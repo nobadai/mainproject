@@ -18,6 +18,10 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Windows PowerShell 5.1 의 기본 출력 인코딩은 시스템 코드페이지(한국어=CP949)라
+# Actions 로그에서 한글이 깨집니다. UTF-8 로 맞춰 로그를 읽을 수 있게 합니다.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 # ── 설정 ──────────────────────────────────────────────────────────
 $DeployDir  = if ($env:DEPLOY_DIR) { $env:DEPLOY_DIR } else { 'C:\apps\mainproject' }
 $AppName    = if ($env:APP_NAME)   { $env:APP_NAME }   else { 'mainproject' }

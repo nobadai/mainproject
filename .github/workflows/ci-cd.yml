@@ -64,6 +64,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Windows 기본 탑재인 Windows PowerShell 5.1 을 사용합니다.
+      # pwsh(PowerShell 7)는 별도 설치가 필요하므로 의존하지 않습니다.
       - name: Deploy
-        shell: pwsh
+        shell: powershell
         run: .\deploy\deploy.ps1
