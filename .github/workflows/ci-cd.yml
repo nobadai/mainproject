@@ -1,7 +1,7 @@
 name: CI/CD
 
-# main 브랜치에 push 되면 CI(빌드·테스트) 후 self-hosted 러너로 배포합니다.
-# PR 에서는 CI 만 돌고 배포는 하지 않습니다. 수동 실행(workflow_dispatch)도 지원합니다.
+# main 브랜치에 push 되면 CI → 이미지 빌드 → 대상 PC 배포 순으로 진행합니다.
+# PR 에서는 CI 와 빌드까지만 하고, 이미지 push 와 배포는 하지 않습니다.
 on:
   push:
     branches: [main]
@@ -9,14 +9,16 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# 같은 브랜치의 이전 실행은 취소해 중복 실행을 막습니다.
 concurrency:
   group: ci-cd-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
 jobs:
   # ─────────────────────────────────────────────
-  # CI: GitHub 클라우드 러너에서 빌드/린트/테스트
+  # CI: GitHub 클라우드 러너에서 린트/테스트
   # ─────────────────────────────────────────────
   ci:
     name: Build & Test
@@ -34,8 +36,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff pytest
+          pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
         run: ruff check .
@@ -44,32 +45,77 @@ jobs:
         run: pytest -q
 
   # ─────────────────────────────────────────────
-  # CD: 대상 Windows PC(self-hosted 러너)에서 배포
+  # 이미지 빌드 → GHCR push (클라우드 러너에서 수행)
+  # ─────────────────────────────────────────────
+  build:
+    name: Build image
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # PR 에서는 빌드가 깨지지 않는지만 확인하고 push 는 하지 않습니다.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # CD: 대상 Windows PC(self-hosted 러너)에서 컨테이너 교체
   # ─────────────────────────────────────────────
   deploy:
     name: Deploy to Windows PC
-    needs: ci
-    # main 브랜치 push (또는 수동 실행) 일 때만 배포. PR 에서는 배포 안 함.
+    needs: build
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: [self-hosted, windows]
-    # 배포는 동시에 하나만 실행되도록 잠금(취소하지 않고 대기).
+    permissions:
+      contents: read
+      packages: read
     concurrency:
       group: deploy-production
       cancel-in-progress: false
     env:
-      DEPLOY_DIR: C:\apps\mainproject # 대상 PC 의 실제 배포 경로
-      APP_NAME: mainproject # 스케줄드 태스크(서비스) 이름
-      APP_PORT: "8000" # 앱이 리슨할 포트
+      APP_NAME: mainproject
+      APP_PORT: "8000"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # cmd 를 거쳐 PowerShell 을 호출합니다.
       #  - pwsh(PowerShell 7)는 별도 설치가 필요하므로 쓰지 않습니다.
       #  - shell: powershell 로 직접 실행하면 GitHub 이 만든 임시 .ps1 이
       #    실행 정책(기본 Restricted)에 걸립니다. cmd 에는 실행 정책이
       #    적용되지 않으므로, 여기서 -ExecutionPolicy Bypass 로 넘깁니다.
-      #    이 방식은 대상 PC 의 시스템 설정을 바꾸지 않습니다.
       - name: Deploy
         shell: cmd
         run: powershell -NoProfile -ExecutionPolicy Bypass -File deploy\deploy.ps1
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          APP_VERSION: ${{ github.sha }}

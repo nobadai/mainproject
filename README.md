@@ -1,25 +1,32 @@
 # mainproject
 
-GitHub Actions로 CI를 돌리고, 사내/집 Windows PC에 self-hosted 러너로 배포하는 프로젝트입니다.
+FastAPI 앱을 컨테이너로 빌드해, 사내/집 Windows PC에 self-hosted 러너로 배포합니다.
 
 ## 구조
 
 | 경로 | 역할 |
 | --- | --- |
-| `.github/workflows/ci-cd.yml` | CI(클라우드 러너) → CD(self-hosted 러너) 파이프라인 |
-| `deploy/deploy.ps1` | 대상 PC에서 실행되는 배포 스크립트 (동기화 → 의존성 → 재시작 → 헬스체크 → 롤백) |
-| `deploy/run-app.ps1` | 스케줄드 태스크가 앱을 띄울 때 쓰는 실행 스크립트 |
-| `app/main.py` | 앱 본체. `/health`는 헬스체크용이므로 유지하세요 |
+| `.github/workflows/ci-cd.yml` | CI → 이미지 빌드 → 배포 파이프라인 |
+| `Dockerfile` | 앱 이미지 정의 (python:3.12-slim + uvicorn) |
+| `deploy/deploy.ps1` | 대상 PC에서 컨테이너를 교체하는 스크립트 |
+| `app/main.py` | FastAPI 앱. `/health`는 배포 판정 기준이므로 유지하세요 |
+| `requirements.txt` | 런타임 의존성 — 이미지에 설치됨 |
+| `requirements-dev.txt` | 개발/CI 도구 — 이미지에 들어가지 않음 |
 
-배포 대상 PC의 디렉터리 레이아웃:
+## 배포 흐름
 
 ```
-C:\apps\mainproject\
-  current\    # 현재 서비스 중인 코드
-  previous\   # 직전 릴리스 (헬스체크 실패 시 자동 롤백)
-  venv\       # 파이썬 가상환경
-  logs\       # 앱 로그
+main 에 push
+  ├─ ci     (ubuntu)  ruff + pytest
+  ├─ build  (ubuntu)  이미지 빌드 → ghcr.io/<owner>/mainproject:<sha> push
+  └─ deploy (대상 PC) pull → 컨테이너 교체 → /health 폴링 → 실패 시 롤백
 ```
+
+이미지는 **GitHub 클라우드에서 빌드**되므로 대상 PC에는 빌드 도구가 필요 없습니다.
+대상 PC는 완성된 이미지를 받아 실행만 합니다.
+
+배포된 컨테이너는 `--restart unless-stopped` 로 뜨므로, Docker Desktop이 살아 있는 한
+재부팅 후에도 자동으로 복구됩니다.
 
 ## 대상 PC에 GitHub Actions 러너 설치하기
 
@@ -99,26 +106,31 @@ GitHub의 Runners 목록에 **Idle(초록색)** 로 표시됩니다.
 
 ### 5. 대상 PC 사전 요구사항
 
-배포 스크립트가 쓰는 도구들입니다. 미리 설치돼 있어야 합니다.
+| 필요 | 용도 |
+| --- | --- |
+| **Docker Desktop** (실행 중) | 컨테이너 실행 |
+| **Git** | `actions/checkout` |
 
 ```powershell
-winget install --id Python.Python.3.12 -e --scope machine
 winget install --id Git.Git -e --scope machine
 ```
 
-`--scope machine`이 중요합니다. 사용자 단위로 설치하면 서비스 계정의 PATH에서
-파이썬이 보이지 않아 배포 중 `py: 명령을 찾을 수 없음`으로 실패합니다.
+Docker Desktop은 [docker.com](https://www.docker.com/products/docker-desktop/)에서 설치하고,
+설정에서 **Start Docker Desktop when you log in**을 켜두세요.
 
-설치 후 `py -3 --version`, `git --version`이 동작하는지 확인하세요.
-러너는 **시작 시점의 PATH를 물고 있으므로**, 파이썬을 러너보다 나중에 깔았다면
-러너를 재시작해야 새 PATH가 반영됩니다.
+> **러너는 시작 시점의 PATH를 물고 있습니다.** Docker Desktop을 러너보다 나중에
+> 설치했다면 러너를 재시작해야 `docker` 명령을 찾습니다.
 
 **설치할 필요 없는 것:**
 
+- **Python** — 앱이 컨테이너 안에서 돌므로 호스트에는 필요 없습니다
 - **PowerShell 7 (`pwsh`)** — 워크플로가 Windows 기본 탑재인 PowerShell 5.1만 씁니다
 - **실행 정책 변경** — 배포 단계를 cmd를 거쳐 호출하고 `-ExecutionPolicy Bypass`를
-  넘기므로, 대상 PC가 기본값 `Restricted`여도 그대로 동작합니다.
-  시스템 보안 설정을 바꿀 필요가 없습니다
+  넘기므로, 대상 PC가 기본값 `Restricted`여도 그대로 동작합니다
+
+> **Docker Desktop은 서비스가 아니라 사용자 애플리케이션입니다.** 로그인한 사용자
+> 세션에서 실행 중이어야 데몬에 접근할 수 있습니다. 아무도 로그인하지 않은 상태로
+> 무인 운영하려면 러너를 WSL2 안에 두거나 대상 PC를 Linux로 바꾸는 편이 낫습니다.
 
 ### 6. 방화벽
 
@@ -129,25 +141,31 @@ winget install --id Git.Git -e --scope machine
 New-NetFirewallRule -DisplayName "mainproject 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
 ```
 
-## 배포 흐름
-
-1. `main` 브랜치에 push
-2. GitHub 클라우드 러너에서 lint + test 실행
-3. 통과하면 대상 PC의 self-hosted 러너가 `deploy/deploy.ps1` 실행
-4. `current\`를 새 코드로 교체하고 기존 릴리스는 `previous\`로 백업
-5. 스케줄드 태스크 `app-mainproject` 재시작
-6. `http://127.0.0.1:8000/health` 를 최대 60초간 폴링
-7. 실패하면 `previous\`로 자동 롤백하고 최근 로그 50줄 출력
-
 ## 설정 바꾸기
 
-배포 경로·포트·태스크 이름은 워크플로의 `env:` 블록에서 조정합니다.
+컨테이너 이름과 포트는 워크플로 `deploy` job의 `env:` 블록에서 조정합니다.
 
 ```yaml
 env:
-  DEPLOY_DIR: C:\apps\mainproject
   APP_NAME: mainproject
   APP_PORT: "8000"
+```
+
+## 운영 명령
+
+대상 PC에서 쓰는 명령들입니다.
+
+```powershell
+docker ps --filter name=mainproject          # 상태 확인
+docker logs -f mainproject                   # 로그 실시간 확인
+docker restart mainproject                   # 재시작
+```
+
+수동 롤백은 이전 커밋 SHA 태그로 다시 띄우면 됩니다.
+
+```powershell
+docker rm --force mainproject
+docker run -d --name mainproject --restart unless-stopped -p 8000:8000 ghcr.io/<owner>/mainproject:<이전SHA>
 ```
 
 ## 문제 해결
@@ -155,16 +173,26 @@ env:
 | 증상 | 확인할 것 |
 | --- | --- |
 | 배포 job이 계속 대기 중 | 러너가 **Offline**이 아닌지. `run.cmd` 창이 닫혔거나 서비스가 멈추면 job은 에러 없이 최대 24시간 큐에 머뭅니다 |
+| `docker: command not found` | Docker Desktop 설치 후 러너를 재시작했는지 |
+| `error during connect` / 데몬 연결 실패 | 대상 PC에 로그인된 상태로 Docker Desktop이 실행 중인지 |
+| `denied` / `unauthorized` (pull 실패) | 워크플로 `deploy` job에 `packages: read` 권한과 GHCR 로그인 단계가 있는지 |
 | `pwsh: command not found` | 워크플로가 `shell: pwsh`를 쓰고 있는 것. 대상 PC에 PowerShell 7이 없으므로 cmd 경유 방식을 써야 합니다 |
 | `running scripts is disabled on this system` | 실행 정책 문제. 배포 단계가 cmd를 거쳐 `-ExecutionPolicy Bypass`로 호출되는지 확인 |
-| `py: 명령을 찾을 수 없음` | 파이썬 설치 후 러너를 재시작했는지, `--scope machine`으로 설치했는지 |
-| `Register-ScheduledTask` 액세스 거부 | 러너가 관리자 권한으로 실행 중인지 (서비스면 계정이 Administrators 그룹인지) |
-| 헬스체크 실패 | `C:\apps\mainproject\logs\` 의 최신 로그 확인 |
-| 앱은 뜨는데 외부 접속 불가 | 방화벽 인바운드 규칙, 앱이 `0.0.0.0`에 바인딩되는지 |
-| 스케줄드 태스크 상태 확인 | `Get-ScheduledTask -TaskName app-mainproject \| Get-ScheduledTaskInfo` |
+| 헬스체크 실패 | `docker logs mainproject` 확인. 실패 시 배포 로그에도 마지막 50줄이 출력됩니다 |
+| 포트 충돌 | `Get-NetTCPConnection -LocalPort 8000 -State Listen` 로 점유 프로세스 확인 |
+| 앱은 뜨는데 외부 접속 불가 | 방화벽 인바운드 규칙 |
 
 ## 로컬 개발
 
-```bash
-py -3 -m venv .venv && .venv\Scripts\pip install -r requirements.txt pytest ruff
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\ruff check .
+.venv\Scripts\pytest -q
+```
+
+개발 서버 실행:
+
+```powershell
+.venv\Scripts\uvicorn app.main:app --reload
 ```
