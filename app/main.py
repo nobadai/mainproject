@@ -25,7 +25,7 @@ def main():
     from waitress import serve
 
     port = int(os.getenv("APP_PORT", "8000"))
-    print(f"serving on 0.0.0.0:{port}", flush=True)
+    print(f"serving on 0.0.0.0:{port}", flush=True )
     serve(app, host="0.0.0.0", port=port)
 
 
