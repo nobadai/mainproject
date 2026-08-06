@@ -60,29 +60,42 @@ Expand-Archive -Path actions-runner.zip -DestinationPath .
 `--labels`의 `self-hosted,windows`는 워크플로의 `runs-on: [self-hosted, windows]`와
 반드시 일치해야 합니다. 안 맞으면 배포 job이 러너를 못 찾고 무한 대기합니다.
 
-### 4. 서비스로 등록 (PC 재부팅 후 자동 시작)
+등록 도중 나오는 질문들의 답은 아래 "서비스로 등록"을 참고하세요.
 
-러너를 Windows 서비스로 등록하면 로그인하지 않아도, 재부팅 후에도 자동으로 동작합니다.
+### 4. 실행 방식 — 임시 실행 vs 서비스
+
+**임시 실행 (디버깅용).** 배포 로그가 창에 실시간으로 찍혀서 첫 설정이나
+문제 추적에 유용합니다. 창을 닫거나 로그아웃하면 러너가 죽습니다.
 
 ```powershell
-.\svc.cmd install
-.\svc.cmd start
+.\run.cmd
 ```
 
-정상 등록되면 `Get-Service actions.runner.*` 로 상태를 확인할 수 있고,
-GitHub의 Runners 목록에 **Idle(초록색)** 로 표시됩니다.
+**서비스로 등록 (상시 운영).** 로그인하지 않아도, 재부팅 후에도 동작합니다.
+Windows 러너는 별도 `svc` 스크립트가 아니라 `config.cmd` 등록 과정에서
+서비스 여부를 정합니다. 이미 비서비스로 등록했다면 지우고 다시 등록하세요.
 
-> **중요 — 서비스 계정 권한.** `svc.cmd install`은 기본적으로 서비스를
-> `NT AUTHORITY\NETWORK SERVICE`로 등록하는데, 이 계정은 관리자가 아니라서
-> `deploy.ps1`의 스케줄드 태스크 등록(`Register-ScheduledTask`)이 **권한 오류로 실패**합니다.
-> 관리자 계정으로 설치하세요.
->
-> ```powershell
-> .\svc.cmd install <컴퓨터명>\<관리자계정명>
-> ```
->
-> 이미 설치했다면 `services.msc` → `Actions Runner (...)` → 속성 → 로그온 탭에서
-> 계정을 바꾼 뒤 서비스를 재시작해도 됩니다.
+```powershell
+.\config.cmd remove
+.\config.cmd --url https://github.com/<사용자명>/mainproject --token <새토큰>
+```
+
+질문에 이렇게 답합니다.
+
+| 질문 | 답 |
+| --- | --- |
+| runner group / name / work folder | Enter (기본값) |
+| `Run the runner as service?` | **`Y`** |
+| `User account to use for the service` | `<컴퓨터명>\<관리자계정>` |
+| `Password` | 해당 계정 비밀번호 |
+
+> **서비스 계정은 반드시 관리자여야 합니다.** 기본값인
+> `NT AUTHORITY\NETWORK SERVICE`는 관리자가 아니라서 `deploy.ps1`의
+> 스케줄드 태스크 등록(`Register-ScheduledTask`)이 권한 오류로 실패합니다.
+> 계정명은 `whoami`, 관리자 여부는 `Get-LocalGroupMember -Group Administrators`로 확인하세요.
+
+정상 등록되면 `Get-Service actions.runner.*`가 `Running`이고,
+GitHub의 Runners 목록에 **Idle(초록색)** 로 표시됩니다.
 
 ### 5. 대상 PC 사전 요구사항
 
@@ -97,8 +110,15 @@ winget install --id Git.Git -e --scope machine
 파이썬이 보이지 않아 배포 중 `py: 명령을 찾을 수 없음`으로 실패합니다.
 
 설치 후 `py -3 --version`, `git --version`이 동작하는지 확인하세요.
-러너 서비스는 시작 시점의 PATH를 물고 있으므로, 파이썬을 러너보다 나중에 깔았다면
-`.\svc.cmd stop; .\svc.cmd start`로 재시작해야 새 PATH가 반영됩니다.
+러너는 **시작 시점의 PATH를 물고 있으므로**, 파이썬을 러너보다 나중에 깔았다면
+러너를 재시작해야 새 PATH가 반영됩니다.
+
+**설치할 필요 없는 것:**
+
+- **PowerShell 7 (`pwsh`)** — 워크플로가 Windows 기본 탑재인 PowerShell 5.1만 씁니다
+- **실행 정책 변경** — 배포 단계를 cmd를 거쳐 호출하고 `-ExecutionPolicy Bypass`를
+  넘기므로, 대상 PC가 기본값 `Restricted`여도 그대로 동작합니다.
+  시스템 보안 설정을 바꿀 필요가 없습니다
 
 ### 6. 방화벽
 
@@ -134,8 +154,11 @@ env:
 
 | 증상 | 확인할 것 |
 | --- | --- |
-| 배포 job이 계속 대기 중 | 러너 라벨(`self-hosted`, `windows`)이 워크플로와 일치하는지, 러너가 Idle인지 |
-| `py: 명령을 찾을 수 없음` | 파이썬 설치 후 러너 서비스를 재시작했는지 |
+| 배포 job이 계속 대기 중 | 러너가 **Offline**이 아닌지. `run.cmd` 창이 닫혔거나 서비스가 멈추면 job은 에러 없이 최대 24시간 큐에 머뭅니다 |
+| `pwsh: command not found` | 워크플로가 `shell: pwsh`를 쓰고 있는 것. 대상 PC에 PowerShell 7이 없으므로 cmd 경유 방식을 써야 합니다 |
+| `running scripts is disabled on this system` | 실행 정책 문제. 배포 단계가 cmd를 거쳐 `-ExecutionPolicy Bypass`로 호출되는지 확인 |
+| `py: 명령을 찾을 수 없음` | 파이썬 설치 후 러너를 재시작했는지, `--scope machine`으로 설치했는지 |
+| `Register-ScheduledTask` 액세스 거부 | 러너가 관리자 권한으로 실행 중인지 (서비스면 계정이 Administrators 그룹인지) |
 | 헬스체크 실패 | `C:\apps\mainproject\logs\` 의 최신 로그 확인 |
 | 앱은 뜨는데 외부 접속 불가 | 방화벽 인바운드 규칙, 앱이 `0.0.0.0`에 바인딩되는지 |
 | 스케줄드 태스크 상태 확인 | `Get-ScheduledTask -TaskName app-mainproject \| Get-ScheduledTaskInfo` |
