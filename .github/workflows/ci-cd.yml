@@ -126,7 +126,7 @@ jobs:
             ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
             ${{ env.FRONTEND_IMAGE_NAME }}:latest
           cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
+          cache-to: type=gha,mode=min,scope=frontend
 
   # ─────────────────────────────────────────────
   # CD: 대상 Windows PC(self-hosted 러너)에서 컨테이너 교체
