@@ -149,6 +149,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Add Docker CLI to PATH
+        shell: cmd
+        env:
+          DOCKER_CLI_DIR: ${{ vars.DOCKER_CLI_DIR }}
+        run: |
+          if not defined DOCKER_CLI_DIR (
+            echo ::error title=Docker CLI path missing::Repository variable DOCKER_CLI_DIR is not configured.
+            exit /b 1
+          )
+          if not exist "%DOCKER_CLI_DIR%\docker.exe" (
+            echo ::error title=Docker CLI not found::docker.exe was not found in DOCKER_CLI_DIR: %DOCKER_CLI_DIR%
+            exit /b 1
+          )
+          echo %DOCKER_CLI_DIR%>>"%GITHUB_PATH%"
+
+      - name: Verify Docker CLI, daemon, and Compose
+        shell: cmd
+        run: |
+          where docker
+          if errorlevel 1 (
+            echo ::error title=Docker CLI unavailable::docker.exe is not available on PATH after configuring DOCKER_CLI_DIR.
+            exit /b 1
+          )
+          docker version
+          if errorlevel 1 (
+            echo ::error title=Docker daemon unavailable::Docker CLI was found, but the runner could not connect to the Docker daemon.
+            exit /b 1
+          )
+          docker compose version
+          if errorlevel 1 (
+            echo ::error title=Docker Compose unavailable::The Docker Compose plugin is not available to the runner.
+            exit /b 1
+          )
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
