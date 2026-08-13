@@ -13,7 +13,7 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: ./frontend
+      dockerfile: ./frontend/Dockerfile
     restart: always
     ports:
       - "80:80" # 외부 80포트를 Nginx 80포트로 연결
