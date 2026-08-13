@@ -1,10 +1,10 @@
-﻿<#
+<#
 .SYNOPSIS
     대상 Windows PC 에서 실행되는 컨테이너 배포 스크립트.
 
 .DESCRIPTION
     GHCR 에서 Backend / Frontend 이미지를 받아 Docker Compose 로 컨테이너를
-    교체하고, Nginx 를 통한 Frontend 와 Backend 응답을 확인합니다.
+    교체하고, Frontend 와 Backend 응답을 확인합니다.
     실패하면 직전에 돌던 Backend / Frontend 이미지로 되돌립니다.
 
     이전 방식(가상환경 + 스케줄드 태스크)의 잔재가 남아 있으면 함께 정리합니다.
@@ -31,11 +31,10 @@ $RepositoryRoot     = Split-Path -Parent $PSScriptRoot
 $ComposeFile        = Join-Path $RepositoryRoot 'compose.yml'
 $BackendContainer   = 'mainproject-backend'
 $FrontendContainer  = 'mainproject-frontend'
-$NginxContainer     = 'mainproject-nginx'
 $LegacyAppName      = if ($env:APP_NAME) { $env:APP_NAME } else { 'mainproject' }
 $LegacyAppPort      = if ($env:APP_PORT) { $env:APP_PORT } else { '8000' }
 $FrontendUrl        = 'http://127.0.0.1/'
-$BackendHealthUrl   = 'http://127.0.0.1/api/health'
+$BackendHealthUrl   = 'http://127.0.0.1:8000/health'
 $LegacyTask         = "app-$LegacyAppName"
 $LegacyDir          = 'C:\apps\mainproject'
 
@@ -66,6 +65,11 @@ function Invoke-Compose {
 }
 
 function Get-ContainerImage([string] $ContainerName) {
+    $containerId = & docker ps -aq --filter "name=^${ContainerName}$"
+    if (-not $containerId) {
+        return $null
+    }
+
     $image = & docker inspect --format '{{.Config.Image}}' $ContainerName 2>$null
     if ($LASTEXITCODE -eq 0 -and $image) {
         return $image.Trim()
@@ -128,68 +132,99 @@ if (Test-Path $LegacyDir) {
 # ── 2. 롤백 대상 기록 ─────────────────────────────────────────────
 # 지금 돌고 있는 컨테이너의 이미지를 기억해 둡니다. 새 이미지가 헬스체크를
 # 통과하지 못하면 이 이미지로 되돌립니다.
-$previousImage = & docker ps -a --filter "name=^$AppName$" --format '{{.Image}}' |
-    Select-Object -First 1
-if ($previousImage) {
-    Write-Host "직전 이미지: $previousImage"
+$previousBackendImage = Get-ContainerImage $BackendContainer
+$previousFrontendImage = Get-ContainerImage $FrontendContainer
+$legacyContainerId = & docker ps -aq --filter "name=^${LegacyAppName}$"
+$legacyContainerExists = [bool]$legacyContainerId
+$legacyContainerWasRunning = [bool](& docker ps -q --filter "name=^${LegacyAppName}$")
+
+# 기존 단일 Backend 컨테이너에서 Compose 로 처음 전환할 때도 직전 Backend
+# 이미지를 기록합니다. 8000 포트 충돌을 피하기 위해 반영 직전에 중지하며,
+# 최초 전환이 실패하면 다시 시작합니다.
+if (-not $previousBackendImage -and $legacyContainerExists) {
+    $previousBackendImage = Get-ContainerImage $LegacyAppName
+}
+
+if ($previousBackendImage) {
+    Write-Host "직전 Backend 이미지: $previousBackendImage"
 } else {
-    Write-Host '실행 중인 컨테이너 없음 (최초 배포).'
+    Write-Host '실행 중인 Backend 컨테이너 없음 (최초 배포).'
+}
+
+if ($previousFrontendImage) {
+    Write-Host "직전 Frontend 이미지: $previousFrontendImage"
+} else {
+    Write-Host '실행 중인 Frontend 컨테이너 없음 (최초 배포).'
 }
 
 # ── 3. 이미지 받기 ────────────────────────────────────────────────
-Write-Step "이미지 pull: $Image"
-Invoke-Docker pull $Image
+Write-Step "Backend 이미지 pull: $BackendImage"
+Invoke-Docker pull $BackendImage
+
+Write-Step "Frontend 이미지 pull: $FrontendImage"
+Invoke-Docker pull $FrontendImage
+
+$env:BACKEND_IMAGE = $BackendImage
+$env:FRONTEND_IMAGE = $FrontendImage
+$env:APP_VERSION = $AppVersion
+$env:BACKEND_PORT = '8000'
+$env:FRONTEND_PORT = '80'
 
 # ── 4. 컨테이너 교체 ──────────────────────────────────────────────
-Write-Step '컨테이너 교체'
-
-function Start-App([string] $ImageRef) {
-    if (& docker ps -aq --filter "name=^$AppName$") {
-        Invoke-Docker rm --force $AppName | Out-Null
-    }
-    Invoke-Docker run --detach `
-        --name $AppName `
-        --restart unless-stopped `
-        --publish "${AppPort}:8000" `
-        --env "APP_VERSION=$AppVersion" `
-        $ImageRef | Out-Null
-}
-
-Start-App $Image
-Write-Host "컨테이너 '$AppName' 기동됨."
-
-# ── 5. 헬스체크 (실패 시 롤백) ────────────────────────────────────
-Write-Step "헬스체크: $HealthUrl"
+Write-Step 'Docker Compose 컨테이너 교체'
 $healthy = $false
-for ($i = 1; $i -le 30; $i++) {
-    Start-Sleep -Seconds 2
-    try {
-        if ((Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200) {
-            $healthy = $true
-            break
-        }
-    } catch {
-        Write-Host "  대기 중... ($i/30)"
+try {
+    if ($legacyContainerWasRunning) {
+        Invoke-Docker stop $LegacyAppName | Out-Null
+        Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 중지됨."
     }
+
+    Invoke-Compose up --detach --force-recreate --remove-orphans
+    Write-Host "컨테이너 '$BackendContainer', '$FrontendContainer' 기동됨."
+
+    # ── 5. 헬스체크 (실패 시 롤백) ────────────────────────────────
+    Write-Step "헬스체크: $FrontendUrl / $BackendHealthUrl"
+    $healthy = Test-Deployment
+} catch {
+    Write-Host "컨테이너 반영 중 오류: $($_.Exception.Message)" -ForegroundColor Red
 }
 
 if (-not $healthy) {
     Write-Host "`n헬스체크 실패." -ForegroundColor Red
-    Write-Host "`n--- 컨테이너 로그 (최근 50줄) ---"
-    & docker logs --tail 50 $AppName
+    Write-Host "`n--- Compose 로그 (최근 50줄) ---"
+    & docker compose --project-name $ProjectName --file $ComposeFile logs --tail 50
 
-    if ($previousImage -and $previousImage -ne $Image) {
-        Write-Host "`n직전 이미지로 롤백합니다: $previousImage" -ForegroundColor Yellow
-        Start-App $previousImage
-        Write-Host '롤백 완료.' -ForegroundColor Yellow
+    if ($previousBackendImage -and $previousFrontendImage) {
+        Write-Host "`n직전 Backend / Frontend 이미지로 롤백합니다." -ForegroundColor Yellow
+        $env:BACKEND_IMAGE = $previousBackendImage
+        $env:FRONTEND_IMAGE = $previousFrontendImage
+        Invoke-Compose up --detach --force-recreate --remove-orphans
+
+        if (Test-Deployment) {
+            Write-Host '롤백 완료.' -ForegroundColor Yellow
+        } else {
+            Write-Host '롤백 후에도 헬스체크가 통과하지 못했습니다.' -ForegroundColor Red
+        }
     } else {
-        Write-Host '롤백할 직전 이미지가 없습니다 (최초 배포).' -ForegroundColor Yellow
+        Write-Host '두 서비스의 직전 이미지가 없어 새 Compose 컨테이너를 내립니다.' -ForegroundColor Yellow
+        & docker compose --project-name $ProjectName --file $ComposeFile down
+        if ($legacyContainerWasRunning) {
+            Invoke-Docker start $LegacyAppName | Out-Null
+            Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 복구됨." -ForegroundColor Yellow
+        }
     }
     throw '배포 실패: 헬스체크가 통과하지 못했습니다.'
 }
 
-Write-Host "`n배포 성공. $HealthUrl 응답 정상." -ForegroundColor Green
-& docker ps --filter "name=^$AppName$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+Write-Host "`n배포 성공. $FrontendUrl 및 $BackendHealthUrl 응답 정상." -ForegroundColor Green
+
+# 기존 단일 Backend 컨테이너는 새 서비스 검증이 끝난 뒤 제거합니다.
+if ($legacyContainerExists) {
+    Invoke-Docker rm --force $LegacyAppName | Out-Null
+    Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 제거됨."
+}
+
+& docker ps --filter "name=^mainproject-" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
 # ── 6. 오래된 이미지 정리 ─────────────────────────────────────────
 # 태그 없는 dangling 이미지만 지웁니다. 롤백용 이전 태그는 남습니다.
