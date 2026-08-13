@@ -1,40 +1,24 @@
-FROM node:24-alpine AS dependencies
-
-WORKDIR /app
-
-COPY package.json package-lock.json ./
-RUN npm ci
-
+# 1단계: Next.js 정적 파일 빌드
 FROM node:24-alpine AS builder
 
 WORKDIR /app
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
-COPY --from=dependencies /app/node_modules ./node_modules
+COPY package.json package-lock.json ./
+RUN npm ci
+
 COPY . .
 RUN npm run build
 
-FROM node:24-alpine AS runner
+# 2단계: 빌드된 정적 파일을 Nginx로 제공
+FROM nginx:1.29-alpine
 
-ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
-    HOSTNAME=0.0.0.0 \
-    PORT=3000
+COPY --from=builder /app/out /usr/share/nginx/html
 
-WORKDIR /app
+EXPOSE 80
 
-RUN chown node:node /app
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1/ || exit 1
 
-COPY --from=builder --chown=node:node /app/public ./public
-COPY --from=builder --chown=node:node /app/.next/standalone ./
-COPY --from=builder --chown=node:node /app/.next/static ./.next/static
-
-USER node
-
-EXPOSE 3000
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/ || exit 1
-
-CMD ["node", "server.js"]
+CMD ["nginx", "-g", "daemon off;"]

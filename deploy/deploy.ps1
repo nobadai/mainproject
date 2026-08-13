@@ -1,10 +1,10 @@
-﻿<#
+<#
 .SYNOPSIS
     대상 Windows PC 에서 실행되는 컨테이너 배포 스크립트.
 
 .DESCRIPTION
     GHCR 에서 Backend / Frontend 이미지를 받아 Docker Compose 로 컨테이너를
-    교체하고, Nginx 를 통한 Frontend 와 Backend 응답을 확인합니다.
+    교체하고, Frontend 와 Backend 응답을 확인합니다.
     실패하면 직전에 돌던 Backend / Frontend 이미지로 되돌립니다.
 
     이전 방식(가상환경 + 스케줄드 태스크)의 잔재가 남아 있으면 함께 정리합니다.
@@ -31,15 +31,12 @@ $RepositoryRoot     = Split-Path -Parent $PSScriptRoot
 $ComposeFile        = Join-Path $RepositoryRoot 'compose.yml'
 $BackendContainer   = 'mainproject-backend'
 $FrontendContainer  = 'mainproject-frontend'
-$NginxContainer     = 'mainproject-nginx'
 $LegacyAppName      = if ($env:APP_NAME) { $env:APP_NAME } else { 'mainproject' }
 $LegacyAppPort      = if ($env:APP_PORT) { $env:APP_PORT } else { '8000' }
 $FrontendUrl        = 'http://127.0.0.1/'
-$BackendHealthUrl   = 'http://127.0.0.1/api/health'
+$BackendHealthUrl   = 'http://127.0.0.1:8000/health'
 $LegacyTask         = "app-$LegacyAppName"
 $LegacyDir          = 'C:\apps\mainproject'
-$NginxConfig        = Join-Path $RepositoryRoot 'deploy\nginx\default.conf'
-$NginxConfigBackup  = Join-Path ([System.IO.Path]::GetTempPath()) "mainproject-nginx-$PID.conf"
 
 if (-not $BackendImage) { throw 'BACKEND_IMAGE 환경변수가 설정되지 않았습니다.' }
 if (-not $FrontendImage) { throw 'FRONTEND_IMAGE 환경변수가 설정되지 않았습니다.' }
@@ -137,19 +134,13 @@ if (Test-Path $LegacyDir) {
 # 통과하지 못하면 이 이미지로 되돌립니다.
 $previousBackendImage = Get-ContainerImage $BackendContainer
 $previousFrontendImage = Get-ContainerImage $FrontendContainer
-$legacyContainerExists = [bool](& docker ps -aq --filter "name=^$LegacyAppName$")
-$previousNginxConfigExists = $false
-
-if (& docker ps -aq --filter "name=^$NginxContainer$") {
-    & docker cp "${NginxContainer}:/etc/nginx/conf.d/default.conf" $NginxConfigBackup
-    if ($LASTEXITCODE -eq 0) {
-        $previousNginxConfigExists = $true
-        Write-Host '직전 Nginx 설정 기록됨.'
-    }
-}
+$legacyContainerId = & docker ps -aq --filter "name=^${LegacyAppName}$"
+$legacyContainerExists = [bool]$legacyContainerId
+$legacyContainerWasRunning = [bool](& docker ps -q --filter "name=^${LegacyAppName}$")
 
 # 기존 단일 Backend 컨테이너에서 Compose 로 처음 전환할 때도 직전 Backend
-# 이미지를 기록합니다. 최초 전환이 실패하면 기존 컨테이너는 그대로 남깁니다.
+# 이미지를 기록합니다. 8000 포트 충돌을 피하기 위해 반영 직전에 중지하며,
+# 최초 전환이 실패하면 다시 시작합니다.
 if (-not $previousBackendImage -and $legacyContainerExists) {
     $previousBackendImage = Get-ContainerImage $LegacyAppName
 }
@@ -176,20 +167,20 @@ Invoke-Docker pull $FrontendImage
 $env:BACKEND_IMAGE = $BackendImage
 $env:FRONTEND_IMAGE = $FrontendImage
 $env:APP_VERSION = $AppVersion
-$env:HTTP_PORT = '80'
-
-Write-Step 'Nginx 이미지 및 설정 확인'
-Invoke-Compose pull nginx
+$env:BACKEND_PORT = '8000'
+$env:FRONTEND_PORT = '80'
 
 # ── 4. 컨테이너 교체 ──────────────────────────────────────────────
 Write-Step 'Docker Compose 컨테이너 교체'
 $healthy = $false
 try {
-    Invoke-Compose up --detach --force-recreate --remove-orphans
-    Write-Host "컨테이너 '$BackendContainer', '$FrontendContainer', '$NginxContainer' 기동됨."
+    if ($legacyContainerWasRunning) {
+        Invoke-Docker stop $LegacyAppName | Out-Null
+        Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 중지됨."
+    }
 
-    # upstream 이름은 Compose 네트워크에서 해석되므로 기동 후 설정을 검사합니다.
-    Invoke-Docker exec $NginxContainer nginx -t
+    Invoke-Compose up --detach --force-recreate --remove-orphans
+    Write-Host "컨테이너 '$BackendContainer', '$FrontendContainer' 기동됨."
 
     # ── 5. 헬스체크 (실패 시 롤백) ────────────────────────────────
     Write-Step "헬스체크: $FrontendUrl / $BackendHealthUrl"
@@ -207,15 +198,8 @@ if (-not $healthy) {
         Write-Host "`n직전 Backend / Frontend 이미지로 롤백합니다." -ForegroundColor Yellow
         $env:BACKEND_IMAGE = $previousBackendImage
         $env:FRONTEND_IMAGE = $previousFrontendImage
-
-        if ($previousNginxConfigExists) {
-            Copy-Item -LiteralPath $NginxConfigBackup -Destination $NginxConfig -Force
-            Write-Host '직전 Nginx 설정 복원됨.' -ForegroundColor Yellow
-        }
-
         Invoke-Compose up --detach --force-recreate --remove-orphans
 
-        Invoke-Docker exec $NginxContainer nginx -t
         if (Test-Deployment) {
             Write-Host '롤백 완료.' -ForegroundColor Yellow
         } else {
@@ -224,15 +208,12 @@ if (-not $healthy) {
     } else {
         Write-Host '두 서비스의 직전 이미지가 없어 새 Compose 컨테이너를 내립니다.' -ForegroundColor Yellow
         & docker compose --project-name $ProjectName --file $ComposeFile down
-        if ($legacyContainerExists) {
-            Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 는 유지됩니다." -ForegroundColor Yellow
+        if ($legacyContainerWasRunning) {
+            Invoke-Docker start $LegacyAppName | Out-Null
+            Write-Host "기존 단일 Backend 컨테이너 '$LegacyAppName' 복구됨." -ForegroundColor Yellow
         }
     }
     throw '배포 실패: 헬스체크가 통과하지 못했습니다.'
-}
-
-if (Test-Path -LiteralPath $NginxConfigBackup) {
-    Remove-Item -LiteralPath $NginxConfigBackup -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "`n배포 성공. $FrontendUrl 및 $BackendHealthUrl 응답 정상." -ForegroundColor Green
