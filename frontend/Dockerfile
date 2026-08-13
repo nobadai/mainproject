@@ -4,15 +4,21 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
-RUN npm run build  # next.config.js의 export 설정 덕분에 'out' 폴더가 생성됨
+RUN npm run build
 
 # 2단계: Nginx만 단독 실행
 FROM nginx:alpine
+
 # 빌드된 out 폴더의 내용물을 Nginx의 웹 루트 디렉토리로 복사
 COPY --from=builder /app/out /usr/share/nginx/html
 
+# ⭐ 중요: 이미지의 deploy/nginx/default.conf 설정을 컨테이너 Nginx에 적용
+# (compose.yml에서 빌드 컨텍스트를 루트로 잡을 것이기 때문에 경로를 아래와 같이 지정합니다)
+COPY ./deploy/nginx/default.conf /etc/nginx/conf.d/default.conf
+
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
+
 
 
 
