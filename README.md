@@ -1,25 +1,45 @@
 # mainproject
 
-FastAPI 앱을 컨테이너로 빌드해, 사내/집 Windows PC에 self-hosted 러너로 배포합니다.
+FastAPI 앱과 Next.js 앱을 컨테이너로 빌드해, 사내/집 Windows PC에 self-hosted
+러너로 배포합니다. Nginx가 외부 요청을 Frontend와 Backend로 전달합니다.
 
 ## 구조
 
 | 경로 | 역할 |
 | --- | --- |
 | `.github/workflows/ci-cd.yml` | CI → 이미지 빌드 → 배포 파이프라인 |
-| `Dockerfile` | 앱 이미지 정의 (python:3.12-slim + uvicorn) |
-| `deploy/deploy.ps1` | 대상 PC에서 컨테이너를 교체하는 스크립트 |
-| `app/main.py` | FastAPI 앱. `/health`는 배포 판정 기준이므로 유지하세요 |
-| `requirements.txt` | 런타임 의존성 — 이미지에 설치됨 |
-| `requirements-dev.txt` | 개발/CI 도구 — 이미지에 들어가지 않음 |
+| `backend/Dockerfile` | 앱 이미지 정의 (python:3.12-slim + uvicorn) |
+| `backend/app/main.py` | FastAPI 앱. `/health`는 배포 판정 기준이므로 유지하세요 |
+| `backend/pyproject.toml` | 백엔드 프로젝트 및 의존성, Ruff, pytest 설정 |
+| `backend/uv.lock` | CI와 Docker에서 사용하는 고정 의존성 lockfile |
+| `frontend/` | Next.js, TypeScript, Tailwind CSS 기반 Frontend |
+| `database/` | 데이터베이스 프로젝트 시작 위치. 현재 기능 미구현 |
+| `deploy/deploy.ps1` | 대상 PC에서 Compose 서비스를 교체하고 롤백하는 스크립트 |
+| `deploy/nginx/default.conf` | Frontend와 Backend의 Nginx reverse proxy 설정 |
+| `compose.yml` | Backend, Frontend, Nginx 컨테이너 실행 설정 |
 
 ## 배포 흐름
 
 ```
 main 에 push
-  ├─ ci     (ubuntu)  ruff + pytest
-  ├─ build  (ubuntu)  이미지 빌드 → ghcr.io/<owner>/mainproject:<sha> push
-  └─ deploy (대상 PC) pull → 컨테이너 교체 → /health 폴링 → 실패 시 롤백
+  ├─ ci       (ubuntu)  Backend ruff + pytest / Frontend lint + build
+  ├─ build    (ubuntu)  Backend / Frontend 이미지 빌드 → GHCR push
+  └─ deploy   (대상 PC) pull → Compose 반영 → Nginx 경유 확인 → 실패 시 롤백
+```
+
+GHCR 이미지는 커밋 SHA와 `latest` 태그를 함께 사용합니다.
+
+```text
+ghcr.io/<owner>/mainproject-backend:<sha>
+ghcr.io/<owner>/mainproject-frontend:<sha>
+```
+
+운영 환경에서는 Nginx의 80 포트만 외부에 공개합니다.
+
+```text
+Client → Nginx :80
+           ├─ /      → Frontend :3000
+           └─ /api/* → Backend :8000
 ```
 
 이미지는 **GitHub 클라우드에서 빌드**되므로 대상 PC에는 빌드 도구가 필요 없습니다.
@@ -134,21 +154,21 @@ Docker Desktop은 [docker.com](https://www.docker.com/products/docker-desktop/)�
 
 ### 6. 방화벽
 
-앱 포트(기본 8000)를 다른 기기에서 접속하려면 인바운드 허용이 필요합니다.
+앱 포트(80)를 다른 기기에서 접속하려면 인바운드 허용이 필요합니다.
 같은 PC에서만 쓸 거라면 생략하세요.
 
 ```powershell
-New-NetFirewallRule -DisplayName "mainproject 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+New-NetFirewallRule -DisplayName "mainproject 80" -Direction Inbound -LocalPort 80 -Protocol TCP -Action Allow
 ```
 
 ## 설정 바꾸기
 
-컨테이너 이름과 포트는 워크플로 `deploy` job의 `env:` 블록에서 조정합니다.
+로컬 Compose 기본 이미지와 포트는 `.env.example`을 `.env`로 복사해 조정합니다.
 
-```yaml
-env:
-  APP_NAME: mainproject
-  APP_PORT: "8000"
+```dotenv
+HTTP_PORT=80
+BACKEND_IMAGE=mainproject-backend:local
+FRONTEND_IMAGE=mainproject-frontend:local
 ```
 
 ## 운영 명령
@@ -156,17 +176,22 @@ env:
 대상 PC에서 쓰는 명령들입니다.
 
 ```powershell
-docker ps --filter name=mainproject          # 상태 확인
-docker logs -f mainproject                   # 로그 실시간 확인
-docker restart mainproject                   # 재시작
+docker compose ps                            # 상태 확인
+docker compose logs -f                       # 로그 실시간 확인
+docker compose restart                       # 전체 재시작
 ```
 
-수동 롤백은 이전 커밋 SHA 태그로 다시 띄우면 됩니다.
+수동 롤백은 이전 커밋 SHA 태그를 지정해 Compose로 다시 띄우면 됩니다.
 
 ```powershell
-docker rm --force mainproject
-docker run -d --name mainproject --restart unless-stopped -p 8000:8000 ghcr.io/<owner>/mainproject:<이전SHA>
+$env:BACKEND_IMAGE='ghcr.io/<owner>/mainproject-backend:<이전SHA>'
+$env:FRONTEND_IMAGE='ghcr.io/<owner>/mainproject-frontend:<이전SHA>'
+docker compose up -d --force-recreate
 ```
+
+자동 배포는 두 서비스의 직전 이미지를 각각 기록합니다. Nginx를 통한 `/` 또는
+`/api/health` 검증이 실패하면 두 직전 이미지를 다시 반영합니다. 최초 Compose 전환이
+실패한 경우에는 기존 단일 Backend 컨테이너를 제거하지 않습니다.
 
 ## 문제 해결
 
@@ -178,21 +203,45 @@ docker run -d --name mainproject --restart unless-stopped -p 8000:8000 ghcr.io/<
 | `denied` / `unauthorized` (pull 실패) | 워크플로 `deploy` job에 `packages: read` 권한과 GHCR 로그인 단계가 있는지 |
 | `pwsh: command not found` | 워크플로가 `shell: pwsh`를 쓰고 있는 것. 대상 PC에 PowerShell 7이 없으므로 cmd 경유 방식을 써야 합니다 |
 | `running scripts is disabled on this system` | 실행 정책 문제. 배포 단계가 cmd를 거쳐 `-ExecutionPolicy Bypass`로 호출되는지 확인 |
-| 헬스체크 실패 | `docker logs mainproject` 확인. 실패 시 배포 로그에도 마지막 50줄이 출력됩니다 |
-| 포트 충돌 | `Get-NetTCPConnection -LocalPort 8000 -State Listen` 로 점유 프로세스 확인 |
+| 헬스체크 실패 | `docker compose logs` 확인. 실패 시 배포 로그에도 서비스별 마지막 50줄이 출력됩니다 |
+| 포트 충돌 | `Get-NetTCPConnection -LocalPort 80 -State Listen` 로 점유 프로세스 확인 |
 | 앱은 뜨는데 외부 접속 불가 | 방화벽 인바운드 규칙 |
 
 ## 로컬 개발
 
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\pip install -r requirements-dev.txt
-.venv\Scripts\ruff check .
-.venv\Scripts\pytest -q
+[uv](https://docs.astral.sh/uv/)와 Python 3.12가 필요합니다.
+
+```bash
+cd backend
+uv sync
+uv run ruff check .
+uv run pytest -q
 ```
 
 개발 서버 실행:
 
-```powershell
-.venv\Scripts\uvicorn app.main:app --reload
+```bash
+uv run uvicorn app.main:app --reload
 ```
+
+의존성을 변경할 때는 `backend/pyproject.toml`과 `backend/uv.lock`을 함께 커밋합니다.
+CI와 Docker에서는 `uv sync --frozen`을 사용하므로 커밋된 lockfile을 변경하지 않습니다.
+
+Frontend에는 Node.js 24와 npm이 필요합니다.
+
+```bash
+cd frontend
+npm ci
+npm run lint
+npm run build
+npm run dev
+```
+
+세 컨테이너를 로컬에서 함께 실행하려면 저장소 루트에서 실행합니다.
+
+```bash
+docker compose up --build
+```
+
+`http://localhost/`는 Frontend로, `http://localhost/api/health`는 기존 Backend
+`/health` 엔드포인트로 전달됩니다.
