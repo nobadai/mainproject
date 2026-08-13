@@ -14,7 +14,7 @@ COPY --from=builder /app/out /usr/share/nginx/html
 
 # ⭐ 중요: 이미지의 deploy/nginx/default.conf 설정을 컨테이너 Nginx에 적용
 # (compose.yml에서 빌드 컨텍스트를 루트로 잡을 것이기 때문에 경로를 아래와 같이 지정합니다)
-COPY ./deploy/nginx/default.conf /etc/nginx/conf.d/default.conf
+COPY ../deploy/nginx/default.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
