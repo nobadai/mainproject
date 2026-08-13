@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  BACKEND_IMAGE_NAME: ghcr.io/${{ github.repository }}-backend
+  FRONTEND_IMAGE_NAME: ghcr.io/${{ github.repository }}-frontend
 
 jobs:
   # ─────────────────────────────────────────────
@@ -23,6 +24,9 @@ jobs:
   ci:
     name: Build & Test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,25 +35,58 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+        run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Run tests
-        run: pytest -q
+        run: uv run pytest -q
+
+  # ─────────────────────────────────────────────
+  # Frontend CI: GitHub 클라우드 러너에서 린트/빌드
+  # ─────────────────────────────────────────────
+  frontend-ci:
+    name: Frontend Build & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
 
   # ─────────────────────────────────────────────
   # 이미지 빌드 → GHCR push (클라우드 러너에서 수행)
   # ─────────────────────────────────────────────
   build:
-    name: Build image
-    needs: ci
+    name: Build images
+    needs: [ci, frontend-ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,16 +106,27 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # PR 에서는 빌드가 깨지지 않는지만 확인하고 push 는 하지 않습니다.
-      - name: Build and push
+      - name: Build and push Backend
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./backend
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.BACKEND_IMAGE_NAME }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.FRONTEND_IMAGE_NAME }}:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
 
   # ─────────────────────────────────────────────
   # CD: 대상 Windows PC(self-hosted 러너)에서 컨테이너 교체
@@ -117,5 +165,6 @@ jobs:
         shell: cmd
         run: powershell -NoProfile -ExecutionPolicy Bypass -File deploy\deploy.ps1
         env:
-          IMAGE: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          BACKEND_IMAGE: ${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
+          FRONTEND_IMAGE: ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
           APP_VERSION: ${{ github.sha }}
