@@ -68,6 +68,11 @@ function Invoke-Compose {
 }
 
 function Get-ContainerImage([string] $ContainerName) {
+    $containerId = & docker ps -aq --filter "name=^${ContainerName}$"
+    if (-not $containerId) {
+        return $null
+    }
+
     $image = & docker inspect --format '{{.Config.Image}}' $ContainerName 2>$null
     if ($LASTEXITCODE -eq 0 -and $image) {
         return $image.Trim()
