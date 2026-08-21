@@ -1,4 +1,4 @@
-"""공통 PostgreSQL 연결 및 조회 기능."""
+"""Finance P0의 PostgreSQL 연결 및 조회 기능."""
 
 import os
 from collections.abc import Mapping, Sequence
@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 Query = str | sql.Composed
 Params = Sequence[object] | Mapping[str, object] | None
 
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 
 

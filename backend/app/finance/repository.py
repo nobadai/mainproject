@@ -6,7 +6,7 @@ from typing import TypedDict, cast
 
 from psycopg import sql
 
-from app.db import fetch_one, get_db_schema
+from app.finance.db import fetch_one, get_db_schema
 
 
 class FinanceState(TypedDict):

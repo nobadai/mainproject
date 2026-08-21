@@ -86,7 +86,7 @@ class FinanceReviewResponse(BaseModel):
     scenario_id: str = Field(min_length=1)
     agent: Literal["finance"] = "finance"
     verdict: Literal["ok", "conditional", "reject"]
-    max_feasible_amount_krw: int = Field(ge=0)
+    max_feasible_amount_krw: Decimal | None = Field(ge=0)
     hard_constraints: list[str]
     soft_warnings: list[str]
     reasoning: list[str]
