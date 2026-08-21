@@ -37,3 +37,7 @@ deploy/runtime.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+
+#예외폴더
+docs/
