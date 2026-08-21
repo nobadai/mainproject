@@ -5,6 +5,8 @@ description = "FastAPI backend for mainproject"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.141.1",
+  "psycopg[binary]",
+  "python-dotenv",
   "uvicorn[standard]==0.52.1",
 ]
 
