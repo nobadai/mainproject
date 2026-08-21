@@ -202,3 +202,9 @@ jobs:
           BACKEND_IMAGE: ${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
           FRONTEND_IMAGE: ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
           APP_VERSION: ${{ github.sha }}
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_PORT: ${{ vars.DB_PORT }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USER: ${{ vars.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_SCHEMA: ${{ vars.DB_SCHEMA }}
