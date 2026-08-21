@@ -1,6 +1,7 @@
 """Finance P0 요청 및 응답 스키마."""
 
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,7 +32,7 @@ class SourcingPlanItem(BaseModel):
 
     market: str = Field(min_length=1)
     grade: str = Field(min_length=1)
-    quantity_ton: float = Field(gt=0)
+    quantity_ton: Decimal = Field(gt=0)
     unit_price: int = Field(ge=0)
 
 
