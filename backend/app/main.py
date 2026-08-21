@@ -8,7 +8,10 @@ import os
 
 from fastapi import FastAPI
 
+from app.finance.router import router as finance_router
+
 app = FastAPI(title="mainproject")
+app.include_router(finance_router)
 
 
 @app.get("/health")
