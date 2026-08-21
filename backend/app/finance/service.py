@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import TypedDict
 
 from app.finance.repository import FinanceState, get_current_finance_state
-from app.finance.rules import FinanceRuleResult, evaluate_finance_rules
+from app.finance.rules import FinanceRuleResult, evaluate_finance_rules, has_required_finance_state
 from app.finance.schemas import FinanceReviewRequest
 from app.finance.tools import (
     ExpectedCostComparison,
@@ -42,12 +42,12 @@ def run_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
         request.scenario.expected_cost,
         proposal_amount,
     )
-
     db_financial_limit = None
     recalculated_financial_limit = None
     financial_limit_matches = None
     post_purchase_cash = None
-    if finance_state is not None:
+    if has_required_finance_state(finance_state):
+        assert finance_state is not None
         db_financial_limit = finance_state["financial_limit_krw"]
         recalculated_financial_limit = calculate_financial_limit(
             finance_state["current_cash_krw"],
@@ -58,12 +58,6 @@ def run_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
         financial_limit_matches = db_financial_limit == recalculated_financial_limit
         if not financial_limit_matches:
             raise ValueError("FINANCIAL_LIMIT_MISMATCH")
-        post_purchase_cash = calculate_post_purchase_cash(
-            finance_state["current_cash_krw"],
-            proposal_amount,
-            finance_state["committed_outflows_krw"],
-            finance_state["unsettled_purchase_payables_krw"],
-        )
 
     rule_result = evaluate_finance_rules(
         purchase_as_of=request.purchase_meta.as_of,
@@ -71,6 +65,16 @@ def run_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
         expected_cost_comparison=expected_cost_comparison,
         finance_state=finance_state,
     )
+
+    if has_required_finance_state(finance_state):
+        assert finance_state is not None
+        if "AS_OF_MISMATCH" not in rule_result["hard_constraints"]:
+            post_purchase_cash = calculate_post_purchase_cash(
+                finance_state["current_cash_krw"],
+                proposal_amount,
+                finance_state["committed_outflows_krw"],
+                finance_state["unsettled_purchase_payables_krw"],
+            )
     return {
         "proposal_id": request.proposal_id,
         "scenario_id": request.scenario_id,

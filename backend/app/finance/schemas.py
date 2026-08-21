@@ -4,7 +4,13 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _reject_boolean(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("boolean values are not valid numeric inputs")  # noqa: TRY004
+    return value
 
 
 class PurchaseMeta(BaseModel):
@@ -18,13 +24,23 @@ class PurchaseMeta(BaseModel):
     is_refeed: bool
     feedback_attempt: int = Field(ge=0)
 
+    @field_validator("feedback_attempt", mode="before")
+    @classmethod
+    def reject_boolean_feedback_attempt(cls, value: object) -> object:
+        return _reject_boolean(value)
+
 
 class SplitPlanItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     seq: int = Field(ge=1)
     date: date
-    quantity_ton: float = Field(gt=0)
+    quantity_ton: Decimal = Field(gt=0)
+
+    @field_validator("seq", "quantity_ton", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
 class SourcingPlanItem(BaseModel):
@@ -33,7 +49,12 @@ class SourcingPlanItem(BaseModel):
     market: str = Field(min_length=1)
     grade: str = Field(min_length=1)
     quantity_ton: Decimal = Field(gt=0)
-    unit_price: int = Field(ge=0)
+    unit_price: int = Field(gt=0)
+
+    @field_validator("quantity_ton", "unit_price", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
 class Evidence(BaseModel):
@@ -49,15 +70,38 @@ class PurchaseScenario(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1)
-    total_quantity_ton: float = Field(gt=0)
+    total_quantity_ton: Decimal = Field(gt=0)
     max_price: int = Field(ge=0)
     timing: str = Field(min_length=1)
     split_plan: list[SplitPlanItem]
-    sourcing_plan: list[SourcingPlanItem]
+    sourcing_plan: list[SourcingPlanItem] = Field(min_length=1)
     expected_margin_rate: float = Field(ge=0, le=1)
     expected_cost: int = Field(ge=0)
     rationale: list[Evidence]
     risks: list[str]
+
+    @field_validator(
+        "total_quantity_ton",
+        "max_price",
+        "expected_margin_rate",
+        "expected_cost",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_quantity_totals(self) -> "PurchaseScenario":
+        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
+        sourcing_quantity = sum(
+            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
+        )
+        if self.total_quantity_ton != split_quantity:
+            raise ValueError("total_quantity_ton must equal split_plan quantity total")
+        if self.total_quantity_ton != sourcing_quantity:
+            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        return self
 
 
 class FinanceReviewRequest(BaseModel):

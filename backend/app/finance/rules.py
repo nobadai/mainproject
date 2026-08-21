@@ -37,7 +37,8 @@ class FinanceRuleResult(TypedDict):
     soft_warnings: list[SoftWarning]
 
 
-def _has_required_finance_state(finance_state: Mapping[str, object] | None) -> bool:
+def has_required_finance_state(finance_state: Mapping[str, object] | None) -> bool:
+    """Finance Rule 판단과 계산에 필요한 State 필드의 존재를 확인한다."""
     return finance_state is not None and all(
         field in finance_state and finance_state[field] is not None
         for field in _REQUIRED_FINANCE_STATE_FIELDS
@@ -56,7 +57,7 @@ def evaluate_finance_rules(
     if not expected_cost_comparison["is_match"]:
         soft_warnings.append("COST_MISMATCH")
 
-    if not _has_required_finance_state(finance_state):
+    if not has_required_finance_state(finance_state):
         return {
             "verdict": "reject",
             "max_feasible_amount_krw": None,
@@ -75,14 +76,14 @@ def evaluate_finance_rules(
     if purchase_as_of != state_date:
         return {
             "verdict": "reject",
-            "max_feasible_amount_krw": financial_limit,
+            "max_feasible_amount_krw": None,
             "hard_constraints": ["AS_OF_MISMATCH"],
             "soft_warnings": soft_warnings,
         }
     if financial_limit <= Decimal(0):
         return {
             "verdict": "reject",
-            "max_feasible_amount_krw": financial_limit,
+            "max_feasible_amount_krw": Decimal(0),
             "hard_constraints": ["NO_FINANCIAL_CAPACITY"],
             "soft_warnings": soft_warnings,
         }
