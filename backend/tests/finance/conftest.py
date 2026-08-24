@@ -3,6 +3,8 @@ from decimal import Decimal
 
 import pytest
 
+from app.finance.schemas import FinanceSnapshot
+
 
 @pytest.fixture
 def finance_state() -> dict[str, object]:
@@ -18,6 +20,11 @@ def finance_state() -> dict[str, object]:
         "unsettled_purchase_payables_krw": Decimal("0.000000"),
         "financial_limit_krw": Decimal("16091273.770000"),
     }
+
+
+@pytest.fixture
+def finance_snapshot(finance_state) -> FinanceSnapshot:
+    return FinanceSnapshot(snapshot_id=None, **finance_state)
 
 
 @pytest.fixture

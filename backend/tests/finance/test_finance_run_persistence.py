@@ -87,13 +87,13 @@ def test_get_finance_agent_run_raises_lookup_error():
         get_finance_agent_run(UUID("00000000-0000-0000-0000-000000000001"))
 
 
-def test_as_of_mismatch_response_is_saved(finance_state, purchase_payload):
+def test_as_of_mismatch_response_is_saved(finance_snapshot, purchase_payload):
     purchase_payload["meta"]["as_of"] = "2026-08-21"
     purchase_payload["scenarios"][0]["split_plan"][0]["date"] = "2026-08-21"
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
@@ -106,11 +106,11 @@ def test_as_of_mismatch_response_is_saved(finance_state, purchase_payload):
     assert saved["response_payload"]["soft_warnings"] == ["COST_MISMATCH"]
 
 
-def test_persistence_error_is_not_converted_to_runtime_warning(finance_state, purchase_payload):
+def test_persistence_error_is_not_converted_to_runtime_warning(finance_snapshot, purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         patch(
             "app.finance.service.save_finance_agent_run",
             side_effect=OperationalError("persistence unavailable"),
@@ -121,12 +121,12 @@ def test_persistence_error_is_not_converted_to_runtime_warning(finance_state, pu
 
 
 def test_finance_calculation_remains_decimal_before_json_serialization(
-    finance_state, purchase_payload
+    finance_snapshot, purchase_payload
 ):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)

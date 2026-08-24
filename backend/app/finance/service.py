@@ -5,7 +5,11 @@ from decimal import Decimal
 from typing import TypedDict
 from uuid import UUID
 
-from app.finance.repository import FinanceState, get_current_finance_state
+from app.finance.repository import (
+    FinanceState,
+    get_current_finance_snapshot,
+    get_current_finance_state,
+)
 from app.finance.rules import (
     FinanceRuleResult,
     evaluate_finance_rules,
@@ -26,6 +30,7 @@ from app.finance.schemas import (
     FinanceReviewRequest,
     FinanceSalesRequest,
     FinanceSalesResponse,
+    FinanceSnapshot,
     ProcurementSuggestedAdjustment,
     PurchaseAgentOutput,
     RuntimeStatus,
@@ -63,6 +68,19 @@ def _get_current_finance_state_or_none() -> FinanceState | None:
         return None
 
 
+def _get_current_finance_snapshot_or_none() -> FinanceSnapshot | None:
+    try:
+        return get_current_finance_snapshot()
+    except LookupError:
+        return None
+
+
+def _finance_state_from_snapshot(snapshot: FinanceSnapshot | None) -> FinanceState | None:
+    if snapshot is None:
+        return None
+    return FinanceState(**snapshot.model_dump(exclude={"snapshot_id"}))
+
+
 def _cross_check_financial_limit(finance_state: FinanceState | None) -> None:
     if not has_required_finance_state(finance_state):
         return
@@ -79,7 +97,25 @@ def _cross_check_financial_limit(finance_state: FinanceState | None) -> None:
 
 def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementResponse:
     """Finance State에서 모든 품목에 공통으로 적용할 매입 금액 Band를 산출한다."""
-    finance_state = _get_current_finance_state_or_none()
+    snapshot = _get_current_finance_snapshot_or_none()
+    response = run_finance_procurement_with_snapshot(request, snapshot)
+    save_finance_agent_run(
+        cycle="PROCUREMENT",
+        as_of=request.meta.as_of,
+        snapshot_id=response.snapshot_id,
+        runtime_status=response.runtime_status,
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return response
+
+
+def run_finance_procurement_with_snapshot(
+    request: PurchaseAgentOutput,
+    snapshot: FinanceSnapshot | None,
+) -> FinanceProcurementResponse:
+    """외부에서 고정한 Finance Snapshot으로 Finance A를 실행한다."""
+    finance_state = _finance_state_from_snapshot(snapshot)
     _cross_check_financial_limit(finance_state)
 
     has_cost_mismatch = False
@@ -101,7 +137,7 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
     )
     response = FinanceProcurementResponse(
         as_of=request.meta.as_of,
-        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
+        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
         band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
         base_projected_cash_min=None,
@@ -111,9 +147,16 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
         suggested_adjustment=suggested_adjustment,
         evidences=[],
     )
+    return response
+
+
+def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
+    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
+    snapshot = _get_current_finance_snapshot_or_none()
+    response = run_finance_sales_with_snapshot(request, snapshot)
     save_finance_agent_run(
-        cycle="PROCUREMENT",
-        as_of=request.meta.as_of,
+        cycle="SALES",
+        as_of=request.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
         request_payload=request.model_dump(mode="json"),
@@ -122,9 +165,12 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
     return response
 
 
-def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
-    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
-    finance_state = _get_current_finance_state_or_none()
+def run_finance_sales_with_snapshot(
+    request: FinanceSalesRequest,
+    snapshot: FinanceSnapshot | None,
+) -> FinanceSalesResponse:
+    """외부에서 고정한 Finance Snapshot으로 Finance B를 실행한다."""
+    finance_state = _finance_state_from_snapshot(snapshot)
     _cross_check_financial_limit(finance_state)
 
     post_approved_purchase_cash = None
@@ -142,7 +188,7 @@ def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
         post_approved_purchase_cash=post_approved_purchase_cash,
     )
     response = FinanceSalesResponse(
-        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
+        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
         base_cash_priority=None,
@@ -150,14 +196,6 @@ def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
         collection_preferences=rank_collection_preferences(request.channel_terms),
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
-    )
-    save_finance_agent_run(
-        cycle="SALES",
-        as_of=request.as_of,
-        snapshot_id=response.snapshot_id,
-        runtime_status=response.runtime_status,
-        request_payload=request.model_dump(mode="json"),
-        response_payload=response.model_dump(mode="json"),
     )
     return response
 

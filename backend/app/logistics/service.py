@@ -42,6 +42,23 @@ def _get_snapshot_or_none() -> InventoryLogisticsSnapshot | None:
 def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurementResponse:
     """현재 Snapshot과 Purchase 날짜 축으로 Logistics A Band를 만든다."""
     snapshot = _get_snapshot_or_none()
+    response = run_logistics_procurement_with_snapshot(request, snapshot)
+    save_logistics_agent_run(
+        cycle="PROCUREMENT",
+        as_of=request.meta.as_of,
+        snapshot_id=response.snapshot_id,
+        runtime_status=response.runtime_status,
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return response
+
+
+def run_logistics_procurement_with_snapshot(
+    request: PurchaseAgentOutput,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsProcurementResponse:
+    """외부에서 고정한 Inventory/Logistics Snapshot으로 A Cycle을 실행한다."""
     rule_result = evaluate_procurement_rules(as_of=request.meta.as_of, snapshot=snapshot)
     cap_by_date = {}
     if rule_result["calculation_ready"]:
@@ -68,9 +85,16 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
         soft_warnings=rule_result["soft_warnings"],
         evidences=_evidences(snapshot),
     )
+    return response
+
+
+def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
+    """H1 승인 매입을 미래 입고로 Overlay해 Logistics B Reply를 만든다."""
+    snapshot = _get_snapshot_or_none()
+    response = run_logistics_sales_with_snapshot(request, snapshot)
     save_logistics_agent_run(
-        cycle="PROCUREMENT",
-        as_of=request.meta.as_of,
+        cycle="SALES",
+        as_of=request.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
         request_payload=request.model_dump(mode="json"),
@@ -79,9 +103,11 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
     return response
 
 
-def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
-    """H1 승인 매입을 미래 입고로 Overlay해 Logistics B Reply를 만든다."""
-    snapshot = _get_snapshot_or_none()
+def run_logistics_sales_with_snapshot(
+    request: LogisticsSalesRequest,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsSalesResponse:
+    """외부에서 고정한 Inventory/Logistics Snapshot으로 B Cycle을 실행한다."""
     future_occupancy = None
     lot_constraints = []
     if snapshot is not None:
@@ -104,14 +130,6 @@ def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesRespons
         lot_constraints=lot_constraints,
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
-    )
-    save_logistics_agent_run(
-        cycle="SALES",
-        as_of=request.as_of,
-        snapshot_id=response.snapshot_id,
-        runtime_status=response.runtime_status,
-        request_payload=request.model_dump(mode="json"),
-        response_payload=response.model_dump(mode="json"),
     )
     return response
 
