@@ -89,6 +89,11 @@ class ScenarioIn(BaseModel):
     unit_price_krw_per_kg: dict[str, float]
     split_plan: list[SplitLegIn] = Field(default_factory=list)
     sourcing_plan: list[SourcingLotIn] = Field(default_factory=list)
+    # ── 매입 명세 v1.1 수신·보존 필드 (선택, 밴드·클리핑에 영향 없음) ──
+    total_amount_krw: float | None = None
+    """사중일치 금액축(명세 §2). 수신·보존만 한다 - 클리핑 금액은 qty×unit_price 파생(동일값)."""
+    margin_warning: bool | None = None
+    """3값 자문 표시 - true 경고 / false 정상 / null 미계산. 컷 아님, 검증에 영향 없음."""
 
 
 class ProcurementRequest(BaseModel):
