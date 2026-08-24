@@ -205,6 +205,36 @@ CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
 FinanceCycle = Literal["PROCUREMENT", "SALES"]
 
 
+class FinanceSnapshot(BaseModel):
+    """한 Cycle 동안 고정해서 사용하는 T0 Finance Snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str | None
+    finance_state_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    state_date: date
+    state_type: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    current_cash_krw: Decimal
+    minimum_operating_cash_krw: Decimal
+    committed_outflows_krw: Decimal
+    unsettled_purchase_payables_krw: Decimal
+    financial_limit_krw: Decimal
+
+    @field_validator(
+        "current_cash_krw",
+        "minimum_operating_cash_krw",
+        "committed_outflows_krw",
+        "unsettled_purchase_payables_krw",
+        "financial_limit_krw",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_amounts(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class FinanceBand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -5,7 +5,11 @@ from decimal import Decimal
 from typing import TypedDict
 from uuid import UUID
 
-from app.finance.repository import FinanceState, get_current_finance_state
+from app.finance.repository import (
+    FinanceState,
+    get_current_finance_snapshot,
+    get_current_finance_state,
+)
 from app.finance.rules import (
     FinanceRuleResult,
     evaluate_finance_rules,
@@ -18,6 +22,10 @@ from app.finance.run_repository import (
     list_finance_agent_runs,
     save_finance_agent_run,
 )
+from app.finance.scenario_engine import (
+    run_finance_procurement_scenario,
+    run_finance_sales_scenario,
+)
 from app.finance.schemas import (
     FinanceAgentRunResponse,
     FinanceBand,
@@ -26,6 +34,7 @@ from app.finance.schemas import (
     FinanceReviewRequest,
     FinanceSalesRequest,
     FinanceSalesResponse,
+    FinanceSnapshot,
     ProcurementSuggestedAdjustment,
     PurchaseAgentOutput,
     RuntimeStatus,
@@ -35,10 +44,7 @@ from app.finance.tools import (
     calculate_financial_limit,
     calculate_post_purchase_cash,
     calculate_proposal_amount,
-    calculate_purchase_scenario_amount,
     compare_expected_cost,
-    compare_reported_amount,
-    rank_collection_preferences,
 )
 
 
@@ -63,54 +69,17 @@ def _get_current_finance_state_or_none() -> FinanceState | None:
         return None
 
 
-def _cross_check_financial_limit(finance_state: FinanceState | None) -> None:
-    if not has_required_finance_state(finance_state):
-        return
-    assert finance_state is not None
-    recalculated_financial_limit = calculate_financial_limit(
-        finance_state["current_cash_krw"],
-        finance_state["minimum_operating_cash_krw"],
-        finance_state["committed_outflows_krw"],
-        finance_state["unsettled_purchase_payables_krw"],
-    )
-    if finance_state["financial_limit_krw"] != recalculated_financial_limit:
-        raise ValueError("FINANCIAL_LIMIT_MISMATCH")
+def _get_current_finance_snapshot_or_none() -> FinanceSnapshot | None:
+    try:
+        return get_current_finance_snapshot()
+    except LookupError:
+        return None
 
 
 def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementResponse:
     """Finance State에서 모든 품목에 공통으로 적용할 매입 금액 Band를 산출한다."""
-    finance_state = _get_current_finance_state_or_none()
-    _cross_check_financial_limit(finance_state)
-
-    has_cost_mismatch = False
-    for scenario in request.scenarios:
-        recalculated_amount = calculate_purchase_scenario_amount(scenario.sourcing_plan)
-        comparison = compare_reported_amount(scenario.total_amount_krw, recalculated_amount)
-        has_cost_mismatch = has_cost_mismatch or not comparison["is_match"]
-
-    rule_result = evaluate_finance_runtime_rules(
-        as_of=request.meta.as_of,
-        finance_state=finance_state,
-        has_cost_mismatch=has_cost_mismatch,
-    )
-    max_feasible_amount = rule_result["max_feasible_amount_krw"]
-    suggested_adjustment = (
-        ProcurementSuggestedAdjustment(max_amount_krw=max_feasible_amount)
-        if max_feasible_amount is not None
-        else None
-    )
-    response = FinanceProcurementResponse(
-        as_of=request.meta.as_of,
-        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
-        runtime_status=rule_result["runtime_status"],
-        band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
-        base_projected_cash_min=None,
-        base_cash_priority=None,
-        hard_constraints=rule_result["hard_constraints"],
-        soft_warnings=rule_result["soft_warnings"],
-        suggested_adjustment=suggested_adjustment,
-        evidences=[],
-    )
+    snapshot = _get_current_finance_snapshot_or_none()
+    response = run_finance_procurement_with_snapshot(request, snapshot)
     save_finance_agent_run(
         cycle="PROCUREMENT",
         as_of=request.meta.as_of,
@@ -122,35 +91,42 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
     return response
 
 
-def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
-    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
-    finance_state = _get_current_finance_state_or_none()
-    _cross_check_financial_limit(finance_state)
-
-    post_approved_purchase_cash = None
-    if has_required_finance_state(finance_state):
-        assert finance_state is not None
-        post_approved_purchase_cash = calculate_post_purchase_cash(
-            finance_state["current_cash_krw"],
-            request.approved_purchase.total_amount_krw,
-            finance_state["committed_outflows_krw"],
-            finance_state["unsettled_purchase_payables_krw"],
-        )
-    rule_result = evaluate_finance_sales_rules(
-        as_of=request.as_of,
-        finance_state=finance_state,
-        post_approved_purchase_cash=post_approved_purchase_cash,
+def run_finance_procurement_with_snapshot(
+    request: PurchaseAgentOutput,
+    snapshot: FinanceSnapshot | None,
+) -> FinanceProcurementResponse:
+    """외부에서 고정한 Finance Snapshot으로 Finance A를 실행한다."""
+    scenario_result = run_finance_procurement_scenario(request, snapshot)
+    rule_result = evaluate_finance_runtime_rules(
+        as_of=request.meta.as_of,
+        finance_state=scenario_result["finance_state"],
+        has_cost_mismatch=scenario_result["has_cost_mismatch"],
     )
-    response = FinanceSalesResponse(
-        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
-        approval_id=request.approved_purchase.approval_id,
+    max_feasible_amount = rule_result["max_feasible_amount_krw"]
+    suggested_adjustment = (
+        ProcurementSuggestedAdjustment(max_amount_krw=max_feasible_amount)
+        if max_feasible_amount is not None
+        else None
+    )
+    response = FinanceProcurementResponse(
+        as_of=request.meta.as_of,
+        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
+        band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
+        base_projected_cash_min=None,
         base_cash_priority=None,
-        sales_cash_priority=None,
-        collection_preferences=rank_collection_preferences(request.channel_terms),
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
+        suggested_adjustment=suggested_adjustment,
+        evidences=[],
     )
+    return response
+
+
+def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
+    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
+    snapshot = _get_current_finance_snapshot_or_none()
+    response = run_finance_sales_with_snapshot(request, snapshot)
     save_finance_agent_run(
         cycle="SALES",
         as_of=request.as_of,
@@ -158,6 +134,30 @@ def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
         runtime_status=response.runtime_status,
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
+    )
+    return response
+
+
+def run_finance_sales_with_snapshot(
+    request: FinanceSalesRequest,
+    snapshot: FinanceSnapshot | None,
+) -> FinanceSalesResponse:
+    """외부에서 고정한 Finance Snapshot으로 Finance B를 실행한다."""
+    scenario_result = run_finance_sales_scenario(request, snapshot)
+    rule_result = evaluate_finance_sales_rules(
+        as_of=request.as_of,
+        finance_state=scenario_result["finance_state"],
+        post_approved_purchase_cash=scenario_result["post_approved_purchase_cash_krw"],
+    )
+    response = FinanceSalesResponse(
+        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
+        approval_id=request.approved_purchase.approval_id,
+        runtime_status=rule_result["runtime_status"],
+        base_cash_priority=None,
+        sales_cash_priority=None,
+        collection_preferences=scenario_result["collection_preferences"],
+        hard_constraints=rule_result["hard_constraints"],
+        soft_warnings=rule_result["soft_warnings"],
     )
     return response
 
