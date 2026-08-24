@@ -8,6 +8,7 @@ import os
 
 from fastapi import FastAPI
 
+from app.critic.router import router as critic_router
 from app.finance.router import router as finance_router
 from app.logistics.router import router as logistics_router
 from app.orchestrator.router import router as orchestrator_router
@@ -16,6 +17,7 @@ app = FastAPI(title="mainproject")
 app.include_router(finance_router)
 app.include_router(logistics_router)
 app.include_router(orchestrator_router)
+app.include_router(critic_router)
 
 
 @app.get("/health")

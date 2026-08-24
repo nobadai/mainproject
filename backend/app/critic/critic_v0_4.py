@@ -50,13 +50,17 @@ from app.orchestrator.band import check_occupancy_by_date, detect_collapse_type
 from app.orchestrator.contracts_core import (
     _DEPT_AXES,
     ITEMS,
+    ApprovedPurchaseCommitment,
     Band,
     CheckResult,
     ClipResult,
     CriticFinding,
     Dept,
     ItemCode,
+    LotConstraint,
+    OutboundBand,
     PurchaseScenario,
+    SaleAllocation,
     T0Snapshot,
     T2Reply,
 )
@@ -768,6 +772,206 @@ def run_critic_v04(
         skipped=tuple(skipped),
         llm_note=note,
         end_stage=("CRITIC_A" if cycle == "A" else "CRITIC_B") if status == "FAIL" else None,
+    )
+
+
+# ===========================================================================
+# 사이클 B 러너 — L4-7 ~ L4-10 (설계서 §6 검사 7~10)
+# ===========================================================================
+#
+#   7  overlay 후 cap_by_date 재검산   E-OVERLAY-CAPDATE
+#   8  공용 출고 능력                  E-OUTBOUND-CAP
+#   9  on_hand 초과                    E-ONHAND-EXCEED
+#   10 신선도·납기                     E-FRESHNESS
+#
+# Critic A 의 L4 가 매입 밴드(kg·원)를 재검산하듯, B 의 L4 는 출고 밴드(전부 kg)와
+# overlay·로트를 재검산한다. 미결값(N15 cap_by_date·N17 공용 출고·로트 규격)으로
+# 돌 수 없는 검사는 통과가 아니라 skipped 로 남긴다 (설계서 §8).
+
+_LAYER_TOTALS_B = {"L4_B": 4}
+
+
+def check_outbound_capacity(
+    clip: ClipResult, band: OutboundBand
+) -> tuple[list[CriticFinding], list[str]]:
+    """L4-8 — 총 출고가 공용 출고 능력을 넘지 않는가 (§3.7.4)."""
+    cap = band.cap_total_kg
+    if cap == float("inf"):
+        return [], ["L4-8 공용 출고 능력: N17 미결 — 미검사"]
+    total = sum(clip.clipped_qty_kg.values())
+    if total > cap + EPS:
+        return [
+            CriticFinding(
+                "L3_band_axis",
+                "outbound.cap_total_kg",
+                f"총 출고 {total:,.0f}kg > 공용 출고 능력 {cap:,.0f}kg",
+            )
+        ], []
+    return [], []
+
+
+def check_onhand_exceed(
+    clip: ClipResult, lots: Sequence[LotConstraint]
+) -> tuple[list[CriticFinding], list[str]]:
+    """L4-9 — 품목별 출고가 on_hand(가용 로트 합)를 넘지 않는가 (§3.4.5-⑦)."""
+    if not lots:
+        return [], ["L4-9 on_hand 초과: 로트 제약 미제출 — 미검사"]
+    avail: dict[ItemCode, float] = {}
+    for lot in lots:
+        if lot.status == "AVAILABLE":
+            avail[lot.item] = avail.get(lot.item, 0.0) + lot.available_qty_kg
+    out: list[CriticFinding] = []
+    for item, qty in clip.clipped_qty_kg.items():
+        cap = avail.get(item, 0.0)
+        if qty > cap + EPS:
+            out.append(
+                CriticFinding(
+                    "L3_band_axis",
+                    f"onhand.{item}",
+                    f"{item} 출고 {qty:,.0f}kg > 가용 로트 {cap:,.0f}kg — on_hand 초과",
+                )
+            )
+    return out, []
+
+
+def check_freshness_delivery(
+    allocation: SaleAllocation | None,
+    lots: Sequence[LotConstraint],
+    as_of: date,
+) -> tuple[list[CriticFinding], list[str]]:
+    """L4-10 — 배정 로트의 잔여 신선도가 납기까지 버티는가.
+
+    각 채널 배분(due_date 있는 것)이 쓰는 로트의 remaining_freshness_days 가
+    (due_date - as_of) 보다 짧으면 납기 전에 상한다.
+    """
+    if allocation is None or not lots:
+        return [], ["L4-10 신선도·납기: 배분/로트 미제출 — 미검사"]
+    fresh = {lot.lot_id: lot.remaining_freshness_days for lot in lots}
+    checked = False
+    out: list[CriticFinding] = []
+    for leg in allocation.legs:
+        if leg.due_date is None or not leg.lot_ids:
+            continue
+        need_days = (leg.due_date - as_of).days
+        for lot_id in leg.lot_ids:
+            if lot_id not in fresh:
+                continue
+            checked = True
+            if fresh[lot_id] < need_days:
+                out.append(
+                    CriticFinding(
+                        "L3_band_axis",
+                        f"freshness.{lot_id}",
+                        f"로트 {lot_id} 잔여 {fresh[lot_id]}일 < 납기 {need_days}일 "
+                        f"({leg.item} → {leg.channel} {leg.due_date}) — 납기 전 신선도 소진",
+                    )
+                )
+    if not checked:
+        return [], ["L4-10 신선도·납기: 납기·로트 매칭 없음 — 미검사"]
+    return out, []
+
+
+def check_overlay_cap_by_date(
+    commitment: ApprovedPurchaseCommitment | None,
+    snapshot: T0Snapshot,
+) -> tuple[list[CriticFinding], list[str]]:
+    """L4-7 — H1 승인분 overlay 후 날짜별 창고 점유가 상한을 넘지 않는가.
+
+    승인 매입의 회차별 도착(arrival_schedule)을 확정 점유에 겹쳐, 어느 날짜든
+    창고 여유(warehouse_free_kg)를 초과하면 오늘 판매를 그만큼 늦추거나 늘려야 한다.
+    N15(confirmed_occupancy_by_date)·N2(창고 상한)가 미결이면 검사할 수 없다.
+    """
+    occ = snapshot.confirmed_occupancy_by_date
+    if commitment is None or not commitment.arrival_schedule:
+        return [], ["L4-7 overlay cap_by_date: 승인 약정 없음 — 미검사"]
+    if not occ or snapshot.warehouse_free_kg <= 0:
+        return [], ["L4-7 overlay cap_by_date: N15/N2 미결 — 미검사"]
+    capacity = max(occ.values()) + snapshot.warehouse_free_kg
+    overlaid: dict[date, float] = dict(occ)
+    for leg in commitment.arrival_schedule:
+        overlaid[leg.date] = overlaid.get(leg.date, 0.0) + leg.qty_kg
+    out: list[CriticFinding] = []
+    for d, load in sorted(overlaid.items()):
+        if load > capacity + EPS:
+            out.append(
+                CriticFinding(
+                    "L3_band_axis",
+                    f"overlay.cap_by_date.{d}",
+                    f"{d} 점유 {load:,.0f}kg > 상한 {capacity:,.0f}kg — 승인분 overlay 후 초과",
+                )
+            )
+    return out, []
+
+
+def run_critic_b(
+    *,
+    as_of: date,
+    run_seq: int,
+    clip: ClipResult,
+    outbound_band: OutboundBand,
+    snapshot: T0Snapshot,
+    replies: Mapping[Dept, T2Reply],
+    allocation: SaleAllocation | None = None,
+    commitment: ApprovedPurchaseCommitment | None = None,
+    lot_constraints: Sequence[LotConstraint] = (),
+    dept_meta: Mapping[Dept, DeptMeta] | None = None,
+    sales_facts: Any | None = None,
+    unattended: bool = False,
+) -> CriticVerdictV04:
+    """사이클 B(판매) 검증. 앞 계층이 FAIL 이면 뒤는 돌리지 않는다.
+
+    A 와 달리 L0(매입 시나리오 형식)·L3(매입 축)·금액 항등식은 없다.
+    B 는 스냅샷 바인딩·룩어헤드·권한(L1~L2) + 출고 결합 재검산(L4-7~10)이다.
+    """
+    meta = dept_meta or {}
+    findings: list[CriticFinding] = []
+    skipped: list[str] = []
+    coverage: dict[str, tuple[int, int]] = {}
+
+    # ── L1 바인딩 · 권한 ──────────────────────────────────────────
+    l1_ran = 0
+    findings += check_snapshot_binding(replies, snapshot)
+    l1_ran += 1
+    for dept, dm in meta.items():
+        findings += check_obligation_authority(dept, dm.produced_fields)
+        l1_ran += 1
+    findings += check_sales_authority(sales_facts)
+    l1_ran += 1
+    coverage["L1"] = (l1_ran, _LAYER_TOTALS["L1"])
+
+    # ── L2 룩어헤드 ───────────────────────────────────────────────
+    coverage["L2"] = (0, _LAYER_TOTALS["L2"])
+    if not findings:
+        findings += check_lookahead(replies, snapshot)
+        coverage["L2"] = (1, _LAYER_TOTALS["L2"])
+
+    # ── L4-B 결합 재검산 (7~10) ───────────────────────────────────
+    l4_ran = 0
+    if not findings:
+        for check, args in (
+            (check_overlay_cap_by_date, (commitment, snapshot)),
+            (check_outbound_capacity, (clip, outbound_band)),
+            (check_onhand_exceed, (clip, lot_constraints)),
+            (check_freshness_delivery, (allocation, lot_constraints, as_of)),
+        ):
+            f, s = check(*args)
+            findings += f
+            skipped += s
+            l4_ran += 1 if not s else 0
+    coverage["L4_B"] = (l4_ran, _LAYER_TOTALS_B["L4_B"])
+
+    status: CriticStatus = "FAIL" if findings else "PASS"
+    if unattended and status == "CONCERN":
+        pass  # B 는 현재 CONCERN 산출 지점이 없다 (L5 미연동)
+    return CriticVerdictV04(
+        as_of=as_of,
+        run_seq=run_seq,
+        scenario_id=getattr(allocation, "allocation_id", "(sales)"),
+        status=status,
+        findings=tuple(findings),
+        coverage=coverage,
+        skipped=tuple(skipped),
+        end_stage="CRITIC_B" if status == "FAIL" else None,
     )
 
 
