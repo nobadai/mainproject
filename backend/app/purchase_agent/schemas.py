@@ -194,7 +194,10 @@ class Scenario(BaseModel):
     margin_warning: bool | None = None
     split_plan: list[SplitPlanItem] = Field(min_length=1)
     sourcing_plan: list[SourcingPlanItem] = Field(min_length=1)
-    expected_margin_rate: float = Field(ge=0, le=1)
+    #: v1.1 개정 — ``margin_warning``과 같은 정보 가족이다(둘 다 contract_price 파생).
+    #: 미계산이면 ``null``. **0.0으로 채우지 않는다** — "마진 0%"는 거짓이고, 이건
+    #: 규칙 3(0과 NULL 구분)의 float 판이다. 기본값이 None인 것도 같은 이유다.
+    expected_margin_rate: float | None = Field(default=None, ge=0, le=1)
     rationale: list[RationaleItem] = Field(min_length=1)
     risks: list[NonEmptyStr] = Field(default_factory=list)
 
@@ -202,6 +205,29 @@ class Scenario(BaseModel):
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_margin_fields_are_synchronised(self) -> "Scenario":
+        """``margin_warning``과 ``expected_margin_rate``의 null 여부가 일치해야 한다.
+
+        둘 다 ``contract_price``에서 나온다 — 계약단가를 받았으면 둘 다 계산되고, 못 받았으면
+        둘 다 미계산이다. **한쪽만 null이면 모순**이라 소비자가 어느 쪽을 믿어야 할지 알 수 없다
+        (IO명세 §2 "동기화 규칙").
+
+        이 판정은 스키마 몫이다 — 출력 문서 안의 두 필드만 보면 되고 런타임 값이 필요 없다.
+        (같은 이유로 축 중복 검사는 ⑦ self_check에 있다. 그쪽은 그날 ``allowed_axes``를
+        알아야 판정할 수 있어 문서만으로는 불가능하다.)
+        """
+        warning_missing = self.margin_warning is None
+        rate_missing = self.expected_margin_rate is None
+        if warning_missing != rate_missing:
+            computed = "margin_warning" if rate_missing else "expected_margin_rate"
+            missing = "expected_margin_rate" if rate_missing else "margin_warning"
+            raise ValueError(
+                f"margin_warning and expected_margin_rate must both be null or both set; "
+                f"{computed} is set but {missing} is null"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_quadruple_match(self) -> "Scenario":

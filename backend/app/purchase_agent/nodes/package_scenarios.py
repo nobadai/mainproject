@@ -101,6 +101,27 @@ def compute_max_price(forecast: dict, coverage_days: int) -> int:
     return max(row["upper"] for row in forecast["daily"][:coverage_days])
 
 
+def compute_margin(
+    unit_price: float, contract_price: float | None
+) -> tuple[bool | None, float | None]:
+    """계약단가 파생 두 값. **함께 계산되거나 함께 null이다** (IO명세 §2 동기화 규칙).
+
+    ``contract_price``가 ``None``이면 아직 못 받은 것이다 — 마진을 지어내지 않고 둘 다 null로
+    내보낸다. 0.0으로 채우면 "마진 0%"라는 거짓이 되고, ``False``로 채우면 "계산했고 정상"과
+    "계산 안 함"이 구분되지 않는다 (규칙 3의 float·bool 판).
+
+    반면 ``0`` 이하는 **미수령이 아니라 잘못된 값**이다. 0원짜리 계약단가는 존재할 수 없고
+    분모로도 쓸 수 없으므로 멈춘다 — 0과 NULL을 구분하는 규칙 3이 여기서도 그대로 적용된다.
+
+    ⚠️ 매입단가가 계약단가를 넘으면(역마진) 실제 마진율은 음수지만 스키마가 ``ge=0``이라
+    0.0으로 깎인다. 그 사실은 ``margin_warning=True``가 대신 전달한다.
+    """
+    if contract_price is None:
+        return None, None
+    require_positive(contract_price, "contract_price")
+    return unit_price > contract_price, max(0.0, (contract_price - unit_price) / contract_price)
+
+
 def _weighted_unit_price(sourcing: list[dict], total_qty_kg: int) -> float:
     amount = sum(line["qty_kg"] * line["grade_unit_price"] for line in sourcing)
     return amount / require_positive(total_qty_kg, "total_qty_kg")
@@ -223,8 +244,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         constraints["allocation"]["aggressive_axis"],
     )
     lots = state["inventory"].get("lots")
-    # 계약단가는 마진 표시의 분모다. 없거나 0이면 마진을 지어내지 않고 멈춘다 (규칙 3).
-    contract_price = require_positive(state["contract_price"], "contract_price")
+    contract_price = state["contract_price"]  # 미수령이면 None — 마진 두 값이 함께 null이 된다
 
     scenarios = []
     dropped = []
@@ -245,6 +265,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         sourcing = materialize_sourcing(total, state["sourcing_plan"])
         rationale_input = {**draft, "daily_demand_kg": base["daily_demand_kg"]}
         unit_price = _weighted_unit_price(sourcing, total)
+        margin_warning, expected_margin_rate = compute_margin(unit_price, contract_price)
         scenarios.append(
             {
                 "label": draft["label"],
@@ -256,10 +277,10 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ),
                 "max_price": compute_max_price(state["forecast"], draft["coverage_days"]),
                 # 규칙 5 — 계약단가 초과는 컷이 아니라 표시다.
-                "margin_warning": unit_price > contract_price,
+                "margin_warning": margin_warning,
                 "split_plan": materialize_split(state["date"], total, state["split_plan"]),
                 "sourcing_plan": sourcing,
-                "expected_margin_rate": max(0.0, (contract_price - unit_price) / contract_price),
+                "expected_margin_rate": expected_margin_rate,
                 "rationale": _rationale(state, rationale_input, constraints),
                 "risks": _risks(draft, base["deferred_checks"], lots, state["date"]),
             }

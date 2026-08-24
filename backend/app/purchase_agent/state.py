@@ -30,7 +30,9 @@ class PurchaseAgentState(TypedDict):
     inventory: dict
     confirmed_orders: dict
     item_mix_ratio: dict  # ★ 품목 비중 (mix 축 게이팅용)
-    contract_price: float  # ★ 계약단가 (참조값 — 마진 표시용, 컷 아님)
+    # ★ 계약단가 (참조값 — 마진 표시용, 컷 아님). **미수령이면 None**이고, 그때
+    # margin_warning·expected_margin_rate가 함께 null로 나간다 (IO명세 §2 동기화 규칙).
+    contract_price: float | None
     margin_defense_floor_rate: float  # ★ 구간별 방어선 (참조값)
     projected_cash_min: int  # ★ 향후 N일 최저 현금
     feedback: dict | None  # 오케스트레이터 재조정 요청 (§6, 전부 기각 시만)

@@ -15,6 +15,7 @@ from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import NODES, build_graph, route_after_classify, run_purchase_agent
 from app.purchase_agent.nodes._guards import require_positive
+from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation, compute_ci_width
 from app.purchase_agent.nodes.draft_plan import (
     draft_plan,
@@ -23,6 +24,7 @@ from app.purchase_agent.nodes.draft_plan import (
 )
 from app.purchase_agent.nodes.package_scenarios import (
     assign_axes,
+    compute_margin,
     materialize_sourcing,
     package_scenarios,
 )
@@ -37,6 +39,7 @@ from app.purchase_agent.nodes.self_check import (
     check_warehouse_capacity,
     self_check,
 )
+from app.purchase_agent.nodes.split_plan import split_plan
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
 from app.purchase_agent.state import build_initial_state
 
@@ -499,14 +502,70 @@ def test_sourcing_ratios_must_be_positive_and_sum_to_one() -> None:
         materialize_sourcing(100, [{**good[0], "ratio": 0.0}, {**good[0], "ratio": 1.0}])
 
 
-def test_missing_contract_price_stops_instead_of_inventing_a_margin() -> None:
-    """계약단가는 마진의 분모다. 없으면 0으로 채우지 않고 멈춘다 (규칙 3)."""
-    state = build_initial_state(ITEM, RISING)
+def _staged_state(as_of: date = RISING, **overrides: object) -> dict:
+    """③까지 돌린 상태에 ④⑤ 스텁 결과를 얹은 것 — ⑥⑦만 따로 시험할 때 쓴다."""
+    state = build_initial_state(ITEM, as_of)
     state.update(classify_situation(state))
     state.update(draft_plan(state))
-    state.update({"split_plan": None, "sourcing_plan": [_line()], "contract_price": 0})
+    state.update(split_plan(state))  # ④ 스텁 — 일괄
+    state.update(allocate_sourcing(state))  # ⑤ 스텁 — 전량 상품 **비율**
+    state.update(overrides)
+    return state
+
+
+def test_missing_contract_price_nulls_both_margin_fields() -> None:
+    """계약단가 미수령이면 마진 두 값이 **함께 null**이다 (IO명세 §2 동기화 규칙).
+
+    0.0·False로 채우지 않는다 — "마진 0%"와 "확인했더니 정상"은 둘 다 거짓이 된다 (규칙 3).
+    """
+    result = package_scenarios(_staged_state(contract_price=None))
+    assert result["scenarios_final"]
+    for scenario in result["scenarios_final"]:
+        assert scenario["margin_warning"] is None
+        assert scenario["expected_margin_rate"] is None
+
+
+def test_zero_contract_price_still_stops() -> None:
+    """``None``(미수령)과 ``0``(0원 계약가)은 다르다 — 후자는 잘못된 값이라 멈춘다.
+
+    0을 미수령처럼 넘겨버리면 0과 NULL의 구분이 무너진다 (규칙 3).
+    """
     with pytest.raises(ValueError, match="contract_price"):
-        package_scenarios(state)
+        package_scenarios(_staged_state(contract_price=0))
+
+
+def test_null_margin_pair_reaches_the_serialized_proposal() -> None:
+    """⑦ 조립과 ``revalidate_for_output``을 지나서도 두 null이 살아남는가."""
+    state = _staged_state(contract_price=None)
+    state.update(package_scenarios(state))
+    proposal = self_check(state)["proposal"]
+
+    assert proposal["scenarios"]
+    for scenario in proposal["scenarios"]:
+        assert "margin_warning" in scenario
+        assert scenario["margin_warning"] is None
+        assert "expected_margin_rate" in scenario
+        assert scenario["expected_margin_rate"] is None
+    PurchaseProposal.model_validate(proposal)
+
+
+def test_margin_pair_is_computed_when_contract_price_is_present(proposals: dict) -> None:
+    """정상 경로에서는 둘 다 값이 있다 — 한쪽만 채워지는 경로가 없다."""
+    for scenario in proposals[RISING]["scenarios"]:
+        assert isinstance(scenario["margin_warning"], bool)
+        assert isinstance(scenario["expected_margin_rate"], float)
+
+
+def test_compute_margin_flags_excess_without_cutting() -> None:
+    """계약단가 초과는 경고일 뿐 컷이 아니다 (규칙 5).
+
+    역마진이면 실제 마진율은 음수지만 스키마가 ``ge=0``이라 0.0으로 깎인다 —
+    그 사실은 ``margin_warning=True``가 전달한다.
+    """
+    assert compute_margin(1650, 2293) == (False, pytest.approx((2293 - 1650) / 2293))
+    warning, rate = compute_margin(2400, 2293)
+    assert warning is True
+    assert rate == 0.0
 
 
 # ── 규칙 3: NULL과 확정 0을 섞지 않는다 ─────────────────────────────────────
@@ -534,8 +593,8 @@ def test_all_plans_clipped_to_zero_yield_no_proposal_with_reasons() -> None:
     state.update(classify_situation(state))
     state["confirmed_orders"] = {**state["confirmed_orders"], "total_kg": 0}
     state.update(draft_plan(state))
-    state.update({"split_plan": None})
-    state.update({"sourcing_plan": [_line()]})
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
     state.update(package_scenarios(state))
 
     assert state["scenarios_final"] == []

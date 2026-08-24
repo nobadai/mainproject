@@ -337,11 +337,55 @@ def test_revalidation_passes_for_untouched_proposal() -> None:
     assert revalidate_for_output(proposal).scenarios[0].total_qty_kg == 4500
 
 
-def test_margin_warning_defaults_to_none() -> None:
-    """규칙 3의 bool 판 — 미계산(None)과 "확인했더니 문제없음"(False)을 구분한다."""
+def _without_margin(data: dict) -> dict:
+    """계약단가를 못 받은 상태 — 마진 두 값이 **함께** 빠진다."""
+    scenario = data["scenarios"][0]
+    del scenario["margin_warning"]
+    del scenario["expected_margin_rate"]
+    return data
+
+
+def test_margin_fields_default_to_none_together() -> None:
+    """규칙 3 — 미계산(None)과 "확인했더니 문제없음"(False / 0.0)을 구분한다.
+
+    ``margin_warning``은 bool 판, ``expected_margin_rate``는 float 판이다. 둘 다
+    contract_price 파생이라 기본값도 함께 None이어야 한다 (IO명세 §2 v1.1 개정).
+    """
+    scenario = PurchaseProposal.model_validate(_without_margin(_proposal())).scenarios[0]
+    assert scenario.margin_warning is None
+    assert scenario.expected_margin_rate is None
+
+
+def test_both_margin_fields_set_is_accepted() -> None:
+    """계약단가를 받았으면 둘 다 값이 있다 — 정상 경로."""
+    scenario = PurchaseProposal.model_validate(_proposal()).scenarios[0]
+    assert scenario.margin_warning is False
+    assert scenario.expected_margin_rate == 0.30
+
+
+@pytest.mark.parametrize(
+    ("dropped", "kept"),
+    [("margin_warning", "expected_margin_rate"), ("expected_margin_rate", "margin_warning")],
+)
+def test_half_null_margin_pair_is_rejected(dropped: str, kept: str) -> None:
+    """한쪽만 null이면 모순이다 — 소비자가 어느 쪽을 믿어야 할지 알 수 없다.
+
+    둘 다 contract_price에서 나오므로 "계약단가를 받았는데 한쪽만 계산했다"는 상태는 없다
+    (IO명세 §2 "동기화 규칙: 한쪽만 null이면 스키마 validator가 반려").
+    """
     data = _proposal()
-    del data["scenarios"][0]["margin_warning"]
-    assert PurchaseProposal.model_validate(data).scenarios[0].margin_warning is None
+    del data["scenarios"][0][dropped]
+    with pytest.raises(ValidationError, match="both be null or both set"):
+        PurchaseProposal.model_validate(data)
+    assert kept in data["scenarios"][0]
+
+
+def test_half_null_margin_pair_is_rejected_when_written_as_explicit_null() -> None:
+    """키를 지우는 것과 ``null``을 명시하는 것이 같은 판정을 받아야 한다."""
+    data = _proposal()
+    data["scenarios"][0]["expected_margin_rate"] = None
+    with pytest.raises(ValidationError, match="both be null or both set"):
+        PurchaseProposal.model_validate(data)
 
 
 def test_normal_proposal_omits_no_proposal_reason_key() -> None:
@@ -350,12 +394,28 @@ def test_normal_proposal_omits_no_proposal_reason_key() -> None:
     assert "no_proposal_reason" not in payload
 
 
-def test_margin_warning_null_survives_serialization() -> None:
-    """margin_warning의 null은 "미계산"이라는 정보다 — 직렬화에서 사라지면 안 된다."""
-    data = _proposal()
-    del data["scenarios"][0]["margin_warning"]
-    payload = json.loads(PurchaseProposal.model_validate(data).model_dump_json())
-    assert payload["scenarios"][0]["margin_warning"] is None
+def test_null_margin_pair_survives_serialization() -> None:
+    """두 null은 "미계산"이라는 **정보**다 — 직렬화에서 사라지면 안 된다.
+
+    키가 빠지면 소비자 쪽에서 "미계산"과 "필드 자체가 없는 구버전"이 구분되지 않는다.
+    (``no_proposal_reason``은 반대로 null일 때 키를 지운다 — 그쪽은 없는 게 정상 상태다.)
+    """
+    payload = json.loads(
+        PurchaseProposal.model_validate(_without_margin(_proposal())).model_dump_json()
+    )
+    scenario = payload["scenarios"][0]
+    assert "margin_warning" in scenario
+    assert scenario["margin_warning"] is None
+    assert "expected_margin_rate" in scenario
+    assert scenario["expected_margin_rate"] is None
+
+
+def test_computed_margin_pair_survives_serialization() -> None:
+    """값이 있을 때도 두 필드가 그대로 나간다 — 반쪽 직렬화가 없다."""
+    payload = json.loads(PurchaseProposal.model_validate(_proposal()).model_dump_json())
+    scenario = payload["scenarios"][0]
+    assert scenario["margin_warning"] is False
+    assert scenario["expected_margin_rate"] == 0.30
 
 
 def test_no_proposal_reason_cannot_coexist_with_scenarios() -> None:
