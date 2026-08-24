@@ -13,6 +13,8 @@ from app.finance.repository import (
 from app.finance.rules import (
     FinanceRuleResult,
     evaluate_finance_rules,
+    evaluate_finance_runtime_rules,
+    evaluate_finance_sales_rules,
     has_required_finance_state,
 )
 from app.finance.run_repository import (
@@ -95,7 +97,11 @@ def run_finance_procurement_with_snapshot(
 ) -> FinanceProcurementResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance A를 실행한다."""
     scenario_result = run_finance_procurement_scenario(request, snapshot)
-    rule_result = scenario_result["rule_result"]
+    rule_result = evaluate_finance_runtime_rules(
+        as_of=request.meta.as_of,
+        finance_state=scenario_result["finance_state"],
+        has_cost_mismatch=scenario_result["has_cost_mismatch"],
+    )
     max_feasible_amount = rule_result["max_feasible_amount_krw"]
     suggested_adjustment = (
         ProcurementSuggestedAdjustment(max_amount_krw=max_feasible_amount)
@@ -138,7 +144,11 @@ def run_finance_sales_with_snapshot(
 ) -> FinanceSalesResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance B를 실행한다."""
     scenario_result = run_finance_sales_scenario(request, snapshot)
-    rule_result = scenario_result["rule_result"]
+    rule_result = evaluate_finance_sales_rules(
+        as_of=request.as_of,
+        finance_state=scenario_result["finance_state"],
+        post_approved_purchase_cash=scenario_result["post_approved_purchase_cash_krw"],
+    )
     response = FinanceSalesResponse(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,

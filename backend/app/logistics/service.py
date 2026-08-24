@@ -4,6 +4,7 @@ from datetime import date
 from uuid import UUID
 
 from app.logistics.repository import get_current_inventory_logistics_snapshot
+from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
 from app.logistics.run_repository import (
     get_logistics_agent_run,
     list_logistics_agent_runs,
@@ -56,13 +57,15 @@ def run_logistics_procurement_with_snapshot(
 ) -> LogisticsProcurementResponse:
     """외부에서 고정한 Inventory/Logistics Snapshot으로 A Cycle을 실행한다."""
     scenario_result = run_logistics_procurement_scenario(request, snapshot)
-    rule_result = scenario_result["rule_result"]
+    rule_result = evaluate_procurement_rules(as_of=request.meta.as_of, snapshot=snapshot)
 
     response = LogisticsProcurementResponse(
         as_of=request.meta.as_of,
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
-        band=LogisticsBand(cap_by_date=scenario_result["cap_by_date"]),
+        band=LogisticsBand(
+            cap_by_date=(scenario_result["cap_by_date"] if rule_result["calculation_ready"] else {})
+        ),
         inbound_constraints=InboundConstraints(
             inbound_lead_days=snapshot.inbound_lead_days if snapshot is not None else None,
             daily_inbound_capacity_kg=(
@@ -100,7 +103,11 @@ def run_logistics_sales_with_snapshot(
 ) -> LogisticsSalesResponse:
     """외부에서 고정한 Inventory/Logistics Snapshot으로 B Cycle을 실행한다."""
     scenario_result = run_logistics_sales_scenario(request, snapshot)
-    rule_result = scenario_result["rule_result"]
+    rule_result = evaluate_sales_rules(
+        as_of=request.as_of,
+        snapshot=snapshot,
+        future_occupancy_by_date=scenario_result["future_occupancy_by_date"],
+    )
     response = LogisticsSalesResponse(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,

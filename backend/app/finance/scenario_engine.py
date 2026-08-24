@@ -3,13 +3,6 @@
 from decimal import Decimal
 from typing import TypedDict
 
-from app.finance.rules import (
-    FinanceRuntimeRuleResult,
-    FinanceSalesRuleResult,
-    evaluate_finance_runtime_rules,
-    evaluate_finance_sales_rules,
-    has_required_finance_state,
-)
 from app.finance.schemas import (
     CollectionPreference,
     FinanceSalesRequest,
@@ -27,16 +20,17 @@ from app.finance.tools import (
 
 
 class FinanceProcurementScenarioResult(TypedDict):
+    finance_state: dict[str, object] | None
     financial_limit_matches: bool | None
     amount_comparisons: list[ReportedAmountComparison]
-    rule_result: FinanceRuntimeRuleResult
+    has_cost_mismatch: bool
 
 
 class FinanceSalesScenarioResult(TypedDict):
+    finance_state: dict[str, object] | None
     financial_limit_matches: bool | None
     post_approved_purchase_cash_krw: Decimal | None
     collection_preferences: list[CollectionPreference]
-    rule_result: FinanceSalesRuleResult
 
 
 def run_finance_procurement_scenario(
@@ -53,15 +47,11 @@ def run_finance_procurement_scenario(
         )
         for scenario in request.scenarios
     ]
-    rule_result = evaluate_finance_runtime_rules(
-        as_of=request.meta.as_of,
-        finance_state=finance_state,
-        has_cost_mismatch=any(not comparison["is_match"] for comparison in comparisons),
-    )
     return {
+        "finance_state": finance_state,
         "financial_limit_matches": financial_limit_matches,
         "amount_comparisons": comparisons,
-        "rule_result": rule_result,
+        "has_cost_mismatch": any(not comparison["is_match"] for comparison in comparisons),
     }
 
 
@@ -73,7 +63,7 @@ def run_finance_sales_scenario(
     finance_state = _snapshot_values(snapshot)
     financial_limit_matches = _cross_check_financial_limit(finance_state)
     post_approved_purchase_cash = None
-    if has_required_finance_state(finance_state):
+    if finance_state is not None:
         assert finance_state is not None
         post_approved_purchase_cash = calculate_post_purchase_cash(
             finance_state["current_cash_krw"],
@@ -81,16 +71,11 @@ def run_finance_sales_scenario(
             finance_state["committed_outflows_krw"],
             finance_state["unsettled_purchase_payables_krw"],
         )
-    rule_result = evaluate_finance_sales_rules(
-        as_of=request.as_of,
-        finance_state=finance_state,
-        post_approved_purchase_cash=post_approved_purchase_cash,
-    )
     return {
+        "finance_state": finance_state,
         "financial_limit_matches": financial_limit_matches,
         "post_approved_purchase_cash_krw": post_approved_purchase_cash,
         "collection_preferences": rank_collection_preferences(request.channel_terms),
-        "rule_result": rule_result,
     }
 
 
@@ -101,9 +86,8 @@ def _snapshot_values(snapshot: FinanceSnapshot | None) -> dict[str, object] | No
 
 
 def _cross_check_financial_limit(finance_state: dict[str, object] | None) -> bool | None:
-    if not has_required_finance_state(finance_state):
+    if finance_state is None:
         return None
-    assert finance_state is not None
     recalculated_financial_limit = calculate_financial_limit(
         finance_state["current_cash_krw"],
         finance_state["minimum_operating_cash_krw"],

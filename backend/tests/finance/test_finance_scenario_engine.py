@@ -24,7 +24,7 @@ def test_finance_procurement_scenario_is_deterministic(
     assert first == second
     assert first["financial_limit_matches"] is True
     assert first["amount_comparisons"][0]["recalculated_amount_krw"] == Decimal(7125000)
-    assert first["rule_result"]["runtime_status"] == "READY"
+    assert first["has_cost_mismatch"] is True
 
 
 def test_finance_external_snapshot_bypasses_repository_and_round_trips_t0_id(

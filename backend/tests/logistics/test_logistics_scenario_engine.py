@@ -29,7 +29,6 @@ def test_logistics_procurement_scenario_is_deterministic(
     assert first == second
     assert first["expected_arrival_dates"] == [date(2026, 8, 23)]
     assert first["cap_by_date"] == {date(2026, 8, 23): Decimal(2500)}
-    assert first["rule_result"]["runtime_status"] == "READY"
 
 
 def test_logistics_external_snapshot_bypasses_repository_and_round_trips_id(
@@ -94,11 +93,9 @@ def test_logistics_engine_preserves_inbound_completeness_fail_closed(
     request = LogisticsSalesRequest.model_validate(logistics_sales_payload)
 
     result = run_logistics_sales_scenario(request, snapshot)
+    response = run_logistics_sales_with_snapshot(request, snapshot)
 
     assert result["inbound_schedule"] is None
     assert result["future_occupancy_by_date"] is None
-    assert result["rule_result"]["runtime_status"] == "RUNTIME_NOT_READY"
-    assert any(
-        item.code == "IN_TRANSIT_SCHEDULE_UNRESOLVED"
-        for item in result["rule_result"]["hard_constraints"]
-    )
+    assert response.runtime_status == "RUNTIME_NOT_READY"
+    assert any(item.code == "IN_TRANSIT_SCHEDULE_UNRESOLVED" for item in response.hard_constraints)

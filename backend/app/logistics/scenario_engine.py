@@ -4,11 +4,6 @@ from datetime import date
 from decimal import Decimal
 from typing import TypedDict
 
-from app.logistics.rules import (
-    LogisticsRuleResult,
-    evaluate_procurement_rules,
-    evaluate_sales_rules,
-)
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     LogisticsSalesRequest,
@@ -28,7 +23,6 @@ from app.logistics.tools import (
 class LogisticsProcurementScenarioResult(TypedDict):
     expected_arrival_dates: list[date]
     cap_by_date: dict[date, Decimal]
-    rule_result: LogisticsRuleResult
 
 
 class LogisticsSalesScenarioResult(TypedDict):
@@ -36,29 +30,31 @@ class LogisticsSalesScenarioResult(TypedDict):
     future_occupancy_by_date: dict[date, Decimal] | None
     daily_outbound_capacity_kg: Decimal | None
     lot_constraints: list[LotConstraint]
-    rule_result: LogisticsRuleResult
 
 
 def run_logistics_procurement_scenario(
     request: PurchaseAgentOutput,
     snapshot: InventoryLogisticsSnapshot | None,
 ) -> LogisticsProcurementScenarioResult:
-    """Logistics A 계산을 기존 Tool로 수행하고 Runtime Rule을 호출한다."""
-    rule_result = evaluate_procurement_rules(as_of=request.meta.as_of, snapshot=snapshot)
+    """Logistics A의 도착일과 입고 Capacity를 기존 Tool로 계산한다."""
     expected_arrival_dates: list[date] = []
     cap_by_date: dict[date, Decimal] = {}
-    if rule_result["calculation_ready"]:
-        assert snapshot is not None
-        assert snapshot.inbound_lead_days is not None
+    if snapshot is not None and snapshot.inbound_lead_days is not None:
         expected_arrival_dates = calculate_expected_arrival_dates(
             request,
             snapshot.inbound_lead_days,
         )
-        cap_by_date = calculate_cap_by_date(snapshot, expected_arrival_dates)
+        try:
+            cap_by_date = calculate_cap_by_date(snapshot, expected_arrival_dates)
+        except ValueError as error:
+            if str(error) not in {
+                "IN_TRANSIT_SCHEDULE_UNRESOLVED",
+                "LOGISTICS_CAPACITY_INPUT_MISSING",
+            }:
+                raise
     return {
         "expected_arrival_dates": expected_arrival_dates,
         "cap_by_date": cap_by_date,
-        "rule_result": rule_result,
     }
 
 
@@ -66,7 +62,7 @@ def run_logistics_sales_scenario(
     request: LogisticsSalesRequest,
     snapshot: InventoryLogisticsSnapshot | None,
 ) -> LogisticsSalesScenarioResult:
-    """H1 미래 입고와 lot/outbound 계산 후 Logistics B Rule을 호출한다."""
+    """H1 미래 입고와 lot/outbound 중간 결과를 계산한다."""
     inbound_schedule = None
     future_occupancy = None
     daily_outbound_capacity = None
@@ -77,15 +73,9 @@ def run_logistics_sales_scenario(
         inbound_schedule = overlay_approved_purchase(snapshot, request.approved_purchase)
         if inbound_schedule is not None:
             future_occupancy = calculate_future_occupancy_by_date(snapshot, inbound_schedule)
-    rule_result = evaluate_sales_rules(
-        as_of=request.as_of,
-        snapshot=snapshot,
-        future_occupancy_by_date=future_occupancy,
-    )
     return {
         "inbound_schedule": inbound_schedule,
         "future_occupancy_by_date": future_occupancy,
         "daily_outbound_capacity_kg": daily_outbound_capacity,
         "lot_constraints": lot_constraints,
-        "rule_result": rule_result,
     }
