@@ -3,9 +3,12 @@
 각 테스트는 "설계 문서의 어느 조항이 코드로 지켜지는가"에 1:1로 대응한다.
 정상 픽스처 하나를 만들고 조항별로 한 필드씩 깨뜨려 거부되는지 확인한다.
 
-⚠️ 픽스처 숫자는 문서 예시에서 복사하지 않았다. IO명세 §2와 상세설계 §5의 예시 JSON은
-``total_amount_krw = 10,318,995`` 로 적혀 있으나 같은 예시의 sourcing으로 계산하면
-7,125,000이라 **사중 일치를 위반**한다. 여기서는 등식이 실제로 성립하는 값을 쓴다.
+픽스처 숫자는 IO명세 §2 / 상세설계 §5의 예시 JSON과 일치시켰다 — 예시 JSON은 mock 스펙이자
+실제 산출물 계약이므로(IO명세 §3 "삼위일체") 같은 값을 쓰면 다음 단계의 mock을 여기서 그대로
+가져갈 수 있다.
+
+(이력: 두 문서의 예시가 한때 ``total_amount_krw = 10,318,995`` 로 적혀 있었으나 같은 예시의
+sourcing 합계는 7,125,000이라 사중 일치를 위반했다. 문서가 수정되어 지금은 등식이 성립한다.)
 """
 
 import inspect
@@ -58,7 +61,7 @@ def _proposal() -> dict:
                 "coverage_days": 5,
                 "total_quantity_ton": "4.5",
                 "total_amount_krw": "7125000",
-                "max_price": 1700,
+                "max_price": 1750,
                 "margin_warning": False,
                 "split_plan": [{"seq": 1, "date": AS_OF, "quantity_ton": "4.5"}],
                 "sourcing_plan": [
@@ -124,7 +127,7 @@ def test_quantity_must_match_sourcing_plan() -> None:
 def test_amount_must_match_sourcing_plan() -> None:
     """사중 일치 금액 축 — total_amount != Σ(qty x 1000 x 등급단가) (규칙 4)."""
     data = _proposal()
-    data["scenarios"][0]["total_amount_krw"] = "10318995"  # 문서 예시의 그 숫자
+    data["scenarios"][0]["total_amount_krw"] = "10318995"  # sourcing 합계 7,125,000과 다른 값
     with pytest.raises(ValidationError, match="sourcing_plan amount total"):
         PurchaseProposal.model_validate(data)
 
