@@ -1,16 +1,27 @@
 """재고·물류 Agent A/B 결정론적 실행 흐름."""
 
+from datetime import date
+from uuid import UUID
+
 from app.logistics.repository import get_current_inventory_logistics_snapshot
 from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
+from app.logistics.run_repository import (
+    get_logistics_agent_run,
+    list_logistics_agent_runs,
+    save_logistics_agent_run,
+)
 from app.logistics.schemas import (
     InboundConstraints,
     InventoryLogisticsSnapshot,
+    LogisticsAgentRunResponse,
     LogisticsBand,
+    LogisticsCycle,
     LogisticsEvidence,
     LogisticsProcurementResponse,
     LogisticsSalesRequest,
     LogisticsSalesResponse,
     PurchaseAgentOutput,
+    RuntimeStatus,
 )
 from app.logistics.tools import (
     build_lot_constraints,
@@ -39,7 +50,7 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
         arrival_dates = calculate_expected_arrival_dates(request, snapshot.inbound_lead_days)
         cap_by_date = calculate_cap_by_date(snapshot, arrival_dates)
 
-    return LogisticsProcurementResponse(
+    response = LogisticsProcurementResponse(
         as_of=request.meta.as_of,
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
@@ -57,6 +68,15 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
         soft_warnings=rule_result["soft_warnings"],
         evidences=_evidences(snapshot),
     )
+    save_logistics_agent_run(
+        cycle="PROCUREMENT",
+        as_of=request.meta.as_of,
+        snapshot_id=response.snapshot_id,
+        runtime_status=response.runtime_status,
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return response
 
 
 def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
@@ -74,7 +94,7 @@ def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesRespons
         snapshot=snapshot,
         future_occupancy_by_date=future_occupancy,
     )
-    return LogisticsSalesResponse(
+    response = LogisticsSalesResponse(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
@@ -85,6 +105,37 @@ def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesRespons
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
     )
+    save_logistics_agent_run(
+        cycle="SALES",
+        as_of=request.as_of,
+        snapshot_id=response.snapshot_id,
+        runtime_status=response.runtime_status,
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return response
+
+
+def get_logistics_run(run_id: UUID) -> LogisticsAgentRunResponse:
+    """UI 조회용 Logistics Agent 실행이력 한 건을 반환한다."""
+    return LogisticsAgentRunResponse.model_validate(get_logistics_agent_run(run_id))
+
+
+def list_logistics_runs(
+    *,
+    cycle: LogisticsCycle | None = None,
+    as_of: date | None = None,
+    runtime_status: RuntimeStatus | None = None,
+    limit: int = 100,
+) -> list[LogisticsAgentRunResponse]:
+    """UI 조회용 Logistics Agent 실행이력 목록을 반환한다."""
+    rows = list_logistics_agent_runs(
+        cycle=cycle,
+        as_of=as_of,
+        runtime_status=runtime_status,
+        limit=limit,
+    )
+    return [LogisticsAgentRunResponse.model_validate(row) for row in rows]
 
 
 def _evidences(snapshot: InventoryLogisticsSnapshot | None) -> list[LogisticsEvidence]:
