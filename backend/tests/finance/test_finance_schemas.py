@@ -50,3 +50,10 @@ def test_sales_contract_rejects_boolean_settlement_days(sales_payload):
 
     with pytest.raises(ValidationError):
         FinanceSalesRequest.model_validate(sales_payload)
+
+
+def test_finance_sales_contract_does_not_accept_sales_candidates(sales_payload):
+    sales_payload["candidates"] = [{"channel": "KIMCHI_FACTORY"}]
+
+    with pytest.raises(ValidationError):
+        FinanceSalesRequest.model_validate(sales_payload)

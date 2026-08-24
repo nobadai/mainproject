@@ -28,7 +28,11 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_state, pu
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
+    assert saved["snapshot_id"] == "FIN-DAY30-LOAN"
+    assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
     assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "10318995"
+    stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
+    assert stored_limit == "16091273.770000"
 
 
 def test_procurement_service_stops_on_financial_limit_mismatch(finance_state, purchase_payload):
@@ -81,6 +85,7 @@ def test_sales_service_applies_approved_purchase_overlay(finance_state, sales_pa
     assert saved["cycle"] == "SALES"
     assert saved["runtime_status"] == "RUNTIME_NOT_READY"
     assert saved["request_payload"]["approved_purchase"]["total_amount_krw"] == "18000000"
+    assert saved["response_payload"]["soft_warnings"] == ["CASH_PRIORITY_POLICY_UNRESOLVED"]
 
 
 def test_repository_preserves_decimal_row(finance_state):
