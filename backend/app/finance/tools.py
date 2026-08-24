@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import TypedDict
 
-from app.finance.schemas import SourcingPlanItem
+from app.finance.schemas import PurchaseSourcingPlanItem, SourcingPlanItem
 
 KG_PER_TON = Decimal(1000)
 
@@ -15,10 +15,27 @@ class ExpectedCostComparison(TypedDict):
     difference: Decimal
 
 
+class ReportedAmountComparison(TypedDict):
+    is_match: bool
+    reported_amount_krw: Decimal
+    recalculated_amount_krw: Decimal
+    difference: Decimal
+
+
 def calculate_proposal_amount(sourcing_plan: list[SourcingPlanItem]) -> Decimal:
     """톤 단위 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
     return sum(
         (item.quantity_ton * KG_PER_TON * Decimal(item.unit_price) for item in sourcing_plan),
+        start=Decimal(0),
+    )
+
+
+def calculate_purchase_scenario_amount(
+    sourcing_plan: list[PurchaseSourcingPlanItem],
+) -> Decimal:
+    """Purchase Agent v0.4 소싱 계획의 총 매입금액을 재계산한다."""
+    return sum(
+        (item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
@@ -34,6 +51,20 @@ def compare_expected_cost(
         "is_match": difference == Decimal(0),
         "expected_cost": expected_cost_decimal,
         "recalculated_cost": recalculated_cost,
+        "difference": difference,
+    }
+
+
+def compare_reported_amount(
+    reported_amount_krw: Decimal,
+    recalculated_amount_krw: Decimal,
+) -> ReportedAmountComparison:
+    """Purchase Agent v0.4 보고 금액과 Finance 재계산 금액을 비교한다."""
+    difference = recalculated_amount_krw - reported_amount_krw
+    return {
+        "is_match": difference == Decimal(0),
+        "reported_amount_krw": reported_amount_krw,
+        "recalculated_amount_krw": recalculated_amount_krw,
         "difference": difference,
     }
 
