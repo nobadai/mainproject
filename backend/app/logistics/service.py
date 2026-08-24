@@ -10,6 +10,10 @@ from app.logistics.run_repository import (
     list_logistics_agent_runs,
     save_logistics_agent_run,
 )
+from app.logistics.scenario_engine import (
+    run_logistics_procurement_scenario,
+    run_logistics_sales_scenario,
+)
 from app.logistics.schemas import (
     InboundConstraints,
     InventoryLogisticsSnapshot,
@@ -23,13 +27,6 @@ from app.logistics.schemas import (
     PurchaseAgentOutput,
     RuntimeStatus,
 )
-from app.logistics.tools import (
-    build_lot_constraints,
-    calculate_cap_by_date,
-    calculate_expected_arrival_dates,
-    calculate_future_occupancy_by_date,
-    overlay_approved_purchase,
-)
 
 
 def _get_snapshot_or_none() -> InventoryLogisticsSnapshot | None:
@@ -42,19 +39,33 @@ def _get_snapshot_or_none() -> InventoryLogisticsSnapshot | None:
 def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurementResponse:
     """현재 Snapshot과 Purchase 날짜 축으로 Logistics A Band를 만든다."""
     snapshot = _get_snapshot_or_none()
+    response = run_logistics_procurement_with_snapshot(request, snapshot)
+    save_logistics_agent_run(
+        cycle="PROCUREMENT",
+        as_of=request.meta.as_of,
+        snapshot_id=response.snapshot_id,
+        runtime_status=response.runtime_status,
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return response
+
+
+def run_logistics_procurement_with_snapshot(
+    request: PurchaseAgentOutput,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsProcurementResponse:
+    """외부에서 고정한 Inventory/Logistics Snapshot으로 A Cycle을 실행한다."""
+    scenario_result = run_logistics_procurement_scenario(request, snapshot)
     rule_result = evaluate_procurement_rules(as_of=request.meta.as_of, snapshot=snapshot)
-    cap_by_date = {}
-    if rule_result["calculation_ready"]:
-        assert snapshot is not None
-        assert snapshot.inbound_lead_days is not None
-        arrival_dates = calculate_expected_arrival_dates(request, snapshot.inbound_lead_days)
-        cap_by_date = calculate_cap_by_date(snapshot, arrival_dates)
 
     response = LogisticsProcurementResponse(
         as_of=request.meta.as_of,
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
-        band=LogisticsBand(cap_by_date=cap_by_date),
+        band=LogisticsBand(
+            cap_by_date=(scenario_result["cap_by_date"] if rule_result["calculation_ready"] else {})
+        ),
         inbound_constraints=InboundConstraints(
             inbound_lead_days=snapshot.inbound_lead_days if snapshot is not None else None,
             daily_inbound_capacity_kg=(
@@ -68,9 +79,16 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
         soft_warnings=rule_result["soft_warnings"],
         evidences=_evidences(snapshot),
     )
+    return response
+
+
+def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
+    """H1 승인 매입을 미래 입고로 Overlay해 Logistics B Reply를 만든다."""
+    snapshot = _get_snapshot_or_none()
+    response = run_logistics_sales_with_snapshot(request, snapshot)
     save_logistics_agent_run(
-        cycle="PROCUREMENT",
-        as_of=request.meta.as_of,
+        cycle="SALES",
+        as_of=request.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
         request_payload=request.model_dump(mode="json"),
@@ -79,39 +97,25 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
     return response
 
 
-def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
-    """H1 승인 매입을 미래 입고로 Overlay해 Logistics B Reply를 만든다."""
-    snapshot = _get_snapshot_or_none()
-    future_occupancy = None
-    lot_constraints = []
-    if snapshot is not None:
-        lot_constraints = build_lot_constraints(snapshot)
-        inbound_schedule = overlay_approved_purchase(snapshot, request.approved_purchase)
-        if inbound_schedule is not None:
-            future_occupancy = calculate_future_occupancy_by_date(snapshot, inbound_schedule)
+def run_logistics_sales_with_snapshot(
+    request: LogisticsSalesRequest,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsSalesResponse:
+    """외부에서 고정한 Inventory/Logistics Snapshot으로 B Cycle을 실행한다."""
+    scenario_result = run_logistics_sales_scenario(request, snapshot)
     rule_result = evaluate_sales_rules(
         as_of=request.as_of,
         snapshot=snapshot,
-        future_occupancy_by_date=future_occupancy,
+        future_occupancy_by_date=scenario_result["future_occupancy_by_date"],
     )
     response = LogisticsSalesResponse(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
-        daily_outbound_capacity_kg=(
-            snapshot.shared_daily_outbound_capacity_kg if snapshot is not None else None
-        ),
-        lot_constraints=lot_constraints,
+        daily_outbound_capacity_kg=scenario_result["daily_outbound_capacity_kg"],
+        lot_constraints=scenario_result["lot_constraints"],
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
-    )
-    save_logistics_agent_run(
-        cycle="SALES",
-        as_of=request.as_of,
-        snapshot_id=response.snapshot_id,
-        runtime_status=response.runtime_status,
-        request_payload=request.model_dump(mode="json"),
-        response_payload=response.model_dump(mode="json"),
     )
     return response
 

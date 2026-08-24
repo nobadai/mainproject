@@ -5,16 +5,16 @@ from unittest.mock import patch
 import pytest
 from psycopg import OperationalError
 
-from app.finance.repository import get_current_finance_state
+from app.finance.repository import get_current_finance_snapshot, get_current_finance_state
 from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
 from app.finance.service import run_finance_procurement, run_finance_sales
 
 
-def test_procurement_service_returns_one_band_and_cost_warning(finance_state, purchase_payload):
+def test_procurement_service_returns_one_band_and_cost_warning(finance_snapshot, purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
@@ -28,19 +28,19 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_state, pu
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
-    assert saved["snapshot_id"] == "FIN-DAY30-LOAN"
+    assert saved["snapshot_id"] is None
     assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
     assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "10318995"
     stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
     assert stored_limit == "16091273.770000"
 
 
-def test_procurement_service_stops_on_financial_limit_mismatch(finance_state, purchase_payload):
-    finance_state["financial_limit_krw"] = Decimal(1)
+def test_procurement_service_stops_on_financial_limit_mismatch(finance_snapshot, purchase_payload):
+    finance_snapshot = finance_snapshot.model_copy(update={"financial_limit_krw": Decimal(1)})
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         pytest.raises(ValueError, match="FINANCIAL_LIMIT_MISMATCH"),
     ):
         run_finance_procurement(request)
@@ -49,7 +49,7 @@ def test_procurement_service_stops_on_financial_limit_mismatch(finance_state, pu
 def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
     with (
-        patch("app.finance.service.get_current_finance_state", side_effect=LookupError),
+        patch("app.finance.service.get_current_finance_snapshot", side_effect=LookupError),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
@@ -59,7 +59,7 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
 
     with (
         patch(
-            "app.finance.service.get_current_finance_state",
+            "app.finance.service.get_current_finance_snapshot",
             side_effect=OperationalError("database unavailable"),
         ),
         pytest.raises(OperationalError),
@@ -67,12 +67,12 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
         run_finance_procurement(request)
 
 
-def test_sales_service_applies_approved_purchase_overlay(finance_state, sales_payload):
+def test_sales_service_applies_approved_purchase_overlay(finance_snapshot, sales_payload):
     sales_payload["approved_purchase"]["total_amount_krw"] = 18000000
     request = FinanceSalesRequest.model_validate(sales_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_state", return_value=finance_state),
+        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_sales(request)
@@ -95,3 +95,10 @@ def test_repository_preserves_decimal_row(finance_state):
     assert state["finance_state_id"] == "FIN-DAY30-LOAN"
     assert state["state_date"] == date(2025, 12, 31)
     assert isinstance(state["financial_limit_krw"], Decimal)
+
+    with patch("app.finance.repository.fetch_one", return_value=finance_state):
+        snapshot = get_current_finance_snapshot()
+
+    assert snapshot.snapshot_id is None
+    assert snapshot.finance_state_id == "FIN-DAY30-LOAN"
+    assert isinstance(snapshot.financial_limit_krw, Decimal)

@@ -7,6 +7,7 @@ from typing import TypedDict, cast
 from psycopg import sql
 
 from app.finance.db import fetch_one, get_db_schema
+from app.finance.schemas import FinanceSnapshot
 
 
 class FinanceState(TypedDict):
@@ -24,6 +25,15 @@ class FinanceState(TypedDict):
 
 def get_current_finance_state() -> FinanceState:
     """DB View가 지정한 현재 Finance State 한 건을 조회한다."""
+    return cast(FinanceState, _get_current_finance_state_row())
+
+
+def get_current_finance_snapshot() -> FinanceSnapshot:
+    """Current View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row())
+
+
+def _get_current_finance_state_row() -> dict[str, object]:
     query = sql.SQL(
         """
         SELECT
@@ -43,4 +53,4 @@ def get_current_finance_state() -> FinanceState:
     row = fetch_one(query)
     if row is None:
         raise LookupError("Current Finance State was not found")
-    return cast(FinanceState, row)
+    return row
