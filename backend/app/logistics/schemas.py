@@ -17,6 +17,7 @@ ConstraintCode = Literal[
     "LOG-H05",
     "N17",
     "N17-LOT",
+    "IN_TRANSIT_SCHEDULE_UNRESOLVED",
     "AS_OF_MISMATCH",
     "REQUIRED_LOGISTICS_SNAPSHOT_MISSING",
 ]
@@ -283,6 +284,12 @@ class LogisticsSalesRequest(BaseModel):
     cycle: Literal["SALES"]
     as_of: date
     approved_purchase: LogisticsApprovedPurchaseCommitment
+
+    @model_validator(mode="after")
+    def validate_arrival_dates(self) -> "LogisticsSalesRequest":
+        if any(item.date < self.as_of for item in self.approved_purchase.arrival_schedule):
+            raise ValueError("arrival_schedule dates must be on or after as_of")
+        return self
 
 
 class LotConstraint(BaseModel):

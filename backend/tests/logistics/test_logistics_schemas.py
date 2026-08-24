@@ -33,6 +33,26 @@ def test_logistics_sales_rejects_arrival_total_mismatch(logistics_sales_payload)
         LogisticsSalesRequest.model_validate(logistics_sales_payload)
 
 
+def test_logistics_sales_rejects_arrival_before_as_of(logistics_sales_payload):
+    logistics_sales_payload["approved_purchase"]["expected_arrival_date"] = "2026-08-20"
+    logistics_sales_payload["approved_purchase"]["arrival_schedule"][0]["date"] = "2026-08-20"
+
+    with pytest.raises(ValidationError, match="on or after as_of"):
+        LogisticsSalesRequest.model_validate(logistics_sales_payload)
+
+
+@pytest.mark.parametrize("arrival_date", ["2026-08-21", "2026-08-23"])
+def test_logistics_sales_accepts_arrival_on_or_after_as_of(
+    logistics_sales_payload, arrival_date
+):
+    logistics_sales_payload["approved_purchase"]["expected_arrival_date"] = arrival_date
+    logistics_sales_payload["approved_purchase"]["arrival_schedule"][0]["date"] = arrival_date
+
+    request = LogisticsSalesRequest.model_validate(logistics_sales_payload)
+
+    assert request.approved_purchase.expected_arrival_date.isoformat() == arrival_date
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [

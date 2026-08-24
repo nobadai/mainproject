@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import TypedDict
 
 from app.logistics.schemas import ConstraintResult, InventoryLogisticsSnapshot, RuntimeStatus
+from app.logistics.tools import is_inbound_schedule_complete
 
 
 class LogisticsRuleResult(TypedDict):
@@ -44,6 +45,14 @@ def evaluate_procurement_rules(
         ),
         _known_constraint("LOG-H05", snapshot.inbound_lead_days, "N4_UNRESOLVED"),
     ]
+    if not is_inbound_schedule_complete(snapshot):
+        constraints.append(
+            ConstraintResult(
+                code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
+                passed=None,
+                skip_reason=_inbound_schedule_skip_reason(snapshot),
+            )
+        )
     soft_warnings = _snapshot_warnings(snapshot)
     core_values = (
         snapshot.guaranteed_capacity_kg,
@@ -53,7 +62,9 @@ def evaluate_procurement_rules(
         snapshot.confirmed_inbound_schedule,
         snapshot.confirmed_outbound_schedule,
     )
-    calculation_ready = all(value is not None for value in core_values)
+    calculation_ready = all(value is not None for value in core_values) and (
+        is_inbound_schedule_complete(snapshot)
+    )
     return {
         "runtime_status": "READY" if calculation_ready else "RUNTIME_NOT_READY",
         "hard_constraints": constraints,
@@ -96,6 +107,13 @@ def evaluate_sales_rules(
         passed=True if lots_complete else None,
         skip_reason=None if lots_complete else "N17_LOT_FRESHNESS_UNRESOLVED",
     )
+    inbound_completeness_constraint = None
+    if not is_inbound_schedule_complete(snapshot):
+        inbound_completeness_constraint = ConstraintResult(
+            code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
+            passed=None,
+            skip_reason=_inbound_schedule_skip_reason(snapshot),
+        )
     soft_warnings = _snapshot_warnings(snapshot)
     if future_occupancy_by_date is None:
         soft_warnings.append("H1_FUTURE_OCCUPANCY_UNRESOLVED")
@@ -104,10 +122,14 @@ def evaluate_sales_rules(
         and snapshot.guaranteed_capacity_kg is not None
         and future_occupancy_by_date is not None
         and lots_complete
+        and is_inbound_schedule_complete(snapshot)
     )
+    constraints = [warehouse_constraint, outbound_constraint, lot_constraint]
+    if inbound_completeness_constraint is not None:
+        constraints.append(inbound_completeness_constraint)
     return {
         "runtime_status": "READY" if calculation_ready else "RUNTIME_NOT_READY",
-        "hard_constraints": [warehouse_constraint, outbound_constraint, lot_constraint],
+        "hard_constraints": constraints,
         "soft_warnings": soft_warnings,
         "calculation_ready": calculation_ready,
     }
@@ -150,6 +172,14 @@ def _known_constraint(
         passed=True if value is not None else None,
         skip_reason=None if value is not None else skip_reason,
     )
+
+
+def _inbound_schedule_skip_reason(snapshot: InventoryLogisticsSnapshot) -> str:
+    if snapshot.in_transit is None:
+        return "IN_TRANSIT_UNRESOLVED"
+    if snapshot.confirmed_inbound_schedule is None:
+        return "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED"
+    return "IN_TRANSIT_SCHEDULE_DEDUPLICATION_UNRESOLVED"
 
 
 def _snapshot_warnings(snapshot: InventoryLogisticsSnapshot) -> list[str]:

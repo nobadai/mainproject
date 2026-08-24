@@ -38,11 +38,12 @@ def calculate_cap_by_date(
     arrival_dates: list[date],
 ) -> dict[date, Decimal]:
     """확정된 창고, 일일 입고, 운송 Capacity로 날짜별 신규 입고 Band를 계산한다."""
+    if not is_inbound_schedule_complete(snapshot):
+        raise ValueError("IN_TRANSIT_SCHEDULE_UNRESOLVED")
     required_values = (
         snapshot.guaranteed_capacity_kg,
         snapshot.daily_inbound_capacity_kg,
         snapshot.inbound_transport_capacity_kg,
-        snapshot.confirmed_inbound_schedule,
         snapshot.confirmed_outbound_schedule,
     )
     if any(value is None for value in required_values):
@@ -91,8 +92,9 @@ def overlay_approved_purchase(
     approved_purchase: LogisticsApprovedPurchaseCommitment,
 ) -> list[ScheduledQuantity] | None:
     """H1 승인 매입을 on_hand가 아닌 미래 입고 Schedule에 Overlay한다."""
-    if snapshot.confirmed_inbound_schedule is None:
+    if not is_inbound_schedule_complete(snapshot):
         return None
+    assert snapshot.confirmed_inbound_schedule is not None
     approved_schedule = [
         ScheduledQuantity(date=item.date, quantity_kg=item.quantity_kg)
         for item in approved_purchase.arrival_schedule
@@ -105,7 +107,7 @@ def calculate_future_occupancy_by_date(
     inbound_schedule: list[ScheduledQuantity],
 ) -> dict[date, Decimal] | None:
     """H1 미래 입고와 확정 출고를 반영한 날짜별 창고 점유량을 계산한다."""
-    if snapshot.confirmed_outbound_schedule is None:
+    if not is_inbound_schedule_complete(snapshot) or snapshot.confirmed_outbound_schedule is None:
         return None
     dates = sorted({item.date for item in inbound_schedule})
     occupancy: dict[date, Decimal] = {}
@@ -127,6 +129,15 @@ def calculate_future_occupancy_by_date(
             raise ValueError("NEGATIVE_PROJECTED_OCCUPANCY")
         occupancy[target_date] = value
     return occupancy
+
+
+def is_inbound_schedule_complete(snapshot: InventoryLogisticsSnapshot) -> bool:
+    """중복 없이 미래 입고를 계산할 수 있는지 보수적으로 확인한다.
+
+    현재 Contract에는 in_transit과 confirmed schedule을 연결할 shipment 식별자가 없다.
+    따라서 확인된 in_transit 0건만 schedule과 중복될 가능성이 없는 상태로 인정한다.
+    """
+    return snapshot.in_transit == [] and snapshot.confirmed_inbound_schedule is not None
 
 
 def build_lot_constraints(snapshot: InventoryLogisticsSnapshot) -> list[LotConstraint]:
