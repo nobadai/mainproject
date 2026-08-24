@@ -5,6 +5,8 @@ from decimal import Decimal
 from typing import TypedDict
 from uuid import UUID
 
+from app.finance.interpretation import enrich_finance_response
+from app.finance.llm.runtime import InterpretationService
 from app.finance.repository import (
     FinanceState,
     get_current_finance_snapshot,
@@ -94,6 +96,7 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
 def run_finance_procurement_with_snapshot(
     request: PurchaseAgentOutput,
     snapshot: FinanceSnapshot | None,
+    interpretation_service: InterpretationService | None = None,
 ) -> FinanceProcurementResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance A를 실행한다."""
     scenario_result = run_finance_procurement_scenario(request, snapshot)
@@ -120,7 +123,7 @@ def run_finance_procurement_with_snapshot(
         suggested_adjustment=suggested_adjustment,
         evidences=[],
     )
-    return response
+    return enrich_finance_response(response, interpretation_service)
 
 
 def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
@@ -141,6 +144,7 @@ def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
 def run_finance_sales_with_snapshot(
     request: FinanceSalesRequest,
     snapshot: FinanceSnapshot | None,
+    interpretation_service: InterpretationService | None = None,
 ) -> FinanceSalesResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance B를 실행한다."""
     scenario_result = run_finance_sales_scenario(request, snapshot)
@@ -159,7 +163,7 @@ def run_finance_sales_with_snapshot(
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
     )
-    return response
+    return enrich_finance_response(response, interpretation_service)
 
 
 def get_finance_run(run_id: UUID) -> FinanceAgentRunResponse:

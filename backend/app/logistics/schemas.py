@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.logistics.llm.schemas import LLMResponseFields
+
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 LogisticsCycle = Literal["PROCUREMENT", "SALES"]
 ConstraintCode = Literal[
@@ -223,7 +225,7 @@ class LogisticsEvidence(BaseModel):
     claim: str = Field(min_length=1)
 
 
-class LogisticsProcurementResponse(BaseModel):
+class LogisticsProcurementResponse(LLMResponseFields):
     model_config = ConfigDict(extra="forbid")
 
     agent: Literal["inventory_logistics"] = "inventory_logistics"
@@ -302,7 +304,7 @@ class LotConstraint(BaseModel):
     status: str
 
 
-class LogisticsSalesResponse(BaseModel):
+class LogisticsSalesResponse(LLMResponseFields):
     model_config = ConfigDict(extra="forbid")
 
     agent: Literal["inventory_logistics"] = "inventory_logistics"

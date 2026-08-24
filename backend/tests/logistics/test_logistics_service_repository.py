@@ -56,11 +56,14 @@ def test_logistics_a_ready_response_and_persistence(
     assert response.runtime_status == "READY"
     assert response.snapshot_id == "T0-20260821-001"
     assert response.band.cap_by_date == {date(2026, 8, 23): Decimal(2500)}
+    assert response.llm_status == "SKIPPED_TEMPLATE"
+    assert response.llm_attempts == 0
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
     assert saved["snapshot_id"] == "T0-20260821-001"
     assert saved["request_payload"]["scenarios"][0]["total_quantity_ton"] == "4.5"
+    assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 
 def test_logistics_a_unresolved_response_is_saved(
@@ -98,6 +101,8 @@ def test_logistics_b_keeps_h1_out_of_on_hand_and_saves_run(
     assert response.approval_id == "H1-20260821-001"
     assert response.daily_outbound_capacity_kg == Decimal(1000)
     assert [item.lot_id for item in response.lot_constraints] == ["LOT-001"]
+    assert response.llm_status == "SKIPPED_TEMPLATE"
+    assert response.llm_attempts == 0
     assert save_run.call_args.kwargs["cycle"] == "SALES"
 
 

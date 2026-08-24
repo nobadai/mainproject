@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.finance.llm.schemas import LLMResponseFields
+
 
 def _reject_boolean(value: object) -> object:
     if isinstance(value, bool):
@@ -250,7 +252,7 @@ class ProcurementSuggestedAdjustment(BaseModel):
     max_amount_krw: Decimal = Field(ge=0)
 
 
-class FinanceProcurementResponse(BaseModel):
+class FinanceProcurementResponse(LLMResponseFields):
     """Finance A의 전사 매입 가능 금액 Band 응답."""
 
     model_config = ConfigDict(extra="forbid")
@@ -318,7 +320,7 @@ class CollectionPreference(BaseModel):
     liquidity_rank: int = Field(ge=1)
 
 
-class FinanceSalesResponse(BaseModel):
+class FinanceSalesResponse(LLMResponseFields):
     """Finance B의 공통 회수 우선도 및 정산 조건 응답."""
 
     model_config = ConfigDict(extra="forbid")

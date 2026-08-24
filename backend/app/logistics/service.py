@@ -3,6 +3,8 @@
 from datetime import date
 from uuid import UUID
 
+from app.logistics.interpretation import enrich_logistics_response
+from app.logistics.llm.runtime import InterpretationService
 from app.logistics.repository import get_current_inventory_logistics_snapshot
 from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
 from app.logistics.run_repository import (
@@ -54,6 +56,7 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
 def run_logistics_procurement_with_snapshot(
     request: PurchaseAgentOutput,
     snapshot: InventoryLogisticsSnapshot | None,
+    interpretation_service: InterpretationService | None = None,
 ) -> LogisticsProcurementResponse:
     """외부에서 고정한 Inventory/Logistics Snapshot으로 A Cycle을 실행한다."""
     scenario_result = run_logistics_procurement_scenario(request, snapshot)
@@ -79,7 +82,7 @@ def run_logistics_procurement_with_snapshot(
         soft_warnings=rule_result["soft_warnings"],
         evidences=_evidences(snapshot),
     )
-    return response
+    return enrich_logistics_response(response, interpretation_service)
 
 
 def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
@@ -100,6 +103,7 @@ def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesRespons
 def run_logistics_sales_with_snapshot(
     request: LogisticsSalesRequest,
     snapshot: InventoryLogisticsSnapshot | None,
+    interpretation_service: InterpretationService | None = None,
 ) -> LogisticsSalesResponse:
     """외부에서 고정한 Inventory/Logistics Snapshot으로 B Cycle을 실행한다."""
     scenario_result = run_logistics_sales_scenario(request, snapshot)
@@ -117,7 +121,7 @@ def run_logistics_sales_with_snapshot(
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
     )
-    return response
+    return enrich_logistics_response(response, interpretation_service)
 
 
 def get_logistics_run(run_id: UUID) -> LogisticsAgentRunResponse:
