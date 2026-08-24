@@ -17,6 +17,7 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_state, pu
         response = run_finance_procurement(request)
 
     assert response.runtime_status == "READY"
+    assert response.policy_version == "v1.3-PROVISIONAL"
     assert response.band.max_feasible_amount_krw == Decimal("16091273.770000")
     assert response.band.scope == "ALL_ITEMS_TOTAL"
     assert response.soft_warnings == ["COST_MISMATCH"]

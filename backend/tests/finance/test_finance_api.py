@@ -28,6 +28,7 @@ def test_finance_procurement_api(purchase_payload):
         response = TestClient(app).post("/finance/procurement", json=purchase_payload)
 
     assert response.status_code == 200
+    assert response.json()["policy_version"] == "v1.3-PROVISIONAL"
     assert response.json()["band"]["scope"] == "ALL_ITEMS_TOTAL"
     assert "verdict" not in response.json()
 

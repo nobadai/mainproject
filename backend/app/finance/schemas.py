@@ -227,7 +227,7 @@ class FinanceProcurementResponse(BaseModel):
     cycle: Literal["PROCUREMENT"] = "PROCUREMENT"
     as_of: date
     snapshot_id: str | None
-    policy_version: Literal["PROVISIONAL"] = "PROVISIONAL"
+    policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
     band: FinanceBand
     base_projected_cash_min: Decimal | None
