@@ -1,8 +1,9 @@
 """Finance P0 요청 및 응답 스키마."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -201,6 +202,7 @@ class PurchaseAgentOutput(BaseModel):
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
+FinanceCycle = Literal["PROCUREMENT", "SALES"]
 
 
 class FinanceBand(BaseModel):
@@ -301,3 +303,18 @@ class FinanceSalesResponse(BaseModel):
     collection_preferences: list[CollectionPreference]
     hard_constraints: list[str]
     soft_warnings: list[str]
+
+
+class FinanceAgentRunResponse(BaseModel):
+    """UI 조회용 Finance Agent 실행이력 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    cycle: FinanceCycle
+    as_of: date
+    snapshot_id: str | None
+    runtime_status: RuntimeStatus
+    request_payload: dict[str, object]
+    response_payload: dict[str, object]
+    created_at: datetime
