@@ -16,6 +16,10 @@ HardConstraint = Literal[
     "AS_OF_MISMATCH",
 ]
 SoftWarning = Literal["COST_MISMATCH"]
+FinanceRuntimeSoftWarning = Literal[
+    "COST_MISMATCH",
+    "CASH_PRIORITY_POLICY_UNRESOLVED",
+]
 
 _REQUIRED_FINANCE_STATE_FIELDS = (
     "finance_state_id",
@@ -43,6 +47,12 @@ class FinanceRuntimeRuleResult(TypedDict):
     max_feasible_amount_krw: Decimal | None
     hard_constraints: list[HardConstraint]
     soft_warnings: list[SoftWarning]
+
+
+class FinanceSalesRuleResult(TypedDict):
+    runtime_status: RuntimeStatus
+    hard_constraints: list[HardConstraint]
+    soft_warnings: list[FinanceRuntimeSoftWarning]
 
 
 def has_required_finance_state(finance_state: Mapping[str, object] | None) -> bool:
@@ -155,5 +165,46 @@ def evaluate_finance_runtime_rules(
         "runtime_status": "READY",
         "max_feasible_amount_krw": financial_limit,
         "hard_constraints": [],
+        "soft_warnings": soft_warnings,
+    }
+
+
+def evaluate_finance_sales_rules(
+    *,
+    as_of: date,
+    finance_state: Mapping[str, object] | None,
+    post_approved_purchase_cash: Decimal | None,
+) -> FinanceSalesRuleResult:
+    """Finance B 실행 경계와 승인 매입 Overlay의 재무 제약을 판정한다."""
+    base_result = evaluate_finance_runtime_rules(as_of=as_of, finance_state=finance_state)
+    hard_constraints = list(base_result["hard_constraints"])
+    soft_warnings: list[FinanceRuntimeSoftWarning] = list(base_result["soft_warnings"])
+    if base_result["runtime_status"] != "READY":
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "hard_constraints": hard_constraints,
+            "soft_warnings": soft_warnings,
+        }
+
+    assert finance_state is not None
+    minimum_operating_cash = finance_state["minimum_operating_cash_krw"]
+    if not isinstance(minimum_operating_cash, Decimal):
+        raise TypeError("finance_state.minimum_operating_cash_krw must be a Decimal")
+    if post_approved_purchase_cash is None:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
+            "soft_warnings": soft_warnings,
+        }
+    if (
+        post_approved_purchase_cash < minimum_operating_cash
+        and "NO_FINANCIAL_CAPACITY" not in hard_constraints
+    ):
+        hard_constraints.append("FINANCIAL_LIMIT_EXCEEDED")
+
+    soft_warnings.append("CASH_PRIORITY_POLICY_UNRESOLVED")
+    return {
+        "runtime_status": "RUNTIME_NOT_READY",
+        "hard_constraints": hard_constraints,
         "soft_warnings": soft_warnings,
     }

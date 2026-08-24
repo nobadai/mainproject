@@ -3,7 +3,12 @@
 from decimal import Decimal
 from typing import TypedDict
 
-from app.finance.schemas import PurchaseSourcingPlanItem, SourcingPlanItem
+from app.finance.schemas import (
+    ChannelTerm,
+    CollectionPreference,
+    PurchaseSourcingPlanItem,
+    SourcingPlanItem,
+)
 
 KG_PER_TON = Decimal(1000)
 
@@ -87,3 +92,20 @@ def calculate_post_purchase_cash(
 ) -> Decimal:
     """제안 매입과 확정 지출 이후의 현금을 계산한다."""
     return current_cash - proposal_amount - committed_outflows - unsettled_purchase_payables
+
+
+def rank_collection_preferences(
+    channel_terms: list[ChannelTerm],
+) -> list[CollectionPreference]:
+    """정산일이 짧은 채널부터 동일 일수에 같은 유동성 순위를 부여한다."""
+    settlement_days = sorted({term.settlement_days for term in channel_terms})
+    ranks = {days: index + 1 for index, days in enumerate(settlement_days)}
+    return [
+        CollectionPreference(
+            channel_type=term.channel_type,
+            partner_id=term.partner_id,
+            settlement_days=term.settlement_days,
+            liquidity_rank=ranks[term.settlement_days],
+        )
+        for term in channel_terms
+    ]

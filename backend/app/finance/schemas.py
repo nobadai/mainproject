@@ -236,3 +236,68 @@ class FinanceProcurementResponse(BaseModel):
     soft_warnings: list[str]
     suggested_adjustment: ProcurementSuggestedAdjustment | None
     evidences: list[Evidence]
+
+
+class ApprovedPurchaseCommitment(BaseModel):
+    """H1에서 승인된 매입 지급 의무."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str = Field(min_length=1)
+    total_amount_krw: Decimal = Field(gt=0)
+    payment_date: date
+
+    @field_validator("total_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class ChannelTerm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: str = Field(min_length=1)
+    partner_id: str = Field(min_length=1)
+    settlement_days: int = Field(ge=0)
+
+    @field_validator("settlement_days", mode="before")
+    @classmethod
+    def reject_boolean_days(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class FinanceSalesRequest(BaseModel):
+    """Finance B가 받는 승인 매입 Overlay와 판매 채널 조건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: Literal["SALES"]
+    as_of: date
+    approved_purchase: ApprovedPurchaseCommitment
+    channel_terms: list[ChannelTerm] = Field(min_length=1)
+
+
+class CollectionPreference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: str
+    partner_id: str
+    settlement_days: int = Field(ge=0)
+    liquidity_rank: int = Field(ge=1)
+
+
+class FinanceSalesResponse(BaseModel):
+    """Finance B의 공통 회수 우선도 및 정산 조건 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: Literal["finance"] = "finance"
+    cycle: Literal["SALES"] = "SALES"
+    snapshot_id: str | None
+    approval_id: str
+    runtime_status: RuntimeStatus
+    base_cash_priority: CashPriority | None
+    sales_cash_priority: CashPriority | None
+    collection_preferences: list[CollectionPreference]
+    hard_constraints: list[str]
+    soft_warnings: list[str]

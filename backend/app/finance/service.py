@@ -9,12 +9,15 @@ from app.finance.rules import (
     FinanceRuleResult,
     evaluate_finance_rules,
     evaluate_finance_runtime_rules,
+    evaluate_finance_sales_rules,
     has_required_finance_state,
 )
 from app.finance.schemas import (
     FinanceBand,
     FinanceProcurementResponse,
     FinanceReviewRequest,
+    FinanceSalesRequest,
+    FinanceSalesResponse,
     ProcurementSuggestedAdjustment,
     PurchaseAgentOutput,
 )
@@ -26,6 +29,7 @@ from app.finance.tools import (
     calculate_purchase_scenario_amount,
     compare_expected_cost,
     compare_reported_amount,
+    rank_collection_preferences,
 )
 
 
@@ -97,6 +101,37 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
         soft_warnings=rule_result["soft_warnings"],
         suggested_adjustment=suggested_adjustment,
         evidences=[],
+    )
+
+
+def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
+    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
+    finance_state = _get_current_finance_state_or_none()
+    _cross_check_financial_limit(finance_state)
+
+    post_approved_purchase_cash = None
+    if has_required_finance_state(finance_state):
+        assert finance_state is not None
+        post_approved_purchase_cash = calculate_post_purchase_cash(
+            finance_state["current_cash_krw"],
+            request.approved_purchase.total_amount_krw,
+            finance_state["committed_outflows_krw"],
+            finance_state["unsettled_purchase_payables_krw"],
+        )
+    rule_result = evaluate_finance_sales_rules(
+        as_of=request.as_of,
+        finance_state=finance_state,
+        post_approved_purchase_cash=post_approved_purchase_cash,
+    )
+    return FinanceSalesResponse(
+        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
+        approval_id=request.approved_purchase.approval_id,
+        runtime_status=rule_result["runtime_status"],
+        base_cash_priority=None,
+        sales_cash_priority=None,
+        collection_preferences=rank_collection_preferences(request.channel_terms),
+        hard_constraints=rule_result["hard_constraints"],
+        soft_warnings=rule_result["soft_warnings"],
     )
 
 
