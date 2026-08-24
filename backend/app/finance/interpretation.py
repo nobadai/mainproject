@@ -1,8 +1,8 @@
 """Finance deterministic Reply projection into the optional LLM layer."""
 
+from app.finance.llm.runtime import InterpretationService, get_interpretation_service
+from app.finance.llm.schemas import SanitizedLLMContext
 from app.finance.schemas import FinanceProcurementResponse, FinanceSalesResponse
-from app.llm.schemas import SanitizedLLMContext
-from app.llm.service import InterpretationService, get_interpretation_service
 
 _FINANCE_FACTS = {
     "AS_OF_MISMATCH": "요청 기준시점과 재무 기준시점이 일치하지 않습니다.",

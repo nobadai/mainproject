@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.llm.schemas import LLMResponseFields
+from app.finance.llm.schemas import LLMResponseFields
 
 
 def _reject_boolean(value: object) -> object:

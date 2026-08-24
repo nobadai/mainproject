@@ -3,8 +3,8 @@
 from datetime import date
 from uuid import UUID
 
-from app.llm.service import InterpretationService
 from app.logistics.interpretation import enrich_logistics_response
+from app.logistics.llm.runtime import InterpretationService
 from app.logistics.repository import get_current_inventory_logistics_snapshot
 from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
 from app.logistics.run_repository import (

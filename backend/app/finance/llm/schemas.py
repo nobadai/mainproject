@@ -1,11 +1,10 @@
-"""Contracts for the optional interpretation layer."""
+"""Finance Local LLM contracts and response extension fields."""
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 LLMStatus = Literal["SUCCESS", "SKIPPED_TEMPLATE", "FALLBACK", "DISABLED"]
-LLMDomain = Literal["FINANCE", "LOGISTICS"]
 
 
 class AgentInterpretation(BaseModel):
@@ -17,11 +16,9 @@ class AgentInterpretation(BaseModel):
 
 
 class SanitizedLLMContext(BaseModel):
-    """Numeric-free deterministic meanings approved for LLM consumption."""
-
     model_config = ConfigDict(extra="forbid")
 
-    domain: LLMDomain
+    domain: Literal["FINANCE"] = "FINANCE"
     signals: list[str]
     facts: list[str]
     allowed_adjustments: list[str]
@@ -40,15 +37,13 @@ class InterpretationResult(BaseModel):
 
 def default_interpretation() -> AgentInterpretation:
     return AgentInterpretation(
-        summary="결정론적 결과를 유지합니다.",
+        summary="결정론적 재무 결과를 유지합니다.",
         risks=[],
         suggested_adjustment=None,
     )
 
 
 class LLMResponseFields(BaseModel):
-    """Backward-compatible response extension mixed into Agent replies."""
-
     interpretation: AgentInterpretation = Field(default_factory=default_interpretation)
     llm_status: LLMStatus = "DISABLED"
     llm_provider: str | None = None

@@ -1,7 +1,7 @@
 """Logistics deterministic Reply projection into the optional LLM layer."""
 
-from app.llm.schemas import SanitizedLLMContext
-from app.llm.service import InterpretationService, get_interpretation_service
+from app.logistics.llm.runtime import InterpretationService, get_interpretation_service
+from app.logistics.llm.schemas import SanitizedLLMContext
 from app.logistics.schemas import LogisticsProcurementResponse, LogisticsSalesResponse
 
 _LOGISTICS_FACTS = {

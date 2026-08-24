@@ -2,10 +2,16 @@ import json
 from decimal import Decimal
 
 from app.finance.interpretation import build_finance_context, enrich_finance_response
+from app.finance.llm.runtime import (
+    InterpretationService as FinanceInterpretationService,
+)
+from app.finance.llm.runtime import LLMSettings as FinanceLLMSettings
 from app.finance.schemas import FinanceBand, FinanceProcurementResponse
-from app.llm.config import LLMSettings
-from app.llm.service import InterpretationService
 from app.logistics.interpretation import build_logistics_context, enrich_logistics_response
+from app.logistics.llm.runtime import (
+    InterpretationService as LogisticsInterpretationService,
+)
+from app.logistics.llm.runtime import LLMSettings as LogisticsLLMSettings
 from app.logistics.schemas import LogisticsSalesResponse
 
 _LLM_FIELDS = {
@@ -24,9 +30,23 @@ class FailingProvider:
         raise RuntimeError("ollama unavailable")
 
 
-def _failing_service():
-    return InterpretationService(
-        LLMSettings(
+def _failing_finance_service():
+    return FinanceInterpretationService(
+        FinanceLLMSettings(
+            enabled=True,
+            provider="ollama",
+            model="gemma3:4b",
+            base_url="http://127.0.0.1:11434",
+            timeout_seconds=1,
+            max_retries=1,
+        ),
+        FailingProvider(),
+    )
+
+
+def _failing_logistics_service():
+    return LogisticsInterpretationService(
+        LogisticsLLMSettings(
             enabled=True,
             provider="ollama",
             model="gemma3:4b",
@@ -109,7 +129,7 @@ def test_llm_failure_preserves_all_logistics_deterministic_fields():
     )
     deterministic = response.model_dump(exclude=_LLM_FIELDS)
 
-    enriched = enrich_logistics_response(response, _failing_service())
+    enriched = enrich_logistics_response(response, _failing_logistics_service())
 
     assert enriched.model_dump(exclude=_LLM_FIELDS) == deterministic
     assert enriched.llm_status == "FALLBACK"
@@ -132,7 +152,7 @@ def test_finance_hard_constraint_uses_template_without_provider_call():
     )
     deterministic = response.model_dump(exclude=_LLM_FIELDS)
 
-    enriched = enrich_finance_response(response, _failing_service())
+    enriched = enrich_finance_response(response, _failing_finance_service())
 
     assert enriched.model_dump(exclude=_LLM_FIELDS) == deterministic
     assert enriched.llm_status == "SKIPPED_TEMPLATE"

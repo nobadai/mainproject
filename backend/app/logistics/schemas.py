@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.llm.schemas import LLMResponseFields
+from app.logistics.llm.schemas import LLMResponseFields
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 LogisticsCycle = Literal["PROCUREMENT", "SALES"]

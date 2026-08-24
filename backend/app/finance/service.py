@@ -6,6 +6,7 @@ from typing import TypedDict
 from uuid import UUID
 
 from app.finance.interpretation import enrich_finance_response
+from app.finance.llm.runtime import InterpretationService
 from app.finance.repository import (
     FinanceState,
     get_current_finance_snapshot,
@@ -47,7 +48,6 @@ from app.finance.tools import (
     calculate_proposal_amount,
     compare_expected_cost,
 )
-from app.llm.service import InterpretationService
 
 
 class FinanceCoreResult(TypedDict):

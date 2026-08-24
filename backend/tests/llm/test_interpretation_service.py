@@ -2,10 +2,14 @@ import json
 
 import pytest
 
-from app.llm.config import LLMSettings, get_llm_settings
-from app.llm.schemas import SanitizedLLMContext
-from app.llm.service import InterpretationService
-from app.llm.validator import InterpretationValidationError, validate_interpretation
+from app.finance.llm.runtime import (
+    InterpretationService,
+    InterpretationValidationError,
+    LLMSettings,
+    get_llm_settings,
+    validate_interpretation,
+)
+from app.finance.llm.schemas import SanitizedLLMContext
 
 
 class FakeProvider:
@@ -37,9 +41,12 @@ def _settings(*, enabled=True, retries=1):
 
 def _context(*, signals=None, allowed_adjustments=None):
     return SanitizedLLMContext(
-        domain="LOGISTICS",
-        signals=["FRESHNESS_QUALITY_RISK"] if signals is None else signals,
-        facts=["재고의 우선 출고와 품질 위험 검토가 필요합니다."],
+        domain="FINANCE",
+        signals=["COST_MISMATCH", "PAYABLES_DUE_SOON"] if signals is None else signals,
+        facts=[
+            "보고 금액과 재계산 금액이 일치하지 않습니다.",
+            "지급 예정 채무가 임박해 있습니다.",
+        ],
         allowed_adjustments=allowed_adjustments or [],
     )
 
@@ -48,7 +55,7 @@ def _output(*, summary="품질 위험 검토가 필요합니다.", risks=None, a
     return json.dumps(
         {
             "summary": summary,
-            "risks": ["FRESHNESS_QUALITY_RISK"] if risks is None else risks,
+            "risks": ["COST_MISMATCH", "PAYABLES_DUE_SOON"] if risks is None else risks,
             "suggested_adjustment": adjustment,
         },
         ensure_ascii=False,
@@ -141,7 +148,9 @@ def test_validator_failure_retries_once_then_falls_back():
     assert result.llm_status == "FALLBACK"
     assert result.llm_attempts == 2
     assert result.llm_fallback_used is True
-    assert result.interpretation.summary == "재고의 우선 출고와 품질 위험 검토가 필요합니다."
+    assert result.interpretation.summary == (
+        "보고 금액과 재계산 금액이 일치하지 않습니다. 지급 예정 채무가 임박해 있습니다."
+    )
 
 
 def test_provider_unavailable_falls_back_without_losing_context():
@@ -155,7 +164,7 @@ def test_provider_unavailable_falls_back_without_losing_context():
     )
 
     assert result.llm_status == "FALLBACK"
-    assert result.interpretation.risks == ["FRESHNESS_QUALITY_RISK"]
+    assert result.interpretation.risks == ["COST_MISMATCH", "PAYABLES_DUE_SOON"]
     assert result.llm_attempts == 2
 
 
@@ -165,7 +174,7 @@ def test_provider_unavailable_falls_back_without_losing_context():
         (_output(summary="위험 수치가 3입니다."), "NUMERIC_OUTPUT_FORBIDDEN"),
         (_output(risks=[]), "SIGNAL_MISSING"),
         (
-            _output(risks=["FRESHNESS_QUALITY_RISK", "UNSUPPORTED"]),
+            _output(risks=["COST_MISMATCH", "PAYABLES_DUE_SOON", "UNSUPPORTED"]),
             "UNSUPPORTED_RISK",
         ),
         (
@@ -173,7 +182,7 @@ def test_provider_unavailable_falls_back_without_losing_context():
             "UNSUPPORTED_ADJUSTMENT",
         ),
         (
-            _output(risks=["FRESHNESS_QUALITY_RISK", "FRESHNESS_QUALITY_RISK"]),
+            _output(risks=["COST_MISMATCH", "COST_MISMATCH", "PAYABLES_DUE_SOON"]),
             "DUPLICATE_RISK",
         ),
         (
