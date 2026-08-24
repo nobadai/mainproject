@@ -60,3 +60,13 @@ def fetch_all(query: Query, params: Params = None) -> list[dict[str, Any]]:
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchall()
+
+
+def execute_returning_one(query: Query, params: Params = None) -> dict[str, Any]:
+    """변경 SQL을 실행하고 RETURNING으로 생성된 단건 결과를 반환한다."""
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Database write did not return a row")
+        return row
