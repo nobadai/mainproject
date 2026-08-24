@@ -3,7 +3,12 @@
 from decimal import Decimal
 from typing import TypedDict
 
-from app.finance.schemas import SourcingPlanItem
+from app.finance.schemas import (
+    ChannelTerm,
+    CollectionPreference,
+    PurchaseSourcingPlanItem,
+    SourcingPlanItem,
+)
 
 KG_PER_TON = Decimal(1000)
 
@@ -15,10 +20,27 @@ class ExpectedCostComparison(TypedDict):
     difference: Decimal
 
 
+class ReportedAmountComparison(TypedDict):
+    is_match: bool
+    reported_amount_krw: Decimal
+    recalculated_amount_krw: Decimal
+    difference: Decimal
+
+
 def calculate_proposal_amount(sourcing_plan: list[SourcingPlanItem]) -> Decimal:
     """톤 단위 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
     return sum(
         (item.quantity_ton * KG_PER_TON * Decimal(item.unit_price) for item in sourcing_plan),
+        start=Decimal(0),
+    )
+
+
+def calculate_purchase_scenario_amount(
+    sourcing_plan: list[PurchaseSourcingPlanItem],
+) -> Decimal:
+    """Purchase Agent v0.4 소싱 계획의 총 매입금액을 재계산한다."""
+    return sum(
+        (item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
@@ -34,6 +56,20 @@ def compare_expected_cost(
         "is_match": difference == Decimal(0),
         "expected_cost": expected_cost_decimal,
         "recalculated_cost": recalculated_cost,
+        "difference": difference,
+    }
+
+
+def compare_reported_amount(
+    reported_amount_krw: Decimal,
+    recalculated_amount_krw: Decimal,
+) -> ReportedAmountComparison:
+    """Purchase Agent v0.4 보고 금액과 Finance 재계산 금액을 비교한다."""
+    difference = recalculated_amount_krw - reported_amount_krw
+    return {
+        "is_match": difference == Decimal(0),
+        "reported_amount_krw": reported_amount_krw,
+        "recalculated_amount_krw": recalculated_amount_krw,
         "difference": difference,
     }
 
@@ -56,3 +92,20 @@ def calculate_post_purchase_cash(
 ) -> Decimal:
     """제안 매입과 확정 지출 이후의 현금을 계산한다."""
     return current_cash - proposal_amount - committed_outflows - unsettled_purchase_payables
+
+
+def rank_collection_preferences(
+    channel_terms: list[ChannelTerm],
+) -> list[CollectionPreference]:
+    """정산일이 짧은 채널부터 동일 일수에 같은 유동성 순위를 부여한다."""
+    settlement_days = sorted({term.settlement_days for term in channel_terms})
+    ranks = {days: index + 1 for index, days in enumerate(settlement_days)}
+    return [
+        CollectionPreference(
+            channel_type=term.channel_type,
+            partner_id=term.partner_id,
+            settlement_days=term.settlement_days,
+            liquidity_rank=ranks[term.settlement_days],
+        )
+        for term in channel_terms
+    ]

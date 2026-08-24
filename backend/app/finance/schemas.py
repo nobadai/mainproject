@@ -136,3 +136,168 @@ class FinanceReviewResponse(BaseModel):
     reasoning: list[str]
     evidences: list[Evidence]
     suggested_adjustment: SuggestedAdjustment | None
+
+
+class PurchaseSourcingPlanItem(BaseModel):
+    """Purchase Agent v0.4 sourcing line."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    market: str = Field(min_length=1)
+    grade: str = Field(min_length=1)
+    quantity_ton: Decimal = Field(gt=0)
+    grade_unit_price: int = Field(gt=0)
+
+    @field_validator("quantity_ton", "grade_unit_price", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class PurchaseAgentScenario(BaseModel):
+    """Purchase Agent v0.4의 단일 매입 후보."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1)
+    strategy_type: str = Field(min_length=1)
+    coverage_days: int = Field(gt=0)
+    total_quantity_ton: Decimal = Field(gt=0)
+    total_amount_krw: Decimal = Field(ge=0)
+    split_plan: list[SplitPlanItem] = Field(min_length=1)
+    sourcing_plan: list[PurchaseSourcingPlanItem] = Field(min_length=1)
+
+    @field_validator(
+        "coverage_days",
+        "total_quantity_ton",
+        "total_amount_krw",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_quantity_totals(self) -> "PurchaseAgentScenario":
+        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
+        sourcing_quantity = sum(
+            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
+        )
+        if self.total_quantity_ton != split_quantity:
+            raise ValueError("total_quantity_ton must equal split_plan quantity total")
+        if self.total_quantity_ton != sourcing_quantity:
+            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        return self
+
+
+class PurchaseAgentOutput(BaseModel):
+    """Finance A가 받는 Purchase Agent v0.4 전체 출력."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: PurchaseMeta
+    scenarios: list[PurchaseAgentScenario] = Field(min_length=1)
+
+
+RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
+
+
+class FinanceBand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_feasible_amount_krw: Decimal | None = Field(ge=0)
+    scope: Literal["ALL_ITEMS_TOTAL"] = "ALL_ITEMS_TOTAL"
+
+
+class ProcurementSuggestedAdjustment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    axis: Literal["amount"] = "amount"
+    action: Literal["cap"] = "cap"
+    max_amount_krw: Decimal = Field(ge=0)
+
+
+class FinanceProcurementResponse(BaseModel):
+    """Finance A의 전사 매입 가능 금액 Band 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: Literal["finance"] = "finance"
+    cycle: Literal["PROCUREMENT"] = "PROCUREMENT"
+    as_of: date
+    snapshot_id: str | None
+    policy_version: Literal["PROVISIONAL"] = "PROVISIONAL"
+    runtime_status: RuntimeStatus
+    band: FinanceBand
+    base_projected_cash_min: Decimal | None
+    base_cash_priority: CashPriority | None
+    hard_constraints: list[str]
+    soft_warnings: list[str]
+    suggested_adjustment: ProcurementSuggestedAdjustment | None
+    evidences: list[Evidence]
+
+
+class ApprovedPurchaseCommitment(BaseModel):
+    """H1에서 승인된 매입 지급 의무."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str = Field(min_length=1)
+    total_amount_krw: Decimal = Field(gt=0)
+    payment_date: date
+
+    @field_validator("total_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class ChannelTerm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: str = Field(min_length=1)
+    partner_id: str = Field(min_length=1)
+    settlement_days: int = Field(ge=0)
+
+    @field_validator("settlement_days", mode="before")
+    @classmethod
+    def reject_boolean_days(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class FinanceSalesRequest(BaseModel):
+    """Finance B가 받는 승인 매입 Overlay와 판매 채널 조건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: Literal["SALES"]
+    as_of: date
+    approved_purchase: ApprovedPurchaseCommitment
+    channel_terms: list[ChannelTerm] = Field(min_length=1)
+
+
+class CollectionPreference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: str
+    partner_id: str
+    settlement_days: int = Field(ge=0)
+    liquidity_rank: int = Field(ge=1)
+
+
+class FinanceSalesResponse(BaseModel):
+    """Finance B의 공통 회수 우선도 및 정산 조건 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: Literal["finance"] = "finance"
+    cycle: Literal["SALES"] = "SALES"
+    snapshot_id: str | None
+    approval_id: str
+    runtime_status: RuntimeStatus
+    base_cash_priority: CashPriority | None
+    sales_cash_priority: CashPriority | None
+    collection_preferences: list[CollectionPreference]
+    hard_constraints: list[str]
+    soft_warnings: list[str]

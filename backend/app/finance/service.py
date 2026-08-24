@@ -5,14 +5,31 @@ from decimal import Decimal
 from typing import TypedDict
 
 from app.finance.repository import FinanceState, get_current_finance_state
-from app.finance.rules import FinanceRuleResult, evaluate_finance_rules, has_required_finance_state
-from app.finance.schemas import FinanceReviewRequest
+from app.finance.rules import (
+    FinanceRuleResult,
+    evaluate_finance_rules,
+    evaluate_finance_runtime_rules,
+    evaluate_finance_sales_rules,
+    has_required_finance_state,
+)
+from app.finance.schemas import (
+    FinanceBand,
+    FinanceProcurementResponse,
+    FinanceReviewRequest,
+    FinanceSalesRequest,
+    FinanceSalesResponse,
+    ProcurementSuggestedAdjustment,
+    PurchaseAgentOutput,
+)
 from app.finance.tools import (
     ExpectedCostComparison,
     calculate_financial_limit,
     calculate_post_purchase_cash,
     calculate_proposal_amount,
+    calculate_purchase_scenario_amount,
     compare_expected_cost,
+    compare_reported_amount,
+    rank_collection_preferences,
 )
 
 
@@ -30,12 +47,97 @@ class FinanceCoreResult(TypedDict):
     rule_result: FinanceRuleResult
 
 
+def _get_current_finance_state_or_none() -> FinanceState | None:
+    try:
+        return get_current_finance_state()
+    except LookupError:
+        return None
+
+
+def _cross_check_financial_limit(finance_state: FinanceState | None) -> None:
+    if not has_required_finance_state(finance_state):
+        return
+    assert finance_state is not None
+    recalculated_financial_limit = calculate_financial_limit(
+        finance_state["current_cash_krw"],
+        finance_state["minimum_operating_cash_krw"],
+        finance_state["committed_outflows_krw"],
+        finance_state["unsettled_purchase_payables_krw"],
+    )
+    if finance_state["financial_limit_krw"] != recalculated_financial_limit:
+        raise ValueError("FINANCIAL_LIMIT_MISMATCH")
+
+
+def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementResponse:
+    """Finance State에서 모든 품목에 공통으로 적용할 매입 금액 Band를 산출한다."""
+    finance_state = _get_current_finance_state_or_none()
+    _cross_check_financial_limit(finance_state)
+
+    has_cost_mismatch = False
+    for scenario in request.scenarios:
+        recalculated_amount = calculate_purchase_scenario_amount(scenario.sourcing_plan)
+        comparison = compare_reported_amount(scenario.total_amount_krw, recalculated_amount)
+        has_cost_mismatch = has_cost_mismatch or not comparison["is_match"]
+
+    rule_result = evaluate_finance_runtime_rules(
+        as_of=request.meta.as_of,
+        finance_state=finance_state,
+        has_cost_mismatch=has_cost_mismatch,
+    )
+    max_feasible_amount = rule_result["max_feasible_amount_krw"]
+    suggested_adjustment = (
+        ProcurementSuggestedAdjustment(max_amount_krw=max_feasible_amount)
+        if max_feasible_amount is not None
+        else None
+    )
+    return FinanceProcurementResponse(
+        as_of=request.meta.as_of,
+        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
+        runtime_status=rule_result["runtime_status"],
+        band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
+        base_projected_cash_min=None,
+        base_cash_priority=None,
+        hard_constraints=rule_result["hard_constraints"],
+        soft_warnings=rule_result["soft_warnings"],
+        suggested_adjustment=suggested_adjustment,
+        evidences=[],
+    )
+
+
+def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
+    """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
+    finance_state = _get_current_finance_state_or_none()
+    _cross_check_financial_limit(finance_state)
+
+    post_approved_purchase_cash = None
+    if has_required_finance_state(finance_state):
+        assert finance_state is not None
+        post_approved_purchase_cash = calculate_post_purchase_cash(
+            finance_state["current_cash_krw"],
+            request.approved_purchase.total_amount_krw,
+            finance_state["committed_outflows_krw"],
+            finance_state["unsettled_purchase_payables_krw"],
+        )
+    rule_result = evaluate_finance_sales_rules(
+        as_of=request.as_of,
+        finance_state=finance_state,
+        post_approved_purchase_cash=post_approved_purchase_cash,
+    )
+    return FinanceSalesResponse(
+        snapshot_id=finance_state["finance_state_id"] if finance_state is not None else None,
+        approval_id=request.approved_purchase.approval_id,
+        runtime_status=rule_result["runtime_status"],
+        base_cash_priority=None,
+        sales_cash_priority=None,
+        collection_preferences=rank_collection_preferences(request.channel_terms),
+        hard_constraints=rule_result["hard_constraints"],
+        soft_warnings=rule_result["soft_warnings"],
+    )
+
+
 def run_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
     """Repository, Tools, Rules를 순서대로 호출해 Finance Core 결과를 만든다."""
-    try:
-        finance_state = get_current_finance_state()
-    except LookupError:
-        finance_state = None
+    finance_state = _get_current_finance_state_or_none()
 
     proposal_amount = calculate_proposal_amount(request.scenario.sourcing_plan)
     expected_cost_comparison = compare_expected_cost(
