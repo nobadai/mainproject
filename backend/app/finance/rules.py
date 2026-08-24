@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, TypedDict, cast
 
+from app.finance.schemas import RuntimeStatus
 from app.finance.tools import ExpectedCostComparison
 
 Verdict = Literal["ok", "conditional", "reject"]
@@ -32,6 +33,13 @@ _REQUIRED_FINANCE_STATE_FIELDS = (
 
 class FinanceRuleResult(TypedDict):
     verdict: Verdict
+    max_feasible_amount_krw: Decimal | None
+    hard_constraints: list[HardConstraint]
+    soft_warnings: list[SoftWarning]
+
+
+class FinanceRuntimeRuleResult(TypedDict):
+    runtime_status: RuntimeStatus
     max_feasible_amount_krw: Decimal | None
     hard_constraints: list[HardConstraint]
     soft_warnings: list[SoftWarning]
@@ -96,6 +104,55 @@ def evaluate_finance_rules(
         }
     return {
         "verdict": "ok",
+        "max_feasible_amount_krw": financial_limit,
+        "hard_constraints": [],
+        "soft_warnings": soft_warnings,
+    }
+
+
+def evaluate_finance_runtime_rules(
+    *,
+    as_of: date,
+    finance_state: Mapping[str, object] | None,
+    has_cost_mismatch: bool = False,
+) -> FinanceRuntimeRuleResult:
+    """Finance A의 실행 상태와 전사 공통 매입 가능 Band를 결정한다."""
+    soft_warnings: list[SoftWarning] = []
+    if has_cost_mismatch:
+        soft_warnings.append("COST_MISMATCH")
+
+    if not has_required_finance_state(finance_state):
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "max_feasible_amount_krw": None,
+            "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
+            "soft_warnings": soft_warnings,
+        }
+
+    finance_state = cast(Mapping[str, object], finance_state)
+    state_date = finance_state["state_date"]
+    financial_limit = finance_state["financial_limit_krw"]
+    if not isinstance(state_date, date):
+        raise TypeError("finance_state.state_date must be a date")
+    if not isinstance(financial_limit, Decimal):
+        raise TypeError("finance_state.financial_limit_krw must be a Decimal")
+
+    if as_of != state_date:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "max_feasible_amount_krw": None,
+            "hard_constraints": ["AS_OF_MISMATCH"],
+            "soft_warnings": soft_warnings,
+        }
+    if financial_limit <= Decimal(0):
+        return {
+            "runtime_status": "READY",
+            "max_feasible_amount_krw": Decimal(0),
+            "hard_constraints": ["NO_FINANCIAL_CAPACITY"],
+            "soft_warnings": soft_warnings,
+        }
+    return {
+        "runtime_status": "READY",
         "max_feasible_amount_krw": financial_limit,
         "hard_constraints": [],
         "soft_warnings": soft_warnings,

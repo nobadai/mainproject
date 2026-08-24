@@ -197,3 +197,42 @@ class PurchaseAgentOutput(BaseModel):
 
     meta: PurchaseMeta
     scenarios: list[PurchaseAgentScenario] = Field(min_length=1)
+
+
+RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
+
+
+class FinanceBand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_feasible_amount_krw: Decimal | None = Field(ge=0)
+    scope: Literal["ALL_ITEMS_TOTAL"] = "ALL_ITEMS_TOTAL"
+
+
+class ProcurementSuggestedAdjustment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    axis: Literal["amount"] = "amount"
+    action: Literal["cap"] = "cap"
+    max_amount_krw: Decimal = Field(ge=0)
+
+
+class FinanceProcurementResponse(BaseModel):
+    """Finance A의 전사 매입 가능 금액 Band 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: Literal["finance"] = "finance"
+    cycle: Literal["PROCUREMENT"] = "PROCUREMENT"
+    as_of: date
+    snapshot_id: str | None
+    policy_version: Literal["PROVISIONAL"] = "PROVISIONAL"
+    runtime_status: RuntimeStatus
+    band: FinanceBand
+    base_projected_cash_min: Decimal | None
+    base_cash_priority: CashPriority | None
+    hard_constraints: list[str]
+    soft_warnings: list[str]
+    suggested_adjustment: ProcurementSuggestedAdjustment | None
+    evidences: list[Evidence]
