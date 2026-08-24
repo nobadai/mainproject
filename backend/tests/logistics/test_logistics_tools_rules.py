@@ -47,9 +47,7 @@ def test_cap_by_date_respects_each_hard_capacity(
 ):
     snapshot = complete_logistics_snapshot.model_copy(update={field: value})
 
-    assert calculate_cap_by_date(snapshot, [date(2026, 8, 23)]) == {
-        date(2026, 8, 23): expected
-    }
+    assert calculate_cap_by_date(snapshot, [date(2026, 8, 23)]) == {date(2026, 8, 23): expected}
 
 
 def test_unresolved_capacity_is_not_zero_or_unlimited(unresolved_logistics_snapshot):

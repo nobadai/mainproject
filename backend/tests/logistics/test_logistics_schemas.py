@@ -42,9 +42,7 @@ def test_logistics_sales_rejects_arrival_before_as_of(logistics_sales_payload):
 
 
 @pytest.mark.parametrize("arrival_date", ["2026-08-21", "2026-08-23"])
-def test_logistics_sales_accepts_arrival_on_or_after_as_of(
-    logistics_sales_payload, arrival_date
-):
+def test_logistics_sales_accepts_arrival_on_or_after_as_of(logistics_sales_payload, arrival_date):
     logistics_sales_payload["approved_purchase"]["expected_arrival_date"] = arrival_date
     logistics_sales_payload["approved_purchase"]["arrival_schedule"][0]["date"] = arrival_date
 

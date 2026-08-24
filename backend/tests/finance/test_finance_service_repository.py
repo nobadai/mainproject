@@ -24,6 +24,8 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_snapshot,
     assert response.band.max_feasible_amount_krw == Decimal("16091273.770000")
     assert response.band.scope == "ALL_ITEMS_TOTAL"
     assert response.soft_warnings == ["COST_MISMATCH"]
+    assert response.llm_status == "SKIPPED_TEMPLATE"
+    assert response.llm_attempts == 0
     assert "verdict" not in response.model_dump()
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
@@ -33,6 +35,7 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_snapshot,
     assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "10318995"
     stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
     assert stored_limit == "16091273.770000"
+    assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 
 def test_procurement_service_stops_on_financial_limit_mismatch(finance_snapshot, purchase_payload):
@@ -79,6 +82,8 @@ def test_sales_service_applies_approved_purchase_overlay(finance_snapshot, sales
 
     assert response.runtime_status == "RUNTIME_NOT_READY"
     assert response.sales_cash_priority is None
+    assert response.llm_status == "SKIPPED_TEMPLATE"
+    assert response.llm_attempts == 0
     assert "FINANCIAL_LIMIT_EXCEEDED" in response.hard_constraints
     assert response.collection_preferences[0].liquidity_rank == 1
     saved = save_run.call_args.kwargs

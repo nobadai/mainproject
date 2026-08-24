@@ -32,6 +32,8 @@ def test_finance_procurement_api(purchase_payload):
     assert response.status_code == 200
     assert response.json()["policy_version"] == "v1.3-PROVISIONAL"
     assert response.json()["band"]["scope"] == "ALL_ITEMS_TOTAL"
+    assert response.json()["interpretation"]["summary"]
+    assert response.json()["llm_status"] == "DISABLED"
     assert "verdict" not in response.json()
 
 
@@ -58,6 +60,8 @@ def test_finance_sales_api(sales_payload):
 
     assert response.status_code == 200
     assert response.json()["sales_cash_priority"] is None
+    assert response.json()["interpretation"]["summary"]
+    assert response.json()["llm_status"] == "DISABLED"
 
 
 def test_finance_openapi_keeps_legacy_endpoint_deprecated():

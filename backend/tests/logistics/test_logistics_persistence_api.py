@@ -2,7 +2,6 @@ from datetime import UTC, date, datetime
 from unittest.mock import patch
 from uuid import UUID
 
-import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
@@ -77,9 +76,13 @@ def test_logistics_post_endpoints(logistics_purchase_payload, logistics_sales_pa
     with patch("app.logistics.router.run_logistics_procurement", return_value=procurement):
         response = client.post("/logistics/procurement", json=logistics_purchase_payload)
     assert response.status_code == 200
+    assert response.json()["interpretation"]["summary"]
+    assert response.json()["llm_status"] == "DISABLED"
     with patch("app.logistics.router.run_logistics_sales", return_value=sales):
         response = client.post("/logistics/sales", json=logistics_sales_payload)
     assert response.status_code == 200
+    assert response.json()["interpretation"]["summary"]
+    assert response.json()["llm_status"] == "DISABLED"
 
 
 def test_logistics_runs_api_filters_and_detail():
