@@ -1,0 +1,311 @@
+"""매입 에이전트 출력 제안 JSON 스키마 (IO명세 v1.1 §2).
+
+오케스트레이터·Critic·재무가 함께 의존하는 **출력 계약**이다. 필드명과 불변조건의 단일
+소스는 ``docs/매입에이전트_IO명세_v1.1.md`` §2 "필드 규약" 표.
+
+read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모듈은 DB에 쓰지 않는다.
+
+이 스키마가 **강제하지 않는** 조항 (전부 ⑦ self_check 몫 — 런타임 컨텍스트가 있어야 판정 가능):
+
+* ``strategy_type`` 이 그날 ``allowed_axes`` 안의 값인가 → ① 노드가 계산한 목록 필요
+* 전 안이 동일 축이면 반려 → 시나리오 1개일 땐 무의미. variant_collapsed 판정은 T3
+* ``coverage_days`` 가 D 범위 안인가 → 임계는 ``constraints.yaml`` 단일 소스(규칙 7).
+  여기에 ``[2, 18]`` 을 박으면 임계가 두 곳에 존재하게 된다
+* ``grade_unit_price`` 가 당일 시세에 실재하는 값인가 → 당일 market_quotes 대조 필요
+* 재고·현금·재무 cap 대조 → 부서 밴드·T0 스냅샷 필요
+* 근거 환각 대조 → 원문 문서 필요
+
+⚠️ 팀 조율 대기 — ``app/finance/schemas.py:PurchaseScenario`` 는 "매입 Agent 출력과 1:1
+대응"이라 선언돼 있으나 **v0.3 필드명**이다. 전 모델이 ``extra="forbid"`` 라서 이 파일의
+출력을 그대로 보내면 거부된다. 개인 개발 범위에서는 문서를 정답으로 삼고(CLAUDE.md)
+finance 쪽을 건드리지 않는다. 어긋난 지점::
+
+    finance/schemas.py (현재)          IO명세 v1.1 (이 파일)
+    ---------------------------------  ------------------------------------------
+    timing: str                        strategy_type: quantity|timing|mix
+    expected_cost: int                 total_amount_krw
+    SourcingPlanItem.unit_price        grade_unit_price
+    Evidence{source, claim}            + ref_id(필수)·evidence_grade·evidence_detail
+    (없음)                              coverage_days, margin_warning
+"""
+
+from datetime import date
+from decimal import Decimal
+from typing import Annotated, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+# ``finance/tools.py:KG_PER_TON`` 과 값을 맞춘다. import하지 않는 이유: 우리 출력을 finance가
+# 소비하는 방향이라, 여기서 finance를 import하면 의존이 거꾸로 선다. 공용화는 팀 통합 과제.
+KG_PER_TON = Decimal(1000)
+
+
+def _decimal_to_ton(value: Decimal) -> float:
+    """수량(톤)을 JSON number로 내보낸다.
+
+    Decimal은 기본적으로 문자열로 직렬화되는데 IO명세 §2의 규약은 ``number``다.
+    ``3.0``처럼 정수값이어도 int로 접지 않는다 — 톤은 소수를 가지는 양이고, 명세 예시도
+    ``3.0``이다. 정수로 접으면 소비자가 수량을 개수로 오해할 여지가 생긴다.
+    """
+    return float(value)
+
+
+def _decimal_to_krw(value: Decimal) -> int | float:
+    """금액(원)을 JSON number로 내보낸다. 원 단위는 정수이므로 정수로 내보낸다.
+
+    계산 결과에 소수가 남으면 float로 그대로 드러낸다 — 조용히 반올림하면 사중 일치
+    금액 축이 어긋난 사실이 출력에서 사라진다.
+    """
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+#: ``when_used="json"``이라 ``model_dump()``는 Decimal을 유지한다 — 등식 검사는 계속 정확하다.
+TonDecimal = Annotated[Decimal, PlainSerializer(_decimal_to_ton, when_used="json")]
+KrwDecimal = Annotated[Decimal, PlainSerializer(_decimal_to_krw, when_used="json")]
+
+#: 공백만 든 문자열을 거부한다. ``min_length=1``은 "   "을 통과시켜 ref_id 필수 조항이
+#: 우회된다 — strip 후 길이를 재고, 값 자체도 trim된 상태로 보관한다.
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+# --- 고정 어휘 (IO명세 §2 필드 규약) ---
+ItemName = Literal["배추", "무", "피마늘", "양파"]
+ScenarioLabel = Literal["보수", "기본", "공격"]
+StrategyType = Literal["quantity", "timing", "mix"]
+RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금", "문서ID"]
+Confidence = Literal["high", "medium", "low"]
+Situation = Literal["stable", "uncertain"]
+Market = Literal["가락"]
+
+#: 근거 등급 4단계 (정의서 §7.3). 서열: OFFICIAL > VENDOR > SIM_FIXED > ASSUMED
+#:
+#: * ``OFFICIAL``   공공기관·법령·공개 통계        → 하드 제약 사용 허용
+#: * ``VENDOR``     업체 공개 견적·계약서          → 허용
+#: * ``SIM_FIXED``  팀이 백테스트 전 확정 선언한 값 → 허용
+#: * ``ASSUMED``    근거 없는 임시값·파생값        → 소프트 경고만 (하드 제약 사용 불가)
+#:
+#: 우리는 등급을 **정확히 채우는 데까지** 책임진다. "낮은 등급으로 하드 제약을 계산했는가"의
+#: 검사는 오케스트레이터의 ``check_evidence_grade()`` 몫이다.
+#:
+#: ⚠️ SIM_FIXED 요건 4번 = 제약 독립성(정의서 §7.1). 매입 값 중 **수요에서 파생된 것은
+#: SIM_FIXED 자격을 잃고 ASSUMED가 된다.** 등급을 매길 때 "이 값이 규율 대상에서
+#: 파생됐는가"를 자문할 것.
+EvidenceGrade = Literal["OFFICIAL", "VENDOR", "SIM_FIXED", "ASSUMED"]
+
+
+def _reject_boolean(value: object) -> object:
+    """bool은 int의 서브클래스라 ge/gt 검사를 그냥 통과한다 — 숫자 자리에서 막는다."""
+    if isinstance(value, bool):
+        raise ValueError("boolean values are not valid numeric inputs")  # noqa: TRY004
+    return value
+
+
+class ProposalMeta(BaseModel):
+    """IO명세 §2 ``meta``."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    as_of: date
+    item: ItemName
+    agent_version: NonEmptyStr
+    is_refeed: bool = False
+    feedback_attempt: int = Field(default=0, ge=0)
+
+    @field_validator("feedback_attempt", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SplitPlanItem(BaseModel):
+    """분할 매입 1회차.
+
+    ``date`` 는 **매입 실행일**이다 — 도착일이 아니다. 실제 도착일은
+    ``date + inbound_lead_days(N4)`` 이고 N4는 현재 미결이라 계산하지 않는다 (IO명세 §4).
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    seq: int = Field(ge=1)
+    date: date
+    quantity_ton: TonDecimal = Field(gt=0)
+
+    @field_validator("seq", "quantity_ton", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SourcingPlanItem(BaseModel):
+    """등급 배분 1건. 등급·단가는 당일 시세에 실재하는 값만 쓴다 (대조는 self_check)."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    market: Market = "가락"
+    #: 가락 경락 원문 기준(특/상/중/하). DB 담당과 표준화 진행 중이라 Literal로 굳히지 않는다.
+    grade: NonEmptyStr
+    quantity_ton: TonDecimal = Field(gt=0)
+    grade_unit_price: int = Field(gt=0)  # 원/kg
+
+    @field_validator("quantity_ton", "grade_unit_price", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class RationaleItem(BaseModel):
+    """근거 1건. **ref_id 없는 근거는 근거가 아니다** (규칙 4 · 정의서 §1.2-5)."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    source: RationaleSource
+    claim: NonEmptyStr
+    ref_id: NonEmptyStr
+    evidence_grade: EvidenceGrade
+    #: 등급으로 정규화하기 전의 원본 값을 보존한다 — 나중에 재분류할 때 되돌릴 수 있도록.
+    evidence_detail: NonEmptyStr
+
+
+class RejectedReason(BaseModel):
+    """self_check가 컷한 이력. 데모에서 "검증이 실제로 작동한다"를 보이는 증거다."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    label: NonEmptyStr
+    reason: NonEmptyStr
+
+
+class Scenario(BaseModel):
+    """시나리오 1안 (IO명세 §2 ``scenarios[]``)."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    label: ScenarioLabel
+    strategy_type: StrategyType
+    #: 커버일수 D. 수량 = 확정수요 × D. 범위 검사는 constraints.yaml을 읽는 self_check 몫.
+    coverage_days: int = Field(gt=0)
+    total_quantity_ton: TonDecimal = Field(gt=0)
+    total_amount_krw: KrwDecimal = Field(ge=0)
+    #: q90 기반 하드 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
+    max_price: int = Field(ge=0)
+    #: 매입단가가 contract_price 방어선을 넘었다는 **표시**. 컷이 아니다(영업이 T2에서 판정).
+    #:
+    #: 규칙 3(0/NULL 구분)을 bool에 적용한 것 — ``None``은 "아직 계산되지 않음"이다.
+    #: 계약단가·방어선은 T0 스냅샷이 주는 입력값이라 없을 수 있고, 그때 ``False``로 채우면
+    #: "확인했더니 문제 없음"과 구분되지 않아 경고가 조용히 사라진다.
+    margin_warning: bool | None = None
+    split_plan: list[SplitPlanItem] = Field(min_length=1)
+    sourcing_plan: list[SourcingPlanItem] = Field(min_length=1)
+    expected_margin_rate: float = Field(ge=0, le=1)
+    rationale: list[RationaleItem] = Field(min_length=1)
+    risks: list[NonEmptyStr] = Field(default_factory=list)
+
+    @field_validator("coverage_days", "max_price", "expected_margin_rate", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_quadruple_match(self) -> "Scenario":
+        """사중 일치 — 수량 3축 + 금액 1축 (규칙 4 · IO명세 §2).
+
+        금액 축이 없으면 T3가 재무 cap(금액)과 매입 제안(수량)을 결합할 수 없다.
+        등급 배분이 수량↔금액 변환 계수이기 때문이다.
+        """
+        split_total = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
+        sourcing_total = sum((item.quantity_ton for item in self.sourcing_plan), start=Decimal(0))
+        if self.total_quantity_ton != split_total:
+            raise ValueError("total_quantity_ton must equal split_plan quantity total")
+        if self.total_quantity_ton != sourcing_total:
+            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+
+        amount_total = sum(
+            (
+                item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price)
+                for item in self.sourcing_plan
+            ),
+            start=Decimal(0),
+        )
+        if self.total_amount_krw != amount_total:
+            raise ValueError("total_amount_krw must equal sourcing_plan amount total")
+        return self
+
+    @model_validator(mode="after")
+    def validate_split_sequence(self) -> "Scenario":
+        """분할 회차는 1부터 1씩 증가한다. 일괄 매입이면 seq 1개짜리 목록."""
+        if [item.seq for item in self.split_plan] != list(range(1, len(self.split_plan) + 1)):
+            raise ValueError("split_plan seq must start at 1 and increase by 1")
+        return self
+
+
+class PurchaseProposal(BaseModel):
+    """에이전트의 **유일한 산출물** (IO명세 §2).
+
+    소비 경로: 오케스트레이터(조정) → Critic(대조) → 승인 → proposals 적재.
+    적재는 실행 스크립트 몫이다 — 이 에이전트는 반환만 한다(규칙 2).
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    meta: ProposalMeta
+    scenarios: list[Scenario] = Field(default_factory=list, max_length=3)
+    confidence: Confidence | None = None
+    situation: Situation | None = None
+    context_docs_used: list[NonEmptyStr] = Field(default_factory=list)
+    rejected_reasons: list[RejectedReason] = Field(default_factory=list)
+    #: 제안 불가 사유. **"유효 시나리오 없음"이라는 사실만 반환한다** — 납품 의무 미충족
+    #: 판정(has_unmet_obligation)은 오케스트레이터 몫이다. 매입 0 ≠ 납품 실패(IO명세 §2).
+    no_proposal_reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def validate_proposal_rules(self) -> "PurchaseProposal":
+        # scenarios와 no_proposal_reason은 상호 배타다 — "안이 있는데 제안 불가"는 모순이다.
+        if not self.scenarios:
+            if not self.no_proposal_reason:
+                raise ValueError("empty scenarios require no_proposal_reason")
+            return self
+        if self.no_proposal_reason:
+            raise ValueError("no_proposal_reason must be absent when scenarios exist")
+
+        if self.situation is None or self.confidence is None:
+            raise ValueError("situation and confidence are required when scenarios exist")
+
+        labels = [scenario.label for scenario in self.scenarios]
+        if len(labels) != len(set(labels)):
+            raise ValueError("scenario labels must be unique")
+
+        # 규칙 4: uncertain이면 공격안 금지 — 보수/기본 2안만 낸다.
+        if self.situation == "uncertain":
+            if len(self.scenarios) > 2:
+                raise ValueError("uncertain situation allows at most 2 scenarios")
+            if "공격" in labels:
+                raise ValueError("uncertain situation forbids the 공격 scenario")
+
+        # IO명세 §2: split_plan seq 1의 date는 as_of다 (첫 회차는 오늘 실행).
+        for scenario in self.scenarios:
+            if scenario.split_plan[0].date != self.meta.as_of:
+                raise ValueError("split_plan seq 1 date must equal meta.as_of")
+        return self
+
+    @model_validator(mode="after")
+    def validate_axis_diversity(self) -> "PurchaseProposal":
+        """전 안이 동일 축이면 반려 (IO명세 §2 strategy_type 규약).
+
+        3안을 냈는데 전부 quantity면 선택지가 아니라 같은 안의 크기 변주다. 안이 1개일 때는
+        비교 대상이 없으므로 적용하지 않는다.
+
+        그날 ``allowed_axes`` 목록과의 대조는 ① 노드가 계산한 런타임 값이 있어야 하므로
+        여기서 하지 않는다 — self_check(⑦) 몫이다.
+        """
+        if len(self.scenarios) < 2:
+            return self
+        if len({scenario.strategy_type for scenario in self.scenarios}) == 1:
+            raise ValueError("scenarios must not all share the same strategy_type")
+        return self

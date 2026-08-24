@@ -1,0 +1,83 @@
+# 매입 에이전트 도메인 임계·상수 — 단일 소스
+#
+# 출처: docs/매입에이전트_상세설계_v1.1.md §7 (일부 IO명세 §1)
+#
+# CLAUDE.md 규칙 7: 임계를 코드에 하드코딩하지 않는다. self_check·Critic이 이 파일을 공유하고,
+#                   config 오버라이드와 feedback의 constraint 덮어쓰기도 이 값 위에서 일어난다.
+# CLAUDE.md 규칙 3: 미결값은 null. 0으로 채우면 에러 없이 결과만 조용히 틀어진다.
+#
+# 여기에 두지 않는 것 (상세설계 §7 각주):
+#   contract_price(계약단가) · margin_defense_floor_rate(방어선) · 역마진 임계
+#   → 재무·영업이 공급하는 **입력값**이지 매입의 상수가 아니다. T0 스냅샷으로 받는다.
+
+version: "1.1"
+
+# ① classify_situation — 신뢰구간 폭으로 stable / uncertain 판정
+situation:
+  # ci_width = (upper - lower) / predicted
+  # 상세설계 §4-①: ci_width < 0.08 -> stable, ci_width >= 0.08 -> uncertain
+  # 경계값 0.08 자신은 uncertain이다 ("넘으면"이 아니라 "이상")
+  ci_width_threshold: 0.08          # ±8%
+  ci_width_comparison: ">="         # 이 연산으로 임계와 비교하면 uncertain
+
+# ③ draft_plan — 수량 = 확정수요 × 커버일수 D
+coverage_days:
+  min: 2                            # 하한 = JIT baseline
+  max: 18                           # 상한 = D+18 지평
+  by_label:                         # 상세설계 §7 "3안 D 매핑" (백테스트로 보정 예정)
+    보수: 2
+    기본: 5                          # §7 표기 "기준" = 출력 label "기본"
+    공격: 12
+
+# 축 진입 트리거
+triggers:
+  pre_purchase_rise_rate: 0.10      # +10% 이상 상승 예상 시 timing 축 진입
+  grade_spread_widening_ratio: 0.50 # 평시 대비 +50% 확대 시 중품 활용 검토
+
+# mix 축 게이팅 — 한 품목이 이 비중을 넘으면 품목 조합의 의미가 사라진다
+concentration:
+  item_threshold: 0.70              # item_concentration_threshold
+  segment_threshold: 0.70           # segment_concentration_threshold (영업 소유 — 이름만 분리)
+
+# 안 사이 차이가 너무 작으면 "3안"이 사실상 1안이다
+variant:
+  collapsed_threshold: 0.15         # (max - min) / max < 0.15 → variant_collapsed (판정은 T3)
+  clip_warning_threshold: 0.30      # clipped / 원안 < 0.30 → 과도 클리핑 경고
+
+costs:
+  delivery_cost_per_kg: 10          # 가락 → 창고 배송비. 상수, 전 시나리오 동일
+
+grade:
+  mid_grade_shelf_ratio: 0.6        # 중품 소진 한계 = 상품 한계일 × 0.6 (등급-신선도 연동)
+
+demand:
+  safety_stock_ratio: 0.20          # 확정주문 총량 + 안전재고 20% (IO명세 §1-④)
+
+warehouse:
+  rental_cap_ratio: 0.30            # 외부임차 한도 = 총용량 × 30% (IO명세 §1-③)
+
+context:
+  loop_max: 3                       # ② collect_context 재진입 상한 (상세설계 §3)
+
+allocation:
+  item_split_rule: "원안비율"         # 품목 안분 기본 규칙. 예외 = 예측신뢰도 가중
+
+# 품목별 보관한계(일). 단일 확정값이 있는 것만 채운다 — 규칙 3
+shelf_life_days:
+  배추: 135
+  양파: null                         # 상세설계 §7 "8~9개월" — 범위라 단일값 미확정
+  무: null                           # "상온" — 일수 규정 없음
+  피마늘: null                        # "상온" — 일수 규정 없음
+
+# ⑥ feedback 재조정 — 오케스트레이터가 전부 기각했을 때만 온다
+feedback:
+  attempt_max: 2                    # 2 초과 요청은 거부하고 "제안 불가"를 반환 (IO명세 §1)
+
+# 미결 파라미터 — 값이 아니라 **계산을 막는 장치**다 (정의서 §1.2-10 · §9.1 게이트 ②)
+pending:
+  # N4. 0으로 채우면 "오늘 승인분이 오늘 도착"이 되어 on_hand 전환 금지가 무의미해진다.
+  # NULL인 동안 expected_arrival_date(= as_of + N4)를 계산하지 않는다.
+  inbound_lead_days: null
+  # N5. 0으로 채우면 D+0 즉시지급이 되어 운전자금이 과대 계상된다.
+  # payment_date(= as_of + N5)를 계산하지 않는다.
+  purchase_payment_days: null
