@@ -10,6 +10,10 @@
 시점 내의 값 변동은 못 막으므로, 스냅샷 단일 소스로 일관성을 보장한다. 추상화 자체는
 유지한다 — mock ↔ 스냅샷 ↔ DB 교체가 이 함수들의 내부 수정만으로 끝난다.
 
+**수량 단위는 kg로 통일**(IO명세 v1.1 단위 통일 항목). 팀 표준(밴드·overlay·UI)이 kg이고,
+``qty_kg × grade_unit_price(원/kg) = 원``으로 금액 변환 계수도 사라진다. mock을 채울 때
+ton으로 되돌리지 않는다 — 숫자만 1000배 어긋나고 타입은 멀쩡해서 조용히 통과한다.
+
 현재 단계: **시그니처만 확정**. mock 구현은 백로그 E1-3에서 채운다.
 """
 
@@ -56,8 +60,8 @@ def get_inventory(item: str, as_of: date) -> dict:
 
         {"as_of": ..., "item": "배추",
          "lots": [{"lot_id": 12, "grade": "상", "stocked_at": "...",
-                   "remaining_ton": 3.0, "shelf_life_days": 10}],
-         "warehouse_free_ton": 12.0, "rental_cap_ton": 3.6}
+                   "remaining_kg": 3000, "shelf_life_days": 10}],
+         "warehouse_free_kg": 12000, "rental_cap_kg": 3600}
 
     에이전트가 파생 계산: 로트별 잔여신선도 = ``shelf_life_days - (as_of - stocked_at)``,
     납품 소요일 내 소진가능량, "신규 매입 시 기존 로트가 밀리는가".
@@ -71,8 +75,8 @@ def get_confirmed_orders(item: str, as_of: date, days: int = 14) -> dict:
     반환 형태 (IO명세 §1-④)::
 
         {"as_of": ..., "item": "배추",
-         "orders": [{"sale_id": 7, "quantity_ton": 12, "due_date": "..."}],
-         "total_ton": 18}
+         "orders": [{"sale_id": 7, "qty_kg": 12000, "due_date": "..."}],
+         "total_kg": 18000}
 
     용도: 기본 수요 산정(총량 + 안전재고), 그리고 **due_date별 분포 → 등급-신선도 매칭**
     (가까운 납품분은 중품 가능, 먼 납품분은 불가 등).

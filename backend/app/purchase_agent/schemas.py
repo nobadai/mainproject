@@ -22,54 +22,41 @@ finance 쪽을 건드리지 않는다. 어긋난 지점::
 
     finance/schemas.py (현재)          IO명세 v1.1 (이 파일)
     ---------------------------------  ------------------------------------------
+    quantity_ton / total_quantity_ton  qty_kg / total_qty_kg   ← 이름도 단위도 다름
     timing: str                        strategy_type: quantity|timing|mix
     expected_cost: int                 total_amount_krw
     SourcingPlanItem.unit_price        grade_unit_price
     Evidence{source, claim}            + ref_id(필수)·evidence_grade·evidence_detail
     (없음)                              coverage_days, margin_warning
+
+⚠️ **단위 충돌이 특히 위험하다.** finance는 ton, 여기는 kg다. 필드명까지 달라서 그대로
+보내면 422로 즉시 거부되지만 — 나중에 옮겨 담는 변환 코드가 생기면 **1000배 오차가
+조용히 통과**한다. ``finance/tools.py:calculate_proposal_amount()``는
+``quantity_ton × KG_PER_TON × unit_price``로 계산하고, 우리는
+``qty_kg × grade_unit_price``다. 결과는 같지만 입력 단위가 다르다.
 """
 
 from datetime import date
-from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PlainSerializer,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
-# ``finance/tools.py:KG_PER_TON`` 과 값을 맞춘다. import하지 않는 이유: 우리 출력을 finance가
-# 소비하는 방향이라, 여기서 finance를 import하면 의존이 거꾸로 선다. 공용화는 팀 통합 과제.
-KG_PER_TON = Decimal(1000)
-
-
-def _decimal_to_ton(value: Decimal) -> float:
-    """수량(톤)을 JSON number로 내보낸다.
-
-    Decimal은 기본적으로 문자열로 직렬화되는데 IO명세 §2의 규약은 ``number``다.
-    ``3.0``처럼 정수값이어도 int로 접지 않는다 — 톤은 소수를 가지는 양이고, 명세 예시도
-    ``3.0``이다. 정수로 접으면 소비자가 수량을 개수로 오해할 여지가 생긴다.
-    """
-    return float(value)
-
-
-def _decimal_to_krw(value: Decimal) -> int | float:
-    """금액(원)을 JSON number로 내보낸다. 원 단위는 정수이므로 정수로 내보낸다.
-
-    계산 결과에 소수가 남으면 float로 그대로 드러낸다 — 조용히 반올림하면 사중 일치
-    금액 축이 어긋난 사실이 출력에서 사라진다.
-    """
-    return int(value) if value == value.to_integral_value() else float(value)
-
-
-#: ``when_used="json"``이라 ``model_dump()``는 Decimal을 유지한다 — 등식 검사는 계속 정확하다.
-TonDecimal = Annotated[Decimal, PlainSerializer(_decimal_to_ton, when_used="json")]
-KrwDecimal = Annotated[Decimal, PlainSerializer(_decimal_to_krw, when_used="json")]
+# 수량 단위가 kg이므로 금액은 ``qty_kg × grade_unit_price(원/kg)``로 곧바로 원이 된다.
+# ton 시절의 ``× 1000`` 변환 계수(KG_PER_TON)는 더 이상 필요하지 않다.
+#
+# 수량·금액을 Decimal이 아니라 **int**로 두는 이유: IO명세 §2가 ``total_qty_kg``를
+# ``integer``로, "정수 kg — 소수 불허"로 규정한다(도매 매입 단위). 정수 kg × 정수 원/kg은
+# 언제나 정수 원이므로, 사중 일치가 정수 연산으로 정확히 떨어지고 float 직렬화 오차가
+# 들어올 자리 자체가 없어진다. Decimal을 쓰던 시절 필요했던 커스텀 직렬화기도 사라진다.
 
 #: 공백만 든 문자열을 거부한다. ``min_length=1``은 "   "을 통과시켜 ref_id 필수 조항이
 #: 우회된다 — strip 후 길이를 재고, 값 자체도 trim된 상태로 보관한다.
@@ -110,7 +97,7 @@ def _reject_boolean(value: object) -> object:
 class ProposalMeta(BaseModel):
     """IO명세 §2 ``meta``."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     as_of: date
     item: ItemName
@@ -131,13 +118,13 @@ class SplitPlanItem(BaseModel):
     ``date + inbound_lead_days(N4)`` 이고 N4는 현재 미결이라 계산하지 않는다 (IO명세 §4).
     """
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     seq: int = Field(ge=1)
     date: date
-    quantity_ton: TonDecimal = Field(gt=0)
+    qty_kg: int = Field(gt=0)
 
-    @field_validator("seq", "quantity_ton", mode="before")
+    @field_validator("seq", "qty_kg", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -146,15 +133,15 @@ class SplitPlanItem(BaseModel):
 class SourcingPlanItem(BaseModel):
     """등급 배분 1건. 등급·단가는 당일 시세에 실재하는 값만 쓴다 (대조는 self_check)."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     market: Market = "가락"
     #: 가락 경락 원문 기준(특/상/중/하). DB 담당과 표준화 진행 중이라 Literal로 굳히지 않는다.
     grade: NonEmptyStr
-    quantity_ton: TonDecimal = Field(gt=0)
+    qty_kg: int = Field(gt=0)
     grade_unit_price: int = Field(gt=0)  # 원/kg
 
-    @field_validator("quantity_ton", "grade_unit_price", mode="before")
+    @field_validator("qty_kg", "grade_unit_price", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -163,7 +150,7 @@ class SourcingPlanItem(BaseModel):
 class RationaleItem(BaseModel):
     """근거 1건. **ref_id 없는 근거는 근거가 아니다** (규칙 4 · 정의서 §1.2-5)."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     source: RationaleSource
     claim: NonEmptyStr
@@ -176,7 +163,7 @@ class RationaleItem(BaseModel):
 class RejectedReason(BaseModel):
     """self_check가 컷한 이력. 데모에서 "검증이 실제로 작동한다"를 보이는 증거다."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     label: NonEmptyStr
     reason: NonEmptyStr
@@ -185,14 +172,14 @@ class RejectedReason(BaseModel):
 class Scenario(BaseModel):
     """시나리오 1안 (IO명세 §2 ``scenarios[]``)."""
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     label: ScenarioLabel
     strategy_type: StrategyType
     #: 커버일수 D. 수량 = 확정수요 × D. 범위 검사는 constraints.yaml을 읽는 self_check 몫.
     coverage_days: int = Field(gt=0)
-    total_quantity_ton: TonDecimal = Field(gt=0)
-    total_amount_krw: KrwDecimal = Field(ge=0)
+    total_qty_kg: int = Field(gt=0)
+    total_amount_krw: int = Field(ge=0)
     #: q90 기반 하드 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
     max_price: int = Field(ge=0)
     #: 매입단가가 contract_price 방어선을 넘었다는 **표시**. 컷이 아니다(영업이 T2에서 판정).
@@ -219,20 +206,15 @@ class Scenario(BaseModel):
         금액 축이 없으면 T3가 재무 cap(금액)과 매입 제안(수량)을 결합할 수 없다.
         등급 배분이 수량↔금액 변환 계수이기 때문이다.
         """
-        split_total = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
-        sourcing_total = sum((item.quantity_ton for item in self.sourcing_plan), start=Decimal(0))
-        if self.total_quantity_ton != split_total:
-            raise ValueError("total_quantity_ton must equal split_plan quantity total")
-        if self.total_quantity_ton != sourcing_total:
-            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        split_total = sum(item.qty_kg for item in self.split_plan)
+        sourcing_total = sum(item.qty_kg for item in self.sourcing_plan)
+        if self.total_qty_kg != split_total:
+            raise ValueError("total_qty_kg must equal split_plan quantity total")
+        if self.total_qty_kg != sourcing_total:
+            raise ValueError("total_qty_kg must equal sourcing_plan quantity total")
 
-        amount_total = sum(
-            (
-                item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price)
-                for item in self.sourcing_plan
-            ),
-            start=Decimal(0),
-        )
+        # kg × 원/kg = 원. 단위가 맞아떨어져 변환 계수가 없다 (상세설계 §4-⑦).
+        amount_total = sum(item.qty_kg * item.grade_unit_price for item in self.sourcing_plan)
         if self.total_amount_krw != amount_total:
             raise ValueError("total_amount_krw must equal sourcing_plan amount total")
         return self
@@ -252,7 +234,7 @@ class PurchaseProposal(BaseModel):
     적재는 실행 스크립트 몫이다 — 이 에이전트는 반환만 한다(규칙 2).
     """
 
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     meta: ProposalMeta
     scenarios: list[Scenario] = Field(default_factory=list, max_length=3)
@@ -309,3 +291,36 @@ class PurchaseProposal(BaseModel):
         if len({scenario.strategy_type for scenario in self.scenarios}) == 1:
             raise ValueError("scenarios must not all share the same strategy_type")
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_null_no_proposal_reason(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """정상 제안에는 ``no_proposal_reason`` 키 자체를 싣지 않는다 (IO명세 §2 정상 예시).
+
+        validator가 "시나리오가 있으면 이 필드는 없어야 한다"고 규정하는데 출력에는
+        ``null``이 실려 나가면 말과 결과가 어긋난다.
+
+        ``margin_warning``의 ``null``은 **"아직 계산되지 않음"이라는 정보**를 담으므로
+        그대로 둔다 — 여기서 빼는 것은 이 필드 하나뿐이고, ``exclude_none``으로
+        일괄 처리하지 않는 이유가 그것이다.
+        """
+        data = handler(self)
+        if data.get("no_proposal_reason") is None:
+            data.pop("no_proposal_reason", None)
+        return data
+
+
+def revalidate_for_output(proposal: PurchaseProposal) -> PurchaseProposal:
+    """출력 직전, 원시 데이터에서 모델을 다시 세워 계약을 재확인한다.
+
+    ``frozen=True``가 필드 재대입을 막지만 **리스트 자체는 여전히 가변**이다.
+    ``proposal.scenarios[0].rationale.append({"source": ...})`` 처럼 리스트에 값을 끼워
+    넣는 경로는 어떤 validator도 거치지 않는다. 원시 dict로 내렸다가 다시 올리면 그렇게
+    끼어든 값도 전부 검증을 다시 통과해야 한다.
+
+    ⑦ self_check의 첫 단계로 재사용할 함수다 — 노드가 만든 제안을 내보내기 전에 통과시키고,
+    ``ValidationError``가 나면 **직렬화하지 않는다.** "검증을 통과한 객체"가 아니라
+    "지금 이 순간의 값"이 계약을 만족하는지가 판단 기준이어야 한다.
+    """
+    return PurchaseProposal.model_validate(proposal.model_dump())

@@ -7,14 +7,15 @@
 실제 산출물 계약이므로(IO명세 §3 "삼위일체") 같은 값을 쓰면 다음 단계의 mock을 여기서 그대로
 가져갈 수 있다.
 
-(이력: 두 문서의 예시가 한때 ``total_amount_krw = 10,318,995`` 로 적혀 있었으나 같은 예시의
-sourcing 합계는 7,125,000이라 사중 일치를 위반했다. 문서가 수정되어 지금은 등식이 성립한다.)
+(이력: ① 두 문서의 예시가 한때 ``total_amount_krw = 10,318,995`` 로 적혀 있었으나 같은
+예시의 sourcing 합계는 7,125,000이라 사중 일치를 위반했다 — 문서 수정으로 해결.
+② 수량 단위가 ton에서 kg로 통일되면서 금액 공식의 ``× 1000``이 사라졌다. 총액 7,125,000은
+그대로다.)
 """
 
 import inspect
 import json
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ import yaml
 from pydantic import ValidationError
 
 from app.purchase_agent import ports
-from app.purchase_agent.schemas import PurchaseProposal
+from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
 
 AS_OF = "2026-08-21"
 
@@ -43,8 +44,9 @@ PORT_FUNCTIONS = (
 def _proposal() -> dict:
     """사중 일치를 만족하는 정상 제안.
 
-    수량: 4.5 == 4.5(split) == 3.0 + 1.5(sourcing)
-    금액: 3.0 x 1000 x 1650 + 1.5 x 1000 x 1450 = 4,950,000 + 2,175,000 = 7,125,000
+    수량: 4500 == 4500(split) == 3000 + 1500(sourcing)
+    금액: 3000 x 1650 + 1500 x 1450 = 4,950,000 + 2,175,000 = 7,125,000
+          (kg x 원/kg = 원 — 단위가 맞아떨어져 변환 계수가 없다)
     """
     return {
         "meta": {
@@ -59,22 +61,22 @@ def _proposal() -> dict:
                 "label": "기본",
                 "strategy_type": "quantity",
                 "coverage_days": 5,
-                "total_quantity_ton": "4.5",
-                "total_amount_krw": "7125000",
+                "total_qty_kg": 4500,
+                "total_amount_krw": 7125000,
                 "max_price": 1750,
                 "margin_warning": False,
-                "split_plan": [{"seq": 1, "date": AS_OF, "quantity_ton": "4.5"}],
+                "split_plan": [{"seq": 1, "date": AS_OF, "qty_kg": 4500}],
                 "sourcing_plan": [
                     {
                         "market": "가락",
                         "grade": "상",
-                        "quantity_ton": "3.0",
+                        "qty_kg": 3000,
                         "grade_unit_price": 1650,
                     },
                     {
                         "market": "가락",
                         "grade": "중",
-                        "quantity_ton": "1.5",
+                        "qty_kg": 1500,
                         "grade_unit_price": 1450,
                     },
                 ],
@@ -88,7 +90,7 @@ def _proposal() -> dict:
                         "evidence_detail": "ML 경락가 예측 q50",
                     }
                 ],
-                "risks": ["중품 1.5톤은 잔여신선도 6일 내 소진 필요"],
+                "risks": ["중품 1,500kg은 잔여신선도 6일 내 소진 필요"],
             }
         ],
         "confidence": "high",
@@ -103,15 +105,15 @@ def _proposal() -> dict:
 
 def test_valid_proposal_passes() -> None:
     proposal = PurchaseProposal.model_validate(_proposal())
-    assert proposal.scenarios[0].total_quantity_ton == Decimal("4.5")
-    assert proposal.scenarios[0].total_amount_krw == Decimal(7125000)
+    assert proposal.scenarios[0].total_qty_kg == 4500
+    assert proposal.scenarios[0].total_amount_krw == 7125000
     assert proposal.meta.as_of == date(2026, 8, 21)
 
 
 def test_quantity_must_match_split_plan() -> None:
     """사중 일치 수량 축 — total != Σsplit (규칙 4)."""
     data = _proposal()
-    data["scenarios"][0]["split_plan"][0]["quantity_ton"] = "4.0"
+    data["scenarios"][0]["split_plan"][0]["qty_kg"] = 4000
     with pytest.raises(ValidationError, match="split_plan quantity total"):
         PurchaseProposal.model_validate(data)
 
@@ -119,15 +121,15 @@ def test_quantity_must_match_split_plan() -> None:
 def test_quantity_must_match_sourcing_plan() -> None:
     """사중 일치 수량 축 — total != Σsourcing (규칙 4)."""
     data = _proposal()
-    data["scenarios"][0]["sourcing_plan"][1]["quantity_ton"] = "1.0"
+    data["scenarios"][0]["sourcing_plan"][1]["qty_kg"] = 1000
     with pytest.raises(ValidationError, match="sourcing_plan quantity total"):
         PurchaseProposal.model_validate(data)
 
 
 def test_amount_must_match_sourcing_plan() -> None:
-    """사중 일치 금액 축 — total_amount != Σ(qty x 1000 x 등급단가) (규칙 4)."""
+    """사중 일치 금액 축 — total_amount != Σ(qty_kg x 등급단가) (규칙 4)."""
     data = _proposal()
-    data["scenarios"][0]["total_amount_krw"] = "10318995"  # sourcing 합계 7,125,000과 다른 값
+    data["scenarios"][0]["total_amount_krw"] = 10318995  # sourcing 합계 7,125,000과 다른 값
     with pytest.raises(ValidationError, match="sourcing_plan amount total"):
         PurchaseProposal.model_validate(data)
 
@@ -235,8 +237,8 @@ def test_split_seq_must_be_sequential() -> None:
     data = _proposal()
     scenario = data["scenarios"][0]
     scenario["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "quantity_ton": "2.5"},
-        {"seq": 3, "date": "2026-08-25", "quantity_ton": "2.0"},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
+        {"seq": 3, "date": "2026-08-25", "qty_kg": 2000},
     ]
     with pytest.raises(ValidationError, match="seq must start at 1"):
         PurchaseProposal.model_validate(data)
@@ -247,8 +249,8 @@ def test_split_plan_supports_multiple_rounds() -> None:
     data = _proposal()
     data["scenarios"][0]["strategy_type"] = "timing"
     data["scenarios"][0]["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "quantity_ton": "2.5"},
-        {"seq": 2, "date": "2026-08-25", "quantity_ton": "2.0"},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
+        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000},
     ]
     assert len(PurchaseProposal.model_validate(data).scenarios[0].split_plan) == 2
 
@@ -273,21 +275,37 @@ def test_boolean_is_rejected_for_numeric_field() -> None:
 
 
 def test_json_serialization_emits_numbers_not_strings() -> None:
-    """IO명세 §2 규약이 ``number``다 — Decimal은 기본적으로 문자열로 직렬화된다."""
+    """IO명세 §2 규약이 ``integer``/``number``다 — 문자열이 아니라 숫자로 나가야 한다."""
     payload = json.loads(PurchaseProposal.model_validate(_proposal()).model_dump_json())
     scenario = payload["scenarios"][0]
 
-    assert isinstance(scenario["total_quantity_ton"], float)
+    assert isinstance(scenario["total_qty_kg"], int)
+    assert scenario["total_qty_kg"] == 4500
     assert isinstance(scenario["total_amount_krw"], int)
     assert scenario["total_amount_krw"] == 7125000
-    assert isinstance(scenario["split_plan"][0]["quantity_ton"], float)
-    assert isinstance(scenario["sourcing_plan"][0]["quantity_ton"], float)
+    assert isinstance(scenario["split_plan"][0]["qty_kg"], int)
+    assert isinstance(scenario["sourcing_plan"][0]["qty_kg"], int)
 
 
-def test_python_dump_keeps_decimal() -> None:
-    """바뀌는 건 JSON 출력뿐이다 — 내부 값이 float가 되면 등식 검사가 오차를 탄다."""
+@pytest.mark.parametrize("value", [4500.5, "4500.5"], ids=["float", "str"])
+def test_fractional_quantity_is_rejected(value: object) -> None:
+    """**정수 kg — 소수 불허** (IO명세 §2 ``integer``).
+
+    도매 매입 단위가 정수 kg이기도 하지만, 더 중요하게는 float 직렬화 오차의 원천을
+    차단한다. 소수를 허용하면 ``0.3kg x 3원 = 0.9원``이 JSON을 거쳐 소비자에게서
+    ``0.3 * 3 != 0.9``가 되어 사중 일치가 직렬화 경계 뒤에서 깨진다.
+    """
+    data = _proposal()
+    data["scenarios"][0]["total_qty_kg"] = value
+    with pytest.raises(ValidationError):
+        PurchaseProposal.model_validate(data)
+
+
+def test_python_dump_keeps_integers() -> None:
+    """``model_dump()``도 int다 — Decimal 시절과 달리 숫자 변환 계층이 아예 없다."""
     dumped = PurchaseProposal.model_validate(_proposal()).model_dump()
-    assert isinstance(dumped["scenarios"][0]["total_quantity_ton"], Decimal)
+    assert isinstance(dumped["scenarios"][0]["total_qty_kg"], int)
+    assert isinstance(dumped["scenarios"][0]["total_amount_krw"], int)
 
 
 @pytest.mark.parametrize("blank", ["   ", "\t", "\n "], ids=["spaces", "tab", "newline"])
@@ -330,11 +348,59 @@ def test_single_scenario_skips_axis_diversity() -> None:
     assert len(PurchaseProposal.model_validate(_proposal()).scenarios) == 1
 
 
-def test_mutation_after_validation_is_revalidated() -> None:
-    """검증을 통과한 뒤 값을 바꿔 사중 일치를 우회할 수 없다 (validate_assignment)."""
+def test_frozen_blocks_field_reassignment() -> None:
+    """(a) 필드 재대입 — 예외뿐 아니라 **값이 오염되지 않았는지**까지 확인한다.
+
+    이전 구현(``validate_assignment=True``)은 예외를 던지면서도 대입값을 남겼다.
+    예외를 삼키는 호출자가 하나만 있어도 오염된 객체가 그대로 직렬화됐다. 예외만 보던
+    테스트는 그 사실을 놓쳤고, "70건 통과"가 이 영역에서는 아무 보증이 아니었다.
+    """
     proposal = PurchaseProposal.model_validate(_proposal())
-    with pytest.raises(ValidationError, match="split_plan quantity total"):
-        proposal.scenarios[0].total_quantity_ton = Decimal(999)
+    with pytest.raises(ValidationError):
+        proposal.scenarios[0].total_qty_kg = 999
+
+    assert proposal.scenarios[0].total_qty_kg == 4500
+    assert json.loads(proposal.model_dump_json())["scenarios"][0]["total_qty_kg"] == 4500
+
+
+def test_frozen_blocks_child_field_reassignment() -> None:
+    """(b) 자식 필드 변경 — 부모 validator가 아예 재실행되지 않던 경로다."""
+    proposal = PurchaseProposal.model_validate(_proposal())
+    with pytest.raises(ValidationError):
+        proposal.scenarios[0].sourcing_plan[0].qty_kg = 2999
+
+    serialized = json.loads(proposal.model_dump_json())["scenarios"][0]
+    assert serialized["total_qty_kg"] == sum(item["qty_kg"] for item in serialized["sourcing_plan"])
+
+
+def test_list_mutation_is_caught_by_output_revalidation() -> None:
+    """(c) 리스트 append는 frozen이 막지 못한다 — 출력 경계 재검증이 잡는다.
+
+    ``frozen=True``는 필드 재대입만 막는다. 리스트 객체 자체는 여전히 가변이라
+    ``rationale.append({...})``는 어떤 validator도 거치지 않는다.
+    """
+    proposal = PurchaseProposal.model_validate(_proposal())
+    proposal.scenarios[0].rationale.append({"source": "예측", "claim": "ref_id 없는 근거"})
+
+    with pytest.raises(ValidationError):
+        revalidate_for_output(proposal)
+
+
+def test_label_mutation_cannot_bypass_uncertain_rule() -> None:
+    """(d) 검증 후 label을 바꿔 uncertain 규칙을 우회할 수 없다."""
+    data = _proposal()
+    data["situation"] = "uncertain"
+    proposal = PurchaseProposal.model_validate(data)
+
+    with pytest.raises(ValidationError):
+        proposal.scenarios[0].label = "공격"
+    assert proposal.scenarios[0].label == "기본"
+
+
+def test_revalidation_passes_for_untouched_proposal() -> None:
+    """정상 제안은 재검증을 그대로 통과한다 — 재검증이 과잉 차단하지 않는지 확인."""
+    proposal = PurchaseProposal.model_validate(_proposal())
+    assert revalidate_for_output(proposal).scenarios[0].total_qty_kg == 4500
 
 
 def test_margin_warning_defaults_to_none() -> None:
@@ -342,6 +408,20 @@ def test_margin_warning_defaults_to_none() -> None:
     data = _proposal()
     del data["scenarios"][0]["margin_warning"]
     assert PurchaseProposal.model_validate(data).scenarios[0].margin_warning is None
+
+
+def test_normal_proposal_omits_no_proposal_reason_key() -> None:
+    """정상 제안에는 키 자체가 없다 (IO명세 §2 정상 예시). null도 싣지 않는다."""
+    payload = json.loads(PurchaseProposal.model_validate(_proposal()).model_dump_json())
+    assert "no_proposal_reason" not in payload
+
+
+def test_margin_warning_null_survives_serialization() -> None:
+    """margin_warning의 null은 "미계산"이라는 정보다 — 직렬화에서 사라지면 안 된다."""
+    data = _proposal()
+    del data["scenarios"][0]["margin_warning"]
+    payload = json.loads(PurchaseProposal.model_validate(data).model_dump_json())
+    assert payload["scenarios"][0]["margin_warning"] is None
 
 
 def test_no_proposal_reason_cannot_coexist_with_scenarios() -> None:
