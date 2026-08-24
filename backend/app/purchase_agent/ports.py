@@ -14,28 +14,36 @@
 ``qty_kg × grade_unit_price(원/kg) = 원``으로 금액 변환 계수도 사라진다. mock을 채울 때
 ton으로 되돌리지 않는다 — 숫자만 1000배 어긋나고 타입은 멀쩡해서 조용히 통과한다.
 
-현재 단계: **시그니처만 확정**. mock 구현은 백로그 E1-3에서 채운다.
+현재 단계: **mock 구현 완료**(백로그 E1-3). 각 함수는 ``mocks/``의 JSON을 IO명세 §1의
+반환 형태로 materialize해 돌려준다. 시나리오는 ``as_of``로 고른다 —
+``mocks/scenarios.json``의 앵커일 4개가 단위 테스트 4종에 대응한다.
+DB/스냅샷으로 갈아끼울 때 바뀌는 건 이 파일의 본문뿐이고, 호출부는 그대로다.
 """
 
 from datetime import date
 
-_NOT_YET = "E1-3(mock 구현)에서 채운다 — 지금은 시그니처만 확정된 상태다"
+from app.purchase_agent import mocks
 
 
 def get_forecast(item: str, as_of: date) -> dict:
-    """가락 경락가 예측. ``generated_at <= as_of`` 최신 배치, 21일치. (공급자: ML)
+    """가락 경락가 예측. ``generated_at <= as_of`` 최신 배치, **18일치**. (공급자: ML)
+
+    지평이 18일인 건 D+18이 커버일수 D의 상한이기 때문이다 (상세설계 §7 · IO명세 §1-①).
 
     반환 형태 (IO명세 §1-①)::
 
-        {"generated_at": ..., "item": "배추", "unit": "원/kg", "current_price": 780,
-         "horizon_days": 21,
-         "daily": [{"date": "...", "predicted": 795, "lower": 760, "upper": 830}],
+        {"generated_at": "2026-08-21T06:00:00+09:00", "item": "배추", "unit": "원/kg",
+         "current_price": 1650, "horizon_days": 18,
+         "daily": [{"date": "2026-08-22", "predicted": 1666, "lower": 1616, "upper": 1716}],
          "model_version": "mock-v0"}
+
+    ``daily``는 **D+1 ~ D+18 총 18건**이며 등급 차원이 없다 — 등급별 단가는 ⑤ 노드가
+    ``get_market_quotes``와 결합해 만든다.
 
     에이전트가 여기서 파생 계산: ``ci_width = (upper - lower) / predicted``,
     ``rise_rate_2w``, ``peak_date``, 궤적 형태(지속상승/단봉/하락).
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_forecast(item, as_of)
 
 
 def get_market_quotes(item: str, as_of: date) -> list[dict]:
@@ -43,14 +51,14 @@ def get_market_quotes(item: str, as_of: date) -> list[dict]:
 
     반환 형태 (IO명세 §1-②)::
 
-        [{"market": "가락", "grade": "특", "price": 920},
-         {"market": "가락", "grade": "상", "price": 850},
-         {"market": "가락", "grade": "중", "price": 720}]
+        [{"market": "가락", "grade": "특", "price": 1850},
+         {"market": "가락", "grade": "상", "price": 1650},
+         {"market": "가락", "grade": "중", "price": 1450}]
 
     ⑤ 등급 배분 스코어링의 원천. 최소 등급 2개 이상이어야 배분 판단이 성립한다.
     ``market``은 확장 여지로 남긴 필드이며 현재는 "가락" 고정 (8/20 결정 — 지방시장 제외).
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_quotes(item, as_of)
 
 
 def get_inventory(item: str, as_of: date) -> dict:
@@ -66,7 +74,7 @@ def get_inventory(item: str, as_of: date) -> dict:
     에이전트가 파생 계산: 로트별 잔여신선도 = ``shelf_life_days - (as_of - stocked_at)``,
     납품 소요일 내 소진가능량, "신규 매입 시 기존 로트가 밀리는가".
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_inventory(item, as_of)
 
 
 def get_confirmed_orders(item: str, as_of: date, days: int = 14) -> dict:
@@ -81,7 +89,7 @@ def get_confirmed_orders(item: str, as_of: date, days: int = 14) -> dict:
     용도: 기본 수요 산정(총량 + 안전재고), 그리고 **due_date별 분포 → 등급-신선도 매칭**
     (가까운 납품분은 중품 가능, 먼 납품분은 불가 등).
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_orders(item, as_of, days)
 
 
 def get_projected_cash_min(as_of: date, horizon_days: int) -> int:
@@ -94,7 +102,7 @@ def get_projected_cash_min(as_of: date, horizon_days: int) -> int:
     ⚠️ 2종이 존재한다. **우리(사이클 A T1)는 ``base_projected_cash_min``을 참조**한다
     (H1 승인 후 재계산분인 ``post_h1_``이 아니다).
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_cash(as_of, horizon_days)
 
 
 def get_context_docs(item: str, as_of: date, doc_types: list[str]) -> list[dict]:
@@ -107,4 +115,4 @@ def get_context_docs(item: str, as_of: date, doc_types: list[str]) -> list[dict]
 
     코퍼스가 작으므로 벡터 검색 없이 전문을 통째로 주입한다 (상세설계 §2).
     """
-    raise NotImplementedError(_NOT_YET)
+    return mocks.load_documents(item, as_of, doc_types)

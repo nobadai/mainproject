@@ -16,20 +16,14 @@
 import inspect
 import json
 from datetime import date
-from pathlib import Path
 
 import pytest
-import yaml
+from _fixtures import AS_OF, _proposal
 from pydantic import ValidationError
 
 from app.purchase_agent import ports
+from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
-
-AS_OF = "2026-08-21"
-
-CONSTRAINTS_PATH = (
-    Path(__file__).resolve().parents[2] / "app" / "purchase_agent" / "constraints.yaml"
-)
 
 PORT_FUNCTIONS = (
     ports.get_forecast,
@@ -41,63 +35,6 @@ PORT_FUNCTIONS = (
 )
 
 
-def _proposal() -> dict:
-    """사중 일치를 만족하는 정상 제안.
-
-    수량: 4500 == 4500(split) == 3000 + 1500(sourcing)
-    금액: 3000 x 1650 + 1500 x 1450 = 4,950,000 + 2,175,000 = 7,125,000
-          (kg x 원/kg = 원 — 단위가 맞아떨어져 변환 계수가 없다)
-    """
-    return {
-        "meta": {
-            "as_of": AS_OF,
-            "item": "배추",
-            "agent_version": "v1.1",
-            "is_refeed": False,
-            "feedback_attempt": 0,
-        },
-        "scenarios": [
-            {
-                "label": "기본",
-                "strategy_type": "quantity",
-                "coverage_days": 5,
-                "total_qty_kg": 4500,
-                "total_amount_krw": 7125000,
-                "max_price": 1750,
-                "margin_warning": False,
-                "split_plan": [{"seq": 1, "date": AS_OF, "qty_kg": 4500}],
-                "sourcing_plan": [
-                    {
-                        "market": "가락",
-                        "grade": "상",
-                        "qty_kg": 3000,
-                        "grade_unit_price": 1650,
-                    },
-                    {
-                        "market": "가락",
-                        "grade": "중",
-                        "qty_kg": 1500,
-                        "grade_unit_price": 1450,
-                    },
-                ],
-                "expected_margin_rate": 0.30,
-                "rationale": [
-                    {
-                        "source": "예측",
-                        "claim": "2주 후 +14%, 신뢰구간 ±4%",
-                        "ref_id": "FC-K-0821",
-                        "evidence_grade": "OFFICIAL",
-                        "evidence_detail": "ML 경락가 예측 q50",
-                    }
-                ],
-                "risks": ["중품 1,500kg은 잔여신선도 6일 내 소진 필요"],
-            }
-        ],
-        "confidence": "high",
-        "situation": "stable",
-        "context_docs_used": ["DOC-3"],
-        "rejected_reasons": [],
-    }
 
 
 # --------------------------------------------------------------------------- schemas
@@ -444,8 +381,8 @@ def test_blank_no_proposal_reason_is_rejected() -> None:
 
 
 def _constraints() -> dict:
-    with CONSTRAINTS_PATH.open(encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+    """로더를 거쳐 읽는다 — 노드가 쓸 경로와 테스트가 볼 경로를 하나로 묶는다."""
+    return load_constraints()
 
 
 def test_constraints_file_parses() -> None:
@@ -536,22 +473,3 @@ def test_every_port_requires_as_of(port: object) -> None:
     parameters = inspect.signature(port).parameters
     assert "as_of" in parameters
     assert parameters["as_of"].annotation is date
-
-
-@pytest.mark.parametrize("port", PORT_FUNCTIONS, ids=lambda fn: fn.__name__)
-def test_every_port_is_not_implemented_yet(port: object) -> None:
-    """시그니처만 확정된 단계 — 호출하면 조용히 None을 주는 대신 즉시 터진다."""
-    arguments = {
-        name: date(2026, 8, 21) if name == "as_of" else _dummy_argument(name)
-        for name in inspect.signature(port).parameters
-    }
-    with pytest.raises(NotImplementedError):
-        port(**arguments)
-
-
-def _dummy_argument(name: str) -> object:
-    if name == "doc_types":
-        return ["관측월보"]
-    if name in ("days", "horizon_days"):
-        return 14
-    return "배추"

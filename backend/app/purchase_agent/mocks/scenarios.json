@@ -1,0 +1,31 @@
+{
+  "_설명": "as_of가 곧 시나리오 키다. 포트 시그니처(item, as_of)에 scenario 인자를 넣을 수 없으므로, 4개 앵커일에 4개 단위 테스트 시나리오를 배정했다. 상태(전역 스위치·환경변수)를 두지 않으므로 테스트 간 오염이 없다.",
+  "anchors": {
+    "2026-08-21": {
+      "name": "mock_rising",
+      "forecast": "rising",
+      "quotes": "normal",
+      "기대": "선매입(D 큰 안) 등장",
+      "비고": "IO명세·상세설계의 모든 예시가 모이는 문서 기준일. 배추 재고·주문 mock이 예시와 완전히 일치한다."
+    },
+    "2026-08-28": {
+      "name": "mock_falling",
+      "forecast": "falling",
+      "quotes": "normal",
+      "기대": "최소 매입(D=2)"
+    },
+    "2026-09-04": {
+      "name": "mock_uncertain",
+      "forecast": "uncertain",
+      "quotes": "normal",
+      "기대": "② 컨텍스트 루프 후 보수·기본 2안만 (공격 금지)"
+    },
+    "2026-09-11": {
+      "name": "grade_spread_wide",
+      "forecast": "rising",
+      "quotes": "wide",
+      "기대": "중품 비중 상승",
+      "비고": "예측을 rising으로 붙인 건 의도적이다 — 하락장이면 수량이 D=2로 깎여 등급 배분을 볼 여지가 줄어든다. 수량이 충분한 날에 등급만 흔들어야 ⑤ 노드가 시험된다."
+    }
+  }
+}
