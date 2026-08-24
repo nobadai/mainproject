@@ -105,6 +105,23 @@ def get_projected_cash_min(as_of: date, horizon_days: int) -> int:
     return mocks.load_cash(as_of, horizon_days)
 
 
+def get_snapshot_extras(item: str, as_of: date) -> dict:
+    """T0 스냅샷 중 위 6개 포트로 오지 않는 입력 3종 (상세설계 §3 State).
+
+    ``item_mix_ratio`` · ``contract_price`` · ``margin_defense_floor_rate``.
+
+    ⚠️ **IO명세 §1의 계약 포트가 아니다.** §1은 6개를 규정하고 이 함수는 거기 없다.
+    상세설계 §11 선행확인이 "T0 스냅샷에 item_mix_ratio·contract_price·방어선 2값 포함
+    (현서님 협의)"를 **미완료**로 두고 있어, 형식이 정해지기 전까지의 잠정 경계다.
+
+    그럼에도 ports에 두는 이유: 이것도 **외부 입력**이라 규칙 2("외부 데이터는 ports 함수로만
+    받는다")가 적용된다. state.py가 mocks를 직접 읽으면 mock → 스냅샷 → DB 교체가 ports
+    안쪽에서 끝나지 않는다. 스냅샷 형식이 확정되면 이 함수가 §1의 7번째 항목이 되거나,
+    기존 포트에 흡수되어 사라진다.
+    """
+    return mocks.load_snapshot_extras(item, as_of)
+
+
 def get_context_docs(item: str, as_of: date, doc_types: list[str]) -> list[dict]:
     """문서 컨텍스트 로드. 검색이 아니라 **선택 로드**다 (② 노드, uncertain일 때만 호출).
 

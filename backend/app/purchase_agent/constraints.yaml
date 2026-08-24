@@ -28,6 +28,11 @@ situation:
   #   라는 하나의 질문으로 묶이고, 여기가 좁으면 그 앞은 대개 더 좁아 상한 검사도 겸한다.
   # 비단조 예측에서 과신이 관찰되면 백테스트 보정 대상이다.
   ci_judgment_day: 14               # D+N. 코드에 박지 않는다 — 규칙 7
+  # 상황별 신뢰도. 구간이 좁은 날은 판단 재료가 확실하다. uncertain은 ② 문서 루프를
+  # 거쳐도 구간 폭 자체가 넓으므로 high를 주지 않는다.
+  confidence_by_situation:
+    stable: high
+    uncertain: medium
 
 # ③ draft_plan — 수량 = 확정수요 × 커버일수 D
 coverage_days:
@@ -42,6 +47,10 @@ coverage_days:
 triggers:
   pre_purchase_rise_rate: 0.10      # +10% 이상 상승 예상 시 timing 축 진입
   grade_spread_widening_ratio: 0.50 # 평시 대비 +50% 확대 시 중품 활용 검토
+  # 분할 진입은 "총수량 임계 초과 OR 지속상승 궤적" 둘 중 하나면 열린다 (정의서 §3.5.1).
+  # 이 값은 그중 총수량 쪽 임계다 (백로그 임계표 "분할 진입 | ≥20,000kg").
+  # ① 시점엔 아직 수량이 없으므로 최대 D(공격)로 추정한 총량과 비교한다.
+  split_entry_qty_kg: 20000
 
 # mix 축 게이팅 — 한 품목이 이 비중을 넘으면 품목 조합의 의미가 사라진다
 concentration:
@@ -56,11 +65,27 @@ variant:
 costs:
   delivery_cost_per_kg: 10          # 가락 → 창고 배송비. 상수, 전 시나리오 동일
 
+# ③ 하드 제약 — 매입액이 향후 최저 예상 현금을 다 쓰지 않게 막는다
+cash:
+  # 백로그 임계표 "현금 상한 | 가용현금 비율 | 60%".
+  # base_projected_cash_min에 곱해 매입 가능액 상한을 만든다 (IO명세 §1-⑤).
+  max_purchase_ratio: 0.60
+  # 최저 현금을 몇 일 지평으로 볼 것인가. IO명세 §1-⑤ "N >= 회수주기(D+30)".
+  horizon_days: 30
+
 grade:
   mid_grade_shelf_ratio: 0.6        # 중품 소진 한계 = 상품 한계일 × 0.6 (등급-신선도 연동)
 
 demand:
-  safety_stock_ratio: 0.20          # 확정주문 총량 + 안전재고 20% (IO명세 §1-④)
+  # 확정주문 조회 창(일). ③이 이 창의 평균으로 일평균 확정수요를 낸다 (상세설계 §4-③).
+  # 스냅샷을 만들 때와 수요를 계산할 때가 같은 창이어야 한다 — 두 곳이 각자 14를 들고
+  # 있으면 한쪽만 바뀌는 순간 수량이 조용히 틀어진다. 그래서 여기 단일 소스로 둔다.
+  order_window_days: 14
+  # ⚠️ legacy — ③ draft_plan에서 곱하지 않는다.
+  # 상세설계 §4-③: 기존 "확정주문 + 안전재고 20%"는 커버일수 D≈2.4의 특수 케이스였고
+  # D 방식이 그것을 일반화했다. 둘 다 적용하면 이중 계상이 된다.
+  # 값을 지우지 않는 이유: 백테스트에서 구방식과 D 방식을 비교할 때 참조한다.
+  safety_stock_ratio: 0.20
 
 warehouse:
   rental_cap_ratio: 0.30            # 외부임차 한도 = 총용량 × 30% (IO명세 §1-③)
@@ -70,6 +95,12 @@ context:
 
 allocation:
   item_split_rule: "원안비율"         # 품목 안분 기본 규칙. 예외 = 예측신뢰도 가중
+  # ③이 수량을 금액으로 환산할 때와 ⑤ 스텁이 배분할 때 쓰는 기준 등급.
+  # 두 노드가 다른 등급을 보면 ③의 현금 상한과 ⑦의 금액 검사가 어긋난다.
+  reference_grade: "상"
+  # 허용 축이 여럿일 때 공격안이 가져가는 축. 선매입은 "언제 살 것인가"를 정하는
+  # 결정이라 timing이 자연스럽다. 축이 하나뿐인 날엔 이 배정이 일어나지 않는다.
+  aggressive_axis: "timing"
 
 # 품목별 보관한계(일). 단일 확정값이 있는 것만 채운다 — 규칙 3
 shelf_life_days:

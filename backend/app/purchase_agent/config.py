@@ -23,6 +23,7 @@ _REQUIRED_SECTIONS = (
     "concentration",
     "variant",
     "costs",
+    "cash",
     "grade",
     "demand",
     "warehouse",

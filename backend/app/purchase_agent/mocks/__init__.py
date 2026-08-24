@@ -13,6 +13,7 @@ from app.purchase_agent.mocks._load import (
     load_inventory,
     load_orders,
     load_quotes,
+    load_snapshot_extras,
     scenario_for,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "load_inventory",
     "load_orders",
     "load_quotes",
+    "load_snapshot_extras",
     "scenario_for",
 ]

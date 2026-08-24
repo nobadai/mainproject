@@ -5,6 +5,7 @@ description = "FastAPI backend for mainproject"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi[standard]==0.141.1",
+  "langgraph>=1.2.11",
   "psycopg[binary]",
   "python-dotenv",
   "pyyaml>=6.0.3",
@@ -24,6 +25,13 @@ package = false
 [tool.ruff]
 line-length = 100
 exclude = [".venv", "venv", "deploy"]
+
+[tool.ruff.lint]
+# line-length는 설정만으로 강제되지 않는다 — E501이 ruff 기본 select에 없어서
+# `ruff check`가 긴 줄을 그냥 통과시킨다. CLAUDE.md가 "line-length 100"을 규율로
+# 적어둔 이상 실제로 걸리게 한다. select가 아니라 extend-select인 이유: 기본 규칙
+# (TRY/FURB/UP/RUF 등)을 덮어쓰지 않고 더하기만 하기 위해서다.
+extend-select = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

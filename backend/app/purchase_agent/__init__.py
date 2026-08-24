@@ -3,3 +3,6 @@
 read-only 에이전트 — 매일 as_of 기준으로 매입 시나리오 2~3안을 생성해 반환한다.
 "사라"고 결정하지 않는다. DB에 쓰지 않는다.
 """
+
+#: 출력 meta.agent_version. 설계 문서 판번호(v1.1)와 맞춘다.
+AGENT_VERSION = "v1.1"

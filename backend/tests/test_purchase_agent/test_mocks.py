@@ -127,7 +127,8 @@ def test_agent_sources_never_read_the_wall_clock() -> None:
 ITEM_KEYED_FILES = [
     path
     for path in MOCK_FILES
-    if path.name.startswith(("forecast_", "quotes_")) or path.name in {"inventory.json", "orders.json"}
+    if path.name.startswith(("forecast_", "quotes_"))
+    or path.name in {"inventory.json", "orders.json"}
 ]
 
 
@@ -600,9 +601,8 @@ def test_constraints_section_must_be_a_non_empty_mapping(
     ``pending: []``이면 ``pending["inbound_lead_days"]``가 노드 안에서 늦게 터지고,
     그때는 어느 파일이 문제인지 알기 어렵다.
     """
-    source = (Path(__file__).resolve().parents[2] / "app/purchase_agent/constraints.yaml").read_text(
-        encoding="utf-8"
-    )
+    live = Path(__file__).resolve().parents[2] / "app/purchase_agent/constraints.yaml"
+    source = live.read_text(encoding="utf-8")
     broken = tmp_path / "constraints.yaml"
     broken.write_text(
         source.replace("pending:\n", f"pending: {broken_value}\n_pending_disabled:\n"),

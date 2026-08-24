@@ -107,7 +107,8 @@ def load_inventory(item: str, as_of: date) -> dict[str, Any]:
     """IO명세 §1-③ 형태. ``stocked_at``은 오프셋에서 만든다."""
     _require_item(item)
     scenario_for(as_of)  # 앵커일 검증 — 6개 포트가 같은 날짜 규칙을 따르게 한다
-    block = _pick(_pick(_read("inventory.json"), "items", "inventory.json"), item, "inventory.json.items")
+    items = _pick(_read("inventory.json"), "items", "inventory.json")
+    block = _pick(items, item, "inventory.json.items")
     return {
         "as_of": as_of.isoformat(),
         "item": item,
@@ -140,7 +141,9 @@ def load_orders(item: str, as_of: date, days: int) -> dict[str, Any]:
             "qty_kg": order["qty_kg"],
             "due_date": (as_of + timedelta(days=order["due_date_offset_days"])).isoformat(),
         }
-        for order in _pick(_pick(_read("orders.json"), "items", "orders.json"), item, "orders.json.items")
+        for order in _pick(
+            _pick(_read("orders.json"), "items", "orders.json"), item, "orders.json.items"
+        )
         if 0 <= order["due_date_offset_days"] <= days
     ]
     return {
@@ -174,10 +177,42 @@ def filter_by_published_at(records: list[dict[str, Any]], as_of: date) -> list[d
     for record in records:
         published_at = record.get("published_at")
         if not published_at:
-            raise ValueError(f"document {record.get('doc_id')!r} has no published_at; refusing load")
+            doc_id = record.get("doc_id")
+            raise ValueError(f"document {doc_id!r} has no published_at; refusing load")
         if date.fromisoformat(published_at) <= as_of:
             kept.append(record)
     return kept
+
+
+def load_snapshot_extras(item: str, as_of: date) -> dict[str, Any]:
+    """ports 6개로 오지 않는 T0 스냅샷 입력 3종 (상세설계 §3 State).
+
+    ``item_mix_ratio`` · ``contract_price`` · ``margin_defense_floor_rate``.
+    형식은 아직 팀 미확정이라(상세설계 §11 선행확인) 전부 ``ASSUMED`` 등급이다 —
+    ``snapshot.json``의 ``_evidence_grade``에 근거를 적어두었다.
+
+    방어선은 구간별 2값인데 State는 float 하나를 받으므로 현재 구간 값을 골라 준다.
+    """
+    _require_item(item)
+    scenario_for(as_of)
+    data = _read("snapshot.json")
+    floor = _pick(data, "margin_defense_floor_rate", "snapshot.json")
+    phase = _pick(floor, "current_phase", "snapshot.json.margin_defense_floor_rate")
+    return {
+        "item_mix_ratio": {
+            name: ratio
+            for name, ratio in _pick(data, "item_mix_ratio", "snapshot.json").items()
+            if not name.startswith("_")
+        },
+        "contract_price": _pick(
+            _pick(data, "contract_price", "snapshot.json"), item, "snapshot.json.contract_price"
+        ),
+        "margin_defense_floor_rate": _pick(
+            _pick(floor, "by_phase", "snapshot.json.margin_defense_floor_rate"),
+            phase,
+            "snapshot.json.margin_defense_floor_rate.by_phase",
+        ),
+    }
 
 
 def load_documents(item: str, as_of: date, doc_types: list[str]) -> list[dict[str, Any]]:

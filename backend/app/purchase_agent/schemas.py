@@ -69,6 +69,10 @@ StrategyType = Literal["quantity", "timing", "mix"]
 RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금", "문서ID"]
 Confidence = Literal["high", "medium", "low"]
 Situation = Literal["stable", "uncertain"]
+#: market 고정값 (IO명세 §1-②, 8/20 결정 — 지방시장 데이터 파편화로 제외).
+#: 아래 ``Market`` Literal과 **같은 값이어야 한다** — 검사 코드가 문자열을 필요로 해서
+#: 상수로도 노출한다. 둘이 갈라지지 않는지는 계약 테스트가 확인한다.
+FIXED_MARKET = "가락"
 Market = Literal["가락"]
 
 #: 근거 등급 4단계 (정의서 §7.3). 서열: OFFICIAL > VENDOR > SIM_FIXED > ASSUMED
@@ -276,21 +280,16 @@ class PurchaseProposal(BaseModel):
                 raise ValueError("split_plan seq 1 date must equal meta.as_of")
         return self
 
-    @model_validator(mode="after")
-    def validate_axis_diversity(self) -> "PurchaseProposal":
-        """전 안이 동일 축이면 반려 (IO명세 §2 strategy_type 규약).
-
-        3안을 냈는데 전부 quantity면 선택지가 아니라 같은 안의 크기 변주다. 안이 1개일 때는
-        비교 대상이 없으므로 적용하지 않는다.
-
-        그날 ``allowed_axes`` 목록과의 대조는 ① 노드가 계산한 런타임 값이 있어야 하므로
-        여기서 하지 않는다 — self_check(⑦) 몫이다.
-        """
-        if len(self.scenarios) < 2:
-            return self
-        if len({scenario.strategy_type for scenario in self.scenarios}) == 1:
-            raise ValueError("scenarios must not all share the same strategy_type")
-        return self
+    # 전 안 동일 축 검사는 여기 없다 — ⑦ self_check.check_axis_diversity() 몫이다.
+    #
+    # 정의서 §3.5.1이 "3) 코드가 최종 중복 검사 — 전 안이 동일 축이면 반려 (self_check)"로
+    # 소유자를 명시한다. 판정에 그날 ``allowed_axes``가 필요한 게 이유다: 하락일처럼 timing
+    # 트리거가 미달하고 mix가 편중으로 게이팅되면 남는 축이 quantity 하나뿐이라, 3안이 전부
+    # quantity인 게 정상이다. 출력 JSON만 보고는 그날 축이 하나였는지 알 수 없으므로 스키마는
+    # 이 판정을 내릴 자격이 없다.
+    #
+    # (이력: Epic 1에서 여기에 두었다가 Epic 2에서 mock_falling이 스키마에 막혀 제안 자체를
+    # 만들지 못하는 것으로 반증됐다.)
 
     @model_serializer(mode="wrap")
     def _omit_null_no_proposal_reason(

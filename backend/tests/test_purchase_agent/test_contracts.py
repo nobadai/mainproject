@@ -25,6 +25,19 @@ from app.purchase_agent import ports
 from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
 
+#: IO명세 §1이 규정한 계약 포트 6개. 이 목록이 곧 외부 입력 경계다.
+CONTRACT_PORTS = (
+    "get_forecast",
+    "get_market_quotes",
+    "get_inventory",
+    "get_confirmed_orders",
+    "get_projected_cash_min",
+    "get_context_docs",
+)
+
+#: 계약 밖 잠정 포트. T0 스냅샷 형식 확정 전까지의 임시 경계다 (상세설계 §11 선행확인).
+PROVISIONAL_PORTS = ("get_snapshot_extras",)
+
 PORT_FUNCTIONS = (
     ports.get_forecast,
     ports.get_market_quotes,
@@ -32,6 +45,7 @@ PORT_FUNCTIONS = (
     ports.get_confirmed_orders,
     ports.get_projected_cash_min,
     ports.get_context_docs,
+    ports.get_snapshot_extras,
 )
 
 
@@ -91,7 +105,8 @@ def test_evidence_grade_accepts_all_four_levels() -> None:
     for grade in ("OFFICIAL", "VENDOR", "SIM_FIXED", "ASSUMED"):
         data = _proposal()
         data["scenarios"][0]["rationale"][0]["evidence_grade"] = grade
-        assert PurchaseProposal.model_validate(data).scenarios[0].rationale[0].evidence_grade == grade
+        proposal = PurchaseProposal.model_validate(data)
+        assert proposal.scenarios[0].rationale[0].evidence_grade == grade
 
 
 def test_evidence_grade_rejects_unknown_level() -> None:
@@ -261,28 +276,10 @@ def test_ref_id_is_trimmed() -> None:
     assert proposal.scenarios[0].rationale[0].ref_id == "FC-K-0821"
 
 
-def test_all_scenarios_sharing_one_axis_is_rejected() -> None:
-    """전 안 동일 축이면 반려 (IO명세 §2). 같은 안의 크기 변주는 선택지가 아니다."""
-    data = _proposal()
-    base = data["scenarios"][0]
-    data["scenarios"] = [{**base, "label": "보수"}, {**base, "label": "기본"}]
-    with pytest.raises(ValidationError, match="same strategy_type"):
-        PurchaseProposal.model_validate(data)
 
 
-def test_distinct_axes_are_accepted() -> None:
-    data = _proposal()
-    base = data["scenarios"][0]
-    data["scenarios"] = [
-        {**base, "label": "보수"},
-        {**base, "label": "기본", "strategy_type": "timing"},
-    ]
-    assert len(PurchaseProposal.model_validate(data).scenarios) == 2
 
 
-def test_single_scenario_skips_axis_diversity() -> None:
-    """안이 1개면 비교 대상이 없다 — 축 다양성 조항을 적용하지 않는다."""
-    assert len(PurchaseProposal.model_validate(_proposal()).scenarios) == 1
 
 
 def test_frozen_blocks_field_reassignment() -> None:
@@ -468,13 +465,28 @@ def test_input_values_are_not_stored_as_constants() -> None:
 # --------------------------------------------------------------------------- ports
 
 
-def test_ports_module_exposes_exactly_six_functions() -> None:
-    public = [
+def test_ports_module_exposes_the_contract_six_and_nothing_unlabelled() -> None:
+    """IO명세 §1의 6개는 반드시 있고, 그 밖의 포트는 **잠정임이 명시**돼야 한다.
+
+    개수만 세면 계약 포트가 하나 사라지고 다른 게 생겨도 통과한다. 이름으로 못 박는다.
+    잠정 포트를 허용하는 이유: T0 스냅짓 형식이 아직 팀 미확정이라(§11 선행확인)
+    ``get_snapshot_extras``가 §1 밖에 있다. 대신 docstring이 그 사실을 밝혀야 한다.
+    """
+    public = {
         name
         for name, value in vars(ports).items()
         if inspect.isfunction(value) and not name.startswith("_")
-    ]
-    assert len(public) == 6, public
+    }
+    assert set(CONTRACT_PORTS) <= public
+    assert public - set(CONTRACT_PORTS) == set(PROVISIONAL_PORTS), public
+
+
+@pytest.mark.parametrize("name", PROVISIONAL_PORTS)
+def test_provisional_port_declares_that_it_is_outside_the_contract(name: str) -> None:
+    """잠정 포트는 "IO명세 §1의 계약 포트가 아니다"를 docstring에 적어야 한다."""
+    doc = getattr(ports, name).__doc__ or ""
+    assert "IO명세 §1" in doc
+    assert "계약 포트가 아니다" in doc
 
 
 @pytest.mark.parametrize("port", PORT_FUNCTIONS, ids=lambda fn: fn.__name__)
