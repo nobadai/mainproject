@@ -115,7 +115,8 @@ FORBIDDEN_SCENARIO_INPUTS: frozenset[str] = frozenset(
 )
 
 _STRATEGY_TYPES: frozenset[str] = frozenset({"quantity", "timing", "mix"})
-_STANCES: frozenset[str] = frozenset({"보수", "기준", "공격"})
+# "기본" = 매입 명세 v1.1 label 어휘. 계약 stance("기준")와 동의어로 함께 수용한다.
+_STANCES: frozenset[str] = frozenset({"보수", "기준", "기본", "공격"})
 
 
 @dataclass(frozen=True)

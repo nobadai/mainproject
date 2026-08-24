@@ -21,7 +21,7 @@ RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 CheckKind = Literal["hard", "soft"]
 Verdict = Literal["ok", "conditional", "reject", "skipped"]
 Severity = Literal["LOW", "MEDIUM", "HIGH"]
-EvidenceGrade = Literal["OFFICIAL", "ASSUMED", "SIM_FIXED", "ESTIMATED"]
+EvidenceGrade = Literal["OFFICIAL", "VENDOR", "SIM_FIXED", "ASSUMED"]
 
 
 class EvidenceIn(BaseModel):
