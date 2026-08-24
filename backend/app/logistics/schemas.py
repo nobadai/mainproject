@@ -15,6 +15,8 @@ ConstraintCode = Literal[
     "LOG-H03",
     "LOG-H04",
     "LOG-H05",
+    "N17",
+    "N17-LOT",
     "AS_OF_MISMATCH",
     "REQUIRED_LOGISTICS_SNAPSHOT_MISSING",
 ]
@@ -130,7 +132,7 @@ class InventoryLotSnapshot(BaseModel):
     lot_id: str = Field(min_length=1)
     item: str = Field(min_length=1)
     available_qty_kg: Decimal = Field(ge=0)
-    remaining_freshness_days: int | None = Field(default=None, ge=0)
+    remaining_freshness_days: int | None = None
     status: str = Field(min_length=1)
     storage_zone: str | None = None
 
@@ -289,7 +291,7 @@ class LotConstraint(BaseModel):
     lot_id: str
     item: str
     available_qty_kg: Decimal = Field(ge=0)
-    remaining_freshness_days: int | None = Field(default=None, ge=0)
+    remaining_freshness_days: int | None = None
     status: str
 
 
