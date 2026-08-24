@@ -19,6 +19,15 @@ situation:
   # 경계값 0.08 자신은 uncertain이다 ("넘으면"이 아니라 "이상")
   ci_width_threshold: 0.08          # ±8%
   ci_width_comparison: ">="         # 이 연산으로 임계와 비교하면 uncertain
+  # 판정 기준일 = D+14 단일 (상세설계 §4-①, Epic 2 확정).
+  #   ci_width = (daily[13].upper - daily[13].lower) / daily[13].predicted
+  #   daily가 D+1부터 시작하므로 D+14는 index 13이다 — 이 매핑이 어긋나면 판정이 통째로 밀린다.
+  # 왜 "전 구간 최대"가 아닌가: ML 신뢰구간은 지평에 단조 확대되는 게 일반적이라 전 구간
+  #   최대는 사실상 D+18의 ci가 되고, 판정이 꼬리에 인질로 잡혀 uncertain이 남발된다
+  #   (= 공격안 소멸). D+14는 rise_rate_2w와 시점이 같아 "2주 후 전망이 얼마나 확실한가"
+  #   라는 하나의 질문으로 묶이고, 여기가 좁으면 그 앞은 대개 더 좁아 상한 검사도 겸한다.
+  # 비단조 예측에서 과신이 관찰되면 백테스트 보정 대상이다.
+  ci_judgment_day: 14               # D+N. 코드에 박지 않는다 — 규칙 7
 
 # ③ draft_plan — 수량 = 확정수요 × 커버일수 D
 coverage_days:

@@ -447,6 +447,16 @@ def test_ci_width_boundary_is_explicit() -> None:
     assert situation["ci_width_comparison"] == ">="
 
 
+def test_ci_judgment_day_is_declared() -> None:
+    """상세설계 §4-①: 판정 기준일 = D+14 단일. 코드에 박지 않는다 (규칙 7).
+
+    "어느 날의 ci_width로 판정하는가"가 오래 미정이었고, 그동안 mock이 전 구간 밴드를
+    고르게 유지해 우회했다. 이제 값이 있으므로 계약으로 고정한다.
+    """
+    situation = _constraints()["situation"]
+    assert situation["ci_judgment_day"] == 14
+
+
 def test_input_values_are_not_stored_as_constants() -> None:
     """계약단가·방어선은 재무·영업이 주는 **입력값**이지 매입 상수가 아니다 (§7 각주)."""
     text = CONSTRAINTS_PATH.read_text(encoding="utf-8")

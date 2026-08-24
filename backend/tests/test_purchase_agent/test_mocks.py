@@ -10,6 +10,7 @@ mock은 장식용 샘플이 아니라 **노드 단위 테스트 4종의 입력**
 """
 
 import json
+import operator
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -149,6 +150,55 @@ def test_anchor_days_match_the_scenarios_file() -> None:
     ]
 
 
+#: 시나리오별 기대 판정. 판정은 **기준일(D+14) 한 줄**로 내려진다 (상세설계 §4-①).
+SITUATION_BY_ANCHOR = (
+    (RISING, "stable"),
+    (FALLING, "stable"),
+    (UNCERTAIN, "uncertain"),
+    (SPREAD_WIDE, "stable"),
+)
+
+#: constraints의 ``ci_width_comparison`` 문자열을 실제 연산으로. 테스트가 비교 방향까지
+#: 파일에서 읽어야 임계와 연산이 따로 노는 사고를 잡을 수 있다.
+_COMPARISONS = {">=": operator.ge, ">": operator.gt}
+
+
+def _judgment_row(item: str, as_of: date) -> dict:
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    return ports.get_forecast(item, as_of)["daily"][day - 1]
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_judgment_day_row_is_the_fourteenth_calendar_day(item: str, as_of: date) -> None:
+    """``ci_judgment_day: 14`` → ``daily[13]``. 이 매핑은 daily가 D+1 시작이라는 데 걸려 있다.
+
+    daily 시작이 D+0으로 바뀌면 index 13은 D+13이 되고, 상황 분류가 하루 밀린 채 조용히
+    돈다. 그래서 index를 믿지 않고 **날짜로 되짚어** 확인한다.
+    """
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    assert _judgment_row(item, as_of)["date"] == (as_of + timedelta(days=day)).isoformat()
+
+
+@pytest.mark.parametrize(("as_of", "expected"), SITUATION_BY_ANCHOR, ids=lambda v: str(v))
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_judgment_day_ci_width_classifies_each_scenario(
+    item: str, as_of: date, expected: str
+) -> None:
+    """실제 판정 경로(기준일 한 줄)로 계산해도 시나리오 이름과 같은 결과가 나오는가.
+
+    아래 ``max``/``min`` 검사는 전 구간을 보므로 더 강하지만, ① 노드가 쓸 식은 이것이다.
+    둘을 함께 두는 이유: 전 구간 검사는 데이터가 고르다는 걸, 이 검사는 **확정된 규칙이
+    의도한 판정을 낸다**는 걸 각각 지킨다.
+    """
+    situation = load_constraints()["situation"]
+    exceeds = _COMPARISONS[situation["ci_width_comparison"]]
+    row = _judgment_row(item, as_of)
+    ci_width = (row["upper"] - row["lower"]) / row["predicted"]
+    verdict = "uncertain" if exceeds(ci_width, situation["ci_width_threshold"]) else "stable"
+    assert verdict == expected
+
+
 def _ci_widths(item: str, as_of: date) -> list[float]:
     """ci_width = (upper − lower) / predicted — 상세설계 §4-①."""
     daily = ports.get_forecast(item, as_of)["daily"]
@@ -156,9 +206,10 @@ def _ci_widths(item: str, as_of: date) -> list[float]:
 
 
 def _rise_rate_2w(item: str, as_of: date) -> float:
-    """2주 후 상승률. daily는 D+1부터라 index 13 = D+14."""
+    """2주 후 상승률. 판정 기준일과 **같은 날**을 본다 — 상세설계 §4-①이 든 D+14 채택 근거가
+    "상황 분류와 상승률이 하나의 질문이 된다"였으므로, 여기서도 같은 상수를 읽는다."""
     forecast = ports.get_forecast(item, as_of)
-    return forecast["daily"][13]["predicted"] / forecast["current_price"] - 1
+    return _judgment_row(item, as_of)["predicted"] / forecast["current_price"] - 1
 
 
 def _predicted(item: str, as_of: date) -> list[int]:
