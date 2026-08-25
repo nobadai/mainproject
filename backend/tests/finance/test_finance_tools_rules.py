@@ -53,6 +53,21 @@ def test_procurement_runtime_ready_can_return_fail(finance_state):
     assert "FIN-H01_MINIMUM_CASH_BALANCE" in result["hard_constraints"]
 
 
+def test_procurement_soft_warning_does_not_change_pass_verdict(finance_state):
+    result = evaluate_finance_runtime_rules(
+        as_of=date(2025, 12, 31),
+        finance_state=finance_state,
+        has_cost_mismatch=True,
+        projected_cash_min=Decimal(19052633),
+        minimum_cash_balance=Decimal(12941280),
+        max_feasible_amount=Decimal(6111353),
+    )
+
+    assert result["runtime_status"] == "READY"
+    assert result["verdict"] == "PASS"
+    assert result["soft_warnings"] == ["COST_MISMATCH"]
+
+
 def test_procurement_runtime_fails_closed_on_as_of_mismatch(finance_state):
     result = evaluate_finance_runtime_rules(
         as_of=date(2026, 8, 21),
@@ -61,7 +76,7 @@ def test_procurement_runtime_fails_closed_on_as_of_mismatch(finance_state):
     )
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
-    assert result["verdict"] == "REVIEW_REQUIRED"
+    assert result["verdict"] is None
     assert result["max_feasible_amount_krw"] is None
     assert result["hard_constraints"] == ["AS_OF_MISMATCH"]
     assert result["soft_warnings"] == ["COST_MISMATCH"]
@@ -74,7 +89,7 @@ def test_procurement_runtime_requires_finance_state():
     )
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
-    assert result["verdict"] == "REVIEW_REQUIRED"
+    assert result["verdict"] is None
     assert result["hard_constraints"] == ["REQUIRED_FINANCE_STATE_MISSING"]
 
 
@@ -89,7 +104,7 @@ def test_sales_rule_keeps_priority_unresolved_without_policy(finance_state):
     )
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
-    assert result["verdict"] == "REVIEW_REQUIRED"
+    assert result["verdict"] is None
     assert result["hard_constraints"] == ["REQUIRED_FINANCE_POLICY_MISSING"]
 
 

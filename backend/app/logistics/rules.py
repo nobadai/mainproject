@@ -20,10 +20,10 @@ class LogisticsRuleResult(TypedDict):
     calculation_ready: bool
 
 
-def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict:
+def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None:
     """Runtime readiness와 개별 Hard Check 상태를 분리해 최종 판정을 집계한다."""
     if result["runtime_status"] != "READY":
-        return "REVIEW_REQUIRED"
+        return None
     statuses = {constraint.status for constraint in result["hard_constraints"]}
     if "FAIL" in statuses:
         return "FAIL"

@@ -21,6 +21,7 @@ from app.logistics.scenario_engine import (
     run_logistics_sales_scenario,
 )
 from app.logistics.schemas import (
+    FinalVerdict,
     InboundConstraints,
     InventoryLogisticsSnapshot,
     LogisticsAgentRunResponse,
@@ -51,6 +52,7 @@ def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurem
         as_of=request.meta.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
+        verdict=response.verdict,
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )
@@ -99,6 +101,7 @@ def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesRespons
         as_of=request.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
+        verdict=response.verdict,
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )
@@ -140,6 +143,7 @@ def list_logistics_runs(
     cycle: LogisticsCycle | None = None,
     as_of: date | None = None,
     runtime_status: RuntimeStatus | None = None,
+    verdict: FinalVerdict | None = None,
     limit: int = 100,
 ) -> list[LogisticsAgentRunResponse]:
     """UI 조회용 Logistics Agent 실행이력 목록을 반환한다."""
@@ -147,6 +151,7 @@ def list_logistics_runs(
         cycle=cycle,
         as_of=as_of,
         runtime_status=runtime_status,
+        verdict=verdict,
         limit=limit,
     )
     return [LogisticsAgentRunResponse.model_validate(row) for row in rows]

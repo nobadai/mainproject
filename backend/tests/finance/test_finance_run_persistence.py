@@ -23,8 +23,9 @@ def _run_row() -> dict[str, object]:
         "as_of": date(2026, 8, 21),
         "snapshot_id": "FIN-DAY30-LOAN",
         "runtime_status": "RUNTIME_NOT_READY",
+        "verdict": None,
         "request_payload": {"meta": {"as_of": "2026-08-21"}},
-        "response_payload": {"runtime_status": "RUNTIME_NOT_READY"},
+        "response_payload": {"runtime_status": "RUNTIME_NOT_READY", "verdict": None},
         "created_at": datetime(2026, 8, 21, tzinfo=UTC),
     }
 
@@ -40,6 +41,7 @@ def test_save_finance_agent_run_uses_jsonb_and_preserves_metadata():
             as_of=date(2026, 8, 21),
             snapshot_id="FIN-DAY30-LOAN",
             runtime_status="RUNTIME_NOT_READY",
+            verdict=None,
             request_payload=row["request_payload"],
             response_payload=row["response_payload"],
         )
@@ -52,8 +54,9 @@ def test_save_finance_agent_run_uses_jsonb_and_preserves_metadata():
         "FIN-DAY30-LOAN",
         "RUNTIME_NOT_READY",
     )
-    assert isinstance(params[5], Jsonb)
+    assert params[5] is None
     assert isinstance(params[6], Jsonb)
+    assert isinstance(params[7], Jsonb)
 
 
 def test_list_finance_agent_runs_passes_filters_and_limit():
@@ -66,6 +69,7 @@ def test_list_finance_agent_runs_passes_filters_and_limit():
             cycle="PROCUREMENT",
             as_of=date(2026, 8, 21),
             runtime_status="RUNTIME_NOT_READY",
+            verdict="FAIL",
             limit=25,
         )
 
@@ -74,8 +78,22 @@ def test_list_finance_agent_runs_passes_filters_and_limit():
         "PROCUREMENT",
         date(2026, 8, 21),
         "RUNTIME_NOT_READY",
+        "FAIL",
         25,
     ]
+
+
+def test_save_finance_agent_run_rejects_verdict_metadata_mismatch():
+    with pytest.raises(ValueError, match="must match"):
+        save_finance_agent_run(
+            cycle="PROCUREMENT",
+            as_of=date(2026, 8, 21),
+            snapshot_id=None,
+            runtime_status="READY",
+            verdict="PASS",
+            request_payload={},
+            response_payload={"verdict": "FAIL"},
+        )
 
 
 def test_get_finance_agent_run_raises_lookup_error():
@@ -104,6 +122,8 @@ def test_as_of_mismatch_response_is_saved(finance_context, purchase_payload):
     assert response.hard_constraints == ["AS_OF_MISMATCH"]
     saved = save_run.call_args.kwargs
     assert saved["runtime_status"] == "RUNTIME_NOT_READY"
+    assert saved["verdict"] is None
+    assert saved["response_payload"]["verdict"] is None
     assert saved["response_payload"]["hard_constraints"] == ["AS_OF_MISMATCH"]
     assert saved["response_payload"]["soft_warnings"] == []
 

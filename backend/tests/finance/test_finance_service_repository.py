@@ -40,6 +40,8 @@ def test_procurement_service_returns_one_band_without_cost_warning(
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
+    assert saved["verdict"] == "PASS"
+    assert saved["response_payload"]["verdict"] == "PASS"
     assert saved["snapshot_id"] is None
     assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
     assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "7125000"
@@ -71,9 +73,11 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
     ):
         response = run_finance_procurement(request)
     assert response.runtime_status == "RUNTIME_NOT_READY"
-    assert response.verdict == "REVIEW_REQUIRED"
+    assert response.verdict is None
     assert response.hard_constraints == ["REQUIRED_FINANCE_STATE_MISSING"]
     assert save_run.call_args.kwargs["runtime_status"] == "RUNTIME_NOT_READY"
+    assert save_run.call_args.kwargs["verdict"] is None
+    assert save_run.call_args.kwargs["response_payload"]["verdict"] is None
 
     with (
         patch(
@@ -108,6 +112,8 @@ def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "SALES"
     assert saved["runtime_status"] == "READY"
+    assert saved["verdict"] == "FAIL"
+    assert saved["response_payload"]["verdict"] == "FAIL"
     assert saved["request_payload"]["approved_purchase"]["total_amount_krw"] == "18000000"
     assert saved["response_payload"]["soft_warnings"] == []
 

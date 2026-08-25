@@ -315,7 +315,7 @@ class LogisticsProcurementResponse(LLMResponseFields):
     snapshot_id: str | None
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
-    verdict: FinalVerdict
+    verdict: FinalVerdict | None
     band: LogisticsBand
     inbound_constraints: InboundConstraints
     hard_constraints: list[ConstraintResult]
@@ -394,7 +394,7 @@ class LogisticsSalesResponse(LLMResponseFields):
     snapshot_id: str | None
     approval_id: str
     runtime_status: RuntimeStatus
-    verdict: FinalVerdict
+    verdict: FinalVerdict | None
     daily_outbound_capacity_kg: Decimal | None
     lot_constraints: list[LotConstraint]
     hard_constraints: list[ConstraintResult]
@@ -409,6 +409,7 @@ class LogisticsAgentRunResponse(BaseModel):
     as_of: date
     snapshot_id: str | None
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     request_payload: dict[str, object]
     response_payload: dict[str, object]
     created_at: datetime

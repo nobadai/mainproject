@@ -399,7 +399,7 @@ class FinanceProcurementResponse(LLMResponseFields):
     snapshot_id: str | None
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
-    verdict: FinalVerdict
+    verdict: FinalVerdict | None
     band: FinanceBand
     base_projected_cash_min: Decimal | None
     base_cash_priority: CashPriority | None
@@ -467,7 +467,7 @@ class FinanceSalesResponse(LLMResponseFields):
     snapshot_id: str | None
     approval_id: str
     runtime_status: RuntimeStatus
-    verdict: FinalVerdict
+    verdict: FinalVerdict | None
     base_cash_priority: CashPriority | None
     sales_cash_priority: CashPriority | None
     collection_preferences: list[CollectionPreference]
@@ -485,6 +485,7 @@ class FinanceAgentRunResponse(BaseModel):
     as_of: date
     snapshot_id: str | None
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     request_payload: dict[str, object]
     response_payload: dict[str, object]
     created_at: datetime

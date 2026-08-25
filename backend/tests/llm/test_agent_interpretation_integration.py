@@ -145,7 +145,7 @@ def test_finance_hard_constraint_uses_template_without_provider_call():
         as_of="2025-12-31",
         snapshot_id=None,
         runtime_status="RUNTIME_NOT_READY",
-        verdict="REVIEW_REQUIRED",
+        verdict=None,
         band=FinanceBand(max_feasible_amount_krw=None),
         base_projected_cash_min=None,
         base_cash_priority=None,

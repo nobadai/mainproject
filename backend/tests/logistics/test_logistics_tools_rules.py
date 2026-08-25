@@ -73,6 +73,7 @@ def test_procurement_rule_keeps_unresolved_constraints_null(unresolved_logistics
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
     assert result["calculation_ready"] is False
+    assert derive_logistics_verdict(result) is None
     assert all(item.status == "UNRESOLVED" for item in result["hard_constraints"])
     assert "PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT" in result["soft_warnings"]
 
@@ -243,3 +244,4 @@ def test_logistics_rules_fail_closed_on_as_of_mismatch(complete_logistics_snapsh
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
     assert result["hard_constraints"][0].code == "AS_OF_MISMATCH"
+    assert derive_logistics_verdict(result) is None
