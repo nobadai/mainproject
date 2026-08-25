@@ -739,6 +739,10 @@ def run_critic_v04(
         l5, note = _run_llm_rationale(clip, band, replies, rationale, judge)
         if judge is None:
             skipped.append("L5: judge 미주입 — 논리 일관성 검증 생략")
+        elif not _judge_ran(judge):
+            # judge 는 붙었지만 LLM 이 실제로 판정하지 못했다 (미가동·장애·호출 불필요).
+            # 검사한 척하지 않는다 — coverage 를 0 으로 두고 skipped 에 드러낸다 (설계서 §8).
+            skipped.append("L5: LLM 판정 미수행 — 논리 일관성 검증 생략")
         else:
             l5_ran = 6
             for f in l5:
@@ -904,6 +908,37 @@ def check_overlay_cap_by_date(
     return out, []
 
 
+def _judge_ran(judge: RationaleJudge) -> bool:
+    """judge 가 실제로 판정했는지.
+
+    LLM 어댑터(`JudgeRunner`)는 `ran` 으로 알려 준다 — 호출 불필요·장애면 False 다.
+    `ran` 이 없는 평범한 콜러블(테스트 스텁 등)은 돌았다고 본다.
+    """
+    return bool(getattr(judge, "ran", True))
+
+
+@dataclass(frozen=True)
+class _BandView:
+    """OutboundBand 를 L5 payload 가 기대하는 Band 모양으로만 비춰 준다.
+
+    B 에는 매입 밴드의 floor·금액축이 없다 — 없는 축은 비운다. 값을 지어내지 않는다.
+    """
+
+    floor_kg: Mapping[str, float]
+    cap_kg: Mapping[str, float]
+    cap_total_kg: float | None
+    cap_amount_krw: float | None
+
+
+def _band_view(outbound_band: OutboundBand) -> _BandView:
+    return _BandView(
+        floor_kg={},
+        cap_kg=dict(outbound_band.cap_kg),
+        cap_total_kg=outbound_band.cap_total_kg,
+        cap_amount_krw=None,
+    )
+
+
 def run_critic_b(
     *,
     as_of: date,
@@ -917,6 +952,8 @@ def run_critic_b(
     lot_constraints: Sequence[LotConstraint] = (),
     dept_meta: Mapping[Dept, DeptMeta] | None = None,
     sales_facts: Any | None = None,
+    judge: RationaleJudge | None = None,
+    rationale: str = "",
     unattended: bool = False,
 ) -> CriticVerdictV04:
     """사이클 B(판매) 검증. 앞 계층이 FAIL 이면 뒤는 돌리지 않는다.
@@ -961,17 +998,43 @@ def run_critic_b(
             l4_ran += 1 if not s else 0
     coverage["L4_B"] = (l4_ran, _LAYER_TOTALS_B["L4_B"])
 
-    status: CriticStatus = "FAIL" if findings else "PASS"
+    # ── L5 논리 일관성 (LLM) — A 와 같이 FAIL 이 아니라 CONCERN ────
+    concerns: list[Issue] = []
+    note = ""
+    l5_ran = 0
+    if not findings:
+        l5, note = _run_llm_rationale(clip, _band_view(outbound_band), replies, rationale, judge)
+        if judge is None:
+            skipped.append("L5: judge 미주입 — 논리 일관성 검증 생략")
+        elif not _judge_ran(judge):
+            skipped.append("L5: LLM 판정 미수행 — 논리 일관성 검증 생략")
+        else:
+            l5_ran = 6
+            for f in l5:
+                concerns.append(Issue("E-LOGIC", f.detail, "L5_logic", f.dept))
+    coverage["L5"] = (l5_ran, _LAYER_TOTALS["L5"])
+
+    if findings:
+        status: CriticStatus = "FAIL"
+    elif concerns:
+        status = "CONCERN"
+    else:
+        status = "PASS"
+
     if unattended and status == "CONCERN":
-        pass  # B 는 현재 CONCERN 산출 지점이 없다 (L5 미연동)
+        # A 와 동일 — 승인하되 별도 카운트한다 (설계서 §10).
+        note = (note + " | " if note else "") + "UNATTENDED_CONCERN_APPROVED"
+
     return CriticVerdictV04(
         as_of=as_of,
         run_seq=run_seq,
         scenario_id=getattr(allocation, "allocation_id", "(sales)"),
         status=status,
         findings=tuple(findings),
+        concerns=tuple(concerns),
         coverage=coverage,
         skipped=tuple(skipped),
+        llm_note=note,
         end_stage="CRITIC_B" if status == "FAIL" else None,
     )
 

@@ -12,6 +12,7 @@ from app.critic.critic_v0_4 import (
     run_critic_b,
     run_critic_v04,
 )
+from app.critic.llm.judge import JudgeRunner, make_rationale_judge
 from app.critic.schemas import (
     ConcernOut,
     CriticProcurementRequest,
@@ -176,8 +177,41 @@ def _dept_meta(req) -> dict:
     }
 
 
-def _verdict_out(v: CriticVerdictV04, cycle: str, runtime_status: str) -> CriticVerdictOut:
+def _rationale(req: CriticProcurementRequest | CriticSalesRequest) -> str:
+    """L5 가 검사할 **결정 근거**.
+
+    ★ 부서 회신(`reasoning`)을 쓰면 안 된다. 부서 문장은 클리핑 **이전**에 작성되므로
+      클리핑 후에야 정해지는 binding_constraints 를 언급할 수 없고, 그것을 누락으로
+      판정하면 정상 실행마다 E-LOGIC CONCERN 이 붙어 소음이 된다 (실측 확인).
+
+      검사 대상은 오케 selector 가 쓴 문장(`rationale_per_id[선택안]`)이며 요청으로 받는다.
+      Critic 은 설명문을 만들지 않는다 — 미제출이면 검사할 것이 없으므로 skipped 다.
+    """
+    return req.rationale.strip()
+
+
+def _verdict_out(
+    v: CriticVerdictV04,
+    cycle: str,
+    runtime_status: str,
+    judge: JudgeRunner | None = None,
+) -> CriticVerdictOut:
+    """결정론 판정 + LLM 상태를 합쳐 응답으로 만든다.
+
+    ⚠️ `skipped`(미검사 항목·coverage)와 `llm_status`(LLM 호출 결과)는 다른 것이다.
+      L5 가 안 돌면 둘 다 나타난다 — 감추지 않는다 (설계서 §8).
+    """
+    llm_fields: dict = {}
+    if judge is not None and judge.result is not None:
+        result = judge.result
+        llm_fields = result.model_dump(exclude={"interpretation"})
+        llm_fields["interpretation"] = result.interpretation
+    elif judge is not None:
+        # 러너가 L5 까지 가지 못했다 (앞 레이어 FAIL 등). 호출 자체가 없었다.
+        llm_fields = {"llm_status": "SKIPPED_TEMPLATE"}
+
     return CriticVerdictOut(
+        **llm_fields,
         cycle=cycle,
         as_of=v.as_of,
         run_seq=v.run_seq,
@@ -238,6 +272,7 @@ def run_critic_procurement(req: CriticProcurementRequest) -> CriticVerdictOut:
         for s in req.scenarios:
             unit_price = {**s.unit_price_krw_per_kg, **unit_price}
 
+    judge = make_rationale_judge(cycle="A")
     verdict = run_critic_v04(
         as_of=req.as_of,
         run_seq=req.run_seq,
@@ -253,11 +288,12 @@ def run_critic_procurement(req: CriticProcurementRequest) -> CriticVerdictOut:
         dept_meta=_dept_meta(req),
         all_clips=clips,
         all_scenarios=scen_by_id,
-        judge=None,  # L5 LLM 미연동 - CONCERN 은 judge 가 붙어야 난다
+        judge=judge,  # L5 - CONCERN 은 judge 가 붙어야 난다
+        rationale=_rationale(req),
         cycle="A",
         unattended=req.unattended,
     )
-    return _verdict_out(verdict, "A", "READY")
+    return _verdict_out(verdict, "A", "READY", judge)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +384,7 @@ def run_critic_sales(req: CriticSalesRequest) -> CriticVerdictOut:
         for lot in req.lot_constraints
     ]
 
+    judge = make_rationale_judge(cycle="B")
     verdict = run_critic_b(
         as_of=req.as_of,
         run_seq=req.run_seq,
@@ -359,5 +396,7 @@ def run_critic_sales(req: CriticSalesRequest) -> CriticVerdictOut:
         commitment=_commitment(req),
         lot_constraints=lots,
         dept_meta=_dept_meta(req),
+        judge=judge,
+        rationale=_rationale(req),
     )
-    return _verdict_out(verdict, "B", "READY")
+    return _verdict_out(verdict, "B", "READY", judge)

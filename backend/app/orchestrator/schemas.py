@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.orchestrator.llm.schemas import LLMResponseFields
+
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 Dept = Literal["sales", "inventory", "finance"]
 StrategyType = Literal["quantity", "timing", "mix"]
@@ -220,8 +222,8 @@ class ClipResultOut(BaseModel):
     clipped_amount_krw: float
 
 
-class ProcurementResponse(BaseModel):
-    """T3 결과 — 그날의 매입 제약 밴드 + 후보별 클리핑 + 순위."""
+class ProcurementResponse(LLMResponseFields):
+    """T3 결과 — 그날의 매입 제약 밴드 + 후보별 클리핑 + 순위 (+ LLM 선정)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -238,8 +240,8 @@ class ProcurementResponse(BaseModel):
     soft_warnings: list[str]
 
 
-class SalesResponse(BaseModel):
-    """S3 결과 — 공용 출고 밴드 + 후보별 클리핑 + 순위."""
+class SalesResponse(LLMResponseFields):
+    """S3 결과 — 공용 출고 밴드 + 후보별 클리핑 + 순위 (+ LLM 선정)."""
 
     model_config = ConfigDict(extra="forbid")
 
