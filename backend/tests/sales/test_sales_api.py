@@ -1,8 +1,9 @@
 """영업 Agent API 테스트.
 
+입력·출력은 팀 공통 I/O 계약(캐논) 구조를 따른다. 다만 미구현 결과는 정상 업무 결과처럼
+채우지 않고 null·빈 목록·명시적 미구현 상태로 낸다.
 실행이력 저장(save_sales_agent_run)은 monkeypatch로 대체해 PostgreSQL 없이
-POST 계산·응답과 저장 호출 인자를 검증한다. 실제 DB 저장·조회는
-운영 DB 환경이 준비된 뒤 별도 통합 테스트로 확인한다.
+POST 계산·응답과 저장 호출 인자를 검증한다.
 """
 
 from datetime import UTC, date, datetime
@@ -23,26 +24,19 @@ def _fake_run(**overrides) -> dict:
         "snapshot_id": "T0-20260821-01",
         "runtime_status": "READY",
         "request_payload": {"item": "배추"},
-        "response_payload": {"stage": "T2"},
+        "response_payload": {"agent": "sales"},
         "created_at": datetime(2026, 8, 21, 9, 0, 0, tzinfo=UTC),
     }
     row.update(overrides)
     return row
 
 
-def test_procurement_computes_floor_and_saves(monkeypatch):
-    saved = {}
-
-    def fake_save(**kwargs):
-        saved.update(kwargs)
-        return kwargs
-
-    monkeypatch.setattr("app.sales.service.save_sales_agent_run", fake_save)
-
-    payload = {
-        "as_of": "2026-08-21",
+def _snapshot_a(**overrides) -> dict:
+    snapshot = {
         "snapshot_id": "T0-20260821-01",
+        "as_of": "2026-08-21",
         "item": "배추",
+        "policy_version": None,
         "inbound_lead_days": 4,
         "confirmed_orders": [
             {"order_id": "ORD-1", "delivery_date": "2026-08-23", "qty_kg": 200},
@@ -56,54 +50,21 @@ def test_procurement_computes_floor_and_saves(monkeypatch):
             "in_transit": [],
         },
     }
-
-    response = client.post("/sales/procurement", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["stage"] == "T2"
-    assert body["runtime_status"] == "READY"
-    assert body["today_floor_kg"] == "1100"
-    assert body["binding_delivery_date"] == "2026-08-25"
-    assert saved["cycle"] == "PROCUREMENT"
-    assert saved["snapshot_id"] == "T0-20260821-01"
+    snapshot.update(overrides)
+    return {"cycle": "PROCUREMENT", "as_of": "2026-08-21", "sales_snapshot": snapshot}
 
 
-def test_procurement_not_ready_when_lead_days_missing(monkeypatch):
-    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
-
-    payload = {
-        "as_of": "2026-08-21",
-        "item": "배추",
-        "confirmed_orders": [
-            {"order_id": "ORD-1", "delivery_date": "2026-08-25", "qty_kg": 1500},
-        ],
-        "inventory": {
-            "on_hand": [{"lot_id": "LOT-A", "qty_kg": 600, "freshness_days_left": 8}],
-            "in_transit": [],
-        },
-    }
-
-    response = client.post("/sales/procurement", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["runtime_status"] == "RUNTIME_NOT_READY"
-    assert body["today_floor_kg"] is None
-    assert body["binding_delivery_date"] is None
-
-
-def test_allocation_computes_strategic_inventory_and_saves(monkeypatch):
-    saved = {}
-    monkeypatch.setattr(
-        "app.sales.service.save_sales_agent_run",
-        lambda **kwargs: saved.update(kwargs) or kwargs,
-    )
-
-    payload = {
-        "as_of": "2026-08-21",
+def _snapshot_b(**overrides) -> dict:
+    snapshot = {
         "snapshot_id": "T0-20260821-01",
+        "as_of": "2026-08-21",
         "item": "배추",
+        "policy_version": None,
+        "cost_basis": None,
+        "confirmed_orders": [
+            {"order_id": "ORD-1", "delivery_date": "2026-08-23", "qty_kg": 200},
+        ],
+        "sales_opportunities": None,
         "inventory": {
             "on_hand": [
                 {
@@ -117,57 +78,138 @@ def test_allocation_computes_strategic_inventory_and_saves(monkeypatch):
             "in_transit": [],
         },
     }
+    snapshot.update(overrides)
+    return {
+        "cycle": "SALES",
+        "as_of": "2026-08-21",
+        "approved_purchase": {"approval_id": "H1-20260821-001"},
+        "sales_snapshot": snapshot,
+    }
 
-    response = client.post("/sales/allocation", json=payload)
+
+def test_procurement_computes_floor_and_saves(monkeypatch):
+    saved = {}
+
+    def fake_save(**kwargs):
+        saved.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", fake_save)
+
+    response = client.post("/sales/procurement", json=_snapshot_a())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent"] == "sales"
+    assert body["band"]["today_floor_kg"] == "1100"
+    assert body["band"]["binding_delivery_date"] == "2026-08-25"
+    assert body["suggested_adjustment"]["min_qty_kg"] == "1100"
+    # 자기 회신 상태는 아직 평가하지 못하므로 verdict는 null이다
+    assert body["verdict"] is None
+    # 하드 제약 3종은 모두 미구현으로 표시된다(가짜 통과 없음)
+    assert {c["code"] for c in body["hard_constraints"]} == {
+        "CONFIRMED_DEMAND_TOTAL",
+        "DELIVERY_DEADLINE",
+        "DAILY_OUTBOUND_CAPACITY",
+    }
+    assert all(c["passed"] is None for c in body["hard_constraints"])
+    assert all("NOT_IMPLEMENTED" in c["skip_reason"] for c in body["hard_constraints"])
+    # 소프트 경고 판정이 미구현이라 빈 목록(가짜 경고 없음)
+    assert body["soft_warnings"] == []
+    assert saved["cycle"] == "PROCUREMENT"
+    assert saved["snapshot_id"] == "T0-20260821-01"
+    assert saved["runtime_status"] == "READY"
+
+
+def test_procurement_not_ready_keeps_null_not_zero(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        "app.sales.service.save_sales_agent_run",
+        lambda **kwargs: saved.update(kwargs) or kwargs,
+    )
+
+    payload = _snapshot_a()
+    del payload["sales_snapshot"]["inbound_lead_days"]
+
+    response = client.post("/sales/procurement", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    # 미결은 0이 아니라 null로 나타난다(0 != null 원칙)
+    assert body["band"]["today_floor_kg"] is None
+    assert body["band"]["binding_delivery_date"] is None
+    assert body["suggested_adjustment"]["min_qty_kg"] is None
+    # runtime_status는 실행이력 DB 컬럼용으로만 내부 계산된다
+    assert saved["runtime_status"] == "RUNTIME_NOT_READY"
+
+
+def test_allocation_reports_facts_without_fake_candidates(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        "app.sales.service.save_sales_agent_run",
+        lambda **kwargs: saved.update(kwargs) or kwargs,
+    )
+
+    response = client.post("/sales/allocation", json=_snapshot_b())
 
     assert response.status_code == 200
     body = response.json()
     assert body["stage"] == "S1"
-    assert body["strategic_inventory_by_date"][0]["kg"] == "500"
+    assert body["meta"]["item"] == "배추"
+    assert body["meta"]["approval_id"] == "H1-20260821-001"
+    # 확정 의무량은 실제 집계값, 후보와 충당량은 미구현이라 빈 목록·null·명시적 사유
+    assert body["confirmed_obligation_kg"] == "200"
+    assert body["candidates"] == []
+    assert body["coverable_kg"] is None
+    assert body["no_feasible_reason"] == "CANDIDATE_GENERATION_NOT_IMPLEMENTED"
     assert saved["cycle"] == "SALES"
+    # S1 제안이 미완성이라 실행이력도 READY로 과장하지 않는다
+    assert saved["runtime_status"] == "RUNTIME_NOT_READY"
+
+
+def test_as_of_must_match_snapshot():
+    payload = _snapshot_a()
+    payload["as_of"] = "2026-08-22"  # 바깥 as_of와 스냅샷 as_of 불일치
+    response = client.post("/sales/procurement", json=payload)
+    assert response.status_code == 422
+
+
+def test_allocation_requires_canon_key():
+    payload = _snapshot_b()
+    del payload["sales_snapshot"]["cost_basis"]  # 캐논 필수 키 누락
+    response = client.post("/sales/allocation", json=payload)
+    assert response.status_code == 422
 
 
 def test_procurement_rejects_unknown_field():
-    payload = {
-        "as_of": "2026-08-21",
-        "item": "배추",
-        "confirmed_orders": [],
-        "inventory": {"on_hand": [], "in_transit": []},
-        "unexpected": "x",
-    }
+    payload = _snapshot_a()
+    payload["unexpected"] = "x"
     response = client.post("/sales/procurement", json=payload)
     assert response.status_code == 422
 
 
 def test_in_transit_requires_arrival_date():
-    payload = {
-        "as_of": "2026-08-21",
-        "snapshot_id": "T0-01",
-        "item": "배추",
-        "inventory": {
+    payload = _snapshot_b(
+        inventory={
             "on_hand": [{"lot_id": "A", "qty_kg": 600, "freshness_days_left": 8}],
             "in_transit": [{"lot_id": "C", "qty_kg": 300}],
-        },
-    }
+        }
+    )
     response = client.post("/sales/allocation", json=payload)
     assert response.status_code == 422
 
 
 def test_in_transit_key_is_required():
-    payload = {
-        "as_of": "2026-08-21",
-        "item": "배추",
-        "inventory": {"on_hand": [{"lot_id": "A", "qty_kg": 600, "freshness_days_left": 8}]},
-    }
+    payload = _snapshot_b(
+        inventory={"on_hand": [{"lot_id": "A", "qty_kg": 600, "freshness_days_left": 8}]}
+    )
     response = client.post("/sales/allocation", json=payload)
     assert response.status_code == 422
 
 
 def test_reserved_over_quantity_is_rejected():
-    payload = {
-        "as_of": "2026-08-21",
-        "item": "배추",
-        "inventory": {
+    payload = _snapshot_b(
+        inventory={
             "on_hand": [
                 {
                     "lot_id": "A",
@@ -177,8 +219,8 @@ def test_reserved_over_quantity_is_rejected():
                 }
             ],
             "in_transit": [],
-        },
-    }
+        }
+    )
     response = client.post("/sales/allocation", json=payload)
     assert response.status_code == 422
 
