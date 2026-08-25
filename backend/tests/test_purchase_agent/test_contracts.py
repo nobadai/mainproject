@@ -16,12 +16,13 @@
 import inspect
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 from _fixtures import AS_OF, _proposal
 from pydantic import ValidationError
 
-from app.purchase_agent import ports
+from app.purchase_agent import mocks, ports
 from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
 from app.purchase_agent.state import build_initial_state
@@ -83,6 +84,43 @@ def test_amount_must_match_sourcing_plan() -> None:
     data = _proposal()
     data["scenarios"][0]["total_amount_krw"] = 10318995  # sourcing 합계 7,125,000과 다른 값
     with pytest.raises(ValidationError, match="sourcing_plan amount total"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_cited_document_must_appear_in_context_docs_used() -> None:
+    """출력 경계 백스톱 (E3-4) — 인용한 DOC이 실제 로드분에 없으면 **제안 전체가 죽는다**.
+
+    ⑦ ``check_document_refs``가 같은 검사를 안 단위로 하고 여기서는 계약 위반으로 다룬다 —
+    사중 일치·분할 날짜와 같은 이중 배치다. 여기서만 잡히는 게 하나 있다: ⑦은 시나리오
+    rationale만 보므로 **``context_docs_used``와 어긋난 상태**는 출력 경계에서만 보인다.
+    """
+    data = _proposal()
+    data["scenarios"][0]["rationale"].append(
+        {
+            "source": "문서ID",
+            "claim": "읽은 적 없는 문서",
+            "ref_id": "DOC-999",
+            "evidence_grade": "SIM_FIXED",
+            "evidence_detail": "지어낸 근거",
+        }
+    )
+    with pytest.raises(ValidationError, match="not in context_docs_used"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_document_ref_id_cannot_hide_under_another_source() -> None:
+    """``DOC-`` 참조에 다른 출처를 붙여 환각 대조를 우회하는 경로를 막는다.
+
+    Codex 교차검증 P1이 짚은 사각지대다 — ``source``만 보던 검사도, 접두어만 보던 검사도
+    아니고 **둘의 정합**을 요구해야 닫힌다.
+    """
+    data = _proposal()
+    data["scenarios"][0]["rationale"][0] = {
+        **data["scenarios"][0]["rationale"][0],
+        "source": "예측",
+        "ref_id": "DOC-3",
+    }
+    with pytest.raises(ValidationError, match="needs source"):
         PurchaseProposal.model_validate(data)
 
 
@@ -534,6 +572,44 @@ def test_split_types_are_a_fixed_list_containing_the_no_split_option() -> None:
     assert types == sorted(set(types))
     assert types[0] == 1
     assert [size for size in types if size > 1]
+
+
+def test_doc_type_priority_exists_in_the_corpus() -> None:
+    """② 우선순위 목록의 모든 유형이 **코퍼스에 실재**하는가.
+
+    ``get_context_docs``는 모르는 ``doc_type``에 ``ValueError``를 던진다 — 오타 하나가
+    uncertain한 날마다 노드를 죽인다. constraints와 코퍼스가 따로 놀 수 있는 지점이라
+    여기서 묶는다. ``baseline_grade_spread``를 평시 mock에 묶어둔 것과 같은 이유다.
+
+    순서까지는 검사하지 않는다. 순서는 §4-②가 정한 **판단**이고, 그건 값이 아니라 설계라
+    테스트가 잠그면 우선순위를 바꿀 때마다 무관한 빨간불이 뜬다.
+    """
+    corpus_path = Path(mocks.__file__).with_name("documents.json")
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    known = {record["doc_type"] for record in corpus["documents"]}
+    priority = _constraints()["context"]["doc_type_priority"]
+    assert priority, "우선순위 목록이 비면 uncertain한 날 문서를 한 건도 안 읽는다"
+    assert list(priority) == sorted(set(priority), key=priority.index), "중복 유형 금지"
+    assert set(priority) <= known, f"코퍼스에 없는 doc_type: {sorted(set(priority) - known)}"
+
+
+def test_context_loop_max_allows_at_least_one_pass() -> None:
+    """``loop_max``가 0 이하면 uncertain인데 **조용히 0건**이 된다.
+
+    ``range(loop_max)``가 아무것도 돌지 않고 예외도 안 난다 — 에러 없이 결과만 비는,
+    규칙 3이 경계하는 그 형태다. 문서 없이 만든 안이 문서를 검토한 안처럼 나간다.
+    """
+    assert _constraints()["context"]["loop_max"] >= 1
+
+
+def test_excerpt_cap_leaves_room_for_an_actual_quote() -> None:
+    """``excerpt_max_chars``가 0이면 빈 발췌, 음수면 슬라이스가 뒤집혀 본문 대부분이 실린다.
+
+    둘 다 "인용 발췌 동봉" 요건을 조용히 깨는 방향이다 (Codex 교차검증 지적).
+    개별 키 타입 검사를 ``config.py``에 넣지 않는 건 그 모듈의 설계다 — YAML을 코드가 한 번
+    더 베끼지 않기 위해서고, 대신 이런 계약을 여기서 잠근다.
+    """
+    assert _constraints()["context"]["excerpt_max_chars"] >= 1
 
 
 def test_baseline_spread_matches_the_normal_day_mock() -> None:

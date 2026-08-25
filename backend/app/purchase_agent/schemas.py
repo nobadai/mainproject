@@ -100,6 +100,31 @@ FIXED_MARKET = "가락"
 TIMING_AXIS: StrategyType = "timing"
 Market = Literal["가락"]
 
+#: 문서 근거의 ``rationale[].source`` 값 (IO명세 §2 열거형).
+DOCUMENT_SOURCE: RationaleSource = "문서ID"
+#: 문서 참조 표기 접두어 (IO명세 §1-⑥ — "doc_id 3 → \"DOC-3\"").
+#: ``context_docs_used``와 ``rationale[].ref_id``가 **같은 변환**을 써야 두 필드를 대조할
+#: 수 있다. 세 곳(⑥ 근거 생성 · ⑦ 환각 대조 · ⑦ 출력 조립)에 복제돼 있었다.
+DOCUMENT_REF_PREFIX = "DOC-"
+
+
+def document_ref(doc_id: object) -> str:
+    """``doc_id`` → ``"DOC-{doc_id}"`` (IO명세 §1-⑥ 문서 참조 표기 규약).
+
+    정수 id와 문자열 참조의 변환 규칙을 한 곳에 고정한다. 규약이 바뀌면 여기만 바뀐다.
+    """
+    return f"{DOCUMENT_REF_PREFIX}{doc_id}"
+
+
+def is_document_ref(ref_id: str) -> bool:
+    """문서 참조인가. **접두어만 보고 판단한다** — ``source`` 필드와 독립이다.
+
+    ``source == "문서ID"``로만 문서 근거를 고르면, 출처를 "예측"으로 적고 ``ref_id``에
+    ``"DOC-999"``를 넣은 항목이 환각 대조를 통째로 빠져나간다 (Codex 교차검증 P1).
+    표기 규약상 ``DOC-``로 시작하는 참조는 **정의상 문서 참조**이므로 그것으로 건진다.
+    """
+    return ref_id.startswith(DOCUMENT_REF_PREFIX)
+
 #: 근거 등급 4단계 (정의서 §7.3). 서열: OFFICIAL > VENDOR > SIM_FIXED > ASSUMED
 #:
 #: * ``OFFICIAL``   공공기관·법령·공개 통계        → 하드 제약 사용 허용
@@ -340,6 +365,21 @@ class PurchaseProposal(BaseModel):
         for scenario in self.scenarios:
             if scenario.split_plan[0].date != self.meta.as_of:
                 raise ValueError("split_plan seq 1 date must equal meta.as_of")
+
+        # 문서 근거의 출력 경계 백스톱 (E3-4). ⑦ check_document_refs가 같은 검사를
+        # **안 단위로** 하고 여기서는 제안 전체를 죽인다 — 사중 일치·분할 날짜와 같은
+        # 이중 배치다. 여기서만 잡을 수 있는 게 하나 있다: ⑦은 시나리오 rationale만 보고
+        # context_docs_used를 만들지도 않으므로, **두 필드가 어긋난 상태**는 출력 경계에서만
+        # 보인다. "읽었는데 인용 안 함"은 위반이 아니라 허용 상태라 한 방향만 검사한다.
+        used = set(self.context_docs_used)
+        for scenario in self.scenarios:
+            for item in scenario.rationale:
+                if item.source != DOCUMENT_SOURCE and is_document_ref(item.ref_id):
+                    raise ValueError(
+                        f"document ref_id {item.ref_id} needs source {DOCUMENT_SOURCE}"
+                    )
+                if item.source == DOCUMENT_SOURCE and item.ref_id not in used:
+                    raise ValueError(f"cited document {item.ref_id} is not in context_docs_used")
         return self
 
     # 전 안 동일 축 검사는 여기 없다 — ⑦ self_check.check_axis_diversity() 몫이다.

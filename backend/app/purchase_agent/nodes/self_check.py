@@ -13,7 +13,14 @@ from typing import Any
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.draft_plan import warehouse_cap_kg
-from app.purchase_agent.schemas import FIXED_MARKET, PurchaseProposal, revalidate_for_output
+from app.purchase_agent.schemas import (
+    DOCUMENT_SOURCE,
+    FIXED_MARKET,
+    PurchaseProposal,
+    document_ref,
+    is_document_ref,
+    revalidate_for_output,
+)
 from app.purchase_agent.state import PurchaseAgentState
 
 
@@ -123,6 +130,42 @@ def check_split_dates(scenario: dict, as_of: str) -> str | None:
     return None
 
 
+def check_document_refs(scenario: dict, context_docs: list[dict]) -> str | None:
+    """인용한 문서가 **실제로 읽은 것인가** (§4-⑦ 근거 환각 대조 중 계산으로 되는 부분).
+
+    ``check_prices_exist``가 단가에 대해 하는 일을 문서에 대해 한다 — 지어낸 ``DOC-``을
+    막는 유일한 검사다. 등급·단가는 당일 시세에 실재해야 하고, 문서 근거는 그날 ②가
+    실제로 로드한 것이어야 한다.
+
+    **역방향은 검사하지 않는다.** "읽었는데 근거에 안 썼다"는 위반이 아니다 — ② 스텁
+    시절부터 그 상태를 **의도적으로 구분 가능하게** 두었다("문서를 읽었는데 근거에 안 썼다"와
+    "아직 안 읽는다"가 출력에서 구분된다). 컷해버리면 그 구분이 사라지고, ``context_docs_used``와
+    rationale이 항상 같아져 두 필드 중 하나가 무의미해진다.
+
+    **``source``와 ``ref_id`` 접두어 중 하나만 봐서는 안 된다.** 처음엔 ``source == "문서ID"``만
+    봤는데, Codex 교차검증이 P1을 짚었다 — 출처를 "예측"으로 적고 ``ref_id``에 ``"DOC-999"``를
+    넣으면 검사를 통째로 빠져나가고 스키마도 둘의 정합을 요구하지 않는다. 재현해 확인했다.
+    그래서 **둘 중 하나라도 문서를 가리키면** 문서 근거로 보고, 이어서 **둘이 어긋난 것 자체**를
+    막는다. 어긋난 항목은 어느 검사에도 안 걸리는 사각지대였다.
+    """
+    loaded = {document_ref(doc["doc_id"]) for doc in context_docs}
+    cited: set[str] = set()
+    for item in scenario["rationale"]:
+        by_source = item["source"] == DOCUMENT_SOURCE
+        by_ref = is_document_ref(item["ref_id"])
+        if by_source != by_ref:
+            return (
+                f"문서 근거 표기 불일치: source={item['source']!r} / ref_id={item['ref_id']!r} — "
+                f"문서 참조는 source가 {DOCUMENT_SOURCE!r}이고 ref_id가 DOC- 로 시작해야 한다"
+            )
+        if by_source:
+            cited.add(item["ref_id"])
+    unknown = sorted(cited - loaded)
+    if unknown:
+        return f"읽지 않은 문서를 인용: {unknown} (그날 로드분 {sorted(loaded)})"
+    return None
+
+
 def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str | None:
     """전 안이 동일 축이면 반려 (정의서 §3.5.1-3 — "코드가 최종 중복 검사 ... (self_check)").
 
@@ -162,6 +205,7 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or check_warehouse_capacity(scenario, state["inventory"])
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
+            or check_document_refs(scenario, state["context_docs"])
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})
@@ -197,7 +241,7 @@ def _assemble(state: PurchaseAgentState, survivors: list[dict], rejected: list[d
         "scenarios": survivors,
         "confidence": state["confidence"],
         "situation": state["situation"],
-        "context_docs_used": [f"DOC-{doc['doc_id']}" for doc in state["context_docs"]],
+        "context_docs_used": [document_ref(doc["doc_id"]) for doc in state["context_docs"]],
         "rejected_reasons": rejected,
     }
     if not survivors:

@@ -12,7 +12,7 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
-from app.purchase_agent.schemas import TIMING_AXIS
+from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
 
@@ -269,6 +269,72 @@ def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> lis
             "evidence_grade": "SIM_FIXED",
             "evidence_detail": "base_projected_cash_min (정산 산출, mock)",
         },
+    ]
+
+
+def _context_rationale(context_docs: list[dict]) -> list[dict]:
+    """② collect_context가 읽은 문서 근거. 안 읽었으면 아무것도 안 붙는다.
+
+    현서님 합의 8/25 (IO명세 §0 P2): 문서를 근거로 쓰면 **``ref_id`` + 해당 구절을 출력에
+    동봉**한다 — Critic은 DB 조회가 금지라 발췌 없이는 근거 대조가 성립하지 않는다.
+    구절은 ②가 뜬 것을 그대로 싣는다 (``doc["excerpt"]``).
+
+    ``ref_id``는 ``"DOC-{doc_id}"`` 고정이다 (IO명세 §1-⑥ 표기 규약). ⑦이 만드는
+    ``context_docs_used``와 같은 변환을 써야 두 필드가 대조 가능하다 — ⑦의
+    ``check_document_refs``가 그 대조를 한다.
+
+    ``evidence_grade``가 ``SIM_FIXED``인 이유: IO명세 §2 예시는 ``OFFICIAL``이지만 그건
+    **실제 KREI 발간물** 기준이다. 우리 코퍼스는 형식만 빌린 가상 문서라
+    (``documents.json._전부_시뮬레이션``), 등급은 문서의 격이 아니라 **실제 데이터
+    출처**를 따라 붙인다. 실문서로 갈아끼우면 여기가 ``OFFICIAL``이 된다.
+
+    ``claim``이 주장 요약이 아닌 이유: 규칙은 본문을 요약할 수 없다. 문서 식별로 두고 실제
+    주장은 ``evidence_detail``의 발췌가 **원문 그대로** 싣는다 — 규칙이 요약한 척하지 않는다.
+    LLM이 붙으면 ``claim``이 요약으로 바뀌고 발췌는 그대로 남는다.
+    """
+    return [
+        {
+            "source": DOCUMENT_SOURCE,
+            "claim": f"{doc['source']} {doc['doc_type']} — {doc['title']}",
+            "ref_id": document_ref(doc["doc_id"]),
+            "evidence_grade": "SIM_FIXED",
+            "evidence_detail": f"{doc['published_at']} 발행 · 발췌: \"{doc['excerpt']}\"",
+        }
+        for doc in context_docs
+    ]
+
+
+def _context_risks(loop_count: int, context_docs: list[dict]) -> list[str]:
+    """문서 수집에서 나온 유의사항. **②가 안 돈 날은 아무 줄도 안 붙는다.**
+
+    판정 기준이 ``situation`` 문자열이 아니라 **``context_loop_count``**인 이유: 알고 싶은
+    건 "그날이 uncertain인가"가 아니라 "문서를 실제로 찾아봤는가"다. situation으로 물으면
+    ②의 실행 여부를 그래프 배선을 통해 **간접 추론**하게 되고, ``Situation``에 값이 늘거나
+    분기가 바뀌면 조용히 어긋난다 (Codex 교차검증 지적). 루프 수는 그 사실을 직접 들고 있다.
+
+    ②가 돌았는데 고지가 없으면 소비자는 "검토를 거친 근거"로 읽는다. 실제로는 우선순위
+    목록을 순서대로 소진했을 뿐이고, **"이만하면 충분한가"를 아무도 묻지 않았다.**
+    E3-3에서 일괄 fallback을 고지하기로 한 것과 같은 라벨/행동 불일치다.
+
+    문구에 내부 단계 이름을 쓰지 않고, **하지 않은 일을 한 것처럼 적지도 않는다** — 발췌는
+    문장 경계 파서가 아니라 서두 잘라내기라 "첫 문장"이라고 주장하지 않는다. 이 필드를
+    읽는 쪽은 코드가 아니라 H1 승인 화면과 Critic이다 (계약서 §0).
+    """
+    if loop_count <= 0:
+        return []  # ② 미실행 — "찾아보지 않았다"는 고지할 유의사항이 아니라 경로의 사실이다
+    if not context_docs:
+        return [
+            (
+                f"문서 {loop_count}종을 찾았으나 참조 가능한 발간물 0건 — "
+                "문서 근거 없이 구성된 안이다"
+            )
+        ]
+    return [
+        (
+            f"문서 {len(context_docs)}건 참조 — 규칙 기반 수집이라 "
+            "문서 선별·충분성 판단은 미적용(우선순위 순서대로 로드). "
+            "발췌는 관련 구절 선별 없이 각 문서 서두에서 기계적으로 뜬 것이다"
+        )
     ]
 
 
@@ -529,11 +595,13 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "expected_margin_rate": expected_margin_rate,
                 "rationale": [
                     *_rationale(state, rationale_input, constraints),
+                    *_context_rationale(state["context_docs"]),
                     *_sourcing_rationale(decision, state["date"]),
                     *_split_rationale(split_decision, rounds, state["forecast"], state["date"]),
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    *_context_risks(state["context_loop_count"], state["context_docs"]),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
                         split_decision, axis, total, coverage_days, chosen, rounds
