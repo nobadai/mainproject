@@ -21,6 +21,7 @@ from app.orchestrator.contracts_core import (
     SplitLeg,
     T2Reply,
 )
+from app.orchestrator.interpretation import enrich_orchestrator_response
 from app.orchestrator.outbound import (
     clip_allocations,
     combine_outbound_band,
@@ -211,7 +212,7 @@ def run_procurement(request: ProcurementRequest) -> ProcurementResponse:
         not_ready=list(band.not_ready),
         usable=band.usable,
     )
-    return ProcurementResponse(
+    response = ProcurementResponse(
         as_of=request.as_of,
         snapshot_id=request.snapshot_id,
         runtime_status="RUNTIME_NOT_READY" if band.not_ready else "READY",
@@ -233,6 +234,8 @@ def run_procurement(request: ProcurementRequest) -> ProcurementResponse:
         recommended_id=recommended,
         soft_warnings=_soft_warnings(request.replies),
     )
+    # T3-5 — 유일한 LLM 지점. 실패해도 위 결정론 결과가 그대로 남는다.
+    return enrich_orchestrator_response(response)
 
 
 def run_sales(request: SalesRequest) -> SalesResponse:
@@ -252,7 +255,7 @@ def run_sales(request: SalesRequest) -> SalesResponse:
         contributors=dict(band.contributors),
         soft_notes=list(band.soft_notes),
     )
-    return SalesResponse(
+    response = SalesResponse(
         as_of=request.as_of,
         snapshot_id=request.snapshot_id,
         runtime_status="READY",
@@ -263,6 +266,8 @@ def run_sales(request: SalesRequest) -> SalesResponse:
         variant_collapsed=detect_allocation_collapse(clips),
         soft_warnings=_soft_warnings(request.replies),
     )
+    # S3 선정 — 매입과 같은 SelectionService 를 통과한다.
+    return enrich_orchestrator_response(response)
 
 
 def run_day(request: DayRequest) -> DayResponse:

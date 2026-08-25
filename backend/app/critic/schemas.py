@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.critic.llm.schemas import LLMResponseFields
+
 # 매입/판매 후보 입력 계약은 오케와 공유한다 (같은 것을 두 벌 정의하지 않는다).
 from app.orchestrator.schemas import AllocationIn, ScenarioIn
 
@@ -109,6 +111,14 @@ class CriticProcurementRequest(BaseModel):
     replies: list[DeptReplyIn] = Field(min_length=1)
     dept_meta: dict[Dept, DeptMetaIn] | None = None
     target_scenario_id: str | None = None
+    rationale: str = ""
+    """L5 가 검사할 **결정 근거** - 오케 selector 가 쓴 문장(`rationale_per_id[선택안]`).
+
+    ★ 부서 회신(`reasoning`)이 아니다. 부서 문장은 클리핑 **이전**에 작성되므로
+      클리핑 후에야 정해지는 binding_constraints 를 언급할 수 없다. 그것을 누락으로
+      판정하면 정상 실행마다 CONCERN 이 붙어 소음이 된다.
+      미제출이면 L5 는 검사할 문장이 없으므로 skipped 로 드러난다.
+    """
     unattended: bool = False
 
 
@@ -164,6 +174,8 @@ class CriticSalesRequest(BaseModel):
     confirmed_occupancy_by_date: dict[date, float] = Field(default_factory=dict)  # N15 (L4-7)
     dept_meta: dict[Dept, DeptMetaIn] | None = None
     target_allocation_id: str | None = None
+    rationale: str = ""
+    """L5 가 검사할 결정 근거 - S3 선정이 쓴 문장. 매입과 같은 이유로 부서 회신과 구분한다."""
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +200,8 @@ class ConcernOut(BaseModel):
     dept: str | None
 
 
-class CriticVerdictOut(BaseModel):
-    """CriticVerdictV04 의 JSON 표현. 커버리지는 감추지 않는다 (설계서 §8)."""
+class CriticVerdictOut(LLMResponseFields):
+    """CriticVerdictV04 의 JSON 표현 (+ L5 LLM 상태). 커버리지는 감추지 않는다 (설계서 §8)."""
 
     model_config = ConfigDict(extra="forbid")
 
