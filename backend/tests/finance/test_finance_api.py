@@ -18,6 +18,7 @@ def test_finance_procurement_api(purchase_payload):
         as_of="2025-12-31",
         snapshot_id="FIN-DAY30-LOAN",
         runtime_status="READY",
+        verdict="PASS",
         band=FinanceBand(max_feasible_amount_krw=Decimal("16091273.770000")),
         base_projected_cash_min=None,
         base_cash_priority=None,
@@ -34,7 +35,7 @@ def test_finance_procurement_api(purchase_payload):
     assert response.json()["band"]["scope"] == "ALL_ITEMS_TOTAL"
     assert response.json()["interpretation"]["summary"]
     assert response.json()["llm_status"] == "DISABLED"
-    assert "verdict" not in response.json()
+    assert response.json()["verdict"] == "PASS"
 
 
 def test_finance_sales_api(sales_payload):
@@ -42,6 +43,7 @@ def test_finance_sales_api(sales_payload):
         snapshot_id="FIN-DAY30-LOAN",
         approval_id="H1-20260821-001",
         runtime_status="RUNTIME_NOT_READY",
+        verdict="REVIEW_REQUIRED",
         base_cash_priority=None,
         sales_cash_priority=None,
         collection_preferences=[

@@ -53,6 +53,7 @@ def test_logistics_post_endpoints(logistics_purchase_payload, logistics_sales_pa
         as_of="2026-08-21",
         snapshot_id=None,
         runtime_status="RUNTIME_NOT_READY",
+        verdict="REVIEW_REQUIRED",
         band={"cap_by_date": {}},
         inbound_constraints={
             "inbound_lead_days": None,
@@ -67,6 +68,7 @@ def test_logistics_post_endpoints(logistics_purchase_payload, logistics_sales_pa
         snapshot_id=None,
         approval_id="H1-20260821-001",
         runtime_status="RUNTIME_NOT_READY",
+        verdict="REVIEW_REQUIRED",
         daily_outbound_capacity_kg=None,
         lot_constraints=[],
         hard_constraints=[],

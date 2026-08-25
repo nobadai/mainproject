@@ -105,7 +105,7 @@ def test_as_of_mismatch_response_is_saved(finance_context, purchase_payload):
     saved = save_run.call_args.kwargs
     assert saved["runtime_status"] == "RUNTIME_NOT_READY"
     assert saved["response_payload"]["hard_constraints"] == ["AS_OF_MISMATCH"]
-    assert saved["response_payload"]["soft_warnings"] == ["COST_MISMATCH"]
+    assert saved["response_payload"]["soft_warnings"] == []
 
 
 def test_persistence_error_is_not_converted_to_runtime_warning(finance_context, purchase_payload):

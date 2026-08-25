@@ -11,13 +11,6 @@ from app.logistics.schemas import (
     ScheduledQuantity,
 )
 
-KG_PER_TON = Decimal(1000)
-
-
-def ton_to_kg(quantity_ton: Decimal) -> Decimal:
-    """톤 단위 수량을 Decimal kg로 변환한다."""
-    return quantity_ton * KG_PER_TON
-
 
 def calculate_expected_arrival_dates(
     purchase: PurchaseAgentOutput,

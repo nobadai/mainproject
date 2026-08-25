@@ -6,7 +6,11 @@ from uuid import UUID
 from app.logistics.interpretation import enrich_logistics_response
 from app.logistics.llm.runtime import InterpretationService
 from app.logistics.repository import get_current_inventory_logistics_snapshot
-from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
+from app.logistics.rules import (
+    derive_logistics_verdict,
+    evaluate_procurement_rules,
+    evaluate_sales_rules,
+)
 from app.logistics.run_repository import (
     get_logistics_agent_run,
     list_logistics_agent_runs,
@@ -66,6 +70,7 @@ def run_logistics_procurement_with_snapshot(
         as_of=request.meta.as_of,
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
+        verdict=derive_logistics_verdict(rule_result),
         band=LogisticsBand(
             cap_by_date=(scenario_result["cap_by_date"] if rule_result["calculation_ready"] else {})
         ),
@@ -116,6 +121,7 @@ def run_logistics_sales_with_snapshot(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
+        verdict=derive_logistics_verdict(rule_result),
         daily_outbound_capacity_kg=scenario_result["daily_outbound_capacity_kg"],
         lot_constraints=scenario_result["lot_constraints"],
         hard_constraints=rule_result["hard_constraints"],

@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.logistics.llm.schemas import LLMResponseFields
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
+RuleStatus = Literal["PASS", "UNRESOLVED", "FAIL"]
 LogisticsCycle = Literal["PROCUREMENT", "SALES"]
 RuntimeSourceStatus = Literal["CONFIRMED", "CONFIRMED_ZERO", "UNRESOLVED"]
 ConstraintCode = Literal[
@@ -52,9 +54,9 @@ class SplitPlanItem(BaseModel):
 
     seq: int = Field(ge=1)
     date: date
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
 
-    @field_validator("seq", "quantity_ton", mode="before")
+    @field_validator("seq", "quantity_kg", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -65,10 +67,10 @@ class PurchaseSourcingPlanItem(BaseModel):
 
     market: str = Field(min_length=1)
     grade: str = Field(min_length=1)
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
     grade_unit_price: int = Field(gt=0)
 
-    @field_validator("quantity_ton", "grade_unit_price", mode="before")
+    @field_validator("quantity_kg", "grade_unit_price", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -80,14 +82,14 @@ class PurchaseAgentScenario(BaseModel):
     label: str = Field(min_length=1)
     strategy_type: str = Field(min_length=1)
     coverage_days: int = Field(gt=0)
-    total_quantity_ton: Decimal = Field(gt=0)
+    total_quantity_kg: Decimal = Field(gt=0)
     total_amount_krw: Decimal = Field(ge=0)
     split_plan: list[SplitPlanItem] = Field(min_length=1)
     sourcing_plan: list[PurchaseSourcingPlanItem] = Field(min_length=1)
 
     @field_validator(
         "coverage_days",
-        "total_quantity_ton",
+        "total_quantity_kg",
         "total_amount_krw",
         mode="before",
     )
@@ -97,14 +99,12 @@ class PurchaseAgentScenario(BaseModel):
 
     @model_validator(mode="after")
     def validate_quantity_totals(self) -> "PurchaseAgentScenario":
-        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
-        sourcing_quantity = sum(
-            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
-        )
-        if self.total_quantity_ton != split_quantity:
-            raise ValueError("total_quantity_ton must equal split_plan quantity total")
-        if self.total_quantity_ton != sourcing_quantity:
-            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        split_quantity = sum((item.quantity_kg for item in self.split_plan), start=Decimal(0))
+        sourcing_quantity = sum((item.quantity_kg for item in self.sourcing_plan), start=Decimal(0))
+        if self.total_quantity_kg != split_quantity:
+            raise ValueError("total_quantity_kg must equal split_plan quantity total")
+        if self.total_quantity_kg != sourcing_quantity:
+            raise ValueError("total_quantity_kg must equal sourcing_plan quantity total")
         return self
 
 
@@ -280,7 +280,7 @@ class ConstraintResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: ConstraintCode
-    passed: bool | None
+    status: RuleStatus
     skip_reason: str | None = None
 
 
@@ -315,6 +315,7 @@ class LogisticsProcurementResponse(LLMResponseFields):
     snapshot_id: str | None
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict
     band: LogisticsBand
     inbound_constraints: InboundConstraints
     hard_constraints: list[ConstraintResult]
@@ -393,6 +394,7 @@ class LogisticsSalesResponse(LLMResponseFields):
     snapshot_id: str | None
     approval_id: str
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict
     daily_outbound_capacity_kg: Decimal | None
     lot_constraints: list[LotConstraint]
     hard_constraints: list[ConstraintResult]

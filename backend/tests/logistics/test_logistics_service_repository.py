@@ -77,25 +77,47 @@ def _fixture_row(**updates) -> dict[str, object]:
 def _inventory_rows() -> list[dict[str, object]]:
     return [
         {
-            "lot_id": "LOT-ACTIVE-001",
+            "lot_id": "LOT-KIMCHI-015-BAECHU",
             "item_name": "배추",
             "grade": "상",
             "received_at": date(2025, 12, 31),
-            "remaining_qty_kg": Decimal("300.4"),
+            "remaining_qty_kg": Decimal("286.92"),
             "status": "ACTIVE",
             "storage_zone": "COLD_HUMID_0_3",
             "operational_limit_days": 10,
             "medium_grade_factor": Decimal("0.8"),
         },
         {
-            "lot_id": "LOT-ACTIVE-002",
+            "lot_id": "LOT-KIMCHI-015-MU",
             "item_name": "무",
             "grade": "상",
             "received_at": date(2025, 12, 30),
-            "remaining_qty_kg": Decimal("75.0"),
+            "remaining_qty_kg": Decimal("61.76"),
             "status": "ACTIVE",
             "storage_zone": "COLD_HUMID_0_4",
             "operational_limit_days": 12,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "lot_id": "LOT-KIMCHI-015-PIMANUL",
+            "item_name": "피마늘",
+            "grade": "상",
+            "received_at": date(2025, 12, 31),
+            "remaining_qty_kg": Decimal("8.88"),
+            "status": "ACTIVE",
+            "storage_zone": "FROZEN_DRY_-3",
+            "operational_limit_days": 30,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "lot_id": "LOT-KIMCHI-015-YANGPA",
+            "item_name": "양파",
+            "grade": "상",
+            "received_at": date(2025, 12, 31),
+            "remaining_qty_kg": Decimal("5.72"),
+            "status": "ACTIVE",
+            "storage_zone": "COLD_DRY_0_1",
+            "operational_limit_days": 14,
             "medium_grade_factor": Decimal("0.8"),
         },
     ]
@@ -266,13 +288,16 @@ def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
 
     assert snapshot.snapshot_id is None
     assert [lot.lot_id for lot in snapshot.on_hand_by_lot] == [
-        "LOT-ACTIVE-001",
-        "LOT-ACTIVE-002",
+        "LOT-KIMCHI-015-BAECHU",
+        "LOT-KIMCHI-015-MU",
+        "LOT-KIMCHI-015-PIMANUL",
+        "LOT-KIMCHI-015-YANGPA",
     ]
-    assert snapshot.used_capacity_kg == Decimal("375.4")
+    assert all(lot.item != "건고추" for lot in snapshot.on_hand_by_lot)
+    assert snapshot.used_capacity_kg == Decimal("363.28")
     assert snapshot.guaranteed_capacity_kg == Decimal(8000)
-    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg == Decimal("7624.6")
-    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg != Decimal("6024.6")
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg == Decimal("7636.72")
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg != Decimal("6036.72")
     assert snapshot.burst_capacity_kg == Decimal(9600)
     assert snapshot.in_transit == []
     assert snapshot.confirmed_inbound_schedule == []
@@ -311,7 +336,7 @@ def test_logistics_a_ready_response_and_persistence(
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
     assert saved["snapshot_id"] == "T0-20260821-001"
-    assert saved["request_payload"]["scenarios"][0]["total_quantity_ton"] == "4.5"
+    assert saved["request_payload"]["scenarios"][0]["total_quantity_kg"] == "4500"
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 

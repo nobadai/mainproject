@@ -63,6 +63,7 @@ def test_finance_context_contains_only_sanitized_meanings():
         as_of="2025-12-31",
         snapshot_id=None,
         runtime_status="READY",
+        verdict="PASS",
         band=FinanceBand(max_feasible_amount_krw=Decimal("16091273.77")),
         base_projected_cash_min=None,
         base_cash_priority=None,
@@ -85,6 +86,7 @@ def test_logistics_context_does_not_expose_freshness_number():
         snapshot_id=None,
         approval_id="H1",
         runtime_status="READY",
+        verdict="PASS",
         daily_outbound_capacity_kg=Decimal(1000),
         lot_constraints=[
             {
@@ -114,6 +116,7 @@ def test_llm_failure_preserves_all_logistics_deterministic_fields():
         snapshot_id=None,
         approval_id="H1",
         runtime_status="READY",
+        verdict="PASS",
         daily_outbound_capacity_kg=Decimal(1000),
         lot_constraints=[
             {
@@ -142,6 +145,7 @@ def test_finance_hard_constraint_uses_template_without_provider_call():
         as_of="2025-12-31",
         snapshot_id=None,
         runtime_status="RUNTIME_NOT_READY",
+        verdict="REVIEW_REQUIRED",
         band=FinanceBand(max_feasible_amount_krw=None),
         base_projected_cash_min=None,
         base_cash_priority=None,

@@ -18,7 +18,6 @@ from app.finance.schemas import (
     SourcingPlanItem,
 )
 
-KG_PER_TON = Decimal(1000)
 KRW_QUANTUM = Decimal("0.000001")
 
 
@@ -194,9 +193,9 @@ def calculate_finance_cap(*, base_projection: CashflowProjection, policy: Financ
 
 
 def calculate_proposal_amount(sourcing_plan: list[SourcingPlanItem]) -> Decimal:
-    """톤 단위 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
+    """kg 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
     return sum(
-        (item.quantity_ton * KG_PER_TON * Decimal(item.unit_price) for item in sourcing_plan),
+        (item.quantity_kg * Decimal(item.unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
@@ -206,7 +205,7 @@ def calculate_purchase_scenario_amount(
 ) -> Decimal:
     """Purchase Agent v0.4 소싱 계획의 총 매입금액을 재계산한다."""
     return sum(
-        (item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price) for item in sourcing_plan),
+        (item.quantity_kg * Decimal(item.grade_unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
