@@ -195,6 +195,36 @@ class InventoryLogisticsSnapshot(BaseModel):
         return _reject_boolean(value)
 
 
+class LogisticsPolicy(BaseModel):
+    """Logistics MVP 실행에 사용하는 운영 제약 및 정책."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    guaranteed_capacity_kg: Decimal = Field(gt=0)
+    burst_capacity_kg: Decimal = Field(gt=0)
+    inbound_lead_days: int = Field(ge=0)
+    daily_inbound_capacity_kg: Decimal = Field(gt=0)
+    inbound_transport_capacity_kg: Decimal = Field(gt=0)
+    shared_daily_outbound_capacity_kg: Decimal = Field(gt=0)
+    cap_by_date_policy: Literal["CONFIRMED_ONLY"]
+    policy_version: Literal["v1.3-PROVISIONAL"]
+    usage_scope: Literal["AGENT_MVP_DEMO"]
+    source_refs: dict[str, str]
+
+    @field_validator(
+        "guaranteed_capacity_kg",
+        "burst_capacity_kg",
+        "inbound_lead_days",
+        "daily_inbound_capacity_kg",
+        "inbound_transport_capacity_kg",
+        "shared_daily_outbound_capacity_kg",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_policy_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class ConstraintResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
