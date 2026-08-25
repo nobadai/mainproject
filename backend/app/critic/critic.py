@@ -142,7 +142,8 @@ def run_l2(
                             CriticFinding(
                                 "L2_evidence",
                                 chk.check_id,
-                                f"'{ev.claim}' 주장값 {ev.value:,.2f}{ev.unit} vs 원본 {actual:,.2f}{ev.unit}",
+                                f"'{ev.claim}' 주장값 {ev.value:,.2f}{ev.unit} "
+                                f"vs 원본 {actual:,.2f}{ev.unit}",
                                 (rid,),
                                 dept,
                             )

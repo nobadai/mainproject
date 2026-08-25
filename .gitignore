@@ -41,5 +41,11 @@ Thumbs.db
 
 #예외폴더
 docs/
-finance/
-tests/
+# finance/·tests/는 제거했다 (팀 확인). 슬래시가 없어 하위 경로에도 매칭되는 규칙이라
+# backend/app/finance/·backend/tests/까지 무시했고, 그 안의 파일들은 add -f 강제 추가로
+# 올려 운영하고 있었다. 규칙을 걷어내면 새 파일이 git status에 정상적으로 뜨고
+# ruff 스캔에도 들어온다 (ruff는 respect-gitignore가 기본 true다).
+
+# 개인 작업 환경 파일(CLAUDE.md, .claude/)은 여기 두지 않는다.
+# 이 저장소 사본에만 적용되도록 .git/info/exclude로 옮겼다 — .gitignore에 두면
+# 다른 사람의 저장소에서도 같은 이름의 파일이 조용히 무시된다.
