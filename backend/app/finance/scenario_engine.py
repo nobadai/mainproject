@@ -1,45 +1,56 @@
-"""고정 Finance Snapshot에서 A/B 계산과 Rule 호출을 조립한다."""
+"""고정 Finance Runtime Context에서 A/B 계산을 조립한다."""
 
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import TypedDict
 
 from app.finance.schemas import (
+    CashEvent,
+    CashflowProjection,
+    CashPriority,
     CollectionPreference,
+    FinanceRuntimeContext,
     FinanceSalesRequest,
-    FinanceSnapshot,
     PurchaseAgentOutput,
 )
 from app.finance.tools import (
     ReportedAmountComparison,
-    calculate_financial_limit,
-    calculate_post_purchase_cash,
+    build_payroll_schedule,
+    calculate_finance_cap,
     calculate_purchase_scenario_amount,
     compare_reported_amount,
+    derive_cash_priority,
+    project_cashflow,
     rank_collection_preferences,
 )
 
 
 class FinanceProcurementScenarioResult(TypedDict):
     finance_state: dict[str, object] | None
-    financial_limit_matches: bool | None
     amount_comparisons: list[ReportedAmountComparison]
     has_cost_mismatch: bool
+    base_projection: CashflowProjection | None
+    base_cash_priority: CashPriority | None
+    max_feasible_amount_krw: Decimal | None
+    unresolved_sources: tuple[str, ...]
 
 
 class FinanceSalesScenarioResult(TypedDict):
     finance_state: dict[str, object] | None
-    financial_limit_matches: bool | None
-    post_approved_purchase_cash_krw: Decimal | None
+    base_projection: CashflowProjection | None
+    post_h1_projection: CashflowProjection | None
+    base_cash_priority: CashPriority | None
+    sales_cash_priority: CashPriority | None
     collection_preferences: list[CollectionPreference]
+    unresolved_sources: tuple[str, ...]
 
 
 def run_finance_procurement_scenario(
     request: PurchaseAgentOutput,
-    snapshot: FinanceSnapshot | None,
+    context: FinanceRuntimeContext | None,
 ) -> FinanceProcurementScenarioResult:
-    """Finance A 계산을 기존 Tool로 수행하고 Runtime Rule을 호출한다."""
-    finance_state = _snapshot_values(snapshot)
-    financial_limit_matches = _cross_check_financial_limit(finance_state)
+    """Finance A의 proposal-independent base projection과 Band를 계산한다."""
+    finance_state = _snapshot_values(context)
     comparisons = [
         compare_reported_amount(
             scenario.total_amount_krw,
@@ -47,54 +58,96 @@ def run_finance_procurement_scenario(
         )
         for scenario in request.scenarios
     ]
+    if context is None or context.unresolved_sources:
+        return {
+            "finance_state": finance_state,
+            "amount_comparisons": comparisons,
+            "has_cost_mismatch": any(not item["is_match"] for item in comparisons),
+            "base_projection": None,
+            "base_cash_priority": None,
+            "max_feasible_amount_krw": None,
+            "unresolved_sources": context.unresolved_sources if context else (),
+        }
+    base_projection = _base_projection(request.meta.as_of, context)
+    priority = derive_cash_priority(
+        projected_cash_min=base_projection.projected_cash_min, policy=context.policy
+    )
     return {
         "finance_state": finance_state,
-        "financial_limit_matches": financial_limit_matches,
         "amount_comparisons": comparisons,
         "has_cost_mismatch": any(not comparison["is_match"] for comparison in comparisons),
+        "base_projection": base_projection,
+        "base_cash_priority": priority,
+        "max_feasible_amount_krw": calculate_finance_cap(
+            base_projection=base_projection, policy=context.policy
+        ),
+        "unresolved_sources": (),
     }
 
 
 def run_finance_sales_scenario(
     request: FinanceSalesRequest,
-    snapshot: FinanceSnapshot | None,
+    context: FinanceRuntimeContext | None,
 ) -> FinanceSalesScenarioResult:
-    """H1 금액 Overlay와 회수 순위를 계산하고 Finance B Rule을 호출한다."""
-    finance_state = _snapshot_values(snapshot)
-    financial_limit_matches = _cross_check_financial_limit(finance_state)
-    post_approved_purchase_cash = None
-    if finance_state is not None:
-        assert finance_state is not None
-        post_approved_purchase_cash = calculate_post_purchase_cash(
-            finance_state["current_cash_krw"],
-            request.approved_purchase.total_amount_krw,
-            finance_state["committed_outflows_krw"],
-            finance_state["unsettled_purchase_payables_krw"],
-        )
+    """T0 Base에 H1의 authoritative payment_date Event를 Overlay한다."""
+    finance_state = _snapshot_values(context)
+    preferences = rank_collection_preferences(request.channel_terms)
+    if context is None or context.unresolved_sources:
+        return {
+            "finance_state": finance_state,
+            "base_projection": None,
+            "post_h1_projection": None,
+            "base_cash_priority": None,
+            "sales_cash_priority": None,
+            "collection_preferences": preferences,
+            "unresolved_sources": context.unresolved_sources if context else (),
+        }
+    base_projection = _base_projection(request.as_of, context)
+    h1_event = CashEvent(
+        event_date=request.approved_purchase.payment_date,
+        event_type="H1_PURCHASE_PAYMENT",
+        amount_krw=request.approved_purchase.total_amount_krw,
+        direction="OUTFLOW",
+        ref_id=request.approved_purchase.approval_id,
+    )
+    post_h1 = project_cashflow(
+        as_of=request.as_of,
+        current_cash_krw=context.snapshot.current_cash_krw,
+        horizon_end=base_projection.horizon_end,
+        cash_events=(*_base_events(request.as_of, context), h1_event),
+    )
     return {
         "finance_state": finance_state,
-        "financial_limit_matches": financial_limit_matches,
-        "post_approved_purchase_cash_krw": post_approved_purchase_cash,
-        "collection_preferences": rank_collection_preferences(request.channel_terms),
+        "base_projection": base_projection,
+        "post_h1_projection": post_h1,
+        "base_cash_priority": derive_cash_priority(
+            projected_cash_min=base_projection.projected_cash_min, policy=context.policy
+        ),
+        "sales_cash_priority": derive_cash_priority(
+            projected_cash_min=post_h1.projected_cash_min, policy=context.policy
+        ),
+        "collection_preferences": preferences,
+        "unresolved_sources": (),
     }
 
 
-def _snapshot_values(snapshot: FinanceSnapshot | None) -> dict[str, object] | None:
-    if snapshot is None:
+def _snapshot_values(context: FinanceRuntimeContext | None) -> dict[str, object] | None:
+    if context is None:
         return None
-    return snapshot.model_dump(exclude={"snapshot_id"})
+    return context.snapshot.model_dump(exclude={"snapshot_id"})
 
 
-def _cross_check_financial_limit(finance_state: dict[str, object] | None) -> bool | None:
-    if finance_state is None:
-        return None
-    recalculated_financial_limit = calculate_financial_limit(
-        finance_state["current_cash_krw"],
-        finance_state["minimum_operating_cash_krw"],
-        finance_state["committed_outflows_krw"],
-        finance_state["unsettled_purchase_payables_krw"],
+def _base_events(as_of: date, context: FinanceRuntimeContext) -> tuple[CashEvent, ...]:
+    horizon_end = as_of + timedelta(days=context.policy.cashflow_projection_days)
+    payroll = build_payroll_schedule(as_of=as_of, horizon_end=horizon_end, policy=context.policy)
+    return (*context.cash_events, *payroll)
+
+
+def _base_projection(as_of: date, context: FinanceRuntimeContext) -> CashflowProjection:
+    horizon_end = as_of + timedelta(days=context.policy.cashflow_projection_days)
+    return project_cashflow(
+        as_of=as_of,
+        current_cash_krw=context.snapshot.current_cash_krw,
+        horizon_end=horizon_end,
+        cash_events=_base_events(as_of, context),
     )
-    matches = finance_state["financial_limit_krw"] == recalculated_financial_limit
-    if not matches:
-        raise ValueError("FINANCIAL_LIMIT_MISMATCH")
-    return matches

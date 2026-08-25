@@ -25,11 +25,14 @@ def test_procurement_runtime_returns_global_band(finance_state):
     result = evaluate_finance_runtime_rules(
         as_of=date(2025, 12, 31),
         finance_state=finance_state,
+        projected_cash_min=Decimal("19052633.77"),
+        minimum_cash_balance=Decimal(12941280),
+        max_feasible_amount=Decimal(6111353),
     )
 
     assert result == {
         "runtime_status": "READY",
-        "max_feasible_amount_krw": Decimal("16091273.770000"),
+        "max_feasible_amount_krw": Decimal(6111353),
         "hard_constraints": [],
         "soft_warnings": [],
     }
@@ -62,12 +65,14 @@ def test_sales_rule_keeps_priority_unresolved_without_policy(finance_state):
     result = evaluate_finance_sales_rules(
         as_of=date(2025, 12, 31),
         finance_state=finance_state,
-        post_approved_purchase_cash=Decimal("21674918.770000"),
+        base_projected_cash_min=None,
+        post_h1_projected_cash_min=None,
+        minimum_cash_balance=None,
+        policy_available=False,
     )
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
-    assert result["hard_constraints"] == []
-    assert result["soft_warnings"] == ["CASH_PRIORITY_POLICY_UNRESOLVED"]
+    assert result["hard_constraints"] == ["REQUIRED_FINANCE_POLICY_MISSING"]
 
 
 def test_collection_preferences_rank_shorter_settlement_first():

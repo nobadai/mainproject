@@ -5,23 +5,31 @@ from unittest.mock import patch
 import pytest
 from psycopg import OperationalError
 
-from app.finance.repository import get_current_finance_snapshot, get_current_finance_state
+from app.finance.repository import (
+    get_current_finance_runtime_context,
+    get_current_finance_snapshot,
+    get_current_finance_state,
+)
 from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
 from app.finance.service import run_finance_procurement, run_finance_sales
 
 
-def test_procurement_service_returns_one_band_and_cost_warning(finance_snapshot, purchase_payload):
+def test_procurement_service_returns_one_band_and_cost_warning(finance_context, purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
+        patch(
+            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+        ),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
 
     assert response.runtime_status == "READY"
     assert response.policy_version == "v1.3-PROVISIONAL"
-    assert response.band.max_feasible_amount_krw == Decimal("16091273.770000")
+    assert response.band.max_feasible_amount_krw == Decimal(6111353)
+    assert response.base_projected_cash_min == Decimal("19052633.770000")
+    assert response.base_cash_priority == "MEDIUM"
     assert response.band.scope == "ALL_ITEMS_TOTAL"
     assert response.soft_warnings == ["COST_MISMATCH"]
     assert response.llm_status == "SKIPPED_TEMPLATE"
@@ -34,25 +42,29 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_snapshot,
     assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
     assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "10318995"
     stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
-    assert stored_limit == "16091273.770000"
+    assert stored_limit == "6111353"
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 
-def test_procurement_service_stops_on_financial_limit_mismatch(finance_snapshot, purchase_payload):
-    finance_snapshot = finance_snapshot.model_copy(update={"financial_limit_krw": Decimal(1)})
+def test_procurement_service_does_not_compare_new_cap_to_legacy_limit(
+    finance_context, purchase_payload
+):
+    snapshot = finance_context.snapshot.model_copy(update={"financial_limit_krw": Decimal(1)})
+    context = finance_context.model_copy(update={"snapshot": snapshot})
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
-        pytest.raises(ValueError, match="FINANCIAL_LIMIT_MISMATCH"),
+        patch("app.finance.service.get_current_finance_runtime_context", return_value=context),
+        patch("app.finance.service.save_finance_agent_run"),
     ):
-        run_finance_procurement(request)
+        response = run_finance_procurement(request)
+    assert response.band.max_feasible_amount_krw == Decimal(6111353)
 
 
 def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
     with (
-        patch("app.finance.service.get_current_finance_snapshot", side_effect=LookupError),
+        patch("app.finance.service.get_current_finance_runtime_context", side_effect=LookupError),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
@@ -62,7 +74,7 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
 
     with (
         patch(
-            "app.finance.service.get_current_finance_snapshot",
+            "app.finance.service.get_current_finance_runtime_context",
             side_effect=OperationalError("database unavailable"),
         ),
         pytest.raises(OperationalError),
@@ -70,27 +82,30 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
         run_finance_procurement(request)
 
 
-def test_sales_service_applies_approved_purchase_overlay(finance_snapshot, sales_payload):
+def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_payload):
     sales_payload["approved_purchase"]["total_amount_krw"] = 18000000
+    sales_payload["approved_purchase"]["payment_date"] = "2026-01-07"
     request = FinanceSalesRequest.model_validate(sales_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_snapshot", return_value=finance_snapshot),
+        patch(
+            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+        ),
         patch("app.finance.service.save_finance_agent_run") as save_run,
     ):
         response = run_finance_sales(request)
 
-    assert response.runtime_status == "RUNTIME_NOT_READY"
-    assert response.sales_cash_priority is None
+    assert response.runtime_status == "READY"
+    assert response.sales_cash_priority == "HIGH"
     assert response.llm_status == "SKIPPED_TEMPLATE"
     assert response.llm_attempts == 0
-    assert "FINANCIAL_LIMIT_EXCEEDED" in response.hard_constraints
+    assert "FIN-H01_MINIMUM_CASH_BALANCE" in response.hard_constraints
     assert response.collection_preferences[0].liquidity_rank == 1
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "SALES"
-    assert saved["runtime_status"] == "RUNTIME_NOT_READY"
+    assert saved["runtime_status"] == "READY"
     assert saved["request_payload"]["approved_purchase"]["total_amount_krw"] == "18000000"
-    assert saved["response_payload"]["soft_warnings"] == ["CASH_PRIORITY_POLICY_UNRESOLVED"]
+    assert saved["response_payload"]["soft_warnings"] == []
 
 
 def test_repository_preserves_decimal_row(finance_state):
@@ -107,3 +122,57 @@ def test_repository_preserves_decimal_row(finance_state):
     assert snapshot.snapshot_id is None
     assert snapshot.finance_state_id == "FIN-DAY30-LOAN"
     assert isinstance(snapshot.financial_limit_krw, Decimal)
+
+
+def test_valid_debt_contract_resolves_with_zero_events_in_horizon(
+    finance_snapshot, finance_policy, finance_debt_policy
+):
+    snapshot = finance_snapshot.model_copy(
+        update={"current_debt_krw": finance_debt_policy.debt_principal_krw}
+    )
+    with (
+        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
+        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
+        patch(
+            "app.finance.repository.get_active_finance_debt_policy",
+            return_value=finance_debt_policy,
+        ),
+        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+    ):
+        context = get_current_finance_runtime_context()
+    assert context.debt_policy == finance_debt_policy
+    assert "DEBT_SERVICE" not in context.unresolved_sources
+    assert [event for event in context.cash_events if event.event_type == "DEBT_SERVICE"] == []
+
+
+@pytest.mark.parametrize("debt_error", [LookupError("missing"), ValueError("malformed")])
+def test_missing_or_malformed_debt_contract_is_unresolved(
+    finance_snapshot, finance_policy, debt_error
+):
+    snapshot = finance_snapshot.model_copy(update={"current_debt_krw": Decimal(1)})
+    with (
+        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
+        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
+        patch("app.finance.repository.get_active_finance_debt_policy", side_effect=debt_error),
+        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+    ):
+        context = get_current_finance_runtime_context()
+    assert context.debt_policy is None
+    assert context.unresolved_sources == ("DEBT_SERVICE",)
+
+
+def test_debt_principal_mismatch_is_unresolved(
+    finance_snapshot, finance_policy, finance_debt_policy
+):
+    snapshot = finance_snapshot.model_copy(update={"current_debt_krw": Decimal(1)})
+    with (
+        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
+        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
+        patch(
+            "app.finance.repository.get_active_finance_debt_policy",
+            return_value=finance_debt_policy,
+        ),
+        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+    ):
+        context = get_current_finance_runtime_context()
+    assert context.unresolved_sources == ("DEBT_SERVICE",)

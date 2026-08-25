@@ -14,6 +14,9 @@ HardConstraint = Literal[
     "NO_FINANCIAL_CAPACITY",
     "REQUIRED_FINANCE_STATE_MISSING",
     "AS_OF_MISMATCH",
+    "FIN-H01_MINIMUM_CASH_BALANCE",
+    "CASH_EVENT_SOURCE_UNRESOLVED",
+    "REQUIRED_FINANCE_POLICY_MISSING",
 ]
 SoftWarning = Literal["COST_MISMATCH"]
 FinanceRuntimeSoftWarning = Literal[
@@ -125,6 +128,11 @@ def evaluate_finance_runtime_rules(
     as_of: date,
     finance_state: Mapping[str, object] | None,
     has_cost_mismatch: bool = False,
+    projected_cash_min: Decimal | None = None,
+    minimum_cash_balance: Decimal | None = None,
+    max_feasible_amount: Decimal | None = None,
+    policy_available: bool = True,
+    unresolved_sources: tuple[str, ...] = (),
 ) -> FinanceRuntimeRuleResult:
     """Finance A의 실행 상태와 전사 공통 매입 가능 Band를 결정한다."""
     soft_warnings: list[SoftWarning] = []
@@ -136,6 +144,14 @@ def evaluate_finance_runtime_rules(
             "runtime_status": "RUNTIME_NOT_READY",
             "max_feasible_amount_krw": None,
             "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
+            "soft_warnings": soft_warnings,
+        }
+
+    if not policy_available:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "max_feasible_amount_krw": None,
+            "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
             "soft_warnings": soft_warnings,
         }
 
@@ -154,17 +170,29 @@ def evaluate_finance_runtime_rules(
             "hard_constraints": ["AS_OF_MISMATCH"],
             "soft_warnings": soft_warnings,
         }
-    if financial_limit <= Decimal(0):
+    if unresolved_sources:
         return {
-            "runtime_status": "READY",
-            "max_feasible_amount_krw": Decimal(0),
-            "hard_constraints": ["NO_FINANCIAL_CAPACITY"],
+            "runtime_status": "RUNTIME_NOT_READY",
+            "max_feasible_amount_krw": None,
+            "hard_constraints": ["CASH_EVENT_SOURCE_UNRESOLVED"],
             "soft_warnings": soft_warnings,
         }
+    if projected_cash_min is None or minimum_cash_balance is None or max_feasible_amount is None:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "max_feasible_amount_krw": None,
+            "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
+            "soft_warnings": soft_warnings,
+        }
+    hard_constraints: list[HardConstraint] = []
+    if projected_cash_min < minimum_cash_balance:
+        hard_constraints.append("FIN-H01_MINIMUM_CASH_BALANCE")
+    if max_feasible_amount <= Decimal(0):
+        hard_constraints.append("NO_FINANCIAL_CAPACITY")
     return {
         "runtime_status": "READY",
-        "max_feasible_amount_krw": financial_limit,
-        "hard_constraints": [],
+        "max_feasible_amount_krw": max_feasible_amount,
+        "hard_constraints": hard_constraints,
         "soft_warnings": soft_warnings,
     }
 
@@ -173,38 +201,44 @@ def evaluate_finance_sales_rules(
     *,
     as_of: date,
     finance_state: Mapping[str, object] | None,
-    post_approved_purchase_cash: Decimal | None,
+    base_projected_cash_min: Decimal | None,
+    post_h1_projected_cash_min: Decimal | None,
+    minimum_cash_balance: Decimal | None,
+    policy_available: bool = True,
+    unresolved_sources: tuple[str, ...] = (),
 ) -> FinanceSalesRuleResult:
-    """Finance B 실행 경계와 승인 매입 Overlay의 재무 제약을 판정한다."""
-    base_result = evaluate_finance_runtime_rules(as_of=as_of, finance_state=finance_state)
-    hard_constraints = list(base_result["hard_constraints"])
-    soft_warnings: list[FinanceRuntimeSoftWarning] = list(base_result["soft_warnings"])
+    """Finance B 실행 경계와 H1 이후 FIN-H01을 판정한다."""
+    base_result = evaluate_finance_runtime_rules(
+        as_of=as_of,
+        finance_state=finance_state,
+        projected_cash_min=base_projected_cash_min,
+        minimum_cash_balance=minimum_cash_balance,
+        max_feasible_amount=Decimal(0) if base_projected_cash_min is not None else None,
+        policy_available=policy_available,
+        unresolved_sources=unresolved_sources,
+    )
+    hard_constraints = [
+        item for item in base_result["hard_constraints"] if item != "NO_FINANCIAL_CAPACITY"
+    ]
     if base_result["runtime_status"] != "READY":
         return {
             "runtime_status": "RUNTIME_NOT_READY",
             "hard_constraints": hard_constraints,
-            "soft_warnings": soft_warnings,
+            "soft_warnings": list(base_result["soft_warnings"]),
         }
-
-    assert finance_state is not None
-    minimum_operating_cash = finance_state["minimum_operating_cash_krw"]
-    if not isinstance(minimum_operating_cash, Decimal):
-        raise TypeError("finance_state.minimum_operating_cash_krw must be a Decimal")
-    if post_approved_purchase_cash is None:
+    if post_h1_projected_cash_min is None or minimum_cash_balance is None:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
-            "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
-            "soft_warnings": soft_warnings,
+            "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
+            "soft_warnings": [],
         }
     if (
-        post_approved_purchase_cash < minimum_operating_cash
-        and "NO_FINANCIAL_CAPACITY" not in hard_constraints
+        post_h1_projected_cash_min < minimum_cash_balance
+        and "FIN-H01_MINIMUM_CASH_BALANCE" not in hard_constraints
     ):
-        hard_constraints.append("FINANCIAL_LIMIT_EXCEEDED")
-
-    soft_warnings.append("CASH_PRIORITY_POLICY_UNRESOLVED")
+        hard_constraints.append("FIN-H01_MINIMUM_CASH_BALANCE")
     return {
-        "runtime_status": "RUNTIME_NOT_READY",
+        "runtime_status": "READY",
         "hard_constraints": hard_constraints,
-        "soft_warnings": soft_warnings,
+        "soft_warnings": [],
     }

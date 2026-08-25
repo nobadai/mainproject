@@ -1,19 +1,20 @@
+from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
-from app.finance.repository import get_active_finance_policy
+from app.finance.repository import get_active_finance_debt_policy, get_active_finance_policy
 
 
 def _rows() -> list[dict[str, object]]:
     values = {
-        "purchase_payment_days": ("NUMERIC", Decimal("7")),
-        "payroll_date": ("NUMERIC", Decimal("25")),
-        "monthly_labor_cost_krw": ("NUMERIC", Decimal("12941280")),
-        "minimum_cash_balance_krw": ("NUMERIC", Decimal("12941280")),
-        "cashflow_projection_days": ("NUMERIC", Decimal("30")),
+        "purchase_payment_days": ("NUMERIC", Decimal(7)),
+        "payroll_date": ("NUMERIC", Decimal(25)),
+        "monthly_labor_cost_krw": ("NUMERIC", Decimal(12941280)),
+        "minimum_cash_balance_krw": ("NUMERIC", Decimal(12941280)),
+        "cashflow_projection_days": ("NUMERIC", Decimal(30)),
         "cash_priority_reference": ("TEXT", "minimum_cash_balance_krw"),
         "cash_priority_high_ratio": ("NUMERIC", Decimal("1.0")),
         "cash_priority_medium_ratio": ("NUMERIC", Decimal("1.5")),
@@ -35,6 +36,48 @@ def _rows() -> list[dict[str, object]]:
     return rows
 
 
+def _debt_rows() -> list[dict[str, object]]:
+    values = {
+        "debt_runtime_status": ("TEXT", "SIM_FIXED_EXECUTED"),
+        "debt_principal_krw": ("NUMERIC", Decimal("45272104.184486")),
+        "debt_execution_date": ("TEXT", "2025-12-02"),
+        "debt_annual_rate": ("NUMERIC", Decimal("0.025")),
+        "debt_term_months": ("NUMERIC", Decimal(72)),
+        "debt_grace_months": ("NUMERIC", Decimal(36)),
+        "debt_grace_payment_mode": ("TEXT", "INTEREST_ONLY"),
+        "debt_repayment_method": ("TEXT", "EQUAL_PRINCIPAL_AFTER_GRACE"),
+        "debt_payment_frequency": ("TEXT", "MONTHLY"),
+        "debt_payment_day_rule": ("TEXT", "MONTH_END"),
+        "debt_first_payment_rule": ("TEXT", "EXECUTION_MONTH_END"),
+        "debt_interest_method": (
+            "TEXT",
+            "OUTSTANDING_PRINCIPAL_ANNUAL_RATE_DIV_12",
+        ),
+    }
+    return [
+        {
+            "policy_key": key,
+            "value_kind": kind,
+            "value_numeric": value if kind == "NUMERIC" else None,
+            "value_text": value if kind == "TEXT" else None,
+            "value_json": None,
+            "evidence_grade": "SIM_FIXED",
+            "source_ref": "MVP-DECISION-20260825:N9-DEMO",
+            "policy_version": "v1.3-PROVISIONAL",
+            "usage_scope": "AGENT_MVP_DEMO",
+        }
+        for key, (kind, value) in values.items()
+    ]
+
+
+def _load_debt(rows):
+    with (
+        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.finance.repository.fetch_all", return_value=rows),
+    ):
+        return get_active_finance_debt_policy()
+
+
 def _load(rows: list[dict[str, object]]):
     with (
         patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
@@ -50,8 +93,8 @@ def test_get_active_finance_policy_parses_typed_values_and_metadata():
 
     assert policy.purchase_payment_days == 7
     assert policy.payroll_date == 25
-    assert policy.monthly_labor_cost_krw == Decimal("12941280")
-    assert policy.minimum_cash_balance_krw == Decimal("12941280")
+    assert policy.monthly_labor_cost_krw == Decimal(12941280)
+    assert policy.minimum_cash_balance_krw == Decimal(12941280)
     assert policy.cashflow_projection_days == 30
     assert policy.cash_priority_reference == "minimum_cash_balance_krw"
     assert policy.cash_priority_high_ratio == Decimal("1.0")
@@ -63,7 +106,7 @@ def test_get_active_finance_policy_parses_typed_values_and_metadata():
 
 def test_zero_numeric_policy_is_not_treated_as_missing():
     rows = _rows()
-    rows[0]["value_numeric"] = Decimal("0")
+    rows[0]["value_numeric"] = Decimal(0)
     assert _load(rows).purchase_payment_days == 0
 
 
@@ -104,3 +147,71 @@ def test_unsupported_cash_priority_reference_fails_closed():
     row["value_text"] = "minimum_operating_cash_krw"
     with pytest.raises(ValidationError):
         _load(rows)
+
+
+def test_debt_policy_parses_all_twelve_fields_and_keeps_base_policy_compatible():
+    debt = _load_debt(_debt_rows())
+    assert debt.debt_principal_krw == Decimal("45272104.184486")
+    assert debt.debt_execution_date == date(2025, 12, 2)
+    assert debt.debt_term_months == 72
+    assert debt.debt_grace_months == 36
+    assert len(debt.source_refs) == 12
+    assert _load(_rows()).purchase_payment_days == 7
+
+
+def test_missing_or_inactive_debt_key_fails_closed():
+    with pytest.raises(LookupError, match="debt_runtime_status"):
+        _load_debt(_debt_rows()[1:])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("debt_runtime_status", "REAL_EXECUTED"),
+        ("debt_grace_payment_mode", "NONE"),
+        ("debt_repayment_method", "ANNUITY"),
+        ("debt_payment_frequency", "WEEKLY"),
+        ("debt_payment_day_rule", "DAY_25"),
+        ("debt_first_payment_rule", "NEXT_MONTH"),
+        ("debt_interest_method", "DAILY_ACCRUAL"),
+    ],
+)
+def test_invalid_debt_text_enum_fails_closed(key, value):
+    rows = _debt_rows()
+    next(row for row in rows if row["policy_key"] == key)["value_text"] = value
+    with pytest.raises(ValidationError):
+        _load_debt(rows)
+
+
+def test_invalid_debt_execution_date_fails_closed():
+    rows = _debt_rows()
+    next(row for row in rows if row["policy_key"] == "debt_execution_date")["value_text"] = (
+        "not-a-date"
+    )
+    with pytest.raises(ValidationError):
+        _load_debt(rows)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("debt_principal_krw", Decimal(0)),
+        ("debt_principal_krw", Decimal(-1)),
+        ("debt_term_months", Decimal(0)),
+        ("debt_term_months", Decimal(-1)),
+    ],
+)
+def test_invalid_debt_numeric_contract_fails_closed(key, value):
+    rows = _debt_rows()
+    next(row for row in rows if row["policy_key"] == key)["value_numeric"] = value
+    with pytest.raises(ValidationError):
+        _load_debt(rows)
+
+
+def test_debt_grace_cannot_equal_or_exceed_term():
+    rows = _debt_rows()
+    next(row for row in rows if row["policy_key"] == "debt_grace_months")["value_numeric"] = (
+        Decimal(73)
+    )
+    with pytest.raises(ValidationError, match="less than"):
+        _load_debt(rows)

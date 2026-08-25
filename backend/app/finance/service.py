@@ -9,6 +9,7 @@ from app.finance.interpretation import enrich_finance_response
 from app.finance.llm.runtime import InterpretationService
 from app.finance.repository import (
     FinanceState,
+    get_current_finance_runtime_context,
     get_current_finance_snapshot,
     get_current_finance_state,
 )
@@ -29,11 +30,14 @@ from app.finance.scenario_engine import (
     run_finance_sales_scenario,
 )
 from app.finance.schemas import (
+    CashEvent,
     FinanceAgentRunResponse,
     FinanceBand,
     FinanceCycle,
+    FinancePolicy,
     FinanceProcurementResponse,
     FinanceReviewRequest,
+    FinanceRuntimeContext,
     FinanceSalesRequest,
     FinanceSalesResponse,
     FinanceSnapshot,
@@ -78,10 +82,17 @@ def _get_current_finance_snapshot_or_none() -> FinanceSnapshot | None:
         return None
 
 
+def _get_current_finance_runtime_context_or_none() -> FinanceRuntimeContext | None:
+    try:
+        return get_current_finance_runtime_context()
+    except LookupError:
+        return None
+
+
 def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementResponse:
     """Finance State에서 모든 품목에 공통으로 적용할 매입 금액 Band를 산출한다."""
-    snapshot = _get_current_finance_snapshot_or_none()
-    response = run_finance_procurement_with_snapshot(request, snapshot)
+    context = _get_current_finance_runtime_context_or_none()
+    response = run_finance_procurement_with_context(request, context)
     save_finance_agent_run(
         cycle="PROCUREMENT",
         as_of=request.meta.as_of,
@@ -97,13 +108,43 @@ def run_finance_procurement_with_snapshot(
     request: PurchaseAgentOutput,
     snapshot: FinanceSnapshot | None,
     interpretation_service: InterpretationService | None = None,
+    *,
+    policy: FinancePolicy | None = None,
+    cash_events: tuple[CashEvent, ...] = (),
+    unresolved_sources: tuple[str, ...] = (),
 ) -> FinanceProcurementResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance A를 실행한다."""
-    scenario_result = run_finance_procurement_scenario(request, snapshot)
+    context = (
+        FinanceRuntimeContext(
+            snapshot=snapshot,
+            policy=policy,
+            cash_events=cash_events,
+            unresolved_sources=unresolved_sources,
+        )
+        if snapshot is not None and policy is not None
+        else None
+    )
+    return run_finance_procurement_with_context(request, context, interpretation_service)
+
+
+def run_finance_procurement_with_context(
+    request: PurchaseAgentOutput,
+    context: FinanceRuntimeContext | None,
+    interpretation_service: InterpretationService | None = None,
+) -> FinanceProcurementResponse:
+    """DB 재조회 없이 고정된 T0 Context로 Finance A를 실행한다."""
+    scenario_result = run_finance_procurement_scenario(request, context)
+    policy = context.policy if context is not None else None
+    projection = scenario_result["base_projection"]
     rule_result = evaluate_finance_runtime_rules(
         as_of=request.meta.as_of,
         finance_state=scenario_result["finance_state"],
         has_cost_mismatch=scenario_result["has_cost_mismatch"],
+        projected_cash_min=projection.projected_cash_min if projection else None,
+        minimum_cash_balance=policy.minimum_cash_balance_krw if policy else None,
+        max_feasible_amount=scenario_result["max_feasible_amount_krw"],
+        policy_available=policy is not None,
+        unresolved_sources=scenario_result["unresolved_sources"],
     )
     max_feasible_amount = rule_result["max_feasible_amount_krw"]
     suggested_adjustment = (
@@ -113,11 +154,11 @@ def run_finance_procurement_with_snapshot(
     )
     response = FinanceProcurementResponse(
         as_of=request.meta.as_of,
-        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
+        snapshot_id=context.snapshot.snapshot_id if context is not None else None,
         runtime_status=rule_result["runtime_status"],
         band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
-        base_projected_cash_min=None,
-        base_cash_priority=None,
+        base_projected_cash_min=projection.projected_cash_min if projection else None,
+        base_cash_priority=scenario_result["base_cash_priority"],
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
         suggested_adjustment=suggested_adjustment,
@@ -128,8 +169,8 @@ def run_finance_procurement_with_snapshot(
 
 def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
     """승인 매입 지급 의무를 Overlay하고 판매 회수 우선도 입력을 구성한다."""
-    snapshot = _get_current_finance_snapshot_or_none()
-    response = run_finance_sales_with_snapshot(request, snapshot)
+    context = _get_current_finance_runtime_context_or_none()
+    response = run_finance_sales_with_context(request, context)
     save_finance_agent_run(
         cycle="SALES",
         as_of=request.as_of,
@@ -145,20 +186,52 @@ def run_finance_sales_with_snapshot(
     request: FinanceSalesRequest,
     snapshot: FinanceSnapshot | None,
     interpretation_service: InterpretationService | None = None,
+    *,
+    policy: FinancePolicy | None = None,
+    cash_events: tuple[CashEvent, ...] = (),
+    unresolved_sources: tuple[str, ...] = (),
 ) -> FinanceSalesResponse:
     """외부에서 고정한 Finance Snapshot으로 Finance B를 실행한다."""
-    scenario_result = run_finance_sales_scenario(request, snapshot)
+    context = (
+        FinanceRuntimeContext(
+            snapshot=snapshot,
+            policy=policy,
+            cash_events=cash_events,
+            unresolved_sources=unresolved_sources,
+        )
+        if snapshot is not None and policy is not None
+        else None
+    )
+    return run_finance_sales_with_context(request, context, interpretation_service)
+
+
+def run_finance_sales_with_context(
+    request: FinanceSalesRequest,
+    context: FinanceRuntimeContext | None,
+    interpretation_service: InterpretationService | None = None,
+) -> FinanceSalesResponse:
+    """DB 재조회 없이 고정된 T0 Context로 Finance B를 실행한다."""
+    scenario_result = run_finance_sales_scenario(request, context)
+    policy = context.policy if context is not None else None
+    base_projection = scenario_result["base_projection"]
+    post_h1_projection = scenario_result["post_h1_projection"]
     rule_result = evaluate_finance_sales_rules(
         as_of=request.as_of,
         finance_state=scenario_result["finance_state"],
-        post_approved_purchase_cash=scenario_result["post_approved_purchase_cash_krw"],
+        base_projected_cash_min=(base_projection.projected_cash_min if base_projection else None),
+        post_h1_projected_cash_min=(
+            post_h1_projection.projected_cash_min if post_h1_projection else None
+        ),
+        minimum_cash_balance=policy.minimum_cash_balance_krw if policy else None,
+        policy_available=policy is not None,
+        unresolved_sources=scenario_result["unresolved_sources"],
     )
     response = FinanceSalesResponse(
-        snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
+        snapshot_id=context.snapshot.snapshot_id if context is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
-        base_cash_priority=None,
-        sales_cash_priority=None,
+        base_cash_priority=scenario_result["base_cash_priority"],
+        sales_cash_priority=scenario_result["sales_cash_priority"],
         collection_preferences=scenario_result["collection_preferences"],
         hard_constraints=rule_result["hard_constraints"],
         soft_warnings=rule_result["soft_warnings"],
