@@ -7,6 +7,7 @@
 순수 함수가 소유하고, LLM은 rationale의 claim이 원본과 맞는지 보는 데만 쓴다.
 """
 
+from itertools import pairwise
 from typing import Any
 
 from app.purchase_agent import AGENT_VERSION
@@ -102,12 +103,23 @@ def check_cash_ceiling(scenario: dict, state: PurchaseAgentState, constraints: d
 
 
 def check_split_dates(scenario: dict, as_of: str) -> str | None:
-    """seq 1의 date는 as_of, seq는 1부터 연속 (IO명세 §2)."""
+    """seq 1의 date는 as_of, seq는 1부터 연속, **날짜는 앞으로만 간다** (IO명세 §2).
+
+    날짜 검사는 ④가 실제로 분할하면서 붙었다. 회차가 하나뿐이던 동안에는 순서를 어길
+    방법이 없었지만, 2회차가 생기면 "같은 날 두 번"이 통과할 수 있다 — 그건 분할이 아니라
+    같은 매입을 두 줄로 적은 것이고, 사중 일치는 멀쩡히 통과한다.
+
+    ISO 날짜 문자열은 사전순 비교가 곧 시간순 비교라 그대로 비교한다.
+    스키마도 같은 검사를 하지만 거기서는 제안 전체가 죽고, 여기서는 **그 안만 컷한다**.
+    """
     rounds = scenario["split_plan"]
     if rounds[0]["date"] != as_of:
         return f"1회차 날짜가 as_of와 다름: {rounds[0]['date']} != {as_of}"
     if [item["seq"] for item in rounds] != list(range(1, len(rounds) + 1)):
         return f"회차 번호가 연속이 아님: {[item['seq'] for item in rounds]}"
+    dates = [item["date"] for item in rounds]
+    if any(earlier >= later for earlier, later in pairwise(dates)):
+        return f"회차 날짜가 앞으로 가지 않음: {dates}"
     return None
 
 

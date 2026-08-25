@@ -5,12 +5,14 @@ Epic 2는 rule_only 경로다. LLM 몫은 **문장을 다듬는 것**이고 숫�
 입력으로 받아 rationale·risks의 서술만 손본다.
 """
 
-from datetime import date
+from datetime import date, timedelta
+from itertools import pairwise
 from typing import Any
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
+from app.purchase_agent.schemas import TIMING_AXIS
 from app.purchase_agent.state import PurchaseAgentState
 
 
@@ -30,22 +32,83 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
     return axes
 
 
-def materialize_split(as_of: str, total_qty_kg: int, chosen: list[dict] | None) -> list[dict]:
-    """회차별 입고 계획. ④가 유형만 정하므로 안별 총량을 여기서 나눈다.
+def split_offsets(coverage_days: int, rounds: int) -> list[int]:
+    """회차별 **매입 실행일** 오프셋 = ``round(i × D / rounds)``.
 
-    ``None``(일괄)이면 단일 회차다. seq 1의 date는 ``as_of``여야 한다 (IO명세 §2).
+    첫 회차는 항상 0(= as_of)이다 — IO명세 §2 "seq 1의 date = as_of".
+    날짜를 ④가 아니라 여기서 만드는 이유: 안마다 D가 다르다 (§4-④ E3-3 확정 4).
+    보수(D=2)와 공격(D=12)에 같은 날짜를 박으면 보수안의 2회차가 커버 구간 밖으로 나간다.
+
+    ⚠️ 이 date는 **도착일이 아니다.** 도착일 = ``date + N4``이고 N4가 NULL이라 계산하지
+    않는다 (§5.5 · 규칙 3).
+    """
+    return [round(index * coverage_days / rounds) for index in range(rounds)]
+
+
+def split_quantities(total_qty_kg: int, chosen: list[dict]) -> list[int]:
+    """회차별 수량. **마지막 회차가 잔량을 흡수한다** — 반올림이 총량을 흔들면
+    사중 일치가 깨진다."""
+    remaining = total_qty_kg
+    quantities = []
+    for index, part in enumerate(chosen, start=1):
+        qty = remaining if index == len(chosen) else round(total_qty_kg * part["ratio"])
+        quantities.append(qty)
+        remaining -= qty
+    return quantities
+
+
+def split_infeasible_reason(
+    total_qty_kg: int, chosen: list[dict], coverage_days: int
+) -> str | None:
+    """이 안이 이 분할을 감당하는가. 못 하면 **사유**를, 되면 ``None``을 돌려준다.
+
+    ④는 그날 하나의 유형을 정하고 안별 총량·D는 모른다. 감당 여부는 여기서 안별로 본다.
+
+    막는 것 둘:
+
+    1. **0kg 회차** — ``SplitPlanItem.qty_kg > 0``이라 하나만 나와도 스키마가 **제안 전체**를
+       죽인다. E3-1에서 등급 배분이 정확히 이 자리에서 터졌다 (Codex 교차검증 P1).
+    2. **겹치는 날짜** — 회차가 커버일수보다 많으면 같은 날 두 번이 되고, 그건 분할이 아니라
+       같은 매입을 두 줄로 적은 것이다.
+    """
+    rounds = len(chosen)
+    if rounds > coverage_days:
+        return f"커버일수 {coverage_days}일보다 회차 수({rounds})가 많다"
+    offsets = split_offsets(coverage_days, rounds)
+    if any(earlier >= later for earlier, later in pairwise(offsets)):
+        return f"회차 날짜가 겹친다 (오프셋 {offsets})"
+    quantities = split_quantities(total_qty_kg, chosen)
+    if any(qty < 1 for qty in quantities):
+        return f"회차당 최소 수량 미달 — {total_qty_kg:,}kg을 {rounds}회로 나누면 {quantities}"
+    return None
+
+
+def materialize_split(
+    as_of: str, total_qty_kg: int, chosen: list[dict] | None, coverage_days: int
+) -> list[dict]:
+    """회차별 매입 계획. ④가 유형·비율만 정하므로 안별 총량과 날짜를 여기서 만든다.
+
+    ``None``(일괄)이거나 이 안이 분할을 감당하지 못하면 단일 회차로 되돌린다.
+    되돌린 사실은 ``_split_risks``가 안의 risks에 싣는다 — timing 라벨인데 회차가 하나인
+    상태를 조용히 넘기면 소비자가 라벨과 행동의 불일치를 추적할 수 없다.
     """
     if not chosen:
         return [{"seq": 1, "date": as_of, "qty_kg": total_qty_kg}]
     _validate_ratios(chosen, "split_plan")
-    remaining = total_qty_kg
-    rounds = []
-    for index, part in enumerate(chosen, start=1):
-        # 마지막 회차가 잔량을 흡수한다 — 반올림이 총량을 흔들면 사중 일치가 깨진다.
-        qty = remaining if index == len(chosen) else round(total_qty_kg * part["ratio"])
-        rounds.append({"seq": index, "date": part["date"], "qty_kg": qty})
-        remaining -= qty
-    return rounds
+    if split_infeasible_reason(total_qty_kg, chosen, coverage_days):
+        return [{"seq": 1, "date": as_of, "qty_kg": total_qty_kg}]
+
+    start = date.fromisoformat(as_of)
+    offsets = split_offsets(coverage_days, len(chosen))
+    quantities = split_quantities(total_qty_kg, chosen)
+    return [
+        {
+            "seq": index + 1,
+            "date": (start + timedelta(days=offset)).isoformat(),
+            "qty_kg": qty,
+        }
+        for index, (offset, qty) in enumerate(zip(offsets, quantities, strict=True))
+    ]
 
 
 def _validate_ratios(ratios: list[dict], name: str) -> list[dict]:
@@ -279,6 +342,110 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
     return notes
 
 
+def _split_decision(chosen: list[dict] | None) -> dict:
+    """④가 첫 줄에 실어 보낸 분할 판단 근거. ⑤의 ``_sourcing_decision``과 같은 방식이다."""
+    return chosen[0].get("decision", {}) if chosen else {}
+
+
+def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: str) -> list[dict]:
+    """분할한 안의 근거. **선 트리거마다 한 건**이고 출처·ref_id·등급이 각각 다르다.
+
+    한 건으로 뭉쳐 전부 "예측(FC-…)·SIM_FIXED"로 적었더니, 수량 단독 진입일 때
+    **예측이 근거가 아닌 주장에 예측 ref_id가 붙었다** (Codex 교차검증 P2).
+    총량은 확정주문에서 파생해 하드 제약으로 클립한 값이라 출처가 주문이고 등급도 낮다
+    (IO명세 §5 — "수요에서 파생된 것은 SIM_FIXED 자격을 잃는다").
+
+    회차가 하나로 되돌아갔으면 붙이지 않는다 — 일어나지 않은 판단을 적지 않는다.
+    """
+    if len(rounds) < 2:
+        return []
+    items = []
+    if decision.get("by_volume"):
+        items.append(
+            {
+                "source": "주문",
+                "claim": (
+                    f"안 총량 {decision['largest_total_kg']:,}kg ≥ 분할 임계 "
+                    f"{decision['threshold_kg']:,}kg → {len(rounds)}회 분할"
+                ),
+                "ref_id": f"SO-{as_of}",
+                "evidence_grade": "ASSUMED",
+                "evidence_detail": (
+                    "확정주문에서 파생해 하드 제약으로 클립한 안별 총량 — "
+                    "수요 파생값이라 SIM_FIXED 자격 없음"
+                ),
+            }
+        )
+    if decision.get("by_trend"):
+        items.append(
+            {
+                "source": "예측",
+                "claim": f"판정일까지 지속 상승 궤적 → {len(rounds)}회 분할로 로트 나이 분산",
+                "ref_id": f"FC-{forecast['model_version']}-{as_of}",
+                "evidence_grade": "SIM_FIXED",
+                "evidence_detail": (
+                    "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — "
+                    "그 트레이드오프 판단은 LLM 몫이라 지금은 균등 배분이다 (상세설계 §4-④)"
+                ),
+            }
+        )
+    return items
+
+
+def _entry_miss_reason(decision: dict) -> str:
+    """④가 진입하지 않은 이유. 두 트리거 중 못 선 것을 그대로 적는다."""
+    misses = []
+    if not decision.get("by_volume"):
+        misses.append(
+            f"최대안 {decision.get('largest_total_kg', 0):,}kg < "
+            f"임계 {decision.get('threshold_kg', 0):,}kg"
+        )
+    if not decision.get("by_trend"):
+        misses.append("지속 상승 궤적 아님")
+    return " · ".join(misses)
+
+
+def _split_risks(
+    decision: dict,
+    axis: str,
+    total_qty_kg: int,
+    coverage_days: int,
+    chosen: list[dict] | None,
+    rounds: list[dict],
+) -> list[str]:
+    """분할에서 나온 유의사항. **timing 라벨과 실제 행동이 어긋나면 반드시 적는다** (규칙 3).
+
+    회차가 하나로 끝나는 경로가 둘인데 이유가 다르다:
+
+    1. **진입 자체를 안 함** — ①이 클립 전 추정 총량으로 축을 열었고 ④가 클립 후 실제
+       총량으로 판정해 닫혔다 (§4-④ E3-3 확정 2가 "정상"이라고 한 경우다)
+    2. **진입했는데 이 안이 못 버팀** — 0kg 회차나 겹치는 날짜가 나온다
+
+    둘 다 조용히 넘기면 소비자가 라벨(timing)과 행동(일괄)의 불일치를 추적할 수 없다.
+    첫 번째 경로는 Codex 교차검증에서 P1으로 잡혔다 — 처음엔 두 번째만 고지했었다.
+    """
+    if axis != TIMING_AXIS:
+        return []  # quantity·mix 축 안은 애초에 분할 대상이 아니다
+    if not decision.get("entered"):
+        return [
+            (
+                f"timing 축 안이지만 분할 미진입({_entry_miss_reason(decision)})으로 일괄 — "
+                "허용 축은 ①이 클립 전 추정 총량으로 열고, "
+                "분할은 ④가 클립 후 실제 총량으로 판정한다"
+            )
+        ]
+    reason = chosen and split_infeasible_reason(total_qty_kg, chosen, coverage_days)
+    if reason:
+        return [f"분할 불가({reason})로 일괄 전환 — timing 축 안이지만 회차는 하나다"]
+    return [
+        (
+            f"{len(rounds)}회 분할 — 회차별 도착일(= 회차 date + N4) 기준 cap_by_date 검사는 "
+            "inbound_lead_days(N4) 미확정으로 보류 (상세설계 §5.5 · 규칙 3). "
+            "총량 단일 도착일로 뭉치면 분할의 창고 부담 분산 효과가 검증되지 않는다"
+        )
+    ]
+
+
 def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str) -> list[str]:
     """위험·유의사항. **미결값 때문에 건너뛴 검사도 여기 싣는다.**
 
@@ -316,6 +483,8 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     lots = state["inventory"].get("lots")
     contract_price = state["contract_price"]  # 미수령이면 None — 마진 두 값이 함께 null이 된다
     decision = _sourcing_decision(state["sourcing_plan"])  # ⑤ 등급 배분 판단 근거
+    split_choice = state["split_plan"]  # ④ 분할 유형·비율 (진입 안 했으면 None)
+    split_decision = _split_decision(split_choice)
 
     scenarios = []
     dropped = []
@@ -334,13 +503,19 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
             )
             continue
         sourcing = materialize_sourcing(total, state["sourcing_plan"])
+        # 분할은 **timing 축을 받은 안에만** 붙는다 (§4-④ E3-3 확정 1). 전 안에 걸면
+        # 세 안의 split 구조가 같아져 timing이 라벨로만 남는다 — §3.5.1-3이 막으려는 상태다.
+        axis = axes[draft["label"]]
+        chosen = split_choice if axis == TIMING_AXIS else None
+        coverage_days = draft["coverage_days"]
+        rounds = materialize_split(state["date"], total, chosen, coverage_days)
         rationale_input = {**draft, "daily_demand_kg": base["daily_demand_kg"]}
         unit_price = _weighted_unit_price(sourcing, total)
         margin_warning, expected_margin_rate = compute_margin(unit_price, contract_price)
         scenarios.append(
             {
                 "label": draft["label"],
-                "strategy_type": axes[draft["label"]],
+                "strategy_type": axis,
                 "coverage_days": draft["coverage_days"],
                 "total_qty_kg": total,
                 "total_amount_krw": sum(
@@ -349,16 +524,20 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "max_price": compute_max_price(state["forecast"], draft["coverage_days"]),
                 # 규칙 5 — 계약단가 초과는 컷이 아니라 표시다.
                 "margin_warning": margin_warning,
-                "split_plan": materialize_split(state["date"], total, state["split_plan"]),
+                "split_plan": rounds,
                 "sourcing_plan": sourcing,
                 "expected_margin_rate": expected_margin_rate,
                 "rationale": [
                     *_rationale(state, rationale_input, constraints),
                     *_sourcing_rationale(decision, state["date"]),
+                    *_split_rationale(split_decision, rounds, state["forecast"], state["date"]),
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
                     *_sourcing_risks(sourcing, decision),
+                    *_split_risks(
+                        split_decision, axis, total, coverage_days, chosen, rounds
+                    ),
                 ],
             }
         )

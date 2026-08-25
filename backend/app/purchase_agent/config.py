@@ -20,6 +20,7 @@ _REQUIRED_SECTIONS = (
     "situation",
     "coverage_days",
     "triggers",
+    "split",
     "concentration",
     "variant",
     "costs",

@@ -56,6 +56,7 @@ kg로 모으면 세 소비자가 한 단위로 정렬된다. 이 파일은 그�
 """
 
 from datetime import date
+from itertools import pairwise
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -92,6 +93,11 @@ Situation = Literal["stable", "uncertain"]
 #: 아래 ``Market`` Literal과 **같은 값이어야 한다** — 검사 코드가 문자열을 필요로 해서
 #: 상수로도 노출한다. 둘이 갈라지지 않는지는 계약 테스트가 확인한다.
 FIXED_MARKET = "가락"
+#: 분할 매입이 붙는 축 (상세설계 §4-④ · E3-3 확정 1 — "timing 축을 받은 안에만").
+#: ``allocation.aggressive_axis``와 값이 같지만 뜻이 다르다 — 그쪽은 "공격안이 어느 축을
+#: 가져가는가"이고 이건 "분할이 어느 축에 붙는가"다. 한 값으로 묶으면 축 배정을 바꾸는
+#: 순간 분할 대상까지 조용히 따라 움직인다.
+TIMING_AXIS: StrategyType = "timing"
 Market = Literal["가락"]
 
 #: 근거 등급 4단계 (정의서 §7.3). 서열: OFFICIAL > VENDOR > SIM_FIXED > ASSUMED
@@ -270,9 +276,20 @@ class Scenario(BaseModel):
 
     @model_validator(mode="after")
     def validate_split_sequence(self) -> "Scenario":
-        """분할 회차는 1부터 1씩 증가한다. 일괄 매입이면 seq 1개짜리 목록."""
+        """분할 회차는 1부터 1씩 증가하고 **날짜도 함께 앞으로 간다**.
+
+        일괄 매입이면 seq 1개짜리 목록이다.
+
+        날짜 검사가 나중에 붙은 이유: 회차가 하나뿐이던 동안에는 순서를 어길 방법이 없었다.
+        ④가 실제로 분할하기 시작하면 "2분할인데 같은 날 두 번"이 통과할 수 있는데,
+        그건 분할이 아니라 같은 매입을 두 줄로 적은 것이다. ⑦도 같은 검사를 하지만
+        거기서는 그 안만 컷하고, 여기서는 출력 경계의 백스톱이다.
+        """
         if [item.seq for item in self.split_plan] != list(range(1, len(self.split_plan) + 1)):
             raise ValueError("split_plan seq must start at 1 and increase by 1")
+        dates = [item.date for item in self.split_plan]
+        if any(earlier >= later for earlier, later in pairwise(dates)):
+            raise ValueError("split_plan dates must strictly increase")
         return self
 
 

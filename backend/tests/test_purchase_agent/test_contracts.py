@@ -453,6 +453,7 @@ def test_constraints_file_parses() -> None:
         "situation",
         "coverage_days",
         "triggers",
+        "split",
         "concentration",
         "variant",
         "costs",
@@ -521,6 +522,18 @@ def test_input_values_are_not_stored_as_constants() -> None:
     body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     assert "contract_price:" not in body
     assert "margin_defense_floor_rate:" not in body
+
+
+def test_split_types_are_a_fixed_list_containing_the_no_split_option() -> None:
+    """분할 유형은 **고정 목록**이다 (상세설계 §4-④ "생성 말고 선택").
+
+    1(일괄)이 목록에 있어야 "분할 안 함"도 선택지가 되고, 1보다 큰 최소 유형이 곧
+    "진입 시 최소 회차"다 — 그 값을 별도 상수로 두면 목록과 어긋날 수 있다.
+    """
+    types = _constraints()["split"]["types"]
+    assert types == sorted(set(types))
+    assert types[0] == 1
+    assert [size for size in types if size > 1]
 
 
 def test_baseline_spread_matches_the_normal_day_mock() -> None:
