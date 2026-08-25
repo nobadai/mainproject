@@ -163,8 +163,9 @@ class AnthropicProvider:
             "format": {"type": "json_schema", "schema": _response_schema()}
         }
         if self.settings.effort:
-            # 후보 3개 중 하나를 고르는 일이라 깊은 추론이 필요하지 않다. 모델을 낮추는
-            # 대신 effort를 낮춘다 — 비용·지연 조절의 정식 레버다.
+            # **설정했을 때만 싣는다.** 지원하지 않는 모델에 실어 보내면 호출이 통째로
+            # 실패하고, 서비스는 그걸 여느 실패와 똑같이 삼켜 규칙 기본안으로 떨어뜨린다
+            # — LLM을 켜 뒀는데 매번 fallback인 상태가 조용히 유지된다.
             output_config["effort"] = self.settings.effort
         message = client.messages.create(
             model=self.settings.model,
@@ -455,8 +456,20 @@ class MixSelectionService:
 #: **openai에는 기본값을 두지 않는다** — 확인하지 않은 모델 id를 코드에 박으면 404를
 #: fallback으로 삼키게 되고, 그건 "LLM이 실패했다"와 "모델명을 지어냈다"를 뒤섞는다.
 #: 값이 없으면 프로바이더가 즉시 터지고 사유가 risks에 남는다.
+#: 프로바이더별 기본 모델. **openai만 일부러 비어 있다** — 확인하지 않은 모델 id를 박으면
+#: 404가 fallback에 삼켜져 "LLM이 실패했다"와 "모델명이 틀렸다"가 구분되지 않는다.
+#:
+#: anthropic 기본이 **Haiku급인 이유** (모델 목록 2026-08-26 재확인): ⑤가 LLM에 맡기는 일은
+#: 규칙이 만든 후보 3개 중 하나를 고르고 사유 한 문장을 쓰는 것이 전부다 — 숫자는 규칙이
+#: 만든다(규칙 6). 판단 밀도가 낮은데 백테스트는 회당 품목 수만큼 호출하므로, 여기서 상위
+#: 모델을 쓰면 비용·지연만 곱해진다. 상위 모델은 ③ 트레이드오프 서술처럼 서술 밀도가
+#: 높은 자리에 남겨둔다.
+#:
+#: **날짜 붙은 스냅샷을 쓴다.** ``claude-haiku-4-5``는 스냅샷을 가리키는 별칭이라 가리키는
+#: 대상이 바뀔 수 있다. 같은 as_of로 두 번 돌렸는데 결과가 다르면 백테스트 성적이 무효가
+#: 되는 건 규칙 1의 look-ahead와 같은 종류의 문제다 — 재현되지 않는 실행은 근거가 못 된다.
 _DEFAULT_MODELS = {
-    "anthropic": "claude-opus-5",
+    "anthropic": "claude-haiku-4-5-20251001",
     "ollama": "gemma3:4b",  # 팀 4벌의 기본값과 같다
 }
 
@@ -516,7 +529,10 @@ def get_llm_settings() -> LLMSettings:
         timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", "30", minimum=0.1),
         max_retries=min(1, _int_env("LLM_MAX_RETRIES", "1", minimum=0)),
         max_output_tokens=_int_env("LLM_MAX_OUTPUT_TOKENS", "8192", minimum=256),
-        effort=(_env("LLM_EFFORT", "low").strip() or None),
+        # **기본은 미설정이다.** effort는 모델마다 지원 여부가 다르고 기본 모델인
+        # Haiku 4.5는 지원 목록에 없다. 기본 모델이 이미 최저 티어인 이상 비용 레버는
+        # effort가 아니라 모델 선택이다 — 상위 모델로 올릴 때만 켠다.
+        effort=(_env("LLM_EFFORT", "").strip() or None),
         # 도메인 임계는 .env가 아니라 constraints.yaml에서 온다 (규칙 7).
         reason_max_chars=load_constraints()["grade"]["mix_reason_max_chars"],
     )

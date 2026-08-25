@@ -13,6 +13,7 @@
 
 import json
 import os
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -557,8 +558,6 @@ def test_provider_without_a_model_raises(monkeypatch) -> None:
     ``openai``에 기본 모델을 두지 않았으므로(확인하지 않은 id를 코드에 박지 않는다)
     ``LLM_MODEL`` 미설정이 이 경로로 온다.
     """
-    from dataclasses import replace
-
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     settings = replace(_settings(provider="openai"), model="")
     with pytest.raises(RuntimeError, match="LLM_MODEL"):
@@ -672,6 +671,66 @@ def test_choosing_base_only_is_still_a_recorded_judgment() -> None:
     items = [r for r in scenario["rationale"] if "등급 조합" in r["claim"]]
     assert len(items) == 1, "중품을 안 쓰기로 한 판단도 근거에 남는다"
     assert "BASE_ONLY" in items[0]["claim"]
+
+
+def test_default_anthropic_model_is_a_pinned_low_tier_snapshot(monkeypatch) -> None:
+    """기본 모델은 **최저 티어의 날짜 붙은 스냅샷**이다.
+
+    두 가지를 동시에 잠근다:
+
+    - **티어**: ⑤가 LLM에 맡기는 일은 후보 3개 중 선택 + 사유 한 문장이고 숫자는 규칙이
+      만든다(규칙 6). 백테스트는 회당 품목 수만큼 부르므로 상위 모델은 비용·지연만 곱한다.
+    - **고정**: 별칭은 가리키는 스냅샷이 바뀔 수 있다. 같은 ``as_of``가 같은 결과를 내지
+      않으면 백테스트 성적이 근거가 못 된다 — 규칙 1의 look-ahead와 같은 종류의 무효화다.
+
+    별칭 형태(``claude-haiku-4-5``)로 되돌아가면 이 검사가 문다.
+    """
+    monkeypatch.delenv("PURCHASE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    from app.purchase_agent.llm.runtime import get_llm_settings
+
+    settings = get_llm_settings()
+    assert settings.model == "claude-haiku-4-5-20251001"
+    snapshot_date = settings.model.rsplit("-", 1)[-1]
+    assert snapshot_date.isdigit() and len(snapshot_date) == 8, (
+        "별칭이 아니라 날짜(YYYYMMDD) 붙은 스냅샷이어야 한다"
+    )
+
+
+def test_effort_is_unset_by_default_and_omitted_from_the_request(monkeypatch) -> None:
+    """``effort``는 **설정했을 때만** 요청에 실린다.
+
+    기본 모델 Haiku 4.5는 ``effort``를 지원하지 않는다. 지원하지 않는 모델에 실어 보내면
+    호출이 통째로 실패하는데, 서비스는 그걸 여느 실패와 똑같이 삼켜 규칙 기본안으로
+    떨어뜨린다 — **LLM을 켜 뒀는데 매번 fallback인 상태가 조용히 유지된다.** 그래서
+    "기본값이 없다"와 "요청에서 빠진다"를 둘 다 잠근다.
+    """
+    monkeypatch.delenv("PURCHASE_LLM_EFFORT", raising=False)
+    monkeypatch.delenv("LLM_EFFORT", raising=False)
+    from app.purchase_agent.llm.runtime import AnthropicProvider, get_llm_settings
+
+    assert get_llm_settings().effort is None
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: dict = {}
+    _anthropic_stub(monkeypatch, [_Block("text", _reply("MID_CAPPED"))], captured)
+    AnthropicProvider(_settings(provider="anthropic")).generate(_context())
+    assert "effort" not in captured["output_config"]
+
+
+def test_effort_is_sent_when_explicitly_configured(monkeypatch) -> None:
+    """상위 모델로 올릴 때를 위해 **경로 자체는 살아 있다** — 켜면 실린다.
+
+    위 테스트만 있으면 ``output_config["effort"]`` 대입을 통째로 지워도 초록불이 뜬다.
+    """
+    from app.purchase_agent.llm.runtime import AnthropicProvider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    captured: dict = {}
+    _anthropic_stub(monkeypatch, [_Block("text", _reply("MID_CAPPED"))], captured)
+    settings = replace(_settings(provider="anthropic"), effort="low")
+    AnthropicProvider(settings).generate(_context())
+    assert captured["output_config"]["effort"] == "low"
 
 
 def test_broken_env_settings_do_not_break_the_graph(monkeypatch) -> None:
