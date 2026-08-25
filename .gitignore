@@ -29,6 +29,7 @@ out/
 npm-debug.log*
 
 # 로컬 실행 결과
+compose.override.yml
 deploy/runtime.json
 *.log
 
@@ -41,5 +42,4 @@ Thumbs.db
 
 #예외폴더
 docs/
-finance/
-tests/
+

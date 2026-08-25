@@ -1037,7 +1037,8 @@ _advisory = CheckResult(
 )
 ok(
     not check_scenario_independence("inventory", _advisory, ["purchase_output", "sourcing_plan"]),
-    "자문 검사(soft·밴드 없음)가 purchase_output 을 읽는 것은 허용 (v1.2.8 — PDF 물류A FRESHNESS_RISK)",
+    "자문 검사(soft·밴드 없음)가 purchase_output 을 읽는 것은 허용 "
+    "(v1.2.8 — PDF 물류A FRESHNESS_RISK)",
 )
 
 # 물류 B lot_constraints 타입

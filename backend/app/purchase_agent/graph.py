@@ -1,0 +1,87 @@
+"""7노드 LangGraph 그래프 (상세설계 §4).
+
+```
+① classify_situation ─ stable ────────────────┐
+                     └ uncertain → ② collect_context
+                                              ▼
+                                       ③ draft_plan
+                                              ▼
+                                       ④ split_plan
+                                              ▼
+                                     ⑤ allocate_sourcing
+                                              ▼
+                                    ⑥ package_scenarios
+                                              ▼
+                                       ⑦ self_check → END
+```
+
+조건부 분기가 하나 있다 — stable한 날은 ② 문서 루프를 건너뛴다. "문서를 읽을지 말지부터가
+판단"이라 원라인 파이프라인이 아니라 그래프인 것이다 (§4).
+
+④는 지금 통과 스텁이라 무조건 지난다. timing 축이 허용될 때만 진입하는 조건부 분기는
+④를 실제로 구현하는 Epic 3에서 붙인다 — 스텁 상태로 분기를 만들면 "분기가 도는지"를
+검증할 수 없는 죽은 코드가 된다.
+"""
+
+from datetime import date
+from typing import Any, Literal
+
+from langgraph.graph import END, START, StateGraph
+
+from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
+from app.purchase_agent.nodes.classify_situation import classify_situation
+from app.purchase_agent.nodes.collect_context import collect_context
+from app.purchase_agent.nodes.draft_plan import draft_plan
+from app.purchase_agent.nodes.package_scenarios import package_scenarios
+from app.purchase_agent.nodes.self_check import self_check
+from app.purchase_agent.nodes.split_plan import split_plan
+from app.purchase_agent.state import PurchaseAgentState, build_initial_state
+
+#: 노드 이름 → 함수. 순서가 §4 그래프의 ①~⑦과 같다.
+NODES = {
+    "classify_situation": classify_situation,
+    "collect_context": collect_context,
+    "draft_plan": draft_plan,
+    "split_plan": split_plan,
+    "allocate_sourcing": allocate_sourcing,
+    "package_scenarios": package_scenarios,
+    "self_check": self_check,
+}
+
+
+def route_after_classify(state: PurchaseAgentState) -> Literal["collect_context", "draft_plan"]:
+    """uncertain일 때만 ② 문서 루프로 간다 (§4-②: "stable한 날은 이 노드를 건너뛴다")."""
+    return "collect_context" if state["situation"] == "uncertain" else "draft_plan"
+
+
+def build_graph() -> Any:
+    """7노드를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행")."""
+    builder = StateGraph(PurchaseAgentState)
+    for name, node in NODES.items():
+        builder.add_node(name, node)
+
+    builder.add_edge(START, "classify_situation")
+    builder.add_conditional_edges(
+        "classify_situation",
+        route_after_classify,
+        {"collect_context": "collect_context", "draft_plan": "draft_plan"},
+    )
+    builder.add_edge("collect_context", "draft_plan")
+    builder.add_edge("draft_plan", "split_plan")
+    builder.add_edge("split_plan", "allocate_sourcing")
+    builder.add_edge("allocate_sourcing", "package_scenarios")
+    builder.add_edge("package_scenarios", "self_check")
+    builder.add_edge("self_check", END)
+    return builder.compile()
+
+
+def run_purchase_agent(item: str, as_of: date, *, feedback: dict | None = None) -> dict:
+    """품목 하나에 대해 그래프를 한 번 돌리고 제안 JSON을 돌려준다.
+
+    **read-only다** (규칙 2) — DB에 아무것도 쓰지 않고 반환이 전부다.
+    **as_of는 주입받는다** (규칙 1) — 벽시계를 읽지 않으므로 과거 날짜로도 그대로 돈다.
+
+    T1은 품목별로 이 그래프를 돌린 뒤 전사 시나리오로 조합한다(§4). 조합은 아직 범위 밖이다.
+    """
+    final_state = build_graph().invoke(build_initial_state(item, as_of, feedback=feedback))
+    return final_state["proposal"]

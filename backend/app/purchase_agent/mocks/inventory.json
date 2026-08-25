@@ -1,0 +1,35 @@
+{
+  "_설명": "품목별 고정값. 날짜만 as_of 상대 오프셋으로 두고 로더가 materialize한다 — 리터럴 날짜를 쓰면 9/11 시나리오에서 '8/17 입고'가 한 달 전이 되어 잔여신선도 계산이 무의미해진다.",
+  "_기준일_재현": "배추 블록은 as_of 2026-08-21에서 IO명세 §1-③ 예시와 완전히 일치한다: stocked_at 2026-08-17, 잔여신선도 = 10 − (8/21 − 8/17) = 6일. 픽스처 risks의 '중품 1,500kg은 잔여신선도 6일 내 소진 필요'와 같은 6이다.",
+  "_주의": "lots[].shelf_life_days는 그 로트의 유통기한이다. constraints.yaml의 shelf_life_days(품목 보관한계, 배추 135일)와 이름만 같고 다른 개념이다.",
+  "items": {
+    "배추": {
+      "lots": [
+        {"lot_id": 12, "grade": "상", "stocked_at_offset_days": -4, "remaining_kg": 3000, "shelf_life_days": 10}
+      ],
+      "warehouse_free_kg": 12000,
+      "rental_cap_kg": 3600
+    },
+    "무": {
+      "lots": [
+        {"lot_id": 21, "grade": "상", "stocked_at_offset_days": -3, "remaining_kg": 2000, "shelf_life_days": 14}
+      ],
+      "warehouse_free_kg": 9000,
+      "rental_cap_kg": 2700
+    },
+    "양파": {
+      "lots": [
+        {"lot_id": 33, "grade": "상", "stocked_at_offset_days": -10, "remaining_kg": 5000, "shelf_life_days": 60}
+      ],
+      "warehouse_free_kg": 15000,
+      "rental_cap_kg": 4500
+    },
+    "피마늘": {
+      "lots": [
+        {"lot_id": 41, "grade": "상", "stocked_at_offset_days": -6, "remaining_kg": 1200, "shelf_life_days": 45}
+      ],
+      "warehouse_free_kg": 6000,
+      "rental_cap_kg": 1800
+    }
+  }
+}
