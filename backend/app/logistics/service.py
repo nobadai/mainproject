@@ -31,16 +31,16 @@ from app.logistics.schemas import (
 )
 
 
-def _get_snapshot_or_none() -> InventoryLogisticsSnapshot | None:
+def _get_snapshot_or_none(*, as_of: date) -> InventoryLogisticsSnapshot | None:
     try:
-        return get_current_inventory_logistics_snapshot()
+        return get_current_inventory_logistics_snapshot(as_of=as_of)
     except LookupError:
         return None
 
 
 def run_logistics_procurement(request: PurchaseAgentOutput) -> LogisticsProcurementResponse:
     """현재 Snapshot과 Purchase 날짜 축으로 Logistics A Band를 만든다."""
-    snapshot = _get_snapshot_or_none()
+    snapshot = _get_snapshot_or_none(as_of=request.meta.as_of)
     response = run_logistics_procurement_with_snapshot(request, snapshot)
     save_logistics_agent_run(
         cycle="PROCUREMENT",
@@ -87,7 +87,7 @@ def run_logistics_procurement_with_snapshot(
 
 def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
     """H1 승인 매입을 미래 입고로 Overlay해 Logistics B Reply를 만든다."""
-    snapshot = _get_snapshot_or_none()
+    snapshot = _get_snapshot_or_none(as_of=request.as_of)
     response = run_logistics_sales_with_snapshot(request, snapshot)
     save_logistics_agent_run(
         cycle="SALES",

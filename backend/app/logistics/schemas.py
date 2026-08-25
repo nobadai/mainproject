@@ -11,6 +11,7 @@ from app.logistics.llm.schemas import LLMResponseFields
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 LogisticsCycle = Literal["PROCUREMENT", "SALES"]
+RuntimeSourceStatus = Literal["CONFIRMED", "CONFIRMED_ZERO", "UNRESOLVED"]
 ConstraintCode = Literal[
     "LOG-H01",
     "LOG-H02",
@@ -223,6 +224,56 @@ class LogisticsPolicy(BaseModel):
     @classmethod
     def reject_boolean_policy_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
+
+
+class LogisticsRuntimeFixture(BaseModel):
+    """AGENT_MVP_DEMO 전용 Logistics schedule completeness fixture."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fixture_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    as_of: date
+    in_transit_status: RuntimeSourceStatus
+    in_transit: list[InTransitItem] | None
+    confirmed_inbound_status: RuntimeSourceStatus
+    confirmed_inbound_schedule: list[ScheduledQuantity] | None
+    confirmed_outbound_status: RuntimeSourceStatus
+    confirmed_outbound_schedule: list[ScheduledQuantity] | None
+    usage_scope: Literal["AGENT_MVP_DEMO"]
+    evidence_grade: Literal["SIM_FIXED"]
+    source_ref: str = Field(min_length=1)
+    approved_by: Literal["HUMAN"]
+
+    @model_validator(mode="after")
+    def validate_schedule_statuses(self) -> "LogisticsRuntimeFixture":
+        sources = (
+            ("in_transit", self.in_transit_status, self.in_transit),
+            (
+                "confirmed_inbound",
+                self.confirmed_inbound_status,
+                self.confirmed_inbound_schedule,
+            ),
+            (
+                "confirmed_outbound",
+                self.confirmed_outbound_status,
+                self.confirmed_outbound_schedule,
+            ),
+        )
+        for name, status, schedule in sources:
+            if status == "UNRESOLVED" and schedule is not None:
+                raise ValueError(f"{name} UNRESOLVED must preserve None")
+            if status == "CONFIRMED_ZERO" and schedule != []:
+                raise ValueError(f"{name} CONFIRMED_ZERO must have an empty list")
+            if status == "CONFIRMED" and not schedule:
+                raise ValueError(f"{name} CONFIRMED must have confirmed rows")
+        if (
+            self.in_transit_status == "CONFIRMED"
+            and self.in_transit is not None
+            and any(item.expected_arrival_date is None for item in self.in_transit)
+        ):
+            raise ValueError("confirmed in_transit rows require expected_arrival_date")
+        return self
 
 
 class ConstraintResult(BaseModel):

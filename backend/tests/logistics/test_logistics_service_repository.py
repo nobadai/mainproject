@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.logistics.repository import (
     get_active_logistics_policy,
+    get_active_logistics_runtime_fixture,
     get_current_inventory_logistics_snapshot,
 )
 from app.logistics.schemas import LogisticsSalesRequest, PurchaseAgentOutput
@@ -51,6 +52,53 @@ def _load_policy(rows: list[dict[str, object]]):
         "AGENT_MVP_DEMO",
     ]
     return policy
+
+
+def _fixture_row(**updates) -> dict[str, object]:
+    row = {
+        "fixture_id": "LOG-RUNTIME-SIM-BURNIN-202512-DAY30",
+        "sim_run_id": "SIM-BURNIN-202512",
+        "as_of": date(2025, 12, 31),
+        "in_transit_status": "CONFIRMED_ZERO",
+        "in_transit_json": [],
+        "confirmed_inbound_status": "CONFIRMED_ZERO",
+        "confirmed_inbound_json": [],
+        "confirmed_outbound_status": "CONFIRMED_ZERO",
+        "confirmed_outbound_json": [],
+        "usage_scope": "AGENT_MVP_DEMO",
+        "evidence_grade": "SIM_FIXED",
+        "source_ref": "MVP-DECISION-20260825:LOG-RUNTIME-DAY30",
+        "approved_by": "HUMAN",
+    }
+    row.update(updates)
+    return row
+
+
+def _inventory_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "lot_id": "LOT-ACTIVE-001",
+            "item_name": "배추",
+            "grade": "상",
+            "received_at": date(2025, 12, 31),
+            "remaining_qty_kg": Decimal("300.4"),
+            "status": "ACTIVE",
+            "storage_zone": "COLD_HUMID_0_3",
+            "operational_limit_days": 10,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "lot_id": "LOT-ACTIVE-002",
+            "item_name": "무",
+            "grade": "상",
+            "received_at": date(2025, 12, 30),
+            "remaining_qty_kg": Decimal("75.0"),
+            "status": "ACTIVE",
+            "storage_zone": "COLD_HUMID_0_4",
+            "operational_limit_days": 12,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+    ]
 
 
 def test_logistics_policy_loads_typed_values_and_metadata():
@@ -140,34 +188,105 @@ def test_independent_sla_capacity_never_falls_back_to_legacy_6_4_ton():
         _load_policy(rows)
 
 
-def test_repository_excludes_provisional_capacity():
-    dashboard = {"as_of": "2026-08-21", "used_capacity_kg": Decimal(375)}
-    capacity = {
-        "guaranteed_capacity_plt": Decimal(8),
-        "effective_kg_per_pallet": Decimal(800),
-        "equivalent_capacity_ton": Decimal("6.4"),
-        "used_capacity_kg": Decimal(375),
-    }
-    contract = {
-        "logistics_contract_id": "LOGI-BASE-5PL",
-        "guaranteed_capacity_plt": Decimal(8),
-        "effective_kg_per_pallet": Decimal(800),
-        "equivalent_capacity_ton": Decimal("6.4"),
-        "contract_status": "BASELINE_ONLY",
-        "provisional": True,
-    }
+def test_runtime_fixture_loads_confirmed_zero_schedules():
     with (
-        patch("app.logistics.repository.get_db_schema", return_value="haetdeul"),
-        patch(
-            "app.logistics.repository.fetch_one",
-            side_effect=[dashboard, capacity],
-        ),
-        patch("app.logistics.repository.fetch_all", side_effect=[[], [contract]]),
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", return_value=[_fixture_row()]) as fetch,
     ):
-        snapshot = get_current_inventory_logistics_snapshot()
+        fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
 
-    assert snapshot.guaranteed_capacity_kg is None
-    assert snapshot.used_capacity_kg == Decimal(375)
+    assert fixture.fixture_id == "LOG-RUNTIME-SIM-BURNIN-202512-DAY30"
+    assert fixture.sim_run_id == "SIM-BURNIN-202512"
+    assert fixture.in_transit == []
+    assert fixture.confirmed_inbound_schedule == []
+    assert fixture.confirmed_outbound_schedule == []
+    assert fetch.call_args.args[1] == ["AGENT_MVP_DEMO", date(2025, 12, 31)]
+
+
+@pytest.mark.parametrize("rows", [[], [_fixture_row(), _fixture_row(fixture_id="duplicate")]])
+def test_runtime_fixture_requires_exactly_one_active_row(rows):
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", return_value=rows),
+        pytest.raises(LookupError, match="exactly one"),
+    ):
+        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"usage_scope": "wrong"}, "usage_scope mismatch"),
+        ({"as_of": date(2025, 12, 30)}, "as_of mismatch"),
+        (
+            {
+                "in_transit_json": [
+                    {
+                        "item": "배추",
+                        "quantity_kg": 1,
+                        "expected_arrival_date": "2026-01-02",
+                    }
+                ]
+            },
+            "CONFIRMED_ZERO",
+        ),
+        ({"confirmed_inbound_json": {}}, "list"),
+        ({"in_transit_status": "INVALID"}, "Input should be"),
+    ],
+)
+def test_invalid_runtime_fixture_fails_closed(updates, message):
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", return_value=[_fixture_row(**updates)]),
+        pytest.raises((ValueError, ValidationError), match=message),
+    ):
+        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+
+
+def test_unresolved_runtime_source_preserves_none():
+    row = _fixture_row(in_transit_status="UNRESOLVED", in_transit_json=None)
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", return_value=[row]),
+    ):
+        fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+
+    assert fixture.in_transit is None
+
+
+def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows()],
+        ) as fetch,
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert snapshot.snapshot_id is None
+    assert [lot.lot_id for lot in snapshot.on_hand_by_lot] == [
+        "LOT-ACTIVE-001",
+        "LOT-ACTIVE-002",
+    ]
+    assert snapshot.used_capacity_kg == Decimal("375.4")
+    assert snapshot.guaranteed_capacity_kg == Decimal(8000)
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg == Decimal("7624.6")
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg != Decimal("6024.6")
+    assert snapshot.burst_capacity_kg == Decimal(9600)
+    assert snapshot.in_transit == []
+    assert snapshot.confirmed_inbound_schedule == []
+    assert snapshot.confirmed_outbound_schedule == []
+    assert snapshot.guaranteed_capacity_by_zone_kg is None
+    inventory_call = fetch.call_args_list[2]
+    assert inventory_call.args[1] == ["SIM-BURNIN-202512", date(2025, 12, 31)]
+    query_text = str(inventory_call.args[0])
+    assert "inventory_lots" in query_text
+    assert "received_at <= %s" in query_text
+    assert "status = 'ACTIVE'" in query_text
+    assert "remaining_qty_kg > 0" in query_text
+    assert "v_current_inventory" not in query_text
+    assert "v_current_logistics_capacity" not in query_text
 
 
 def test_logistics_a_ready_response_and_persistence(
