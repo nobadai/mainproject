@@ -1,0 +1,29 @@
+{
+  "_scenario": {
+    "kind": "wide",
+    "설명": "등급 스프레드 확대. 상-중 약 21% — 평시(약 12%) 대비 +75%로 constraints의 grade_spread_widening_ratio(0.50) 임계를 넘는다.",
+    "비고": "특·상 가격은 평시와 동일하게 두고 중품만 내렸다. 변수를 하나만 움직여야 ⑤ 등급 배분 노드 테스트의 인과가 분명해진다."
+  },
+  "items": {
+    "배추": [
+      {"market": "가락", "grade": "특", "price": 1850},
+      {"market": "가락", "grade": "상", "price": 1650},
+      {"market": "가락", "grade": "중", "price": 1300}
+    ],
+    "무": [
+      {"market": "가락", "grade": "특", "price": 1240},
+      {"market": "가락", "grade": "상", "price": 1100},
+      {"market": "가락", "grade": "중", "price": 865}
+    ],
+    "양파": [
+      {"market": "가락", "grade": "특", "price": 1460},
+      {"market": "가락", "grade": "상", "price": 1300},
+      {"market": "가락", "grade": "중", "price": 1025}
+    ],
+    "피마늘": [
+      {"market": "가락", "grade": "특", "price": 5800},
+      {"market": "가락", "grade": "상", "price": 5200},
+      {"market": "가락", "grade": "중", "price": 4100}
+    ]
+  }
+}

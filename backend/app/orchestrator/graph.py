@@ -168,7 +168,8 @@ def node_t3_combine(state: PipelineState) -> PipelineState:
     )
     if state.log.a.over_clipped_ids:
         state.log.note(
-            f"T3: C-4 과도 클리핑 경고 (clip_ratio<0.30) — {', '.join(state.log.a.over_clipped_ids)} "
+            f"T3: C-4 과도 클리핑 경고 (clip_ratio<0.30) — "
+            f"{', '.join(state.log.a.over_clipped_ids)} "
             f"※ 드랍하지 않고 경고만 (§1.2-7)"
         )
     bad = [p for r in state.clip_results for p in r.identity_problems]

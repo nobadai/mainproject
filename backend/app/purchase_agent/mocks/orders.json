@@ -1,0 +1,23 @@
+{
+  "_설명": "품목별 고정값. due_date는 as_of 상대 오프셋 — 등급-신선도 매칭이 '며칠 뒤 납품인가'에 달려 있어 리터럴 날짜로는 시나리오를 옮길 수 없다.",
+  "_기준일_재현": "배추 블록은 as_of 2026-08-21에서 IO명세 §1-④ 예시와 일치한다: 8/24 12,000kg(+3일) / 8/29 6,000kg(+8일). 상세설계 §4-⑤ 본문의 '8/24 납품 12,000kg에는 중품 배정 가능, 8/29 납품분은 상품으로'가 이 두 줄을 가리킨다.",
+  "_total_kg": "저장하지 않는다. days 필터 뒤에 로더가 합산한다 — 미리 적어두면 필터 결과와 어긋나도 아무도 모른다.",
+  "items": {
+    "배추": [
+      {"sale_id": 7, "qty_kg": 12000, "due_date_offset_days": 3},
+      {"sale_id": 9, "qty_kg": 6000, "due_date_offset_days": 8}
+    ],
+    "무": [
+      {"sale_id": 11, "qty_kg": 7000, "due_date_offset_days": 2},
+      {"sale_id": 13, "qty_kg": 4000, "due_date_offset_days": 9}
+    ],
+    "양파": [
+      {"sale_id": 15, "qty_kg": 9000, "due_date_offset_days": 4},
+      {"sale_id": 17, "qty_kg": 3000, "due_date_offset_days": 11}
+    ],
+    "피마늘": [
+      {"sale_id": 19, "qty_kg": 2000, "due_date_offset_days": 3},
+      {"sale_id": 21, "qty_kg": 1200, "due_date_offset_days": 10}
+    ]
+  }
+}

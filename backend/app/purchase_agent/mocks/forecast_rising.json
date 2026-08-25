@@ -1,0 +1,106 @@
+{
+  "_scenario": {
+    "kind": "rising",
+    "설명": "지속 상승. ci_width 0.06 < 0.08 → stable, rise_rate_2w +14% ≥ 0.10 → timing 축 진입 → 선매입(D 큰 안) 등장",
+    "rise_rate_2w": 0.14,
+    "ci_band": 0.03,
+    "shape": "지속상승"
+  },
+  "horizon_days": 18,
+  "unit": "원/kg",
+  "model_version": "mock-v0",
+  "items": {
+    "배추": {
+      "current_price": 1650,
+      "daily": [
+        {"offset_days":  1, "predicted": 1666, "lower": 1616, "upper": 1716},
+        {"offset_days":  2, "predicted": 1681, "lower": 1631, "upper": 1731},
+        {"offset_days":  3, "predicted": 1697, "lower": 1646, "upper": 1748},
+        {"offset_days":  4, "predicted": 1713, "lower": 1662, "upper": 1764},
+        {"offset_days":  5, "predicted": 1729, "lower": 1677, "upper": 1781},
+        {"offset_days":  6, "predicted": 1745, "lower": 1693, "upper": 1797},
+        {"offset_days":  7, "predicted": 1762, "lower": 1709, "upper": 1815},
+        {"offset_days":  8, "predicted": 1778, "lower": 1725, "upper": 1831},
+        {"offset_days":  9, "predicted": 1795, "lower": 1741, "upper": 1849},
+        {"offset_days": 10, "predicted": 1812, "lower": 1758, "upper": 1866},
+        {"offset_days": 11, "predicted": 1829, "lower": 1774, "upper": 1884},
+        {"offset_days": 12, "predicted": 1846, "lower": 1791, "upper": 1901},
+        {"offset_days": 13, "predicted": 1863, "lower": 1807, "upper": 1919},
+        {"offset_days": 14, "predicted": 1881, "lower": 1825, "upper": 1937},
+        {"offset_days": 15, "predicted": 1899, "lower": 1842, "upper": 1956},
+        {"offset_days": 16, "predicted": 1917, "lower": 1859, "upper": 1975},
+        {"offset_days": 17, "predicted": 1935, "lower": 1877, "upper": 1993},
+        {"offset_days": 18, "predicted": 1953, "lower": 1894, "upper": 2012}
+      ]
+    },
+    "무": {
+      "current_price": 1100,
+      "daily": [
+        {"offset_days":  1, "predicted": 1110, "lower": 1077, "upper": 1143},
+        {"offset_days":  2, "predicted": 1121, "lower": 1087, "upper": 1155},
+        {"offset_days":  3, "predicted": 1131, "lower": 1097, "upper": 1165},
+        {"offset_days":  4, "predicted": 1142, "lower": 1108, "upper": 1176},
+        {"offset_days":  5, "predicted": 1153, "lower": 1118, "upper": 1188},
+        {"offset_days":  6, "predicted": 1164, "lower": 1129, "upper": 1199},
+        {"offset_days":  7, "predicted": 1174, "lower": 1139, "upper": 1209},
+        {"offset_days":  8, "predicted": 1186, "lower": 1150, "upper": 1222},
+        {"offset_days":  9, "predicted": 1197, "lower": 1161, "upper": 1233},
+        {"offset_days": 10, "predicted": 1208, "lower": 1172, "upper": 1244},
+        {"offset_days": 11, "predicted": 1219, "lower": 1182, "upper": 1256},
+        {"offset_days": 12, "predicted": 1231, "lower": 1194, "upper": 1268},
+        {"offset_days": 13, "predicted": 1242, "lower": 1205, "upper": 1279},
+        {"offset_days": 14, "predicted": 1254, "lower": 1216, "upper": 1292},
+        {"offset_days": 15, "predicted": 1266, "lower": 1228, "upper": 1304},
+        {"offset_days": 16, "predicted": 1278, "lower": 1240, "upper": 1316},
+        {"offset_days": 17, "predicted": 1290, "lower": 1251, "upper": 1329},
+        {"offset_days": 18, "predicted": 1302, "lower": 1263, "upper": 1341}
+      ]
+    },
+    "양파": {
+      "current_price": 1300,
+      "daily": [
+        {"offset_days":  1, "predicted": 1312, "lower": 1273, "upper": 1351},
+        {"offset_days":  2, "predicted": 1325, "lower": 1285, "upper": 1365},
+        {"offset_days":  3, "predicted": 1337, "lower": 1297, "upper": 1377},
+        {"offset_days":  4, "predicted": 1350, "lower": 1310, "upper": 1391},
+        {"offset_days":  5, "predicted": 1362, "lower": 1321, "upper": 1403},
+        {"offset_days":  6, "predicted": 1375, "lower": 1334, "upper": 1416},
+        {"offset_days":  7, "predicted": 1388, "lower": 1346, "upper": 1430},
+        {"offset_days":  8, "predicted": 1401, "lower": 1359, "upper": 1443},
+        {"offset_days":  9, "predicted": 1414, "lower": 1372, "upper": 1456},
+        {"offset_days": 10, "predicted": 1428, "lower": 1385, "upper": 1471},
+        {"offset_days": 11, "predicted": 1441, "lower": 1398, "upper": 1484},
+        {"offset_days": 12, "predicted": 1455, "lower": 1411, "upper": 1499},
+        {"offset_days": 13, "predicted": 1468, "lower": 1424, "upper": 1512},
+        {"offset_days": 14, "predicted": 1482, "lower": 1438, "upper": 1526},
+        {"offset_days": 15, "predicted": 1496, "lower": 1451, "upper": 1541},
+        {"offset_days": 16, "predicted": 1510, "lower": 1465, "upper": 1555},
+        {"offset_days": 17, "predicted": 1524, "lower": 1478, "upper": 1570},
+        {"offset_days": 18, "predicted": 1539, "lower": 1493, "upper": 1585}
+      ]
+    },
+    "피마늘": {
+      "current_price": 5200,
+      "daily": [
+        {"offset_days":  1, "predicted": 5249, "lower": 5092, "upper": 5406},
+        {"offset_days":  2, "predicted": 5298, "lower": 5139, "upper": 5457},
+        {"offset_days":  3, "predicted": 5348, "lower": 5188, "upper": 5508},
+        {"offset_days":  4, "predicted": 5398, "lower": 5236, "upper": 5560},
+        {"offset_days":  5, "predicted": 5449, "lower": 5286, "upper": 5612},
+        {"offset_days":  6, "predicted": 5500, "lower": 5335, "upper": 5665},
+        {"offset_days":  7, "predicted": 5552, "lower": 5385, "upper": 5719},
+        {"offset_days":  8, "predicted": 5604, "lower": 5436, "upper": 5772},
+        {"offset_days":  9, "predicted": 5657, "lower": 5487, "upper": 5827},
+        {"offset_days": 10, "predicted": 5710, "lower": 5539, "upper": 5881},
+        {"offset_days": 11, "predicted": 5764, "lower": 5591, "upper": 5937},
+        {"offset_days": 12, "predicted": 5818, "lower": 5643, "upper": 5993},
+        {"offset_days": 13, "predicted": 5873, "lower": 5697, "upper": 6049},
+        {"offset_days": 14, "predicted": 5928, "lower": 5750, "upper": 6106},
+        {"offset_days": 15, "predicted": 5984, "lower": 5804, "upper": 6164},
+        {"offset_days": 16, "predicted": 6040, "lower": 5859, "upper": 6221},
+        {"offset_days": 17, "predicted": 6097, "lower": 5914, "upper": 6280},
+        {"offset_days": 18, "predicted": 6154, "lower": 5969, "upper": 6339}
+      ]
+    }
+  }
+}
