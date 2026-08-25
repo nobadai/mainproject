@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "FastAPI backend for mainproject"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "anthropic>=1.0.0",
   "fastapi[standard]==0.141.1",
   "langgraph>=1.2.11",
+  "openai>=3.3.1",
   "psycopg[binary]",
   "python-dotenv",
   "pyyaml>=6.0.3",
@@ -36,3 +38,8 @@ extend-select = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# 실 LLM 프로바이더(API 키 또는 로컬 서버)가 있어야만 도는 테스트에 붙인다.
+# addopts로 기본 제외하므로 `uv run pytest`는 키·서버 없이 그대로 돈다 —
+# 마커가 없는 기존 테스트는 `not llm`에 전부 걸리므로 영향이 없다.
+markers = ["llm: 실 LLM 프로바이더 필요 (기본 실행에서 제외)"]
+addopts = "-m 'not llm'"

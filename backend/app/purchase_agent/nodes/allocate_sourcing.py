@@ -16,10 +16,13 @@
 만들지 않으므로 사중 일치의 수량 축을 여기서 깨뜨릴 수단 자체가 없다.
 """
 
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_context
+from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
 from app.purchase_agent.schemas import FIXED_MARKET
@@ -259,13 +262,174 @@ def _yields_positive_kg(state: PurchaseAgentState, ratio: float) -> bool:
     return bool(totals) and all(round(total * ratio) >= 1 for total in totals)
 
 
-def allocate_sourcing(state: PurchaseAgentState) -> dict[str, Any]:
-    """등급 배분 비율을 정한다 (계산 전용 — E3-1).
+#: 자주 쓰는 배수의 **읽기 좋은 이름**. constraints의 배수 목록을 복제하는 게 아니라
+#: 이름을 붙여줄 뿐이다 — 목록에 없는 배수는 아래에서 id를 유도하므로 **조용히 누락되지
+#: 않는다**. (Codex 교차검증: 여기가 YAML 단일 소스를 복제하던 자리였다.)
+_CANDIDATE_LABELS = {
+    0.0: ("BASE_ONLY", "전량 기준등급"),
+    0.5: ("MID_HALF", "중품을 상한의 절반만"),
+    1.0: ("MID_CAPPED", "중품을 상한만큼"),
+}
 
-    E3-2에서 LLM이 붙는 자리는 여기다: ``evaluate_mid_grade``가 낸 사실들(스프레드·소진
-    한계일·근접 납품량·스코어)을 프롬프트로 주고 **조합 트레이드오프**를 판단하게 한다 —
-    "중품이 130원 싸지만 6일 내 소진 필요, 8/24 납품분엔 배정 가능, 8/29분은 상품으로.
-    혼합 비율은?" 숫자는 그때도 계산이 소유한다 (규칙 6). 지금은 rule_only다.
+
+def candidate_label(fraction: float) -> tuple[str, str]:
+    """배수 → ``(id, 설명)``. **모르는 배수도 후보가 된다.**
+
+    이름 표에 없으면 배수에서 id를 유도한다. 표를 단일 소스처럼 쓰면 constraints에
+    ``0.25``를 넣었을 때 그 후보가 아무 말 없이 사라진다 — 규칙 7이 막으려는 형태다.
+    """
+    known = _CANDIDATE_LABELS.get(fraction)
+    if known is not None:
+        return known
+    percent = f"{fraction:.2f}".rstrip("0").rstrip(".").replace(".", "_")
+    return f"MID_F{percent}", "중품을 상한의 일부만"
+
+
+def build_mix_candidates(
+    state: PurchaseAgentState, cap_ratio: float, constraints: dict
+) -> list[tuple[str, float, str]]:
+    """규칙이 만드는 후보 집합 — ``(id, 중품 비율, 설명)``.
+
+    **LLM은 이 목록 밖을 고를 수 없다.** 백로그 E3-2 DoD("장기 보관 계획+중품 과다 조합
+    회피")가 LLM의 판단력이 아니라 **여기서** 지켜지는 이유다: 모든 후보가 ``cap_ratio``
+    이하라 "중품 과다"는 구조적으로 만들어질 수 없고, LLM이 무엇을 골라도 상한을 못 넘는다.
+
+    걸러내는 것 두 가지 — E3-1이 이미 아프게 배운 자리다:
+
+    * ``min_share`` 미만은 배분이 아니다
+    * ``_yields_positive_kg``를 **안별 전수**로 통과해야 한다. 한 줄이라도 0kg이면
+      스키마(``qty_kg > 0``)가 **제안 전체**를 죽인다
+
+    중복 비율은 하나로 합친다 — ``cap_ratio``가 0에 가까우면 0.5배와 1.0배가 같은 값이
+    되고, 그러면 LLM에게 구분 불가능한 선택지를 내미는 꼴이다.
+    """
+    min_share = constraints["grade"]["min_share"]
+    candidates: list[tuple[str, float, str]] = []
+    seen: set[float] = set()
+    for fraction in constraints["grade"]["mix_candidate_fractions"]:
+        # **반올림하지 않는다.** round(cap × 1.0, 6)은 cap을 미세하게 **넘길 수 있고**
+        # (0.6666666… → 0.666667), 그러면 "모든 후보가 상한 이하"라는 불변이 깨진다.
+        # 중복 판정에만 반올림 키를 쓰고 값은 정확히 유지한다.
+        ratio = cap_ratio * fraction
+        key = round(ratio, 9)
+        if key in seen:
+            continue
+        if ratio > 0 and (ratio < min_share or not _yields_positive_kg(state, ratio)):
+            continue
+        # 잔여분(기준등급)도 같은 검사를 받아야 한다. 잔여가 0kg이면 그 줄이 사라지는 게
+        # 아니라 제안이 죽는다 — 100% 중품은 별도 경로로만 허용한다 (아래 라인 구성부).
+        if 0 < ratio < 1 and not _yields_positive_kg(state, 1.0 - ratio):
+            continue
+        candidate_id, summary = candidate_label(fraction)
+        seen.add(key)
+        candidates.append((candidate_id, ratio, summary))
+    return candidates
+
+
+def _mix_signals(facts: dict) -> tuple[list[str], list[str]]:
+    """LLM에 넘길 신호·사실. **숫자를 넣지 않는다** (§4-⑤ E3-2 "입력 컨텍스트도 기호화")."""
+    signals: list[str] = []
+    facts_text: list[str] = []
+    if facts.get("widened"):
+        signals.append("GRADE_SPREAD_WIDENED")
+        facts_text.append("등급 스프레드가 평시보다 확대됐다.")
+    if facts.get("score", 0) > 0:
+        signals.append("MID_GRADE_SCORE_POSITIVE")
+        facts_text.append("중품의 단가 이득이 신선도 리스크를 넘는다.")
+    if facts.get("cap_ratio") is not None and facts["cap_ratio"] < 1.0:
+        signals.append("NEAR_TERM_DEMAND_LIMITED")
+        facts_text.append("근접 납품량이 전량을 감당하지 못해 중품 상한이 걸려 있다.")
+    if facts.get("arrival_basis_assumed"):
+        signals.append("ARRIVAL_DATE_ASSUMED")
+        facts_text.append("입고 소요일이 미확정이라 소진 창을 오늘 기준으로 근사했다.")
+    return signals, facts_text
+
+
+def _select_mix(
+    state: PurchaseAgentState,
+    facts: dict,
+    constraints: dict,
+    selector: MixSelector | None,
+) -> tuple[float, MixDecision | None]:
+    """후보를 만들고 LLM에게 고르게 한다. **숫자는 후보의 것을 그대로 쓴다.**
+
+    기본안(``default``)은 **규칙이 고르던 값**이다 — LLM이 꺼져 있든 전면 실패하든 이
+    함수가 돌려주는 비율이 E3-1 시절과 같아진다. 회귀가 아니라 무변화다.
+    """
+    rule_ratio = facts["ratio"]
+    # ``cap_ratio``는 **키 자체가 없을 수 있다** — evaluate_mid_grade가 blocked_by를 세우고
+    # 조기 반환하는 경로(상 등급 로트 없음·기준선 미확정 등)에서는 거기까지 가지 않는다.
+    # 그때는 중품 배정 자체를 안 하는 날이므로 고를 후보도 없다.
+    cap_ratio = facts.get("cap_ratio")
+    if cap_ratio is None or selector is None:
+        return rule_ratio, None
+    # **규칙이 중품을 태우기로 한 날에만 묻는다.** E3-1의 AND 게이트(확대 ∧ 스코어>0)가
+    # "중품을 쓸 것인가"를 소유하고, LLM은 "쓴다면 얼마나"만 판단한다.
+    #
+    # 게이팅을 "후보 ≥ 2"로만 두면 안 된다 — 실측 결과 cap_ratio는 스프레드와 무관하게
+    # 근접 납품량으로 계산되므로 **평시에도 후보가 3개** 나오고, 4앵커 × 4품목 = 16회
+    # 전부 호출된다(백로그 비용 완화책이 무력화). 여기가 그 계산과 실제가 갈린 자리다.
+    #
+    # 평시에 LLM에게 문을 열어주면 E3-1의 양파 반례가 부활한다: 양파는 신선도 리스크가
+    # 0으로 눌려 스코어만 보면 평시에도 100% 중품이 "합리적"으로 보인다. 그 판단을
+    # 막는 게 확대 게이트이고, LLM이 그걸 우회할 수 있으면 게이트가 사라진 것이다.
+    if rule_ratio <= 0:
+        return rule_ratio, None
+
+    candidates = build_mix_candidates(state, cap_ratio, constraints)
+    by_id = {candidate_id: ratio for candidate_id, ratio, _ in candidates}
+    # 규칙이 고르던 비율에 해당하는 후보를 기본안으로 삼는다. 없으면 LLM을 부르지 않는다 —
+    # 고를 목록에 기본안이 없으면 실패 시 돌아갈 자리가 사라진다.
+    # 정확 비교다. 후보 비율이 ``cap × fraction``이고 규칙이 채택한 값이 ``cap``이므로
+    # ``cap × 1.0``이 정확히 일치한다 — 반올림을 끼우면 그 등식이 깨진다.
+    default_id = next((cid for cid, ratio in by_id.items() if ratio == rule_ratio), None)
+    if default_id is None or len(candidates) < 2:
+        return rule_ratio, None
+
+    signals, facts_text = _mix_signals(facts)
+    context = build_mix_context(
+        state["item"],
+        spread_widened=bool(facts.get("widened")),
+        shelf_days=facts.get("shelf_days"),
+        shelf_tight=facts.get("cap_ratio", 1.0) < 1.0,
+        signals=signals,
+        facts=facts_text,
+        candidates=[
+            MixCandidate(candidate_id=cid, summary=summary)
+            for cid, _, summary in candidates
+        ],
+    )
+    decision = selector(context, default_id)
+    if decision.candidate_id not in by_id:
+        # **서비스 검증기만으로는 부족하다.** selector는 주입 가능한 콜러블이라 그 층을
+        # 우회할 수 있고, 실제로 우회하면 비율만 규칙값으로 되돌아가고 결정 객체는 그대로
+        # 남아 출력에 "없는 후보를 선택함"이라고 기록된다 — 라벨과 행동이 어긋난다
+        # (Codex 교차검증 P2, 재현 확인). 노드가 자기 후보 집합으로 한 번 더 확인한다.
+        #
+        # ``None``으로 지우지 않는다. 그러면 고지까지 사라져 "판단자가 이상한 값을 줘서
+        # 되돌렸다"는 사실이 소비자에게 안 보인다 — 조용히 넘기지 않는 게 이 프로젝트의
+        # 규칙이다. 실패로 표시해 ⑥이 risks에 싣게 한다.
+        return rule_ratio, replace(
+            decision,
+            candidate_id=default_id,
+            reason="규칙 기본안",
+            llm_status="FALLBACK",
+            llm_fallback_used=True,
+        )
+    return by_id[decision.candidate_id], decision
+
+
+def allocate_sourcing(
+    state: PurchaseAgentState, *, selector: MixSelector | None = None
+) -> dict[str, Any]:
+    """등급 배분 비율을 정한다. **계산이 후보를 만들고 LLM은 고르기만 한다** (E3-1 + E3-2).
+
+    ``evaluate_mid_grade``가 낸 사실들(스프레드·소진 한계일·근접 납품량·스코어)로 규칙이
+    후보 집합을 만들고, LLM은 그중 **id 하나**를 고른다. 숫자는 계산이 소유한다 (규칙 6 ·
+    §4-⑤ E3-2 확정) — LLM 출력 스키마에 비율 필드가 아예 없어 생성이 타입으로 불가능하다.
+
+    ``selector``를 주입 가능하게 둔 이유: 테스트가 결정적이어야 한다. 기본값 ``None``은
+    "LLM 없이 규칙만"이고, 그 경로가 E3-1의 산출물과 **완전히 같다**.
     """
     constraints = load_constraints()
     quotes = fixed_market_quotes(state["market_quotes"])
@@ -279,7 +443,9 @@ def allocate_sourcing(state: PurchaseAgentState) -> dict[str, Any]:
 
     decision = evaluate_mid_grade(state, constraints)
     decision["base_grade"] = base_grade
-    mid_ratio = decision["ratio"]
+    mid_ratio, mix = _select_mix(state, decision, constraints, selector)
+    decision["ratio"] = mid_ratio
+    decision["mix"] = mix
 
     min_share = constraints["grade"]["min_share"]
     mid_ok = mid_ratio >= min_share and _yields_positive_kg(state, mid_ratio)

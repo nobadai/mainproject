@@ -356,7 +356,10 @@ def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
     (IO명세 §5 — 파생값은 원천의 등급을 물려받지 못한다).
     """
     if not decision.get("ratio"):
-        return []
+        # 중품을 안 태운 날. **판단이 있었다면 그 사실은 남긴다** — LLM이 "확대됐지만
+        # 신선도가 빡빡해 중품을 쓰지 않는다"를 고른 것과, 평시라 애초에 후보가 없던 것은
+        # 다른 사실이다. 조기 반환하면 둘이 구분되지 않는다 (Codex 교차검증 P2).
+        return _mix_choice_rationale(decision, as_of)
     widening = decision["spread"] / decision["baseline"] - 1
     return [
         {
@@ -372,6 +375,34 @@ def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
                 f"소진 한계 {decision['shelf_days']:.0f}일 = 상품 한계일 "
                 f"{decision['top_shelf_days']}일 × {decision['shelf_ratio']} · "
                 f"스코어 {decision['score']:+.3f}"
+            ),
+        },
+        *_mix_choice_rationale(decision, as_of),
+    ]
+
+
+def _mix_choice_rationale(decision: dict, as_of: str) -> list[dict]:
+    """LLM이 조합을 고른 날의 근거 1건 (E3-2). **고르지 않았으면 붙이지 않는다.**
+
+    ``evidence_grade``가 ASSUMED인 이유는 스프레드 근거와 같다 — 소진 한계일이 재고
+    로트에서 추론한 값이라 그 위에 얹힌 판단은 가장 약한 등급을 따른다. LLM이 개입했다는
+    사실 자체가 등급을 낮추는 건 아니다: **비율은 규칙이 만든 후보의 값 그대로**이고
+    LLM은 그중 하나를 고르기만 했다.
+
+    ``ref_id``에 모델명을 싣는다 — 어느 판단자가 골랐는지 되짚을 수 있어야 한다.
+    """
+    mix = decision.get("mix")
+    if mix is None or not mix.applied:
+        return []
+    return [
+        {
+            "source": "시세관측",
+            "claim": f"등급 조합 {mix.candidate_id} 선택 — {mix.reason}",
+            "ref_id": f"MQ-가락-{as_of}",
+            "evidence_grade": "ASSUMED",
+            "evidence_detail": (
+                f"규칙이 만든 후보 중 선택 (판단 {mix.llm_model}) — "
+                "비율·수량은 규칙 산출값 그대로"
             ),
         }
     ]
@@ -389,7 +420,9 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
         grade = decision.get("base_grade", "?")
         return [f"등급 배분 보류 — {decision['blocked_by']}. 전량 {grade} 단일 등급으로 배정했다"]
     if not decision.get("ratio"):
-        return []
+        # 중품 미사용. 판단 미적용 고지는 여기서도 살아야 한다 — 판단자가 있었는지
+        # 없었는지는 배분 결과와 별개의 사실이다 (rationale 쪽과 같은 이유).
+        return _mix_choice_risks(decision)
     mid_kg = sum(line["qty_kg"] for line in sourcing if line["grade"] == decision["mid_grade"])
     notes = [
         (
@@ -405,7 +438,31 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
             "inbound_lead_days(N4)가 미확정이라 계산하지 않았다 (규칙 3). "
             "N4가 확정되면 소화 가능량이 달라질 수 있다"
         )
+    notes.extend(_mix_choice_risks(decision))
     return notes
+
+
+def _mix_choice_risks(decision: dict) -> list[str]:
+    """등급 조합 판단이 **적용되지 않은** 날의 고지 (E3-2).
+
+    성공하면 아무 줄도 안 붙는다 — 판단이 적용된 건 위험이 아니라 정상이고, 그 사실은
+    rationale이 이미 싣는다. 여기 적는 건 **라벨과 행동이 어긋나는 상태**뿐이다:
+    "판단자가 골랐다"고 읽힐 자리에서 실제로는 규칙 기본안이 나갔다는 것.
+    E3-3의 일괄 fallback 고지, E3-4의 충분성 미판정 고지와 같은 자리다.
+
+    문구에 내부 상태 코드(FALLBACK 등)를 쓰지 않는다 — 이 필드를 읽는 쪽은 코드가 아니라
+    H1 승인 화면과 Critic이다 (계약서 §0).
+    """
+    mix = decision.get("mix")
+    if mix is None or mix.applied:
+        return []
+    cause = "판단자 응답 실패" if mix.llm_fallback_used else "판단자 미사용"
+    return [
+        (
+            f"등급 조합 판단 미적용({cause}) — 규칙 기본안으로 배분했다. "
+            "비율·수량은 규칙 산출값이라 결과는 판단 없이도 유효하다"
+        )
+    ]
 
 
 def _split_decision(chosen: list[dict] | None) -> dict:
