@@ -15,25 +15,44 @@ read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모�
 * 재고·현금·재무 cap 대조 → 부서 밴드·T0 스냅샷 필요
 * 근거 환각 대조 → 원문 문서 필요
 
-⚠️ 팀 조율 대기 — ``app/finance/schemas.py:PurchaseScenario`` 는 "매입 Agent 출력과 1:1
-대응"이라 선언돼 있으나 **v0.3 필드명**이다. 전 모델이 ``extra="forbid"`` 라서 이 파일의
-출력을 그대로 보내면 거부된다. 개인 개발 범위에서는 문서를 정답으로 삼고(CLAUDE.md)
-finance 쪽을 건드리지 않는다. 어긋난 지점::
+⚠️ **finance 측 kg 전환 반영 대기.** 수량 단위는 **kg 통일로 확정**됐다(팀 결정).
+아래 표는 전환이 끝날 때까지의 임시 대조표다 — **전환 완료 시 이 표는 삭제한다.**
 
-    finance/schemas.py (현재)          IO명세 v1.1 (이 파일)
-    ---------------------------------  ------------------------------------------
-    quantity_ton / total_quantity_ton  qty_kg / total_qty_kg   ← 이름도 단위도 다름
-    timing: str                        strategy_type: quantity|timing|mix
-    expected_cost: int                 total_amount_krw
-    SourcingPlanItem.unit_price        grade_unit_price
-    Evidence{source, claim}            + ref_id(필수)·evidence_grade·evidence_detail
-    (없음)                              coverage_days, margin_warning
+현재 이 출력을 받는 소비자가 셋이고, 그중 부서 DTO 둘이 아직 ton이다::
 
-⚠️ **단위 충돌이 특히 위험하다.** finance는 ton, 여기는 kg다. 필드명까지 달라서 그대로
-보내면 422로 즉시 거부되지만 — 나중에 옮겨 담는 변환 코드가 생기면 **1000배 오차가
-조용히 통과**한다. ``finance/tools.py:calculate_proposal_amount()``는
-``quantity_ton × KG_PER_TON × unit_price``로 계산하고, 우리는
-``qty_kg × grade_unit_price``다. 결과는 같지만 입력 단위가 다르다.
+    소비자 (진입점)                                    수량 필드                축 필드
+    -----------------------------------------------  ----------------------  -------------
+    orchestrator/contracts_core.py:PurchaseScenario   qty_kg                  strategy_type
+      Protocol v1.2 — band 클리핑·critic이 사용         unit_price_krw_per_kg   ← kg, 정합
+    finance·logistics:PurchaseAgentScenario (v0.4)    total_quantity_ton      strategy_type
+      POST /finance|logistics/procurement             quantity_ton            ← ton
+    finance/schemas.py:PurchaseScenario (v0.3)        total_quantity_ton      timing
+      POST /finance/core (review_finance_core)        unit_price              ← ton, 구판
+
+**v0.4에서 정합이 끝난 것**: ``coverage_days`` · ``strategy_type`` · ``grade_unit_price`` ·
+``total_amount_krw``. 이름도 의미도 일치한다 (v0.3에서는 각각 없음 / ``timing`` /
+``unit_price`` / ``expected_cost`` 였다).
+
+**남은 차이는 수량 필드 3개뿐이다** — finance·logistics v0.4 기준::
+
+    finance·logistics (v0.4)              IO명세 v1.1 (이 파일)
+    ------------------------------------  ---------------------------
+    total_quantity_ton: Decimal           total_qty_kg: int
+    SplitPlanItem.quantity_ton            SplitPlanItem.qty_kg
+    PurchaseSourcingPlanItem.quantity_ton SourcingPlanItem.qty_kg
+
+전 모델이 ``extra="forbid"`` 라 지금 그대로 보내면 422로 거부된다. 덧붙여 v0.4 쪽에는
+``max_price`` · ``margin_warning`` · ``expected_margin_rate`` · ``rationale`` · ``risks``가
+아예 없다 — 부서가 안 보는 필드인지 누락인지 확인이 필요하다.
+
+⚠️ **거부되는 것보다 변환 코드가 더 위험하다.** 나중에 옮겨 담는 코드가 생기면
+**1000배 오차가 조용히 통과**한다. ``finance/tools.py``는
+``quantity_ton × KG_PER_TON × grade_unit_price``로, 우리는 ``qty_kg × grade_unit_price``로
+계산한다 — 결과는 같지만 입력 단위가 다르다.
+
+전환 방향은 **부서 DTO를 kg로** 맞추는 쪽이다. 팀 코어 계약인
+``contracts_core.py:PurchaseScenario``가 이미 ``qty_kg`` · ``unit_price_krw_per_kg``라,
+kg로 모으면 세 소비자가 한 단위로 정렬된다. 이 파일은 그대로 IO명세 v1.1(kg)을 따른다.
 """
 
 from datetime import date
