@@ -5,7 +5,7 @@ POST 계산·응답과 저장 호출 인자를 검증한다. 실제 DB 저장·�
 운영 DB 환경이 준비된 뒤 별도 통합 테스트로 확인한다.
 """
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -24,7 +24,7 @@ def _fake_run(**overrides) -> dict:
         "runtime_status": "READY",
         "request_payload": {"item": "배추"},
         "response_payload": {"stage": "T2"},
-        "created_at": datetime(2026, 8, 21, 9, 0, 0),
+        "created_at": datetime(2026, 8, 21, 9, 0, 0, tzinfo=UTC),
     }
     row.update(overrides)
     return row
