@@ -44,7 +44,7 @@ def test_procurement_service_returns_one_band_without_cost_warning(
     assert saved["response_payload"]["verdict"] == "PASS"
     assert saved["snapshot_id"] is None
     assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
-    assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "7125000"
+    assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == 7125000
     stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
     assert stored_limit == "6111353"
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"

@@ -9,13 +9,22 @@ from app.logistics.schemas import LogisticsSalesRequest, PurchaseAgentOutput
 def test_logistics_procurement_accepts_purchase_v04(logistics_purchase_payload):
     request = PurchaseAgentOutput.model_validate(logistics_purchase_payload)
 
-    assert request.scenarios[0].total_quantity_kg == Decimal(4500)
-    assert request.scenarios[0].split_plan[0].quantity_kg == Decimal(4500)
+    assert request.scenarios[0].total_qty_kg == 4500
+    assert request.scenarios[0].split_plan[0].qty_kg == 4500
 
 
 def test_logistics_procurement_rejects_legacy_ton_fields(logistics_purchase_payload):
     scenario = logistics_purchase_payload["scenarios"][0]
-    scenario["total_quantity_ton"] = scenario.pop("total_quantity_kg")
+    scenario["total_quantity_ton"] = scenario.pop("total_qty_kg")
+
+    with pytest.raises(ValidationError):
+        PurchaseAgentOutput.model_validate(logistics_purchase_payload)
+
+
+def test_logistics_procurement_rejects_duplicate_kg_names(logistics_purchase_payload):
+    scenario = logistics_purchase_payload["scenarios"][0]
+    scenario["total_quantity_kg"] = scenario.pop("total_qty_kg")
+    scenario["split_plan"][0]["quantity_kg"] = scenario["split_plan"][0].pop("qty_kg")
 
     with pytest.raises(ValidationError):
         PurchaseAgentOutput.model_validate(logistics_purchase_payload)

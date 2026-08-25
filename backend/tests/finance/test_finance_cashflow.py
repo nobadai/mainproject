@@ -121,7 +121,9 @@ def test_finance_cap_is_monotonic_and_legacy_limit_independent(finance_context, 
 
 def test_finance_band_is_candidate_independent(finance_context, purchase_payload):
     first = PurchaseAgentOutput.model_validate(purchase_payload)
-    purchase_payload["scenarios"][0]["total_amount_krw"] = 99999999
+    purchase_payload["scenarios"][0]["sourcing_plan"][0]["grade_unit_price"] = 1600
+    purchase_payload["scenarios"][0]["sourcing_plan"][1]["grade_unit_price"] = 1400
+    purchase_payload["scenarios"][0]["total_amount_krw"] = 6900000
     second = PurchaseAgentOutput.model_validate(purchase_payload)
     assert run_finance_procurement_with_context(first, finance_context).band == (
         run_finance_procurement_with_context(second, finance_context).band

@@ -339,7 +339,7 @@ def test_logistics_a_ready_response_and_persistence(
     assert saved["verdict"] == "REVIEW_REQUIRED"
     assert saved["response_payload"]["verdict"] == "REVIEW_REQUIRED"
     assert saved["snapshot_id"] == "T0-20260821-001"
-    assert saved["request_payload"]["scenarios"][0]["total_quantity_kg"] == "4500"
+    assert saved["request_payload"]["scenarios"][0]["total_qty_kg"] == 4500
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 

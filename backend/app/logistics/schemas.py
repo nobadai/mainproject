@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.logistics.llm.schemas import LLMResponseFields
+from app.purchase_agent.schemas import PurchaseProposal
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
@@ -34,87 +35,7 @@ def _reject_boolean(value: object) -> object:
     return value
 
 
-class PurchaseMeta(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    as_of: date
-    item: str = Field(min_length=1)
-    agent_version: str = Field(min_length=1)
-    is_refeed: bool
-    feedback_attempt: int = Field(ge=0)
-
-    @field_validator("feedback_attempt", mode="before")
-    @classmethod
-    def reject_boolean_feedback_attempt(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-
-class SplitPlanItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    seq: int = Field(ge=1)
-    date: date
-    quantity_kg: Decimal = Field(gt=0)
-
-    @field_validator("seq", "quantity_kg", mode="before")
-    @classmethod
-    def reject_boolean_numbers(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-
-class PurchaseSourcingPlanItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    market: str = Field(min_length=1)
-    grade: str = Field(min_length=1)
-    quantity_kg: Decimal = Field(gt=0)
-    grade_unit_price: int = Field(gt=0)
-
-    @field_validator("quantity_kg", "grade_unit_price", mode="before")
-    @classmethod
-    def reject_boolean_numbers(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-
-class PurchaseAgentScenario(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    label: str = Field(min_length=1)
-    strategy_type: str = Field(min_length=1)
-    coverage_days: int = Field(gt=0)
-    total_quantity_kg: Decimal = Field(gt=0)
-    total_amount_krw: Decimal = Field(ge=0)
-    split_plan: list[SplitPlanItem] = Field(min_length=1)
-    sourcing_plan: list[PurchaseSourcingPlanItem] = Field(min_length=1)
-
-    @field_validator(
-        "coverage_days",
-        "total_quantity_kg",
-        "total_amount_krw",
-        mode="before",
-    )
-    @classmethod
-    def reject_boolean_numbers(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-    @model_validator(mode="after")
-    def validate_quantity_totals(self) -> "PurchaseAgentScenario":
-        split_quantity = sum((item.quantity_kg for item in self.split_plan), start=Decimal(0))
-        sourcing_quantity = sum((item.quantity_kg for item in self.sourcing_plan), start=Decimal(0))
-        if self.total_quantity_kg != split_quantity:
-            raise ValueError("total_quantity_kg must equal split_plan quantity total")
-        if self.total_quantity_kg != sourcing_quantity:
-            raise ValueError("total_quantity_kg must equal sourcing_plan quantity total")
-        return self
-
-
-class PurchaseAgentOutput(BaseModel):
-    """Logistics A가 받는 Purchase Agent v0.4 전체 출력."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    meta: PurchaseMeta
-    scenarios: list[PurchaseAgentScenario] = Field(min_length=1)
+PurchaseAgentOutput = PurchaseProposal
 
 
 class ScheduledQuantity(BaseModel):

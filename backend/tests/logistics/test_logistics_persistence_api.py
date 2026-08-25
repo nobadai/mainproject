@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from app.logistics.run_repository import list_logistics_agent_runs, save_logistics_agent_run
 from app.logistics.schemas import LogisticsProcurementResponse, LogisticsSalesResponse
 from app.main import app
+from app.purchase_agent.schemas import PurchaseProposal
 
 
 def _run_row() -> dict[str, object]:
@@ -103,8 +104,11 @@ def test_logistics_post_endpoints(logistics_purchase_payload, logistics_sales_pa
         soft_warnings=[],
     )
     client = TestClient(app)
+    purchase_json = PurchaseProposal.model_validate(logistics_purchase_payload).model_dump(
+        mode="json"
+    )
     with patch("app.logistics.router.run_logistics_procurement", return_value=procurement):
-        response = client.post("/logistics/procurement", json=logistics_purchase_payload)
+        response = client.post("/logistics/procurement", json=purchase_json)
     assert response.status_code == 200
     assert response.json()["interpretation"]["summary"]
     assert response.json()["llm_status"] == "DISABLED"

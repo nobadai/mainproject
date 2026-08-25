@@ -14,9 +14,9 @@ from app.finance.schemas import (
     CollectionPreference,
     FinanceDebtPolicy,
     FinancePolicy,
-    PurchaseSourcingPlanItem,
     SourcingPlanItem,
 )
+from app.purchase_agent.schemas import SourcingPlanItem as PurchaseSourcingPlanItem
 
 KRW_QUANTUM = Decimal("0.000001")
 
@@ -205,7 +205,7 @@ def calculate_purchase_scenario_amount(
 ) -> Decimal:
     """Purchase Agent v0.4 소싱 계획의 총 매입금액을 재계산한다."""
     return sum(
-        (item.quantity_kg * Decimal(item.grade_unit_price) for item in sourcing_plan),
+        (Decimal(item.qty_kg) * Decimal(item.grade_unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 

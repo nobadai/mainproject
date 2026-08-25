@@ -11,9 +11,11 @@ from app.finance.schemas import (
     FinanceSalesResponse,
 )
 from app.main import app
+from app.purchase_agent.schemas import PurchaseProposal
 
 
 def test_finance_procurement_api(purchase_payload):
+    purchase_json = PurchaseProposal.model_validate(purchase_payload).model_dump(mode="json")
     result = FinanceProcurementResponse(
         as_of="2025-12-31",
         snapshot_id="FIN-DAY30-LOAN",
@@ -28,7 +30,7 @@ def test_finance_procurement_api(purchase_payload):
         evidences=[],
     )
     with patch("app.finance.router.run_finance_procurement", return_value=result):
-        response = TestClient(app).post("/finance/procurement", json=purchase_payload)
+        response = TestClient(app).post("/finance/procurement", json=purchase_json)
 
     assert response.status_code == 200
     assert response.json()["policy_version"] == "v1.3-PROVISIONAL"

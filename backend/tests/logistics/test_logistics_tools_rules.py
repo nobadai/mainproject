@@ -27,7 +27,7 @@ from app.logistics.tools import (
 def test_expected_arrival_date_uses_canonical_kg_contract(logistics_purchase_payload):
     request = PurchaseAgentOutput.model_validate(logistics_purchase_payload)
 
-    assert request.scenarios[0].total_quantity_kg == Decimal(4500)
+    assert request.scenarios[0].total_qty_kg == 4500
     assert calculate_expected_arrival_dates(request, 2) == [date(2026, 8, 23)]
 
 

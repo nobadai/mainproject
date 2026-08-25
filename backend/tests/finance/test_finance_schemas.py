@@ -10,12 +10,12 @@ def test_purchase_agent_v04_contract_keeps_decimal(purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     assert request.scenarios[0].total_amount_krw == Decimal(7125000)
-    assert request.scenarios[0].sourcing_plan[0].quantity_kg == Decimal(3000)
+    assert request.scenarios[0].sourcing_plan[0].qty_kg == 3000
 
 
 def test_purchase_agent_contract_rejects_legacy_ton_fields(purchase_payload):
     scenario = purchase_payload["scenarios"][0]
-    scenario["total_quantity_ton"] = scenario.pop("total_quantity_kg")
+    scenario["total_quantity_ton"] = scenario.pop("total_qty_kg")
 
     with pytest.raises(ValidationError):
         PurchaseAgentOutput.model_validate(purchase_payload)
@@ -47,7 +47,16 @@ def test_purchase_sourcing_rejects_boolean_and_zero_price(purchase_payload):
 
 
 def test_purchase_scenario_rejects_quantity_total_mismatch(purchase_payload):
-    purchase_payload["scenarios"][0]["sourcing_plan"][1]["quantity_kg"] = 1000
+    purchase_payload["scenarios"][0]["sourcing_plan"][1]["qty_kg"] = 1000
+
+    with pytest.raises(ValidationError):
+        PurchaseAgentOutput.model_validate(purchase_payload)
+
+
+def test_purchase_agent_contract_rejects_duplicate_kg_names(purchase_payload):
+    scenario = purchase_payload["scenarios"][0]
+    scenario["total_quantity_kg"] = scenario.pop("total_qty_kg")
+    scenario["split_plan"][0]["quantity_kg"] = scenario["split_plan"][0].pop("qty_kg")
 
     with pytest.raises(ValidationError):
         PurchaseAgentOutput.model_validate(purchase_payload)
