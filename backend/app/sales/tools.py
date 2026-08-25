@@ -18,7 +18,11 @@ def _usable_on_hand_kg(on_hand: list[OnHandLot], as_of: date, target: date) -> D
     로트는 as_of + freshness_days_left 까지 쓸 수 있다. 그 뒤 날짜에는 못 쓴다.
     """
     return sum(
-        (lot.qty_kg for lot in on_hand if as_of + timedelta(days=lot.freshness_days_left) >= target),
+        (
+            lot.qty_kg
+            for lot in on_hand
+            if as_of + timedelta(days=lot.freshness_days_left) >= target
+        ),
         start=Decimal(0),
     )
 
