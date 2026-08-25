@@ -28,9 +28,10 @@ def fixed_market_quotes(market_quotes: list[dict]) -> list[dict]:
 def reference_unit_price(market_quotes: list[dict], reference_grade: str) -> int:
     """기준 등급의 당일 가락 시세. 없으면 가장 비싼 등급으로 보수적으로 잡는다.
 
-    ⑤ 스텁이 같은 등급으로 배분하므로 ③의 현금 제약과 ⑦의 금액 검사가 같은 단가를 본다 —
-    두 노드가 다른 등급을 고르면 상한과 검사가 어긋난다. 그래서 등급을 constraints에서
-    한 번만 읽어 양쪽에 넘긴다 (규칙 7).
+    ⑤도 이 등급을 배분의 기준으로 삼는다 — 등급을 constraints에서 한 번만 읽어 양쪽에
+    넘긴다 (규칙 7). ⑤가 더 싼 중품을 섞으면 실제 매입단가는 이 값보다 낮아지므로, 여기서
+    낸 현금 상한은 **보수적인 쪽으로만** 어긋난다. 반대로 이 등급을 ⑤보다 싸게 잡으면
+    ③이 살 수 있다고 계산한 양을 ⑦의 금액 검사가 컷하게 된다.
     """
     prices = {quote["grade"]: quote["price"] for quote in fixed_market_quotes(market_quotes)}
     chosen = prices.get(reference_grade, max(prices.values()))

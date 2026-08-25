@@ -503,12 +503,13 @@ def test_sourcing_ratios_must_be_positive_and_sum_to_one() -> None:
 
 
 def _staged_state(as_of: date = RISING, **overrides: object) -> dict:
-    """③까지 돌린 상태에 ④⑤ 스텁 결과를 얹은 것 — ⑥⑦만 따로 시험할 때 쓴다."""
+    """③까지 돌린 상태에 ④ 스텁과 ⑤ 배분 결과를 얹은 것 — ⑥⑦만 따로 시험할 때 쓴다."""
     state = build_initial_state(ITEM, as_of)
     state.update(classify_situation(state))
     state.update(draft_plan(state))
     state.update(split_plan(state))  # ④ 스텁 — 일괄
-    state.update(allocate_sourcing(state))  # ⑤ 스텁 — 전량 상품 **비율**
+    # ⑤ — 등급 **비율**. 평시(RISING)엔 중품 스코어가 음수라 전량 상품 한 줄이다.
+    state.update(allocate_sourcing(state))
     state.update(overrides)
     return state
 

@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from app.purchase_agent import ports
 from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
+from app.purchase_agent.state import build_initial_state
 
 #: IO명세 §1이 규정한 계약 포트 6개. 이 목록이 곧 외부 입력 경계다.
 CONTRACT_PORTS = (
@@ -522,6 +523,31 @@ def test_input_values_are_not_stored_as_constants() -> None:
     assert "margin_defense_floor_rate:" not in body
 
 
+def test_baseline_spread_matches_the_normal_day_mock() -> None:
+    """평시 기준선(SIM_FIXED 선언값)이 **실제 평시 mock 스프레드와 같은가**.
+
+    과거 시세 이력 포트가 계약에 없어 상수로 선언했는데(§4-⑤ Epic 3 확정 1), 그 상수가
+    자기가 대표한다고 주장하는 데이터와 어긋나면 "평시 대비 확대" 판정이 통째로 거짓이 된다.
+    두 파일이 따로 놀 수 있는 유일한 지점이라 여기서 묶어둔다.
+    """
+    constraints = _constraints()
+    mid_grade = constraints["grade"]["mid_grade"]
+    top_grade = constraints["allocation"]["reference_grade"]
+    normal_day = date(2026, 8, 21)  # quotes_normal이 붙은 앵커일 (scenarios.json)
+
+    for item, baseline in constraints["grade"]["baseline_grade_spread"].items():
+        prices = {q["grade"]: q["price"] for q in ports.get_market_quotes(item, normal_day)}
+        observed = (prices[top_grade] - prices[mid_grade]) / prices[top_grade]
+        assert observed == pytest.approx(baseline, rel=0.01), item
+
+
+def test_mid_grade_scoring_weights_are_declared() -> None:
+    """스코어 가중치는 코드가 아니라 파일이 갖는다 (규칙 7). 값 자체는 튜닝 대상이다."""
+    weights = _constraints()["grade"]["score_weights"]
+    assert set(weights) == {"price_gain", "freshness_risk"}
+    assert all(value > 0 for value in weights.values())
+
+
 # --------------------------------------------------------------------------- ports
 
 
@@ -555,3 +581,40 @@ def test_every_port_requires_as_of(port: object) -> None:
     parameters = inspect.signature(port).parameters
     assert "as_of" in parameters
     assert parameters["as_of"].annotation is date
+
+
+def test_t0_snapshot_calls_ports_one_to_five_once_and_never_loads_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """호출 **위치**를 잠근다 — ①~⑤는 T0 only, ⑥ 문서만 ② 노드의 런타임 예외.
+
+    ``ports.py``·``state.py`` docstring이 선언만 하고 아무도 검사하지 않던 경계다
+    (정의서 §3.1.1 · 팀 확인 2026-08-25 · IO명세 §0). 실제로 한 번 어긋나 있었다 —
+    docstring이 "6개 포트를 각각 한 번씩"이라고 적혀 있었는데 호출은 5개였다.
+
+    이게 있어야 ② ``collect_context``를 구현하다 실수로 T0에서 문서를 당겨오는 걸 막는다.
+    문서를 T0로 옮기면 "발행 시점 고정"이라는 예외의 안전 근거가 사라진다.
+    """
+    calls: dict[str, int] = {}
+
+    def counted(name: str):
+        original = getattr(ports, name)
+
+        def wrapper(*args, **kwargs):
+            calls[name] = calls.get(name, 0) + 1
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name in (*CONTRACT_PORTS, *PROVISIONAL_PORTS):
+        monkeypatch.setattr(ports, name, counted(name))
+
+    state = build_initial_state("배추", date(2026, 8, 21))
+
+    assert "get_context_docs" not in calls  # ⑥은 T0에서 부르지 않는다
+    t0_ports = [name for name in CONTRACT_PORTS if name != "get_context_docs"]
+    assert {name: calls.get(name) for name in t0_ports} == dict.fromkeys(t0_ports, 1)
+    # 계약 밖 잠정 포트도 T0 1회다 — 스냅샷 형식이 확정되면 이 줄이 함께 바뀐다
+    assert calls.get("get_snapshot_extras") == 1
+    # ② 노드가 아직 안 돌았으므로 문서 자리는 비어 있어야 한다 (빈 목록 = "아직 안 읽음")
+    assert state["context_docs"] == []

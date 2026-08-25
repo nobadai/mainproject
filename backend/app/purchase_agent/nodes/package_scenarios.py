@@ -209,6 +209,76 @@ def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> lis
     ]
 
 
+def _sourcing_decision(ratios: list[dict]) -> dict:
+    """⑤가 첫 줄에 실어 보낸 등급 배분 판단 근거.
+
+    State 필드를 늘리지 않으려고 비율 목록에 얹었다 (§3 "필드는 §3 State 정의 그대로").
+    ``materialize_sourcing``이 계약 4필드만 투영하므로 이 키는 **출력에 새지 않는다** —
+    내부 중간산출과 출력 계약이 같은 리스트를 공유하되 경계에서 잘린다.
+    """
+    return ratios[0].get("decision", {}) if ratios else {}
+
+
+def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
+    """중품을 태운 날의 근거 1건. 안 태웠으면 붙이지 않는다 — 없는 판단을 적지 않는다.
+
+    ``evidence_grade``가 ASSUMED인 이유: 평시 기준선은 선언 상수(SIM_FIXED)지만 중품
+    소진 한계일이 **재고 로트에서 추론한 값**이라, 둘을 합친 판단은 가장 약한 등급을 따른다
+    (IO명세 §5 — 파생값은 원천의 등급을 물려받지 못한다).
+    """
+    if not decision.get("ratio"):
+        return []
+    widening = decision["spread"] / decision["baseline"] - 1
+    return [
+        {
+            "source": "시세관측",
+            "claim": (
+                f"{decision['top_grade']}-{decision['mid_grade']} 스프레드 "
+                f"{decision['spread']:.1%} — 평시 {decision['baseline']:.1%} 대비 "
+                f"{widening:+.0%} 확대, {decision['mid_grade']} {decision['ratio']:.0%} 배정"
+            ),
+            "ref_id": f"MQ-가락-{as_of}",
+            "evidence_grade": "ASSUMED",
+            "evidence_detail": (
+                f"소진 한계 {decision['shelf_days']:.0f}일 = 상품 한계일 "
+                f"{decision['top_shelf_days']}일 × {decision['shelf_ratio']} · "
+                f"스코어 {decision['score']:+.3f}"
+            ),
+        }
+    ]
+
+
+def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
+    """등급 배분에서 나온 유의사항. **미결로 건너뛴 검사도 여기 싣는다** (규칙 3).
+
+    §4-⑦ 예시 출력의 risks("중품 1,500kg은 잔여신선도 6일 내 소진 필요 — 확정주문
+    일정상 충족")를 재현한다.
+    """
+    if decision.get("blocked_by"):
+        # 배정한 등급을 **이름으로** 적는다. 기준등급 시세가 없으면 ⑤가 다른 등급으로
+        # 대체하므로, "기준등급으로 배정했다"고 쓰면 형식만 맞고 내용이 거짓인 근거가 된다.
+        grade = decision.get("base_grade", "?")
+        return [f"등급 배분 보류 — {decision['blocked_by']}. 전량 {grade} 단일 등급으로 배정했다"]
+    if not decision.get("ratio"):
+        return []
+    mid_kg = sum(line["qty_kg"] for line in sourcing if line["grade"] == decision["mid_grade"])
+    notes = [
+        (
+            f"{decision['mid_grade']} {mid_kg:,}kg은 소진 한계 {decision['shelf_days']:.0f}일 내 "
+            f"납품분 {decision['near_qty_kg']:,}kg 안에서만 소화 가능"
+        )
+    ]
+    if decision.get("arrival_basis_assumed"):
+        # **"충족"이라고 쓰지 않는다.** 창의 시작점이 입고일인데 N4가 NULL이라 as_of로
+        # 근사했다 — 근사 위에서 낸 결론을 검증된 것처럼 적으면 규칙 3이 형식만 남는다.
+        notes.append(
+            "위 매칭은 as_of 기준 근사다 — 실제 창은 입고일(as_of + N4)부터인데 "
+            "inbound_lead_days(N4)가 미확정이라 계산하지 않았다 (규칙 3). "
+            "N4가 확정되면 소화 가능량이 달라질 수 있다"
+        )
+    return notes
+
+
 def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str) -> list[str]:
     """위험·유의사항. **미결값 때문에 건너뛴 검사도 여기 싣는다.**
 
@@ -245,6 +315,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     )
     lots = state["inventory"].get("lots")
     contract_price = state["contract_price"]  # 미수령이면 None — 마진 두 값이 함께 null이 된다
+    decision = _sourcing_decision(state["sourcing_plan"])  # ⑤ 등급 배분 판단 근거
 
     scenarios = []
     dropped = []
@@ -281,8 +352,14 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "split_plan": materialize_split(state["date"], total, state["split_plan"]),
                 "sourcing_plan": sourcing,
                 "expected_margin_rate": expected_margin_rate,
-                "rationale": _rationale(state, rationale_input, constraints),
-                "risks": _risks(draft, base["deferred_checks"], lots, state["date"]),
+                "rationale": [
+                    *_rationale(state, rationale_input, constraints),
+                    *_sourcing_rationale(decision, state["date"]),
+                ],
+                "risks": [
+                    *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    *_sourcing_risks(sourcing, decision),
+                ],
             }
         )
 
