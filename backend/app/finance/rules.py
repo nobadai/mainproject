@@ -5,10 +5,10 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal, TypedDict, cast
 
-from app.finance.schemas import RuntimeStatus
+from app.finance.schemas import FinalVerdict, RuntimeStatus
 from app.finance.tools import ExpectedCostComparison
 
-Verdict = Literal["ok", "conditional", "reject"]
+Verdict = FinalVerdict
 HardConstraint = Literal[
     "FINANCIAL_LIMIT_EXCEEDED",
     "NO_FINANCIAL_CAPACITY",
@@ -47,6 +47,7 @@ class FinanceRuleResult(TypedDict):
 
 class FinanceRuntimeRuleResult(TypedDict):
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     max_feasible_amount_krw: Decimal | None
     hard_constraints: list[HardConstraint]
     soft_warnings: list[SoftWarning]
@@ -54,6 +55,7 @@ class FinanceRuntimeRuleResult(TypedDict):
 
 class FinanceSalesRuleResult(TypedDict):
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     hard_constraints: list[HardConstraint]
     soft_warnings: list[FinanceRuntimeSoftWarning]
 
@@ -80,7 +82,7 @@ def evaluate_finance_rules(
 
     if not has_required_finance_state(finance_state):
         return {
-            "verdict": "reject",
+            "verdict": "FAIL",
             "max_feasible_amount_krw": None,
             "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
             "soft_warnings": soft_warnings,
@@ -96,27 +98,27 @@ def evaluate_finance_rules(
 
     if purchase_as_of != state_date:
         return {
-            "verdict": "reject",
+            "verdict": "FAIL",
             "max_feasible_amount_krw": None,
             "hard_constraints": ["AS_OF_MISMATCH"],
             "soft_warnings": soft_warnings,
         }
     if financial_limit <= Decimal(0):
         return {
-            "verdict": "reject",
+            "verdict": "FAIL",
             "max_feasible_amount_krw": Decimal(0),
             "hard_constraints": ["NO_FINANCIAL_CAPACITY"],
             "soft_warnings": soft_warnings,
         }
     if proposal_amount > financial_limit:
         return {
-            "verdict": "conditional",
+            "verdict": "FAIL",
             "max_feasible_amount_krw": financial_limit,
             "hard_constraints": ["FINANCIAL_LIMIT_EXCEEDED"],
             "soft_warnings": soft_warnings,
         }
     return {
-        "verdict": "ok",
+        "verdict": "PASS",
         "max_feasible_amount_krw": financial_limit,
         "hard_constraints": [],
         "soft_warnings": soft_warnings,
@@ -142,6 +144,7 @@ def evaluate_finance_runtime_rules(
     if not has_required_finance_state(finance_state):
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "max_feasible_amount_krw": None,
             "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
             "soft_warnings": soft_warnings,
@@ -150,6 +153,7 @@ def evaluate_finance_runtime_rules(
     if not policy_available:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "max_feasible_amount_krw": None,
             "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
             "soft_warnings": soft_warnings,
@@ -166,6 +170,7 @@ def evaluate_finance_runtime_rules(
     if as_of != state_date:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "max_feasible_amount_krw": None,
             "hard_constraints": ["AS_OF_MISMATCH"],
             "soft_warnings": soft_warnings,
@@ -173,6 +178,7 @@ def evaluate_finance_runtime_rules(
     if unresolved_sources:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "max_feasible_amount_krw": None,
             "hard_constraints": ["CASH_EVENT_SOURCE_UNRESOLVED"],
             "soft_warnings": soft_warnings,
@@ -180,6 +186,7 @@ def evaluate_finance_runtime_rules(
     if projected_cash_min is None or minimum_cash_balance is None or max_feasible_amount is None:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "max_feasible_amount_krw": None,
             "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
             "soft_warnings": soft_warnings,
@@ -191,6 +198,7 @@ def evaluate_finance_runtime_rules(
         hard_constraints.append("NO_FINANCIAL_CAPACITY")
     return {
         "runtime_status": "READY",
+        "verdict": "FAIL" if hard_constraints else "PASS",
         "max_feasible_amount_krw": max_feasible_amount,
         "hard_constraints": hard_constraints,
         "soft_warnings": soft_warnings,
@@ -223,12 +231,14 @@ def evaluate_finance_sales_rules(
     if base_result["runtime_status"] != "READY":
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "hard_constraints": hard_constraints,
             "soft_warnings": list(base_result["soft_warnings"]),
         }
     if post_h1_projected_cash_min is None or minimum_cash_balance is None:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
             "hard_constraints": ["REQUIRED_FINANCE_POLICY_MISSING"],
             "soft_warnings": [],
         }
@@ -239,6 +249,7 @@ def evaluate_finance_sales_rules(
         hard_constraints.append("FIN-H01_MINIMUM_CASH_BALANCE")
     return {
         "runtime_status": "READY",
+        "verdict": "FAIL" if hard_constraints else "PASS",
         "hard_constraints": hard_constraints,
         "soft_warnings": [],
     }

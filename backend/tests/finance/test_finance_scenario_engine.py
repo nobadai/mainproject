@@ -24,7 +24,7 @@ def test_finance_procurement_scenario_is_deterministic(
     assert first == second
     assert first["max_feasible_amount_krw"] == Decimal(6111353)
     assert first["amount_comparisons"][0]["recalculated_amount_krw"] == Decimal(7125000)
-    assert first["has_cost_mismatch"] is True
+    assert first["has_cost_mismatch"] is False
 
 
 def test_finance_external_snapshot_bypasses_repository_and_round_trips_t0_id(

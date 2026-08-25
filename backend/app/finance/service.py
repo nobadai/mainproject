@@ -31,6 +31,7 @@ from app.finance.scenario_engine import (
 )
 from app.finance.schemas import (
     CashEvent,
+    FinalVerdict,
     FinanceAgentRunResponse,
     FinanceBand,
     FinanceCycle,
@@ -98,6 +99,7 @@ def run_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementR
         as_of=request.meta.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
+        verdict=response.verdict,
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )
@@ -156,6 +158,7 @@ def run_finance_procurement_with_context(
         as_of=request.meta.as_of,
         snapshot_id=context.snapshot.snapshot_id if context is not None else None,
         runtime_status=rule_result["runtime_status"],
+        verdict=rule_result["verdict"],
         band=FinanceBand(max_feasible_amount_krw=max_feasible_amount),
         base_projected_cash_min=projection.projected_cash_min if projection else None,
         base_cash_priority=scenario_result["base_cash_priority"],
@@ -176,6 +179,7 @@ def run_finance_sales(request: FinanceSalesRequest) -> FinanceSalesResponse:
         as_of=request.as_of,
         snapshot_id=response.snapshot_id,
         runtime_status=response.runtime_status,
+        verdict=response.verdict,
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )
@@ -230,6 +234,7 @@ def run_finance_sales_with_context(
         snapshot_id=context.snapshot.snapshot_id if context is not None else None,
         approval_id=request.approved_purchase.approval_id,
         runtime_status=rule_result["runtime_status"],
+        verdict=rule_result["verdict"],
         base_cash_priority=scenario_result["base_cash_priority"],
         sales_cash_priority=scenario_result["sales_cash_priority"],
         collection_preferences=scenario_result["collection_preferences"],
@@ -249,6 +254,7 @@ def list_finance_runs(
     cycle: FinanceCycle | None = None,
     as_of: date | None = None,
     runtime_status: RuntimeStatus | None = None,
+    verdict: FinalVerdict | None = None,
     limit: int = 100,
 ) -> list[FinanceAgentRunResponse]:
     """UI 조회용 Finance Agent 실행이력 목록을 반환한다."""
@@ -256,6 +262,7 @@ def list_finance_runs(
         cycle=cycle,
         as_of=as_of,
         runtime_status=runtime_status,
+        verdict=verdict,
         limit=limit,
     )
     return [FinanceAgentRunResponse.model_validate(row) for row in rows]
