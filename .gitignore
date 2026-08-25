@@ -42,6 +42,12 @@ Thumbs.db
 #예외폴더
 docs/
 finance/
+# 앵커(/) 추가: 슬래시 없는 `tests/`는 하위 경로에도 매칭돼 backend/tests/까지 무시했다.
+# 이미 추적 중인 파일은 영향받지 않지만, 새로 추가하는 테스트 파일이 git add에서
+# 조용히 빠진다. 의도가 루트 임시 폴더 제외였다고 보고 앵커를 붙였다 — 현서님 확인 요망.
+# (같은 문제가 위 `finance/`에도 있다: backend/app/finance/·backend/tests/finance/를 매칭.
+#  남의 규칙이라 이번 머지에서는 손대지 않고 PR에서 함께 확인 요청한다.)
+/tests/
 
 # 개인 작업 환경 파일(CLAUDE.md, .claude/)은 여기 두지 않는다.
 # 이 저장소 사본에만 적용되도록 .git/info/exclude로 옮겼다 — .gitignore에 두면

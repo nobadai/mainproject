@@ -1,4 +1,4 @@
-"""Finance P0의 PostgreSQL 연결 및 조회 기능."""
+"""Logistics Agent의 PostgreSQL 접근 기능."""
 
 import os
 from collections.abc import Mapping, Sequence
@@ -17,12 +17,8 @@ _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 
 
-def _load_environment() -> None:
-    load_dotenv(_ENV_FILE)
-
-
 def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
-    _load_environment()
+    load_dotenv(_ENV_FILE)
     values = {key: os.getenv(key, "") for key in keys}
     missing = [key for key, value in values.items() if not value]
     if missing:
@@ -49,21 +45,21 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
 
 
 def fetch_one(query: Query, params: Params = None) -> dict[str, Any] | None:
-    """Parameter binding을 사용해 단건 SELECT 결과를 반환한다."""
+    """Parameter binding을 사용해 단건 조회 결과를 반환한다."""
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchone()
 
 
 def fetch_all(query: Query, params: Params = None) -> list[dict[str, Any]]:
-    """Parameter binding을 사용해 다건 SELECT 결과를 반환한다."""
+    """Parameter binding을 사용해 다건 조회 결과를 반환한다."""
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchall()
 
 
 def execute_returning_one(query: Query, params: Params = None) -> dict[str, Any]:
-    """변경 SQL을 실행하고 RETURNING으로 생성된 단건 결과를 반환한다."""
+    """변경 SQL을 실행하고 RETURNING 단건 결과를 반환한다."""
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute(query, params)
         row = cursor.fetchone()
