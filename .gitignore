@@ -43,5 +43,6 @@ Thumbs.db
 docs/
 finance/
 
-CLAUDE.md
-.claude/
+# 개인 작업 환경 파일(CLAUDE.md, .claude/)은 여기 두지 않는다.
+# 이 저장소 사본에만 적용되도록 .git/info/exclude로 옮겼다 — .gitignore에 두면
+# 다른 사람의 저장소에서도 같은 이름의 파일이 조용히 무시된다.
