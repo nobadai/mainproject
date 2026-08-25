@@ -207,6 +207,38 @@ CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
 FinanceCycle = Literal["PROCUREMENT", "SALES"]
 
 
+class FinancePolicy(BaseModel):
+    """Finance MVP 실행에 사용하는 회사/Agent 운영 정책."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    purchase_payment_days: int = Field(ge=0)
+    payroll_date: int = Field(ge=1, le=31)
+    monthly_labor_cost_krw: Decimal = Field(ge=0)
+    minimum_cash_balance_krw: Decimal = Field(ge=0)
+    cashflow_projection_days: int = Field(gt=0)
+    cash_priority_reference: Literal["minimum_cash_balance_krw"]
+    cash_priority_high_ratio: Decimal = Field(ge=0)
+    cash_priority_medium_ratio: Decimal = Field(ge=0)
+    policy_version: Literal["v1.3-PROVISIONAL"]
+    usage_scope: Literal["AGENT_MVP_DEMO"]
+    source_refs: dict[str, str]
+
+    @field_validator(
+        "purchase_payment_days",
+        "payroll_date",
+        "monthly_labor_cost_krw",
+        "minimum_cash_balance_krw",
+        "cashflow_projection_days",
+        "cash_priority_high_ratio",
+        "cash_priority_medium_ratio",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_policy_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class FinanceSnapshot(BaseModel):
     """한 Cycle 동안 고정해서 사용하는 T0 Finance Snapshot."""
 
