@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import TypedDict, cast
+from typing import Protocol, TypedDict, cast
 
 from psycopg import sql
 
@@ -431,3 +431,76 @@ def _get_current_finance_state_row() -> dict[str, object]:
     if row is None:
         raise LookupError("Current Finance State was not found")
     return row
+
+
+class FinanceDataNotReady(RuntimeError):
+    """Required Finance fact/policy is absent or not historically reproducible."""
+
+    def __init__(self, key: str):
+        self.key = key
+        super().__init__(f"Finance data is not ready: {key}")
+
+
+class FinanceAsOfDataPort(Protocol):
+    """v2.2 repository boundary. Every mutable read carries ``as_of``."""
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]: ...
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None: ...
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy: ...
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+
+
+class PostgresFinanceAsOfDataPort:
+    """Adapter over the current schema with an explicit reproducibility guard.
+
+    The present DB has a current-state view, not a full bitemporal state store.
+    It is therefore safe only when the view's state_date exactly equals as_of;
+    older requests are reported as not ready instead of reading today's state.
+    """
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]:
+        row = _get_current_finance_state_row()
+        if row.get("state_date") != as_of:
+            raise FinanceDataNotReady("historical_finance_position")
+        return row
+
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
+        del as_of
+        if policy_version != FINANCE_POLICY_VERSION:
+            raise FinanceDataNotReady("finance_policy_version")
+        try:
+            policy = get_active_finance_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("finance_policy") from exc
+        # D-FIN-01 is a v2.2 SIM_FIXED policy. Amount remains DB sourced.
+        return policy.model_copy(update={"payroll_date": 10})
+
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
+        return self._events(as_of, horizon, {"PURCHASE_PAYABLE", "COMMITTED_OUTFLOW"})
+
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]:
+        return self._events(as_of, horizon, {"RECEIVABLE"})
+
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None:
+        del as_of, horizon
+        try:
+            policy = get_active_finance_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("payroll_amount") from exc
+        return policy.monthly_labor_cost_krw
+
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]:
+        try:
+            debt = get_active_finance_debt_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("debt_policy") from exc
+        return list(build_debt_service_schedule(debt_policy=debt, as_of=as_of, horizon_end=horizon))
+
+    def _events(self, as_of: date, horizon: date, kinds: set[str]) -> list[CashEvent]:
+        # Reuse the legacy adapter only after the exact-as_of guard has passed.
+        context = get_current_finance_runtime_context()
+        if context.snapshot.state_date != as_of:
+            raise FinanceDataNotReady("historical_cash_schedule")
+        return [e for e in context.cash_events if e.event_type in kinds and e.event_date <= horizon]
