@@ -1,4 +1,4 @@
-"""Finance v2.2 tool-using agent entry path.
+"""Finance tool-using agent entry path.
 
 This module deliberately does not import ``FinanceSnapshot``.  The legacy
 procurement/sales services remain compatibility-only while this path uses the
@@ -18,7 +18,7 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
-from app.finance.run_repository import save_finance_v22_run
+from app.finance.run_repository import save_finance_execution
 from app.finance.schemas import CashEvent, FinancePolicy
 from app.finance.tools import (
     build_payroll_schedule,
@@ -361,13 +361,24 @@ class FinanceToolRegistry:
         )
         state.projection = base_projection
         state.scenario_projection = scenario_projection
-        state.scenario_cap = cap
         state.scenario_schedule = schedule
-        verdict = (
-            "ok"
-            if scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
-            else "reject"
+        state.base_state_violated = (
+            base_projection.projected_cash_min < policy.minimum_cash_balance_krw
         )
+        if state.base_state_violated:
+            cap = Decimal(0)
+            verdict = "reject"
+            rule_id = "FIN-BASE-MIN-CASH"
+            reason = "Base Finance minimum-cash rule failed."
+        else:
+            verdict = (
+                "ok"
+                if scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
+                else "reject"
+            )
+            rule_id = "FIN-CAP"
+            reason = "Finance cap rule passed." if verdict == "ok" else "Finance cap rule failed."
+        state.scenario_cap = cap
         scenario_ref = str(payload["scenario_id"])
         return {
             "scenario_id": payload["scenario_id"],
@@ -380,8 +391,8 @@ class FinanceToolRegistry:
                 {"payment_date": item[0].isoformat(), "amount_krw": str(item[1])}
                 for item in schedule
             ],
-            "reason": "Finance cap rule passed." if verdict == "ok" else "Finance cap rule failed.",
-            "rules": [{"rule_id": "FIN-CAP", "status": "PASS" if verdict == "ok" else "FAIL"}],
+            "reason": reason,
+            "rules": [{"rule_id": rule_id, "status": "PASS" if verdict == "ok" else "FAIL"}],
             "evidence": [
                 _evidence("scenario_id", 1, "identity", scenario_ref),
                 _evidence(
@@ -394,20 +405,20 @@ class FinanceToolRegistry:
                     "projected_cash_min",
                     scenario_projection.projected_cash_min,
                     "krw",
-                    f"{scenario_ref}:cashflow",
+                    _branch_ref("cashflow", state),
                 ),
-                _evidence("verdict", verdict == "ok", "boolean", f"{scenario_ref}:FIN-CAP"),
+                _evidence("verdict", verdict == "ok", "boolean", _branch_ref(rule_id, state)),
                 _evidence(
                     "payment_schedule",
                     len(schedule),
                     "payment_count",
-                    f"{scenario_ref}:payment-schedule",
+                    _branch_ref("payment-schedule", state),
                 ),
                 _evidence(
                     "adjustability",
                     0 if verdict == "ok" else 2,
                     "enum_code",
-                    f"{scenario_ref}:FIN-CAP",
+                    _branch_ref(rule_id, state),
                 ),
             ],
         }
@@ -448,7 +459,7 @@ class FinanceToolRegistry:
                     "validation_status",
                     valid,
                     "boolean",
-                    f"{state.branch_id}:FIN-CAP",
+                    _branch_ref("FIN-CAP", state),
                 ),
             ],
         }
@@ -467,6 +478,7 @@ class FinanceAgentState:
     scenario_projection: Any = None
     scenario_cap: Decimal | None = None
     scenario_schedule: tuple[tuple[date, Decimal], ...] = ()
+    base_state_violated: bool = False
 
 
 _CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
@@ -523,6 +535,7 @@ class FinanceAgentController:
         total_calls = 0
         total_replans = 0
         try:
+            _validate_finance_payload(request)
             branch_requests = self._branch_requests(request)
             for branch_request in branch_requests:
                 branch_id = str(branch_request.payload.get("scenario_id", "PRE_PURCHASE"))
@@ -565,7 +578,7 @@ class FinanceAgentController:
             llm_status="SUCCESS" if runtime_status == "READY" else "DISABLED",
             llm_model=self.planner.model,
             llm_attempts=self.planner.attempts,
-            llm_fallback_used=runtime_status == "READY",
+            llm_fallback_used=False,
             elapsed_ms=elapsed,
         )
         reply = AgentReply(
@@ -584,8 +597,20 @@ class FinanceAgentController:
             needs_followup=runtime_status == "RUNTIME_NOT_READY",
             additional_validation_required=False,
         )
+        nested_findings = validate_finance_scenario_output(reply)
+        if nested_findings:
+            reply = replace(
+                reply,
+                runtime_status="ERROR",
+                business_status="skipped",
+                payload={},
+                evidences=(),
+                suggested_adjustments=(),
+                reasoning="Finance scenario output validation failed.",
+                needs_followup=True,
+            )
         try:
-            save_finance_v22_run(request=request, reply=reply, metadata=metadata)
+            save_finance_execution(request=request, reply=reply, metadata=metadata)
         except Exception:  # noqa: BLE001 - persistence failure is an Agent ERROR value.
             reply = replace(
                 reply,
@@ -625,7 +650,7 @@ class FinanceAgentController:
         )
         while total_calls < self.max_tool_calls:
             satisfied = _satisfied_capabilities(state)
-            if _scenario_verdict(state) == "reject":
+            if _scenario_verdict(state) == "reject" and not state.base_state_violated:
                 required.add("amount_adjustment_validation")
             missing = tuple(sorted(required - satisfied))
             planner_tools = frozenset().union(*(_CAPABILITY_TOOLS[name] for name in missing))
@@ -731,7 +756,12 @@ class FinanceAgentController:
                 evidence_detail="Branch-isolated deterministic Finance validation.",
             )
             if "scenarios" in request.payload:
-                return {"scenarios": results}, [scenarios_evidence], status, []
+                adjustments = [
+                    _adjustment_from_dict(adjustment)
+                    for result in results
+                    for adjustment in result["suggested_adjustments"]
+                ]
+                return {"scenarios": results}, [scenarios_evidence], status, adjustments
             result = results[0]
             branch_evidence = [_evidence_from_dict(item) for item in result.pop("evidences")]
             branch_adjustments = result.pop("suggested_adjustments")
@@ -801,7 +831,7 @@ class FinanceAgentController:
                 "adjustability",
                 adjustability_code,
                 "enum_code",
-                f"{state.branch_id}:adjustability",
+                _branch_ref("adjustability", state),
             )
         )
         payload["evidences"] = [_evidence_dict(item) for item in evidence]
@@ -857,7 +887,14 @@ def _evidence(
 
 
 def _tool_ref(tool_name: str, state: FinanceAgentState) -> str:
-    return f"FIN-V22:{state.request.context.request_id}:{state.branch_id}:{tool_name}"
+    return _branch_ref(tool_name, state)
+
+
+def _branch_ref(kind: str, state: FinanceAgentState) -> str:
+    return (
+        f"FIN-AGENT:{state.request.context.request_id}:{state.request.call_seq}:"
+        f"{state.branch_id}:{kind}"
+    )
 
 
 def _short_reason(reason: str) -> str:
@@ -931,6 +968,121 @@ def _scenario_schedule(
     if sum((item[1] for item in schedule), Decimal(0)) != amount:
         raise ValueError("payment_schedule amount sum must equal total_amount_krw")
     return tuple(sorted(schedule))
+
+
+def _validate_finance_payload(request: AgentRequest) -> None:
+    if request.mode != "SCENARIO_VALIDATION":
+        return
+    raw_scenarios = request.payload.get("scenarios")
+    scenarios = raw_scenarios if raw_scenarios is not None else [request.payload]
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        raise ValueError("SCENARIO_VALIDATION requires one to three scenarios")
+    scenario_ids: set[str] = set()
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise TypeError("each Finance scenario must be an object")
+        scenario_id = scenario.get("scenario_id")
+        if not isinstance(scenario_id, str) or not scenario_id.strip():
+            raise ValueError("scenario_id must be a non-empty string")
+        if scenario_id in scenario_ids:
+            raise ValueError("scenario_id must be unique within the request")
+        scenario_ids.add(scenario_id)
+        try:
+            amount = Decimal(str(scenario["total_amount_krw"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("total_amount_krw must be a valid number") from exc
+        if (
+            isinstance(scenario.get("total_amount_krw"), bool)
+            or not amount.is_finite()
+            or amount <= 0
+        ):
+            raise ValueError("total_amount_krw must be a positive finite number")
+        schedule = scenario.get("payment_schedule")
+        if schedule is None:
+            continue
+        if not isinstance(schedule, list) or not schedule:
+            raise ValueError("payment_schedule must be a non-empty list")
+        total = Decimal(0)
+        for payment in schedule:
+            if not isinstance(payment, dict):
+                raise TypeError("each payment_schedule entry must be an object")
+            try:
+                date.fromisoformat(str(payment["payment_date"]))
+                payment_amount = Decimal(str(payment["amount_krw"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("payment_schedule date and amount must be valid") from exc
+            if (
+                isinstance(payment.get("amount_krw"), bool)
+                or not payment_amount.is_finite()
+                or payment_amount <= 0
+            ):
+                raise ValueError("payment_schedule amount must be positive and finite")
+            total += payment_amount
+        if total != amount:
+            raise ValueError("payment_schedule amount sum must equal total_amount_krw")
+
+
+def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
+    """Validate Finance-owned nested scenario lineage beyond the common envelope."""
+    if reply.runtime_status != "READY" or reply.mode != "SCENARIO_VALIDATION":
+        return ()
+    scenarios = reply.payload.get("scenarios")
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        return ("payload.scenarios must contain one to three results",)
+    # The retained single-scenario compatibility shape carries branch Evidence at
+    # the common envelope level. The documented multi-scenario contract nests it.
+    if reply.payload.get("scenario_id") is not None and len(scenarios) == 1:
+        return ()
+    findings: list[str] = []
+    seen: set[str] = set()
+    nested_adjustment_refs: set[str] = set()
+    for scenario in scenarios:
+        scenario_id = scenario.get("scenario_id") if isinstance(scenario, dict) else None
+        if not isinstance(scenario_id, str) or not scenario_id or scenario_id in seen:
+            findings.append("scenario result ids must be non-empty and unique")
+            continue
+        seen.add(scenario_id)
+        if scenario.get("adjustability") not in {"NOT_NEEDED", "ADJUSTABLE", "NOT_ADJUSTABLE"}:
+            findings.append(f"{scenario_id}: invalid adjustability")
+        evidence = scenario.get("evidences")
+        claims = {item.get("claim") for item in evidence} if isinstance(evidence, list) else set()
+        required = {
+            "finance_cap_amount_krw",
+            "projected_cash_min",
+            "payment_schedule",
+            "verdict",
+            "adjustability",
+        }
+        if not required <= claims:
+            findings.append(f"{scenario_id}: nested Evidence is incomplete")
+        for item in evidence if isinstance(evidence, list) else ():
+            for ref in item.get("ref_ids", ()):
+                if str(ref).startswith("FIN-AGENT:") and scenario_id not in str(ref):
+                    findings.append(f"{scenario_id}: cross-branch Evidence ref")
+        adjustments = scenario.get("suggested_adjustments", [])
+        if scenario.get("adjustability") == "ADJUSTABLE" and not adjustments:
+            findings.append(f"{scenario_id}: verified adjustment is missing")
+        if scenario.get("adjustability") != "ADJUSTABLE" and adjustments:
+            findings.append(f"{scenario_id}: unexpected adjustment")
+        for adjustment in adjustments:
+            refs = adjustment.get("ref_ids", ())
+            if (
+                adjustment.get("axis") != "amount"
+                or not refs
+                or not all(scenario_id in str(ref) for ref in refs)
+            ):
+                findings.append(f"{scenario_id}: adjustment lineage is invalid")
+            nested_adjustment_refs.update(str(ref) for ref in refs)
+        if adjustments and scenario.get("verdict") == "ok":
+            findings.append(f"{scenario_id}: adjustment must not rewrite reject to ok")
+    top_refs = {
+        str(ref)
+        for adjustment in reply.suggested_adjustments
+        for ref in adjustment.ref_ids
+    }
+    if top_refs != nested_adjustment_refs:
+        findings.append("top-level and nested Finance adjustments differ")
+    return tuple(dict.fromkeys(findings))
 
 
 def _schedule_events(

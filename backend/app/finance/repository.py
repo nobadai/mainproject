@@ -557,8 +557,13 @@ class PostgresFinanceAsOfDataPort:
         return policy.monthly_labor_cost_krw
 
     def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
         try:
             debt = get_active_finance_debt_policy()
         except (LookupError, TypeError, ValueError) as exc:
             raise FinanceDataNotReady("debt_policy") from exc
+        if abs(
+            debt.debt_principal_krw - Decimal(str(position["current_debt_krw"]))
+        ) > Decimal("0.000001"):
+            raise FinanceDataNotReady("debt_policy_consistency")
         return list(build_debt_service_schedule(debt_policy=debt, as_of=as_of, horizon_end=horizon))

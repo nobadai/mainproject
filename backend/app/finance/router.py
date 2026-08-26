@@ -6,9 +6,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.finance.agent_v22 import FinanceAgentController
+from app.finance.agent import FinanceAgentController
 from app.finance.repository import PostgresFinanceAsOfDataPort
-from app.finance.run_repository import get_finance_v22_run
+from app.finance.run_repository import get_finance_execution
 from app.finance.schemas import (
     FinalVerdict,
     FinanceAgentRunResponse,
@@ -41,9 +41,9 @@ def run_finance_agent(request: AgentRequest) -> AgentReply:
 
 
 @router.get("/agent/runs/{run_id}", summary="Finance v2.2 execution metadata")
-def get_finance_agent_v22_run(run_id: UUID) -> dict[str, object]:
+def get_finance_execution_by_id(run_id: UUID) -> dict[str, object]:
     try:
-        return get_finance_v22_run(run_id)
+        return get_finance_execution(run_id)
     except LookupError as error:
         raise HTTPException(status_code=404, detail="Finance v2.2 run was not found") from error
 

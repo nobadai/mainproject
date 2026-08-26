@@ -136,7 +136,7 @@ def list_finance_agent_runs(
     return cast(list[FinanceAgentRun], fetch_all(query, params))
 
 
-def save_finance_v22_run(
+def save_finance_execution(
     *, request: AgentRequest, reply: AgentReply, metadata: ExecutionMetadata
 ) -> None:
     """Persist the v2.2 child trace when the migration is installed.
@@ -187,7 +187,7 @@ def save_finance_v22_run(
     )
 
 
-def get_finance_v22_run(run_id: UUID) -> dict[str, object]:
+def get_finance_execution(run_id: UUID) -> dict[str, object]:
     query = sql.SQL("SELECT * FROM {}.finance_agent_runs_v22 WHERE run_id = %s").format(
         sql.Identifier(get_db_schema())
     )
