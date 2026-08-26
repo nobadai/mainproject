@@ -147,13 +147,14 @@ def save_finance_v22_run(
     query = sql.SQL(
         """
         INSERT INTO {}.finance_agent_runs_v22 (
-            run_id, request_id, agent, mode, as_of, runtime_status,
+            run_id, request_id, agent, mode, as_of, policy_version, trigger, call_seq,
+            runtime_status,
             business_status, request_payload, response_payload,
             used_tools, tool_order, observations, rules_applied, replans,
             llm_status, llm_model, llm_attempts, llm_fallback_used, elapsed_ms
         ) VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """
     ).format(sql.Identifier(get_db_schema()))
@@ -165,6 +166,9 @@ def save_finance_v22_run(
             "finance",
             request.mode,
             request.context.as_of,
+            request.context.policy_version,
+            request.context.trigger,
+            request.call_seq,
             reply.runtime_status,
             reply.business_status,
             Jsonb(dict(request.payload)),
