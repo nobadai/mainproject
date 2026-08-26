@@ -460,14 +460,25 @@ class PostgresFinanceAsOfDataPort:
     older requests are reported as not ready instead of reading today's state.
     """
 
+    def __init__(self) -> None:
+        self._position_cache: tuple[date, dict[str, object]] | None = None
+        self._policy_cache: tuple[date, str, FinancePolicy] | None = None
+
     def load_finance_position(self, as_of: date) -> dict[str, object]:
+        if self._position_cache is not None and self._position_cache[0] == as_of:
+            return self._position_cache[1]
         row = _get_current_finance_state_row()
         if row.get("state_date") != as_of:
             raise FinanceDataNotReady("historical_finance_position")
+        self._position_cache = (as_of, row)
         return row
 
     def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
-        del as_of
+        if self._policy_cache is not None and self._policy_cache[:2] == (
+            as_of,
+            policy_version,
+        ):
+            return self._policy_cache[2]
         if policy_version != FINANCE_POLICY_VERSION:
             raise FinanceDataNotReady("finance_policy_version")
         try:
@@ -475,20 +486,74 @@ class PostgresFinanceAsOfDataPort:
         except (LookupError, TypeError, ValueError) as exc:
             raise FinanceDataNotReady("finance_policy") from exc
         # D-FIN-01 is a v2.2 SIM_FIXED policy. Amount remains DB sourced.
-        return policy.model_copy(update={"payroll_date": 10})
+        policy = policy.model_copy(update={"payroll_date": 10})
+        self._policy_cache = (as_of, policy_version, policy)
+        return policy
 
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
-        return self._events(as_of, horizon, {"PURCHASE_PAYABLE", "COMMITTED_OUTFLOW"})
+        position = self.load_finance_position(as_of)
+        payable_rows = _fetch_scheduled_rows(
+            table="payables",
+            columns=("payable_id", "due_date", "outstanding_amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            active_status="OPEN",
+        )
+        expense_rows = _fetch_scheduled_rows(
+            table="expenses",
+            columns=("expense_id", "expense_date", "amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            excluded_status="PAID",
+        )
+        return [
+            *_rows_to_events(
+                payable_rows,
+                id_column="payable_id",
+                date_column="due_date",
+                amount_column="outstanding_amount_krw",
+                event_type="PURCHASE_PAYABLE",
+                direction="OUTFLOW",
+            ),
+            *_rows_to_events(
+                expense_rows,
+                id_column="expense_id",
+                date_column="expense_date",
+                amount_column="amount_krw",
+                event_type="COMMITTED_OUTFLOW",
+                direction="OUTFLOW",
+            ),
+        ]
 
     def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]:
-        return self._events(as_of, horizon, {"RECEIVABLE"})
+        position = self.load_finance_position(as_of)
+        rows = _fetch_scheduled_rows(
+            table="receivables",
+            columns=("receivable_id", "due_date", "outstanding_amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            active_status="OPEN",
+        )
+        return _rows_to_events(
+            rows,
+            id_column="receivable_id",
+            date_column="due_date",
+            amount_column="outstanding_amount_krw",
+            event_type="RECEIVABLE",
+            direction="INFLOW",
+        )
 
     def load_payroll(self, as_of: date, horizon: date) -> Decimal | None:
-        del as_of, horizon
-        try:
-            policy = get_active_finance_policy()
-        except (LookupError, TypeError, ValueError) as exc:
-            raise FinanceDataNotReady("payroll_amount") from exc
+        del horizon
+        if self._policy_cache is None or self._policy_cache[0] != as_of:
+            raise FinanceDataNotReady("finance_policy_context")
+        policy = self._policy_cache[2]
         return policy.monthly_labor_cost_krw
 
     def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]:
@@ -497,10 +562,3 @@ class PostgresFinanceAsOfDataPort:
         except (LookupError, TypeError, ValueError) as exc:
             raise FinanceDataNotReady("debt_policy") from exc
         return list(build_debt_service_schedule(debt_policy=debt, as_of=as_of, horizon_end=horizon))
-
-    def _events(self, as_of: date, horizon: date, kinds: set[str]) -> list[CashEvent]:
-        # Reuse the legacy adapter only after the exact-as_of guard has passed.
-        context = get_current_finance_runtime_context()
-        if context.snapshot.state_date != as_of:
-            raise FinanceDataNotReady("historical_cash_schedule")
-        return [e for e in context.cash_events if e.event_type in kinds and e.event_date <= horizon]
