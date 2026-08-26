@@ -4,7 +4,12 @@ from datetime import date
 from decimal import Decimal
 from typing import TypedDict
 
-from app.logistics.schemas import ConstraintResult, InventoryLogisticsSnapshot, RuntimeStatus
+from app.logistics.schemas import (
+    ConstraintResult,
+    FinalVerdict,
+    InventoryLogisticsSnapshot,
+    RuntimeStatus,
+)
 from app.logistics.tools import is_inbound_schedule_complete
 
 
@@ -13,6 +18,18 @@ class LogisticsRuleResult(TypedDict):
     hard_constraints: list[ConstraintResult]
     soft_warnings: list[str]
     calculation_ready: bool
+
+
+def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None:
+    """Runtime readiness와 개별 Hard Check 상태를 분리해 최종 판정을 집계한다."""
+    if result["runtime_status"] != "READY":
+        return None
+    statuses = {constraint.status for constraint in result["hard_constraints"]}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "UNRESOLVED" in statuses:
+        return "REVIEW_REQUIRED"
+    return "PASS"
 
 
 def evaluate_procurement_rules(
@@ -49,7 +66,7 @@ def evaluate_procurement_rules(
         constraints.append(
             ConstraintResult(
                 code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
-                passed=None,
+                status="UNRESOLVED",
                 skip_reason=_inbound_schedule_skip_reason(snapshot),
             )
         )
@@ -91,10 +108,12 @@ def evaluate_sales_rules(
     if snapshot.guaranteed_capacity_kg is not None and future_occupancy_by_date is not None:
         warehouse_constraint = ConstraintResult(
             code="LOG-H01",
-            passed=all(
+            status="PASS"
+            if all(
                 value <= snapshot.guaranteed_capacity_kg
                 for value in future_occupancy_by_date.values()
-            ),
+            )
+            else "FAIL",
         )
     outbound_constraint = _known_constraint(
         "N17",
@@ -104,14 +123,14 @@ def evaluate_sales_rules(
     lots_complete = all(lot.remaining_freshness_days is not None for lot in snapshot.on_hand_by_lot)
     lot_constraint = ConstraintResult(
         code="N17-LOT",
-        passed=True if lots_complete else None,
+        status="PASS" if lots_complete else "UNRESOLVED",
         skip_reason=None if lots_complete else "N17_LOT_FRESHNESS_UNRESOLVED",
     )
     inbound_completeness_constraint = None
     if not is_inbound_schedule_complete(snapshot):
         inbound_completeness_constraint = ConstraintResult(
             code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
-            passed=None,
+            status="UNRESOLVED",
             skip_reason=_inbound_schedule_skip_reason(snapshot),
         )
     soft_warnings = _snapshot_warnings(snapshot)
@@ -146,7 +165,7 @@ def _snapshot_boundary(
             "hard_constraints": [
                 ConstraintResult(
                     code="REQUIRED_LOGISTICS_SNAPSHOT_MISSING",
-                    passed=False,
+                    status="FAIL",
                 )
             ],
             "soft_warnings": [],
@@ -155,7 +174,7 @@ def _snapshot_boundary(
     if as_of != snapshot.as_of:
         return {
             "runtime_status": "RUNTIME_NOT_READY",
-            "hard_constraints": [ConstraintResult(code="AS_OF_MISMATCH", passed=False)],
+            "hard_constraints": [ConstraintResult(code="AS_OF_MISMATCH", status="FAIL")],
             "soft_warnings": _snapshot_warnings(snapshot),
             "calculation_ready": False,
         }
@@ -169,7 +188,7 @@ def _known_constraint(
 ) -> ConstraintResult:
     return ConstraintResult(
         code=code,
-        passed=True if value is not None else None,
+        status="PASS" if value is not None else "UNRESOLVED",
         skip_reason=None if value is not None else skip_reason,
     )
 

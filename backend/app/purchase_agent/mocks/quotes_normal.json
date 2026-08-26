@@ -1,0 +1,29 @@
+{
+  "_scenario": {
+    "kind": "normal",
+    "설명": "평시 등급 스프레드. 상-중 약 12%.",
+    "비고": "배추 특1850/상1650/중1450은 IO명세 §1-② 예시와 동일한 값이다. 픽스처 _proposal()의 sourcing_plan 단가(상 1650·중 1450)가 여기 실재해야 규칙 4('당일 시세에 실재하는 값만')가 데이터 수준에서 성립한다."
+  },
+  "items": {
+    "배추": [
+      {"market": "가락", "grade": "특", "price": 1850},
+      {"market": "가락", "grade": "상", "price": 1650},
+      {"market": "가락", "grade": "중", "price": 1450}
+    ],
+    "무": [
+      {"market": "가락", "grade": "특", "price": 1240},
+      {"market": "가락", "grade": "상", "price": 1100},
+      {"market": "가락", "grade": "중", "price": 970}
+    ],
+    "양파": [
+      {"market": "가락", "grade": "특", "price": 1460},
+      {"market": "가락", "grade": "상", "price": 1300},
+      {"market": "가락", "grade": "중", "price": 1145}
+    ],
+    "피마늘": [
+      {"market": "가락", "grade": "특", "price": 5800},
+      {"market": "가락", "grade": "상", "price": 5200},
+      {"market": "가락", "grade": "중", "price": 4580}
+    ]
+  }
+}

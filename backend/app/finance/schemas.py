@@ -8,6 +8,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.finance.llm.schemas import LLMResponseFields
+from app.purchase_agent.schemas import PurchaseProposal
+
+FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
 
 
 def _reject_boolean(value: object) -> object:
@@ -38,9 +41,9 @@ class SplitPlanItem(BaseModel):
 
     seq: int = Field(ge=1)
     date: date
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
 
-    @field_validator("seq", "quantity_ton", mode="before")
+    @field_validator("seq", "quantity_kg", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -51,10 +54,10 @@ class SourcingPlanItem(BaseModel):
 
     market: str = Field(min_length=1)
     grade: str = Field(min_length=1)
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
     unit_price: int = Field(gt=0)
 
-    @field_validator("quantity_ton", "unit_price", mode="before")
+    @field_validator("quantity_kg", "unit_price", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -73,7 +76,7 @@ class PurchaseScenario(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1)
-    total_quantity_ton: Decimal = Field(gt=0)
+    total_quantity_kg: Decimal = Field(gt=0)
     max_price: int = Field(ge=0)
     timing: str = Field(min_length=1)
     split_plan: list[SplitPlanItem]
@@ -84,7 +87,7 @@ class PurchaseScenario(BaseModel):
     risks: list[str]
 
     @field_validator(
-        "total_quantity_ton",
+        "total_quantity_kg",
         "max_price",
         "expected_margin_rate",
         "expected_cost",
@@ -96,14 +99,12 @@ class PurchaseScenario(BaseModel):
 
     @model_validator(mode="after")
     def validate_quantity_totals(self) -> "PurchaseScenario":
-        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
-        sourcing_quantity = sum(
-            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
-        )
-        if self.total_quantity_ton != split_quantity:
-            raise ValueError("total_quantity_ton must equal split_plan quantity total")
-        if self.total_quantity_ton != sourcing_quantity:
-            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        split_quantity = sum((item.quantity_kg for item in self.split_plan), start=Decimal(0))
+        sourcing_quantity = sum((item.quantity_kg for item in self.sourcing_plan), start=Decimal(0))
+        if self.total_quantity_kg != split_quantity:
+            raise ValueError("total_quantity_kg must equal split_plan quantity total")
+        if self.total_quantity_kg != sourcing_quantity:
+            raise ValueError("total_quantity_kg must equal sourcing_plan quantity total")
         return self
 
 
@@ -132,7 +133,7 @@ class FinanceReviewResponse(BaseModel):
     proposal_id: str = Field(min_length=1)
     scenario_id: str = Field(min_length=1)
     agent: Literal["finance"] = "finance"
-    verdict: Literal["ok", "conditional", "reject"]
+    verdict: FinalVerdict
     max_feasible_amount_krw: Decimal | None = Field(ge=0)
     hard_constraints: list[str]
     soft_warnings: list[str]
@@ -141,65 +142,7 @@ class FinanceReviewResponse(BaseModel):
     suggested_adjustment: SuggestedAdjustment | None
 
 
-class PurchaseSourcingPlanItem(BaseModel):
-    """Purchase Agent v0.4 sourcing line."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    market: str = Field(min_length=1)
-    grade: str = Field(min_length=1)
-    quantity_ton: Decimal = Field(gt=0)
-    grade_unit_price: int = Field(gt=0)
-
-    @field_validator("quantity_ton", "grade_unit_price", mode="before")
-    @classmethod
-    def reject_boolean_numbers(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-
-class PurchaseAgentScenario(BaseModel):
-    """Purchase Agent v0.4의 단일 매입 후보."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    label: str = Field(min_length=1)
-    strategy_type: str = Field(min_length=1)
-    coverage_days: int = Field(gt=0)
-    total_quantity_ton: Decimal = Field(gt=0)
-    total_amount_krw: Decimal = Field(ge=0)
-    split_plan: list[SplitPlanItem] = Field(min_length=1)
-    sourcing_plan: list[PurchaseSourcingPlanItem] = Field(min_length=1)
-
-    @field_validator(
-        "coverage_days",
-        "total_quantity_ton",
-        "total_amount_krw",
-        mode="before",
-    )
-    @classmethod
-    def reject_boolean_numbers(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-    @model_validator(mode="after")
-    def validate_quantity_totals(self) -> "PurchaseAgentScenario":
-        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
-        sourcing_quantity = sum(
-            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
-        )
-        if self.total_quantity_ton != split_quantity:
-            raise ValueError("total_quantity_ton must equal split_plan quantity total")
-        if self.total_quantity_ton != sourcing_quantity:
-            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
-        return self
-
-
-class PurchaseAgentOutput(BaseModel):
-    """Finance A가 받는 Purchase Agent v0.4 전체 출력."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    meta: PurchaseMeta
-    scenarios: list[PurchaseAgentScenario] = Field(min_length=1)
+PurchaseAgentOutput = PurchaseProposal
 
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
@@ -401,6 +344,7 @@ class FinanceProcurementResponse(LLMResponseFields):
     snapshot_id: str | None
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     band: FinanceBand
     base_projected_cash_min: Decimal | None
     base_cash_priority: CashPriority | None
@@ -468,6 +412,7 @@ class FinanceSalesResponse(LLMResponseFields):
     snapshot_id: str | None
     approval_id: str
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     base_cash_priority: CashPriority | None
     sales_cash_priority: CashPriority | None
     collection_preferences: list[CollectionPreference]
@@ -485,6 +430,7 @@ class FinanceAgentRunResponse(BaseModel):
     as_of: date
     snapshot_id: str | None
     runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
     request_payload: dict[str, object]
     response_payload: dict[str, object]
     created_at: datetime

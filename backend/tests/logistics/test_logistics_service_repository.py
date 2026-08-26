@@ -77,25 +77,47 @@ def _fixture_row(**updates) -> dict[str, object]:
 def _inventory_rows() -> list[dict[str, object]]:
     return [
         {
-            "lot_id": "LOT-ACTIVE-001",
+            "lot_id": "LOT-KIMCHI-015-BAECHU",
             "item_name": "배추",
             "grade": "상",
             "received_at": date(2025, 12, 31),
-            "remaining_qty_kg": Decimal("300.4"),
+            "remaining_qty_kg": Decimal("286.92"),
             "status": "ACTIVE",
             "storage_zone": "COLD_HUMID_0_3",
             "operational_limit_days": 10,
             "medium_grade_factor": Decimal("0.8"),
         },
         {
-            "lot_id": "LOT-ACTIVE-002",
+            "lot_id": "LOT-KIMCHI-015-MU",
             "item_name": "무",
             "grade": "상",
             "received_at": date(2025, 12, 30),
-            "remaining_qty_kg": Decimal("75.0"),
+            "remaining_qty_kg": Decimal("61.76"),
             "status": "ACTIVE",
             "storage_zone": "COLD_HUMID_0_4",
             "operational_limit_days": 12,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "lot_id": "LOT-KIMCHI-015-PIMANUL",
+            "item_name": "피마늘",
+            "grade": "상",
+            "received_at": date(2025, 12, 31),
+            "remaining_qty_kg": Decimal("8.88"),
+            "status": "ACTIVE",
+            "storage_zone": "FROZEN_DRY_-3",
+            "operational_limit_days": 30,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "lot_id": "LOT-KIMCHI-015-YANGPA",
+            "item_name": "양파",
+            "grade": "상",
+            "received_at": date(2025, 12, 31),
+            "remaining_qty_kg": Decimal("5.72"),
+            "status": "ACTIVE",
+            "storage_zone": "COLD_DRY_0_1",
+            "operational_limit_days": 14,
             "medium_grade_factor": Decimal("0.8"),
         },
     ]
@@ -266,13 +288,16 @@ def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
 
     assert snapshot.snapshot_id is None
     assert [lot.lot_id for lot in snapshot.on_hand_by_lot] == [
-        "LOT-ACTIVE-001",
-        "LOT-ACTIVE-002",
+        "LOT-KIMCHI-015-BAECHU",
+        "LOT-KIMCHI-015-MU",
+        "LOT-KIMCHI-015-PIMANUL",
+        "LOT-KIMCHI-015-YANGPA",
     ]
-    assert snapshot.used_capacity_kg == Decimal("375.4")
+    assert all(lot.item != "건고추" for lot in snapshot.on_hand_by_lot)
+    assert snapshot.used_capacity_kg == Decimal("363.28")
     assert snapshot.guaranteed_capacity_kg == Decimal(8000)
-    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg == Decimal("7624.6")
-    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg != Decimal("6024.6")
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg == Decimal("7636.72")
+    assert snapshot.guaranteed_capacity_kg - snapshot.used_capacity_kg != Decimal("6036.72")
     assert snapshot.burst_capacity_kg == Decimal(9600)
     assert snapshot.in_transit == []
     assert snapshot.confirmed_inbound_schedule == []
@@ -303,6 +328,7 @@ def test_logistics_a_ready_response_and_persistence(
         response = run_logistics_procurement(request)
 
     assert response.runtime_status == "READY"
+    assert response.verdict == "REVIEW_REQUIRED"
     assert response.snapshot_id == "T0-20260821-001"
     assert response.band.cap_by_date == {date(2026, 8, 23): Decimal(2500)}
     assert response.llm_status == "SKIPPED_TEMPLATE"
@@ -310,8 +336,10 @@ def test_logistics_a_ready_response_and_persistence(
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
+    assert saved["verdict"] == "REVIEW_REQUIRED"
+    assert saved["response_payload"]["verdict"] == "REVIEW_REQUIRED"
     assert saved["snapshot_id"] == "T0-20260821-001"
-    assert saved["request_payload"]["scenarios"][0]["total_quantity_ton"] == "4.5"
+    assert saved["request_payload"]["scenarios"][0]["total_qty_kg"] == 4500
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
 
 
@@ -329,8 +357,11 @@ def test_logistics_a_unresolved_response_is_saved(
         response = run_logistics_procurement(request)
 
     assert response.runtime_status == "RUNTIME_NOT_READY"
+    assert response.verdict is None
     assert response.band.cap_by_date == {}
     assert save_run.call_args.kwargs["runtime_status"] == "RUNTIME_NOT_READY"
+    assert save_run.call_args.kwargs["verdict"] is None
+    assert save_run.call_args.kwargs["response_payload"]["verdict"] is None
 
 
 def test_logistics_b_keeps_h1_out_of_on_hand_and_saves_run(
@@ -347,12 +378,15 @@ def test_logistics_b_keeps_h1_out_of_on_hand_and_saves_run(
         response = run_logistics_sales(request)
 
     assert response.runtime_status == "READY"
+    assert response.verdict == "PASS"
     assert response.approval_id == "H1-20260821-001"
     assert response.daily_outbound_capacity_kg == Decimal(1000)
     assert [item.lot_id for item in response.lot_constraints] == ["LOT-001"]
     assert response.llm_status == "SKIPPED_TEMPLATE"
     assert response.llm_attempts == 0
     assert save_run.call_args.kwargs["cycle"] == "SALES"
+    assert save_run.call_args.kwargs["verdict"] == "PASS"
+    assert save_run.call_args.kwargs["response_payload"]["verdict"] == "PASS"
 
 
 def test_logistics_b_unresolved_n17_is_saved(
@@ -369,8 +403,32 @@ def test_logistics_b_unresolved_n17_is_saved(
         response = run_logistics_sales(request)
 
     assert response.runtime_status == "RUNTIME_NOT_READY"
+    assert response.verdict is None
     assert response.daily_outbound_capacity_kg is None
     assert save_run.call_args.kwargs["runtime_status"] == "RUNTIME_NOT_READY"
+    assert save_run.call_args.kwargs["verdict"] is None
+
+
+def test_logistics_b_ready_blocking_constraint_persists_fail(
+    complete_logistics_snapshot, logistics_sales_payload
+):
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={"guaranteed_capacity_kg": Decimal(5000)}
+    )
+    request = LogisticsSalesRequest.model_validate(logistics_sales_payload)
+    with (
+        patch(
+            "app.logistics.service.get_current_inventory_logistics_snapshot",
+            return_value=snapshot,
+        ),
+        patch("app.logistics.service.save_logistics_agent_run") as save_run,
+    ):
+        response = run_logistics_sales(request)
+
+    assert response.runtime_status == "READY"
+    assert response.verdict == "FAIL"
+    assert save_run.call_args.kwargs["verdict"] == "FAIL"
+    assert save_run.call_args.kwargs["response_payload"]["verdict"] == "FAIL"
 
 
 def test_logistics_persistence_failure_is_not_runtime_warning(

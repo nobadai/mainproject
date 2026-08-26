@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.finance.schemas import (
+    FinalVerdict,
     FinanceAgentRunResponse,
     FinanceCycle,
     FinanceProcurementResponse,
@@ -68,6 +69,7 @@ def get_finance_runs(
     cycle: FinanceCycle | None = None,
     as_of: date | None = None,
     runtime_status: RuntimeStatus | None = None,
+    verdict: FinalVerdict | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> list[FinanceAgentRunResponse]:
     """cycle, as_of, runtime_status 필터로 최근 실행이력을 반환한다."""
@@ -75,6 +77,7 @@ def get_finance_runs(
         cycle=cycle,
         as_of=as_of,
         runtime_status=runtime_status,
+        verdict=verdict,
         limit=limit,
     )
 

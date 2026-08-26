@@ -182,7 +182,8 @@ def build_graph(
     builder.add_edge("deadlock_exit", END)
 
     # ★ H1 은 반드시 사람을 거친다 (§4 선택 모드).
-    #   approver 를 준 경우에도 중단점은 남긴다 — 승인 없이 T4 로 갈 수 없다는 구조는 배선이 보장한다.
+    #   approver 를 준 경우에도 중단점은 남긴다 — 승인 없이 T4 로 갈 수 없다는
+    #   구조는 배선이 보장한다.
     return builder.compile(
         checkpointer=checkpointer or default_checkpointer(),
         interrupt_before=["h1_approval"],

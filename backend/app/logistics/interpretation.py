@@ -33,7 +33,7 @@ def build_logistics_context(
     response: LogisticsProcurementResponse | LogisticsSalesResponse,
 ) -> SanitizedLLMContext:
     constraint_signals = [
-        constraint.code for constraint in response.hard_constraints if constraint.passed is not True
+        constraint.code for constraint in response.hard_constraints if constraint.status != "PASS"
     ]
     signals = _unique([*constraint_signals, *response.soft_warnings])
     allowed_adjustments: list[str] = []
@@ -65,7 +65,7 @@ def enrich_logistics_response[
         context,
         runtime_ready=response.runtime_status == "READY",
         has_blocking_constraints=any(
-            constraint.passed is not True for constraint in response.hard_constraints
+            constraint.status != "PASS" for constraint in response.hard_constraints
         ),
     )
     update = result.model_dump(exclude={"interpretation"})

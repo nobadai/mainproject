@@ -3,7 +3,11 @@ from decimal import Decimal
 
 import pytest
 
-from app.logistics.rules import evaluate_procurement_rules, evaluate_sales_rules
+from app.logistics.rules import (
+    derive_logistics_verdict,
+    evaluate_procurement_rules,
+    evaluate_sales_rules,
+)
 from app.logistics.schemas import (
     InTransitItem,
     LogisticsSalesRequest,
@@ -17,14 +21,13 @@ from app.logistics.tools import (
     calculate_future_occupancy_by_date,
     is_inbound_schedule_complete,
     overlay_approved_purchase,
-    ton_to_kg,
 )
 
 
-def test_ton_to_kg_and_expected_arrival_date(logistics_purchase_payload):
+def test_expected_arrival_date_uses_canonical_kg_contract(logistics_purchase_payload):
     request = PurchaseAgentOutput.model_validate(logistics_purchase_payload)
 
-    assert ton_to_kg(request.scenarios[0].total_quantity_ton) == Decimal(4500)
+    assert request.scenarios[0].total_qty_kg == 4500
     assert calculate_expected_arrival_dates(request, 2) == [date(2026, 8, 23)]
 
 
@@ -70,7 +73,8 @@ def test_procurement_rule_keeps_unresolved_constraints_null(unresolved_logistics
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
     assert result["calculation_ready"] is False
-    assert all(item.passed is None for item in result["hard_constraints"])
+    assert derive_logistics_verdict(result) is None
+    assert all(item.status == "UNRESOLVED" for item in result["hard_constraints"])
     assert "PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT" in result["soft_warnings"]
 
 
@@ -82,7 +86,8 @@ def test_procurement_rule_can_be_ready_without_zone_capacity(complete_logistics_
 
     assert result["runtime_status"] == "READY"
     zone = next(item for item in result["hard_constraints"] if item.code == "LOG-H02")
-    assert zone.passed is None
+    assert zone.status == "UNRESOLVED"
+    assert derive_logistics_verdict(result) == "REVIEW_REQUIRED"
 
 
 def test_in_transit_none_blocks_procurement_and_sales(complete_logistics_snapshot):
@@ -200,7 +205,20 @@ def test_sales_rule_marks_warehouse_over_capacity(complete_logistics_snapshot):
     )
 
     warehouse = next(item for item in result["hard_constraints"] if item.code == "LOG-H01")
-    assert warehouse.passed is False
+    assert warehouse.status == "FAIL"
+    assert result["runtime_status"] == "READY"
+    assert derive_logistics_verdict(result) == "FAIL"
+
+
+def test_sales_rule_all_pass_aggregates_to_pass(complete_logistics_snapshot):
+    result = evaluate_sales_rules(
+        as_of=date(2026, 8, 21),
+        snapshot=complete_logistics_snapshot,
+        future_occupancy_by_date={date(2026, 8, 23): Decimal(5500)},
+    )
+
+    assert {item.status for item in result["hard_constraints"]} == {"PASS"}
+    assert derive_logistics_verdict(result) == "PASS"
 
 
 def test_sales_rule_requires_n17(complete_logistics_snapshot):
@@ -215,7 +233,7 @@ def test_sales_rule_requires_n17(complete_logistics_snapshot):
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
     n17 = next(item for item in result["hard_constraints"] if item.code == "N17")
-    assert n17.passed is None
+    assert n17.status == "UNRESOLVED"
 
 
 def test_logistics_rules_fail_closed_on_as_of_mismatch(complete_logistics_snapshot):
@@ -226,3 +244,4 @@ def test_logistics_rules_fail_closed_on_as_of_mismatch(complete_logistics_snapsh
 
     assert result["runtime_status"] == "RUNTIME_NOT_READY"
     assert result["hard_constraints"][0].code == "AS_OF_MISMATCH"
+    assert derive_logistics_verdict(result) is None
