@@ -268,33 +268,96 @@ class EnvelopeFinding:
 _BIG_NUMBER = re.compile(r"\d[\d,]{2,}")
 _SENTENCE_SPLIT = re.compile(r"[.!?。]\s*|\n+")
 _LABEL = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_CLAIM_PATH = re.compile(r"^(?P<key>[^\[\].]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$")
 
 _MAX_REASONING_SENTENCES = 3
 
 
-def _needs_evidence(value: Any) -> bool:
-    """근거가 필요한 값인가.
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    ★ **최상위 필드만 본다.** 중첩 구조(예: `verdicts[].verdict`)의 근거 규칙은
-      도메인이 정한다 — 여기서 재귀하면 시나리오별 판정마다 Evidence 를 요구하게 되어
-      과해진다.
 
-    ★ 판정 라벨도 포함한다 (M-1 v0.2 확대).
-      `payment_pressure: "MEDIUM"` 은 숫자가 아니지만 매입의 행동을 바꾼다.
-      근거 없이 오면 **LLM 이 만든 라벨과 구분되지 않는다.**
-      대문자·숫자·밑줄로만 된 문자열을 라벨로 본다(휴리스틱).
+def _is_label(value: Any) -> bool:
+    """판정 라벨인가 — 대문자·숫자·밑줄로만 된 문자열 (휴리스틱).
+
+    `payment_pressure: "MEDIUM"` 은 숫자가 아니지만 매입의 행동을 바꾼다.
+    근거 없이 오면 **LLM 이 만든 라벨과 구분되지 않는다.**
     """
-    if isinstance(value, bool):
+    return isinstance(value, str) and bool(_LABEL.match(value))
+
+
+def _is_item_list(value: Any) -> bool:
+    """매핑들의 배열인가 — `scenarios: [{...}, {...}]`."""
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
         return False
-    if isinstance(value, (int, float)):
-        return True
-    if isinstance(value, str):
-        return bool(_LABEL.match(value))
-    if isinstance(value, Mapping):
-        return False
-    if isinstance(value, Sequence):
-        return len(value) > 0
-    return False
+    return bool(value) and all(isinstance(item, Mapping) for item in value)
+
+
+def required_claims(payload: Mapping[str, Any]) -> set[str]:
+    """근거가 필요한 값의 **경로 집합**.
+
+    ★ v0.3 — 배열 payload 를 지원한다 (매입 파트 요청).
+      매입은 `scenarios[]` 안에 같은 이름의 필드가 2~3벌 있어서 평면 1:1 이 성립하지 않는다.
+      `claim` 에 **경로 표기**를 허용하고, 여기서 그 경로를 만든다.
+
+    ★ 요구 강도가 층마다 다르다.
+
+      | 위치 | 숫자 | 판정 라벨 |
+      |---|---|---|
+      | 최상위 | 필요 | **필요** — 홀로 서서 남의 행동을 바꾸는 판단이다 |
+      | 배열 항목 안 | 필요 | **면제** — 구조 식별자이거나 그 에이전트 자신의 판정이다 |
+
+      배열 항목의 라벨까지 요구하면 시나리오마다 `label` 근거를 만들어야 해서 과하다.
+      숫자는 다르다 — **어디서 왔는지 없으면 LLM 이 만든 값과 구분되지 않는다.**
+
+    ★ 배열은 **한 겹만** 파고든다. 더 깊은 중첩의 규칙은 도메인이 정한다.
+    """
+    out: set[str] = set()
+    for key, value in payload.items():
+        if _is_item_list(value):
+            for index, item in enumerate(value):
+                for sub, sub_value in item.items():
+                    if _is_number(sub_value):
+                        out.add(f"{key}[{index}].{sub}")
+        elif _is_number(value) or _is_label(value):
+            out.add(key)
+        elif not isinstance(value, (str, bytes, Mapping)) and isinstance(value, Sequence) and value:
+            out.add(key)  # 스칼라 배열 — 통째로 하나의 근거
+    return out
+
+
+def canonical_claim(payload: Mapping[str, Any], claim: str) -> str | None:
+    """`scenarios[공격].total_amount_krw` → `scenarios[1].total_amount_krw`.
+
+    배열 항목은 **번호로도 이름으로도** 가리킬 수 있다. 이름은 그 항목의 문자열 필드
+    아무거나와 맞으면 된다(`label` · `scenario_id` 등) — 도메인마다 식별 필드가 달라서
+    하나로 못 박지 않는다.
+
+    가리키는 곳이 없으면 `None` — 고아 근거다.
+    """
+    match = _CLAIM_PATH.fullmatch(claim)
+    if match is None:
+        return claim if claim in payload else None
+
+    key, selector, sub = match.group("key"), match.group("sel"), match.group("sub")
+    items = payload.get(key)
+    if not _is_item_list(items):
+        return None
+
+    index = _select_index(items, selector)
+    if index is None or sub not in items[index]:
+        return None
+    return f"{key}[{index}].{sub}"
+
+
+def _select_index(items: Sequence[Mapping[str, Any]], selector: str) -> int | None:
+    if selector.isdigit():
+        index = int(selector)
+        return index if index < len(items) else None
+    for index, item in enumerate(items):
+        if any(value == selector for value in item.values() if isinstance(value, str)):
+            return index
+    return None
 
 
 def check_binding(request: AgentRequest, reply: AgentReply) -> list[EnvelopeFinding]:
@@ -345,28 +408,40 @@ def check_evidence_coverage(reply: AgentReply) -> list[EnvelopeFinding]:
     ★ 이것이 §1.2-3("LLM 은 숫자를 생성하지 않는다")의 집행 수단이다.
       `Evidence.source` 는 DB Fact·ML·Policy·`tool_calc` 뿐이라
       **LLM 이 만든 값은 어느 출처에도 해당하지 않는다.**
+
+    ★ `claim` 은 경로 표기를 쓸 수 있다 — `scenarios[공격].total_amount_krw` (§required_claims).
     """
     if not reply.contributes_to_band:
         return []  # 못 돈 회신에 근거를 요구하지 않는다
-    claims = {e.claim for e in reply.evidences}
-    out: list[EnvelopeFinding] = []
-    for key, value in reply.payload.items():
-        if _needs_evidence(value) and key not in claims:
-            out.append(
-                EnvelopeFinding(
-                    "E-EVIDENCE-MISSING",
-                    f"payload.{key}",
-                    f"{key} 에 대응하는 Evidence(claim='{key}') 가 없다.",
-                )
-            )
-    for claim in sorted(claims - set(reply.payload)):
-        out.append(
-            EnvelopeFinding(
-                "E-EVIDENCE-ORPHAN",
-                f"evidences[{claim}]",
-                f"payload 에 없는 '{claim}' 의 근거가 붙었다 — 무엇을 뒷받침하는지 불명.",
-            )
+
+    payload = reply.payload
+    required = required_claims(payload)
+
+    covered: set[str] = set()
+    orphans: list[str] = []
+    for evidence in reply.evidences:
+        canonical = canonical_claim(payload, evidence.claim)
+        if canonical is None:
+            orphans.append(evidence.claim)
+        else:
+            covered.add(canonical)
+
+    out = [
+        EnvelopeFinding(
+            "E-EVIDENCE-MISSING",
+            f"payload.{path}",
+            f"{path} 에 대응하는 Evidence 가 없다.",
         )
+        for path in sorted(required - covered)
+    ]
+    out += [
+        EnvelopeFinding(
+            "E-EVIDENCE-ORPHAN",
+            f"evidences[{claim}]",
+            f"payload 에서 '{claim}' 을 찾을 수 없다 — 무엇을 뒷받침하는지 불명.",
+        )
+        for claim in sorted(orphans)
+    ]
     return out
 
 

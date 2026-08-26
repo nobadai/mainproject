@@ -1,0 +1,297 @@
+"""
+flow.py — 매입 의사결정 Flow (정의서 v2.2 §3.4)
+
+    ① 재무·물류 PRE_PURCHASE        → 실행 가능 경계 수집
+    ② 마스터가 매입 Input 구성       → 해석·재계산하지 않는다 (§3.2.2)
+    ③ 매입 GENERATE_SCENARIOS       → 시나리오 2~3개
+    ④ 재무·물류 SCENARIO_VALIDATION  → 시나리오별 판정
+    ⑤ 검증 Tool                     → 정합성·누락·충돌
+    ⑥ 취합 → 필요 시 매입 재호출 (예산 내) → 사용자 제시
+
+★ **순서는 결정론이다** (이슈 설계 원칙 ③).
+  의도 분류에는 LLM 을 쓰지만 여기는 규칙이다. 같은 입력에 같은 실행 계획이 나와야
+  백테스트가 성립한다. LLM 이 순서를 정하면 재현성·회송 상한·승인 정지가 동시에 흔들린다.
+
+★ **ML 예측·확정주문·정책값은 마스터가 실어 준다** (§3.2.5 의 명시적 예외).
+
+  처음에는 "매입이 자기 Tool 로 읽는다"로 구현했으나 **매입 파트 지적으로 뒤집었다.**
+  ML 은 매입의 도메인이 아니다 — 매입이 직접 읽으면 §1.2-9(자기 도메인만 조회)를 어긴다.
+  그렇다고 §4.1 의 "해당 에이전트에게 요청"도 성립하지 않는다. **ML 은 호출 구조 밖의
+  독립 실행이라 부를 대상 자체가 없다.** 판매 Rule(확정주문)과 경영 정책값도 같다.
+
+  따라서 이 셋은 마스터가 실어 준다. 대신 **look-ahead 방어가 조립 시점으로 옮겨오므로**
+  마스터가 `as_of` 대조를 한다 (§1.2-6).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from app.master.budget import BudgetExhausted
+from app.master.envelope import AgentName, AgentReply
+from app.master.plan import ExecutionPlan
+from app.master.runner import MasterRunner
+from app.orchestrator.contracts_core import EndCode
+
+ADVISORS: tuple[AgentName, ...] = ("finance", "inventory")
+"""1차 조언자. 영업은 구성에서 빠졌고 판매는 2차 MVP 다 (정의서 §2.1)."""
+
+
+class VerifierPort(Protocol):
+    """마스터가 직접 가진 검증 Tool (정의서 §3.7.1).
+
+    ★ 주입하지 않으면 **검증을 건너뛴 것이 결과에 드러난다** — 통과로 치지 않는다.
+      "검사하지 못한 것을 검사했다고 말하지 않는다"(설계서 §8).
+    """
+
+    def __call__(
+        self,
+        scenarios: Sequence[Mapping[str, Any]],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+    ) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True)
+class ProcurementOutcome:
+    """Flow 한 번의 결과. **무엇을 못 했는지도 담는다.**"""
+
+    end_code: EndCode
+    reason: str
+    plan: ExecutionPlan
+
+    scenarios: tuple[Mapping[str, Any], ...] = ()
+    constraints: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
+    verdicts: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
+
+    blocked_by: tuple[AgentName, ...] = ()
+    findings: tuple[str, ...] = ()
+    verification_skipped: bool = False
+    purchase_attempts: int = 0
+
+    @property
+    def presentable(self) -> bool:
+        """사용자에게 선택지를 올릴 수 있는가."""
+        return self.end_code == "E1_APPROVED" and bool(self.scenarios)
+
+    @property
+    def single_option(self) -> bool:
+        """선택지가 하나뿐인가.
+
+        §1.2-7 은 2개 이상을 요구하지만 §5.2 가 단일안 예외를 둔다.
+        **사용자에게 보여줄지 자체가 미결(M-5)** 이라 여기서는 사실만 드러낸다.
+        """
+        return len(self.scenarios) == 1
+
+
+class ProcurementFlow:
+    """매입 Flow 실행기.
+
+    ★ 요청마다 새로 만든다 — `MasterRunner` 가 요청 단위이기 때문이다.
+    """
+
+    def __init__(
+        self,
+        runner: MasterRunner,
+        verifier: VerifierPort | None = None,
+        advisors: tuple[AgentName, ...] = ADVISORS,
+        max_purchase_attempts: int = 2,
+        forecast: Mapping[str, Any] | None = None,
+        confirmed_orders: Mapping[str, Any] | None = None,
+        policy_values: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.runner = runner
+        self.verifier = verifier
+        self.advisors = advisors
+        self.max_purchase_attempts = max_purchase_attempts
+        self.forecast = forecast
+        self.confirmed_orders = confirmed_orders
+        self.policy_values = policy_values
+
+    # ── 진입점 ──────────────────────────────────────────────────
+
+    def run(self, has_unmet_obligation: bool = False) -> ProcurementOutcome:
+        """끝까지 돌린다.
+
+        `has_unmet_obligation` 은 **판매 Rule 이 주는 사실**이다 (1차는 B2B 계약 납품량).
+        마스터가 계산하지 않고 받아서 E5 판정에만 쓴다.
+        """
+        try:
+            return self._run(has_unmet_obligation)
+        except BudgetExhausted as exc:
+            # 예산 소진은 위로 새지 않는다 — 종료 코드로 바꾼다 (§1.2-12)
+            return self._outcome("E3_REJECTED", f"호출 예산 소진: {exc}")
+
+    def _run(self, has_unmet_obligation: bool) -> ProcurementOutcome:
+        constraints = self._collect_constraints()
+
+        if not self.runner.band_is_formed(self.advisors):
+            blocked = self.runner.blocking_agents(self.advisors)
+            return self._outcome(
+                "E4_NOT_STARTED",
+                f"경계를 내지 못한 에이전트: {', '.join(blocked)}",
+                constraints=constraints,
+                blocked_by=blocked,
+            )
+
+        attempts = 0
+        scenarios: tuple[Mapping[str, Any], ...] = ()
+        verdicts: dict[AgentName, Mapping[str, Any]] = {}
+        findings: tuple[str, ...] = ()
+
+        while attempts < self.max_purchase_attempts:
+            attempts += 1
+            purchase = self.runner.call(
+                "purchase", "GENERATE_SCENARIOS", self._purchase_input(constraints)
+            )
+            scenarios = _scenarios_of(purchase)
+
+            if not purchase.contributes_to_band:
+                return self._outcome(
+                    "E4_NOT_STARTED",
+                    f"매입 에이전트 미가동: {purchase.reasoning or purchase.runtime_status}",
+                    constraints=constraints,
+                    blocked_by=("purchase",),
+                    purchase_attempts=attempts,
+                )
+
+            if not scenarios:
+                return self._outcome(
+                    "E5_NO_FEASIBLE_PLAN" if has_unmet_obligation else "E2_HELD",
+                    purchase.reasoning or "실행 가능한 매입안이 없다",
+                    constraints=constraints,
+                    purchase_attempts=attempts,
+                )
+
+            verdicts = self._validate(scenarios)
+            findings = self._verify(scenarios, constraints, verdicts)
+
+            if self._acceptable(scenarios, verdicts, findings):
+                break
+
+            if attempts >= self.max_purchase_attempts:
+                return self._outcome(
+                    "E3_REJECTED",
+                    f"매입 재호출 {attempts} 회에도 통과안 없음",
+                    scenarios=scenarios,
+                    constraints=constraints,
+                    verdicts=verdicts,
+                    findings=findings,
+                    purchase_attempts=attempts,
+                )
+
+        return self._outcome(
+            "E1_APPROVED",
+            "사용자 선택 대기",
+            scenarios=scenarios,
+            constraints=constraints,
+            verdicts=verdicts,
+            findings=findings,
+            purchase_attempts=attempts,
+        )
+
+    # ── 단계 ────────────────────────────────────────────────────
+
+    def _collect_constraints(self) -> dict[AgentName, Mapping[str, Any]]:
+        """① 재무·물류에게 실행 가능 경계를 받는다."""
+        out: dict[AgentName, Mapping[str, Any]] = {}
+        for agent in self.advisors:
+            reply = self.runner.call(agent, "PRE_PURCHASE")
+            if reply.contributes_to_band:
+                out[agent] = dict(reply.payload)
+        return out
+
+    def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
+        """② 받은 것을 **묶기만** 한다.
+
+        ★ 해석하거나 재계산하지 않는다 (§3.2.2). 값의 타당성은 검증 Tool 이 본다.
+          마스터가 여기서 손대면 **부서 판단을 조정자가 덮어쓰는** 것이 된다.
+
+        ★ 예외 셋(ML 예측·확정주문·정책값)은 마스터가 싣되 **`as_of` 대조는 한다.**
+          직접 조회 시절 매입이 테스트로 강제하던 look-ahead 방어가 조립 시점으로 옮겨왔다.
+          누수는 에러를 내지 않고 손익만 좋아지므로 여기서 막지 않으면 아무도 모른다.
+        """
+        payload: dict[str, Any] = {"constraints": dict(constraints)}
+        if self.forecast is not None and self._forecast_is_clean():
+            payload["forecast"] = dict(self.forecast)
+        if self.confirmed_orders is not None:
+            payload["confirmed_orders"] = dict(self.confirmed_orders)
+        if self.policy_values is not None:
+            payload["policy_values"] = dict(self.policy_values)
+        return payload
+
+    def _forecast_is_clean(self) -> bool:
+        """예측 생성 시각이 `as_of` 이후면 싣지 않는다.
+
+        오염된 입력으로 시나리오를 만들면 **백테스트 손익만 좋아진다.**
+        싣지 않으면 매입이 `RUNTIME_NOT_READY` 를 내고, 그 사실이 이력에 남는다.
+        """
+        generated = (self.forecast or {}).get("generated_at")
+        if not isinstance(generated, str):
+            return True  # 시점 필드가 없으면 판단하지 않는다 — 매입이 수신 시 재검증한다
+        return generated[:10] <= self.runner.context.as_of.isoformat()
+
+    def _validate(
+        self, scenarios: Sequence[Mapping[str, Any]]
+    ) -> dict[AgentName, Mapping[str, Any]]:
+        """④ 각 조언자가 시나리오를 자기 관점에서 본다."""
+        payload = {"scenarios": list(scenarios)}
+        out: dict[AgentName, Mapping[str, Any]] = {}
+        for agent in self.advisors:
+            reply = self.runner.call(agent, "SCENARIO_VALIDATION", payload)
+            out[agent] = {
+                "business_status": reply.business_status,
+                "runtime_status": reply.runtime_status,
+                "payload": dict(reply.payload),
+                "suggested_adjustments": len(reply.suggested_adjustments),
+                "needs_followup": reply.needs_followup,
+            }
+        return out
+
+    def _verify(
+        self,
+        scenarios: Sequence[Mapping[str, Any]],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+    ) -> tuple[str, ...]:
+        """⑤ 마스터가 가진 검증 Tool. 주입 전에는 건너뛴 사실이 결과에 남는다."""
+        if self.verifier is None:
+            return ()
+        return tuple(self.verifier(scenarios, constraints, verdicts))
+
+    # ── 판단 ────────────────────────────────────────────────────
+
+    def _acceptable(
+        self,
+        scenarios: Sequence[Mapping[str, Any]],
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        findings: Sequence[str],
+    ) -> bool:
+        """사용자에게 올릴 만한가.
+
+        ★ **전원 통과를 요구하지 않는다.** 조언자 하나가 `conditional` 을 내도 사람이
+          보고 정할 수 있다 — 마스터는 최적안을 고르는 자리가 아니다 (§3.4).
+          `reject` 가 있거나 검증 발견이 있으면 매입을 다시 부른다.
+        """
+        if findings:
+            return False
+        return all(v.get("business_status") != "reject" for v in verdicts.values())
+
+    def _outcome(self, end_code: EndCode, reason: str, **kw: Any) -> ProcurementOutcome:
+        plan: ExecutionPlan = self.runner.plan
+        return ProcurementOutcome(
+            end_code=end_code,
+            reason=reason,
+            plan=plan,
+            verification_skipped=self.verifier is None,
+            **kw,
+        )
+
+
+def _scenarios_of(reply: AgentReply) -> tuple[Mapping[str, Any], ...]:
+    raw = reply.payload.get("scenarios", ())
+    if isinstance(raw, Mapping) or not isinstance(raw, Sequence):
+        return ()
+    return tuple(item for item in raw if isinstance(item, Mapping))

@@ -23,8 +23,7 @@ class BudgetExhausted(MasterError):
 
     def __init__(self, limit: int, attempted: str) -> None:
         super().__init__(
-            f"호출 예산 {limit} 회를 모두 썼다 (시도: {attempted}). "
-            "정의서 §1.2-12 — 코드가 끊는다."
+            f"호출 예산 {limit} 회를 모두 썼다 (시도: {attempted}). 정의서 §1.2-12 — 코드가 끊는다."
         )
         self.limit = limit
         self.attempted = attempted

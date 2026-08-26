@@ -245,11 +245,80 @@ def test_비어있지_않은_리스트는_근거가_필요하다():
     assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
 
 
-def test_중첩_구조는_재귀하지_않는다():
-    # verdicts[].verdict 의 근거 규칙은 도메인이 정한다
+# ── 배열 payload — 매입 파트 요청으로 v0.3 에서 확대 ──────────────────
+
+
+def test_배열_항목의_라벨은_근거를_요구하지_않는다():
+    """`verdict`·`scenario_id` 는 구조 식별자이거나 그 에이전트 자신의 판정이다."""
     payload = {"verdicts": [{"scenario_id": "SCN-1", "verdict": "reject"}]}
-    f = check_evidence_coverage(reply(payload=payload, evidences=(ev("verdicts"),)))
-    assert f == []
+    assert check_evidence_coverage(reply(payload=payload)) == []
+
+
+def test_배열_항목의_숫자는_근거가_필요하다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 9107750}]}
+    f = check_evidence_coverage(reply(payload=payload))
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+    assert "scenarios[0].total_amount_krw" in f[0].where
+
+
+def test_경로_표기로_번호를_가리킬_수_있다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 9107750}]}
+    ok = reply(
+        payload=payload,
+        evidences=(ev("scenarios[0].total_amount_krw", 9107750.0),),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_경로_표기로_이름을_가리킬_수_있다():
+    """`scenarios[공격].total_amount_krw` — 도메인마다 식별 필드가 다르다."""
+    payload = {
+        "scenarios": [
+            {"label": "기본", "total_amount_krw": 9107750},
+            {"label": "공격", "total_amount_krw": 12363250},
+        ]
+    }
+    ok = reply(
+        payload=payload,
+        evidences=(
+            ev("scenarios[기본].total_amount_krw", 9107750.0),
+            ev("scenarios[공격].total_amount_krw", 12363250.0),
+        ),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_같은_이름_필드가_여러_벌이면_각각_필요하다():
+    payload = {
+        "scenarios": [
+            {"label": "보수", "total_amount_krw": 3642250},
+            {"label": "기본", "total_amount_krw": 9107750},
+        ]
+    }
+    f = check_evidence_coverage(
+        reply(payload=payload, evidences=(ev("scenarios[보수].total_amount_krw", 3642250.0),))
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+    assert "scenarios[1]" in f[0].where
+
+
+def test_없는_항목을_가리키면_고아다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 1}]}
+    f = check_evidence_coverage(
+        reply(payload=payload, evidences=(ev("scenarios[공격].total_amount_krw"),))
+    )
+    assert "E-EVIDENCE-ORPHAN" in [x.code for x in f]
+
+
+def test_없는_필드를_가리키면_고아다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 1}]}
+    f = check_evidence_coverage(
+        reply(
+            payload=payload,
+            evidences=(ev("scenarios[0].total_amount_krw"), ev("scenarios[0].ghost")),
+        )
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-ORPHAN"]
 
 
 def test_근거가_붙으면_통과한다():

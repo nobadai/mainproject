@@ -9,6 +9,9 @@
     budget   호출 예산 강제 (정의서 §1.2-12)
     plan     실행 계획 기록 (정의서 §1.2-11)
     runner   위 셋을 묶은 호출 계층
+    flow     매입 의사결정 Flow (정의서 §3.4)
+    wiring   프로세스 전역 에이전트 레지스트리 — 각 파트 어댑터가 등록한다
+    router   API — /master/request · /master/trigger
 """
 
 from app.master.budget import BudgetExhausted, CallBudget
@@ -26,6 +29,12 @@ from app.master.envelope import (
     agent_allowed_modes,
     validate_reply,
 )
+from app.master.flow import (
+    ADVISORS,
+    ProcurementFlow,
+    ProcurementOutcome,
+    VerifierPort,
+)
 from app.master.plan import ExecutionPlan, ExecutionStep
 from app.master.ports import (
     AgentNotRegistered,
@@ -38,6 +47,7 @@ from app.master.ports import (
 from app.master.runner import MasterRunner
 
 __all__ = [
+    "ADVISORS",
     "SCHEMA_VERSION",
     "AgentName",
     "AgentNotRegistered",
@@ -56,7 +66,10 @@ __all__ = [
     "MasterError",
     "MasterRunner",
     "Mode",
+    "ProcurementFlow",
+    "ProcurementOutcome",
     "Trigger",
+    "VerifierPort",
     "agent_allowed_modes",
     "empty_metadata",
     "error_reply",
