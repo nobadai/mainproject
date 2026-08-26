@@ -3,7 +3,9 @@ from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
-from app.finance.agent_v22 import (
+import pytest
+
+from app.finance.agent import (
     DEFAULT_MAX_REPLANS,
     DEFAULT_MAX_TOOL_CALLS,
     PRE_PURCHASE_TOOLS,
@@ -11,12 +13,13 @@ from app.finance.agent_v22 import (
     FinanceAgentController,
     FinanceToolRegistry,
     ToolAction,
+    validate_finance_scenario_output,
 )
 from app.finance.repository import (
     FinanceDataNotReady,
     PostgresFinanceAsOfDataPort,
 )
-from app.finance.run_repository import get_finance_v22_run, save_finance_v22_run
+from app.finance.run_repository import get_finance_execution, save_finance_execution
 from app.finance.schemas import CashEvent, FinancePolicy
 from app.master.envelope import (
     AgentReply,
@@ -111,6 +114,20 @@ class CountingPort(Port):
         return super().load_policy(as_of, policy_version)
 
 
+class BaseViolationPort(Port):
+    def load_obligations(self, as_of, horizon):
+        del as_of, horizon
+        return [
+            CashEvent(
+                event_date=date(2025, 1, 2),
+                event_type="COMMITTED_OUTFLOW",
+                amount_krw=Decimal(1000),
+                direction="OUTFLOW",
+                ref_id="BASE-OUTFLOW-1",
+            )
+        ]
+
+
 def request(mode="PRE_PURCHASE", payload=None):
     return AgentRequest(
         context=ExecutionContext(
@@ -134,7 +151,7 @@ def test_registry_exposes_exactly_six_business_tools():
     assert DEFAULT_MAX_REPLANS == 2
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_pre_purchase_dynamic_order_and_envelope(save_run):
     order = [
         "analyze_payment_pressure",
@@ -160,7 +177,7 @@ def test_pre_purchase_dynamic_order_and_envelope(save_run):
     save_run.assert_called_once()
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run):
     planner = Planner(
         [
@@ -186,10 +203,10 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     assert evidence["payment_pressure"].source == "tool_calc"
     assert evidence["payroll_payment_day"].source == "persona"
     assert evidence["payroll_payment_day"].evidence_grade == "SIM_FIXED"
-    assert metadata.llm_fallback_used is True
+    assert metadata.llm_fallback_used is False
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run):
     planner = Planner(
         [
@@ -220,20 +237,58 @@ def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run)
     assert [result["verdict"] for result in results] == ["ok", "reject", "ok"]
     assert results[1]["adjustability"] == "ADJUSTABLE"
     assert results[1]["verdict"] == "reject"
+    assert len(reply.suggested_adjustments) == 1
+    assert "S2" in reply.suggested_adjustments[0].ref_ids[0]
     for result in results:
         branch = result["scenario_id"]
         derived_refs = {
             ref
             for evidence in result["evidences"]
             for ref in evidence["ref_ids"]
-            if ref.startswith("FIN-V22:") or ":cashflow" in ref or ":FIN-CAP" in ref
+            if ref.startswith("FIN-AGENT:") or ":cashflow" in ref or ":FIN-CAP" in ref
         }
         assert derived_refs
         assert all(branch in ref for ref in derived_refs)
     assert validate_reply(req, reply, metadata) == ()
+    assert validate_finance_scenario_output(reply) == ()
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
+def test_base_cashflow_failure_is_not_presented_as_repairable(save_run):
+    planner = Planner([ToolAction("evaluate_purchase_scenario"), ToolAction(finalize=True)])
+    reply, _ = FinanceAgentController(BaseViolationPort(), planner).run(
+        request(
+            "SCENARIO_VALIDATION",
+            {"scenario_id": "BASE-FAIL", "total_amount_krw": 10},
+        )
+    )
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "reject"
+    assert reply.payload["verdict"] == "reject"
+    assert reply.payload["adjustability"] == "NOT_ADJUSTABLE"
+    assert reply.payload["finance_cap_amount_krw"] == 0
+    assert reply.suggested_adjustments == ()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"scenarios": []},
+        {"scenarios": [{"scenario_id": "S", "total_amount_krw": 1}] * 2},
+        {"scenario_id": "", "total_amount_krw": 1},
+        {"scenario_id": "S", "total_amount_krw": 0},
+        {"scenario_id": "S", "total_amount_krw": True},
+    ],
+)
+def test_finance_owned_payload_validation_rejects_invalid_scenarios(payload):
+    with patch("app.finance.agent.save_finance_execution"):
+        reply, _ = FinanceAgentController(Port(), Planner([])).run(
+            request("SCENARIO_VALIDATION", payload)
+        )
+    assert reply.runtime_status == "ERROR"
+
+
+@patch("app.finance.agent.save_finance_execution")
 def test_scenario_payment_dates_change_projected_cashflow(save_run):
     planner = Planner(
         [
@@ -272,7 +327,7 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
     assert late["verdict"] == "ok"
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     planner = Planner(
         [
@@ -293,7 +348,7 @@ def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     ]
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_multi_scenario_reuses_one_policy_context(save_run):
     port = CountingPort()
     planner = Planner(
@@ -329,7 +384,7 @@ def test_run_history_persistence_failure_becomes_agent_error():
         ]
     )
     with patch(
-        "app.finance.agent_v22.save_finance_v22_run", side_effect=RuntimeError("database down")
+        "app.finance.agent.save_finance_execution", side_effect=RuntimeError("database down")
     ):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
@@ -337,7 +392,7 @@ def test_run_history_persistence_failure_becomes_agent_error():
     assert reply.reasoning == "Finance run history persistence failed."
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_zero_debt_does_not_require_debt_policy(save_run):
     planner = Planner(
         [
@@ -349,7 +404,7 @@ def test_zero_debt_does_not_require_debt_policy(save_run):
     assert reply.runtime_status == "READY"
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_positive_debt_without_policy_is_not_ready(save_run):
     port = Port()
     port.debt = Decimal(1)
@@ -360,7 +415,7 @@ def test_positive_debt_without_policy_is_not_ready(save_run):
     assert reply.missing_data == ("debt_policy",)
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     port = Port()
     port.payroll = None
@@ -373,7 +428,7 @@ def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     assert reply.needs_followup is True
 
 
-@patch("app.finance.agent_v22.save_finance_v22_run")
+@patch("app.finance.agent.save_finance_execution")
 def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     planner = Planner(
         [
@@ -399,7 +454,7 @@ def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
 
 def test_payment_schedule_sum_mismatch_is_error():
     planner = Planner([ToolAction("evaluate_purchase_scenario")])
-    with patch("app.finance.agent_v22.save_finance_v22_run"):
+    with patch("app.finance.agent.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
@@ -417,7 +472,7 @@ def test_duplicate_tool_call_is_blocked():
     planner = Planner(
         [ToolAction("assess_finance_position"), ToolAction("assess_finance_position")]
     )
-    with patch("app.finance.agent_v22.save_finance_v22_run"):
+    with patch("app.finance.agent.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
 
@@ -432,7 +487,7 @@ def test_non_amount_adjustment_axis_is_rejected():
             ),
         ]
     )
-    with patch("app.finance.agent_v22.save_finance_v22_run"):
+    with patch("app.finance.agent.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
@@ -453,7 +508,7 @@ def test_postgres_port_fails_closed_for_historical_as_of():
             raise AssertionError("historical request silently read current state")
 
 
-def test_v22_run_id_resolves_finance_history():
+def test_run_id_resolves_finance_history():
     run_id = UUID("00000000-0000-0000-0000-000000000022")
     row = {
         "run_id": run_id,
@@ -466,11 +521,11 @@ def test_v22_run_id_resolves_finance_history():
         patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
         patch("app.finance.run_repository.fetch_one", return_value=row) as fetch,
     ):
-        assert get_finance_v22_run(run_id) == row
+        assert get_finance_execution(run_id) == row
     assert fetch.call_args.args[1] == (run_id,)
 
 
-def test_v22_run_history_persists_reproducibility_fields():
+def test_run_history_persists_reproducibility_fields():
     req = request()
     reply = AgentReply(
         request_id=req.context.request_id,
@@ -495,6 +550,6 @@ def test_v22_run_history_persists_reproducibility_fields():
             return_value={"run_id": UUID(reply.run_id)},
         ) as execute,
     ):
-        save_finance_v22_run(request=req, reply=reply, metadata=metadata)
+        save_finance_execution(request=req, reply=reply, metadata=metadata)
     params = execute.call_args.args[1]
     assert params[5:8] == ("v1.3-PROVISIONAL", "USER_REQUEST", 1)
