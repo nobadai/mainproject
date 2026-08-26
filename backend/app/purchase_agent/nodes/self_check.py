@@ -12,6 +12,7 @@ from typing import Any
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
 from app.purchase_agent.nodes.draft_plan import warehouse_cap_kg
 from app.purchase_agent.schemas import (
     DOCUMENT_SOURCE,
@@ -166,6 +167,88 @@ def check_document_refs(scenario: dict, context_docs: list[dict]) -> str | None:
     return None
 
 
+def check_excerpt_fidelity(scenario: dict, context_docs: list[dict]) -> str | None:
+    """인용 발췌가 **원문에 실재하는 문자열인가** (§4-⑦ 근거 환각 대조 · 현서님 2차 합의 8/26).
+
+    현서님 회신(8/26)으로 역할 경계가 정해졌다: **문서 원문 대조는 매입 소유다.** Critic은
+    월보·기상 문서를 스냅샷으로 받지 않기로 해(8/25 B4-8) 원문 접근권이 없고, 접근권 없는
+    쪽은 이 검사를 구조적으로 수행할 수 없다. 대체 불가능하므로 여기가 유일한 자리다.
+
+    **오늘은 이 검사가 통과할 수밖에 없다.** ②의 발췌가 서두 잘라내기라 원문 문자가 변조될
+    길이 없기 때문이다. 그래도 지금 넣는 이유는, ②·⑥에 LLM이 붙어 "구절 선별"과 "claim
+    요약"이 생기는 순간(E3-5 이후) **이 검사가 없으면 환각이 그대로 출력에 실리기 때문**이다.
+    검사를 나중에 만들면 그 사이 산출물은 검증된 적이 없는 채로 남는다.
+
+    두 지점을 본다 — ②가 원문에서 떴는가, ⑥이 그걸 그대로 실었는가:
+
+    1. ``excerpt`` ⊆ ``content``  — ②의 발췌가 원문에서 온 문자열인가
+    2. ``excerpt`` ⊆ ``evidence_detail`` — ⑥이 옮기며 고치지 않았는가
+
+    **``substring``이지 ``prefix``가 아니다.** 지금 발췌는 항상 서두라 접두어 검사로도
+    통과하지만, LLM이 구절을 고르기 시작하면 발췌는 본문 중간에서 온다. 오늘의 구현이
+    아니라 **계약이 약속하는 것**에 맞춰 검사한다.
+
+    절단 표시는 떼고 맞춘다 — ``…``는 ②가 붙인 표식이지 원문 문자가 아니다.
+    접미사를 보고 판별하지 않고 ``excerpt_truncated`` 플래그를 쓰는 이유는
+    ``leading_excerpt`` docstring에 있다.
+    """
+    by_ref = {document_ref(doc["doc_id"]): doc for doc in context_docs}
+    for item in scenario["rationale"]:
+        if item["source"] != DOCUMENT_SOURCE:
+            continue
+        doc = by_ref.get(item["ref_id"])
+        if doc is None:
+            # 검사 순서상 check_document_refs가 먼저 잡는 상태다. 순서에 기대지 않고
+            # 여기서도 막는다 — 체인 순서가 바뀌면 조용히 통과하는 자리가 된다.
+            return f"인용한 문서를 찾을 수 없어 발췌 대조 불가: {item['ref_id']}"
+        excerpt = doc["excerpt"]
+        if doc.get("excerpt_truncated"):
+            excerpt = excerpt.removesuffix(TRUNCATION_MARK)
+        if excerpt not in doc["content"]:
+            return f"발췌가 원문에 없다: {item['ref_id']} — 인용 {excerpt[:40]!r}"
+        if excerpt not in item["evidence_detail"]:
+            return (
+                f"근거 문구가 로드한 발췌와 다르다: {item['ref_id']} — "
+                f"발췌 {excerpt[:40]!r}가 evidence_detail에 없다"
+            )
+    return None
+
+
+def check_document_publication(
+    scenario: dict, context_docs: list[dict], as_of: str
+) -> str | None:
+    """인용 문서가 **as_of 시점에 실재하는 발행물인가** (규칙 1 look-ahead 방어).
+
+    포트가 이미 ``published_at <= as_of``로 거른다(``mocks._load.filter_by_published_at``).
+    그런데도 출력 경계에서 한 번 더 보는 이유는, **필터를 통과하는 것과 출력이 지키는 것이
+    다른 약속**이기 때문이다 — 스키마의 ``DOC-`` backstop을 ⑦ 검사와 별개로 둔 것과 같은
+    자리다. 9/4에 9/5 발행 문서(DOC-6)를 인용하면 백테스트 성적이 무효가 되는데, 그건
+    사업적 판단이 아니라 버그이므로 컷 사유로 남긴다.
+
+    ``published_at``이 **없는** 것도 위반이다. 없으면 비교 자체가 불가능한데 조용히
+    넘기면 "검사했다"가 거짓이 된다 — 로더가 ``published_at`` 없는 문서를 적재 거부하는
+    것과 같은 이유다 (IO명세 §1-⑥).
+
+    ISO 날짜 문자열은 사전순 비교가 곧 시간순이라 ``date`` 변환 없이 비교한다.
+    """
+    by_ref = {document_ref(doc["doc_id"]): doc for doc in context_docs}
+    for item in scenario["rationale"]:
+        if item["source"] != DOCUMENT_SOURCE:
+            continue
+        doc = by_ref.get(item["ref_id"])
+        if doc is None:
+            return f"인용한 문서를 찾을 수 없어 발행일 대조 불가: {item['ref_id']}"
+        published_at = doc.get("published_at")
+        if not published_at:
+            return f"발행일 없는 문서를 인용: {item['ref_id']} — as_of 대조가 불가능하다"
+        if published_at > as_of:
+            return (
+                f"as_of 이후 발행 문서를 인용: {item['ref_id']} "
+                f"(발행 {published_at} > as_of {as_of}) — look-ahead"
+            )
+    return None
+
+
 def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str | None:
     """전 안이 동일 축이면 반려 (정의서 §3.5.1-3 — "코드가 최종 중복 검사 ... (self_check)").
 
@@ -206,6 +289,11 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
             or check_document_refs(scenario, state["context_docs"])
+            # 문서 검사 3종은 순서가 있다: 인용이 로드분인가(refs) → 발행일이 as_of 이전인가
+            # (publication) → 발췌가 원문 문자인가(fidelity). 뒤 두 검사는 앞이 통과했다고
+            # 가정하지 않고 각자 문서를 다시 찾는다.
+            or check_document_publication(scenario, state["context_docs"], state["date"])
+            or check_excerpt_fidelity(scenario, state["context_docs"])
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})

@@ -21,6 +21,7 @@ from app.purchase_agent.graph import build_graph, run_purchase_agent
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.collect_context import (
+    TRUNCATION_MARK,
     collect_context,
     is_enough,
     leading_excerpt,
@@ -32,7 +33,12 @@ from app.purchase_agent.nodes.package_scenarios import (
     _context_risks,
     package_scenarios,
 )
-from app.purchase_agent.nodes.self_check import check_document_refs, self_check
+from app.purchase_agent.nodes.self_check import (
+    check_document_publication,
+    check_document_refs,
+    check_excerpt_fidelity,
+    self_check,
+)
 from app.purchase_agent.nodes.split_plan import split_plan
 from app.purchase_agent.state import build_initial_state
 
@@ -238,9 +244,43 @@ def test_excerpt_is_the_verbatim_first_sentence() -> None:
 
 
 def test_excerpt_falls_back_to_a_length_cap_without_a_sentence_end() -> None:
-    """종결("…다.")이 없으면 본문 전체가 인용으로 둔갑한다 — 상한이 그걸 막는다."""
-    assert leading_excerpt("종결 없는 긴 본문" * 50, 10) == "종결 없는 긴 본문"
-    assert leading_excerpt("첫 문장이다. 둘째 문장이다.", 999) == "첫 문장이다."
+    """종결("…다.")이 없으면 본문 전체가 인용으로 둔갑한다 — 상한이 그걸 막는다.
+
+    **잘린 발췌에는 절단 표시가 붙는다** (현서님 2차 피드백). 표시가 없으면 "상승하지
+    않았다"가 "상승"으로 잘렸을 때 **부정이 사라진 완결된 주장**으로 읽힌다.
+    """
+    assert leading_excerpt("종결 없는 긴 본문" * 50, 10) == ("종결 없는 긴 본문…", True)
+    assert leading_excerpt("첫 문장이다. 둘째 문장이다.", 999) == ("첫 문장이다.", False)
+
+
+def test_untruncated_content_gets_no_truncation_mark() -> None:
+    """상한에 **안 걸린** 본문에는 표시를 붙이지 않는다.
+
+    종결이 없다는 것과 잘렸다는 것은 다른 사실이다. 짧은 본문 전문이 발췌인데 표시를
+    붙이면 **잘리지 않은 것을 잘렸다고 말하는 것**이라 표시 자체가 신뢰를 잃는다.
+    """
+    assert leading_excerpt("종결 없는 짧은 본문", 999) == ("종결 없는 짧은 본문", False)
+
+
+def test_truncation_mark_does_not_rescue_empty_content() -> None:
+    """빈 검사는 **표시를 붙이기 전에** 한다.
+
+    붙인 뒤에 보면 공백뿐인 본문도 표시 한 글자 때문에 non-empty가 되어, 빈 발췌를
+    거부하는 방어(Codex P1 회귀)가 통째로 무력해진다.
+    """
+    with pytest.raises(ValueError, match="excerpt"):
+        leading_excerpt(" " * 500, 10)
+
+
+def test_truncated_excerpt_reads_as_incomplete() -> None:
+    """현서님 반례 그대로 — 부정이 잘려나가도 **완결 주장으로 읽히지 않는다.**"""
+    # 종결("다.")이 없어 상한 경로로 간다. 상한이 "상승" 직후에 떨어지도록 잡았다 —
+    # 표시가 없으면 "배추 가격은 상승"이 되어 **원문과 정반대**로 읽히는 자리다.
+    excerpt, truncated = leading_excerpt("배추 가격은 상승하지 않았음", 9)
+    assert truncated
+    assert excerpt == "배추 가격은 상승…"
+    assert excerpt.endswith(TRUNCATION_MARK)
+    assert not excerpt.removesuffix(TRUNCATION_MARK).endswith("상승…")
 
 
 def test_empty_content_is_refused_instead_of_quoting_nothing() -> None:
@@ -263,8 +303,9 @@ def test_excerpt_never_alters_the_source_text() -> None:
     문장 경계 파서가 아니라는 뜻이고, 그래서 risks 문구도 "첫 문장"이라 주장하지 않는다.
     """
     tricky = "그는 '끝이다.'라고 말했지만 설명은 이어졌다."
-    excerpt = leading_excerpt(tricky, 120)
+    excerpt, truncated = leading_excerpt(tricky, 120)
     assert excerpt == "그는 '끝이다."
+    assert not truncated  # 종결에서 잘렸지 글자 수에 걸린 게 아니다
     assert tricky.startswith(excerpt)  # 잘렸을 뿐 고쳐지지 않았다
 
 
@@ -351,6 +392,104 @@ def test_citing_an_unloaded_document_is_cut() -> None:
     assert check_document_refs({"rationale": scenario["rationale"][1:]}, docs) is None
 
 
+def _cited(ref_id: str, excerpt: str) -> dict:
+    """문서 근거 한 줄. ⑥ ``_context_rationale``이 만드는 형태와 같다."""
+    return {
+        "source": "문서ID",
+        "ref_id": ref_id,
+        "evidence_detail": f'2026-08-05 발행 · 발췌: "{excerpt}"',
+    }
+
+
+def _doc(**kwargs) -> dict:
+    base = {
+        "doc_id": 3,
+        "content": "고랭지 배추 정식면적은 전년 대비 6% 감소했다. 이어지는 문장이다.",
+        "excerpt": "고랭지 배추 정식면적은 전년 대비 6% 감소했다.",
+        "excerpt_truncated": False,
+        "published_at": "2026-08-05",
+    }
+    return {**base, **kwargs}
+
+
+# ── 신설 불변식 ① 발췌가 원문의 literal substring인가 ──────────────────────
+
+
+def test_excerpt_absent_from_the_source_is_cut() -> None:
+    """원문에 없는 문자열을 발췌라고 실으면 컷된다 — **환각 인용**의 정면 방어다.
+
+    오늘은 ②가 서두를 잘라내기만 해서 이 상태가 나올 수 없다. ②·⑥에 LLM이 붙어
+    "구절 선별"이 생기는 순간(E3-5 이후) 열리는 구멍을 미리 막는 것이고, 검사를 나중에
+    만들면 그 사이 산출물은 검증된 적이 없는 채로 남는다.
+    """
+    fabricated = "정식면적이 전년 대비 30% 증가했다."
+    scenario = {"rationale": [_cited("DOC-3", fabricated)]}
+    docs = [_doc(excerpt=fabricated)]
+    assert "원문에 없다" in check_excerpt_fidelity(scenario, docs)
+
+
+def test_rationale_altering_the_excerpt_is_cut() -> None:
+    """⑥이 옮기며 문구를 고치면 컷된다 — ②의 발췌와 출력의 인용이 같아야 한다.
+
+    ②가 원문에서 제대로 떴어도 ⑥이 다듬으면 Critic이 대조하는 값은 원문이 아니게 된다.
+    두 지점을 따로 보는 이유다.
+    """
+    doc = _doc()
+    scenario = {"rationale": [_cited("DOC-3", "정식면적이 감소했다")]}  # 요약해 실음
+    assert "로드한 발췌와 다르다" in check_excerpt_fidelity(scenario, [doc])
+    # 그대로 실으면 통과한다
+    assert check_excerpt_fidelity({"rationale": [_cited("DOC-3", doc["excerpt"])]}, [doc]) is None
+
+
+def test_truncation_mark_is_stripped_before_matching() -> None:
+    """절단 표시는 ②가 붙인 표식이지 원문 문자가 아니다 — 떼고 맞춘다.
+
+    떼지 않으면 **잘린 발췌가 전부 컷된다.** 표시를 도입하면서 이 검사가 같이 안 오면
+    9/4처럼 문서를 인용하는 날의 안이 통째로 사라진다.
+    """
+    doc = _doc(excerpt="고랭지 배추 정식면적은…", excerpt_truncated=True)
+    scenario = {"rationale": [_cited("DOC-3", doc["excerpt"])]}
+    assert check_excerpt_fidelity(scenario, [doc]) is None
+
+
+def test_fidelity_ignores_non_document_rationale() -> None:
+    """문서가 아닌 근거는 건드리지 않는다 — 검사가 다른 축을 침범하면 안 된다."""
+    scenario = {"rationale": [{"source": "예측", "ref_id": "FC-mock-v0", "evidence_detail": "x"}]}
+    assert check_excerpt_fidelity(scenario, []) is None
+
+
+# ── 신설 불변식 ② ref_id 실재 + published_at <= as_of ─────────────────────
+
+
+def test_citing_a_document_published_after_as_of_is_cut() -> None:
+    """as_of 이후 발행 문서를 인용하면 컷된다 (규칙 1 look-ahead).
+
+    포트가 이미 거르지만, **필터를 통과하는 것과 출력이 지키는 것은 다른 약속**이다.
+    9/4에 9/5 발행 DOC-6을 인용하면 백테스트 성적이 무효가 되는데 그건 버그다.
+    """
+    scenario = {"rationale": [_cited("DOC-6", "x")]}
+    docs = [_doc(doc_id=6, published_at="2026-09-05")]
+    reason = check_document_publication(scenario, docs, "2026-09-04")
+    assert "look-ahead" in reason and "DOC-6" in reason
+    # 같은 문서라도 발행일 이후 시점이면 통과한다
+    assert check_document_publication(scenario, docs, "2026-09-05") is None
+
+
+def test_citing_a_document_without_a_publication_date_is_cut() -> None:
+    """발행일이 없으면 비교 자체가 불가능하다 — 조용히 넘기면 "검사했다"가 거짓이 된다."""
+    scenario = {"rationale": [_cited("DOC-3", "x")]}
+    for missing in (None, ""):
+        reason = check_document_publication(scenario, [_doc(published_at=missing)], "2026-09-04")
+        assert "발행일 없는" in reason
+
+
+def test_document_checks_do_not_lean_on_chain_order() -> None:
+    """앞 검사가 통과했다고 가정하지 않는다 — 체인 순서가 바뀌어도 조용히 안 뚫린다."""
+    scenario = {"rationale": [_cited("DOC-99", "x")]}
+    assert "찾을 수 없어" in check_document_publication(scenario, [_doc()], "2026-09-04")
+    assert "찾을 수 없어" in check_excerpt_fidelity(scenario, [_doc()])
+
+
 def test_disguising_a_document_ref_as_another_source_is_cut() -> None:
     """**Codex 교차검증 P1 회귀 테스트.**
 
@@ -400,6 +539,45 @@ def test_hallucinated_document_reaches_rejected_reasons() -> None:
     )
     result = self_check(state)
     assert any("DOC-99" in item["reason"] for item in result["rejected_reasons"])
+
+
+def _built_state() -> dict:
+    """⑦ 직전까지 그래프를 돌린 state. 체인 레벨 검사에 쓴다."""
+    state = _classified()
+    state.update(collect_context(state))
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+    return state
+
+
+def test_altered_excerpt_reaches_rejected_reasons() -> None:
+    """발췌 대조가 **그래프 안에서** 컷하는가 — 함수 단위 통과와 배선은 별개다.
+
+    이 테스트가 없으면 ``check_excerpt_fidelity``를 검사 체인에서 통째로 빼도 단위
+    테스트가 전부 초록불이다. 신설 검사를 배선하는 커밋에는 배선을 잠그는 검사가 같이
+    와야 한다.
+    """
+    state = _built_state()
+    cited = next(
+        item
+        for item in state["scenarios_final"][0]["rationale"]
+        if item["source"] == "문서ID"
+    )
+    cited["evidence_detail"] = '2026-08-05 발행 · 발췌: "정식면적이 크게 늘었다."'
+    result = self_check(state)
+    assert any("로드한 발췌와 다르다" in item["reason"] for item in result["rejected_reasons"])
+
+
+def test_look_ahead_document_reaches_rejected_reasons() -> None:
+    """발행일 대조도 그래프 안에서 컷한다 — 포트 필터와 **별개의 약속**이다."""
+    state = _built_state()
+    # 로드된 문서의 발행일을 as_of 이후로 조작한다. 포트는 이미 통과한 뒤라
+    # 출력 경계 검사만이 이걸 잡을 수 있다.
+    state["context_docs"][0]["published_at"] = "2026-12-31"
+    result = self_check(state)
+    assert any("look-ahead" in item["reason"] for item in result["rejected_reasons"])
 
 
 # ── 포트 호출 위치 잠금 (실패 모드 e·f) ────────────────────────────────────
