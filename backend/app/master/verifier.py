@@ -11,8 +11,9 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
   `skipped` 에 사유와 함께 남긴다. 비워 두면 **"검사했고 통과했다"로 읽힌다.**
 
 ★ **커버리지를 감추지 않는다** (§3.7.6).
-  Critic 56검사가 아직 이 경로에 붙지 않았다는 사실 자체를 `skipped` 로 노출한다.
-  붙지 않은 것을 조용히 두면 시연에서 "검증이 돈다"가 사실이 아니게 된다.
+  Critic 56검사를 붙였고(2026-08-27), **몇 개가 돌았는지를 `skipped` 에 적는다.**
+  `findings: []` 만 보면 *"56검사를 통과했다"* 로 읽힌다 — 실제로는 부서 메타 미제출
+  같은 이유로 절반이 안 돌 수 있고, 그 사실이 같이 보여야 한다.
 
 ★ 왜 ①이 여기 없는가
   `E-BIND-*` · `E-EVIDENCE-*` · `E-REASONING-*` 는 `MasterRunner.call()` 이 호출마다
@@ -23,12 +24,37 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Any, Protocol
 
+from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
+from app.critic.service import run_critic_procurement
+from app.master.critic_bridge import CriticSkipped, build_request, fold
 from app.master.envelope import AgentName
 from app.master.plan import ExecutionPlan
+from app.orchestrator.contracts_core import Evidence
+
+
+class CriticPort(Protocol):
+    """Critic 진입점. 갈아 끼울 수 있게 두는 이유는 테스트가 아니라 **격리**다 —
+    검증 Tool 이 도메인 구현에 직접 묶이면 Critic 이 바뀔 때 마스터가 흔들린다."""
+
+    def __call__(self, req: CriticProcurementRequest) -> CriticVerdictOut: ...
+
+
+@dataclass(frozen=True)
+class VerificationContext:
+    """검증이 **부서 판정을 넘어** 보려면 필요한 것.
+
+    ★ `evidences` 가 여기 있는 이유 — `constraints` 는 payload 만 담는다. Critic 은
+      cap 축마다 근거를 요구하므로(§1.2-5) 근거 없이 넘기면 **없는 것이 아니라 안 넘긴
+      것인데 계약 위반으로 잡힌다.**
+    """
+
+    as_of: date
+    item: str | None = None
+    evidences: Mapping[AgentName, tuple[Evidence, ...]] = field(default_factory=dict)
 
 
 def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
@@ -141,8 +167,14 @@ class MasterVerifier:
       마스터가 제대로 합쳤나 · 합친 결과가 앞뒤가 맞나"* 를 본다.
     """
 
-    def __init__(self, required_advisors: tuple[AgentName, ...] = ("finance", "inventory")):
+    def __init__(
+        self,
+        required_advisors: tuple[AgentName, ...] = ("finance", "inventory"),
+        critic: CriticPort | None = run_critic_procurement,
+    ):
         self.required_advisors = required_advisors
+        self.critic = critic
+        """Critic 56검사. `None` 이면 **돌리지 않은 사실이 `skipped` 에 남는다.**"""
 
     def __call__(
         self,
@@ -150,11 +182,15 @@ class MasterVerifier:
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
+        context: VerificationContext | None = None,
     ) -> VerificationResult:
         """★ 시나리오 배열이 아니라 **제안 전체**를 받는다 (2026-08-27 매입 스키마 확인).
 
         `allowed_axes` · `situation` · `confidence` 는 `scenarios[]` 안이 아니라
         **제안 최상위**에 있다(`PurchaseProposal`). 배열만 받으면 그 판정들을 볼 수 없다.
+
+        ★ `context` 는 Critic 에 넘길 때만 쓴다 — `as_of` · 품목 · 조언자 Evidence.
+          주지 않으면 Critic 을 돌리지 않고 그 사실을 `skipped` 에 남긴다.
         """
         scenarios = _scenarios_of(proposal)
         findings: list[str] = []
@@ -163,11 +199,73 @@ class MasterVerifier:
 
         self._check_plan_integrity(plan, scenarios, findings, concerns)
         self._check_timing_gate(proposal, scenarios, findings, skipped)
+        identity_findings = len(findings)
         self._check_scenario_identities(scenarios, findings, skipped)
+        identity_broken = len(findings) > identity_findings
         self._check_payment_schedule(scenarios, constraints, findings, skipped)
+        self._run_critic(
+            proposal, constraints, context, identity_broken, findings, concerns, skipped
+        )
         self._declare_uncovered(skipped)
 
         return VerificationResult(tuple(findings), tuple(concerns), tuple(skipped))
+
+    # ── Critic 56검사 (§3.7.1) ──────────────────────────────────
+
+    def _run_critic(
+        self,
+        proposal: Mapping[str, Any],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        context: VerificationContext | None,
+        identity_broken: bool,
+        findings: list[str],
+        concerns: list[str],
+        skipped: list[str],
+    ) -> None:
+        """★ **항등식이 깨졌으면 돌리지 않는다.**
+
+        Critic 의 금액 축은 `qty × unit_price` 로 다시 만들어지고, 그 단가는
+        `total_amount_krw / total_qty_kg` 에서 온다 — **두 값이 서로 맞을 때만** 뜻이
+        있는 표현이다. 어긋난 숫자 위에서 돌린 56검사는 **그럴듯한 통과**를 만든다.
+        그건 검증이 아니라 검증처럼 보이는 것이다.
+
+        ★ Critic 이 던지는 예외를 위로 올리지 않는다. 검증 Tool 이 죽으면 Flow 가
+          통째로 `ERROR` 가 되는데, **검증 실패는 매입 판단의 실패가 아니다.**
+        """
+        if self.critic is None:
+            skipped.append("Critic L0~L5 (56검사): 검증 Tool 에 주입되지 않음")
+            return
+        if context is None:
+            skipped.append("Critic L0~L5 (56검사): 실행 맥락 미전달 — as_of · 품목 · 근거 없음")
+            return
+        if identity_broken:
+            skipped.append(
+                "Critic L0~L5 (56검사): 시나리오 항등식이 깨져 돌리지 않았다 — "
+                "어긋난 숫자 위의 판정은 통과해도 뜻이 없다"
+            )
+            return
+
+        try:
+            request = build_request(
+                as_of=context.as_of,
+                item=context.item,
+                proposal=proposal,
+                constraints=constraints,
+                evidences=context.evidences,
+            )
+            verdict = self.critic(request)
+        except CriticSkipped as exc:
+            skipped.append(f"Critic L0~L5 (56검사): {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001 — 검증이 죽어도 Flow 는 살아야 한다
+            concerns.append(f"CRITIC: 검증 Tool 이 돌지 못했다 — {type(exc).__name__}: {exc}")
+            skipped.append("Critic L0~L5 (56검사): 실행 중 오류로 미판정")
+            return
+
+        critic_findings, critic_concerns, critic_skipped = fold(verdict)
+        findings.extend(critic_findings)
+        concerns.extend(critic_concerns)
+        skipped.extend(critic_skipped)
 
     # ── ④ 실행 계획 온전성 (M-16 · §3.7.4) ──────────────────────
     #
@@ -459,8 +557,4 @@ class MasterVerifier:
         ★ 이 줄이 없으면 `findings: []` 가 **"56검사를 통과했다"로 읽힌다.**
           붙지 않은 것을 조용히 두는 것이 커버리지를 감추는 가장 흔한 방식이다.
         """
-        skipped.append(
-            "Critic L0~L5 (56검사): 마스터 경로 미배선 — "
-            "도메인 payload 필드명 미확정(물류 미제출 · 매입 키 표 미수령)"
-        )
         skipped.append("②마스터 계산 재검산: 결합·클리핑 Tool 이 Flow 에 붙은 뒤 가능")

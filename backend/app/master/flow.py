@@ -34,8 +34,8 @@ from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
-from app.master.verifier import VerificationResult
-from app.orchestrator.contracts_core import EndCode, ItemCode
+from app.master.verifier import VerificationContext, VerificationResult
+from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode
 
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
@@ -74,6 +74,7 @@ class VerifierPort(Protocol):
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
+        context: VerificationContext | None = None,
     ) -> VerificationResult: ...
 
     """★ 시나리오 배열이 아니라 **제안 전체**를 받는다.
@@ -138,6 +139,7 @@ class ProcurementFlow:
         self.advisors = advisors
         self.max_purchase_attempts = max_purchase_attempts
         self.item = item
+        self.constraint_evidences: dict[AgentName, tuple[Evidence, ...]] = {}
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
@@ -233,12 +235,19 @@ class ProcurementFlow:
     # ── 단계 ────────────────────────────────────────────────────
 
     def _collect_constraints(self) -> dict[AgentName, Mapping[str, Any]]:
-        """① 재무·물류에게 실행 가능 경계를 받는다."""
+        """① 재무·물류에게 실행 가능 경계를 받는다.
+
+        ★ **근거도 같이 남긴다.** 전에는 `payload` 만 들고 있었는데, Critic 은 cap 축
+          마다 근거를 요구한다(§1.2-5). 근거를 안 넘기면 *"없는 것"* 이 아니라
+          **"안 넘긴 것"** 인데 계약 위반으로 잡힌다.
+        """
         out: dict[AgentName, Mapping[str, Any]] = {}
+        self.constraint_evidences = {}
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE")
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
+                self.constraint_evidences[agent] = reply.evidences
         return out
 
     def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
@@ -357,7 +366,12 @@ class ProcurementFlow:
         """
         if self.verifier is None:
             return VerificationResult()
-        return self.verifier(proposal, constraints, verdicts, self.runner.plan)
+        context = VerificationContext(
+            as_of=self.runner.context.as_of,
+            item=self.item,
+            evidences=dict(self.constraint_evidences),
+        )
+        return self.verifier(proposal, constraints, verdicts, self.runner.plan, context)
 
     # ── 판단 ────────────────────────────────────────────────────
 

@@ -249,7 +249,7 @@ def test_검증_미주입은_건너뛴_사실이_남는다():
 def test_검증_발견이_있으면_재호출한다():
     calls = []
 
-    def verifier(scenarios, constraints, verdicts, plan):
+    def verifier(scenarios, constraints, verdicts, plan, context=None):
         calls.append(len(scenarios))
         return VerificationResult(("E-IDENTITY",) if len(calls) == 1 else ())
 
@@ -260,7 +260,7 @@ def test_검증_발견이_있으면_재호출한다():
 
 
 def test_검증_발견이_안_풀리면_E3():
-    out = happy(verifier=lambda s, c, v, p: VerificationResult(("E-IDENTITY",))).run()
+    out = happy(verifier=lambda s, c, v, p, ctx=None: VerificationResult(("E-IDENTITY",))).run()
     assert out.end_code == "E3_REJECTED"
     assert out.findings == ("E-IDENTITY",)
 
@@ -268,13 +268,16 @@ def test_검증_발견이_안_풀리면_E3():
 def test_검증은_제안전체와_경계와_판정과_계획을_받는다():
     seen = {}
 
-    def verifier(proposal, constraints, verdicts, plan):
+    def verifier(proposal, constraints, verdicts, plan, context=None):
         # ★ 배열이 아니라 제안 전체다 — allowed_axes 가 최상위에 있다
         seen["scenarios"] = len(proposal["scenarios"])
         seen["top_level"] = sorted(proposal)
         seen["constraints"] = sorted(constraints)
         seen["verdicts"] = sorted(verdicts)
         seen["plan_steps"] = len(plan.steps)  # ④ M-16 이 읽는 것
+        # ★ Critic 에 넘길 맥락 — as_of · 품목 · 조언자 근거
+        seen["context_as_of"] = context.as_of.isoformat()
+        seen["context_evidence_depts"] = sorted(context.evidences)
         return VerificationResult()
 
     happy(verifier=verifier).run()
@@ -284,6 +287,8 @@ def test_검증은_제안전체와_경계와_판정과_계획을_받는다():
         "top_level": ["scenarios"],
         "verdicts": ["finance", "inventory"],
         "plan_steps": 5,
+        "context_as_of": "2026-08-26",
+        "context_evidence_depts": ["finance", "inventory"],
     }
 
 
