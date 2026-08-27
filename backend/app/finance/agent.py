@@ -869,10 +869,17 @@ class FinanceAgentController:
             return [request]
         scenarios = request.payload.get("scenarios")
         if scenarios is None:
-            return [request]
+            payload = dict(request.payload)
+            payload["scenario_id"] = _scenario_identity(payload)
+            return [replace(request, payload=payload)]
         if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
             raise ValueError("SCENARIO_VALIDATION requires one to three scenarios")
-        return [replace(request, payload=dict(scenario)) for scenario in scenarios]
+        branches: list[AgentRequest] = []
+        for scenario in scenarios:
+            payload = dict(scenario)
+            payload["scenario_id"] = _scenario_identity(payload)
+            branches.append(replace(request, payload=payload))
+        return branches
 
     def _execute_loop(
         self,
@@ -1263,9 +1270,7 @@ def _validate_finance_payload(request: AgentRequest) -> None:
     for scenario in scenarios:
         if not isinstance(scenario, dict):
             raise TypeError("each Finance scenario must be an object")
-        scenario_id = scenario.get("scenario_id")
-        if not isinstance(scenario_id, str) or not scenario_id.strip():
-            raise ValueError("scenario_id must be a non-empty string")
+        scenario_id = _scenario_identity(scenario)
         if scenario_id in scenario_ids:
             raise ValueError("scenario_id must be unique within the request")
         scenario_ids.add(scenario_id)
@@ -1302,6 +1307,19 @@ def _validate_finance_payload(request: AgentRequest) -> None:
             total += payment_amount
         if total != amount:
             raise ValueError("payment_schedule amount sum must equal total_amount_krw")
+
+
+def _scenario_identity(scenario: dict[str, Any]) -> str:
+    """scenario_id가 없으면 Purchase가 보장하는 non-empty label을 identity로 사용한다."""
+    if "scenario_id" in scenario:
+        scenario_id = scenario["scenario_id"]
+        if isinstance(scenario_id, str) and scenario_id.strip():
+            return scenario_id.strip()
+        raise ValueError("scenario_id must be a non-empty string when present")
+    label = scenario.get("label")
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    raise ValueError("label must be a non-empty string when scenario_id is absent")
 
 
 def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:

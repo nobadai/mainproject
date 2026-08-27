@@ -89,6 +89,12 @@ def build_payroll_schedule(
     """Projection 구간 안의 미래 급여일을 월 경계와 무관하게 생성한다."""
     if horizon_end < as_of:
         raise ValueError("horizon_end must not precede as_of")
+    amount_source_ref = policy.source_refs.get("monthly_labor_cost_krw")
+    date_source_ref = policy.source_refs.get("payroll_date")
+    if not amount_source_ref:
+        raise ValueError("monthly_labor_cost_krw source_ref is required for PAYROLL")
+    if not date_source_ref:
+        raise ValueError("payroll_date source_ref is required for PAYROLL")
     year, month = as_of.year, as_of.month
     events: list[CashEvent] = []
     while date(year, month, 1) <= horizon_end:
@@ -104,7 +110,8 @@ def build_payroll_schedule(
                     amount_krw=policy.monthly_labor_cost_krw,
                     direction="OUTFLOW",
                     ref_id=f"PAYROLL:{payroll_day.isoformat()}",
-                    source_ref=policy.source_refs.get("payroll_date"),
+                    source_ref=amount_source_ref,
+                    schedule_source_ref=date_source_ref,
                 )
             )
         if month == 12:

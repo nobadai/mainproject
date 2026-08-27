@@ -45,7 +45,20 @@ def test_payroll_date_is_required_db_policy_with_source_and_drives_event():
         as_of=date(2026, 8, 27), horizon_end=date(2026, 9, 26), policy=policy
     )[0]
     assert event.event_date == date(2026, 9, 17)
-    assert event.source_ref == "db-policy:payroll_date"
+    assert event.source_ref == "db-policy:monthly_labor_cost_krw"
+    assert event.schedule_source_ref == "db-policy:payroll_date"
+
+
+@pytest.mark.parametrize("missing_key", ["monthly_labor_cost_krw", "payroll_date"])
+def test_payroll_lineage_source_ref가_없으면_실패한다(missing_key):
+    policy = _build_finance_policy(policy_rows())
+    source_refs = dict(policy.source_refs)
+    source_refs.pop(missing_key)
+    policy = policy.model_copy(update={"source_refs": source_refs})
+    with pytest.raises(ValueError, match=missing_key):
+        build_payroll_schedule(
+            as_of=date(2026, 8, 27), horizon_end=date(2026, 9, 26), policy=policy
+        )
 
 
 def test_missing_or_non_integer_payroll_date_fails_closed():

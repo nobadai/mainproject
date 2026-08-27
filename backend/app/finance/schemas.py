@@ -246,6 +246,7 @@ class CashEvent(BaseModel):
     direction: CashEventDirection
     ref_id: str = Field(min_length=1)
     source_ref: str | None = None
+    schedule_source_ref: str | None = None
     principal_component_krw: Decimal | None = Field(default=None, ge=0)
     interest_component_krw: Decimal | None = Field(default=None, ge=0)
 
