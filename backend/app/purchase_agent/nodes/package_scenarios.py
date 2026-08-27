@@ -569,6 +569,102 @@ def payment_dates(rounds: list[dict], payment_days: int | None) -> list[str]:
     ]
 
 
+def _round_amounts(rounds: list[dict], sourcing: list[dict]) -> list[int]:
+    """회차별 금액 = **그 회차에 배분된 등급 구성**의 실제 금액.
+
+    등급별 kg를 회차 수량 비율대로 나누고 등급 단가로 곱한다. 전체 가중단가를 쓰면
+    합은 맞지만 **어느 정수 kg 구성으로도 재현되지 않는 값**이 나와, 재무가
+    ``sourcing_plan``으로 검산할 때 어긋난다.
+
+    **각 등급의 마지막 회차가 그 등급의 잔량을 흡수한다** — ``split_quantities``가 수량에
+    쓰는 것과 같은 장치다. 그래서 ``Σ amount_krw == Σ(등급 kg × 등급 단가) ==
+    total_amount_krw``가 항등식으로 성립한다.
+
+    ⚠️ **회차별 등급 내역을 출력에 싣지는 않는다** — 재무가 ``by_grade``를 요구하지
+    않았고(회신 §2) 등급은 ``sourcing_plan``이 정본이다. 여기서는 **금액을 재현 가능하게
+    만들기 위해서만** 배분한다.
+    """
+    total_qty_kg = require_positive(sum(item["qty_kg"] for item in rounds), "total_qty_kg")
+    amounts = [0] * len(rounds)
+    for line in sourcing:
+        remaining = line["qty_kg"]
+        for index, item in enumerate(rounds):
+            share = (
+                remaining
+                if index == len(rounds) - 1
+                else round(line["qty_kg"] * item["qty_kg"] / total_qty_kg)
+            )
+            share = min(share, remaining)
+            remaining -= share
+            amounts[index] += share * line["grade_unit_price"]
+    return amounts
+
+
+def build_payment_schedule(
+    rounds: list[dict],
+    sourcing: list[dict],
+    max_price: int,
+    payment_days: int | None,
+) -> list[dict] | None:
+    """회차별 지급 계획 (재무 확정 7필드 · 2026-08-27 회신).
+
+    재무가 ``SCENARIO_VALIDATION``에서 회차별 Cashflow를 검증할 때 쓴다. 두 금액이
+    각각 다른 검증에 들어간다 (회신 §1):
+
+    - ``amount_krw``     → **BASE Cashflow**   (오늘 단가 기준 예상 지급액)
+    - ``amount_max_krw`` → **STRESS Cashflow** (회차 수량 × ``max_price``)
+
+    **``None``을 돌려주는 경우가 둘이고 뜻이 다르다** — 호출부가 그때 키를 만들지 않는다:
+
+    1. ``payment_days``(N5)가 미결 — 지급일을 **계산할 수 없다**. 0으로 채우면
+       "D+0 즉시지급"이 되어 운전자금이 과대 계상된다 (규칙 3). 그 사실은
+       ``deferred_checks``가 싣는다.
+    2. 회차가 하나 — **일괄 안이라 실을 것이 없다.** 지급일 하나는 ``split_plan``에서
+       바로 파생되므로 같은 값을 두 벌 내보내지 않는다 (제안 §3.2 항등식 5).
+
+    ⚠️ **``by_grade``를 넣지 않는다.** 등급별 수량·단가는 ``sourcing_plan``이 정본이고,
+    여기는 회차별 Cashflow 정보만 있으면 충분하다 (회신 §2).
+
+    ⚠️ **금액은 등급 구성에서 만든다.** 처음엔 전체 가중단가를 회차 수량에 곱했는데,
+    그러면 **어떤 정수 kg 등급 구성으로도 재현되지 않는 금액**이 나온다 (Codex 교차검증).
+    재무가 ``sourcing_plan``으로 검산하면 어긋난다 — ``_round_amounts``가 등급별 kg를
+    회차에 배분해 실제 단가로 곱한다.
+
+    ⚠️ **``payment_days``가 음수면 만들지 않는다.** 지급일이 매입일보다 앞서는 것은
+    N5의 뜻(매입 후 며칠 뒤 지급)과 모순이고, 그대로 두면 ⑦도 같은 음수로 재계산해
+    정상 판정한다 (Codex 교차검증).
+    """
+    if payment_days is None or payment_days < 0 or len(rounds) <= 1:
+        return None
+
+    amounts = _round_amounts(rounds, sourcing)
+    schedule = []
+    for item, amount in zip(rounds, amounts, strict=True):
+        purchase_date = date.fromisoformat(item["date"])
+        schedule.append(
+            {
+                "seq": item["seq"],
+                "purchase_date": item["date"],
+                "payment_date": (purchase_date + timedelta(days=payment_days)).isoformat(),
+                "qty_kg": item["qty_kg"],
+                "amount_krw": amount,
+                "amount_max_krw": item["qty_kg"] * max_price,
+                # ``amount_krw``를 **어떻게 추정했는가**다. 재무의 BASE/STRESS는 두 금액을
+                # 각각 어느 Cashflow에 넣는지의 소비 프레이밍이라 축이 다르다.
+                "basis": "as_of_unit_price",
+            }
+        )
+    return schedule
+
+
+def _payment_schedule_field(
+    rounds: list[dict], sourcing: list[dict], max_price: int, payment_days: int | None
+) -> dict:
+    """실을 것이 있을 때만 키를 만든다 — ``None``을 담으면 "빈 계획"으로 읽힌다."""
+    schedule = build_payment_schedule(rounds, sourcing, max_price, payment_days)
+    return {"payment_schedule": schedule} if schedule else {}
+
+
 def _payment_risks(
     rounds: list[dict], payment_days: int | None, critical_dates: list[str] | None
 ) -> list[str]:
@@ -720,6 +816,13 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "margin_warning": margin_warning,
                 "split_plan": rounds,
                 "sourcing_plan": sourcing,
+                # 분할 안이고 N5를 받은 날만 실린다 — 아니면 **키 자체가 없다**.
+                **_payment_schedule_field(
+                    rounds,
+                    sourcing,
+                    compute_max_price(state["forecast"], draft["coverage_days"]),
+                    pending_value(state, constraints, "purchase_payment_days"),
+                ),
                 "expected_margin_rate": expected_margin_rate,
                 "rationale": [
                     *_rationale(state, rationale_input, constraints),
