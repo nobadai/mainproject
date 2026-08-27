@@ -2,10 +2,17 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.logistics.llm.schemas import LLMResponseFields
 from app.purchase_agent.schemas import PurchaseProposal
@@ -24,9 +31,18 @@ ConstraintCode = Literal[
     "N17",
     "N17-LOT",
     "IN_TRANSIT_SCHEDULE_UNRESOLVED",
+    "CONFIRMED_OUTBOUND_ITEM_UNRESOLVED",
     "AS_OF_MISMATCH",
     "REQUIRED_LOGISTICS_SNAPSHOT_MISSING",
 ]
+ScenarioVerdict = Literal["ok", "conditional", "reject", "skipped"]
+LogisticsReasonCode = Literal[
+    "CAPACITY_EXCEEDED",
+    "NO_FEASIBLE_ARRIVAL_DATE",
+    "FRESHNESS_EXPIRED",
+    "FRESHNESS_WARNING",
+]
+AdjustmentAxis = Literal["quantity", "timing"]
 
 
 def _reject_boolean(value: object) -> object:
@@ -44,6 +60,9 @@ class ScheduledQuantity(BaseModel):
     date: date
     quantity_kg: Decimal = Field(ge=0)
     item: str | None = None
+    #: B-1 입고 건 식별자. outbound 등 다른 Schedule에서도 이 모델을 재사용하므로
+    #: 전역 필수값이 아니다 — in_transit 정합성 검증에서만 존재 여부를 판단한다.
+    inbound_id: str | None = None
 
     @field_validator("quantity_kg", mode="before")
     @classmethod
@@ -56,6 +75,9 @@ class InventoryLotSnapshot(BaseModel):
 
     lot_id: str = Field(min_length=1)
     item: str = Field(min_length=1)
+    #: Purchase용 정규화 등급(특/상/중/하). 정규화 근거가 없으면 None —
+    #: raw `상품`을 근거 없이 `상`으로 바꾸지 않는다.
+    grade: str | None = None
     available_qty_kg: Decimal = Field(ge=0)
     remaining_freshness_days: int | None = None
     status: str = Field(min_length=1)
@@ -70,6 +92,8 @@ class InventoryLotSnapshot(BaseModel):
 class InTransitItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    #: B-1: 행이 존재하면 confirmed_inbound_schedule과 같은 건인지 이 ID로 대조한다.
+    inbound_id: str | None = None
     item: str = Field(min_length=1)
     quantity_kg: Decimal = Field(gt=0)
     expected_arrival_date: date | None
@@ -205,6 +229,42 @@ class ConstraintResult(BaseModel):
     skip_reason: str | None = None
 
 
+class InventoryByItem(BaseModel):
+    """가용재고 정의를 적용한 품목별 자유재고 합계. 등급 축으로 나누지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1)
+    available_qty_kg: Decimal = Field(ge=0)
+
+    @field_validator("available_qty_kg", mode="before")
+    @classmethod
+    def reject_boolean_quantity(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class ScenarioAdjustment(BaseModel):
+    """물류 허용 조정 축은 quantity/timing뿐이다. amount/channel_mix는 반환하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    axis: AdjustmentAxis
+    #: 조정 대상 분할 회차의 매입 실행일 — 어느 split에 대한 제안인지 식별용.
+    split_date: date
+    suggested_qty_kg: Decimal | None = None
+    #: 매입 실행일 역산은 Purchase 책임이라 도착일 기준으로만 제안한다.
+    suggested_arrival_date: date | None = None
+
+
+class ScenarioValidationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1)
+    verdict: ScenarioVerdict
+    reason_codes: list[LogisticsReasonCode]
+    adjustments: list[ScenarioAdjustment]
+
+
 class LogisticsBand(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -238,10 +298,22 @@ class LogisticsProcurementResponse(LLMResponseFields):
     runtime_status: RuntimeStatus
     verdict: FinalVerdict | None
     band: LogisticsBand
+    #: 물류가 직접 집계한 품목별 가용재고. confirmed_outbound.item 누락 등으로
+    #: 정확히 계산할 수 없으면 None이며, 직렬화 시 키 자체를 뺀다 — `[]`(0건 확인)와
+    #: 구분되어야 하기 때문이다. M-1 missing_data 번역은 Master Adapter 책임.
+    inventory_by_item: list[InventoryByItem] | None = None
+    scenario_results: list[ScenarioValidationResult] | None = None
     inbound_constraints: InboundConstraints
     hard_constraints: list[ConstraintResult]
     soft_warnings: list[str]
     evidences: list[LogisticsEvidence]
+
+    @model_serializer(mode="wrap")
+    def drop_uncomputable_inventory_by_item(self, handler: Any) -> dict:
+        data = handler(self)
+        if data.get("inventory_by_item") is None:
+            data.pop("inventory_by_item", None)
+        return data
 
 
 class ArrivalScheduleItem(BaseModel):

@@ -10,7 +10,11 @@ from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     RuntimeStatus,
 )
-from app.logistics.tools import is_inbound_schedule_complete
+from app.logistics.tools import (
+    find_in_transit_schedule_gap,
+    has_unattributed_confirmed_outbound,
+    is_inbound_schedule_complete,
+)
 
 
 class LogisticsRuleResult(TypedDict):
@@ -62,26 +66,36 @@ def evaluate_procurement_rules(
         ),
         _known_constraint("LOG-H05", snapshot.inbound_lead_days, "N4_UNRESOLVED"),
     ]
-    if not is_inbound_schedule_complete(snapshot):
+    inbound_gap = find_in_transit_schedule_gap(snapshot)
+    if inbound_gap is not None:
         constraints.append(
             ConstraintResult(
                 code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
                 status="UNRESOLVED",
-                skip_reason=_inbound_schedule_skip_reason(snapshot),
+                skip_reason=inbound_gap,
+            )
+        )
+    # 확정 출고 행에 item이 없으면 품목별 예약 차감을 못 한다 — inventory_by_item만
+    # 생략하는 Partial Output이며 PRE 전체는 READY를 유지한다. Master Adapter는 이
+    # ConstraintResult로 누락을 식별해 M-1 missing_data로 번역한다.
+    if has_unattributed_confirmed_outbound(snapshot):
+        constraints.append(
+            ConstraintResult(
+                code="CONFIRMED_OUTBOUND_ITEM_UNRESOLVED",
+                status="UNRESOLVED",
+                skip_reason="CONFIRMED_OUTBOUND_ITEM_UNRESOLVED",
             )
         )
     soft_warnings = _snapshot_warnings(snapshot)
+    # 1차 Hard Capacity는 guaranteed 하나다 — daily inbound/transport는 값이 없어도
+    # Runtime을 막지 않는다 (Policy 결정값 §3).
     core_values = (
         snapshot.guaranteed_capacity_kg,
-        snapshot.daily_inbound_capacity_kg,
-        snapshot.inbound_transport_capacity_kg,
         snapshot.inbound_lead_days,
         snapshot.confirmed_inbound_schedule,
         snapshot.confirmed_outbound_schedule,
     )
-    calculation_ready = all(value is not None for value in core_values) and (
-        is_inbound_schedule_complete(snapshot)
-    )
+    calculation_ready = all(value is not None for value in core_values) and inbound_gap is None
     return {
         "runtime_status": "READY" if calculation_ready else "RUNTIME_NOT_READY",
         "hard_constraints": constraints,
@@ -127,11 +141,12 @@ def evaluate_sales_rules(
         skip_reason=None if lots_complete else "N17_LOT_FRESHNESS_UNRESOLVED",
     )
     inbound_completeness_constraint = None
-    if not is_inbound_schedule_complete(snapshot):
+    sales_inbound_gap = find_in_transit_schedule_gap(snapshot)
+    if sales_inbound_gap is not None:
         inbound_completeness_constraint = ConstraintResult(
             code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
             status="UNRESOLVED",
-            skip_reason=_inbound_schedule_skip_reason(snapshot),
+            skip_reason=sales_inbound_gap,
         )
     soft_warnings = _snapshot_warnings(snapshot)
     if future_occupancy_by_date is None:
@@ -193,18 +208,14 @@ def _known_constraint(
     )
 
 
-def _inbound_schedule_skip_reason(snapshot: InventoryLogisticsSnapshot) -> str:
-    if snapshot.in_transit is None:
-        return "IN_TRANSIT_UNRESOLVED"
-    if snapshot.confirmed_inbound_schedule is None:
-        return "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED"
-    return "IN_TRANSIT_SCHEDULE_DEDUPLICATION_UNRESOLVED"
-
-
 def _snapshot_warnings(snapshot: InventoryLogisticsSnapshot) -> list[str]:
     warnings: list[str] = []
     if snapshot.snapshot_id is None:
         warnings.append("SNAPSHOT_ID_UNRESOLVED")
+    # 정규화 근거가 없어 등급 어휘를 해석하지 못한 Lot이 있다는 사실만 드러낸다 —
+    # 임의 매핑은 하지 않고, 이 경고만으로 Runtime을 중단시키지도 않는다.
+    if any(lot.grade is None for lot in snapshot.on_hand_by_lot):
+        warnings.append("GRADE_VOCABULARY_UNRESOLVED")
     if any("provisional=true" in ref for ref in snapshot.evidence_refs):
         warnings.append("PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT")
     if snapshot.in_transit is None:
