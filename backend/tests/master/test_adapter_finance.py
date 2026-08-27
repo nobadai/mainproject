@@ -43,10 +43,14 @@ class _Policy:
     policy_version = "v1.3-PROVISIONAL"
     payroll_date = 10
     monthly_labor_cost_krw = Decimal(3_000_000)
+    #: ★ **실제 DB 와 같은 이름을 쓴다** (2026-08-27 재무 Persona v1.6 정렬).
+    #:   픽스처가 실물과 다른 이름을 들고 있으면 나중에 읽는 사람이 *"어느 쪽이
+    #:   정본인가"* 를 다시 확인해야 한다. 어댑터는 이름을 검사하지 않고 **존재만**
+    #:   보므로 값이 통과하는 것과는 무관하다 — 읽는 사람을 위한 정렬이다.
     source_refs: ClassVar[dict[str, str]] = {
         "purchase_payment_days": "FINANCE-DECISION-20260827:N5",
-        "payroll_date": "FINANCE-DECISION-20260827:N6",
-        "monthly_labor_cost_krw": "PERSONA-V1.5:monthly_labor_cost",
+        "payroll_date": "SRC-FIN-N6",
+        "monthly_labor_cost_krw": "SRC-FIN-PERSONA",
         "minimum_cash_balance_krw": "PROJECT-DEFINITION-V1.2:minimum_cash_balance",
         "cashflow_projection_days": "MVP-DECISION-20260825:FIN-CASH-01",
         "margin_defense_floor_rate": "PROJECT-DEFINITION-V1.2:MARGIN-DEFENSE-GRACE",
@@ -284,8 +288,8 @@ def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
     class _PayrollOnly(_Context):
         class policy(_Policy):
             source_refs: ClassVar[dict[str, str]] = {
-                "monthly_labor_cost_krw": "PERSONA-V1.5:monthly_labor_cost",
-                "payroll_date": "FINANCE-DECISION-20260827:N6",
+                "monthly_labor_cost_krw": "SRC-FIN-PERSONA",
+                "payroll_date": "SRC-FIN-N6",
             }
 
     monkeypatch.setattr(adapter, "_load_context", lambda: _PayrollOnly())
