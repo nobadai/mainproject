@@ -249,14 +249,19 @@ def test_출처가_다_있으면_missing_data_가_비어_있다(wired):
     assert not [m for m in reply.missing_data if m.endswith("@policy_source_ref")]
 
 
-def test_source_ref_가_없으면_이름을_밝힌다(monkeypatch):
-    """🔴 값이 아니라 **출처**의 문제다.
+def test_급여_출처가_없으면_투영을_만들지_않는다(monkeypatch):
+    """🔴 값이 아니라 **출처**의 문제인데, 급여만은 계산까지 막는다.
 
     Repository 가 그 키를 조회하지 않으면 Pydantic 기본값이 대신 쓰이는데, 값은
     멀쩡히 나오고 에러도 안 난다 — **DB 를 고쳐도 반영되지 않는다는 사실만 숨는다.**
     실제로 `payroll_date` 가 그 상태였다. DB(10)와 default(10)가 우연히 같았다.
 
-    계산 자체는 되므로 `READY` 는 유지한다.
+    ★ 재무가 2026-08-27(#63) `build_payroll_schedule` 을 fail-closed 로 바꿨다 —
+      출처 없는 급여 이벤트를 만들지 않는다(M-23). 그러면 **급여 유출이 통째로 빠진
+      투영**이 나오고 `finance_cap` 이 낙관적으로 부풀려진다.
+
+    ★ 그래서 `READY` 로 두고 이름만 밝히지 않는다. 다만 **`ERROR` 도 아니다** —
+      다시 불러도 같으므로 `RUNTIME_NOT_READY` 다 (M-1 §5.1).
     """
 
     class _NoRef(_Context):
@@ -265,5 +270,25 @@ def test_source_ref_가_없으면_이름을_밝힌다(monkeypatch):
 
     monkeypatch.setattr(adapter, "_load_context", lambda: _NoRef())
     reply, _ = adapter.finance_port(req())
-    assert "payroll_date@policy_source_ref" in reply.missing_data
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert set(reply.missing_data) == {
+        "monthly_labor_cost_krw@policy_source_ref",
+        "payroll_date@policy_source_ref",
+    }
+
+
+def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
+    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다."""
+
+    class _PayrollOnly(_Context):
+        class policy(_Policy):
+            source_refs: ClassVar[dict[str, str]] = {
+                "monthly_labor_cost_krw": "PERSONA-V1.5:monthly_labor_cost",
+                "payroll_date": "FINANCE-DECISION-20260827:N6",
+            }
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _PayrollOnly())
+    reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "READY"
+    assert "purchase_payment_days@policy_source_ref" in reply.missing_data

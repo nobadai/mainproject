@@ -64,6 +64,13 @@ _POLICY_KEYS_IN_USE: tuple[str, ...] = (
 
 목록을 여기 두는 이유는 재무 Policy 에 필드가 늘어도 **우리가 쓰는 것만** 보기 위해서다."""
 
+_PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date")
+"""이 둘은 **출처가 없으면 계산 자체가 안 된다** (재무 #63 · M-23).
+
+나머지 정책값은 출처가 없어도 값은 쓸 수 있어 `missing_data` 로 밝히고 지나가지만,
+급여는 다르다 — 출처 없는 급여 이벤트를 만들지 않기로 재무가 정했으므로 **급여 유출이
+통째로 빠진다.** 그 상태의 `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다.**"""
+
 
 def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
@@ -105,6 +112,31 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
 
     policy = context.policy
     horizon_end = as_of + timedelta(days=policy.cashflow_projection_days)
+
+    # 🔴 급여 출처가 없으면 **투영을 만들지 않는다** (2026-08-27 재무 #63).
+    #
+    #    재무가 `build_payroll_schedule` 을 fail-closed 로 바꿨다 — 출처 없는 급여
+    #    이벤트를 만들지 않는다(M-23). 옳은 방향이라 여기서도 그 뜻을 따른다.
+    #
+    #    ★ 다만 **예외로 새게 두지 않는다.** 그대로 두면 `MasterRunner` 가 `ERROR`
+    #      로 바꾸는데, 입력이 없어서 못 내는 답은 `RUNTIME_NOT_READY` 다 (M-1 §5.1).
+    #      둘은 재시도 가치가 다르다.
+    #
+    #    ★ **READY 로 두고 이름만 밝히면 안 된다.** 급여 유출이 통째로 빠진 투영은
+    #      `finance_cap` 을 낙관적으로 부풀린다 — 숫자는 나오고 에러도 안 난다.
+    payroll_refs = tuple(
+        f"{key}@policy_source_ref"
+        for key in _PAYROLL_SOURCE_KEYS
+        if not policy.source_refs.get(key)
+    )
+    if payroll_refs:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=payroll_refs,
+            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+        )
 
     tools.append(_T_CASHFLOW)
     events = (
