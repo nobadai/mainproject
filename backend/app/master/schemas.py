@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.master.decision import DecisionOut
 from app.master.envelope import AgentName, Trigger
 from app.orchestrator.contracts_core import EndCode
 
@@ -143,6 +144,14 @@ class RunHistoryOut(BaseModel):
 
     request_payload: dict[str, Any] = {}
     response_payload: dict[str, Any] = {}
+
+    decisions: list[DecisionOut] = Field(
+        default=[],
+        description=(
+            "사람의 결정 이력. 최신 하나가 `is_current` 다. 비어 있으면 아직 미결정 — "
+            '"그 요청 어떻게 됐냐"에 한 번의 호출로 답하기 위해 여기 싣는다.'
+        ),
+    )
 
 
 class TriggerAck(BaseModel):

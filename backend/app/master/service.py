@@ -10,6 +10,7 @@ import time
 
 from app.master import persistence, wiring
 from app.master.budget import CallBudget
+from app.master.decision_service import get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.plan import ExecutionPlan
@@ -159,6 +160,9 @@ def get_run_history(request_id: str) -> RunHistoryOut:
     ★ 재실행하면 같은 `request_id` 로 행이 여럿 생긴다. **최신을 돌려준다** —
       "그 요청 어떻게 됐냐"에는 마지막 결과가 답이다. 전체 이력이 필요하면
       `run_id` 로 목록을 훑는다.
+
+    ★ 결정은 **전부** 싣는다 (실행과 달리 최신 하나로 접지 않는다).
+      번복이 있었다는 사실 자체가 답의 일부다 — `is_current` 로 최신만 표시한다.
     """
     row = get_run_by_request_id(request_id)
     plan = list(row.get("plan") or [])
@@ -176,4 +180,5 @@ def get_run_history(request_id: str) -> RunHistoryOut:
         ],
         request_payload=dict(row.get("request_payload") or {}),
         response_payload=dict(row.get("response_payload") or {}),
+        decisions=get_decisions(request_id),
     )

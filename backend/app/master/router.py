@@ -8,6 +8,8 @@
 
 from fastapi import APIRouter, HTTPException, status
 
+from app.master.decision import DecisionIn, DecisionOut, DecisionRejected
+from app.master.decision_service import get_decisions, record_decision
 from app.master.schemas import (
     ProcurementRunRequest,
     ProcurementRunResponse,
@@ -87,3 +89,55 @@ def master_run_history(request_id: str) -> RunHistoryOut:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
         ) from error
+
+
+@router.post(
+    "/runs/{request_id}/decision",
+    response_model=DecisionOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="사용자 결정 기록 — 승인 · 전체 거절 · 조건부 재요청",
+)
+def master_decide(request_id: str, body: DecisionIn) -> DecisionOut:
+    """마스터가 제시한 안에 대한 **사람의 결정**을 적는다 (회의 미결정 12번).
+
+    ★ **마스터 Flow 가 부를 수 없는 경로다.** 승인 게이트가 툴 목록 안에 있으면
+      마스터가 스스로 통과시킬 수 있다 — 8/26 회의가 "툴 바깥에 두어 우회 불가하게"로
+      정한 이유다. `flow.py` 는 이 모듈을 임포트하지 않는다.
+
+    ★ **적재 실패를 삼키지 않는다** — `/request` 와 반대다. 실행 이력은 없어도 결과를
+      줄 수 있지만, 결정이 안 남았는데 201 을 돌려주면 승인 없이 실행된 것과 같아진다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 404 | 그 업무 키의 실행이 없다 |
+    | 409 | 지금 상태에서 받을 수 없다 — `E4` 에 결정 · `E1` 아닌 날 승인 · 같은 안 재승인 |
+    | 422 | 요청이 틀렸다 — 제시되지 않은 안 · 라벨/조건 누락 |
+    """
+    try:
+        return record_decision(request_id, body)
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except DecisionRejected as error:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_409_CONFLICT if error.conflict else status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
+            detail=str(error),
+        ) from error
+
+
+@router.get(
+    "/runs/{request_id}/decisions",
+    response_model=list[DecisionOut],
+    summary="결정 이력 — 번복도 지우지 않고 남는다",
+)
+def master_decision_history(request_id: str) -> list[DecisionOut]:
+    """한 요청에 붙은 결정 전부. 오래된 것부터이며 최신 하나가 `is_current` 다.
+
+    ★ 실행이 없어도 **빈 목록**을 돌려준다. 결정이 없는 것과 요청이 없는 것을 여기서는
+      구분하지 않는다 — 그 구분은 `GET /master/runs/{request_id}` 가 404 로 답한다.
+    """
+    return get_decisions(request_id)

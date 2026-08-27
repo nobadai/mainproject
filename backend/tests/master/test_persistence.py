@@ -130,6 +130,7 @@ def test_이력을_찾으면_계획과_지문을_돌려준다(client, monkeypatc
         "response_payload": {"end_code": "E1_APPROVED"},
     }
     monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _: row)
+    monkeypatch.setattr("app.master.service.get_decisions", lambda _: [])
 
     data = client.get("/master/runs/REQ-20260827-0001").json()
     assert data["agent"] == "master"
@@ -156,6 +157,7 @@ def test_계획이_NULL_이어도_깨지지_않는다(client, monkeypatch):
         "response_payload": None,
     }
     monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _: row)
+    monkeypatch.setattr("app.master.service.get_decisions", lambda _: [])
 
     data = client.get("/master/runs/REQ-X").json()
     assert data["plan"] == []

@@ -1,0 +1,183 @@
+"""마스터 사용자 결정 — 스키마와 판단 규칙.
+
+회의 미결정 12번("사용자 선택 이후 실제 실행 여부 기록")에 대한 답이다.
+
+★ **LLM 이 없다.** 사람이 고른 것을 그대로 적는다. 해석할 것이 없다.
+
+★ **`flow.py` 는 이 모듈을 임포트하지 않는다.**
+  승인 게이트가 마스터가 부를 수 있는 툴 목록 안에 있으면 마스터가 스스로 통과시킬 수
+  있다. 8/26 회의가 "승인 게이트를 툴 바깥에 두어 우회 불가하게" 로 정한 이유다.
+
+★ **적재 실패를 삼키지 않는다.**
+  `persistence.record` 는 실패를 삼킨다 — 이력이 없는 것보다 결과를 못 주는 것이 나쁘기
+  때문이다. **결정은 반대다.** 안 남았는데 남았다고 하면 승인 없이 실행된 것과 같아진다.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, model_validator
+
+Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE"]
+
+#: 승인은 통과안이 있는 날에만 성립한다.
+_APPROVE_END_CODES: frozenset[str] = frozenset({"E1_APPROVED"})
+
+#: 사람이 결정할 것이 있는 종료 코드.
+#:
+#: `E4_NOT_STARTED` 는 뺀다 — 부서가 못 돈 날은 **회사의 판단이 아니라 실행 환경 문제**라
+#: 사람이 고를 것이 없다. 그날의 재시도는 결정이 아니라 새 요청이다.
+_DECIDABLE_END_CODES: frozenset[str] = frozenset(
+    {"E1_APPROVED", "E2_HELD", "E3_REJECTED", "E5_NO_FEASIBLE_PLAN"}
+)
+
+
+class DecisionRejected(ValueError):
+    """결정을 받을 수 없다. 라우터가 409/422 로 접는다.
+
+    ★ 조용히 무시하지 않는다. 받아 놓고 안 적으면 사용자는 결정한 줄 안다.
+    """
+
+    def __init__(self, message: str, *, conflict: bool = False) -> None:
+        super().__init__(message)
+        #: 요청 자체가 틀렸나(422) vs 지금 상태에서 받을 수 없나(409)
+        self.conflict = conflict
+
+
+class DecisionIn(BaseModel):
+    """`POST /master/runs/{request_id}/decision` 요청 본문."""
+
+    model_config = {"extra": "forbid"}
+
+    decision: Decision
+    scenario_label: str | None = Field(
+        default=None,
+        description="APPROVE 일 때 필수. 그 실행이 실제로 내놓은 안의 label 이어야 한다.",
+    )
+    condition_text: str | None = Field(
+        default=None,
+        min_length=1,
+        description="REQUEST_CHANGE 일 때 필수. 조건 없는 재요청은 그냥 거절이다.",
+    )
+    decided_by: str = Field(
+        min_length=1,
+        description="승인자. 승인자가 없는 승인은 승인이 아니다.",
+    )
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _shape_matches_decision(self) -> DecisionIn:
+        """DB CHECK 과 같은 규칙을 입구에서도 건다.
+
+        ★ 두 곳에 두는 것이 중복이 아니다 — DB 는 **다른 경로로 들어온 행**도 막고,
+          여기는 **사용자에게 이유를 돌려준다**. 뒤에서 터지면 500 이 된다.
+        """
+        if self.decision == "APPROVE" and not self.scenario_label:
+            raise ValueError("APPROVE 에는 고른 안(scenario_label)이 있어야 한다.")
+        if self.decision != "APPROVE" and self.scenario_label:
+            raise ValueError(
+                f"{self.decision} 에는 scenario_label 을 넣지 않는다 — "
+                "무엇을 거절했는지가 두 가지로 읽힌다."
+            )
+        if self.decision == "REQUEST_CHANGE" and not self.condition_text:
+            raise ValueError("REQUEST_CHANGE 에는 조건(condition_text)이 있어야 한다.")
+        return self
+
+
+class DecisionOut(BaseModel):
+    """적재된 결정 1건."""
+
+    decision_id: UUID
+    request_id: str
+    decision_seq: int
+    decision: Decision
+    scenario_label: str | None = None
+    condition_text: str | None = None
+    decided_by: str
+    follow_up_request_id: str | None = None
+    end_code_at_decision: str
+    note: str | None = None
+    created_at: datetime
+
+    is_current: bool = Field(
+        default=False,
+        description="최신 결정인가. 번복이 있으면 이전 것은 False — 지우지 않고 접는다.",
+    )
+
+
+# ── 판단 ────────────────────────────────────────────────────────────────
+
+
+def scenario_labels_of(response_payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """그 실행이 실제로 내놓은 안의 label 목록.
+
+    ★ 라벨을 열거로 박지 않고 **응답에서 읽는** 이유 — '보수·기본·공격' 은 매입의
+      계약이다. 여기에 복제하면 매입이 라벨을 바꿀 때 조용히 어긋난다.
+    """
+    scenarios = response_payload.get("scenarios") or []
+    out: list[str] = []
+    for scenario in scenarios:
+        if not isinstance(scenario, Mapping):
+            continue
+        label = scenario.get("label")
+        if isinstance(label, str) and label:
+            out.append(label)
+    return tuple(out)
+
+
+def check_decidable(end_code: str, decision: Decision) -> None:
+    """지금 상태에서 이 결정을 받을 수 있나.
+
+    ★ `E4` 에는 아무 결정도 받지 않는다. 부서가 못 돈 날을 사람이 "승인" 하면
+      **아무도 판단하지 않은 계획이 승인된 것으로 남는다.**
+    """
+    if end_code not in _DECIDABLE_END_CODES:
+        raise DecisionRejected(
+            f"{end_code} 인 실행에는 결정을 받지 않는다 — "
+            "부서가 못 돈 날은 사람이 고를 것이 없다. 재시도는 새 요청이다.",
+            conflict=True,
+        )
+    if decision == "APPROVE" and end_code not in _APPROVE_END_CODES:
+        raise DecisionRejected(
+            f"{end_code} 에는 승인할 안이 없다 (통과안은 E1_APPROVED 에만 있다).",
+            conflict=True,
+        )
+
+
+def check_scenario_exists(
+    scenario_label: str | None,
+    available: Sequence[str],
+) -> None:
+    """고른 안이 그 실행에 실제로 있었나.
+
+    ★ **이 검사가 이 모듈의 핵심이다.** 없는 안을 승인하면 이력에는 승인이 남고
+      대조할 대상은 없다 — 나중에 "무엇을 승인했나" 에 답할 수 없다.
+    """
+    if scenario_label is None:
+        return
+    if scenario_label not in available:
+        shown = ", ".join(available) if available else "(없음)"
+        raise DecisionRejected(
+            f"'{scenario_label}' 은 이 실행이 내놓은 안이 아니다. 제시된 안: {shown}",
+        )
+
+
+def next_seq(existing: Sequence[DecisionOut]) -> int:
+    """번복은 덮어쓰지 않고 회차를 올린다."""
+    return max((row.decision_seq for row in existing), default=0) + 1
+
+
+def mark_current(rows: Sequence[DecisionOut]) -> list[DecisionOut]:
+    """최신 회차 하나만 `is_current=True` 로.
+
+    ★ DB 에 플래그를 두지 않는다. 플래그는 UPDATE 를 부르고, UPDATE 는 append-only 를
+      깬다. 최대 회차에서 **파생**하면 이력이 그대로 남는다.
+    """
+    if not rows:
+        return []
+    top = max(row.decision_seq for row in rows)
+    return [row.model_copy(update={"is_current": row.decision_seq == top}) for row in rows]
