@@ -7,13 +7,18 @@
 순수 함수가 소유하고, LLM은 rationale의 claim이 원본과 맞는지 보는 데만 쓴다.
 """
 
+from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
-from app.purchase_agent.nodes.draft_plan import purchase_budget_krw, warehouse_cap_kg
+from app.purchase_agent.nodes.draft_plan import (
+    pending_value,
+    purchase_budget_krw,
+    warehouse_cap_kg,
+)
 from app.purchase_agent.schemas import (
     DOCUMENT_SOURCE,
     FIXED_MARKET,
@@ -253,6 +258,80 @@ def check_document_publication(
     return None
 
 
+def check_payment_schedule(scenario: dict, state: PurchaseAgentState) -> str | None:
+    """지급 계획이 **분할·총량·총액과 어긋나지 않는가** (재무 확정분 · 제안 §3.2 항등식 5).
+
+    재무가 이 값을 자기 Cashflow에 얹어 검증하므로(회신 §6), 여기서 어긋난 채 나가면
+    **재무 판정이 틀린 입력 위에서 이뤄진다.** 어느 쪽도 에러를 내지 않는다.
+
+    다섯 가지를 본다:
+
+    1. ``Σ qty_kg == total_qty_kg``            — 사중 일치의 지급 축 판
+    2. ``Σ amount_krw == total_amount_krw``    — BASE Cashflow의 전제
+    3. ``purchase_date == split_plan[i].date`` — seq 대응. 어긋나면 다른 회차의 돈이 된다
+    4. ``payment_date == purchase_date + N5``  — calendar day, 영업일 보정 없음
+    5. **일괄 안에는 키가 없다**               — 있으면 실을 것이 없는데 실은 것이다
+
+    N5가 미결이면 애초에 만들어지지 않으므로(``build_payment_schedule``) 검사 대상도
+    아니다 — 그 사실은 ``deferred_checks``가 싣는다.
+    """
+    schedule = scenario.get("payment_schedule")
+    rounds = scenario["split_plan"]
+    payment_days = pending_value(state, load_constraints(), "purchase_payment_days")
+    #: N5를 받았고 분할이면 **있어야 한다.** 없으면 만들어야 할 것이 사라진 것이다.
+    expected = payment_days is not None and payment_days >= 0 and len(rounds) > 1
+
+    if schedule is None:
+        # ⚠️ 처음엔 여기서 무조건 통과시켰는데, **키를 지우면 검사가 통째로 빠졌다**
+        # (Codex 교차검증 P1). 있어야 하는 날 없는 것도 위반이다.
+        if expected:
+            return f"분할 {len(rounds)}회인데 payment_schedule이 없다 (N5={payment_days} 수신)"
+        return None
+    if not expected:
+        # N5가 미결이거나 일괄인데 실렸다 — 계산할 수 없거나 실을 것이 없는 값이다.
+        reason = "일괄 안" if len(rounds) <= 1 else f"N5 미결(={payment_days})"
+        return f"{reason}에 payment_schedule이 실렸다 — 만들 수 없는 값이다"
+    if len(schedule) != len(rounds):
+        return f"지급 계획 회차 수 불일치: {len(schedule)}건 vs 분할 {len(rounds)}회"
+
+    qty = sum(row["qty_kg"] for row in schedule)
+    if qty != scenario["total_qty_kg"]:
+        return f"지급 계획 수량 합 {qty:,}kg ≠ 총량 {scenario['total_qty_kg']:,}kg"
+
+    amount = sum(row["amount_krw"] for row in schedule)
+    if amount != scenario["total_amount_krw"]:
+        return f"지급 계획 금액 합 {amount:,}원 ≠ 총액 {scenario['total_amount_krw']:,}원"
+
+    for row, item in zip(schedule, rounds, strict=True):
+        if row["seq"] != item["seq"] or row["purchase_date"] != item["date"]:
+            return (
+                f"지급 계획이 분할과 어긋난다: seq {row['seq']}/{item['seq']} · "
+                f"{row['purchase_date']}/{item['date']}"
+            )
+        # ⚠️ **회차별 수량도 본다.** 합만 보면 1회차에서 빼 2회차에 더하는 이동이
+        # 통과하고, 그러면 **BASE 현금유출이 잘못된 날짜에 배치된다** (Codex 교차검증 P1).
+        if row["qty_kg"] != item["qty_kg"]:
+            return (
+                f"회차 {item['seq']} 수량이 분할과 다르다: "
+                f"{row['qty_kg']:,}kg ≠ {item['qty_kg']:,}kg"
+            )
+        due = date.fromisoformat(row["purchase_date"]) + timedelta(days=payment_days)
+        if row["payment_date"] != due.isoformat():
+            return (
+                f"지급일이 매입일 + N5({payment_days})와 다르다: "
+                f"{row['payment_date']} ≠ {due.isoformat()}"
+            )
+        # ⚠️ **STRESS 금액을 검증한다.** 재무가 이 값을 그대로 STRESS Cashflow에 쓰므로
+        # 틀리면 REVIEW/FAIL이 PASS로 왜곡된다 (Codex 교차검증 P1).
+        stress = row["qty_kg"] * scenario["max_price"]
+        if row["amount_max_krw"] != stress:
+            return (
+                f"회차 {item['seq']} STRESS 금액이 수량×상한가와 다르다: "
+                f"{row['amount_max_krw']:,} ≠ {stress:,}"
+            )
+    return None
+
+
 def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str | None:
     """전 안이 동일 축이면 반려 (정의서 §3.5.1-3 — "코드가 최종 중복 검사 ... (self_check)").
 
@@ -298,6 +377,7 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             # 가정하지 않고 각자 문서를 다시 찾는다.
             or check_document_publication(scenario, state["context_docs"], state["date"])
             or check_excerpt_fidelity(scenario, state["context_docs"])
+            or check_payment_schedule(scenario, state)
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})
