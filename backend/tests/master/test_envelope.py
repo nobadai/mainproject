@@ -245,11 +245,80 @@ def test_비어있지_않은_리스트는_근거가_필요하다():
     assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
 
 
-def test_중첩_구조는_재귀하지_않는다():
-    # verdicts[].verdict 의 근거 규칙은 도메인이 정한다
+# ── 배열 payload — 매입 파트 요청으로 v0.3 에서 확대 ──────────────────
+
+
+def test_배열_항목의_라벨은_근거를_요구하지_않는다():
+    """`verdict`·`scenario_id` 는 구조 식별자이거나 그 에이전트 자신의 판정이다."""
     payload = {"verdicts": [{"scenario_id": "SCN-1", "verdict": "reject"}]}
-    f = check_evidence_coverage(reply(payload=payload, evidences=(ev("verdicts"),)))
-    assert f == []
+    assert check_evidence_coverage(reply(payload=payload)) == []
+
+
+def test_배열_항목의_숫자는_근거가_필요하다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 9107750}]}
+    f = check_evidence_coverage(reply(payload=payload))
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+    assert "scenarios[0].total_amount_krw" in f[0].where
+
+
+def test_경로_표기로_번호를_가리킬_수_있다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 9107750}]}
+    ok = reply(
+        payload=payload,
+        evidences=(ev("scenarios[0].total_amount_krw", 9107750.0),),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_경로_표기로_이름을_가리킬_수_있다():
+    """`scenarios[공격].total_amount_krw` — 도메인마다 식별 필드가 다르다."""
+    payload = {
+        "scenarios": [
+            {"label": "기본", "total_amount_krw": 9107750},
+            {"label": "공격", "total_amount_krw": 12363250},
+        ]
+    }
+    ok = reply(
+        payload=payload,
+        evidences=(
+            ev("scenarios[기본].total_amount_krw", 9107750.0),
+            ev("scenarios[공격].total_amount_krw", 12363250.0),
+        ),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_같은_이름_필드가_여러_벌이면_각각_필요하다():
+    payload = {
+        "scenarios": [
+            {"label": "보수", "total_amount_krw": 3642250},
+            {"label": "기본", "total_amount_krw": 9107750},
+        ]
+    }
+    f = check_evidence_coverage(
+        reply(payload=payload, evidences=(ev("scenarios[보수].total_amount_krw", 3642250.0),))
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+    assert "scenarios[1]" in f[0].where
+
+
+def test_없는_항목을_가리키면_고아다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 1}]}
+    f = check_evidence_coverage(
+        reply(payload=payload, evidences=(ev("scenarios[공격].total_amount_krw"),))
+    )
+    assert "E-EVIDENCE-ORPHAN" in [x.code for x in f]
+
+
+def test_없는_필드를_가리키면_고아다():
+    payload = {"scenarios": [{"label": "기본", "total_amount_krw": 1}]}
+    f = check_evidence_coverage(
+        reply(
+            payload=payload,
+            evidences=(ev("scenarios[0].total_amount_krw"), ev("scenarios[0].ghost")),
+        )
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-ORPHAN"]
 
 
 def test_근거가_붙으면_통과한다():
@@ -362,3 +431,108 @@ def test_재무_PRE_PURCHASE_정상_경로는_발견_0():
         llm_status="SUCCESS",
     )
     assert validate_reply(request, r, meta) == ()
+
+
+# ── judgment_fields — 소문자 판정 라벨 (v0.4 · 매입 파트 지적) ──────────
+
+
+def test_소문자_판정_라벨은_휴리스틱이_못_잡는다():
+    """`situation: "stable"` — 대문자 규칙의 한계를 사실로 고정한다."""
+    f = check_evidence_coverage(reply(payload={"situation": "stable"}))
+    assert f == []
+
+
+def test_선언하면_표기와_무관하게_요구한다():
+    f = check_evidence_coverage(
+        reply(payload={"situation": "stable"}, judgment_fields=("situation",))
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+
+
+def test_선언한_판정에_근거가_붙으면_통과():
+    ok = reply(
+        payload={"situation": "stable"},
+        judgment_fields=("situation",),
+        evidences=(ev("situation", 0.06, "ratio"),),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_대문자_라벨은_선언_없이도_걸린다():
+    """휴리스틱은 자동 하한으로 남는다."""
+    f = check_evidence_coverage(reply(payload={"payment_pressure": "MEDIUM"}))
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+
+
+def test_없는_필드를_판정으로_선언하면_걸린다():
+    """오타를 조용히 넘기면 그 검사가 통째로 빈다."""
+    f = check_evidence_coverage(
+        reply(payload={"situation": "stable"}, judgment_fields=("situaton",))
+    )
+    assert "E-JUDGMENT-UNKNOWN" in [x.code for x in f]
+
+
+def test_매입_출력_형태_전체():
+    """situation · allowed_axes · scenarios[] 를 한 번에."""
+    payload = {
+        "situation": "stable",
+        "allowed_axes": ["quantity", "timing"],
+        "scenarios": [
+            {"label": "기본", "total_amount_krw": 9107750, "total_qty_kg": 6429},
+            {"label": "공격", "total_amount_krw": 12363250, "total_qty_kg": 8000},
+        ],
+    }
+    ok = reply(
+        payload=payload,
+        judgment_fields=("situation", "allowed_axes"),
+        evidences=(
+            ev("situation", 0.06, "ratio"),
+            ev("allowed_axes", 2.0, "count"),
+            ev("scenarios[기본].total_amount_krw", 9107750.0),
+            ev("scenarios[기본].total_qty_kg", 6429.0, "kg"),
+            ev("scenarios[공격].total_amount_krw", 12363250.0),
+            ev("scenarios[공격].total_qty_kg", 8000.0, "kg"),
+        ),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+# ---------------------------------------------------------------------------
+# E-PLAN-EMPTY 예외 — STATUS_QUERY (v0.6 · 매입 파트 지적)
+# ---------------------------------------------------------------------------
+
+
+def _reply_with_mode(mode):
+    return AgentReply(
+        request_id="REQ-1",
+        as_of=AS_OF,
+        agent="purchase",
+        mode=mode,
+        run_id="PUR-1",
+        runtime_status="READY",
+        business_status="ok",
+    )
+
+
+def _meta_no_tools():
+    return ExecutionMetadata(run_id="PUR-1", request_id="REQ-1", agent="purchase")
+
+
+def test_status_query_is_exempt_from_plan_empty():
+    """조회는 재현할 판단이 없다 — Tool 없이 답해도 정상이다."""
+    findings = validate_reply(
+        req("purchase", "STATUS_QUERY"),
+        _reply_with_mode("STATUS_QUERY"),
+        _meta_no_tools(),
+    )
+    assert not [f for f in findings if f.code == "E-PLAN-EMPTY"]
+
+
+def test_generate_scenarios_still_requires_tools():
+    """예외는 STATUS_QUERY 에만 붙는다 — 판단하는 mode 는 그대로 걸린다."""
+    findings = validate_reply(
+        req("purchase", "GENERATE_SCENARIOS"),
+        _reply_with_mode("GENERATE_SCENARIOS"),
+        _meta_no_tools(),
+    )
+    assert [f for f in findings if f.code == "E-PLAN-EMPTY"]

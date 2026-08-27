@@ -1,3 +1,6 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# STATUS: ACTIVE · 공용 (2026-08-26) — persistence.py 와 같은 계열. 위치 재검토 대상.
+# ─────────────────────────────────────────────────────────────────────────────
 """오케스트레이터 · Critic 실행이력 Repository.
 
 ★ 코어의 DB 미접근 원칙(§5.1)은 그대로다. 여기는 **계산이 끝난 뒤** 요청·응답을 적는
@@ -24,7 +27,7 @@ from app.finance.db import execute_returning_one, fetch_all, fetch_one, get_db_s
 
 logger = logging.getLogger(__name__)
 
-Agent = Literal["orchestrator", "critic"]
+Agent = Literal["orchestrator", "critic", "master"]
 RunCycle = Literal["PROCUREMENT", "SALES", "DAY", "A", "B"]
 
 _TABLE = "orchestrator_agent_runs"
@@ -46,6 +49,8 @@ _COLUMNS = (
     "elapsed_ms",
     "request_payload",
     "response_payload",
+    "request_id",
+    "plan",
     "created_at",
 )
 
@@ -68,6 +73,8 @@ class OrchestratorAgentRun(TypedDict):
     elapsed_ms: int | None
     request_payload: dict[str, object]
     response_payload: dict[str, object]
+    request_id: str | None
+    plan: list[dict[str, object]] | None
     created_at: datetime
 
 
@@ -97,17 +104,25 @@ def save_run(
     llm_attempts: int | None = None,
     llm_fallback_used: bool | None = None,
     elapsed_ms: int | None = None,
+    request_id: str | None = None,
+    plan: list[dict[str, object]] | None = None,
 ) -> OrchestratorAgentRun:
-    """실행 1건을 적재한다."""
+    """실행 1건을 적재한다.
+
+    ★ `request_id`·`plan` 은 마스터 행에만 채워진다 (2026-08-27).
+      오케·Critic 은 UUID 로 조회하지만 마스터는 **업무 키**(`REQ-20260827-0001`)로 찾는다.
+      `plan` 을 응답 원문 안에 묻지 않고 컬럼으로 뺀 것은, 검증 Tool 의 ④ 실행 계획
+      온전성 검사(M-16)가 **이것만** 읽기 때문이다.
+    """
     query = sql.SQL(
         """
         INSERT INTO {}.{} (
             run_id, agent, cycle, as_of, run_seq, snapshot_id, runtime_status,
             critic_status, coverage_ran, coverage_total,
             llm_status, llm_model, llm_attempts, llm_fallback_used, elapsed_ms,
-            request_payload, response_payload
+            request_payload, response_payload, request_id, plan
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING {}
         """
     ).format(
@@ -135,6 +150,8 @@ def save_run(
             elapsed_ms,
             Jsonb(request_payload),
             Jsonb(response_payload),
+            request_id,
+            Jsonb(plan) if plan is not None else None,
         ),
     )
     return cast(OrchestratorAgentRun, row)
@@ -177,6 +194,19 @@ def get_run(run_id: UUID) -> OrchestratorAgentRun:
     row = fetch_one(query, (run_id,))
     if row is None:
         raise LookupError(f"실행이력을 찾을 수 없습니다: {run_id}")
+    return cast(OrchestratorAgentRun, row)
+
+
+def get_run_by_request_id(request_id: str) -> OrchestratorAgentRun:
+    """마스터 업무 키로 찾는다 — 최신 1건.
+
+    같은 `request_id` 로 두 번 돌면(재실행) 행이 둘이 된다. **최신을 돌려준다** —
+    사용자가 "그 요청 어떻게 됐냐"고 물으면 마지막 결과를 기대한다.
+    """
+    query = _select() + sql.SQL(" WHERE request_id = %s ORDER BY created_at DESC LIMIT 1")
+    row = fetch_one(query, (request_id,))
+    if row is None:
+        raise LookupError(f"실행이력을 찾을 수 없습니다: {request_id}")
     return cast(OrchestratorAgentRun, row)
 
 
