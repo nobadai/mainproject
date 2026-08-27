@@ -34,11 +34,28 @@ from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
-from app.master.verifier import VerificationResult
-from app.orchestrator.contracts_core import EndCode
+from app.master.verifier import VerificationContext, VerificationResult
+from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode
 
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
+
+_FORECAST_ENVELOPE_KEYS: tuple[str, ...] = (
+    "generated_at",
+    "model_version",
+    "horizon_days",
+    "unit",
+    "price_basis",
+    "size_class",
+    "grade",
+)
+"""ML 봉투에서 **품목 블록으로 내려보내는** 필드 (ML 규격 v0.3 §1).
+
+★ `price_basis` · `size_class` · `grade` 가 여기 있는 이유가 중요하다.
+  매입의 상승률은 **분자를 ML 예측에서, 분모를 시세 실측에서** 가져온다. 둘이 다른
+  시리즈면 규격 차이를 가격 변동으로 읽고, **숫자는 멀쩡히 나오며 에러도 안 난다.**
+  봉투에만 두고 안 내려보내면 매입이 대조할 값 자체를 못 받는다.
+"""
 
 ADVISORS: tuple[AgentName, ...] = ("finance", "inventory")
 """1차 조언자. 영업은 구성에서 빠졌고 판매는 2차 MVP 다 (정의서 §2.1)."""
@@ -57,6 +74,7 @@ class VerifierPort(Protocol):
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
+        context: VerificationContext | None = None,
     ) -> VerificationResult: ...
 
     """★ 시나리오 배열이 아니라 **제안 전체**를 받는다.
@@ -111,6 +129,7 @@ class ProcurementFlow:
         verifier: VerifierPort | None = None,
         advisors: tuple[AgentName, ...] = ADVISORS,
         max_purchase_attempts: int = 2,
+        item: ItemCode | None = None,
         forecast: Mapping[str, Any] | None = None,
         confirmed_orders: Mapping[str, Any] | None = None,
         policy_values: Mapping[str, Any] | None = None,
@@ -119,6 +138,8 @@ class ProcurementFlow:
         self.verifier = verifier
         self.advisors = advisors
         self.max_purchase_attempts = max_purchase_attempts
+        self.item = item
+        self.constraint_evidences: dict[AgentName, tuple[Evidence, ...]] = {}
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
@@ -180,7 +201,7 @@ class ProcurementFlow:
                     purchase_attempts=attempts,
                 )
 
-            verdicts = self._validate(scenarios)
+            verdicts = self._validate(proposal, scenarios)
             verification = self._verify(proposal, constraints, verdicts)
 
             if self._acceptable(scenarios, verdicts, verification.findings):
@@ -214,12 +235,19 @@ class ProcurementFlow:
     # ── 단계 ────────────────────────────────────────────────────
 
     def _collect_constraints(self) -> dict[AgentName, Mapping[str, Any]]:
-        """① 재무·물류에게 실행 가능 경계를 받는다."""
+        """① 재무·물류에게 실행 가능 경계를 받는다.
+
+        ★ **근거도 같이 남긴다.** 전에는 `payload` 만 들고 있었는데, Critic 은 cap 축
+          마다 근거를 요구한다(§1.2-5). 근거를 안 넘기면 *"없는 것"* 이 아니라
+          **"안 넘긴 것"** 인데 계약 위반으로 잡힌다.
+        """
         out: dict[AgentName, Mapping[str, Any]] = {}
+        self.constraint_evidences = {}
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE")
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
+                self.constraint_evidences[agent] = reply.evidences
         return out
 
     def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
@@ -233,13 +261,52 @@ class ProcurementFlow:
           누수는 에러를 내지 않고 손익만 좋아지므로 여기서 막지 않으면 아무도 모른다.
         """
         payload: dict[str, Any] = {"constraints": dict(constraints)}
+        if self.item is not None:
+            payload["item"] = self.item
         if self.forecast is not None and self._forecast_is_clean():
-            payload["forecast"] = dict(self.forecast)
+            unwrapped = self._forecast_for_item()
+            if unwrapped is not None:
+                payload["forecast"] = unwrapped
         if self.confirmed_orders is not None:
             payload["confirmed_orders"] = dict(self.confirmed_orders)
         if self.policy_values is not None:
             payload["policy_values"] = dict(self.policy_values)
         return payload
+
+    def _forecast_for_item(self) -> dict[str, Any] | None:
+        """4품목 봉투에서 **이 품목 블록만** 꺼내 매입이 읽는 평면 모양으로 편다.
+
+        ML 은 하루 한 번 4품목을 한 봉투로 보내고(ML 규격 §8-4 · 매입 동의), 매입은
+        **품목 하나씩** 돈다. 그 사이를 잇는 것이 조립 책임이라 마스터 자리다 (§3.2.2).
+
+        ★ **값을 만들지 않는다.** 봉투 공통 필드를 블록에 얹고 이름만 바꾼다.
+          품목별 예측치를 여기서 고르거나 합치면 마스터가 ML 판단을 덮어쓰게 된다.
+
+        ★ 블록이 봉투를 이긴다. 같은 이름이 양쪽에 있으면 **품목별 값이 더 구체적**이다.
+
+        되돌리는 값이 `None` 이면 **싣지 않는다** — 매입이 `missing_data: ["forecast"]`
+        로 `RUNTIME_NOT_READY` 를 내고 그 사실이 이력에 남는다. 빈 dict 를 실으면
+        *"받았는데 비어 있다"* 가 되어 못 받은 것과 구분되지 않는다 (§1.2-10).
+        """
+        forecast = self.forecast
+        if forecast is None:
+            return None
+
+        items = forecast.get("items")
+        if not isinstance(items, Mapping):
+            # 평면 봉투 — 품목 축이 없는 현행 모양이다. 그대로 넘긴다.
+            return dict(forecast)
+
+        if self.item is None:
+            return None  # 어느 품목인지 모르는 채로 4품목 봉투를 넘길 수는 없다
+        block = items.get(self.item)
+        if not isinstance(block, Mapping):
+            return None  # 이 품목의 예측이 안 왔다
+
+        out = {key: forecast[key] for key in _FORECAST_ENVELOPE_KEYS if key in forecast}
+        out.update(block)
+        out["item"] = self.item
+        return out
 
     def _forecast_is_clean(self) -> bool:
         """예측 생성 시각이 `as_of` 이후면 싣지 않는다.
@@ -260,10 +327,20 @@ class ProcurementFlow:
         return generated[:10] <= self.runner.context.as_of.isoformat()
 
     def _validate(
-        self, scenarios: Sequence[Mapping[str, Any]]
+        self, proposal: Mapping[str, Any], scenarios: Sequence[Mapping[str, Any]]
     ) -> dict[AgentName, Mapping[str, Any]]:
-        """④ 각 조언자가 시나리오를 자기 관점에서 본다."""
-        payload = {"scenarios": list(scenarios)}
+        """④ 각 조언자가 시나리오를 자기 관점에서 본다.
+
+        ★ **시나리오 배열이 아니라 제안 전체를 넘긴다.**
+
+          전에는 `{"scenarios": [...]}` 만 보냈다. 그런데 물류는 도착일을 계산하려면
+          `meta.as_of` · `meta.item` 이 필요하고, 그 둘은 시나리오 안이 아니라 **제안
+          최상위**에 있다. 검증 Tool 이 `allowed_axes` 를 못 보던 것과 **같은 종류의
+          누락**이다 — 배열만 넘기면 그 판정을 못 본다.
+
+          `scenarios` 는 제안 안에 그대로 있으므로 기존 소비자(재무)는 안 바뀐다.
+        """
+        payload = {**proposal, "scenarios": list(scenarios)}
         out: dict[AgentName, Mapping[str, Any]] = {}
         for agent in self.advisors:
             reply = self.runner.call(agent, "SCENARIO_VALIDATION", payload)
@@ -289,7 +366,12 @@ class ProcurementFlow:
         """
         if self.verifier is None:
             return VerificationResult()
-        return self.verifier(proposal, constraints, verdicts, self.runner.plan)
+        context = VerificationContext(
+            as_of=self.runner.context.as_of,
+            item=self.item,
+            evidences=dict(self.constraint_evidences),
+        )
+        return self.verifier(proposal, constraints, verdicts, self.runner.plan, context)
 
     # ── 판단 ────────────────────────────────────────────────────
 

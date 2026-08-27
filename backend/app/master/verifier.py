@@ -11,8 +11,9 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
   `skipped` 에 사유와 함께 남긴다. 비워 두면 **"검사했고 통과했다"로 읽힌다.**
 
 ★ **커버리지를 감추지 않는다** (§3.7.6).
-  Critic 56검사가 아직 이 경로에 붙지 않았다는 사실 자체를 `skipped` 로 노출한다.
-  붙지 않은 것을 조용히 두면 시연에서 "검증이 돈다"가 사실이 아니게 된다.
+  Critic 56검사를 붙였고(2026-08-27), **몇 개가 돌았는지를 `skipped` 에 적는다.**
+  `findings: []` 만 보면 *"56검사를 통과했다"* 로 읽힌다 — 실제로는 부서 메타 미제출
+  같은 이유로 절반이 안 돌 수 있고, 그 사실이 같이 보여야 한다.
 
 ★ 왜 ①이 여기 없는가
   `E-BIND-*` · `E-EVIDENCE-*` · `E-REASONING-*` 는 `MasterRunner.call()` 이 호출마다
@@ -23,11 +24,39 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Any, Protocol
 
+from pydantic import ValidationError
+
+from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
+from app.critic.service import run_critic_procurement
+from app.master.critic_bridge import CriticSkipped, build_request, fold
 from app.master.envelope import AgentName
 from app.master.plan import ExecutionPlan
+from app.orchestrator.contracts_core import Evidence
+
+
+class CriticPort(Protocol):
+    """Critic 진입점. 갈아 끼울 수 있게 두는 이유는 테스트가 아니라 **격리**다 —
+    검증 Tool 이 도메인 구현에 직접 묶이면 Critic 이 바뀔 때 마스터가 흔들린다."""
+
+    def __call__(self, req: CriticProcurementRequest) -> CriticVerdictOut: ...
+
+
+@dataclass(frozen=True)
+class VerificationContext:
+    """검증이 **부서 판정을 넘어** 보려면 필요한 것.
+
+    ★ `evidences` 가 여기 있는 이유 — `constraints` 는 payload 만 담는다. Critic 은
+      cap 축마다 근거를 요구하므로(§1.2-5) 근거 없이 넘기면 **없는 것이 아니라 안 넘긴
+      것인데 계약 위반으로 잡힌다.**
+    """
+
+    as_of: date
+    item: str | None = None
+    evidences: Mapping[AgentName, tuple[Evidence, ...]] = field(default_factory=dict)
 
 
 def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
@@ -36,10 +65,68 @@ def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
         return ()
     return tuple(item for item in raw if isinstance(item, Mapping))
 
+
+def _rows(value: Any) -> tuple[Mapping[str, Any], ...] | None:
+    """매핑들의 배열인가. **아니면 `None`** — 빈 배열과 구분한다.
+
+    빈 배열로 접으면 *"항목이 없다"* 와 *"키가 없다"* 가 같아 보인다. 앞은 계약 위반이고
+    뒤는 아직 안 실린 것이라 처리가 다르다.
+    """
+    if value is None or isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        return None
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _int_of(value: Any) -> int | None:
+    """정수로 읽는다. `bool` 은 배제한다 — `True` 가 `1` 로 새면 검사가 조용히 통과한다."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _sum_field(rows: Any, field: str) -> int | None:
+    """항목들의 한 필드를 더한다. **하나라도 못 읽으면 `None`** — 부분합은 대조에 못 쓴다."""
+    items = _rows(rows)
+    if items is None:
+        return None
+    total = 0
+    for item in items:
+        value = _int_of(item.get(field))
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def _sum_product(rows: Any, left: str, right: str) -> int | None:
+    items = _rows(rows)
+    if items is None:
+        return None
+    total = 0
+    for item in items:
+        a, b = _int_of(item.get(left)), _int_of(item.get(right))
+        if a is None or b is None:
+            return None
+        total += a * b
+    return total
+
+
+def _day_gap(start: Any, end: Any) -> int | None:
+    """`YYYY-MM-DD` 두 개의 일수 차이. calendar day 다 — 영업일 보정 없음 (N5)."""
+    try:
+        return (date.fromisoformat(str(end)) - date.fromisoformat(str(start))).days
+    except (ValueError, TypeError):
+        return None
+
+
 # 매입이 밝힌 판정 필드 (2026-08-27 회신). 없으면 그 검사는 skipped 다.
 _ALLOWED_AXES = "allowed_axes"
 _SPLIT_PLAN = "split_plan"
 _TIMING = "timing"
+
+# 분할 매입 지급 일정 — 매입 §3.2 제안 · 재무 회신으로 필드 확정 (2026-08-27)
+_PAYMENT_SCHEDULE = "payment_schedule"
+_SOURCING_PLAN = "sourcing_plan"
 
 
 @dataclass(frozen=True)
@@ -82,8 +169,14 @@ class MasterVerifier:
       마스터가 제대로 합쳤나 · 합친 결과가 앞뒤가 맞나"* 를 본다.
     """
 
-    def __init__(self, required_advisors: tuple[AgentName, ...] = ("finance", "inventory")):
+    def __init__(
+        self,
+        required_advisors: tuple[AgentName, ...] = ("finance", "inventory"),
+        critic: CriticPort | None = run_critic_procurement,
+    ):
         self.required_advisors = required_advisors
+        self.critic = critic
+        """Critic 56검사. `None` 이면 **돌리지 않은 사실이 `skipped` 에 남는다.**"""
 
     def __call__(
         self,
@@ -91,11 +184,15 @@ class MasterVerifier:
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
+        context: VerificationContext | None = None,
     ) -> VerificationResult:
         """★ 시나리오 배열이 아니라 **제안 전체**를 받는다 (2026-08-27 매입 스키마 확인).
 
         `allowed_axes` · `situation` · `confidence` 는 `scenarios[]` 안이 아니라
         **제안 최상위**에 있다(`PurchaseProposal`). 배열만 받으면 그 판정들을 볼 수 없다.
+
+        ★ `context` 는 Critic 에 넘길 때만 쓴다 — `as_of` · 품목 · 조언자 Evidence.
+          주지 않으면 Critic 을 돌리지 않고 그 사실을 `skipped` 에 남긴다.
         """
         scenarios = _scenarios_of(proposal)
         findings: list[str] = []
@@ -104,9 +201,82 @@ class MasterVerifier:
 
         self._check_plan_integrity(plan, scenarios, findings, concerns)
         self._check_timing_gate(proposal, scenarios, findings, skipped)
+        identity_findings = len(findings)
+        self._check_scenario_identities(scenarios, findings, skipped)
+        identity_broken = len(findings) > identity_findings
+        self._check_payment_schedule(scenarios, constraints, findings, skipped)
+        self._run_critic(
+            proposal, constraints, context, identity_broken, findings, concerns, skipped
+        )
         self._declare_uncovered(skipped)
 
         return VerificationResult(tuple(findings), tuple(concerns), tuple(skipped))
+
+    # ── Critic 56검사 (§3.7.1) ──────────────────────────────────
+
+    def _run_critic(
+        self,
+        proposal: Mapping[str, Any],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        context: VerificationContext | None,
+        identity_broken: bool,
+        findings: list[str],
+        concerns: list[str],
+        skipped: list[str],
+    ) -> None:
+        """★ **항등식이 깨졌으면 돌리지 않는다.**
+
+        Critic 의 금액 축은 `qty × unit_price` 로 다시 만들어지고, 그 단가는
+        `total_amount_krw / total_qty_kg` 에서 온다 — **두 값이 서로 맞을 때만** 뜻이
+        있는 표현이다. 어긋난 숫자 위에서 돌린 56검사는 **그럴듯한 통과**를 만든다.
+        그건 검증이 아니라 검증처럼 보이는 것이다.
+
+        ★ Critic 이 던지는 예외를 위로 올리지 않는다. 검증 Tool 이 죽으면 Flow 가
+          통째로 `ERROR` 가 되는데, **검증 실패는 매입 판단의 실패가 아니다.**
+        """
+        if self.critic is None:
+            skipped.append("Critic L0~L5 (56검사): 검증 Tool 에 주입되지 않음")
+            return
+        if context is None:
+            skipped.append("Critic L0~L5 (56검사): 실행 맥락 미전달 — as_of · 품목 · 근거 없음")
+            return
+        if identity_broken:
+            skipped.append(
+                "Critic L0~L5 (56검사): 시나리오 항등식이 깨져 돌리지 않았다 — "
+                "어긋난 숫자 위의 판정은 통과해도 뜻이 없다"
+            )
+            return
+
+        try:
+            request = build_request(
+                as_of=context.as_of,
+                item=context.item,
+                proposal=proposal,
+                constraints=constraints,
+                evidences=context.evidences,
+            )
+            verdict = self.critic(request)
+        except CriticSkipped as exc:
+            skipped.append(f"Critic L0~L5 (56검사): {exc}")
+            return
+        except ValidationError as exc:
+            # ★ 입력이 Critic 계약에 안 맞는 것은 **검증 Tool 의 고장이 아니다.**
+            #   매입이 허용 목록 밖 어휘를 내면 여기서 걸린다(예: strategy_type).
+            #   어느 필드인지 적어 `skipped` 로 남긴다 — 통과로 치지 않는다.
+            fields = " · ".join(
+                ".".join(str(part) for part in err["loc"]) for err in exc.errors()[:5]
+            )
+            skipped.append(f"Critic L0~L5 (56검사): 입력이 Critic 계약에 맞지 않는다 — {fields}")
+            return
+        except Exception as exc:  # noqa: BLE001 — 검증이 죽어도 Flow 는 살아야 한다
+            concerns.append(f"CRITIC: 검증 Tool 이 돌지 못했다 — {type(exc).__name__}: {exc}")
+            skipped.append("Critic L0~L5 (56검사): 실행 중 오류로 미판정")
+            return
+
+        critic_findings, critic_concerns, critic_skipped = fold(verdict)
+        findings.extend(critic_findings)
+        concerns.extend(critic_concerns)
+        skipped.extend(critic_skipped)
 
     # ── ④ 실행 계획 온전성 (M-16 · §3.7.4) ──────────────────────
     #
@@ -211,6 +381,185 @@ class MasterVerifier:
                     f"분할 {len(split)} 회차다 (allowed_axes={list(axes)})"
                 )
 
+    # ── ② 마스터 계산 재검산 (§3.7.3-②) ─────────────────────────
+    #
+    # 매입이 §4-2 에서 항등식을 명시해 줘서 성립하게 됐다. 그전에는 "무엇과 무엇이
+    # 같아야 하는가"가 계약에 없어 재검산할 대상 자체가 없었다.
+
+    def _check_scenario_identities(
+        self,
+        scenarios: Sequence[Mapping[str, Any]],
+        out: list[str],
+        skipped: list[str],
+    ) -> None:
+        """시나리오 층 항등식.
+
+        ```text
+        total_qty_kg     == Σ split_plan[].qty_kg == Σ sourcing_plan[].qty_kg
+        total_amount_krw == Σ(sourcing_plan[].qty_kg × grade_unit_price)
+        ```
+
+        ★ **자기검증이 아니다.** 매입도 같은 항등식을 강제한다고 했지만, 그 말을 믿는
+          것과 확인하는 것은 다르다. 여기서는 **원시 항목에서 독립적으로 다시 더해**
+          매입이 낸 합계와 대조한다 (§3.7.3-②).
+        """
+        for idx, scenario in enumerate(scenarios):
+            label = f"scenarios[{idx}]"
+            total_qty = _int_of(scenario.get("total_qty_kg"))
+            total_amount = _int_of(scenario.get("total_amount_krw"))
+
+            split_qty = _sum_field(scenario.get(_SPLIT_PLAN), "qty_kg")
+            source_qty = _sum_field(scenario.get(_SOURCING_PLAN), "qty_kg")
+            source_amount = _sum_product(scenario.get(_SOURCING_PLAN), "qty_kg", "grade_unit_price")
+
+            for name, got, expected in (
+                (f"{_SPLIT_PLAN} 수량 합", split_qty, total_qty),
+                (f"{_SOURCING_PLAN} 수량 합", source_qty, total_qty),
+            ):
+                if got is None or expected is None:
+                    skipped.append(f"L-IDENTITY-QTY: {label} 의 {name} 을 셀 수 없어 미검사")
+                elif got != expected:
+                    out.append(
+                        f"L-IDENTITY-QTY: {label} 의 {name} {got:,} ≠ total_qty_kg {expected:,}"
+                    )
+
+            if source_amount is None or total_amount is None:
+                skipped.append(f"L-IDENTITY-AMOUNT: {label} 의 등급별 금액을 셀 수 없어 미검사")
+            elif source_amount != total_amount:
+                out.append(
+                    f"L-IDENTITY-AMOUNT: {label} 의 Σ(수량×등급단가) {source_amount:,} "
+                    f"≠ total_amount_krw {total_amount:,}"
+                )
+
+    # ── ③ 분할 지급 일정 (매입 §3.2 · 재무 확정) ────────────────
+
+    def _check_payment_schedule(
+        self,
+        scenarios: Sequence[Mapping[str, Any]],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        out: list[str],
+        skipped: list[str],
+    ) -> None:
+        """분할 회차의 지급 일정이 시나리오와 맞물리는가.
+
+        매입이 검증 대상 항등식 5개를 명시했다(§3.2). 그대로 옮긴다.
+
+        ```text
+        ① Σ qty_kg          == total_qty_kg
+        ② Σ amount_krw      == total_amount_krw
+        ③ purchase_date     == split_plan[i].date   (seq 대응)
+        ④ payment_date      == purchase_date + N5
+        ⑤ 분할이 아닌 시나리오에는 이 키가 없다
+        ```
+
+        ★ **N5 를 상수로 박지 않는다.** 재무 payload 의 `purchase_payment_days` 를 쓰고,
+          없으면 ④를 `skipped` 로 남긴다. 7 을 박아 두면 정책이 바뀌어도 검사가
+          옛 값으로 통과시킨다 — 검사가 거짓말하는 가장 흔한 방식이다.
+
+        ★ ④는 **H1 확정 `payment_date` 가 있으면 건너뛴다** (재무: *"H1 값이
+          authoritative"*). 지금 경로에는 H1 이 없지만, 붙었을 때 이 검사가 정상
+          동작을 오류로 잡지 않게 미리 갈라 둔다.
+        """
+        pay_days = _int_of(constraints.get("finance", {}).get("purchase_payment_days"))
+
+        for idx, scenario in enumerate(scenarios):
+            label = f"scenarios[{idx}]"
+            split = _rows(scenario.get(_SPLIT_PLAN))
+            schedule = _rows(scenario.get(_PAYMENT_SCHEDULE))
+
+            # ⑤ 분할이 아닌 안에는 이 키가 없어야 한다
+            if schedule is not None and split is not None and len(split) <= 1:
+                out.append(
+                    f"L-PAYSCHED-UNEXPECTED: {label} 은 분할이 아닌데 "
+                    f"{_PAYMENT_SCHEDULE} 가 있다 (split {len(split)} 회차)"
+                )
+                continue
+
+            if schedule is None:
+                if split is not None and len(split) > 1:
+                    # 아직 안 실려 오는 신설 필드다. **통과로 치지 않는다.**
+                    skipped.append(
+                        f"L-PAYSCHED: {label} 은 분할 {len(split)} 회차인데 "
+                        f"{_PAYMENT_SCHEDULE} 가 없어 미검사"
+                    )
+                continue
+
+            self._payment_rows(label, scenario, split, schedule, pay_days, out, skipped)
+
+    def _payment_rows(
+        self,
+        label: str,
+        scenario: Mapping[str, Any],
+        split: Sequence[Mapping[str, Any]] | None,
+        schedule: Sequence[Mapping[str, Any]],
+        pay_days: int | None,
+        out: list[str],
+        skipped: list[str],
+    ) -> None:
+        # ① 수량 합
+        qty = _sum_field(schedule, "qty_kg")
+        total_qty = _int_of(scenario.get("total_qty_kg"))
+        if qty is not None and total_qty is not None and qty != total_qty:
+            out.append(
+                f"L-PAYSCHED-QTY: {label} 의 회차 수량 합 {qty:,} ≠ total_qty_kg {total_qty:,}"
+            )
+
+        # ② 금액 합 — 회차 금액은 오늘 단가 기준 추정이지만 **합은 총액과 같아야 한다**
+        amount = _sum_field(schedule, "amount_krw")
+        total_amount = _int_of(scenario.get("total_amount_krw"))
+        if amount is not None and total_amount is not None and amount != total_amount:
+            out.append(
+                f"L-PAYSCHED-AMOUNT: {label} 의 회차 금액 합 {amount:,} "
+                f"≠ total_amount_krw {total_amount:,}"
+            )
+
+        # ③ 매입일이 split_plan 과 seq 대응하는가
+        if split is None:
+            skipped.append(f"L-PAYSCHED-DATE: {label} 에 {_SPLIT_PLAN} 이 없어 대조 불가")
+        elif len(split) != len(schedule):
+            out.append(
+                f"L-PAYSCHED-DATE: {label} 의 회차 수가 다르다 — "
+                f"{_SPLIT_PLAN} {len(split)} vs {_PAYMENT_SCHEDULE} {len(schedule)}"
+            )
+        else:
+            for row, plan_row in zip(schedule, split, strict=True):
+                seq = row.get("seq")
+                if row.get("purchase_date") != plan_row.get("date"):
+                    out.append(
+                        f"L-PAYSCHED-DATE: {label} seq {seq} 의 purchase_date "
+                        f"{row.get('purchase_date')} ≠ {_SPLIT_PLAN} 의 {plan_row.get('date')}"
+                    )
+
+        # ④ 지급일 = 매입일 + N5
+        for row in schedule:
+            seq = row.get("seq")
+            if row.get("h1_payment_date") or row.get("payment_date_authoritative"):
+                skipped.append(f"L-PAYSCHED-N5: {label} seq {seq} 는 H1 확정 지급일이라 미검사")
+                continue
+            if pay_days is None:
+                skipped.append(
+                    f"L-PAYSCHED-N5: {label} seq {seq} — 재무 purchase_payment_days 가 없어 미검사"
+                )
+                continue
+            gap = _day_gap(row.get("purchase_date"), row.get("payment_date"))
+            if gap is None:
+                skipped.append(f"L-PAYSCHED-N5: {label} seq {seq} 의 날짜를 읽을 수 없어 미검사")
+            elif gap != pay_days:
+                out.append(f"L-PAYSCHED-N5: {label} seq {seq} 의 지급 간격 D+{gap} ≠ D+{pay_days}")
+
+        # 상한 — 재무가 STRESS Cashflow 로 쓴다. 수량 × 상한가여야 한다
+        max_price = _int_of(scenario.get("max_price"))
+        for row in schedule:
+            declared = _int_of(row.get("amount_max_krw"))
+            row_qty = _int_of(row.get("qty_kg"))
+            if declared is None or row_qty is None or max_price is None:
+                continue
+            if declared != row_qty * max_price:
+                out.append(
+                    f"L-PAYSCHED-MAX: {label} seq {row.get('seq')} 의 amount_max_krw "
+                    f"{declared:,} ≠ qty {row_qty:,} × max_price {max_price:,}"
+                )
+
     # ── 커버리지 정직성 (§3.7.6) ────────────────────────────────
 
     def _declare_uncovered(self, skipped: list[str]) -> None:
@@ -219,8 +568,4 @@ class MasterVerifier:
         ★ 이 줄이 없으면 `findings: []` 가 **"56검사를 통과했다"로 읽힌다.**
           붙지 않은 것을 조용히 두는 것이 커버리지를 감추는 가장 흔한 방식이다.
         """
-        skipped.append(
-            "Critic L0~L5 (56검사): 마스터 경로 미배선 — "
-            "도메인 payload 필드명 미확정(물류 미제출 · 매입 키 표 미수령)"
-        )
         skipped.append("②마스터 계산 재검산: 결합·클리핑 Tool 이 Flow 에 붙은 뒤 가능")

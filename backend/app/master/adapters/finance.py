@@ -46,6 +46,31 @@ _T_PRESSURE = "analyze_payment_pressure"
 # 매입이 읽는 판정 필드. 대문자라 휴리스틱도 잡지만, 소문자로 바뀌어도 살아남게 선언한다.
 _JUDGMENT_FIELDS = ("payment_pressure",)
 
+_POLICY_KEYS_IN_USE: tuple[str, ...] = (
+    "purchase_payment_days",
+    "payroll_date",
+    "monthly_labor_cost_krw",
+    "minimum_cash_balance_krw",
+    "cashflow_projection_days",
+)
+"""이 어댑터의 산출에 실제로 들어가는 정책값.
+
+★ **전부 `source_refs` 에 있어야 한다** — 없으면 DB 가 아니라 Schema default 다.
+  Repository 가 그 키를 조회하지 않으면 Pydantic 기본값이 대신 쓰이는데, 값은 멀쩡히
+  나오고 에러도 안 난다. **DB 를 고쳐도 반영되지 않는다는 사실만 조용히 숨는다.**
+
+  실제로 `payroll_date` 가 그 상태였다(2026-08-27 재무 후속회신 §3). DB(10)와
+  default(10)가 우연히 같아 양쪽 다 눈치채지 못했다.
+
+목록을 여기 두는 이유는 재무 Policy 에 필드가 늘어도 **우리가 쓰는 것만** 보기 위해서다."""
+
+_PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date")
+"""이 둘은 **출처가 없으면 계산 자체가 안 된다** (재무 #63 · M-23).
+
+나머지 정책값은 출처가 없어도 값은 쓸 수 있어 `missing_data` 로 밝히고 지나가지만,
+급여는 다르다 — 출처 없는 급여 이벤트를 만들지 않기로 재무가 정했으므로 **급여 유출이
+통째로 빠진다.** 그 상태의 `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다.**"""
+
 
 def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
@@ -88,6 +113,31 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     policy = context.policy
     horizon_end = as_of + timedelta(days=policy.cashflow_projection_days)
 
+    # 🔴 급여 출처가 없으면 **투영을 만들지 않는다** (2026-08-27 재무 #63).
+    #
+    #    재무가 `build_payroll_schedule` 을 fail-closed 로 바꿨다 — 출처 없는 급여
+    #    이벤트를 만들지 않는다(M-23). 옳은 방향이라 여기서도 그 뜻을 따른다.
+    #
+    #    ★ 다만 **예외로 새게 두지 않는다.** 그대로 두면 `MasterRunner` 가 `ERROR`
+    #      로 바꾸는데, 입력이 없어서 못 내는 답은 `RUNTIME_NOT_READY` 다 (M-1 §5.1).
+    #      둘은 재시도 가치가 다르다.
+    #
+    #    ★ **READY 로 두고 이름만 밝히면 안 된다.** 급여 유출이 통째로 빠진 투영은
+    #      `finance_cap` 을 낙관적으로 부풀린다 — 숫자는 나오고 에러도 안 난다.
+    payroll_refs = tuple(
+        f"{key}@policy_source_ref"
+        for key in _PAYROLL_SOURCE_KEYS
+        if not policy.source_refs.get(key)
+    )
+    if payroll_refs:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=payroll_refs,
+            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+        )
+
     tools.append(_T_CASHFLOW)
     events = (
         *context.cash_events,
@@ -120,8 +170,6 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         "critical_payment_dates": _critical_payment_dates(
             projection, outflows, policy.minimum_cash_balance_krw
         ),
-        # 현금이 바닥나는 날 — 위와 **다른 개념**이라 필드를 나눈다 (재무 구분)
-        "critical_cash_date": _critical_cash_date(projection),
         # ★ 재현 4종의 하나 (§3.2.4). 마스터가 준 policy_version 과 다를 수 있어 밝힌다 — M-20
         "policy_version_used": policy.policy_version,
     }
@@ -132,11 +180,17 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     #   같은 값을 계산하게 되고, N9 후 재산정 때 한쪽만 바뀐다 (2026-08-27 재무 확인).
     #   읽어서 싣기만 한다. 없으면 0 으로 채우지 않고 이름을 밝힌다 (§1.2-10).
     floor_rate = policy.margin_defense_floor_rate
-    missing: tuple[str, ...] = ()
+    missing: list[str] = []
     if floor_rate is None:
-        missing = ("margin_defense_floor_rate",)
+        missing.append("margin_defense_floor_rate")
     else:
         payload["margin_defense_floor_rate"] = _num(floor_rate)
+
+    # 🔴 정책값이 DB 에서 온 것인지 확인한다 (2026-08-27 재무 후속회신 §3).
+    #    값이 아니라 **출처**의 문제이므로 READY 는 유지하고 이름만 밝힌다.
+    missing.extend(
+        f"{key}@policy_source_ref" for key in _POLICY_KEYS_IN_USE if key not in policy.source_refs
+    )
 
     evidences = (
         _ev("available_cash", context.snapshot.current_cash_krw, "KRW", ref),
@@ -176,15 +230,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             policy.minimum_cash_balance_krw,
             "KRW",
             ref,
-            "지급일 중 (지급 후 잔액 < 최소현금) ∪ (일일 유출 최대). "
-            "판정 임계 = 최소현금 보유선",
-        ),
-        _ev(
-            "critical_cash_date",
-            projection.projected_cash_min,
-            "KRW",
-            ref,
-            "투영 구간 최저 잔액일 — 지급 집중도가 아니라 현금 위험",
+            "지급일 중 (지급 후 잔액 < 최소현금) ∪ (일일 유출 최대). 판정 임계 = 최소현금 보유선",
         ),
     )
     if floor_rate is not None:
@@ -211,7 +257,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         payload=payload,
         evidences=evidences,
         judgment_fields=_JUDGMENT_FIELDS,
-        missing_data=missing,
+        missing_data=tuple(missing),
         reasoning="재무 경계를 산출했다.",
     )
     return reply, _meta(request, run_id, tools)
@@ -379,4 +425,3 @@ def _not_ready(
         reasoning=reason,
     )
     return reply, _meta(request, run_id, tools)
-

@@ -43,7 +43,18 @@ class _Policy:
     policy_version = "v1.3-PROVISIONAL"
     payroll_date = 10
     monthly_labor_cost_krw = Decimal(3_000_000)
-    source_refs: ClassVar[dict[str, str]] = {}
+    #: ★ **실제 DB 와 같은 이름을 쓴다** (2026-08-27 재무 Persona v1.6 정렬).
+    #:   픽스처가 실물과 다른 이름을 들고 있으면 나중에 읽는 사람이 *"어느 쪽이
+    #:   정본인가"* 를 다시 확인해야 한다. 어댑터는 이름을 검사하지 않고 **존재만**
+    #:   보므로 값이 통과하는 것과는 무관하다 — 읽는 사람을 위한 정렬이다.
+    source_refs: ClassVar[dict[str, str]] = {
+        "purchase_payment_days": "FINANCE-DECISION-20260827:N5",
+        "payroll_date": "SRC-FIN-N6",
+        "monthly_labor_cost_krw": "SRC-FIN-PERSONA",
+        "minimum_cash_balance_krw": "PROJECT-DEFINITION-V1.2:minimum_cash_balance",
+        "cashflow_projection_days": "MVP-DECISION-20260825:FIN-CASH-01",
+        "margin_defense_floor_rate": "PROJECT-DEFINITION-V1.2:MARGIN-DEFENSE-GRACE",
+    }
 
 
 class _Snapshot:
@@ -220,13 +231,68 @@ def test_유입은_지급_집중도에_세지_않는다(monkeypatch):
     assert reply.payload["critical_payment_dates"] == ["2026-01-20"]
 
 
-def test_현금_최저일과_지급_집중일은_다른_필드다(monkeypatch):
-    """★ 재무가 갈라 달라고 한 지점.
+def test_현금_최저일은_Business_Reply_에_싣지_않는다(monkeypatch):
+    """★ 개념이 달라 필드를 나눴다가 재무 요청으로 다시 뺐다 (2026-08-27).
 
-    `critical_cash_date` 는 **현금이 바닥나는 날**, `critical_payment_dates` 는
-    **지급이 몰린 날**이다. 같은 날일 수도 있지만 개념이 다르므로 필드를 나눈다.
+    `critical_cash_date` 는 Finance Trace / Run History 에서 관리한다.
+    **계약 필드는 읽는 쪽이 있을 때만 늘어야 한다** — 매입이 쓰지 않는 값이다.
     """
     _with_events(monkeypatch, [_Event(20, 9_000_000)])
     reply, _ = adapter.finance_port(req())
-    assert reply.payload["critical_cash_date"] == "2026-01-20"
-    assert "critical_cash_date" in {e.claim for e in reply.evidences}
+    assert "critical_cash_date" not in reply.payload
+    assert "critical_cash_date" not in {e.claim for e in reply.evidences}
+
+
+# ---------------------------------------------------------------------------
+# 정책값 출처 — DB 인가 Schema default 인가 (2026-08-27 재무 후속회신 §3)
+# ---------------------------------------------------------------------------
+
+
+def test_출처가_다_있으면_missing_data_가_비어_있다(wired):
+    reply, _ = adapter.finance_port(req())
+    assert not [m for m in reply.missing_data if m.endswith("@policy_source_ref")]
+
+
+def test_급여_출처가_없으면_투영을_만들지_않는다(monkeypatch):
+    """🔴 값이 아니라 **출처**의 문제인데, 급여만은 계산까지 막는다.
+
+    Repository 가 그 키를 조회하지 않으면 Pydantic 기본값이 대신 쓰이는데, 값은
+    멀쩡히 나오고 에러도 안 난다 — **DB 를 고쳐도 반영되지 않는다는 사실만 숨는다.**
+    실제로 `payroll_date` 가 그 상태였다. DB(10)와 default(10)가 우연히 같았다.
+
+    ★ 재무가 2026-08-27(#63) `build_payroll_schedule` 을 fail-closed 로 바꿨다 —
+      출처 없는 급여 이벤트를 만들지 않는다(M-23). 그러면 **급여 유출이 통째로 빠진
+      투영**이 나오고 `finance_cap` 이 낙관적으로 부풀려진다.
+
+    ★ 그래서 `READY` 로 두고 이름만 밝히지 않는다. 다만 **`ERROR` 도 아니다** —
+      다시 불러도 같으므로 `RUNTIME_NOT_READY` 다 (M-1 §5.1).
+    """
+
+    class _NoRef(_Context):
+        class policy(_Policy):
+            source_refs: ClassVar[dict[str, str]] = {}
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _NoRef())
+    reply, _ = adapter.finance_port(req())
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert set(reply.missing_data) == {
+        "monthly_labor_cost_krw@policy_source_ref",
+        "payroll_date@policy_source_ref",
+    }
+
+
+def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
+    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다."""
+
+    class _PayrollOnly(_Context):
+        class policy(_Policy):
+            source_refs: ClassVar[dict[str, str]] = {
+                "monthly_labor_cost_krw": "SRC-FIN-PERSONA",
+                "payroll_date": "SRC-FIN-N6",
+            }
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _PayrollOnly())
+    reply, _ = adapter.finance_port(req())
+    assert reply.runtime_status == "READY"
+    assert "purchase_payment_days@policy_source_ref" in reply.missing_data
