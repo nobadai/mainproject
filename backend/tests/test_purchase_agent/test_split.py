@@ -1,0 +1,386 @@
+"""E3-3 검사 — ④ split_plan 조건부 진입 + 유형 선택 (백로그 E3-3 · 상세설계 §4-④).
+
+백로그 E3-3 DoD: **"20,000kg↑ or 상승 궤적에서만 진입"**.
+
+⚠️ **수량 가지는 mock에서 한 번도 서지 않는다.** 최대안이 8,727kg이고 임계는 20,000kg이라
+두 앵커(8/21·9/11) 모두 궤적으로만 진입한다 — mock만 돌리면 `by_volume`을 지워도 초록불이
+뜬다. 그래서 수량 가지는 **합성 입력으로 따로** 시험한다.
+
+4품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파·피마늘 크래시를 놓친 교훈이다.
+"""
+
+from copy import deepcopy
+from datetime import date
+
+import pytest
+
+from app.purchase_agent.config import load_constraints
+from app.purchase_agent.graph import run_purchase_agent
+from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
+from app.purchase_agent.nodes.classify_situation import classify_situation
+from app.purchase_agent.nodes.draft_plan import draft_plan
+from app.purchase_agent.nodes.package_scenarios import (
+    materialize_split,
+    package_scenarios,
+    split_infeasible_reason,
+    split_offsets,
+)
+from app.purchase_agent.nodes.self_check import check_quadruple_match, check_split_dates
+from app.purchase_agent.nodes.split_plan import (
+    choose_rounds,
+    equal_ratios,
+    evaluate_split_entry,
+    largest_total_kg,
+    split_plan,
+)
+from app.purchase_agent.schemas import TIMING_AXIS, PurchaseProposal
+from app.purchase_agent.state import build_initial_state
+
+RISING = date(2026, 8, 21)
+FALLING = date(2026, 8, 28)
+UNCERTAIN = date(2026, 9, 4)
+SPREAD_WIDE = date(2026, 9, 11)
+ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
+
+ITEM = "배추"
+
+
+def _staged(item: str = ITEM, as_of: date = RISING) -> dict:
+    """③까지 돌린 상태 — ④가 ``base_plan``의 안별 총량을 보므로 ③이 선행해야 한다."""
+    state = build_initial_state(item, as_of)
+    state.update(classify_situation(state))
+    state.update(draft_plan(state))
+    return state
+
+
+def _flatten_trend(state: dict) -> None:
+    """지속 상승 궤적을 깬다 — 궤적 가지를 끄고 수량 가지만 남길 때 쓴다."""
+    daily = deepcopy(state["forecast"]["daily"])
+    daily[1]["predicted"] = daily[0]["predicted"]  # 단조 증가가 아니게 된다
+    state["forecast"] = {**state["forecast"], "daily": daily}
+
+
+@pytest.fixture(scope="module")
+def proposals() -> dict[date, dict]:
+    return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+
+
+# ── E3-3 DoD: 진입 조건 ─────────────────────────────────────────────────────
+
+
+def test_rising_day_splits_only_the_timing_scenario(proposals: dict) -> None:
+    """8/21 공격안(D=12, 8,727kg)에 분할이 뜬다. **보수·기본은 단일 회차다.**
+
+    전 안에 걸면 세 안의 split 구조가 같아져 timing 축이 라벨로만 남는다
+    (§4-④ E3-3 확정 1 · §3.5.1-3의 분할 판).
+    """
+    by_label = {s["label"]: s for s in proposals[RISING]["scenarios"]}
+    assert by_label["공격"]["strategy_type"] == TIMING_AXIS
+    assert len(by_label["공격"]["split_plan"]) == 2
+    assert len(by_label["보수"]["split_plan"]) == 1
+    assert len(by_label["기본"]["split_plan"]) == 1
+
+
+def test_days_without_the_timing_axis_never_split(proposals: dict) -> None:
+    """하락·불확실 날엔 timing 축이 없어 ④가 진입하지 않는다."""
+    for as_of in (FALLING, UNCERTAIN):
+        assert TIMING_AXIS not in proposals[as_of]["scenarios"][0]["strategy_type"]
+        for scenario in proposals[as_of]["scenarios"]:
+            assert len(scenario["split_plan"]) == 1
+
+
+def test_entry_is_driven_by_trend_not_volume_in_the_mocks() -> None:
+    """**mock에서는 수량 가지가 한 번도 서지 않는다** — 이 사실 자체를 잠근다.
+
+    8,727kg < 20,000kg이라 두 앵커 모두 궤적으로만 진입한다. 이걸 못 박아 두지 않으면
+    아래 합성 테스트가 왜 필요한지 알 수 없다.
+    """
+    constraints = load_constraints()
+    for as_of in (RISING, SPREAD_WIDE):
+        decision = evaluate_split_entry(_staged(as_of=as_of), constraints)
+        assert decision["entered"] is True
+        assert decision["by_volume"] is False  # ← 수량 가지는 죽어 있다
+        assert decision["by_trend"] is True
+
+
+def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
+    """**합성 입력** — 궤적을 죽이고 총량만 임계로 올리면 수량 가지 단독으로 진입한다."""
+    constraints = load_constraints()
+    threshold = constraints["triggers"]["split_entry_qty_kg"]
+
+    state = _staged()
+    _flatten_trend(state)
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = threshold
+    decision = evaluate_split_entry(state, constraints)
+    assert decision["by_trend"] is False
+    assert decision["by_volume"] is True
+    assert decision["entered"] is True
+
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = threshold - 1  # 경계 바로 아래
+    blocked = evaluate_split_entry(state, constraints)
+    assert blocked["by_volume"] is False
+    assert blocked["entered"] is False
+
+
+def test_trend_trigger_enters_on_its_own_below_the_volume_threshold() -> None:
+    """궤적 가지 단독 진입 — mock의 실제 경로다. 궤적을 꺾으면 닫힌다."""
+    constraints = load_constraints()
+    state = _staged()
+    assert largest_total_kg(state["base_plan"]) < constraints["triggers"]["split_entry_qty_kg"]
+    assert evaluate_split_entry(state, constraints)["entered"] is True
+
+    _flatten_trend(state)
+    assert evaluate_split_entry(state, constraints)["entered"] is False
+
+
+def test_timing_axis_gates_both_triggers() -> None:
+    """축이 닫히면 두 트리거가 다 서도 진입하지 않는다 (§4-④ "timing ∈ allowed_axes AND …")."""
+    constraints = load_constraints()
+    state = _staged()
+    state["allowed_axes"] = ["quantity"]
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = 50_000
+    decision = evaluate_split_entry(state, constraints)
+    assert decision["by_volume"] and decision["by_trend"]
+    assert decision["entered"] is False
+
+
+# ── 회차 수 — 고정 목록에서 선택 (§4-④ "생성 말고 선택") ────────────────────
+
+
+def test_rounds_come_from_the_fixed_list_and_are_clamped() -> None:
+    """``clamp(ceil(총량 / 임계), 목록 경계)``. 진입 시 하한 2는 **목록에서 유도**한다."""
+    constraints = load_constraints()
+    threshold = constraints["triggers"]["split_entry_qty_kg"]
+    types = sorted(constraints["split"]["types"])
+    smallest_split, largest_split = min(t for t in types if t > 1), max(types)
+
+    assert choose_rounds(8_727, constraints) == smallest_split  # ceil(0.44)=1 → 하한
+    assert choose_rounds(threshold, constraints) == smallest_split
+    assert choose_rounds(threshold * 2 + 1, constraints) == 3
+    assert choose_rounds(threshold * 99, constraints) == largest_split  # 목록 상한을 넘지 않는다
+
+
+def test_equal_ratios_sum_to_one_exactly_enough() -> None:
+    """마지막을 ``1 − Σ앞``으로 구성해 ⑥의 합계 검사(1e-9)를 통과한다."""
+    for rounds in (2, 3):
+        ratios = equal_ratios(rounds)
+        assert len(ratios) == rounds
+        assert all(ratio > 0 for ratio in ratios)
+        assert abs(sum(ratios) - 1.0) <= 1e-9
+
+
+# ── 회차 날짜 — ⑥이 안별 D로 만든다 ────────────────────────────────────────
+
+
+def test_offsets_start_at_as_of_and_stay_inside_the_coverage_window() -> None:
+    """1회차는 as_of(0), 나머지는 커버 구간 안에서 앞으로만 간다."""
+    assert split_offsets(12, 2) == [0, 6]
+    assert split_offsets(12, 3) == [0, 4, 8]
+    for coverage in range(2, 19):
+        for rounds in (2, 3):
+            if rounds > coverage:
+                continue
+            offsets = split_offsets(coverage, rounds)
+            assert offsets[0] == 0
+            assert offsets == sorted(set(offsets))  # 중복도 역행도 없다
+            assert offsets[-1] < coverage
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_split_dates_pass_the_self_check(as_of: date, proposals: dict) -> None:
+    """1회차 = as_of · seq 연속 · **날짜 단조증가** (IO명세 §2)."""
+    for scenario in proposals[as_of]["scenarios"]:
+        assert check_split_dates(scenario, as_of.isoformat()) is None
+
+
+def test_self_check_rejects_repeated_or_backwards_round_dates() -> None:
+    """"2분할인데 같은 날 두 번"은 분할이 아니다 — 회차가 하나뿐일 땐 없던 구멍이다.
+
+    사중 일치는 멀쩡히 통과하므로 날짜를 따로 보지 않으면 잡히지 않는다.
+    """
+    as_of = "2026-08-21"
+    same_day = {
+        "split_plan": [
+            {"seq": 1, "date": as_of, "qty_kg": 5},
+            {"seq": 2, "date": as_of, "qty_kg": 5},
+        ]
+    }
+    assert "앞으로 가지 않음" in check_split_dates(same_day, as_of)
+
+    backwards = deepcopy(same_day)
+    backwards["split_plan"][1]["date"] = "2026-08-20"
+    assert check_split_dates(backwards, as_of) is not None
+
+    forwards = deepcopy(same_day)
+    forwards["split_plan"][1]["date"] = "2026-08-27"
+    assert check_split_dates(forwards, as_of) is None
+
+
+def test_schema_backstops_the_date_order(proposals: dict) -> None:
+    """⑦이 컷하는 것과 별개로 스키마가 출력 경계에서 한 번 더 막는다."""
+    broken = deepcopy(proposals[RISING])
+    scenario = next(s for s in broken["scenarios"] if len(s["split_plan"]) == 2)
+    scenario["split_plan"][1]["date"] = scenario["split_plan"][0]["date"]
+    with pytest.raises(ValueError, match="strictly increase"):
+        PurchaseProposal.model_validate(broken)
+
+
+# ── 사중 일치 — 회차가 둘이 되며 Σ split 축이 실제로 검증되기 시작한다 ──────
+
+
+@pytest.mark.parametrize("item", ["배추", "무", "양파", "피마늘"])
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_every_item_and_anchor_stays_consistent(item: str, as_of: date) -> None:
+    """4품목 × 4앵커 전횡단 — 품목 하나만 도는 테스트는 E3-1에서 크래시를 놓쳤다."""
+    proposal = run_purchase_agent(item, as_of)
+    PurchaseProposal.model_validate(proposal)
+    assert proposal["scenarios"]
+    for scenario in proposal["scenarios"]:
+        assert check_quadruple_match(scenario) is None
+        assert check_split_dates(scenario, as_of.isoformat()) is None
+        for round_ in scenario["split_plan"]:
+            assert round_["qty_kg"] > 0
+        assert len(scenario["split_plan"]) <= scenario["coverage_days"]
+
+
+def test_rounding_remainder_lands_on_the_last_round(proposals: dict) -> None:
+    """균등 분할의 나머지를 마지막 회차가 흡수한다 — 산술이 정하는 값이라 정확히 대조한다."""
+    aggressive = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "공격")
+    quantities = [round_["qty_kg"] for round_ in aggressive["split_plan"]]
+    assert quantities == [4364, 4363]
+    assert sum(quantities) == aggressive["total_qty_kg"] == 8727
+
+
+# ── 일괄 전환(fallback) — 라벨과 행동의 불일치를 드러낸다 ───────────────────
+
+
+def test_infeasible_split_reports_why() -> None:
+    """감당 못 하는 조건 둘: 0kg 회차, 겹치는 날짜."""
+    two = [{"ratio": 0.5}, {"ratio": 0.5}]
+    assert split_infeasible_reason(8727, two, 12) is None
+    assert "최소 수량 미달" in split_infeasible_reason(1, two, 12)
+    assert "회차 수" in split_infeasible_reason(8727, two, 1)
+
+    three = [{"ratio": 1 / 3}, {"ratio": 1 / 3}, {"ratio": 1 / 3}]
+    assert "회차 수" in split_infeasible_reason(8727, three, 2)  # 보수안(D=2)엔 3분할 불가
+
+
+def test_materialize_split_falls_back_to_a_single_round() -> None:
+    """감당 못 하면 단일 회차로 되돌린다 — 0kg 회차는 스키마가 **제안 전체**를 죽인다."""
+    two = [{"ratio": 0.5}, {"ratio": 0.5}]
+    assert len(materialize_split("2026-08-21", 1, two, 12)) == 1
+    assert len(materialize_split("2026-08-21", 8727, two, 12)) == 2
+    assert materialize_split("2026-08-21", 8727, None, 12)[0]["qty_kg"] == 8727
+
+
+def test_fallback_is_disclosed_in_risks() -> None:
+    """timing 라벨인데 회차가 하나면 **그 사실을 적는다** — 조용히 넘기면 라벨/행동 불일치를
+    소비자가 추적할 수 없다 (§4-④ E3-3 확정 4)."""
+    state = _staged()
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = 1  # 공격안을 1kg으로 — 2분할 불가
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    result = package_scenarios(state)
+
+    aggressive = next(s for s in result["scenarios_final"] if s["label"] == "공격")
+    assert aggressive["strategy_type"] == TIMING_AXIS
+    assert len(aggressive["split_plan"]) == 1
+    assert any("일괄 전환" in risk for risk in aggressive["risks"])
+    assert any("최소 수량 미달" in risk for risk in aggressive["risks"])
+
+
+# ── 규칙 3: 미결로 건너뛴 검사가 드러난다 ───────────────────────────────────
+
+
+def test_round_level_arrival_check_is_disclosed_as_deferred(proposals: dict) -> None:
+    """§5.5 회차별 ``cap_by_date`` 검사가 N4 미확정으로 보류라는 사실이 risks에 실린다.
+
+    "총량 기준 단일 도착일로 뭉치면 분할의 창고 부담 분산 효과가 사라진다"가 §5.5의 요지라,
+    보류 사실을 안 적으면 분할이 그 효과를 검증받은 것처럼 읽힌다.
+    """
+    assert load_constraints()["pending"]["inbound_lead_days"] is None
+    aggressive = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "공격")
+    assert any("cap_by_date" in risk and "보류" in risk for risk in aggressive["risks"])
+
+    conservative = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "보수")
+    assert not any("cap_by_date" in risk for risk in conservative["risks"])
+
+
+def _forced(as_of: date, orders_kg: int, warehouse_kg: int, cash: int) -> dict:
+    """하드 제약을 직접 흔들어 만든 안 — mock으로는 안 나오는 조합을 시험할 때 쓴다."""
+    state = build_initial_state(ITEM, as_of)
+    state["confirmed_orders"] = {**state["confirmed_orders"], "total_kg": orders_kg}
+    state["inventory"] = {
+        **state["inventory"],
+        "warehouse_free_kg": warehouse_kg,
+        "rental_cap_kg": 0,
+    }
+    state["projected_cash_min"] = cash
+    state.update(classify_situation(state))
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    result = package_scenarios(state)
+    return next(s for s in result["scenarios_final"] if s["label"] == "공격")
+
+
+def test_split_plan_is_never_none_so_the_decision_always_travels() -> None:
+    """일괄도 **1회차 비율 목록**으로 낸다 — ``None``이면 미진입 사유가 ⑥까지 못 간다."""
+    for as_of in ANCHORS:
+        chosen = split_plan(_staged(as_of=as_of))["split_plan"]
+        assert chosen is not None
+        assert "decision" in chosen[0]
+        assert abs(sum(line["ratio"] for line in chosen) - 1.0) <= 1e-9
+
+
+def test_timing_label_without_a_split_is_disclosed() -> None:
+    """①이 **클립 전** 추정 총량으로 축을 열고 ④가 **클립 후** 총량으로 닫는 경우.
+
+    §4-④ E3-3 확정 2가 "정상"이라 한 상황인데, 그대로 두면 timing 라벨을 단 안이
+    quantity 안과 똑같이 행동하면서 아무 설명이 없다 (Codex 교차검증 P1).
+    처음엔 일괄 전환(fallback)만 고지하고 이 경로를 빠뜨렸다.
+    """
+    # 확정주문 30,000kg → ①의 추정 총량 25,714kg이 임계를 넘어 timing이 열린다.
+    # 창고 5,000kg이 안별 총량을 깎아 ④의 판정에서는 임계 미달이 된다. 예측은 하락이라
+    # 궤적 가지도 서지 않는다.
+    aggressive = _forced(FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12)
+    assert aggressive["strategy_type"] == TIMING_AXIS
+    assert len(aggressive["split_plan"]) == 1
+    note = next(risk for risk in aggressive["risks"] if "미진입" in risk)
+    assert "임계 20,000kg" in note
+    assert "지속 상승 궤적 아님" in note
+
+
+def test_volume_only_entry_cites_orders_not_the_forecast() -> None:
+    """수량 단독 진입의 근거는 **주문**이다 — 예측 ref_id를 붙이면 근거가 주장을 못 받친다.
+
+    총량은 확정주문에서 파생해 하드 제약으로 클립한 값이라 ``ASSUMED``다
+    (IO명세 §5 "수요에서 파생된 것은 SIM_FIXED 자격을 잃는다"). Codex 교차검증 P2.
+    """
+    aggressive = _forced(FALLING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12)
+    assert len(aggressive["split_plan"]) > 1
+    items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]
+    assert len(items) == 1
+    assert items[0]["source"] == "주문"
+    assert items[0]["ref_id"].startswith("SO-")
+    assert items[0]["evidence_grade"] == "ASSUMED"
+    assert not any(r["ref_id"].startswith("FC-") for r in items)
+
+
+def test_both_triggers_produce_one_rationale_each() -> None:
+    """수량·궤적이 둘 다 서면 근거도 둘이다 — 출처가 다르니 한 건으로 뭉치지 않는다."""
+    aggressive = _forced(RISING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12)
+    items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]
+    assert {item["source"] for item in items} == {"주문", "예측"}
+
+
+def test_split_carries_its_own_rationale(proposals: dict) -> None:
+    """분할한 안엔 왜 나눴는지가 근거에 남는다 — ref_id 포함 (규칙 4)."""
+    aggressive = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "공격")
+    items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]
+    assert len(items) == 1
+    assert "지속 상승 궤적" in items[0]["claim"]
+    assert items[0]["ref_id"].strip()
+
+    conservative = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "보수")
+    assert not [r for r in conservative["rationale"] if "분할" in r["claim"]]

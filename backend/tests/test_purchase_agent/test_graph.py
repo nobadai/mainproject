@@ -332,12 +332,15 @@ def test_situation_and_confidence_travel_together(proposals: dict) -> None:
     assert proposals[UNCERTAIN]["confidence"] == "medium"
 
 
-def test_context_docs_used_is_empty_while_node_two_is_a_stub(proposals: dict) -> None:
-    """② 스텁이 아무것도 읽지 않으므로 근거 목록도 비어야 한다.
+def test_context_docs_used_lists_only_documents_actually_loaded(proposals: dict) -> None:
+    """② 구현(E3-4) 후: uncertain에서만 문서가 실리고, stable한 날은 비어 있다.
 
-    "문서를 읽었는데 근거에 안 썼다"와 "아직 안 읽는다"가 출력에서 구분된다.
+    스텁 시절엔 "언제나 빈 목록"을 검사했다. 이제 **비어 있음이 노드를 안 돌았다는 뜻**이라,
+    같은 필드가 두 상태를 구분한다 — 그게 이 필드의 존재 이유다.
     """
-    assert proposals[UNCERTAIN]["context_docs_used"] == []
+    assert proposals[UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
+    for as_of in (RISING, FALLING, SPREAD_WIDE):
+        assert proposals[as_of]["context_docs_used"] == []
 
 
 def test_rejected_scenario_is_recorded_with_label_and_reason(proposals: dict) -> None:
@@ -503,12 +506,13 @@ def test_sourcing_ratios_must_be_positive_and_sum_to_one() -> None:
 
 
 def _staged_state(as_of: date = RISING, **overrides: object) -> dict:
-    """③까지 돌린 상태에 ④⑤ 스텁 결과를 얹은 것 — ⑥⑦만 따로 시험할 때 쓴다."""
+    """③까지 돌린 상태에 ④ 스텁과 ⑤ 배분 결과를 얹은 것 — ⑥⑦만 따로 시험할 때 쓴다."""
     state = build_initial_state(ITEM, as_of)
     state.update(classify_situation(state))
     state.update(draft_plan(state))
     state.update(split_plan(state))  # ④ 스텁 — 일괄
-    state.update(allocate_sourcing(state))  # ⑤ 스텁 — 전량 상품 **비율**
+    # ⑤ — 등급 **비율**. 평시(RISING)엔 중품 스코어가 음수라 전량 상품 한 줄이다.
+    state.update(allocate_sourcing(state))
     state.update(overrides)
     return state
 

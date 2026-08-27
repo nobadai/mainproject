@@ -28,9 +28,10 @@ def fixed_market_quotes(market_quotes: list[dict]) -> list[dict]:
 def reference_unit_price(market_quotes: list[dict], reference_grade: str) -> int:
     """기준 등급의 당일 가락 시세. 없으면 가장 비싼 등급으로 보수적으로 잡는다.
 
-    ⑤ 스텁이 같은 등급으로 배분하므로 ③의 현금 제약과 ⑦의 금액 검사가 같은 단가를 본다 —
-    두 노드가 다른 등급을 고르면 상한과 검사가 어긋난다. 그래서 등급을 constraints에서
-    한 번만 읽어 양쪽에 넘긴다 (규칙 7).
+    ⑤도 이 등급을 배분의 기준으로 삼는다 — 등급을 constraints에서 한 번만 읽어 양쪽에
+    넘긴다 (규칙 7). ⑤가 더 싼 중품을 섞으면 실제 매입단가는 이 값보다 낮아지므로, 여기서
+    낸 현금 상한은 **보수적인 쪽으로만** 어긋난다. 반대로 이 등급을 ⑤보다 싸게 잡으면
+    ③이 살 수 있다고 계산한 양을 ⑦의 금액 검사가 컷하게 된다.
     """
     prices = {quote["grade"]: quote["price"] for quote in fixed_market_quotes(market_quotes)}
     chosen = prices.get(reference_grade, max(prices.values()))
@@ -47,9 +48,29 @@ def warehouse_cap_kg(inventory: dict) -> int:
     return inventory["warehouse_free_kg"] + inventory["rental_cap_kg"]
 
 
-def cash_cap_kg(projected_cash_min: int, unit_price: int, constraints: dict) -> int:
-    """현금 상한을 수량으로 환산. ``projected_cash_min × 비율 ÷ 단가``."""
-    budget = projected_cash_min * constraints["cash"]["max_purchase_ratio"]
+def purchase_budget_krw(state: PurchaseAgentState, constraints: dict) -> float:
+    """이 사이클에 쓸 수 있는 **매입 가능액(원)**. 경로가 둘이다 (IO명세 §2-B · B6).
+
+    1. **재무 cap을 받은 경우** (어댑터 경로) — 그 값이 곧 상한이다. 여기에
+       ``max_purchase_ratio``를 곱하지 않는다. 재무가 이미 *"이만큼까지"*를 계산해
+       보낸 값이라, 같은 목적으로 한 번 더 조이면 상한이 두 겹이 되고
+       **"왜 이만큼밖에 못 사나"의 근거가 흐려진다** (재무 회신 v2.2.1 — "같은 목적
+       60% 재적용 금지").
+    2. **못 받은 경우** (mock 경로) — 종전대로 ``base_projected_cash_min × 비율``.
+
+    ⚠️ 2번이 죽은 경로가 아니다. 어댑터를 거치지 않는 ``run_purchase_agent`` 직접 호출이
+    그 길로 가고, 회귀 테스트 전량이 매일 그 길을 밟는다. 다만 **실운영에서는 재무 경계
+    미수신이 곧 ``RUNTIME_NOT_READY``라**(M-1 제출 §4) 1번만 돈다.
+    """
+    cap = state.get("finance_cap_amount_krw")
+    if cap is not None:
+        return float(cap)
+    return state["projected_cash_min"] * constraints["cash"]["max_purchase_ratio"]
+
+
+def cash_cap_kg(budget_krw: float, unit_price: int) -> int:
+    """매입 가능액을 수량으로 환산. ``budget ÷ 단가``."""
+    budget = budget_krw
     return int(budget // require_positive(unit_price, "unit_price"))
 
 
@@ -81,7 +102,7 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     unit_price = reference_unit_price(state["market_quotes"], reference_grade)
 
     warehouse_cap = warehouse_cap_kg(state["inventory"])
-    cash_cap = cash_cap_kg(state["projected_cash_min"], unit_price, constraints)
+    cash_cap = cash_cap_kg(purchase_budget_krw(state, constraints), unit_price)
     freshness_cap = _freshness_cap_kg(state, daily_demand, constraints)
 
     drafts = []
@@ -104,7 +125,7 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             "daily_demand_kg": daily_demand,
             "reference_unit_price": unit_price,
             "drafts": drafts,
-            "deferred_checks": _deferred_checks(constraints, freshness_cap, state["item"]),
+            "deferred_checks": _deferred_checks(state, constraints, freshness_cap, state["item"]),
         },
     }
 
@@ -131,19 +152,35 @@ def _draft_one(
     }
 
 
-def _deferred_checks(constraints: dict, freshness_cap: int | None, item: str) -> list[str]:
+def pending_value(state: PurchaseAgentState, constraints: dict, name: str) -> int | None:
+    """미결 파라미터의 현재 값. **수신값이 설정값을 이긴다.**
+
+    ``constraints.yaml``의 ``pending``은 "아직 아무도 안 줬다"는 기본값이고, 어댑터가
+    재무 payload에서 받아 실으면 그 값이 정답이다. 두 곳을 각자 읽으면 한쪽만 바뀐다.
+
+    ``or``를 쓰지 않는다 — 0은 확정된 0이라 폴백 대상이 아니다 (규칙 3).
+    """
+    received = state.get(name)  # type: ignore[call-overload]  # NotRequired 키
+    if received is not None:
+        return received
+    return constraints["pending"][name]
+
+
+def _deferred_checks(
+    state: PurchaseAgentState, constraints: dict, freshness_cap: int | None, item: str
+) -> list[str]:
     """미결값 때문에 **계산하지 않은** 검사들. ⑥이 안별 risks에 싣는다.
 
     ``rejected_reasons``가 아니라 risks로 가는 이유: 소비자는 rejected_reasons를 "컷된 안의
     이력"으로 읽는다. "검사를 건너뛰었다"는 다른 의미라 그 필드에 섞으면 계약이 오염된다.
     """
     deferred = []
-    if constraints["pending"]["inbound_lead_days"] is None:
+    if pending_value(state, constraints, "inbound_lead_days") is None:
         deferred.append(
             "입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 "
             "expected_arrival_date를 계산하지 않는다 (상세설계 §4-⑦)"
         )
-    if constraints["pending"]["purchase_payment_days"] is None:
+    if pending_value(state, constraints, "purchase_payment_days") is None:
         deferred.append(
             "지급일 기준 현금 검사 보류 — purchase_payment_days(N5) 미확정이라 "
             "payment_date를 계산하지 않는다"

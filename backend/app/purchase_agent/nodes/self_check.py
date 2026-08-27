@@ -7,12 +7,21 @@
 순수 함수가 소유하고, LLM은 rationale의 claim이 원본과 맞는지 보는 데만 쓴다.
 """
 
+from itertools import pairwise
 from typing import Any
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.nodes.draft_plan import warehouse_cap_kg
-from app.purchase_agent.schemas import FIXED_MARKET, PurchaseProposal, revalidate_for_output
+from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
+from app.purchase_agent.nodes.draft_plan import purchase_budget_krw, warehouse_cap_kg
+from app.purchase_agent.schemas import (
+    DOCUMENT_SOURCE,
+    FIXED_MARKET,
+    PurchaseProposal,
+    document_ref,
+    is_document_ref,
+    revalidate_for_output,
+)
 from app.purchase_agent.state import PurchaseAgentState
 
 
@@ -94,20 +103,153 @@ def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
 
 
 def check_cash_ceiling(scenario: dict, state: PurchaseAgentState, constraints: dict) -> str | None:
-    """매입액 ≤ 향후 최저 현금 × 비율."""
-    budget = state["projected_cash_min"] * constraints["cash"]["max_purchase_ratio"]
+    """매입액 ≤ 매입 가능액.
+
+    상한을 ③과 **같은 함수**(``purchase_budget_krw``)로 구한다. 두 노드가 각자 계산하면
+    재무 cap 수신 여부에 따라 한쪽만 바뀌고, ③이 통과시킨 안을 ⑦이 컷하는 상태가 된다.
+    """
+    budget = purchase_budget_krw(state, constraints)
     if scenario["total_amount_krw"] > budget:
         return f"현금 초과: {scenario['total_amount_krw']:,}원 > 매입 가능액 {budget:,.0f}원"
     return None
 
 
 def check_split_dates(scenario: dict, as_of: str) -> str | None:
-    """seq 1의 date는 as_of, seq는 1부터 연속 (IO명세 §2)."""
+    """seq 1의 date는 as_of, seq는 1부터 연속, **날짜는 앞으로만 간다** (IO명세 §2).
+
+    날짜 검사는 ④가 실제로 분할하면서 붙었다. 회차가 하나뿐이던 동안에는 순서를 어길
+    방법이 없었지만, 2회차가 생기면 "같은 날 두 번"이 통과할 수 있다 — 그건 분할이 아니라
+    같은 매입을 두 줄로 적은 것이고, 사중 일치는 멀쩡히 통과한다.
+
+    ISO 날짜 문자열은 사전순 비교가 곧 시간순 비교라 그대로 비교한다.
+    스키마도 같은 검사를 하지만 거기서는 제안 전체가 죽고, 여기서는 **그 안만 컷한다**.
+    """
     rounds = scenario["split_plan"]
     if rounds[0]["date"] != as_of:
         return f"1회차 날짜가 as_of와 다름: {rounds[0]['date']} != {as_of}"
     if [item["seq"] for item in rounds] != list(range(1, len(rounds) + 1)):
         return f"회차 번호가 연속이 아님: {[item['seq'] for item in rounds]}"
+    dates = [item["date"] for item in rounds]
+    if any(earlier >= later for earlier, later in pairwise(dates)):
+        return f"회차 날짜가 앞으로 가지 않음: {dates}"
+    return None
+
+
+def check_document_refs(scenario: dict, context_docs: list[dict]) -> str | None:
+    """인용한 문서가 **실제로 읽은 것인가** (§4-⑦ 근거 환각 대조 중 계산으로 되는 부분).
+
+    ``check_prices_exist``가 단가에 대해 하는 일을 문서에 대해 한다 — 지어낸 ``DOC-``을
+    막는 유일한 검사다. 등급·단가는 당일 시세에 실재해야 하고, 문서 근거는 그날 ②가
+    실제로 로드한 것이어야 한다.
+
+    **역방향은 검사하지 않는다.** "읽었는데 근거에 안 썼다"는 위반이 아니다 — ② 스텁
+    시절부터 그 상태를 **의도적으로 구분 가능하게** 두었다("문서를 읽었는데 근거에 안 썼다"와
+    "아직 안 읽는다"가 출력에서 구분된다). 컷해버리면 그 구분이 사라지고, ``context_docs_used``와
+    rationale이 항상 같아져 두 필드 중 하나가 무의미해진다.
+
+    **``source``와 ``ref_id`` 접두어 중 하나만 봐서는 안 된다.** 처음엔 ``source == "문서ID"``만
+    봤는데, Codex 교차검증이 P1을 짚었다 — 출처를 "예측"으로 적고 ``ref_id``에 ``"DOC-999"``를
+    넣으면 검사를 통째로 빠져나가고 스키마도 둘의 정합을 요구하지 않는다. 재현해 확인했다.
+    그래서 **둘 중 하나라도 문서를 가리키면** 문서 근거로 보고, 이어서 **둘이 어긋난 것 자체**를
+    막는다. 어긋난 항목은 어느 검사에도 안 걸리는 사각지대였다.
+    """
+    loaded = {document_ref(doc["doc_id"]) for doc in context_docs}
+    cited: set[str] = set()
+    for item in scenario["rationale"]:
+        by_source = item["source"] == DOCUMENT_SOURCE
+        by_ref = is_document_ref(item["ref_id"])
+        if by_source != by_ref:
+            return (
+                f"문서 근거 표기 불일치: source={item['source']!r} / ref_id={item['ref_id']!r} — "
+                f"문서 참조는 source가 {DOCUMENT_SOURCE!r}이고 ref_id가 DOC- 로 시작해야 한다"
+            )
+        if by_source:
+            cited.add(item["ref_id"])
+    unknown = sorted(cited - loaded)
+    if unknown:
+        return f"읽지 않은 문서를 인용: {unknown} (그날 로드분 {sorted(loaded)})"
+    return None
+
+
+def check_excerpt_fidelity(scenario: dict, context_docs: list[dict]) -> str | None:
+    """인용 발췌가 **원문에 실재하는 문자열인가** (§4-⑦ 근거 환각 대조 · 현서님 2차 합의 8/26).
+
+    현서님 회신(8/26)으로 역할 경계가 정해졌다: **문서 원문 대조는 매입 소유다.** Critic은
+    월보·기상 문서를 스냅샷으로 받지 않기로 해(8/25 B4-8) 원문 접근권이 없고, 접근권 없는
+    쪽은 이 검사를 구조적으로 수행할 수 없다. 대체 불가능하므로 여기가 유일한 자리다.
+
+    **오늘은 이 검사가 통과할 수밖에 없다.** ②의 발췌가 서두 잘라내기라 원문 문자가 변조될
+    길이 없기 때문이다. 그래도 지금 넣는 이유는, ②·⑥에 LLM이 붙어 "구절 선별"과 "claim
+    요약"이 생기는 순간(E3-5 이후) **이 검사가 없으면 환각이 그대로 출력에 실리기 때문**이다.
+    검사를 나중에 만들면 그 사이 산출물은 검증된 적이 없는 채로 남는다.
+
+    두 지점을 본다 — ②가 원문에서 떴는가, ⑥이 그걸 그대로 실었는가:
+
+    1. ``excerpt`` ⊆ ``content``  — ②의 발췌가 원문에서 온 문자열인가
+    2. ``excerpt`` ⊆ ``evidence_detail`` — ⑥이 옮기며 고치지 않았는가
+
+    **``substring``이지 ``prefix``가 아니다.** 지금 발췌는 항상 서두라 접두어 검사로도
+    통과하지만, LLM이 구절을 고르기 시작하면 발췌는 본문 중간에서 온다. 오늘의 구현이
+    아니라 **계약이 약속하는 것**에 맞춰 검사한다.
+
+    절단 표시는 떼고 맞춘다 — ``…``는 ②가 붙인 표식이지 원문 문자가 아니다.
+    접미사를 보고 판별하지 않고 ``excerpt_truncated`` 플래그를 쓰는 이유는
+    ``leading_excerpt`` docstring에 있다.
+    """
+    by_ref = {document_ref(doc["doc_id"]): doc for doc in context_docs}
+    for item in scenario["rationale"]:
+        if item["source"] != DOCUMENT_SOURCE:
+            continue
+        doc = by_ref.get(item["ref_id"])
+        if doc is None:
+            # 검사 순서상 check_document_refs가 먼저 잡는 상태다. 순서에 기대지 않고
+            # 여기서도 막는다 — 체인 순서가 바뀌면 조용히 통과하는 자리가 된다.
+            return f"인용한 문서를 찾을 수 없어 발췌 대조 불가: {item['ref_id']}"
+        excerpt = doc["excerpt"]
+        if doc.get("excerpt_truncated"):
+            excerpt = excerpt.removesuffix(TRUNCATION_MARK)
+        if excerpt not in doc["content"]:
+            return f"발췌가 원문에 없다: {item['ref_id']} — 인용 {excerpt[:40]!r}"
+        if excerpt not in item["evidence_detail"]:
+            return (
+                f"근거 문구가 로드한 발췌와 다르다: {item['ref_id']} — "
+                f"발췌 {excerpt[:40]!r}가 evidence_detail에 없다"
+            )
+    return None
+
+
+def check_document_publication(
+    scenario: dict, context_docs: list[dict], as_of: str
+) -> str | None:
+    """인용 문서가 **as_of 시점에 실재하는 발행물인가** (규칙 1 look-ahead 방어).
+
+    포트가 이미 ``published_at <= as_of``로 거른다(``mocks._load.filter_by_published_at``).
+    그런데도 출력 경계에서 한 번 더 보는 이유는, **필터를 통과하는 것과 출력이 지키는 것이
+    다른 약속**이기 때문이다 — 스키마의 ``DOC-`` backstop을 ⑦ 검사와 별개로 둔 것과 같은
+    자리다. 9/4에 9/5 발행 문서(DOC-6)를 인용하면 백테스트 성적이 무효가 되는데, 그건
+    사업적 판단이 아니라 버그이므로 컷 사유로 남긴다.
+
+    ``published_at``이 **없는** 것도 위반이다. 없으면 비교 자체가 불가능한데 조용히
+    넘기면 "검사했다"가 거짓이 된다 — 로더가 ``published_at`` 없는 문서를 적재 거부하는
+    것과 같은 이유다 (IO명세 §1-⑥).
+
+    ISO 날짜 문자열은 사전순 비교가 곧 시간순이라 ``date`` 변환 없이 비교한다.
+    """
+    by_ref = {document_ref(doc["doc_id"]): doc for doc in context_docs}
+    for item in scenario["rationale"]:
+        if item["source"] != DOCUMENT_SOURCE:
+            continue
+        doc = by_ref.get(item["ref_id"])
+        if doc is None:
+            return f"인용한 문서를 찾을 수 없어 발행일 대조 불가: {item['ref_id']}"
+        published_at = doc.get("published_at")
+        if not published_at:
+            return f"발행일 없는 문서를 인용: {item['ref_id']} — as_of 대조가 불가능하다"
+        if published_at > as_of:
+            return (
+                f"as_of 이후 발행 문서를 인용: {item['ref_id']} "
+                f"(발행 {published_at} > as_of {as_of}) — look-ahead"
+            )
     return None
 
 
@@ -150,6 +292,12 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or check_warehouse_capacity(scenario, state["inventory"])
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
+            or check_document_refs(scenario, state["context_docs"])
+            # 문서 검사 3종은 순서가 있다: 인용이 로드분인가(refs) → 발행일이 as_of 이전인가
+            # (publication) → 발췌가 원문 문자인가(fidelity). 뒤 두 검사는 앞이 통과했다고
+            # 가정하지 않고 각자 문서를 다시 찾는다.
+            or check_document_publication(scenario, state["context_docs"], state["date"])
+            or check_excerpt_fidelity(scenario, state["context_docs"])
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})
@@ -185,7 +333,7 @@ def _assemble(state: PurchaseAgentState, survivors: list[dict], rejected: list[d
         "scenarios": survivors,
         "confidence": state["confidence"],
         "situation": state["situation"],
-        "context_docs_used": [f"DOC-{doc['doc_id']}" for doc in state["context_docs"]],
+        "context_docs_used": [document_ref(doc["doc_id"]) for doc in state["context_docs"]],
         "rejected_reasons": rejected,
     }
     if not survivors:

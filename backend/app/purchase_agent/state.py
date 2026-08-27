@@ -7,13 +7,17 @@
 **노드는 State 전체가 아니라 바꿀 키만 담은 dict를 반환한다** — LangGraph 런타임이 병합한다.
 그래서 이 TypedDict가 ``total=True``인데도 부분 갱신이 성립한다.
 
-**ports는 여기서 한 번만 부른다.** ``ports.py`` docstring이 약속한 "T0 스냅샷 생성 시점에만
-호출되고 T1 이후 노드는 스냅샷에서 읽는다"가 이 모듈이다. 노드가 직접 ports를 부르면
+**포트 ①~⑤는 여기서 한 번만 부른다.** ``ports.py`` docstring이 약속한 "T0 스냅샷 생성
+시점에만 호출되고 T1 이후 노드는 스냅샷에서 읽는다"가 이 모듈이다. 노드가 직접 ports를 부르면
 같은 사이클 안에서 값이 달라질 수 있고(T0~T2 시점 차), 그러면 사중 일치가 무너진다.
+
+**⑥ 문서 포트만 예외다** — ② collect_context가 런타임에 호출한다 (정의서 §3.1.1 ·
+팀 확인 2026-08-25 · IO명세 §0). 문서는 상태 데이터가 아니라 ``published_at <= as_of``로
+고정된 불변 발행물이라 사이클 중 값이 변하지 않는다.
 """
 
 from datetime import date
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
@@ -34,8 +38,24 @@ class PurchaseAgentState(TypedDict):
     # margin_warning·expected_margin_rate가 함께 null로 나간다 (IO명세 §2 동기화 규칙).
     contract_price: float | None
     margin_defense_floor_rate: float  # ★ 구간별 방어선 (참조값)
-    projected_cash_min: int  # ★ 향후 N일 최저 현금
+    projected_cash_min: int  # ★ 향후 N일 최저 현금 (재무 base_projected_cash_min)
     feedback: dict | None  # 오케스트레이터 재조정 요청 (§6, 전부 기각 시만)
+
+    # ── 재무 수신값 (어댑터 경로에만 실린다) ────────────────────────────────
+    # **셋 다 선택 필드다.** ``build_initial_state``(mock 경로)는 채우지 않으므로
+    # ``.get()``이 None을 돌려주고 노드는 종전 경로로 간다 — 949건이 그대로 도는 근거다.
+    # 어댑터 경로에서만 값이 실리고, 그때 계산이 달라진다 (IO명세 §2-B).
+    #
+    # ``finance_cap_amount_krw``: 재무가 낸 **최종 매입 상한(원)**. 이 값이 오면
+    # ``cash.max_purchase_ratio``를 곱하지 않는다 — 같은 목적으로 두 번 조이면
+    # "왜 이만큼밖에 못 사나"의 근거가 흐려진다 (재무 회신 v2.2.1 · B6).
+    finance_cap_amount_krw: NotRequired[int | None]
+    # ``purchase_payment_days``: N5. 7 확정 (8/27 재무 · calendar day · 영업일 보정 없음).
+    # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
+    purchase_payment_days: NotRequired[int | None]
+    # ``critical_payment_dates``: 지급 집중일. **겹침 경고에만 쓴다** — 날짜별 잔액
+    # 재계산은 재무 SCENARIO_VALIDATION 소관이다 (도메인 침범 + 이중 계산).
+    critical_payment_dates: NotRequired[list[str] | None]
 
     # ── 중간 산출 ───────────────────────────────────────────────────────────
     situation: Literal["stable", "uncertain"]
@@ -57,7 +77,11 @@ class PurchaseAgentState(TypedDict):
 def build_initial_state(
     item: str, as_of: date, *, feedback: dict | None = None
 ) -> PurchaseAgentState:
-    """T0 스냅샷을 만든다 — 6개 포트를 각각 한 번씩만 호출한다.
+    """T0 스냅샷을 만든다 — **포트 ①~⑤를 한 번씩 호출한다 (T0 only)**.
+
+    ⑥ ``get_context_docs``는 여기서 부르지 않는다. 문서 포트만 ② collect_context가
+    **런타임에 호출하는 예외**다 (정의서 §3.1.1 · 팀 확인 2026-08-25 · IO명세 §0).
+    예외가 안전한 이유는 ``ports.get_context_docs`` docstring에 적어두었다.
 
 ``item_mix_ratio`` · ``contract_price`` · ``margin_defense_floor_rate``는 IO명세 §1의
     계약 포트 6개에 없다. 그래도 **외부 입력이므로 ports를 거친다**(규칙 2) —

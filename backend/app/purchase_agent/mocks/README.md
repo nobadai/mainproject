@@ -52,7 +52,7 @@ IO명세·상세설계의 예시들이 흩어져 보이지만 **한 날의 스�
 | `quotes_{normal,wide}.json` | 4품목 특/상/중 (market="가락" 고정) |
 | `inventory.json` · `orders.json` | 품목별 고정값, 날짜는 as_of 상대 오프셋 |
 | `cash.json` | horizon_days → projected_cash_min (`base_` 계열) |
-| `documents.json` | 관측월보 스타일 4건, `published_at` 필수 |
+| `documents.json` | 발간물 스타일 7건 (배추 4 · 무/양파/피마늘 각 1), `published_at` 필수 |
 | `_load.py` | 위 JSON을 IO명세 §1 반환 형태로 materialize |
 
 `_`로 시작하는 JSON 키(`_scenario` · `_설명` 등)는 **설명용이며 포트 반환값에 실리지 않는다.**
@@ -62,6 +62,25 @@ IO명세·상세설계의 예시들이 흩어져 보이지만 **한 날의 스�
 리터럴 날짜를 쓰면 9/11 시나리오에서 "8/24 납품"이 3주 전이 되어 등급-신선도 매칭이
 무의미해진다. `_load.py`가 `as_of`를 더해 실날짜를 만든다 — 그래서 mock 어디에도
 `date.today()`가 없다 (규칙 1).
+
+## 품목 비중이 두 곳에 있고 값이 다른 이유
+
+`snapshot.json`의 `item_mix_ratio.배추`는 **0.812**인데 `orders.json`으로 배추 비중을 내면
+**0.407**이 나온다. **모순이 아니다 — 축이 다르다.**
+
+| | `snapshot.json.item_mix_ratio` | `orders.json` 파생 |
+|---|---|---|
+| 뜻 | **전사 매출 비중** (정의서 §3.5.1 "배추 81.2%") | **향후 14일 확정주문 구성** |
+| 분모 | 회사 전체 매출 | 그 창(14일) 안의 확정주문 합 |
+| 기간 | 상시 | 단기(`demand.order_window_days`) |
+| 쓰는 곳 | **mix 축 게이팅 전용** (`concentration.item_threshold` 0.70과 비교) | ③ 일평균 수요 산정 |
+
+**서로 참조하지 않는다.** 게이팅은 snapshot만 보고, 수요는 orders만 본다. 두 값을 억지로
+맞추면 둘 중 하나가 자기 용도에서 틀어진다 — 0.812를 0.407로 내리면 mix 축이 열려버리고,
+반대로 orders를 0.812에 맞추면 4품목 수요가 배추 하나로 쏠려 3안 구분이 사라진다.
+
+> 2026-08-26 팀 페르소나 워크북과 대조하다 이 둘을 "mock 내부 모순"으로 한 번 잘못
+> 잡았다. 같은 오독이 반복되지 않게 여기와 `snapshot.json` 양쪽에 적어둔다.
 
 ## 값을 고칠 때 지켜야 할 것
 
