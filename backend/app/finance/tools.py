@@ -175,6 +175,8 @@ def derive_cash_priority(*, projected_cash_min: Decimal, policy: FinancePolicy) 
 
 def calculate_finance_cap(*, base_projection: CashflowProjection, policy: FinancePolicy) -> Decimal:
     """단일 D+N 매입 지급을 Overlay할 때의 보수적 원 단위 상한."""
+    if policy.purchase_payment_days is None:
+        raise ValueError("purchase_payment_days is required for Finance Cap")
     payment_date = base_projection.as_of + timedelta(days=policy.purchase_payment_days)
     if not base_projection.as_of < payment_date <= base_projection.horizon_end:
         raise ValueError("purchase payment date is outside projection horizon")
