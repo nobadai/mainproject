@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -96,6 +96,28 @@ class ProcurementRunResponse(BaseModel):
         default=[],
         description="어댑터가 아직 등록되지 않은 에이전트. 비어 있지 않으면 end_code 는 E4 다.",
     )
+
+
+class RunHistoryOut(BaseModel):
+    """`GET /master/runs/{request_id}` — 그 요청이 어떻게 됐나.
+
+    ★ `plan` 은 응답 원문 안이 아니라 **별도 컬럼**에서 온다. 검증 Tool 의
+      ④ 실행 계획 온전성 검사(M-16)가 이것만 읽기 때문이다.
+    """
+
+    request_id: str
+    as_of: date
+    agent: str
+    cycle: str
+    runtime_status: str
+    elapsed_ms: int | None = None
+    created_at: datetime
+
+    plan: list[dict[str, Any]] = []
+    plan_signature: list[tuple[str, str, int]] = []
+
+    request_payload: dict[str, Any] = {}
+    response_payload: dict[str, Any] = {}
 
 
 class TriggerAck(BaseModel):

@@ -11,7 +11,8 @@
     runner   위 셋을 묶은 호출 계층
     flow     매입 의사결정 Flow (정의서 §3.4)
     wiring   프로세스 전역 에이전트 레지스트리 — 각 파트 어댑터가 등록한다
-    router   API — /master/request · /master/trigger
+    persistence  실행 계획 적재 (정의서 §1.2-11)
+    router   API — /master/request · /master/trigger · /master/runs/{request_id}
 """
 
 from app.master.budget import BudgetExhausted, CallBudget

@@ -431,3 +431,67 @@ def test_재무_PRE_PURCHASE_정상_경로는_발견_0():
         llm_status="SUCCESS",
     )
     assert validate_reply(request, r, meta) == ()
+
+
+# ── judgment_fields — 소문자 판정 라벨 (v0.4 · 매입 파트 지적) ──────────
+
+
+def test_소문자_판정_라벨은_휴리스틱이_못_잡는다():
+    """`situation: "stable"` — 대문자 규칙의 한계를 사실로 고정한다."""
+    f = check_evidence_coverage(reply(payload={"situation": "stable"}))
+    assert f == []
+
+
+def test_선언하면_표기와_무관하게_요구한다():
+    f = check_evidence_coverage(
+        reply(payload={"situation": "stable"}, judgment_fields=("situation",))
+    )
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+
+
+def test_선언한_판정에_근거가_붙으면_통과():
+    ok = reply(
+        payload={"situation": "stable"},
+        judgment_fields=("situation",),
+        evidences=(ev("situation", 0.06, "ratio"),),
+    )
+    assert check_evidence_coverage(ok) == []
+
+
+def test_대문자_라벨은_선언_없이도_걸린다():
+    """휴리스틱은 자동 하한으로 남는다."""
+    f = check_evidence_coverage(reply(payload={"payment_pressure": "MEDIUM"}))
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+
+
+def test_없는_필드를_판정으로_선언하면_걸린다():
+    """오타를 조용히 넘기면 그 검사가 통째로 빈다."""
+    f = check_evidence_coverage(
+        reply(payload={"situation": "stable"}, judgment_fields=("situaton",))
+    )
+    assert "E-JUDGMENT-UNKNOWN" in [x.code for x in f]
+
+
+def test_매입_출력_형태_전체():
+    """situation · allowed_axes · scenarios[] 를 한 번에."""
+    payload = {
+        "situation": "stable",
+        "allowed_axes": ["quantity", "timing"],
+        "scenarios": [
+            {"label": "기본", "total_amount_krw": 9107750, "total_qty_kg": 6429},
+            {"label": "공격", "total_amount_krw": 12363250, "total_qty_kg": 8000},
+        ],
+    }
+    ok = reply(
+        payload=payload,
+        judgment_fields=("situation", "allowed_axes"),
+        evidences=(
+            ev("situation", 0.06, "ratio"),
+            ev("allowed_axes", 2.0, "count"),
+            ev("scenarios[기본].total_amount_krw", 9107750.0),
+            ev("scenarios[기본].total_qty_kg", 6429.0, "kg"),
+            ev("scenarios[공격].total_amount_krw", 12363250.0),
+            ev("scenarios[공격].total_qty_kg", 8000.0, "kg"),
+        ),
+    )
+    assert check_evidence_coverage(ok) == []

@@ -173,6 +173,15 @@ class AgentReply:
     missing_data: tuple[str, ...] = ()
     missing_capability: tuple[str, ...] = ()
 
+    judgment_fields: tuple[str, ...] = ()
+    """★ 이 payload 필드는 **내가 내린 판정**이니 근거를 요구하라 (v0.4).
+
+    자동 판별은 대문자 라벨(`MEDIUM`)만 잡는 **휴리스틱**이라 소문자 판정
+    (`situation: "stable"`)을 놓친다. 도메인마다 표기가 달라 규칙으로 못 박을 수 없으므로
+    **에이전트가 직접 선언**한다. 선언된 필드는 표기와 무관하게 Evidence 가 필요하다.
+
+    휴리스틱은 자동 하한으로 남는다 — 선언하지 않아도 대문자 라벨은 여전히 걸린다."""
+
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -293,7 +302,7 @@ def _is_item_list(value: Any) -> bool:
     return bool(value) and all(isinstance(item, Mapping) for item in value)
 
 
-def required_claims(payload: Mapping[str, Any]) -> set[str]:
+def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] = ()) -> set[str]:
     """근거가 필요한 값의 **경로 집합**.
 
     ★ v0.3 — 배열 payload 를 지원한다 (매입 파트 요청).
@@ -305,6 +314,7 @@ def required_claims(payload: Mapping[str, Any]) -> set[str]:
       | 위치 | 숫자 | 판정 라벨 |
       |---|---|---|
       | 최상위 | 필요 | **필요** — 홀로 서서 남의 행동을 바꾸는 판단이다 |
+      | 최상위 · `judgment_fields` 선언분 | — | **필요** — 표기 무관 (v0.4) |
       | 배열 항목 안 | 필요 | **면제** — 구조 식별자이거나 그 에이전트 자신의 판정이다 |
 
       배열 항목의 라벨까지 요구하면 시나리오마다 `label` 근거를 만들어야 해서 과하다.
@@ -312,8 +322,11 @@ def required_claims(payload: Mapping[str, Any]) -> set[str]:
 
     ★ 배열은 **한 겹만** 파고든다. 더 깊은 중첩의 규칙은 도메인이 정한다.
     """
-    out: set[str] = set()
+    declared = set(judgment_fields)
+    out: set[str] = {key for key in declared if key in payload}
     for key, value in payload.items():
+        if key in declared:
+            continue  # 이미 넣었다 — 표기와 무관하게 요구한다
         if _is_item_list(value):
             for index, item in enumerate(value):
                 for sub, sub_value in item.items():
@@ -415,7 +428,17 @@ def check_evidence_coverage(reply: AgentReply) -> list[EnvelopeFinding]:
         return []  # 못 돈 회신에 근거를 요구하지 않는다
 
     payload = reply.payload
-    required = required_claims(payload)
+    required = required_claims(payload, reply.judgment_fields)
+
+    # 선언한 이름이 payload 에 없으면 오타다 — 조용히 넘어가면 검사가 통째로 빈다
+    out_declared = [
+        EnvelopeFinding(
+            "E-JUDGMENT-UNKNOWN",
+            f"judgment_fields[{name}]",
+            f"'{name}' 을 판정 필드로 선언했으나 payload 에 없다 — 오타이거나 이름이 바뀌었다.",
+        )
+        for name in sorted(set(reply.judgment_fields) - set(payload))
+    ]
 
     covered: set[str] = set()
     orphans: list[str] = []
@@ -426,7 +449,7 @@ def check_evidence_coverage(reply: AgentReply) -> list[EnvelopeFinding]:
         else:
             covered.add(canonical)
 
-    out = [
+    out = out_declared + [
         EnvelopeFinding(
             "E-EVIDENCE-MISSING",
             f"payload.{path}",

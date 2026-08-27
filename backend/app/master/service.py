@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from app.master import wiring
+import time
+
+from app.master import persistence, wiring
 from app.master.budget import CallBudget
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
@@ -15,8 +17,10 @@ from app.master.runner import MasterRunner
 from app.master.schemas import (
     ProcurementRunRequest,
     ProcurementRunResponse,
+    RunHistoryOut,
     StepOut,
 )
+from app.orchestrator.run_repository import get_run_by_request_id
 
 
 def make_request_id(as_of: str, seq: int = 1) -> str:
@@ -32,7 +36,11 @@ def run_procurement(
     request: ProcurementRunRequest,
     verifier: VerifierPort | None = None,
 ) -> ProcurementRunResponse:
-    """매입 Flow 를 한 번 돌린다."""
+    """매입 Flow 를 한 번 돌리고 실행 계획을 적재한다.
+
+    ★ 적재는 계산이 끝난 뒤다. 실패해도 응답을 막지 않는다 (§persistence).
+    """
+    started = time.perf_counter()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
     context = ExecutionContext(
         request_id=request_id,
@@ -44,11 +52,14 @@ def run_procurement(
     missing = wiring.missing()
     if missing:
         # 어댑터 미구현은 오류가 아니라 "그 부서가 오늘 돌지 않는다"와 같다 (§5.3)
-        return _empty_response(
+        response = _empty_response(
             context,
             reason=f"어댑터 미등록: {', '.join(missing)}",
             missing_adapters=list(missing),
         )
+        # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
+        persistence.record(request, response, elapsed_ms=_elapsed(started))
+        return response
 
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
@@ -58,7 +69,14 @@ def run_procurement(
         confirmed_orders=request.confirmed_orders,
         policy_values=request.policy_values,
     ).run(has_unmet_obligation=request.has_unmet_obligation)
-    return _to_response(context, outcome)
+
+    response = _to_response(context, outcome)
+    persistence.record(request, response, elapsed_ms=_elapsed(started))
+    return response
+
+
+def _elapsed(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -116,3 +134,34 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
         )
         for s in plan.steps
     ]
+
+
+# ---------------------------------------------------------------------------
+# 조회 — GET /master/runs/{request_id}
+# ---------------------------------------------------------------------------
+
+
+def get_run_history(request_id: str) -> RunHistoryOut:
+    """업무 키로 실행 이력을 찾는다.
+
+    ★ 재실행하면 같은 `request_id` 로 행이 여럿 생긴다. **최신을 돌려준다** —
+      "그 요청 어떻게 됐냐"에는 마지막 결과가 답이다. 전체 이력이 필요하면
+      `run_id` 로 목록을 훑는다.
+    """
+    row = get_run_by_request_id(request_id)
+    plan = list(row.get("plan") or [])
+    return RunHistoryOut(
+        request_id=row.get("request_id") or request_id,
+        as_of=row["as_of"],
+        agent=row["agent"],
+        cycle=row["cycle"],
+        runtime_status=row["runtime_status"],
+        elapsed_ms=row.get("elapsed_ms"),
+        created_at=row["created_at"],
+        plan=plan,
+        plan_signature=[
+            (str(s.get("agent")), str(s.get("mode")), int(s.get("call_seq", 1))) for s in plan
+        ],
+        request_payload=dict(row.get("request_payload") or {}),
+        response_payload=dict(row.get("response_payload") or {}),
+    )
