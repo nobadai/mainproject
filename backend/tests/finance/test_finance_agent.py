@@ -57,6 +57,8 @@ class Port:
             policy_version="v1.3-PROVISIONAL",
             usage_scope="AGENT_MVP_DEMO",
             source_refs={
+                "payroll_date": "POL-PAYROLL-DATE",
+                "monthly_labor_cost_krw": "FACT-PAYROLL-AMOUNT",
                 "purchase_payment_days": "policy:purchase-days",
                 "minimum_cash_balance_krw": "policy:min-cash",
                 "cash_priority_reference": "policy:pressure",
@@ -264,8 +266,9 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     evidence = {item.claim: item for item in reply.evidences}
     assert evidence["available_cash"].source == "finance"
     assert evidence["payment_pressure"].source == "tool_calc"
-    assert evidence["payroll_payment_day"].source == "persona"
+    assert evidence["payroll_payment_day"].source == "finance"
     assert evidence["payroll_payment_day"].evidence_grade == "SIM_FIXED"
+    assert evidence["payroll_payment_day"].ref_ids == ("POL-PAYROLL-DATE",)
     assert metadata.llm_fallback_used is False
 
 
@@ -366,19 +369,35 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
         "SCENARIO_VALIDATION",
         {
             "scenarios": [
-                {
-                    "scenario_id": "EARLY",
-                    "total_amount_krw": 1000,
-                    "payment_schedule": [
-                        {"payment_date": "2025-01-02", "amount_krw": 1000}
-                    ],
-                },
-                {
-                    "scenario_id": "LATE",
-                    "total_amount_krw": 1000,
-                    "payment_schedule": [
-                        {"payment_date": "2025-01-06", "amount_krw": 1000}
-                    ],
+                    {
+                        "scenario_id": "EARLY",
+                        "total_qty_kg": 1,
+                        "total_amount_krw": 1000,
+                        "max_price": 1000,
+                        "split_plan": [{"seq": 1, "date": "2025-01-01", "qty_kg": 1}],
+                        "payment_schedule": [
+                            {
+                                "seq": 1, "purchase_date": "2025-01-01",
+                                "payment_date": "2025-01-02", "qty_kg": 1,
+                                "amount_krw": 1000, "amount_max_krw": 1000,
+                                "basis": "as_of_unit_price",
+                            }
+                        ],
+                    },
+                    {
+                        "scenario_id": "LATE",
+                        "total_qty_kg": 1,
+                        "total_amount_krw": 1000,
+                        "max_price": 1000,
+                        "split_plan": [{"seq": 1, "date": "2025-01-05", "qty_kg": 1}],
+                        "payment_schedule": [
+                            {
+                                "seq": 1, "purchase_date": "2025-01-05",
+                                "payment_date": "2025-01-06", "qty_kg": 1,
+                                "amount_krw": 1000, "amount_max_krw": 1000,
+                                "basis": "as_of_unit_price",
+                            }
+                        ],
                 },
             ]
         },
@@ -551,6 +570,86 @@ def test_payment_schedule_sum_mismatch_is_error():
             )
         )
     assert reply.runtime_status == "ERROR"
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_purchase_pr62_shape_uses_label_identity_and_validates_base_stress(save_run):
+    del save_run
+    scenario = {
+        "label": "기본",
+        "strategy_type": "timing",
+        "coverage_days": 3,
+        "total_qty_kg": 3,
+        "total_amount_krw": 300,
+        "max_price": 120,
+        "margin_warning": False,
+        "split_plan": [
+            {"seq": 1, "date": "2025-01-01", "qty_kg": 1},
+            {"seq": 2, "date": "2025-01-02", "qty_kg": 2},
+        ],
+        "sourcing_plan": [
+            {"market": "가락", "grade": "상", "qty_kg": 3, "grade_unit_price": 100}
+        ],
+        "payment_schedule": [
+            {
+                "seq": 1,
+                "purchase_date": "2025-01-01",
+                "payment_date": "2025-01-02",
+                "qty_kg": 1,
+                "amount_krw": 100,
+                "amount_max_krw": 120,
+                "basis": "as_of_unit_price",
+            },
+            {
+                "seq": 2,
+                "purchase_date": "2025-01-02",
+                "payment_date": "2025-01-03",
+                "qty_kg": 2,
+                "amount_krw": 200,
+                "amount_max_krw": 240,
+                "basis": "as_of_unit_price",
+            },
+        ],
+        "expected_margin_rate": 0.3,
+        "rationale": [
+            {
+                "source": "시세관측",
+                "claim": "현재 단가",
+                "ref_id": "PRICE-1",
+                "evidence_grade": "OFFICIAL",
+                "evidence_detail": "가락시장 기준",
+            }
+        ],
+        "risks": [],
+    }
+    reply, _ = FinanceAgentController(
+        Port(), Planner([ToolAction("evaluate_purchase_scenario"), ToolAction(finalize=True)])
+    ).run(request("SCENARIO_VALIDATION", {"scenarios": [scenario]}))
+
+    assert reply.runtime_status == "READY"
+    assert reply.payload["verdicts"][0]["scenario_id"] == "기본"
+    assert reply.payload["verdicts"][0]["verdict"] == "ok"
+    assert reply.payload["verdicts"][0]["stress_projected_cash_min"] < reply.payload[
+        "verdicts"
+    ][0]["scenario_projected_cash_min"]
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_purchase_labels_must_be_unique_when_scenario_id_is_absent(save_run):
+    del save_run
+    reply, _ = FinanceAgentController(Port(), Planner([])).run(
+        request(
+            "SCENARIO_VALIDATION",
+            {
+                "scenarios": [
+                    {"label": "기본", "total_amount_krw": 100},
+                    {"label": "기본", "total_amount_krw": 200},
+                ]
+            },
+        )
+    )
+    assert reply.runtime_status == "ERROR"
+    assert "unique" in reply.reasoning
 
 
 def test_duplicate_tool_call_is_blocked():

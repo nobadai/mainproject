@@ -156,7 +156,7 @@ class FinancePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     purchase_payment_days: int | None = Field(default=None, ge=0)
-    payroll_date: int = Field(default=10, ge=1, le=31)
+    payroll_date: int = Field(ge=1, le=31)
     margin_defense_floor_rate: Decimal | None = Field(default=None, ge=0, le=1)
     monthly_labor_cost_krw: Decimal | None = Field(default=None, ge=0)
     minimum_cash_balance_krw: Decimal = Field(ge=0)
@@ -246,6 +246,7 @@ class CashEvent(BaseModel):
     direction: CashEventDirection
     ref_id: str = Field(min_length=1)
     source_ref: str | None = None
+    schedule_source_ref: str | None = None
     principal_component_krw: Decimal | None = Field(default=None, ge=0)
     interest_component_krw: Decimal | None = Field(default=None, ge=0)
 
