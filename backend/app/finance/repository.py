@@ -29,6 +29,17 @@ _NUMERIC_POLICY_KEYS = {
 }
 _TEXT_POLICY_KEYS = {"cash_priority_reference"}
 _REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
+
+# ★ 선택 정책값 — 없어도 Finance 는 돈다 (2026-08-27 신설).
+#
+#   `margin_defense_floor_rate` 는 **재무가 계산에 쓰지 않고 매입에 전달만 한다.**
+#   그래서 필수로 두면 이 행이 없는 DB 에서 재무 전체가 LookupError 로 죽는데,
+#   정작 재무 자신의 상한 계산에는 필요 없는 값이다.
+#
+#   없으면 `None` 이 되고, 마스터 어댑터가 `missing_data` 로 밝힌다 (§1.2-10).
+#   **`0` 으로 채우지 않는다** — 매입이 그 값으로 손익분기를 계산하면 숫자는 멀쩡히
+#   나오고 에러도 안 나고 검증도 통과한다.
+_OPTIONAL_NUMERIC_POLICY_KEYS = {"margin_defense_floor_rate"}
 _DEBT_NUMERIC_POLICY_KEYS = {
     "debt_principal_krw",
     "debt_annual_rate",
@@ -236,7 +247,7 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
 
     for row in rows:
         key = row.get("policy_key")
-        if key not in _REQUIRED_POLICY_KEYS:
+        if key not in _REQUIRED_POLICY_KEYS and key not in _OPTIONAL_NUMERIC_POLICY_KEYS:
             continue
         if key in values:
             raise ValueError(f"Duplicate Finance policy key: {key}")
@@ -246,7 +257,8 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
             raise ValueError(f"Finance policy usage_scope mismatch: {key}")
 
         kind = row.get("value_kind")
-        expected_kind = "NUMERIC" if key in _NUMERIC_POLICY_KEYS else "TEXT"
+        numeric_keys = _NUMERIC_POLICY_KEYS | _OPTIONAL_NUMERIC_POLICY_KEYS
+        expected_kind = "NUMERIC" if key in numeric_keys else "TEXT"
         if kind != expected_kind:
             raise ValueError(f"Invalid value_kind for Finance policy {key}: {kind}")
         selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"

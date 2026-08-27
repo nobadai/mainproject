@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -32,6 +33,7 @@ def req(mode="PRE_PURCHASE", as_of: date = AS_OF) -> AgentRequest:
 
 
 class _Policy:
+    margin_defense_floor_rate = Decimal("0.267")
     purchase_payment_days = 7
     minimum_cash_balance_krw = Decimal(10_000_000)
     cashflow_projection_days = 30
@@ -41,6 +43,7 @@ class _Policy:
     policy_version = "v1.3-PROVISIONAL"
     payroll_date = 10
     monthly_labor_cost_krw = Decimal(3_000_000)
+    source_refs: ClassVar[dict[str, str]] = {}
 
 
 class _Snapshot:
@@ -90,12 +93,26 @@ def test_확정_7필드를_싣는다(wired):
         assert field in reply.payload, field
 
 
-def test_마진_방어선은_missing_data_로_밝힌다(wired):
-    """🔴 재무 payload 로 오기로 했는데(M-19) 구현된 Policy 에 필드가 없다.
+def test_마진_방어선을_읽어서_싣는다(wired):
+    """★ 어댑터가 **계산하지 않는다** (2026-08-27 재무 확인).
 
-    `0` 이나 임의값으로 채우면 매입이 그 값으로 손익분기를 계산한다 — 에러도 안 나고
-    검증도 통과한다 (§1.2-10).
+    `break_even_cm + 0.02` 를 여기서 만들면 두 곳에서 같은 값을 계산하게 되고,
+    N9 후 재산정 때 한쪽만 바뀐다. Policy 를 읽어 싣기만 한다.
     """
+    reply, _ = adapter.finance_port(req())
+    assert reply.payload["margin_defense_floor_rate"] == 0.267
+    assert "margin_defense_floor_rate" not in reply.missing_data
+
+
+def test_마진_방어선이_없으면_missing_data_로_밝힌다(monkeypatch):
+    """`0` 으로 채우면 매입이 그 값으로 손익분기를 계산한다 — 에러도 안 나고
+    검증도 통과한다 (§1.2-10)."""
+
+    class _NoFloor(_Context):
+        class policy(_Policy):
+            margin_defense_floor_rate = None
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _NoFloor())
     reply, _ = adapter.finance_port(req())
     assert "margin_defense_floor_rate" not in reply.payload
     assert "margin_defense_floor_rate" in reply.missing_data
@@ -152,18 +169,64 @@ def test_목록형_근거는_개수가_아니라_임계값이다(wired):
 
 
 # ---------------------------------------------------------------------------
-# SCENARIO_VALIDATION — 아직 못 한다
+# critical_payment_dates — 지급일만 후보다 (2026-08-27 재무 정의)
 # ---------------------------------------------------------------------------
 
 
-def test_시나리오_판정은_못_한다는_사실이_드러난다(wired):
-    """★ 추측 매핑을 하면 **틀린 값을 판정**하고 에러도 안 난다.
+class _Event:
+    """project_cashflow 가 중복 판정에 쓰는 (date, event_type, ref_id) 까지 갖춘다."""
 
-    못 하는 것을 `skipped` 로 밝히면 Flow 는 끝까지 돌고 사실은 이력에 남는다.
+    def __init__(self, day: int, amount: int, direction: str = "OUTFLOW"):
+        self.event_date = date(2026, 1, day)
+        self.amount_krw = Decimal(amount)
+        self.direction = direction
+        self.event_type = "TEST"
+        self.ref_id = f"EV-{day}-{direction}"
+
+
+def _with_events(monkeypatch, events):
+    class _C(_Context):
+        cash_events = tuple(events)
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _C())
+
+
+def test_지급이_없는_날은_후보가_아니다(monkeypatch):
+    """★ 제 초안을 재무가 되돌렸다.
+
+    처음에는 "잔액이 최소현금 아래인 날"로 정의했는데 그건 `critical_cash_date` 다.
+    매입은 **분할 회차 지급일이 겹치는지**를 보므로, 지급이 없는 날은 겹칠 수가 없다.
     """
-    reply, meta = adapter.finance_port(req(mode="SCENARIO_VALIDATION"))
-    assert reply.runtime_status == "RUNTIME_NOT_READY"
-    assert reply.business_status == "skipped"
-    assert "purchase_scenario_schema" in reply.missing_data
-    assert reply.missing_capability
-    assert meta.used_tools == ()
+    _with_events(monkeypatch, [_Event(20, 1_000_000)])
+    reply, _ = adapter.finance_port(req())
+    dates = reply.payload["critical_payment_dates"]
+    # 급여(10일 3,000,000)가 20일 1,000,000 보다 크므로 급여일이 뽑힌다
+    assert dates == ["2026-01-10"]
+    # 지급이 없는 날은 어느 것도 후보가 아니다
+    assert all(d in {"2026-01-10", "2026-01-20"} for d in dates)
+
+
+def test_일일_유출이_가장_큰_지급일을_고른다(monkeypatch):
+    """급여 3,000,000 보다 큰 지급이 들어오면 그쪽이 뽑힌다."""
+    _with_events(monkeypatch, [_Event(5, 1_000_000), _Event(20, 9_000_000)])
+    reply, _ = adapter.finance_port(req())
+    assert reply.payload["critical_payment_dates"] == ["2026-01-20"]
+
+
+def test_유입은_지급_집중도에_세지_않는다(monkeypatch):
+    """지급 부담을 보는 값이라 들어오는 돈은 후보가 아니다."""
+    _with_events(monkeypatch, [_Event(5, 99_000_000, "INFLOW"), _Event(20, 9_000_000)])
+    reply, _ = adapter.finance_port(req())
+    assert reply.payload["critical_payment_dates"] == ["2026-01-20"]
+
+
+def test_현금_최저일과_지급_집중일은_다른_필드다(monkeypatch):
+    """★ 재무가 갈라 달라고 한 지점.
+
+    `critical_cash_date` 는 **현금이 바닥나는 날**, `critical_payment_dates` 는
+    **지급이 몰린 날**이다. 같은 날일 수도 있지만 개념이 다르므로 필드를 나눈다.
+    """
+    _with_events(monkeypatch, [_Event(20, 9_000_000)])
+    reply, _ = adapter.finance_port(req())
+    assert reply.payload["critical_cash_date"] == "2026-01-20"
+    assert "critical_cash_date" in {e.claim for e in reply.evidences}

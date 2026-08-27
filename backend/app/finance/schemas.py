@@ -167,6 +167,16 @@ class FinancePolicy(BaseModel):
     usage_scope: Literal["AGENT_MVP_DEMO"]
     source_refs: dict[str, str]
 
+    margin_defense_floor_rate: Decimal | None = Field(default=None, ge=0)
+    """마진 방어선 — **재무가 소유하고 매입이 쓴다** (M-19 해소 · 2026-08-27).
+
+    재무 자신의 상한 계산에는 들어가지 않는다. `PRE_PURCHASE` payload 로 실려
+    매입의 손익분기 판단에 쓰인다.
+
+    ★ 선택 필드다. 없으면 `None` 이고 어댑터가 `missing_data` 로 밝힌다.
+      `0` 으로 채우면 매입이 그 값으로 계산하는데 **에러도 안 나고 검증도 통과한다**
+      (§1.2-10). 현재 값 0.267 = 거치기 손익분기 CM 24.66% + 2%p · N9 후 재산정."""
+
     @field_validator(
         "purchase_payment_days",
         "payroll_date",

@@ -20,8 +20,8 @@ adapters/finance.py — 재무 에이전트 접점 (마스터 ↔ 재무)
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import timedelta
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -89,15 +89,18 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     horizon_end = as_of + timedelta(days=policy.cashflow_projection_days)
 
     tools.append(_T_CASHFLOW)
+    events = (
+        *context.cash_events,
+        *build_payroll_schedule(as_of=as_of, horizon_end=horizon_end, policy=policy),
+    )
     projection = project_cashflow(
         as_of=as_of,
         current_cash_krw=context.snapshot.current_cash_krw,
         horizon_end=horizon_end,
-        cash_events=(
-            *context.cash_events,
-            *build_payroll_schedule(as_of=as_of, horizon_end=horizon_end, policy=policy),
-        ),
+        cash_events=events,
     )
+    # 투영 구간 밖의 이벤트는 투영에 안 들어가므로 유출 집계에서도 뺀다
+    outflows = _outflow_by_date([e for e in events if as_of < e.event_date <= horizon_end])
 
     tools.append(_T_CAP)
     cap = calculate_finance_cap(base_projection=projection, policy=policy)
@@ -113,16 +116,27 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         "base_projected_cash_min": _num(cash_min),
         "purchase_payment_days": policy.purchase_payment_days,
         "payment_pressure": pressure,
-        "critical_payment_dates": _critical_dates(projection, policy.minimum_cash_balance_krw),
+        # 지급이 몰린 날 — 매입의 분할 회차 충돌 검사용 (2026-08-27 재무 정의)
+        "critical_payment_dates": _critical_payment_dates(
+            projection, outflows, policy.minimum_cash_balance_krw
+        ),
+        # 현금이 바닥나는 날 — 위와 **다른 개념**이라 필드를 나눈다 (재무 구분)
+        "critical_cash_date": _critical_cash_date(projection),
         # ★ 재현 4종의 하나 (§3.2.4). 마스터가 준 policy_version 과 다를 수 있어 밝힌다 — M-20
         "policy_version_used": policy.policy_version,
     }
 
-    # 🔴 `margin_defense_floor_rate` 는 재무 payload 로 오기로 했는데(M-19 해소)
-    #    구현된 FinancePolicy 에 그 필드가 없다. 0 이나 임의값으로 채우지 않는다 (§1.2-10).
-    missing = () if hasattr(policy, "margin_defense_floor_rate") else ("margin_defense_floor_rate",)
-    if not missing:
-        payload["margin_defense_floor_rate"] = _num(policy.margin_defense_floor_rate)
+    # `margin_defense_floor_rate` 는 재무 Policy 소유다 (M-19 해소).
+    #
+    # ★ 어댑터가 계산하지 않는다 — `break_even_cm + 0.02` 를 여기서 만들면 두 곳에서
+    #   같은 값을 계산하게 되고, N9 후 재산정 때 한쪽만 바뀐다 (2026-08-27 재무 확인).
+    #   읽어서 싣기만 한다. 없으면 0 으로 채우지 않고 이름을 밝힌다 (§1.2-10).
+    floor_rate = policy.margin_defense_floor_rate
+    missing: tuple[str, ...] = ()
+    if floor_rate is None:
+        missing = ("margin_defense_floor_rate",)
+    else:
+        payload["margin_defense_floor_rate"] = _num(floor_rate)
 
     evidences = (
         _ev("available_cash", context.snapshot.current_cash_krw, "KRW", ref),
@@ -162,9 +176,29 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             policy.minimum_cash_balance_krw,
             "KRW",
             ref,
-            "판정 임계 = 최소현금 보유선. 투영 잔액이 이 값 아래인 날 + 투영 최저일",
+            "지급일 중 (지급 후 잔액 < 최소현금) ∪ (일일 유출 최대). "
+            "판정 임계 = 최소현금 보유선",
+        ),
+        _ev(
+            "critical_cash_date",
+            projection.projected_cash_min,
+            "KRW",
+            ref,
+            "투영 구간 최저 잔액일 — 지급 집중도가 아니라 현금 위험",
         ),
     )
+    if floor_rate is not None:
+        evidences = (
+            *evidences,
+            _ev(
+                "margin_defense_floor_rate",
+                floor_rate,
+                "ratio",
+                policy.source_refs.get("margin_defense_floor_rate", ref),
+                "재무 Policy 값. 거치기 손익분기 CM + 2%p · N9 후 재산정 대상",
+                grade="SIM_FIXED",
+            ),
+        )
 
     reply = AgentReply(
         request_id=request.context.request_id,
@@ -228,20 +262,52 @@ def _load_context() -> FinanceRuntimeContext | None:
         return None
 
 
-def _critical_dates(projection: CashflowProjection, floor: Decimal) -> list[str]:
-    """현금이 최소 보유선 아래로 내려가는 날 + 바닥 나는 날.
+def _critical_payment_dates(
+    projection: CashflowProjection,
+    outflow_by_date: Mapping[date, Decimal],
+    floor: Decimal,
+) -> list[str]:
+    """**지급일 중** 위험한 날 (2026-08-27 재무 정의).
 
-    ⚠️ **판정 규칙은 재무 확인이 필요하다.** 지금은 `minimum_cash_balance_krw` 미만으로
-    정의했다 — 정책값에 묶인 결정론 규칙이라 재현은 되지만, "지급이 몰리는 날"의 재무
-    정의와 다를 수 있다. `evidence_detail` 에 규칙을 적어 두었으니 다르면 알려 주십시오.
+    ```text
+    critical_payment_dates = minimum_cash 위반 지급일  ∪  최대 일일 유출 지급일
+    ```
+
+    ★ **제 초안을 재무가 되돌렸다.** 처음에는 *"잔액이 최소현금 아래인 날 + 투영
+      최저일"* 로 정의했는데, 그건 `critical_cash_date` 지 `critical_payment_dates` 가
+      아니다 — **현금이 위험한 날**과 **지급이 몰린 날**은 다르다.
+
+      매입은 이 값으로 *"분할 회차 지급일이 이미 지급부담이 큰 날과 겹치는가"* 를
+      본다. 지급이 없는 날은 겹칠 수가 없으므로 **후보는 지급일뿐이다.**
+
+    따라서 실제 예정 유출이 있는 날만 후보로 두고, 그중 두 종류를 고른다.
     """
-    dates = {
-        p.projection_date.isoformat()
-        for p in projection.projected_cash_by_date
-        if p.cash_balance_krw < floor
-    }
-    dates.add(projection.projected_cash_min_date.isoformat())
-    return sorted(dates)
+    payment_dates = {d for d, amount in outflow_by_date.items() if amount > 0}
+    if not payment_dates:
+        return []
+
+    balance_at = {p.projection_date: p.cash_balance_krw for p in projection.projected_cash_by_date}
+    picked = {d for d in payment_dates if balance_at.get(d, floor) < floor}
+
+    peak = max(outflow_by_date[d] for d in payment_dates)
+    picked |= {d for d in payment_dates if outflow_by_date[d] == peak}
+
+    return sorted(d.isoformat() for d in picked)
+
+
+def _outflow_by_date(events: Sequence[Any]) -> dict[date, Decimal]:
+    """날짜별 **유출** 합계. 유입은 세지 않는다 — 지급 집중도를 보는 값이다."""
+    out: dict[date, Decimal] = {}
+    for event in events:
+        if event.direction == "INFLOW":
+            continue
+        out[event.event_date] = out.get(event.event_date, Decimal(0)) + event.amount_krw
+    return out
+
+
+def _critical_cash_date(projection: CashflowProjection) -> str:
+    """현금 잔액이 가장 낮은 날 — **지급 집중도가 아니라 현금 위험**이다 (재무 구분)."""
+    return projection.projected_cash_min_date.isoformat()
 
 
 def _ratio(numerator: Decimal, denominator: Decimal) -> float:
