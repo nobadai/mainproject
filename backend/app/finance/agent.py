@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -66,6 +67,19 @@ class FinancePlanner(Protocol):
         observations: tuple[dict[str, Any], ...],
         missing_capabilities: tuple[str, ...],
     ) -> ToolAction: ...
+
+
+class FinanceFinalizer(Protocol):
+    model: str
+    attempts: int
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str: ...
 
 
 class OllamaFinancePlanner:
@@ -159,6 +173,110 @@ class OllamaFinancePlanner:
         return ToolAction(**content)
 
 
+_FINAL_EXPLANATIONS = {
+    "PRE_BOUNDARY": "Verified Finance Evidence supports the reported purchasing boundary.",
+    "SCENARIO_REJECT": (
+        "Verified Finance Evidence rejects at least one original scenario. "
+        "Any published amount alternative was independently validated."
+    ),
+    "SCENARIO_ACCEPT": "Verified Finance Evidence supports the reported scenario verdicts.",
+}
+
+
+class OllamaFinanceFinalizer:
+    """Evidence-only LLM finalization separated from investigation planning."""
+
+    def __init__(self) -> None:
+        self.model = os.getenv("LLM_MODEL", "gemma3:4b")
+        self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+        self.attempts = 0
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        self.attempts += 1
+        allowed = (
+            ["PRE_BOUNDARY"]
+            if mode == "PRE_PURCHASE"
+            else ["SCENARIO_REJECT"]
+            if business_status == "reject"
+            else ["SCENARIO_ACCEPT"]
+        )
+        body = {
+            "model": self.model,
+            "stream": False,
+            "think": False,
+            "format": {
+                "type": "object",
+                "properties": {"explanation_key": {"type": "string", "enum": allowed}},
+                "required": ["explanation_key"],
+                "additionalProperties": False,
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Finalize the Finance reply from verified Evidence only. Select the "
+                        "allowed explanation key. Do not calculate or add numbers or claims."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "mode": mode,
+                            "business_status": business_status,
+                            "verified_claims": [item.claim for item in evidences],
+                            "allowed_explanation_keys": allowed,
+                        }
+                    ),
+                },
+            ],
+            "options": {"temperature": 0},
+        }
+        req = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            raw = json.loads(response.read().decode())
+        selected = json.loads(raw["message"]["content"])["explanation_key"]
+        if selected not in allowed:
+            raise ValueError("Finance finalization selected an unsupported explanation")
+        return _FINAL_EXPLANATIONS[selected]
+
+
+class DeterministicFinanceFinalizer:
+    """Test/offline finalizer implementing the same verified explanation contract."""
+
+    model = "deterministic-finance-finalizer"
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        self.attempts += 1
+        del evidences
+        if mode == "PRE_PURCHASE":
+            return _FINAL_EXPLANATIONS["PRE_BOUNDARY"]
+        return _FINAL_EXPLANATIONS[
+            "SCENARIO_REJECT" if business_status == "reject" else "SCENARIO_ACCEPT"
+        ]
+
+
 class FinanceToolRegistry:
     def __init__(self, data_port: FinanceAsOfDataPort):
         self.data_port = data_port
@@ -184,7 +302,7 @@ class FinanceToolRegistry:
         horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
         payroll_amount = self.data_port.load_payroll(ctx.as_of, horizon)
         if payroll_amount is None:
-            raise FinanceDataNotReady("payroll_amount")
+            raise FinanceDataNotReady("payroll_schedule")
         policy = policy.model_copy(
             update={"payroll_date": 10, "monthly_labor_cost_krw": payroll_amount}
         )
@@ -204,10 +322,18 @@ class FinanceToolRegistry:
     ) -> dict[str, Any]:
         del args
         position, policy, _ = self._context(state)
+        if state.request.mode == "PRE_PURCHASE" and policy.purchase_payment_days is None:
+            raise FinanceDataNotReady("purchase_payment_days")
         return {
             "available_cash": str(position["current_cash_krw"]),
             "minimum_cash_balance_krw": str(policy.minimum_cash_balance_krw),
             "payroll_payment_day": 10,
+            "purchase_payment_days": policy.purchase_payment_days,
+            "margin_defense_floor_rate": (
+                str(policy.margin_defense_floor_rate)
+                if policy.margin_defense_floor_rate is not None
+                else None
+            ),
             "evidence": [
                 _evidence(
                     "available_cash",
@@ -232,6 +358,26 @@ class FinanceToolRegistry:
                     evidence_grade="SIM_FIXED",
                     evidence_detail="Finance v2.2 D-FIN-01 approved policy",
                 ),
+                _evidence(
+                    "purchase_payment_days",
+                    policy.purchase_payment_days,
+                    "day",
+                    policy.source_refs["purchase_payment_days"],
+                    source="persona",
+                ),
+                *(
+                    [
+                        _evidence(
+                            "margin_defense_floor_rate",
+                            policy.margin_defense_floor_rate,
+                            "ratio",
+                            policy.source_refs["margin_defense_floor_rate"],
+                            source="persona",
+                        )
+                    ]
+                    if policy.margin_defense_floor_rate is not None
+                    else []
+                ),
             ],
         }
 
@@ -247,11 +393,10 @@ class FinanceToolRegistry:
         )
         state.projection = projection
         return {
-            "projected_cash_min": str(projection.projected_cash_min),
-            "critical_cash_date": projection.projected_cash_min_date.isoformat(),
+            "base_projected_cash_min": str(projection.projected_cash_min),
             "evidence": [
                 _evidence(
-                    "projected_cash_min",
+                    "base_projected_cash_min",
                     projection.projected_cash_min,
                     "krw",
                     _tool_ref("project_cashflow", state),
@@ -264,12 +409,14 @@ class FinanceToolRegistry:
     ) -> dict[str, Any]:
         del args
         _, policy, _ = self._context(state)
+        if policy.purchase_payment_days is None:
+            raise FinanceDataNotReady("purchase_payment_days")
         if state.projection is None:
             self.project_cashflow({}, state)
         cap = calculate_finance_cap(base_projection=state.projection, policy=policy)
         return {
             "finance_cap_amount_krw": str(cap),
-            "projected_cash_min": str(state.projection.projected_cash_min),
+            "base_projected_cash_min": str(state.projection.projected_cash_min),
             "evidence": [
                 _evidence(
                     "finance_cap_amount_krw",
@@ -278,7 +425,7 @@ class FinanceToolRegistry:
                     _tool_ref("calculate_purchase_finance_cap", state),
                 ),
                 _evidence(
-                    "projected_cash_min",
+                    "base_projected_cash_min",
                     state.projection.projected_cash_min,
                     "krw",
                     _tool_ref("project_cashflow", state),
@@ -303,13 +450,25 @@ class FinanceToolRegistry:
         return {
             "payment_pressure": pressure,
             "critical_payment_dates": dates,
-            "projected_cash_min": str(state.projection.projected_cash_min),
+            "base_projected_cash_min": str(state.projection.projected_cash_min),
             "evidence": [
-                _evidence(
-                    "payment_pressure",
-                    ratio,
-                    "ratio",
-                    policy.source_refs["cash_priority_reference"],
+                Evidence(
+                    claim="payment_pressure",
+                    source="tool_calc",
+                    ref_ids=(
+                        _tool_ref("analyze_payment_pressure", state),
+                        policy.source_refs["cash_priority_reference"],
+                        policy.source_refs["cash_priority_high_ratio"],
+                        policy.source_refs["cash_priority_medium_ratio"],
+                    ),
+                    value=float(ratio),
+                    unit="ratio",
+                    evidence_grade="OFFICIAL",
+                    evidence_detail=(
+                        "base_projected_cash_min / minimum_cash_balance_krw; "
+                        "compared with cash_priority_high_ratio and "
+                        "cash_priority_medium_ratio."
+                    ),
                 ),
                 _evidence(
                     "critical_payment_dates",
@@ -318,7 +477,7 @@ class FinanceToolRegistry:
                     _tool_ref("analyze_payment_pressure", state),
                 ),
                 _evidence(
-                    "projected_cash_min",
+                    "base_projected_cash_min",
                     state.projection.projected_cash_min,
                     "krw",
                     _tool_ref("project_cashflow", state),
@@ -385,7 +544,7 @@ class FinanceToolRegistry:
             "verdict": verdict,
             "adjustability": "NOT_NEEDED" if verdict == "ok" else "NOT_ADJUSTABLE",
             "finance_cap_amount_krw": str(cap),
-            "projected_cash_min": str(scenario_projection.projected_cash_min),
+            "scenario_projected_cash_min": str(scenario_projection.projected_cash_min),
             "critical_cash_date": scenario_projection.projected_cash_min_date.isoformat(),
             "payment_schedule": [
                 {"payment_date": item[0].isoformat(), "amount_krw": str(item[1])}
@@ -402,7 +561,7 @@ class FinanceToolRegistry:
                     _tool_ref("evaluate_purchase_scenario", state),
                 ),
                 _evidence(
-                    "projected_cash_min",
+                    "scenario_projected_cash_min",
                     scenario_projection.projected_cash_min,
                     "krw",
                     _branch_ref("cashflow", state),
@@ -503,12 +662,18 @@ class FinanceAgentController:
         self,
         data_port: FinanceAsOfDataPort,
         planner: FinancePlanner | None = None,
+        finalizer: FinanceFinalizer | None = None,
         *,
         max_tool_calls: int | None = None,
         max_replans: int | None = None,
     ):
         self.registry = FinanceToolRegistry(data_port)
         self.planner = planner or OllamaFinancePlanner()
+        self.finalizer = finalizer or (
+            OllamaFinanceFinalizer()
+            if planner is None
+            else DeterministicFinanceFinalizer()
+        )
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )
@@ -560,6 +725,28 @@ class FinanceAgentController:
         payload, evidences, business_status, adjustments = self._finalize(
             request, states, runtime_status
         )
+        llm_status = "DISABLED"
+        llm_fallback_used = False
+        if runtime_status == "READY":
+            finalization_evidence = [*evidences]
+            for verdict in payload.get("verdicts", []):
+                finalization_evidence.extend(
+                    _evidence_from_dict(item) for item in verdict.get("evidences", [])
+                )
+            try:
+                reasoning = self.finalizer.finalize(
+                    mode=request.mode,
+                    business_status=business_status,
+                    evidences=tuple(finalization_evidence),
+                )
+                _validate_ready_reasoning(reasoning)
+                llm_status = "SUCCESS"
+            except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
+                reasoning = self._fallback_reasoning(request.mode, business_status)
+                llm_status = "FALLBACK"
+                llm_fallback_used = True
+        else:
+            reasoning = error_reason[:240]
         elapsed = int((time.monotonic() - started) * 1000)
         observations = [item for state in states for item in state.observations]
         used_tools = [item for state in states for item in state.tool_order]
@@ -575,10 +762,10 @@ class FinanceAgentController:
             ),
             rules_applied=tuple(rules),
             replans=total_replans,
-            llm_status="SUCCESS" if runtime_status == "READY" else "DISABLED",
-            llm_model=self.planner.model,
-            llm_attempts=self.planner.attempts,
-            llm_fallback_used=False,
+            llm_status=llm_status,
+            llm_model=self.finalizer.model,
+            llm_attempts=self.planner.attempts + self.finalizer.attempts,
+            llm_fallback_used=llm_fallback_used,
             elapsed_ms=elapsed,
         )
         reply = AgentReply(
@@ -592,9 +779,9 @@ class FinanceAgentController:
             payload=payload,
             evidences=tuple(evidences),
             suggested_adjustments=tuple(adjustments),
-            reasoning=self._reasoning(request.mode, runtime_status, business_status, error_reason),
+            reasoning=reasoning,
             missing_data=missing_data,
-            needs_followup=runtime_status == "RUNTIME_NOT_READY",
+            needs_followup=(runtime_status == "RUNTIME_NOT_READY" or bool(adjustments)),
             additional_validation_required=False,
         )
         nested_findings = validate_finance_scenario_output(reply)
@@ -746,8 +933,8 @@ class FinanceAgentController:
                 if "conditional" in verdicts
                 else "ok"
             )
-            scenarios_evidence = Evidence(
-                claim="scenarios",
+            verdicts_evidence = Evidence(
+                claim="verdicts",
                 source="tool_calc",
                 ref_ids=tuple(str(result["scenario_id"]) for result in results),
                 value=float(len(results)),
@@ -761,14 +948,14 @@ class FinanceAgentController:
                     for result in results
                     for adjustment in result["suggested_adjustments"]
                 ]
-                return {"scenarios": results}, [scenarios_evidence], status, adjustments
+                return {"verdicts": results}, [verdicts_evidence], status, adjustments
             result = results[0]
             branch_evidence = [_evidence_from_dict(item) for item in result.pop("evidences")]
             branch_adjustments = result.pop("suggested_adjustments")
             adjustments = [_adjustment_from_dict(item) for item in branch_adjustments]
             return (
-                {"scenarios": [dict(result)], **result},
-                [scenarios_evidence, *branch_evidence],
+                {"verdicts": [dict(result)], **result},
+                [verdicts_evidence, *branch_evidence],
                 status,
                 adjustments,
             )
@@ -839,17 +1026,12 @@ class FinanceAgentController:
         return payload
 
     @staticmethod
-    def _reasoning(mode: str, runtime: str, business: str, error: str) -> str:
-        if runtime != "READY":
-            return error[:240]
+    def _fallback_reasoning(mode: str, business: str) -> str:
         if mode == "PRE_PURCHASE":
-            return "Deterministic Finance Evidence supports the reported purchasing boundary."
+            return _FINAL_EXPLANATIONS["PRE_BOUNDARY"]
         if business == "reject":
-            return (
-                "Deterministic Finance Evidence rejects at least one original scenario. "
-                "Any published amount alternative was independently validated."
-            )
-        return "Deterministic Finance Evidence supports the scenario results."
+            return _FINAL_EXPLANATIONS["SCENARIO_REJECT"]
+        return _FINAL_EXPLANATIONS["SCENARIO_ACCEPT"]
 
 
 def _json_value(value: Any) -> Any:
@@ -901,6 +1083,14 @@ def _short_reason(reason: str) -> str:
     return " ".join(reason.split())[:160]
 
 
+def _validate_ready_reasoning(reasoning: str) -> None:
+    sentences = [part for part in re.split(r"(?<=[.!?])\s+", reasoning.strip()) if part]
+    if not reasoning.strip() or len(sentences) > 3:
+        raise ValueError("Finance reasoning must contain one to three sentences")
+    if re.search(r"\d", reasoning):
+        raise ValueError("Finance reasoning must not introduce numeric claims")
+
+
 def _satisfied_capabilities(state: FinanceAgentState) -> set[str]:
     keys = {
         key
@@ -910,7 +1100,7 @@ def _satisfied_capabilities(state: FinanceAgentState) -> set[str]:
     out: set[str] = set()
     if {"available_cash", "payroll_payment_day"} <= keys:
         out.add("finance_position")
-    if "projected_cash_min" in keys:
+    if "base_projected_cash_min" in keys:
         out.add("cashflow_projection")
     if "finance_cap_amount_krw" in keys and state.request.mode == "PRE_PURCHASE":
         out.add("finance_cap")
@@ -1026,9 +1216,9 @@ def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
     """Validate Finance-owned nested scenario lineage beyond the common envelope."""
     if reply.runtime_status != "READY" or reply.mode != "SCENARIO_VALIDATION":
         return ()
-    scenarios = reply.payload.get("scenarios")
+    scenarios = reply.payload.get("verdicts")
     if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
-        return ("payload.scenarios must contain one to three results",)
+        return ("payload.verdicts must contain one to three results",)
     # The retained single-scenario compatibility shape carries branch Evidence at
     # the common envelope level. The documented multi-scenario contract nests it.
     if reply.payload.get("scenario_id") is not None and len(scenarios) == 1:
@@ -1048,7 +1238,7 @@ def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
         claims = {item.get("claim") for item in evidence} if isinstance(evidence, list) else set()
         required = {
             "finance_cap_amount_krw",
-            "projected_cash_min",
+            "scenario_projected_cash_min",
             "payment_schedule",
             "verdict",
             "adjustability",

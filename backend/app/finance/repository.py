@@ -20,7 +20,7 @@ FINANCE_POLICY_VERSION = "v1.3-PROVISIONAL"
 FINANCE_POLICY_USAGE_SCOPE = "AGENT_MVP_DEMO"
 _NUMERIC_POLICY_KEYS = {
     "purchase_payment_days",
-    "payroll_date",
+    "margin_defense_floor_rate",
     "monthly_labor_cost_krw",
     "minimum_cash_balance_krw",
     "cashflow_projection_days",
@@ -28,7 +28,13 @@ _NUMERIC_POLICY_KEYS = {
     "cash_priority_medium_ratio",
 }
 _TEXT_POLICY_KEYS = {"cash_priority_reference"}
-_REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
+_OPTIONAL_POLICY_KEYS = {
+    "purchase_payment_days",
+    "margin_defense_floor_rate",
+    "monthly_labor_cost_krw",
+}
+_REQUIRED_POLICY_KEYS = (_NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS) - _OPTIONAL_POLICY_KEYS
+_KNOWN_POLICY_KEYS = _REQUIRED_POLICY_KEYS | _OPTIONAL_POLICY_KEYS
 _DEBT_NUMERIC_POLICY_KEYS = {
     "debt_principal_krw",
     "debt_annual_rate",
@@ -236,7 +242,7 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
 
     for row in rows:
         key = row.get("policy_key")
-        if key not in _REQUIRED_POLICY_KEYS:
+        if key not in _KNOWN_POLICY_KEYS:
             continue
         if key in values:
             raise ValueError(f"Duplicate Finance policy key: {key}")
@@ -252,6 +258,14 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
         selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
         unused_columns = {"value_numeric", "value_text", "value_json"} - {selected_column}
         value = row.get(selected_column)
+        if value is None and key in _OPTIONAL_POLICY_KEYS:
+            if any(row.get(column) is not None for column in unused_columns):
+                raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
+            values[key] = None
+            source_ref = row.get("source_ref")
+            if isinstance(source_ref, str) and source_ref:
+                source_refs[key] = source_ref
+            continue
         if value is None or any(row.get(column) is not None for column in unused_columns):
             raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
         if kind == "NUMERIC" and (isinstance(value, bool) or not isinstance(value, Decimal)):
@@ -269,8 +283,13 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
     if missing:
         raise LookupError(f"Required Finance policies were not found: {', '.join(sorted(missing))}")
 
-    for key in ("purchase_payment_days", "payroll_date", "cashflow_projection_days"):
+    values.setdefault("purchase_payment_days", None)
+    values.setdefault("margin_defense_floor_rate", None)
+    values.setdefault("monthly_labor_cost_krw", None)
+    for key in ("purchase_payment_days", "cashflow_projection_days"):
         numeric = values[key]
+        if numeric is None:
+            continue
         assert isinstance(numeric, Decimal)
         if numeric != numeric.to_integral_value():
             raise ValueError(f"Finance policy must be an integer: {key}")
