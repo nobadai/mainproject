@@ -43,7 +43,14 @@ class _Policy:
     policy_version = "v1.3-PROVISIONAL"
     payroll_date = 10
     monthly_labor_cost_krw = Decimal(3_000_000)
-    source_refs: ClassVar[dict[str, str]] = {}
+    source_refs: ClassVar[dict[str, str]] = {
+        "purchase_payment_days": "FINANCE-DECISION-20260827:N5",
+        "payroll_date": "FINANCE-DECISION-20260827:N6",
+        "monthly_labor_cost_krw": "PERSONA-V1.5:monthly_labor_cost",
+        "minimum_cash_balance_krw": "PROJECT-DEFINITION-V1.2:minimum_cash_balance",
+        "cashflow_projection_days": "MVP-DECISION-20260825:FIN-CASH-01",
+        "margin_defense_floor_rate": "PROJECT-DEFINITION-V1.2:MARGIN-DEFENSE-GRACE",
+    }
 
 
 class _Snapshot:
@@ -220,13 +227,43 @@ def test_유입은_지급_집중도에_세지_않는다(monkeypatch):
     assert reply.payload["critical_payment_dates"] == ["2026-01-20"]
 
 
-def test_현금_최저일과_지급_집중일은_다른_필드다(monkeypatch):
-    """★ 재무가 갈라 달라고 한 지점.
+def test_현금_최저일은_Business_Reply_에_싣지_않는다(monkeypatch):
+    """★ 개념이 달라 필드를 나눴다가 재무 요청으로 다시 뺐다 (2026-08-27).
 
-    `critical_cash_date` 는 **현금이 바닥나는 날**, `critical_payment_dates` 는
-    **지급이 몰린 날**이다. 같은 날일 수도 있지만 개념이 다르므로 필드를 나눈다.
+    `critical_cash_date` 는 Finance Trace / Run History 에서 관리한다.
+    **계약 필드는 읽는 쪽이 있을 때만 늘어야 한다** — 매입이 쓰지 않는 값이다.
     """
     _with_events(monkeypatch, [_Event(20, 9_000_000)])
     reply, _ = adapter.finance_port(req())
-    assert reply.payload["critical_cash_date"] == "2026-01-20"
-    assert "critical_cash_date" in {e.claim for e in reply.evidences}
+    assert "critical_cash_date" not in reply.payload
+    assert "critical_cash_date" not in {e.claim for e in reply.evidences}
+
+
+# ---------------------------------------------------------------------------
+# 정책값 출처 — DB 인가 Schema default 인가 (2026-08-27 재무 후속회신 §3)
+# ---------------------------------------------------------------------------
+
+
+def test_출처가_다_있으면_missing_data_가_비어_있다(wired):
+    reply, _ = adapter.finance_port(req())
+    assert not [m for m in reply.missing_data if m.endswith("@policy_source_ref")]
+
+
+def test_source_ref_가_없으면_이름을_밝힌다(monkeypatch):
+    """🔴 값이 아니라 **출처**의 문제다.
+
+    Repository 가 그 키를 조회하지 않으면 Pydantic 기본값이 대신 쓰이는데, 값은
+    멀쩡히 나오고 에러도 안 난다 — **DB 를 고쳐도 반영되지 않는다는 사실만 숨는다.**
+    실제로 `payroll_date` 가 그 상태였다. DB(10)와 default(10)가 우연히 같았다.
+
+    계산 자체는 되므로 `READY` 는 유지한다.
+    """
+
+    class _NoRef(_Context):
+        class policy(_Policy):
+            source_refs: ClassVar[dict[str, str]] = {}
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _NoRef())
+    reply, _ = adapter.finance_port(req())
+    assert "payroll_date@policy_source_ref" in reply.missing_data
+    assert reply.runtime_status == "READY"
