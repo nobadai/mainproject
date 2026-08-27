@@ -8,10 +8,13 @@ adapters/logistics.py — 재고·물류 에이전트 접점 (마스터 ↔ 물�
   여기가 하는 일은 **번역**뿐이다 (재무 어댑터와 같은 규율).
 
 ★ **없는 값을 만들지 않는다.**
-  매입이 요구하는 `rental_cap_kg` 은 물류 Policy 에 **존재하지 않는다.**
-  `burst_capacity_kg − guaranteed_capacity_kg` 로 채우고 싶어지지만 그건 추측이다 —
-  burst 는 3PL 의 순간 초과 허용이고 rental 은 창고 임대다. **다른 개념이다.**
-  섞으면 숫자는 나오고 에러도 안 나며 검증도 통과한다. 이름을 밝히고 비워 둔다 (§1.2-10).
+  `rental_cap_kg` 을 `burst − guaranteed` 로 채우지 않았다. burst 는 3PL 의 순간 초과
+  허용이고 rental 은 창고 임대다 — **다른 개념**이라 섞으면 숫자는 나오고 에러도 안
+  나며 검증도 통과한다. 비워 두고 물었더니 **물류가 `0` 으로 확정**했다
+  (2026-08-27 회신 §1). 추측이 아니라 소유 파트의 답이므로 이제 싣는다.
+
+  ★ **`0` 은 미확정이 아니다** — *"1차 MVP 에서 임차 가능량이 0 으로 확정"* 이다.
+    누락으로 되돌리지 않는다 (물류 회신 §7).
 
 ★ **LLM 을 타지 않는다.**
   `run_logistics_procurement_with_snapshot()` 은 마지막에 `enrich_logistics_response()`
@@ -64,6 +67,18 @@ _CAP_WINDOW_DAYS = 18
 
   창의 길이 자체는 `cap_by_date_window_days` 로 payload 에 밝힌다. 받는 쪽이
   *"이 날짜까지밖에 안 왔다"* 를 알아야 없는 날을 0 으로 읽지 않는다.
+"""
+
+_RENTAL_CAP_KEY = "rental_cap_kg"
+_RENTAL_CAP_KG = 0.0
+_RENTAL_CAP_REF = "LOGISTICS-REPLY-20260827:rental_cap_kg"
+"""외부 창고 임차 상한. **1차 MVP 는 임차 기능이 없다** (2026-08-27 물류 회신 §1 · §6).
+
+★ `0` 은 *"모른다"* 가 아니라 *"임차 가능량이 0 으로 확정됐다"* 다. 매입은 이 값을
+  창고 상한에 더하므로 둘의 구분이 결과를 바꾼다 — 모르는 값을 0 으로 쓰면 **살 수
+  있는 양을 실제보다 적게** 잡고, 확정 0 을 미확정으로 두면 **매입이 아예 못 돈다.**
+
+★ 상수로 둔 것은 DB 에 키가 없어서다. `missing_data` 에 출처 부재를 남긴다.
 """
 
 _VERDICT_MAP: Mapping[str, Verdict] = {
@@ -137,11 +152,14 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     else:
         payload["warehouse_free_kg"] = _num(free_kg)
 
-    # 🔴 `rental_cap_kg` — 물류 Policy 에 **없는 값**이다.
+    # `rental_cap_kg` — 2026-08-27 물류 회신 §1 로 **0 확정**.
     #
-    #    매입 `validate_payload` 가 필수로 요구하지만, `burst − guaranteed` 로 채우면
-    #    **다른 개념을 같은 이름에 넣는 것**이 된다. 값을 만들지 않고 이름을 밝힌다.
-    missing.append("rental_cap_kg")
+    # ★ DB `agent_policy_config` 에는 아직 이 키가 없다. 값은 쓰되 **출처가 DB 가
+    #   아니라는 사실**을 밝힌다 — 재무 `payroll_date` 가 Schema default 로 조용히
+    #   쓰이던 것과 같은 자리다. 등록되면 이 줄이 저절로 사라진다.
+    payload["rental_cap_kg"] = _num(_RENTAL_CAP_KG)
+    if policy is None or _RENTAL_CAP_KEY not in policy.source_refs:
+        missing.append(f"{_RENTAL_CAP_KEY}@policy_source_ref")
 
     payload.update(
         {
@@ -213,6 +231,15 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             _policy_ref(policy, "cap_by_date_policy", ref),
             "확정 입·출고만 반영한다(CONFIRMED_ONLY · N15) — 예정분은 Band 에 안 든다. "
             f"조회 창 D+{_CAP_WINDOW_DAYS}",
+            grade="SIM_FIXED",
+        ),
+        _ev(
+            _RENTAL_CAP_KEY,
+            _RENTAL_CAP_KG,
+            "kg",
+            _policy_ref(policy, _RENTAL_CAP_KEY, _RENTAL_CAP_REF),
+            "1차 MVP 는 외부 창고 임차 기능이 없다 — 임차 가능량 0 확정. "
+            "미확정이 아니다 (2026-08-27 물류 회신 §1)",
             grade="SIM_FIXED",
         ),
         _ev(

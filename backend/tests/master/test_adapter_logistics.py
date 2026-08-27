@@ -131,18 +131,42 @@ def test_창고_여유는_보장치에서_점유를_뺀_값이다(wired):
     assert reply.payload["warehouse_free_kg"] == 7000.0
 
 
-def test_rental_cap_kg_를_지어내지_않는다(wired):
+def test_rental_cap_kg_는_burst_에서_파생하지_않는다(wired):
     """🔴 **이 파일에서 가장 중요한 검사.**
 
     `burst − guaranteed = 1,600` 은 그럴듯하지만 다른 개념이다 — burst 는 3PL 의
-    순간 초과 허용이고 rental 은 창고 임대다. 채우면 숫자도 나오고 봉투도 통과한다.
+    순간 초과 허용이고 rental 은 창고 임대다. 채웠으면 숫자도 나오고 봉투도 통과했다.
+
+    비워 두고 물었더니 **물류가 `0` 으로 확정**했다 (2026-08-27 회신 §1).
+    추측했더라면 1,600kg 을 더 살 수 있다고 매입에 알렸을 것이다.
     """
     reply, _ = adapter.logistics_port(req())
-    assert "rental_cap_kg" not in reply.payload
-    assert "rental_cap_kg" in reply.missing_data
-    # 값이 없다고 못 도는 것은 아니다 — 나머지 경계는 그대로 낸다
+    assert reply.payload["rental_cap_kg"] == 0.0
+    assert reply.payload["burst_capacity_kg"] == 9600.0  # 값은 싣되 파생하지 않는다
+
+
+def test_rental_cap_0_은_미확정이_아니다(wired):
+    """★ `0` 과 *"모른다"* 는 다르다 (물류 회신 §7).
+
+    매입은 이 값을 창고 상한에 더한다 — 모르는 값을 0 으로 쓰면 **살 수 있는 양을
+    실제보다 적게** 잡고, 확정 0 을 미확정으로 두면 **매입이 아예 못 돈다.**
+    """
+    reply, _ = adapter.logistics_port(req())
+    assert "rental_cap_kg" not in reply.missing_data
     assert reply.runtime_status == "READY"
     assert reply.business_status == "ok"
+    evidence = next(e for e in reply.evidences if e.claim == "rental_cap_kg")
+    assert evidence.evidence_grade == "SIM_FIXED"
+    assert "확정" in evidence.evidence_detail
+
+
+def test_DB_에_없는_정책값은_출처_부재를_밝힌다(wired):
+    """🔴 재무 `payroll_date` 가 Schema default 로 조용히 쓰이던 것과 같은 자리다.
+
+    값은 쓰되 **DB 에서 온 것이 아니라는 사실**이 남는다. 등록되면 저절로 사라진다.
+    """
+    reply, _ = adapter.logistics_port(req())
+    assert "rental_cap_kg@policy_source_ref" in reply.missing_data
 
 
 def test_cap_by_date_는_리드타임_다음날부터_창_길이만큼이다(wired):
