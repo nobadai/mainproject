@@ -17,7 +17,7 @@
 """
 
 from datetime import date
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
@@ -38,8 +38,24 @@ class PurchaseAgentState(TypedDict):
     # margin_warning·expected_margin_rate가 함께 null로 나간다 (IO명세 §2 동기화 규칙).
     contract_price: float | None
     margin_defense_floor_rate: float  # ★ 구간별 방어선 (참조값)
-    projected_cash_min: int  # ★ 향후 N일 최저 현금
+    projected_cash_min: int  # ★ 향후 N일 최저 현금 (재무 base_projected_cash_min)
     feedback: dict | None  # 오케스트레이터 재조정 요청 (§6, 전부 기각 시만)
+
+    # ── 재무 수신값 (어댑터 경로에만 실린다) ────────────────────────────────
+    # **셋 다 선택 필드다.** ``build_initial_state``(mock 경로)는 채우지 않으므로
+    # ``.get()``이 None을 돌려주고 노드는 종전 경로로 간다 — 949건이 그대로 도는 근거다.
+    # 어댑터 경로에서만 값이 실리고, 그때 계산이 달라진다 (IO명세 §2-B).
+    #
+    # ``finance_cap_amount_krw``: 재무가 낸 **최종 매입 상한(원)**. 이 값이 오면
+    # ``cash.max_purchase_ratio``를 곱하지 않는다 — 같은 목적으로 두 번 조이면
+    # "왜 이만큼밖에 못 사나"의 근거가 흐려진다 (재무 회신 v2.2.1 · B6).
+    finance_cap_amount_krw: NotRequired[int | None]
+    # ``purchase_payment_days``: N5. 7 확정 (8/27 재무 · calendar day · 영업일 보정 없음).
+    # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
+    purchase_payment_days: NotRequired[int | None]
+    # ``critical_payment_dates``: 지급 집중일. **겹침 경고에만 쓴다** — 날짜별 잔액
+    # 재계산은 재무 SCENARIO_VALIDATION 소관이다 (도메인 침범 + 이중 계산).
+    critical_payment_dates: NotRequired[list[str] | None]
 
     # ── 중간 산출 ───────────────────────────────────────────────────────────
     situation: Literal["stable", "uncertain"]

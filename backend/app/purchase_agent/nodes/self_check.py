@@ -13,7 +13,7 @@ from typing import Any
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
-from app.purchase_agent.nodes.draft_plan import warehouse_cap_kg
+from app.purchase_agent.nodes.draft_plan import purchase_budget_krw, warehouse_cap_kg
 from app.purchase_agent.schemas import (
     DOCUMENT_SOURCE,
     FIXED_MARKET,
@@ -103,8 +103,12 @@ def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
 
 
 def check_cash_ceiling(scenario: dict, state: PurchaseAgentState, constraints: dict) -> str | None:
-    """매입액 ≤ 향후 최저 현금 × 비율."""
-    budget = state["projected_cash_min"] * constraints["cash"]["max_purchase_ratio"]
+    """매입액 ≤ 매입 가능액.
+
+    상한을 ③과 **같은 함수**(``purchase_budget_krw``)로 구한다. 두 노드가 각자 계산하면
+    재무 cap 수신 여부에 따라 한쪽만 바뀌고, ③이 통과시킨 안을 ⑦이 컷하는 상태가 된다.
+    """
+    budget = purchase_budget_krw(state, constraints)
     if scenario["total_amount_krw"] > budget:
         return f"현금 초과: {scenario['total_amount_krw']:,}원 > 매입 가능액 {budget:,.0f}원"
     return None

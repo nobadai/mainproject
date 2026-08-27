@@ -12,6 +12,7 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
+from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -259,17 +260,40 @@ def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> lis
             "evidence_grade": grade,
             "evidence_detail": "inventory_lots 스냅샷 (mock)",
         },
-        {
+        # **상한을 실제로 정한 경로를 그대로 적는다** (Codex 교차검증 P1).
+        # 재무 cap을 받는 날에도 "최저 현금의 60%"라고 쓰고 있었는데, 그 문장이
+        # 주장하는 금액보다 실제 안이 클 수 있어 **근거가 산출물과 어긋났다.**
+        # ⑥은 계산하지 않고 ③·⑦이 쓴 것과 같은 함수(``purchase_budget_krw``)를 부른다.
+        _cash_rationale(state, constraints, as_of),
+    ]
+
+
+def _cash_rationale(state: PurchaseAgentState, constraints: dict, as_of: str) -> dict:
+    """현금 상한의 근거. **경로가 둘이라 문장도 둘이다** (B6).
+
+    재무 cap을 받은 날은 그 값이 곧 상한이고 출처도 재무 회신이다. 못 받은 날만
+    ``base_projected_cash_min × 비율``이고, 그때만 mock 표기가 맞다.
+    """
+    cap = state.get("finance_cap_amount_krw")
+    budget = purchase_budget_krw(state, constraints)
+    if cap is not None:
+        return {
             "source": "현금",
-            "claim": (
-                f"향후 최저 현금 {state['projected_cash_min']:,}원의 "
-                f"{constraints['cash']['max_purchase_ratio']:.0%}까지 매입 가능"
-            ),
+            "claim": f"재무 매입 상한 {int(budget):,}원까지 매입 가능",
             "ref_id": f"CASH-{as_of}",
             "evidence_grade": "SIM_FIXED",
-            "evidence_detail": "base_projected_cash_min (정산 산출, mock)",
-        },
-    ]
+            "evidence_detail": "finance_cap_amount_krw (재무 PRE_PURCHASE 회신)",
+        }
+    return {
+        "source": "현금",
+        "claim": (
+            f"향후 최저 현금 {state['projected_cash_min']:,}원의 "
+            f"{constraints['cash']['max_purchase_ratio']:.0%}까지 매입 가능"
+        ),
+        "ref_id": f"CASH-{as_of}",
+        "evidence_grade": "SIM_FIXED",
+        "evidence_detail": "base_projected_cash_min (정산 산출, mock)",
+    }
 
 
 def _context_rationale(context_docs: list[dict]) -> list[dict]:
@@ -528,6 +552,53 @@ def _entry_miss_reason(decision: dict) -> str:
     return " · ".join(misses)
 
 
+def payment_dates(rounds: list[dict], payment_days: int | None) -> list[str]:
+    """회차별 **지급일** = 회차 date + N5. N5가 없으면 빈 목록이다.
+
+    N5 = 7 확정 (8/27 재무 · **calendar day · 영업일 보정 없음**). 분할이면 회차마다
+    각각 계산한다 — 총액을 한 날에 몰아 지급하는 게 아니라 회차별로 나가기 때문이다.
+
+    ⚠️ **영업일 보정을 하지 않는다.** 재무가 calendar day로 확정했으므로 여기서 주말을
+    밀면 재무 계산과 어긋난다. 보정이 필요해지면 재무 쪽에서 정한다.
+    """
+    if payment_days is None:
+        return []  # 규칙 3 — 미결값으로는 계산하지 않는다
+    return [
+        (date.fromisoformat(item["date"]) + timedelta(days=payment_days)).isoformat()
+        for item in rounds
+    ]
+
+
+def _payment_risks(
+    rounds: list[dict], payment_days: int | None, critical_dates: list[str] | None
+) -> list[str]:
+    """지급일이 **재무의 지급 집중일과 겹치는가** — 겹치면 경고만 남긴다.
+
+    🔴 **여기가 도메인 경계다.** 우리 소관은 *"우리 회차 지급일이 집중일과 겹친다"*는
+    사실을 알리는 데까지다. **날짜별 잔액을 재계산하지 않는다** — 그건 재무의
+    ``SCENARIO_VALIDATION`` 소관이고(8/27 매입 회신), 우리가 하면 두 가지가 깨진다:
+
+    1. **도메인 침범** — 재무 payload에 전체 Cashflow 배열이 오지 않는다. 우리가 가진
+       것은 ``base_projected_cash_min``(최저점 하나)과 집중일 목록뿐이라, 날짜별 잔액을
+       만들려면 **없는 데이터를 추정**해야 한다.
+    2. **이중 계산** — 재무가 같은 검사를 제대로 하는데 우리가 근사로 한 번 더 하면,
+       두 판정이 갈렸을 때 어느 쪽이 정본인지 불분명해진다.
+
+    그래서 반환은 경고 문자열이고 **컷하지 않는다.** 컷 여부는 재무가 정한다.
+    """
+    if not critical_dates:
+        return []
+    overlap = sorted(set(payment_dates(rounds, payment_days)) & set(critical_dates))
+    if not overlap:
+        return []
+    return [
+        (
+            f"회차 지급일 {', '.join(overlap)}이 재무의 지급 집중일과 겹친다 — "
+            "해당 일자 현금 여력을 재무 검증에서 확인 필요"
+        )
+    ]
+
+
 def _split_risks(
     decision: dict,
     axis: str,
@@ -662,6 +733,11 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
                         split_decision, axis, total, coverage_days, chosen, rounds
+                    ),
+                    *_payment_risks(
+                        rounds,
+                        pending_value(state, constraints, "purchase_payment_days"),
+                        state.get("critical_payment_dates"),
                     ),
                 ],
             }

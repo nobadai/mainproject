@@ -25,6 +25,7 @@
 """
 
 from datetime import date
+from functools import partial
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -38,6 +39,7 @@ from app.purchase_agent.nodes.package_scenarios import package_scenarios
 from app.purchase_agent.nodes.self_check import self_check
 from app.purchase_agent.nodes.split_plan import split_plan
 from app.purchase_agent.state import PurchaseAgentState, build_initial_state
+from app.purchase_agent.tracing import ToolRecorder, wrap
 
 #: 노드 이름 → 함수. 순서가 §4 그래프의 ①~⑦과 같다.
 #: ⑤만 부분 적용으로 감싼다 — LLM 선택자는 **그래프가 조립할 때 한 번** 만들어 주입한다
@@ -58,8 +60,13 @@ def route_after_classify(state: PurchaseAgentState) -> Literal["collect_context"
     return "collect_context" if state["situation"] == "uncertain" else "draft_plan"
 
 
-def build_graph(*, selector: MixSelector | None = None) -> Any:
+def build_graph(
+    *, selector: MixSelector | None = None, recorder: ToolRecorder | None = None
+) -> Any:
     """7노드를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
+
+    ``recorder``는 ⑦ 이후 ``used_tools``를 만들 통과 기록기다 (M-1 §6). ``None``이면
+    노드를 감싸지 않는다 — **어댑터를 거치지 않는 호출은 이 층 자체를 만나지 않는다.**
 
     ``selector``는 ⑤의 등급 조합 판단자다 (E3-2). ``None``이면 여기서 만든다 —
     설정이 LLM을 껐거나 키·서버가 없으면 그 선택자가 규칙 기본안을 돌려주므로,
@@ -69,11 +76,9 @@ def build_graph(*, selector: MixSelector | None = None) -> Any:
     builder = StateGraph(PurchaseAgentState)
     for name, node in NODES.items():
         if name == "allocate_sourcing":
-            builder.add_node(
-                name, lambda state: allocate_sourcing(state, selector=mix_selector)
-            )
-            continue
-        builder.add_node(name, node)
+            # 부분 적용 — LLM 선택자는 **그래프 조립 시 한 번** 만들어 주입한다.
+            node = partial(allocate_sourcing, selector=mix_selector)
+        builder.add_node(name, wrap(node, name, recorder))
 
     builder.add_edge(START, "classify_situation")
     builder.add_conditional_edges(
