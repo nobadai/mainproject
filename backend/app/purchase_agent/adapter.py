@@ -32,14 +32,12 @@ from app.purchase_agent.tracing import ToolRecorder
 
 AGENT_NAME = "purchase"
 
-#: ``STATUS_QUERY``가 담는 Tool 이름.
-#: ⚠️ **임시값이다.** 봉투 검증은 ``runtime_status == "READY"``면 ``used_tools``가 비는 것을
-#: ``E-PLAN-EMPTY``로 막는데(``envelope.py``), STATUS_QUERY는 업무 Tool을 하나도 쓰지 않는다.
-#: 이 이름은 M-1 §10에 제출한 **6종 Registry에 없다** — 마스터 쪽에 STATUS_QUERY를
-#: ``E-PLAN-EMPTY`` 예외로 두는 것을 제안 중이고, 정해지면 이 상수가 사라지거나
-#: Registry에 정식 등재된다.
-_STATUS_QUERY_TOOL = "status_query"
-
+#: 표기와 무관하게 근거를 요구할 판정 필드 (M-1 §7.2 · 전달_2차 §1).
+#: 봉투의 라벨 휴리스틱은 **대문자만** 보므로 재무의 ``MEDIUM``은 걸리지만 매입의
+#: ``stable``·``["quantity","timing"]``은 빠진다. 선언하면 표기와 무관하게 걸린다.
+#: **payload에 없는 이름을 적으면 ``E-JUDGMENT-UNKNOWN``이다** — 오타를 조용히 넘기면
+#: 그 검사가 통째로 빈다.
+JUDGMENT_FIELDS: tuple[str, ...] = ("situation", "allowed_axes")
 
 def _run_id(request: AgentRequest) -> str:
     """``request_id``에서 **결정적으로** 만든다.
@@ -60,6 +58,7 @@ def _reply(
     evidences: tuple[Evidence, ...] = (),
     reasoning: str = "",
     missing_data: tuple[str, ...] = (),
+    judgment_fields: tuple[str, ...] = (),
 ) -> AgentReply:
     """봉투 4종(E-BIND)을 **한 곳에서** 채운다.
 
@@ -81,6 +80,7 @@ def _reply(
         evidences=evidences,
         reasoning=reasoning,
         missing_data=missing_data,
+        judgment_fields=judgment_fields,
     )
 
 
@@ -507,7 +507,10 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
                 "불확실이면 공격안을 만들지 않아 두 안이 된다"
             ),
         ),
+        *_scenario_evidences(payload, ref),
     ]
+
+
     # 아래 둘은 **비어 있으면 근거를 요구받지 않는다** (빈 Sequence는 대상 밖).
     # 그런데도 붙이면 넘치는 쪽이라 ORPHAN은 아니지만 의미 없는 근거가 된다.
     if payload.get("context_docs_used"):
@@ -537,6 +540,67 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             )
         )
     return tuple(out)
+
+
+#: 안 안쪽에서 **근거를 요구받는 숫자**와 그 값이 어디서 왔는지.
+#: 봉투 v0.4가 배열을 **한 겹 파고들어** ``scenarios[i].<필드>`` 경로로 요구한다
+#: (M-1 §7.1 — 매입 요청으로 신설된 규칙이다. 재무 payload는 평면이라 1:1이 성립하지만
+#: 우리는 같은 이름의 필드가 안마다 2~3벌이라 위치가 필요하다).
+#:
+#: **라벨은 면제다** — ``label``·``strategy_type``까지 요구하면 안마다 근거를 만들어야
+#: 해서 과하다. 숫자만 다르다: 어디서 왔는지 없으면 **LLM이 만든 값과 구분되지 않는다.**
+_SCENARIO_NUMERIC_SOURCES: dict[str, str] = {
+    "coverage_days": "constraints.coverage_days.by_label — 안별 커버일수 매핑",
+    "total_qty_kg": "일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)으로 클립",
+    "total_amount_krw": "Σ(sourcing_plan[].qty_kg × grade_unit_price) — 등급 배분에서 파생",
+    "max_price": "커버 구간 예측 상단(q90)의 최대값",
+    "expected_margin_rate": "(contract_price − 가중 매입단가) ÷ contract_price",
+}
+
+
+def _scenario_evidences(payload: Mapping[str, Any], ref: Any) -> list[Evidence]:
+    """안별 숫자 근거. **경로 표기**로 어느 안의 값인지 가리킨다.
+
+    ``scenarios[0].total_amount_krw`` 형태다. 번호 대신 ``scenarios[공격]``처럼 이름으로도
+    가리킬 수 있지만(봉투 ``canonical_claim``), **번호를 쓴다** — 라벨은 안 구성이 바뀌면
+    사라질 수 있고 번호는 배열이 있는 한 항상 유효하다.
+
+    ``None``인 값은 건너뛴다. ``expected_margin_rate``는 ``contract_price`` 미수령이면
+    ``null``로 나가는데(IO명세 §2 동기화 규칙), 그때 봉투는 근거를 **요구하지 않는다.**
+
+    ⚠️ **다만 봉투가 막아 주지는 않는다.** 처음엔 *"없는 값에 근거를 붙이면 고아 근거가
+    된다"*고 적었는데 **틀렸다** — ``canonical_claim``은 값이 ``None``이어도 **필드가
+    존재하면** 경로를 인정하므로, 여기서 ``0.0``을 지어내 붙여도 ``validate_reply``는
+    깨끗하다 (Codex 교차검증 P2, 강제 삽입으로 재현). 즉 **미결을 0으로 채우지 않는 것은
+    이 ``continue`` 한 줄이 유일한 방어**이고, 그래서 테스트로 따로 잠근다.
+    """
+    out: list[Evidence] = []
+    for index, scenario in enumerate(payload.get("scenarios") or []):
+        for field, origin in _SCENARIO_NUMERIC_SOURCES.items():
+            value = scenario.get(field)
+            if value is None:
+                continue
+            out.append(
+                Evidence(
+                    claim=f"scenarios[{index}].{field}",
+                    source="tool_calc",
+                    ref_ids=ref(f"SC{index}"),
+                    value=float(value),
+                    unit=_SCENARIO_UNITS[field],
+                    evidence_grade="SIM_FIXED",
+                    evidence_detail=f"{scenario.get('label')}안 — {origin}",
+                )
+            )
+    return out
+
+
+_SCENARIO_UNITS: dict[str, str] = {
+    "coverage_days": "days",
+    "total_qty_kg": "kg",
+    "total_amount_krw": "KRW",
+    "max_price": "KRW/kg",
+    "expected_margin_rate": "ratio",
+}
 
 
 def purchase_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -570,7 +634,10 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         },
         reasoning="매입 에이전트는 요청을 받을 수 있는 상태다.",
     )
-    return reply, _metadata(request, None, tools=(_STATUS_QUERY_TOOL,))
+    # ``used_tools``를 비운다. 봉투가 ``STATUS_QUERY``를 ``E-PLAN-EMPTY`` 예외로
+    # 뺐으므로(``_PLAN_EXEMPT_MODES``) 가짜 Tool 이름을 넣을 이유가 사라졌다.
+    # 검사를 피하려고 넣은 이름은 **M-16이 읽는 실행 계획을 그대로 오염시킨다.**
+    return reply, _metadata(request, None)
 
 
 def _generate_scenarios(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -603,5 +670,6 @@ def _generate_scenarios(request: AgentRequest) -> tuple[AgentReply, ExecutionMet
         payload=payload,
         evidences=build_evidences(final, payload),
         reasoning=build_reasoning(payload),
+        judgment_fields=JUDGMENT_FIELDS,
     )
     return reply, _metadata(request, recorder, state=final)

@@ -375,6 +375,109 @@ def test_concentration_gate_survives_a_max_that_is_neither_first_nor_called() ->
     assert "mix" in reply.payload["allowed_axes"], "0.55 < 0.70 이므로 개방"
 
 
+def test_null_margin_gets_no_fabricated_evidence() -> None:
+    """``contract_price`` 미수령이면 마진이 ``null``이고 **근거도 만들지 않는다** (규칙 3).
+
+    ⚠️ **봉투는 이걸 막지 않는다.** ``canonical_claim``은 값이 ``None``이어도 필드가
+    존재하면 경로를 인정하므로, ``0.0``을 지어내 붙여도 ``validate_reply``는 깨끗하다
+    (Codex 교차검증 P2). 미결을 0으로 채우지 않는 것은 **우리 쪽 한 줄이 유일한 방어**라
+    여기서 직접 잠근다.
+    """
+    from dataclasses import replace as dc_replace
+
+    from app.orchestrator.contracts_core import Evidence
+
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["policy_values"] = {**payload["policy_values"], "contract_price_krw": None}
+    request = AgentRequest(
+        context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, metadata = purchase_port(request)
+
+    scenario = reply.payload["scenarios"][0]
+    assert scenario["expected_margin_rate"] is None
+    assert scenario["margin_warning"] is None, "두 값은 함께 null이다 (IO명세 §2)"
+    assert not [e for e in reply.evidences if e.claim.endswith(".expected_margin_rate")]
+    assert validate_reply(request, reply, metadata) == ()
+
+    # 봉투가 못 잡는다는 사실 자체를 고정한다 — 이 단언이 깨지면 봉투가 강화된 것이고,
+    # 그때는 위 방어를 봉투에 맡길 수 있다.
+    fabricated = dc_replace(
+        reply,
+        evidences=(
+            *reply.evidences,
+            Evidence(
+                claim="scenarios[0].expected_margin_rate",
+                source="tool_calc",
+                ref_ids=("X",),
+                value=0.0,
+                unit="ratio",
+                evidence_grade="SIM_FIXED",
+                evidence_detail="지어낸 0.0",
+            ),
+        ),
+    )
+    assert validate_reply(request, fabricated, metadata) == (), (
+        "봉투가 잡기 시작했다면 adapter 주석과 이 테스트를 갱신할 것"
+    )
+
+
+def test_envelope_stays_clean_when_every_scenario_is_cut() -> None:
+    """**안이 0개인 날도 봉투를 통과한다** (Codex 교차검증 P3).
+
+    빈 배열에 stale 경로 근거가 남으면 `E-EVIDENCE-ORPHAN`이다 — 안이 사라졌는데
+    ``scenarios[0].*`` 근거만 남는 상태를 막는다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of, finance={"finance_cap_amount_krw": 0})
+    request = AgentRequest(
+        context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, metadata = purchase_port(request)
+    assert reply.payload["scenarios"] == []
+    assert not [e for e in reply.evidences if e.claim.startswith("scenarios[")]
+    assert validate_reply(request, reply, metadata) == ()
+
+
+def test_envelope_stays_clean_with_a_single_scenario() -> None:
+    """안이 **1개**인 날의 인덱스 처리를 고정한다 (Codex 교차검증 P3).
+
+    ⚠️ **재무 상한으로는 1안을 만들 수 없다.** 상한은 안을 없애는 게 아니라 **수량을
+    깎으므로** 셋 다 살아남는다(cap 300만~1,100만 전부 3안, 0원일 때만 0안). 그래서
+    실제 산출물의 안 목록을 하나로 줄여 **근거 생성과 봉투 검증만** 시험한다 —
+    마스터는 1안이어도 배열로 받아 ``single_option``으로 표시한다.
+    """
+    from dataclasses import replace as dc_replace
+
+    from app.purchase_agent.adapter import build_evidences, build_reasoning
+
+    request = _request("배추", SPREAD_WIDE)
+    reply, metadata = purchase_port(request)
+    final_state = {"forecast": request.payload["forecast"], "item_mix_ratio":
+                   request.payload["policy_values"]["item_mix_ratio"],
+                   "confirmed_orders": request.payload["confirmed_orders"]}
+
+    single = {**reply.payload, "scenarios": reply.payload["scenarios"][:1]}
+    trimmed = dc_replace(
+        reply,
+        payload=single,
+        evidences=build_evidences(final_state, single),
+        reasoning=build_reasoning(single),
+    )
+    assert isinstance(trimmed.payload["scenarios"], list)
+    paths = {e.claim for e in trimmed.evidences if e.claim.startswith("scenarios[")}
+    assert paths and all(c.startswith("scenarios[0].") for c in paths), (
+        "1안이면 인덱스는 0뿐이다 — stale한 [1]·[2] 경로가 남으면 고아 근거다"
+    )
+    assert validate_reply(request, trimmed, metadata) == ()
+
 # ── used_tools ────────────────────────────────────────────────────────────
 
 
@@ -873,6 +976,53 @@ def test_status_query_answers_without_building_scenarios() -> None:
         "GENERATE_SCENARIOS",
         "STATUS_QUERY",
     ]
-    # E-PLAN-EMPTY를 피하려면 READY 회신에 Tool이 하나는 있어야 한다 (임시값)
-    assert metadata.used_tools == ("status_query",)
+    # **``used_tools``는 비어 있다.** 봉투가 STATUS_QUERY를 ``E-PLAN-EMPTY`` 예외로
+    # 뺐으므로(``_PLAN_EXEMPT_MODES``) 가짜 Tool 이름을 넣을 이유가 없다 — 검사를
+    # 피하려고 넣은 이름은 M-16이 읽는 실행 계획을 그대로 오염시킨다.
+    assert metadata.used_tools == ()
     assert validate_reply(request, reply, metadata) == ()
+
+
+def test_generate_scenarios_still_requires_used_tools() -> None:
+    """면제는 ``STATUS_QUERY`` **하나뿐**이다 — 판단하는 mode는 재현할 대상이 있다."""
+    from app.master.envelope import ExecutionMetadata, validate_reply
+
+    request = _request("배추", SPREAD_WIDE)
+    reply, metadata = purchase_port(request)
+    assert metadata.used_tools, "정상 경로는 Tool을 담는다"
+
+    stripped = ExecutionMetadata(
+        run_id=metadata.run_id, request_id=metadata.request_id, agent="purchase"
+    )
+    codes = [f.code for f in validate_reply(request, reply, stripped)]
+    assert "E-PLAN-EMPTY" in codes
+
+
+def test_judgment_fields_are_declared_and_resolve_in_payload() -> None:
+    """선언한 이름이 payload에 없으면 ``E-JUDGMENT-UNKNOWN``이다.
+
+    오타를 조용히 넘기면 *"표기와 무관하게 근거를 요구하라"*는 그 검사가 통째로 빈다.
+    ``allowed_axes``는 스키마에 없어 어댑터가 얹는 값이라 특히 깨지기 쉬운 자리다.
+    """
+    from app.purchase_agent.adapter import JUDGMENT_FIELDS
+
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    assert reply.judgment_fields == JUDGMENT_FIELDS == ("situation", "allowed_axes")
+    for name in reply.judgment_fields:
+        assert name in reply.payload, f"{name}이 payload에 없으면 E-JUDGMENT-UNKNOWN"
+
+
+def test_every_scenario_number_carries_a_path_evidence() -> None:
+    """봉투 v0.4가 배열을 **한 겹 파고들어** 안 안쪽 숫자에도 근거를 요구한다.
+
+    같은 이름의 필드가 안마다 2~3벌이라 위치가 필요하다 — 매입 요청으로 신설된 규칙이다
+    (M-1 §7.1). 라벨은 면제이므로 ``label``·``strategy_type`` 근거는 만들지 않는다.
+    """
+    from app.master.envelope import required_claims
+
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    required = required_claims(reply.payload, reply.judgment_fields)
+    claims = {e.claim for e in reply.evidences}
+    assert required <= claims, f"근거 없는 경로: {sorted(required - claims)}"
+    assert any(c.startswith("scenarios[0].") for c in claims)
+    assert not any(c.endswith((".label", ".strategy_type")) for c in claims)
