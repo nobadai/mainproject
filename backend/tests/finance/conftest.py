@@ -45,7 +45,11 @@ def finance_policy() -> FinancePolicy:
         cash_priority_medium_ratio=Decimal("1.5"),
         policy_version="v1.3-PROVISIONAL",
         usage_scope="AGENT_MVP_DEMO",
-        source_refs={"fixture": "test"},
+        source_refs={
+            "payroll_date": "policy:payroll_date",
+            "monthly_labor_cost_krw": "policy:monthly_labor_cost_krw",
+            "fixture": "test",
+        },
     )
 
 

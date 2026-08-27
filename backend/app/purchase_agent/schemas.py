@@ -57,7 +57,7 @@ kg로 모으면 세 소비자가 한 단위로 정렬된다. 이 파일은 그�
 
 from datetime import date
 from itertools import pairwise
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -223,6 +223,51 @@ class RejectedReason(BaseModel):
     reason: NonEmptyStr
 
 
+#: ``payment_schedule[].basis`` — ``amount_krw``의 추정 근거.
+#: 현재는 **오늘 등급별 시세로 계산한 값** 하나뿐이다. 예측 단가를 쓰기 시작하면 값이 는다.
+PaymentBasis = Literal["as_of_unit_price"]
+
+
+class PaymentScheduleItem(BaseModel):
+    """회차별 지급 계획 한 줄 (재무 확정 7필드 · 2026-08-27 회신).
+
+    **분할 시나리오에만 실린다.** 일괄 안은 지급일 하나가 ``split_plan``에서 바로
+    파생되므로 같은 값을 두 벌 내보내지 않는다.
+
+    두 금액이 각각 다른 검증에 들어간다 (회신 §1) — 재무가 ``amount_krw``는 BASE
+    Cashflow로, ``amount_max_krw``는 STRESS Cashflow로 얹어 본다. 둘 다 안전하면 PASS,
+    STRESS만 위험하면 REVIEW_REQUIRED, BASE부터 위험하면 FAIL이다.
+
+    ``by_grade``는 **없다** — 등급별 수량·단가는 ``sourcing_plan``이 정본이다 (회신 §2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seq: int = Field(ge=1)
+    purchase_date: date
+    #: 매입일 + N5. N5가 미결이면 이 항목 자체가 만들어지지 않는다 (규칙 3).
+    payment_date: date
+    qty_kg: int = Field(gt=0)
+    amount_krw: int = Field(ge=0)
+    #: ``qty_kg × max_price`` — 상한가로 샀을 때의 금액.
+    amount_max_krw: int = Field(ge=0)
+    #: ``amount_krw``를 **어떻게 추정했는가**. 재무의 BASE/STRESS는 두 금액을 각각 어느
+    #: Cashflow에 넣는지의 소비 프레이밍이라 축이 다르다.
+    #:
+    #: **열거형이다** — 자유 문자열이면 오타나 임의 값이 최종 재검증까지 통과한다
+    #: (Codex 교차검증). 추정 방식이 늘면 여기에 값을 추가한다.
+    basis: PaymentBasis
+
+    @field_validator("seq", "qty_kg", "amount_krw", "amount_max_krw", mode="before")
+    @classmethod
+    def _no_boolean_numbers(cls, value: object) -> object:
+        """인접한 ``SplitPlanItem``·``SourcingPlanItem``과 같은 방어 (Codex 교차검증).
+
+        bool은 int의 서브클래스라 ``ge``/``gt``를 그냥 통과하고 ``True``가 ``1``이 된다.
+        """
+        return _reject_boolean(value)
+
+
 class Scenario(BaseModel):
     """시나리오 1안 (IO명세 §2 ``scenarios[]``)."""
 
@@ -244,12 +289,35 @@ class Scenario(BaseModel):
     margin_warning: bool | None = None
     split_plan: list[SplitPlanItem] = Field(min_length=1)
     sourcing_plan: list[SourcingPlanItem] = Field(min_length=1)
+    #: 분할 안에만 실린다. **일괄 안에는 키 자체가 없다** — ``None``으로 나가면 "지급
+    #: 계획이 비었다"로 읽히므로 ``_assemble``이 직렬화 후 키를 뺀다.
+    payment_schedule: list[PaymentScheduleItem] | None = Field(default=None, min_length=1)
     #: v1.1 개정 — ``margin_warning``과 같은 정보 가족이다(둘 다 contract_price 파생).
     #: 미계산이면 ``null``. **0.0으로 채우지 않는다** — "마진 0%"는 거짓이고, 이건
     #: 규칙 3(0과 NULL 구분)의 float 판이다. 기본값이 None인 것도 같은 이유다.
     expected_margin_rate: float | None = Field(default=None, ge=0, le=1)
     rationale: list[RationaleItem] = Field(min_length=1)
     risks: list[NonEmptyStr] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def drop_absent_payment_schedule(self, handler: Any) -> dict:
+        """일괄 안에서는 ``payment_schedule`` **키 자체를 뺀다.**
+
+        ``null``로 나가면 "지급 계획이 비었다"로 읽히는데 사실은 **분할이 아니라 실을
+        것이 없는 것**이다. 재무는 이 키의 유무로 회차별 Cashflow 검증 여부를 가른다.
+
+        ⚠️ ``model_dump(exclude_none=True)``를 **쓸 수 없다.** ``expected_margin_rate``·
+        ``margin_warning``은 계약상 **null로 나가야 하는 값**이라(IO명세 §2 동기화 규칙)
+        전역으로 빼면 그쪽 계약이 깨진다.
+
+        ⚠️ **후처리가 아니라 직렬화기인 이유**: ``_assemble``에서 dump 뒤에 키를 지웠더니
+        ``revalidate_for_output``의 **왕복 항등성이 깨졌다** — 모델은 ``null``을 뱉고
+        우리는 지운 값을 비교하게 된다. 규칙이 타입에 있어야 어느 경로로 직렬화해도 같다.
+        """
+        data = handler(self)
+        if data.get("payment_schedule") is None:
+            data.pop("payment_schedule", None)
+        return data
 
     @field_validator("coverage_days", "max_price", "expected_margin_rate", mode="before")
     @classmethod

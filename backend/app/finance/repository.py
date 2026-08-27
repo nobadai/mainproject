@@ -20,6 +20,7 @@ FINANCE_POLICY_VERSION = "v1.3-PROVISIONAL"
 FINANCE_POLICY_USAGE_SCOPE = "AGENT_MVP_DEMO"
 _NUMERIC_POLICY_KEYS = {
     "purchase_payment_days",
+    "payroll_date",
     "margin_defense_floor_rate",
     "monthly_labor_cost_krw",
     "minimum_cash_balance_krw",
@@ -286,7 +287,7 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
     values.setdefault("purchase_payment_days", None)
     values.setdefault("margin_defense_floor_rate", None)
     values.setdefault("monthly_labor_cost_krw", None)
-    for key in ("purchase_payment_days", "cashflow_projection_days"):
+    for key in ("purchase_payment_days", "payroll_date", "cashflow_projection_days"):
         numeric = values[key]
         if numeric is None:
             continue
@@ -504,8 +505,6 @@ class PostgresFinanceAsOfDataPort:
             policy = get_active_finance_policy()
         except (LookupError, TypeError, ValueError) as exc:
             raise FinanceDataNotReady("finance_policy") from exc
-        # D-FIN-01 is a v2.2 SIM_FIXED policy. Amount remains DB sourced.
-        policy = policy.model_copy(update={"payroll_date": 10})
         self._policy_cache = (as_of, policy_version, policy)
         return policy
 

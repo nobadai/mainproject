@@ -73,6 +73,8 @@ def test_payroll_schedule_handles_month_boundary_today_and_policy_amount(finance
     assert [(item.event_date, item.amount_krw) for item in events] == [
         (date(2026, 1, 25), Decimal(12941280))
     ]
+    assert events[0].source_ref == "policy:monthly_labor_cost_krw"
+    assert events[0].schedule_source_ref == "policy:payroll_date"
     changed = finance_policy.model_copy(update={"monthly_labor_cost_krw": Decimal(1)})
     assert (
         build_payroll_schedule(
