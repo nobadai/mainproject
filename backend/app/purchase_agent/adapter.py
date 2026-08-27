@@ -23,7 +23,10 @@ from app.orchestrator.contracts_core import Evidence
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import build_graph
-from app.purchase_agent.nodes.classify_situation import compute_ci_width
+from app.purchase_agent.nodes.classify_situation import (
+    compute_ci_width,
+    estimate_daily_demand,
+)
 from app.purchase_agent.state import PurchaseAgentState
 from app.purchase_agent.tracing import ToolRecorder
 
@@ -251,8 +254,11 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     policy = payload.get("policy_values")
     if not isinstance(policy, Mapping):
         missing.append("policy_values")
-    elif not isinstance(policy.get("item_mix_ratio"), Mapping):
+    elif not policy.get("item_mix_ratio") or not isinstance(policy["item_mix_ratio"], Mapping):
         # 스칼라로 오면 mix 게이팅의 max()가 성립하지 않는다 (답변 §4-4).
+        # **빈 dict도 거부한다.** 통과시키면 근거가 관측된 적 없는 최대비를 ``0.0``으로
+        # 적고 "0.000 < 0.7 → mix 제외"라는 **스스로 모순된 문장**을 낸다 — 미결을 0으로
+        # 채우지 않는다는 규칙 3 위반이다 (Codex 교차검증 P1).
         missing.append("policy_values.item_mix_ratio")
     # ⚠️ ``contract_price_krw``는 **필수가 아니다.** 미수령이면 ``None``이고, 그때
     # ``margin_warning``·``expected_margin_rate``가 함께 null로 나가는 것이 계약이다
@@ -350,6 +356,19 @@ def build_payload(state: Mapping[str, Any], proposal: Mapping[str, Any]) -> dict
     return {**proposal, "allowed_axes": list(state.get("allowed_axes") or [])}
 
 
+def _relation(value: float, threshold: float, comparison: str) -> str:
+    """근거 문장에 쓸 부등호. **판정에 쓴 연산과 같은 방향**을 돌려준다.
+
+    ①이 ``ci_width_comparison``(설정값)으로 임계를 비교하므로 여기서도 그 문자열을 받아
+    쓴다. 경계값에서 "0.080 > 0.08"처럼 **거짓인 문장**이 나오지 않게, 성립하지 않을 때는
+    반대 방향을 적는다.
+    """
+    holds = value >= threshold if comparison == ">=" else value > threshold
+    if holds:
+        return "≥" if comparison == ">=" else ">"
+    return "<" if comparison == ">=" else "≤"
+
+
 def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tuple[Evidence, ...]:
     """payload의 **숫자·판정·비어 있지 않은 배열**에 근거를 붙인다 (정의서 §1.2-5).
 
@@ -361,9 +380,9 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     정하고, 우리는 아는 키에 대해 만든다. 규칙이 바뀌면 재구현이 조용히 어긋나므로,
     대신 **실제 ``validate_reply``를 돌려 findings가 0인지 보는 테스트**로 잠근다.
 
-    ⚠️ ``allowed_axes``의 ``value``는 **열린 축 개수**다. ``Evidence.value``가 ``float``
-    필수인데 축 목록에 대응하는 수치가 없어 택한 값이고 **현서님 확인 항목**이다.
-    실제 근거는 ``evidence_detail``이 문장으로 싣는다.
+    ``allowed_axes``는 **게이트마다 한 건**이다 (신뢰도·총량·편중 셋). 축 목록 하나에
+    근거가 여럿인 이유는 축을 여닫는 조건이 여럿이기 때문이고, 하나로 합치면 나머지
+    게이트의 수치가 사라진다.
     """
     constraints = load_constraints()
     threshold = constraints["situation"]["ci_width_threshold"]
@@ -375,6 +394,22 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     # 그 변화를 받는다. 같은 입력·같은 함수라 두 값이 갈릴 수 없다.
     ci_width = compute_ci_width(state["forecast"], judgment_day)
     axes = list(payload.get("allowed_axes") or [])
+    # 편중 게이트가 보는 값 — **호출 품목이 아니라 전 품목의 최대비**다.
+    # mix 축은 품목을 조합하는 전략이라 "어느 품목이든 편중됐나"를 묻는다
+    # (``classify_situation.compute_allowed_axes``와 같은 계산).
+    ratios = (state.get("item_mix_ratio") or {}).values()
+    top_mix_ratio = max(ratios) if ratios else 0.0
+    mix_threshold = constraints["concentration"]["item_threshold"]
+    # **부등호를 하드코딩하지 않는다** (규칙 7). ①이 임계와 **비교 방향을 둘 다** 파일에서
+    # 읽으므로(``ci_width_comparison``), 근거 문장이 방향을 따로 적으면 설정을 ``>``로
+    # 바꾼 날 문장만 옛 방향으로 남는다.
+    comparison = constraints["situation"]["ci_width_comparison"]
+    # 총량 게이트가 보는 값 — ①과 **같은 계산**이다. 여기서 따로 세면 근거가 실제 판정과
+    # 다른 수치를 주장하게 된다.
+    estimated_total_kg = estimate_daily_demand(state["confirmed_orders"], constraints) * max(
+        constraints["coverage_days"]["by_label"].values()
+    )
+    volume_threshold = constraints["triggers"]["split_entry_qty_kg"]
 
     def ref(kind: str) -> tuple[str, ...]:
         return (f"{item}-{kind}-{as_of}",)
@@ -392,14 +427,72 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
                 f"{payload.get('situation')} 판정"
             ),
         ),
+        # ── allowed_axes는 **게이트마다 한 건**이다 (현서님 회신 8/27) ──────────
+        #
+        # 처음엔 "열린 축 개수"(2.0)를 실었는데, 그건 **답의 길이를 세어 답이라고 적은
+        # 것**이라 감사 가치가 없다. 나중에 *"왜 그날 timing이 열렸나"*를 보는 사람에게
+        # 2.0은 아무것도 말하지 않는다. ``Evidence.value``의 용도는 **판정을 만든 근거
+        # 수치**다.
+        #
+        # 축을 여닫는 게이트가 둘이라 근거도 둘이다. 하나로 합치면 한쪽 수치가 사라진다.
         Evidence(
             claim="allowed_axes",
             source="tool_calc",
-            ref_ids=ref("AXES"),
-            value=float(len(axes)),
-            unit="count",
+            # **``situation``과 같은 ``ref_id``다.** §4.2.2가 "하나의 신뢰도 판정이
+            # 개수·허용 축·분할 진입 셋을 동시에 결정한다"로 정했으므로 판정이 하나면
+            # 근거도 하나다 — 추적하면 한 곳으로 모인다.
+            ref_ids=ref("CI"),
+            value=round(ci_width, 6),
+            unit="ratio",
             evidence_grade="SIM_FIXED",
-            evidence_detail=f"허용 축 {axes} — 축별 개폐는 상황 판정과 편중·트리거가 정한다",
+            # ⚠️ **"→ 허용 축 [...]"이라고 쓰지 않는다.** 구간폭이 정하는 것은 ``situation``
+            # 이고, 축에 대해서는 **선매입 궤적 조건(by_trend)만** 연다·닫는다.
+            # timing은 총량 게이트로도 열리므로(아래 VOL 근거), uncertain인데 timing이
+            # 열린 날이 실재한다 — 그때 이 문장이 "uncertain → timing 열림"으로 읽히면
+            # **없는 인과를 주장하게 된다** (Codex 교차검증 P1, 합성 입력으로 재현).
+            evidence_detail=(
+                f"구간폭 {ci_width:.3f} {_relation(ci_width, threshold, comparison)} {threshold}"
+                f" → {payload.get('situation')} → 선매입 궤적 "
+                f"{'차단' if payload.get('situation') == 'uncertain' else '허용'}"
+            ),
+        ),
+        Evidence(
+            claim="allowed_axes",
+            source="tool_calc",
+            # **세 번째 게이트다.** 현서님 회신이 *"축을 닫는 다른 게이트가 있다면 그
+            # 게이트의 값을 쓰는 게 맞다 — 그런 게이트가 있습니까?"*라고 물었는데,
+            # 있다: timing은 ``by_volume OR by_trend``로 열리고 **by_volume은 situation과
+            # 무관하다**. 이 근거가 없으면 uncertain인데 timing이 열린 날을 설명할 수 없다.
+            ref_ids=ref("VOL"),
+            value=float(round(estimated_total_kg)),
+            unit="kg",
+            evidence_grade="SIM_FIXED",
+            evidence_detail=(
+                f"추정 총량 {round(estimated_total_kg):,}kg "
+                f"{'≥' if estimated_total_kg >= volume_threshold else '<'} "
+                f"임계 {volume_threshold:,}kg → 총량 트리거 "
+                f"{'충족' if estimated_total_kg >= volume_threshold else '미달'}"
+            ),
+        ),
+        Evidence(
+            claim="allowed_axes",
+            source="tool_calc",
+            # 편중은 **다른 게이트**라 ref_id도 다르다. 신뢰도와 같은 id를 쓰면
+            # 서로 다른 두 판정이 한 근거를 가리키게 된다.
+            ref_ids=ref("MIX"),
+            value=round(top_mix_ratio, 6),
+            unit="ratio",
+            evidence_grade="SIM_FIXED",
+            # **열린 날에도 싣는다.** 닫힘만 기록하면 "왜 열렸나"의 근거가 없어지고,
+            # 편중이 완화돼 mix가 부활한 날을 설명할 수 없다.
+            # ⑤ 게이트 조건은 ``max(ratios) < threshold``면 개방이다. 부등호를 그 조건에서
+            # 이끌어내 **경계값에서도 참인 문장**이 되게 한다 — 예전엔 0.70에서 "0.700 > 0.7"
+            # 이라고 적었는데 그건 거짓이었다(판정은 맞고 문장만 틀린 상태).
+            evidence_detail=(
+                f"품목 편중 최대 {top_mix_ratio:.3f} "
+                f"{'<' if top_mix_ratio < mix_threshold else '≥'} {mix_threshold} → "
+                f"mix {'개방' if 'mix' in axes else '제외'}"
+            ),
         ),
         Evidence(
             claim="scenarios",

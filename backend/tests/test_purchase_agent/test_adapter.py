@@ -24,6 +24,7 @@ from app.purchase_agent.adapter import (
     purchase_port,
     validate_payload,
 )
+from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 
 ANCHORS = ["2026-08-21", "2026-08-28", "2026-09-04", "2026-09-11"]
@@ -132,6 +133,246 @@ def test_suggested_adjustments_stays_empty() -> None:
     """매입은 축 조정을 제안할 권한이 없다 — 하나라도 담으면 ``ContractViolation``."""
     reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
     assert reply.suggested_adjustments == ()
+
+
+# ── allowed_axes Evidence — 게이트별 2건 ──────────────────────────────────
+
+
+def _axes_evidence(reply) -> list:
+    return [e for e in reply.evidences if e.claim == "allowed_axes"]
+
+
+def test_allowed_axes_carries_one_evidence_per_gate() -> None:
+    """축을 여닫는 게이트가 둘이라 **근거도 둘**이다 (현서님 회신 8/27).
+
+    처음엔 "열린 축 개수"(2.0)를 실었는데 그건 **답의 길이를 세어 답이라고 적은 것**이라
+    감사 가치가 없다. 나중에 *"왜 그날 timing이 열렸나"*를 보는 사람에게 2.0은 아무것도
+    말하지 않는다. ``Evidence.value``의 용도는 **판정을 만든 근거 수치**다.
+    """
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    axes_ev = _axes_evidence(reply)
+    # 신뢰도(CI) · 총량(VOL) · 편중(MIX) — 축을 여닫는 조건이 셋이라 근거도 셋이다.
+    assert {e.ref_ids[0].split("-")[1] for e in axes_ev} == {"CI", "VOL", "MIX"}
+    assert not any(e.unit == "count" for e in axes_ev), "개수(count) 방식은 폐기됐다"
+    assert not any(e.value == float(len(reply.payload["allowed_axes"])) for e in axes_ev)
+
+
+def test_confidence_gate_evidence_shares_the_situation_ref_id() -> None:
+    """**판정 하나 = 근거 하나** (정의서 §4.2.2).
+
+    하나의 신뢰도 판정이 개수·허용 축·분할 진입 셋을 동시에 결정하므로, ``situation``과
+    ``allowed_axes``의 신뢰도 게이트는 같은 ``ref_id``를 가리킨다 — 추적하면 한 곳으로
+    모인다.
+    """
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    situation = next(e for e in reply.evidences if e.claim == "situation")
+    gate = next(e for e in _axes_evidence(reply) if e.ref_ids == situation.ref_ids)
+    assert gate.value == situation.value, "같은 판정이면 같은 수치여야 한다"
+    assert "구간폭" in gate.evidence_detail
+
+
+def test_concentration_gate_evidence_uses_a_separate_ref_id() -> None:
+    """편중은 **다른 게이트**라 ``ref_id``도 다르다.
+
+    신뢰도와 같은 id를 쓰면 서로 다른 두 판정이 한 근거를 가리키게 된다.
+    """
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    situation = next(e for e in reply.evidences if e.claim == "situation")
+    mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
+    assert mix_gate.ref_ids != situation.ref_ids
+    # 호출 품목이 아니라 **전 품목의 최대비**다 — mix 게이팅이 max()를 보기 때문
+    assert mix_gate.value == pytest.approx(0.812)
+    assert "mix 제외" in mix_gate.evidence_detail
+
+
+def test_concentration_gate_uses_the_maximum_not_the_called_item() -> None:
+    """편중 값은 **전 품목의 최대비**다 — 호출 품목의 비중이 아니다.
+
+    ⚠️ 배추로만 시험하면 이 구분이 안 드러난다. mock에서 배추가 **호출 품목이자
+    최대비**(0.812)라 두 계산이 같은 값을 내기 때문이다 — 변이를 넣어도 초록불이었다.
+    무(0.081)로 부르면 갈린다: mix 게이팅이 *"어느 품목이든 편중됐나"*를 묻기 때문에
+    무를 사는 날에도 배추의 편중이 축을 닫는다.
+    """
+    reply = purchase_port(_request("무", SPREAD_WIDE))[0]
+    mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
+    assert mix_gate.value == pytest.approx(0.812), "호출 품목(무 0.081)이 아니라 최대비"
+    assert "mix" not in reply.payload["allowed_axes"]
+
+
+def test_concentration_gate_evidence_is_present_when_mix_opens_too() -> None:
+    """**열린 날에도 싣는다.**
+
+    닫힘만 기록하면 *"왜 열렸나"*의 근거가 없어지고, 편중이 완화돼 mix가 부활한 날을
+    설명할 수 없다. 값은 그대로 최대비이고 문장만 갈린다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    # 편중을 임계 아래로 낮춘 합성 입력 — mock에서는 배추가 늘 0.812라 이 경로가 안 밟힌다
+    payload["policy_values"] = {
+        **payload["policy_values"],
+        "item_mix_ratio": {"배추": 0.30, "무": 0.25, "양파": 0.25, "피마늘": 0.20},
+    }
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=payload,
+        )
+    )
+    assert "mix" in reply.payload["allowed_axes"]
+    mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
+    assert mix_gate.value == pytest.approx(0.30)
+    assert "mix 개방" in mix_gate.evidence_detail
+
+
+@pytest.mark.parametrize(
+    ("value", "threshold", "comparison", "expected"),
+    [
+        (0.08, 0.08, ">=", "≥"),  # 경계 — 예전엔 ">"를 찍어 거짓 문장이 됐다
+        (0.09, 0.08, ">=", "≥"),
+        (0.07, 0.08, ">=", "<"),
+        (0.08, 0.08, ">", "≤"),  # 설정이 ">"면 경계는 성립하지 않는다
+        (0.09, 0.08, ">", ">"),
+    ],
+)
+def test_evidence_relation_never_states_a_false_comparison(
+    value: float, threshold: float, comparison: str, expected: str
+) -> None:
+    """근거 문장의 부등호가 **경계에서도 참**이어야 한다.
+
+    예전 구현은 ``'>' if value >= threshold``였다 — 정확히 임계와 같은 날 "0.080 > 0.08"
+    이라고 적었는데 그건 거짓이다. 판정은 맞고 문장만 틀린 상태라 아무도 안 잡는다.
+
+    방향을 하드코딩하지 않는 것도 같은 이유다 — ①이 ``ci_width_comparison``을 설정에서
+    읽으므로(규칙 7), 문장이 방향을 따로 적으면 설정을 바꾼 날 문장만 옛 방향으로 남는다.
+    """
+    from app.purchase_agent.adapter import _relation
+
+    assert _relation(value, threshold, comparison) == expected
+
+
+def test_axes_evidence_reads_the_comparison_from_constraints() -> None:
+    """실제 산출물의 부등호가 설정값 방향과 맞는가 (하드코딩 회귀)."""
+    from app.purchase_agent.config import load_constraints
+
+    constraints = load_constraints()
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    situation = next(e for e in reply.evidences if e.claim == "situation")
+    gate = next(e for e in _axes_evidence(reply) if e.ref_ids == situation.ref_ids)
+    threshold = constraints["situation"]["ci_width_threshold"]
+    # 9/11 배추는 stable(0.060 < 0.08)이라 "<"가 나와야 한다
+    assert gate.value < threshold
+    assert f"{gate.value:.3f} < {threshold}" in gate.evidence_detail
+
+
+def test_concentration_detail_matches_the_gate_condition_at_the_boundary() -> None:
+    """편중 게이트는 ``max < threshold``면 개방이다 — 경계는 **제외**다.
+
+    임계와 정확히 같은 편중을 합성해 문장이 ``≥``인지 본다.
+    """
+    as_of = SPREAD_WIDE
+    threshold = load_constraints()["concentration"]["item_threshold"]
+    payload = _payload("배추", as_of)
+    payload["policy_values"] = {
+        **payload["policy_values"],
+        "item_mix_ratio": {"배추": threshold, "무": 0.1, "양파": 0.1, "피마늘": 0.1},
+    }
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=payload,
+        )
+    )
+    assert "mix" not in reply.payload["allowed_axes"], "경계값은 제외다"
+    mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
+    assert f"≥ {threshold}" in mix_gate.evidence_detail
+    assert "mix 제외" in mix_gate.evidence_detail
+
+
+def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation() -> None:
+    """🔴 **timing은 ``situation``과 무관하게도 열린다** (Codex 교차검증 P1).
+
+    ``by_volume OR by_trend``인데 ``by_volume``은 추정 총량만 본다. 그래서 uncertain인
+    날에도 물량이 크면 timing이 열린다 — CI 근거만 있으면 *"uncertain → timing 열림"*
+    이라는 **없는 인과**를 주장하게 된다.
+
+    현서님 회신이 물은 *"축을 닫는 다른 게이트가 있습니까?"*의 답이 이것이다.
+    """
+    as_of = UNCERTAIN
+    payload = _payload("배추", as_of)
+    payload["confirmed_orders"] = {**payload["confirmed_orders"], "total_kg": 300_000}
+    payload["constraints"]["finance"] = {
+        **payload["constraints"]["finance"],
+        "finance_cap_amount_krw": 50_000_000,
+    }
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=payload,
+        )
+    )
+    assert reply.payload["situation"] == "uncertain"
+    assert "timing" in reply.payload["allowed_axes"], "총량으로 열린다"
+
+    ci_gate = next(e for e in _axes_evidence(reply) if "CI" in e.ref_ids[0])
+    assert "선매입 궤적 차단" in ci_gate.evidence_detail
+    assert "허용 축" not in ci_gate.evidence_detail, "구간폭이 축을 열었다고 주장하면 안 된다"
+
+    vol_gate = next(e for e in _axes_evidence(reply) if "VOL" in e.ref_ids[0])
+    assert vol_gate.unit == "kg"
+    assert "총량 트리거 충족" in vol_gate.evidence_detail
+
+
+def test_empty_item_mix_ratio_is_refused_not_recorded_as_zero() -> None:
+    """빈 매핑을 통과시키면 **관측된 적 없는 최대비를 0.0으로 적는다** (규칙 3 위반).
+
+    게이트는 빈 입력이면 mix를 안 열지만, 근거는 "0.000 < 0.7 → mix 제외"라는 **스스로
+    모순된 문장**을 냈다 — 부등호는 개방 조건이 성립한다고 말하는데 판정은 제외다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["policy_values"] = {**payload["policy_values"], "item_mix_ratio": {}}
+    assert "policy_values.item_mix_ratio" in validate_payload(payload, as_of)
+
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=payload,
+        )
+    )
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+
+
+def test_concentration_gate_survives_a_max_that_is_neither_first_nor_called() -> None:
+    """``max()``가 아니라 **첫 항목**을 읽어도 통과하던 사각을 막는다 (Codex 교차검증 P2).
+
+    앞선 테스트들은 배추가 늘 첫 항목이자 최대비라 ``next(iter(ratios))`` 변이를
+    잡지 못했다. 최대비를 **마지막 항목의 다른 품목**에 두고, 호출은 배추로 한다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["policy_values"] = {
+        **payload["policy_values"],
+        "item_mix_ratio": {"배추": 0.10, "무": 0.15, "양파": 0.20, "피마늘": 0.55},
+    }
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=payload,
+        )
+    )
+    mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
+    assert mix_gate.value == pytest.approx(0.55), "첫 항목(0.10)도 호출 품목(0.10)도 아니다"
+    assert "mix" in reply.payload["allowed_axes"], "0.55 < 0.70 이므로 개방"
 
 
 # ── used_tools ────────────────────────────────────────────────────────────
