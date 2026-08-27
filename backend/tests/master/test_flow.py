@@ -18,6 +18,7 @@ from app.master import (
     MasterRunner,
 )
 from app.master.flow import ProcurementFlow
+from app.master.verifier import VerificationResult
 
 AS_OF = date(2026, 8, 26)
 
@@ -248,9 +249,9 @@ def test_검증_미주입은_건너뛴_사실이_남는다():
 def test_검증_발견이_있으면_재호출한다():
     calls = []
 
-    def verifier(scenarios, constraints, verdicts):
+    def verifier(scenarios, constraints, verdicts, plan):
         calls.append(len(scenarios))
-        return ("E-IDENTITY",) if len(calls) == 1 else ()
+        return VerificationResult(("E-IDENTITY",) if len(calls) == 1 else ())
 
     out = happy(verifier=verifier).run()
     assert out.end_code == "E1_APPROVED"
@@ -259,7 +260,7 @@ def test_검증_발견이_있으면_재호출한다():
 
 
 def test_검증_발견이_안_풀리면_E3():
-    out = happy(verifier=lambda s, c, v: ("E-IDENTITY",)).run()
+    out = happy(verifier=lambda s, c, v, p: VerificationResult(("E-IDENTITY",))).run()
     assert out.end_code == "E3_REJECTED"
     assert out.findings == ("E-IDENTITY",)
 
@@ -267,17 +268,19 @@ def test_검증_발견이_안_풀리면_E3():
 def test_검증은_시나리오와_경계와_판정을_함께_받는다():
     seen = {}
 
-    def verifier(scenarios, constraints, verdicts):
+    def verifier(scenarios, constraints, verdicts, plan):
         seen["scenarios"] = len(scenarios)
         seen["constraints"] = sorted(constraints)
         seen["verdicts"] = sorted(verdicts)
-        return ()
+        seen["plan_steps"] = len(plan.steps)   # ④ M-16 이 읽는 것
+        return VerificationResult()
 
     happy(verifier=verifier).run()
     assert seen == {
         "scenarios": 2,
         "constraints": ["finance", "inventory"],
         "verdicts": ["finance", "inventory"],
+        "plan_steps": 5,
     }
 
 

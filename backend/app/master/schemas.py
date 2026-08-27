@@ -80,7 +80,24 @@ class ProcurementRunResponse(BaseModel):
     verdicts: dict[str, dict[str, Any]] = {}
 
     blocked_by: list[AgentName] = []
-    findings: list[str] = []
+    findings: list[str] = Field(
+        default=[],
+        description="**매입 재호출을 유발한** 발견. 다시 만들면 달라질 수 있는 것만 여기 든다.",
+    )
+    concerns: list[str] = Field(
+        default=[],
+        description=(
+            "사실이지만 **재호출로 고쳐지지 않는** 것 — 조언자의 계약 위반 · 마스터 "
+            "배선 문제. 사람이 봐야 한다 (§3.4)."
+        ),
+    )
+    skipped_checks: list[str] = Field(
+        default=[],
+        description=(
+            "검증 Tool 이 **판정하지 못한** 검사와 사유. 비어 있는 findings 를 "
+            "'전부 통과'로 읽지 않게 한다 (§3.7.6 커버리지를 감추지 않는다)."
+        ),
+    )
     verification_skipped: bool = False
     purchase_attempts: int = 0
 

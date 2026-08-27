@@ -20,6 +20,7 @@ from app.master.schemas import (
     RunHistoryOut,
     StepOut,
 )
+from app.master.verifier import MasterVerifier
 from app.orchestrator.run_repository import get_run_by_request_id
 
 
@@ -39,7 +40,13 @@ def run_procurement(
     """매입 Flow 를 한 번 돌리고 실행 계획을 적재한다.
 
     ★ 적재는 계산이 끝난 뒤다. 실패해도 응답을 막지 않는다 (§persistence).
+
+    ★ `verifier` 를 주지 않으면 **마스터의 기본 검증 Tool** 이 붙는다 (§3.7.1).
+      전에는 기본값이 `None` 이라 API 경로에서 검증이 통째로 건너뛰어졌다 —
+      `verification_skipped: true` 로 드러나긴 했지만 아무도 안 봤다.
+      **끄려면 명시적으로 꺼야 한다**(`NO_VERIFIER`)는 쪽이 안전하다.
     """
+    verifier = MasterVerifier() if verifier is None else verifier
     started = time.perf_counter()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
     context = ExecutionContext(
@@ -95,6 +102,8 @@ def _to_response(context: ExecutionContext, outcome: ProcurementOutcome) -> Proc
         verdicts={k: dict(v) for k, v in outcome.verdicts.items()},
         blocked_by=list(outcome.blocked_by),
         findings=list(outcome.findings),
+        concerns=list(outcome.concerns),
+        skipped_checks=list(outcome.skipped_checks),
         verification_skipped=outcome.verification_skipped,
         purchase_attempts=outcome.purchase_attempts,
         presentable=outcome.presentable,
@@ -115,6 +124,8 @@ def _empty_response(
         blocked_by=missing_adapters,
         missing_adapters=missing_adapters,
         verification_skipped=True,
+        # 어댑터가 없어 못 돈 날도 **무엇을 못 봤는지**는 남긴다 (§3.7.6)
+        skipped_checks=["전 검사: 어댑터 미등록으로 Flow 가 시작되지 않음"],
     )
 
 

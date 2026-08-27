@@ -133,9 +133,40 @@ def test_같은_입력에_같은_계획(client):
     assert a["request_id"] == b["request_id"]
 
 
-def test_검증_미주입이_응답에_드러난다(client):
+def test_검증_Tool_이_기본으로_붙는다(client):
+    """★ 전에는 기본값이 None 이라 API 경로에서 검증이 통째로 건너뛰어졌다.
+
+    `verification_skipped: true` 로 드러나긴 했지만 아무도 안 봤다. 끄려면 명시적으로
+    꺼야 하는 쪽이 안전하다.
+    """
     wire_all()
-    assert client.post("/master/request", json=body()).json()["verification_skipped"] is True
+    data = client.post("/master/request", json=body()).json()
+    assert data["verification_skipped"] is False
+
+
+def test_못_본_검사가_응답에_드러난다(client):
+    """§3.7.6 — 커버리지를 감추지 않는다.
+
+    `findings: []` 를 "56검사 통과"로 읽지 않게 **못 본 것**을 함께 낸다.
+    """
+    wire_all()
+    skipped = client.post("/master/request", json=body()).json()["skipped_checks"]
+    assert any("56검사" in s for s in skipped)
+
+
+def test_조언자_봉투_위반은_재호출을_유발하지_않는다(client):
+    """★ 배선하고 나서 드러난 것.
+
+    스텁 조언자가 Evidence 를 안 붙여 `E-EVIDENCE-MISSING` 이 난다. 이걸 findings 로
+    올리면 **매입을 다시 부른다** — 매입이 몇 번을 다시 만들어도 재무의 위반은 그대로다.
+    호출 예산만 태우고 E3 로 끝난다.
+    """
+    wire_all([{"scenario_id": "SCN-1"}, {"scenario_id": "SCN-2"}])
+    data = client.post("/master/request", json=body()).json()
+    assert data["end_code"] == "E1_APPROVED"
+    assert data["purchase_attempts"] == 1
+    assert any("E-EVIDENCE-MISSING" in c for c in data["concerns"])
+    assert data["findings"] == []
 
 
 def test_단일안이_표시된다(client):

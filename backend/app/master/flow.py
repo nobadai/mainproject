@@ -33,6 +33,7 @@ from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
+from app.master.verifier import VerificationResult
 from app.orchestrator.contracts_core import EndCode
 
 ADVISORS: tuple[AgentName, ...] = ("finance", "inventory")
@@ -51,7 +52,8 @@ class VerifierPort(Protocol):
         scenarios: Sequence[Mapping[str, Any]],
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
-    ) -> tuple[str, ...]: ...
+        plan: ExecutionPlan,
+    ) -> VerificationResult: ...
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,8 @@ class ProcurementOutcome:
 
     blocked_by: tuple[AgentName, ...] = ()
     findings: tuple[str, ...] = ()
+    concerns: tuple[str, ...] = ()
+    skipped_checks: tuple[str, ...] = ()
     verification_skipped: bool = False
     purchase_attempts: int = 0
 
@@ -139,7 +143,7 @@ class ProcurementFlow:
         attempts = 0
         scenarios: tuple[Mapping[str, Any], ...] = ()
         verdicts: dict[AgentName, Mapping[str, Any]] = {}
-        findings: tuple[str, ...] = ()
+        verification = VerificationResult()
 
         while attempts < self.max_purchase_attempts:
             attempts += 1
@@ -166,9 +170,9 @@ class ProcurementFlow:
                 )
 
             verdicts = self._validate(scenarios)
-            findings = self._verify(scenarios, constraints, verdicts)
+            verification = self._verify(scenarios, constraints, verdicts)
 
-            if self._acceptable(scenarios, verdicts, findings):
+            if self._acceptable(scenarios, verdicts, verification.findings):
                 break
 
             if attempts >= self.max_purchase_attempts:
@@ -178,7 +182,9 @@ class ProcurementFlow:
                     scenarios=scenarios,
                     constraints=constraints,
                     verdicts=verdicts,
-                    findings=findings,
+                    findings=verification.findings,
+                    concerns=verification.concerns,
+                    skipped_checks=verification.skipped,
                     purchase_attempts=attempts,
                 )
 
@@ -188,7 +194,9 @@ class ProcurementFlow:
             scenarios=scenarios,
             constraints=constraints,
             verdicts=verdicts,
-            findings=findings,
+            findings=verification.findings,
+            concerns=verification.concerns,
+            skipped_checks=verification.skipped,
             purchase_attempts=attempts,
         )
 
@@ -255,11 +263,15 @@ class ProcurementFlow:
         scenarios: Sequence[Mapping[str, Any]],
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
-    ) -> tuple[str, ...]:
-        """⑤ 마스터가 가진 검증 Tool. 주입 전에는 건너뛴 사실이 결과에 남는다."""
+    ) -> VerificationResult:
+        """⑤ 마스터가 가진 검증 Tool. 주입 전에는 건너뛴 사실이 결과에 남는다.
+
+        ★ 검증 Tool 은 **실행 계획도 본다** — ④ 실행 계획 온전성(M-16)이 그것만 읽는다.
+          시나리오·경계·판정만으로는 "필요한 에이전트를 다 불렀나"를 알 수 없다.
+        """
         if self.verifier is None:
-            return ()
-        return tuple(self.verifier(scenarios, constraints, verdicts))
+            return VerificationResult()
+        return self.verifier(scenarios, constraints, verdicts, self.runner.plan)
 
     # ── 판단 ────────────────────────────────────────────────────
 
