@@ -90,6 +90,7 @@ def _day_gap(start: Any, end: Any) -> int | None:
     except (ValueError, TypeError):
         return None
 
+
 # 매입이 밝힌 판정 필드 (2026-08-27 회신). 없으면 그 검사는 skipped 다.
 _ALLOWED_AXES = "allowed_axes"
 _SPLIT_PLAN = "split_plan"
@@ -435,9 +436,7 @@ class MasterVerifier:
             if gap is None:
                 skipped.append(f"L-PAYSCHED-N5: {label} seq {seq} 의 날짜를 읽을 수 없어 미검사")
             elif gap != pay_days:
-                out.append(
-                    f"L-PAYSCHED-N5: {label} seq {seq} 의 지급 간격 D+{gap} ≠ D+{pay_days}"
-                )
+                out.append(f"L-PAYSCHED-N5: {label} seq {seq} 의 지급 간격 D+{gap} ≠ D+{pay_days}")
 
         # 상한 — 재무가 STRESS Cashflow 로 쓴다. 수량 × 상한가여야 한다
         max_price = _int_of(scenario.get("max_price"))

@@ -157,9 +157,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     # 🔴 정책값이 DB 에서 온 것인지 확인한다 (2026-08-27 재무 후속회신 §3).
     #    값이 아니라 **출처**의 문제이므로 READY 는 유지하고 이름만 밝힌다.
     missing.extend(
-        f"{key}@policy_source_ref"
-        for key in _POLICY_KEYS_IN_USE
-        if key not in policy.source_refs
+        f"{key}@policy_source_ref" for key in _POLICY_KEYS_IN_USE if key not in policy.source_refs
     )
 
     evidences = (
@@ -200,8 +198,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             policy.minimum_cash_balance_krw,
             "KRW",
             ref,
-            "지급일 중 (지급 후 잔액 < 최소현금) ∪ (일일 유출 최대). "
-            "판정 임계 = 최소현금 보유선",
+            "지급일 중 (지급 후 잔액 < 최소현금) ∪ (일일 유출 최대). 판정 임계 = 최소현금 보유선",
         ),
     )
     if floor_rate is not None:
@@ -396,4 +393,3 @@ def _not_ready(
         reasoning=reason,
     )
     return reply, _meta(request, run_id, tools)
-

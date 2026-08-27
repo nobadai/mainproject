@@ -199,7 +199,7 @@ class ProcurementFlow:
                     purchase_attempts=attempts,
                 )
 
-            verdicts = self._validate(scenarios)
+            verdicts = self._validate(proposal, scenarios)
             verification = self._verify(proposal, constraints, verdicts)
 
             if self._acceptable(scenarios, verdicts, verification.findings):
@@ -318,10 +318,20 @@ class ProcurementFlow:
         return generated[:10] <= self.runner.context.as_of.isoformat()
 
     def _validate(
-        self, scenarios: Sequence[Mapping[str, Any]]
+        self, proposal: Mapping[str, Any], scenarios: Sequence[Mapping[str, Any]]
     ) -> dict[AgentName, Mapping[str, Any]]:
-        """④ 각 조언자가 시나리오를 자기 관점에서 본다."""
-        payload = {"scenarios": list(scenarios)}
+        """④ 각 조언자가 시나리오를 자기 관점에서 본다.
+
+        ★ **시나리오 배열이 아니라 제안 전체를 넘긴다.**
+
+          전에는 `{"scenarios": [...]}` 만 보냈다. 그런데 물류는 도착일을 계산하려면
+          `meta.as_of` · `meta.item` 이 필요하고, 그 둘은 시나리오 안이 아니라 **제안
+          최상위**에 있다. 검증 Tool 이 `allowed_axes` 를 못 보던 것과 **같은 종류의
+          누락**이다 — 배열만 넘기면 그 판정을 못 본다.
+
+          `scenarios` 는 제안 안에 그대로 있으므로 기존 소비자(재무)는 안 바뀐다.
+        """
+        payload = {**proposal, "scenarios": list(scenarios)}
         out: dict[AgentName, Mapping[str, Any]] = {}
         for agent in self.advisors:
             reply = self.runner.call(agent, "SCENARIO_VALIDATION", payload)
