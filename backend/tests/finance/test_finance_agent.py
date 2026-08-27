@@ -57,8 +57,11 @@ class Port:
             policy_version="v1.3-PROVISIONAL",
             usage_scope="AGENT_MVP_DEMO",
             source_refs={
+                "purchase_payment_days": "policy:purchase-days",
                 "minimum_cash_balance_krw": "policy:min-cash",
                 "cash_priority_reference": "policy:pressure",
+                "cash_priority_high_ratio": "policy:pressure-high",
+                "cash_priority_medium_ratio": "policy:pressure-medium",
             },
         )
 
@@ -92,6 +95,16 @@ class Planner:
         return next(self.actions)
 
 
+class FailingFinalizer:
+    model = "failing-finalizer"
+    attempts = 0
+
+    def finalize(self, **kwargs):
+        del kwargs
+        self.attempts += 1
+        raise TimeoutError("finalization timeout")
+
+
 class ReceivablePort(Port):
     def load_receivables(self, as_of, horizon):
         del as_of, horizon
@@ -112,6 +125,27 @@ class CountingPort(Port):
     def load_policy(self, as_of, policy_version):
         self.policy_reads += 1
         return super().load_policy(as_of, policy_version)
+
+
+class MissingN5Port(Port):
+    def load_policy(self, as_of, policy_version):
+        return super().load_policy(as_of, policy_version).model_copy(
+            update={"purchase_payment_days": None}
+        )
+
+
+class MarginPolicyPort(Port):
+    def load_policy(self, as_of, policy_version):
+        policy = super().load_policy(as_of, policy_version)
+        return policy.model_copy(
+            update={
+                "margin_defense_floor_rate": Decimal("0.12"),
+                "source_refs": {
+                    **policy.source_refs,
+                    "margin_defense_floor_rate": "policy:margin-floor",
+                },
+            }
+        )
 
 
 class BaseViolationPort(Port):
@@ -168,13 +202,42 @@ def test_pre_purchase_dynamic_order_and_envelope(save_run):
     assert metadata.used_tools == tuple(order)
     assert "budget_remaining" not in vars(request())
     assert reply.payload["available_cash"] == 1000
+    assert reply.payload["purchase_payment_days"] == 1
+    assert reply.payload["margin_defense_floor_rate"] is None
     assert {e.claim for e in reply.evidences} >= {
         "available_cash",
         "finance_cap_amount_krw",
-        "projected_cash_min",
+        "base_projected_cash_min",
         "payment_pressure",
     }
     save_run.assert_called_once()
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
+    planner = Planner(
+        [
+            ToolAction("assess_finance_position"),
+            ToolAction("calculate_purchase_finance_cap"),
+            ToolAction("analyze_payment_pressure"),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, _ = FinanceAgentController(MarginPolicyPort(), planner).run(request())
+    assert reply.payload["margin_defense_floor_rate"] == 0.12
+    evidence = {item.claim: item for item in reply.evidences}
+    assert evidence["margin_defense_floor_rate"].ref_ids == ("policy:margin-floor",)
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_missing_n5_is_not_ready_and_never_returns_finance_cap(save_run):
+    reply, _ = FinanceAgentController(
+        MissingN5Port(), Planner([ToolAction("assess_finance_position")])
+    ).run(request())
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ("purchase_payment_days",)
+    assert "finance_cap_amount_krw" not in reply.payload
 
 
 @patch("app.finance.agent.save_finance_execution")
@@ -232,7 +295,7 @@ def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run)
     reply, metadata = FinanceAgentController(Port(), planner).run(req)
     assert reply.runtime_status == "READY"
     assert reply.business_status == "reject"
-    results = reply.payload["scenarios"]
+    results = reply.payload["verdicts"]
     assert [result["scenario_id"] for result in results] == ["S1", "S2", "S3"]
     assert [result["verdict"] for result in results] == ["ok", "reject", "ok"]
     assert results[1]["adjustability"] == "ADJUSTABLE"
@@ -321,8 +384,8 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
         },
     )
     reply, _ = FinanceAgentController(ReceivablePort(), planner).run(req)
-    early, late = reply.payload["scenarios"]
-    assert early["projected_cash_min"] < late["projected_cash_min"]
+    early, late = reply.payload["verdicts"]
+    assert early["scenario_projected_cash_min"] < late["scenario_projected_cash_min"]
     assert early["verdict"] == "reject"
     assert late["verdict"] == "ok"
 
@@ -393,6 +456,26 @@ def test_run_history_persistence_failure_becomes_agent_error():
 
 
 @patch("app.finance.agent.save_finance_execution")
+def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_run):
+    planner = Planner(
+        [
+            ToolAction("assess_finance_position"),
+            ToolAction("calculate_purchase_finance_cap"),
+            ToolAction("analyze_payment_pressure"),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, metadata = FinanceAgentController(
+        Port(), planner, finalizer=FailingFinalizer()
+    ).run(request())
+    assert reply.runtime_status == "READY"
+    assert reply.payload["finance_cap_amount_krw"] == 800
+    assert metadata.llm_status == "FALLBACK"
+    assert metadata.llm_fallback_used is True
+    assert not any(character.isdigit() for character in reply.reasoning)
+
+
+@patch("app.finance.agent.save_finance_execution")
 def test_zero_debt_does_not_require_debt_policy(save_run):
     planner = Planner(
         [
@@ -423,8 +506,8 @@ def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     reply, _ = FinanceAgentController(port, planner).run(request())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.business_status == "skipped"
-    assert reply.missing_data == ("payroll_amount",)
-    assert "projected_cash_min" not in reply.payload
+    assert reply.missing_data == ("payroll_schedule",)
+    assert "base_projected_cash_min" not in reply.payload
     assert reply.needs_followup is True
 
 
@@ -450,6 +533,8 @@ def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     assert reply.payload["verdict"] == "reject"
     assert reply.payload["adjustability"] == "ADJUSTABLE"
     assert reply.suggested_adjustments[0].axis == "amount"
+    assert reply.needs_followup is True
+    assert reply.additional_validation_required is False
 
 
 def test_payment_schedule_sum_mismatch_is_error():
