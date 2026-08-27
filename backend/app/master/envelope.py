@@ -281,6 +281,20 @@ _CLAIM_PATH = re.compile(r"^(?P<key>[^\[\].]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$"
 
 _MAX_REASONING_SENTENCES = 3
 
+_PLAN_EXEMPT_MODES: frozenset[Mode] = frozenset({"STATUS_QUERY"})
+"""★ `E-PLAN-EMPTY` 를 적용하지 않는 mode (v0.6 · 매입 파트 지적).
+
+`STATUS_QUERY` 는 **판단이 아니라 조회**다. 밴드에 들어가지도 시나리오를 만들지도
+않으므로 "어떻게 이 답이 나왔나"를 재현할 대상이 없다. Tool 없이 상태만 돌려주는 것이
+정상 동작이다.
+
+> 지적 전에는 매입이 검사를 피하려고 `used_tools: ["status_query"]` 를 넣고 있었다.
+> **가짜 Tool 이름이 실행 계획에 남는다** — M-16 이 읽는 바로 그 기록이 거짓이 된다.
+> 검사를 피하려고 이력을 오염시키게 만드는 검사는 잘못 놓인 검사다.
+
+`contributes_to_band` 는 `runtime_status == READY` 만 보는 속성이라 mode 를 구분하지
+못한다. 그래서 여기서 따로 뺀다."""
+
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -521,7 +535,8 @@ def validate_reply(
                     f"회신 run_id={reply.run_id} 인데 메타데이터는 {metadata.run_id} 다.",
                 )
             )
-        if reply.contributes_to_band and not metadata.used_tools:
+        plan_required = reply.contributes_to_band and reply.mode not in _PLAN_EXEMPT_MODES
+        if plan_required and not metadata.used_tools:
             out.append(
                 EnvelopeFinding(
                     "E-PLAN-EMPTY",

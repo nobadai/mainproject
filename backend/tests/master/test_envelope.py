@@ -495,3 +495,44 @@ def test_매입_출력_형태_전체():
         ),
     )
     assert check_evidence_coverage(ok) == []
+
+
+# ---------------------------------------------------------------------------
+# E-PLAN-EMPTY 예외 — STATUS_QUERY (v0.6 · 매입 파트 지적)
+# ---------------------------------------------------------------------------
+
+
+def _reply_with_mode(mode):
+    return AgentReply(
+        request_id="REQ-1",
+        as_of=AS_OF,
+        agent="purchase",
+        mode=mode,
+        run_id="PUR-1",
+        runtime_status="READY",
+        business_status="ok",
+    )
+
+
+def _meta_no_tools():
+    return ExecutionMetadata(run_id="PUR-1", request_id="REQ-1", agent="purchase")
+
+
+def test_status_query_is_exempt_from_plan_empty():
+    """조회는 재현할 판단이 없다 — Tool 없이 답해도 정상이다."""
+    findings = validate_reply(
+        req("purchase", "STATUS_QUERY"),
+        _reply_with_mode("STATUS_QUERY"),
+        _meta_no_tools(),
+    )
+    assert not [f for f in findings if f.code == "E-PLAN-EMPTY"]
+
+
+def test_generate_scenarios_still_requires_tools():
+    """예외는 STATUS_QUERY 에만 붙는다 — 판단하는 mode 는 그대로 걸린다."""
+    findings = validate_reply(
+        req("purchase", "GENERATE_SCENARIOS"),
+        _reply_with_mode("GENERATE_SCENARIOS"),
+        _meta_no_tools(),
+    )
+    assert [f for f in findings if f.code == "E-PLAN-EMPTY"]
