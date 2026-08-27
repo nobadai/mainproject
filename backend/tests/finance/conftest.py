@@ -103,7 +103,7 @@ def purchase_payload() -> dict[str, object]:
         "meta": {
             "as_of": "2025-12-31",
             "item": "배추",
-            "agent_version": "v0.4",
+            "agent_version": "v1.1",
             "is_refeed": False,
             "feedback_attempt": 0,
         },
@@ -112,25 +112,42 @@ def purchase_payload() -> dict[str, object]:
                 "label": "기본",
                 "strategy_type": "quantity",
                 "coverage_days": 5,
-                "total_quantity_ton": 4.5,
-                "total_amount_krw": 10318995,
-                "split_plan": [{"seq": 1, "date": "2025-12-31", "quantity_ton": 4.5}],
+                "total_qty_kg": 4500,
+                "total_amount_krw": 7125000,
+                "max_price": 1750,
+                "margin_warning": False,
+                "split_plan": [{"seq": 1, "date": "2025-12-31", "qty_kg": 4500}],
                 "sourcing_plan": [
                     {
                         "market": "가락",
                         "grade": "상",
-                        "quantity_ton": 3.0,
+                        "qty_kg": 3000,
                         "grade_unit_price": 1650,
                     },
                     {
                         "market": "가락",
                         "grade": "중",
-                        "quantity_ton": 1.5,
+                        "qty_kg": 1500,
                         "grade_unit_price": 1450,
                     },
                 ],
+                "expected_margin_rate": 0.3,
+                "rationale": [
+                    {
+                        "source": "예측",
+                        "claim": "테스트 예측 근거",
+                        "ref_id": "TEST-FC-001",
+                        "evidence_grade": "OFFICIAL",
+                        "evidence_detail": "테스트 fixture",
+                    }
+                ],
+                "risks": [],
             }
         ],
+        "confidence": "high",
+        "situation": "stable",
+        "context_docs_used": [],
+        "rejected_reasons": [],
     }
 
 

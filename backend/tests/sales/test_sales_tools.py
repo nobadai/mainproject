@@ -6,7 +6,7 @@
 from datetime import date
 from decimal import Decimal
 
-from app.sales.schemas import SalesAllocationInput, SalesFloorInput
+from app.sales.schemas import SalesSnapshotA, SalesSnapshotB
 from app.sales.tools import (
     build_floor_vector,
     resolve_today_floor,
@@ -14,10 +14,12 @@ from app.sales.tools import (
 )
 
 
-def _floor_input(**overrides) -> SalesFloorInput:
+def _floor_input(**overrides) -> SalesSnapshotA:
     payload = {
+        "snapshot_id": "T0-20260821-01",
         "as_of": "2026-08-21",
         "item": "배추",
+        "policy_version": None,
         "confirmed_orders": [
             {"order_id": "ORD-20260823-001", "delivery_date": "2026-08-23", "qty_kg": 200},
             {"order_id": "ORD-20260825-002", "delivery_date": "2026-08-25", "qty_kg": 1500},
@@ -31,7 +33,7 @@ def _floor_input(**overrides) -> SalesFloorInput:
         },
     }
     payload.update(overrides)
-    return SalesFloorInput.model_validate(payload)
+    return SalesSnapshotA.model_validate(payload)
 
 
 def test_build_floor_vector_matches_spec_example():
@@ -72,10 +74,15 @@ def test_resolve_today_floor_within_lead_window():
     assert resolve_today_floor(floor_vector, 4, date(2026, 8, 21)) == Decimal(1100)
 
 
-def _allocation_input(**overrides) -> SalesAllocationInput:
+def _allocation_input(**overrides) -> SalesSnapshotB:
     payload = {
+        "snapshot_id": "T0-20260821-01",
         "as_of": "2026-08-21",
         "item": "배추",
+        "policy_version": None,
+        "cost_basis": None,
+        "confirmed_orders": [],
+        "sales_opportunities": None,
         "inventory": {
             "on_hand": [
                 {
@@ -95,7 +102,7 @@ def _allocation_input(**overrides) -> SalesAllocationInput:
         },
     }
     payload.update(overrides)
-    return SalesAllocationInput.model_validate(payload)
+    return SalesSnapshotB.model_validate(payload)
 
 
 def test_strategic_inventory_today_excludes_reserved():

@@ -14,7 +14,9 @@ from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
 from app.finance.service import run_finance_procurement, run_finance_sales
 
 
-def test_procurement_service_returns_one_band_and_cost_warning(finance_context, purchase_payload):
+def test_procurement_service_returns_one_band_without_cost_warning(
+    finance_context, purchase_payload
+):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
@@ -31,16 +33,18 @@ def test_procurement_service_returns_one_band_and_cost_warning(finance_context, 
     assert response.base_projected_cash_min == Decimal("19052633.770000")
     assert response.base_cash_priority == "MEDIUM"
     assert response.band.scope == "ALL_ITEMS_TOTAL"
-    assert response.soft_warnings == ["COST_MISMATCH"]
+    assert response.soft_warnings == []
     assert response.llm_status == "SKIPPED_TEMPLATE"
     assert response.llm_attempts == 0
-    assert "verdict" not in response.model_dump()
+    assert response.verdict == "PASS"
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "PROCUREMENT"
     assert saved["runtime_status"] == "READY"
+    assert saved["verdict"] == "PASS"
+    assert saved["response_payload"]["verdict"] == "PASS"
     assert saved["snapshot_id"] is None
     assert saved["request_payload"]["meta"]["as_of"] == "2025-12-31"
-    assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == "10318995"
+    assert saved["request_payload"]["scenarios"][0]["total_amount_krw"] == 7125000
     stored_limit = saved["response_payload"]["band"]["max_feasible_amount_krw"]
     assert stored_limit == "6111353"
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
@@ -69,8 +73,11 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
     ):
         response = run_finance_procurement(request)
     assert response.runtime_status == "RUNTIME_NOT_READY"
+    assert response.verdict is None
     assert response.hard_constraints == ["REQUIRED_FINANCE_STATE_MISSING"]
     assert save_run.call_args.kwargs["runtime_status"] == "RUNTIME_NOT_READY"
+    assert save_run.call_args.kwargs["verdict"] is None
+    assert save_run.call_args.kwargs["response_payload"]["verdict"] is None
 
     with (
         patch(
@@ -96,6 +103,7 @@ def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_
         response = run_finance_sales(request)
 
     assert response.runtime_status == "READY"
+    assert response.verdict == "FAIL"
     assert response.sales_cash_priority == "HIGH"
     assert response.llm_status == "SKIPPED_TEMPLATE"
     assert response.llm_attempts == 0
@@ -104,6 +112,8 @@ def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_
     saved = save_run.call_args.kwargs
     assert saved["cycle"] == "SALES"
     assert saved["runtime_status"] == "READY"
+    assert saved["verdict"] == "FAIL"
+    assert saved["response_payload"]["verdict"] == "FAIL"
     assert saved["request_payload"]["approved_purchase"]["total_amount_krw"] == "18000000"
     assert saved["response_payload"]["soft_warnings"] == []
 

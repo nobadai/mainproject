@@ -92,7 +92,8 @@ def test_get_active_finance_policy_parses_typed_values_and_metadata():
     policy = _load(_rows())
 
     assert policy.purchase_payment_days == 7
-    assert policy.payroll_date == 25
+    assert policy.payroll_date == 10
+    assert policy.margin_defense_floor_rate is None
     assert policy.monthly_labor_cost_krw == Decimal(12941280)
     assert policy.minimum_cash_balance_krw == Decimal(12941280)
     assert policy.cashflow_projection_days == 30
@@ -118,16 +119,48 @@ def test_policy_metadata_mismatch_fails_closed(field):
         _load(rows)
 
 
-def test_missing_or_inactive_required_policy_fails_closed():
-    with pytest.raises(LookupError, match="purchase_payment_days"):
-        _load(_rows()[1:])
+def test_missing_n5_is_preserved_as_null_for_runtime_readiness():
+    policy = _load(_rows()[1:])
+    assert policy.purchase_payment_days is None
+    assert "purchase_payment_days" not in policy.source_refs
+
+
+def test_explicit_null_n5_is_preserved():
+    rows = _rows()
+    rows[0]["value_numeric"] = None
+    assert _load(rows).purchase_payment_days is None
+
+
+def test_missing_payroll_amount_is_preserved_as_null():
+    rows = [row for row in _rows() if row["policy_key"] != "monthly_labor_cost_krw"]
+    assert _load(rows).monthly_labor_cost_krw is None
+
+
+def test_optional_margin_defense_floor_rate_is_source_owned():
+    rows = _rows()
+    rows.append(
+        {
+            "policy_key": "margin_defense_floor_rate",
+            "value_kind": "NUMERIC",
+            "value_numeric": Decimal("0.12"),
+            "value_text": None,
+            "value_json": None,
+            "source_ref": "policy:margin_defense_floor_rate",
+            "policy_version": "v1.3-PROVISIONAL",
+            "usage_scope": "AGENT_MVP_DEMO",
+        }
+    )
+    policy = _load(rows)
+    assert policy.margin_defense_floor_rate == Decimal("0.12")
+    assert policy.source_refs["margin_defense_floor_rate"] == (
+        "policy:margin_defense_floor_rate"
+    )
 
 
 @pytest.mark.parametrize(
     ("key", "mutation", "error"),
     [
         ("purchase_payment_days", {"value_kind": "TEXT"}, ValueError),
-        ("purchase_payment_days", {"value_numeric": None}, ValueError),
         ("purchase_payment_days", {"value_numeric": "7"}, TypeError),
         ("cash_priority_reference", {"value_text": 7}, TypeError),
         ("cash_priority_reference", {"value_json": {}}, ValueError),

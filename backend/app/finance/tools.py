@@ -14,11 +14,10 @@ from app.finance.schemas import (
     CollectionPreference,
     FinanceDebtPolicy,
     FinancePolicy,
-    PurchaseSourcingPlanItem,
     SourcingPlanItem,
 )
+from app.purchase_agent.schemas import SourcingPlanItem as PurchaseSourcingPlanItem
 
-KG_PER_TON = Decimal(1000)
 KRW_QUANTUM = Decimal("0.000001")
 
 
@@ -176,6 +175,8 @@ def derive_cash_priority(*, projected_cash_min: Decimal, policy: FinancePolicy) 
 
 def calculate_finance_cap(*, base_projection: CashflowProjection, policy: FinancePolicy) -> Decimal:
     """단일 D+N 매입 지급을 Overlay할 때의 보수적 원 단위 상한."""
+    if policy.purchase_payment_days is None:
+        raise ValueError("purchase_payment_days is required for Finance Cap")
     payment_date = base_projection.as_of + timedelta(days=policy.purchase_payment_days)
     if not base_projection.as_of < payment_date <= base_projection.horizon_end:
         raise ValueError("purchase payment date is outside projection horizon")
@@ -194,9 +195,9 @@ def calculate_finance_cap(*, base_projection: CashflowProjection, policy: Financ
 
 
 def calculate_proposal_amount(sourcing_plan: list[SourcingPlanItem]) -> Decimal:
-    """톤 단위 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
+    """kg 수량과 kg당 단가로 매입 제안 총액을 재계산한다."""
     return sum(
-        (item.quantity_ton * KG_PER_TON * Decimal(item.unit_price) for item in sourcing_plan),
+        (item.quantity_kg * Decimal(item.unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
@@ -206,7 +207,7 @@ def calculate_purchase_scenario_amount(
 ) -> Decimal:
     """Purchase Agent v0.4 소싱 계획의 총 매입금액을 재계산한다."""
     return sum(
-        (item.quantity_ton * KG_PER_TON * Decimal(item.grade_unit_price) for item in sourcing_plan),
+        (Decimal(item.qty_kg) * Decimal(item.grade_unit_price) for item in sourcing_plan),
         start=Decimal(0),
     )
 
