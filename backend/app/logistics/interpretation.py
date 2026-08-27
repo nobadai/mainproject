@@ -9,6 +9,7 @@ _LOGISTICS_FACTS = {
     "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED": "확정 입고 일정 정보가 부족합니다.",
     "CONFIRMED_OUTBOUND_SCHEDULE_UNRESOLVED": "확정 출고 일정 정보가 부족합니다.",
     "FRESHNESS_QUALITY_RISK": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
+    "GRADE_VOCABULARY_UNRESOLVED": "일부 재고의 등급 어휘를 정규화 근거 없이 해석할 수 없습니다.",
     "H1_FUTURE_OCCUPANCY_UNRESOLVED": "승인 매입의 미래 점유를 확정할 수 없습니다.",
     "IN_TRANSIT_SCHEDULE_UNRESOLVED": "운송 중 재고와 입고 일정의 관계가 확정되지 않았습니다.",
     "IN_TRANSIT_UNRESOLVED": "운송 중 재고 정보가 부족합니다.",

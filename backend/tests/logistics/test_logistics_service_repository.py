@@ -11,6 +11,7 @@ from app.logistics.repository import (
     get_active_logistics_runtime_fixture,
     get_current_inventory_logistics_snapshot,
 )
+from app.logistics.rules import evaluate_procurement_rules
 from app.logistics.schemas import LogisticsSalesRequest, PurchaseAgentOutput
 from app.logistics.service import run_logistics_procurement, run_logistics_sales
 
@@ -276,6 +277,40 @@ def test_unresolved_runtime_source_preserves_none():
     assert fixture.in_transit is None
 
 
+def test_runtime_fixture_carries_inbound_id_for_b1_validation():
+    """B-1: Fixture의 동일 입고 건은 명시적 inbound_id로 연결된다 (자동 생성 금지)."""
+    row = _fixture_row(
+        in_transit_status="CONFIRMED",
+        in_transit_json=[
+            {
+                "inbound_id": "INB-001",
+                "item": "배추",
+                "quantity_kg": 500,
+                "expected_arrival_date": "2026-01-02",
+            }
+        ],
+        confirmed_inbound_status="CONFIRMED",
+        confirmed_inbound_json=[
+            {
+                "inbound_id": "INB-001",
+                "item": "배추",
+                "quantity_kg": 500,
+                "date": "2026-01-02",
+            }
+        ],
+    )
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", return_value=[row]),
+    ):
+        fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+
+    assert fixture.in_transit is not None
+    assert fixture.in_transit[0].inbound_id == "INB-001"
+    assert fixture.confirmed_inbound_schedule is not None
+    assert fixture.confirmed_inbound_schedule[0].inbound_id == "INB-001"
+
+
 def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
     with (
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
@@ -308,10 +343,93 @@ def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
     query_text = str(inventory_call.args[0])
     assert "inventory_lots" in query_text
     assert "received_at <= %s" in query_text
-    assert "status = 'ACTIVE'" in query_text
+    # 물리 점유는 status와 무관하다 — 잔량이 남아 창고 안에 있으면 전부 읽는다.
+    # 소진/반출 완료 Lot은 remaining_qty_kg = 0으로 자연히 빠진다.
+    assert "status = 'ACTIVE'" not in query_text
     assert "remaining_qty_kg > 0" in query_text
     assert "v_current_inventory" not in query_text
     assert "v_current_logistics_capacity" not in query_text
+
+
+def test_lot_grade_in_purchase_vocabulary_passes_through():
+    """DB raw가 이미 특/상/중/하 어휘면 변환이 아니므로 그대로 싣는다."""
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows()],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert all(lot.grade == "상" for lot in snapshot.on_hand_by_lot)
+
+
+def test_lot_grade_without_normalization_evidence_is_none():
+    """TC-03: raw `상품`은 근거 없는 `상` 변환 금지 — grade=None.
+
+    등급 의존 판단(medium_grade_factor)도 정규화 결과 기준이라 적용되지 않고,
+    freshness는 operational_limit 기준으로 남는다. 해석 불가 사실은
+    GRADE_VOCABULARY_UNRESOLVED soft warning으로만 드러나며 Runtime은 유지된다.
+    """
+    rows = _inventory_rows()
+    for row in rows:
+        row["grade"] = "상품"
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), rows],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert all(lot.grade is None for lot in snapshot.on_hand_by_lot)
+    assert all(lot.grade != "상" for lot in snapshot.on_hand_by_lot)
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    # operational_limit 10 · factor 미적용 — as_of 당일 입고라 잔여 10일 그대로.
+    assert baechu.remaining_freshness_days == 10
+
+    result = evaluate_procurement_rules(as_of=date(2025, 12, 31), snapshot=snapshot)
+    assert "GRADE_VOCABULARY_UNRESOLVED" in result["soft_warnings"]
+    assert result["runtime_status"] == "READY"
+
+
+def test_medium_grade_lot_applies_medium_grade_factor():
+    """raw `중`은 Purchase 어휘 그대로라 정규화되고 medium_grade_factor가 적용된다."""
+    rows = _inventory_rows()
+    rows[0]["grade"] = "중"
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), rows],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    assert baechu.grade == "중"
+    # operational_limit 10 × medium_grade_factor 0.8 = 8 — as_of 당일 입고라 잔여 8일.
+    assert baechu.remaining_freshness_days == 8
+
+
+def test_non_active_lot_occupies_capacity_when_physically_present():
+    """검수/격리 등 비-ACTIVE 재고도 잔량이 남아 있으면 물리 점유에 포함한다."""
+    rows = _inventory_rows()
+    rows[0]["status"] = "QUARANTINED"
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), rows],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert snapshot.used_capacity_kg == Decimal("363.28")
+    quarantined = next(lot for lot in snapshot.on_hand_by_lot if lot.status == "QUARANTINED")
+    assert quarantined.lot_id == "LOT-KIMCHI-015-BAECHU"
 
 
 def test_logistics_a_ready_response_and_persistence(
@@ -330,7 +448,12 @@ def test_logistics_a_ready_response_and_persistence(
     assert response.runtime_status == "READY"
     assert response.verdict == "REVIEW_REQUIRED"
     assert response.snapshot_id == "T0-20260821-001"
-    assert response.band.cap_by_date == {date(2026, 8, 23): Decimal(2500)}
+    assert response.band.cap_by_date == {date(2026, 8, 23): Decimal(7000)}
+    assert response.inventory_by_item is not None
+    assert [(row.item, row.available_qty_kg) for row in response.inventory_by_item] == [
+        ("배추", Decimal(1000))
+    ]
+    assert [result.verdict for result in response.scenario_results] == ["ok"]
     assert response.llm_status == "SKIPPED_TEMPLATE"
     assert response.llm_attempts == 0
     saved = save_run.call_args.kwargs
@@ -341,6 +464,8 @@ def test_logistics_a_ready_response_and_persistence(
     assert saved["snapshot_id"] == "T0-20260821-001"
     assert saved["request_payload"]["scenarios"][0]["total_qty_kg"] == 4500
     assert saved["response_payload"]["llm_status"] == "SKIPPED_TEMPLATE"
+    assert [row["item"] for row in saved["response_payload"]["inventory_by_item"]] == ["배추"]
+    assert [row["verdict"] for row in saved["response_payload"]["scenario_results"]] == ["ok"]
 
 
 def test_logistics_a_unresolved_response_is_saved(
@@ -359,9 +484,13 @@ def test_logistics_a_unresolved_response_is_saved(
     assert response.runtime_status == "RUNTIME_NOT_READY"
     assert response.verdict is None
     assert response.band.cap_by_date == {}
+    # 계산 불가(None)는 0건 확인([])이 아니다 — 직렬화에서 키 자체가 빠진다.
+    assert response.inventory_by_item is None
+    assert [result.verdict for result in response.scenario_results] == ["skipped"]
     assert save_run.call_args.kwargs["runtime_status"] == "RUNTIME_NOT_READY"
     assert save_run.call_args.kwargs["verdict"] is None
     assert save_run.call_args.kwargs["response_payload"]["verdict"] is None
+    assert "inventory_by_item" not in save_run.call_args.kwargs["response_payload"]
 
 
 def test_logistics_b_keeps_h1_out_of_on_hand_and_saves_run(

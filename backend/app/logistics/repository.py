@@ -173,6 +173,10 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
     policy = get_active_logistics_policy()
     schema = sql.Identifier(get_db_schema())
 
+    # 물리 점유 대상: 잔량이 남아 실제 창고 안에 존재하는 모든 Lot.
+    # status로 거르지 않는다 — 검수·격리·사용불가·신선도 만료 재고도 반출/폐기 전이면
+    # 공간을 점유한다. 소진/반출 완료 Lot은 remaining_qty_kg = 0으로 자연히 빠진다
+    # (현행 DB의 DEPLETED가 그 예). 가용 여부 판정은 tools.build_inventory_by_item 몫이다.
     inventory_rows = fetch_all(
         sql.SQL(
             """
@@ -191,7 +195,6 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
             JOIN {}.item_storage_policies p ON p.item_id = l.item_id
             WHERE l.sim_run_id = %s
               AND l.received_at <= %s
-              AND l.status = 'ACTIVE'
               AND l.remaining_qty_kg > 0
             ORDER BY l.lot_id
             """
@@ -225,6 +228,22 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
     )
 
 
+#: Purchase 등급 어휘. 원천이 이미 이 어휘면 변환이 아니므로 그대로 통과시킨다.
+_PURCHASE_GRADE_VOCABULARY = frozenset({"특", "상", "중", "하"})
+#: 근거가 확정된 raw → 정규화 매핑만 등록한다. 현재 확정된 매핑은 없다 —
+#: 특히 `상품 → 상` 같은 임의 치환은 금지다 (등급 표준화 근거 확정 시 여기에 반영).
+_RAW_GRADE_NORMALIZATION: dict[str, str] = {}
+
+
+def _normalize_grade(raw_grade: object) -> str | None:
+    """DB raw grade를 Purchase용 정규화 등급으로 옮긴다. 근거 없으면 None."""
+    if not isinstance(raw_grade, str):
+        return None
+    if raw_grade in _PURCHASE_GRADE_VOCABULARY:
+        return raw_grade
+    return _RAW_GRADE_NORMALIZATION.get(raw_grade)
+
+
 def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> InventoryLotSnapshot:
     received_at = row.get("received_at")
     quantity = row.get("remaining_qty_kg")
@@ -238,12 +257,17 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         raise TypeError("Inventory lot operational_limit_days must be an int")
     if isinstance(medium_factor, bool) or not isinstance(medium_factor, Decimal):
         raise TypeError("Inventory lot medium_grade_factor must be a Decimal")
+    # 등급 의존 판단은 raw가 아니라 정규화 결과 기준이다 — raw `상품` 계열은
+    # 정규화되지 않으므로(None) medium_grade_factor를 조용히 건너뛰지 않고,
+    # 해석 불가 사실이 lots[].grade = None으로 드러난다.
+    normalized_grade = _normalize_grade(row.get("grade"))
     freshness_limit = operational_limit
-    if row.get("grade") == "중":
+    if normalized_grade == "중":
         freshness_limit = int(Decimal(operational_limit) * medium_factor)
     return InventoryLotSnapshot(
         lot_id=row.get("lot_id"),
         item=row.get("item_name"),
+        grade=normalized_grade,
         available_qty_kg=quantity,
         remaining_freshness_days=freshness_limit - (as_of - received_at).days,
         status=row.get("status"),
