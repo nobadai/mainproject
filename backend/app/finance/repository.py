@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import TypedDict, cast
+from typing import Protocol, TypedDict, cast
 
 from psycopg import sql
 
@@ -20,7 +20,7 @@ FINANCE_POLICY_VERSION = "v1.3-PROVISIONAL"
 FINANCE_POLICY_USAGE_SCOPE = "AGENT_MVP_DEMO"
 _NUMERIC_POLICY_KEYS = {
     "purchase_payment_days",
-    "payroll_date",
+    "margin_defense_floor_rate",
     "monthly_labor_cost_krw",
     "minimum_cash_balance_krw",
     "cashflow_projection_days",
@@ -28,7 +28,13 @@ _NUMERIC_POLICY_KEYS = {
     "cash_priority_medium_ratio",
 }
 _TEXT_POLICY_KEYS = {"cash_priority_reference"}
-_REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
+_OPTIONAL_POLICY_KEYS = {
+    "purchase_payment_days",
+    "margin_defense_floor_rate",
+    "monthly_labor_cost_krw",
+}
+_REQUIRED_POLICY_KEYS = (_NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS) - _OPTIONAL_POLICY_KEYS
+_KNOWN_POLICY_KEYS = _REQUIRED_POLICY_KEYS | _OPTIONAL_POLICY_KEYS
 _DEBT_NUMERIC_POLICY_KEYS = {
     "debt_principal_krw",
     "debt_annual_rate",
@@ -236,7 +242,7 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
 
     for row in rows:
         key = row.get("policy_key")
-        if key not in _REQUIRED_POLICY_KEYS:
+        if key not in _KNOWN_POLICY_KEYS:
             continue
         if key in values:
             raise ValueError(f"Duplicate Finance policy key: {key}")
@@ -252,6 +258,14 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
         selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
         unused_columns = {"value_numeric", "value_text", "value_json"} - {selected_column}
         value = row.get(selected_column)
+        if value is None and key in _OPTIONAL_POLICY_KEYS:
+            if any(row.get(column) is not None for column in unused_columns):
+                raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
+            values[key] = None
+            source_ref = row.get("source_ref")
+            if isinstance(source_ref, str) and source_ref:
+                source_refs[key] = source_ref
+            continue
         if value is None or any(row.get(column) is not None for column in unused_columns):
             raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
         if kind == "NUMERIC" and (isinstance(value, bool) or not isinstance(value, Decimal)):
@@ -269,8 +283,13 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
     if missing:
         raise LookupError(f"Required Finance policies were not found: {', '.join(sorted(missing))}")
 
-    for key in ("purchase_payment_days", "payroll_date", "cashflow_projection_days"):
+    values.setdefault("purchase_payment_days", None)
+    values.setdefault("margin_defense_floor_rate", None)
+    values.setdefault("monthly_labor_cost_krw", None)
+    for key in ("purchase_payment_days", "cashflow_projection_days"):
         numeric = values[key]
+        if numeric is None:
+            continue
         assert isinstance(numeric, Decimal)
         if numeric != numeric.to_integral_value():
             raise ValueError(f"Finance policy must be an integer: {key}")
@@ -431,3 +450,139 @@ def _get_current_finance_state_row() -> dict[str, object]:
     if row is None:
         raise LookupError("Current Finance State was not found")
     return row
+
+
+class FinanceDataNotReady(RuntimeError):
+    """Required Finance fact/policy is absent or not historically reproducible."""
+
+    def __init__(self, key: str):
+        self.key = key
+        super().__init__(f"Finance data is not ready: {key}")
+
+
+class FinanceAsOfDataPort(Protocol):
+    """v2.2 repository boundary. Every mutable read carries ``as_of``."""
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]: ...
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None: ...
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy: ...
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+
+
+class PostgresFinanceAsOfDataPort:
+    """Adapter over the current schema with an explicit reproducibility guard.
+
+    The present DB has a current-state view, not a full bitemporal state store.
+    It is therefore safe only when the view's state_date exactly equals as_of;
+    older requests are reported as not ready instead of reading today's state.
+    """
+
+    def __init__(self) -> None:
+        self._position_cache: tuple[date, dict[str, object]] | None = None
+        self._policy_cache: tuple[date, str, FinancePolicy] | None = None
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]:
+        if self._position_cache is not None and self._position_cache[0] == as_of:
+            return self._position_cache[1]
+        row = _get_current_finance_state_row()
+        if row.get("state_date") != as_of:
+            raise FinanceDataNotReady("historical_finance_position")
+        self._position_cache = (as_of, row)
+        return row
+
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
+        if self._policy_cache is not None and self._policy_cache[:2] == (
+            as_of,
+            policy_version,
+        ):
+            return self._policy_cache[2]
+        if policy_version != FINANCE_POLICY_VERSION:
+            raise FinanceDataNotReady("finance_policy_version")
+        try:
+            policy = get_active_finance_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("finance_policy") from exc
+        # D-FIN-01 is a v2.2 SIM_FIXED policy. Amount remains DB sourced.
+        policy = policy.model_copy(update={"payroll_date": 10})
+        self._policy_cache = (as_of, policy_version, policy)
+        return policy
+
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        payable_rows = _fetch_scheduled_rows(
+            table="payables",
+            columns=("payable_id", "due_date", "outstanding_amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            active_status="OPEN",
+        )
+        expense_rows = _fetch_scheduled_rows(
+            table="expenses",
+            columns=("expense_id", "expense_date", "amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            excluded_status="PAID",
+        )
+        return [
+            *_rows_to_events(
+                payable_rows,
+                id_column="payable_id",
+                date_column="due_date",
+                amount_column="outstanding_amount_krw",
+                event_type="PURCHASE_PAYABLE",
+                direction="OUTFLOW",
+            ),
+            *_rows_to_events(
+                expense_rows,
+                id_column="expense_id",
+                date_column="expense_date",
+                amount_column="amount_krw",
+                event_type="COMMITTED_OUTFLOW",
+                direction="OUTFLOW",
+            ),
+        ]
+
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        rows = _fetch_scheduled_rows(
+            table="receivables",
+            columns=("receivable_id", "due_date", "outstanding_amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            active_status="OPEN",
+        )
+        return _rows_to_events(
+            rows,
+            id_column="receivable_id",
+            date_column="due_date",
+            amount_column="outstanding_amount_krw",
+            event_type="RECEIVABLE",
+            direction="INFLOW",
+        )
+
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None:
+        del horizon
+        if self._policy_cache is None or self._policy_cache[0] != as_of:
+            raise FinanceDataNotReady("finance_policy_context")
+        policy = self._policy_cache[2]
+        return policy.monthly_labor_cost_krw
+
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        try:
+            debt = get_active_finance_debt_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("debt_policy") from exc
+        if abs(
+            debt.debt_principal_krw - Decimal(str(position["current_debt_krw"]))
+        ) > Decimal("0.000001"):
+            raise FinanceDataNotReady("debt_policy_consistency")
+        return list(build_debt_service_schedule(debt_policy=debt, as_of=as_of, horizon_end=horizon))
