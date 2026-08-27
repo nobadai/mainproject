@@ -69,6 +69,9 @@ _CAP_WINDOW_DAYS = 18
   *"이 날짜까지밖에 안 왔다"* 를 알아야 없는 날을 0 으로 읽지 않는다.
 """
 
+_RULE_PREFIX = "logistics_rule/"
+"""물류 규칙이 낸 `ConstraintCode` 에 붙이는 접두어 — 출처를 이름에 남긴다."""
+
 _RENTAL_CAP_KEY = "rental_cap_kg"
 _RENTAL_CAP_KG = 0.0
 _RENTAL_CAP_REF = "LOGISTICS-REPLY-20260827:rental_cap_kg"
@@ -134,7 +137,25 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     policy = _load_policy()
     rules = evaluate_procurement_rules(as_of=as_of, snapshot=snapshot)
 
-    missing: list[str] = []
+    # 🔴 물류가 **못 돌겠다고 한 이유**를 그대로 옮긴다 (2026-08-27 물류 B-1 회신 §5).
+    #
+    # ★ 물류가 `missing_data` 필드를 새로 만들 필요가 없다. `ConstraintResult` 에
+    #   `code` · `status` · `skip_reason` 이 이미 있고 어휘도 이미 있다
+    #   (`IN_TRANSIT_SCHEDULE_UNRESOLVED` 등). **번역이 어댑터 일이다.**
+    #
+    # ★ 이걸 안 옮기면 `runtime_status` 만 NOT_READY 로 오고 **왜인지가 안 남는다.**
+    #   마스터가 사용자에게 무엇을 달라고 할지 모른다 (M-1 §5.1).
+    #
+    # ★ 그리고 계약상 필요하다 — `RUNTIME_NOT_READY` 는 `missing_data` 가 비면
+    #   `ContractViolation` 이다. 지금은 다른 이름이 우연히 채워 주고 있을 뿐이라,
+    #   그 이름이 사라지는 날 봉투가 터진다.
+    # ★ `logistics_rule/` 을 앞에 붙인다. 물류 규칙이 말한 것과 **어댑터가 payload 를
+    #   만들다 못 채운 것**을 구분하기 위해서다 — `LOG-H01` 이 UNRESOLVED 면
+    #   `guaranteed_capacity_kg` 도 비는데, 접두어가 없으면 같은 사실이 두 이름으로
+    #   섞여 어느 쪽이 원인인지 흐려진다.
+    missing: list[str] = [
+        f"{_RULE_PREFIX}{c.code}" for c in rules["hard_constraints"] if c.status != "PASS"
+    ]
     payload: dict[str, Any] = {}
 
     # ── 창고 여유 ────────────────────────────────────────────────
@@ -203,6 +224,11 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         }
         for lot in build_lot_constraints(snapshot)
     ]
+
+    # 물류가 *"돌긴 돌지만 이런 점을 봐 달라"* 고 남긴 것. 판정을 바꾸지 않지만
+    # 검증 경로에 흘러야 Critic 과 사람이 본다.
+    if rules["soft_warnings"]:
+        payload["soft_warnings"] = list(rules["soft_warnings"])
 
     if policy is not None:
         payload["policy_version_used"] = policy.policy_version
@@ -336,6 +362,36 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                         "잔여 신선도 — 등급 배분·소진 순서 판단용",
                     )
                 )
+
+    # 🔴 물류가 NOT_READY 를 냈는데 **이름이 하나도 없으면 계약 위반**이다
+    #    (M-1 §5.1 — 봉투가 ContractViolation 을 던진다).
+    #
+    #    `rules["runtime_status"]` 는 물류가 정하고 `missing` 은 어댑터가 따로 모은다.
+    #    둘이 어긋날 수 있다 — 물류 Rule 이 막았는데 어댑터가 읽은 값은 다 멀쩡한 경우다.
+    #    지금은 `rental_cap_kg@policy_source_ref` 가 늘 들어 있어 우연히 안 비어 있지만,
+    #    **DB 에 그 키가 등록되면 비게 된다.** 그날 물류 어댑터가 예외로 죽는다.
+    #
+    #    통과 못 한 하드 체크의 **코드를 그대로 적는다** — 지어내지 않고 물류가 낸 이름이다.
+    if rules["runtime_status"] != "READY" and not missing:
+        missing.extend(
+            f"logistics_rule/{check.code}"
+            for check in rules["hard_constraints"]
+            if check.status != "PASS"
+        )
+    if rules["runtime_status"] != "READY" and not missing:
+        missing.append("logistics_runtime")  # 코드조차 없으면 최소한 사실은 남긴다
+
+    if payload.get("soft_warnings"):
+        evidences.append(
+            _ev(
+                "soft_warnings",
+                len(payload["soft_warnings"]),
+                "warning_count",
+                ref,
+                "물류 규칙이 남긴 관찰 — 판정을 바꾸지 않지만 사람과 Critic 이 본다",
+                source="tool_calc",
+            )
+        )
 
     reply = AgentReply(
         request_id=request.context.request_id,
