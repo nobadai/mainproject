@@ -110,11 +110,13 @@ def calculate_future_occupancy_by_date(
             (item.quantity_kg for item in inbound_schedule if item.date <= target_date),
             start=Decimal(0),
         )
+        # 출고는 `<` — cap_by_date와 같은 정책이다. 같은 날 출고는 입출고 순서를
+        # 알 수 없으므로 당일 점유를 낮추지 않고 D+1부터 공간을 해제한다.
         outbound = sum(
             (
                 item.quantity_kg
                 for item in snapshot.confirmed_outbound_schedule
-                if item.date <= target_date
+                if item.date < target_date
             ),
             start=Decimal(0),
         )

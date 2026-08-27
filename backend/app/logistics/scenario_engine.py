@@ -77,6 +77,10 @@ def validate_purchase_scenarios(
 ) -> list[ScenarioValidationResult]:
     """각 Scenario의 각 split 요청 수량을 도착일 Capacity와 실제 비교해 판정한다.
 
+    같은 Scenario 안에서는 앞선 split 입고량이 도착일부터 계속 공간을 점유하므로
+    이후 split의 가용 Capacity에서 누적 차감한다. 서로 다른 Scenario는 대안 관계라
+    누적하지 않는다 — Scenario마다 누적량을 새로 시작한다.
+
     판정: 그대로 가능 → ok / quantity·timing 조정으로 가능 → conditional /
     18일 Window 안에서도 불가 → reject / 필수 물류 Fact 확인 불가 → skipped.
     조정 축은 quantity·timing만 허용한다. Timing 제안은 도착일 기준이다 —
@@ -104,34 +108,45 @@ def validate_purchase_scenarios(
         reason_codes: list[LogisticsReasonCode] = []
         adjustments: list[ScenarioAdjustment] = []
         infeasible = False
+        # 이 Scenario의 proposal inbound 누적분 — (도착일, 수량). Scenario마다 새로 시작.
+        proposal_inbound: list[tuple[date, Decimal]] = []
         for split in scenario.split_plan:
             arrival = split.date + timedelta(days=lead)
             requested = Decimal(split.qty_kg)
-            cap = caps[arrival]
-            if requested <= cap:
-                continue
-            _append_unique(reason_codes, "CAPACITY_EXCEEDED")
-            if cap > Decimal(0):
-                adjustments.append(
-                    ScenarioAdjustment(
-                        axis="quantity",
-                        split_date=split.date,
-                        suggested_qty_kg=cap,
+            available = _available_capacity(caps, proposal_inbound, arrival)
+            if requested > available:
+                _append_unique(reason_codes, "CAPACITY_EXCEEDED")
+                if available > Decimal(0):
+                    adjustments.append(
+                        ScenarioAdjustment(
+                            axis="quantity",
+                            split_date=split.date,
+                            suggested_qty_kg=available,
+                        )
                     )
-                )
-                continue
-            feasible_arrival = next((day for day in window_dates if requested <= caps[day]), None)
-            if feasible_arrival is not None:
-                adjustments.append(
-                    ScenarioAdjustment(
-                        axis="timing",
-                        split_date=split.date,
-                        suggested_arrival_date=feasible_arrival,
+                else:
+                    feasible_arrival = next(
+                        (
+                            day
+                            for day in window_dates
+                            if requested <= _available_capacity(caps, proposal_inbound, day)
+                        ),
+                        None,
                     )
-                )
-            else:
-                infeasible = True
-                _append_unique(reason_codes, "NO_FEASIBLE_ARRIVAL_DATE")
+                    if feasible_arrival is not None:
+                        adjustments.append(
+                            ScenarioAdjustment(
+                                axis="timing",
+                                split_date=split.date,
+                                suggested_arrival_date=feasible_arrival,
+                            )
+                        )
+                    else:
+                        infeasible = True
+                        _append_unique(reason_codes, "NO_FEASIBLE_ARRIVAL_DATE")
+            # 제안 그대로의 입고량이 도착일부터 이후 split의 공간을 점유한다 —
+            # 초과 여부와 무관하게 proposal 원안 기준으로 누적한다.
+            proposal_inbound.append((arrival, requested))
         if infeasible:
             verdict = "reject"
         elif adjustments:
@@ -153,6 +168,19 @@ def _skipped(label: str) -> ScenarioValidationResult:
     # 데이터 누락은 Business Reason이 아니라 Runtime 상태로 표현한다 —
     # reason_codes를 비워 두고 원인은 ConstraintResult가 담당한다.
     return ScenarioValidationResult(label=label, verdict="skipped", reason_codes=[], adjustments=[])
+
+
+def _available_capacity(
+    caps: dict[date, Decimal],
+    proposal_inbound: list[tuple[date, Decimal]],
+    day: date,
+) -> Decimal:
+    """base cap에서 같은 Scenario의 앞선 proposal 입고 점유분을 뺀 가용 Capacity."""
+    occupied = sum(
+        (quantity for arrival, quantity in proposal_inbound if arrival <= day),
+        start=Decimal(0),
+    )
+    return max(Decimal(0), caps[day] - occupied)
 
 
 def _append_unique(codes: list[LogisticsReasonCode], code: LogisticsReasonCode) -> None:

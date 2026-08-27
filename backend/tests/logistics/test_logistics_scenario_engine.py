@@ -82,6 +82,61 @@ def test_scenario_over_capacity_suggests_quantity(
     assert adjustment.suggested_arrival_date is None
 
 
+def test_split_inbound_accumulates_within_scenario_only(
+    complete_logistics_snapshot, logistics_purchase_payload
+):
+    """같은 Scenario의 앞선 split 입고량은 이후 split 가용 Capacity에서 누적 차감된다.
+
+    used 6000 / guaranteed 8000 → base cap 2000.
+    split1 1500(도착 8/23) 통과 후 8/24 가용은 500뿐이므로 split2 1500은 초과다 —
+    두 split을 base cap과 독립 비교해 둘 다 통과시키면 안 된다.
+    서로 다른 Scenario는 대안 관계라 누적하지 않는다.
+    """
+    snapshot = complete_logistics_snapshot.model_copy(update={"used_capacity_kg": Decimal(6000)})
+    base = logistics_purchase_payload["scenarios"][0]
+    split_scenario = {
+        **base,
+        "label": "기본",
+        "total_qty_kg": 3000,
+        "total_amount_krw": 3000 * 1650,
+        "split_plan": [
+            {"seq": 1, "date": "2026-08-21", "qty_kg": 1500},
+            {"seq": 2, "date": "2026-08-22", "qty_kg": 1500},
+        ],
+        "sourcing_plan": [
+            {"market": "가락", "grade": "상", "qty_kg": 3000, "grade_unit_price": 1650}
+        ],
+    }
+    sibling_scenario = {
+        **base,
+        "label": "보수",
+        "total_qty_kg": 2000,
+        "total_amount_krw": 2000 * 1650,
+        "split_plan": [{"seq": 1, "date": "2026-08-21", "qty_kg": 2000}],
+        "sourcing_plan": [
+            {"market": "가락", "grade": "상", "qty_kg": 2000, "grade_unit_price": 1650}
+        ],
+    }
+    logistics_purchase_payload["scenarios"] = [split_scenario, sibling_scenario]
+    request = PurchaseAgentOutput.model_validate(logistics_purchase_payload)
+
+    results = validate_purchase_scenarios(request, snapshot)
+
+    split_result = next(result for result in results if result.label == "기본")
+    assert split_result.verdict == "conditional"
+    assert split_result.reason_codes == ["CAPACITY_EXCEEDED"]
+    adjustment = split_result.adjustments[0]
+    assert adjustment.axis == "quantity"
+    assert adjustment.split_date == date(2026, 8, 22)
+    # 8/24 가용 = base 2000 − split1 누적 1500 = 500. 독립 비교였다면 조정 없이 ok였다.
+    assert adjustment.suggested_qty_kg == Decimal(500)
+
+    # 다른 Scenario에는 앞 Scenario의 입고가 누적되지 않는다 — 2000 그대로 가능.
+    sibling_result = next(result for result in results if result.label == "보수")
+    assert sibling_result.verdict == "ok"
+    assert sibling_result.adjustments == []
+
+
 def test_scenario_blocked_arrival_suggests_timing(
     complete_logistics_snapshot, logistics_purchase_payload
 ):

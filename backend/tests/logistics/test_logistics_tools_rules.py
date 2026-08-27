@@ -459,6 +459,29 @@ def test_h1_overlay_stays_future_and_does_not_change_on_hand(
     assert len(original_lots) == 1
 
 
+def test_future_occupancy_same_day_outbound_releases_next_day(complete_logistics_snapshot):
+    """H1 미래 점유도 같은 정책 — D일 출고는 D일 공간을 열지 않고 D+1부터 해제."""
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "confirmed_outbound_schedule": [
+                ScheduledQuantity(date=ARRIVAL, quantity_kg=Decimal(500), item="배추")
+            ]
+        }
+    )
+    schedule = [
+        ScheduledQuantity(date=ARRIVAL, quantity_kg=Decimal(4500)),
+        ScheduledQuantity(date=date(2026, 8, 24), quantity_kg=Decimal(500)),
+    ]
+
+    occupancy = calculate_future_occupancy_by_date(snapshot, schedule)
+
+    assert occupancy is not None
+    # 8/23: used 1000 + inbound 4500 — 당일 출고 500은 미해제 (해제됐다면 5000).
+    assert occupancy[ARRIVAL] == Decimal(5500)
+    # 8/24: used 1000 + inbound 5000 − 전일 출고 500 해제 = 5500.
+    assert occupancy[date(2026, 8, 24)] == Decimal(5500)
+
+
 def test_sales_rule_marks_warehouse_over_capacity(complete_logistics_snapshot):
     result = evaluate_sales_rules(
         as_of=AS_OF,
