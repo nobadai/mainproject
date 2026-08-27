@@ -57,6 +57,7 @@ class Port:
             policy_version="v1.3-PROVISIONAL",
             usage_scope="AGENT_MVP_DEMO",
             source_refs={
+                "payroll_date": "POL-PAYROLL-DATE",
                 "purchase_payment_days": "policy:purchase-days",
                 "minimum_cash_balance_krw": "policy:min-cash",
                 "cash_priority_reference": "policy:pressure",
@@ -264,8 +265,9 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     evidence = {item.claim: item for item in reply.evidences}
     assert evidence["available_cash"].source == "finance"
     assert evidence["payment_pressure"].source == "tool_calc"
-    assert evidence["payroll_payment_day"].source == "persona"
+    assert evidence["payroll_payment_day"].source == "finance"
     assert evidence["payroll_payment_day"].evidence_grade == "SIM_FIXED"
+    assert evidence["payroll_payment_day"].ref_ids == ("POL-PAYROLL-DATE",)
     assert metadata.llm_fallback_used is False
 
 
@@ -366,19 +368,35 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
         "SCENARIO_VALIDATION",
         {
             "scenarios": [
-                {
-                    "scenario_id": "EARLY",
-                    "total_amount_krw": 1000,
-                    "payment_schedule": [
-                        {"payment_date": "2025-01-02", "amount_krw": 1000}
-                    ],
-                },
-                {
-                    "scenario_id": "LATE",
-                    "total_amount_krw": 1000,
-                    "payment_schedule": [
-                        {"payment_date": "2025-01-06", "amount_krw": 1000}
-                    ],
+                    {
+                        "scenario_id": "EARLY",
+                        "total_qty_kg": 1,
+                        "total_amount_krw": 1000,
+                        "max_price": 1000,
+                        "split_plan": [{"seq": 1, "date": "2025-01-01", "qty_kg": 1}],
+                        "payment_schedule": [
+                            {
+                                "seq": 1, "purchase_date": "2025-01-01",
+                                "payment_date": "2025-01-02", "qty_kg": 1,
+                                "amount_krw": 1000, "amount_max_krw": 1000,
+                                "basis": "as_of_unit_price",
+                            }
+                        ],
+                    },
+                    {
+                        "scenario_id": "LATE",
+                        "total_qty_kg": 1,
+                        "total_amount_krw": 1000,
+                        "max_price": 1000,
+                        "split_plan": [{"seq": 1, "date": "2025-01-05", "qty_kg": 1}],
+                        "payment_schedule": [
+                            {
+                                "seq": 1, "purchase_date": "2025-01-05",
+                                "payment_date": "2025-01-06", "qty_kg": 1,
+                                "amount_krw": 1000, "amount_max_krw": 1000,
+                                "basis": "as_of_unit_price",
+                            }
+                        ],
                 },
             ]
         },

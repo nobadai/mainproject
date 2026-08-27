@@ -156,7 +156,7 @@ class FinancePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     purchase_payment_days: int | None = Field(default=None, ge=0)
-    payroll_date: int = Field(default=10, ge=1, le=31)
+    payroll_date: int = Field(ge=1, le=31)
     margin_defense_floor_rate: Decimal | None = Field(default=None, ge=0, le=1)
     monthly_labor_cost_krw: Decimal | None = Field(default=None, ge=0)
     minimum_cash_balance_krw: Decimal = Field(ge=0)

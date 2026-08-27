@@ -92,7 +92,8 @@ def test_get_active_finance_policy_parses_typed_values_and_metadata():
     policy = _load(_rows())
 
     assert policy.purchase_payment_days == 7
-    assert policy.payroll_date == 10
+    assert policy.payroll_date == 25
+    assert policy.source_refs["payroll_date"] == "policy:payroll_date"
     assert policy.margin_defense_floor_rate is None
     assert policy.monthly_labor_cost_krw == Decimal(12941280)
     assert policy.minimum_cash_balance_krw == Decimal(12941280)

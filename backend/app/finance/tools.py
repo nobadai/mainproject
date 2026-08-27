@@ -104,6 +104,7 @@ def build_payroll_schedule(
                     amount_krw=policy.monthly_labor_cost_krw,
                     direction="OUTFLOW",
                     ref_id=f"PAYROLL:{payroll_day.isoformat()}",
+                    source_ref=policy.source_refs.get("payroll_date"),
                 )
             )
         if month == 12:
@@ -111,6 +112,41 @@ def build_payroll_schedule(
         else:
             month += 1
     return tuple(events)
+
+
+def derive_critical_payment_dates(
+    *,
+    current_cash_krw: Decimal,
+    cash_events: tuple[CashEvent, ...] | list[CashEvent],
+    minimum_cash_balance_krw: Decimal,
+) -> tuple[date, ...]:
+    """Return risky payment dates and all tied maximum confirmed-outflow dates."""
+    by_date: dict[date, list[CashEvent]] = defaultdict(list)
+    for event in cash_events:
+        by_date[event.event_date].append(event)
+
+    balance = current_cash_krw
+    violation_dates: set[date] = set()
+    daily_outflows: dict[date, Decimal] = {}
+    for event_date in sorted(by_date):
+        daily = by_date[event_date]
+        inflow = sum(
+            (event.amount_krw for event in daily if event.direction == "INFLOW"), Decimal(0)
+        )
+        outflow = sum(
+            (event.amount_krw for event in daily if event.direction == "OUTFLOW"), Decimal(0)
+        )
+        balance += inflow - outflow
+        if outflow > 0:
+            daily_outflows[event_date] = outflow
+            if balance < minimum_cash_balance_krw:
+                violation_dates.add(event_date)
+
+    max_dates: set[date] = set()
+    if daily_outflows:
+        maximum = max(daily_outflows.values())
+        max_dates = {day for day, amount in daily_outflows.items() if amount == maximum}
+    return tuple(sorted(violation_dates | max_dates))
 
 
 def project_cashflow(

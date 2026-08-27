@@ -19,12 +19,14 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
+from app.finance.rules import classify_base_stress
 from app.finance.run_repository import save_finance_execution
 from app.finance.schemas import CashEvent, FinancePolicy
 from app.finance.tools import (
     build_payroll_schedule,
     calculate_finance_cap,
     derive_cash_priority,
+    derive_critical_payment_dates,
     project_cashflow,
 )
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
@@ -53,6 +55,17 @@ class ToolAction:
     arguments: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     finalize: bool = False
+
+
+@dataclass(frozen=True)
+class ScenarioPayment:
+    seq: int
+    purchase_date: date
+    payment_date: date
+    qty_kg: Decimal | None
+    amount_krw: Decimal
+    amount_max_krw: Decimal
+    basis: str
 
 
 class FinancePlanner(Protocol):
@@ -303,9 +316,7 @@ class FinanceToolRegistry:
         payroll_amount = self.data_port.load_payroll(ctx.as_of, horizon)
         if payroll_amount is None:
             raise FinanceDataNotReady("payroll_schedule")
-        policy = policy.model_copy(
-            update={"payroll_date": 10, "monthly_labor_cost_krw": payroll_amount}
-        )
+        policy = policy.model_copy(update={"monthly_labor_cost_krw": payroll_amount})
         events = [
             *self.data_port.load_obligations(ctx.as_of, horizon),
             *self.data_port.load_receivables(ctx.as_of, horizon),
@@ -327,7 +338,7 @@ class FinanceToolRegistry:
         return {
             "available_cash": str(position["current_cash_krw"]),
             "minimum_cash_balance_krw": str(policy.minimum_cash_balance_krw),
-            "payroll_payment_day": 10,
+            "payroll_payment_day": policy.payroll_date,
             "purchase_payment_days": policy.purchase_payment_days,
             "margin_defense_floor_rate": (
                 str(policy.margin_defense_floor_rate)
@@ -351,12 +362,12 @@ class FinanceToolRegistry:
                 ),
                 Evidence(
                     claim="payroll_payment_day",
-                    source="persona",
-                    ref_ids=("D-FIN-01",),
-                    value=10,
+                    source="finance",
+                    ref_ids=(policy.source_refs["payroll_date"],),
+                    value=policy.payroll_date,
                     unit="day_of_month",
                     evidence_grade="SIM_FIXED",
-                    evidence_detail="Finance v2.2 D-FIN-01 approved policy",
+                    evidence_detail="Finance Policy DB day-of-month value.",
                 ),
                 _evidence(
                     "purchase_payment_days",
@@ -443,9 +454,14 @@ class FinanceToolRegistry:
         pressure = derive_cash_priority(
             projected_cash_min=state.projection.projected_cash_min, policy=policy
         )
-        dates = sorted(
-            {event.event_date.isoformat() for event in events if event.direction == "OUTFLOW"}
-        )
+        dates = [
+            item.isoformat()
+            for item in derive_critical_payment_dates(
+                current_cash_krw=Decimal(self._context(state)[0]["current_cash_krw"]),
+                cash_events=events,
+                minimum_cash_balance_krw=policy.minimum_cash_balance_krw,
+            )
+        ]
         ratio = state.projection.projected_cash_min / policy.minimum_cash_balance_krw
         return {
             "payment_pressure": pressure,
@@ -505,12 +521,23 @@ class FinanceToolRegistry:
             horizon_end=horizon,
             cash_events=events,
         )
-        scenario_events = [*events, *_schedule_events(payload["scenario_id"], schedule)]
-        scenario_projection = project_cashflow(
+        base_scenario_projection = project_cashflow(
             as_of=state.request.context.as_of,
             current_cash_krw=Decimal(position["current_cash_krw"]),
             horizon_end=horizon,
-            cash_events=scenario_events,
+            cash_events=[
+                *events,
+                *_schedule_events(payload["scenario_id"], schedule, stress=False),
+            ],
+        )
+        stress_scenario_projection = project_cashflow(
+            as_of=state.request.context.as_of,
+            current_cash_krw=Decimal(position["current_cash_krw"]),
+            horizon_end=horizon,
+            cash_events=[
+                *events,
+                *_schedule_events(payload["scenario_id"], schedule, stress=True),
+            ],
         )
         cap = _calculate_schedule_cap(
             base_projection=base_projection,
@@ -519,24 +546,31 @@ class FinanceToolRegistry:
             minimum_cash=policy.minimum_cash_balance_krw,
         )
         state.projection = base_projection
-        state.scenario_projection = scenario_projection
+        state.scenario_projection = base_scenario_projection
         state.scenario_schedule = schedule
         state.base_state_violated = (
             base_projection.projected_cash_min < policy.minimum_cash_balance_krw
         )
+        base_safe = base_scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
+        stress_safe = (
+            stress_scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
+        )
+        scenario_verdict = classify_base_stress(base_safe=base_safe, stress_safe=stress_safe)
         if state.base_state_violated:
             cap = Decimal(0)
             verdict = "reject"
             rule_id = "FIN-BASE-MIN-CASH"
             reason = "Base Finance minimum-cash rule failed."
-        else:
-            verdict = (
-                "ok"
-                if scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
-                else "reject"
+        elif scenario_verdict == "ok":
+            verdict, rule_id, reason = "ok", "FIN-BASE-STRESS", "BASE and STRESS passed."
+        elif scenario_verdict == "conditional":
+            verdict, rule_id, reason = (
+                "conditional",
+                "FIN-BASE-STRESS",
+                "BASE passed and STRESS failed.",
             )
-            rule_id = "FIN-CAP"
-            reason = "Finance cap rule passed." if verdict == "ok" else "Finance cap rule failed."
+        else:
+            verdict, rule_id, reason = "reject", "FIN-BASE-STRESS", "BASE failed."
         state.scenario_cap = cap
         scenario_ref = str(payload["scenario_id"])
         return {
@@ -544,10 +578,22 @@ class FinanceToolRegistry:
             "verdict": verdict,
             "adjustability": "NOT_NEEDED" if verdict == "ok" else "NOT_ADJUSTABLE",
             "finance_cap_amount_krw": str(cap),
-            "scenario_projected_cash_min": str(scenario_projection.projected_cash_min),
-            "critical_cash_date": scenario_projection.projected_cash_min_date.isoformat(),
+            "scenario_projected_cash_min": str(base_scenario_projection.projected_cash_min),
+            "stress_projected_cash_min": str(stress_scenario_projection.projected_cash_min),
+            "critical_cash_date": base_scenario_projection.projected_cash_min_date.isoformat(),
             "payment_schedule": [
-                {"payment_date": item[0].isoformat(), "amount_krw": str(item[1])}
+                ({
+                    "seq": item.seq,
+                    "purchase_date": item.purchase_date.isoformat(),
+                    "payment_date": item.payment_date.isoformat(),
+                    "qty_kg": str(item.qty_kg) if item.qty_kg is not None else None,
+                    "amount_krw": str(item.amount_krw),
+                    "amount_max_krw": str(item.amount_max_krw),
+                    "basis": item.basis,
+                } if item.qty_kg is not None else {
+                    "payment_date": item.payment_date.isoformat(),
+                    "amount_krw": str(item.amount_krw),
+                })
                 for item in schedule
             ],
             "reason": reason,
@@ -562,9 +608,15 @@ class FinanceToolRegistry:
                 ),
                 _evidence(
                     "scenario_projected_cash_min",
-                    scenario_projection.projected_cash_min,
+                    base_scenario_projection.projected_cash_min,
                     "krw",
                     _branch_ref("cashflow", state),
+                ),
+                _evidence(
+                    "stress_projected_cash_min",
+                    stress_scenario_projection.projected_cash_min,
+                    "krw",
+                    _branch_ref("stress-cashflow", state),
                 ),
                 _evidence("verdict", verdict == "ok", "boolean", _branch_ref(rule_id, state)),
                 _evidence(
@@ -636,7 +688,7 @@ class FinanceAgentState:
     projection: Any = None
     scenario_projection: Any = None
     scenario_cap: Decimal | None = None
-    scenario_schedule: tuple[tuple[date, Decimal], ...] = ()
+    scenario_schedule: tuple[ScenarioPayment, ...] = ()
     base_state_violated: bool = False
 
 
@@ -933,29 +985,21 @@ class FinanceAgentController:
                 if "conditional" in verdicts
                 else "ok"
             )
-            verdicts_evidence = Evidence(
-                claim="verdicts",
-                source="tool_calc",
-                ref_ids=tuple(str(result["scenario_id"]) for result in results),
-                value=float(len(results)),
-                unit="scenario_count",
-                evidence_grade="OFFICIAL",
-                evidence_detail="Branch-isolated deterministic Finance validation.",
-            )
+            indexed_evidence = _indexed_verdict_evidence(results)
             if "scenarios" in request.payload:
                 adjustments = [
                     _adjustment_from_dict(adjustment)
                     for result in results
                     for adjustment in result["suggested_adjustments"]
                 ]
-                return {"verdicts": results}, [verdicts_evidence], status, adjustments
+                return {"verdicts": results}, indexed_evidence, status, adjustments
             result = results[0]
             branch_evidence = [_evidence_from_dict(item) for item in result.pop("evidences")]
             branch_adjustments = result.pop("suggested_adjustments")
             adjustments = [_adjustment_from_dict(item) for item in branch_adjustments]
             return (
                 {"verdicts": [dict(result)], **result},
-                [verdicts_evidence, *branch_evidence],
+                [*indexed_evidence, *branch_evidence],
                 status,
                 adjustments,
             )
@@ -1130,7 +1174,7 @@ def _scenario_schedule(
     as_of: date,
     horizon: date,
     default_payment_days: int | None,
-) -> tuple[tuple[date, Decimal], ...]:
+) -> tuple[ScenarioPayment, ...]:
     amount = Decimal(str(scenario["total_amount_krw"]))
     if amount <= 0:
         raise ValueError("total_amount_krw must be positive")
@@ -1141,23 +1185,71 @@ def _scenario_schedule(
         payment_date = as_of + timedelta(days=default_payment_days)
         if not as_of < payment_date <= horizon:
             raise FinanceDataNotReady("default_purchase_payment_date")
-        return ((payment_date, amount),)
+        return (
+            ScenarioPayment(
+                seq=1,
+                purchase_date=as_of,
+                payment_date=payment_date,
+                qty_kg=None,
+                amount_krw=amount,
+                amount_max_krw=amount,
+                basis="non_split_policy_reconstruction",
+            ),
+        )
     if not isinstance(raw_schedule, list) or not raw_schedule:
         raise ValueError("payment_schedule must be a non-empty list")
-    schedule: list[tuple[date, Decimal]] = []
-    for row in raw_schedule:
-        payment_date = row["payment_date"]
-        if isinstance(payment_date, str):
-            payment_date = date.fromisoformat(payment_date)
+    split_plan = scenario.get("split_plan")
+    if not isinstance(split_plan, list) or len(split_plan) != len(raw_schedule):
+        raise ValueError("payment_schedule must correspond one-to-one with split_plan")
+    total_qty = Decimal(str(scenario["total_qty_kg"]))
+    max_price = Decimal(str(scenario["max_price"]))
+    authoritative_h1 = bool(
+        scenario.get("h1_authoritative") or scenario.get("authoritative_h1_payment_data")
+    )
+    schedule: list[ScenarioPayment] = []
+    for index, (row, split) in enumerate(zip(raw_schedule, split_plan, strict=True), start=1):
+        required = {
+            "seq", "purchase_date", "payment_date", "qty_kg", "amount_krw",
+            "amount_max_krw", "basis",
+        }
+        if not required <= row.keys():
+            raise ValueError("payment_schedule row is missing required Finance fields")
+        purchase_date = date.fromisoformat(str(row["purchase_date"]))
+        payment_date = date.fromisoformat(str(row["payment_date"]))
         payment_amount = Decimal(str(row["amount_krw"]))
+        max_amount = Decimal(str(row["amount_max_krw"]))
+        qty = Decimal(str(row["qty_kg"]))
+        basis = str(row["basis"]).strip()
         if not isinstance(payment_date, date) or not as_of < payment_date <= horizon:
             raise ValueError("payment_date must be inside the Finance projection horizon")
-        if payment_amount <= 0:
-            raise ValueError("payment_schedule amount must be positive")
-        schedule.append((payment_date, payment_amount))
-    if sum((item[1] for item in schedule), Decimal(0)) != amount:
+        if int(row["seq"]) != index or int(split["seq"]) != index:
+            raise ValueError("payment_schedule and split_plan seq must align")
+        if purchase_date != date.fromisoformat(str(split["date"])):
+            raise ValueError("payment_schedule purchase_date must equal split_plan date")
+        split_qty = Decimal(str(split.get("qty_kg", split.get("quantity_kg"))))
+        if qty != split_qty:
+            raise ValueError("payment_schedule qty_kg must equal split_plan qty_kg")
+        if payment_amount <= 0 or max_amount <= 0 or qty <= 0:
+            raise ValueError("payment_schedule amounts and qty must be positive")
+        if not basis:
+            raise ValueError("payment_schedule basis must be non-empty")
+        if not authoritative_h1:
+            if default_payment_days is None:
+                raise FinanceDataNotReady("purchase_payment_days")
+            if payment_date != purchase_date + timedelta(days=default_payment_days):
+                raise ValueError("payment_date must equal purchase_date plus policy days before H1")
+            if max_amount != qty * max_price:
+                raise ValueError("amount_max_krw must equal qty_kg times max_price")
+        schedule.append(
+            ScenarioPayment(
+                index, purchase_date, payment_date, qty, payment_amount, max_amount, basis
+            )
+        )
+    if sum((item.amount_krw for item in schedule), Decimal(0)) != amount:
         raise ValueError("payment_schedule amount sum must equal total_amount_krw")
-    return tuple(sorted(schedule))
+    if sum((item.qty_kg or Decimal(0) for item in schedule), Decimal(0)) != total_qty:
+        raise ValueError("payment_schedule qty sum must equal total_qty_kg")
+    return tuple(schedule)
 
 
 def _validate_finance_payload(request: AgentRequest) -> None:
@@ -1276,25 +1368,28 @@ def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
 
 
 def _schedule_events(
-    scenario_id: object, schedule: tuple[tuple[date, Decimal], ...]
+    scenario_id: object, schedule: tuple[ScenarioPayment, ...], *, stress: bool
 ) -> tuple[CashEvent, ...]:
     return tuple(
         CashEvent(
-            event_date=payment_date,
+            event_date=payment.payment_date,
             event_type="EXTRA_PURCHASE",
-            amount_krw=amount,
+            amount_krw=payment.amount_max_krw if stress else payment.amount_krw,
             direction="OUTFLOW",
-            ref_id=f"SCENARIO:{scenario_id}:{index}:{payment_date.isoformat()}",
+            ref_id=(
+                f"SCENARIO:{scenario_id}:{'STRESS' if stress else 'BASE'}:"
+                f"{index}:{payment.payment_date.isoformat()}"
+            ),
             source_ref=str(scenario_id),
         )
-        for index, (payment_date, amount) in enumerate(schedule, start=1)
+        for index, payment in enumerate(schedule, start=1)
     )
 
 
 def _calculate_schedule_cap(
     *,
     base_projection: Any,
-    schedule: tuple[tuple[date, Decimal], ...],
+    schedule: tuple[ScenarioPayment, ...],
     total_amount: Decimal,
     minimum_cash: Decimal,
 ) -> Decimal:
@@ -1302,13 +1397,15 @@ def _calculate_schedule_cap(
         point.projection_date: point.cash_balance_krw
         for point in base_projection.projected_cash_by_date
     }
-    dates = sorted({*balances, *(item[0] for item in schedule)})
+    dates = sorted({*balances, *(item.payment_date for item in schedule)})
     current_balance = balances[base_projection.as_of]
     paid = Decimal(0)
     bounds: list[Decimal] = []
     schedule_by_date: dict[date, Decimal] = {}
-    for payment_date, amount in schedule:
-        schedule_by_date[payment_date] = schedule_by_date.get(payment_date, Decimal(0)) + amount
+    for payment in schedule:
+        schedule_by_date[payment.payment_date] = (
+            schedule_by_date.get(payment.payment_date, Decimal(0)) + payment.amount_krw
+        )
     for current_date in dates:
         if current_date in balances:
             current_balance = balances[current_date]
@@ -1343,6 +1440,36 @@ def _evidence_from_dict(value: dict[str, Any]) -> Evidence:
         evidence_grade=value["evidence_grade"],
         evidence_detail=value["evidence_detail"],
     )
+
+
+def _indexed_verdict_evidence(results: list[dict[str, Any]]) -> list[Evidence]:
+    """Rebind actual numeric branch claims to Envelope v0.4 index paths."""
+    indexed: list[Evidence] = []
+    for index, result in enumerate(results):
+        raw_evidence = result.get("evidences", [])
+        by_claim = {
+            item.get("claim"): item
+            for item in raw_evidence
+            if isinstance(item, dict) and isinstance(item.get("claim"), str)
+        }
+        for claim, value in result.items():
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            source = by_claim.get(claim)
+            if source is None:
+                continue
+            indexed.append(
+                Evidence(
+                    claim=f"verdicts[{index}].{claim}",
+                    source=source["source"],
+                    ref_ids=tuple(source["ref_ids"]),
+                    value=float(value),
+                    unit=source["unit"],
+                    evidence_grade=source["evidence_grade"],
+                    evidence_detail=source.get("evidence_detail"),
+                )
+            )
+    return indexed
 
 
 def _adjustment_from_dict(value: dict[str, Any]) -> SuggestedAdjustment:
