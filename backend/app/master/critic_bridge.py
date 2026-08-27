@@ -112,8 +112,7 @@ def fold(verdict: CriticVerdictOut) -> tuple[list[str], list[str], list[str]]:
       *"56검사를 통과했다"* 로 읽힌다. 실제로 몇 개가 돌았는지가 같이 보여야 한다.
     """
     findings = [
-        f"CRITIC/{f.layer}/{f.check_id}: {f.detail}"
-        + (f" (부서 {f.dept})" if f.dept else "")
+        f"CRITIC/{f.layer}/{f.check_id}: {f.detail}" + (f" (부서 {f.dept})" if f.dept else "")
         for f in verdict.findings
     ]
     concerns = [f"CRITIC/{c.code}: {getattr(c, 'detail', '') or c.code}" for c in verdict.concerns]

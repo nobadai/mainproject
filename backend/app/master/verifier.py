@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol
 
+from pydantic import ValidationError
+
 from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 from app.critic.service import run_critic_procurement
 from app.master.critic_bridge import CriticSkipped, build_request, fold
@@ -256,6 +258,15 @@ class MasterVerifier:
             verdict = self.critic(request)
         except CriticSkipped as exc:
             skipped.append(f"Critic L0~L5 (56검사): {exc}")
+            return
+        except ValidationError as exc:
+            # ★ 입력이 Critic 계약에 안 맞는 것은 **검증 Tool 의 고장이 아니다.**
+            #   매입이 허용 목록 밖 어휘를 내면 여기서 걸린다(예: strategy_type).
+            #   어느 필드인지 적어 `skipped` 로 남긴다 — 통과로 치지 않는다.
+            fields = " · ".join(
+                ".".join(str(part) for part in err["loc"]) for err in exc.errors()[:5]
+            )
+            skipped.append(f"Critic L0~L5 (56검사): 입력이 Critic 계약에 맞지 않는다 — {fields}")
             return
         except Exception as exc:  # noqa: BLE001 — 검증이 죽어도 Flow 는 살아야 한다
             concerns.append(f"CRITIC: 검증 Tool 이 돌지 못했다 — {type(exc).__name__}: {exc}")
