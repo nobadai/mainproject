@@ -252,8 +252,7 @@ def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
             raise ValueError(f"Finance policy usage_scope mismatch: {key}")
 
         kind = row.get("value_kind")
-        numeric_keys = _NUMERIC_POLICY_KEYS | _OPTIONAL_NUMERIC_POLICY_KEYS
-        expected_kind = "NUMERIC" if key in numeric_keys else "TEXT"
+        expected_kind = "NUMERIC" if key in _NUMERIC_POLICY_KEYS else "TEXT"
         if kind != expected_kind:
             raise ValueError(f"Invalid value_kind for Finance policy {key}: {kind}")
         selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
