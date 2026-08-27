@@ -25,6 +25,7 @@ flow.py — 매입 의사결정 Flow (정의서 v2.2 §3.4)
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -35,6 +36,9 @@ from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationResult
 from app.orchestrator.contracts_core import EndCode
+
+_HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
+"""ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
 
 ADVISORS: tuple[AgentName, ...] = ("finance", "inventory")
 """1차 조언자. 영업은 구성에서 빠졌고 판매는 2차 MVP 다 (정의서 §2.1)."""
@@ -49,11 +53,16 @@ class VerifierPort(Protocol):
 
     def __call__(
         self,
-        scenarios: Sequence[Mapping[str, Any]],
+        proposal: Mapping[str, Any],
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
     ) -> VerificationResult: ...
+
+    """★ 시나리오 배열이 아니라 **제안 전체**를 받는다.
+
+    `allowed_axes` · `situation` · `confidence` 가 `scenarios[]` 안이 아니라 제안
+    최상위에 있어서다 (2026-08-27 매입 스키마). 배열만 넘기면 그 판정을 못 본다."""
 
 
 @dataclass(frozen=True)
@@ -142,6 +151,7 @@ class ProcurementFlow:
 
         attempts = 0
         scenarios: tuple[Mapping[str, Any], ...] = ()
+        proposal: Mapping[str, Any] = {}
         verdicts: dict[AgentName, Mapping[str, Any]] = {}
         verification = VerificationResult()
 
@@ -150,6 +160,7 @@ class ProcurementFlow:
             purchase = self.runner.call(
                 "purchase", "GENERATE_SCENARIOS", self._purchase_input(constraints)
             )
+            proposal = dict(purchase.payload)
             scenarios = _scenarios_of(purchase)
 
             if not purchase.contributes_to_band:
@@ -170,7 +181,7 @@ class ProcurementFlow:
                 )
 
             verdicts = self._validate(scenarios)
-            verification = self._verify(scenarios, constraints, verdicts)
+            verification = self._verify(proposal, constraints, verdicts)
 
             if self._acceptable(scenarios, verdicts, verification.findings):
                 break
@@ -235,10 +246,17 @@ class ProcurementFlow:
 
         오염된 입력으로 시나리오를 만들면 **백테스트 손익만 좋아진다.**
         싣지 않으면 매입이 `RUNTIME_NOT_READY` 를 내고, 그 사실이 이력에 남는다.
+
+        ★ **타임존이 없으면 싣지 않는다** (2026-08-27 매입 요청 반영).
+          앞 10자만 비교하므로 오프셋이 없으면 `2026-09-04T23:00` 이 KST 로 09-05 인지
+          UTC 로 09-04 인지 갈리지 않는다 — **이 검사 자체가 성립하지 않는다.**
+          매입도 수신 시 거부하지만, 여기서 막으면 매입 호출 한 번을 아낀다.
         """
         generated = (self.forecast or {}).get("generated_at")
         if not isinstance(generated, str):
             return True  # 시점 필드가 없으면 판단하지 않는다 — 매입이 수신 시 재검증한다
+        if not _HAS_TIMEZONE.search(generated):
+            return False
         return generated[:10] <= self.runner.context.as_of.isoformat()
 
     def _validate(
@@ -260,7 +278,7 @@ class ProcurementFlow:
 
     def _verify(
         self,
-        scenarios: Sequence[Mapping[str, Any]],
+        proposal: Mapping[str, Any],
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
     ) -> VerificationResult:
@@ -271,7 +289,7 @@ class ProcurementFlow:
         """
         if self.verifier is None:
             return VerificationResult()
-        return self.verifier(scenarios, constraints, verdicts, self.runner.plan)
+        return self.verifier(proposal, constraints, verdicts, self.runner.plan)
 
     # ── 판단 ────────────────────────────────────────────────────
 

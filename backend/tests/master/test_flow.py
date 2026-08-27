@@ -265,11 +265,13 @@ def test_검증_발견이_안_풀리면_E3():
     assert out.findings == ("E-IDENTITY",)
 
 
-def test_검증은_시나리오와_경계와_판정을_함께_받는다():
+def test_검증은_제안전체와_경계와_판정과_계획을_받는다():
     seen = {}
 
-    def verifier(scenarios, constraints, verdicts, plan):
-        seen["scenarios"] = len(scenarios)
+    def verifier(proposal, constraints, verdicts, plan):
+        # ★ 배열이 아니라 제안 전체다 — allowed_axes 가 최상위에 있다
+        seen["scenarios"] = len(proposal["scenarios"])
+        seen["top_level"] = sorted(proposal)
         seen["constraints"] = sorted(constraints)
         seen["verdicts"] = sorted(verdicts)
         seen["plan_steps"] = len(plan.steps)   # ④ M-16 이 읽는 것
@@ -279,6 +281,7 @@ def test_검증은_시나리오와_경계와_판정을_함께_받는다():
     assert seen == {
         "scenarios": 2,
         "constraints": ["finance", "inventory"],
+        "top_level": ["scenarios"],
         "verdicts": ["finance", "inventory"],
         "plan_steps": 5,
     }
@@ -303,7 +306,8 @@ def test_둘_이상이면_단일안이_아니다():
 # §3.2.5 예외 — ML 예측 · 확정주문 · 정책값은 마스터가 싣는다 (매입 파트 요청)
 # ---------------------------------------------------------------------------
 
-FORECAST = {"generated_at": "2026-08-26T06:00:00", "horizon_days": 18, "daily": []}
+# ★ 타임존 필수 — 없으면 as_of 대조가 성립하지 않아 싣지 않는다 (매입 요청)
+FORECAST = {"generated_at": "2026-08-26T06:00:00+09:00", "horizon_days": 18, "daily": []}
 
 
 def _watch_purchase_input(seen: dict):
@@ -347,14 +351,14 @@ def test_안_주면_안_싣는다():
 def test_예측_생성시각이_as_of_이후면_싣지_않는다():
     """look-ahead 는 에러를 내지 않고 손익만 좋아진다 (§1.2-6)."""
     seen: dict = {}
-    future = {**FORECAST, "generated_at": "2026-08-27T06:00:00"}
+    future = {**FORECAST, "generated_at": "2026-08-27T06:00:00+09:00"}
     _flow_with(seen, forecast=future).run()
     assert "forecast" not in seen
 
 
 def test_같은_날_생성은_싣는다():
     seen: dict = {}
-    _flow_with(seen, forecast={**FORECAST, "generated_at": "2026-08-26T23:59:00"}).run()
+    _flow_with(seen, forecast={**FORECAST, "generated_at": "2026-08-26T23:59:00+09:00"}).run()
     assert "forecast" in seen
 
 
@@ -362,4 +366,26 @@ def test_시점_필드가_없으면_판단하지_않는다():
     """매입이 수신 시 재검증한다 — 마스터가 임의로 막지 않는다."""
     seen: dict = {}
     _flow_with(seen, forecast={"horizon_days": 18}).run()
+    assert "forecast" in seen
+
+
+# ---------------------------------------------------------------------------
+# 타임존 요구 (2026-08-27 매입 요청) — 위 세 건은 as_of 대조, 여기는 대조의 성립 조건
+# ---------------------------------------------------------------------------
+
+
+def test_타임존이_없으면_싣지_않는다():
+    """★ 앞 10자만 비교하므로 오프셋이 없으면 **이 검사 자체가 성립하지 않는다.**
+
+    `2026-08-26T23:59` 이 KST 로 08-26 인지 UTC 로 08-27 인지 갈리지 않는다.
+    매입도 수신 시 거부하지만, 여기서 막으면 매입 호출 한 번을 아낀다.
+    """
+    seen: dict = {}
+    _flow_with(seen, forecast={**FORECAST, "generated_at": "2026-08-26T06:00:00"}).run()
+    assert "forecast" not in seen
+
+
+def test_Z_표기도_타임존으로_인정한다():
+    seen: dict = {}
+    _flow_with(seen, forecast={**FORECAST, "generated_at": "2026-08-26T06:00:00Z"}).run()
     assert "forecast" in seen

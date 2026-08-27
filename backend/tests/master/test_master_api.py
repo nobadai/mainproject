@@ -300,7 +300,7 @@ def test_예측을_요청에_실으면_매입에_전달된다(client):
     r = client.post(
         "/master/request",
         json=body(
-            forecast={"generated_at": "2026-08-26T06:00:00", "horizon_days": 18},
+            forecast={"generated_at": "2026-08-26T06:00:00+09:00", "horizon_days": 18},
             confirmed_orders={"total_kg": 5000},
             policy_values={"contract_price_krw": 1900},
         ),

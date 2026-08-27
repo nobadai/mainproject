@@ -29,6 +29,13 @@ from typing import Any
 from app.master.envelope import AgentName
 from app.master.plan import ExecutionPlan
 
+
+def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    raw = proposal.get("scenarios", ())
+    if isinstance(raw, Mapping) or not isinstance(raw, Sequence):
+        return ()
+    return tuple(item for item in raw if isinstance(item, Mapping))
+
 # 매입이 밝힌 판정 필드 (2026-08-27 회신). 없으면 그 검사는 skipped 다.
 _ALLOWED_AXES = "allowed_axes"
 _SPLIT_PLAN = "split_plan"
@@ -80,17 +87,23 @@ class MasterVerifier:
 
     def __call__(
         self,
-        scenarios: Sequence[Mapping[str, Any]],
+        proposal: Mapping[str, Any],
         constraints: Mapping[AgentName, Mapping[str, Any]],
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         plan: ExecutionPlan,
     ) -> VerificationResult:
+        """★ 시나리오 배열이 아니라 **제안 전체**를 받는다 (2026-08-27 매입 스키마 확인).
+
+        `allowed_axes` · `situation` · `confidence` 는 `scenarios[]` 안이 아니라
+        **제안 최상위**에 있다(`PurchaseProposal`). 배열만 받으면 그 판정들을 볼 수 없다.
+        """
+        scenarios = _scenarios_of(proposal)
         findings: list[str] = []
         concerns: list[str] = []
         skipped: list[str] = []
 
         self._check_plan_integrity(plan, scenarios, findings, concerns)
-        self._check_timing_gate(scenarios, findings, skipped)
+        self._check_timing_gate(proposal, scenarios, findings, skipped)
         self._declare_uncovered(skipped)
 
         return VerificationResult(tuple(findings), tuple(concerns), tuple(skipped))
@@ -157,39 +170,46 @@ class MasterVerifier:
 
     def _check_timing_gate(
         self,
+        proposal: Mapping[str, Any],
         scenarios: Sequence[Mapping[str, Any]],
         out: list[str],
         skipped: list[str],
     ) -> None:
         """타이밍 축이 닫혔는데 분할이 있나.
 
-        ★ `strategy_type` 이 아니라 `allowed_axes` 로 잡는다 (2026-08-27 매입 지정).
-          `strategy_type` 은 그 시나리오가 어느 축을 **썼는지**이고, `allowed_axes` 는
-          그날 어느 축이 **열렸는지**다. 게이트는 후자다.
+        ```text
+        "timing" ∉ allowed_axes  AND  ∃ s: len(s.split_plan) > 1
+        ```
 
-        하나의 신뢰도 판정이 개수·허용 축·분할 진입 셋을 동시에 정하므로(§4.2.2),
-        **축이 닫혔는데 분할이 있으면 그 판정이 지켜지지 않은 것이다.**
+        ★ **`allowed_axes` 는 제안 최상위, `split_plan` 은 시나리오 안이다.**
+          초안은 둘 다 시나리오에서 찾았는데 `allowed_axes` 가 거기 없어
+          **검사가 영영 발화하지 않았다.** 그런 검사는 `skipped` 로도 안 잡힌다 —
+          "봤는데 문제없음"으로 읽힌다. (2026-08-27 매입 스키마로 확인)
+
+        ★ `strategy_type` 으로 판정하지 않는다 (매입 지정). 축이 하나뿐인 날은 전 안이
+          같은 축을 쓰므로 `strategy_type == "timing"` 이 안 나와도 분할은 존재할 수 있다.
+
+        ★ `split_plan` 은 **최소 1**이다 (매입 스키마). 분할 미적용이 빈 배열이 아니라
+          1회차 목록이므로 **경계는 `> 1`** 이다.
         """
-        checked = 0
+        axes = proposal.get(_ALLOWED_AXES)
+        if axes is None:
+            if scenarios:
+                skipped.append(f"L-TIMING-GATE: 제안에 {_ALLOWED_AXES} 가 없어 미검사")
+            return
+        if _TIMING in axes:
+            return  # 축이 열려 있으면 분할은 정상이다
+
         for idx, scenario in enumerate(scenarios):
-            axes = scenario.get(_ALLOWED_AXES)
             split = scenario.get(_SPLIT_PLAN)
-            if axes is None or split is None:
+            if not isinstance(split, Sequence) or isinstance(split, (str, bytes)):
+                skipped.append(f"L-TIMING-GATE: scenarios[{idx}] 에 {_SPLIT_PLAN} 이 없어 미검사")
                 continue
-            checked += 1
-            if _TIMING in axes:
-                continue
-            rounds = len(split) if isinstance(split, Sequence) else 0
-            if rounds > 1:
+            if len(split) > 1:
                 out.append(
                     f"L-TIMING-GATE: scenarios[{idx}] 는 timing 축이 닫혔는데 "
-                    f"분할 {rounds} 회차다"
+                    f"분할 {len(split)} 회차다 (allowed_axes={list(axes)})"
                 )
-
-        if scenarios and checked == 0:
-            skipped.append(
-                f"L-TIMING-GATE: 시나리오에 {_ALLOWED_AXES}·{_SPLIT_PLAN} 이 없어 미검사"
-            )
 
     # ── 커버리지 정직성 (§3.7.6) ────────────────────────────────
 
