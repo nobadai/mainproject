@@ -72,6 +72,7 @@ def run_procurement(
     outcome = ProcurementFlow(
         runner,
         verifier=verifier,
+        item=request.item,
         forecast=request.forecast,
         confirmed_orders=request.confirmed_orders,
         policy_values=request.policy_values,

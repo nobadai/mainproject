@@ -274,7 +274,7 @@ def test_검증은_제안전체와_경계와_판정과_계획을_받는다():
         seen["top_level"] = sorted(proposal)
         seen["constraints"] = sorted(constraints)
         seen["verdicts"] = sorted(verdicts)
-        seen["plan_steps"] = len(plan.steps)   # ④ M-16 이 읽는 것
+        seen["plan_steps"] = len(plan.steps)  # ④ M-16 이 읽는 것
         return VerificationResult()
 
     happy(verifier=verifier).run()
@@ -389,3 +389,97 @@ def test_Z_표기도_타임존으로_인정한다():
     seen: dict = {}
     _flow_with(seen, forecast={**FORECAST, "generated_at": "2026-08-26T06:00:00Z"}).run()
     assert "forecast" in seen
+
+
+# ---------------------------------------------------------------------------
+# 품목 축 — ML 4품목 봉투 분해 (2026-08-27 결정 ⓑ)
+#
+# ML 은 하루 한 번 4품목을 한 봉투로 보내고 매입은 품목 하나씩 돈다.
+# 그 사이를 마스터가 잇는다. **값을 만들지 않고 이름만 편다.**
+# ---------------------------------------------------------------------------
+
+_ENVELOPE = {
+    "generated_at": "2026-08-26T06:00:00+09:00",
+    "model_version": "lgbm-v1.2.0",
+    "horizon_days": 18,
+    "unit": "원/kg",
+    "price_basis": "경락가",
+    "size_class": "대표규격",
+    "grade": "상",
+    "items": {
+        "배추": {"daily": [{"date": "2026-08-27", "predicted": 1671}]},
+        "무": {"daily": [{"date": "2026-08-27", "predicted": 900}]},
+    },
+}
+
+
+def test_품목을_주면_매입_Input_에_실린다():
+    """매입 필수 4키 중 하나다 — 없으면 어댑터가 missing_data 로 막는다."""
+    seen: dict = {}
+    _flow_with(seen, item="배추").run()
+    assert seen["item"] == "배추"
+
+
+def test_4품목_봉투에서_그_품목만_꺼낸다():
+    seen: dict = {}
+    _flow_with(seen, item="배추", forecast=_ENVELOPE).run()
+    forecast = seen["forecast"]
+    assert forecast["daily"] == [{"date": "2026-08-27", "predicted": 1671}]
+    assert forecast["item"] == "배추"
+    assert "items" not in forecast  # 남의 품목이 따라 들어가지 않는다
+
+
+def test_봉투_공통필드가_품목_블록으로_내려온다():
+    """`price_basis`·`size_class`·`grade` 가 안 내려오면 매입이 대조할 값이 없다.
+
+    상승률의 분자는 ML, 분모는 시세 실측이다. 시리즈가 어긋나면 **규격 차이를 가격
+    변동으로 읽고 에러도 안 난다** — 매입이 거부하려면 이 셋을 받아야 한다.
+    """
+    seen: dict = {}
+    _flow_with(seen, item="무", forecast=_ENVELOPE).run()
+    forecast = seen["forecast"]
+    assert forecast["price_basis"] == "경락가"
+    assert forecast["size_class"] == "대표규격"
+    assert forecast["grade"] == "상"
+    assert forecast["model_version"] == "lgbm-v1.2.0"
+    assert forecast["horizon_days"] == 18
+
+
+def test_품목_블록이_봉투를_이긴다():
+    envelope = {**_ENVELOPE, "items": {"배추": {"daily": [], "horizon_days": 7}}}
+    seen: dict = {}
+    _flow_with(seen, item="배추", forecast=envelope).run()
+    assert seen["forecast"]["horizon_days"] == 7
+
+
+def test_품목을_모르면_4품목_봉투를_싣지_않는다():
+    """어느 품목인지 모르는 채로 넘기면 매입이 daily 를 못 찾는다.
+
+    싣지 않으면 매입이 `missing_data: ["forecast"]` 를 내고 **그 사실이 이력에 남는다.**
+    """
+    seen: dict = {}
+    _flow_with(seen, forecast=_ENVELOPE).run()
+    assert "forecast" not in seen
+
+
+def test_봉투에_없는_품목이면_싣지_않는다():
+    """빈 dict 를 싣지 않는다 — 못 받은 것과 받았는데 빈 것은 다르다 (§1.2-10)."""
+    seen: dict = {}
+    _flow_with(seen, item="양파", forecast=_ENVELOPE).run()
+    assert "forecast" not in seen
+
+
+def test_평면_봉투는_그대로_넘긴다():
+    """`items` 가 없는 현행 모양 — 품목 축 도입이 기존 경로를 깨지 않는다."""
+    seen: dict = {}
+    _flow_with(seen, item="배추", forecast=FORECAST).run()
+    assert seen["forecast"]["horizon_days"] == 18
+    assert "item" not in seen["forecast"]  # 평면 봉투에는 손대지 않는다
+
+
+def test_품목_분해_전에_as_of_대조가_먼저다():
+    """look-ahead 방어는 품목 축과 무관하게 봉투 층에서 끝난다."""
+    seen: dict = {}
+    future = {**_ENVELOPE, "generated_at": "2026-08-27T06:00:00+09:00"}
+    _flow_with(seen, item="배추", forecast=future).run()
+    assert "forecast" not in seen
