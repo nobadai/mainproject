@@ -9,10 +9,10 @@ import os
 from fastapi import FastAPI
 
 from app.critic.router import router as critic_router
+from app.finance.adapter import finance_port
 from app.finance.router import router as finance_router
+from app.logistics.adapter import logistics_port
 from app.logistics.router import router as logistics_router
-from app.master.adapters.finance import finance_port
-from app.master.adapters.logistics import logistics_port
 from app.master.router import router as master_router
 from app.master.wiring import register as register_agent
 from app.orchestrator.router import router as orchestrator_router
