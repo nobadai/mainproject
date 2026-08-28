@@ -35,6 +35,130 @@ def calculate_expected_arrival_dates(
     )
 
 
+#: 품목을 식별할 수 없는 물리 점유·입고·출고를 담는 버킷 키.
+_UNATTRIBUTED: str | None = None
+
+
+def _replay_aggregate_occupancy(
+    *,
+    start_occupancy: Decimal,
+    inbound: list[ScheduledQuantity],
+    outbound: list[ScheduledQuantity],
+    target_date: date,
+) -> Decimal:
+    """품목 축 없이 총 kg만 날짜순으로 재생한다 (H1 미래 점유 전용).
+
+    출고가 열어주는 공간은 **그 시점에 실제 창고에 있는 물량까지**다. 확정 출고가
+    보유량보다 많은 것은 계산이 무너져야 하는 오류가 아니라 추가 매입이 필요할 수
+    있는 정상 업무 상태이고, 모자란 물량은 음수 점유량이 아니라 별개의 업무 사실이다
+    (상세설계 §4 물리 점유량 정의).
+
+    H1 승인 매입 Schedule에는 품목 축이 없어(`ArrivalScheduleItem`) 품목별 재생을
+    할 수 없으므로 이 경로만 총량 계산을 유지한다. PRE의 `cap_by_date`는
+    `_replay_occupancy_by_item()`을 쓴다.
+
+    날짜 규칙은 기존 정책 그대로다 — 입고는 `<= target_date`로 당일부터 점유하고,
+    출고는 `< target_date`로 당일 공간을 열지 않고 D+1부터 해제한다 (상세설계 §9).
+    """
+    inbound_by_date: dict[date, Decimal] = {}
+    for row in inbound:
+        if row.date <= target_date:
+            inbound_by_date[row.date] = inbound_by_date.get(row.date, Decimal(0)) + row.quantity_kg
+    outbound_by_date: dict[date, Decimal] = {}
+    for row in outbound:
+        if row.date < target_date:
+            released = outbound_by_date.get(row.date, Decimal(0))
+            outbound_by_date[row.date] = released + row.quantity_kg
+
+    occupancy = start_occupancy
+    for day in sorted({*inbound_by_date, *outbound_by_date}):
+        occupancy += inbound_by_date.get(day, Decimal(0))
+        # 같은 날 입고분까지 포함한 실재 물량이 그날 출고가 해제할 수 있는 상한이다.
+        # 못 내보낸 물량을 이후 입고에 떠넘기지 않는다 — 애초에 없던 재고다.
+        occupancy -= min(outbound_by_date.get(day, Decimal(0)), occupancy)
+    return occupancy
+
+
+def _initial_occupancy_by_item(
+    snapshot: InventoryLogisticsSnapshot,
+) -> dict[str | None, Decimal]:
+    """현재 물리 점유를 품목별로 나눈다. 총량 정본은 `used_capacity_kg`다.
+
+    Lot으로 식별되는 만큼만 품목에 귀속시키고, `used_capacity_kg`에 못 미치는
+    차이는 품목 미귀속 점유로 남긴다 — 특정 품목의 출고가 그 몫을 대신 소진했다고
+    보지 않는다. `sum(on_hand_by_lot)`으로 총량 정본을 대체하지 않는다.
+    """
+    buckets: dict[str | None, Decimal] = {}
+    for lot in snapshot.on_hand_by_lot:
+        buckets[lot.item] = buckets.get(lot.item, Decimal(0)) + lot.available_qty_kg
+    identified = sum(buckets.values(), start=Decimal(0))
+    buckets[_UNATTRIBUTED] = max(Decimal(0), snapshot.used_capacity_kg - identified)
+    return buckets
+
+
+def _replay_occupancy_by_item(
+    snapshot: InventoryLogisticsSnapshot,
+    target_date: date,
+) -> Decimal:
+    """품목별 물리 점유를 날짜순으로 재생해 target_date 시점의 창고 점유량을 만든다.
+
+    품목이 명확한 확정 출고는 **그 품목 재고에서만** 공간을 연다 — 다른 품목이나
+    미귀속 점유를 대신 소진했다고 계산하지 않는다. 창고 Capacity는 총 kg만 맞으면
+    되는 숫자가 아니기 때문이다.
+
+    품목을 알 수 없는 출고(`item=None`)만 기존처럼 남은 전체 물량 범위에서 총량으로
+    차감한다. 임의 품목 배분은 하지 않는다 — Partial Output 정책상 이 행이 있어도
+    총량 Capacity는 계속 제공해야 한다.
+
+    품목 불명 출고가 한 번 나오면 **그 날짜부터 품목별 잔량을 확정할 수 없다.**
+    어느 품목에서 나갔느냐에 따라 이후 품목 지정 출고가 실제로 열 수 있는 공간이
+    달라지기 때문이다. 배정을 추정하지 않고, 그 시점부터는 품목 지정 출고를 추가
+    해제 근거로 쓰지 않는다. 보장할 수 없는 공간을 있는 것처럼 열어 주는 쪽보다
+    보수적으로 잡는 쪽이 안전하다.
+
+    Lot 단위 배정은 하지 않는다 (FIFO/FEFO 없음). 날짜 규칙은 기존 정책 그대로다.
+    """
+    assert snapshot.confirmed_inbound_schedule is not None
+    assert snapshot.confirmed_outbound_schedule is not None
+
+    inbound_on: dict[date, list[ScheduledQuantity]] = {}
+    for row in snapshot.confirmed_inbound_schedule:
+        if row.date <= target_date:
+            inbound_on.setdefault(row.date, []).append(row)
+    outbound_on: dict[date, list[ScheduledQuantity]] = {}
+    for row in snapshot.confirmed_outbound_schedule:
+        if row.date < target_date:
+            outbound_on.setdefault(row.date, []).append(row)
+
+    buckets = _initial_occupancy_by_item(snapshot)
+    #: 품목별 잔량을 더 이상 확정할 수 없어지는 날짜. 같은 날에 섞여 있으면 그날부터다.
+    unresolved_from = min(
+        (day for day, rows in outbound_on.items() if any(row.item is None for row in rows)),
+        default=None,
+    )
+    #: 품목 불명 출고가 총량에서 걷어낸 누계. 어느 품목에도 귀속시키지 않는다.
+    unattributed_release = Decimal(0)
+    for day in sorted({*inbound_on, *outbound_on}):
+        for row in inbound_on.get(day, []):
+            buckets[row.item] = buckets.get(row.item, Decimal(0)) + row.quantity_kg
+        # 품목 지정 출고는 배정이 아직 확정적인 구간에서만 자기 품목 재고를 연다.
+        if unresolved_from is None or day < unresolved_from:
+            for row in outbound_on.get(day, []):
+                if row.item is None:
+                    continue
+                held = buckets.get(row.item, Decimal(0))
+                buckets[row.item] = held - min(row.quantity_kg, held)
+        for row in outbound_on.get(day, []):
+            if row.item is not None:
+                continue
+            gross = sum(buckets.values(), start=Decimal(0))
+            remaining = max(Decimal(0), gross - unattributed_release)
+            unattributed_release += min(row.quantity_kg, remaining)
+
+    gross = sum(buckets.values(), start=Decimal(0))
+    return gross - min(unattributed_release, gross)
+
+
 def calculate_cap_by_date(
     snapshot: InventoryLogisticsSnapshot,
     arrival_dates: list[date],
@@ -48,31 +172,12 @@ def calculate_cap_by_date(
         raise ValueError("IN_TRANSIT_SCHEDULE_UNRESOLVED")
     if snapshot.guaranteed_capacity_kg is None or snapshot.confirmed_outbound_schedule is None:
         raise ValueError("LOGISTICS_CAPACITY_INPUT_MISSING")
-    assert snapshot.confirmed_inbound_schedule is not None
 
     result: dict[date, Decimal] = {}
     for arrival_date in arrival_dates:
-        confirmed_inbound = sum(
-            (
-                item.quantity_kg
-                for item in snapshot.confirmed_inbound_schedule
-                if item.date <= arrival_date
-            ),
-            start=Decimal(0),
-        )
-        # 출고는 `<` — 같은 날 출고는 입출고 순서를 알 수 없으므로 당일 입고 공간을
-        # 열어주지 않고 D+1부터 해제한다 (상세설계 §9).
-        confirmed_outbound_released = sum(
-            (
-                item.quantity_kg
-                for item in snapshot.confirmed_outbound_schedule
-                if item.date < arrival_date
-            ),
-            start=Decimal(0),
-        )
-        projected_occupancy = (
-            snapshot.used_capacity_kg + confirmed_inbound - confirmed_outbound_released
-        )
+        projected_occupancy = _replay_occupancy_by_item(snapshot, arrival_date)
+        # 품목별 재생이 각 버킷을 0 아래로 내리지 않으므로 정상 입력에서는 걸리지
+        # 않는다. 불변식이 깨진 Snapshot을 잡는 최후 방어로 남긴다.
         if projected_occupancy < Decimal(0):
             raise ValueError("NEGATIVE_PROJECTED_OCCUPANCY")
         result[arrival_date] = max(
@@ -106,21 +211,14 @@ def calculate_future_occupancy_by_date(
     dates = sorted({item.date for item in inbound_schedule})
     occupancy: dict[date, Decimal] = {}
     for target_date in dates:
-        inbound = sum(
-            (item.quantity_kg for item in inbound_schedule if item.date <= target_date),
-            start=Decimal(0),
+        # 출고는 D+1부터 해제하고, 해제량은 그 시점에 실제 존재하는 물량을 넘지
+        # 않는다. 품목 축은 쓰지 않는다 — 승인 매입 Schedule에 item이 없어서다.
+        value = _replay_aggregate_occupancy(
+            start_occupancy=snapshot.used_capacity_kg,
+            inbound=inbound_schedule,
+            outbound=snapshot.confirmed_outbound_schedule,
+            target_date=target_date,
         )
-        # 출고는 `<` — cap_by_date와 같은 정책이다. 같은 날 출고는 입출고 순서를
-        # 알 수 없으므로 당일 점유를 낮추지 않고 D+1부터 공간을 해제한다.
-        outbound = sum(
-            (
-                item.quantity_kg
-                for item in snapshot.confirmed_outbound_schedule
-                if item.date < target_date
-            ),
-            start=Decimal(0),
-        )
-        value = snapshot.used_capacity_kg + inbound - outbound
         if value < Decimal(0):
             raise ValueError("NEGATIVE_PROJECTED_OCCUPANCY")
         occupancy[target_date] = value
@@ -217,6 +315,9 @@ def build_lot_constraints(snapshot: InventoryLogisticsSnapshot) -> list[LotConst
             item=lot.item,
             available_qty_kg=lot.available_qty_kg,
             remaining_freshness_days=lot.remaining_freshness_days,
+            # 등급은 Snapshot이 이미 정규화해 둔 값을 그대로 나른다 — 여기서
+            # 다시 계산하거나 None을 임의 등급으로 채우지 않는다.
+            grade=lot.grade,
             status=lot.status,
         )
         for lot in snapshot.on_hand_by_lot

@@ -104,6 +104,28 @@ class InTransitItem(BaseModel):
         return _reject_boolean(value)
 
 
+class ItemStoragePolicyFact(BaseModel):
+    """품목 자체의 보관 정책. Lot의 현재 상태와 다른 개념이다.
+
+    `remaining_freshness_days`는 *"이 Lot이 앞으로 며칠 쓸 수 있나"*이고
+    `operational_limit_days`는 *"이 품목이 원래 며칠 보관 가능한가"*다.
+    새로 매입하는 물량의 기준은 후자이므로 기존 Lot의 잔여일수에서 역산하면 안 된다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1)
+    #: DB에 값이 없으면 None을 유지한다 — 코드에서 기본값을 만들지 않는다.
+    operational_limit_days: int | None = None
+    #: 등급 사다리(#69)가 정리되기 전까지 의미를 재정의하지 않고 DB Fact 그대로 나른다.
+    medium_grade_factor: Decimal | None = None
+
+    @field_validator("operational_limit_days", "medium_grade_factor", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class InventoryLogisticsSnapshot(BaseModel):
     """Repository가 조회한 T0 Inventory/Logistics 사실과 미결 정책값."""
 
@@ -112,6 +134,9 @@ class InventoryLogisticsSnapshot(BaseModel):
     snapshot_id: str | None
     as_of: date
     on_hand_by_lot: list[InventoryLotSnapshot]
+    #: 품목 단위 보관 정책. Lot 목록에서 역산하지 않으므로 재고 0kg인 품목도 들어온다.
+    #: None은 미조회, []는 정책 0건 확인이다.
+    item_storage_policies: list[ItemStoragePolicyFact] | None = None
     in_transit: list[InTransitItem] | None
     confirmed_inbound_schedule: list[ScheduledQuantity] | None
     confirmed_outbound_schedule: list[ScheduledQuantity] | None
@@ -376,6 +401,9 @@ class LotConstraint(BaseModel):
     item: str
     available_qty_kg: Decimal = Field(ge=0)
     remaining_freshness_days: int | None = None
+    #: Snapshot의 정규화 등급을 그대로 나른다. 정규화 근거가 없으면 None이며,
+    #: 필드를 빠뜨리는 것(키 없음)과 None(확인 불가)은 다른 상태다.
+    grade: str | None = None
     status: str
 
 
