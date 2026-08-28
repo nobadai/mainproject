@@ -85,6 +85,15 @@ class ProcurementRunResponse(BaseModel):
     reason: str
 
     scenarios: list[dict[str, Any]] = []
+    judgment: dict[str, Any] = Field(
+        default={},
+        description=(
+            "매입 제안의 판정부 — `scenarios` 를 뺀 제안 최상위 전부 "
+            "(situation · allowed_axes · confidence · meta · no_proposal_reason …). "
+            '"왜 3안인지/2안인지"의 근거이며 프론트 판정 헤더가 소비한다. '
+            "`verdicts`(조언자·검증 판정)와 다르다 — 이건 **매입 자신의** 판정이다."
+        ),
+    )
     constraints: dict[str, dict[str, Any]] = {}
     verdicts: dict[str, dict[str, Any]] = {}
 

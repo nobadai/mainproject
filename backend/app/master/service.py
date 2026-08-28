@@ -100,6 +100,7 @@ def _to_response(context: ExecutionContext, outcome: ProcurementOutcome) -> Proc
         end_code=outcome.end_code,
         reason=outcome.reason,
         scenarios=[dict(s) for s in outcome.scenarios],
+        judgment=dict(outcome.judgment),
         constraints={k: dict(v) for k, v in outcome.constraints.items()},
         verdicts={k: dict(v) for k, v in outcome.verdicts.items()},
         blocked_by=list(outcome.blocked_by),

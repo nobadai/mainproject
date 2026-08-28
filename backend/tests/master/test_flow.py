@@ -88,13 +88,18 @@ def advisor(
     return port
 
 
-def purchaser(scenarios=None, runtime: str = "READY", reason: str = ""):
+def purchaser(scenarios=None, runtime: str = "READY", reason: str = "", **top_level):
+    """``top_level`` 은 제안 최상위 판정부 (situation·allowed_axes 등) 를 흉내낸다."""
+
     def port(request: AgentRequest):
         reply = _reply(
             request,
             runtime_status=runtime,
             business_status="ok" if runtime == "READY" else "skipped",
-            payload={"scenarios": list(scenarios if scenarios is not None else SCN)},
+            payload={
+                "scenarios": list(scenarios if scenarios is not None else SCN),
+                **top_level,
+            },
             reasoning=reason,
             missing_data=() if runtime != "RUNTIME_NOT_READY" else ("ml_forecast",),
         )
@@ -132,6 +137,36 @@ def test_정상_경로는_E1():
     assert out.end_code == "E1_APPROVED"
     assert out.presentable
     assert len(out.scenarios) == 2
+
+
+def test_판정부가_응답까지_온다():
+    """#73 ③ — situation·allowed_axes 가 scenarios 옆에서 유실되던 회귀.
+
+    프론트 판정 헤더가 소비하므로 **scenarios 를 뺀 제안 최상위 전부**가
+    `judgment` 로 실려야 한다. 키를 화이트리스트로 고르지 않는다.
+    """
+    out = happy(
+        purchase=purchaser(
+            situation="uncertain",
+            allowed_axes=["quantity", "timing"],
+            confidence={"level": "medium"},
+        )
+    ).run()
+    assert out.end_code == "E1_APPROVED"
+    assert out.judgment["situation"] == "uncertain"
+    assert out.judgment["allowed_axes"] == ["quantity", "timing"]
+    assert out.judgment["confidence"] == {"level": "medium"}
+    assert "scenarios" not in out.judgment  # 중복 적재 금지 — 시나리오는 자기 자리에
+
+
+def test_안이_없어도_판정부는_남는다():
+    """E2 에서도 no_proposal_reason 등 "왜 안이 없는지"가 응답에 남아야 한다."""
+    out = happy(
+        purchase=purchaser(scenarios=[], situation="stable", no_proposal_reason="밴드 소진")
+    ).run()
+    assert out.end_code == "E2_HELD"
+    assert out.judgment["situation"] == "stable"
+    assert out.judgment["no_proposal_reason"] == "밴드 소진"
 
 
 def test_호출_순서가_정의서_3_4_와_같다():
