@@ -302,7 +302,19 @@ FORECAST_KEYS = {
 DAILY_KEYS = {"date", "predicted", "lower", "upper"}
 QUOTE_KEYS = {"market", "grade", "price"}
 INVENTORY_KEYS = {"as_of", "item", "lots", "warehouse_free_kg", "rental_cap_kg"}
-LOT_KEYS = {"lot_id", "grade", "stocked_at", "remaining_kg", "shelf_life_days"}
+#: 물류가 싣는 여섯 키 + `shelf_life_days`.
+#: 마지막 하나만 **물류가 아직 안 주는 미결 필드**다 (#76) — ⑤가 품목 보관한계를 쓰는데
+#: 물류의 `remaining_freshness_days`(로트 잔여일)로는 대체할 수 없어서다. 전달 경로가
+#: 정해지면 이 집합에서 빠진다.
+LOT_KEYS = {
+    "lot_id",
+    "item",
+    "available_qty_kg",
+    "remaining_freshness_days",
+    "grade",
+    "status",
+    "shelf_life_days",
+}
 ORDERS_KEYS = {"as_of", "item", "orders", "total_kg"}
 ORDER_KEYS = {"sale_id", "qty_kg", "due_date"}
 DOCUMENT_KEYS = {"doc_id", "source", "doc_type", "item", "title", "published_at", "content"}
@@ -353,7 +365,10 @@ def test_inventory_and_orders_match_the_io_spec_shape(item: str, as_of: date) ->
     assert set(inventory) == INVENTORY_KEYS
     assert inventory["as_of"] == as_of.isoformat()
     assert all(set(lot) == LOT_KEYS for lot in inventory["lots"])
-    assert all(date.fromisoformat(lot["stocked_at"]) <= as_of for lot in inventory["lots"])
+    # 날짜 필드가 사라져 look-ahead 검사 대상이 없다 — 물류가 계산한 잔여일을 그대로 받는다.
+    # 대신 **품목 축**을 본다: 실물은 4품목을 한 목록에 담아 보내므로 어느 품목 것인지가
+    # 로트 안에 있어야 하고, 없으면 어댑터가 가려낼 수 없다 (#76).
+    assert all(lot["item"] == item for lot in inventory["lots"])
 
     orders = ports.get_confirmed_orders(item, as_of)
     assert set(orders) == ORDERS_KEYS
@@ -384,10 +399,12 @@ def test_inventory_reproduces_the_io_spec_example() -> None:
         "item": "배추",
         "lots": [
             {
-                "lot_id": 12,
+                "lot_id": "LOT-MOCK-BAECHU",
+                "item": "배추",
+                "available_qty_kg": 3000,
+                "remaining_freshness_days": 6,
                 "grade": "상",
-                "stocked_at": "2026-08-17",
-                "remaining_kg": 3000,
+                "status": "ACTIVE",
                 "shelf_life_days": 10,
             }
         ],
@@ -409,10 +426,13 @@ def test_orders_reproduce_the_io_spec_example() -> None:
 
 
 def test_remaining_freshness_is_the_six_days_the_fixture_talks_about() -> None:
-    """잔여신선도 = shelf_life − (as_of − stocked_at). 픽스처 risks의 '6일'과 같은 6이어야 한다."""
+    """잔여신선도는 **물류가 계산해 보낸 값**이다. 픽스처 risks의 '6일'과 같은 6이어야 한다.
+
+    전에는 ``shelf_life − (as_of − stocked_at)``으로 파생했다. 물류가 이미 내는 값이라
+    받는 쪽으로 정리했고(#76), 같은 개념을 두 곳에서 계산하지 않는다.
+    """
     lot = ports.get_inventory("배추", RISING)["lots"][0]
-    elapsed = (RISING - date.fromisoformat(lot["stocked_at"])).days
-    assert lot["shelf_life_days"] - elapsed == 6
+    assert lot["remaining_freshness_days"] == 6
     assert "6일" in _proposal()["scenarios"][0]["risks"][0]
 
 

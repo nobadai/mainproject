@@ -109,20 +109,14 @@ def load_inventory(item: str, as_of: date) -> dict[str, Any]:
     scenario_for(as_of)  # 앵커일 검증 — 6개 포트가 같은 날짜 규칙을 따르게 한다
     items = _pick(_read("inventory.json"), "items", "inventory.json")
     block = _pick(items, item, "inventory.json.items")
+    # ★ 로트는 **물류가 싣는 모양 그대로** 옮긴다 (#76 · 2026-08-28 실측).
+    #   전에는 stocked_at 오프셋에서 잔여신선도를 파생했는데, 물류가 이미 계산한
+    #   remaining_freshness_days 를 주므로 같은 개념을 두 곳에서 계산하지 않는다.
+    #   날짜 필드가 사라져 오프셋 materialize 도 필요 없다.
     return {
         "as_of": as_of.isoformat(),
         "item": item,
-        "lots": [
-            {
-                "lot_id": lot["lot_id"],
-                "grade": lot["grade"],
-                "stocked_at": (as_of + timedelta(days=lot["stocked_at_offset_days"])).isoformat(),
-                "remaining_kg": lot["remaining_kg"],
-                # 이 로트의 유통기한. constraints.yaml의 품목 보관한계와 다른 개념이다.
-                "shelf_life_days": lot["shelf_life_days"],
-            }
-            for lot in block["lots"]
-        ],
+        "lots": [dict(lot) for lot in block["lots"]],
         "warehouse_free_kg": block["warehouse_free_kg"],
         "rental_cap_kg": block["rental_cap_kg"],
     }

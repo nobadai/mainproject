@@ -95,6 +95,36 @@ def top_grade_shelf_days(inventory: dict, top_grade: str) -> int | None:
     return min(days) if days else None
 
 
+#: ``shelf_life_days``를 못 읽은 사유. ``None``이 하나인데 원인이 넷이라 갈라 적는다.
+#:
+#: ⚠️ 전에는 호출부가 원인과 무관하게 *"{등급} 등급 로트가 없다"*로 적었다. 물류 경로에서
+#:   실제 원인은 **키 자체가 안 실린 것**인데(#76 미결), 그렇게 쓰면 *"재고에 상 등급이
+#:   없구나"*로 읽힌다 — 없는 사실을 만들어 낸다. 침묵도 오답이지만 **틀린 사유는 더 나쁘다.**
+_SHELF_DAYS_MISSING_KEY = (
+    "품목 보관한계(shelf_life_days)를 아무 로트도 싣지 않았다 — 물류 payload에 없는 값이라 "
+    "미결이다. 중품 소진 한계를 계산하지 않았다"
+)
+
+
+def shelf_days_block_reason(inventory: dict, top_grade: str) -> str:
+    """``top_grade_shelf_days``가 ``None``을 돌려준 **이유**.
+
+    호출부가 ``blocked_by``에 그대로 싣는다 — risks 로 나가 *"무엇을 못 봤는지"*가
+    사용자에게 남는다 (§3.7.6 · 규칙 3). 사유를 안 남기면 "중품을 검토하고 안 쓴 것"과
+    "검토 자체를 못 한 것"이 같은 화면으로 보인다.
+    """
+    lots = inventory.get("lots")
+    if lots is None:
+        return "재고 로트를 받지 못해 상품 한계일을 알 수 없다"
+    if not lots:
+        return "보유 로트가 없어 상품 한계일을 알 수 없다"
+    if all("shelf_life_days" not in lot for lot in lots):
+        return _SHELF_DAYS_MISSING_KEY
+    if all(lot.get("grade") is None for lot in lots):
+        return "보유 로트의 등급이 모두 미상이라 상품 한계일을 알 수 없다"
+    return f"{top_grade} 등급 로트가 없어 상품 한계일을 알 수 없다"
+
+
 def near_term_demand_kg(
     orders: list[dict], as_of: str, within_days: float, *, since_days: float = 0
 ) -> int:
@@ -178,7 +208,7 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
     top_shelf = top_grade_shelf_days(state["inventory"], top_grade)
     facts["top_shelf_days"] = top_shelf
     if top_shelf is None:
-        facts["blocked_by"] = f"{top_grade} 등급 로트가 없어 상품 한계일을 알 수 없다"
+        facts["blocked_by"] = shelf_days_block_reason(state["inventory"], top_grade)
         return facts
 
     shelf_ratio = grade_cfg["mid_grade_shelf_ratio"]
