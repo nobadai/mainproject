@@ -36,13 +36,18 @@ def req(mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None) -> AgentRequest:
 
 
 class _Lot:
-    """`build_lot_constraints` 가 돌려주는 모양만 흉내 낸다 — 어댑터가 읽는 5필드."""
+    """`build_lot_constraints` 가 돌려주는 모양만 흉내 낸다 — 어댑터가 읽는 6필드.
 
-    def __init__(self, lot_id: str, qty: str, freshness: int | None):
+    ★ `grade` 는 #77 로 `LotConstraint` 에 생겼다. 기본값을 `None` 으로 둔 것은
+      실물이 그렇기 때문이다 — raw `'상품'` 은 정규화 근거가 없어 `None` 으로 온다.
+    """
+
+    def __init__(self, lot_id: str, qty: str, freshness: int | None, grade: str | None = None):
         self.lot_id = lot_id
         self.item = "배추"
         self.available_qty_kg = Decimal(qty)
         self.remaining_freshness_days = freshness
+        self.grade = grade
         self.status = "ACTIVE"
 
 
@@ -448,3 +453,34 @@ class _Check:
     def __init__(self, code: str, status: str):
         self.code = code
         self.status = status
+
+
+# ---------------------------------------------------------------------------
+# lots[].grade — 물류 #77 로 열린 축
+# ---------------------------------------------------------------------------
+
+
+def test_lots_에_grade_를_실어_나른다(wired, monkeypatch):
+    """매입 등급 배분이 이 값을 본다 — 없으면 필터가 **에러 없이 전부 미스**다.
+
+    8/28 `lots` 필드 매핑 회신에서 짚은 것으로, 물류가 `LotConstraint.grade` 를
+    나르게 되면서(#77) 마스터도 payload 로 옮긴다.
+    """
+    monkeypatch.setattr(
+        adapter, "build_lot_constraints", lambda snapshot: [_Lot("LOT-G", "100", 5, grade="특")]
+    )
+    reply, _ = adapter.logistics_port(req())
+    assert reply.payload["lots"][0]["grade"] == "특"
+
+
+def test_grade_가_없으면_None_으로_드러낸다(wired):
+    """🔴 임의 등급으로 채우지 않는다.
+
+    `_RAW_GRADE_NORMALIZATION` 이 비어 있어 raw `'상품'` 은 `None` 으로 온다.
+    **키를 빼면** *"물류가 안 준 것"* 과 *"근거가 없어 못 정한 것"* 이 구분되지
+    않는다 (§1.2-10) — 키는 두고 값을 `None` 으로 드러낸다.
+    """
+    reply, _ = adapter.logistics_port(req())
+    for lot in reply.payload["lots"]:
+        assert "grade" in lot
+        assert lot["grade"] is None

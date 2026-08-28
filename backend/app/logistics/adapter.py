@@ -371,6 +371,14 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             "available_qty_kg": _num(lot.available_qty_kg),
             # 신선도는 **없을 수 있다** — 0 으로 채우지 않는다 (§1.2-10)
             "remaining_freshness_days": lot.remaining_freshness_days,
+            # 물류가 `LotConstraint.grade` 를 나르게 됐다 (#77). 매입 등급 배분이 이
+            # 값을 본다 — 없으면 필터가 **에러 없이 전부 미스**로 지나간다.
+            #
+            # ★ `None` 을 임의 등급으로 채우지 않는다. 현재 `_RAW_GRADE_NORMALIZATION`
+            #   이 비어 있어 raw `'상품'` 은 정규화되지 않고 그대로 `None` 이 온다.
+            #   그 사실이 payload 에 드러나는 것이 맞다 — 키를 빼면 *"물류가 안 준 것"*
+            #   과 *"근거가 없어 못 정한 것"* 이 구분되지 않는다 (§1.2-10).
+            "grade": lot.grade,
             "status": lot.status,
         }
         for lot in build_lot_constraints(snapshot)
