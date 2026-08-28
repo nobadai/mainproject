@@ -3,8 +3,8 @@ import type { Scenario } from "@/lib/types";
 
 import { Chip, GradeBadge } from "./ui";
 
-const TH = "bg-surface-2 px-4 py-2.5 font-mono text-xs2 font-medium tracking-wider uppercase text-ink-3";
-const TD = "border-b border-rule px-4 py-2.5 whitespace-nowrap num";
+const TH = "bg-surface-2 px-4 py-3 font-mono text-xs2 font-semibold tracking-wider uppercase text-ink-3";
+const TD = "border-b border-rule px-4 py-3 whitespace-nowrap num";
 
 function Section({
   title,
@@ -19,7 +19,7 @@ function Section({
 }) {
   return (
     <div className="border-b border-rule p-6 last:border-b-0">
-      <div className="mb-3.5 flex items-baseline gap-3">
+      <div className="mb-4 flex items-baseline gap-3">
         <h3 className="text-md2 font-semibold">{title}</h3>
         <span className="font-mono text-xs2 text-ink-3">{ref_}</span>
         {right && <span className="ml-auto">{right}</span>}
@@ -41,8 +41,8 @@ function Fold({
   children: React.ReactNode;
 }) {
   return (
-    <details open={open} className="overflow-hidden rounded-lg border border-rule bg-surface">
-      <summary className="flex cursor-pointer list-none items-center gap-3 px-[18px] py-[15px] text-md2 font-medium hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
+    <details open={open} className="overflow-hidden rounded-card border border-rule bg-surface">
+      <summary className="flex cursor-pointer list-none items-center gap-3 px-5 py-4 text-md2 font-semibold hover:bg-surface-2 [&::-webkit-details-marker]:hidden">
         <span className="font-mono text-xs2 text-ink-3">▸</span>
         {title}
         <span className="ml-auto font-mono text-sm2 text-ink-3">{count}건</span>
@@ -57,11 +57,11 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
   const pay = s.payment_schedule;
 
   return (
-    <div className="overflow-hidden rounded-xl border border-rule bg-surface shadow-sm">
+    <div className="overflow-hidden rounded-card border border-rule bg-surface">
       <div className="grid gap-px bg-rule lg:grid-cols-2">
         <div className="bg-surface">
           <Section title="등급 배분" ref_="sourcing_plan">
-            <div className="overflow-x-auto rounded-lg border border-rule">
+            <div className="overflow-x-auto border-y border-rule">
               <table className="w-full border-collapse text-md2">
                 <thead>
                   <tr>
@@ -85,11 +85,11 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-rule-2 bg-surface-2 font-semibold">
-                    <td className="px-4 py-2.5 text-left">합계</td>
+                    <td className="px-4 py-3 text-left">합계</td>
                     <td />
-                    <td className="num px-4 py-2.5 text-right">{n(s.total_qty_kg)}</td>
-                    <td className="num px-4 py-2.5 text-right">{n(unit)}</td>
-                    <td className="num px-4 py-2.5 text-right">{n(s.total_amount_krw)}</td>
+                    <td className="num px-4 py-3 text-right">{n(s.total_qty_kg)}</td>
+                    <td className="num px-4 py-3 text-right">{n(unit)}</td>
+                    <td className="num px-4 py-3 text-right">{n(s.total_amount_krw)}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -105,7 +105,7 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
               <Chip>{s.split_plan.length === 1 ? "일괄 1회" : `${s.split_plan.length}회 분할`}</Chip>
             }
           >
-            <div className="overflow-x-auto rounded-lg border border-rule">
+            <div className="overflow-x-auto border-y border-rule">
               <table className="w-full border-collapse text-md2">
                 <thead>
                   <tr>
@@ -134,7 +134,7 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
       <Section title="지급계획" ref_="payment_schedule">
         {pay ? (
           <>
-            <div className="overflow-x-auto rounded-lg border border-rule">
+            <div className="overflow-x-auto border-y border-rule">
               <table className="w-full border-collapse text-md2">
                 <thead>
                   <tr>
@@ -160,16 +160,16 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-rule-2 bg-surface-2 font-semibold">
-                    <td className="px-4 py-2.5 text-left" colSpan={3}>
+                    <td className="px-4 py-3 text-left" colSpan={3}>
                       합계
                     </td>
-                    <td className="num px-4 py-2.5 text-right">
+                    <td className="num px-4 py-3 text-right">
                       {n(pay.reduce((a, r) => a + r.qty_kg, 0))}
                     </td>
-                    <td className="num px-4 py-2.5 text-right">
+                    <td className="num px-4 py-3 text-right">
                       {n(pay.reduce((a, r) => a + r.amount_krw, 0))}
                     </td>
-                    <td className="num px-4 py-2.5 text-right text-ink-2">
+                    <td className="num px-4 py-3 text-right text-ink-2">
                       {n(pay.reduce((a, r) => a + r.amount_max_krw, 0))}
                     </td>
                   </tr>
@@ -186,8 +186,8 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
         ) : (
           /* ★ 일괄 안에는 payment_schedule 키 자체가 없다 — 설계다.
                빈 표를 그리면 "있는데 비었다"로 읽혀 누락과 구분되지 않는다. */
-          <div className="rounded-lg border-2 border-dashed border-rule-2 bg-surface-2 px-6 py-5">
-            <div className="mb-[7px] text-lg2 font-semibold">일괄 매입 — 회차 지급계획 없음</div>
+          <div className="rounded-card border border-rule bg-surface-2 px-6 py-5">
+            <div className="mb-2 text-lg2 font-semibold">일괄 매입 — 회차 지급계획 없음</div>
             <div className="text-md2 leading-relaxed text-ink-2">
               한 번에 사는 안이라 회차가 나뉘지 않는다. 지급계획은 <b>분할 안에만</b> 실린다 — 비어
               있는 게 아니라 <b>해당하지 않는다.</b> 총액 {won(s.total_amount_krw)}이 지급일 하나에
@@ -200,16 +200,16 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
       <Section title="근거와 고지" ref_="rationale · risks">
         <Fold title="근거" count={s.rationale.length} open>
           {s.rationale.map((r, i) => (
-            <div key={i} className="border-b border-rule px-[18px] py-[15px] last:border-b-0">
-              <div className="mb-1.5 flex flex-wrap items-center gap-2.5">
-                <span className="rounded-md border border-rule-2 bg-surface-2 px-2.5 py-[3px] text-sm2 font-semibold text-ink-2">
+            <div key={i} className="border-b border-rule px-5 py-4 last:border-b-0">
+              <div className="mb-2 flex flex-wrap items-center gap-3">
+                <span className="rounded-ctl border border-rule-2 bg-surface-2 px-3 py-1 text-sm2 font-semibold text-ink-2">
                   {r.source}
                 </span>
                 <GradeBadge grade={r.evidence_grade} />
                 <span className="ml-auto font-mono text-xs2 text-ink-3">{r.ref_id}</span>
               </div>
               <div className="text-md2 leading-relaxed">{r.claim}</div>
-              <div className="mt-[7px] border-l-2 border-rule pl-3 text-sm2 leading-relaxed text-ink-3">
+              <div className="mt-2 border-l-2 border-rule pl-3 text-sm2 leading-relaxed text-ink-3">
                 {r.evidence_detail}
               </div>
             </div>
@@ -220,7 +220,7 @@ export function ScenarioDetail({ s }: { s: Scenario }) {
             {s.risks.map((t, i) => (
               <div
                 key={i}
-                className="flex items-start gap-3 border-b border-rule px-[18px] py-3.5 last:border-b-0"
+                className="flex items-start gap-3 border-b border-rule px-5 py-4 last:border-b-0"
               >
                 <Chip tone={isHold(t) ? "hold" : "plain"}>{isHold(t) ? "보류" : "확인"}</Chip>
                 <span className="text-md2 leading-relaxed text-ink-2">{t}</span>

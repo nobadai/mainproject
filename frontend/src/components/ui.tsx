@@ -22,7 +22,7 @@ export function Chip({
   } as const;
   return (
     <span
-      className={`inline-flex items-center gap-[7px] rounded-md border px-3 py-[5px] text-sm2 font-semibold ${tones[tone]}`}
+      className={`inline-flex items-center gap-2 rounded-ctl border px-3 py-1 text-sm2 font-semibold ${tones[tone]}`}
     >
       {children}
     </span>
@@ -39,10 +39,10 @@ export function GradeBadge({ grade }: { grade: string }) {
   return (
     <span
       title={m.why}
-      className="inline-flex flex-none items-center gap-1.5 rounded-[5px] border border-warn-line bg-warn-soft px-2 py-[2px] font-mono text-xs2 tracking-wide text-warn"
+      className="inline-flex flex-none items-center gap-2 rounded-ctl border border-warn-line bg-warn-soft px-2 py-1 font-mono text-xs2 tracking-wide text-warn"
     >
       <i
-        className={`block size-[9px] flex-none rounded-[2px] ${
+        className={`block size-2 flex-none rounded-ctl ${
           m.dashed ? "border-2 border-dashed border-warn" : "bg-warn"
         }`}
       />
@@ -79,7 +79,7 @@ export function EndCodeBanner({ vm }: { vm: ViewModel }) {
   const meaning = END_CODE_KO[vm.endCode];
   if (!meaning || vm.endCode === "E1_APPROVED") return null;
   return (
-    <div className="mb-[22px] flex flex-wrap items-center gap-3 rounded-[10px] border border-warn-line bg-warn-soft px-6 py-3.5">
+    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-card border border-warn-line bg-warn-soft px-6 py-4">
       <Chip tone="hold">{meaning.label}</Chip>
       <span className="text-md2 text-warn">{meaning.detail}</span>
       <span className="ml-auto font-mono text-xs2 text-warn">{vm.endCode}</span>
@@ -93,7 +93,7 @@ export function EndCodeBanner({ vm }: { vm: ViewModel }) {
 export function SourceBadge({ vm }: { vm: ViewModel }) {
   if (vm.source === "api") {
     return (
-      <div className="mb-[22px] flex flex-wrap items-center gap-3 rounded-[10px] border border-down bg-down-soft px-6 py-3.5">
+      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-card border border-down bg-down-soft px-6 py-4">
         <Chip tone="ok">실행 결과</Chip>
         <span className="text-md2 text-down">
           <b className="font-mono">POST /master/request</b> 로 방금 돌린 응답을 그리고 있다 — 화면의
@@ -108,7 +108,7 @@ export function SourceBadge({ vm }: { vm: ViewModel }) {
     );
   }
   return (
-    <div className="mb-[22px] flex flex-wrap items-center gap-3 rounded-[10px] border border-warn-line bg-warn-soft px-6 py-3.5">
+    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-card border border-warn-line bg-warn-soft px-6 py-4">
       <Chip tone="hold">내장 표본</Chip>
       <span className="text-md2 text-warn">
         API 응답을 쓰지 못해 고정 표본을 그리고 있다 — 화면의 수치는 실행 결과가 아니다.
@@ -123,9 +123,9 @@ export function SourceBadge({ vm }: { vm: ViewModel }) {
 /** 단일 색상 크기 비교라 범례가 필요 없다 — 값이 곧 직접 라벨이다. */
 export function Bar({ ratio }: { ratio: number }) {
   return (
-    <div className="mt-2.5 h-2 overflow-hidden rounded-[5px] bg-surface-3">
+    <div className="mt-3 h-2 overflow-hidden rounded-ctl bg-surface-3">
       <i
-        className="block h-full rounded-r-[5px] bg-accent"
+        className="block h-full rounded-r-ctl bg-accent"
         style={{ width: `${Math.min(ratio * 100, 100).toFixed(2)}%` }}
       />
     </div>

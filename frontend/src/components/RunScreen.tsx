@@ -93,12 +93,12 @@ export function RunScreen({
 
   return (
     <div className="grid items-start gap-7 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
-      <div className="rounded-xl border border-rule bg-surface shadow-sm">
-        <div className="border-b border-rule px-6 py-4.5">
+      <div className="rounded-card border border-rule bg-surface">
+        <div className="border-b border-rule px-6 py-5">
           <h2 className="text-lg2 font-semibold">실행 조건</h2>
         </div>
         <div className="p-6">
-          <div className="mb-[22px] flex flex-col gap-2">
+          <div className="mb-6 flex flex-col gap-2">
             <label className="lbl" htmlFor="sel-date">
               기준일 · as_of
             </label>
@@ -107,7 +107,7 @@ export function RunScreen({
               value={asOf}
               disabled={busy}
               onChange={(e) => onAsOf(e.target.value)}
-              className="w-full rounded-md border border-rule-2 bg-surface-2 px-3.5 py-3 font-mono text-md2 text-ink disabled:opacity-50"
+              className="w-full rounded-ctl border border-rule-2 bg-surface-2 px-4 py-3 font-mono text-md2 text-ink disabled:opacity-50"
             >
               {Object.keys(SCENES).map((d) => (
                 <option key={d} value={d}>
@@ -120,14 +120,14 @@ export function RunScreen({
             </span>
           </div>
 
-          <div className="mb-[22px] flex flex-col gap-2">
+          <div className="mb-6 flex flex-col gap-2">
             <label className="lbl" htmlFor="sel-item">
               품목
             </label>
             <select
               id="sel-item"
               defaultValue="배추"
-              className="w-full rounded-md border border-rule-2 bg-surface-2 px-3.5 py-3 font-mono text-md2 text-ink"
+              className="w-full rounded-ctl border border-rule-2 bg-surface-2 px-4 py-3 font-mono text-md2 text-ink"
             >
               <option value="배추">배추</option>
               <option value="무" disabled>
@@ -146,7 +146,7 @@ export function RunScreen({
             type="button"
             onClick={onRun}
             disabled={busy}
-            className="w-full rounded-md bg-accent px-4 py-4 text-lg2 font-semibold tracking-tight text-on-accent disabled:opacity-45"
+            className="w-full rounded-ctl bg-accent px-4 py-4 text-lg2 font-semibold tracking-tight text-on-accent disabled:opacity-45"
           >
             {busy ? "실행 중…" : "매입 시나리오 생성"}
           </button>
@@ -154,7 +154,7 @@ export function RunScreen({
             <button
               type="button"
               onClick={onReset}
-              className="mt-3 w-full rounded-md border border-rule-2 bg-surface-2 px-4 py-3.5 text-md2 font-medium text-ink"
+              className="mt-3 w-full rounded-ctl border border-rule-2 bg-surface-2 px-4 py-4 text-md2 font-normal text-ink"
             >
               다시 실행
             </button>
@@ -162,20 +162,20 @@ export function RunScreen({
         </div>
       </div>
 
-      <div className="rounded-xl border border-rule bg-surface shadow-sm">
-        <div className="flex flex-wrap items-center gap-4 border-b border-rule px-6 py-4.5">
+      <div className="rounded-card border border-rule bg-surface">
+        <div className="flex flex-wrap items-center gap-4 border-b border-rule px-6 py-5">
           <h2 className="text-lg2 font-semibold">실행 경로</h2>
           <span className="lbl">{status}</span>
         </div>
         <div className="p-6">
           <div className="relative pl-10">
-            <span className="absolute top-4 bottom-4.5 left-[13px] w-0.5 bg-rule" />
+            <span className="absolute top-4 bottom-5 left-[14px] w-px bg-rule" />
             {STAGES.map((st, i) => {
               const state = states[i];
               return (
-                <div key={st.t} className="relative pb-[26px] last:pb-0.5">
+                <div key={st.t} className="relative pb-7 last:pb-1">
                   <span
-                    className={`absolute top-0.5 -left-10 grid size-7 place-items-center rounded-full border-2 font-mono text-xs2 font-bold ${
+                    className={`absolute top-1 -left-10 grid size-7 place-items-center rounded-full border font-mono text-xs2 font-semibold ${
                       state === "done"
                         ? "border-accent bg-accent text-on-accent"
                         : state === "run"
@@ -191,7 +191,7 @@ export function RunScreen({
                     >
                       {st.t}
                     </h3>
-                    <span className="rounded-[5px] border border-rule px-2 py-0.5 font-mono text-xs2 text-ink-3">
+                    <span className="rounded-ctl border border-rule px-2 py-1 font-mono text-xs2 text-ink-3">
                       {st.who}
                     </span>
                     <span className="ml-auto font-mono text-xs2 text-ink-3">
@@ -199,7 +199,7 @@ export function RunScreen({
                     </span>
                   </div>
                   <div
-                    className={`mt-3 overflow-hidden rounded-lg border border-rule bg-surface-2 ${
+                    className={`mt-3 overflow-hidden rounded-card border border-rule bg-surface-2 ${
                       state === "idle" ? "opacity-50" : ""
                     }`}
                   >
@@ -207,20 +207,20 @@ export function RunScreen({
                       {rows[i].map(([k, v], ri) => (
                         <div key={k} className="contents">
                           <div
-                            className={`border-r border-rule bg-surface px-4 py-2.5 text-sm2 whitespace-nowrap text-ink-2 ${
+                            className={`border-r border-rule bg-surface px-4 py-3 text-sm2 whitespace-nowrap text-ink-2 ${
                               ri < rows[i].length - 1 ? "border-b" : ""
                             }`}
                           >
                             {k}
                           </div>
                           <div
-                            className={`num px-4 py-2.5 text-sm2 ${
+                            className={`num px-4 py-3 text-sm2 ${
                               ri < rows[i].length - 1 ? "border-b border-rule" : ""
                             } ${state === "done" ? "" : "text-ink-3"}`}
                           >
                             {state === "run" ? (
                               <span
-                                className="skeleton block h-3 rounded bg-surface-3"
+                                className="skeleton block h-3 rounded-ctl bg-surface-3"
                                 style={{ width: `${45 + ((ri * 17) % 40)}%` }}
                               />
                             ) : state === "done" ? (

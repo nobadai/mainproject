@@ -103,9 +103,9 @@ export default function Home() {
 
   return (
     <main>
-      <header className="sticky top-0 z-40 flex h-[68px] flex-wrap items-center gap-6 border-b border-rule bg-surface px-8">
+      <header className="sticky top-0 z-40 flex h-18 flex-wrap items-center gap-6 border-b border-rule bg-surface px-8">
         <div className="mr-auto flex items-center gap-3">
-          <span className="grid size-[30px] place-items-center rounded-[5px] bg-accent text-md2 font-bold text-on-accent">
+          <span className="grid size-8 place-items-center rounded-ctl bg-accent text-md2 font-semibold text-on-accent">
             햇
           </span>
           <b className="text-lg2 font-semibold tracking-tight">매입 시나리오 콘솔</b>
@@ -114,7 +114,7 @@ export default function Home() {
         <div
           role="tablist"
           aria-label="화면"
-          className="flex gap-[3px] rounded-[9px] border border-rule bg-surface-2 p-1"
+          className="flex gap-1 rounded-card border border-rule bg-surface-2 p-1"
         >
           {(
             [
@@ -129,8 +129,8 @@ export default function Home() {
               aria-selected={tab === key}
               disabled={disabled}
               onClick={() => setTab(key)}
-              className={`flex items-center gap-2.5 rounded-md px-4.5 py-2 text-md2 font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
-                tab === key ? "bg-surface text-ink shadow-sm" : "text-ink-2"
+              className={`flex items-center gap-3 rounded-ctl px-5 py-2 text-md2 font-normal disabled:cursor-not-allowed disabled:opacity-40 ${
+                tab === key ? "bg-surface font-semibold text-ink" : "text-ink-2"
               }`}
             >
               <span className={`font-mono text-xs2 ${tab === key ? "text-accent" : "text-ink-3"}`}>
@@ -142,7 +142,7 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1300px] px-8 pt-9 pb-28">
+      <div className="mx-auto max-w-[1300px] px-8 pt-8 pb-28">
         {tab === "run" ? (
           <RunScreen
             asOf={asOf}

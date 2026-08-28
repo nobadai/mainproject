@@ -1,44 +1,52 @@
 @import "tailwindcss";
 
 /* ═══════════════════════════════════════════════════════════════
-   발표 시연 녹화용 토큰. 대형 스크린 투사 기준으로 짠다 —
-   최소 활자 13px, 본문 17px, 핵심 수치 40px. 투사기는 대비를 깎아
-   먹으므로 잉크/바탕 대비를 실무 화면보다 한 단계 올렸다.
-   전 조합 WCAG 4.7:1 이상 (판정 밴드 9.6:1).
+   발표 시연(줌 화면 공유) 녹화용 토큰. 최소 활자 13px, 본문 17px,
+   핵심 수치 40px. 줌은 영상 압축이라 **미세한 색차와 그라디언트를 뭉갠다** —
+   그래서 면은 단색으로만 나누고 경계는 선이 맡는다.
+   텍스트 대비는 전 조합 4.7:1 이상 (본문 잉크 16.8:1, 액센트 5.6:1).
 
-   테마는 세 상태다: 명시 light · 명시 dark · 아무것도 안 찍힌 "시스템".
-   그래서 색은 **토큰으로만** 정의하고, 미디어쿼리/`[data-theme]` 안에서는
-   토큰 값만 바꾼다. 컴포넌트 색을 미디어쿼리 안에 두면 시스템 상태에서
-   한쪽 테마 글자가 다른 쪽 바탕에 얹힌다.
+   **라이트 고정.** 다크 대응을 두지 않는다 — 발표는 줌 화면 공유이고,
+   보는 기계의 시스템 설정 때문에 도중에 배색이 바뀌면 안 된다.
+   `color-scheme: light`까지 선언해 select·date 같은 폼 컨트롤도
+   OS 다크 설정을 따라가지 못하게 막는다 (이게 없으면 드롭다운만 검게 뜬다).
    ═══════════════════════════════════════════════════════════════ */
 @theme {
-  --color-ground: #edf0f4;
+  /* 캔버스는 흰색, 서피스(f5f5f7)는 **눌린 자리**에만 — 입력칸·표 머리·탭 트랙.
+     카드를 회색으로 칠하지 않는다 — 경계는 헤어라인(--color-rule)이 맡는다. */
+  --color-ground: #ffffff;
   --color-surface: #ffffff;
-  --color-surface-2: #f3f5f9;
-  --color-surface-3: #dfe4ec;
-  --color-ink: #0d1219;
-  --color-ink-2: #48525f;
-  --color-ink-3: #606b79;
-  --color-rule: #d3d9e2;
-  --color-rule-2: #b4becb;
-  --color-accent: #17457f;
+  --color-surface-2: #f5f5f7;
+  --color-surface-3: #e8e8ed;
+  --color-ink: #1d1d1f;
+  --color-ink-2: #48484a;
+  --color-ink-3: #636366;
+  --color-rule: #e0e0e0;
+  --color-rule-2: #d2d2d7;
+  /* 액센트는 **하나뿐**이다. 상호작용·강조·하락 방향이 전부 이 파랑을 쓴다. */
+  --color-accent: #0066cc;
   --color-on-accent: #ffffff;
-  --color-accent-soft: #dfe8f4;
-  --color-accent-line: #a9bdd8;
-  /* 적·청은 **가격 방향에만** 쓴다 (상승=적, 한국 시장 관행).
-     통과/차단 색으로 돌려쓰면 의미가 흐려진다. */
+  --color-accent-soft: #e8f0fa;
+  --color-accent-line: #a5c8ec;
+  /* 적은 **가격 상승에만** 쓴다 (한국 시장 관행). 통과/차단 색으로 돌려쓰지 않는다.
+     청(하락)은 액센트와 같은 값이다 — 파랑을 둘로 나누면 "액센트 하나" 규칙이 깨진다.
+     방향은 색이 아니라 ▲▼ 기호가 먼저 말한다. */
   --color-up: #a02a20;
-  --color-up-soft: #f8e8e6;
-  --color-down: #14588f;
-  --color-down-soft: #e3eef7;
+  --color-up-soft: #fbeceb;
+  --color-down: #0066cc;
+  --color-down-soft: #e8f0fa;
   --color-warn: #7e5806;
-  --color-warn-soft: #f7eeda;
-  --color-warn-line: #d9c293;
+  --color-warn-soft: #fbf2e0;
+  --color-warn-line: #ddc794;
   /* 지워진 열의 빗금 */
-  --color-void: #8a94a2;
+  --color-void: #8e8e93;
 
-  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
-    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  /* -apple-system을 맨 앞에 둔다 — macOS에서 진짜 SF Pro로 잡힌다.
+     SF Pro에는 한글 글리프가 없어 한글만 다음 후보로 떨어지므로,
+     바로 뒤에 Apple SD Gothic Neo(애플 한글 정본)를 놓는다. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Apple SD Gothic Neo", "Pretendard Variable", Pretendard, "Noto Sans KR", system-ui,
+    sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono",
     "JetBrains Mono", "D2Coding", monospace;
 
@@ -48,56 +56,21 @@
   --text-md2: 17px;
   --text-sm2: 15px;
   --text-xs2: 13px;
+
+  /* 반경도 두 단계뿐이다 (+ 알약). 7종이 섞여 있으면 눈이 "같은 층"을
+     못 묶는다 — 정돈돼 보이지 않는 이유가 대개 이것이다. */
+  --radius-ctl: 6px;
+  --radius-card: 12px;
+
+  /* 굵기는 두 단계뿐이다. 500·700을 섞으면 위계가 네 겹이 되어
+     "무엇이 더 중요한가"가 오히려 안 보인다. */
+  --font-weight-normal: 400;
+  --font-weight-semibold: 600;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --color-ground: #0b0f15;
-    --color-surface: #151a22;
-    --color-surface-2: #1b222c;
-    --color-surface-3: #28313d;
-    --color-ink: #f1f4f8;
-    --color-ink-2: #aab5c3;
-    --color-ink-3: #939eac;
-    --color-rule: #2a333f;
-    --color-rule-2: #3d4855;
-    --color-accent: #8fb6ea;
-    --color-on-accent: #0b0f15;
-    --color-accent-soft: #18273a;
-    --color-accent-line: #365071;
-    --color-up: #ec8a7d;
-    --color-up-soft: #2c1a17;
-    --color-down: #74b6ec;
-    --color-down-soft: #13232f;
-    --color-warn: #dbaa48;
-    --color-warn-soft: #2c2416;
-    --color-warn-line: #4f401f;
-    --color-void: #5a6573;
-  }
-}
-
-:root[data-theme="dark"] {
-  --color-ground: #0b0f15;
-  --color-surface: #151a22;
-  --color-surface-2: #1b222c;
-  --color-surface-3: #28313d;
-  --color-ink: #f1f4f8;
-  --color-ink-2: #aab5c3;
-  --color-ink-3: #939eac;
-  --color-rule: #2a333f;
-  --color-rule-2: #3d4855;
-  --color-accent: #8fb6ea;
-  --color-on-accent: #0b0f15;
-  --color-accent-soft: #18273a;
-  --color-accent-line: #365071;
-  --color-up: #ec8a7d;
-  --color-up-soft: #2c1a17;
-  --color-down: #74b6ec;
-  --color-down-soft: #13232f;
-  --color-warn: #dbaa48;
-  --color-warn-soft: #2c2416;
-  --color-warn-line: #4f401f;
-  --color-void: #5a6573;
+:root {
+  /* 브라우저가 그리는 폼 컨트롤·스크롤바까지 라이트로 못박는다 */
+  color-scheme: light;
 }
 
 * {
@@ -111,12 +84,16 @@ body {
 }
 
 body {
-  /* 투사 화면은 바탕을 호스트에서 빌려오면 안 된다 — 명시한다 */
+  /* 바탕을 호스트에서 빌려오면 안 된다 — 명시한다 */
   background: var(--color-ground);
   color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: var(--text-md2);
-  line-height: 1.55;
+  line-height: 1.47;
+  /* 자간을 **절대값**으로 준다 (em이 아니라 px). 그래야 40px 수치에서는
+     거의 안 조여지고 17px 본문에서만 조여진다 — 큰 활자를 em으로 조이면
+     투사 화면에서 글자가 서로 붙어 읽히지 않는다. */
+  letter-spacing: -0.374px;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -130,7 +107,7 @@ body {
 .num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.374px;
 }
 
 /* 터미널 필드 라벨 */
@@ -140,7 +117,7 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--color-ink-3);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* 만들지 않은 안의 자리 — 열을 빼지 않고 비운다.

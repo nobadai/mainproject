@@ -34,7 +34,7 @@ export function ComparisonTable({
       cell: (s) => (
         <span className="num text-lg2 font-semibold">
           {s.coverage_days}
-          <small className="ml-1.5 font-sans text-sm2 font-medium text-ink-3">일</small>
+          <small className="ml-2 font-sans text-sm2 font-normal text-ink-3">일</small>
         </span>
       ),
     },
@@ -45,7 +45,7 @@ export function ComparisonTable({
         <>
           <span className="num text-hero font-semibold tracking-[-0.04em]">
             {n(s.total_qty_kg)}
-            <small className="ml-1.5 font-sans text-md2 font-medium text-ink-3">kg</small>
+            <small className="ml-2 font-sans text-md2 font-normal text-ink-3">kg</small>
           </span>
           <Bar ratio={s.total_qty_kg / maxQty} />
         </>
@@ -57,7 +57,7 @@ export function ComparisonTable({
       cell: (s) => (
         <span className="num text-hero font-semibold tracking-[-0.04em]">
           {n(s.total_amount_krw)}
-          <small className="ml-1.5 font-sans text-md2 font-medium text-ink-3">원</small>
+          <small className="ml-2 font-sans text-md2 font-normal text-ink-3">원</small>
         </span>
       ),
     },
@@ -70,7 +70,7 @@ export function ComparisonTable({
       cell: (s) => (
         <span className="num text-lg2 font-semibold">
           {n(s.max_price)}
-          <small className="ml-1.5 font-sans text-sm2 font-medium text-ink-3">원/kg</small>
+          <small className="ml-2 font-sans text-sm2 font-normal text-ink-3">원/kg</small>
         </span>
       ),
     },
@@ -89,7 +89,7 @@ export function ComparisonTable({
   ];
 
   return (
-    <div className="overflow-hidden rounded-xl border border-rule bg-surface shadow-sm">
+    <div className="overflow-hidden rounded-card border border-rule bg-surface">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse">
           <thead>
@@ -105,7 +105,7 @@ export function ComparisonTable({
                     }`}
                   >
                     {label}
-                    <span className="mt-[3px] block font-mono text-xs2 font-medium text-ink-3">
+                    <span className="mt-1 block font-mono text-xs2 font-normal text-ink-3">
                       {s ? `${AXIS_KO[s.strategy_type]} 축` : "해당 없음"}
                     </span>
                   </th>
@@ -116,7 +116,7 @@ export function ComparisonTable({
           <tbody>
             {rows.map((r, ri) => (
               <tr key={r.k}>
-                <td className="border-r border-b border-rule bg-surface-2 px-6 py-4 text-left text-sm2 font-medium whitespace-nowrap text-ink-2">
+                <td className="border-r border-b border-rule bg-surface-2 px-6 py-4 text-left text-sm2 font-semibold whitespace-nowrap text-ink-2">
                   {r.k}
                 </td>
                 {ALL_LABELS.map((label) => {
@@ -141,7 +141,7 @@ export function ComparisonTable({
                       rowSpan={rows.length}
                       className="void-cell border-b border-rule px-6 text-center align-middle"
                     >
-                      <div className="inline-flex max-w-[280px] flex-col items-center gap-2.5 rounded-xl border-2 border-dashed border-rule-2 bg-surface px-7 py-[22px]">
+                      <div className="inline-flex max-w-[280px] flex-col items-center gap-3 rounded-card border border-rule bg-surface px-7 py-6">
                         <div className="text-lg2 font-semibold tracking-tight text-ink-2">
                           만들지 않음
                         </div>
@@ -158,7 +158,7 @@ export function ComparisonTable({
           </tbody>
         </table>
       </div>
-      <div className="border-t border-rule bg-surface-2 px-6 py-3.5 text-sm2 text-ink-3">
+      <div className="border-t border-rule bg-surface-2 px-6 py-4 text-sm2 text-ink-3">
         표의 모든 수치는 시뮬레이션 고정값이다 — 안별 상세의 근거에 출처가 하나씩 달려 있다. 재무
         매입 상한 {won(financeCap)} 기준.
       </div>
