@@ -338,3 +338,43 @@ def test_모르는_mode_는_능력_없음으로_답한다(wired):
     reply, _ = adapter.logistics_port(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.missing_capability == ("STATUS_QUERY 번역",)
+
+
+def test_물류가_NOT_READY_면_반드시_이름이_남는다(wired, monkeypatch):
+    """🔴 `rules` 는 물류가 정하고 `missing` 은 어댑터가 따로 모은다 — 어긋날 수 있다.
+
+    물류 Rule 이 막았는데 어댑터가 읽은 값이 다 멀쩡하면 `missing_data` 가 빈 채로
+    `RUNTIME_NOT_READY` 가 나가고, **봉투가 ContractViolation 을 던진다**(M-1 §5.1).
+
+    지금은 `rental_cap_kg@policy_source_ref` 가 늘 들어 있어 우연히 안 비어 있다.
+    **DB 에 그 키가 등록되는 날 터진다.** 그때를 미리 재현한다.
+    """
+    monkeypatch.setattr(
+        adapter,
+        "_load_policy",
+        lambda: _policy().model_copy(
+            update={"source_refs": {**_policy().source_refs, "rental_cap_kg": "MVP:RENTAL"}}
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "evaluate_procurement_rules",
+        lambda **kw: {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "calculation_ready": True,  # 계산은 됐는데 Rule 이 막은 경우
+            "hard_constraints": [_Check("IN_TRANSIT_SCHEDULE_UNRESOLVED", "UNRESOLVED")],
+            "soft_warnings": [],
+        },
+    )
+    reply, _ = adapter.logistics_port(req())
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.missing_data  # 비어 있으면 봉투가 던진다
+    assert "logistics_rule/IN_TRANSIT_SCHEDULE_UNRESOLVED" in reply.missing_data
+
+
+class _Check:
+    """`ConstraintResult` 의 어댑터가 읽는 두 필드만 흉내 낸다."""
+
+    def __init__(self, code: str, status: str):
+        self.code = code
+        self.status = status

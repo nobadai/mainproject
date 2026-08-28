@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.master.decision import DecisionOut
 from app.master.envelope import AgentName, Trigger
 from app.orchestrator.contracts_core import EndCode
 
@@ -84,6 +85,15 @@ class ProcurementRunResponse(BaseModel):
     reason: str
 
     scenarios: list[dict[str, Any]] = []
+    judgment: dict[str, Any] = Field(
+        default={},
+        description=(
+            "매입 제안의 판정부 — `scenarios` 를 뺀 제안 최상위 전부 "
+            "(situation · allowed_axes · confidence · meta · no_proposal_reason …). "
+            '"왜 3안인지/2안인지"의 근거이며 프론트 판정 헤더가 소비한다. '
+            "`verdicts`(조언자·검증 판정)와 다르다 — 이건 **매입 자신의** 판정이다."
+        ),
+    )
     constraints: dict[str, dict[str, Any]] = {}
     verdicts: dict[str, dict[str, Any]] = {}
 
@@ -143,6 +153,14 @@ class RunHistoryOut(BaseModel):
 
     request_payload: dict[str, Any] = {}
     response_payload: dict[str, Any] = {}
+
+    decisions: list[DecisionOut] = Field(
+        default=[],
+        description=(
+            "사람의 결정 이력. 최신 하나가 `is_current` 다. 비어 있으면 아직 미결정 — "
+            '"그 요청 어떻게 됐냐"에 한 번의 호출로 답하기 위해 여기 싣는다.'
+        ),
+    )
 
 
 class TriggerAck(BaseModel):

@@ -92,6 +92,7 @@ class ProcurementOutcome:
     plan: ExecutionPlan
 
     scenarios: tuple[Mapping[str, Any], ...] = ()
+    judgment: Mapping[str, Any] = field(default_factory=dict)
     constraints: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
     verdicts: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
 
@@ -173,6 +174,7 @@ class ProcurementFlow:
         attempts = 0
         scenarios: tuple[Mapping[str, Any], ...] = ()
         proposal: Mapping[str, Any] = {}
+        judgment: Mapping[str, Any] = {}
         verdicts: dict[AgentName, Mapping[str, Any]] = {}
         verification = VerificationResult()
 
@@ -183,20 +185,24 @@ class ProcurementFlow:
             )
             proposal = dict(purchase.payload)
             scenarios = _scenarios_of(purchase)
+            judgment = _judgment_of(purchase)
 
             if not purchase.contributes_to_band:
                 return self._outcome(
                     "E4_NOT_STARTED",
                     f"매입 에이전트 미가동: {purchase.reasoning or purchase.runtime_status}",
+                    judgment=judgment,
                     constraints=constraints,
                     blocked_by=("purchase",),
                     purchase_attempts=attempts,
                 )
 
             if not scenarios:
+                # `no_proposal_reason` 이 judgment 에 실려 "왜 안이 없는지"도 응답에 남는다
                 return self._outcome(
                     "E5_NO_FEASIBLE_PLAN" if has_unmet_obligation else "E2_HELD",
                     purchase.reasoning or "실행 가능한 매입안이 없다",
+                    judgment=judgment,
                     constraints=constraints,
                     purchase_attempts=attempts,
                 )
@@ -212,6 +218,7 @@ class ProcurementFlow:
                     "E3_REJECTED",
                     f"매입 재호출 {attempts} 회에도 통과안 없음",
                     scenarios=scenarios,
+                    judgment=judgment,
                     constraints=constraints,
                     verdicts=verdicts,
                     findings=verification.findings,
@@ -224,6 +231,7 @@ class ProcurementFlow:
             "E1_APPROVED",
             "사용자 선택 대기",
             scenarios=scenarios,
+            judgment=judgment,
             constraints=constraints,
             verdicts=verdicts,
             findings=verification.findings,
@@ -407,3 +415,14 @@ def _scenarios_of(reply: AgentReply) -> tuple[Mapping[str, Any], ...]:
     if isinstance(raw, Mapping) or not isinstance(raw, Sequence):
         return ()
     return tuple(item for item in raw if isinstance(item, Mapping))
+
+
+def _judgment_of(reply: AgentReply) -> Mapping[str, Any]:
+    """`scenarios` 를 뺀 제안 최상위 — `situation`·`allowed_axes`·`confidence` 판정부.
+
+    ★ 키를 **고르지 않는다.** 화이트리스트로 뽑으면 매입이 판정 필드를 추가할 때마다
+      마스터를 고쳐야 하고, 빠뜨린 키는 §3.7.6 의 "커버리지를 감춘" 상태가 된다.
+      시나리오 배열만 빼고 전부 옮긴다 — 검증 Tool 에 배열 대신 제안 전체를 넘기게
+      된 것과 같은 교훈이다 (2026-08-27 매입 스키마 · 프론트 판정 헤더가 소비).
+    """
+    return {k: v for k, v in reply.payload.items() if k != "scenarios"}
