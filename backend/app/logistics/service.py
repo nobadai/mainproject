@@ -76,6 +76,10 @@ def run_logistics_procurement_with_snapshot(
         band=LogisticsBand(
             cap_by_date=(scenario_result["cap_by_date"] if rule_result["calculation_ready"] else {})
         ),
+        # None이면 직렬화에서 키가 빠진다 — confirmed_outbound.item 누락 같은
+        # Partial Output 상태를 `[]`(0건 확인)로 위장하지 않기 위해서다.
+        inventory_by_item=scenario_result["inventory_by_item"],
+        scenario_results=scenario_result["scenario_results"],
         inbound_constraints=InboundConstraints(
             inbound_lead_days=snapshot.inbound_lead_days if snapshot is not None else None,
             daily_inbound_capacity_kg=(

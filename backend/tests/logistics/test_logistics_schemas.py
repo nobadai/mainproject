@@ -1,9 +1,34 @@
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
-from app.logistics.schemas import LogisticsSalesRequest, PurchaseAgentOutput
+from app.logistics.schemas import (
+    LogisticsProcurementResponse,
+    LogisticsSalesRequest,
+    PurchaseAgentOutput,
+    ScenarioAdjustment,
+)
+
+
+def _procurement_response(**overrides) -> LogisticsProcurementResponse:
+    base = {
+        "as_of": "2026-08-21",
+        "snapshot_id": None,
+        "runtime_status": "READY",
+        "verdict": "PASS",
+        "band": {"cap_by_date": {}},
+        "inbound_constraints": {
+            "inbound_lead_days": 2,
+            "daily_inbound_capacity_kg": None,
+            "inbound_transport_capacity_kg": None,
+        },
+        "hard_constraints": [],
+        "soft_warnings": [],
+        "evidences": [],
+    }
+    return LogisticsProcurementResponse(**{**base, **overrides})
 
 
 def test_logistics_procurement_accepts_purchase_v04(logistics_purchase_payload):
@@ -83,3 +108,28 @@ def test_logistics_sales_rejects_boolean_numbers(logistics_sales_payload, path, 
 
     with pytest.raises(ValidationError):
         LogisticsSalesRequest.model_validate(logistics_sales_payload)
+
+
+def test_uncomputable_inventory_by_item_is_omitted_not_empty():
+    """None(계산 불가)은 키 생략, [](0건 확인)은 그대로 나간다 — 0 != null."""
+    omitted = _procurement_response(inventory_by_item=None).model_dump(mode="json")
+    kept = _procurement_response(inventory_by_item=[]).model_dump(mode="json")
+
+    assert "inventory_by_item" not in omitted
+    assert kept["inventory_by_item"] == []
+
+
+def test_inventory_by_item_round_trips():
+    response = _procurement_response(inventory_by_item=[{"item": "배추", "available_qty_kg": 3000}])
+
+    assert response.inventory_by_item is not None
+    assert response.inventory_by_item[0].available_qty_kg == Decimal(3000)
+
+
+def test_scenario_adjustment_allows_only_quantity_and_timing():
+    """물류 Adjustment 축은 quantity/timing뿐 — amount/channel_mix 금지."""
+    ScenarioAdjustment(axis="quantity", split_date=date(2026, 8, 21))
+    ScenarioAdjustment(axis="timing", split_date=date(2026, 8, 21))
+    for forbidden in ("amount", "channel_mix"):
+        with pytest.raises(ValidationError):
+            ScenarioAdjustment(axis=forbidden, split_date=date(2026, 8, 21))
