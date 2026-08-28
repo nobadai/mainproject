@@ -20,6 +20,7 @@ from app.master.envelope import (
 )
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import (
+    absorb_inventory,
     build_reasoning,
     purchase_port,
     validate_payload,
@@ -1027,3 +1028,139 @@ def test_every_scenario_number_carries_a_path_evidence() -> None:
     assert required <= claims, f"근거 없는 경로: {sorted(required - claims)}"
     assert any(c.startswith("scenarios[0].") for c in claims)
     assert not any(c.endswith((".label", ".strategy_type")) for c in claims)
+
+
+# ── #76 물류 lots 흡수 ────────────────────────────────────────────────────
+#
+# 이 절이 막으려는 사고: 전 스위트가 green 인데 실연동이 `KeyError: 'remaining_kg'` 로
+# 죽었다 (2026-08-28 첫 통합 실행). mock 이 물류와 다른 이름을 쓰고 있었고, `lots` 가
+# 선택 항목이라 수신 검증도 지나쳤다. 그래서 **mock 모양이 아니라 물류 모양**으로 검사한다.
+
+#: 물류가 실제로 싣는 로트 (2026-08-28 실측). 값·타입을 그대로 옮겼다.
+_LOGISTICS_LOT = {
+    "lot_id": "LOT-KIMCHI-015-BAECHU",
+    "item": "배추",
+    "available_qty_kg": 286.92,
+    "remaining_freshness_days": 10,
+    "grade": None,
+    "status": "ACTIVE",
+}
+_OTHER_ITEM_LOT = {**_LOGISTICS_LOT, "lot_id": "LOT-KIMCHI-015-MU", "item": "무"}
+
+
+def test_lots_of_other_items_are_filtered_out() -> None:
+    """물류는 4품목을 한 목록에 담아 보낸다 — 매입은 품목 하나씩 돈다.
+
+    거르지 않고 ``lots[0]`` 을 집으면 **다른 품목의 로트를 근거로 삼는다.** 에러가 나지
+    않아 아무도 모른다. mock 은 품목별로 나뉘어 있어 이 구멍이 보이지 않던 자리다.
+    """
+    absorbed = absorb_inventory({"lots": [_OTHER_ITEM_LOT, _LOGISTICS_LOT]}, "배추")
+    assert [lot["lot_id"] for lot in absorbed["lots"]] == ["LOT-KIMCHI-015-BAECHU"]
+
+
+def test_lots_without_an_item_key_are_kept_not_dropped() -> None:
+    """품목 축을 **못 밝힌 것**과 **다른 품목**은 다르다 — 버리면 있는 재고가 없어진다."""
+    unlabeled = {k: v for k, v in _LOGISTICS_LOT.items() if k != "item"}
+    absorbed = absorb_inventory({"lots": [unlabeled]}, "배추")
+    assert absorbed["lots"] == [unlabeled]
+
+
+def test_absorb_does_not_invent_values() -> None:
+    """없는 키를 기본값으로 채우지 않는다 (규칙 3). 옮기기만 한다."""
+    absorbed = absorb_inventory({"warehouse_free_kg": 10, "lots": [_LOGISTICS_LOT]}, "배추")
+    assert absorbed["lots"][0] == _LOGISTICS_LOT
+    assert absorbed["warehouse_free_kg"] == 10
+
+
+def test_absorb_passes_through_when_lots_are_absent() -> None:
+    """``lots`` 는 선택 항목이다 — 없으면 그대로 둔다 (M-1 제출 §5)."""
+    assert absorb_inventory({"warehouse_free_kg": 10}, "배추") == {"warehouse_free_kg": 10}
+
+
+def test_old_shape_lots_are_caught_by_receive_validation() -> None:
+    """**있는데 모양이 다른** 경우를 어댑터가 잡는다.
+
+    옛 이름(``remaining_kg``)만 실린 로트가 오면, 노드 안에서 ``KeyError`` 로 죽는 대신
+    ``missing_data`` 로 **무엇이 어긋났는지** 마스터에게 전달된다.
+    """
+    stale = {"lot_id": 12, "grade": "상", "remaining_kg": 3000, "shelf_life_days": 10}
+    payload = _payload("배추", date(2026, 8, 21))
+    payload["constraints"]["inventory"] = {**payload["constraints"]["inventory"], "lots": [stale]}
+    missing = validate_payload(payload, date(2026, 8, 21))
+    assert "constraints.inventory.lots[0].available_qty_kg" in missing
+
+
+def test_absent_lots_are_not_reported_as_missing() -> None:
+    """부재는 잡지 않는다 — 선택 항목이라 빠져도 단일 등급으로 돌아간다."""
+    payload = _payload("배추", date(2026, 8, 21))
+    inventory = {k: v for k, v in payload["constraints"]["inventory"].items() if k != "lots"}
+    payload["constraints"]["inventory"] = inventory
+    missing = validate_payload(payload, date(2026, 8, 21))
+    assert not [name for name in missing if "lots" in name]
+
+
+def test_real_logistics_lot_shape_runs_end_to_end() -> None:
+    """물류 실물 모양으로 어댑터가 **끝까지 돈다.**
+
+    이 테스트가 없어서 첫 통합 실행이 죽었다. mock 을 물류 모양에 맞췄으므로 이제
+    같은 계약을 두 경로가 공유하지만, **실물 값을 직접 넣어** 한 번 더 못 박는다.
+    """
+    as_of = date(2026, 8, 21)
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"] = {
+        **payload["constraints"]["inventory"],
+        "lots": [_LOGISTICS_LOT, _OTHER_ITEM_LOT],
+    }
+    request = AgentRequest(
+        context=ExecutionContext(f"REQ-{as_of}-배추", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, _ = purchase_port(request)
+    assert reply.runtime_status == "READY"
+    assert reply.payload["scenarios"]
+    # 근거는 **이 품목** 로트를 가리켜야 한다 — 무 로트를 집으면 여기서 걸린다
+    inventory_refs = [
+        item["ref_id"]
+        for scenario in reply.payload["scenarios"]
+        for item in scenario["rationale"]
+        if item["source"] == "재고"
+    ]
+    assert inventory_refs and all(ref == "INV-LOT-KIMCHI-015-BAECHU" for ref in inventory_refs)
+
+
+def test_fractional_warehouse_capacity_still_yields_integer_quantities() -> None:
+    """물류가 보내는 창고 여유는 **소수**다 (실측 7,636.72kg).
+
+    mock 이 우연히 정수라(12,000 + 3,600) 오래 드러나지 않았다. 소수가 그대로 수량 상한이
+    되면 ``total_qty_kg`` 가 소수가 되고 출력 스키마(``int``)가 막는다 — 실연동이 거기서
+    죽었다 (2026-08-28).
+
+    **내림**인 것도 함께 못 박는다: 창고 수용량은 상한이라 올리면 못 넣는 양을 계획하게 된다.
+    """
+    as_of = date(2026, 8, 21)
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"] = {
+        **payload["constraints"]["inventory"],
+        "warehouse_free_kg": 7636.72,
+        "rental_cap_kg": 0.0,
+    }
+    request = AgentRequest(
+        context=ExecutionContext(f"REQ-{as_of}-배추", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, _ = purchase_port(request)
+    assert reply.runtime_status == "READY", reply.reasoning
+    scenarios = reply.payload["scenarios"]
+    assert scenarios
+    for scenario in scenarios:
+        assert isinstance(scenario["total_qty_kg"], int)
+        assert all(isinstance(r["qty_kg"], int) for r in scenario["split_plan"])
+        assert all(isinstance(r["qty_kg"], int) for r in scenario["sourcing_plan"])
+        # 상한을 **넘지 않는다** — 내림이라 7,636 이 최대다
+        # (이 픽스처는 현금이 먼저 묶어 창고 상한까지 안 간다. 내림 자체는
+        #  test_draft_plan 의 warehouse_cap_kg 단위 검사가 잠근다.)
+        assert scenario["total_qty_kg"] <= 7636

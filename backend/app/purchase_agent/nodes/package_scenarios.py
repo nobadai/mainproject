@@ -202,8 +202,10 @@ def _inventory_claim(lots: list[dict] | None) -> tuple[str, str, str]:
     if not lots:
         return "가용 재고 없음 (확정)", "INV-없음", "SIM_FIXED"
     lot = lots[0]
+    # 키 이름은 **물류 어휘를 그대로** 쓴다 (#76 — 매입이 흡수하기로 합의).
+    # 품목 필터는 어댑터가 이미 했다(`adapter.absorb_inventory`) — 여기 lots는 이 품목 것뿐이다.
     return (
-        f"가용 {lot['remaining_kg']:,}kg (로트 {lot['lot_id']})",
+        f"가용 {lot['available_qty_kg']:,}kg (로트 {lot['lot_id']})",
         f"INV-{lot['lot_id']}",
         "SIM_FIXED",
     )
@@ -749,12 +751,13 @@ def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str
             f"{clip['cap_kg']:,}kg으로 축소"
         )
     lot = lots[0] if lots else {}
-    if lot.get("shelf_life_days") is not None and lot.get("stocked_at"):
-        # 잔여신선도 = shelf_life − (as_of − stocked_at). as_of는 주입된 값이라
-        # 벽시계를 읽지 않는다 (규칙 1).
-        elapsed = (date.fromisoformat(as_of) - date.fromisoformat(lot["stocked_at"])).days
+    # 잔여신선도는 **물류가 계산해 보낸다** (`remaining_freshness_days` · #76).
+    # 전에는 shelf_life_days − (as_of − stocked_at)으로 파생했는데, 같은 개념을 두 곳에서
+    # 계산하면 어긋난다 — 물류가 재고 도메인 값을 이미 내므로 받는 쪽으로 정리했다.
+    # ``None``일 수 있다: 물류가 "모른다"를 그렇게 표현한다(§1.2-10). 0으로 읽지 않는다.
+    if lot.get("remaining_freshness_days") is not None:
         risks.append(
-            f"기존 로트 {lot['lot_id']} 잔여신선도 {lot['shelf_life_days'] - elapsed}일 — "
+            f"기존 로트 {lot['lot_id']} 잔여신선도 {lot['remaining_freshness_days']}일 — "
             "신규 매입분이 이 로트를 밀어내지 않는지 확인 필요"
         )
     return risks

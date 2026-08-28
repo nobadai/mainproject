@@ -1,32 +1,66 @@
 {
-  "_설명": "품목별 고정값. 날짜만 as_of 상대 오프셋으로 두고 로더가 materialize한다 — 리터럴 날짜를 쓰면 9/11 시나리오에서 '8/17 입고'가 한 달 전이 되어 잔여신선도 계산이 무의미해진다.",
-  "_기준일_재현": "배추 블록은 as_of 2026-08-21에서 IO명세 §1-③ 예시와 완전히 일치한다: stocked_at 2026-08-17, 잔여신선도 = 10 − (8/21 − 8/17) = 6일. 픽스처 risks의 '중품 1,500kg은 잔여신선도 6일 내 소진 필요'와 같은 6이다.",
-  "_주의": "lots[].shelf_life_days는 그 로트의 유통기한이다. constraints.yaml의 shelf_life_days(품목 보관한계, 배추 135일)와 이름만 같고 다른 개념이다.",
+  "_설명": "품목별 고정값. **물류가 실제로 싣는 lot 모양을 그대로 따른다** (2026-08-28 실측 · #76). 이름이 어긋나 있으면 전 스위트가 green인데 실연동이 KeyError로 죽는다 — 실제로 그렇게 죽었다.",
+  "_실물_대조": "마스터 경유 시 물류가 싣는 키는 lot_id·item·available_qty_kg·remaining_freshness_days·grade·status 여섯이다 (master/adapters/logistics.py). mock도 같은 이름·같은 타입을 쓴다. lot_id는 **문자열**이다 — 실물이 'LOT-KIMCHI-015-BAECHU' 형태라 정수로 두면 ref_id 모양이 실연동에서만 달라진다.",
+  "_shelf_life_days_는_미결_필드": "이 키만 물류가 아직 주지 않는다 (#76 미결). ⑤ 등급 배분이 '이 품목의 전체 보관한계'를 쓰는데(allocate_sourcing.py:78-88 — 오늘 사는 물건은 새 물건이라 기존 로트가 쓴 날짜를 물려받지 않는다), 물류의 remaining_freshness_days는 '이 로트의 잔여일'이라 대체할 수 없다. 값은 haetdeul.item_storage_policies.operational_limit_days 실측(2026-08-28)을 따랐다: 배추 10 · 무 14 · 양파 30 · 피마늘 30. 전달 경로가 정해지면 이 키는 사라진다.",
+  "_정정_이력": "양파 60→30, 피마늘 45→30. 종전 값은 근거 없이 길었고 DB 실측과 어긋나 있었다 — 등급 배분이 실물보다 긴 보관한계로 돌고 있었다.",
+  "_기준일_재현": "배추 블록은 IO명세 §1-③ 예시와 일치한다: 잔여신선도 6일. 픽스처 risks의 '중품 1,500kg은 잔여신선도 6일 내 소진 필요'와 같은 6이다. 종전에는 stocked_at 오프셋에서 파생했으나, 물류가 계산된 값을 주므로 계산 결과를 직접 싣는다 (계산이 두 곳에 있으면 어긋난다).",
   "items": {
     "배추": {
       "lots": [
-        {"lot_id": 12, "grade": "상", "stocked_at_offset_days": -4, "remaining_kg": 3000, "shelf_life_days": 10}
+        {
+          "lot_id": "LOT-MOCK-BAECHU",
+          "item": "배추",
+          "available_qty_kg": 3000,
+          "remaining_freshness_days": 6,
+          "grade": "상",
+          "status": "ACTIVE",
+          "shelf_life_days": 10
+        }
       ],
       "warehouse_free_kg": 12000,
       "rental_cap_kg": 3600
     },
     "무": {
       "lots": [
-        {"lot_id": 21, "grade": "상", "stocked_at_offset_days": -3, "remaining_kg": 2000, "shelf_life_days": 14}
+        {
+          "lot_id": "LOT-MOCK-MU",
+          "item": "무",
+          "available_qty_kg": 2000,
+          "remaining_freshness_days": 11,
+          "grade": "상",
+          "status": "ACTIVE",
+          "shelf_life_days": 14
+        }
       ],
       "warehouse_free_kg": 9000,
       "rental_cap_kg": 2700
     },
     "양파": {
       "lots": [
-        {"lot_id": 33, "grade": "상", "stocked_at_offset_days": -10, "remaining_kg": 5000, "shelf_life_days": 60}
+        {
+          "lot_id": "LOT-MOCK-YANGPA",
+          "item": "양파",
+          "available_qty_kg": 5000,
+          "remaining_freshness_days": 20,
+          "grade": "상",
+          "status": "ACTIVE",
+          "shelf_life_days": 30
+        }
       ],
       "warehouse_free_kg": 15000,
       "rental_cap_kg": 4500
     },
     "피마늘": {
       "lots": [
-        {"lot_id": 41, "grade": "상", "stocked_at_offset_days": -6, "remaining_kg": 1200, "shelf_life_days": 45}
+        {
+          "lot_id": "LOT-MOCK-PIMANUL",
+          "item": "피마늘",
+          "available_qty_kg": 1200,
+          "remaining_freshness_days": 24,
+          "grade": "상",
+          "status": "ACTIVE",
+          "shelf_life_days": 30
+        }
       ],
       "warehouse_free_kg": 6000,
       "rental_cap_kg": 1800
