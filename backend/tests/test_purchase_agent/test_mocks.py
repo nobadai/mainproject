@@ -29,7 +29,9 @@ RISING = date(2026, 8, 21)
 FALLING = date(2026, 8, 28)
 UNCERTAIN = date(2026, 9, 4)
 SPREAD_WIDE = date(2026, 9, 11)
-ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
+#: 통합 시연 앵커 (#73). 성격은 rising 과 같고 날짜만 다르다.
+INTEGRATION = date(2025, 12, 31)
+ANCHORS = (INTEGRATION, RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
 
 DOC_TYPES = ["관측월보", "기상", "작년동기"]
 
@@ -144,6 +146,7 @@ def test_anchor_days_match_the_scenarios_file() -> None:
     anchors = json.loads((MOCK_DIR / "scenarios.json").read_text(encoding="utf-8"))["anchors"]
     assert sorted(anchors) == sorted(d.isoformat() for d in ANCHORS)
     assert [anchors[d.isoformat()]["name"] for d in ANCHORS] == [
+        "integration_demo",
         "mock_rising",
         "mock_falling",
         "mock_uncertain",
@@ -434,8 +437,18 @@ def test_fixture_sourcing_prices_exist_in_the_same_day_quotes() -> None:
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 @pytest.mark.parametrize("item", mocks.ITEMS)
 def test_documents_never_leak_future_publications(item: str, as_of: date) -> None:
-    """전 품목·전 앵커일. 배추만 검사하면 다른 품목의 빈 코퍼스를 못 본다."""
+    """전 품목·전 앵커일. 배추만 검사하면 다른 품목의 빈 코퍼스를 못 본다.
+
+    ★ 통합 앵커(12-31)만 **0건이 정답**이다. ``documents.json`` 은 발행일이 절대 날짜
+      (2026-08~09)라 그날 보이는 문서가 없다 — 발행일이 ``as_of`` 를 따라 움직이면
+      아래 ``test_future_document_is_invisible_until_it_is_published`` 가 증명하려는
+      look-ahead 필터가 성립하지 않아 **의도적으로 고정해 둔 것**이다 (#73).
+      "비어도 통과"로 풀지 않고 **0건임을 못 박는다** — 느슨하게 두면 다른 앵커의
+      빈 코퍼스까지 같이 통과한다."""
     documents = ports.get_context_docs(item, as_of, DOC_TYPES)
+    if as_of == INTEGRATION:
+        assert documents == [], "12-31은 발행된 문서가 없어야 한다 — 보이면 발행일이 밀린 것이다"
+        return
     assert documents, f"{item}에 읽을 문서가 없으면 ② 컨텍스트 루프가 헛돈다"
     assert all(set(doc) == DOCUMENT_KEYS for doc in documents)
     assert all(date.fromisoformat(doc["published_at"]) <= as_of for doc in documents)
@@ -527,7 +540,7 @@ def test_non_integer_cash_horizon_is_rejected(horizon: object) -> None:
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 @pytest.mark.parametrize("item", mocks.ITEMS)
 def test_every_port_returns_data_on_every_anchor_day(item: str, as_of: date) -> None:
-    """6개 포트 × 4품목 × 4앵커일이 전부 살아 있다 (E1-3 DoD).
+    """6개 포트 × 4품목 × 5앵커일이 전부 살아 있다 (E1-3 DoD).
 
     시그니처만 있던 단계의 ``NotImplementedError`` 검사를 대체한다. 한 품목만 돌면
     나머지 품목의 mock이 비어 있어도 초록불이 뜬다 — 실제로 그런 구멍이 있었다.
@@ -537,7 +550,12 @@ def test_every_port_returns_data_on_every_anchor_day(item: str, as_of: date) -> 
     assert ports.get_inventory(item, as_of)["lots"]
     assert ports.get_confirmed_orders(item, as_of)["orders"]
     assert ports.get_projected_cash_min(as_of, 30) > 0
-    assert ports.get_context_docs(item, as_of, DOC_TYPES)
+    # 문서 포트만 앵커마다 기대가 다르다 — 12-31 은 0건이 정답이다 (위 테스트 참조).
+    docs = ports.get_context_docs(item, as_of, DOC_TYPES)
+    if as_of == INTEGRATION:
+        assert docs == []
+    else:
+        assert docs
 
 
 def test_unknown_item_is_rejected() -> None:
