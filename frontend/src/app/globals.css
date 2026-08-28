@@ -1,5 +1,105 @@
 @import "tailwindcss";
 
+/* ═══════════════════════════════════════════════════════════════
+   발표 시연 녹화용 토큰. 대형 스크린 투사 기준으로 짠다 —
+   최소 활자 13px, 본문 17px, 핵심 수치 40px. 투사기는 대비를 깎아
+   먹으므로 잉크/바탕 대비를 실무 화면보다 한 단계 올렸다.
+   전 조합 WCAG 4.7:1 이상 (판정 밴드 9.6:1).
+
+   테마는 세 상태다: 명시 light · 명시 dark · 아무것도 안 찍힌 "시스템".
+   그래서 색은 **토큰으로만** 정의하고, 미디어쿼리/`[data-theme]` 안에서는
+   토큰 값만 바꾼다. 컴포넌트 색을 미디어쿼리 안에 두면 시스템 상태에서
+   한쪽 테마 글자가 다른 쪽 바탕에 얹힌다.
+   ═══════════════════════════════════════════════════════════════ */
+@theme {
+  --color-ground: #edf0f4;
+  --color-surface: #ffffff;
+  --color-surface-2: #f3f5f9;
+  --color-surface-3: #dfe4ec;
+  --color-ink: #0d1219;
+  --color-ink-2: #48525f;
+  --color-ink-3: #606b79;
+  --color-rule: #d3d9e2;
+  --color-rule-2: #b4becb;
+  --color-accent: #17457f;
+  --color-on-accent: #ffffff;
+  --color-accent-soft: #dfe8f4;
+  --color-accent-line: #a9bdd8;
+  /* 적·청은 **가격 방향에만** 쓴다 (상승=적, 한국 시장 관행).
+     통과/차단 색으로 돌려쓰면 의미가 흐려진다. */
+  --color-up: #a02a20;
+  --color-up-soft: #f8e8e6;
+  --color-down: #14588f;
+  --color-down-soft: #e3eef7;
+  --color-warn: #7e5806;
+  --color-warn-soft: #f7eeda;
+  --color-warn-line: #d9c293;
+  /* 지워진 열의 빗금 */
+  --color-void: #8a94a2;
+
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono",
+    "JetBrains Mono", "D2Coding", monospace;
+
+  --text-hero: 40px;
+  --text-xl2: 30px;
+  --text-lg2: 22px;
+  --text-md2: 17px;
+  --text-sm2: 15px;
+  --text-xs2: 13px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-ground: #0b0f15;
+    --color-surface: #151a22;
+    --color-surface-2: #1b222c;
+    --color-surface-3: #28313d;
+    --color-ink: #f1f4f8;
+    --color-ink-2: #aab5c3;
+    --color-ink-3: #939eac;
+    --color-rule: #2a333f;
+    --color-rule-2: #3d4855;
+    --color-accent: #8fb6ea;
+    --color-on-accent: #0b0f15;
+    --color-accent-soft: #18273a;
+    --color-accent-line: #365071;
+    --color-up: #ec8a7d;
+    --color-up-soft: #2c1a17;
+    --color-down: #74b6ec;
+    --color-down-soft: #13232f;
+    --color-warn: #dbaa48;
+    --color-warn-soft: #2c2416;
+    --color-warn-line: #4f401f;
+    --color-void: #5a6573;
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-ground: #0b0f15;
+  --color-surface: #151a22;
+  --color-surface-2: #1b222c;
+  --color-surface-3: #28313d;
+  --color-ink: #f1f4f8;
+  --color-ink-2: #aab5c3;
+  --color-ink-3: #939eac;
+  --color-rule: #2a333f;
+  --color-rule-2: #3d4855;
+  --color-accent: #8fb6ea;
+  --color-on-accent: #0b0f15;
+  --color-accent-soft: #18273a;
+  --color-accent-line: #365071;
+  --color-up: #ec8a7d;
+  --color-up-soft: #2c1a17;
+  --color-down: #74b6ec;
+  --color-down-soft: #13232f;
+  --color-warn: #dbaa48;
+  --color-warn-soft: #2c2416;
+  --color-warn-line: #4f401f;
+  --color-void: #5a6573;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -8,4 +108,89 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+}
+
+body {
+  /* 투사 화면은 바탕을 호스트에서 빌려오면 안 된다 — 명시한다 */
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-md2);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 숫자는 전부 모노 + 자릿수 고정 — 표에서 세로로 맞는다 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+/* 터미널 필드 라벨 */
+.lbl {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+  font-weight: 500;
+}
+
+/* 만들지 않은 안의 자리 — 열을 빼지 않고 비운다.
+   열이 사라지면 "원래 2안"으로 읽히고, 지워져 있으면
+   "있어야 할 것이 지워졌다"로 읽힌다. */
+.void-cell {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 9px,
+    color-mix(in srgb, var(--color-void) 26%, transparent) 9px 11px
+  );
+}
+
+@keyframes pulse-ring {
+  from {
+    transform: scale(0.74);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1.2);
+    opacity: 0;
+  }
+}
+.pulse-ring::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+  border: 2px solid var(--color-accent);
+  opacity: 0.3;
+  animation: pulse-ring 1.1s ease-out infinite;
+}
+
+@keyframes skeleton {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.skeleton {
+  animation: skeleton 1.15s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
