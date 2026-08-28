@@ -36,13 +36,14 @@ def req(mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None) -> AgentRequest:
 
 
 class _Lot:
-    """`build_lot_constraints` 가 돌려주는 모양만 흉내 낸다 — 어댑터가 읽는 5필드."""
+    """`build_lot_constraints` 가 돌려주는 모양만 흉내 낸다 — 어댑터가 읽는 6필드."""
 
-    def __init__(self, lot_id: str, qty: str, freshness: int | None):
+    def __init__(self, lot_id: str, qty: str, freshness: int | None, grade: str | None = None):
         self.lot_id = lot_id
         self.item = "배추"
         self.available_qty_kg = Decimal(qty)
         self.remaining_freshness_days = freshness
+        self.grade = grade
         self.status = "ACTIVE"
 
 
@@ -98,7 +99,8 @@ def _snapshot(**overrides) -> InventoryLogisticsSnapshot:
     return InventoryLogisticsSnapshot(**{**base, **overrides})
 
 
-_LOTS = [_Lot("LOT-A", "300.5", 10), _Lot("LOT-B", "200", None)]
+#: LOT-B 는 등급·신선도가 **확인되지 않은** Lot 이다 — 둘 다 None 으로 나가야 한다.
+_LOTS = [_Lot("LOT-A", "300.5", 10, grade="상"), _Lot("LOT-B", "200", None)]
 
 
 @pytest.fixture
@@ -216,6 +218,22 @@ def test_Lot_근거는_Lot_을_담은_참조를_가리킨다(wired):
     reply, _ = adapter.logistics_port(req())
     lot_ev = next(e for e in reply.evidences if e.claim.startswith("lots[LOT-A]"))
     assert "inventory_lots" in lot_ev.ref_ids[0]
+
+
+def test_Lot_등급은_물류가_준_값_그대로_실린다(wired):
+    """등급은 DB 에서 오는 값이라 **물류가 실어야** 매입 등급 배분이 볼 수 있다.
+
+    `None` 이어도 키를 빼지 않는다 — *"등급 축이 없다"* 와 *"등급을 모른다"* 는
+    다르다. 어댑터는 값을 만들지 않고 그대로 옮기기만 한다.
+    """
+    reply, _ = adapter.logistics_port(req())
+    lots = {lot["lot_id"]: lot for lot in reply.payload["lots"]}
+
+    assert lots["LOT-A"]["grade"] == "상"
+    assert "grade" in lots["LOT-B"]
+    assert lots["LOT-B"]["grade"] is None
+    # 매입이 stocked_at/shelf_life_days 로 다시 계산하지 않도록 파생 원재료는 안 싣는다.
+    assert not {"stocked_at", "shelf_life_days", "remaining_kg"} & lots["LOT-A"].keys()
 
 
 def test_스냅샷_기준일이_다르면_판단하지_않는다(wired):

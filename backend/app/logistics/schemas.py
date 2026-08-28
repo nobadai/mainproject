@@ -376,6 +376,9 @@ class LotConstraint(BaseModel):
     item: str
     available_qty_kg: Decimal = Field(ge=0)
     remaining_freshness_days: int | None = None
+    #: Snapshot의 정규화 등급을 그대로 나른다. 정규화 근거가 없으면 None이며,
+    #: 필드를 빠뜨리는 것(키 없음)과 None(확인 불가)은 다른 상태다.
+    grade: str | None = None
     status: str
 
 

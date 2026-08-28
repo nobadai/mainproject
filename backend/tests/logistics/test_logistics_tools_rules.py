@@ -404,6 +404,53 @@ def test_item_without_ml_forecast_stays_in_inventory(complete_logistics_snapshot
     assert any(lot.item == "피마늘" for lot in build_lot_constraints(snapshot))
 
 
+def test_lot_constraints_carry_grade_and_freshness_unchanged(complete_logistics_snapshot):
+    """Snapshot의 등급·신선도를 그대로 나른다 — 여기서 만들거나 0으로 채우지 않는다.
+
+    등급은 재고 DB에서 오는 값이라 물류가 실어야 매입 등급 배분이 볼 수 있다.
+    """
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [
+                InventoryLotSnapshot(
+                    lot_id="LOT-001",
+                    item="배추",
+                    grade="상",
+                    available_qty_kg=Decimal(100),
+                    remaining_freshness_days=8,
+                    status="ACTIVE",
+                ),
+                InventoryLotSnapshot(
+                    lot_id="LOT-002",
+                    item="양파",
+                    grade=None,
+                    available_qty_kg=Decimal(50),
+                    remaining_freshness_days=None,
+                    status="ACTIVE",
+                ),
+            ]
+        }
+    )
+
+    constraints = {row.lot_id: row for row in build_lot_constraints(snapshot)}
+
+    assert constraints["LOT-001"].grade == "상"
+    assert constraints["LOT-001"].remaining_freshness_days == 8
+    # 정규화 근거가 없는 Lot은 None을 유지한다 — 임의 등급을 만들지 않는다.
+    assert constraints["LOT-002"].grade is None
+    # 신선도 None을 0으로 바꾸지 않는다 (0 != null).
+    assert constraints["LOT-002"].remaining_freshness_days is None
+    # 신선도 계산 책임은 물류에 있다 — 남이 다시 계산할 원재료를 싣지 않는다.
+    assert set(constraints["LOT-001"].model_dump()) == {
+        "lot_id",
+        "item",
+        "available_qty_kg",
+        "remaining_freshness_days",
+        "grade",
+        "status",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Runtime 규칙
 # ---------------------------------------------------------------------------
@@ -480,6 +527,223 @@ def test_future_occupancy_same_day_outbound_releases_next_day(complete_logistics
     assert occupancy[ARRIVAL] == Decimal(5500)
     # 8/24: used 1000 + inbound 5000 − 전일 출고 500 해제 = 5500.
     assert occupancy[date(2026, 8, 24)] == Decimal(5500)
+
+
+# ---------------------------------------------------------------------------
+# 확정 출고 > 보유량 — 추가 매입이 필요한 정상 상태이지 음수 점유가 아니다
+# ---------------------------------------------------------------------------
+
+
+def _short_supply_snapshot(complete_logistics_snapshot):
+    """확정 납품 150kg > 현재 재고 100kg — 50kg은 부족분이지 음수 점유량이 아니다."""
+    return complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [_lot("LOT-SHORT", "배추", 100, 5, "ACTIVE")],
+            "used_capacity_kg": Decimal(100),
+            "confirmed_outbound_schedule": [
+                ScheduledQuantity(date=date(2026, 8, 22), quantity_kg=Decimal(150), item="배추")
+            ],
+        }
+    )
+
+
+def test_confirmed_outbound_over_stock_keeps_capacity_computable(complete_logistics_snapshot):
+    """확정 출고가 보유량을 넘어도 계산이 무너지지 않고 매입 판단을 이어갈 수 있다."""
+    snapshot = _short_supply_snapshot(complete_logistics_snapshot)
+
+    # 출고 150은 실재 100kg만 해제한다 — 점유 0이므로 8,000 전부가 입고 가능 공간이다.
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(8000)}
+    result = evaluate_procurement_rules(as_of=AS_OF, snapshot=snapshot)
+    assert result["runtime_status"] == "READY"
+    assert result["calculation_ready"] is True
+
+
+def test_outbound_never_releases_more_space_than_is_present(complete_logistics_snapshot):
+    """해제 공간의 상한은 그 시점 실재 물량이고, 부족분을 이후 입고가 갚지 않는다."""
+    snapshot = _short_supply_snapshot(complete_logistics_snapshot)
+    cap = calculate_cap_by_date(snapshot, [ARRIVAL])[ARRIVAL]
+
+    assert snapshot.guaranteed_capacity_kg - cap == Decimal(0)
+
+    # 8/23 확정 입고 200은 8/22에 못 내보낸 50kg을 메우지 않고 그대로 점유한다.
+    # 부족분을 미래 입고에서 빼면 cap이 7,850으로 잘못 나온다.
+    with_later_inbound = snapshot.model_copy(
+        update={
+            "confirmed_inbound_schedule": [
+                ScheduledQuantity(date=ARRIVAL, quantity_kg=Decimal(200), item="배추")
+            ]
+        }
+    )
+    assert calculate_cap_by_date(with_later_inbound, [ARRIVAL]) == {ARRIVAL: Decimal(7800)}
+
+
+def test_future_occupancy_outbound_over_stock_stays_non_negative(complete_logistics_snapshot):
+    """H1 미래 점유도 같은 규칙 — 확정 출고 초과가 음수 점유를 만들지 않는다."""
+    snapshot = _short_supply_snapshot(complete_logistics_snapshot)
+    schedule = [ScheduledQuantity(date=ARRIVAL, quantity_kg=Decimal(300))]
+
+    # 8/22 출고 150은 실재 100만 해제해 0이 되고, 8/23 승인 매입 300이 그대로 점유한다.
+    assert calculate_future_occupancy_by_date(snapshot, schedule) == {ARRIVAL: Decimal(300)}
+
+
+# ---------------------------------------------------------------------------
+# 확정 출고는 자기 품목 재고만 창고에서 빼낸다
+# ---------------------------------------------------------------------------
+
+OUTBOUND_DAY = date(2026, 8, 22)
+
+
+def _outbound_snapshot(complete_logistics_snapshot, lots, *, item: str, quantity: int):
+    """주어진 Lot 구성에 특정 품목 확정 출고 한 건만 얹은 Snapshot."""
+    return complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": lots,
+            "used_capacity_kg": sum((lot.available_qty_kg for lot in lots), start=Decimal(0)),
+            "confirmed_outbound_schedule": [
+                ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(quantity), item=item)
+            ],
+        }
+    )
+
+
+def test_outbound_does_not_release_other_item_inventory(complete_logistics_snapshot):
+    """Case A: 배추 확정 출고가 양파 재고를 창고에서 빼내면 안 된다."""
+    snapshot = _outbound_snapshot(
+        complete_logistics_snapshot,
+        [_lot("LOT-YANGPA", "양파", 100, 5, "ACTIVE")],
+        item="배추",
+        quantity=150,
+    )
+
+    cap = calculate_cap_by_date(snapshot, [OUTBOUND_DAY, ARRIVAL])
+
+    # 8/22: 같은 날 출고는 당일 공간을 열지 않는다.
+    assert cap[OUTBOUND_DAY] == Decimal(7900)
+    # 8/23: 내보낼 배추가 0kg이라 해제할 공간이 없다 — 양파 100kg은 그대로 점유한다.
+    assert cap[ARRIVAL] == Decimal(7900)
+
+
+def test_outbound_releases_only_matching_item_inventory(complete_logistics_snapshot):
+    """Case B 대조군: 같은 품목이면 실재 물량까지 정상적으로 해제된다."""
+    snapshot = _outbound_snapshot(
+        complete_logistics_snapshot,
+        [_lot("LOT-BAECHU", "배추", 100, 5, "ACTIVE")],
+        item="배추",
+        quantity=150,
+    )
+
+    cap = calculate_cap_by_date(snapshot, [OUTBOUND_DAY, ARRIVAL])
+
+    assert cap[OUTBOUND_DAY] == Decimal(7900)
+    assert cap[ARRIVAL] == Decimal(8000)
+
+
+def test_outbound_over_stock_preserves_other_item_occupancy(complete_logistics_snapshot):
+    """Case C: 배추 40 + 양파 60에서 배추 출고 150은 배추 40만 해제한다."""
+    snapshot = _outbound_snapshot(
+        complete_logistics_snapshot,
+        [
+            _lot("LOT-BAECHU", "배추", 40, 5, "ACTIVE"),
+            _lot("LOT-YANGPA", "양파", 60, 5, "ACTIVE"),
+        ],
+        item="배추",
+        quantity=150,
+    )
+
+    cap = calculate_cap_by_date(snapshot, [OUTBOUND_DAY, ARRIVAL])
+
+    assert cap[OUTBOUND_DAY] == Decimal(7900)
+    # 배추 40 → 0, 양파 60은 유지 → 총 점유 60.
+    assert cap[ARRIVAL] == Decimal(7940)
+
+
+def test_inventory_by_item_and_occupancy_agree_on_other_item_stock(complete_logistics_snapshot):
+    """가용재고가 양파 100kg이라면서 창고 점유를 0으로 보면 두 값이 모순된다."""
+    snapshot = _outbound_snapshot(
+        complete_logistics_snapshot,
+        [_lot("LOT-YANGPA", "양파", 100, 5, "ACTIVE")],
+        item="배추",
+        quantity=150,
+    )
+
+    inventory = build_inventory_by_item(snapshot)
+    assert inventory is not None
+    assert [(row.item, row.available_qty_kg) for row in inventory] == [("양파", Decimal(100))]
+
+    cap = calculate_cap_by_date(snapshot, [ARRIVAL])[ARRIVAL]
+    assert snapshot.guaranteed_capacity_kg - cap >= Decimal(100)
+
+
+def test_item_outbound_does_not_consume_unattributed_occupancy(complete_logistics_snapshot):
+    """품목 초과 출고가 품목 미귀속 점유를 대신 소진하면 안 된다.
+
+    used 1,000 중 Lot으로 식별되는 것은 700(배추 300 · 양파 400)이고 나머지 300은
+    미귀속이다. 배추 출고 500은 배추 300만 열 수 있다.
+    """
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [
+                _lot("LOT-BAECHU", "배추", 300, 5, "ACTIVE"),
+                _lot("LOT-YANGPA", "양파", 400, 5, "ACTIVE"),
+            ],
+            "used_capacity_kg": Decimal(1000),
+            "confirmed_outbound_schedule": [
+                ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(500), item="배추")
+            ],
+        }
+    )
+
+    # 배추 0 + 양파 400 + 미귀속 300 = 700.
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(7300)}
+
+
+@pytest.mark.xfail(
+    reason=(
+        "H1 approved purchase contract lacks item dimension "
+        "(ArrivalScheduleItem has no item). Deferred until the H1 contract is revised."
+    ),
+    strict=True,
+)
+def test_future_occupancy_does_not_release_other_item_inventory(complete_logistics_snapshot):
+    """H1 미래 점유의 품목 혼선 — 알려진 한계다.
+
+    승인 매입 Schedule에 품목이 없어 품목별 재생을 할 수 없으므로 이 경로는 총량
+    계산을 유지한다. 배추 출고 150이 양파 100을 대신 소진해 300이 나온다.
+    """
+    snapshot = _outbound_snapshot(
+        complete_logistics_snapshot,
+        [_lot("LOT-YANGPA", "양파", 100, 5, "ACTIVE")],
+        item="배추",
+        quantity=150,
+    )
+    schedule = [ScheduledQuantity(date=ARRIVAL, quantity_kg=Decimal(300))]
+
+    # 양파 100은 남고 승인 매입 300이 더해져 400이어야 한다.
+    assert calculate_future_occupancy_by_date(snapshot, schedule) == {ARRIVAL: Decimal(400)}
+
+
+def test_projected_occupancy_never_goes_negative_across_mixed_outbound(
+    complete_logistics_snapshot,
+):
+    """음수 점유가 나올 정상 경로가 없다 — 방어는 불변식 위반용으로만 남는다.
+
+    품목 지정 출고와 품목 불명 출고가 겹쳐 보유량을 넘겨도 계산은 0에서 멈춘다.
+    `calculate_cap_by_date`의 `NEGATIVE_PROJECTED_OCCUPANCY` raise는 그대로 두되
+    이 경로로는 도달하지 않는다.
+    """
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [_lot("LOT-BAECHU", "배추", 100, 5, "ACTIVE")],
+            "used_capacity_kg": Decimal(100),
+            "confirmed_outbound_schedule": [
+                ScheduledQuantity(date=date(2026, 8, 21), quantity_kg=Decimal(80), item="배추"),
+                ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(100), item=None),
+            ],
+        }
+    )
+
+    # 배추 100 → 20(지정 출고 80) → 품목 불명 출고는 남은 20까지만 걷어낸다.
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(8000)}
 
 
 def test_sales_rule_marks_warehouse_over_capacity(complete_logistics_snapshot):

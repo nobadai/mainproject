@@ -220,6 +220,10 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             "available_qty_kg": _num(lot.available_qty_kg),
             # 신선도는 **없을 수 있다** — 0 으로 채우지 않는다 (§1.2-10)
             "remaining_freshness_days": lot.remaining_freshness_days,
+            # 등급도 **없을 수 있다** — 물류가 정규화 근거를 못 찾으면 None 이다.
+            #   키를 빼지 않는다: *"등급 축이 없다"* 와 *"등급을 모른다"* 는 다르다.
+            #   여기서 값을 만들지 않는다 — 물류가 준 값을 그대로 옮긴다.
+            "grade": lot.grade,
             "status": lot.status,
         }
         for lot in build_lot_constraints(snapshot)
