@@ -4,7 +4,7 @@ import { GRADE_KO, capPct } from "@/lib/format";
 import type { ViewModel } from "@/lib/types";
 
 export function Lbl({ children }: { children: ReactNode }) {
-  return <span className="lbl">{children}</span>;
+  return <span className="lbl text-ink-3">{children}</span>;
 }
 
 export function Chip({
@@ -22,7 +22,7 @@ export function Chip({
   } as const;
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-ctl border px-3 py-1 text-sm2 font-semibold ${tones[tone]}`}
+      className={`inline-flex flex-none items-center gap-2 rounded-ctl border px-3 py-1 text-sm2 font-semibold whitespace-nowrap ${tones[tone]}`}
     >
       {children}
     </span>

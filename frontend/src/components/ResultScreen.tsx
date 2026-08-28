@@ -16,7 +16,7 @@ function VerdictBand({ vm }: { vm: ViewModel }) {
     <>
       <div className="mb-4 flex flex-wrap items-center gap-8 rounded-card bg-accent px-8 py-7 text-on-accent">
         <div className="flex flex-col gap-1">
-          <span className="lbl text-on-accent/70">품목 · 기준일</span>
+          <span className="lbl text-on-accent/90">품목 · 기준일</span>
           <span className="text-xl2 font-semibold tracking-tight">
             {vm.item}
             <span className="num ml-2 text-lg2 opacity-85">{vm.asOf}</span>
@@ -98,8 +98,10 @@ function GateStrip({ vm }: { vm: ViewModel }) {
       </div>
       {vm.gates.map((g) => (
         <div key={g.name} className="border-r border-rule px-6 py-5 last:border-r-0">
-          <div className="flex min-h-8 items-center justify-between gap-3">
-            <Lbl>{g.name}</Lbl>
+          <div className="flex min-h-8 items-start justify-between gap-3">
+            <span className="min-w-0">
+              <Lbl>{g.name}</Lbl>
+            </span>
             {g.blocked && <Chip tone="hold">{g.chip}</Chip>}
           </div>
           <div

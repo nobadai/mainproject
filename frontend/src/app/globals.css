@@ -110,13 +110,14 @@ body {
   letter-spacing: -0.374px;
 }
 
-/* 터미널 필드 라벨 */
+/* 터미널 필드 라벨. **색은 여기서 정하지 않는다** — 이 규칙은 레이어 밖이라
+   Tailwind 유틸리티(@layer utilities)를 이겨서, color를 박으면 호출부의
+   text-* 가 조용히 안 먹는다 (파란 밴드 위 라벨이 진회색으로 뜨던 원인). */
 .lbl {
   font-family: var(--font-mono);
   font-size: var(--text-xs2);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--color-ink-3);
   font-weight: 600;
 }
 

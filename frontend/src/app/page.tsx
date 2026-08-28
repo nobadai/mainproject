@@ -11,6 +11,14 @@ import type { ViewModel } from "@/lib/types";
 const IDLE: StageState[] = ["idle", "idle", "idle", "idle"];
 /** 단계 하나가 켜지고 꺼지는 간격. 녹화에서 읽을 수 있는 속도다. */
 const STEP_MS = 640;
+/**
+ * 값이 다 차고 나서 결과 탭으로 넘어가기까지의 여유.
+ *
+ * 없으면 **각 파트가 낸 값을 볼 수 없다** — 값이 채워지는 순간과 탭 전환이 같은
+ * 프레임에서 일어나서, 실행 경로에 재무 31,854,627원 · 물류 7,636.72kg ·
+ * ML 1,881원이 찬 화면이 한 프레임도 안 보인 채 넘어간다. 그 장면이 시연의 핵심이다.
+ */
+const SETTLE_MS = 2_000;
 
 export default function Home() {
   const [tab, setTab] = useState<"run" | "result">("run");
@@ -74,7 +82,9 @@ export default function Home() {
         : "완료 · 표본으로 표시 (API 결과 아님)",
     );
     setBusy(false);
-    setTab("result");
+    // 타이머를 ref에 담는다 — 재실행·초기화가 이걸 취소하지 못하면, 사용자가
+    // 실행 탭으로 되돌아온 뒤에 뒤늦게 결과 탭으로 튕긴다.
+    timers.current.push(setTimeout(() => setTab("result"), SETTLE_MS));
   }, [asOf]);
 
   /** 장면 전환 = as_of 를 바꿔 **재호출**한다. 화면에 담아 둔 다른 응답을 꺼내는 게 아니다. */
