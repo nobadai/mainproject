@@ -333,11 +333,81 @@ def test_REVIEW_REQUIRED_는_conditional_로_옮긴다():
     assert adapter._VERDICT_MAP["FAIL"] == "reject"
 
 
-def test_모르는_mode_는_능력_없음으로_답한다(wired):
-    request = req(mode="STATUS_QUERY")
-    reply, _ = adapter.logistics_port(request)
+def test_모르는_mode_는_능력_없음으로_답한다():
+    """🔴 이제 **공개 경로로는 도달할 수 없다.**
+
+    봉투가 `AgentRequest` 에서 mode 를 검증하는데(`ContractViolation`), inventory 의
+    허용 mode 셋이 전부 구현됐다. 그래서 `logistics_port()` 를 통해서는 이 분기에
+    닿지 못하고, 함수를 직접 부른다.
+
+    지워도 되는 코드처럼 보이지만 남긴다 — 봉투가 mode 를 하나 더 여는 날
+    **구현 전까지 이 분기가 받는다.** 그때 조용히 빈 답을 내는 대신
+    `missing_capability` 로 이름을 남기는 것이 이 함수의 일이다.
+    """
+    request = req(mode="SCENARIO_VALIDATION")  # 봉투가 허용하는 아무 mode
+    reply, _ = adapter._not_implemented(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"
-    assert reply.missing_capability == ("STATUS_QUERY 번역",)
+    assert reply.missing_capability == ("SCENARIO_VALIDATION 번역",)
+    # RUNTIME_NOT_READY 는 이름이 비면 ContractViolation 이다 (M-1 §5.1)
+    assert reply.missing_data
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — 조회는 경계가 아니라 상태를 답한다
+# ---------------------------------------------------------------------------
+
+
+def test_조회는_봉투_검증을_통과한다(wired):
+    request = req(mode="STATUS_QUERY")
+    reply, meta = adapter.logistics_port(request)
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "ok"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_조회는_상태를_싣고_경계는_안_싣는다(wired):
+    """★ `PRE_PURCHASE` 와 읽는 것은 같고 **싣는 것이 다르다.**
+
+    `cap_by_date` 는 매입이 분할 계획을 짤 때 쓰는 경계다. "지금 창고 어떠냐" 에
+    D+18 Band 를 실으면 사람이 읽을 것이 아닌 표가 답을 덮는다.
+    """
+    reply, _ = adapter.logistics_port(req(mode="STATUS_QUERY"))
+    assert reply.payload["used_capacity_kg"] == 1000.0
+    assert reply.payload["warehouse_free_kg"] == 7000.0
+    assert reply.payload["guaranteed_capacity_kg"] == 8000.0
+    assert reply.payload["lot_count"] == 2
+    for boundary in ("cap_by_date", "inbound_lead_days", "daily_inbound_capacity_kg", "lots"):
+        assert boundary not in reply.payload
+
+
+def test_조회는_가장_짧은_신선도만_밝힌다(wired):
+    """★ 임계를 **지어내지 않는다** — "며칠 이하가 임박인가" 는 물류 정책이다.
+
+    여기서 3일·5일 같은 수를 고르면 §1.2-8(하드 제약값 파생 금지)이 된다.
+    최솟값과 그 Lot 만 밝히고 위험 여부는 사람이 본다.
+    """
+    reply, _ = adapter.logistics_port(req(mode="STATUS_QUERY"))
+    # LOT-A 10일 · LOT-B 는 None — None 을 0 으로 읽으면 최솟값이 뒤집힌다
+    assert reply.payload["min_remaining_freshness_days"] == 10
+    assert reply.payload["min_freshness_lot_id"] == "LOT-A"
+
+
+def test_신선도가_하나도_없으면_이름을_남긴다(wired, monkeypatch):
+    """Lot 은 있는데 신선도가 안 실린 것은 **"0 일 남았다" 가 아니다** (§1.2-10)."""
+    monkeypatch.setattr(
+        adapter, "build_lot_constraints", lambda snapshot: [_Lot("LOT-C", "100", None)]
+    )
+    reply, _ = adapter.logistics_port(req(mode="STATUS_QUERY"))
+    assert "min_remaining_freshness_days" not in reply.payload
+    assert "lots[].remaining_freshness_days" in reply.missing_data
+    assert reply.runtime_status == "READY"  # 못 채운 값이 조회 자체를 막지 않는다
+
+
+def test_조회도_as_of_가_어긋나면_안_답한다(wired):
+    """다른 날의 재고는 그날의 사실이 아니다 (§1.2-6) — 조회라고 느슨하지 않다."""
+    reply, _ = adapter.logistics_port(req(mode="STATUS_QUERY", as_of=date(2026, 1, 1)))
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.missing_data == ("logistics_snapshot@2026-01-01",)
 
 
 def test_물류가_NOT_READY_면_반드시_이름이_남는다(wired, monkeypatch):

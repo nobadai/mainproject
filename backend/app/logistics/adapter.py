@@ -101,7 +101,158 @@ def logistics_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata
         return _pre_purchase(request)
     if request.mode == "SCENARIO_VALIDATION":
         return _scenario_validation(request)
+    if request.mode == "STATUS_QUERY":
+        return _status_query(request)
     return _not_implemented(request)
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — "지금 창고·재고 상황" 조회
+# ---------------------------------------------------------------------------
+
+
+def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """묻기만 하는 요청. **경계가 아니라 상태**를 돌려준다.
+
+    ★ `PRE_PURCHASE` 와 읽는 것은 같고 **싣는 것이 다르다.** `cap_by_date` ·
+      `inbound_lead_days` · `daily_inbound_capacity_kg` 는 *매입이 분할 계획을 짤 때
+      쓰는 경계*라, "지금 창고 어떠냐" 를 묻는 사람에게는 답이 아니다.
+      D+18 Band 를 조회 답에 실으면 사람이 읽을 것이 아닌 표가 화면을 덮는다.
+
+    ★ **하드 제약 위반이 조회를 막지 않는다.** `PRE_PURCHASE` 는 `LOG-H01` 이
+      UNRESOLVED 면 경계를 못 내지만, 조회는 실행으로 이어지지 않는다. 규칙이 못 본
+      것은 `missing_data` 로 이름만 밝히고 **읽어낸 상태는 답한다** (§3.7.6 —
+      못 한 것을 한 척하지 않되, 할 수 있는 것을 안 한 척도 하지 않는다).
+
+    ★ `lots` 를 통째로 싣지 않는다. 조회에 필요한 것은 *"몇 건이 얼마나 있고 임박한
+      것이 있는가"* 이지 Lot 목록이 아니다 — 목록은 매입이 배분할 때 쓴다.
+    """
+    as_of = request.context.as_of
+    run_id = _run_id(request)
+    tools: list[str] = [_T_LOTS]
+
+    snapshot = _load_snapshot(as_of)
+    if snapshot is None:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=("logistics_snapshot", "logistics_runtime_fixture"),
+            reason="물류 스냅샷을 읽지 못했다",
+        )
+    if snapshot.as_of != as_of:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=(f"logistics_snapshot@{as_of.isoformat()}",),
+            reason=f"물류 스냅샷 기준일이 {snapshot.as_of} 다 — 요청은 {as_of} 다",
+        )
+
+    policy = _load_policy()
+    ref = _ref(snapshot)
+    lots_ref = _lots_ref(snapshot)
+    lots = build_lot_constraints(snapshot)
+
+    missing: list[str] = []
+    payload: dict[str, Any] = {
+        "as_of": as_of.isoformat(),
+        "used_capacity_kg": _num(snapshot.used_capacity_kg),
+        "lot_count": len(lots),
+    }
+
+    free_kg = _free_capacity(snapshot)
+    if free_kg is None:
+        # 0 과 "모름" 은 다르다 (§1.2-10) — 여유를 못 셈했으면 이름을 밝힌다
+        missing.append("guaranteed_capacity_kg")
+    else:
+        payload["warehouse_free_kg"] = _num(free_kg)
+
+    # 여유만 싣고 총량을 빼면 "7,499kg 남았다" 가 큰 건지 작은 건지 알 수 없다.
+    # 실으면 **근거도 같이 달아야 한다** — 봉투가 E-EVIDENCE-MISSING 으로 잡는다.
+    guaranteed = snapshot.guaranteed_capacity_kg
+    if guaranteed is not None:
+        payload["guaranteed_capacity_kg"] = _num(guaranteed)
+
+    # ── 임박 신선도 ──────────────────────────────────────────────
+    #
+    # ★ 임계를 **지어내지 않는다.** "며칠 이하가 임박인가" 는 물류 정책이지 조회의
+    #   판단이 아니라서, 최솟값과 그 Lot 만 밝히고 위험 여부는 사람이 본다.
+    #   여기서 3일·5일 같은 수를 고르면 §1.2-8(하드 제약값 파생 금지)이 된다.
+    fresh = [
+        (lot.remaining_freshness_days, lot.lot_id)
+        for lot in lots
+        if lot.remaining_freshness_days is not None
+    ]
+    if fresh:
+        days, lot_id = min(fresh)
+        payload["min_remaining_freshness_days"] = days
+        payload["min_freshness_lot_id"] = lot_id
+    elif lots:
+        # Lot 은 있는데 신선도가 하나도 안 실렸다 — 빈 값으로 덮지 않는다
+        missing.append("lots[].remaining_freshness_days")
+
+    evidences = [
+        _ev("used_capacity_kg", snapshot.used_capacity_kg, "kg", ref, "현재 점유량"),
+        _ev("lot_count", len(lots), "count", lots_ref, "ACTIVE Lot 건수"),
+    ]
+    if guaranteed is not None:
+        evidences.append(
+            _ev(
+                "guaranteed_capacity_kg",
+                guaranteed,
+                "kg",
+                _policy_ref(policy, "guaranteed_capacity_kg", ref),
+                "3PL 보장 Capacity (독립 SLA) — burst 9,600 은 순간 초과라 기준이 아니다",
+                grade="SIM_FIXED",
+            )
+        )
+    if free_kg is not None:
+        evidences.append(
+            _ev(
+                "warehouse_free_kg",
+                free_kg,
+                "kg",
+                ref,
+                "guaranteed_capacity_kg − 현재 점유량 (물류 calculate_cap_by_date 정의)",
+            )
+        )
+    if "min_remaining_freshness_days" in payload:
+        evidences.append(
+            _ev(
+                "min_remaining_freshness_days",
+                payload["min_remaining_freshness_days"],
+                "days",
+                lots_ref,
+                f"Lot {payload['min_freshness_lot_id']} — 가장 짧은 잔여 신선도",
+            )
+        )
+
+    if policy is not None:
+        payload["policy_version_used"] = policy.policy_version
+        if "guaranteed_capacity_kg" not in policy.source_refs:
+            missing.append("guaranteed_capacity_kg@policy_source_ref")
+    else:
+        missing.append("logistics_policy")
+
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=as_of,
+        agent=_AGENT,
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="READY",
+        business_status="ok",
+        payload=payload,
+        evidences=tuple(evidences),
+        # 조회는 판정을 내지 않는다 — cap_by_date_policy 는 경계 해석이라 여기 없다
+        judgment_fields=(),
+        missing_data=tuple(missing),
+        reasoning="현재 창고·재고 상태를 조회했다."
+        if not missing
+        else "읽어낸 상태는 답했고, 채우지 못한 값은 이름을 밝혔다.",
+    )
+    return reply, _meta(request, run_id, tools)
 
 
 # ---------------------------------------------------------------------------
