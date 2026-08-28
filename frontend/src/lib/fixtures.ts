@@ -25,6 +25,662 @@ export interface Scene {
 }
 
 export const SCENES: Record<string, Scene> = {
+  "2025-12-31": {
+    "input": {
+      "item": "배추",
+      "forecast": {
+        "generated_at": "2025-12-31T06:00:00+09:00",
+        "item": "배추",
+        "unit": "원/kg",
+        "current_price": 1650,
+        "horizon_days": 18,
+        "daily": [
+          {
+            "date": "2026-01-01",
+            "predicted": 1666,
+            "lower": 1616,
+            "upper": 1716
+          },
+          {
+            "date": "2026-01-02",
+            "predicted": 1681,
+            "lower": 1631,
+            "upper": 1731
+          },
+          {
+            "date": "2026-01-03",
+            "predicted": 1697,
+            "lower": 1646,
+            "upper": 1748
+          },
+          {
+            "date": "2026-01-04",
+            "predicted": 1713,
+            "lower": 1662,
+            "upper": 1764
+          },
+          {
+            "date": "2026-01-05",
+            "predicted": 1729,
+            "lower": 1677,
+            "upper": 1781
+          },
+          {
+            "date": "2026-01-06",
+            "predicted": 1745,
+            "lower": 1693,
+            "upper": 1797
+          },
+          {
+            "date": "2026-01-07",
+            "predicted": 1762,
+            "lower": 1709,
+            "upper": 1815
+          },
+          {
+            "date": "2026-01-08",
+            "predicted": 1778,
+            "lower": 1725,
+            "upper": 1831
+          },
+          {
+            "date": "2026-01-09",
+            "predicted": 1795,
+            "lower": 1741,
+            "upper": 1849
+          },
+          {
+            "date": "2026-01-10",
+            "predicted": 1812,
+            "lower": 1758,
+            "upper": 1866
+          },
+          {
+            "date": "2026-01-11",
+            "predicted": 1829,
+            "lower": 1774,
+            "upper": 1884
+          },
+          {
+            "date": "2026-01-12",
+            "predicted": 1846,
+            "lower": 1791,
+            "upper": 1901
+          },
+          {
+            "date": "2026-01-13",
+            "predicted": 1863,
+            "lower": 1807,
+            "upper": 1919
+          },
+          {
+            "date": "2026-01-14",
+            "predicted": 1881,
+            "lower": 1825,
+            "upper": 1937
+          },
+          {
+            "date": "2026-01-15",
+            "predicted": 1899,
+            "lower": 1842,
+            "upper": 1956
+          },
+          {
+            "date": "2026-01-16",
+            "predicted": 1917,
+            "lower": 1859,
+            "upper": 1975
+          },
+          {
+            "date": "2026-01-17",
+            "predicted": 1935,
+            "lower": 1877,
+            "upper": 1993
+          },
+          {
+            "date": "2026-01-18",
+            "predicted": 1953,
+            "lower": 1894,
+            "upper": 2012
+          }
+        ],
+        "model_version": "mock-v0"
+      },
+      "confirmed_orders": {
+        "as_of": "2025-12-31",
+        "item": "배추",
+        "orders": [
+          {
+            "sale_id": 7,
+            "qty_kg": 12000,
+            "due_date": "2026-01-03"
+          },
+          {
+            "sale_id": 9,
+            "qty_kg": 6000,
+            "due_date": "2026-01-08"
+          }
+        ],
+        "total_kg": 18000
+      },
+      "policy_values": {
+        "contract_price_krw": 2293,
+        "item_mix_ratio": {
+          "배추": 0.812,
+          "무": 0.081,
+          "양파": 0.068,
+          "피마늘": 0.039
+        }
+      }
+    },
+    "fallback": {
+      "situation": "stable",
+      "allowed_axes": [
+        "quantity",
+        "timing"
+      ],
+      "confidence": "high",
+      "context_docs_used": [],
+      "meta": {
+        "as_of": "2025-12-31",
+        "item": "배추",
+        "agent_version": "v1.1",
+        "is_refeed": false,
+        "feedback_attempt": 0
+      },
+      "scenarios": [
+        {
+          "label": "보수",
+          "strategy_type": "quantity",
+          "coverage_days": 2,
+          "total_qty_kg": 2571,
+          "total_amount_krw": 4242150,
+          "max_price": 1731,
+          "margin_warning": false,
+          "split_plan": [
+            {
+              "seq": 1,
+              "date": "2025-12-31",
+              "qty_kg": 2571
+            }
+          ],
+          "sourcing_plan": [
+            {
+              "market": "가락",
+              "grade": "상",
+              "qty_kg": 2571,
+              "grade_unit_price": 1650
+            }
+          ],
+          "expected_margin_rate": 0.2804186655037069,
+          "rationale": [
+            {
+              "source": "예측",
+              "claim": "D+14 예측 +14.0%, 신뢰구간 폭 6.0%",
+              "ref_id": "FC-mock-v0-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "mock-v0 경락가 예측 (지평 18일)"
+            },
+            {
+              "source": "시세관측",
+              "claim": "가락 당일 경락가 1,850원/kg 등 3개 등급",
+              "ref_id": "MQ-가락-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "가락시장 등급별 당일 실측 (mock)"
+            },
+            {
+              "source": "주문",
+              "claim": "확정주문 18,000kg → 일평균 1,286kg × D=2",
+              "ref_id": "SO-2025-12-31",
+              "evidence_grade": "ASSUMED",
+              "evidence_detail": "확정주문에서 파생한 일평균 — 수요 파생값이라 SIM_FIXED 자격 없음"
+            },
+            {
+              "source": "재고",
+              "claim": "가용 3,000kg (로트 12)",
+              "ref_id": "INV-12",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "inventory_lots 스냅샷 (mock)"
+            },
+            {
+              "source": "현금",
+              "claim": "재무 매입 상한 20,000,000원까지 매입 가능",
+              "ref_id": "CASH-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "finance_cap_amount_krw (재무 PRE_PURCHASE 회신)"
+            }
+          ],
+          "risks": [
+            "입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 expected_arrival_date를 계산하지 않는다 (상세설계 §4-⑦)",
+            "기존 로트 12 잔여신선도 6일 — 신규 매입분이 이 로트를 밀어내지 않는지 확인 필요"
+          ]
+        },
+        {
+          "label": "기본",
+          "strategy_type": "quantity",
+          "coverage_days": 5,
+          "total_qty_kg": 6429,
+          "total_amount_krw": 10607850,
+          "max_price": 1781,
+          "margin_warning": false,
+          "split_plan": [
+            {
+              "seq": 1,
+              "date": "2025-12-31",
+              "qty_kg": 6429
+            }
+          ],
+          "sourcing_plan": [
+            {
+              "market": "가락",
+              "grade": "상",
+              "qty_kg": 6429,
+              "grade_unit_price": 1650
+            }
+          ],
+          "expected_margin_rate": 0.2804186655037069,
+          "rationale": [
+            {
+              "source": "예측",
+              "claim": "D+14 예측 +14.0%, 신뢰구간 폭 6.0%",
+              "ref_id": "FC-mock-v0-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "mock-v0 경락가 예측 (지평 18일)"
+            },
+            {
+              "source": "시세관측",
+              "claim": "가락 당일 경락가 1,850원/kg 등 3개 등급",
+              "ref_id": "MQ-가락-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "가락시장 등급별 당일 실측 (mock)"
+            },
+            {
+              "source": "주문",
+              "claim": "확정주문 18,000kg → 일평균 1,286kg × D=5",
+              "ref_id": "SO-2025-12-31",
+              "evidence_grade": "ASSUMED",
+              "evidence_detail": "확정주문에서 파생한 일평균 — 수요 파생값이라 SIM_FIXED 자격 없음"
+            },
+            {
+              "source": "재고",
+              "claim": "가용 3,000kg (로트 12)",
+              "ref_id": "INV-12",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "inventory_lots 스냅샷 (mock)"
+            },
+            {
+              "source": "현금",
+              "claim": "재무 매입 상한 20,000,000원까지 매입 가능",
+              "ref_id": "CASH-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "finance_cap_amount_krw (재무 PRE_PURCHASE 회신)"
+            }
+          ],
+          "risks": [
+            "입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 expected_arrival_date를 계산하지 않는다 (상세설계 §4-⑦)",
+            "기존 로트 12 잔여신선도 6일 — 신규 매입분이 이 로트를 밀어내지 않는지 확인 필요"
+          ]
+        },
+        {
+          "label": "공격",
+          "strategy_type": "timing",
+          "coverage_days": 12,
+          "total_qty_kg": 12121,
+          "total_amount_krw": 19999650,
+          "max_price": 1901,
+          "margin_warning": false,
+          "split_plan": [
+            {
+              "seq": 1,
+              "date": "2025-12-31",
+              "qty_kg": 6060
+            },
+            {
+              "seq": 2,
+              "date": "2026-01-06",
+              "qty_kg": 6061
+            }
+          ],
+          "sourcing_plan": [
+            {
+              "market": "가락",
+              "grade": "상",
+              "qty_kg": 12121,
+              "grade_unit_price": 1650
+            }
+          ],
+          "payment_schedule": [
+            {
+              "seq": 1,
+              "purchase_date": "2025-12-31",
+              "payment_date": "2026-01-07",
+              "qty_kg": 6060,
+              "amount_krw": 9999000,
+              "amount_max_krw": 11520060,
+              "basis": "as_of_unit_price"
+            },
+            {
+              "seq": 2,
+              "purchase_date": "2026-01-06",
+              "payment_date": "2026-01-13",
+              "qty_kg": 6061,
+              "amount_krw": 10000650,
+              "amount_max_krw": 11521961,
+              "basis": "as_of_unit_price"
+            }
+          ],
+          "expected_margin_rate": 0.2804186655037069,
+          "rationale": [
+            {
+              "source": "예측",
+              "claim": "D+14 예측 +14.0%, 신뢰구간 폭 6.0%",
+              "ref_id": "FC-mock-v0-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "mock-v0 경락가 예측 (지평 18일)"
+            },
+            {
+              "source": "시세관측",
+              "claim": "가락 당일 경락가 1,850원/kg 등 3개 등급",
+              "ref_id": "MQ-가락-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "가락시장 등급별 당일 실측 (mock)"
+            },
+            {
+              "source": "주문",
+              "claim": "확정주문 18,000kg → 일평균 1,286kg × D=12",
+              "ref_id": "SO-2025-12-31",
+              "evidence_grade": "ASSUMED",
+              "evidence_detail": "확정주문에서 파생한 일평균 — 수요 파생값이라 SIM_FIXED 자격 없음"
+            },
+            {
+              "source": "재고",
+              "claim": "가용 3,000kg (로트 12)",
+              "ref_id": "INV-12",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "inventory_lots 스냅샷 (mock)"
+            },
+            {
+              "source": "현금",
+              "claim": "재무 매입 상한 20,000,000원까지 매입 가능",
+              "ref_id": "CASH-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "finance_cap_amount_krw (재무 PRE_PURCHASE 회신)"
+            },
+            {
+              "source": "예측",
+              "claim": "판정일까지 지속 상승 궤적 → 2회 분할로 로트 나이 분산",
+              "ref_id": "FC-mock-v0-2025-12-31",
+              "evidence_grade": "SIM_FIXED",
+              "evidence_detail": "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — 그 트레이드오프 판단은 LLM 몫이라 지금은 균등 배분이다 (상세설계 §4-④)"
+            }
+          ],
+          "risks": [
+            "입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 expected_arrival_date를 계산하지 않는다 (상세설계 §4-⑦)",
+            "현금 제약으로 원안 15,429kg에서 12,121kg으로 축소",
+            "기존 로트 12 잔여신선도 6일 — 신규 매입분이 이 로트를 밀어내지 않는지 확인 필요",
+            "2회 분할 — 회차별 도착일(= 회차 date + N4) 기준 cap_by_date 검사는 inbound_lead_days(N4) 미확정으로 보류 (상세설계 §5.5 · 규칙 3). 총량 단일 도착일로 뭉치면 분할의 창고 부담 분산 효과가 검증되지 않는다"
+          ]
+        }
+      ],
+      "reasoning": "보수·기본·공격 안을 냈다. 예측 구간이 안정 범위다. 열린 전략축은 quantity·timing이다.",
+      "evidences": [
+        {
+          "claim": "situation",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-CI-2025-12-31"
+          ],
+          "value": 0.059543,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "D+14 구간폭을 임계 0.08와 비교해 stable 판정"
+        },
+        {
+          "claim": "allowed_axes",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-CI-2025-12-31"
+          ],
+          "value": 0.059543,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "구간폭 0.060 < 0.08 → stable → 선매입 궤적 허용"
+        },
+        {
+          "claim": "allowed_axes",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-VOL-2025-12-31"
+          ],
+          "value": 15429.0,
+          "unit": "kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "추정 총량 15,429kg < 임계 20,000kg → 총량 트리거 미달"
+        },
+        {
+          "claim": "allowed_axes",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-MIX-2025-12-31"
+          ],
+          "value": 0.812,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "품목 편중 최대 0.812 ≥ 0.7 → mix 제외"
+        },
+        {
+          "claim": "scenarios",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SCEN-2025-12-31"
+          ],
+          "value": 3.0,
+          "unit": "count",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "stable 판정에서 파생 — 불확실이면 공격안을 만들지 않아 두 안이 된다"
+        },
+        {
+          "claim": "scenarios[0].coverage_days",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC0-2025-12-31"
+          ],
+          "value": 2.0,
+          "unit": "days",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "보수안 — constraints.coverage_days.by_label — 안별 커버일수 매핑"
+        },
+        {
+          "claim": "scenarios[0].total_qty_kg",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC0-2025-12-31"
+          ],
+          "value": 2571.0,
+          "unit": "kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "보수안 — 일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)으로 클립"
+        },
+        {
+          "claim": "scenarios[0].total_amount_krw",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC0-2025-12-31"
+          ],
+          "value": 4242150.0,
+          "unit": "KRW",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "보수안 — Σ(sourcing_plan[].qty_kg × grade_unit_price) — 등급 배분에서 파생"
+        },
+        {
+          "claim": "scenarios[0].max_price",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC0-2025-12-31"
+          ],
+          "value": 1731.0,
+          "unit": "KRW/kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "보수안 — 커버 구간 예측 상단(q90)의 최대값"
+        },
+        {
+          "claim": "scenarios[0].expected_margin_rate",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC0-2025-12-31"
+          ],
+          "value": 0.2804186655037069,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "보수안 — (contract_price − 가중 매입단가) ÷ contract_price"
+        },
+        {
+          "claim": "scenarios[1].coverage_days",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC1-2025-12-31"
+          ],
+          "value": 5.0,
+          "unit": "days",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "기본안 — constraints.coverage_days.by_label — 안별 커버일수 매핑"
+        },
+        {
+          "claim": "scenarios[1].total_qty_kg",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC1-2025-12-31"
+          ],
+          "value": 6429.0,
+          "unit": "kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "기본안 — 일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)으로 클립"
+        },
+        {
+          "claim": "scenarios[1].total_amount_krw",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC1-2025-12-31"
+          ],
+          "value": 10607850.0,
+          "unit": "KRW",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "기본안 — Σ(sourcing_plan[].qty_kg × grade_unit_price) — 등급 배분에서 파생"
+        },
+        {
+          "claim": "scenarios[1].max_price",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC1-2025-12-31"
+          ],
+          "value": 1781.0,
+          "unit": "KRW/kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "기본안 — 커버 구간 예측 상단(q90)의 최대값"
+        },
+        {
+          "claim": "scenarios[1].expected_margin_rate",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC1-2025-12-31"
+          ],
+          "value": 0.2804186655037069,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "기본안 — (contract_price − 가중 매입단가) ÷ contract_price"
+        },
+        {
+          "claim": "scenarios[2].coverage_days",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC2-2025-12-31"
+          ],
+          "value": 12.0,
+          "unit": "days",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "공격안 — constraints.coverage_days.by_label — 안별 커버일수 매핑"
+        },
+        {
+          "claim": "scenarios[2].total_qty_kg",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC2-2025-12-31"
+          ],
+          "value": 12121.0,
+          "unit": "kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "공격안 — 일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)으로 클립"
+        },
+        {
+          "claim": "scenarios[2].total_amount_krw",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC2-2025-12-31"
+          ],
+          "value": 19999650.0,
+          "unit": "KRW",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "공격안 — Σ(sourcing_plan[].qty_kg × grade_unit_price) — 등급 배분에서 파생"
+        },
+        {
+          "claim": "scenarios[2].max_price",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC2-2025-12-31"
+          ],
+          "value": 1901.0,
+          "unit": "KRW/kg",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "공격안 — 커버 구간 예측 상단(q90)의 최대값"
+        },
+        {
+          "claim": "scenarios[2].expected_margin_rate",
+          "source": "tool_calc",
+          "ref_ids": [
+            "배추-SC2-2025-12-31"
+          ],
+          "value": 0.2804186655037069,
+          "unit": "ratio",
+          "evidence_grade": "SIM_FIXED",
+          "evidence_detail": "공격안 — (contract_price − 가중 매입단가) ÷ contract_price"
+        }
+      ],
+      "run_id": "PUR-RUN-REQ-2025-12-31-배추-1",
+      "used_tools": [
+        "assess_market_situation",
+        "draft_purchase_quantities",
+        "plan_split_purchase",
+        "allocate_grade_mix",
+        "compose_and_verify_scenarios"
+      ],
+      "missing_data": []
+    },
+    "boundary": {
+      "finance": {
+        "base_projected_cash_min": 24000000,
+        "margin_defense_floor_rate": 0.267,
+        "finance_cap_amount_krw": 20000000,
+        "purchase_payment_days": 7,
+        "critical_payment_dates": []
+      },
+      "inventory": {
+        "as_of": "2025-12-31",
+        "item": "배추",
+        "warehouse_free_kg": 12000,
+        "rental_cap_kg": 3600,
+        "lot_count": 1,
+        "first_lot": {
+          "lot_id": 12,
+          "grade": "상",
+          "stocked_at": "2025-12-27",
+          "remaining_kg": 3000,
+          "shelf_life_days": 10
+        }
+      }
+    },
+    "financeCap": 20000000,
+    "blurb": "통합 · 3안"
+  },
   "2026-08-21": {
     "input": {
       "item": "배추",

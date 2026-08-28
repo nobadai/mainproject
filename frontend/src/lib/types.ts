@@ -114,19 +114,32 @@ export interface PlanStep {
   missing_data: string[];
 }
 
-/**
- * ⚠️ **`situation`·`allowed_axes`·`confidence`·`context_docs_used` 가 없다.**
- *
- * `flow.py:_scenarios_of()` 가 매입 회신 payload 에서 `scenarios` 배열만 꺼내고
- * 제안 최상위 판정 필드는 버린다. 화면은 없는 것을 지어내지 않고 **없다고 표시**한다.
- * 노출되면 `MasterResponse` 에 필드를 더하고 `Judgment` 를 API 에서 채우면 된다.
- */
+/** 매입 제안의 판정부 — `scenarios` 를 뺀 제안 최상위 전부 (PR #75 · `flow.py:_judgment_of`). */
+export interface JudgmentPayload {
+  situation?: "stable" | "uncertain";
+  allowed_axes?: string[];
+  confidence?: string;
+  context_docs_used?: string[];
+  meta?: Record<string, unknown>;
+  rejected_reasons?: unknown[];
+  /** 안이 하나도 없을 때 그 사유가 여기 실린다. */
+  no_proposal_reason?: string;
+}
+
 export interface MasterResponse {
   request_id: string;
   as_of: string;
   end_code: EndCode;
   reason: string;
   scenarios: Scenario[];
+  /**
+   * 매입 자신의 판정 (PR #75 로 응답에 실린다). `verdicts`(조언자·검증 판정)와 다르다.
+   *
+   * ⚠️ **게이트 임계값은 여기 없다.** CI·VOL·MIX 의 비교 문면은 매입 회신의
+   * `evidences` 에 있는데 마스터 응답이 그것까지는 싣지 않는다. 화면은 없는 것을
+   * 지어내지 않는다 — 클라이언트가 임계를 다시 계산하면 에이전트 판정을 흉내 낸 값이 된다.
+   */
+  judgment: JudgmentPayload;
   constraints: Record<string, Record<string, unknown>>;
   verdicts: Record<string, Record<string, unknown>>;
   blocked_by: string[];
@@ -219,6 +232,8 @@ export interface ViewModel {
   /** 재무·물류가 실제로 돌려준 경계. API 경로는 응답에서, 표본 경로는 고정값에서 온다. */
   boundary: { finance: Record<string, unknown>; inventory: Record<string, unknown> };
   evidenceCount: number | null;
+  /** 게이트를 판정 근거에서 만들었는가. API 경로는 `evidences` 가 없어 false 다. */
+  gatesFromEvidence: boolean;
   missingData: string[];
   concerns: string[];
   skippedChecks: string[];

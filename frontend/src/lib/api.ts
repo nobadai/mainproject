@@ -6,10 +6,12 @@
  * 멀쩡해 보이는데 사실이 아니게 된다.
  */
 import { SCENES } from "./fixtures";
+import { AXIS_KO } from "./format";
 import type {
   Direction,
   FallbackProposal,
   Gate,
+  Judgment,
   MasterResponse,
   ProcurementRunRequest,
   ViewModel,
@@ -71,17 +73,36 @@ function capOf(res: MasterResponse, asOf: string): number {
 }
 
 export function fromApi(res: MasterResponse, asOf: string): ViewModel {
+  const j = res.judgment ?? {};
+  // 판정부는 **응답이 준 것만** 옮긴다. situation 이 없으면 화면이 "미노출"로 표시한다 —
+  // 기본값을 채우면 판정하지 않은 날이 "안정"으로 보인다.
+  const judgment =
+    j.situation === undefined
+      ? null
+      : {
+          situation: j.situation,
+          allowedAxes: j.allowed_axes ?? [],
+          confidence: j.confidence ?? "",
+          contextDocs: j.context_docs_used ?? [],
+        };
   return {
     source: "api",
     asOf: res.as_of,
     item: SCENES[asOf]?.input.item ?? "",
     scenarios: res.scenarios,
     financeCap: capOf(res, asOf),
-    // ⚠️ 마스터 응답이 아직 안 싣는다 (types.ts 의 MasterResponse 주석 참조)
-    judgment: null,
-    gates: null,
-    direction: null,
-    reasoning: res.reason,
+    judgment,
+    // ⚠️ **임계 비교 문면은 응답에 없다.** CI·VOL·MIX 는 매입 회신의 `evidences` 에 있는데
+    //   마스터가 그것까지 싣지 않는다. 클라이언트가 다시 계산하면 에이전트 판정을 흉내 낸
+    //   값이 되므로 만들지 않고, 판정부에서 **말할 수 있는 것만** 게이트로 세운다.
+    gates: judgment ? judgmentGates(judgment) : null,
+    direction: directionOf(asOf),
+    gatesFromEvidence: false,
+    // ★ `res.reason` 을 쓰지 않는다. 그것은 **Flow 의 종료 사유**(예: "매입 재호출 2 회에도
+    //   통과안 없음")라 판단 요약 자리에 놓으면 **매입이 실패한 것처럼 읽힌다** — 실제로는
+    //   매입 산출은 통과했고 그 뒤 검증에서 걸린 경우가 있다. 종료 사유는 EndCodeBanner 가
+    //   따로 말하고, 여기에는 **매입 자신의 판정**을 적는다.
+    reasoning: judgment ? summarize(judgment, res.scenarios.length) : res.reason,
     runId: res.plan.find((s) => s.agent === "purchase")?.run_id ?? res.request_id,
     usedTools: res.plan.flatMap((s) => (s.agent === "purchase" ? s.used_tools : [])),
     endCode: res.end_code,
@@ -92,6 +113,55 @@ export function fromApi(res: MasterResponse, asOf: string): ViewModel {
     concerns: res.concerns,
     skippedChecks: res.skipped_checks,
   };
+}
+
+/** 판정부를 한 문장으로. 없는 것을 덧붙이지 않는다 — 판정부가 말한 것만 옮긴다. */
+function summarize(j: Judgment, count: number): string {
+  const axes = j.allowedAxes.map((a) => AXIS_KO[a] ?? a).join("·") || "없음";
+  const state =
+    j.situation === "stable"
+      ? "예측 구간이 안정 범위다."
+      : "예측 구간이 넓어 공격안은 만들지 않았다.";
+  return `${count}안을 냈다. ${state} 열린 전략축은 ${axes}이다.`;
+}
+
+/**
+ * 판정부만 있을 때의 게이트. **임계 비교를 지어내지 않는다** — 응답이 말한 것만 옮긴다.
+ *
+ * 표본 경로의 게이트(`gatesOf`)와 내용이 다른 것은 의도다. 그쪽은 `evidences` 가 있어
+ * *"구간폭 0.060 < 0.08 → stable"* 까지 말할 수 있고, 이쪽은 결론만 온다.
+ */
+function judgmentGates(j: Judgment): Gate[] {
+  const axisKo = (a: string) => AXIS_KO[a] ?? a;
+  return [
+    {
+      name: "시장 상황 · SITUATION",
+      value: j.situation === "stable" ? "안정" : "불확실",
+      say:
+        j.situation === "stable"
+          ? "예측 구간이 임계 안이라 선매입 궤적이 열렸다."
+          : "예측 구간이 넓어 선매입 궤적이 차단됐다.",
+      ref: "judgment.situation",
+      blocked: j.situation !== "stable",
+      chip: "선매입 차단",
+    },
+    {
+      name: "열린 축 · ALLOWED_AXES",
+      value: j.allowedAxes.map(axisKo).join(" · ") || "없음",
+      say: `세 축 중 ${j.allowedAxes.length}개가 열렸다. 닫힌 축의 사유는 판정 근거에 있고 응답에는 실리지 않는다.`,
+      ref: "judgment.allowed_axes",
+      blocked: j.allowedAxes.length < 3,
+      chip: "일부 제외",
+    },
+    {
+      name: "신뢰도 · CONFIDENCE",
+      value: j.confidence || "미상",
+      say: "상황 판정에 따라붙는 등급이다.",
+      ref: "judgment.confidence",
+      blocked: false,
+      chip: "",
+    },
+  ];
 }
 
 /** 게이트 넷은 판정 근거(`evidences`)에서 만든다 — 화면이 계산하지 않는다. */
@@ -130,7 +200,7 @@ function gatesOf(p: FallbackProposal): Gate[] {
 }
 
 /** 예측 방향은 근거의 예측 항목에서 읽는다. 값은 요청에 실어 보낸 forecast 가 정본이다. */
-function directionOf(asOf: string, p: FallbackProposal): Direction | null {
+function directionOf(asOf: string, p?: FallbackProposal): Direction | null {
   const fc = SCENES[asOf].input.forecast as {
     current_price?: number;
     daily?: { predicted: number }[];
@@ -145,7 +215,7 @@ function directionOf(asOf: string, p: FallbackProposal): Direction | null {
     predicted,
     change: (predicted - current) / current,
     say:
-      p.situation === "uncertain"
+      p?.situation === "uncertain"
         ? "구간이 넓어 방향보다 폭이 판단을 지배한다 — 이 상승은 근거로 못 쓴다."
         : "지속 상승 궤적 — 미리 사 두는 안(시점 축)이 열리는 근거다.",
     ref: `FC-${fc.model_version}-${asOf}`,
@@ -170,6 +240,7 @@ export function fromFallback(asOf: string, reason: string): ViewModel {
     },
     gates: gatesOf(p),
     direction: directionOf(asOf, p),
+    gatesFromEvidence: true,
     reasoning: p.reasoning,
     runId: p.run_id,
     usedTools: p.used_tools,

@@ -8,7 +8,7 @@ import type { ViewModel } from "@/lib/types";
 
 import { ComparisonTable } from "./ComparisonTable";
 import { ScenarioDetail } from "./ScenarioDetail";
-import { Chip, GradeBadge, Lbl, SourceBadge } from "./ui";
+import { Chip, EndCodeBanner, GradeBadge, Lbl, SourceBadge } from "./ui";
 
 function VerdictBand({ vm }: { vm: ViewModel }) {
   const j = vm.judgment;
@@ -154,11 +154,23 @@ export function ResultScreen({
           >
             {d}
             <span className="mt-0.5 block text-xs2 font-medium text-ink-3">{SCENES[d].blurb}</span>
+            {d === vm.asOf && (
+              <span
+                className={`mt-1 inline-block rounded px-2 py-0.5 text-xs2 font-semibold ${
+                  vm.source === "api"
+                    ? "bg-down-soft text-down"
+                    : "bg-warn-soft text-warn"
+                }`}
+              >
+                {vm.source === "api" ? "실행 결과" : "표본"}
+              </span>
+            )}
           </button>
         ))}
       </div>
 
       <SourceBadge vm={vm} />
+      <EndCodeBanner vm={vm} />
       <VerdictBand vm={vm} />
 
       {j && j.contextDocs.length > 0 && (
