@@ -76,7 +76,141 @@ def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
     if request.mode == "PRE_PURCHASE":
         return _pre_purchase(request)
+    if request.mode == "STATUS_QUERY":
+        return _status_query(request)
     return _not_implemented(request)
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — "지금 자금 상황" 조회
+# ---------------------------------------------------------------------------
+
+
+def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """묻기만 하는 요청. **경계가 아니라 상태**를 돌려준다.
+
+    ★ `PRE_PURCHASE` 와 계산은 같고 **싣는 것이 다르다.** `finance_cap` ·
+      `purchase_payment_days` 같은 값은 *매입 판단을 위한 경계*라 "지금 자금 상황"
+      을 묻는 사람에게는 답이 아니다.
+
+    ★ **급여 출처가 없어도 답을 낸다 — 다만 낼 수 있는 것만.**
+      `PRE_PURCHASE` 는 급여 출처가 없으면 통째로 멈춘다. 급여 유출이 빠진 투영으로
+      만든 `finance_cap` 은 **낙관적으로 틀리고**, 그 상한으로 매입이 실행되기 때문이다.
+      조회는 실행으로 이어지지 않으므로 **현재 현금처럼 투영이 필요 없는 값은 답하고**,
+      투영이 필요한 값만 빼고 이름을 밝힌다 (§3.7.6 — 못 한 것을 한 척하지 않는다).
+    """
+    as_of = request.context.as_of
+    run_id = _run_id(request)
+    tools: list[str] = [_T_POSITION]
+
+    context = _load_context()
+    if context is None:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=("finance_state", "finance_policy"),
+            reason="재무 상태 또는 정책을 읽지 못했다",
+        )
+
+    state_date = context.snapshot.state_date
+    if state_date != as_of:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=(f"finance_state@{as_of.isoformat()}",),
+            reason=f"재무 상태 기준일이 {state_date} 다 — 요청은 {as_of} 다",
+        )
+
+    policy = context.policy
+    ref = context.snapshot.finance_state_id
+    payload: dict[str, Any] = {
+        "as_of": as_of.isoformat(),
+        "state_date": state_date.isoformat(),
+        "available_cash": _num(context.snapshot.current_cash_krw),
+        "minimum_cash_balance_krw": _num(policy.minimum_cash_balance_krw),
+        "policy_version_used": policy.policy_version,
+    }
+    evidences = (
+        _ev("available_cash", context.snapshot.current_cash_krw, "KRW", ref, "재무 상태 현재 잔액"),
+        _ev(
+            "minimum_cash_balance_krw",
+            policy.minimum_cash_balance_krw,
+            "KRW",
+            ref,
+            f"Finance Policy {policy.policy_version} · 1개월 급여 Reserve",
+            grade="SIM_FIXED",
+        ),
+    )
+
+    missing: list[str] = []
+    payroll_refs = tuple(
+        f"{key}@policy_source_ref"
+        for key in _PAYROLL_SOURCE_KEYS
+        if not policy.source_refs.get(key)
+    )
+    if payroll_refs:
+        # 투영이 필요한 값만 뺀다. 현재 잔액은 그대로 답한다.
+        missing.extend(payroll_refs)
+    else:
+        tools.extend((_T_CASHFLOW, _T_PRESSURE))
+        horizon_end = as_of + timedelta(days=policy.cashflow_projection_days)
+        events = (
+            *context.cash_events,
+            *build_payroll_schedule(as_of=as_of, horizon_end=horizon_end, policy=policy),
+        )
+        projection = project_cashflow(
+            as_of=as_of,
+            current_cash_krw=context.snapshot.current_cash_krw,
+            horizon_end=horizon_end,
+            cash_events=events,
+        )
+        outflows = _outflow_by_date([e for e in events if as_of < e.event_date <= horizon_end])
+        cash_min = calculate_projected_cash_min(projection)
+        pressure = derive_cash_priority(projected_cash_min=cash_min, policy=policy)
+        payload["projection_days"] = policy.cashflow_projection_days
+        payload["projected_cash_min"] = _num(cash_min)
+        payload["payment_pressure"] = pressure
+        payload["critical_payment_dates"] = _critical_payment_dates(
+            projection, outflows, policy.minimum_cash_balance_krw
+        )
+        evidences = (
+            *evidences,
+            _ev(
+                "projected_cash_min",
+                cash_min,
+                "KRW",
+                ref,
+                f"D+{policy.cashflow_projection_days} 투영 최저",
+            ),
+            _ev(
+                "payment_pressure",
+                _ratio(cash_min, policy.minimum_cash_balance_krw),
+                "ratio",
+                ref,
+                f"투영최저/최소현금 = 임계 {policy.cash_priority_high_ratio}"
+                f"/{policy.cash_priority_medium_ratio} → {pressure}",
+            ),
+        )
+
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=as_of,
+        agent="finance",
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="READY",
+        business_status="ok",
+        payload=payload,
+        evidences=evidences,
+        judgment_fields=_JUDGMENT_FIELDS if "payment_pressure" in payload else (),
+        missing_data=tuple(missing),
+        reasoning="현재 자금 상태를 조회했다."
+        if not missing
+        else "현재 잔액은 답했고, 급여 출처가 없어 현금 투영은 내지 못했다.",
+    )
+    return reply, _meta(request, run_id, tools)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +415,16 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
     남는다** (§3.7.6).
     """
     run_id = _run_id(request)
+    # 🔴 mode 마다 못 하는 **이유가 다르다.** 예전에는 어느 mode 로 와도
+    #    "매입 시나리오 필드명이 확정되지 않아" 를 냈는데, 그건 `SCENARIO_VALIDATION`
+    #    의 사유일 뿐이다. 다른 mode 에 그대로 붙이면 **거짓 사유가 이력에 남고**,
+    #    마스터가 사용자에게 요청할 대상을 잘못 알려 준다.
+    if request.mode == "SCENARIO_VALIDATION":
+        missing = ("purchase_scenario_schema",)
+        reason = "매입 시나리오 필드명이 확정되지 않아 판정하지 못했다."
+    else:
+        missing = (f"{request.mode}_translation",)
+        reason = f"{request.mode} 는 재무 어댑터에 아직 없다."
     reply = AgentReply(
         request_id=request.context.request_id,
         as_of=request.context.as_of,
@@ -289,9 +433,9 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
         run_id=run_id,
         runtime_status="RUNTIME_NOT_READY",
         business_status="skipped",
-        missing_data=("purchase_scenario_schema",),
+        missing_data=missing,
         missing_capability=(f"{request.mode} 번역",),
-        reasoning="매입 시나리오 필드명이 확정되지 않아 판정하지 못했다.",
+        reasoning=reason,
     )
     return reply, _meta(request, run_id, [])
 
