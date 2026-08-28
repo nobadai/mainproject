@@ -111,12 +111,20 @@ def test_없는_action_은_스키마에서_막힌다():
         validate_intent(payload(action="DELETE_EVERYTHING", confidence="HIGH"), "...")
 
 
-def test_조회가_아닌데_에이전트를_실으면_막는다():
-    with pytest.raises(IntentValidationError) as error:
-        validate_intent(
-            payload(action="PROCUREMENT_RUN", agents=["finance"], confidence="HIGH"), "..."
-        )
-    assert IntentIssue.AGENTS_ON_NON_QUERY in error.value.issues
+def test_조회가_아닌데_에이전트를_실으면_지운다():
+    """**거부하지 않고 지운다.** 안 쓰는 칸이라 해가 없다.
+
+    전에는 거부했는데, 실측에서 모델이 `PROCUREMENT_RUN` 에 `agents` 를 곁들이면
+    재시도가 돌고 **거기서 분류를 `UNKNOWN` 으로 무는** 일이 반복됐다.
+    쓰지 않는 값 하나 때문에 맞는 답을 버리는 셈이었다.
+    """
+    intent = validate_intent(
+        payload(action="PROCUREMENT_RUN", agents=["finance"], item="배추", confidence="HIGH"),
+        "오늘 배추 얼마나 사야 해?",
+    )
+    assert intent.action == "PROCUREMENT_RUN"
+    assert intent.agents == []
+    assert intent.item == "배추"
 
 
 def test_조회인데_에이전트가_비면_막는다():
@@ -151,10 +159,14 @@ def test_사용자가_말한_숫자는_그대로_옮길_수_있다():
     assert intent.condition == "예산 2000만원으로"
 
 
-def test_UNKNOWN_인데_다른_필드가_차_있으면_막는다():
-    with pytest.raises(IntentValidationError) as error:
-        validate_intent(payload(action="UNKNOWN", item="배추", confidence="LOW"), "...")
-    assert IntentIssue.UNKNOWN_NOT_EMPTY in error.value.issues
+def test_UNKNOWN_인데_다른_필드가_차_있으면_지운다():
+    """`UNKNOWN` 은 **아무것도 실행하지 않으므로** 남은 값이 해를 끼치지 않는다."""
+    intent = validate_intent(
+        payload(action="UNKNOWN", item="배추", agents=["finance"], confidence="LOW"), "..."
+    )
+    assert intent.action == "UNKNOWN"
+    assert intent.item is None
+    assert intent.agents == []
 
 
 def test_선택인데_안_이름이_없으면_막는다():
