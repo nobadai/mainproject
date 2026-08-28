@@ -296,3 +296,103 @@ def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "READY"
     assert "purchase_payment_days@policy_source_ref" in reply.missing_data
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — 조회는 경계가 아니라 상태를 답한다
+#
+# 🔴 재무 파트 리뷰 요청 (2026-08-28). 이 넷이 없어서 `projection_days` ·
+#    `critical_payment_dates` 의 Evidence 누락이 머지 직전까지 안 잡혔다.
+# ---------------------------------------------------------------------------
+
+
+def test_조회가_봉투_검증을_통과한다(wired):
+    """🔴 리뷰에서 나온 것 — `validate_reply()` 가 실제로 비어야 한다.
+
+    `projection_days`(숫자)와 `critical_payment_dates`(스칼라 배열)는 둘 다
+    `required_claims` 대상이라 Evidence 가 없으면 `E-EVIDENCE-MISSING` 이다.
+    payload 에 값을 더할 때 근거를 안 달면 여기서 걸린다.
+    """
+    request = req(mode="STATUS_QUERY")
+    reply, meta = adapter.finance_port(request)
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "ok"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_조회는_매입용_경계를_안_싣는다(wired):
+    """`finance_cap` · `purchase_payment_days` 는 *매입 판단을 위한 경계*다.
+
+    "지금 자금 상황" 을 묻는 사람에게는 답이 아니다 — 조회와 실행의 답이 같아지면
+    화면이 무엇을 보여야 할지 알 수 없다.
+    """
+    reply, _ = adapter.finance_port(req(mode="STATUS_QUERY"))
+    for boundary in ("finance_cap", "purchase_payment_days", "margin_defense_floor_rate"):
+        assert boundary not in reply.payload
+    # 대신 상태는 싣는다
+    assert reply.payload["available_cash"] == 50_000_000.0
+    assert reply.payload["payment_pressure"] == "LOW"
+
+
+def test_급여_출처가_없으면_현금은_답하고_투영만_뺀다(monkeypatch):
+    """🔴 `PRE_PURCHASE` 와 갈리는 지점이다.
+
+    실행 경로는 급여 유출이 빠진 투영으로 만든 `finance_cap` 이 **낙관적으로
+    틀리기** 때문에 통째로 멈춘다. 조회는 실행으로 이어지지 않으므로, 투영이
+    필요 없는 값(현재 잔액)은 답하고 **투영이 필요한 값만** 빼고 이름을 밝힌다.
+    """
+
+    class _NoPayroll(_Policy):
+        source_refs: ClassVar[dict[str, str]] = {
+            k: v for k, v in _Policy.source_refs.items() if k != "monthly_labor_cost_krw"
+        }
+
+    class _Ctx(_Context):
+        policy = _NoPayroll()
+
+    monkeypatch.setattr(adapter, "_load_context", lambda: _Ctx())
+    request = req(mode="STATUS_QUERY")
+    reply, meta = adapter.finance_port(request)
+
+    assert reply.runtime_status == "READY"  # 조회 자체는 막지 않는다
+    assert reply.payload["available_cash"] == 50_000_000.0
+    assert reply.payload["minimum_cash_balance_krw"] == 10_000_000.0
+    for projected in (
+        "projection_days",
+        "projected_cash_min",
+        "payment_pressure",
+        "critical_payment_dates",
+    ):
+        assert projected not in reply.payload
+    assert "monthly_labor_cost_krw@policy_source_ref" in reply.missing_data
+    # 뺀 값에 근거를 남기지 않았으니 봉투도 통과해야 한다
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_정책값_근거는_Policy_출처를_가리킨다(wired):
+    """🔴 값이 Policy 에서 왔으면 근거도 Policy 를 가리켜야 한다.
+
+    스냅샷 id(`FIN-STATE-1`)를 달면 *"재무 상태 행에서 온 수"* 라고 말하는 것이라
+    **거짓 출처**다. 나중에 *"이 수가 어디서 왔나"* 를 따라가면 엉뚱한 곳에 닿는다.
+    """
+    reply, _ = adapter.finance_port(req(mode="STATUS_QUERY"))
+    by_claim = {e.claim: e for e in reply.evidences}
+
+    assert by_claim["minimum_cash_balance_krw"].ref_ids == (
+        "PROJECT-DEFINITION-V1.2:minimum_cash_balance",
+    )
+    assert by_claim["projection_days"].ref_ids == ("MVP-DECISION-20260825:FIN-CASH-01",)
+    # 스냅샷에서 온 값은 스냅샷을 가리킨다 — 둘이 섞이지 않는다
+    assert by_claim["available_cash"].ref_ids == ("FIN-STATE-1",)
+
+
+def test_목록형_조회_근거도_개수가_아니라_임계값이다(wired):
+    """`critical_payment_dates` 는 스칼라 배열이라 **통째로 하나의 근거**를 요구한다.
+
+    개수(1건)를 넣으면 답의 길이를 세어 답이라고 적는 것이다 — 그 목록을 만든
+    임계값을 넣어야 *"왜 그날이 위험일인가"* 에 답이 된다.
+    """
+    reply, _ = adapter.finance_port(req(mode="STATUS_QUERY"))
+    ev = next(e for e in reply.evidences if e.claim == "critical_payment_dates")
+    assert ev.value == 10_000_000.0  # minimum_cash_balance_krw — 임계값
+    assert ev.unit == "KRW"

@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.finance.repository import get_current_finance_runtime_context
-from app.finance.schemas import CashflowProjection, FinanceRuntimeContext
+from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
     calculate_finance_cap,
@@ -138,7 +138,10 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             "minimum_cash_balance_krw",
             policy.minimum_cash_balance_krw,
             "KRW",
-            ref,
+            # 🔴 값이 Policy 에서 왔으면 근거도 Policy 를 가리켜야 한다.
+            #    스냅샷 id(FIN-DAY30-LOAN)를 달면 *"재무 상태 행에서 온 수"* 라고
+            #    말하는 것이라 **거짓 출처**다. 나중에 따라가면 엉뚱한 곳에 닿는다.
+            _policy_ref(policy, "minimum_cash_balance_krw", ref),
             f"Finance Policy {policy.policy_version} · 1개월 급여 Reserve",
             grade="SIM_FIXED",
         ),
@@ -191,6 +194,25 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                 ref,
                 f"투영최저/최소현금 = 임계 {policy.cash_priority_high_ratio}"
                 f"/{policy.cash_priority_medium_ratio} → {pressure}",
+            ),
+            _ev(
+                "projection_days",
+                policy.cashflow_projection_days,
+                "day",
+                _policy_ref(policy, "cashflow_projection_days", ref),
+                "현금 투영 Horizon — Finance Policy 값",
+                grade="SIM_FIXED",
+            ),
+            _ev(
+                # ★ 목록의 **개수**가 아니라 그 목록을 만든 **임계값**을 넣는다 (`_ev` 규율).
+                #   개수를 넣으면 "왜 그날이 위험일인가" 에 아무 답이 안 된다.
+                "critical_payment_dates",
+                policy.minimum_cash_balance_krw,
+                "KRW",
+                _policy_ref(policy, "minimum_cash_balance_krw", ref),
+                f"이 임계 미만으로 떨어지는 지급일 {len(payload['critical_payment_dates'])} 건 "
+                f"(D+{policy.cashflow_projection_days} 투영)",
+                grade="SIM_FIXED",
             ),
         )
 
@@ -506,6 +528,15 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> float:
 
 def _num(value: Decimal | float) -> float:
     return float(value)
+
+
+def _policy_ref(policy: FinancePolicy, key: str, fallback: str) -> str:
+    """정책값 근거는 **Policy 의 출처**를 가리킨다.
+
+    없으면 스냅샷 참조로 떨어진다 — 그 사실 자체는 `missing_data` 의
+    `{key}@policy_source_ref` 가 따로 남긴다.
+    """
+    return policy.source_refs.get(key) or fallback
 
 
 def _ev(
