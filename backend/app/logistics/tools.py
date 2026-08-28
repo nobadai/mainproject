@@ -110,6 +110,12 @@ def _replay_occupancy_by_item(
     차감한다. 임의 품목 배분은 하지 않는다 — Partial Output 정책상 이 행이 있어도
     총량 Capacity는 계속 제공해야 한다.
 
+    품목 불명 출고가 한 번 나오면 **그 날짜부터 품목별 잔량을 확정할 수 없다.**
+    어느 품목에서 나갔느냐에 따라 이후 품목 지정 출고가 실제로 열 수 있는 공간이
+    달라지기 때문이다. 배정을 추정하지 않고, 그 시점부터는 품목 지정 출고를 추가
+    해제 근거로 쓰지 않는다. 보장할 수 없는 공간을 있는 것처럼 열어 주는 쪽보다
+    보수적으로 잡는 쪽이 안전하다.
+
     Lot 단위 배정은 하지 않는다 (FIFO/FEFO 없음). 날짜 규칙은 기존 정책 그대로다.
     """
     assert snapshot.confirmed_inbound_schedule is not None
@@ -125,17 +131,23 @@ def _replay_occupancy_by_item(
             outbound_on.setdefault(row.date, []).append(row)
 
     buckets = _initial_occupancy_by_item(snapshot)
+    #: 품목별 잔량을 더 이상 확정할 수 없어지는 날짜. 같은 날에 섞여 있으면 그날부터다.
+    unresolved_from = min(
+        (day for day, rows in outbound_on.items() if any(row.item is None for row in rows)),
+        default=None,
+    )
     #: 품목 불명 출고가 총량에서 걷어낸 누계. 어느 품목에도 귀속시키지 않는다.
     unattributed_release = Decimal(0)
     for day in sorted({*inbound_on, *outbound_on}):
         for row in inbound_on.get(day, []):
             buckets[row.item] = buckets.get(row.item, Decimal(0)) + row.quantity_kg
-        # 품목 지정 출고를 먼저 처리한다 — 자기 품목 재고까지만 열 수 있다.
-        for row in outbound_on.get(day, []):
-            if row.item is None:
-                continue
-            held = buckets.get(row.item, Decimal(0))
-            buckets[row.item] = held - min(row.quantity_kg, held)
+        # 품목 지정 출고는 배정이 아직 확정적인 구간에서만 자기 품목 재고를 연다.
+        if unresolved_from is None or day < unresolved_from:
+            for row in outbound_on.get(day, []):
+                if row.item is None:
+                    continue
+                held = buckets.get(row.item, Decimal(0))
+                buckets[row.item] = held - min(row.quantity_kg, held)
         for row in outbound_on.get(day, []):
             if row.item is not None:
                 continue

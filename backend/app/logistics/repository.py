@@ -9,6 +9,7 @@ from app.logistics.db import fetch_all, get_db_schema
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
+    ItemStoragePolicyFact,
     LogisticsPolicy,
     LogisticsRuntimeFixture,
 )
@@ -167,6 +168,50 @@ def _build_logistics_runtime_fixture(
     )
 
 
+def get_item_storage_policies() -> list[ItemStoragePolicyFact]:
+    """품목 단위 보관 정책을 조회한다.
+
+    Lot 목록에서 역산하지 않는다 — 새로 매입하려는 품목은 현재 재고가 0kg일 수 있고
+    그때도 보관한계는 알아야 한다. 정책 테이블 자체를 기준으로 읽는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    rows = fetch_all(
+        sql.SQL(
+            """
+            SELECT
+                i.item_name,
+                p.operational_limit_days,
+                p.medium_grade_factor
+            FROM {}.item_storage_policies p
+            JOIN {}.items i ON i.item_id = p.item_id
+            ORDER BY i.item_name
+            """
+        ).format(schema, schema),
+        [],
+    )
+    return [_item_storage_policy_from_row(row) for row in rows]
+
+
+def _item_storage_policy_from_row(row: dict[str, object]) -> ItemStoragePolicyFact:
+    item = row.get("item_name")
+    limit_days = row.get("operational_limit_days")
+    medium_factor = row.get("medium_grade_factor")
+    if not isinstance(item, str) or not item:
+        raise TypeError("Item storage policy item_name must be a non-empty string")
+    # 값이 없으면 없는 대로 둔다 — 0이나 0.6 같은 기본값을 코드에서 지어내지 않는다.
+    if limit_days is not None and (isinstance(limit_days, bool) or not isinstance(limit_days, int)):
+        raise TypeError(f"Item storage policy operational_limit_days must be an int: {item}")
+    if medium_factor is not None and (
+        isinstance(medium_factor, bool) or not isinstance(medium_factor, Decimal)
+    ):
+        raise TypeError(f"Item storage policy medium_grade_factor must be a Decimal: {item}")
+    return ItemStoragePolicyFact(
+        item=item,
+        operational_limit_days=limit_days,
+        medium_grade_factor=medium_factor,
+    )
+
+
 def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisticsSnapshot:
     """Fixture, direct physical lots, Policy를 한 번 읽어 고정 T0 Snapshot을 만든다."""
     fixture = get_active_logistics_runtime_fixture(as_of=as_of)
@@ -208,6 +253,8 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
         snapshot_id=None,
         as_of=fixture.as_of,
         on_hand_by_lot=lots,
+        # Lot 조회와 별도로 읽는다 — 재고가 0kg인 품목의 보관 정책도 필요하다.
+        item_storage_policies=get_item_storage_policies(),
         in_transit=fixture.in_transit,
         confirmed_inbound_schedule=fixture.confirmed_inbound_schedule,
         confirmed_outbound_schedule=fixture.confirmed_outbound_schedule,
@@ -223,6 +270,7 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
             f"DB:logistics_runtime_fixture/{fixture.fixture_id}",
             fixture.source_ref,
             f"DB:inventory_lots/sim_run_id={fixture.sim_run_id}",
+            "DB:item_storage_policies",
             *policy.source_refs.values(),
         ],
     )

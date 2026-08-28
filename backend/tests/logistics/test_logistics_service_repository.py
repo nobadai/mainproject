@@ -124,6 +124,36 @@ def _inventory_rows() -> list[dict[str, object]]:
     ]
 
 
+def _storage_policy_rows() -> list[dict[str, object]]:
+    """items JOIN item_storage_policies 결과.
+
+    양파는 현재 Lot이 없어도(재고 0kg) 정책은 존재한다 — 새로 살 물건의 보관한계는
+    현재 재고 존재 여부에 종속되면 안 된다.
+    """
+    return [
+        {
+            "item_name": "무",
+            "operational_limit_days": 12,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "item_name": "배추",
+            "operational_limit_days": 10,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "item_name": "양파",
+            "operational_limit_days": 14,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+        {
+            "item_name": "피마늘",
+            "operational_limit_days": 30,
+            "medium_grade_factor": Decimal("0.8"),
+        },
+    ]
+
+
 def test_logistics_policy_loads_typed_values_and_metadata():
     policy = _load_policy(_policy_rows())
 
@@ -316,7 +346,12 @@ def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                _inventory_rows(),
+                _storage_policy_rows(),
+            ],
         ) as fetch,
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -357,7 +392,12 @@ def test_lot_grade_in_purchase_vocabulary_passes_through():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                _inventory_rows(),
+                _storage_policy_rows(),
+            ],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -379,7 +419,7 @@ def test_lot_grade_without_normalization_evidence_is_none():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows],
+            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -403,7 +443,7 @@ def test_medium_grade_lot_applies_medium_grade_factor():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows],
+            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -422,7 +462,7 @@ def test_non_active_lot_occupies_capacity_when_physically_present():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows],
+            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -430,6 +470,86 @@ def test_non_active_lot_occupies_capacity_when_physically_present():
     assert snapshot.used_capacity_kg == Decimal("363.28")
     quarantined = next(lot for lot in snapshot.on_hand_by_lot if lot.status == "QUARANTINED")
     assert quarantined.lot_id == "LOT-KIMCHI-015-BAECHU"
+
+
+def test_item_storage_policy_is_separate_from_lot_freshness():
+    """Lot의 잔여 신선도와 품목의 보관한계는 다른 값이다.
+
+    배추 보관한계가 15일이고 Lot이 7일 경과했으면 그 Lot은 8일 남았다.
+    새로 매입하는 배추의 기준은 8이 아니라 15다.
+    """
+    rows = _inventory_rows()[:1]
+    rows[0]["received_at"] = date(2025, 12, 24)
+    rows[0]["operational_limit_days"] = 15
+    storage_rows = [
+        {
+            "item_name": "배추",
+            "operational_limit_days": 15,
+            "medium_grade_factor": Decimal("0.6"),
+        }
+    ]
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), rows, storage_rows],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    lot = snapshot.on_hand_by_lot[0]
+    assert lot.remaining_freshness_days == 8
+    assert snapshot.item_storage_policies is not None
+    baechu = next(row for row in snapshot.item_storage_policies if row.item == "배추")
+    assert baechu.operational_limit_days == 15
+    assert baechu.operational_limit_days != lot.remaining_freshness_days
+    # DB 값을 그대로 나른다 — 코드에서 0.6이나 0.8을 새로 만들지 않는다.
+    assert baechu.medium_grade_factor == Decimal("0.6")
+
+
+def test_item_storage_policy_covers_items_without_lots():
+    """재고가 0kg인 품목도 정책은 나온다 — Lot 목록에서 역산하지 않는다."""
+    rows = [row for row in _inventory_rows() if row["item_name"] == "배추"]
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
+        ) as fetch,
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert [lot.item for lot in snapshot.on_hand_by_lot] == ["배추"]
+    assert snapshot.item_storage_policies is not None
+    assert [row.item for row in snapshot.item_storage_policies] == ["무", "배추", "양파", "피마늘"]
+
+    storage_call = fetch.call_args_list[3]
+    query_text = str(storage_call.args[0])
+    assert "item_storage_policies" in query_text
+    assert "items" in query_text
+    # 재고 조회에 얹지 않는다 — Lot이 없으면 정책도 못 받는 구조가 되면 안 된다.
+    assert "inventory_lots" not in query_text
+
+
+def test_item_storage_policy_preserves_missing_values():
+    """DB에 값이 없으면 없는 대로 둔다 — 0이나 0.6을 지어내지 않는다."""
+    storage_rows = [
+        {"item_name": "무", "operational_limit_days": None, "medium_grade_factor": None}
+    ]
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows(), storage_rows],
+        ),
+    ):
+        snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+    assert snapshot.item_storage_policies is not None
+    mu = snapshot.item_storage_policies[0]
+    assert mu.item == "무"
+    assert mu.operational_limit_days is None
+    assert mu.medium_grade_factor is None
 
 
 def test_logistics_a_ready_response_and_persistence(

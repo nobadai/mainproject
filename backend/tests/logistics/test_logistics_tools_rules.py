@@ -746,6 +746,70 @@ def test_projected_occupancy_never_goes_negative_across_mixed_outbound(
     assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(8000)}
 
 
+def _mixed_outbound_snapshot(complete_logistics_snapshot, outbound):
+    """배추 100 + 양파 100 = 200kg 에 주어진 확정 출고만 얹는다."""
+    return complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [
+                _lot("LOT-BAECHU", "배추", 100, 5, "ACTIVE"),
+                _lot("LOT-YANGPA", "양파", 100, 5, "ACTIVE"),
+            ],
+            "used_capacity_kg": Decimal(200),
+            "confirmed_outbound_schedule": outbound,
+        }
+    )
+
+
+def test_named_outbound_after_unknown_item_does_not_open_more_space(
+    complete_logistics_snapshot,
+):
+    """품목 불명 출고 뒤의 지정 출고를 추가 해제 근거로 쓰지 않는다.
+
+    8-21 품목 불명 80 이 배추에서 나갔는지 양파에서 나갔는지 알 수 없다.
+    양파에서 나갔다면 8-22 배추 50 이 전량 나가 점유가 70 이 되고,
+    배추에서 나갔다면 배추가 20 뿐이라 점유가 100 이 된다.
+    배정을 추정해 70 을 주면 보장할 수 없는 공간 30kg 을 여는 셈이라
+    확실히 해제된 80 만 반영해 120 으로 잡는다.
+    """
+    snapshot = _mixed_outbound_snapshot(
+        complete_logistics_snapshot,
+        [
+            ScheduledQuantity(date=date(2026, 8, 21), quantity_kg=Decimal(80), item=None),
+            ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(50), item="배추"),
+        ],
+    )
+
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(7880)}
+
+
+def test_same_day_unknown_and_named_outbound_is_not_optimistic(complete_logistics_snapshot):
+    """같은 날 섞이면 출고 순서를 알 수 없으므로 그날부터 배정을 확정하지 않는다."""
+    snapshot = _mixed_outbound_snapshot(
+        complete_logistics_snapshot,
+        [
+            ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(80), item=None),
+            ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(50), item="배추"),
+        ],
+    )
+
+    # 지정 출고를 먼저 처리한 뒤 총량에서 또 빼면 130 이 해제돼 cap 이 7,930 이 된다.
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(7880)}
+
+
+def test_named_outbound_before_unknown_item_still_opens_space(complete_logistics_snapshot):
+    """불확실해지기 전 구간의 지정 출고는 그대로 자기 품목 재고를 연다."""
+    snapshot = _mixed_outbound_snapshot(
+        complete_logistics_snapshot,
+        [
+            ScheduledQuantity(date=date(2026, 8, 21), quantity_kg=Decimal(50), item="배추"),
+            ScheduledQuantity(date=OUTBOUND_DAY, quantity_kg=Decimal(80), item=None),
+        ],
+    )
+
+    # 8-21 배추 50 해제 → 150, 8-22 품목 불명 80 해제 → 70.
+    assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(7930)}
+
+
 def test_sales_rule_marks_warehouse_over_capacity(complete_logistics_snapshot):
     result = evaluate_sales_rules(
         as_of=AS_OF,
