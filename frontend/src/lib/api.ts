@@ -25,8 +25,24 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 
 export const POLICY_VERSION = "v2.3";
 
-/** 응답이 늦어도 화면이 영원히 매달리지 않게 한다. */
+/**
+ * 응답이 늦어도 화면이 영원히 매달리지 않게 한다.
+ *
+ * ⚠️ **백엔드에는 이 방어가 없다.** DB 가 접속을 *거부*하면 16ms 에 `E4_NOT_STARTED`
+ * 로 정상 종료하지만, *무응답*이면 `psycopg.connect` 에 `connect_timeout` 이 없어
+ * 무한 대기한다 (2026-08-28 반증 실험 실측 ·
+ * `docs/demo-captures/proof-2025-12-31_실DB-읽음-반증실험.txt`).
+ * 시연 중 네트워크가 흔들려도 화면은 멈추면 안 되므로 여기서 끊는다.
+ */
 const TIMEOUT_MS = 15_000;
+
+/** 타임아웃으로 끊긴 것을 다른 실패와 구분하기 위한 표식. */
+export class RequestTimeout extends Error {
+  constructor(readonly ms: number) {
+    super(`백엔드 응답 없음 (타임아웃 ${ms / 1000}초)`);
+    this.name = "RequestTimeout";
+  }
+}
 
 export async function requestProcurement(asOf: string): Promise<MasterResponse> {
   const scene = SCENES[asOf];
@@ -44,7 +60,13 @@ export async function requestProcurement(asOf: string): Promise<MasterResponse> 
   };
 
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  // ★ 우리가 끊은 것인지 다른 이유로 끊긴 것인지 구분한다. `AbortError` 하나로 뭉치면
+  //   "백엔드가 안 답한다" 와 "요청이 취소됐다" 가 같은 문구로 화면에 나간다.
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}/master/request`, {
       method: "POST",
@@ -57,6 +79,9 @@ export async function requestProcurement(asOf: string): Promise<MasterResponse> 
       throw new Error(`HTTP ${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 200)}` : ""}`);
     }
     return (await res.json()) as MasterResponse;
+  } catch (err) {
+    if (timedOut) throw new RequestTimeout(TIMEOUT_MS);
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -267,6 +292,10 @@ export async function loadScene(asOf: string): Promise<ViewModel> {
     if (res.scenarios.length > 0) return fromApi(res, asOf);
     return fromFallback(asOf, `${res.end_code} · ${res.reason || "시나리오 0건"}`);
   } catch (err) {
+    // 타임아웃은 **다른 실패와 구분해서** 적는다. `E4_NOT_STARTED` 는 백엔드가
+    // "그 부서가 오늘 못 돈다" 고 **답한** 것이고, 타임아웃은 **답이 없는** 것이다 —
+    // 둘을 같은 문구로 내보내면 백엔드가 죽은 날을 정상 종료로 읽게 된다.
+    if (err instanceof RequestTimeout) return fromFallback(asOf, err.message);
     return fromFallback(asOf, err instanceof Error ? err.message : String(err));
   }
 }
