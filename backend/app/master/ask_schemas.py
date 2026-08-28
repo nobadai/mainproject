@@ -69,6 +69,26 @@ class StatusAnswer(BaseModel):
     errors: dict[AgentName, str] = {}
 
 
+class AnswerOut(BaseModel):
+    """사람이 읽는 답. 마스터 역할 ⑥.
+
+    ★ `text` 는 **규칙이 만든 사실 줄 + (있으면) LLM 문장**이다. `narrative` 가 비어도
+      `text` 는 완결돼 있다 — LLM 이 답의 뼈대가 아니기 때문이다.
+
+    ★ `status.answers` 를 지우지 않는다. 이건 **사람이 읽는 표현**이고, 화면·다른
+      시스템이 쓰는 것은 여전히 구조화된 `status` 다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    #: LLM 이 쓴 앞머리. 없으면 규칙이 만든 줄만으로 답한 것이다.
+    narrative: str | None = None
+    llm_status: LLMStatus
+    llm_attempts: int = 0
+    llm_fallback_used: bool = False
+
+
 class AskResponse(BaseModel):
     """분류 결과 + (실행했다면) 그 결과."""
 
@@ -85,7 +105,11 @@ class AskResponse(BaseModel):
     confirm_required: bool = False
 
     status: StatusAnswer | None = None
+    #: 사람이 읽는 답 (⑥). 실행한 경우에만 채운다 — 되묻는 경우는 `clarification` 이다.
+    answer: AnswerOut | None = None
 
+    #: ★ 아래 다섯은 **①(의도 분류)의 상태다.** ⑥의 상태는 `answer` 안에 따로 있다 —
+    #: 한 요청에 LLM 호출이 둘이라 한 칸에 담으면 어느 쪽이 죽었는지 알 수 없다.
     llm_status: LLMStatus
     llm_provider: str | None = None
     llm_model: str | None = None

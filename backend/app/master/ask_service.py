@@ -1,9 +1,13 @@
-"""발화문 입구 — 분류하고, 확인이 필요 없을 때만 실행한다.
+"""발화문 입구 — 분류하고, 확인이 필요 없을 때만 실행하고, 사람 말로 답한다.
 
 ```text
-발화문 → [LLM 분류] → 확인 필요? ─예→ 되묻고 끝 (아무것도 안 돈다)
-                                └아니오→ 조회 실행
+발화문 → [LLM ①분류] → 확인 필요? ─예→ 되묻고 끝 (아무것도 안 돈다)
+                                 └아니오→ 조회 실행 → [LLM ⑥문장] → 답
 ```
+
+★ **LLM 이 둘이고 역할이 다르다.** ①이 죽으면 되물어야 하지만(분류를 못 하면 실행할
+  수 없다), **⑥이 죽어도 답은 나간다** — 숫자는 규칙이 만들고 LLM 은 앞머리 문장만
+  얹기 때문이다 (`answer.py`).
 
 ★ **`flow.py` 는 이 모듈을 모른다.** 발화문 해석은 Flow 바깥 일이고, Flow 는 타입이
   붙은 요청만 받는다 — 그래야 백테스트에서 Flow 를 그대로 돌릴 수 있다.
@@ -28,7 +32,9 @@ from __future__ import annotations
 from datetime import date
 
 from app.master import wiring
+from app.master.answer import AnswerFacts, facts_from_status, render_answer
 from app.master.ask_schemas import (
+    AnswerOut,
     AskExecuteRequest,
     AskRequest,
     AskResponse,
@@ -36,6 +42,7 @@ from app.master.ask_schemas import (
 )
 from app.master.budget import CallBudget
 from app.master.envelope import ExecutionContext
+from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import Intent, IntentResult
 from app.master.runner import MasterRunner
@@ -47,10 +54,17 @@ from app.master.status_flow import StatusFlow, StatusOutcome
 _AUTO_RUN = frozenset({"STATUS_QUERY"})
 
 
-def ask(request: AskRequest, service: IntentService | None = None) -> AskResponse:
-    """발화문을 분류하고, 확인이 필요 없으면 조회까지 돌린다.
+def ask(
+    request: AskRequest,
+    service: IntentService | None = None,
+    narrator: NarrativeService | None = None,
+) -> AskResponse:
+    """발화문을 분류하고, 확인이 필요 없으면 조회까지 돌린 뒤 **사람 말로 답한다.**
 
-    ★ `service` 를 주지 않으면 `.env` 설정으로 만든다. 테스트가 갈아 끼운다.
+    ★ `service`(①분류) · `narrator`(⑥응답)를 주지 않으면 `.env` 설정으로 만든다.
+      테스트가 갈아 끼운다. **둘을 나눠 받는 이유는 역할마다 모델 등급이 달라질
+      것이기 때문이다** — 분류는 소형이면 되고, 응답 문장도 마찬가지지만 판정 검증은
+      아니다.
     """
     service = service or get_intent_service()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
@@ -89,11 +103,13 @@ def ask(request: AskRequest, service: IntentService | None = None) -> AskRespons
         result,
         outcome="STATUS_ANSWERED",
         status=_to_answer(outcome),
+        answer=_write_answer(facts_from_status(outcome), narrator),
     )
 
 
 def execute(
     request: AskExecuteRequest,
+    narrator: NarrativeService | None = None,
 ) -> AskResponse | ProcurementRunResponse:
     """사용자가 확인한 의도를 실행한다.
 
@@ -119,7 +135,9 @@ def execute(
             outcome="STATUS_ANSWERED",
             intent=intent,
             status=_to_answer(outcome),
-            llm_status="SKIPPED_TEMPLATE",  # 이미 분류된 의도라 LLM 을 안 부른다
+            answer=_write_answer(facts_from_status(outcome), narrator),
+            # ①은 안 부른다 (이미 분류된 의도다). ⑥의 상태는 answer 안에 있다.
+            llm_status="SKIPPED_TEMPLATE",
         )
 
     if intent.action == "PROCUREMENT_RUN":
@@ -190,6 +208,23 @@ def _run_status(
     )
 
 
+def _write_answer(facts: AnswerFacts, narrator: NarrativeService | None) -> AnswerOut:
+    """⑥ — 문장을 얹어 사람이 읽는 답을 만든다.
+
+    ★ **문장 생성이 실패해도 답은 나간다.** `narrative=None` 이면 규칙이 만든 사실
+      줄만으로 완결된다 — LLM 을 답의 뼈대로 쓰지 않는 것이 이 설계의 요지다.
+    """
+    narrator = narrator or get_narrative_service()
+    result = narrator.write(facts)
+    return AnswerOut(
+        text=render_answer(facts, result.narrative),
+        narrative=result.narrative,
+        llm_status=result.llm_status,
+        llm_attempts=result.llm_attempts,
+        llm_fallback_used=result.llm_fallback_used,
+    )
+
+
 def _to_answer(outcome: StatusOutcome) -> StatusAnswer:
     return StatusAnswer(
         status_code=outcome.status_code,
@@ -209,6 +244,7 @@ def _response(
     outcome,
     confirm_required: bool = False,
     status: StatusAnswer | None = None,
+    answer: AnswerOut | None = None,
     note: str | None = None,
 ) -> AskResponse:
     return AskResponse(
@@ -219,6 +255,7 @@ def _response(
         clarification=result.clarification,
         confirm_required=confirm_required,
         status=status,
+        answer=answer,
         llm_status=result.llm_status,
         llm_provider=result.llm_provider,
         llm_model=result.llm_model,

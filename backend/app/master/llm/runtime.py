@@ -360,11 +360,6 @@ class IntentValidationError(ValueError):
 #: **분류 자체를 UNKNOWN 으로 바꿔** 회피하는 일이 실측에서 나왔다 ("재고 어때?").
 #: 빈 칸을 지적받으면 그 칸을 채우는 대신 **답을 무르는 쪽이 더 쉽기 때문**이다.
 #: 그래서 고칠 곳을 짚을 때 **분류를 바꾸지 말라**고 함께 못박는다.
-#: 🔴 교정 문구는 **"빠진 칸을 채워라"** 여야 한다.
-#:
-#: 빈 칸을 지적받으면 모델은 그 칸을 채우는 대신 **분류 자체를 UNKNOWN 으로 무르는**
-#: 쪽을 고른다 — 그게 더 쉽기 때문이다. 실측에서 반복해 나왔다. 그래서 고칠 곳을
-#: 짚을 때 **분류를 바꾸지 말라**고 함께 못박는다.
 _GUIDANCE: dict[IntentIssue, str] = {
     IntentIssue.NOT_JSON: "JSON 만 출력한다. 설명 문장을 붙이지 않는다.",
     IntentIssue.SCHEMA: "지정된 JSON Schema 의 필드와 허용값만 쓴다.",
@@ -557,8 +552,17 @@ def _user_payload(utterance: str, guidance: list[str] | None) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def build_provider(settings: LLMSettings) -> TextProvider:
+    """설정에 맞는 프로바이더. **모르는 값이면 터뜨리는 것을 돌려준다.**
+
+    ★ 역할(①분류 · ⑥응답 생성)마다 프로바이더를 새로 고르게 하지 않는다. 지금은 둘이
+      같은 `.env` 를 보지만, **역할마다 모델 등급이 달라지는 것이 예정된 변화**라
+      (분류는 소형 · 판정 검증은 상위 모델) 고르는 자리를 한 곳으로 모아 둔다.
+    """
+    factory = _PROVIDERS.get(settings.provider)
+    return factory(settings) if factory else UnavailableProvider()
+
+
 def get_intent_service() -> IntentService:
     settings = get_llm_settings()
-    factory = _PROVIDERS.get(settings.provider)
-    provider: TextProvider = factory(settings) if factory else UnavailableProvider()
-    return IntentService(settings, provider)
+    return IntentService(settings, build_provider(settings))
