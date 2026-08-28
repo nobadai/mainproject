@@ -13,7 +13,7 @@ from typing import ClassVar
 
 import pytest
 
-from app.master.adapters import finance as adapter
+from app.finance import adapter
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)

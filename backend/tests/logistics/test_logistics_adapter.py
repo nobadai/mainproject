@@ -15,8 +15,8 @@ from decimal import Decimal
 
 import pytest
 
+from app.logistics import adapter
 from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsPolicy
-from app.master.adapters import logistics as adapter
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)
