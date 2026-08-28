@@ -451,14 +451,19 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     context = _load_context()
     if context is None:
         return _not_ready(
-            request, run_id, [_T_POSITION], ("finance_state", "finance_policy"),
-            "재무 상태 또는 정책을 읽지 못했다",
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=("finance_state", "finance_policy"),
+            reason="재무 상태 또는 정책을 읽지 못했다",
         )
     if context.snapshot.state_date != request.context.as_of:
         return _not_ready(
-            request, run_id, [_T_POSITION],
-            (f"finance_state@{request.context.as_of.isoformat()}",),
-            (
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=(f"finance_state@{request.context.as_of.isoformat()}",),
+            reason=(
                 f"재무 상태 기준일이 {context.snapshot.state_date} 다 — "
                 f"요청은 {request.context.as_of} 다"
             ),
@@ -471,8 +476,19 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     )
     if payroll_refs:
         return _not_ready(
-            request, run_id, [_T_POSITION], payroll_refs,
-            "급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=payroll_refs,
+            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+        )
+    if context.policy.purchase_payment_days is None:
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION, _T_CASHFLOW, _T_CAP],
+            missing=("purchase_payment_days",),
+            reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
         )
 
     # This invokes the existing scenario engine and runtime rules for the
@@ -480,9 +496,11 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     base_result = run_finance_procurement_with_context(proposal, context)
     if base_result.runtime_status != "READY":
         return _not_ready(
-            request, run_id, [_T_POSITION, _T_CASHFLOW, _T_CAP],
-            tuple(base_result.hard_constraints) or ("finance_runtime",),
-            "재무 실행 입력이 준비되지 않아 시나리오를 판정하지 못했다.",
+            request,
+            run_id,
+            [_T_POSITION, _T_CASHFLOW, _T_CAP],
+            missing=tuple(base_result.hard_constraints) or ("finance_runtime",),
+            reason="재무 실행 입력이 준비되지 않아 시나리오를 판정하지 못했다.",
         )
 
     policy = context.policy
