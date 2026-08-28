@@ -46,7 +46,10 @@ RISING = date(2026, 8, 21)
 FALLING = date(2026, 8, 28)
 UNCERTAIN = date(2026, 9, 4)
 SPREAD_WIDE = date(2026, 9, 11)
-ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
+#: 통합 시연 앵커 (#73). 성격은 rising 과 같고 날짜만 다르다 — 여기서는 ② 진입 잠금
+#: (stable 이면 문서 포트를 0회 부른다)을 한 앵커 더 걸어 두는 값이 있다.
+INTEGRATION = date(2025, 12, 31)
+ANCHORS = (INTEGRATION, RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
 ITEMS = ("배추", "무", "피마늘", "양파")
 
 ITEM = "배추"

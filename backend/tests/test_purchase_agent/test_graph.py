@@ -47,7 +47,11 @@ RISING = date(2026, 8, 21)
 FALLING = date(2026, 8, 28)
 UNCERTAIN = date(2026, 9, 4)
 SPREAD_WIDE = date(2026, 9, 11)
-ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
+#: 통합 시연 앵커 (#73). 성격은 rising 과 같고 **날짜만 다르다** — 재무·물류 DB 데이터가
+#: 이 날에만 있어서(2026-08-28 실측) 세 파트가 함께 도는 유일한 날이다. 기대는 rising 군과
+#: 같은 자리에 넣는다: 같은 forecast·quotes 를 쓰므로 다른 값이 나오면 그게 회귀다.
+INTEGRATION = date(2025, 12, 31)
+ANCHORS = (INTEGRATION, RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
 
 ITEM = "배추"
 
@@ -82,6 +86,7 @@ def test_stable_days_skip_the_context_loop() -> None:
 # ── E2-2: ① 상황 분류 + 허용 축 ─────────────────────────────────────────────
 
 SITUATION_BY_ANCHOR = (
+    (INTEGRATION, "stable", ["quantity", "timing"]),
     (RISING, "stable", ["quantity", "timing"]),
     (FALLING, "stable", ["quantity"]),
     (UNCERTAIN, "uncertain", ["quantity"]),
@@ -112,7 +117,13 @@ def test_mix_axis_is_gated_out_by_item_concentration(as_of: date) -> None:
 
 # ── E2-3: ③⑥ 수량과 패키징 ─────────────────────────────────────────────────
 
-SCENARIO_COUNT = ((RISING, 3), (FALLING, 3), (UNCERTAIN, 2), (SPREAD_WIDE, 3))
+SCENARIO_COUNT = (
+    (INTEGRATION, 3),
+    (RISING, 3),
+    (FALLING, 3),
+    (UNCERTAIN, 2),
+    (SPREAD_WIDE, 3),
+)
 
 
 @pytest.mark.parametrize(("as_of", "count"), SCENARIO_COUNT, ids=lambda v: str(v))
@@ -339,7 +350,10 @@ def test_context_docs_used_lists_only_documents_actually_loaded(proposals: dict)
     같은 필드가 두 상태를 구분한다 — 그게 이 필드의 존재 이유다.
     """
     assert proposals[UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
-    for as_of in (RISING, FALLING, SPREAD_WIDE):
+    # INTEGRATION(12-31)도 여기 든다. documents.json 은 절대 날짜(2026-08~09)라 그날
+    # 가시 문서가 0건이지만, **stable 이라 ② 자체를 안 탄다** — 0건이어서 비는 것과
+    # 안 돌아서 비는 것은 다르고, 여기서 검사하는 것은 뒤쪽이다.
+    for as_of in (INTEGRATION, RISING, FALLING, SPREAD_WIDE):
         assert proposals[as_of]["context_docs_used"] == []
 
 
