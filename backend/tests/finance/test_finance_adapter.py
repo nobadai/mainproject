@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 from typing import ClassVar
@@ -28,8 +29,8 @@ def ctx(as_of: date = AS_OF) -> ExecutionContext:
     )
 
 
-def req(mode="PRE_PURCHASE", as_of: date = AS_OF) -> AgentRequest:
-    return AgentRequest(context=ctx(as_of), agent="finance", mode=mode)
+def req(mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None) -> AgentRequest:
+    return AgentRequest(context=ctx(as_of), agent="finance", mode=mode, payload=payload or {})
 
 
 class _Policy:
@@ -61,12 +62,36 @@ class _Snapshot:
     state_date = AS_OF
     current_cash_krw = Decimal(50_000_000)
     finance_state_id = "FIN-STATE-1"
+    snapshot_id = "FIN-SNAPSHOT-1"
+    minimum_operating_cash_krw = Decimal(10_000_000)
+    committed_outflows_krw = Decimal(0)
+    unsettled_purchase_payables_krw = Decimal(0)
+    receivables_krw = Decimal(0)
+    current_debt_krw = Decimal(0)
+    financial_limit_krw = Decimal(40_000_000)
+
+    def model_dump(self, **_kwargs):
+        return {
+            "finance_state_id": self.finance_state_id,
+            "sim_run_id": "SIM-1",
+            "state_date": self.state_date,
+            "state_type": "DAILY",
+            "financing_mode": "NONE",
+            "current_cash_krw": self.current_cash_krw,
+            "minimum_operating_cash_krw": self.minimum_operating_cash_krw,
+            "committed_outflows_krw": self.committed_outflows_krw,
+            "unsettled_purchase_payables_krw": self.unsettled_purchase_payables_krw,
+            "receivables_krw": self.receivables_krw,
+            "current_debt_krw": self.current_debt_krw,
+            "financial_limit_krw": self.financial_limit_krw,
+        }
 
 
 class _Context:
     snapshot = _Snapshot()
     policy = _Policy()
     cash_events: tuple = ()
+    unresolved_sources: tuple = ()
 
 
 @pytest.fixture
@@ -396,3 +421,83 @@ def test_목록형_조회_근거도_개수가_아니라_임계값이다(wired):
     ev = next(e for e in reply.evidences if e.claim == "critical_payment_dates")
     assert ev.value == 10_000_000.0  # minimum_cash_balance_krw — 임계값
     assert ev.unit == "KRW"
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_VALIDATION — Master가 전달하는 Purchase proposal 계약
+# ---------------------------------------------------------------------------
+
+
+def test_정상_Purchase_시나리오를_READY_판정으로_반환한다(wired, purchase_payload):
+    request = req("SCENARIO_VALIDATION", payload=purchase_payload)
+    reply, meta = adapter.finance_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.payload["verdicts"]
+    assert reply.payload["verdicts"][0]["scenario_id"] == "기본"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_Finance_Cap을_초과하면_정상_업무_reject를_반환한다(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    scenario = payload["scenarios"][0]
+    scenario["total_amount_krw"] = 45_000_000
+    scenario["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 4500, "grade_unit_price": 10_000}
+    ]
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "reject"
+    assert reply.payload["verdicts"][0]["verdict"] == "reject"
+
+
+def test_분할_지급의_실제_payment_date를_현금흐름에_쓴다(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    scenario = payload["scenarios"][0]
+    scenario.update(
+        total_qty_kg=2,
+        total_amount_krw=200,
+        max_price=120,
+        split_plan=[
+            {"seq": 1, "date": "2025-12-31", "qty_kg": 1},
+            {"seq": 2, "date": "2026-01-01", "qty_kg": 1},
+        ],
+        sourcing_plan=[{"market": "가락", "grade": "상", "qty_kg": 2, "grade_unit_price": 100}],
+        payment_schedule=[
+            {
+                "seq": 1, "purchase_date": "2025-12-31", "payment_date": "2026-01-07",
+                "qty_kg": 1, "amount_krw": 100, "amount_max_krw": 120, "basis": "as_of_unit_price",
+            },
+            {
+                "seq": 2, "purchase_date": "2026-01-01", "payment_date": "2026-01-08",
+                "qty_kg": 1, "amount_krw": 100, "amount_max_krw": 120, "basis": "as_of_unit_price",
+            },
+        ],
+    )
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+    assert reply.runtime_status == "READY"
+    assert [row["payment_date"] for row in reply.payload["verdicts"][0]["payment_schedule"]] == [
+        "2026-01-07", "2026-01-08"
+    ]
+
+
+def test_필수_Purchase_시나리오_필드가_없으면_명시적으로_ERROR(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    del payload["scenarios"][0]["sourcing_plan"]
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert reply.payload["validation_errors"]
+
+
+def test_Purchase_as_of_불일치는_명시적으로_ERROR(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    payload["meta"]["as_of"] = "2025-12-30"
+    payload["scenarios"][0]["split_plan"][0]["date"] = "2025-12-30"
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+    assert reply.runtime_status == "ERROR"
+    assert reply.payload["validation_errors"] == ["proposal.meta.as_of"]
