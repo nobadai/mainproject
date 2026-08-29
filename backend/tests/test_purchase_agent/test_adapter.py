@@ -27,6 +27,7 @@ from app.purchase_agent.adapter import (
 )
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
+from app.purchase_agent.nodes.package_scenarios import split_quantities
 
 # "2025-12-31" 은 통합 시연 앵커 (#73) — 재무·물류 DB 데이터가 이 날에만 있다.
 ANCHORS = ["2025-12-31", "2026-08-21", "2026-08-28", "2026-09-04", "2026-09-11"]
@@ -902,6 +903,56 @@ def test_n4_zero_is_a_received_value_not_a_missing_one() -> None:
         _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 0})
     )[0].payload
     assert not _n4_notes(received["scenarios"][0]["risks"])
+
+
+def test_split_quantities_and_the_risk_note_never_disagree() -> None:
+    """⑥은 수량을 재배분하고 ``_split_risks``는 **같은 계산을 다시** 한다.
+
+    두 곳이 갈라지면 화면에 "재배분했다"고 적힌 옆에 균등 수량이 뜬다 — 어느 쪽이
+    사실인지 소비자가 알 수 없다. 순수 함수라 갈라질 수 없다는 전제를 못박는다.
+    """
+    # 공격안(D=12·2회차)의 실제 도착일이다 — 매입일 09-11·09-17 에 N4 2 를 더한 값.
+    # 1회차 상한을 낮게 걸어 **재배분이 실제로 일어나게** 한다.
+    cap = {"2026-09-13": 1_000, "2026-09-19": 100_000}
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2, "cap_by_date": cap})
+    )[0].payload
+
+    split_scenarios = [s for s in received["scenarios"] if len(s["split_plan"]) > 1]
+    assert split_scenarios, "분할 안이 없으면 이 검사가 아무것도 안 본다"
+    reapportioned = 0
+    for scenario in split_scenarios:
+        quantities = [line["qty_kg"] for line in scenario["split_plan"]]
+        assert sum(quantities) == scenario["total_qty_kg"], "사중 일치"
+        assert all(qty > 0 for qty in quantities), "0kg 회차는 스키마가 죽인다"
+        notes = [note for note in scenario["risks"] if "회 분할" in note]
+        assert len(notes) == 1
+
+        # 균등이었다면 나왔을 수량. **양방향으로** 대조한다 — 한 방향만 보면
+        # 고지가 "보류"로 빠지는 변이를 못 잡는다.
+        rounds = len(quantities)
+        equal = split_quantities(scenario["total_qty_kg"], [{"ratio": 1 / rounds}] * rounds)
+        if quantities != equal:
+            reapportioned += 1
+            assert "재배분했다" in notes[0], "조정했는데 고지는 다른 말을 한다"
+            assert str(quantities) in notes[0]
+        else:
+            assert "재배분했다" not in notes[0], "조정 안 했는데 했다고 적는다"
+
+    assert reapportioned, "재배분이 한 번도 안 일어나면 이 검사가 헛돈다"
+
+
+def test_cap_by_date_absence_is_the_normal_path() -> None:
+    """mock 재고에는 ``cap_by_date``가 없다 — 회귀 픽스처 전량이 이 길로 간다."""
+    received = purchase_port(_request("배추", SPREAD_WIDE))[0].payload
+    notes = [
+        note
+        for scenario in received["scenarios"]
+        for note in scenario["risks"]
+        if "회 분할" in note
+    ]
+    assert notes, "분할 고지는 남는다"
+    assert all("보류" in note for note in notes), "부재는 보류로 고지되고 조정은 없다"
 
 
 def test_payment_date_overlap_raises_a_warning_not_a_cut() -> None:

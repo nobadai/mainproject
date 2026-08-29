@@ -442,12 +442,38 @@ def test_fallback_when_an_arrival_falls_outside_the_query_window() -> None:
     assert "조회 창" in note
 
 
-def test_zero_capacity_inside_the_window_is_honoured_unlike_a_missing_date() -> None:
-    """**있는 0**과 **없는 값**은 다르다 — 0은 진짜로 못 넣는다는 뜻이라 밀어낸다."""
-    cap = {"2026-01-02": 0, "2026-01-08": 100}
-    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
-    assert quantities == [0, 100]
-    assert note and "재배분" in note
+def test_zero_capacity_inside_the_window_is_distinguished_from_a_missing_date() -> None:
+    """**있는 0**과 **없는 값**은 다르다 — 사유 문구가 갈린다.
+
+    다만 결과는 둘 다 균등 유지다. 0kg 회차는 ``SplitPlanItem.qty_kg > 0``이라
+    제안 전체를 죽이므로 재배분을 포기한다.
+    """
+    zero = {"2026-01-02": 0, "2026-01-08": 100}
+    _, zero_note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], zero)
+    _, missing_note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], {})
+    assert "실행 불가 회차" in zero_note, "0은 값이 있는 것이라 창 밖으로 뭉뚱그리지 않는다"
+    assert "조회 창" in missing_note
+
+
+def test_a_round_never_comes_out_zero_or_negative() -> None:
+    """🔴 재배분이 **최소 수량 검사를 사후에 깬다.**
+
+    ``split_infeasible_reason``은 균등 분할 수량으로 검사를 마쳤는데, 그 뒤 재배분이
+    0kg·음수 회차를 새로 만들 수 있다. 총합은 맞으므로 **사중 일치는 통과하고**
+    스키마 검증에서야 제안 전체가 터진다 — ``_validate_ratios``가 막는 것과 같은
+    "조용히 지나가는 구간"이다.
+    """
+    # 음수 수용량이 섞이면 앞 회차가 음수가 되고 뒤 회차가 그만큼 부푼다
+    mixed = {"2026-01-02": -30, "2026-01-08": 1000}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], mixed)
+    assert quantities == [50, 50]
+    assert "실행 불가 회차" in note
+    assert all(quantity > 0 for quantity in quantities)
+
+    # 창 안의 0도 같은 이유로 되돌린다
+    zeroed = {"2026-01-02": 0, "2026-01-08": 100}
+    quantities, _ = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], zeroed)
+    assert all(quantity > 0 for quantity in quantities)
 
 
 def test_fallback_when_total_does_not_fit_under_the_caps() -> None:

@@ -163,6 +163,16 @@ def cap_constrained_quantities(
         adjusted.append(take)
         carried = want - take
 
+    if any(quantity < 1 for quantity in adjusted):
+        # 0kg·음수 회차는 ``SplitPlanItem.qty_kg > 0``이라 **제안 전체**를 죽인다.
+        # 균등 분할은 ``split_infeasible_reason``의 최소 수량 검사를 이미 통과한 값이라
+        # 되돌리면 안전하다. 재배분이 그 검사를 **사후에 깨는** 자리라 여기서 한 번 더 본다
+        # (음수 수용량이 섞이면 앞 회차가 음수가 되고 총합은 맞아 사중 일치는 통과한다 —
+        # 스키마에서야 터지는, 조용히 지나가는 구간이다).
+        return quantities, (
+            f"회차 수량을 도착일 수용량에 맞추면 실행 불가 회차가 생긴다 — {adjusted}. "
+            "0kg·음수 회차는 제안 전체를 무효로 만들어 균등 분할을 유지했다"
+        )
     if carried:
         return quantities, (
             f"회차별 도착일 수용량 안에 총량을 못 담았다 — {carried:,}kg이 남는다 "
