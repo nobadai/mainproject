@@ -264,3 +264,74 @@ def test_분할인데_지급일정이_없으면_미검사다():
     result = run(proposal(["quantity", "timing"], rounds=2))
     assert not sched(result)
     assert any("payment_schedule 가 없어 미검사" in s for s in result.skipped)
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 실어 준 값을 미결이라 답하는가
+# ---------------------------------------------------------------------------
+
+
+INVENTORY = {"inventory": {"inbound_lead_days": 2.0, "cap_by_date": {"2026-01-02": 5000}}}
+
+
+def supplied(result) -> list[str]:
+    return [c for c in result.concerns if c.startswith("SUPPLIED-BUT-UNRESOLVED")]
+
+
+def with_risk(text: str) -> dict:
+    p = proposal()
+    p["scenarios"][0]["risks"] = [text]
+    return p
+
+
+def test_실어_준_값을_미결이라_답하면_잡는다():
+    """🔴 **조정자만 볼 수 있는 종류다.**
+
+    물류는 자기가 보낸 것을 알고 매입은 자기가 못 읽은 것을 아는데, **둘을 나란히
+    놓는 것은 마스터뿐**이다. 실측(2026-08-29)에서 `inbound_lead_days` 가 봉투에
+    `2.0` 으로 실려 있는데 매입이 *"미확정"* 으로 도착일 계산을 보류했다.
+    """
+    result = run(
+        with_risk("입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 …"),
+        INVENTORY,
+    )
+
+    assert len(supplied(result)) == 1
+    assert "inbound_lead_days" in supplied(result)[0]
+    # 재호출로 안 고쳐진다 — 배선을 고쳐야 하는 일이라 findings 가 아니다
+    assert not any("SUPPLIED" in f for f in result.findings)
+
+
+def test_같은_원인의_파생은_두_번_보고하지_않는다():
+    """`cap_by_date` 도 봉투에 있지만 **보류 사유는 뒤의 키 하나**다.
+
+    처음엔 문장 어디에 있든 잡아 둘 다 보고했다 — 같은 원인을 두 번 낸 셈이었다.
+    """
+    result = run(
+        with_risk("cap_by_date 검사는 inbound_lead_days(N4) 미확정으로 보류"),
+        INVENTORY,
+    )
+
+    assert len(supplied(result)) == 1
+    assert "inbound_lead_days" in supplied(result)[0]
+
+
+def test_봉투에_없는_이름은_잡지_않는다():
+    """이름이 다른 불일치는 **여기서 못 잡는다.**
+
+    물류 `item_storage_policies[].operational_limit_days` 와 매입
+    `lots[].shelf_life_days` 가 그 경우다. 별칭 표를 두면 어긋날 자리가 하나 더
+    생기고, 그건 8/29 에 걷어낸 층이다 — **이름 합의는 팀이 할 일이다.**
+    """
+    result = run(with_risk("품목 보관한계(shelf_life_days)를 아무 로트도 싣지 않았다"), INVENTORY)
+
+    assert supplied(result) == []
+
+
+def test_정상적인_위험_고지는_잡지_않는다():
+    """넓게 잡으면 **부서가 성실히 남긴 위험까지** 배선 문제로 읽힌다."""
+    result = run(
+        with_risk("기존 로트 잔여신선도 10일 — 신규 매입분이 밀어내지 않는지 확인"), INVENTORY
+    )
+
+    assert supplied(result) == []
