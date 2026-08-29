@@ -20,6 +20,8 @@ from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import (
+    arrival_dates,
+    cap_constrained_quantities,
     materialize_split,
     package_scenarios,
     split_infeasible_reason,
@@ -384,3 +386,141 @@ def test_split_carries_its_own_rationale(proposals: dict) -> None:
 
     conservative = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "보수")
     assert not [r for r in conservative["rationale"] if "분할" in r["claim"]]
+
+
+# ── #58 회차별 도착일 수용량 ────────────────────────────────────────────────
+#
+# ⚠️ **mock 재고에는 ``cap_by_date``도 ``inbound_lead_days``도 없다.** 물류 어댑터
+# 경로에서만 오는 값이라, 기존 픽스처로는 아래 경로가 한 번도 안 밟힌다. 전부 합성
+# 입력으로 시험한다 — E3-3의 수량 트리거와 같은 상황이다.
+
+AS_OF = "2025-12-31"
+
+
+def test_arrival_dates_are_purchase_dates_plus_n4() -> None:
+    """도착일 = 회차일 + N4. 회차일은 ``split_offsets``를 **재사용**한다."""
+    assert arrival_dates(AS_OF, 12, 2, 2) == ["2026-01-02", "2026-01-08"]
+    # 오프셋 0·6 (= split_offsets(12, 2)) 에 N4 2를 더한 값이다
+    assert split_offsets(12, 2) == [0, 6]
+
+
+def test_arrival_dates_are_none_when_n4_is_missing() -> None:
+    """N4가 없으면 **계산하지 않는다**. 0으로 채우면 "오늘 승인분이 오늘 도착"이 된다."""
+    assert arrival_dates(AS_OF, 12, 2, None) is None
+
+
+def test_arrival_dates_accept_zero_lead_as_a_real_value() -> None:
+    """0은 미결이 아니라 "당일 도착"이라는 확정값이다 (규칙 3)."""
+    assert arrival_dates(AS_OF, 12, 2, 0) == ["2025-12-31", "2026-01-06"]
+
+
+# ── 4갈래 폴백 ─────────────────────────────────────────────────────────────
+
+
+def test_fallback_when_logistics_sent_no_cap() -> None:
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], None)
+    assert quantities == [50, 50]
+    assert "물류가 날짜별 수용량" in note
+
+
+def test_fallback_when_n4_is_missing() -> None:
+    quantities, note = cap_constrained_quantities([50, 50], None, {"2026-01-02": 10})
+    assert quantities == [50, 50]
+    assert "입고 소요일(N4)" in note
+
+
+def test_fallback_when_an_arrival_falls_outside_the_query_window() -> None:
+    """🔴 **이 작업의 급소.** 창 밖은 0이 아니라 "안 봤다"다.
+
+    물류는 ``as_of + N4``부터 18일만 계산해 보낸다. 창 밖 날짜를 ``.get(d, 0)``으로
+    읽으면 그 회차가 **수용량 0**이 되어 통째로 죽는다.
+    """
+    cap = {"2026-01-02": 10_000}  # 2회차 도착일(01-08)은 창 밖
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [50, 50], "창 밖 회차를 0으로 눌러 죽이면 안 된다"
+    assert "2026-01-08" in note
+    assert "조회 창" in note
+
+
+def test_zero_capacity_inside_the_window_is_honoured_unlike_a_missing_date() -> None:
+    """**있는 0**과 **없는 값**은 다르다 — 0은 진짜로 못 넣는다는 뜻이라 밀어낸다."""
+    cap = {"2026-01-02": 0, "2026-01-08": 100}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [0, 100]
+    assert note and "재배분" in note
+
+
+def test_fallback_when_total_does_not_fit_under_the_caps() -> None:
+    cap = {"2026-01-02": 10, "2026-01-08": 10}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [50, 50], "총량을 줄이면 사중 일치가 깨진다"
+    assert "못 담았다" in note and "80" in note
+
+
+# ── 재배분 ─────────────────────────────────────────────────────────────────
+
+
+def test_overflow_is_pushed_to_the_later_round() -> None:
+    cap = {"2026-01-02": 30, "2026-01-08": 100}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [30, 70]
+    assert sum(quantities) == 100, "총합 불변"
+    assert note and "재배분" in note
+
+
+def test_no_note_when_equal_split_already_fits() -> None:
+    cap = {"2026-01-02": 100, "2026-01-08": 100}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [50, 50]
+    assert note is None
+
+
+def test_capacity_is_floored_not_rounded() -> None:
+    """수용량은 상한이라 내림한다 — 올림하면 못 넣는 양을 계획하게 된다."""
+    cap = {"2026-01-02": 30.9, "2026-01-08": 100}
+    quantities, _ = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    assert quantities == [30, 70]
+
+
+def test_iso_string_keys_are_what_logistics_sends() -> None:
+    """물류는 ``d.isoformat()``으로 직렬화해 보낸다 (`logistics/adapter.py:364`).
+
+    ``date`` 객체를 키로 조회하면 **전부 미스**가 되어, 수용량이 와 있는데도
+    "창 밖"으로 빠진다.
+    """
+    iso_cap = {"2026-01-02": 30, "2026-01-08": 100}
+    date_cap = {date(2026, 1, 2): 30, date(2026, 1, 8): 100}
+    arrivals = arrival_dates(AS_OF, 12, 2, 2)
+
+    assert cap_constrained_quantities([50, 50], arrivals, iso_cap)[0] == [30, 70]
+    # 같은 값인데 키 타입만 다르면 조정이 일어나지 않는다 — 그 사실이 고지로 드러난다
+    quantities, note = cap_constrained_quantities([50, 50], arrivals, date_cap)  # type: ignore[arg-type]
+    assert quantities == [50, 50]
+    assert "조회 창" in note
+
+
+# ── ⑥ 통합 ─────────────────────────────────────────────────────────────────
+
+
+def test_materialize_split_applies_the_cap() -> None:
+    chosen = [{"ratio": 0.5}, {"ratio": 0.5}]
+    rounds = materialize_split(
+        AS_OF,
+        100,
+        chosen,
+        12,
+        lead_days=2,
+        cap_by_date={"2026-01-02": 30, "2026-01-08": 100},
+    )
+    assert [line["qty_kg"] for line in rounds] == [30, 70]
+    assert sum(line["qty_kg"] for line in rounds) == 100
+    # 매입일은 도착일이 아니다 — 회차 date 는 오프셋 그대로다
+    assert [line["date"] for line in rounds] == ["2025-12-31", "2026-01-06"]
+
+
+def test_materialize_split_is_unchanged_without_logistics_values() -> None:
+    """부재가 **정상 경로**다 — 회귀 픽스처 전량이 이 길로 간다."""
+    chosen = [{"ratio": 0.5}, {"ratio": 0.5}]
+    assert materialize_split(AS_OF, 100, chosen, 12) == materialize_split(
+        AS_OF, 100, chosen, 12, lead_days=None, cap_by_date=None
+    )
