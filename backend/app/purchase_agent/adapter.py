@@ -373,6 +373,11 @@ def build_state(request: AgentRequest) -> PurchaseAgentState:
         "projected_cash_min": finance["base_projected_cash_min"],
         "finance_cap_amount_krw": finance.get("finance_cap_amount_krw"),
         "purchase_payment_days": finance.get("purchase_payment_days"),
+        # N4는 **물류** payload에 있다 (재무가 아니다). ``absorb_inventory``가 통째로
+        # 복사해 ``state["inventory"]`` 안에도 들어가지만, ``pending_value``는 State
+        # 최상위를 보므로 여기서 한 번 더 올려야 값이 실제로 쓰인다.
+        # ``or``를 쓰지 않는다 — 0은 "당일 도착"이라는 확정된 값이라 폴백 대상이 아니다 (규칙 3).
+        "inbound_lead_days": inventory.get("inbound_lead_days"),
         "critical_payment_dates": list(finance.get("critical_payment_dates") or []),
         "feedback": dict(payload.get("prior_feedback") or {}) or None,
         "context_docs": [],

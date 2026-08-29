@@ -24,7 +24,7 @@ from app.purchase_agent.config import load_constraints
 from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_context
 from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import require_positive
-from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
+from app.purchase_agent.nodes.draft_plan import fixed_market_quotes, pending_value
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -225,7 +225,11 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
     # N4(입고 소요일)가 확정되면 소진 창이 입고일 기준으로 **이동**한다 — 입고 전 납기는
     # 이 매입분으로 채울 수 없고, 뒤쪽은 그만큼 밀린다. NULL이면 0으로 채우지 않고
     # "as_of 기준 근사"임을 facts에 남겨 ⑥이 risks에 싣게 한다 (규칙 3).
-    lead_days = constraints["pending"]["inbound_lead_days"]
+    # ``constraints["pending"]``을 직접 읽지 않는다 — 그 값은 "아직 아무도 안 줬다"는
+    # **기본값**이고, 물류가 보내면 State의 값이 정답이다. 직접 읽으면 어댑터 경로에서
+    # N4가 와 있어도 못 보고 "미확정"을 고지한다 (``pending_value`` docstring —
+    # "두 곳을 각자 읽으면 한쪽만 바뀐다"가 실제로 일어난 자리).
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
     facts["arrival_basis_assumed"] = lead_days is None
     facts["near_qty_kg"] = near_term_demand_kg(
         state["confirmed_orders"]["orders"],

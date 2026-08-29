@@ -47,13 +47,19 @@ def _finance(as_of: date, **over) -> dict:
     return base
 
 
+def _inventory(item: str, as_of: date, **over) -> dict:
+    """물류 payload. 어댑터 경로에서만 오는 키(``inbound_lead_days``·``cap_by_date``)를
+    얹어 시험할 수 있게 finance와 같은 방식으로 연다 — mock에는 그 키들이 없다."""
+    return {**ports.get_inventory(item, as_of), **over}
+
+
 def _payload(item: str, as_of: date, **over) -> dict:
     extras = ports.get_snapshot_extras(item, as_of)
     payload = {
         "item": item,
         "constraints": {
             "finance": _finance(as_of, **over.pop("finance", {})),
-            "inventory": ports.get_inventory(item, as_of),
+            "inventory": _inventory(item, as_of, **over.pop("inventory", {})),
         },
         "forecast": ports.get_forecast(item, as_of),
         "confirmed_orders": ports.get_confirmed_orders(item, as_of, days=14),
@@ -865,6 +871,37 @@ def test_n5_deferred_on_the_mock_path_and_restored_on_the_adapter_path() -> None
 
     received = purchase_port(_request("배추", SPREAD_WIDE))[0].payload
     assert not _n5_notes(received["scenarios"][0]["risks"]), "N5를 받으면 보류가 풀린다"
+
+
+def _n4_notes(risks: list[str]) -> list[str]:
+    return [note for note in risks if "N4" in note]
+
+
+def test_n4_deferred_on_the_mock_path_and_restored_when_logistics_sends_it() -> None:
+    """N5와 같은 이중 경로다. **다만 N4는 물류 payload에서 온다** (재무가 아니다).
+
+    이 배선이 없으면 값이 ``state["inventory"]`` 안에는 들어와 있는데
+    ``pending_value``가 State **최상위**를 봐서 못 찾고, 실연동에서도 "N4 미확정"을
+    고지한다 — 화면에 사실이 아닌 문장이 나가던 자리다 (#58 선행).
+    """
+    direct = run_purchase_agent("배추", SPREAD_WIDE)
+    assert _n4_notes(direct["scenarios"][0]["risks"]), "mock 경로는 보류 고지가 남는다"
+
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2})
+    )[0].payload
+    assert not _n4_notes(received["scenarios"][0]["risks"]), "N4를 받으면 보류가 풀린다"
+
+
+def test_n4_zero_is_a_received_value_not_a_missing_one() -> None:
+    """``0``은 "당일 도착"이라는 **확정된 값**이다 (규칙 3).
+
+    ``or``로 폴백하면 0이 falsy라 미결로 되돌아가고, "받았는데 못 받은 것으로 친다"가 된다.
+    """
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 0})
+    )[0].payload
+    assert not _n4_notes(received["scenarios"][0]["risks"])
 
 
 def test_payment_date_overlap_raises_a_warning_not_a_cut() -> None:
