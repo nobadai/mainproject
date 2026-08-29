@@ -120,13 +120,13 @@ class AnswerFacts:
         모델이 쓸 문장은 **누가 답했고 누가 못 답했나** 뿐이므로 그 둘만 준다.
         값도 라벨도 안 보이면 **틀리게 쓸 재료 자체가 없다.**
         """
-        return "\n".join(
-            (
-                f"결론: {self.headline}",
-                "답한 부서: " + (", ".join(self.answered) or "없음"),
-                "답하지 못한 부서: " + (", ".join(self.unanswered) or "없음"),
-            )
-        )
+        lines = [f"결론: {self.headline}"]
+        if self.answered or self.unanswered:
+            # ★ 부서 얘기가 없는 결과(결정 기록)에까지 "답한 부서: 없음" 을 주면
+            #   모델이 그 "없음" 을 문장에 옮겨 적는다.
+            lines.append("답한 부서: " + (", ".join(self.answered) or "없음"))
+            lines.append("답하지 못한 부서: " + (", ".join(self.unanswered) or "없음"))
+        return "\n".join(lines)
 
 
 def agent_label(agent: str) -> str:
@@ -243,6 +243,49 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
         unanswered=tuple(
             agent_label(a) for a in (*response.blocked_by, *response.missing_adapters)
         ),
+    )
+
+
+# ── 결정 ────────────────────────────────────────────────────────────────
+
+#: 사람의 결정을 사람이 읽는 문장으로.
+_DECISION_HEADLINE: dict[str, str] = {
+    "APPROVE": "'{label}' 안으로 진행합니다.",
+    "REJECT_ALL": "제시된 안을 모두 반려했습니다.",
+    "REQUEST_CHANGE": "조건을 붙여 다시 요청하도록 기록했습니다.",
+}
+
+
+def facts_from_decision(decision: Any) -> AnswerFacts:
+    """적재된 결정 1건을 사실 줄로.
+
+    🔴 **승인은 기록이지 실행이 아니다.** 여기서 끝난 것은 *"사람이 이 안을 골랐다"*
+      까지이고 실제 발주는 이 시스템 밖이다. 그 사실을 답에 **반드시 적는다** —
+      안 적으면 사용자는 발주가 나간 줄 안다.
+    """
+    facts = [
+        Fact(label="결정", value=decision.decision),
+        Fact(label="회차", value=f"{decision.decision_seq}회차"),
+        Fact(label="결정자", value=decision.decided_by),
+        Fact(label="대상 실행", value=decision.request_id),
+        Fact(label="그때 종료 코드", value=decision.end_code_at_decision),
+    ]
+    if decision.condition_text:
+        facts.append(Fact(label="붙인 조건", value=decision.condition_text))
+
+    gaps: list[str] = []
+    if decision.decision == "APPROVE":
+        gaps.append("이 기록은 사람이 안을 골랐다는 것까지입니다 — 실제 발주는 별도입니다")
+    if decision.decision == "REQUEST_CHANGE" and not decision.follow_up_request_id:
+        gaps.append("조건을 반영한 재실행은 아직 걸려 있지 않습니다")
+
+    return AnswerFacts(
+        headline=_DECISION_HEADLINE.get(decision.decision, decision.decision).format(
+            label=decision.scenario_label or ""
+        ),
+        facts=tuple(facts),
+        gaps=tuple(gaps),
+        basis=(f"기록 {decision.created_at:%Y-%m-%d %H:%M}",),
     )
 
 

@@ -7,18 +7,23 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.master import AgentReply, AgentRequest, ExecutionMetadata, wiring
+from app.master import AgentReply, AgentRequest, ExecutionMetadata, decision_service, wiring
 from app.master.ask_schemas import AskRequest
 from app.master.ask_service import ask
+from app.master.decision import DecisionOut, mark_current
 from app.master.llm.runtime import IntentService, LLMSettings
 from app.master.router import router
 
 AS_OF = "2026-08-27"
+#: 결정 대상 실행의 업무 키. **발화문에 없으므로 화면이 싣는다.**
+TARGET = "REQ-20260827-0001"
 
 SETTINGS = LLMSettings(
     enabled=True,
@@ -51,6 +56,40 @@ def intent_json(**kw) -> str:
 
 def svc(response: str) -> IntentService:
     return IntentService(SETTINGS, FakeProvider(response))
+
+
+@pytest.fixture
+def decisions(monkeypatch):
+    """결정 리포지토리를 in-memory 로 갈아 끼운다.
+
+    ★ **공용 DB 를 건드리지 않는다.** `.env` 의 `DB_HOST` 가 팀 공용 서버라,
+      라우터를 그냥 치면 실제 INSERT 가 남는다 (`test_decision.py` 와 같은 방식).
+    """
+    rows: list[DecisionOut] = []
+
+    def list_decisions(request_id: str) -> list[DecisionOut]:
+        return mark_current([r for r in rows if r.request_id == request_id])
+
+    def save_decision(**kw) -> DecisionOut:
+        row = DecisionOut(decision_id=uuid4(), created_at=datetime.now(UTC), **kw)
+        rows.append(row)
+        return row
+
+    def get_run(request_id: str) -> dict:
+        if request_id != TARGET:
+            raise LookupError(f"실행 이력이 없다: {request_id}")
+        return {
+            "request_id": TARGET,
+            "response_payload": {
+                "end_code": "E1_APPROVED",
+                "scenarios": [{"label": "보수"}, {"label": "기본"}, {"label": "공격"}],
+            },
+        }
+
+    monkeypatch.setattr(decision_service, "list_decisions", list_decisions)
+    monkeypatch.setattr(decision_service, "save_decision", save_decision)
+    monkeypatch.setattr(decision_service, "get_run_by_request_id", get_run)
+    return rows
 
 
 def _reply(request: AgentRequest, **kw) -> AgentReply:
@@ -265,9 +304,9 @@ def test_확인한_의도는_재분류_없이_실행된다(client):
 def test_아직_배선_안_된_종류는_501(client):
     body = {
         "intent": {
-            "action": "SELECT_SCENARIO",
+            "action": "RERUN_WITH_CONDITION",
             "agents": [],
-            "scenario_label": "기본",
+            "condition": "예산 2000만원으로",
             "confidence": "HIGH",
         },
         "as_of": AS_OF,
@@ -276,7 +315,85 @@ def test_아직_배선_안_된_종류는_501(client):
     response = client.post("/master/ask/execute", json=body)
 
     assert response.status_code == 501
-    assert "decision" in response.json()["detail"]
+    assert "RERUN_WITH_CONDITION" in response.json()["detail"]
+
+
+# ── 말로 고른 안 ────────────────────────────────────────────────────────
+
+
+def select_body(**kw) -> dict:
+    base = {
+        "intent": {
+            "action": "SELECT_SCENARIO",
+            "agents": [],
+            "scenario_label": "기본",
+            "confidence": "HIGH",
+        },
+        "as_of": AS_OF,
+        "policy_version": "v1.3",
+        "target_request_id": TARGET,
+        "decided_by": "사장",
+    }
+    base.update(kw)
+    return base
+
+
+def test_말로_고른_안이_결정_이력에_적힌다(client, decisions):
+    data = client.post("/master/ask/execute", json=select_body()).json()
+
+    assert data["outcome"] == "DECISION_RECORDED"
+    assert data["decision"]["decision"] == "APPROVE"
+    assert data["decision"]["scenario_label"] == "기본"
+    assert data["decision"]["decided_by"] == "사장"
+    assert data["decision"]["request_id"] == TARGET
+    # 이미 분류된 의도라 ①은 안 부른다
+    assert data["llm_status"] == "SKIPPED_TEMPLATE"
+
+
+def test_승인은_기록이지_발주가_아니라고_답에_적는다(client, decisions):
+    """🔴 **안 적으면 사용자는 발주가 나간 줄 안다.**"""
+    data = client.post("/master/ask/execute", json=select_body()).json()
+
+    assert "실제 발주는 별도" in data["answer"]["text"]
+
+
+def test_어느_실행인지_없으면_추측하지_않고_거절한다(client, decisions):
+    """🔴 "가장 최근 실행" 으로 메우면 **엉뚱한 날의 안을 승인**할 수 있다."""
+    response = client.post("/master/ask/execute", json=select_body(target_request_id=None))
+
+    assert response.status_code == 422
+    assert "target_request_id" in response.json()["detail"]
+
+
+def test_승인자가_없으면_거절한다(client, decisions):
+    """*"승인자가 없는 승인은 승인이 아니다"* — 말로 골랐다고 승인자가 생기지 않는다."""
+    response = client.post("/master/ask/execute", json=select_body(decided_by=None))
+
+    assert response.status_code == 422
+    assert "decided_by" in response.json()["detail"]
+
+
+def test_제시되지_않은_안은_화면_경로와_같은_규칙으로_막힌다(client, decisions):
+    """**검사를 발화문 경로에 복제하지 않는다** — `decision_service` 가 한 곳에서 한다."""
+    body = select_body()
+    body["intent"]["scenario_label"] = "초공격"
+    response = client.post("/master/ask/execute", json=body)
+
+    assert response.status_code == 422
+    assert "초공격" in response.json()["detail"]
+
+
+def test_같은_안을_두_번_승인하면_409(client, decisions):
+    assert client.post("/master/ask/execute", json=select_body()).status_code == 200
+    response = client.post("/master/ask/execute", json=select_body())
+
+    assert response.status_code == 409
+
+
+def test_그_실행이_없으면_404(client, decisions):
+    response = client.post("/master/ask/execute", json=select_body(target_request_id="REQ-없는것"))
+
+    assert response.status_code == 404
 
 
 # ── 라우터 ──────────────────────────────────────────────────────────────

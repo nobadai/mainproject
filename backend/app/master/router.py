@@ -112,8 +112,15 @@ def master_ask_execute(request: AskExecuteRequest) -> AskResponse | ProcurementR
     ★ 매입 실행은 기존 `/master/request` 와 **같은 Flow** 를 탄다 — 발화문 경로라고
       다른 조립을 두면 두 경로가 조용히 갈라진다 (구 백로그 B1-3 이 그 문제였다).
 
-    아직 배선되지 않은 종류는 501 이다 — `SELECT_SCENARIO` 는
-    `/master/runs/{request_id}/decision` 을, `RERUN_WITH_CONDITION` 은 조건을 반영한
+    ★ **`SELECT_SCENARIO` 는 `/runs/{id}/decision` 과 같은 규칙을 탄다.** 발화문
+      경로라고 승인 기준을 따로 두면 화면에서 누른 승인과 말로 한 승인이 갈라진다.
+      그래서 상태 코드도 같다 — 404 · 409 · 422.
+
+      🔴 다만 **말에 없는 둘을 본문에 실어야 한다** — `target_request_id`(어느 실행의
+      안인가)와 `decided_by`(누가 승인하는가). 없으면 422 다. 서버가 "가장 최근 실행"
+      으로 추측하면 엉뚱한 날의 안을 승인할 수 있다.
+
+    아직 배선되지 않은 종류는 501 이다 — `RERUN_WITH_CONDITION` 은 조건을 반영한
     `/master/request` 를 쓴다.
     """
     try:
@@ -121,6 +128,18 @@ def master_ask_execute(request: AskExecuteRequest) -> AskResponse | ProcurementR
     except NotImplementedError as error:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(error),
+        ) from error
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except DecisionRejected as error:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_409_CONFLICT if error.conflict else status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
             detail=str(error),
         ) from error
 

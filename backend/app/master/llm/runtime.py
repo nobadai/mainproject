@@ -542,6 +542,12 @@ def _clarification(intent: Intent) -> str:
     if intent.action == "PROCUREMENT_RUN":
         item = intent.item or "품목"
         return f"{item} 매입안을 새로 만들까요? (부서 호출이 일어납니다)"
+    if intent.action == "SELECT_SCENARIO":
+        # **무엇을 고른 것으로 알아들었는지 되읽어 준다.** 승인은 되돌리기 어려우므로
+        # "진행할까요?" 만 물으면 사용자가 무엇에 동의하는지 모른 채 누른다.
+        return f"'{intent.scenario_label}' 안을 고르신 것으로 승인 기록할까요?"
+    if intent.action == "RERUN_WITH_CONDITION":
+        return f"'{intent.condition}' 조건을 붙여 다시 만들까요?"
     return "이렇게 이해했습니다. 진행할까요?"
 
 

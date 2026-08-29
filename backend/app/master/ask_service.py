@@ -32,7 +32,12 @@ from __future__ import annotations
 from datetime import date
 
 from app.master import wiring
-from app.master.answer import AnswerFacts, facts_from_status, render_answer
+from app.master.answer import (
+    AnswerFacts,
+    facts_from_decision,
+    facts_from_status,
+    render_answer,
+)
 from app.master.ask_schemas import (
     AnswerOut,
     AskExecuteRequest,
@@ -41,6 +46,8 @@ from app.master.ask_schemas import (
     StatusAnswer,
 )
 from app.master.budget import CallBudget
+from app.master.decision import DecisionIn, DecisionRejected
+from app.master.decision_service import record_decision
 from app.master.envelope import ExecutionContext
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
@@ -151,10 +158,14 @@ def execute(
             )
         )
 
-    # RERUN_WITH_CONDITION · SELECT_SCENARIO 는 아직 배선하지 않았다.
+    if intent.action == "SELECT_SCENARIO":
+        return _record_selection(request, narrator)
+
+    # RERUN_WITH_CONDITION 은 아직 배선하지 않았다 — 조건을 반영해 **다시 도는** 것이
+    # 남아 있다. 결정 적재만이라면 SELECT 와 같지만, 재실행 연결(`follow_up_request_id`)이
+    # 없으면 "조건을 붙였는데 아무 일도 안 일어나는" 상태가 된다.
     raise NotImplementedError(
         f"{intent.action} 실행 경로는 아직 없다. "
-        "SELECT_SCENARIO 는 /master/runs/{request_id}/decision 을, "
         "RERUN_WITH_CONDITION 은 조건을 반영한 /master/request 를 쓴다."
     )
 
@@ -205,6 +216,52 @@ def _run_status(
         unavailable=outcome.unavailable + unregistered,
         missing_data=merged_missing,
         errors=outcome.errors,
+    )
+
+
+def _record_selection(request: AskExecuteRequest, narrator: NarrativeService | None) -> AskResponse:
+    """사용자가 **말로 고른 안**을 결정 이력에 적는다 (역할 ⑦ 앞의 사람 게이트).
+
+    ★ **여기서 새로 검사하지 않는다.** 라벨이 그 실행에 실제로 있었나 · 지금 승인할 수
+      있는 상태인가는 전부 `decision_service` 가 한다. 발화문 경로라고 검사를 따로 두면
+      **두 경로의 승인 기준이 조용히 갈라진다** — 화면에서 누른 승인과 말로 한 승인이
+      다른 규칙을 타면 안 된다.
+
+    ★ **마스터 Flow 는 이 경로를 부를 수 없다.** `flow.py` 는 `decision` 계열을
+      임포트하지 않는다 (8/26 회의 — 승인 게이트는 툴 목록 바깥).
+
+    🔴 **말에 없는 둘을 화면이 싣는다.** 어느 실행인지(`target_request_id`)와 누가
+      승인하는지(`decided_by`)는 발화문에 없다. 없으면 **추측하지 않고 거절한다.**
+    """
+    intent = request.intent
+    if not request.target_request_id:
+        raise DecisionRejected(
+            "어느 실행의 안인지 지정되지 않았다 — target_request_id 가 필요하다. "
+            "발화문에는 그 정보가 없으므로 화면이 실어야 한다."
+        )
+    if not request.decided_by:
+        raise DecisionRejected(
+            "승인자가 없다 — decided_by 가 필요하다. 승인자가 없는 승인은 승인이 아니다."
+        )
+
+    decision = record_decision(
+        request.target_request_id,
+        DecisionIn(
+            decision="APPROVE",
+            scenario_label=intent.scenario_label,
+            decided_by=request.decided_by,
+            note="발화문 경로에서 선택",
+        ),
+    )
+    return AskResponse(
+        request_id=decision.request_id,
+        as_of=request.as_of,
+        outcome="DECISION_RECORDED",
+        intent=intent,
+        decision=decision,
+        answer=_write_answer(facts_from_decision(decision), narrator),
+        # ①은 안 부른다 — 이미 분류된 의도다.
+        llm_status="SKIPPED_TEMPLATE",
     )
 
 
