@@ -480,6 +480,9 @@ _NO_CONFIRM_ACTIONS = frozenset({"STATUS_QUERY"})
 
 _UNKNOWN = Intent(action="UNKNOWN", confidence="LOW")
 
+#: 되묻는 말에 쓰는 부서 이름. `answer.py` 와 같은 어휘다.
+_DEPT_LABEL = {"finance": "재무", "inventory": "물류", "purchase": "매입"}
+
 
 class IntentService:
     """검증·재시도·fallback 을 소유한다. **프로바이더가 바뀌어도 이 층은 그대로다.**"""
@@ -554,6 +557,10 @@ def _clarification(intent: Intent) -> str:
     if intent.action == "PROCUREMENT_RUN":
         item = intent.item or "품목"
         return f"{item} 매입안을 새로 만들까요? (부서 호출이 일어납니다)"
+    if intent.action == "STATUS_QUERY":
+        # 확신이 낮아 확인받는 경우다. **어느 부서에 물을 것인지** 되읽어 준다.
+        names = ", ".join(_DEPT_LABEL.get(a, a) for a in intent.agents) or "부서"
+        return f"{names} 상태를 조회할까요?"
     if intent.action == "SELECT_SCENARIO":
         # **무엇을 고른 것으로 알아들었는지 되읽어 준다.** 승인은 되돌리기 어려우므로
         # "진행할까요?" 만 물으면 사용자가 무엇에 동의하는지 모른 채 누른다.

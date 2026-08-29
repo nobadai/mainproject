@@ -32,7 +32,6 @@ from typing import Any, Protocol
 
 from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply
-from app.master.interop import translate_inventory
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
@@ -145,8 +144,6 @@ class ProcurementFlow:
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
-        #: 🔴 부서 간 이름을 마스터가 맞춘 내역. **concerns 로 올라가 리포트에 나온다.**
-        self.interop_notes: list[str] = []
 
     # ── 진입점 ──────────────────────────────────────────────────
 
@@ -271,7 +268,7 @@ class ProcurementFlow:
           직접 조회 시절 매입이 테스트로 강제하던 look-ahead 방어가 조립 시점으로 옮겨왔다.
           누수는 에러를 내지 않고 손익만 좋아지므로 여기서 막지 않으면 아무도 모른다.
         """
-        payload: dict[str, Any] = {"constraints": self._named_for_purchase(constraints)}
+        payload: dict[str, Any] = {"constraints": dict(constraints)}
         if self.item is not None:
             payload["item"] = self.item
         if self.forecast is not None and self._forecast_is_clean():
@@ -283,25 +280,6 @@ class ProcurementFlow:
         if self.policy_values is not None:
             payload["policy_values"] = dict(self.policy_values)
         return payload
-
-    def _named_for_purchase(
-        self, constraints: Mapping[AgentName, Mapping[str, Any]]
-    ) -> dict[AgentName, Mapping[str, Any]]:
-        """🔴 **한시 조치** — 같은 값을 부서가 다른 이름으로 부르는 것을 맞춘다.
-
-        ★ §3.2.2 의 *"해석하거나 재계산하지 않는다"* 와 어긋나지 않는다 — **값을 바꾸지
-          않고 이름만 바꾼다.** `_forecast_for_item` 이 봉투를 펴는 것과 같은 종류다.
-
-        ★ **바꾼 내역을 `interop_notes` 에 남긴다.** 조용히 맞추면 *"합의가 안 됐다"* 는
-          사실이 사라지고, 같은 문제가 더 깊은 곳에서 다시 난다.
-        """
-        out = dict(constraints)
-        inventory = out.get("inventory")
-        if inventory is not None:
-            translated, notes = translate_inventory(inventory)
-            out["inventory"] = translated
-            self.interop_notes.extend(notes)
-        return out
 
     def _forecast_for_item(self) -> dict[str, Any] | None:
         """4품목 봉투에서 **이 품목 블록만** 꺼내 매입이 읽는 평면 모양으로 편다.
@@ -423,10 +401,6 @@ class ProcurementFlow:
 
     def _outcome(self, end_code: EndCode, reason: str, **kw: Any) -> ProcurementOutcome:
         plan: ExecutionPlan = self.runner.plan
-        # 🔴 이름을 맞춘 내역은 **재호출로 고쳐지지 않는다** — 합의가 필요한 일이라
-        #    `findings`(다시 만들면 달라질 수 있는 것)가 아니라 `concerns` 다 (§3.4).
-        if self.interop_notes:
-            kw["concerns"] = (*kw.get("concerns", ()), *dict.fromkeys(self.interop_notes))
         return ProcurementOutcome(
             end_code=end_code,
             reason=reason,
