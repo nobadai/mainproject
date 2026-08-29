@@ -23,19 +23,25 @@ from app.master.llm.runtime import get_intent_service
 
 pytestmark = pytest.mark.llm
 
-# (발화문, 기대 action, 반드시 포함해야 하는 agents)
+# (발화문, 기대 action, 반드시 포함해야 하는 agents, 기대 item)
+#
+# 🔴 `item` 을 뒤늦게 넣었다. 8/28 채점표가 action·agents 만 봐서 **item 이 3/3 으로
+#    비어 있는 것을 놓쳤고**, 8/29 관통을 돌려 보고서야 드러났다 (품목이 없으면
+#    마스터가 입력을 못 싣고 매입이 E4 로 멈춘다). **안 재는 것은 안 고쳐진다.**
 CASES = [
-    ("지금 자금 상황 알려줘", "STATUS_QUERY", {"finance"}),
-    ("돈 얼마나 있어?", "STATUS_QUERY", {"finance"}),
-    ("창고에 얼마나 남았어?", "STATUS_QUERY", {"inventory"}),
-    ("재고 어때?", "STATUS_QUERY", {"inventory"}),
-    ("지금 자금이랑 창고 상황 둘 다 알려줘", "STATUS_QUERY", {"finance", "inventory"}),
-    ("오늘 배추 얼마나 사야 해?", "PROCUREMENT_RUN", set()),
-    ("무 매입안 뽑아줘", "PROCUREMENT_RUN", set()),
-    ("예산 2천만원으로 낮춰서 다시 해줘", "RERUN_WITH_CONDITION", set()),
-    ("기본안으로 진행해", "SELECT_SCENARIO", set()),
-    ("보수안 선택할게", "SELECT_SCENARIO", set()),
-    ("그거 있잖아 그거", "UNKNOWN", set()),
+    ("지금 자금 상황 알려줘", "STATUS_QUERY", {"finance"}, None),
+    ("돈 얼마나 있어?", "STATUS_QUERY", {"finance"}, None),
+    ("창고에 얼마나 남았어?", "STATUS_QUERY", {"inventory"}, None),
+    ("재고 어때?", "STATUS_QUERY", {"inventory"}, None),
+    ("지금 자금이랑 창고 상황 둘 다 알려줘", "STATUS_QUERY", {"finance", "inventory"}, None),
+    ("오늘 배추 얼마나 사야 해?", "PROCUREMENT_RUN", set(), "배추"),
+    ("무 매입안 뽑아줘", "PROCUREMENT_RUN", set(), "무"),
+    ("양파 얼마나 들여와야 하지?", "PROCUREMENT_RUN", set(), "양파"),
+    ("오늘 뭘 사면 좋을까", "PROCUREMENT_RUN", set(), None),
+    ("예산 2천만원으로 낮춰서 다시 해줘", "RERUN_WITH_CONDITION", set(), None),
+    ("기본안으로 진행해", "SELECT_SCENARIO", set(), None),
+    ("보수안 선택할게", "SELECT_SCENARIO", set(), None),
+    ("그거 있잖아 그거", "UNKNOWN", set(), None),
 ]
 
 
@@ -45,11 +51,11 @@ def service():
 
 
 @pytest.mark.parametrize(
-    ("utterance", "want_action", "want_agents"),
+    ("utterance", "want_action", "want_agents", "want_item"),
     CASES,
     ids=[c[0] for c in CASES],
 )
-def test_분류가_정답과_맞는다(service, utterance, want_action, want_agents):
+def test_분류가_정답과_맞는다(service, utterance, want_action, want_agents, want_item):
     result = service.classify(utterance)
     intent = result.intent
 
@@ -64,6 +70,10 @@ def test_분류가_정답과_맞는다(service, utterance, want_action, want_age
         assert want_agents <= set(intent.agents), (
             f"'{utterance}' 의 부서가 {intent.agents} — {sorted(want_agents)} 를 포함해야 한다"
         )
+    assert intent.item == want_item, (
+        f"'{utterance}' 의 품목이 {intent.item} (기대 {want_item}) — "
+        "품목이 비면 마스터가 입력을 못 싣고 매입이 E4 로 멈춘다"
+    )
 
 
 def test_고른_안은_라벨을_달고_온다(service):

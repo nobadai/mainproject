@@ -95,10 +95,16 @@ UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 
 ★ 부서가 여럿이면 여럿을 넣는다 ("자금이랑 창고 둘 다" → finance, inventory).
 ★ **어느 부서인지** 애매한 것은 UNKNOWN 이 아니다 — 가까운 부서를 넣고 confidence 를
   낮춘다. UNKNOWN 은 **어느 종류인지** 모를 때만 쓴다.
+★ **어느 품목인지** 모르는 것도 UNKNOWN 이 아니다. 품목은 비우고 종류는 그대로 둔다.
+  "오늘 뭘 사면 좋을까"  → PROCUREMENT_RUN · item: null   (UNKNOWN 이 아니다)
+  무엇을 해 달라는지가 분명하면 세부가 비어도 그 종류로 분류한다.
 
 나머지 필드:
-- item 은 배추·무·양파·피마늘 중 발화문이 가리키는 것. 알 수 없으면 비운다.
-  **추측해서 채우지 않는다.**
+- item 은 배추·무·양파·피마늘 중 **발화문에 나온 것을 그대로** 옮긴다.
+  "오늘 배추 얼마나 사야 해?" → item: "배추"
+  "무 매입안 뽑아줘"          → item: "무"
+  "오늘 뭘 사면 좋을까"        → item: null   (품목이 안 나왔다)
+  발화문에 없으면 null 이다. **추측해서 채우지 않는다.**
 - scenario_label 은 SELECT_SCENARIO 일 때만. 사용자가 부른 이름을 그대로 옮긴다.
 - condition 은 RERUN_WITH_CONDITION 일 때만. **사용자의 말 그대로** 옮긴다.
   발화문에 없는 숫자를 만들지 않는다.
@@ -174,19 +180,25 @@ def get_llm_settings() -> LLMSettings:
 def _intent_schema() -> dict[str, Any]:
     """구조화 출력에 넘길 JSON Schema.
 
-    🔴 **`agents` 를 required 로 올린다.**
+    🔴 **기본값이 있는 칸을 `required` 로 올린다 — 안 그러면 모델이 그 칸을 안 쓴다.**
 
-    `agents` 는 파이썬 쪽에 기본값(`[]`)이 있어 스키마의 `required` 에서 빠지는데,
-    그러면 모델이 **그 칸을 아예 안 쓴다.** 실측에서 "재고 어때?" 같은 짧은 발화에
-    `{"action":"STATUS_QUERY","confidence":"HIGH"}` 만 돌려주고 `agents` 를 생략했다.
-    그러면 검증이 잡아 재시도로 넘어가고, 재시도에서 모델이 **분류를 UNKNOWN 으로
-    무르는 쪽**을 고르는 일이 3번 중 1번 있었다.
+    파이썬 쪽 기본값(`agents=[]` · `item=None`)이 스키마의 `required` 에서 그 칸을 빼고,
+    빠진 칸은 모델에게 **없는 칸처럼 보인다.**
 
-    한 번에 답하게 만드는 편이 낫다 — 재시도는 비용이고, 무르는 답은 되돌릴 수 없다.
-    `STATUS_QUERY` 가 아닐 때는 빈 배열을 쓰면 되고, 그건 검증이 이미 요구한다.
+    ```text
+    "재고 어때?"              {"action":"STATUS_QUERY","confidence":"HIGH"}   agents 없음
+    "오늘 배추 얼마나 사야 해?"  item 이 3/3 으로 null          발화문에 배추가 있는데도
+    ```
+
+    `agents` 는 8/28 에 올렸는데 `item` 을 빠뜨렸다. 채점표가 `action` 과 `agents` 만
+    보고 있어 **드러나지 않았다** — 8/29 에 관통을 돌려 보고서야 나왔다(품목이 없으면
+    마스터가 입력을 못 싣고 매입이 `E4` 로 멈춘다). 채점 항목에 `item` 을 넣었다.
+
+    ★ **`null` 을 못 쓰게 만드는 것이 아니다.** `item` 은 `anyOf[..., null]` 이라
+      required 여도 *"모르겠다"* 를 쓸 수 있다. 바뀌는 것은 **매번 판단하게 되는 것**뿐이다.
     """
     schema = Intent.model_json_schema()
-    schema["required"] = sorted({*schema.get("required", ()), "agents"})
+    schema["required"] = sorted({*schema.get("required", ()), "agents", "item"})
     return schema
 
 

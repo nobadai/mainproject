@@ -9,10 +9,12 @@ from __future__ import annotations
 import time
 
 from app.master import persistence, wiring
+from app.master.answer import facts_from_procurement, render_answer
 from app.master.budget import CallBudget
 from app.master.decision_service import get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
+from app.master.inputs import MasterInputs, collect_inputs
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.schemas import (
@@ -65,23 +67,56 @@ def run_procurement(
             reason=f"어댑터 미등록: {', '.join(missing)}",
             missing_adapters=list(missing),
         )
+        # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
+        response.report_text = render_answer(facts_from_procurement(response))
         # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
         persistence.record(request, response, elapsed_ms=_elapsed(started))
         return response
 
+    inputs = _inputs_for(request)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
         runner,
         verifier=verifier,
         item=request.item,
-        forecast=request.forecast,
-        confirmed_orders=request.confirmed_orders,
-        policy_values=request.policy_values,
+        forecast=request.forecast or _payload(inputs, "forecast"),
+        confirmed_orders=request.confirmed_orders or _payload(inputs, "confirmed_orders"),
+        policy_values=request.policy_values or _payload(inputs, "policy_values"),
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
-    response = _to_response(context, outcome)
+    response = _to_response(context, outcome, inputs)
+    response.report_text = render_answer(facts_from_procurement(response))
     persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
+
+
+def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
+    """마스터가 실어 줄 셋을 모은다 (§3.2.5).
+
+    ★ **요청이 직접 준 값이 이긴다.** 백테스트는 그날의 값을 그대로 넣어야 하므로
+      적재층이 현재 DB 를 읽어 덮으면 안 된다.
+
+    ★ 품목이 없으면 모으지 않는다 — 셋 다 품목 단위다. 매입이 `missing_data: ["item"]`
+      으로 답하는 것이 정상 경로다.
+
+    ★ **적재 실패가 Flow 를 막지 않는다.** 못 실으면 매입이 `missing_data` 로 답하고
+      `E4` 가 된다 — 그것도 사실의 기록이다.
+    """
+    if not request.item:
+        return None
+    if request.forecast and request.confirmed_orders and request.policy_values:
+        return None
+    try:
+        return collect_inputs(request.item, request.as_of)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _payload(inputs: MasterInputs | None, key: str):
+    if inputs is None:
+        return None
+    sourced = getattr(inputs, key)
+    return sourced.payload if sourced.usable else None
 
 
 def _elapsed(started: float) -> int:
@@ -93,8 +128,14 @@ def _elapsed(started: float) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _to_response(context: ExecutionContext, outcome: ProcurementOutcome) -> ProcurementRunResponse:
+def _to_response(
+    context: ExecutionContext,
+    outcome: ProcurementOutcome,
+    inputs: MasterInputs | None = None,
+) -> ProcurementRunResponse:
     return ProcurementRunResponse(
+        input_sources=inputs.sources() if inputs else {},
+        mocked_inputs=list(inputs.mocked) if inputs else [],
         request_id=context.request_id,
         as_of=context.as_of,
         end_code=outcome.end_code,

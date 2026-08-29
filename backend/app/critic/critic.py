@@ -67,9 +67,16 @@ class CheckFn(Protocol):
 
 
 class EvidenceResolver(Protocol):
-    """ref_id → 원본 실값. Critic 전용. as_of 로 잘린 세션을 내부에서 쓴다."""
+    """(ref_id, claim) → 원본 실값. Critic 전용. as_of 로 잘린 세션을 내부에서 쓴다.
 
-    def __call__(self, ref_id: str) -> float | None: ...
+    🔴 **claim 이 키에 반드시 들어간다.** ref_id 하나가 여러 주장을 뒷받침하는 것이
+    정상이기 때문이다 — DB 한 행이 *창고 여유* 와 *창고 점유* 를 동시에 뒷받침한다.
+    ref_id 만으로 대조하면 **여유를 점유와 비교**하게 되고, 그 불일치는 실제 오류가
+    아니라 **키가 부족해서 생긴 거짓 양성**이다 (실측 2026-08-29: 재무 1건 · 물류 2건이
+    이 이유로 떴고, 통과안 3개가 그 때문에 반려됐다).
+    """
+
+    def __call__(self, ref_id: str, claim: str) -> float | None: ...
 
 
 class RationaleJudge(Protocol):
@@ -114,9 +121,21 @@ def run_l2(
     resolve: EvidenceResolver,
     tolerance: float = 0.0,
 ) -> list[CriticFinding]:
-    """
-    LLM 이 만드는 오류는 "없는 숫자를 근거로 든다"이다.
+    """LLM 이 만드는 오류는 "없는 숫자를 근거로 든다"이다.
     이건 룰이 아니라 **입력이 달라야** 잡힌다(§6.4). 허용오차는 기본 0.
+
+    ⚠️ **이 검사가 무엇을 잡고 무엇을 못 잡는지 분명히 해 둔다.**
+
+    ```text
+    잡는다   evidences 가 비어 있다
+    잡는다   ref_id 를 원본에서 찾을 수 없다 — 지어낸 근거
+    잡는다   같은 (ref_id, claim) 을 두 값으로 주장한다
+    못 잡는다 주장값이 실제와 다르다  ← resolver 가 독립 원본일 때만 가능하다
+    ```
+
+    마지막 줄이 핵심이다. `service._evidence_resolver` 는 **회신 자신에서** 대조표를
+    만들므로 독립 원본이 아니다. 그 배선에서는 값 대조가 성립하지 않으며, **그 사실을
+    통과로 세지 않도록** `critic_bridge` 가 `skipped` 에 적는다.
     """
     findings: list[CriticFinding] = []
     for dept, reply in replies.items():
@@ -130,7 +149,7 @@ def run_l2(
                 continue
             for ev in chk.evidences:
                 for rid in ev.ref_ids:
-                    actual = resolve(rid)
+                    actual = resolve(rid, ev.claim)
                     if actual is None:
                         findings.append(
                             CriticFinding(

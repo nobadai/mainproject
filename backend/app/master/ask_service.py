@@ -148,7 +148,7 @@ def execute(
         )
 
     if intent.action == "PROCUREMENT_RUN":
-        return run_procurement(
+        response = run_procurement(
             ProcurementRunRequest(
                 as_of=request.as_of,
                 policy_version=request.policy_version,
@@ -157,6 +157,13 @@ def execute(
                 budget=request.budget,
             )
         )
+        # ★ **여기에는 ⑥ 을 붙이지 않는다.** 매입 리포트의 머리말은 이미 완결된 판단
+        #   문장이라(`"매입안을 제시합니다. 고르시면 진행합니다."`) LLM 이 얹으면
+        #   **같은 말을 두 번** 한다. 실측에서 *"매입안을 제시합니다."* 가 그대로
+        #   중복됐다. 더할 것이 없는 자리에 모델을 부르는 것은 비용과 위험만 는다.
+        #
+        #   조회·결정은 다르다 — 거기 머리말은 문장이 아니라 머리글이라 얹을 자리가 있다.
+        return response
 
     if intent.action == "SELECT_SCENARIO":
         return _record_selection(request, narrator)

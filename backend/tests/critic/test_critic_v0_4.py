@@ -126,7 +126,13 @@ def _finance_reply(cap: float = 30_000_000.0) -> T2Reply:
 
 
 def _resolver(mapping):
-    return lambda rid: mapping.get(rid)
+    """ref_id → 값. **claim 은 받되 무시한다** — 이 fixture 는 ref_id 당 주장이 하나다.
+
+    실 배선(`service._evidence_resolver`)은 `(ref_id, claim)` 으로 키를 잡는다.
+    ref_id 하나가 여러 주장을 뒷받침하는 것이 정상이라, ref_id 만으로 대조하면
+    **다른 주장끼리 비교**하게 된다.
+    """
+    return lambda rid, claim=None: mapping.get(rid)
 
 
 _REPLIES = {"sales": sales_reply(), "finance": _finance_reply()}

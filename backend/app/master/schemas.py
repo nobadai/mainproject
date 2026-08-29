@@ -132,6 +132,32 @@ class ProcurementRunResponse(BaseModel):
         description="어댑터가 아직 등록되지 않은 에이전트. 비어 있지 않으면 end_code 는 E4 다.",
     )
 
+    report_text: str = Field(
+        default="",
+        description=(
+            "사람이 읽는 리포트 (마스터 역할 ⑥). **규칙만으로 만든다** — 숫자·결론은 "
+            "종료 코드와 부서 값에서 그대로 온다. 발화문 경로에서는 여기에 LLM 이 쓴 "
+            "한 문장이 앞에 얹힌다."
+        ),
+    )
+
+    input_sources: dict[str, str] = Field(
+        default={},
+        description=(
+            "마스터가 실어 준 입력 3종의 출처 — `등급:소스` (§3.2.5 · `inputs.py`). "
+            "등급은 MEASURED(실 DB 그대로) · DERIVED(실 DB 값에서 파생) · MOCK · MISSING. "
+            "**같은 값이라도 어디서 왔느냐로 판단의 무게가 다르다** — 값만 실으면 "
+            "리포트를 읽는 사람이 전부 실측으로 읽는다."
+        ),
+    )
+    mocked_inputs: list[str] = Field(
+        default=[],
+        description=(
+            "🔴 mock 에서 온 입력. **비어 있지 않으면 이 실행의 결론을 실측으로 읽으면 "
+            "안 된다.** 검증 커버리지를 분수로 내는 것과 같은 이유로 감추지 않는다."
+        ),
+    )
+
 
 class RunHistoryOut(BaseModel):
     """`GET /master/runs/{request_id}` — 그 요청이 어떻게 됐나.

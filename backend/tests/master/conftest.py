@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.master.inputs import MasterInputs, SourcedInput
 from app.master.llm.answer_runtime import NarrativeService
 from app.master.llm.runtime import LLMSettings
 
@@ -46,3 +47,24 @@ def 응답_생성_LLM_을_끈다(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.master.ask_service.get_narrative_service",
         lambda: NarrativeService(_OFFLINE, _NeverCalled()),
     )
+
+
+_NOT_LOADED = MasterInputs(
+    forecast=SourcedInput("forecast", None, "MISSING", "-", "테스트에서는 적재하지 않는다"),
+    confirmed_orders=SourcedInput("confirmed_orders", None, "MISSING", "-", ""),
+    policy_values=SourcedInput("policy_values", None, "MISSING", "-", ""),
+)
+
+
+@pytest.fixture(autouse=True)
+def 입력_적재를_끈다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """마스터가 실어 주는 입력 3종(§3.2.5)을 **DB 대신 빈 값으로** 준다.
+
+    ★ **공용 DB 를 건드리지 않기 위해서다.** `.env` 의 `DB_HOST` 가 팀 공용 서버라
+      `run_procurement` 을 그냥 부르면 실제 조회가 나간다.
+
+    ★ 빈 값이어도 기존 테스트는 그대로 돈다 — 셋이 없으면 매입이 `missing_data` 로
+      답하는 것이 **원래 계약**이고, 그 경로를 테스트가 이미 검사하고 있다.
+      실 적재는 `test_inputs.py` 가 따로 본다.
+    """
+    monkeypatch.setattr("app.master.service.collect_inputs", lambda *a, **k: _NOT_LOADED)

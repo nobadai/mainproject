@@ -235,6 +235,16 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
     if response.verification_skipped:
         gaps.append("검증을 돌리지 못했습니다 — 통과로 읽지 마십시오")
 
+    # 🔴 **입력이 어디서 왔는지를 결론과 같은 화면에 둔다.** mock 에서 온 값이 섞였는데
+    #    결론만 읽으면 실측으로 오해한다 (`inputs.py`).
+    for key, source in (getattr(response, "input_sources", None) or {}).items():
+        facts.append(Fact(label=f"입력 {key}", value=source))
+    if getattr(response, "mocked_inputs", None):
+        gaps.append(
+            f"🔴 {', '.join(response.mocked_inputs)} 는 mock 에서 왔습니다 — "
+            "이 결론을 실측으로 읽지 마십시오"
+        )
+
     return AnswerFacts(
         headline=_END_HEADLINE.get(response.end_code, response.reason),
         facts=tuple(facts),
