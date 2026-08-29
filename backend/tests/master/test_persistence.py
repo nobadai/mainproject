@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -162,3 +163,44 @@ def test_계획이_NULL_이어도_깨지지_않는다(client, monkeypatch):
     data = client.get("/master/runs/REQ-X").json()
     assert data["plan"] == []
     assert data["plan_signature"] == []
+
+
+def test_이미_결정이_붙은_키로_다시_돌면_경고한다(monkeypatch):
+    """🔴 **리허설에서 재현한 것이다 (2026-08-29).**
+
+    실행 이력은 append-only 라 같은 키로 두 번 돌면 행이 둘이 되고, 조회는 **최신
+    1건**을 돌려준다. 그러면 첫 실행에 걸린 승인이 **두 번째 실행을 가리키는 것처럼**
+    보인다 — 두 실행의 같은 라벨이 다른 수량이면 승인한 것과 다른 것이 승인된 것으로
+    읽힌다.
+
+    ★ **막지 않고 드러낸다.** 승인 게이트를 마스터가 들고 있으면 안 된다(8/26 회의).
+    """
+    from app.master.decision import DecisionOut
+    from app.master.service import _decision_collision
+
+    row = DecisionOut(
+        decision_id=uuid4(),
+        request_id="REQ-1",
+        decision_seq=1,
+        decision="APPROVE",
+        scenario_label="기본",
+        decided_by="사장",
+        end_code_at_decision="E1_APPROVED",
+        created_at=datetime.now(UTC),
+        is_current=True,
+    )
+    monkeypatch.setattr("app.master.service.get_decisions", lambda _: [row])
+    warnings = _decision_collision("REQ-1")
+
+    assert len(warnings) == 1
+    assert "DECISION-COLLISION" in warnings[0]
+    assert "기본" in warnings[0]
+    assert "새 업무 키" in warnings[0]
+
+
+def test_결정이_없으면_조용하다(monkeypatch):
+    """**할 말이 없으면 안 한다** — 매번 경고를 내면 진짜 충돌이 묻힌다."""
+    from app.master.service import _decision_collision
+
+    monkeypatch.setattr("app.master.service.get_decisions", lambda _: [])
+    assert _decision_collision("REQ-1") == []

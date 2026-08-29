@@ -86,9 +86,53 @@ def run_procurement(
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
+    response.concerns = [*response.concerns, *_decision_collision(request_id)]
     response.report_text = render_answer(facts_from_procurement(response))
     persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
+
+
+def _decision_collision(request_id: str) -> list[str]:
+    """🔴 **이미 결정이 붙은 업무 키로 다시 도는가.**
+
+    `orchestrator_agent_runs` 는 append-only 라 같은 키로 두 번 돌면 **행이 둘**이
+    되고, `get_run_by_request_id` 는 **최신 1건**을 돌려준다(그게 맞는 동작이다 —
+    *"그 요청 어떻게 됐냐"* 에는 마지막 결과가 답이다).
+
+    문제는 **결정과 결합할 때** 생긴다.
+
+    ```text
+    06:22  실행 A (안 3개)
+    06:22  '기본' 승인          ← A 의 '기본' 을 골랐다
+    06:23  실행 B (같은 키)      ← 이제 조회하면 B 가 나온다
+           → 화면에는 "B 의 기본을 승인했다" 로 보인다
+    ```
+
+    두 실행의 같은 라벨이 다른 수량이면 **승인한 것과 다른 것이 승인된 것으로
+    읽힌다.** 실측(2026-08-29 리허설)에서 재현했다.
+
+    ★ **막지 않고 드러낸다.** 재실행 자체는 죄가 아니고, 승인 게이트를 마스터가
+      들고 있으면 안 된다(8/26 회의). 사람이 보고 판단할 일이다.
+
+    ⚠️ **근본 해법은 결정이 어느 실행 행인지 가리키는 것**이다 — `master_decisions`
+      에 `run_id` 를 붙이는 DDL 이 필요해 팀 안건으로 올린다. 지금은 `request_id`
+      까지만 가리켜 같은 키의 두 실행을 구분하지 못한다.
+    """
+    try:
+        existing = get_decisions(request_id)
+    except Exception:  # noqa: BLE001 — 경고를 못 만든다고 실행을 막지 않는다
+        return []
+    if not existing:
+        return []
+    current = next((row for row in existing if row.is_current), existing[-1])
+    label = f" · {current.scenario_label}" if current.scenario_label else ""
+    warning = (
+        f"DECISION-COLLISION: 이 업무 키에는 이미 결정이 있다 "
+        f"({current.decision_seq}회차 {current.decision}{label}). "
+        "같은 키로 다시 돌면 그 결정이 **이 실행을 가리키는 것처럼** 보인다 — "
+        "조건을 바꿔 다시 만들려면 새 업무 키를 써라"
+    )
+    return [warning]
 
 
 def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
