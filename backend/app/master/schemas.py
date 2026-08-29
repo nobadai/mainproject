@@ -61,6 +61,14 @@ class ProcurementRunRequest(BaseModel):
         default=None,
         description="계약 판매단가·마진 방어선 등 정책 테이블 값. 운반 주체는 미결(M-19).",
     )
+    prior_feedback: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "사람이 조건을 붙여 다시 요청한 경우 그 조건. 매입 `prior_feedback` 계약으로 "
+            "**사용자의 말 그대로** 넘어간다 — 마스터가 숫자로 해석하지 않는다. "
+            "⚠️ 매입은 현재 이 값을 `is_refeed`·`attempt` 메타로만 쓰고 안을 바꾸지 않는다."
+        ),
+    )
 
 
 class StepOut(BaseModel):

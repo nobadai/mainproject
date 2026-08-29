@@ -29,12 +29,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 from app.master import wiring
 from app.master.answer import (
     AnswerFacts,
+    Fact,
     facts_from_decision,
+    facts_from_procurement,
     facts_from_status,
     render_answer,
 )
@@ -47,6 +50,7 @@ from app.master.ask_schemas import (
 )
 from app.master.budget import CallBudget
 from app.master.decision import DecisionIn, DecisionRejected
+from app.master.decision_repository import link_follow_up
 from app.master.decision_service import record_decision
 from app.master.envelope import ExecutionContext
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
@@ -54,7 +58,7 @@ from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import Intent, IntentResult
 from app.master.runner import MasterRunner
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse
-from app.master.service import make_request_id, run_procurement
+from app.master.service import get_run_history, make_request_id, run_procurement
 from app.master.status_flow import StatusFlow, StatusOutcome
 
 #: 확인 없이 바로 도는 종류. 조회뿐이다.
@@ -166,15 +170,20 @@ def execute(
         return response
 
     if intent.action == "SELECT_SCENARIO":
-        return _record_selection(request, narrator)
+        return _record_selection(request)
 
-    # RERUN_WITH_CONDITION 은 아직 배선하지 않았다 — 조건을 반영해 **다시 도는** 것이
-    # 남아 있다. 결정 적재만이라면 SELECT 와 같지만, 재실행 연결(`follow_up_request_id`)이
-    # 없으면 "조건을 붙였는데 아무 일도 안 일어나는" 상태가 된다.
-    raise NotImplementedError(
-        f"{intent.action} 실행 경로는 아직 없다. "
-        "RERUN_WITH_CONDITION 은 조건을 반영한 /master/request 를 쓴다."
-    )
+    if intent.action == "RERUN_WITH_CONDITION":
+        return _record_rerun(request)
+
+    if intent.action == "UNKNOWN":
+        # **"아직 안 만들었다" 가 아니라 "실행할 것이 없다" 다.** 501 로 답하면 언젠가
+        # 되는 것처럼 읽힌다 — `UNKNOWN` 은 분류에 실패했다는 뜻이라 영영 실행되지 않는다.
+        raise DecisionRejected(
+            "UNKNOWN 은 실행할 수 없다 — 무엇을 할지 정해지지 않았다. 다시 물어라."
+        )
+
+    # 종류가 늘어났는데 여기 배선을 안 한 경우. **조용히 통과시키지 않는다.**
+    raise NotImplementedError(f"{intent.action} 실행 경로가 배선되지 않았다.")
 
 
 # ── 내부 ────────────────────────────────────────────────────────────────
@@ -226,7 +235,7 @@ def _run_status(
     )
 
 
-def _record_selection(request: AskExecuteRequest, narrator: NarrativeService | None) -> AskResponse:
+def _record_selection(request: AskExecuteRequest) -> AskResponse:
     """사용자가 **말로 고른 안**을 결정 이력에 적는다 (역할 ⑦ 앞의 사람 게이트).
 
     ★ **여기서 새로 검사하지 않는다.** 라벨이 그 실행에 실제로 있었나 · 지금 승인할 수
@@ -266,10 +275,117 @@ def _record_selection(request: AskExecuteRequest, narrator: NarrativeService | N
         outcome="DECISION_RECORDED",
         intent=intent,
         decision=decision,
-        answer=_write_answer(facts_from_decision(decision), narrator),
-        # ①은 안 부른다 — 이미 분류된 의도다.
+        answer=_rule_answer(facts_from_decision(decision)),
+        # ①도 ⑥도 안 부른다 — 이미 분류된 의도이고, 머리말이 이미 완결 문장이다.
         llm_status="SKIPPED_TEMPLATE",
     )
+
+
+def _record_rerun(request: AskExecuteRequest) -> AskResponse:
+    """조건을 붙인 재요청 — **적고 · 다시 돌리고 · 둘을 잇는다.**
+
+    ```text
+    REQUEST_CHANGE 적재 → 새 업무 키로 재실행 → follow_up_request_id 로 연결
+    ```
+
+    ★ **조건을 숫자로 해석하지 않는다.** *"예산 2천만원으로 낮춰서"* 를 재무 cap 으로
+      꽂으면 마스터가 부서 판단을 덮어쓰는 것이다. 사용자의 말을 그대로
+      `prior_feedback` 으로 매입에 넘기고, **해석은 매입이 한다** (§3.2.2).
+
+    🔴 **지금 매입은 그 조건으로 안을 바꾸지 않는다.** `prior_feedback` 을
+      `is_refeed`·`attempt` 메타로만 읽는다(`self_check.py`). 그래서 재실행 결과에
+      **그 사실을 적어 내보낸다** — 안 적으면 사용자는 조건이 반영된 줄 안다.
+      값을 실어 주고 안 쓰는 것을 매입에 지적해 놓고 같은 일을 조용히 할 수는 없다.
+
+    ★ **품목은 원 실행에서 가져온다.** *"예산 줄여서 다시 해줘"* 에는 품목이 없다.
+      발화문에 없는 것을 지어내지 않고 **직전 실행이 무엇이었는지**를 본다.
+    """
+    intent = request.intent
+    if not request.target_request_id:
+        raise DecisionRejected(
+            "어느 실행에 대한 재요청인지 지정되지 않았다 — target_request_id 가 필요하다."
+        )
+    if not request.decided_by:
+        raise DecisionRejected("요청자가 없다 — decided_by 가 필요하다.")
+    if not intent.condition:
+        raise DecisionRejected("조건이 비어 있다 — 조건 없는 재요청은 그냥 거절이다.")
+
+    decision = record_decision(
+        request.target_request_id,
+        DecisionIn(
+            decision="REQUEST_CHANGE",
+            condition_text=intent.condition,
+            decided_by=request.decided_by,
+            note="발화문 경로에서 조건부 재요청",
+        ),
+    )
+
+    follow_up_id = make_request_id(request.as_of.isoformat(), seq=decision.decision_seq + 1)
+    rerun = run_procurement(
+        ProcurementRunRequest(
+            as_of=request.as_of,
+            policy_version=request.policy_version,
+            request_id=follow_up_id,
+            item=intent.item or _item_of(request.target_request_id),
+            budget=request.budget,
+            prior_feedback={
+                "condition_text": intent.condition,
+                "attempt": decision.decision_seq,
+                "requested_by": request.decided_by,
+                "origin_request_id": request.target_request_id,
+            },
+        )
+    )
+    linked = link_follow_up(decision_id=decision.decision_id, follow_up_request_id=follow_up_id)
+
+    # ★ **답의 본체는 결정이 아니라 다시 만든 안이다.** 사용자가 *"다시 해줘"* 라고
+    #   했으니 보고 싶은 것은 새 안이다 — 결정 기록은 그 위에 한 줄로 붙인다.
+    passed_on = (
+        f"조건 '{intent.condition}' 을 매입에 그대로 전달했습니다 — "
+        "다만 매입은 아직 이 조건으로 안을 바꾸지 않습니다(재요청 표시로만 씁니다)"
+    )
+    unlinked = () if linked else ("이 결정에는 이미 후속 실행이 있어 링크를 잇지 않았습니다",)
+    base = facts_from_procurement(rerun)
+    facts = replace(
+        base,
+        facts=(
+            *base.facts,
+            Fact(label="조건 기록", value=f"{decision.decision_seq}회차 · {intent.condition}"),
+            Fact(label="원 실행", value=request.target_request_id),
+        ),
+        gaps=(*base.gaps, passed_on, *unlinked),
+    )
+    rerun.report_text = render_answer(facts)
+    return AskResponse(
+        request_id=follow_up_id,
+        as_of=request.as_of,
+        outcome="DECISION_RECORDED",
+        intent=intent,
+        decision=decision.model_copy(update={"follow_up_request_id": follow_up_id}),
+        answer=_rule_answer(facts),
+        llm_status="SKIPPED_TEMPLATE",
+    )
+
+
+def _item_of(request_id: str) -> str | None:
+    """직전 실행의 품목. **없으면 비운다** — 지어내지 않는다."""
+    try:
+        history = get_run_history(request_id)
+    except LookupError:
+        return None
+    item = (history.request_payload or {}).get("item")
+    return item if isinstance(item, str) else None
+
+
+def _rule_answer(facts: AnswerFacts) -> AnswerOut:
+    """⑥ 없이 규칙만으로 만드는 답.
+
+    ★ **머리말이 이미 완결된 판단 문장인 곳에는 ⑥ 을 얹지 않는다.**
+      *"'기본' 안으로 진행합니다"* · *"매입안을 제시합니다"* 위에 한 문장을 더 쓰면
+      **같은 말을 두 번** 한다(실측에서 그랬다). 조회만 머리말이 **머리글**
+      (*"조회 결과 — 물류"*)이라 얹을 자리가 있다.
+    """
+    return AnswerOut(text=render_answer(facts), llm_status="SKIPPED_TEMPLATE")
 
 
 def _write_answer(facts: AnswerFacts, narrator: NarrativeService | None) -> AnswerOut:

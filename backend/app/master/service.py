@@ -82,6 +82,7 @@ def run_procurement(
         forecast=request.forecast or _payload(inputs, "forecast"),
         confirmed_orders=request.confirmed_orders or _payload(inputs, "confirmed_orders"),
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
+        prior_feedback=request.prior_feedback,
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
