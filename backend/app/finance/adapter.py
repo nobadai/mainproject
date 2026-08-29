@@ -25,8 +25,13 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
+from pydantic import ValidationError
+
+from app.finance.agent import _calculate_schedule_cap, _scenario_schedule, _schedule_events
 from app.finance.repository import get_current_finance_runtime_context
+from app.finance.rules import classify_base_stress
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
+from app.finance.service import run_finance_procurement_with_context
 from app.finance.tools import (
     build_payroll_schedule,
     calculate_finance_cap,
@@ -36,6 +41,7 @@ from app.finance.tools import (
 )
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.orchestrator.contracts_core import Evidence
+from app.purchase_agent.schemas import PurchaseProposal
 
 # 재무 1차 Tool Set — T-FIN-01~06 (2026-08-27 확정). 그날 실제로 부른 것만 남긴다.
 _T_POSITION = "assess_finance_position"
@@ -78,6 +84,8 @@ def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         return _pre_purchase(request)
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
+    if request.mode == "SCENARIO_VALIDATION":
+        return _scenario_validation(request)
     return _not_implemented(request)
 
 
@@ -420,8 +428,231 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
 
 
 # ---------------------------------------------------------------------------
-# SCENARIO_VALIDATION — 아직 못 한다
+# SCENARIO_VALIDATION — Purchase proposal을 Finance 판정 입력으로 번역
 # ---------------------------------------------------------------------------
+
+
+def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """Validate the current Purchase output without recreating its finance values.
+
+    The Purchase schema remains the source of truth.  The adapter only validates
+    that serialised contract, reuses the Finance procurement engine for the base
+    context/rules, then overlays its already-authoritative payment schedule.
+    """
+    run_id = _run_id(request)
+    try:
+        proposal = _purchase_proposal(request.payload)
+    except ValidationError as exc:
+        return _invalid_scenario_input(request, run_id, exc)
+
+    if proposal.meta.as_of != request.context.as_of:
+        return _invalid_scenario_as_of(request, run_id, proposal.meta.as_of)
+
+    context = _load_context()
+    if context is None:
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=("finance_state", "finance_policy"),
+            reason="재무 상태 또는 정책을 읽지 못했다",
+        )
+    if context.snapshot.state_date != request.context.as_of:
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=(f"finance_state@{request.context.as_of.isoformat()}",),
+            reason=(
+                f"재무 상태 기준일이 {context.snapshot.state_date} 다 — "
+                f"요청은 {request.context.as_of} 다"
+            ),
+        )
+
+    payroll_refs = tuple(
+        f"{key}@policy_source_ref"
+        for key in _PAYROLL_SOURCE_KEYS
+        if not context.policy.source_refs.get(key)
+    )
+    if payroll_refs:
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION],
+            missing=payroll_refs,
+            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+        )
+    if context.policy.purchase_payment_days is None:
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION, _T_CASHFLOW, _T_CAP],
+            missing=("purchase_payment_days",),
+            reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
+        )
+
+    # This invokes the existing scenario engine and runtime rules for the
+    # proposal-independent Finance position and reported-amount comparison.
+    base_result = run_finance_procurement_with_context(proposal, context)
+    if base_result.runtime_status != "READY":
+        return _not_ready(
+            request,
+            run_id,
+            [_T_POSITION, _T_CASHFLOW, _T_CAP],
+            missing=tuple(base_result.hard_constraints) or ("finance_runtime",),
+            reason="재무 실행 입력이 준비되지 않아 시나리오를 판정하지 못했다.",
+        )
+
+    policy = context.policy
+    as_of = request.context.as_of
+    horizon = as_of + timedelta(days=policy.cashflow_projection_days)
+    base_events = (
+        *context.cash_events,
+        *build_payroll_schedule(as_of=as_of, horizon_end=horizon, policy=policy),
+    )
+    base_projection = project_cashflow(
+        as_of=as_of,
+        current_cash_krw=context.snapshot.current_cash_krw,
+        horizon_end=horizon,
+        cash_events=base_events,
+    )
+    base_violated = base_projection.projected_cash_min < policy.minimum_cash_balance_krw
+
+    verdicts: list[dict[str, Any]] = []
+    evidences: list[Evidence] = []
+    for index, scenario in enumerate(proposal.scenarios):
+        raw = scenario.model_dump(mode="json")
+        raw["scenario_id"] = scenario.label
+        schedule = _scenario_schedule(
+            scenario=raw,
+            as_of=as_of,
+            horizon=horizon,
+            default_payment_days=policy.purchase_payment_days,
+        )
+        base_with_scenario = project_cashflow(
+            as_of=as_of,
+            current_cash_krw=context.snapshot.current_cash_krw,
+            horizon_end=horizon,
+            cash_events=[*base_events, *_schedule_events(scenario.label, schedule, stress=False)],
+        )
+        stress_with_scenario = project_cashflow(
+            as_of=as_of,
+            current_cash_krw=context.snapshot.current_cash_krw,
+            horizon_end=horizon,
+            cash_events=[*base_events, *_schedule_events(scenario.label, schedule, stress=True)],
+        )
+        cap = _calculate_schedule_cap(
+            base_projection=base_projection,
+            schedule=schedule,
+            total_amount=Decimal(scenario.total_amount_krw),
+            minimum_cash=policy.minimum_cash_balance_krw,
+        )
+        scenario_status = classify_base_stress(
+            base_safe=base_with_scenario.projected_cash_min >= policy.minimum_cash_balance_krw,
+            stress_safe=stress_with_scenario.projected_cash_min >= policy.minimum_cash_balance_krw,
+        )
+        if base_violated or base_result.verdict == "FAIL":
+            verdict, rule_id, reason = (
+                "reject",
+                "FIN-BASE-MIN-CASH",
+                "Base Finance minimum-cash rule failed.",
+            )
+        elif scenario_status == "ok":
+            verdict, rule_id, reason = "ok", "FIN-BASE-STRESS", "BASE and STRESS passed."
+        elif scenario_status == "conditional":
+            verdict, rule_id, reason = (
+                "conditional",
+                "FIN-BASE-STRESS",
+                "BASE passed and STRESS failed.",
+            )
+        else:
+            verdict, rule_id, reason = "reject", "FIN-BASE-STRESS", "BASE failed."
+
+        result = {
+            "scenario_id": scenario.label,
+            "verdict": verdict,
+            "adjustability": "NOT_NEEDED" if verdict == "ok" else "NOT_ADJUSTABLE",
+            "finance_cap_amount_krw": _num(cap),
+            "scenario_projected_cash_min": _num(base_with_scenario.projected_cash_min),
+            "stress_projected_cash_min": _num(stress_with_scenario.projected_cash_min),
+            "critical_cash_date": base_with_scenario.projected_cash_min_date.isoformat(),
+            "payment_schedule": [
+                {
+                    "payment_date": payment.payment_date.isoformat(),
+                    "amount_krw": _num(payment.amount_krw),
+                    "amount_max_krw": _num(payment.amount_max_krw),
+                }
+                for payment in schedule
+            ],
+            "reason": reason,
+            "rule_id": rule_id,
+        }
+        verdicts.append(result)
+        ref = context.snapshot.finance_state_id
+        evidences.extend(
+            (
+                _ev(f"verdicts[{index}].finance_cap_amount_krw", cap, "KRW", ref),
+                _ev(
+                    f"verdicts[{index}].scenario_projected_cash_min",
+                    base_with_scenario.projected_cash_min, "KRW", ref,
+                ),
+                _ev(
+                    f"verdicts[{index}].stress_projected_cash_min",
+                    stress_with_scenario.projected_cash_min, "KRW", ref,
+                ),
+            )
+        )
+
+    business = "reject" if any(v["verdict"] == "reject" for v in verdicts) else (
+        "conditional" if any(v["verdict"] == "conditional" for v in verdicts) else "ok"
+    )
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=as_of,
+        agent="finance",
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="READY",
+        business_status=business,
+        payload={"verdicts": verdicts},
+        evidences=tuple(evidences),
+        reasoning="Purchase scenarios were evaluated with Finance cashflow rules.",
+    )
+    return reply, _meta(
+        request, run_id, [_T_POSITION, _T_CASHFLOW, _T_CAP, "evaluate_purchase_scenario"]
+    )
+
+
+def _purchase_proposal(payload: Mapping[str, Any]) -> PurchaseProposal:
+    """Discard envelope-only keys, then validate the actual Purchase contract."""
+    fields = PurchaseProposal.model_fields
+    return PurchaseProposal.model_validate(
+        {key: value for key, value in payload.items() if key in fields}
+    )
+
+
+def _invalid_scenario_input(
+    request: AgentRequest, run_id: str, exc: ValidationError
+) -> tuple[AgentReply, ExecutionMetadata]:
+    reply = AgentReply(
+        request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
+        mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
+        payload={"validation_errors": [item["loc"][-1] for item in exc.errors()]},
+        reasoning="Purchase scenario input failed Finance contract validation.",
+    )
+    return reply, _meta(request, run_id, [])
+
+
+def _invalid_scenario_as_of(
+    request: AgentRequest, run_id: str, proposal_as_of: date
+) -> tuple[AgentReply, ExecutionMetadata]:
+    reply = AgentReply(
+        request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
+        mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
+        payload={"validation_errors": ["proposal.meta.as_of"]},
+        reasoning="Purchase proposal as-of does not match the Master request.",
+    )
+    return reply, _meta(request, run_id, [])
 
 
 def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:

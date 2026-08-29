@@ -44,8 +44,16 @@ def warehouse_cap_kg(inventory: dict) -> int:
     ⚠️ §4-⑦은 이 검사를 ``check_warehouse_capacity()`` **공용 모듈**로 두고 매입·T3·Critic이
     import하라고 규정한다("자체 구현 금지 — 매입 통과, T3 FAIL 반복 방지"). 그 모듈이 아직
     없어서 지금은 여기 있다. 생기면 이 함수를 지우고 import로 바꾼다.
+
+    ★ **내림한다.** 물류가 보내는 창고 여유는 소수다(실측 7,636.72kg). 이 값은 **상한**이라
+      올리면 못 넣는 양을 계획하게 된다 — 7,637kg을 사면 0.28kg이 갈 곳이 없다. 수량 상한을
+      ``min()``으로 클립하는 것과 같은 보수 방향이다.
+
+      ⚠️ mock이 우연히 정수라(12,000 + 3,600) 이 자리가 오래 드러나지 않았다. 선언은
+      ``-> int``인데 실제로는 float을 그대로 돌려주고 있었고, 실연동에서 ``total_qty_kg``가
+      소수가 되어 출력 스키마 검증이 막았다 (2026-08-28 통합 실행).
     """
-    return inventory["warehouse_free_kg"] + inventory["rental_cap_kg"]
+    return int(inventory["warehouse_free_kg"] + inventory["rental_cap_kg"])
 
 
 def purchase_budget_krw(state: PurchaseAgentState, constraints: dict) -> float:

@@ -29,10 +29,11 @@ from app.purchase_agent.nodes.allocate_sourcing import (
     is_spread_widened,
     mid_grade_score,
     near_term_demand_kg,
+    shelf_days_block_reason,
     top_grade_shelf_days,
 )
 from app.purchase_agent.nodes.classify_situation import classify_situation
-from app.purchase_agent.nodes.draft_plan import draft_plan
+from app.purchase_agent.nodes.draft_plan import draft_plan, warehouse_cap_kg
 from app.purchase_agent.nodes.package_scenarios import package_scenarios
 from app.purchase_agent.nodes.self_check import check_quadruple_match, self_check
 from app.purchase_agent.nodes.split_plan import split_plan
@@ -495,3 +496,72 @@ def test_shelf_days_do_not_depend_on_lot_order() -> None:
 
     state["inventory"]["lots"].reverse()
     assert top_grade_shelf_days(state["inventory"], "상") == 4
+
+
+# ── #76 미결 고지 ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("inventory", "expected"),
+    [
+        ({"lots": None}, "재고 로트를 받지 못해"),
+        ({"lots": []}, "보유 로트가 없어"),
+        # 물류 payload 에는 shelf_life_days 자체가 없다 (#76 미결)
+        (
+            {"lots": [{"lot_id": "L1", "grade": "상", "available_qty_kg": 100}]},
+            "물류 payload에 없는",
+        ),
+        ({"lots": [{"lot_id": "L1", "grade": None, "shelf_life_days": 10}]}, "등급이 모두 미상"),
+        ({"lots": [{"lot_id": "L1", "grade": "중", "shelf_life_days": 10}]}, "상 등급 로트가 없어"),
+    ],
+    ids=["로트미수신", "로트없음", "키미수신", "등급미상", "해당등급없음"],
+)
+def test_shelf_days_block_reason_separates_four_causes(inventory: dict, expected: str) -> None:
+    """``None`` 은 하나인데 원인이 넷이라 갈라 적는다.
+
+    전에는 원인과 무관하게 *"상 등급 로트가 없다"* 로 적었다. 물류 경로의 실제 원인은
+    **키 자체가 안 실린 것**인데(#76 미결) 그렇게 쓰면 *"재고에 상 등급이 없구나"* 로
+    읽힌다 — 침묵도 오답이지만 **틀린 사유는 더 나쁘다.**
+    """
+    assert expected in shelf_days_block_reason(inventory, "상")
+
+
+def test_missing_shelf_life_surfaces_in_risks_instead_of_passing_silently() -> None:
+    """키가 없으면 조용히 넘어가지 않고 **고지로 나간다** (§3.7.6 · 규칙 3).
+
+    사유를 안 남기면 "중품을 검토하고 안 쓴 것" 과 "검토 자체를 못 한 것" 이 같은 화면이 된다.
+    """
+    as_of = date(2026, 9, 11)  # 스프레드가 넓은 날 — 중품 검토가 실제로 진입하는 앵커
+    state = build_initial_state("배추", as_of)
+    state["inventory"]["lots"] = [
+        {k: v for k, v in lot.items() if k != "shelf_life_days"}
+        for lot in state["inventory"]["lots"]
+    ]
+    decision = evaluate_mid_grade(state, load_constraints())
+    assert decision["blocked_by"] is not None
+    assert "물류 payload에 없는" in decision["blocked_by"]
+
+    # 그리고 그 사유가 **고지로 나간다** — decision 안에만 있으면 사용자는 못 본다
+    state.update(classify_situation(state))
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    notices = [
+        risk
+        for scenario in package_scenarios(state)["scenarios_final"]
+        for risk in scenario["risks"]
+    ]
+    assert any("물류 payload에 없는" in risk for risk in notices), notices
+
+
+def test_warehouse_cap_floors_fractional_capacity() -> None:
+    """창고 수용량은 **상한**이라 내린다 — 올리면 못 넣는 양을 계획하게 된다.
+
+    물류 실측이 7,636.72kg 다. 7,637kg 을 사면 0.28kg 이 갈 곳이 없다.
+    수량을 ``min()`` 으로 클립하는 것과 같은 보수 방향이다.
+    """
+    cap = warehouse_cap_kg({"warehouse_free_kg": 7636.72, "rental_cap_kg": 0.0})
+    assert cap == 7636
+    assert isinstance(cap, int)
+    # 정수 입력은 그대로다 — mock 경로가 달라지지 않는다
+    assert warehouse_cap_kg({"warehouse_free_kg": 12000, "rental_cap_kg": 3600}) == 15600

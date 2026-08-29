@@ -184,6 +184,45 @@ def validate_forecast(forecast: Any, as_of: date) -> list[str]:
     return sorted(set(missing))
 
 
+#: 물류가 로트마다 싣는 키 (`master/adapters/logistics.py` · 2026-08-28 실측).
+#: **이름을 바꾸지 않는다** — 물류가 alias 를 만들지 않기로 했고(#78 §6), 매입이
+#: 물류 어휘를 그대로 읽기로 합의했다(#76). 매핑 표를 두면 어긋날 자리가 하나 더 생긴다.
+LOT_REQUIRED_KEYS = ("lot_id", "available_qty_kg")
+
+#: 로트가 어느 품목 것인지 밝히는 키. 없으면 품목을 가려낼 수 없다.
+LOT_ITEM_KEY = "item"
+
+
+def _lot_shape_problems(lots: Any) -> list[str]:
+    """``lots``가 **있을 때** 모양을 본다. 없는 것과 모양이 다른 것은 다르다.
+
+    ``lots``는 여전히 **선택 항목**이다 — 빠지면 등급 배분이 단일 등급으로 내려갈 뿐
+    돌아간다(M-1 제출 §5). 그래서 부재는 잡지 않는다.
+
+    ⚠️ **막으려는 것은 "있는데 모양이 다른" 경우다.** 그 구멍으로 실연동이
+    ``KeyError: 'remaining_kg'`` 로 죽었는데(2026-08-28), 전 스위트는 green 이었다 —
+    선택 항목이라 검사 자체가 없었고 노드 안에서야 터졌다. 어댑터에서 잡으면
+    마스터가 ``missing_data`` 로 **무엇이 어긋났는지** 받는다 (#76).
+    """
+    if lots is None:
+        return []
+    if not isinstance(lots, list):
+        return ["constraints.inventory.lots"]
+    problems: list[str] = []
+    for index, lot in enumerate(lots):
+        if not isinstance(lot, Mapping):
+            problems.append(f"constraints.inventory.lots[{index}]")
+            continue
+        # 값이 ``None``인 것은 통과시킨다 — 물류가 "모른다"를 그렇게 표현한다(§1.2-10).
+        # 여기서 막는 것은 **키 자체가 없는** 경우다.
+        problems.extend(
+            f"constraints.inventory.lots[{index}].{key}"
+            for key in LOT_REQUIRED_KEYS
+            if key not in lot
+        )
+    return sorted(set(problems))
+
+
 def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     """필수 4키와 그 하위 계약. 없는 것의 **이름**을 돌려준다.
 
@@ -234,6 +273,7 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
             for key in ("warehouse_free_kg", "rental_cap_kg"):
                 if inventory.get(key) is None:
                     missing.append(f"constraints.inventory.{key}")
+            missing.extend(_lot_shape_problems(inventory.get("lots")))
 
     if "forecast" not in payload:
         # 마스터가 오염 판정으로 싣지 않은 경우가 여기다 (필요데이터 §1.3-②).
@@ -267,6 +307,36 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     return sorted(set(missing))
 
 
+# ── 재고 흡수 ─────────────────────────────────────────────────────────────
+
+def absorb_inventory(inventory: Mapping[str, Any], item: str) -> dict[str, Any]:
+    """물류 payload 의 재고를 **이 품목 것만** 남겨 넘긴다.
+
+    ★ **품목 필터가 핵심이다.** 물류는 4품목 로트를 한 목록에 담아 보내는데
+      (`LOT-…-BAECHU` · `-MU` · `-PIMANUL` · `-YANGPA`, 2026-08-28 실측),
+      매입은 품목 하나씩 돈다. 거르지 않고 ``lots[0]`` 을 집으면 **다른 품목의
+      로트를 근거로 삼는다** — 에러가 나지 않아 아무도 모른다. mock 은 품목별로
+      나뉘어 있어 이 구멍이 보이지 않던 자리다.
+
+    ★ ``item`` 키가 없는 로트는 **버리지 않고 남긴다.** 품목 축을 못 밝힌 것과
+      "다른 품목"은 다르다 — 버리면 있는 재고를 없는 것으로 만든다. 판단은
+      노드가 하고, 여기서는 가려낼 수 있는 것만 가려낸다.
+
+    ★ **값을 만들지 않는다.** 없는 키를 기본값으로 채우면 미결이 사실이 된다
+      (규칙 3). 모양 검사는 `validate_payload` 가 하고, 여기서는 옮기기만 한다.
+    """
+    out = dict(inventory)
+    lots = inventory.get("lots")
+    if not isinstance(lots, list):
+        return out
+    out["lots"] = [
+        dict(lot)
+        for lot in lots
+        if isinstance(lot, Mapping) and lot.get(LOT_ITEM_KEY, item) == item
+    ]
+    return out
+
+
 # ── payload → State ───────────────────────────────────────────────────────
 
 
@@ -292,7 +362,7 @@ def build_state(request: AgentRequest) -> PurchaseAgentState:
         "forecast": dict(payload["forecast"]),
         # 자기 도메인 — 마스터를 거치지 않는다 (정의서 §4.1)
         "market_quotes": ports.get_market_quotes(item, as_of),
-        "inventory": dict(inventory),
+        "inventory": absorb_inventory(inventory, item),
         "confirmed_orders": dict(payload["confirmed_orders"]),
         "item_mix_ratio": dict(policy["item_mix_ratio"]),
         "contract_price": policy.get("contract_price_krw"),
