@@ -231,18 +231,33 @@ def find_in_transit_schedule_gap(snapshot: InventoryLogisticsSnapshot) -> str | 
     in_transit 3상태를 명시적으로 구분한다 — None(미확인)과 [](0건 확인)은 다르다.
     행이 존재하면 inbound_id로 confirmed schedule 포함 여부와 item/quantity/도착일
     일치를 검증한다. 성공해도 Capacity에는 confirmed_inbound_schedule만 반영한다.
+
+    confirmed schedule 안의 inbound_id 중복은 in_transit 유무와 무관하게 먼저 막는다
+    (아래 참조).
     """
     if snapshot.in_transit is None:
         return "IN_TRANSIT_UNRESOLVED"
     if snapshot.confirmed_inbound_schedule is None:
         return "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED"
+
+    # 같은 inbound_id가 confirmed schedule에 두 번 있으면 정상 데이터로 보지 않는다.
+    # 대조는 id 하나에 행 하나를 전제하는데, Capacity 계산은 두 행을 **모두** 점유로
+    # 더한다 — 조용히 넘기면 대조는 통과하고 점유만 이중 계상된다. 어느 행이 진짜인지
+    # 여기서 고르지 않는다(뒤 행이 앞 행을 덮는 것도 하나를 고르는 것이다).
+    #
+    # in_transit이 0건이어도 검사한다 — confirmed schedule 자체의 무결성 문제다.
+    # DB UNIQUE 제약이 없어 여기가 유일한 방어선이다.
+    confirmed_by_id: dict[str, ScheduledQuantity] = {}
+    for row in snapshot.confirmed_inbound_schedule:
+        if row.inbound_id is None:
+            continue
+        if row.inbound_id in confirmed_by_id:
+            return "CONFIRMED_INBOUND_ID_DUPLICATED"
+        confirmed_by_id[row.inbound_id] = row
+
     if snapshot.in_transit == []:
         return None
 
-    confirmed_by_id: dict[str, ScheduledQuantity] = {}
-    for row in snapshot.confirmed_inbound_schedule:
-        if row.inbound_id is not None:
-            confirmed_by_id[row.inbound_id] = row
     for transit in snapshot.in_transit:
         if transit.inbound_id is None:
             return "IN_TRANSIT_INBOUND_ID_MISSING"

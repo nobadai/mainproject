@@ -214,7 +214,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                 free_kg,
                 "kg",
                 ref,
-                "guaranteed_capacity_kg − 현재 점유량 (물류 calculate_cap_by_date 정의)",
+                "guaranteed_capacity_kg − 현재 물리 점유량(as_of 시점)",
             )
         )
     if "min_remaining_freshness_days" in payload:
@@ -384,6 +384,36 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         for lot in build_lot_constraints(snapshot)
     ]
 
+    # ── 품목 보관 정책 ───────────────────────────────────────────
+    #
+    # ★ Lot 의 `remaining_freshness_days` 와 **다른 값이다.** 잔여 신선도는 *이미 창고에
+    #   있는 그 Lot* 이 앞으로 며칠 쓸 수 있나이고, `operational_limit_days` 는 그 품목을
+    #   **새로 들일 때** 적용할 품목 단위 보관 한계다. 새로 매입할 물량의 기준은 후자라
+    #   기존 Lot 의 잔여일수에서 역산하면 안 된다 (`ItemStoragePolicyFact` 참조).
+    #
+    # ★ 그래서 Lot 목록에서 뽑지 않고 Repository 가 정책 테이블에서 직접 읽은 것을
+    #   그대로 나른다 — 재고가 0kg 인 품목의 보관 한계도 매입은 알아야 한다.
+    #
+    # ★ `None`(미조회)과 `[]`(정책 0 건 확인)은 다르다 (§1.2-10). 미조회면 키를 만들지
+    #   않고 이름만 남긴다 — 빈 배열로 덮으면 *"정책이 없다"* 로 읽힌다.
+    policies = snapshot.item_storage_policies
+    if policies is None:
+        missing.append("item_storage_policies")
+    else:
+        payload["item_storage_policies"] = [
+            {
+                "item": policy_fact.item,
+                # 값이 없으면 없는 대로 둔다 — 0 이나 기본 계수를 어댑터가 지어내지 않는다.
+                "operational_limit_days": policy_fact.operational_limit_days,
+                "medium_grade_factor": (
+                    None
+                    if policy_fact.medium_grade_factor is None
+                    else _num(policy_fact.medium_grade_factor)
+                ),
+            }
+            for policy_fact in policies
+        ]
+
     # 물류가 *"돌긴 돌지만 이런 점을 봐 달라"* 고 남긴 것. 판정을 바꾸지 않지만
     # 검증 경로에 흘러야 Critic 과 사람이 본다.
     if rules["soft_warnings"]:
@@ -445,8 +475,9 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                 free_kg,
                 "kg",
                 ref,
-                "보장 capacity − 현재 점유 (물류 calculate_cap_by_date 의 free_capacity 정의). "
-                "기준은 독립 SLA 보장치이며 burst 가 아니다",
+                "guaranteed_capacity_kg − 현재 점유(as_of 시점). 기준은 독립 SLA "
+                "보장치이며 burst 가 아니다. cap_by_date 는 같은 뺄셈을 도착일별 "
+                "예상 점유로 다시 하므로 이 값과 일치하지 않는다",
                 source="tool_calc",
             )
         )
@@ -478,7 +509,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                 "date_count",
                 ref,
                 f"D+{snapshot.inbound_lead_days} 부터 {_CAP_WINDOW_DAYS} 일 · "
-                "min(창고여유, 일일입고, 운송) — 물류 Tool 산출",
+                "guaranteed_capacity_kg − 도착일별 예상 점유 — 물류 Tool 산출",
                 source="tool_calc",
             )
         )
@@ -519,6 +550,41 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                         "days",
                         lots_ref,
                         "잔여 신선도 — 등급 배분·소진 순서 판단용",
+                    )
+                )
+
+    # ★ 보관 정책의 숫자에도 근거를 단다 — 봉투는 **배열 항목 안의 숫자마다** Evidence 를
+    #   요구한다(`required_claims`). Lot 과 같은 방식으로 **이름 선택자**를 쓴다:
+    #   `item_storage_policies[배추].operational_limit_days`. 번호로 쓰면 품목 순서가
+    #   바뀌는 날 근거가 다른 품목을 가리킨다.
+    #
+    # ★ ref 를 지어내지 않는다 — Repository 가 스냅샷 `evidence_refs` 에 실어 둔
+    #   `DB:item_storage_policies` 를 그대로 가리킨다.
+    #
+    # ★ 값이 `None` 인 필드는 근거를 만들지 않는다. 봉투도 숫자가 아닌 값에는 근거를
+    #   요구하지 않는다 — 없는 값에 근거를 붙이면 *"확인했다"* 는 거짓이 된다.
+    if payload.get("item_storage_policies"):
+        policies_ref = _policies_ref(snapshot)
+        for row in payload["item_storage_policies"]:
+            if row["operational_limit_days"] is not None:
+                evidences.append(
+                    _ev(
+                        f"item_storage_policies[{row['item']}].operational_limit_days",
+                        row["operational_limit_days"],
+                        "days",
+                        policies_ref,
+                        f"{row['item']} 품목의 신규 입고분 운영 보관한계 — "
+                        "기존 Lot 의 잔여 신선도와 다른 값이다",
+                    )
+                )
+            if row["medium_grade_factor"] is not None:
+                evidences.append(
+                    _ev(
+                        f"item_storage_policies[{row['item']}].medium_grade_factor",
+                        row["medium_grade_factor"],
+                        "ratio",
+                        policies_ref,
+                        f"{row['item']} 중등급 보관한계 계수 — DB Fact 를 그대로 나른다",
                     )
                 )
 
@@ -637,7 +703,8 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             len(cap),
             "date_count",
             ref,
-            "도착일별 신규 입고 상한 — min(창고여유, 일일입고, 운송)",
+            "guaranteed_capacity_kg 에서 도착일별 예상 점유를 뺀 신규 입고 상한 — "
+            "1차 MVP 의 Hard Capacity 는 이 하나다",
             source="tool_calc",
         ),
         _ev(
@@ -756,6 +823,14 @@ def _lots_ref(snapshot: InventoryLogisticsSnapshot) -> str:
     """
     for candidate in snapshot.evidence_refs:
         if "inventory_lots" in candidate:
+            return candidate
+    return _ref(snapshot)
+
+
+def _policies_ref(snapshot: InventoryLogisticsSnapshot) -> str:
+    """품목 보관 정책 근거는 **정책 테이블을 담은 참조**를 가리킨다 (`_lots_ref` 와 같은 이유)."""
+    for candidate in snapshot.evidence_refs:
+        if "item_storage_policies" in candidate:
             return candidate
     return _ref(snapshot)
 
