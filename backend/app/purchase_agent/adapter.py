@@ -12,6 +12,8 @@
 
 from collections.abc import Mapping
 from datetime import date, timedelta
+from decimal import Decimal
+from math import isfinite
 from typing import Any
 
 from app.master.envelope import (
@@ -274,6 +276,7 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
                 if inventory.get(key) is None:
                     missing.append(f"constraints.inventory.{key}")
             missing.extend(_lot_shape_problems(inventory.get("lots")))
+            missing.extend(_arrival_input_problems(inventory))
 
     if "forecast" not in payload:
         # 마스터가 오염 판정으로 싣지 않은 경우가 여기다 (필요데이터 §1.3-②).
@@ -305,6 +308,50 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     # (state.py · IO명세 §2 동기화 규칙). 필수로 걸면 정상 경로가 막힌다
     # (Codex 교차검증 P1).
     return sorted(set(missing))
+
+
+def _arrival_input_problems(inventory: Mapping[str, Any]) -> list[str]:
+    """도착일 계산 입력의 **모양**을 본다. 부재는 잡지 않는다 — 둘 다 선택 필드다.
+
+    ⚠️ ``inbound_lead_days``를 정수로 강제하는 이유: 2.5가 오면 도착일은
+    ``date + timedelta(days=2.5)``에서 **2일로 잘리는데** ⑤의 소진 창 계산은 2.5를
+    그대로 쓴다. 두 계산이 다른 리드타임을 보게 되고, 결과는 멀쩡해 보인다.
+    조용히 반올림하지 않고 여기서 세운다 — 계약이 "일" 단위이기 때문이다.
+
+    ``bool``을 따로 막는 것은 ``True``가 ``1일``로 통과하기 때문이다
+    (``schemas.py``의 ``_reject_boolean``과 같은 이유).
+    """
+    problems: list[str] = []
+    lead = inventory.get("inbound_lead_days")
+    if lead is not None:
+        base = "constraints.inventory.inbound_lead_days"
+        if isinstance(lead, bool) or not isinstance(lead, int | float):
+            problems.append(f"{base}@정수여야 한다")
+        elif lead != int(lead):
+            problems.append(f"{base}@일 단위 정수여야 한다 (받은 값 {lead})")
+        elif lead < 0:
+            problems.append(f"{base}@음수일 수 없다 (받은 값 {lead})")
+
+    cap = inventory.get("cap_by_date")
+    if cap is not None:
+        base = "constraints.inventory.cap_by_date"
+        if not isinstance(cap, Mapping):
+            problems.append(f"{base}@날짜→수용량 매핑이어야 한다")
+        else:
+            for day, value in cap.items():
+                if not isinstance(day, str):
+                    # 날짜 객체로 오면 ISO 문자열 조회가 **전부 미스**가 되고,
+                    # 값이 와 있는데도 "받지 못했다"로 고지된다.
+                    problems.append(f"{base}@키가 ISO 날짜 문자열이어야 한다")
+                    break
+            for day, value in cap.items():
+                if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+                    problems.append(f"{base}[{day}]@수량이어야 한다")
+                    break
+                if not isfinite(value):  # NaN · ±Inf
+                    problems.append(f"{base}[{day}]@유한한 수여야 한다")
+                    break
+    return problems
 
 
 # ── 재고 흡수 ─────────────────────────────────────────────────────────────

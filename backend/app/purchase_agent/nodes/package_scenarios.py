@@ -110,12 +110,12 @@ def arrival_dates(
 #: 원인이 넷이라, 뭉치면 무엇을 고쳐야 하는지가 사라진다.
 CAP_BLOCK_REASONS = {
     "no_cap": (
-        "회차별 도착일 수용량 검사 보류 — 물류가 날짜별 수용량(cap_by_date)을 보내지 않았다. "
-        "수용량을 0으로 가정하지 않고 균등 분할을 유지했다"
+        "회차별 창고 여유 검사를 하지 않았다 — 물류에서 날짜별 입고 여유를 받지 못했다. "
+        "여유를 0으로 가정하지 않고 회차를 균등하게 나눴다"
     ),
     "no_lead": (
-        "회차별 도착일 수용량 검사 보류 — 입고 소요일(N4) 미확정이라 도착일을 계산하지 "
-        "않았다. 균등 분할을 유지했다"
+        "회차별 창고 여유 검사를 하지 않았다 — 입고 소요일이 정해지지 않아 도착일을 "
+        "계산할 수 없다. 회차를 균등하게 나눴다"
     ),
 }
 
@@ -131,8 +131,9 @@ def cap_constrained_quantities(
     균등 분할을 그대로 돌려준다 — 총량을 줄이면 사중 일치가 깨지고, 마지막 회차에
     억지로 얹으면 상한을 지킨 척하면서 어긴 계획이 된다.
 
-    ⚠️ **조회 창 밖 날짜는 0이 아니라 "안 봤다"다.** ``cap_by_date``는 물류가
-    ``as_of + N4``부터 18일만 계산해 보낸다 (`logistics/adapter.py` `_CAP_WINDOW_DAYS`).
+    ⚠️ **받지 못한 날짜는 0이 아니라 "안 봤다"다.** ``cap_by_date``는 물류가 정한
+    조회 기간만큼만 계산해 보낸다 (기간 길이는 물류 소유값이라 여기 적지 않는다 —
+    같은 수를 두 곳에 적으면 한쪽만 바뀐다).
     ``.get(d, 0)``으로 읽으면 창 밖 회차가 **수용량 0**이 되어 통째로 죽는다 —
     이 함수가 막는 것이 그것이다 (규칙 3).
 
@@ -148,20 +149,29 @@ def cap_constrained_quantities(
     unknown = [day for day in arrivals if cap_by_date.get(day) is None]
     if unknown:
         return quantities, (
-            f"회차별 도착일 수용량 검사 보류 — 도착일 {', '.join(unknown)}이(가) 물류 조회 창 "
-            "밖이라 수용량을 받지 못했다. 창 밖을 0으로 읽지 않고 균등 분할을 유지했다"
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
+            "물류에서 받지 못했다(조회 기간 밖이거나 값이 비어 있다). 받지 못한 날을 "
+            "여유 0으로 읽지 않고 회차를 균등하게 나눴다"
         )
 
     adjusted: list[int] = []
     carried = 0
+    occupied = 0
     for quantity, day in zip(quantities, arrivals, strict=True):
         want = quantity + carried
         # 수용량은 **상한**이라 내림한다 — 올림하면 못 넣는 양을 계획하게 된다
         # (``warehouse_cap_kg``와 같은 이유).
         cap = int(cap_by_date[day])
-        take = min(want, cap)
+        # ★ **앞 회차가 아직 창고에 있다.** ``cap_by_date[d]``는 그날의 여유 공간인데,
+        #   물류는 **기존 일정만** 재생해 그 값을 낸다 (`logistics/tools.py`
+        #   ``calculate_cap_by_date``: guaranteed − projected_occupancy). 우리가 새로
+        #   넣을 회차는 거기 없다. 날짜마다 독립으로 비교하면 1회차 30kg이 남아 있는데도
+        #   2회차가 그날 상한을 통째로 쓰는 계획이 나온다 — 총합은 맞고 하드 제약은 깨진다.
+        room = max(0, cap - occupied)
+        take = min(want, room)
         adjusted.append(take)
         carried = want - take
+        occupied += take
 
     if any(quantity < 1 for quantity in adjusted):
         # 0kg·음수 회차는 ``SplitPlanItem.qty_kg > 0``이라 **제안 전체**를 죽인다.
@@ -170,21 +180,26 @@ def cap_constrained_quantities(
         # (음수 수용량이 섞이면 앞 회차가 음수가 되고 총합은 맞아 사중 일치는 통과한다 —
         # 스키마에서야 터지는, 조용히 지나가는 구간이다).
         return quantities, (
-            f"회차 수량을 도착일 수용량에 맞추면 실행 불가 회차가 생긴다 — {adjusted}. "
-            "0kg·음수 회차는 제안 전체를 무효로 만들어 균등 분할을 유지했다"
+            "🔴 회차별 창고 여유를 지킬 수 없다 — 여유에 맞추면 물량이 0인 회차가 생겨 "
+            "실행할 수 없는 계획이 된다. 회차를 균등하게 나눴으므로 "
+            "**이 계획은 날짜별 창고 여유를 넘는다**"
         )
     if carried:
         return quantities, (
-            f"회차별 도착일 수용량 안에 총량을 못 담았다 — {carried:,}kg이 남는다 "
-            f"(도착일 {arrivals[-1]} 상한 {int(cap_by_date[arrivals[-1]]):,}kg). "
-            "총량을 줄이지 않고 균등 분할을 유지했다"
+            f"🔴 회차별 창고 여유를 지킬 수 없다 — 총량 중 {carried:,}kg을 넣을 자리가 없다 "
+            f"(마지막 도착일 {arrivals[-1]} 기준). 총량은 매입 수량 산정 단계가 정하므로 "
+            "여기서 줄이지 않았고, 회차를 균등하게 나눴다 — "
+            "**이 계획은 날짜별 창고 여유를 넘는다**"
         )
     if adjusted == quantities:
         return quantities, None
-    return adjusted, (
-        f"회차 수량을 도착일 수용량에 맞춰 재배분했다 — {quantities} → {adjusted} "
-        f"(도착일 {', '.join(arrivals)})"
+    moved = " · ".join(
+        f"{seq}회 {before:,}→{after:,}kg({day} 도착)"
+        for seq, (before, after, day) in enumerate(
+            zip(quantities, adjusted, arrivals, strict=True), 1
+        )
     )
+    return adjusted, f"회차 물량을 날짜별 창고 여유에 맞춰 옮겼다 — {moved}"
 
 
 def materialize_split(
@@ -609,6 +624,19 @@ def _split_decision(chosen: list[dict] | None) -> dict:
     return chosen[0].get("decision", {}) if chosen else {}
 
 
+def _ratio_outcome(rounds: list[dict]) -> str:
+    """비율은 균등이어도 **수량은 다를 수 있다** — ⑥이 날짜별 창고 여유로 옮기기 때문이다.
+
+    이 한 줄이 없으면 화면에 [30, 70]이 떠 있는 옆에서 근거가 "균등"이라고 말한다.
+    같은 안에서 근거와 수량이 서로를 부정하는 상태다.
+    """
+    quantities = [line["qty_kg"] for line in rounds]
+    if len(set(quantities)) <= 1:
+        return "회차 물량도 균등하다."
+    moved = " · ".join(f"{line['seq']}회 {line['qty_kg']:,}kg" for line in rounds)
+    return f"다만 회차 물량은 날짜별 창고 여유에 맞춰 옮겨졌다 — {moved}."
+
+
 def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: str) -> list[dict]:
     """분할한 안의 근거. **선 트리거마다 한 건**이고 출처·ref_id·등급이 각각 다르다.
 
@@ -647,7 +675,8 @@ def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: 
                 "evidence_grade": "SIM_FIXED",
                 "evidence_detail": (
                     "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — "
-                    "그 트레이드오프 판단은 LLM 몫이라 지금은 균등 배분이다 (상세설계 §4-④)"
+                    "그 트레이드오프 판단은 LLM 몫이라 회차 비율은 균등으로 두었다 "
+                    f"(상세설계 §4-④). {_ratio_outcome(rounds)}"
                 ),
             }
         )

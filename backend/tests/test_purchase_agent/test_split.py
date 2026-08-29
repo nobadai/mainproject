@@ -295,14 +295,20 @@ def test_fallback_is_disclosed_in_risks() -> None:
 
 
 def test_round_level_arrival_check_is_disclosed_as_deferred(proposals: dict) -> None:
-    """§5.5 회차별 ``cap_by_date`` 검사가 N4 미확정으로 보류라는 사실이 risks에 실린다.
+    """§5.5 회차별 창고 여유 검사를 **하지 않았다**는 사실이 risks에 실린다.
 
     "총량 기준 단일 도착일로 뭉치면 분할의 창고 부담 분산 효과가 사라진다"가 §5.5의 요지라,
-    보류 사실을 안 적으면 분할이 그 효과를 검증받은 것처럼 읽힌다.
+    안 했다는 사실을 적지 않으면 분할이 그 효과를 검증받은 것처럼 읽힌다.
+
+    mock 경로는 날짜별 입고 여유도 입고 소요일도 없다. 먼저 걸리는 쪽(여유 미수신)이
+    사유로 나간다 — 둘 다 적으면 무엇을 먼저 받아야 하는지가 흐려진다.
     """
     assert load_constraints()["pending"]["inbound_lead_days"] is None
     aggressive = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "공격")
-    assert any("cap_by_date" in risk and "보류" in risk for risk in aggressive["risks"])
+    assert any(
+        "회차별 창고 여유 검사를 하지 않았다" in risk and "받지 못했다" in risk
+        for risk in aggressive["risks"]
+    )
 
     conservative = next(s for s in proposals[RISING]["scenarios"] if s["label"] == "보수")
     assert not any("cap_by_date" in risk for risk in conservative["risks"])
@@ -420,13 +426,13 @@ def test_arrival_dates_accept_zero_lead_as_a_real_value() -> None:
 def test_fallback_when_logistics_sent_no_cap() -> None:
     quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], None)
     assert quantities == [50, 50]
-    assert "물류가 날짜별 수용량" in note
+    assert "날짜별 입고 여유를 받지 못했다" in note
 
 
 def test_fallback_when_n4_is_missing() -> None:
     quantities, note = cap_constrained_quantities([50, 50], None, {"2026-01-02": 10})
     assert quantities == [50, 50]
-    assert "입고 소요일(N4)" in note
+    assert "입고 소요일이 정해지지 않아" in note
 
 
 def test_fallback_when_an_arrival_falls_outside_the_query_window() -> None:
@@ -439,7 +445,7 @@ def test_fallback_when_an_arrival_falls_outside_the_query_window() -> None:
     quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
     assert quantities == [50, 50], "창 밖 회차를 0으로 눌러 죽이면 안 된다"
     assert "2026-01-08" in note
-    assert "조회 창" in note
+    assert "받지 못했다" in note
 
 
 def test_zero_capacity_inside_the_window_is_distinguished_from_a_missing_date() -> None:
@@ -451,8 +457,8 @@ def test_zero_capacity_inside_the_window_is_distinguished_from_a_missing_date() 
     zero = {"2026-01-02": 0, "2026-01-08": 100}
     _, zero_note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], zero)
     _, missing_note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], {})
-    assert "실행 불가 회차" in zero_note, "0은 값이 있는 것이라 창 밖으로 뭉뚱그리지 않는다"
-    assert "조회 창" in missing_note
+    assert "물량이 0인 회차" in zero_note, "0은 값이 있는 것이라 미수신으로 뭉뚱그리지 않는다"
+    assert "받지 못했다" in missing_note
 
 
 def test_a_round_never_comes_out_zero_or_negative() -> None:
@@ -467,7 +473,7 @@ def test_a_round_never_comes_out_zero_or_negative() -> None:
     mixed = {"2026-01-02": -30, "2026-01-08": 1000}
     quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], mixed)
     assert quantities == [50, 50]
-    assert "실행 불가 회차" in note
+    assert "지킬 수 없다" in note
     assert all(quantity > 0 for quantity in quantities)
 
     # 창 안의 0도 같은 이유로 되돌린다
@@ -477,21 +483,27 @@ def test_a_round_never_comes_out_zero_or_negative() -> None:
 
 
 def test_fallback_when_total_does_not_fit_under_the_caps() -> None:
-    cap = {"2026-01-02": 10, "2026-01-08": 10}
+    """모든 회차가 1kg 이상인데도 총량이 안 들어가는 경우.
+
+    누적이라 2회차 여유는 40 − 30 = 10 뿐이고, 60kg 이 남는다.
+    """
+    cap = {"2026-01-02": 30, "2026-01-08": 40}
     quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
     assert quantities == [50, 50], "총량을 줄이면 사중 일치가 깨진다"
-    assert "못 담았다" in note and "80" in note
+    assert "지킬 수 없다" in note and "넣을 자리가 없다" in note
 
 
 # ── 재배분 ─────────────────────────────────────────────────────────────────
 
 
 def test_overflow_is_pushed_to_the_later_round() -> None:
+    # 2회차 상한은 **누적 기준**이다 — 1회차 30kg이 아직 창고에 있으므로
+    # 100 안에서 70만 더 들어간다.
     cap = {"2026-01-02": 30, "2026-01-08": 100}
     quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
     assert quantities == [30, 70]
     assert sum(quantities) == 100, "총합 불변"
-    assert note and "재배분" in note
+    assert note and "맞춰 옮겼다" in note
 
 
 def test_no_note_when_equal_split_already_fits() -> None:
@@ -505,7 +517,7 @@ def test_capacity_is_floored_not_rounded() -> None:
     """수용량은 상한이라 내림한다 — 올림하면 못 넣는 양을 계획하게 된다."""
     cap = {"2026-01-02": 30.9, "2026-01-08": 100}
     quantities, _ = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
-    assert quantities == [30, 70]
+    assert quantities == [30, 70]  # 30.9 → 30 (내림) · 2회차는 100 − 30 = 70
 
 
 def test_iso_string_keys_are_what_logistics_sends() -> None:
@@ -515,14 +527,14 @@ def test_iso_string_keys_are_what_logistics_sends() -> None:
     "창 밖"으로 빠진다.
     """
     iso_cap = {"2026-01-02": 30, "2026-01-08": 100}
-    date_cap = {date(2026, 1, 2): 30, date(2026, 1, 8): 100}
+    date_cap = {date(2026, 1, 2): 30, date(2026, 1, 8): 100}  # 같은 값, 키 타입만 다름
     arrivals = arrival_dates(AS_OF, 12, 2, 2)
 
     assert cap_constrained_quantities([50, 50], arrivals, iso_cap)[0] == [30, 70]
     # 같은 값인데 키 타입만 다르면 조정이 일어나지 않는다 — 그 사실이 고지로 드러난다
     quantities, note = cap_constrained_quantities([50, 50], arrivals, date_cap)  # type: ignore[arg-type]
     assert quantities == [50, 50]
-    assert "조회 창" in note
+    assert "받지 못했다" in note
 
 
 # ── ⑥ 통합 ─────────────────────────────────────────────────────────────────
@@ -550,3 +562,33 @@ def test_materialize_split_is_unchanged_without_logistics_values() -> None:
     assert materialize_split(AS_OF, 100, chosen, 12) == materialize_split(
         AS_OF, 100, chosen, 12, lead_days=None, cap_by_date=None
     )
+
+
+# ── 누적 (Codex 교차검증 지적) ──────────────────────────────────────────────
+
+
+def test_earlier_rounds_still_occupy_the_warehouse_on_later_dates() -> None:
+    """🔴 **앞 회차가 아직 창고에 있다.**
+
+    ``cap_by_date[d]``는 물류가 **기존 일정만** 재생해 낸 그날의 여유다
+    (`logistics/tools.py` ``calculate_cap_by_date``:
+    ``guaranteed_capacity_kg − projected_occupancy``). 우리가 새로 넣을 회차는
+    거기 없으므로, 날짜마다 독립으로 비교하면 1회차가 남아 있는데도 2회차가
+    그날 여유를 통째로 쓰는 계획이 나온다 — **총합은 맞고 하드 제약은 깨진다.**
+    """
+    # 독립 비교였다면 [30, 70] 이 나오고 01-08 누적이 100 > 80 으로 여유를 넘는다.
+    cap = {"2026-01-02": 30, "2026-01-08": 80}
+    quantities, note = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+
+    cumulative = [sum(quantities[: index + 1]) for index in range(len(quantities))]
+    assert cumulative[-1] > cap["2026-01-08"], "이 입력은 애초에 담을 수 없다"
+    assert quantities == [50, 50], "담을 수 없으면 조정하지 않고 균등을 유지한다"
+    assert "지킬 수 없다" in note, "담지 못한 사실을 성공으로 고지하면 안 된다"
+
+
+def test_adjusted_rounds_respect_the_cap_cumulatively() -> None:
+    """조정이 성립하는 경우, **누적**이 각 날짜 여유 안에 든다."""
+    cap = {"2026-01-02": 30, "2026-01-08": 1_000}
+    quantities, _ = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
+    for index, day in enumerate(["2026-01-02", "2026-01-08"]):
+        assert sum(quantities[: index + 1]) <= cap[day], f"{day} 누적 초과"
