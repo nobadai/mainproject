@@ -264,6 +264,95 @@ def test_same_inbound_id_field_mismatch_fails_closed(complete_logistics_snapshot
     assert procurement["runtime_status"] == "RUNTIME_NOT_READY"
 
 
+def test_duplicate_inbound_id_in_confirmed_schedule_fails_closed(complete_logistics_snapshot):
+    """같은 inbound_id가 두 행이면 대조는 한 건만 보는데 점유는 두 건 다 더해진다.
+
+    조용히 넘기면 검증은 통과하고 Capacity만 500kg 더 좁아진다 — 어느 행이 진짜인지
+    코드가 고르지 않고 명시적으로 막는다.
+    """
+    duplicated = [
+        ScheduledQuantity(
+            inbound_id="INB-001",
+            item="배추",
+            quantity_kg=Decimal(500),
+            date=date(2026, 8, 30),
+        ),
+        ScheduledQuantity(
+            inbound_id="INB-001",
+            item="배추",
+            quantity_kg=Decimal(500),
+            date=date(2026, 8, 30),
+        ),
+    ]
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "in_transit": [
+                InTransitItem(
+                    inbound_id="INB-001",
+                    item="배추",
+                    quantity_kg=Decimal(500),
+                    expected_arrival_date=date(2026, 8, 30),
+                )
+            ],
+            "confirmed_inbound_schedule": duplicated,
+        }
+    )
+
+    assert find_in_transit_schedule_gap(snapshot) == "CONFIRMED_INBOUND_ID_DUPLICATED"
+    assert is_inbound_schedule_complete(snapshot) is False
+    with pytest.raises(ValueError, match="IN_TRANSIT_SCHEDULE_UNRESOLVED"):
+        calculate_cap_by_date(snapshot, [date(2026, 8, 30)])
+
+    procurement = evaluate_procurement_rules(as_of=AS_OF, snapshot=snapshot)
+    assert procurement["runtime_status"] == "RUNTIME_NOT_READY"
+    constraint = next(
+        item
+        for item in procurement["hard_constraints"]
+        if item.code == "IN_TRANSIT_SCHEDULE_UNRESOLVED"
+    )
+    assert constraint.skip_reason == "CONFIRMED_INBOUND_ID_DUPLICATED"
+
+
+def test_duplicate_inbound_id_is_checked_even_without_in_transit(complete_logistics_snapshot):
+    """in_transit이 0건이어도 검사한다 — confirmed schedule 자체의 무결성 문제다."""
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "in_transit": [],
+            "confirmed_inbound_schedule": [
+                ScheduledQuantity(
+                    inbound_id="INB-009",
+                    item="배추",
+                    quantity_kg=Decimal(300),
+                    date=date(2026, 8, 30),
+                ),
+                ScheduledQuantity(
+                    inbound_id="INB-009",
+                    item="배추",
+                    quantity_kg=Decimal(300),
+                    date=date(2026, 8, 31),
+                ),
+            ],
+        }
+    )
+
+    assert find_in_transit_schedule_gap(snapshot) == "CONFIRMED_INBOUND_ID_DUPLICATED"
+
+
+def test_inbound_id_none_rows_are_not_treated_as_duplicates(complete_logistics_snapshot):
+    """id 없는 행은 서로 다른 입고일 수 있다 — 없는 값을 같은 값으로 세지 않는다."""
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "in_transit": [],
+            "confirmed_inbound_schedule": [
+                ScheduledQuantity(item="배추", quantity_kg=Decimal(300), date=date(2026, 8, 30)),
+                ScheduledQuantity(item="무", quantity_kg=Decimal(200), date=date(2026, 8, 31)),
+            ],
+        }
+    )
+
+    assert find_in_transit_schedule_gap(snapshot) is None
+
+
 def test_confirmed_inbound_none_fails_closed(complete_logistics_snapshot):
     snapshot = complete_logistics_snapshot.model_copy(update={"confirmed_inbound_schedule": None})
 
