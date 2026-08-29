@@ -16,7 +16,11 @@ from decimal import Decimal
 import pytest
 
 from app.logistics import adapter
-from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsPolicy
+from app.logistics.schemas import (
+    InventoryLogisticsSnapshot,
+    ItemStoragePolicyFact,
+    LogisticsPolicy,
+)
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)
@@ -95,9 +99,20 @@ def _snapshot(**overrides) -> InventoryLogisticsSnapshot:
         "daily_inbound_capacity_kg": Decimal(5000),
         "inbound_transport_capacity_kg": Decimal(5000),
         "shared_daily_outbound_capacity_kg": Decimal(5000),
+        # 실물 Repository 가 늘 싣는다 — 재고가 0kg 인 품목의 보관 한계도 매입은 알아야
+        # 해서 Lot 목록과 별개로 읽는다. `대파` 는 DB 값이 비어 있는 경우다.
+        "item_storage_policies": [
+            ItemStoragePolicyFact(
+                item="배추",
+                operational_limit_days=15,
+                medium_grade_factor=Decimal("0.8"),
+            ),
+            ItemStoragePolicyFact(item="대파"),
+        ],
         "evidence_refs": [
             "DB:logistics_runtime_fixture/LOG-RUNTIME-1",
             "DB:inventory_lots/sim_run_id=SIM-1",
+            "DB:item_storage_policies",
         ],
     }
     return InventoryLogisticsSnapshot(**{**base, **overrides})
@@ -221,6 +236,125 @@ def test_Lot_근거는_Lot_을_담은_참조를_가리킨다(wired):
     reply, _ = adapter.logistics_port(req())
     lot_ev = next(e for e in reply.evidences if e.claim.startswith("lots[LOT-A]"))
     assert "inventory_lots" in lot_ev.ref_ids[0]
+
+
+# ---------------------------------------------------------------------------
+# cap_by_date — Evidence 가 실제 계산을 설명하는가
+# ---------------------------------------------------------------------------
+
+
+def test_cap_by_date_근거는_실제_계산을_설명한다(wired):
+    """🔴 근거가 **실제 계산과 다른 말**을 하면 검증은 통과하고 사람만 속는다.
+
+    1차 MVP 의 Hard Capacity 는 `guaranteed_capacity_kg` 하나다
+    (`calculate_cap_by_date` — burst·일일입고·운송은 판정에 개입하지 않는다).
+    `min(창고여유, 일일입고, 운송)` 은 그 정책 이전의 설명이라 남아 있으면 안 된다.
+    """
+    reply, _ = adapter.logistics_port(req())
+    detail = next(e for e in reply.evidences if e.claim == "cap_by_date").evidence_detail
+    assert "min(" not in detail
+    assert "guaranteed_capacity_kg" in detail
+
+
+def test_시나리오_판정의_cap_by_date_근거도_같은_계산을_설명한다(wired):
+    """두 mode 가 같은 Tool 을 부르므로 설명도 같아야 한다."""
+    request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    reply, _ = adapter.logistics_port(request)
+    detail = next(e for e in reply.evidences if e.claim == "cap_by_date").evidence_detail
+    assert "min(" not in detail
+    assert "guaranteed_capacity_kg" in detail
+
+
+def test_창고여유_근거는_cap_by_date_와_같은_값이라고_말하지_않는다(wired):
+    """★ `warehouse_free_kg` 는 as_of 점유 기준이고 `cap_by_date` 는 도착일별이다.
+
+    뺄셈의 모양이 같아 헷갈리지만 **같은 값이 아니다.** 같다고 쓰면 받는 쪽이
+    하루치 여유를 18일 내내 쓸 수 있는 것으로 읽는다.
+    """
+    reply, _ = adapter.logistics_port(req())
+    detail = next(e for e in reply.evidences if e.claim == "warehouse_free_kg").evidence_detail
+    # 이제는 존재하지 않는 이름을 가리키지 않는다
+    assert "free_capacity" not in detail
+    assert "일치하지 않는다" in detail
+
+
+# ---------------------------------------------------------------------------
+# item_storage_policies — 품목 단위 보관 정책
+# ---------------------------------------------------------------------------
+
+
+def test_품목_보관정책을_PRE_payload_에_싣는다(wired):
+    """Repository→Snapshot 까지 온 값이 매입에 닿지 않으면 조회한 의미가 없다."""
+    reply, _ = adapter.logistics_port(req())
+    policies = reply.payload["item_storage_policies"]
+    baechu = next(row for row in policies if row["item"] == "배추")
+    assert baechu["operational_limit_days"] == 15
+    assert baechu["medium_grade_factor"] == 0.8
+
+
+def test_보관한계는_Lot_잔여_신선도와_다른_값이다(wired):
+    """🔴 **개념이 다르다.**
+
+    `lots[].remaining_freshness_days` 는 *이미 있는 그 Lot* 이 앞으로 며칠 쓸 수 있나이고,
+    `operational_limit_days` 는 *그 품목을 새로 들일 때* 적용할 보관 한계다.
+    새 매입의 기준은 후자라 Lot 잔여일수에서 역산하면 **살 수 있는 양이 조용히 줄어든다.**
+    """
+    reply, _ = adapter.logistics_port(req())
+    lot_a = next(lot for lot in reply.payload["lots"] if lot["lot_id"] == "LOT-A")
+    baechu = next(row for row in reply.payload["item_storage_policies"] if row["item"] == "배추")
+    assert lot_a["item"] == baechu["item"]  # 같은 품목인데
+    assert lot_a["remaining_freshness_days"] == 10  # 값이 다르다 — 서로 다른 사실이다
+    assert baechu["operational_limit_days"] == 15
+    # 어느 한쪽이 다른 쪽을 대체하지 않는다 — 둘 다 payload 에 남는다
+    assert "remaining_freshness_days" not in baechu
+    assert "operational_limit_days" not in lot_a
+
+
+def test_보관정책_근거는_번호가_아니라_품목명으로_가리킨다(wired):
+    """Lot 과 같은 이유다 — 번호로 쓰면 품목 순서가 바뀌는 날 다른 품목을 가리킨다."""
+    reply, _ = adapter.logistics_port(req())
+    claims = {e.claim for e in reply.evidences}
+    assert "item_storage_policies[배추].operational_limit_days" in claims
+    assert "item_storage_policies[배추].medium_grade_factor" in claims
+
+
+def test_보관정책_근거는_정책_테이블을_가리킨다(wired):
+    """ref_id 를 지어내지 않는다 — Repository 가 실은 DB 참조를 그대로 쓴다."""
+    reply, _ = adapter.logistics_port(req())
+    evidence = next(e for e in reply.evidences if e.claim.startswith("item_storage_policies[배추]"))
+    assert evidence.ref_ids == ("DB:item_storage_policies",)
+
+
+def test_정책값이_없는_품목은_근거를_만들지_않는다(wired):
+    """없는 값에 근거를 붙이면 *"확인했다"* 는 거짓이 된다 — 0 으로도 채우지 않는다."""
+    reply, _ = adapter.logistics_port(req())
+    claims = {e.claim for e in reply.evidences}
+    assert "item_storage_policies[대파].operational_limit_days" not in claims
+    assert "item_storage_policies[대파].medium_grade_factor" not in claims
+    daepa = next(row for row in reply.payload["item_storage_policies"] if row["item"] == "대파")
+    assert daepa["operational_limit_days"] is None
+    assert daepa["medium_grade_factor"] is None
+
+
+def test_보관정책이_미조회면_빈_배열로_덮지_않는다(wired, monkeypatch):
+    """`None`(미조회)과 `[]`(정책 0 건 확인)은 다르다 (§1.2-10)."""
+    monkeypatch.setattr(
+        adapter, "_load_snapshot", lambda as_of: _snapshot(item_storage_policies=None)
+    )
+    reply, _ = adapter.logistics_port(req())
+    assert "item_storage_policies" not in reply.payload
+    assert "item_storage_policies" in reply.missing_data
+
+
+def test_보관정책을_실어도_봉투_검증을_통과한다(wired):
+    """🔴 배열 항목 안의 숫자에는 봉투가 **항목마다 Evidence 를 요구한다.**
+
+    근거 없이 payload 에만 넣으면 `E-EVIDENCE-MISSING` 으로 물류 회신이 통째로 막힌다.
+    """
+    request = req()
+    reply, meta = adapter.logistics_port(request)
+    assert "item_storage_policies" in reply.payload
+    assert validate_reply(request, reply, meta) == ()
 
 
 def test_스냅샷_기준일이_다르면_판단하지_않는다(wired):
@@ -383,6 +517,18 @@ def test_조회는_상태를_싣고_경계는_안_싣는다(wired):
     assert reply.payload["lot_count"] == 2
     for boundary in ("cap_by_date", "inbound_lead_days", "daily_inbound_capacity_kg", "lots"):
         assert boundary not in reply.payload
+
+
+def test_조회의_창고여유_근거는_현재_점유만_설명한다(wired):
+    """★ 조회에는 `cap_by_date` 가 없다 — 그 계산을 근거로 끌어오면 안 된다.
+
+    `warehouse_free_kg` 는 as_of 의 `used_capacity_kg` 기준이고
+    `calculate_cap_by_date()` 는 도착일별 예상 점유 기준이라 **다른 계산**이다.
+    """
+    reply, _ = adapter.logistics_port(req(mode="STATUS_QUERY"))
+    detail = next(e for e in reply.evidences if e.claim == "warehouse_free_kg").evidence_detail
+    assert "cap_by_date" not in detail
+    assert "guaranteed_capacity_kg" in detail
 
 
 def test_조회는_가장_짧은_신선도만_밝힌다(wired):
