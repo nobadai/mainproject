@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.master.decision import DecisionOut
 from app.master.envelope import AgentName
 from app.master.llm.schemas import Intent, LLMStatus
 from app.master.status_flow import StatusCode
@@ -22,6 +23,7 @@ from app.master.status_flow import StatusCode
 AskOutcome = Literal[
     "CLASSIFIED_ONLY",  # 확인이 필요해 실행하지 않음
     "STATUS_ANSWERED",  # 조회를 돌려 답을 담음
+    "DECISION_RECORDED",  # 사람이 고른 안을 결정 이력에 적음
     "NEEDS_CLARIFICATION",  # 못 알아들음 — 되묻는다
 ]
 
@@ -52,6 +54,20 @@ class AskExecuteRequest(BaseModel):
     policy_version: str = Field(min_length=1)
     request_id: str | None = None
     budget: int = Field(default=12, ge=1, le=50)
+
+    #: 🔴 **결정 대상 실행의 업무 키.** `SELECT_SCENARIO` 에 필수다.
+    #:
+    #: **LLM 이 채울 수 없고 채워서도 안 된다.** *"기본안으로 진행해"* 라는 말에는
+    #: **어느 실행의** 기본안인지가 없다. 화면은 방금 무엇을 보여줬는지 알고 있으므로
+    #: 화면이 싣는다 — 서버가 "가장 최근 실행" 으로 추측하면 **엉뚱한 날의 안을
+    #: 승인**할 수 있다.
+    target_request_id: str | None = None
+
+    #: 🔴 **승인자.** `SELECT_SCENARIO` 에 필수다.
+    #:
+    #: *"승인자가 없는 승인은 승인이 아니다"* (`decision.py`). **말로 골랐다고 승인자가
+    #: 생기지는 않는다** — 발화문에는 신원이 없으므로 인증된 사용자를 화면이 싣는다.
+    decided_by: str | None = None
 
 
 class StatusAnswer(BaseModel):
@@ -105,6 +121,8 @@ class AskResponse(BaseModel):
     confirm_required: bool = False
 
     status: StatusAnswer | None = None
+    #: 적재된 결정. `DECISION_RECORDED` 일 때만 채운다.
+    decision: DecisionOut | None = None
     #: 사람이 읽는 답 (⑥). 실행한 경우에만 채운다 — 되묻는 경우는 `clarification` 이다.
     answer: AnswerOut | None = None
 
