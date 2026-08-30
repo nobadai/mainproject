@@ -5,6 +5,7 @@ Epic 2는 rule_only 경로다. LLM 몫은 **문장을 다듬는 것**이고 숫�
 입력으로 받아 rationale·risks의 서술만 손본다.
 """
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
@@ -84,8 +85,131 @@ def split_infeasible_reason(
     return None
 
 
+def arrival_dates(
+    as_of: str, coverage_days: int, rounds: int, lead_days: int | None
+) -> list[str] | None:
+    """회차별 **도착일** = 회차일 + N4 (상세설계 §5.5).
+
+    ``split_offsets``를 재사용한다 — 매입일을 두 곳에서 각자 계산하면 회차 날짜와
+    도착일이 어긋나고, 어긋난 쪽을 아무도 못 찾는다.
+
+    N4가 없으면 ``None``이다. **0으로 채우지 않는다** — 0은 "당일 도착"이라는 확정된
+    값이라, 미결을 0으로 적으면 "오늘 승인분이 오늘 도착"이 사실이 된다 (규칙 3).
+    """
+    if lead_days is None:
+        return None
+    start = date.fromisoformat(as_of)
+    return [
+        (start + timedelta(days=offset + lead_days)).isoformat()
+        for offset in split_offsets(coverage_days, rounds)
+    ]
+
+
+#: 회차 수량을 재배분하지 못한 사유. ⑥이 안별 risks에 싣는다.
+#: 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과 같다 — 결과는 "균등 유지" 하나인데
+#: 원인이 넷이라, 뭉치면 무엇을 고쳐야 하는지가 사라진다.
+CAP_BLOCK_REASONS = {
+    "no_cap": (
+        "회차별 창고 여유 검사를 하지 않았다 — 물류에서 날짜별 입고 여유를 받지 못했다. "
+        "여유를 0으로 가정하지 않고 회차를 균등하게 나눴다"
+    ),
+    "no_lead": (
+        "회차별 창고 여유 검사를 하지 않았다 — 입고 소요일이 정해지지 않아 도착일을 "
+        "계산할 수 없다. 회차를 균등하게 나눴다"
+    ),
+}
+
+
+def cap_constrained_quantities(
+    quantities: list[int],
+    arrivals: list[str] | None,
+    cap_by_date: Mapping[str, float] | None,
+) -> tuple[list[int], str | None]:
+    """도착일 수용량으로 회차 수량을 재배분한다. **총합은 불변이다.**
+
+    상한을 넘는 만큼을 뒤 회차로 넘긴다. 넘길 곳이 없으면 재배분을 **포기하고**
+    균등 분할을 그대로 돌려준다 — 총량을 줄이면 사중 일치가 깨지고, 마지막 회차에
+    억지로 얹으면 상한을 지킨 척하면서 어긴 계획이 된다.
+
+    ⚠️ **받지 못한 날짜는 0이 아니라 "안 봤다"다.** ``cap_by_date``는 물류가 정한
+    조회 기간만큼만 계산해 보낸다 (기간 길이는 물류 소유값이라 여기 적지 않는다 —
+    같은 수를 두 곳에 적으면 한쪽만 바뀐다).
+    ``.get(d, 0)``으로 읽으면 창 밖 회차가 **수용량 0**이 되어 통째로 죽는다 —
+    이 함수가 막는 것이 그것이다 (규칙 3).
+
+    회차 하나라도 수용량을 모르면 **아무 회차도 조정하지 않는다.** 아는 날짜만 조이면
+    남은 물량이 모르는 날짜로 밀려가 "모르는 곳에 더 쌓는" 계획이 되고, 계획의 모양이
+    "어느 날짜가 우연히 창 안이었나"에 좌우돼 설명할 수 없게 된다.
+    """
+    if cap_by_date is None:
+        return quantities, CAP_BLOCK_REASONS["no_cap"]
+    if arrivals is None:
+        return quantities, CAP_BLOCK_REASONS["no_lead"]
+
+    unknown = [day for day in arrivals if cap_by_date.get(day) is None]
+    if unknown:
+        return quantities, (
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
+            "물류에서 받지 못했다(조회 기간 밖이거나 값이 비어 있다). 받지 못한 날을 "
+            "여유 0으로 읽지 않고 회차를 균등하게 나눴다"
+        )
+
+    adjusted: list[int] = []
+    carried = 0
+    occupied = 0
+    for quantity, day in zip(quantities, arrivals, strict=True):
+        want = quantity + carried
+        # 수용량은 **상한**이라 내림한다 — 올림하면 못 넣는 양을 계획하게 된다
+        # (``warehouse_cap_kg``와 같은 이유).
+        cap = int(cap_by_date[day])
+        # ★ **앞 회차가 아직 창고에 있다.** ``cap_by_date[d]``는 그날의 여유 공간인데,
+        #   물류는 **기존 일정만** 재생해 그 값을 낸다 (`logistics/tools.py`
+        #   ``calculate_cap_by_date``: guaranteed − projected_occupancy). 우리가 새로
+        #   넣을 회차는 거기 없다. 날짜마다 독립으로 비교하면 1회차 30kg이 남아 있는데도
+        #   2회차가 그날 상한을 통째로 쓰는 계획이 나온다 — 총합은 맞고 하드 제약은 깨진다.
+        room = max(0, cap - occupied)
+        take = min(want, room)
+        adjusted.append(take)
+        carried = want - take
+        occupied += take
+
+    if any(quantity < 1 for quantity in adjusted):
+        # 0kg·음수 회차는 ``SplitPlanItem.qty_kg > 0``이라 **제안 전체**를 죽인다.
+        # 균등 분할은 ``split_infeasible_reason``의 최소 수량 검사를 이미 통과한 값이라
+        # 되돌리면 안전하다. 재배분이 그 검사를 **사후에 깨는** 자리라 여기서 한 번 더 본다
+        # (음수 수용량이 섞이면 앞 회차가 음수가 되고 총합은 맞아 사중 일치는 통과한다 —
+        # 스키마에서야 터지는, 조용히 지나가는 구간이다).
+        return quantities, (
+            "🔴 회차별 창고 여유를 지킬 수 없다 — 여유에 맞추면 물량이 0인 회차가 생겨 "
+            "실행할 수 없는 계획이 된다. 회차를 균등하게 나눴으므로 "
+            "**이 계획은 날짜별 창고 여유를 넘는다**"
+        )
+    if carried:
+        return quantities, (
+            f"🔴 회차별 창고 여유를 지킬 수 없다 — 총량 중 {carried:,}kg을 넣을 자리가 없다 "
+            f"(마지막 도착일 {arrivals[-1]} 기준). 총량은 매입 수량 산정 단계가 정하므로 "
+            "여기서 줄이지 않았고, 회차를 균등하게 나눴다 — "
+            "**이 계획은 날짜별 창고 여유를 넘는다**"
+        )
+    if adjusted == quantities:
+        return quantities, None
+    moved = " · ".join(
+        f"{seq}회 {before:,}→{after:,}kg({day} 도착)"
+        for seq, (before, after, day) in enumerate(
+            zip(quantities, adjusted, arrivals, strict=True), 1
+        )
+    )
+    return adjusted, f"회차 물량을 날짜별 창고 여유에 맞춰 옮겼다 — {moved}"
+
+
 def materialize_split(
-    as_of: str, total_qty_kg: int, chosen: list[dict] | None, coverage_days: int
+    as_of: str,
+    total_qty_kg: int,
+    chosen: list[dict] | None,
+    coverage_days: int,
+    *,
+    lead_days: int | None = None,
+    cap_by_date: Mapping[str, float] | None = None,
 ) -> list[dict]:
     """회차별 매입 계획. ④가 유형·비율만 정하므로 안별 총량과 날짜를 여기서 만든다.
 
@@ -101,7 +225,11 @@ def materialize_split(
 
     start = date.fromisoformat(as_of)
     offsets = split_offsets(coverage_days, len(chosen))
-    quantities = split_quantities(total_qty_kg, chosen)
+    quantities, _ = cap_constrained_quantities(
+        split_quantities(total_qty_kg, chosen),
+        arrival_dates(as_of, coverage_days, len(chosen), lead_days),
+        cap_by_date,
+    )
     return [
         {
             "seq": index + 1,
@@ -496,6 +624,19 @@ def _split_decision(chosen: list[dict] | None) -> dict:
     return chosen[0].get("decision", {}) if chosen else {}
 
 
+def _ratio_outcome(rounds: list[dict]) -> str:
+    """비율은 균등이어도 **수량은 다를 수 있다** — ⑥이 날짜별 창고 여유로 옮기기 때문이다.
+
+    이 한 줄이 없으면 화면에 [30, 70]이 떠 있는 옆에서 근거가 "균등"이라고 말한다.
+    같은 안에서 근거와 수량이 서로를 부정하는 상태다.
+    """
+    quantities = [line["qty_kg"] for line in rounds]
+    if len(set(quantities)) <= 1:
+        return "회차 물량도 균등하다."
+    moved = " · ".join(f"{line['seq']}회 {line['qty_kg']:,}kg" for line in rounds)
+    return f"다만 회차 물량은 날짜별 창고 여유에 맞춰 옮겨졌다 — {moved}."
+
+
 def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: str) -> list[dict]:
     """분할한 안의 근거. **선 트리거마다 한 건**이고 출처·ref_id·등급이 각각 다르다.
 
@@ -534,7 +675,8 @@ def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: 
                 "evidence_grade": "SIM_FIXED",
                 "evidence_detail": (
                     "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — "
-                    "그 트레이드오프 판단은 LLM 몫이라 지금은 균등 배분이다 (상세설계 §4-④)"
+                    "그 트레이드오프 판단은 LLM 몫이라 회차 비율은 균등으로 두었다 "
+                    f"(상세설계 §4-④). {_ratio_outcome(rounds)}"
                 ),
             }
         )
@@ -704,6 +846,10 @@ def _split_risks(
     coverage_days: int,
     chosen: list[dict] | None,
     rounds: list[dict],
+    *,
+    as_of: str,
+    lead_days: int | None,
+    cap_by_date: Mapping[str, float] | None,
 ) -> list[str]:
     """분할에서 나온 유의사항. **timing 라벨과 실제 행동이 어긋나면 반드시 적는다** (규칙 3).
 
@@ -729,13 +875,15 @@ def _split_risks(
     reason = chosen and split_infeasible_reason(total_qty_kg, chosen, coverage_days)
     if reason:
         return [f"분할 불가({reason})로 일괄 전환 — timing 축 안이지만 회차는 하나다"]
-    return [
-        (
-            f"{len(rounds)}회 분할 — 회차별 도착일(= 회차 date + N4) 기준 cap_by_date 검사는 "
-            "inbound_lead_days(N4) 미확정으로 보류 (상세설계 §5.5 · 규칙 3). "
-            "총량 단일 도착일로 뭉치면 분할의 창고 부담 분산 효과가 검증되지 않는다"
-        )
-    ]
+    # 재배분 결과를 여기서 다시 계산한다 — 바로 위 ``split_infeasible_reason``과 같은
+    # 방식이다. 순수 함수라 같은 입력이면 같은 답이고, 수량과 고지가 갈라질 수 없다.
+    _, cap_note = cap_constrained_quantities(
+        split_quantities(total_qty_kg, chosen or []),
+        arrival_dates(as_of, coverage_days, len(rounds), lead_days),
+        cap_by_date,
+    )
+    head = f"{len(rounds)}회 분할"
+    return [f"{head} — {cap_note}" if cap_note else f"{head} — 회차별 도착일 수용량 안에 든다"]
 
 
 def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str) -> list[str]:
@@ -777,6 +925,11 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     contract_price = state["contract_price"]  # 미수령이면 None — 마진 두 값이 함께 null이 된다
     decision = _sourcing_decision(state["sourcing_plan"])  # ⑤ 등급 배분 판단 근거
     split_choice = state["split_plan"]  # ④ 분할 유형·비율 (진입 안 했으면 None)
+    # N4·수용량은 그날 하나뿐이라 안 루프 밖에서 한 번만 읽는다.
+    # ``cap_by_date``는 **어댑터 경로에만** 있다 — mock 재고에는 없어서 None이고,
+    # 그때 회차 조정은 일어나지 않는다 (부재가 정상 경로다).
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    cap_by_date = state["inventory"].get("cap_by_date")
     split_decision = _split_decision(split_choice)
 
     scenarios = []
@@ -801,7 +954,14 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         axis = axes[draft["label"]]
         chosen = split_choice if axis == TIMING_AXIS else None
         coverage_days = draft["coverage_days"]
-        rounds = materialize_split(state["date"], total, chosen, coverage_days)
+        rounds = materialize_split(
+            state["date"],
+            total,
+            chosen,
+            coverage_days,
+            lead_days=lead_days,
+            cap_by_date=cap_by_date,
+        )
         rationale_input = {**draft, "daily_demand_kg": base["daily_demand_kg"]}
         unit_price = _weighted_unit_price(sourcing, total)
         margin_warning, expected_margin_rate = compute_margin(unit_price, contract_price)
@@ -838,7 +998,15 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_context_risks(state["context_loop_count"], state["context_docs"]),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
-                        split_decision, axis, total, coverage_days, chosen, rounds
+                        split_decision,
+                        axis,
+                        total,
+                        coverage_days,
+                        chosen,
+                        rounds,
+                        as_of=state["date"],
+                        lead_days=lead_days,
+                        cap_by_date=cap_by_date,
                     ),
                     *_payment_risks(
                         rounds,
