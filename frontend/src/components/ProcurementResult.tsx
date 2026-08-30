@@ -25,10 +25,13 @@ export function ProcurementResult({
   run,
   canApprove,
   onPick,
+  onRerun,
 }: {
   run: ProcurementRunResponse;
   canApprove: boolean;
   onPick: (scenario: Scenario) => void;
+  /** 조건을 붙여 다시 — 입력창에 문안을 채우고 커서를 준다. **보내는 것은 사람이다.** */
+  onRerun?: () => void;
 }) {
   // 결론 문장은 서버가 만든 리포트의 첫 줄이다 — 프론트가 다시 쓰지 않는다.
   const headline = run.report_text.split("\n")[0] || run.reason;
@@ -54,6 +57,16 @@ export function ProcurementResult({
             />
           ))}
         </div>
+      )}
+
+      {onRerun && run.scenarios.length > 0 && (
+        <button
+          type="button"
+          onClick={onRerun}
+          className="self-start rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink"
+        >
+          ↻ 조건을 붙여 다시 만들기
+        </button>
       )}
 
       <SourceBadges sources={run.input_sources} />

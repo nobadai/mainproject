@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.master.decision import DecisionOut
 from app.master.envelope import AgentName
 from app.master.llm.schemas import Intent, LLMStatus
+from app.master.schemas import ProcurementRunResponse
 from app.master.status_flow import StatusCode
 
 #: 이 요청이 실제로 무엇을 했나.
@@ -123,6 +124,13 @@ class AskResponse(BaseModel):
     status: StatusAnswer | None = None
     #: 적재된 결정. `DECISION_RECORDED` 일 때만 채운다.
     decision: DecisionOut | None = None
+    #: 조건부 재요청으로 **다시 돈 실행.** `RERUN_WITH_CONDITION` 일 때만 채운다.
+    #:
+    #: ★ **없으면 고리가 끊긴다.** 사용자가 *"다시 해줘"* 라고 했으면 다음 동작은
+    #:   **새로 나온 안 중 하나를 고르는 것**인데, 결정만 돌려주면 화면이 그 안을
+    #:   그릴 수도 고를 수도 없다. 리포트 문장에는 있지만 문장에서 라벨을 긁어 쓰는 것은
+    #:   화면이 서버 문장 형식에 묶이는 일이라 하지 않는다.
+    run: ProcurementRunResponse | None = None
     #: 사람이 읽는 답 (⑥). 실행한 경우에만 채운다 — 되묻는 경우는 `clarification` 이다.
     answer: AnswerOut | None = None
 

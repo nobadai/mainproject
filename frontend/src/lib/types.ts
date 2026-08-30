@@ -62,6 +62,8 @@ export interface AskResponse {
   confirm_required: boolean;
   status: unknown;
   decision: DecisionOut | null;
+  /** 조건부 재요청으로 **다시 돈 실행.** 없으면 고리가 끊긴다. */
+  run: ProcurementRunResponse | null;
   answer: AnswerOut | null;
   llm_status: string;
   llm_model: string | null;

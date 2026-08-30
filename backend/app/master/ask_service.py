@@ -362,6 +362,7 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
         outcome="DECISION_RECORDED",
         intent=intent,
         decision=decision.model_copy(update={"follow_up_request_id": follow_up_id}),
+        run=rerun,
         answer=_rule_answer(facts),
         llm_status="SKIPPED_TEMPLATE",
     )

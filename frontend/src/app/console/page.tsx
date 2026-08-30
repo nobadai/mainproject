@@ -36,7 +36,10 @@ import {
 type Turn =
   | { kind: "me"; text: string }
   | { kind: "bot"; text: string }
-  | { kind: "confirm"; text: string; intent: Intent; requestId: string }
+  // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
+  //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
+  //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
+  | { kind: "confirm"; text: string; intent: Intent; requestId: string; done?: boolean }
   | { kind: "run"; run: ProcurementRunResponse }
   | { kind: "error"; text: string };
 
@@ -50,6 +53,17 @@ export default function ConsolePage() {
   const router = useRouter();
   // localStorage 는 React 바깥이라 구독해서 읽는다 (`session.ts` 주석 참조)
   const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
+
+  // 🔴 **"아직 모른다" 와 "없다" 를 가른다.**
+  //
+  // 서버 렌더에는 저장소가 없어 첫 렌더의 세션이 늘 `null` 이다. 그걸 "없다" 로 읽고
+  // 바로 로그인으로 보내면 **로그인한 사용자가 새로고침마다 튕긴다** (실측으로 잡음).
+  // 이 값은 클라이언트에서만 `true` 라, 하이드레이션이 끝났는지를 알려 준다.
+  const hydrated = useSyncExternalStore(
+    subscribeSession,
+    () => true,
+    () => false,
+  );
   const [tab, setTab] = useState("master");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
@@ -57,21 +71,25 @@ export default function ConsolePage() {
 
   // 승인 모달 — 어느 실행의 어느 안인지 함께 들고 있어야 한다
   const [picked, setPicked] = useState<{ scenario: Scenario; requestId: string } | null>(null);
+  // 🔴 재요청은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
   const tail = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     // 세션이 없으면 로그인으로. **효과가 하는 일은 외부(라우터) 갱신뿐이다.**
-    if (session === null) router.replace("/");
-  }, [session, router]);
+    // 하이드레이션 전에는 판단하지 않는다 — 아직 저장소를 못 읽은 상태다.
+    if (hydrated && session === null) router.replace("/");
+  }, [hydrated, session, router]);
 
   useEffect(() => {
     tail.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns]);
 
-  if (!session) return null;
+  if (!hydrated || !session) return null;
   const can = CAN[session.role];
 
   function push(...items: Turn[]) {
@@ -115,15 +133,44 @@ export default function ConsolePage() {
   }
 
   /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
-  async function confirm(turn: Extract<Turn, { kind: "confirm" }>) {
-    if (busy) return;
+  async function confirm(turn: Extract<Turn, { kind: "confirm" }>, index: number) {
+    if (busy || !session || turn.done) return;
+    const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
+
+    // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
+    if (rerun && !lastRunId) {
+      push({
+        kind: "error",
+        text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
+      });
+      return;
+    }
+
+    // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
+    setTurns((prev) => prev.map((t, i) => (i === index ? { ...t, done: true } : t)));
     push({ kind: "me", text: "네" });
     setBusy(true);
     try {
-      const res = await execute({ intent: turn.intent, requestId: turn.requestId });
-      if (isProcurement(res)) push({ kind: "run", run: res });
-      else if (res.answer) push({ kind: "bot", text: res.answer.text });
-      else push({ kind: "bot", text: res.clarification ?? "실행했지만 답이 비었습니다." });
+      const res = await execute({
+        intent: turn.intent,
+        requestId: turn.requestId,
+        // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
+        targetRequestId: rerun ? (lastRunId ?? undefined) : undefined,
+        decidedBy: rerun ? session.name : undefined,
+      });
+
+      if (isProcurement(res)) {
+        setLastRunId(res.request_id);
+        push({ kind: "run", run: res });
+      } else if (res.run) {
+        // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
+        setLastRunId(res.run.request_id);
+        push({ kind: "bot", text: res.answer?.text ?? "" }, { kind: "run", run: res.run });
+      } else if (res.answer) {
+        push({ kind: "bot", text: res.answer.text });
+      } else {
+        push({ kind: "bot", text: res.clarification ?? "실행했지만 답이 비었습니다." });
+      }
     } catch (error) {
       fail(error);
     } finally {
@@ -189,7 +236,7 @@ export default function ConsolePage() {
           {turns.length === 0 && <Empty onPick={send} />}
 
           {turns.map((turn, i) => (
-            <TurnView key={i} turn={turn} onConfirm={confirm} busy={busy}>
+            <TurnView key={i} turn={turn} index={i} onConfirm={confirm} busy={busy}>
               {turn.kind === "run" && (
                 <ProcurementResult
                   run={turn.run}
@@ -197,6 +244,11 @@ export default function ConsolePage() {
                   onPick={(scenario) => {
                     setModalError(null);
                     setPicked({ scenario, requestId: turn.run.request_id });
+                  }}
+                  onRerun={() => {
+                    setLastRunId(turn.run.request_id);
+                    setDraft("예산 2천만원으로 낮춰서 다시 해줘");
+                    composer.current?.focus();
                   }}
                 />
               )}
@@ -216,6 +268,7 @@ export default function ConsolePage() {
             className="flex items-center gap-2 rounded-xl border-[1.5px] border-accent bg-surface px-3.5 py-2.5"
           >
             <input
+              ref={composer}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="무엇을 도와드릴까요"
@@ -253,12 +306,14 @@ export default function ConsolePage() {
 
 function TurnView({
   turn,
+  index,
   onConfirm,
   busy,
   children,
 }: {
   turn: Turn;
-  onConfirm: (t: Extract<Turn, { kind: "confirm" }>) => void;
+  index: number;
+  onConfirm: (t: Extract<Turn, { kind: "confirm" }>, index: number) => void;
   busy: boolean;
   children?: React.ReactNode;
 }) {
@@ -285,14 +340,18 @@ function TurnView({
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
         <p className="m-0 text-sm">{turn.text}</p>
-        <button
-          type="button"
-          onClick={() => onConfirm(turn)}
-          disabled={busy}
-          className="mt-2.5 rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
-        >
-          네, 진행합니다
-        </button>
+        {turn.done ? (
+          <p className="m-0 mt-2 text-[12.5px] text-faint">확인함 — 아래 결과를 보세요</p>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onConfirm(turn, index)}
+            disabled={busy}
+            className="mt-2.5 rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
+          >
+            네, 진행합니다
+          </button>
+        )}
       </div>
     );
 

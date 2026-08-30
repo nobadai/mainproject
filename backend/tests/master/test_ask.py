@@ -499,3 +499,25 @@ def test_품목을_안_말하면_직전_실행에서_가져온다(client, rerun,
     client.post("/master/ask/execute", json=body)
 
     assert rerun["request"].item == "무"
+
+
+def test_재요청_응답에_새로_나온_안이_실린다(client, rerun):
+    """🔴 **없으면 고리가 끊긴다.**
+
+    *"다시 해줘"* 다음 동작은 **새로 나온 안 중 하나를 고르는 것**인데, 결정만
+    돌려주면 화면이 그 안을 그릴 수도 고를 수도 없다. 리포트 문장에는 있지만
+    문장에서 라벨을 긁어 쓰게 하면 화면이 서버 문장 형식에 묶인다.
+    """
+    data = client.post("/master/ask/execute", json=rerun_body()).json()
+
+    assert data["run"] is not None
+    assert data["run"]["request_id"] == data["request_id"]
+    # 결정과 새 실행이 **함께** 온다 — 한 번의 호출로 고리가 이어진다
+    assert data["decision"]["follow_up_request_id"] == data["run"]["request_id"]
+
+
+def test_선택_응답에는_새_실행이_없다(client, decisions):
+    """안을 고른 것은 **새로 돌린 것이 아니다** — 채우면 거짓이 된다."""
+    data = client.post("/master/ask/execute", json=select_body()).json()
+
+    assert data["run"] is None
