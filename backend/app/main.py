@@ -15,7 +15,6 @@ from app.logistics.adapter import logistics_port
 from app.logistics.router import router as logistics_router
 from app.master.router import router as master_router
 from app.master.wiring import register as register_agent
-from app.orchestrator.router import router as orchestrator_router
 from app.purchase_agent.adapter import purchase_port
 from app.sales.router import router as sales_router
 
@@ -35,9 +34,24 @@ app.include_router(master_router)
 register_agent("finance", finance_port)
 register_agent("inventory", logistics_port)
 register_agent("purchase", purchase_port)
-app.include_router(orchestrator_router)
 app.include_router(critic_router)
 app.include_router(sales_router)
+
+# ★ **오케스트레이터 라우터는 2026-08-30 에 걷어냈다.**
+#
+#   `/orchestrator/{procurement,sales,day,runs,runs/{id}}` 5개. 오케스트레이터가
+#   마스터 에이전트가 되면서 대체됐고, 저장소 전체에서 **부르는 곳이 없었다** —
+#   프론트도 테스트도 다른 파트도 안 썼다 (실측 2026-08-30).
+#
+#   🔴 **표는 그대로다.** `orchestrator_agent_runs` 는 오케·Critic·마스터가 함께
+#   쓰는 실행이력이고, `agent` 축이 셋을 구분한다. 과거 행(agent='orchestrator'
+#   21건)은 그때 실제로 있었던 일이라 지우거나 옮기지 않는다.
+#
+#   🔴 **`app/orchestrator/` 폴더도 남는다.** `contracts_core.py` 는 재무·물류·
+#   매입·Critic·마스터가 전부 쓰는 **공용 계약**이다 (`Evidence`·`EndCode`·
+#   `ContractViolation`). 폴더 이름만 오케일 뿐 내용은 공용이라, 중립 위치로
+#   옮기는 것은 저장소 전체의 import 를 건드리는 별도 작업이다
+#   (`docs/260830_오케_Critic_정리안.md`).
 
 
 @app.get("/health")
