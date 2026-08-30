@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
 import { ProcurementResult } from "@/components/ProcurementResult";
+import { RunHistoryPanel } from "@/components/RunHistory";
 import { Sidebar } from "@/components/Sidebar";
 import { ApiError, AS_OF, ask, execute } from "@/lib/api";
 import {
@@ -39,7 +40,13 @@ type Turn =
   // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
   //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
   //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
-  | { kind: "confirm"; text: string; intent: Intent; requestId: string; done?: boolean }
+  | {
+      kind: "confirm";
+      text: string;
+      intent: Intent;
+      requestId: string;
+      done?: boolean;
+    }
   | { kind: "run"; run: ProcurementRunResponse }
   | { kind: "error"; text: string };
 
@@ -52,7 +59,11 @@ const SHORTCUT: Record<string, string> = {
 export default function ConsolePage() {
   const router = useRouter();
   // localStorage 는 React 바깥이라 구독해서 읽는다 (`session.ts` 주석 참조)
-  const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
+  const session = useSyncExternalStore(
+    subscribeSession,
+    sessionSnapshot,
+    serverSnapshot,
+  );
 
   // 🔴 **"아직 모른다" 와 "없다" 를 가른다.**
   //
@@ -70,9 +81,18 @@ export default function ConsolePage() {
   const [busy, setBusy] = useState(false);
 
   // 승인 모달 — 어느 실행의 어느 안인지 함께 들고 있어야 한다
-  const [picked, setPicked] = useState<{ scenario: Scenario; requestId: string } | null>(null);
-  // 🔴 재요청은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다
-  const [lastRunId, setLastRunId] = useState<string | null>(null);
+  const [picked, setPicked] = useState<{
+    scenario: Scenario;
+    requestId: string;
+  } | null>(null);
+  // 🔴 재요청은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다.
+  //    이력 화면도 같은 목록을 쓴다.
+  const [runIds, setRunIds] = useState<string[]>([]);
+  const lastRunId = runIds.at(-1) ?? null;
+
+  function rememberRun(id: string) {
+    setRunIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
@@ -123,7 +143,10 @@ export default function ConsolePage() {
       } else if (res.answer) {
         push({ kind: "bot", text: res.answer.text });
       } else {
-        push({ kind: "bot", text: res.clarification ?? res.note ?? "답을 받지 못했습니다." });
+        push({
+          kind: "bot",
+          text: res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+        });
       }
     } catch (error) {
       fail(error);
@@ -133,7 +156,10 @@ export default function ConsolePage() {
   }
 
   /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
-  async function confirm(turn: Extract<Turn, { kind: "confirm" }>, index: number) {
+  async function confirm(
+    turn: Extract<Turn, { kind: "confirm" }>,
+    index: number,
+  ) {
     if (busy || !session || turn.done) return;
     const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
 
@@ -147,7 +173,9 @@ export default function ConsolePage() {
     }
 
     // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
-    setTurns((prev) => prev.map((t, i) => (i === index ? { ...t, done: true } : t)));
+    setTurns((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
+    );
     push({ kind: "me", text: "네" });
     setBusy(true);
     try {
@@ -160,16 +188,22 @@ export default function ConsolePage() {
       });
 
       if (isProcurement(res)) {
-        setLastRunId(res.request_id);
+        rememberRun(res.request_id);
         push({ kind: "run", run: res });
       } else if (res.run) {
         // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
-        setLastRunId(res.run.request_id);
-        push({ kind: "bot", text: res.answer?.text ?? "" }, { kind: "run", run: res.run });
+        rememberRun(res.run.request_id);
+        push(
+          { kind: "bot", text: res.answer?.text ?? "" },
+          { kind: "run", run: res.run },
+        );
       } else if (res.answer) {
         push({ kind: "bot", text: res.answer.text });
       } else {
-        push({ kind: "bot", text: res.clarification ?? "실행했지만 답이 비었습니다." });
+        push({
+          kind: "bot",
+          text: res.clarification ?? "실행했지만 답이 비었습니다.",
+        });
       }
     } catch (error) {
       fail(error);
@@ -197,11 +231,14 @@ export default function ConsolePage() {
         decidedBy: session.name,
       });
       setPicked(null);
-      if (!isProcurement(res) && res.answer) push({ kind: "bot", text: res.answer.text });
+      if (!isProcurement(res) && res.answer)
+        push({ kind: "bot", text: res.answer.text });
     } catch (error) {
       // 🔴 서버 문장을 그대로 보인다 — "이미 승인됐다 (회차 1)" 같은 말이 답이다
       setModalError(
-        error instanceof ApiError ? `[${error.status}] ${error.message}` : String(error),
+        error instanceof ApiError
+          ? `[${error.status}] ${error.message}`
+          : String(error),
       );
     } finally {
       setModalBusy(false);
@@ -211,8 +248,14 @@ export default function ConsolePage() {
   function selectTab(key: string) {
     setTab(key);
     const canned = SHORTCUT[key];
-    if (canned) void send(canned);
+    if (canned) {
+      // 부서 탭은 **같은 API 를 발화문 없이 부르는 지름길**이다 — 돌아오는 것은 같다
+      setTab("master");
+      void send(canned);
+    }
   }
+
+  const isHistory = tab === "runs";
 
   return (
     <div className="flex min-h-screen">
@@ -228,65 +271,89 @@ export default function ConsolePage() {
 
       <main className="flex min-w-0 flex-1 flex-col bg-surface">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-3.5">
-          <h1 className="m-0 text-base font-semibold">마스터에게 묻기</h1>
-          <span className="font-mono text-[11.5px] text-faint">기준일 {AS_OF}</span>
+          <h1 className="m-0 text-base font-semibold">
+            {isHistory ? "실행 이력" : "마스터에게 묻기"}
+          </h1>
+          <span className="font-mono text-[11.5px] text-faint">
+            기준일 {AS_OF}
+          </span>
         </header>
 
-        <div className="flex-1 space-y-3.5 overflow-y-auto px-6 py-5">
-          {turns.length === 0 && <Empty onPick={send} />}
+        {isHistory ? (
+          <div className="flex-1 overflow-y-auto px-6 py-5">
+            <RunHistoryPanel known={runIds} />
+          </div>
+        ) : (
+          <>
+            <div className="flex-1 space-y-3.5 overflow-y-auto px-6 py-5">
+              {turns.length === 0 && <Empty onPick={send} />}
 
-          {turns.map((turn, i) => (
-            <TurnView key={i} turn={turn} index={i} onConfirm={confirm} busy={busy}>
-              {turn.kind === "run" && (
-                <ProcurementResult
-                  run={turn.run}
-                  canApprove={can.approve}
-                  onPick={(scenario) => {
-                    setModalError(null);
-                    setPicked({ scenario, requestId: turn.run.request_id });
-                  }}
-                  onRerun={() => {
-                    setLastRunId(turn.run.request_id);
-                    setDraft("예산 2천만원으로 낮춰서 다시 해줘");
-                    composer.current?.focus();
-                  }}
-                />
+              {turns.map((turn, i) => (
+                <TurnView
+                  key={i}
+                  turn={turn}
+                  index={i}
+                  onConfirm={confirm}
+                  busy={busy}
+                >
+                  {turn.kind === "run" && (
+                    <ProcurementResult
+                      run={turn.run}
+                      canApprove={can.approve}
+                      onPick={(scenario) => {
+                        setModalError(null);
+                        setPicked({ scenario, requestId: turn.run.request_id });
+                      }}
+                      onRerun={() => {
+                        rememberRun(turn.run.request_id);
+                        setDraft("예산 2천만원으로 낮춰서 다시 해줘");
+                        composer.current?.focus();
+                      }}
+                    />
+                  )}
+                </TurnView>
+              ))}
+
+              {busy && (
+                <p className="m-0 text-[13px] text-faint">
+                  마스터가 부서를 부르는 중…
+                </p>
               )}
-            </TurnView>
-          ))}
+              <div ref={tail} />
+            </div>
 
-          {busy && <p className="m-0 text-[13px] text-faint">마스터가 부서를 부르는 중…</p>}
-          <div ref={tail} />
-        </div>
-
-        <div className="border-t border-line px-6 py-4">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void send(draft);
-            }}
-            className="flex items-center gap-2 rounded-xl border-[1.5px] border-accent bg-surface px-3.5 py-2.5"
-          >
-            <input
-              ref={composer}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="무엇을 도와드릴까요"
-              className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
-            />
-            <button
-              type="submit"
-              disabled={busy || !draft.trim()}
-              className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
-            >
-              보내기
-            </button>
-          </form>
-          <p className="m-0 mt-2 text-[11.5px] text-faint">
-            매입 실행은 <b className="text-muted">확인을 한 번 더 받습니다</b> — 잘못 알아들으면
-            호출 예산 12회와 매입 LLM 을 태웁니다. 조회는 바로 돕니다.
-          </p>
-        </div>
+            <div className="border-t border-line px-6 py-4">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void send(draft);
+                }}
+                className="flex items-center gap-2 rounded-xl border-[1.5px] border-accent bg-surface px-3.5 py-2.5"
+              >
+                <input
+                  ref={composer}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="무엇을 도와드릴까요"
+                  className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || !draft.trim()}
+                  className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
+                >
+                  보내기
+                </button>
+              </form>
+              <p className="m-0 mt-2 text-[11.5px] text-faint">
+                매입 실행은{" "}
+                <b className="text-muted">확인을 한 번 더 받습니다</b> — 잘못
+                알아들으면 호출 예산 12회와 매입 LLM 을 태웁니다. 조회는 바로
+                돕니다.
+              </p>
+            </div>
+          </>
+        )}
       </main>
 
       {picked && (
@@ -334,14 +401,18 @@ function TurnView({
     );
 
   if (turn.kind === "error")
-    return <Panel tone="attn" title="실행하지 못했습니다" items={[turn.text]} />;
+    return (
+      <Panel tone="attn" title="실행하지 못했습니다" items={[turn.text]} />
+    );
 
   if (turn.kind === "confirm")
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
         <p className="m-0 text-sm">{turn.text}</p>
         {turn.done ? (
-          <p className="m-0 mt-2 text-[12.5px] text-faint">확인함 — 아래 결과를 보세요</p>
+          <p className="m-0 mt-2 text-[12.5px] text-faint">
+            확인함 — 아래 결과를 보세요
+          </p>
         ) : (
           <button
             type="button"
@@ -357,7 +428,9 @@ function TurnView({
 
   // kind === "run"
   return (
-    <div className="rounded-xl border border-line bg-surface p-4">{children}</div>
+    <div className="rounded-xl border border-line bg-surface p-4">
+      {children}
+    </div>
   );
 }
 
@@ -372,8 +445,8 @@ function Empty({ onPick }: { onPick: (text: string) => void }) {
     <div className="rounded-xl border border-dashed border-line p-6">
       <p className="m-0 text-sm font-semibold">말로 물어보세요</p>
       <p className="m-0 mt-1 text-[13px] text-muted">
-        마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못 봤는지 함께
-        답합니다.
+        마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
+        봤는지 함께 답합니다.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         {samples.map((s) => (
