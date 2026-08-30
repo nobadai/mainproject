@@ -126,6 +126,9 @@ export interface RunHistory {
   as_of: string;
   cycle: string;
   runtime_status: string;
+  /** 이 계획을 만든 실행의 시각. **같은 업무 키에 실행이 여럿이라 필요하다.** */
+  created_at: string;
+  elapsed_ms: number | null;
   plan: Record<string, unknown>[];
   decisions: DecisionOut[];
 }

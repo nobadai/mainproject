@@ -101,6 +101,15 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
             <span className="font-mono text-[11.5px] text-faint">
               {data.cycle} · {data.runtime_status} · 기준일 {data.as_of}
             </span>
+            {/* 🔴 같은 업무 키로 다시 돌리면 실행 행이 쌓인다 — 실측에서 한 키에 74행이
+                나왔다 (2026-08-30). 서버는 **마지막 하나**를 돌려주는데, 화면이 그 말을
+                안 하면 "이 키에 실행이 하나뿐"으로 읽힌다. 어느 실행인지 시각으로 못박는다. */}
+            <span className="w-full font-mono text-[11px] text-muted">
+              아래 호출 순서는 이 업무 키의 <b className="text-ink">마지막 실행</b>입니다 —{" "}
+              {data.created_at.slice(0, 16).replace("T", " ")}
+              {data.elapsed_ms != null && ` · ${data.elapsed_ms}ms`}
+              . 같은 키로 여러 번 돌렸다면 그 전 실행은 여기 안 나옵니다.
+            </span>
           </div>
 
           <PlanTable rows={data.plan} />

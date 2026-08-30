@@ -16,8 +16,13 @@ import { ROLE_LABEL, type Role, saveSession } from "@/lib/session";
  */
 export default function LoginPage() {
   const router = useRouter();
-  const [employeeId, setEmployeeId] = useState("2026-0142");
-  const [name, setName] = useState("이현서");
+  // 🔴 **미리 채우지 않는다.** 시연 편의로 값을 넣어 뒀더니, 클릭 후 타이핑이
+  //    덧붙어 `이현서이현서` 가 그대로 `decided_by` 로 저장됐다 (실측 2026-08-30).
+  //    `onFocus` 의 select() 로는 못 막는다 — 이미 포커스된 칸을 다시 클릭하면
+  //    focus 이벤트가 안 난다. 예시는 placeholder 로 내리면 **빈 칸에서 시작**하고,
+  //    빈 칸은 `handleSubmit` 의 trim 검사가 이미 막는다.
+  const [employeeId, setEmployeeId] = useState("");
+  const [name, setName] = useState("");
   const [role, setRole] = useState<Role>("approver");
 
   function signIn() {
@@ -47,6 +52,7 @@ export default function LoginPage() {
             <input
               value={employeeId}
               onChange={(e) => setEmployeeId(e.target.value)}
+              placeholder="2026-0142"
               className="w-full rounded-lg border border-line bg-surface px-3 py-2 font-mono text-sm outline-none focus:border-accent"
             />
           </label>
@@ -56,6 +62,7 @@ export default function LoginPage() {
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
+              placeholder="이현서"
               className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
             />
             <span className="mt-1 block text-[11px] text-faint">
