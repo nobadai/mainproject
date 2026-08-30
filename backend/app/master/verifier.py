@@ -23,6 +23,7 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -205,6 +206,7 @@ class MasterVerifier:
         self._check_scenario_identities(scenarios, findings, skipped)
         identity_broken = len(findings) > identity_findings
         self._check_payment_schedule(scenarios, constraints, findings, skipped)
+        self._check_supplied_but_unused(scenarios, constraints, concerns)
         self._run_critic(
             proposal, constraints, context, identity_broken, findings, concerns, skipped
         )
@@ -561,6 +563,69 @@ class MasterVerifier:
                 )
 
     # ── 커버리지 정직성 (§3.7.6) ────────────────────────────────
+
+    # ── 실어 준 값을 미결이라 답하는가 ────────────────────────────
+
+    #: 부서가 *"이 값이 없어서 못 했다"* 고 말할 때 쓰는 말.
+    #:
+    #: 🔴 **키 바로 뒤에 붙은 것만 본다.** 처음엔 문장 어디에 있든 잡았는데,
+    #: *"cap_by_date 검사는 inbound_lead_days(N4) 미확정으로 보류"* 에서 `cap_by_date`
+    #: 까지 잡혔다 — **같은 원인의 파생을 두 번 보고**하는 셈이었다. 실제로 미결인 것은
+    #: 뒤의 키 하나다. 사이에 `(N4)` 같은 짧은 꼬리표가 붙으므로 12자만 허용한다.
+    _UNRESOLVED_NEAR = r".{0,12}?(?:미확정|미결|싣지 않았다|받지 못)"
+
+    #: 부서가 실은 것이지만 **값이 아니라 메타**라 대조 대상이 아닌 키.
+    _NOT_A_VALUE = frozenset({"policy_version_used", "as_of", "state_date", "soft_warnings"})
+
+    def _check_supplied_but_unused(
+        self,
+        scenarios: tuple[Mapping[str, Any], ...],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        concerns: list[str],
+    ) -> None:
+        """🔴 **마스터가 실어 준 값을 부서가 "없다" 고 답하는가.**
+
+        ★ **조정자만 볼 수 있는 종류다.** 각 부서는 자기 쪽만 본다 — 물류는 자기가
+          보낸 것을 알고, 매입은 자기가 못 읽은 것을 안다. **둘을 나란히 놓는 것은
+          마스터뿐**이고, 안 보면 아무도 안 본다.
+
+        ★ **실측에서 나왔다 (2026-08-29).** `inbound_lead_days` 가 봉투에 `2.0` 으로
+          실려 있는데 매입은 *"inbound_lead_days(N4) 미확정"* 으로 도착일 계산을
+          보류했다 — 매입이 봉투 대신 자기 `constraints.yaml` 의 `pending` 을 본다.
+          값이 있는데 안 쓰면 **더 보수적인 안이 나오고, 아무도 이유를 모른다.**
+
+        ★ `findings` 가 아니라 `concerns` 다. **재호출해도 안 고쳐진다** — 배선을
+          고쳐야 하는 일이라 사람이 봐야 한다 (§3.4).
+
+        ★ **키 이름으로만 대조한다.** 이름이 다른 불일치는 여기서 못 잡는다
+          (물류 `item_storage_policies[].operational_limit_days` vs 매입
+          `lots[].shelf_life_days`). 별칭 표를 두면 어긋날 자리가 하나 더 생기고,
+          그건 8/29 에 걷어낸 층이다 — **이름 합의는 팀이 할 일**이다.
+        """
+        supplied = {
+            key
+            for payload in constraints.values()
+            for key, value in payload.items()
+            if key not in self._NOT_A_VALUE and value is not None
+        }
+        if not supplied:
+            return
+
+        seen: set[str] = set()
+        for scenario in scenarios:
+            for risk in scenario.get("risks") or ():
+                text = str(risk)
+                for key in supplied:
+                    if key in seen:
+                        continue
+                    pattern = re.compile(re.escape(key) + self._UNRESOLVED_NEAR)
+                    if pattern.search(text):
+                        seen.add(key)
+                        concerns.append(
+                            f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
+                            f"매입이 미결로 답했다 — 부서가 봉투 대신 다른 곳을 보는지 "
+                            f"확인하라 (사유: {text[:80]})"
+                        )
 
     def _declare_uncovered(self, skipped: list[str]) -> None:
         """아직 이 경로에 붙지 않은 검사를 드러낸다.

@@ -134,6 +134,7 @@ class ProcurementFlow:
         forecast: Mapping[str, Any] | None = None,
         confirmed_orders: Mapping[str, Any] | None = None,
         policy_values: Mapping[str, Any] | None = None,
+        prior_feedback: Mapping[str, Any] | None = None,
     ) -> None:
         self.runner = runner
         self.verifier = verifier
@@ -144,6 +145,7 @@ class ProcurementFlow:
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
+        self.prior_feedback = prior_feedback
 
     # ── 진입점 ──────────────────────────────────────────────────
 
@@ -279,6 +281,10 @@ class ProcurementFlow:
             payload["confirmed_orders"] = dict(self.confirmed_orders)
         if self.policy_values is not None:
             payload["policy_values"] = dict(self.policy_values)
+        if self.prior_feedback is not None:
+            # ★ **사용자의 말 그대로 나른다.** 조건을 숫자로 바꿔 제약에 꽂으면 마스터가
+            #   부서 판단을 덮어쓰는 것이 된다 — 해석은 매입이 한다 (§3.2.2).
+            payload["prior_feedback"] = dict(self.prior_feedback)
         return payload
 
     def _forecast_for_item(self) -> dict[str, Any] | None:

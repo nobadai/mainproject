@@ -9,10 +9,12 @@ from __future__ import annotations
 import time
 
 from app.master import persistence, wiring
+from app.master.answer import facts_from_procurement, render_answer
 from app.master.budget import CallBudget
 from app.master.decision_service import get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
+from app.master.inputs import MasterInputs, collect_inputs
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.schemas import (
@@ -65,23 +67,101 @@ def run_procurement(
             reason=f"어댑터 미등록: {', '.join(missing)}",
             missing_adapters=list(missing),
         )
+        # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
+        response.report_text = render_answer(facts_from_procurement(response))
         # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
         persistence.record(request, response, elapsed_ms=_elapsed(started))
         return response
 
+    inputs = _inputs_for(request)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
         runner,
         verifier=verifier,
         item=request.item,
-        forecast=request.forecast,
-        confirmed_orders=request.confirmed_orders,
-        policy_values=request.policy_values,
+        forecast=request.forecast or _payload(inputs, "forecast"),
+        confirmed_orders=request.confirmed_orders or _payload(inputs, "confirmed_orders"),
+        policy_values=request.policy_values or _payload(inputs, "policy_values"),
+        prior_feedback=request.prior_feedback,
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
-    response = _to_response(context, outcome)
+    response = _to_response(context, outcome, inputs)
+    response.concerns = [*response.concerns, *_decision_collision(request_id)]
+    response.report_text = render_answer(facts_from_procurement(response))
     persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
+
+
+def _decision_collision(request_id: str) -> list[str]:
+    """🔴 **이미 결정이 붙은 업무 키로 다시 도는가.**
+
+    `orchestrator_agent_runs` 는 append-only 라 같은 키로 두 번 돌면 **행이 둘**이
+    되고, `get_run_by_request_id` 는 **최신 1건**을 돌려준다(그게 맞는 동작이다 —
+    *"그 요청 어떻게 됐냐"* 에는 마지막 결과가 답이다).
+
+    문제는 **결정과 결합할 때** 생긴다.
+
+    ```text
+    06:22  실행 A (안 3개)
+    06:22  '기본' 승인          ← A 의 '기본' 을 골랐다
+    06:23  실행 B (같은 키)      ← 이제 조회하면 B 가 나온다
+           → 화면에는 "B 의 기본을 승인했다" 로 보인다
+    ```
+
+    두 실행의 같은 라벨이 다른 수량이면 **승인한 것과 다른 것이 승인된 것으로
+    읽힌다.** 실측(2026-08-29 리허설)에서 재현했다.
+
+    ★ **막지 않고 드러낸다.** 재실행 자체는 죄가 아니고, 승인 게이트를 마스터가
+      들고 있으면 안 된다(8/26 회의). 사람이 보고 판단할 일이다.
+
+    ⚠️ **근본 해법은 결정이 어느 실행 행인지 가리키는 것**이다 — `master_decisions`
+      에 `run_id` 를 붙이는 DDL 이 필요해 팀 안건으로 올린다. 지금은 `request_id`
+      까지만 가리켜 같은 키의 두 실행을 구분하지 못한다.
+    """
+    try:
+        existing = get_decisions(request_id)
+    except Exception:  # noqa: BLE001 — 경고를 못 만든다고 실행을 막지 않는다
+        return []
+    if not existing:
+        return []
+    current = next((row for row in existing if row.is_current), existing[-1])
+    label = f" · {current.scenario_label}" if current.scenario_label else ""
+    warning = (
+        f"DECISION-COLLISION: 이 업무 키에는 이미 결정이 있다 "
+        f"({current.decision_seq}회차 {current.decision}{label}). "
+        "같은 키로 다시 돌면 그 결정이 **이 실행을 가리키는 것처럼** 보인다 — "
+        "조건을 바꿔 다시 만들려면 새 업무 키를 써라"
+    )
+    return [warning]
+
+
+def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
+    """마스터가 실어 줄 셋을 모은다 (§3.2.5).
+
+    ★ **요청이 직접 준 값이 이긴다.** 백테스트는 그날의 값을 그대로 넣어야 하므로
+      적재층이 현재 DB 를 읽어 덮으면 안 된다.
+
+    ★ 품목이 없으면 모으지 않는다 — 셋 다 품목 단위다. 매입이 `missing_data: ["item"]`
+      으로 답하는 것이 정상 경로다.
+
+    ★ **적재 실패가 Flow 를 막지 않는다.** 못 실으면 매입이 `missing_data` 로 답하고
+      `E4` 가 된다 — 그것도 사실의 기록이다.
+    """
+    if not request.item:
+        return None
+    if request.forecast and request.confirmed_orders and request.policy_values:
+        return None
+    try:
+        return collect_inputs(request.item, request.as_of)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _payload(inputs: MasterInputs | None, key: str):
+    if inputs is None:
+        return None
+    sourced = getattr(inputs, key)
+    return sourced.payload if sourced.usable else None
 
 
 def _elapsed(started: float) -> int:
@@ -93,8 +173,14 @@ def _elapsed(started: float) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _to_response(context: ExecutionContext, outcome: ProcurementOutcome) -> ProcurementRunResponse:
+def _to_response(
+    context: ExecutionContext,
+    outcome: ProcurementOutcome,
+    inputs: MasterInputs | None = None,
+) -> ProcurementRunResponse:
     return ProcurementRunResponse(
+        input_sources=inputs.sources() if inputs else {},
+        mocked_inputs=list(inputs.mocked) if inputs else [],
         request_id=context.request_id,
         as_of=context.as_of,
         end_code=outcome.end_code,

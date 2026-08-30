@@ -97,3 +97,38 @@ class IntentResult(BaseModel):
 
     #: 되물을 말. `UNKNOWN` 이거나 확인이 필요할 때만 채운다.
     clarification: str | None = None
+
+
+# ── ⑥ 사용자 응답 생성 ───────────────────────────────────────────────────
+
+
+class Narrative(BaseModel):
+    """LLM 이 쓰는 것 — **문장 하나뿐이다.**
+
+    ★ **숫자 칸이 없는 것으로는 부족한 자리다.** 의도 분류(`Intent`)는 출력이 전부
+      닫힌 열거라 타입만으로 막혔지만, 여기는 자유 문장이라 **본문 안에 숫자가 섞일 수
+      있다.** 그래서 장치가 하나 더 있다 — `answer_runtime` 이 출력에 숫자가 있으면
+      거부하고, 숫자는 전부 `answer.py` 가 만든 사실 줄로만 나간다.
+
+    ★ 필드를 하나로 묶어 둔 이유도 같다. 제목·본문·결론으로 쪼개면 각 칸마다 숫자가
+      샐 자리가 생기고, 검사할 곳이 늘어난다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 사실 줄 위에 얹을 해석 문장. **숫자를 쓰지 않는다.**
+    summary: str
+
+
+class NarrativeResult(BaseModel):
+    """⑥의 결과. **문장이 없어도 정상이다** — 그때는 규칙이 만든 답만 나간다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: LLM 이 쓴 문장. `None` 이면 규칙이 만든 줄만으로 답한다.
+    narrative: str | None = None
+    llm_status: LLMStatus
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_attempts: int = Field(default=0, ge=0)
+    llm_fallback_used: bool = False

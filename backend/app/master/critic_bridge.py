@@ -64,6 +64,22 @@ _INVENTORY_CAP_CLAIMS: frozenset[str] = frozenset(
 )
 
 
+#: 🔴 **L2 가 실제로는 값을 대조하지 못한다.** 통과로 세지 않도록 매번 적는다.
+#:
+#: Critic 의 대조표(`service._evidence_resolver`)는 **회신이 낸 evidences 자신으로**
+#: 만들어진다. 독립 원본이 아니므로 *"주장값이 실제와 다르다"* 는 구조적으로 잡을 수
+#: 없다. 지금 L2 가 잡는 것은 근거 누락 · 없는 ref_id · 같은 주장을 두 값으로 내는
+#: 모순 셋뿐이다.
+#:
+#: 이걸 적어 두지 않으면 `findings: []` 가 *"근거 숫자를 다 대조했고 문제없다"* 로
+#: 읽힌다 — §3.7.6 이 막으려는 바로 그 오독이다. 진짜 대조를 하려면 마스터가 부서
+#: payload 를 원본으로 하는 resolver 를 주입해야 하고, 그건 별건이다.
+_L2_VALUE_NOT_CHECKED = (
+    "L2 근거 값 대조: 수행하지 못함 — 대조표가 회신 자신에서 만들어져 독립 원본이 없다 "
+    "(누락·없는 ref_id·자기모순은 대조함)"
+)
+
+
 class CriticSkipped(Exception):
     """넘길 수 없는 이유. **예외로 새지 않고 `skipped` 문장이 된다.**"""
 
@@ -119,7 +135,7 @@ def fold(verdict: CriticVerdictOut) -> tuple[list[str], list[str], list[str]]:
 
     ran, total = verdict.coverage_ratio
     layers = " · ".join(f"{name} {a}/{b}" for name, (a, b) in sorted(verdict.coverage.items()))
-    skipped = [f"Critic 커버리지 {ran}/{total} — {layers}"]
+    skipped = [f"Critic 커버리지 {ran}/{total} — {layers}", _L2_VALUE_NOT_CHECKED]
     skipped += [f"CRITIC: {s}" for s in verdict.skipped]
     return findings, concerns, skipped
 

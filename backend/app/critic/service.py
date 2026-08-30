@@ -103,18 +103,35 @@ def _to_check(chk, dept: str) -> CheckResult:
 
 
 def _evidence_resolver(replies: list[DeptReplyIn]):
-    """회신이 제출한 evidence 로 {ref_id: value} 를 만든다.
+    """회신이 제출한 evidence 로 `{(ref_id, claim): value}` 를 만든다.
 
     ★ 소스 DB 재조회 계층이 아니므로 값의 진위는 회신을 신뢰한다. Critic 은 근거의
       구조·바인딩(ref_id 존재, 대조 대상 존재)을 검증한다.
+
+    🔴 **키에 `claim` 이 반드시 들어간다.** 전에는 `{ref_id: value}` 였는데, ref_id
+      하나가 여러 주장을 뒷받침하는 것이 **정상**이라 두 번째 주장부터 **첫 주장의 값과
+      비교**됐다.
+
+    ```text
+    DB:logistics_runtime_fixture/... 를 셋이 함께 가리킨다
+      used_capacity_kg   363.28   ← 먼저 들어와 이 ref_id 의 "원본" 이 된다
+      warehouse_free_kg  7,636.72 → 363.28 과 비교되어 불일치로 보고
+      cap_by_date        18       → 363.28 과 비교되어 불일치로 보고
+    ```
+
+    실측(2026-08-29)에서 이 거짓 양성 3건 때문에 **통과안 3개가 반려**됐다.
+    같은 주장을 같은 근거로 두 값으로 내는 진짜 모순은 여전히 잡힌다.
     """
-    mapping: dict[str, float] = {}
+    mapping: dict[tuple[str, str], float] = {}
     for reply in replies:
         for chk in reply.checks:
             for e in chk.evidences:
                 for rid in e.ref_ids:
-                    mapping.setdefault(rid, e.value)
-    return lambda rid: mapping.get(rid)
+                    mapping.setdefault((rid, e.claim), e.value)
+    # ★ 이 배선에서는 L2 가 묻는 (ref_id, claim) 이 **항상 여기 있다** — 대조표를 같은
+    #   evidences 로 만들기 때문이다. `None` 은 다른 resolver 가 주입됐을 때만 의미가
+    #   있고, 그때는 "지어낸 근거" 가 맞다.
+    return lambda ref_id, claim: mapping.get((ref_id, claim))
 
 
 def _to_reply(reply: DeptReplyIn, as_of) -> T2Reply:

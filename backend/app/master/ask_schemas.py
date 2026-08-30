@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.master.decision import DecisionOut
 from app.master.envelope import AgentName
 from app.master.llm.schemas import Intent, LLMStatus
 from app.master.status_flow import StatusCode
@@ -22,6 +23,7 @@ from app.master.status_flow import StatusCode
 AskOutcome = Literal[
     "CLASSIFIED_ONLY",  # 확인이 필요해 실행하지 않음
     "STATUS_ANSWERED",  # 조회를 돌려 답을 담음
+    "DECISION_RECORDED",  # 사람이 고른 안을 결정 이력에 적음
     "NEEDS_CLARIFICATION",  # 못 알아들음 — 되묻는다
 ]
 
@@ -53,6 +55,20 @@ class AskExecuteRequest(BaseModel):
     request_id: str | None = None
     budget: int = Field(default=12, ge=1, le=50)
 
+    #: 🔴 **결정 대상 실행의 업무 키.** `SELECT_SCENARIO` 에 필수다.
+    #:
+    #: **LLM 이 채울 수 없고 채워서도 안 된다.** *"기본안으로 진행해"* 라는 말에는
+    #: **어느 실행의** 기본안인지가 없다. 화면은 방금 무엇을 보여줬는지 알고 있으므로
+    #: 화면이 싣는다 — 서버가 "가장 최근 실행" 으로 추측하면 **엉뚱한 날의 안을
+    #: 승인**할 수 있다.
+    target_request_id: str | None = None
+
+    #: 🔴 **승인자.** `SELECT_SCENARIO` 에 필수다.
+    #:
+    #: *"승인자가 없는 승인은 승인이 아니다"* (`decision.py`). **말로 골랐다고 승인자가
+    #: 생기지는 않는다** — 발화문에는 신원이 없으므로 인증된 사용자를 화면이 싣는다.
+    decided_by: str | None = None
+
 
 class StatusAnswer(BaseModel):
     """조회 결과. **못 답한 부서를 감추지 않는다.**"""
@@ -67,6 +83,26 @@ class StatusAnswer(BaseModel):
     missing_data: dict[AgentName, list[str]] = {}
     #: 호출이 터진 것 — 다시 불러 볼 값어치가 있다. `missing_data` 와 나눠 둔다.
     errors: dict[AgentName, str] = {}
+
+
+class AnswerOut(BaseModel):
+    """사람이 읽는 답. 마스터 역할 ⑥.
+
+    ★ `text` 는 **규칙이 만든 사실 줄 + (있으면) LLM 문장**이다. `narrative` 가 비어도
+      `text` 는 완결돼 있다 — LLM 이 답의 뼈대가 아니기 때문이다.
+
+    ★ `status.answers` 를 지우지 않는다. 이건 **사람이 읽는 표현**이고, 화면·다른
+      시스템이 쓰는 것은 여전히 구조화된 `status` 다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    #: LLM 이 쓴 앞머리. 없으면 규칙이 만든 줄만으로 답한 것이다.
+    narrative: str | None = None
+    llm_status: LLMStatus
+    llm_attempts: int = 0
+    llm_fallback_used: bool = False
 
 
 class AskResponse(BaseModel):
@@ -85,7 +121,13 @@ class AskResponse(BaseModel):
     confirm_required: bool = False
 
     status: StatusAnswer | None = None
+    #: 적재된 결정. `DECISION_RECORDED` 일 때만 채운다.
+    decision: DecisionOut | None = None
+    #: 사람이 읽는 답 (⑥). 실행한 경우에만 채운다 — 되묻는 경우는 `clarification` 이다.
+    answer: AnswerOut | None = None
 
+    #: ★ 아래 다섯은 **①(의도 분류)의 상태다.** ⑥의 상태는 `answer` 안에 따로 있다 —
+    #: 한 요청에 LLM 호출이 둘이라 한 칸에 담으면 어느 쪽이 죽었는지 알 수 없다.
     llm_status: LLMStatus
     llm_provider: str | None = None
     llm_model: str | None = None

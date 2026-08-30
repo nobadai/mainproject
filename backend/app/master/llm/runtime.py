@@ -55,21 +55,56 @@ SYSTEM_PROMPT = """당신은 햇들농산 매입 의사결정 시스템의 요�
 - 실행하지 않는다. 분류만 한다.
 - 지정된 JSON Schema 에 맞는 JSON 만 출력한다. 설명 문장을 덧붙이지 않는다.
 - 목록에 없는 값을 만들지 않는다.
-- 확실하지 않으면 action 을 UNKNOWN 으로, confidence 를 LOW 로 둔다.
-  **모르겠다고 답하는 것이 틀리게 분류하는 것보다 낫다.**
+- **어느 종류인지** 확실하지 않으면 UNKNOWN · LOW 로 둔다.
+  모르겠다고 답하는 것이 틀리게 분류하는 것보다 낫다.
 
-action 종류:
-- PROCUREMENT_RUN       오늘 매입안을 만들어 달라 (예: "오늘 배추 얼마나 사야 해?")
-- STATUS_QUERY          특정 부서 상태만 조회 (예: "지금 자금 상황 알려줘")
-- RERUN_WITH_CONDITION  조건을 붙여 다시 (예: "예산 2천만원으로 낮춰서 다시")
-- SELECT_SCENARIO       제시된 안을 고름 (예: "기본안으로 진행해")
-- UNKNOWN               위 어디에도 확실히 속하지 않음
+action 종류와 예시:
 
-필드 규칙:
-- agents 는 STATUS_QUERY 일 때만 채운다. finance(재무·자금), inventory(재고·물류),
-  purchase(매입) 중에서 고른다. 그 외 action 에서는 빈 배열이다.
-- item 은 배추·무·양파·피마늘 중 발화문이 가리키는 것. 알 수 없으면 비운다.
-  **추측해서 채우지 않는다.**
+PROCUREMENT_RUN — 살 안을 **만들어 달라**
+  "오늘 배추 얼마나 사야 해?"   "무 매입안 뽑아줘"   "오늘 뭘 사면 좋을까"
+  "배추 매입 계획 만들어줘"      "얼마나 들여와야 하지?"
+
+STATUS_QUERY — 부서의 **지금 상태만** 묻는다 (안을 만들지 않는다)
+  "지금 자금 상황 알려줘"   "창고에 얼마나 남았어?"   "재고 어때?"
+  "돈 얼마나 있어?"        "지금 창고 여유 있나?"
+
+RERUN_WITH_CONDITION — **조건을 붙여 다시** 만들어 달라
+  "예산 2천만원으로 낮춰서 다시"   "좀 적게 사는 걸로 다시 해줘"
+
+SELECT_SCENARIO — **이미 나와 있는 안 중 하나를 고른다**
+  "기본안으로 진행해"   "보수안 선택할게"   "두 번째 걸로 해줘"
+
+UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 없다
+  "그거 있잖아 그거"   "음..."
+
+★ **만들어 달라**와 **고른다**를 구분하라. "안" 이라는 글자로 가르지 마라.
+  "매입안 뽑아줘 · 만들어줘 · 얼마나 사야 해"  → 만들어 달라  → PROCUREMENT_RUN
+  "기본안으로 · 보수안으로 · 두 번째 걸로"      → 고른다        → SELECT_SCENARIO
+
+★ SELECT_SCENARIO 로 고르면 scenario_label 을 **반드시 채운다** — 사용자가 부른 이름 그대로.
+  "기본안으로 진행해"  → scenario_label: "기본"
+  "보수안 선택할게"    → scenario_label: "보수"
+  "공격안으로 가자"    → scenario_label: "공격"
+
+부서 이름 (agents) — STATUS_QUERY 일 때만 채운다:
+
+  finance     자금 · 현금 · 잔고 · 돈 · 예산 · 지급 · 결제 · 대금 · 자금 사정
+  inventory   재고 · 창고 · 보관 · 입고 · 출고 · 용량 · 여유 · 신선도 · 남은 양
+  purchase    매입 진행 상황 · 지금 만들어 둔 안
+
+★ 부서가 여럿이면 여럿을 넣는다 ("자금이랑 창고 둘 다" → finance, inventory).
+★ **어느 부서인지** 애매한 것은 UNKNOWN 이 아니다 — 가까운 부서를 넣고 confidence 를
+  낮춘다. UNKNOWN 은 **어느 종류인지** 모를 때만 쓴다.
+★ **어느 품목인지** 모르는 것도 UNKNOWN 이 아니다. 품목은 비우고 종류는 그대로 둔다.
+  "오늘 뭘 사면 좋을까"  → PROCUREMENT_RUN · item: null   (UNKNOWN 이 아니다)
+  무엇을 해 달라는지가 분명하면 세부가 비어도 그 종류로 분류한다.
+
+나머지 필드:
+- item 은 배추·무·양파·피마늘 중 **발화문에 나온 것을 그대로** 옮긴다.
+  "오늘 배추 얼마나 사야 해?" → item: "배추"
+  "무 매입안 뽑아줘"          → item: "무"
+  "오늘 뭘 사면 좋을까"        → item: null   (품목이 안 나왔다)
+  발화문에 없으면 null 이다. **추측해서 채우지 않는다.**
 - scenario_label 은 SELECT_SCENARIO 일 때만. 사용자가 부른 이름을 그대로 옮긴다.
 - condition 은 RERUN_WITH_CONDITION 일 때만. **사용자의 말 그대로** 옮긴다.
   발화문에 없는 숫자를 만들지 않는다.
@@ -143,7 +178,28 @@ def get_llm_settings() -> LLMSettings:
 
 
 def _intent_schema() -> dict[str, Any]:
-    return Intent.model_json_schema()
+    """구조화 출력에 넘길 JSON Schema.
+
+    🔴 **기본값이 있는 칸을 `required` 로 올린다 — 안 그러면 모델이 그 칸을 안 쓴다.**
+
+    파이썬 쪽 기본값(`agents=[]` · `item=None`)이 스키마의 `required` 에서 그 칸을 빼고,
+    빠진 칸은 모델에게 **없는 칸처럼 보인다.**
+
+    ```text
+    "재고 어때?"              {"action":"STATUS_QUERY","confidence":"HIGH"}   agents 없음
+    "오늘 배추 얼마나 사야 해?"  item 이 3/3 으로 null          발화문에 배추가 있는데도
+    ```
+
+    `agents` 는 8/28 에 올렸는데 `item` 을 빠뜨렸다. 채점표가 `action` 과 `agents` 만
+    보고 있어 **드러나지 않았다** — 8/29 에 관통을 돌려 보고서야 나왔다(품목이 없으면
+    마스터가 입력을 못 싣고 매입이 `E4` 로 멈춘다). 채점 항목에 `item` 을 넣었다.
+
+    ★ **`null` 을 못 쓰게 만드는 것이 아니다.** `item` 은 `anyOf[..., null]` 이라
+      required 여도 *"모르겠다"* 를 쓸 수 있다. 바뀌는 것은 **매번 판단하게 되는 것**뿐이다.
+    """
+    schema = Intent.model_json_schema()
+    schema["required"] = sorted({*schema.get("required", ()), "agents", "item"})
+    return schema
 
 
 def _require_model(settings: LLMSettings) -> None:
@@ -279,17 +335,29 @@ _PROVIDERS: dict[str, type] = {
 
 
 class IntentIssue(StrEnum):
+    """🔴 **행동을 바꾸는 것만 거부한다.**
+
+    처음에는 "`agents` 는 `STATUS_QUERY` 일 때만" 처럼 **쓰이지도 않는 칸이 차 있는
+    것**까지 거부했다. 실측에서 그 엄격함이 손해였다 — 모델이 `PROCUREMENT_RUN` 에
+    `agents` 를 곁들이면 거부 → 재시도 → **분류를 UNKNOWN 으로 무르는** 일이 반복됐다.
+    쓰지 않는 값이 붙어 있다고 답을 통째로 버리는 셈이었다.
+
+    그래서 셋으로 나눴다.
+
+    ```text
+    안 쓰는 칸이 차 있다   →  지운다 (normalize)   — 해가 없다
+    필요한 칸이 비었다     →  거부한다             — 부를 대상이 없다
+    없던 내용을 지어냈다   →  거부한다             — 그대로 실행에 실린다
+    ```
+    """
+
     NOT_JSON = "NOT_JSON"
     SCHEMA = "SCHEMA"
-    AGENTS_ON_NON_QUERY = "AGENTS_ON_NON_QUERY"
     AGENTS_MISSING = "AGENTS_MISSING"
     AGENT_CANNOT_QUERY = "AGENT_CANNOT_QUERY"
-    LABEL_ON_NON_SELECT = "LABEL_ON_NON_SELECT"
     LABEL_MISSING = "LABEL_MISSING"
-    CONDITION_ON_NON_RERUN = "CONDITION_ON_NON_RERUN"
     CONDITION_MISSING = "CONDITION_MISSING"
     CONDITION_INVENTED_NUMBER = "CONDITION_INVENTED_NUMBER"
-    UNKNOWN_NOT_EMPTY = "UNKNOWN_NOT_EMPTY"
 
 
 class IntentValidationError(ValueError):
@@ -298,20 +366,32 @@ class IntentValidationError(ValueError):
         self.issues = issues
 
 
+#: 🔴 교정 문구는 **"빠진 칸을 채워라"** 여야 한다.
+#:
+#: 처음엔 "STATUS_QUERY 면 agents 를 넣는다" 로만 썼는데, 모델이 그 말을 듣고
+#: **분류 자체를 UNKNOWN 으로 바꿔** 회피하는 일이 실측에서 나왔다 ("재고 어때?").
+#: 빈 칸을 지적받으면 그 칸을 채우는 대신 **답을 무르는 쪽이 더 쉽기 때문**이다.
+#: 그래서 고칠 곳을 짚을 때 **분류를 바꾸지 말라**고 함께 못박는다.
 _GUIDANCE: dict[IntentIssue, str] = {
     IntentIssue.NOT_JSON: "JSON 만 출력한다. 설명 문장을 붙이지 않는다.",
     IntentIssue.SCHEMA: "지정된 JSON Schema 의 필드와 허용값만 쓴다.",
-    IntentIssue.AGENTS_ON_NON_QUERY: "agents 는 STATUS_QUERY 일 때만 채운다.",
-    IntentIssue.AGENTS_MISSING: "STATUS_QUERY 면 agents 에 최소 하나를 넣는다.",
-    IntentIssue.AGENT_CANNOT_QUERY: "그 에이전트는 상태 조회를 받지 않는다.",
-    IntentIssue.LABEL_ON_NON_SELECT: "scenario_label 은 SELECT_SCENARIO 일 때만 쓴다.",
-    IntentIssue.LABEL_MISSING: "SELECT_SCENARIO 면 사용자가 부른 안 이름을 넣는다.",
-    IntentIssue.CONDITION_ON_NON_RERUN: "condition 은 RERUN_WITH_CONDITION 일 때만 쓴다.",
-    IntentIssue.CONDITION_MISSING: "RERUN_WITH_CONDITION 이면 조건을 그대로 옮긴다.",
+    IntentIssue.AGENTS_MISSING: (
+        "action 은 STATUS_QUERY 로 그대로 두고 agents 만 채워라. "
+        "자금·현금·잔고는 finance, 재고·창고·보관은 inventory 다. "
+        "UNKNOWN 으로 바꾸지 마라."
+    ),
+    IntentIssue.AGENT_CANNOT_QUERY: "그 에이전트는 상태 조회를 받지 않는다. 다른 부서를 골라라.",
+    IntentIssue.LABEL_MISSING: (
+        "action 은 SELECT_SCENARIO 로 그대로 두고 scenario_label 만 채워라 — "
+        "사용자가 부른 이름 그대로(기본 · 보수 · 공격). UNKNOWN 으로 바꾸지 마라."
+    ),
+    IntentIssue.CONDITION_MISSING: (
+        "action 은 RERUN_WITH_CONDITION 으로 그대로 두고 condition 만 채워라 — "
+        "사용자의 말 그대로. UNKNOWN 으로 바꾸지 마라."
+    ),
     IntentIssue.CONDITION_INVENTED_NUMBER: (
         "condition 에 발화문에 없는 숫자를 넣지 않는다. 사용자의 말 그대로 옮긴다."
     ),
-    IntentIssue.UNKNOWN_NOT_EMPTY: "UNKNOWN 이면 나머지 필드를 전부 비운다.",
 }
 
 
@@ -319,14 +399,37 @@ def retry_guidance(issues: list[IntentIssue]) -> list[str]:
     return [_GUIDANCE[issue] for issue in issues]
 
 
+def normalize_intent(intent: Intent) -> Intent:
+    """그 action 에서 **쓰이지 않는 칸을 지운다.**
+
+    모델은 스키마에 있는 칸을 곧잘 곁들여 채운다 — `PROCUREMENT_RUN` 에 `agents`,
+    `UNKNOWN` 에 `item` 같은 식으로. 그 값은 **아무도 읽지 않으므로 해가 없다.**
+    거부하면 재시도가 돌고, 재시도에서 모델이 답을 무르는 쪽이 훨씬 비싸다.
+    """
+    action = intent.action
+    return intent.model_copy(
+        update={
+            "agents": list(intent.agents) if action == "STATUS_QUERY" else [],
+            "scenario_label": intent.scenario_label if action == "SELECT_SCENARIO" else None,
+            "condition": intent.condition if action == "RERUN_WITH_CONDITION" else None,
+            "item": None if action == "UNKNOWN" else intent.item,
+        }
+    )
+
+
 def validate_intent(raw_output: str, utterance: str) -> Intent:
-    """LLM 출력을 검사한다. **닫힌 열거가 대부분을 막고, 나머지를 여기서 막는다.**"""
+    """LLM 출력을 검사한다. **닫힌 열거가 대부분을 막고, 나머지를 여기서 막는다.**
+
+    순서가 중요하다 — **먼저 지우고 나서 검사한다.** 안 쓰는 칸 때문에 답이 버려지지
+    않게 하되, 필요한 칸이 빈 것과 지어낸 내용은 그대로 잡는다.
+    """
     try:
         intent = Intent.model_validate_json(raw_output)
     except ValidationError as error:
         issue = IntentIssue.NOT_JSON if "json_invalid" in str(error) else IntentIssue.SCHEMA
         raise IntentValidationError([issue]) from error
 
+    intent = normalize_intent(intent)
     issues = _issues(intent, utterance)
     if issues:
         raise IntentValidationError(issues)
@@ -334,11 +437,10 @@ def validate_intent(raw_output: str, utterance: str) -> Intent:
 
 
 def _issues(intent: Intent, utterance: str) -> list[IntentIssue]:
+    """**정규화 뒤에** 남는 문제만 본다 — 빈 필수 칸과 지어낸 내용."""
     out: list[IntentIssue] = []
     action = intent.action
 
-    if intent.agents and action != "STATUS_QUERY":
-        out.append(IntentIssue.AGENTS_ON_NON_QUERY)
     if action == "STATUS_QUERY":
         if not intent.agents:
             out.append(IntentIssue.AGENTS_MISSING)
@@ -347,23 +449,16 @@ def _issues(intent: Intent, utterance: str) -> list[IntentIssue]:
                 out.append(IntentIssue.AGENT_CANNOT_QUERY)
                 break
 
-    label = (intent.scenario_label or "").strip()
-    if label and action != "SELECT_SCENARIO":
-        out.append(IntentIssue.LABEL_ON_NON_SELECT)
-    if action == "SELECT_SCENARIO" and not label:
+    if action == "SELECT_SCENARIO" and not (intent.scenario_label or "").strip():
         out.append(IntentIssue.LABEL_MISSING)
 
-    condition = (intent.condition or "").strip()
-    if condition and action != "RERUN_WITH_CONDITION":
-        out.append(IntentIssue.CONDITION_ON_NON_RERUN)
     if action == "RERUN_WITH_CONDITION":
+        condition = (intent.condition or "").strip()
         if not condition:
             out.append(IntentIssue.CONDITION_MISSING)
         elif _invents_digits(condition, utterance):
             out.append(IntentIssue.CONDITION_INVENTED_NUMBER)
 
-    if action == "UNKNOWN" and (intent.agents or intent.item or label or condition):
-        out.append(IntentIssue.UNKNOWN_NOT_EMPTY)
     return out
 
 
@@ -384,6 +479,9 @@ def _invents_digits(condition: str, utterance: str) -> bool:
 _NO_CONFIRM_ACTIONS = frozenset({"STATUS_QUERY"})
 
 _UNKNOWN = Intent(action="UNKNOWN", confidence="LOW")
+
+#: 되묻는 말에 쓰는 부서 이름. `answer.py` 와 같은 어휘다.
+_DEPT_LABEL = {"finance": "재무", "inventory": "물류", "purchase": "매입"}
 
 
 class IntentService:
@@ -459,6 +557,16 @@ def _clarification(intent: Intent) -> str:
     if intent.action == "PROCUREMENT_RUN":
         item = intent.item or "품목"
         return f"{item} 매입안을 새로 만들까요? (부서 호출이 일어납니다)"
+    if intent.action == "STATUS_QUERY":
+        # 확신이 낮아 확인받는 경우다. **어느 부서에 물을 것인지** 되읽어 준다.
+        names = ", ".join(_DEPT_LABEL.get(a, a) for a in intent.agents) or "부서"
+        return f"{names} 상태를 조회할까요?"
+    if intent.action == "SELECT_SCENARIO":
+        # **무엇을 고른 것으로 알아들었는지 되읽어 준다.** 승인은 되돌리기 어려우므로
+        # "진행할까요?" 만 물으면 사용자가 무엇에 동의하는지 모른 채 누른다.
+        return f"'{intent.scenario_label}' 안을 고르신 것으로 승인 기록할까요?"
+    if intent.action == "RERUN_WITH_CONDITION":
+        return f"'{intent.condition}' 조건을 붙여 다시 만들까요?"
     return "이렇게 이해했습니다. 진행할까요?"
 
 
@@ -469,8 +577,17 @@ def _user_payload(utterance: str, guidance: list[str] | None) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def build_provider(settings: LLMSettings) -> TextProvider:
+    """설정에 맞는 프로바이더. **모르는 값이면 터뜨리는 것을 돌려준다.**
+
+    ★ 역할(①분류 · ⑥응답 생성)마다 프로바이더를 새로 고르게 하지 않는다. 지금은 둘이
+      같은 `.env` 를 보지만, **역할마다 모델 등급이 달라지는 것이 예정된 변화**라
+      (분류는 소형 · 판정 검증은 상위 모델) 고르는 자리를 한 곳으로 모아 둔다.
+    """
+    factory = _PROVIDERS.get(settings.provider)
+    return factory(settings) if factory else UnavailableProvider()
+
+
 def get_intent_service() -> IntentService:
     settings = get_llm_settings()
-    factory = _PROVIDERS.get(settings.provider)
-    provider: TextProvider = factory(settings) if factory else UnavailableProvider()
-    return IntentService(settings, provider)
+    return IntentService(settings, build_provider(settings))
