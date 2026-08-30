@@ -84,14 +84,25 @@ export default function ConsolePage() {
   const [picked, setPicked] = useState<{
     scenario: Scenario;
     requestId: string;
+    historyRunId: string | null;
   } | null>(null);
-  // 🔴 재요청은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다.
-  //    이력 화면도 같은 목록을 쓴다.
-  const [runIds, setRunIds] = useState<string[]>([]);
-  const lastRunId = runIds.at(-1) ?? null;
+  // 🔴 재요청·승인은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다.
+  //
+  //    업무 키만으로는 부족하다. 한 키에 실행이 여러 행이라(실측 75행) 그 사이
+  //    재실행이 있으면 **본 것과 다른 안이 승인된 것으로 남는다.** 그래서 업무 키와
+  //    실행 행 id 를 **짝으로** 들고 다닌다.
+  const [runs, setRuns] = useState<
+    { requestId: string; historyRunId: string | null }[]
+  >([]);
+  const runIds = runs.map((r) => r.requestId);
+  const last = runs.at(-1) ?? null;
 
-  function rememberRun(id: string) {
-    setRunIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  function rememberRun(run: { request_id: string; history_run_id: string | null }) {
+    setRuns((prev) =>
+      prev.some((r) => r.requestId === run.request_id)
+        ? prev
+        : [...prev, { requestId: run.request_id, historyRunId: run.history_run_id }],
+    );
   }
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
@@ -164,7 +175,7 @@ export default function ConsolePage() {
     const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
 
     // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
-    if (rerun && !lastRunId) {
+    if (rerun && !last) {
       push({
         kind: "error",
         text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
@@ -183,16 +194,17 @@ export default function ConsolePage() {
         intent: turn.intent,
         requestId: turn.requestId,
         // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
-        targetRequestId: rerun ? (lastRunId ?? undefined) : undefined,
+        targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
         decidedBy: rerun ? session.name : undefined,
       });
 
       if (isProcurement(res)) {
-        rememberRun(res.request_id);
+        rememberRun(res);
         push({ kind: "run", run: res });
       } else if (res.run) {
         // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
-        rememberRun(res.run.request_id);
+        rememberRun(res.run);
         push(
           { kind: "bot", text: res.answer?.text ?? "" },
           { kind: "run", run: res.run },
@@ -228,6 +240,7 @@ export default function ConsolePage() {
           confidence: "HIGH",
         },
         targetRequestId: picked.requestId,
+        targetHistoryRunId: picked.historyRunId ?? undefined,
         decidedBy: session.name,
       });
       setPicked(null);
@@ -302,10 +315,14 @@ export default function ConsolePage() {
                       canApprove={can.approve}
                       onPick={(scenario) => {
                         setModalError(null);
-                        setPicked({ scenario, requestId: turn.run.request_id });
+                        setPicked({
+                          scenario,
+                          requestId: turn.run.request_id,
+                          historyRunId: turn.run.history_run_id,
+                        });
                       }}
                       onRerun={() => {
-                        rememberRun(turn.run.request_id);
+                        rememberRun(turn.run);
                         setDraft("예산 2천만원으로 낮춰서 다시 해줘");
                         composer.current?.focus();
                       }}

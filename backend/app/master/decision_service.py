@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from app.master.decision import (
     DecisionIn,
@@ -19,7 +20,7 @@ from app.master.decision import (
     scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
-from app.orchestrator.run_repository import get_run_by_request_id
+from app.orchestrator.run_repository import get_run, get_run_by_request_id
 
 
 def _end_code_of(response_payload: dict[str, Any]) -> str:
@@ -46,7 +47,7 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     :raises LookupError: 그 업무 키의 실행이 없다 (라우터가 404).
     :raises DecisionRejected: 지금 상태에서 받을 수 없다 (라우터가 409/422).
     """
-    row = get_run_by_request_id(request_id)  # 없으면 LookupError
+    row = _run_for(request_id, payload.history_run_id)  # 없으면 LookupError
     response_payload = dict(row.get("response_payload") or {})
 
     end_code = _end_code_of(response_payload)
@@ -64,8 +65,41 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         end_code_at_decision=end_code,
         scenario_label=payload.scenario_label,
         condition_text=payload.condition_text,
+        history_run_id=str(row["run_id"]),
         note=payload.note,
     )
+
+
+def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:
+    """결정이 걸릴 **실행 한 건**을 고른다.
+
+    ★ 🔴 **화면이 본 실행으로 검사한다.** `history_run_id` 를 주면 그 행을 읽고,
+      종료 코드도 시나리오 라벨도 **그 실행 것**을 쓴다. 최신 실행으로 검사하면
+      *"사람이 본 안"* 과 *"검사한 안"* 이 갈린다 — 라벨이 같아 눈에 안 띈다.
+
+    ★ **막지 않고 드러낸다.** 그 사이 재실행이 있어 최신이 아니게 됐어도 거절하지
+      않는다. 사람이 그 실행을 보고 결정한 것은 **사실**이고, 그 사실을 그대로
+      적는 것이 이 표의 일이다 (8/26 회의: 승인 게이트를 마스터가 들지 않는다).
+      낡았다는 것은 `run_id` 가 최신 행과 다르다는 사실로 이미 드러난다.
+
+    ★ 안 주면 예전처럼 최신을 고른다. 다른 클라이언트가 깨지지 않게 하려는 것이고,
+      그 경우 **경합이 남는다** — 화면은 반드시 실어 보내야 한다.
+
+    :raises DecisionRejected: 준 실행이 이 업무 키의 것이 아니다 (422).
+    """
+    if history_run_id is None:
+        return dict(get_run_by_request_id(request_id))
+    try:
+        run = dict(get_run(UUID(history_run_id)))
+    except ValueError as exc:  # UUID 파싱 실패
+        raise DecisionRejected(f"실행 id 형식이 아니다: {history_run_id}") from exc
+    if run.get("request_id") != request_id:
+        # DB 의 복합 FK 가 이것을 최종적으로 막지만, 여기서 잡아야 이유를 돌려준다.
+        raise DecisionRejected(
+            f"실행 {history_run_id} 는 업무 키 {request_id} 의 것이 아니다 "
+            f"(그 실행의 업무 키: {run.get('request_id')})."
+        )
+    return run
 
 
 def _reject_repeat_approval(existing: list[DecisionOut], payload: DecisionIn) -> None:

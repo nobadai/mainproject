@@ -266,6 +266,8 @@ def _record_selection(request: AskExecuteRequest) -> AskResponse:
             decision="APPROVE",
             scenario_label=intent.scenario_label,
             decided_by=request.decided_by,
+            # ★ 화면이 본 실행을 그대로 넘긴다 — 여기서 고르지 않는다.
+            history_run_id=request.target_history_run_id,
             note="발화문 경로에서 선택",
         ),
     )
@@ -316,6 +318,7 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
             decision="REQUEST_CHANGE",
             condition_text=intent.condition,
             decided_by=request.decided_by,
+            history_run_id=request.target_history_run_id,
             note="발화문 경로에서 조건부 재요청",
         ),
     )

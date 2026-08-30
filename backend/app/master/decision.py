@@ -67,6 +67,14 @@ class DecisionIn(BaseModel):
         min_length=1,
         description="승인자. 승인자가 없는 승인은 승인이 아니다.",
     )
+    history_run_id: str | None = Field(
+        default=None,
+        description=(
+            "화면이 **보고 있던 실행**의 이력 행 id. 주면 그 실행으로 검사하고 그것을 "
+            "가리켜 기록한다. 안 주면 서버가 최신 실행을 고르는데, 그 사이 재실행이 "
+            "있었으면 사람이 본 것과 다른 안이 승인된 것으로 남는다."
+        ),
+    )
     note: str | None = None
 
     @model_validator(mode="after")
@@ -100,6 +108,10 @@ class DecisionOut(BaseModel):
     decided_by: str
     follow_up_request_id: str | None = None
     end_code_at_decision: str
+    #: 이 결정이 가리키는 실행 이력 행. DB 컬럼은 `master_decisions.run_id` 다.
+    #: `None` 은 **"실행이 없다"가 아니라 "어느 실행인지 기록되지 않았다"** 이다 —
+    #: 2026-08-30 이전 결정이 그렇다.
+    history_run_id: str | None = None
     note: str | None = None
     created_at: datetime
 

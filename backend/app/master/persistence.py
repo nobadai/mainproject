@@ -51,9 +51,20 @@ def record(
     response: ProcurementRunResponse,
     *,
     elapsed_ms: int | None = None,
-) -> None:
-    """실행 1건을 적재한다. 실패해도 조용히 넘어간다."""
-    try_save_run(
+) -> str | None:
+    """실행 1건을 적재하고 **그 행의 id 를 돌려준다.** 실패해도 조용히 넘어간다.
+
+    ★ **전에는 이 값을 버렸다** (2026-08-30 까지). `try_save_run` 이 `run_id` 를
+      돌려주는데 받지 않았고, 그래서 응답에 실을 수가 없었다. 결정은 업무 키까지만
+      가리켰고, 한 업무 키에 실행이 75행이면 **어느 실행을 승인한 것인지 알 수 없었다.**
+
+    ★ 적재에 실패하면 `None` 이다 — 그때는 결정이 실행을 못 가리킨다. 그것도 사실이라
+      숨기지 않는다 (`master_decisions.run_id` 가 NULL 을 허용하는 이유).
+
+    ⚠️ 저장되는 `response_payload` 에는 이 값이 없다. 값이 **적재 후에** 나오기
+      때문이다. 두 번 쓰지 않는다 — 행의 `run_id` 가 이미 그 답이다.
+    """
+    run_id = try_save_run(
         agent="master",
         cycle=_CYCLE,
         as_of=response.as_of,
@@ -64,3 +75,4 @@ def record(
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )
+    return None if run_id is None else str(run_id)

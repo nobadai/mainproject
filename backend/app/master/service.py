@@ -70,7 +70,9 @@ def run_procurement(
         # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
         response.report_text = render_answer(facts_from_procurement(response))
         # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
-        persistence.record(request, response, elapsed_ms=_elapsed(started))
+        response.history_run_id = persistence.record(
+            request, response, elapsed_ms=_elapsed(started)
+        )
         return response
 
     inputs = _inputs_for(request)
@@ -88,7 +90,9 @@ def run_procurement(
     response = _to_response(context, outcome, inputs)
     response.concerns = [*response.concerns, *_decision_collision(request_id)]
     response.report_text = render_answer(facts_from_procurement(response))
-    persistence.record(request, response, elapsed_ms=_elapsed(started))
+    # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
+    #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
+    response.history_run_id = persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
 
 
@@ -255,6 +259,7 @@ def get_run_history(request_id: str) -> RunHistoryOut:
     plan = list(row.get("plan") or [])
     return RunHistoryOut(
         request_id=row.get("request_id") or request_id,
+        run_id=(None if row.get("run_id") is None else str(row["run_id"])),
         as_of=row["as_of"],
         agent=row["agent"],
         cycle=row["cycle"],

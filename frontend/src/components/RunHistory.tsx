@@ -113,7 +113,7 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
           </div>
 
           <PlanTable rows={data.plan} />
-          <Decisions rows={data.decisions} />
+          <Decisions rows={data.decisions} latestRunId={data.run_id ?? null} />
         </>
       )}
     </div>
@@ -181,7 +181,7 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
   );
 }
 
-function Decisions({ rows }: { rows: DecisionOut[] }) {
+function Decisions({ rows, latestRunId }: { rows: DecisionOut[]; latestRunId: string | null }) {
   if (rows.length === 0)
     return (
       <p className="m-0 rounded-lg border border-line bg-sunk p-3 text-[13px] text-muted">
@@ -225,6 +225,24 @@ function Decisions({ rows }: { rows: DecisionOut[] }) {
                 → 후속 실행 {row.follow_up_request_id}
               </p>
             )}
+            {/* 🔴 **무엇을 보고 결정했나.** 한 업무 키에 실행이 여러 행이라, 이게
+                없으면 "그 안" 이 어느 실행의 안인지 나중에 답할 수 없다. */}
+            <p className="m-0 mt-1 font-mono text-[11px] text-faint">
+              {row.history_run_id ? (
+                <>
+                  본 실행 {row.history_run_id.slice(0, 8)}…
+                  {row.history_run_id !== latestRunId && (
+                    <span className="ml-1.5 text-warn">
+                      (이 화면 위의 마지막 실행과 다릅니다)
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-warn">
+                  어느 실행인지 기록되지 않았습니다 — 2026-08-30 이전 결정입니다
+                </span>
+              )}
+            </p>
           </li>
         ))}
       </ol>

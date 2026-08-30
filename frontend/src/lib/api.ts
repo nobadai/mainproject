@@ -71,6 +71,8 @@ export function execute(args: {
   intent: Intent;
   requestId?: string;
   targetRequestId?: string;
+  /** 화면이 **보고 있던 실행**. 없으면 서버가 최신을 고르고 경합이 남는다. */
+  targetHistoryRunId?: string;
   decidedBy?: string;
 }): Promise<ExecuteResponse> {
   return call<ExecuteResponse>("/master/ask/execute", {
@@ -80,8 +82,9 @@ export function execute(args: {
       as_of: AS_OF,
       policy_version: POLICY_VERSION,
       request_id: args.requestId ?? null,
-      // 발화문에 없어 화면이 실어야 하는 둘 (SELECT · RERUN 필수)
+      // 발화문에 없어 화면이 실어야 하는 셋 (SELECT · RERUN 필수)
       target_request_id: args.targetRequestId ?? null,
+      target_history_run_id: args.targetHistoryRunId ?? null,
       decided_by: args.decidedBy ?? null,
     }),
   });
