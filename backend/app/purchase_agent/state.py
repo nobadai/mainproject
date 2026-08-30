@@ -42,7 +42,7 @@ class PurchaseAgentState(TypedDict):
     feedback: dict | None  # 오케스트레이터 재조정 요청 (§6, 전부 기각 시만)
 
     # ── 재무 수신값 (어댑터 경로에만 실린다) ────────────────────────────────
-    # **셋 다 선택 필드다.** ``build_initial_state``(mock 경로)는 채우지 않으므로
+    # **넷 다 선택 필드다.** ``build_initial_state``(mock 경로)는 채우지 않으므로
     # ``.get()``이 None을 돌려주고 노드는 종전 경로로 간다 — 949건이 그대로 도는 근거다.
     # 어댑터 경로에서만 값이 실리고, 그때 계산이 달라진다 (IO명세 §2-B).
     #
@@ -53,6 +53,14 @@ class PurchaseAgentState(TypedDict):
     # ``purchase_payment_days``: N5. 7 확정 (8/27 재무 · calendar day · 영업일 보정 없음).
     # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
     purchase_payment_days: NotRequired[int | None]
+    # ``inbound_lead_days``: N4. 입고 리드타임(일). **도착일 = 회차일 + N4**이고, 도착일이
+    # 없으면 ⑥의 회차별 ``cap_by_date`` 검사가 성립하지 않는다 (#58).
+    #
+    # 물류가 ``constraints.inventory`` 안에 담아 보내므로 ``absorb_inventory``의 통째 복사로
+    # ``state["inventory"]``에는 이미 들어와 있었다. 그런데 ``pending_value``는 **State
+    # 최상위**를 보므로, 값이 와 있어도 못 찾아 "N4 미확정"을 고지하고 있었다 —
+    # "수신값이 설정값을 이긴다"는 규칙이 이 키에서만 작동하지 않던 자리다.
+    inbound_lead_days: NotRequired[int | None]
     # ``critical_payment_dates``: 지급 집중일. **겹침 경고에만 쓴다** — 날짜별 잔액
     # 재계산은 재무 SCENARIO_VALIDATION 소관이다 (도메인 침범 + 이중 계산).
     critical_payment_dates: NotRequired[list[str] | None]

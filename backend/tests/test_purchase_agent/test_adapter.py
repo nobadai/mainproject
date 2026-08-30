@@ -27,6 +27,7 @@ from app.purchase_agent.adapter import (
 )
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
+from app.purchase_agent.nodes.package_scenarios import split_quantities
 
 # "2025-12-31" 은 통합 시연 앵커 (#73) — 재무·물류 DB 데이터가 이 날에만 있다.
 ANCHORS = ["2025-12-31", "2026-08-21", "2026-08-28", "2026-09-04", "2026-09-11"]
@@ -47,13 +48,19 @@ def _finance(as_of: date, **over) -> dict:
     return base
 
 
+def _inventory(item: str, as_of: date, **over) -> dict:
+    """물류 payload. 어댑터 경로에서만 오는 키(``inbound_lead_days``·``cap_by_date``)를
+    얹어 시험할 수 있게 finance와 같은 방식으로 연다 — mock에는 그 키들이 없다."""
+    return {**ports.get_inventory(item, as_of), **over}
+
+
 def _payload(item: str, as_of: date, **over) -> dict:
     extras = ports.get_snapshot_extras(item, as_of)
     payload = {
         "item": item,
         "constraints": {
             "finance": _finance(as_of, **over.pop("finance", {})),
-            "inventory": ports.get_inventory(item, as_of),
+            "inventory": _inventory(item, as_of, **over.pop("inventory", {})),
         },
         "forecast": ports.get_forecast(item, as_of),
         "confirmed_orders": ports.get_confirmed_orders(item, as_of, days=14),
@@ -865,6 +872,144 @@ def test_n5_deferred_on_the_mock_path_and_restored_on_the_adapter_path() -> None
 
     received = purchase_port(_request("배추", SPREAD_WIDE))[0].payload
     assert not _n5_notes(received["scenarios"][0]["risks"]), "N5를 받으면 보류가 풀린다"
+
+
+def _n4_notes(risks: list[str]) -> list[str]:
+    return [note for note in risks if "N4" in note]
+
+
+def test_n4_deferred_on_the_mock_path_and_restored_when_logistics_sends_it() -> None:
+    """N5와 같은 이중 경로다. **다만 N4는 물류 payload에서 온다** (재무가 아니다).
+
+    이 배선이 없으면 값이 ``state["inventory"]`` 안에는 들어와 있는데
+    ``pending_value``가 State **최상위**를 봐서 못 찾고, 실연동에서도 "N4 미확정"을
+    고지한다 — 화면에 사실이 아닌 문장이 나가던 자리다 (#58 선행).
+    """
+    direct = run_purchase_agent("배추", SPREAD_WIDE)
+    assert _n4_notes(direct["scenarios"][0]["risks"]), "mock 경로는 보류 고지가 남는다"
+
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2})
+    )[0].payload
+    assert not _n4_notes(received["scenarios"][0]["risks"]), "N4를 받으면 보류가 풀린다"
+
+
+def test_n4_zero_is_a_received_value_not_a_missing_one() -> None:
+    """``0``은 "당일 도착"이라는 **확정된 값**이다 (규칙 3).
+
+    ``or``로 폴백하면 0이 falsy라 미결로 되돌아가고, "받았는데 못 받은 것으로 친다"가 된다.
+    """
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 0})
+    )[0].payload
+    assert not _n4_notes(received["scenarios"][0]["risks"])
+
+
+def test_split_quantities_and_the_risk_note_never_disagree() -> None:
+    """⑥은 수량을 재배분하고 ``_split_risks``는 **같은 계산을 다시** 한다.
+
+    두 곳이 갈라지면 화면에 "재배분했다"고 적힌 옆에 균등 수량이 뜬다 — 어느 쪽이
+    사실인지 소비자가 알 수 없다. 순수 함수라 갈라질 수 없다는 전제를 못박는다.
+    """
+    # 공격안(D=12·2회차)의 실제 도착일이다 — 매입일 09-11·09-17 에 N4 2 를 더한 값.
+    # 1회차 상한을 낮게 걸어 **재배분이 실제로 일어나게** 한다.
+    cap = {"2026-09-13": 1_000, "2026-09-19": 100_000}
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2, "cap_by_date": cap})
+    )[0].payload
+
+    split_scenarios = [s for s in received["scenarios"] if len(s["split_plan"]) > 1]
+    assert split_scenarios, "분할 안이 없으면 이 검사가 아무것도 안 본다"
+    reapportioned = 0
+    for scenario in split_scenarios:
+        quantities = [line["qty_kg"] for line in scenario["split_plan"]]
+        assert sum(quantities) == scenario["total_qty_kg"], "사중 일치"
+        assert all(qty > 0 for qty in quantities), "0kg 회차는 스키마가 죽인다"
+        notes = [note for note in scenario["risks"] if "회 분할" in note]
+        assert len(notes) == 1
+
+        # 균등이었다면 나왔을 수량. **양방향으로** 대조한다 — 한 방향만 보면
+        # 고지가 "보류"로 빠지는 변이를 못 잡는다.
+        rounds = len(quantities)
+        equal = split_quantities(scenario["total_qty_kg"], [{"ratio": 1 / rounds}] * rounds)
+        if quantities != equal:
+            reapportioned += 1
+            assert "맞춰 옮겼다" in notes[0], "조정했는데 고지는 다른 말을 한다"
+            for line in scenario["split_plan"]:
+                assert f"{line['seq']}회 " in notes[0]
+                assert f"{line['qty_kg']:,}kg" in notes[0]
+        else:
+            assert "맞춰 옮겼다" not in notes[0], "조정 안 했는데 했다고 적는다"
+
+    assert reapportioned, "재배분이 한 번도 안 일어나면 이 검사가 헛돈다"
+
+
+def test_cap_by_date_absence_is_the_normal_path() -> None:
+    """mock 재고에는 ``cap_by_date``가 없다 — 회귀 픽스처 전량이 이 길로 간다."""
+    received = purchase_port(_request("배추", SPREAD_WIDE))[0].payload
+    notes = [
+        note
+        for scenario in received["scenarios"]
+        for note in scenario["risks"]
+        if "회 분할" in note
+    ]
+    assert notes, "분할 고지는 남는다"
+    assert all("검사를 하지 않았다" in note for note in notes), "부재는 미검사로 고지된다"
+
+
+@pytest.mark.parametrize(
+    ("bad", "hint"),
+    [
+        ({"inbound_lead_days": 2.5}, "일 단위 정수"),
+        ({"inbound_lead_days": True}, "정수여야"),
+        ({"inbound_lead_days": -1}, "음수"),
+        ({"cap_by_date": [1, 2]}, "매핑이어야"),
+        ({"cap_by_date": {date(2026, 1, 2): 30}}, "ISO 날짜 문자열"),
+        ({"cap_by_date": {"2026-01-02": float("nan")}}, "유한한 수"),
+        ({"cap_by_date": {"2026-01-02": True}}, "수량이어야"),
+    ],
+)
+def test_arrival_inputs_are_shape_checked(bad: dict, hint: str) -> None:
+    """도착일 계산 입력의 **모양**이 어긋나면 어댑터에서 세운다.
+
+    특히 ``2.5``: 도착일은 ``timedelta(days=2.5)``에서 2일로 잘리는데 ⑤의 소진 창은
+    2.5를 그대로 쓴다. 두 계산이 다른 리드타임을 보고도 결과는 멀쩡해 보인다 —
+    조용히 반올림하지 않고 여기서 막는다 (Codex 교차검증).
+    """
+    payload = _payload("배추", SPREAD_WIDE, inventory=bad)
+    problems = [m for m in validate_payload(payload, SPREAD_WIDE) if "inventory" in m]
+    assert any(hint in m for m in problems), problems
+
+
+def test_arrival_inputs_absent_is_not_a_problem() -> None:
+    """둘 다 선택 필드다 — 부재는 잡지 않는다 (mock 경로가 그 길이다)."""
+    payload = _payload("배추", SPREAD_WIDE)
+    assert not [
+        m
+        for m in validate_payload(payload, SPREAD_WIDE)
+        if "inbound_lead_days" in m or "cap_by_date" in m
+    ]
+
+
+def test_rationale_does_not_claim_equal_split_after_reapportioning() -> None:
+    """근거와 수량이 서로를 부정하면 안 된다 (Codex 교차검증).
+
+    회차 **비율**은 균등이지만 **물량**은 창고 여유로 옮겨질 수 있다. 근거가
+    "균등"이라고만 적으면 화면에서 [30, 70] 옆에 균등이라는 문장이 뜬다.
+    """
+    cap = {"2026-09-13": 1_000, "2026-09-19": 100_000}
+    received = purchase_port(
+        _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2, "cap_by_date": cap})
+    )[0].payload
+    for scenario in received["scenarios"]:
+        quantities = [line["qty_kg"] for line in scenario["split_plan"]]
+        trend = [r for r in scenario["rationale"] if "지속 상승 궤적" in r["claim"]]
+        if not trend or len(set(quantities)) <= 1:
+            continue
+        detail = trend[0]["evidence_detail"]
+        assert "회차 물량도 균등하다" not in detail, "옮겨졌는데 균등이라고 적는다"
+        for line in scenario["split_plan"]:
+            assert f"{line['qty_kg']:,}kg" in detail
 
 
 def test_payment_date_overlap_raises_a_warning_not_a_cut() -> None:
