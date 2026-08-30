@@ -34,7 +34,7 @@ from pydantic import ValidationError
 from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 from app.critic.service import run_critic_procurement
 from app.master.critic_bridge import CriticSkipped, build_request, fold
-from app.master.envelope import AgentName
+from app.master.envelope import ENVELOPE_META_KEYS, AgentName
 from app.master.plan import ExecutionPlan
 from app.orchestrator.contracts_core import Evidence
 
@@ -575,7 +575,12 @@ class MasterVerifier:
     _UNRESOLVED_NEAR = r".{0,12}?(?:미확정|미결|싣지 않았다|받지 못)"
 
     #: 부서가 실은 것이지만 **값이 아니라 메타**라 대조 대상이 아닌 키.
-    _NOT_A_VALUE = frozenset({"policy_version_used", "as_of", "state_date", "soft_warnings"})
+    #:
+    #: ★ **계약 쪽 목록을 그대로 읽는다** (`envelope.ENVELOPE_META_KEYS`). 전에는 같은
+    #:   목록을 여기 따로 적어 뒀는데, `required_claims` 는 `soft_warnings` 에 근거를
+    #:   요구하고 이 검사는 그것을 메타로 빼는 **정반대 상태**가 됐다 (실측 2026-08-30).
+    #:   두 벌을 두면 언젠가 갈린다 — 갈렸다.
+    _NOT_A_VALUE = ENVELOPE_META_KEYS
 
     def _check_supplied_but_unused(
         self,

@@ -316,6 +316,29 @@ def _is_item_list(value: Any) -> bool:
     return bool(value) and all(isinstance(item, Mapping) for item in value)
 
 
+#: 🔴 **봉투 자신의 어휘** — 도메인 값이 아니라 모든 부서가 공통으로 다는 메타다.
+#: 근거를 요구하지 않고, 값 대조 대상으로도 세지 않는다.
+#:
+#: `soft_warnings` 가 여기 들어온 경위 (실측 2026-08-30 · `713e515`):
+#: 물류 `SCENARIO_VALIDATION` 의
+#: `soft_warnings: ['SNAPSHOT_ID_UNRESOLVED', 'GRADE_VOCABULARY_UNRESOLVED']` 에
+#: 근거를 요구해서 `E-EVIDENCE-MISSING` 이 **매 실행 떴다.** 그런데 `Evidence.value`
+#: 는 숫자라 **채울 방법이 없는 요구**였다 — 물류가 낼 수 있는 것은 "경고 2건" 같은
+#: 개수뿐이고 그건 근거가 아니라 세어 본 것이다. **만족시킬 수 없는 검사는 기준이
+#: 아니라 결함이다.**
+#:
+#: 그리고 `verifier._NOT_A_VALUE` 는 같은 키를 이미 *"값이 아니라 메타"* 로 빼고
+#: 있었다 — **내 두 검사가 한 키를 두고 반대로 말하고 있었다.** 목록을 계약 쪽에
+#: 한 벌만 두고 검증기가 그것을 읽는다.
+#:
+#: ⚠️ **이름으로만 뺀다.** 모양으로 빼려다 재무 `critical_payment_dates`
+#: (날짜 배열) 의 근거 요구까지 지웠다 — `test_비어있지_않은_리스트는_근거가_
+#: 필요하다` 가 잡았다. 날짜 배열과 코드 배열은 둘 다 문자열 배열이라 못 가른다.
+ENVELOPE_META_KEYS: frozenset[str] = frozenset(
+    {"policy_version_used", "as_of", "state_date", "soft_warnings"}
+)
+
+
 def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] = ()) -> set[str]:
     """근거가 필요한 값의 **경로 집합**.
 
@@ -341,6 +364,10 @@ def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] =
     for key, value in payload.items():
         if key in declared:
             continue  # 이미 넣었다 — 표기와 무관하게 요구한다
+        if key in ENVELOPE_META_KEYS:
+            # 봉투 어휘는 근거 대상이 아니다. 부서가 굳이 근거를 받고 싶으면
+            # `judgment_fields` 에 선언하면 위 가지에서 다시 요구된다.
+            continue
         if _is_item_list(value):
             for index, item in enumerate(value):
                 for sub, sub_value in item.items():
