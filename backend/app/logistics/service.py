@@ -3,12 +3,18 @@
 from datetime import date
 from uuid import UUID
 
-from app.logistics.interpretation import enrich_logistics_response
+from app.logistics.interpretation import enrich_logistics_response, translate_missing_data
 from app.logistics.llm.runtime import InterpretationService
 from app.logistics.repository import get_current_inventory_logistics_snapshot
 from app.logistics.rules import (
+    FRESHNESS_QUALITY_RISK,
+    SALES_PRIORITY_ADJUSTMENT,
+    BusinessSignalResult,
+    LogisticsRuleResult,
     derive_logistics_verdict,
+    evaluate_procurement_business_signals,
     evaluate_procurement_rules,
+    evaluate_sales_business_signals,
     evaluate_sales_rules,
 )
 from app.logistics.run_repository import (
@@ -17,6 +23,7 @@ from app.logistics.run_repository import (
     save_logistics_agent_run,
 )
 from app.logistics.scenario_engine import (
+    derive_preferred_adjustment,
     run_logistics_procurement_scenario,
     run_logistics_sales_scenario,
 )
@@ -67,6 +74,12 @@ def run_logistics_procurement_with_snapshot(
     """외부에서 고정한 Inventory/Logistics Snapshot으로 A Cycle을 실행한다."""
     scenario_result = run_logistics_procurement_scenario(request, snapshot)
     rule_result = evaluate_procurement_rules(as_of=request.meta.as_of, snapshot=snapshot)
+    # 업무 위험 판정(비교식)은 Rule 소유 — Service 는 계산 결과를 조립만 한다.
+    business = evaluate_procurement_business_signals(
+        as_of=request.meta.as_of,
+        snapshot=snapshot,
+        scenario_results=scenario_result["scenario_results"],
+    )
 
     response = LogisticsProcurementResponse(
         as_of=request.meta.as_of,
@@ -90,7 +103,11 @@ def run_logistics_procurement_with_snapshot(
             ),
         ),
         hard_constraints=rule_result["hard_constraints"],
-        soft_warnings=rule_result["soft_warnings"],
+        # 업무 위험 signal 은 soft_warnings 채널로 나간다 — LLM Context 는 의미
+        # 기준(BUSINESS_SIGNALS)으로 이 중 signals 만 골라낸다.
+        soft_warnings=_merge_warnings(rule_result, business),
+        missing_data=_missing_data(rule_result, business),
+        preferred_adjustment=derive_preferred_adjustment(scenario_result["scenario_results"]),
         evidences=_evidences(snapshot),
     )
     return enrich_logistics_response(response, interpretation_service)
@@ -124,6 +141,8 @@ def run_logistics_sales_with_snapshot(
         snapshot=snapshot,
         future_occupancy_by_date=scenario_result["future_occupancy_by_date"],
     )
+    # 판매 신선도 위험도 비율 Rule 로 판정한다 — Lot status 의존 폐기 (결정서 §3).
+    business = evaluate_sales_business_signals(snapshot=snapshot)
     response = LogisticsSalesResponse(
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         approval_id=request.approved_purchase.approval_id,
@@ -132,9 +151,40 @@ def run_logistics_sales_with_snapshot(
         daily_outbound_capacity_kg=scenario_result["daily_outbound_capacity_kg"],
         lot_constraints=scenario_result["lot_constraints"],
         hard_constraints=rule_result["hard_constraints"],
-        soft_warnings=rule_result["soft_warnings"],
+        soft_warnings=_merge_warnings(rule_result, business),
+        missing_data=_missing_data(rule_result, business),
+        # 우선출고 조정은 Rule 이 정한 것이다 — 신선도 위험이 성립할 때만 preferred 로
+        # 지정한다. 이게 없으면 preferred 강제 검증과 결합해 판매 추천이 영구 봉쇄된다.
+        preferred_adjustment=(
+            SALES_PRIORITY_ADJUSTMENT if FRESHNESS_QUALITY_RISK in business["signals"] else None
+        ),
     )
     return enrich_logistics_response(response, interpretation_service)
+
+
+def _merge_warnings(
+    rule_result: LogisticsRuleResult,
+    business: BusinessSignalResult,
+) -> list[str]:
+    """Runtime 경고 + 업무 위험 signal + 판정 스킵 사실을 한 채널로 합친다."""
+    merged = [*rule_result["soft_warnings"], *business["signals"], *business["warnings"]]
+    return list(dict.fromkeys(merged))
+
+
+def _missing_data(
+    rule_result: LogisticsRuleResult,
+    business: BusinessSignalResult,
+) -> list[str]:
+    """미확정 계열(비-PASS Constraint · 데이터 경고 · 판정 스킵)의 번역명 목록.
+
+    업무 위험 signal 은 미확정이 아니므로 여기 들어가지 않는다.
+    """
+    codes = [
+        constraint.code
+        for constraint in rule_result["hard_constraints"]
+        if constraint.status != "PASS"
+    ]
+    return translate_missing_data([*codes, *rule_result["soft_warnings"], *business["warnings"]])
 
 
 def get_logistics_run(run_id: UUID) -> LogisticsAgentRunResponse:

@@ -21,6 +21,7 @@ _LLM_FIELDS = {
     "llm_model",
     "llm_attempts",
     "llm_fallback_used",
+    "llm_error_kind",
 }
 
 
@@ -82,6 +83,8 @@ def test_finance_context_contains_only_sanitized_meanings():
 
 
 def test_logistics_context_does_not_expose_freshness_number():
+    # 신선도 위험은 Lot status 가 아니라 비율 Rule 이 판정해 soft_warnings 로 온다
+    # (LLM 정책 결정서 §3 — status 생성 주체 부재로 status 의존 폐기).
     response = LogisticsSalesResponse(
         snapshot_id=None,
         approval_id="H1",
@@ -94,18 +97,23 @@ def test_logistics_context_does_not_expose_freshness_number():
                 "item": "배추",
                 "available_qty_kg": Decimal(800),
                 "remaining_freshness_days": 2,
-                "status": "NEEDS_PRIORITY_SHIPMENT",
+                "status": "ACTIVE",
             }
         ],
         hard_constraints=[],
-        soft_warnings=[],
+        soft_warnings=["FRESHNESS_QUALITY_RISK", "SNAPSHOT_ID_UNRESOLVED"],
+        missing_data=["snapshot_id"],
+        preferred_adjustment="우선 출고 대상으로 검토합니다.",
     )
 
     context = build_logistics_context(response)
     serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
 
+    # 데이터 미확정 코드는 signals 에 섞이지 않는다 — 의미 기준 분류 (41-A).
     assert context.signals == ["FRESHNESS_QUALITY_RISK"]
     assert context.allowed_adjustments == ["우선 출고 대상으로 검토합니다."]
+    assert context.preferred_adjustment == "우선 출고 대상으로 검토합니다."
+    assert context.missing_data == ["snapshot_id"]
     assert "1000" not in serialized
     assert "800" not in serialized
     assert '"2"' not in serialized
@@ -124,11 +132,14 @@ def test_llm_failure_preserves_all_logistics_deterministic_fields():
                 "item": "배추",
                 "available_qty_kg": Decimal(800),
                 "remaining_freshness_days": 2,
-                "status": "NEEDS_PRIORITY_SHIPMENT",
+                "status": "ACTIVE",
             }
         ],
         hard_constraints=[],
-        soft_warnings=[],
+        # Rule 이 판정한 업무 위험이 있어야 LLM 이 호출되고, 그 호출이 실패해야
+        # FALLBACK 경로가 재현된다.
+        soft_warnings=["FRESHNESS_QUALITY_RISK"],
+        preferred_adjustment="우선 출고 대상으로 검토합니다.",
     )
     deterministic = response.model_dump(exclude=_LLM_FIELDS)
 
