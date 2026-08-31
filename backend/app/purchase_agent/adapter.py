@@ -20,11 +20,13 @@ from app.master.envelope import (
     AgentReply,
     AgentRequest,
     ExecutionMetadata,
+    LLMStatus,
 )
 from app.orchestrator.contracts_core import Evidence
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import build_graph
+from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     estimate_daily_demand,
@@ -110,18 +112,41 @@ def _metadata(
         agent=AGENT_NAME,
         used_tools=used,
         tool_order=tuple(range(1, len(used) + 1)),
-        llm_status=mix.llm_status if mix is not None else "DISABLED",
+        llm_status=mix.llm_status if mix is not None else _uncalled_status(),
         llm_model=(mix.llm_model or "") if mix is not None else "",
         llm_fallback_used=mix.llm_fallback_used if mix is not None else False,
     )
+
+
+def _uncalled_status() -> LLMStatus:
+    """판단자를 **한 번도 안 부른** 실행의 상태. 설정이 갈림길이다.
+
+    🔴 전에는 무조건 ``DISABLED`` 였다. 그러면 *"LLM 을 안 켰네"* 와 *"켰는데 이번엔 안
+      썼네"* 가 한 값이 되고, **사람이 없는 문제를 찾는다** — 2025-12-31 실행이 그랬다.
+      등급이 미상이라 ⑤가 후보를 만들기 전에 막혔는데, 설정은 켜져 있었다.
+
+    봉투가 네 값의 뜻을 규정한다 (``master/envelope.py`` ``LLMStatus``)::
+
+        DISABLED           설정이 꺼져 있다
+        SKIPPED_TEMPLATE   켜져 있는데 이번 실행에서는 안 불렀다 — 부를 조건이 아니었다
+
+    **새로 정한 규칙이 아니다.** 마스터 ``IntentService``·Critic ``JudgeService``·우리
+    ``MixSelectionService`` 가 이미 ``DISABLED → SKIPPED_TEMPLATE → SUCCESS → FALLBACK``
+    순서를 쓴다. 서비스 **안**은 맞았는데, 서비스에 **닿기 전에** 막히는 경로만 이 함수를
+    거치면서 뭉개지고 있었다.
+
+    STATUS_QUERY 처럼 애초에 판단 단계가 없는 실행도 ``SKIPPED_TEMPLATE`` 이다 —
+    Critic 이 *"이 Flow 에는 그 문장을 쓰는 단계가 없다"* 를 같은 값으로 적는 것과 같다.
+    """
+    return "SKIPPED_TEMPLATE" if get_llm_settings().enabled else "DISABLED"
 
 
 def _mix_decision(state: Mapping[str, Any] | None) -> Any:
     """⑤의 LLM 판단. ⑤가 비율 목록 **첫 줄에 얹어** 보낸다 (``_sourcing_decision``과 같은 자리).
 
     ``None``인 경우가 둘이다 — ⑤가 아예 안 돈 경로(수신 검증 실패·STATUS_QUERY)와,
-    돌았지만 게이팅에 걸려 LLM을 부르지 않은 날. 둘 다 ``DISABLED``가 맞다:
-    전자는 실행이 없었고 후자는 **판단자를 쓰지 않기로 규칙이 정한 것**이라 실패가 아니다.
+    돌았지만 게이팅에 걸려 LLM을 부르지 않은 날. **둘 다 실패가 아니고**, 어느 쪽이든
+    "이번 실행에서 안 불렀다"는 같은 사실이라 ``_uncalled_status()`` 가 설정으로 가른다.
     """
     if not state:
         return None

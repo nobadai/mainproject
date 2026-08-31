@@ -1309,3 +1309,53 @@ def test_fractional_warehouse_capacity_still_yields_integer_quantities() -> None
         # (이 픽스처는 현금이 먼저 묶어 창고 상한까지 안 간다. 내림 자체는
         #  test_draft_plan 의 warehouse_cap_kg 단위 검사가 잠근다.)
         assert scenario["total_qty_kg"] <= 7636
+
+
+# ── llm_status — DISABLED 와 SKIPPED_TEMPLATE 를 가른다 (2026-08-31) ────────
+
+
+def test_llm_status_separates_switched_off_from_not_called_this_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **"안 켰다"와 "켰는데 이번엔 안 썼다"는 다른 사실이다.**
+
+    전에는 판단자를 안 부른 실행이 무조건 ``DISABLED`` 였다. 2025-12-31 실행이 그랬는데
+    설정은 켜져 있었다 — 등급이 미상이라 ⑤가 후보를 만들기 전에 막힌 것이다.
+    **앞은 설정 문제라 고칠 수 있고 뒤는 그날의 사실이라 고칠 것이 없다.** 한 값으로
+    내면 사람이 없는 문제를 찾는다.
+
+    봉투가 뜻을 규정한다 (``master/envelope.py`` ``LLMStatus``) — 새로 정한 규칙이 아니라
+    마스터 ``IntentService``·Critic ``JudgeService`` 가 이미 쓰는 서열이다.
+    """
+    from app.purchase_agent.adapter import _uncalled_status
+
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "false")
+    assert _uncalled_status() == "DISABLED"
+
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "true")
+    assert _uncalled_status() == "SKIPPED_TEMPLATE"
+
+
+def test_a_status_query_says_skipped_not_disabled_when_the_llm_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """판단 단계가 **애초에 없는** 실행도 ``SKIPPED_TEMPLATE`` 이다.
+
+    Critic 이 *"이 Flow 에는 그 문장을 쓰는 단계가 없다"* 를 같은 값으로 적는 것과 같다
+    (``critic/critic_v0_4.py``).
+    """
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "true")
+    _, metadata = purchase_port(_request("배추", SPREAD_WIDE, mode="STATUS_QUERY"))
+
+    assert metadata.llm_status == "SKIPPED_TEMPLATE"
+    assert metadata.llm_fallback_used is False
+
+
+def test_our_vocabulary_is_the_envelope_vocabulary() -> None:
+    """어휘를 우리가 새로 만들지 않는다 — 봉투 계약의 네 값을 그대로 쓴다."""
+    from typing import get_args
+
+    from app.master.envelope import LLMStatus as EnvelopeStatus
+    from app.purchase_agent.llm.schemas import LLMStatus as OurStatus
+
+    assert set(get_args(OurStatus)) == set(get_args(EnvelopeStatus))
