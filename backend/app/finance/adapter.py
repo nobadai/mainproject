@@ -91,11 +91,10 @@ def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
 
 
 class _RuntimeContextDataPort:
-    """Expose the already-fixed Finance runtime context to the agent tools.
+    """이미 고정된 Finance Runtime 컨텍스트를 Agent Tool에 제공한다.
 
-    The Master policy version identifies the orchestration request.  Finance's
-    policy has its own version, so the controller is deliberately invoked with
-    the version that was actually loaded at this boundary.
+    Master Policy 버전은 오케스트레이션 요청을 식별한다. Finance Policy는 별도
+    버전을 가지므로, Controller는 이 경계에서 실제로 읽은 버전을 사용한다.
     """
 
     def __init__(self, context: FinanceRuntimeContext):
@@ -111,9 +110,9 @@ class _RuntimeContextDataPort:
 
     def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
         self._check_as_of(as_of)
-        # ``policy_version`` belongs to Master execution context and is not a
-        # Finance policy selector.  The fixed runtime context is authoritative
-        # for the Finance policy version used by this controller run.
+        # ``policy_version``은 Master 실행 컨텍스트의 값이며 Finance Policy 선택자가
+        # 아니다. 이 Controller 실행에서 사용할 Finance Policy 버전은 고정된 Runtime
+        # 컨텍스트가 정본이다.
         del policy_version
         policy = self.context.policy
         if isinstance(policy, FinancePolicy):
@@ -157,7 +156,7 @@ class _RuntimeContextDataPort:
 
 
 def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:
-    """Do not rewrite Master context; the data port resolves Finance's own policy."""
+    """Master 컨텍스트를 다시 쓰지 않고 Data Port가 Finance 자체 Policy를 해석하게 한다."""
     del context
     return request
 
@@ -189,7 +188,7 @@ def _controller_scenario_validation(request: AgentRequest) -> tuple[AgentReply, 
 def _controller_run(
     request: AgentRequest, context: FinanceRuntimeContext
 ) -> tuple[AgentReply, ExecutionMetadata]:
-    """Add only legacy business-contract annotations; keep controller metadata intact."""
+    """레거시 업무 계약 주석만 보강하고 Controller 메타데이터는 그대로 유지한다."""
     reply, metadata = FinanceAgentController(_RuntimeContextDataPort(context)).run(
         _controller_request(request, context)
     )
@@ -217,7 +216,7 @@ def _controller_run(
 def _controller_boundary(
     request: AgentRequest,
 ) -> tuple[FinanceRuntimeContext | None, tuple[AgentReply, ExecutionMetadata] | None]:
-    """Preserve adapter-level readiness semantics before controller delegation."""
+    """Controller 위임 전에 Adapter 수준의 준비 상태 의미를 보존한다."""
     run_id = _run_id(request)
     context = _load_context()
     if context is None:
@@ -594,11 +593,11 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
 
 
 def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
-    """Validate the current Purchase output without recreating its finance values.
+    """현재 Purchase 출력을 재무값 재생성 없이 검증한다.
 
-    The Purchase schema remains the source of truth.  The adapter only validates
-    that serialised contract, reuses the Finance procurement engine for the base
-    context/rules, then overlays its already-authoritative payment schedule.
+    Purchase Schema를 정본으로 유지한다. Adapter는 직렬화된 계약만 검증하고,
+    기본 컨텍스트/Rule에는 기존 Finance 매입 엔진을 재사용한 뒤 이미 권위가 있는
+    지급 일정을 Overlay한다.
     """
     run_id = _run_id(request)
     try:
@@ -652,8 +651,8 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
         )
 
-    # This invokes the existing scenario engine and runtime rules for the
-    # proposal-independent Finance position and reported-amount comparison.
+    # 제안과 독립적인 Finance 상태 및 보고 금액 비교에는 기존 시나리오 엔진과
+    # Runtime Rule을 호출한다.
     base_result = run_finance_procurement_with_context(proposal, context)
     if base_result.runtime_status != "READY":
         return _not_ready(
@@ -785,7 +784,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
 
 
 def _purchase_proposal(payload: Mapping[str, Any]) -> PurchaseProposal:
-    """Discard envelope-only keys, then validate the actual Purchase contract."""
+    """Envelope 전용 키를 버린 뒤 실제 Purchase 계약을 검증한다."""
     fields = PurchaseProposal.model_fields
     return PurchaseProposal.model_validate(
         {key: value for key, value in payload.items() if key in fields}

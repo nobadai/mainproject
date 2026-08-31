@@ -35,7 +35,7 @@ router = APIRouter(prefix="/finance", tags=["finance"])
 
 @router.post("/agent", summary="Finance v2.2 Tool-Using Agent")
 def run_finance_agent(request: AgentRequest) -> AgentReply:
-    """Primary v2.2 entrypoint; it has no Snapshot/T0 boundary."""
+    """기본 v2.2 진입점이며 Snapshot/T0 경계를 두지 않는다."""
     reply, _metadata = FinanceAgentController(PostgresFinanceAsOfDataPort()).run(request)
     return reply
 

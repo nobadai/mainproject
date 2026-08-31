@@ -127,7 +127,7 @@ def derive_critical_payment_dates(
     cash_events: tuple[CashEvent, ...] | list[CashEvent],
     minimum_cash_balance_krw: Decimal,
 ) -> tuple[date, ...]:
-    """Return risky payment dates and all tied maximum confirmed-outflow dates."""
+    """위험 지급일과 동률인 모든 최대 확정 유출일을 반환한다."""
     by_date: dict[date, list[CashEvent]] = defaultdict(list)
     for event in cash_events:
         by_date[event.event_date].append(event)

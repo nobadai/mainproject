@@ -26,7 +26,7 @@ FinanceRuntimeSoftWarning = Literal[
 
 
 def classify_base_stress(*, base_safe: bool, stress_safe: bool) -> str:
-    """Map alternative BASE/STRESS projections to the Finance business contract."""
+    """대안 BASE/STRESS Projection을 Finance 업무 계약으로 매핑한다."""
     if not base_safe and stress_safe:
         raise ValueError("BASE unsafe with STRESS safe is an invalid Finance scenario")
     if not base_safe:
