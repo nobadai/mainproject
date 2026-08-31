@@ -164,6 +164,19 @@ class LogisticsRuleResult(TypedDict):
     calculation_ready: bool
 
 
+def merge_business_warnings(
+    rule_result: LogisticsRuleResult,
+    business: BusinessSignalResult,
+) -> list[str]:
+    """Runtime 경고 + 업무 위험 signal + 판정 스킵 사실을 한 채널로 합친다.
+
+    독립 경로(service)와 Master 어댑터가 같은 병합을 쓴다 — 두 입력의 소유 모듈인
+    여기에 두어 채널 구성이 두 곳에서 갈라지지 않게 한다 (#111).
+    """
+    merged = [*rule_result["soft_warnings"], *business["signals"], *business["warnings"]]
+    return list(dict.fromkeys(merged))
+
+
 def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None:
     """Runtime readiness와 개별 Hard Check 상태를 분리해 최종 판정을 집계한다."""
     if result["runtime_status"] != "READY":

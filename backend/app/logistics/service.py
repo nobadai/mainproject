@@ -16,6 +16,7 @@ from app.logistics.rules import (
     evaluate_procurement_rules,
     evaluate_sales_business_signals,
     evaluate_sales_rules,
+    merge_business_warnings,
 )
 from app.logistics.run_repository import (
     get_logistics_agent_run,
@@ -105,7 +106,7 @@ def run_logistics_procurement_with_snapshot(
         hard_constraints=rule_result["hard_constraints"],
         # 업무 위험 signal 은 soft_warnings 채널로 나간다 — LLM Context 는 의미
         # 기준(BUSINESS_SIGNALS)으로 이 중 signals 만 골라낸다.
-        soft_warnings=_merge_warnings(rule_result, business),
+        soft_warnings=merge_business_warnings(rule_result, business),
         missing_data=_missing_data(rule_result, business),
         preferred_adjustment=derive_preferred_adjustment(scenario_result["scenario_results"]),
         evidences=_evidences(snapshot),
@@ -153,7 +154,7 @@ def run_logistics_sales_with_snapshot(
         daily_outbound_capacity_kg=scenario_result["daily_outbound_capacity_kg"],
         lot_constraints=scenario_result["lot_constraints"],
         hard_constraints=rule_result["hard_constraints"],
-        soft_warnings=_merge_warnings(rule_result, business),
+        soft_warnings=merge_business_warnings(rule_result, business),
         missing_data=_missing_data(rule_result, business),
         # 우선출고 조정은 Rule 이 정한 것이다 — 신선도 위험이 성립할 때만 preferred 로
         # 지정한다. 이게 없으면 preferred 강제 검증과 결합해 판매 추천이 영구 봉쇄된다.
@@ -164,15 +165,6 @@ def run_logistics_sales_with_snapshot(
     return enrich_logistics_response(
         response, interpretation_service, measurements=business["measurements"]
     )
-
-
-def _merge_warnings(
-    rule_result: LogisticsRuleResult,
-    business: BusinessSignalResult,
-) -> list[str]:
-    """Runtime 경고 + 업무 위험 signal + 판정 스킵 사실을 한 채널로 합친다."""
-    merged = [*rule_result["soft_warnings"], *business["signals"], *business["warnings"]]
-    return list(dict.fromkeys(merged))
 
 
 def _missing_data(
