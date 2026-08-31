@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -334,3 +335,128 @@ def test_허용목록_밖_어휘는_통과로_치지_않는다():
     )
     assert any("Critic 계약에 맞지 않는다" in s and "strategy_type" in s for s in result.skipped)
     assert not any("돌지 못했다" in c for c in result.concerns)
+
+
+# ---------------------------------------------------------------------------
+# 부서 DeptMeta — 마스터는 나르고 Critic 이 검사한다
+#
+# 🔴 오래 `DeptMeta 미제출 — E-AUTHORITY·E-GRADE-LEAK 생략` 이 떴다. 마스터가
+#    *"재무가 cap 을 낼 때 무엇을 읽었나"* 를 모르기 때문인데, 모르는 것을 빈 dict 로
+#    보내면 **모르는 것이 통과가 된다.** 이제 재무가 자기 실행을 보고 적어 보내고
+#    마스터는 그것을 해석 없이 옮긴다.
+# ---------------------------------------------------------------------------
+
+
+def _finance_meta_observation(
+    *, inputs: list[str] | None = None, produced: list[str] | None = None
+) -> str:
+    """재무가 `ExecutionMetadata.observations` 에 넣는 것과 같은 모양."""
+    return json.dumps(
+        {
+            "observation_type": "finance_dept_meta",
+            "inputs_used": {
+                "finance_cap_amount_krw": inputs
+                if inputs is not None
+                else [
+                    "finance_state.current_cash_krw",
+                    "finance_policy.minimum_cash_balance_krw",
+                    "finance_policy.purchase_payment_days",
+                ]
+            },
+            "produced_fields": produced
+            if produced is not None
+            else ["available_cash", "finance_cap_amount_krw", "payment_pressure"],
+        }
+    )
+
+
+def _ctx_with_meta(observation: str) -> VerificationContext:
+    return VerificationContext(
+        as_of=AS_OF,
+        item="배추",
+        evidences=EVIDENCES,
+        observations={"finance": (observation,)},
+    )
+
+
+def test_부서가_적어_보낸_dept_meta_를_그대로_옮긴다():
+    """마스터는 **추측하지 않는다** — 부서가 적은 값을 Critic 어휘로 옮기기만 한다."""
+    req = bridge.build_request(
+        as_of=AS_OF,
+        item="배추",
+        proposal=_proposal(),
+        constraints=CONSTRAINTS,
+        evidences=EVIDENCES,
+        observations={"finance": (_finance_meta_observation(),)},
+    )
+    assert req.dept_meta is not None
+    meta = req.dept_meta["finance"]
+    assert meta.inputs_used["finance_cap_amount_krw"] == [
+        "finance_state.current_cash_krw",
+        "finance_policy.minimum_cash_balance_krw",
+        "finance_policy.purchase_payment_days",
+    ]
+    assert "finance_cap_amount_krw" in meta.produced_fields
+    # 재무만 냈으면 재무만 있다 — 물류 것을 지어내지 않는다.
+    assert set(req.dept_meta) == {"finance"}
+
+
+def test_관측이_없거나_모양이_어긋나면_보내지_않는다():
+    """부서가 잘못 적은 것을 마스터가 고쳐 주면 **고친 값이 근거가 된다.**"""
+    for observations in (
+        {"finance": ("not json at all",)},
+        {"finance": (json.dumps({"observation_type": "finance_llm_provider"}),)},
+        {"finance": (json.dumps({"observation_type": "finance_dept_meta"}),)},
+        {},
+    ):
+        req = bridge.build_request(
+            as_of=AS_OF,
+            item="배추",
+            proposal=_proposal(),
+            constraints=CONSTRAINTS,
+            evidences=EVIDENCES,
+            observations=observations,
+        )
+        assert req.dept_meta is None, observations
+
+
+def test_정상_dept_meta_는_미제출_경고를_없애고_두_검사를_돌린다():
+    """단순히 문구가 사라지는 것이 아니라 **검사가 실제로 돈다.**"""
+    result = MasterVerifier()(
+        _proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(_finance_meta_observation())
+    )
+    assert not any("finance: DeptMeta 미제출" in s for s in result.skipped), result.skipped
+    # 재무 소유 입력만 썼으므로 두 검사 모두 findings 를 내지 않는다.
+    assert not any("E-GRADE-LEAK" in f for f in result.findings), result.findings
+    assert not any("E-AUTHORITY" in f for f in result.findings), result.findings
+
+
+def test_dept_meta_가_없으면_미제출_경고가_그대로_남는다():
+    """반례 — 경고를 숨긴 것이 아니라 제출했을 때만 사라진다."""
+    result = MasterVerifier()(_proposal(), CONSTRAINTS, {}, _plan(), _ctx())
+    assert any("finance: DeptMeta 미제출" in s for s in result.skipped), result.skipped
+
+
+@pytest.mark.parametrize("leaked", ["qty_kg", "grade_unit_price", "sourcing_plan"])
+def test_재무_cap_에_매입_소유_입력이_섞이면_E_GRADE_LEAK(leaked):
+    """§3.6.8 — 재무 상한이 등급·수량을 읽으면 하루 한 번 회신 계약이 깨진다."""
+    observation = _finance_meta_observation(
+        inputs=["finance_state.current_cash_krw", leaked]
+    )
+    result = MasterVerifier()(
+        _proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation)
+    )
+    assert any("E-GRADE-LEAK" in f for f in result.findings), result.findings
+    assert any(leaked in f for f in result.findings), result.findings
+
+
+def test_S3_전속_필드를_산출하면_E_AUTHORITY():
+    """§5.0 — `has_unmet_obligation` 은 오케 전속 판정이다. 부서가 내면 위반이다."""
+    observation = _finance_meta_observation(
+        produced=["finance_cap_amount_krw", "has_unmet_obligation"]
+    )
+    result = MasterVerifier()(
+        _proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation)
+    )
+    assert any("E-AUTHORITY" in f for f in result.findings), result.findings
+    assert any("has_unmet_obligation" in f for f in result.findings), result.findings
