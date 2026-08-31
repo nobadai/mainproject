@@ -89,6 +89,17 @@ _LIVENESS_KEYS: frozenset[str] = frozenset({"capabilities"})
 #: "받을 수 있는 상태입니다" 만 적으면 물어본 사람이 얻는 것이 없다.
 _LIVENESS_TEXT = "요청을 받을 수 있는 상태입니다 — 업무 값은 매입안 생성에서 나옵니다"
 
+#: 조언자 판정 라벨. **`ok` 도 적는다** — 통과한 부서를 지우면 "물류만 봤나" 로 읽힌다.
+#:
+#: 🔴 `conditional` 을 `ok` 와 같은 말로 쓰지 않는다. 마스터는 조언자 하나가
+#:   `conditional` 을 내도 사람에게 올리는데(§3.4), 그 사실을 안 적으면 **사람이
+#:   무조건 통과로 읽는다.**
+_VERDICT_LABEL: dict[str, str] = {
+    "ok": "통과",
+    "conditional": "조건부",
+    "reject": "거절",
+}
+
 #: 종료 코드를 사람이 읽는 결론으로. **"사라 / 사지 마라" 가 여기서 나온다.**
 _END_HEADLINE: dict[str, str] = {
     "E1_APPROVED": "매입안을 제시합니다. 고르시면 진행합니다.",
@@ -247,6 +258,26 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
         facts.append(Fact(label="사유", value=response.reason))
     if response.single_option:
         facts.append(Fact(label="남은 안", value="1개뿐입니다"))
+
+    # 🔴 **조언자 판정을 적는다.** 실측에서 물류가 `conditional` 을 냈는데 화면에
+    #    한 글자도 안 나왔다 (2026-08-31). 마스터는 그 값으로 `_acceptable` 을
+    #    정하면서 **사람에게는 안 보여줬다** — 무엇을 보고 통과시켰는지가 사라진다.
+    #
+    #    ★ `ok` 도 적는다. 통과한 부서를 지우면 *"물류만 봤나"* 로 읽힌다.
+    #    ★ 이유는 payload 안에 있고 부서마다 모양이 다르다 — **여기서 파헤치지
+    #      않는다.** 판정 라벨까지가 마스터가 아는 것이고, 자세한 것은 실행 이력이다.
+    for agent, verdict in (getattr(response, "verdicts", None) or {}).items():
+        label = _VERDICT_LABEL.get(str(verdict.get("business_status")), None)
+        if label is None:
+            continue
+        facts.append(Fact(label=f"{agent_label(agent)} 판정", value=label))
+        if verdict.get("suggested_adjustments"):
+            gaps.append(
+                f"{agent_label(agent)} 가 조정을 제안했습니다 "
+                f"({verdict['suggested_adjustments']}건) — 실행 이력에서 보십시오"
+            )
+        if verdict.get("business_status") == "conditional":
+            gaps.append(f"{agent_label(agent)} 판정이 조건부입니다 — 무조건 통과가 아닙니다")
 
     facts.append(
         Fact(
