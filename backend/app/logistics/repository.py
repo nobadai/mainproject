@@ -26,6 +26,13 @@ _NUMERIC_POLICY_KEYS = {
 }
 _TEXT_POLICY_KEYS = {"cap_by_date_policy"}
 _REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
+#: 선택 정책 2종 (LLM 정책 결정서 §4) — 업무 위험 signal 의 임계값.
+#: _REQUIRED_POLICY_KEYS 로 승격 금지: DB 행이 없는 순간 스냅샷 전체가 실패해
+#: 물류가 통째로 RUNTIME_NOT_READY 가 된다. 없으면 None → 해당 판정만 SKIPPED.
+_OPTIONAL_NUMERIC_POLICY_KEYS = {
+    "capacity_tight_ratio",
+    "freshness_pressure_ratio",
+}
 
 
 def get_active_logistics_policy() -> LogisticsPolicy:
@@ -60,7 +67,7 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
     source_refs: dict[str, str] = {}
     for row in rows:
         key = row.get("policy_key")
-        if key not in _REQUIRED_POLICY_KEYS:
+        if key not in _REQUIRED_POLICY_KEYS and key not in _OPTIONAL_NUMERIC_POLICY_KEYS:
             continue
         if key in values:
             raise ValueError(f"Duplicate Logistics policy key: {key}")
@@ -70,7 +77,7 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
             raise ValueError(f"Logistics policy usage_scope mismatch: {key}")
 
         kind = row.get("value_kind")
-        expected_kind = "NUMERIC" if key in _NUMERIC_POLICY_KEYS else "TEXT"
+        expected_kind = "TEXT" if key in _TEXT_POLICY_KEYS else "NUMERIC"
         if kind != expected_kind:
             raise ValueError(f"Invalid value_kind for Logistics policy {key}: {kind}")
         selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
@@ -94,6 +101,9 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
         raise LookupError(
             f"Required Logistics policies were not found: {', '.join(sorted(missing))}"
         )
+    # 선택 정책은 없어도 실패가 아니다 — None 으로 두면 해당 signal 판정만 꺼진다.
+    for optional_key in _OPTIONAL_NUMERIC_POLICY_KEYS:
+        values.setdefault(optional_key, None)
 
     inbound_lead_days = values["inbound_lead_days"]
     assert isinstance(inbound_lead_days, Decimal)
@@ -266,6 +276,8 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
         daily_inbound_capacity_kg=policy.daily_inbound_capacity_kg,
         inbound_transport_capacity_kg=policy.inbound_transport_capacity_kg,
         shared_daily_outbound_capacity_kg=policy.shared_daily_outbound_capacity_kg,
+        capacity_tight_ratio=policy.capacity_tight_ratio,
+        freshness_pressure_ratio=policy.freshness_pressure_ratio,
         evidence_refs=[
             f"DB:logistics_runtime_fixture/{fixture.fixture_id}",
             fixture.source_ref,
@@ -318,6 +330,9 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         grade=normalized_grade,
         available_qty_kg=quantity,
         remaining_freshness_days=freshness_limit - (as_of - received_at).days,
+        # remaining 계산에 쓴 그 한계를 그대로 싣는다 — 신선도 잔여 비율의 분모는
+        # operational_limit 원값이 아니라 이 값이어야 한다 (중 등급 왜곡 방지).
+        effective_freshness_limit_days=freshness_limit,
         status=row.get("status"),
         storage_zone=row.get("storage_zone"),
     )

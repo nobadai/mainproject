@@ -1,4 +1,4 @@
-"""Logistics-owned Ollama provider, policy, validator, retry and fallback runtime."""
+"""Logistics-owned LLM providers (Ollama·Gemini), policy, validator, retry and fallback runtime."""
 
 import json
 import os
@@ -16,16 +16,43 @@ from pydantic import ValidationError
 from app.logistics.llm.schemas import (
     AgentInterpretation,
     InterpretationResult,
+    LLMErrorKind,
     LLMStatus,
     SanitizedLLMContext,
 )
 
-_ENV_FILE = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+#: backend/.env 와 저장소 루트 .env 를 순서대로 읽는다 — 마스터 _ENV_FILES 패턴.
+#: 팀 환경에서 .env 가 루트에 있는 경우 backend/ 만 보면 키를 못 찾는다.
+_ENV_FILES = (
+    Path(__file__).resolve().parents[3] / ".env",
+    Path(__file__).resolve().parents[4] / ".env",
+)
+#: 물류 전용 환경변수 접두어 — 마스터의 MASTER_ 패턴 복제 (결정서 §6).
+#: 전역 LLM_PROVIDER 하나로 다른 Agent 까지 함께 바뀌는 것을 막는다.
+_ENV_PREFIX = "LOGISTICS_"
+#: Provider 별 기본 모델. Gemini 는 stable 버전을 pin 한다 — latest/preview 같은
+#: 자동 갱신 별칭은 출력 성향이 예고 없이 바뀌므로 금지 (결정서 §6).
+_DEFAULT_MODELS = {
+    "ollama": "gemma3:4b",
+    "gemini": "gemini-3.5-flash-lite",
+}
 _NUMERIC_PATTERN = re.compile(r"\d")
 _SENTENCE_SPLIT = re.compile(r"[.!?。]+")
 _MAX_SUMMARY_CHARACTERS = 240
-_QUALITATIVE_SIGNALS = {"FRESHNESS_QUALITY_RISK"}
-_COMPOSITE_SIGNALS = {"FRESHNESS_QUALITY_RISK"}
+#: 단독으로 LLM 을 호출할 수 있는 질적 업무 위험 (LLM 정책 결정서 §2).
+_QUALITATIVE_SIGNALS = {
+    "FRESHNESS_QUALITY_RISK",
+    "INVENTORY_FRESHNESS_PRESSURE",
+    "SCENARIO_ADJUSTMENT_REQUIRED",
+}
+#: 복합 위험 화이트리스트 — 2개 이상 겹치면 호출. 데이터 미확정 코드는 넣지 않는다.
+#:
+#: ★ 이 분기는 **의도적 휴면 상태다.** 현재 성립 가능한 조합에는 항상
+#:   INVENTORY_FRESHNESS_PRESSURE(Qualitative)가 끼어 단독 분기가 먼저 잡는다.
+#:   SCENARIO_ADJUSTMENT_REQUIRED 도 Qualitative 라 여기 넣어도 휴면이 안 풀린다 —
+#:   넣지 않는다. 단독 호출 대상이 아닌 업무 위험(예: 품목 재고 부족 signal)이
+#:   추가되는 날 처음으로 살아난다. 죽은 코드가 아니라 확장 자리다.
+_COMPOSITE_SIGNALS = {"CAPACITY_TIGHT", "INVENTORY_FRESHNESS_PRESSURE"}
 SYSTEM_PROMPT = """당신은 Inventory/Logistics Agent의 해석 레이어다.
 입력 Context는 deterministic Core와 Rule 검증을 통과했다.
 계산기나 결정 엔진이 아니며 질적 설명만 작성한다.
@@ -38,7 +65,13 @@ SYSTEM_PROMPT = """당신은 Inventory/Logistics Agent의 해석 레이어다.
 - 새로운 위험이나 원인을 생성하지 않는다.
 - facts의 의미를 과장하지 않는다.
 - summary는 최대 두 문장으로 작성하고 반복하지 않는다.
+- summary는 업무 위험 설명을 우선하고, 공간이 남는 경우에만 missing_data를 언급한다.
+- missing_data에 없는 부족 정보를 새로 만들지 않는다.
 - suggested_adjustment는 allowed_adjustments 중 하나만 선택한다.
+- preferred_adjustment가 있으면 suggested_adjustment는 반드시 그 값이어야 하며
+  그 방향만 설명한다.
+- preferred_adjustment가 null이면 suggested_adjustment도 null이다 — 조정 방향을
+  스스로 고르지 않는다.
 - allowed_adjustments가 비어 있으면 suggested_adjustment는 null이다.
 - 지정된 JSON Schema에 맞는 JSON만 출력한다."""
 
@@ -103,6 +136,95 @@ class OllamaProvider:
         return content
 
 
+#: Gemini API 기본 엔드포인트. LOGISTICS_GEMINI_BASE_URL 로만 바꾼다 —
+#: LLM_BASE_URL 은 Ollama 로컬 주소라 의미가 다르다.
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+#: Gemini 구조화 출력 스키마. AgentInterpretation 3필드를 Gemini 의 OpenAPI 서브셋
+#: 으로 평탄화한 것이다 — pydantic json_schema 의 anyOf 는 지원 범위 밖일 수 있어
+#: 손으로 고정한다. 필드가 늘면 여기도 같이 는다 (지금은 늘리지 않는 게 계약이다).
+_GEMINI_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "summary": {"type": "STRING"},
+        "risks": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "suggested_adjustment": {"type": "STRING", "nullable": True},
+    },
+    "required": ["summary", "risks", "suggested_adjustment"],
+}
+
+
+class GeminiProvider:
+    """Gemini REST 호출. 정책 판정은 하지 않는다 — 호출·구조화 응답·오류 전달만.
+
+    ★ API Key 는 호출 시점에 환경변수에서 읽는다 — `LLMSettings` 에 저장하지 않고
+      로그·예외 메시지에도 원문을 싣지 않는다 (결정서 §6). 키는 Auth Key 로 신규
+      발급한다 (2026-09 부터 Standard 키 전면 거부).
+    ★ SDK 를 쓰지 않고 표준 라이브러리만 쓴다 — 팀 Ollama 경로와 같은 규율이고,
+      HTTPError 가 그대로 전파되어 classify_llm_error 가 상태 코드로 분류한다.
+    ★ 자체 재시도는 없다 — 재시도는 InterpretationService 가 소유한다.
+    """
+
+    def __init__(self, settings: LLMSettings):
+        self.settings = settings
+
+    def generate(
+        self,
+        context: SanitizedLLMContext,
+        *,
+        retry_guidance: list[str] | None = None,
+    ) -> str:
+        api_key = os.getenv(f"{_ENV_PREFIX}GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ProviderAuthError("GEMINI_API_KEY is not set")
+        user_payload: dict[str, object] = {"context": context.model_dump(mode="json")}
+        if retry_guidance:
+            user_payload["correction"] = retry_guidance
+        payload = {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": json.dumps(user_payload, ensure_ascii=False)}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": _GEMINI_RESPONSE_SCHEMA,
+            },
+        }
+        base_url = (os.getenv(f"{_ENV_PREFIX}GEMINI_BASE_URL") or _GEMINI_BASE_URL).rstrip("/")
+        request = urllib.request.Request(
+            f"{base_url}/models/{self.settings.model}:generateContent",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            method="POST",
+        )
+        # HTTPError·URLError·TimeoutError 는 그대로 전파한다 — 분류는
+        # classify_llm_error 한 곳이 한다 (여기서 삼키면 재시도 정책이 눈을 잃는다).
+        with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds) as response:
+            document = json.loads(response.read().decode("utf-8"))
+        try:
+            content = document["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise TypeError("Gemini response did not contain text content") from error
+        if not isinstance(content, str):
+            raise TypeError("Gemini response text content was not a string")
+        return content
+
+
+class ProviderConfigurationError(RuntimeError):
+    """설정 문제(미지원 Provider·모델 등) — 다시 불러도 같으므로 즉시 FALLBACK."""
+
+
+class ProviderAuthError(RuntimeError):
+    """API Key 부재·인증 거부 — 재시도 무의미. Key 원문은 절대 싣지 않는다."""
+
+
 class UnavailableProvider:
     def generate(
         self,
@@ -111,7 +233,7 @@ class UnavailableProvider:
         retry_guidance: list[str] | None = None,
     ) -> str:
         del context, retry_guidance
-        raise RuntimeError("Configured Logistics LLM provider is not supported")
+        raise ProviderConfigurationError("Configured Logistics LLM provider is not supported")
 
 
 class ValidationIssue(StrEnum):
@@ -124,6 +246,7 @@ class ValidationIssue(StrEnum):
     TOO_MANY_SENTENCES = "TOO_MANY_SENTENCES"
     REPETITIVE_OUTPUT = "REPETITIVE_OUTPUT"
     UNSUPPORTED_ADJUSTMENT = "UNSUPPORTED_ADJUSTMENT"
+    PREFERRED_ADJUSTMENT_VIOLATION = "PREFERRED_ADJUSTMENT_VIOLATION"
 
 
 class InterpretationValidationError(ValueError):
@@ -159,24 +282,52 @@ class InterpretationService:
                 fallback=False,
             )
 
+        # 전송 재시도와 검증(correction) 재시도는 **별도 예산**이다 (결정서 §6).
+        # 하나의 카운터를 공유하면 첫 호출이 timeout 일 때 검증 실패의 correction
+        # 기회가 사라진다 — timeout → 잘못된 출력 → 교정 출력 순서가 성립해야 한다.
+        # 최악 호출 수는 1 + 전송 1 + 검증 1 = 3회로 유한하다.
         guidance = None
         attempts = 0
-        for _ in range(self.settings.max_retries + 1):
+        error_kind: LLMErrorKind | None = None
+        transport_retries_left = self.settings.max_retries
+        # 검증 correction 은 정책 고정 1회다 (결정서 §6). MAX_RETRIES 는 전송 재시도의
+        # 손잡이라 0 으로 꺼도 correction 경로까지 꺼지면 안 된다 — 교차 검토 지적.
+        validation_retries_left = 1
+        while True:
             attempts += 1
             try:
                 raw_output = self.provider.generate(context, retry_guidance=guidance)
+            except Exception as error:  # noqa: BLE001 - optional LLM cannot fail Logistics Core.
+                # 전송 실패 — 재시도 가치가 있는 오류만 다시 해본다 (결정서 §6).
+                # AUTH·QUOTA·BAD_REQUEST 는 다시 불러도 같으므로 즉시 FALLBACK.
+                retryable, error_kind = classify_llm_error(error)
+                if retryable and transport_retries_left > 0:
+                    transport_retries_left -= 1
+                    continue
+                break
+            try:
                 interpretation = validate_interpretation(raw_output, context)
-                return self._result(
-                    interpretation,
-                    status="SUCCESS",
-                    attempts=attempts,
-                    fallback=False,
-                )
             except InterpretationValidationError as error:
-                guidance = retry_guidance(error.issues)
-            except Exception:  # noqa: BLE001 - optional LLM cannot fail Logistics Core.
-                guidance = ["지정된 규칙과 JSON 형식에 맞춰 다시 작성하세요."]
-        return self._result(template, status="FALLBACK", attempts=attempts, fallback=True)
+                # 검증 실패 — 전송 재시도와 별개 경로. correction 을 붙여 다시 시도한다.
+                error_kind = "VALIDATION_FAILED"
+                if validation_retries_left > 0:
+                    validation_retries_left -= 1
+                    guidance = retry_guidance(error.issues)
+                    continue
+                break
+            return self._result(
+                interpretation,
+                status="SUCCESS",
+                attempts=attempts,
+                fallback=False,
+            )
+        return self._result(
+            template,
+            status="FALLBACK",
+            attempts=attempts,
+            fallback=True,
+            error_kind=error_kind,
+        )
 
     def _result(
         self,
@@ -185,6 +336,7 @@ class InterpretationService:
         status: LLMStatus,
         attempts: int,
         fallback: bool,
+        error_kind: LLMErrorKind | None = None,
     ) -> InterpretationResult:
         return InterpretationResult(
             interpretation=interpretation,
@@ -193,27 +345,103 @@ class InterpretationService:
             llm_model=self.settings.model,
             llm_attempts=attempts,
             llm_fallback_used=fallback,
+            # 최종 상태만 기록한다 — 재시도 후 성공이면 None (중간 실패는 로그 몫).
+            llm_error_kind=error_kind,
         )
 
 
+def _env(key: str, default: str) -> str:
+    return os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key) or default
+
+
+def _int_env(key: str, default: str, *, minimum: int) -> int:
+    """파싱 실패는 기본값으로 되돌린다 — `.env` 오타 하나로 물류가 죽으면 안 된다."""
+    try:
+        return max(minimum, int(_env(key, default)))
+    except (TypeError, ValueError):
+        return max(minimum, int(default))
+
+
+def _float_env(key: str, default: str, *, minimum: float) -> float:
+    try:
+        return max(minimum, float(_env(key, default)))
+    except (TypeError, ValueError):
+        return max(minimum, float(default))
+
+
 def get_llm_settings() -> LLMSettings:
-    load_dotenv(_ENV_FILE)
+    for env_file in _ENV_FILES:
+        load_dotenv(env_file)
+    scoped_provider = os.getenv(f"{_ENV_PREFIX}LLM_PROVIDER")
+    global_provider = (os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+    provider = (scoped_provider or global_provider).strip().lower()
+    # 모델은 provider 에 종속된 값이다. 물류 provider 가 전역과 **다를 때** 전역
+    # LLM_MODEL(예: Ollama 의 gemma3:4b)을 상속하면 Gemini 가 존재하지 않는 모델로
+    # 호출돼 400 이 난다 — 실호출 검증에서 실제로 발생한 사례다. 그 경우에만 전역
+    # 모델을 건너뛴다. provider 가 같으면(예: 둘 다 ollama) 전역 모델은 유효한
+    # 상속이므로 폴백 사슬(LOGISTICS_ → 전역 → 기본값)을 그대로 따른다.
+    if provider != global_provider and not os.getenv(f"{_ENV_PREFIX}LLM_MODEL"):
+        model = _DEFAULT_MODELS.get(provider, "")
+    else:
+        model = _env("LLM_MODEL", _DEFAULT_MODELS.get(provider, ""))
     return LLMSettings(
         enabled=_read_bool("LLM_ENABLED", default=True),
-        provider=os.getenv("LLM_PROVIDER", "ollama").strip().lower(),
-        model=os.getenv("LLM_MODEL", "gemma3:4b").strip(),
-        base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
-        timeout_seconds=max(0.1, float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))),
-        max_retries=min(1, max(0, int(os.getenv("LLM_MAX_RETRIES", "1")))),
+        provider=provider,
+        model=model.strip(),
+        base_url=_env("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+        # 기본 10초 (PROVISIONAL) — 원격 API 장애 시 최악 경로가 재시도 포함 약 20초
+        # 에서 끊기도록 잡는다. AI 는 보조 기능이라 물류 응답을 오래 잡으면 안 된다.
+        timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", "10", minimum=0.1),
+        max_retries=min(1, _int_env("LLM_MAX_RETRIES", "1", minimum=0)),
     )
+
+
+#: Provider registry — Ollama 는 제거하지 않는다. 선택은 물류 전용 env 가 정한다.
+_PROVIDERS: dict[str, type] = {
+    "ollama": OllamaProvider,
+    "gemini": GeminiProvider,
+}
 
 
 def get_interpretation_service() -> InterpretationService:
     settings = get_llm_settings()
-    provider: LLMProvider = (
-        OllamaProvider(settings) if settings.provider == "ollama" else UnavailableProvider()
-    )
+    factory = _PROVIDERS.get(settings.provider)
+    provider: LLMProvider = factory(settings) if factory else UnavailableProvider()
     return InterpretationService(settings, provider)
+
+
+def classify_llm_error(error: Exception) -> tuple[bool, LLMErrorKind]:
+    """전송 실패를 (재시도 가능 여부, 기록 분류)로 판정한다.
+
+    분류 로직은 이 함수 한 곳이다 — 재시도 정책과 llm_error_kind 기록이 같은
+    결과를 쓰므로 둘이 어긋날 수 없다 (결정서 §6). 오류 메시지의 세부(Key 원문 등)
+    는 분류값으로만 남고 그대로 실리지 않는다.
+    """
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, ProviderAuthError):
+            return False, "AUTH_ERROR"
+        if isinstance(cause, ProviderConfigurationError):
+            return False, "BAD_REQUEST"
+        if isinstance(cause, urllib.error.HTTPError):
+            if cause.code in (401, 403):
+                return False, "AUTH_ERROR"
+            if cause.code == 429:
+                return False, "QUOTA_EXCEEDED"
+            if 400 <= cause.code < 500:
+                return False, "BAD_REQUEST"
+            return True, "SERVER_ERROR"
+        if isinstance(cause, TimeoutError):
+            return True, "TIMEOUT"
+        if isinstance(cause, urllib.error.URLError):
+            if isinstance(cause.reason, TimeoutError):
+                return True, "TIMEOUT"
+            return True, "NETWORK_ERROR"
+        if isinstance(cause, json.JSONDecodeError | TypeError):
+            return True, "INVALID_RESPONSE"
+        cause = cause.__cause__
+    # 분류할 수 없는 예외 — 일시적일 수 있으므로 기존 동작(1회 재시도)을 유지한다.
+    return True, "NETWORK_ERROR"
 
 
 def needs_llm(
@@ -249,10 +477,11 @@ def _validation_issues(
     context: SanitizedLLMContext,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    output_text = " ".join(
-        [interpretation.summary, *interpretation.risks, interpretation.suggested_adjustment or ""]
-    )
-    if _NUMERIC_PATTERN.search(output_text):
+    # 숫자 금지는 summary·suggested_adjustment 만 검사한다. risks 는 signal 코드
+    # 보존 필드라 제외한다 — 코드에 숫자가 든 signal 이 오면(방어선) 보존 규칙과
+    # 숫자 규칙이 충돌해 구조적으로 매번 FALLBACK 이 되기 때문이다 (결정서 §5).
+    numeric_scope = " ".join([interpretation.summary, interpretation.suggested_adjustment or ""])
+    if _NUMERIC_PATTERN.search(numeric_scope):
         issues.append(ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN)
     expected_signals = set(context.signals)
     actual_signals = set(interpretation.risks)
@@ -277,6 +506,13 @@ def _validation_issues(
     adjustment = interpretation.suggested_adjustment
     if adjustment is not None and adjustment not in context.allowed_adjustments:
         issues.append(ValidationIssue.UNSUPPORTED_ADJUSTMENT)
+    # preferred 일관성 — Prompt 만 믿지 않는다 (결정서 §5). Rule 이 정한 방향과
+    # 다른 추천이 나가면 화면에서 결정론 결과와 LLM 이 서로 다른 말을 하게 된다.
+    if context.preferred_adjustment is not None:
+        if adjustment != context.preferred_adjustment:
+            issues.append(ValidationIssue.PREFERRED_ADJUSTMENT_VIOLATION)
+    elif adjustment is not None:
+        issues.append(ValidationIssue.PREFERRED_ADJUSTMENT_VIOLATION)
     return issues
 
 
@@ -300,6 +536,11 @@ def retry_guidance(issues: list[ValidationIssue]) -> list[str]:
         guidance.append(
             "suggested_adjustment는 허용 목록에서만 선택하고 목록이 비어 있으면 null로 두세요."
         )
+    if ValidationIssue.PREFERRED_ADJUSTMENT_VIOLATION in issues:
+        guidance.append(
+            "preferred_adjustment가 있으면 suggested_adjustment는 그 값이어야 하고, "
+            "없으면 null이어야 합니다."
+        )
     return guidance
 
 
@@ -312,14 +553,14 @@ def build_template_interpretation(context: SanitizedLLMContext) -> AgentInterpre
     return AgentInterpretation(
         summary=summary,
         risks=list(context.signals),
-        suggested_adjustment=(
-            context.allowed_adjustments[0] if context.allowed_adjustments else None
-        ),
+        # 템플릿도 preferred 규칙을 따른다 — Rule 이 방향을 안 정했으면 추천하지
+        # 않는다. allowed[0] 자동 추천은 preferred 강제와 충돌해 폐기했다.
+        suggested_adjustment=context.preferred_adjustment,
     )
 
 
 def _read_bool(key: str, *, default: bool) -> bool:
-    value = os.getenv(key)
+    value = os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}

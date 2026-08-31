@@ -9,12 +9,114 @@ from app.logistics.schemas import (
     FinalVerdict,
     InventoryLogisticsSnapshot,
     RuntimeStatus,
+    ScenarioValidationResult,
 )
 from app.logistics.tools import (
+    calculate_window_capacity_usage,
+    collect_freshness_pressure_inputs,
     find_in_transit_schedule_gap,
     has_unattributed_confirmed_outbound,
     is_inbound_schedule_complete,
 )
+
+# ---------------------------------------------------------------------------
+# 업무 위험 Signal (LLM 정책 결정서 §3)
+# ---------------------------------------------------------------------------
+#
+# ★ 이름에 숫자를 넣지 않는다 — LLM 출력 검증기의 숫자 금지 검사와 충돌하지 않기
+#   위한 명명 규칙이다 (`LOG-H02` 같은 내부 코드가 겪은 함정).
+# ★ 데이터/정책 미확정 코드는 여기 넣지 않는다 — signals 와 missing_data 는
+#   저장 위치가 아니라 **코드의 의미**로 분류한다.
+
+CAPACITY_TIGHT = "CAPACITY_TIGHT"
+INVENTORY_FRESHNESS_PRESSURE = "INVENTORY_FRESHNESS_PRESSURE"
+FRESHNESS_QUALITY_RISK = "FRESHNESS_QUALITY_RISK"
+SCENARIO_ADJUSTMENT_REQUIRED = "SCENARIO_ADJUSTMENT_REQUIRED"
+
+#: LLM 해석 대상 업무 위험의 전체 집합. 여기 없는 코드는 전부 미확정 계열이다.
+BUSINESS_SIGNALS = frozenset(
+    {
+        CAPACITY_TIGHT,
+        INVENTORY_FRESHNESS_PRESSURE,
+        FRESHNESS_QUALITY_RISK,
+        SCENARIO_ADJUSTMENT_REQUIRED,
+    }
+)
+
+#: 정책값 부재로 판정을 건너뛴 사실의 무숫자 경고 — 조용한 off 금지 (결정서 §4).
+#: "검사해서 문제 없음"과 "기준이 없어 검사 안 함"을 구분한다.
+CAPACITY_TIGHT_POLICY_UNRESOLVED = "CAPACITY_TIGHT_POLICY_UNRESOLVED"
+FRESHNESS_PRESSURE_POLICY_UNRESOLVED = "FRESHNESS_PRESSURE_POLICY_UNRESOLVED"
+#: 잔여일·유효 한계 미확인으로 신선도 비율 계산에서 제외된 Lot 이 있다는 사실.
+LOT_FRESHNESS_UNRESOLVED = "LOT_FRESHNESS_UNRESOLVED"
+
+#: Sales 에서 Rule 이 정하는 우선 조정 어휘. Procurement 의 quantity/timing 과
+#: 사이클 어휘를 섞지 않는다 (결정서 §5).
+SALES_PRIORITY_ADJUSTMENT = "우선 출고 대상으로 검토합니다."
+
+
+class BusinessSignalResult(TypedDict):
+    signals: list[str]
+    #: 판정 스킵·제외 사실 — 데이터/정책 미확정 계열. soft_warnings 로 나간다.
+    warnings: list[str]
+
+
+def evaluate_procurement_business_signals(
+    *,
+    as_of: date,
+    snapshot: InventoryLogisticsSnapshot | None,
+    scenario_results: list[ScenarioValidationResult],
+) -> BusinessSignalResult:
+    """PROCUREMENT 업무 위험 3종을 판정한다. 비교식은 여기(Rule)가 소유한다.
+
+    계산(사용률·신선도 비율)은 Tool 이 하고, 임계 비교와 signal 생성만 여기서 한다.
+    임계가 None(선택 정책 미등록)이면 판정을 지어내지 않고 SKIPPED + 경고다.
+    """
+    signals: list[str] = []
+    warnings: list[str] = []
+    if snapshot is not None:
+        usage = calculate_window_capacity_usage(snapshot, as_of)
+        if snapshot.capacity_tight_ratio is None:
+            warnings.append(CAPACITY_TIGHT_POLICY_UNRESOLVED)
+        elif usage is not None and usage >= snapshot.capacity_tight_ratio:
+            signals.append(CAPACITY_TIGHT)
+
+        ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
+        if snapshot.freshness_pressure_ratio is None:
+            warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
+        elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
+            signals.append(INVENTORY_FRESHNESS_PRESSURE)
+        if unresolved_lots:
+            warnings.append(LOT_FRESHNESS_UNRESOLVED)
+
+    # 조정 필요 = 이번 실행에서 실제로 conditional 이 나온 상태. ok-only 는 조정이
+    # 없고 reject-only 는 Rule 이 불가를 확정한 것이라 signal 을 만들지 않는다.
+    if any(result.verdict == "conditional" for result in scenario_results):
+        signals.append(SCENARIO_ADJUSTMENT_REQUIRED)
+    return {"signals": signals, "warnings": warnings}
+
+
+def evaluate_sales_business_signals(
+    *,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> BusinessSignalResult:
+    """SALES 신선도 위험을 비율 Rule 로 판정한다.
+
+    기존에는 Lot `status = NEEDS_PRIORITY_SHIPMENT` 에 의존했는데, 그 상태를 만드는
+    코드가 물류에 없고 DB 생성 주체도 확인되지 않아 실데이터에서 트리거가 죽는다 —
+    매입 전과 같은 비율 계산을 쓰되 사이클 업무 의미에 따라 이름만 달리 붙인다.
+    """
+    signals: list[str] = []
+    warnings: list[str] = []
+    if snapshot is not None:
+        ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
+        if snapshot.freshness_pressure_ratio is None:
+            warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
+        elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
+            signals.append(FRESHNESS_QUALITY_RISK)
+        if unresolved_lots:
+            warnings.append(LOT_FRESHNESS_UNRESOLVED)
+    return {"signals": signals, "warnings": warnings}
 
 
 class LogisticsRuleResult(TypedDict):

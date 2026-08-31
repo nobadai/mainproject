@@ -35,6 +35,70 @@ def calculate_expected_arrival_dates(
     )
 
 
+def calculate_window_capacity_usage(
+    snapshot: InventoryLogisticsSnapshot,
+    as_of: date,
+) -> Decimal | None:
+    """고정 18일 창에서 가장 빡빡한 날의 창고 사용률을 계산한다.
+
+    CAPACITY_TIGHT 판정의 분자다 (LLM 정책 결정서 §3). 판정 창을 매입 제안의
+    도착일이 아니라 `as_of + lead` 부터 고정 창으로 잡는 이유: 창고 상태 판정이
+    제안이 어떤 날짜를 담았느냐에 따라 흔들리면 안 되기 때문이다.
+
+    사용률 = 1 − (창 내 최소 cap / guaranteed). 점유가 guaranteed 를 넘으면
+    cap 이 0 으로 클램프되어 사용률은 1 에서 멈춘다. 계산에 필요한 입력이
+    없으면 None — 그 사실은 기존 Hard Constraint(LOG-H01·H05 등)가 이미
+    드러내므로 여기서 이름을 중복으로 만들지 않는다.
+    """
+    lead = snapshot.inbound_lead_days
+    guaranteed = snapshot.guaranteed_capacity_kg
+    if lead is None or guaranteed is None:
+        return None
+    start = as_of + timedelta(days=lead)
+    window = [start + timedelta(days=offset) for offset in range(CAP_BY_DATE_WINDOW_DAYS)]
+    try:
+        caps = calculate_cap_by_date(snapshot, window)
+    except ValueError:
+        # IN_TRANSIT_SCHEDULE_UNRESOLVED 등 — 필수 Fact 미확인. 그 사실은 기존
+        # Constraint 가 이미 이름을 밝히므로 여기서 중복으로 만들지 않는다.
+        return None
+    return Decimal(1) - (min(caps.values()) / guaranteed)
+
+
+def collect_freshness_pressure_inputs(
+    snapshot: InventoryLogisticsSnapshot,
+) -> tuple[list[Decimal], int]:
+    """가용 Lot 의 신선도 잔여 비율 목록과, 비율을 셈할 수 없어 제외된 Lot 수.
+
+    비율 = remaining_freshness_days ÷ effective_freshness_limit_days.
+    분모는 remaining 계산에 실제 사용된 유효 한계다 — operational_limit 원값을
+    쓰면 `중` 등급이 갓 입고돼도 임박 판정된다 (LLM 정책 결정서 §3).
+
+    대상은 가용 재고 Lot 이다: 비-ACTIVE(격리·검수 등)와 신선도 만료(<= 0) 확인
+    Lot 은 `build_inventory_by_item` 과 같은 기준으로 제외한다. remaining 이나
+    유효 한계가 None 인 Lot 은 0 취급도 위험 강제도 하지 않고 계산에서 빼되,
+    제외 수를 함께 반환해 호출부가 그 사실을 드러낼 수 있게 한다 (조용한 누락 금지).
+    grade=None 은 제외 사유가 아니다 — remaining 은 등급과 무관하게 계산된다.
+    """
+    ratios: list[Decimal] = []
+    unresolved = 0
+    for lot in snapshot.on_hand_by_lot:
+        if lot.status != _AVAILABLE_LOT_STATUS:
+            continue
+        if lot.remaining_freshness_days is None or lot.effective_freshness_limit_days is None:
+            unresolved += 1
+            continue
+        if lot.remaining_freshness_days <= 0:
+            continue
+        if lot.effective_freshness_limit_days <= 0:
+            unresolved += 1
+            continue
+        ratios.append(
+            Decimal(lot.remaining_freshness_days) / Decimal(lot.effective_freshness_limit_days)
+        )
+    return ratios, unresolved
+
+
 #: 품목을 식별할 수 없는 물리 점유·입고·출고를 담는 버킷 키.
 _UNATTRIBUTED: str | None = None
 

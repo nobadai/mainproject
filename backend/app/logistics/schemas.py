@@ -80,10 +80,20 @@ class InventoryLotSnapshot(BaseModel):
     grade: str | None = None
     available_qty_kg: Decimal = Field(ge=0)
     remaining_freshness_days: int | None = None
+    #: remaining_freshness_days 계산에 실제 사용된 유효 보관한계.
+    #: `중` 등급은 operational_limit × medium_grade_factor 가 유효 한계이므로,
+    #: 신선도 잔여 비율의 분모로 operational_limit 원값을 쓰면 갓 입고된 중 등급이
+    #: 즉시 임박 판정된다 — Rule 이 재계산하지 않도록 계산 주체가 여기 실어 준다.
+    effective_freshness_limit_days: int | None = None
     status: str = Field(min_length=1)
     storage_zone: str | None = None
 
-    @field_validator("available_qty_kg", "remaining_freshness_days", mode="before")
+    @field_validator(
+        "available_qty_kg",
+        "remaining_freshness_days",
+        "effective_freshness_limit_days",
+        mode="before",
+    )
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -118,6 +128,9 @@ class ItemStoragePolicyFact(BaseModel):
     #: DB에 값이 없으면 None을 유지한다 — 코드에서 기본값을 만들지 않는다.
     operational_limit_days: int | None = None
     #: 등급 사다리(#69)가 정리되기 전까지 의미를 재정의하지 않고 DB Fact 그대로 나른다.
+    #: ★ "재정의하지 않는다" = 물류가 해석·rename·재계산을 얹지 않는다는 뜻이다.
+    #:   소비자(매입)가 자기 계산에 쓰는 것을 막는 뜻이 아니다 — 값은 MVP 정책값
+    #:   (DB note)이고, #69 가 정하는 것은 계수 값이 아니라 곱하는 대상 등급이다.
     medium_grade_factor: Decimal | None = None
 
     @field_validator("operational_limit_days", "medium_grade_factor", mode="before")
@@ -148,6 +161,10 @@ class InventoryLogisticsSnapshot(BaseModel):
     daily_inbound_capacity_kg: Decimal | None = Field(default=None, gt=0)
     inbound_transport_capacity_kg: Decimal | None = Field(default=None, gt=0)
     shared_daily_outbound_capacity_kg: Decimal | None = Field(default=None, gt=0)
+    #: 선택 정책 2종 (LLM 정책 결정서 §4). 없으면 해당 업무 위험 판정만 SKIPPED 되고
+    #: 물류 계산은 정상 수행한다 — 필수 키로 승격 금지(행 없는 순간 전체 실패).
+    capacity_tight_ratio: Decimal | None = Field(default=None, gt=0, le=1)
+    freshness_pressure_ratio: Decimal | None = Field(default=None, gt=0, le=1)
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     evidence_refs: list[str]
 
@@ -159,6 +176,8 @@ class InventoryLogisticsSnapshot(BaseModel):
         "daily_inbound_capacity_kg",
         "inbound_transport_capacity_kg",
         "shared_daily_outbound_capacity_kg",
+        "capacity_tight_ratio",
+        "freshness_pressure_ratio",
         mode="before",
     )
     @classmethod
@@ -178,6 +197,10 @@ class LogisticsPolicy(BaseModel):
     inbound_transport_capacity_kg: Decimal = Field(gt=0)
     shared_daily_outbound_capacity_kg: Decimal = Field(gt=0)
     cap_by_date_policy: Literal["CONFIRMED_ONLY"]
+    #: 선택 정책 — DB에 행이 없으면 None 이며 해당 signal 판정만 꺼진다.
+    #: 값의 성격은 실업계 기준이 아니라 시뮬레이션 검증용 PROVISIONAL 이다.
+    capacity_tight_ratio: Decimal | None = Field(default=None, gt=0, le=1)
+    freshness_pressure_ratio: Decimal | None = Field(default=None, gt=0, le=1)
     policy_version: Literal["v1.3-PROVISIONAL"]
     usage_scope: Literal["AGENT_MVP_DEMO"]
     source_refs: dict[str, str]
@@ -189,6 +212,8 @@ class LogisticsPolicy(BaseModel):
         "daily_inbound_capacity_kg",
         "inbound_transport_capacity_kg",
         "shared_daily_outbound_capacity_kg",
+        "capacity_tight_ratio",
+        "freshness_pressure_ratio",
         mode="before",
     )
     @classmethod
@@ -331,6 +356,13 @@ class LogisticsProcurementResponse(LLMResponseFields):
     inbound_constraints: InboundConstraints
     hard_constraints: list[ConstraintResult]
     soft_warnings: list[str]
+    #: 사람이 읽을 미확정 항목의 무숫자 번역명. soft_warnings(원본 기계 코드)와
+    #: 채널을 분리한다 — 소비자가 AI 문장을 파싱하지 않고 바로 표시할 수 있고,
+    #: LLM Context의 missing_data와 같은 어휘를 쓴다.
+    missing_data: list[str] = Field(default_factory=list)
+    #: Rule/Scenario Engine 이 결정한 우선 조정 축(quantity/timing). 조정이 없거나
+    #: 축이 혼재하면 None — LLM 이 아니라 결정론 층이 정한 값이다.
+    preferred_adjustment: str | None = None
     evidences: list[LogisticsEvidence]
 
     @model_serializer(mode="wrap")
@@ -420,6 +452,11 @@ class LogisticsSalesResponse(LLMResponseFields):
     lot_constraints: list[LotConstraint]
     hard_constraints: list[ConstraintResult]
     soft_warnings: list[str]
+    #: PRE와 같은 채널 분리 — 원본 기계 코드는 soft_warnings, 무숫자 번역명은 여기.
+    missing_data: list[str] = Field(default_factory=list)
+    #: Sales 에서 Rule 이 정한 우선 조정(현행 어휘: 우선 출고 검토 문장). LLM 이 아니라
+    #: 결정론 층이 정한다 — 없으면 LLM 도 추천하지 않는다(검증기 강제).
+    preferred_adjustment: str | None = None
 
 
 class LogisticsAgentRunResponse(BaseModel):

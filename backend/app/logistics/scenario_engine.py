@@ -188,6 +188,22 @@ def _append_unique(codes: list[LogisticsReasonCode], code: LogisticsReasonCode) 
         codes.append(code)
 
 
+def derive_preferred_adjustment(
+    scenario_results: list[ScenarioValidationResult],
+) -> str | None:
+    """Rule 이 낸 조정 제안에서 우선 조정 축을 집계한다 (LLM 정책 결정서 §5).
+
+    전체 시나리오의 모든 adjustments[].axis 를 모아 고유 축이 정확히 1종이면 그 축,
+    혼재하거나 0건이면 None 이다. 근거 없이 하나를 고르지 않는다 — None 이면 LLM 도
+    추천하지 않는다(검증기 강제). reject 시나리오는 adjustments 가 비므로 자연히
+    집계에서 빠진다.
+    """
+    axes = {adjustment.axis for result in scenario_results for adjustment in result.adjustments}
+    if len(axes) == 1:
+        return next(iter(axes))
+    return None
+
+
 def run_logistics_sales_scenario(
     request: LogisticsSalesRequest,
     snapshot: InventoryLogisticsSnapshot | None,
