@@ -335,3 +335,42 @@ def test_정상적인_위험_고지는_잡지_않는다():
     )
 
     assert supplied(result) == []
+
+
+def test_짧은_키가_긴_키_안에_걸리지_않는다():
+    """🔴 **이름 전체로만 건다.** 실측 2026-08-31 (피마늘 관통) — 중첩 한 겹을 보게
+    되면서 `item` 이 `supplied` 에 들어왔고, 그 순간 매입 문장 **하나가 지적 두 줄**이
+    됐다. 화면에 같은 사유가 두 번 떴다.
+
+    ```text
+    "item_storage_policies 반영했으나 결론 미결"
+      item_storage_policies → 울린다 (맞다)
+      item                  → 그 이름 안에 걸려 또 울린다 (오탐)
+    ```
+
+    ★ **끼어든 키 규칙으로는 못 막았다.** `item` 의 match 가 이름 중간에서 끝나므로
+      뒤에 남는 것이 `_storage_policies …` 라 온전한 이름이 없다.
+    """
+    nested = {
+        "inventory": {
+            "item": "피마늘",
+            "item_storage_policies": [{"item": "피마늘", "operational_limit_days": 7}],
+        }
+    }
+
+    result = run(
+        with_risk("등급 배분 보류 — item_storage_policies 반영했으나 결론 미결"), nested
+    )
+
+    assert len(supplied(result)) == 1, f"오탐 포함: {supplied(result)}"
+    assert "item_storage_policies" in supplied(result)[0]
+
+
+def test_한글_조사가_붙어도_잡는다():
+    """`operational_limit_days는` — 조사는 식별자 글자가 아니라 경계로 친다."""
+    nested = {"inventory": {"item_storage_policies": [{"operational_limit_days": 7}]}}
+
+    result = run(with_risk("operational_limit_days는 미확정이라 보류"), nested)
+
+    assert len(supplied(result)) == 1
+    assert "operational_limit_days" in supplied(result)[0]

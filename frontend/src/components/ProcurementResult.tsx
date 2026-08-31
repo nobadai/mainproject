@@ -1,7 +1,9 @@
 "use client";
 
+import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
 import { Panel, SourceBadges } from "@/components/Badges";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
+import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
 
 /**
  * 매입 제안 결과.
@@ -73,10 +75,21 @@ export function ProcurementResult({
               ))}
             </ul>
           )}
-          {run.judgment?.situation && (
-            <p className="m-0 mt-2 font-mono text-[11.5px] text-faint">
-              매입 판단 · 상황 {run.judgment.situation}
-              {run.judgment.confidence ? ` · 확신 ${run.judgment.confidence}` : ""}
+          {/*
+            매입이 준 닫힌 집합을 한국어로 옮긴다. **모르는 값은 원문 + `미등록`** 이라
+            매입이 어휘를 늘린 날 화면에서 바로 보인다 (매입 2026-08-31 회신 ④).
+          */}
+          {vocab(SITUATION_LABEL, run.judgment?.situation) && (
+            <p className="m-0 mt-2 text-[11.5px] text-faint">
+              매입 판단 · 상황 {vocab(SITUATION_LABEL, run.judgment?.situation)}
+              {vocab(CONFIDENCE_LABEL, run.judgment?.confidence)
+                ? ` · 확신 ${vocab(CONFIDENCE_LABEL, run.judgment?.confidence)}`
+                : ""}
+              {(run.judgment?.allowed_axes ?? []).length > 0
+                ? ` · 열린 축 ${(run.judgment.allowed_axes ?? [])
+                    .map((a) => vocab(AXIS_LABEL, a) ?? a)
+                    .join("·")}`
+                : ""}
             </p>
           )}
         </div>
@@ -107,6 +120,12 @@ export function ProcurementResult({
       )}
 
       <SourceBadges sources={run.input_sources} />
+
+      {/*
+        🔴 판정 라벨 **밑에** 둔다. "조건부" 한 단어가 *"안에 문제가 있다"* 와
+        *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
+      */}
+      <AdvisorVerdicts verdicts={run.verdicts} />
 
       <Panel
         tone="attn"

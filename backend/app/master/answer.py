@@ -100,6 +100,20 @@ _VERDICT_LABEL: dict[str, str] = {
     "reject": "거절",
 }
 
+#: 부서가 **판정을 내지 않았다고 스스로 말하는** 값. 모르는 라벨과 갈라야 한다.
+_NO_VERDICT_STATUS = frozenset({"skipped", "", "None"})
+
+
+def _no_verdict(verdict: Mapping[str, Any]) -> bool:
+    """판정을 **안 낸** 것인가 (모르는 라벨을 낸 것과 다르다).
+
+    `runtime_status` 가 `READY` 가 아니면 그 봉투는 판정을 담고 있지 않다 —
+    부서가 무슨 라벨을 적었든 그것은 판정이 아니다.
+    """
+    if str(verdict.get("runtime_status") or "READY") != "READY":
+        return True
+    return str(verdict.get("business_status") or "") in _NO_VERDICT_STATUS
+
 #: 종료 코드를 사람이 읽는 결론으로. **"사라 / 사지 마라" 가 여기서 나온다.**
 _END_HEADLINE: dict[str, str] = {
     "E1_APPROVED": "매입안을 제시합니다. 고르시면 진행합니다.",
@@ -269,6 +283,24 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
     for agent, verdict in (getattr(response, "verdicts", None) or {}).items():
         label = _VERDICT_LABEL.get(str(verdict.get("business_status")), None)
         if label is None:
+            # 🔴 **"안 냈다" 와 "냈는데 모르는 값이다" 는 다르다.**
+            #
+            #   ```text
+            #   skipped · 비-READY   판정을 안 한 것       → 내지 못함 (적는다)
+            #   모르는 라벨           판정은 했는데 모른다   → 적지 않는다
+            #   ```
+            #
+            #   뒤엣것에 *"내지 못함"* 을 적으면 **부서가 안 한 일을 했다고 하는
+            #   것**이다. 모르는 라벨을 추측해 번역하지 않는 것은 이미 선 결정이다.
+            if not _no_verdict(verdict):
+                continue
+            # 앞엣것을 조용히 빼면 그 부서가 화면에서 통째로 사라져 *"안 물어봤다"* 와
+            # 구분되지 않는다 (실측 2026-08-31 — 물류 기준일 불일치 봉투로 재현).
+            facts.append(Fact(label=f"{agent_label(agent)} 판정", value="내지 못함"))
+            why = str(verdict.get("reasoning") or "").strip()
+            gaps.append(
+                f"{agent_label(agent)} 판정을 내지 못했습니다 — {why or '사유 미기재'}"
+            )
             continue
         facts.append(Fact(label=f"{agent_label(agent)} 판정", value=label))
         if verdict.get("suggested_adjustments"):

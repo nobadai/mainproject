@@ -364,6 +364,10 @@ class ProcurementFlow:
                 "payload": dict(reply.payload),
                 "suggested_adjustments": len(reply.suggested_adjustments),
                 "needs_followup": reply.needs_followup,
+                # 🔴 **판정을 못 냈을 때 유일하게 이유를 아는 칸이다.** 이것이 없으면
+                #   화면이 *"물류가 못 답했다"* 까지만 말하고 왜인지는 아무 데도 안 남는다
+                #   — 물류의 기준일 불일치 fail-closed 가 그런 모양이다 (2026-08-31 회신).
+                "reasoning": reply.reasoning,
             }
         return out
 
