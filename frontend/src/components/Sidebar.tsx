@@ -58,7 +58,7 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
   );
 
   return (
-    <aside className="flex w-[212px] shrink-0 flex-col gap-5 border-r border-line bg-sunk p-3">
+    <aside className="flex w-[212px] shrink-0 flex-col gap-5 overflow-y-auto border-r border-line bg-sunk p-3">
       <div className="flex items-center gap-2.5 px-1.5">
         <span className="grid size-[26px] place-items-center rounded-[7px] bg-accent text-[13px] font-bold text-white">
           햇

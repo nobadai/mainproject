@@ -271,7 +271,18 @@ export default function ConsolePage() {
   const isHistory = tab === "runs";
 
   return (
-    <div className="flex min-h-screen">
+    /**
+     * 🔴 `h-screen` 이지 `min-h-screen` 이 아니다. `min-h-screen` 은 **최소**만
+     * 정해서, 대화가 쌓이면 부모가 같이 늘어나고 스크롤이 대화 영역이 아니라
+     * **페이지 전체**에 걸린다. 그러면 하단 입력창과 왼쪽 사이드바가 화면 밖으로
+     * 밀려난다 — 매 턴 `tail.scrollIntoView()` 가 돌아 **보낸 직후에는 보이므로**
+     * 탭을 왕복하거나 위로 스크롤했을 때만 드러난다.
+     *
+     * 아래 스크롤 영역의 `min-h-0` 도 같이 있어야 한다. flex 아이템의 기본
+     * `min-height: auto` 는 내용 높이라 **`flex-1` 이 내용보다 작아지지 못하고**,
+     * `overflow-y-auto` 를 걸어도 스크롤이 안 걸린다.
+     */
+    <div className="flex h-screen">
       <Sidebar
         session={session}
         active={tab}
@@ -293,12 +304,12 @@ export default function ConsolePage() {
         </header>
 
         {isHistory ? (
-          <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
             <RunHistoryPanel known={runIds} />
           </div>
         ) : (
           <>
-            <div className="flex-1 space-y-3.5 overflow-y-auto px-6 py-5">
+            <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-6 py-5">
               {turns.length === 0 && <Empty onPick={send} />}
 
               {turns.map((turn, i) => (
