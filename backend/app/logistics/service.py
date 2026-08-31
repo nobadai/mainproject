@@ -110,7 +110,9 @@ def run_logistics_procurement_with_snapshot(
         preferred_adjustment=derive_preferred_adjustment(scenario_result["scenario_results"]),
         evidences=_evidences(snapshot),
     )
-    return enrich_logistics_response(response, interpretation_service)
+    return enrich_logistics_response(
+        response, interpretation_service, measurements=business["measurements"]
+    )
 
 
 def run_logistics_sales(request: LogisticsSalesRequest) -> LogisticsSalesResponse:
@@ -159,7 +161,9 @@ def run_logistics_sales_with_snapshot(
             SALES_PRIORITY_ADJUSTMENT if FRESHNESS_QUALITY_RISK in business["signals"] else None
         ),
     )
-    return enrich_logistics_response(response, interpretation_service)
+    return enrich_logistics_response(
+        response, interpretation_service, measurements=business["measurements"]
+    )
 
 
 def _merge_warnings(

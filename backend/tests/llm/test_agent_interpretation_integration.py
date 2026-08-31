@@ -106,7 +106,7 @@ def test_logistics_context_does_not_expose_freshness_number():
         preferred_adjustment="우선 출고 대상으로 검토합니다.",
     )
 
-    context = build_logistics_context(response)
+    context, _ = build_logistics_context(response)
     serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
 
     # 데이터 미확정 코드는 signals 에 섞이지 않는다 — 의미 기준 분류 (41-A).
