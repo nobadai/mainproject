@@ -437,17 +437,38 @@ class GeminiProvider:
         try:
             with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds) as response:
                 document = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            # 🔴 **`HTTPError` 는 감싸지 않는다.** `URLError` 의 하위라 아래 except 가
+            #    같이 먹는데, 감싸면 **상태 코드가 사라진다.** 실측에서 429(quota)를
+            #    `RuntimeError("Master Gemini request failed")` 로 덮어 버려, 한도에
+            #    걸린 것과 서버가 죽은 것이 **로그에서 같아 보였다.**
+            #
+            #    지금은 `classify` 가 어떤 예외든 fallback 으로 보내므로 화면 동작은
+            #    같지만, 원인을 **꺼낼 수 있게는 두어야** 한다 — 물류도 같은 이유로
+            #    HTTPError 를 그대로 흘린다.
+            raise
         except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
-            # 🔴 키를 메시지에 싣지 않는다. urllib 예외는 URL 을 담는데 키는 헤더라
-            #    안 끼지만, 여기서 새 메시지를 만들 때도 넣지 않는다.
+            # 키를 메시지에 싣지 않는다. urllib 예외는 URL 을 담는데 키는 헤더라
+            # 안 끼지만, 여기서 새 메시지를 만들 때도 넣지 않는다.
             raise RuntimeError("Master Gemini request failed") from error
-        try:
-            content = document["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError) as error:
-            raise TypeError("Gemini response did not contain text content") from error
-        if not isinstance(content, str):
-            raise TypeError("Gemini response text content was not a string")
-        return content
+        # 🔴 **`parts[0]` 이 아니다 — 사고 조각이 앞에 오는 모델이 있다.**
+        #    `gemini-3.5-flash-lite` 는 생각을 켜고 답하며, 그때 `parts` 앞머리에
+        #    `thought: true` 인 조각이 붙는다. 첫 조각만 보면 `text` 가 없어 터지고,
+        #    **호출은 성공했는데 FALLBACK 으로 떨어진다** — 화면에는 "못 알아들음"
+        #    으로 보여서 모델이 틀린 것처럼 읽힌다. 실측에서 `SELECT_SCENARIO` 가
+        #    12번 중 11번 이렇게 죽었다 (승인 마디가 통째로 안 되는 상황이다).
+        #
+        #    같은 함정을 `AnthropicProvider` 가 이미 주석으로 남겨 뒀는데 여기 옮기지
+        #    않았다. **프로바이더가 늘 때마다 다시 밟는 자리다.**
+        candidates = document.get("candidates") or []
+        parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
+        for part in parts:
+            if part.get("thought"):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                return text
+        raise TypeError("Gemini response did not contain text content")
 
 
 class UnavailableProvider:
