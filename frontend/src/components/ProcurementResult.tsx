@@ -1,5 +1,6 @@
 "use client";
 
+import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
 import { Panel, SourceBadges } from "@/components/Badges";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
 
@@ -107,6 +108,12 @@ export function ProcurementResult({
       )}
 
       <SourceBadges sources={run.input_sources} />
+
+      {/*
+        🔴 판정 라벨 **밑에** 둔다. "조건부" 한 단어가 *"안에 문제가 있다"* 와
+        *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
+      */}
+      <AdvisorVerdicts verdicts={run.verdicts} />
 
       <Panel
         tone="attn"

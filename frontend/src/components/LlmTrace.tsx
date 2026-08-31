@@ -31,7 +31,8 @@ const ACTION_LABEL: Record<IntentAction, string> = {
   UNKNOWN: "실행할 것 없음",
 };
 
-const AGENT_LABEL: Record<string, string> = {
+/** 부서 이름. **한 벌만 둔다** — 두 벌을 두면 언젠가 갈린다. */
+export const AGENT_LABEL: Record<string, string> = {
   finance: "재무",
   inventory: "물류",
   purchase: "매입",
