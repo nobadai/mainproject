@@ -6,6 +6,7 @@ from uuid import UUID
 from app.finance.interpretation import enrich_finance_response
 from app.finance.llm.runtime import InterpretationService
 from app.finance.repository import (
+    FinanceDataNotReady,
     get_current_finance_runtime_context,
 )
 from app.finance.rules import (
@@ -40,9 +41,17 @@ from app.finance.schemas import (
 
 
 def _get_current_finance_runtime_context_or_none() -> FinanceRuntimeContext | None:
+    """읽지 못한 것은 예외가 아니라 상태다 — 여기서 `None` 으로 접는다.
+
+    ★ `FinanceDataNotReady` 도 같이 접는다. 부채가 음수인 재무 상태는 이제 원천 행에서
+      막히는데(`repository._reject_negative_debt`), 그것이 `LookupError` 가 아니라는
+      이유로 여기를 뚫고 나가면 레거시 `/finance/sales` 가 **500** 을 낸다. 못 믿을
+      상태를 만난 결과는 서버 오류가 아니라 *"준비되지 않음"* 이어야 한다 — 아래
+      경로가 `context=None` 을 이미 그렇게 다룬다.
+    """
     try:
         return get_current_finance_runtime_context()
-    except LookupError:
+    except (LookupError, FinanceDataNotReady):
         return None
 
 

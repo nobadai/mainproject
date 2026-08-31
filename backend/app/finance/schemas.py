@@ -260,7 +260,10 @@ class FinanceSnapshot(BaseModel):
     committed_outflows_krw: Decimal
     unsettled_purchase_payables_krw: Decimal
     receivables_krw: Decimal = Decimal(0)
-    current_debt_krw: Decimal = Decimal(0)
+    #: 부채는 음수일 수 없다. 음수는 **"빚 없음"으로 오독되어** 부채 정책 검증과 상환
+    #: 일정을 통째로 건너뛰게 한다 — 잘못된 상태가 정상 응답으로 둔갑한다.
+    #: 원천 행 검증(`repository._reject_negative_debt`)과 **함께** 쓰는 이중 방어다.
+    current_debt_krw: Decimal = Field(default=Decimal(0), ge=0)
     financial_limit_krw: Decimal
 
     @field_validator(
