@@ -66,6 +66,28 @@ Mode = Literal[
 Trigger = Literal["ML_COMPLETE", "USER_REQUEST"]
 
 LLMStatus = Literal["SUCCESS", "SKIPPED_TEMPLATE", "FALLBACK", "DISABLED"]
+"""그 부서 안에서 LLM 이 어떻게 됐나. **네 값의 뜻을 여기 적는다.**
+
+```text
+DISABLED           설정이 꺼져 있다 (`LLM_ENABLED=false` · 프로바이더 미지원)
+SKIPPED_TEMPLATE   켜져 있는데 **이번 실행에서는 안 불렀다** — 부를 조건이 아니었다
+SUCCESS            불렀고 쓸 수 있는 답을 받았다
+FALLBACK           불렀는데 실패했다 — 규칙이 대신 답했다
+```
+
+🔴 **`DISABLED` 와 `SKIPPED_TEMPLATE` 를 섞지 않는다.** 섞으면 *"LLM 을 안 켰네"* 와
+*"켰는데 이번엔 안 썼네"* 가 구분되지 않는다 — 매입이 8/31 에 지적했다. 앞은 설정
+문제라 고칠 수 있고, 뒤는 그날의 사실이라 고칠 것이 없다. **둘을 한 값으로 내면
+사람이 없는 문제를 찾는다.**
+
+★ **새로 정한 규칙이 아니다.** 마스터 `IntentService` 와 Critic `JudgeService` 가
+  이미 이대로 쓴다 (`master/llm/runtime.py` · `critic/llm/runtime.py`). 다만 **뜻이
+  어디에도 안 적혀 있어서** 각 파트가 남의 코드를 읽고 유추해야 했다. 그것이
+  어휘가 갈리는 진짜 원인이었다.
+
+★ **`FALLBACK` 은 실패지 오류가 아니다.** 답은 나간다 — 규칙이 만든 답이다.
+  그래서 이 값이 없으면 **모델이 죽은 날과 산 날이 화면에서 같아 보인다.**
+"""
 
 _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     "finance": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
