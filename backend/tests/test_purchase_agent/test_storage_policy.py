@@ -10,8 +10,6 @@
 import re
 from datetime import date
 
-import pytest
-
 from app.master.verifier import MasterVerifier
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.allocate_sourcing import (
@@ -142,6 +140,7 @@ def test_real_shape_reports_grade_not_missing_value() -> None:
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     reason = shelf_days_block_reason(inventory, "상", ITEM)
     assert "등급" in reason and "#69" in reason
+    assert "item_storage_policies" in reason, "봉투 최상위 키로 말해야 마스터가 잡는다"
     assert "받지 못했다" not in reason, "값은 왔다 — 안 왔다고 적으면 안 된다"
 
 
@@ -164,30 +163,53 @@ def test_policy_alone_does_not_unblock_the_allocation() -> None:
 # ── 🔴 마스터 검사와의 접점 ──────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("key", ["operational_limit_days"])
-def test_our_reason_matches_the_master_unresolved_pattern(key: str) -> None:
-    """🔴 **12자 제약** — 마스터가 이 사유를 SUPPLIED-BUT-UNRESOLVED 로 잡는가.
+#: 물류가 봉투에 싣는 **최상위** 키 (2026-08-31 실측 `constraints.inventory`).
+#: 마스터의 `supplied` 집합이 이 층에서만 만들어진다 — 중첩 필드는 들어가지 않는다.
+ENVELOPE_TOP_LEVEL_KEYS = (
+    "warehouse_free_kg", "rental_cap_kg", "used_capacity_kg", "guaranteed_capacity_kg",
+    "burst_capacity_kg", "inbound_lead_days", "cap_by_date", "lots",
+    "item_storage_policies", "soft_warnings", "policy_version_used",
+)
 
-    ``MasterVerifier`` 가 ``re.escape(key) + _UNRESOLVED_NEAR`` 로 대조한다. 키 이름 뒤
-    **12자 안**에 미결 어휘가 없으면, 봉투에 실린 값을 쓰고도 결론이 안 났다는 사실이
-    검증 경로에 **안 뜬다.**
 
-    ⚠️ 패턴을 문자열로 베끼지 않고 **마스터에서 import** 한다. 복제하면 그쪽이 바뀔 때
-    이 검사가 거짓 안심을 준다 — 우리가 보려는 것은 "그때의 패턴"이 아니라 **지금 도는
-    패턴에 걸리는가**다.
+def test_master_actually_flags_our_reason() -> None:
+    """🔴 **마스터가 이 사유를 SUPPLIED-BUT-UNRESOLVED 로 잡는가** — 관문 둘을 다 본다.
+
+    ``_check_supplied_but_unused`` 는 두 조건이 **모두** 맞아야 울린다.
+
+    1. 키가 ``supplied`` 에 있을 것. 그 집합은 **봉투 payload 의 최상위 키**로만 만들어진다
+       (``for key, value in payload.items()``). 중첩 필드는 들어가지 않는다.
+    2. ``re.escape(key) + _UNRESOLVED_NEAR`` 에 걸릴 것 — 키 뒤 **12자 안**에 미결 어휘.
+
+    ⚠️ 처음에는 2번만 검사했고 통과했다. 그런데 실물에서 concerns 가 **0건**이었다 —
+    사유에 적은 ``operational_limit_days`` 가 ``item_storage_policies[]`` **안에** 있어
+    1번을 못 넘었기 때문이다 (2026-08-31 실측). **정규식에 걸리는 것과 마스터가 잡는 것은
+    다르다.** 그래서 이 검사는 두 관문을 함께 재현한다.
+
+    패턴은 문자열로 베끼지 않고 마스터에서 import 한다 — 복제하면 그쪽이 바뀔 때
+    거짓 안심을 준다.
     """
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     reason = shelf_days_block_reason(inventory, "상", ITEM)
-    pattern = re.compile(re.escape(key) + MasterVerifier._UNRESOLVED_NEAR)
-    assert pattern.search(reason), (
-        f"키 뒤 12자 안에 미결 어휘가 없다 — 마스터가 못 잡는다: {reason!r}"
-    )
+
+    hit = [
+        key
+        for key in ENVELOPE_TOP_LEVEL_KEYS
+        if re.compile(re.escape(key) + MasterVerifier._UNRESOLVED_NEAR).search(reason)
+    ]
+    assert hit, f"봉투 최상위 키 중 어느 것도 안 걸린다 — 마스터가 못 잡는다: {reason!r}"
+    assert "item_storage_policies" in hit
+
+
+def test_a_nested_field_name_alone_would_not_be_flagged() -> None:
+    """중첩 필드 이름만으로는 안 잡힌다 — 위 검사가 무엇을 막고 있는지 못박는다.
+
+    이 반례가 없으면 사유를 ``operational_limit_days`` 로 되돌려도 통과하는 줄 알기 쉽다.
+    """
+    assert "operational_limit_days" not in ENVELOPE_TOP_LEVEL_KEYS
 
 
 def test_the_distance_constraint_actually_bites() -> None:
-    """거리 제약이 **실제로 좁다**는 것 — 멀어지면 안 걸린다는 사실을 함께 잠근다.
-
-    위 검사만 있으면 문구를 늘려도 통과하는 줄 알기 쉽다. 반례를 함께 둔다.
-    """
-    pattern = re.compile(re.escape("operational_limit_days") + MasterVerifier._UNRESOLVED_NEAR)
-    assert not pattern.search("operational_limit_days 는 반영했으나 등급 어휘가 미확정이다")
+    """거리 제약이 **실제로 좁다**는 것 — 멀어지면 안 걸린다는 사실을 함께 잠근다."""
+    pattern = re.compile(re.escape("item_storage_policies") + MasterVerifier._UNRESOLVED_NEAR)
+    assert not pattern.search("item_storage_policies 는 반영했으나 등급 어휘가 미확정이다")
