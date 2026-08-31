@@ -70,7 +70,9 @@ def run_procurement(
         # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
         response.report_text = render_answer(facts_from_procurement(response))
         # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
-        persistence.record(request, response, elapsed_ms=_elapsed(started))
+        response.history_run_id = persistence.record(
+            request, response, elapsed_ms=_elapsed(started)
+        )
         return response
 
     inputs = _inputs_for(request)
@@ -88,7 +90,9 @@ def run_procurement(
     response = _to_response(context, outcome, inputs)
     response.concerns = [*response.concerns, *_decision_collision(request_id)]
     response.report_text = render_answer(facts_from_procurement(response))
-    persistence.record(request, response, elapsed_ms=_elapsed(started))
+    # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
+    #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
+    response.history_run_id = persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
 
 
@@ -114,9 +118,14 @@ def _decision_collision(request_id: str) -> list[str]:
     ★ **막지 않고 드러낸다.** 재실행 자체는 죄가 아니고, 승인 게이트를 마스터가
       들고 있으면 안 된다(8/26 회의). 사람이 보고 판단할 일이다.
 
-    ⚠️ **근본 해법은 결정이 어느 실행 행인지 가리키는 것**이다 — `master_decisions`
-      에 `run_id` 를 붙이는 DDL 이 필요해 팀 안건으로 올린다. 지금은 `request_id`
-      까지만 가리켜 같은 키의 두 실행을 구분하지 못한다.
+    ★ **근본 해법이 들어왔다 (2026-08-30, `master_decisions.run_id`).** 결정이
+      이제 실행 행을 가리키므로 *"그 결정이 이 실행을 가리키는 것처럼 보인다"* 는
+      **더 이상 사실이 아니다.** 그래도 경고는 남긴다 — 이력 조회가 그 키의 **최신
+      실행 하나**를 주기 때문에, 같은 키로 다시 돌리면 앞 결정이 보고 있던 계획이
+      화면에서 사라진다. 바뀐 것은 **문구가 가리키는 위험**이다.
+
+    ⚠️ 8/30 이전 결정은 `history_run_id` 가 `None` 이다 — 그때는 정말로 어느 실행인지
+      모른다. 그 경우 문구가 옛말 그대로여야 맞다.
     """
     try:
         existing = get_decisions(request_id)
@@ -126,13 +135,25 @@ def _decision_collision(request_id: str) -> list[str]:
         return []
     current = next((row for row in existing if row.is_current), existing[-1])
     label = f" · {current.scenario_label}" if current.scenario_label else ""
-    warning = (
+    head = (
         f"DECISION-COLLISION: 이 업무 키에는 이미 결정이 있다 "
         f"({current.decision_seq}회차 {current.decision}{label}). "
-        "같은 키로 다시 돌면 그 결정이 **이 실행을 가리키는 것처럼** 보인다 — "
-        "조건을 바꿔 다시 만들려면 새 업무 키를 써라"
     )
-    return [warning]
+    if current.history_run_id:
+        tail = (
+            f"그 결정은 **다른 실행**({current.history_run_id[:8]}…)을 가리키므로 이 "
+            "실행이 승인된 것은 아니다. 다만 이력 조회는 최신 실행 하나만 보여주므로 "
+            "앞 결정이 보고 있던 계획이 화면에서 사라진다 — 조건을 바꿔 다시 만들려면 "
+            "새 업무 키를 써라"
+        )
+    else:
+        # 8/30 이전 결정 — 정말로 어느 실행인지 모른다
+        tail = (
+            "그 결정은 **어느 실행을 가리키는지 기록되지 않았다** (2026-08-30 이전). "
+            "같은 키로 다시 돌면 그 결정이 이 실행을 가리키는 것처럼 보인다 — "
+            "조건을 바꿔 다시 만들려면 새 업무 키를 써라"
+        )
+    return [head + tail]
 
 
 def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
@@ -255,6 +276,7 @@ def get_run_history(request_id: str) -> RunHistoryOut:
     plan = list(row.get("plan") or [])
     return RunHistoryOut(
         request_id=row.get("request_id") or request_id,
+        run_id=(None if row.get("run_id") is None else str(row["run_id"])),
         as_of=row["as_of"],
         agent=row["agent"],
         cycle=row["cycle"],

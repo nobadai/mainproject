@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -44,6 +44,7 @@ class FakeStore:
         scenario_label: str | None = None,
         condition_text: str | None = None,
         follow_up_request_id: str | None = None,
+        history_run_id: str | None = None,
         note: str | None = None,
     ) -> DecisionOut:
         row = DecisionOut(
@@ -56,6 +57,7 @@ class FakeStore:
             decided_by=decided_by,
             follow_up_request_id=follow_up_request_id,
             end_code_at_decision=end_code_at_decision,
+            history_run_id=history_run_id,
             note=note,
             created_at=datetime.now(UTC),
             is_current=True,
@@ -64,9 +66,22 @@ class FakeStore:
         return row
 
 
-def _run_row(end_code: str = "E1_APPROVED", labels: tuple[str, ...] = LABELS) -> dict[str, Any]:
+#: 실행 이력 행의 id. **가짜가 실제를 닮아야 한다** — 이 키가 없던 탓에 결정이
+#: 실행을 가리키게 만들 때 테스트 14건이 한꺼번에 무너졌다 (2026-08-30).
+RUN_UUID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+OTHER_RUN_UUID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+
+def _run_row(
+    end_code: str = "E1_APPROVED",
+    labels: tuple[str, ...] = LABELS,
+    *,
+    run_id: UUID = RUN_UUID,
+    request_id: str = REQ,
+) -> dict[str, Any]:
     return {
-        "request_id": REQ,
+        "run_id": run_id,
+        "request_id": request_id,
         "response_payload": {
             "end_code": end_code,
             "scenarios": [{"label": label} for label in labels],
@@ -94,13 +109,27 @@ def client(store):
     return TestClient(app)
 
 
-def _set_run(monkeypatch, row: dict[str, Any] | None) -> None:
-    def fake(request_id: str) -> dict[str, Any]:
+def _set_run(
+    monkeypatch, row: dict[str, Any] | None, *, by_id: dict[str, Any] | None = None
+) -> None:
+    """최신 실행(`get_run_by_request_id`) 과 id 조회(`get_run`) 를 같이 세운다.
+
+    `by_id` 를 주면 **화면이 본 실행**이 최신과 다른 상황을 만든다.
+    """
+
+    def latest(request_id: str) -> dict[str, Any]:
         if row is None:
             raise LookupError(f"실행 이력이 없다: {request_id}")
         return row
 
-    monkeypatch.setattr(decision_service, "get_run_by_request_id", fake)
+    def by_uuid(run_id: UUID) -> dict[str, Any]:
+        target = by_id if by_id is not None else row
+        if target is None or target["run_id"] != run_id:
+            raise LookupError(f"실행 이력이 없다: {run_id}")
+        return target
+
+    monkeypatch.setattr(decision_service, "get_run_by_request_id", latest)
+    monkeypatch.setattr(decision_service, "get_run", by_uuid)
 
 
 def _post(client, **kw):
@@ -225,3 +254,69 @@ def test_결정_이력은_오래된_것부터_최신만_current(client, monkeypa
 def test_결정이_없으면_빈_목록(client, monkeypatch):
     _set_run(monkeypatch, _run_row())
     assert client.get(f"/master/runs/{REQ}/decisions").json() == []
+
+
+# ── 결정이 **어느 실행**을 가리키나 (2026-08-30) ────────────────────────
+#
+# 실측에서 한 업무 키에 실행이 75행이었고, 1회차 승인이 그중 68건 가운데 무엇을
+# 승인한 것인지 DB 에 없었다. 이력 조회는 최신을 주므로 재실행이 한 번 더 일어나면
+# **사람이 승인한 수량과 화면이 승인됐다고 말하는 수량이 갈린다** — 라벨이 같아
+# 눈에 안 띈다. 아래 넷이 그 자리를 지킨다.
+
+
+def test_화면이_본_실행을_그대로_가리킨다(client, monkeypatch, store):
+    _set_run(monkeypatch, _run_row())
+    res = _post(
+        client,
+        decision="APPROVE",
+        scenario_label="기본",
+        history_run_id=str(RUN_UUID),
+    )
+    assert res.status_code == 201
+    assert res.json()["history_run_id"] == str(RUN_UUID)
+
+
+def test_최신이_아닌_실행도_막지_않고_그것을_가리킨다(client, monkeypatch, store):
+    """🔴 **막지 않고 드러낸다.**
+
+    화면이 A 를 보는 사이 B 가 돌았어도, 사람이 A 를 보고 결정한 것은 **사실**이다.
+    거절하면 그 사실이 사라지고, 최신으로 바꿔 적으면 **거짓**이 된다.
+    낡았다는 것은 `history_run_id` 가 최신 행과 다르다는 사실로 이미 드러난다.
+    """
+    seen = _run_row(run_id=RUN_UUID)
+    latest = _run_row(run_id=OTHER_RUN_UUID)
+    _set_run(monkeypatch, latest, by_id=seen)
+
+    res = _post(
+        client,
+        decision="APPROVE",
+        scenario_label="기본",
+        history_run_id=str(RUN_UUID),
+    )
+    assert res.status_code == 201
+    # 최신(OTHER)이 아니라 **본 것**(RUN)을 가리킨다
+    assert res.json()["history_run_id"] == str(RUN_UUID)
+
+
+def test_다른_업무_키의_실행은_거부된다(client, monkeypatch, store):
+    """DB 의 복합 FK 가 최종적으로 막지만, 여기서 잡아야 **이유**를 돌려준다."""
+    남의것 = _run_row(run_id=OTHER_RUN_UUID, request_id="REQ-남의것-0001")
+    _set_run(monkeypatch, _run_row(), by_id=남의것)
+
+    res = _post(
+        client,
+        decision="APPROVE",
+        scenario_label="기본",
+        history_run_id=str(OTHER_RUN_UUID),
+    )
+    assert res.status_code == 422
+    assert "REQ-남의것-0001" in res.json()["detail"]
+
+
+def test_안_실으면_최신을_고르되_그_사실이_기록에_남는다(client, monkeypatch, store):
+    """예전 클라이언트를 깨지 않는다. 다만 **경합이 남는다** — 화면은 실어야 한다."""
+    _set_run(monkeypatch, _run_row())
+    res = _post(client, decision="APPROVE", scenario_label="기본")
+    assert res.status_code == 201
+    # 최신 실행을 가리킨다 — NULL 이 아니다
+    assert res.json()["history_run_id"] == str(RUN_UUID)

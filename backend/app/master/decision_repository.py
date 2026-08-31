@@ -28,6 +28,9 @@ _COLUMNS = (
     "decided_by",
     "follow_up_request_id",
     "end_code_at_decision",
+    # DB 컬럼은 `run_id` 지만 코드에서는 `history_run_id` 로 부른다 —
+    # `plan[].run_id`(부서 호출 id) 와 헷갈리지 않게 하려는 것이다.
+    "run_id",
     "note",
     "created_at",
 )
@@ -48,6 +51,7 @@ def _row_to_out(row: dict[str, Any]) -> DecisionOut:
         decided_by=row["decided_by"],
         follow_up_request_id=row.get("follow_up_request_id"),
         end_code_at_decision=row["end_code_at_decision"],
+        history_run_id=(None if row.get("run_id") is None else str(row["run_id"])),
         note=row.get("note"),
         created_at=row["created_at"],
     )
@@ -77,6 +81,7 @@ def save_decision(
     scenario_label: str | None = None,
     condition_text: str | None = None,
     follow_up_request_id: str | None = None,
+    history_run_id: str | None = None,
     note: str | None = None,
 ) -> DecisionOut:
     """결정 1건을 적재한다.
@@ -89,9 +94,10 @@ def save_decision(
         """
         INSERT INTO {}.{} (
             decision_id, request_id, decision_seq, decision, scenario_label,
-            condition_text, decided_by, follow_up_request_id, end_code_at_decision, note
+            condition_text, decided_by, follow_up_request_id, end_code_at_decision,
+            run_id, note
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING {}
         """
     ).format(
@@ -111,6 +117,7 @@ def save_decision(
             decided_by,
             follow_up_request_id,
             end_code_at_decision,
+            history_run_id,
             note,
         ),
     )

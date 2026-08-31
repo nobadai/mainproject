@@ -49,6 +49,8 @@ export interface DecisionOut {
   decided_by: string;
   follow_up_request_id: string | null;
   end_code_at_decision: string;
+  /** 이 결정이 가리키는 실행. `null` 은 **"어느 실행인지 기록되지 않았다"** 이다. */
+  history_run_id: string | null;
   created_at: string;
   is_current: boolean;
 }
@@ -90,6 +92,20 @@ export type EndCode =
 export interface ProcurementRunResponse {
   request_id: string;
   as_of: string;
+  /**
+   * 🔴 **이 실행이 이력에 남은 행의 id.**
+   *
+   * `plan[].run_id` 와 **다른 것이다** — 저쪽은 그 *부서 호출* 의 id 이고 이것은
+   * *마스터 실행 한 번* 의 id 다.
+   *
+   * 승인·재요청 때 이 값을 **그대로 되돌려 준다.** 그래야 "내가 본 그것을
+   * 승인했다" 가 기록된다. 안 보내면 서버가 최신 실행을 고르는데, 그 사이
+   * 재실행이 있었으면 **본 것과 다른 안이 승인된 것으로 남는다** (라벨이 같아
+   * 눈에 안 띈다).
+   *
+   * 적재 실패 시 `null` — 이력이 없어도 계산 결과는 온다.
+   */
+  history_run_id: string | null;
   end_code: EndCode;
   reason: string;
   scenarios: Scenario[];
@@ -123,9 +139,14 @@ export function isProcurement(r: ExecuteResponse): r is ProcurementRunResponse {
 
 export interface RunHistory {
   request_id: string;
+  /** 돌려받은 이 행의 id — 결정이 **이 실행**을 가리키는지 대조하는 데 쓴다. */
+  run_id: string | null;
   as_of: string;
   cycle: string;
   runtime_status: string;
+  /** 이 계획을 만든 실행의 시각. **같은 업무 키에 실행이 여럿이라 필요하다.** */
+  created_at: string;
+  elapsed_ms: number | null;
   plan: Record<string, unknown>[];
   decisions: DecisionOut[];
 }

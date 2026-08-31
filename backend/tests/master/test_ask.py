@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -77,10 +77,13 @@ def decisions(monkeypatch):
         rows.append(row)
         return row
 
-    def get_run(request_id: str) -> dict:
-        if request_id != TARGET:
-            raise LookupError(f"실행 이력이 없다: {request_id}")
+    # 실행 이력 행의 id. **가짜가 실제를 닮아야 한다** — 이 키가 없으면 결정이
+    # 실행을 가리키는 경로가 통째로 안 돈다 (2026-08-30).
+    target_run_uuid = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+
+    def _row() -> dict:
         return {
+            "run_id": target_run_uuid,
             "request_id": TARGET,
             "response_payload": {
                 "end_code": "E1_APPROVED",
@@ -88,9 +91,20 @@ def decisions(monkeypatch):
             },
         }
 
+    def get_run(request_id: str) -> dict:
+        if request_id != TARGET:
+            raise LookupError(f"실행 이력이 없다: {request_id}")
+        return _row()
+
+    def get_run_by_uuid(run_id: UUID) -> dict:
+        if run_id != target_run_uuid:
+            raise LookupError(f"실행 이력이 없다: {run_id}")
+        return _row()
+
     monkeypatch.setattr(decision_service, "list_decisions", list_decisions)
     monkeypatch.setattr(decision_service, "save_decision", save_decision)
     monkeypatch.setattr(decision_service, "get_run_by_request_id", get_run)
+    monkeypatch.setattr(decision_service, "get_run", get_run_by_uuid)
     return rows
 
 

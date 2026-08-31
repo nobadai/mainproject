@@ -101,10 +101,19 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
             <span className="font-mono text-[11.5px] text-faint">
               {data.cycle} · {data.runtime_status} · 기준일 {data.as_of}
             </span>
+            {/* 🔴 같은 업무 키로 다시 돌리면 실행 행이 쌓인다 — 실측에서 한 키에 74행이
+                나왔다 (2026-08-30). 서버는 **마지막 하나**를 돌려주는데, 화면이 그 말을
+                안 하면 "이 키에 실행이 하나뿐"으로 읽힌다. 어느 실행인지 시각으로 못박는다. */}
+            <span className="w-full font-mono text-[11px] text-muted">
+              아래 호출 순서는 이 업무 키의 <b className="text-ink">마지막 실행</b>입니다 —{" "}
+              {data.created_at.slice(0, 16).replace("T", " ")}
+              {data.elapsed_ms != null && ` · ${data.elapsed_ms}ms`}
+              . 같은 키로 여러 번 돌렸다면 그 전 실행은 여기 안 나옵니다.
+            </span>
           </div>
 
           <PlanTable rows={data.plan} />
-          <Decisions rows={data.decisions} />
+          <Decisions rows={data.decisions} latestRunId={data.run_id ?? null} />
         </>
       )}
     </div>
@@ -172,7 +181,7 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
   );
 }
 
-function Decisions({ rows }: { rows: DecisionOut[] }) {
+function Decisions({ rows, latestRunId }: { rows: DecisionOut[]; latestRunId: string | null }) {
   if (rows.length === 0)
     return (
       <p className="m-0 rounded-lg border border-line bg-sunk p-3 text-[13px] text-muted">
@@ -216,6 +225,24 @@ function Decisions({ rows }: { rows: DecisionOut[] }) {
                 → 후속 실행 {row.follow_up_request_id}
               </p>
             )}
+            {/* 🔴 **무엇을 보고 결정했나.** 한 업무 키에 실행이 여러 행이라, 이게
+                없으면 "그 안" 이 어느 실행의 안인지 나중에 답할 수 없다. */}
+            <p className="m-0 mt-1 font-mono text-[11px] text-faint">
+              {row.history_run_id ? (
+                <>
+                  본 실행 {row.history_run_id.slice(0, 8)}…
+                  {row.history_run_id !== latestRunId && (
+                    <span className="ml-1.5 text-warn">
+                      (이 화면 위의 마지막 실행과 다릅니다)
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-warn">
+                  어느 실행인지 기록되지 않았습니다 — 2026-08-30 이전 결정입니다
+                </span>
+              )}
+            </p>
           </li>
         ))}
       </ol>

@@ -89,6 +89,20 @@ class StepOut(BaseModel):
 class ProcurementRunResponse(BaseModel):
     request_id: str
     as_of: date
+
+    #: 🔴 **이 실행이 이력에 남은 행의 id** (2026-08-30 신설).
+    #:
+    #: `plan[].run_id` 와 **다른 것이다** — 저쪽은 그 *부서 호출* 의 id 이고,
+    #: 이것은 *마스터 실행 한 번* 의 id 다. 이름이 겹쳐 헷갈리므로 여기서는
+    #: `history_run_id` 로 부른다 (DB 컬럼은 `orchestrator_agent_runs.run_id`).
+    #:
+    #: 화면이 승인할 때 이 값을 되돌려 준다 — 그래야 *"내가 본 그것을 승인했다"* 가
+    #: 기록된다. 없으면 서버가 최신 실행을 고르는데, 그 사이 재실행이 있었으면
+    #: **사람이 본 것과 다른 안이 승인된 것으로 남는다.**
+    #:
+    #: 적재에 실패하면 `None` 이다 — 이력이 없어도 계산 결과는 돌려준다.
+    history_run_id: str | None = None
+
     end_code: EndCode
     reason: str
 
@@ -175,6 +189,10 @@ class RunHistoryOut(BaseModel):
     """
 
     request_id: str
+    #: 🔴 **돌려주는 이 행의 id.** 같은 업무 키에 실행이 여러 행이라, 이게 없으면
+    #: 화면이 *"지금 보는 계획이 어느 실행 것인가"* 와 *"이 결정이 그 실행을
+    #: 가리키나"* 를 대조할 수 없다.
+    run_id: str | None = None
     as_of: date
     agent: str
     cycle: str

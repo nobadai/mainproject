@@ -64,6 +64,16 @@ class AskExecuteRequest(BaseModel):
     #: 승인**할 수 있다.
     target_request_id: str | None = None
 
+    #: 🔴 **화면이 보고 있던 실행의 이력 행 id** (2026-08-30 신설).
+    #:
+    #: `target_request_id` 는 **업무 키**라 한 키에 실행이 여러 행이면 어느 것인지
+    #: 못 가린다 (실측: 한 키에 75행). 그 사이 재실행이 있었으면 **사람이 본 안과
+    #: 다른 안이 승인된 것으로 남는다** — 라벨이 같아 눈에 안 띈다.
+    #:
+    #: 화면이 응답의 `history_run_id` 를 그대로 되돌려 주면 된다. 안 주면 서버가
+    #: 최신 실행을 고르고, **그때는 경합이 남는다.**
+    target_history_run_id: str | None = None
+
     #: 🔴 **승인자.** `SELECT_SCENARIO` 에 필수다.
     #:
     #: *"승인자가 없는 승인은 승인이 아니다"* (`decision.py`). **말로 골랐다고 승인자가
