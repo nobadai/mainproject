@@ -37,8 +37,6 @@ from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 
 FinanceMode = Literal["PRE_PURCHASE", "SCENARIO_VALIDATION"]
-Adjustability = Literal["NOT_NEEDED", "ADJUSTABLE", "NOT_ADJUSTABLE"]
-
 DEFAULT_MAX_TOOL_CALLS = 8
 DEFAULT_MAX_REPLANS = 2
 
@@ -51,22 +49,94 @@ _ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",
 )
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-_GEMINI_PLANNER_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "tool_name": {"type": "string", "nullable": True},
-        "arguments": {
-            "type": "object",
-            "properties": {
-                "axis": {"type": "string"},
-                "candidate_amount_krw": {"type": "number"},
+def _planner_response_schema(
+    allowed_tools: frozenset[str], *, planning_required: bool
+) -> dict[str, Any]:
+    """이번 호출에서 Planner 가 낼 수 있는 형태를 그대로 스키마로 만든다.
+
+    ★ **Provider 마다 Tool 허용 수준이 달라지면 안 된다.** Ollama 는 ``format`` 으로
+      enum 을 강제하는데 Gemini 쪽만 자유 문자열이면, 같은 재무 판단이 Provider 에
+      따라 다른 Tool 을 부를 수 있게 열린다. 두 Planner 가 같은 스키마를 쓴다.
+
+    ★ 스키마는 **1차 방어**일 뿐이다. `_validate_planner_action` 사후 검증을 대체하지
+      않는다 — 구조화 출력을 무시하는 모델이 있고, 그때 걸러야 할 곳은 우리 쪽이다.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "tool_name": (
+                {"type": "string", "enum": sorted(allowed_tools)}
+                if planning_required
+                else {"type": "null"}
+            ),
+            "arguments": {
+                "type": "object",
+                "properties": {
+                    "axis": {"type": "string"},
+                    "candidate_amount_krw": {"type": "number"},
+                },
             },
+            "reason": {"type": "string"},
+            "finalize": {"type": "boolean", "enum": [not planning_required]},
         },
-        "reason": {"type": "string"},
-        "finalize": {"type": "boolean"},
+        "required": ["tool_name", "arguments", "reason", "finalize"],
+    }
+
+
+_PLANNER_SYSTEM_PROMPT = (
+    "You plan Finance capability calls. Select only an allowed tool. "
+    "Never calculate or invent financial numbers or policy values. "
+    "Use observations only. When missing_capabilities is non-empty, you MUST set "
+    "finalize=false and select exactly one allowed tool that can satisfy a missing "
+    "capability. You may set finalize=true only when missing_capabilities is empty; "
+    "then tool_name must be null. For validate_amount_adjustment, copy the observed "
+    "deterministic finance_cap_amount_krw exactly and set axis to amount."
+)
+
+_TOOL_ARGUMENT_CONTRACTS = {
+    "assess_finance_position": {},
+    "project_cashflow": {},
+    "calculate_purchase_finance_cap": {},
+    "analyze_payment_pressure": {},
+    "evaluate_purchase_scenario": {},
+    "validate_amount_adjustment": {
+        "axis": "amount",
+        "candidate_amount_krw": (
+            "copy the exact finance_cap_amount_krw from a prior observation; "
+            "never create a number"
+        ),
     },
-    "required": ["tool_name", "arguments", "reason", "finalize"],
 }
+
+
+def _planner_prompt(
+    *,
+    request: AgentRequest,
+    allowed_tools: frozenset[str],
+    observations: tuple[dict[str, Any], ...],
+    missing_capabilities: tuple[str, ...],
+) -> dict[str, Any]:
+    """두 Planner 가 같은 입력을 본다.
+
+    직전 재계획 사유는 Controller 가 ``observations`` 에 남긴 GUARD 항목에서 뽑는다 —
+    Planner 계약에 인자를 더하지 않고도 **왜 반려됐는지**를 모델에게 되돌려준다.
+    """
+    rejected = [
+        {key: value for key, value in observation.items() if key != "branch_id"}
+        for observation in observations
+        if observation.get("type") == "GUARD"
+    ]
+    prompt: dict[str, Any] = {
+        "mode": request.mode,
+        "business_payload": dict(request.payload),
+        "allowed_tools": sorted(allowed_tools),
+        "observations": observations,
+        "missing_capabilities": missing_capabilities,
+        "tool_argument_contracts": _TOOL_ARGUMENT_CONTRACTS,
+    }
+    if rejected:
+        prompt["previous_attempts_rejected"] = rejected
+    return prompt
 
 
 def _load_finance_environment() -> None:
@@ -74,7 +144,37 @@ def _load_finance_environment() -> None:
         load_dotenv(env_file, override=False)
 
 
+def _read_bool(key: str) -> bool | None:
+    """설정된 경우에만 bool 을 돌려준다. 미설정과 false 를 섞지 않기 위해서다."""
+    value = os.getenv(key)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def finance_llm_enabled() -> bool:
+    """Finance Agent LLM 활성화 여부.
+
+    ``FINANCE_LLM_ENABLED`` → ``LLM_ENABLED`` → 기본 활성. 재무만 끄고 싶은 경우와
+    전역으로 끈 경우를 구분한다 (재무 전용 키가 전역 키를 이긴다).
+    """
+    _load_finance_environment()
+    finance = _read_bool("FINANCE_LLM_ENABLED")
+    if finance is not None:
+        return finance
+    shared = _read_bool("LLM_ENABLED")
+    if shared is not None:
+        return shared
+    return True
+
+
 def _finance_provider_name() -> str:
+    """★ 전역 ``LLM_PROVIDER`` 를 상속하지 않는다.
+
+    전역은 레거시 Ollama 해석 계층이 쓰는 값이다. 그것을 상속하면 전역을 ollama 로
+    둔 배포에서 재무 Agent 가 조용히 Gemini 를 떠난다 — 재무 Provider 정책은 재무
+    키로만 정해진다.
+    """
     _load_finance_environment()
     provider = (
         os.getenv("FINANCE_LLM_PROVIDER")
@@ -157,6 +257,54 @@ PRE_PURCHASE_TOOLS = frozenset(
 )
 SCENARIO_VALIDATION_TOOLS = frozenset({"evaluate_purchase_scenario", "validate_amount_adjustment"})
 
+#: Critic 이 재무 cap 검사를 부르는 이름(`critic_bridge._FINANCE_CAP_CHECK`).
+#: `DeptMeta.inputs_used` 는 이 check_id 로 색인된다.
+FINANCE_CAP_CHECK_ID = "finance_cap_amount_krw"
+
+#: Finance Cap 을 만들 때 **실제로 읽는** 재무 입력.
+#:
+#: ★ 이것은 선언이 아니라 **관측이어야 한다.** 그래서 실행 중 실제로 부른 Tool 을 보고
+#:   골라 담는다 (`_finance_dept_meta`). 목록을 손으로 적어 두고 실행과 어긋나면,
+#:   Critic 의 등급 누출 검사는 **우리가 적은 거짓말을 검사하게 된다.**
+#:
+#: ★ 매입 소유 입력(`qty_kg` · `grade_unit_price` · `sourcing_plan` …)은 여기 없다.
+#:   PRE_PURCHASE 는 payload 가 비어 있고 Tool 이 그 값을 읽지 않기 때문이다 — 읽게
+#:   되는 날이 오면 **숨기지 말고 여기에 나타나야 한다.** 그것이 이 검사의 존재 이유다.
+_CAP_TOOL_INPUTS: dict[str, tuple[str, ...]] = {
+    "assess_finance_position": (
+        "finance_state.current_cash_krw",
+        "finance_policy.minimum_cash_balance_krw",
+        "finance_policy.purchase_payment_days",
+    ),
+    "project_cashflow": (
+        "finance_state.current_cash_krw",
+        "finance_policy.cashflow_projection_days",
+        "finance_cash_events.obligations",
+        "finance_cash_events.receivables",
+        "finance_policy.monthly_labor_cost_krw",
+        "finance_policy.payroll_date",
+    ),
+    "calculate_purchase_finance_cap": (
+        "base_projection.projected_cash_by_date",
+        "finance_policy.minimum_cash_balance_krw",
+        "finance_policy.purchase_payment_days",
+    ),
+    "analyze_payment_pressure": (
+        "base_projection.projected_cash_min",
+        "finance_policy.minimum_cash_balance_krw",
+        "finance_policy.cash_priority_high_ratio",
+        "finance_policy.cash_priority_medium_ratio",
+    ),
+}
+
+_PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date")
+"""이 둘만 **출처가 없으면 계산 자체가 안 된다** (재무 #63 · M-23).
+
+출처 없는 급여 이벤트를 만들지 않기로 재무가 정했으므로 급여 유출이 통째로 빠지고,
+그 상태의 `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다** — 그 상한으로 매입이
+실행된다. 나머지 정책값은 값 자체를 쓸 수 있어 실행을 세우지 않는다
+(`_optional_source_ref`)."""
+
 
 @dataclass(frozen=True)
 class ToolAction:
@@ -205,7 +353,21 @@ class FinanceFinalizer(Protocol):
 
 
 class FinancePlannerFailure(RuntimeError):
-    """Planner 호출 또는 출력 검증 실패를 Controller 상태로 전달한다."""
+    """되돌릴 수 없는 Planner 실패를 Controller 상태로 전달한다.
+
+    Provider 장애·네트워크 오류·구조화 출력 파싱 불가처럼 **다시 물어도 같은 것**이
+    여기로 온다. 모델이 계약을 어긴 것은 `FinancePlannerContractViolation` 이다.
+    """
+
+
+class FinancePlannerContractViolation(ValueError):
+    """모델이 계약을 어긴 **회복 가능한** 잘못.
+
+    ★ 이것을 `FinancePlannerFailure` 와 섞으면 재계획이 죽는다. 예전에는 검증 실패가
+      `decide()` 안에서 예외로 올라와 Controller 가 통째로 ERROR 로 접었고, 그래서
+      `_guard_replan` 은 있으나 마나였다 — `metadata.replans` 는 늘 0 이었다.
+      허용되지 않은 Tool 선택 같은 잘못은 **왜 반려됐는지 알려주고 다시 묻는다.**
+    """
 
 
 @dataclass
@@ -266,63 +428,23 @@ class OllamaFinancePlanner:
         missing_capabilities: tuple[str, ...],
     ) -> ToolAction:
         self.attempts += 1
-        planning_required = bool(missing_capabilities)
-        schema = {
-            "type": "object",
-            "properties": {
-                "tool_name": (
-                    {"type": "string", "enum": sorted(allowed_tools)}
-                    if planning_required
-                    else {"type": "null"}
-                ),
-                "arguments": {"type": "object"},
-                "reason": {"type": "string"},
-                "finalize": {"type": "boolean", "enum": [not planning_required]},
-            },
-            "required": ["tool_name", "arguments", "reason", "finalize"],
-            "additionalProperties": False,
-        }
-        prompt = {
-            "mode": request.mode,
-            "business_payload": dict(request.payload),
-            "allowed_tools": sorted(allowed_tools),
-            "observations": observations,
-            "missing_capabilities": missing_capabilities,
-            "tool_argument_contracts": {
-                "assess_finance_position": {},
-                "project_cashflow": {},
-                "calculate_purchase_finance_cap": {},
-                "analyze_payment_pressure": {},
-                "evaluate_purchase_scenario": {},
-                "validate_amount_adjustment": {
-                    "axis": "amount",
-                    "candidate_amount_krw": (
-                        "copy the exact finance_cap_amount_krw from a prior observation; "
-                        "never create a number"
-                    ),
-                },
-            },
-        }
+        schema = _planner_response_schema(
+            allowed_tools, planning_required=bool(missing_capabilities)
+        )
+        schema["additionalProperties"] = False
+        prompt = _planner_prompt(
+            request=request,
+            allowed_tools=allowed_tools,
+            observations=observations,
+            missing_capabilities=missing_capabilities,
+        )
         body = {
             "model": self.model,
             "stream": False,
             "think": False,
             "format": schema,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You plan Finance capability calls. Select only an allowed tool. "
-                        "Never calculate or invent financial numbers or policy values. "
-                        "Use observations only. When missing_capabilities is non-empty, "
-                        "you MUST set finalize=false and select exactly one allowed tool "
-                        "that can satisfy a missing capability. You may set finalize=true "
-                        "only when "
-                        "missing_capabilities is empty; then tool_name must be null."
-                        " For validate_amount_adjustment, copy the observed deterministic "
-                        "finance_cap_amount_krw exactly and set axis to amount."
-                    ),
-                },
+                {"role": "system", "content": _PLANNER_SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(prompt, default=str)},
             ],
             "options": {"temperature": 0},
@@ -357,47 +479,60 @@ class GeminiFinancePlanner:
         missing_capabilities: tuple[str, ...],
     ) -> ToolAction:
         self.attempts += 1
-        prompt = {
-            "mode": request.mode,
-            "business_payload": dict(request.payload),
-            "allowed_tools": sorted(allowed_tools),
-            "observations": observations,
-            "missing_capabilities": missing_capabilities,
-            "tool_argument_contracts": {
-                "assess_finance_position": {},
-                "project_cashflow": {},
-                "calculate_purchase_finance_cap": {},
-                "analyze_payment_pressure": {},
-                "evaluate_purchase_scenario": {},
-                "validate_amount_adjustment": {
-                    "axis": "amount",
-                    "candidate_amount_krw": (
-                        "copy the exact finance_cap_amount_krw from a prior observation; "
-                        "never create a number"
-                    ),
-                },
-            },
-        }
         content = json.loads(
             _gemini_generate(
                 model=self.model,
-                system_prompt=(
-                    "You plan Finance capability calls. Select only an allowed tool. "
-                    "Never calculate or invent financial numbers or policy values. "
-                    "Use observations only. When missing_capabilities is non-empty, "
-                    "set finalize=false and select exactly one allowed tool that can "
-                    "satisfy a missing capability. When missing_capabilities is empty, "
-                    "set finalize=true and tool_name=null. For validate_amount_adjustment, "
-                    "copy the observed deterministic finance_cap_amount_krw exactly and "
-                    "set axis to amount."
+                system_prompt=_PLANNER_SYSTEM_PROMPT,
+                user_payload=_planner_prompt(
+                    request=request,
+                    allowed_tools=allowed_tools,
+                    observations=observations,
+                    missing_capabilities=missing_capabilities,
                 ),
-                user_payload=prompt,
-                response_schema=_GEMINI_PLANNER_RESPONSE_SCHEMA,
+                # ★ Ollama 와 **같은** 스키마다 — 이번 호출의 allowed_tools 가 enum 으로
+                #   들어간다. Provider 를 바꿔도 고를 수 있는 Tool 집합이 같아야 한다.
+                response_schema=_planner_response_schema(
+                    allowed_tools, planning_required=bool(missing_capabilities)
+                ),
             )
         )
         action = ToolAction(**content)
         _validate_planner_action(action, allowed_tools, missing_capabilities)
         return action
+
+
+class DeterministicFinancePlanner:
+    """LLM 이 꺼졌을 때 쓰는 Planner. **선택만** 결정론으로 대신한다.
+
+    ★ 새 재무 정책을 만들지 않는다. 고를 수 있는 Tool 집합(`allowed_tools`)과 남은
+      capability 는 Controller 가 이미 정해서 넘긴다 — 여기서 하는 일은 그중 하나를
+      **정해진 순서로** 집는 것뿐이다. 숫자·판정은 여전히 Tool 과 Rule 이 만든다.
+    """
+
+    model = "deterministic-finance-planner"
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def decide(
+        self,
+        *,
+        request: AgentRequest,
+        allowed_tools: frozenset[str],
+        observations: tuple[dict[str, Any], ...],
+        missing_capabilities: tuple[str, ...],
+    ) -> ToolAction:
+        del request, observations
+        self.attempts += 1
+        if not missing_capabilities:
+            return ToolAction(finalize=True, reason="capabilities complete")
+        for capability in missing_capabilities:
+            for tool in sorted(_CAPABILITY_TOOLS[capability]):
+                if tool in allowed_tools:
+                    return ToolAction(tool_name=tool, reason=f"satisfies {capability}")
+        raise FinancePlannerFailure(
+            "no allowed Finance tool can satisfy the missing capabilities"
+        )
 
 
 _FINAL_EXPLANATIONS = {
@@ -646,24 +781,36 @@ def _validate_planner_action(
     allowed_tools: frozenset[str],
     missing_capabilities: tuple[str, ...],
 ) -> None:
+    """Planner 출력 사후 검증 — 스키마를 무시한 모델을 여기서 잡는다.
+
+    전부 `FinancePlannerContractViolation` 으로 올린다. Controller 가 이것만 bounded
+    replan 으로 되묻고, 나머지 예외는 즉시 실패로 접는다.
+    """
     if not isinstance(action.finalize, bool):
-        raise TypeError("Finance Planner finalize must be boolean")
+        raise FinancePlannerContractViolation("Finance Planner finalize must be boolean")
     if not isinstance(action.arguments, dict):
-        raise TypeError("Finance Planner arguments must be an object")
+        raise FinancePlannerContractViolation("Finance Planner arguments must be an object")
     if missing_capabilities:
         if action.finalize or action.tool_name not in allowed_tools:
-            raise ValueError(
+            raise FinancePlannerContractViolation(
                 "Finance Planner must select one allowed tool while capabilities are missing"
             )
         return
     if not action.finalize or action.tool_name is not None:
-        raise ValueError(
+        raise FinancePlannerContractViolation(
             "Finance Planner must finalize without a tool when capabilities are complete"
         )
 
 
 def _configured_finance_llms(
-) -> tuple[FinancePlanner, FinanceFinalizer, _ProviderFallbackState]:
+) -> tuple[FinancePlanner, FinanceFinalizer, _ProviderFallbackState | None]:
+    """설정이 정하는 Planner/Finalizer 한 쌍.
+
+    LLM 이 꺼져 있으면 Provider 를 아예 만들지 않는다 — 끈 상태에서 API 키나 로컬
+    서버를 확인하러 나가면 "껐는데 왜 나가나" 가 된다.
+    """
+    if not finance_llm_enabled():
+        return DeterministicFinancePlanner(), DeterministicFinanceFinalizer(), None
     provider = _finance_provider_name()
     state = _ProviderFallbackState(
         primary_provider=provider,
@@ -684,6 +831,47 @@ def _configured_finance_llms(
         ),
         state,
     )
+
+
+def _source_ref(policy: FinancePolicy, key: str) -> str:
+    """**계산 자체가 성립하지 않는** 정책 출처. 없으면 멈춘다.
+
+    급여 두 키 전용이다 (`_PAYROLL_SOURCE_KEYS`). 출처 없는 급여 이벤트를 만들지
+    않기로 재무가 정했으므로(재무 #63 · M-23) 급여 유출이 통째로 빠지고, 그 상태의
+    `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다** — 그 상한으로 매입이 실행된다.
+
+    ★ `KeyError` 로 두지 않는 이유: Controller 의 일반 예외 경로로 빠져 `ERROR` 가
+      된다. **출처가 없는 것은 프로그램 오류가 아니라 그날의 사실**이므로
+      `RUNTIME_NOT_READY` + `missing_data` 다 — 둘은 재시도 가치가 다르다 (M-1 §5.1).
+    """
+    ref = policy.source_refs.get(key)
+    if not ref:
+        raise FinanceDataNotReady(f"{key}@policy_source_ref")
+    return ref
+
+
+def _optional_source_ref(
+    policy: FinancePolicy, key: str, state: FinanceAgentState
+) -> str | None:
+    """급여 외 정책값의 출처. **없어도 실행은 계속한다.**
+
+    ★ 급여만 특별하다 (`_PAYROLL_SOURCE_KEYS`). 나머지는 값 자체를 쓸 수 있으므로
+      계산은 그대로 돌고, 실행을 통째로 세우지 않는다 — 기존 재무 정책이다.
+
+    ★ 다만 **지어내지 않는다.** 없는 출처를 `finance-policy:{version}:{key}` 같은
+      문자열이나 스냅샷 id 로 채우면, 값은 멀쩡히 나오고 에러도 안 나지만 그 ref 는
+      따라갔을 때 **아무 데도 닿지 않는다.** 근거가 있는 척하는 판정만 남는다.
+
+    ★ 그래서 `None` 을 돌려주고, 부르는 쪽이 **그 claim 의 payload 필드와 Evidence 를
+      함께 뺀다.** 숫자만 남기고 근거를 빼면 봉투 검증이 `E-EVIDENCE-MISSING` 을
+      낸다 — 낼 수 없는 근거를 요구받는 것이 아니라, 낼 수 없는 값을 안 내는 것이다.
+      빠진 사실은 `missing_data` 의 `<key>@policy_source_ref` 로 밝힌다.
+    """
+    ref = policy.source_refs.get(key)
+    if not ref:
+        state.note_missing_source(key)
+        return None
+    return ref
 
 
 class FinanceToolRegistry:
@@ -713,6 +901,11 @@ class FinanceToolRegistry:
         if payroll_amount is None:
             raise FinanceDataNotReady("payroll_schedule")
         policy = policy.model_copy(update={"monthly_labor_cost_krw": payroll_amount})
+        # 급여 출처는 fail-closed 다. `build_payroll_schedule` 도 막지만 그쪽은
+        # `ValueError` 라 일반 `ERROR` 로 분류된다 — **입력이 없어서 못 내는 답**은
+        # `RUNTIME_NOT_READY` 여야 재시도 가치가 제대로 남는다 (M-1 §5.1).
+        for key in _PAYROLL_SOURCE_KEYS:
+            _source_ref(policy, key)
         events = [
             *self.data_port.load_obligations(ctx.as_of, horizon),
             *self.data_port.load_receivables(ctx.as_of, horizon),
@@ -731,74 +924,93 @@ class FinanceToolRegistry:
         position, policy, _ = self._context(state)
         if state.request.mode == "PRE_PURCHASE" and policy.purchase_payment_days is None:
             raise FinanceDataNotReady("purchase_payment_days")
-        return {
+        # ★ 값과 근거는 **한 쌍으로** 실린다. 정책 출처가 없으면 그 claim 은 payload
+        #   에서도 빠진다 — 숫자만 남기면 봉투가 `E-EVIDENCE-MISSING` 을 내고, 근거를
+        #   지어내면 따라갈 수 없는 ref 가 남는다. 빠진 사실은 missing_data 로 밝힌다.
+        result: dict[str, Any] = {
             "available_cash": str(position["current_cash_krw"]),
-            "minimum_cash_balance_krw": str(policy.minimum_cash_balance_krw),
             "payroll_payment_day": policy.payroll_date,
-            "purchase_payment_days": policy.purchase_payment_days,
-            "margin_defense_floor_rate": (
-                str(policy.margin_defense_floor_rate)
-                if policy.margin_defense_floor_rate is not None
-                else None
-            ),
             # Finance Policy 버전은 Master 실행 컨텍스트와 독립적이다. 재현을 위해
             # Finance 데이터 경계에서 실제로 읽은 버전을 반환한다.
             "policy_version_used": policy.policy_version,
-            "evidence": [
-                _evidence(
-                    "available_cash",
-                    position["current_cash_krw"],
-                    "krw",
-                    str(position["finance_state_id"]),
-                    source="finance",
-                ),
+        }
+        evidence: list[Evidence] = [
+            _evidence(
+                "available_cash",
+                position["current_cash_krw"],
+                "krw",
+                str(position["finance_state_id"]),
+                source="finance",
+            ),
+            Evidence(
+                claim="payroll_payment_day",
+                source="finance",
+                ref_ids=(_source_ref(policy, "payroll_date"),),
+                value=policy.payroll_date,
+                unit="day_of_month",
+                evidence_grade="SIM_FIXED",
+                evidence_detail="Finance Policy DB day-of-month value.",
+            ),
+        ]
+
+        minimum_cash_ref = _optional_source_ref(policy, "minimum_cash_balance_krw", state)
+        if minimum_cash_ref is not None:
+            result["minimum_cash_balance_krw"] = str(policy.minimum_cash_balance_krw)
+            evidence.append(
                 _evidence(
                     "minimum_cash_balance_krw",
                     policy.minimum_cash_balance_krw,
                     "krw",
-                    policy.source_refs["minimum_cash_balance_krw"],
+                    minimum_cash_ref,
                     source="persona",
-                ),
-                Evidence(
-                    claim="payroll_payment_day",
-                    source="finance",
-                    ref_ids=(policy.source_refs["payroll_date"],),
-                    value=policy.payroll_date,
-                    unit="day_of_month",
-                    evidence_grade="SIM_FIXED",
-                    evidence_detail="Finance Policy DB day-of-month value.",
-                ),
+                )
+            )
+
+        payment_days_ref = _optional_source_ref(policy, "purchase_payment_days", state)
+        if payment_days_ref is not None:
+            result["purchase_payment_days"] = policy.purchase_payment_days
+            evidence.append(
                 _evidence(
                     "purchase_payment_days",
                     policy.purchase_payment_days,
                     "day",
-                    policy.source_refs["purchase_payment_days"],
+                    payment_days_ref,
                     source="persona",
-                ),
+                )
+            )
+            # `policy_version_used` 는 봉투 어휘라 근거가 필수는 아니다. 다만 달 수
+            # 있을 때는 단다 — 어느 정책 행을 읽었는지가 재현의 핵심이다.
+            evidence.append(
                 Evidence(
                     claim="policy_version_used",
                     source="persona",
-                    ref_ids=(policy.source_refs["purchase_payment_days"],),
+                    ref_ids=(payment_days_ref,),
                     value=policy.policy_version,
                     unit="version",
                     evidence_grade="SIM_FIXED",
                     evidence_detail="Version of the Finance policy used for this execution.",
-                ),
-                *(
-                    [
-                        _evidence(
-                            "margin_defense_floor_rate",
-                            policy.margin_defense_floor_rate,
-                            "ratio",
-                            policy.source_refs["margin_defense_floor_rate"],
-                            source="persona",
-                        )
-                    ]
-                    if policy.margin_defense_floor_rate is not None
-                    else []
-                ),
-            ],
-        }
+                )
+            )
+
+        if policy.margin_defense_floor_rate is None:
+            # 값이 없다는 것 자체가 답이다 — 근거를 요구받지 않는다(숫자가 아니다).
+            result["margin_defense_floor_rate"] = None
+        else:
+            margin_ref = _optional_source_ref(policy, "margin_defense_floor_rate", state)
+            if margin_ref is not None:
+                result["margin_defense_floor_rate"] = str(policy.margin_defense_floor_rate)
+                evidence.append(
+                    _evidence(
+                        "margin_defense_floor_rate",
+                        policy.margin_defense_floor_rate,
+                        "ratio",
+                        margin_ref,
+                        source="persona",
+                    )
+                )
+
+        result["evidence"] = evidence
+        return result
 
     def project_cashflow(self, args: dict[str, Any], state: FinanceAgentState) -> dict[str, Any]:
         del args
@@ -871,19 +1083,39 @@ class FinanceToolRegistry:
             )
         ]
         ratio = state.projection.projected_cash_min / policy.minimum_cash_balance_krw
-        return {
-            "payment_pressure": pressure,
-            "critical_payment_dates": dates,
+        # 압박 판정은 Tool 이 이미 만들었다. 여기서 정하는 것은 **근거를 달 수 있는가**
+        # 뿐이고, 못 다는 claim 은 값도 싣지 않는다 (`_optional_source_ref` 참조).
+        priority_refs = [
+            _optional_source_ref(policy, key, state)
+            for key in (
+                "cash_priority_reference",
+                "cash_priority_high_ratio",
+                "cash_priority_medium_ratio",
+            )
+        ]
+        minimum_cash_ref = _optional_source_ref(policy, "minimum_cash_balance_krw", state)
+
+        result: dict[str, Any] = {
             "base_projected_cash_min": str(state.projection.projected_cash_min),
-            "evidence": [
+        }
+        evidence: list[Evidence] = [
+            _evidence(
+                "base_projected_cash_min",
+                state.projection.projected_cash_min,
+                "krw",
+                _tool_ref("project_cashflow", state),
+            ),
+        ]
+
+        if all(ref is not None for ref in priority_refs):
+            result["payment_pressure"] = pressure
+            evidence.append(
                 Evidence(
                     claim="payment_pressure",
                     source="tool_calc",
                     ref_ids=(
                         _tool_ref("analyze_payment_pressure", state),
-                        policy.source_refs["cash_priority_reference"],
-                        policy.source_refs["cash_priority_high_ratio"],
-                        policy.source_refs["cash_priority_medium_ratio"],
+                        *(ref for ref in priority_refs if ref is not None),
                     ),
                     value=float(ratio),
                     unit="ratio",
@@ -893,13 +1125,17 @@ class FinanceToolRegistry:
                         "compared with cash_priority_high_ratio and "
                         "cash_priority_medium_ratio."
                     ),
-                ),
+                )
+            )
+        if minimum_cash_ref is not None:
+            result["critical_payment_dates"] = dates
+            evidence.append(
                 Evidence(
                     claim="critical_payment_dates",
                     source="tool_calc",
                     ref_ids=(
                         _tool_ref("analyze_payment_pressure", state),
-                        policy.source_refs["minimum_cash_balance_krw"],
+                        minimum_cash_ref,
                     ),
                     value=float(policy.minimum_cash_balance_krw),
                     unit="KRW",
@@ -908,15 +1144,11 @@ class FinanceToolRegistry:
                         "Payment dates whose post-payment cash is below the "
                         "Finance minimum-cash threshold, plus the maximum daily outflow date."
                     ),
-                ),
-                _evidence(
-                    "base_projected_cash_min",
-                    state.projection.projected_cash_min,
-                    "krw",
-                    _tool_ref("project_cashflow", state),
-                ),
-            ],
-        }
+                )
+            )
+
+        result["evidence"] = evidence
+        return result
 
     def evaluate_purchase_scenario(
         self, args: dict[str, Any], state: FinanceAgentState
@@ -1108,6 +1340,13 @@ class FinanceAgentState:
     scenario_cap: Decimal | None = None
     scenario_schedule: tuple[ScenarioPayment, ...] = ()
     base_state_violated: bool = False
+    missing_sources: list[str] = field(default_factory=list)
+
+    def note_missing_source(self, key: str) -> None:
+        """근거를 달지 못해 뺀 정책값을 기록한다. 어댑터 경계와 같은 이름을 쓴다."""
+        name = f"{key}@policy_source_ref"
+        if name not in self.missing_sources:
+            self.missing_sources.append(name)
 
 
 _CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
@@ -1145,10 +1384,13 @@ class FinanceAgentController:
             self.planner = configured_planner
             self.finalizer = finalizer or configured_finalizer
             self._provider_state = provider_state
+            # 설정으로 껐을 때만 DISABLED 다. 주입된 Planner 는 설정과 무관하다.
+            self.llm_enabled = provider_state is not None
         else:
             self.planner = planner
             self.finalizer = finalizer or DeterministicFinanceFinalizer()
             self._provider_state = None
+            self.llm_enabled = not isinstance(planner, DeterministicFinancePlanner)
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )
@@ -1185,6 +1427,9 @@ class FinanceAgentController:
                     branch_id=branch_id,
                     context_cache=shared_context,
                 )
+                # ★ 루프 **전에** 담는다. 실패해도 그때까지의 observation 과 재계획
+                #   횟수가 이력에 남아야 한다 — 실패한 실행일수록 흔적이 필요하다.
+                states.append(state)
                 total_calls, total_replans = self._execute_loop(
                     state,
                     seen=seen,
@@ -1192,7 +1437,6 @@ class FinanceAgentController:
                     total_replans=total_replans,
                 )
                 shared_context = state.context_cache
-                states.append(state)
         except FinancePlannerFailure as exc:
             planner_failed = True
             runtime_status, error_reason = "ERROR", str(exc)
@@ -1204,9 +1448,12 @@ class FinanceAgentController:
         payload, evidences, business_status, adjustments = self._finalize(
             request, states, runtime_status
         )
-        llm_status = "FALLBACK" if planner_failed else (
-            "SUCCESS" if self.planner.attempts else "DISABLED"
-        )
+        # 🔴 LLMStatus 는 **이번 실행에서 실제로 무슨 일이 있었는가**다 (envelope §LLMStatus).
+        #    예전에는 `SUCCESS if attempts else DISABLED` 였다. 그러면 LLM 을 켜 두고도
+        #    Controller 가 첫 Tool 전에 접힌 실행이 전부 `DISABLED` 로 남는다 — 이력에는
+        #    *"LLM 을 안 켰다"* 고 적히고, 실제로는 **켜 뒀는데 부를 일이 없었다** 이다.
+        #    둘은 다음 조치가 다르다.
+        llm_status = self._llm_status(planner_failed=planner_failed)
         llm_fallback_used = planner_failed
         if runtime_status == "READY":
             finalization_evidence = [*evidences]
@@ -1221,15 +1468,18 @@ class FinanceAgentController:
                     evidences=tuple(finalization_evidence),
                 )
                 _validate_ready_reasoning(reasoning)
-                llm_status = "SUCCESS"
+                llm_status = self._llm_status(planner_failed=planner_failed)
             except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
                 reasoning = self._fallback_reasoning(request.mode, business_status)
-                llm_status = "FALLBACK"
-                llm_fallback_used = True
+                llm_status = "DISABLED" if not self.llm_enabled else "FALLBACK"
+                llm_fallback_used = self.llm_enabled
         else:
             reasoning = error_reason[:240]
         elapsed = int((time.monotonic() - started) * 1000)
         observations = [item for state in states for item in state.observations]
+        dept_meta = _finance_dept_meta(request.mode, payload, states)
+        if dept_meta is not None and runtime_status == "READY":
+            observations.append(dept_meta)
         if self._provider_state is not None:
             observations.append(
                 {
@@ -1252,7 +1502,10 @@ class FinanceAgentController:
                 json.dumps(o, default=str, sort_keys=True) for o in observations
             ),
             rules_applied=tuple(rules),
-            replans=total_replans,
+            # 🔴 `total_replans` 가 아니라 상태에서 센다. 루프가 예외로 끝나면 지역
+            #    변수는 갱신되지 않아 **실패한 실행의 재계획이 0 으로 남았다** — 가장
+            #    알아야 할 실행에서 숫자가 사라진다.
+            replans=sum(state.replans for state in states),
             llm_status=llm_status,
             llm_model=(
                 self.finalizer.model if self.finalizer.attempts else self.planner.model
@@ -1260,6 +1513,13 @@ class FinanceAgentController:
             llm_attempts=self.planner.attempts + self.finalizer.attempts,
             llm_fallback_used=llm_fallback_used,
             elapsed_ms=elapsed,
+        )
+        # 근거가 없어 뺀 정책값을 밝힌다. 실행은 계속했지만 **못 낸 것을 낸 척하지
+        # 않는다** (§3.7.6). 이미 담긴 missing_data 뒤에 붙이고 중복은 지운다.
+        missing_data = tuple(
+            dict.fromkeys(
+                [*missing_data, *(item for state in states for item in state.missing_sources)]
+            )
         )
         reply = AgentReply(
             request_id=request.context.request_id,
@@ -1304,6 +1564,25 @@ class FinanceAgentController:
                 needs_followup=True,
             )
         return reply, metadata
+
+    def _llm_status(self, *, planner_failed: bool) -> str:
+        """공용 `LLMStatus` 의미를 재무 실행에 그대로 적용한다.
+
+            DISABLED          설정으로 껐다
+            SKIPPED_TEMPLATE  켜져 있는데 **이번 실행에서는 부를 일이 없었다**
+            SUCCESS           실제로 불렀고 쓸 수 있는 답을 받았다
+            FALLBACK          불렀는데 실패해서 결정론이 대신 답했다
+
+        ★ Gemini→Gemma **Provider 대체는 `FALLBACK` 이 아니다.** LLM 은 답을 냈다 —
+          다른 Provider 가 냈을 뿐이다. 그 사실은 observations 로 따로 남긴다 (§17).
+        """
+        if not self.llm_enabled:
+            return "DISABLED"
+        if planner_failed:
+            return "FALLBACK"
+        if self.planner.attempts + self.finalizer.attempts == 0:
+            return "SKIPPED_TEMPLATE"
+        return "SUCCESS"
 
     def _branch_requests(self, request: AgentRequest) -> list[AgentRequest]:
         if request.mode != "SCENARIO_VALIDATION":
@@ -1350,7 +1629,19 @@ class FinanceAgentController:
                     observations=tuple(state.observations),
                     missing_capabilities=missing,
                 )
+            except FinancePlannerContractViolation as exc:
+                # 모델이 계약을 어겼다 — **되물어 볼 가치가 있다.** 왜 반려됐는지를
+                # GUARD 로 남기면 다음 호출의 프롬프트에 그대로 들어간다.
+                total_replans = self._guard_replan(
+                    state,
+                    total_replans,
+                    {"rejected_action": _short_reason(str(exc)), "unresolved": list(missing)},
+                )
+                continue
+            except FinancePlannerFailure:
+                raise
             except Exception as exc:
+                # Provider 장애·네트워크·구조화 출력 파싱 불가 — 다시 물어도 같다.
                 raise FinancePlannerFailure(str(exc)) from exc
             if action.finalize:
                 if not missing:
@@ -1395,7 +1686,11 @@ class FinanceAgentController:
         self, state: FinanceAgentState, total_replans: int, detail: dict[str, Any]
     ) -> int:
         if total_replans >= self.max_replans:
-            raise RuntimeError("required Finance capability planning did not complete")
+            # 되묻기에는 상한이 있다. 넘으면 최종 실패다 — 계약 위반을 무한히 숨기지
+            # 않는다. `FinancePlannerFailure` 로 올려 이력에 FALLBACK 으로 남긴다.
+            raise FinancePlannerFailure(
+                "required Finance capability planning did not complete"
+            )
         state.replans += 1
         state.observations.append(
             {"branch_id": state.branch_id, "type": "GUARD", **detail}
@@ -1529,6 +1824,43 @@ class FinanceAgentController:
         return _FINAL_EXPLANATIONS["SCENARIO_ACCEPT"]
 
 
+def _finance_dept_meta(
+    mode: str, payload: dict[str, Any], states: list[FinanceAgentState]
+) -> dict[str, Any] | None:
+    """이번 실행의 사용 입력·산출 필드를 **재무 자신이** 기계가 읽을 형태로 낸다.
+
+    Critic 의 `E-GRADE-LEAK`(재무 cap 에 등급·수량이 섞였나)와 `E-AUTHORITY`(부서가
+    S3 전속 판정을 냈나)는 이 둘이 없으면 아예 돌지 않는다 — 통과가 아니라 **생략**이다.
+
+    ★ **마스터가 추측하면 안 되는 것이라 재무가 낸다.** 마스터는 Tool 이름이나
+      payload 키를 보고 *"재무가 무엇을 읽었는지"* 를 알 수 없다. 모르는 것을 빈
+      dict 로 보내면 Critic 은 *"금지 입력이 없다"* 로 읽고 **통과시킨다** — 모르는
+      것이 통과가 되는 구조라, 마스터는 아예 안 보내고 생략으로 남겨 왔다.
+
+    ★ **관측이지 선언이 아니다.** `inputs_used` 는 실행에서 실제로 성공한 Tool
+      (`state.tool_order`)만 보고 만든다. `produced_fields` 는 실제로 실린 payload
+      키다. 둘 다 실행과 어긋날 수 없다.
+
+    PRE_PURCHASE 만 낸다 — Critic 의 두 검사가 조언자 경계 회신을 대상으로 한다.
+    """
+    if mode != "PRE_PURCHASE" or not states:
+        return None
+    executed = [tool for state in states for tool in state.tool_order]
+    inputs: list[str] = []
+    for tool in executed:
+        for name in _CAP_TOOL_INPUTS.get(tool, ()):
+            if name not in inputs:
+                inputs.append(name)
+    return {
+        "observation_type": "finance_dept_meta",
+        "inputs_used": {FINANCE_CAP_CHECK_ID: inputs},
+        # 값이 `None` 인 키는 뺀다 — 어댑터가 경계에서 실제로 빼는 것과 같은 기준이다
+        # (`_controller_run` 의 `margin_defense_floor_rate`). 산출하지 않은 필드를
+        # 산출했다고 적으면 권한 검사가 엉뚱한 것을 본다.
+        "produced_fields": sorted(key for key, value in payload.items() if value is not None),
+    }
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _json_value(item) for key, item in value.items()}
@@ -1592,7 +1924,16 @@ def _satisfied_capabilities(state: FinanceAgentState) -> set[str]:
         for observation in state.observations
         for key in observation.get("result", {})
     }
-    out: set[str] = set()
+    # ★ **실행한 Tool 로도 센다.** 결과 키만 보면, 정책 출처가 없어 claim 을 뺀 실행에서
+    #   capability 가 영영 안 채워진 것처럼 보여 Planner 를 계속 다시 부른다 — 답을
+    #   못 내는 것도 아닌데 Tool 호출 상한까지 돌다 죽는다. Tool 이 성공적으로 돌았으면
+    #   그 capability 는 조사된 것이다 (`tool_order` 는 성공한 실행만 담는다).
+    out: set[str] = {
+        capability
+        for capability, tools in _CAPABILITY_TOOLS.items()
+        if tools & set(state.tool_order)
+        and (capability != "finance_cap" or state.request.mode == "PRE_PURCHASE")
+    }
     if {"available_cash", "payroll_payment_day"} <= keys:
         out.add("finance_position")
     if "base_projected_cash_min" in keys:

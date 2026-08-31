@@ -435,7 +435,10 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
     )
     assert "127.0.0.1:11434" not in seen[0][0].full_url
     schema = json.loads(seen[0][0].data)["generationConfig"]["responseSchema"]
-    assert "enum" not in schema["properties"]["finalize"]
+    # Gemini 도 Ollama 와 같은 제약을 받는다 — 이번 호출의 allowed_tools 가 enum 이고,
+    # missing capability 가 있으므로 finalize 는 False 만 낼 수 있다 (§14).
+    assert schema["properties"]["finalize"]["enum"] == [False]
+    assert schema["properties"]["tool_name"]["enum"] == ["assess_finance_position"]
 
 
 def test_gemini_skips_thought_part_and_uses_later_text():

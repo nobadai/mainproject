@@ -16,7 +16,13 @@ import pytest
 
 from app.finance import adapter
 from app.finance.agent import FinanceAgentController, ToolAction
-from app.master.envelope import AgentReply, AgentRequest, ExecutionContext, ExecutionMetadata, validate_reply
+from app.master.envelope import (
+    AgentReply,
+    AgentRequest,
+    ExecutionContext,
+    ExecutionMetadata,
+    validate_reply,
+)
 
 AS_OF = date(2025, 12, 31)
 
@@ -390,7 +396,13 @@ def test_급여_출처가_없으면_투영을_만들지_않는다(monkeypatch):
 
 
 def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
-    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다."""
+    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다.
+
+    🔴 다만 **지어낸 ref 로 지나가지는 않는다.** 예전에는 어댑터가 빠진 키마다
+       `finance-policy:{version}:{key}` 를 채워 넣어서 근거가 있는 척했다 — 그 ref 는
+       DB 어디에도 없어 따라가면 아무 데도 닿지 않았다. 지금은 근거를 못 다는 claim 을
+       payload 에서 함께 빼고 `missing_data` 로 밝힌다.
+    """
 
     class _PayrollOnly(_Context):
         class policy(_Policy):
@@ -403,6 +415,13 @@ def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "READY"
     assert "purchase_payment_days@policy_source_ref" in reply.missing_data
+    # 계산은 그대로 돈다 — 상한 자체는 나온다.
+    assert reply.payload["finance_cap_amount_krw"]
+    # 근거를 못 다는 값은 실리지 않는다. 지어낸 ref 도 없다.
+    assert "purchase_payment_days" not in reply.payload
+    for evidence in reply.evidences:
+        for ref in evidence.ref_ids:
+            assert not ref.startswith("finance-policy:")
 
 
 # ---------------------------------------------------------------------------
