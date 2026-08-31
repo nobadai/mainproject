@@ -117,7 +117,7 @@ class _RuntimeContextDataPort:
         if isinstance(policy, FinancePolicy):
             return policy
         raw = {
-                field: getattr(policy, field)
+                field: getattr(policy, field, None)
                 for field in FinancePolicy.model_fields
                 if field not in {"usage_scope"}
             }
@@ -194,7 +194,7 @@ def _controller_run(
     if reply.runtime_status != "READY" or request.mode != "PRE_PURCHASE":
         return reply, metadata
     missing = list(reply.missing_data)
-    if context.policy.margin_defense_floor_rate is None:
+    if getattr(context.policy, "margin_defense_floor_rate", None) is None:
         missing.append("margin_defense_floor_rate")
     missing.extend(
         f"{key}@policy_source_ref"
@@ -202,7 +202,7 @@ def _controller_run(
         if key not in context.policy.source_refs
     )
     payload = dict(reply.payload)
-    if context.policy.margin_defense_floor_rate is None:
+    if getattr(context.policy, "margin_defense_floor_rate", None) is None:
         payload.pop("margin_defense_floor_rate", None)
     return replace(
         reply,
