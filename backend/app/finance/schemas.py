@@ -19,23 +19,6 @@ def _reject_boolean(value: object) -> object:
     return value
 
 
-class PurchaseMeta(BaseModel):
-    """매입 Agent 출력의 ``meta``와 1:1 대응한다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    as_of: date
-    item: str = Field(min_length=1)
-    agent_version: str = Field(min_length=1)
-    is_refeed: bool
-    feedback_attempt: int = Field(ge=0)
-
-    @field_validator("feedback_attempt", mode="before")
-    @classmethod
-    def reject_boolean_feedback_attempt(cls, value: object) -> object:
-        return _reject_boolean(value)
-
-
 class SplitPlanItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -108,38 +91,12 @@ class PurchaseScenario(BaseModel):
         return self
 
 
-class FinanceReviewRequest(BaseModel):
-    """오케스트레이터가 Finance에 전달하는 단일 시나리오 검토 요청."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    proposal_id: str = Field(min_length=1)
-    scenario_id: str = Field(min_length=1)
-    purchase_meta: PurchaseMeta
-    scenario: PurchaseScenario
-
-
 class SuggestedAdjustment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     axis: Literal["amount"]
     description: str = Field(min_length=1)
     evidences: list[Evidence]
-
-
-class FinanceReviewResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    proposal_id: str = Field(min_length=1)
-    scenario_id: str = Field(min_length=1)
-    agent: Literal["finance"] = "finance"
-    verdict: FinalVerdict
-    max_feasible_amount_krw: Decimal | None = Field(ge=0)
-    hard_constraints: list[str]
-    soft_warnings: list[str]
-    reasoning: list[str]
-    evidences: list[Evidence]
-    suggested_adjustment: SuggestedAdjustment | None
 
 
 PurchaseAgentOutput = PurchaseProposal
