@@ -345,6 +345,10 @@ class FinanceToolRegistry:
                 if policy.margin_defense_floor_rate is not None
                 else None
             ),
+            # The Finance policy is independently versioned from the Master
+            # execution context.  Publish the version actually read by the
+            # Finance data boundary for replayability.
+            "policy_version_used": policy.policy_version,
             "evidence": [
                 _evidence(
                     "available_cash",
@@ -375,6 +379,15 @@ class FinanceToolRegistry:
                     "day",
                     policy.source_refs["purchase_payment_days"],
                     source="persona",
+                ),
+                Evidence(
+                    claim="policy_version_used",
+                    source="persona",
+                    ref_ids=(policy.source_refs["purchase_payment_days"],),
+                    value=policy.policy_version,
+                    unit="version",
+                    evidence_grade="SIM_FIXED",
+                    evidence_detail="Version of the Finance policy used for this execution.",
                 ),
                 *(
                     [
@@ -486,11 +499,20 @@ class FinanceToolRegistry:
                         "cash_priority_medium_ratio."
                     ),
                 ),
-                _evidence(
-                    "critical_payment_dates",
-                    len(dates),
-                    "count",
-                    _tool_ref("analyze_payment_pressure", state),
+                Evidence(
+                    claim="critical_payment_dates",
+                    source="tool_calc",
+                    ref_ids=(
+                        _tool_ref("analyze_payment_pressure", state),
+                        policy.source_refs["minimum_cash_balance_krw"],
+                    ),
+                    value=float(policy.minimum_cash_balance_krw),
+                    unit="KRW",
+                    evidence_grade="SIM_FIXED",
+                    evidence_detail=(
+                        "Payment dates whose post-payment cash is below the "
+                        "Finance minimum-cash threshold, plus the maximum daily outflow date."
+                    ),
                 ),
                 _evidence(
                     "base_projected_cash_min",
@@ -581,6 +603,7 @@ class FinanceToolRegistry:
             "scenario_projected_cash_min": str(base_scenario_projection.projected_cash_min),
             "stress_projected_cash_min": str(stress_scenario_projection.projected_cash_min),
             "critical_cash_date": base_scenario_projection.projected_cash_min_date.isoformat(),
+            "rule_id": rule_id,
             "payment_schedule": [
                 ({
                     "seq": item.seq,
