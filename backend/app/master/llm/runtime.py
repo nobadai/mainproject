@@ -173,11 +173,25 @@ def _float_env(key: str, default: str, *, minimum: float) -> float:
 def get_llm_settings() -> LLMSettings:
     for env_file in _ENV_FILES:
         load_dotenv(env_file)
-    provider = _env("LLM_PROVIDER", "anthropic").strip().lower()
+    scoped_provider = os.getenv(f"{_ENV_PREFIX}LLM_PROVIDER")
+    global_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+    provider = (scoped_provider or global_provider).strip().lower()
+    # 🔴 **모델은 프로바이더에 종속된 값이다.** 마스터가 전역과 다른 프로바이더를
+    #    쓸 때 전역 `LLM_MODEL`(재무·Critic·오케가 같이 보는 `gemma3:4b`)을 상속하면
+    #    **Gemini 에 없는 모델을 요청해 404 가 난다.** 그 경우에만 전역 모델을
+    #    건너뛴다 — 물류가 #95 에서 같은 사고를 겪고 세운 규칙이고, 두 파트가 다르게
+    #    풀면 `.env` 를 읽는 사람이 규칙을 두 번 배워야 한다.
+    #
+    #    프로바이더가 같으면(둘 다 ollama) 전역 모델은 **정당한 상속**이므로
+    #    사슬(`MASTER_LLM_MODEL` → `LLM_MODEL` → 기본값)을 그대로 따른다.
+    if provider != global_provider and not os.getenv(f"{_ENV_PREFIX}LLM_MODEL"):
+        model = _DEFAULT_MODELS.get(provider, "")
+    else:
+        model = _env("LLM_MODEL", _DEFAULT_MODELS.get(provider, ""))
     return LLMSettings(
         enabled=_read_bool("LLM_ENABLED", default=True),
         provider=provider,
-        model=_env("LLM_MODEL", _DEFAULT_MODELS.get(provider, "")).strip(),
+        model=model.strip(),
         base_url=_env("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
         timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", "30", minimum=0.1),
         max_retries=min(1, _int_env("LLM_MAX_RETRIES", "1", minimum=0)),

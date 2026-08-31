@@ -28,6 +28,7 @@ from app.master.llm.runtime import (
     _intent_schema,
     _to_gemini_schema,
     build_provider,
+    get_llm_settings,
 )
 
 
@@ -220,3 +221,75 @@ def test_provider_로_gemini_를_고르면_Gemini_가_나온다():
 def test_기본_모델이_물류와_같다():
     """두 파트가 다른 모델을 쓰면 '모델이 달라서 그런가' 가 모든 조사에 끼어든다."""
     assert runtime._DEFAULT_MODELS["gemini"] == "gemini-3.5-flash-lite"
+
+
+# ── ④ 전역 설정과의 충돌 ─────────────────────────────────────────────────
+#
+# 🔴 `LLM_MODEL` 은 **재무·Critic·오케가 같이 보는 값**이다 (재무는 접두어도 없이
+#    `os.getenv("LLM_MODEL")` 로 읽는다). 마스터만 Gemini 로 가려고 그 줄을 지우면
+#    재무가 같이 바뀐다. 그래서 **지우지 않고도 되어야 한다.**
+
+
+@pytest.fixture
+def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    """`.env` 를 안 읽는 상태에서 환경변수만으로 판정한다.
+
+    `load_dotenv` 는 os.environ 에 없는 키를 채우므로, 지운 변수를 다시 살려 낸다 —
+    그러면 이 검사들이 **개발자 기계의 `.env` 에 따라 결과가 달라진다.**
+    """
+    monkeypatch.setattr(runtime, "load_dotenv", lambda *_a, **_k: None)
+    for key in (
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "MASTER_LLM_PROVIDER",
+        "MASTER_LLM_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    return monkeypatch
+
+
+def test_마스터만_Gemini_로_가도_전역_모델을_안_물어온다(env: pytest.MonkeyPatch):
+    """**재무의 `LLM_MODEL` 을 지우지 않아도 된다.**
+
+    상속하면 Gemini 에 `gemma3:4b` 를 요청해 404 가 난다 — 물류가 #95 에서 겪은
+    사고다. 프로바이더가 다르면 전역 모델을 건너뛴다.
+    """
+    env.setenv("LLM_PROVIDER", "ollama")
+    env.setenv("LLM_MODEL", "gemma3:4b")  # 재무·Critic·오케가 같이 보는 줄
+    env.setenv("MASTER_LLM_PROVIDER", "gemini")
+
+    settings = get_llm_settings()
+
+    assert settings.provider == "gemini"
+    assert settings.model == "gemini-3.5-flash-lite"
+    assert settings.model != "gemma3:4b", "전역 모델을 물어오면 Gemini 가 404 를 준다"
+
+
+def test_마스터_모델을_직접_주면_그것을_쓴다(env: pytest.MonkeyPatch):
+    """건너뛰는 것은 **기본값으로 되돌리는 것**이지 지정을 무시하는 것이 아니다."""
+    env.setenv("LLM_PROVIDER", "ollama")
+    env.setenv("LLM_MODEL", "gemma3:4b")
+    env.setenv("MASTER_LLM_PROVIDER", "gemini")
+    env.setenv("MASTER_LLM_MODEL", "gemini-3.5-flash")
+
+    assert get_llm_settings().model == "gemini-3.5-flash"
+
+
+def test_프로바이더가_같으면_전역_모델을_그대로_쓴다(env: pytest.MonkeyPatch):
+    """둘 다 ollama 면 전역 모델은 **정당한 상속**이다 — 여기까지 끊으면 안 된다."""
+    env.setenv("LLM_PROVIDER", "ollama")
+    env.setenv("LLM_MODEL", "qwen2.5:3b")
+
+    settings = get_llm_settings()
+
+    assert settings.provider == "ollama"
+    assert settings.model == "qwen2.5:3b"
+
+
+def test_마스터_접두어가_없으면_전역_프로바이더를_따른다(env: pytest.MonkeyPatch):
+    env.setenv("LLM_PROVIDER", "gemini")
+
+    settings = get_llm_settings()
+
+    assert settings.provider == "gemini"
+    assert settings.model == "gemini-3.5-flash-lite"
