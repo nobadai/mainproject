@@ -15,6 +15,7 @@
 
 from copy import deepcopy
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -622,3 +623,49 @@ def test_warehouse_cap_floors_fractional_capacity() -> None:
     assert isinstance(cap, int)
     # 정수 입력은 그대로다 — mock 경로가 달라지지 않는다
     assert warehouse_cap_kg({"warehouse_free_kg": 12000, "rental_cap_kg": 3600}) == 15600
+
+
+def test_warehouse_cap_accepts_confirmed_zero() -> None:
+    """**확정된 0은 통과한다** (규칙 3).
+
+    ``rental_cap_kg``는 2026-08-27 물류 회신 §1로 0 확정이고, 창고가 꽉 차면
+    ``warehouse_free_kg``도 0이다. 둘 다 "값이 안 왔다"가 아니라 **사실**이라
+    상한 0kg으로 그대로 쓴다 — 전 안이 창고에 눌리는 것이 맞는 결과다.
+    """
+    assert warehouse_cap_kg({"warehouse_free_kg": 0, "rental_cap_kg": 0}) == 0
+
+
+def test_warehouse_cap_rejects_true_instead_of_reading_it_as_one_kg() -> None:
+    """🔴 ``True``가 **1kg 상한**으로 통과하던 자리.
+
+    ``bool``은 ``int``의 하위형이라 ``True + 0 == 1``이다. 창고 상한이 1kg이면 전 안이
+    거기에 눌려 죽는데 **에러가 없어 원인이 안 보인다** — ``_positive_int``·
+    ``schemas._reject_boolean``이 같은 이유로 ``bool``을 먼저 막는다.
+    """
+    with pytest.raises(TypeError, match="warehouse_free_kg"):
+        warehouse_cap_kg({"warehouse_free_kg": True, "rental_cap_kg": 0})
+
+
+@pytest.mark.parametrize(
+    "bad", ["1000", [1], None, float("nan"), float("inf"), -500], ids=lambda v: repr(v)
+)
+def test_warehouse_cap_names_the_key_instead_of_dying_anonymously(bad: object) -> None:
+    """어느 키가 왜 잘못됐는지를 **메시지가 말한다**.
+
+    전에는 ``'1000' + 0``·``Decimal + float``이 더하는 자리에서 터졌다. 그 ``TypeError``
+    에는 키 이름이 없어 *"물류가 무엇을 잘못 보냈는가"*를 알 수 없었다. 수신 payload는
+    ``adapter.validate_payload``가 먼저 잡아 ``missing_data``로 사유를 내므로, 이 가드가
+    실제로 터지는 자리는 mock·직접 호출 경로다.
+    """
+    with pytest.raises((TypeError, ValueError), match="rental_cap_kg"):
+        warehouse_cap_kg({"warehouse_free_kg": 100, "rental_cap_kg": bad})
+
+
+def test_warehouse_cap_mixes_decimal_and_float_without_dying() -> None:
+    """출처가 둘이면 ``Decimal + float``이 ``TypeError``였다.
+
+    물류 어댑터는 float으로 보내지만(``logistics/adapter._num``) 그것이 유일한 출처라는
+    보장이 없다. 타입을 맞춰 받으므로 섞여 와도 같은 답이 나온다.
+    """
+    mixed = warehouse_cap_kg({"warehouse_free_kg": Decimal("7636.72"), "rental_cap_kg": 0.0})
+    assert mixed == warehouse_cap_kg({"warehouse_free_kg": 7636.72, "rental_cap_kg": 0.0}) == 7636

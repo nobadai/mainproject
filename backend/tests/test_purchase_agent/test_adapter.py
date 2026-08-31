@@ -634,6 +634,65 @@ def test_inventory_leaf_keys_are_required(key: str) -> None:
     assert f"constraints.inventory.{key}" in validate_payload(payload, as_of)
 
 
+@pytest.mark.parametrize(
+    ("bad", "expected"),
+    [
+        (True, "@수량이어야 한다"),
+        ("1000", "@수량이어야 한다"),
+        ([1], "@수량이어야 한다"),
+        (float("nan"), "@유한한 수여야 한다"),
+        (-500, "@음수일 수 없다"),
+    ],
+    ids=["bool", "문자열", "리스트", "NaN", "음수"],
+)
+@pytest.mark.parametrize("key", ["warehouse_free_kg", "rental_cap_kg"])
+def test_capacity_of_wrong_shape_answers_with_a_reason(
+    key: str, bad: object, expected: str
+) -> None:
+    """🔴 **값이 와도 수가 아니면 사유를 내고 멈춘다** — 죽지 않는다.
+
+    부재만 보던 자리다. 값이 있으면 그대로 ``warehouse_cap_kg``까지 흘러갔고 거기서
+    ``TypeError``로 죽었다 — 죽으면 ``missing_data``가 비어 마스터는 *"무엇을 다시
+    달라고 해야 하는지"*를 모른다. ``True``는 더 나쁘다: 죽지도 않고 **창고 상한
+    1kg**이 되어 전 안이 눌린다 (2026-08-31 확인).
+
+    로트 ``shelf_life_days``·``inbound_lead_days``와 같은 종류의 값이라 같은 자리에서
+    같은 모양으로 막는다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"][key] = bad
+
+    request = AgentRequest(
+        context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, _ = purchase_port(request)  # 터지지 않는다
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    named = [m for m in reply.missing_data if m.startswith(f"constraints.inventory.{key}")]
+    assert named, reply.missing_data
+    assert expected in named[0], named
+
+
+@pytest.mark.parametrize("key", ["warehouse_free_kg", "rental_cap_kg"])
+def test_confirmed_zero_capacity_is_not_a_shape_problem(key: str) -> None:
+    """**확정된 0은 통과한다** (규칙 3).
+
+    ``rental_cap_kg``는 2026-08-27 물류 회신 §1로 0 확정이다. 0을 모양 문제로 잡으면
+    정상 payload가 ``RUNTIME_NOT_READY``로 막힌다 — 창고 상한이 그만큼 작다는 **사실**을
+    값이 안 온 것으로 바꿔 읽는 셈이다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"][key] = 0
+    assert not [
+        m for m in validate_payload(payload, as_of) if m.startswith(f"constraints.inventory.{key}")
+    ]
+
+
 def test_empty_inventory_reports_names_instead_of_crashing() -> None:
     """빈 dict가 와도 터지지 않고 **무엇이 없는지**를 담아 돌아온다."""
     as_of = SPREAD_WIDE
@@ -1309,3 +1368,53 @@ def test_fractional_warehouse_capacity_still_yields_integer_quantities() -> None
         # (이 픽스처는 현금이 먼저 묶어 창고 상한까지 안 간다. 내림 자체는
         #  test_draft_plan 의 warehouse_cap_kg 단위 검사가 잠근다.)
         assert scenario["total_qty_kg"] <= 7636
+
+
+# ── llm_status — DISABLED 와 SKIPPED_TEMPLATE 를 가른다 (2026-08-31) ────────
+
+
+def test_llm_status_separates_switched_off_from_not_called_this_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **"안 켰다"와 "켰는데 이번엔 안 썼다"는 다른 사실이다.**
+
+    전에는 판단자를 안 부른 실행이 무조건 ``DISABLED`` 였다. 2025-12-31 실행이 그랬는데
+    설정은 켜져 있었다 — 등급이 미상이라 ⑤가 후보를 만들기 전에 막힌 것이다.
+    **앞은 설정 문제라 고칠 수 있고 뒤는 그날의 사실이라 고칠 것이 없다.** 한 값으로
+    내면 사람이 없는 문제를 찾는다.
+
+    봉투가 뜻을 규정한다 (``master/envelope.py`` ``LLMStatus``) — 새로 정한 규칙이 아니라
+    마스터 ``IntentService``·Critic ``JudgeService`` 가 이미 쓰는 서열이다.
+    """
+    from app.purchase_agent.adapter import _uncalled_status
+
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "false")
+    assert _uncalled_status() == "DISABLED"
+
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "true")
+    assert _uncalled_status() == "SKIPPED_TEMPLATE"
+
+
+def test_a_status_query_says_skipped_not_disabled_when_the_llm_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """판단 단계가 **애초에 없는** 실행도 ``SKIPPED_TEMPLATE`` 이다.
+
+    Critic 이 *"이 Flow 에는 그 문장을 쓰는 단계가 없다"* 를 같은 값으로 적는 것과 같다
+    (``critic/critic_v0_4.py``).
+    """
+    monkeypatch.setenv("PURCHASE_LLM_ENABLED", "true")
+    _, metadata = purchase_port(_request("배추", SPREAD_WIDE, mode="STATUS_QUERY"))
+
+    assert metadata.llm_status == "SKIPPED_TEMPLATE"
+    assert metadata.llm_fallback_used is False
+
+
+def test_our_vocabulary_is_the_envelope_vocabulary() -> None:
+    """어휘를 우리가 새로 만들지 않는다 — 봉투 계약의 네 값을 그대로 쓴다."""
+    from typing import get_args
+
+    from app.master.envelope import LLMStatus as EnvelopeStatus
+    from app.purchase_agent.llm.schemas import LLMStatus as OurStatus
+
+    assert set(get_args(OurStatus)) == set(get_args(EnvelopeStatus))

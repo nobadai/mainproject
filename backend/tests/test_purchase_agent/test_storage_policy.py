@@ -12,7 +12,7 @@ from datetime import date
 
 import pytest
 
-from app.master.verifier import MasterVerifier
+from app.master.verifier import supplied_but_unresolved
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.allocate_sourcing import (
     evaluate_mid_grade,
@@ -142,7 +142,8 @@ def test_real_shape_reports_grade_not_missing_value() -> None:
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     reason = shelf_days_block_reason(inventory, "상", ITEM)
     assert "등급" in reason and "#69" in reason
-    assert "item_storage_policies" in reason, "봉투 최상위 키로 말해야 마스터가 잡는다"
+    # 마스터가 중첩 한 겹까지 보게 되어(dev 42795c6) **못 읽은 값의 이름을 그대로** 쓴다.
+    assert "operational_limit_days" in reason
     assert "받지 못했다" not in reason, "값은 왔다 — 안 왔다고 적으면 안 된다"
 
 
@@ -174,47 +175,100 @@ ENVELOPE_TOP_LEVEL_KEYS = (
 )
 
 
+def _concerns_text(concerns: list[str]) -> str:
+    return "\n".join(concerns)
+
+
+def _flagged_keys(concerns: list[str]) -> set[str]:
+    """마스터가 **지목한 키**만 뽑는다.
+
+    🔴 concern 문장은 사유 원문을 통째로 되싣는다. 그래서 ``"키" in concern`` 으로 보면
+      **사유에 그 이름이 적혀 있다는 이유만으로** 통과한다 — 다른 키가 지목된 경우에도
+      참이 된다. 실제로 그 형태로 짰다가 반례 검사가 엉뚱하게 통과했다.
+      머리말의 따옴표 안만 읽는다.
+    """
+    return {
+        m.group(1)
+        for m in re.finditer(
+            r"SUPPLIED-BUT-UNRESOLVED: '([^']+)'", _concerns_text(concerns)
+        )
+    }
+
+
 def test_master_actually_flags_our_reason() -> None:
-    """🔴 **마스터가 이 사유를 SUPPLIED-BUT-UNRESOLVED 로 잡는가** — 관문 둘을 다 본다.
+    """🔴 **마스터가 이 사유를 SUPPLIED-BUT-UNRESOLVED 로 잡는가** — 실제로 불러서 본다.
 
-    ``_check_supplied_but_unused`` 는 두 조건이 **모두** 맞아야 울린다.
+    ⚠️ **규칙을 재현하지 않는다.** 전에는 마스터의 정규식을 import 해 *"우리가 재현한
+      규칙에 걸리는가"* 를 봤다. 검사는 통과했는데 실물 ``concerns`` 는 **0건**이었다 —
+      관문이 둘인데 하나만 재현했기 때문이다 (2026-08-31 실측).
 
-    1. 키가 ``supplied`` 에 있을 것. 그 집합은 **봉투 payload 의 최상위 키**로만 만들어진다
-       (``for key, value in payload.items()``). 중첩 필드는 들어가지 않는다.
-    2. ``re.escape(key) + _UNRESOLVED_NEAR`` 에 걸릴 것 — 키 뒤 **12자 안**에 미결 어휘.
+      현서님이 그래서 공개 함수를 열었다 (dev `4137bc9`). docstring 이 그 이유를 적고 있다:
+      *"규칙을 재현하지 마십시오. 재현한 것이 진짜와 갈리는 순간, 검사는 통과하는데 실물은
+      조용해집니다. 이 함수를 부르면 재현할 것이 없습니다."*
 
-    ⚠️ 처음에는 2번만 검사했고 통과했다. 그런데 실물에서 concerns 가 **0건**이었다 —
-    사유에 적은 ``operational_limit_days`` 가 ``item_storage_policies[]`` **안에** 있어
-    1번을 못 넘었기 때문이다 (2026-08-31 실측). **정규식에 걸리는 것과 마스터가 잡는 것은
-    다르다.** 그래서 이 검사는 두 관문을 함께 재현한다.
-
-    패턴은 문자열로 베끼지 않고 마스터에서 import 한다 — 복제하면 그쪽이 바뀔 때
-    거짓 안심을 준다.
+    이 검사는 **마스터 관통이 쓰는 것과 같은 코드**를 부른다. 재현할 것이 없다.
     """
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     reason = shelf_days_block_reason(inventory, "상", ITEM)
 
-    hit = [
-        key
-        for key in ENVELOPE_TOP_LEVEL_KEYS
-        if re.compile(re.escape(key) + MasterVerifier._UNRESOLVED_NEAR).search(reason)
-    ]
-    assert hit, f"봉투 최상위 키 중 어느 것도 안 걸린다 — 마스터가 못 잡는다: {reason!r}"
-    assert "item_storage_policies" in hit
+    concerns = supplied_but_unresolved(
+        [{"label": "보수", "risks": [reason]}], {"inventory": inventory}
+    )
+
+    assert concerns, f"마스터가 못 잡는다: {reason!r}"
+    assert "operational_limit_days" in _flagged_keys(concerns)
 
 
-def test_a_nested_field_name_alone_would_not_be_flagged() -> None:
-    """중첩 필드 이름만으로는 안 잡힌다 — 위 검사가 무엇을 막고 있는지 못박는다.
+def test_the_reason_names_the_value_we_actually_could_not_use() -> None:
+    """🔴 **못 읽은 값의 이름을 그대로 쓴다.**
 
-    이 반례가 없으면 사유를 ``operational_limit_days`` 로 되돌려도 통과하는 줄 알기 쉽다.
+    전에는 봉투 최상위 키(``item_storage_policies``)로 적었다 — 마스터의 ``supplied`` 가
+    최상위만 봐서 중첩 키로는 안 울렸기 때문이다. **증상에 문구를 맞춘 것**이지 사실을
+    말한 것이 아니었다. 현서님이 ``_supplied_keys`` 를 중첩 한 겹까지 보게 고쳐서
+    (dev `42795c6`) 이제 정확한 이름을 쓸 수 있다.
     """
-    assert "operational_limit_days" not in ENVELOPE_TOP_LEVEL_KEYS
+    reason = shelf_days_block_reason(
+        {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}, "상", ITEM
+    )
+
+    assert "operational_limit_days" in reason
+    assert "item_storage_policies" not in reason
 
 
-def test_the_distance_constraint_actually_bites() -> None:
-    """거리 제약이 **실제로 좁다**는 것 — 멀어지면 안 걸린다는 사실을 함께 잠근다."""
-    pattern = re.compile(re.escape("item_storage_policies") + MasterVerifier._UNRESOLVED_NEAR)
-    assert not pattern.search("item_storage_policies 는 반영했으나 등급 어휘가 미확정이다")
+def test_the_sentence_length_no_longer_decides_whether_it_rings() -> None:
+    """🔴 판정이 **글자 수로 재지 않는다** (dev `42795c6`).
+
+    전에는 키 뒤 12자 안에 미결 어휘가 있어야 울렸다. 우리 문구가 그 창을 넘어서
+    *"멀어지면 안 걸린다"* 를 오히려 잠그고 있었다 — 검사가 남의 문장 길이를 정하는
+    상태였다. 새 규칙은 거리 대신 **사이에 다른 실린 키가 끼었는가** 를 본다.
+    """
+    inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
+    far = (
+        "operational_limit_days 는 받았고 로트도 받았으나 등급 어휘가 아직 정해지지 "
+        "않아 기준등급을 특정할 수 없어 미확정이다"
+    )
+    assert far.index("미확정") - far.index("operational_limit_days") > 12
+
+    concerns = supplied_but_unresolved(
+        [{"label": "보수", "risks": [far]}], {"inventory": inventory}
+    )
+    assert "operational_limit_days" in _flagged_keys(concerns)
+
+
+def test_another_supplied_key_between_the_name_and_the_word_silences_it() -> None:
+    """새 규칙의 반대편 — 사이에 **다른 실린 키**가 있으면 그 키 얘기라 안 울린다.
+
+    이 반례가 없으면 위 검사가 "무엇이든 울린다"를 잠그는 것과 구분되지 않는다.
+    """
+    inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
+    other = "operational_limit_days 검사는 medium_grade_factor 미확정으로 보류"
+
+    concerns = supplied_but_unresolved(
+        [{"label": "보수", "risks": [other]}], {"inventory": inventory}
+    )
+    flagged = _flagged_keys(concerns)
+    assert "operational_limit_days" not in flagged, f"다른 키 얘기인데 울렸다: {flagged}"
+    assert "medium_grade_factor" in flagged, "정작 그 키는 울려야 한다"
 
 
 # ── Codex 교차검증 회귀 (2026-08-31) ────────────────────────────────────
@@ -285,3 +339,57 @@ def test_reason_does_not_deny_a_lot_that_exists(lots: list, forbidden: str) -> N
     reason = shelf_days_block_reason(inventory, "상", ITEM)
     assert forbidden not in reason, f"있는 로트를 부정한다: {reason!r}"
     assert "받지 못했다" in reason or "읽지 못했다" in reason
+
+
+# ── 타입 강제 — 폴백 경로도 같은 검사를 받는다 (2026-08-31) ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        ("10", "문자열이 그대로 통과해 뒤에서 '10' * 0.6 으로 죽었다"),
+        (10.9, "소진 한계가 6.54일이 된다 — 에러 없이 다른 값"),
+        (True, "bool 이 1일로 통과했다"),
+        (0, "신선도 리스크가 1.0 으로 굳어 중품이 조용히 막힌다"),
+        (-5, "음수 유통기한"),
+    ],
+)
+def test_lot_shelf_life_gets_the_same_type_check_as_the_policy(bad: object, why: str) -> None:
+    """🔴 ``operational_limit_days`` 는 막아 두고 **로트 폴백은 그냥 읽고 있었다.**
+
+    같은 종류의 값인데 한쪽만 지킨 상태였다 — 물류 값이 없는 날에만 타는 경로라
+    실측에서 안 드러났다.
+    """
+    inventory = {
+        "item_storage_policies": [],
+        "lots": [{"lot_id": "L", "item": ITEM, "grade": "상", "shelf_life_days": bad}],
+    }
+
+    assert top_grade_shelf_days(inventory, "상", ITEM) is None, why
+
+
+def test_mixed_lot_types_do_not_crash_the_comparison() -> None:
+    """혼합 타입이면 ``min()`` 이 str 과 int 를 비교하다 죽었다.
+
+    못 읽는 값은 **버린다** — 0으로 채우지 않는다 (규칙 3). 읽을 수 있는 값이 남으면
+    그것으로 판단하고, 전부 버려지면 None 이라 사유가 나간다.
+    """
+    inventory = {
+        "item_storage_policies": [],
+        "lots": [
+            {"lot_id": "A", "item": ITEM, "grade": "상", "shelf_life_days": 10},
+            {"lot_id": "B", "item": ITEM, "grade": "상", "shelf_life_days": "8"},
+        ],
+    }
+
+    assert top_grade_shelf_days(inventory, "상", ITEM) == 10
+
+
+def test_the_policy_still_wins_over_a_readable_lot_value() -> None:
+    """검사를 붙이면서 우선순위가 바뀌지 않았는지 — 물류 값이 있으면 그것을 쓴다."""
+    inventory = {
+        "item_storage_policies": [{"item": ITEM, "operational_limit_days": 14}],
+        "lots": [{"lot_id": "A", "item": ITEM, "grade": "상", "shelf_life_days": 10}],
+    }
+
+    assert top_grade_shelf_days(inventory, "상", ITEM) == 14
