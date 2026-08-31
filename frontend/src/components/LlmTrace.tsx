@@ -20,7 +20,15 @@ const ACTION_LABEL: Record<IntentAction, string> = {
   STATUS_QUERY: "부서 상태 조회",
   RERUN_WITH_CONDITION: "조건 변경 재요청",
   SELECT_SCENARIO: "안 선택",
-  UNKNOWN: "못 알아들음",
+  // 🔴 **"못 알아들음" 이 아니다.** 마스터는 *"가격을 묻는구나"* 를 알아듣고
+  //    *"그 자리는 없다"* 고 답한다. 그런데 라벨이 "못 알아들음" 이면 바로 아래
+  //    문장과 **모순된다** — 읽는 사람은 "못 알아들었다면서 왜 가격 얘기를 하지" 가 된다.
+  //
+  //    `UNKNOWN` 은 두 경우를 덮는다 — 발화가 불분명한 것("그거 있잖아")과 알아들었지만
+  //    할 수 있는 일이 아닌 것("배추 가격"). 확신도로는 못 가른다(둘 다 HIGH 로 온다).
+  //    **둘 다 참인 말**을 쓴다 — 백엔드도 같은 어휘다:
+  //    *"아직 안 만들었다" 가 아니라 "실행할 것이 없다" 다* (`ask_service.py`).
+  UNKNOWN: "실행할 것 없음",
 };
 
 const AGENT_LABEL: Record<string, string> = {
@@ -45,8 +53,8 @@ const CONFIDENCE = {
  * 강조색을 주지만, 여기서는 *"확실히 못 한다"* 라 강조할 것이 아니다.
  */
 const UNKNOWN_CONFIDENCE = {
-  HIGH: { text: "범위 밖인 것이 확실", style: "bg-sunk text-muted" },
-  MEDIUM: { text: "범위 밖으로 보임", style: "bg-sky-wash text-sky" },
+  HIGH: { text: "확실", style: "bg-sunk text-muted" },
+  MEDIUM: { text: "아마도", style: "bg-sky-wash text-sky" },
   LOW: { text: "판단하지 못함", style: "bg-gold-wash text-gold" },
 } as const;
 
