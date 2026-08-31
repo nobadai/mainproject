@@ -71,12 +71,24 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
 
   return (
     <aside className="flex w-[212px] shrink-0 flex-col gap-5 overflow-y-auto border-r border-line bg-sunk p-3">
-      <div className="flex items-center gap-2.5 px-1.5">
+      {/*
+        로고를 누르면 첫 화면(마스터 대화)으로 돌아온다. **어디서나 돌아갈 곳이 하나**
+        있어야 한다 — 실행 이력이나 번인 화면에 들어갔다가 길을 잃는 자리였다.
+
+        ★ **대화를 지우지 않는다.** 자리만 옮긴다 — 돌아왔는데 앞의 답이 사라져 있으면
+          누른 사람은 *"내가 뭘 지웠나"* 로 읽는다.
+      */}
+      <button
+        type="button"
+        onClick={() => onSelect("master")}
+        title="첫 화면으로"
+        className="flex cursor-pointer items-center gap-2.5 rounded-lg px-1.5 py-1 text-left hover:bg-surface/70"
+      >
         <span className="grid size-[26px] place-items-center rounded-[7px] bg-accent text-[13px] font-bold text-white">
           햇
         </span>
         <b className="text-[14.5px] font-semibold">운영 콘솔</b>
-      </div>
+      </button>
 
       <div>
         <p className="mb-1.5 px-2 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
