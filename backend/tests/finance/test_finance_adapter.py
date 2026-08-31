@@ -190,7 +190,7 @@ def test_컨트롤러_위임은_실행_메타데이터를_그대로_반환한다
     monkeypatch.setattr(adapter, "FinanceAgentController", _Controller)
     reply, metadata = adapter.finance_port(request)
 
-    assert received and received[0].context.policy_version == "v1.3-PROVISIONAL"
+    assert received and received[0].context.policy_version == "POLICY-V1"
     assert reply.run_id == "controller-run"
     assert metadata is controller_metadata
     assert metadata.used_tools == ("controller-tool",)

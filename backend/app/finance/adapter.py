@@ -111,8 +111,10 @@ class _RuntimeContextDataPort:
 
     def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
         self._check_as_of(as_of)
-        if policy_version != self.context.policy.policy_version:
-            raise FinanceDataNotReady("finance_policy_version")
+        # ``policy_version`` belongs to Master execution context and is not a
+        # Finance policy selector.  The fixed runtime context is authoritative
+        # for the Finance policy version used by this controller run.
+        del policy_version
         policy = self.context.policy
         if isinstance(policy, FinancePolicy):
             return policy
@@ -155,9 +157,9 @@ class _RuntimeContextDataPort:
 
 
 def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:
-    """Keep Master context immutable while selecting the Finance policy version."""
-    finance_context = replace(request.context, policy_version=context.policy.policy_version)
-    return replace(request, context=finance_context)
+    """Do not rewrite Master context; the data port resolves Finance's own policy."""
+    del context
+    return request
 
 
 def _controller_pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
