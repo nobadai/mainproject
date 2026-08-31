@@ -186,6 +186,10 @@ class FinanceFinalizer(Protocol):
     ) -> str: ...
 
 
+class FinancePlannerFailure(RuntimeError):
+    """Planner 호출 또는 출력 검증 실패를 Controller 상태로 전달한다."""
+
+
 class OllamaFinancePlanner:
     """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
 
@@ -497,9 +501,9 @@ def _validate_planner_action(
     missing_capabilities: tuple[str, ...],
 ) -> None:
     if not isinstance(action.finalize, bool):
-        raise ValueError("Finance Planner finalize must be boolean")
+        raise TypeError("Finance Planner finalize must be boolean")
     if not isinstance(action.arguments, dict):
-        raise ValueError("Finance Planner arguments must be an object")
+        raise TypeError("Finance Planner arguments must be an object")
     if missing_capabilities:
         if action.finalize or action.tool_name not in allowed_tools:
             raise ValueError(
@@ -1011,6 +1015,7 @@ class FinanceAgentController:
         seen: set[str] = set()
         total_calls = 0
         total_replans = 0
+        planner_failed = False
         try:
             _validate_finance_payload(request)
             branch_requests = self._branch_requests(request)
@@ -1029,6 +1034,9 @@ class FinanceAgentController:
                 )
                 shared_context = state.context_cache
                 states.append(state)
+        except FinancePlannerFailure as exc:
+            planner_failed = True
+            runtime_status, error_reason = "ERROR", str(exc)
         except FinanceDataNotReady as exc:
             runtime_status, missing_data, error_reason = "RUNTIME_NOT_READY", (exc.key,), str(exc)
         except Exception as exc:  # noqa: BLE001 - Agent boundary converts failures to ERROR.
@@ -1037,8 +1045,10 @@ class FinanceAgentController:
         payload, evidences, business_status, adjustments = self._finalize(
             request, states, runtime_status
         )
-        llm_status = "DISABLED"
-        llm_fallback_used = False
+        llm_status = "FALLBACK" if planner_failed else (
+            "SUCCESS" if self.planner.attempts else "DISABLED"
+        )
+        llm_fallback_used = planner_failed
         if runtime_status == "READY":
             finalization_evidence = [*evidences]
             for verdict in payload.get("verdicts", []):
@@ -1075,7 +1085,9 @@ class FinanceAgentController:
             rules_applied=tuple(rules),
             replans=total_replans,
             llm_status=llm_status,
-            llm_model=self.finalizer.model,
+            llm_model=(
+                self.finalizer.model if self.finalizer.attempts else self.planner.model
+            ),
             llm_attempts=self.planner.attempts + self.finalizer.attempts,
             llm_fallback_used=llm_fallback_used,
             elapsed_ms=elapsed,
@@ -1162,12 +1174,15 @@ class FinanceAgentController:
             planner_tools = frozenset().union(*(_CAPABILITY_TOOLS[name] for name in missing))
             if not planner_tools:
                 planner_tools = self.registry.names_for(state.request.mode)
-            action = self.planner.decide(
-                request=state.request,
-                allowed_tools=planner_tools,
-                observations=tuple(state.observations),
-                missing_capabilities=missing,
-            )
+            try:
+                action = self.planner.decide(
+                    request=state.request,
+                    allowed_tools=planner_tools,
+                    observations=tuple(state.observations),
+                    missing_capabilities=missing,
+                )
+            except Exception as exc:
+                raise FinancePlannerFailure(str(exc)) from exc
             if action.finalize:
                 if not missing:
                     return total_calls, total_replans
