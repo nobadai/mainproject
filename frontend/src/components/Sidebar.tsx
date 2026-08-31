@@ -24,10 +24,17 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
     { key: "inventory", icon: "▥", label: "물류", open: true },
     { key: "finance", icon: "▦", label: "재무", open: can.finance },
   ];
-  const records = [
-    { key: "runs", icon: "≡", label: "실행 이력", open: true },
-    { key: "decisions", icon: "✓", label: "승인 이력", open: can.approve },
-  ];
+  /**
+   * 🔴 '승인 이력' 탭은 **없다.** 사이드바에만 있고 `console/page.tsx` 에 그리는
+   * 분기가 없어서, 누르면 마스터 대화가 그대로 나오고 하이라이트만 옮겨 갔다 —
+   * 누른 사람은 "안 눌렸나" 로 읽는다. **없는 화면을 눌러 보게 두는 것보다
+   * 안 보이는 편이 낫다.**
+   *
+   * 지금은 실행 이력 화면의 '결정 N회차'가 승인·재요청을 회차와 대상 실행까지
+   * 같이 보여준다. 승인만 따로 모아 보는 화면이 필요해지면 **먼저 화면을 만들고**
+   * 여기에 되돌린다.
+   */
+  const records = [{ key: "runs", icon: "≡", label: "실행 이력", open: true }];
 
   const item = (row: { key: string; icon: string; label: string; badge?: string; open: boolean }) => (
     <button
