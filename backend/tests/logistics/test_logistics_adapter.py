@@ -841,15 +841,24 @@ def test_조정_제안은_전용_채널에도_실린다(stocked):
     assert validate_reply(request, reply, meta) == ()
 
 
-def test_판정_스킵_사실은_missing_data_에도_남는다(wired):
-    """독립 경로 `_missing_data` 와 같은 분류다 (검증 발견 4) — signal 채널만 맞추면
-    "못 본 것"의 이름이 M-1 에서 사라진다. 기본 픽스처는 임계 정책 미등록이라
-    판정 스킵 2건이 나온다."""
+def test_판정_스킵_사실은_soft_warnings_에만_남는다(wired):
+    """🔴 업무 경고를 M-1 `missing_data` 로 옮기지 않는다.
+
+    독립 응답의 `missing_data` 는 무숫자 번역 채널이라 판정 스킵 사실이 들어가지만,
+    M-1 의 `missing_data` 는 **마스터가 사용자에게 무엇을 달라고 할지**의 이름이다.
+    형식도 `logistics_rule/LOG-H02` · `rental_cap_kg@policy_source_ref` 처럼 네임스페이스
+    붙은 필드명이라 맨 경고 코드를 섞으면 어휘가 갈라진다. NOT_READY 로 떨어지는 날에는
+    *"CAPACITY_TIGHT_POLICY_UNRESOLVED 가 없어 답하지 못했습니다"* 라는 이중부정 문장이
+    나간다 (`master/answer.py`).
+
+    사실은 사라지지 않는다 — 같은 코드가 `soft_warnings` 로 나간다. 기본 픽스처는
+    임계 정책이 등록돼 있지 않아 판정 스킵 2건이 실제로 발생하는 상태다.
+    """
     reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
-    assert "CAPACITY_TIGHT_POLICY_UNRESOLVED" in reply.missing_data
-    assert "FRESHNESS_PRESSURE_POLICY_UNRESOLVED" in reply.missing_data
-    # soft_warnings 채널에도 같은 사실이 있어야 한다 — 두 채널은 분류가 다를 뿐이다.
     assert "CAPACITY_TIGHT_POLICY_UNRESOLVED" in reply.payload["soft_warnings"]
+    assert "FRESHNESS_PRESSURE_POLICY_UNRESOLVED" in reply.payload["soft_warnings"]
+    assert "CAPACITY_TIGHT_POLICY_UNRESOLVED" not in reply.missing_data
+    assert "FRESHNESS_PRESSURE_POLICY_UNRESOLVED" not in reply.missing_data
 
 
 def test_우선_조정_축은_판정으로_선언되고_근거가_붙는다(wired, monkeypatch):

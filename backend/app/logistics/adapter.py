@@ -804,10 +804,15 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             {"item": entry.item, "available_qty_kg": _num(entry.available_qty_kg)}
             for entry in scenario["inventory_by_item"]
         ]
-    # 판정 스킵 사실(정책 미등록 등)은 "못 본 것"의 이름이다 — soft_warnings 로도
-    # 나가지만 missing_data 에도 남긴다. 독립 경로 `_missing_data` 와 같은 분류다
-    # (#111 검증 발견 4 — signal 만 맞추고 missing 은 빠뜨렸던 비대칭).
-    missing.extend(business["warnings"])
+    # ★ 업무 경고(`business["warnings"]`)는 여기 넣지 않는다. 독립 응답의
+    #   `missing_data` 는 무숫자 번역 채널이라 그쪽에는 들어가지만, M-1 의
+    #   `missing_data` 는 **마스터가 사용자에게 무엇을 달라고 할지**의 이름이고 형식도
+    #   `logistics_rule/LOG-H02` · `rental_cap_kg@policy_source_ref` 처럼 네임스페이스가
+    #   붙은 필드명이다. 맨 경고 코드를 섞으면 어휘가 갈라지고, NOT_READY 로 떨어지는
+    #   날 *"CAPACITY_TIGHT_POLICY_UNRESOLVED 가 없어 답하지 못했습니다"* 라는
+    #   이중부정 문장이 나간다 (`master/answer.py` 의 gaps 문구).
+    #
+    #   사실이 사라지는 것은 아니다 — `soft_warnings` 가 같은 코드를 그대로 나른다.
 
     ref = _ref(snapshot)
     evidences = (
