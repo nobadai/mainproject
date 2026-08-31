@@ -89,8 +89,27 @@ Ollama/Gemma를 사용한다.
 
 Gemini 가용성 오류 후 Gemma가 성공하면 Finance 계산 결과는 그대로 유지되고
 `runtime_status=READY`, `llm_status=SUCCESS`가 된다. 이때 실제 사용 모델은
-`llm_model=gemma3:4b`로 관측할 수 있으며 `llm_fallback_used=False`다. Provider 전환과
-deterministic finalization fallback을 같은 상태로 취급하지 않는다.
+`llm_model=gemma3:4b`이며 `llm_fallback_used=False`다. Provider 전환과 deterministic
+finalization fallback을 같은 상태로 취급하지 않는다.
+
+Provider 전환 이력은 Finance가 `ExecutionMetadata.observations`에 추가하는
+`finance_llm_provider` observation으로 구분한다.
+
+```json
+{
+  "observation_type": "finance_llm_provider",
+  "primary_provider": "gemini",
+  "effective_provider": "ollama",
+  "provider_fallback_used": true,
+  "provider_fallback_reason": "HTTP_429"
+}
+```
+
+`provider_fallback_reason`은 `API_KEY_MISSING`, `HTTP_429`, `TIMEOUT`, `NETWORK_ERROR`,
+`HTTP_5XX` 중 하나이며 fallback이 없으면 `null`이다. 따라서 명시적으로 Ollama를 선택한
+실행은 `primary_provider=ollama`, `effective_provider=ollama`,
+`provider_fallback_used=false`로 자동 fallback과 구분된다. 공유 `ExecutionMetadata`
+계약에는 Finance 전용 필드를 추가하지 않는다.
 
 ## Gemini 응답 처리
 

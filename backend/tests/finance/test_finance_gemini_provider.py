@@ -13,12 +13,14 @@ from app.finance.agent import (
     FinanceAgentController,
     GeminiFinanceFinalizer,
     GeminiFinancePlanner,
+    OllamaFinanceFinalizer,
     OllamaFinancePlanner,
     ToolAction,
     _AvailabilityFallbackFinanceFinalizer,
     _AvailabilityFallbackFinancePlanner,
     _finance_model,
     _finance_provider_name,
+    _gemini_availability_failure_reason,
     _gemini_response_text,
     _is_gemini_availability_failure,
     _load_finance_environment,
@@ -170,6 +172,36 @@ def _planner_decide(planner: GeminiFinancePlanner, *, missing=("finance_position
     )
 
 
+def _mock_successful_pre_purchase(monkeypatch, planner_type, finalizer_type):
+    actions = iter(
+        [
+            ToolAction("assess_finance_position"),
+            ToolAction("analyze_payment_pressure"),
+            ToolAction("calculate_purchase_finance_cap"),
+            ToolAction(finalize=True),
+        ]
+    )
+
+    def decide(planner, **_kwargs):
+        planner.attempts += 1
+        return next(actions)
+
+    def finalize(finalizer, **_kwargs):
+        finalizer.attempts += 1
+        return "Verified Finance Evidence supports the reported purchasing boundary."
+
+    monkeypatch.setattr(planner_type, "decide", decide)
+    monkeypatch.setattr(finalizer_type, "finalize", finalize)
+
+
+def _provider_observation(metadata):
+    return next(
+        json.loads(item)
+        for item in metadata.observations
+        if json.loads(item).get("observation_type") == "finance_llm_provider"
+    )
+
+
 def test_finance_settings_load_env_independent_of_working_directory(tmp_path, monkeypatch):
     env_file = tmp_path / "config" / ".env"
     env_file.parent.mkdir()
@@ -254,6 +286,20 @@ def test_wrapped_gemini_transport_failures_are_eligible_for_ollama(cause):
 
 
 @pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (RuntimeError("Finance Gemini API key is not set"), "API_KEY_MISSING"),
+        (urllib.error.HTTPError("https://gemini.invalid", 429, "quota", {}, None), "HTTP_429"),
+        (urllib.error.HTTPError("https://gemini.invalid", 503, "server", {}, None), "HTTP_5XX"),
+        (TimeoutError("timeout"), "TIMEOUT"),
+        (urllib.error.URLError("network"), "NETWORK_ERROR"),
+    ],
+)
+def test_gemini_availability_failure_reason_is_observable(error, reason):
+    assert _gemini_availability_failure_reason(error) == reason
+
+
+@pytest.mark.parametrize(
     "error",
     [
         urllib.error.HTTPError("https://gemini.invalid", 400, "schema", {}, None),
@@ -276,26 +322,8 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     monkeypatch.setenv("FINANCE_LLM_MODEL", "gemini-primary-model")
     monkeypatch.delenv("FINANCE_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    fallback_actions = iter(
-        [
-            ToolAction("assess_finance_position"),
-            ToolAction("analyze_payment_pressure"),
-            ToolAction("calculate_purchase_finance_cap"),
-            ToolAction(finalize=True),
-        ]
-    )
-
-    def fallback_decide(planner, **_kwargs):
-        planner.attempts += 1
-        return next(fallback_actions)
-
-    def fallback_finalize(finalizer, **_kwargs):
-        finalizer.attempts += 1
-        return "Verified Finance Evidence supports the reported purchasing boundary."
-
-    monkeypatch.setattr(OllamaFinancePlanner, "decide", fallback_decide)
-    monkeypatch.setattr(
-        "app.finance.agent.OllamaFinanceFinalizer.finalize", fallback_finalize
+    _mock_successful_pre_purchase(
+        monkeypatch, OllamaFinancePlanner, OllamaFinanceFinalizer
     )
     with patch("app.finance.agent.urllib.request.urlopen") as urlopen:
         controller = FinanceAgentController(_FinancePort())
@@ -307,12 +335,65 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     assert metadata.llm_model == "gemma3:4b"
     assert metadata.llm_attempts == 6
     assert controller.planner.state.active is True
+    assert _provider_observation(metadata) == {
+        "effective_provider": "ollama",
+        "observation_type": "finance_llm_provider",
+        "primary_provider": "gemini",
+        "provider_fallback_reason": "API_KEY_MISSING",
+        "provider_fallback_used": True,
+    }
     urlopen.assert_not_called()
     save_run.assert_called_once()
 
 
+@patch("app.finance.agent.save_finance_execution")
+def test_normal_gemini_provider_observation_is_distinct(save_run, monkeypatch):
+    monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("FINANCE_LLM_MODEL", "gemini-primary-model")
+    _mock_successful_pre_purchase(
+        monkeypatch, GeminiFinancePlanner, GeminiFinanceFinalizer
+    )
+
+    reply, metadata = FinanceAgentController(_FinancePort()).run(_request())
+
+    assert reply.runtime_status == "READY"
+    assert metadata.llm_status == "SUCCESS"
+    assert metadata.llm_fallback_used is False
+    assert _provider_observation(metadata) == {
+        "effective_provider": "gemini",
+        "observation_type": "finance_llm_provider",
+        "primary_provider": "gemini",
+        "provider_fallback_reason": None,
+        "provider_fallback_used": False,
+    }
+    save_run.assert_called_once()
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_explicit_ollama_provider_observation_is_distinct(save_run, monkeypatch):
+    monkeypatch.setenv("FINANCE_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("FINANCE_LLM_MODEL", "gemma3:4b")
+    _mock_successful_pre_purchase(
+        monkeypatch, OllamaFinancePlanner, OllamaFinanceFinalizer
+    )
+
+    reply, metadata = FinanceAgentController(_FinancePort()).run(_request())
+
+    assert reply.runtime_status == "READY"
+    assert metadata.llm_status == "SUCCESS"
+    assert metadata.llm_fallback_used is False
+    assert _provider_observation(metadata) == {
+        "effective_provider": "ollama",
+        "observation_type": "finance_llm_provider",
+        "primary_provider": "ollama",
+        "provider_fallback_reason": None,
+        "provider_fallback_used": False,
+    }
+    save_run.assert_called_once()
+
+
 def test_schema_failure_does_not_activate_provider_fallback():
-    state = _ProviderFallbackState()
+    state = _ProviderFallbackState("gemini", "gemini")
     fallback = _FallbackPlanner()
     planner = _AvailabilityFallbackFinancePlanner(
         _UnavailablePlanner(ValueError("invalid structured output")),

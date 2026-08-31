@@ -209,20 +209,42 @@ class FinancePlannerFailure(RuntimeError):
 
 @dataclass
 class _ProviderFallbackState:
+    primary_provider: str
+    effective_provider: str
     active: bool = False
+    reason: str | None = None
+
+    def activate(self, reason: str) -> None:
+        self.active = True
+        self.effective_provider = "ollama"
+        self.reason = reason
 
 
-def _is_gemini_availability_failure(error: Exception) -> bool:
+def _gemini_availability_failure_reason(error: Exception) -> str | None:
     if isinstance(error, urllib.error.HTTPError):
-        return error.code == 429 or 500 <= error.code < 600
-    if isinstance(error, (TimeoutError, urllib.error.URLError)):
-        return True
+        if error.code == 429:
+            return "HTTP_429"
+        if 500 <= error.code < 600:
+            return "HTTP_5XX"
+        return None
+    if isinstance(error, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error, urllib.error.URLError):
+        return "NETWORK_ERROR"
     if (
         isinstance(error, RuntimeError)
         and str(error) == "Finance Gemini API key is not set"
     ):
-        return True
-    return isinstance(error.__cause__, (TimeoutError, urllib.error.URLError))
+        return "API_KEY_MISSING"
+    if isinstance(error.__cause__, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error.__cause__, urllib.error.URLError):
+        return "NETWORK_ERROR"
+    return None
+
+
+def _is_gemini_availability_failure(error: Exception) -> bool:
+    return _gemini_availability_failure_reason(error) is not None
 
 
 class OllamaFinancePlanner:
@@ -544,9 +566,10 @@ class _AvailabilityFallbackFinancePlanner:
         try:
             return self.primary.decide(**kwargs)
         except Exception as error:
-            if not _is_gemini_availability_failure(error):
+            reason = _gemini_availability_failure_reason(error)
+            if reason is None:
                 raise
-            self.state.active = True
+            self.state.activate(reason)
             return self.fallback.decide(**kwargs)
 
 
@@ -586,9 +609,10 @@ class _AvailabilityFallbackFinanceFinalizer:
         try:
             return self.primary.finalize(**kwargs)
         except Exception as error:
-            if not _is_gemini_availability_failure(error):
+            reason = _gemini_availability_failure_reason(error)
+            if reason is None:
                 raise
-            self.state.active = True
+            self.state.activate(reason)
             return self.fallback.finalize(**kwargs)
 
 
@@ -637,10 +661,15 @@ def _validate_planner_action(
         )
 
 
-def _configured_finance_llms() -> tuple[FinancePlanner, FinanceFinalizer]:
-    if _finance_provider_name() == "ollama":
-        return OllamaFinancePlanner(), OllamaFinanceFinalizer()
-    state = _ProviderFallbackState()
+def _configured_finance_llms(
+) -> tuple[FinancePlanner, FinanceFinalizer, _ProviderFallbackState]:
+    provider = _finance_provider_name()
+    state = _ProviderFallbackState(
+        primary_provider=provider,
+        effective_provider=provider,
+    )
+    if provider == "ollama":
+        return OllamaFinancePlanner(), OllamaFinanceFinalizer(), state
     return (
         _AvailabilityFallbackFinancePlanner(
             GeminiFinancePlanner(),
@@ -652,6 +681,7 @@ def _configured_finance_llms() -> tuple[FinancePlanner, FinanceFinalizer]:
             OllamaFinanceFinalizer(model=_DEFAULT_MODELS["ollama"]),
             state,
         ),
+        state,
     )
 
 
@@ -1108,12 +1138,16 @@ class FinanceAgentController:
     ):
         self.registry = FinanceToolRegistry(data_port)
         if planner is None:
-            configured_planner, configured_finalizer = _configured_finance_llms()
+            configured_planner, configured_finalizer, provider_state = (
+                _configured_finance_llms()
+            )
             self.planner = configured_planner
             self.finalizer = finalizer or configured_finalizer
+            self._provider_state = provider_state
         else:
             self.planner = planner
             self.finalizer = finalizer or DeterministicFinanceFinalizer()
+            self._provider_state = None
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )
@@ -1195,6 +1229,16 @@ class FinanceAgentController:
             reasoning = error_reason[:240]
         elapsed = int((time.monotonic() - started) * 1000)
         observations = [item for state in states for item in state.observations]
+        if self._provider_state is not None:
+            observations.append(
+                {
+                    "observation_type": "finance_llm_provider",
+                    "primary_provider": self._provider_state.primary_provider,
+                    "effective_provider": self._provider_state.effective_provider,
+                    "provider_fallback_used": self._provider_state.active,
+                    "provider_fallback_reason": self._provider_state.reason,
+                }
+            )
         used_tools = [item for state in states for item in state.tool_order]
         rules = [f"{state.branch_id}:{rule}" for state in states for rule in state.rules]
         metadata = ExecutionMetadata(
