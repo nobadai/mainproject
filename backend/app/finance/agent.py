@@ -11,12 +11,16 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal
+from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
+
+from dotenv import load_dotenv
 
 from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.rules import classify_base_stress
@@ -37,6 +41,111 @@ Adjustability = Literal["NOT_NEEDED", "ADJUSTABLE", "NOT_ADJUSTABLE"]
 
 DEFAULT_MAX_TOOL_CALLS = 8
 DEFAULT_MAX_REPLANS = 2
+
+_DEFAULT_MODELS = {
+    "ollama": "gemma3:4b",
+    "gemini": "gemini-3.5-flash-lite",
+}
+_ENV_FILES = (
+    Path(__file__).resolve().parents[2] / ".env",
+    Path(__file__).resolve().parents[3] / ".env",
+)
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+_GEMINI_PLANNER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tool_name": {"type": "string", "nullable": True},
+        "arguments": {
+            "type": "object",
+            "properties": {
+                "axis": {"type": "string"},
+                "candidate_amount_krw": {"type": "number"},
+            },
+        },
+        "reason": {"type": "string"},
+        "finalize": {"type": "boolean"},
+    },
+    "required": ["tool_name", "arguments", "reason", "finalize"],
+}
+
+
+def _load_finance_environment() -> None:
+    for env_file in _ENV_FILES:
+        load_dotenv(env_file, override=False)
+
+
+def _finance_provider_name() -> str:
+    _load_finance_environment()
+    provider = (
+        os.getenv("FINANCE_LLM_PROVIDER")
+        or "gemini"
+    ).strip().lower()
+    if provider not in _DEFAULT_MODELS:
+        raise RuntimeError("Configured Finance LLM provider is not supported")
+    return provider
+
+
+def _finance_model(provider: str) -> str:
+    _load_finance_environment()
+    explicit = os.getenv("FINANCE_LLM_MODEL")
+    if explicit:
+        return explicit
+    global_provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+    global_model = os.getenv("LLM_MODEL")
+    if provider == global_provider and global_model:
+        return global_model
+    return _DEFAULT_MODELS[provider]
+
+
+def _gemini_response_text(document: dict[str, Any]) -> str:
+    candidates = document.get("candidates") or []
+    parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
+    for part in parts:
+        if part.get("thought"):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    raise TypeError("Finance Gemini response did not contain text content")
+
+
+def _gemini_generate(
+    *, model: str, system_prompt: str, user_payload: dict[str, Any], response_schema: dict[str, Any]
+) -> str:
+    _load_finance_environment()
+    api_key = os.getenv("FINANCE_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Finance Gemini API key is not set")
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": json.dumps(user_payload, default=str)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+        },
+    }
+    request = urllib.request.Request(
+        f"{_GEMINI_BASE_URL}/models/{model}:generateContent",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+        ) as response:
+            document = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        raise
+    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
+        raise RuntimeError("Finance Gemini request failed") from error
+    return _gemini_response_text(document)
 
 PRE_PURCHASE_TOOLS = frozenset(
     {
@@ -95,11 +204,55 @@ class FinanceFinalizer(Protocol):
     ) -> str: ...
 
 
+class FinancePlannerFailure(RuntimeError):
+    """Planner 호출 또는 출력 검증 실패를 Controller 상태로 전달한다."""
+
+
+@dataclass
+class _ProviderFallbackState:
+    primary_provider: str
+    effective_provider: str
+    active: bool = False
+    reason: str | None = None
+
+    def activate(self, reason: str) -> None:
+        self.active = True
+        self.effective_provider = "ollama"
+        self.reason = reason
+
+
+def _gemini_availability_failure_reason(error: Exception) -> str | None:
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code == 429:
+            return "HTTP_429"
+        if 500 <= error.code < 600:
+            return "HTTP_5XX"
+        return None
+    if isinstance(error, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error, urllib.error.URLError):
+        return "NETWORK_ERROR"
+    if (
+        isinstance(error, RuntimeError)
+        and str(error) == "Finance Gemini API key is not set"
+    ):
+        return "API_KEY_MISSING"
+    if isinstance(error.__cause__, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error.__cause__, urllib.error.URLError):
+        return "NETWORK_ERROR"
+    return None
+
+
+def _is_gemini_availability_failure(error: Exception) -> bool:
+    return _gemini_availability_failure_reason(error) is not None
+
+
 class OllamaFinancePlanner:
     """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
 
-    def __init__(self) -> None:
-        self.model = os.getenv("LLM_MODEL", "gemma3:4b")
+    def __init__(self, *, model: str | None = None) -> None:
+        self.model = model or _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -183,7 +336,68 @@ class OllamaFinancePlanner:
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
             raw = json.loads(response.read().decode())
         content = json.loads(raw["message"]["content"])
-        return ToolAction(**content)
+        action = ToolAction(**content)
+        _validate_planner_action(action, allowed_tools, missing_capabilities)
+        return action
+
+
+class GeminiFinancePlanner:
+    """Finance Tool 선택만 수행하는 Gemini structured-output Planner."""
+
+    def __init__(self) -> None:
+        self.model = _finance_model("gemini")
+        self.attempts = 0
+
+    def decide(
+        self,
+        *,
+        request: AgentRequest,
+        allowed_tools: frozenset[str],
+        observations: tuple[dict[str, Any], ...],
+        missing_capabilities: tuple[str, ...],
+    ) -> ToolAction:
+        self.attempts += 1
+        prompt = {
+            "mode": request.mode,
+            "business_payload": dict(request.payload),
+            "allowed_tools": sorted(allowed_tools),
+            "observations": observations,
+            "missing_capabilities": missing_capabilities,
+            "tool_argument_contracts": {
+                "assess_finance_position": {},
+                "project_cashflow": {},
+                "calculate_purchase_finance_cap": {},
+                "analyze_payment_pressure": {},
+                "evaluate_purchase_scenario": {},
+                "validate_amount_adjustment": {
+                    "axis": "amount",
+                    "candidate_amount_krw": (
+                        "copy the exact finance_cap_amount_krw from a prior observation; "
+                        "never create a number"
+                    ),
+                },
+            },
+        }
+        content = json.loads(
+            _gemini_generate(
+                model=self.model,
+                system_prompt=(
+                    "You plan Finance capability calls. Select only an allowed tool. "
+                    "Never calculate or invent financial numbers or policy values. "
+                    "Use observations only. When missing_capabilities is non-empty, "
+                    "set finalize=false and select exactly one allowed tool that can "
+                    "satisfy a missing capability. When missing_capabilities is empty, "
+                    "set finalize=true and tool_name=null. For validate_amount_adjustment, "
+                    "copy the observed deterministic finance_cap_amount_krw exactly and "
+                    "set axis to amount."
+                ),
+                user_payload=prompt,
+                response_schema=_GEMINI_PLANNER_RESPONSE_SCHEMA,
+            )
+        )
+        action = ToolAction(**content)
+        _validate_planner_action(action, allowed_tools, missing_capabilities)
+        return action
 
 
 _FINAL_EXPLANATIONS = {
@@ -199,8 +413,8 @@ _FINAL_EXPLANATIONS = {
 class OllamaFinanceFinalizer:
     """조사 Planner와 분리된 Evidence 전용 LLM finalization."""
 
-    def __init__(self) -> None:
-        self.model = os.getenv("LLM_MODEL", "gemma3:4b")
+    def __init__(self, *, model: str | None = None) -> None:
+        self.model = model or _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -266,6 +480,143 @@ class OllamaFinanceFinalizer:
         return _FINAL_EXPLANATIONS[selected]
 
 
+class GeminiFinanceFinalizer:
+    """검증된 Evidence에서 설명 키만 고르는 Gemini Finalizer."""
+
+    def __init__(self) -> None:
+        self.model = _finance_model("gemini")
+        self.attempts = 0
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        self.attempts += 1
+        allowed = (
+            ["PRE_BOUNDARY"]
+            if mode == "PRE_PURCHASE"
+            else ["SCENARIO_REJECT"]
+            if business_status == "reject"
+            else ["SCENARIO_ACCEPT"]
+        )
+        selected = json.loads(
+            _gemini_generate(
+                model=self.model,
+                system_prompt=(
+                    "Finalize the Finance reply from verified Evidence only. Select the "
+                    "allowed explanation key. Do not calculate or add numbers or claims."
+                ),
+                user_payload={
+                    "mode": mode,
+                    "business_status": business_status,
+                    "verified_claims": [item.claim for item in evidences],
+                    "allowed_explanation_keys": allowed,
+                },
+                response_schema={
+                    "type": "object",
+                    "properties": {
+                        "explanation_key": {"type": "string", "enum": allowed}
+                    },
+                    "required": ["explanation_key"],
+                },
+            )
+        )["explanation_key"]
+        if selected not in allowed:
+            raise ValueError("Finance finalization selected an unsupported explanation")
+        return _FINAL_EXPLANATIONS[selected]
+
+
+class _AvailabilityFallbackFinancePlanner:
+    def __init__(
+        self,
+        primary: FinancePlanner,
+        fallback: FinancePlanner,
+        state: _ProviderFallbackState,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.state = state
+
+    @property
+    def model(self) -> str:
+        return self.fallback.model if self.state.active else self.primary.model
+
+    @property
+    def attempts(self) -> int:
+        return self.primary.attempts + self.fallback.attempts
+
+    def decide(
+        self,
+        *,
+        request: AgentRequest,
+        allowed_tools: frozenset[str],
+        observations: tuple[dict[str, Any], ...],
+        missing_capabilities: tuple[str, ...],
+    ) -> ToolAction:
+        kwargs = {
+            "request": request,
+            "allowed_tools": allowed_tools,
+            "observations": observations,
+            "missing_capabilities": missing_capabilities,
+        }
+        if self.state.active:
+            return self.fallback.decide(**kwargs)
+        try:
+            return self.primary.decide(**kwargs)
+        except Exception as error:
+            reason = _gemini_availability_failure_reason(error)
+            if reason is None:
+                raise
+            self.state.activate(reason)
+            return self.fallback.decide(**kwargs)
+
+
+class _AvailabilityFallbackFinanceFinalizer:
+    def __init__(
+        self,
+        primary: FinanceFinalizer,
+        fallback: FinanceFinalizer,
+        state: _ProviderFallbackState,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.state = state
+
+    @property
+    def model(self) -> str:
+        return self.fallback.model if self.state.active else self.primary.model
+
+    @property
+    def attempts(self) -> int:
+        return self.primary.attempts + self.fallback.attempts
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        kwargs = {
+            "mode": mode,
+            "business_status": business_status,
+            "evidences": evidences,
+        }
+        if self.state.active:
+            return self.fallback.finalize(**kwargs)
+        try:
+            return self.primary.finalize(**kwargs)
+        except Exception as error:
+            reason = _gemini_availability_failure_reason(error)
+            if reason is None:
+                raise
+            self.state.activate(reason)
+            return self.fallback.finalize(**kwargs)
+
+
 class DeterministicFinanceFinalizer:
     """동일한 검증 완료 설명 계약을 구현하는 테스트/오프라인 finalizer."""
 
@@ -288,6 +639,51 @@ class DeterministicFinanceFinalizer:
         return _FINAL_EXPLANATIONS[
             "SCENARIO_REJECT" if business_status == "reject" else "SCENARIO_ACCEPT"
         ]
+
+
+def _validate_planner_action(
+    action: ToolAction,
+    allowed_tools: frozenset[str],
+    missing_capabilities: tuple[str, ...],
+) -> None:
+    if not isinstance(action.finalize, bool):
+        raise TypeError("Finance Planner finalize must be boolean")
+    if not isinstance(action.arguments, dict):
+        raise TypeError("Finance Planner arguments must be an object")
+    if missing_capabilities:
+        if action.finalize or action.tool_name not in allowed_tools:
+            raise ValueError(
+                "Finance Planner must select one allowed tool while capabilities are missing"
+            )
+        return
+    if not action.finalize or action.tool_name is not None:
+        raise ValueError(
+            "Finance Planner must finalize without a tool when capabilities are complete"
+        )
+
+
+def _configured_finance_llms(
+) -> tuple[FinancePlanner, FinanceFinalizer, _ProviderFallbackState]:
+    provider = _finance_provider_name()
+    state = _ProviderFallbackState(
+        primary_provider=provider,
+        effective_provider=provider,
+    )
+    if provider == "ollama":
+        return OllamaFinancePlanner(), OllamaFinanceFinalizer(), state
+    return (
+        _AvailabilityFallbackFinancePlanner(
+            GeminiFinancePlanner(),
+            OllamaFinancePlanner(model=_DEFAULT_MODELS["ollama"]),
+            state,
+        ),
+        _AvailabilityFallbackFinanceFinalizer(
+            GeminiFinanceFinalizer(),
+            OllamaFinanceFinalizer(model=_DEFAULT_MODELS["ollama"]),
+            state,
+        ),
+        state,
+    )
 
 
 class FinanceToolRegistry:
@@ -742,12 +1138,17 @@ class FinanceAgentController:
         max_replans: int | None = None,
     ):
         self.registry = FinanceToolRegistry(data_port)
-        self.planner = planner or OllamaFinancePlanner()
-        self.finalizer = finalizer or (
-            OllamaFinanceFinalizer()
-            if planner is None
-            else DeterministicFinanceFinalizer()
-        )
+        if planner is None:
+            configured_planner, configured_finalizer, provider_state = (
+                _configured_finance_llms()
+            )
+            self.planner = configured_planner
+            self.finalizer = finalizer or configured_finalizer
+            self._provider_state = provider_state
+        else:
+            self.planner = planner
+            self.finalizer = finalizer or DeterministicFinanceFinalizer()
+            self._provider_state = None
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )
@@ -773,6 +1174,7 @@ class FinanceAgentController:
         seen: set[str] = set()
         total_calls = 0
         total_replans = 0
+        planner_failed = False
         try:
             _validate_finance_payload(request)
             branch_requests = self._branch_requests(request)
@@ -791,6 +1193,9 @@ class FinanceAgentController:
                 )
                 shared_context = state.context_cache
                 states.append(state)
+        except FinancePlannerFailure as exc:
+            planner_failed = True
+            runtime_status, error_reason = "ERROR", str(exc)
         except FinanceDataNotReady as exc:
             runtime_status, missing_data, error_reason = "RUNTIME_NOT_READY", (exc.key,), str(exc)
         except Exception as exc:  # noqa: BLE001 - Agent boundary converts failures to ERROR.
@@ -799,8 +1204,10 @@ class FinanceAgentController:
         payload, evidences, business_status, adjustments = self._finalize(
             request, states, runtime_status
         )
-        llm_status = "DISABLED"
-        llm_fallback_used = False
+        llm_status = "FALLBACK" if planner_failed else (
+            "SUCCESS" if self.planner.attempts else "DISABLED"
+        )
+        llm_fallback_used = planner_failed
         if runtime_status == "READY":
             finalization_evidence = [*evidences]
             for verdict in payload.get("verdicts", []):
@@ -823,6 +1230,16 @@ class FinanceAgentController:
             reasoning = error_reason[:240]
         elapsed = int((time.monotonic() - started) * 1000)
         observations = [item for state in states for item in state.observations]
+        if self._provider_state is not None:
+            observations.append(
+                {
+                    "observation_type": "finance_llm_provider",
+                    "primary_provider": self._provider_state.primary_provider,
+                    "effective_provider": self._provider_state.effective_provider,
+                    "provider_fallback_used": self._provider_state.active,
+                    "provider_fallback_reason": self._provider_state.reason,
+                }
+            )
         used_tools = [item for state in states for item in state.tool_order]
         rules = [f"{state.branch_id}:{rule}" for state in states for rule in state.rules]
         metadata = ExecutionMetadata(
@@ -837,7 +1254,9 @@ class FinanceAgentController:
             rules_applied=tuple(rules),
             replans=total_replans,
             llm_status=llm_status,
-            llm_model=self.finalizer.model,
+            llm_model=(
+                self.finalizer.model if self.finalizer.attempts else self.planner.model
+            ),
             llm_attempts=self.planner.attempts + self.finalizer.attempts,
             llm_fallback_used=llm_fallback_used,
             elapsed_ms=elapsed,
@@ -924,12 +1343,15 @@ class FinanceAgentController:
             planner_tools = frozenset().union(*(_CAPABILITY_TOOLS[name] for name in missing))
             if not planner_tools:
                 planner_tools = self.registry.names_for(state.request.mode)
-            action = self.planner.decide(
-                request=state.request,
-                allowed_tools=planner_tools,
-                observations=tuple(state.observations),
-                missing_capabilities=missing,
-            )
+            try:
+                action = self.planner.decide(
+                    request=state.request,
+                    allowed_tools=planner_tools,
+                    observations=tuple(state.observations),
+                    missing_capabilities=missing,
+                )
+            except Exception as exc:
+                raise FinancePlannerFailure(str(exc)) from exc
             if action.finalize:
                 if not missing:
                     return total_calls, total_replans
