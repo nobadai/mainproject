@@ -93,6 +93,39 @@ class FakeProvider:
         return response
 
 
+def _pin_to_code_defaults(monkeypatch, *keys: str) -> None:
+    """``.env`` 와 무관하게 **코드 기본값**만 보게 한다.
+
+    ``get_llm_settings()``는 함수 안에서 ``load_dotenv()``를 부르고, 그건 기본이
+    ``override=False``라 **이미 설정된** 변수만 안 덮어쓴다. ``delenv``로 지우면
+    "미설정"이 되어 ``.env``의 값이 그대로 실린다 — 검사가 코드 기본값이 아니라
+    **개발자 머신의 .env를 시험하게 된다.**
+
+    실제로 그렇게 깨졌다 (2026-08-31): ``.env``의 ``LLM_MODEL=gemma3:4b``가 되살아나
+    ``settings.model``이 그 값이 됐다. 팀원마다 ``.env``가 다르므로 **로컬만 빨간불**이
+    되고, 그런 실패가 쌓이면 스위트를 아무도 안 믿는다.
+
+    ⚠️ **오염은 테스트 하나로 끝나지 않는다.** ``load_dotenv``는 ``os.environ`` 을
+    실제로 채우고 그건 ``monkeypatch`` 밖이라 **세션 끝까지 남는다.** 앞선 테스트가
+    한 번만 ``get_llm_settings()`` 를 불러도 ``LLM_PROVIDER=ollama`` 가 심기고,
+    기본 모델은 provider 별로 갈리므로(``_DEFAULT_MODELS``) 뒤 테스트가 다른 기본값을
+    본다. 그래서 **읽는 키를 하나도 빠뜨리지 않고 넘겨야** 한다 — 단독 실행은 통과하고
+    전체 실행만 깨지는 차이가 여기서 난다.
+
+    그래서 **로딩 자체를 끊는다** — 팀 선례와 같은 방식이다
+    (``tests/llm/test_per_agent_model_override.py`` 의 ``_clear``).
+
+    ⚠️ 명시한 키만 지운다. conftest 가 세션 전체에 걸어 둔 ``PURCHASE_LLM_ENABLED=false``
+    를 건드리면 테스트가 실 프로바이더를 타게 된다.
+    """
+    monkeypatch.setattr(
+        "app.purchase_agent.llm.runtime.load_dotenv", lambda *a, **k: False
+    )
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(f"PURCHASE_{key}", raising=False)
+
+
 def _settings(*, enabled=True, retries=1, provider="fake") -> LLMSettings:
     return LLMSettings(
         enabled=enabled,
@@ -685,8 +718,7 @@ def test_default_anthropic_model_is_a_pinned_low_tier_snapshot(monkeypatch) -> N
 
     별칭 형태(``claude-haiku-4-5``)로 되돌아가면 이 검사가 문다.
     """
-    monkeypatch.delenv("PURCHASE_LLM_MODEL", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
+    _pin_to_code_defaults(monkeypatch, "LLM_PROVIDER", "LLM_MODEL")
     from app.purchase_agent.llm.runtime import get_llm_settings
 
     settings = get_llm_settings()
@@ -705,8 +737,7 @@ def test_effort_is_unset_by_default_and_omitted_from_the_request(monkeypatch) ->
     떨어뜨린다 — **LLM을 켜 뒀는데 매번 fallback인 상태가 조용히 유지된다.** 그래서
     "기본값이 없다"와 "요청에서 빠진다"를 둘 다 잠근다.
     """
-    monkeypatch.delenv("PURCHASE_LLM_EFFORT", raising=False)
-    monkeypatch.delenv("LLM_EFFORT", raising=False)
+    _pin_to_code_defaults(monkeypatch, "LLM_EFFORT")
     from app.purchase_agent.llm.runtime import AnthropicProvider, get_llm_settings
 
     assert get_llm_settings().effort is None
