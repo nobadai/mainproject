@@ -92,7 +92,11 @@ _LIVENESS_TEXT = "요청을 받을 수 있는 상태입니다 — 업무 값은 
 #: 종료 코드를 사람이 읽는 결론으로. **"사라 / 사지 마라" 가 여기서 나온다.**
 _END_HEADLINE: dict[str, str] = {
     "E1_APPROVED": "매입안을 제시합니다. 고르시면 진행합니다.",
-    "E2_HELD": "보류합니다 — 사람이 봐야 할 지적이 있습니다.",
+    #: 🔴 **"지적이 있습니다" 라고 쓰지 않는다.** `E2_HELD` 는 두 경우를 덮는다 —
+    #: 지적이 있어 멈춘 것과, **안이 아예 안 나온 것**(필수 의무가 없어 E5 가 아닌
+    #: 경우)이다. 뒤엣것은 지적이 0건인데 머리말이 있다고 말해서, 화면이
+    #: *"보류 · 지적 0건"* 이라는 앞뒤 안 맞는 말을 했다 (실측 2026-08-31).
+    "E2_HELD": "보류합니다 — 사람이 봐야 합니다.",
     "E3_REJECTED": "이번에는 매입하지 않는 것을 권합니다.",
     "E4_NOT_STARTED": "실행하지 못했습니다 — 준비되지 않은 부서가 있습니다.",
     "E5_NO_FEASIBLE_PLAN": "실행 가능한 안이 없습니다.",
@@ -232,6 +236,15 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
     labels = [str(s.get("label", "이름 없음")) for s in (response.scenarios or [])]
     if labels:
         facts.append(Fact(label="제시한 안", value=f"{len(labels)}개 ({', '.join(labels)})"))
+    elif response.reason:
+        # 🔴 **안이 없으면 사유가 답이다.** 머리말이 `_END_HEADLINE` 로 갈리면서
+        #    `reason` 이 버려지고 있었다 — 화면에 *"보류합니다"* 만 남고 **왜 없는지가
+        #    사라졌다** (실측 2026-08-31: `제약 조합 하에 유효한 안이 없어 제안을 내지
+        #    못했다` 가 응답에는 있는데 화면에 없었다).
+        #
+        #    안이 있을 때는 안 싣는다 — 그때 `reason` 은 `사용자 선택 대기` 라
+        #    머리말과 겹친다. **안이 없을 때만 사유가 새 정보다.**
+        facts.append(Fact(label="사유", value=response.reason))
     if response.single_option:
         facts.append(Fact(label="남은 안", value="1개뿐입니다"))
 
