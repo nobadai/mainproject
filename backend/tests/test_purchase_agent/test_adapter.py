@@ -634,6 +634,65 @@ def test_inventory_leaf_keys_are_required(key: str) -> None:
     assert f"constraints.inventory.{key}" in validate_payload(payload, as_of)
 
 
+@pytest.mark.parametrize(
+    ("bad", "expected"),
+    [
+        (True, "@수량이어야 한다"),
+        ("1000", "@수량이어야 한다"),
+        ([1], "@수량이어야 한다"),
+        (float("nan"), "@유한한 수여야 한다"),
+        (-500, "@음수일 수 없다"),
+    ],
+    ids=["bool", "문자열", "리스트", "NaN", "음수"],
+)
+@pytest.mark.parametrize("key", ["warehouse_free_kg", "rental_cap_kg"])
+def test_capacity_of_wrong_shape_answers_with_a_reason(
+    key: str, bad: object, expected: str
+) -> None:
+    """🔴 **값이 와도 수가 아니면 사유를 내고 멈춘다** — 죽지 않는다.
+
+    부재만 보던 자리다. 값이 있으면 그대로 ``warehouse_cap_kg``까지 흘러갔고 거기서
+    ``TypeError``로 죽었다 — 죽으면 ``missing_data``가 비어 마스터는 *"무엇을 다시
+    달라고 해야 하는지"*를 모른다. ``True``는 더 나쁘다: 죽지도 않고 **창고 상한
+    1kg**이 되어 전 안이 눌린다 (2026-08-31 확인).
+
+    로트 ``shelf_life_days``·``inbound_lead_days``와 같은 종류의 값이라 같은 자리에서
+    같은 모양으로 막는다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"][key] = bad
+
+    request = AgentRequest(
+        context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode="GENERATE_SCENARIOS",
+        payload=payload,
+    )
+    reply, _ = purchase_port(request)  # 터지지 않는다
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    named = [m for m in reply.missing_data if m.startswith(f"constraints.inventory.{key}")]
+    assert named, reply.missing_data
+    assert expected in named[0], named
+
+
+@pytest.mark.parametrize("key", ["warehouse_free_kg", "rental_cap_kg"])
+def test_confirmed_zero_capacity_is_not_a_shape_problem(key: str) -> None:
+    """**확정된 0은 통과한다** (규칙 3).
+
+    ``rental_cap_kg``는 2026-08-27 물류 회신 §1로 0 확정이다. 0을 모양 문제로 잡으면
+    정상 payload가 ``RUNTIME_NOT_READY``로 막힌다 — 창고 상한이 그만큼 작다는 **사실**을
+    값이 안 온 것으로 바꿔 읽는 셈이다.
+    """
+    as_of = SPREAD_WIDE
+    payload = _payload("배추", as_of)
+    payload["constraints"]["inventory"][key] = 0
+    assert not [
+        m for m in validate_payload(payload, as_of) if m.startswith(f"constraints.inventory.{key}")
+    ]
+
+
 def test_empty_inventory_reports_names_instead_of_crashing() -> None:
     """빈 dict가 와도 터지지 않고 **무엇이 없는지**를 담아 돌아온다."""
     as_of = SPREAD_WIDE

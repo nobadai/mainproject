@@ -297,9 +297,7 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
         # 필수가 아니다 (M-1 제출 §5).
         inventory = constraints.get("inventory")
         if isinstance(inventory, Mapping):
-            for key in ("warehouse_free_kg", "rental_cap_kg"):
-                if inventory.get(key) is None:
-                    missing.append(f"constraints.inventory.{key}")
+            missing.extend(_capacity_input_problems(inventory))
             missing.extend(_lot_shape_problems(inventory.get("lots")))
             missing.extend(_arrival_input_problems(inventory))
 
@@ -333,6 +331,37 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     # (state.py · IO명세 §2 동기화 규칙). 필수로 걸면 정상 경로가 막힌다
     # (Codex 교차검증 P1).
     return sorted(set(missing))
+
+
+def _capacity_input_problems(inventory: Mapping[str, Any]) -> list[str]:
+    """창고 상한 입력의 **부재와 모양을 함께** 본다.
+
+    부재만 보면 ``warehouse_cap_kg``가 값을 받고도 죽거나 조용히 틀린다. 실측:
+
+        True          → 창고 상한 1kg. 전 안이 창고에 눌려 죽는데 사유가 안 남는다
+        '1000' · [1]  → 더하는 자리에서 ``TypeError``. 노드가 죽으면 **사유를 못 낸다**
+        -500          → 상한이 음수. 수량이 음수로 클립된다
+
+    죽으면 마스터는 *"무엇을 다시 달라고 해야 하는지"*를 모른다 — ``RUNTIME_NOT_READY``에
+    ``missing_data``가 있어야 요청이 성립한다. 로트 ``shelf_life_days``·
+    ``inbound_lead_days``와 **같은 종류의 값이라 같은 자리에서 막는다**.
+
+    ``0``은 통과시킨다. ``rental_cap_kg``는 2026-08-27 물류 회신 §1로 **0 확정**이라
+    미결이 아니다 (규칙 3).
+    """
+    problems: list[str] = []
+    for key in ("warehouse_free_kg", "rental_cap_kg"):
+        base = f"constraints.inventory.{key}"
+        value = inventory.get(key)
+        if value is None:
+            problems.append(base)
+        elif isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+            problems.append(f"{base}@수량이어야 한다")
+        elif not isfinite(float(value)):  # NaN · ±Inf
+            problems.append(f"{base}@유한한 수여야 한다")
+        elif float(value) < 0:
+            problems.append(f"{base}@음수일 수 없다 (받은 값 {value})")
+    return problems
 
 
 def _arrival_input_problems(inventory: Mapping[str, Any]) -> list[str]:
