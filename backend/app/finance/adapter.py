@@ -31,6 +31,11 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.finance.agent import FinanceAgentController, finance_llm_enabled
+from app.finance.evidence import (
+    _PAYROLL_SOURCE_KEYS,
+    missing_source_name,
+    resolve_optional_source_ref,
+)
 from app.finance.repository import FinanceDataNotReady, get_current_finance_runtime_context
 from app.finance.run_repository import save_finance_execution
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
@@ -70,14 +75,6 @@ _POLICY_KEYS_IN_USE: tuple[str, ...] = (
   default(10)가 우연히 같아 양쪽 다 눈치채지 못했다.
 
 목록을 여기 두는 이유는 재무 Policy 에 필드가 늘어도 **우리가 쓰는 것만** 보기 위해서다."""
-
-_PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date")
-"""이 둘은 **출처가 없으면 계산 자체가 안 된다** (재무 #63 · M-23).
-
-나머지 정책값은 출처가 없어도 값은 쓸 수 있어 `missing_data` 로 밝히고 지나가지만,
-급여는 다르다 — 출처 없는 급여 이벤트를 만들지 않기로 재무가 정했으므로 **급여 유출이
-통째로 빠진다.** 그 상태의 `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다.**"""
-
 
 def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
@@ -194,7 +191,7 @@ def _controller_run(
     if getattr(context.policy, "margin_defense_floor_rate", None) is None:
         missing.append("margin_defense_floor_rate")
     missing.extend(
-        f"{key}@policy_source_ref"
+        missing_source_name(key)
         for key in _POLICY_KEYS_IN_USE
         if key not in context.policy.source_refs
     )
@@ -231,7 +228,7 @@ def _controller_boundary(
             ),
         )
     payroll_refs = tuple(
-        f"{key}@policy_source_ref"
+        missing_source_name(key)
         for key in _PAYROLL_SOURCE_KEYS
         if not context.policy.source_refs.get(key)
     )
@@ -323,7 +320,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         )
 
     payroll_refs = tuple(
-        f"{key}@policy_source_ref"
+        missing_source_name(key)
         for key in _PAYROLL_SOURCE_KEYS
         if not policy.source_refs.get(key)
     )
@@ -566,19 +563,19 @@ def _policy_ref(policy: FinancePolicy, key: str, missing: list[str]) -> str | No
     🔴 예전에는 없을 때 **스냅샷 참조로 떨어졌다.** 정책에서 온 값에 재무 상태 행의
        id(`FIN-DAY30-LOAN`)를 달면 *"재무 상태 행에서 온 수"* 라고 말하는 것이라
        **거짓 출처**다 — 나중에 따라가면 엉뚱한 곳에 닿고, 닿았다는 사실만 남는다.
-       이 파일 안의 주석이 이미 그것을 금지라고 적어 두고 있었다.
 
     ★ 조회는 **낼 수 있는 것만 낸다** (§3.7.6). 그래서 근거를 못 다는 claim 은
       payload 에서도 빼고 `missing_data` 로 밝힌다 — 일부가 빠졌다고 조회 전체를
       세우지는 않는다. 현재 잔액처럼 근거가 멀쩡한 값은 그대로 답한다.
+
+    규칙 자체는 `evidence.resolve_optional_source_ref` 가 갖는다. 여기서는 **어디에
+    적을지**만 정한다 — 조회는 상태가 아니라 지역 목록에 모은다.
     """
-    ref = policy.source_refs.get(key)
-    if ref:
-        return ref
-    name = f"{key}@policy_source_ref"
-    if name not in missing:
-        missing.append(name)
-    return None
+    def record(name: str) -> None:
+        if name not in missing:
+            missing.append(name)
+
+    return resolve_optional_source_ref(policy, key, record)
 
 
 def _ev(

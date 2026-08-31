@@ -176,7 +176,7 @@ def _no_persistence():
 @pytest.fixture(autouse=True)
 def _no_env_file(monkeypatch):
     """`.env` 가 테스트 결과를 바꾸지 않게 한다 — 설정 의미만 본다."""
-    monkeypatch.setattr("app.finance.agent._load_finance_environment", lambda: None)
+    monkeypatch.setattr("app.finance.llm.config._load_finance_environment", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ def test_finance_llm_defaults_to_enabled(monkeypatch):
 
 def test_finance_provider_does_not_inherit_the_global_provider(monkeypatch):
     """★ 전역을 ollama 로 둔 배포에서도 재무는 Gemini 다 (§12)."""
-    from app.finance.agent import _finance_provider_name
+    from app.finance.llm.config import _finance_provider_name
 
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
@@ -213,7 +213,7 @@ def test_finance_provider_does_not_inherit_the_global_provider(monkeypatch):
 
 def test_disabled_finance_llm_builds_no_provider(monkeypatch):
     """껐으면 Provider 를 만들지 않는다 — API 키도 로컬 서버도 확인하러 나가지 않는다."""
-    from app.finance.agent import _configured_finance_llms
+    from app.finance.llm.provider import _configured_finance_llms
 
     monkeypatch.setenv("FINANCE_LLM_ENABLED", "false")
     planner, finalizer, provider_state = _configured_finance_llms()
@@ -507,7 +507,7 @@ def test_provider_fallback_is_not_a_deterministic_fallback(monkeypatch):
     import json
     import urllib.error
 
-    from app.finance.agent import (
+    from app.finance.llm.provider import (
         _AvailabilityFallbackFinancePlanner,
         _ProviderFallbackState,
     )
