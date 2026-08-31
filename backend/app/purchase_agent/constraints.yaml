@@ -82,7 +82,13 @@ cash:
   horizon_days: 30
 
 grade:
-  mid_grade_shelf_ratio: 0.6        # 중품 소진 한계 = 상품 한계일 × 0.6 (등급-신선도 연동)
+  # 중품 소진 한계 = 상품 한계일 × 0.6 (등급-신선도 연동, 상세설계 §7).
+  #
+  # ⚠️ **_fallback 인 이유** — 물류가 같은 개념을 `item_storage_policies[].medium_grade_factor`
+  #   로 보낸다 (실측 전 품목 0.6). 값이 같아 갈라져도 티가 나지 않는 상태라, 어느 쪽이
+  #   정본인지 **이름이 말하게** 했다. 읽는 자리는 allocate_sourcing.mid_grade_shelf_ratio()
+  #   하나뿐이고, 물류 값이 오면 그것을 쓰고 없으면 이 값으로 떨어지며 고지한다 (규칙 3).
+  mid_grade_shelf_ratio_fallback: 0.6
   # 기준등급(allocation.reference_grade)의 짝. ⑤는 상/중 2등급만 다룬다 — 특 활용은 범위 밖.
   mid_grade: "중"
   # 평시 등급 스프레드 기준선 = (P상 − P중) / P상. **SIM_FIXED 선언값**이다.
