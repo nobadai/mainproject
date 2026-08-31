@@ -80,7 +80,13 @@ export interface Scenario {
   label?: string;
   total_qty_kg?: number;
   total_amount_krw?: number;
+  coverage_days?: number;
   split_plan?: { qty_kg?: number }[];
+  //: 승인 결과 화면이 편다. **모양은 매입이 정한다** — 여기서 좁게 잡으면
+  //: 매입이 칸을 늘릴 때 화면이 조용히 못 읽는다. 인덱스 시그니처로 받고
+  //: 쓰는 쪽에서 좁힌다 (`ApprovedPlan.tsx`).
+  sourcing_plan?: unknown[];
+  payment_schedule?: unknown[];
   [key: string]: unknown;
 }
 
@@ -197,4 +203,13 @@ export interface BurnIn {
   financing_mode: string | null;
   note: string | null;
   closings: DailyClosing[];
+}
+
+
+/** `GET /master/runs/{id}/report` — 들고 나갈 수 있는 매입안 문서. */
+export interface RunReport {
+  request_id: string;
+  filename: string;
+  /** Markdown 전문. **화면이 조립하지 않는다** — 서버가 낸 것을 그대로 내려받는다. */
+  markdown: string;
 }
