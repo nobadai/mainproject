@@ -24,7 +24,7 @@ verifier.py — 마스터가 직접 가진 검증 Tool (정의서 §3.7)
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol
@@ -567,12 +567,41 @@ class MasterVerifier:
     # ── 실어 준 값을 미결이라 답하는가 ────────────────────────────
 
     #: 부서가 *"이 값이 없어서 못 했다"* 고 말할 때 쓰는 말.
+    _UNRESOLVED_WORDS = ("미확정", "미결", "싣지 않았다", "받지 못")
+
+    #: 한 문장 안에서만 본다. 문장이 바뀌면 다른 얘기다.
+    _SENTENCE_END = re.compile(r"[.。\n;]")
+
+    #: 🔴 **글자 수로 재지 않는다.** 처음엔 *"cap_by_date 검사는 inbound_lead_days(N4)
+    #: 미확정으로 보류"* 에서 `cap_by_date` 까지 잡혀서 **12자 이내**로 좁혔는데,
+    #: 그건 원인을 고친 것이 아니라 증상을 잘라 낸 것이었다. 매입이 8/31 에
+    #: 지적했다 — *"저희가 쓰려던 문구가 12자를 넘어 안 울립니다"*.
     #:
-    #: 🔴 **키 바로 뒤에 붙은 것만 본다.** 처음엔 문장 어디에 있든 잡았는데,
-    #: *"cap_by_date 검사는 inbound_lead_days(N4) 미확정으로 보류"* 에서 `cap_by_date`
-    #: 까지 잡혔다 — **같은 원인의 파생을 두 번 보고**하는 셈이었다. 실제로 미결인 것은
-    #: 뒤의 키 하나다. 사이에 `(N4)` 같은 짧은 꼬리표가 붙으므로 12자만 허용한다.
-    _UNRESOLVED_NEAR = r".{0,12}?(?:미확정|미결|싣지 않았다|받지 못)"
+    #: **검사가 남의 문장 길이를 정하면 안 된다.** 진짜 규칙은 이것이다:
+    #: 키와 미결 어휘 사이에 **다른 실린 키가 끼어 있으면 그 키 얘기다.**
+    #:
+    #: ```text
+    #: "cap_by_date 검사는 inbound_lead_days(N4) 미확정으로 보류"
+    #:   cap_by_date        → 사이에 inbound_lead_days 가 있다        → 건너뛴다
+    #:   inbound_lead_days  → 사이에 다른 키가 없다                    → 울린다
+    #:
+    #: "operational_limit_days는 받았으나 등급 어휘 미확정(#69)"
+    #:   operational_limit_days → 사이에 다른 키가 없다                → 울린다 (13자여도)
+    #: ```
+    def _unresolved_here(self, text: str, key: str, others: Iterable[str]) -> bool:
+        for match in re.finditer(re.escape(key), text):
+            tail = text[match.end() :]
+            stop = self._SENTENCE_END.search(tail)
+            clause = tail[: stop.start()] if stop else tail
+            spots = [clause.find(word) for word in self._UNRESOLVED_WORDS]
+            spots = [i for i in spots if i >= 0]
+            if not spots:
+                continue
+            between = clause[: min(spots)]
+            if any(other != key and other in between for other in others):
+                continue  # 그 키 얘기다 — 같은 원인을 두 번 보고하지 않는다
+            return True
+        return False
 
     #: 부서가 실은 것이지만 **값이 아니라 메타**라 대조 대상이 아닌 키.
     #:
@@ -581,6 +610,41 @@ class MasterVerifier:
     #:   요구하고 이 검사는 그것을 메타로 빼는 **정반대 상태**가 됐다 (실측 2026-08-30).
     #:   두 벌을 두면 언젠가 갈린다 — 갈렸다.
     _NOT_A_VALUE = ENVELOPE_META_KEYS
+
+    def _supplied_keys(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> set[str]:
+        """봉투에 **값이 실린** 키. 최상위와 **항목 배열 안 한 겹**까지 본다.
+
+        🔴 **한 겹을 안 봐서 ②③ 을 놓칠 뻔했다 (실측 2026-08-31).** 매입이 읽는
+        `operational_limit_days`·`medium_grade_factor` 는 최상위가 아니라
+        `item_storage_policies[]` **안**에 있다. 최상위만 보면 `supplied` 에
+        `item_storage_policies` 만 들어가고, 매입이 *"operational_limit_days 미확정"*
+        이라고 적어도 **이 검사는 조용하다.**
+
+        이 클래스 주석이 *"②③ 배선하면 그때 이 검사가 울리는 것이 옳다"* 고 예고해
+        뒀는데, **울리지 않을 상태였다.** 예고가 검사를 대신하지 않는다.
+
+        ★ **`None` 인 칸은 안 넣는다.** 로트 `grade` 가 그렇다 — 전부 `None` 이라
+          *"실어 준 값"* 이 아니고, 매입이 *"grade 미확정"* 이라 말하면 그건
+          **맞는 말이다.** 맞는 말을 지적으로 올리면 안 된다.
+
+        ★ 한 겹만 판다. 더 깊이는 `required_claims` 와 같은 규율이다 —
+          더 깊은 중첩의 규칙은 도메인이 정한다.
+        """
+        supplied: set[str] = set()
+        for payload in constraints.values():
+            for key, value in payload.items():
+                if key in self._NOT_A_VALUE or value is None:
+                    continue
+                supplied.add(key)
+                if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+                    continue
+                for item in value:
+                    if not isinstance(item, Mapping):
+                        continue
+                    supplied.update(
+                        sub for sub, sub_value in item.items() if sub_value is not None
+                    )
+        return supplied
 
     def _check_supplied_but_unused(
         self,
@@ -631,12 +695,7 @@ class MasterVerifier:
           `lots[].shelf_life_days`). 별칭 표를 두면 어긋날 자리가 하나 더 생기고,
           그건 8/29 에 걷어낸 층이다 — **이름 합의는 팀이 할 일**이다.
         """
-        supplied = {
-            key
-            for payload in constraints.values()
-            for key, value in payload.items()
-            if key not in self._NOT_A_VALUE and value is not None
-        }
+        supplied = self._supplied_keys(constraints)
         if not supplied:
             return
 
@@ -647,8 +706,7 @@ class MasterVerifier:
                 for key in supplied:
                     if key in seen:
                         continue
-                    pattern = re.compile(re.escape(key) + self._UNRESOLVED_NEAR)
-                    if pattern.search(text):
+                    if self._unresolved_here(text, key, supplied):
                         seen.add(key)
                         concerns.append(
                             f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
