@@ -291,29 +291,61 @@ def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Com
 
     ``HAVING`` 을 따로 두지 않는다. 남은 행이 전부 양수 중량이라 그룹 합계도 양수이고,
     같은 뜻의 검사를 두 곳에 두면 한쪽만 바뀐다.
+
+    🔴 ``market`` CTE 에는 **품목 필터가 없다 — 없는 것이 맞다.**
+      이 CTE 가 답하는 질문은 *"시장이 언제 열렸나"* 이지 *"우리 품목이 언제 팔렸나"* 가
+      아니다. 품목을 걸면 ``market`` 이 ``usable`` 과 같은 날짜 집합이 되어
+      ``trading_days_behind`` 가 **항상 0**이 되고, 검사가 있는데 아무것도 안 보는 상태가
+      된다 (규칙 8). 계약 테스트가 이 필터 부재를 잠근다.
+
+      필터가 없어야 두 상황이 갈린다::
+
+          시장 개장 + 우리 규격 거래 있음  → behind 0        정상
+          시장 개장 + 우리 규격 거래 없음  → behind N        "이 규격이 안 팔렸다"
+          시장 휴장                        → behind 0        연휴는 지연이 아니다
+
+      **적재가 멈춘 경우는 여기서 안 잡힌다.** 시장 최신일이 우리 관측일과 같이 뒤로
+      밀려 ``behind`` 가 0으로 읽히기 때문이다. 그 사각은 ``market_last_open`` 을 달력일로
+      재는 ``max_calendar_days_behind`` 가 맡는다.
+
+    ⚠️ ``market`` 을 창으로 제한하는 이유는 성능이다. ``source_raw`` 는 FOREIGN 테이블이라
+      경계 없는 ``max(auction_date)`` 한 번에 원격 커넥션이 끊긴다 (2026-08-31 실측).
     """
     return sql.SQL("""
         WITH usable AS (
           SELECT auction_date, grade_name, trade_amount_krw, trade_volume_kg
-            FROM {}.{}
+            FROM {schema}.{table}
            WHERE auction_date     <  %(as_of)s
              AND market_category  =  %(market_category)s
              AND item_name        =  %(item)s
              AND grade_name       =  ANY(%(grades)s)
              AND package_name     =  ANY(%(packages)s)
-             AND {}
+             AND {weight}
              AND trade_volume_kg  >  0
              AND trade_amount_krw IS NOT NULL
              AND trade_amount_krw >= 0
+        ),
+        picked AS (SELECT max(auction_date) AS day FROM usable),
+        market AS (
+          SELECT DISTINCT auction_date AS day
+            FROM {schema}.{table}
+           WHERE auction_date    <  %(as_of)s
+             AND auction_date    >= %(as_of)s::date - %(market_window_days)s
+             AND market_category =  %(market_category)s
         )
-        SELECT auction_date AS observed_date,
-               grade_name   AS grade,
-               sum(trade_amount_krw) AS amount_krw,
-               sum(trade_volume_kg)  AS volume_kg
+        SELECT usable.auction_date AS observed_date,
+               usable.grade_name   AS grade,
+               sum(usable.trade_amount_krw) AS amount_krw,
+               sum(usable.trade_volume_kg)  AS volume_kg,
+               (SELECT max(day) FROM market) AS market_last_open,
+               (SELECT count(*) FROM market
+                 WHERE market.day > (SELECT day FROM picked)) AS trading_days_behind
           FROM usable
-         WHERE auction_date = (SELECT max(auction_date) FROM usable)
-         GROUP BY auction_date, grade_name
-    """).format(sql.Identifier(schema), sql.Identifier(table), weight_condition)
+         WHERE usable.auction_date = (SELECT day FROM picked)
+         GROUP BY usable.auction_date, usable.grade_name
+    """).format(
+        schema=sql.Identifier(schema), table=sql.Identifier(table), weight=weight_condition
+    )
 
 
 def auction_quote_source(*, fetch: Fetch | None = None) -> QuoteSource:
@@ -346,6 +378,7 @@ def auction_quote_source(*, fetch: Fetch | None = None) -> QuoteSource:
             "grades": list(cfg["grades"]),
             "packages": list(spec["packages"]),
             "unit_weight_kg": spec["unit_weight_kg"],
+            "market_window_days": cfg["market_open_window_days"],
         }
         before = spec.get("before")
         if before is not None:
@@ -377,6 +410,9 @@ def _materialize(
     #   여기서 합쳐두면 나중에 GROUP BY 축이 늘어도 물량가중이 유일한 정답으로 남는다.
     observed = _single_observed_date(rows)
     label = _spec_label_on(spec, observed)
+    # 시장 쪽 두 값은 행마다 같다(스칼라 서브쿼리) — 첫 행에서 한 번만 읽는다.
+    market_last_open = _iso_or_none(rows[0].get("market_last_open")) if rows else None
+    behind = int(rows[0]["trading_days_behind"]) if rows else None
     totals: dict[str, list[Decimal]] = {}
     for row in rows:
         amount = _amount(row["amount_krw"])
@@ -409,9 +445,21 @@ def _materialize(
                 # ★ **as_of 가 아니라 실제 관측일이다.** 12-30 값을 12-31 시세라고 적으면
                 #   그것도 거짓이다 — 사유·근거·ref_id 가 전부 이 값을 가져간다.
                 "observed_date": observed,
+                # 시장이 마지막으로 열린 날과, 그 뒤로 우리가 놓친 개장일 수. 노드는 DB 를
+                # 모르므로 **값이 여기서 실려 가야** 순수 함수가 판정할 수 있다 — ``spec``·
+                # ``observed_date`` 를 같은 이유로 얹는 것과 같다.
+                "market_last_open": market_last_open,
+                "trading_days_behind": behind,
             }
         )
     return quotes
+
+
+def _iso_or_none(value: Any) -> str | None:
+    """``date`` 든 문자열이든 ISO 문자열로. 없으면 None."""
+    if value is None:
+        return None
+    return value.isoformat() if isinstance(value, date) else str(value)
 
 
 def _single_observed_date(rows: list[dict[str, Any]]) -> str | None:
@@ -505,15 +553,64 @@ def provenance_problem(
             f"그 시각엔 그 값이 존재하지 않는다. look-ahead 라 쓰지 않았다"
         )
 
-    limit = constraints["market_quotes"]["max_staleness_days"]
-    gap = (today - observed).days
-    if gap > limit:
+    return _lag_problem(quotes, dates[0], today, constraints["market_quotes"])
+
+
+def _lag_problem(
+    quotes: list[dict[str, Any]], observed: str, today: date, cfg: Mapping[str, Any]
+) -> str | None:
+    """뒤처짐 둘을 **갈라서** 본다 — 사유가 원인을 잘못 말하면 엉뚱한 자리를 보게 된다.
+
+    1. **적재가 멈췄다** — 시장 전체의 최신 기록이 너무 오래됐다. 규격과 무관하다.
+    2. **이 규격이 안 팔렸다** — 시장은 그 뒤로도 열렸는데 우리 규격에 거래가 없다.
+
+    순서가 1→2 인 것은 1이 더 근본이기 때문이다. 적재가 멈춘 상태에서는 2가 **0으로 읽힌다**
+    (우리 관측일과 시장 최신일이 같이 뒤로 밀린다) — 그때 2만 보면 "정상"이 되어버린다.
+
+    ⚠️ **연휴는 어느 쪽도 아니다.** 시장이 쉰 날은 개장일이 아니라 2에서 세지 않고,
+      1의 임계는 최장 연휴(2025년 6일)를 넘겨 잡아 통과시킨다. 연휴 직후 첫 아침에
+      0안이 나오지 않는 것이 이 설계의 목적이다.
+
+    시장 쪽 표기가 없으면(mock·주입) 두 검사 다 건너뛴다 — 없는 값으로 판정하지 않는다.
+    """
+    last_open = _iso_or_none(_single_market_value(quotes, "market_last_open"))
+    if last_open is None:
+        return None
+
+    stall_limit = cfg["max_calendar_days_behind"]
+    stall_gap = (today - date.fromisoformat(last_open)).days
+    if stall_gap > stall_limit:
         return (
-            f"최신 경락 기록이 {dates[0]}로 {gap}일 전이다 (허용 {limit}일). "
-            f"시장이 쉬었거나 적재가 밀린 것인데 어느 쪽이든 그만큼 오래된 값이라, "
-            f"오늘 시세로 쓰지 않고 안을 만들지 않았다"
+            f"시장 전체의 최신 경락 기록이 {last_open}로 {stall_gap}일 전이다 "
+            f"(허용 {stall_limit}일). 규격 문제가 아니라 적재가 멈췄거나 시장이 그만큼 "
+            f"오래 쉰 것이라, 오늘 시세로 쓰지 않고 안을 만들지 않았다"
+        )
+
+    behind = _single_market_value(quotes, "trading_days_behind")
+    if behind is None:
+        return None
+    behind_limit = cfg["max_trading_days_behind"]
+    if behind > behind_limit:
+        return (
+            f"시장은 {last_open}까지 열렸는데 이 규격에서는 {observed} 이후 낙찰이 없다 "
+            f"— 거래일 기준 {behind}일 (허용 {behind_limit}일). 적재가 밀린 게 아니라 "
+            f"그동안 이 규격의 가격이 형성되지 않았다는 뜻이라, 오늘 시세로 쓰지 않고 "
+            f"안을 만들지 않았다"
         )
     return None
+
+
+def _single_market_value(quotes: list[dict[str, Any]], key: str) -> Any:
+    """행마다 같아야 하는 시장 쪽 값. 갈라져 있으면 **쓰지 않는다**.
+
+    ``0`` 이 정상값이라 ``or`` 로 접을 수 없다 (규칙 3) — ``trading_days_behind`` 의
+    0은 *"안 밀렸다"* 는 확정된 사실이지 미결이 아니다.
+    """
+    values = {q.get(key) for q in quotes}
+    if len(values) != 1:
+        return None
+    value = values.pop()
+    return None if value is None else value
 
 
 def observed_date(quotes: list[dict[str, Any]]) -> str | None:
@@ -538,11 +635,12 @@ def stale_quote_reason(
 ) -> str | None:
     """너무 오래된 시세면 사유를 돌려준다 — ``provenance_problem`` 의 staleness 부분.
 
-    🔴 **오래된 값을 당일인 척 쓰지 않는다** (규칙 3). 시장이 쉰 것이든 적재가 밀린 것이든,
-      우리가 손에 든 값이 N일 된 값이라는 사실은 같다 — 둘을 구분할 방법도 없다. 그래서
-      원인을 단정하지 않고 **며칠 된 값인지**만 말한다.
+    🔴 **오래된 값을 당일인 척 쓰지 않는다** (규칙 3). 다만 *"오래됐다"* 를 달력일로 세지
+      않는다 — 주말·연휴가 그대로 지연으로 잡혀 **연휴 직후 첫 아침**이 반드시 0안이 되고,
+      그날이 하필 가장 판단이 필요한 아침이다.
 
-    임계는 ``constraints.market_quotes.max_staleness_days`` 다 (규칙 7).
+    거래일 기준으로 세면 원인이 갈린다 (``_lag_problem``). 임계 둘 다 규칙 7이다 —
+    ``max_trading_days_behind`` · ``max_calendar_days_behind``.
     """
     return provenance_problem(quotes, as_of, constraints)
 
@@ -569,7 +667,7 @@ def quote_block_reason(
     그 반대) 상태가 조용히 생긴다.
 
     1. 한 건도 못 받았다 — 휴장 · 그 규격 미거래 · 기록 판독 불가 · 규격 미확정
-    2. 받았는데 너무 오래됐다 — ``max_staleness_days`` 초과
+    2. 받았는데 뒤처졌다 — 거래일 기준 초과이거나, 시장 전체 적재가 멈췄다
     """
     market = constraints["market_quotes"]["market_category"]
     usable = [quote for quote in quotes if quote["market"] == market]

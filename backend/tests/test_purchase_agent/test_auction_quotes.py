@@ -79,7 +79,10 @@ def _fetch_returning(rows: list[dict[str, Any]], captured: dict | None = None):
             raw = query.as_string(None) if hasattr(query, "as_string") else str(query)
             captured["query"] = _flat(raw)
             captured["params"] = params
-        return rows
+        # 시장 쪽 두 값은 실제 쿼리가 **항상** 실어 오므로 여기서 기본값을 채운다 —
+        # 행 하나하나에 적으면 이 파일의 가짜 행 전부를 고쳐야 하고, 정작 잠글 것은
+        # "쿼리가 그 컬럼을 뽑는가"다. 그건 쿼리 모양 검사가 따로 본다.
+        return [{"market_last_open": OBSERVED, "trading_days_behind": 0, **row} for row in rows]
 
     return fetch
 
@@ -225,6 +228,10 @@ def test_the_real_1231_rows_become_one_weighted_quote() -> None:
             "price": 933,
             "spec": "그물망·파렛트 10kg",
             "observed_date": OBSERVED,
+            # 시장 쪽 두 값도 시세에 실려 간다 — 노드는 DB 를 모르므로 여기서 가야
+            # 순수 함수가 뒤처짐을 판정할 수 있다.
+            "market_last_open": OBSERVED,
+            "trading_days_behind": 0,
         }
     ]
 
@@ -456,6 +463,9 @@ def test_the_source_reads_the_prior_trading_day_from_the_real_table() -> None:
             "price": 824,
             "spec": "그물망·파렛트 10kg",
             "observed_date": "2025-12-30",
+            # 관측일 = 시장 최신 개장일 → 뒤처지지 않았다.
+            "market_last_open": "2025-12-30",
+            "trading_days_behind": 0,
         }
     ]
 
@@ -877,7 +887,8 @@ def test_the_query_picks_one_day_not_one_day_per_grade() -> None:
     query = {}
     _source(BAECHU_1231_ROWS, query)("배추", INTEGRATION)
 
-    assert "auction_date = (SELECT max(auction_date) FROM usable)" in query["query"]
+    assert "picked AS (SELECT max(auction_date) AS day FROM usable)" in query["query"]
+    assert "usable.auction_date = (SELECT day FROM picked)" in query["query"]
 
 
 def test_two_observation_dates_in_one_db_result_are_refused() -> None:
@@ -992,66 +1003,187 @@ def test_an_observation_on_or_after_as_of_is_refused(observed: str) -> None:
 # --------------------------------------------------------------------- staleness
 
 
-def _aged(days: int) -> list[dict]:
-    observed = (INTEGRATION - timedelta(days=days)).isoformat()
+def _aged(days: int, *, behind: int = 0, last_open: int | None = None) -> list[dict]:
+    """관측일이 ``days`` 일 전인 시세 한 줄.
+
+    ``behind`` 는 그 뒤로 시장이 열렸는데 우리 규격이 안 팔린 개장일 수,
+    ``last_open`` 은 시장 전체 최신 개장일이 며칠 전인가다. 기본은 **관측일 = 시장
+    최신일**이라 뒤처지지 않은 상태 — 연휴가 며칠이든 여기 걸리지 않아야 한다.
+    """
+    observed = INTEGRATION - timedelta(days=days)
+    market = INTEGRATION - timedelta(days=last_open if last_open is not None else days)
     return [
         {"market": "가락", "grade": "특", "price": 824,
-         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+         "spec": "그물망·파렛트 10kg", "observed_date": observed.isoformat(),
+         "market_last_open": market.isoformat(), "trading_days_behind": behind}
     ]
 
 
-@pytest.mark.parametrize("days", [1, 2])
-def test_a_price_within_the_staleness_limit_is_used(days: int) -> None:
+@pytest.mark.parametrize("days", [1, 2, 5, 6])
+def test_a_holiday_gap_is_not_a_lag(days: int) -> None:
+    """🔴 **연휴는 지연이 아니다.** 관측일이 6일 전이어도 그게 시장 최신일이면 쓴다.
+
+    6까지 보는 것은 2025년 최장 공백이 6일(설·추석)이기 때문이다. 그보다 길어지면
+    적재 정지 상한이 대신 받는다 — 정상 휴장으로는 안 나오는 길이라서다.
+
+    달력일로 세던 때는 이 경로가 3일에서 막혔고, 2025년 평일 13일이 그렇게 0안이 됐다 —
+    하필 연휴 직후, 가장 판단이 필요한 아침이다. 시장이 안 열렸으면 **더 새로운 값이
+    세상에 없다** — 우리가 든 값이 곧 최신이다.
+    """
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(days))
 
     assert proposal["scenarios"]
 
 
-@pytest.mark.parametrize("days", [3, 4, 11])
-def test_a_price_past_the_staleness_limit_gives_a_reason_and_no_plan(days: int) -> None:
-    """🔴 오래된 값을 당일인 척 쓰지 않는다 (규칙 3).
+@pytest.mark.parametrize("behind", [0, 1])
+def test_being_within_the_trading_day_limit_is_used(behind: int) -> None:
+    """그 규격이 하루쯤 안 나오는 것은 시장 두께의 문제라 값이 죽지 않았다고 본다."""
+    proposal = run_purchase_agent(
+        "배추", INTEGRATION, quotes=lambda i, d: _aged(4, behind=behind, last_open=1)
+    )
 
-    지금의 5일 적재 지연도 여기 걸린다 — 조용히 5일 된 값을 쓰는 것보다 사유가 나가는
-    쪽이 낫다는 판단이다.
+    assert proposal["scenarios"]
+
+
+@pytest.mark.parametrize("behind", [2, 4])
+def test_a_spec_that_stopped_trading_says_so_and_makes_no_plan(behind: int) -> None:
+    """🔴 사유가 **"적재가 밀렸다"가 아니라 "이 규격이 안 팔렸다"** 여야 한다.
+
+    시장은 열렸는데 우리 규격에 낙찰이 없는 상태다. 원인을 적재로 적으면 읽는 사람이
+    수집기를 보러 가는데, 볼 것은 그 품목의 거래 두께다. 2025년 배추·무 1/7~10이
+    실제로 이 모양이었다 — 양파는 정상이라 휴장이 아니다.
     """
-    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(days))
+    proposal = run_purchase_agent(
+        "배추", INTEGRATION, quotes=lambda i, d: _aged(behind + 1, behind=behind, last_open=1)
+    )
 
     assert proposal["scenarios"] == []
     reason = proposal["rejected_reasons"][0]["reason"]
-    assert f"{days}일 전" in reason
-    assert "허용 2일" in reason
+    assert f"거래일 기준 {behind}일" in reason
+    assert "이 규격의 가격이 형성되지 않았다" in reason
+    assert "적재가 밀린 게 아니라" in reason
     assert proposal["no_proposal_reason"].startswith("안이 만들어지지 않았다")
 
 
-def test_the_staleness_reason_does_not_guess_the_cause() -> None:
-    """시장이 쉰 것과 적재가 밀린 것은 "as_of − 관측일"로만 나타나 구분할 수 없다.
-    하나로 단정하면 없는 원인을 보고하게 된다."""
-    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(9))
-    reason = proposal["rejected_reasons"][0]["reason"]
+def test_a_stalled_loader_says_so_instead_of_blaming_the_spec() -> None:
+    """🔴 반대쪽 사유. 시장 전체 기록이 멈춘 상태는 **규격 문제가 아니다.**
 
-    assert "시장이 쉬었거나 적재가 밀린 것인데" in reason
+    이때 거래일 기준 지연은 **0으로 읽힌다** — 우리 관측일과 시장 최신일이 같이 뒤로
+    밀리기 때문이다. 그 사각을 달력일 상한이 막는다.
+    """
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(12))
+
+    assert proposal["scenarios"] == []
+    reason = proposal["rejected_reasons"][0]["reason"]
+    assert "시장 전체의 최신 경락 기록" in reason
+    assert "규격 문제가 아니라" in reason
+    assert "12일 전" in reason
+
+
+def test_the_stall_check_wins_when_both_could_fire() -> None:
+    """둘 다 걸리는 상태에서는 **적재 정지가 답이다** — 그쪽이 더 근본이라서다.
+
+    시장 전체가 10일째 비었는데 사유가 *"이 규격이 안 팔렸다"* 로 나가면, 읽는 사람은
+    그 품목의 거래 두께를 보러 간다 — 볼 것은 수집기다.
+
+    ⚠️ **둘 다 걸리게 만들어야 순서가 시험된다.** 처음엔 ``behind=0`` 으로 짜서
+      거래일 검사가 애초에 안 걸렸고, 순서를 뒤집는 변이가 **안 물렸다** (규칙 8).
+    """
+    both = _aged(12, behind=3, last_open=10)
+    reason = stale_quote_reason(both, INTEGRATION.isoformat(), load_constraints())
+
+    assert reason is not None
+    assert "시장 전체의 최신 경락 기록" in reason
+    assert "거래일 기준" not in reason
+
+
+@pytest.mark.parametrize(
+    ("limit", "behind", "blocked"),
+    [(1, 1, False), (1, 2, True), (5, 4, False), (0, 1, True)],
+)
+def test_the_trading_day_limit_actually_comes_from_constraints(
+    limit: int, behind: int, blocked: bool
+) -> None:
+    """임계를 코드에 박지 않는다 (규칙 7).
+
+    ⚠️ **값 비교로는 증명할 수 없다.** ``constraints[...] == 1`` 은 코드가 1을 다시 박아도
+      통과한다. 임계를 **바꿔보고** 판정이 따라 바뀌는지를 본다 (규칙 8).
+    """
+    constraints = load_constraints()
+    constraints["market_quotes"]["max_trading_days_behind"] = limit
+    reason = stale_quote_reason(
+        _aged(behind + 1, behind=behind, last_open=1), INTEGRATION.isoformat(), constraints
+    )
+
+    assert (reason is not None) is blocked
+    if blocked:
+        assert f"허용 {limit}일" in reason
 
 
 @pytest.mark.parametrize(
     ("limit", "days", "blocked"),
-    [(3, 3, False), (3, 4, True), (10, 5, False), (1, 2, True)],
+    [(7, 7, False), (7, 8, True), (30, 20, False), (2, 3, True)],
 )
-def test_the_staleness_limit_actually_comes_from_constraints(
+def test_the_calendar_backstop_actually_comes_from_constraints(
     limit: int, days: int, blocked: bool
 ) -> None:
-    """임계를 코드에 박지 않는다 (규칙 7).
-
-    ⚠️ **값 비교로는 이걸 증명할 수 없다.** ``constraints[...] == 3`` 은 코드가 3을 다시
-      박아도 통과한다 — 실제로 변이가 안 물렸다(M17 과 같은 유형). 임계를 **바꿔보고**
-      판정이 따라 바뀌는지를 봐야 한다.
-    """
+    """적재 정지 상한도 같은 방식으로 잠근다 (규칙 8)."""
     constraints = load_constraints()
-    constraints["market_quotes"]["max_staleness_days"] = limit
+    constraints["market_quotes"]["max_calendar_days_behind"] = limit
     reason = stale_quote_reason(_aged(days), INTEGRATION.isoformat(), constraints)
 
     assert (reason is not None) is blocked
     if blocked:
         assert f"허용 {limit}일" in reason
+
+
+def test_market_marks_are_optional_so_the_mock_path_never_meets_the_check() -> None:
+    """시장 쪽 표기가 없으면 **재지 않는다** — 없는 값으로 판정하지 않는다 (규칙 3).
+
+    mock 이 그 경우이고, 회귀 테스트 전량이 이 길을 밟는다.
+    """
+    without = [{"market": "가락", "grade": "특", "price": 824,
+                "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-01"}]
+
+    assert stale_quote_reason(without, INTEGRATION.isoformat(), load_constraints()) is None
+
+
+def test_the_market_cte_has_no_item_filter_so_the_two_causes_stay_apart() -> None:
+    """🔴 **시장 개장일 조회에 품목 필터가 없어야 한다.**
+
+    이 CTE 가 답하는 질문은 *"시장이 언제 열렸나"* 이지 *"우리 품목이 언제 팔렸나"* 가
+    아니다. 품목을 걸면 ``market`` 이 ``usable`` 과 같은 날짜 집합이 되어
+    ``trading_days_behind`` 가 **항상 0**이 된다 — 검사가 있는데 아무것도 안 보는 상태다.
+
+    그러면 *"시장은 열렸는데 이 규격이 안 팔렸다"* 를 영영 못 말한다. 2025년 배추·무
+    1/7~10이 그 모양이었고(양파는 정상이라 휴장이 아니다), 달력일로는 연휴와 구분되지
+    않던 것이 바로 이 구분이다.
+    """
+    captured: dict = {}
+    _source([], captured)("배추", INTEGRATION)
+    query = captured["query"]
+    market_cte = query[query.index("market AS (") : query.index("SELECT usable.auction_date")]
+
+    assert "item_name" not in market_cte, market_cte
+    assert "grade_name" not in market_cte
+    assert "package_name" not in market_cte
+    assert "unit_weight_kg" not in market_cte
+    # 시장은 걸러야 한다 — 다른 도매시장 개장일을 가락 개장일로 세면 안 된다.
+    assert "market_category" in market_cte
+    # 창이 없으면 FOREIGN 테이블 무경계 스캔이라 원격 커넥션이 끊긴다 (실측).
+    assert "market_window_days" in captured["params"] or "market_window_days" in market_cte
+
+
+def test_the_query_selects_both_market_columns() -> None:
+    """``_materialize`` 가 두 컬럼을 **필수로** 읽는다 — 쿼리가 빼면 KeyError 로 선다.
+
+    ``.get`` 으로 눅여두면 컬럼이 사라져도 ``None`` 이 되어 뒤처짐 검사가 조용히 꺼진다.
+    """
+    captured: dict = {}
+    _source([], captured)("배추", INTEGRATION)
+
+    assert "AS market_last_open" in captured["query"]
+    assert "AS trading_days_behind" in captured["query"]
 
 
 # --------------------------------------------------------------------- 읽는 테이블
