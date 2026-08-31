@@ -44,6 +44,21 @@ class ExecutionStep:
     finding_codes: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
 
+    #: 🔴 **그 부서 안에서 LLM 이 실제로 돌았나.** `ExecutionMetadata` 는 처음부터
+    #: 이 넷을 담고 있었는데 여기로 옮기지 않아, 마스터는 **부서가 규칙으로 답했는지
+    #: 모델로 답했는지 구분하지 못했다** (실측 2026-08-31).
+    #:
+    #: 재무가 Tool 선택을 Planner 에게 맡기는 구조로 가면(재무 2026-08-31 질의)
+    #: 이 값이 **없으면 안 된다** — Planner 가 죽어 규칙 경로로 떨어져도 산출물은
+    #: 멀쩡해 보이고, 그게 오늘 하루 종일 고친 실패 방식이다.
+    #:
+    #: ★ **재현성 비교에는 안 쓴다.** 같은 계획이 한 번은 SUCCESS 한 번은
+    #:   FALLBACK 일 수 있다 — `plan_signature` 는 (agent, mode, call_seq) 셋만 본다.
+    llm_status: str = "DISABLED"
+    llm_model: str = ""
+    llm_attempts: int = 0
+    llm_fallback_used: bool = False
+
     @property
     def contributed(self) -> bool:
         return self.runtime_status == "READY"
@@ -75,6 +90,10 @@ class ExecutionPlan:
             used_tools=tuple(metadata.used_tools),
             finding_codes=tuple(f.code for f in findings),
             missing_data=tuple(reply.missing_data),
+            llm_status=metadata.llm_status,
+            llm_model=metadata.llm_model,
+            llm_attempts=metadata.llm_attempts,
+            llm_fallback_used=metadata.llm_fallback_used,
         )
         self.steps.append(step)
         return step

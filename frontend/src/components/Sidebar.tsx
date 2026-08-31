@@ -24,9 +24,21 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
     { key: "inventory", icon: "▥", label: "물류", open: true },
     { key: "finance", icon: "▦", label: "재무", open: can.finance },
   ];
+  /**
+   * 🔴 '승인 이력' 탭은 **없다.** 사이드바에만 있고 `console/page.tsx` 에 그리는
+   * 분기가 없어서, 누르면 마스터 대화가 그대로 나오고 하이라이트만 옮겨 갔다 —
+   * 누른 사람은 "안 눌렸나" 로 읽는다. **없는 화면을 눌러 보게 두는 것보다
+   * 안 보이는 편이 낫다.**
+   *
+   * 지금은 실행 이력 화면의 '결정 N회차'가 승인·재요청을 회차와 대상 실행까지
+   * 같이 보여준다. 승인만 따로 모아 보는 화면이 필요해지면 **먼저 화면을 만들고**
+   * 여기에 되돌린다.
+   */
   const records = [
     { key: "runs", icon: "≡", label: "실행 이력", open: true },
-    { key: "decisions", icon: "✓", label: "승인 이력", open: can.approve },
+    //: 🔴 **결론 옆에 경로를 두기 위한 것이다.** 에이전트가 "살 안이 없다" 고
+    //: 답하는데 그 앞 30일을 안 보면 시스템이 고장 난 것처럼 읽힌다.
+    { key: "burnin", icon: "◷", label: "판단 전 30일", open: true },
   ];
 
   const item = (row: { key: string; icon: string; label: string; badge?: string; open: boolean }) => (
@@ -58,7 +70,7 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
   );
 
   return (
-    <aside className="flex w-[212px] shrink-0 flex-col gap-5 border-r border-line bg-sunk p-3">
+    <aside className="flex w-[212px] shrink-0 flex-col gap-5 overflow-y-auto border-r border-line bg-sunk p-3">
       <div className="flex items-center gap-2.5 px-1.5">
         <span className="grid size-[26px] place-items-center rounded-[7px] bg-accent text-[13px] font-bold text-white">
           햇

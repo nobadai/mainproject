@@ -14,12 +14,13 @@ from app.master.ask_service import execute as run_ask_execute
 from app.master.decision import DecisionIn, DecisionOut, DecisionRejected
 from app.master.decision_service import get_decisions, record_decision
 from app.master.schemas import (
+    BurnInOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
     RunHistoryOut,
     TriggerAck,
 )
-from app.master.service import get_run_history, run_procurement
+from app.master.service import get_burn_in_history, get_run_history, run_procurement
 from app.orchestrator.contracts_core import ContractViolation
 
 router = APIRouter(prefix="/master", tags=["master"])
@@ -158,6 +159,29 @@ def master_run_history(request_id: str) -> RunHistoryOut:
     """
     try:
         return get_run_history(request_id)
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+
+
+@router.get(
+    "/burn-in",
+    response_model=BurnInOut,
+    summary="번인 구간 — 에이전트가 판단하기 전에 회사가 어떻게 왔나",
+)
+def master_burn_in() -> BurnInOut:
+    """`sim_runs` 의 `BURN_IN` 한 건과 일별 마감 30일.
+
+    🔴 **결론 옆에 경로를 두기 위한 것이다.** 에이전트가 12-31 에 *"살 안이 없다"*
+      고 답하는데 그 앞 30일을 안 보면 시스템이 고장 난 것처럼 읽힌다.
+
+    ★ 읽기 전용이다 — 하루를 진행시키는 것은 승인이 발주로 흘러가야 성립하고,
+      그건 각 파트의 상태 전이 로직이다 (아직 없다 · 별도 이슈).
+    """
+    try:
+        return get_burn_in_history()
     except LookupError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

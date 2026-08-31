@@ -85,6 +85,13 @@ class StepOut(BaseModel):
     finding_codes: list[str] = []
     missing_data: list[str] = []
 
+    #: 🔴 **그 부서 안에서 LLM 이 돌았나.** 없으면 부서가 규칙으로 답한 것과
+    #: 모델로 답한 것이 화면에서 같아 보인다 — 오늘 마스터에서 고친 것과 같은 종류다.
+    llm_status: str = "DISABLED"
+    llm_model: str = ""
+    llm_attempts: int = 0
+    llm_fallback_used: bool = False
+
 
 class ProcurementRunResponse(BaseModel):
     request_id: str
@@ -179,6 +186,46 @@ class ProcurementRunResponse(BaseModel):
             "안 된다.** 검증 커버리지를 분수로 내는 것과 같은 이유로 감추지 않는다."
         ),
     )
+
+
+class DailyClosingOut(BaseModel):
+    """하루치 마감 한 줄. **번인 구간의 실제 값이고 에이전트가 만든 것이 아니다.**"""
+
+    close_date: date
+    day_no: int
+    #: 🔴 **무차입 기준 현금.** 재무가 답하는 `available_cash` 와 다르다 —
+    #: 그쪽은 대출 실행분이 더해진 값이다. 둘을 같은 줄에 두면 화면이 거짓말을 한다.
+    base_cash_balance_krw: float | None = None
+    loan_cash_balance_krw: float | None = None
+    receivables_balance_krw: float | None = None
+    inventory_qty_kg: float | None = None
+    sales_recognized_krw: float | None = None
+    collection_cash_in_krw: float | None = None
+    purchase_cash_out_krw: float | None = None
+    #: 마감되지 않은 날이 섞이면 그 사실이 답의 일부다 — 지우지 않는다.
+    closed: bool = False
+
+
+class BurnInOut(BaseModel):
+    """`GET /master/burn-in` — **에이전트가 판단하기 전에 회사가 어떻게 왔는가.**
+
+    🔴 에이전트가 12-31 에 *"살 안이 없다"* 고 답하는데, 그 앞 30일을 안 보면
+    **시스템이 고장 난 것처럼 읽힌다.** 결론 옆에 경로를 둔다.
+
+    ★ **읽기 전용이다.** 하루를 진행시키는 것은 승인이 발주로 흘러가야 성립하고,
+      그건 각 파트의 상태 전이 로직이다 (아직 없다 · 별도 이슈).
+    """
+
+    sim_run_id: str
+    run_type: str
+    period_start: date
+    period_end: date
+    #: 에이전트가 **처음 판단하는 날**. 번인의 마지막 날과 같다.
+    as_of: date
+    status: str
+    financing_mode: str | None = None
+    note: str | None = None
+    closings: list[DailyClosingOut] = []
 
 
 class RunHistoryOut(BaseModel):

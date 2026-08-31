@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import date
 
+from dataclasses import replace
+
 import pytest
 
 from app.master import (
@@ -250,10 +252,16 @@ def test_계획에_실행_시각이_없다():
     """같은 입력에 같은 값이어야 한다 — 시각이 들어가면 재현성 비교가 불가능하다.
 
     필드를 늘릴 때 무심코 타임스탬프를 넣지 않도록 **집합을 통째로 고정**한다.
+
+    ★ **결과값은 들어와도 된다.** `runtime_status`·`llm_status` 는 실행마다 달라질 수
+      있지만, 재현성 비교는 `plan.signature`(agent · mode · call_seq)만 본다 —
+      결과는 *"에이전트 쪽 사정이지 마스터의 계획이 아니다"* (`plan.signature` 주석).
+      막아야 하는 것은 **시계**다.
     """
     r = runner(finance=ok_port())
     r.call("finance", "PRE_PURCHASE")
-    assert set(vars(r.steps()[0])) == {
+    fields = set(vars(r.steps()[0]))
+    assert fields == {
         "seq",
         "agent",
         "mode",
@@ -264,7 +272,63 @@ def test_계획에_실행_시각이_없다():
         "used_tools",
         "finding_codes",
         "missing_data",
+        # 그 부서 안에서 LLM 이 돌았나 — 규칙으로 답한 것과 모델로 답한 것을 가른다
+        "llm_status",
+        "llm_model",
+        "llm_attempts",
+        "llm_fallback_used",
     }
+    # 목록을 고쳐 가며 늘리다 시계를 흘려 넣지 않도록, 이름으로도 한 번 막는다.
+    # 🔴 부분 문자열로 재지 않는다 — "time" 은 `runtime_status` 를, "ts" 는
+    #    `llm_attempts` 를 오탐한다. **시계를 뜻하는 이름만** 정확히 본다.
+    clockish = {"timestamp", "created", "started", "finished", "elapsed", "duration", "clock"}
+    assert not [
+        f for f in fields if f.endswith("_at") or any(w in f.split("_") for w in clockish)
+    ]
+
+
+def test_부서가_LLM_을_썼는지_계획에_남는다():
+    """🔴 `ExecutionMetadata` 는 처음부터 이 넷을 담고 있었는데 계획으로 옮기지 않아,
+    마스터는 **부서가 규칙으로 답했는지 모델로 답했는지 몰랐다.**
+
+    재무가 Tool 선택을 Planner 에게 맡기는 구조로 가면(재무 2026-08-31 질의) 이 값이
+    없으면 안 된다 — Planner 가 죽어 규칙으로 떨어져도 산출물은 멀쩡해 보인다.
+    """
+
+    def llm_port(request):
+        reply, meta = ok_port()(request)
+        return reply, replace(
+            meta,
+            llm_status="FALLBACK",
+            llm_model="gemma3:4b",
+            llm_attempts=2,
+            llm_fallback_used=True,
+        )
+
+    r = runner(finance=llm_port)
+    r.call("finance", "PRE_PURCHASE")
+    step = r.steps()[0]
+
+    assert step.llm_status == "FALLBACK"
+    assert step.llm_model == "gemma3:4b"
+    assert step.llm_attempts == 2
+    assert step.llm_fallback_used is True
+
+
+def test_LLM_상태는_재현성_지문에_안_들어간다():
+    """같은 계획이 한 번은 SUCCESS 한 번은 FALLBACK 일 수 있다 — 그것으로 계획이
+    달라졌다고 읽으면 안 된다."""
+
+    def fallback_port(request):
+        reply, meta = ok_port()(request)
+        return reply, replace(meta, llm_status="FALLBACK", llm_fallback_used=True)
+
+    a = runner(finance=ok_port())
+    a.call("finance", "PRE_PURCHASE")
+    b = runner(finance=fallback_port)
+    b.call("finance", "PRE_PURCHASE")
+
+    assert a.plan.signature == b.plan.signature
 
 
 # ---------------------------------------------------------------------------

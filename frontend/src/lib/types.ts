@@ -68,6 +68,8 @@ export interface AskResponse {
   run: ProcurementRunResponse | null;
   answer: AnswerOut | null;
   llm_status: string;
+  /** 어느 API 를 탔나 — `ollama`(로컬) 인지 `gemini`(외부) 인지 화면이 구분해 적는다. */
+  llm_provider: string | null;
   llm_model: string | null;
   llm_attempts: number;
   llm_fallback_used: boolean;
@@ -149,4 +151,36 @@ export interface RunHistory {
   elapsed_ms: number | null;
   plan: Record<string, unknown>[];
   decisions: DecisionOut[];
+}
+
+/** 하루치 마감 한 줄. **번인 구간의 실제 값이고 에이전트가 만든 것이 아니다.** */
+export interface DailyClosing {
+  close_date: string;
+  day_no: number;
+  /**
+   * 🔴 **무차입 기준 현금.** 재무가 답하는 `available_cash` 와 다르다 — 그쪽은
+   * 대출 실행분이 더해진 값이다. 둘을 같은 줄에 두면 화면이 거짓말을 한다.
+   */
+  base_cash_balance_krw: number | null;
+  loan_cash_balance_krw: number | null;
+  receivables_balance_krw: number | null;
+  inventory_qty_kg: number | null;
+  sales_recognized_krw: number | null;
+  collection_cash_in_krw: number | null;
+  purchase_cash_out_krw: number | null;
+  closed: boolean;
+}
+
+/** `GET /master/burn-in` — 에이전트가 판단하기 전에 회사가 어떻게 왔는가. */
+export interface BurnIn {
+  sim_run_id: string;
+  run_type: string;
+  period_start: string;
+  period_end: string;
+  /** 에이전트가 **처음 판단하는 날**. 번인의 마지막 날과 같다. */
+  as_of: string;
+  status: string;
+  financing_mode: string | null;
+  note: string | null;
+  closings: DailyClosing[];
 }

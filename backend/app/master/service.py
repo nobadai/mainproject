@@ -17,7 +17,10 @@ from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.inputs import MasterInputs, collect_inputs
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
+from app.master.ledger_repository import get_burn_in
 from app.master.schemas import (
+    BurnInOut,
+    DailyClosingOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
     RunHistoryOut,
@@ -252,6 +255,10 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             used_tools=list(s.used_tools),
             finding_codes=list(s.finding_codes),
             missing_data=list(s.missing_data),
+            llm_status=s.llm_status,
+            llm_model=s.llm_model,
+            llm_attempts=s.llm_attempts,
+            llm_fallback_used=s.llm_fallback_used,
         )
         for s in plan.steps
     ]
@@ -260,6 +267,28 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
 # ---------------------------------------------------------------------------
 # 조회 — GET /master/runs/{request_id}
 # ---------------------------------------------------------------------------
+
+
+def get_burn_in_history() -> BurnInOut:
+    """번인 구간(에이전트 판단 전 30일)을 화면이 읽는 형태로.
+
+    ★ **값을 만들지 않는다.** DB 에 심긴 것을 모양만 바꾼다 — 합계·증감률을 여기서
+      계산하기 시작하면 재무가 내는 숫자와 갈릴 자리가 생긴다. 화면이 필요하면
+      **가진 값으로** 그린다.
+    """
+    raw = get_burn_in()
+    run = raw["run"]
+    return BurnInOut(
+        sim_run_id=run["sim_run_id"],
+        run_type=run["run_type"],
+        period_start=run["period_start"],
+        period_end=run["period_end"],
+        as_of=run["as_of"],
+        status=run["status"],
+        financing_mode=run.get("financing_mode"),
+        note=run.get("note"),
+        closings=[DailyClosingOut(**row) for row in raw["closings"]],
+    )
 
 
 def get_run_history(request_id: str) -> RunHistoryOut:

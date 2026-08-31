@@ -56,6 +56,21 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
         <input
           value={id}
           onChange={(e) => setId(e.target.value)}
+          /**
+           * 🔴 칸이 **실제 값**으로 차 있다 — 마운트 때 마지막 업무 키가 들어가고,
+           * 아래 세션 칩을 누르면 `load()` 가 `setId(key)` 로 다시 채운다. 그 상태로
+           * 칸을 클릭해 다른 키를 치면 **지워지지 않고 뒤에 붙는다.**
+           *
+           *   REQ-20251231-0001 + REQ-NOPE-9999 → REQ-20251231-0001REQ-NOPE-9999
+           *
+           * 그래서 포커스를 받을 때 전체를 고른다. 로그인 칸은 아예 안 채우는 것
+           * (placeholder) 으로 풀었지만, 여기서는 채워 두는 것이 맞다 — 방금 본
+           * 업무 키를 다시 타이핑하게 만들 이유가 없다.
+           *
+           * 이미 포커스된 칸을 다시 클릭하면 focus 가 안 나서 select 도 안 걸리는데,
+           * 그건 커서를 옮기려는 것이므로 **그대로 두는 것이 맞다.**
+           */
+          onFocus={(e) => e.currentTarget.select()}
           placeholder="REQ-20251231-0001"
           className="min-w-[220px] flex-1 rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[13px] outline-none focus:border-accent"
         />
@@ -142,6 +157,8 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
               <th className="px-3 py-2 text-left font-semibold">모드</th>
               <th className="px-3 py-2 text-left font-semibold">결과</th>
               <th className="px-3 py-2 text-left font-semibold">쓴 도구</th>
+              {/* 🔴 그 부서가 규칙으로 답했나 모델로 답했나 — 없으면 둘이 같아 보인다 */}
+              <th className="px-3 py-2 text-left font-semibold">LLM</th>
             </tr>
           </thead>
           <tbody>
@@ -170,6 +187,22 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
                   </td>
                   <td className="px-3 py-2 font-mono text-[11.5px] text-muted">
                     {tools.length > 0 ? tools.join(" → ") : "—"}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[11.5px]">
+                    <span className={row.llm_fallback_used ? "text-warn" : "text-muted"}>
+                      {String(row.llm_status ?? "—")}
+                    </span>
+                    {/* 모델이 죽어 규칙이 대신 답한 것과 애초에 안 쓴 것은 다르다 */}
+                    {row.llm_fallback_used ? (
+                      <span className="mt-0.5 block text-[11px] text-warn">
+                        규칙이 대신 답함
+                      </span>
+                    ) : null}
+                    {row.llm_model ? (
+                      <span className="mt-0.5 block text-[11px] text-faint">
+                        {String(row.llm_model)}
+                      </span>
+                    ) : null}
                   </td>
                 </tr>
               );

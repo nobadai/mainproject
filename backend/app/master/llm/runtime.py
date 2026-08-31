@@ -42,7 +42,16 @@ _ENV_PREFIX = "MASTER_"
 _DEFAULT_MODELS = {
     "anthropic": "claude-haiku-4-5-20251001",
     "ollama": "gemma3:4b",
+    #: 🔴 stable 을 pin 한다 — `latest`·`preview` 같은 자동 갱신 별칭은 출력 성향이
+    #: 예고 없이 바뀐다. 물류가 #95 에서 고른 것과 같은 모델이다 (팀 안에서 두 파트가
+    #: 다른 모델을 쓰면 "모델이 달라서 그런가" 가 모든 조사에 끼어든다).
+    "gemini": "gemini-3.5-flash-lite",
 }
+
+#: Gemini 는 자체 엔드포인트를 쓴다. `LLM_BASE_URL` 은 기본값이 Ollama 라
+#: **거기서 읽으면 안 된다** — provider 를 바꿨는데 주소가 안 바뀌면
+#: 로컬 11434 로 쏘고 연결 실패로만 보인다.
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 #: 발화문에 없던 숫자를 조건에 지어넣는 것을 막는다. 매입 ⑤의 "숫자 금지"와 다르다 —
 #: 여기서는 **사용자가 말한 숫자는 허용**하고, 출처 없는 숫자만 거부한다.
@@ -76,6 +85,10 @@ SELECT_SCENARIO — **이미 나와 있는 안 중 하나를 고른다**
 
 UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 없다
   "그거 있잖아 그거"   "음..."
+  ★ **이 시스템에 답할 자리가 없는 것도 UNKNOWN 이다.** 가까운 부서로 돌리지 마라.
+    "배추 가격 얼마야"  "시세 알려줘"  "단가 어떻게 돼"   → UNKNOWN
+    품목 가격·시세를 답하는 부서는 없다. 재무는 **회사 자금**이지 품목 가격이 아니다.
+    가까운 부서를 넣으면 사용자는 **물어본 것과 상관없는 숫자**를 받는다.
 
 ★ **만들어 달라**와 **고른다**를 구분하라. "안" 이라는 글자로 가르지 마라.
   "매입안 뽑아줘 · 만들어줘 · 얼마나 사야 해"  → 만들어 달라  → PROCUREMENT_RUN
@@ -164,11 +177,25 @@ def _float_env(key: str, default: str, *, minimum: float) -> float:
 def get_llm_settings() -> LLMSettings:
     for env_file in _ENV_FILES:
         load_dotenv(env_file)
-    provider = _env("LLM_PROVIDER", "anthropic").strip().lower()
+    scoped_provider = os.getenv(f"{_ENV_PREFIX}LLM_PROVIDER")
+    global_provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+    provider = (scoped_provider or global_provider).strip().lower()
+    # 🔴 **모델은 프로바이더에 종속된 값이다.** 마스터가 전역과 다른 프로바이더를
+    #    쓸 때 전역 `LLM_MODEL`(재무·Critic·오케가 같이 보는 `gemma3:4b`)을 상속하면
+    #    **Gemini 에 없는 모델을 요청해 404 가 난다.** 그 경우에만 전역 모델을
+    #    건너뛴다 — 물류가 #95 에서 같은 사고를 겪고 세운 규칙이고, 두 파트가 다르게
+    #    풀면 `.env` 를 읽는 사람이 규칙을 두 번 배워야 한다.
+    #
+    #    프로바이더가 같으면(둘 다 ollama) 전역 모델은 **정당한 상속**이므로
+    #    사슬(`MASTER_LLM_MODEL` → `LLM_MODEL` → 기본값)을 그대로 따른다.
+    if provider != global_provider and not os.getenv(f"{_ENV_PREFIX}LLM_MODEL"):
+        model = _DEFAULT_MODELS.get(provider, "")
+    else:
+        model = _env("LLM_MODEL", _DEFAULT_MODELS.get(provider, ""))
     return LLMSettings(
         enabled=_read_bool("LLM_ENABLED", default=True),
         provider=provider,
-        model=_env("LLM_MODEL", _DEFAULT_MODELS.get(provider, "")).strip(),
+        model=model.strip(),
         base_url=_env("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
         timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", "30", minimum=0.1),
         max_retries=min(1, _int_env("LLM_MAX_RETRIES", "1", minimum=0)),
@@ -316,6 +343,138 @@ class OllamaProvider:
         return content
 
 
+#: Gemini `responseSchema` 가 안 받는 칸. JSON Schema 에는 있고 저쪽에는 없다.
+_GEMINI_SCHEMA_DROP = frozenset({"title", "default", "additionalProperties", "$schema", "examples"})
+
+
+def _to_gemini_schema(node: Any) -> Any:
+    """JSON Schema → Gemini `responseSchema`.
+
+    ★ **Ollama 는 JSON Schema 를 그대로 먹지만 Gemini 는 못 먹는다.** 그래서 변환이
+      필요하고, 변환은 **버리는 것과 바꾸는 것 둘뿐**이다.
+
+      ```text
+      버린다   title · default · additionalProperties     Gemini 가 거부한다
+      바꾼다   anyOf[X, null] → X + nullable: true         저쪽의 표현 방식이다
+      남긴다   description                                 Ollama 도 보고 있다
+      ```
+
+    🔴 **`description` 을 남기는 것이 중요하다.** Ollama 에는 스키마를 통째로
+      넘기고 있어 모델이 클래스 docstring 을 이미 보고 있다. 여기서 빼면 프로바이더를
+      바꾼 것만으로 **모델에게 보이는 지시가 달라진다** — 분류가 달라져도 그게
+      모델 탓인지 프롬프트 탓인지 가릴 수 없게 된다.
+
+    🔴 **모르는 `anyOf` 는 터뜨린다.** 조용히 흘려보내면 Gemini 가 400 을 주는데,
+      그건 "스키마가 틀렸다" 가 아니라 그냥 호출 실패로 보인다. 여기서 터지면
+      서비스가 fallback 으로 보내고 `llm_status` 에 남는다.
+    """
+    if isinstance(node, list):
+        return [_to_gemini_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    if "anyOf" in node:
+        branches = node["anyOf"]
+        concrete = [b for b in branches if b.get("type") != "null"]
+        nullable = len(concrete) != len(branches)
+        if len(concrete) != 1:
+            raise TypeError(
+                f"Gemini 로 옮길 수 없는 anyOf 다 (분기 {len(concrete)}개): {branches!r}"
+            )
+        converted = _to_gemini_schema(concrete[0])
+        for key, value in node.items():
+            if key == "anyOf" or key in _GEMINI_SCHEMA_DROP:
+                continue
+            converted[key] = _to_gemini_schema(value)
+        if nullable:
+            converted["nullable"] = True
+        return converted
+
+    return {
+        key: _to_gemini_schema(value)
+        for key, value in node.items()
+        if key not in _GEMINI_SCHEMA_DROP
+    }
+
+
+class GeminiProvider:
+    """Gemini REST 호출. 표준 라이브러리만 쓴다 — Ollama 경로와 같은 규율이다.
+
+    ★ **API 키는 호출 시점에 환경에서 읽는다.** `LLMSettings` 에 담지 않는다 —
+      설정 객체는 로그·예외에 통째로 실릴 수 있고, 키가 거기 끼면 지울 수 없다.
+    ★ 자체 재시도가 없다. 재시도는 `IntentService` 가 소유한다 — 두 층이 세면
+      상한이 곱해진다 (Anthropic·OpenAI 프로바이더도 `max_retries=0` 이다).
+    """
+
+    def __init__(self, settings: LLMSettings) -> None:
+        self.settings = settings
+
+    def generate(self, system: str, user: str, schema: dict[str, Any]) -> str:
+        import urllib.error
+        import urllib.request
+
+        api_key = os.getenv(f"{_ENV_PREFIX}GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set")
+        _require_model(self.settings)
+        payload = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": _to_gemini_schema(schema),
+                "maxOutputTokens": self.settings.max_output_tokens,
+            },
+        }
+        base_url = (
+            os.getenv(f"{_ENV_PREFIX}GEMINI_BASE_URL")
+            or os.getenv("GEMINI_BASE_URL")
+            or _GEMINI_BASE_URL
+        ).rstrip("/")
+        request = urllib.request.Request(
+            f"{base_url}/models/{self.settings.model}:generateContent",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds) as response:
+                document = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            # 🔴 **`HTTPError` 는 감싸지 않는다.** `URLError` 의 하위라 아래 except 가
+            #    같이 먹는데, 감싸면 **상태 코드가 사라진다.** 실측에서 429(quota)를
+            #    `RuntimeError("Master Gemini request failed")` 로 덮어 버려, 한도에
+            #    걸린 것과 서버가 죽은 것이 **로그에서 같아 보였다.**
+            #
+            #    지금은 `classify` 가 어떤 예외든 fallback 으로 보내므로 화면 동작은
+            #    같지만, 원인을 **꺼낼 수 있게는 두어야** 한다 — 물류도 같은 이유로
+            #    HTTPError 를 그대로 흘린다.
+            raise
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
+            # 키를 메시지에 싣지 않는다. urllib 예외는 URL 을 담는데 키는 헤더라
+            # 안 끼지만, 여기서 새 메시지를 만들 때도 넣지 않는다.
+            raise RuntimeError("Master Gemini request failed") from error
+        # 🔴 **`parts[0]` 이 아니다 — 사고 조각이 앞에 오는 모델이 있다.**
+        #    `gemini-3.5-flash-lite` 는 생각을 켜고 답하며, 그때 `parts` 앞머리에
+        #    `thought: true` 인 조각이 붙는다. 첫 조각만 보면 `text` 가 없어 터지고,
+        #    **호출은 성공했는데 FALLBACK 으로 떨어진다** — 화면에는 "못 알아들음"
+        #    으로 보여서 모델이 틀린 것처럼 읽힌다. 실측에서 `SELECT_SCENARIO` 가
+        #    12번 중 11번 이렇게 죽었다 (승인 마디가 통째로 안 되는 상황이다).
+        #
+        #    같은 함정을 `AnthropicProvider` 가 이미 주석으로 남겨 뒀는데 여기 옮기지
+        #    않았다. **프로바이더가 늘 때마다 다시 밟는 자리다.**
+        candidates = document.get("candidates") or []
+        parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
+        for part in parts:
+            if part.get("thought"):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                return text
+        raise TypeError("Gemini response did not contain text content")
+
+
 class UnavailableProvider:
     """미지원 `LLM_PROVIDER` 값. 조용히 무시하지 않고 **터뜨려 fallback 으로 보낸다**."""
 
@@ -328,6 +487,7 @@ _PROVIDERS: dict[str, type] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
+    "gemini": GeminiProvider,
 }
 
 
@@ -499,9 +659,12 @@ class IntentService:
         """
         text = utterance.strip()
         if not self.settings.enabled:
-            return self._result(_UNKNOWN, status="DISABLED", attempts=0, fallback=False)
+            return self._result(
+                _UNKNOWN, status="DISABLED", attempts=0, fallback=False, utterance=text
+            )
         if not text:
             return self._result(_UNKNOWN, status="SKIPPED_TEMPLATE", attempts=0, fallback=False)
+        # 아래 경로는 전부 발화문을 넘긴다 — 빈 발화문에는 이름 붙일 것이 없다.
 
         guidance: list[str] | None = None
         attempts = 0
@@ -516,16 +679,31 @@ class IntentService:
                     status="SUCCESS",
                     attempts=attempts,
                     fallback=False,
+                    utterance=text,
                 )
             except IntentValidationError as error:
                 guidance = retry_guidance(error.issues)
             except Exception:  # noqa: BLE001 — 분류 실패가 API 를 죽이면 안 된다
                 break
-        return self._result(_UNKNOWN, status="FALLBACK", attempts=attempts, fallback=True)
+        return self._result(
+            _UNKNOWN, status="FALLBACK", attempts=attempts, fallback=True, utterance=text
+        )
 
     def _result(
-        self, intent: Intent, *, status: LLMStatus, attempts: int, fallback: bool
+        self,
+        intent: Intent,
+        *,
+        status: LLMStatus,
+        attempts: int,
+        fallback: bool,
+        utterance: str = "",
     ) -> IntentResult:
+        """`utterance` 는 **되물을 말을 고르는 데만** 쓴다.
+
+        분류에는 안 쓴다 — 분류는 이미 끝났고, 여기서 발화문을 다시 보면 규칙이
+        모델의 판정을 덮게 된다. 여기서 하는 일은 *"없는 것을 없다고 이름 붙이는 것"*
+        뿐이다.
+        """
         confirm = _needs_confirmation(intent)
         return IntentResult(
             intent=intent,
@@ -535,7 +713,7 @@ class IntentService:
             llm_attempts=attempts,
             llm_fallback_used=fallback,
             needs_confirmation=confirm,
-            clarification=_clarification(intent) if confirm else None,
+            clarification=_clarification(intent, utterance) if confirm else None,
         )
 
 
@@ -547,9 +725,40 @@ def _needs_confirmation(intent: Intent) -> bool:
     return intent.action not in _NO_CONFIRM_ACTIONS
 
 
-def _clarification(intent: Intent) -> str:
+#: 🔴 **물어볼 만한데 답할 자리가 없는 것.** 이름을 붙여 준다.
+#:
+#: *"못 알아들었습니다"* 만 적으면 물어본 사람은 **자기가 말을 잘못했다고 생각하고**
+#: 표현을 바꿔 다시 묻는다. 그래도 안 된다 — 없는 것이기 때문이다. 없는 것은
+#: **없다고 말해야** 그 사람이 다른 길을 찾는다.
+#:
+#: ★ 여기 없는 말은 종전대로 일반 안내로 간다. 목록을 늘려 가며 맞히는 것이 아니라,
+#:   **자주 묻는데 답이 없는 것**만 이름을 준다.
+_KNOWN_GAPS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("가격", "시세", "단가", "시가"),
+        "품목 가격·시세를 조회하는 자리는 아직 없습니다. "
+        "예측 가격은 mock 이라 답으로 내지 않습니다 — "
+        "재무 조회는 회사 자금이지 품목 가격이 아닙니다.",
+    ),
+)
+
+
+def _known_gap(utterance: str) -> str | None:
+    for words, message in _KNOWN_GAPS:
+        if any(word in utterance for word in words):
+            return message
+    return None
+
+
+def _clarification(intent: Intent, utterance: str = "") -> str:
     """되물을 말. **규칙이 만든다** — LLM 이 쓰면 사용자 응답 생성(⑥)이 되고, 그건 아직 없다."""
     if intent.action == "UNKNOWN":
+        gap = _known_gap(utterance)
+        if gap:
+            return (
+                f"{gap} "
+                "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택은 됩니다."
+            )
         return (
             "무엇을 해 드릴지 알아듣지 못했습니다. "
             "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택 중 하나로 말씀해 주세요."

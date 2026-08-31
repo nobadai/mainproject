@@ -10,7 +10,7 @@
  *   **무엇을 고쳐야 하는지 알려주는 문장**이 사라진다.
  */
 
-import type { AskResponse, ExecuteResponse, Intent, RunHistory } from "./types";
+import type { AskResponse, BurnIn, ExecuteResponse, Intent, RunHistory } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 
@@ -92,6 +92,11 @@ export function execute(args: {
 
 export function runHistory(requestId: string): Promise<RunHistory> {
   return call<RunHistory>(`/master/runs/${encodeURIComponent(requestId)}`);
+}
+
+/** 번인 구간 — 에이전트가 판단하기 전 30일. **읽기 전용이다.** */
+export function burnIn(): Promise<BurnIn> {
+  return call<BurnIn>("/master/burn-in");
 }
 
 export function health(): Promise<{ status: string }> {

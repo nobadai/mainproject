@@ -69,10 +69,34 @@ _LABEL: dict[str, str] = {
     "min_freshness_lot_id": "해당 로트",
 }
 
+#: 🔴 **업무 값이 아니라 생존 확인인 키.** 매입의 `STATUS_QUERY` 는 설계상
+#: *"살아 있는지와 무엇을 받을 수 있는지"* 를 답한다 (`purchase_agent/adapter.py`
+#: `_status_query`). 재무·물류가 업무 값을 주는 것과 성격이 다르다.
+#:
+#: 그걸 그대로 펼치면 화면에 **개발자용 능력 목록**이 나간다 — 실측에서 이렇게 나왔다:
+#:
+#: ```text
+#: 매입 capabilities agent_version v1.1, supported_modes GENERATE_SCENARIOS,
+#: STATUS_QUERY, items 배추, 무, 피마늘 외 1건
+#: ```
+#:
+#: **매입 잘못이 아니라 여기 잘못이다.** 매입은 자기 성격을 정직하게 답했고,
+#: 마스터가 셋을 똑같이 취급했다. 감추지 않고 **사람이 읽는 한 줄로 바꾼다** —
+#: 버전·모드·품목 목록은 사람이 결정에 쓰지 않으므로 싣지 않는다.
+_LIVENESS_KEYS: frozenset[str] = frozenset({"capabilities"})
+
+#: 생존 확인이 답으로 나갈 때의 문장. **다음에 무엇을 하면 되는지까지 적는다** —
+#: "받을 수 있는 상태입니다" 만 적으면 물어본 사람이 얻는 것이 없다.
+_LIVENESS_TEXT = "요청을 받을 수 있는 상태입니다 — 업무 값은 매입안 생성에서 나옵니다"
+
 #: 종료 코드를 사람이 읽는 결론으로. **"사라 / 사지 마라" 가 여기서 나온다.**
 _END_HEADLINE: dict[str, str] = {
     "E1_APPROVED": "매입안을 제시합니다. 고르시면 진행합니다.",
-    "E2_HELD": "보류합니다 — 사람이 봐야 할 지적이 있습니다.",
+    #: 🔴 **"지적이 있습니다" 라고 쓰지 않는다.** `E2_HELD` 는 두 경우를 덮는다 —
+    #: 지적이 있어 멈춘 것과, **안이 아예 안 나온 것**(필수 의무가 없어 E5 가 아닌
+    #: 경우)이다. 뒤엣것은 지적이 0건인데 머리말이 있다고 말해서, 화면이
+    #: *"보류 · 지적 0건"* 이라는 앞뒤 안 맞는 말을 했다 (실측 2026-08-31).
+    "E2_HELD": "보류합니다 — 사람이 봐야 합니다.",
     "E3_REJECTED": "이번에는 매입하지 않는 것을 권합니다.",
     "E4_NOT_STARTED": "실행하지 못했습니다 — 준비되지 않은 부서가 있습니다.",
     "E5_NO_FEASIBLE_PLAN": "실행 가능한 안이 없습니다.",
@@ -152,6 +176,11 @@ def facts_from_status(outcome: StatusOutcome) -> AnswerFacts:
                 if entry not in basis:
                     basis.append(entry)
                 continue
+            if key in _LIVENESS_KEYS:
+                # 값을 버리는 것이 아니라 **뜻을 옮긴다.** 답한 부서로는 계속 세어지고
+                # (`answered`), 사람에게는 결정에 쓸 수 있는 말로 나간다.
+                facts.append(Fact(label="상태", value=_LIVENESS_TEXT, source=label))
+                continue
             facts.append(Fact(label=_LABEL.get(key, key), value=text, source=label))
 
     return AnswerFacts(
@@ -207,6 +236,15 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
     labels = [str(s.get("label", "이름 없음")) for s in (response.scenarios or [])]
     if labels:
         facts.append(Fact(label="제시한 안", value=f"{len(labels)}개 ({', '.join(labels)})"))
+    elif response.reason:
+        # 🔴 **안이 없으면 사유가 답이다.** 머리말이 `_END_HEADLINE` 로 갈리면서
+        #    `reason` 이 버려지고 있었다 — 화면에 *"보류합니다"* 만 남고 **왜 없는지가
+        #    사라졌다** (실측 2026-08-31: `제약 조합 하에 유효한 안이 없어 제안을 내지
+        #    못했다` 가 응답에는 있는데 화면에 없었다).
+        #
+        #    안이 있을 때는 안 싣는다 — 그때 `reason` 은 `사용자 선택 대기` 라
+        #    머리말과 겹친다. **안이 없을 때만 사유가 새 정보다.**
+        facts.append(Fact(label="사유", value=response.reason))
     if response.single_option:
         facts.append(Fact(label="남은 안", value="1개뿐입니다"))
 

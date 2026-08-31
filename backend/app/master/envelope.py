@@ -316,6 +316,23 @@ def _is_item_list(value: Any) -> bool:
     return bool(value) and all(isinstance(item, Mapping) for item in value)
 
 
+def _is_number_map(value: Any) -> bool:
+    """숫자를 담은 매핑인가 — `cap_by_date: {"2026-01-02": 7636.72, ...}`.
+
+    🔴 **여기 있던 구멍이다.** Mapping 은 위 세 갈래 어디에도 안 걸려 **근거 요구에서
+    통째로 빠졌다.** 물류 `cap_by_date` 는 숫자 18개인데 하나도 요구되지 않았다 —
+    물류가 자발적으로 근거를 실어 주고 있어서 드러나지 않았을 뿐, 빼도 아무 소리가
+    안 났다 (실측 2026-08-31).
+
+    ★ **날짜마다 요구하지 않는다.** 18개를 따로 받으면 근거가 18줄이 되는데, 그것들은
+      **한 규칙이 만든 한 벌**이다 (`cap_by_date_policy` 가 그 규칙 이름이다).
+      스칼라 배열을 *"통째로 하나의 근거"* 로 두는 것과 같은 판단이다.
+    """
+    if not isinstance(value, Mapping) or not value:
+        return False
+    return all(_is_number(item) for item in value.values())
+
+
 #: 🔴 **봉투 자신의 어휘** — 도메인 값이 아니라 모든 부서가 공통으로 다는 메타다.
 #: 근거를 요구하지 않고, 값 대조 대상으로도 세지 않는다.
 #:
@@ -375,6 +392,8 @@ def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] =
                         out.add(f"{key}[{index}].{sub}")
         elif _is_number(value) or _is_label(value):
             out.add(key)
+        elif _is_number_map(value):
+            out.add(key)  # 숫자 매핑 — 한 규칙이 만든 한 벌이라 통째로 하나의 근거
         elif not isinstance(value, (str, bytes, Mapping)) and isinstance(value, Sequence) and value:
             out.add(key)  # 스칼라 배열 — 통째로 하나의 근거
     return out
