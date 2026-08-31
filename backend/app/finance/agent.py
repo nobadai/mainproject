@@ -16,8 +16,11 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal
+from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
+
+from dotenv import load_dotenv
 
 from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.rules import classify_base_stress
@@ -43,6 +46,10 @@ _DEFAULT_MODELS = {
     "ollama": "gemma3:4b",
     "gemini": "gemini-3.5-flash-lite",
 }
+_ENV_FILES = (
+    Path(__file__).resolve().parents[2] / ".env",
+    Path(__file__).resolve().parents[3] / ".env",
+)
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_PLANNER_RESPONSE_SCHEMA = {
     "type": "object",
@@ -62,14 +69,23 @@ _GEMINI_PLANNER_RESPONSE_SCHEMA = {
 }
 
 
+def _load_finance_environment() -> None:
+    for env_file in _ENV_FILES:
+        load_dotenv(env_file, override=False)
+
+
 def _finance_provider_name() -> str:
-    provider = os.getenv("FINANCE_LLM_PROVIDER", "ollama").strip().lower()
+    _load_finance_environment()
+    provider = (
+        os.getenv("FINANCE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "ollama"
+    ).strip().lower()
     if provider not in _DEFAULT_MODELS:
         raise RuntimeError("Configured Finance LLM provider is not supported")
     return provider
 
 
 def _finance_model(provider: str) -> str:
+    _load_finance_environment()
     explicit = os.getenv("FINANCE_LLM_MODEL")
     if explicit:
         return explicit
@@ -95,6 +111,7 @@ def _gemini_response_text(document: dict[str, Any]) -> str:
 def _gemini_generate(
     *, model: str, system_prompt: str, user_payload: dict[str, Any], response_schema: dict[str, Any]
 ) -> str:
+    _load_finance_environment()
     api_key = os.getenv("FINANCE_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("Finance Gemini API key is not set")

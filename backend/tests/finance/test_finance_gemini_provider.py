@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 from datetime import date
 from unittest.mock import patch
@@ -13,7 +14,10 @@ from app.finance.agent import (
     GeminiFinancePlanner,
     OllamaFinancePlanner,
     ToolAction,
+    _finance_model,
+    _finance_provider_name,
     _gemini_response_text,
+    _load_finance_environment,
 )
 from app.master.envelope import AgentRequest, ExecutionContext
 
@@ -30,6 +34,11 @@ class _Response:
 
     def read(self):
         return self.body
+
+
+@pytest.fixture(autouse=True)
+def _prevent_real_finance_env_loading(monkeypatch):
+    monkeypatch.setattr("app.finance.agent._load_finance_environment", lambda: None)
 
 
 def _request() -> AgentRequest:
@@ -60,6 +69,67 @@ def _planner_decide(planner: GeminiFinancePlanner, *, missing=("finance_position
         observations=(),
         missing_capabilities=missing,
     )
+
+
+def test_finance_settings_load_env_independent_of_working_directory(tmp_path, monkeypatch):
+    env_file = tmp_path / "config" / ".env"
+    env_file.parent.mkdir()
+    env_file.write_text(
+        "FINANCE_LLM_PROVIDER=gemini\n"
+        "FINANCE_LLM_MODEL=gemini-test-model\n"
+        "FINANCE_GEMINI_API_KEY=test-key\n",
+        encoding="utf-8",
+    )
+    unrelated_directory = tmp_path / "unrelated"
+    unrelated_directory.mkdir()
+    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr(
+        "app.finance.agent._load_finance_environment", _load_finance_environment
+    )
+    monkeypatch.chdir(unrelated_directory)
+
+    with patch.dict(os.environ, {}, clear=True):
+        provider = _finance_provider_name()
+
+        assert provider == "gemini"
+        assert _finance_model(provider) == "gemini-test-model"
+        assert bool(os.getenv("FINANCE_GEMINI_API_KEY")) is True
+
+
+def test_finance_env_file_does_not_override_process_environment(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "FINANCE_LLM_PROVIDER=gemini\nFINANCE_LLM_MODEL=dotenv-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr(
+        "app.finance.agent._load_finance_environment", _load_finance_environment
+    )
+
+    process_environment = {
+        "FINANCE_LLM_PROVIDER": "ollama",
+        "FINANCE_LLM_MODEL": "process-model",
+    }
+    with patch.dict(os.environ, process_environment, clear=True):
+        provider = _finance_provider_name()
+
+        assert provider == "ollama"
+        assert _finance_model(provider) == "process-model"
+
+
+def test_finance_provider_inherits_global_provider(monkeypatch):
+    monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+
+    assert _finance_provider_name() == "gemini"
+
+
+def test_finance_provider_defaults_to_ollama(monkeypatch):
+    monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    assert _finance_provider_name() == "ollama"
 
 
 def test_gemini_planner_never_uses_ollama_url(monkeypatch):
