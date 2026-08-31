@@ -109,7 +109,21 @@ export interface ProcurementRunResponse {
    */
   history_run_id: string | null;
   end_code: EndCode;
+  /** 마스터가 내린 결론의 사유. **안이 없을 때는 이것이 답 자체다.** */
   reason: string;
+  /**
+   * 매입 자신의 판정. `verdicts`(조언자 판정)와 다르다.
+   *
+   * 🔴 **안이 0개일 때 여기에 진짜 이유가 있다.** 마스터의 `reason` 은
+   * *"유효한 안이 없다"* 까지만 말하고, **왜 없는지**는 매입이 안다 —
+   * `no_proposal_reason` · `rejected_reasons`.
+   */
+  judgment: {
+    situation?: string;
+    confidence?: string;
+    no_proposal_reason?: string | null;
+    rejected_reasons?: { label?: string; reason?: string }[];
+  };
   scenarios: Scenario[];
   findings: string[];
   concerns: string[];
