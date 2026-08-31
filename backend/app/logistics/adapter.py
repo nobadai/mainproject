@@ -38,12 +38,24 @@ from app.logistics.repository import (
     get_active_logistics_policy,
     get_current_inventory_logistics_snapshot,
 )
-from app.logistics.rules import derive_logistics_verdict, evaluate_procurement_rules
-from app.logistics.scenario_engine import run_logistics_procurement_scenario
+from app.logistics.rules import (
+    derive_logistics_verdict,
+    evaluate_procurement_business_signals,
+    evaluate_procurement_rules,
+    merge_business_warnings,
+)
+from app.logistics.scenario_engine import (
+    derive_preferred_adjustment,
+    run_logistics_procurement_scenario,
+)
 from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsPolicy
-from app.logistics.tools import build_lot_constraints, calculate_cap_by_date
+from app.logistics.tools import (
+    build_inventory_by_item,
+    build_lot_constraints,
+    calculate_cap_by_date,
+)
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
-from app.orchestrator.contracts_core import Evidence
+from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
 
 _AGENT = "inventory"
@@ -53,6 +65,8 @@ _T_RULES = "evaluate_procurement_rules"
 _T_CAP = "calculate_cap_by_date"
 _T_ARRIVAL = "calculate_expected_arrival_dates"
 _T_LOTS = "build_lot_constraints"
+_T_INVENTORY = "build_inventory_by_item"
+_T_SIGNALS = "evaluate_procurement_business_signals"
 
 _JUDGMENT_FIELDS = ("cap_by_date_policy",)
 
@@ -384,6 +398,24 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         for lot in build_lot_constraints(snapshot)
     ]
 
+    # ── 품목별 가용재고 집계 ─────────────────────────────────────
+    #
+    # ★ Lot 목록과 **별개로** 싣는다 (#111 A1). 매입/마스터가 Lot 을 재합산하면 가용재고
+    #   정의(비-ACTIVE 제외 · 신선도 만료 제외 · 확정 출고 예약분 차감)를 남의 도메인에서
+    #   재구현하게 된다 — 집계는 물류 Tool 이 소유한다.
+    #
+    # ★ `None` 은 Partial Output 이다 — 확정 출고에 item 없는 행이 있으면 임의 배분하지
+    #   않고 키를 생략한다. `[]`(품목 0 건 확인)로 위장하지 않는다 (§1.2-10).
+    tools.append(_T_INVENTORY)
+    inventory_by_item = build_inventory_by_item(snapshot)
+    if inventory_by_item is None:
+        missing.append("inventory_by_item")
+    else:
+        payload["inventory_by_item"] = [
+            {"item": entry.item, "available_qty_kg": _num(entry.available_qty_kg)}
+            for entry in inventory_by_item
+        ]
+
     # ── 품목 보관 정책 ───────────────────────────────────────────
     #
     # ★ Lot 의 `remaining_freshness_days` 와 **다른 값이다.** 잔여 신선도는 *이미 창고에
@@ -588,6 +620,9 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                     )
                 )
 
+    if payload.get("inventory_by_item"):
+        evidences.extend(_inventory_by_item_evidences(payload["inventory_by_item"], snapshot))
+
     # 🔴 물류가 NOT_READY 를 냈는데 **이름이 하나도 없으면 계약 위반**이다
     #    (M-1 §5.1 — 봉투가 ContractViolation 을 던진다).
     #
@@ -661,6 +696,23 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             reason="매입 제안을 물류 입력 모델로 되살리지 못했다",
         )
 
+    # 🔴 기준일이 다른 제안은 판정하지 않는다 — 재무 어댑터와 같은 fail-closed (§1.2-6).
+    #    스냅샷·Rule 은 요청 `as_of` 로 읽는데 시나리오만 다른 날짜로 계산하면
+    #    기준일이 섞인 판정이 READY 로 나간다 (Codex 교차검증 재현 · #111).
+    if proposal.meta.as_of != as_of:
+        reply = AgentReply(
+            request_id=request.context.request_id,
+            as_of=as_of,
+            agent=_AGENT,
+            mode=request.mode,
+            run_id=run_id,
+            runtime_status="ERROR",
+            business_status="skipped",
+            payload={"validation_errors": ["proposal.meta.as_of"]},
+            reasoning="Purchase proposal as-of does not match the Master request.",
+        )
+        return reply, _meta(request, run_id, [])
+
     snapshot = _load_snapshot(as_of)
     if snapshot is None:
         return _not_ready(
@@ -676,6 +728,15 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     rules = evaluate_procurement_rules(as_of=as_of, snapshot=snapshot)
     verdict = derive_logistics_verdict(rules)
 
+    # 업무 위험 판정(비교식)은 Rule 소유 — 독립 경로(service)와 같은 함수·같은 병합을
+    # 쓴다 (#111 A3). 여기서 계산하는 것이 아니라 Rule 이 낸 signal 을 나를 뿐이다.
+    tools.append(_T_SIGNALS)
+    business = evaluate_procurement_business_signals(
+        as_of=as_of,
+        snapshot=snapshot,
+        scenario_results=scenario["scenario_results"],
+    )
+
     cap = scenario["cap_by_date"] if rules["calculation_ready"] else {}
     payload: dict[str, Any] = {
         "verdict": _VERDICT_MAP.get(verdict or "", "skipped"),
@@ -685,8 +746,68 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             {"code": c.code, "status": c.status, "skip_reason": c.skip_reason}
             for c in rules["hard_constraints"]
         ],
-        "soft_warnings": list(rules["soft_warnings"]),
+        # Rule 경고 + 업무 위험 signal + 판정 스킵 사실 — 독립 응답과 같은 채널 구성이다.
+        # CAPACITY_TIGHT 같은 signal 은 판정을 바꾸지 않지만 Critic 과 사람이 봐야 한다.
+        "soft_warnings": merge_business_warnings(rules, business),
+        # 시나리오별 판정 상세 (#111 A2) — 총평만으로는 "어떤 시나리오가 왜 conditional
+        # 인지"를 마스터가 받지 못한다. 항목 안의 라벨은 봉투 규칙상 근거 면제이고,
+        # 숫자(suggested_qty_kg)는 두 겹 안이라 근거 대상이 아니다 (`required_claims`
+        # — 배열은 한 겹만 파고든다).
+        "scenario_results": [
+            {
+                "label": result.label,
+                "verdict": result.verdict,
+                "reason_codes": list(result.reason_codes),
+                "adjustments": [
+                    {
+                        "axis": adjustment.axis,
+                        "split_date": adjustment.split_date.isoformat(),
+                        # 없는 제안값은 싣지 않는다 — null 로 채우면 "0 제안"과
+                        # "제안 없음"이 구분되지 않는다 (§1.2-10)
+                        **(
+                            {"suggested_qty_kg": _num(adjustment.suggested_qty_kg)}
+                            if adjustment.suggested_qty_kg is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "suggested_arrival_date": (
+                                    adjustment.suggested_arrival_date.isoformat()
+                                )
+                            }
+                            if adjustment.suggested_arrival_date is not None
+                            else {}
+                        ),
+                    }
+                    for adjustment in result.adjustments
+                ],
+            }
+            for result in scenario["scenario_results"]
+        ],
     }
+
+    # Rule 이 낸 조정 제안의 우선 축 (#111 A4) — LLM 이 아니라 Scenario/Rule 의 결정이다.
+    # 축이 혼재하거나 0건이면 None 이고, 그때는 키를 싣지 않는다 — 근거 없이 하나를
+    # 고르지 않는다 (`derive_preferred_adjustment` docstring).
+    preferred = derive_preferred_adjustment(scenario["scenario_results"])
+    if preferred is not None:
+        payload["preferred_adjustment"] = preferred
+
+    # 품목별 가용재고 — Scenario 엔진이 이미 계산해 돌려준다. 안 실으면 계산한 값을
+    # 버리는 것이고(#111 검증 발견 5), 마스터는 판정 회신에서 재고 맥락을 잃는다.
+    # `None`(출고 귀속 불명) 위장 금지는 PRE 와 같다 (§1.2-10).
+    missing: list[str] = [] if rules["calculation_ready"] else ["cap_by_date"]
+    if scenario["inventory_by_item"] is None:
+        missing.append("inventory_by_item")
+    else:
+        payload["inventory_by_item"] = [
+            {"item": entry.item, "available_qty_kg": _num(entry.available_qty_kg)}
+            for entry in scenario["inventory_by_item"]
+        ]
+    # 판정 스킵 사실(정책 미등록 등)은 "못 본 것"의 이름이다 — soft_warnings 로도
+    # 나가지만 missing_data 에도 남긴다. 독립 경로 `_missing_data` 와 같은 분류다
+    # (#111 검증 발견 4 — signal 만 맞추고 missing 은 빠뜨렸던 비대칭).
+    missing.extend(business["warnings"])
 
     ref = _ref(snapshot)
     evidences = (
@@ -716,6 +837,90 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             source="tool_calc",
         ),
     )
+    # `soft_warnings` 는 봉투 메타(ENVELOPE_META_KEYS)라 근거 의무는 없지만, PRE 와
+    # 같은 이유로 개수를 남긴다 — 판정을 바꾸지 않는 관찰이 몇 건 흘렀는지가 실행
+    # 이력에 보여야 Critic 이 잡는다.
+    if payload["soft_warnings"]:
+        evidences = (
+            *evidences,
+            _ev(
+                "soft_warnings",
+                len(payload["soft_warnings"]),
+                "warning_count",
+                ref,
+                "물류 규칙 경고 + 업무 위험 signal + 판정 스킵 사실 — 한 채널로 합류",
+                source="tool_calc",
+            ),
+        )
+    if payload.get("inventory_by_item"):
+        evidences = (
+            *evidences,
+            *_inventory_by_item_evidences(payload["inventory_by_item"], snapshot),
+        )
+
+    judgment_fields: tuple[str, ...] = ("verdict",)
+    if preferred is not None:
+        # `quantity`/`timing` 은 소문자라 봉투의 대문자 라벨 휴리스틱을 지나친다.
+        # 매입 행동을 바꾸는 판정이므로 직접 선언하고 근거를 단다 — envelope 의
+        # judgment_fields docstring 이 말하는 바로 그 케이스다 (#111 검증 발견 2).
+        judgment_fields = ("verdict", "preferred_adjustment")
+        evidences = (
+            *evidences,
+            _ev(
+                "preferred_adjustment",
+                len(
+                    [
+                        adjustment
+                        for result in scenario["scenario_results"]
+                        for adjustment in result.adjustments
+                        if adjustment.axis == preferred
+                    ]
+                ),
+                "adjustment_count",
+                ref,
+                f"전 시나리오 조정 제안의 고유 축이 {preferred} 하나 — 해당 축 제안 건수",
+                source="tool_calc",
+            ),
+        )
+
+    # M-1 전용 채널 배선 (#111 검증 발견 1) — payload 안에만 두면 마스터 flow 가 세는
+    # `reply.suggested_adjustments` 는 0건이고, 사람 화면과 Critic 의 축 침범 검사가
+    # 전부 빈 튜플을 본다. 축 어휘는 `_DEPT_AXES["inventory"] = ("quantity","timing")`
+    # 과 정확히 같아 추측 없이 옮긴다.
+    suggested: list[SuggestedAdjustment] = []
+    seen_adjustments: set[tuple[str, date, float]] = set()
+    for result in scenario["scenario_results"]:
+        for adjustment in result.adjustments:
+            if adjustment.axis == "quantity" and adjustment.suggested_qty_kg is not None:
+                target, unit = _num(adjustment.suggested_qty_kg), "kg"
+                what = f"수량을 {target:g}kg 로 조정 제안"
+            elif adjustment.axis == "timing" and adjustment.suggested_arrival_date is not None:
+                # 날짜는 float 로 실을 수 없어 as_of 기준 D+N 으로 옮긴다 — 실제 날짜는
+                # reason 에 그대로 남으므로 손실 없는 표기 변환이지 새 판단이 아니다.
+                target = float((adjustment.suggested_arrival_date - as_of).days)
+                unit = "d"
+                what = f"도착일을 {adjustment.suggested_arrival_date.isoformat()} 로 조정 제안"
+            else:
+                # 값 없는 제안은 전용 채널로 못 옮긴다 — payload.scenario_results 에는
+                # 그대로 남아 있어 사실이 사라지지는 않는다.
+                continue
+            key = (adjustment.axis, adjustment.split_date, target)
+            if key in seen_adjustments:
+                continue
+            seen_adjustments.add(key)
+            suggested.append(
+                SuggestedAdjustment(
+                    dept="inventory",
+                    axis=adjustment.axis,
+                    target_value=target,
+                    unit=unit,
+                    reason=(
+                        f"{result.label} 시나리오 "
+                        f"{adjustment.split_date.isoformat()} 회차 — {what}"
+                    ),
+                    ref_ids=(ref,),
+                )
+            )
 
     reply = AgentReply(
         request_id=request.context.request_id,
@@ -727,8 +932,12 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         business_status=payload["verdict"],
         payload=payload,
         evidences=evidences,
-        judgment_fields=("verdict",),
-        missing_data=() if rules["calculation_ready"] else ("cap_by_date",),
+        suggested_adjustments=tuple(suggested),
+        # 조정 제안이 있다는 것은 "이 안 그대로는 안 되고 재검토가 필요하다"다 —
+        # 라우팅은 마스터 몫이고 여기서는 사실만 표시한다 (AgentReply docstring).
+        needs_followup=bool(suggested),
+        judgment_fields=judgment_fields,
+        missing_data=tuple(dict.fromkeys(missing)),
         reasoning="매입 시나리오를 물류 관점에서 판정했다.",
     )
     return reply, _meta(request, run_id, tools)
@@ -853,16 +1062,44 @@ def _ev(
     detail: str = "",
     grade: str = "OFFICIAL",
     source: str = "inventory",
+    extra_ref_ids: tuple[str, ...] = (),
 ) -> Evidence:
     return Evidence(
         claim=claim,
         source=source,  # type: ignore[arg-type]
-        ref_ids=(ref,),
+        ref_ids=(ref, *extra_ref_ids),
         value=float(value),
         unit=unit,
         evidence_grade=grade,  # type: ignore[arg-type]
         evidence_detail=detail,
     )
+
+
+def _inventory_by_item_evidences(
+    rows: list[dict[str, Any]],
+    snapshot: InventoryLogisticsSnapshot,
+) -> list[Evidence]:
+    """품목별 가용재고 근거 — 배열 항목 안의 숫자마다, 이름 선택자로 (#111 A1).
+
+    ★ ref 는 **집계 원본**을 가리킨다. `_ref()`(스냅샷 첫 참조)를 쓰면 runtime fixture
+      에 닿는데, 이 kg 은 Lot 행 합산 − 확정 출고 차감이다 — `_lots_ref` docstring 이
+      금지한 바로 그 경우다. 확정 출고 출처(스냅샷 첫 참조)는 보조 ref 로 함께 싣는다.
+    """
+    lots_ref = _lots_ref(snapshot)
+    outbound_ref = _ref(snapshot)
+    return [
+        _ev(
+            f"inventory_by_item[{row['item']}].available_qty_kg",
+            row["available_qty_kg"],
+            "kg",
+            lots_ref,
+            f"{row['item']} 가용재고 합계 — 비-ACTIVE·신선도 만료 Lot 제외, "
+            "확정 출고 예약분 차감",
+            source="tool_calc",
+            extra_ref_ids=(outbound_ref,) if outbound_ref != lots_ref else (),
+        )
+        for row in rows
+    ]
 
 
 def _run_id(request: AgentRequest) -> str:

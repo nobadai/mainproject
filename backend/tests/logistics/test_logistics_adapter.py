@@ -18,9 +18,12 @@ import pytest
 from app.logistics import adapter
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
+    InventoryLotSnapshot,
     ItemStoragePolicyFact,
     LogisticsPolicy,
+    ScheduledQuantity,
 )
+from app.logistics.tools import build_lot_constraints as real_build_lot_constraints
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)
@@ -630,3 +633,243 @@ def test_grade_가_없으면_None_으로_드러낸다(wired):
     for lot in reply.payload["lots"]:
         assert "grade" in lot
         assert lot["grade"] is None
+
+
+# ---------------------------------------------------------------------------
+# 품목별 가용재고 — #111 A1
+# ---------------------------------------------------------------------------
+
+
+def _stocked_snapshot(**overrides) -> InventoryLogisticsSnapshot:
+    """가용재고 집계가 실제로 도는 스냅샷.
+
+    배추 300(가용) + 배추 100(신선도 만료 — 제외) + 무 50, 확정 출고 배추 120 차감.
+    기대: 무 50 · 배추 180.
+    """
+    lots = [
+        InventoryLotSnapshot(
+            lot_id="LOT-B1", item="배추", available_qty_kg=Decimal(300),
+            remaining_freshness_days=5, effective_freshness_limit_days=10, status="ACTIVE",
+        ),
+        InventoryLotSnapshot(
+            lot_id="LOT-B2", item="배추", available_qty_kg=Decimal(100),
+            remaining_freshness_days=0, effective_freshness_limit_days=10, status="ACTIVE",
+        ),
+        InventoryLotSnapshot(
+            lot_id="LOT-M1", item="무", available_qty_kg=Decimal(50),
+            remaining_freshness_days=7, effective_freshness_limit_days=14, status="ACTIVE",
+        ),
+    ]
+    outbound = [ScheduledQuantity(date=AS_OF, quantity_kg=Decimal(120), item="배추")]
+    merged: dict = {"on_hand_by_lot": lots, "confirmed_outbound_schedule": outbound, **overrides}
+    return _snapshot(**merged)
+
+
+@pytest.fixture
+def stocked(wired, monkeypatch):
+    """`_stocked_snapshot` 기반 배선.
+
+    ★ `build_lot_constraints` 를 실물로 되돌린다 — `wired` 의 `_LOTS` 패치를 그대로
+      두면 payload 의 `lots`(배추 500.5)와 `inventory_by_item`(배추 180)이 **서로 다른
+      재고**에서 나와, 두 필드의 정합을 보려는 후속 테스트가 헛돈다 (검증 발견 7).
+    """
+    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: _stocked_snapshot())
+    monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
+
+
+def test_품목별_가용재고를_PRE_payload_에_싣는다(stocked):
+    """Lot 목록과 별개의 **집계값**이다 — 매입/마스터가 Lot 을 재합산하면 가용재고
+    정의(비-ACTIVE·만료 제외, 확정 출고 차감)를 남의 도메인에서 재구현하게 된다."""
+    reply, _ = adapter.logistics_port(req())
+    assert reply.payload["inventory_by_item"] == [
+        {"item": "무", "available_qty_kg": 50.0},
+        {"item": "배추", "available_qty_kg": 180.0},
+    ]
+
+
+def test_가용재고_근거는_번호가_아니라_품목명으로_가리킨다(stocked):
+    """Lot·보관정책과 같은 이름 선택자다 — 번호로 쓰면 품목 순서가 바뀌는 날
+    근거가 다른 품목을 가리킨다."""
+    reply, _ = adapter.logistics_port(req())
+    claims = {evidence.claim: evidence.value for evidence in reply.evidences}
+    assert claims["inventory_by_item[배추].available_qty_kg"] == 180.0
+    assert claims["inventory_by_item[무].available_qty_kg"] == 50.0
+
+
+def test_가용재고_근거는_Lot_출처를_가리킨다(stocked):
+    """🔴 이 kg 은 Lot 행 합산이다 — `_ref()`(첫 참조 = runtime fixture)를 쓰면
+    *"이 수량이 어디서 왔나"* 를 따라갈 때 엉뚱한 곳에 닿는다 (`_lots_ref` docstring,
+    검증 발견 3). 확정 출고 출처는 보조 ref 로 함께 싣는다."""
+    reply, _ = adapter.logistics_port(req())
+    inventory_evidences = [
+        evidence for evidence in reply.evidences if evidence.claim.startswith("inventory_by_item[")
+    ]
+    assert inventory_evidences
+    for evidence in inventory_evidences:
+        assert "inventory_lots" in evidence.ref_ids[0], evidence.ref_ids
+
+
+def test_출고_귀속_불명이면_가용재고를_지어내지_않는다(stocked, monkeypatch):
+    """🔴 확정 출고에 item 없는 행이 있으면 어느 품목의 재고가 줄었는지 모른다.
+
+    임의 배분 대신 키를 생략하고 이름을 남긴다 — `[]`(품목 0건 확인)로 위장하면
+    *"재고가 없다"* 로 읽힌다 (§1.2-10).
+    """
+    unattributed = [ScheduledQuantity(date=AS_OF, quantity_kg=Decimal(120), item=None)]
+    monkeypatch.setattr(
+        adapter,
+        "_load_snapshot",
+        lambda as_of: _stocked_snapshot(confirmed_outbound_schedule=unattributed),
+    )
+    reply, _ = adapter.logistics_port(req())
+    assert "inventory_by_item" not in reply.payload
+    assert "inventory_by_item" in reply.missing_data
+
+
+def test_가용재고를_실어도_봉투_검증을_통과한다(stocked):
+    """배열 항목 안의 숫자마다 근거가 있어야 한다 (`required_claims`) — 커버리지 검증."""
+    request = req()
+    reply, meta = adapter.logistics_port(request)
+    assert reply.payload["inventory_by_item"]
+    assert validate_reply(request, reply, meta) == ()
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 상세·업무 위험 signal·우선 조정 축 — #111 A2·A3·A4
+# ---------------------------------------------------------------------------
+
+
+def test_시나리오별_판정_상세를_봉투에_싣는다(wired):
+    """총평(verdict)만으로는 *"어떤 시나리오가 왜 conditional 인지"* 를 마스터가
+    받지 못한다 — 독립 응답과 같은 상세를 나른다."""
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
+    results = reply.payload["scenario_results"]
+    assert len(results) == 1
+    assert results[0]["label"] == "기본"
+    assert results[0]["verdict"] in {"ok", "conditional", "reject", "skipped"}
+    assert isinstance(results[0]["reason_codes"], list)
+    assert isinstance(results[0]["adjustments"], list)
+
+
+def test_업무_위험_signal_이_soft_warnings_로_합류한다(wired, monkeypatch):
+    """CAPACITY_TIGHT 계열은 판정을 바꾸지 않지만 Critic 과 사람이 봐야 한다.
+
+    독립 경로와 같은 병합(`merge_business_warnings`)이다 — 잔여 신선도 비율
+    2/10 = 0.2 ≤ 임계 0.30 이면 `INVENTORY_FRESHNESS_PRESSURE` 가 나간다.
+    """
+    pressured = _stocked_snapshot(freshness_pressure_ratio=Decimal("0.30"))
+    pressured = pressured.model_copy(
+        update={
+            "on_hand_by_lot": [
+                InventoryLotSnapshot(
+                    lot_id="LOT-P1", item="배추", available_qty_kg=Decimal(100),
+                    remaining_freshness_days=2, effective_freshness_limit_days=10,
+                    status="ACTIVE",
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: pressured)
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
+    assert "INVENTORY_FRESHNESS_PRESSURE" in reply.payload["soft_warnings"]
+
+
+def test_우선_조정_축은_있을_때만_실린다(wired, monkeypatch):
+    """축 값의 정확성은 `derive_preferred_adjustment` 테스트가 본다 — 여기는 **번역**만.
+
+    `None`(혼재·0건)이면 키를 싣지 않는다 — 근거 없이 하나를 고르지 않는다.
+    """
+    monkeypatch.setattr(adapter, "derive_preferred_adjustment", lambda results: "quantity")
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
+    assert reply.payload["preferred_adjustment"] == "quantity"
+
+    monkeypatch.setattr(adapter, "derive_preferred_adjustment", lambda results: None)
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
+    assert "preferred_adjustment" not in reply.payload
+
+
+def test_시나리오_상세를_실어도_봉투_검증을_통과한다(wired, monkeypatch):
+    """signal·상세·근거가 다 실린 상태로 봉투 규칙 전체를 통과해야 한다."""
+    pressured = _stocked_snapshot(freshness_pressure_ratio=Decimal("0.30"))
+    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: pressured)
+    request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    reply, meta = adapter.logistics_port(request)
+    assert reply.payload["scenario_results"]
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_기준일이_다른_제안은_판정하지_않는다(wired):
+    """🔴 재무 어댑터와 같은 fail-closed (§1.2-6).
+
+    스냅샷·Rule 은 요청 `as_of` 로 읽는데 시나리오만 다른 날짜로 계산하면 기준일이
+    섞인 판정이 READY 로 나간다 — Codex 교차검증에서 실제 재현된 케이스다.
+    """
+    payload = _proposal_payload()
+    payload["meta"]["as_of"] = "2026-01-01"
+    payload["scenarios"][0]["split_plan"][0]["date"] = "2026-01-01"
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=payload))
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert reply.payload["validation_errors"] == ["proposal.meta.as_of"]
+
+
+def test_조정_제안은_전용_채널에도_실린다(stocked):
+    """🔴 payload 안에만 두면 마스터 flow 가 세는 `reply.suggested_adjustments` 는
+    0건이고, 사람 화면("물류가 조정을 제안했습니다 N건")과 Critic 축 침범 검사가
+    전부 빈 튜플을 본다 (검증 발견 1).
+
+    창고 여유(무 50 + 배추 180 시나리오와 무관하게 cap 은 guaranteed−점유)로는
+    20,000kg 제안을 못 받으므로 조정 제안이 나온다.
+    """
+    payload = _proposal_payload()
+    scenario = payload["scenarios"][0]
+    scenario["total_qty_kg"] = 20000
+    scenario["total_amount_krw"] = 33000000
+    scenario["split_plan"] = [{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 20000}]
+    scenario["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 20000, "grade_unit_price": 1650}
+    ]
+    request = req(mode="SCENARIO_VALIDATION", payload=payload)
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.suggested_adjustments, "payload 에는 있는 조정이 전용 채널에 없다"
+    for adjustment in reply.suggested_adjustments:
+        assert adjustment.dept == "inventory"
+        assert adjustment.axis in {"quantity", "timing"}
+        assert adjustment.ref_ids
+    assert reply.needs_followup is True
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_판정_스킵_사실은_missing_data_에도_남는다(wired):
+    """독립 경로 `_missing_data` 와 같은 분류다 (검증 발견 4) — signal 채널만 맞추면
+    "못 본 것"의 이름이 M-1 에서 사라진다. 기본 픽스처는 임계 정책 미등록이라
+    판정 스킵 2건이 나온다."""
+    reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
+    assert "CAPACITY_TIGHT_POLICY_UNRESOLVED" in reply.missing_data
+    assert "FRESHNESS_PRESSURE_POLICY_UNRESOLVED" in reply.missing_data
+    # soft_warnings 채널에도 같은 사실이 있어야 한다 — 두 채널은 분류가 다를 뿐이다.
+    assert "CAPACITY_TIGHT_POLICY_UNRESOLVED" in reply.payload["soft_warnings"]
+
+
+def test_우선_조정_축은_판정으로_선언되고_근거가_붙는다(wired, monkeypatch):
+    """`quantity` 는 소문자라 봉투의 대문자 라벨 휴리스틱을 지나친다 — 직접 선언하지
+    않으면 매입 행동을 바꾸는 판정이 근거 없이 나간다 (검증 발견 2)."""
+    monkeypatch.setattr(adapter, "derive_preferred_adjustment", lambda results: "quantity")
+    request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    reply, meta = adapter.logistics_port(request)
+    assert "preferred_adjustment" in reply.judgment_fields
+    assert any(evidence.claim == "preferred_adjustment" for evidence in reply.evidences)
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_시나리오_판정에도_품목별_가용재고를_싣는다(stocked):
+    """Scenario 엔진이 이미 계산한 값이다 — 버리면 마스터가 판정 회신에서 재고 맥락을
+    잃는다 (검증 발견 5). PRE 와 같은 근거(이름 선택자·Lot 출처)가 붙는다."""
+    request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    reply, meta = adapter.logistics_port(request)
+    assert reply.payload["inventory_by_item"] == [
+        {"item": "무", "available_qty_kg": 50.0},
+        {"item": "배추", "available_qty_kg": 180.0},
+    ]
+    assert validate_reply(request, reply, meta) == ()
