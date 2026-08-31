@@ -27,8 +27,9 @@ Evidence, verdict와 adjustment는 deterministic Finance Tools/Rules가 계산�
 - Ollama / Gemma
 - Gemini API
 
-Production 기본값은 `ollama / gemma3:4b`다. Gemini는 선택적으로 활성화할 수 있는 후보이며
-아직 Production 기본 Provider가 아니다.
+Finance의 Primary Provider는 `gemini / gemini-3.5-flash-lite`다. Gemini를 사용할 수 없는
+일부 가용성 장애에서는 `ollama / gemma3:4b`를 availability fallback으로 사용한다. 다른
+Agent가 사용하는 전역 LLM 기본값은 변경하지 않는다.
 
 ## 환경 설정
 
@@ -40,7 +41,7 @@ FINANCE_LLM_MODEL=gemini-3.5-flash-lite
 FINANCE_GEMINI_API_KEY=<secret>
 ```
 
-Provider는 `FINANCE_LLM_PROVIDER → LLM_PROVIDER → ollama` 순서로 결정한다. Gemini API
+Provider는 `FINANCE_LLM_PROVIDER → LLM_PROVIDER → gemini` 순서로 결정한다. Gemini API
 키는 `FINANCE_GEMINI_API_KEY`를 먼저 읽고, 비어 있으면 `GEMINI_API_KEY`를 사용한다.
 Finance는 `MASTER_GEMINI_API_KEY`를 읽지 않는다. Finance에서만 Gemini를 활성화하기 위해
 전역 `LLM_PROVIDER`를 변경해서는 안 된다.
@@ -51,8 +52,8 @@ Finance는 `MASTER_GEMINI_API_KEY`를 읽지 않는다. Finance에서만 Gemini�
 
 ### Provider별 기본 모델과 상속 규칙
 
-- Ollama 기본 모델: `gemma3:4b`
-- Gemini 기본 모델: `gemini-3.5-flash-lite`
+- Primary Gemini 모델: `gemini-3.5-flash-lite`
+- Availability fallback Ollama 모델: `gemma3:4b`
 - 명시적인 `FINANCE_LLM_MODEL`이 항상 우선한다.
 
 모델은 Provider에 종속된다. 다음 설정처럼 전역 Provider와 Finance Provider가 다를 때
@@ -66,6 +67,30 @@ FINANCE_LLM_PROVIDER=gemini
 
 따라서 위 설정의 Finance 모델은 `gemini-3.5-flash-lite`이며, Gemini API에
 `gemma3:4b`를 요청해 404가 발생하는 구성을 방지한다.
+
+### Availability fallback
+
+Gemini에서 다음 가용성 오류가 발생하면 같은 Finance 실행의 남은 Planner와 Finalizer는
+Ollama/Gemma를 사용한다.
+
+- Gemini API 키 누락
+- HTTP 429
+- timeout
+- network 또는 `URLError`
+- HTTP 5xx
+
+다음 오류는 구성이나 계약 결함일 수 있으므로 Ollama로 조용히 우회하지 않는다.
+
+- HTTP 400
+- HTTP 401/403
+- HTTP 404
+- schema 또는 contract 오류
+- invalid JSON 및 structured output 오류
+
+Gemini 가용성 오류 후 Gemma가 성공하면 Finance 계산 결과는 그대로 유지되고
+`runtime_status=READY`, `llm_status=SUCCESS`가 된다. 이때 실제 사용 모델은
+`llm_model=gemma3:4b`로 관측할 수 있으며 `llm_fallback_used=False`다. Provider 전환과
+deterministic finalization fallback을 같은 상태로 취급하지 않는다.
 
 ## Gemini 응답 처리
 
@@ -102,6 +127,10 @@ Finalizer 실패는 기존 deterministic fallback을 사용할 수 있으며, �
 `used_tools`, `tool_order`, `replans`, `llm_attempts`, `llm_fallback_used`, `elapsed_ms`를
 보존한다.
 
+Availability fallback으로 Ollama가 정상 결과를 반환한 경우는 LLM 실행 자체가 성공한
+것이므로 `SUCCESS`다. 반면 deterministic fallback은 LLM 결과를 사용하지 못한 상태이므로
+`FALLBACK`이며 `llm_fallback_used=True`다.
+
 ## Gemma vs Gemini — initial smoke benchmark
 
 2026-08-31에 동일한 deterministic Finance 입력으로 실제 smoke test를 수행했다.
@@ -134,9 +163,10 @@ Hard invariant도 모두 유지됐다.
 - LLM이 재무 수치를 생성하지 않았다.
 - Finance contract validation이 통과했다.
 
-Gemini의 잠정 분류는 `STRONG_CANDIDATE`다. 다만 이는 실제 Gemini Finance 실행 세 건만을
-대상으로 한 초기 smoke benchmark이며, 최종 Production 모델을 선택하기에 충분한 근거가
-아니다. quota 초기화 이후 더 다양한 입력과 반복 안정성을 별도로 평가해야 한다.
+Gemini의 잠정 분류는 `STRONG_CANDIDATE`다. Finance 정책상 Gemini를 Primary로 사용하지만,
+이는 실제 Gemini Finance 실행 세 건만을 대상으로 한 초기 smoke benchmark다. benchmark
+하나만으로 모든 Production 상황에서의 최종 우승 모델을 단정할 수는 없다. quota 초기화
+이후 더 다양한 입력과 반복 안정성을 별도로 평가해야 한다.
 
 ## Gemini quota와 자동 테스트
 
