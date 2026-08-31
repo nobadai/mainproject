@@ -20,6 +20,7 @@ import pytest
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
+from app.purchase_agent.llm.mix import MixDecision
 from app.purchase_agent.nodes.allocate_sourcing import (
     _yields_positive_kg,
     allocate_sourcing,
@@ -348,6 +349,23 @@ def test_a_ratio_that_rounds_to_zero_kg_is_dropped_before_it_kills_the_proposal(
 # ── 근거 (규칙 4) ───────────────────────────────────────────────────────────
 
 
+def _mid_grade_items(scenario: dict) -> list[dict]:
+    """중품 배분 근거만 고른다 — **LLM이 닿지 못하는 축**으로 거른다.
+
+    ⚠️ ``claim``의 "스프레드"로 거르면 안 된다. ⑤의 LLM 판단 근거는
+    ``f"등급 조합 {id} 선택 — {mix.reason}"``이고(``package_scenarios.py``)
+    ``reason``은 **LLM이 쓴 자유 문장**이라 "스프레드"라는 단어가 들어갈 수 있다.
+    2026-08-31 실측에서 gemma3:4b가 실제로 *"등급 스프레드가 확대된 상황에서…"* 를 냈다.
+    그러면 개수 단언이 **확률적으로** 깨진다 — 모델·온도에 따라 재현이 갈리는 flaky 다.
+
+    ``evidence_detail``의 "소진 한계"는 규칙이 조립한 문구라(``_ratio_line``) LLM이
+    건드릴 수 없다. 그래서 LLM on/off 어느 쪽에서도 같은 것을 센다.
+    """
+    return [
+        r for r in scenario["rationale"] if "소진 한계" in (r.get("evidence_detail") or "")
+    ]
+
+
 def test_mid_grade_allocation_carries_its_own_rationale(proposals: dict) -> None:
     """중품을 태운 날엔 왜 태웠는지가 근거에 남는다 — ref_id 포함 (규칙 4).
 
@@ -355,13 +373,51 @@ def test_mid_grade_allocation_carries_its_own_rationale(proposals: dict) -> None
     물려받지 못한다 (IO명세 §5).
     """
     for scenario in proposals[SPREAD_WIDE]["scenarios"]:
-        spread_items = [r for r in scenario["rationale"] if "스프레드" in r["claim"]]
-        assert len(spread_items) == 1
-        assert spread_items[0]["ref_id"].strip()
-        assert spread_items[0]["evidence_grade"] == "ASSUMED"
+        items = _mid_grade_items(scenario)
+        assert len(items) == 1
+        assert items[0]["ref_id"].strip()
+        assert items[0]["evidence_grade"] == "ASSUMED"
 
     for scenario in proposals[RISING]["scenarios"]:
-        assert not [r for r in scenario["rationale"] if "스프레드" in r["claim"]]
+        assert not _mid_grade_items(scenario)
+
+
+def _selector_saying(reason: str):
+    """규칙 기본안을 그대로 고르되 **이유 문장만** 지정한다.
+
+    수량을 바꾸지 않으므로 이 테스트가 보는 것은 "문장이 근거에 실리는 경로" 하나로
+    좁혀진다. ``test_mix_llm.py``의 ``_fixed_selector``와 같은 방식이다.
+    """
+
+    def selector(context, default_candidate_id: str) -> MixDecision:
+        del context
+        return MixDecision(
+            candidate_id=default_candidate_id,
+            reason=reason,
+            llm_status="SUCCESS",
+            llm_model="fake-model",
+            llm_fallback_used=False,
+        )
+
+    return selector
+
+
+def test_llm_wording_cannot_inflate_the_mid_grade_rationale_count() -> None:
+    """**2026-08-31 회귀.** LLM 문장이 "스프레드"를 써도 중품 근거는 1건 그대로다.
+
+    LLM이 켜지면 ⑤의 판단 근거가 rationale에 **1건 늘어난다.** 그 자체는 설계대로지만,
+    옛 필터(``"스프레드" in claim``)는 늘어난 항목까지 함께 세어 개수 단언을 깼다.
+    conftest가 LLM을 꺼 두는 덕에 기본 실행에서만 안 보였을 뿐이다.
+
+    아래 두 단언이 짝이다 — 새 필터가 안 흔들리는 것과, **옛 필터였다면 깨졌을 것**을
+    같이 잠근다. 뒤엣것이 없으면 필터를 되돌려도 이 테스트가 통과한다.
+    """
+    proposal = run_purchase_agent(
+        ITEM, SPREAD_WIDE, selector=_selector_saying("등급 스프레드가 확대된 상황이라 골랐다")
+    )
+    for scenario in proposal["scenarios"]:
+        assert len(_mid_grade_items(scenario)) == 1
+        assert len([r for r in scenario["rationale"] if "스프레드" in r["claim"]]) == 2
 
 
 def test_deferred_arrival_date_check_is_disclosed_when_mid_grade_is_used(proposals: dict) -> None:
