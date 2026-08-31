@@ -121,9 +121,9 @@ def test_mid_grade_shelf_days_comes_from_the_top_grade_lot() -> None:
     constraints = load_constraints()
     state = _staged()
     reference = constraints["allocation"]["reference_grade"]
-    top_shelf = top_grade_shelf_days(state["inventory"], reference)
+    top_shelf = top_grade_shelf_days(state["inventory"], reference, ITEM)
     assert top_shelf == 10
-    assert top_shelf * constraints["grade"]["mid_grade_shelf_ratio"] == 6
+    assert top_shelf * constraints["grade"]["mid_grade_shelf_ratio_fallback"] == 6
 
 
 # ── E3-1 DoD ③: 사중 일치 — 줄이 둘이 되어야 금액 축이 실제로 검증된다 ─────
@@ -198,7 +198,8 @@ def test_shelf_ratio_in_constraints_actually_drives_the_allocation() -> None:
     assert evaluate_mid_grade(state, constraints)["ratio"] > 0
 
     tightened = deepcopy(constraints)
-    tightened["grade"]["mid_grade_shelf_ratio"] = 0.2  # 10일 × 0.2 = 2일 → +3일 납품도 못 받는다
+    # 10일 × 0.2 = 2일 → +3일 납품도 못 받는다
+    tightened["grade"]["mid_grade_shelf_ratio_fallback"] = 0.2
     assert evaluate_mid_grade(state, tightened)["ratio"] == 0
 
 
@@ -285,7 +286,7 @@ def test_missing_top_grade_lot_blocks_the_allocation_instead_of_guessing() -> No
     """상 등급 로트가 없으면 상품 한계일을 모른다 — 중품 배정을 하지 않고 사유를 남긴다."""
     state = _staged(as_of=SPREAD_WIDE)
     state["inventory"]["lots"] = []
-    assert top_grade_shelf_days(state["inventory"], "상") is None
+    assert top_grade_shelf_days(state["inventory"], "상", ITEM) is None
 
     decision = evaluate_mid_grade(state, load_constraints())
     assert decision["ratio"] == 0
@@ -492,10 +493,10 @@ def test_shelf_days_do_not_depend_on_lot_order() -> None:
     state = _staged(as_of=SPREAD_WIDE)
     lot = state["inventory"]["lots"][0]
     state["inventory"]["lots"] = [{**lot, "shelf_life_days": 20}, {**lot, "shelf_life_days": 4}]
-    assert top_grade_shelf_days(state["inventory"], "상") == 4
+    assert top_grade_shelf_days(state["inventory"], "상", ITEM) == 4
 
     state["inventory"]["lots"].reverse()
-    assert top_grade_shelf_days(state["inventory"], "상") == 4
+    assert top_grade_shelf_days(state["inventory"], "상", ITEM) == 4
 
 
 # ── #76 미결 고지 ─────────────────────────────────────────────────────────
@@ -509,7 +510,7 @@ def test_shelf_days_do_not_depend_on_lot_order() -> None:
         # 물류 payload 에는 shelf_life_days 자체가 없다 (#76 미결)
         (
             {"lots": [{"lot_id": "L1", "grade": "상", "available_qty_kg": 100}]},
-            "물류 payload에 없는",
+            "어느 쪽으로도 받지 못했다",
         ),
         ({"lots": [{"lot_id": "L1", "grade": None, "shelf_life_days": 10}]}, "등급이 모두 미상"),
         ({"lots": [{"lot_id": "L1", "grade": "중", "shelf_life_days": 10}]}, "상 등급 로트가 없어"),
@@ -523,7 +524,7 @@ def test_shelf_days_block_reason_separates_four_causes(inventory: dict, expected
     **키 자체가 안 실린 것**인데(#76 미결) 그렇게 쓰면 *"재고에 상 등급이 없구나"* 로
     읽힌다 — 침묵도 오답이지만 **틀린 사유는 더 나쁘다.**
     """
-    assert expected in shelf_days_block_reason(inventory, "상")
+    assert expected in shelf_days_block_reason(inventory, "상", ITEM)
 
 
 def test_missing_shelf_life_surfaces_in_risks_instead_of_passing_silently() -> None:
@@ -539,7 +540,7 @@ def test_missing_shelf_life_surfaces_in_risks_instead_of_passing_silently() -> N
     ]
     decision = evaluate_mid_grade(state, load_constraints())
     assert decision["blocked_by"] is not None
-    assert "물류 payload에 없는" in decision["blocked_by"]
+    assert "어느 쪽으로도 받지 못했다" in decision["blocked_by"]
 
     # 그리고 그 사유가 **고지로 나간다** — decision 안에만 있으면 사용자는 못 본다
     state.update(classify_situation(state))
@@ -551,7 +552,7 @@ def test_missing_shelf_life_surfaces_in_risks_instead_of_passing_silently() -> N
         for scenario in package_scenarios(state)["scenarios_final"]
         for risk in scenario["risks"]
     ]
-    assert any("물류 payload에 없는" in risk for risk in notices), notices
+    assert any("어느 쪽으로도 받지 못했다" in risk for risk in notices), notices
 
 
 def test_warehouse_cap_floors_fractional_capacity() -> None:

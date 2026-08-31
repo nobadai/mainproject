@@ -592,6 +592,13 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
             "inbound_lead_days(N4)가 미확정이라 계산하지 않았다 (규칙 3). "
             "N4가 확정되면 소화 가능량이 달라질 수 있다"
         )
+    if decision.get("shelf_ratio_fallback"):
+        # 물류가 medium_grade_factor 를 보내지 않아 설계 기본값으로 계산했다. 값이 같아
+        # 결과가 안 바뀌더라도 **무엇을 근거로 셈했는지**는 달라진다 (규칙 3).
+        notes.append(
+            "중품 소진 계수는 물류 medium_grade_factor를 받지 못해 설계 기본값으로 "
+            "계산했다 — 물류 값이 다르면 중품 비중이 달라진다"
+        )
     notes.extend(_mix_choice_risks(decision))
     return notes
 

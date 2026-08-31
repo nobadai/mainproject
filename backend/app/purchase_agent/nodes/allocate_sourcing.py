@@ -16,6 +16,7 @@
 만들지 않으므로 사중 일치의 수량 축을 여기서 깨뜨릴 수단 자체가 없다.
 """
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date
 from typing import Any
@@ -68,31 +69,92 @@ def is_spread_widened(spread: float | None, baseline: float | None, widening_rat
     return spread >= baseline * (1 + widening_ratio)
 
 
-def top_grade_shelf_days(inventory: dict, top_grade: str) -> int | None:
-    """기준등급(상) 로트의 유통기한 = "상품 한계일".
+#: 매입이 다루는 품목 (정의서 §1). 물류는 이보다 넓은 목록을 보낸다 — 실측에서
+#: ``건고추``(90일)가 함께 왔다. 우리 품목이 아니면 정책을 읽지 않는다.
+#:
+#: ⚠️ 여기서 거르지 않아도 ``item`` 매칭이 이미 다른 품목을 떨어뜨린다. 그런데도 목록을
+#:   두는 이유는 **"물류 목록에 있다"가 "매입이 다룬다"를 뜻하지 않는다**는 것을 코드가
+#:   말하게 하기 위해서다. 나중에 품목이 늘 때 여기가 고칠 자리다.
+PURCHASE_ITEMS = ("배추", "무", "피마늘", "양파")
 
-    ⚠️ **추론이다.** 상세설계 §7 임계표는 "중품 소진 한계 = 상품 한계일 × 0.6"만 규정하고
-    상품 한계일 값을 주지 않는다. 같은 표의 "보관한계(품목별) 배추 135일"은 저장성 기준이라
-    다른 개념이고(``mocks/inventory.json._주의``), 값이 실재하는 곳은 재고 로트의
-    ``shelf_life_days``뿐이다. 배추 10일 × 0.6 = 6일이 §4-⑤ 판단 예시의 "6일"과 일치한다.
 
-    같은 품목·같은 등급의 로트면 유통기한이 같다고 보고 신규 매입분에도 그 값을 쓴다.
-    **로트의 잔여신선도가 아니라 전체 유통기한**을 읽는 이유: 오늘 사는 물건은 새 물건이라
-    기존 로트가 이미 쓴 날짜를 물려받지 않는다.
+def item_storage_policy(inventory: dict, item: str) -> dict | None:
+    """물류가 보낸 품목 보관 정책 중 **이 품목 것**을 고른다.
+
+    🔴 **첫 항목을 집으면 안 된다.** 물류는 4품목이 아니라 **5품목**을 한 목록에 담아
+    보내고(2026-08-31 실측: 무·배추·양파·건고추·피마늘), **첫 항목이 무(14일)** 다.
+    배추를 돌리며 ``policies[0]`` 을 읽으면 무의 보관한계로 중품 소진 창을 계산한다 —
+    에러가 나지 않아 아무도 모른다. 실제로 이 함정을 밟은 사례가 보고됐다(#79).
+
+    ``lots`` 에 품목 필터를 거는 ``adapter.absorb_inventory`` 와 같은 이유다. 다만
+    policies 는 어댑터가 통째로 넘기므로(품목 축이 행 안에 있다) **읽는 쪽이 거른다.**
+    """
+    if item not in PURCHASE_ITEMS:
+        return None
+    for row in inventory.get("item_storage_policies") or []:
+        if isinstance(row, Mapping) and row.get("item") == item:
+            return dict(row)
+    return None
+
+
+def top_grade_shelf_days(inventory: dict, top_grade: str, item: str) -> int | None:
+    """기준등급(상)의 "상품 한계일".
+
+    **값의 출처는 둘이고 물류가 우선이다.**
+
+    1. 물류 ``item_storage_policies[item].operational_limit_days`` — 운영 보관한계.
+       실측값이고 품목 마스터에서 온다 (배추 10 · 무 14 · 양파 30 · 피마늘 30).
+    2. 재고 로트의 ``shelf_life_days`` — 물류가 이 키를 싣지 않을 때의 경로다.
+
+    ⚠️ **값이 와도 등급을 특정하지 못하면 None이다.** 이 함수가 답하는 것은
+    *"이 품목의 보관한계"* 가 아니라 *"기준등급 물건의 한계일"* 이다. 로트 ``grade`` 가
+    전부 ``None`` 이면(#69 등급 어휘 미확정) 어느 등급의 한계일인지 말할 수 없다 —
+    품목 정책값을 그 자리에 끼워 넣으면 **근거 없는 결론**이 된다 (규칙 3).
+    마스터도 이 상태를 예상하고 있다 (``master/verifier.py`` — "값을 쓰면서도 결론이
+    안 난다"는 원인 ③).
+
+    ⚠️ ``operational_limit_days`` 는 상세설계 §7 임계표의 **"보관한계(품목별) 배추 135일"
+    과 다른 개념이다.** 그쪽은 저장성 축이고 ``_freshness_cap_kg`` 가 쓴다. 이름이
+    비슷해 섞기 쉬운데, 섞으면 배추 상한이 135일 기준에서 10일 기준으로 바뀌어
+    매입 가능량이 9분의 1이 된다. 물류도 #90에서 "기존 Lot 의 잔여 신선도와 다른 값"
+    이라고 적었다 — 세 문서가 같은 말을 한다.
 
     로트가 여럿이면 **가장 짧은 유통기한**을 쓴다. IO명세 §1-③은 lots의 순서도, 같은 등급
     로트의 유통기한이 같다는 것도 보장하지 않는다 — 첫 로트를 집으면 같은 재고를 순서만
     바꿔 넣어도 배분이 달라진다. 짧은 쪽이 안전한 방향이다.
-
-    등급별 보관한계 마스터가 생기면 **이 함수만** 교체한다. 상 등급 로트가 없으면
-    None — 중품 소진 한계를 계산하지 않는다 (규칙 3).
     """
-    days = [
-        lot["shelf_life_days"]
-        for lot in inventory.get("lots") or []
-        if lot.get("grade") == top_grade and lot.get("shelf_life_days") is not None
-    ]
+    graded = [lot for lot in inventory.get("lots") or [] if lot.get("grade") == top_grade]
+    if not graded:
+        # 기준등급 로트를 특정하지 못했다 — 사유는 shelf_days_block_reason 이 갈라 적는다.
+        return None
+
+    policy = item_storage_policy(inventory, item)
+    if policy is not None and policy.get("operational_limit_days") is not None:
+        return int(policy["operational_limit_days"])
+
+    days = [lot["shelf_life_days"] for lot in graded if lot.get("shelf_life_days") is not None]
     return min(days) if days else None
+
+
+def mid_grade_shelf_ratio(inventory: dict, item: str, constraints: dict) -> tuple[float, bool]:
+    """중품 소진 계수. **물류 값이 정본이고, 없으면 설계 기본값 + 고지.**
+
+    돌려주는 둘째 값은 *"기본값으로 떨어졌는가"* 다 — ⑥이 risks 에 싣는다 (규칙 3).
+
+    ⚠️ **읽는 자리를 하나로 모은 함수다.** 전에는 호출부가
+    ``constraints["grade"]["mid_grade_shelf_ratio"]`` 를 직접 읽었는데, 물류가 같은 개념을
+    ``medium_grade_factor`` 로 보내면서 **같은 값(0.6)이 두 곳에 생겼다.** 값이 같아
+    갈라져도 티가 나지 않는 상태이고, N4 에서 실제로 겪은 실패 모드다
+    (``pending_value`` docstring 이 경고했고 이 파일이 그대로 재현했다).
+
+    yaml 쪽 키 이름에 ``_fallback`` 을 붙인 것은 **어느 쪽이 정본인지 이름이 말하게**
+    하기 위해서다. 값을 코드에 박지 않는 이유는 규칙 7이다.
+    """
+    policy = item_storage_policy(inventory, item)
+    factor = policy.get("medium_grade_factor") if policy else None
+    if factor is not None:
+        return float(factor), False
+    return float(constraints["grade"]["mid_grade_shelf_ratio_fallback"]), True
 
 
 #: ``shelf_life_days``를 못 읽은 사유. ``None``이 하나인데 원인이 넷이라 갈라 적는다.
@@ -101,27 +163,58 @@ def top_grade_shelf_days(inventory: dict, top_grade: str) -> int | None:
 #:   실제 원인은 **키 자체가 안 실린 것**인데(#76 미결), 그렇게 쓰면 *"재고에 상 등급이
 #:   없구나"*로 읽힌다 — 없는 사실을 만들어 낸다. 침묵도 오답이지만 **틀린 사유는 더 나쁘다.**
 _SHELF_DAYS_MISSING_KEY = (
-    "품목 보관한계(shelf_life_days)를 아무 로트도 싣지 않았다 — 물류 payload에 없는 값이라 "
-    "미결이다. 중품 소진 한계를 계산하지 않았다"
+    "품목 보관한계를 어느 쪽으로도 받지 못했다 — 로트에 shelf_life_days가 없고 "
+    "operational_limit_days 미수신. 중품 소진 한계를 계산하지 않았다"
+)
+
+#: 등급 어휘가 확정되지 않아 기준등급을 특정하지 못한 상태 (#69).
+#:
+#: 🔴 **키 이름과 미결 어휘가 붙어 있어야 한다.** 마스터의 SUPPLIED-BUT-UNRESOLVED 검사가
+#:   ``re.escape(key) + r".{0,12}?(?:미확정|미결|싣지 않았다|받지 못)"`` 으로 대조한다
+#:   (``master/verifier.py``). 키 뒤 12자 안에 미결 어휘가 없으면 **봉투에 실린 값을 쓰고도
+#:   결론이 안 났다는 사실이 검증 경로에 안 뜬다.** 문구를 손볼 때 이 거리를 깨지 않는다 —
+#:   테스트가 실제 패턴으로 잠근다.
+#:
+#: 이 상태가 마스터가 말하는 **원인 ③**이다: 값은 쓰는데 다른 입력이 없어 결론이 안 난다.
+#: 원인 ①(다른 곳을 본다)·②(값이 그 자리까지 안 온다)와 구분되어야 물류에 잘못된
+#: 문의가 가지 않는다 — 물류는 보낼 것을 다 보냈다.
+_SHELF_DAYS_GRADE_UNRESOLVED = (
+    "operational_limit_days 반영 · 등급 미확정(#69)으로 결론 미결 — "
+    "보유 로트의 등급이 모두 미상이라 기준등급 한계일을 특정할 수 없다"
 )
 
 
-def shelf_days_block_reason(inventory: dict, top_grade: str) -> str:
+def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
     """``top_grade_shelf_days``가 ``None``을 돌려준 **이유**.
 
     호출부가 ``blocked_by``에 그대로 싣는다 — risks 로 나가 *"무엇을 못 봤는지"*가
     사용자에게 남는다 (§3.7.6 · 규칙 3). 사유를 안 남기면 "중품을 검토하고 안 쓴 것"과
     "검토 자체를 못 한 것"이 같은 화면으로 보인다.
+
+    ⚠️ **순서가 곧 사실 판정이다.** 전에는 "보관한계 미수신"이 등급 검사보다 먼저였는데,
+    ``operational_limit_days`` 가 배선된 지금 실물은 **값이 와 있다.** 그 상태에서 먼저
+    걸리면 *"물류가 안 줬다"* 는 **거짓 사유**가 나간다 — 침묵도 오답이지만 틀린 사유는
+    더 나쁘다. 미수신 검사는 **두 소스가 다 없을 때만** 성립하도록 좁혔다.
     """
     lots = inventory.get("lots")
     if lots is None:
         return "재고 로트를 받지 못해 상품 한계일을 알 수 없다"
     if not lots:
         return "보유 로트가 없어 상품 한계일을 알 수 없다"
-    if all("shelf_life_days" not in lot for lot in lots):
+
+    policy = item_storage_policy(inventory, item)
+    has_limit = policy is not None and policy.get("operational_limit_days") is not None
+    if not has_limit and all("shelf_life_days" not in lot for lot in lots):
+        # 두 소스가 다 없을 때만 "못 받았다"가 참이다.
         return _SHELF_DAYS_MISSING_KEY
+
     if all(lot.get("grade") is None for lot in lots):
-        return "보유 로트의 등급이 모두 미상이라 상품 한계일을 알 수 없다"
+        # 값이 왔는지에 따라 사유가 갈린다 — 안 온 값을 "반영"이라 적지 않는다.
+        return (
+            _SHELF_DAYS_GRADE_UNRESOLVED
+            if has_limit
+            else "보유 로트의 등급이 모두 미상이라 상품 한계일을 알 수 없다"
+        )
     return f"{top_grade} 등급 로트가 없어 상품 한계일을 알 수 없다"
 
 
@@ -205,14 +298,19 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
         spread, baseline, constraints["triggers"]["grade_spread_widening_ratio"]
     )
 
-    top_shelf = top_grade_shelf_days(state["inventory"], top_grade)
+    top_shelf = top_grade_shelf_days(state["inventory"], top_grade, state["item"])
     facts["top_shelf_days"] = top_shelf
     if top_shelf is None:
-        facts["blocked_by"] = shelf_days_block_reason(state["inventory"], top_grade)
+        facts["blocked_by"] = shelf_days_block_reason(
+            state["inventory"], top_grade, state["item"]
+        )
         return facts
 
-    shelf_ratio = grade_cfg["mid_grade_shelf_ratio"]
+    shelf_ratio, ratio_fallback = mid_grade_shelf_ratio(
+        state["inventory"], state["item"], constraints
+    )
     facts["shelf_ratio"] = shelf_ratio
+    facts["shelf_ratio_fallback"] = ratio_fallback
     facts["shelf_days"] = top_shelf * shelf_ratio
 
     # 신선도 리스크 = 확정주문 창 중 중품이 감당하지 못하는 기간의 비율.
