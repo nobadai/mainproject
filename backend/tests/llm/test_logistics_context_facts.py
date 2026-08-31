@@ -7,6 +7,7 @@ import pytest
 
 from app.logistics.interpretation import (
     _assemble_facts,
+    _build_signal_facts,
     build_logistics_context,
     format_count,
     format_measured_percent,
@@ -42,8 +43,8 @@ def test_policy_percent_preserves_precision_without_trailing_zeros():
     assert format_policy_percent(Decimal("0.90")) == "90%"
     assert format_policy_percent(Decimal("0.30")) == "30%"
     assert format_policy_percent(Decimal("0.925")) == "92.5%"
-    # 백분율 소수 2자리 상한 — 제약 없는 numeric 이 표기를 무한정 늘리지 않는다.
-    assert format_policy_percent(Decimal("0.9012345678")) == "90.12%"
+    # 유효 정밀도 보존 — 자릿수는 정책값이 소유하고 formatter 는 반올림하지 않는다.
+    assert format_policy_percent(Decimal("0.9012345678")) == "90.12345678%"
 
 
 def test_ratio_with_threshold_bundles_measured_and_policy():
@@ -84,6 +85,33 @@ _FRESHNESS_MEASUREMENTS = {
 }
 
 
+def test_capacity_fact_bundles_usage_and_threshold():
+    facts = _build_signal_facts(
+        "CAPACITY_TIGHT",
+        {
+            "capacity_window_usage": Decimal("0.9165"),
+            "capacity_tight_ratio": Decimal("0.90"),
+        },
+    )
+
+    assert [(f.fact_id, f.display_value) for f in facts] == [
+        ("capacity_window_usage", "91.7% (임계 90%)")
+    ]
+
+
+def test_scenario_fact_uses_agreed_count_format():
+    # "조건부 N건 (전체 M건)" 문형은 표기 스펙(2026-08-31)으로 확정된 형식이다 —
+    # 슬래시("2/3건")로 회귀하면 토큰 추출이 깨진다.
+    facts = _build_signal_facts(
+        "SCENARIO_ADJUSTMENT_REQUIRED",
+        {"scenario_conditional_count": 2, "scenario_total_count": 3},
+    )
+
+    assert [(f.fact_id, f.display_value) for f in facts] == [
+        ("scenario_conditional_count", "조건부 2건 (전체 3건)")
+    ]
+
+
 def test_context_facts_carry_judged_values_only():
     context, overflow = build_logistics_context(_sales_response(), _FRESHNESS_MEASUREMENTS)
 
@@ -93,10 +121,12 @@ def test_context_facts_carry_judged_values_only():
     assert all(not any(ch.isdigit() for ch in fact.fact_id) for fact in context.facts)
 
 
-def test_signal_without_measurements_produces_no_facts():
-    context, overflow = build_logistics_context(_sales_response(), None)
+def test_signal_without_measurements_fails_closed():
+    # signal 은 섰는데 판정 수치가 전달되지 않으면 배선 버그다 — 확인된 fact 없이
+    # 해석시키지 않고 LLM 을 건너뛴다 (facts_incomplete=True).
+    context, incomplete = build_logistics_context(_sales_response(), None)
 
-    assert overflow is False
+    assert incomplete is True
     assert context.facts == []
 
 
@@ -190,6 +220,7 @@ def test_bundled_fact_allows_both_tokens():
     "summary",
     [
         "잔여 비율이 0.25입니다.",  # 단위 없는 원값 — 환산 금지
+        "잔여 비율이 25%입니다.",  # 표기 축약("25.0%" → "25%")도 완전 일치 위반이다
         "잔여 비율이 26.0%입니다.",  # 새 숫자 생성
         "차이가 5.0%p입니다.",  # 파생 계산
         "신선도 임박 Lot이 3일 남았습니다.",  # 단위 바꿔치기("3개" → "3일")
@@ -204,16 +235,6 @@ def test_non_whitelisted_numeric_tokens_are_rejected(summary):
         validate_interpretation(_raw(summary), _quote_context())
 
     assert ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN in error.value.issues
-
-
-def test_trailing_zero_stripped_equivalent_is_quotable():
-    # "25.0%"의 zero-strip 동치("25%")는 같은 값의 표기라 인용으로 인정한다 —
-    # 같은 fact 안의 임계("30%")가 zero 를 떼는 규칙이라 LLM 이 따라 떼기 쉽다.
-    interpretation = validate_interpretation(
-        _raw("최소 잔여 비율이 25%로 임계 30% 이하입니다."), _quote_context()
-    )
-
-    assert interpretation.risks == ["INVENTORY_FRESHNESS_PRESSURE"]
 
 
 @pytest.mark.parametrize(
@@ -315,7 +336,10 @@ def test_pre_send_failure_still_records_facts():
 def test_skipped_and_disabled_record_empty_facts():
     provider = _FakeProvider([])
     skipped = _service(provider).interpret(
-        _quote_context(), runtime_ready=True, has_blocking_constraints=False, facts_overflow=True
+        _quote_context(),
+        runtime_ready=True,
+        has_blocking_constraints=False,
+        facts_incomplete=True,
     )
     disabled = _service(provider, enabled=False).interpret(
         _quote_context(), runtime_ready=True, has_blocking_constraints=False

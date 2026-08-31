@@ -86,16 +86,21 @@ def format_policy_percent(value: Decimal) -> str:
     """임계(정책값)의 확정 표기 — 유효 정밀도 보존 + trailing zero 제거.
 
     0.90 → "90%" · 0.925 → "92.5%". 정수로 강제하면 실측 후 임계가 소수가 될 때
-    다시 의미가 틀어진다. 백분율 소수 2자리를 상한으로 둔다 — value_numeric 은
-    자릿수 제약이 없는 numeric 이라, 실측 갱신값이 길게 들어와도 표기가
-    "90.12345678%" 로 늘어나지 않게 하기 위해서다.
+    다시 의미가 틀어진다. 자릿수 상한은 여기서 두지 않는다 — 정밀도는 정책값
+    (`agent_policy_config.value_numeric`)이 소유하고 formatter 는 그대로 보존한다.
+    표기가 길어지면 그것은 정책값 등록 시 자릿수를 정할 사안이지 formatter 가
+    몰래 반올림할 사안이 아니다 (PR #104 리뷰 반영).
     """
-    percent = (value * Decimal(100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    percent = value * Decimal(100)
     return f"{percent.normalize():f}%"
 
 
 def format_ratio_with_threshold(measured: Decimal, threshold: Decimal) -> str:
-    """관계 수치 한 fact 표기 — 라벨-값 뒤바뀜을 구조로 차단한다."""
+    """관계 수치 한 fact 표기 — 라벨-값 오용 위험을 줄인다.
+
+    검증기는 숫자 토큰만 대조하므로 두 토큰을 서로 바꿔 쓰는 것까지 막지는
+    못한다 — 의미 관계의 semantic validation 은 v1.3 범위 밖이다 (결정서 §5).
+    """
     return f"{format_measured_percent(measured)} (임계 {format_policy_percent(threshold)})"
 
 
@@ -158,12 +163,23 @@ def _assemble_facts(
     signals: list[str],
     measurements: SignalMeasurements,
 ) -> tuple[list[ContextFact], bool]:
-    """signal 전체의 fact 목록과 상한 초과 여부. 초과 시 조용한 절단 금지 —
-    빈 목록 + True를 반환하고 호출부가 LLM을 호출하지 않는다 (Core는 정상)."""
+    """signal 전체의 fact 목록과 fail-closed 플래그 (상한 초과 또는 조립 실패).
+
+    True 면 호출부가 LLM 을 호출하지 않는다 (Core 는 정상). 상한 초과는 조용한
+    절단 금지이고, 조립 실패(signal 은 섰는데 판정 수치가 전달되지 않음)는 배선
+    버그다 — 확인된 fact 없이 해석시키지 않고 무숫자 Template 로 남긴다."""
     facts: list[ContextFact] = []
     seen_fact_ids: set[str] = set()
     for signal in signals:
         signal_facts = _build_signal_facts(signal, measurements)
+        if not signal_facts:
+            # 업무 signal 은 전부 fact 를 동반해야 한다 — measurements 미전달은
+            # Rule→Service 배선이 깨진 상태이므로 fail-closed 로 LLM 을 건너뛴다.
+            logger.warning(
+                "Logistics fact assembly failed: signal=%s has no measurements — LLM skipped",
+                signal,
+            )
+            return [], True
         # fact_id 중복 방어 — 신선도 두 signal(매입·판매)이 같은 fact_id 를 내는
         # 구조라, 사이클 분리가 무너져 공존하게 되면 같은 fact 가 두 번 나간다.
         # 첫 것만 유지하고 사실을 로그로 남긴다 (같은 값의 중복이라 의미 손실 없음).
@@ -195,7 +211,7 @@ def build_logistics_context(
     response: LogisticsProcurementResponse | LogisticsSalesResponse,
     measurements: SignalMeasurements | None = None,
 ) -> tuple[SanitizedLLMContext, bool]:
-    """결정론 응답에서 LLM Context 를 조립한다. 반환은 (context, facts_overflow).
+    """결정론 응답에서 LLM Context 를 조립한다. 반환은 (context, facts_incomplete).
 
     signals 와 missing_data 는 저장 위치가 아니라 **코드의 의미**로 분류한다 —
     soft_warnings 안의 업무 위험(BUSINESS_SIGNALS)만 signals 로 가고, 나머지
@@ -212,7 +228,7 @@ def build_logistics_context(
         )
     else:
         allowed_adjustments = list(_PROCUREMENT_ALLOWED_ADJUSTMENTS)
-    facts, overflow = _assemble_facts(signals, measurements or {})
+    facts, incomplete = _assemble_facts(signals, measurements or {})
     context = SanitizedLLMContext(
         domain="LOGISTICS",
         signals=signals,
@@ -222,7 +238,7 @@ def build_logistics_context(
         preferred_adjustment=response.preferred_adjustment,
         missing_data=list(response.missing_data),
     )
-    return context, overflow
+    return context, incomplete
 
 
 def enrich_logistics_response[
@@ -233,7 +249,7 @@ def enrich_logistics_response[
     measurements: SignalMeasurements | None = None,
 ) -> LogisticsResponse:
     service = interpretation_service or get_interpretation_service()
-    context, facts_overflow = build_logistics_context(response, measurements)
+    context, facts_incomplete = build_logistics_context(response, measurements)
     result = service.interpret(
         context,
         runtime_ready=response.runtime_status == "READY",
@@ -243,7 +259,7 @@ def enrich_logistics_response[
         has_blocking_constraints=any(
             constraint.status == "FAIL" for constraint in response.hard_constraints
         ),
-        facts_overflow=facts_overflow,
+        facts_incomplete=facts_incomplete,
     )
     update = result.model_dump(exclude={"interpretation", "llm_context_facts"})
     update["interpretation"] = result.interpretation

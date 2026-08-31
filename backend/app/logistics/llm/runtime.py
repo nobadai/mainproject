@@ -278,18 +278,18 @@ class InterpretationService:
         *,
         runtime_ready: bool,
         has_blocking_constraints: bool,
-        facts_overflow: bool = False,
+        facts_incomplete: bool = False,
     ) -> InterpretationResult:
         template = build_template_interpretation(context)
         if not self.settings.enabled:
             return self._result(template, status="DISABLED", attempts=0, fallback=False)
-        if facts_overflow or not needs_llm(
+        if facts_incomplete or not needs_llm(
             context,
             runtime_ready=runtime_ready,
             has_blocking_constraints=has_blocking_constraints,
         ):
-            # fact 상한 초과는 조용한 절단이 아니라 LLM 미호출이다 (v1.3 §5) —
-            # 결정론 결과 + 무숫자 Template 유지, overflow 자체는 조립기가 로그로 남긴다.
+            # fact 상한 초과·조립 실패는 조용한 절단이 아니라 LLM 미호출이다 (v1.3
+            # §5) — 결정론 결과 + 무숫자 Template 유지, 원인은 조립기가 로그로 남긴다.
             return self._result(
                 template,
                 status="SKIPPED_TEMPLATE",
@@ -599,16 +599,13 @@ def _allowed_numeric_tokens(context: SanitizedLLMContext) -> frozenset[str]:
 
     출력 검사와 **같은 패턴**으로 추출한다 — 추출 규칙이 두 벌이면 화이트리스트와
     검사가 어긋난다. "91.7% (임계 90%)" 한 fact의 두 토큰이 모두 인용 가능하다.
-    측정 표기의 ".0"(예: "25.0%")은 trailing zero 제거형("25%")도 함께 허용한다 —
-    같은 fact 안의 임계 표기("30%")가 zero 를 떼는 규칙이라 LLM 이 따라 떼기 쉽고,
-    값이 같은 표기 동치라 fail-closed 를 깨지 않는다. 반올림·환산은 여전히 거부된다.
+    표기 동치("25.0%" ↔ "25%")도 허용하지 않는다 — display_value 가 곧 화이트리스트
+    라는 v1.3 계약의 완전 일치를 유지한다. 표기 축약이 자주 FALLBACK 을 만들면
+    검사기를 느슨하게 할 것이 아니라 formatter 표기 정책을 다시 결정한다.
     """
     tokens: set[str] = set()
     for fact in context.facts:
-        for token in _NUMERIC_TOKEN_PATTERN.findall(fact.display_value):
-            tokens.add(token)
-            if token.endswith(".0%"):
-                tokens.add(token.removesuffix(".0%") + "%")
+        tokens.update(_NUMERIC_TOKEN_PATTERN.findall(fact.display_value))
     return frozenset(tokens)
 
 

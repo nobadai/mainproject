@@ -26,7 +26,8 @@ class ContextFact(BaseModel):
     LLM에 계산을 시키지 않는다는 원칙은 그대로다 — LLM이 할 수 있는 것은
     `display_value` 표기의 인용뿐이다. 1차에서 `raw_value`·`unit`·`date`·`source`
     필드는 추가하지 않는다. 관계 수치(판정값과 임계)는 "91.7% (임계 90%)" 처럼
-    한 fact로 묶어 라벨-값 뒤바뀜을 구조로 차단한다.
+    한 fact로 묶어 라벨-값 오용 위험을 줄인다 — 의미 관계의 semantic validation
+    은 v1.3 범위 밖이다.
     `display_value`는 단일 formatter(interpretation.py)만 만든다 — 인용 검사가
     exact 대조라 표기가 두 곳에서 만들어지면 검증이 흔들린다.
     """
