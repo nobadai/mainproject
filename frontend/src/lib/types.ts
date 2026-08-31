@@ -125,12 +125,46 @@ export interface ProcurementRunResponse {
    * `no_proposal_reason` · `rejected_reasons`.
    */
   judgment: {
+    /**
+     * 닫힌 집합 — `stable` · `uncertain`. 매입 스키마의 `Literal` 이라
+     * **새 값이 생기면 스키마가 먼저 바뀐다** (매입 2026-08-31 회신 ④).
+     * 한국어 표기는 `lib/vocab.ts` 한 곳에 있고, 모르는 값은 원문 그대로 보인다.
+     */
     situation?: string;
+    /** 닫힌 집합 — `high` · `medium` · `low`. `Intent.confidence` 와 **다른 값이다.** */
     confidence?: string;
+    /** 닫힌 집합 — `quantity` · `timing` · `mix`. 매입이 **연** 축이다. */
+    allowed_axes?: string[];
     no_proposal_reason?: string | null;
     rejected_reasons?: { label?: string; reason?: string }[];
   };
   scenarios: Scenario[];
+  /**
+   * 조언자(재무·물류)가 시나리오를 보고 낸 판정. `judgment`(매입 자신의 판정)와 다르다.
+   *
+   * 🔴 **"왜 조건부인지" 가 여기 말고는 없다.** 마스터는 판정 라벨까지만 알고 이유는
+   * `payload` 안에 있는데, 그 모양은 **부서마다 다르다** — 그래서 서버가 해석하지
+   * 않고 그대로 싣는다. 화면도 해석하지 않는다 (`AdvisorVerdicts`).
+   *
+   * ★ 실측 2026-08-31 — 물류 `verdict: "conditional"` 인데 시나리오 셋은 전부 `ok`
+   *   였다. 조건부의 원인은 안이 아니라 `hard_constraints` 의 `LOG-H02 UNRESOLVED`
+   *   (창고 구역 용량 정책 미비)였다. **"안에 문제가 있다" 와 "검사를 못 돌렸다" 가
+   *   같은 한 단어에 뭉쳐 있다.**
+   */
+  verdicts: Record<
+    string,
+    {
+      business_status: string;
+      runtime_status: string;
+      /** 부서가 보낸 것 그대로. 모양이 부서마다 다르다 — 타입을 좁히지 않는다. */
+      payload?: Record<string, unknown>;
+      /** 개수만 온다. 내용은 부서 payload 안에 있다. */
+      suggested_adjustments?: number;
+      needs_followup?: boolean;
+      /** 판정을 못 냈을 때 **유일하게 이유를 담는 칸**. */
+      reasoning?: string | null;
+    }
+  >;
   findings: string[];
   concerns: string[];
   skipped_checks: string[];

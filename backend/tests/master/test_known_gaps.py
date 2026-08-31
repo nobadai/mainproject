@@ -13,11 +13,11 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.master.answer import facts_from_status
 from app.master.llm.runtime import _clarification
 from app.master.llm.schemas import Intent
-from datetime import date
-
 from app.master.plan import ExecutionPlan
 from app.master.status_flow import StatusOutcome
 

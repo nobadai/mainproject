@@ -93,6 +93,51 @@ class FakeProvider:
         return response
 
 
+#: ``conftest``가 세션 전체에 걸어 둔 LLM 차단. 훑기에서 **빼야 한다** — 쓸어내면
+#: 설정이 켜지고 테스트가 실 프로바이더를 탄다 (conftest ``_LLM_ENV_KEYS``와 같은 짝).
+_CONFTEST_GUARD = ("PURCHASE_LLM_ENABLED", "LLM_ENABLED")
+
+
+def _pin_to_code_defaults(monkeypatch) -> None:
+    """``.env``·앞선 테스트의 잔재와 무관하게 **코드 기본값**만 보게 한다.
+
+    두 가지를 한다.
+
+    1. **로딩을 끊는다.** ``get_llm_settings()``는 함수 안에서 ``load_dotenv()``를
+       부르고, 그건 기본이 ``override=False``라 **이미 설정된** 변수만 안 덮어쓴다.
+       ``delenv``로 지우면 "미설정"이 되어 ``.env``의 값이 그대로 실린다 — 검사가 코드
+       기본값이 아니라 **개발자 머신의 .env를 시험하게 된다.** 팀 선례와 같은 방식이다
+       (``tests/llm/test_per_agent_model_override.py``의 ``_clear``).
+
+    2. **접두사로 훑는다.** ``load_dotenv``는 ``os.environ``을 실제로 채우고 그건
+       ``monkeypatch`` 밖이라 **세션 끝까지 남는다.** 앞선 테스트가 한 번만
+       ``get_llm_settings()``를 불러도 ``LLM_PROVIDER=ollama``가 심기고, 기본 모델은
+       provider별로 갈리므로(``_DEFAULT_MODELS``) 뒤 테스트가 다른 기본값을 본다.
+
+       🔴 **지울 키를 손으로 받지 않는 이유가 여기다.** 목록을 인자로 받으면
+       ``get_llm_settings``가 나중에 ``.env``에 있는 **새 키를 읽기 시작할 때** 그 키는
+       목록에 없어 세션에 남고, 검사는 **조용히 다시 환경을 시험한다** — 통과하는데
+       아무것도 안 보는 상태다. 접두사로 훑으면 목록을 유지할 일이 없어진다
+       (규칙 8: 선언과 실행이 이어져 있는지를 본다).
+
+    ⚠️ ``conftest``가 건 차단만 남긴다. 그것까지 쓸어내면 설정이 켜지고 테스트가 실
+    프로바이더를 탄다 — 이 파일이 막으려는 것과 정반대다.
+    """
+    monkeypatch.setattr(
+        "app.purchase_agent.llm.runtime.load_dotenv", lambda *a, **k: False
+    )
+    swept = [
+        key
+        for key in os.environ
+        if key.startswith(("LLM_", "PURCHASE_LLM_")) and key not in _CONFTEST_GUARD
+    ]
+    for key in swept:
+        monkeypatch.delenv(key, raising=False)
+    assert os.getenv("PURCHASE_LLM_ENABLED") == "false", (
+        "conftest가 세션 전체에 건 LLM 차단을 훑기가 쓸어냈다"
+    )
+
+
 def _settings(*, enabled=True, retries=1, provider="fake") -> LLMSettings:
     return LLMSettings(
         enabled=enabled,
@@ -685,8 +730,7 @@ def test_default_anthropic_model_is_a_pinned_low_tier_snapshot(monkeypatch) -> N
 
     별칭 형태(``claude-haiku-4-5``)로 되돌아가면 이 검사가 문다.
     """
-    monkeypatch.delenv("PURCHASE_LLM_MODEL", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
+    _pin_to_code_defaults(monkeypatch)
     from app.purchase_agent.llm.runtime import get_llm_settings
 
     settings = get_llm_settings()
@@ -697,6 +741,30 @@ def test_default_anthropic_model_is_a_pinned_low_tier_snapshot(monkeypatch) -> N
     )
 
 
+def test_pinning_sweeps_keys_it_was_never_told_about(monkeypatch) -> None:
+    """🔴 **손 목록이었다면 새 키가 그대로 새 들어온다.**
+
+    앞선 두 검사는 ``LLM_PROVIDER``·``LLM_MODEL``만 지우면 통과한다 — 그래서 목록을
+    손으로 들고 있어도 초록이었다. 하지만 ``get_llm_settings``가 읽는 키는 그 둘이
+    아니고, ``.env``나 앞선 테스트가 **다른 키**를 세션에 남기면 그 키는 목록에 없어
+    살아남는다. 검사는 통과하면서 코드 기본값이 아니라 환경을 시험하게 된다.
+
+    여기서는 목록에 **한 번도 이름이 오른 적 없는** 두 키를 심고, 그래도 코드 기본값이
+    나오는지 본다. 훑기를 목록으로 되돌리면 이 검사가 문다.
+
+    비교 대상은 ``get_llm_settings``가 코드에 적어 둔 기본값 리터럴이다 — 같은 상수를
+    양쪽이 들고 있는 형태가 아니라, **환경이 못 이긴다**는 사실을 본다.
+    """
+    monkeypatch.setenv("PURCHASE_LLM_MAX_OUTPUT_TOKENS", "1")
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "0.5")
+    _pin_to_code_defaults(monkeypatch)
+    from app.purchase_agent.llm.runtime import get_llm_settings
+
+    settings = get_llm_settings()
+    assert settings.max_output_tokens == 8192
+    assert settings.timeout_seconds == 30.0
+
+
 def test_effort_is_unset_by_default_and_omitted_from_the_request(monkeypatch) -> None:
     """``effort``는 **설정했을 때만** 요청에 실린다.
 
@@ -705,8 +773,7 @@ def test_effort_is_unset_by_default_and_omitted_from_the_request(monkeypatch) ->
     떨어뜨린다 — **LLM을 켜 뒀는데 매번 fallback인 상태가 조용히 유지된다.** 그래서
     "기본값이 없다"와 "요청에서 빠진다"를 둘 다 잠근다.
     """
-    monkeypatch.delenv("PURCHASE_LLM_EFFORT", raising=False)
-    monkeypatch.delenv("LLM_EFFORT", raising=False)
+    _pin_to_code_defaults(monkeypatch)
     from app.purchase_agent.llm.runtime import AnthropicProvider, get_llm_settings
 
     assert get_llm_settings().effort is None

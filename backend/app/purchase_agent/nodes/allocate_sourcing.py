@@ -168,8 +168,21 @@ def top_grade_shelf_days(inventory: dict, top_grade: str, item: str) -> int | No
     if limit is not None:
         return limit
 
-    days = [lot["shelf_life_days"] for lot in graded if lot.get("shelf_life_days") is not None]
-    return min(days) if days else None
+    # 🔴 **폴백 경로도 같은 검사를 받는다.** ``operational_limit_days`` 는 ``_positive_int``
+    #   로 막아 두고 로트 값은 그냥 읽고 있었다 — 같은 종류의 값인데 한쪽만 지킨 상태였다
+    #   (2026-08-31 확인). 실측:
+    #
+    #       '10'  → 문자열 그대로 통과 → 뒤에서 `'10' * 0.6` 로 죽는다
+    #       10.9  → 소진 한계 6.54 일. 에러 없이 다른 값이 된다
+    #       True  → 1 일
+    #       0/-5  → 신선도 리스크가 1.0 으로 굳어 중품이 조용히 막힌다
+    #       혼합  → min() 이 str 과 int 를 비교하다 TypeError
+    #
+    #   못 읽는 값은 **버린다 — 0으로 채우지 않는다** (규칙 3). 전부 버려지면 None 이고,
+    #   사유는 ``shelf_days_block_reason`` 이 갈라 적는다.
+    days = [_positive_int(lot.get("shelf_life_days")) for lot in graded]
+    usable = [day for day in days if day is not None]
+    return min(usable) if usable else None
 
 
 def mid_grade_shelf_ratio(inventory: dict, item: str, constraints: dict) -> tuple[float, bool]:
@@ -223,9 +236,18 @@ _SHELF_DAYS_MISSING_KEY = (
 #: 이 상태가 마스터가 말하는 **원인 ③**이다: 값은 쓰는데 다른 입력이 없어 결론이 안 난다.
 #: 원인 ①(다른 곳을 본다)·②(값이 그 자리까지 안 온다)와 구분되어야 물류에 잘못된
 #: 문의가 가지 않는다 — 물류는 보낼 것을 다 보냈다.
+#: 물류 값은 왔는데 **다른 입력이 없어** 결론이 안 나는 상태 (원인 ③).
+#:
+#: 🔴 **정확한 키 이름으로 말한다.** 전에는 봉투 최상위 키(``item_storage_policies``)로
+#:   적었다 — 마스터의 ``supplied`` 가 최상위만 봐서 중첩 키로는 안 울렸기 때문이다.
+#:   증상에 문구를 맞춘 것이지 사실을 말한 것이 아니었다.
+#:
+#:   현서님이 양쪽을 고쳤다 (dev `42795c6`). ``_supplied_keys`` 가 **중첩 한 겹**까지 보고,
+#:   판정도 12자 창을 버리고 *"키와 미결 어휘 사이에 다른 실린 키가 끼었는가"* 로 바뀌었다.
+#:   이제 우리가 실제로 못 읽은 값의 이름을 그대로 쓸 수 있다.
 _SHELF_DAYS_GRADE_UNRESOLVED = (
-    "item_storage_policies 반영했으나 결론 미결 — operational_limit_days는 받았고, "
-    "보유 로트의 등급이 모두 미상이라(#69) 기준등급 한계일을 특정할 수 없다"
+    "operational_limit_days는 받았으나 등급 어휘 미확정(#69)으로 기준등급 로트를 "
+    "특정할 수 없다 — 중품 소진 한계를 계산하지 않았다"
 )
 
 
