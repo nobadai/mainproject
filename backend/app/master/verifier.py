@@ -236,6 +236,7 @@ class MasterVerifier:
         skipped: list[str] = []
 
         self._check_plan_integrity(plan, scenarios, findings, concerns)
+        self._check_advisor_answered(verdicts, concerns)
         self._check_timing_gate(proposal, scenarios, findings, skipped)
         identity_findings = len(findings)
         self._check_scenario_identities(scenarios, findings, skipped)
@@ -372,6 +373,56 @@ class MasterVerifier:
                     continue  # 재호출로 같은 줄이 반복되면 읽는 사람만 피곤하다
                 seen.add(line)
                 (out if step.agent == "purchase" else concerns).append(line)
+
+    #: 조언자가 **실제로 낸 판정**. 이 셋이 아니면 판정을 안 낸 것이다.
+    #: `skipped` 는 판정이 아니라 *"판정하지 않았다"* 는 말이다.
+    _REAL_VERDICTS = frozenset({"ok", "conditional", "reject"})
+
+    def _check_advisor_answered(
+        self,
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        concerns: list[str],
+    ) -> None:
+        """🔴 **판정을 못 낸 조언자가 화면에서 사라지지 않게 한다.**
+
+        ★ **실측에서 나왔다 (2026-08-31).** 물류가 기준일 불일치를 fail-closed 로
+          막으면서 `runtime_status=ERROR` · `business_status=skipped` 를 낸다. 그때
+          세 곳이 서로 다르게 말하고 있었다.
+
+        ```text
+        화면     answer.py 가 라벨 없는 판정을 continue 로 건너뛴다 → 물류가 통째로 사라진다
+        보고서   report.py 가 라벨 표에 없는 값을 그대로 찍는다      → 영어 "skipped" 가 뜬다
+        검증     plan.called() 는 "불렀나" 만 본다                   → 답을 못 받아도 통과
+        ```
+
+          **"물어보지 않았다" 와 "물어봤는데 못 답했다" 가 화면에서 같아 보였다.**
+          앞엣것은 마스터 배선 문제고 뒤엣것은 그 부서 문제라 완전히 다른 얘기다.
+
+        ★ `findings` 가 아니라 `concerns` 다. 매입을 다시 불러도 안 고쳐진다 —
+          제안 기준일을 맞추거나 그 부서를 고쳐야 하는 일이라 **사람이 봐야 한다.**
+
+        ★ **이유를 같이 적는다.** `reasoning` 이 없으면 이 줄은 *"못 답했다"* 까지만
+          말하고 왜인지는 아무 데도 안 남는다 — 그러면 읽는 사람이 할 수 있는 것이 없다.
+        """
+        for agent, verdict in verdicts.items():
+            status = str(verdict.get("business_status") or "")
+            if status in self._REAL_VERDICTS:
+                continue
+            runtime = str(verdict.get("runtime_status") or "?")
+            why = str(verdict.get("reasoning") or "").strip()
+            # ★ **안 낸 것과 모르는 값을 낸 것을 갈라 적는다.** 뒤엣것을 *"안 냈다"* 고
+            #   쓰면 부서가 안 한 일을 했다고 하는 것이고, 고칠 곳도 서로 다르다 —
+            #   앞은 그 부서(또는 제안)의 문제, 뒤는 **마스터의 어휘가 낡은 것**이다.
+            what = (
+                "시나리오 판정을 내지 않았다"
+                if runtime != "READY" or status in ("", "skipped")
+                else f"마스터가 모르는 판정값 '{status}' 를 냈다 — 어휘 확인이 필요하다"
+            )
+            concerns.append(
+                f"ADVISOR-NO-VERDICT: {agent} 가 {what} "
+                f"(business={status or '없음'} · runtime={runtime}) — "
+                f"{why or '사유 미기재'}"
+            )
 
     # ── ③ 합쳤을 때의 모순 (§3.7.3) ─────────────────────────────
 
@@ -623,8 +674,34 @@ class MasterVerifier:
     #: "operational_limit_days는 받았으나 등급 어휘 미확정(#69)"
     #:   operational_limit_days → 사이에 다른 키가 없다                → 울린다 (13자여도)
     #: ```
+    #: 🔴 **키는 이름 전체로만 걸린다.** 그냥 부분문자열로 찾으면 짧은 키가 긴 키
+    #: **안에** 걸린다 — 중첩 한 겹을 보게 되면서 `item` 이 `supplied` 에 들어왔고,
+    #: 그 순간 이 문장 하나가 지적 **두 줄**이 됐다 (실측 2026-08-31, 피마늘 관통).
+    #:
+    #: ```text
+    #: "item_storage_policies 반영했으나 결론 미결"
+    #:   item_storage_policies → 울린다 (맞다)
+    #:   item                  → item_storage_policies 안에 걸려 또 울린다 (오탐)
+    #: ```
+    #:
+    #: ★ **끼어든 키 규칙으로는 못 막는다.** `item` 의 match 는 키 이름 중간에서
+    #:   끝나므로 뒤에 남는 것이 `_storage_policies …` 다 — 거기엔 `item_storage_policies`
+    #:   라는 온전한 이름이 없어서 "그 키 얘기다" 로 걸러지지 않는다.
+    #:
+    #: 앞뒤가 식별자 글자면 이름의 일부다. 한글 조사(`operational_limit_days는`)는
+    #: 식별자 글자가 아니라 그대로 걸린다.
+    _WORD_CHAR = "A-Za-z0-9_"
+
+    @classmethod
+    def _name_pattern(cls, key: str) -> re.Pattern[str]:
+        return re.compile(rf"(?<![{cls._WORD_CHAR}]){re.escape(key)}(?![{cls._WORD_CHAR}])")
+
+    @classmethod
+    def _name_in(cls, text: str, key: str) -> bool:
+        return cls._name_pattern(key).search(text) is not None
+
     def _unresolved_here(self, text: str, key: str, others: Iterable[str]) -> bool:
-        for match in re.finditer(re.escape(key), text):
+        for match in self._name_pattern(key).finditer(text):
             tail = text[match.end() :]
             stop = self._SENTENCE_END.search(tail)
             clause = tail[: stop.start()] if stop else tail
@@ -633,7 +710,9 @@ class MasterVerifier:
             if not spots:
                 continue
             between = clause[: min(spots)]
-            if any(other != key and other in between for other in others):
+            # 끼어든 키도 **이름 전체**로 본다. `in` 으로 보면 `item` 이
+            # `item_storage_policies` 안에 걸려 남의 문장을 가로챈다 — 위와 같은 결함이다.
+            if any(other != key and self._name_in(between, other) for other in others):
                 continue  # 그 키 얘기다 — 같은 원인을 두 번 보고하지 않는다
             return True
         return False

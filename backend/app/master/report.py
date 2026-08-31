@@ -180,7 +180,18 @@ def render_report(run: Mapping[str, Any]) -> str:
         out += ["## 부서 판정", ""]
         for agent, verdict in verdicts.items():
             status = str(verdict.get("business_status"))
-            out.append(f"- {agent_label(agent)} — **{_VERDICT_LABEL.get(status, status)}**")
+            label = _VERDICT_LABEL.get(status)
+            if label is not None:
+                out.append(f"- {agent_label(agent)} — **{label}**")
+                continue
+            # 🔴 영어 코드를 그대로 찍지 않는다. 종전에는 `skipped` 가 문서에 그대로
+            #   나가서, 같은 상태를 화면은 **침묵**하고 문서는 **영어**로 말했다.
+            #   들고 나간 사람이 이것을 판정 하나로 읽는다 (실측 2026-08-31).
+            why = str(verdict.get("reasoning") or "").strip()
+            out.append(
+                f"- {agent_label(agent)} — **판정을 내지 못함** "
+                f"(`{status}`) — {why or '사유 미기재'}"
+            )
         out.append("")
 
     if scenarios:
