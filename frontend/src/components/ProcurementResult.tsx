@@ -45,6 +45,43 @@ export function ProcurementResult({
         </span>
       </div>
 
+      {/*
+        🔴 **안이 없으면 사유가 답이다.** 지금까지 화면은 "보류합니다" 만 적고
+        왜 없는지는 안 적었다 — 사용자는 시스템이 고장 난 것으로 읽는다.
+
+        ★ **둘을 다 적는다.** 마스터는 *"유효한 안이 없다"* 까지만 말하고,
+          **왜 없는지는 매입이 안다.** 매입 문장이 더 유용하다:
+          "매입단가 1,650원이 max_price 992원 초과" (실측 2026-08-31).
+        ★ 매입 문장을 화면이 다시 쓰지 않는다 — 그대로 옮긴다.
+      */}
+      {run.scenarios.length === 0 && (
+        <div className="rounded-lg border border-line bg-sunk px-3.5 py-3">
+          {run.reason && (
+            <p className="m-0 text-[13px] leading-relaxed">{run.reason}</p>
+          )}
+          {run.judgment?.no_proposal_reason && (
+            <p className="m-0 mt-2 text-[13px] leading-relaxed text-warn">
+              매입: {run.judgment.no_proposal_reason}
+            </p>
+          )}
+          {(run.judgment?.rejected_reasons ?? []).length > 0 && (
+            <ul className="m-0 mt-2 list-none space-y-1 p-0">
+              {run.judgment.rejected_reasons!.map((r, i) => (
+                <li key={i} className="text-[12.5px] text-muted">
+                  <b className="font-semibold text-ink">{r.label ?? "안"}</b> — {r.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {run.judgment?.situation && (
+            <p className="m-0 mt-2 font-mono text-[11.5px] text-faint">
+              매입 판단 · 상황 {run.judgment.situation}
+              {run.judgment.confidence ? ` · 확신 ${run.judgment.confidence}` : ""}
+            </p>
+          )}
+        </div>
+      )}
+
       {run.scenarios.length > 0 && (
         <div className="grid gap-2.5 sm:grid-cols-3">
           {run.scenarios.map((s, i) => (

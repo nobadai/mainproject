@@ -80,7 +80,13 @@ export interface Scenario {
   label?: string;
   total_qty_kg?: number;
   total_amount_krw?: number;
+  coverage_days?: number;
   split_plan?: { qty_kg?: number }[];
+  //: 승인 결과 화면이 편다. **모양은 매입이 정한다** — 여기서 좁게 잡으면
+  //: 매입이 칸을 늘릴 때 화면이 조용히 못 읽는다. 인덱스 시그니처로 받고
+  //: 쓰는 쪽에서 좁힌다 (`ApprovedPlan.tsx`).
+  sourcing_plan?: unknown[];
+  payment_schedule?: unknown[];
   [key: string]: unknown;
 }
 
@@ -109,7 +115,21 @@ export interface ProcurementRunResponse {
    */
   history_run_id: string | null;
   end_code: EndCode;
+  /** 마스터가 내린 결론의 사유. **안이 없을 때는 이것이 답 자체다.** */
   reason: string;
+  /**
+   * 매입 자신의 판정. `verdicts`(조언자 판정)와 다르다.
+   *
+   * 🔴 **안이 0개일 때 여기에 진짜 이유가 있다.** 마스터의 `reason` 은
+   * *"유효한 안이 없다"* 까지만 말하고, **왜 없는지**는 매입이 안다 —
+   * `no_proposal_reason` · `rejected_reasons`.
+   */
+  judgment: {
+    situation?: string;
+    confidence?: string;
+    no_proposal_reason?: string | null;
+    rejected_reasons?: { label?: string; reason?: string }[];
+  };
   scenarios: Scenario[];
   findings: string[];
   concerns: string[];
@@ -183,4 +203,13 @@ export interface BurnIn {
   financing_mode: string | null;
   note: string | null;
   closings: DailyClosing[];
+}
+
+
+/** `GET /master/runs/{id}/report` — 들고 나갈 수 있는 매입안 문서. */
+export interface RunReport {
+  request_id: string;
+  filename: string;
+  /** Markdown 전문. **화면이 조립하지 않는다** — 서버가 낸 것을 그대로 내려받는다. */
+  markdown: string;
 }

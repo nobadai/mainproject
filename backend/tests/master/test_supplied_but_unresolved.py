@@ -14,15 +14,13 @@
 
 from __future__ import annotations
 
-from app.master.verifier import MasterVerifier
+from app.master.verifier import supplied_but_unresolved
 
 
 def _concerns(constraints: dict, risks: list[str]) -> list[str]:
-    out: list[str] = []
-    MasterVerifier()._check_supplied_but_unused(
-        ({"label": "기본", "risks": risks},), constraints, out
-    )
-    return out
+    """🔴 **공개 진입점으로 부른다.** 매입도 같은 문을 쓴다 (8/31) — 검사와 실물이
+    다른 코드를 타면 *"통과했는데 실물은 0건"* 이 다시 생긴다."""
+    return supplied_but_unresolved([{"label": "기본", "risks": risks}], constraints)
 
 
 # ── ① 문장 길이가 검사를 좌우하지 않는다 ─────────────────────────────────
@@ -115,3 +113,27 @@ def test_같은_키를_두_번_보고하지_않는다():
     )
 
     assert len(out) == 1
+
+
+def test_공개_진입점이_관통과_같은_것을_본다():
+    """🔴 매입이 8/31 에 겪은 일 — **규칙을 재현하면 검사와 실물이 갈린다.**
+
+    정규식만 빌려 재현했더니 검사는 통과하는데 실물은 `concerns` 0건이었다.
+    관문이 둘인데(supplied 조회 · 미결 어휘) 하나만 재현했기 때문이다.
+
+    이 검사는 **관통이 쓰는 것과 같은 함수**를 부르는지 붙잡는다.
+    """
+    from app.master import verifier
+
+    seen: list[str] = []
+    verifier.MasterVerifier()._check_supplied_but_unused(
+        ({"label": "기본", "risks": ["inbound_lead_days 미확정"]},),
+        {"inventory": {"inbound_lead_days": 2.0}},
+        seen,
+    )
+    공개 = supplied_but_unresolved(
+        [{"label": "기본", "risks": ["inbound_lead_days 미확정"]}],
+        {"inventory": {"inbound_lead_days": 2.0}},
+    )
+
+    assert seen == 공개, "공개 자리와 관통이 다른 답을 내면 매입 검사가 또 헛돈다"
