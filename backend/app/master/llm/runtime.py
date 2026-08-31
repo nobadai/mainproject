@@ -42,7 +42,16 @@ _ENV_PREFIX = "MASTER_"
 _DEFAULT_MODELS = {
     "anthropic": "claude-haiku-4-5-20251001",
     "ollama": "gemma3:4b",
+    #: 🔴 stable 을 pin 한다 — `latest`·`preview` 같은 자동 갱신 별칭은 출력 성향이
+    #: 예고 없이 바뀐다. 물류가 #95 에서 고른 것과 같은 모델이다 (팀 안에서 두 파트가
+    #: 다른 모델을 쓰면 "모델이 달라서 그런가" 가 모든 조사에 끼어든다).
+    "gemini": "gemini-3.5-flash-lite",
 }
+
+#: Gemini 는 자체 엔드포인트를 쓴다. `LLM_BASE_URL` 은 기본값이 Ollama 라
+#: **거기서 읽으면 안 된다** — provider 를 바꿨는데 주소가 안 바뀌면
+#: 로컬 11434 로 쏘고 연결 실패로만 보인다.
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 #: 발화문에 없던 숫자를 조건에 지어넣는 것을 막는다. 매입 ⑤의 "숫자 금지"와 다르다 —
 #: 여기서는 **사용자가 말한 숫자는 허용**하고, 출처 없는 숫자만 거부한다.
@@ -316,6 +325,117 @@ class OllamaProvider:
         return content
 
 
+#: Gemini `responseSchema` 가 안 받는 칸. JSON Schema 에는 있고 저쪽에는 없다.
+_GEMINI_SCHEMA_DROP = frozenset({"title", "default", "additionalProperties", "$schema", "examples"})
+
+
+def _to_gemini_schema(node: Any) -> Any:
+    """JSON Schema → Gemini `responseSchema`.
+
+    ★ **Ollama 는 JSON Schema 를 그대로 먹지만 Gemini 는 못 먹는다.** 그래서 변환이
+      필요하고, 변환은 **버리는 것과 바꾸는 것 둘뿐**이다.
+
+      ```text
+      버린다   title · default · additionalProperties     Gemini 가 거부한다
+      바꾼다   anyOf[X, null] → X + nullable: true         저쪽의 표현 방식이다
+      남긴다   description                                 Ollama 도 보고 있다
+      ```
+
+    🔴 **`description` 을 남기는 것이 중요하다.** Ollama 에는 스키마를 통째로
+      넘기고 있어 모델이 클래스 docstring 을 이미 보고 있다. 여기서 빼면 프로바이더를
+      바꾼 것만으로 **모델에게 보이는 지시가 달라진다** — 분류가 달라져도 그게
+      모델 탓인지 프롬프트 탓인지 가릴 수 없게 된다.
+
+    🔴 **모르는 `anyOf` 는 터뜨린다.** 조용히 흘려보내면 Gemini 가 400 을 주는데,
+      그건 "스키마가 틀렸다" 가 아니라 그냥 호출 실패로 보인다. 여기서 터지면
+      서비스가 fallback 으로 보내고 `llm_status` 에 남는다.
+    """
+    if isinstance(node, list):
+        return [_to_gemini_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    if "anyOf" in node:
+        branches = node["anyOf"]
+        concrete = [b for b in branches if b.get("type") != "null"]
+        nullable = len(concrete) != len(branches)
+        if len(concrete) != 1:
+            raise TypeError(
+                f"Gemini 로 옮길 수 없는 anyOf 다 (분기 {len(concrete)}개): {branches!r}"
+            )
+        converted = _to_gemini_schema(concrete[0])
+        for key, value in node.items():
+            if key == "anyOf" or key in _GEMINI_SCHEMA_DROP:
+                continue
+            converted[key] = _to_gemini_schema(value)
+        if nullable:
+            converted["nullable"] = True
+        return converted
+
+    return {
+        key: _to_gemini_schema(value)
+        for key, value in node.items()
+        if key not in _GEMINI_SCHEMA_DROP
+    }
+
+
+class GeminiProvider:
+    """Gemini REST 호출. 표준 라이브러리만 쓴다 — Ollama 경로와 같은 규율이다.
+
+    ★ **API 키는 호출 시점에 환경에서 읽는다.** `LLMSettings` 에 담지 않는다 —
+      설정 객체는 로그·예외에 통째로 실릴 수 있고, 키가 거기 끼면 지울 수 없다.
+    ★ 자체 재시도가 없다. 재시도는 `IntentService` 가 소유한다 — 두 층이 세면
+      상한이 곱해진다 (Anthropic·OpenAI 프로바이더도 `max_retries=0` 이다).
+    """
+
+    def __init__(self, settings: LLMSettings) -> None:
+        self.settings = settings
+
+    def generate(self, system: str, user: str, schema: dict[str, Any]) -> str:
+        import urllib.error
+        import urllib.request
+
+        api_key = os.getenv(f"{_ENV_PREFIX}GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set")
+        _require_model(self.settings)
+        payload = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": _to_gemini_schema(schema),
+                "maxOutputTokens": self.settings.max_output_tokens,
+            },
+        }
+        base_url = (
+            os.getenv(f"{_ENV_PREFIX}GEMINI_BASE_URL")
+            or os.getenv("GEMINI_BASE_URL")
+            or _GEMINI_BASE_URL
+        ).rstrip("/")
+        request = urllib.request.Request(
+            f"{base_url}/models/{self.settings.model}:generateContent",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds) as response:
+                document = json.loads(response.read().decode("utf-8"))
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
+            # 🔴 키를 메시지에 싣지 않는다. urllib 예외는 URL 을 담는데 키는 헤더라
+            #    안 끼지만, 여기서 새 메시지를 만들 때도 넣지 않는다.
+            raise RuntimeError("Master Gemini request failed") from error
+        try:
+            content = document["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise TypeError("Gemini response did not contain text content") from error
+        if not isinstance(content, str):
+            raise TypeError("Gemini response text content was not a string")
+        return content
+
+
 class UnavailableProvider:
     """미지원 `LLM_PROVIDER` 값. 조용히 무시하지 않고 **터뜨려 fallback 으로 보낸다**."""
 
@@ -328,6 +448,7 @@ _PROVIDERS: dict[str, type] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
+    "gemini": GeminiProvider,
 }
 
 
