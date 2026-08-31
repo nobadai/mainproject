@@ -77,7 +77,7 @@ def _load_finance_environment() -> None:
 def _finance_provider_name() -> str:
     _load_finance_environment()
     provider = (
-        os.getenv("FINANCE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "ollama"
+        os.getenv("FINANCE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "gemini"
     ).strip().lower()
     if provider not in _DEFAULT_MODELS:
         raise RuntimeError("Configured Finance LLM provider is not supported")
@@ -207,11 +207,29 @@ class FinancePlannerFailure(RuntimeError):
     """Planner 호출 또는 출력 검증 실패를 Controller 상태로 전달한다."""
 
 
+@dataclass
+class _ProviderFallbackState:
+    active: bool = False
+
+
+def _is_gemini_availability_failure(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code == 429 or 500 <= error.code < 600
+    if isinstance(error, (TimeoutError, urllib.error.URLError)):
+        return True
+    if (
+        isinstance(error, RuntimeError)
+        and str(error) == "Finance Gemini API key is not set"
+    ):
+        return True
+    return isinstance(error.__cause__, (TimeoutError, urllib.error.URLError))
+
+
 class OllamaFinancePlanner:
     """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
 
-    def __init__(self) -> None:
-        self.model = _finance_model("ollama")
+    def __init__(self, *, model: str | None = None) -> None:
+        self.model = model or _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -372,8 +390,8 @@ _FINAL_EXPLANATIONS = {
 class OllamaFinanceFinalizer:
     """조사 Planner와 분리된 Evidence 전용 LLM finalization."""
 
-    def __init__(self) -> None:
-        self.model = _finance_model("ollama")
+    def __init__(self, *, model: str | None = None) -> None:
+        self.model = model or _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -488,6 +506,92 @@ class GeminiFinanceFinalizer:
         return _FINAL_EXPLANATIONS[selected]
 
 
+class _AvailabilityFallbackFinancePlanner:
+    def __init__(
+        self,
+        primary: FinancePlanner,
+        fallback: FinancePlanner,
+        state: _ProviderFallbackState,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.state = state
+
+    @property
+    def model(self) -> str:
+        return self.fallback.model if self.state.active else self.primary.model
+
+    @property
+    def attempts(self) -> int:
+        return self.primary.attempts + self.fallback.attempts
+
+    def decide(
+        self,
+        *,
+        request: AgentRequest,
+        allowed_tools: frozenset[str],
+        observations: tuple[dict[str, Any], ...],
+        missing_capabilities: tuple[str, ...],
+    ) -> ToolAction:
+        kwargs = {
+            "request": request,
+            "allowed_tools": allowed_tools,
+            "observations": observations,
+            "missing_capabilities": missing_capabilities,
+        }
+        if self.state.active:
+            return self.fallback.decide(**kwargs)
+        try:
+            return self.primary.decide(**kwargs)
+        except Exception as error:
+            if not _is_gemini_availability_failure(error):
+                raise
+            self.state.active = True
+            return self.fallback.decide(**kwargs)
+
+
+class _AvailabilityFallbackFinanceFinalizer:
+    def __init__(
+        self,
+        primary: FinanceFinalizer,
+        fallback: FinanceFinalizer,
+        state: _ProviderFallbackState,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.state = state
+
+    @property
+    def model(self) -> str:
+        return self.fallback.model if self.state.active else self.primary.model
+
+    @property
+    def attempts(self) -> int:
+        return self.primary.attempts + self.fallback.attempts
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        kwargs = {
+            "mode": mode,
+            "business_status": business_status,
+            "evidences": evidences,
+        }
+        if self.state.active:
+            return self.fallback.finalize(**kwargs)
+        try:
+            return self.primary.finalize(**kwargs)
+        except Exception as error:
+            if not _is_gemini_availability_failure(error):
+                raise
+            self.state.active = True
+            return self.fallback.finalize(**kwargs)
+
+
 class DeterministicFinanceFinalizer:
     """동일한 검증 완료 설명 계약을 구현하는 테스트/오프라인 finalizer."""
 
@@ -533,19 +637,21 @@ def _validate_planner_action(
         )
 
 
-def _configured_finance_planner() -> FinancePlanner:
+def _configured_finance_llms() -> tuple[FinancePlanner, FinanceFinalizer]:
+    if _finance_provider_name() == "ollama":
+        return OllamaFinancePlanner(), OllamaFinanceFinalizer()
+    state = _ProviderFallbackState()
     return (
-        GeminiFinancePlanner()
-        if _finance_provider_name() == "gemini"
-        else OllamaFinancePlanner()
-    )
-
-
-def _configured_finance_finalizer() -> FinanceFinalizer:
-    return (
-        GeminiFinanceFinalizer()
-        if _finance_provider_name() == "gemini"
-        else OllamaFinanceFinalizer()
+        _AvailabilityFallbackFinancePlanner(
+            GeminiFinancePlanner(),
+            OllamaFinancePlanner(model=_DEFAULT_MODELS["ollama"]),
+            state,
+        ),
+        _AvailabilityFallbackFinanceFinalizer(
+            GeminiFinanceFinalizer(),
+            OllamaFinanceFinalizer(model=_DEFAULT_MODELS["ollama"]),
+            state,
+        ),
     )
 
 
@@ -1001,12 +1107,13 @@ class FinanceAgentController:
         max_replans: int | None = None,
     ):
         self.registry = FinanceToolRegistry(data_port)
-        self.planner = planner or _configured_finance_planner()
-        self.finalizer = finalizer or (
-            _configured_finance_finalizer()
-            if planner is None
-            else DeterministicFinanceFinalizer()
-        )
+        if planner is None:
+            configured_planner, configured_finalizer = _configured_finance_llms()
+            self.planner = configured_planner
+            self.finalizer = finalizer or configured_finalizer
+        else:
+            self.planner = planner
+            self.finalizer = finalizer or DeterministicFinanceFinalizer()
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )

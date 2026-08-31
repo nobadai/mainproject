@@ -4,6 +4,7 @@ import json
 import os
 import urllib.error
 from datetime import date
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -14,11 +15,17 @@ from app.finance.agent import (
     GeminiFinancePlanner,
     OllamaFinancePlanner,
     ToolAction,
+    _AvailabilityFallbackFinanceFinalizer,
+    _AvailabilityFallbackFinancePlanner,
     _finance_model,
     _finance_provider_name,
     _gemini_response_text,
+    _is_gemini_availability_failure,
     _load_finance_environment,
+    _ProviderFallbackState,
 )
+from app.finance.repository import FinanceDataNotReady
+from app.finance.schemas import FinancePolicy
 from app.master.envelope import AgentRequest, ExecutionContext
 
 
@@ -34,6 +41,98 @@ class _Response:
 
     def read(self):
         return self.body
+
+
+class _FinancePort:
+    def load_finance_position(self, as_of):
+        assert as_of == date(2025, 1, 1)
+        return {
+            "finance_state_id": "FIN-GEMINI-FALLBACK",
+            "current_cash_krw": Decimal(1000),
+            "current_debt_krw": Decimal(0),
+        }
+
+    def load_policy(self, as_of, policy_version):
+        assert as_of == date(2025, 1, 1)
+        assert policy_version == "v1.3-PROVISIONAL"
+        return FinancePolicy(
+            purchase_payment_days=1,
+            payroll_date=10,
+            monthly_labor_cost_krw=Decimal(100),
+            minimum_cash_balance_krw=Decimal(100),
+            cashflow_projection_days=30,
+            cash_priority_reference="minimum_cash_balance_krw",
+            cash_priority_high_ratio=Decimal(1),
+            cash_priority_medium_ratio=Decimal(2),
+            policy_version="v1.3-PROVISIONAL",
+            usage_scope="AGENT_MVP_DEMO",
+            source_refs={
+                "payroll_date": "POL-PAYROLL-DATE",
+                "monthly_labor_cost_krw": "FACT-PAYROLL-AMOUNT",
+                "purchase_payment_days": "policy:purchase-days",
+                "minimum_cash_balance_krw": "policy:min-cash",
+                "cash_priority_reference": "policy:pressure",
+                "cash_priority_high_ratio": "policy:pressure-high",
+                "cash_priority_medium_ratio": "policy:pressure-medium",
+            },
+        )
+
+    def load_payroll(self, as_of, horizon):
+        del as_of, horizon
+        return Decimal(100)
+
+    def load_obligations(self, as_of, horizon):
+        del as_of, horizon
+        return []
+
+    def load_receivables(self, as_of, horizon):
+        del as_of, horizon
+        return []
+
+    def load_debt_schedule(self, as_of, horizon):
+        del as_of, horizon
+        raise FinanceDataNotReady("debt_policy")
+
+
+class _UnavailablePlanner:
+    model = "gemini-3.5-flash-lite"
+
+    def __init__(self, error):
+        self.error = error
+        self.attempts = 0
+
+    def decide(self, **_kwargs):
+        self.attempts += 1
+        raise self.error
+
+
+class _FallbackPlanner:
+    model = "gemma3:4b"
+
+    def __init__(self):
+        self.attempts = 0
+
+    def decide(self, *, missing_capabilities, **_kwargs):
+        self.attempts += 1
+        if not missing_capabilities:
+            return ToolAction(finalize=True)
+        preferred = (
+            "assess_finance_position",
+            "analyze_payment_pressure",
+            "calculate_purchase_finance_cap",
+        )
+        capability_tools = {
+            "finance_position": "assess_finance_position",
+            "payment_pressure": "analyze_payment_pressure",
+            "finance_cap": "calculate_purchase_finance_cap",
+            "cashflow_projection": "calculate_purchase_finance_cap",
+        }
+        selected = next(
+            name
+            for name in preferred
+            if name in {capability_tools[item] for item in missing_capabilities}
+        )
+        return ToolAction(selected)
 
 
 @pytest.fixture(autouse=True)
@@ -125,11 +224,107 @@ def test_finance_provider_inherits_global_provider(monkeypatch):
     assert _finance_provider_name() == "gemini"
 
 
-def test_finance_provider_defaults_to_ollama(monkeypatch):
+def test_finance_provider_defaults_to_gemini(monkeypatch):
     monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
 
-    assert _finance_provider_name() == "ollama"
+    assert _finance_provider_name() == "gemini"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Finance Gemini API key is not set"),
+        urllib.error.HTTPError("https://gemini.invalid", 429, "quota", {}, None),
+        urllib.error.HTTPError("https://gemini.invalid", 500, "server", {}, None),
+        TimeoutError("timeout"),
+        urllib.error.URLError("network"),
+    ],
+)
+def test_gemini_availability_failures_are_eligible_for_ollama(error):
+    assert _is_gemini_availability_failure(error) is True
+
+
+@pytest.mark.parametrize("cause", [TimeoutError("timeout"), urllib.error.URLError("network")])
+def test_wrapped_gemini_transport_failures_are_eligible_for_ollama(cause):
+    error = RuntimeError("Finance Gemini request failed")
+    error.__cause__ = cause
+
+    assert _is_gemini_availability_failure(error) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib.error.HTTPError("https://gemini.invalid", 400, "schema", {}, None),
+        urllib.error.HTTPError("https://gemini.invalid", 401, "auth", {}, None),
+        urllib.error.HTTPError("https://gemini.invalid", 403, "permission", {}, None),
+        urllib.error.HTTPError("https://gemini.invalid", 404, "model", {}, None),
+        ValueError("invalid structured output"),
+        json.JSONDecodeError("invalid JSON", "not-json", 0),
+    ],
+)
+def test_gemini_contract_failures_are_not_eligible_for_ollama(error):
+    assert _is_gemini_availability_failure(error) is False
+
+
+@patch("app.finance.agent.save_finance_execution")
+def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
+    save_run, monkeypatch
+):
+    monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("FINANCE_LLM_MODEL", "gemini-primary-model")
+    monkeypatch.delenv("FINANCE_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    fallback_actions = iter(
+        [
+            ToolAction("assess_finance_position"),
+            ToolAction("analyze_payment_pressure"),
+            ToolAction("calculate_purchase_finance_cap"),
+            ToolAction(finalize=True),
+        ]
+    )
+
+    def fallback_decide(planner, **_kwargs):
+        planner.attempts += 1
+        return next(fallback_actions)
+
+    def fallback_finalize(finalizer, **_kwargs):
+        finalizer.attempts += 1
+        return "Verified Finance Evidence supports the reported purchasing boundary."
+
+    monkeypatch.setattr(OllamaFinancePlanner, "decide", fallback_decide)
+    monkeypatch.setattr(
+        "app.finance.agent.OllamaFinanceFinalizer.finalize", fallback_finalize
+    )
+    with patch("app.finance.agent.urllib.request.urlopen") as urlopen:
+        controller = FinanceAgentController(_FinancePort())
+        reply, metadata = controller.run(_request())
+
+    assert reply.runtime_status == "READY"
+    assert metadata.llm_status == "SUCCESS"
+    assert metadata.llm_fallback_used is False
+    assert metadata.llm_model == "gemma3:4b"
+    assert metadata.llm_attempts == 6
+    assert controller.planner.state.active is True
+    urlopen.assert_not_called()
+    save_run.assert_called_once()
+
+
+def test_schema_failure_does_not_activate_provider_fallback():
+    state = _ProviderFallbackState()
+    fallback = _FallbackPlanner()
+    planner = _AvailabilityFallbackFinancePlanner(
+        _UnavailablePlanner(ValueError("invalid structured output")),
+        fallback,
+        state,
+    )
+
+    with pytest.raises(ValueError, match="invalid structured output"):
+        _planner_decide(planner)
+
+    assert state.active is False
+    assert fallback.attempts == 0
 
 
 def test_gemini_planner_never_uses_ollama_url(monkeypatch):
@@ -324,6 +519,13 @@ def test_ollama_planner_remains_backward_compatible(monkeypatch):
 
 def test_controller_selects_gemini_planner_and_finalizer(monkeypatch):
     monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("FINANCE_LLM_MODEL", "gemini-primary-model")
     controller = FinanceAgentController(object())
-    assert isinstance(controller.planner, GeminiFinancePlanner)
-    assert isinstance(controller.finalizer, GeminiFinanceFinalizer)
+    assert isinstance(controller.planner, _AvailabilityFallbackFinancePlanner)
+    assert isinstance(controller.planner.primary, GeminiFinancePlanner)
+    assert controller.planner.primary.model == "gemini-primary-model"
+    assert controller.planner.fallback.model == "gemma3:4b"
+    assert isinstance(controller.finalizer, _AvailabilityFallbackFinanceFinalizer)
+    assert isinstance(controller.finalizer.primary, GeminiFinanceFinalizer)
+    assert controller.finalizer.primary.model == "gemini-primary-model"
+    assert controller.finalizer.fallback.model == "gemma3:4b"
