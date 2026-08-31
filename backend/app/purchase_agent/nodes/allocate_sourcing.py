@@ -25,7 +25,7 @@ from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_conte
 from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes, pending_value
-from app.purchase_agent.quotes import observed_spec
+from app.purchase_agent.quotes import observed_date, observed_spec, quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -59,7 +59,10 @@ def missing_grade_reason(state: PurchaseAgentState, top_grade: str, mid_grade: s
     present = sorted({str(quote["grade"]) for quote in quotes})
     missing = [grade for grade in (top_grade, mid_grade) if grade not in present]
     spec = observed_spec(quotes)
-    where = f"{FIXED_MARKET} {state['date']}" + (f" {spec} 규격" if spec else " 당일 시세")
+    # ⚠️ **as_of 가 아니라 관측일이다.** 12-30 시세로 돌면서 "가락 2025-12-31 … 그날 잡힌
+    #   등급"이라고 적으면, 그날 열리지도 않은 경매 결과를 말하는 셈이다 (Codex 2차 지적).
+    when = observed_date(quotes) or state["date"]
+    where = f"{FIXED_MARKET} {when}" + (f" {spec} 규격" if spec else " 당일 시세")
     return (
         f"{where}에서 {'·'.join(missing)} 등급 거래가 없다 "
         f"(그날 잡힌 등급: {'·'.join(present) or '없음'}) — 보유 재고가 아니라 "
@@ -491,9 +494,10 @@ def allocate_sourcing(
     "LLM 없이 규칙만"이고, 그 경로가 E3-1의 산출물과 **완전히 같다**.
     """
     constraints = load_constraints()
-    if not [quote for quote in state["market_quotes"] if quote["market"] == FIXED_MARKET]:
-        # 시세가 한 건도 없는 날(휴장·그 규격 미거래). ③이 이미 안을 만들지 않았고 사유도
+    if quote_block_reason(state["market_quotes"], state["item"], state["date"], constraints):
+        # 시세를 쓸 수 없는 날(0건이거나 너무 오래됨). ③이 이미 안을 만들지 않았고 사유도
         # 남겼으므로, 여기서는 **배분할 대상이 없다**는 사실만 빈 목록으로 돌려준다.
+        # ③과 **같은 판정 함수**를 쓴다 — 두 노드가 각자 판단하면 한쪽만 바뀐다.
         # ``fixed_market_quotes``의 가드는 그대로 둔다 — 그 함수의 뜻은 "빈 값으로 조용히
         # 계산하지 말라"이지 "죽어라"가 아니고, 사유를 낼 수 있는 자리에서 먼저 낸다.
         return {"sourcing_plan": []}

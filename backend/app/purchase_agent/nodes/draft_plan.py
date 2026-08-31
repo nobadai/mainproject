@@ -9,7 +9,7 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_non_empty, require_positive
 from app.purchase_agent.nodes.classify_situation import estimate_daily_demand
-from app.purchase_agent.quotes import missing_quote_reason
+from app.purchase_agent.quotes import quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -113,8 +113,9 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
         # 구간이 넓은 날엔 공격안을 만들지 않는다
         if not (state["situation"] == "uncertain" and label == "공격")
     ]
-    if not [quote for quote in state["market_quotes"] if quote["market"] == FIXED_MARKET]:
-        return _no_quote_plan(state, constraints, daily_demand, labels)
+    blocked = quote_block_reason(state["market_quotes"], state["item"], state["date"], constraints)
+    if blocked:
+        return _no_quote_plan(state, constraints, daily_demand, labels, blocked)
 
     reference_grade = constraints["allocation"]["reference_grade"]
     unit_price = reference_unit_price(state["market_quotes"], reference_grade)
@@ -146,9 +147,17 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
 
 
 def _no_quote_plan(
-    state: PurchaseAgentState, constraints: dict, daily_demand: float, labels: list[str]
+    state: PurchaseAgentState,
+    constraints: dict,
+    daily_demand: float,
+    labels: list[str],
+    reason: str,
 ) -> dict[str, Any]:
-    """등급별 시세를 한 건도 못 받은 날 — **죽지 않고 사유를 남기고 0안으로 끝낸다**.
+    """시세를 쓸 수 없는 날 — **죽지 않고 사유를 남기고 0안으로 끝낸다**.
+
+    막히는 경우가 둘이다: 한 건도 못 받았거나(휴장·미거래·판독불가·규격 미확정),
+    받았는데 **너무 오래된 값**이거나. 둘 다 "오늘 시세를 모른다"는 같은 상태이고,
+    사유 문장만 다르다.
 
     ``reference_unit_price``는 ``require_non_empty``로 멈춘다. 그 가드의 뜻은 "빈 값으로
     조용히 계산하지 말라"이지 "죽어라"가 아니다 — 여기서 죽으면 오케스트레이터는 예외만
@@ -161,7 +170,6 @@ def _no_quote_plan(
     ``reference_unit_price``를 **0이 아니라 None**으로 둔다 (규칙 3). 0으로 채우면
     ``cash_cap_kg``가 0으로 나누고, 그 전에 "단가 0원"이라는 없는 사실이 만들어진다.
     """
-    reason = missing_quote_reason(state["item"], state["date"], constraints)
     return {
         "coverage_days": constraints["coverage_days"]["by_label"]["기본"],
         "base_plan": {

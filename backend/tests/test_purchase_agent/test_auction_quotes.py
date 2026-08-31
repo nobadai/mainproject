@@ -12,7 +12,7 @@
 import inspect
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,8 +28,12 @@ from app.purchase_agent.quotes import (
     auction_quote_source,
     krw_per_kg,
     missing_quote_reason,
+    observed_date,
     observed_spec,
+    provenance_problem,
     spec_for_item,
+    stale_quote_reason,
+    staleness_days,
     to_price,
 )
 
@@ -51,10 +55,20 @@ DOD_WEIGHTED = Decimal("938.5")
 DOD_SIMPLE_AVERAGE = Decimal("2009.9")
 
 #: 2025-12-31 배추 특 · 서울가락 · 그물망/파렛트 10kg 실측 (관통일).
+#: 쿼리가 as_of 이전 최신 거래일 하루를 고르므로 관측일은 12-30 이다 (12-31 이 아니다).
+OBSERVED = "2025-12-30"
 BAECHU_1231_ROWS = [
-    {"grade": "특", "amount_krw": Decimal(247255700), "volume_kg": Decimal(265420)},
-    {"grade": "특", "amount_krw": Decimal(9641800), "volume_kg": Decimal(9940)},
+    {"observed_date": OBSERVED, "grade": "특",
+     "amount_krw": Decimal(247255700), "volume_kg": Decimal(265420)},
+    {"observed_date": OBSERVED, "grade": "특",
+     "amount_krw": Decimal(9641800), "volume_kg": Decimal(9940)},
 ]
+
+
+def _flat(query: str) -> str:
+    """쿼리 문자열을 공백 하나로 눌러 비교한다 — 들여쓰기가 바뀌었다고 검사가 깨지면
+    검사가 SQL 의 **뜻**이 아니라 모양을 잠그고 있는 것이다."""
+    return " ".join(query.split())
 
 
 def _fetch_returning(rows: list[dict[str, Any]], captured: dict | None = None):
@@ -62,7 +76,8 @@ def _fetch_returning(rows: list[dict[str, Any]], captured: dict | None = None):
 
     def fetch(query, params=None):
         if captured is not None:
-            captured["query"] = query.as_string(None) if hasattr(query, "as_string") else str(query)
+            raw = query.as_string(None) if hasattr(query, "as_string") else str(query)
+            captured["query"] = _flat(raw)
             captured["params"] = params
         return rows
 
@@ -163,9 +178,12 @@ def test_variety_is_absent_from_the_whole_module() -> None:
 def test_grades_outside_the_declared_vocabulary_are_dropped() -> None:
     """``.``·5등·등외는 등급이 아니라 잡음이다. 양파는 그런 행이 하루 여섯 줄씩 온다."""
     rows = [
-        {"grade": "특", "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"grade": ".", "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
-        {"grade": "5등", "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "특",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": ".",
+         "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "5등",
+         "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
 
@@ -176,9 +194,12 @@ def test_grades_come_out_in_the_declared_order() -> None:
     """⑥의 근거 문장이 ``market_quotes[0]``을 대표값으로 읽는다 — 순서가 흔들리면
     같은 날 근거 문구가 달라진다."""
     rows = [
-        {"grade": "중", "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"grade": "특", "amount_krw": Decimal(300000), "volume_kg": Decimal(100)},
-        {"grade": "상", "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "중",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "특",
+         "amount_krw": Decimal(300000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "상",
+         "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
 
@@ -194,7 +215,13 @@ def test_the_real_1231_rows_become_one_weighted_quote() -> None:
     result = _source(BAECHU_1231_ROWS)("배추", INTEGRATION)
 
     assert result == [
-        {"market": "가락", "grade": "특", "price": 933, "spec": "그물망·파렛트 10kg"}
+        {
+            "market": "가락",
+            "grade": "특",
+            "price": 933,
+            "spec": "그물망·파렛트 10kg",
+            "observed_date": OBSERVED,
+        }
     ]
 
 
@@ -303,12 +330,11 @@ def test_a_market_holiday_does_not_kill_the_agent() -> None:
 
 
 def test_a_market_holiday_says_it_is_the_auction_not_our_stock() -> None:
-    """사유가 "재고가 없다"로 읽히면 안 된다 — 규격과 시장·날짜를 함께 적는다."""
+    """사유가 "재고가 없다"로 읽히면 안 된다 — 규격과 시장·기간을 함께 적는다."""
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=_no_quotes)
     reason = proposal["rejected_reasons"][0]["reason"]
 
     assert "그물망·파렛트 10kg 규격" in reason
-    assert "휴장" in reason
     assert "보유 재고와는 무관" in reason
     assert proposal["no_proposal_reason"]
 
@@ -346,7 +372,10 @@ def test_a_missing_partner_grade_names_the_spec_it_looked_at() -> None:
 
     그 사유가 "재고에 상이 없다"로 읽히면 재고를 확인하러 가는 사람이 생긴다.
     """
-    only_top = [{"market": "가락", "grade": "특", "price": 933, "spec": "그물망·파렛트 10kg"}]
+    only_top = [
+        {"market": "가락", "grade": "특", "price": 824,
+         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+    ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: only_top)
 
     blocked = [risk for scenario in proposal["scenarios"] for risk in scenario["risks"]]
@@ -354,6 +383,9 @@ def test_a_missing_partner_grade_names_the_spec_it_looked_at() -> None:
     assert said, blocked
     assert "그물망·파렛트 10kg 규격" in said[0]
     assert "보유 재고가 아니라" in said[0]
+    # ⚠️ as_of(12-31)가 아니라 **관측일(12-30)**을 말해야 한다 — 12-31 은 열리지도 않았다.
+    assert "2025-12-30" in said[0]
+    assert "2025-12-31" not in said[0]
 
 
 def test_the_spec_in_the_reason_comes_from_the_data_not_from_constraints() -> None:
@@ -364,7 +396,7 @@ def test_the_spec_in_the_reason_comes_from_the_data_not_from_constraints() -> No
 
 def test_mock_path_keeps_its_own_wording_without_a_spec() -> None:
     """mock 은 규격 표기가 없다 — 그날 시세 그대로 말하고 없는 규격을 지어내지 않는다."""
-    only_top = [{"market": "가락", "grade": "특", "price": 1850}]
+    only_top = [{"market": "가락", "grade": "특", "price": 1850}]  # 표기 없음 = mock
     proposal = run_purchase_agent("배추", date(2026, 8, 21), quotes=lambda i, d: only_top)
 
     said = [
@@ -403,26 +435,36 @@ def test_dod_weighted_price_reproduces_the_measured_value() -> None:
 
 
 @pytest.mark.db
-def test_the_source_reads_the_integration_anchor_from_the_real_table() -> None:
-    """관통일 배추 — 특 933원 하나. 상·중은 그날 그 규격에서 낙찰되지 않았다."""
+def test_the_source_reads_the_prior_trading_day_from_the_real_table() -> None:
+    """관통일 기준 **직전 거래일(12-30)** 배추 — 특 824원 하나.
+
+    12-31 당일은 933원이지만 아침에는 그 값이 없다. 상·중은 12-30 에도 그 규격에서
+    낙찰되지 않았다.
+    """
     result = auction_quote_source()("배추", INTEGRATION)
 
     assert result == [
-        {"market": "가락", "grade": "특", "price": 933, "spec": "그물망·파렛트 10kg"}
+        {
+            "market": "가락",
+            "grade": "특",
+            "price": 824,
+            "spec": "그물망·파렛트 10kg",
+            "observed_date": "2025-12-30",
+        }
     ]
 
 
 @pytest.mark.db
 @pytest.mark.parametrize(
     ("item", "expected"),
-    # 정확값 배추 932.97 · 무 729.4978 · 양파 1096.70 → 사사오입한 정수 원/kg.
-    [("배추", 933), ("무", 729), ("양파", 1097)],
+    # 12-30 물량가중 정수 원/kg. 12-31 당일값(933 · 729 · 1097)이 아니다.
+    [("배추", 824), ("무", 736), ("양파", 1106)],
 )
 def test_real_prices_now_sit_under_the_forecast_ceiling(item: str, expected: int) -> None:
     """🔴 12-31 관통이 0안이던 원인 — mock 시세가 실데이터 ``max_price``를 넘었다.
 
     실측 상한(D=2): 배추 992 · 무 795 · 양파 1,152. mock 상 등급은 1,650 · 1,100 · 1,300
-    이라 셋 다 컷됐다. 실 경락가로 바꾸면 셋 다 상한 아래다.
+    이라 셋 다 컷됐다. 직전 거래일 경락가로 바꾸면 셋 다 상한 아래다.
     """
     ceilings = {"배추": 992, "무": 795, "양파": 1152}
     result = auction_quote_source()(item, INTEGRATION)
@@ -434,10 +476,33 @@ def test_real_prices_now_sit_under_the_forecast_ceiling(item: str, expected: int
 
 
 @pytest.mark.db
-def test_a_real_market_holiday_returns_nothing_rather_than_last_close() -> None:
-    """2026-01-01은 신정 휴장이다. **직전 거래일로 당겨오지 않는다** — 그러면 "당일 실측"
-    이라는 계약이 깨지고, 관측값 자리에 관측값이 아닌 것이 들어간다."""
-    assert auction_quote_source()("배추", date(2026, 1, 1)) == []
+def test_the_real_source_never_returns_the_as_of_day_itself() -> None:
+    """look-ahead 방어가 실제 조회에서도 성립하는지 — 아침엔 당일 값이 없다."""
+    for item in ("배추", "무", "양파"):
+        result = auction_quote_source()(item, INTEGRATION)
+        assert result, item
+        assert observed_date(result) < INTEGRATION.isoformat(), item
+
+
+@pytest.mark.db
+def test_the_real_radish_query_uses_18kg_before_2018() -> None:
+    """2017년 무를 20kg 로 고정하면 244 거래일 중 64일만 잡힌다 (18kg 는 227일)."""
+    result = auction_quote_source()("무", date(2017, 6, 2))
+
+    assert result
+    assert result[0]["spec"] == "상자·파렛트 18kg"
+    assert observed_date(result) < "2018-01-01"
+
+
+@pytest.mark.db
+def test_a_real_market_holiday_still_reaches_back_but_says_how_far() -> None:
+    """2026-01-01·01-02는 신정 휴장이다. 직전 거래일(2025-12-31)까지 거슬러 가되
+    **며칠 전인지를 관측일이 말한다** — staleness 검사가 그 값으로 판정한다."""
+    result = auction_quote_source()("배추", date(2026, 1, 3))
+
+    assert result
+    assert observed_date(result) == "2025-12-31"
+    assert staleness_days(result, "2026-01-03") == 3
 
 
 # --------------------------------------------------------------------- 읽을 수 없는 값
@@ -451,8 +516,9 @@ def test_a_null_aggregate_drops_the_grade_instead_of_crashing() -> None:
     적재되는 값이라 우리가 통제하지 못하고, **죽는 쪽은 사유를 못 내기** 때문이다.
     """
     rows = [
-        {"grade": "특", "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"grade": "상", "amount_krw": None, "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "특",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "상", "amount_krw": None, "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
 
@@ -461,32 +527,41 @@ def test_a_null_aggregate_drops_the_grade_instead_of_crashing() -> None:
 
 def test_all_grades_unreadable_becomes_the_zero_quote_path() -> None:
     """읽을 수 있는 등급이 하나도 없으면 빈 목록이다 — ③이 사유를 남기고 0안으로 끝낸다."""
-    rows = [{"grade": "특", "amount_krw": None, "volume_kg": None}]
+    rows = [{"observed_date": OBSERVED, "grade": "특", "amount_krw": None, "volume_kg": None}]
 
     assert _source(rows)("배추", INTEGRATION) == []
 
 
-def test_the_zero_quote_reason_does_not_pick_one_cause_out_of_three() -> None:
-    """🔴 0건이 되는 길이 셋인데(휴장 · 그 규격 미거래 · 기록 판독 불가) 하나만 적으면
-    나머지 둘일 때 **없는 원인을 보고**하게 된다.
+def test_the_zero_quote_reason_speaks_about_the_whole_lookback_not_one_day() -> None:
+    """🔴 쿼리가 ``auction_date < as_of`` 로 **전 기간**을 훑어 최신일을 고른다.
 
-    앞서 이 테스트는 ``== []`` 만 보고 통과했다 — 그 상태에서는 사유가 "휴장"이라고
-    단정해도 아무것도 걸리지 않았다. **통과하는데 아무것도 안 보는 검사**였다.
+    그래서 빈 결과는 "그날 휴장"이 될 수 **없다** — as_of 이전 어느 날에도 그 좌표로
+    쓸 수 있는 기록이 없다는 뜻이다. 쿼리를 바꾸면서 사유를 안 바꿔 한동안 틀린 말을 하고
+    있었다 (Codex 2차 지적).
     """
     reason = missing_quote_reason("배추", "2025-12-31", load_constraints())
 
-    assert "휴장일이거나" in reason
-    assert "거래가 없었거나" in reason
-    assert "읽을 수 없었다" in reason
+    assert "2025-12-31 이전 기간에" in reason
+    assert "휴장" not in reason
     assert "보유 재고와는 무관" in reason
+
+
+def test_the_zero_quote_reason_names_the_spec_that_day_actually_used() -> None:
+    """🔴 2017년 무는 18kg 로 조회하는데 사유가 "20kg 규격에서"라고 말하고 있었다."""
+    reason = missing_quote_reason("무", "2017-06-02", load_constraints())
+
+    assert "상자·파렛트 18kg" in reason
+    assert "20kg" not in reason
 
 
 def test_a_non_positive_price_drops_the_grade() -> None:
     """``grade_unit_price``는 스키마가 ``gt=0``이라 0 이하가 한 줄만 섞여도 **제안 전체**가
     출력 경계에서 죽는다. 그 등급 하나를 빼는 쪽이 맞다."""
     rows = [
-        {"grade": "특", "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"grade": "상", "amount_krw": Decimal(0), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "특",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"observed_date": OBSERVED, "grade": "상",
+         "amount_krw": Decimal(0), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
 
@@ -546,7 +621,7 @@ def test_the_zero_quote_path_keeps_reasons_left_by_earlier_nodes() -> None:
 
 @pytest.mark.parametrize(
     "token",
-    ["trade_volume_kg  > 0", "trade_amount_krw IS NOT NULL", "trade_amount_krw >= 0"],
+    ["trade_volume_kg > 0", "trade_amount_krw IS NOT NULL", "trade_amount_krw >= 0"],
 )
 def test_unusable_rows_are_excluded_before_aggregation(token: str) -> None:
     """🔴 ``sum()``은 NULL 을 건너뛰는데 다른 컬럼의 합계에는 그 행이 들어간다.
@@ -568,7 +643,7 @@ def test_the_row_filter_sits_in_where_not_having() -> None:
     query = captured["query"]
 
     assert "HAVING" not in query
-    assert query.index("trade_volume_kg  > 0") < query.index("GROUP BY")
+    assert query.index("trade_volume_kg > 0") < query.index("GROUP BY")
 
 
 # --------------------------------------------------------------------- 🔴3 좌표 잠금
@@ -703,7 +778,10 @@ def test_real_auction_quotes_are_labelled_official_not_mock() -> None:
     OFFICIAL > VENDOR > SIM_FIXED > ASSUMED 이고, 가락 경락 실적은 공영도매시장의 공식
     거래 기록이라 ``OFFICIAL`` 이 맞는 자리다.
     """
-    real = [{"market": "가락", "grade": "특", "price": 933, "spec": "그물망·파렛트 10kg"}]
+    real = [
+        {"market": "가락", "grade": "특", "price": 824,
+         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+    ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: real)
 
     quoted = [
@@ -765,3 +843,339 @@ def test_a_real_self_check_cut_still_says_self_check() -> None:
     assert proposal["scenarios"] == []
     assert proposal["no_proposal_reason"].startswith("모든 안이 self_check에서 컷됨")
     assert "max_price" in proposal["no_proposal_reason"]
+
+
+# --------------------------------------------------------------------- look-ahead
+
+
+def test_the_query_reads_before_as_of_not_the_day_itself() -> None:
+    """🔴 우리는 **아침에 돈다** (상세설계 §128 · 역할계약서 §45 · CLAUDE.md).
+
+    그 시각엔 당일 경매가 끝나지 않았고 적재는 더 늦다 — 2026-08-31 실측으로 haetdeul
+    최신이 08-26(5일 전), 원천도 08-29(2일 전)였다. `= as_of`면 실운영에서 **매일 0행**이고
+    그때마다 "휴장이거나 그 규격 거래가 없다"는 틀린 사유가 나간다.
+    """
+    captured: dict = {}
+    _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
+
+    assert "auction_date < %(as_of)s" in captured["query"]
+    assert "auction_date = %(as_of)s" not in captured["query"]
+
+
+def test_the_query_picks_one_day_not_one_day_per_grade() -> None:
+    """🔴 등급별로 각자 거슬러 올라가면 스프레드가 **다른 시점의 두 가격**을 비교한다.
+
+    2025-12-31 기준 실측: 배추 특 12-30(1일 전) · 상 11-12(1.5개월 전) · 하 2023-02-23
+    (2.8년 전). 규칙 4의 "당일 시세에 실재하는 값"이 무너진다.
+    """
+    query = {}
+    _source(BAECHU_1231_ROWS, query)("배추", INTEGRATION)
+
+    assert "auction_date = (SELECT max(auction_date) FROM usable)" in query["query"]
+
+
+def test_two_observation_dates_in_one_db_result_are_refused() -> None:
+    """DB 경로 — 쿼리가 하루로 좁히므로 정상 경로에선 안 생긴다."""
+    mixed = [
+        {"observed_date": "2025-12-30", "grade": "특",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"observed_date": "2025-11-12", "grade": "상",
+         "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
+    ]
+    with pytest.raises(ValueError, match="관측일이 하루가 아니다"):
+        _source(mixed)("배추", INTEGRATION)
+
+
+def test_two_observation_dates_from_an_injected_source_are_refused() -> None:
+    """🔴 앞서 이 검사는 ``_materialize`` 만 봤다 — **DB 경로만** 지키고 주입은 그대로
+    통과했다 (Codex 2차 지적).
+
+    재현됐던 상태: 상 800원(12-30) + 중 600원(11-12) → 안 3개, 1.5개월 떨어진 두 가격으로
+    스프레드 25%. ``check_prices_exist`` 는 (market, grade, price) 만 보므로 못 잡는다.
+    """
+    mixed = [
+        {"market": "가락", "grade": "상", "price": 800,
+         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"},
+        {"market": "가락", "grade": "중", "price": 600,
+         "spec": "그물망·파렛트 10kg", "observed_date": "2025-11-12"},
+    ]
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: mixed)
+
+    assert proposal["scenarios"] == []
+    assert "관측일이 하루가 아니다" in proposal["rejected_reasons"][0]["reason"]
+
+
+def test_the_observed_date_rides_on_every_quote() -> None:
+    result = _source(BAECHU_1231_ROWS)("배추", INTEGRATION)
+
+    assert all(quote["observed_date"] == OBSERVED for quote in result)
+    assert observed_date(result) == OBSERVED
+    assert staleness_days(result, "2025-12-31") == 1
+
+
+def test_mock_quotes_carry_no_observation_date_so_staleness_is_not_measured() -> None:
+    """회귀 경로가 이 검사를 만나지 않는 근거 — mock 은 표기가 없어 항상 None 이다."""
+    assert observed_date(mocks.load_quotes("배추", date(2026, 8, 21))) is None
+    assert staleness_days(mocks.load_quotes("배추", date(2026, 8, 21)), "2026-08-21") is None
+
+
+# --------------------------------------------------------------------- 관측일이 출력에
+
+
+def _wide_spread_on(observed: str):
+    """스프레드가 확대된 다등급 시세. **스프레드 rationale 경로를 실제로 돌린다.**
+
+    단일 등급이면 ⑤가 중품을 배정하지 않아 시세관측 근거가 하나뿐이고, 그러면 거기
+    남아 있던 옛 ``MQ-가락-{as_of}`` 를 아무 검사도 못 본다.
+
+    상 900 · 중 600 → 스프레드 33.3% (평시 12.1% 대비 확대 임계 18.2% 초과).
+    12-31 mock 로트가 상 등급 10일이라 소진 한계 6일 → 스코어 +0.204 로 채택된다.
+    셋 다 그날 max_price(992/1,007/1,079) 아래라 ⑦에 컷되지 않는다.
+    """
+    rows = [("특", 950), ("상", 900), ("중", 600)]
+    return lambda item, as_of: [
+        {"market": "가락", "grade": grade, "price": price,
+         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+        for grade, price in rows
+    ]
+
+
+def test_the_rationale_says_the_observation_date_not_as_of() -> None:
+    """🔴 12-30 값을 "12-31 당일 경락가"라고 적으면 그것도 거짓이다."""
+    # 🔴 **다등급이어야 한다.** 단일 등급이면 스프레드 rationale 경로가 아예 안 돌아서
+    #   거기 남아 있던 옛 ``MQ-가락-{as_of}`` 를 못 잡았다 (Codex 2차 지적).
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=_wide_spread_on("2025-12-30"))
+
+    quoted = [
+        row
+        for scenario in proposal["scenarios"]
+        for row in scenario["rationale"]
+        if row["source"] == "시세관측"
+    ]
+    assert len(quoted) >= 2, "시세관측 근거가 하나뿐이면 스프레드 경로를 안 본 것이다"
+    # 🔴 **같은 시세에서 나온 근거는 같은 좌표를 갖는다.** 대표 근거만 관측일로 바꾸고
+    #   스프레드·조합 근거를 as_of 로 둬서 좌표가 갈라져 있었다 (Codex 2차 지적).
+    assert {row["ref_id"] for row in quoted} == {"MQ-가락-2025-12-30"}
+    for row in quoted:
+        assert "2025-12-31" not in row["claim"]
+    # 관측일과 나이는 **대표 근거**가 말한다 — 스프레드 근거는 소진 한계·스코어를 말한다.
+    lead = next(row for row in quoted if "경락가" in row["claim"])
+    assert "2025-12-30" in lead["claim"]
+    assert "관측일 2025-12-30" in lead["evidence_detail"]
+    assert "1일 전" in lead["evidence_detail"]
+
+
+@pytest.mark.parametrize("observed", ["2025-12-31", "2026-01-05"])
+def test_an_observation_on_or_after_as_of_is_refused(observed: str) -> None:
+    """🔴 as_of **당일** 관측도 look-ahead 다. 아침엔 그 값이 존재하지 않는다.
+
+    앞서 이 자리에는 "당일 관측이면 '0일 전'이라 적지 않는다"는 테스트가 있었다 —
+    있으면 안 되는 상태를 **정상으로 못 박고** 있었고, 엄격한 ``< as_of`` 와 정면으로
+    충돌했다 (Codex 2차 지적).
+    """
+    ahead = [
+        {"market": "가락", "grade": "특", "price": 933,
+         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+    ]
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: ahead)
+
+    assert proposal["scenarios"] == []
+    assert "as_of 이후" in proposal["rejected_reasons"][0]["reason"]
+
+
+# --------------------------------------------------------------------- staleness
+
+
+def _aged(days: int) -> list[dict]:
+    observed = (INTEGRATION - timedelta(days=days)).isoformat()
+    return [
+        {"market": "가락", "grade": "특", "price": 824,
+         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+    ]
+
+
+@pytest.mark.parametrize("days", [1, 2, 3])
+def test_a_price_within_the_staleness_limit_is_used(days: int) -> None:
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(days))
+
+    assert proposal["scenarios"]
+
+
+@pytest.mark.parametrize("days", [4, 5, 11])
+def test_a_price_past_the_staleness_limit_gives_a_reason_and_no_plan(days: int) -> None:
+    """🔴 오래된 값을 당일인 척 쓰지 않는다 (규칙 3).
+
+    지금의 5일 적재 지연도 여기 걸린다 — 조용히 5일 된 값을 쓰는 것보다 사유가 나가는
+    쪽이 낫다는 판단이다.
+    """
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(days))
+
+    assert proposal["scenarios"] == []
+    reason = proposal["rejected_reasons"][0]["reason"]
+    assert f"{days}일 전" in reason
+    assert "허용 3일" in reason
+    assert proposal["no_proposal_reason"].startswith("안이 만들어지지 않았다")
+
+
+def test_the_staleness_reason_does_not_guess_the_cause() -> None:
+    """시장이 쉰 것과 적재가 밀린 것은 "as_of − 관측일"로만 나타나 구분할 수 없다.
+    하나로 단정하면 없는 원인을 보고하게 된다."""
+    proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(9))
+    reason = proposal["rejected_reasons"][0]["reason"]
+
+    assert "시장이 쉬었거나 적재가 밀린 것인데" in reason
+
+
+@pytest.mark.parametrize(
+    ("limit", "days", "blocked"),
+    [(3, 3, False), (3, 4, True), (10, 5, False), (1, 2, True)],
+)
+def test_the_staleness_limit_actually_comes_from_constraints(
+    limit: int, days: int, blocked: bool
+) -> None:
+    """임계를 코드에 박지 않는다 (규칙 7).
+
+    ⚠️ **값 비교로는 이걸 증명할 수 없다.** ``constraints[...] == 3`` 은 코드가 3을 다시
+      박아도 통과한다 — 실제로 변이가 안 물렸다(M17 과 같은 유형). 임계를 **바꿔보고**
+      판정이 따라 바뀌는지를 봐야 한다.
+    """
+    constraints = load_constraints()
+    constraints["market_quotes"]["max_staleness_days"] = limit
+    reason = stale_quote_reason(_aged(days), INTEGRATION.isoformat(), constraints)
+
+    assert (reason is not None) is blocked
+    if blocked:
+        assert f"허용 {limit}일" in reason
+
+
+# --------------------------------------------------------------------- 무 18kg
+
+
+def test_the_radish_spec_switches_weight_before_2018() -> None:
+    """🔴 ML spec_desc "상자·파렛트 20kg (2018년 이전 18kg)". 우리 IO명세에도
+    "무 규격 2018 전 18kg(백테스트 주의)"로 적혀 있었는데 코드엔 없었다.
+
+    20kg 고정이면 2017년 244 거래일 중 **64일만** 잡힌다(18kg 는 227일).
+    """
+    captured: dict = {}
+    rows = [{"observed_date": "2017-06-01", "grade": "특",
+             "amount_krw": Decimal(100000), "volume_kg": Decimal(100)}]
+    _source(rows, captured)("무", date(2017, 6, 2))
+
+    assert "CASE WHEN auction_date < %(spec_switch_date)s" in captured["query"]
+    assert captured["params"]["spec_switch_date"] == date(2018, 1, 1)
+    assert captured["params"]["unit_weight_before"] == 18
+    assert captured["params"]["unit_weight_kg"] == 20
+
+
+def test_items_without_a_weight_switch_keep_the_plain_condition() -> None:
+    """분기가 없는 품목까지 CASE 를 붙이면 읽는 사람이 없는 전환을 찾게 된다."""
+    captured: dict = {}
+    _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
+
+    assert "CASE WHEN" not in captured["query"]
+    assert "unit_weight_kg = %(unit_weight_kg)s" in captured["query"]
+    assert "spec_switch_date" not in captured["params"]
+
+
+@pytest.mark.parametrize(
+    ("observed", "expected"),
+    [("2017-06-01", "상자·파렛트 18kg"), ("2018-01-01", "상자·파렛트 20kg"),
+     ("2025-12-30", "상자·파렛트 20kg")],
+)
+def test_the_spec_label_tells_which_weight_that_day_used(observed: str, expected: str) -> None:
+    """라벨은 사유에 그대로 실린다 — 2017년 값을 보면서 "20kg"이라고 적으면 **무엇을
+    봤는지가 거짓**이 된다."""
+    rows = [{"observed_date": observed, "grade": "특",
+             "amount_krw": Decimal(100000), "volume_kg": Decimal(100)}]
+    result = _source(rows)("무", date(2026, 1, 1))
+
+    assert result[0]["spec"] == expected
+
+
+# --------------------------------------------------------------------- 관측 표기 계약
+
+
+def _marked(**over: Any) -> list[dict]:
+    base = {"market": "가락", "grade": "특", "price": 824,
+            "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+    return [{**base, **over}]
+
+
+def test_half_written_provenance_is_refused() -> None:
+    """🔴 규격은 있는데 관측일이 없으면 **as_of 를 관측일인 것처럼 적게 된다.**
+
+    재현됐던 출력: "관측일 2025-12-31 · 그물망·파렛트 10kg · 물량가중" — 12-31 은 관측된
+    적이 없는 날이다 (Codex 2차 지적).
+    """
+    proposal = run_purchase_agent(
+        "배추", INTEGRATION, quotes=lambda i, d: [
+            {"market": "가락", "grade": "특", "price": 824, "spec": "그물망·파렛트 10kg"}
+        ]
+    )
+
+    assert proposal["scenarios"] == []
+    assert "반쪽만" in proposal["rejected_reasons"][0]["reason"]
+
+
+def test_an_unparseable_observation_date_does_not_kill_the_graph() -> None:
+    """🔴 결정 d — 죽으면 오케스트레이터가 원인을 못 받는다.
+
+    전에는 ``date.fromisoformat`` 이 ``ValueError`` 로 그래프 전체를 죽였다.
+    """
+    proposal = run_purchase_agent(
+        "배추", INTEGRATION, quotes=lambda i, d: _marked(observed_date="어제")
+    )
+
+    assert proposal["scenarios"] == []
+    assert "날짜로 읽을 수 없어" in proposal["rejected_reasons"][0]["reason"]
+
+
+def test_the_provenance_check_applies_to_injected_sources_too() -> None:
+    """🔴 전에는 ``_materialize`` 안에만 있어 **DB 경로만** 지켰다."""
+    constraints = load_constraints()
+
+    assert provenance_problem(_marked(), "2025-12-31", constraints) is None
+    assert provenance_problem(_marked(observed_date="2026-01-05"), "2025-12-31", constraints)
+    assert provenance_problem(_marked(observed_date="2025-12-31"), "2025-12-31", constraints)
+
+
+def test_mock_quotes_pass_the_provenance_check_untouched() -> None:
+    """표기가 **둘 다 없는** 것이 mock 의 정상 상태다 — 회귀 경로가 이 검사를 안 만난다."""
+    constraints = load_constraints()
+    plain = mocks.load_quotes("배추", date(2026, 8, 21))
+
+    assert provenance_problem(plain, "2026-08-21", constraints) is None
+
+
+def test_a_row_without_an_observation_date_cannot_ride_along_in_the_db_path() -> None:
+    """한 행만 날짜가 있으면 예전엔 "단일 날짜"로 인정해 **함께 합산**했다."""
+    rows = [
+        {"observed_date": OBSERVED, "grade": "특",
+         "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
+        {"grade": "상", "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
+    ]
+    with pytest.raises(ValueError, match="관측일 없는 행"):
+        _source(rows)("배추", INTEGRATION)
+
+
+# --------------------------------------------------------------------- before 검증
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"unit_weight_kg": 18, "label": "x"},                       # date 누락
+        {"date": "2018-01-01", "unit_weight_kg": 18, "label": "x"},  # 문자열 date
+        {"date": date(2018, 1, 1), "unit_weight_kg": 0, "label": "x"},
+        {"date": date(2018, 1, 1), "unit_weight_kg": 18, "label": ""},
+    ],
+)
+def test_a_half_written_weight_switch_is_refused_early(broken: dict) -> None:
+    """``date`` 누락은 쿼리 파라미터를 채울 때 **늦게 KeyError** 로 터지고, 음수 중량은
+    조용히 0행 → "거래 기록이 없다"는 틀린 사유로 이어진다 (Codex 2차 지적)."""
+    constraints = load_constraints()
+    constraints["market_quotes"]["spec_by_item"]["무"]["before"] = broken
+
+    with pytest.raises((ValueError, TypeError)):
+        spec_for_item("무", constraints)

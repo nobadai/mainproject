@@ -121,7 +121,37 @@ def _checked_spec(item: str, spec: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(label, str) or not label:
         # label 은 사유 문장에 그대로 실린다 — 비면 "그날 무엇을 봤는지"가 사라진다.
         raise ValueError(f"spec_by_item[{item!r}].label must be a non-empty string, got {label!r}")
+    _check_before(item, spec.get("before"))
     return dict(spec)
+
+
+def _check_before(item: str, before: Any) -> None:
+    """규격 전환 블록(``before``)도 같은 검사를 받는다.
+
+    ⚠️ 여기서 안 보면 ``date`` 누락은 쿼리 파라미터를 채울 때 **늦게 ``KeyError``** 로 터지고
+      (그때는 사유를 낼 자리가 지나갔다), 음수 중량은 조용히 0행 → "거래 기록이 없다"는
+      **틀린 사유**로 이어진다 (Codex 2차 지적).
+    """
+    if before is None:
+        return
+    if not isinstance(before, Mapping):
+        raise TypeError(
+            f"spec_by_item[{item!r}].before must be a mapping or absent, got {before!r}"
+        )
+    if not isinstance(before.get("date"), date):
+        raise TypeError(
+            f"spec_by_item[{item!r}].before.date must be a date, got {before.get('date')!r}"
+        )
+    weight = before.get("unit_weight_kg")
+    if isinstance(weight, bool) or not isinstance(weight, int | float) or weight <= 0:
+        raise ValueError(
+            f"spec_by_item[{item!r}].before.unit_weight_kg must be positive, got {weight!r}"
+        )
+    label = before.get("label")
+    if not isinstance(label, str) or not label:
+        raise ValueError(
+            f"spec_by_item[{item!r}].before.label must be a non-empty string, got {label!r}"
+        )
 
 
 def krw_per_kg(amount_krw: Decimal, volume_kg: Decimal) -> Decimal:
@@ -174,8 +204,46 @@ def _amount(value: Any) -> Decimal | None:
     return converted if converted.is_finite() and converted >= 0 else None
 
 
-def _query(schema: str, table: str) -> sql.Composed:
-    """등급별 물량가중 집계 한 방.
+def _weight_condition(spec: Mapping[str, Any]) -> sql.Composable:
+    """규격 중량 조건. **날짜에 따라 바뀌는 품목이 있다.**
+
+    무는 2018-01-01 이전이 18kg 이다 (ML ``spec_desc``: *"상자·파렛트 20kg (2018년 이전
+    18kg)"*). 우리 IO명세도 *"무 규격 2018 전 18kg(백테스트 주의)"* 로 적어두고 있었는데
+    코드에는 없었다 — 20kg 로 고정하면 2017년 244 거래일 중 **64일만** 잡힌다(18kg 는
+    227일). 에러 없이 다른 시리즈가 된다.
+
+    ``CASE`` 로 쓰는 이유: 두 중량을 ``IN`` 으로 합치면 전환 전후가 한 날에 섞일 수 있다.
+    2017년에 18kg 과 20kg 이 **둘 다 존재**해서 실제로 섞인다.
+    """
+    before = spec.get("before")
+    if before is None:
+        return sql.SQL("unit_weight_kg = %(unit_weight_kg)s")
+    return sql.SQL(
+        "unit_weight_kg = CASE WHEN auction_date < %(spec_switch_date)s "
+        "THEN %(unit_weight_before)s ELSE %(unit_weight_kg)s END"
+    )
+
+
+def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Composed:
+    """**as_of 이전 최신 거래일 하루**의 등급별 물량가중 집계.
+
+    🔴 ``auction_date < as_of`` 다 — 당일이 아니다 (2026-08-31 확인).
+      우리는 **아침에 돈다**(상세설계 §128 · 역할계약서 §45 · 백로그 §12 · CLAUDE.md).
+      그 시각엔 당일 경매가 끝나지 않았고, 적재는 더 늦다 — 2026-08-31 실측으로
+      ``haetdeul`` 최신이 08-26(5일 지연), 원천도 08-29(2일 지연)였다.
+      ``= as_of`` 로 두면 실운영에서 **매일 0행**이고, 그때마다 "휴장이거나 그 규격 거래가
+      없다"는 **틀린 사유**가 나간다. 12-31 관통이 돌았던 건 그날이 9개월 전 과거라
+      이미 적재돼 있었기 때문이지, 실운영 가능성을 보인 게 아니다.
+
+    🔴 **하루를 통째로 고른다 — 등급별로 각자 거슬러 올라가지 않는다.**
+      등급마다 "그 등급의 최신 거래일"을 잡으면 2025-12-31 기준으로 이렇게 된다::
+
+          배추 특  2025-12-30 (1일 전)
+          배추 상  2025-11-12 (1.5개월 전)
+          배추 하  2023-02-23 (2.8년 전)
+
+      스프레드가 **서로 다른 시점의 두 가격**을 비교하게 되고, 규칙 4의 "당일 시세에
+      실재하는 값"이 무너진다. ``max(auction_date)`` 를 먼저 정하고 그날 것만 쓴다.
 
     🔴 ``subclass_*`` 가 **없다** — WHERE 에도 GROUP BY 에도. 품종을 고르지 않는다는
       결정이 코드에서 지켜지는 자리이고, 계약 테스트가 이 문자열을 검사한다.
@@ -197,21 +265,27 @@ def _query(schema: str, table: str) -> sql.Composed:
     같은 뜻의 검사를 두 곳에 두면 한쪽만 바뀐다.
     """
     return sql.SQL("""
-        SELECT grade_name AS grade,
+        WITH usable AS (
+          SELECT auction_date, grade_name, trade_amount_krw, trade_volume_kg
+            FROM {}.{}
+           WHERE auction_date     <  %(as_of)s
+             AND market_category  =  %(market_category)s
+             AND item_name        =  %(item)s
+             AND grade_name       =  ANY(%(grades)s)
+             AND package_name     =  ANY(%(packages)s)
+             AND {}
+             AND trade_volume_kg  >  0
+             AND trade_amount_krw IS NOT NULL
+             AND trade_amount_krw >= 0
+        )
+        SELECT auction_date AS observed_date,
+               grade_name   AS grade,
                sum(trade_amount_krw) AS amount_krw,
                sum(trade_volume_kg)  AS volume_kg
-          FROM {}.{}
-         WHERE auction_date     = %(as_of)s
-           AND market_category  = %(market_category)s
-           AND item_name        = %(item)s
-           AND grade_name       = ANY(%(grades)s)
-           AND package_name     = ANY(%(packages)s)
-           AND unit_weight_kg   = %(unit_weight_kg)s
-           AND trade_volume_kg  > 0
-           AND trade_amount_krw IS NOT NULL
-           AND trade_amount_krw >= 0
-         GROUP BY grade_name
-    """).format(sql.Identifier(schema), sql.Identifier(table))
+          FROM usable
+         WHERE auction_date = (SELECT max(auction_date) FROM usable)
+         GROUP BY auction_date, grade_name
+    """).format(sql.Identifier(schema), sql.Identifier(table), weight_condition)
 
 
 def auction_quote_source(*, fetch: Fetch | None = None, schema: str | None = None) -> QuoteSource:
@@ -235,16 +309,23 @@ def auction_quote_source(*, fetch: Fetch | None = None, schema: str | None = Non
             # 규격 미확정 품목(피마늘)은 **조회하지 않는다**. 아무 규격으로나 물어보면
             # 값이 오고, 그 값은 우리가 뜻한 시리즈가 아니다 (규칙 3).
             return []
+        params: dict[str, Any] = {
+            "as_of": as_of,
+            "market_category": cfg["market_category"],
+            "item": item,
+            "grades": list(cfg["grades"]),
+            "packages": list(spec["packages"]),
+            "unit_weight_kg": spec["unit_weight_kg"],
+        }
+        before = spec.get("before")
+        if before is not None:
+            params["spec_switch_date"] = before["date"]
+            params["unit_weight_before"] = before["unit_weight_kg"]
         rows = do_fetch(
-            _query(schema_name or db.get_db_schema(), cfg["table"]),
-            {
-                "as_of": as_of,
-                "market_category": cfg["market_category"],
-                "item": item,
-                "grades": list(cfg["grades"]),
-                "packages": list(spec["packages"]),
-                "unit_weight_kg": spec["unit_weight_kg"],
-            },
+            _query(
+                schema_name or db.get_db_schema(), cfg["table"], _weight_condition(spec)
+            ),
+            params,
         )
         return _materialize(rows, cfg, spec)
 
@@ -268,6 +349,8 @@ def _materialize(
     #   것만 조용히 남는다**. 관통일 배추가 정확히 그 모양이다(그물망 10kg + 파렛트 10kg):
     #   합산이면 933원, 마지막 행만 집으면 970원 — 에러 없이 4% 어긋난다.
     #   여기서 합쳐두면 나중에 GROUP BY 축이 늘어도 물량가중이 유일한 정답으로 남는다.
+    observed = _single_observed_date(rows)
+    label = _spec_label_on(spec, observed)
     totals: dict[str, list[Decimal]] = {}
     for row in rows:
         amount = _amount(row["amount_krw"])
@@ -296,10 +379,146 @@ def _materialize(
                 "market": cfg["market_category"],
                 "grade": grade,
                 "price": price,
-                "spec": spec["label"],
+                "spec": label,
+                # ★ **as_of 가 아니라 실제 관측일이다.** 12-30 값을 12-31 시세라고 적으면
+                #   그것도 거짓이다 — 사유·근거·ref_id 가 전부 이 값을 가져간다.
+                "observed_date": observed,
             }
         )
     return quotes
+
+
+def _single_observed_date(rows: list[dict[str, Any]]) -> str | None:
+    """쿼리가 고른 **하루**. 두 날짜가 섞여 오면 멈춘다.
+
+    쿼리가 ``max(auction_date)`` 하나로 좁히므로 정상 경로에서는 항상 한 날이다. 그런데도
+    검사하는 이유: 등급별로 각자 거슬러 올라가는 형태로 쿼리가 바뀌면 **스프레드가 서로 다른
+    시점의 두 가격을 비교**하게 되고, 그건 에러가 아니라 조용히 틀린 판단이 된다.
+    """
+    # 🔴 **전 행에 있어야 한다.** ``if row.get(...)`` 로 걸러 읽으면, 한 행만 날짜가 있고
+    #   나머지는 없을 때 "단일 날짜"로 인정해 **함께 합산**한다 (Codex 2차 지적).
+    missing = [row for row in rows if not row.get("observed_date")]
+    if rows and missing:
+        raise ValueError(
+            f"관측일 없는 행이 {len(missing)}건 섞였다 — 어느 날 값인지 모르는 행을 "
+            f"합산하면 물량가중이 서로 다른 시점을 섞는다"
+        )
+    dates = {str(row["observed_date"]) for row in rows}
+    if not dates:
+        return None
+    if len(dates) > 1:
+        raise ValueError(
+            f"관측일이 하루가 아니다: {sorted(dates)} — 등급별로 다른 날을 집으면 "
+            f"스프레드가 다른 시점의 두 가격을 비교하게 된다 (규칙 4)"
+        )
+    return dates.pop()
+
+
+def _spec_label_on(spec: Mapping[str, Any], observed: str | None) -> str:
+    """그날 유효했던 규격 이름. 전환일 이전이면 옛 규격 이름을 쓴다.
+
+    라벨은 사유 문장에 그대로 실린다 — 2017년 값을 보면서 "상자·파렛트 20kg"이라고 적으면
+    **무엇을 봤는지가 거짓**이 된다.
+    """
+    before = spec.get("before")
+    if before is None or observed is None:
+        return str(spec["label"])
+    return str(before["label"] if observed < str(before["date"]) else spec["label"])
+
+
+#: 실측 시세임을 나타내는 표시 두 개. **한 묶음이다** — 반쪽만 있으면 계약 위반이다.
+#: mock 은 둘 다 없고, DB 공급자는 둘 다 싣는다.
+PROVENANCE_KEYS = ("spec", "observed_date")
+
+
+def provenance_problem(
+    quotes: list[dict[str, Any]], as_of: str, constraints: Mapping[str, Any]
+) -> str | None:
+    """관측 표기가 계약대로인가. 어긋나면 **사유 문장**을 돌려준다 (예외가 아니다).
+
+    🔴 이 검사는 **주입 경로에도 걸려야 한다.** 전에는 ``_materialize`` 안에만 있어서
+      DB 경로만 지켰고, 주입 시세는 관측일이 미래여도·섞여도·아예 없어도 그대로 통과했다
+      (Codex 2차 지적, 전부 재현됨).
+
+    ⚠️ **왜 ``ports`` 가 아니라 여기인가.** 포트는 T0(``build_initial_state``)에서 도는데,
+      거기서 예외를 던지면 그래프가 시작조차 못 하고 **어느 노드도 사유를 쓸 자리가 없다**
+      — 결정 d 가 막으려던 그것이다. 그리고 mock 은 관측 표기가 정당하게 없어서 포트에서
+      일률적으로 요구할 수도 없다. 그래서 판정은 ③·⑤ 가 공유하는 이 함수가 하고, 포트는
+      구조 계약(market·grade·price)만 본다.
+
+    검사 다섯. 앞의 것이 걸리면 뒤는 보지 않는다 — 원인을 하나로 말해야 읽는 사람이 그 자리를 본다.
+    """
+    marked = [q for q in quotes if any(q.get(key) for key in PROVENANCE_KEYS)]
+    if not marked:
+        return None  # mock — 표기가 없는 것이 정상이다
+
+    half = [q for q in quotes if not all(q.get(key) for key in PROVENANCE_KEYS)]
+    if half:
+        return (
+            f"시세 {len(half)}건에 관측 표기가 반쪽만 있다 (규격·관측일은 한 묶음이다) "
+            f"— 관측일 없이 실측으로 분류하면 as_of 를 관측일인 것처럼 적게 된다"
+        )
+
+    dates = sorted({str(q["observed_date"]) for q in quotes})
+    if len(dates) > 1:
+        return (
+            f"관측일이 하루가 아니다: {dates} — 등급마다 다른 날의 가격을 쓰면 "
+            f"스프레드가 서로 다른 시점의 두 가격을 비교하게 된다 (규칙 4)"
+        )
+
+    try:
+        observed = date.fromisoformat(dates[0])
+        today = date.fromisoformat(as_of)
+    except ValueError:
+        # 죽지 않는다 (결정 d) — 파싱 실패도 "오늘 시세를 모른다"는 상태의 하나다.
+        return f"관측일 {dates[0]!r} 을 날짜로 읽을 수 없어 언제 값인지 알 수 없다"
+
+    if observed >= today:
+        return (
+            f"관측일 {dates[0]} 이 as_of 이후다 (as_of {as_of}) — 우리는 아침에 돌아서 "
+            f"그 시각엔 그 값이 존재하지 않는다. look-ahead 라 쓰지 않았다"
+        )
+
+    limit = constraints["market_quotes"]["max_staleness_days"]
+    gap = (today - observed).days
+    if gap > limit:
+        return (
+            f"최신 경락 기록이 {dates[0]}로 {gap}일 전이다 (허용 {limit}일). "
+            f"시장이 쉬었거나 적재가 밀린 것인데 어느 쪽이든 그만큼 오래된 값이라, "
+            f"오늘 시세로 쓰지 않고 안을 만들지 않았다"
+        )
+    return None
+
+
+def observed_date(quotes: list[dict[str, Any]]) -> str | None:
+    """받은 시세의 관측일. mock 처럼 표기가 없으면 None."""
+    dates = {str(q["observed_date"]) for q in quotes if q.get("observed_date")}
+    return max(dates) if dates else None
+
+
+def staleness_days(quotes: list[dict[str, Any]], as_of: str) -> int | None:
+    """관측일이 as_of 로부터 며칠 전인가. 관측일 표기가 없으면 None (= 재지 않는다).
+
+    mock 은 표기가 없어 항상 None 이다 — 회귀 경로가 이 검사를 만나지 않는다.
+    """
+    observed = observed_date(quotes)
+    if observed is None:
+        return None
+    return (date.fromisoformat(as_of) - date.fromisoformat(observed)).days
+
+
+def stale_quote_reason(
+    quotes: list[dict[str, Any]], as_of: str, constraints: Mapping[str, Any]
+) -> str | None:
+    """너무 오래된 시세면 사유를 돌려준다 — ``provenance_problem`` 의 staleness 부분.
+
+    🔴 **오래된 값을 당일인 척 쓰지 않는다** (규칙 3). 시장이 쉰 것이든 적재가 밀린 것이든,
+      우리가 손에 든 값이 N일 된 값이라는 사실은 같다 — 둘을 구분할 방법도 없다. 그래서
+      원인을 단정하지 않고 **며칠 된 값인지**만 말한다.
+
+    임계는 ``constraints.market_quotes.max_staleness_days`` 다 (규칙 7).
+    """
+    return provenance_problem(quotes, as_of, constraints)
 
 
 def observed_spec(quotes: list[dict[str, Any]]) -> str | None:
@@ -311,6 +530,28 @@ def observed_spec(quotes: list[dict[str, Any]]) -> str | None:
     return " · ".join(labels) if labels else None
 
 
+def quote_block_reason(
+    quotes: list[dict[str, Any]],
+    item: str,
+    as_of: str,
+    constraints: Mapping[str, Any],
+) -> str | None:
+    """오늘 시세를 쓸 수 없는 사유. 쓸 수 있으면 None.
+
+    막히는 길이 둘이라 한 함수로 모은다 — ③과 ⑤가 **같은 판정**을 봐야 하기 때문이다.
+    각자 판단하면 한쪽만 바뀌고, 그러면 ③은 안을 안 만들었는데 ⑤는 배분을 만드는(또는
+    그 반대) 상태가 조용히 생긴다.
+
+    1. 한 건도 못 받았다 — 휴장 · 그 규격 미거래 · 기록 판독 불가 · 규격 미확정
+    2. 받았는데 너무 오래됐다 — ``max_staleness_days`` 초과
+    """
+    market = constraints["market_quotes"]["market_category"]
+    usable = [quote for quote in quotes if quote["market"] == market]
+    if not usable:
+        return missing_quote_reason(item, as_of, constraints)
+    return provenance_problem(usable, as_of, constraints)
+
+
 def missing_quote_reason(item: str, as_of: str, constraints: Mapping[str, Any]) -> str:
     """시세를 한 건도 못 받은 날의 사유. **오케스트레이터가 원인을 알 수 있어야 한다.**
 
@@ -318,11 +559,10 @@ def missing_quote_reason(item: str, as_of: str, constraints: Mapping[str, Any]) 
       않는다(모르는 품목이면 KeyError 로 멈춘다). 그래서 여기서 규격을 이름으로 말해도
       "안 쓴 규격을 썼다고 적는" 일이 생기지 않는다 — 계약 테스트가 그 전제를 잠근다.
 
-    🔴 **원인을 하나로 좁히지 않는다.** 0건이 되는 길이 셋인데(휴장 · 그 규격 미거래 ·
-      기록 판독 불가) 포트 반환형이 ``list[dict]`` 라 어느 쪽인지를 실어 보낼 자리가 없다.
-      하나만 적으면 나머지 둘일 때 **없는 원인을 보고하는 것**이 된다 — 규칙 3의 0/NULL
-      구분이 무너지는 자리이고, 읽는 사람이 엉뚱한 데를 확인하러 간다. 셋을 다 적어
-      "여기부터 보라"를 정확히 남긴다.
+    🔴 **"그날 휴장"이라고 말하지 않는다.** 쿼리가 ``auction_date < as_of`` 로 **전 기간**을
+      훑어 최신일을 고르므로, 빈 결과는 그날 하루의 사정이 아니라 *"as_of 이전 어느 날에도
+      그 좌표로 쓸 수 있는 기록이 없다"* 는 뜻이다. 쿼리를 바꾸면서 사유를 안 바꿔
+      한동안 틀린 말을 하고 있었다 (Codex 2차 지적) — 이번 수정이 없애려던 바로 그 종류다.
     """
     market = constraints["market_quotes"]["market_category"]
     spec = spec_for_item(item, constraints)
@@ -333,9 +573,12 @@ def missing_quote_reason(item: str, as_of: str, constraints: Mapping[str, Any]) 
             f"{item} 조회 규격이 아직 정해지지 않아 등급별 경락가를 받지 못했다 "
             f"— 시세 없이 매입 수량을 정할 수 없어 안을 만들지 않았다"
         )
+    # 규격 이름도 **as_of 에 맞는 것**을 고른다. 2017년 무를 18kg 로 조회해 놓고
+    # "20kg 규격에서"라고 적으면 무엇을 봤는지가 거짓이 된다 (Codex 2차 지적).
+    label = _spec_label_on(spec, as_of)
     return (
-        f"{market} {as_of} {spec['label']} 규격에서 쓸 수 있는 낙찰 기록을 받지 못했다 "
-        f"— 휴장일이거나, 그날 그 규격의 거래가 없었거나, 받은 기록의 금액·중량을 읽을 수 "
-        f"없었다. 셋 중 어느 쪽이든 보유 재고와는 무관하다. "
+        f"{as_of} 이전 기간에 {market} {label} 규격으로 쓸 수 있는 낙찰 기록이 없다 "
+        f"— 그 좌표의 거래 자체가 없었거나, 있던 기록의 금액·중량을 읽을 수 없었다는 뜻이고, "
+        f"보유 재고와는 무관하다. "
         f"시세 없이 매입 수량을 정할 수 없어 안을 만들지 않았다"
     )
