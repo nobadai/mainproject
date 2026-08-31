@@ -160,7 +160,7 @@ function render(value: unknown): React.ReactNode {
         {Object.entries(value).map(([k, v]) => (
           <div key={k} className="flex gap-2">
             <span className="font-mono text-[11.5px] text-faint">{k}</span>
-            <span className="font-mono tabular-nums">{scalar(v)}</span>
+            <span className="font-mono tabular-nums">{cell(v)}</span>
           </div>
         ))}
       </div>
@@ -190,7 +190,7 @@ function Rows({ rows }: { rows: Record<string, unknown>[] }) {
             <tr key={i} className="border-t border-line-soft">
               {columns.map((c) => (
                 <td key={c} className="px-2 py-1 font-mono">
-                  {scalar(row[c])}
+                  {cell(row[c])}
                 </td>
               ))}
             </tr>
@@ -203,6 +203,41 @@ function Rows({ rows }: { rows: Record<string, unknown>[] }) {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * 한 칸을 그린다. 🔴 **모름과 0 을 같은 색으로 두지 않는다.**
+ *
+ * 글자는 진작에 갈라 놨는데(`—` vs `0건`) **색이 같아 눈으로는 구분이 안 됐다**
+ * (실측 2026-08-31, 화면 확인). 뜻이 다른 두 값이 같아 보이면 갈라 놓은 의미가 없다.
+ *
+ * ```text
+ * —      값이 오지 않았다        흐리게 — 읽을 것이 없다는 신호
+ * 0건    0건인 것을 확인했다      본문색 — 이건 **값이다**
+ * ```
+ *
+ * ★ 위 `render()` 의 최상위와 색이 다른 것은 의도다. 최상위 `null` 은 부서가
+ *   **키를 실어 놓고 "모른다" 고 답한 것**이라 눈에 띄어야 하고(`text-warn`),
+ *   표 칸의 빈 자리는 그 행에 해당 사항이 없는 경우가 대부분이다 —
+ *   `LOG-H01 PASS` 에 `skip_reason` 이 없는 것을 경고색으로 칠하면 **다섯 줄 중
+ *   넷이 붉어져** 정작 봐야 할 `LOG-H02` 가 묻힌다.
+ */
+function cell(value: unknown): React.ReactNode {
+  if (value === null || value === undefined) {
+    return (
+      <span className="text-faint" title="값이 오지 않았습니다 (모름)">
+        —
+      </span>
+    );
+  }
+  if (Array.isArray(value) && value.length === 0) {
+    return (
+      <span className="text-muted" title="0건인 것을 확인했습니다">
+        0건
+      </span>
+    );
+  }
+  return scalar(value);
 }
 
 /** 한 칸. **깊이가 더 있으면 JSON 그대로** — 화면이 지어내는 것보다 낫다. */
