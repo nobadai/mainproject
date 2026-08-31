@@ -10,6 +10,8 @@
 import re
 from datetime import date
 
+import pytest
+
 from app.master.verifier import MasterVerifier
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.allocate_sourcing import (
@@ -213,3 +215,73 @@ def test_the_distance_constraint_actually_bites() -> None:
     """거리 제약이 **실제로 좁다**는 것 — 멀어지면 안 걸린다는 사실을 함께 잠근다."""
     pattern = re.compile(re.escape("item_storage_policies") + MasterVerifier._UNRESOLVED_NEAR)
     assert not pattern.search("item_storage_policies 는 반영했으나 등급 어휘가 미확정이다")
+
+
+# ── Codex 교차검증 회귀 (2026-08-31) ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        (10.9, "소수는 조용히 10으로 잘렸다"),
+        ("10", "문자열이 통과했다"),
+        (True, "bool 이 1일로 통과했다"),
+        (0, "0일이면 중품을 아예 못 쓴다 — 확정된 0이 아니라 잘못 온 값이다"),
+        (-5, "음수 보관한계"),
+        ("oops", "int() 가 ValueError 로 노드를 죽였다"),
+    ],
+)
+def test_bad_operational_limit_days_is_not_silently_coerced(bad: object, why: str) -> None:
+    """🟡 **Codex 지적 재현.** 이상한 보관한계를 고쳐 쓰지도, 터지지도 않는다.
+
+    잘린 값은 에러가 나지 않아 아무도 모르고, ``ValueError`` 는 봉투 하나가 그래프
+    전체를 멈춘다. 둘 다 안 되므로 **못 쓰는 값으로 보고 폴백**한다.
+    """
+    inventory = {
+        "item_storage_policies": [{"item": ITEM, "operational_limit_days": bad}],
+        "lots": [{"lot_id": "L1", "grade": "상", "available_qty_kg": 100}],
+    }
+    assert top_grade_shelf_days(inventory, "상", ITEM) is None, why
+
+
+@pytest.mark.parametrize("bad", [0, -0.5, 5.0, True, "x", float("nan")])
+def test_bad_medium_grade_factor_falls_back_instead_of_distorting(bad: object) -> None:
+    """🟡 **Codex 지적 재현.** 범위 밖 계수는 폴백으로 보내고 **고지한다.**
+
+    ``0``·음수는 폴백도 고지도 없이 중품 배분을 0으로 만들었고, ``1`` 초과는 중품
+    소진 한계를 상품 한계일보다 길게 만들어 개념을 뒤집었다.
+    """
+    constraints = load_constraints()
+    inventory = {"item_storage_policies": [
+        {"item": ITEM, "operational_limit_days": 10, "medium_grade_factor": bad}
+    ]}
+    ratio, fell_back = mid_grade_shelf_ratio(inventory, ITEM, constraints)
+    assert fell_back is True
+    assert ratio == constraints["grade"]["mid_grade_shelf_ratio_fallback"]
+
+
+@pytest.mark.parametrize(
+    ("lots", "forbidden"),
+    [
+        ([{"lot_id": "L1", "grade": "상", "shelf_life_days": None}], "등급 로트가 없어"),
+        (
+            [
+                {"lot_id": "L1", "grade": "상"},
+                {"lot_id": "L2", "grade": "중", "shelf_life_days": 10},
+            ],
+            "등급 로트가 없어",
+        ),
+    ],
+    ids=["상등급_값이_None", "중등급에만_키가_있음"],
+)
+def test_reason_does_not_deny_a_lot_that_exists(lots: list, forbidden: str) -> None:
+    """🟡 **Codex 지적 재현.** 있는 로트를 없다고 말하지 않는다.
+
+    사유 판정이 "키가 있는가"를 보고 ``top_grade_shelf_days`` 는 "값이 있는가"를 봤다.
+    두 기준이 갈리자 **상 등급 로트가 있는데도** *"상 등급 로트가 없어"* 라고 답했다 —
+    재고에 없는 사실을 만들어 내는 것이라, 읽는 사람이 창고를 잘못 이해한다.
+    """
+    inventory = {"lots": lots}
+    reason = shelf_days_block_reason(inventory, "상", ITEM)
+    assert forbidden not in reason, f"있는 로트를 부정한다: {reason!r}"
+    assert "받지 못했다" in reason or "읽지 못했다" in reason
