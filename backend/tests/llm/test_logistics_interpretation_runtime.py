@@ -12,7 +12,7 @@ from app.logistics.llm.runtime import (
     needs_llm,
     validate_interpretation,
 )
-from app.logistics.llm.schemas import SanitizedLLMContext
+from app.logistics.llm.schemas import ContextFact, SanitizedLLMContext
 
 
 class FakeProvider:
@@ -43,10 +43,25 @@ def _service(provider):
     )
 
 
+def _freshness_facts() -> list[ContextFact]:
+    return [
+        ContextFact(
+            fact_id="freshness_risk_lot_count",
+            label="신선도 임박 가용 Lot 수",
+            display_value="3개",
+        ),
+        ContextFact(
+            fact_id="freshness_min_remaining_ratio",
+            label="최소 신선도 잔여 비율",
+            display_value="25.0% (임계 30%)",
+        ),
+    ]
+
+
 def _context():
     return SanitizedLLMContext(
         signals=["FRESHNESS_QUALITY_RISK"],
-        facts=["재고의 우선 출고와 품질 위험 검토가 필요합니다."],
+        facts=_freshness_facts(),
         allowed_adjustments=["우선 출고 대상으로 검토합니다."],
         # Rule 이 정한 우선 조정 — 없으면 검증기가 추천을 null 로 강제한다.
         preferred_adjustment="우선 출고 대상으로 검토합니다.",
@@ -111,9 +126,10 @@ def test_logistics_provider_failure_does_not_fail_interpretation():
 
 
 def _gate_context(signals: list[str]) -> SanitizedLLMContext:
+    # 게이트 판정은 facts 를 읽지 않는다 — signal 만으로 호출 여부를 정한다.
     return SanitizedLLMContext(
         signals=signals,
-        facts=["게이트 검증용"] * len(signals),
+        facts=[],
         allowed_adjustments=[],
     )
 
@@ -153,7 +169,7 @@ def test_fail_blocks_the_call_even_with_signals():
 def _validator_context(**overrides) -> SanitizedLLMContext:
     fields = {
         "signals": ["INVENTORY_FRESHNESS_PRESSURE"],
-        "facts": ["기존 재고의 신선도 잔여가 보관한계 대비 충분하지 않습니다."],
+        "facts": _freshness_facts(),
         "allowed_adjustments": ["quantity", "timing"],
         "preferred_adjustment": None,
         "missing_data": [],
@@ -171,7 +187,7 @@ def _raw(summary: str, risks: list[str], suggested: str | None) -> str:
 
 def test_digit_bearing_risk_code_is_not_a_numeric_violation():
     """risks 는 signal 코드 보존 필드다 — 코드 속 숫자로 FALLBACK 이 나면 안 된다."""
-    context = _validator_context(signals=["LOG-H02"], facts=["방어선 검증용"])
+    context = _validator_context(signals=["LOG-H02"], facts=[])
 
     interpretation = validate_interpretation(
         _raw("구역별 수용량이 확정되지 않았습니다.", ["LOG-H02"], None), context

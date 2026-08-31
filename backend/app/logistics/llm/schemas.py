@@ -20,6 +20,26 @@ LLMErrorKind = Literal[
 ]
 
 
+class ContextFact(BaseModel):
+    """판정에 실제 사용된 수치의 확정 표기 (LLM 정책 결정서 v1.3 §5).
+
+    LLM에 계산을 시키지 않는다는 원칙은 그대로다 — LLM이 할 수 있는 것은
+    `display_value` 표기의 인용뿐이다. 1차에서 `raw_value`·`unit`·`date`·`source`
+    필드는 추가하지 않는다. 관계 수치(판정값과 임계)는 "91.7% (임계 90%)" 처럼
+    한 fact로 묶어 라벨-값 오용 위험을 줄인다 — 의미 관계의 semantic validation
+    은 v1.3 범위 밖이다.
+    `display_value`는 단일 formatter(interpretation.py)만 만든다 — 인용 검사가
+    exact 대조라 표기가 두 곳에서 만들어지면 검증이 흔들린다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 무숫자 명명 — 숫자 포함 코드는 검증기의 숫자 검사와 충돌한 전례가 있다.
+    fact_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    display_value: str = Field(min_length=1)
+
+
 class AgentInterpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -43,7 +63,10 @@ class SanitizedLLMContext(BaseModel):
 
     domain: Literal["LOGISTICS"] = "LOGISTICS"
     signals: list[str]
-    facts: list[str]
+    #: 판정에 실제 사용된 수치의 구조화 표기 (v1.3 — 결론 문장 폐기).
+    #: 상한: signal당 최대 3개 · Context 전체 최대 8개. 초과 시 조용한 절단 금지 —
+    #: LLM을 호출하지 않고 무숫자 Template을 유지한다 (조립기가 강제).
+    facts: list[ContextFact]
     allowed_adjustments: list[str]
     #: Rule/Scenario Engine이 이미 결정한 우선 조정 방향. LLM이 고르지 않는다 —
     #: 값이 있으면 그 방향만 설명하고, None이면 추천하지 않는다(검증기가 강제).
@@ -64,6 +87,11 @@ class InterpretationResult(BaseModel):
     llm_fallback_used: bool
     #: 최종 실패 원인. SUCCESS(재시도 후 성공 포함)면 None.
     llm_error_kind: LLMErrorKind | None = None
+    #: LLM 호출에 사용된 fact 목록. 기준은 수신이 아니라 **호출 확정**이다 —
+    #: provider.generate(context)의 입력으로 쓰였으면 기록한다. Key 없음(AUTH_ERROR)
+    #: 처럼 전송 전에 실패한 FALLBACK도 기록된다. "Gemini가 실제 수신한 값"을
+    #: 뜻하지 않는다. SUCCESS·FALLBACK → 기록 / SKIPPED_TEMPLATE·DISABLED → 빈 목록.
+    llm_context_facts: list[ContextFact] = Field(default_factory=list)
 
 
 def default_interpretation() -> AgentInterpretation:
@@ -82,3 +110,6 @@ class LLMResponseFields(BaseModel):
     llm_attempts: int = Field(default=0, ge=0)
     llm_fallback_used: bool = False
     llm_error_kind: LLMErrorKind | None = None
+    #: LLM 호출에 사용된 Sanitized ContextFact 목록 — 독립 Response로 노출되고
+    #: response_payload 실행이력에 자동 기록된다 (저장 스키마 무변경).
+    llm_context_facts: list[ContextFact] = Field(default_factory=list)

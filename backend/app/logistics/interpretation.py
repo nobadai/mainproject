@@ -1,22 +1,28 @@
 """Logistics deterministic Reply projection into the optional LLM layer."""
 
 import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.logistics.llm.runtime import InterpretationService, get_interpretation_service
-from app.logistics.llm.schemas import SanitizedLLMContext
-from app.logistics.rules import BUSINESS_SIGNALS, SALES_PRIORITY_ADJUSTMENT
+from app.logistics.llm.schemas import ContextFact, SanitizedLLMContext
+from app.logistics.rules import (
+    BUSINESS_SIGNALS,
+    SALES_PRIORITY_ADJUSTMENT,
+    SignalMeasurements,
+)
 from app.logistics.schemas import LogisticsProcurementResponse, LogisticsSalesResponse
 
 logger = logging.getLogger(__name__)
 
-#: 업무 위험 signal 의 사람용 의미. signals 에 실리는 코드만 여기 있으면 된다 —
-#: 데이터/정책 미확정은 missing_data 번역명으로 가므로 facts 를 만들지 않는다.
-_LOGISTICS_FACTS = {
-    "CAPACITY_TIGHT": "확정 입출고를 반영한 미래 창고 여유가 운영 임계 수준 이하입니다.",
-    "FRESHNESS_QUALITY_RISK": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
-    "INVENTORY_FRESHNESS_PRESSURE": "기존 재고의 신선도 잔여가 보관한계 대비 충분하지 않습니다.",
-    "SCENARIO_ADJUSTMENT_REQUIRED": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
-}
+#: fact 상한 (LLM 정책 결정서 v1.3 §5). 초과 시 조용한 절단 금지 — LLM을 호출하지
+#: 않고 무숫자 Template을 유지한다 (SKIPPED_TEMPLATE · llm_context_facts=[] · 로그).
+#:
+#: ★ 이 가드는 **의도적 휴면 상태다.** 현행 조립기의 실측 최대는 signal당 2개
+#:   (신선도) · 전체 4개(capacity 1 + 신선도 2 + 시나리오 1)라 상한 3/8에 닿을 수
+#:   없다. 죽은 코드가 아니라 signal·fact가 늘어나는 날을 위한 확장 자리다 —
+#:   _COMPOSITE_SIGNALS 휴면과 같은 성격이다.
+_MAX_FACTS_PER_SIGNAL = 3
+_MAX_CONTEXT_FACTS = 8
 
 #: 내부 미확정 코드 → 사람이 읽을 무숫자 번역명. 코드 1개 → 이름 1개이며,
 #: 여러 미확정을 하나로 뭉개지 않는다 (LLM 정책 결정서 §5).
@@ -65,15 +71,153 @@ def translate_missing_data(codes: list[str]) -> list[str]:
     return names
 
 
+def format_measured_percent(value: Decimal) -> str:
+    """측정 비율의 확정 표기 — 백분율 소수 1자리 · ROUND_HALF_UP (표기 스펙 2026-08-31).
+
+    정수 반올림은 경계(89.6% → "90%")에서 표기와 판정이 어긋나 보이고, 내림은
+    사용률·잔여비율의 위험 방향이 반대라 한쪽에서 위험을 과장한다. float round()는
+    banker's rounding이라 같은 값 → 같은 표기 보장이 깨진다 — 쓰지 않는다.
+    """
+    percent = (value * Decimal(100)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{percent}%"
+
+
+def format_policy_percent(value: Decimal) -> str:
+    """임계(정책값)의 확정 표기 — 유효 정밀도 보존 + trailing zero 제거.
+
+    0.90 → "90%" · 0.925 → "92.5%". 정수로 강제하면 실측 후 임계가 소수가 될 때
+    다시 의미가 틀어진다. 자릿수 상한은 여기서 두지 않는다 — 정밀도는 정책값
+    (`agent_policy_config.value_numeric`)이 소유하고 formatter 는 그대로 보존한다.
+    표기가 길어지면 그것은 정책값 등록 시 자릿수를 정할 사안이지 formatter 가
+    몰래 반올림할 사안이 아니다 (PR #104 리뷰 반영).
+    """
+    percent = value * Decimal(100)
+    return f"{percent.normalize():f}%"
+
+
+def format_ratio_with_threshold(measured: Decimal, threshold: Decimal) -> str:
+    """관계 수치 한 fact 표기 — 라벨-값 오용 위험을 줄인다.
+
+    검증기는 숫자 토큰만 대조하므로 두 토큰을 서로 바꿔 쓰는 것까지 막지는
+    못한다 — 의미 관계의 semantic validation 은 v1.3 범위 밖이다 (결정서 §5).
+    """
+    return f"{format_measured_percent(measured)} (임계 {format_policy_percent(threshold)})"
+
+
+def format_count(value: int, unit: str) -> str:
+    """건수·개수 표기 — 숫자마다 단위를 붙인다 (단위 없는 숫자는 인용 불가)."""
+    return f"{value}{unit}"
+
+
+def _build_signal_facts(signal: str, measurements: SignalMeasurements) -> list[ContextFact]:
+    """signal별 fact 조립 (v1.3 §5). 조정 축은 fact로 싣지 않는다 —
+    allowed_adjustments·preferred_adjustment가 정본이다."""
+    if signal == "CAPACITY_TIGHT":
+        usage = measurements.get("capacity_window_usage")
+        threshold = measurements.get("capacity_tight_ratio")
+        if usage is None or threshold is None:
+            return []
+        return [
+            ContextFact(
+                fact_id="capacity_window_usage",
+                label="판정 창 최대 창고 사용률",
+                display_value=format_ratio_with_threshold(usage, threshold),
+            )
+        ]
+    if signal in ("INVENTORY_FRESHNESS_PRESSURE", "FRESHNESS_QUALITY_RISK"):
+        count = measurements.get("freshness_risk_lot_count")
+        min_ratio = measurements.get("freshness_min_remaining_ratio")
+        threshold = measurements.get("freshness_pressure_ratio")
+        if count is None or min_ratio is None or threshold is None:
+            return []
+        return [
+            ContextFact(
+                fact_id="freshness_risk_lot_count",
+                label="신선도 임박 가용 Lot 수",
+                display_value=format_count(count, "개"),
+            ),
+            ContextFact(
+                fact_id="freshness_min_remaining_ratio",
+                label="최소 신선도 잔여 비율",
+                display_value=format_ratio_with_threshold(min_ratio, threshold),
+            ),
+        ]
+    if signal == "SCENARIO_ADJUSTMENT_REQUIRED":
+        conditional = measurements.get("scenario_conditional_count")
+        total = measurements.get("scenario_total_count")
+        if conditional is None or total is None:
+            return []
+        conditional_text = format_count(conditional, "건")
+        total_text = format_count(total, "건")
+        return [
+            ContextFact(
+                fact_id="scenario_conditional_count",
+                label="조정 필요 시나리오 수",
+                display_value=f"조건부 {conditional_text} (전체 {total_text})",
+            )
+        ]
+    return []
+
+
+def _assemble_facts(
+    signals: list[str],
+    measurements: SignalMeasurements,
+) -> tuple[list[ContextFact], bool]:
+    """signal 전체의 fact 목록과 fail-closed 플래그 (상한 초과 또는 조립 실패).
+
+    True 면 호출부가 LLM 을 호출하지 않는다 (Core 는 정상). 상한 초과는 조용한
+    절단 금지이고, 조립 실패(signal 은 섰는데 판정 수치가 전달되지 않음)는 배선
+    버그다 — 확인된 fact 없이 해석시키지 않고 무숫자 Template 로 남긴다."""
+    facts: list[ContextFact] = []
+    seen_fact_ids: set[str] = set()
+    for signal in signals:
+        signal_facts = _build_signal_facts(signal, measurements)
+        if not signal_facts:
+            # 업무 signal 은 전부 fact 를 동반해야 한다 — measurements 미전달은
+            # Rule→Service 배선이 깨진 상태이므로 fail-closed 로 LLM 을 건너뛴다.
+            logger.warning(
+                "Logistics fact assembly failed: signal=%s has no measurements — LLM skipped",
+                signal,
+            )
+            return [], True
+        # fact_id 중복 방어 — 신선도 두 signal(매입·판매)이 같은 fact_id 를 내는
+        # 구조라, 사이클 분리가 무너져 공존하게 되면 같은 fact 가 두 번 나간다.
+        # 첫 것만 유지하고 사실을 로그로 남긴다 (같은 값의 중복이라 의미 손실 없음).
+        deduped = [fact for fact in signal_facts if fact.fact_id not in seen_fact_ids]
+        if len(deduped) < len(signal_facts):
+            logger.warning("Duplicate logistics fact_id dropped: signal=%s", signal)
+        signal_facts = deduped
+        seen_fact_ids.update(fact.fact_id for fact in signal_facts)
+        if len(signal_facts) > _MAX_FACTS_PER_SIGNAL:
+            logger.warning(
+                "Logistics fact overflow: signal=%s count=%d limit=%d — LLM skipped",
+                signal,
+                len(signal_facts),
+                _MAX_FACTS_PER_SIGNAL,
+            )
+            return [], True
+        facts.extend(signal_facts)
+    if len(facts) > _MAX_CONTEXT_FACTS:
+        logger.warning(
+            "Logistics fact overflow: total=%d limit=%d — LLM skipped",
+            len(facts),
+            _MAX_CONTEXT_FACTS,
+        )
+        return [], True
+    return facts, False
+
+
 def build_logistics_context(
     response: LogisticsProcurementResponse | LogisticsSalesResponse,
-) -> SanitizedLLMContext:
-    """결정론 응답에서 LLM Context 를 조립한다.
+    measurements: SignalMeasurements | None = None,
+) -> tuple[SanitizedLLMContext, bool]:
+    """결정론 응답에서 LLM Context 를 조립한다. 반환은 (context, facts_incomplete).
 
     signals 와 missing_data 는 저장 위치가 아니라 **코드의 의미**로 분류한다 —
     soft_warnings 안의 업무 위험(BUSINESS_SIGNALS)만 signals 로 가고, 나머지
-    미확정 계열은 response.missing_data(이미 번역됨)로 전달된다. 원본 숫자·lot_id
-    는 싣지 않는다 — 이 Context 가 외부 Provider 전송 경계다.
+    미확정 계열은 response.missing_data(이미 번역됨)로 전달된다. facts 는 판정에
+    실제 사용된 수치의 확정 표기뿐이다 — 원본 DB row·lot_id·거래처·날짜·판정에
+    쓰이지 않은 수치는 싣지 않는다. 이 Context 가 외부 Provider 전송 경계다.
     """
     signals = _unique(
         [warning for warning in response.soft_warnings if warning in BUSINESS_SIGNALS]
@@ -84,18 +228,17 @@ def build_logistics_context(
         )
     else:
         allowed_adjustments = list(_PROCUREMENT_ALLOWED_ADJUSTMENTS)
-    return SanitizedLLMContext(
+    facts, incomplete = _assemble_facts(signals, measurements or {})
+    context = SanitizedLLMContext(
         domain="LOGISTICS",
         signals=signals,
-        facts=[
-            _LOGISTICS_FACTS.get(signal, "정의되지 않은 재고물류 신호가 확인되었습니다.")
-            for signal in signals
-        ],
+        facts=facts,
         allowed_adjustments=allowed_adjustments,
         # Rule/Scenario Engine 이 정한 값을 그대로 나른다 — LLM 이 고르지 않는다.
         preferred_adjustment=response.preferred_adjustment,
         missing_data=list(response.missing_data),
     )
+    return context, incomplete
 
 
 def enrich_logistics_response[
@@ -103,9 +246,10 @@ def enrich_logistics_response[
 ](
     response: LogisticsResponse,
     interpretation_service: InterpretationService | None = None,
+    measurements: SignalMeasurements | None = None,
 ) -> LogisticsResponse:
     service = interpretation_service or get_interpretation_service()
-    context = build_logistics_context(response)
+    context, facts_incomplete = build_logistics_context(response, measurements)
     result = service.interpret(
         context,
         runtime_ready=response.runtime_status == "READY",
@@ -115,9 +259,12 @@ def enrich_logistics_response[
         has_blocking_constraints=any(
             constraint.status == "FAIL" for constraint in response.hard_constraints
         ),
+        facts_incomplete=facts_incomplete,
     )
-    update = result.model_dump(exclude={"interpretation"})
+    update = result.model_dump(exclude={"interpretation", "llm_context_facts"})
     update["interpretation"] = result.interpretation
+    # model_copy 는 검증하지 않으므로 dict 가 아니라 모델 객체를 그대로 싣는다.
+    update["llm_context_facts"] = list(result.llm_context_facts)
     return response.model_copy(update=update)
 
 

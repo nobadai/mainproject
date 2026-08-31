@@ -381,6 +381,62 @@ def test_sales_response_sets_priority_preferred_when_risk_fires(
     assert response.preferred_adjustment == SALES_PRIORITY_ADJUSTMENT
 
 
+def test_sales_wiring_carries_rule_measurements_to_llm_context_facts(
+    logistics_sales_payload, complete_logistics_snapshot
+):
+    """Rule 판정 수치 → Service 전달 → llm_context_facts 까지 실제 배선 검증.
+
+    수치를 테스트가 만들어 넣지 않고 Snapshot 에서 Rule 이 계산한 값이 응답까지
+    도달하는지를 본다 — Service 전달 실수(fact 누락)는 단위 테스트로 못 잡는다.
+    """
+    import json
+
+    request = LogisticsSalesRequest.model_validate(logistics_sales_payload)
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [_lot(remaining_freshness_days=2, effective_freshness_limit_days=10)],
+            "freshness_pressure_ratio": Decimal("0.30"),
+        }
+    )
+
+    class _ValidProvider:
+        def generate(self, context, *, retry_guidance=None):
+            del context, retry_guidance
+            return json.dumps(
+                {
+                    "summary": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
+                    "risks": ["FRESHNESS_QUALITY_RISK"],
+                    "suggested_adjustment": SALES_PRIORITY_ADJUSTMENT,
+                },
+                ensure_ascii=False,
+            )
+
+    service = InterpretationService(
+        LLMSettings(
+            enabled=True,
+            provider="fake",
+            model="fake-model",
+            base_url="http://127.0.0.1:11434",
+            timeout_seconds=1,
+            max_retries=0,
+        ),
+        _ValidProvider(),
+    )
+
+    response = run_logistics_sales_with_snapshot(request, snapshot, service)
+
+    assert response.llm_status == "SUCCESS"
+    # Rule 이 Snapshot 에서 계산한 값(위험 Lot 1개 · 잔여비율 2/10)이 formatter 를
+    # 거쳐 그대로 도달한다 — 테스트가 수치를 주입하지 않았다.
+    assert [(f.fact_id, f.display_value) for f in response.llm_context_facts] == [
+        ("freshness_risk_lot_count", "1개"),
+        ("freshness_min_remaining_ratio", "20.0% (임계 30%)"),
+    ]
+    # response_payload 실행이력 자동 기록의 전제 — 직렬화에 facts 가 실린다.
+    dumped = response.model_dump(mode="json")
+    assert dumped["llm_context_facts"][0]["display_value"] == "1개"
+
+
 def test_sales_response_without_risk_has_no_preferred(
     logistics_sales_payload, complete_logistics_snapshot
 ):

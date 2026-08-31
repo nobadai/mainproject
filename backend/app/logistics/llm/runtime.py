@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.logistics.llm.schemas import (
     AgentInterpretation,
+    ContextFact,
     InterpretationResult,
     LLMErrorKind,
     LLMStatus,
@@ -36,8 +37,17 @@ _DEFAULT_MODELS = {
     "ollama": "gemma3:4b",
     "gemini": "gemini-3.5-flash-lite",
 }
-_NUMERIC_PATTERN = re.compile(r"\d")
-_SENTENCE_SPLIT = re.compile(r"[.!?。]+")
+#: 숫자+단위 결합 토큰 (v1.3 인용 화이트리스트). 부호까지 포함해 하나로 추출한다 —
+#: "-30%"·"+30%"가 허용 토큰 "30%"의 부분 문자열로 통과하는 우회를 막는다 (교차 검증
+#: 지적). "%"에는 부정 전방탐색을 걸어 "30%%"가 "30%"로 잘려 통과하지 않게 한다
+#: ("%%"에서 % 단위 매치가 실패하면 무단위 토큰 "30"이 되어 거부된다 — fail-closed).
+#: 단위 없는 숫자("0.92")도 토큰으로 잡혀 화이트리스트 대조에서 거부된다.
+#: 한글 단위 뒤에 조사가 붙는 경우("3개이며")는 패턴이 아니라 _is_quoted_token 의
+#: 조사 화이트리스트가 처리한다 — "3개월" 같은 단위 연장은 조사가 아니므로 거부된다.
+_NUMERIC_TOKEN_PATTERN = re.compile(r"[+-]?\d(?:[\d.,/]*\d)?(?:%p|%(?!%)|[A-Za-z]+|[가-힣]+)?")
+#: 문장 구분자 — 마침표는 숫자 사이 소수점("91.7%")을 제외한다. 소수점을 문장으로
+#: 세면 표기 스펙이 공식 지원하는 소수 표기가 TOO_MANY_SENTENCES 로 오거부된다.
+_SENTENCE_SPLIT = re.compile(r"(?:(?<!\d)\.(?!\d)|[!?。])+")
 _MAX_SUMMARY_CHARACTERS = 240
 #: 단독으로 LLM 을 호출할 수 있는 질적 업무 위험 (LLM 정책 결정서 §2).
 _QUALITATIVE_SIGNALS = {
@@ -58,7 +68,9 @@ SYSTEM_PROMPT = """당신은 Inventory/Logistics Agent의 해석 레이어다.
 계산기나 결정 엔진이 아니며 질적 설명만 작성한다.
 
 규칙:
-- 숫자, 날짜, 금액, 수량, 비율, 용량을 출력하지 않는다.
+- 숫자를 새로 만들지 않는다. facts의 display_value 표기만 그대로 인용할 수 있고,
+  가능하면 label의 의미와 함께 서술한다. 환산·반올림·단위 변경도 새 숫자다.
+- facts에 없는 날짜, 금액, 수량, 비율, 용량을 출력하지 않는다.
 - 계산하거나 추정하지 않는다.
 - risks에는 signals에 있는 코드만 사용한다.
 - 모든 signal을 정확히 한 번 보존한다.
@@ -266,21 +278,27 @@ class InterpretationService:
         *,
         runtime_ready: bool,
         has_blocking_constraints: bool,
+        facts_incomplete: bool = False,
     ) -> InterpretationResult:
         template = build_template_interpretation(context)
         if not self.settings.enabled:
             return self._result(template, status="DISABLED", attempts=0, fallback=False)
-        if not needs_llm(
+        if facts_incomplete or not needs_llm(
             context,
             runtime_ready=runtime_ready,
             has_blocking_constraints=has_blocking_constraints,
         ):
+            # fact 상한 초과·조립 실패는 조용한 절단이 아니라 LLM 미호출이다 (v1.3
+            # §5) — 결정론 결과 + 무숫자 Template 유지, 원인은 조립기가 로그로 남긴다.
             return self._result(
                 template,
                 status="SKIPPED_TEMPLATE",
                 attempts=0,
                 fallback=False,
             )
+        # 여기부터는 호출 확정이다 — provider.generate(context)의 입력으로 쓰이므로
+        # 전송 전에 실패(AUTH_ERROR 등)해도 llm_context_facts에 기록된다 (v1.3 §5).
+        context_facts = list(context.facts)
 
         # 전송 재시도와 검증(correction) 재시도는 **별도 예산**이다 (결정서 §6).
         # 하나의 카운터를 공유하면 첫 호출이 timeout 일 때 검증 실패의 correction
@@ -320,6 +338,7 @@ class InterpretationService:
                 status="SUCCESS",
                 attempts=attempts,
                 fallback=False,
+                context_facts=context_facts,
             )
         return self._result(
             template,
@@ -327,6 +346,7 @@ class InterpretationService:
             attempts=attempts,
             fallback=True,
             error_kind=error_kind,
+            context_facts=context_facts,
         )
 
     def _result(
@@ -337,6 +357,7 @@ class InterpretationService:
         attempts: int,
         fallback: bool,
         error_kind: LLMErrorKind | None = None,
+        context_facts: list[ContextFact] | None = None,
     ) -> InterpretationResult:
         return InterpretationResult(
             interpretation=interpretation,
@@ -347,6 +368,8 @@ class InterpretationService:
             llm_fallback_used=fallback,
             # 최종 상태만 기록한다 — 재시도 후 성공이면 None (중간 실패는 로그 몫).
             llm_error_kind=error_kind,
+            # 호출 확정된 facts만 기록 — SKIPPED_TEMPLATE·DISABLED는 빈 목록.
+            llm_context_facts=list(context_facts or []),
         )
 
 
@@ -477,11 +500,16 @@ def _validation_issues(
     context: SanitizedLLMContext,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    # 숫자 금지는 summary·suggested_adjustment 만 검사한다. risks 는 signal 코드
-    # 보존 필드라 제외한다 — 코드에 숫자가 든 signal 이 오면(방어선) 보존 규칙과
+    # 숫자 검사는 v1.3부터 인용 화이트리스트다 — 출력의 모든 숫자+단위 토큰이
+    # display_value 토큰 집합에 완전 일치해야 한다. 새 숫자의 생성·계산·환산
+    # ("0.92"·"93%"·"2%p")만 차단하고 자연어 수식("약")은 통제하지 않는다.
+    # 검사 범위는 summary·suggested_adjustment 유지. risks 는 signal 코드 보존
+    # 필드라 제외한다 — 코드에 숫자가 든 signal 이 오면(방어선) 보존 규칙과
     # 숫자 규칙이 충돌해 구조적으로 매번 FALLBACK 이 되기 때문이다 (결정서 §5).
     numeric_scope = " ".join([interpretation.summary, interpretation.suggested_adjustment or ""])
-    if _NUMERIC_PATTERN.search(numeric_scope):
+    allowed_tokens = _allowed_numeric_tokens(context)
+    output_tokens = _NUMERIC_TOKEN_PATTERN.findall(numeric_scope)
+    if any(not _is_quoted_token(token, allowed_tokens) for token in output_tokens):
         issues.append(ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN)
     expected_signals = set(context.signals)
     actual_signals = set(interpretation.risks)
@@ -516,12 +544,92 @@ def _validation_issues(
     return issues
 
 
+#: 한글 단위 토큰 뒤에 이어질 수 있는 조사·어미 (fail-closed 화이트리스트).
+#: "3개이며"는 "3개" 인용 + 조사 "이며"다 — 여기 없는 접미("3개월"의 "월")는 단위
+#: 연장으로 간주해 거부한다. 조사를 패턴에서 탐욕 매치로 흡수하면 정당한 인용이
+#: 전부 깨지고, 무제한 허용하면 단위 바꿔치기가 뚫린다 — 목록 대조가 그 사이다.
+_KOREAN_PARTICLE_SUFFIXES = frozenset(
+    {
+        "이",
+        "가",
+        "은",
+        "는",
+        "을",
+        "를",
+        "와",
+        "과",
+        "의",
+        "도",
+        "만",
+        "씩",
+        "이며",
+        "이고",
+        "이라",
+        "이라서",
+        "라서",
+        "이므로",
+        "이니",
+        "인",
+        "임",
+        "이다",
+        "입니다",
+        "이었습니다",
+        "였습니다",
+        "이었고",
+        "였고",
+        "이었으며",
+        "였으며",
+        "로",
+        "으로",
+        "에",
+        "에서",
+        "부터",
+        "까지",
+        "보다",
+        "처럼",
+        "만큼",
+        "조차",
+        "마저",
+    }
+)
+
+
+def _allowed_numeric_tokens(context: SanitizedLLMContext) -> frozenset[str]:
+    """display_value 표기에서 인용 가능한 숫자+단위 토큰 집합 (fail-closed의 기준).
+
+    출력 검사와 **같은 패턴**으로 추출한다 — 추출 규칙이 두 벌이면 화이트리스트와
+    검사가 어긋난다. "91.7% (임계 90%)" 한 fact의 두 토큰이 모두 인용 가능하다.
+    표기 동치("25.0%" ↔ "25%")도 허용하지 않는다 — display_value 가 곧 화이트리스트
+    라는 v1.3 계약의 완전 일치를 유지한다. 표기 축약이 자주 FALLBACK 을 만들면
+    검사기를 느슨하게 할 것이 아니라 formatter 표기 정책을 다시 결정한다.
+    """
+    tokens: set[str] = set()
+    for fact in context.facts:
+        tokens.update(_NUMERIC_TOKEN_PATTERN.findall(fact.display_value))
+    return frozenset(tokens)
+
+
+def _is_quoted_token(token: str, allowed: frozenset[str]) -> bool:
+    """토큰이 허용 표기의 정확한 인용인가 — 부분 일치 금지, 한글 조사만 예외."""
+    if token in allowed:
+        return True
+    # 한글 단위 토큰은 조사가 붙어 추출된다("3개이며") — 허용 토큰 + 조사 화이트리스트
+    # 조합만 통과시킨다. "3개월"의 "월"처럼 목록에 없는 접미는 거부된다.
+    return any(
+        token.startswith(quoted) and token[len(quoted) :] in _KOREAN_PARTICLE_SUFFIXES
+        for quoted in allowed
+    )
+
+
 def retry_guidance(issues: list[ValidationIssue]) -> list[str]:
     guidance = []
     if ValidationIssue.INVALID_SCHEMA in issues:
         guidance.append("지정된 세 필드만 포함한 유효한 JSON을 작성하세요.")
     if ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN in issues:
-        guidance.append("숫자와 날짜를 사용하지 마세요.")
+        guidance.append(
+            "숫자는 facts의 display_value 표기만 그대로 인용하세요. "
+            "새 숫자를 만들거나 환산·반올림하지 마세요."
+        )
     if ValidationIssue.SIGNAL_MISSING in issues:
         guidance.append("제공된 모든 signal을 risks에 정확히 한 번 포함하세요.")
     if ValidationIssue.UNSUPPORTED_RISK in issues:
@@ -544,10 +652,25 @@ def retry_guidance(issues: list[ValidationIssue]) -> list[str]:
     return guidance
 
 
+#: Template Fallback의 무숫자 고정 문형 — signal 코드별 사람용 의미.
+#: v1.3에서 facts가 수치 표기(ContextFact)로 바뀌었지만 Template은 무숫자 문형을
+#: 유지한다 — Fallback까지 인용 검증 대상으로 만들지 않는다 (결정서 §5).
+_TEMPLATE_SIGNAL_PHRASES = {
+    "CAPACITY_TIGHT": "확정 입출고를 반영한 미래 창고 여유가 운영 임계 수준 이하입니다.",
+    "FRESHNESS_QUALITY_RISK": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
+    "INVENTORY_FRESHNESS_PRESSURE": "기존 재고의 신선도 잔여가 보관한계 대비 충분하지 않습니다.",
+    "SCENARIO_ADJUSTMENT_REQUIRED": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
+}
+
+
 def build_template_interpretation(context: SanitizedLLMContext) -> AgentInterpretation:
+    phrases = [
+        _TEMPLATE_SIGNAL_PHRASES.get(signal, "정의되지 않은 재고물류 신호가 확인되었습니다.")
+        for signal in context.signals[:2]
+    ]
     summary = (
-        " ".join(context.facts[:2])
-        if context.facts
+        " ".join(phrases)
+        if phrases
         else "결정론적 재고물류 검토 결과 별도 위험 신호가 확인되지 않았습니다."
     )
     return AgentInterpretation(

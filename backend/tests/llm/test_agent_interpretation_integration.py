@@ -22,6 +22,7 @@ _LLM_FIELDS = {
     "llm_attempts",
     "llm_fallback_used",
     "llm_error_kind",
+    "llm_context_facts",
 }
 
 
@@ -106,7 +107,7 @@ def test_logistics_context_does_not_expose_freshness_number():
         preferred_adjustment="우선 출고 대상으로 검토합니다.",
     )
 
-    context = build_logistics_context(response)
+    context, _ = build_logistics_context(response)
     serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
 
     # 데이터 미확정 코드는 signals 에 섞이지 않는다 — 의미 기준 분류 (41-A).
@@ -143,7 +144,17 @@ def test_llm_failure_preserves_all_logistics_deterministic_fields():
     )
     deterministic = response.model_dump(exclude=_LLM_FIELDS)
 
-    enriched = enrich_logistics_response(response, _failing_logistics_service())
+    enriched = enrich_logistics_response(
+        response,
+        _failing_logistics_service(),
+        # v1.3: 업무 signal 은 판정 수치를 동반해야 한다 — 없으면 fail-closed 로
+        # LLM 을 건너뛰므로, FALLBACK 경로 재현에는 measurements 가 필요하다.
+        measurements={
+            "freshness_risk_lot_count": 1,
+            "freshness_min_remaining_ratio": Decimal("0.2"),
+            "freshness_pressure_ratio": Decimal("0.3"),
+        },
+    )
 
     assert enriched.model_dump(exclude=_LLM_FIELDS) == deterministic
     assert enriched.llm_status == "FALLBACK"

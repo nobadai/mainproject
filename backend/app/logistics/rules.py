@@ -55,10 +55,28 @@ LOT_FRESHNESS_UNRESOLVED = "LOT_FRESHNESS_UNRESOLVED"
 SALES_PRIORITY_ADJUSTMENT = "우선 출고 대상으로 검토합니다."
 
 
+class SignalMeasurements(TypedDict, total=False):
+    """판정에 실제 사용된 원값 — fact 조립이 같은 값을 재계산하지 않게 한다 (v1.3 §5).
+
+    signal이 발화했을 때만 채운다. 표기(display_value)는 여기서 만들지 않는다 —
+    반올림·단위는 단일 formatter(interpretation.py) 소유다.
+    """
+
+    capacity_window_usage: Decimal
+    capacity_tight_ratio: Decimal
+    freshness_risk_lot_count: int
+    freshness_min_remaining_ratio: Decimal
+    freshness_pressure_ratio: Decimal
+    scenario_conditional_count: int
+    scenario_total_count: int
+
+
 class BusinessSignalResult(TypedDict):
     signals: list[str]
     #: 판정 스킵·제외 사실 — 데이터/정책 미확정 계열. soft_warnings 로 나간다.
     warnings: list[str]
+    #: 판정에 실제 사용된 수치 (signal 발화 시에만).
+    measurements: SignalMeasurements
 
 
 def evaluate_procurement_business_signals(
@@ -74,26 +92,33 @@ def evaluate_procurement_business_signals(
     """
     signals: list[str] = []
     warnings: list[str] = []
+    measurements: SignalMeasurements = {}
     if snapshot is not None:
         usage = calculate_window_capacity_usage(snapshot, as_of)
         if snapshot.capacity_tight_ratio is None:
             warnings.append(CAPACITY_TIGHT_POLICY_UNRESOLVED)
         elif usage is not None and usage >= snapshot.capacity_tight_ratio:
             signals.append(CAPACITY_TIGHT)
+            measurements["capacity_window_usage"] = usage
+            measurements["capacity_tight_ratio"] = snapshot.capacity_tight_ratio
 
         ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
         if snapshot.freshness_pressure_ratio is None:
             warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
         elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
             signals.append(INVENTORY_FRESHNESS_PRESSURE)
+            _record_freshness_measurements(measurements, ratios, snapshot.freshness_pressure_ratio)
         if unresolved_lots:
             warnings.append(LOT_FRESHNESS_UNRESOLVED)
 
     # 조정 필요 = 이번 실행에서 실제로 conditional 이 나온 상태. ok-only 는 조정이
     # 없고 reject-only 는 Rule 이 불가를 확정한 것이라 signal 을 만들지 않는다.
-    if any(result.verdict == "conditional" for result in scenario_results):
+    conditional_count = sum(1 for result in scenario_results if result.verdict == "conditional")
+    if conditional_count > 0:
         signals.append(SCENARIO_ADJUSTMENT_REQUIRED)
-    return {"signals": signals, "warnings": warnings}
+        measurements["scenario_conditional_count"] = conditional_count
+        measurements["scenario_total_count"] = len(scenario_results)
+    return {"signals": signals, "warnings": warnings, "measurements": measurements}
 
 
 def evaluate_sales_business_signals(
@@ -108,15 +133,28 @@ def evaluate_sales_business_signals(
     """
     signals: list[str] = []
     warnings: list[str] = []
+    measurements: SignalMeasurements = {}
     if snapshot is not None:
         ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
         if snapshot.freshness_pressure_ratio is None:
             warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
         elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
             signals.append(FRESHNESS_QUALITY_RISK)
+            _record_freshness_measurements(measurements, ratios, snapshot.freshness_pressure_ratio)
         if unresolved_lots:
             warnings.append(LOT_FRESHNESS_UNRESOLVED)
-    return {"signals": signals, "warnings": warnings}
+    return {"signals": signals, "warnings": warnings, "measurements": measurements}
+
+
+def _record_freshness_measurements(
+    measurements: SignalMeasurements,
+    ratios: list[Decimal],
+    threshold: Decimal,
+) -> None:
+    """신선도 signal의 판정 사용 수치 — 위험 Lot 수와 최소 잔여비율(집계만, lot_id 미전송)."""
+    measurements["freshness_risk_lot_count"] = sum(1 for ratio in ratios if ratio <= threshold)
+    measurements["freshness_min_remaining_ratio"] = min(ratios)
+    measurements["freshness_pressure_ratio"] = threshold
 
 
 class LogisticsRuleResult(TypedDict):
