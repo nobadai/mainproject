@@ -746,9 +746,14 @@ def run_critic_v04(
         if judge is None:
             skipped.append("L5: judge 미주입 — 논리 일관성 검증 생략")
         elif not _judge_ran(judge):
-            # judge 는 붙었지만 LLM 이 실제로 판정하지 못했다 (미가동·장애·호출 불필요).
-            # 검사한 척하지 않는다 — coverage 를 0 으로 두고 skipped 에 드러낸다 (설계서 §8).
-            skipped.append("L5: LLM 판정 미수행 — 논리 일관성 검증 생략")
+            # judge 는 붙었지만 LLM 이 실제로 판정하지 못했다. 검사한 척하지 않는다 —
+            # coverage 를 0 으로 두고 skipped 에 드러낸다 (설계서 §8).
+            #
+            # 🔴 **왜 못 했는지를 가른다.** 전에는 미가동·장애·호출 불필요를 한 문구로
+            #    냈는데, 셋은 **해야 할 일이 다르다** — 앞 둘은 고칠 것이 있고 뒤는
+            #    없다. 한 줄로 내면 사람이 **없는 문제를 찾는다** (매입 8/31 지적과
+            #    같은 종류다).
+            skipped.append(f"L5: {_l5_skip_reason(judge)} — 논리 일관성 검증 생략")
         else:
             l5_ran = 6
             for f in l5:
@@ -912,6 +917,26 @@ def check_overlay_cap_by_date(
                 )
             )
     return out, []
+
+
+#: `judge` 가 판정하지 못한 이유. `JudgeRunner` 가 남긴 `llm_status` 로 가른다.
+#:
+#: 🔴 `SKIPPED_TEMPLATE` 이 이 Flow 의 기본 상태다 — **판정할 문장이 없다.**
+#:   L5 는 *"클리핑 후에 쓰인 결정 근거"* 를 본다. 1차 Flow 에는 그 문장을 쓰는
+#:   단계가 없어서(오케 selector 가 하던 일), `rationale` 이 빈 채로 온다.
+#:   **이건 장애가 아니라 아직 없는 단계다.** "미수행" 이라고만 적으면 읽는 사람이
+#:   서버를 뒤진다.
+_L5_SKIP_REASON: dict[str, str] = {
+    "SKIPPED_TEMPLATE": "판정할 결정 근거가 없다 (이 Flow 에는 그 문장을 쓰는 단계가 없다)",
+    "FALLBACK": "LLM 을 불렀으나 쓸 수 있는 판정을 못 받았다",
+    "DISABLED": "LLM 설정이 꺼져 있다",
+}
+
+
+def _l5_skip_reason(judge: RationaleJudge) -> str:
+    result = getattr(judge, "result", None)
+    status = getattr(result, "llm_status", None)
+    return _L5_SKIP_REASON.get(str(status), "LLM 판정 미수행")
 
 
 def _judge_ran(judge: RationaleJudge) -> bool:

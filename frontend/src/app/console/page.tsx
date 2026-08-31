@@ -6,7 +6,9 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
 import { ProcurementResult } from "@/components/ProcurementResult";
+import { ReportDownload } from "@/components/ReportDownload";
 import { RunHistoryPanel } from "@/components/RunHistory";
+import { ApprovedPlan } from "@/components/ApprovedPlan";
 import { BurnInPanel } from "@/components/BurnInPanel";
 import { LlmTrace } from "@/components/LlmTrace";
 import { Sidebar } from "@/components/Sidebar";
@@ -21,6 +23,7 @@ import {
 import {
   isProcurement,
   type AskResponse,
+  type DecisionOut,
   type Intent,
   type ProcurementRunResponse,
   type Scenario,
@@ -53,6 +56,9 @@ type Turn =
       done?: boolean;
     }
   | { kind: "run"; run: ProcurementRunResponse }
+  //   승인 직후 "무엇을 하기로 한 것인가". **"오늘 산 것" 이 아니다** — 승인은
+  //   기록이고 발주는 이 시스템 밖이다 (`ApprovedPlan` 이 그 사실을 적는다).
+  | { kind: "approved"; scenario: Scenario; decision: DecisionOut }
   | { kind: "error"; text: string };
 
 /**
@@ -270,9 +276,13 @@ export default function ConsolePage() {
         targetHistoryRunId: picked.historyRunId ?? undefined,
         decidedBy: session.name,
       });
+      const scenario = picked.scenario;
       setPicked(null);
       if (!isProcurement(res) && res.answer)
         push({ kind: "bot", text: res.answer.text });
+      // 화면은 방금 무엇을 승인했는지 안다 — 서버에 다시 묻지 않는다.
+      if (!isProcurement(res) && res.decision)
+        push({ kind: "approved", scenario, decision: res.decision });
     } catch (error) {
       // 🔴 서버 문장을 그대로 보인다 — "이미 승인됐다 (회차 1)" 같은 말이 답이다
       setModalError(
@@ -353,6 +363,7 @@ export default function ConsolePage() {
                   busy={busy}
                 >
                   {turn.kind === "run" && (
+                    <>
                     <ProcurementResult
                       run={turn.run}
                       canApprove={can.approve}
@@ -370,6 +381,12 @@ export default function ConsolePage() {
                         composer.current?.focus();
                       }}
                     />
+                    {/* 들고 나갈 수 있는 문서 — 안이 있든 없든 낸다.
+                        **안이 없는 실행도 기록으로 남길 값이 있다** (왜 없는지가 담긴다). */}
+                    <div className="mt-3">
+                      <ReportDownload requestId={turn.run.request_id} />
+                    </div>
+                    </>
                   )}
                 </TurnView>
               ))}
@@ -462,6 +479,9 @@ function TurnView({
         {turn.trace && <LlmTrace trace={turn.trace} />}
       </div>
     );
+
+  if (turn.kind === "approved")
+    return <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />;
 
   if (turn.kind === "error")
     return (
