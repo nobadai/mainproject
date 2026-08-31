@@ -13,10 +13,42 @@ from typing import ClassVar
 import pytest
 
 from app.finance import adapter
+from app.finance.agent import FinanceAgentController, ToolAction
 from app.finance.schemas import CashEvent
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)
+
+
+class _EvaluationPlanner:
+    model = "evaluation-finance-planner"
+
+    def __init__(self):
+        self.attempts = 0
+
+    def decide(self, *, allowed_tools, missing_capabilities, **_kwargs):
+        self.attempts += 1
+        if not missing_capabilities:
+            return ToolAction(finalize=True)
+        preferred = (
+            "assess_finance_position",
+            "project_cashflow",
+            "calculate_purchase_finance_cap",
+            "analyze_payment_pressure",
+            "evaluate_purchase_scenario",
+            "validate_amount_adjustment",
+        )
+        return ToolAction(next(name for name in preferred if name in allowed_tools))
+
+
+@pytest.fixture(autouse=True)
+def controller_wired(monkeypatch):
+    monkeypatch.setattr(
+        adapter,
+        "FinanceAgentController",
+        lambda port: FinanceAgentController(port, _EvaluationPlanner()),
+    )
+    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
 
 
 @dataclass(frozen=True)
