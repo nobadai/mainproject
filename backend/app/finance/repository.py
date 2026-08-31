@@ -74,12 +74,12 @@ def get_current_finance_state() -> FinanceState:
 
 
 def get_current_finance_snapshot() -> FinanceSnapshot:
-    """Current View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    """현재 View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
     return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row())
 
 
 def get_current_finance_runtime_context() -> FinanceRuntimeContext:
-    """Snapshot, Policy, confirmed schedules를 DB boundary에서 한 번 고정한다."""
+    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다."""
     snapshot = get_current_finance_snapshot()
     policy = get_active_finance_policy()
     horizon_end = snapshot.state_date + timedelta(days=policy.cashflow_projection_days)
@@ -454,7 +454,7 @@ def _get_current_finance_state_row() -> dict[str, object]:
 
 
 class FinanceDataNotReady(RuntimeError):
-    """Required Finance fact/policy is absent or not historically reproducible."""
+    """필수 Finance 사실/Policy가 없거나 과거 시점으로 재현할 수 없다."""
 
     def __init__(self, key: str):
         self.key = key
@@ -462,7 +462,7 @@ class FinanceDataNotReady(RuntimeError):
 
 
 class FinanceAsOfDataPort(Protocol):
-    """v2.2 repository boundary. Every mutable read carries ``as_of``."""
+    """v2.2 Repository 경계. 모든 변경 가능 읽기에는 ``as_of``를 전달한다."""
 
     def load_finance_position(self, as_of: date) -> dict[str, object]: ...
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]: ...
@@ -473,11 +473,11 @@ class FinanceAsOfDataPort(Protocol):
 
 
 class PostgresFinanceAsOfDataPort:
-    """Adapter over the current schema with an explicit reproducibility guard.
+    """명시적인 재현성 보호 장치를 둔 현재 Schema용 Adapter.
 
-    The present DB has a current-state view, not a full bitemporal state store.
-    It is therefore safe only when the view's state_date exactly equals as_of;
-    older requests are reported as not ready instead of reading today's state.
+    현재 DB에는 완전한 이중 시간 상태 저장소가 아니라 현재 상태 View만 있다.
+    따라서 View의 state_date가 as_of와 정확히 일치할 때만 안전하다. 이전 요청은
+    오늘 상태를 읽지 않고 준비되지 않은 것으로 보고한다.
     """
 
     def __init__(self) -> None:

@@ -270,6 +270,10 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     assert evidence["payroll_payment_day"].evidence_grade == "SIM_FIXED"
     assert evidence["payroll_payment_day"].ref_ids == ("POL-PAYROLL-DATE",)
     assert metadata.llm_fallback_used is False
+    assert reply.payload["policy_version_used"] == "v1.3-PROVISIONAL"
+    assert evidence["policy_version_used"].unit == "version"
+    assert evidence["critical_payment_dates"].value == 100
+    assert evidence["critical_payment_dates"].unit == "KRW"
 
 
 @patch("app.finance.agent.save_finance_execution")

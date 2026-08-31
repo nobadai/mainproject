@@ -1,8 +1,8 @@
-"""Finance tool-using agent entry path.
+"""Tool을 사용하는 Finance Agent 진입 경로.
 
-This module deliberately does not import ``FinanceSnapshot``.  The legacy
-procurement/sales services remain compatibility-only while this path uses the
-M-1 execution context as its boundary.
+이 모듈은 의도적으로 ``FinanceSnapshot``을 import하지 않는다. 레거시
+매입/영업 서비스는 호환성 용도로만 남기고, 이 경로는 M-1 실행 컨텍스트를
+경계로 사용한다.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ class FinanceFinalizer(Protocol):
 
 
 class OllamaFinancePlanner:
-    """LLM planner whose output is limited to an allowed tool call or finalize."""
+    """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
 
     def __init__(self) -> None:
         self.model = os.getenv("LLM_MODEL", "gemma3:4b")
@@ -197,7 +197,7 @@ _FINAL_EXPLANATIONS = {
 
 
 class OllamaFinanceFinalizer:
-    """Evidence-only LLM finalization separated from investigation planning."""
+    """조사 Planner와 분리된 Evidence 전용 LLM finalization."""
 
     def __init__(self) -> None:
         self.model = os.getenv("LLM_MODEL", "gemma3:4b")
@@ -267,7 +267,7 @@ class OllamaFinanceFinalizer:
 
 
 class DeterministicFinanceFinalizer:
-    """Test/offline finalizer implementing the same verified explanation contract."""
+    """동일한 검증 완료 설명 계약을 구현하는 테스트/오프라인 finalizer."""
 
     model = "deterministic-finance-finalizer"
 
@@ -345,6 +345,9 @@ class FinanceToolRegistry:
                 if policy.margin_defense_floor_rate is not None
                 else None
             ),
+            # Finance Policy 버전은 Master 실행 컨텍스트와 독립적이다. 재현을 위해
+            # Finance 데이터 경계에서 실제로 읽은 버전을 반환한다.
+            "policy_version_used": policy.policy_version,
             "evidence": [
                 _evidence(
                     "available_cash",
@@ -375,6 +378,15 @@ class FinanceToolRegistry:
                     "day",
                     policy.source_refs["purchase_payment_days"],
                     source="persona",
+                ),
+                Evidence(
+                    claim="policy_version_used",
+                    source="persona",
+                    ref_ids=(policy.source_refs["purchase_payment_days"],),
+                    value=policy.policy_version,
+                    unit="version",
+                    evidence_grade="SIM_FIXED",
+                    evidence_detail="Version of the Finance policy used for this execution.",
                 ),
                 *(
                     [
@@ -486,11 +498,20 @@ class FinanceToolRegistry:
                         "cash_priority_medium_ratio."
                     ),
                 ),
-                _evidence(
-                    "critical_payment_dates",
-                    len(dates),
-                    "count",
-                    _tool_ref("analyze_payment_pressure", state),
+                Evidence(
+                    claim="critical_payment_dates",
+                    source="tool_calc",
+                    ref_ids=(
+                        _tool_ref("analyze_payment_pressure", state),
+                        policy.source_refs["minimum_cash_balance_krw"],
+                    ),
+                    value=float(policy.minimum_cash_balance_krw),
+                    unit="KRW",
+                    evidence_grade="SIM_FIXED",
+                    evidence_detail=(
+                        "Payment dates whose post-payment cash is below the "
+                        "Finance minimum-cash threshold, plus the maximum daily outflow date."
+                    ),
                 ),
                 _evidence(
                     "base_projected_cash_min",
@@ -581,6 +602,7 @@ class FinanceToolRegistry:
             "scenario_projected_cash_min": str(base_scenario_projection.projected_cash_min),
             "stress_projected_cash_min": str(stress_scenario_projection.projected_cash_min),
             "critical_cash_date": base_scenario_projection.projected_cash_min_date.isoformat(),
+            "rule_id": rule_id,
             "payment_schedule": [
                 ({
                     "seq": item.seq,
@@ -1323,14 +1345,14 @@ def _scenario_identity(scenario: dict[str, Any]) -> str:
 
 
 def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
-    """Validate Finance-owned nested scenario lineage beyond the common envelope."""
+    """공통 Envelope를 넘어 Finance가 소유한 중첩 시나리오 계보를 검증한다."""
     if reply.runtime_status != "READY" or reply.mode != "SCENARIO_VALIDATION":
         return ()
     scenarios = reply.payload.get("verdicts")
     if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
         return ("payload.verdicts must contain one to three results",)
-    # The retained single-scenario compatibility shape carries branch Evidence at
-    # the common envelope level. The documented multi-scenario contract nests it.
+    # 유지하는 단일 시나리오 호환 형식은 branch Evidence를 공통 Envelope 수준에 둔다.
+    # 문서화된 복수 시나리오 계약은 이를 중첩한다.
     if reply.payload.get("scenario_id") is not None and len(scenarios) == 1:
         return ()
     findings: list[str] = []
@@ -1461,7 +1483,7 @@ def _evidence_from_dict(value: dict[str, Any]) -> Evidence:
 
 
 def _indexed_verdict_evidence(results: list[dict[str, Any]]) -> list[Evidence]:
-    """Rebind actual numeric branch claims to Envelope v0.4 index paths."""
+    """실제 숫자 branch claim을 Envelope v0.4 인덱스 경로에 다시 바인딩한다."""
     indexed: list[Evidence] = []
     for index, result in enumerate(results):
         raw_evidence = result.get("evidences", [])

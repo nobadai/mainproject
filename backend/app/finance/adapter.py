@@ -21,14 +21,15 @@ adapters/finance.py — 재무 에이전트 접점 (마스터 ↔ 재무)
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
 from pydantic import ValidationError
 
-from app.finance.agent import _calculate_schedule_cap, _scenario_schedule, _schedule_events
-from app.finance.repository import get_current_finance_runtime_context
+from app.finance.agent import FinanceAgentController, _calculate_schedule_cap, _scenario_schedule, _schedule_events
+from app.finance.repository import FinanceDataNotReady, get_current_finance_runtime_context
 from app.finance.rules import classify_base_stress
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.service import run_finance_procurement_with_context
@@ -81,12 +82,171 @@ _PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date
 def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
     if request.mode == "PRE_PURCHASE":
-        return _pre_purchase(request)
+        return _controller_pre_purchase(request)
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
     if request.mode == "SCENARIO_VALIDATION":
-        return _scenario_validation(request)
+        return _controller_scenario_validation(request)
     return _not_implemented(request)
+
+
+class _RuntimeContextDataPort:
+    """이미 고정된 Finance Runtime 컨텍스트를 Agent Tool에 제공한다.
+
+    Master Policy 버전은 오케스트레이션 요청을 식별한다. Finance Policy는 별도
+    버전을 가지므로, Controller는 이 경계에서 실제로 읽은 버전을 사용한다.
+    """
+
+    def __init__(self, context: FinanceRuntimeContext):
+        self.context = context
+
+    def _check_as_of(self, as_of: date) -> None:
+        if self.context.snapshot.state_date != as_of:
+            raise FinanceDataNotReady("historical_finance_position")
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]:
+        self._check_as_of(as_of)
+        return self.context.snapshot.model_dump()
+
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
+        self._check_as_of(as_of)
+        # ``policy_version``은 Master 실행 컨텍스트의 값이며 Finance Policy 선택자가
+        # 아니다. 이 Controller 실행에서 사용할 Finance Policy 버전은 고정된 Runtime
+        # 컨텍스트가 정본이다.
+        del policy_version
+        policy = self.context.policy
+        if isinstance(policy, FinancePolicy):
+            return policy
+        raw = {
+                field: getattr(policy, field, None)
+                for field in FinancePolicy.model_fields
+                if field not in {"usage_scope"}
+            }
+        refs = dict(raw["source_refs"])
+        for key in (
+            "minimum_cash_balance_krw",
+            "payroll_date",
+            "purchase_payment_days",
+            "cash_priority_reference",
+            "cash_priority_high_ratio",
+            "cash_priority_medium_ratio",
+            "margin_defense_floor_rate",
+        ):
+            refs.setdefault(key, f"finance-policy:{policy.policy_version}:{key}")
+        return FinancePolicy.model_validate(raw | {"usage_scope": "AGENT_MVP_DEMO", "source_refs": refs})
+
+    def _events(self, direction: str) -> list:
+        return [event for event in self.context.cash_events if event.direction == direction]
+
+    def load_obligations(self, as_of: date, horizon: date) -> list:
+        self._check_as_of(as_of)
+        return self._events("OUTFLOW")
+
+    def load_receivables(self, as_of: date, horizon: date) -> list:
+        self._check_as_of(as_of)
+        return self._events("INFLOW")
+
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None:
+        self._check_as_of(as_of)
+        return self.context.policy.monthly_labor_cost_krw
+
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list:
+        self._check_as_of(as_of)
+        return []
+
+
+def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:
+    """Master 컨텍스트를 다시 쓰지 않고 Data Port가 Finance 자체 Policy를 해석하게 한다."""
+    del context
+    return request
+
+
+def _controller_pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    context, not_ready = _controller_boundary(request)
+    if not_ready is not None:
+        return not_ready
+    assert context is not None
+    return _controller_run(request, context)
+
+
+def _controller_scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    run_id = _run_id(request)
+    try:
+        _purchase_proposal(request.payload)
+    except ValidationError as exc:
+        return _invalid_scenario_input(request, run_id, exc)
+    proposal = _purchase_proposal(request.payload)
+    if proposal.meta.as_of != request.context.as_of:
+        return _invalid_scenario_as_of(request, run_id, proposal.meta.as_of)
+    context, not_ready = _controller_boundary(request)
+    if not_ready is not None:
+        return not_ready
+    assert context is not None
+    return _controller_run(request, context)
+
+
+def _controller_run(
+    request: AgentRequest, context: FinanceRuntimeContext
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """레거시 업무 계약 주석만 보강하고 Controller 메타데이터는 그대로 유지한다."""
+    reply, metadata = FinanceAgentController(_RuntimeContextDataPort(context)).run(
+        _controller_request(request, context)
+    )
+    if reply.runtime_status != "READY" or request.mode != "PRE_PURCHASE":
+        return reply, metadata
+    missing = list(reply.missing_data)
+    if getattr(context.policy, "margin_defense_floor_rate", None) is None:
+        missing.append("margin_defense_floor_rate")
+    missing.extend(
+        f"{key}@policy_source_ref"
+        for key in _POLICY_KEYS_IN_USE
+        if key not in context.policy.source_refs
+    )
+    payload = dict(reply.payload)
+    if getattr(context.policy, "margin_defense_floor_rate", None) is None:
+        payload.pop("margin_defense_floor_rate", None)
+    return replace(
+        reply,
+        payload=payload,
+        missing_data=tuple(dict.fromkeys(missing)),
+        judgment_fields=_JUDGMENT_FIELDS,
+    ), metadata
+
+
+def _controller_boundary(
+    request: AgentRequest,
+) -> tuple[FinanceRuntimeContext | None, tuple[AgentReply, ExecutionMetadata] | None]:
+    """Controller 위임 전에 Adapter 수준의 준비 상태 의미를 보존한다."""
+    run_id = _run_id(request)
+    context = _load_context()
+    if context is None:
+        return None, _not_ready(
+            request, run_id, [_T_POSITION],
+            missing=("finance_state", "finance_policy"),
+            reason="재무 상태 또는 정책을 읽지 못했다",
+        )
+    if context.snapshot.state_date != request.context.as_of:
+        return None, _not_ready(
+            request, run_id, [_T_POSITION],
+            missing=(f"finance_state@{request.context.as_of.isoformat()}",),
+            reason=f"재무 상태 기준일이 {context.snapshot.state_date} 다 — 요청은 {request.context.as_of} 다",
+        )
+    payroll_refs = tuple(
+        f"{key}@policy_source_ref" for key in _PAYROLL_SOURCE_KEYS if not context.policy.source_refs.get(key)
+    )
+    if payroll_refs:
+        return None, _not_ready(
+            request, run_id, [_T_POSITION],
+            missing=payroll_refs,
+            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+        )
+    if context.policy.purchase_payment_days is None:
+        return None, _not_ready(
+            request, run_id, [_T_POSITION],
+            missing=("purchase_payment_days",),
+            reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
+        )
+    return context, None
 
 
 # ---------------------------------------------------------------------------
@@ -433,11 +593,11 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
 
 
 def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
-    """Validate the current Purchase output without recreating its finance values.
+    """현재 Purchase 출력을 재무값 재생성 없이 검증한다.
 
-    The Purchase schema remains the source of truth.  The adapter only validates
-    that serialised contract, reuses the Finance procurement engine for the base
-    context/rules, then overlays its already-authoritative payment schedule.
+    Purchase Schema를 정본으로 유지한다. Adapter는 직렬화된 계약만 검증하고,
+    기본 컨텍스트/Rule에는 기존 Finance 매입 엔진을 재사용한 뒤 이미 권위가 있는
+    지급 일정을 Overlay한다.
     """
     run_id = _run_id(request)
     try:
@@ -491,8 +651,8 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
         )
 
-    # This invokes the existing scenario engine and runtime rules for the
-    # proposal-independent Finance position and reported-amount comparison.
+    # 제안과 독립적인 Finance 상태 및 보고 금액 비교에는 기존 시나리오 엔진과
+    # Runtime Rule을 호출한다.
     base_result = run_finance_procurement_with_context(proposal, context)
     if base_result.runtime_status != "READY":
         return _not_ready(
@@ -624,7 +784,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
 
 
 def _purchase_proposal(payload: Mapping[str, Any]) -> PurchaseProposal:
-    """Discard envelope-only keys, then validate the actual Purchase contract."""
+    """Envelope 전용 키를 버린 뒤 실제 Purchase 계약을 검증한다."""
     fields = PurchaseProposal.model_fields
     return PurchaseProposal.model_validate(
         {key: value for key, value in payload.items() if key in fields}
@@ -637,7 +797,12 @@ def _invalid_scenario_input(
     reply = AgentReply(
         request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
         mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
-        payload={"validation_errors": [item["loc"][-1] for item in exc.errors()]},
+        payload={
+            "validation_errors": [
+                ".".join(str(part) for part in item["loc"]) or item["type"]
+                for item in exc.errors()
+            ]
+        },
         reasoning="Purchase scenario input failed Finance contract validation.",
     )
     return reply, _meta(request, run_id, [])

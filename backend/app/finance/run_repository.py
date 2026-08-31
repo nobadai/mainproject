@@ -139,10 +139,10 @@ def list_finance_agent_runs(
 def save_finance_execution(
     *, request: AgentRequest, reply: AgentReply, metadata: ExecutionMetadata
 ) -> None:
-    """Persist the v2.2 child trace when the migration is installed.
+    """마이그레이션이 설치된 경우 v2.2 하위 trace를 저장한다.
 
-    Persistence failure is intentionally not swallowed: a normal Business
-    completion must have a resolvable run_id.
+    저장 실패는 의도적으로 삼키지 않는다. 정상적인 Business 완료에는 해석 가능한
+    run_id가 반드시 있어야 한다.
     """
     query = sql.SQL(
         """
