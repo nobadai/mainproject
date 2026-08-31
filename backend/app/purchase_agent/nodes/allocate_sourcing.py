@@ -25,6 +25,7 @@ from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_conte
 from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes, pending_value
+from app.purchase_agent.quotes import observed_spec
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -40,6 +41,30 @@ def grade_spread(quotes: list[dict], top_grade: str, mid_grade: str) -> float | 
         return None
     top = require_positive(prices[top_grade], f"quote[{top_grade}]")
     return (top - prices[mid_grade]) / top
+
+
+def missing_grade_reason(state: PurchaseAgentState, top_grade: str, mid_grade: str) -> str:
+    """스프레드를 못 잰 날, **무엇이 없었는지를 오해 없이** 말한다.
+
+    🔴 "상 등급이 없다"만 적으면 **보유 재고에 그 등급이 없다**로 읽힌다. 우리가 못 받은
+      것은 재고가 아니라 **그날 그 규격에서 낙찰된 등급**이다. 실데이터에서 이게 흔하다 —
+      2025년 가락 배추는 특·상이 같은 날 함께 잡히는 날이 규격 고정 시 300일 중 **21일**
+      뿐이다(상·중이 상자 8kg 같은 다른 규격으로 거래된다). 사유를 잘못 적으면 재고를
+      확인하러 가는 사람이 생긴다.
+
+    규격은 **받은 시세가 스스로 말한다** (``observed_spec``). constraints에서 다시 읽으면
+    mock 경로에서 쓰지도 않은 규격을 적게 된다 — 형식만 맞고 내용이 거짓인 사유다.
+    """
+    quotes = [quote for quote in state["market_quotes"] if quote["market"] == FIXED_MARKET]
+    present = sorted({str(quote["grade"]) for quote in quotes})
+    missing = [grade for grade in (top_grade, mid_grade) if grade not in present]
+    spec = observed_spec(quotes)
+    where = f"{FIXED_MARKET} {state['date']}" + (f" {spec} 규격" if spec else " 당일 시세")
+    return (
+        f"{where}에서 {'·'.join(missing)} 등급 거래가 없다 "
+        f"(그날 잡힌 등급: {'·'.join(present) or '없음'}) — 보유 재고가 아니라 "
+        f"그날 그 조건의 경매 결과다"
+    )
 
 
 def baseline_spread(item: str, constraints: dict) -> float | None:
@@ -192,7 +217,7 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
     facts["spread"] = spread
     facts["baseline"] = baseline
     if spread is None:
-        facts["blocked_by"] = f"당일 시세에 {top_grade}·{mid_grade} 두 등급이 모두 있지 않다"
+        facts["blocked_by"] = missing_grade_reason(state, top_grade, mid_grade)
         return facts
     if baseline is None or baseline <= 0:
         # 0은 "평시엔 등급 간 가격차가 없다"는 뜻인데, 그러면 "평시 대비 +50%"라는 판정
@@ -466,6 +491,12 @@ def allocate_sourcing(
     "LLM 없이 규칙만"이고, 그 경로가 E3-1의 산출물과 **완전히 같다**.
     """
     constraints = load_constraints()
+    if not [quote for quote in state["market_quotes"] if quote["market"] == FIXED_MARKET]:
+        # 시세가 한 건도 없는 날(휴장·그 규격 미거래). ③이 이미 안을 만들지 않았고 사유도
+        # 남겼으므로, 여기서는 **배분할 대상이 없다**는 사실만 빈 목록으로 돌려준다.
+        # ``fixed_market_quotes``의 가드는 그대로 둔다 — 그 함수의 뜻은 "빈 값으로 조용히
+        # 계산하지 말라"이지 "죽어라"가 아니고, 사유를 낼 수 있는 자리에서 먼저 낸다.
+        return {"sourcing_plan": []}
     quotes = fixed_market_quotes(state["market_quotes"])
     prices = {quote["grade"]: quote["price"] for quote in quotes}
 

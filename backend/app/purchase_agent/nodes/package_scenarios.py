@@ -14,6 +14,7 @@ from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
 from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
+from app.purchase_agent.quotes import observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -24,6 +25,11 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
     축이 하나뿐인 날은 전 안이 같은 축을 쓴다 — 그게 정상이고, ⑦의 중복 검사도 그날은
     면제한다. 축이 여럿이면 겹치지 않게 배분해 "3안인데 사실 한 안"을 피한다.
     """
+    if not labels:
+        # 안이 하나도 없는 날 — ③이 시세를 못 받아 초안을 만들지 않았다. 배정할 축이 없다.
+        # 이 줄이 없으면 아래 ``labels[-1]``이 IndexError로 죽고, 그러면 "왜 안이 없는가"라는
+        # 사유가 오케스트레이터에 도달하지 못한다.
+        return {}
     if len(allowed_axes) == 1:
         return dict.fromkeys(labels, allowed_axes[0])
     axes = dict.fromkeys(labels, "quantity")
@@ -319,6 +325,36 @@ def _weighted_unit_price(sourcing: list[dict], total_qty_kg: int) -> float:
     return amount / require_positive(total_qty_kg, "total_qty_kg")
 
 
+def _quote_provenance(market_quotes: list[dict]) -> dict[str, str]:
+    """시세 근거의 **출처 등급과 설명**. 실 경락과 mock 을 갈라 적는다 (#70).
+
+    🔴 전에는 어느 경로로 왔든 ``SIM_FIXED`` · ``"…실측 (mock)"`` 으로 고정돼 있었다.
+      실 DB 시세를 쓰는 날에도 **출처를 거짓으로 표시**했다는 뜻이고, Critic·H1 이 읽는
+      값이라 "데이터는 시뮬레이션 / 실행은 실제"라는 구분이 여기서 무너진다
+      (Codex 교차검증 2026-08-31).
+
+    등급이 ``MEASURED`` 가 아닌 이유: 그건 **마스터의 입력 등급 어휘**다
+    (``app/master/inputs.py`` — MEASURED · DERIVED · MOCK · MISSING). 우리 rationale 의
+    사다리는 ``OFFICIAL > VENDOR > SIM_FIXED > ASSUMED`` 네 단계뿐이고(§7.3), 가락 경락
+    실적은 **공영도매시장의 공식 거래 기록**이라 그 사다리에서 ``OFFICIAL`` 이 맞는 자리다.
+    등급이 실제로 중요한 이유도 있다 — ``grade_unit_price`` 는 ``check_max_price`` 와 사중
+    일치 금액 축을 타는 **하드 제약 입력**이고, ``HARD_ALLOWED_GRADES`` 가 그 자격을 본다.
+
+    **데이터가 말하게 한다.** DB 공급자만 각 줄에 규격을 얹으므로(``quotes._materialize``),
+    그 표시가 곧 "실 경락에서 왔다"는 증거다. 주입 경로를 따로 묻지 않는다.
+    """
+    spec = observed_spec(market_quotes)
+    if spec is None:
+        return {
+            "evidence_grade": "SIM_FIXED",
+            "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
+        }
+    return {
+        "evidence_grade": "OFFICIAL",
+        "evidence_detail": f"가락시장 등급별 당일 경락 실적 · {spec} · 물량가중",
+    }
+
+
 def _inventory_claim(lots: list[dict] | None) -> tuple[str, str, str]:
     """재고 근거 문장 · ref_id · 등급. **NULL과 확정 0을 구분한다** (규칙 3).
 
@@ -370,8 +406,7 @@ def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> lis
                 f"{len(state['market_quotes'])}개 등급"
             ),
             "ref_id": f"MQ-가락-{as_of}",
-            "evidence_grade": "SIM_FIXED",
-            "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
+            **_quote_provenance(state["market_quotes"]),
         },
         {
             "source": "주문",

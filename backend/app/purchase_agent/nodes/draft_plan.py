@@ -9,6 +9,7 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_non_empty, require_positive
 from app.purchase_agent.nodes.classify_situation import estimate_daily_demand
+from app.purchase_agent.quotes import missing_quote_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -106,6 +107,15 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     constraints = load_constraints()
     coverage = constraints["coverage_days"]
     daily_demand = estimate_daily_demand(state["confirmed_orders"], constraints)
+    labels = [
+        label
+        for label in coverage["by_label"]
+        # 구간이 넓은 날엔 공격안을 만들지 않는다
+        if not (state["situation"] == "uncertain" and label == "공격")
+    ]
+    if not [quote for quote in state["market_quotes"] if quote["market"] == FIXED_MARKET]:
+        return _no_quote_plan(state, constraints, daily_demand, labels)
+
     reference_grade = constraints["allocation"]["reference_grade"]
     unit_price = reference_unit_price(state["market_quotes"], reference_grade)
 
@@ -113,19 +123,16 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     cash_cap = cash_cap_kg(purchase_budget_krw(state, constraints), unit_price)
     freshness_cap = _freshness_cap_kg(state, daily_demand, constraints)
 
-    drafts = []
-    for label, days in coverage["by_label"].items():
-        if state["situation"] == "uncertain" and label == "공격":
-            continue  # 구간이 넓은 날엔 공격안을 만들지 않는다
-        drafts.append(
-            _draft_one(
-                label=label,
-                days=days,
-                daily_demand=daily_demand,
-                caps={"창고": warehouse_cap, "현금": cash_cap, "신선도": freshness_cap},
-                coverage=coverage,
-            )
+    drafts = [
+        _draft_one(
+            label=label,
+            days=coverage["by_label"][label],
+            daily_demand=daily_demand,
+            caps={"창고": warehouse_cap, "현금": cash_cap, "신선도": freshness_cap},
+            coverage=coverage,
         )
+        for label in labels
+    ]
 
     return {
         "coverage_days": coverage["by_label"]["기본"],  # §3 State는 대표 D 하나를 담는다
@@ -135,6 +142,45 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             "drafts": drafts,
             "deferred_checks": _deferred_checks(state, constraints, freshness_cap, state["item"]),
         },
+    }
+
+
+def _no_quote_plan(
+    state: PurchaseAgentState, constraints: dict, daily_demand: float, labels: list[str]
+) -> dict[str, Any]:
+    """등급별 시세를 한 건도 못 받은 날 — **죽지 않고 사유를 남기고 0안으로 끝낸다**.
+
+    ``reference_unit_price``는 ``require_non_empty``로 멈춘다. 그 가드의 뜻은 "빈 값으로
+    조용히 계산하지 말라"이지 "죽어라"가 아니다 — 여기서 죽으면 오케스트레이터는 예외만
+    받고 **왜 안이 없는지를 모른다**. 그래서 계산을 안 하는 것은 그대로 두고, 사유를 낼 수
+    있는 이 자리에서 먼저 낸다.
+
+    ⚠️ 실데이터 경로에서만 도달한다. mock 은 어느 앵커·품목에서도 빈 시세를 돌려주지
+      않는다(모르는 품목이면 멈춘다) — 계약 테스트가 그 전제를 잠근다.
+
+    ``reference_unit_price``를 **0이 아니라 None**으로 둔다 (규칙 3). 0으로 채우면
+    ``cash_cap_kg``가 0으로 나누고, 그 전에 "단가 0원"이라는 없는 사실이 만들어진다.
+    """
+    reason = missing_quote_reason(state["item"], state["date"], constraints)
+    return {
+        "coverage_days": constraints["coverage_days"]["by_label"]["기본"],
+        "base_plan": {
+            "daily_demand_kg": daily_demand,
+            "reference_unit_price": None,
+            "drafts": [],
+            "deferred_checks": _deferred_checks(state, constraints, None, state["item"]),
+        },
+        # 라벨마다 한 줄씩 남긴다 — 소비자가 "보수는 왜 없나"를 안별로 묻기 때문이고,
+        # ⑦의 no_proposal_reason도 이 목록을 이어 붙여 만든다.
+        #
+        # ★ **앞의 것을 이어 붙인다.** 노드가 돌려주는 값이 State의 같은 키를 통째로
+        #   대체하므로, 새 목록만 반환하면 앞 노드가 쌓은 사유가 사라진다. 지금은 ③이
+        #   이 키를 처음 쓰는 노드라 결과가 같지만, ②가 사유를 남기게 되는 날 조용히
+        #   지워진다 — ⑥이 ``[*state[...], *dropped]``로 쓰는 것과 같은 이유다.
+        "rejected_reasons": [
+            *state["rejected_reasons"],
+            *({"label": label, "reason": reason} for label in labels),
+        ],
     }
 
 

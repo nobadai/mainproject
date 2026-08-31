@@ -29,6 +29,7 @@ from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     estimate_daily_demand,
 )
+from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
 from app.purchase_agent.tracing import ToolRecorder
 
@@ -387,12 +388,15 @@ def absorb_inventory(inventory: Mapping[str, Any], item: str) -> dict[str, Any]:
 # ── payload → State ───────────────────────────────────────────────────────
 
 
-def build_state(request: AgentRequest) -> PurchaseAgentState:
+def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> PurchaseAgentState:
     """수신 payload를 그래프가 아는 State로 편다 (IO명세 §2-B).
 
     ``build_initial_state``와 **다른 경로**다 — 그쪽은 포트를 호출해 값을 당겨오고,
     이쪽은 이미 받은 값을 배치한다. 매입 자기 도메인(당일 시세·시장 문서)만 포트가
     그대로 담당하므로, 그 둘은 여기서도 ``ports``를 거친다.
+
+    ``quotes``는 그 시세의 공급자다 (#70). ``None``이면 mock 이고, 실데이터로 돌리려면
+    ``quotes.auction_quote_source()``를 넘긴다 — 환경변수가 아니라 **명시 주입**이다.
     """
     from app.purchase_agent import ports
 
@@ -408,7 +412,7 @@ def build_state(request: AgentRequest) -> PurchaseAgentState:
         "item": item,
         "forecast": dict(payload["forecast"]),
         # 자기 도메인 — 마스터를 거치지 않는다 (정의서 §4.1)
-        "market_quotes": ports.get_market_quotes(item, as_of),
+        "market_quotes": ports.get_market_quotes(item, as_of, source=quotes),
         "inventory": absorb_inventory(inventory, item),
         "confirmed_orders": dict(payload["confirmed_orders"]),
         "item_mix_ratio": dict(policy["item_mix_ratio"]),
@@ -725,15 +729,24 @@ _SCENARIO_UNITS: dict[str, str] = {
 }
 
 
-def purchase_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+def purchase_port(
+    request: AgentRequest, *, quotes: QuoteSource | None = None
+) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 진입점.
 
     ``mode``는 둘뿐이다 — ``GENERATE_SCENARIOS``·``STATUS_QUERY``. 다른 mode는 봉투가
     **보내기 전에** 막으므로 여기서 다시 검사하지 않는다 (``_AGENT_MODES``).
+
+    ``quotes``는 등급별 시세 공급자다 (#70). 기본값은 mock 이고, 실데이터로 돌리려면
+    등록 시점에 ``partial(purchase_port, quotes=auction_quote_source())``로 꽂는다.
+
+    ⚠️ **실운영 기본값을 아직 바꾸지 않았다.** 우리 물량가중 시리즈가 ML ``current_price``와
+      일치하지 않는 것이 확인됐고(2026-08-31 실측), 두 시리즈를 어떻게 병기할지가 ML 회신
+      대기 중이다. 전환은 ``app/main.py``의 등록 한 줄이다.
     """
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
-    return _generate_scenarios(request)
+    return _generate_scenarios(request, quotes=quotes)
 
 
 def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -762,7 +775,9 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     return reply, _metadata(request, None)
 
 
-def _generate_scenarios(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+def _generate_scenarios(
+    request: AgentRequest, *, quotes: QuoteSource | None = None
+) -> tuple[AgentReply, ExecutionMetadata]:
     as_of = request.context.as_of
     missing = validate_payload(request.payload, as_of)
     if missing:
@@ -779,7 +794,7 @@ def _generate_scenarios(request: AgentRequest) -> tuple[AgentReply, ExecutionMet
         return reply, _metadata(request, None)
 
     recorder = ToolRecorder()
-    state = build_state(request)
+    state = build_state(request, quotes=quotes)
     final = build_graph(recorder=recorder).invoke(state)
     proposal = final["proposal"]
 

@@ -29,6 +29,7 @@ _REQUIRED_SECTIONS = (
     "demand",
     "warehouse",
     "context",
+    "market_quotes",
     "allocation",
     "shelf_life_days",
     "feedback",
