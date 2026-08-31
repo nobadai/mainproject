@@ -68,6 +68,8 @@ export interface AskResponse {
   run: ProcurementRunResponse | null;
   answer: AnswerOut | null;
   llm_status: string;
+  /** 어느 API 를 탔나 — `ollama`(로컬) 인지 `gemini`(외부) 인지 화면이 구분해 적는다. */
+  llm_provider: string | null;
   llm_model: string | null;
   llm_attempts: number;
   llm_fallback_used: boolean;

@@ -7,6 +7,7 @@ import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
 import { ProcurementResult } from "@/components/ProcurementResult";
 import { RunHistoryPanel } from "@/components/RunHistory";
+import { LlmTrace } from "@/components/LlmTrace";
 import { Sidebar } from "@/components/Sidebar";
 import { ApiError, AS_OF, ask, execute } from "@/lib/api";
 import {
@@ -36,7 +37,9 @@ import {
 
 type Turn =
   | { kind: "me"; text: string }
-  | { kind: "bot"; text: string }
+  //   `trace` 는 **①(의도 분류)가 무엇을 했는지**다. 되묻는 답에도 실어야 한다 —
+  //   "못 알아들었습니다" 만 적으면 모델이 안 돈 것처럼 보인다.
+  | { kind: "bot"; text: string; trace?: LlmTraceData }
   // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
   //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
   //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
@@ -45,10 +48,31 @@ type Turn =
       text: string;
       intent: Intent;
       requestId: string;
+      trace: LlmTraceData;
       done?: boolean;
     }
   | { kind: "run"; run: ProcurementRunResponse }
   | { kind: "error"; text: string };
+
+/**
+ * 화면이 쥐고 있을 ① 분류 흔적. **응답에 이미 있던 것만 추린다** — 여기서 값을
+ * 만들면 화면이 서버와 다른 이야기를 하게 된다.
+ */
+type LlmTraceData = Pick<
+  AskResponse,
+  "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
+>;
+
+function traceOf(res: AskResponse): LlmTraceData {
+  return {
+    intent: res.intent,
+    llm_status: res.llm_status,
+    llm_provider: res.llm_provider,
+    llm_model: res.llm_model,
+    llm_attempts: res.llm_attempts,
+    llm_fallback_used: res.llm_fallback_used,
+  };
+}
 
 const SHORTCUT: Record<string, string> = {
   purchase: "오늘 배추 얼마나 사야 해?",
@@ -150,13 +174,15 @@ export default function ConsolePage() {
           text: res.clarification ?? "진행할까요?",
           intent: res.intent,
           requestId: res.request_id,
+          trace: traceOf(res),
         });
       } else if (res.answer) {
-        push({ kind: "bot", text: res.answer.text });
+        push({ kind: "bot", text: res.answer.text, trace: traceOf(res) });
       } else {
         push({
           kind: "bot",
           text: res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+          trace: traceOf(res),
         });
       }
     } catch (error) {
@@ -423,8 +449,11 @@ function TurnView({
 
   if (turn.kind === "bot")
     return (
-      <div className="max-w-[85%] whitespace-pre-wrap rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5 text-sm leading-relaxed">
-        {turn.text}
+      <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
+        <div className="whitespace-pre-wrap text-sm leading-relaxed">
+          {turn.text}
+        </div>
+        {turn.trace && <LlmTrace trace={turn.trace} />}
       </div>
     );
 
@@ -437,6 +466,7 @@ function TurnView({
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
         <p className="m-0 text-sm">{turn.text}</p>
+        <LlmTrace trace={turn.trace} />
         {turn.done ? (
           <p className="m-0 mt-2 text-[12.5px] text-faint">
             확인함 — 아래 결과를 보세요
