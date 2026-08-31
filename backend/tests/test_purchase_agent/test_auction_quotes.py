@@ -84,8 +84,12 @@ def _fetch_returning(rows: list[dict[str, Any]], captured: dict | None = None):
     return fetch
 
 
+#: "선언 자체가 없다"를 값으로 표현한다 — ``None`` 은 그 자리에 쓸 수 있는 값이라 못 쓴다.
+_ABSENT = object()
+
+
 def _source(rows: list[dict[str, Any]], captured: dict | None = None):
-    return auction_quote_source(fetch=_fetch_returning(rows, captured), schema="haetdeul")
+    return auction_quote_source(fetch=_fetch_returning(rows, captured))
 
 
 # --------------------------------------------------------------------- 물량가중 식
@@ -239,7 +243,7 @@ def test_item_without_a_settled_spec_is_not_queried_at_all() -> None:
         calls.append(params)
         return []
 
-    result = auction_quote_source(fetch=fetch, schema="haetdeul")("피마늘", INTEGRATION)
+    result = auction_quote_source(fetch=fetch)("피마늘", INTEGRATION)
 
     assert result == []
     assert calls == []
@@ -283,7 +287,9 @@ def test_the_purchase_db_module_exposes_only_read_helpers() -> None:
         and value.__module__ == db.__name__
     }
 
-    assert public == {"fetch_all", "fetch_one", "get_connection", "get_db_schema"}
+    # ``get_db_schema`` 가 없는 것이 계약이다 — 읽을 스키마는 ``market_quotes.source``
+    # 가 정한다. 헬퍼가 있으면 다음 사람이 그걸로 배선하고 ``.env`` 가 테이블을 고른다.
+    assert public == {"fetch_all", "fetch_one", "get_connection"}
 
 
 # --------------------------------------------------------------------- 주입 (환경변수 아님)
@@ -424,7 +430,7 @@ def test_dod_weighted_price_reproduces_the_measured_value() -> None:
         """
         SELECT round(sum(trade_amount_krw) / nullif(sum(trade_volume_kg), 0), 1) AS weighted,
                round(avg(avg_auction_price_krw_per_kg), 1) AS simple_average
-          FROM haetdeul.auction_prices_daily
+          FROM source_raw.auction_prices_daily
          WHERE item_name = '배추' AND market_category = '가락' AND grade_name = '특'
            AND auction_date = DATE '2026-08-03'
         """
@@ -994,14 +1000,14 @@ def _aged(days: int) -> list[dict]:
     ]
 
 
-@pytest.mark.parametrize("days", [1, 2, 3])
+@pytest.mark.parametrize("days", [1, 2])
 def test_a_price_within_the_staleness_limit_is_used(days: int) -> None:
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: _aged(days))
 
     assert proposal["scenarios"]
 
 
-@pytest.mark.parametrize("days", [4, 5, 11])
+@pytest.mark.parametrize("days", [3, 4, 11])
 def test_a_price_past_the_staleness_limit_gives_a_reason_and_no_plan(days: int) -> None:
     """🔴 오래된 값을 당일인 척 쓰지 않는다 (규칙 3).
 
@@ -1013,7 +1019,7 @@ def test_a_price_past_the_staleness_limit_gives_a_reason_and_no_plan(days: int) 
     assert proposal["scenarios"] == []
     reason = proposal["rejected_reasons"][0]["reason"]
     assert f"{days}일 전" in reason
-    assert "허용 3일" in reason
+    assert "허용 2일" in reason
     assert proposal["no_proposal_reason"].startswith("안이 만들어지지 않았다")
 
 
@@ -1046,6 +1052,71 @@ def test_the_staleness_limit_actually_comes_from_constraints(
     assert (reason is not None) is blocked
     if blocked:
         assert f"허용 {limit}일" in reason
+
+
+# --------------------------------------------------------------------- 읽는 테이블
+
+
+@pytest.mark.parametrize(
+    ("schema", "table"),
+    [("source_raw", "auction_prices_daily"), ("어딘가", "다른표")],
+    ids=["선언대로", "선언을_바꾸면_따라간다"],
+)
+def test_the_table_read_actually_comes_from_constraints(
+    schema: str, table: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 읽을 스키마·테이블이 **선언에서 온다** (규칙 7·8).
+
+    값 비교로는 증명되지 않는다 — ``cfg["source"]["schema"] == "source_raw"`` 는 코드가
+    스키마를 박아도 통과한다. 선언을 **바꿔보고** 쿼리가 따라가는지를 본다.
+
+    전에는 스키마가 ``DB_SCHEMA`` 환경변수에서 왔다. 그러면 ``.env`` 가 어느 테이블을
+    읽을지 정하고, ``DB_SCHEMA=haetdeul`` 인 머신은 **3일 된 사본**을 본다
+    (2026-08-31 실측: haetdeul 08-26 vs source_raw 08-29).
+    """
+    base = load_constraints()
+    base["market_quotes"]["source"] = {"schema": schema, "table": table}
+    monkeypatch.setattr("app.purchase_agent.quotes.load_constraints", lambda: base)
+
+    captured: dict = {}
+    _source([], captured)("배추", INTEGRATION)
+
+    assert f"FROM {schema}.{table}" in captured["query"].replace('"', "")
+
+
+@pytest.mark.parametrize(
+    ("broken", "expected"),
+    [
+        (_ABSENT, KeyError),
+        ("source_raw.auction_prices_daily", KeyError),
+        ({"schema": "source_raw"}, ValueError),
+        ({"schema": "", "table": "t"}, ValueError),
+    ],
+    ids=["선언_없음", "문자열_한_줄로_적음", "table_빠짐", "빈_문자열"],
+)
+def test_a_source_declaration_that_is_missing_or_half_written_stops_the_query(
+    broken: Any, expected: type[Exception], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """반쪽 선언은 조립 시점의 ``sql.Identifier`` 가 아니라 **여기서** 막는다.
+
+    거기서 죽으면 무엇이 잘못됐는지 남지 않는다 — 규격 반쪽 표기를 ``spec_for_item`` 이
+    먼저 막는 것과 같은 이유다.
+
+    ⚠️ **예외 종류를 나눠 본다.** 둘 다 그냥 "터진다"로 두면 부재 검사를
+      ``source or {}`` 로 바꿔도 반쪽 검사가 대신 걸려 **변이가 안 물린다**
+      (실제로 안 물렸다 — 규칙 8). ``"schema.table"`` 처럼 **한 줄 문자열로 적는** 실수가
+      그 차이를 드러낸다: ``.get`` 이 없어 ``AttributeError`` 로 죽는데, 그건 우리가
+      낸 사유가 아니라 파이썬이 낸 것이다.
+    """
+    base = load_constraints()
+    if broken is _ABSENT:
+        del base["market_quotes"]["source"]
+    else:
+        base["market_quotes"]["source"] = broken
+    monkeypatch.setattr("app.purchase_agent.quotes.load_constraints", lambda: base)
+
+    with pytest.raises(expected):
+        _source([], {})("배추", INTEGRATION)
 
 
 # --------------------------------------------------------------------- 무 18kg

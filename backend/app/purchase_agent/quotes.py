@@ -77,6 +77,34 @@ def validate_coordinates(cfg: Mapping[str, Any]) -> None:
         )
 
 
+def source_table(cfg: Mapping[str, Any]) -> tuple[str, str]:
+    """읽을 ``(schema, table)``. **환경변수가 아니라 선언에서 온다** (규칙 7).
+
+    🔴 전에는 스키마를 ``db.get_db_schema()`` 가 ``DB_SCHEMA`` 환경변수에서 가져왔다.
+      그러면 **``.env`` 가 어느 테이블을 읽을지 정한다** — 팀원마다 값이 달라 같은 코드가
+      다른 시세를 보고, 그 상태는 이 저장소에서 이미 한 번 겪었다 (LLM_PROVIDER 건).
+      스키마는 접속 정보가 아니라 **좌표**라서 다른 다섯과 같은 자리에 있어야 한다.
+
+    ``haetdeul`` 사본이 아니라 ``source_raw`` 를 읽는다 — 사본은 ML 소관이 아니고
+    2026-08-31 실측으로 **3일** 뒤처져 있었다(08-26 vs 08-29). rise_rate 분모가 ML 예측과
+    다른 날의 시장을 보게 된다.
+
+    두 값 다 식별자로 쿼리에 들어가므로 문자열인지 여기서 본다 — 아니면
+    ``sql.Identifier`` 가 조립 시점에 죽고, 그때는 무엇이 잘못됐는지 남지 않는다.
+    """
+    source = cfg.get("source")
+    if not isinstance(source, Mapping):
+        raise KeyError(
+            "market_quotes.source 가 없다 — 스키마·테이블은 선언에서 읽는다 (규칙 7)"
+        )
+    schema, table = source.get("schema"), source.get("table")
+    if not isinstance(schema, str) or not isinstance(table, str) or not schema or not table:
+        raise ValueError(
+            f"market_quotes.source 는 schema·table 문자열이어야 한다: {dict(source)!r}"
+        )
+    return schema, table
+
+
 def spec_for_item(item: str, constraints: Mapping[str, Any]) -> dict[str, Any] | None:
     """그 품목의 조회 규격. **미확정이면 None 이다 — 임의 규격으로 채우지 않는다** (규칙 3).
 
@@ -288,15 +316,17 @@ def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Com
     """).format(sql.Identifier(schema), sql.Identifier(table), weight_condition)
 
 
-def auction_quote_source(*, fetch: Fetch | None = None, schema: str | None = None) -> QuoteSource:
+def auction_quote_source(*, fetch: Fetch | None = None) -> QuoteSource:
     """``ports.get_market_quotes`` 에 꽂을 DB 공급자를 만든다.
 
-    ``fetch`` · ``schema`` 를 인자로 뺀 이유는 테스트다 — 가짜 행을 꽂으면 쿼리 결과를
-    시세 형태로 옮기는 부분(가중·반올림·정렬·등급 어휘)이 DB 없이 전부 시험된다.
-    실제 조회가 필요한 테스트만 ``db`` 마커로 분리한다.
+    ``fetch`` 를 인자로 뺀 이유는 테스트다 — 가짜 행을 꽂으면 쿼리 결과를 시세 형태로
+    옮기는 부분(가중·반올림·정렬·등급 어휘)이 DB 없이 전부 시험된다. 실제 조회가 필요한
+    테스트만 ``db`` 마커로 분리한다.
+
+    ⚠️ ``schema`` 인자는 **없앴다.** 스키마가 선언으로 내려온 뒤에도 인자로 덮을 수 있으면
+    "어느 테이블을 읽는가"의 답이 둘이 된다 — 한쪽만 바뀌는 자리를 다시 만드는 셈이다.
     """
     do_fetch = fetch if fetch is not None else db.fetch_all
-    schema_name = schema
 
     def load(item: str, as_of: date) -> list[dict[str, Any]]:
         # 좌표는 매 호출마다 다시 읽는다 — ``load_constraints`` 가 캐시하지 않는 이유와 같다
@@ -321,12 +351,8 @@ def auction_quote_source(*, fetch: Fetch | None = None, schema: str | None = Non
         if before is not None:
             params["spec_switch_date"] = before["date"]
             params["unit_weight_before"] = before["unit_weight_kg"]
-        rows = do_fetch(
-            _query(
-                schema_name or db.get_db_schema(), cfg["table"], _weight_condition(spec)
-            ),
-            params,
-        )
+        schema, table = source_table(cfg)
+        rows = do_fetch(_query(schema, table, _weight_condition(spec)), params)
         return _materialize(rows, cfg, spec)
 
     return load
