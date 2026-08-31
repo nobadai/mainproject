@@ -85,6 +85,13 @@ class StepOut(BaseModel):
     finding_codes: list[str] = []
     missing_data: list[str] = []
 
+    #: 🔴 **그 부서 안에서 LLM 이 돌았나.** 없으면 부서가 규칙으로 답한 것과
+    #: 모델로 답한 것이 화면에서 같아 보인다 — 오늘 마스터에서 고친 것과 같은 종류다.
+    llm_status: str = "DISABLED"
+    llm_model: str = ""
+    llm_attempts: int = 0
+    llm_fallback_used: bool = False
+
 
 class ProcurementRunResponse(BaseModel):
     request_id: str

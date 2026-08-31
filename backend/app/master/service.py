@@ -255,6 +255,10 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             used_tools=list(s.used_tools),
             finding_codes=list(s.finding_codes),
             missing_data=list(s.missing_data),
+            llm_status=s.llm_status,
+            llm_model=s.llm_model,
+            llm_attempts=s.llm_attempts,
+            llm_fallback_used=s.llm_fallback_used,
         )
         for s in plan.steps
     ]

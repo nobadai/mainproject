@@ -157,6 +157,8 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
               <th className="px-3 py-2 text-left font-semibold">모드</th>
               <th className="px-3 py-2 text-left font-semibold">결과</th>
               <th className="px-3 py-2 text-left font-semibold">쓴 도구</th>
+              {/* 🔴 그 부서가 규칙으로 답했나 모델로 답했나 — 없으면 둘이 같아 보인다 */}
+              <th className="px-3 py-2 text-left font-semibold">LLM</th>
             </tr>
           </thead>
           <tbody>
@@ -185,6 +187,22 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
                   </td>
                   <td className="px-3 py-2 font-mono text-[11.5px] text-muted">
                     {tools.length > 0 ? tools.join(" → ") : "—"}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[11.5px]">
+                    <span className={row.llm_fallback_used ? "text-warn" : "text-muted"}>
+                      {String(row.llm_status ?? "—")}
+                    </span>
+                    {/* 모델이 죽어 규칙이 대신 답한 것과 애초에 안 쓴 것은 다르다 */}
+                    {row.llm_fallback_used ? (
+                      <span className="mt-0.5 block text-[11px] text-warn">
+                        규칙이 대신 답함
+                      </span>
+                    ) : null}
+                    {row.llm_model ? (
+                      <span className="mt-0.5 block text-[11px] text-faint">
+                        {String(row.llm_model)}
+                      </span>
+                    ) : null}
                   </td>
                 </tr>
               );
