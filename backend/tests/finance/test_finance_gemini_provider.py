@@ -249,9 +249,9 @@ def test_finance_env_file_does_not_override_process_environment(tmp_path, monkey
         assert _finance_model(provider) == "process-model"
 
 
-def test_finance_provider_inherits_global_provider(monkeypatch):
+def test_finance_provider_defaults_to_gemini_even_when_global_is_ollama(monkeypatch):
     monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
 
     assert _finance_provider_name() == "gemini"
 

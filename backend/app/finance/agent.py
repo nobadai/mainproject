@@ -77,7 +77,8 @@ def _load_finance_environment() -> None:
 def _finance_provider_name() -> str:
     _load_finance_environment()
     provider = (
-        os.getenv("FINANCE_LLM_PROVIDER") or os.getenv("LLM_PROVIDER") or "gemini"
+        os.getenv("FINANCE_LLM_PROVIDER")
+        or "gemini"
     ).strip().lower()
     if provider not in _DEFAULT_MODELS:
         raise RuntimeError("Configured Finance LLM provider is not supported")

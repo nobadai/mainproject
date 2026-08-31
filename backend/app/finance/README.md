@@ -41,7 +41,10 @@ FINANCE_LLM_MODEL=gemini-3.5-flash-lite
 FINANCE_GEMINI_API_KEY=<secret>
 ```
 
-Provider는 `FINANCE_LLM_PROVIDER → LLM_PROVIDER → gemini` 순서로 결정한다. Gemini API
+Provider는 FINANCE_LLM_PROVIDER가 있으면 해당 값을 사용하고,
+없으면 Finance 기본 Provider인 gemini를 사용한다.
+전역 LLM_PROVIDER는 Finance Provider 선택에 상속하지 않는다.
+
 키는 `FINANCE_GEMINI_API_KEY`를 먼저 읽고, 비어 있으면 `GEMINI_API_KEY`를 사용한다.
 Finance는 `MASTER_GEMINI_API_KEY`를 읽지 않는다. Finance에서만 Gemini를 활성화하기 위해
 전역 `LLM_PROVIDER`를 변경해서는 안 된다.
