@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
@@ -37,6 +38,96 @@ Adjustability = Literal["NOT_NEEDED", "ADJUSTABLE", "NOT_ADJUSTABLE"]
 
 DEFAULT_MAX_TOOL_CALLS = 8
 DEFAULT_MAX_REPLANS = 2
+
+_DEFAULT_MODELS = {
+    "ollama": "gemma3:4b",
+    "gemini": "gemini-3.5-flash-lite",
+}
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+_GEMINI_PLANNER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "tool_name": {"type": "string", "nullable": True},
+        "arguments": {
+            "type": "object",
+            "properties": {
+                "axis": {"type": "string"},
+                "candidate_amount_krw": {"type": "number"},
+            },
+        },
+        "reason": {"type": "string"},
+        "finalize": {"type": "boolean"},
+    },
+    "required": ["tool_name", "arguments", "reason", "finalize"],
+}
+
+
+def _finance_provider_name() -> str:
+    provider = os.getenv("FINANCE_LLM_PROVIDER", "ollama").strip().lower()
+    if provider not in _DEFAULT_MODELS:
+        raise RuntimeError("Configured Finance LLM provider is not supported")
+    return provider
+
+
+def _finance_model(provider: str) -> str:
+    explicit = os.getenv("FINANCE_LLM_MODEL")
+    if explicit:
+        return explicit
+    global_provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+    global_model = os.getenv("LLM_MODEL")
+    if provider == global_provider and global_model:
+        return global_model
+    return _DEFAULT_MODELS[provider]
+
+
+def _gemini_response_text(document: dict[str, Any]) -> str:
+    candidates = document.get("candidates") or []
+    parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
+    for part in parts:
+        if part.get("thought"):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    raise TypeError("Finance Gemini response did not contain text content")
+
+
+def _gemini_generate(
+    *, model: str, system_prompt: str, user_payload: dict[str, Any], response_schema: dict[str, Any]
+) -> str:
+    api_key = os.getenv("FINANCE_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Finance Gemini API key is not set")
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": json.dumps(user_payload, default=str)}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+        },
+    }
+    request = urllib.request.Request(
+        f"{_GEMINI_BASE_URL}/models/{model}:generateContent",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+        ) as response:
+            document = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        raise
+    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
+        raise RuntimeError("Finance Gemini request failed") from error
+    return _gemini_response_text(document)
 
 PRE_PURCHASE_TOOLS = frozenset(
     {
@@ -99,7 +190,7 @@ class OllamaFinancePlanner:
     """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
 
     def __init__(self) -> None:
-        self.model = os.getenv("LLM_MODEL", "gemma3:4b")
+        self.model = _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -183,7 +274,68 @@ class OllamaFinancePlanner:
         with urllib.request.urlopen(req, timeout=self.timeout) as response:
             raw = json.loads(response.read().decode())
         content = json.loads(raw["message"]["content"])
-        return ToolAction(**content)
+        action = ToolAction(**content)
+        _validate_planner_action(action, allowed_tools, missing_capabilities)
+        return action
+
+
+class GeminiFinancePlanner:
+    """Finance Tool 선택만 수행하는 Gemini structured-output Planner."""
+
+    def __init__(self) -> None:
+        self.model = _finance_model("gemini")
+        self.attempts = 0
+
+    def decide(
+        self,
+        *,
+        request: AgentRequest,
+        allowed_tools: frozenset[str],
+        observations: tuple[dict[str, Any], ...],
+        missing_capabilities: tuple[str, ...],
+    ) -> ToolAction:
+        self.attempts += 1
+        prompt = {
+            "mode": request.mode,
+            "business_payload": dict(request.payload),
+            "allowed_tools": sorted(allowed_tools),
+            "observations": observations,
+            "missing_capabilities": missing_capabilities,
+            "tool_argument_contracts": {
+                "assess_finance_position": {},
+                "project_cashflow": {},
+                "calculate_purchase_finance_cap": {},
+                "analyze_payment_pressure": {},
+                "evaluate_purchase_scenario": {},
+                "validate_amount_adjustment": {
+                    "axis": "amount",
+                    "candidate_amount_krw": (
+                        "copy the exact finance_cap_amount_krw from a prior observation; "
+                        "never create a number"
+                    ),
+                },
+            },
+        }
+        content = json.loads(
+            _gemini_generate(
+                model=self.model,
+                system_prompt=(
+                    "You plan Finance capability calls. Select only an allowed tool. "
+                    "Never calculate or invent financial numbers or policy values. "
+                    "Use observations only. When missing_capabilities is non-empty, "
+                    "set finalize=false and select exactly one allowed tool that can "
+                    "satisfy a missing capability. When missing_capabilities is empty, "
+                    "set finalize=true and tool_name=null. For validate_amount_adjustment, "
+                    "copy the observed deterministic finance_cap_amount_krw exactly and "
+                    "set axis to amount."
+                ),
+                user_payload=prompt,
+                response_schema=_GEMINI_PLANNER_RESPONSE_SCHEMA,
+            )
+        )
+        action = ToolAction(**content)
+        _validate_planner_action(action, allowed_tools, missing_capabilities)
+        return action
 
 
 _FINAL_EXPLANATIONS = {
@@ -200,7 +352,7 @@ class OllamaFinanceFinalizer:
     """조사 Planner와 분리된 Evidence 전용 LLM finalization."""
 
     def __init__(self) -> None:
-        self.model = os.getenv("LLM_MODEL", "gemma3:4b")
+        self.model = _finance_model("ollama")
         self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.attempts = 0
@@ -266,6 +418,55 @@ class OllamaFinanceFinalizer:
         return _FINAL_EXPLANATIONS[selected]
 
 
+class GeminiFinanceFinalizer:
+    """검증된 Evidence에서 설명 키만 고르는 Gemini Finalizer."""
+
+    def __init__(self) -> None:
+        self.model = _finance_model("gemini")
+        self.attempts = 0
+
+    def finalize(
+        self,
+        *,
+        mode: FinanceMode,
+        business_status: str,
+        evidences: tuple[Evidence, ...],
+    ) -> str:
+        self.attempts += 1
+        allowed = (
+            ["PRE_BOUNDARY"]
+            if mode == "PRE_PURCHASE"
+            else ["SCENARIO_REJECT"]
+            if business_status == "reject"
+            else ["SCENARIO_ACCEPT"]
+        )
+        selected = json.loads(
+            _gemini_generate(
+                model=self.model,
+                system_prompt=(
+                    "Finalize the Finance reply from verified Evidence only. Select the "
+                    "allowed explanation key. Do not calculate or add numbers or claims."
+                ),
+                user_payload={
+                    "mode": mode,
+                    "business_status": business_status,
+                    "verified_claims": [item.claim for item in evidences],
+                    "allowed_explanation_keys": allowed,
+                },
+                response_schema={
+                    "type": "object",
+                    "properties": {
+                        "explanation_key": {"type": "string", "enum": allowed}
+                    },
+                    "required": ["explanation_key"],
+                },
+            )
+        )["explanation_key"]
+        if selected not in allowed:
+            raise ValueError("Finance finalization selected an unsupported explanation")
+        return _FINAL_EXPLANATIONS[selected]
+
+
 class DeterministicFinanceFinalizer:
     """동일한 검증 완료 설명 계약을 구현하는 테스트/오프라인 finalizer."""
 
@@ -288,6 +489,43 @@ class DeterministicFinanceFinalizer:
         return _FINAL_EXPLANATIONS[
             "SCENARIO_REJECT" if business_status == "reject" else "SCENARIO_ACCEPT"
         ]
+
+
+def _validate_planner_action(
+    action: ToolAction,
+    allowed_tools: frozenset[str],
+    missing_capabilities: tuple[str, ...],
+) -> None:
+    if not isinstance(action.finalize, bool):
+        raise ValueError("Finance Planner finalize must be boolean")
+    if not isinstance(action.arguments, dict):
+        raise ValueError("Finance Planner arguments must be an object")
+    if missing_capabilities:
+        if action.finalize or action.tool_name not in allowed_tools:
+            raise ValueError(
+                "Finance Planner must select one allowed tool while capabilities are missing"
+            )
+        return
+    if not action.finalize or action.tool_name is not None:
+        raise ValueError(
+            "Finance Planner must finalize without a tool when capabilities are complete"
+        )
+
+
+def _configured_finance_planner() -> FinancePlanner:
+    return (
+        GeminiFinancePlanner()
+        if _finance_provider_name() == "gemini"
+        else OllamaFinancePlanner()
+    )
+
+
+def _configured_finance_finalizer() -> FinanceFinalizer:
+    return (
+        GeminiFinanceFinalizer()
+        if _finance_provider_name() == "gemini"
+        else OllamaFinanceFinalizer()
+    )
 
 
 class FinanceToolRegistry:
@@ -742,9 +980,9 @@ class FinanceAgentController:
         max_replans: int | None = None,
     ):
         self.registry = FinanceToolRegistry(data_port)
-        self.planner = planner or OllamaFinancePlanner()
+        self.planner = planner or _configured_finance_planner()
         self.finalizer = finalizer or (
-            OllamaFinanceFinalizer()
+            _configured_finance_finalizer()
             if planner is None
             else DeterministicFinanceFinalizer()
         )
