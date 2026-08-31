@@ -36,6 +36,20 @@ const CONFIDENCE = {
   LOW: { text: "확신 낮음", style: "bg-gold-wash text-gold" },
 } as const;
 
+/**
+ * 🔴 `UNKNOWN` 에는 같은 말을 쓸 수 없다. *"못 알아들음 · 확신 높음"* 은
+ * **"못 알아들었는데 확신은 높다"** 로 읽힌다. 뜻은 그 반대다 — 모델이
+ * **범위 밖인 것을 확실히 알아본 것**이다.
+ *
+ * 그리고 이 자리는 색이 반대다. 다른 action 에서 `HIGH` 는 좋은 소식이라
+ * 강조색을 주지만, 여기서는 *"확실히 못 한다"* 라 강조할 것이 아니다.
+ */
+const UNKNOWN_CONFIDENCE = {
+  HIGH: { text: "범위 밖인 것이 확실", style: "bg-sunk text-muted" },
+  MEDIUM: { text: "범위 밖으로 보임", style: "bg-sky-wash text-sky" },
+  LOW: { text: "판단하지 못함", style: "bg-gold-wash text-gold" },
+} as const;
+
 function summarize(intent: Intent): string {
   const parts = [ACTION_LABEL[intent.action] ?? intent.action];
   if (intent.item) parts.push(intent.item);
@@ -52,7 +66,10 @@ type Trace = Pick<
 >;
 
 export function LlmTrace({ trace }: { trace: Trace }) {
-  const confidence = CONFIDENCE[trace.intent.confidence];
+  const confidence =
+    trace.intent.action === "UNKNOWN"
+      ? UNKNOWN_CONFIDENCE[trace.intent.confidence]
+      : CONFIDENCE[trace.intent.confidence];
 
   return (
     <div className="mt-2 border-t border-line-soft pt-2">

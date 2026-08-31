@@ -85,6 +85,10 @@ SELECT_SCENARIO — **이미 나와 있는 안 중 하나를 고른다**
 
 UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 없다
   "그거 있잖아 그거"   "음..."
+  ★ **이 시스템에 답할 자리가 없는 것도 UNKNOWN 이다.** 가까운 부서로 돌리지 마라.
+    "배추 가격 얼마야"  "시세 알려줘"  "단가 어떻게 돼"   → UNKNOWN
+    품목 가격·시세를 답하는 부서는 없다. 재무는 **회사 자금**이지 품목 가격이 아니다.
+    가까운 부서를 넣으면 사용자는 **물어본 것과 상관없는 숫자**를 받는다.
 
 ★ **만들어 달라**와 **고른다**를 구분하라. "안" 이라는 글자로 가르지 마라.
   "매입안 뽑아줘 · 만들어줘 · 얼마나 사야 해"  → 만들어 달라  → PROCUREMENT_RUN
@@ -655,9 +659,12 @@ class IntentService:
         """
         text = utterance.strip()
         if not self.settings.enabled:
-            return self._result(_UNKNOWN, status="DISABLED", attempts=0, fallback=False)
+            return self._result(
+                _UNKNOWN, status="DISABLED", attempts=0, fallback=False, utterance=text
+            )
         if not text:
             return self._result(_UNKNOWN, status="SKIPPED_TEMPLATE", attempts=0, fallback=False)
+        # 아래 경로는 전부 발화문을 넘긴다 — 빈 발화문에는 이름 붙일 것이 없다.
 
         guidance: list[str] | None = None
         attempts = 0
@@ -672,16 +679,31 @@ class IntentService:
                     status="SUCCESS",
                     attempts=attempts,
                     fallback=False,
+                    utterance=text,
                 )
             except IntentValidationError as error:
                 guidance = retry_guidance(error.issues)
             except Exception:  # noqa: BLE001 — 분류 실패가 API 를 죽이면 안 된다
                 break
-        return self._result(_UNKNOWN, status="FALLBACK", attempts=attempts, fallback=True)
+        return self._result(
+            _UNKNOWN, status="FALLBACK", attempts=attempts, fallback=True, utterance=text
+        )
 
     def _result(
-        self, intent: Intent, *, status: LLMStatus, attempts: int, fallback: bool
+        self,
+        intent: Intent,
+        *,
+        status: LLMStatus,
+        attempts: int,
+        fallback: bool,
+        utterance: str = "",
     ) -> IntentResult:
+        """`utterance` 는 **되물을 말을 고르는 데만** 쓴다.
+
+        분류에는 안 쓴다 — 분류는 이미 끝났고, 여기서 발화문을 다시 보면 규칙이
+        모델의 판정을 덮게 된다. 여기서 하는 일은 *"없는 것을 없다고 이름 붙이는 것"*
+        뿐이다.
+        """
         confirm = _needs_confirmation(intent)
         return IntentResult(
             intent=intent,
@@ -691,7 +713,7 @@ class IntentService:
             llm_attempts=attempts,
             llm_fallback_used=fallback,
             needs_confirmation=confirm,
-            clarification=_clarification(intent) if confirm else None,
+            clarification=_clarification(intent, utterance) if confirm else None,
         )
 
 
@@ -703,9 +725,40 @@ def _needs_confirmation(intent: Intent) -> bool:
     return intent.action not in _NO_CONFIRM_ACTIONS
 
 
-def _clarification(intent: Intent) -> str:
+#: 🔴 **물어볼 만한데 답할 자리가 없는 것.** 이름을 붙여 준다.
+#:
+#: *"못 알아들었습니다"* 만 적으면 물어본 사람은 **자기가 말을 잘못했다고 생각하고**
+#: 표현을 바꿔 다시 묻는다. 그래도 안 된다 — 없는 것이기 때문이다. 없는 것은
+#: **없다고 말해야** 그 사람이 다른 길을 찾는다.
+#:
+#: ★ 여기 없는 말은 종전대로 일반 안내로 간다. 목록을 늘려 가며 맞히는 것이 아니라,
+#:   **자주 묻는데 답이 없는 것**만 이름을 준다.
+_KNOWN_GAPS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("가격", "시세", "단가", "시가"),
+        "품목 가격·시세를 조회하는 자리는 아직 없습니다. "
+        "예측 가격은 mock 이라 답으로 내지 않습니다 — "
+        "재무 조회는 회사 자금이지 품목 가격이 아닙니다.",
+    ),
+)
+
+
+def _known_gap(utterance: str) -> str | None:
+    for words, message in _KNOWN_GAPS:
+        if any(word in utterance for word in words):
+            return message
+    return None
+
+
+def _clarification(intent: Intent, utterance: str = "") -> str:
     """되물을 말. **규칙이 만든다** — LLM 이 쓰면 사용자 응답 생성(⑥)이 되고, 그건 아직 없다."""
     if intent.action == "UNKNOWN":
+        gap = _known_gap(utterance)
+        if gap:
+            return (
+                f"{gap} "
+                "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택은 됩니다."
+            )
         return (
             "무엇을 해 드릴지 알아듣지 못했습니다. "
             "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택 중 하나로 말씀해 주세요."

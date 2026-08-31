@@ -62,7 +62,14 @@ class _FakeResponse:
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch, text: str = '{"summary":"확인되었습니다."}') -> dict:
-    """`urlopen` 을 가로채 요청을 담아 둔다."""
+    """`urlopen` 을 가로채 요청을 담아 둔다.
+
+    🔴 **개발자 기계의 실 키를 지운다.** `MASTER_GEMINI_API_KEY` 가 `.env` 에 있으면
+    접두어가 이겨서, 검사가 `GEMINI_API_KEY="test-key"` 를 넣어도 **실 키가 헤더에
+    실린다.** 그러면 이 검사는 (ㄱ) 키를 넣은 사람에게만 깨지고 (ㄴ) 실패 출력에
+    **진짜 키를 찍는다.** 실제로 한 번 그렇게 깨졌다.
+    """
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
     seen: dict[str, Any] = {}
 
     def fake_urlopen(request: Any, timeout: float | None = None) -> _FakeResponse:
@@ -178,9 +185,9 @@ def test_키는_헤더로_간다(monkeypatch: pytest.MonkeyPatch):
 
 def test_마스터_접두어가_전역보다_앞선다(monkeypatch: pytest.MonkeyPatch):
     """물류와 키를 나눠 쓸 수 있어야 한다 — 한 키가 막히면 두 파트가 같이 죽는다."""
+    seen = _capture(monkeypatch)  # 실 키를 먼저 지운다
     monkeypatch.setenv("GEMINI_API_KEY", "global")
     monkeypatch.setenv("MASTER_GEMINI_API_KEY", "master")
-    seen = _capture(monkeypatch)
 
     GeminiProvider(_settings()).generate("system", "user", narrative_schema())
 
@@ -293,3 +300,124 @@ def test_마스터_접두어가_없으면_전역_프로바이더를_따른다(en
 
     assert settings.provider == "gemini"
     assert settings.model == "gemini-3.5-flash-lite"
+
+
+# ── ⑤ 사고 조각 ─────────────────────────────────────────────────────────
+
+
+def test_사고_조각을_건너뛰고_답을_찾는다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 `parts[0]` 만 보면 **호출이 성공했는데 FALLBACK 으로 떨어진다.**
+
+    `gemini-3.5-flash-lite` 는 생각을 켜고 답하며 `thought: true` 조각이 앞에 붙는다.
+    실측에서 `SELECT_SCENARIO` 가 12번 중 11번 이렇게 죽었다 — 승인 마디가 통째로
+    안 되는 상황이고, 화면에는 "못 알아들음" 으로 보여 **모델이 틀린 것처럼 읽혔다.**
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_a, **_k: _FakeResponse(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"thought": True, "text": "사용자가 안을 고르고 있다"},
+                                {"text": '{"summary":"진짜 답"}'},
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+    )
+
+    got = GeminiProvider(_settings()).generate("system", "user", narrative_schema())
+
+    assert got == '{"summary":"진짜 답"}'
+
+
+def test_사고_조각만_오면_터진다(monkeypatch: pytest.MonkeyPatch):
+    """빈 답을 통과시키면 **답이 조용히 사라진다** — 터져야 fallback 이 산다."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_a, **_k: _FakeResponse(
+            {"candidates": [{"content": {"parts": [{"thought": True, "text": "생각만"}]}}]}
+        ),
+    )
+    with pytest.raises(TypeError, match="text content"):
+        GeminiProvider(_settings()).generate("system", "user", narrative_schema())
+
+
+def test_thoughtSignature_가_붙은_답도_읽는다(monkeypatch: pytest.MonkeyPatch):
+    """실 응답은 답 조각에 `thoughtSignature` 를 같이 싣는다 — 그건 사고 조각이 아니다."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_a, **_k: _FakeResponse(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": '{"summary":"답"}', "thoughtSignature": "El4KXA=="}
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+    )
+
+    assert GeminiProvider(_settings()).generate("s", "u", narrative_schema()) == '{"summary":"답"}'
+
+
+def test_HTTP_오류는_상태_코드를_잃지_않는다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 `HTTPError` 는 `URLError` 의 하위다 — 함께 감싸면 **상태 코드가 사라진다.**
+
+    실측에서 429(quota 초과)가 `RuntimeError("Master Gemini request failed")` 로
+    덮여, **한도에 걸린 것과 서버가 죽은 것이 로그에서 같아 보였다.**
+    """
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
+
+    def boom(*_a, **_k):
+        raise urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        GeminiProvider(_settings()).generate("s", "u", narrative_schema())
+    assert caught.value.code == 429
+
+
+def test_연결_실패는_키를_안_싣고_감싼다(monkeypatch: pytest.MonkeyPatch):
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("MASTER_GEMINI_API_KEY", raising=False)
+
+    def boom(*_a, **_k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+
+    with pytest.raises(RuntimeError) as caught:
+        GeminiProvider(_settings()).generate("s", "u", narrative_schema())
+    assert "test-key" not in str(caught.value)
