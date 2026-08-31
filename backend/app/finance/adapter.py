@@ -797,7 +797,12 @@ def _invalid_scenario_input(
     reply = AgentReply(
         request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
         mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
-        payload={"validation_errors": [item["loc"][-1] for item in exc.errors()]},
+        payload={
+            "validation_errors": [
+                ".".join(str(part) for part in item["loc"]) or item["type"]
+                for item in exc.errors()
+            ]
+        },
         reasoning="Purchase scenario input failed Finance contract validation.",
     )
     return reply, _meta(request, run_id, [])

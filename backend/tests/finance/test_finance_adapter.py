@@ -575,6 +575,18 @@ def test_필수_Purchase_시나리오_필드가_없으면_명시적으로_ERROR(
     assert reply.payload["validation_errors"]
 
 
+def test_Purchase_모델_수준_검증_오류도_안전하게_반환한다(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    payload["no_proposal_reason"] = "시나리오가 있는 제안에는 설정할 수 없다"
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert reply.payload["validation_errors"]
+    assert "value_error" in reply.payload["validation_errors"]
+
+
 def test_Purchase_as_of_불일치는_명시적으로_ERROR(wired, purchase_payload):
     payload = deepcopy(purchase_payload)
     payload["meta"]["as_of"] = "2025-12-30"
