@@ -15,9 +15,9 @@ from app.master.decision import DecisionIn, DecisionOut, DecisionRejected
 from app.master.decision_service import get_decisions, record_decision
 from app.master.schemas import (
     BurnInOut,
-    ReportOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
+    ReportOut,
     RunHistoryOut,
     TriggerAck,
 )

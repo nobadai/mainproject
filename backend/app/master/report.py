@@ -64,8 +64,10 @@ def _scenario_block(scenario: Mapping[str, Any], index: int) -> list[str]:
     out = [
         f"### {index + 1}. {label}",
         "",
-        f"- 수량 **{_kg(scenario.get('total_qty_kg'))}** · 금액 "
-        f"**{_won(scenario.get('total_amount_krw'))}**",
+        (
+            f"- 수량 **{_kg(scenario.get('total_qty_kg'))}** · 금액 "
+            f"**{_won(scenario.get('total_amount_krw'))}**"
+        ),
     ]
     if scenario.get("strategy_type"):
         out.append(f"- 전략 `{scenario['strategy_type']}` · 커버 {scenario.get('coverage_days')}일")
@@ -148,8 +150,10 @@ def render_report(run: Mapping[str, Any]) -> str:
     out = [
         f"# 매입안 보고서 — {run.get('request_id', '')}",
         "",
-        f"> 기준일 {run.get('as_of', '')} · 종료 코드 `{run.get('end_code', '')}` · "
-        f"안 {len(scenarios)}개",
+        (
+            f"> 기준일 {run.get('as_of', '')} · 종료 코드 `{run.get('end_code', '')}` · "
+            f"안 {len(scenarios)}개"
+        ),
         "> **이 문서는 판단 기록이지 발주가 아닙니다.**",
         "",
     ]
@@ -170,8 +174,10 @@ def render_report(run: Mapping[str, Any]) -> str:
     # 🔴 mock 경고를 결론과 같은 문서에 둔다. 빼면 이 숫자가 실측으로 읽힌다.
     if run.get("mocked_inputs"):
         out += [
-            f"> 🔴 **{', '.join(run['mocked_inputs'])} 는 mock 에서 왔습니다** — "
-            "이 결론을 실측으로 읽지 마십시오.",
+            (
+                f"> 🔴 **{', '.join(run['mocked_inputs'])} 는 mock 에서 왔습니다** — "
+                "이 결론을 실측으로 읽지 마십시오."
+            ),
             "",
         ]
 
@@ -203,8 +209,10 @@ def render_report(run: Mapping[str, Any]) -> str:
     out += [
         "## 검증",
         "",
-        f"- 지적 {len(run.get('findings') or [])}건 · "
-        f"판정하지 못한 검사 {len(run.get('skipped_checks') or [])}건",
+        (
+            f"- 지적 {len(run.get('findings') or [])}건 · "
+            f"판정하지 못한 검사 {len(run.get('skipped_checks') or [])}건"
+        ),
         "",
     ]
     for finding in run.get("findings") or []:

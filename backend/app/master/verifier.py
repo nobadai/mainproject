@@ -197,6 +197,40 @@ def supplied_but_unresolved(
     return concerns
 
 
+def unresolved_supplied_keys(
+    scenarios: Sequence[Mapping[str, Any]],
+    constraints: Mapping[AgentName, Mapping[str, Any]],
+) -> list[str]:
+    """🔴 **지목된 키만.** 위 함수의 *문장* 대신 *사실* 을 돌려준다.
+
+    매입이 2026-08-31 에 겪은 두 번째 일 때문에 연다.
+
+    ```text
+    concern 문장이 사유 원문을 통째로 되싣는다 (…사유: <매입이 쓴 문장>)
+      → "operational_limit_days" in concern 이
+        다른 키가 지목된 경우에도 참이 된다 (사유 문장 안에 그 이름이 있으니까)
+      → 매입의 반례 검사가 엉뚱하게 통과했다
+    ```
+
+    ★ **문장을 파싱하지 마십시오.** 머리말 따옴표를 정규식으로 여는 것도 결국
+      *"마스터가 문구를 안 바꾼다"* 에 기대는 것이라, 제가 문구를 다듬는 날 다시
+      깨집니다. 이 함수를 부르면 기댈 것이 없습니다.
+
+    ```python
+    from app.master.verifier import unresolved_supplied_keys
+
+    keys = unresolved_supplied_keys(scenarios, constraints)
+    assert "operational_limit_days" in keys
+    assert "cap_by_date" not in keys      # 반례가 진짜로 반례가 된다
+    ```
+
+    ★ 사람이 읽을 문장이 필요하면 `supplied_but_unresolved()` 를 쓴다. 둘은 **같은
+      검사**를 부르므로 갈릴 자리가 없다.
+    """
+    pairs = MasterVerifier()._unresolved_pairs(tuple(scenarios), constraints)
+    return [key for key, _ in pairs]
+
+
 class MasterVerifier:
     """마스터의 검증 Tool.
 
@@ -809,10 +843,27 @@ class MasterVerifier:
           `lots[].shelf_life_days`). 별칭 표를 두면 어긋날 자리가 하나 더 생기고,
           그건 8/29 에 걷어낸 층이다 — **이름 합의는 팀이 할 일**이다.
         """
+        for key, text in self._unresolved_pairs(scenarios, constraints):
+            concerns.append(
+                f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
+                f"매입이 미결로 답했다 — 원인은 최소 셋이고 마스터는 "
+                f"고르지 않는다: ① 봉투 대신 다른 곳을 본다 ② 올바른 "
+                f"함수를 쓰는데 값이 그 자리까지 안 온다 ③ 이 값은 "
+                f"쓰는데 다른 입력이 없어 결론이 안 난다 "
+                f"(사유: {text[:80]})"
+            )
+
+    def _unresolved_pairs(
+        self,
+        scenarios: tuple[Mapping[str, Any], ...],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+    ) -> list[tuple[str, str]]:
+        """지목된 `(키, 사유 문장)`. **문장을 만들기 전의 사실이다.**"""
         supplied = self._supplied_keys(constraints)
         if not supplied:
-            return
+            return []
 
+        out: list[tuple[str, str]] = []
         seen: set[str] = set()
         for scenario in scenarios:
             for risk in scenario.get("risks") or ():
@@ -822,14 +873,8 @@ class MasterVerifier:
                         continue
                     if self._unresolved_here(text, key, supplied):
                         seen.add(key)
-                        concerns.append(
-                            f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
-                            f"매입이 미결로 답했다 — 원인은 최소 셋이고 마스터는 "
-                            f"고르지 않는다: ① 봉투 대신 다른 곳을 본다 ② 올바른 "
-                            f"함수를 쓰는데 값이 그 자리까지 안 온다 ③ 이 값은 "
-                            f"쓰는데 다른 입력이 없어 결론이 안 난다 "
-                            f"(사유: {text[:80]})"
-                        )
+                        out.append((key, text))
+        return out
 
     def _declare_uncovered(self, skipped: list[str]) -> None:
         """아직 이 경로에 붙지 않은 검사를 드러낸다.

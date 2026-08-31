@@ -125,8 +125,16 @@ export interface ProcurementRunResponse {
    * `no_proposal_reason` · `rejected_reasons`.
    */
   judgment: {
+    /**
+     * 닫힌 집합 — `stable` · `uncertain`. 매입 스키마의 `Literal` 이라
+     * **새 값이 생기면 스키마가 먼저 바뀐다** (매입 2026-08-31 회신 ④).
+     * 한국어 표기는 `lib/vocab.ts` 한 곳에 있고, 모르는 값은 원문 그대로 보인다.
+     */
     situation?: string;
+    /** 닫힌 집합 — `high` · `medium` · `low`. `Intent.confidence` 와 **다른 값이다.** */
     confidence?: string;
+    /** 닫힌 집합 — `quantity` · `timing` · `mix`. 매입이 **연** 축이다. */
+    allowed_axes?: string[];
     no_proposal_reason?: string | null;
     rejected_reasons?: { label?: string; reason?: string }[];
   };

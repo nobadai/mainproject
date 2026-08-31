@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -54,7 +54,7 @@ class _FakeResponse:
     def read(self) -> bytes:
         return self._payload
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
