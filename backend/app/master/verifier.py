@@ -162,6 +162,41 @@ class VerificationResult:
         return not self.findings
 
 
+def supplied_but_unresolved(
+    scenarios: Sequence[Mapping[str, Any]],
+    constraints: Mapping[AgentName, Mapping[str, Any]],
+) -> list[str]:
+    """🔴 **다른 파트가 부를 수 있는 자리.** 마스터가 실어 준 값을 부서가 *"없다"* 고
+    답하는지 본다 — 마스터 관통이 쓰는 것과 **같은 코드**다.
+
+    매입이 8/31 에 겪은 일 때문에 열었다.
+
+    ```text
+    매입 검사   마스터 정규식을 빌려 "우리가 재현한 규칙에 걸리는가" 를 봤다  → 통과
+    실물        concerns 0건
+    ```
+
+    **관문이 둘인데 하나만 재현했다.** 정규식(둘째)에 걸려도 `supplied` 조회(첫째)에서
+    이미 걸러지면 아무 일도 안 일어난다 — `operational_limit_days` 는 중첩이라
+    그때 마스터의 `supplied` 에 없었다.
+
+    ★ **규칙을 재현하지 마십시오.** 재현한 것이 진짜와 갈리는 순간, 검사는 통과하는데
+      실물은 조용해집니다. 이 함수를 부르면 재현할 것이 없습니다.
+
+    ```python
+    from app.master.verifier import supplied_but_unresolved
+
+    concerns = supplied_but_unresolved(scenarios, constraints)
+    assert any("operational_limit_days" in c for c in concerns)
+    ```
+
+    ★ `MasterVerifier` 를 만들지 않아도 된다 — 이 검사는 Critic 도 DB 도 안 탄다.
+    """
+    concerns: list[str] = []
+    MasterVerifier()._check_supplied_but_unused(tuple(scenarios), constraints, concerns)
+    return concerns
+
+
 class MasterVerifier:
     """마스터의 검증 Tool.
 
