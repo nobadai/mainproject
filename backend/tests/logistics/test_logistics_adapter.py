@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 
@@ -909,3 +910,185 @@ def test_시나리오_판정에도_품목별_가용재고를_싣는다(stocked):
         {"item": "배추", "available_qty_kg": 180.0},
     ]
     assert validate_reply(request, reply, meta) == ()
+
+
+# ---------------------------------------------------------------------------
+# Critic DeptMeta (#134)
+#
+# ★ 이 관측은 **틀리게 적어도 에러가 안 난다.** Critic 은
+#   `inputs_used.get(check_id, ())` 로 읽고 못 찾으면 빈 튜플이며, 빈 튜플은
+#   "금지 입력이 없다" 로 읽혀 통과다. 그래서 여기서 보는 것은 값의 정확성이 아니라
+#   **조용한 통과가 성립하지 않는가**다.
+# ---------------------------------------------------------------------------
+
+
+def _dept_meta(meta):
+    """ExecutionMetadata 의 observations 에서 물류 DeptMeta 하나를 꺼낸다."""
+    found = [
+        json.loads(item)
+        for item in meta.observations
+        if json.loads(item).get("observation_type") == "inventory_dept_meta"
+    ]
+    return found[0] if found else None
+
+
+def test_PRE_회신에_DeptMeta_관측이_실린다(wired):
+    """안 실으면 Critic 의 두 검사가 통과가 아니라 **생략**된다."""
+    request = req()
+    reply, meta = adapter.logistics_port(request)
+    assert reply.runtime_status == "READY"
+    dept_meta = _dept_meta(meta)
+    assert dept_meta is not None
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_inputs_used_키는_마스터가_합성하는_check_id_다(wired):
+    """🔴 한 글자만 달라도 Critic 이 빈 튜플을 받고 **조용히 통과**한다.
+
+    이름의 주인은 마스터(`critic_bridge._INVENTORY_CAP_CHECK`)이고, 물류는 거기에
+    맞출 뿐이다. 마스터가 공개 상수를 내면 이 문자열이 import 로 바뀐다.
+    """
+    from app.master.critic_bridge import _INVENTORY_CAP_CHECK
+
+    _, meta = adapter.logistics_port(req())
+    assert list(_dept_meta(meta)["inputs_used"]) == [_INVENTORY_CAP_CHECK]
+
+
+def test_마스터가_실제로_합성한_check_와_키가_맞는다(wired):
+    """상수 비교보다 한 걸음 더 — **마스터가 이 회신 payload 로 만든 check** 의
+    `check_id` 가 우리 `inputs_used` 의 키여야 한다.
+
+    Critic 은 `inputs_used.get(chk.check_id, ())` 로 대조하므로, 여기서 어긋나면
+    검사가 돌면서 빈 튜플을 보고 **조용히 통과**한다 (`critic_v0_4.py:643`).
+    """
+    from app.master.critic_bridge import _replies_in
+
+    reply, meta = adapter.logistics_port(req())
+    synthesized = _replies_in({"inventory": reply.payload}, {"inventory": reply.evidences})
+    checks = [chk for dept in synthesized for chk in dept["checks"]]
+    assert checks, "마스터가 물류 check 를 합성하지 못했다 — payload 전제가 바뀐 것이다"
+    declared = _dept_meta(meta)["inputs_used"]
+    for chk in checks:
+        assert chk["check_id"] in declared
+
+
+def test_선언한_입력에_매입_시나리오_이름이_없다(wired):
+    """`E-SCENARIO-LEAK` 의 자기 검증 — 밴드는 후보와 무관해야 한다 (§3.6.1).
+
+    PRE_PURCHASE 는 제안이 생기기 **전에** 도는 경로라 구조적으로 성립하지만
+    (`master/flow.py::_collect_constraints` 가 PRE 회신만 모은다), 그 사실이 관측에도
+    유지되는지는 따로 봐야 한다.
+    """
+    from app.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
+
+    _, meta = adapter.logistics_port(req())
+    declared = set(_dept_meta(meta)["inputs_used"][adapter._CAP_CHECK_ID])
+    assert FORBIDDEN_SCENARIO_INPUTS & declared == set()
+
+
+def test_안_돈_Tool_의_입력은_실리지_않는다():
+    """선언이 아니라 **관측**이다. 정적 목록을 그대로 내면 실행과 갈리고, 갈린 목록을
+    Critic 은 사실로 검사한다.
+
+    같은 mode 를 Tool 목록만 바꿔 부르면 선언이 따라 바뀌어야 한다.
+    """
+    only_lots = adapter._inventory_dept_meta("PRE_PURCHASE", {}, [adapter._T_LOTS])
+    with_rules = adapter._inventory_dept_meta(
+        "PRE_PURCHASE", {}, [adapter._T_LOTS, adapter._T_RULES]
+    )
+    band = set(adapter._ADAPTER_BAND_INPUTS)
+    assert set(only_lots["inputs_used"][adapter._CAP_CHECK_ID]) == band | set(
+        adapter._TOOL_INPUTS[adapter._T_LOTS]
+    )
+    # Rule **만** 읽는 입력(어댑터 밴드·Lots 와 겹치지 않는 것)은 Rule 이 돌기
+    # 전에는 실리지 않는다. `on_hand_by_lot` 처럼 공유되는 입력은 돈 Tool 이 데려오므로
+    # 배타 입력으로 봐야 실행 의존이 실제로 검증된다.
+    rule_only = (
+        set(adapter._TOOL_INPUTS[adapter._T_RULES])
+        - band
+        - set(adapter._TOOL_INPUTS[adapter._T_LOTS])
+    )
+    assert rule_only
+    assert rule_only.isdisjoint(only_lots["inputs_used"][adapter._CAP_CHECK_ID])
+    assert rule_only <= set(with_rules["inputs_used"][adapter._CAP_CHECK_ID])
+
+
+def test_produced_fields_는_실제로_실린_필드다(wired):
+    """산출하지 않은 필드를 산출했다고 적으면 권한 검사가 엉뚱한 것을 본다."""
+    reply, meta = adapter.logistics_port(req())
+    assert _dept_meta(meta)["produced_fields"] == sorted(
+        key for key, value in reply.payload.items() if value is not None
+    )
+
+
+def test_시나리오_판정은_inputs_used_를_비우고_산출만_낸다(stocked):
+    """그 mode 에는 대응하는 cap 검사 축이 없다 — 마스터가 밴드 check 를 합성하는
+    입력(`constraints`)은 PRE 회신만 모은다. 없는 검사에 가짜 입력을 지어내지 않고,
+    `E-AUTHORITY` 가 볼 수 있게 실제 산출 필드만 낸다."""
+    reply, meta = adapter.logistics_port(
+        req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    )
+    dept_meta = _dept_meta(meta)
+    assert dept_meta["inputs_used"] == {}
+    assert dept_meta["produced_fields"] == sorted(
+        key for key, value in reply.payload.items() if value is not None
+    )
+
+
+def test_빈_inputs_used_가_경계_관측을_덮지_않는다(wired, stocked):
+    """마스터가 두 mode 의 관측을 **합쳐서** 나른다 (`critic_bridge._dept_meta_in`).
+    시나리오 관측의 빈 `inputs_used` 가 마지막이라 경계 것을 덮으면, 검사가 돌면서
+    아무것도 안 보게 된다."""
+    from app.master.critic_bridge import _dept_meta_in
+
+    _, pre_meta = adapter.logistics_port(req())
+    _, sv_meta = adapter.logistics_port(
+        req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    )
+    merged = _dept_meta_in({"inventory": [*pre_meta.observations, *sv_meta.observations]})
+    assert merged["inventory"]["inputs_used"][adapter._CAP_CHECK_ID]
+
+
+def test_못_낸_회신에는_관측을_달지_않는다(monkeypatch):
+    """ "안 돌았는데 무엇을 읽었다" 가 되면 안 된다."""
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: None)
+    reply, meta = adapter.logistics_port(req())
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert _dept_meta(meta) is None
+
+
+def test_스냅샷_실행오류_회신에도_관측을_달지_않는다(monkeypatch):
+    def _boom(as_of):
+        raise adapter._SnapshotLoadError("db down")
+
+    monkeypatch.setattr(adapter, "_load_read", _boom)
+    reply, meta = adapter.logistics_port(req())
+    assert reply.runtime_status == "ERROR"
+    assert _dept_meta(meta) is None
+
+
+def test_모든_Tool_이_입력_계약을_가진다():
+    """Tool 을 새로 만들고 계약을 안 적으면 조용한 누락이 아니라 **import 실패**여야
+    한다. 빈 `inputs_used` 는 Critic 이 통과로 읽으므로 크게 실패하는 편이 낫다."""
+    declared = set(adapter._TOOL_INPUTS)
+    assert {
+        adapter._T_RULES,
+        adapter._T_CAP,
+        adapter._T_ARRIVAL,
+        adapter._T_LOTS,
+        adapter._T_INVENTORY,
+        adapter._T_SIGNALS,
+    } <= declared
+
+
+def test_계약_없는_Tool_은_조용히_0개가_아니라_예외다():
+    with pytest.raises(adapter._ToolInputContractMissing):
+        adapter._inventory_dept_meta("PRE_PURCHASE", {}, ["nonexistent_tool"])
+
+
+def test_시나리오_Tool_은_금지_이름을_정직하게_선언한다():
+    """지금은 SCENARIO_VALIDATION 에서만 돌아 `inputs_used` 에 실리지 않는다. 언젠가
+    경계 경로로 새면 Critic 이 잡아야 하므로 계약을 비워 두지 않는다."""
+    from app.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
+
+    assert FORBIDDEN_SCENARIO_INPUTS & set(adapter._TOOL_INPUTS[adapter._T_ARRIVAL])
