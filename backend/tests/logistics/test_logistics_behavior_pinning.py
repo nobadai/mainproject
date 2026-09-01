@@ -1,8 +1,12 @@
-"""물류 행동 고정 테스트 — 감사 P0 2건의 현재 동작 박제 + Adapter↔Service parity (#121 1단계).
+"""물류 행동 고정 테스트 — 감사 P0 2건 + Adapter↔Service parity (#121).
 
-★ 이 파일의 (a)·(b) 테스트는 **버그를 승인하는 것이 아니라 고정하는 것**이다.
-  수정 이슈(#121 2·3단계)에서 기대값을 반전하는 것이 곧 수정 완료의 판정이 된다.
-  `PIN(현재 동작)` 표시가 붙은 assert 가 반전 대상이다.
+★ (a) P0-1 테스트는 **버그를 승인하는 것이 아니라 고정하는 것**이다.
+  마스터의 집계 규칙 확정(#121 3단계) 후 기대값을 반전하는 것이 곧 수정 완료의
+  판정이 된다. `PIN(현재 동작)` 표시가 붙은 assert 가 반전 대상이다.
+
+★ (b) P0-2 는 2단계에서 수정 완료됐다 — 해당 테스트들은 이제 고정이 아니라
+  **계약**이다: reject 안의 adjustment 는 scenario_results 에 진단으로만 남고,
+  preferred·suggested·needs_followup 으로 승격되지 않는다.
 
 ★ (c) parity 는 재현이 아니라 상시 안전망이다 — Core 에 값이 추가되고 한쪽 조립에만
   반영되는 드리프트(PR #116 에서 실제로 일어난 일)를 자동으로 잡는다.
@@ -28,7 +32,12 @@ from app.logistics.scenario_engine import (
     derive_preferred_adjustment,
     validate_purchase_scenarios,
 )
-from app.logistics.schemas import InventoryLogisticsSnapshot, PurchaseAgentOutput
+from app.logistics.schemas import (
+    InventoryLogisticsSnapshot,
+    PurchaseAgentOutput,
+    ScenarioAdjustment,
+    ScenarioValidationResult,
+)
 from app.logistics.service import run_logistics_procurement_with_snapshot
 from app.master.envelope import AgentRequest, ExecutionContext
 
@@ -71,12 +80,47 @@ def _snapshot(**overrides: Any) -> InventoryLogisticsSnapshot:
     return InventoryLogisticsSnapshot(**{**base, **overrides})
 
 
-def _proposal_payload(
+_UNIT_PRICE = 1650
+
+
+def _scenario_block(
+    label: str,
     split_plan: list[dict[str, Any]],
-    sourcing_qty: int,
+    total_qty: int,
 ) -> dict[str, Any]:
-    """사중 일치(수량 3축 + 금액)와 seq·날짜 규칙을 지키는 최소 제안."""
-    unit_price = 1650
+    """사중 일치(수량 3축 + 금액)와 seq·날짜 규칙을 지키는 시나리오 블록."""
+    return {
+        "label": label,
+        "strategy_type": "quantity",
+        "coverage_days": 5,
+        "total_qty_kg": total_qty,
+        "total_amount_krw": total_qty * _UNIT_PRICE,
+        "max_price": 1750,
+        "margin_warning": False,
+        "split_plan": split_plan,
+        "sourcing_plan": [
+            {
+                "market": "가락",
+                "grade": "상",
+                "qty_kg": total_qty,
+                "grade_unit_price": _UNIT_PRICE,
+            }
+        ],
+        "expected_margin_rate": 0.3,
+        "rationale": [
+            {
+                "source": "예측",
+                "claim": "행동 고정 테스트 근거",
+                "ref_id": "TEST-PIN-001",
+                "evidence_grade": "OFFICIAL",
+                "evidence_detail": "테스트 fixture",
+            }
+        ],
+        "risks": [],
+    }
+
+
+def _payload_of(scenarios: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "meta": {
             "as_of": AS_OF.isoformat(),
@@ -85,42 +129,19 @@ def _proposal_payload(
             "is_refeed": False,
             "feedback_attempt": 0,
         },
-        "scenarios": [
-            {
-                "label": "기본",
-                "strategy_type": "quantity",
-                "coverage_days": 5,
-                "total_qty_kg": sourcing_qty,
-                "total_amount_krw": sourcing_qty * unit_price,
-                "max_price": 1750,
-                "margin_warning": False,
-                "split_plan": split_plan,
-                "sourcing_plan": [
-                    {
-                        "market": "가락",
-                        "grade": "상",
-                        "qty_kg": sourcing_qty,
-                        "grade_unit_price": unit_price,
-                    }
-                ],
-                "expected_margin_rate": 0.3,
-                "rationale": [
-                    {
-                        "source": "예측",
-                        "claim": "행동 고정 테스트 근거",
-                        "ref_id": "TEST-PIN-001",
-                        "evidence_grade": "OFFICIAL",
-                        "evidence_detail": "테스트 fixture",
-                    }
-                ],
-                "risks": [],
-            }
-        ],
+        "scenarios": scenarios,
         "confidence": "high",
         "situation": "stable",
         "context_docs_used": [],
         "rejected_reasons": [],
     }
+
+
+def _proposal_payload(
+    split_plan: list[dict[str, Any]],
+    sourcing_qty: int,
+) -> dict[str, Any]:
+    return _payload_of([_scenario_block("기본", split_plan, sourcing_qty)])
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, snapshot: InventoryLogisticsSnapshot) -> None:
@@ -198,7 +219,7 @@ def test_전_시나리오_reject_인데_business_status_는_ok_다(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (b) P0-2 — reject 시나리오가 앞 회차 adjustment 를 유지한 채 새어 나간다
+# (b) P0-2 — reject 의 adjustment 는 진단으로만 남는다 (2단계 수정 반영)
 # ---------------------------------------------------------------------------
 
 
@@ -219,12 +240,13 @@ def _multi_split_case() -> tuple[InventoryLogisticsSnapshot, dict[str, Any]]:
     return snapshot, payload
 
 
-def test_reject_시나리오에_앞_회차_adjustment_가_남는다():
-    """🔴 PIN(현재 동작) — #121 2단계에서 기대값 반전 대상.
+def test_reject_의_adjustment_는_진단으로_남고_preferred_에서는_빠진다():
+    """✅ 계약 (#121 2단계 수정 반영) — 1단계 PIN 의 기대값 반전.
 
-    `derive_preferred_adjustment` docstring 은 "reject 시나리오는 adjustments 가
-    비므로 자연히 집계에서 빠진다" 고 전제하지만, multi-split 에서는 거짓이다 —
-    뒤 회차의 불가 판정이 앞 회차에서 이미 쌓인 adjustment 를 지우지 않는다.
+    multi-split 에서 앞 회차의 adjustment 가 쌓인 채 뒤 회차 불가로 reject 가 될
+    수 있다. 그 adjustment 는 "어디까지는 됐는지"의 **진단 기록으로 유지**되지만,
+    구제 불가 판정한 안이 우선 조정 축을 정하면 안 되므로 preferred 집계에서는
+    제외된다.
     """
     snapshot, payload = _multi_split_case()
     proposal = PurchaseAgentOutput.model_validate(payload)
@@ -236,22 +258,20 @@ def test_reject_시나리오에_앞_회차_adjustment_가_남는다():
     assert result.verdict == "reject"
     assert "NO_FEASIBLE_ARRIVAL_DATE" in result.reason_codes
 
-    # 🔴 PIN(현재 동작): 불가 판정된 안에 1회차 수량 조정이 그대로 남아 있고,
-    #    preferred 집계가 그 축을 우선 조정으로 뽑는다. 수정 후에는
-    #    파생 채널(preferred)에서 reject 시나리오가 제외되어야 한다.
+    # 진단 기록은 유지된다 — 사실을 지우는 수정이 아니다.
     assert len(result.adjustments) == 1
     assert result.adjustments[0].axis == "quantity"
     assert result.adjustments[0].suggested_qty_kg == Decimal(1000)
-    assert derive_preferred_adjustment(results) == "quantity"
+    # ✅ 반전 완료: reject 만 있는 집계에서 preferred 는 없다.
+    assert derive_preferred_adjustment(results) is None
 
 
-def test_reject_시나리오의_조정이_M1_행동_제안_채널로_나간다(monkeypatch):
-    """🔴 PIN(현재 동작) — #121 2단계에서 기대값 반전 대상.
+def test_reject_시나리오의_조정은_M1_행동_제안_채널로_나가지_않는다(monkeypatch):
+    """✅ 계약 (#121 2단계 수정 반영) — 1단계 PIN 의 기대값 반전.
 
-    어댑터의 suggested 조립 루프에 verdict 필터가 없어, 불가 판정된 안의 조정이
-    M-1 전용 채널(`suggested_adjustments`)과 `needs_followup=True` 로 승격된다.
-    수정 후: scenario_results.adjustments(진단 정보)는 유지하되
-    suggested/needs_followup 은 reject 만으로 서지 않아야 한다.
+    reject 안의 조정은 payload.scenario_results(진단)에는 남지만, M-1 행동 제안
+    채널(`suggested_adjustments`)·`preferred_adjustment`·`needs_followup` 으로는
+    승격되지 않는다 — "reject 는 조정으로 구제 불가"와 채널 의미를 일치시킨다.
     """
     snapshot, payload = _multi_split_case()
     _wire(monkeypatch, snapshot)
@@ -260,14 +280,139 @@ def test_reject_시나리오의_조정이_M1_행동_제안_채널로_나간다(m
 
     results = reply.payload["scenario_results"]
     assert [row["verdict"] for row in results] == ["reject"]
-    # 진단 정보 자체는 수정 후에도 유지된다 — 반전 대상이 아니다.
+    # 진단 정보는 유지된다 — 사실이 사라지는 것이 아니라 제안으로 격상되지 않을 뿐.
     assert results[0]["adjustments"][0]["suggested_qty_kg"] == 1000.0
 
-    # 🔴 PIN(현재 동작): 반전 대상 세 줄.
-    assert reply.payload["preferred_adjustment"] == "quantity"
+    # ✅ 반전 완료: 행동 제안 채널 전부 침묵. preferred 는 None 이므로 키 자체가 없다.
+    assert "preferred_adjustment" not in reply.payload
+    assert reply.suggested_adjustments == ()
+    assert reply.needs_followup is False
+
+
+def test_혼합_집계에서_preferred_는_비reject_축을_따른다():
+    """✅ 계약 — 2단계 수정의 의미 변화를 고정한다 (검증 지적 반영).
+
+    reject(quantity 잔존) + conditional(timing) 혼합에서 수정 전에는 축 혼재로
+    None 이었지만, reject 의 조정은 행동 제안의 모집단이 아니므로 **행동 가능한
+    안의 고유 축인 timing 이 우선 조정**이 맞다. 구제 불가 판정의 진단 잔재가
+    유효한 추천을 막던 것이 종전의 결함이다.
+    """
+    results = [
+        ScenarioValidationResult(
+            label="보수",
+            verdict="reject",
+            reason_codes=["CAPACITY_EXCEEDED", "NO_FEASIBLE_ARRIVAL_DATE"],
+            adjustments=[
+                ScenarioAdjustment(
+                    axis="quantity", split_date=AS_OF, suggested_qty_kg=Decimal(1000)
+                )
+            ],
+        ),
+        ScenarioValidationResult(
+            label="기본",
+            verdict="conditional",
+            reason_codes=["CAPACITY_EXCEEDED"],
+            adjustments=[
+                ScenarioAdjustment(
+                    axis="timing",
+                    split_date=AS_OF,
+                    suggested_arrival_date=date(2026, 8, 26),
+                )
+            ],
+        ),
+    ]
+
+    assert derive_preferred_adjustment(results) == "timing"
+
+
+def _mixed_verdict_case() -> tuple[InventoryLogisticsSnapshot, dict[str, Any]]:
+    """reject(보수)와 conditional(기본)이 한 제안에 공존하는 실계산 케이스.
+
+    창고 만석(8,000/8,000)에 확정 출고가 1,000kg(8/25)·1,000kg(8/27) 있어
+    8/26부터 1,000 · 8/28부터 2,000 이 열린다. lead=2. (매입 계약상 각 시나리오
+    seq 1 의 날짜는 `meta.as_of` 여야 하므로 둘 다 8/21 시작이다.)
+
+    보수: split1 2,000@8/21 → 도착 8/23 cap 0 → timing 조정(8/28, 처음으로 2,000
+          이 들어가는 날). 원안 2,000 이 8/23부터 점유 → split2 3,000@8/23 은
+          8/28에도 2000−2000=0 이라 창 전체 불가 → **reject + timing 조정 잔존**.
+    기본: split 1,000@8/21 → 도착 8/23 cap 0 → 8/26 가능 → **conditional + timing**.
+
+    두 조정의 dedup 키가 다르다(target 8/28→7.0 vs 8/26→5.0) — 필터가 없으면
+    suggested 가 2건이 되므로 필터 제거 뮤턴트가 확실히 잡힌다.
+    """
+    snapshot = _snapshot(
+        used_capacity_kg=Decimal(8000),
+        on_hand_by_lot=[
+            {
+                "lot_id": "LOT-MIX-1",
+                "item": "배추",
+                "available_qty_kg": Decimal(2000),
+                "remaining_freshness_days": 5,
+                "effective_freshness_limit_days": 10,
+                "status": "ACTIVE",
+            }
+        ],
+        confirmed_outbound_schedule=[
+            {"date": date(2026, 8, 25).isoformat(), "quantity_kg": 1000, "item": "배추"},
+            {"date": date(2026, 8, 27).isoformat(), "quantity_kg": 1000, "item": "배추"},
+        ],
+    )
+    payload = _payload_of(
+        [
+            _scenario_block(
+                "보수",
+                [
+                    {"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 2000},
+                    {"seq": 2, "date": date(2026, 8, 23).isoformat(), "qty_kg": 3000},
+                ],
+                5000,
+            ),
+            _scenario_block(
+                "기본",
+                [{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 1000}],
+                1000,
+            ),
+        ]
+    )
+    return snapshot, payload
+
+
+def test_혼합_케이스에서_어댑터는_비reject_조정만_승격한다(monkeypatch):
+    """✅ 계약 — suggested 선별 승격과 preferred Evidence 건수 모집단을 고정한다.
+
+    reject(보수)의 timing 조정은 진단으로만 남고, conditional(기본)의 timing 조정만
+    행동 제안 채널로 나간다. preferred Evidence 의 건수도 비-reject 모집단만 센다 —
+    이 필터는 혼합 케이스에서만 발화하므로 여기서만 잡힌다 (검증 지적 반영).
+    """
+    snapshot, payload = _mixed_verdict_case()
+    _wire(monkeypatch, snapshot)
+
+    reply, _meta = adapter.logistics_port(_request(payload))
+
+    results = reply.payload["scenario_results"]
+    assert [(row["label"], row["verdict"]) for row in results] == [
+        ("보수", "reject"),
+        ("기본", "conditional"),
+    ]
+    # reject 의 timing 조정은 진단으로 유지된다.
+    assert results[0]["adjustments"][0]["axis"] == "timing"
+    assert results[0]["adjustments"][0]["suggested_arrival_date"] == "2026-08-28"
+
+    # preferred 는 비-reject 축(timing)을 따른다.
+    assert reply.payload["preferred_adjustment"] == "timing"
+    assert "preferred_adjustment" in reply.judgment_fields
+
+    # 승격은 conditional(기본)의 조정 1건뿐 — 필터가 없으면 보수 것까지 2건이 된다.
     assert len(reply.suggested_adjustments) == 1
-    assert reply.suggested_adjustments[0].axis == "quantity"
+    suggested = reply.suggested_adjustments[0]
+    assert suggested.axis == "timing"
+    assert suggested.target_value == 5.0  # 8/26 − as_of(8/21)
+    assert "기본" in suggested.reason
     assert reply.needs_followup is True
+
+    # preferred Evidence 건수 = 비-reject 모집단의 timing 조정 수 = 1 (전체로 세면 2).
+    evidence = next(e for e in reply.evidences if e.claim == "preferred_adjustment")
+    assert evidence.value == 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -362,6 +362,8 @@ class LogisticsProcurementResponse(LLMResponseFields):
     missing_data: list[str] = Field(default_factory=list)
     #: Rule/Scenario Engine 이 결정한 우선 조정 축(quantity/timing). 조정이 없거나
     #: 축이 혼재하면 None — LLM 이 아니라 결정론 층이 정한 값이다.
+    #: reject 시나리오의 조정은 집계에서 제외된다(#121 2단계) — 그 조정은
+    #: scenario_results 안의 진단 기록으로만 남는다.
     preferred_adjustment: str | None = None
     evidences: list[LogisticsEvidence]
 

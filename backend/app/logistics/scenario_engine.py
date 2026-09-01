@@ -193,12 +193,22 @@ def derive_preferred_adjustment(
 ) -> str | None:
     """Rule 이 낸 조정 제안에서 우선 조정 축을 집계한다 (LLM 정책 결정서 §5).
 
-    전체 시나리오의 모든 adjustments[].axis 를 모아 고유 축이 정확히 1종이면 그 축,
+    **reject 시나리오는 집계에서 명시적으로 제외한다** (#121 2단계). multi-split
+    에서는 앞 회차의 adjustment 가 쌓인 채 뒤 회차 불가로 reject 가 될 수 있어,
+    "reject 는 adjustments 가 비므로 자연히 빠진다"는 가정이 성립하지 않는다.
+    reject 안의 adjustment 는 "어디까지는 됐는지"의 진단 기록이지 행동 제안의
+    근거가 아니다 — 구제 불가 판정한 안이 우선 축을 정하면 안 된다.
+
+    비-reject 시나리오의 adjustments[].axis 를 모아 고유 축이 정확히 1종이면 그 축,
     혼재하거나 0건이면 None 이다. 근거 없이 하나를 고르지 않는다 — None 이면 LLM 도
-    추천하지 않는다(검증기 강제). reject 시나리오는 adjustments 가 비므로 자연히
-    집계에서 빠진다.
+    추천하지 않는다(검증기 강제).
     """
-    axes = {adjustment.axis for result in scenario_results for adjustment in result.adjustments}
+    axes = {
+        adjustment.axis
+        for result in scenario_results
+        if result.verdict != "reject"
+        for adjustment in result.adjustments
+    }
     if len(axes) == 1:
         return next(iter(axes))
     return None

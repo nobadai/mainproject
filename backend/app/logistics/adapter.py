@@ -877,13 +877,15 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
                     [
                         adjustment
                         for result in scenario["scenario_results"]
+                        # 집계와 같은 모집단 — reject 안의 조정은 근거 건수에서도 뺀다
+                        if result.verdict != "reject"
                         for adjustment in result.adjustments
                         if adjustment.axis == preferred
                     ]
                 ),
                 "adjustment_count",
                 ref,
-                f"전 시나리오 조정 제안의 고유 축이 {preferred} 하나 — 해당 축 제안 건수",
+                f"비-reject 시나리오 조정 제안의 고유 축이 {preferred} 하나 — 해당 축 제안 건수",
                 source="tool_calc",
             ),
         )
@@ -895,6 +897,14 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     suggested: list[SuggestedAdjustment] = []
     seen_adjustments: set[tuple[str, date, float]] = set()
     for result in scenario["scenario_results"]:
+        # ★ reject 안의 adjustment 는 승격하지 않는다 (#121 2단계). multi-split 에서
+        #   앞 회차의 조정이 남은 채 전체가 reject 될 수 있는데, 구제 불가 판정한 안의
+        #   조정을 행동 제안으로 내보내면 "reject 는 조정으로 구제 불가"와 모순된다.
+        #   진단 기록은 payload.scenario_results 에 그대로 남는다 — 사실이 사라지는
+        #   것이 아니라 제안으로 격상되지 않을 뿐이다. needs_followup 도 이에 따라
+        #   reject 만으로는 서지 않는다.
+        if result.verdict == "reject":
+            continue
         for adjustment in result.adjustments:
             if adjustment.axis == "quantity" and adjustment.suggested_qty_kg is not None:
                 target, unit = _num(adjustment.suggested_qty_kg), "kg"
