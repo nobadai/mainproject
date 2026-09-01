@@ -30,6 +30,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply
 from app.master.plan import ExecutionPlan
@@ -218,7 +219,7 @@ class ProcurementFlow:
             if attempts >= self.max_purchase_attempts:
                 return self._outcome(
                     "E3_REJECTED",
-                    f"매입 재호출 {attempts} 회에도 통과안 없음",
+                    self._exhausted_reason(attempts, verdicts, verification.findings),
                     scenarios=scenarios,
                     judgment=judgment,
                     constraints=constraints,
@@ -445,6 +446,57 @@ class ProcurementFlow:
         if findings:
             return False
         return all(v.get("business_status") != "reject" for v in verdicts.values())
+
+    def _exhausted_reason(
+        self,
+        attempts: int,
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        findings: Sequence[str],
+    ) -> str:
+        """재호출을 다 쓰고도 통과안이 없을 때 **사람이 읽는 사유.**
+
+        🔴 **다시 부른 것과 이유를 주고 다시 부른 것은 다른 문장이다.**
+          전에는 *"매입 재호출 2 회에도 통과안 없음"* 만 적었다. 사람은 그것을
+          *"고쳐 보라고 두 번 시켰는데 못 고쳤구나"* 로 읽는다. 실제로는 **같은 입력으로
+          두 번 돌렸다** — `_purchase_input` 이 루프 밖 값만 읽어서 무엇을 고쳐야 하는지가
+          매입에 안 간다.
+
+        ★ **되먹임을 배선하지 않은 것은 선택이다. 안 한 것을 한 것처럼 읽히게 두는 것은
+          선택이 아니다.** 배선이 끝나면 이 문장은 전달 건수와 반영 건수를 적는 쪽으로
+          바뀐다 — 그때까지 여기가 그 사실을 말하는 유일한 자리다.
+
+        ★ **왜 못 냈는지는 안 쓴다.** 그건 `findings` 와 `verdicts` 가 이미 응답에
+          싣고 있고, 여기서 한 번 더 요약하면 같은 사실의 주인이 둘이 된다.
+          이 문장이 소유하는 것은 **"그 지적이 매입에 갔는가"** 하나다.
+        """
+        head = f"매입 재호출 {attempts} 회에도 통과안 없음"
+        unsent = self._unsent_to_purchase(verdicts, findings)
+        if not unsent:
+            return head
+        return f"{head} — 매입에 전달되지 않은 것: {', '.join(unsent)} (되먹임 미배선)"
+
+    def _unsent_to_purchase(
+        self,
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        findings: Sequence[str],
+    ) -> tuple[str, ...]:
+        """재호출을 **유발한 근거**인데 재호출 payload 에는 안 실리는 것.
+
+        `_acceptable` 이 거짓이 되는 길이 둘뿐이므로(검증 지적 · 부서 기각) 둘만 본다.
+        둘 다 없으면 `_acceptable` 이 참이라 이 자리에 오지 않지만, 빈 튜플을 돌려
+        **머리말만 남기는 쪽**으로 둔다 — 없는 것을 있다고 적지 않는다.
+        """
+        out: list[str] = []
+        if findings:
+            out.append(f"검증 지적 {len(findings)}건")
+        rejected = tuple(
+            agent_label(agent)
+            for agent, verdict in verdicts.items()
+            if verdict.get("business_status") == "reject"
+        )
+        if rejected:
+            out.append(f"{'·'.join(rejected)} 기각 사유")
+        return tuple(out)
 
     def _outcome(self, end_code: EndCode, reason: str, **kw: Any) -> ProcurementOutcome:
         plan: ExecutionPlan = self.runner.plan
