@@ -7,10 +7,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import date
 from typing import Any
 from uuid import UUID
 
+from app.master.commitment import CommitmentNotBuildable, build_commitment
 from app.master.decision import (
+    CommitmentOut,
     DecisionIn,
     DecisionOut,
     DecisionRejected,
@@ -57,9 +61,10 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     existing = list_decisions(request_id)
     _reject_repeat_approval(existing, payload)
 
-    return save_decision(
+    seq = next_seq(existing)
+    saved = save_decision(
         request_id=request_id,
-        decision_seq=next_seq(existing),
+        decision_seq=seq,
         decision=payload.decision,
         decided_by=payload.decided_by,
         end_code_at_decision=end_code,
@@ -68,6 +73,53 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         history_run_id=str(row["run_id"]),
         note=payload.note,
     )
+    return saved.model_copy(
+        update={"commitment": _commitment_for(request_id, seq, payload, response_payload)}
+    )
+
+
+def _commitment_for(
+    request_id: str,
+    decision_seq: int,
+    payload: DecisionIn,
+    response_payload: Mapping[str, Any],
+) -> CommitmentOut | None:
+    """승인이면 **확정 입고 약정**을 같이 낸다 (H1).
+
+    ★ **적재 뒤에 만든다.** 약정을 못 만들어도 결정은 남아야 한다 — 사람이 승인한
+      것은 사실이고, 그 사실을 약정 조립 실패가 지우면 안 된다.
+
+    ★ **못 만들면 이유를 싣는다.** `None` 을 조용히 돌려주면 물류가 *"입고 예정이
+      없다"* 로 읽는다. 없는 것과 못 만든 것은 다르다 (§1.2-10).
+
+    ★ **오케 `cycle.py` 를 부르지 않는다** (지시 2026-09-01). 같은 변환이 거기에도
+      있지만 그 경로는 M-1 에서 안 돌고, 회차 수량을 합쳐 **품목을 없앤다.**
+    """
+    if payload.decision != "APPROVE":
+        return None
+
+    scenario = _scenario_of(response_payload, payload.scenario_label)
+    if scenario is None:
+        return CommitmentOut(buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다.")
+
+    as_of = _as_of_of(response_payload)
+    if as_of is None:
+        return CommitmentOut(
+            buildable=False, reason="실행 이력에 기준일이 없어 도착일을 걸 수 없다."
+        )
+
+    try:
+        commitment = build_commitment(
+            request_id=request_id,
+            as_of=as_of,
+            item=_item_of(response_payload),
+            scenario=scenario,
+            inbound_lead_days=_lead_days_of(response_payload),
+            decision_seq=decision_seq,
+        )
+    except CommitmentNotBuildable as exc:
+        return CommitmentOut(buildable=False, reason=str(exc))
+    return CommitmentOut.of(commitment)
 
 
 def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:
@@ -125,3 +177,48 @@ def _reject_repeat_approval(existing: list[DecisionOut], payload: DecisionIn) ->
 def get_decisions(request_id: str) -> list[DecisionOut]:
     """한 요청에 붙은 결정 전부. 최신 하나가 `is_current` 다."""
     return list_decisions(request_id)
+
+
+# ── 승인 → 약정 (H1) ────────────────────────────────────────────────────
+
+
+def _scenario_of(
+    response_payload: Mapping[str, Any], label: str | None
+) -> Mapping[str, Any] | None:
+    """승인한 라벨의 안. **라벨로 찾는다** — 순서로 고르지 않는다."""
+    for scenario in response_payload.get("scenarios") or ():
+        if isinstance(scenario, Mapping) and scenario.get("label") == label:
+            return scenario
+    return None
+
+
+def _item_of(response_payload: Mapping[str, Any]) -> str | None:
+    """실행의 품목. 판정부 `meta.item` 이 정본이다 (매입 보증 2026-09-01)."""
+    meta = (response_payload.get("judgment") or {}).get("meta") or {}
+    item = meta.get("item")
+    return item if isinstance(item, str) and item else None
+
+
+def _as_of_of(response_payload: Mapping[str, Any]) -> date | None:
+    """실행의 기준일.
+
+    🔴 **여기서 예외를 던지면 안 된다 (2026-09-01 실측).** 처음에 `DecisionRejected`
+      를 올렸더니 **결정은 이미 적재된 뒤라** 저장은 되고 응답은 409 가 나갔다.
+      *"약정을 못 만들어도 결정은 남아야 한다"* 고 적어 놓고 그 반대를 했다.
+      못 읽으면 `None` 을 돌려주고 사유를 약정에 싣는다.
+    """
+    raw = response_payload.get("as_of")
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _lead_days_of(response_payload: Mapping[str, Any]) -> Any:
+    """N4. **물류가 준 값을 그대로 읽는다** — 없으면 없는 대로 넘긴다."""
+    inventory = (response_payload.get("constraints") or {}).get("inventory") or {}
+    return inventory.get("inbound_lead_days")
