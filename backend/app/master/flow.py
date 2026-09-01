@@ -388,8 +388,20 @@ class ProcurementFlow:
             as_of=self.runner.context.as_of,
             item=self.item,
             evidences=dict(self.constraint_evidences),
+            # 부서가 남긴 관측을 실행 계획에서 그대로 꺼내 나른다. 마스터는 내용을
+            # 해석하지 않는다 — 해석은 `critic_bridge` 가 Critic 어휘로 옮길 때뿐이다.
+            observations=self._boundary_observations(),
         )
         return self.verifier(proposal, constraints, verdicts, self.runner.plan, context)
+
+    def _boundary_observations(self) -> dict[AgentName, tuple[str, ...]]:
+        """조언자 경계 회신에 딸린 부서 관측. **경계를 낸 부서만** 담는다."""
+        out: dict[AgentName, tuple[str, ...]] = {}
+        for agent in ADVISORS:
+            step = self.runner.plan.last(agent, "PRE_PURCHASE")
+            if step is not None and step.contributed and step.observations:
+                out[agent] = step.observations
+        return out
 
     # ── 판단 ────────────────────────────────────────────────────
 

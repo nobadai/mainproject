@@ -59,6 +59,14 @@ class VerificationContext:
     item: str | None = None
     evidences: Mapping[AgentName, tuple[Evidence, ...]] = field(default_factory=dict)
 
+    #: 부서가 스스로 남긴 관측. **마스터는 읽지 않고 나른다** (`critic_bridge`).
+    #:
+    #: `evidences` 와 같은 이유로 여기 있다 — `constraints` 는 payload 만 담는데,
+    #: Critic 의 `E-AUTHORITY` · `E-GRADE-LEAK` 는 *"그 부서가 무엇을 읽고 무엇을
+    #: 냈나"* 를 요구한다. 마스터가 추측하면 **모르는 것이 근거가 되므로** 부서가
+    #: 적어 보낸 것만 옮긴다. 없으면 Critic 이 그 검사를 생략한다.
+    observations: Mapping[AgentName, tuple[str, ...]] = field(default_factory=dict)
+
 
 def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     raw = proposal.get("scenarios", ())
@@ -326,6 +334,7 @@ class MasterVerifier:
                 proposal=proposal,
                 constraints=constraints,
                 evidences=context.evidences,
+                observations=context.observations,
             )
             verdict = self.critic(request)
         except CriticSkipped as exc:

@@ -9,21 +9,22 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance.agent import (
-    FinanceAgentController,
-    GeminiFinanceFinalizer,
-    GeminiFinancePlanner,
-    OllamaFinanceFinalizer,
-    OllamaFinancePlanner,
-    ToolAction,
-    _AvailabilityFallbackFinanceFinalizer,
-    _AvailabilityFallbackFinancePlanner,
-    _finance_model,
-    _finance_provider_name,
+from app.finance.agent import FinanceAgentController, ToolAction
+from app.finance.llm.client import (
     _gemini_availability_failure_reason,
     _gemini_response_text,
     _is_gemini_availability_failure,
+)
+from app.finance.llm.config import (
+    _finance_model,
+    _finance_provider_name,
     _load_finance_environment,
+)
+from app.finance.llm.finalizer import GeminiFinanceFinalizer, OllamaFinanceFinalizer
+from app.finance.llm.planner import GeminiFinancePlanner, OllamaFinancePlanner
+from app.finance.llm.provider import (
+    _AvailabilityFallbackFinanceFinalizer,
+    _AvailabilityFallbackFinancePlanner,
     _ProviderFallbackState,
 )
 from app.finance.repository import FinanceDataNotReady
@@ -139,7 +140,7 @@ class _FallbackPlanner:
 
 @pytest.fixture(autouse=True)
 def _prevent_real_finance_env_loading(monkeypatch):
-    monkeypatch.setattr("app.finance.agent._load_finance_environment", lambda: None)
+    monkeypatch.setattr("app.finance.llm.config._load_finance_environment", lambda: None)
 
 
 def _request() -> AgentRequest:
@@ -213,9 +214,9 @@ def test_finance_settings_load_env_independent_of_working_directory(tmp_path, mo
     )
     unrelated_directory = tmp_path / "unrelated"
     unrelated_directory.mkdir()
-    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr("app.finance.llm.config._ENV_FILES", (env_file,))
     monkeypatch.setattr(
-        "app.finance.agent._load_finance_environment", _load_finance_environment
+        "app.finance.llm.config._load_finance_environment", _load_finance_environment
     )
     monkeypatch.chdir(unrelated_directory)
 
@@ -233,9 +234,9 @@ def test_finance_env_file_does_not_override_process_environment(tmp_path, monkey
         "FINANCE_LLM_PROVIDER=gemini\nFINANCE_LLM_MODEL=dotenv-model\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr("app.finance.llm.config._ENV_FILES", (env_file,))
     monkeypatch.setattr(
-        "app.finance.agent._load_finance_environment", _load_finance_environment
+        "app.finance.llm.config._load_finance_environment", _load_finance_environment
     )
 
     process_environment = {
@@ -325,7 +326,7 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     _mock_successful_pre_purchase(
         monkeypatch, OllamaFinancePlanner, OllamaFinanceFinalizer
     )
-    with patch("app.finance.agent.urllib.request.urlopen") as urlopen:
+    with patch("app.finance.llm.client.urllib.request.urlopen") as urlopen:
         controller = FinanceAgentController(_FinancePort())
         reply, metadata = controller.run(_request())
 
@@ -426,7 +427,7 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
             )
         )
 
-    monkeypatch.setattr("app.finance.agent.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("app.finance.llm.client.urllib.request.urlopen", urlopen)
     action = _planner_decide(GeminiFinancePlanner())
 
     assert action.tool_name == "assess_finance_position"
@@ -435,7 +436,10 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
     )
     assert "127.0.0.1:11434" not in seen[0][0].full_url
     schema = json.loads(seen[0][0].data)["generationConfig"]["responseSchema"]
-    assert "enum" not in schema["properties"]["finalize"]
+    # Gemini 도 Ollama 와 같은 제약을 받는다 — 이번 호출의 allowed_tools 가 enum 이고,
+    # missing capability 가 있으므로 finalize 는 False 만 낼 수 있다 (§14).
+    assert schema["properties"]["finalize"]["enum"] == [False]
+    assert schema["properties"]["tool_name"]["enum"] == ["assess_finance_position"]
 
 
 def test_gemini_skips_thought_part_and_uses_later_text():
@@ -464,7 +468,7 @@ def test_gemini_http_429_is_preserved(monkeypatch):
     monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
     error = urllib.error.HTTPError("https://gemini.invalid", 429, "quota", {}, None)
     with (
-        patch("app.finance.agent.urllib.request.urlopen", side_effect=error),
+        patch("app.finance.llm.client.urllib.request.urlopen", side_effect=error),
         pytest.raises(urllib.error.HTTPError) as caught,
     ):
         _planner_decide(GeminiFinancePlanner())
@@ -488,7 +492,7 @@ def test_missing_gemini_key_fails_without_network(monkeypatch):
     monkeypatch.delenv("FINANCE_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with (
-        patch("app.finance.agent.urllib.request.urlopen") as urlopen,
+        patch("app.finance.llm.client.urllib.request.urlopen") as urlopen,
         pytest.raises(RuntimeError, match="API key is not set"),
     ):
         _planner_decide(GeminiFinancePlanner())
@@ -507,7 +511,8 @@ def test_gemini_planner_returns_valid_tool_action(monkeypatch):
         thought_first=True,
     )
     monkeypatch.setattr(
-        "app.finance.agent.urllib.request.urlopen", lambda *_args, **_kwargs: _Response(document)
+        "app.finance.llm.client.urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(document),
     )
     action = _planner_decide(GeminiFinancePlanner())
     assert action == ToolAction(
@@ -536,7 +541,7 @@ def test_gemini_planner_returns_valid_tool_action(monkeypatch):
 def test_gemini_rejects_invalid_finalize_tool_combinations(monkeypatch, content, missing):
     monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(
-        "app.finance.agent.urllib.request.urlopen",
+        "app.finance.llm.client.urllib.request.urlopen",
         lambda *_args, **_kwargs: _Response(_gemini_document(content)),
     )
     with pytest.raises(ValueError, match="Finance Planner must"):
@@ -584,7 +589,7 @@ def test_ollama_planner_remains_backward_compatible(monkeypatch):
             }
         )
 
-    monkeypatch.setattr("app.finance.agent.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("app.finance.llm.client.urllib.request.urlopen", urlopen)
     planner = OllamaFinancePlanner()
     action = planner.decide(
         request=_request(),

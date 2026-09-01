@@ -11,10 +11,16 @@ critic_bridge.py — 마스터 검증 Tool ↔ Critic 56검사 번역
 ★ **번역만 한다.** 판정은 `app.critic` 이 내리고, 여기는 이름을 옮긴다.
 
 ★ **없는 것을 만들지 않는다.**
-  `dept_meta` 를 보내지 않는 것이 그 예다. `inputs_used` 는 *"재무가 cap 을 낼 때
-  무엇을 읽었나"* 인데 마스터는 그걸 모른다. 빈 dict 를 보내면 Critic 의 등급 누출
-  검사가 **"금지 입력이 없다"로 읽고 통과**한다 — 모르는 것이 통과가 된다.
-  안 보내면 Critic 이 `skipped` 에 *"DeptMeta 미제출 — 생략"* 을 남긴다 (설계서 §8).
+  `inputs_used` 는 *"재무가 cap 을 낼 때 무엇을 읽었나"* 인데 **마스터는 그걸 모른다.**
+  빈 dict 를 보내면 Critic 의 등급 누출 검사가 **"금지 입력이 없다"로 읽고 통과**한다 —
+  모르는 것이 통과가 된다. 그래서 오랫동안 아무것도 안 보냈고, Critic 은 `skipped` 에
+  *"DeptMeta 미제출 — 생략"* 을 남겼다 (설계서 §8).
+
+  🔴 **이제는 부서가 직접 낸다.** 재무가 자기 실행을 보고 `finance_dept_meta` 관측을
+  `ExecutionMetadata.observations` 에 적고(`app.finance.agent._finance_dept_meta`),
+  마스터는 그것을 **해석하지 않고 나른다.** 여기서 하는 일은 관측 JSON 을 Critic 의
+  `DeptMetaIn` 모양으로 옮기는 것뿐이다 — Tool 이름을 보고 입력을 추정하거나
+  payload 키로 의미를 짐작하지 않는다. 부서가 안 적었으면 여전히 안 보낸다.
 
 ★ **항등식이 깨진 제안은 넘기지 않는다.**
   Critic 의 금액 축은 `qty_kg × unit_price_krw_per_kg` 로 다시 만들어진다. 그 단가는
@@ -29,6 +35,7 @@ critic_bridge.py — 마스터 검증 Tool ↔ Critic 56검사 번역
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
@@ -91,6 +98,7 @@ def build_request(
     proposal: Mapping[str, Any],
     constraints: Mapping[AgentName, Mapping[str, Any]],
     evidences: Mapping[AgentName, Sequence[Evidence]],
+    observations: Mapping[AgentName, Sequence[str]] | None = None,
     run_seq: int = 1,
 ) -> CriticProcurementRequest:
     """마스터 상태 → `CriticProcurementRequest`.
@@ -115,10 +123,50 @@ def build_request(
         inbound_lead_days=_int_of((constraints.get(_INVENTORY) or {}).get("inbound_lead_days")),
         scenarios=scenarios,
         replies=replies,
-        # ★ dept_meta 를 보내지 않는다 (모듈 주석 참고). rationale 도 비운다 — L5 는
-        #   오케 selector 문장을 검사하는데 1차 Flow 에 그 단계가 없다.
+        # ★ dept_meta 는 **부서가 적어 보낸 것만** 옮긴다 (모듈 주석 참고).
+        #   rationale 은 비운다 — L5 는 오케 selector 문장을 검사하는데 1차 Flow 에
+        #   그 단계가 없다.
+        dept_meta=_dept_meta_in(observations) or None,
         rationale="",
     )
+
+
+def _dept_meta_in(
+    observations: Mapping[AgentName, Sequence[str]] | None,
+) -> dict[str, dict[str, Any]]:
+    """부서 관측 → Critic `DeptMetaIn`. **번역만 한다.**
+
+    ★ 부서가 `<dept>_dept_meta` 관측을 적었을 때만 만든다. 안 적었으면 그 부서는
+      목록에 없고, Critic 은 예전처럼 *"DeptMeta 미제출 — 생략"* 을 남긴다.
+      **빈 dict 를 채워 넣지 않는다** — 그러면 모르는 것이 통과가 된다.
+
+    ★ 모양이 어긋난 관측도 조용히 버린다. 부서가 잘못 적은 것을 마스터가 고쳐
+      주면, 고친 값이 근거가 된다.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for dept, items in (observations or {}).items():
+        for raw in items:
+            try:
+                observation = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(observation, dict):
+                continue
+            if observation.get("observation_type") != f"{dept}_dept_meta":
+                continue
+            inputs_used = observation.get("inputs_used")
+            produced = observation.get("produced_fields")
+            if not isinstance(inputs_used, dict) or not isinstance(produced, list):
+                continue
+            out[dept] = {
+                "inputs_used": {
+                    str(check): [str(name) for name in names]
+                    for check, names in inputs_used.items()
+                    if isinstance(names, list)
+                },
+                "produced_fields": [str(name) for name in produced],
+            }
+    return out
 
 
 def fold(verdict: CriticVerdictOut) -> tuple[list[str], list[str], list[str]]:

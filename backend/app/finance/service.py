@@ -1,24 +1,17 @@
 """Finance P0 결정론적 Core 실행 흐름."""
 
 from datetime import date
-from decimal import Decimal
-from typing import TypedDict
 from uuid import UUID
 
 from app.finance.interpretation import enrich_finance_response
 from app.finance.llm.runtime import InterpretationService
 from app.finance.repository import (
-    FinanceState,
+    FinanceDataNotReady,
     get_current_finance_runtime_context,
-    get_current_finance_snapshot,
-    get_current_finance_state,
 )
 from app.finance.rules import (
-    FinanceRuleResult,
-    evaluate_finance_rules,
     evaluate_finance_runtime_rules,
     evaluate_finance_sales_rules,
-    has_required_finance_state,
 )
 from app.finance.run_repository import (
     get_finance_agent_run,
@@ -37,7 +30,6 @@ from app.finance.schemas import (
     FinanceCycle,
     FinancePolicy,
     FinanceProcurementResponse,
-    FinanceReviewRequest,
     FinanceRuntimeContext,
     FinanceSalesRequest,
     FinanceSalesResponse,
@@ -46,47 +38,20 @@ from app.finance.schemas import (
     PurchaseAgentOutput,
     RuntimeStatus,
 )
-from app.finance.tools import (
-    ExpectedCostComparison,
-    calculate_financial_limit,
-    calculate_post_purchase_cash,
-    calculate_proposal_amount,
-    compare_expected_cost,
-)
-
-
-class FinanceCoreResult(TypedDict):
-    proposal_id: str
-    scenario_id: str
-    purchase_as_of: date
-    finance_state: FinanceState | None
-    proposal_amount_krw: Decimal
-    expected_cost_comparison: ExpectedCostComparison
-    db_financial_limit_krw: Decimal | None
-    recalculated_financial_limit_krw: Decimal | None
-    financial_limit_matches: bool | None
-    post_purchase_cash_krw: Decimal | None
-    rule_result: FinanceRuleResult
-
-
-def _get_current_finance_state_or_none() -> FinanceState | None:
-    try:
-        return get_current_finance_state()
-    except LookupError:
-        return None
-
-
-def _get_current_finance_snapshot_or_none() -> FinanceSnapshot | None:
-    try:
-        return get_current_finance_snapshot()
-    except LookupError:
-        return None
 
 
 def _get_current_finance_runtime_context_or_none() -> FinanceRuntimeContext | None:
+    """읽지 못한 것은 예외가 아니라 상태다 — 여기서 `None` 으로 접는다.
+
+    ★ `FinanceDataNotReady` 도 같이 접는다. 부채가 음수인 재무 상태는 이제 원천 행에서
+      막히는데(`repository._reject_negative_debt`), 그것이 `LookupError` 가 아니라는
+      이유로 여기를 뚫고 나가면 레거시 `/finance/sales` 가 **500** 을 낸다. 못 믿을
+      상태를 만난 결과는 서버 오류가 아니라 *"준비되지 않음"* 이어야 한다 — 아래
+      경로가 `context=None` 을 이미 그렇게 다룬다.
+    """
     try:
         return get_current_finance_runtime_context()
-    except LookupError:
+    except (LookupError, FinanceDataNotReady):
         return None
 
 
@@ -266,60 +231,3 @@ def list_finance_runs(
         limit=limit,
     )
     return [FinanceAgentRunResponse.model_validate(row) for row in rows]
-
-
-def run_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
-    """Repository, Tools, Rules를 순서대로 호출해 Finance Core 결과를 만든다."""
-    finance_state = _get_current_finance_state_or_none()
-
-    proposal_amount = calculate_proposal_amount(request.scenario.sourcing_plan)
-    expected_cost_comparison = compare_expected_cost(
-        request.scenario.expected_cost,
-        proposal_amount,
-    )
-    db_financial_limit = None
-    recalculated_financial_limit = None
-    financial_limit_matches = None
-    post_purchase_cash = None
-    if has_required_finance_state(finance_state):
-        assert finance_state is not None
-        db_financial_limit = finance_state["financial_limit_krw"]
-        recalculated_financial_limit = calculate_financial_limit(
-            finance_state["current_cash_krw"],
-            finance_state["minimum_operating_cash_krw"],
-            finance_state["committed_outflows_krw"],
-            finance_state["unsettled_purchase_payables_krw"],
-        )
-        financial_limit_matches = db_financial_limit == recalculated_financial_limit
-        if not financial_limit_matches:
-            raise ValueError("FINANCIAL_LIMIT_MISMATCH")
-
-    rule_result = evaluate_finance_rules(
-        purchase_as_of=request.purchase_meta.as_of,
-        proposal_amount=proposal_amount,
-        expected_cost_comparison=expected_cost_comparison,
-        finance_state=finance_state,
-    )
-
-    if has_required_finance_state(finance_state):
-        assert finance_state is not None
-        if "AS_OF_MISMATCH" not in rule_result["hard_constraints"]:
-            post_purchase_cash = calculate_post_purchase_cash(
-                finance_state["current_cash_krw"],
-                proposal_amount,
-                finance_state["committed_outflows_krw"],
-                finance_state["unsettled_purchase_payables_krw"],
-            )
-    return {
-        "proposal_id": request.proposal_id,
-        "scenario_id": request.scenario_id,
-        "purchase_as_of": request.purchase_meta.as_of,
-        "finance_state": finance_state,
-        "proposal_amount_krw": proposal_amount,
-        "expected_cost_comparison": expected_cost_comparison,
-        "db_financial_limit_krw": db_financial_limit,
-        "recalculated_financial_limit_krw": recalculated_financial_limit,
-        "financial_limit_matches": financial_limit_matches,
-        "post_purchase_cash_krw": post_purchase_cash,
-        "rule_result": rule_result,
-    }
