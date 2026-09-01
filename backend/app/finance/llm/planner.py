@@ -17,6 +17,7 @@ from app.finance.llm.contracts import (
     _PLANNER_SYSTEM_PROMPT,
     FinancePlannerFailure,
     ToolAction,
+    _gemini_planner_response_schema,
     _planner_prompt,
     _planner_response_schema,
     _validate_planner_action,
@@ -104,9 +105,10 @@ class GeminiFinancePlanner:
                     observations=observations,
                     missing_capabilities=missing_capabilities,
                 ),
-                # ★ Ollama 와 **같은** 스키마다 — 이번 호출의 allowed_tools 가 enum 으로
-                #   들어간다. Provider 를 바꿔도 고를 수 있는 Tool 집합이 같아야 한다.
-                response_schema=_planner_response_schema(
+                # ★ 계약은 Ollama 와 **같다** — 이번 호출의 allowed_tools 가 enum 으로
+                #   들어간다. 다만 Gemini 가 못 받는 표현(boolean enum · null 타입)은
+                #   낮춰서 보내고, 그 강제는 `_validate_planner_action` 이 대신 한다.
+                response_schema=_gemini_planner_response_schema(
                     allowed_tools, planning_required=bool(missing_capabilities)
                 ),
             )

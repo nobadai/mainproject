@@ -395,12 +395,25 @@ class ProcurementFlow:
         return self.verifier(proposal, constraints, verdicts, self.runner.plan, context)
 
     def _boundary_observations(self) -> dict[AgentName, tuple[str, ...]]:
-        """조언자 경계 회신에 딸린 부서 관측. **경계를 낸 부서만** 담는다."""
+        """조언자 회신에 딸린 부서 관측. **기여한 회신만** 담는다.
+
+        ★ 경계(`PRE_PURCHASE`)와 시나리오 판정(`SCENARIO_VALIDATION`)을 **둘 다** 나른다.
+          Critic 의 권한 검사(`E-AUTHORITY`)는 부서가 무엇을 산출했는지를 보는데, 재무는
+          두 mode 에서 서로 다른 것을 산출한다 — 경계만 나르면 시나리오 산출 필드는
+          아무도 못 본다.
+
+        ★ 마스터는 **읽지 않고 나른다.** 내용을 해석하는 곳은 `critic_bridge` 가 부서
+          관측을 Critic 어휘로 옮길 때뿐이다.
+        """
         out: dict[AgentName, tuple[str, ...]] = {}
         for agent in ADVISORS:
-            step = self.runner.plan.last(agent, "PRE_PURCHASE")
-            if step is not None and step.contributed and step.observations:
-                out[agent] = step.observations
+            items: list[str] = []
+            for mode in ("PRE_PURCHASE", "SCENARIO_VALIDATION"):
+                step = self.runner.plan.last(agent, mode)
+                if step is not None and step.contributed and step.observations:
+                    items.extend(step.observations)
+            if items:
+                out[agent] = tuple(items)
         return out
 
     # ── 판단 ────────────────────────────────────────────────────

@@ -50,6 +50,38 @@ def _planner_response_schema(
     }
 
 
+def _gemini_planner_response_schema(
+    allowed_tools: frozenset[str], *, planning_required: bool
+) -> dict[str, Any]:
+    """같은 계약을 **Gemini 가 받아 주는 표현으로** 낮춘 스키마.
+
+    🔴 엄격 스키마를 그대로 보내면 Gemini 가 **HTTP 400** 을 낸다. 재무 Planner 가 매
+       호출 실패하고, 그것이 `FinancePlannerFailure` → Finance ERROR → 마스터
+       `E4_NOT_STARTED` 로 이어졌다 — 재무가 아니라 **전송 형식**이 문제였다.
+
+       Gemini responseSchema 는 OpenAPI 3.0 부분집합이라 두 가지를 못 받는다.
+         · `enum` 은 STRING 에만 붙는다 → `finalize: {boolean, enum:[false]}` 가 400
+         · 타입은 STRING/NUMBER/INTEGER/BOOLEAN/ARRAY/OBJECT 뿐 → `{"type": "null"}`
+           도 400. finalize 국면의 `tool_name` 이 그 모양이었다.
+
+    ★ **계약을 낮추는 것이 아니라 표현만 낮춘다.** 전송 스키마에서 빠진 강제는
+      `_validate_planner_action` 이 그대로 잡는다 (사후 검증은 원래 2차 방어이고,
+      구조화 출력을 무시하는 모델 때문에 어차피 필요하다).
+
+        missing capability 있음 → finalize=False, 허용 Tool 중 정확히 하나
+        missing capability 없음 → finalize=True, tool_name=None
+
+    ★ 엄격 스키마에서 **파생**시킨다. 두 벌로 적으면 allowed_tools enum 이 갈린다.
+    """
+    schema = _planner_response_schema(allowed_tools, planning_required=planning_required)
+    properties = dict(schema["properties"])
+    properties["finalize"] = {"type": "boolean"}
+    if not planning_required:
+        # 값은 null 이어야 하지만, 그 강제는 사후 검증이 한다.
+        properties["tool_name"] = {"type": "string", "nullable": True}
+    return {**schema, "properties": properties}
+
+
 _PLANNER_SYSTEM_PROMPT = (
     "You plan Finance capability calls. Select only an allowed tool. "
     "Never calculate or invent financial numbers or policy values. "
