@@ -55,6 +55,7 @@ from app.logistics.tools import (
     build_lot_constraints,
     calculate_cap_by_date,
 )
+from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
@@ -83,9 +84,14 @@ _T_SIGNALS = "evaluate_procurement_business_signals"
 #: 🔴 **이름이 어긋나면 검사가 조용히 통과한다.** Critic 은
 #: `inputs_used.get(check.check_id, ())` 로 읽고 못 찾으면 빈 튜플인데, 빈 튜플은
 #: *"금지 입력이 없다"* 로 읽혀 통과다 (`critic_v0_4.py:401`). 에러가 없으니 아무도
-#: 모른다. 마스터가 이 상수를 공개하고 대조 테스트를 붙이기로 했다 — 나오면 이
-#: 문자열을 import 로 교체한다.
-_CAP_CHECK_ID = "warehouse_cap"
+#: 모른다.
+#:
+#: ★ **그래서 문자열을 베끼지 않고 참조한다** (#137). 마스터가 PR #135 로 상수를
+#:   공개하며 같은 이유를 적었다 — *"부서가 문자열을 베껴 두면 마스터가 이름을 바꾸는
+#:   날 그 부서의 검사가 조용히 무력화된다."* 마스터의
+#:   `tests/master/test_dept_meta_check_id.py` 는 **마스터 합성 결과와 상수**가 같은지만
+#:   보므로, 물류가 베낀 문자열을 들고 있으면 그 테스트는 초록불인 채 물류 검사만 죽는다.
+_CAP_CHECK_ID = DEPT_CAP_CHECK_ID[_AGENT]
 
 
 class _ToolInputContractMissing(RuntimeError):
