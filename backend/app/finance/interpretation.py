@@ -1,4 +1,4 @@
-"""Finance deterministic Reply projection into the optional LLM layer."""
+"""결정론적 Finance Reply를 선택적 LLM 계층으로 투영한다."""
 
 from app.finance.llm.runtime import InterpretationService, get_interpretation_service
 from app.finance.llm.schemas import SanitizedLLMContext

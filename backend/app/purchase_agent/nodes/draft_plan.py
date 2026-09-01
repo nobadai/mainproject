@@ -7,7 +7,11 @@
 from typing import Any
 
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.nodes._guards import require_non_empty, require_positive
+from app.purchase_agent.nodes._guards import (
+    require_capacity_kg,
+    require_non_empty,
+    require_positive,
+)
 from app.purchase_agent.nodes.classify_situation import estimate_daily_demand
 from app.purchase_agent.quotes import quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
@@ -53,8 +57,23 @@ def warehouse_cap_kg(inventory: dict) -> int:
       ⚠️ mock이 우연히 정수라(12,000 + 3,600) 이 자리가 오래 드러나지 않았다. 선언은
       ``-> int``인데 실제로는 float을 그대로 돌려주고 있었고, 실연동에서 ``total_qty_kg``가
       소수가 되어 출력 스키마 검증이 막았다 (2026-08-28 통합 실행).
+
+    🔴 **두 값의 타입을 강제한다.** 물류가 준 수량이라는 점에서 로트 ``shelf_life_days``와
+      같은 종류인데 그쪽만 막혀 있었다 — *"한쪽만 지킨"* 상태다 (2026-08-31 확인). 실측:
+
+          True          → 창고 상한 1kg. 전 안이 창고에 눌려 죽는데 원인이 안 보인다
+          '1000' · [1]  → 더하는 자리에서 TypeError. 어느 키가 문제인지 안 남는다
+          -500          → 상한이 음수. 수량이 음수로 클립된다
+          NaN           → int() 변환에서 ValueError
+          Decimal + float → TypeError (물류는 float이지만 출처가 하나가 아니다)
+
+      수신 payload는 ``adapter.validate_payload``가 같은 검사를 먼저 해 ``missing_data``로
+      **사유를 내고 멈춘다** — 여기까지 오지 않는다.
     """
-    return int(inventory["warehouse_free_kg"] + inventory["rental_cap_kg"])
+    return int(
+        require_capacity_kg(inventory["warehouse_free_kg"], "warehouse_free_kg")
+        + require_capacity_kg(inventory["rental_cap_kg"], "rental_cap_kg")
+    )
 
 
 def purchase_budget_krw(state: PurchaseAgentState, constraints: dict) -> float:

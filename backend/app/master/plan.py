@@ -59,6 +59,14 @@ class ExecutionStep:
     llm_attempts: int = 0
     llm_fallback_used: bool = False
 
+    #: 부서가 스스로 남긴 관측. **마스터는 읽지 않고 나른다.**
+    #:
+    #: 부서만 아는 사실 중에는 봉투에 자리가 없는 것이 있다 — 재무가 cap 을 낼 때
+    #: 무엇을 읽었는지가 그것이다. 마스터가 Tool 이름이나 payload 키를 보고 추측하면
+    #: **모르는 것이 근거가 된다.** 그래서 부서가 기계가 읽을 형태로 적어 보내고,
+    #: 마스터는 그것을 그대로 검증 Tool 까지 옮긴다 (`critic_bridge`).
+    observations: tuple[str, ...] = ()
+
     @property
     def contributed(self) -> bool:
         return self.runtime_status == "READY"
@@ -94,6 +102,7 @@ class ExecutionPlan:
             llm_model=metadata.llm_model,
             llm_attempts=metadata.llm_attempts,
             llm_fallback_used=metadata.llm_fallback_used,
+            observations=tuple(metadata.observations),
         )
         self.steps.append(step)
         return step

@@ -40,6 +40,7 @@ class _Response:
         self.purchase_attempts = kw.get("purchase_attempts", 1)
         self.input_sources = kw.get("input_sources", {})
         self.mocked_inputs = kw.get("mocked_inputs", [])
+        self.verdicts = kw.get("verdicts", {})
         self.as_of = date(2025, 12, 31)
         self.request_id = "REQ-20251231-0001"
 
@@ -84,3 +85,66 @@ def test_검증_분수는_안이_없어도_실린다():
     facts = facts_from_procurement(_Response(reason="없다", skipped_checks=["A", "B"]))
 
     assert "지적 0건 · 판정하지 못한 검사 2건" in _lines(facts)
+
+
+# ── 조언자 판정 ─────────────────────────────────────────────────────────
+
+
+def test_조언자_판정을_적는다():
+    """🔴 실측 2026-08-31 — 물류가 `conditional` 을 냈는데 화면에 **한 글자도**
+    안 나왔다. 마스터는 그 값으로 `_acceptable` 을 정하면서 사람에게는 안 보여줬다."""
+    facts = facts_from_procurement(
+        _Response(
+            end_code="E1_APPROVED",
+            scenarios=[{"label": "기본"}],
+            verdicts={
+                "finance": {"business_status": "ok", "suggested_adjustments": 0},
+                "inventory": {"business_status": "conditional", "suggested_adjustments": 0},
+            },
+        )
+    )
+
+    적힌_것 = _lines(facts)
+    assert "재무 판정 통과" in 적힌_것
+    assert "물류 판정 조건부" in 적힌_것
+
+
+def test_조건부는_확인해_주세요_에도_올린다():
+    """`conditional` 을 `ok` 와 같은 줄에만 두면 **사람이 무조건 통과로 읽는다.**"""
+    facts = facts_from_procurement(
+        _Response(
+            scenarios=[{"label": "기본"}],
+            verdicts={"inventory": {"business_status": "conditional"}},
+        )
+    )
+
+    assert any("조건부입니다" in g for g in facts.gaps)
+
+
+def test_통과한_부서도_지우지_않는다():
+    """통과를 지우면 *"물류만 봤나"* 로 읽힌다 — 누가 봤는지가 답의 일부다."""
+    facts = facts_from_procurement(
+        _Response(scenarios=[{"label": "기본"}], verdicts={"finance": {"business_status": "ok"}})
+    )
+
+    assert "재무 판정 통과" in _lines(facts)
+
+
+def test_조정_제안이_있으면_드러낸다():
+    facts = facts_from_procurement(
+        _Response(
+            scenarios=[{"label": "기본"}],
+            verdicts={"finance": {"business_status": "ok", "suggested_adjustments": 2}},
+        )
+    )
+
+    assert any("조정을 제안했습니다 (2건)" in g for g in facts.gaps)
+
+
+def test_모르는_판정값은_적지_않는다():
+    """부서가 새 라벨을 내면 **추측해서 번역하지 않는다** — 모르는 것은 안 적는다."""
+    facts = facts_from_procurement(
+        _Response(scenarios=[{"label": "기본"}], verdicts={"finance": {"business_status": "???"}})
+    )
+
+    assert "재무 판정" not in _lines(facts)

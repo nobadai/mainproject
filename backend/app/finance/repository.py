@@ -1,5 +1,6 @@
 """Finance State 조회 Repository."""
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Protocol, TypedDict, cast
@@ -74,12 +75,12 @@ def get_current_finance_state() -> FinanceState:
 
 
 def get_current_finance_snapshot() -> FinanceSnapshot:
-    """Current View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    """현재 View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
     return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row())
 
 
 def get_current_finance_runtime_context() -> FinanceRuntimeContext:
-    """Snapshot, Policy, confirmed schedules를 DB boundary에서 한 번 고정한다."""
+    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다."""
     snapshot = get_current_finance_snapshot()
     policy = get_active_finance_policy()
     horizon_end = snapshot.state_date + timedelta(days=policy.cashflow_projection_days)
@@ -152,23 +153,37 @@ def get_current_finance_runtime_context() -> FinanceRuntimeContext:
     if snapshot.receivables_krw != 0 and not receivable_rows:
         unresolved.append("RECEIVABLE")
 
+    # 🔴 **부채가 없으면 부채 정책을 요구하지 않는다.**
+    #
+    #    예전에는 `current_debt_krw` 와 무관하게 부채 정책을 읽고, 행이 없으면
+    #    `DEBT_SERVICE` 를 unresolved 로 올렸다. 그러면 **빚이 없는 회사가 "부채 원천을
+    #    확인하지 못했다"** 고 말하게 된다 — 확인할 부채가 애초에 없는데도.
+    #    그 unresolved 는 아래로 흘러 *"재무가 뭔가 못 읽었다"* 로 읽히고, 실제로는
+    #    아무 문제가 없다. 없는 의무를 증명하라고 요구한 셈이다.
+    #
+    # ★ 부채가 있으면 규율은 그대로다 — 정책이 없거나 원금이 상태와 어긋나면
+    #   fail-closed 다. 부채 상환은 현금흐름에서 **가장 확실한 유출**이라, 그것을
+    #   빠뜨린 투영은 틀린 게 아니라 낙관적으로 틀린다.
     debt_policy = None
-    try:
-        debt_policy = get_active_finance_debt_policy()
-    except (LookupError, TypeError, ValueError):
-        unresolved.append("DEBT_SERVICE")
-    if debt_policy is not None:
-        if abs(debt_policy.debt_principal_krw - snapshot.current_debt_krw) > Decimal("0.000001"):
+    if snapshot.current_debt_krw > 0:
+        try:
+            debt_policy = get_active_finance_debt_policy()
+        except (LookupError, TypeError, ValueError):
             unresolved.append("DEBT_SERVICE")
-            debt_policy = None
-        else:
-            events.extend(
-                build_debt_service_schedule(
-                    debt_policy=debt_policy,
-                    as_of=snapshot.state_date,
-                    horizon_end=horizon_end,
+        if debt_policy is not None:
+            if abs(
+                debt_policy.debt_principal_krw - snapshot.current_debt_krw
+            ) > Decimal("0.000001"):
+                unresolved.append("DEBT_SERVICE")
+                debt_policy = None
+            else:
+                events.extend(
+                    build_debt_service_schedule(
+                        debt_policy=debt_policy,
+                        as_of=snapshot.state_date,
+                        horizon_end=horizon_end,
+                    )
                 )
-            )
 
     return FinanceRuntimeContext(
         snapshot=snapshot,
@@ -450,11 +465,36 @@ def _get_current_finance_state_row() -> dict[str, object]:
     row = fetch_one(query)
     if row is None:
         raise LookupError("Current Finance State was not found")
+    _reject_negative_debt(row)
     return row
 
 
+def _reject_negative_debt(row: Mapping[str, object]) -> None:
+    """부채는 음수일 수 없다. **원천 행에서 한 번 막는다.**
+
+    🔴 여기서 막지 않으면 음수 부채가 **"빚 없음"으로 읽힌다.** 부채 축의 판단은
+       `current_debt_krw > 0` 인지로 갈리는데, 음수는 그 분기에서 0 과 같은 쪽에
+       떨어진다 — 잘못된 DB 상태가 *"확인할 부채가 없다"* 는 정상 응답으로 둔갑하고,
+       부채 정책 검증도 상환 일정도 통째로 건너뛴다.
+
+    ★ **원천 행에 두는 이유**: 이 함수가 두 런타임 경로의 유일한 공통 입구다.
+
+        _get_current_finance_state_row
+          ├─ get_current_finance_snapshot → get_current_finance_runtime_context
+          └─ PostgresFinanceAsOfDataPort.load_finance_position → load_debt_schedule
+
+      `FinanceSnapshot` 검증만 믿으면 AsOf DataPort 는 **원시 dict 를 그대로** 쓰므로
+      그 경로로 음수가 빠져나간다. 스키마 제약은 이중 방어이지 대체가 아니다.
+
+    ★ 못 믿을 상태이지 프로그램 오류가 아니므로 `RUNTIME_NOT_READY` 로 접힌다.
+    """
+    debt = row.get("current_debt_krw")
+    if debt is not None and Decimal(str(debt)) < 0:
+        raise FinanceDataNotReady("finance_state_debt_invalid")
+
+
 class FinanceDataNotReady(RuntimeError):
-    """Required Finance fact/policy is absent or not historically reproducible."""
+    """필수 Finance 사실/Policy가 없거나 과거 시점으로 재현할 수 없다."""
 
     def __init__(self, key: str):
         self.key = key
@@ -462,7 +502,7 @@ class FinanceDataNotReady(RuntimeError):
 
 
 class FinanceAsOfDataPort(Protocol):
-    """v2.2 repository boundary. Every mutable read carries ``as_of``."""
+    """v2.2 Repository 경계. 모든 변경 가능 읽기에는 ``as_of``를 전달한다."""
 
     def load_finance_position(self, as_of: date) -> dict[str, object]: ...
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]: ...
@@ -473,11 +513,11 @@ class FinanceAsOfDataPort(Protocol):
 
 
 class PostgresFinanceAsOfDataPort:
-    """Adapter over the current schema with an explicit reproducibility guard.
+    """명시적인 재현성 보호 장치를 둔 현재 Schema용 Adapter.
 
-    The present DB has a current-state view, not a full bitemporal state store.
-    It is therefore safe only when the view's state_date exactly equals as_of;
-    older requests are reported as not ready instead of reading today's state.
+    현재 DB에는 완전한 이중 시간 상태 저장소가 아니라 현재 상태 View만 있다.
+    따라서 View의 state_date가 as_of와 정확히 일치할 때만 안전하다. 이전 요청은
+    오늘 상태를 읽지 않고 준비되지 않은 것으로 보고한다.
     """
 
     def __init__(self) -> None:

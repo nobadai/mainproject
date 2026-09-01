@@ -1,4 +1,4 @@
-"""Finance-owned Ollama provider, policy, validator, retry and fallback runtime."""
+"""Finance가 소유하는 Ollama Provider, Policy, Validator, 재시도 및 fallback Runtime."""
 
 import json
 import os

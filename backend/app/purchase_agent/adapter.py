@@ -20,11 +20,13 @@ from app.master.envelope import (
     AgentReply,
     AgentRequest,
     ExecutionMetadata,
+    LLMStatus,
 )
 from app.orchestrator.contracts_core import Evidence
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import build_graph
+from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     estimate_daily_demand,
@@ -111,18 +113,41 @@ def _metadata(
         agent=AGENT_NAME,
         used_tools=used,
         tool_order=tuple(range(1, len(used) + 1)),
-        llm_status=mix.llm_status if mix is not None else "DISABLED",
+        llm_status=mix.llm_status if mix is not None else _uncalled_status(),
         llm_model=(mix.llm_model or "") if mix is not None else "",
         llm_fallback_used=mix.llm_fallback_used if mix is not None else False,
     )
+
+
+def _uncalled_status() -> LLMStatus:
+    """판단자를 **한 번도 안 부른** 실행의 상태. 설정이 갈림길이다.
+
+    🔴 전에는 무조건 ``DISABLED`` 였다. 그러면 *"LLM 을 안 켰네"* 와 *"켰는데 이번엔 안
+      썼네"* 가 한 값이 되고, **사람이 없는 문제를 찾는다** — 2025-12-31 실행이 그랬다.
+      등급이 미상이라 ⑤가 후보를 만들기 전에 막혔는데, 설정은 켜져 있었다.
+
+    봉투가 네 값의 뜻을 규정한다 (``master/envelope.py`` ``LLMStatus``)::
+
+        DISABLED           설정이 꺼져 있다
+        SKIPPED_TEMPLATE   켜져 있는데 이번 실행에서는 안 불렀다 — 부를 조건이 아니었다
+
+    **새로 정한 규칙이 아니다.** 마스터 ``IntentService``·Critic ``JudgeService``·우리
+    ``MixSelectionService`` 가 이미 ``DISABLED → SKIPPED_TEMPLATE → SUCCESS → FALLBACK``
+    순서를 쓴다. 서비스 **안**은 맞았는데, 서비스에 **닿기 전에** 막히는 경로만 이 함수를
+    거치면서 뭉개지고 있었다.
+
+    STATUS_QUERY 처럼 애초에 판단 단계가 없는 실행도 ``SKIPPED_TEMPLATE`` 이다 —
+    Critic 이 *"이 Flow 에는 그 문장을 쓰는 단계가 없다"* 를 같은 값으로 적는 것과 같다.
+    """
+    return "SKIPPED_TEMPLATE" if get_llm_settings().enabled else "DISABLED"
 
 
 def _mix_decision(state: Mapping[str, Any] | None) -> Any:
     """⑤의 LLM 판단. ⑤가 비율 목록 **첫 줄에 얹어** 보낸다 (``_sourcing_decision``과 같은 자리).
 
     ``None``인 경우가 둘이다 — ⑤가 아예 안 돈 경로(수신 검증 실패·STATUS_QUERY)와,
-    돌았지만 게이팅에 걸려 LLM을 부르지 않은 날. 둘 다 ``DISABLED``가 맞다:
-    전자는 실행이 없었고 후자는 **판단자를 쓰지 않기로 규칙이 정한 것**이라 실패가 아니다.
+    돌았지만 게이팅에 걸려 LLM을 부르지 않은 날. **둘 다 실패가 아니고**, 어느 쪽이든
+    "이번 실행에서 안 불렀다"는 같은 사실이라 ``_uncalled_status()`` 가 설정으로 가른다.
     """
     if not state:
         return None
@@ -273,9 +298,7 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
         # 필수가 아니다 (M-1 제출 §5).
         inventory = constraints.get("inventory")
         if isinstance(inventory, Mapping):
-            for key in ("warehouse_free_kg", "rental_cap_kg"):
-                if inventory.get(key) is None:
-                    missing.append(f"constraints.inventory.{key}")
+            missing.extend(_capacity_input_problems(inventory))
             missing.extend(_lot_shape_problems(inventory.get("lots")))
             missing.extend(_arrival_input_problems(inventory))
 
@@ -309,6 +332,37 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     # (state.py · IO명세 §2 동기화 규칙). 필수로 걸면 정상 경로가 막힌다
     # (Codex 교차검증 P1).
     return sorted(set(missing))
+
+
+def _capacity_input_problems(inventory: Mapping[str, Any]) -> list[str]:
+    """창고 상한 입력의 **부재와 모양을 함께** 본다.
+
+    부재만 보면 ``warehouse_cap_kg``가 값을 받고도 죽거나 조용히 틀린다. 실측:
+
+        True          → 창고 상한 1kg. 전 안이 창고에 눌려 죽는데 사유가 안 남는다
+        '1000' · [1]  → 더하는 자리에서 ``TypeError``. 노드가 죽으면 **사유를 못 낸다**
+        -500          → 상한이 음수. 수량이 음수로 클립된다
+
+    죽으면 마스터는 *"무엇을 다시 달라고 해야 하는지"*를 모른다 — ``RUNTIME_NOT_READY``에
+    ``missing_data``가 있어야 요청이 성립한다. 로트 ``shelf_life_days``·
+    ``inbound_lead_days``와 **같은 종류의 값이라 같은 자리에서 막는다**.
+
+    ``0``은 통과시킨다. ``rental_cap_kg``는 2026-08-27 물류 회신 §1로 **0 확정**이라
+    미결이 아니다 (규칙 3).
+    """
+    problems: list[str] = []
+    for key in ("warehouse_free_kg", "rental_cap_kg"):
+        base = f"constraints.inventory.{key}"
+        value = inventory.get(key)
+        if value is None:
+            problems.append(base)
+        elif isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+            problems.append(f"{base}@수량이어야 한다")
+        elif not isfinite(float(value)):  # NaN · ±Inf
+            problems.append(f"{base}@유한한 수여야 한다")
+        elif float(value) < 0:
+            problems.append(f"{base}@음수일 수 없다 (받은 값 {value})")
+    return problems
 
 
 def _arrival_input_problems(inventory: Mapping[str, Any]) -> list[str]:

@@ -1,4 +1,4 @@
-"""Finance Local LLM contracts and response extension fields."""
+"""Finance 로컬 LLM 계약과 응답 확장 필드."""
 
 from typing import Literal
 

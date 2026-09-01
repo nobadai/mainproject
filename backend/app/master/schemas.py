@@ -188,6 +188,19 @@ class ProcurementRunResponse(BaseModel):
     )
 
 
+class ReportOut(BaseModel):
+    """`GET /master/runs/{request_id}/report` — 들고 나갈 수 있는 매입안 문서.
+
+    ★ **화면이 만들지 않는다.** 서버가 낸 Markdown 을 그대로 내려받는다 —
+      화면이 문서를 조립하기 시작하면 **화면과 문서가 다른 숫자**를 말하게 된다.
+    """
+
+    request_id: str
+    filename: str
+    #: Markdown 전문. 붙여 넣기·메신저·이슈 어디에도 그대로 들어간다.
+    markdown: str
+
+
 class DailyClosingOut(BaseModel):
     """하루치 마감 한 줄. **번인 구간의 실제 값이고 에이전트가 만든 것이 아니다.**"""
 

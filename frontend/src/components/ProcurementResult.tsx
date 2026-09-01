@@ -1,7 +1,9 @@
 "use client";
 
+import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
 import { Panel, SourceBadges } from "@/components/Badges";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
+import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
 
 /**
  * 매입 제안 결과.
@@ -45,6 +47,54 @@ export function ProcurementResult({
         </span>
       </div>
 
+      {/*
+        🔴 **안이 없으면 사유가 답이다.** 지금까지 화면은 "보류합니다" 만 적고
+        왜 없는지는 안 적었다 — 사용자는 시스템이 고장 난 것으로 읽는다.
+
+        ★ **둘을 다 적는다.** 마스터는 *"유효한 안이 없다"* 까지만 말하고,
+          **왜 없는지는 매입이 안다.** 매입 문장이 더 유용하다:
+          "매입단가 1,650원이 max_price 992원 초과" (실측 2026-08-31).
+        ★ 매입 문장을 화면이 다시 쓰지 않는다 — 그대로 옮긴다.
+      */}
+      {run.scenarios.length === 0 && (
+        <div className="rounded-lg border border-line bg-sunk px-3.5 py-3">
+          {run.reason && (
+            <p className="m-0 text-[13px] leading-relaxed">{run.reason}</p>
+          )}
+          {run.judgment?.no_proposal_reason && (
+            <p className="m-0 mt-2 text-[13px] leading-relaxed text-warn">
+              매입: {run.judgment.no_proposal_reason}
+            </p>
+          )}
+          {(run.judgment?.rejected_reasons ?? []).length > 0 && (
+            <ul className="m-0 mt-2 list-none space-y-1 p-0">
+              {run.judgment.rejected_reasons!.map((r, i) => (
+                <li key={i} className="text-[12.5px] text-muted">
+                  <b className="font-semibold text-ink">{r.label ?? "안"}</b> — {r.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {/*
+            매입이 준 닫힌 집합을 한국어로 옮긴다. **모르는 값은 원문 + `미등록`** 이라
+            매입이 어휘를 늘린 날 화면에서 바로 보인다 (매입 2026-08-31 회신 ④).
+          */}
+          {vocab(SITUATION_LABEL, run.judgment?.situation) && (
+            <p className="m-0 mt-2 text-[11.5px] text-faint">
+              매입 판단 · 상황 {vocab(SITUATION_LABEL, run.judgment?.situation)}
+              {vocab(CONFIDENCE_LABEL, run.judgment?.confidence)
+                ? ` · 확신 ${vocab(CONFIDENCE_LABEL, run.judgment?.confidence)}`
+                : ""}
+              {(run.judgment?.allowed_axes ?? []).length > 0
+                ? ` · 열린 축 ${(run.judgment.allowed_axes ?? [])
+                    .map((a) => vocab(AXIS_LABEL, a) ?? a)
+                    .join("·")}`
+                : ""}
+            </p>
+          )}
+        </div>
+      )}
+
       {run.scenarios.length > 0 && (
         <div className="grid gap-2.5 sm:grid-cols-3">
           {run.scenarios.map((s, i) => (
@@ -70,6 +120,12 @@ export function ProcurementResult({
       )}
 
       <SourceBadges sources={run.input_sources} />
+
+      {/*
+        🔴 판정 라벨 **밑에** 둔다. "조건부" 한 단어가 *"안에 문제가 있다"* 와
+        *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
+      */}
+      <AdvisorVerdicts verdicts={run.verdicts} />
 
       <Panel
         tone="attn"

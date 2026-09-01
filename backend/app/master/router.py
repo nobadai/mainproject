@@ -17,10 +17,16 @@ from app.master.schemas import (
     BurnInOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
+    ReportOut,
     RunHistoryOut,
     TriggerAck,
 )
-from app.master.service import get_burn_in_history, get_run_history, run_procurement
+from app.master.service import (
+    get_burn_in_history,
+    get_run_history,
+    get_run_report,
+    run_procurement,
+)
 from app.orchestrator.contracts_core import ContractViolation
 
 router = APIRouter(prefix="/master", tags=["master"])
@@ -163,6 +169,26 @@ def master_run_history(request_id: str) -> RunHistoryOut:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
+        ) from error
+
+
+@router.get(
+    "/runs/{request_id}/report",
+    response_model=ReportOut,
+    summary="매입안 보고서 — 들고 나갈 수 있는 Markdown",
+)
+def master_run_report(request_id: str) -> ReportOut:
+    """안마다 분할·조달·지급 일정과 근거를 편 문서.
+
+    ★ **못 한 것을 같이 싣는다.** 지적·확인 필요·못 돈 검사·입력 출처가 안 옆에
+      있어야 들고 나간 사람이 그 숫자를 어떻게 읽어야 하는지 안다.
+      **결론만 담은 문서가 가장 위험하다.**
+    """
+    try:
+        return get_run_report(request_id)
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
         ) from error
 
 

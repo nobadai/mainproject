@@ -6,9 +6,8 @@
 
 from __future__ import annotations
 
-from datetime import date
-
 from dataclasses import replace
+from datetime import date
 
 import pytest
 
@@ -277,6 +276,9 @@ def test_계획에_실행_시각이_없다():
         "llm_model",
         "llm_attempts",
         "llm_fallback_used",
+        # 부서가 스스로 남긴 관측 — 마스터는 읽지 않고 Critic 까지 나른다.
+        # 재무의 `finance_dept_meta` 가 여기로 온다 (E-AUTHORITY · E-GRADE-LEAK).
+        "observations",
     }
     # 목록을 고쳐 가며 늘리다 시계를 흘려 넣지 않도록, 이름으로도 한 번 막는다.
     # 🔴 부분 문자열로 재지 않는다 — "time" 은 `runtime_status` 를, "ts" 는

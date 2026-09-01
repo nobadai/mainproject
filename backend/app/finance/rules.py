@@ -6,7 +6,6 @@ from decimal import Decimal
 from typing import Literal, TypedDict, cast
 
 from app.finance.schemas import FinalVerdict, RuntimeStatus
-from app.finance.tools import ExpectedCostComparison
 
 Verdict = FinalVerdict
 HardConstraint = Literal[
@@ -26,7 +25,7 @@ FinanceRuntimeSoftWarning = Literal[
 
 
 def classify_base_stress(*, base_safe: bool, stress_safe: bool) -> str:
-    """Map alternative BASE/STRESS projections to the Finance business contract."""
+    """대안 BASE/STRESS Projection을 Finance 업무 계약으로 매핑한다."""
     if not base_safe and stress_safe:
         raise ValueError("BASE unsafe with STRESS safe is an invalid Finance scenario")
     if not base_safe:
@@ -75,63 +74,6 @@ def has_required_finance_state(finance_state: Mapping[str, object] | None) -> bo
         field in finance_state and finance_state[field] is not None
         for field in _REQUIRED_FINANCE_STATE_FIELDS
     )
-
-
-def evaluate_finance_rules(
-    *,
-    purchase_as_of: date,
-    proposal_amount: Decimal,
-    expected_cost_comparison: ExpectedCostComparison,
-    finance_state: Mapping[str, object] | None,
-) -> FinanceRuleResult:
-    """계산 완료된 매입금액과 Finance State를 우선순위에 따라 판정한다."""
-    soft_warnings: list[SoftWarning] = []
-    if not expected_cost_comparison["is_match"]:
-        soft_warnings.append("COST_MISMATCH")
-
-    if not has_required_finance_state(finance_state):
-        return {
-            "verdict": "FAIL",
-            "max_feasible_amount_krw": None,
-            "hard_constraints": ["REQUIRED_FINANCE_STATE_MISSING"],
-            "soft_warnings": soft_warnings,
-        }
-
-    finance_state = cast(Mapping[str, object], finance_state)
-    state_date = finance_state["state_date"]
-    financial_limit = finance_state["financial_limit_krw"]
-    if not isinstance(state_date, date):
-        raise TypeError("finance_state.state_date must be a date")
-    if not isinstance(financial_limit, Decimal):
-        raise TypeError("finance_state.financial_limit_krw must be a Decimal")
-
-    if purchase_as_of != state_date:
-        return {
-            "verdict": "FAIL",
-            "max_feasible_amount_krw": None,
-            "hard_constraints": ["AS_OF_MISMATCH"],
-            "soft_warnings": soft_warnings,
-        }
-    if financial_limit <= Decimal(0):
-        return {
-            "verdict": "FAIL",
-            "max_feasible_amount_krw": Decimal(0),
-            "hard_constraints": ["NO_FINANCIAL_CAPACITY"],
-            "soft_warnings": soft_warnings,
-        }
-    if proposal_amount > financial_limit:
-        return {
-            "verdict": "FAIL",
-            "max_feasible_amount_krw": financial_limit,
-            "hard_constraints": ["FINANCIAL_LIMIT_EXCEEDED"],
-            "soft_warnings": soft_warnings,
-        }
-    return {
-        "verdict": "PASS",
-        "max_feasible_amount_krw": financial_limit,
-        "hard_constraints": [],
-        "soft_warnings": soft_warnings,
-    }
 
 
 def evaluate_finance_runtime_rules(

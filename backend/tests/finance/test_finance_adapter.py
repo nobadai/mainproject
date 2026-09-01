@@ -15,7 +15,14 @@ from typing import ClassVar
 import pytest
 
 from app.finance import adapter
-from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
+from app.finance.agent import FinanceAgentController, ToolAction
+from app.master.envelope import (
+    AgentReply,
+    AgentRequest,
+    ExecutionContext,
+    ExecutionMetadata,
+    validate_reply,
+)
 
 AS_OF = date(2025, 12, 31)
 
@@ -55,6 +62,9 @@ class _Policy:
         "minimum_cash_balance_krw": "PROJECT-DEFINITION-V1.2:minimum_cash_balance",
         "cashflow_projection_days": "MVP-DECISION-20260825:FIN-CASH-01",
         "margin_defense_floor_rate": "PROJECT-DEFINITION-V1.2:MARGIN-DEFENSE-GRACE",
+        "cash_priority_reference": "POL-CASH-PRIORITY",
+        "cash_priority_high_ratio": "POL-CASH-HIGH",
+        "cash_priority_medium_ratio": "POL-CASH-MEDIUM",
     }
 
 
@@ -94,9 +104,40 @@ class _Context:
     unresolved_sources: tuple = ()
 
 
+@pytest.fixture(autouse=True)
+def controller_wired(monkeypatch):
+    monkeypatch.setattr(
+        adapter,
+        "FinanceAgentController",
+        lambda port: FinanceAgentController(port, _AdapterPlanner()),
+    )
+    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
+
+
 @pytest.fixture
 def wired(monkeypatch):
     monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
+
+
+class _AdapterPlanner:
+    model = "test-finance-planner"
+
+    def __init__(self):
+        self.attempts = 0
+
+    def decide(self, *, allowed_tools, missing_capabilities, **_kwargs):
+        self.attempts += 1
+        if not missing_capabilities:
+            return ToolAction(finalize=True)
+        preferred = (
+            "assess_finance_position",
+            "project_cashflow",
+            "calculate_purchase_finance_cap",
+            "analyze_payment_pressure",
+            "evaluate_purchase_scenario",
+            "validate_amount_adjustment",
+        )
+        return ToolAction(next(name for name in preferred if name in allowed_tools))
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +154,53 @@ def test_봉투_검증을_통과한다(wired):
     request = req()
     reply, meta = adapter.finance_port(request)
     assert [f.code for f in validate_reply(request, reply, meta)] == []
+
+
+@pytest.mark.parametrize("mode", ["PRE_PURCHASE", "SCENARIO_VALIDATION"])
+def test_컨트롤러_위임은_실행_메타데이터를_그대로_반환한다(
+    wired, monkeypatch, purchase_payload, mode
+):
+    request = req(mode, payload=purchase_payload if mode == "SCENARIO_VALIDATION" else {})
+    controller_reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=request.context.as_of,
+        agent="finance",
+        mode=mode,
+        run_id="controller-run",
+        runtime_status="READY",
+        business_status="ok",
+    )
+    controller_metadata = ExecutionMetadata(
+        run_id="controller-run",
+        request_id=request.context.request_id,
+        agent="finance",
+        used_tools=("controller-tool",),
+        tool_order=(7,),
+        llm_status="FALLBACK",
+        llm_model="finance-test-model",
+        llm_attempts=3,
+        llm_fallback_used=True,
+        replans=2,
+        elapsed_ms=41,
+    )
+    received = []
+
+    class _Controller:
+        def __init__(self, _port):
+            pass
+
+        def run(self, controller_request):
+            received.append(controller_request)
+            return controller_reply, controller_metadata
+
+    monkeypatch.setattr(adapter, "FinanceAgentController", _Controller)
+    reply, metadata = adapter.finance_port(request)
+
+    assert received and received[0].context.policy_version == "POLICY-V1"
+    assert reply.run_id == "controller-run"
+    assert metadata is controller_metadata
+    assert metadata.used_tools == ("controller-tool",)
+    assert metadata.llm_status == "FALLBACK"
 
 
 def test_확정_7필드를_싣는다(wired):
@@ -308,7 +396,13 @@ def test_급여_출처가_없으면_투영을_만들지_않는다(monkeypatch):
 
 
 def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
-    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다."""
+    """★ 급여만 특별하다. 나머지는 값을 쓸 수 있으므로 이름만 밝히고 지나간다.
+
+    🔴 다만 **지어낸 ref 로 지나가지는 않는다.** 예전에는 어댑터가 빠진 키마다
+       `finance-policy:{version}:{key}` 를 채워 넣어서 근거가 있는 척했다 — 그 ref 는
+       DB 어디에도 없어 따라가면 아무 데도 닿지 않았다. 지금은 근거를 못 다는 claim 을
+       payload 에서 함께 빼고 `missing_data` 로 밝힌다.
+    """
 
     class _PayrollOnly(_Context):
         class policy(_Policy):
@@ -321,6 +415,13 @@ def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "READY"
     assert "purchase_payment_days@policy_source_ref" in reply.missing_data
+    # 계산은 그대로 돈다 — 상한 자체는 나온다.
+    assert reply.payload["finance_cap_amount_krw"]
+    # 근거를 못 다는 값은 실리지 않는다. 지어낸 ref 도 없다.
+    assert "purchase_payment_days" not in reply.payload
+    for evidence in reply.evidences:
+        for ref in evidence.ref_ids:
+            assert not ref.startswith("finance-policy:")
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +592,18 @@ def test_필수_Purchase_시나리오_필드가_없으면_명시적으로_ERROR(
     assert reply.runtime_status == "ERROR"
     assert reply.business_status == "skipped"
     assert reply.payload["validation_errors"]
+
+
+def test_Purchase_모델_수준_검증_오류도_안전하게_반환한다(wired, purchase_payload):
+    payload = deepcopy(purchase_payload)
+    payload["no_proposal_reason"] = "시나리오가 있는 제안에는 설정할 수 없다"
+
+    reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload=payload))
+
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert reply.payload["validation_errors"]
+    assert "value_error" in reply.payload["validation_errors"]
 
 
 def test_Purchase_as_of_불일치는_명시적으로_ERROR(wired, purchase_payload):

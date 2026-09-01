@@ -59,6 +59,14 @@ class VerificationContext:
     item: str | None = None
     evidences: Mapping[AgentName, tuple[Evidence, ...]] = field(default_factory=dict)
 
+    #: 부서가 스스로 남긴 관측. **마스터는 읽지 않고 나른다** (`critic_bridge`).
+    #:
+    #: `evidences` 와 같은 이유로 여기 있다 — `constraints` 는 payload 만 담는데,
+    #: Critic 의 `E-AUTHORITY` · `E-GRADE-LEAK` 는 *"그 부서가 무엇을 읽고 무엇을
+    #: 냈나"* 를 요구한다. 마스터가 추측하면 **모르는 것이 근거가 되므로** 부서가
+    #: 적어 보낸 것만 옮긴다. 없으면 Critic 이 그 검사를 생략한다.
+    observations: Mapping[AgentName, tuple[str, ...]] = field(default_factory=dict)
+
 
 def _scenarios_of(proposal: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
     raw = proposal.get("scenarios", ())
@@ -162,6 +170,75 @@ class VerificationResult:
         return not self.findings
 
 
+def supplied_but_unresolved(
+    scenarios: Sequence[Mapping[str, Any]],
+    constraints: Mapping[AgentName, Mapping[str, Any]],
+) -> list[str]:
+    """🔴 **다른 파트가 부를 수 있는 자리.** 마스터가 실어 준 값을 부서가 *"없다"* 고
+    답하는지 본다 — 마스터 관통이 쓰는 것과 **같은 코드**다.
+
+    매입이 8/31 에 겪은 일 때문에 열었다.
+
+    ```text
+    매입 검사   마스터 정규식을 빌려 "우리가 재현한 규칙에 걸리는가" 를 봤다  → 통과
+    실물        concerns 0건
+    ```
+
+    **관문이 둘인데 하나만 재현했다.** 정규식(둘째)에 걸려도 `supplied` 조회(첫째)에서
+    이미 걸러지면 아무 일도 안 일어난다 — `operational_limit_days` 는 중첩이라
+    그때 마스터의 `supplied` 에 없었다.
+
+    ★ **규칙을 재현하지 마십시오.** 재현한 것이 진짜와 갈리는 순간, 검사는 통과하는데
+      실물은 조용해집니다. 이 함수를 부르면 재현할 것이 없습니다.
+
+    ```python
+    from app.master.verifier import supplied_but_unresolved
+
+    concerns = supplied_but_unresolved(scenarios, constraints)
+    assert any("operational_limit_days" in c for c in concerns)
+    ```
+
+    ★ `MasterVerifier` 를 만들지 않아도 된다 — 이 검사는 Critic 도 DB 도 안 탄다.
+    """
+    concerns: list[str] = []
+    MasterVerifier()._check_supplied_but_unused(tuple(scenarios), constraints, concerns)
+    return concerns
+
+
+def unresolved_supplied_keys(
+    scenarios: Sequence[Mapping[str, Any]],
+    constraints: Mapping[AgentName, Mapping[str, Any]],
+) -> list[str]:
+    """🔴 **지목된 키만.** 위 함수의 *문장* 대신 *사실* 을 돌려준다.
+
+    매입이 2026-08-31 에 겪은 두 번째 일 때문에 연다.
+
+    ```text
+    concern 문장이 사유 원문을 통째로 되싣는다 (…사유: <매입이 쓴 문장>)
+      → "operational_limit_days" in concern 이
+        다른 키가 지목된 경우에도 참이 된다 (사유 문장 안에 그 이름이 있으니까)
+      → 매입의 반례 검사가 엉뚱하게 통과했다
+    ```
+
+    ★ **문장을 파싱하지 마십시오.** 머리말 따옴표를 정규식으로 여는 것도 결국
+      *"마스터가 문구를 안 바꾼다"* 에 기대는 것이라, 제가 문구를 다듬는 날 다시
+      깨집니다. 이 함수를 부르면 기댈 것이 없습니다.
+
+    ```python
+    from app.master.verifier import unresolved_supplied_keys
+
+    keys = unresolved_supplied_keys(scenarios, constraints)
+    assert "operational_limit_days" in keys
+    assert "cap_by_date" not in keys      # 반례가 진짜로 반례가 된다
+    ```
+
+    ★ 사람이 읽을 문장이 필요하면 `supplied_but_unresolved()` 를 쓴다. 둘은 **같은
+      검사**를 부르므로 갈릴 자리가 없다.
+    """
+    pairs = MasterVerifier()._unresolved_pairs(tuple(scenarios), constraints)
+    return [key for key, _ in pairs]
+
+
 class MasterVerifier:
     """마스터의 검증 Tool.
 
@@ -201,6 +278,7 @@ class MasterVerifier:
         skipped: list[str] = []
 
         self._check_plan_integrity(plan, scenarios, findings, concerns)
+        self._check_advisor_answered(verdicts, concerns)
         self._check_timing_gate(proposal, scenarios, findings, skipped)
         identity_findings = len(findings)
         self._check_scenario_identities(scenarios, findings, skipped)
@@ -256,6 +334,7 @@ class MasterVerifier:
                 proposal=proposal,
                 constraints=constraints,
                 evidences=context.evidences,
+                observations=context.observations,
             )
             verdict = self.critic(request)
         except CriticSkipped as exc:
@@ -337,6 +416,56 @@ class MasterVerifier:
                     continue  # 재호출로 같은 줄이 반복되면 읽는 사람만 피곤하다
                 seen.add(line)
                 (out if step.agent == "purchase" else concerns).append(line)
+
+    #: 조언자가 **실제로 낸 판정**. 이 셋이 아니면 판정을 안 낸 것이다.
+    #: `skipped` 는 판정이 아니라 *"판정하지 않았다"* 는 말이다.
+    _REAL_VERDICTS = frozenset({"ok", "conditional", "reject"})
+
+    def _check_advisor_answered(
+        self,
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        concerns: list[str],
+    ) -> None:
+        """🔴 **판정을 못 낸 조언자가 화면에서 사라지지 않게 한다.**
+
+        ★ **실측에서 나왔다 (2026-08-31).** 물류가 기준일 불일치를 fail-closed 로
+          막으면서 `runtime_status=ERROR` · `business_status=skipped` 를 낸다. 그때
+          세 곳이 서로 다르게 말하고 있었다.
+
+        ```text
+        화면     answer.py 가 라벨 없는 판정을 continue 로 건너뛴다 → 물류가 통째로 사라진다
+        보고서   report.py 가 라벨 표에 없는 값을 그대로 찍는다      → 영어 "skipped" 가 뜬다
+        검증     plan.called() 는 "불렀나" 만 본다                   → 답을 못 받아도 통과
+        ```
+
+          **"물어보지 않았다" 와 "물어봤는데 못 답했다" 가 화면에서 같아 보였다.**
+          앞엣것은 마스터 배선 문제고 뒤엣것은 그 부서 문제라 완전히 다른 얘기다.
+
+        ★ `findings` 가 아니라 `concerns` 다. 매입을 다시 불러도 안 고쳐진다 —
+          제안 기준일을 맞추거나 그 부서를 고쳐야 하는 일이라 **사람이 봐야 한다.**
+
+        ★ **이유를 같이 적는다.** `reasoning` 이 없으면 이 줄은 *"못 답했다"* 까지만
+          말하고 왜인지는 아무 데도 안 남는다 — 그러면 읽는 사람이 할 수 있는 것이 없다.
+        """
+        for agent, verdict in verdicts.items():
+            status = str(verdict.get("business_status") or "")
+            if status in self._REAL_VERDICTS:
+                continue
+            runtime = str(verdict.get("runtime_status") or "?")
+            why = str(verdict.get("reasoning") or "").strip()
+            # ★ **안 낸 것과 모르는 값을 낸 것을 갈라 적는다.** 뒤엣것을 *"안 냈다"* 고
+            #   쓰면 부서가 안 한 일을 했다고 하는 것이고, 고칠 곳도 서로 다르다 —
+            #   앞은 그 부서(또는 제안)의 문제, 뒤는 **마스터의 어휘가 낡은 것**이다.
+            what = (
+                "시나리오 판정을 내지 않았다"
+                if runtime != "READY" or status in ("", "skipped")
+                else f"마스터가 모르는 판정값 '{status}' 를 냈다 — 어휘 확인이 필요하다"
+            )
+            concerns.append(
+                f"ADVISOR-NO-VERDICT: {agent} 가 {what} "
+                f"(business={status or '없음'} · runtime={runtime}) — "
+                f"{why or '사유 미기재'}"
+            )
 
     # ── ③ 합쳤을 때의 모순 (§3.7.3) ─────────────────────────────
 
@@ -588,8 +717,34 @@ class MasterVerifier:
     #: "operational_limit_days는 받았으나 등급 어휘 미확정(#69)"
     #:   operational_limit_days → 사이에 다른 키가 없다                → 울린다 (13자여도)
     #: ```
+    #: 🔴 **키는 이름 전체로만 걸린다.** 그냥 부분문자열로 찾으면 짧은 키가 긴 키
+    #: **안에** 걸린다 — 중첩 한 겹을 보게 되면서 `item` 이 `supplied` 에 들어왔고,
+    #: 그 순간 이 문장 하나가 지적 **두 줄**이 됐다 (실측 2026-08-31, 피마늘 관통).
+    #:
+    #: ```text
+    #: "item_storage_policies 반영했으나 결론 미결"
+    #:   item_storage_policies → 울린다 (맞다)
+    #:   item                  → item_storage_policies 안에 걸려 또 울린다 (오탐)
+    #: ```
+    #:
+    #: ★ **끼어든 키 규칙으로는 못 막는다.** `item` 의 match 는 키 이름 중간에서
+    #:   끝나므로 뒤에 남는 것이 `_storage_policies …` 다 — 거기엔 `item_storage_policies`
+    #:   라는 온전한 이름이 없어서 "그 키 얘기다" 로 걸러지지 않는다.
+    #:
+    #: 앞뒤가 식별자 글자면 이름의 일부다. 한글 조사(`operational_limit_days는`)는
+    #: 식별자 글자가 아니라 그대로 걸린다.
+    _WORD_CHAR = "A-Za-z0-9_"
+
+    @classmethod
+    def _name_pattern(cls, key: str) -> re.Pattern[str]:
+        return re.compile(rf"(?<![{cls._WORD_CHAR}]){re.escape(key)}(?![{cls._WORD_CHAR}])")
+
+    @classmethod
+    def _name_in(cls, text: str, key: str) -> bool:
+        return cls._name_pattern(key).search(text) is not None
+
     def _unresolved_here(self, text: str, key: str, others: Iterable[str]) -> bool:
-        for match in re.finditer(re.escape(key), text):
+        for match in self._name_pattern(key).finditer(text):
             tail = text[match.end() :]
             stop = self._SENTENCE_END.search(tail)
             clause = tail[: stop.start()] if stop else tail
@@ -598,7 +753,9 @@ class MasterVerifier:
             if not spots:
                 continue
             between = clause[: min(spots)]
-            if any(other != key and other in between for other in others):
+            # 끼어든 키도 **이름 전체**로 본다. `in` 으로 보면 `item` 이
+            # `item_storage_policies` 안에 걸려 남의 문장을 가로챈다 — 위와 같은 결함이다.
+            if any(other != key and self._name_in(between, other) for other in others):
                 continue  # 그 키 얘기다 — 같은 원인을 두 번 보고하지 않는다
             return True
         return False
@@ -695,10 +852,27 @@ class MasterVerifier:
           `lots[].shelf_life_days`). 별칭 표를 두면 어긋날 자리가 하나 더 생기고,
           그건 8/29 에 걷어낸 층이다 — **이름 합의는 팀이 할 일**이다.
         """
+        for key, text in self._unresolved_pairs(scenarios, constraints):
+            concerns.append(
+                f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
+                f"매입이 미결로 답했다 — 원인은 최소 셋이고 마스터는 "
+                f"고르지 않는다: ① 봉투 대신 다른 곳을 본다 ② 올바른 "
+                f"함수를 쓰는데 값이 그 자리까지 안 온다 ③ 이 값은 "
+                f"쓰는데 다른 입력이 없어 결론이 안 난다 "
+                f"(사유: {text[:80]})"
+            )
+
+    def _unresolved_pairs(
+        self,
+        scenarios: tuple[Mapping[str, Any], ...],
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+    ) -> list[tuple[str, str]]:
+        """지목된 `(키, 사유 문장)`. **문장을 만들기 전의 사실이다.**"""
         supplied = self._supplied_keys(constraints)
         if not supplied:
-            return
+            return []
 
+        out: list[tuple[str, str]] = []
         seen: set[str] = set()
         for scenario in scenarios:
             for risk in scenario.get("risks") or ():
@@ -708,14 +882,8 @@ class MasterVerifier:
                         continue
                     if self._unresolved_here(text, key, supplied):
                         seen.add(key)
-                        concerns.append(
-                            f"SUPPLIED-BUT-UNRESOLVED: '{key}' 는 봉투에 실려 있는데 "
-                            f"매입이 미결로 답했다 — 원인은 최소 셋이고 마스터는 "
-                            f"고르지 않는다: ① 봉투 대신 다른 곳을 본다 ② 올바른 "
-                            f"함수를 쓰는데 값이 그 자리까지 안 온다 ③ 이 값은 "
-                            f"쓰는데 다른 입력이 없어 결론이 안 난다 "
-                            f"(사유: {text[:80]})"
-                        )
+                        out.append((key, text))
+        return out
 
     def _declare_uncovered(self, skipped: list[str]) -> None:
         """아직 이 경로에 붙지 않은 검사를 드러낸다.

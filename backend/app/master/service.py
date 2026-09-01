@@ -15,14 +15,16 @@ from app.master.decision_service import get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.inputs import MasterInputs, collect_inputs
-from app.master.plan import ExecutionPlan
-from app.master.runner import MasterRunner
 from app.master.ledger_repository import get_burn_in
+from app.master.plan import ExecutionPlan
+from app.master.report import render_report, report_filename
+from app.master.runner import MasterRunner
 from app.master.schemas import (
     BurnInOut,
     DailyClosingOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
+    ReportOut,
     RunHistoryOut,
     StepOut,
 )
@@ -267,6 +269,24 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
 # ---------------------------------------------------------------------------
 # 조회 — GET /master/runs/{request_id}
 # ---------------------------------------------------------------------------
+
+
+def get_run_report(request_id: str) -> ReportOut:
+    """저장된 실행 하나를 보고서로.
+
+    ★ **최신 실행을 쓴다** — `get_run_history` 와 같은 규칙이다. *"그 요청 어떻게
+      됐냐"* 에는 마지막 결과가 답이다.
+    """
+    row = get_run_by_request_id(request_id)
+    run = dict(row.get("response_payload") or {})
+    if not run:
+        raise LookupError(f"실행 원문이 없어 보고서를 만들 수 없습니다: {request_id}")
+    run.setdefault("request_id", request_id)
+    return ReportOut(
+        request_id=request_id,
+        filename=report_filename(run),
+        markdown=render_report(run),
+    )
 
 
 def get_burn_in_history() -> BurnInOut:

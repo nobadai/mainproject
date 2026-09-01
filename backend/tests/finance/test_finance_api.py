@@ -1,43 +1,62 @@
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from app.finance.schemas import (
-    FinanceBand,
-    FinanceProcurementResponse,
-    FinanceSalesResponse,
-)
+from app.finance.schemas import FinanceSalesResponse
 from app.main import app
-from app.purchase_agent.schemas import PurchaseProposal
+from app.master.envelope import AgentReply, ExecutionMetadata
+from app.master.wiring import registry
 
 
-def test_finance_procurement_api(purchase_payload):
-    purchase_json = PurchaseProposal.model_validate(purchase_payload).model_dump(mode="json")
-    result = FinanceProcurementResponse(
-        as_of="2025-12-31",
-        snapshot_id="FIN-DAY30-LOAN",
+def test_finance_agent_api_goes_through_finance_port():
+    """`/finance/agent` 는 Controller 를 직접 만들지 않고 Master 와 같은 Port 를 탄다."""
+    request_payload = {
+        "context": {
+            "request_id": "REQ-FINANCE-API-001",
+            "as_of": "2025-12-31",
+            "trigger": "USER_REQUEST",
+            "policy_version": "v1.3-PROVISIONAL",
+        },
+        "agent": "finance",
+        "mode": "PRE_PURCHASE",
+        "call_seq": 1,
+        "payload": {},
+    }
+    reply = AgentReply(
+        request_id="REQ-FINANCE-API-001",
+        as_of=date(2025, 12, 31),
+        agent="finance",
+        mode="PRE_PURCHASE",
+        run_id="00000000-0000-0000-0000-000000000009",
         runtime_status="READY",
-        verdict="PASS",
-        band=FinanceBand(max_feasible_amount_krw=Decimal("16091273.770000")),
-        base_projected_cash_min=None,
-        base_cash_priority=None,
-        hard_constraints=[],
-        soft_warnings=["COST_MISMATCH"],
-        suggested_adjustment={"max_amount_krw": Decimal("16091273.770000")},
-        evidences=[],
+        business_status="ok",
+        payload={"finance_cap_amount_krw": 1000},
+        reasoning="Verified Finance Evidence supports the reported purchasing boundary.",
     )
-    with patch("app.finance.router.run_finance_procurement", return_value=result):
-        response = TestClient(app).post("/finance/procurement", json=purchase_json)
+    metadata = ExecutionMetadata(
+        run_id=reply.run_id,
+        request_id="REQ-FINANCE-API-001",
+        agent="finance",
+    )
+    with patch("app.finance.router.finance_port", return_value=(reply, metadata)) as port:
+        response = TestClient(app).post("/finance/agent", json=request_payload)
 
     assert response.status_code == 200
-    assert response.json()["policy_version"] == "v1.3-PROVISIONAL"
-    assert response.json()["band"]["scope"] == "ALL_ITEMS_TOTAL"
-    assert response.json()["interpretation"]["summary"]
-    assert response.json()["llm_status"] == "DISABLED"
-    assert response.json()["verdict"] == "PASS"
+    assert port.call_count == 1
+    assert port.call_args.args[0].mode == "PRE_PURCHASE"
+    assert response.json()["payload"] == {"finance_cap_amount_krw": 1000}
+
+
+def test_master_registry_uses_the_same_finance_port():
+    """Master Registry 에 등록된 재무 Port 가 Adapter 정본과 동일한 객체인지 읽어서 검증한다.
+
+    Master 코드는 이번 작업에서 수정하지 않는다 — 등록 상태만 확인한다.
+    """
+    from app.finance.adapter import finance_port
+
+    assert registry().get("finance") is finance_port
 
 
 def test_finance_sales_api(sales_payload):
@@ -68,12 +87,15 @@ def test_finance_sales_api(sales_payload):
     assert response.json()["llm_status"] == "DISABLED"
 
 
-def test_finance_openapi_keeps_legacy_endpoint_deprecated():
+def test_finance_openapi_keeps_sales_and_drops_replaced_legacy_endpoints():
+    """`/finance/sales` 는 Finance B 호환 경로로 남고, Agent 가 대체한 경로는 사라진다."""
     schema = TestClient(app).get("/openapi.json").json()
 
-    assert "/finance/procurement" in schema["paths"]
     assert "/finance/sales" in schema["paths"]
-    assert schema["paths"]["/finance/core-review"]["post"]["deprecated"] is True
+    assert "/finance/agent" in schema["paths"]
+    assert "/finance/runs" in schema["paths"]
+    assert "/finance/procurement" not in schema["paths"]
+    assert "/finance/core-review" not in schema["paths"]
 
 
 def test_finance_runs_api_forwards_filters():

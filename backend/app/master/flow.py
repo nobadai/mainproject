@@ -364,6 +364,10 @@ class ProcurementFlow:
                 "payload": dict(reply.payload),
                 "suggested_adjustments": len(reply.suggested_adjustments),
                 "needs_followup": reply.needs_followup,
+                # 🔴 **판정을 못 냈을 때 유일하게 이유를 아는 칸이다.** 이것이 없으면
+                #   화면이 *"물류가 못 답했다"* 까지만 말하고 왜인지는 아무 데도 안 남는다
+                #   — 물류의 기준일 불일치 fail-closed 가 그런 모양이다 (2026-08-31 회신).
+                "reasoning": reply.reasoning,
             }
         return out
 
@@ -384,8 +388,20 @@ class ProcurementFlow:
             as_of=self.runner.context.as_of,
             item=self.item,
             evidences=dict(self.constraint_evidences),
+            # 부서가 남긴 관측을 실행 계획에서 그대로 꺼내 나른다. 마스터는 내용을
+            # 해석하지 않는다 — 해석은 `critic_bridge` 가 Critic 어휘로 옮길 때뿐이다.
+            observations=self._boundary_observations(),
         )
         return self.verifier(proposal, constraints, verdicts, self.runner.plan, context)
+
+    def _boundary_observations(self) -> dict[AgentName, tuple[str, ...]]:
+        """조언자 경계 회신에 딸린 부서 관측. **경계를 낸 부서만** 담는다."""
+        out: dict[AgentName, tuple[str, ...]] = {}
+        for agent in ADVISORS:
+            step = self.runner.plan.last(agent, "PRE_PURCHASE")
+            if step is not None and step.contributed and step.observations:
+                out[agent] = step.observations
+        return out
 
     # ── 판단 ────────────────────────────────────────────────────
 
