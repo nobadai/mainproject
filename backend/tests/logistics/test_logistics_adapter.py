@@ -945,13 +945,13 @@ def test_PRE_회신에_DeptMeta_관측이_실린다(wired):
 def test_inputs_used_키는_마스터가_합성하는_check_id_다(wired):
     """🔴 한 글자만 달라도 Critic 이 빈 튜플을 받고 **조용히 통과**한다.
 
-    이름의 주인은 마스터(`critic_bridge._INVENTORY_CAP_CHECK`)이고, 물류는 거기에
-    맞출 뿐이다. 마스터가 공개 상수를 내면 이 문자열이 import 로 바뀐다.
+    이름의 주인은 마스터(`critic_bridge.DEPT_CAP_CHECK_ID`)이고, 물류는 거기에 맞출
+    뿐이다. 물류는 문자열을 베끼지 않고 그 상수를 참조한다 (#137).
     """
-    from app.master.critic_bridge import _INVENTORY_CAP_CHECK
+    from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 
     _, meta = adapter.logistics_port(req())
-    assert list(_dept_meta(meta)["inputs_used"]) == [_INVENTORY_CAP_CHECK]
+    assert list(_dept_meta(meta)["inputs_used"]) == [DEPT_CAP_CHECK_ID["inventory"]]
 
 
 def test_마스터가_실제로_합성한_check_와_키가_맞는다(wired):
@@ -970,6 +970,28 @@ def test_마스터가_실제로_합성한_check_와_키가_맞는다(wired):
     declared = _dept_meta(meta)["inputs_used"]
     for chk in checks:
         assert chk["check_id"] in declared
+
+
+def test_check_id_문자열을_물류가_들고_있지_않다():
+    """🔴 **이 이슈(#137)의 실질 수용 기준 — 이름이 사는 곳은 한 곳이다.**
+
+    값이 같은지를 보는 것으로는 부족하다. 베낀 문자열도 값은 같기 때문이다.
+    그래서 **물류 소스에 그 리터럴이 없다**는 것을 본다.
+
+    이 테스트가 잡는 회귀는 이렇다 — 누가 순환 import 를 피하려고, 또는 마스터
+    의존을 줄이려고 문자열을 다시 박아 넣는 경우다. 그 순간 마스터가 이름을 바꾸면
+    물류 검사만 조용히 죽고, 마스터 대조 테스트는 초록불이다.
+    """
+    import inspect
+
+    from app.master.critic_bridge import DEPT_CAP_CHECK_ID
+
+    source = inspect.getsource(adapter)
+    literal = DEPT_CAP_CHECK_ID["inventory"]
+    assert f'"{literal}"' not in source, (
+        f"물류 소스에 {literal!r} 리터럴이 있다 — 마스터 상수를 참조해야 한다"
+    )
+    assert adapter._CAP_CHECK_ID == literal
 
 
 def test_선언한_입력에_매입_시나리오_이름이_없다(wired):
