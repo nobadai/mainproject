@@ -33,7 +33,7 @@ def test_finance_agent_api_goes_through_finance_port():
         runtime_status="READY",
         business_status="ok",
         payload={"finance_cap_amount_krw": 1000},
-        reasoning="Verified Finance Evidence supports the reported purchasing boundary.",
+        reasoning="검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다.",
     )
     metadata = ExecutionMetadata(
         run_id=reply.run_id,

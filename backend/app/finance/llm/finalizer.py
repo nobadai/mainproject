@@ -15,13 +15,20 @@ from app.finance.llm.config import _finance_model
 from app.finance.llm.contracts import FinanceMode
 from app.orchestrator.contracts_core import Evidence
 
+#: 사용자에게 그대로 보이는 확정 설명.
+#:
+#: ★ **키는 기계 계약이고 값만 표시 문장이다.** Finalizer 는 이 키 중 하나를 고를 뿐이라,
+#:   설명을 한국어로 바꿔도 LLM 이 숫자를 새로 만들 자리는 여전히 없다 — 고정 문장을
+#:   고르는 구조 자체가 숫자 비소유를 지킨다.
+#:
+#: ★ 숫자를 넣지 않는다. `_validate_ready_reasoning` 이 reasoning 안의 숫자를 막는다.
 _FINAL_EXPLANATIONS = {
-    "PRE_BOUNDARY": "Verified Finance Evidence supports the reported purchasing boundary.",
+    "PRE_BOUNDARY": "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다.",
     "SCENARIO_REJECT": (
-        "Verified Finance Evidence rejects at least one original scenario. "
-        "Any published amount alternative was independently validated."
+        "검증된 재무 근거가 원안 시나리오 중 최소 하나를 반려했습니다. "
+        "함께 제시된 금액 대안은 별도로 검증했습니다."
     ),
-    "SCENARIO_ACCEPT": "Verified Finance Evidence supports the reported scenario verdicts.",
+    "SCENARIO_ACCEPT": "검증된 재무 근거가 보고된 시나리오 판정을 뒷받침합니다.",
 }
 
 

@@ -378,17 +378,25 @@ class FinanceToolRegistry:
             cap = Decimal(0)
             verdict = "reject"
             rule_id = "FIN-BASE-MIN-CASH"
-            reason = "Base Finance minimum-cash rule failed."
+            reason = "기본 상태에서 재무 최소현금 규칙을 충족하지 못했습니다."
         elif scenario_verdict == "ok":
-            verdict, rule_id, reason = "ok", "FIN-BASE-STRESS", "BASE and STRESS passed."
+            verdict, rule_id, reason = (
+                "ok",
+                "FIN-BASE-STRESS",
+                "기본과 스트레스 시나리오를 모두 통과했습니다.",
+            )
         elif scenario_verdict == "conditional":
             verdict, rule_id, reason = (
                 "conditional",
                 "FIN-BASE-STRESS",
-                "BASE passed and STRESS failed.",
+                "기본은 통과했고 스트레스 시나리오에서 미달했습니다.",
             )
         else:
-            verdict, rule_id, reason = "reject", "FIN-BASE-STRESS", "BASE failed."
+            verdict, rule_id, reason = (
+                "reject",
+                "FIN-BASE-STRESS",
+                "기본 시나리오에서 미달했습니다.",
+            )
         state.scenario_cap = cap
         scenario_ref = str(payload["scenario_id"])
         return {

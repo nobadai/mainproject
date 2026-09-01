@@ -194,7 +194,7 @@ def _mock_successful_pre_purchase(monkeypatch, planner_type, finalizer_type):
 
     def finalize(finalizer, **_kwargs):
         finalizer.attempts += 1
-        return "Verified Finance Evidence supports the reported purchasing boundary."
+        return "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
 
     monkeypatch.setattr(planner_type, "decide", decide)
     monkeypatch.setattr(finalizer_type, "finalize", finalize)

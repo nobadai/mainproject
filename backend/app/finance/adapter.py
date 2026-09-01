@@ -439,7 +439,7 @@ def _invalid_scenario_input(
                 for item in exc.errors()
             ]
         },
-        reasoning="Purchase scenario input failed Finance contract validation.",
+        reasoning="매입 시나리오 입력이 재무 계약 검증을 통과하지 못했습니다.",
     )
     return _recorded(request, reply, _meta(request, run_id, []))
 
@@ -451,7 +451,7 @@ def _invalid_scenario_as_of(
         request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
         mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
         payload={"validation_errors": ["proposal.meta.as_of"]},
-        reasoning="Purchase proposal as-of does not match the Master request.",
+        reasoning="매입 제안의 기준시점이 마스터 요청과 일치하지 않습니다.",
     )
     return _recorded(request, reply, _meta(request, run_id, []))
 
