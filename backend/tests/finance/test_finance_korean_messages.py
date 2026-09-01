@@ -53,7 +53,7 @@ def _wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
-    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
 
 
@@ -129,7 +129,7 @@ def test_boundary_not_ready_message_is_korean(monkeypatch):
 
 def test_persistence_failure_message_is_korean():
     with patch(
-        "app.finance.agent.save_finance_execution", side_effect=RuntimeError("db down")
+        "app.finance.run_repository.save_finance_execution", side_effect=RuntimeError("db down")
     ):
         reply, _meta = adapter.finance_port(_req())
 

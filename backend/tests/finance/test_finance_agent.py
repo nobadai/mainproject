@@ -29,6 +29,9 @@ from app.master.envelope import (
     validate_reply,
 )
 
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+
 
 class Port:
     debt = Decimal(0)
@@ -178,6 +181,36 @@ def request(mode="PRE_PURCHASE", payload=None):
     )
 
 
+def scenario(scenario_id: str, total_amount_krw, *, qty=None, max_price=None, **over):
+    """지급 일정이 없는 시나리오 — **재구성에 필요한 제출 사실을 갖춘다.**
+
+    ★ 재무는 `payment_schedule` 이 없으면 매입이 제출한 사실에서 파생한다.
+        purchase_date  ← split_plan[0].date
+        qty_kg         ← total_qty_kg
+        STRESS 금액     ← total_qty_kg × max_price
+
+      이 셋이 없으면 STRESS 금액을 만들 방법이 없어 fail-closed 다 — 예전처럼
+      STRESS 를 BASE 와 같게 채우면 두 투영이 늘 같아져 **검사가 아무것도 가르지 못한다.**
+
+    ★ 기본 상한가는 BASE 와 같은 총액이 나오도록 잡는다(`total/qty`). 개별 테스트가
+      더 높은 상한가를 주면 STRESS 가 BASE 보다 커진다.
+    """
+    quantity = Decimal(str(qty if qty is not None else 1))
+    unit_cap = (
+        Decimal(str(max_price))
+        if max_price is not None
+        else Decimal(str(total_amount_krw)) / quantity
+    )
+    return {
+        "scenario_id": scenario_id,
+        "total_amount_krw": total_amount_krw,
+        "total_qty_kg": quantity,
+        "max_price": unit_cap,
+        "split_plan": [{"seq": 1, "date": "2025-01-01", "qty_kg": quantity}],
+        **over,
+    }
+
+
 def test_registry_exposes_exactly_six_business_tools():
     registry = FinanceToolRegistry(Port())
     assert registry.names_for("PRE_PURCHASE") == PRE_PURCHASE_TOOLS
@@ -187,7 +220,7 @@ def test_registry_exposes_exactly_six_business_tools():
     assert DEFAULT_MAX_REPLANS == 2
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_pre_purchase_dynamic_order_and_envelope(save_run):
     order = [
         "analyze_payment_pressure",
@@ -215,7 +248,7 @@ def test_pre_purchase_dynamic_order_and_envelope(save_run):
     save_run.assert_called_once()
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
     planner = Planner(
         [
@@ -231,7 +264,7 @@ def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
     assert evidence["margin_defense_floor_rate"].ref_ids == ("policy:margin-floor",)
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_missing_n5_is_not_ready_and_never_returns_finance_cap(save_run):
     reply, _ = FinanceAgentController(
         MissingN5Port(), Planner([ToolAction("assess_finance_position")])
@@ -242,7 +275,7 @@ def test_missing_n5_is_not_ready_and_never_returns_finance_cap(save_run):
     assert "finance_cap_amount_krw" not in reply.payload
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run):
     planner = Planner(
         [
@@ -276,7 +309,7 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     assert evidence["critical_payment_dates"].unit == "KRW"
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run):
     planner = Planner(
         [
@@ -293,9 +326,9 @@ def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run)
         "SCENARIO_VALIDATION",
         {
             "scenarios": [
-                {"scenario_id": "S1", "total_amount_krw": 700},
-                {"scenario_id": "S2", "total_amount_krw": 900},
-                {"scenario_id": "S3", "total_amount_krw": 600},
+                scenario("S1", 700),
+                scenario("S2", 900),
+                scenario("S3", 600),
             ]
         },
     )
@@ -323,13 +356,13 @@ def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run)
     assert validate_finance_scenario_output(reply) == ()
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_base_cashflow_failure_is_not_presented_as_repairable(save_run):
     planner = Planner([ToolAction("evaluate_purchase_scenario"), ToolAction(finalize=True)])
     reply, _ = FinanceAgentController(BaseViolationPort(), planner).run(
         request(
             "SCENARIO_VALIDATION",
-            {"scenario_id": "BASE-FAIL", "total_amount_krw": 10},
+            scenario("BASE-FAIL", 10),
         )
     )
     assert reply.runtime_status == "READY"
@@ -351,14 +384,14 @@ def test_base_cashflow_failure_is_not_presented_as_repairable(save_run):
     ],
 )
 def test_finance_owned_payload_validation_rejects_invalid_scenarios(payload):
-    with patch("app.finance.agent.save_finance_execution"):
+    with patch("app.finance.run_repository.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), Planner([])).run(
             request("SCENARIO_VALIDATION", payload)
         )
     assert reply.runtime_status == "ERROR"
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_scenario_payment_dates_change_projected_cashflow(save_run):
     planner = Planner(
         [
@@ -413,7 +446,7 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
     assert late["verdict"] == "ok"
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     planner = Planner(
         [
@@ -425,16 +458,28 @@ def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     reply, _ = FinanceAgentController(Port(), planner).run(
         request(
             "SCENARIO_VALIDATION",
-            {"scenario_id": "DEFAULT", "total_amount_krw": 900, "payment_schedule": None},
+            scenario("DEFAULT", 900, payment_schedule=None),
         )
     )
     assert reply.runtime_status == "READY"
+    # 🔴 매입일은 **`split_plan[0].date`** 에서 오고, 지급일은 그 매입일에 N5 를 더한다.
+    #    예전에는 매입일을 `as_of` 로 두어 **오늘 기준**으로 지급일을 만들었다.
+    #    행 모양도 분할 건과 같은 하나로 통일됐다.
     assert reply.payload["payment_schedule"] == [
-        {"payment_date": "2025-01-02", "amount_krw": 900}
+        {
+            "seq": 1,
+            "purchase_date": "2025-01-01",
+            "payment_date": "2025-01-02",
+            # `_json_value` 가 payload 조립에서 숫자 문자열을 수로 되돌린다.
+            "qty_kg": 1,
+            "amount_krw": 900,
+            "amount_max_krw": 900,
+            "basis": "non_split_policy_reconstruction",
+        }
     ]
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_multi_scenario_reuses_one_policy_context(save_run):
     port = CountingPort()
     planner = Planner(
@@ -450,8 +495,8 @@ def test_multi_scenario_reuses_one_policy_context(save_run):
             "SCENARIO_VALIDATION",
             {
                 "scenarios": [
-                    {"scenario_id": "S1", "total_amount_krw": 700},
-                    {"scenario_id": "S2", "total_amount_krw": 600},
+                    scenario("S1", 700),
+                    scenario("S2", 600),
                 ]
             },
         )
@@ -470,7 +515,8 @@ def test_run_history_persistence_failure_becomes_agent_error():
         ]
     )
     with patch(
-        "app.finance.agent.save_finance_execution", side_effect=RuntimeError("database down")
+        "app.finance.run_repository.save_finance_execution",
+        side_effect=RuntimeError("database down"),
     ):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
@@ -478,7 +524,7 @@ def test_run_history_persistence_failure_becomes_agent_error():
     assert reply.reasoning == "재무 실행이력을 저장하지 못했습니다."
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_run):
     planner = Planner(
         [
@@ -498,7 +544,7 @@ def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_ru
     assert not any(character.isdigit() for character in reply.reasoning)
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_zero_debt_does_not_require_debt_policy(save_run):
     planner = Planner(
         [
@@ -510,7 +556,7 @@ def test_zero_debt_does_not_require_debt_policy(save_run):
     assert reply.runtime_status == "READY"
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_positive_debt_without_policy_is_not_ready(save_run):
     port = Port()
     port.debt = Decimal(1)
@@ -521,7 +567,7 @@ def test_positive_debt_without_policy_is_not_ready(save_run):
     assert reply.missing_data == ("debt_policy",)
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     port = Port()
     port.payroll = None
@@ -534,7 +580,7 @@ def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     assert reply.needs_followup is True
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     planner = Planner(
         [
@@ -549,7 +595,7 @@ def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     reply, _ = FinanceAgentController(Port(), planner).run(
         request(
             "SCENARIO_VALIDATION",
-            {"scenario_id": "S1", "total_amount_krw": 1000, "payment_schedule": None},
+            scenario("S1", 1000, payment_schedule=None),
         )
     )
     assert reply.business_status == "reject"
@@ -562,7 +608,7 @@ def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
 
 def test_payment_schedule_sum_mismatch_is_error():
     planner = Planner([ToolAction("evaluate_purchase_scenario")])
-    with patch("app.finance.agent.save_finance_execution"):
+    with patch("app.finance.run_repository.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
@@ -576,7 +622,7 @@ def test_payment_schedule_sum_mismatch_is_error():
     assert reply.runtime_status == "ERROR"
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_purchase_pr62_shape_uses_label_identity_and_validates_base_stress(save_run):
     del save_run
     scenario = {
@@ -638,7 +684,7 @@ def test_purchase_pr62_shape_uses_label_identity_and_validates_base_stress(save_
     ][0]["scenario_projected_cash_min"]
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_purchase_labels_must_be_unique_when_scenario_id_is_absent(save_run):
     del save_run
     reply, _ = FinanceAgentController(Port(), Planner([])).run(
@@ -660,7 +706,7 @@ def test_duplicate_tool_call_is_blocked():
     planner = Planner(
         [ToolAction("assess_finance_position"), ToolAction("assess_finance_position")]
     )
-    with patch("app.finance.agent.save_finance_execution"):
+    with patch("app.finance.run_repository.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
 
@@ -675,11 +721,11 @@ def test_non_amount_adjustment_axis_is_rejected():
             ),
         ]
     )
-    with patch("app.finance.agent.save_finance_execution"):
+    with patch("app.finance.run_repository.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
-                {"scenario_id": "S1", "total_amount_krw": 1000},
+                scenario("S1", 1000),
             )
         )
     assert reply.runtime_status == "ERROR"
@@ -687,7 +733,7 @@ def test_non_amount_adjustment_axis_is_rejected():
 
 def test_postgres_port_fails_closed_for_historical_as_of():
     row = {"state_date": date(2025, 1, 2)}
-    with patch("app.finance.repository._get_current_finance_state_row", return_value=row):
+    with patch(f"{_STATE_REPO}._get_current_finance_state_row", return_value=row):
         try:
             PostgresFinanceAsOfDataPort().load_finance_position(date(2025, 1, 1))
         except FinanceDataNotReady as error:

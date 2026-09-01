@@ -48,7 +48,7 @@ def controller_wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _EvaluationPlanner()),
     )
-    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
 
 
 @dataclass(frozen=True)

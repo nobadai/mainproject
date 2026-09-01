@@ -92,7 +92,7 @@ def controller_wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
-    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
 
 
 @pytest.fixture
@@ -139,7 +139,7 @@ def test_same_request_executed_twice_writes_two_history_rows(monkeypatch):
 
 def test_controller_run_ids_are_also_per_execution(wired):
     """Controller 경로도 같은 규칙이다 — 어댑터만 다르게 굴면 이력 축이 갈린다."""
-    with patch("app.finance.agent.save_finance_execution") as saved:
+    with patch("app.finance.run_repository.save_finance_execution") as saved:
         first, _ = adapter.finance_port(req())
         second, _ = adapter.finance_port(req())
 
@@ -202,7 +202,7 @@ def test_invalid_scenario_input_is_recorded(monkeypatch):
 def test_ready_run_is_saved_by_the_controller_only(wired):
     """★ 이중 저장 금지 — 정상 완료는 Controller 가 한 번만 저장한다."""
     with (
-        patch("app.finance.agent.save_finance_execution") as controller_saved,
+        patch("app.finance.run_repository.save_finance_execution") as controller_saved,
         patch("app.finance.adapter.save_finance_execution") as adapter_saved,
     ):
         reply, _ = adapter.finance_port(req())
@@ -487,7 +487,7 @@ def test_finance_dept_meta_reaches_critic_and_runs_both_checks(wired):
     )
     try:
         runner = MasterRunner(context, wiring.registry(), CallBudget())
-        with patch("app.finance.agent.save_finance_execution"):
+        with patch("app.finance.run_repository.save_finance_execution"):
             reply = runner.call("finance", "PRE_PURCHASE")
     finally:
         wiring._REGISTRY = saved_registry

@@ -169,7 +169,7 @@ def pre_purchase_plan():
 
 @pytest.fixture(autouse=True)
 def _no_persistence():
-    with patch("app.finance.agent.save_finance_execution"):
+    with patch("app.finance.run_repository.save_finance_execution"):
         yield
 
 
