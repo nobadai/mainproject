@@ -98,9 +98,16 @@ def _commitment_for(
     if payload.decision != "APPROVE":
         return None
 
-    scenario = _scenario_of(response_payload, payload.scenario_label)
-    if scenario is None:
+    matches = _scenarios_of(response_payload, payload.scenario_label)
+    if not matches:
         return CommitmentOut(buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다.")
+    if len(matches) > 1:
+        # 🔴 첫 것을 조용히 고르면 **어느 안을 약정했는지가 운에 걸린다** (자기 리뷰).
+        return CommitmentOut(
+            buildable=False,
+            reason=f"라벨 '{payload.scenario_label}' 이 {len(matches)}개다 — 유일하지 않다.",
+        )
+    scenario = matches[0]
 
     as_of = _as_of_of(response_payload)
     if as_of is None:
@@ -182,14 +189,19 @@ def get_decisions(request_id: str) -> list[DecisionOut]:
 # ── 승인 → 약정 (H1) ────────────────────────────────────────────────────
 
 
-def _scenario_of(
+def _scenarios_of(
     response_payload: Mapping[str, Any], label: str | None
-) -> Mapping[str, Any] | None:
-    """승인한 라벨의 안. **라벨로 찾는다** — 순서로 고르지 않는다."""
-    for scenario in response_payload.get("scenarios") or ():
-        if isinstance(scenario, Mapping) and scenario.get("label") == label:
-            return scenario
-    return None
+) -> list[Mapping[str, Any]]:
+    """승인한 라벨의 안 **전부**. 라벨로 찾고, 유일성 판정은 호출자가 한다.
+
+    ★ 첫 것을 돌려주는 함수였다가 목록으로 바꿨다 — 라벨이 겹치는 날 첫 것을
+      조용히 고르면 검사도 이력도 그 선택을 모른다 (2026-09-01 자기 리뷰).
+    """
+    return [
+        scenario
+        for scenario in response_payload.get("scenarios") or ()
+        if isinstance(scenario, Mapping) and scenario.get("label") == label
+    ]
 
 
 def _item_of(response_payload: Mapping[str, Any]) -> str | None:

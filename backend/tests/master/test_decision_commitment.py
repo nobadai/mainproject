@@ -141,3 +141,14 @@ def test_승인한_안을_라벨로_찾는다(wired):
 
     assert out.commitment.scenario_label == "공격"
     assert out.commitment.total_qty_kg == 100.0
+
+
+def test_라벨이_겹치면_첫_것을_고르지_않고_막는다(wired):
+    """🔴 첫 것을 조용히 고르면 어느 안을 약정했는지가 운에 걸린다 (자기 리뷰)."""
+    response = _response(scenarios=[_scenario("보수"), _scenario("보수", total_qty_kg=999.0)])
+
+    out = wired(response)
+
+    assert out.decision == "APPROVE", "결정 자체는 남아야 한다"
+    assert out.commitment.buildable is False
+    assert "유일" in (out.commitment.reason or "") or "2개" in (out.commitment.reason or "")

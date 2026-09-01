@@ -195,3 +195,38 @@ def test_오케를_import_하지_않는다():
     }
 
     assert not any(m.startswith("app.orchestrator") for m in modules), modules
+
+
+# ---------------------------------------------------------------------------
+# 자기 리뷰에서 나온 셋 (2026-09-01)
+# ---------------------------------------------------------------------------
+
+
+def test_소수_리드타임은_자르지_않고_일정을_안_만든다():
+    """🔴 처음엔 `int(lead)` 로 잘랐다 — 2.9 가 조용히 2일이 됐다."""
+    commitment = _build(inbound_lead_days=2.9)
+
+    assert commitment.arrival_schedule == ()
+    assert any("일수로 읽히지 않아" in note for note in commitment.notes), commitment.notes
+
+
+def test_음수_리드타임은_과거_도착을_만들지_않는다():
+    """🔴 -1 이 **매입일보다 과거 도착**을 만들었다 — 점유가 하루 이르게 계산된다."""
+    commitment = _build(inbound_lead_days=-1)
+
+    assert commitment.arrival_schedule == ()
+    assert commitment.notes
+
+
+def test_품목_어휘가_매입_ItemName_과_같다():
+    """★ `attempt_max` 와 같은 자리 — 같은 4품목이 두 곳에 선언돼 있다.
+
+    매입 `ItemName` 은 Literal, 마스터 `ITEM_CODES` 는 frozenset. 어느 쪽이
+    품목을 늘리면 **다른 쪽은 에러 없이 낡는다.** 갈리는 날 여기가 운다.
+    """
+    from typing import get_args
+
+    from app.master.commitment import ITEM_CODES
+    from app.purchase_agent.schemas import ItemName
+
+    assert ITEM_CODES == frozenset(get_args(ItemName))

@@ -162,6 +162,12 @@ def _legs(
         return (), ("안에 분할 계획이 없어 회차별 입고 일정을 만들지 못했다.",)
     if lead is None:
         return (), ("물류 inbound_lead_days(N4) 가 없어 도착일을 계산하지 못했다.",)
+    if lead < 0 or lead != int(lead):
+        # 🔴 처음에는 `int(lead)` 로 바로 잘랐다 (2026-09-01 자기 리뷰에서 발견).
+        #   2.9 가 조용히 2일이 되고 -1 은 **매입일보다 과거 도착**을 만들었다 —
+        #   에러 없이 창고 점유가 하루 이르게 계산되는 종류다. 일수로 읽을 수 없는
+        #   값이면 자르지 않고 일정을 안 만든다. N4 를 마스터가 고쳐 주지 않는다.
+        return (), (f"inbound_lead_days 가 일수로 읽히지 않아({lead:g}) 도착일을 계산하지 않았다.",)
 
     legs: list[ArrivalLeg] = []
     for index, raw in enumerate(split_plan, 1):
