@@ -120,6 +120,17 @@ class MasterRunner:
 
         `ERROR` 만 참이다. `RUNTIME_NOT_READY` 는 입력이 없어서 못 낸 답이므로
         다시 불러도 같고, 재시도하면 **호출 예산만 태운다.**
+
+        ★ **정하는 것은 여기가 아니다.** 이 함수는 알려만 주고, 실제로 다시 부를지는
+          `flow._collect_constraints` 가 정한다 — 경계 수집에서 **한 번만** 쓴다.
+
+        🔴 **오랫동안 아무도 안 불렀다 (2026-08-31 실측).** 이 함수도
+          `envelope.worth_retry` 도 정의와 테스트만 있고 호출자가 0이었다. 판단을
+          담아 둔 자리가 배선되지 않으면, 읽는 사람이 *"재시도가 되는 줄"* 안다.
+
+        ★ `envelope.worth_retry` 는 **회신 하나**를 보고 같은 판정을 낸다. 여기는
+          **실행 계획에 실제로 기록된 것**을 본다 — 재시도는 "무슨 일이 일어났나" 를
+          근거로 정해야 하므로 이쪽을 쓴다.
         """
         step = self.plan.last(agent, mode)
         return step is not None and step.runtime_status == "ERROR"

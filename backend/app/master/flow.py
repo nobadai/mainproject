@@ -255,6 +255,18 @@ class ProcurementFlow:
         self.constraint_evidences = {}
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE")
+            if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
+                # 🔴 **한 번만 다시 부른다.** `ERROR` 는 어댑터가 터진 것이라 다시 부르면
+                #   달라질 수 있다 — `RUNTIME_NOT_READY` 는 입력이 없어서 못 낸 답이라
+                #   다시 불러도 같고, `retryable` 이 그 둘을 갈라 준다 (M-1 §5.1).
+                #
+                # ★ **루프가 아니다.** 결정론 고장(어댑터 스키마 오류 같은 것)은 몇 번을
+                #   불러도 같으므로, 두 번째까지만 쓰고 예산을 더 태우지 않는다.
+                #
+                # ★ **실패를 감추지 않는다 — 오히려 드러낸다.** 실행 계획에 같은 단계가
+                #   두 줄로 남아 *"한 번 실패"* 가 아니라 **"다시 불렀는데도 안 됐다"** 가
+                #   된다. 사람이 보는 문장이 달라진다.
+                reply = self.runner.call(agent, "PRE_PURCHASE")
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
                 self.constraint_evidences[agent] = reply.evidences
