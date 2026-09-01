@@ -281,9 +281,19 @@ def _split_legs(
 ) -> list[dict[str, Any]]:
     """절대 날짜 → `offset_days`. **되돌릴 수 있는 변환만** 한다.
 
-    ★ `expected_arrival_date` 는 물류의 `calculate_expected_arrival_dates` 와 같은
-      규칙(매입일 + 리드타임)이다. 리드타임을 못 받았으면 **비운다** — 0 일로 치면
-      도착일 분해 검사가 통과해 버린다.
+    ★ **매입이 도착일을 실어 주면 계산하지 않는다** (매입 #141 · 2026-09-01).
+      `commitment.py` 와 같은 규칙이다 — 매입 지적대로, 여기만 자기 계산으로 남아
+      *"같은 사실을 두 곳에서 계산하는"* 마지막 자리였다. 이제 계산 경로는 매입이
+      안 실었을 때의 폴백뿐이다.
+
+    ★ 폴백 계산의 `expected_arrival_date` 는 물류의 `calculate_expected_arrival_dates`
+      와 같은 규칙(매입일 + 리드타임)이다. 리드타임을 못 받았으면 **비운다** — 0 일로
+      치면 도착일 분해 검사가 통과해 버린다.
+
+    ⚠️ 폴백의 `lead` 는 `_int_of` 를 거쳐 **2.5 같은 값이면 조용히 None** 이다 —
+      Critic 요청 어휘가 `int | None` 이고 여기에는 스킵 신호 자리가 없다. 매입 값
+      소비가 들어오면서 이 경로 자체가 좁아졌고, 남는 차이는 그 사실을 여기 적는
+      것으로 갈음한다 (세 곳 정책 대조는 2026-09-01 매입 회신 §4).
     """
     out: list[dict[str, Any]] = []
     for leg in scenario.get("split_plan") or ():
@@ -301,7 +311,11 @@ def _split_legs(
                 "offset_days": offset,
                 "qty_kg": {item: qty},
                 "expected_arrival_date": (
-                    (day + timedelta(days=lead)).isoformat() if lead is not None else None
+                    supplied.isoformat()
+                    if (supplied := _date_of(leg.get("expected_arrival_date"))) is not None
+                    else (day + timedelta(days=lead)).isoformat()
+                    if lead is not None
+                    else None
                 ),
             }
         )

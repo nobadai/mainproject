@@ -290,3 +290,56 @@ def test_도착일이_null_이면_매입도_못_낸_것이라_계산하지_않�
 
     assert commitment.arrival_schedule == ()
     assert any("N4" in note for note in commitment.notes)
+
+
+# ---------------------------------------------------------------------------
+# 매입 #141 제보 셋 (2026-09-01) — 부분 공급 · 과거 도착일
+# ---------------------------------------------------------------------------
+
+
+def _two_legs(first_eta, second_eta):
+    plan = [
+        {"seq": 1, "date": "2025-12-31", "qty_kg": 60.0},
+        {"seq": 2, "date": "2026-01-06", "qty_kg": 40.0},
+    ]
+    if first_eta is not ...:
+        plan[0]["expected_arrival_date"] = first_eta
+    if second_eta is not ...:
+        plan[1]["expected_arrival_date"] = second_eta
+    return _scenario(total_qty_kg=100.0, split_plan=plan)
+
+
+def test_부분_공급은_출처를_섞지_않는다():
+    """🔴 전에는 실린 회차=매입값 · 빈 회차=마스터 계산으로 섞인 일정이 나갔다."""
+    commitment = _build(scenario=_two_legs("2026-01-05", ...), inbound_lead_days=2.0)
+
+    assert commitment.arrival_schedule == ()
+    assert any("섞어" in note for note in commitment.notes), commitment.notes
+
+
+def test_부분_공급에_N4_까지_없으면_사유가_정확하다():
+    """🔴 전에는 실린 1회차 값마저 "N4 가 없어" 라는 틀린 사유로 버려졌다 (매입 제보)."""
+    commitment = _build(scenario=_two_legs("2026-01-05", None), inbound_lead_days=None)
+
+    assert commitment.arrival_schedule == ()
+    assert any("1회차만 실려" in note or "2회차 중 1회차" in note for note in commitment.notes), (
+        commitment.notes
+    )
+    assert not any("N4" in note for note in commitment.notes), "사유가 원인을 잘못 가리킨다"
+
+
+def test_받은_도착일이_매입일보다_앞서면_막는다():
+    """마스터 계산은 lead<0 을 막으면서 수신 값은 안 보고 있었다 (매입 참고 ③)."""
+    with pytest.raises(CommitmentNotBuildable, match="앞선다"):
+        _build(
+            scenario=_scenario(
+                split_plan=[
+                    {
+                        "seq": 1,
+                        "date": "2025-12-31",
+                        "qty_kg": 44.0,
+                        "expected_arrival_date": "2025-12-28",
+                    }
+                ]
+            )
+        )

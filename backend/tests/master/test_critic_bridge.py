@@ -440,12 +440,8 @@ def test_dept_meta_가_없으면_미제출_경고가_그대로_남는다():
 @pytest.mark.parametrize("leaked", ["qty_kg", "grade_unit_price", "sourcing_plan"])
 def test_재무_cap_에_매입_소유_입력이_섞이면_E_GRADE_LEAK(leaked):
     """§3.6.8 — 재무 상한이 등급·수량을 읽으면 하루 한 번 회신 계약이 깨진다."""
-    observation = _finance_meta_observation(
-        inputs=["finance_state.current_cash_krw", leaked]
-    )
-    result = MasterVerifier()(
-        _proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation)
-    )
+    observation = _finance_meta_observation(inputs=["finance_state.current_cash_krw", leaked])
+    result = MasterVerifier()(_proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation))
     assert any("E-GRADE-LEAK" in f for f in result.findings), result.findings
     assert any(leaked in f for f in result.findings), result.findings
 
@@ -455,8 +451,31 @@ def test_S3_전속_필드를_산출하면_E_AUTHORITY():
     observation = _finance_meta_observation(
         produced=["finance_cap_amount_krw", "has_unmet_obligation"]
     )
-    result = MasterVerifier()(
-        _proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation)
-    )
+    result = MasterVerifier()(_proposal(), CONSTRAINTS, {}, _plan(), _ctx_with_meta(observation))
     assert any("E-AUTHORITY" in f for f in result.findings), result.findings
     assert any("has_unmet_obligation" in f for f in result.findings), result.findings
+
+
+def test_split_legs_는_매입_도착일을_그대로_옮긴다():
+    """★ 매입 #141 — 여기가 "같은 사실을 두 곳에서 계산하는" 마지막 자리였다.
+
+    매입 값(01-09)이 N4 계산(01-02)과 달라도 매입 값이 이긴다."""
+    from app.master.critic_bridge import _split_legs
+
+    scenario = {
+        "split_plan": [
+            {"date": "2025-12-31", "qty_kg": 44.0, "expected_arrival_date": "2026-01-09"}
+        ]
+    }
+    legs = _split_legs(scenario, "피마늘", date(2025, 12, 31), lead=2)
+
+    assert legs[0]["expected_arrival_date"] == "2026-01-09"
+
+
+def test_split_legs_는_매입_값이_없으면_폴백_계산한다():
+    from app.master.critic_bridge import _split_legs
+
+    scenario = {"split_plan": [{"date": "2025-12-31", "qty_kg": 44.0}]}
+    legs = _split_legs(scenario, "피마늘", date(2025, 12, 31), lead=2)
+
+    assert legs[0]["expected_arrival_date"] == "2026-01-02"

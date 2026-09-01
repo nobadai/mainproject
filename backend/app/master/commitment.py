@@ -163,7 +163,20 @@ def _legs(
     supplied = [
         _date(raw.get("expected_arrival_date")) for raw in split_plan if isinstance(raw, Mapping)
     ]
-    if supplied and all(eta is not None for eta in supplied):
+    filled = sum(1 for eta in supplied if eta is not None)
+    if 0 < filled < len(supplied):
+        # 🔴 **부분 공급은 섞어 만들지 않는다 (매입 제보 2026-09-01).** 전에는 실린
+        #   회차는 매입 값, 빈 회차는 마스터 계산으로 **출처가 섞인 일정**이 나갔고,
+        #   N4 까지 없으면 실린 값마저 "N4 가 없어" 라는 **틀린 사유**로 통째로
+        #   버려졌다. null 은 "N4 미결로 매입도 못 냈다" 인데 같은 제안에서 회차마다
+        #   있고 없고는 자기모순이다 — 매입도 구조적으로 부분을 안 낸다(_rounds 가
+        #   통째로 쓰거나 통째로 None). 부분은 계약 이상 신호로 보고 일정을 안 만든다.
+        note = (
+            f"회차 도착일이 {len(supplied)}회차 중 {filled}회차만 실려 있어"
+            " 일정을 만들지 않았다 — 출처를 섞어 만들지 않는다."
+        )
+        return (), (note,)
+    if filled and filled == len(supplied):
         lead = 0.0  # 계산 안 함 — 아래 게이트만 지나가는 무해한 값. 회차마다 매입 값을 쓴다
     elif lead is None:
         return (), ("물류 inbound_lead_days(N4) 가 없어 도착일을 계산하지 못했다.",)
@@ -187,6 +200,14 @@ def _legs(
         #   각자 계산하면 어긋나는 날이 온다. null 이면 "N4 미결로 매입도 못 냈다"이므로
         #   마스터도 계산하지 않는다(같은 N4 원천을 다시 쓰면 두-곳-계산이 재현된다).
         eta = _date(raw.get("expected_arrival_date"))
+        if eta is not None and eta < purchase_date:
+            # 🔴 받은 값도 모순은 막는다 (매입 참고 2026-09-01). 마스터 계산 경로는
+            #   lead<0 을 막는데 수신 값은 안 보고 있었다 — 도착이 매입보다 앞서면
+            #   물류 점유가 이르게 계산되고 에러가 안 난다. 고쳐 쓰지 않고 막는다.
+            raise CommitmentNotBuildable(
+                f"{index}회차 도착일({eta})이 매입일({purchase_date})보다 앞선다"
+                " — 받은 값을 고쳐 쓰지 않는다."
+            )
         if eta is None:
             # ★ **매입 실행일 + N4 다.** 안의 `date` 는 도착일이 아니라 매입일이다
             #   (매입 schemas.py SplitPlanItem 주석 — 처음엔 "IO명세 §4"로 잘못 인용했다.
