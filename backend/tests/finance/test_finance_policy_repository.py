@@ -7,6 +7,9 @@ from pydantic import ValidationError
 
 from app.finance.repository import get_active_finance_debt_policy, get_active_finance_policy
 
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+
 
 def _rows() -> list[dict[str, object]]:
     values = {
@@ -72,16 +75,16 @@ def _debt_rows() -> list[dict[str, object]]:
 
 def _load_debt(rows):
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_all", return_value=rows),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=rows),
     ):
         return get_active_finance_debt_policy()
 
 
 def _load(rows: list[dict[str, object]]):
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_all", return_value=rows) as fetch,
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=rows) as fetch,
     ):
         policy = get_active_finance_policy()
     assert fetch.call_args.args[1] == ["finance", "v1.3-PROVISIONAL", "AGENT_MVP_DEMO"]

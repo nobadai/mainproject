@@ -137,7 +137,7 @@ def test_fixed_context_never_reads_db(finance_context, purchase_payload, sales_p
     sales_payload["approved_purchase"]["payment_date"] = "2026-01-07"
     sales = FinanceSalesRequest.model_validate(sales_payload)
     with patch(
-        "app.finance.repository.get_current_finance_runtime_context",
+        "app.finance.infrastructure.finance_state_repository.get_current_finance_runtime_context",
         side_effect=AssertionError("DB must not be read"),
     ):
         run_finance_procurement_with_context(purchase, finance_context)

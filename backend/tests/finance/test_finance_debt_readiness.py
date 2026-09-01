@@ -16,14 +16,16 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from app.finance.repository import (
-    FinanceDataNotReady,
-    PostgresFinanceAsOfDataPort,
+from app.finance.infrastructure.finance_state_repository import (
     _get_current_finance_state_row,
     get_current_finance_runtime_context,
 )
+from app.finance.repository import FinanceDataNotReady, PostgresFinanceAsOfDataPort
 from app.finance.schemas import FinanceSnapshot
 from tests.finance.test_finance_policy_repository import _debt_rows, _rows
+
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
 
 
 def _snapshot(debt: Decimal) -> FinanceSnapshot:
@@ -71,10 +73,10 @@ def _context(
         return []
 
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_all", side_effect=fetch_all),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_all", side_effect=fetch_all),
         patch(
-            "app.finance.repository.get_current_finance_snapshot",
+            f"{_STATE_REPO}.get_current_finance_snapshot",
             return_value=_snapshot(debt),
         ),
     ):
@@ -162,8 +164,8 @@ def _raw_state_row(debt: Decimal) -> dict[str, object]:
 def test_negative_debt_is_rejected_at_the_raw_row_boundary():
     """⑤ 음수 부채는 원천 행에서 막힌다 — 두 런타임 경로의 공통 입구다."""
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
         pytest.raises(FinanceDataNotReady) as raised,
     ):
         _get_current_finance_state_row()
@@ -174,9 +176,9 @@ def test_negative_debt_is_rejected_at_the_raw_row_boundary():
 def test_negative_debt_cannot_reach_the_runtime_context():
     """⑤ 컨텍스트 경로: 음수 부채가 `unresolved 없음` 으로 통과하지 않는다."""
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_one", return_value=_raw_state_row(Decimal("-0.01"))),
-        patch("app.finance.repository.fetch_all", return_value=[]),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal("-0.01"))),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=[]),
         pytest.raises(FinanceDataNotReady),
     ):
         get_current_finance_runtime_context()
@@ -190,8 +192,8 @@ def test_negative_debt_cannot_bypass_through_the_as_of_data_port():
     """
     port = PostgresFinanceAsOfDataPort()
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
         pytest.raises(FinanceDataNotReady) as raised,
     ):
         port.load_finance_position(date(2025, 12, 31))
@@ -199,8 +201,8 @@ def test_negative_debt_cannot_bypass_through_the_as_of_data_port():
     assert raised.value.key == "finance_state_debt_invalid"
     # 부채 일정 조회까지 가지도 못한다 — 상태 자체를 못 믿기 때문이다.
     with (
-        patch("app.finance.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.finance.repository.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
+        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
         pytest.raises(FinanceDataNotReady),
     ):
         port.load_debt_schedule(date(2025, 12, 31), date(2026, 1, 30))

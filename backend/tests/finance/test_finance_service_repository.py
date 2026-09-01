@@ -13,6 +13,12 @@ from app.finance.repository import (
 from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
 from app.finance.service import run_finance_procurement, run_finance_sales
 
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_LEGACY_SERVICE = "app.finance.legacy.deterministic_service"
+
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+
 
 def test_procurement_service_returns_one_band_without_cost_warning(
     finance_context, purchase_payload
@@ -119,14 +125,14 @@ def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_
 
 
 def test_repository_preserves_decimal_row(finance_state):
-    with patch("app.finance.repository.fetch_one", return_value=finance_state):
+    with patch(f"{_STATE_REPO}.fetch_one", return_value=finance_state):
         state = get_current_finance_state()
 
     assert state["finance_state_id"] == "FIN-DAY30-LOAN"
     assert state["state_date"] == date(2025, 12, 31)
     assert isinstance(state["financial_limit_krw"], Decimal)
 
-    with patch("app.finance.repository.fetch_one", return_value=finance_state):
+    with patch(f"{_STATE_REPO}.fetch_one", return_value=finance_state):
         snapshot = get_current_finance_snapshot()
 
     assert snapshot.snapshot_id is None
@@ -141,13 +147,13 @@ def test_valid_debt_contract_resolves_with_zero_events_in_horizon(
         update={"current_debt_krw": finance_debt_policy.debt_principal_krw}
     )
     with (
-        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
-        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
+        patch(f"{_STATE_REPO}.get_current_finance_snapshot", return_value=snapshot),
+        patch(f"{_STATE_REPO}.get_active_finance_policy", return_value=finance_policy),
         patch(
-            "app.finance.repository.get_active_finance_debt_policy",
+            f"{_STATE_REPO}.get_active_finance_debt_policy",
             return_value=finance_debt_policy,
         ),
-        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
     ):
         context = get_current_finance_runtime_context()
     assert context.debt_policy == finance_debt_policy
@@ -161,10 +167,10 @@ def test_missing_or_malformed_debt_contract_is_unresolved(
 ):
     snapshot = finance_snapshot.model_copy(update={"current_debt_krw": Decimal(1)})
     with (
-        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
-        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
-        patch("app.finance.repository.get_active_finance_debt_policy", side_effect=debt_error),
-        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}.get_current_finance_snapshot", return_value=snapshot),
+        patch(f"{_STATE_REPO}.get_active_finance_policy", return_value=finance_policy),
+        patch(f"{_STATE_REPO}.get_active_finance_debt_policy", side_effect=debt_error),
+        patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
     ):
         context = get_current_finance_runtime_context()
     assert context.debt_policy is None
@@ -176,13 +182,13 @@ def test_debt_principal_mismatch_is_unresolved(
 ):
     snapshot = finance_snapshot.model_copy(update={"current_debt_krw": Decimal(1)})
     with (
-        patch("app.finance.repository.get_current_finance_snapshot", return_value=snapshot),
-        patch("app.finance.repository.get_active_finance_policy", return_value=finance_policy),
+        patch(f"{_STATE_REPO}.get_current_finance_snapshot", return_value=snapshot),
+        patch(f"{_STATE_REPO}.get_active_finance_policy", return_value=finance_policy),
         patch(
-            "app.finance.repository.get_active_finance_debt_policy",
+            f"{_STATE_REPO}.get_active_finance_debt_policy",
             return_value=finance_debt_policy,
         ),
-        patch("app.finance.repository._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
     ):
         context = get_current_finance_runtime_context()
     assert context.unresolved_sources == ("DEBT_SERVICE",)
