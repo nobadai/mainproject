@@ -160,7 +160,12 @@ def _legs(
     """
     if not isinstance(split_plan, Sequence) or isinstance(split_plan, (str, bytes)):
         return (), ("안에 분할 계획이 없어 회차별 입고 일정을 만들지 못했다.",)
-    if lead is None:
+    supplied = [
+        _date(raw.get("expected_arrival_date")) for raw in split_plan if isinstance(raw, Mapping)
+    ]
+    if supplied and all(eta is not None for eta in supplied):
+        lead = 0.0  # 계산 안 함 — 아래 게이트만 지나가는 무해한 값. 회차마다 매입 값을 쓴다
+    elif lead is None:
         return (), ("물류 inbound_lead_days(N4) 가 없어 도착일을 계산하지 못했다.",)
     if lead < 0 or lead != int(lead):
         # 🔴 처음에는 `int(lead)` 로 바로 잘랐다 (2026-09-01 자기 리뷰에서 발견).
@@ -177,13 +182,23 @@ def _legs(
         purchase_date = _date(raw.get("date"))
         if qty is None or purchase_date is None:
             return (), (f"{index}회차에 수량 또는 매입일이 없어 일정을 만들지 못했다.",)
+        # ★ **매입이 도착일을 실어 주면 계산하지 않는다** (매입 회신 2026-09-01 합의).
+        #   매입은 arrival_dates(§5.5)로 같은 값을 이미 계산한다 — 같은 사실을 두 곳에서
+        #   각자 계산하면 어긋나는 날이 온다. null 이면 "N4 미결로 매입도 못 냈다"이므로
+        #   마스터도 계산하지 않는다(같은 N4 원천을 다시 쓰면 두-곳-계산이 재현된다).
+        eta = _date(raw.get("expected_arrival_date"))
+        if eta is None:
+            # ★ **매입 실행일 + N4 다.** 안의 `date` 는 도착일이 아니라 매입일이다
+            #   (매입 schemas.py SplitPlanItem 주석 — 처음엔 "IO명세 §4"로 잘못 인용했다.
+            #   §4는 1차 범위 밖 변환 계약이다 · 매입 정정 2026-09-01).
+            #   도착일로 읽으면 물류 cap_by_date 창(도착일 기준) **밖의 키**를 조회해
+            #   검사 자체가 안 돈다 — 과소 계산이 아니라 그보다 앞에서 무너진다.
+            eta = purchase_date + timedelta(days=int(lead))
         legs.append(
             ArrivalLeg(
                 item=item,
                 qty_kg=qty,
-                # ★ **매입 실행일 + N4 다.** 안의 `date` 는 도착일이 아니라 매입일이다
-                #   (매입 IO명세 §4). 그것을 도착일로 읽으면 리드타임만큼 앞당겨진다.
-                arrival_date=purchase_date + timedelta(days=int(lead)),
+                arrival_date=eta,
                 purchase_date=purchase_date,
                 seq=int(raw.get("seq") or index),
             )
