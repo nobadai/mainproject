@@ -842,11 +842,24 @@ def _generate_scenarios(
     if missing:
         # 제약이 하나라도 빠진 시나리오는 만들지 않는다 (M-1 §11-6 · 제출 §4).
         # 재시도해도 같은 결과이므로 ERROR가 아니라 RUNTIME_NOT_READY다.
+        #
+        # 🔴 **payload를 싣지 않는다.** 전에는 ``{"scenarios": []}``였다.
+        #   ``RUNTIME_NOT_READY``는 *"안 돌았다"*인데 그 dict는 **반쪽짜리 제안 형태**라
+        #   ``PurchaseProposal``로 파싱하면 깨진다(``meta``·``no_proposal_reason`` 부재).
+        #
+        #   온전한 제안 형태로 채우는 것도 답이 아니다. *"돌았는데 안이 없다"*는
+        #   **``READY`` + ``no_proposal_reason``**으로 이미 따로 있어서(12-31 피마늘이
+        #   그 모양), payload를 같게 만들면 **두 상태가 payload만 봐서는 구분되지 않는다.**
+        #   ``runtime_status``를 안 보는 소비자가 하나라도 생기면 "안 돌았다"가
+        #   "돌았는데 안이 없다"로 읽힌다.
+        #
+        #   재무·물류도 이 자리에 payload를 안 싣는다(둘 다 ``_not_ready()``). 무엇이
+        #   없는지는 ``missing_data``가, 왜인지는 ``reasoning``이 말한다 — 봉투는
+        #   ``RUNTIME_NOT_READY``에 ``missing_data``가 비지 않을 것만 요구한다.
         reply = _reply(
             request,
             runtime_status="RUNTIME_NOT_READY",
             business_status="skipped",
-            payload={"scenarios": []},
             reasoning="필수 입력이 없어 시나리오를 만들지 못했다.",
             missing_data=tuple(missing),
         )

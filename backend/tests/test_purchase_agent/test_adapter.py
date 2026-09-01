@@ -538,7 +538,64 @@ def test_missing_forecast_key_reports_runtime_not_ready() -> None:
     reply, _ = purchase_port(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert "forecast" in reply.missing_data
-    assert reply.payload["scenarios"] == []
+
+
+@pytest.mark.parametrize(
+    "drop", ["item", "forecast", "constraints", "confirmed_orders", "policy_values"]
+)
+def test_a_not_ready_reply_carries_no_payload_at_all(drop: str) -> None:
+    """🔴 **"안 돌았다"에는 제안 형태를 싣지 않는다.**
+
+    전에는 ``{"scenarios": []}``였다. 반쪽짜리 제안이라 ``PurchaseProposal``로 파싱하면
+    깨지고(``meta``·``no_proposal_reason`` 부재), 온전히 채우면 이번엔 **"돌았는데 안이
+    없다"와 구분되지 않는다** — 그쪽은 ``READY`` + ``no_proposal_reason``으로 이미 따로
+    있다(아래 검사가 그 상태를 잠근다). ``runtime_status``를 안 보는 소비자가 하나라도
+    생기면 두 상태가 같아진다.
+
+    재무·물류도 이 자리에 payload를 안 싣는다(둘 다 ``_not_ready()``). 무엇이 없는지는
+    ``missing_data``가, 왜인지는 ``reasoning``이 말한다.
+    """
+    request = _request("배추", SPREAD_WIDE)
+    stripped = {k: v for k, v in request.payload.items() if k != drop}
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=request.context, agent="purchase", mode=request.mode, payload=stripped
+        )
+    )
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.payload == {}, f"안 돌았는데 뭔가 실렸다: {reply.payload}"
+    assert reply.missing_data, "무엇이 없는지는 이름으로 남아야 한다"
+    assert reply.reasoning
+
+
+def test_the_two_empty_states_are_told_apart_by_payload_alone() -> None:
+    """🔴 **payload만 봐도 두 상태가 갈린다** — ``runtime_status``를 안 봐도.
+
+    ``READY`` + 0안은 *"돌았는데 안이 없다"* 라서 왜인지를 싣는다.
+    ``RUNTIME_NOT_READY``는 *"안 돌았다"* 라서 아무것도 안 싣는다.
+    """
+    as_of = SPREAD_WIDE
+    ran, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=_payload("배추", as_of, finance={"finance_cap_amount_krw": 0}),
+        )
+    )
+    request = _request("배추", as_of)
+    did_not_run, _ = purchase_port(
+        AgentRequest(
+            context=request.context,
+            agent="purchase",
+            mode=request.mode,
+            payload={k: v for k, v in request.payload.items() if k != "forecast"},
+        )
+    )
+
+    assert ran.payload["scenarios"] == [] and ran.payload["no_proposal_reason"]
+    assert did_not_run.payload == {}
 
 
 @pytest.mark.parametrize(
