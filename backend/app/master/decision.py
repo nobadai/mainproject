@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.master.commitment import ApprovedCommitment
 
 Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE"]
 
@@ -96,6 +98,66 @@ class DecisionIn(BaseModel):
         return self
 
 
+class ArrivalLegOut(BaseModel):
+    """입고 1회분. **품목이 붙어 있다.**"""
+
+    item: str
+    qty_kg: float
+    arrival_date: date
+    purchase_date: date
+    seq: int
+
+
+class CommitmentOut(BaseModel):
+    """승인이 만든 확정 입고 약정 (H1). 물류의 미래 창고 점유 입력이 된다.
+
+    🔴 **`buildable=False` 를 `None` 과 섞지 않는다.**
+      승인이 아니어서 약정이 없는 것(`None`)과, 승인했는데 못 만든 것은 다르다.
+      후자를 조용히 비우면 물류가 *"입고 예정이 없다"* 로 읽는다 (§1.2-10).
+    """
+
+    buildable: bool = True
+    reason: str | None = Field(
+        default=None, description="못 만든 이유. `buildable=False` 일 때만 찬다."
+    )
+
+    approval_id: str | None = None
+    item: str | None = None
+    scenario_label: str | None = None
+    total_qty_kg: float | None = None
+    total_amount_krw: float | None = None
+    inbound_lead_days: float | None = None
+    first_arrival: date | None = None
+    arrival_schedule: list[ArrivalLegOut] = Field(default_factory=list)
+    notes: list[str] = Field(
+        default_factory=list,
+        description="약정은 섰으나 일정을 못 만든 사유 등 — 빈 일정을 설명한다.",
+    )
+
+    @classmethod
+    def of(cls, commitment: ApprovedCommitment) -> CommitmentOut:
+        return cls(
+            approval_id=commitment.approval_id,
+            item=commitment.item,
+            scenario_label=commitment.scenario_label,
+            total_qty_kg=commitment.total_qty_kg,
+            total_amount_krw=commitment.total_amount_krw,
+            inbound_lead_days=commitment.inbound_lead_days,
+            first_arrival=commitment.first_arrival,
+            arrival_schedule=[
+                ArrivalLegOut(
+                    item=leg.item,
+                    qty_kg=leg.qty_kg,
+                    arrival_date=leg.arrival_date,
+                    purchase_date=leg.purchase_date,
+                    seq=leg.seq,
+                )
+                for leg in commitment.arrival_schedule
+            ],
+            notes=list(commitment.notes),
+        )
+
+
 class DecisionOut(BaseModel):
     """적재된 결정 1건."""
 
@@ -119,6 +181,11 @@ class DecisionOut(BaseModel):
         default=False,
         description="최신 결정인가. 번복이 있으면 이전 것은 False — 지우지 않고 접는다.",
     )
+
+    #: 승인이 만든 확정 입고 약정 (H1). **승인이 아니면 `None`** 이고, 승인인데 못
+    #: 만들었으면 `buildable=False` 와 사유가 실린다 — 둘을 섞지 않는다.
+    #: 적재 대상이 아니라 응답 전용이라 이력 조회에는 안 실린다.
+    commitment: CommitmentOut | None = None
 
 
 # ── 판단 ────────────────────────────────────────────────────────────────
