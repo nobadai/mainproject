@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 from app.master import (
@@ -106,6 +107,13 @@ def purchaser(scenarios=None, runtime: str = "READY", reason: str = "", **top_le
         return reply, _meta(request, reply)
 
     return port
+
+
+def _registry(**ports) -> AgentRegistry:
+    reg = AgentRegistry()
+    for name, port in ports.items():
+        reg.register(name, port)
+    return reg
 
 
 def flow(budget: int = 12, verifier=None, max_attempts: int = 2, **ports) -> ProcurementFlow:
@@ -523,3 +531,104 @@ def test_품목_분해_전에_as_of_대조가_먼저다():
     future = {**_ENVELOPE, "generated_at": "2026-08-27T06:00:00+09:00"}
     _flow_with(seen, item="배추", forecast=future).run()
     assert "forecast" not in seen
+
+
+# ---------------------------------------------------------------------------
+# 부서 관측 운반 — 마스터는 읽지 않고 나른다
+# ---------------------------------------------------------------------------
+
+
+def test_부서_관측을_해석하지_않고_검증_맥락으로_나른다():
+    """🔴 Critic 의 `E-AUTHORITY`·`E-GRADE-LEAK` 는 부서가 낸 DeptMeta 가 없으면
+       아예 돌지 않는다. 마스터는 *"재무가 무엇을 읽었나"* 를 모르므로 **추측하지 않고**
+       부서가 적어 보낸 관측을 그대로 검증 Tool 까지 옮긴다.
+    """
+    observation = '{"observation_type": "finance_dept_meta", "produced_fields": []}'
+
+    def finance_port(request: AgentRequest):
+        reply = _reply(request, payload={"finance_cap_amount_krw": 38_000_000})
+        meta = _meta(request, reply)
+        if request.mode == "PRE_PURCHASE":
+            meta = replace(meta, observations=(observation,))
+        return reply, meta
+
+    seen: dict = {}
+
+    def watching_verifier(proposal, constraints, verdicts, plan, context):
+        seen["observations"] = dict(context.observations) if context else {}
+        return VerificationResult()
+
+    happy(finance=finance_port, verifier=watching_verifier).run()
+
+    assert seen["observations"]["finance"] == (observation,)
+    # 물류는 관측을 안 냈으므로 목록에 없다 — 빈 값을 지어내지 않는다.
+    assert "inventory" not in seen["observations"]
+
+
+def test_경계를_못_낸_부서의_관측은_나르지_않는다():
+    """경계에 기여하지 못한 회신의 관측을 넘기면, 안 쓴 값이 검증 근거가 된다."""
+
+    def finance_port(request: AgentRequest):
+        reply = _reply(
+            request,
+            runtime_status="RUNTIME_NOT_READY",
+            business_status="skipped",
+            missing_data=("finance_state",),
+        )
+        meta = replace(_meta(request, reply), observations=("{}",))
+        return reply, meta
+
+    runner = MasterRunner(
+        ctx(),
+        _registry(finance=finance_port, inventory=advisor(), purchase=purchaser()),
+        CallBudget(limit=12),
+    )
+    procurement = ProcurementFlow(runner)
+    procurement.run()
+
+    assert procurement._boundary_observations() == {}
+
+
+def test_매입이_미가동이면_조언자_SCENARIO_VALIDATION_을_부르지_않는다():
+    """★ 매입이 안을 못 냈으면 **검증할 시나리오가 없다.**
+
+    그래도 부르면 조언자는 `RUNTIME_NOT_READY` payload 를 시나리오로 읽으려다
+    ERROR 를 내고, 그 ERROR 가 *"재무가 고장났다"* 로 보인다 — 실제로는 매입이
+    미가동인 것이다. 원인이 한 칸 밀려 기록되면 다음 사람이 엉뚱한 데를 판다.
+    """
+    called: list[tuple[str, str]] = []
+
+    def watching(agent: str):
+        def port(request: AgentRequest):
+            called.append((agent, request.mode))
+            return advisor()(request)
+
+        return port
+
+    out = happy(
+        purchase=purchaser(runtime="RUNTIME_NOT_READY", reason="예측 없음"),
+        finance=watching("finance"),
+        inventory=watching("inventory"),
+    ).run()
+
+    assert out.end_code == "E4_NOT_STARTED"
+    assert out.blocked_by == ("purchase",)
+    # 경계는 받았지만 시나리오 판정은 아무도 부르지 않았다.
+    assert ("finance", "PRE_PURCHASE") in called
+    assert not [item for item in called if item[1] == "SCENARIO_VALIDATION"], called
+
+
+def test_시나리오가_0개여도_SCENARIO_VALIDATION_을_부르지_않는다():
+    """매입이 READY 로 답했지만 안이 없는 경우도 같다 — 검증할 것이 없다."""
+    called: list[str] = []
+
+    def watching(request: AgentRequest):
+        called.append(request.mode)
+        return advisor()(request)
+
+    out = happy(
+        purchase=purchaser(scenarios=[], reason="밴드 소진"), finance=watching
+    ).run()
+
+    assert out.end_code == "E2_HELD"
+    assert "SCENARIO_VALIDATION" not in called

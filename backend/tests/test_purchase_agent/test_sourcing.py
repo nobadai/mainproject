@@ -123,9 +123,10 @@ def test_mid_grade_shelf_days_comes_from_the_top_grade_lot() -> None:
     constraints = load_constraints()
     state = _staged()
     reference = constraints["allocation"]["reference_grade"]
-    top_shelf = top_grade_shelf_days(state["inventory"], reference, ITEM)
-    assert top_shelf == 10
-    assert top_shelf * constraints["grade"]["mid_grade_shelf_ratio_fallback"] == 6
+    assert top_grade_shelf_days(state["inventory"], reference, ITEM) == 10
+    # ⚠️ ``top_shelf * constraints[...] == 6`` 로 두면 **설정으로 산술만** 하고 노드를
+    #   전혀 안 본다 — 계수를 코드에 박아도 통과한다 (규칙 8). 산출을 본다.
+    assert evaluate_mid_grade(state, constraints)["shelf_days"] == 6
 
 
 # ── E3-1 DoD ③: 사중 일치 — 줄이 둘이 되어야 금액 축이 실제로 검증된다 ─────
@@ -163,8 +164,44 @@ def test_mid_grade_line_comes_first_so_the_reference_grade_absorbs_the_remainder
     """
     state = _staged(as_of=SPREAD_WIDE)
     ratios = allocate_sourcing(state)["sourcing_plan"]
-    assert ratios[0]["grade"] == load_constraints()["grade"]["mid_grade"]
-    assert ratios[-1]["grade"] == load_constraints()["allocation"]["reference_grade"]
+    # 이 테스트의 목적은 **순서**다 — 등급 이름은 리터럴로 못 박는다. 설정에서 읽는지는
+    # ``test_grade_pair_is_read_from_constraints`` 가 따로 잠근다 (규칙 8).
+    assert ratios[0]["grade"] == "중"
+    assert ratios[-1]["grade"] == "상"
+
+
+def test_grade_pair_is_read_from_constraints(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 기준등급·중품 등급을 **설정에서 읽는지**를 잠근다 (규칙 8).
+
+    앞서 이 사실은 ``ratios[0]["grade"] == constraints[...]["mid_grade"]`` 로만 확인됐는데,
+    그 형태는 코드가 등급 이름을 박아도 통과한다 — 실제로 ``mid_grade`` 를 ``"중"`` 으로
+    변이시켰더니 이 파일 57건이 그대로 통과했다.
+
+    ⚠️ **두 값을 따로 흔든다.** 처음엔 둘을 한 번에 바꿨는데, 그러면 두 세계가 같은
+      결과(기준등급 한 줄)로 수렴해 변이가 안 물렸다 — 검사가 있는데 아무것도 안 보는
+      그 상태다. 각 값이 **혼자서** 산출을 바꾸는 자리를 골라야 한다.
+    """
+    state = _staged(as_of=SPREAD_WIDE)
+    # 기준선: 그날 규칙은 중품을 태운다 (스프레드 21.2% ≥ 확대 임계 18.2%, 스코어 +0.083)
+    assert {line["grade"] for line in allocate_sourcing(state)["sourcing_plan"]} == {"중", "상"}
+
+    # ① 중품 등급만 특으로 → 스프레드가 (1650−1850)/1650 로 음수라 중품을 안 태운다.
+    #    코드가 "중"을 박고 있으면 여전히 중품이 실려 {"중","상"} 이 나온다.
+    mid_swapped = load_constraints()
+    mid_swapped["grade"]["mid_grade"] = "특"
+    monkeypatch.setattr(
+        "app.purchase_agent.nodes.allocate_sourcing.load_constraints", lambda: mid_swapped
+    )
+    assert {line["grade"] for line in allocate_sourcing(state)["sourcing_plan"]} == {"상"}
+
+    # ② 기준등급만 특으로 → 보유 로트가 상 등급뿐이라 상품 한계일을 못 재고 배분이 막힌다.
+    #    코드가 "상"을 박고 있으면 종전대로 중품이 실린다.
+    top_swapped = load_constraints()
+    top_swapped["allocation"]["reference_grade"] = "특"
+    monkeypatch.setattr(
+        "app.purchase_agent.nodes.allocate_sourcing.load_constraints", lambda: top_swapped
+    )
+    assert {line["grade"] for line in allocate_sourcing(state)["sourcing_plan"]} == {"특"}
 
 
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
@@ -483,7 +520,7 @@ def test_full_near_term_demand_yields_a_single_mid_grade_line() -> None:
     assert evaluate_mid_grade(state, constraints)["cap_ratio"] == 1.0
 
     lines = allocate_sourcing(state)["sourcing_plan"]
-    assert [line["grade"] for line in lines] == [constraints["grade"]["mid_grade"]]
+    assert [line["grade"] for line in lines] == ["중"]  # 리터럴 — 규칙 8
     assert lines[0]["ratio"] == 1.0
 
 

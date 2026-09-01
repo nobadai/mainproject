@@ -640,7 +640,17 @@ def test_every_item_and_anchor_survives_the_document_loop(item: str, as_of: date
 
 
 def test_priority_list_comes_from_constraints() -> None:
-    """우선순위는 constraints가 소유한다 (규칙 7) — 코드에 박으면 두 곳이 된다."""
+    """우선순위는 constraints가 소유한다 (규칙 7) — 코드에 박으면 두 곳이 된다.
+
+    🔴 **값을 비교하지 않는다** (규칙 8). ``select_doc_types(c) == c["context"][...]`` 는
+      함수가 목록을 하드코딩해도 통과한다 — 양쪽이 같은 상수를 들고 있을 뿐이다.
+      실제로 하드코딩으로 변이시켰더니 이 파일 61건이 그대로 통과했다.
+      **선언을 바꿔보고 산출이 따라 바뀌는지** 본다.
+    """
+    swapped = load_constraints()
+    swapped["context"]["doc_type_priority"] = ["작년동기", "관측월보"]
+    assert select_doc_types(swapped) == ["작년동기", "관측월보"]
+
     constraints = load_constraints()
     assert select_doc_types(constraints) == constraints["context"]["doc_type_priority"]
     # 반환은 **복사본**이어야 한다. 루프가 pop으로 소비하므로 원본을 돌려주면

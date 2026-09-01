@@ -6,26 +6,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.finance.agent import FinanceAgentController
-from app.finance.repository import PostgresFinanceAsOfDataPort
+from app.finance.adapter import finance_port
 from app.finance.run_repository import get_finance_execution
 from app.finance.schemas import (
     FinalVerdict,
     FinanceAgentRunResponse,
     FinanceCycle,
-    FinanceProcurementResponse,
-    FinanceReviewRequest,
     FinanceSalesRequest,
     FinanceSalesResponse,
-    PurchaseAgentOutput,
     RuntimeStatus,
 )
 from app.finance.service import (
-    FinanceCoreResult,
     get_finance_run,
     list_finance_runs,
-    run_finance_core,
-    run_finance_procurement,
     run_finance_sales,
 )
 from app.master.envelope import AgentReply, AgentRequest
@@ -35,8 +28,8 @@ router = APIRouter(prefix="/finance", tags=["finance"])
 
 @router.post("/agent", summary="Finance v2.2 Tool-Using Agent")
 def run_finance_agent(request: AgentRequest) -> AgentReply:
-    """기본 v2.2 진입점이며 Snapshot/T0 경계를 두지 않는다."""
-    reply, _metadata = FinanceAgentController(PostgresFinanceAsOfDataPort()).run(request)
+    """Master와 동일한 Finance Port를 통해 Agent를 실행한다."""
+    reply, _metadata = finance_port(request)
     return reply
 
 
@@ -46,27 +39,6 @@ def get_finance_execution_by_id(run_id: UUID) -> dict[str, object]:
         return get_finance_execution(run_id)
     except LookupError as error:
         raise HTTPException(status_code=404, detail="Finance v2.2 run was not found") from error
-
-
-@router.post(
-    "/core-review",
-    response_model=FinanceCoreResult,
-    summary="Finance P0 deterministic core 검증",
-    deprecated=True,
-)
-def review_finance_core(request: FinanceReviewRequest) -> FinanceCoreResult:
-    """LLM 이전의 Repository → Tools → Rules 흐름을 검증한다."""
-    return run_finance_core(request)
-
-
-@router.post(
-    "/procurement",
-    response_model=FinanceProcurementResponse,
-    summary="Finance A 전사 매입 가능 금액 Band 조회",
-)
-def review_finance_procurement(request: PurchaseAgentOutput) -> FinanceProcurementResponse:
-    """Purchase Agent v0.4 Context와 현재 Finance State로 공통 Band를 반환한다."""
-    return run_finance_procurement(request)
 
 
 @router.post(

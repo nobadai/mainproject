@@ -24,9 +24,12 @@ ton으로 되돌리지 않는다 — 숫자만 1000배 어긋나고 타입은 �
 DB/스냅샷으로 갈아끼울 때 바뀌는 건 이 파일의 본문뿐이고, 호출부는 그대로다.
 """
 
+from collections.abc import Mapping
 from datetime import date
 
 from app.purchase_agent import mocks
+from app.purchase_agent.quotes import QuoteSource
+from app.purchase_agent.schemas import FIXED_MARKET
 
 
 def get_forecast(item: str, as_of: date) -> dict:
@@ -50,7 +53,9 @@ def get_forecast(item: str, as_of: date) -> dict:
     return mocks.load_forecast(item, as_of)
 
 
-def get_market_quotes(item: str, as_of: date) -> list[dict]:
+def get_market_quotes(
+    item: str, as_of: date, *, source: QuoteSource | None = None
+) -> list[dict]:
     """가락시장 등급별 **당일 실측** 시세(경락가). 예측이 아니라 관측값이다.
 
     반환 형태 (IO명세 §1-②)::
@@ -61,8 +66,57 @@ def get_market_quotes(item: str, as_of: date) -> list[dict]:
 
     ⑤ 등급 배분 스코어링의 원천. 최소 등급 2개 이상이어야 배분 판단이 성립한다.
     ``market``은 확장 여지로 남긴 필드이며 현재는 "가락" 고정 (8/20 결정 — 지방시장 제외).
+
+    ★ **시세는 매입 자기 도메인이라 우리가 직접 읽는다** (정의서 §4.1 · #70). 실데이터
+      공급자는 ``quotes.auction_quote_source()`` 이고, ``source`` 로 **명시 주입**한다 —
+      환경변수 스위치를 두지 않는다. ``.env`` 가 결과를 좌우하면 로컬만 빨간 스위트가
+      만들어지고, 그 상태는 이미 한 번 겪었다 (2026-08-31).
+
+      ``None`` 이면 mock 이다. 회귀 테스트 전량이 그 길을 밟으므로 스위트가 DB 에 묶이지
+      않는다. 실데이터 경로는 ``auction_quote_source()`` 를 꽂은 호출만 탄다.
+
+    ⚠️ 실데이터 공급자는 **빈 목록을 돌려줄 수 있다** — 휴장일이거나 그날 그 규격의 낙찰이
+      없는 날이다. mock 은 빈 목록을 돌려주지 않는다(모르는 품목이면 멈춘다). 빈 목록을
+      받은 쪽은 죽지 않고 사유를 남긴다 (③ ``draft_plan``).
     """
+    if source is not None:
+        return _checked_quotes(source(item, as_of), item)
     return mocks.load_quotes(item, as_of)
+
+
+def _checked_quotes(quotes: list[dict], item: str) -> list[dict]:
+    """주입된 공급자가 **계약대로 돌려줬는지** 본다 (Codex 교차검증 2026-08-31).
+
+    주입 지점은 배선 실수가 나기 좋은 자리인데, 그 실수가 조용히 지나간다:
+
+    * ``market`` 키 누락 → ③에서 ``KeyError``. 어느 공급자가 범인인지 안 나온다
+    * ``market="부산"`` → 하류 필터가 전부 떨어뜨려 **"가락 휴장"** 으로 보고된다.
+      계약 위반이 날씨 얘기로 둔갑하는 셈이다
+    * ``price`` 가 0·음수·실수 → 출력 경계(``grade_unit_price: int, gt=0``)에서 **제안
+      전체**가 죽는다. 그때는 어느 줄 때문인지 알 수 없다
+
+    ``check_prices_exist`` 는 이걸 못 잡는다 — **주입 원본과 대조**하기 때문에 원본이
+    틀리면 같이 틀린 채 통과한다. 그래서 경계가 여기여야 한다.
+
+    등급 어휘는 **보지 않는다.** 어느 등급을 쓸지는 #69 소관이고, ``schemas.py`` 도
+    "DB 담당과 표준화 진행 중이라 Literal로 굳히지 않는다"고 열어둔 자리다.
+    """
+    for index, quote in enumerate(quotes):
+        where = f"주입 시세[{index}] ({item})"
+        if not isinstance(quote, Mapping):
+            raise TypeError(f"{where}: 매핑이어야 한다, got {quote!r}")
+        missing = [key for key in ("market", "grade", "price") if key not in quote]
+        if missing:
+            raise ValueError(f"{where}: 필수 키 없음 {missing} — IO명세 §1-② 형태여야 한다")
+        if quote["market"] != FIXED_MARKET:
+            raise ValueError(
+                f"{where}: market={quote['market']!r} — {FIXED_MARKET} 고정이다. "
+                f"다른 시장을 그대로 실으면 하류 필터가 전부 떨어뜨려 '휴장'으로 보고된다"
+            )
+        price = quote["price"]
+        if isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+            raise ValueError(f"{where}: price={price!r} — 양의 정수 원/kg 이어야 한다")
+    return quotes
 
 
 def get_inventory(item: str, as_of: date) -> dict:

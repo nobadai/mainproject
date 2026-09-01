@@ -538,7 +538,64 @@ def test_missing_forecast_key_reports_runtime_not_ready() -> None:
     reply, _ = purchase_port(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert "forecast" in reply.missing_data
-    assert reply.payload["scenarios"] == []
+
+
+@pytest.mark.parametrize(
+    "drop", ["item", "forecast", "constraints", "confirmed_orders", "policy_values"]
+)
+def test_a_not_ready_reply_carries_no_payload_at_all(drop: str) -> None:
+    """🔴 **"안 돌았다"에는 제안 형태를 싣지 않는다.**
+
+    전에는 ``{"scenarios": []}``였다. 반쪽짜리 제안이라 ``PurchaseProposal``로 파싱하면
+    깨지고(``meta``·``no_proposal_reason`` 부재), 온전히 채우면 이번엔 **"돌았는데 안이
+    없다"와 구분되지 않는다** — 그쪽은 ``READY`` + ``no_proposal_reason``으로 이미 따로
+    있다(아래 검사가 그 상태를 잠근다). ``runtime_status``를 안 보는 소비자가 하나라도
+    생기면 두 상태가 같아진다.
+
+    재무·물류도 이 자리에 payload를 안 싣는다(둘 다 ``_not_ready()``). 무엇이 없는지는
+    ``missing_data``가, 왜인지는 ``reasoning``이 말한다.
+    """
+    request = _request("배추", SPREAD_WIDE)
+    stripped = {k: v for k, v in request.payload.items() if k != drop}
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=request.context, agent="purchase", mode=request.mode, payload=stripped
+        )
+    )
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.payload == {}, f"안 돌았는데 뭔가 실렸다: {reply.payload}"
+    assert reply.missing_data, "무엇이 없는지는 이름으로 남아야 한다"
+    assert reply.reasoning
+
+
+def test_the_two_empty_states_are_told_apart_by_payload_alone() -> None:
+    """🔴 **payload만 봐도 두 상태가 갈린다** — ``runtime_status``를 안 봐도.
+
+    ``READY`` + 0안은 *"돌았는데 안이 없다"* 라서 왜인지를 싣는다.
+    ``RUNTIME_NOT_READY``는 *"안 돌았다"* 라서 아무것도 안 싣는다.
+    """
+    as_of = SPREAD_WIDE
+    ran, _ = purchase_port(
+        AgentRequest(
+            context=ExecutionContext("R", as_of, "ML_COMPLETE", "v2.3"),
+            agent="purchase",
+            mode="GENERATE_SCENARIOS",
+            payload=_payload("배추", as_of, finance={"finance_cap_amount_krw": 0}),
+        )
+    )
+    request = _request("배추", as_of)
+    did_not_run, _ = purchase_port(
+        AgentRequest(
+            context=request.context,
+            agent="purchase",
+            mode=request.mode,
+            payload={k: v for k, v in request.payload.items() if k != "forecast"},
+        )
+    )
+
+    assert ran.payload["scenarios"] == [] and ran.payload["no_proposal_reason"]
+    assert did_not_run.payload == {}
 
 
 @pytest.mark.parametrize(
@@ -1167,6 +1224,33 @@ def test_the_envelope_rule_is_stricter_than_a_naive_digit_check() -> None:
 def test_reasoning_reports_the_absence_of_scenarios() -> None:
     """안이 없는 날도 **사실만** 적는다 — E5 판정은 마스터 몫이다."""
     assert "제안을 내지 못했다" in build_reasoning({"scenarios": [], "situation": "uncertain"})
+
+
+def test_the_no_plan_sentence_passes_the_envelope_rule_too() -> None:
+    """🔴 **0안 문장도 봉투 규칙을 지킨다** — 지금까지는 우연이었다.
+
+    위 앵커 검사는 **안이 있는 날만** 돈다. 0안 가지는 검사 밖이라, 문구를 다듬다 날짜나
+    금액을 넣으면 ``E-REASONING-NUMERIC``이 **실운영에서 처음** 나온다. 규칙을 여기서
+    다시 쓰지 않고 봉투의 ``check_reasoning``을 그대로 부르는 이유도 위와 같다.
+    """
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    probe = replace(reply, reasoning=build_reasoning({"scenarios": []}))
+
+    assert check_reasoning(probe) == []
+
+
+@pytest.mark.parametrize("cause", ["제약", "창고", "현금", "시세", "규격", "적재", "휴장"])
+def test_the_no_plan_sentence_does_not_name_a_cause(cause: str) -> None:
+    """🔴 **1행이 원인을 단정하지 않는다.**
+
+    전에는 *"제약 조합 하에 유효한 안이 없어…"* 였다. #70 이후 0안 원인이 셋으로 늘었고
+    (규격 미확정 · 그 규격 미거래 · 적재 정지) 그중 둘은 **제약 때문이 아니다.** 화면은
+    이 문장을 1행으로 그대로 옮기므로(``ProcurementResult.tsx``) 거기까지만 읽는 사람이
+    창고·현금에 걸린 줄 안다.
+
+    원인은 아래 두 줄이 말한다 — ``no_proposal_reason`` 과 ``rejected_reasons``.
+    """
+    assert cause not in build_reasoning({"scenarios": []})
 
 
 # ── STATUS_QUERY ──────────────────────────────────────────────────────────

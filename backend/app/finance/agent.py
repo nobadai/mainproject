@@ -3,6 +3,15 @@
 이 모듈은 의도적으로 ``FinanceSnapshot``을 import하지 않는다. 레거시
 매입/영업 서비스는 호환성 용도로만 남기고, 이 경로는 M-1 실행 컨텍스트를
 경계로 사용한다.
+
+★ **여기 남는 것은 Agent 자신뿐이다.** LLM Provider·Planner·Finalizer 는
+  `app.finance.llm`, capability 실행은 `tool_registry`, 실행 상태는 `state`,
+  근거 규율은 `evidence`, 관측 사이드카는 `execution` 이 맡는다. 이 모듈이 하는 일은
+  **그것들을 순서대로 부르는 것**이다.
+
+★ 아래 재노출(re-export)은 **호환을 위한 것**이다. `app.finance.agent` 를 통해 들어오던
+  기존 import 와 테스트의 patch 대상을 그대로 살려 둔다 — 옮기면서 부르는 쪽을
+  깨뜨리지 않는 것이 이번 정리의 조건이었다.
 """
 
 from __future__ import annotations
@@ -11,1120 +20,103 @@ import json
 import os
 import re
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field, replace
-from datetime import date, timedelta
-from decimal import ROUND_FLOOR, Decimal
-from pathlib import Path
-from typing import Any, Literal, Protocol
+from datetime import date
+from decimal import Decimal
+from typing import Any, Literal
 from uuid import uuid4
 
-from dotenv import load_dotenv
-
+from app.finance.evidence import (
+    _adjustment_from_dict,
+    _branch_ref,
+    _evidence,
+    _evidence_dict,
+    _evidence_from_dict,
+    _indexed_verdict_evidence,
+    _json_value,
+    _tool_ref,
+)
+from app.finance.execution import FINANCE_CAP_CHECK_ID, _finance_dept_meta
+from app.finance.llm.config import finance_llm_enabled
+from app.finance.llm.contracts import (
+    FinanceFinalizer,
+    FinanceMode,
+    FinancePlanner,
+    FinancePlannerContractViolation,
+    FinancePlannerFailure,
+    ToolAction,
+)
+from app.finance.llm.finalizer import _FINAL_EXPLANATIONS, DeterministicFinanceFinalizer
+from app.finance.llm.planner import DeterministicFinancePlanner
+from app.finance.llm.provider import _configured_finance_llms
 from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
-from app.finance.rules import classify_base_stress
 from app.finance.run_repository import save_finance_execution
-from app.finance.schemas import CashEvent, FinancePolicy
-from app.finance.tools import (
-    build_payroll_schedule,
-    calculate_finance_cap,
-    derive_cash_priority,
-    derive_critical_payment_dates,
-    project_cashflow,
+from app.finance.state import (
+    _CAPABILITY_TOOLS,
+    _PRE_REQUIRED_CAPABILITIES,
+    _SCENARIO_REQUIRED_CAPABILITIES,
+    FinanceAgentState,
+    ScenarioPayment,
+    _satisfied_capabilities,
+    _scenario_verdict,
+)
+from app.finance.tool_registry import (
+    PRE_PURCHASE_TOOLS,
+    SCENARIO_VALIDATION_TOOLS,
+    FinanceToolRegistry,
+    _scenario_schedule,
 )
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 
-FinanceMode = Literal["PRE_PURCHASE", "SCENARIO_VALIDATION"]
-Adjustability = Literal["NOT_NEEDED", "ADJUSTABLE", "NOT_ADJUSTABLE"]
-
 DEFAULT_MAX_TOOL_CALLS = 8
 DEFAULT_MAX_REPLANS = 2
 
-_DEFAULT_MODELS = {
-    "ollama": "gemma3:4b",
-    "gemini": "gemini-3.5-flash-lite",
-}
-_ENV_FILES = (
-    Path(__file__).resolve().parents[2] / ".env",
-    Path(__file__).resolve().parents[3] / ".env",
-)
-_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-_GEMINI_PLANNER_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "tool_name": {"type": "string", "nullable": True},
-        "arguments": {
-            "type": "object",
-            "properties": {
-                "axis": {"type": "string"},
-                "candidate_amount_krw": {"type": "number"},
-            },
-        },
-        "reason": {"type": "string"},
-        "finalize": {"type": "boolean"},
-    },
-    "required": ["tool_name", "arguments", "reason", "finalize"],
-}
-
-
-def _load_finance_environment() -> None:
-    for env_file in _ENV_FILES:
-        load_dotenv(env_file, override=False)
-
-
-def _finance_provider_name() -> str:
-    _load_finance_environment()
-    provider = (
-        os.getenv("FINANCE_LLM_PROVIDER")
-        or "gemini"
-    ).strip().lower()
-    if provider not in _DEFAULT_MODELS:
-        raise RuntimeError("Configured Finance LLM provider is not supported")
-    return provider
-
-
-def _finance_model(provider: str) -> str:
-    _load_finance_environment()
-    explicit = os.getenv("FINANCE_LLM_MODEL")
-    if explicit:
-        return explicit
-    global_provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
-    global_model = os.getenv("LLM_MODEL")
-    if provider == global_provider and global_model:
-        return global_model
-    return _DEFAULT_MODELS[provider]
-
-
-def _gemini_response_text(document: dict[str, Any]) -> str:
-    candidates = document.get("candidates") or []
-    parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
-    for part in parts:
-        if part.get("thought"):
-            continue
-        text = part.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-    raise TypeError("Finance Gemini response did not contain text content")
-
-
-def _gemini_generate(
-    *, model: str, system_prompt: str, user_payload: dict[str, Any], response_schema: dict[str, Any]
-) -> str:
-    _load_finance_environment()
-    api_key = os.getenv("FINANCE_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Finance Gemini API key is not set")
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": json.dumps(user_payload, default=str)}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0,
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema,
-        },
-    }
-    request = urllib.request.Request(
-        f"{_GEMINI_BASE_URL}/models/{model}:generateContent",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(
-            request, timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
-        ) as response:
-            document = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError:
-        raise
-    except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
-        raise RuntimeError("Finance Gemini request failed") from error
-    return _gemini_response_text(document)
-
-PRE_PURCHASE_TOOLS = frozenset(
-    {
-        "assess_finance_position",
-        "project_cashflow",
-        "calculate_purchase_finance_cap",
-        "analyze_payment_pressure",
-    }
-)
-SCENARIO_VALIDATION_TOOLS = frozenset({"evaluate_purchase_scenario", "validate_amount_adjustment"})
-
-
-@dataclass(frozen=True)
-class ToolAction:
-    tool_name: str | None = None
-    arguments: dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
-    finalize: bool = False
-
-
-@dataclass(frozen=True)
-class ScenarioPayment:
-    seq: int
-    purchase_date: date
-    payment_date: date
-    qty_kg: Decimal | None
-    amount_krw: Decimal
-    amount_max_krw: Decimal
-    basis: str
-
-
-class FinancePlanner(Protocol):
-    model: str
-    attempts: int
-
-    def decide(
-        self,
-        *,
-        request: AgentRequest,
-        allowed_tools: frozenset[str],
-        observations: tuple[dict[str, Any], ...],
-        missing_capabilities: tuple[str, ...],
-    ) -> ToolAction: ...
-
-
-class FinanceFinalizer(Protocol):
-    model: str
-    attempts: int
-
-    def finalize(
-        self,
-        *,
-        mode: FinanceMode,
-        business_status: str,
-        evidences: tuple[Evidence, ...],
-    ) -> str: ...
-
-
-class FinancePlannerFailure(RuntimeError):
-    """Planner 호출 또는 출력 검증 실패를 Controller 상태로 전달한다."""
+__all__ = [
+    "DEFAULT_MAX_REPLANS",
+    "DEFAULT_MAX_TOOL_CALLS",
+    "FINANCE_CAP_CHECK_ID",
+    "PRE_PURCHASE_TOOLS",
+    "SCENARIO_VALIDATION_TOOLS",
+    "DeterministicFinanceFinalizer",
+    "DeterministicFinancePlanner",
+    "FinanceAgentController",
+    "FinanceAgentState",
+    "FinanceFinalizer",
+    "FinanceMode",
+    "FinancePlanner",
+    "FinancePlannerContractViolation",
+    "FinancePlannerFailure",
+    "FinanceToolRegistry",
+    "ScenarioPayment",
+    "ToolAction",
+    # 아래 비공개 이름은 재무 안에서만 쓰는 호환 재노출이다.
+    "_finance_dept_meta",
+    "_indexed_verdict_evidence",
+    "_scenario_schedule",
+    "finance_llm_enabled",
+    "validate_finance_scenario_output",
+]
 
 
 @dataclass
-class _ProviderFallbackState:
-    primary_provider: str
-    effective_provider: str
-    active: bool = False
-    reason: str | None = None
+class _BranchOutcome:
+    """분기 실행이 남긴 것. **실패도 값으로 담는다.**"""
 
-    def activate(self, reason: str) -> None:
-        self.active = True
-        self.effective_provider = "ollama"
-        self.reason = reason
+    states: list[FinanceAgentState] = field(default_factory=list)
+    runtime_status: Literal["READY", "RUNTIME_NOT_READY", "ERROR"] = "READY"
+    missing_data: tuple[str, ...] = ()
+    error_reason: str = ""
+    planner_failed: bool = False
 
 
-def _gemini_availability_failure_reason(error: Exception) -> str | None:
-    if isinstance(error, urllib.error.HTTPError):
-        if error.code == 429:
-            return "HTTP_429"
-        if 500 <= error.code < 600:
-            return "HTTP_5XX"
-        return None
-    if isinstance(error, TimeoutError):
-        return "TIMEOUT"
-    if isinstance(error, urllib.error.URLError):
-        return "NETWORK_ERROR"
-    if (
-        isinstance(error, RuntimeError)
-        and str(error) == "Finance Gemini API key is not set"
-    ):
-        return "API_KEY_MISSING"
-    if isinstance(error.__cause__, TimeoutError):
-        return "TIMEOUT"
-    if isinstance(error.__cause__, urllib.error.URLError):
-        return "NETWORK_ERROR"
-    return None
+@dataclass(frozen=True)
+class _Explanation:
+    """설명과 **그 설명이 어떻게 나왔는지.** 둘은 같이 다녀야 뜻이 통한다."""
 
-
-def _is_gemini_availability_failure(error: Exception) -> bool:
-    return _gemini_availability_failure_reason(error) is not None
-
-
-class OllamaFinancePlanner:
-    """허용된 Tool 호출 또는 finalize로 출력이 제한된 LLM Planner."""
-
-    def __init__(self, *, model: str | None = None) -> None:
-        self.model = model or _finance_model("ollama")
-        self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
-        self.attempts = 0
-
-    def decide(
-        self,
-        *,
-        request: AgentRequest,
-        allowed_tools: frozenset[str],
-        observations: tuple[dict[str, Any], ...],
-        missing_capabilities: tuple[str, ...],
-    ) -> ToolAction:
-        self.attempts += 1
-        planning_required = bool(missing_capabilities)
-        schema = {
-            "type": "object",
-            "properties": {
-                "tool_name": (
-                    {"type": "string", "enum": sorted(allowed_tools)}
-                    if planning_required
-                    else {"type": "null"}
-                ),
-                "arguments": {"type": "object"},
-                "reason": {"type": "string"},
-                "finalize": {"type": "boolean", "enum": [not planning_required]},
-            },
-            "required": ["tool_name", "arguments", "reason", "finalize"],
-            "additionalProperties": False,
-        }
-        prompt = {
-            "mode": request.mode,
-            "business_payload": dict(request.payload),
-            "allowed_tools": sorted(allowed_tools),
-            "observations": observations,
-            "missing_capabilities": missing_capabilities,
-            "tool_argument_contracts": {
-                "assess_finance_position": {},
-                "project_cashflow": {},
-                "calculate_purchase_finance_cap": {},
-                "analyze_payment_pressure": {},
-                "evaluate_purchase_scenario": {},
-                "validate_amount_adjustment": {
-                    "axis": "amount",
-                    "candidate_amount_krw": (
-                        "copy the exact finance_cap_amount_krw from a prior observation; "
-                        "never create a number"
-                    ),
-                },
-            },
-        }
-        body = {
-            "model": self.model,
-            "stream": False,
-            "think": False,
-            "format": schema,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You plan Finance capability calls. Select only an allowed tool. "
-                        "Never calculate or invent financial numbers or policy values. "
-                        "Use observations only. When missing_capabilities is non-empty, "
-                        "you MUST set finalize=false and select exactly one allowed tool "
-                        "that can satisfy a missing capability. You may set finalize=true "
-                        "only when "
-                        "missing_capabilities is empty; then tool_name must be null."
-                        " For validate_amount_adjustment, copy the observed deterministic "
-                        "finance_cap_amount_krw exactly and set axis to amount."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(prompt, default=str)},
-            ],
-            "options": {"temperature": 0},
-        }
-        req = urllib.request.Request(
-            f"{self.base_url}/api/chat",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as response:
-            raw = json.loads(response.read().decode())
-        content = json.loads(raw["message"]["content"])
-        action = ToolAction(**content)
-        _validate_planner_action(action, allowed_tools, missing_capabilities)
-        return action
-
-
-class GeminiFinancePlanner:
-    """Finance Tool 선택만 수행하는 Gemini structured-output Planner."""
-
-    def __init__(self) -> None:
-        self.model = _finance_model("gemini")
-        self.attempts = 0
-
-    def decide(
-        self,
-        *,
-        request: AgentRequest,
-        allowed_tools: frozenset[str],
-        observations: tuple[dict[str, Any], ...],
-        missing_capabilities: tuple[str, ...],
-    ) -> ToolAction:
-        self.attempts += 1
-        prompt = {
-            "mode": request.mode,
-            "business_payload": dict(request.payload),
-            "allowed_tools": sorted(allowed_tools),
-            "observations": observations,
-            "missing_capabilities": missing_capabilities,
-            "tool_argument_contracts": {
-                "assess_finance_position": {},
-                "project_cashflow": {},
-                "calculate_purchase_finance_cap": {},
-                "analyze_payment_pressure": {},
-                "evaluate_purchase_scenario": {},
-                "validate_amount_adjustment": {
-                    "axis": "amount",
-                    "candidate_amount_krw": (
-                        "copy the exact finance_cap_amount_krw from a prior observation; "
-                        "never create a number"
-                    ),
-                },
-            },
-        }
-        content = json.loads(
-            _gemini_generate(
-                model=self.model,
-                system_prompt=(
-                    "You plan Finance capability calls. Select only an allowed tool. "
-                    "Never calculate or invent financial numbers or policy values. "
-                    "Use observations only. When missing_capabilities is non-empty, "
-                    "set finalize=false and select exactly one allowed tool that can "
-                    "satisfy a missing capability. When missing_capabilities is empty, "
-                    "set finalize=true and tool_name=null. For validate_amount_adjustment, "
-                    "copy the observed deterministic finance_cap_amount_krw exactly and "
-                    "set axis to amount."
-                ),
-                user_payload=prompt,
-                response_schema=_GEMINI_PLANNER_RESPONSE_SCHEMA,
-            )
-        )
-        action = ToolAction(**content)
-        _validate_planner_action(action, allowed_tools, missing_capabilities)
-        return action
-
-
-_FINAL_EXPLANATIONS = {
-    "PRE_BOUNDARY": "Verified Finance Evidence supports the reported purchasing boundary.",
-    "SCENARIO_REJECT": (
-        "Verified Finance Evidence rejects at least one original scenario. "
-        "Any published amount alternative was independently validated."
-    ),
-    "SCENARIO_ACCEPT": "Verified Finance Evidence supports the reported scenario verdicts.",
-}
-
-
-class OllamaFinanceFinalizer:
-    """조사 Planner와 분리된 Evidence 전용 LLM finalization."""
-
-    def __init__(self, *, model: str | None = None) -> None:
-        self.model = model or _finance_model("ollama")
-        self.base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
-        self.attempts = 0
-
-    def finalize(
-        self,
-        *,
-        mode: FinanceMode,
-        business_status: str,
-        evidences: tuple[Evidence, ...],
-    ) -> str:
-        self.attempts += 1
-        allowed = (
-            ["PRE_BOUNDARY"]
-            if mode == "PRE_PURCHASE"
-            else ["SCENARIO_REJECT"]
-            if business_status == "reject"
-            else ["SCENARIO_ACCEPT"]
-        )
-        body = {
-            "model": self.model,
-            "stream": False,
-            "think": False,
-            "format": {
-                "type": "object",
-                "properties": {"explanation_key": {"type": "string", "enum": allowed}},
-                "required": ["explanation_key"],
-                "additionalProperties": False,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Finalize the Finance reply from verified Evidence only. Select the "
-                        "allowed explanation key. Do not calculate or add numbers or claims."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "mode": mode,
-                            "business_status": business_status,
-                            "verified_claims": [item.claim for item in evidences],
-                            "allowed_explanation_keys": allowed,
-                        }
-                    ),
-                },
-            ],
-            "options": {"temperature": 0},
-        }
-        req = urllib.request.Request(
-            f"{self.base_url}/api/chat",
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as response:
-            raw = json.loads(response.read().decode())
-        selected = json.loads(raw["message"]["content"])["explanation_key"]
-        if selected not in allowed:
-            raise ValueError("Finance finalization selected an unsupported explanation")
-        return _FINAL_EXPLANATIONS[selected]
-
-
-class GeminiFinanceFinalizer:
-    """검증된 Evidence에서 설명 키만 고르는 Gemini Finalizer."""
-
-    def __init__(self) -> None:
-        self.model = _finance_model("gemini")
-        self.attempts = 0
-
-    def finalize(
-        self,
-        *,
-        mode: FinanceMode,
-        business_status: str,
-        evidences: tuple[Evidence, ...],
-    ) -> str:
-        self.attempts += 1
-        allowed = (
-            ["PRE_BOUNDARY"]
-            if mode == "PRE_PURCHASE"
-            else ["SCENARIO_REJECT"]
-            if business_status == "reject"
-            else ["SCENARIO_ACCEPT"]
-        )
-        selected = json.loads(
-            _gemini_generate(
-                model=self.model,
-                system_prompt=(
-                    "Finalize the Finance reply from verified Evidence only. Select the "
-                    "allowed explanation key. Do not calculate or add numbers or claims."
-                ),
-                user_payload={
-                    "mode": mode,
-                    "business_status": business_status,
-                    "verified_claims": [item.claim for item in evidences],
-                    "allowed_explanation_keys": allowed,
-                },
-                response_schema={
-                    "type": "object",
-                    "properties": {
-                        "explanation_key": {"type": "string", "enum": allowed}
-                    },
-                    "required": ["explanation_key"],
-                },
-            )
-        )["explanation_key"]
-        if selected not in allowed:
-            raise ValueError("Finance finalization selected an unsupported explanation")
-        return _FINAL_EXPLANATIONS[selected]
-
-
-class _AvailabilityFallbackFinancePlanner:
-    def __init__(
-        self,
-        primary: FinancePlanner,
-        fallback: FinancePlanner,
-        state: _ProviderFallbackState,
-    ) -> None:
-        self.primary = primary
-        self.fallback = fallback
-        self.state = state
-
-    @property
-    def model(self) -> str:
-        return self.fallback.model if self.state.active else self.primary.model
-
-    @property
-    def attempts(self) -> int:
-        return self.primary.attempts + self.fallback.attempts
-
-    def decide(
-        self,
-        *,
-        request: AgentRequest,
-        allowed_tools: frozenset[str],
-        observations: tuple[dict[str, Any], ...],
-        missing_capabilities: tuple[str, ...],
-    ) -> ToolAction:
-        kwargs = {
-            "request": request,
-            "allowed_tools": allowed_tools,
-            "observations": observations,
-            "missing_capabilities": missing_capabilities,
-        }
-        if self.state.active:
-            return self.fallback.decide(**kwargs)
-        try:
-            return self.primary.decide(**kwargs)
-        except Exception as error:
-            reason = _gemini_availability_failure_reason(error)
-            if reason is None:
-                raise
-            self.state.activate(reason)
-            return self.fallback.decide(**kwargs)
-
-
-class _AvailabilityFallbackFinanceFinalizer:
-    def __init__(
-        self,
-        primary: FinanceFinalizer,
-        fallback: FinanceFinalizer,
-        state: _ProviderFallbackState,
-    ) -> None:
-        self.primary = primary
-        self.fallback = fallback
-        self.state = state
-
-    @property
-    def model(self) -> str:
-        return self.fallback.model if self.state.active else self.primary.model
-
-    @property
-    def attempts(self) -> int:
-        return self.primary.attempts + self.fallback.attempts
-
-    def finalize(
-        self,
-        *,
-        mode: FinanceMode,
-        business_status: str,
-        evidences: tuple[Evidence, ...],
-    ) -> str:
-        kwargs = {
-            "mode": mode,
-            "business_status": business_status,
-            "evidences": evidences,
-        }
-        if self.state.active:
-            return self.fallback.finalize(**kwargs)
-        try:
-            return self.primary.finalize(**kwargs)
-        except Exception as error:
-            reason = _gemini_availability_failure_reason(error)
-            if reason is None:
-                raise
-            self.state.activate(reason)
-            return self.fallback.finalize(**kwargs)
-
-
-class DeterministicFinanceFinalizer:
-    """동일한 검증 완료 설명 계약을 구현하는 테스트/오프라인 finalizer."""
-
-    model = "deterministic-finance-finalizer"
-
-    def __init__(self) -> None:
-        self.attempts = 0
-
-    def finalize(
-        self,
-        *,
-        mode: FinanceMode,
-        business_status: str,
-        evidences: tuple[Evidence, ...],
-    ) -> str:
-        self.attempts += 1
-        del evidences
-        if mode == "PRE_PURCHASE":
-            return _FINAL_EXPLANATIONS["PRE_BOUNDARY"]
-        return _FINAL_EXPLANATIONS[
-            "SCENARIO_REJECT" if business_status == "reject" else "SCENARIO_ACCEPT"
-        ]
-
-
-def _validate_planner_action(
-    action: ToolAction,
-    allowed_tools: frozenset[str],
-    missing_capabilities: tuple[str, ...],
-) -> None:
-    if not isinstance(action.finalize, bool):
-        raise TypeError("Finance Planner finalize must be boolean")
-    if not isinstance(action.arguments, dict):
-        raise TypeError("Finance Planner arguments must be an object")
-    if missing_capabilities:
-        if action.finalize or action.tool_name not in allowed_tools:
-            raise ValueError(
-                "Finance Planner must select one allowed tool while capabilities are missing"
-            )
-        return
-    if not action.finalize or action.tool_name is not None:
-        raise ValueError(
-            "Finance Planner must finalize without a tool when capabilities are complete"
-        )
-
-
-def _configured_finance_llms(
-) -> tuple[FinancePlanner, FinanceFinalizer, _ProviderFallbackState]:
-    provider = _finance_provider_name()
-    state = _ProviderFallbackState(
-        primary_provider=provider,
-        effective_provider=provider,
-    )
-    if provider == "ollama":
-        return OllamaFinancePlanner(), OllamaFinanceFinalizer(), state
-    return (
-        _AvailabilityFallbackFinancePlanner(
-            GeminiFinancePlanner(),
-            OllamaFinancePlanner(model=_DEFAULT_MODELS["ollama"]),
-            state,
-        ),
-        _AvailabilityFallbackFinanceFinalizer(
-            GeminiFinanceFinalizer(),
-            OllamaFinanceFinalizer(model=_DEFAULT_MODELS["ollama"]),
-            state,
-        ),
-        state,
-    )
-
-
-class FinanceToolRegistry:
-    def __init__(self, data_port: FinanceAsOfDataPort):
-        self.data_port = data_port
-
-    def names_for(self, mode: FinanceMode) -> frozenset[str]:
-        return PRE_PURCHASE_TOOLS if mode == "PRE_PURCHASE" else SCENARIO_VALIDATION_TOOLS
-
-    def execute(
-        self, name: str, arguments: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        if name not in self.names_for(state.request.mode):
-            raise ValueError(f"Tool {name} is not allowed for {state.request.mode}")
-        return getattr(self, name)(arguments, state)
-
-    def _context(
-        self, state: FinanceAgentState
-    ) -> tuple[dict[str, Any], FinancePolicy, list[CashEvent]]:
-        if state.context_cache is not None:
-            return state.context_cache
-        ctx = state.request.context
-        position = self.data_port.load_finance_position(ctx.as_of)
-        policy = self.data_port.load_policy(ctx.as_of, ctx.policy_version)
-        horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
-        payroll_amount = self.data_port.load_payroll(ctx.as_of, horizon)
-        if payroll_amount is None:
-            raise FinanceDataNotReady("payroll_schedule")
-        policy = policy.model_copy(update={"monthly_labor_cost_krw": payroll_amount})
-        events = [
-            *self.data_port.load_obligations(ctx.as_of, horizon),
-            *self.data_port.load_receivables(ctx.as_of, horizon),
-            *build_payroll_schedule(as_of=ctx.as_of, horizon_end=horizon, policy=policy),
-        ]
-        current_debt = Decimal(position["current_debt_krw"])
-        if current_debt > 0:
-            events.extend(self.data_port.load_debt_schedule(ctx.as_of, horizon))
-        state.context_cache = (position, policy, events)
-        return state.context_cache
-
-    def assess_finance_position(
-        self, args: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        del args
-        position, policy, _ = self._context(state)
-        if state.request.mode == "PRE_PURCHASE" and policy.purchase_payment_days is None:
-            raise FinanceDataNotReady("purchase_payment_days")
-        return {
-            "available_cash": str(position["current_cash_krw"]),
-            "minimum_cash_balance_krw": str(policy.minimum_cash_balance_krw),
-            "payroll_payment_day": policy.payroll_date,
-            "purchase_payment_days": policy.purchase_payment_days,
-            "margin_defense_floor_rate": (
-                str(policy.margin_defense_floor_rate)
-                if policy.margin_defense_floor_rate is not None
-                else None
-            ),
-            # Finance Policy 버전은 Master 실행 컨텍스트와 독립적이다. 재현을 위해
-            # Finance 데이터 경계에서 실제로 읽은 버전을 반환한다.
-            "policy_version_used": policy.policy_version,
-            "evidence": [
-                _evidence(
-                    "available_cash",
-                    position["current_cash_krw"],
-                    "krw",
-                    str(position["finance_state_id"]),
-                    source="finance",
-                ),
-                _evidence(
-                    "minimum_cash_balance_krw",
-                    policy.minimum_cash_balance_krw,
-                    "krw",
-                    policy.source_refs["minimum_cash_balance_krw"],
-                    source="persona",
-                ),
-                Evidence(
-                    claim="payroll_payment_day",
-                    source="finance",
-                    ref_ids=(policy.source_refs["payroll_date"],),
-                    value=policy.payroll_date,
-                    unit="day_of_month",
-                    evidence_grade="SIM_FIXED",
-                    evidence_detail="Finance Policy DB day-of-month value.",
-                ),
-                _evidence(
-                    "purchase_payment_days",
-                    policy.purchase_payment_days,
-                    "day",
-                    policy.source_refs["purchase_payment_days"],
-                    source="persona",
-                ),
-                Evidence(
-                    claim="policy_version_used",
-                    source="persona",
-                    ref_ids=(policy.source_refs["purchase_payment_days"],),
-                    value=policy.policy_version,
-                    unit="version",
-                    evidence_grade="SIM_FIXED",
-                    evidence_detail="Version of the Finance policy used for this execution.",
-                ),
-                *(
-                    [
-                        _evidence(
-                            "margin_defense_floor_rate",
-                            policy.margin_defense_floor_rate,
-                            "ratio",
-                            policy.source_refs["margin_defense_floor_rate"],
-                            source="persona",
-                        )
-                    ]
-                    if policy.margin_defense_floor_rate is not None
-                    else []
-                ),
-            ],
-        }
-
-    def project_cashflow(self, args: dict[str, Any], state: FinanceAgentState) -> dict[str, Any]:
-        del args
-        position, policy, events = self._context(state)
-        projection = project_cashflow(
-            as_of=state.request.context.as_of,
-            current_cash_krw=Decimal(position["current_cash_krw"]),
-            horizon_end=state.request.context.as_of
-            + timedelta(days=policy.cashflow_projection_days),
-            cash_events=events,
-        )
-        state.projection = projection
-        return {
-            "base_projected_cash_min": str(projection.projected_cash_min),
-            "evidence": [
-                _evidence(
-                    "base_projected_cash_min",
-                    projection.projected_cash_min,
-                    "krw",
-                    _tool_ref("project_cashflow", state),
-                )
-            ],
-        }
-
-    def calculate_purchase_finance_cap(
-        self, args: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        del args
-        _, policy, _ = self._context(state)
-        if policy.purchase_payment_days is None:
-            raise FinanceDataNotReady("purchase_payment_days")
-        if state.projection is None:
-            self.project_cashflow({}, state)
-        cap = calculate_finance_cap(base_projection=state.projection, policy=policy)
-        return {
-            "finance_cap_amount_krw": str(cap),
-            "base_projected_cash_min": str(state.projection.projected_cash_min),
-            "evidence": [
-                _evidence(
-                    "finance_cap_amount_krw",
-                    cap,
-                    "krw",
-                    _tool_ref("calculate_purchase_finance_cap", state),
-                ),
-                _evidence(
-                    "base_projected_cash_min",
-                    state.projection.projected_cash_min,
-                    "krw",
-                    _tool_ref("project_cashflow", state),
-                ),
-            ],
-        }
-
-    def analyze_payment_pressure(
-        self, args: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        del args
-        _, policy, events = self._context(state)
-        if state.projection is None:
-            self.project_cashflow({}, state)
-        pressure = derive_cash_priority(
-            projected_cash_min=state.projection.projected_cash_min, policy=policy
-        )
-        dates = [
-            item.isoformat()
-            for item in derive_critical_payment_dates(
-                current_cash_krw=Decimal(self._context(state)[0]["current_cash_krw"]),
-                cash_events=events,
-                minimum_cash_balance_krw=policy.minimum_cash_balance_krw,
-            )
-        ]
-        ratio = state.projection.projected_cash_min / policy.minimum_cash_balance_krw
-        return {
-            "payment_pressure": pressure,
-            "critical_payment_dates": dates,
-            "base_projected_cash_min": str(state.projection.projected_cash_min),
-            "evidence": [
-                Evidence(
-                    claim="payment_pressure",
-                    source="tool_calc",
-                    ref_ids=(
-                        _tool_ref("analyze_payment_pressure", state),
-                        policy.source_refs["cash_priority_reference"],
-                        policy.source_refs["cash_priority_high_ratio"],
-                        policy.source_refs["cash_priority_medium_ratio"],
-                    ),
-                    value=float(ratio),
-                    unit="ratio",
-                    evidence_grade="OFFICIAL",
-                    evidence_detail=(
-                        "base_projected_cash_min / minimum_cash_balance_krw; "
-                        "compared with cash_priority_high_ratio and "
-                        "cash_priority_medium_ratio."
-                    ),
-                ),
-                Evidence(
-                    claim="critical_payment_dates",
-                    source="tool_calc",
-                    ref_ids=(
-                        _tool_ref("analyze_payment_pressure", state),
-                        policy.source_refs["minimum_cash_balance_krw"],
-                    ),
-                    value=float(policy.minimum_cash_balance_krw),
-                    unit="KRW",
-                    evidence_grade="SIM_FIXED",
-                    evidence_detail=(
-                        "Payment dates whose post-payment cash is below the "
-                        "Finance minimum-cash threshold, plus the maximum daily outflow date."
-                    ),
-                ),
-                _evidence(
-                    "base_projected_cash_min",
-                    state.projection.projected_cash_min,
-                    "krw",
-                    _tool_ref("project_cashflow", state),
-                ),
-            ],
-        }
-
-    def evaluate_purchase_scenario(
-        self, args: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        del args
-        payload = state.request.payload
-        amount = Decimal(str(payload["total_amount_krw"]))
-        position, policy, events = self._context(state)
-        horizon = state.request.context.as_of + timedelta(days=policy.cashflow_projection_days)
-        schedule = _scenario_schedule(
-            scenario=payload,
-            as_of=state.request.context.as_of,
-            horizon=horizon,
-            default_payment_days=policy.purchase_payment_days,
-        )
-        base_projection = project_cashflow(
-            as_of=state.request.context.as_of,
-            current_cash_krw=Decimal(position["current_cash_krw"]),
-            horizon_end=horizon,
-            cash_events=events,
-        )
-        base_scenario_projection = project_cashflow(
-            as_of=state.request.context.as_of,
-            current_cash_krw=Decimal(position["current_cash_krw"]),
-            horizon_end=horizon,
-            cash_events=[
-                *events,
-                *_schedule_events(payload["scenario_id"], schedule, stress=False),
-            ],
-        )
-        stress_scenario_projection = project_cashflow(
-            as_of=state.request.context.as_of,
-            current_cash_krw=Decimal(position["current_cash_krw"]),
-            horizon_end=horizon,
-            cash_events=[
-                *events,
-                *_schedule_events(payload["scenario_id"], schedule, stress=True),
-            ],
-        )
-        cap = _calculate_schedule_cap(
-            base_projection=base_projection,
-            schedule=schedule,
-            total_amount=amount,
-            minimum_cash=policy.minimum_cash_balance_krw,
-        )
-        state.projection = base_projection
-        state.scenario_projection = base_scenario_projection
-        state.scenario_schedule = schedule
-        state.base_state_violated = (
-            base_projection.projected_cash_min < policy.minimum_cash_balance_krw
-        )
-        base_safe = base_scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
-        stress_safe = (
-            stress_scenario_projection.projected_cash_min >= policy.minimum_cash_balance_krw
-        )
-        scenario_verdict = classify_base_stress(base_safe=base_safe, stress_safe=stress_safe)
-        if state.base_state_violated:
-            cap = Decimal(0)
-            verdict = "reject"
-            rule_id = "FIN-BASE-MIN-CASH"
-            reason = "Base Finance minimum-cash rule failed."
-        elif scenario_verdict == "ok":
-            verdict, rule_id, reason = "ok", "FIN-BASE-STRESS", "BASE and STRESS passed."
-        elif scenario_verdict == "conditional":
-            verdict, rule_id, reason = (
-                "conditional",
-                "FIN-BASE-STRESS",
-                "BASE passed and STRESS failed.",
-            )
-        else:
-            verdict, rule_id, reason = "reject", "FIN-BASE-STRESS", "BASE failed."
-        state.scenario_cap = cap
-        scenario_ref = str(payload["scenario_id"])
-        return {
-            "scenario_id": payload["scenario_id"],
-            "verdict": verdict,
-            "adjustability": "NOT_NEEDED" if verdict == "ok" else "NOT_ADJUSTABLE",
-            "finance_cap_amount_krw": str(cap),
-            "scenario_projected_cash_min": str(base_scenario_projection.projected_cash_min),
-            "stress_projected_cash_min": str(stress_scenario_projection.projected_cash_min),
-            "critical_cash_date": base_scenario_projection.projected_cash_min_date.isoformat(),
-            "rule_id": rule_id,
-            "payment_schedule": [
-                ({
-                    "seq": item.seq,
-                    "purchase_date": item.purchase_date.isoformat(),
-                    "payment_date": item.payment_date.isoformat(),
-                    "qty_kg": str(item.qty_kg) if item.qty_kg is not None else None,
-                    "amount_krw": str(item.amount_krw),
-                    "amount_max_krw": str(item.amount_max_krw),
-                    "basis": item.basis,
-                } if item.qty_kg is not None else {
-                    "payment_date": item.payment_date.isoformat(),
-                    "amount_krw": str(item.amount_krw),
-                })
-                for item in schedule
-            ],
-            "reason": reason,
-            "rules": [{"rule_id": rule_id, "status": "PASS" if verdict == "ok" else "FAIL"}],
-            "evidence": [
-                _evidence("scenario_id", 1, "identity", scenario_ref),
-                _evidence(
-                    "finance_cap_amount_krw",
-                    cap,
-                    "krw",
-                    _tool_ref("evaluate_purchase_scenario", state),
-                ),
-                _evidence(
-                    "scenario_projected_cash_min",
-                    base_scenario_projection.projected_cash_min,
-                    "krw",
-                    _branch_ref("cashflow", state),
-                ),
-                _evidence(
-                    "stress_projected_cash_min",
-                    stress_scenario_projection.projected_cash_min,
-                    "krw",
-                    _branch_ref("stress-cashflow", state),
-                ),
-                _evidence("verdict", verdict == "ok", "boolean", _branch_ref(rule_id, state)),
-                _evidence(
-                    "payment_schedule",
-                    len(schedule),
-                    "payment_count",
-                    _branch_ref("payment-schedule", state),
-                ),
-                _evidence(
-                    "adjustability",
-                    0 if verdict == "ok" else 2,
-                    "enum_code",
-                    _branch_ref(rule_id, state),
-                ),
-            ],
-        }
-
-    def validate_amount_adjustment(
-        self, args: dict[str, Any], state: FinanceAgentState
-    ) -> dict[str, Any]:
-        axis = args.get("axis", "amount")
-        if axis != "amount":
-            raise ValueError("Finance may adjust only the amount axis")
-        candidate = Decimal(str(args["candidate_amount_krw"]))
-        if candidate < 0:
-            raise ValueError("candidate amount must not be negative")
-        self._context(state)
-        cap = state.scenario_cap
-        if cap is None:
-            raise FinanceDataNotReady("scenario_finance_cap")
-        source_values = {
-            Decimal(str(state.request.payload[key]))
-            for key in ("candidate_amount_krw", "proposed_amount_krw")
-            if state.request.payload.get(key) is not None
-        }
-        source_values.add(cap)
-        if candidate not in source_values:
-            raise ValueError("candidate amount has no DB, policy, payload, or Tool evidence source")
-        valid = candidate <= cap
-        return {
-            "candidate_amount_krw": str(candidate),
-            "validation_status": "PASS" if valid else "FAIL",
-            "evidence": [
-                _evidence(
-                    "candidate_amount_krw",
-                    candidate,
-                    "krw",
-                    _tool_ref("validate_amount_adjustment", state),
-                ),
-                _evidence(
-                    "validation_status",
-                    valid,
-                    "boolean",
-                    _branch_ref("FIN-CAP", state),
-                ),
-            ],
-        }
-
-
-@dataclass
-class FinanceAgentState:
-    request: AgentRequest
-    branch_id: str = "PRE_PURCHASE"
-    observations: list[dict[str, Any]] = field(default_factory=list)
-    tool_order: list[str] = field(default_factory=list)
-    rules: list[str] = field(default_factory=list)
-    replans: int = 0
-    context_cache: tuple[dict[str, Any], FinancePolicy, list[CashEvent]] | None = None
-    projection: Any = None
-    scenario_projection: Any = None
-    scenario_cap: Decimal | None = None
-    scenario_schedule: tuple[ScenarioPayment, ...] = ()
-    base_state_violated: bool = False
-
-
-_CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
-    "finance_position": frozenset({"assess_finance_position"}),
-    "cashflow_projection": frozenset(
-        {"project_cashflow", "calculate_purchase_finance_cap", "analyze_payment_pressure"}
-    ),
-    "finance_cap": frozenset({"calculate_purchase_finance_cap"}),
-    "payment_pressure": frozenset({"analyze_payment_pressure"}),
-    "scenario_evaluation": frozenset({"evaluate_purchase_scenario"}),
-    "amount_adjustment_validation": frozenset({"validate_amount_adjustment"}),
-}
-
-_PRE_REQUIRED_CAPABILITIES = frozenset(
-    {"finance_position", "cashflow_projection", "finance_cap", "payment_pressure"}
-)
-_SCENARIO_REQUIRED_CAPABILITIES = frozenset({"scenario_evaluation"})
+    reasoning: str
+    llm_status: str
+    llm_fallback_used: bool
 
 
 class FinanceAgentController:
@@ -1145,10 +137,13 @@ class FinanceAgentController:
             self.planner = configured_planner
             self.finalizer = finalizer or configured_finalizer
             self._provider_state = provider_state
+            # 설정으로 껐을 때만 DISABLED 다. 주입된 Planner 는 설정과 무관하다.
+            self.llm_enabled = provider_state is not None
         else:
             self.planner = planner
             self.finalizer = finalizer or DeterministicFinanceFinalizer()
             self._provider_state = None
+            self.llm_enabled = not isinstance(planner, DeterministicFinancePlanner)
         self.max_tool_calls = max_tool_calls or int(
             os.getenv("FINANCE_MAX_TOOL_CALLS", str(DEFAULT_MAX_TOOL_CALLS))
         )
@@ -1159,6 +154,13 @@ class FinanceAgentController:
         )
 
     def run(self, request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+        """한 번의 재무 실행. **단계마다 무엇을 책임지는지가 이름에 있다.**
+
+            준비/검증 → 분기 실행 → 업무 결과 확정 → 설명 → 메타데이터 → 회신 → 이력
+
+        ★ 순서가 곧 계약이다. 설명은 결과가 확정된 뒤에만 만들 수 있고(Finalizer 는
+          검증된 Evidence 만 본다), 이력은 회신이 확정된 뒤에 남는다.
+        """
         if request.agent != "finance" or request.mode not in (
             "PRE_PURCHASE",
             "SCENARIO_VALIDATION",
@@ -1166,25 +168,61 @@ class FinanceAgentController:
             raise ValueError("Finance v2.2 supports only its two core modes")
         started = time.monotonic()
         run_id = str(uuid4())
-        states: list[FinanceAgentState] = []
-        runtime_status: Literal["READY", "RUNTIME_NOT_READY", "ERROR"] = "READY"
-        missing_data: tuple[str, ...] = ()
-        error_reason = ""
+
+        outcome = self._execute_branches(request)
+        payload, evidences, business_status, adjustments = self._finalize(
+            request, outcome.states, outcome.runtime_status
+        )
+        explanation = self._explain(request, outcome, payload, evidences, business_status)
+        elapsed = int((time.monotonic() - started) * 1000)
+
+        metadata = self._build_metadata(
+            request,
+            run_id=run_id,
+            outcome=outcome,
+            payload=payload,
+            explanation=explanation,
+            elapsed=elapsed,
+        )
+        reply = self._build_reply(
+            request,
+            run_id=run_id,
+            outcome=outcome,
+            payload=payload,
+            evidences=evidences,
+            business_status=business_status,
+            adjustments=adjustments,
+            reasoning=explanation.reasoning,
+        )
+        return self._persisted(request, reply, metadata), metadata
+
+    # ── 단계 ────────────────────────────────────────────────────
+
+    def _execute_branches(self, request: AgentRequest) -> _BranchOutcome:
+        """분기를 돌리고 **실패를 값으로 접는다.**
+
+        세 갈래를 구분해서 접는 것이 핵심이다.
+          · Planner 실패      → ERROR, 그리고 `llm_status` 는 FALLBACK 이 된다
+          · 입력이 없어서 못 함 → RUNTIME_NOT_READY + missing_data (다시 불러도 같다)
+          · 그 밖의 예외       → ERROR (프로그램 오류를 사실로 위장하지 않는다)
+        """
+        outcome = _BranchOutcome()
         shared_context = None
         seen: set[str] = set()
         total_calls = 0
         total_replans = 0
-        planner_failed = False
         try:
             _validate_finance_payload(request)
-            branch_requests = self._branch_requests(request)
-            for branch_request in branch_requests:
+            for branch_request in self._branch_requests(request):
                 branch_id = str(branch_request.payload.get("scenario_id", "PRE_PURCHASE"))
                 state = FinanceAgentState(
                     branch_request,
                     branch_id=branch_id,
                     context_cache=shared_context,
                 )
+                # ★ 루프 **전에** 담는다. 실패해도 그때까지의 observation 과 재계획
+                #   횟수가 이력에 남아야 한다 — 실패한 실행일수록 흔적이 필요하다.
+                outcome.states.append(state)
                 total_calls, total_replans = self._execute_loop(
                     state,
                     seen=seen,
@@ -1192,45 +230,82 @@ class FinanceAgentController:
                     total_replans=total_replans,
                 )
                 shared_context = state.context_cache
-                states.append(state)
         except FinancePlannerFailure as exc:
-            planner_failed = True
-            runtime_status, error_reason = "ERROR", str(exc)
+            outcome.planner_failed = True
+            outcome.runtime_status, outcome.error_reason = "ERROR", str(exc)
         except FinanceDataNotReady as exc:
-            runtime_status, missing_data, error_reason = "RUNTIME_NOT_READY", (exc.key,), str(exc)
+            outcome.runtime_status = "RUNTIME_NOT_READY"
+            outcome.missing_data = (exc.key,)
+            outcome.error_reason = str(exc)
         except Exception as exc:  # noqa: BLE001 - Agent boundary converts failures to ERROR.
-            runtime_status, error_reason = "ERROR", str(exc)
+            outcome.runtime_status, outcome.error_reason = "ERROR", str(exc)
+        return outcome
 
-        payload, evidences, business_status, adjustments = self._finalize(
-            request, states, runtime_status
+    def _explain(
+        self,
+        request: AgentRequest,
+        outcome: _BranchOutcome,
+        payload: dict[str, Any],
+        evidences: list[Evidence],
+        business_status: str,
+    ) -> _Explanation:
+        """검증된 Evidence 로 설명을 **고른다.** 설명이 결과를 바꾸지는 않는다.
+
+        🔴 LLMStatus 는 **이번 실행에서 실제로 무슨 일이 있었는가**다
+           (envelope §LLMStatus). 예전에는 `SUCCESS if attempts else DISABLED` 였다.
+           그러면 LLM 을 켜 두고도 Controller 가 첫 Tool 전에 접힌 실행이 전부
+           `DISABLED` 로 남는다 — 이력에는 *"LLM 을 안 켰다"* 고 적히고, 실제로는
+           **켜 뒀는데 부를 일이 없었다** 이다. 둘은 다음 조치가 다르다.
+        """
+        llm_status = self._llm_status(planner_failed=outcome.planner_failed)
+        if outcome.runtime_status != "READY":
+            # 못 낸 이유가 곧 설명이다. Finalizer 를 부르지 않는다 — 검증된 결과가 없다.
+            return _Explanation(outcome.error_reason[:240], llm_status, outcome.planner_failed)
+
+        finalization_evidence = [*evidences]
+        for verdict in payload.get("verdicts", []):
+            finalization_evidence.extend(
+                _evidence_from_dict(item) for item in verdict.get("evidences", [])
+            )
+        try:
+            reasoning = self.finalizer.finalize(
+                mode=request.mode,
+                business_status=business_status,
+                evidences=tuple(finalization_evidence),
+            )
+            _validate_ready_reasoning(reasoning)
+        except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
+            # ★ 답은 나간다 — 규칙이 만든 답이다. 검증된 Evidence 가 이미 있으므로
+            #   설명을 못 골랐다고 업무 결과를 버릴 이유가 없다.
+            return _Explanation(
+                self._fallback_reasoning(request.mode, business_status),
+                "DISABLED" if not self.llm_enabled else "FALLBACK",
+                self.llm_enabled,
+            )
+        return _Explanation(
+            reasoning,
+            self._llm_status(planner_failed=outcome.planner_failed),
+            outcome.planner_failed,
         )
-        llm_status = "FALLBACK" if planner_failed else (
-            "SUCCESS" if self.planner.attempts else "DISABLED"
-        )
-        llm_fallback_used = planner_failed
-        if runtime_status == "READY":
-            finalization_evidence = [*evidences]
-            for verdict in payload.get("verdicts", []):
-                finalization_evidence.extend(
-                    _evidence_from_dict(item) for item in verdict.get("evidences", [])
-                )
-            try:
-                reasoning = self.finalizer.finalize(
-                    mode=request.mode,
-                    business_status=business_status,
-                    evidences=tuple(finalization_evidence),
-                )
-                _validate_ready_reasoning(reasoning)
-                llm_status = "SUCCESS"
-            except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
-                reasoning = self._fallback_reasoning(request.mode, business_status)
-                llm_status = "FALLBACK"
-                llm_fallback_used = True
-        else:
-            reasoning = error_reason[:240]
-        elapsed = int((time.monotonic() - started) * 1000)
+
+    def _build_metadata(
+        self,
+        request: AgentRequest,
+        *,
+        run_id: str,
+        outcome: _BranchOutcome,
+        payload: dict[str, Any],
+        explanation: _Explanation,
+        elapsed: int,
+    ) -> ExecutionMetadata:
+        """실행 흔적. **Business Reply 와 섞지 않는다.**"""
+        states = outcome.states
         observations = [item for state in states for item in state.observations]
+        dept_meta = _finance_dept_meta(request.mode, payload, states)
+        if dept_meta is not None and outcome.runtime_status == "READY":
+            observations.append(dept_meta)
         if self._provider_state is not None:
+            # ★ Provider 대체는 `llm_status` 가 아니라 **여기서** 드러난다 (§17).
             observations.append(
                 {
                     "observation_type": "finance_llm_provider",
@@ -1242,7 +317,7 @@ class FinanceAgentController:
             )
         used_tools = [item for state in states for item in state.tool_order]
         rules = [f"{state.branch_id}:{rule}" for state in states for rule in state.rules]
-        metadata = ExecutionMetadata(
+        return ExecutionMetadata(
             run_id=run_id,
             request_id=request.context.request_id,
             agent="finance",
@@ -1252,14 +327,40 @@ class FinanceAgentController:
                 json.dumps(o, default=str, sort_keys=True) for o in observations
             ),
             rules_applied=tuple(rules),
-            replans=total_replans,
-            llm_status=llm_status,
+            # 🔴 실행 지역변수가 아니라 상태에서 센다. 루프가 예외로 끝나면 지역
+            #    변수는 갱신되지 않아 **실패한 실행의 재계획이 0 으로 남았다** — 가장
+            #    알아야 할 실행에서 숫자가 사라진다.
+            replans=sum(state.replans for state in states),
+            llm_status=explanation.llm_status,
             llm_model=(
                 self.finalizer.model if self.finalizer.attempts else self.planner.model
             ),
             llm_attempts=self.planner.attempts + self.finalizer.attempts,
-            llm_fallback_used=llm_fallback_used,
+            llm_fallback_used=explanation.llm_fallback_used,
             elapsed_ms=elapsed,
+        )
+
+    def _build_reply(
+        self,
+        request: AgentRequest,
+        *,
+        run_id: str,
+        outcome: _BranchOutcome,
+        payload: dict[str, Any],
+        evidences: list[Evidence],
+        business_status: str,
+        adjustments: list[SuggestedAdjustment],
+        reasoning: str,
+    ) -> AgentReply:
+        # 근거가 없어 뺀 정책값을 밝힌다. 실행은 계속했지만 **못 낸 것을 낸 척하지
+        # 않는다** (§3.7.6). 이미 담긴 missing_data 뒤에 붙이고 중복은 지운다.
+        missing_data = tuple(
+            dict.fromkeys(
+                [
+                    *outcome.missing_data,
+                    *(item for state in outcome.states for item in state.missing_sources),
+                ]
+            )
         )
         reply = AgentReply(
             request_id=request.context.request_id,
@@ -1267,43 +368,71 @@ class FinanceAgentController:
             agent="finance",
             mode=request.mode,
             run_id=run_id,
-            runtime_status=runtime_status,
+            runtime_status=outcome.runtime_status,
             business_status=business_status,
             payload=payload,
             evidences=tuple(evidences),
             suggested_adjustments=tuple(adjustments),
             reasoning=reasoning,
             missing_data=missing_data,
-            needs_followup=(runtime_status == "RUNTIME_NOT_READY" or bool(adjustments)),
+            needs_followup=(outcome.runtime_status == "RUNTIME_NOT_READY" or bool(adjustments)),
             additional_validation_required=False,
         )
         nested_findings = validate_finance_scenario_output(reply)
-        if nested_findings:
-            reply = replace(
-                reply,
-                runtime_status="ERROR",
-                business_status="skipped",
-                payload={},
-                evidences=(),
-                suggested_adjustments=(),
-                reasoning="Finance scenario output validation failed.",
-                needs_followup=True,
-            )
+        if not nested_findings:
+            return reply
+        # 중첩 판정이 계약을 어겼으면 **그 결과를 내보내지 않는다.** 그럴듯한 판정이
+        # 틀렸다는 사실만 아무도 모르는 것보다, 안 내는 편이 낫다.
+        return replace(
+            reply,
+            runtime_status="ERROR",
+            business_status="skipped",
+            payload={},
+            evidences=(),
+            suggested_adjustments=(),
+            reasoning="재무 시나리오 산출이 계약 검증을 통과하지 못했습니다.",
+            needs_followup=True,
+        )
+
+    @staticmethod
+    def _persisted(
+        request: AgentRequest, reply: AgentReply, metadata: ExecutionMetadata
+    ) -> AgentReply:
+        """이력을 남긴다. **정상 완료에는 해석 가능한 run_id 가 반드시 있어야 한다.**"""
         try:
             save_finance_execution(request=request, reply=reply, metadata=metadata)
         except Exception:  # noqa: BLE001 - persistence failure is an Agent ERROR value.
-            reply = replace(
+            return replace(
                 reply,
                 runtime_status="ERROR",
                 business_status="skipped",
                 payload={},
                 evidences=(),
                 suggested_adjustments=(),
-                reasoning="Finance run history persistence failed.",
+                reasoning="재무 실행이력을 저장하지 못했습니다.",
                 missing_data=(),
                 needs_followup=True,
             )
-        return reply, metadata
+        return reply
+
+    def _llm_status(self, *, planner_failed: bool) -> str:
+        """공용 `LLMStatus` 의미를 재무 실행에 그대로 적용한다.
+
+            DISABLED          설정으로 껐다
+            SKIPPED_TEMPLATE  켜져 있는데 **이번 실행에서는 부를 일이 없었다**
+            SUCCESS           실제로 불렀고 쓸 수 있는 답을 받았다
+            FALLBACK          불렀는데 실패해서 결정론이 대신 답했다
+
+        ★ Gemini→Gemma **Provider 대체는 `FALLBACK` 이 아니다.** LLM 은 답을 냈다 —
+          다른 Provider 가 냈을 뿐이다. 그 사실은 observations 로 따로 남긴다 (§17).
+        """
+        if not self.llm_enabled:
+            return "DISABLED"
+        if planner_failed:
+            return "FALLBACK"
+        if self.planner.attempts + self.finalizer.attempts == 0:
+            return "SKIPPED_TEMPLATE"
+        return "SUCCESS"
 
     def _branch_requests(self, request: AgentRequest) -> list[AgentRequest]:
         if request.mode != "SCENARIO_VALIDATION":
@@ -1350,7 +479,19 @@ class FinanceAgentController:
                     observations=tuple(state.observations),
                     missing_capabilities=missing,
                 )
+            except FinancePlannerContractViolation as exc:
+                # 모델이 계약을 어겼다 — **되물어 볼 가치가 있다.** 왜 반려됐는지를
+                # GUARD 로 남기면 다음 호출의 프롬프트에 그대로 들어간다.
+                total_replans = self._guard_replan(
+                    state,
+                    total_replans,
+                    {"rejected_action": _short_reason(str(exc)), "unresolved": list(missing)},
+                )
+                continue
+            except FinancePlannerFailure:
+                raise
             except Exception as exc:
+                # Provider 장애·네트워크·구조화 출력 파싱 불가 — 다시 물어도 같다.
                 raise FinancePlannerFailure(str(exc)) from exc
             if action.finalize:
                 if not missing:
@@ -1395,7 +536,11 @@ class FinanceAgentController:
         self, state: FinanceAgentState, total_replans: int, detail: dict[str, Any]
     ) -> int:
         if total_replans >= self.max_replans:
-            raise RuntimeError("required Finance capability planning did not complete")
+            # 되묻기에는 상한이 있다. 넘으면 최종 실패다 — 계약 위반을 무한히 숨기지
+            # 않는다. `FinancePlannerFailure` 로 올려 이력에 FALLBACK 으로 남긴다.
+            raise FinancePlannerFailure(
+                "required Finance capability planning did not complete"
+            )
         state.replans += 1
         state.observations.append(
             {"branch_id": state.branch_id, "type": "GUARD", **detail}
@@ -1529,51 +674,6 @@ class FinanceAgentController:
         return _FINAL_EXPLANATIONS["SCENARIO_ACCEPT"]
 
 
-def _json_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value) if "." in value else int(value)
-        except ValueError:
-            return value
-    return value
-
-
-def _evidence(
-    claim: str,
-    value: Any,
-    unit: str,
-    ref_id: str,
-    *,
-    source: Literal["finance", "tool_calc", "persona"] = "tool_calc",
-) -> Evidence:
-    numeric = float(value)
-    return Evidence(
-        claim=claim,
-        source=source,
-        ref_ids=(ref_id,),
-        value=numeric,
-        unit=unit,
-        evidence_grade="OFFICIAL",
-    )
-
-
-def _tool_ref(tool_name: str, state: FinanceAgentState) -> str:
-    return _branch_ref(tool_name, state)
-
-
-def _branch_ref(kind: str, state: FinanceAgentState) -> str:
-    return (
-        f"FIN-AGENT:{state.request.context.request_id}:{state.request.call_seq}:"
-        f"{state.branch_id}:{kind}"
-    )
-
-
 def _short_reason(reason: str) -> str:
     return " ".join(reason.split())[:160]
 
@@ -1584,123 +684,6 @@ def _validate_ready_reasoning(reasoning: str) -> None:
         raise ValueError("Finance reasoning must contain one to three sentences")
     if re.search(r"\d", reasoning):
         raise ValueError("Finance reasoning must not introduce numeric claims")
-
-
-def _satisfied_capabilities(state: FinanceAgentState) -> set[str]:
-    keys = {
-        key
-        for observation in state.observations
-        for key in observation.get("result", {})
-    }
-    out: set[str] = set()
-    if {"available_cash", "payroll_payment_day"} <= keys:
-        out.add("finance_position")
-    if "base_projected_cash_min" in keys:
-        out.add("cashflow_projection")
-    if "finance_cap_amount_krw" in keys and state.request.mode == "PRE_PURCHASE":
-        out.add("finance_cap")
-    if {"payment_pressure", "critical_payment_dates"} <= keys:
-        out.add("payment_pressure")
-    if "verdict" in keys:
-        out.add("scenario_evaluation")
-    if "validation_status" in keys:
-        out.add("amount_adjustment_validation")
-    return out
-
-
-def _scenario_verdict(state: FinanceAgentState) -> str | None:
-    return next(
-        (
-            observation["result"]["verdict"]
-            for observation in reversed(state.observations)
-            if "verdict" in observation.get("result", {})
-        ),
-        None,
-    )
-
-
-def _scenario_schedule(
-    *,
-    scenario: Any,
-    as_of: date,
-    horizon: date,
-    default_payment_days: int | None,
-) -> tuple[ScenarioPayment, ...]:
-    amount = Decimal(str(scenario["total_amount_krw"]))
-    if amount <= 0:
-        raise ValueError("total_amount_krw must be positive")
-    raw_schedule = scenario.get("payment_schedule")
-    if raw_schedule is None:
-        if default_payment_days is None:
-            raise FinanceDataNotReady("purchase_payment_days")
-        payment_date = as_of + timedelta(days=default_payment_days)
-        if not as_of < payment_date <= horizon:
-            raise FinanceDataNotReady("default_purchase_payment_date")
-        return (
-            ScenarioPayment(
-                seq=1,
-                purchase_date=as_of,
-                payment_date=payment_date,
-                qty_kg=None,
-                amount_krw=amount,
-                amount_max_krw=amount,
-                basis="non_split_policy_reconstruction",
-            ),
-        )
-    if not isinstance(raw_schedule, list) or not raw_schedule:
-        raise ValueError("payment_schedule must be a non-empty list")
-    split_plan = scenario.get("split_plan")
-    if not isinstance(split_plan, list) or len(split_plan) != len(raw_schedule):
-        raise ValueError("payment_schedule must correspond one-to-one with split_plan")
-    total_qty = Decimal(str(scenario["total_qty_kg"]))
-    max_price = Decimal(str(scenario["max_price"]))
-    authoritative_h1 = bool(
-        scenario.get("h1_authoritative") or scenario.get("authoritative_h1_payment_data")
-    )
-    schedule: list[ScenarioPayment] = []
-    for index, (row, split) in enumerate(zip(raw_schedule, split_plan, strict=True), start=1):
-        required = {
-            "seq", "purchase_date", "payment_date", "qty_kg", "amount_krw",
-            "amount_max_krw", "basis",
-        }
-        if not required <= row.keys():
-            raise ValueError("payment_schedule row is missing required Finance fields")
-        purchase_date = date.fromisoformat(str(row["purchase_date"]))
-        payment_date = date.fromisoformat(str(row["payment_date"]))
-        payment_amount = Decimal(str(row["amount_krw"]))
-        max_amount = Decimal(str(row["amount_max_krw"]))
-        qty = Decimal(str(row["qty_kg"]))
-        basis = str(row["basis"]).strip()
-        if not isinstance(payment_date, date) or not as_of < payment_date <= horizon:
-            raise ValueError("payment_date must be inside the Finance projection horizon")
-        if int(row["seq"]) != index or int(split["seq"]) != index:
-            raise ValueError("payment_schedule and split_plan seq must align")
-        if purchase_date != date.fromisoformat(str(split["date"])):
-            raise ValueError("payment_schedule purchase_date must equal split_plan date")
-        split_qty = Decimal(str(split.get("qty_kg", split.get("quantity_kg"))))
-        if qty != split_qty:
-            raise ValueError("payment_schedule qty_kg must equal split_plan qty_kg")
-        if payment_amount <= 0 or max_amount <= 0 or qty <= 0:
-            raise ValueError("payment_schedule amounts and qty must be positive")
-        if not basis:
-            raise ValueError("payment_schedule basis must be non-empty")
-        if not authoritative_h1:
-            if default_payment_days is None:
-                raise FinanceDataNotReady("purchase_payment_days")
-            if payment_date != purchase_date + timedelta(days=default_payment_days):
-                raise ValueError("payment_date must equal purchase_date plus policy days before H1")
-            if max_amount != qty * max_price:
-                raise ValueError("amount_max_krw must equal qty_kg times max_price")
-        schedule.append(
-            ScenarioPayment(
-                index, purchase_date, payment_date, qty, payment_amount, max_amount, basis
-            )
-        )
-    if sum((item.amount_krw for item in schedule), Decimal(0)) != amount:
-        raise ValueError("payment_schedule amount sum must equal total_amount_krw")
-    if sum((item.qty_kg or Decimal(0) for item in schedule), Decimal(0)) != total_qty:
-        raise ValueError("payment_schedule qty sum must equal total_qty_kg")
-    return tuple(schedule)
 
 
 def _validate_finance_payload(request: AgentRequest) -> None:
@@ -1827,119 +810,3 @@ def validate_finance_scenario_output(reply: AgentReply) -> tuple[str, ...]:
     if top_refs != nested_adjustment_refs:
         findings.append("top-level and nested Finance adjustments differ")
     return tuple(dict.fromkeys(findings))
-
-
-def _schedule_events(
-    scenario_id: object, schedule: tuple[ScenarioPayment, ...], *, stress: bool
-) -> tuple[CashEvent, ...]:
-    return tuple(
-        CashEvent(
-            event_date=payment.payment_date,
-            event_type="EXTRA_PURCHASE",
-            amount_krw=payment.amount_max_krw if stress else payment.amount_krw,
-            direction="OUTFLOW",
-            ref_id=(
-                f"SCENARIO:{scenario_id}:{'STRESS' if stress else 'BASE'}:"
-                f"{index}:{payment.payment_date.isoformat()}"
-            ),
-            source_ref=str(scenario_id),
-        )
-        for index, payment in enumerate(schedule, start=1)
-    )
-
-
-def _calculate_schedule_cap(
-    *,
-    base_projection: Any,
-    schedule: tuple[ScenarioPayment, ...],
-    total_amount: Decimal,
-    minimum_cash: Decimal,
-) -> Decimal:
-    balances = {
-        point.projection_date: point.cash_balance_krw
-        for point in base_projection.projected_cash_by_date
-    }
-    dates = sorted({*balances, *(item.payment_date for item in schedule)})
-    current_balance = balances[base_projection.as_of]
-    paid = Decimal(0)
-    bounds: list[Decimal] = []
-    schedule_by_date: dict[date, Decimal] = {}
-    for payment in schedule:
-        schedule_by_date[payment.payment_date] = (
-            schedule_by_date.get(payment.payment_date, Decimal(0)) + payment.amount_krw
-        )
-    for current_date in dates:
-        if current_date in balances:
-            current_balance = balances[current_date]
-        paid += schedule_by_date.get(current_date, Decimal(0))
-        if paid > 0:
-            fraction = paid / total_amount
-            bounds.append((current_balance - minimum_cash) / fraction)
-    if not bounds:
-        raise FinanceDataNotReady("scenario_payment_schedule")
-    return max(Decimal(0), min(bounds).quantize(Decimal(1), rounding=ROUND_FLOOR))
-
-
-def _evidence_dict(evidence: Evidence) -> dict[str, Any]:
-    return {
-        "claim": evidence.claim,
-        "source": evidence.source,
-        "ref_ids": list(evidence.ref_ids),
-        "value": evidence.value,
-        "unit": evidence.unit,
-        "evidence_grade": evidence.evidence_grade,
-        "evidence_detail": evidence.evidence_detail,
-    }
-
-
-def _evidence_from_dict(value: dict[str, Any]) -> Evidence:
-    return Evidence(
-        claim=value["claim"],
-        source=value["source"],
-        ref_ids=tuple(value["ref_ids"]),
-        value=value["value"],
-        unit=value["unit"],
-        evidence_grade=value["evidence_grade"],
-        evidence_detail=value["evidence_detail"],
-    )
-
-
-def _indexed_verdict_evidence(results: list[dict[str, Any]]) -> list[Evidence]:
-    """실제 숫자 branch claim을 Envelope v0.4 인덱스 경로에 다시 바인딩한다."""
-    indexed: list[Evidence] = []
-    for index, result in enumerate(results):
-        raw_evidence = result.get("evidences", [])
-        by_claim = {
-            item.get("claim"): item
-            for item in raw_evidence
-            if isinstance(item, dict) and isinstance(item.get("claim"), str)
-        }
-        for claim, value in result.items():
-            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            source = by_claim.get(claim)
-            if source is None:
-                continue
-            indexed.append(
-                Evidence(
-                    claim=f"verdicts[{index}].{claim}",
-                    source=source["source"],
-                    ref_ids=tuple(source["ref_ids"]),
-                    value=float(value),
-                    unit=source["unit"],
-                    evidence_grade=source["evidence_grade"],
-                    evidence_detail=source.get("evidence_detail"),
-                )
-            )
-    return indexed
-
-
-def _adjustment_from_dict(value: dict[str, Any]) -> SuggestedAdjustment:
-    return SuggestedAdjustment(
-        dept="finance",
-        axis="amount",
-        target_value=value["target_value"],
-        unit=value["unit"],
-        reason=value["reason"],
-        ref_ids=tuple(value["ref_ids"]),
-    )

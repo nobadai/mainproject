@@ -475,7 +475,7 @@ def test_run_history_persistence_failure_becomes_agent_error():
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
     assert reply.business_status == "skipped"
-    assert reply.reasoning == "Finance run history persistence failed."
+    assert reply.reasoning == "재무 실행이력을 저장하지 못했습니다."
 
 
 @patch("app.finance.agent.save_finance_execution")

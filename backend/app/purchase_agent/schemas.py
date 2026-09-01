@@ -57,7 +57,7 @@ kg로 모으면 세 소비자가 한 단위로 정렬된다. 이 파일은 그�
 
 from datetime import date
 from itertools import pairwise
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
     BaseModel,
@@ -69,6 +69,8 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+
+from app.purchase_agent.config import load_constraints
 
 # 수량 단위가 kg이므로 금액은 ``qty_kg × grade_unit_price(원/kg)``로 곧바로 원이 된다.
 # ton 시절의 ``× 1000`` 변환 계수(KG_PER_TON)는 더 이상 필요하지 않다.
@@ -90,15 +92,30 @@ RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금"
 Confidence = Literal["high", "medium", "low"]
 Situation = Literal["stable", "uncertain"]
 #: market 고정값 (IO명세 §1-②, 8/20 결정 — 지방시장 데이터 파편화로 제외).
-#: 아래 ``Market`` Literal과 **같은 값이어야 한다** — 검사 코드가 문자열을 필요로 해서
-#: 상수로도 노출한다. 둘이 갈라지지 않는지는 계약 테스트가 확인한다.
-FIXED_MARKET = "가락"
+#:
+#: 🔴 **``constraints.yaml`` 에서 읽는다 — 여기 박지 않는다** (#70 · Codex 교차검증
+#:   2026-08-31). 같은 값이 시세 조회(``market_quotes.market_category``)와 하류 필터에
+#:   따로 있으면, YAML 만 바꿨을 때 **정상 조회된 시세가 전부 필터에서 떨어져 "가락 휴장"
+#:   으로 보고된다.** 값이 아니라 사유가 틀리는 종류의 고장이라 아무도 원인을 못 찾는다.
+#:   N4(#58)와 medium_grade_factor(#79)에서 두 번 겪은 자리라 세 번째는 만들지 않는다.
+#:
+#: 아래 ``Market`` Literal 은 **출력 계약**이라 리터럴로 남는다(타입은 변수로 못 만든다).
+#: 둘이 갈라지면 import 시점에 멈춘다 — 조용히 다른 시장으로 도는 상태를 만들지 않는다.
+FIXED_MARKET: str = load_constraints()["market_quotes"]["market_category"]
 #: 분할 매입이 붙는 축 (상세설계 §4-④ · E3-3 확정 1 — "timing 축을 받은 안에만").
 #: ``allocation.aggressive_axis``와 값이 같지만 뜻이 다르다 — 그쪽은 "공격안이 어느 축을
 #: 가져가는가"이고 이건 "분할이 어느 축에 붙는가"다. 한 값으로 묶으면 축 배정을 바꾸는
 #: 순간 분할 대상까지 조용히 따라 움직인다.
 TIMING_AXIS: StrategyType = "timing"
 Market = Literal["가락"]
+
+if FIXED_MARKET not in get_args(Market):
+    # 선언을 바꾸려면 **둘 다** 바꿔야 한다는 사실을 여기서 말한다. 조회만 바뀌고 출력
+    # 계약이 그대로면 그날 산출물은 스키마에서 죽거나(운이 좋으면) 빈 시세로 돈다.
+    raise ValueError(
+        f"constraints.yaml market_quotes.market_category={FIXED_MARKET!r} 가 "
+        f"출력 계약 Market={get_args(Market)} 에 없다 — 시장을 넓히려면 스키마도 함께 연다"
+    )
 
 #: 문서 근거의 ``rationale[].source`` 값 (IO명세 §2 열거형).
 DOCUMENT_SOURCE: RationaleSource = "문서ID"

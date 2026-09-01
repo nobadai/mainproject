@@ -9,21 +9,27 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance.agent import (
-    FinanceAgentController,
-    GeminiFinanceFinalizer,
-    GeminiFinancePlanner,
-    OllamaFinanceFinalizer,
-    OllamaFinancePlanner,
-    ToolAction,
-    _AvailabilityFallbackFinanceFinalizer,
-    _AvailabilityFallbackFinancePlanner,
-    _finance_model,
-    _finance_provider_name,
+from app.finance.agent import FinanceAgentController, ToolAction
+from app.finance.llm.client import (
     _gemini_availability_failure_reason,
     _gemini_response_text,
     _is_gemini_availability_failure,
+)
+from app.finance.llm.config import (
+    _finance_model,
+    _finance_provider_name,
     _load_finance_environment,
+)
+from app.finance.llm.contracts import (
+    FinancePlannerContractViolation,
+    _gemini_planner_response_schema,
+    _planner_response_schema,
+)
+from app.finance.llm.finalizer import GeminiFinanceFinalizer, OllamaFinanceFinalizer
+from app.finance.llm.planner import GeminiFinancePlanner, OllamaFinancePlanner
+from app.finance.llm.provider import (
+    _AvailabilityFallbackFinanceFinalizer,
+    _AvailabilityFallbackFinancePlanner,
     _ProviderFallbackState,
 )
 from app.finance.repository import FinanceDataNotReady
@@ -139,7 +145,7 @@ class _FallbackPlanner:
 
 @pytest.fixture(autouse=True)
 def _prevent_real_finance_env_loading(monkeypatch):
-    monkeypatch.setattr("app.finance.agent._load_finance_environment", lambda: None)
+    monkeypatch.setattr("app.finance.llm.config._load_finance_environment", lambda: None)
 
 
 def _request() -> AgentRequest:
@@ -188,7 +194,7 @@ def _mock_successful_pre_purchase(monkeypatch, planner_type, finalizer_type):
 
     def finalize(finalizer, **_kwargs):
         finalizer.attempts += 1
-        return "Verified Finance Evidence supports the reported purchasing boundary."
+        return "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
 
     monkeypatch.setattr(planner_type, "decide", decide)
     monkeypatch.setattr(finalizer_type, "finalize", finalize)
@@ -213,9 +219,9 @@ def test_finance_settings_load_env_independent_of_working_directory(tmp_path, mo
     )
     unrelated_directory = tmp_path / "unrelated"
     unrelated_directory.mkdir()
-    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr("app.finance.llm.config._ENV_FILES", (env_file,))
     monkeypatch.setattr(
-        "app.finance.agent._load_finance_environment", _load_finance_environment
+        "app.finance.llm.config._load_finance_environment", _load_finance_environment
     )
     monkeypatch.chdir(unrelated_directory)
 
@@ -233,9 +239,9 @@ def test_finance_env_file_does_not_override_process_environment(tmp_path, monkey
         "FINANCE_LLM_PROVIDER=gemini\nFINANCE_LLM_MODEL=dotenv-model\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("app.finance.agent._ENV_FILES", (env_file,))
+    monkeypatch.setattr("app.finance.llm.config._ENV_FILES", (env_file,))
     monkeypatch.setattr(
-        "app.finance.agent._load_finance_environment", _load_finance_environment
+        "app.finance.llm.config._load_finance_environment", _load_finance_environment
     )
 
     process_environment = {
@@ -325,7 +331,7 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     _mock_successful_pre_purchase(
         monkeypatch, OllamaFinancePlanner, OllamaFinanceFinalizer
     )
-    with patch("app.finance.agent.urllib.request.urlopen") as urlopen:
+    with patch("app.finance.llm.client.urllib.request.urlopen") as urlopen:
         controller = FinanceAgentController(_FinancePort())
         reply, metadata = controller.run(_request())
 
@@ -426,7 +432,7 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
             )
         )
 
-    monkeypatch.setattr("app.finance.agent.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("app.finance.llm.client.urllib.request.urlopen", urlopen)
     action = _planner_decide(GeminiFinancePlanner())
 
     assert action.tool_name == "assess_finance_position"
@@ -435,6 +441,10 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
     )
     assert "127.0.0.1:11434" not in seen[0][0].full_url
     schema = json.loads(seen[0][0].data)["generationConfig"]["responseSchema"]
+    # Tool 제약은 Ollama 와 같다 — 이번 호출의 allowed_tools 가 그대로 enum 이다.
+    assert schema["properties"]["tool_name"]["enum"] == ["assess_finance_position"]
+    # 🔴 finalize 는 타입만 보낸다. boolean 에 enum 을 붙이면 Gemini 가 400 을 낸다.
+    assert schema["properties"]["finalize"]["type"] == "boolean"
     assert "enum" not in schema["properties"]["finalize"]
 
 
@@ -464,7 +474,7 @@ def test_gemini_http_429_is_preserved(monkeypatch):
     monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
     error = urllib.error.HTTPError("https://gemini.invalid", 429, "quota", {}, None)
     with (
-        patch("app.finance.agent.urllib.request.urlopen", side_effect=error),
+        patch("app.finance.llm.client.urllib.request.urlopen", side_effect=error),
         pytest.raises(urllib.error.HTTPError) as caught,
     ):
         _planner_decide(GeminiFinancePlanner())
@@ -488,7 +498,7 @@ def test_missing_gemini_key_fails_without_network(monkeypatch):
     monkeypatch.delenv("FINANCE_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with (
-        patch("app.finance.agent.urllib.request.urlopen") as urlopen,
+        patch("app.finance.llm.client.urllib.request.urlopen") as urlopen,
         pytest.raises(RuntimeError, match="API key is not set"),
     ):
         _planner_decide(GeminiFinancePlanner())
@@ -507,7 +517,8 @@ def test_gemini_planner_returns_valid_tool_action(monkeypatch):
         thought_first=True,
     )
     monkeypatch.setattr(
-        "app.finance.agent.urllib.request.urlopen", lambda *_args, **_kwargs: _Response(document)
+        "app.finance.llm.client.urllib.request.urlopen",
+        lambda *_args, **_kwargs: _Response(document),
     )
     action = _planner_decide(GeminiFinancePlanner())
     assert action == ToolAction(
@@ -536,7 +547,7 @@ def test_gemini_planner_returns_valid_tool_action(monkeypatch):
 def test_gemini_rejects_invalid_finalize_tool_combinations(monkeypatch, content, missing):
     monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(
-        "app.finance.agent.urllib.request.urlopen",
+        "app.finance.llm.client.urllib.request.urlopen",
         lambda *_args, **_kwargs: _Response(_gemini_document(content)),
     )
     with pytest.raises(ValueError, match="Finance Planner must"):
@@ -584,7 +595,7 @@ def test_ollama_planner_remains_backward_compatible(monkeypatch):
             }
         )
 
-    monkeypatch.setattr("app.finance.agent.urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("app.finance.llm.client.urllib.request.urlopen", urlopen)
     planner = OllamaFinancePlanner()
     action = planner.decide(
         request=_request(),
@@ -610,3 +621,137 @@ def test_controller_selects_gemini_planner_and_finalizer(monkeypatch):
     assert isinstance(controller.finalizer.primary, GeminiFinanceFinalizer)
     assert controller.finalizer.primary.model == "gemini-primary-model"
     assert controller.finalizer.fallback.model == "gemma3:4b"
+
+
+# ---------------------------------------------------------------------------
+# Gemini 전송 스키마 — 계약은 같고 표현만 낮춘다
+#
+# 🔴 엄격 스키마를 그대로 보내면 Gemini 가 HTTP 400 을 낸다. 재무 Planner 가 매 호출
+#    실패하고 마스터가 `E4_NOT_STARTED` 로 멈췄다 — 재무가 아니라 전송 형식이 문제였다.
+# ---------------------------------------------------------------------------
+
+
+_GEMINI_TYPES = {"string", "number", "integer", "boolean", "array", "object"}
+
+
+def _assert_gemini_schema_is_wire_safe(node) -> None:
+    """Gemini responseSchema(OpenAPI 3.0 부분집합)가 받아 주는 형태인가.
+
+    두 가지가 400 의 원인이다.
+      · `enum` 은 STRING 에만 붙는다
+      · 타입은 6종뿐이라 `{"type": "null"}` 은 없다 (`nullable` 로 표현한다)
+    """
+    if not isinstance(node, dict):
+        return
+    node_type = node.get("type")
+    if node_type is not None:
+        assert node_type in _GEMINI_TYPES, f"Gemini 가 모르는 타입: {node_type!r}"
+    if "enum" in node:
+        assert node_type == "string", f"enum 은 string 에만 붙는다 (여기는 {node_type!r})"
+    for child in node.get("properties", {}).values():
+        _assert_gemini_schema_is_wire_safe(child)
+    if "items" in node:
+        _assert_gemini_schema_is_wire_safe(node["items"])
+
+
+@pytest.mark.parametrize("planning_required", [True, False])
+def test_gemini_wire_schema_has_no_unsupported_form(planning_required):
+    """조사 국면과 finalize 국면 **양쪽** 전송 스키마가 안전해야 한다.
+
+    finalize 국면이 특히 중요하다 — 엄격 스키마의 `tool_name` 이 `{"type": "null"}`
+    이라 그 국면에서도 400 이 났다.
+    """
+    schema = _gemini_planner_response_schema(
+        frozenset({"assess_finance_position", "project_cashflow"}),
+        planning_required=planning_required,
+    )
+    _assert_gemini_schema_is_wire_safe(schema)
+    assert schema["properties"]["finalize"]["type"] == "boolean"
+    assert "enum" not in schema["properties"]["finalize"]
+    assert schema["required"] == ["tool_name", "arguments", "reason", "finalize"]
+
+
+def test_gemini_wire_schema_keeps_allowed_tools_enum():
+    """표현만 낮춘다 — Tool 허용 범위는 Ollama 와 동일하게 enum 으로 남는다."""
+    allowed = frozenset({"assess_finance_position", "project_cashflow"})
+    wire = _gemini_planner_response_schema(allowed, planning_required=True)
+    strict = _planner_response_schema(allowed, planning_required=True)
+
+    assert wire["properties"]["tool_name"]["enum"] == sorted(allowed)
+    assert wire["properties"]["tool_name"] == strict["properties"]["tool_name"]
+
+
+def test_gemini_finalize_phase_uses_nullable_string_not_null_type():
+    """`{"type": "null"}` 대신 nullable string. 값이 null 이어야 하는 강제는 사후 검증이 한다."""
+    wire = _gemini_planner_response_schema(
+        frozenset({"assess_finance_position"}), planning_required=False
+    )
+    assert wire["properties"]["tool_name"] == {"type": "string", "nullable": True}
+
+
+# ---------------------------------------------------------------------------
+# 전송 강제를 낮춘 만큼 사후 검증이 그대로 잡는가
+# ---------------------------------------------------------------------------
+
+
+def _decide_with(monkeypatch, content, *, missing):
+    monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "app.finance.llm.client.urllib.request.urlopen",
+        lambda *_a, **_k: _Response(_gemini_document(content)),
+    )
+    return GeminiFinancePlanner().decide(
+        request=_request(),
+        allowed_tools=frozenset({"assess_finance_position"}),
+        observations=(),
+        missing_capabilities=missing,
+    )
+
+
+def test_finalizing_while_capabilities_missing_is_rejected(monkeypatch):
+    """스키마가 더는 막지 않으므로 **여기서** 잡아야 한다."""
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {"tool_name": None, "arguments": {}, "reason": "성급한 종료", "finalize": True},
+            missing=("finance_position",),
+        )
+
+
+def test_selecting_a_tool_after_capabilities_complete_is_rejected(monkeypatch):
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {
+                "tool_name": "assess_finance_position",
+                "arguments": {},
+                "reason": "끝났는데 또 부른다",
+                "finalize": False,
+            },
+            missing=(),
+        )
+
+
+def test_disallowed_tool_is_still_rejected(monkeypatch):
+    """전송 enum 을 무시한 모델이 허용 밖 Tool 을 골라도 통과하지 못한다."""
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {
+                "tool_name": "evaluate_purchase_scenario",
+                "arguments": {},
+                "reason": "허용 밖",
+                "finalize": False,
+            },
+            missing=("finance_position",),
+        )
+
+
+def test_valid_finalization_is_accepted(monkeypatch):
+    action = _decide_with(
+        monkeypatch,
+        {"tool_name": None, "arguments": {}, "reason": "capabilities complete", "finalize": True},
+        missing=(),
+    )
+    assert action.finalize is True
+    assert action.tool_name is None

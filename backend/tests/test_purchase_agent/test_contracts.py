@@ -532,9 +532,29 @@ def test_unconfirmed_shelf_life_is_null() -> None:
     assert shelf_life["피마늘"] is None
 
 
-def test_feedback_attempt_max_is_declared() -> None:
-    """재시도 상한은 임계다 — 코드가 아니라 constraints.yaml에서 읽는다 (규칙 7)."""
+def test_feedback_attempt_max_is_declared_but_not_yet_consumed_here() -> None:
+    """재시도 상한 선언. **아직 우리 코드가 읽지 않는다** — 집행은 마스터가 한다.
+
+    🔴 앞서 이 테스트의 docstring 은 "코드가 아니라 constraints.yaml에서 읽는다"고
+      적혀 있었는데 **아무것도 읽지 않았다.** 값 비교(`== 2`)는 선언이 있다는 것만
+      보여줄 뿐, 코드가 그걸 쓴다는 증명이 아니다 (규칙 8).
+
+    실제 집행은 ``app/master/flow.py`` 의 ``max_purchase_attempts`` (기본 2) 다.
+    우리가 재시도 루프를 갖게 되면 이 검사는 "설정을 바꿔보고 상한이 따라 바뀌는지"로
+    교체해야 한다 — 그때까지는 **읽는 곳이 없다는 사실 자체**를 잠근다.
+    """
     assert _constraints()["feedback"]["attempt_max"] == 2
+
+    package = Path(inspect.getfile(ports)).parent
+    readers = [
+        path.name
+        for path in package.rglob("*.py")
+        if "attempt_max" in path.read_text(encoding="utf-8")
+    ]
+    assert readers == [], (
+        f"{readers} 가 attempt_max 를 읽기 시작했다 — 값 비교로는 그게 설정에서 온 건지 "
+        f"알 수 없다. 선언을 바꿔보고 상한이 따라 바뀌는지 보는 검사로 교체할 것 (규칙 8)"
+    )
 
 
 def test_ci_width_boundary_is_explicit() -> None:
