@@ -1,6 +1,6 @@
 """물류 어댑터 — 번역이 계약을 지키는가.
 
-★ DB 를 타지 않는다. `_load_snapshot` · `_load_policy` 를 갈아 끼워 **번역만** 시험한다.
+★ DB 를 타지 않는다. `_load_read`(Snapshot + Policy 한 벌)를 갈아 끼워 **번역만** 시험한다.
   값의 정확성은 `app.logistics.tools` 의 테스트가 본다.
 
 ★ 여기서 특히 보는 것은 **없는 값을 지어내지 않는가**다.
@@ -16,6 +16,7 @@ from decimal import Decimal
 import pytest
 
 from app.logistics import adapter
+from app.logistics.repository import LogisticsRead
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
@@ -124,10 +125,14 @@ def _snapshot(**overrides) -> InventoryLogisticsSnapshot:
 _LOTS = [_Lot("LOT-A", "300.5", 10), _Lot("LOT-B", "200", None)]
 
 
+def _read(snapshot=None, policy=None):
+    """어댑터의 단일 읽기 seam — Snapshot 과 그것을 만든 Policy 를 함께 준다 (#121 ⑤)."""
+    return LogisticsRead(snapshot=snapshot or _snapshot(), policy=policy or _policy())
+
+
 @pytest.fixture
 def wired(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: _snapshot())
-    monkeypatch.setattr(adapter, "_load_policy", _policy)
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read())
     monkeypatch.setattr(adapter, "build_lot_constraints", lambda snapshot: list(_LOTS))
 
 
@@ -209,7 +214,9 @@ def test_조회_창을_payload_에_밝힌다(wired):
 def test_리드타임이_없으면_cap_by_date_를_비우지_않고_밝힌다(wired, monkeypatch):
     """빈 dict 를 실으면 *못 받은 것* 과 *받았는데 빈 것* 이 구분되지 않는다."""
 
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: _snapshot(inbound_lead_days=None))
+    monkeypatch.setattr(
+        adapter, "_load_read", lambda as_of: _read(_snapshot(inbound_lead_days=None))
+    )
     reply, _ = adapter.logistics_port(req())
     assert "cap_by_date" not in reply.payload
     assert "cap_by_date" in reply.missing_data
@@ -342,7 +349,7 @@ def test_정책값이_없는_품목은_근거를_만들지_않는다(wired):
 def test_보관정책이_미조회면_빈_배열로_덮지_않는다(wired, monkeypatch):
     """`None`(미조회)과 `[]`(정책 0 건 확인)은 다르다 (§1.2-10)."""
     monkeypatch.setattr(
-        adapter, "_load_snapshot", lambda as_of: _snapshot(item_storage_policies=None)
+        adapter, "_load_read", lambda as_of: _read(_snapshot(item_storage_policies=None))
     )
     reply, _ = adapter.logistics_port(req())
     assert "item_storage_policies" not in reply.payload
@@ -370,7 +377,7 @@ def test_스냅샷_기준일이_다르면_판단하지_않는다(wired):
 
 def test_스냅샷이_없으면_ERROR_가_아니라_NOT_READY(wired, monkeypatch):
     """다시 불러도 같다 — 재시도 가치가 다르다 (M-1 §5.1)."""
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: None)
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: None)
     reply, _ = adapter.logistics_port(req())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.business_status == "skipped"
@@ -575,9 +582,11 @@ def test_물류가_NOT_READY_면_반드시_이름이_남는다(wired, monkeypatc
     """
     monkeypatch.setattr(
         adapter,
-        "_load_policy",
-        lambda: _policy().model_copy(
-            update={"source_refs": {**_policy().source_refs, "rental_cap_kg": "MVP:RENTAL"}}
+        "_load_read",
+        lambda as_of: _read(
+            policy=_policy().model_copy(
+                update={"source_refs": {**_policy().source_refs, "rental_cap_kg": "MVP:RENTAL"}}
+            )
         ),
     )
     monkeypatch.setattr(
@@ -594,6 +603,9 @@ def test_물류가_NOT_READY_면_반드시_이름이_남는다(wired, monkeypatc
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.missing_data  # 비어 있으면 봉투가 던진다
     assert "logistics_rule/IN_TRANSIT_SCHEDULE_UNRESOLVED" in reply.missing_data
+    # 🔴 이 테스트의 전제 — DB 에 키가 등록되면 그 이름이 **사라진다.** 우연히 남아
+    #    있는 이름 덕에 통과하는 것이 아님을 함께 고정한다.
+    assert "rental_cap_kg@policy_source_ref" not in reply.missing_data
 
 
 class _Check:
@@ -648,16 +660,28 @@ def _stocked_snapshot(**overrides) -> InventoryLogisticsSnapshot:
     """
     lots = [
         InventoryLotSnapshot(
-            lot_id="LOT-B1", item="배추", available_qty_kg=Decimal(300),
-            remaining_freshness_days=5, effective_freshness_limit_days=10, status="ACTIVE",
+            lot_id="LOT-B1",
+            item="배추",
+            available_qty_kg=Decimal(300),
+            remaining_freshness_days=5,
+            effective_freshness_limit_days=10,
+            status="ACTIVE",
         ),
         InventoryLotSnapshot(
-            lot_id="LOT-B2", item="배추", available_qty_kg=Decimal(100),
-            remaining_freshness_days=0, effective_freshness_limit_days=10, status="ACTIVE",
+            lot_id="LOT-B2",
+            item="배추",
+            available_qty_kg=Decimal(100),
+            remaining_freshness_days=0,
+            effective_freshness_limit_days=10,
+            status="ACTIVE",
         ),
         InventoryLotSnapshot(
-            lot_id="LOT-M1", item="무", available_qty_kg=Decimal(50),
-            remaining_freshness_days=7, effective_freshness_limit_days=14, status="ACTIVE",
+            lot_id="LOT-M1",
+            item="무",
+            available_qty_kg=Decimal(50),
+            remaining_freshness_days=7,
+            effective_freshness_limit_days=14,
+            status="ACTIVE",
         ),
     ]
     outbound = [ScheduledQuantity(date=AS_OF, quantity_kg=Decimal(120), item="배추")]
@@ -673,7 +697,7 @@ def stocked(wired, monkeypatch):
       두면 payload 의 `lots`(배추 500.5)와 `inventory_by_item`(배추 180)이 **서로 다른
       재고**에서 나와, 두 필드의 정합을 보려는 후속 테스트가 헛돈다 (검증 발견 7).
     """
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: _stocked_snapshot())
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(_stocked_snapshot()))
     monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
 
 
@@ -718,8 +742,8 @@ def test_출고_귀속_불명이면_가용재고를_지어내지_않는다(stock
     unattributed = [ScheduledQuantity(date=AS_OF, quantity_kg=Decimal(120), item=None)]
     monkeypatch.setattr(
         adapter,
-        "_load_snapshot",
-        lambda as_of: _stocked_snapshot(confirmed_outbound_schedule=unattributed),
+        "_load_read",
+        lambda as_of: _read(_stocked_snapshot(confirmed_outbound_schedule=unattributed)),
     )
     reply, _ = adapter.logistics_port(req())
     assert "inventory_by_item" not in reply.payload
@@ -762,14 +786,17 @@ def test_업무_위험_signal_이_soft_warnings_로_합류한다(wired, monkeypa
         update={
             "on_hand_by_lot": [
                 InventoryLotSnapshot(
-                    lot_id="LOT-P1", item="배추", available_qty_kg=Decimal(100),
-                    remaining_freshness_days=2, effective_freshness_limit_days=10,
+                    lot_id="LOT-P1",
+                    item="배추",
+                    available_qty_kg=Decimal(100),
+                    remaining_freshness_days=2,
+                    effective_freshness_limit_days=10,
                     status="ACTIVE",
                 )
             ]
         }
     )
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: pressured)
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(pressured))
     reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
     assert "INVENTORY_FRESHNESS_PRESSURE" in reply.payload["soft_warnings"]
 
@@ -791,7 +818,7 @@ def test_우선_조정_축은_있을_때만_실린다(wired, monkeypatch):
 def test_시나리오_상세를_실어도_봉투_검증을_통과한다(wired, monkeypatch):
     """signal·상세·근거가 다 실린 상태로 봉투 규칙 전체를 통과해야 한다."""
     pressured = _stocked_snapshot(freshness_pressure_ratio=Decimal("0.30"))
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: pressured)
+    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(pressured))
     request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
     reply, meta = adapter.logistics_port(request)
     assert reply.payload["scenario_results"]

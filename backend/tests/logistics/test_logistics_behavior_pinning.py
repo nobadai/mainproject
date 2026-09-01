@@ -26,20 +26,29 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from app.logistics import adapter
+from app.logistics.interpretation import _MISSING_DATA_NAMES
 from app.logistics.llm.runtime import InterpretationService, LLMSettings, UnavailableProvider
-from app.logistics.rules import BUSINESS_SIGNALS, derive_procurement_verdict
+from app.logistics.repository import LogisticsRead
+from app.logistics.rules import (
+    BUSINESS_SIGNALS,
+    UNRESOLVED_WARNING_CODES,
+    derive_procurement_verdict,
+)
 from app.logistics.scenario_engine import (
     derive_preferred_adjustment,
     validate_purchase_scenarios,
 )
 from app.logistics.schemas import (
+    POLICY_VERSION,
+    ConstraintCode,
     ConstraintResult,
     InventoryLogisticsSnapshot,
+    LogisticsPolicy,
     PurchaseAgentOutput,
     ScenarioAdjustment,
     ScenarioValidationResult,
@@ -148,9 +157,28 @@ def _proposal_payload(
     return _payload_of([_scenario_block("기본", split_plan, sourcing_qty)])
 
 
+def _policy() -> LogisticsPolicy:
+    """실물 모델로 만든다 — 가짜를 쓰면 물류가 계약을 넓힐 때 이 테스트가 안 깨진다."""
+    return LogisticsPolicy(
+        guaranteed_capacity_kg=Decimal(8000),
+        burst_capacity_kg=Decimal(9600),
+        inbound_lead_days=2,
+        daily_inbound_capacity_kg=Decimal(5000),
+        inbound_transport_capacity_kg=Decimal(5000),
+        shared_daily_outbound_capacity_kg=Decimal(5000),
+        cap_by_date_policy="CONFIRMED_ONLY",
+        policy_version=POLICY_VERSION,
+        usage_scope="AGENT_MVP_DEMO",
+        source_refs={},
+    )
+
+
 def _wire(monkeypatch: pytest.MonkeyPatch, snapshot: InventoryLogisticsSnapshot) -> None:
-    monkeypatch.setattr(adapter, "_load_snapshot", lambda as_of: snapshot)
-    monkeypatch.setattr(adapter, "_load_policy", lambda: None)
+    monkeypatch.setattr(
+        adapter,
+        "_load_read",
+        lambda as_of: LogisticsRead(snapshot=snapshot, policy=_policy()),
+    )
 
 
 def _disabled_llm() -> InterpretationService:
@@ -732,10 +760,9 @@ def test_데이터_부재는_NOT_READY_다(monkeypatch, mode, payload_factory):
     """
     monkeypatch.setattr(
         adapter,
-        "get_current_inventory_logistics_snapshot",
+        "get_current_logistics_read",
         _raising_loader(LookupError("No active Logistics runtime fixture")),
     )
-    monkeypatch.setattr(adapter, "_load_policy", lambda: None)
 
     request = _request(payload_factory(), mode=mode)
     reply, meta = adapter.logistics_port(request)
@@ -774,8 +801,7 @@ def test_실행_오류는_ERROR_다(monkeypatch, mode, payload_factory, error):
     세 예외를 다 도는 이유는 무결성 계열 하나만 대표로 두면 "ValueError 만 부재로
     되돌리는" 뮤턴트가 살아남기 때문이다 (2026-09-01 교차검증 지적).
     """
-    monkeypatch.setattr(adapter, "get_current_inventory_logistics_snapshot", _raising_loader(error))
-    monkeypatch.setattr(adapter, "_load_policy", lambda: None)
+    monkeypatch.setattr(adapter, "get_current_logistics_read", _raising_loader(error))
 
     request = _request(payload_factory(), mode=mode)
     reply, meta = adapter.logistics_port(request)
@@ -787,3 +813,38 @@ def test_실행_오류는_ERROR_다(monkeypatch, mode, payload_factory, error):
     assert not any(character.isdigit() for character in reply.reasoning)
     # ERROR 봉투도 계약을 지킨다 — missing_data 가 비어도 위반이 아니다
     assert validate_reply(request, reply, meta) == ()
+
+
+# ---------------------------------------------------------------------------
+# (e) 어휘 완전성 — missing 코드 발행처와 번역표가 갈리지 않는가 (#121 ⑤)
+# ---------------------------------------------------------------------------
+
+
+def test_모든_미확정_코드에_번역명이_있다():
+    """코드 발행처(schemas Literal · rules 경고 상수)와 번역표는 세 파일에 흩어져 있다.
+
+    수동 동기화라 새 코드가 생겨도 아무도 모르고, 번역표에 없으면 사람 화면에는
+    generic 이름(`unrecognized_missing_information`)이 나가 **무엇이 없는지가
+    사라진다**. 발행처를 기준으로 표를 훑어 그 순간 CI 가 울게 한다.
+
+    ★ 한계 — `UNRESOLVED_WARNING_CODES` 자체가 손으로 유지되는 목록이라, Rule 이
+      목록에 없는 새 문자열을 직접 append 하면 여기서도 안 잡힌다. 그 경우 목록에
+      추가하는 것이 계약이다.
+    """
+    published = {*get_args(ConstraintCode), *UNRESOLVED_WARNING_CODES}
+
+    unmapped = sorted(code for code in published if code not in _MISSING_DATA_NAMES)
+
+    assert unmapped == []
+
+
+def test_번역표에_죽은_이름이_없다():
+    """반대 방향 — 아무도 내지 않는 코드가 표에 남아 있으면 그것도 드리프트다.
+
+    (H1_FUTURE_OCCUPANCY_UNRESOLVED 는 Sales rules 가 내므로 발행처에 포함된다.)
+    """
+    published = {*get_args(ConstraintCode), *UNRESOLVED_WARNING_CODES}
+
+    stale = sorted(code for code in _MISSING_DATA_NAMES if code not in published)
+
+    assert stale == []

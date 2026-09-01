@@ -54,6 +54,30 @@ LOT_FRESHNESS_UNRESOLVED = "LOT_FRESHNESS_UNRESOLVED"
 #: 사이클 어휘를 섞지 않는다 (결정서 §5).
 SALES_PRIORITY_ADJUSTMENT = "우선 출고 대상으로 검토합니다."
 
+#: Rule 이 `soft_warnings` 로 내는 **미확정 계열** 코드의 전체 집합 (#121 ⑤).
+#:
+#: ★ 이 코드들은 `interpretation._MISSING_DATA_NAMES` 가 사람용 이름으로 옮긴다.
+#:   발행처(여기)와 번역표가 따로 자라면 새 코드가 generic 이름으로 뭉개져
+#:   **무엇이 없는지가 사라진다** — 목록을 명시해 테스트가 대조할 수 있게 한다.
+#: ★ 업무 위험(BUSINESS_SIGNALS)은 여기 넣지 않는다. 미확정이 아니라 판정 결과다.
+UNRESOLVED_WARNING_CODES = frozenset(
+    {
+        # `_snapshot_warnings` 가 내는 스냅샷 계열
+        "SNAPSHOT_ID_UNRESOLVED",
+        "GRADE_VOCABULARY_UNRESOLVED",
+        "PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT",
+        "IN_TRANSIT_UNRESOLVED",
+        "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED",
+        "CONFIRMED_OUTBOUND_SCHEDULE_UNRESOLVED",
+        # Sales 전용 — H1 미래 점유를 못 셈한 사실
+        "H1_FUTURE_OCCUPANCY_UNRESOLVED",
+        # 업무 위험 판정을 정책 부재·데이터 부재로 건너뛴 사실
+        CAPACITY_TIGHT_POLICY_UNRESOLVED,
+        FRESHNESS_PRESSURE_POLICY_UNRESOLVED,
+        LOT_FRESHNESS_UNRESOLVED,
+    }
+)
+
 
 class SignalMeasurements(TypedDict, total=False):
     """판정에 실제 사용된 원값 — fact 조립이 같은 값을 재계산하지 않게 한다 (v1.3 §5).
@@ -410,6 +434,9 @@ def _known_constraint(
 
 def _snapshot_warnings(snapshot: InventoryLogisticsSnapshot) -> list[str]:
     warnings: list[str] = []
+    # ★ 이 경고는 **상시 발동한다** — Repository 가 `snapshot_id` 를 채우지 않기
+    #   때문이다(폐지된 T0 스냅샷의 유산). 없앨지 실제 ID 를 줄지는 계약 결정이라
+    #   여기서 조용히 끄지 않는다 — 끄면 "검사했더니 문제 없음"으로 위장된다.
     if snapshot.snapshot_id is None:
         warnings.append("SNAPSHOT_ID_UNRESOLVED")
     # 정규화 근거가 없어 등급 어휘를 해석하지 못한 Lot이 있다는 사실만 드러낸다 —
