@@ -141,3 +141,103 @@ def test_승인한_안을_라벨로_찾는다(wired):
 
     assert out.commitment.scenario_label == "공격"
     assert out.commitment.total_qty_kg == 100.0
+
+
+def test_라벨이_겹치면_첫_것을_고르지_않고_막는다(wired):
+    """🔴 첫 것을 조용히 고르면 어느 안을 약정했는지가 운에 걸린다 (자기 리뷰)."""
+    response = _response(scenarios=[_scenario("보수"), _scenario("보수", total_qty_kg=999.0)])
+
+    out = wired(response)
+
+    assert out.decision == "APPROVE", "결정 자체는 남아야 한다"
+    assert out.commitment.buildable is False
+    assert "유일" in (out.commitment.reason or "") or "2개" in (out.commitment.reason or "")
+
+
+# ---------------------------------------------------------------------------
+# GET /runs/{id}/commitment — 전달 방식 ⓐ (물류 회신 2026-09-01)
+# ---------------------------------------------------------------------------
+
+
+def _current(monkeypatch, decisions, response):
+    monkeypatch.setattr(svc, "list_decisions", lambda request_id: decisions)
+    monkeypatch.setattr(
+        svc,
+        "_run_for",
+        lambda request_id, history_run_id: {
+            "run_id": uuid4(),
+            "request_id": request_id,
+            "response_payload": response,
+        },
+    )
+    return svc.current_commitment("REQ-1")
+
+
+def _decision(**over):
+    base = {
+        "decision_id": uuid4(),
+        "request_id": "REQ-1",
+        "decision_seq": 1,
+        "decision": "APPROVE",
+        "scenario_label": "보수",
+        "decided_by": "lhs",
+        "end_code_at_decision": "E1_APPROVED",
+        "created_at": datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+        "is_current": True,
+    }
+    base.update(over)
+    return DecisionOut(**base)
+
+
+def test_현재_승인의_약정을_재조립한다(monkeypatch):
+    out = _current(monkeypatch, [_decision()], _response())
+
+    assert out is not None and out.buildable
+    assert out.approval_id == "H1-REQ-1-1"
+    assert out.item == "피마늘"
+
+
+def test_승인이_없으면_None_이다(monkeypatch):
+    assert _current(monkeypatch, [], _response()) is None
+    assert (
+        _current(
+            monkeypatch,
+            [_decision(decision="REJECT_ALL", scenario_label=None)],
+            _response(),
+        )
+        is None
+    )
+
+
+def test_번복되면_현재_결정의_약정만_나온다(monkeypatch):
+    """★ 앞 승인(보수)은 접혔다 — is_current 인 공격만 재조립된다."""
+    decisions = [
+        _decision(decision_seq=1, scenario_label="보수", is_current=False),
+        _decision(decision_seq=2, scenario_label="공격", is_current=True),
+    ]
+    response = _response(
+        scenarios=[
+            _scenario("보수"),
+            _scenario(
+                "공격",
+                total_qty_kg=100.0,
+                split_plan=[{"seq": 1, "date": "2025-12-31", "qty_kg": 100.0}],
+            ),
+        ]
+    )
+
+    out = _current(monkeypatch, decisions, response)
+
+    assert out.scenario_label == "공격"
+    assert out.approval_id == "H1-REQ-1-2"
+
+
+def test_못_만든_약정은_None_이_아니라_사유다(monkeypatch):
+    """404(승인 없음)와 buildable=false(승인인데 못 만듦)를 섞지 않는다."""
+    response = _response(judgment={"meta": {}})  # 품목 없음
+
+    out = _current(monkeypatch, [_decision()], response)
+
+    assert out is not None
+    assert out.buildable is False
+    assert "품목" in (out.reason or "")
