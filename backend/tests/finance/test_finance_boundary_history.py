@@ -513,7 +513,19 @@ def test_finance_dept_meta_reaches_critic_and_runs_both_checks(wired):
         s.startswith("finance:") and "DeptMeta" in s for s in verdict.skipped
     ), verdict.skipped
     # 두 검사가 실제로 돌았고, 재무 소유 입력만 썼으므로 findings 는 없다.
-    assert verdict.coverage["L1"][0] >= 7
+    #
+    # 🔴 **커버리지 숫자로는 이걸 확인할 수 없다 (2026-09-01 마스터 정정).**
+    #   전에는 `coverage["L1"][0] >= 7` 로 확인했는데, 그 7 은 `l1_ran += 2 if meta else 0`
+    #   이 *"아무 부서나 하나 냈나"* 를 세어서 나온 값이었다. 재무만 내도 물류 몫까지
+    #   가산돼 **숫자가 실제보다 후했다.**
+    #
+    #   이제 회신을 낸 부서가 전부 제출해야 가산된다. 이 테스트는 재무만 배선하므로
+    #   가산이 없는 것이 맞다 — 대신 **위의 `skipped` 단언이 이 테스트의 증거다.**
+    #   "재무 미제출 문구가 사라졌다" 가 곧 "재무 DeptMeta 가 Critic 에 닿았다" 이다.
+    #
+    #   ⚠️ 부분 제출이 0으로 세어지는 것은 **과소 보고**다. 어느 쪽으로 틀릴지 골라야
+    #     한다면 안전한 쪽이고, 빠진 부서는 `skipped` 줄이 이름까지 적는다.
+    assert verdict.coverage["L1"][0] == 5
     assert not [f.check_id for f in verdict.findings]
 
 

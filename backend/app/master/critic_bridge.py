@@ -47,8 +47,30 @@ from app.orchestrator.contracts_core import Evidence
 _FINANCE = "finance"
 _INVENTORY = "inventory"
 
-_FINANCE_CAP_CHECK = "finance_cap_amount_krw"
-_INVENTORY_CAP_CHECK = "warehouse_cap"
+DEPT_CAP_CHECK_ID: dict[AgentName, str] = {
+    "finance": "finance_cap_amount_krw",
+    "inventory": "warehouse_cap",
+}
+"""부서 경계 회신에서 마스터가 **합성하는** Critic 검사의 id. 소유자는 마스터다.
+
+🔴 **부서는 `checks[]` 를 내지 않는다.** `_replies_in` 이 부서 payload 에서 부서당
+  하나씩 만든다 — 그래서 이 이름의 주인이 마스터다 (2026-09-01 물류 확인).
+
+★ **공개하는 이유.** 부서 `DeptMeta` 의 `inputs_used` 키가 이 id 와 같아야 Critic 이
+  그 부서의 입력을 본다.
+
+  ```python
+  used = dm.inputs_used.get(chk.check_id, ())   # 이름이 다르면 빈 튜플
+  leaked = FORBIDDEN_SCENARIO_INPUTS & set(used)  # 위반 없음 → 조용히 통과
+  ```
+
+  **틀려도 에러가 안 난다.** 부서가 문자열을 베껴 두면 마스터가 이름을 바꾸는 날 그
+  부서의 검사가 조용히 무력화된다. 베끼지 말고 여기를 import 해서 쓴다 —
+  `MAX_PURCHASE_ATTEMPTS` 를 매입 YAML 이 인용하는 것과 같은 자리다.
+"""
+
+_FINANCE_CAP_CHECK = DEPT_CAP_CHECK_ID["finance"]
+_INVENTORY_CAP_CHECK = DEPT_CAP_CHECK_ID["inventory"]
 
 _FINANCE_CAP_CLAIMS: frozenset[str] = frozenset(
     {"finance_cap_amount_krw", "available_cash", "base_projected_cash_min"}
