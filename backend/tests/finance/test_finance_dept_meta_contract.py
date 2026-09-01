@@ -27,11 +27,17 @@ from app.finance.execution import (
 )
 from app.finance.state import FinanceAgentState
 from app.finance.tool_registry import PRE_PURCHASE_TOOLS
+from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentRequest, ExecutionContext
 
 FORBIDDEN_IN_FINANCE_CAP = frozenset(
     {"grade_unit_price", "qty_kg", "total_qty_kg", "avg_unit_price", "sourcing_plan"}
 )
+
+
+def test_finance_check_id_uses_master_canonical_contract():
+    """Finance DeptMeta의 key는 Master가 합성하는 검사 id 정본을 따른다."""
+    assert FINANCE_CAP_CHECK_ID == DEPT_CAP_CHECK_ID["finance"]
 
 
 def _request(mode: str = "PRE_PURCHASE") -> AgentRequest:
