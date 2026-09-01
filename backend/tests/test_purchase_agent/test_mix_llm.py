@@ -221,7 +221,14 @@ def test_env_file_is_gitignored() -> None:
         ["git", "check-ignore", ".env", "backend/.env"],
         cwd="..",
         capture_output=True,
-        text=True,
+        # 🔴 ``text=True`` 만 주면 **부모 로케일**로 디코드한다 — cp949 환경에서 UTF-8
+        #   출력을 만나면 리더 스레드가 죽고 ``stdout`` 이 ``None`` 이 된다.
+        #   ``git check-ignore`` 는 **무시 대상 경로를 그대로 되돌려주므로**, 한글 경로가
+        #   인자나 출력에 들어가는 순간 여기가 그 자리다 (`docs/` 에 한글 파일명이 있다).
+        #   **지금 안 깨지는 건 이 테스트가 한글 경로를 안 넣어서지 구조가 달라서가
+        #   아니다** (현서님 지적 2026-09-01). `test_auction_quotes.py` 와 같은 형태로 맞춘다.
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     assert ".env" in result.stdout

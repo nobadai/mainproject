@@ -185,8 +185,8 @@ class ProposalMeta(BaseModel):
 class SplitPlanItem(BaseModel):
     """분할 매입 1회차.
 
-    ``date`` 는 **매입 실행일**이다 — 도착일이 아니다. 실제 도착일은
-    ``date + inbound_lead_days(N4)`` 이고 N4는 현재 미결이라 계산하지 않는다 (IO명세 §4).
+    ``date`` 는 **매입 실행일**이다 — 도착일이 아니다. 도착일은
+    ``date + inbound_lead_days(N4)`` 이고 그 값은 ``expected_arrival_date`` 가 싣는다.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -194,6 +194,21 @@ class SplitPlanItem(BaseModel):
     seq: int = Field(ge=1)
     date: date
     qty_kg: int = Field(gt=0)
+    #: 이 회차의 **도착일** = ``date + N4``. ⑥ ``materialize_split`` 이 ``arrival_dates()``
+    #: 로 만든다 (상세설계 §5.5).
+    #:
+    #: 🔴 **N4가 없으면 ``None``이다. 0으로 채우지 않는다** — 0은 "당일 도착"이라는
+    #: 확정된 값이라, 미결을 0으로 적으면 "오늘 승인분이 오늘 도착"이 사실이 된다 (규칙 3).
+    #:
+    #: ⚠️ ``payment_schedule`` 처럼 **키를 빼지 않는다.** 마스터 약정
+    #: (``master/commitment.py``)이 ``null`` 을 *"N4 미결로 매입도 못 냈다"* 로 읽고
+    #: **자기도 계산하지 않는다**. 키가 없으면 그 구분이 사라진다. Critic 도 같은 이름의
+    #: 필드에서 ``None`` 을 세어 ``E-ARRIVAL-COLLAPSE`` 를 판정한다
+    #: (``critic/critic_v0_4.py``).
+    #:
+    #: **마스터가 이 값을 받으면 자기 계산을 건너뛴다** (2026-09-01 합의 · PR #138).
+    #: 같은 사실을 두 곳에서 각자 계산하면 어긋나는 날이 온다.
+    expected_arrival_date: date | None = None
 
     @field_validator("seq", "qty_kg", mode="before")
     @classmethod
