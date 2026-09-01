@@ -497,8 +497,10 @@ class FinanceDataNotReady(RuntimeError):
     """필수 Finance 사실/Policy가 없거나 과거 시점으로 재현할 수 없다."""
 
     def __init__(self, key: str):
+        # `key` 는 `missing_data` 식별자다 — 기계가 읽으므로 번역하지 않는다.
+        # 문장만 사람이 읽는 설명이다 (Controller 경로에서 `reasoning` 이 된다).
         self.key = key
-        super().__init__(f"Finance data is not ready: {key}")
+        super().__init__(f"재무 데이터가 준비되지 않았습니다: {key}")
 
 
 class FinanceAsOfDataPort(Protocol):

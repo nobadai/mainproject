@@ -134,13 +134,13 @@ class ScriptedFinalizer:
         if self.fail:
             raise TimeoutError("finalization timeout")
         if mode == "PRE_PURCHASE":
-            return "Verified Finance Evidence supports the reported purchasing boundary."
+            return "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
         if business_status == "reject":
             return (
-                "Verified Finance Evidence rejects at least one original scenario. "
-                "Any published amount alternative was independently validated."
+                "검증된 재무 근거가 원안 시나리오 중 최소 하나를 반려했습니다. "
+                "함께 제시된 금액 대안은 별도로 검증했습니다."
             )
-        return "Verified Finance Evidence supports the reported scenario verdicts."
+        return "검증된 재무 근거가 보고된 시나리오 판정을 뒷받침합니다."
 
 
 def request(mode="PRE_PURCHASE", payload=None):
@@ -285,7 +285,7 @@ def test_finalizer_failure_falls_back_deterministically():
 
     assert reply.runtime_status == "READY"
     assert reply.reasoning == (
-        "Verified Finance Evidence supports the reported purchasing boundary."
+        "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
     )
     assert metadata.llm_status == "FALLBACK"
     assert metadata.llm_fallback_used is True

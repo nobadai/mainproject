@@ -390,7 +390,7 @@ class FinanceAgentController:
             payload={},
             evidences=(),
             suggested_adjustments=(),
-            reasoning="Finance scenario output validation failed.",
+            reasoning="재무 시나리오 산출이 계약 검증을 통과하지 못했습니다.",
             needs_followup=True,
         )
 
@@ -409,7 +409,7 @@ class FinanceAgentController:
                 payload={},
                 evidences=(),
                 suggested_adjustments=(),
-                reasoning="Finance run history persistence failed.",
+                reasoning="재무 실행이력을 저장하지 못했습니다.",
                 missing_data=(),
                 needs_followup=True,
             )
