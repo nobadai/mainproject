@@ -1,11 +1,13 @@
-"""물류 행동 고정 테스트 — 감사 P0 2건 + Adapter↔Service parity (#121).
+"""물류 행동 계약 테스트 — 감사 P0 2건 + Adapter↔Service parity (#121).
 
-★ (a) P0-1 테스트는 **버그를 승인하는 것이 아니라 고정하는 것**이다.
-  마스터의 집계 규칙 확정(#121 3단계) 후 기대값을 반전하는 것이 곧 수정 완료의
-  판정이 된다. `PIN(현재 동작)` 표시가 붙은 assert 가 반전 대상이다.
+1단계에서 결함의 현재 동작을 PIN 으로 고정했고, 2·3단계 수정이 반영되면서 전부
+**계약 테스트**로 전환됐다 (PIN 잔존 없음).
 
-★ (b) P0-2 는 2단계에서 수정 완료됐다 — 해당 테스트들은 이제 고정이 아니라
-  **계약**이다: reject 안의 adjustment 는 scenario_results 에 진단으로만 남고,
+★ (a) P0-1 — business_status 는 시나리오 집계 ⊕ 하드 제약의 최악값 결합이다
+  (2026-09-01 마스터 확정: any reject → reject · 조정안은 판정을 무르지 않음 ·
+  하드 제약은 낮출 수만 있음). 독립 API 최상위 verdict 도 같은 규칙이다.
+
+★ (b) P0-2 — reject 안의 adjustment 는 scenario_results 에 진단으로만 남고,
   preferred·suggested·needs_followup 으로 승격되지 않는다.
 
 ★ (c) parity 는 재현이 아니라 상시 안전망이다 — Core 에 값이 추가되고 한쪽 조립에만
@@ -27,12 +29,13 @@ import pytest
 
 from app.logistics import adapter
 from app.logistics.llm.runtime import InterpretationService, LLMSettings, UnavailableProvider
-from app.logistics.rules import BUSINESS_SIGNALS
+from app.logistics.rules import BUSINESS_SIGNALS, derive_procurement_verdict
 from app.logistics.scenario_engine import (
     derive_preferred_adjustment,
     validate_purchase_scenarios,
 )
 from app.logistics.schemas import (
+    ConstraintResult,
     InventoryLogisticsSnapshot,
     PurchaseAgentOutput,
     ScenarioAdjustment,
@@ -162,22 +165,20 @@ def _disabled_llm() -> InterpretationService:
 
 
 # ---------------------------------------------------------------------------
-# (a) P0-1 — 최상위 판정이 시나리오 판정을 집계하지 않는다
+# (a) P0-1 — business_status 는 시나리오 집계 ⊕ 하드 제약 결합이다 (3단계 수정 반영)
 # ---------------------------------------------------------------------------
 
 
-def test_전_시나리오_reject_인데_business_status_는_ok_다(monkeypatch):
-    """🔴 PIN(현재 동작) — #121 3단계에서 기대값 반전 대상.
+def test_전_시나리오_reject_면_business_status_도_reject_다(monkeypatch):
+    """✅ 계약 (#121 3단계 수정 반영 · 2026-09-01 마스터 확정) — 1단계 PIN 의 반전.
 
-    하드 제약을 전부 PASS 로 만들면(창고 정책값 전부 존재 + zone 존재) 최상위 판정은
-    `derive_logistics_verdict` 가 hard_constraints 만 보고 PASS → `ok` 를 낸다.
-    같은 응답의 `scenario_results` 는 전부 reject 다 — 창고가 꽉 차 어느 날짜로도
-    수용 불가한 제안이기 때문이다.
+    하드 제약이 전부 PASS 여도(창고 정책값 전부 존재 + zone 존재) 시나리오가 전부
+    reject 면 business_status 는 reject 다 — 하드 제약은 판정을 낮출 수만 있고
+    올릴 수 없다. 종전에는 하드만 집계해 `ok` 가 나갔고, 마스터 `_acceptable` 이
+    이 값만 보므로 "물류상 실행 불가능한 안이 통과"였다 (P0-1).
 
-    마스터 `_acceptable` 은 business_status 만 보고 재호출을 판단하므로, 이 조합은
-    "물류상 실행 불가능한 안이 통과" 로 이어진다. 실환경은 zone=None(LOG-H02
-    UNRESOLVED)이라 같은 이유로 `conditional` 이 나온다(PR #119 실측) — 여기서는
-    집계 단절만 분리해 보기 위해 전부 PASS 로 둔다.
+    전부-PASS 스냅샷을 쓰는 이유는 1단계와 같다 — 실환경의 zone=None(LOG-H02
+    UNRESOLVED) 노이즈를 걷어내고 시나리오 축이 판정을 끌어내리는 것만 분리해 본다.
     """
     snapshot = _snapshot(
         used_capacity_kg=Decimal(8000),  # 보장치와 같음 — 여유 0, 출고 없음 → 창 전체 0
@@ -209,13 +210,81 @@ def test_전_시나리오_reject_인데_business_status_는_ok_다(monkeypatch):
     assert [row["verdict"] for row in results] == ["reject"]
     assert "NO_FEASIBLE_ARRIVAL_DATE" in results[0]["reason_codes"]
 
-    # 🔴 PIN(현재 동작): 시나리오가 전부 reject 인데 최상위는 ok 다.
-    #    집계 규칙 확정(#121 3단계) 후 이 두 줄의 기대값을 반전한다.
-    assert reply.payload["verdict"] == "ok"
-    assert reply.business_status == "ok"
-    # 아무 신호도 마스터로 가지 않는다 — 조정 제안이 없어 followup 도 서지 않는다.
+    # ✅ 반전 완료: 시나리오 전부 reject → 최상위도 reject. 마스터가 재호출한다.
+    assert reply.payload["verdict"] == "reject"
+    assert reply.business_status == "reject"
+    # 행동 제안 채널은 침묵 — reject 안에는 승격할 조정이 없다 (2단계 계약과 정합).
     assert reply.suggested_adjustments == ()
     assert reply.needs_followup is False
+
+    # verdict Evidence 도 결합 근거를 싣는다 — 되돌리면 unit/value/문구가 갈린다
+    # (종전: failed_check_count=0). 3자 검증 지적 반영.
+    evidence = next(e for e in reply.evidences if e.claim == "verdict")
+    assert evidence.unit == "non_ok_input_count"
+    assert evidence.value == 1.0  # 비통과 하드 0건 + reject 1안 + conditional 0안
+    assert "reject 1안" in evidence.evidence_detail
+
+    # 독립 API 도 같은 결합 규칙이다 (#121 3단계의 나머지 절반) — 이 픽스처에서
+    # 하드만 보면 PASS, 결합이면 FAIL 이라 service 쪽 되돌리기가 여기서 잡힌다.
+    service_response = run_logistics_procurement_with_snapshot(
+        PurchaseAgentOutput.model_validate(payload),
+        snapshot,
+        interpretation_service=_disabled_llm(),
+    )
+    assert service_response.verdict == "FAIL"
+
+
+def _rule_result(*, runtime: str = "READY", statuses: tuple[str, ...] = ("PASS",)) -> dict:
+    """결합 함수 단위 테스트용 최소 LogisticsRuleResult."""
+    return {
+        "runtime_status": runtime,
+        "hard_constraints": [
+            ConstraintResult(code="LOG-H01", status=status, skip_reason=None) for status in statuses
+        ],
+        "soft_warnings": [],
+        "calculation_ready": runtime == "READY",
+    }
+
+
+def _scenario_verdicts(*verdicts: str) -> list[ScenarioValidationResult]:
+    return [
+        ScenarioValidationResult(label=f"안{i}", verdict=v, reason_codes=[], adjustments=[])
+        for i, v in enumerate(verdicts, start=1)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("runtime", "statuses", "verdicts", "expected"),
+    [
+        # 시나리오 집계 — any reject > any conditional > 전부 ok
+        ("READY", ("PASS",), ("ok", "ok"), "PASS"),
+        ("READY", ("PASS",), ("ok", "conditional"), "REVIEW_REQUIRED"),
+        ("READY", ("PASS",), ("ok", "conditional", "reject"), "FAIL"),
+        # 하드는 낮출 수만 있다 — UNRESOLVED 가 전-ok 를 끌어내리고,
+        # 전부 PASS 가 reject 를 되살리지 못한다
+        ("READY", ("UNRESOLVED",), ("ok",), "REVIEW_REQUIRED"),
+        ("READY", ("PASS",), ("reject",), "FAIL"),
+        ("READY", ("FAIL",), ("ok",), "FAIL"),
+        # skipped 는 집계 불참 — 올리지도 낮추지도 않는다
+        ("READY", ("PASS",), ("skipped",), "PASS"),
+        ("READY", ("UNRESOLVED",), ("skipped", "ok"), "REVIEW_REQUIRED"),
+        # 시나리오 0개 — 하드 판정만으로 떨어진다 (집계항 부재)
+        ("READY", ("PASS",), (), "PASS"),
+        # runtime 비-READY — 시나리오와 무관하게 판정 없음
+        ("RUNTIME_NOT_READY", ("PASS",), ("reject",), None),
+    ],
+)
+def test_결합_판정_truth_table(runtime, statuses, verdicts, expected):
+    """`derive_procurement_verdict` 단위 고정 — 확정 문구의 성질 전부 (검증 지적 반영).
+
+    `skipped` 불참과 시나리오 0개(하드만)는 통합 경로로는 닿기 어려운 경계라
+    함수 단위로 박는다. 형제 `derive_logistics_verdict` 의 단위 테스트와 대칭.
+    """
+    result = derive_procurement_verdict(
+        _rule_result(runtime=runtime, statuses=statuses),
+        _scenario_verdicts(*verdicts),
+    )
+    assert result == expected
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +471,9 @@ def test_혼합_케이스에서_어댑터는_비reject_조정만_승격한다(mo
     assert reply.payload["preferred_adjustment"] == "timing"
     assert "preferred_adjustment" in reply.judgment_fields
 
+    # 3단계 확정 별표 ①: 조정안이 있어도 판정을 무르지 않는다 — any reject → reject.
+    assert reply.business_status == "reject"
+
     # 승격은 conditional(기본)의 조정 1건뿐 — 필터가 없으면 보수 것까지 2건이 된다.
     assert len(reply.suggested_adjustments) == 1
     suggested = reply.suggested_adjustments[0]
@@ -413,6 +485,15 @@ def test_혼합_케이스에서_어댑터는_비reject_조정만_승격한다(mo
     # preferred Evidence 건수 = 비-reject 모집단의 timing 조정 수 = 1 (전체로 세면 2).
     evidence = next(e for e in reply.evidences if e.claim == "preferred_adjustment")
     assert evidence.value == 1.0
+
+    # 독립 API 정렬의 두 번째 대조점 — 이 픽스처는 하드만 보면 REVIEW_REQUIRED,
+    # 결합이면 FAIL 이다 ((a)의 PASS→FAIL 과 다른 갈림이라 함께 고정한다).
+    service_response = run_logistics_procurement_with_snapshot(
+        PurchaseAgentOutput.model_validate(payload),
+        snapshot,
+        interpretation_service=_disabled_llm(),
+    )
+    assert service_response.verdict == "FAIL"
 
 
 # ---------------------------------------------------------------------------
@@ -532,8 +613,11 @@ def test_어댑터와_독립_경로는_공유_결정론_값이_같다(monkeypatc
         "SCENARIO_ADJUSTMENT_REQUIRED",
     }
 
-    # ① runtime — 같은 rules 결과를 쓴다
+    # ① runtime·최상위 판정 — 같은 rules 결과·같은 결합 규칙을 쓴다 (#121 3단계:
+    #    독립 API verdict 와 M-1 business_status 는 같은 집계의 두 표기다)
     assert reply.runtime_status == service_response.runtime_status
+    assert service_response.verdict is not None
+    assert reply.business_status == adapter._VERDICT_MAP[service_response.verdict]
 
     # ② inventory_by_item
     assert service_response.inventory_by_item is not None
@@ -595,6 +679,9 @@ def test_parity_는_시나리오가_전부_통과인_날도_성립한다(monkeyp
     reply, _meta = adapter.logistics_port(_request(payload))
 
     assert service_response.preferred_adjustment is None
+    # 조용한 날도 최상위 판정 결합 규칙은 동일하다.
+    assert service_response.verdict is not None
+    assert reply.business_status == adapter._VERDICT_MAP[service_response.verdict]
     # 키 생략까지 고정한다 — `.get() is None` 은 "키 없음"과 "명시적 null 탑재"를
     # 구분하지 못한다 (§1.2-10). 어댑터는 preferred 가 없으면 키 자체를 빼야 한다.
     assert "preferred_adjustment" not in reply.payload

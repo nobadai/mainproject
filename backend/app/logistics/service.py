@@ -12,6 +12,7 @@ from app.logistics.rules import (
     BusinessSignalResult,
     LogisticsRuleResult,
     derive_logistics_verdict,
+    derive_procurement_verdict,
     evaluate_procurement_business_signals,
     evaluate_procurement_rules,
     evaluate_sales_business_signals,
@@ -86,7 +87,10 @@ def run_logistics_procurement_with_snapshot(
         as_of=request.meta.as_of,
         snapshot_id=snapshot.snapshot_id if snapshot is not None else None,
         runtime_status=rule_result["runtime_status"],
-        verdict=derive_logistics_verdict(rule_result),
+        # M-1 business_status 와 같은 규칙 — 시나리오 집계 ⊕ 하드 제약 최악값 결합
+        # (2026-09-01 마스터 확정 · #121 3단계). 실행이력 verdict 컬럼·/logistics/runs
+        # 필터의 의미도 이 시점부터 결합 판정이다.
+        verdict=derive_procurement_verdict(rule_result, scenario_result["scenario_results"]),
         band=LogisticsBand(
             cap_by_date=(scenario_result["cap_by_date"] if rule_result["calculation_ready"] else {})
         ),

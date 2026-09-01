@@ -189,6 +189,53 @@ def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None
     return "PASS"
 
 
+_FINAL_VERDICT_SEVERITY: dict[FinalVerdict, int] = {
+    "PASS": 0,
+    "REVIEW_REQUIRED": 1,
+    "FAIL": 2,
+}
+#: 시나리오 판정 → FinalVerdict 심각도 매핑. `skipped`는 여기 없다 — 판정 불가는
+#: 안을 통과시키지도(올림) 죽이지도(낮춤) 않고, 그 사실은 Runtime/Constraint가 나른다.
+_SCENARIO_VERDICT_TO_FINAL: dict[str, FinalVerdict] = {
+    "ok": "PASS",
+    "conditional": "REVIEW_REQUIRED",
+    "reject": "FAIL",
+}
+
+
+def derive_procurement_verdict(
+    result: LogisticsRuleResult,
+    scenario_results: list[ScenarioValidationResult],
+) -> FinalVerdict | None:
+    """시나리오 집계와 하드 제약 판정의 **최악값 결합** (2026-09-01 마스터 확정 · #121 3단계).
+
+    확정 문구:
+
+    ```text
+    SCENARIO_VALIDATION 의 business_status 는 그 부서가 검증한 시나리오 전체의 집계다.
+      하나라도 reject → reject / 아니고 하나라도 conditional → conditional / 전부 ok → ok
+    ★ 조정안의 유무는 이 값을 바꾸지 않는다.
+    ★ 하드 제약 상태(PASS/UNRESOLVED)는 이 값을 낮출 수는 있어도 올릴 수 없다.
+    ```
+
+    최악값 결합이 두 별표를 그대로 구현한다 — 하드 UNRESOLVED 는 전-ok 를
+    REVIEW_REQUIRED 로 낮출 수 있지만, 하드 전부 PASS 가 시나리오 reject 를
+    되살리지는 못한다. 종전 `derive_logistics_verdict`(하드만)는 판매 경로와
+    이 결합의 하드 축으로 계속 쓰인다.
+    """
+    hard = derive_logistics_verdict(result)
+    if hard is None:
+        return None
+    worst = hard
+    for scenario in scenario_results:
+        mapped = _SCENARIO_VERDICT_TO_FINAL.get(scenario.verdict)
+        if mapped is None:
+            continue
+        if _FINAL_VERDICT_SEVERITY[mapped] > _FINAL_VERDICT_SEVERITY[worst]:
+            worst = mapped
+    return worst
+
+
 def evaluate_procurement_rules(
     *,
     as_of: date,

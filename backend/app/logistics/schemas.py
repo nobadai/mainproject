@@ -346,6 +346,10 @@ class LogisticsProcurementResponse(LLMResponseFields):
     snapshot_id: str | None
     policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
     runtime_status: RuntimeStatus
+    #: 시나리오 집계 ⊕ 하드 제약의 최악값 결합 (2026-09-01 마스터 확정 · #121 3단계).
+    #: any reject → FAIL / any conditional → REVIEW_REQUIRED / 전부 ok → PASS 에
+    #: 하드 UNRESOLVED/FAIL 이 값을 낮출 수만 있다. 2026-09-01 이전 실행이력의
+    #: verdict 는 하드 제약만의 판정이다.
     verdict: FinalVerdict | None
     band: LogisticsBand
     #: 물류가 직접 집계한 품목별 가용재고. confirmed_outbound.item 누락 등으로

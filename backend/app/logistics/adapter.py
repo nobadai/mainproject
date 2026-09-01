@@ -39,7 +39,7 @@ from app.logistics.repository import (
     get_current_inventory_logistics_snapshot,
 )
 from app.logistics.rules import (
-    derive_logistics_verdict,
+    derive_procurement_verdict,
     evaluate_procurement_business_signals,
     evaluate_procurement_rules,
     merge_business_warnings,
@@ -726,7 +726,9 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     policy = _load_policy()
     scenario = run_logistics_procurement_scenario(proposal, snapshot)
     rules = evaluate_procurement_rules(as_of=as_of, snapshot=snapshot)
-    verdict = derive_logistics_verdict(rules)
+    # 시나리오 집계 ⊕ 하드 제약의 최악값 결합 (2026-09-01 마스터 확정 · #121 3단계).
+    # 전 시나리오 reject 인데 하드가 전부 PASS 라고 ok 가 나가던 집계 단절의 수정이다.
+    verdict = derive_procurement_verdict(rules, scenario["scenario_results"])
 
     # 업무 위험 판정(비교식)은 Rule 소유 — 독립 경로(service)와 같은 함수·같은 병합을
     # 쓴다 (#111 A3). 여기서 계산하는 것이 아니라 Rule 이 낸 signal 을 나를 뿐이다.
@@ -815,13 +817,19 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     #   사실이 사라지는 것은 아니다 — `soft_warnings` 가 같은 코드를 그대로 나른다.
 
     ref = _ref(snapshot)
+    # verdict 근거의 구성 요소 — 결합 판정에 실제로 들어간 비통과 입력의 수다.
+    _failed_hard = len([c for c in rules["hard_constraints"] if c.status != "PASS"])
+    _rejected = len([s for s in scenario["scenario_results"] if s.verdict == "reject"])
+    _conditional = len([s for s in scenario["scenario_results"] if s.verdict == "conditional"])
     evidences = (
         _ev(
             "verdict",
-            len([c for c in rules["hard_constraints"] if c.status != "PASS"]),
-            "failed_check_count",
+            _failed_hard + _rejected + _conditional,
+            "non_ok_input_count",
             ref,
-            f"물류 하드 체크 {len(rules['hard_constraints'])} 건 중 통과 못 한 수 → {verdict}",
+            "시나리오 집계 ⊕ 하드 제약 최악값 결합 (2026-09-01 확정) — "
+            f"비통과 하드 체크 {_failed_hard}건 · reject {_rejected}안 · "
+            f"conditional {_conditional}안 → {verdict}",
             source="tool_calc",
         ),
         _ev(
