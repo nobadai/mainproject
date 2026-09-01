@@ -1,12 +1,26 @@
-"""Inventory/Logistics Policy 및 T0 Runtime Snapshot Repository."""
+"""Inventory/Logistics Policy 및 Runtime Fact Repository.
+
+★ 여기의 "Snapshot" 은 **폐지된 T0 스냅샷이 아니다.** 정의서 v2.5 §3.2 가 폐지한
+  것은 *마스터가 전 부서 데이터를 얼려 배포하던 덩어리*이고(v1.2 §1.2-9 · §3.1.1 ·
+  §3.2.3 — v2.5 부록 B 가 각각 대체·폐지로 적은 조항들이다),
+  이 모듈이 만드는 것은 **물류가 자기 도메인만 진입 시점에 1회 읽어 호출이 끝날
+  때까지 고정하는 값**이다 — 정의서 §1.2-13("한 호출 안에서 같은 값을 두 번 조회하지
+  않는다")의 구현 수단이다.
+
+  두 개념이 같은 단어를 쓰는 탓에 *"폐지된 것을 왜 아직 쓰나"* 로 읽히기 쉬워 여기에
+  구분을 남긴다. 타입 이름(`InventoryLogisticsSnapshot`)은 물류 문서 세트 v1.4 의
+  IO Contract 가 그 이름으로 계약을 적고 있어 문서와 함께 움직여야 한다.
+"""
 
 from datetime import date
 from decimal import Decimal
+from typing import NamedTuple
 
 from psycopg import sql
 
 from app.logistics.db import fetch_all, get_db_schema
 from app.logistics.schemas import (
+    POLICY_VERSION,
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
     ItemStoragePolicyFact,
@@ -14,7 +28,8 @@ from app.logistics.schemas import (
     LogisticsRuntimeFixture,
 )
 
-LOGISTICS_POLICY_VERSION = "v1.3-PROVISIONAL"
+#: 계약(Literal)과 같은 값을 쓴다 — schemas 가 단일 소유다 (#121 ⑤).
+LOGISTICS_POLICY_VERSION = POLICY_VERSION
 LOGISTICS_POLICY_USAGE_SCOPE = "AGENT_MVP_DEMO"
 _NUMERIC_POLICY_KEYS = {
     "guaranteed_capacity_kg",
@@ -147,8 +162,25 @@ def get_active_logistics_runtime_fixture(*, as_of: date) -> LogisticsRuntimeFixt
         ).format(schema),
         [LOGISTICS_POLICY_USAGE_SCOPE, as_of],
     )
-    if len(rows) != 1:
-        raise LookupError(
+    # 🔴 0건과 2건 이상은 **다른 종류의 실패다** (#121 4단계 · 2026-09-01 교차검증 지적).
+    #
+    #   0건       그날의 fixture 가 아직 없다 — 부재. 다시 불러도 같다
+    #   2건 이상  활성 fixture 가 둘이라 어느 것이 그날의 사실인지 모른다 — 무결성 위반
+    #
+    # ★ 둘을 같은 LookupError 로 내면 소비자가 가릴 수 없다. 어댑터는 부재를
+    #   RUNTIME_NOT_READY 로, 실행 오류를 ERROR 로 나누는데(M-1 §5.1) 중복이 부재로
+    #   섞이면 **깨진 데이터가 "데이터를 주세요" 로 나간다.**
+    #
+    # ★ DB 가 막아 주지 않는다 — `uq_log_runtime_fixture` 는
+    #   `(sim_run_id, as_of, usage_scope)` 라 sim_run_id 가 다른 활성 행 둘이 같은
+    #   날짜에 공존할 수 있고, 이 조회는 sim_run_id 를 조건에 넣지 않는다.
+    #
+    # ★ 여기서 하나를 고르지 않는다 — 뒤 행이 앞 행을 덮는 것도 고르는 것이다
+    #   (`find_in_transit_schedule_gap` 의 inbound_id 중복 처리와 같은 규율).
+    if not rows:
+        raise LookupError(f"No active Logistics runtime fixture for as_of={as_of}")
+    if len(rows) > 1:
+        raise ValueError(
             f"Expected exactly one active Logistics runtime fixture, found {len(rows)}"
         )
     return _build_logistics_runtime_fixture(rows[0], expected_as_of=as_of)
@@ -222,8 +254,34 @@ def _item_storage_policy_from_row(row: dict[str, object]) -> ItemStoragePolicyFa
     )
 
 
+class LogisticsRead(NamedTuple):
+    """한 호출이 읽은 물류 Fact 한 벌 — Snapshot 과 **그것을 만든 Policy**.
+
+    ★ 정의서 §1.2-13(한 호출 안에서 같은 값을 두 번 조회하지 않는다)의 구현 수단이다
+      (#121 ⑤). 종전에는 Snapshot 조립이 Policy 를 읽어 **값만** 담고 버렸고,
+      어댑터가 `source_refs`·`policy_version` 때문에 같은 테이블을 다시 읽었다.
+      두 읽기가 서로 다른 active 행을 볼 수 있어 *"payload 값은 옛 정책, 표기된
+      policy_version 은 새 정책"* 이 조용히 성립하는 구조였다.
+
+    ★ 두 읽기가 여전히 다른 connection 인 것(조회 원자성)은 별개 위험이며 여기서
+      해결하지 않는다 — 이 타입이 닫는 것은 **같은 값의 중복 조회**다.
+    """
+
+    snapshot: InventoryLogisticsSnapshot
+    policy: LogisticsPolicy
+
+
 def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisticsSnapshot:
-    """Fixture, direct physical lots, Policy를 한 번 읽어 고정 T0 Snapshot을 만든다."""
+    """Snapshot 만 필요한 소비자용 (독립 Service 경로)."""
+    return get_current_logistics_read(as_of=as_of).snapshot
+
+
+def get_current_logistics_read(*, as_of: date) -> LogisticsRead:
+    """Fixture, direct physical lots, Policy를 한 번 읽어 호출 중 고정될 값을 만든다.
+
+    "한 번"이 계약이다 (정의서 §1.2-13) — 같은 호출이 같은 값을 다시 읽으면 그 사이
+    원장이 바뀌어 **같은 `as_of` 인데 값이 다른** 상태가 성립한다.
+    """
     fixture = get_active_logistics_runtime_fixture(as_of=as_of)
     policy = get_active_logistics_policy()
     schema = sql.Identifier(get_db_schema())
@@ -259,7 +317,7 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
 
     lots = [_inventory_lot_from_row(row, as_of=fixture.as_of) for row in inventory_rows]
     used_capacity = sum((lot.available_qty_kg for lot in lots), start=Decimal(0))
-    return InventoryLogisticsSnapshot(
+    snapshot = InventoryLogisticsSnapshot(
         snapshot_id=None,
         as_of=fixture.as_of,
         on_hand_by_lot=lots,
@@ -286,6 +344,7 @@ def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisti
             *policy.source_refs.values(),
         ],
     )
+    return LogisticsRead(snapshot=snapshot, policy=policy)
 
 
 #: Purchase 등급 어휘. 원천이 이미 이 어휘면 변환이 아니므로 그대로 통과시킨다.

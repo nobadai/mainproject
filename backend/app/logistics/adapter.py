@@ -29,17 +29,15 @@ adapters/logistics.py — 재고·물류 에이전트 접점 (마스터 ↔ 물�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from app.logistics.repository import (
-    get_active_logistics_policy,
-    get_current_inventory_logistics_snapshot,
-)
+from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
-    derive_logistics_verdict,
+    derive_procurement_verdict,
     evaluate_procurement_business_signals,
     evaluate_procurement_rules,
     merge_business_warnings,
@@ -50,6 +48,8 @@ from app.logistics.scenario_engine import (
 )
 from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsPolicy
 from app.logistics.tools import (
+    CAP_BY_DATE_WINDOW_DAYS,
+    build_cap_window,
     build_inventory_by_item,
     build_lot_constraints,
     calculate_cap_by_date,
@@ -57,6 +57,8 @@ from app.logistics.tools import (
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
+
+logger = logging.getLogger(__name__)
 
 _AGENT = "inventory"
 
@@ -70,8 +72,8 @@ _T_SIGNALS = "evaluate_procurement_business_signals"
 
 _JUDGMENT_FIELDS = ("cap_by_date_policy",)
 
-_CAP_WINDOW_DAYS = 18
-"""PRE_PURCHASE 에서 `cap_by_date` 를 뽑는 **조회 창**의 길이.
+_CAP_WINDOW_DAYS = CAP_BY_DATE_WINDOW_DAYS
+"""PRE_PURCHASE 에서 `cap_by_date` 를 뽑는 **조회 창**의 길이 — 물류 Tool 소유값.
 
 ★ **제약값이 아니다.** 물류의 `calculate_cap_by_date()` 는 도착일 목록을 받는데,
   제안 전에는 도착일이 없다. 그래서 `as_of + lead` 부터 이 길이만큼 훑는다.
@@ -81,6 +83,10 @@ _CAP_WINDOW_DAYS = 18
 
   창의 길이 자체는 `cap_by_date_window_days` 로 payload 에 밝힌다. 받는 쪽이
   *"이 날짜까지밖에 안 왔다"* 를 알아야 없는 날을 0 으로 읽지 않는다.
+
+★ 값은 `tools.CAP_BY_DATE_WINDOW_DAYS` 를 그대로 쓴다 (#121 ⑤) — 어댑터가 자기
+  숫자를 들고 있으면 판정 창과 조회 창이 갈린다. 이름만 여기 남긴 것은 Evidence
+  문구·payload 키가 이 이름을 참조하기 때문이다.
 """
 
 _RULE_PREFIX = "logistics_rule/"
@@ -145,7 +151,11 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_LOTS]
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        read = _load_read(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
+    snapshot = read.snapshot if read is not None else None
     if snapshot is None:
         return _not_ready(
             request,
@@ -163,7 +173,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             reason=f"물류 스냅샷 기준일이 {snapshot.as_of} 다 — 요청은 {as_of} 다",
         )
 
-    policy = _load_policy()
+    policy = read.policy
     ref = _ref(snapshot)
     lots_ref = _lots_ref(snapshot)
     lots = build_lot_constraints(snapshot)
@@ -242,12 +252,19 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             )
         )
 
-    if policy is not None:
-        payload["policy_version_used"] = policy.policy_version
-        if "guaranteed_capacity_kg" not in policy.source_refs:
-            missing.append("guaranteed_capacity_kg@policy_source_ref")
-    else:
-        missing.append("logistics_policy")
+    # ★ policy 는 항상 있다 — Snapshot 조립이 Policy 로 만들어지므로 read 가 성공한
+    #   순간 둘 다 존재한다 (#121 ⑤).
+    #
+    #   🔴 **이 변경이 그렇게 만든 것이지, 종전에도 그랬던 것이 아니다.** 종전에는
+    #   어댑터가 policy 를 **두 번째로 독립 조회**하고 모든 예외를 삼켰기 때문에,
+    #   첫 조회 성공 후 둘째만 실패하면 *"snapshot 은 있는데 policy 는 None"* 이
+    #   실제로 성립했다. 그때 나가던 것은 `cap_by_date_policy="UNKNOWN"` 이고,
+    #   그것은 **판정 필드(`judgment_fields`)에 실린 지어낸 값**이며 근거까지 붙어
+    #   봉투 검증을 통과했다 (§1.2-10 위반). 분기를 없앤 진짜 이유가 이것이다 —
+    #   "죽은 코드라서" 가 아니라 **조작값이 나가던 경로라서**다.
+    payload["policy_version_used"] = policy.policy_version
+    if "guaranteed_capacity_kg" not in policy.source_refs:
+        missing.append("guaranteed_capacity_kg@policy_source_ref")
 
     reply = AgentReply(
         request_id=request.context.request_id,
@@ -279,7 +296,11 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_RULES]
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        read = _load_read(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
+    snapshot = read.snapshot if read is not None else None
     if snapshot is None:
         return _not_ready(
             request,
@@ -299,7 +320,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             reason=f"물류 스냅샷 기준일이 {snapshot.as_of} 다 — 요청은 {as_of} 다",
         )
 
-    policy = _load_policy()
+    policy = read.policy
     rules = evaluate_procurement_rules(as_of=as_of, snapshot=snapshot)
 
     # 🔴 물류가 **못 돌겠다고 한 이유**를 그대로 옮긴다 (2026-08-27 물류 B-1 회신 §5).
@@ -344,13 +365,13 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     #   아니라는 사실**을 밝힌다 — 재무 `payroll_date` 가 Schema default 로 조용히
     #   쓰이던 것과 같은 자리다. 등록되면 이 줄이 저절로 사라진다.
     payload["rental_cap_kg"] = _num(_RENTAL_CAP_KG)
-    if policy is None or _RENTAL_CAP_KEY not in policy.source_refs:
+    if _RENTAL_CAP_KEY not in policy.source_refs:
         missing.append(f"{_RENTAL_CAP_KEY}@policy_source_ref")
 
     payload.update(
         {
             "used_capacity_kg": _num(snapshot.used_capacity_kg),
-            "cap_by_date_policy": policy.cap_by_date_policy if policy else "UNKNOWN",
+            "cap_by_date_policy": policy.cap_by_date_policy,
             "cap_by_date_window_days": _CAP_WINDOW_DAYS,
         }
     )
@@ -451,22 +472,19 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     if rules["soft_warnings"]:
         payload["soft_warnings"] = list(rules["soft_warnings"])
 
-    if policy is not None:
-        payload["policy_version_used"] = policy.policy_version
-        # 정책값이 DB 에서 온 것인지 — 값이 아니라 **출처**의 문제라 READY 는 유지한다
-        missing.extend(
-            f"{key}@policy_source_ref"
-            for key in (
-                "guaranteed_capacity_kg",
-                "inbound_lead_days",
-                "daily_inbound_capacity_kg",
-                "inbound_transport_capacity_kg",
-                "cap_by_date_policy",
-            )
-            if key not in policy.source_refs
+    payload["policy_version_used"] = policy.policy_version
+    # 정책값이 DB 에서 온 것인지 — 값이 아니라 **출처**의 문제라 READY 는 유지한다
+    missing.extend(
+        f"{key}@policy_source_ref"
+        for key in (
+            "guaranteed_capacity_kg",
+            "inbound_lead_days",
+            "daily_inbound_capacity_kg",
+            "inbound_transport_capacity_kg",
+            "cap_by_date_policy",
         )
-    else:
-        missing.append("logistics_policy")
+        if key not in policy.source_refs
+    )
 
     ref = _ref(snapshot)
     evidences = [
@@ -529,7 +547,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                     value,
                     unit,
                     _policy_ref(policy, name, ref),
-                    f"Logistics Policy {policy.policy_version if policy else '?'}",
+                    f"Logistics Policy {policy.policy_version}",
                     grade="SIM_FIXED",
                 )
             )
@@ -632,14 +650,12 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     #    **DB 에 그 키가 등록되면 비게 된다.** 그날 물류 어댑터가 예외로 죽는다.
     #
     #    통과 못 한 하드 체크의 **코드를 그대로 적는다** — 지어내지 않고 물류가 낸 이름이다.
+    # ★ 첫 fallback(비-PASS 코드 재수집)은 없앴다 — `missing` 초기화가 이미 같은
+    #   comprehension 으로 무조건 채우므로 여기서 다시 돌려도 한 건도 늘지 않는다.
+    #   `logistics_runtime` 만이 유효한 최후 방어다: Rule 이 막았는데 비-PASS 코드가
+    #   하나도 없는(=이름을 못 내는) 경우에 사실만이라도 남긴다.
     if rules["runtime_status"] != "READY" and not missing:
-        missing.extend(
-            f"logistics_rule/{check.code}"
-            for check in rules["hard_constraints"]
-            if check.status != "PASS"
-        )
-    if rules["runtime_status"] != "READY" and not missing:
-        missing.append("logistics_runtime")  # 코드조차 없으면 최소한 사실은 남긴다
+        missing.append("logistics_runtime")
 
     if payload.get("soft_warnings"):
         evidences.append(
@@ -713,7 +729,11 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         )
         return reply, _meta(request, run_id, [])
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        read = _load_read(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
+    snapshot = read.snapshot if read is not None else None
     if snapshot is None:
         return _not_ready(
             request,
@@ -723,10 +743,12 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             reason="물류 스냅샷을 읽지 못했다",
         )
 
-    policy = _load_policy()
+    policy = read.policy
     scenario = run_logistics_procurement_scenario(proposal, snapshot)
     rules = evaluate_procurement_rules(as_of=as_of, snapshot=snapshot)
-    verdict = derive_logistics_verdict(rules)
+    # 시나리오 집계 ⊕ 하드 제약의 최악값 결합 (2026-09-01 마스터 확정 · #121 3단계).
+    # 전 시나리오 reject 인데 하드가 전부 PASS 라고 ok 가 나가던 집계 단절의 수정이다.
+    verdict = derive_procurement_verdict(rules, scenario["scenario_results"])
 
     # 업무 위험 판정(비교식)은 Rule 소유 — 독립 경로(service)와 같은 함수·같은 병합을
     # 쓴다 (#111 A3). 여기서 계산하는 것이 아니라 Rule 이 낸 signal 을 나를 뿐이다.
@@ -815,13 +837,19 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     #   사실이 사라지는 것은 아니다 — `soft_warnings` 가 같은 코드를 그대로 나른다.
 
     ref = _ref(snapshot)
+    # verdict 근거의 구성 요소 — 결합 판정에 실제로 들어간 비통과 입력의 수다.
+    _failed_hard = len([c for c in rules["hard_constraints"] if c.status != "PASS"])
+    _rejected = len([s for s in scenario["scenario_results"] if s.verdict == "reject"])
+    _conditional = len([s for s in scenario["scenario_results"] if s.verdict == "conditional"])
     evidences = (
         _ev(
             "verdict",
-            len([c for c in rules["hard_constraints"] if c.status != "PASS"]),
-            "failed_check_count",
+            _failed_hard + _rejected + _conditional,
+            "non_ok_input_count",
             ref,
-            f"물류 하드 체크 {len(rules['hard_constraints'])} 건 중 통과 못 한 수 → {verdict}",
+            "시나리오 집계 ⊕ 하드 제약 최악값 결합 (2026-09-01 확정) — "
+            f"비통과 하드 체크 {_failed_hard}건 · reject {_rejected}안 · "
+            f"conditional {_conditional}안 → {verdict}",
             source="tool_calc",
         ),
         _ev(
@@ -877,13 +905,15 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
                     [
                         adjustment
                         for result in scenario["scenario_results"]
+                        # 집계와 같은 모집단 — reject 안의 조정은 근거 건수에서도 뺀다
+                        if result.verdict != "reject"
                         for adjustment in result.adjustments
                         if adjustment.axis == preferred
                     ]
                 ),
                 "adjustment_count",
                 ref,
-                f"전 시나리오 조정 제안의 고유 축이 {preferred} 하나 — 해당 축 제안 건수",
+                f"비-reject 시나리오 조정 제안의 고유 축이 {preferred} 하나 — 해당 축 제안 건수",
                 source="tool_calc",
             ),
         )
@@ -895,6 +925,14 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     suggested: list[SuggestedAdjustment] = []
     seen_adjustments: set[tuple[str, date, float]] = set()
     for result in scenario["scenario_results"]:
+        # ★ reject 안의 adjustment 는 승격하지 않는다 (#121 2단계). multi-split 에서
+        #   앞 회차의 조정이 남은 채 전체가 reject 될 수 있는데, 구제 불가 판정한 안의
+        #   조정을 행동 제안으로 내보내면 "reject 는 조정으로 구제 불가"와 모순된다.
+        #   진단 기록은 payload.scenario_results 에 그대로 남는다 — 사실이 사라지는
+        #   것이 아니라 제안으로 격상되지 않을 뿐이다. needs_followup 도 이에 따라
+        #   reject 만으로는 서지 않는다.
+        if result.verdict == "reject":
+            continue
         for adjustment in result.adjustments:
             if adjustment.axis == "quantity" and adjustment.suggested_qty_kg is not None:
                 target, unit = _num(adjustment.suggested_qty_kg), "kg"
@@ -920,8 +958,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
                     target_value=target,
                     unit=unit,
                     reason=(
-                        f"{result.label} 시나리오 "
-                        f"{adjustment.split_date.isoformat()} 회차 — {what}"
+                        f"{result.label} 시나리오 {adjustment.split_date.isoformat()} 회차 — {what}"
                     ),
                     ref_ids=(ref,),
                 )
@@ -972,18 +1009,40 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
 # ---------------------------------------------------------------------------
 
 
-def _load_snapshot(as_of: date) -> InventoryLogisticsSnapshot | None:
-    try:
-        return get_current_inventory_logistics_snapshot(as_of=as_of)
-    except Exception:  # noqa: BLE001 — 없는 것은 예외가 아니라 상태다
-        return None
+class _SnapshotLoadError(Exception):
+    """스냅샷 조회가 **실행 오류**로 실패했다 — 데이터 부재(LookupError)와 다르다."""
 
 
-def _load_policy() -> LogisticsPolicy | None:
+def _load_read(as_of: date) -> LogisticsRead | None:
+    """부재만 None 으로, 실행 오류는 구분해 올린다 (#121 4단계).
+
+    Repository 예외 계약 전수 확인(2026-09-01) — 정상적인 "데이터 없음/미확정"은
+    **LookupError 둘**이다(runtime fixture 0건 · 필수 정책 미등재). 독립 Service
+    경로(`service._get_snapshot_or_none`)가 같은 기준선이다.
+
+    그 외 — ValueError/TypeError(데이터는 있는데 모양이 깨졌거나 활성 fixture 가
+    중복인 무결성 위반), RuntimeError(env 부재), psycopg 오류(DB 장애) — 는 회사
+    상태가 아니라 **실행 실패**다. 종전처럼 RUNTIME_NOT_READY 로 뭉개면 마스터가
+    재시도하지 않고 "데이터를 달라"로 오독한다 (M-1 §5.1 — ERROR 가 재시도 가치가
+    있는 쪽).
+
+    ★ **예외가 하나 알려져 있다** — `item_storage_policies.operational_limit_days`
+      는 DB 가 nullable 인데 `_inventory_lot_from_row` 가 NULL 을 TypeError 로 낸다.
+      그 NULL 은 "보관한계 미등록"(부재)이라 여기서는 ERROR 로 분류되지만 재시도해도
+      풀리지 않는다. Repository 안에서 같은 컬럼을 두 경로가 다르게 다루는 것이
+      원인이라 어댑터 특례가 아니라 Repository 어휘를 고쳐야 하고, 그러면 독립
+      Service 도 함께 고쳐진다 — **별도 안건**이다 (2026-09-01 교차검증 I-1).
+      NULL 인 Lot 의 신선도를 어떻게 볼지가 함께 정해져야 해 기계적 수정이 아니다.
+    """
     try:
-        return get_active_logistics_policy()
-    except Exception:  # noqa: BLE001
-        return None
+        return get_current_logistics_read(as_of=as_of)
+    except LookupError:
+        return None  # 없는 것은 예외가 아니라 상태다
+    except Exception as error:
+        # 원문 메시지는 로그로만 남긴다 — reasoning 에 그대로 실으면 숫자가 섞여
+        # E-REASONING-NUMERIC 에 걸린다 (2026-09-01 재무 400 회신에서 실측된 함정).
+        logger.exception("Logistics read failed (as_of=%s)", as_of)
+        raise _SnapshotLoadError from error
 
 
 def _free_capacity(snapshot: InventoryLogisticsSnapshot) -> Decimal | None:
@@ -994,15 +1053,14 @@ def _free_capacity(snapshot: InventoryLogisticsSnapshot) -> Decimal | None:
 
 
 def _cap_window(snapshot: InventoryLogisticsSnapshot, as_of: date) -> dict[date, Decimal] | None:
-    """제안 전이라 도착일이 없다 — `as_of + lead` 부터 조회 창만큼 훑는다.
+    """제안 전이라 도착일이 없다 — 물류 Tool 의 조회 창을 그대로 훑는다.
 
-    ★ 물류 Tool 을 그대로 부른다. 창을 정하는 것 말고는 아무것도 하지 않는다.
+    ★ 창의 정의(시작일·길이)는 `tools.build_cap_window` 소유다 (#121 ⑤). 어댑터가
+      같은 날짜 나열을 따로 만들면 판정 창과 조회 창이 갈릴 자리가 생긴다.
     """
-    lead = snapshot.inbound_lead_days
-    if lead is None:
+    dates = build_cap_window(snapshot, as_of)
+    if dates is None:
         return None
-    start = as_of + timedelta(days=lead)
-    dates = [start + timedelta(days=offset) for offset in range(_CAP_WINDOW_DAYS)]
     try:
         return calculate_cap_by_date(snapshot, dates)
     except ValueError:
@@ -1049,9 +1107,7 @@ def _policies_ref(snapshot: InventoryLogisticsSnapshot) -> str:
     return _ref(snapshot)
 
 
-def _policy_ref(policy: LogisticsPolicy | None, key: str, fallback: str) -> str:
-    if policy is None:
-        return fallback
+def _policy_ref(policy: LogisticsPolicy, key: str, fallback: str) -> str:
     return policy.source_refs.get(key, fallback)
 
 
@@ -1098,8 +1154,7 @@ def _inventory_by_item_evidences(
             row["available_qty_kg"],
             "kg",
             lots_ref,
-            f"{row['item']} 가용재고 합계 — 비-ACTIVE·신선도 만료 Lot 제외, "
-            "확정 출고 예약분 차감",
+            f"{row['item']} 가용재고 합계 — 비-ACTIVE·신선도 만료 Lot 제외, 확정 출고 예약분 차감",
             source="tool_calc",
             extra_ref_ids=(outbound_ref,) if outbound_ref != lots_ref else (),
         )
@@ -1120,6 +1175,34 @@ def _meta(request: AgentRequest, run_id: str, tools: Sequence[str]) -> Execution
         tool_order=tuple(range(1, len(tools) + 1)),
         llm_status="DISABLED",
     )
+
+
+def _snapshot_error(
+    request: AgentRequest,
+    run_id: str,
+    tools: Sequence[str],
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """스냅샷 조회의 **실행 실패** — `RUNTIME_NOT_READY` 가 아니다 (#121 4단계).
+
+    다시 부르면 성공할 수 있는 쪽이라 재시도 가치가 있다 (M-1 §5.1 — DB 장애·크래시).
+    ★ 예외 원문을 reasoning 에 싣지 않는다 — 숫자가 섞이면 E-REASONING-NUMERIC 에
+      걸린다(재무 400 실측 함정). 원문은 `_load_snapshot` 이 로그로 남긴다.
+    """
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=request.context.as_of,
+        agent=_AGENT,
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="ERROR",
+        business_status="skipped",
+        payload={"failed_operation": "load_logistics_snapshot"},
+        reasoning=(
+            "물류 스냅샷 조회가 실행 오류로 실패했다 — "
+            "데이터 부재가 아니라 재시도 가치가 있는 실패다."
+        ),
+    )
+    return reply, _meta(request, run_id, tools)
 
 
 def _not_ready(

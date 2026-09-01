@@ -14,7 +14,27 @@ from app.logistics.schemas import (
 
 #: cap_by_date 조회 창 길이 (`as_of + inbound_lead_days`부터, Policy 확정값 18).
 #: Window 밖은 0이 아니라 미조회 영역이다.
+#:
+#: ★ **이 값과 창 구성은 여기 한 벌이다** (#121 ⑤). 종전에는 어댑터가 같은 18과
+#:   같은 날짜 나열을 따로 들고 있어, 한쪽만 바뀌는 날 판정 창(CAPACITY_TIGHT)과
+#:   M-1 조회 창이 조용히 갈라질 자리였다.
 CAP_BY_DATE_WINDOW_DAYS = 18
+
+
+def build_cap_window(snapshot: InventoryLogisticsSnapshot, as_of: date) -> list[date] | None:
+    """`as_of + inbound_lead_days` 부터 조회 창 길이만큼의 날짜 목록.
+
+    제안 전(PRE)에는 도착일이 없어 이 고정 창을 훑고, 판정 창(창고 사용률)도 제안
+    날짜가 아니라 같은 창을 써야 판정이 제안에 흔들리지 않는다. 리드타임(N4)이
+    미확정이면 창을 지어내지 않고 None 이다 — 0 으로 채우면 "오늘 승인분이 오늘
+    도착"이 되어 창고 검사가 무의미해진다 (§1.2-10).
+    """
+    lead = snapshot.inbound_lead_days
+    if lead is None:
+        return None
+    start = as_of + timedelta(days=lead)
+    return [start + timedelta(days=offset) for offset in range(CAP_BY_DATE_WINDOW_DAYS)]
+
 
 #: 가용재고로 인정하는 Lot 상태. DB에 없는 상태를 새로 만들지 않는다 —
 #: ACTIVE가 아닌 상태(검수/격리/사용불가 등)는 물리 점유만 하고 가용에서 빠진다.
@@ -50,12 +70,15 @@ def calculate_window_capacity_usage(
     없으면 None — 그 사실은 기존 Hard Constraint(LOG-H01·H05 등)가 이미
     드러내므로 여기서 이름을 중복으로 만들지 않는다.
     """
-    lead = snapshot.inbound_lead_days
     guaranteed = snapshot.guaranteed_capacity_kg
-    if lead is None or guaranteed is None:
+    # ★ guaranteed 를 **먼저** 본다 — 창 구성보다 앞이다. 순서를 바꾸면 극단 입력
+    #   (`as_of` 가 date.max 근처 + lead > 0)에서 종전의 `None` 대신 OverflowError 가
+    #   난다. 관측 가능성은 낮지만 순서 하나로 종전 동작이 그대로 남는다.
+    if guaranteed is None:
         return None
-    start = as_of + timedelta(days=lead)
-    window = [start + timedelta(days=offset) for offset in range(CAP_BY_DATE_WINDOW_DAYS)]
+    window = build_cap_window(snapshot, as_of)
+    if window is None:
+        return None
     try:
         caps = calculate_cap_by_date(snapshot, window)
     except ValueError:

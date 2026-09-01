@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from uuid import UUID
 
 from pydantic import (
@@ -16,6 +16,16 @@ from pydantic import (
 
 from app.logistics.llm.schemas import LLMResponseFields
 from app.purchase_agent.schemas import PurchaseProposal
+
+#: 물류 운영 Policy 의 현재 버전. **문서 세트 버전(v1.4)과 다른 축이다** — 이쪽은
+#: `agent_policy_config` 의 행을 고르는 값이라 DB 와 함께 움직인다.
+#: 타입(Literal)과 값이 같이 가야 하므로 한 곳에서 만든다 — 종전에는 이 문자열이
+#: repository 상수 1곳 + Literal 3곳으로 흩어져 버전을 올릴 때 네 곳을 동시에
+#: 고쳐야 했다 (#121 ⑤).
+PolicyVersion = Literal["v1.3-PROVISIONAL"]
+#: 값은 타입에서 **파생한다** — 문자열이 한 번만 적히게 하려는 것이다. 둘을 나란히
+#: 적으면 버전을 올릴 때 여전히 두 줄을 함께 고쳐야 한다 (2026-09-01 교차검증 지적).
+POLICY_VERSION: PolicyVersion = get_args(PolicyVersion)[0]
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
@@ -140,10 +150,20 @@ class ItemStoragePolicyFact(BaseModel):
 
 
 class InventoryLogisticsSnapshot(BaseModel):
-    """Repository가 조회한 T0 Inventory/Logistics 사실과 미결 정책값."""
+    """Repository가 한 호출 진입 시점에 읽어 고정한 Inventory/Logistics 사실과 정책값.
+
+    ★ **폐지된 T0 스냅샷이 아니다.** 마스터가 전 부서 데이터를 얼려 배포하던 구조는
+      정의서 v2.5 §3.2 로 폐지됐다. 이 모델은 물류가 **자기 도메인만** 1회 읽어
+      호출이 끝날 때까지 고정하는 값이며, 정의서 §1.2-13 이 요구하는 것이다.
+      (`repository` 모듈 docstring 참조)
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    #: 🔴 **폐지된 T0 스냅샷의 식별자 — 실제 유산이다.** Repository 는 항상 `None` 을
+    #: 넣고, 그래서 `_snapshot_warnings` 가 매 실행마다 `SNAPSHOT_ID_UNRESOLVED` 를
+    #: 낸다(상시 노이즈). 실행이력 컬럼·독립 응답 필드로도 나가 있어 그냥 지울 수
+    #: 없다 — 실제 ID 를 부여할지 계약에서 걷어낼지가 **미결 안건**이다 (#121 별도).
     snapshot_id: str | None
     as_of: date
     on_hand_by_lot: list[InventoryLotSnapshot]
@@ -165,7 +185,7 @@ class InventoryLogisticsSnapshot(BaseModel):
     #: 물류 계산은 정상 수행한다 — 필수 키로 승격 금지(행 없는 순간 전체 실패).
     capacity_tight_ratio: Decimal | None = Field(default=None, gt=0, le=1)
     freshness_pressure_ratio: Decimal | None = Field(default=None, gt=0, le=1)
-    policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
+    policy_version: PolicyVersion = POLICY_VERSION
     evidence_refs: list[str]
 
     @field_validator(
@@ -201,7 +221,7 @@ class LogisticsPolicy(BaseModel):
     #: 값의 성격은 실업계 기준이 아니라 시뮬레이션 검증용 PROVISIONAL 이다.
     capacity_tight_ratio: Decimal | None = Field(default=None, gt=0, le=1)
     freshness_pressure_ratio: Decimal | None = Field(default=None, gt=0, le=1)
-    policy_version: Literal["v1.3-PROVISIONAL"]
+    policy_version: PolicyVersion
     usage_scope: Literal["AGENT_MVP_DEMO"]
     source_refs: dict[str, str]
 
@@ -344,8 +364,12 @@ class LogisticsProcurementResponse(LLMResponseFields):
     cycle: Literal["PROCUREMENT"] = "PROCUREMENT"
     as_of: date
     snapshot_id: str | None
-    policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
+    policy_version: PolicyVersion = POLICY_VERSION
     runtime_status: RuntimeStatus
+    #: 시나리오 집계 ⊕ 하드 제약의 최악값 결합 (2026-09-01 마스터 확정 · #121 3단계).
+    #: any reject → FAIL / any conditional → REVIEW_REQUIRED / 전부 ok → PASS 에
+    #: 하드 UNRESOLVED/FAIL 이 값을 낮출 수만 있다. 2026-09-01 이전 실행이력의
+    #: verdict 는 하드 제약만의 판정이다.
     verdict: FinalVerdict | None
     band: LogisticsBand
     #: 물류가 직접 집계한 품목별 가용재고. confirmed_outbound.item 누락 등으로
@@ -362,6 +386,8 @@ class LogisticsProcurementResponse(LLMResponseFields):
     missing_data: list[str] = Field(default_factory=list)
     #: Rule/Scenario Engine 이 결정한 우선 조정 축(quantity/timing). 조정이 없거나
     #: 축이 혼재하면 None — LLM 이 아니라 결정론 층이 정한 값이다.
+    #: reject 시나리오의 조정은 집계에서 제외된다(#121 2단계) — 그 조정은
+    #: scenario_results 안의 진단 기록으로만 남는다.
     preferred_adjustment: str | None = None
     evidences: list[LogisticsEvidence]
 

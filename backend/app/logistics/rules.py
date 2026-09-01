@@ -54,6 +54,30 @@ LOT_FRESHNESS_UNRESOLVED = "LOT_FRESHNESS_UNRESOLVED"
 #: 사이클 어휘를 섞지 않는다 (결정서 §5).
 SALES_PRIORITY_ADJUSTMENT = "우선 출고 대상으로 검토합니다."
 
+#: Rule 이 `soft_warnings` 로 내는 **미확정 계열** 코드의 전체 집합 (#121 ⑤).
+#:
+#: ★ 이 코드들은 `interpretation._MISSING_DATA_NAMES` 가 사람용 이름으로 옮긴다.
+#:   발행처(여기)와 번역표가 따로 자라면 새 코드가 generic 이름으로 뭉개져
+#:   **무엇이 없는지가 사라진다** — 목록을 명시해 테스트가 대조할 수 있게 한다.
+#: ★ 업무 위험(BUSINESS_SIGNALS)은 여기 넣지 않는다. 미확정이 아니라 판정 결과다.
+UNRESOLVED_WARNING_CODES = frozenset(
+    {
+        # `_snapshot_warnings` 가 내는 스냅샷 계열
+        "SNAPSHOT_ID_UNRESOLVED",
+        "GRADE_VOCABULARY_UNRESOLVED",
+        "PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT",
+        "IN_TRANSIT_UNRESOLVED",
+        "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED",
+        "CONFIRMED_OUTBOUND_SCHEDULE_UNRESOLVED",
+        # Sales 전용 — H1 미래 점유를 못 셈한 사실
+        "H1_FUTURE_OCCUPANCY_UNRESOLVED",
+        # 업무 위험 판정을 정책 부재·데이터 부재로 건너뛴 사실
+        CAPACITY_TIGHT_POLICY_UNRESOLVED,
+        FRESHNESS_PRESSURE_POLICY_UNRESOLVED,
+        LOT_FRESHNESS_UNRESOLVED,
+    }
+)
+
 
 class SignalMeasurements(TypedDict, total=False):
     """판정에 실제 사용된 원값 — fact 조립이 같은 값을 재계산하지 않게 한다 (v1.3 §5).
@@ -187,6 +211,53 @@ def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None
     if "UNRESOLVED" in statuses:
         return "REVIEW_REQUIRED"
     return "PASS"
+
+
+_FINAL_VERDICT_SEVERITY: dict[FinalVerdict, int] = {
+    "PASS": 0,
+    "REVIEW_REQUIRED": 1,
+    "FAIL": 2,
+}
+#: 시나리오 판정 → FinalVerdict 심각도 매핑. `skipped`는 여기 없다 — 판정 불가는
+#: 안을 통과시키지도(올림) 죽이지도(낮춤) 않고, 그 사실은 Runtime/Constraint가 나른다.
+_SCENARIO_VERDICT_TO_FINAL: dict[str, FinalVerdict] = {
+    "ok": "PASS",
+    "conditional": "REVIEW_REQUIRED",
+    "reject": "FAIL",
+}
+
+
+def derive_procurement_verdict(
+    result: LogisticsRuleResult,
+    scenario_results: list[ScenarioValidationResult],
+) -> FinalVerdict | None:
+    """시나리오 집계와 하드 제약 판정의 **최악값 결합** (2026-09-01 마스터 확정 · #121 3단계).
+
+    확정 문구:
+
+    ```text
+    SCENARIO_VALIDATION 의 business_status 는 그 부서가 검증한 시나리오 전체의 집계다.
+      하나라도 reject → reject / 아니고 하나라도 conditional → conditional / 전부 ok → ok
+    ★ 조정안의 유무는 이 값을 바꾸지 않는다.
+    ★ 하드 제약 상태(PASS/UNRESOLVED)는 이 값을 낮출 수는 있어도 올릴 수 없다.
+    ```
+
+    최악값 결합이 두 별표를 그대로 구현한다 — 하드 UNRESOLVED 는 전-ok 를
+    REVIEW_REQUIRED 로 낮출 수 있지만, 하드 전부 PASS 가 시나리오 reject 를
+    되살리지는 못한다. 종전 `derive_logistics_verdict`(하드만)는 판매 경로와
+    이 결합의 하드 축으로 계속 쓰인다.
+    """
+    hard = derive_logistics_verdict(result)
+    if hard is None:
+        return None
+    worst = hard
+    for scenario in scenario_results:
+        mapped = _SCENARIO_VERDICT_TO_FINAL.get(scenario.verdict)
+        if mapped is None:
+            continue
+        if _FINAL_VERDICT_SEVERITY[mapped] > _FINAL_VERDICT_SEVERITY[worst]:
+            worst = mapped
+    return worst
 
 
 def evaluate_procurement_rules(
@@ -363,6 +434,9 @@ def _known_constraint(
 
 def _snapshot_warnings(snapshot: InventoryLogisticsSnapshot) -> list[str]:
     warnings: list[str] = []
+    # ★ 이 경고는 **상시 발동한다** — Repository 가 `snapshot_id` 를 채우지 않기
+    #   때문이다(폐지된 T0 스냅샷의 유산). 없앨지 실제 ID 를 줄지는 계약 결정이라
+    #   여기서 조용히 끄지 않는다 — 끄면 "검사했더니 문제 없음"으로 위장된다.
     if snapshot.snapshot_id is None:
         warnings.append("SNAPSHOT_ID_UNRESOLVED")
     # 정규화 근거가 없어 등급 어휘를 해석하지 못한 Lot이 있다는 사실만 드러낸다 —
