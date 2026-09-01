@@ -147,8 +147,25 @@ def get_active_logistics_runtime_fixture(*, as_of: date) -> LogisticsRuntimeFixt
         ).format(schema),
         [LOGISTICS_POLICY_USAGE_SCOPE, as_of],
     )
-    if len(rows) != 1:
-        raise LookupError(
+    # 🔴 0건과 2건 이상은 **다른 종류의 실패다** (#121 4단계 · 2026-09-01 교차검증 지적).
+    #
+    #   0건       그날의 fixture 가 아직 없다 — 부재. 다시 불러도 같다
+    #   2건 이상  활성 fixture 가 둘이라 어느 것이 그날의 사실인지 모른다 — 무결성 위반
+    #
+    # ★ 둘을 같은 LookupError 로 내면 소비자가 가릴 수 없다. 어댑터는 부재를
+    #   RUNTIME_NOT_READY 로, 실행 오류를 ERROR 로 나누는데(M-1 §5.1) 중복이 부재로
+    #   섞이면 **깨진 데이터가 "데이터를 주세요" 로 나간다.**
+    #
+    # ★ DB 가 막아 주지 않는다 — `uq_log_runtime_fixture` 는
+    #   `(sim_run_id, as_of, usage_scope)` 라 sim_run_id 가 다른 활성 행 둘이 같은
+    #   날짜에 공존할 수 있고, 이 조회는 sim_run_id 를 조건에 넣지 않는다.
+    #
+    # ★ 여기서 하나를 고르지 않는다 — 뒤 행이 앞 행을 덮는 것도 고르는 것이다
+    #   (`find_in_transit_schedule_gap` 의 inbound_id 중복 처리와 같은 규율).
+    if not rows:
+        raise LookupError(f"No active Logistics runtime fixture for as_of={as_of}")
+    if len(rows) > 1:
+        raise ValueError(
             f"Expected exactly one active Logistics runtime fixture, found {len(rows)}"
         )
     return _build_logistics_runtime_fixture(rows[0], expected_as_of=as_of)

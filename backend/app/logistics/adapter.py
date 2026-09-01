@@ -29,6 +29,7 @@ adapters/logistics.py — 재고·물류 에이전트 접점 (마스터 ↔ 물�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
@@ -57,6 +58,8 @@ from app.logistics.tools import (
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
+
+logger = logging.getLogger(__name__)
 
 _AGENT = "inventory"
 
@@ -145,7 +148,10 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_LOTS]
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        snapshot = _load_snapshot(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
     if snapshot is None:
         return _not_ready(
             request,
@@ -279,7 +285,10 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_RULES]
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        snapshot = _load_snapshot(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
     if snapshot is None:
         return _not_ready(
             request,
@@ -713,7 +722,10 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         )
         return reply, _meta(request, run_id, [])
 
-    snapshot = _load_snapshot(as_of)
+    try:
+        snapshot = _load_snapshot(as_of)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
     if snapshot is None:
         return _not_ready(
             request,
@@ -990,14 +1002,45 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
 # ---------------------------------------------------------------------------
 
 
+class _SnapshotLoadError(Exception):
+    """스냅샷 조회가 **실행 오류**로 실패했다 — 데이터 부재(LookupError)와 다르다."""
+
+
 def _load_snapshot(as_of: date) -> InventoryLogisticsSnapshot | None:
+    """부재만 None 으로, 실행 오류는 구분해 올린다 (#121 4단계).
+
+    Repository 예외 계약 전수 확인(2026-09-01) — 정상적인 "데이터 없음/미확정"은
+    **LookupError 둘**이다(runtime fixture 0건 · 필수 정책 미등재). 독립 Service
+    경로(`service._get_snapshot_or_none`)가 같은 기준선이다.
+
+    그 외 — ValueError/TypeError(데이터는 있는데 모양이 깨졌거나 활성 fixture 가
+    중복인 무결성 위반), RuntimeError(env 부재), psycopg 오류(DB 장애) — 는 회사
+    상태가 아니라 **실행 실패**다. 종전처럼 RUNTIME_NOT_READY 로 뭉개면 마스터가
+    재시도하지 않고 "데이터를 달라"로 오독한다 (M-1 §5.1 — ERROR 가 재시도 가치가
+    있는 쪽).
+
+    ★ **예외가 하나 알려져 있다** — `item_storage_policies.operational_limit_days`
+      는 DB 가 nullable 인데 `_inventory_lot_from_row` 가 NULL 을 TypeError 로 낸다.
+      그 NULL 은 "보관한계 미등록"(부재)이라 여기서는 ERROR 로 분류되지만 재시도해도
+      풀리지 않는다. Repository 안에서 같은 컬럼을 두 경로가 다르게 다루는 것이
+      원인이라 어댑터 특례가 아니라 Repository 어휘를 고쳐야 하고, 그러면 독립
+      Service 도 함께 고쳐진다 — ⑤ 내부 정리 과제 (2026-09-01 교차검증 I-1).
+    """
     try:
         return get_current_inventory_logistics_snapshot(as_of=as_of)
-    except Exception:  # noqa: BLE001 — 없는 것은 예외가 아니라 상태다
-        return None
+    except LookupError:
+        return None  # 없는 것은 예외가 아니라 상태다
+    except Exception as error:
+        # 원문 메시지는 로그로만 남긴다 — reasoning 에 그대로 실으면 숫자가 섞여
+        # E-REASONING-NUMERIC 에 걸린다 (2026-09-01 재무 400 회신에서 실측된 함정).
+        logger.exception("Logistics snapshot load failed (as_of=%s)", as_of)
+        raise _SnapshotLoadError from error
 
 
 def _load_policy() -> LogisticsPolicy | None:
+    # ⑤ 정리 대상 (#121) — Snapshot 조립이 policy 를 이미 읽으므로 이 재조회 자체를
+    # 제거할 때 전체-삼킴도 함께 사라진다. 그때까지 조회 실패는 source_ref 부재
+    # (`*@policy_source_ref` missing)로만 드러난다.
     try:
         return get_active_logistics_policy()
     except Exception:  # noqa: BLE001
@@ -1138,6 +1181,34 @@ def _meta(request: AgentRequest, run_id: str, tools: Sequence[str]) -> Execution
         tool_order=tuple(range(1, len(tools) + 1)),
         llm_status="DISABLED",
     )
+
+
+def _snapshot_error(
+    request: AgentRequest,
+    run_id: str,
+    tools: Sequence[str],
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """스냅샷 조회의 **실행 실패** — `RUNTIME_NOT_READY` 가 아니다 (#121 4단계).
+
+    다시 부르면 성공할 수 있는 쪽이라 재시도 가치가 있다 (M-1 §5.1 — DB 장애·크래시).
+    ★ 예외 원문을 reasoning 에 싣지 않는다 — 숫자가 섞이면 E-REASONING-NUMERIC 에
+      걸린다(재무 400 실측 함정). 원문은 `_load_snapshot` 이 로그로 남긴다.
+    """
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=request.context.as_of,
+        agent=_AGENT,
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="ERROR",
+        business_status="skipped",
+        payload={"failed_operation": "load_logistics_snapshot"},
+        reasoning=(
+            "물류 스냅샷 조회가 실행 오류로 실패했다 — "
+            "데이터 부재가 아니라 재시도 가치가 있는 실패다."
+        ),
+    )
+    return reply, _meta(request, run_id, tools)
 
 
 def _not_ready(

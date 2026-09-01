@@ -15,8 +15,11 @@
   **응답 전체를 비교하지 않는다.** 두 경로는 계약이 다르다(Evidence · missing_data
   어휘 · LLM 필드) — 공유돼야 하는 결정론 값만 대조한다.
 
-★ DB 를 타지 않는다. 스냅샷은 양쪽에 동일 객체를 직접 주입한다 — 로드 실패 처리
-  차이(#121 4단계 건)를 여기에 섞지 않는다.
+★ (d) P1-1 — 스냅샷 로드 실패의 분류: 데이터 부재(LookupError)는 RUNTIME_NOT_READY,
+  실행 오류(무결성 위반·DB 장애 등)는 ERROR. 예외 원문은 reasoning 으로 새지 않는다.
+
+★ DB 를 타지 않는다. (a)~(c)의 스냅샷은 양쪽에 동일 객체를 직접 주입하고,
+  (d)만 로드 실패 자체를 대상으로 repository 함수를 갈아 끼운다.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ from app.logistics.schemas import (
     ScenarioValidationResult,
 )
 from app.logistics.service import run_logistics_procurement_with_snapshot
-from app.master.envelope import AgentRequest, ExecutionContext
+from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2026, 8, 21)
 
@@ -56,10 +59,8 @@ def _ctx() -> ExecutionContext:
     )
 
 
-def _request(payload: dict[str, Any]) -> AgentRequest:
-    return AgentRequest(
-        context=_ctx(), agent="inventory", mode="SCENARIO_VALIDATION", payload=payload
-    )
+def _request(payload: dict[str, Any], mode: str = "SCENARIO_VALIDATION") -> AgentRequest:
+    return AgentRequest(context=_ctx(), agent="inventory", mode=mode, payload=payload)
 
 
 def _snapshot(**overrides: Any) -> InventoryLogisticsSnapshot:
@@ -694,3 +695,95 @@ def test_parity_는_시나리오가_전부_통과인_날도_성립한다(monkeyp
     # 조용한 날의 경고는 signal 이 아니라 POLICY_UNRESOLVED 계열뿐 — 전체 대조로 고정.
     assert reply.payload["soft_warnings"] == service_response.soft_warnings
     assert _business_signals(reply.payload["soft_warnings"]) == set()
+
+
+# ---------------------------------------------------------------------------
+# (d) P1-1 — 스냅샷 로드 실패 분류: 부재는 NOT_READY, 실행 오류는 ERROR (#121 4단계)
+# ---------------------------------------------------------------------------
+
+
+def _raising_loader(error: Exception):
+    def _fn(*, as_of):
+        raise error
+
+    return _fn
+
+
+def _validation_payload() -> dict[str, Any]:
+    return _proposal_payload(
+        split_plan=[{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 1000}],
+        sourcing_qty=1000,
+    )
+
+
+_MODE_PAYLOADS = [
+    pytest.param("PRE_PURCHASE", dict, id="PRE_PURCHASE"),
+    pytest.param("STATUS_QUERY", dict, id="STATUS_QUERY"),
+    pytest.param("SCENARIO_VALIDATION", _validation_payload, id="SCENARIO_VALIDATION"),
+]
+
+
+@pytest.mark.parametrize(("mode", "payload_factory"), _MODE_PAYLOADS)
+def test_데이터_부재는_NOT_READY_다(monkeypatch, mode, payload_factory):
+    """Repository 예외 계약의 부재 쪽 — LookupError(fixture 0건 · 필수 정책 미등재).
+
+    다시 불러도 같은 답이므로 재시도 대상이 아니고(M-1 §5.1), 마스터가 사용자에게
+    무엇을 달라고 할지 알도록 missing_data 에 **이름**이 남는다.
+    """
+    monkeypatch.setattr(
+        adapter,
+        "get_current_inventory_logistics_snapshot",
+        _raising_loader(LookupError("No active Logistics runtime fixture")),
+    )
+    monkeypatch.setattr(adapter, "_load_policy", lambda: None)
+
+    request = _request(payload_factory(), mode=mode)
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    # 이름 없는 NOT_READY 는 계약 위반이다 (M-1 §5.1) — 봉투가 던진다
+    assert "logistics_snapshot" in reply.missing_data
+    assert validate_reply(request, reply, meta) == ()
+
+
+@pytest.mark.parametrize(("mode", "payload_factory"), _MODE_PAYLOADS)
+@pytest.mark.parametrize(
+    "error",
+    [
+        # DB 장애 — 다시 부르면 성공할 수 있다
+        pytest.param(RuntimeError("connection refused: 127.0.0.1:5432"), id="db"),
+        # 무결성 위반 ValueError — 활성 fixture 중복 등 (repository 가 부재와 가른다)
+        pytest.param(
+            ValueError("Expected exactly one active Logistics runtime fixture, found 2"),
+            id="duplicate",
+        ),
+        # 무결성 위반 TypeError — 깨진 행
+        pytest.param(
+            TypeError("Inventory lot remaining_qty_kg must be a Decimal"), id="broken-row"
+        ),
+    ],
+)
+def test_실행_오류는_ERROR_다(monkeypatch, mode, payload_factory, error):
+    """✅ 계약 (#121 4단계) — 종전에는 모든 예외가 NOT_READY 로 뭉개졌다.
+
+    DB 장애·env 부재·무결성 위반(ValueError/TypeError)은 회사 상태가 아니라 실행
+    실패다 — ERROR 로 나가야 마스터가 재시도할 수 있다. 예외 원문(숫자 포함)은
+    reasoning 으로 새지 않는다 — E-REASONING-NUMERIC 함정 방지(재무 400 실측).
+
+    세 예외를 다 도는 이유는 무결성 계열 하나만 대표로 두면 "ValueError 만 부재로
+    되돌리는" 뮤턴트가 살아남기 때문이다 (2026-09-01 교차검증 지적).
+    """
+    monkeypatch.setattr(adapter, "get_current_inventory_logistics_snapshot", _raising_loader(error))
+    monkeypatch.setattr(adapter, "_load_policy", lambda: None)
+
+    request = _request(payload_factory(), mode=mode)
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert reply.payload == {"failed_operation": "load_logistics_snapshot"}
+    # 예외 원문이 새지 않는다 — reasoning 에 숫자가 한 자리도 없어야 한다.
+    assert not any(character.isdigit() for character in reply.reasoning)
+    # ERROR 봉투도 계약을 지킨다 — missing_data 가 비어도 위반이 아니다
+    assert validate_reply(request, reply, meta) == ()

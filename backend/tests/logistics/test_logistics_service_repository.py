@@ -256,12 +256,21 @@ def test_runtime_fixture_loads_confirmed_zero_schedules():
     assert fetch.call_args.args[1] == ["AGENT_MVP_DEMO", date(2025, 12, 31)]
 
 
-@pytest.mark.parametrize("rows", [[], [_fixture_row(), _fixture_row(fixture_id="duplicate")]])
-def test_runtime_fixture_requires_exactly_one_active_row(rows):
+@pytest.mark.parametrize(
+    ("rows", "expected_error", "match"),
+    [
+        # 부재 — 다시 불러도 같다. 소비자는 RUNTIME_NOT_READY 로 옮긴다
+        ([], LookupError, "No active"),
+        # 중복 — 어느 것이 그날의 사실인지 모른다. 부재가 아니라 무결성 위반이므로
+        # 소비자가 ERROR(재시도 가치)로 옮길 수 있게 다른 예외로 낸다 (#121 4단계)
+        ([_fixture_row(), _fixture_row(fixture_id="duplicate")], ValueError, "found 2"),
+    ],
+)
+def test_runtime_fixture_separates_absence_from_duplication(rows, expected_error, match):
     with (
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch("app.logistics.repository.fetch_all", return_value=rows),
-        pytest.raises(LookupError, match="exactly one"),
+        pytest.raises(expected_error, match=match),
     ):
         get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
 
