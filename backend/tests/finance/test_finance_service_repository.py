@@ -27,9 +27,9 @@ def test_procurement_service_returns_one_band_without_cost_warning(
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=finance_context
         ),
-        patch("app.finance.service.save_finance_agent_run") as save_run,
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
 
@@ -64,8 +64,8 @@ def test_procurement_service_does_not_compare_new_cap_to_legacy_limit(
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with (
-        patch("app.finance.service.get_current_finance_runtime_context", return_value=context),
-        patch("app.finance.service.save_finance_agent_run"),
+        patch(f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=context),
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run"),
     ):
         response = run_finance_procurement(request)
     assert response.band.max_feasible_amount_krw == Decimal(6111353)
@@ -74,8 +74,8 @@ def test_procurement_service_does_not_compare_new_cap_to_legacy_limit(
 def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payload):
     request = PurchaseAgentOutput.model_validate(purchase_payload)
     with (
-        patch("app.finance.service.get_current_finance_runtime_context", side_effect=LookupError),
-        patch("app.finance.service.save_finance_agent_run") as save_run,
+        patch(f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", side_effect=LookupError),
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
     assert response.runtime_status == "RUNTIME_NOT_READY"
@@ -87,7 +87,7 @@ def test_procurement_service_maps_only_lookup_error_to_not_ready(purchase_payloa
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context",
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context",
             side_effect=OperationalError("database unavailable"),
         ),
         pytest.raises(OperationalError),
@@ -102,9 +102,9 @@ def test_sales_service_applies_approved_purchase_overlay(finance_context, sales_
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=finance_context
         ),
-        patch("app.finance.service.save_finance_agent_run") as save_run,
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run") as save_run,
     ):
         response = run_finance_sales(request)
 
