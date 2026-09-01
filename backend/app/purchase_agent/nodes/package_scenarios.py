@@ -14,6 +14,7 @@ from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
 from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
+from app.purchase_agent.quotes import observed_date, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -24,6 +25,11 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
     축이 하나뿐인 날은 전 안이 같은 축을 쓴다 — 그게 정상이고, ⑦의 중복 검사도 그날은
     면제한다. 축이 여럿이면 겹치지 않게 배분해 "3안인데 사실 한 안"을 피한다.
     """
+    if not labels:
+        # 안이 하나도 없는 날 — ③이 시세를 못 받아 초안을 만들지 않았다. 배정할 축이 없다.
+        # 이 줄이 없으면 아래 ``labels[-1]``이 IndexError로 죽고, 그러면 "왜 안이 없는가"라는
+        # 사유가 오케스트레이터에 도달하지 못한다.
+        return {}
     if len(allowed_axes) == 1:
         return dict.fromkeys(labels, allowed_axes[0])
     axes = dict.fromkeys(labels, "quantity")
@@ -319,6 +325,43 @@ def _weighted_unit_price(sourcing: list[dict], total_qty_kg: int) -> float:
     return amount / require_positive(total_qty_kg, "total_qty_kg")
 
 
+def _quote_provenance(market_quotes: list[dict], as_of: str) -> dict[str, str]:
+    """시세 근거의 **출처 등급과 설명**. 실 경락과 mock 을 갈라 적는다 (#70).
+
+    🔴 전에는 어느 경로로 왔든 ``SIM_FIXED`` · ``"…실측 (mock)"`` 으로 고정돼 있었다.
+      실 DB 시세를 쓰는 날에도 **출처를 거짓으로 표시**했다는 뜻이고, Critic·H1 이 읽는
+      값이라 "데이터는 시뮬레이션 / 실행은 실제"라는 구분이 여기서 무너진다
+      (Codex 교차검증 2026-08-31).
+
+    등급이 ``MEASURED`` 가 아닌 이유: 그건 **마스터의 입력 등급 어휘**다
+    (``app/master/inputs.py`` — MEASURED · DERIVED · MOCK · MISSING). 우리 rationale 의
+    사다리는 ``OFFICIAL > VENDOR > SIM_FIXED > ASSUMED`` 네 단계뿐이고(§7.3), 가락 경락
+    실적은 **공영도매시장의 공식 거래 기록**이라 그 사다리에서 ``OFFICIAL`` 이 맞는 자리다.
+    등급이 실제로 중요한 이유도 있다 — ``grade_unit_price`` 는 ``check_max_price`` 와 사중
+    일치 금액 축을 타는 **하드 제약 입력**이고, ``HARD_ALLOWED_GRADES`` 가 그 자격을 본다.
+
+    **데이터가 말하게 한다.** DB 공급자만 각 줄에 규격을 얹으므로(``quotes._materialize``),
+    그 표시가 곧 "실 경락에서 왔다"는 증거다. 주입 경로를 따로 묻지 않는다.
+    """
+    spec = observed_spec(market_quotes)
+    if spec is None:
+        return {
+            "evidence_grade": "SIM_FIXED",
+            "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
+        }
+    observed = observed_date(market_quotes) or as_of
+    # 관측일이 as_of 와 다르면 **며칠 전 값인지**까지 적는다. "12-30 경락 실적"만 적으면
+    # 읽는 사람이 오늘 값인지 아닌지를 스스로 계산해야 한다.
+    gap = (date.fromisoformat(as_of) - date.fromisoformat(observed)).days
+    aged = f" · as_of 기준 {gap}일 전" if gap else ""
+    return {
+        "evidence_grade": "OFFICIAL",
+        "evidence_detail": (
+            f"가락시장 등급별 경락 실적 · 관측일 {observed}{aged} · {spec} · 물량가중"
+        ),
+    }
+
+
 def _inventory_claim(lots: list[dict] | None) -> tuple[str, str, str]:
     """재고 근거 문장 · ref_id · 등급. **NULL과 확정 0을 구분한다** (규칙 3).
 
@@ -339,7 +382,9 @@ def _inventory_claim(lots: list[dict] | None) -> tuple[str, str, str]:
     )
 
 
-def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> list[dict]:
+def _rationale(
+    state: PurchaseAgentState, draft: dict, constraints: dict, quote_ref: str
+) -> list[dict]:
     """근거. **모든 항목에 ref_id가 필수**다 (규칙 4) — 실제 데이터에서 뽑는다.
 
     ``evidence_grade``는 정직하게 붙인다. mock은 팀이 시뮬 조건으로 선언한 값이라
@@ -365,13 +410,17 @@ def _rationale(state: PurchaseAgentState, draft: dict, constraints: dict) -> lis
         },
         {
             "source": "시세관측",
+            # ★ **관측일을 말한다.** 12-30 값을 "12-31 당일 경락가"라고 적으면 그것도
+            #   거짓이다 — 우리는 아침에 돌아서 as_of 이전 최신 거래일을 읽는다.
             "claim": (
-                f"가락 당일 경락가 {state['market_quotes'][0]['price']:,}원/kg 등 "
+                f"가락 {observed_date(state['market_quotes']) or as_of} 경락가 "
+                f"{state['market_quotes'][0]['price']:,}원/kg 등 "
                 f"{len(state['market_quotes'])}개 등급"
             ),
-            "ref_id": f"MQ-가락-{as_of}",
-            "evidence_grade": "SIM_FIXED",
-            "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
+            # ref_id 도 관측일 기준이다. as_of 로 두면 서로 다른 날의 제안이 같은 근거
+            # 식별자를 갖게 되고, Critic 이 원문을 되짚을 좌표가 사라진다.
+            "ref_id": quote_ref,
+            **_quote_provenance(state["market_quotes"], as_of),
         },
         {
             "source": "주문",
@@ -502,7 +551,7 @@ def _sourcing_decision(ratios: list[dict]) -> dict:
     return ratios[0].get("decision", {}) if ratios else {}
 
 
-def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
+def _sourcing_rationale(decision: dict, quote_ref: str) -> list[dict]:
     """중품을 태운 날의 근거 1건. 안 태웠으면 붙이지 않는다 — 없는 판단을 적지 않는다.
 
     ``evidence_grade``가 ASSUMED인 이유: 평시 기준선은 선언 상수(SIM_FIXED)지만 중품
@@ -513,7 +562,7 @@ def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
         # 중품을 안 태운 날. **판단이 있었다면 그 사실은 남긴다** — LLM이 "확대됐지만
         # 신선도가 빡빡해 중품을 쓰지 않는다"를 고른 것과, 평시라 애초에 후보가 없던 것은
         # 다른 사실이다. 조기 반환하면 둘이 구분되지 않는다 (Codex 교차검증 P2).
-        return _mix_choice_rationale(decision, as_of)
+        return _mix_choice_rationale(decision, quote_ref)
     widening = decision["spread"] / decision["baseline"] - 1
     return [
         {
@@ -523,7 +572,7 @@ def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
                 f"{decision['spread']:.1%} — 평시 {decision['baseline']:.1%} 대비 "
                 f"{widening:+.0%} 확대, {decision['mid_grade']} {decision['ratio']:.0%} 배정"
             ),
-            "ref_id": f"MQ-가락-{as_of}",
+            "ref_id": quote_ref,
             "evidence_grade": "ASSUMED",
             "evidence_detail": (
                 f"소진 한계 {decision['shelf_days']:.0f}일 = 상품 한계일 "
@@ -531,11 +580,11 @@ def _sourcing_rationale(decision: dict, as_of: str) -> list[dict]:
                 f"스코어 {decision['score']:+.3f}"
             ),
         },
-        *_mix_choice_rationale(decision, as_of),
+        *_mix_choice_rationale(decision, quote_ref),
     ]
 
 
-def _mix_choice_rationale(decision: dict, as_of: str) -> list[dict]:
+def _mix_choice_rationale(decision: dict, quote_ref: str) -> list[dict]:
     """LLM이 조합을 고른 날의 근거 1건 (E3-2). **고르지 않았으면 붙이지 않는다.**
 
     ``evidence_grade``가 ASSUMED인 이유는 스프레드 근거와 같다 — 소진 한계일이 재고
@@ -552,7 +601,7 @@ def _mix_choice_rationale(decision: dict, as_of: str) -> list[dict]:
         {
             "source": "시세관측",
             "claim": f"등급 조합 {mix.candidate_id} 선택 — {mix.reason}",
-            "ref_id": f"MQ-가락-{as_of}",
+            "ref_id": quote_ref,
             "evidence_grade": "ASSUMED",
             "evidence_detail": (
                 f"규칙이 만든 후보 중 선택 (판단 {mix.llm_model}) — "
@@ -938,6 +987,9 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     lead_days = pending_value(state, constraints, "inbound_lead_days")
     cap_by_date = state["inventory"].get("cap_by_date")
     split_decision = _split_decision(split_choice)
+    # 시세 근거 좌표는 **관측일 기준**이고 그날 하나뿐이다. 안 루프 안에서 만들면 같은
+    # 시세에서 나온 근거들이 서로 다른 좌표를 갖게 된다 (실제로 그랬다 — Codex 2차 지적).
+    quote_ref = f"MQ-가락-{observed_date(state['market_quotes']) or state['date']}"
 
     scenarios = []
     dropped = []
@@ -995,9 +1047,9 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ),
                 "expected_margin_rate": expected_margin_rate,
                 "rationale": [
-                    *_rationale(state, rationale_input, constraints),
+                    *_rationale(state, rationale_input, constraints, quote_ref),
                     *_context_rationale(state["context_docs"]),
-                    *_sourcing_rationale(decision, state["date"]),
+                    *_sourcing_rationale(decision, quote_ref),
                     *_split_rationale(split_decision, rounds, state["forecast"], state["date"]),
                 ],
                 "risks": [

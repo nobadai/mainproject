@@ -38,6 +38,7 @@ from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import package_scenarios
 from app.purchase_agent.nodes.self_check import self_check
 from app.purchase_agent.nodes.split_plan import split_plan
+from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState, build_initial_state
 from app.purchase_agent.tracing import ToolRecorder, wrap
 
@@ -101,6 +102,7 @@ def run_purchase_agent(
     *,
     feedback: dict | None = None,
     selector: MixSelector | None = None,
+    quotes: QuoteSource | None = None,
 ) -> dict:
     """품목 하나에 대해 그래프를 한 번 돌리고 제안 JSON을 돌려준다.
 
@@ -108,8 +110,11 @@ def run_purchase_agent(
     **as_of는 주입받는다** (규칙 1) — 벽시계를 읽지 않으므로 과거 날짜로도 그대로 돈다.
 
     T1은 품목별로 이 그래프를 돌린 뒤 전사 시나리오로 조합한다(§4). 조합은 아직 범위 밖이다.
+
+    ``quotes``는 등급별 시세 공급자다 (#70). ``None``이면 mock 이라 **회귀 테스트 전량이
+    DB 없이 그대로 돈다** — 스위트가 DB 에 묶이지 않는 근거가 이 기본값이다.
     """
     final_state = build_graph(selector=selector).invoke(
-        build_initial_state(item, as_of, feedback=feedback)
+        build_initial_state(item, as_of, feedback=feedback, quotes=quotes)
     )
     return final_state["proposal"]

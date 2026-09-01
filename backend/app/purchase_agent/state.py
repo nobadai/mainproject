@@ -21,6 +21,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.quotes import QuoteSource
 
 
 class PurchaseAgentState(TypedDict):
@@ -83,7 +84,11 @@ class PurchaseAgentState(TypedDict):
 
 
 def build_initial_state(
-    item: str, as_of: date, *, feedback: dict | None = None
+    item: str,
+    as_of: date,
+    *,
+    feedback: dict | None = None,
+    quotes: QuoteSource | None = None,
 ) -> PurchaseAgentState:
     """T0 스냅샷을 만든다 — **포트 ①~⑤를 한 번씩 호출한다 (T0 only)**.
 
@@ -100,6 +105,11 @@ def build_initial_state(
     ``rejected_reasons``는 어느 노드든 append할 수 있어야 하므로 빈 목록으로 둔다.
     ``coverage_days``·``situation`` 같은 값은 **0이나 빈 문자열로 채우지 않는다** — 미결과
     확정된 값을 구분해야 하기 때문이다 (규칙 3).
+
+    ``quotes``는 등급별 시세 공급자다 (#70). ``None``이면 mock 이고, 실데이터로 돌리려면
+    ``quotes.auction_quote_source()``를 넘긴다 — **환경변수가 아니라 명시 주입**이다.
+    시세만 주입 지점을 여는 이유: 나머지 다섯은 마스터 봉투가 실어 보내거나(어댑터 경로)
+    mock 이고, **시세만 매입 자기 도메인이라 우리가 직접 읽는다** (정의서 §4.1).
     """
     constraints = load_constraints()
     # 창·지평을 파라미터로 받지 않는다. 여기서 쓴 창과 ③이 나눌 창이 달라지면 수량이
@@ -111,7 +121,7 @@ def build_initial_state(
         "date": as_of.isoformat(),
         "item": item,
         "forecast": ports.get_forecast(item, as_of),
-        "market_quotes": ports.get_market_quotes(item, as_of),
+        "market_quotes": ports.get_market_quotes(item, as_of, source=quotes),
         "inventory": ports.get_inventory(item, as_of),
         "confirmed_orders": ports.get_confirmed_orders(item, as_of, days=order_days),
         "item_mix_ratio": extras["item_mix_ratio"],

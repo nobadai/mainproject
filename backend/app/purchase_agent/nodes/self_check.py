@@ -389,11 +389,40 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)
         survivors = []
 
-    proposal = _assemble(state, survivors, rejected)
+    # 이 노드가 **직접 컷한 것**만 세어 넘긴다 — 아래 no_proposal_reason 이 원인을
+    # self_check 으로 돌릴 자격이 여기서 갈린다.
+    cut_here = len(rejected) - len(state["rejected_reasons"])
+    proposal = _assemble(state, survivors, rejected, cut_here=cut_here)
     return {"scenarios_final": survivors, "rejected_reasons": rejected, "proposal": proposal}
 
 
-def _assemble(state: PurchaseAgentState, survivors: list[dict], rejected: list[dict]) -> dict:
+def _no_proposal_reason(rejected: list[dict], cut_here: int) -> str:
+    """안이 하나도 없는 날, **어느 단계에서 없어졌는지**를 정확히 말한다.
+
+    🔴 전에는 무조건 "모든 안이 self_check에서 컷됨"으로 시작했다. 시세를 못 받아 ③이
+      초안을 아예 만들지 않은 날에도 그렇게 나갔고 — 2025-12-31 피마늘이 실제로 그랬다 —
+      어댑터의 Evidence 도 그 문장을 그대로 "자기 검증에서 컷된 안"으로 옮겼다
+      (Codex 교차검증 2026-08-31). 사유는 맞고 **원인 분류가 틀린** 종류의 거짓이라,
+      읽는 사람이 검증 로직을 들여다보게 된다.
+
+    ``cut_here`` 는 ⑦이 직접 컷한 안의 수다. 0이면 여기 오기 전에 이미 없었다는 뜻이다.
+    """
+    detail = "; ".join(f"{item['label']}({item['reason']})" for item in rejected)
+    if cut_here == 0:
+        return f"안이 만들어지지 않았다: {detail}"
+    if cut_here == len(rejected):
+        return f"모든 안이 self_check에서 컷됨: {detail}"
+    # 섞인 날 — 앞 단계에서 빠진 것과 여기서 컷된 것이 함께 있다.
+    return f"앞 단계에서 빠지거나 self_check에서 컷됨: {detail}"
+
+
+def _assemble(
+    state: PurchaseAgentState,
+    survivors: list[dict],
+    rejected: list[dict],
+    *,
+    cut_here: int = 0,
+) -> dict:
     """제안 JSON을 만들고 **출력 경계에서 계약을 재확인**한다.
 
     ``revalidate_for_output()``은 Epic 1에서 만들어둔 함수다 — 원시 데이터에서 모델을 다시
@@ -417,8 +446,5 @@ def _assemble(state: PurchaseAgentState, survivors: list[dict], rejected: list[d
         "rejected_reasons": rejected,
     }
     if not survivors:
-        raw["no_proposal_reason"] = (
-            "모든 안이 self_check에서 컷됨: "
-            + "; ".join(f"{item['label']}({item['reason']})" for item in rejected)
-        )
+        raw["no_proposal_reason"] = _no_proposal_reason(rejected, cut_here)
     return revalidate_for_output(PurchaseProposal.model_validate(raw)).model_dump(mode="json")

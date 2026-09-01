@@ -1169,6 +1169,33 @@ def test_reasoning_reports_the_absence_of_scenarios() -> None:
     assert "제안을 내지 못했다" in build_reasoning({"scenarios": [], "situation": "uncertain"})
 
 
+def test_the_no_plan_sentence_passes_the_envelope_rule_too() -> None:
+    """🔴 **0안 문장도 봉투 규칙을 지킨다** — 지금까지는 우연이었다.
+
+    위 앵커 검사는 **안이 있는 날만** 돈다. 0안 가지는 검사 밖이라, 문구를 다듬다 날짜나
+    금액을 넣으면 ``E-REASONING-NUMERIC``이 **실운영에서 처음** 나온다. 규칙을 여기서
+    다시 쓰지 않고 봉투의 ``check_reasoning``을 그대로 부르는 이유도 위와 같다.
+    """
+    reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
+    probe = replace(reply, reasoning=build_reasoning({"scenarios": []}))
+
+    assert check_reasoning(probe) == []
+
+
+@pytest.mark.parametrize("cause", ["제약", "창고", "현금", "시세", "규격", "적재", "휴장"])
+def test_the_no_plan_sentence_does_not_name_a_cause(cause: str) -> None:
+    """🔴 **1행이 원인을 단정하지 않는다.**
+
+    전에는 *"제약 조합 하에 유효한 안이 없어…"* 였다. #70 이후 0안 원인이 셋으로 늘었고
+    (규격 미확정 · 그 규격 미거래 · 적재 정지) 그중 둘은 **제약 때문이 아니다.** 화면은
+    이 문장을 1행으로 그대로 옮기므로(``ProcurementResult.tsx``) 거기까지만 읽는 사람이
+    창고·현금에 걸린 줄 안다.
+
+    원인은 아래 두 줄이 말한다 — ``no_proposal_reason`` 과 ``rejected_reasons``.
+    """
+    assert cause not in build_reasoning({"scenarios": []})
+
+
 # ── STATUS_QUERY ──────────────────────────────────────────────────────────
 
 
