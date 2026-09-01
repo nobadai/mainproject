@@ -712,7 +712,13 @@ def test_the_fixed_market_constant_reads_the_declared_coordinate(tmp_path: Path)
         [sys.executable, "-c", probe],
         check=False,  # 실패하는 게 이 테스트의 기대값이다
         capture_output=True,
-        text=True,
+        # 🔴 ``text=True`` 만 주면 **부모 로케일**로 디코드한다. 자식은 한글 사유를
+        #   UTF-8 로 쓰는데 부모가 cp949 면 리더 스레드가 죽고 ``stderr`` 가 ``None``
+        #   이 되어, 아래 단언이 사유 불일치가 아니라 ``TypeError`` 로 터진다.
+        #   **부모 로케일과 무관해야 한다 — PYTHONIOENCODING 이 있는 환경에서만
+        #   깨지는 자리였다** (현서님 실측 2026-09-01).
+        encoding="utf-8",
+        errors="replace",
         cwd=Path(inspect.getfile(quotes)).parents[2],
     )
 

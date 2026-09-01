@@ -224,25 +224,49 @@ def materialize_split(
     상태를 조용히 넘기면 소비자가 라벨과 행동의 불일치를 추적할 수 없다.
     """
     if not chosen:
-        return [{"seq": 1, "date": as_of, "qty_kg": total_qty_kg}]
+        return _rounds(as_of, coverage_days, [total_qty_kg], lead_days)
     _validate_ratios(chosen, "split_plan")
     if split_infeasible_reason(total_qty_kg, chosen, coverage_days):
-        return [{"seq": 1, "date": as_of, "qty_kg": total_qty_kg}]
+        return _rounds(as_of, coverage_days, [total_qty_kg], lead_days)
 
-    start = date.fromisoformat(as_of)
-    offsets = split_offsets(coverage_days, len(chosen))
     quantities, _ = cap_constrained_quantities(
         split_quantities(total_qty_kg, chosen),
         arrival_dates(as_of, coverage_days, len(chosen), lead_days),
         cap_by_date,
     )
+    return _rounds(as_of, coverage_days, quantities, lead_days)
+
+
+def _rounds(
+    as_of: str, coverage_days: int, quantities: list[int], lead_days: int | None
+) -> list[dict]:
+    """회차 dict 목록. **매입일과 도착일을 같은 ``split_offsets``에서 만든다.**
+
+    도착일을 다른 자리에서 만들면 두 날짜가 어긋나고 어긋난 쪽을 아무도 못 찾는다
+    (``arrival_dates`` docstring과 같은 이유).
+
+    ⚠️ **일괄(1회차)도 이 함수를 지난다.** ``materialize_split``의 반환 경로가 셋인데
+    (일괄·분할 불가·정상) 경로마다 따로 채우면 한 곳이 빠지고, 그러면 *"회차 N건 중
+    도착일이 있는 것은 M건뿐"*(Critic ``E-ARRIVAL-COLLAPSE``)이 된다.
+    ``split_offsets(D, 1) == [0]``이라 1회차도 같은 식으로 덮인다.
+
+    N4가 없으면 도착일은 **전 회차 ``None``**이다 — 0으로 채우지 않는다 (규칙 3).
+    """
+    start = date.fromisoformat(as_of)
+    offsets = split_offsets(coverage_days, len(quantities))
+    arrivals = arrival_dates(as_of, coverage_days, len(quantities), lead_days)
+    if arrivals is None:
+        arrivals = [None] * len(quantities)
     return [
         {
             "seq": index + 1,
             "date": (start + timedelta(days=offset)).isoformat(),
             "qty_kg": qty,
+            "expected_arrival_date": eta,
         }
-        for index, (offset, qty) in enumerate(zip(offsets, quantities, strict=True))
+        for index, (offset, qty, eta) in enumerate(
+            zip(offsets, quantities, arrivals, strict=True)
+        )
     ]
 
 
