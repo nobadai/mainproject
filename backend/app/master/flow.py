@@ -61,6 +61,22 @@ _FORECAST_ENVELOPE_KEYS: tuple[str, ...] = (
 ADVISORS: tuple[AgentName, ...] = ("finance", "inventory")
 """1차 조언자. 영업은 구성에서 빠졌고 판매는 2차 MVP 다 (정의서 §2.1)."""
 
+MAX_PURCHASE_ATTEMPTS = 2
+"""매입 재호출 상한. **이 값의 소유자는 마스터다.**
+
+재시도는 조정 행위이므로 조정자가 소유한다. 부서는 자기 안을 몇 번 다시 만들지 정하지
+않는다 — 그건 예산과 종료 코드를 쥔 쪽의 판단이다 (§1.2-12).
+
+🔴 **같은 수가 매입 `constraints.yaml` 의 `feedback.attempt_max` 에도 있다.**
+  그쪽은 IO명세 §1 이 요구한 **인용 선언**이고 매입 코드는 아직 읽지 않는다 (그 파일
+  주석에 그렇게 적혀 있다). 인용이 원본과 갈리면 *"2회까지"* 가 두 뜻을 갖는데,
+  **갈려도 에러가 안 난다** — `tests/master/test_retry_cap_ownership.py` 가 대조한다.
+
+★ **마스터는 그 YAML 을 런타임에 읽지 않는다.** 읽으면 마스터가 부서 설정을 배우는
+  것이 되고, 남의 스키마를 해석하지 않는다는 자리와 어긋난다 (물류 `scenario_results`
+  를 마스터가 안 펴는 것과 같다). **대조는 테스트에서만 한다.**
+"""
+
 
 class VerifierPort(Protocol):
     """마스터가 직접 가진 검증 Tool (정의서 §3.7.1).
@@ -130,7 +146,7 @@ class ProcurementFlow:
         runner: MasterRunner,
         verifier: VerifierPort | None = None,
         advisors: tuple[AgentName, ...] = ADVISORS,
-        max_purchase_attempts: int = 2,
+        max_purchase_attempts: int = MAX_PURCHASE_ATTEMPTS,
         item: ItemCode | None = None,
         forecast: Mapping[str, Any] | None = None,
         confirmed_orders: Mapping[str, Any] | None = None,
