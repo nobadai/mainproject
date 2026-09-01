@@ -580,6 +580,11 @@ def test_planner_supplied_numbers_never_reach_the_payload():
         "proposal_id": "P-1",
         "scenario_id": "S-1",
         "total_amount_krw": 100000,
+        # 지급 일정이 없으면 재무는 **제출된 사실**에서 재구성한다 — 그 사실이 없으면
+        # STRESS 금액을 만들 수 없어 fail-closed 다.
+        "total_qty_kg": 100,
+        "max_price": 1000,
+        "split_plan": [{"seq": 1, "date": "2025-01-01", "qty_kg": 100}],
         "meta": {"as_of": "2025-01-01"},
     }
     invented = 999_999_999

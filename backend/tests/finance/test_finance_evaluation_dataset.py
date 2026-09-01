@@ -133,7 +133,12 @@ def test_정상과_Cap_초과는_결정론_Adapter_결과를_라벨로_쓴다(mo
 
     payload = deepcopy(evaluation_request.payload)
     payload["scenarios"][0]["total_amount_krw"] = 45_000_000
-    payload["scenarios"][0]["sourcing_plan"] = [{"market": "가락", "grade": "상", "qty_kg": 4500, "grade_unit_price": 10_000}]
+    # STRESS 금액은 제출 수량 × 제출 상한가에서 파생된다 — 상한가도 같이 올려야
+    # 모순 없는 제안이 된다 (여기서 보려는 것은 Cap 초과이지 제안 모순이 아니다).
+    payload["scenarios"][0]["max_price"] = 10_000
+    payload["scenarios"][0]["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 4500, "grade_unit_price": 10_000}
+    ]
     exceeded = AgentRequest(evaluation_request.context, "finance", "SCENARIO_VALIDATION", payload=payload)
     rejected, _ = adapter.finance_port(exceeded)
     assert rejected.runtime_status == "READY"

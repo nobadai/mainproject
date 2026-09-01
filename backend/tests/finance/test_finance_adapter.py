@@ -543,6 +543,12 @@ def test_Finance_Cap을_초과하면_정상_업무_reject를_반환한다(wired,
     payload = deepcopy(purchase_payload)
     scenario = payload["scenarios"][0]
     scenario["total_amount_krw"] = 45_000_000
+    # ★ `max_price` 도 같이 올린다. STRESS 금액은 이제 **제출 수량 × 제출 상한가**에서
+    #   파생되므로(N5 재구성), 상한가를 그대로 두면 STRESS(7.875M) < BASE(45M) 인
+    #   **모순된 제안**이 된다 — 상한가보다 비싸게 사겠다는 뜻이라 매입이 낼 수 없는 값이고,
+    #   재무의 BASE/STRESS 불변식이 그것을 잡는다. 여기서 보려는 것은 그 모순이 아니라
+    #   **Cap 초과 → reject** 다.
+    scenario["max_price"] = 10_000
     scenario["sourcing_plan"] = [
         {"market": "가락", "grade": "상", "qty_kg": 4500, "grade_unit_price": 10_000}
     ]
