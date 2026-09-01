@@ -506,7 +506,12 @@ def build_reasoning(proposal: Mapping[str, Any]) -> str:
     """
     labels = [s["label"] for s in proposal.get("scenarios", [])]
     if not labels:
-        return "제약 조합 하에 유효한 안이 없어 제안을 내지 못했다."
+        # 🔴 **원인을 단정하지 않는다.** 전에는 *"제약 조합 하에"* 로 시작했는데, #70 이후
+        #   0안 원인이 셋으로 늘었다 — 규격 미확정 · 적재 정지는 **제약 때문이 아니다.**
+        #   화면은 이 문장을 1행으로 그대로 옮기므로(`ProcurementResult.tsx`), 거기까지만
+        #   읽는 사람은 창고·현금에 걸린 줄 안다. 원인은 아래 두 줄이 말한다 —
+        #   ``no_proposal_reason`` 과 ``rejected_reasons``.
+        return "유효한 안이 없어 제안을 내지 못했다."
     head = "·".join(labels)
     # **열린 축을 실제 값에서 읽는다.** 처음엔 stable이면 무조건 "세 축을 모두 열었다"고
     # 썼는데, 배추는 편중 게이팅으로 mix가 닫혀 있어 두 축뿐이었다 — 서술문이 산출물과
