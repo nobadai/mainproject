@@ -320,7 +320,7 @@ def test_gemini_contract_failures_are_not_eligible_for_ollama(error):
     assert _is_gemini_availability_failure(error) is False
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     save_run, monkeypatch
 ):
@@ -352,7 +352,7 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     save_run.assert_called_once()
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_normal_gemini_provider_observation_is_distinct(save_run, monkeypatch):
     monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
     monkeypatch.setenv("FINANCE_LLM_MODEL", "gemini-primary-model")
@@ -375,7 +375,7 @@ def test_normal_gemini_provider_observation_is_distinct(save_run, monkeypatch):
     save_run.assert_called_once()
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_explicit_ollama_provider_observation_is_distinct(save_run, monkeypatch):
     monkeypatch.setenv("FINANCE_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("FINANCE_LLM_MODEL", "gemma3:4b")
@@ -554,7 +554,7 @@ def test_gemini_rejects_invalid_finalize_tool_combinations(monkeypatch, content,
         _planner_decide(GeminiFinancePlanner(), missing=missing)
 
 
-@patch("app.finance.agent.save_finance_execution")
+@patch("app.finance.run_repository.save_finance_execution")
 def test_gemini_planner_failure_is_error_with_fallback_metadata(save_run, monkeypatch):
     monkeypatch.delenv("FINANCE_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)

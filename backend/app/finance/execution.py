@@ -11,8 +11,10 @@ from decimal import Decimal
 from typing import Any
 
 from app.finance.state import FinanceAgentState
+from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 
-FINANCE_CAP_CHECK_ID = "finance_cap_amount_krw"
+#: Critic에 전달되는 검사 id의 정본은 합성 주체인 Master가 소유한다.
+FINANCE_CAP_CHECK_ID = DEPT_CAP_CHECK_ID["finance"]
 
 #: `_context()` 가 **항상** 읽는 것. PRE_PURCHASE Tool 은 전부 이것을 거친다.
 #:

@@ -15,6 +15,9 @@ from app.finance.run_repository import (
 from app.finance.schemas import PurchaseAgentOutput
 from app.finance.service import run_finance_procurement
 
+#: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
+_LEGACY_SERVICE = "app.finance.legacy.deterministic_service"
+
 
 def _run_row() -> dict[str, object]:
     return {
@@ -112,9 +115,9 @@ def test_as_of_mismatch_response_is_saved(finance_context, purchase_payload):
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=finance_context
         ),
-        patch("app.finance.service.save_finance_agent_run") as save_run,
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
 
@@ -133,10 +136,10 @@ def test_persistence_error_is_not_converted_to_runtime_warning(finance_context, 
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=finance_context
         ),
         patch(
-            "app.finance.service.save_finance_agent_run",
+            f"{_LEGACY_SERVICE}.save_finance_agent_run",
             side_effect=OperationalError("persistence unavailable"),
         ),
         pytest.raises(OperationalError, match="persistence unavailable"),
@@ -151,9 +154,9 @@ def test_finance_calculation_remains_decimal_before_json_serialization(
 
     with (
         patch(
-            "app.finance.service.get_current_finance_runtime_context", return_value=finance_context
+            f"{_LEGACY_SERVICE}.get_current_finance_runtime_context", return_value=finance_context
         ),
-        patch("app.finance.service.save_finance_agent_run") as save_run,
+        patch(f"{_LEGACY_SERVICE}.save_finance_agent_run") as save_run,
     ):
         response = run_finance_procurement(request)
 

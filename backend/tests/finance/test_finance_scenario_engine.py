@@ -36,7 +36,7 @@ def test_finance_external_snapshot_bypasses_repository_and_round_trips_t0_id(
     request = PurchaseAgentOutput.model_validate(purchase_payload)
 
     with patch(
-        "app.finance.service.get_current_finance_runtime_context",
+        "app.finance.legacy.deterministic_service.get_current_finance_runtime_context",
         side_effect=AssertionError("Repository must not be called"),
     ):
         response = run_finance_procurement_with_snapshot(request, snapshot, policy=finance_policy)
@@ -58,7 +58,7 @@ def test_finance_sales_scenario_and_external_snapshot_are_deterministic(
     first = run_finance_sales_scenario(request, context)
     second = run_finance_sales_scenario(request, context)
     with patch(
-        "app.finance.service.get_current_finance_runtime_context",
+        "app.finance.legacy.deterministic_service.get_current_finance_runtime_context",
         side_effect=AssertionError("Repository must not be called"),
     ):
         response = run_finance_sales_with_snapshot(request, snapshot, policy=context.policy)

@@ -22,6 +22,75 @@ Planner는 현재 mode에서 허용된 Finance Tool만 선택한다. 모든 재�
 Evidence, verdict와 adjustment는 deterministic Finance Tools/Rules가 계산한다. Finalizer는
 검증된 Evidence를 설명할 뿐이며 재무 수치나 Policy 값을 생성할 수 없다.
 
+## 패키지 구조
+
+책임이 어디 사는지가 파일 위치로 보이게 정리했다. 전체 디렉터리 이동보다 **책임 분리와
+기존 import 호환**을 우선했으므로, 밖에서 쓰는 모듈은 원래 자리를 지킨다.
+
+```text
+app/finance/
+├─ adapter.py         Master 경계 번역 (finance_port)      ← main.py 가 import
+├─ router.py          HTTP 진입점                          ← main.py 가 import
+├─ agent.py           공개 표면 (application/* 재수출)     ← 구현 없음
+├─ application/       Agent 실행 계층
+│  ├─ controller.py       FinanceAgentController (오케스트레이션)
+│  ├─ planner_loop.py     branch 분해 · bounded tool 호출 루프
+│  ├─ guards.py           계약 위반 판정 · replan guard · 인자 출처 강제
+│  └─ finalization.py     Business payload · Evidence · reasoning 조립
+├─ tool_registry.py   capability 디스패처 (thin)
+├─ capabilities/
+│  ├─ pre_purchase.py         PRE_PURCHASE capability 4종
+│  ├─ scenario_validation.py  SCENARIO_VALIDATION capability 2종
+│  ├─ runtime_context.py      컨텍스트 적재 (position·policy·payroll·부채)
+│  └─ payment_schedule.py     지급 일정 재구성/정규화 · BASE/STRESS event
+├─ state.py           실행 상태 · capability 판정
+├─ evidence.py        Evidence 생성 · 정책 출처 규율
+├─ execution.py       finance_dept_meta (Critic 사이드카)
+├─ tools.py           결정론 재무 계산 (공식 소유)
+├─ rules.py           결정론 판정 (verdict 소유)
+├─ ports/
+│  └─ finance_data.py     FinanceAsOfDataPort · FinanceDataNotReady (계약만)
+├─ infrastructure/    경계 계약의 PostgreSQL 구현
+│  ├─ finance_state_repository.py  State · Policy · 부채 규율 · 확정 일정 조회
+│  └─ postgres_data_port.py        as-of 재현성 보호를 둔 DataPort 구현
+├─ repository.py      공개 표면 (ports + infrastructure 재수출)  ← 구현 없음
+├─ run_repository.py  실행이력 (도메인 공통 `run_repository` 관례)
+├─ db.py              DB 헬퍼   ← master · orchestrator 가 import (재무 밖 공유)
+├─ contracts/         재무 계약 타입을 업무 의미 단위로 분리
+│  ├─ vocabulary.py       닫힌 어휘 (verdict · runtime status · cash event)
+│  ├─ numeric_guards.py   숫자 필드 공통 입력 방어
+│  ├─ purchase_request.py 매입 제안 입력 계약
+│  ├─ policy.py           운영 정책 · 부채 계약
+│  ├─ cashflow.py         현금 사건 · 현금흐름 투영
+│  ├─ state.py            T0 Snapshot · RuntimeContext (서로 참조 — 같이 둔다)
+│  ├─ procurement.py      매입 Cycle 응답
+│  ├─ sales.py            판매 Cycle 계약
+│  └─ run_history.py      실행이력 조회 응답
+├─ schemas.py         공개 표면 (contracts/* 재수출)       ← 구현 없음
+├─ service.py         Agent 실행이력 조회 + 레거시 재수출
+├─ legacy/            Agent 이전의 결정론 경로 (입구는 `/finance/sales` 하나)
+│  ├─ deterministic_service.py  Finance A/B 실행
+│  ├─ scenario_engine.py        결정론 Scenario 실행
+│  └─ interpretation.py         응답 해설 보강
+├─ scenario_engine.py / interpretation.py
+│                     공개 표면 (legacy/* 재수출)          ← 구현 없음
+└─ llm/               Planner · Finalizer · Provider · 설정
+   └─ runtime.py      레거시 해석 계층 (`/finance/sales` 전용)
+```
+
+책임 경계는 다음과 같다.
+
+```text
+Planner    무엇을 부를지 고른다        (숫자를 만들지 않는다)
+capability 허용된 재무 작업을 수행한다
+tools.py   금액·현금흐름을 계산한다     (공식의 유일한 주인)
+rules.py   PASS/FAIL·verdict 를 정한다
+Finalizer  검증된 Evidence 를 설명한다  (고정 문장을 고를 뿐이다)
+```
+
+`tool_registry.py` 는 이름을 capability 로 넘기는 일만 한다. 예전에는 이 파일 하나가
+디스패치·컨텍스트 적재·두 mode 업무·지급 일정 재구성·Evidence 조립을 모두 들고 있었다.
+
 ## 지원 Provider
 
 - Ollama / Gemma
