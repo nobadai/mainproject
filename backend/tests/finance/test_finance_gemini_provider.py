@@ -20,6 +20,11 @@ from app.finance.llm.config import (
     _finance_provider_name,
     _load_finance_environment,
 )
+from app.finance.llm.contracts import (
+    FinancePlannerContractViolation,
+    _gemini_planner_response_schema,
+    _planner_response_schema,
+)
 from app.finance.llm.finalizer import GeminiFinanceFinalizer, OllamaFinanceFinalizer
 from app.finance.llm.planner import GeminiFinancePlanner, OllamaFinancePlanner
 from app.finance.llm.provider import (
@@ -436,10 +441,11 @@ def test_gemini_planner_never_uses_ollama_url(monkeypatch):
     )
     assert "127.0.0.1:11434" not in seen[0][0].full_url
     schema = json.loads(seen[0][0].data)["generationConfig"]["responseSchema"]
-    # Gemini 도 Ollama 와 같은 제약을 받는다 — 이번 호출의 allowed_tools 가 enum 이고,
-    # missing capability 가 있으므로 finalize 는 False 만 낼 수 있다 (§14).
-    assert schema["properties"]["finalize"]["enum"] == [False]
+    # Tool 제약은 Ollama 와 같다 — 이번 호출의 allowed_tools 가 그대로 enum 이다.
     assert schema["properties"]["tool_name"]["enum"] == ["assess_finance_position"]
+    # 🔴 finalize 는 타입만 보낸다. boolean 에 enum 을 붙이면 Gemini 가 400 을 낸다.
+    assert schema["properties"]["finalize"]["type"] == "boolean"
+    assert "enum" not in schema["properties"]["finalize"]
 
 
 def test_gemini_skips_thought_part_and_uses_later_text():
@@ -615,3 +621,137 @@ def test_controller_selects_gemini_planner_and_finalizer(monkeypatch):
     assert isinstance(controller.finalizer.primary, GeminiFinanceFinalizer)
     assert controller.finalizer.primary.model == "gemini-primary-model"
     assert controller.finalizer.fallback.model == "gemma3:4b"
+
+
+# ---------------------------------------------------------------------------
+# Gemini 전송 스키마 — 계약은 같고 표현만 낮춘다
+#
+# 🔴 엄격 스키마를 그대로 보내면 Gemini 가 HTTP 400 을 낸다. 재무 Planner 가 매 호출
+#    실패하고 마스터가 `E4_NOT_STARTED` 로 멈췄다 — 재무가 아니라 전송 형식이 문제였다.
+# ---------------------------------------------------------------------------
+
+
+_GEMINI_TYPES = {"string", "number", "integer", "boolean", "array", "object"}
+
+
+def _assert_gemini_schema_is_wire_safe(node) -> None:
+    """Gemini responseSchema(OpenAPI 3.0 부분집합)가 받아 주는 형태인가.
+
+    두 가지가 400 의 원인이다.
+      · `enum` 은 STRING 에만 붙는다
+      · 타입은 6종뿐이라 `{"type": "null"}` 은 없다 (`nullable` 로 표현한다)
+    """
+    if not isinstance(node, dict):
+        return
+    node_type = node.get("type")
+    if node_type is not None:
+        assert node_type in _GEMINI_TYPES, f"Gemini 가 모르는 타입: {node_type!r}"
+    if "enum" in node:
+        assert node_type == "string", f"enum 은 string 에만 붙는다 (여기는 {node_type!r})"
+    for child in node.get("properties", {}).values():
+        _assert_gemini_schema_is_wire_safe(child)
+    if "items" in node:
+        _assert_gemini_schema_is_wire_safe(node["items"])
+
+
+@pytest.mark.parametrize("planning_required", [True, False])
+def test_gemini_wire_schema_has_no_unsupported_form(planning_required):
+    """조사 국면과 finalize 국면 **양쪽** 전송 스키마가 안전해야 한다.
+
+    finalize 국면이 특히 중요하다 — 엄격 스키마의 `tool_name` 이 `{"type": "null"}`
+    이라 그 국면에서도 400 이 났다.
+    """
+    schema = _gemini_planner_response_schema(
+        frozenset({"assess_finance_position", "project_cashflow"}),
+        planning_required=planning_required,
+    )
+    _assert_gemini_schema_is_wire_safe(schema)
+    assert schema["properties"]["finalize"]["type"] == "boolean"
+    assert "enum" not in schema["properties"]["finalize"]
+    assert schema["required"] == ["tool_name", "arguments", "reason", "finalize"]
+
+
+def test_gemini_wire_schema_keeps_allowed_tools_enum():
+    """표현만 낮춘다 — Tool 허용 범위는 Ollama 와 동일하게 enum 으로 남는다."""
+    allowed = frozenset({"assess_finance_position", "project_cashflow"})
+    wire = _gemini_planner_response_schema(allowed, planning_required=True)
+    strict = _planner_response_schema(allowed, planning_required=True)
+
+    assert wire["properties"]["tool_name"]["enum"] == sorted(allowed)
+    assert wire["properties"]["tool_name"] == strict["properties"]["tool_name"]
+
+
+def test_gemini_finalize_phase_uses_nullable_string_not_null_type():
+    """`{"type": "null"}` 대신 nullable string. 값이 null 이어야 하는 강제는 사후 검증이 한다."""
+    wire = _gemini_planner_response_schema(
+        frozenset({"assess_finance_position"}), planning_required=False
+    )
+    assert wire["properties"]["tool_name"] == {"type": "string", "nullable": True}
+
+
+# ---------------------------------------------------------------------------
+# 전송 강제를 낮춘 만큼 사후 검증이 그대로 잡는가
+# ---------------------------------------------------------------------------
+
+
+def _decide_with(monkeypatch, content, *, missing):
+    monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "app.finance.llm.client.urllib.request.urlopen",
+        lambda *_a, **_k: _Response(_gemini_document(content)),
+    )
+    return GeminiFinancePlanner().decide(
+        request=_request(),
+        allowed_tools=frozenset({"assess_finance_position"}),
+        observations=(),
+        missing_capabilities=missing,
+    )
+
+
+def test_finalizing_while_capabilities_missing_is_rejected(monkeypatch):
+    """스키마가 더는 막지 않으므로 **여기서** 잡아야 한다."""
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {"tool_name": None, "arguments": {}, "reason": "성급한 종료", "finalize": True},
+            missing=("finance_position",),
+        )
+
+
+def test_selecting_a_tool_after_capabilities_complete_is_rejected(monkeypatch):
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {
+                "tool_name": "assess_finance_position",
+                "arguments": {},
+                "reason": "끝났는데 또 부른다",
+                "finalize": False,
+            },
+            missing=(),
+        )
+
+
+def test_disallowed_tool_is_still_rejected(monkeypatch):
+    """전송 enum 을 무시한 모델이 허용 밖 Tool 을 골라도 통과하지 못한다."""
+    with pytest.raises(FinancePlannerContractViolation):
+        _decide_with(
+            monkeypatch,
+            {
+                "tool_name": "evaluate_purchase_scenario",
+                "arguments": {},
+                "reason": "허용 밖",
+                "finalize": False,
+            },
+            missing=("finance_position",),
+        )
+
+
+def test_valid_finalization_is_accepted(monkeypatch):
+    action = _decide_with(
+        monkeypatch,
+        {"tool_name": None, "arguments": {}, "reason": "capabilities complete", "finalize": True},
+        missing=(),
+    )
+    assert action.finalize is True
+    assert action.tool_name is None

@@ -158,14 +158,23 @@ def _dept_meta_in(
             produced = observation.get("produced_fields")
             if not isinstance(inputs_used, dict) or not isinstance(produced, list):
                 continue
-            out[dept] = {
-                "inputs_used": {
-                    str(check): [str(name) for name in names]
-                    for check, names in inputs_used.items()
-                    if isinstance(names, list)
-                },
-                "produced_fields": [str(name) for name in produced],
-            }
+            # 🔴 **덮어쓰지 않고 합친다.** 부서는 mode 마다 관측을 하나씩 낸다 —
+            #    재무는 경계에서 `inputs_used` 를, 시나리오 판정에서 그쪽 산출 필드를
+            #    낸다. 마지막 것만 남기면 시나리오 관측(`inputs_used` 가 빈)이 경계의
+            #    cap 입력을 **지워** 등급 누출 검사가 조용히 통과한다.
+            #
+            #    합치는 것은 해석이 아니다 — 부서가 적은 기록을 모으기만 한다.
+            merged = out.setdefault(dept, {"inputs_used": {}, "produced_fields": []})
+            for check, names in inputs_used.items():
+                if not isinstance(names, list):
+                    continue
+                target = merged["inputs_used"].setdefault(str(check), [])
+                for name in names:
+                    if str(name) not in target:
+                        target.append(str(name))
+            for name in produced:
+                if str(name) not in merged["produced_fields"]:
+                    merged["produced_fields"].append(str(name))
     return out
 
 

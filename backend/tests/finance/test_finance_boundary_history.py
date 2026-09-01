@@ -73,11 +73,26 @@ class _AdapterPlanner:
 
 @pytest.fixture(autouse=True)
 def controller_wired(monkeypatch):
+    """Planner 와 **이력 저장**을 격리한다.
+
+    🔴 이력 저장을 안 막으면 이 파일의 계약 테스트가 **실 DB 에 의존한다.** DB 가 없는
+       곳에서는 `save_finance_execution` 이 터지고, Controller 는 그것을 의도대로
+       `ERROR` 로 접는다 — 그래서 DeptMeta 를 보려던 테스트가 *"READY 인데 ERROR"* 로
+       깨진다. **production 결함이 아니라 격리 누락**이다 (Tool 은 4개 다 돌았고
+       `llm_status` 도 SUCCESS 였다).
+
+    ★ 형제 파일 `test_finance_adapter.py` 는 처음부터 같은 줄을 갖고 있었다. 이 파일만
+      빠져 있었다.
+
+    ★ 이력 **자체**를 검증하는 테스트는 각자 `with patch(...)` 로 다시 덮어쓰므로
+      영향이 없다 — 그쪽이 저장 호출 수를 직접 센다.
+    """
     monkeypatch.setattr(
         adapter,
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
+    monkeypatch.setattr("app.finance.agent.save_finance_execution", lambda **_kwargs: None)
 
 
 @pytest.fixture
@@ -416,18 +431,41 @@ def test_dept_meta_is_absent_when_the_run_is_not_ready(monkeypatch):
     assert not any("finance_dept_meta" in item for item in metadata.observations)
 
 
-def test_scenario_validation_does_not_emit_dept_meta(wired, purchase_payload):
-    """Critic 의 두 검사는 조언자 **경계 회신**을 본다 — 시나리오 판정은 대상이 아니다."""
-    _reply, metadata = adapter.finance_port(req("SCENARIO_VALIDATION", payload=purchase_payload))
-    assert not any("finance_dept_meta" in item for item in metadata.observations)
+def test_scenario_validation_emits_dept_meta_with_produced_fields(wired, purchase_payload):
+    """🔴 시나리오 판정도 DeptMeta 를 낸다.
+
+    예전에는 경계(`PRE_PURCHASE`)만 냈다. 그러면 Critic 의 권한 검사(`E-AUTHORITY`)가
+    **시나리오 산출 필드를 아예 못 본다** — 재무가 시나리오에서 S3 전속 판정을 내도
+    검사가 돌지 않는다. 통과가 아니라 생략이다.
+
+    ★ 다만 `inputs_used` 는 **비운다.** 시나리오 판정에는 재무 cap 등급 누출 검사에
+      해당하는 축이 없다 — 없는 검사에 가짜 입력을 지어내지 않는다.
+    """
+    reply, metadata = adapter.finance_port(req("SCENARIO_VALIDATION", payload=purchase_payload))
+    assert reply.runtime_status == "READY"
+
+    meta = _dept_meta(metadata)
+    assert meta["inputs_used"] == {}
+    # 정적 목록이 아니라 **실제 확정된 payload** 에서 나온다.
+    assert meta["produced_fields"] == sorted(
+        key for key, value in reply.payload.items() if value is not None
+    )
+    assert meta["produced_fields"], "판정을 냈으면 산출 필드도 있어야 한다"
+    # 재무는 S3 전속 판정을 내지 않는다.
+    assert "has_unmet_obligation" not in meta["produced_fields"]
 
 
-def test_finance_dept_meta_reaches_critic_and_runs_both_checks():
+def test_finance_dept_meta_reaches_critic_and_runs_both_checks(wired):
     """실제 실행 → 마스터 실행계획 → critic_bridge → Critic 까지 한 번에 확인한다.
 
     🔴 이 연결이 없던 동안 Critic 은 매 실행 `finance: DeptMeta 미제출 —
        E-AUTHORITY·E-GRADE-LEAK 생략` 을 남겼다. 문구를 지우는 것이 목적이 아니라
        **두 검사가 실제로 도는 것**이 목적이므로, 커버리지가 늘었는지까지 본다.
+
+    ★ `wired` 로 **DB 읽기만** 격리한다. 예전에는 실 `_load_context` 를 타서 DB 가 없는
+      곳에서는 `RUNTIME_NOT_READY(finance_state, finance_policy)` 가 나왔다 — 검증하려던
+      연결과 무관한 이유로 깨진 것이다. Controller · Tool · Evidence · DeptMeta ·
+      마스터 운반 · Critic 은 **전부 실제로** 돈다.
     """
     from app.critic.service import run_critic_procurement
     from app.master import critic_bridge as bridge
