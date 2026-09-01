@@ -7,12 +7,11 @@
 3. **사유 순서** — 값이 온 뒤에도 *"안 왔다"* 고 적으면 거짓 사유가 나간다.
 """
 
-import re
 from datetime import date
 
 import pytest
 
-from app.master.verifier import supplied_but_unresolved
+from app.master.verifier import supplied_but_unresolved, unresolved_supplied_keys
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.allocate_sourcing import (
     evaluate_mid_grade,
@@ -175,24 +174,19 @@ ENVELOPE_TOP_LEVEL_KEYS = (
 )
 
 
-def _concerns_text(concerns: list[str]) -> str:
-    return "\n".join(concerns)
+def _keys(risk: str, inventory: dict) -> list[str]:
+    """마스터가 **지목한 키**. 문장이 아니라 사실을 받는다.
 
+    🔴 전에는 concern 문장의 머리말 따옴표를 정규식으로 열었다. 그것도 결국
+      *"마스터가 문구를 안 바꾼다"* 에 기대는 것이라, 현서님이 문구를 다듬는 날 다시
+      깨진다 — 그 전에는 **문장이 사유 원문을 통째로 되싣어** ``"키" in concern`` 이
+      다른 키가 지목된 경우에도 참이 됐다(반례가 엉뚱하게 통과). 두 번 같은 자리에서
+      깨진 셈이라 현서님이 ``unresolved_supplied_keys`` 를 여셨다 (verifier.py).
 
-def _flagged_keys(concerns: list[str]) -> set[str]:
-    """마스터가 **지목한 키**만 뽑는다.
-
-    🔴 concern 문장은 사유 원문을 통째로 되싣는다. 그래서 ``"키" in concern`` 으로 보면
-      **사유에 그 이름이 적혀 있다는 이유만으로** 통과한다 — 다른 키가 지목된 경우에도
-      참이 된다. 실제로 그 형태로 짰다가 반례 검사가 엉뚱하게 통과했다.
-      머리말의 따옴표 안만 읽는다.
+    ★ 사람이 읽을 문장이 필요하면 ``supplied_but_unresolved`` 를 쓴다. 둘은 **같은
+      검사**를 부르므로 갈릴 자리가 없다.
     """
-    return {
-        m.group(1)
-        for m in re.finditer(
-            r"SUPPLIED-BUT-UNRESOLVED: '([^']+)'", _concerns_text(concerns)
-        )
-    }
+    return unresolved_supplied_keys([{"label": "보수", "risks": [risk]}], {"inventory": inventory})
 
 
 def test_master_actually_flags_our_reason() -> None:
@@ -211,12 +205,14 @@ def test_master_actually_flags_our_reason() -> None:
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     reason = shelf_days_block_reason(inventory, "상", ITEM)
 
+    # 사람이 읽을 문장이 필요한 자리 — 실패 메시지에 마스터가 쓴 말을 그대로 싣는다.
     concerns = supplied_but_unresolved(
         [{"label": "보수", "risks": [reason]}], {"inventory": inventory}
     )
-
     assert concerns, f"마스터가 못 잡는다: {reason!r}"
-    assert "operational_limit_days" in _flagged_keys(concerns)
+
+    # 단언은 키로 한다 — 문구가 바뀌어도 이 줄은 그대로다.
+    assert "operational_limit_days" in _keys(reason, inventory)
 
 
 def test_the_reason_names_the_value_we_actually_could_not_use() -> None:
@@ -249,24 +245,24 @@ def test_the_sentence_length_no_longer_decides_whether_it_rings() -> None:
     )
     assert far.index("미확정") - far.index("operational_limit_days") > 12
 
-    concerns = supplied_but_unresolved(
-        [{"label": "보수", "risks": [far]}], {"inventory": inventory}
-    )
-    assert "operational_limit_days" in _flagged_keys(concerns)
+    assert "operational_limit_days" in _keys(far, inventory)
 
 
 def test_another_supplied_key_between_the_name_and_the_word_silences_it() -> None:
     """새 규칙의 반대편 — 사이에 **다른 실린 키**가 있으면 그 키 얘기라 안 울린다.
 
     이 반례가 없으면 위 검사가 "무엇이든 울린다"를 잠그는 것과 구분되지 않는다.
+
+    🔴 **여기가 키로 받아야 하는 자리다.** 문장으로 보면 이 반례가 반례가 아니다 —
+      concern 이 사유 원문을 되싣기 때문에 ``medium_grade_factor`` 가 지목된 경우에도
+      문장 안에 ``operational_limit_days`` 라는 글자가 그대로 있다. 그래서 "안 울렸다"
+      를 확인할 방법이 없었다.
     """
     inventory = {"item_storage_policies": REAL_POLICIES, "lots": REAL_LOTS}
     other = "operational_limit_days 검사는 medium_grade_factor 미확정으로 보류"
 
-    concerns = supplied_but_unresolved(
-        [{"label": "보수", "risks": [other]}], {"inventory": inventory}
-    )
-    flagged = _flagged_keys(concerns)
+    flagged = _keys(other, inventory)
+
     assert "operational_limit_days" not in flagged, f"다른 키 얘기인데 울렸다: {flagged}"
     assert "medium_grade_factor" in flagged, "정작 그 키는 울려야 한다"
 
