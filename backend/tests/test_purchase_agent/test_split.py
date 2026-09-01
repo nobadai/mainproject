@@ -10,7 +10,7 @@
 """
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -592,3 +592,86 @@ def test_adjusted_rounds_respect_the_cap_cumulatively() -> None:
     quantities, _ = cap_constrained_quantities([50, 50], ["2026-01-02", "2026-01-08"], cap)
     for index, day in enumerate(["2026-01-02", "2026-01-08"]):
         assert sum(quantities[: index + 1]) <= cap[day], f"{day} 누적 초과"
+
+
+# ── expected_arrival_date — 산출물로 나가는 도착일 (마스터 PR #138 합의) ─────
+
+
+def test_each_round_carries_its_own_arrival_date() -> None:
+    """회차마다 **자기 도착일**이 붙는다 — 총량 단일 도착일로 뭉치지 않는다.
+
+    뭉치면 Critic ``E-ARRIVAL-COLLAPSE``가 *"분산 효과가 사라진다"*로 잡는다
+    (`critic/critic_v0_4.py`).
+    """
+    rounds = materialize_split(AS_OF, 100, [{"ratio": 0.5}, {"ratio": 0.5}], 12, lead_days=2)
+
+    assert [line["date"] for line in rounds] == ["2025-12-31", "2026-01-06"]
+    assert [line["expected_arrival_date"] for line in rounds] == ["2026-01-02", "2026-01-08"]
+
+
+def test_arrival_dates_are_absent_when_n4_is_undecided() -> None:
+    """🔴 N4가 없으면 **전 회차 ``None``**이다. 0으로 채우지 않는다 (규칙 3).
+
+    마스터 약정이 ``null``을 *"N4 미결로 매입도 못 냈다"*로 읽고 **자기도 계산하지
+    않는다**(`master/commitment.py`). 0으로 채우면 "오늘 승인분이 오늘 도착"이 된다.
+    """
+    rounds = materialize_split(AS_OF, 100, [{"ratio": 0.5}, {"ratio": 0.5}], 12, lead_days=None)
+
+    assert [line["expected_arrival_date"] for line in rounds] == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("chosen", "why"),
+    [(None, "일괄 — 진입 자체를 안 한 경로"), ([{"ratio": 0.5}, {"ratio": 0.5}], "분할 불가 전환")],
+)
+def test_single_round_paths_also_carry_the_arrival_date(chosen, why) -> None:
+    """⚠️ ``materialize_split``의 반환 경로가 셋인데 **일괄 둘도 채워야 한다.**
+
+    한 곳이라도 빠지면 *"회차 N건 중 도착일이 있는 것은 M건뿐"*이 되어 Critic이 운다.
+    분할 불가 경로는 총량 1kg으로 만든다 — 회차당 1kg 미만이라 일괄로 되돌아간다.
+    """
+    total = 100 if chosen is None else 1
+    rounds = materialize_split(AS_OF, total, chosen, 12, lead_days=2)
+
+    assert len(rounds) == 1, why
+    assert rounds[0]["date"] == AS_OF
+    assert rounds[0]["expected_arrival_date"] == "2026-01-02"
+
+
+def test_arrival_dates_are_all_or_nothing() -> None:
+    """🔴 **부분 공급이 나올 수 없다.**
+
+    마스터는 1회차만 실리고 N4도 없으면 **실린 값까지 버린다**
+    (`master/commitment.py` — `lead is None`이면 일정 자체를 안 만든다).
+    우리가 그 입력을 만들 수 있는지가 쟁점인데, ``_rounds``가 ``arrival_dates()``의
+    결과를 통째로 쓰거나 통째로 ``None``으로 채우므로 **섞인 목록이 구조적으로 안 나온다.**
+    """
+    for lead in (2, None):
+        rounds = materialize_split(AS_OF, 100, [{"ratio": 0.4}, {"ratio": 0.6}], 12, lead_days=lead)
+        etas = [line["expected_arrival_date"] for line in rounds]
+        assert all(e is None for e in etas) or all(e is not None for e in etas), etas
+
+
+def test_arrival_date_follows_the_round_not_the_as_of() -> None:
+    """★ 변이 방어 — ``as_of + N4``를 전 회차에 박으면 2회차가 틀린다.
+
+    도착일은 **회차일** + N4다. ``split_offsets`` 재사용이 그것을 보장하는데, 그 재사용을
+    끊고 ``as_of``로 고정해도 1회차는 우연히 맞는다 — 2회차가 유일한 증거다.
+    """
+    rounds = materialize_split(AS_OF, 100, [{"ratio": 0.5}, {"ratio": 0.5}], 12, lead_days=2)
+    fixed = (date.fromisoformat(AS_OF) + timedelta(days=2)).isoformat()
+
+    assert rounds[0]["expected_arrival_date"] == fixed  # 1회차는 구분이 안 된다
+    assert rounds[1]["expected_arrival_date"] != fixed  # 2회차가 갈라준다
+    assert rounds[1]["expected_arrival_date"] == "2026-01-08"
+
+
+def test_arrival_dates_match_the_helper_used_for_cap_checks() -> None:
+    """🔴 **산출물과 cap 대조가 같은 값을 본다.**
+
+    ⑥은 ``arrival_dates()``로 회차 수량을 재배분하고(같은 함수), 그 도착일을 그대로
+    싣는다. 둘이 갈라지면 "검사한 날짜"와 "약정에 적힌 날짜"가 달라진다.
+    """
+    rounds = materialize_split(AS_OF, 100, [{"ratio": 0.5}, {"ratio": 0.5}], 12, lead_days=2)
+
+    assert [line["expected_arrival_date"] for line in rounds] == arrival_dates(AS_OF, 12, 2, 2)
