@@ -590,6 +590,24 @@ def classify_collapse(
 _LAYER_TOTALS = {"L0": 6, "L1": 13, "L2": 4, "L3": 17, "L4": 10, "L5": 6}
 
 
+def _dept_meta_checks(dept: Dept) -> str:
+    """`DeptMeta` 가 없어서 **그 부서에** 못 도는 검사 이름.
+
+    🔴 **전에는 전 부서에 `E-AUTHORITY·E-GRADE-LEAK` 이라고 적었다 (2026-09-01 정정).**
+      `E-GRADE-LEAK` 은 `check_finance_cap_grade_neutrality` 가 `dept != "finance"` 에서
+      바로 돌아서므로 **재무 말고는 애초에 안 돈다.** 반대로 `E-SCENARIO-LEAK` 은 전 부서
+      공통인데 이름이 빠져 있었다.
+
+      물류에게는 **틀린 이름 하나를 적고 맞는 이름 하나를 빠뜨린** 문장이었다. 물류
+      `warehouse_cap` 은 `cap_total_kg`·`cap_by_date_kg` 를 채우므로 `_fills_band` 가
+      참이고, `E-SCENARIO-LEAK` 이 실제로 걸리는 부서다.
+    """
+    checks = ["E-AUTHORITY", "E-SCENARIO-LEAK"]
+    if dept == "finance":
+        checks.append("E-GRADE-LEAK")
+    return "·".join(checks)
+
+
 def run_critic_v04(
     *,
     as_of: date,
@@ -636,6 +654,7 @@ def run_critic_v04(
     if not findings:
         findings += check_snapshot_binding(replies, snapshot)
         l1_ran += 1
+        covered = 0
         for dept, reply in replies.items():
             dm = meta.get(dept)
             if dm is not None:
@@ -646,9 +665,19 @@ def run_critic_v04(
                     findings += check_scenario_independence(dept, chk, used)
                     # 재무 전용 — 등급·수량 무관 (§3.6.8)
                     findings += check_finance_cap_grade_neutrality(chk, used)
+                covered += 1
             else:
-                skipped.append(f"{dept}: DeptMeta 미제출 — E-AUTHORITY·E-GRADE-LEAK 생략")
-        l1_ran += 2 if meta else 0
+                skipped.append(f"{dept}: DeptMeta 미제출 — {_dept_meta_checks(dept)} 생략")
+        # 🔴 **부서 하나가 냈다고 이 검사가 완주한 것이 아니다 (2026-09-01 실측).**
+        #   전에는 `2 if meta else 0` 이라 **아무 부서나 하나 내면 2를 다 세었다.**
+        #   재무만 낸 상태에서 물류가 생략돼도 커버리지가 같았다 — 숫자가 실제보다
+        #   후하게 나가고, 생략된 사실은 `skipped` 줄에만 남았다.
+        #
+        #   `_LAYER_TOTALS["L1"]` 의 13 은 이 둘을 **한 번씩** 세므로, 회신을 낸 부서가
+        #   전부 제출했을 때만 완주로 친다. 하나라도 빠지면 0이다 — 부분 수행을
+        #   반올림해 주면 "못 한 것을 통과로 치지 않는다"가 무너진다.
+        if replies and covered == len(replies):
+            l1_ran += 2
         findings += _run_evidence_match(replies, resolve_evidence)
         l1_ran += 1
         findings += check_evidence_grade(replies, allow_assumed_hard)

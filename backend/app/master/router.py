@@ -11,8 +11,8 @@ from fastapi import APIRouter, HTTPException, status
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
-from app.master.decision import DecisionIn, DecisionOut, DecisionRejected
-from app.master.decision_service import get_decisions, record_decision
+from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
+from app.master.decision_service import current_commitment, get_decisions, record_decision
 from app.master.schemas import (
     BurnInOut,
     ProcurementRunRequest,
@@ -187,9 +187,7 @@ def master_run_report(request_id: str) -> ReportOut:
     try:
         return get_run_report(request_id)
     except LookupError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
-        ) from error
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
 
 
 @router.get(
@@ -251,6 +249,32 @@ def master_decide(request_id: str, body: DecisionIn) -> DecisionOut:
             ),
             detail=str(error),
         ) from error
+
+
+@router.get(
+    "/runs/{request_id}/commitment",
+    response_model=CommitmentOut,
+    summary="현재 승인이 만든 확정 입고 약정 (H1)",
+)
+def master_commitment(request_id: str) -> CommitmentOut:
+    """물류 H1 미래 점유의 입력이 되는 약정. 전달 방식 ⓐ — 물류 회신 2026-09-01 합의.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 현재 결정이 승인이다 — 못 만든 약정도 `buildable=false` 로 **사실대로** 나간다 |
+    | 404 | 승인이 없다 — 결정이 없거나, 현재 결정이 거절·조건부 재요청이다 |
+
+    ★ `buildable=false` 를 404 로 접지 않는다. *"승인이 없다"* 와 *"승인했는데 약정을
+      못 만들었다"* 는 다른 사실이고, 부르는 쪽이 다르게 행동해야 한다 — 앞은 물류를
+      부르지 않으면 되고, 뒤는 사람이 봐야 한다.
+    """
+    commitment = current_commitment(request_id)
+    if commitment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"업무 키 {request_id} 에 유효한 승인이 없다 — 약정은 승인에서만 나온다.",
+        )
+    return commitment
 
 
 @router.get(

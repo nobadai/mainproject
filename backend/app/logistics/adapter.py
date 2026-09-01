@@ -29,6 +29,7 @@ adapters/logistics.py — 재고·물류 에이전트 접점 (마스터 ↔ 물�
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import date
@@ -54,6 +55,7 @@ from app.logistics.tools import (
     build_lot_constraints,
     calculate_cap_by_date,
 )
+from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
 from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
@@ -69,6 +71,172 @@ _T_ARRIVAL = "calculate_expected_arrival_dates"
 _T_LOTS = "build_lot_constraints"
 _T_INVENTORY = "build_inventory_by_item"
 _T_SIGNALS = "evaluate_procurement_business_signals"
+
+
+# --- Critic DeptMeta (#134) -------------------------------------------------
+
+#: Critic 의 물류 밴드 검사 id — **마스터 소유 상수**다
+#: (`app/master/critic_bridge.py:51 _INVENTORY_CAP_CHECK`). 마스터가 물류 PRE_PURCHASE
+#: payload 의 `warehouse_free_kg`·`cap_by_date` 로 check 를 합성할 때 붙이는 이름이고,
+#: **물류는 `checks[]` 를 내지 않는다** (2026-09-01 마스터 확정 — 같은 사실의 주인이
+#: 둘이 되면 마스터 합성분과 갈리는 자리가 새로 생긴다).
+#:
+#: 🔴 **이름이 어긋나면 검사가 조용히 통과한다.** Critic 은
+#: `inputs_used.get(check.check_id, ())` 로 읽고 못 찾으면 빈 튜플인데, 빈 튜플은
+#: *"금지 입력이 없다"* 로 읽혀 통과다 (`critic_v0_4.py:401`). 에러가 없으니 아무도
+#: 모른다.
+#:
+#: ★ **그래서 문자열을 베끼지 않고 참조한다** (#137). 마스터가 PR #135 로 상수를
+#:   공개하며 같은 이유를 적었다 — *"부서가 문자열을 베껴 두면 마스터가 이름을 바꾸는
+#:   날 그 부서의 검사가 조용히 무력화된다."* 마스터의
+#:   `tests/master/test_dept_meta_check_id.py` 는 **마스터 합성 결과와 상수**가 같은지만
+#:   보므로, 물류가 베낀 문자열을 들고 있으면 그 테스트는 초록불인 채 물류 검사만 죽는다.
+_CAP_CHECK_ID = DEPT_CAP_CHECK_ID[_AGENT]
+
+
+class _ToolInputContractMissing(RuntimeError):
+    """실행한 Tool 의 입력 계약이 없다. **조용히 0개로 보고하지 않는다.**
+
+    빈 `inputs_used` 는 Critic 이 *"금지 입력이 없다"* 로 읽고 통과시킨다 — 모르는
+    것이 통과가 되는 구조라 여기서는 크게 실패하는 편이 낫다 (재무와 같은 판단).
+    """
+
+    def __init__(self, tool: str) -> None:
+        self.tool = tool
+        super().__init__(f"Logistics tool has no declared input contract: {tool}")
+
+
+#: Tool 하나가 스냅샷·요청에서 **실제로 읽는** 입력. `inputs_used` 의 재료다.
+#:
+#: ★ **선언이 아니라 관측의 재료다.** 이 표만으로 관측을 만들지 않는다 — 그날 실행에
+#:   실제로 들어간 Tool 만 골라 합집합을 낸다. 안 돈 Tool 의 입력은 안 실린다.
+#:
+#: ★ **과다 선언이 안전한 방향이다.** 적게 적으면 Critic 이 금지 입력을 못 보고 조용히
+#:   통과시키고, 많이 적으면 검사가 더 걸릴 뿐이다. 그래서 Tool 이 판정에 곁들여 읽는
+#:   것(경고용 `snapshot_id`·`evidence_refs`)도 빼지 않는다.
+#:
+#: ★ **시나리오 계열 Tool 은 금지 이름을 그대로 적는다.** `calculate_expected_arrival_dates`
+#:   는 매입 제안을 읽는다. 지금은 SCENARIO_VALIDATION 에서만 돌아 `inputs_used` 에
+#:   실리지 않지만, 언젠가 경계 경로로 새면 Critic 이 `E-SCENARIO-LEAK` 으로 잡아야
+#:   한다 (`FORBIDDEN_SCENARIO_INPUTS`). 정직하게 적는 것이 그때의 방어다.
+_TOOL_INPUTS: dict[str, tuple[str, ...]] = {
+    _T_RULES: (
+        "logistics_snapshot.guaranteed_capacity_kg",
+        "logistics_snapshot.guaranteed_capacity_by_zone_kg",
+        "logistics_snapshot.daily_inbound_capacity_kg",
+        "logistics_snapshot.inbound_transport_capacity_kg",
+        "logistics_snapshot.inbound_lead_days",
+        "logistics_snapshot.in_transit",
+        "logistics_snapshot.confirmed_inbound_schedule",
+        "logistics_snapshot.confirmed_outbound_schedule",
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.snapshot_id",
+        "logistics_snapshot.evidence_refs",
+    ),
+    _T_CAP: (
+        "logistics_snapshot.guaranteed_capacity_kg",
+        "logistics_snapshot.used_capacity_kg",
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.confirmed_inbound_schedule",
+        "logistics_snapshot.confirmed_outbound_schedule",
+    ),
+    _T_LOTS: ("logistics_snapshot.on_hand_by_lot",),
+    _T_INVENTORY: (
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.confirmed_outbound_schedule",
+    ),
+    # 아래 둘은 SCENARIO_VALIDATION 전용이라 `inputs_used` 에 실리지 않는다. 계약을
+    # 비워 두지 않는 이유는 위 ★ 넷째 항목이다.
+    _T_ARRIVAL: ("scenarios", "split_plan"),
+    _T_SIGNALS: (
+        "scenarios",
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.used_capacity_kg",
+        "logistics_snapshot.guaranteed_capacity_kg",
+        "logistics_snapshot.confirmed_inbound_schedule",
+        "logistics_snapshot.confirmed_outbound_schedule",
+        "logistics_snapshot.capacity_tight_ratio",
+        "logistics_snapshot.freshness_pressure_ratio",
+        "logistics_snapshot.item_storage_policies",
+    ),
+}
+
+#: 어댑터가 **Tool 없이** 직접 만드는 밴드 값의 입력. `_free_capacity()` 가
+#: `warehouse_free_kg` 를 만드는데, 이것이 마스터 합성 check 의 `cap_total_kg` 이 된다
+#: (`critic_bridge.py:350`). 재무는 cap 을 Tool 이 만들어 이 자리가 없지만 물류는
+#: 어댑터가 만든다 — 여기 안 적으면 밴드 절반의 입력이 통째로 빠진다.
+_ADAPTER_BAND_INPUTS: tuple[str, ...] = (
+    "logistics_snapshot.guaranteed_capacity_kg",
+    "logistics_snapshot.used_capacity_kg",
+)
+
+
+def _assert_tool_input_contracts_complete() -> None:
+    """모든 물류 Tool 은 입력 계약을 가져야 한다.
+
+    기동 시점에 확인한다 — Tool 을 새로 만들고 계약을 안 적으면 그 사실이 조용한
+    `inputs_used` 누락이 아니라 **import 실패**로 즉시 드러난다 (재무와 같은 규율).
+    """
+    undeclared = sorted(
+        {_T_RULES, _T_CAP, _T_ARRIVAL, _T_LOTS, _T_INVENTORY, _T_SIGNALS} - set(_TOOL_INPUTS)
+    )
+    if undeclared:
+        raise _ToolInputContractMissing(", ".join(undeclared))
+
+
+_assert_tool_input_contracts_complete()
+
+
+def _produced_fields(payload: Mapping[str, Any]) -> list[str]:
+    """이번 회신에 **실제로 실린** 필드.
+
+    값이 `None` 인 키는 뺀다 — 산출하지 않은 것을 산출했다고 적으면 권한 검사
+    (`E-AUTHORITY`)가 엉뚱한 것을 본다. 어댑터는 원래 없는 값의 키를 아예 안 싣지만
+    (§1.2-10), 기준을 명시해 둔다.
+    """
+    return sorted(key for key, value in payload.items() if value is not None)
+
+
+def _inventory_dept_meta(
+    mode: str,
+    payload: Mapping[str, Any],
+    tools: Sequence[str],
+) -> dict[str, Any] | None:
+    """이번 실행이 읽은 입력과 낸 산출을 **물류 자신이** 기계가 읽을 형태로 낸다.
+
+    Critic 의 `E-AUTHORITY`(부서가 S3 전속 판정을 냈나)와 `E-SCENARIO-LEAK`(밴드 검사가
+    매입 시나리오를 읽었나)은 이것이 없으면 아예 돌지 않는다 — **통과가 아니라 생략**
+    이다. 마스터는 Tool 이름이나 payload 키를 보고 물류가 무엇을 읽었는지 알 수 없어
+    추측하지 않는다.
+
+    `PRE_PURCHASE` 만 `inputs_used` 를 낸다. 마스터가 밴드 check 를 합성하는 입력은
+    `constraints` 이고 그것은 PRE_PURCHASE 회신만 모으므로
+    (`master/flow.py::_collect_constraints`), SCENARIO_VALIDATION 에는 대응하는 cap
+    검사 축이 없다. 없는 검사에 가짜 `inputs_used` 를 지어내지 않고 **실제 산출 필드만**
+    낸다 — `E-AUTHORITY` 는 그것으로 돈다. 마스터가 두 mode 의 관측을 **합쳐서** 나르므로
+    빈 `inputs_used` 가 경계 관측을 덮지 않는다 (`critic_bridge._dept_meta_in`).
+    """
+    if mode == "SCENARIO_VALIDATION":
+        return {
+            "observation_type": "inventory_dept_meta",
+            "inputs_used": {},
+            "produced_fields": _produced_fields(payload),
+        }
+    if mode != "PRE_PURCHASE":
+        return None
+    inputs: list[str] = list(_ADAPTER_BAND_INPUTS)
+    for tool in tools:
+        if tool not in _TOOL_INPUTS:
+            raise _ToolInputContractMissing(tool)
+        for name in _TOOL_INPUTS[tool]:
+            if name not in inputs:
+                inputs.append(name)
+    return {
+        "observation_type": "inventory_dept_meta",
+        "inputs_used": {_CAP_CHECK_ID: inputs},
+        "produced_fields": _produced_fields(payload),
+    }
+
 
 _JUDGMENT_FIELDS = ("cap_by_date_policy",)
 
@@ -283,7 +451,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         if not missing
         else "읽어낸 상태는 답했고, 채우지 못한 값은 이름을 밝혔다.",
     )
-    return reply, _meta(request, run_id, tools)
+    return reply, _meta(request, run_id, tools, reply)
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +851,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         missing_data=tuple(dict.fromkeys(missing)),
         reasoning="물류 경계를 산출했다.",
     )
-    return reply, _meta(request, run_id, tools)
+    return reply, _meta(request, run_id, tools, reply)
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +1150,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         missing_data=tuple(dict.fromkeys(missing)),
         reasoning="매입 시나리오를 물류 관점에서 판정했다.",
     )
-    return reply, _meta(request, run_id, tools)
+    return reply, _meta(request, run_id, tools, reply)
 
 
 def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -1166,7 +1334,22 @@ def _run_id(request: AgentRequest) -> str:
     return f"LOG-{request.context.request_id}-{request.call_seq}"
 
 
-def _meta(request: AgentRequest, run_id: str, tools: Sequence[str]) -> ExecutionMetadata:
+def _meta(
+    request: AgentRequest,
+    run_id: str,
+    tools: Sequence[str],
+    reply: AgentReply | None = None,
+) -> ExecutionMetadata:
+    """실행 흔적. **Business Reply 와 섞지 않는다.**
+
+    `reply` 를 받으면 `runtime_status == "READY"` 일 때만 DeptMeta 관측을 붙인다.
+    ★ **못 낸 회신에 관측을 달지 않는다** — *"안 돌았는데 무엇을 읽었다"* 가 된다.
+    """
+    observations: list[dict[str, Any]] = []
+    if reply is not None and reply.runtime_status == "READY":
+        dept_meta = _inventory_dept_meta(request.mode, reply.payload, tools)
+        if dept_meta is not None:
+            observations.append(dept_meta)
     return ExecutionMetadata(
         run_id=run_id,
         request_id=request.context.request_id,
@@ -1174,6 +1357,7 @@ def _meta(request: AgentRequest, run_id: str, tools: Sequence[str]) -> Execution
         used_tools=tuple(tools),
         tool_order=tuple(range(1, len(tools) + 1)),
         llm_status="DISABLED",
+        observations=tuple(json.dumps(o, default=str, sort_keys=True) for o in observations),
     )
 
 
@@ -1202,7 +1386,7 @@ def _snapshot_error(
             "데이터 부재가 아니라 재시도 가치가 있는 실패다."
         ),
     )
-    return reply, _meta(request, run_id, tools)
+    return reply, _meta(request, run_id, tools, reply)
 
 
 def _not_ready(
@@ -1225,4 +1409,4 @@ def _not_ready(
         missing_data=missing,
         reasoning=reason,
     )
-    return reply, _meta(request, run_id, tools)
+    return reply, _meta(request, run_id, tools, reply)
