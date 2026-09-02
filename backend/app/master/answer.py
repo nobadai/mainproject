@@ -34,6 +34,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.master.envelope import agent_dept
 from app.master.status_flow import StatusOutcome
 
 #: 부서 이름을 사람 말로. **없는 이름은 그대로 쓴다** (지어내지 않는다).
@@ -113,6 +114,7 @@ def _no_verdict(verdict: Mapping[str, Any]) -> bool:
     if str(verdict.get("runtime_status") or "READY") != "READY":
         return True
     return str(verdict.get("business_status") or "") in _NO_VERDICT_STATUS
+
 
 #: 종료 코드를 사람이 읽는 결론으로. **"사라 / 사지 마라" 가 여기서 나온다.**
 _END_HEADLINE: dict[str, str] = {
@@ -249,6 +251,31 @@ def _status_gaps(outcome: StatusOutcome) -> tuple[str, ...]:
 # ── 매입 ────────────────────────────────────────────────────────────────
 
 
+def _adjustment_lines(response: Any, agent: str) -> list[str]:
+    """그 부서가 낸 조정안을 사람이 읽는 줄로.
+
+    🔴 **개수만 말하고 "실행 이력에서 보십시오" 로 끝내던 자리다.** 실행 계획에도
+      이력의 계획 행에도 조정안 칸이 없어서, 가서 봐도 없는 곳을 알려 주고 있었다
+      (2026-09-02).
+
+    ★ **마스터가 문장을 새로 쓰지 않는다.** 축·목표값·단위는 부서가 낸 값 그대로고,
+      뒤에 붙는 설명은 부서가 쓴 `reason` 원문이다.
+
+    ★ **0건을 실패로 말하지 않는다.** 물류는 `reject` 안의 조정을 승격하지 않으므로
+      (#121 · 2026-09-02 확정) 0건이 정답인 날이 있다. 그런 날은 아무 줄도 안 낸다.
+    """
+    dept = agent_dept(agent)
+    if dept is None:
+        return []
+    mine = [a for a in response.adjustments if a.dept == dept]
+    if not mine:
+        return []
+    label = agent_label(agent)
+    out = [f"{label} 가 조정을 제안했습니다 ({len(mine)}건)"]
+    out += [f"{label} 조정: {a.axis} {a.target_value:g}{a.unit} — {a.reason}" for a in mine]
+    return out
+
+
 def facts_from_procurement(response: Any) -> AnswerFacts:
     """매입 실행 결과를 사실 줄로.
 
@@ -298,16 +325,16 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
             # 구분되지 않는다 (실측 2026-08-31 — 물류 기준일 불일치 봉투로 재현).
             facts.append(Fact(label=f"{agent_label(agent)} 판정", value="내지 못함"))
             why = str(verdict.get("reasoning") or "").strip()
-            gaps.append(
-                f"{agent_label(agent)} 판정을 내지 못했습니다 — {why or '사유 미기재'}"
-            )
+            gaps.append(f"{agent_label(agent)} 판정을 내지 못했습니다 — {why or '사유 미기재'}")
             continue
         facts.append(Fact(label=f"{agent_label(agent)} 판정", value=label))
-        if verdict.get("suggested_adjustments"):
-            gaps.append(
-                f"{agent_label(agent)} 가 조정을 제안했습니다 "
-                f"({verdict['suggested_adjustments']}건) — 실행 이력에서 보십시오"
-            )
+        # 🔴 **없는 곳을 가리키지 않는다** (2026-09-02). 전에는 개수만 말하고
+        #    "실행 이력에서 보십시오" 로 끝냈는데, 실행 계획에도 이력의 계획 행에도
+        #    조정안 칸이 없었다. 이제 내용을 여기서 말한다.
+        #
+        # ★ 이름으로 재지 않는다 — `AgentName` 과 `Dept` 는 지금 글자가 같을 뿐
+        #   어휘가 다르다. 매핑의 주인(`agent_dept`)을 거친다.
+        gaps.extend(_adjustment_lines(response, agent))
         if verdict.get("business_status") == "conditional":
             gaps.append(f"{agent_label(agent)} 판정이 조건부입니다 — 무조건 통과가 아닙니다")
 

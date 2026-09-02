@@ -30,6 +30,48 @@ export const AXIS_LABEL: Record<string, string> = {
   mix: "구성",
 };
 
+/**
+ * 부서가 **제안하는** 조정 축 (`_DEPT_AXES`).
+ *
+ * 🔴 `AXIS_LABEL` 과 **다른 표다.** 저쪽은 *매입이 연 축*(quantity·timing·mix)이고
+ *   이쪽은 *부서가 고치라는 축*(quantity·timing·channel_mix·amount)이다.
+ *   `quantity` · `timing` 두 글자가 겹칠 뿐 주체와 집합이 다르다.
+ */
+export const DEPT_AXIS_LABEL: Record<string, string> = {
+  quantity: "수량",
+  timing: "시점",
+  channel_mix: "채널 배분",
+  amount: "금액",
+};
+
+/**
+ * 부서 이름 (`Dept`).
+ *
+ * 🔴 `AGENT_LABEL`(마스터가 부르는 대상)과 **지금 글자가 같지만 다른 어휘다.**
+ *   서버에서는 `_AGENT_DEPT` 가 그 매핑의 주인이다. 화면은 매핑을 다시 만들지 않고
+ *   **부서 이름을 그대로 받아** 한국어만 붙인다.
+ */
+export const DEPT_LABEL: Record<string, string> = {
+  finance: "재무",
+  inventory: "물류",
+  sales: "영업",
+};
+
+/**
+ * 조정안의 단위.
+ *
+ * 🔴 **닫힌 집합이 아니다** — 봉투(`SuggestedAdjustment.unit`)가 `str` 이고 아무도
+ *   검사하지 않는다 (2026-09-02 확인). 그래서 모르는 값이 **실제로 올 수 있고**,
+ *   그때 `미등록` 이 붙어 보이는 것이 이 표의 목적이다.
+ *
+ * `d` 는 봉투 `as_of` 로부터의 일수다 (물류 타이밍 축 · 코드에 그렇게 박혀 있다).
+ */
+export const UNIT_LABEL: Record<string, string> = {
+  kg: "kg",
+  krw: "원",
+  d: "일",
+};
+
 /** 등록된 값이면 한국어, 아니면 **원문 + 미등록**. 빈 값은 `null` — 아무것도 안 그린다. */
 export function vocab(table: Record<string, string>, value: unknown): string | null {
   if (typeof value !== "string" || value === "") return null;

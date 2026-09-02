@@ -29,8 +29,13 @@ import type { ProcurementRunResponse } from "@/lib/types";
  *   붙이기 시작하면 **부서 스키마가 화면에 한 벌 더 생긴다** — 물류가 값을 바꾸는
  *   날 화면만 옛말을 한다. 그대로 편다.
  *
- * ★ **"실행 이력에서 보십시오" 의 목적지이기도 하다.** 서버 문구가 그렇게 안내하는데
- *   실행 이력 표에는 호출 단계만 있어 조정 제안이 개수조차 없었다.
+ * ★ **조정안은 여기 없다 — `AdjustmentPanel` 이 갖는다** (2026-09-02).
+ *   전에는 여기에 *"조정 제안 3건"* 배지만 달았고, 서버 문구는 *"실행 이력에서
+ *   보십시오"* 라고 안내하는데 **실행 이력에 그 칸이 없었다.**
+ *
+ *   내용을 이리로 가져오지 않고 자리를 나눈 이유는 어휘다. 조정안은 `dept` 를
+ *   달고 오고 이 표의 키는 `AgentName` 이라 — **지금 글자가 같을 뿐 다른 어휘다.**
+ *   여기서 이어 붙이면 그 둘을 같은 것으로 쓰게 된다.
  */
 
 const STATUS_LABEL: Record<string, string> = {
@@ -74,7 +79,6 @@ function AdvisorRow({
   const label = STATUS_LABEL[verdict.business_status];
   const payload = verdict.payload ?? {};
   const hasPayload = Object.keys(payload).length > 0;
-  const adjustments = verdict.suggested_adjustments ?? 0;
 
   return (
     <div className="rounded-lg border border-line-soft bg-surface px-3 py-2">
@@ -99,9 +103,6 @@ function AdvisorRow({
         )}
         {verdict.runtime_status !== "READY" && (
           <span className="font-mono text-[11px] text-warn">{verdict.runtime_status}</span>
-        )}
-        {adjustments > 0 && (
-          <span className="text-[11.5px] text-muted">조정 제안 {adjustments}건</span>
         )}
         {verdict.needs_followup && <span className="text-[11.5px] text-warn">후속 확인 필요</span>}
         {hasPayload && (

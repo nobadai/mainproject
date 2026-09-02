@@ -19,6 +19,7 @@ E2_HELD · 호출 3단계
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 from app.master.answer import facts_from_procurement
 
@@ -35,6 +36,7 @@ class _Response:
         self.skipped_checks = kw.get("skipped_checks", [])
         self.blocked_by = kw.get("blocked_by", ())
         self.blocked_failures = kw.get("blocked_failures", ())
+        self.adjustments = kw.get("adjustments", ())
         self.missing_adapters = kw.get("missing_adapters", ())
         self.single_option = kw.get("single_option", False)
         self.verification_skipped = kw.get("verification_skipped", False)
@@ -44,6 +46,13 @@ class _Response:
         self.verdicts = kw.get("verdicts", {})
         self.as_of = date(2025, 12, 31)
         self.request_id = "REQ-20251231-0001"
+
+
+def _adjustment(dept: str, axis: str, value: float, unit: str, reason: str = "사유"):
+    """`AdjustmentOut` 최소 대역. 실제 필드 이름을 그대로 쓴다."""
+    return SimpleNamespace(
+        dept=dept, axis=axis, target_value=value, unit=unit, reason=reason, ref_ids=["REF-1"]
+    )
 
 
 def _lines(facts) -> str:
@@ -99,8 +108,8 @@ def test_조언자_판정을_적는다():
             end_code="E1_APPROVED",
             scenarios=[{"label": "기본"}],
             verdicts={
-                "finance": {"business_status": "ok", "suggested_adjustments": 0},
-                "inventory": {"business_status": "conditional", "suggested_adjustments": 0},
+                "finance": {"business_status": "ok"},
+                "inventory": {"business_status": "conditional"},
             },
         )
     )
@@ -135,11 +144,57 @@ def test_조정_제안이_있으면_드러낸다():
     facts = facts_from_procurement(
         _Response(
             scenarios=[{"label": "기본"}],
-            verdicts={"finance": {"business_status": "ok", "suggested_adjustments": 2}},
+            verdicts={"finance": {"business_status": "ok"}},
+            adjustments=(_adjustment("finance", "amount", 18000000.0, "krw"),),
         )
     )
 
-    assert any("조정을 제안했습니다 (2건)" in g for g in facts.gaps)
+    assert any("조정을 제안했습니다 (1건)" in g for g in facts.gaps)
+
+
+def test_조정_제안의_내용을_적는다():
+    """🔴 전에는 개수만 말하고 *"실행 이력에서 보십시오"* 로 끝냈다 (2026-09-02).
+
+    **실행 이력에 없었다.** 가서 봐도 없는 곳을 알려 주고 있었다.
+    """
+    facts = facts_from_procurement(
+        _Response(
+            scenarios=[{"label": "기본"}],
+            verdicts={"inventory": {"business_status": "conditional"}},
+            adjustments=(_adjustment("inventory", "quantity", 7120.0, "kg", "창고가 모자랍니다"),),
+        )
+    )
+
+    적힌_것 = " ".join(facts.gaps)
+    assert "7120kg" in 적힌_것, "목표값이 안 보이면 개수만 말하던 때와 같다"
+    assert "창고가 모자랍니다" in 적힌_것, "부서가 쓴 사유를 그대로 옮긴다"
+    assert "실행 이력에서 보십시오" not in 적힌_것, "없는 곳을 가리키던 문장이 남았다"
+
+
+def test_남의_부서_조정을_자기_것으로_적지_않는다():
+    """`AgentName` 과 `Dept` 는 지금 글자가 같을 뿐 **어휘가 다르다.**"""
+    facts = facts_from_procurement(
+        _Response(
+            scenarios=[{"label": "기본"}],
+            verdicts={"finance": {"business_status": "ok"}},
+            adjustments=(_adjustment("inventory", "quantity", 7120.0, "kg"),),
+        )
+    )
+
+    assert not any("재무 가 조정을 제안" in g for g in facts.gaps)
+
+
+def test_조정이_0건이면_아무_줄도_안_낸다():
+    """물류는 `reject` 안의 조정을 승격하지 않는다 — **0건이 정답인 날이 있다.**"""
+    facts = facts_from_procurement(
+        _Response(
+            scenarios=[{"label": "기본"}],
+            verdicts={"inventory": {"business_status": "reject"}},
+            adjustments=(),
+        )
+    )
+
+    assert not any("조정을 제안" in g for g in facts.gaps)
 
 
 def test_모르는_판정값은_적지_않는다():

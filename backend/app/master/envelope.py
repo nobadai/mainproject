@@ -102,6 +102,19 @@ _AGENT_DEPT: dict[AgentName, Dept] = {
 """매입은 여기 없다 — 축 조정을 제안할 권한이 없다 (제안자 ≠ 조언자)."""
 
 
+def agent_dept(agent: AgentName) -> Dept | None:
+    """에이전트 이름을 부서 어휘로. **없으면 `None`** (조정을 제안할 수 없는 쪽).
+
+    🔴 **지금 두 어휘의 글자가 같다.** `AgentName` 의 `finance`·`inventory` 와
+      `Dept` 의 그것이 같은 문자열이라 그냥 비교해도 통한다 — 그래서 위험하다.
+      판매가 붙거나 어느 한쪽 이름이 바뀌는 날 **조용히 틀린다.**
+
+    ★ 이름으로 재다 세 번 틀린 주에 만든 자리다 (`llm_attempts` · `runtime_status` ·
+      회차 분할). **매핑의 주인을 하나로 두고 거기를 거친다.**
+    """
+    return _AGENT_DEPT.get(agent)
+
+
 def agent_allowed_modes(agent: AgentName) -> frozenset[Mode]:
     return _AGENT_MODES[agent]
 
