@@ -408,9 +408,10 @@ class MissingCapability(BaseModel):
 
     candidate_id: str
     capability: Literal[
-        "FINANCE_SALES_VALIDATION",
-        "LOGISTICS_SUPPLY_FEASIBILITY",
-        "ADDITIONAL_PROCUREMENT_FEASIBILITY",
+        "SELLABLE_SUPPLY_CONTEXT",
+        "DELIVERY_FEASIBILITY_CONTEXT",
+        "FINANCIAL_VALIDATION",
+        "ADDITIONAL_SUPPLY_CONTEXT",
     ]
     reason: str
 
@@ -487,6 +488,232 @@ class SalesAllocationReply(BaseModel):
     self_check: SalesSelfCheck
     base_proposals: list[BaseSalesProposal] = Field(default_factory=list)
     recommendation: SalesRecommendation
+
+
+# ---------------------------------------------------------------------------
+# 최종 Sales Proposal Core — 레거시 allocation 계약과 병행한다.
+# ---------------------------------------------------------------------------
+
+SalesCapability = Literal[
+    "SELLABLE_SUPPLY_CONTEXT",
+    "DELIVERY_FEASIBILITY_CONTEXT",
+    "FINANCIAL_VALIDATION",
+    "ADDITIONAL_SUPPLY_CONTEXT",
+]
+ScenarioType = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
+ScenarioObjective = Literal["RISK_DEFENSE", "BALANCE", "SALES_OPPORTUNITY"]
+
+
+class SalesUserRequest(BaseModel):
+    """Sales가 제안의 기준으로 삼는 사용자 요청이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    raw_text: str | None = None
+    item: str = Field(min_length=1)
+    partner_id: str | None = None
+    requested_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    preferred_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    preferred_delivery_date: date | None = None
+    preferred_payment_days: int | None = Field(default=None, ge=0)
+    preferred_contract_term_days: int | None = Field(default=None, ge=0)
+
+    @field_validator(
+        "requested_quantity_kg",
+        "preferred_unit_price_krw",
+        "preferred_payment_days",
+        "preferred_contract_term_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesContractContext(BaseModel):
+    """계약 사실을 소비만 하는 Sales용 축약 뷰다."""
+
+    model_config = ConfigDict(extra="forbid")
+    contract_id: str | None = None
+    previous_contract_id: str | None = None
+    partner_id: str | None = None
+    item: str | None = None
+    contract_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    contract_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    contract_delivery_date: date | None = None
+    contract_payment_days: int | None = Field(default=None, ge=0)
+    contract_term_days: int | None = Field(default=None, ge=0)
+    source_ref: str | None = None
+
+    @field_validator(
+        "contract_quantity_kg",
+        "contract_unit_price_krw",
+        "contract_payment_days",
+        "contract_term_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesMlContext(PassThrough):
+    """ML 예측은 시장 맥락일 뿐 Sales 가격을 결정하지 않는다."""
+
+
+class LogisticsQueryScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item: str | None = None
+    as_of: date | None = None
+    delivery_window_start: date | None = None
+    delivery_window_end: date | None = None
+    max_confirmed_sellable_quantity_kg: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("max_confirmed_sellable_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsDeliveryFeasibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["READY", "UNRESOLVED", "FAIL"] = "UNRESOLVED"
+    daily_outbound_capacity_kg: Decimal | None = Field(default=None, ge=0)
+    reason_codes: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator("daily_outbound_capacity_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsSupplyByDate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    date: date
+    confirmed_sellable_quantity_kg: Decimal = Field(ge=0)
+    freshness_unresolved_inbound_quantity_kg: Decimal = Field(default=Decimal(0), ge=0)
+    uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "confirmed_sellable_quantity_kg", "freshness_unresolved_inbound_quantity_kg", mode="before"
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesLogisticsContext(BaseModel):
+    """Logistics PRE_SALES 결과를 재계산 없이 보존하는 입력 모델이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    query_scope: LogisticsQueryScope | None = None
+    sellable_supply_status: Literal["READY", "UNRESOLVED", "FAIL"] | None = None
+    # Logistics의 상세 lot·재고 산식은 Sales가 해석하거나 재계산하지 않고 보존만 한다.
+    sellable_supply: PassThrough | None = None
+    delivery_feasibility: LogisticsDeliveryFeasibility | None = None
+    supply_capacity_by_date: list[LogisticsSupplyByDate] = Field(default_factory=list)
+    hard_constraints: list[PassThrough] = Field(default_factory=list)
+    soft_warnings: list[PassThrough] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class SalesDomainReply(BaseModel):
+    """Master가 전달한 원본 Domain 회신을 손실 없이 보관한다."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_agent: Literal["finance", "logistics", "purchase"]
+    capability: SalesCapability
+    reply_ref: str
+    runtime_status: RuntimeStatus
+    business_status: str | None = None
+    scenario_id: str | None = None
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class SalesScenarioFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario_id: str
+    reply_refs: list[str] = Field(default_factory=list)
+
+
+class SalesFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    original_run_id: str | None = None
+    attempt: int = Field(default=1, ge=1)
+    domain_replies: list[SalesDomainReply] = Field(default_factory=list)
+    scenario_feedback: list[SalesScenarioFeedback] = Field(default_factory=list)
+
+
+class SalesProposalInput(BaseModel):
+    """Master 연동 전에도 독립 실행 가능한 최종 Sales 제안 입력이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    business_mode: SalesBusinessMode
+    is_refeed: bool = False
+    feedback_attempt: int = Field(default=0, ge=0)
+    user_request: SalesUserRequest
+    contract_context: SalesContractContext | None = None
+    ml_context: SalesMlContext | None = None
+    finance_context: PassThrough | None = None
+    logistics_context: SalesLogisticsContext | None = None
+    feedback: SalesFeedback | None = None
+
+
+class ScenarioSupply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    required_additional_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    additional_supply_required: bool = False
+
+
+class SalesScenario(BaseModel):
+    """Sales가 소유한 제안과 외부 검증 의존성을 분리한 최종 시나리오다."""
+
+    model_config = ConfigDict(extra="forbid")
+    scenario_id: str
+    parent_scenario_id: str | None = None
+    revision: int = Field(default=0, ge=0)
+    scenario_type: ScenarioType
+    objective: ScenarioObjective
+    business_mode: SalesBusinessMode
+    item: str
+    partner_id: str | None = None
+    quantity_kg: Decimal | None = Field(default=None, ge=0)
+    unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    sales_amount_krw: Decimal | None = Field(default=None, ge=0)
+    delivery_date: date | None = None
+    payment_days: int | None = Field(default=None, ge=0)
+    contract_term_days: int | None = Field(default=None, ge=0)
+    supply: ScenarioSupply
+    sales_decision_axes: list[str] = Field(default_factory=list)
+    required_validations: list[SalesCapability] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    rationale: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    conditional_purchase: bool = False
+    variant_collapsed: bool = False
+    variant_collapsed_reason: str | None = None
+    domain_replies: list[SalesDomainReply] = Field(default_factory=list)
+
+
+class ProposalSelfCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    issue_codes: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
+class SalesProposalReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent: Literal["sales"] = "sales"
+    business_mode: SalesBusinessMode
+    scenarios: list[SalesScenario] = Field(default_factory=list)
+    missing_capabilities: list[SalesCapability] = Field(default_factory=list)
+    recommended_scenario_id: str | None = None
+    recommendation: SalesRecommendation
+    self_check: ProposalSelfCheck
 
 
 # ---------------------------------------------------------------------------
