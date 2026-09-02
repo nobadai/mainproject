@@ -23,6 +23,7 @@ from app.master.runner import MasterRunner
 from app.master.schemas import (
     BurnInOut,
     DailyClosingOut,
+    EvidenceOut,
     ProcurementRunRequest,
     ProcurementRunResponse,
     ReportOut,
@@ -93,7 +94,11 @@ def run_procurement(
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
-    response.concerns = [*response.concerns, *_decision_collision(request_id)]
+    response.concerns = [
+        *response.concerns,
+        *_decision_collision(request_id),
+        *_evidence_contract_concerns(outcome),
+    ]
     response.report_text = render_answer(facts_from_procurement(response))
     # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
     #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
@@ -214,6 +219,7 @@ def _to_response(
         scenarios=[dict(s) for s in outcome.scenarios],
         judgment=dict(outcome.judgment),
         constraints={k: dict(v) for k, v in outcome.constraints.items()},
+        evidences=_evidences_out(outcome),
         verdicts={k: dict(v) for k, v in outcome.verdicts.items()},
         blocked_by=list(outcome.blocked_by),
         findings=list(outcome.findings),
@@ -242,6 +248,65 @@ def _empty_response(
         # 어댑터가 없어 못 돈 날도 **무엇을 못 봤는지**는 남긴다 (§3.7.6)
         skipped_checks=["전 검사: 어댑터 미등록으로 Flow 가 시작되지 않음"],
     )
+
+
+def _evidence_contract_concerns(outcome: ProcurementOutcome) -> list[str]:
+    """🔴 **근거의 값이 계약과 다른가.**
+
+    `contracts_core.Evidence.value` 는 `float` 인데 `Evidence` 가 dataclass 라
+    런타임 검증이 없다. 그래서 문자열을 넣어도 아무 데서도 안 걸리고, 실제로
+    재무 `policy_version_used` 가 `"v1.3-PROVISIONAL"` 을 싣고 있다
+    (`finance/capabilities/procurement.py:175`).
+
+    ★ **값을 고치거나 버리지 않는다.** 고치면 남의 값을 덮어쓰는 것이고(§3.2.2),
+      버리면 근거를 고르는 것이다. 원본은 그대로 나가고 여기서 **사실만 적는다.**
+
+    ★ `findings` 가 아니라 `concerns` 다. **매입을 다시 불러도 안 고쳐진다** -
+      남의 계약 문제라 사람이 봐야 한다 (§3.4). 재무 회신의 봉투 위반 때문에
+      매입을 재호출하던 것과 같은 실수를 반복하지 않는다.
+
+    ⚠️ 이 검사는 **증상만 잡는다.** 어느 쪽이 맞는지는 정하지 않는다 - 계약을
+      넓힐지(문자열 근거를 허용) 재무가 다른 칸을 쓸지는 팀이 정할 일이다.
+    """
+    offenders = [
+        f"{item.agent}:{item.evidence.claim}={item.evidence.value!r}"
+        for item in outcome.evidences
+        if not isinstance(item.evidence.value, (int, float))
+        or isinstance(item.evidence.value, bool)
+    ]
+    if not offenders:
+        return []
+    message = (
+        "EVIDENCE-VALUE-NOT-NUMERIC: 근거의 value 가 계약(float)과 다른 것이 "
+        f"{len(offenders)}건이다 - {', '.join(offenders)}. 값은 그대로 나갔고 "
+        "마스터가 고치지 않았다. 계약을 넓힐지 부서가 다른 칸을 쓸지는 팀이 정한다."
+    )
+    return [message]
+
+
+def _evidences_out(outcome: ProcurementOutcome) -> list[EvidenceOut]:
+    """부서 근거를 응답 모양으로. **고르지도 요약하지도 않는다.**
+
+    ★ 순서를 손대지 않는다 - 부서가 낸 순서가 그 부서의 설명 순서다.
+      마스터가 정렬하면 "이게 더 중요하다" 는 뜻이 생긴다 (§3.2.2).
+
+    ★ 빈 목록은 "근거가 완비됐다" 가 아니라 **부서가 근거를 안 냈다**는 사실이다.
+      화면이 그렇게 읽도록 스키마 설명에 적어 두었다.
+    """
+    return [
+        EvidenceOut(
+            agent=item.agent,
+            mode=item.mode,
+            claim=item.evidence.claim,
+            source=item.evidence.source,
+            value=item.evidence.value,
+            unit=item.evidence.unit,
+            evidence_grade=item.evidence.evidence_grade,
+            evidence_detail=item.evidence.evidence_detail,
+            ref_ids=list(item.evidence.ref_ids),
+        )
+        for item in outcome.evidences
+    ]
 
 
 def _steps(plan: ExecutionPlan) -> list[StepOut]:
