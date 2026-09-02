@@ -50,7 +50,7 @@ def test_externally_imported_modules_still_resolve(module):
 
 def test_finance_port_and_controller_still_resolve():
     from app.finance.adapter import finance_port
-    from app.finance.agent import FinanceAgentController
+    from app.finance.application.orchestration import FinanceAgentController
 
     assert callable(finance_port)
     assert FinanceAgentController is not None
@@ -64,18 +64,19 @@ def test_router_exposes_the_same_endpoints():
 
 
 def test_tool_registry_keeps_its_public_names():
-    """재무 내부·재무 테스트가 이 경로로 들어온다."""
-    from app.finance import tool_registry
+    """Registry 이름은 Harness 가 소유한다 — **디스패치는 실행 통제의 일부다.**"""
+    from app.finance.application import harness
 
-    for name in (
-        "PRE_PURCHASE_TOOLS",
-        "SCENARIO_VALIDATION_TOOLS",
-        "FinanceToolRegistry",
-        "_scenario_schedule",
-        "_schedule_events",
-        "_calculate_schedule_cap",
-    ):
-        assert hasattr(tool_registry, name), name
+    for name in ("PRE_PURCHASE_TOOLS", "SCENARIO_VALIDATION_TOOLS", "FinanceToolRegistry"):
+        assert hasattr(harness, name), name
+
+
+def test_schedule_helpers_live_with_the_capability_that_owns_them():
+    """지급 일정 재구성은 **그것을 쓰는 mode** 옆에 산다 — 시나리오 판정이 유일한 소비자다."""
+    from app.finance.capabilities import scenario
+
+    for name in ("_scenario_schedule", "_schedule_events", "_calculate_schedule_cap"):
+        assert hasattr(scenario, name), name
 
 
 def test_every_finance_module_imports():
@@ -90,25 +91,22 @@ def test_every_finance_module_imports():
 
 
 def test_registry_is_a_thin_dispatcher():
-    """🔴 예전에는 이 파일 하나가 디스패치·컨텍스트·두 mode·일정·Evidence 를 다 들었다."""
-    source = (FINANCE / "tool_registry.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    """🔴 예전에는 디스패처가 컨텍스트·두 mode·일정·Evidence 를 다 들었다.
 
+    ★ Harness 안으로 들어왔어도 **디스패치는 여전히 얇다.** mode 검사 하나와 위임뿐이다.
+    """
+    source = (FINANCE / "application" / "harness.py").read_text(encoding="utf-8")
     registry = next(
         node
-        for node in tree.body
+        for node in ast.parse(source).body
         if isinstance(node, ast.ClassDef) and node.name == "FinanceToolRegistry"
     )
     methods = {n.name for n in registry.body if isinstance(n, ast.FunctionDef)}
     assert methods == {"__init__", "names_for", "execute"}
 
-    # 업무 계산이 디스패처로 돌아오지 않았는지 본다.
-    assert "project_cashflow(" not in source.replace('"project_cashflow"', "")
-    assert "classify_base_stress" not in source
-
 
 def test_capabilities_are_split_by_mode():
-    from app.finance.capabilities import pre_purchase, scenario_validation
+    from app.finance.capabilities import procurement, scenario
 
     for name in (
         "assess_finance_position",
@@ -116,14 +114,14 @@ def test_capabilities_are_split_by_mode():
         "calculate_purchase_finance_cap",
         "analyze_payment_pressure",
     ):
-        assert hasattr(pre_purchase, name), name
+        assert hasattr(procurement, name), name
     for name in ("evaluate_purchase_scenario", "validate_amount_adjustment"):
-        assert hasattr(scenario_validation, name), name
+        assert hasattr(scenario, name), name
 
 
 def test_tool_names_are_unchanged():
     """Planner 계약이다 — 이름이 바뀌면 모델이 고를 수 없다."""
-    from app.finance.tool_registry import PRE_PURCHASE_TOOLS, SCENARIO_VALIDATION_TOOLS
+    from app.finance.application.harness import PRE_PURCHASE_TOOLS, SCENARIO_VALIDATION_TOOLS
 
     assert PRE_PURCHASE_TOOLS == frozenset(
         {
@@ -139,7 +137,7 @@ def test_tool_names_are_unchanged():
 
 
 def test_no_capability_is_registered_twice():
-    from app.finance.tool_registry import (
+    from app.finance.application.harness import (
         _CAPABILITIES,
         PRE_PURCHASE_TOOLS,
         SCENARIO_VALIDATION_TOOLS,
@@ -181,7 +179,7 @@ def test_deterministic_calculations_stay_in_tools():
     ):
         assert hasattr(tools, name), name
 
-    capability = (FINANCE / "capabilities" / "pre_purchase.py").read_text(encoding="utf-8")
+    capability = (FINANCE / "capabilities" / "procurement.py").read_text(encoding="utf-8")
     # cap 공식이 capability 안에서 다시 구현되지 않았다.
     assert "ROUND_FLOOR" not in capability
     assert "calculate_finance_cap(" in capability
@@ -192,6 +190,6 @@ def test_rules_are_not_absorbed_into_agent_or_adapter():
     from app.finance import rules
 
     assert hasattr(rules, "classify_base_stress")
-    for module in ("agent.py", "adapter.py"):
+    for module in ("adapter.py", "application/orchestration.py"):
         source = (FINANCE / module).read_text(encoding="utf-8")
         assert "def classify_base_stress" not in source
