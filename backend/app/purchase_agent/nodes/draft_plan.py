@@ -258,14 +258,14 @@ def _deferred_checks(
     deferred = []
     if pending_value(state, constraints, "inbound_lead_days") is None:
         deferred.append(
-            "입고일 기준 창고 점유 검사 보류 — inbound_lead_days(N4) 미확정이라 "
-            "expected_arrival_date를 계산하지 않는다 (상세설계 §4-⑦)"
+            "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정이라 "
+            "회차별 도착일을 계산하지 않는다"
         )
     if pending_value(state, constraints, "purchase_payment_days") is None:
         deferred.append(
-            "지급일 기준 현금 검사 보류 — purchase_payment_days(N5) 미확정이라 "
-            "payment_date를 계산하지 않는다"
+            "지급일 기준 현금 검사 보류 — 재무 대금 지급 소요일이 미확정이라 "
+            "회차별 지급일을 계산하지 않는다"
         )
     if freshness_cap is None:
-        deferred.append(f"신선도 상한 검사 보류 — {item} 품목 보관한계가 constraints에 미확정")
+        deferred.append(f"신선도 상한 검사 보류 — {item} 품목 보관한계가 설정에 미확정")
     return deferred

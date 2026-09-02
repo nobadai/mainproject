@@ -232,6 +232,20 @@ export interface ProcurementRunResponse {
     /** 부서가 쓴 문장 그대로. 마스터가 요약하지 않는다. */
     reason: string;
     ref_ids: string[];
+    /**
+     * 🆕 이 조정이 어느 시나리오 대상인가 (2026-09-02).
+     *
+     * 전에는 `reason` 문장 안에만 있었다. 합쳐진 건이면 합쳐진 라벨이 다 들어온다 —
+     * 건수를 안 늘리면서 *"이 조정은 세 안 모두에 해당"* 이 값으로 드러난다.
+     *
+     * **비어 있으면 부서가 안 채운 것이다.** 화면이 지어내지 않는다.
+     */
+    scenario_labels: string[];
+    /**
+     * 🆕 어느 회차의 상한인가. **번호가 아니라 날짜다** — 물류에 회차 번호가 없다.
+     * 회차 개념이 없는 축(재무 `amount`)은 `null`.
+     */
+    split_date: string | null;
   }[];
   findings: string[];
   concerns: string[];

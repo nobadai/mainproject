@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from app.master.answer import agent_label
@@ -294,10 +294,13 @@ class ProcurementFlow:
         verdicts: dict[AgentName, Mapping[str, Any]] = {}
         verification = VerificationResult()
 
+        #: 다음 회차에 실을 되먹임. **1회차는 None** — 되먹임은 1회차 산출물에서 나온다.
+        feedback: Mapping[str, Any] | None = None
+
         while attempts < self.max_purchase_attempts:
             attempts += 1
             purchase = self.runner.call(
-                "purchase", "GENERATE_SCENARIOS", self._purchase_input(constraints)
+                "purchase", "GENERATE_SCENARIOS", self._purchase_input(constraints, feedback)
             )
             proposal = dict(purchase.payload)
             scenarios = _scenarios_of(purchase)
@@ -363,6 +366,15 @@ class ProcurementFlow:
 
             if self._acceptable(scenarios, verdicts, verification.findings):
                 break
+
+            # 🔴 **다음 회차를 위한 되먹임.** 여기가 없어서 2회차가 1회차와 같은 입력으로
+            #   돌았다 (매입 Q4 지적 2026-09-02). `_exhausted_reason` 이 그 사실을
+            #   문장으로 내보내고 있었는데, **적어 둔 것과 고친 것은 다르다.**
+            #
+            # ★ **이 자리에서 만든다.** 1회차 산출물이 다 나온 뒤이고 다음 호출 전이라,
+            #   `verdicts`·`findings`·조정안이 전부 이 회차의 것이다. 루프 밖에서
+            #   만들면 어느 회차의 것인지가 흐려진다.
+            feedback = self._feedback(attempts + 1, verdicts, verification)
 
             if attempts >= self.max_purchase_attempts:
                 return self._outcome(
@@ -431,7 +443,44 @@ class ProcurementFlow:
                 self.suggested_adjustments.extend(reply.suggested_adjustments)
         return out
 
-    def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
+    def _feedback(
+        self,
+        next_attempt: int,
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+        verification: VerificationResult,
+    ) -> dict[str, Any]:
+        """다음 회차에 실을 되먹임 (계약 v0.2 §3.3).
+
+        ★ **`reason` 은 인용도 요약도 아니다.** 무엇이 방아쇠였나를 세어 적는다.
+          `findings` 중 하나를 골라 옮기면 **고르는 것이 곧 판단**이 된다 (§3.2.2).
+          원문은 `findings` 와 `verdict_reasons` 에 통째로 있다.
+
+        ★ **`verdicts` 는 봉투 어휘 그대로.** 마스터가 표기를 바꾸지 않는다.
+          `adjustments` 가 0건일 때 그 0의 뜻을 가르는 유일한 칸이다 —
+          `reject`(구제 불가) · `conditional` · `ok`(조정 불필요) · `skipped`(검토 안 함)
+          가 전부 빈 배열로 보이기 때문이다 (재무·물류 지적 2026-09-02).
+
+        ★ **시각·난수·외부조회를 넣지 않는다** (§3.4). 되먹임은 1회차 산출물에서만
+          나와야 같은 입력에 같은 2회차가 나온다.
+        """
+        return {
+            "attempt": next_attempt,
+            "reason": _feedback_reason(verdicts, verification.findings),
+            # 아래 셋은 부서·검증이 낸 원문 그대로다. 마스터가 안 고친다.
+            "findings": list(verification.findings),
+            "verdict_reasons": {
+                agent: str(v.get("reasoning") or "") for agent, v in verdicts.items()
+            },
+            "verdicts": {
+                agent: str(v.get("business_status") or "") for agent, v in verdicts.items()
+            },
+        }
+
+    def _purchase_input(
+        self,
+        constraints: Mapping[AgentName, Mapping[str, Any]],
+        feedback: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """② 받은 것을 **묶기만** 한다.
 
         ★ 해석하거나 재계산하지 않는다 (§3.2.2). 값의 타당성은 검증 Tool 이 본다.
@@ -456,6 +505,21 @@ class ProcurementFlow:
             # ★ **사용자의 말 그대로 나른다.** 조건을 숫자로 바꿔 제약에 꽂으면 마스터가
             #   부서 판단을 덮어쓰는 것이 된다 — 해석은 매입이 한다 (§3.2.2).
             payload["prior_feedback"] = dict(self.prior_feedback)
+        if feedback is not None:
+            # 🔴 **사용자 조건과 섞지 않는다** (계약 v0.2 §2 · 매입 제안).
+            #
+            #   수명   사용자 조건은 실행 단위, 되먹임은 회차 단위
+            #   모양   자연어 하나 vs 구조화 배열
+            #   권위   사람 → 제안자 vs 조언자 → 제안자
+            #
+            #   한 슬롯에 `source` 로 갈랐던 v0.1 은 **payload 의 타입이 source 값에
+            #   딸려 가서** 계약이 아니라 관례가 됐다.
+            #
+            # ★ **조정안은 부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도
+            #   않는다 — 같은 축이 둘 이상이어도 그대로 나른다 (매입·재무 합의).
+            #   dataclass 를 dict 로 펴기만 한다 (모양을 바꾸는 것이 아니다).
+            payload["adjustments"] = [asdict(a) for a in self.suggested_adjustments]
+            payload["feedback_context"] = dict(feedback)
         return payload
 
     def _forecast_for_item(self) -> dict[str, Any] | None:
@@ -640,21 +704,30 @@ class ProcurementFlow:
           이 문장이 소유하는 것은 **"그 지적이 매입에 갔는가"** 하나다.
         """
         head = f"매입 재호출 {attempts} 회에도 통과안 없음"
-        unsent = self._unsent_to_purchase(verdicts, findings)
-        if not unsent:
+        sent = self._sent_to_purchase(verdicts, findings)
+        if not sent:
             return head
-        return f"{head} — 매입에 전달되지 않은 것: {', '.join(unsent)} (되먹임 미배선)"
+        # ⚠️ **보낸 것과 반영된 것은 다르다.** 매입이 `applied_adjustments` 를 회신하기
+        #   전까지 마스터가 아는 것은 "보냈다" 까지다. 문장이 그 이상을 말하면 안 된다.
+        return f"{head} — 매입에 전달한 것: {', '.join(sent)}(반영 여부는 매입 회신에 달림)"
 
-    def _unsent_to_purchase(
+    def _sent_to_purchase(
         self,
         verdicts: Mapping[AgentName, Mapping[str, Any]],
         findings: Sequence[str],
     ) -> tuple[str, ...]:
-        """재호출을 **유발한 근거**인데 재호출 payload 에는 안 실리는 것.
+        """재호출을 유발한 근거 중 **재호출 payload 에 실어 보낸 것.**
+
+        🔴 **전에는 이 함수가 `_unsent_to_purchase` 였다** — 같은 것을 세면서 *"안
+          실린다"* 고 말했다. 되먹임을 배선한 지금은 실린다 (계약 v0.2 · #169).
+          세는 대상은 그대로고 **문장의 뜻이 뒤집혔다.**
 
         `_acceptable` 이 거짓이 되는 길이 둘뿐이므로(검증 지적 · 부서 기각) 둘만 본다.
         둘 다 없으면 `_acceptable` 이 참이라 이 자리에 오지 않지만, 빈 튜플을 돌려
         **머리말만 남기는 쪽**으로 둔다 — 없는 것을 있다고 적지 않는다.
+
+        ★ **조정안 건수는 안 센다.** 여기가 소유하는 사실은 *"재호출을 유발한 것이
+          매입에 갔는가"* 이고, 조정안은 그 유발자가 아니라 **함께 실어 보낸 값**이다.
         """
         out: list[str] = []
         if findings:
@@ -709,6 +782,33 @@ class ProcurementFlow:
             adjustments=tuple(self.suggested_adjustments),
             **kw,
         )
+
+
+def _feedback_reason(
+    verdicts: Mapping[AgentName, Mapping[str, Any]],
+    findings: Sequence[str],
+) -> str:
+    """되먹임을 켠 방아쇠를 **세어 적는다.**
+
+    ★ **고르지 않는다.** `findings` 중 하나를 옮기면 *"이것이 대표다"* 라는 판단이
+      생긴다. 원문은 `findings` · `verdict_reasons` 에 통째로 실려 있으므로 여기는
+      **무엇이 방아쇠였나**만 말한다.
+
+    ★ `_unsent_to_purchase` 와 세는 것이 같다 — `_acceptable` 이 거짓이 되는 길이
+      둘뿐이라(검증 지적 · 부서 기각) 둘만 본다. 저쪽은 *"안 보낸 것"* 을 세고
+      이쪽은 *"보내는 이유"* 를 센다. 배선이 끝나면 저쪽이 없어질 자리다.
+    """
+    parts: list[str] = []
+    if findings:
+        parts.append(f"검증 지적 {len(findings)}건")
+    rejected = tuple(
+        agent_label(agent)
+        for agent, verdict in verdicts.items()
+        if verdict.get("business_status") == "reject"
+    )
+    if rejected:
+        parts.append(f"{'·'.join(rejected)} 기각")
+    return f"재호출 사유: {' · '.join(parts)}" if parts else "재호출 사유: 미상"
 
 
 def _blocked_reason(failures: tuple[AgentFailure, ...]) -> str:

@@ -327,6 +327,9 @@ def _adjustments_out(outcome: ProcurementOutcome) -> list[AdjustmentOut]:
             unit=a.unit,
             reason=a.reason,
             ref_ids=list(a.ref_ids),
+            # 부서가 안 채우면 빈 목록·None 그대로 나간다 - 없는 것을 만들지 않는다
+            scenario_labels=list(a.scenario_labels),
+            split_date=a.split_date,
         )
         for a in outcome.adjustments
     ]
@@ -369,6 +372,8 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             llm_attempts=s.llm_attempts,
             llm_fallback_used=s.llm_fallback_used,
             replans=s.replans,
+            # 마스터는 읽지 않고 나른다 - 순서도 부서가 낸 그대로다
+            observations=list(s.observations),
         )
         for s in plan.steps
     ]

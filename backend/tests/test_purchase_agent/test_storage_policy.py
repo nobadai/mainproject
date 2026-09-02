@@ -126,7 +126,7 @@ def test_fallback_is_disclosed_in_risks() -> None:
 
     proposal = run_purchase_agent(ITEM, SPREAD_WIDE)
     for scenario in proposal["scenarios"]:
-        assert any("medium_grade_factor" in risk for risk in scenario["risks"]), scenario["risks"]
+        assert any("중품 보관계수" in risk for risk in scenario["risks"]), scenario["risks"]
 
 
 # ── 함정 3: 사유 순서 ────────────────────────────────────────────────────

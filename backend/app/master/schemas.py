@@ -146,6 +146,18 @@ class StepOut(BaseModel):
     #: 재시도가 아니다 (재무 정정 2026-09-02). 재계획은 이 값이다.
     replans: int = 0
 
+    #: 🔴 **부서가 스스로 남긴 관측. 마스터는 읽지 않고 나른다.**
+    #:
+    #: 값은 처음부터 `ExecutionMetadata` → `ExecutionStep` 까지 왔는데 **여기서
+    #: 끊겼다** (2026-09-02 · #165 에서 드러남). 재무가 provider 대체 사실
+    #: (gemini → ollama · HTTP_429)을 여기 싣는데 응답·화면·매입 이력 어디에도
+    #: 안 나갔다. `replans` · `evidences` · 조정안에 이은 네 번째 누락이다.
+    #:
+    #: ⚠️ **부서마다 모양이 다른 JSON 문자열이다.** 마스터도 화면도 파싱하지 않는다 -
+    #: 파싱하면 부서 스키마가 한 벌 더 생기고, 부서가 필드를 바꾸는 날 이쪽만
+    #: 옛말을 한다 (`AdvisorVerdicts` 가 부서 payload 를 안 펴는 것과 같은 이유).
+    observations: list[str] = []
+
 
 class AdjustmentOut(BaseModel):
     """부서가 낸 조정안 하나 - **봉투 표준형 그대로.**
@@ -170,6 +182,16 @@ class AdjustmentOut(BaseModel):
     )
     reason: str = Field(description="부서가 쓴 문장 그대로. 마스터가 요약하지 않는다.")
     ref_ids: list[str]
+
+    #: 🆕 이 조정이 어느 시나리오 대상인가 (2026-09-02 · 계약 v0.2 §5.1).
+    #: 전에는 `reason` 문장 안에만 있어 기계가 읽으려면 부서 문장을 파싱해야 했다.
+    #: 합쳐진 건이면 합쳐진 라벨을 다 담는다 - 건수를 안 늘리면서 사실이 드러난다.
+    scenario_labels: list[str] = []
+
+    #: 🆕 어느 회차의 상한인가 (2026-09-02 · 계약 v0.2 §5.2).
+    #: **번호가 아니라 날짜다** - 물류에 회차 번호가 없어 번호 칸을 두면 없는 값을
+    #: 만들게 된다. 회차 개념이 없는 축(재무 amount)은 `null` 이다.
+    split_date: date | None = None
 
 
 class BlockedAgentOut(BaseModel):

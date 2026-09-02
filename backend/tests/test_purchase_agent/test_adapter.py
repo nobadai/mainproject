@@ -191,7 +191,7 @@ def test_concentration_gate_evidence_uses_a_separate_ref_id() -> None:
     assert mix_gate.ref_ids != situation.ref_ids
     # 호출 품목이 아니라 **전 품목의 최대비**다 — mix 게이팅이 max()를 보기 때문
     assert mix_gate.value == pytest.approx(0.812)
-    assert "mix 제외" in mix_gate.evidence_detail
+    assert "등급 구성 제외" in mix_gate.evidence_detail
 
 
 def test_concentration_gate_uses_the_maximum_not_the_called_item() -> None:
@@ -232,7 +232,7 @@ def test_concentration_gate_evidence_is_present_when_mix_opens_too() -> None:
     assert "mix" in reply.payload["allowed_axes"]
     mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
     assert mix_gate.value == pytest.approx(0.30)
-    assert "mix 개방" in mix_gate.evidence_detail
+    assert "등급 구성 개방" in mix_gate.evidence_detail
 
 
 @pytest.mark.parametrize(
@@ -298,7 +298,7 @@ def test_concentration_detail_matches_the_gate_condition_at_the_boundary() -> No
     assert "mix" not in reply.payload["allowed_axes"], "경계값은 제외다"
     mix_gate = next(e for e in _axes_evidence(reply) if "MIX" in e.ref_ids[0])
     assert f"≥ {threshold}" in mix_gate.evidence_detail
-    assert "mix 제외" in mix_gate.evidence_detail
+    assert "등급 구성 제외" in mix_gate.evidence_detail
 
 
 def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation() -> None:
@@ -334,7 +334,7 @@ def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
 
     vol_gate = next(e for e in _axes_evidence(reply) if "VOL" in e.ref_ids[0])
     assert vol_gate.unit == "kg"
-    assert "총량 트리거 충족" in vol_gate.evidence_detail
+    assert "총량 진입 조건 충족" in vol_gate.evidence_detail
 
 
 def test_empty_item_mix_ratio_is_refused_not_recorded_as_zero() -> None:
@@ -974,7 +974,8 @@ def test_reasoning_reports_the_axes_that_are_actually_open() -> None:
 
 
 def _n5_notes(risks: list[str]) -> list[str]:
-    return [note for note in risks if "N5" in note]
+    # 고지 문면에서 내부 코드(N5)를 뺐다 — 사람이 읽는 말로 찾는다 (2026-09-02).
+    return [note for note in risks if "대금 지급 소요일" in note]
 
 
 def test_n5_deferred_on_the_mock_path_and_restored_on_the_adapter_path() -> None:
@@ -991,7 +992,8 @@ def test_n5_deferred_on_the_mock_path_and_restored_on_the_adapter_path() -> None
 
 
 def _n4_notes(risks: list[str]) -> list[str]:
-    return [note for note in risks if "N4" in note]
+    # 같은 이유로 N4 → "입고 소요일".
+    return [note for note in risks if "입고 소요일" in note]
 
 
 def test_n4_deferred_on_the_mock_path_and_restored_when_logistics_sends_it() -> None:
