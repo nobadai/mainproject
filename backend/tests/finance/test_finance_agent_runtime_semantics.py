@@ -6,21 +6,23 @@
 실 LLM 을 부르지 않는다 — Planner/Finalizer 는 전부 fake 다.
 """
 
+import json
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 
-from app.finance.agent import (
-    DeterministicFinanceFinalizer,
+from app.finance import messages
+from app.finance.application.orchestration import FinanceAgentController
+from app.finance.db import FinanceDataNotReady
+from app.finance.llm.client import finance_llm_enabled
+from app.finance.llm.finalizer import DeterministicFinanceFinalizer
+from app.finance.llm.planner import (
     DeterministicFinancePlanner,
-    FinanceAgentController,
     FinancePlannerContractViolation,
     ToolAction,
-    finance_llm_enabled,
 )
-from app.finance.repository import FinanceDataNotReady
 from app.finance.schemas import FinancePolicy
 from app.master.envelope import AgentRequest, ExecutionContext
 
@@ -129,18 +131,12 @@ class ScriptedFinalizer:
         self.fail = fail
 
     def finalize(self, *, mode, business_status, evidences):
+        """★ 문장은 정본(`messages`)에서 고른다 — 가짜가 자기 말투를 갖지 않는다."""
         del evidences
         self.attempts += 1
         if self.fail:
             raise TimeoutError("finalization timeout")
-        if mode == "PRE_PURCHASE":
-            return "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
-        if business_status == "reject":
-            return (
-                "검증된 재무 근거가 원안 시나리오 중 최소 하나를 반려했습니다. "
-                "함께 제시된 금액 대안은 별도로 검증했습니다."
-            )
-        return "검증된 재무 근거가 보고된 시나리오 판정을 뒷받침합니다."
+        return messages.explanation_for(mode, business_status)
 
 
 def request(mode="PRE_PURCHASE", payload=None):
@@ -169,14 +165,14 @@ def pre_purchase_plan():
 
 @pytest.fixture(autouse=True)
 def _no_persistence():
-    with patch("app.finance.run_repository.save_finance_execution"):
+    with patch("app.finance.execution.save_finance_execution"):
         yield
 
 
 @pytest.fixture(autouse=True)
 def _no_env_file(monkeypatch):
     """`.env` 가 테스트 결과를 바꾸지 않게 한다 — 설정 의미만 본다."""
-    monkeypatch.setattr("app.finance.llm.config._load_finance_environment", lambda: None)
+    monkeypatch.setattr("app.finance.llm.client._load_finance_environment", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +200,7 @@ def test_finance_llm_defaults_to_enabled(monkeypatch):
 
 def test_finance_provider_does_not_inherit_the_global_provider(monkeypatch):
     """★ 전역을 ollama 로 둔 배포에서도 재무는 Gemini 다 (§12)."""
-    from app.finance.llm.config import _finance_provider_name
+    from app.finance.llm.client import _finance_provider_name
 
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.delenv("FINANCE_LLM_PROVIDER", raising=False)
@@ -213,7 +209,7 @@ def test_finance_provider_does_not_inherit_the_global_provider(monkeypatch):
 
 def test_disabled_finance_llm_builds_no_provider(monkeypatch):
     """껐으면 Provider 를 만들지 않는다 — API 키도 로컬 서버도 확인하러 나가지 않는다."""
-    from app.finance.llm.provider import _configured_finance_llms
+    from app.finance.llm.planner import _configured_finance_llms
 
     monkeypatch.setenv("FINANCE_LLM_ENABLED", "false")
     planner, finalizer, provider_state = _configured_finance_llms()
@@ -237,10 +233,12 @@ def test_llm_disabled_runs_deterministically_and_records_disabled(monkeypatch):
     assert metadata.llm_status == "DISABLED"
     assert metadata.llm_fallback_used is False
     # 껐어도 Tool 은 전부 돌았다 — 숫자는 여전히 결정론 Tool 이 만든다.
-    # `calculate_purchase_finance_cap` 이 cashflow_projection capability 도 채우므로
-    # `project_cashflow` 를 따로 부르지 않는다 — capability 기준 선택이라는 뜻이다.
+    # ★ `project_cashflow` 가 **이력에 있다.** capability 소유가 1:1 이라 cap 과
+    #   압박도가 남의 capability 를 대신 채우지 않고, 선행 실행은 Harness 가 드러내
+    #   놓고 강제한다 — 예전처럼 안에서 몰래 도는 투영이 없다.
     assert set(metadata.used_tools) == {
         "assess_finance_position",
+        "project_cashflow",
         "calculate_purchase_finance_cap",
         "analyze_payment_pressure",
     }
@@ -284,9 +282,9 @@ def test_finalizer_failure_falls_back_deterministically():
     reply, metadata = FinanceAgentController(Port(), planner, finalizer).run(request())
 
     assert reply.runtime_status == "READY"
-    assert reply.reasoning == (
-        "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다."
-    )
+    # ★ 문장을 그대로 적지 않는다 — 말투는 바뀔 수 있고, 지켜야 하는 것은
+    #   **LLM 경로와 대체 경로가 같은 설명을 낸다**는 것이다.
+    assert reply.reasoning == messages.explanation_for("PRE_PURCHASE", "ok")
     assert metadata.llm_status == "FALLBACK"
     assert metadata.llm_fallback_used is True
 
@@ -478,13 +476,22 @@ def test_missing_data_port_fact_is_not_ready():
 def test_programmer_bug_stays_an_error():
     """★ 모든 예외를 `FinanceDataNotReady` 로 접으면 진짜 버그가 조용히 숨는다."""
     planner = ScriptedPlanner(pre_purchase_plan())
-    reply, _metadata = FinanceAgentController(
+    reply, metadata = FinanceAgentController(
         BrokenPort(), planner, ScriptedFinalizer()
     ).run(request())
 
     assert reply.runtime_status == "ERROR"
     assert reply.missing_data == ()
-    assert "programming bug" in reply.reasoning
+    # 사용자는 **다음에 할 일**을 받는다. 스택 조각을 받지 않는다.
+    assert reply.reasoning == messages.INTERNAL_FAILURE
+    # 기술적 사유는 사라지지 않는다 — 개발자가 읽는 Trace 에 그대로 남는다.
+    trace = next(
+        json.loads(item)
+        for item in metadata.observations
+        if json.loads(item).get("observation_type") == "finance_harness_trace"
+    )
+    assert "programming bug" in trace["failure_reason"]
+    assert trace["failure_kind"] == "INTERNAL"
 
 
 def test_finance_data_not_ready_carries_its_key():
@@ -507,7 +514,7 @@ def test_provider_fallback_is_not_a_deterministic_fallback(monkeypatch):
     import json
     import urllib.error
 
-    from app.finance.llm.provider import (
+    from app.finance.llm.planner import (
         _AvailabilityFallbackFinancePlanner,
         _ProviderFallbackState,
     )
