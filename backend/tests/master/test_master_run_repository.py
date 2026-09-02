@@ -365,3 +365,33 @@ def test_어댑터가_없어_못_물어본_날도_남는다(monkeypatch):
     outcome = called["outcome"]
     assert outcome.status_code == "S3_UNAVAILABLE"
     assert "inventory" in outcome.unavailable
+
+
+def test_미등록이_없는_정상_경로도_적재한다(monkeypatch):
+    """🔴 **변이 테스트가 찾아낸 구멍이다** (2026-09-02).
+
+    미등록 부서가 있는 경로만 덮고 있었다. 그래서 "미등록이 없으면 먼저 return"
+    이라는 변이를 넣었는데 한 건도 안 걸렸다 - 정상 경로에서 적재가 통째로
+    빠져도 테스트가 초록이었다.
+
+    **정상 경로가 오히려 대부분이다.** 거기서 이력이 안 남으면 조회는 영영
+    안 보이는 호출이 된다.
+    """
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    called: dict[str, object] = {}
+    monkeypatch.setattr(ask_service.persistence, "record_status", lambda **kw: called.update(kw))
+    monkeypatch.setattr(ask_service.wiring, "missing", tuple)
+    monkeypatch.setattr(ask_service.wiring, "registry", dict)
+
+    ask_service._run_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        budget=12,
+        intent=Intent(action="STATUS_QUERY", agents=[], confidence="HIGH"),
+    )
+
+    assert called, "미등록이 없는 경로에서 적재를 건너뛰었다"
+    assert called["request_id"] == "REQ-20251231-0001"
