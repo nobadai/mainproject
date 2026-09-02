@@ -2,10 +2,16 @@
 
 from calendar import monthrange
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TypedDict
 
+from app.finance.sales_models import (
+    InventoryCostBasis,
+    SalesCostBasis,
+    VerifiedDirectCost,
+)
 from app.finance.schemas import (
     CashEvent,
     CashflowPoint,
@@ -421,3 +427,73 @@ def build_sales_calculation_facts(
         "contribution_margin_rate": margin_rate,
         "collection_date": collection_date,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 2 — 판매 원가 기준 합성
+#
+#     sales_cost_basis
+#     = 권위 있는 inventory_cost_basis 금액
+#     + inventory_cost_basis 가 아직 품지 않은 검증된 직접비
+#
+# ★ 이 함수는 **후보를 고르지 않는다.** 어느 재고/매입 원가가 정본인지, 직접
+#   물류비를 누가 소유하는지는 아직 도메인 간 계약이 없다. 선택은 바깥(권위 있는
+#   입력을 만드는 쪽)이 하고, 여기서는 합성만 결정론적으로 한다.
+# ---------------------------------------------------------------------------
+
+
+def compose_sales_cost_basis(
+    *,
+    inventory_cost_basis: InventoryCostBasis | None,
+    direct_costs: Sequence[VerifiedDirectCost] = (),
+) -> SalesCostBasis | None:
+    """재고원가에 아직 포함되지 않은 검증된 직접비만 더한다.
+
+    권위 있는 재고원가가 없으면 ``None`` 이다 — 0으로 바꾸지 않고, 직접비만으로
+    원가 기준을 만들지도 않는다. 뒤따르는 마진 계산은 원가 기준이 없으면 아예
+    돌지 않는다(`build_sales_calculation_facts` 가 이미 그렇게 되어 있다).
+
+    같은 `component` 가 직접비에 두 번 오면 fail closed 로 거절한다 — 어느 쪽이
+    맞는지 Finance 가 조용히 고르면 그 선택이 곧 보이지 않는 정책이 된다.
+
+    `cost_method` 가 UNKNOWN 이어도 여기서 막지 않는다 — 그 값을 판정에 쓸 수
+    있는지는 **정책 판단**이라 Rule 계층 몫이다. 계산은 사실을 그대로 나르고,
+    UNKNOWN 을 0으로 바꾸지 않는다.
+    """
+    components = [cost.component for cost in direct_costs]
+    duplicated = sorted({name for name in components if components.count(name) > 1})
+    if duplicated:
+        raise ValueError(f"Duplicate direct cost components: {duplicated}")
+
+    if inventory_cost_basis is None:
+        return None
+
+    already_included = tuple(
+        cost.component
+        for cost in direct_costs
+        if cost.component in inventory_cost_basis.included_components
+    )
+    added = tuple(
+        cost
+        for cost in direct_costs
+        if cost.component not in inventory_cost_basis.included_components
+    )
+    amount = sum((cost.amount_krw for cost in added), start=inventory_cost_basis.amount_krw)
+
+    return SalesCostBasis(
+        amount_krw=amount,
+        inventory_amount_krw=inventory_cost_basis.amount_krw,
+        inventory_cost_method=inventory_cost_basis.cost_method,
+        inventory_source_ref=inventory_cost_basis.source_ref,
+        inventory_evidence_grade=inventory_cost_basis.evidence_grade,
+        added_direct_costs=added,
+        already_included_components=already_included,
+        included_components=(
+            *inventory_cost_basis.included_components,
+            *(cost.component for cost in added),
+        ),
+        source_refs=(
+            inventory_cost_basis.source_ref,
+            *(cost.source_ref for cost in added),
+        ),
+    )
