@@ -60,7 +60,13 @@ export function ProcurementResult({
       */}
       {run.scenarios.length === 0 && (
         <div className="rounded-lg border border-line bg-sunk px-3.5 py-3">
-          {run.reason && (
+          {/*
+            ★ 부서별로 펼 것이 있으면 `reason` 줄은 빼고 아래 목록만 남긴다.
+              같은 문장이 두 번 나오기 때문이다 — `reason` 은 부서 사유를 이어 붙인
+              것이라 목록과 내용이 정확히 같다. **버리는 것이 아니라** 응답·보고서·
+              이력에는 그대로 있고, 화면에서만 구조화된 쪽을 보여준다.
+          */}
+          {run.reason && run.blocked_failures.length === 0 && (
             <p className="m-0 text-[13px] leading-relaxed">{run.reason}</p>
           )}
           {/*
@@ -73,7 +79,7 @@ export function ProcurementResult({
               여기가 갈린다 — 근거를 검증과 화면이 같은 객체로 보게 한 것과 같다.
           */}
           {run.blocked_failures.length > 0 && (
-            <ul className="m-0 mt-2 list-none space-y-1 p-0">
+            <ul className="m-0 list-none space-y-1 p-0">
               {run.blocked_failures.map((f) => (
                 <li key={f.agent} className="text-[12.5px] text-warn">
                   <b className="font-semibold">{AGENT_LABEL[f.agent] ?? f.agent}</b>
