@@ -28,7 +28,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from app.orchestrator.contracts_core import (
     ContractViolation,
@@ -89,6 +89,32 @@ FALLBACK           불렀는데 실패했다 — 규칙이 대신 답했다
   그래서 이 값이 없으면 **모델이 죽은 날과 산 날이 화면에서 같아 보인다.**
 """
 
+# ---------------------------------------------------------------------------
+# 1-1. 닫힌 집합을 **누가 만들었나로 갈라** 강제한다 (2026-09-02)
+# ---------------------------------------------------------------------------
+#
+# 🔴 **선언은 있는데 강제가 없는 자리**가 이번 주에만 셋이었다.
+#   `Trigger`(매입 실측) · `Evidence.value` 가 float 인데 문자열(재무 실측) ·
+#   `SuggestedAdjustment.unit` 이 자유 문자열. 전부 조용히 통과했다.
+#
+# ★ **그렇다고 전부 예외로 막으면 안 된다.** 갈리는 것은 *누가 채우는 값인가* 다.
+#
+# ```text
+# 마스터가 만드는 값   예외로 막는다        trigger · request_id · policy_version · mode
+#                     내 실수는 내가 즉시 안다. 부서를 부르기 전에 죽는 편이 싸다
+#
+# 부서가 채우는 값     findings 로 돌린다   business_status · runtime_status · llm_status
+#                     예외로 막으면 **부서 하나의 실수가 사이클을 죽인다** —
+#                     봉투 docstring 이 명시적으로 금하는 것이 이것이다
+# ```
+#
+# ★ 집합의 주인은 위의 `Literal` 정의 하나다. `get_args` 로 읽어 **두 벌로 만들지
+#   않는다** — 손으로 복사하면 어휘를 늘린 날 한쪽만 늘어난다.
+TRIGGERS: frozenset[str] = frozenset(get_args(Trigger))
+RUNTIME_STATUSES: frozenset[str] = frozenset(get_args(RuntimeStatus))
+VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
+LLM_STATUSES: frozenset[str] = frozenset(get_args(LLMStatus))
+
 _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     "finance": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
     "inventory": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
@@ -143,6 +169,20 @@ class ExecutionContext:
             raise ContractViolation("request_id 는 비울 수 없다 — 검증 L1 바인딩의 근거다.")
         if not self.policy_version.strip():
             raise ContractViolation("policy_version 은 비울 수 없다 — 재현 4종의 하나다 (§3.2.4).")
+        # 🔴 **닫힌 집합인데 아무도 안 봤다** (매입 실측 2026-09-02).
+        #
+        #   `Trigger` 는 타입 힌트일 뿐이고 dataclass 는 런타임에 Literal 을 강제하지
+        #   않는다. 매입 하네스가 `trigger="MANUAL"` 을 넣었을 때 **입구를 통과해**
+        #   LLM 6회·8.6초를 태우고 나서 DB CHECK 에서 죽었고, 나간 사유는
+        #   *"재무 검토 기록을 저장하지 못해..."* 였다 — **매입이 재무 문제로 오진했다.**
+        #
+        # ★ 같은 파일의 `AgentRequest` 가 `mode` 를 막는 것과 **대칭을 맞춘 것**이다.
+        #   새 규칙이 아니다.
+        if self.trigger not in TRIGGERS:
+            raise ContractViolation(
+                f"trigger={self.trigger!r} 는 유효하지 않다. 허용: {sorted(TRIGGERS)} "
+                "(마스터가 만드는 값이라 입구에서 막는다 — §봉투 어휘 강제 규칙)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +633,50 @@ def check_reasoning(reply: AgentReply) -> list[EnvelopeFinding]:
     return out
 
 
+def check_vocabulary(reply: AgentReply) -> list[EnvelopeFinding]:
+    """부서가 채운 상태값이 **닫힌 집합 안에 있는가.**
+
+    🔴 **여기가 비어 있으면 fail-open 이다.** 마스터는 `business_status != "reject"`
+      로 통과를 정하는데(`flow._acceptable`), 어휘 밖의 값은 *"reject 가 아니다"* 라
+      **그냥 통과한다.** 부서가 `FAIL` 을 보내도 안이 사용자에게 올라간다.
+
+    ★ **예외로 막지 않는다.** 부서가 채우는 값이라 예외를 던지면 부서 하나의 실수가
+      사이클을 죽인다 — 이 모듈 docstring 이 금하는 것이 그것이다. 사실만 남기고
+      무엇을 할지는 마스터가 정한다.
+
+    ★ **판정 단계에는 이미 비슷한 검사가 있다** (`verifier._check_advisor_answered`
+      의 *"마스터가 모르는 판정값"*). 그쪽은 `SCENARIO_VALIDATION` 판정만 보고
+      검증 Tool 이 돌 때만 발화한다. **여기는 모든 회신·모든 모드에서 돈다** —
+      봉투가 `mode` 를 검증 Tool 과 무관하게 막는 것과 같은 자리다.
+
+    ★ 마스터 어휘가 낡았을 수도 있다. 그래서 문장이 *"부서가 틀렸다"* 가 아니라
+      **"둘 중 하나가 낡았다"** 로 읽히게 쓴다.
+    """
+    out: list[EnvelopeFinding] = []
+    if reply.runtime_status not in RUNTIME_STATUSES:
+        out.append(
+            EnvelopeFinding(
+                "E-VOCAB-RUNTIME-STATUS",
+                "reply.runtime_status",
+                f"{reply.runtime_status!r} 는 마스터가 아는 값이 아니다. "
+                f"허용: {sorted(RUNTIME_STATUSES)} — 부서 표기와 마스터 어휘 중 "
+                "하나가 낡았다.",
+            )
+        )
+    if reply.business_status not in VERDICTS:
+        out.append(
+            EnvelopeFinding(
+                "E-VOCAB-BUSINESS-STATUS",
+                "reply.business_status",
+                f"{reply.business_status!r} 는 마스터가 아는 판정이 아니다. "
+                f"허용: {sorted(VERDICTS)} — 부서 표기와 마스터 어휘 중 하나가 낡았다. "
+                "이 값으로는 통과 판정을 신뢰할 수 없다 "
+                "(마스터는 'reject 가 아니면 통과' 로 읽는다).",
+            )
+        )
+    return out
+
+
 def validate_reply(
     request: AgentRequest,
     reply: AgentReply,
@@ -605,9 +689,23 @@ def validate_reply(
     """
     out: list[EnvelopeFinding] = []
     out += check_binding(request, reply)
+    out += check_vocabulary(reply)
     out += check_evidence_coverage(reply)
     out += check_reasoning(reply)
     if metadata is not None:
+        if metadata.llm_status not in LLM_STATUSES:
+            # 이 값이 낡으면 *"모델이 죽어 규칙이 답한 날"* 과 *"애초에 안 쓴 날"* 이
+            # 화면에서 같아 보인다 (`LLMStatus` 주석). 두 파트가 같은 값을 쓰는지는
+            # `test_llm_status_vocabulary` 가 따로 대조한다 — 여기는 런타임 하한이다.
+            out.append(
+                EnvelopeFinding(
+                    "E-VOCAB-LLM-STATUS",
+                    "metadata.llm_status",
+                    f"{metadata.llm_status!r} 는 마스터가 아는 값이 아니다. "
+                    f"허용: {sorted(LLM_STATUSES)} — 부서 표기와 마스터 어휘 중 "
+                    "하나가 낡았다.",
+                )
+            )
         if metadata.run_id != reply.run_id:
             out.append(
                 EnvelopeFinding(
