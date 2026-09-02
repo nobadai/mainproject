@@ -10,6 +10,7 @@
 """
 
 import inspect
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -712,13 +713,24 @@ def test_the_fixed_market_constant_reads_the_declared_coordinate(tmp_path: Path)
         [sys.executable, "-c", probe],
         check=False,  # 실패하는 게 이 테스트의 기대값이다
         capture_output=True,
-        # 🔴 ``text=True`` 만 주면 **부모 로케일**로 디코드한다. 자식은 한글 사유를
-        #   UTF-8 로 쓰는데 부모가 cp949 면 리더 스레드가 죽고 ``stderr`` 가 ``None``
-        #   이 되어, 아래 단언이 사유 불일치가 아니라 ``TypeError`` 로 터진다.
-        #   **부모 로케일과 무관해야 한다 — PYTHONIOENCODING 이 있는 환경에서만
-        #   깨지는 자리였다** (현서님 실측 2026-09-01).
+        # 🔴 **쓰는 쪽과 읽는 쪽을 둘 다 고정한다.** 둘 중 하나만 고정하면
+        #   반대편 로케일이 다른 기계에서 그대로 깨진다 — 실제로 두 번 깨졌다.
+        #
+        #   읽는 쪽(``encoding``): 부모 로케일이 cp949 면 ``text=True`` 는 리더
+        #   스레드가 죽어 ``stderr`` 가 ``None`` 이 되고, 아래 단언이 사유 불일치가
+        #   아니라 ``TypeError`` 로 터졌다 (현서님 실측 2026-09-01).
+        #
+        #   쓰는 쪽(``PYTHONIOENCODING``): 그걸 고쳐도 **자식이 cp949 로 쓰면**
+        #   ``errors="replace"`` 가 한글을 전부 U+FFFD 로 바꿔 사유 단언이 다시 깨졌다
+        #   (현서님 기계 상시 실패 2026-09-02). 자식은 우리가 띄우는 파이썬이니
+        #   자식의 표준입출력 인코딩을 직접 지정한다.
+        #
+        #   ⚠️ ``returncode`` 만 보는 걸로 대신하지 않는다. 그러면 **뭐든 죽기만
+        #   하면 통과**라, 오타로 난 ``ImportError`` 도 합격시킨다. 이 테스트가
+        #   잠그려는 건 "선언을 바꾸면 **그 사유로** 선다" 다 (규칙 8).
         encoding="utf-8",
         errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         cwd=Path(inspect.getfile(quotes)).parents[2],
     )
 

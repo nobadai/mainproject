@@ -221,17 +221,20 @@ def test_env_file_is_gitignored() -> None:
         ["git", "check-ignore", ".env", "backend/.env"],
         cwd="..",
         capture_output=True,
-        # 🔴 ``text=True`` 만 주면 **부모 로케일**로 디코드한다 — cp949 환경에서 UTF-8
-        #   출력을 만나면 리더 스레드가 죽고 ``stdout`` 이 ``None`` 이 된다.
-        #   ``git check-ignore`` 는 **무시 대상 경로를 그대로 되돌려주므로**, 한글 경로가
-        #   인자나 출력에 들어가는 순간 여기가 그 자리다 (`docs/` 에 한글 파일명이 있다).
-        #   **지금 안 깨지는 건 이 테스트가 한글 경로를 안 넣어서지 구조가 달라서가
-        #   아니다** (현서님 지적 2026-09-01). `test_auction_quotes.py` 와 같은 형태로 맞춘다.
-        encoding="utf-8",
-        errors="replace",
+        # 🔴 **여기선 디코드를 안 한다 — 바이트로 본다.**
+        #   ``text=True`` 는 부모 로케일로 디코드해서 cp949 환경에서 깨졌다. 그런데
+        #   ``test_auction_quotes.py`` 처럼 **자식 ``PYTHONIOENCODING`` 을 주는 해법은
+        #   여기서 안 먹는다 — 자식이 파이썬이 아니라 git 이다**. 두 자리는 같은
+        #   증상이지만 같은 형태가 될 수 없다.
+        #
+        #   git 은 ``check-ignore`` 로 **무시 대상 경로를 그대로 되돌려주고**, 한글
+        #   경로는 ``core.quotePath`` 기본값에 따라 ``\355\225\234`` 식 옥탈로 이스케이프해
+        #   내보낸다 — 그 설정을 끈 기계에서는 raw UTF-8 이 나온다. 즉 **출력 인코딩이
+        #   기계마다 다르고 우리가 정할 수 없다.** 정할 수 없으면 디코드하지 않는다.
+        #   찾는 문자열이 ASCII 라 바이트로 봐도 잃는 게 없다.
         check=False,
     )
-    assert ".env" in result.stdout
+    assert b".env" in result.stdout
 
 
 # ── 게이팅 (비용) ───────────────────────────────────────────────────────────
