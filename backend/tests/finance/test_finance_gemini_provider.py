@@ -673,6 +673,9 @@ def _assert_gemini_schema_is_wire_safe(node) -> None:
     if not isinstance(node, dict):
         return
     assert "const" not in node, "const 는 Gemini Schema 에 없다"
+    assert "additionalProperties" not in node, (
+        "Gemini Tool Schema 는 additionalProperties 를 받지 않는다"
+    )
     node_type = node.get("type")
     if node_type is not None:
         assert node_type in _GEMINI_TYPES, f"Gemini 가 모르는 타입: {node_type!r}"

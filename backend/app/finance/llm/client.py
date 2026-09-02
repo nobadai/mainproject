@@ -239,18 +239,23 @@ def _gemini_safe_schema(node: Any) -> Any:
     """Tool 인자 스키마를 **Gemini 가 받는 표현으로** 낮춘다.
 
     🔴 계약을 낮추는 것이 아니라 표현만 낮춘다. Gemini Schema 는 OpenAPI 3.0 부분집합이라
-       두 가지를 못 받고, 그대로 보내면 **HTTP 400** 이다 — 재무가 아니라 전송 형식이
+       세 가지를 못 받고, 그대로 보내면 **HTTP 400** 이다 — 재무가 아니라 전송 형식이
        문제인데 재무 Planner 가 매 호출 실패한다.
 
          · `const`                 → STRING + 한 값짜리 `enum`
          · `anyOf` 안의 `type:null` → 그 갈래를 빼고 `nullable`
+         · `additionalProperties`  → 제거
 
     ★ pydantic 이 만드는 모양이라 손으로 피할 수 없다. `Literal["amount"]` 은 `const` 를,
       `float | None` 은 null 갈래를 낸다 — 두 표현 모두 우리가 쓰고 싶은 계약이다.
     """
     if not isinstance(node, dict):
         return node
-    safe = {key: value for key, value in node.items() if key not in {"const", "anyOf"}}
+    safe = {
+        key: value
+        for key, value in node.items()
+        if key not in {"const", "anyOf", "additionalProperties"}
+    }
     if "const" in node:
         safe["type"] = "string"
         safe["enum"] = [node["const"]]
