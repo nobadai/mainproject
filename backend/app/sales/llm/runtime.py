@@ -41,12 +41,7 @@ def load_settings() -> LLMSettings:
         enabled = _read_bool("LLM_ENABLED")
     provider = (os.getenv("SALES_LLM_PROVIDER") or "gemini").strip().lower()
     explicit_model = os.getenv("SALES_LLM_MODEL")
-    common_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
-    common_model = os.getenv("LLM_MODEL")
-    inherited_model = (
-        common_model if provider == common_provider and common_model else _DEFAULT_MODEL
-    )
-    model = explicit_model or inherited_model
+    model = explicit_model or _DEFAULT_MODEL
     return LLMSettings(
         enabled=False if enabled is None else enabled,
         provider=provider,
@@ -58,7 +53,9 @@ def load_settings() -> LLMSettings:
 def interpret_candidates(candidates: list[SalesCandidate]) -> SalesRecommendation:
     """Gemini 실패는 Scenario를 바꾸지 않고 결정론 fallback으로만 전환한다."""
     settings = load_settings()
-    if not candidates or not settings.enabled:
+    if not candidates:
+        return _fallback(candidates, "SKIPPED_TEMPLATE", settings, 0)
+    if not settings.enabled:
         return _fallback(candidates, "DISABLED", settings, 0)
     try:
         output = _call_gemini(_safe_context(candidates), settings)
@@ -147,7 +144,8 @@ def _gemini_safe_schema(node: Any) -> Any:
 
 def _validated(candidates, output, settings) -> SalesRecommendation:
     """후보 ID·빈 문장·숫자 포함 여부를 검사해 LLM의 권한을 제한한다."""
-    if output.recommended_candidate_id not in {c.candidate_id for c in candidates}:
+    selectable = {c.candidate_id for c in candidates if "FINANCE_FAIL" not in c.risks}
+    if output.recommended_candidate_id not in selectable:
         raise ValueError("unknown candidate")
     texts = (
         output.summary,
@@ -166,7 +164,10 @@ def _validated(candidates, output, settings) -> SalesRecommendation:
 
 
 def _fallback(candidates, status, settings, attempts) -> SalesRecommendation:
-    candidate = next((c for c in candidates if not c.conditional), None) if candidates else None
+    selectable = [c for c in candidates if "FINANCE_FAIL" not in c.risks]
+    candidate = next((c for c in selectable if not c.conditional), None)
+    if candidate is None and selectable:
+        candidate = selectable[0]
     return SalesRecommendation(
         status=status, recommended_candidate_id=candidate.candidate_id if candidate else None,
         summary="규칙 기반 판매안을 준비했습니다.",

@@ -1,6 +1,6 @@
 """Sales LLM Runtime은 실제 호출 경로를 대체해 안전성만 단위 검증한다."""
 
-from app.sales.llm.runtime import interpret_candidates
+from app.sales.llm.runtime import interpret_candidates, load_settings
 from app.sales.llm.schemas import LlmInterpretationOutput
 from app.sales.schemas import AllocationLeg, SalesCandidate
 
@@ -81,3 +81,19 @@ def test_llm_numeric_or_malformed_response_falls_back(monkeypatch):
         ),
     )
     assert interpret_candidates([_candidate()]).status == "FALLBACK"
+
+
+def test_finance_fail_candidate_is_never_recommended(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    candidate = _candidate()
+    candidate.risks.append("FINANCE_FAIL")
+    result = interpret_candidates([candidate])
+    assert result.recommended_candidate_id is None
+
+
+def test_sales_gemini_model_does_not_inherit_common_ollama_model(monkeypatch):
+    monkeypatch.setattr("app.sales.llm.runtime._load_environment", lambda: None)
+    monkeypatch.delenv("SALES_LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "gemma3:4b")
+    assert load_settings().model == "gemini-3.5-flash-lite"

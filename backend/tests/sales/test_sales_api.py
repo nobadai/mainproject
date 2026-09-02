@@ -282,6 +282,25 @@ def test_conditional_purchase_creates_separate_delivery_scenario(monkeypatch):
     assert candidates[1]["outbound_by_date"][0]["date"] == "2026-09-13"
 
 
+def test_refeed_equal_limits_do_not_create_adjustment_or_repeat_capability(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(sales_opportunities=[
+        {"opportunity_id": "OP-1", "channel": "B2B", "qty_kg": 4000, "unit_price": 2000,
+         "delivery_date": "2026-09-12", "payment_days": 15, "evidence_ref": "CON-1"},
+    ])
+    payload["refeed_results"] = [
+        {"candidate_id": "OP-1", "source": "LOGISTICS", "verdict": "PASS", "max_qty_kg": 4000,
+         "earliest_delivery_date": "2026-09-12", "ref_id": "LOG-1"},
+        {"candidate_id": "OP-1", "source": "FINANCE", "verdict": "PASS", "max_payment_days": 15,
+         "ref_id": "FIN-1"},
+    ]
+    body = client.post("/sales/allocation", json=payload).json()
+    candidate = body["candidates"][0]
+    assert candidate["adjustment_axis"] == "NONE"
+    assert candidate["messages"] == []
+    assert body["missing_capabilities"] == []
+
+
 
 
 def test_as_of_must_match_snapshot():

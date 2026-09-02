@@ -106,7 +106,7 @@ def run_allocation(request: SalesAllocationInput) -> SalesAllocationReply:
     situation = _classify_situation(request)
     base_proposals = _build_base_proposals(request)
     candidates = _build_candidates(request, base_proposals)
-    missing_capabilities = _missing_capabilities(candidates, request.refeed_results)
+    missing_capabilities = _missing_capabilities(candidates, base_proposals, request.refeed_results)
     no_feasible_reason = None
     no_feasible_message = None
     if not candidates:
@@ -314,7 +314,11 @@ def _apply_refeed(
         if result.candidate_id in {candidate.candidate_id, candidate.base_proposal_id}
     ]
     data = candidate.model_dump()
-    refs = [result.ref_id for result in matching if result.ref_id]
+    refs = [
+        result.ref_id
+        for result in matching
+        if result.ref_id and not (not candidate.conditional and result.source == "PURCHASE")
+    ]
     data["external_validation_refs"] = refs
     for result in matching:
         if result.verdict == "FAIL":
@@ -331,11 +335,19 @@ def _apply_refeed(
                 data["messages"].append(
                     "요청 수량 전체를 공급하기 어려워 공급 가능한 수량 기준으로 조정했습니다."
                 )
-            if result.earliest_delivery_date is not None:
+            if (
+                result.earliest_delivery_date is not None
+                and result.earliest_delivery_date != data["outbound_by_date"][0]["date"]
+            ):
                 data["outbound_by_date"][0]["date"] = result.earliest_delivery_date
                 _add_adjustment_axis(data, "DELIVERY")
                 data["messages"].append("납품 가능 일정을 기준으로 납기일을 조정했습니다.")
-        elif result.source == "FINANCE" and result.max_payment_days is not None:
+        elif (
+            result.source == "FINANCE"
+            and result.max_payment_days is not None
+            and data["payment_days"] is not None
+            and data["payment_days"] > result.max_payment_days
+        ):
             data["payment_days"] = result.max_payment_days
             _add_adjustment_axis(data, "PAYMENT_TERMS")
             data["messages"].append(
@@ -407,35 +419,41 @@ def _add_adjustment_axis(data: dict[str, object], axis: str) -> None:
 
 
 def _missing_capabilities(
-    candidates: list[SalesCandidate], results: list[ExternalValidationResult]
+    candidates: list[SalesCandidate],
+    base_proposals: list[BaseSalesProposal],
+    results: list[ExternalValidationResult],
 ) -> list[MissingCapability]:
+    base_qty = {base.proposal_id: base.allocation.qty_kg for base in base_proposals}
     capabilities: list[MissingCapability] = []
     for candidate in candidates:
-        capabilities.extend(
-            [
+        matching = [
+            result
+            for result in results
+            if result.candidate_id in {candidate.candidate_id, candidate.base_proposal_id}
+        ]
+        if not any(result.source == "FINANCE" for result in matching):
+            capabilities.append(
                 MissingCapability(
                     candidate_id=candidate.candidate_id,
                     capability="FINANCE_SALES_VALIDATION",
                     reason="결제 조건·신용·매출채권·현금 상태는 Finance 검증이 필요합니다.",
-                ),
+                )
+            )
+        if not any(result.source == "LOGISTICS" for result in matching):
+            capabilities.append(
                 MissingCapability(
                     candidate_id=candidate.candidate_id,
                     capability="LOGISTICS_SUPPLY_FEASIBILITY",
                     reason="수량·신선도·납기 가능성은 Logistics 검증이 필요합니다.",
-                ),
-            ]
-        )
+                )
+            )
         logistics_limit = any(
-            result.candidate_id in {candidate.candidate_id, candidate.base_proposal_id}
-            and result.source == "LOGISTICS"
+            result.source == "LOGISTICS"
             and result.max_qty_kg is not None
-            for result in results
+            and result.max_qty_kg < base_qty.get(candidate.base_proposal_id, Decimal(0))
+            for result in matching
         )
-        purchase_result = any(
-            result.candidate_id in {candidate.candidate_id, candidate.base_proposal_id}
-            and result.source == "PURCHASE"
-            for result in results
-        )
+        purchase_result = any(result.source == "PURCHASE" for result in matching)
         if logistics_limit and not purchase_result:
             capabilities.append(
                 MissingCapability(
