@@ -159,12 +159,22 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
               <th className="px-3 py-2 text-left font-semibold">쓴 도구</th>
               {/* 🔴 그 부서가 규칙으로 답했나 모델로 답했나 — 없으면 둘이 같아 보인다 */}
               <th className="px-3 py-2 text-left font-semibold">LLM</th>
+              {/*
+                🔴 **부서가 스스로 남긴 관측** (2026-09-02 · #166).
+                재무가 provider 대체(gemini → ollama · HTTP_429)를 여기 싣는데,
+                `llm_fallback_used` 는 계약상 *"규칙이 대신 답함"* 만 뜻해서 False 다.
+                모델이 바뀐 사실은 이 칸에만 있다.
+              */}
+              <th className="px-3 py-2 text-left font-semibold">관측</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row, i) => {
               const tools = Array.isArray(row.used_tools) ? (row.used_tools as string[]) : [];
               const missing = Array.isArray(row.missing_data) ? (row.missing_data as string[]) : [];
+              const observations = Array.isArray(row.observations)
+                ? (row.observations as string[])
+                : [];
               const ready = row.runtime_status === "READY";
               return (
                 <tr key={i} className="border-t border-line-soft align-top">
@@ -203,6 +213,33 @@ function PlanTable({ rows }: { rows: Record<string, unknown>[] }) {
                         {String(row.llm_model)}
                       </span>
                     ) : null}
+                  </td>
+                  {/*
+                    ★ **파싱하지 않는다.** 부서마다 모양이 다른 JSON 이라, 화면이 뜻을
+                      붙이면 부서 스키마가 여기 한 벌 더 생기고 부서가 필드를 바꾸는 날
+                      화면만 옛말을 한다 (`AdvisorVerdicts` 와 같은 이유).
+                      건수만 세고 원문 그대로 편다.
+                  */}
+                  <td className="px-3 py-2 text-[11.5px]">
+                    {observations.length === 0 ? (
+                      <span className="text-faint">—</span>
+                    ) : (
+                      <details>
+                        <summary className="cursor-pointer text-muted">
+                          {observations.length}건
+                        </summary>
+                        <ul className="m-0 mt-1 list-none space-y-1 p-0">
+                          {observations.map((o, j) => (
+                            <li
+                              key={j}
+                              className="break-all font-mono text-[10.5px] text-faint"
+                            >
+                              {o}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                   </td>
                 </tr>
               );
