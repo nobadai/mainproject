@@ -261,6 +261,7 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             llm_model=s.llm_model,
             llm_attempts=s.llm_attempts,
             llm_fallback_used=s.llm_fallback_used,
+            replans=s.replans,
         )
         for s in plan.steps
     ]

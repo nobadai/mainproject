@@ -92,6 +92,11 @@ class StepOut(BaseModel):
     llm_attempts: int = 0
     llm_fallback_used: bool = False
 
+    #: 🔴 **부서가 계획을 다시 세운 횟수.** `llm_attempts` 와 뜻이 다르다.
+    #: `llm_attempts` 는 Planner + Finalizer 호출 수라 툴 개수를 따라 커지고
+    #: 재시도가 아니다 (재무 정정 2026-09-02). 재계획은 이 값이다.
+    replans: int = 0
+
 
 class ProcurementRunResponse(BaseModel):
     request_id: str
