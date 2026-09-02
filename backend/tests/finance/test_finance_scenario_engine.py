@@ -1,15 +1,15 @@
 from decimal import Decimal
 from unittest.mock import patch
 
-from app.finance.scenario_engine import (
+from app.finance.legacy.deterministic_service import (
+    run_finance_procurement_with_snapshot,
+    run_finance_sales_with_snapshot,
+)
+from app.finance.legacy.scenario_engine import (
     run_finance_procurement_scenario,
     run_finance_sales_scenario,
 )
 from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
-from app.finance.service import (
-    run_finance_procurement_with_snapshot,
-    run_finance_sales_with_snapshot,
-)
 
 
 def test_finance_procurement_scenario_is_deterministic(

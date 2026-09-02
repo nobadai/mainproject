@@ -6,8 +6,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.finance import messages
 from app.finance.adapter import finance_port
-from app.finance.run_repository import get_finance_execution
+from app.finance.execution import get_finance_execution, get_finance_run, list_finance_runs
+from app.finance.legacy.deterministic_service import run_finance_sales
 from app.finance.schemas import (
     FinalVerdict,
     FinanceAgentRunResponse,
@@ -15,11 +17,6 @@ from app.finance.schemas import (
     FinanceSalesRequest,
     FinanceSalesResponse,
     RuntimeStatus,
-)
-from app.finance.service import (
-    get_finance_run,
-    list_finance_runs,
-    run_finance_sales,
 )
 from app.master.envelope import AgentReply, AgentRequest
 
@@ -38,7 +35,7 @@ def get_finance_execution_by_id(run_id: UUID) -> dict[str, object]:
     try:
         return get_finance_execution(run_id)
     except LookupError as error:
-        raise HTTPException(status_code=404, detail="Finance v2.2 run was not found") from error
+        raise HTTPException(status_code=404, detail=messages.RUN_NOT_FOUND) from error
 
 
 @router.post(
@@ -85,5 +82,5 @@ def get_finance_run_by_id(run_id: UUID) -> FinanceAgentRunResponse:
     except LookupError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Finance Agent run was not found",
+            detail=messages.RUN_NOT_FOUND,
         ) from error

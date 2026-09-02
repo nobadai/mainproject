@@ -1,7 +1,10 @@
 """Finance Finalizer — **검증된 Evidence 에서 설명 키를 고른다.**
 
-문장을 쓰지 않는다. `_FINAL_EXPLANATIONS` 세 키 중 하나를 고를 뿐이라, 새 숫자나
+문장을 쓰지 않는다. `_FINAL_EXPLANATIONS` 의 키 중 하나를 고를 뿐이라, 새 숫자나
 새 주장이 설명을 통해 들어올 자리가 없다.
+
+★ 사용자에게 나가는 문장 자체는 `app.finance.messages` 소유다. 여기서는 **어느 문장을
+  고를지**만 정한다 — 문장을 여기 두면 Provider 코드마다 조금씩 다른 말투가 생긴다.
 """
 
 from __future__ import annotations
@@ -10,26 +13,38 @@ import json
 import os
 import urllib.request
 
-from app.finance.llm.client import _gemini_generate
-from app.finance.llm.config import _finance_model
-from app.finance.llm.contracts import FinanceMode
+from app.finance.llm.client import _finance_model, _gemini_generate
+from app.finance.messages import FINANCE_EXPLANATIONS, explanation_keys
+from app.finance.schemas import FinanceMode
 from app.orchestrator.contracts_core import Evidence
 
-#: 사용자에게 그대로 보이는 확정 설명.
+#: 사용자에게 그대로 보이는 확정 설명. **정본은 `app.finance.messages`** 다.
 #:
 #: ★ **키는 기계 계약이고 값만 표시 문장이다.** Finalizer 는 이 키 중 하나를 고를 뿐이라,
-#:   설명을 한국어로 바꿔도 LLM 이 숫자를 새로 만들 자리는 여전히 없다 — 고정 문장을
-#:   고르는 구조 자체가 숫자 비소유를 지킨다.
+#:   설명을 어떻게 고쳐 써도 LLM 이 숫자를 새로 만들 자리는 여전히 없다.
+_FINAL_EXPLANATIONS = FINANCE_EXPLANATIONS
+
+#: Finalizer 에게 주는 규율. **사용자가 읽을 문장을 고르는 일**이라는 것을 명시한다.
 #:
-#: ★ 숫자를 넣지 않는다. `_validate_ready_reasoning` 이 reasoning 안의 숫자를 막는다.
-_FINAL_EXPLANATIONS = {
-    "PRE_BOUNDARY": "검증된 재무 근거가 보고된 매입 가능 경계를 뒷받침합니다.",
-    "SCENARIO_REJECT": (
-        "검증된 재무 근거가 원안 시나리오 중 최소 하나를 반려했습니다. "
-        "함께 제시된 금액 대안은 별도로 검증했습니다."
-    ),
-    "SCENARIO_ACCEPT": "검증된 재무 근거가 보고된 시나리오 판정을 뒷받침합니다.",
-}
+#: ★ 내부 구조를 말하지 말라고 적어 두는 이유: 모델은 프롬프트에 들어간 관측을 그대로
+#:   흉내 내려는 경향이 있다. 고정 문장을 고르는 구조가 1차 방어이고, 이 규율은 그 위의
+#:   2차 방어다 — 둘 중 하나만 두지 않는다.
+_FINALIZER_SYSTEM_PROMPT = (
+    "You choose the Korean explanation that a business user will read for a Finance "
+    "review that is already complete. Answer only by selecting one allowed "
+    "explanation key.\n"
+    "Rules:\n"
+    "- The reply the user sees is Korean and written for a finance/business reader.\n"
+    "- Explain what the result means for their purchase decision and why.\n"
+    "- Use only the verified evidence you are given.\n"
+    "- Never calculate, derive, restate or invent any number or policy value.\n"
+    "- Never change the verdict; it is already decided by deterministic rules.\n"
+    "- Never mention internal architecture, agent framework, LangChain, Harness, "
+    "Planner, Registry, Capability, Dependency, Tool names, run state or any other "
+    "debugging detail.\n"
+    "- Do not translate English implementation terms literally; the user does not "
+    "know them."
+)
 
 
 class OllamaFinanceFinalizer:
@@ -49,13 +64,7 @@ class OllamaFinanceFinalizer:
         evidences: tuple[Evidence, ...],
     ) -> str:
         self.attempts += 1
-        allowed = (
-            ["PRE_BOUNDARY"]
-            if mode == "PRE_PURCHASE"
-            else ["SCENARIO_REJECT"]
-            if business_status == "reject"
-            else ["SCENARIO_ACCEPT"]
-        )
+        allowed = explanation_keys(mode, business_status)
         body = {
             "model": self.model,
             "stream": False,
@@ -67,13 +76,7 @@ class OllamaFinanceFinalizer:
                 "additionalProperties": False,
             },
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Finalize the Finance reply from verified Evidence only. Select the "
-                        "allowed explanation key. Do not calculate or add numbers or claims."
-                    ),
-                },
+                {"role": "system", "content": _FINALIZER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -117,20 +120,11 @@ class GeminiFinanceFinalizer:
         evidences: tuple[Evidence, ...],
     ) -> str:
         self.attempts += 1
-        allowed = (
-            ["PRE_BOUNDARY"]
-            if mode == "PRE_PURCHASE"
-            else ["SCENARIO_REJECT"]
-            if business_status == "reject"
-            else ["SCENARIO_ACCEPT"]
-        )
+        allowed = explanation_keys(mode, business_status)
         selected = json.loads(
             _gemini_generate(
                 model=self.model,
-                system_prompt=(
-                    "Finalize the Finance reply from verified Evidence only. Select the "
-                    "allowed explanation key. Do not calculate or add numbers or claims."
-                ),
+                system_prompt=_FINALIZER_SYSTEM_PROMPT,
                 user_payload={
                     "mode": mode,
                     "business_status": business_status,
@@ -168,8 +162,4 @@ class DeterministicFinanceFinalizer:
     ) -> str:
         self.attempts += 1
         del evidences
-        if mode == "PRE_PURCHASE":
-            return _FINAL_EXPLANATIONS["PRE_BOUNDARY"]
-        return _FINAL_EXPLANATIONS[
-            "SCENARIO_REJECT" if business_status == "reject" else "SCENARIO_ACCEPT"
-        ]
+        return _FINAL_EXPLANATIONS[explanation_keys(mode, business_status)[0]]

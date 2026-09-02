@@ -16,17 +16,17 @@ from decimal import Decimal
 
 import pytest
 
+from app.finance.application.harness import PRE_PURCHASE_TOOLS
 from app.finance.execution import (
     _CAP_TOOL_INPUTS,
     _CONTEXT_INPUTS,
-    _TOOL_INTERNAL_CALLS,
+    _TOOL_PREREQUISITE_TOOLS,
     FINANCE_CAP_CHECK_ID,
     FinanceToolDependencyMissing,
     _finance_dept_meta,
     _resolve_tool_inputs,
 )
 from app.finance.state import FinanceAgentState
-from app.finance.tool_registry import PRE_PURCHASE_TOOLS
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentRequest, ExecutionContext
 
@@ -73,7 +73,7 @@ def test_every_pre_purchase_tool_has_dependency_metadata():
 
 def test_internal_call_targets_are_themselves_declared():
     """내부 호출 대상도 계약이 있어야 전이 폐포가 성립한다."""
-    targets = {item for targets in _TOOL_INTERNAL_CALLS.values() for item in targets}
+    targets = {item for targets in _TOOL_PREREQUISITE_TOOLS.values() for item in targets}
     assert not targets - set(_CAP_TOOL_INPUTS)
 
 

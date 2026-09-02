@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
@@ -5,21 +6,24 @@ from uuid import UUID
 
 import pytest
 
-from app.finance.agent import (
-    DEFAULT_MAX_REPLANS,
-    DEFAULT_MAX_TOOL_CALLS,
+from app.finance import messages
+from app.finance.application.harness import (
     PRE_PURCHASE_TOOLS,
     SCENARIO_VALIDATION_TOOLS,
-    FinanceAgentController,
     FinanceToolRegistry,
-    ToolAction,
     validate_finance_scenario_output,
 )
-from app.finance.repository import (
+from app.finance.application.orchestration import (
+    DEFAULT_MAX_REPLANS,
+    DEFAULT_MAX_TOOL_CALLS,
+    FinanceAgentController,
+)
+from app.finance.db import (
     FinanceDataNotReady,
     PostgresFinanceAsOfDataPort,
 )
-from app.finance.run_repository import get_finance_execution, save_finance_execution
+from app.finance.execution import get_finance_execution, save_finance_execution
+from app.finance.llm.planner import ToolAction
 from app.finance.schemas import CashEvent, FinancePolicy
 from app.master.envelope import (
     AgentReply,
@@ -29,8 +33,18 @@ from app.master.envelope import (
     validate_reply,
 )
 
+
+def _harness_trace(metadata) -> dict:
+    """개발자가 읽는 실행 흔적. **사용자 회신과 다른 자리에 산다.**"""
+    return next(
+        json.loads(item)
+        for item in metadata.observations
+        if json.loads(item).get("observation_type") == "finance_harness_trace"
+    )
+
+
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
-_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+_STATE_REPO = "app.finance.db"
 
 
 class Port:
@@ -220,13 +234,18 @@ def test_registry_exposes_exactly_six_business_tools():
     assert DEFAULT_MAX_REPLANS == 2
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_pre_purchase_dynamic_order_and_envelope(save_run):
+    """순서는 고정 파이프라인이 아니다 — **합법이기만 하면 Planner 가 정한다.**
+
+    ★ 여기 쓰인 것은 정본 순서가 아니다. `cashflow_projection` 이 채워진 뒤에는
+      cap 과 압박도 중 어느 것을 먼저 골라도 되고, 위치 조사는 언제든 고를 수 있다.
+    """
     order = [
+        "project_cashflow",
         "analyze_payment_pressure",
         "assess_finance_position",
         "calculate_purchase_finance_cap",
-        "project_cashflow",
     ]
     planner = Planner([*(ToolAction(name) for name in order), ToolAction(finalize=True)])
     reply, metadata = FinanceAgentController(Port(), planner).run(request())
@@ -248,11 +267,12 @@ def test_pre_purchase_dynamic_order_and_envelope(save_run):
     save_run.assert_called_once()
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
     planner = Planner(
         [
             ToolAction("assess_finance_position"),
+            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -264,7 +284,7 @@ def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
     assert evidence["margin_defense_floor_rate"].ref_ids == ("policy:margin-floor",)
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_missing_n5_is_not_ready_and_never_returns_finance_cap(save_run):
     reply, _ = FinanceAgentController(
         MissingN5Port(), Planner([ToolAction("assess_finance_position")])
@@ -275,27 +295,64 @@ def test_missing_n5_is_not_ready_and_never_returns_finance_cap(save_run):
     assert "finance_cap_amount_krw" not in reply.payload
 
 
-@patch("app.finance.run_repository.save_finance_execution")
-def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run):
-    planner = Planner(
+@patch("app.finance.execution.save_finance_execution")
+def test_different_legal_tool_orders_produce_the_same_finance_result(save_run):
+    """🔴 예전에는 cap·압박도 Tool 이 투영이 없으면 **안에서 몰래** 현금흐름을 돌렸다.
+
+    값은 맞았지만 이력이 실행을 말하지 않았다 — 현금흐름을 만든 적이 없는 실행으로
+    남았다. 지금은 선행 capability 를 Harness 가 드러내 놓고 강제하므로
+    `project_cashflow` 가 **반드시 먼저 찍힌다.**
+
+    ★ 그렇다고 순서가 하나로 굳지는 않는다. 투영이 끝난 뒤의 두 Tool 은 서로 순서를
+      바꿔도 되고, **어느 쪽이든 재무 결과는 같아야 한다.**
+    """
+    first = Planner(
         [
+            ToolAction("project_cashflow", reason="Project the base cashflow."),
             ToolAction("analyze_payment_pressure", reason="Check payment concentration."),
             ToolAction("assess_finance_position", reason="Read the Finance position."),
             ToolAction("calculate_purchase_finance_cap", reason="Derive the purchase boundary."),
             ToolAction(finalize=True),
         ]
     )
+    second = Planner(
+        [
+            ToolAction("assess_finance_position", reason="Read the Finance position."),
+            ToolAction("project_cashflow", reason="Project the base cashflow."),
+            ToolAction("calculate_purchase_finance_cap", reason="Derive the purchase boundary."),
+            ToolAction("analyze_payment_pressure", reason="Check payment concentration."),
+            ToolAction(finalize=True),
+        ]
+    )
     req = request()
-    reply, metadata = FinanceAgentController(Port(), planner).run(req)
-    assert reply.runtime_status == "READY"
+    reply, metadata = FinanceAgentController(Port(), first).run(req)
+    other, other_metadata = FinanceAgentController(Port(), second).run(request())
+
+    assert reply.runtime_status == other.runtime_status == "READY"
     assert metadata.used_tools == (
+        "project_cashflow",
         "analyze_payment_pressure",
         "assess_finance_position",
         "calculate_purchase_finance_cap",
     )
-    assert "project_cashflow" not in metadata.used_tools
+    assert other_metadata.used_tools == (
+        "assess_finance_position",
+        "project_cashflow",
+        "calculate_purchase_finance_cap",
+        "analyze_payment_pressure",
+    )
+    # 실행 순서는 달랐고 **결정론 결과는 같다.**
+    assert reply.payload == other.payload
+    # ★ Evidence **집합**을 비교한다. 나열 순서는 Tool 순서를 따라가고, 그것은
+    #   재무 결과가 아니라 이 실행이 어떤 순서를 골랐는지를 말할 뿐이다.
+    assert {item.claim for item in reply.evidences} == {
+        item.claim for item in other.evidences
+    }
+    assert {(item.claim, item.value) for item in reply.evidences} == {
+        (item.claim, item.value) for item in other.evidences
+    }
     assert validate_reply(req, reply, metadata) == ()
-    assert "Check payment concentration." in metadata.observations[0]
+    assert "Project the base cashflow." in metadata.observations[0]
     evidence = {item.claim: item for item in reply.evidences}
     assert evidence["available_cash"].source == "finance"
     assert evidence["payment_pressure"].source == "tool_calc"
@@ -309,7 +366,7 @@ def test_capability_completion_does_not_require_every_pre_purchase_tool(save_run
     assert evidence["critical_payment_dates"].unit == "KRW"
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run):
     planner = Planner(
         [
@@ -356,7 +413,7 @@ def test_multi_scenario_results_are_isolated_and_common_contract_valid(save_run)
     assert validate_finance_scenario_output(reply) == ()
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_base_cashflow_failure_is_not_presented_as_repairable(save_run):
     planner = Planner([ToolAction("evaluate_purchase_scenario"), ToolAction(finalize=True)])
     reply, _ = FinanceAgentController(BaseViolationPort(), planner).run(
@@ -384,14 +441,14 @@ def test_base_cashflow_failure_is_not_presented_as_repairable(save_run):
     ],
 )
 def test_finance_owned_payload_validation_rejects_invalid_scenarios(payload):
-    with patch("app.finance.run_repository.save_finance_execution"):
+    with patch("app.finance.execution.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), Planner([])).run(
             request("SCENARIO_VALIDATION", payload)
         )
     assert reply.runtime_status == "ERROR"
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_scenario_payment_dates_change_projected_cashflow(save_run):
     planner = Planner(
         [
@@ -446,7 +503,7 @@ def test_scenario_payment_dates_change_projected_cashflow(save_run):
     assert late["verdict"] == "ok"
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     planner = Planner(
         [
@@ -479,7 +536,7 @@ def test_default_payment_date_is_reconstructed_from_approved_policy(save_run):
     ]
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_multi_scenario_reuses_one_policy_context(save_run):
     port = CountingPort()
     planner = Planner(
@@ -508,6 +565,7 @@ def test_multi_scenario_reuses_one_policy_context(save_run):
 def test_run_history_persistence_failure_becomes_agent_error():
     planner = Planner(
         [
+            ToolAction("project_cashflow"),
             ToolAction("analyze_payment_pressure"),
             ToolAction("assess_finance_position"),
             ToolAction("calculate_purchase_finance_cap"),
@@ -515,20 +573,21 @@ def test_run_history_persistence_failure_becomes_agent_error():
         ]
     )
     with patch(
-        "app.finance.run_repository.save_finance_execution",
+        "app.finance.execution.save_finance_execution",
         side_effect=RuntimeError("database down"),
     ):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
     assert reply.business_status == "skipped"
-    assert reply.reasoning == "재무 실행이력을 저장하지 못했습니다."
+    assert reply.reasoning == messages.PERSISTENCE_FAILED
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_run):
     planner = Planner(
         [
             ToolAction("assess_finance_position"),
+            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -544,19 +603,31 @@ def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_ru
     assert not any(character.isdigit() for character in reply.reasoning)
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_zero_debt_does_not_require_debt_policy(save_run):
+    # ★ `PRE_PURCHASE_TOOLS` 는 frozenset 이라 순회 순서가 정해져 있지 않다. 선행
+    #   capability 를 Harness 가 강제하는 이상, 순서를 운에 맡기면 이 테스트가
+    #   가끔 반려로 끝난다 — 합법 순서를 명시한다.
     planner = Planner(
         [
-            *(ToolAction(name) for name in PRE_PURCHASE_TOOLS),
+            ToolAction("assess_finance_position"),
+            ToolAction("project_cashflow"),
+            ToolAction("calculate_purchase_finance_cap"),
+            ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
         ]
     )
+    assert PRE_PURCHASE_TOOLS == {
+        "assess_finance_position",
+        "project_cashflow",
+        "calculate_purchase_finance_cap",
+        "analyze_payment_pressure",
+    }
     reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "READY"
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_positive_debt_without_policy_is_not_ready(save_run):
     port = Port()
     port.debt = Decimal(1)
@@ -567,7 +638,7 @@ def test_positive_debt_without_policy_is_not_ready(save_run):
     assert reply.missing_data == ("debt_policy",)
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     port = Port()
     port.payroll = None
@@ -580,7 +651,7 @@ def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
     assert reply.needs_followup is True
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     planner = Planner(
         [
@@ -608,7 +679,7 @@ def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
 
 def test_payment_schedule_sum_mismatch_is_error():
     planner = Planner([ToolAction("evaluate_purchase_scenario")])
-    with patch("app.finance.run_repository.save_finance_execution"):
+    with patch("app.finance.execution.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
@@ -622,7 +693,7 @@ def test_payment_schedule_sum_mismatch_is_error():
     assert reply.runtime_status == "ERROR"
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_purchase_pr62_shape_uses_label_identity_and_validates_base_stress(save_run):
     del save_run
     scenario = {
@@ -684,10 +755,10 @@ def test_purchase_pr62_shape_uses_label_identity_and_validates_base_stress(save_
     ][0]["scenario_projected_cash_min"]
 
 
-@patch("app.finance.run_repository.save_finance_execution")
+@patch("app.finance.execution.save_finance_execution")
 def test_purchase_labels_must_be_unique_when_scenario_id_is_absent(save_run):
     del save_run
-    reply, _ = FinanceAgentController(Port(), Planner([])).run(
+    reply, metadata = FinanceAgentController(Port(), Planner([])).run(
         request(
             "SCENARIO_VALIDATION",
             {
@@ -699,14 +770,18 @@ def test_purchase_labels_must_be_unique_when_scenario_id_is_absent(save_run):
         )
     )
     assert reply.runtime_status == "ERROR"
-    assert "unique" in reply.reasoning
+    # 🔴 사용자에게 `scenario_id must be unique within the request` 를 보여 주지
+    #    않는다. 어느 필드가 왜 막혔는지는 실행 이력이 들고, 사용자는 **무엇을 고쳐야
+    #    하는지**를 받는다.
+    assert reply.reasoning == messages.INVALID_REQUEST
+    assert "unique" in _harness_trace(metadata)["failure_reason"]
 
 
 def test_duplicate_tool_call_is_blocked():
     planner = Planner(
         [ToolAction("assess_finance_position"), ToolAction("assess_finance_position")]
     )
-    with patch("app.finance.run_repository.save_finance_execution"):
+    with patch("app.finance.execution.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(request())
     assert reply.runtime_status == "ERROR"
 
@@ -721,7 +796,7 @@ def test_non_amount_adjustment_axis_is_rejected():
             ),
         ]
     )
-    with patch("app.finance.run_repository.save_finance_execution"):
+    with patch("app.finance.execution.save_finance_execution"):
         reply, _ = FinanceAgentController(Port(), planner).run(
             request(
                 "SCENARIO_VALIDATION",
@@ -752,8 +827,8 @@ def test_run_id_resolves_finance_history():
         "runtime_status": "READY",
     }
     with (
-        patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
-        patch("app.finance.run_repository.fetch_one", return_value=row) as fetch,
+        patch("app.finance.execution.get_db_schema", return_value="haetdeul"),
+        patch("app.finance.execution.fetch_one", return_value=row) as fetch,
     ):
         assert get_finance_execution(run_id) == row
     assert fetch.call_args.args[1] == (run_id,)
@@ -778,9 +853,9 @@ def test_run_history_persists_reproducibility_fields():
         tool_order=(1,),
     )
     with (
-        patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
+        patch("app.finance.execution.get_db_schema", return_value="haetdeul"),
         patch(
-            "app.finance.run_repository.execute_returning_one",
+            "app.finance.execution.execute_returning_one",
             return_value={"run_id": UUID(reply.run_id)},
         ) as execute,
     ):

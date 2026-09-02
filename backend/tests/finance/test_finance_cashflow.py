@@ -4,14 +4,17 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance.scenario_engine import run_finance_procurement_scenario
+from app.finance.legacy.deterministic_service import (
+    run_finance_procurement_with_context,
+    run_finance_sales_with_context,
+)
+from app.finance.legacy.scenario_engine import run_finance_procurement_scenario
 from app.finance.schemas import (
     CashEvent,
     FinanceRuntimeContext,
     FinanceSalesRequest,
     PurchaseAgentOutput,
 )
-from app.finance.service import run_finance_procurement_with_context, run_finance_sales_with_context
 from app.finance.tools import (
     build_debt_service_schedule,
     build_payroll_schedule,
@@ -137,7 +140,7 @@ def test_fixed_context_never_reads_db(finance_context, purchase_payload, sales_p
     sales_payload["approved_purchase"]["payment_date"] = "2026-01-07"
     sales = FinanceSalesRequest.model_validate(sales_payload)
     with patch(
-        "app.finance.infrastructure.finance_state_repository.get_current_finance_runtime_context",
+        "app.finance.db.get_current_finance_runtime_context",
         side_effect=AssertionError("DB must not be read"),
     ):
         run_finance_procurement_with_context(purchase, finance_context)

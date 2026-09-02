@@ -2,7 +2,8 @@
 
 ## Finance LLM 아키텍처
 
-Finance의 Master 연동 경로는 다음과 같다.
+Finance의 Master 연동 경로는 다음과 같다. **밖에서 보이는 계약은 그대로다** —
+LangChain 과 Harness 는 재무 내부 구현이다.
 
 ```text
 Master
@@ -11,16 +12,142 @@ finance_port
   ↓
 FinanceAgentController
   ↓
-Finance Planner
+Finance Harness            ← 지금 무엇이 합법인가를 정한다
   ↓
-Finance Tools / Rules
+LangChain Tool-calling Planner (LLM)
+  ↓  선택 = 실행 요청
+Finance Harness 재검증      ← Registry 직전에 한 번 더
   ↓
-Finance Finalizer
+FinanceToolRegistry → capability (결정론)
+  ↓
+Finance Rules (verdict)
+  ↓
+Finance Finalizer (설명) → 설명 guard
 ```
 
-Planner는 현재 mode에서 허용된 Finance Tool만 선택한다. 모든 재무 수치, Policy 적용,
-Evidence, verdict와 adjustment는 deterministic Finance Tools/Rules가 계산한다. Finalizer는
-검증된 Evidence를 설명할 뿐이며 재무 수치나 Policy 값을 생성할 수 없다.
+책임은 다음과 같이 갈린다.
+
+```text
+LangChain   Tool 계약 표현과 tool calling 전송 계층. 업무 로직을 갖지 않는다.
+Harness     capability 상태 · 실행 가능 Tool · 권한 · 의존 · 예산 · 중복을 정하고 강제한다.
+LLM         (1) 지금 실행 가능한 Tool 중 하나를 고른다 (2) 확정된 결과를 설명한다
+Tool        재무 사실을 계산한다 (금액 공식의 유일한 주인)
+Rule        재무 verdict 를 정한다
+Finalizer   검증된 Evidence 로 고정 문장을 고른다 — 결과를 바꾸지 못한다
+```
+
+★ **LLM 의 Tool 호출은 실행 요청이지 실행 권한이 아니다.** LangChain 에 바인딩되는
+Tool 객체와 실제로 실행되는 Tool 객체는 같지만, 그 사이에 Harness 승인이 있다.
+그래서 `AgentExecutor` 류의 자동 실행 루프를 쓰지 않는다 — 승인 자리가 사라진다.
+
+### capability 소유와 의존
+
+정본은 `application/harness.py` 하나다. 소유는 **1:1** 이다.
+
+```text
+finance_position              → assess_finance_position
+cashflow_projection           → project_cashflow
+finance_cap                   → calculate_purchase_finance_cap
+payment_pressure              → analyze_payment_pressure
+scenario_evaluation           → evaluate_purchase_scenario
+amount_adjustment_validation  → validate_amount_adjustment
+```
+
+선행 조건은 **Tool 이름 순서가 아니라 capability 조건**이다.
+
+```text
+calculate_purchase_finance_cap  requires cashflow_projection
+analyze_payment_pressure        requires cashflow_projection
+validate_amount_adjustment      requires scenario_evaluation
+```
+
+조건만 맞으면 어느 것을 먼저 골라도 된다. 그래서 PRE_PURCHASE 는 고정 파이프라인이
+아니다 — 투영이 끝난 뒤에는 위치조사·cap·압박도 셋이 모두 합법이고, 그중 무엇을
+고를지는 Planner 몫이다.
+
+🔴 **숨은 선행 호출을 없앴다.** 예전에는 투영이 없으면 `calculate_purchase_finance_cap`
+과 `analyze_payment_pressure` 가 안에서 `project_cashflow` 를 몰래 돌렸다. 값은 맞았지만
+**이력이 실행을 말하지 않았다** — 현금흐름을 만든 적이 없는 실행으로 남았다. 지금은
+선행 capability 를 Harness 가 드러내 놓고 강제하고, 그래도 새어 들어온 호출은
+`FinancePreconditionMissing` 으로 실패한다. 이것은 **실행 순서 오류이지
+`RUNTIME_NOT_READY` 가 아니다** — 재무 데이터는 멀쩡히 있다.
+
+### 반려 사유
+
+Harness 가 막은 이유는 값으로 남는다 (`finance_harness_trace` observation).
+
+```text
+TOOL_NOT_EXECUTABLE            지금 필요하지 않거나 이미 채워진 capability
+DEPENDENCY_NOT_SATISFIED       선행 capability 가 없다
+TOOL_PERMISSION_DENIED         이 mode 의 Tool 이 아니다
+TOOL_BUDGET_EXHAUSTED          Tool 호출 상한
+DUPLICATE_UNRESOLVED_TOOL_CALL 같은 요청 반복
+```
+
+앞의 셋은 회복 가능해 상한 안에서 되묻고(bounded replan), 뒤의 둘은 되물어도 같아서
+실행을 접는다.
+
+### Trace
+
+`ExecutionMetadata.observations` 에 `finance_harness_trace` 가 한 덩어리로 남는다.
+단계마다 **LLM 이 요청한 것 · Harness 가 허락한 것 · 실제로 돈 것**을 함께 적는다.
+
+```text
+step / branch_id
+completed_capabilities · missing_capabilities · executable_tools · dependency_status
+requested_tool · finalize_requested · selected_tool · executed_tool
+denied_tool · denied_reason
+tool_calls · llm_calls · replans
+```
+
+DB 테이블을 새로 만들지 않는다 — 기존 실행 metadata 를 넓혔을 뿐이다.
+
+### 상한
+
+```text
+FINANCE_MAX_TOOL_CALLS   기본 8
+FINANCE_MAX_REPLANS      기본 2
+```
+
+한 실행 전체에서 공유한다(분기가 늘어도 예산은 늘지 않는다). `0` 은 기본값으로
+덮이지 않는다 — **한 번도 부르지 말라**는 뜻이다.
+
+### 사용자 문장과 기계 계약
+
+나누는 기준은 **누가 읽는가** 다. 정본은 `messages.py` 하나다.
+
+```text
+사람이 읽는 것   reasoning · payload.verdicts[].reason · HTTP 404 본문
+                 → 한국어 · 업무 언어 · 구현 용어 없음
+
+기계가 읽는 것   READY · RUNTIME_NOT_READY · ERROR
+                 ok · conditional · reject · FIN-BASE-STRESS
+                 Tool 이름 · capability id · payload 키 · missing_data · Trace
+                 → 그대로 둔다. 번역하면 프론트·Critic·마스터가 대상을 못 찾는다.
+```
+
+읽는 사람은 Tool 도 Capability 도 Harness 도 Planner 도 모른다. 그래서 사용자 문장에는
+그 낱말이 없다 — *"무엇이 어떻게 됐고 왜 그런가"* 와 **다음에 할 일**만 있다.
+
+🔴 **기술적 사유를 회신에 싣지 않는다. 대신 잃지도 않는다.** 예전에는 실패한 실행의
+`reasoning` 이 예외 문자열 그대로였다 — 사용자가 `Finance tool call limit exceeded` 를
+받았다. 지금 그 문자열은 `finance_harness_trace` 의 `failure_reason` · `failure_kind` 로
+가고, 사용자에게는 갈래에 맞는 한국어 문장이 나간다.
+
+```text
+failure_kind = INVALID_REQUEST  보내 주신 내용을 고쳐야 한다
+failure_kind = NOT_READY        자료가 준비되면 다시 보면 된다   (RUNTIME_NOT_READY)
+failure_kind = INTERNAL         우리 쪽 사정이다. 잠시 후 다시   (ERROR)
+```
+
+`ok` · `conditional` · `reject` 는 **각각 다른 문장**을 받는다. 사용자가 할 일이
+다르기 때문이다 — 그대로 진행 / 조정한 뒤 재검토 / 이 조건으로는 어려움.
+
+★ **LLM 경로와 결정론 대체 경로가 같은 문장을 쓴다.** 한쪽만 다듬으면 모델이 죽은
+날에만 말투가 달라진다 — 설명이 가장 필요한 날에 설명이 제일 나빠진다.
+
+★ 숫자 비소유는 그대로다. 설명은 여전히 **고정 문장을 고르는** 구조이고
+`_validate_ready_reasoning` 이 숫자를 막는다. 금액은 payload 와 Evidence 가 든다.
 
 ## 패키지 구조
 
@@ -30,62 +157,51 @@ Evidence, verdict와 adjustment는 deterministic Finance Tools/Rules가 계산�
 ```text
 app/finance/
 ├─ adapter.py         Master 경계 번역 (finance_port)      ← main.py 가 import
-├─ router.py          HTTP 진입점                          ← main.py 가 import
-├─ agent.py           공개 표면 (application/* 재수출)     ← 구현 없음
-├─ application/       Agent 실행 계층
-│  ├─ controller.py       FinanceAgentController (오케스트레이션)
-│  ├─ planner_loop.py     branch 분해 · bounded tool 호출 루프
-│  ├─ guards.py           계약 위반 판정 · replan guard · 인자 출처 강제
-│  └─ finalization.py     Business payload · Evidence · reasoning 조립
-├─ tool_registry.py   capability 디스패처 (thin)
-├─ capabilities/
-│  ├─ pre_purchase.py         PRE_PURCHASE capability 4종
-│  ├─ scenario_validation.py  SCENARIO_VALIDATION capability 2종
-│  ├─ runtime_context.py      컨텍스트 적재 (position·policy·payroll·부채)
-│  └─ payment_schedule.py     지급 일정 재구성/정규화 · BASE/STRESS event
-├─ state.py           실행 상태 · capability 판정
-├─ evidence.py        Evidence 생성 · 정책 출처 규율
-├─ execution.py       finance_dept_meta (Critic 사이드카)
-├─ tools.py           결정론 재무 계산 (공식 소유)
+├─ router.py          HTTP 진입점 · 실행이력/판매 조회      ← main.py 가 import
+├─ db.py              영속 계층: 연결·조회 헬퍼 · 데이터 경계 계약 · as-of DataPort 구현
+│                                                          ← master · orchestrator 도 import
+├─ schemas.py         요청·응답 계약 전체 (어휘·현금흐름·정책·상태·매입·판매·이력)
+├─ state.py           한 실행 동안 살아 있는 값
+├─ tools.py           결정론 재무 계산 (공식의 유일한 주인)
 ├─ rules.py           결정론 판정 (verdict 소유)
-├─ ports/
-│  └─ finance_data.py     FinanceAsOfDataPort · FinanceDataNotReady (계약만)
-├─ infrastructure/    경계 계약의 PostgreSQL 구현
-│  ├─ finance_state_repository.py  State · Policy · 부채 규율 · 확정 일정 조회
-│  └─ postgres_data_port.py        as-of 재현성 보호를 둔 DataPort 구현
-├─ repository.py      공개 표면 (ports + infrastructure 재수출)  ← 구현 없음
-├─ run_repository.py  실행이력 (도메인 공통 `run_repository` 관례)
-├─ db.py              DB 헬퍼   ← master · orchestrator 가 import (재무 밖 공유)
-├─ contracts/         재무 계약 타입을 업무 의미 단위로 분리
-│  ├─ vocabulary.py       닫힌 어휘 (verdict · runtime status · cash event)
-│  ├─ numeric_guards.py   숫자 필드 공통 입력 방어
-│  ├─ purchase_request.py 매입 제안 입력 계약
-│  ├─ policy.py           운영 정책 · 부채 계약
-│  ├─ cashflow.py         현금 사건 · 현금흐름 투영
-│  ├─ state.py            T0 Snapshot · RuntimeContext (서로 참조 — 같이 둔다)
-│  ├─ procurement.py      매입 Cycle 응답
-│  ├─ sales.py            판매 Cycle 계약
-│  └─ run_history.py      실행이력 조회 응답
-├─ schemas.py         공개 표면 (contracts/* 재수출)       ← 구현 없음
-├─ service.py         Agent 실행이력 조회 + 레거시 재수출
-├─ legacy/            Agent 이전의 결정론 경로 (입구는 `/finance/sales` 하나)
-│  ├─ deterministic_service.py  Finance A/B 실행
-│  ├─ scenario_engine.py        결정론 Scenario 실행
-│  └─ interpretation.py         응답 해설 보강
-├─ scenario_engine.py / interpretation.py
-│                     공개 표면 (legacy/* 재수출)          ← 구현 없음
-└─ llm/               Planner · Finalizer · Provider · 설정
-   └─ runtime.py      레거시 해석 계층 (`/finance/sales` 전용)
+├─ execution.py       Evidence · DeptMeta(Critic 사이드카) · 실행이력 저장/조회
+├─ messages.py        사용자에게 보이는 한국어 문장 (정본)  ← 기계 계약은 담지 않는다
+├─ interpretation.py  공개 표면 (legacy/* 재수출)          ← 재무 밖 테스트가 import
+├─ application/       Agent 실행 계층
+│  ├─ harness.py          합법 행동공간: capability 정책 · Tool 선언/디스패치 ·
+│  │                      승인 · 예산 · 중복 차단 · 실행 계약 guard · Trace
+│  └─ orchestration.py    수명주기: 분기 · Planner 루프 · 결과 확정 · 설명 · 회신 · 이력
+├─ capabilities/      결정론 업무 (Harness 가 부르고, 여기서 계산한다)
+│  ├─ procurement.py      컨텍스트 적재 · 위치 조사 · 투영 · Finance Cap · 지급 압박도
+│  └─ scenario.py         지급 일정 재구성 · BASE/STRESS overlay · 판정 · 금액 대안 검증
+├─ llm/               Provider 통합 (업무 로직 없음)
+│  ├─ client.py           설정 · Gemini/Ollama HTTP · 가용성 실패 판별 ·
+│  │                      Gemini 전송 형식 낮추기(const → enum, null union → nullable)
+│  ├─ planner.py          Planner 계약 · 프롬프트 · 사후 검증 · ChatModel ·
+│  │                      LangChain tool-calling Planner · 결정론 Planner · 가용성 대체
+│  ├─ finalizer.py        검증된 Evidence 에서 설명 키 선택
+│  ├─ runtime.py          레거시 해석 계층 (`/finance/sales` 전용) ← 재무 밖 테스트가 import
+│  └─ schemas.py          레거시 해석 계약                      ← 재무 밖 테스트가 import
+└─ legacy/            Agent 이전의 결정론 경로 (입구는 `/finance/sales` 하나)
+   ├─ deterministic_service.py  Finance A/B 실행
+   ├─ scenario_engine.py        결정론 Scenario 실행
+   └─ interpretation.py         응답 해설 보강
 ```
+
+★ **한 응집 영역 = 한 모듈**이다. 늘 같이 열리는 것들을 한 파일에 둔다 — *"재무
+Agent 는 어떻게 실행되는가"* 는 `application/orchestration.py`, *"이 호출이 합법인가"* 는
+`application/harness.py` 하나면 된다. 파일 경계와 신뢰 경계는 다른 것이고, 후자는
+클래스·절·이름으로 지킨다.
 
 책임 경계는 다음과 같다.
 
 ```text
-Planner    무엇을 부를지 고른다        (숫자를 만들지 않는다)
+harness.py 무엇을 부를 수 있는지 정하고 강제한다 (숫자를 만들지 않는다)
+Planner    그중 무엇을 부를지 고른다             (숫자를 만들지 않는다)
 capability 허용된 재무 작업을 수행한다
-tools.py   금액·현금흐름을 계산한다     (공식의 유일한 주인)
+tools.py   금액·현금흐름을 계산한다              (공식의 유일한 주인)
 rules.py   PASS/FAIL·verdict 를 정한다
-Finalizer  검증된 Evidence 를 설명한다  (고정 문장을 고를 뿐이다)
+Finalizer  검증된 Evidence 를 설명한다           (고정 문장을 고를 뿐이다)
 ```
 
 `tool_registry.py` 는 이름을 capability 로 넘기는 일만 한다. 예전에는 이 파일 하나가

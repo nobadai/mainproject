@@ -1,5 +1,17 @@
 """PRE_PURCHASE capability — 매입 실행 **경계**를 낸다.
-숫자는 전부 `app.finance.tools` 의 결정론 함수가 만들고, 근거는 `evidence` 규율을 따른다.
+
+이 파일이 소유하는 것
+    실행 컨텍스트 적재(상태·정책·급여·채무/채권·부채)
+    · 위치 조사 · 현금흐름 투영 · Finance Cap · 지급 압박도
+
+여기 **없는 것**
+    금액 공식 자체(`tools`) · 판정(`rules`) · 실행 통제(`application.harness`)
+    · 사람이 읽는 문장(`messages`)
+
+★ 숫자는 전부 `app.finance.tools` 의 결정론 함수가 만들고, 근거는 `execution` 의
+  Evidence 규율을 따른다. 여기서 하는 일은 **무엇을 어떤 순서로 읽어 그 함수에
+  넘기는가** 다.
+
 """
 
 from __future__ import annotations
@@ -8,16 +20,18 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from app.finance.capabilities.runtime_context import load_context
-from app.finance.evidence import (
+from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
+from app.finance.execution import (
+    _PAYROLL_SOURCE_KEYS,
     _evidence,
     _optional_source_ref,
     _source_ref,
     _tool_ref,
 )
-from app.finance.repository import FinanceAsOfDataPort, FinanceDataNotReady
+from app.finance.schemas import CashEvent, FinancePolicy
 from app.finance.state import FinanceAgentState
 from app.finance.tools import (
+    build_payroll_schedule,
     calculate_finance_cap,
     derive_cash_priority,
     derive_critical_payment_dates,
@@ -26,6 +40,68 @@ from app.finance.tools import (
     project_cashflow as project_cashflow_tool,
 )
 from app.orchestrator.contracts_core import Evidence
+
+# ---------------------------------------------------------------------------
+# 실행 컨텍스트 적재
+# ---------------------------------------------------------------------------
+
+def load_context(
+    data_port: FinanceAsOfDataPort, state: FinanceAgentState
+) -> tuple[dict[str, Any], FinancePolicy, list[CashEvent]]:
+    """이 실행의 재무 컨텍스트. **한 번 읽고 분기 간에 공유한다.**
+
+    ★ 부채 일정은 `current_debt > 0` 일 때만 읽는다 — 빚이 없는 회사에 부채 정책을
+      요구하지 않는다 (repository 의 부채 규율과 같은 방향).
+    """
+    if state.context_cache is not None:
+        return state.context_cache
+    ctx = state.request.context
+    position = data_port.load_finance_position(ctx.as_of)
+    policy = data_port.load_policy(ctx.as_of, ctx.policy_version)
+    horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
+    payroll_amount = data_port.load_payroll(ctx.as_of, horizon)
+    if payroll_amount is None:
+        raise FinanceDataNotReady("payroll_schedule")
+    policy = policy.model_copy(update={"monthly_labor_cost_krw": payroll_amount})
+    # 급여 출처는 fail-closed 다. `build_payroll_schedule` 도 막지만 그쪽은
+    # `ValueError` 라 일반 `ERROR` 로 분류된다 — **입력이 없어서 못 내는 답**은
+    # `RUNTIME_NOT_READY` 여야 재시도 가치가 제대로 남는다 (M-1 §5.1).
+    for key in _PAYROLL_SOURCE_KEYS:
+        _source_ref(policy, key)
+    events = [
+        *data_port.load_obligations(ctx.as_of, horizon),
+        *data_port.load_receivables(ctx.as_of, horizon),
+        *build_payroll_schedule(as_of=ctx.as_of, horizon_end=horizon, policy=policy),
+    ]
+    current_debt = Decimal(position["current_debt_krw"])
+    if current_debt > 0:
+        events.extend(data_port.load_debt_schedule(ctx.as_of, horizon))
+    state.context_cache = (position, policy, events)
+    return state.context_cache
+
+
+# ---------------------------------------------------------------------------
+# PRE_PURCHASE capability
+# ---------------------------------------------------------------------------
+
+class FinancePreconditionMissing(RuntimeError):
+    """선행 capability 없이 Tool 이 실행됐다. **재무 사실이 없는 것이 아니다.**
+
+    🔴 예전에는 투영이 없으면 cap·압박도 Tool 이 안에서 `project_cashflow` 를 몰래
+       돌렸다. 값은 맞았지만 **이력이 실행을 말하지 않았다** — 현금흐름을 만든 적이
+       없는 실행으로 남았고, `inputs_used` 도 그 사실을 따로 보정해야 했다.
+
+    ★ 이것은 실행 순서 오류이지 `RUNTIME_NOT_READY` 가 아니다. 재무 데이터·정책은
+       멀쩡히 있다 — 다시 불러도 같은 결과가 나올 종류의 문제가 아니라, Harness 가
+       막았어야 할 호출이 새어 들어온 것이다.
+    """
+
+
+def _require_projection(state: FinanceAgentState, tool: str) -> None:
+    if state.projection is None:
+        raise FinancePreconditionMissing(
+            f"{tool} requires the cashflow_projection capability"
+        )
 
 
 def assess_finance_position(
@@ -155,8 +231,7 @@ data_port: FinanceAsOfDataPort, args: dict[str, Any], state: FinanceAgentState
     _, policy, _ = load_context(data_port, state)
     if policy.purchase_payment_days is None:
         raise FinanceDataNotReady("purchase_payment_days")
-    if state.projection is None:
-        project_cashflow(data_port, {}, state)
+    _require_projection(state, "calculate_purchase_finance_cap")
     cap = calculate_finance_cap(base_projection=state.projection, policy=policy)
     return {
         "finance_cap_amount_krw": str(cap),
@@ -182,8 +257,7 @@ data_port: FinanceAsOfDataPort, args: dict[str, Any], state: FinanceAgentState
 ) -> dict[str, Any]:
     del args
     _, policy, events = load_context(data_port, state)
-    if state.projection is None:
-        project_cashflow(data_port, {}, state)
+    _require_projection(state, "analyze_payment_pressure")
     pressure = derive_cash_priority(
         projected_cash_min=state.projection.projected_cash_min, policy=policy
     )

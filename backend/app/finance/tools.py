@@ -20,13 +20,6 @@ from app.purchase_agent.schemas import SourcingPlanItem as PurchaseSourcingPlanI
 KRW_QUANTUM = Decimal("0.000001")
 
 
-class ExpectedCostComparison(TypedDict):
-    is_match: bool
-    expected_cost: Decimal
-    recalculated_cost: Decimal
-    difference: Decimal
-
-
 class ReportedAmountComparison(TypedDict):
     is_match: bool
     reported_amount_krw: Decimal
