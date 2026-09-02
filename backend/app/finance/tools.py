@@ -10,6 +10,7 @@ from typing import TypedDict
 from app.finance.sales_models import (
     InventoryCostBasis,
     SalesCostBasis,
+    SalesScenarioCashflow,
     VerifiedDirectCost,
 )
 from app.finance.schemas import (
@@ -495,5 +496,107 @@ def compose_sales_cost_basis(
         source_refs=(
             inventory_cost_basis.source_ref,
             *(cost.source_ref for cost in added),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 3 — 판매 시나리오 현금흐름 오버레이
+#
+#     BASE     = 이미 확정된 Finance 현금 Event 만
+#     SCENARIO = BASE + 제안된 판매 회수 유입
+#
+# ★ 제안 회수는 **확정 채권이 아니다.** BASE 에 섞이거나 실제 AR 로 적재되면
+#   승인되지 않은 돈이 확정 현금처럼 읽힌다. 그래서 BASE 는 제안이 없을 때와
+#   값이 같아야 하고, 두 투영은 같은 리스트를 공유하지 않는다.
+#
+# ★ 투영 엔진은 기존 `project_cashflow` 하나뿐이다 — 두 벌을 만들지 않는다.
+# ---------------------------------------------------------------------------
+
+PROPOSED_SALES_COLLECTION_EVENT_TYPE = "PROPOSED_SALES_COLLECTION"
+
+
+def build_proposed_sales_collection_event(
+    *,
+    proposal_ref: str,
+    collection_date: date,
+    sales_amount_krw: Decimal,
+    source_ref: str,
+) -> CashEvent:
+    """제안된 판매 회수를 유입 Event 하나로 만든다 (확정 채권이 아니다).
+
+    회수일은 호출자가 `calculate_collection_date` 로 이미 구한 값을 넘긴다 —
+    날짜 산술을 여기서 다시 구현하지 않는다.
+    """
+    if not proposal_ref.strip():
+        raise ValueError("proposal_ref must not be blank")
+    if not source_ref.strip():
+        raise ValueError("source_ref must not be blank")
+    if sales_amount_krw < 0:
+        raise ValueError("sales_amount_krw must not be negative")
+    return CashEvent(
+        event_date=collection_date,
+        event_type=PROPOSED_SALES_COLLECTION_EVENT_TYPE,
+        amount_krw=sales_amount_krw,
+        direction="INFLOW",
+        ref_id=f"SALES-PROPOSAL:{proposal_ref}:{collection_date.isoformat()}",
+        source_ref=source_ref,
+    )
+
+
+def project_sales_scenario_cashflow(
+    *,
+    as_of: date,
+    current_cash_krw: Decimal,
+    horizon_end: date,
+    base_cash_events: Sequence[CashEvent],
+    proposed_collection: CashEvent,
+) -> SalesScenarioCashflow:
+    """BASE 와 SCENARIO 를 각각 투영하고 둘을 나란히 보존한다.
+
+    horizon 밖 회수일은 **날짜를 옮기지 않는다.** 현재 Finance 계약에 동적 horizon
+    연장 규칙이 없으므로 7/14/30일 같은 연장을 지어내지 않고, horizon 밖이라는
+    사실을 `collection_within_horizon=False` 로 드러낸다. 그때 SCENARIO 는 BASE 와
+    같아지며 `depends_on_projected_inflow` 는 False 다 — 판정은 Rule 계층 몫이다.
+    """
+    if proposed_collection.event_type != PROPOSED_SALES_COLLECTION_EVENT_TYPE:
+        raise ValueError("proposed_collection must be a PROPOSED_SALES_COLLECTION event")
+    if proposed_collection.direction != "INFLOW":
+        raise ValueError("proposed_collection must be an INFLOW event")
+    if any(
+        event.event_type == PROPOSED_SALES_COLLECTION_EVENT_TYPE for event in base_cash_events
+    ):
+        raise ValueError("base_cash_events must not contain a proposed sales collection")
+
+    # 두 투영은 서로 다른 리스트를 본다 — 공유 리스트를 제자리에서 바꾸지 않는다.
+    base_events = list(base_cash_events)
+    scenario_events = [*base_cash_events, proposed_collection]
+
+    base_projection = project_cashflow(
+        as_of=as_of,
+        current_cash_krw=current_cash_krw,
+        horizon_end=horizon_end,
+        cash_events=base_events,
+    )
+    scenario_projection = project_cashflow(
+        as_of=as_of,
+        current_cash_krw=current_cash_krw,
+        horizon_end=horizon_end,
+        cash_events=scenario_events,
+    )
+
+    return SalesScenarioCashflow(
+        base_projection=base_projection,
+        scenario_projection=scenario_projection,
+        base_projected_cash_min=base_projection.projected_cash_min,
+        base_projected_cash_min_date=base_projection.projected_cash_min_date,
+        scenario_projected_cash_min=scenario_projection.projected_cash_min,
+        scenario_projected_cash_min_date=scenario_projection.projected_cash_min_date,
+        collection_date=proposed_collection.event_date,
+        collection_amount_krw=proposed_collection.amount_krw,
+        proposed_collection_ref_id=proposed_collection.ref_id,
+        collection_within_horizon=as_of < proposed_collection.event_date <= horizon_end,
+        depends_on_projected_inflow=(
+            scenario_projection.projected_cash_min > base_projection.projected_cash_min
         ),
     )

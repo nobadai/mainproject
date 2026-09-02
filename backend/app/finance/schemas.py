@@ -45,6 +45,10 @@ CashEventType = Literal[
     "DEBT_SERVICE",
     "EXTRA_PURCHASE",
     "H1_PURCHASE_PAYMENT",
+    # ★ 제안된 판매 회수. **확정 채권이 아니다** — 이름 자체가 확실성을 나른다.
+    #   BASE(확정 Event)에 섞이면 승인되지 않은 돈이 확정 현금처럼 읽히므로,
+    #   SCENARIO 투영에서만 쓰고 실제 채권으로 적재하지 않는다.
+    "PROPOSED_SALES_COLLECTION",
 ]
 
 

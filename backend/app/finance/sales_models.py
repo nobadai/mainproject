@@ -14,12 +14,13 @@
   `schemas.py` 에 외부 계약을 따로 세운다.
 """
 
+from datetime import date
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.finance.schemas import _reject_boolean
+from app.finance.schemas import CashflowProjection, _reject_boolean
 from app.orchestrator.contracts_core import EvidenceGrade
 
 # ---------------------------------------------------------------------------
@@ -114,3 +115,25 @@ class SalesCostBasis(BaseModel):
     already_included_components: tuple[str, ...] = ()
     included_components: tuple[str, ...] = ()
     source_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class SalesScenarioCashflow(BaseModel):
+    """BASE 와 SCENARIO 를 나란히 보존하는 판매 시나리오 현금흐름 결과."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_projection: CashflowProjection
+    scenario_projection: CashflowProjection
+    base_projected_cash_min: Decimal
+    base_projected_cash_min_date: date
+    scenario_projected_cash_min: Decimal
+    scenario_projected_cash_min_date: date
+    collection_date: date
+    collection_amount_krw: Decimal = Field(ge=0)
+    proposed_collection_ref_id: str = Field(min_length=1)
+    #: 회수일이 현재 Finance projection horizon 안인가. 밖이면 SCENARIO 는 BASE 와 같다.
+    collection_within_horizon: bool
+    #: SCENARIO 최저 현금이 **제안 유입 덕분에** 올라갔는가.
+    #: 정의: scenario_projected_cash_min > base_projected_cash_min.
+    #: True 면 그 현금 여력은 아직 확정되지 않은 돈에 기대고 있다는 뜻이다.
+    depends_on_projected_inflow: bool
