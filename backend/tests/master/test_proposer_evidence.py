@@ -294,12 +294,21 @@ def test_응답_변환이_매입_근거를_버리지_않는다():
 def test_응답_변환이_부서별로_정렬하지_않는다():
     """정렬하면 그것이 우선순위로 읽힌다.
 
-    매입 호출이 조언자 경계보다 **뒤**라 순서가 그대로면 매입 근거가 뒤에 온다.
+    🔴 **처음 쓴 이 테스트는 정렬 변이를 못 잡았다.** `finance` 와 `purchase` 만
+      비교했는데 알파벳 순이 마침 호출 순서와 같아 정렬해도 통과했다.
+      (응답 변환 층을 얕게 잠근 것이 이번 주 세 번째다 — 근거·조정안·여기.)
+
+    ★ **부르는 순서를 통째로 고정한다.** 매입 호출은 조언자 *경계* 뒤이면서
+      조언자 *판정* 앞이라, 알파벳으로 정렬하면 매입이 맨 뒤로 밀린다.
     """
     run = _run(
         finance=_advisor((_ev("cap", 1.0, "finance"),)),
         purchase=_purchaser((_ev("qty", 7120.0),)),
     )
 
-    순서 = [e.agent for e in _evidences_out(run)]
-    assert 순서.index("finance") < 순서.index("purchase"), "부른 차례가 아니다"
+    순서 = [(e.agent, e.mode) for e in _evidences_out(run)]
+    assert 순서 == [
+        ("finance", "PRE_PURCHASE"),
+        ("purchase", "GENERATE_SCENARIOS"),
+        ("finance", "SCENARIO_VALIDATION"),
+    ], "부른 차례가 아니다 - 정렬했거나 버렸다"
