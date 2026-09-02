@@ -1,6 +1,7 @@
 "use client";
 
 import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
+import { EvidencePanel } from "@/components/EvidencePanel";
 import { Panel, SourceBadges } from "@/components/Badges";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
 import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
@@ -126,6 +127,8 @@ export function ProcurementResult({
         *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
       */}
       <AdvisorVerdicts verdicts={run.verdicts} />
+      {/* 판정 바로 아래에 둔다 — "왜 그 판정인가" 를 물은 다음에 보는 것이다 */}
+      <EvidencePanel evidences={run.evidences} />
 
       <Panel
         tone="attn"

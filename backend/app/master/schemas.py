@@ -71,6 +71,50 @@ class ProcurementRunRequest(BaseModel):
     )
 
 
+class EvidenceOut(BaseModel):
+    """부서가 낸 근거 하나. **숫자가 어디서 왔는가.**
+
+    🔴 **전에는 검증까지만 가고 화면에서 끊겼다** (2026-09-02 배선).
+      `flow` 가 모아 검증 Tool 에 넘기는데 응답 스키마에 자리가 없었다. 그래서 화면은
+      *"재무 상한 2,000만원"* 은 보여주면서 그 숫자의 출처는 못 보여줬다.
+      `verdicts[].reasoning` 은 부서가 쓴 **설명 문장**이지 출처가 아니다.
+
+    ★ **마스터는 고르지도 요약하지도 않는다.** 부서가 낸 것을 그대로 옮긴다 (§3.2.2).
+      고르는 것이 곧 판단이고, 그 순간 화면의 근거가 마스터의 의견이 된다.
+
+    ★ `evidence_grade` 가 값만큼 중요하다. 같은 숫자라도 `OFFICIAL` 과 `ASSUMED` 는
+      판단의 무게가 다르다 - `input_sources` 를 등급까지 실은 것과 같은 이유다.
+    """
+
+    agent: AgentName
+    #: 어느 호출에서 나온 근거인가. `PRE_PURCHASE` 는 경계("상한이 왜 그 값인가"),
+    #: `SCENARIO_VALIDATION` 은 판정("이 안이 왜 ok 인가") - 답하는 질문이 다르다.
+    mode: str
+
+    #: 무엇에 대한 근거인가 (예: `finance_cap_amount_krw`).
+    claim: str
+    #: 어디서 온 값인가 - inventory · sales · finance · documents · tool_calc · persona.
+    source: str
+    #: 🔴 **`float | str` 이다.** 계약(`contracts_core.Evidence.value`)은 `float` 인데
+    #: 실제로는 문자열이 오는 근거가 있다 - 재무 `policy_version_used` 가
+    #: `"v1.3-PROVISIONAL"` 을 싣는다 (`finance/capabilities/procurement.py:175`).
+    #: `Evidence` 가 dataclass 라 런타임 검증이 없어 지금까지 아무도 몰랐고,
+    #: 근거를 화면으로 내보내려다 처음 드러났다 (2026-09-02).
+    #:
+    #: **마스터는 값을 고치지도 버리지도 않는다.** 고치면 남의 값을 덮어쓰는 것이고
+    #: (§3.2.2), 버리면 근거를 고르는 것이다. 원본을 나르고 **어긋난 사실은
+    #: `concerns` 로 드러낸다** - 재호출로 안 고쳐지는 남의 계약 문제라 정확히
+    #: concerns 의 자리다.
+    value: float | str
+    unit: str
+    #: OFFICIAL · VENDOR · SIM_FIXED · ASSUMED · INVALID_FOR_HARD.
+    evidence_grade: str
+    #: SIM_FIXED 는 여기에 승인 회차가 적힌다.
+    evidence_detail: str = ""
+    #: 원본 레코드 참조. **비어 있을 수 없다** - 봉투가 막는다 (§1.2-5).
+    ref_ids: list[str] = []
+
+
 class StepOut(BaseModel):
     """실행 계획의 한 걸음. **시각을 담지 않는다** — 재현성 비교 대상이다."""
 
@@ -130,6 +174,15 @@ class ProcurementRunResponse(BaseModel):
     )
     constraints: dict[str, dict[str, Any]] = {}
     verdicts: dict[str, dict[str, Any]] = {}
+
+    evidences: list[EvidenceOut] = Field(
+        default=[],
+        description=(
+            "부서가 낸 근거 - 시나리오 숫자의 출처. **마스터가 고르거나 요약하지 않는다.** "
+            "`mode` 로 경계 근거(PRE_PURCHASE)와 판정 근거(SCENARIO_VALIDATION)를 가른다. "
+            "비어 있으면 '근거가 완비됐다' 가 아니라 **부서가 근거를 안 냈다**는 뜻이다."
+        ),
+    )
 
     blocked_by: list[AgentName] = []
     findings: list[str] = Field(

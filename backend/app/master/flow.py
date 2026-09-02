@@ -101,6 +101,22 @@ class VerifierPort(Protocol):
 
 
 @dataclass(frozen=True)
+class SourcedEvidence:
+    """부서가 낸 근거 하나 + **누가 어느 모드에서 냈는가.**
+
+    ★ `Evidence` 자체에는 부서도 모드도 없다. 봉투가 그 문맥을 들고 있기 때문이다 -
+      회신이 누구 것인지는 `AgentReply.agent` 가 안다. 응답으로 나갈 때는 그 문맥이
+      사라지므로 여기서 붙여 준다.
+
+    ★ **값은 손대지 않는다.** `evidence` 는 부서가 낸 것 그대로다.
+    """
+
+    agent: AgentName
+    mode: str
+    evidence: Evidence
+
+
+@dataclass(frozen=True)
 class ProcurementOutcome:
     """Flow 한 번의 결과. **무엇을 못 했는지도 담는다.**"""
 
@@ -112,6 +128,20 @@ class ProcurementOutcome:
     judgment: Mapping[str, Any] = field(default_factory=dict)
     constraints: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
     verdicts: Mapping[AgentName, Mapping[str, Any]] = field(default_factory=dict)
+
+    #: 🔴 **부서가 낸 근거.** 값이 어디서 왔는지를 사람이 볼 수 있게 나른다 (2026-09-02).
+    #:
+    #: 전에는 `_collect_constraints` 가 모아 **검증에만** 넘기고 응답에서는 끊겼다.
+    #: 화면은 "재무 상한 2,000만원" 은 보여주는데 그 숫자의 출처는 못 보여줬다 -
+    #: 사유 문장(`verdicts[].reasoning`)은 사람이 쓴 설명이지 출처가 아니다.
+    #:
+    #: ★ **마스터는 고르지도 요약하지도 않는다.** `constraints`·`verdicts` 를 나르는
+    #:   것과 같다 - 고르는 것이 곧 판단이다 (§3.2.2).
+    #:
+    #: ★ **모드를 함께 담는다.** 경계 근거(`PRE_PURCHASE`)와 판정 근거
+    #:   (`SCENARIO_VALIDATION`)는 답하는 질문이 다르다 - 앞은 "상한이 왜 그 값인가",
+    #:   뒤는 "이 안이 왜 ok 인가". 한 칸에 섞으면 화면이 둘을 구별하지 못한다.
+    evidences: tuple[SourcedEvidence, ...] = ()
 
     blocked_by: tuple[AgentName, ...] = ()
     findings: tuple[str, ...] = ()
@@ -159,6 +189,9 @@ class ProcurementFlow:
         self.max_purchase_attempts = max_purchase_attempts
         self.item = item
         self.constraint_evidences: dict[AgentName, tuple[Evidence, ...]] = {}
+        #: 화면까지 나갈 근거. `constraint_evidences` 와 **원본이 같다** -
+        #: 검증이 본 것과 화면이 보는 것이 갈리면 "검증은 통과했는데 근거는 다른 값" 이 된다.
+        self.sourced_evidences: list[SourcedEvidence] = []
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
@@ -270,6 +303,7 @@ class ProcurementFlow:
         """
         out: dict[AgentName, Mapping[str, Any]] = {}
         self.constraint_evidences = {}
+        self.sourced_evidences = []
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE")
             if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
@@ -287,6 +321,11 @@ class ProcurementFlow:
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
                 self.constraint_evidences[agent] = reply.evidences
+                # ★ 검증에 넘기는 것과 **같은 객체**를 화면 쪽에도 담는다.
+                #   두 곳에서 각자 모으면 갈린다.
+                self.sourced_evidences.extend(
+                    SourcedEvidence(agent, "PRE_PURCHASE", ev) for ev in reply.evidences
+                )
         return out
 
     def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
@@ -398,6 +437,15 @@ class ProcurementFlow:
                 #   — 물류의 기준일 불일치 fail-closed 가 그런 모양이다 (2026-08-31 회신).
                 "reasoning": reply.reasoning,
             }
+            # 🔴 **판정 근거도 버리지 않는다** (2026-09-02). 전에는 여기서 payload 만
+            #   꺼내고 evidences 를 통째로 흘렸다 - 부서가 보내 준 것을 마스터가
+            #   버리는 모양이고, `replans` 에서 고친 것과 같은 종류다.
+            #
+            #   경계 근거와 답하는 질문이 다르다 - 저쪽은 "상한이 왜 그 값인가",
+            #   여기는 "이 안이 왜 ok 인가". 그래서 모드를 붙여 구별한다.
+            self.sourced_evidences.extend(
+                SourcedEvidence(agent, "SCENARIO_VALIDATION", ev) for ev in reply.evidences
+            )
         return out
 
     def _verify(
@@ -521,6 +569,10 @@ class ProcurementFlow:
             reason=reason,
             plan=plan,
             verification_skipped=self.verifier is None,
+            # ★ **모든 종료 코드에서 싣는다.** 안이 안 나온 날(E2·E3)이야말로
+            #   "무슨 근거로 그렇게 됐나" 가 필요하다 - 성공한 날만 근거를 보여주면
+            #   정작 설명이 필요한 날에 화면이 침묵한다.
+            evidences=tuple(self.sourced_evidences),
             **kw,
         )
 
