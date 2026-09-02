@@ -20,8 +20,8 @@ from decimal import Decimal
 import pytest
 
 from app.finance import adapter
-from app.finance.agent import FinanceAgentController
-from app.finance.tool_registry import _scenario_schedule
+from app.finance.application.orchestration import FinanceAgentController
+from app.finance.capabilities.scenario import _scenario_schedule
 from app.master.envelope import AgentRequest, ExecutionContext
 from tests.finance.test_finance_adapter import _AdapterPlanner, _Context
 
@@ -51,7 +51,7 @@ def _wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
-    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
 
 
@@ -339,7 +339,7 @@ def test_missing_reconstruction_input_fails_closed(missing, expected_key):
     scenario = _non_split()
     scenario.pop(missing)
 
-    from app.finance.repository import FinanceDataNotReady
+    from app.finance.db import FinanceDataNotReady
 
     with pytest.raises(FinanceDataNotReady) as raised:
         _schedule(scenario)
@@ -348,7 +348,7 @@ def test_missing_reconstruction_input_fails_closed(missing, expected_key):
 
 def test_multi_split_without_payment_schedule_fails_closed():
     """분할이 여러 건인데 지급 일정이 없으면 **금액 배분은 매입이 정할 일**이다."""
-    from app.finance.repository import FinanceDataNotReady
+    from app.finance.db import FinanceDataNotReady
 
     scenario = _non_split(
         split_plan=[
@@ -364,7 +364,7 @@ def test_multi_split_without_payment_schedule_fails_closed():
 def test_reconstruction_outside_horizon_fails_closed():
     scenario = _non_split(split_plan=[{"seq": 1, "date": "2026-01-28", "qty_kg": 100}])
 
-    from app.finance.repository import FinanceDataNotReady
+    from app.finance.db import FinanceDataNotReady
 
     with pytest.raises(FinanceDataNotReady) as raised:
         _schedule(scenario)

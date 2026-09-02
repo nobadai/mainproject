@@ -4,8 +4,9 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.finance.agent import _indexed_verdict_evidence, _scenario_schedule
-from app.finance.infrastructure.finance_state_repository import _build_finance_policy
+from app.finance.capabilities.scenario import _scenario_schedule
+from app.finance.db import _build_finance_policy
+from app.finance.execution import _indexed_verdict_evidence
 from app.finance.rules import classify_base_stress
 from app.finance.schemas import CashEvent
 from app.finance.tools import build_payroll_schedule, derive_critical_payment_dates
