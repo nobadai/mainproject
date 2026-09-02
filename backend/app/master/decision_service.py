@@ -24,7 +24,7 @@ from app.master.decision import (
     scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
-from app.orchestrator.run_repository import get_run, get_run_by_request_id
+from app.master.run_repository import get_run, get_run_by_request_id
 
 
 def _end_code_of(response_payload: dict[str, Any]) -> str:
