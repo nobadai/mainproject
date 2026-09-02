@@ -40,6 +40,7 @@ from app.finance.application.harness import (
     guard_replan,
     source_owned_arguments,
     validate_finance_scenario_output,
+    validate_planner_tool_arguments,
 )
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import (
@@ -272,7 +273,24 @@ def execute_loop(
         #   승인이 아니다. 순서를 뒤집으면 부를 수도 없는 Tool 의 인자를 먼저 찾다가
         #   실패하고, 실행 순서 오류가 `RUNTIME_NOT_READY` 로 잘못 보고된다.
         try:
-            harness.authorize(action.tool_name, action.arguments, state, capability_state)
+            arguments = validate_planner_tool_arguments(action)
+        except FinancePlannerContractViolation as exc:
+            _replan(
+                state,
+                harness=harness,
+                capability_state=capability_state,
+                detail={
+                    "rejected_action": _short_reason(str(exc)),
+                    "unresolved": list(capability_state.missing),
+                },
+                denied_reason="PLANNER_CONTRACT_VIOLATION",
+                requested_tool=action.tool_name,
+                denied_tool=action.tool_name,
+            )
+            continue
+
+        try:
+            harness.authorize(action.tool_name, arguments, state, capability_state)
         except FinanceToolDenied as denied:
             if denied.reason in _TERMINAL_DENIALS:
                 _stop(
@@ -301,6 +319,7 @@ def execute_loop(
             )
             continue
 
+        action = replace(action, arguments=arguments)
         arguments = source_owned_arguments(action, state)
         observation = harness.execute(action.tool_name, arguments, state, capability_state)
         state.tool_order.append(action.tool_name)

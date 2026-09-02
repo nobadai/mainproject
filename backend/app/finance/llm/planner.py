@@ -72,8 +72,10 @@ _PLANNER_SYSTEM_PROMPT = (
     "You plan Finance capability calls. Call exactly one of the tools you were given "
     "this step; they are the only ones that can legally run right now. "
     "Never calculate or invent financial numbers or policy values - use the "
-    "observations only. Call the finalize tool only when missing_capabilities is "
-    "empty; while it is non-empty you must call a capability tool instead."
+    "observations only. Never copy business payload fields into tool arguments. "
+    "For a tool with no declared parameters, send an empty arguments object. "
+    "Call the finalize tool only when missing_capabilities is empty; while it is "
+    "non-empty you must call a capability tool instead."
 )
 
 
@@ -96,7 +98,6 @@ def _planner_prompt(
     ]
     prompt: dict[str, Any] = {
         "mode": request.mode,
-        "business_payload": dict(request.payload),
         "executable_tools": sorted(allowed_tools),
         "observations": observations,
         "missing_capabilities": missing_capabilities,

@@ -25,6 +25,27 @@ Finance Rules (verdict)
 Finance Finalizer (설명) → 설명 guard
 ```
 
+### Finance availability fallback
+
+```text
+Finance Planner
+Gemini gemini-3.5-flash-lite
+  ↓ availability failure (HTTP 429/5xx, timeout, network, API key missing)
+Ollama llama3.2:3b
+
+Finance Finalizer
+Gemini gemini-3.5-flash-lite
+  ↓ availability failure
+Ollama gemma3:4b
+```
+
+로컬 fallback을 쓰려면 다음 모델이 필요하다.
+
+```bash
+ollama pull llama3.2:3b
+ollama pull gemma3:4b
+```
+
 책임은 다음과 같이 갈린다.
 
 ```text
