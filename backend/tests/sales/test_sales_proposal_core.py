@@ -158,4 +158,7 @@ def test_all_sales_business_modes_are_represented_without_implicit_policy(
 
     assert all(scenario.business_mode == business_mode for scenario in reply.scenarios)
     if business_mode == "CONTRACT_FULFILLMENT":
-        assert all(scenario.quantity_kg == Decimal(5000) for scenario in reply.scenarios)
+        # 원계약은 공격안에 남기고, 공급 부족 보수안은 별도 조정안으로 표현한다.
+        assert reply.scenarios[2].quantity_kg == Decimal(5000)
+        assert reply.scenarios[0].quantity_kg == Decimal(3000)
+        assert reply.scenarios[0].sales_decision_axes == ["QUANTITY"]
