@@ -234,11 +234,27 @@ def test_broken_base_is_not_masked_by_the_proposed_inflow():
     assert "BASE_MINIMUM_CASH_VIOLATED" in result["reason_codes"]
 
 
-def test_safe_base_that_still_depends_on_the_proposal_is_review_required():
+def test_dependence_on_the_proposed_inflow_is_a_fact_not_a_verdict():
+    """🔴 예전에는 이 경우를 REVIEW_REQUIRED 로 낮췄다 — 근거가 없었다.
+
+    저장소의 권위 있는 규칙(설계서 v2.2.2 §9 BASE/STRESS)은 *매입 STRESS 가 기준을
+    밑돌 때* conditional 이라는 규칙이지, *유입에 기대는가* 를 다루지 않는다. 근거
+    없이 판정을 낮추면 그것이 곧 합의되지 않은 정책이 된다. 사실은 reason code 로
+    남기고, 판정은 최소 현금 정책만 움직인다.
+    """
     result = _cash(base=Decimal(6_000_000), scenario=Decimal(9_000_000), depends=True)
 
-    assert result["verdict"] == "REVIEW_REQUIRED"
-    assert result["reason_codes"] == ("SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW",)
+    assert result["verdict"] == "PASS"
+    assert "SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW" in result["reason_codes"]
+
+
+def test_the_dependence_fact_is_not_lost_when_the_verdict_passes():
+    depends = _cash(base=Decimal(6_000_000), scenario=Decimal(9_000_000), depends=True)
+    independent = _cash(base=Decimal(9_000_000), scenario=Decimal(9_000_000), depends=False)
+
+    assert "SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW" in depends["reason_codes"]
+    assert "SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW" not in independent["reason_codes"]
+    assert depends["verdict"] == independent["verdict"] == "PASS"
 
 
 def test_scenario_below_minimum_fails():

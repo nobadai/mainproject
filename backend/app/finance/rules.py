@@ -401,14 +401,26 @@ def evaluate_sales_cashflow_rule(
 ) -> SalesRuleResult:
     """BASE 와 SCENARIO 를 각각 최소 현금 정책에 견준다.
 
-    ★ 제안 유입은 확정 현금이 아니다. SCENARIO 최저 현금이 그 유입 덕분에만 기준을
-      넘는다면(`depends_on_projected_inflow`) 통과가 아니라 REVIEW_REQUIRED 다 —
-      아직 들어오지 않은 돈으로 안전하다고 말하지 않는다. 이것은 새 숫자 정책이
-      아니라 BASE/SCENARIO 분리에서 곧바로 따라오는 구조 규칙이다.
+    ★ `depends_on_projected_inflow` 는 **사실이지 판정이 아니다.**
+
+      🔴 예전에는 이 값이 True 면 PASS 를 REVIEW_REQUIRED 로 낮췄다. 뜻은 그럴듯하지만
+        그렇게 정한 **권위 있는 근거가 없다.** 저장소의 BASE/STRESS 규칙
+        (설계서 v2.2.2 §9 · 검증설계 §Case B)은 *매입 STRESS 오버레이가 기준을 밑돌 때*
+        conditional 이라는 규칙이고, *유입에 기대는가* 를 다루지 않는다. 근거 없이
+        판정을 낮추면 그것이 곧 아무도 합의하지 않은 정책이 된다.
+
+      그래서 지금은 reason code 로만 남긴다 — 사실은 잃지 않고, 종합 판정은 권위 있는
+      규칙(최소 현금 정책)만 움직인다. 판매 현금흐름 판정 기준이 정해지면 그때 이
+      자리에 근거와 함께 넣는다.
+
+    ★ BASE/SCENARIO 구분 자체는 그대로다. 제안 유입은 여전히 확정 현금이 아니고,
+      BASE 가 기준을 밑돌면 SCENARIO 가 안전해도 FAIL 이다.
     """
     reasons: list[str] = []
     if not collection_within_horizon:
         reasons.append("SALES_COLLECTION_OUTSIDE_HORIZON")
+    if depends_on_projected_inflow:
+        reasons.append("SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW")
 
     if base_projected_cash_min < minimum_cash_balance_krw:
         return _sales_rule(
@@ -421,12 +433,6 @@ def evaluate_sales_cashflow_rule(
             "FIN-SALES-CASHFLOW",
             verdict="FAIL",
             reason_codes=(*reasons, "SCENARIO_MINIMUM_CASH_VIOLATED"),
-        )
-    if depends_on_projected_inflow:
-        return _sales_rule(
-            "FIN-SALES-CASHFLOW",
-            verdict="REVIEW_REQUIRED",
-            reason_codes=(*reasons, "SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW"),
         )
     return _sales_rule(
         "FIN-SALES-CASHFLOW",
