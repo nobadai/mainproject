@@ -216,6 +216,7 @@ def test_every_capability_has_exactly_one_owning_tool():
         "payment_pressure": "analyze_payment_pressure",
         "scenario_evaluation": "evaluate_purchase_scenario",
         "amount_adjustment_validation": "validate_amount_adjustment",
+        "sales_scenario_evaluation": "evaluate_sales_scenario",
     }
     assert len(set(CAPABILITY_OWNER.values())) == len(CAPABILITY_OWNER)
 

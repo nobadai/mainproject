@@ -36,6 +36,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.finance.capabilities import procurement as _pre
+from app.finance.capabilities import sales as _sales
 from app.finance.capabilities import scenario as _scn
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import _assert_dependency_contract_is_complete
@@ -60,6 +61,7 @@ CAPABILITY_OWNER: dict[str, str] = {
     "payment_pressure": "analyze_payment_pressure",
     "scenario_evaluation": "evaluate_purchase_scenario",
     "amount_adjustment_validation": "validate_amount_adjustment",
+    "sales_scenario_evaluation": "evaluate_sales_scenario",
 }
 
 #: Tool 이 실행되기 전에 **이미 채워져 있어야 하는** capability.
@@ -73,12 +75,14 @@ TOOL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "analyze_payment_pressure": frozenset({"cashflow_projection"}),
     "evaluate_purchase_scenario": frozenset(),
     "validate_amount_adjustment": frozenset({"scenario_evaluation"}),
+    "evaluate_sales_scenario": frozenset(),
 }
 
 PRE_REQUIRED_CAPABILITIES = frozenset(
     {"finance_position", "cashflow_projection", "finance_cap", "payment_pressure"}
 )
 SCENARIO_REQUIRED_CAPABILITIES = frozenset({"scenario_evaluation"})
+SALES_REQUIRED_CAPABILITIES = frozenset({"sales_scenario_evaluation"})
 
 #: 호환 재노출 — capability 하나가 한 Tool 만 갖는다.
 CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
@@ -87,11 +91,11 @@ CAPABILITY_TOOLS: dict[str, frozenset[str]] = {
 
 
 def required_capabilities(mode: str) -> frozenset[str]:
-    return (
-        PRE_REQUIRED_CAPABILITIES
-        if mode == "PRE_PURCHASE"
-        else SCENARIO_REQUIRED_CAPABILITIES
-    )
+    if mode == "PRE_PURCHASE":
+        return PRE_REQUIRED_CAPABILITIES
+    if mode == "SALES_VALIDATION":
+        return SALES_REQUIRED_CAPABILITIES
+    return SCENARIO_REQUIRED_CAPABILITIES
 
 
 def completed_capabilities(executed_tools: Iterable[str]) -> set[str]:
@@ -170,6 +174,9 @@ _ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "analyze_payment_pressure": _NoArguments,
     "evaluate_purchase_scenario": _NoArguments,
     "validate_amount_adjustment": _AmountAdjustmentArguments,
+    # ★ 판매 검증도 인자를 받지 않는다. 수량·단가·원가·결제일수·여신은 전부
+    #   request payload 와 Finance 정책이 소유한다 — Planner 가 숫자를 실을 자리가 없다.
+    "evaluate_sales_scenario": _NoArguments,
 }
 
 _EXECUTION_ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -203,6 +210,12 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "validate_amount_adjustment": (
         "Validate a source-owned amount alternative against the deterministic "
         "scenario Finance Cap."
+    ),
+    "evaluate_sales_scenario": (
+        "Evaluate the submitted sales proposal deterministically: recalculated sales "
+        "amount, cost basis, contribution margin, payment-term boundary, scenario "
+        "cash-flow and the Finance verdict. Reads the proposal from the request "
+        "payload. Takes no arguments."
     ),
 }
 
@@ -273,6 +286,10 @@ PRE_PURCHASE_TOOLS = frozenset(
 )
 SCENARIO_VALIDATION_TOOLS = frozenset({"evaluate_purchase_scenario", "validate_amount_adjustment"})
 
+#: ★ 판매 Tool 은 매입 두 mode 어디에서도 보이지 않는다. 반대도 같다 — 매입 Tool 이
+#:   SALES_VALIDATION 에서 실행 가능해지면 매입 판정 공식이 판매 회신에 실린다.
+SALES_VALIDATION_TOOLS = frozenset({"evaluate_sales_scenario"})
+
 #: Tool 이름 → 구현. **이름은 Planner 계약이라 바뀌지 않는다.**
 _CAPABILITIES = {
     "assess_finance_position": _pre.assess_finance_position,
@@ -281,6 +298,7 @@ _CAPABILITIES = {
     "analyze_payment_pressure": _pre.analyze_payment_pressure,
     "evaluate_purchase_scenario": _scn.evaluate_purchase_scenario,
     "validate_amount_adjustment": _scn.validate_amount_adjustment,
+    "evaluate_sales_scenario": _sales.run_sales_validation,
 }
 
 class FinanceToolRegistry:
@@ -290,7 +308,11 @@ class FinanceToolRegistry:
         self.data_port = data_port
 
     def names_for(self, mode: FinanceMode) -> frozenset[str]:
-        return PRE_PURCHASE_TOOLS if mode == "PRE_PURCHASE" else SCENARIO_VALIDATION_TOOLS
+        if mode == "PRE_PURCHASE":
+            return PRE_PURCHASE_TOOLS
+        if mode == "SALES_VALIDATION":
+            return SALES_VALIDATION_TOOLS
+        return SCENARIO_VALIDATION_TOOLS
 
     def execute(
         self, name: str, arguments: dict[str, Any], state: FinanceAgentState

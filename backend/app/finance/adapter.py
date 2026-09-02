@@ -32,6 +32,11 @@ from pydantic import ValidationError
 
 from app.finance import messages
 from app.finance.application.orchestration import FinanceAgentController
+from app.finance.capabilities.sales import (
+    SALES_VERDICT_TO_BUSINESS_STATUS,
+    build_sales_validation_payload,
+    map_sales_finance_verdict,
+)
 from app.finance.db import FinanceDataNotReady, get_current_finance_runtime_context
 from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
@@ -86,6 +91,8 @@ def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         return _status_query(request)
     if request.mode == "SCENARIO_VALIDATION":
         return _controller_scenario_validation(request)
+    if request.mode == "SALES_VALIDATION":
+        return _controller_sales_validation(request)
     return _not_implemented(request)
 
 
@@ -173,6 +180,21 @@ def _controller_scenario_validation(request: AgentRequest) -> tuple[AgentReply, 
     proposal = _purchase_proposal(request.payload)
     if proposal.meta.as_of != request.context.as_of:
         return _invalid_scenario_as_of(request, run_id, proposal.meta.as_of)
+    context, not_ready = _controller_boundary(request)
+    if not_ready is not None:
+        return not_ready
+    assert context is not None
+    return _controller_run(request, context)
+
+
+def _controller_sales_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """판매 제안 재무 검증. **매입 시나리오 검증 경로를 재사용하지 않는다.**
+
+    ★ 매입처럼 `PurchaseProposal` 로 payload 를 미리 검증하지 않는다. 판매 payload 의
+      필수 항목이 무엇인지는 재무 판매 Capability 가 소유하고, 빠진 것은 `ERROR` 가
+      아니라 `INPUT_INCOMPLETE`(→ `skipped`) 로 나간다 — 제안이 미완성인 것은 재무
+      고장이 아니다.
+    """
     context, not_ready = _controller_boundary(request)
     if not_ready is not None:
         return not_ready
@@ -663,7 +685,12 @@ def _not_ready(
     return _recorded(request, reply, _meta(request, run_id, tools))
 
 
-_CONTROLLER_MODES = ("PRE_PURCHASE", "SCENARIO_VALIDATION")
+#: 실행이력에 남기는 mode. **닫힌 허용목록이다** — 모르는 mode 는 여기 없다.
+#:
+#: ★ `SALES_VALIDATION` 은 `finance_agent_runs_v22.mode` CHECK 에
+#:   SALES_VALIDATION 이 들어간 뒤에 열었다 (신규 DDL + 기존 DB 마이그레이션).
+#:   제약보다 먼저 열면 판정은 되는데 **저장이 전부 실패한다.**
+_CONTROLLER_MODES = ("PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION")
 
 
 def _recorded(
@@ -696,3 +723,20 @@ def _recorded(
         )
         return reply, replace(metadata, observations=(*metadata.observations, failure))
     return reply, metadata
+
+
+# ---------------------------------------------------------------------------
+# 판매 재무 판정 봉투 매핑 — **재무가 소유한다**
+#
+# 표와 함수는 `capabilities/sales.py` 에 한 벌만 둔다 (Orchestration 도 같은 표를
+# 읽어야 하는데, Adapter → Orchestration 방향 import 라 반대는 순환이 된다).
+# 여기서 다시 내보내는 이유는 **밖에서 보는 주소를 재무 Adapter 로 고정**하기
+# 위해서다 — 마스터가 이 매핑을 자기 코드에서 다시 하지 않는다.
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    "SALES_VERDICT_TO_BUSINESS_STATUS",
+    "build_sales_validation_payload",
+    "finance_port",
+    "map_sales_finance_verdict",
+]

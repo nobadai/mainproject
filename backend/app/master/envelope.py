@@ -55,13 +55,23 @@ AgentName = Literal["finance", "inventory", "purchase"]
 Mode = Literal[
     "PRE_PURCHASE",
     "SCENARIO_VALIDATION",
+    "SALES_VALIDATION",
     "GENERATE_SCENARIOS",
     "STATUS_QUERY",
 ]
 """호출 목적 (정의서 §3.2.3).
 
 같은 에이전트가 서로 다른 업무를 수행하므로 **무엇을 요청하는지**를 실어 보낸다.
-`PRE_PURCHASE` 는 *경계*를, `SCENARIO_VALIDATION` 은 *판정*을 돌려준다."""
+`PRE_PURCHASE` 는 *경계*를, `SCENARIO_VALIDATION` 은 *판정*을 돌려준다.
+
+★ `SALES_VALIDATION` 은 **판매 제안 재무 검증**이다 (2026-09-02 재무 회신).
+  매입 `SCENARIO_VALIDATION` 과 나눠 둔 이유는 책임이 다르기 때문이다 — 합치면
+  `(agent, mode, call_seq)` 로 매입 검증과 판매 검증을 구분할 수 없고, 그러면
+  payload 모양을 보고 무엇인지 **추측하는** 코드가 생긴다.
+
+  🔴 여기 있는 것은 **어휘뿐이다.** 영업 제안이 여기까지 오는 라우팅
+  (`FINANCIAL_VALIDATION` → 재무)은 아직 없다 — `AgentName` 에 sales 가 없고
+  capability 어휘도 없다. 그것은 별도 작업이다."""
 
 Trigger = Literal["ML_COMPLETE", "USER_REQUEST"]
 
@@ -116,7 +126,10 @@ VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 LLM_STATUSES: frozenset[str] = frozenset(get_args(LLMStatus))
 
 _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
-    "finance": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
+    # 판매 검증은 재무만 받는다 — 재고에 열면 없는 책임을 만든다.
+    "finance": frozenset(
+        {"PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION", "STATUS_QUERY"}
+    ),
     "inventory": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
     "purchase": frozenset({"GENERATE_SCENARIOS", "STATUS_QUERY"}),
 }

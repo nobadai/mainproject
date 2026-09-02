@@ -72,6 +72,7 @@ finance_cap                   → calculate_purchase_finance_cap
 payment_pressure              → analyze_payment_pressure
 scenario_evaluation           → evaluate_purchase_scenario
 amount_adjustment_validation  → validate_amount_adjustment
+sales_scenario_evaluation     → evaluate_sales_scenario
 ```
 
 선행 조건은 **Tool 이름 순서가 아니라 capability 조건**이다.
@@ -170,6 +171,172 @@ failure_kind = INTERNAL         우리 쪽 사정이다. 잠시 후 다시   (ER
 ★ 숫자 비소유는 그대로다. 설명은 여전히 **고정 문장을 고르는** 구조이고
 `_validate_ready_reasoning` 이 숫자를 막는다. 금액은 payload 와 Evidence 가 든다.
 
+## 판매 재무 검증 (SALES_VALIDATION)
+
+### Finance mode
+
+```text
+PRE_PURCHASE         매입 경계
+SCENARIO_VALIDATION  매입 시나리오 판정
+SALES_VALIDATION     판매 시나리오 판정   ← 매입과 다른 책임이다
+```
+
+매입 `SCENARIO_VALIDATION` 을 판매에 재사용하지 않는다. 같은 mode 를 나눠 쓰면
+`(agent, mode, call_seq)` 로 둘을 구분할 수 없고, 그러면 payload 모양을 보고 무엇인지
+**추측하는** Adapter 가 생긴다.
+
+### 흐름
+
+```text
+Sales → Master → Finance(SALES_VALIDATION) → Master → Sales Refeed
+```
+
+마스터가 순서를 소유한다. 영업과 재무는 서로를 직접 부르지 않는다
+(`tests/finance/test_finance_sales_orchestration_boundary.py` 가 고정한다).
+
+### 결정론 책임
+
+```text
+매출액 재계산       수량 × 단가 (Decimal, 반올림 없음)
+보고 금액 대조      정확한 항등. 허용오차 없음
+판매 원가 기준      권위 있는 재고원가 + 아직 포함 안 된 검증된 직접비
+공헌이익 · 이익률   매출액 - 원가기준 / 매출액
+회수일              기준일 + 결제일수 (기준점의 의미는 호출자 소유)
+판매 시나리오 현금흐름  BASE + 제안 회수 유입
+채권 사실           거래처 채권 · 연체 잔액 집계
+종합 Finance verdict   하위 규칙 결과만으로 결정
+```
+
+계산은 `tools.py`, 판정은 `rules.py`, 조립은 `capabilities/sales.py` 가 소유한다.
+Finance 내부 전용 모델은 `sales_models.py` 에 산다 — `schemas.py` 는 밖에서 읽는
+계약이라 내부 계산 구조를 거기 두지 않는다.
+
+### BASE 와 SCENARIO
+
+```text
+BASE      = 확정된 Finance 현금 Event 만
+SCENARIO  = BASE + PROPOSED_SALES_COLLECTION
+```
+
+제안 회수는 **확정 채권이 아니다.** BASE 로 승격되지 않고 실제 AR 로 적재되지도
+않는다. BASE 가 최소 현금을 밑돌면 SCENARIO 가 안전해도 `FAIL` 이다 — 아직 안 들어온
+돈이 이미 난 구멍을 가리지 못한다.
+
+`depends_on_projected_inflow` 는 **사실이지 판정이 아니다.** SCENARIO 최저 현금이 그
+유입 덕분에 올라갔다는 것은 reason code 로 남고, 종합 판정은 권위 있는 규칙(최소 현금
+정책)만 움직인다. 판정을 낮출 근거가 저장소에 없기 때문이다 — 설계서 v2.2.2 §9 의
+BASE/STRESS 규칙은 *매입 STRESS 오버레이가 기준을 밑돌 때* conditional 이라는 규칙이지
+*유입에 기대는가* 를 다루지 않는다. 판매 현금흐름 판정 기준이 정해지면 그때 근거와
+함께 넣는다.
+
+horizon 밖 회수일은 **날짜를 옮기지 않는다.** 동적 horizon 연장 규칙이 계약에 없어서
+연장을 지어내지 않고 `collection_within_horizon=False` 로 드러낸다.
+
+### 판정 어휘
+
+```text
+Finance 도메인    PASS · REVIEW_REQUIRED · FAIL
+공통 봉투         ok · conditional · reject · skipped
+```
+
+매핑은 **Finance Adapter 가 소유한다** (`SALES_VERDICT_TO_BUSINESS_STATUS`).
+마스터가 재무 판정을 다시 해석하지 않는다. 옮긴 뒤에도 원본은
+`payload.finance_verdict` 에 남는다 — `conditional` 만 남으면 마진 경고인지 현금
+의존인지 되돌릴 수 없다.
+
+### 못 한 일을 성공처럼 내지 않는다
+
+```text
+INPUT_INCOMPLETE   제안에 사실이 빠졌다 (영업/마스터 쪽). runtime_status 는 READY
+RUNTIME_NOT_READY  Finance 정책/데이터가 없다 (재무 쪽)
+ERROR              저장소 실행 실패
+```
+
+셋 다 `business_status = skipped` 이고 `finance_verdict = None` 이다.
+**없는 정책은 FAIL 이 아니다.** 없는 값을 0 으로 바꾸지도 않는다.
+
+### LLM 책임
+
+```text
+한다      Tool 선택 · 확정된 결과 설명
+안 한다   업무 숫자 생성 · verdict 결정 · 없는 정책 채우기
+```
+
+판매 Tool 은 **인자를 받지 않는다**(`_NoArguments`, `extra="forbid"`). 수량·단가·
+원가·결제일수·여신은 전부 request payload 와 Finance 정책이 소유한다 — Planner 가
+숫자를 실을 자리 자체가 없다.
+
+### SuggestedAdjustment
+
+```text
+Finance 조정 축   amount 하나뿐
+```
+
+`payment_terms` · `price` · `delivery` · `quantity` · `channel_mix` 축을 만들지 않는다.
+재무가 내는 결제일수 상한은 **payload 필드**다.
+
+```text
+payload.max_finance_allowed_payment_terms_days   상한(경계)이지 조정이 아니다
+payload.max_finance_allowed_amount_krw
+```
+
+### 실행 경로 상태
+
+재무 쪽은 열려 있다.
+
+```text
+finance_port(mode=SALES_VALIDATION)
+  → _controller_sales_validation
+  → FinanceAgentController
+  → Harness (SALES_VALIDATION_TOOLS)
+  → evaluate_sales_scenario
+  → AgentReply + ExecutionMetadata
+  → finance_agent_runs_v22 저장
+```
+
+저장 제약도 함께 열었다 — 신규 DDL 과 기존 DB 마이그레이션
+(`database/finance_agent_runs_v22_sales_validation.sql`) 둘 다.
+**순서가 중요하다.** 제약보다 Controller 를 먼저 열면 판정은 되는데 저장이 전부
+실패한다.
+
+아직 막힌 것은 재무 밖이다.
+
+```text
+Master capability 라우팅  FINANCIAL_VALIDATION → (finance, SALES_VALIDATION)
+                        → 마스터에 capability 어휘 자체가 없다
+Sales AgentName         AgentName 에 sales 가 없다 (부를 대상이 아니다)
+Feedback Envelope       최종 필드명 미확정 (팀 결정)
+```
+
+공통 `Mode` 에는 `SALES_VALIDATION` 어휘만 넣었다 — 그게 없으면 유효한 재무
+`AgentRequest` 자체를 만들 수 없다. 어휘와 라우팅은 다른 일이다.
+
+권위 있는 값이 없어 **오늘은 항상 닫히는** 정책들:
+
+```text
+finance_minimum_margin_rate
+finance_warning_margin_rate
+max_finance_allowed_payment_terms_days
+partner_credit_limit_krw
+sales_collection_risk_policy
+sales_installment_payment_policy
+```
+
+저장소 어디에도 이 값들이 없다 — `FinancePolicy` 의 닫힌 키에도,
+`agent_policy_config` 의 finance domain 에도, 어떤 테이블에도 없다. 그래서 판정은
+`RUNTIME_NOT_READY` 로 닫히고 없는 정책 이름이 `missing_data` 에 실린다.
+**Purchase 의 `margin_defense_floor_rate` 를 판매 마진 임계값으로 쓰지 않는다.**
+
+원가 기준 쪽도 아직 저장소 조회로 잇지 않았다.
+
+```text
+proposed sale 의 정본 재고원가   어느 Lot 을 쓸지는 Inventory 의 배분 결정이다
+직접 물류비                      deliveries 는 실제 실행 데이터라 제안 시점에 없다
+```
+
+그래서 `sales_cost_basis` 는 **주입받는다**. 권위 있는 재고원가가 없으면 마진을
+계산하지 않고, 0 으로 대체하지 않는다. 조건부 물량이 섞이면 확정 재고원가를 제안
+전체의 원가처럼 쓰지 않는다.
 ## 패키지 구조
 
 책임이 어디 사는지가 파일 위치로 보이게 정리했다. 전체 디렉터리 이동보다 **책임 분리와
