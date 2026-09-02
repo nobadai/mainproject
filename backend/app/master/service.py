@@ -21,6 +21,7 @@ from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
 from app.master.runner import MasterRunner
 from app.master.schemas import (
+    AdjustmentOut,
     BlockedAgentOut,
     BurnInOut,
     DailyClosingOut,
@@ -221,6 +222,7 @@ def _to_response(
         judgment=dict(outcome.judgment),
         constraints={k: dict(v) for k, v in outcome.constraints.items()},
         evidences=_evidences_out(outcome),
+        adjustments=_adjustments_out(outcome),
         verdicts={k: dict(v) for k, v in outcome.verdicts.items()},
         blocked_by=list(outcome.blocked_by),
         blocked_failures=_blocked_out(outcome),
@@ -308,6 +310,25 @@ def _evidences_out(outcome: ProcurementOutcome) -> list[EvidenceOut]:
             ref_ids=list(item.evidence.ref_ids),
         )
         for item in outcome.evidences
+    ]
+
+
+def _adjustments_out(outcome: ProcurementOutcome) -> list[AdjustmentOut]:
+    """조정안을 표준형 그대로 옮긴다. **고르지도 정렬하지도 않는다.**
+
+    ★ 순서는 부서가 보낸 차례다. 정렬하면 그것이 우선순위로 읽힌다 -
+      근거(`_evidences_out`)와 같은 이유다 (§3.2.2).
+    """
+    return [
+        AdjustmentOut(
+            dept=a.dept,
+            axis=a.axis,
+            target_value=a.target_value,
+            unit=a.unit,
+            reason=a.reason,
+            ref_ids=list(a.ref_ids),
+        )
+        for a in outcome.adjustments
     ]
 
 

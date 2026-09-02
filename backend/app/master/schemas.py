@@ -147,6 +147,31 @@ class StepOut(BaseModel):
     replans: int = 0
 
 
+class AdjustmentOut(BaseModel):
+    """부서가 낸 조정안 하나 - **봉투 표준형 그대로.**
+
+    🔴 전에는 개수만 나갔다 (`verdicts[].suggested_adjustments`). 되먹임 계약 §3.2 의
+      `constraint` 가 바로 이 객체 배열이라, 개수만 남기면 되먹임을 붙이는 순간
+      나를 값이 없다 (2026-09-02).
+
+    ★ **부서 원시형이 아니다.** 같은 사실이 `verdicts[].payload` 에도 부서 모양으로
+      남아 있는데, 그쪽을 파서 쓰면 마스터가 남의 스키마를 해석하는 것이 된다
+      (§3.2.2). 표준형은 그 해석을 안 하려고 있는 자리다.
+    """
+
+    dept: str = Field(description="AgentName 이 아니라 Dept 다. 어휘가 다르다 (_AGENT_DEPT).")
+    axis: str = Field(description="quantity · timing · channel_mix · amount. 봉투가 강제한다.")
+    target_value: float
+    unit: str = Field(
+        description=(
+            "kg · krw · d. **닫힌 집합이 아니다** - 봉투가 검사하지 않는다. "
+            "물류 타이밍 축은 봉투 as_of 로부터의 일수를 'd' 로 싣는다."
+        )
+    )
+    reason: str = Field(description="부서가 쓴 문장 그대로. 마스터가 요약하지 않는다.")
+    ref_ids: list[str]
+
+
 class BlockedAgentOut(BaseModel):
     """기여하지 못한 부서 하나 — **이름 옆에 사유가 있다.**
 
@@ -207,6 +232,16 @@ class ProcurementRunResponse(BaseModel):
             "부서가 낸 근거 - 시나리오 숫자의 출처. **마스터가 고르거나 요약하지 않는다.** "
             "`mode` 로 경계 근거(PRE_PURCHASE)와 판정 근거(SCENARIO_VALIDATION)를 가른다. "
             "비어 있으면 '근거가 완비됐다' 가 아니라 **부서가 근거를 안 냈다**는 뜻이다."
+        ),
+    )
+
+    adjustments: list[AdjustmentOut] = Field(
+        default=[],
+        description=(
+            "부서가 낸 조정안 - **개수가 아니라 내용이다.** 마스터가 고르거나 정렬하지 "
+            "않고 온 차례 그대로 싣는다. 되먹임 계약 §3.2 의 `constraint` 가 이 배열이다. "
+            "비어 있는 것이 곧 실패는 아니다 - 물류는 `reject` 안의 조정을 승격하지 "
+            "않으므로(#121) 0건이 정답인 날이 있다."
         ),
     )
 

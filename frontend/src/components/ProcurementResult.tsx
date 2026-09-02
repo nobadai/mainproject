@@ -1,5 +1,6 @@
 "use client";
 
+import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
 import { EvidencePanel } from "@/components/EvidencePanel";
 import { Panel, SourceBadges } from "@/components/Badges";
@@ -157,6 +158,11 @@ export function ProcurementResult({
         *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
       */}
       <AdvisorVerdicts verdicts={run.verdicts} />
+      {/*
+        판정 다음에 온다 — "이 안이 통과인가" 다음이 "그럼 무엇을 고치나" 다.
+        0건이면 아무것도 안 그린다 (reject 안의 조정은 승격되지 않으므로 0이 정답일 수 있다).
+      */}
+      <AdjustmentPanel adjustments={run.adjustments} />
       {/* 판정 바로 아래에 둔다 — "왜 그 판정인가" 를 물은 다음에 보는 것이다 */}
       <EvidencePanel evidences={run.evidences} />
 

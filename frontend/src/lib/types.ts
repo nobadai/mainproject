@@ -158,8 +158,6 @@ export interface ProcurementRunResponse {
       runtime_status: string;
       /** 부서가 보낸 것 그대로. 모양이 부서마다 다르다 — 타입을 좁히지 않는다. */
       payload?: Record<string, unknown>;
-      /** 개수만 온다. 내용은 부서 payload 안에 있다. */
-      suggested_adjustments?: number;
       needs_followup?: boolean;
       /** 판정을 못 냈을 때 **유일하게 이유를 담는 칸**. */
       reasoning?: string | null;
@@ -209,6 +207,31 @@ export interface ProcurementRunResponse {
     /** `RUNTIME_NOT_READY` 일 때 **여기가 답이다** — 무엇이 없어서 못 냈는지. */
     missing_data: string[];
     detail: string;
+  }[];
+  /**
+   * 부서가 낸 조정안 — **개수가 아니라 내용이다.**
+   *
+   * 🔴 전에는 `verdicts[].suggested_adjustments` 에 **개수만** 왔고, 서버 문구는
+   *   *"실행 이력에서 보십시오"* 라고 안내했는데 **실행 이력에 그 칸이 없었다**
+   *   (2026-09-02). 가서 봐도 없는 곳을 알려 주고 있었다.
+   *
+   * ★ **`dept` 는 `verdicts` 의 키(`AgentName`)와 다른 어휘다.** 지금 글자가 같을
+   *   뿐이라, 화면이 둘을 이어 붙이지 않는다 — 부서 이름을 그대로 받아 쓴다.
+   *
+   * ★ **비어 있는 것이 곧 실패는 아니다.** 물류는 `reject` 안의 조정을 승격하지
+   *   않으므로(#121 · 2026-09-02 확정) 0건이 정답인 날이 있다.
+   */
+  adjustments: {
+    /** `Dept` — finance · inventory · sales. */
+    dept: string;
+    /** `_DEPT_AXES` 가 강제한다 — quantity · timing · channel_mix · amount. */
+    axis: string;
+    target_value: number;
+    /** 🔴 닫힌 집합이 아니다. 물류 타이밍 축은 봉투 `as_of` 로부터의 일수를 `d` 로 싣는다. */
+    unit: string;
+    /** 부서가 쓴 문장 그대로. 마스터가 요약하지 않는다. */
+    reason: string;
+    ref_ids: string[];
   }[];
   findings: string[];
   concerns: string[];

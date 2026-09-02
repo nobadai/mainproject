@@ -38,6 +38,7 @@ class _Response:
         self.skipped_checks = kw.get("skipped_checks", [])
         self.blocked_by = kw.get("blocked_by", ())
         self.blocked_failures = kw.get("blocked_failures", ())
+        self.adjustments = kw.get("adjustments", ())
         self.missing_adapters = kw.get("missing_adapters", ())
         self.single_option = kw.get("single_option", False)
         self.verification_skipped = kw.get("verification_skipped", False)
@@ -54,7 +55,6 @@ _AS_OF_MISMATCH = {
     "business_status": "skipped",
     "runtime_status": "ERROR",
     "payload": {"validation_errors": ["proposal.meta.as_of"]},
-    "suggested_adjustments": 0,
     "needs_followup": False,
     "reasoning": "Purchase proposal as-of does not match the Master request.",
 }

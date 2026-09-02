@@ -36,7 +36,7 @@ from app.master.envelope import AgentName, AgentReply, Mode
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
-from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode
+from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode, SuggestedAdjustment
 
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
@@ -180,6 +180,21 @@ class ProcurementOutcome:
     #:   뒤는 "이 안이 왜 ok 인가". 한 칸에 섞으면 화면이 둘을 구별하지 못한다.
     evidences: tuple[SourcedEvidence, ...] = ()
 
+    #: 🔴 **부서가 낸 조정안 - 봉투 표준형 그대로** (2026-09-02).
+    #:
+    #: 전에는 `_validate` 가 `len()` 만 담고 객체를 버렸다. 사실이 아주 사라진 것은
+    #: 아니어서(부서 원시형이 `verdicts[].payload` 에 남는다) 더 위험했다 -
+    #: **"값이 있으니 되겠지" 로 넘어가면 마스터가 남의 payload 를 파게 된다.**
+    #: 표준형은 그 해석을 안 하려고 만든 자리인데 그 자리를 비워 두고 있었다.
+    #:
+    #: ★ **감싸지 않는다.** `SuggestedAdjustment` 는 `dept` 를 스스로 들고 있어
+    #:   `SourcedEvidence` 같은 껍데기가 필요 없다. 되먹임 계약 §3.2 의 `constraint`
+    #:   가 부서를 가로지르는 평평한 배열이라 모양도 1:1 로 맞는다.
+    #:
+    #: ★ **개수를 따로 담지 않는다.** 세는 쪽이 센다 - 같은 사실의 주인을 둘로
+    #:   만들지 않는다 (`evidences` 와 같다).
+    adjustments: tuple[SuggestedAdjustment, ...] = ()
+
     blocked_by: tuple[AgentName, ...] = ()
 
     #: 🔴 **막은 부서가 왜 막았는가** (2026-09-02). `blocked_by` 는 이름만 든다.
@@ -237,6 +252,8 @@ class ProcurementFlow:
         #: 화면까지 나갈 근거. `constraint_evidences` 와 **원본이 같다** -
         #: 검증이 본 것과 화면이 보는 것이 갈리면 "검증은 통과했는데 근거는 다른 값" 이 된다.
         self.sourced_evidences: list[SourcedEvidence] = []
+        #: 부서가 낸 조정안. **마스터는 고르지도 정렬하지도 않는다** - 온 차례 그대로.
+        self.suggested_adjustments: list[SuggestedAdjustment] = []
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
@@ -355,6 +372,7 @@ class ProcurementFlow:
         out: dict[AgentName, Mapping[str, Any]] = {}
         self.constraint_evidences = {}
         self.sourced_evidences = []
+        self.suggested_adjustments = []
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE")
             if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
@@ -377,6 +395,9 @@ class ProcurementFlow:
                 self.sourced_evidences.extend(
                     SourcedEvidence(agent, "PRE_PURCHASE", ev) for ev in reply.evidences
                 )
+                # 경계 단계에서 조정안이 오는 일은 지금 없지만, **온다면 버리지 않는다.**
+                # 부서가 무엇을 보내도 되는지는 봉투가 정하지 마스터가 정하지 않는다.
+                self.suggested_adjustments.extend(reply.suggested_adjustments)
         return out
 
     def _purchase_input(self, constraints: Mapping[AgentName, Mapping[str, Any]]) -> dict[str, Any]:
@@ -481,7 +502,6 @@ class ProcurementFlow:
                 "business_status": reply.business_status,
                 "runtime_status": reply.runtime_status,
                 "payload": dict(reply.payload),
-                "suggested_adjustments": len(reply.suggested_adjustments),
                 "needs_followup": reply.needs_followup,
                 # 🔴 **판정을 못 냈을 때 유일하게 이유를 아는 칸이다.** 이것이 없으면
                 #   화면이 *"물류가 못 답했다"* 까지만 말하고 왜인지는 아무 데도 안 남는다
@@ -497,6 +517,10 @@ class ProcurementFlow:
             self.sourced_evidences.extend(
                 SourcedEvidence(agent, "SCENARIO_VALIDATION", ev) for ev in reply.evidences
             )
+            # 🔴 **개수가 아니라 객체를 담는다** (2026-09-02). 되먹임 계약 §3.2 의
+            #   `constraint` 가 바로 이 배열이라, 개수만 남기면 되먹임을 붙이는 순간
+            #   나를 값이 없다. `replans` · `evidences` 와 같은 종류의 누락이었다.
+            self.suggested_adjustments.extend(reply.suggested_adjustments)
         return out
 
     def _verify(
@@ -649,6 +673,9 @@ class ProcurementFlow:
             #   "무슨 근거로 그렇게 됐나" 가 필요하다 - 성공한 날만 근거를 보여주면
             #   정작 설명이 필요한 날에 화면이 침묵한다.
             evidences=tuple(self.sourced_evidences),
+            # ★ 근거와 같은 이유로 **모든 종료 코드에서 싣는다.** 안이 안 나온 날
+            #   ("무엇을 고쳐야 하나")이야말로 조정안이 필요한 날이다.
+            adjustments=tuple(self.suggested_adjustments),
             **kw,
         )
 

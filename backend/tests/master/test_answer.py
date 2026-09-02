@@ -141,6 +141,7 @@ def procurement(**kw) -> SimpleNamespace:
         "skipped_checks": [],
         "blocked_by": [],
         "blocked_failures": [],
+        "adjustments": [],
         "missing_adapters": [],
         "verification_skipped": False,
         "single_option": False,
