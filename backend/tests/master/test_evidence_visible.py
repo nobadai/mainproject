@@ -149,8 +149,14 @@ def test_순서를_바꾸지_않는다():
     )
     outcome = flow.run()
 
-    got = [e.evidence.claim for e in outcome.evidences if e.agent == "finance"]
+    # ★ **응답 변환까지 보고 확인한다.** outcome 만 보면 `_evidences_out` 이
+    #   정렬해도 안 걸린다 - 변이 테스트에서 실제로 안 걸렸다 (2026-09-02).
+    #   순서를 바꾸는 자리는 마지막 변환이다.
+    got = [e.claim for e in _evidences_out(outcome) if e.agent == "finance"]
     assert got == list(order), f"순서가 바뀌었다: {got}"
+
+    raw = [e.evidence.claim for e in outcome.evidences if e.agent == "finance"]
+    assert raw == list(order), f"수집 단계에서 이미 바뀌었다: {raw}"
 
 
 def test_값을_손대지_않는다():
