@@ -466,7 +466,7 @@ def test_deferred_arrival_date_check_is_disclosed_when_mid_grade_is_used(proposa
     """
     assert load_constraints()["pending"]["inbound_lead_days"] is None
     for scenario in proposals[SPREAD_WIDE]["scenarios"]:
-        assert any("as_of 기준 근사" in risk for risk in scenario["risks"])
+        assert any("매입일 기준 근사" in risk for risk in scenario["risks"])
         assert not any("일정상 충족" in risk for risk in scenario["risks"])
 
 

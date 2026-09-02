@@ -12,6 +12,7 @@ from typing import Any
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
+from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
 from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
 from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
 from app.purchase_agent.quotes import observed_date, observed_spec
@@ -454,7 +455,9 @@ def _rationale(
             ),
             "ref_id": f"SO-{as_of}",
             "evidence_grade": "ASSUMED",
-            "evidence_detail": "확정주문에서 파생한 일평균 — 수요 파생값이라 SIM_FIXED 자격 없음",
+            "evidence_detail": (
+                "확정주문에서 파생한 일평균 — 관측값이 아니라 계산값이라 실측 등급이 아니다"
+            ),
         },
         {
             "source": "재고",
@@ -624,7 +627,13 @@ def _mix_choice_rationale(decision: dict, quote_ref: str) -> list[dict]:
     return [
         {
             "source": "시세관측",
-            "claim": f"등급 조합 {mix.candidate_id} 선택 — {mix.reason}",
+            # 🔴 ``candidate_id`` 는 계약 값이라 그대로 두고, **사람이 읽는 설명**을 함께
+            #   적는다. 화면·Critic 이 이 문장을 읽는데 ``MID_CAPPED`` 만으로는 안 읽힌다.
+            #   설명은 ``_CANDIDATE_LABELS`` 단일 소스에서 가져온다 (규칙 7).
+            "claim": (
+                f"등급 조합 {candidate_summary(mix.candidate_id)}"
+                f"({mix.candidate_id}) 선택 — {mix.reason}"
+            ),
             "ref_id": quote_ref,
             "evidence_grade": "ASSUMED",
             "evidence_detail": (
@@ -653,7 +662,7 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
     mid_kg = sum(line["qty_kg"] for line in sourcing if line["grade"] == decision["mid_grade"])
     notes = [
         (
-            f"{decision['mid_grade']} {mid_kg:,}kg은 소진 한계 {decision['shelf_days']:.0f}일 내 "
+            f"{decision['mid_grade']}품 {mid_kg:,}kg은 소진 한계 {decision['shelf_days']:.0f}일 내 "
             f"납품분 {decision['near_qty_kg']:,}kg 안에서만 소화 가능"
         )
     ]
@@ -661,15 +670,16 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
         # **"충족"이라고 쓰지 않는다.** 창의 시작점이 입고일인데 N4가 NULL이라 as_of로
         # 근사했다 — 근사 위에서 낸 결론을 검증된 것처럼 적으면 규칙 3이 형식만 남는다.
         notes.append(
-            "위 매칭은 as_of 기준 근사다 — 실제 창은 입고일(as_of + N4)부터인데 "
-            "inbound_lead_days(N4)가 미확정이라 계산하지 않았다 (규칙 3). "
-            "N4가 확정되면 소화 가능량이 달라질 수 있다"
+            "위 매칭은 매입일 기준 근사다 — 실제 창은 입고일(매입일 + 입고 소요일)부터인데 "
+            "물류 입고 소요일이 미확정이라 계산하지 않았다. 미확정을 0으로 채우면 "
+            "'오늘 사서 오늘 도착'이 사실이 되므로 채우지 않는다. "
+            "입고 소요일이 확정되면 소화 가능량이 달라질 수 있다"
         )
     if decision.get("shelf_ratio_fallback"):
         # 물류가 medium_grade_factor 를 보내지 않아 설계 기본값으로 계산했다. 값이 같아
         # 결과가 안 바뀌더라도 **무엇을 근거로 셈했는지**는 달라진다 (규칙 3).
         notes.append(
-            "중품 소진 계수는 물류 medium_grade_factor를 받지 못해 설계 기본값으로 "
+            "중품 소진 계수는 물류 중품 보관계수를 받지 못해 설계 기본값으로 "
             "계산했다 — 물류 값이 다르면 중품 비중이 달라진다"
         )
     notes.extend(_mix_choice_risks(decision))
@@ -755,8 +765,8 @@ def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: 
                 "evidence_grade": "SIM_FIXED",
                 "evidence_detail": (
                     "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — "
-                    "그 트레이드오프 판단은 LLM 몫이라 회차 비율은 균등으로 두었다 "
-                    f"(상세설계 §4-④). {_ratio_outcome(rounds)}"
+                    "그 절충 판단은 아직 사람·모델 몫이라 회차 비율은 균등으로 두었다. "
+                    f"{_ratio_outcome(rounds)}"
                 ),
             }
         )
