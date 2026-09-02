@@ -183,6 +183,16 @@ class AdjustmentOut(BaseModel):
     reason: str = Field(description="부서가 쓴 문장 그대로. 마스터가 요약하지 않는다.")
     ref_ids: list[str]
 
+    #: 🆕 이 조정이 어느 시나리오 대상인가 (2026-09-02 · 계약 v0.2 §5.1).
+    #: 전에는 `reason` 문장 안에만 있어 기계가 읽으려면 부서 문장을 파싱해야 했다.
+    #: 합쳐진 건이면 합쳐진 라벨을 다 담는다 - 건수를 안 늘리면서 사실이 드러난다.
+    scenario_labels: list[str] = []
+
+    #: 🆕 어느 회차의 상한인가 (2026-09-02 · 계약 v0.2 §5.2).
+    #: **번호가 아니라 날짜다** - 물류에 회차 번호가 없어 번호 칸을 두면 없는 값을
+    #: 만들게 된다. 회차 개념이 없는 축(재무 amount)은 `null` 이다.
+    split_date: date | None = None
+
 
 class BlockedAgentOut(BaseModel):
     """기여하지 못한 부서 하나 — **이름 옆에 사유가 있다.**

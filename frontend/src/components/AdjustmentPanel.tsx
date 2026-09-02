@@ -59,6 +59,24 @@ export function AdjustmentPanel({
                 {vocab(UNIT_LABEL, a.unit) ?? a.unit}
               </span>
             </span>
+            {/*
+              🆕 **어느 안 · 어느 회차인가** (2026-09-02). 전에는 `reason` 문장
+                 안에만 있어서, 사용자가 기본 안을 골랐는데 사유가 보수 안만
+                 가리키면 자기가 고른 안과 무관한 제안으로 읽혔다.
+
+              ★ **비어 있으면 아무것도 안 그린다.** 부서가 안 채운 것이지
+                "해당 없음" 이 아니다 — 화면이 그 둘을 지어내 가르지 않는다.
+            */}
+            {a.scenario_labels.length > 0 && (
+              <span className="ml-1.5 text-[11.5px] text-faint">
+                {a.scenario_labels.join("·")}안
+              </span>
+            )}
+            {a.split_date && (
+              <span className="ml-1 font-mono text-[11px] text-faint">
+                {a.split_date} 회차
+              </span>
+            )}
             {/* 부서가 쓴 문장 그대로 — 화면이 다시 쓰지 않는다 */}
             <span className="ml-1.5 text-muted">{a.reason}</span>
           </li>

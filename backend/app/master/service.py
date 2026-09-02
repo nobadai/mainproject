@@ -327,6 +327,9 @@ def _adjustments_out(outcome: ProcurementOutcome) -> list[AdjustmentOut]:
             unit=a.unit,
             reason=a.reason,
             ref_ids=list(a.ref_ids),
+            # 부서가 안 채우면 빈 목록·None 그대로 나간다 - 없는 것을 만들지 않는다
+            scenario_labels=list(a.scenario_labels),
+            split_date=a.split_date,
         )
         for a in outcome.adjustments
     ]
