@@ -51,7 +51,14 @@ class _Response:
 def _adjustment(dept: str, axis: str, value: float, unit: str, reason: str = "사유"):
     """`AdjustmentOut` 최소 대역. 실제 필드 이름을 그대로 쓴다."""
     return SimpleNamespace(
-        dept=dept, axis=axis, target_value=value, unit=unit, reason=reason, ref_ids=["REF-1"]
+        dept=dept,
+        axis=axis,
+        target_value=value,
+        unit=unit,
+        reason=reason,
+        ref_ids=["REF-1"],
+        scenario_labels=[],
+        split_date=None,
     )
 
 

@@ -272,8 +272,31 @@ def _adjustment_lines(response: Any, agent: str) -> list[str]:
         return []
     label = agent_label(agent)
     out = [f"{label} 가 조정을 제안했습니다 ({len(mine)}건)"]
-    out += [f"{label} 조정: {a.axis} {a.target_value:g}{a.unit} — {a.reason}" for a in mine]
+    out += [
+        f"{label} 조정: {a.axis} {a.target_value:g}{a.unit}{_scope(a)} — {a.reason}" for a in mine
+    ]
     return out
+
+
+def _scope(adjustment: Any) -> str:
+    """이 조정이 **어느 안 · 어느 회차** 것인가.
+
+    🔴 **`reason` 에서 라벨·회차를 빼기로 하면서 생긴 자리다** (물류 제안 · 계약 v0.2
+      §5.4). 같은 사실을 문장과 칸 두 곳에 두면 한쪽만 고쳐지는 날이 오므로 칸으로
+      옮기는데, **읽는 쪽을 같이 안 고치면 그 사실이 발화문에서 사라진다.**
+
+      화면(`AdjustmentPanel`)은 칸을 읽게 이미 고쳤는데 여기가 남아 있었다 —
+      값을 옮기면서 읽는 자리를 빠뜨리는 것이 이번 주에 네 번 고친 그 모양이다.
+
+    ★ **부서가 안 채우면 아무것도 안 붙인다.** 빈 목록은 *"안 채운 것"* 이지
+      *"해당 없음"* 이 아니라, 마스터가 그 둘을 지어내 가르지 않는다.
+    """
+    parts: list[str] = []
+    if adjustment.scenario_labels:
+        parts.append(f"{'·'.join(adjustment.scenario_labels)}안")
+    if adjustment.split_date:
+        parts.append(f"{adjustment.split_date} 회차")
+    return f" ({' · '.join(parts)})" if parts else ""
 
 
 def facts_from_procurement(response: Any) -> AnswerFacts:

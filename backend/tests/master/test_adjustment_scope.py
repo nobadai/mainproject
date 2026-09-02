@@ -26,6 +26,7 @@ from dataclasses import fields
 from datetime import date
 from typing import Any
 
+from app.master.answer import facts_from_procurement
 from app.master.budget import CallBudget
 from app.master.envelope import (
     AgentReply,
@@ -214,6 +215,43 @@ def test_안_채운_것을_마스터가_채우지_않는다():
 
     assert 실린_것.scenario_labels == []
     assert 실린_것.split_date is None
+
+
+# ── ④ 읽는 자리도 같이 고쳤다 ───────────────────────────────────────────────
+
+
+def test_발화문이_어느_안_어느_회차인지_말한다():
+    """🔴 **`reason` 에서 라벨·회차를 빼기로 하면서 생긴 자리다** (계약 v0.2 §5.4).
+
+    같은 사실을 문장과 칸 두 곳에 두면 한쪽만 고쳐지는 날이 오므로 칸으로 옮기는데,
+    **읽는 쪽을 같이 안 고치면 그 사실이 발화문에서 사라진다** — 값을 옮기면서
+    읽는 자리를 빠뜨리는 것이 이번 주에 네 번 고친 그 모양이다.
+    """
+    run = _run(
+        (
+            _adj(
+                scenario_labels=("보수", "기본"),
+                split_date=date(2026, 1, 3),
+                reason="수량을 7120kg 로 조정 제안",
+            ),
+        )
+    )
+    facts = facts_from_procurement(_to_response(_ctx(), run))
+    적힌_것 = " ".join(facts.gaps)
+
+    assert "보수·기본안" in 적힌_것
+    assert "2026-01-03 회차" in 적힌_것
+    assert "수량을 7120kg 로 조정 제안" in 적힌_것, "부서 문장은 그대로 남는다"
+
+
+def test_안_채운_조정은_범위를_안_붙인다():
+    """빈 목록은 *"안 채운 것"* 이지 *"해당 없음"* 이 아니다 — 지어내 가르지 않는다."""
+    run = _run((_adj(reason="수량 조정"),))
+    facts = facts_from_procurement(_to_response(_ctx(), run))
+    적힌_것 = " ".join(facts.gaps)
+
+    assert "수량 조정" in 적힌_것
+    assert "안 ·" not in 적힌_것 and "회차" not in 적힌_것
 
 
 def test_회차_개념이_없는_축은_None_이다():
