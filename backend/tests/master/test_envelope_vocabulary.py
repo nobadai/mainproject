@@ -141,21 +141,23 @@ def test_어휘_지적이_봉투_검증_전체에_실린다():
 # ── ③ 왜 이 지적이 필요한가 ─────────────────────────────────────────────────
 
 
-def test_어휘_밖의_값은_통과로_읽힌다는_것을_고정한다():
-    """🔴 **이것이 fail-open 이다.**
+def test_어휘_밖의_값은_이제_통과로_읽히지_않는다():
+    """🟢 **fail-open 을 닫았다** (#173 · 2026-09-02).
 
-    마스터는 `business_status != "reject"` 로 통과를 정한다
-    (`flow._acceptable`). 어휘 밖의 값은 *"reject 가 아니다"* 라 **그냥 통과한다.**
+    전에는 `business_status != "reject"` 로 통과를 정해서, 어휘 밖의 값이
+    *"reject 가 아니다"* 라 **그냥 통과했다.** 이 테스트가 그 사실을 고정하며
+    *"바꿀지는 별건"* 이라고 적어 뒀고, **그 별건이 #173 이다.**
 
-    ★ 이 테스트는 지금 동작을 **고치는 것이 아니라 드러낸다.** 통과 판정을
-      fail-closed 로 바꿀지는 별건이고, 그때까지 이 지적이 유일한 경보다.
+    ★ 지적(`E-VOCAB-BUSINESS-STATUS`)은 그대로 남는다. **드러내는 것과 막는 것은
+      다른 일**이고 둘 다 필요하다 — 지적은 실행 계획으로 가고 통과 판정은
+      `_acceptable` 이 정한다. 전에는 앞의 것만 있었다.
     """
     from app.master.flow import ProcurementFlow
 
     acceptable = ProcurementFlow._acceptable
     verdicts = {"inventory": {"business_status": "FAIL"}}
 
-    assert acceptable(None, (), verdicts, ()) is True, "지금은 통과한다"
+    assert acceptable(None, (), verdicts, ()) is False, "모르는 값을 통과로 읽지 않는다"
     assert "E-VOCAB-BUSINESS-STATUS" in _codes(check_vocabulary(reply(business_status="FAIL")))
 
 
