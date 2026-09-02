@@ -140,11 +140,19 @@ def test_no_capability_is_registered_twice():
     from app.finance.application.harness import (
         _CAPABILITIES,
         PRE_PURCHASE_TOOLS,
+        SALES_VALIDATION_TOOLS,
         SCENARIO_VALIDATION_TOOLS,
     )
 
+    # ★ 세 mode 의 Tool 집합은 서로 겹치지 않는다 — 매입 판정 공식이 판매 회신에
+    #   실리거나 그 반대가 되는 길을 막는다.
     assert not PRE_PURCHASE_TOOLS & SCENARIO_VALIDATION_TOOLS
-    assert set(_CAPABILITIES) == PRE_PURCHASE_TOOLS | SCENARIO_VALIDATION_TOOLS
+    assert not PRE_PURCHASE_TOOLS & SALES_VALIDATION_TOOLS
+    assert not SCENARIO_VALIDATION_TOOLS & SALES_VALIDATION_TOOLS
+    assert (
+        set(_CAPABILITIES)
+        == PRE_PURCHASE_TOOLS | SCENARIO_VALIDATION_TOOLS | SALES_VALIDATION_TOOLS
+    )
     # 한 구현이 두 이름에 걸리면 어느 쪽을 고쳤는지 알 수 없다.
     assert len({id(fn) for fn in _CAPABILITIES.values()}) == len(_CAPABILITIES)
 

@@ -31,7 +31,16 @@ from app.purchase_agent.schemas import PurchaseProposal
 # ---------------------------------------------------------------------------
 
 #: Agent 가 지원하는 두 실행 mode. **Planner 계약이자 회신 계약이다.**
-FinanceMode = Literal["PRE_PURCHASE", "SCENARIO_VALIDATION"]
+#: ★ `SALES_VALIDATION` 은 **매입 시나리오 검증과 다른 책임이다.** Master 는
+#:   Sales 의 `FINANCIAL_VALIDATION` 요청을 `(finance, SALES_VALIDATION)` 으로 라우팅한다
+#:   (2026-09-02 Master 회신). 같은 mode 를 재사용하면 `(agent, mode, call_seq)` 로
+#:   매입 검증과 판매 검증을 구분할 수 없고, 그러면 payload 모양을 보고 무엇인지
+#:   추측하는 Adapter 가 생긴다.
+#:
+#:   🔴 **아직 Controller 경로에 연결되지 않았다.** `finance_agent_runs_v22.mode` 의
+#:   CHECK 제약이 두 매입 mode 만 허용해서, 연결하면 실행이력 저장이 전부 깨진다.
+#:   DB 마이그레이션과 Master capability 라우팅이 함께 와야 열 수 있다.
+FinanceMode = Literal["PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION"]
 FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 CashPriority = Literal["LOW", "MEDIUM", "HIGH"]

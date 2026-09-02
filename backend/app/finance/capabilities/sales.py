@@ -28,6 +28,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.finance.db import FinanceAsOfDataPort
 from app.finance.rules import (
     SalesRuleResult,
     aggregate_sales_finance_rules,
@@ -517,3 +518,36 @@ def _unique_refs(values: Sequence[str]) -> tuple[str, ...]:
     for value in values:
         seen.setdefault(value, None)
     return tuple(seen)
+
+
+# ---------------------------------------------------------------------------
+# Harness 진입점 — 인자를 받지 않는다
+# ---------------------------------------------------------------------------
+
+
+def run_sales_validation(
+    data_port: FinanceAsOfDataPort, args: dict[str, Any], state: Any
+) -> dict[str, Any]:
+    """SALES_VALIDATION Tool 본체. **Planner 가 준 값을 쓰지 않는다.**
+
+    ★ `args` 는 비어 있어야 하고 실제로 버린다. 제안 숫자는 request payload 가,
+      정책은 Finance Policy 가 소유한다 — 모델이 수량·단가·원가·결제일수·여신을
+      만들거나 베껴 넣을 자리를 두지 않는다.
+
+    ★ 판매 마진 임계값 · 최대 결제일수 · 여신한도 · 회수위험 정책은 현재
+      `FinancePolicy` 의 닫힌 키에도 `agent_policy_config` 의 finance domain 에도
+      없다. 그래서 아래 호출은 오늘 전부 ``None`` 을 넘기고, 결과는 값을 지어내는
+      대신 RUNTIME_NOT_READY 와 없는 정책 이름을 돌려준다.
+    """
+    del args, data_port
+    return evaluate_sales_scenario(
+        state.request.payload,
+        finance_minimum_margin_rate=None,
+        finance_warning_margin_rate=None,
+        max_finance_allowed_payment_terms_days=None,
+        minimum_cash_balance_krw=None,
+        credit_limit_krw=None,
+        receivable_facts=None,
+        scenario_cashflow=None,
+        collection_risk_policy=None,
+    ).model_dump()
