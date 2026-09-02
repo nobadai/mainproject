@@ -154,8 +154,17 @@ def test_관측이_없는_부서는_빈_목록이다():
 
 
 def test_순서를_바꾸지_않는다():
-    """부서가 낸 차례가 그 부서의 설명 차례다."""
-    first, second = json.dumps({"a": 1}), json.dumps({"b": 2})
+    """부서가 낸 차례가 그 부서의 설명 차례다.
+
+    🔴 **처음 쓴 이 테스트는 정렬 변이를 못 잡았다.** 데이터를 `{"a":1}` · `{"b":2}`
+      로 골랐는데 **정렬해도 같은 순서**라서다. 이번 주에 같은 실수를 네 번 했다
+      (#154 · #157 · #164 · 여기).
+
+    ★ 그래서 **정렬하면 뒤집히는 값**을 쓴다.
+    """
+    first, second = json.dumps({"z": 1}), json.dumps({"a": 2})
+    assert sorted([first, second]) != [first, second], "정렬해도 같으면 변이를 못 잡는다"
+
     response = _to_response(_ctx(), _run(finance=_port("finance", (first, second))))
 
     assert _finance_steps(response.plan)[0].observations == [first, second]
