@@ -91,7 +91,7 @@ def decisions(monkeypatch):
             },
         }
 
-    def get_run(request_id: str) -> dict:
+    def get_run(request_id: str, *, cycle: str | None = None) -> dict:
         if request_id != TARGET:
             raise LookupError(f"실행 이력이 없다: {request_id}")
         return _row()

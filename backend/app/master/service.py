@@ -277,8 +277,11 @@ def get_run_report(request_id: str) -> ReportOut:
 
     ★ **최신 실행을 쓴다** — `get_run_history` 와 같은 규칙이다. *"그 요청 어떻게
       됐냐"* 에는 마지막 결과가 답이다.
+
+    ★ 매입안 보고서다. 조회(STATUS)는 안이 없어 보고서가 성립하지 않으므로
+      사이클을 밝힌다 (2026-09-02).
     """
-    row = get_run_by_request_id(request_id)
+    row = get_run_by_request_id(request_id, cycle="PROCUREMENT")
     run = dict(row.get("response_payload") or {})
     if not run:
         raise LookupError(f"실행 원문이 없어 보고서를 만들 수 없습니다: {request_id}")
@@ -322,7 +325,9 @@ def get_run_history(request_id: str) -> RunHistoryOut:
     ★ 결정은 **전부** 싣는다 (실행과 달리 최신 하나로 접지 않는다).
       번복이 있었다는 사실 자체가 답의 일부다 — `is_current` 로 최신만 표시한다.
     """
-    row = get_run_by_request_id(request_id)
+    # ★ 조회(STATUS)가 같은 업무 키로 적재되므로 사이클을 밝힌다 (2026-09-02).
+    #   이 화면은 매입 실행 이력이다 - 안 밝히면 최신 조회가 매입 자리에 뜬다.
+    row = get_run_by_request_id(request_id, cycle="PROCUREMENT")
     plan = list(row.get("plan") or [])
     return RunHistoryOut(
         request_id=row.get("request_id") or request_id,

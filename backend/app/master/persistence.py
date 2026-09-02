@@ -23,13 +23,21 @@ persistence.py — 마스터 실행 계획 적재 (정의서 §1.2-11)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import asdict
+from datetime import date
 from typing import Any
 
+from app.master.plan import ExecutionPlan
 from app.master.run_repository import try_save_run
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse
+from app.master.status_flow import StatusOutcome
 
 # 마스터의 1차 Flow 는 매입 의사결정이다. 판매(2차)가 붙으면 cycle 이 갈린다.
 _CYCLE = "PROCUREMENT"
+
+# 조회. 안을 만들지 않지만 예산을 쓰고 부서를 부르므로 이력에 남는다 (2026-09-02).
+_STATUS_CYCLE = "STATUS"
 
 # 종료 코드 → 런타임 상태. 표의 CHECK 어휘가 3값이라 여기서 접는다.
 _RUNTIME_BY_END_CODE = {
@@ -85,5 +93,74 @@ def record(
         plan=plan_rows(response),
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
+    )
+    return None if run_id is None else str(run_id)
+
+
+def status_plan_rows(plan: ExecutionPlan) -> list[dict[str, Any]]:
+    """조회의 실행 계획을 JSONB 모양으로.
+
+    ★ 매입 쪽(`plan_rows`)은 응답 스키마(`StepOut`)를 거치는데 여기는 계획 객체를
+      바로 쓴다 - 조회 응답에는 계획이 안 실리기 때문이다. **그래서 더 중요하다.**
+      화면에 안 보이는 호출이라 이력이 유일한 기록이다.
+
+    ★ 시각을 담지 않는다. `ExecutionStep` 에 시계가 없다는 것은
+      `test_계획에_실행_시각이_없다` 가 잠근다.
+    """
+    return [asdict(step) for step in plan.steps]
+
+
+def record_status(
+    *,
+    request_id: str,
+    as_of: date,
+    policy_version: str,
+    intent: Mapping[str, Any],
+    outcome: StatusOutcome,
+    elapsed_ms: int | None = None,
+) -> str | None:
+    """조회 1건을 적재한다 (2026-09-02 신설).
+
+    🔴 **왜 조회도 남기는가.**
+      조회는 안을 만들지 않지만 **예산을 쓰고 부서를 부른다.** 안 남기면 그 호출이
+      이력에서 사라지고, 검증 6계열의 M-16 이 막으려는 것이 정확히 "안 보이는
+      호출" 이다. 조회만 계속 돌린 날과 아무것도 안 한 날이 같아 보이면 안 된다.
+
+    ★ **전에는 표가 못 받았다.** 옛 `orchestrator_agent_runs` 의 `cycle` CHECK 에
+      `STATUS` 가 없었고, 어휘를 고치려면 오케·Critic 행의 뜻까지 건드려야 했다.
+      마스터가 자기 표로 나오면서(2026-09-02) 그 장애물이 없어졌다.
+
+    ★ **`end_code` 에 S 코드가 들어간다.** 매입은 `E1`~`E5`, 조회는
+      `S1_ANSWERED`~`S3_UNAVAILABLE` 이다. 컬럼을 CHECK 로 안 닫은 이유가 이것이고,
+      뜻은 둘 다 "이 실행이 어떻게 끝났나" 로 같다.
+
+    ★ **품목이 없다.** 조회는 품목 축이 아니라 부서 축이다 - 무엇을 물었는지는
+      `request_payload` 의 `agents` 에 남는다. 없는 것을 지어내지 않는다.
+
+    ⚠️ **업무 키가 매입과 겹칠 수 있다.** 둘 다 `make_request_id(as_of)` 를 쓴다.
+      그래서 읽는 쪽이 `cycle` 을 밝히게 했다 (`get_run_by_request_id`) - 안 그러면
+      조회가 최신 행이 되는 날 결정이 조회를 가리키고 이력 화면이 조회를 보여준다.
+    """
+    run_id = try_save_run(
+        cycle=_STATUS_CYCLE,
+        as_of=as_of,
+        request_id=request_id,
+        end_code=outcome.status_code,
+        runtime_status=outcome.runtime_status,
+        elapsed_ms=elapsed_ms,
+        plan=status_plan_rows(outcome.plan),
+        request_payload={
+            "as_of": as_of.isoformat(),
+            "policy_version": policy_version,
+            "intent": dict(intent),
+        },
+        response_payload={
+            "status_code": outcome.status_code,
+            "reason": outcome.reason,
+            "answers": {k: dict(v) for k, v in outcome.answers.items()},
+            "unavailable": list(outcome.unavailable),
+            "missing_data": {k: list(v) for k, v in outcome.missing_data.items()},
+            "errors": dict(outcome.errors),
+        },
     )
     return None if run_id is None else str(run_id)

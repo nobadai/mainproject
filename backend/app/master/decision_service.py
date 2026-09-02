@@ -147,7 +147,8 @@ def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:
     :raises DecisionRejected: 준 실행이 이 업무 키의 것이 아니다 (422).
     """
     if history_run_id is None:
-        return dict(get_run_by_request_id(request_id))
+        # ★ 승인 대상은 매입 실행이다. 조회는 승인할 수 없다 (2026-09-02).
+        return dict(get_run_by_request_id(request_id, cycle="PROCUREMENT"))
     try:
         run = dict(get_run(UUID(history_run_id)))
     except ValueError as exc:  # UUID 파싱 실패
