@@ -40,6 +40,7 @@ from app.finance.execution import (
     save_finance_execution,
 )
 from app.finance.llm.client import finance_llm_enabled
+from app.finance.sales_models import SalesValidationResult
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
@@ -696,3 +697,78 @@ def _recorded(
         )
         return reply, replace(metadata, observations=(*metadata.observations, failure))
     return reply, metadata
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 8 — 판매 재무 판정의 봉투 매핑
+#
+# ★ **도메인 판정을 마스터가 다시 해석하지 않는다.** 재무가 PASS/REVIEW_REQUIRED/
+#   FAIL 로 말한 것을 봉투 어휘로 옮기는 일은 Finance Adapter 소유다. 마스터가
+#   옮기면 재무 판정의 뜻이 마스터 코드에 흩어지고, 그때부터 두 곳을 같이 고쳐야
+#   한다.
+#
+# ★ 원본을 지우지 않는다. `payload.finance_verdict` 는 봉투 상태와 **함께** 나간다 —
+#   `conditional` 만 남으면 "마진 경고"인지 "현금 의존"인지 되돌릴 수 없다.
+#
+# 🔴 아직 `finance_port` 에 연결되지 않았다. `finance_agent_runs_v22.mode` CHECK 와
+#   Master capability 라우팅(FINANCIAL_VALIDATION → finance/SALES_VALIDATION)이
+#   함께 와야 열 수 있다. 그때까지 이 매핑은 계약으로만 존재하고 시험된다.
+# ---------------------------------------------------------------------------
+
+#: 재무 도메인 판정 → 공통 봉투 어휘. **이 방향으로만 쓴다.**
+SALES_VERDICT_TO_BUSINESS_STATUS: dict[str, str] = {
+    "PASS": "ok",
+    "REVIEW_REQUIRED": "conditional",
+    "FAIL": "reject",
+}
+
+
+def map_sales_finance_verdict(result: SalesValidationResult) -> tuple[str, str]:
+    """판매 검증 결과를 ``(runtime_status, business_status)`` 로 옮긴다.
+
+    판정이 없는 세 경우는 전부 `skipped` 다 — 없는 판정을 `reject` 로 바꾸면
+    "재무가 거절했다"가 되고, `ok` 로 바꾸면 보지 않은 것을 통과시킨 것이 된다.
+    """
+    if result.status == "INPUT_INCOMPLETE":
+        # Finance 는 멀쩡하다. 제안에 사실이 빠졌을 뿐이다.
+        return "READY", "skipped"
+    if result.status == "RUNTIME_NOT_READY":
+        return "RUNTIME_NOT_READY", "skipped"
+    if result.status == "ERROR":
+        return "ERROR", "skipped"
+    if result.finance_verdict is None:
+        return result.runtime_status, "skipped"
+    return result.runtime_status, SALES_VERDICT_TO_BUSINESS_STATUS[result.finance_verdict]
+
+
+def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
+    """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
+
+    ★ 마스터는 이것을 **통째로** 나른다. 그래서 판정을 만든 근거가 전부 여기 있어야
+      한다 — 하나라도 내부 상태에 남겨두면 회송된 회신에서 그 사실이 사라진다.
+
+    ★ 결제일수 상한은 payload 필드다. 공통 `SuggestedAdjustment` 축이 아니다 —
+      재무의 조정 축은 `amount` 하나뿐이고, 상한은 조정이 아니라 경계다.
+    """
+    summary = result.financial_summary
+    return {
+        "status": result.status,
+        # 봉투 상태와 나란히 원본 판정을 남긴다.
+        "finance_verdict": result.finance_verdict,
+        "scenario_id": result.scenario_id,
+        "financial_summary": (None if summary is None else summary.model_dump()),
+        "rule_results": [dict(rule) for rule in result.rule_results],
+        "reason_codes": list(result.reason_codes),
+        "missing_fields": list(result.missing_fields),
+        "missing_data": list(result.missing_data),
+        "data_quality": (
+            "COMPLETE"
+            if not result.missing_fields and not result.missing_data
+            else "INCOMPLETE"
+        ),
+        "max_finance_allowed_amount_krw": result.max_finance_allowed_amount_krw,
+        "max_finance_allowed_payment_terms_days": (
+            result.max_finance_allowed_payment_terms_days
+        ),
+        "evidence_refs": list(result.evidence_refs),
+    }
