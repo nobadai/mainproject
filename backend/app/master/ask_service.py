@@ -16,24 +16,30 @@
   `/master/ask/execute` 로 온다. 오분류 비용이 비대칭이기 때문이다 — 조회를 잘못
   고르면 다시 물으면 그만이지만, 매입은 예산 12회와 매입 LLM 을 태운다.
 
-⚠️ **조회는 아직 실행이력에 적재하지 않는다 — 다만 막고 있던 것은 없어졌다.**
-  전에는 `orchestrator_agent_runs.cycle` 의 CHECK 어휘에 `STATUS` 가 없어서 막혀
-  있었다. 어휘를 고치려면 오케·Critic 행의 뜻까지 건드려야 했기 때문이다.
+★ **조회도 실행이력에 적재한다** (2026-09-02 배선).
+  조회는 안을 만들지 않지만 **예산을 쓰고 부서를 부른다.** 안 남기면 그 호출이
+  이력에서 사라지고, M-16(실행 계획 온전성)이 막으려는 것이 정확히
+  "안 보이는 호출" 이다. 조회만 계속 돌린 날과 아무것도 안 한 날이 같아 보이면 안 된다.
 
-  2026-09-02 에 마스터가 자기 표(`master_agent_runs`)를 가지면서 **`cycle` 에
-  `STATUS` 가 들어갔다.** 이제 DB 쪽 장애물은 없고 남은 것은 배선뿐이다.
+  전에는 표가 못 받았다 — 옛 `orchestrator_agent_runs.cycle` 의 CHECK 에 `STATUS` 가
+  없었고, 어휘를 고치려면 오케·Critic 행의 뜻까지 건드려야 했다. 마스터가 자기
+  표(`master_agent_runs`)로 나오면서 그 장애물이 없어졌다.
 
-  **조회도 예산을 쓰고 에이전트를 부른다.** 안 남기면 그 호출이 이력에 안 보이고,
-  M-16(실행 계획 온전성)이 막으려는 것이 정확히 "안 보이는 호출"이다.
-  매입 실행은 기존 경로를 그대로 타므로 지금도 적재된다.
+⚠️ **조회와 매입이 같은 업무 키를 쓴다.** 둘 다 `make_request_id(as_of)` 로
+  `REQ-20251231-0001` 을 만든다 — 순번 관리가 호출자 몫이라 화면이 안 주면 같아진다.
+
+  그래서 **읽는 쪽이 `cycle` 을 밝힌다** (`get_run_by_request_id(..., cycle=...)`).
+  안 밝히면 조회가 최신 행이 되는 날 **결정이 조회를 가리키고** 이력 화면이 조회를
+  보여준다. 조회는 승인 대상이 아니다.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from datetime import date
 
-from app.master import wiring
+from app.master import persistence, wiring
 from app.master.answer import (
     AnswerFacts,
     Fact,
@@ -198,7 +204,13 @@ def _run_status(
     budget: int,
     intent: Intent,
 ) -> StatusOutcome:
-    """조회 Flow 를 돌린다. **어댑터 미등록도 결과로 접는다.**"""
+    """조회 Flow 를 돌린다. **어댑터 미등록도 결과로 접는다.**
+
+    ★ **끝에서 이력에 적재한다** (2026-09-02). 조회는 안을 만들지 않지만 예산을 쓰고
+      부서를 부른다 — 안 남기면 그 호출이 이력에서 사라진다. 적재 실패는 답을 막지
+      않는다 (`try_save_run` 이 삼킨다).
+    """
+    started = time.perf_counter()
     context = ExecutionContext(
         request_id=request_id,
         as_of=as_of,
@@ -213,27 +225,37 @@ def _run_status(
     outcome = StatusFlow(runner, registered).run()
 
     unregistered = tuple(a for a in asked if a in missing)
-    if not unregistered:
-        return outcome
+    if unregistered:
+        # 미등록은 오류가 아니라 "그 부서가 오늘 돌지 않는다"와 같다 (§5.3).
+        merged_missing = dict(outcome.missing_data)
+        for agent in unregistered:
+            merged_missing[agent] = ("ADAPTER_NOT_REGISTERED",)
+        answered = len(outcome.answers)
+        outcome = StatusOutcome(
+            status_code="S3_UNAVAILABLE" if answered == 0 else "S2_PARTIAL",
+            reason=(
+                f"{', '.join(unregistered)} 어댑터가 등록되지 않았다."
+                if answered == 0
+                else f"{outcome.reason} {', '.join(unregistered)} 는 어댑터 미등록이다."
+            ),
+            plan=outcome.plan,
+            answers=outcome.answers,
+            unavailable=outcome.unavailable + unregistered,
+            missing_data=merged_missing,
+            errors=outcome.errors,
+        )
 
-    # 미등록은 오류가 아니라 "그 부서가 오늘 돌지 않는다"와 같다 (§5.3).
-    merged_missing = dict(outcome.missing_data)
-    for agent in unregistered:
-        merged_missing[agent] = ("ADAPTER_NOT_REGISTERED",)
-    answered = len(outcome.answers)
-    return StatusOutcome(
-        status_code="S3_UNAVAILABLE" if answered == 0 else "S2_PARTIAL",
-        reason=(
-            f"{', '.join(unregistered)} 어댑터가 등록되지 않았다."
-            if answered == 0
-            else f"{outcome.reason} {', '.join(unregistered)} 는 어댑터 미등록이다."
-        ),
-        plan=outcome.plan,
-        answers=outcome.answers,
-        unavailable=outcome.unavailable + unregistered,
-        missing_data=merged_missing,
-        errors=outcome.errors,
+    # ★ **미등록으로 접힌 결과를 적재한다.** 위에서 바로 돌려주면 "어댑터가 없어
+    #   못 물어본 날" 이 이력에 안 남는다 - 안 부른 것과 못 부른 것은 다르다.
+    persistence.record_status(
+        request_id=request_id,
+        as_of=as_of,
+        policy_version=policy_version,
+        intent=intent.model_dump(mode="json"),
+        outcome=outcome,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
+    return outcome
 
 
 def _record_selection(request: AskExecuteRequest) -> AskResponse:

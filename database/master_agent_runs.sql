@@ -54,11 +54,12 @@ CREATE TABLE IF NOT EXISTS haetdeul.master_agent_runs (
     --   의 ITEM_CODES 이고, 같은 규칙을 두 곳에 두면 조용히 갈린다.
     item TEXT NULL,
 
-    -- ★ 종료 코드 (신설). E1~E5 를 response_payload 안에서 꺼냈다.
+    -- ★ 종료 코드 (신설). 매입은 E1~E5, 조회는 S1~S3 다.
     --   "배추가 며칠째 E2 인가" 는 운영이 실제로 묻는 질문인데, JSONB 를 파야
     --   답이 나오면 아무도 안 본다.
     --
-    --   CHECK 로 닫지 않는다 — 코드 어휘가 늘면(판매) DDL 이 병목이 된다.
+    --   CHECK 로 닫지 않는다 — 사이클마다 어휘가 다르고(매입 E · 조회 S), 판매가
+    --   붙으면 또 는다. DDL 이 병목이 되면 어휘를 늘릴 때마다 마이그레이션이 필요하다.
     --   대신 아래 runtime_status 가 3값으로 닫혀 있어 이상값은 그쪽에서 걸린다.
     end_code TEXT NULL,
 
@@ -125,6 +126,6 @@ COMMENT ON COLUMN haetdeul.master_agent_runs.cycle IS
 COMMENT ON COLUMN haetdeul.master_agent_runs.item IS
     '이번 실행이 다룬 품목. 매입은 품목 하나씩 돈다. 어휘의 소유는 master/commitment.py 의 ITEM_CODES.';
 COMMENT ON COLUMN haetdeul.master_agent_runs.end_code IS
-    '종료 코드 E1~E5. response_payload 안에도 있지만 추이 조회를 위해 컬럼으로 뺐다.';
+    '이 실행이 어떻게 끝났나. 매입 E1~E5 · 조회 S1~S3. payload 안에도 있지만 추이 조회를 위해 컬럼으로 뺐다.';
 COMMENT ON COLUMN haetdeul.master_agent_runs.plan IS
     '실행 계획 — 누구를 어떤 목적으로 몇 번째로 불렀나. 시각은 담지 않는다.';

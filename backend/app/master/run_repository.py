@@ -207,19 +207,45 @@ def get_run(run_id: UUID) -> MasterAgentRun:
     return row  # type: ignore[return-value]
 
 
-def get_run_by_request_id(request_id: str) -> MasterAgentRun:
+def get_run_by_request_id(request_id: str, *, cycle: str | None = None) -> MasterAgentRun:
     """업무 키로 **가장 최근** 실행 1건. 없으면 `LookupError`.
 
     ★ 같은 업무 키로 여러 번 돌면 행이 여럿이다 (append-only). "그 요청 어떻게
       됐냐" 에는 마지막 결과가 답이라 최신을 돌려준다. 전체가 필요하면
       `list_runs(request_id=...)` 를 쓴다.
+
+    🔴 **`cycle` 을 주는 쪽이 왜 중요한가** (2026-09-02, 조회 적재 배선).
+
+      조회와 매입이 **같은 업무 키를 쓴다.** 둘 다 `make_request_id(as_of)` 로
+      `REQ-20251231-0001` 을 만들고, 순번 관리는 호출자 몫이라 화면이 안 주면
+      같은 값이 된다.
+
+      조회를 이력에 적기 시작하면 그 행이 최신이 되는 날이 생긴다. 그러면
+
+      ```text
+      결정 경로     승인할 실행을 찾다가 조회를 집는다 - 조회는 승인 대상이 아니다
+      이력 화면     매입 실행을 보여줘야 할 자리에 조회가 뜬다
+      ```
+
+      **기본값을 두지 않는다.** 조용히 걸러 주면 새 호출자가 무엇을 보는지
+      모른 채 쓰게 된다 - 부르는 쪽이 자기가 무엇을 찾는지 밝힌다.
     """
-    query = _select() + sql.SQL(
-        " WHERE request_id = %s ORDER BY created_at DESC, run_seq DESC LIMIT 1"
+    clauses = [sql.SQL("request_id = %s")]
+    params: list[Any] = [request_id]
+    if cycle is not None:
+        clauses.append(sql.SQL("cycle = %s"))
+        params.append(cycle)
+
+    query = (
+        _select()
+        + sql.SQL(" WHERE ")
+        + sql.SQL(" AND ").join(clauses)
+        + sql.SQL(" ORDER BY created_at DESC, run_seq DESC LIMIT 1")
     )
-    row = fetch_one(query, (request_id,))
+    row = fetch_one(query, tuple(params))
     if row is None:
-        raise LookupError(f"업무 키로 찾은 실행이 없다: {request_id}")
+        scope = "" if cycle is None else f" ({cycle})"
+        raise LookupError(f"업무 키로 찾은 실행이 없다{scope}: {request_id}")
     return row  # type: ignore[return-value]
 
 

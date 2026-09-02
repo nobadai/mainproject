@@ -117,7 +117,7 @@ def _set_run(
     `by_id` 를 주면 **화면이 본 실행**이 최신과 다른 상황을 만든다.
     """
 
-    def latest(request_id: str) -> dict[str, Any]:
+    def latest(request_id: str, *, cycle: str | None = None) -> dict[str, Any]:
         if row is None:
             raise LookupError(f"실행 이력이 없다: {request_id}")
         return row

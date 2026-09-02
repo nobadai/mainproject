@@ -105,7 +105,7 @@ def client():
 
 
 def test_없는_요청은_404(client, monkeypatch):
-    def missing(request_id):
+    def missing(request_id, *, cycle=None):
         raise LookupError(f"실행이력을 찾을 수 없습니다: {request_id}")
 
     monkeypatch.setattr("app.master.service.get_run_by_request_id", missing)
@@ -130,7 +130,7 @@ def test_이력을_찾으면_계획과_지문을_돌려준다(client, monkeypatc
         "request_payload": {"as_of": "2026-08-27"},
         "response_payload": {"end_code": "E1_APPROVED"},
     }
-    monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _: row)
+    monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _, **_kw: row)
     monkeypatch.setattr("app.master.service.get_decisions", lambda _: [])
 
     data = client.get("/master/runs/REQ-20260827-0001").json()
@@ -157,7 +157,7 @@ def test_계획이_NULL_이어도_깨지지_않는다(client, monkeypatch):
         "request_payload": None,
         "response_payload": None,
     }
-    monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _: row)
+    monkeypatch.setattr("app.master.service.get_run_by_request_id", lambda _, **_kw: row)
     monkeypatch.setattr("app.master.service.get_decisions", lambda _: [])
 
     data = client.get("/master/runs/REQ-X").json()

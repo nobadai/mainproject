@@ -22,7 +22,9 @@ from datetime import date
 import pytest
 
 from app.master import persistence, run_repository
+from app.master.plan import ExecutionPlan
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse
+from app.master.status_flow import StatusOutcome
 
 # ── ① 표 이름 ───────────────────────────────────────────────────────────────
 
@@ -202,3 +204,194 @@ def test_조회_사이클을_적을_수_있다():
 
     assert "'STATUS'" in ddl, "cycle 어휘에 STATUS 가 없다 — 표를 나눈 이유가 사라진다"
     assert "'A'" not in ddl, "오케 어휘(A·B)를 가져오면 안 된다"
+
+
+# ── 조회(STATUS) 적재 ───────────────────────────────────────────────────────
+
+
+def _status_outcome(status_code: str = "S1_ANSWERED") -> StatusOutcome:
+    return StatusOutcome(
+        status_code=status_code,
+        reason="",
+        plan=ExecutionPlan(request_id="REQ-20251231-0001", as_of=date(2025, 12, 31)),
+        answers={"finance": {"cash": 1}},
+    )
+
+
+def test_조회도_이력에_남는다(monkeypatch):
+    """🔴 **조회는 안을 안 만들지만 예산을 쓰고 부서를 부른다.**
+
+    안 남기면 그 호출이 이력에서 사라진다 - M-16 이 막으려는 "안 보이는 호출" 이다.
+    조회만 계속 돌린 날과 아무것도 안 한 날이 이력에서 같아 보이면 안 된다.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "try_save_run", lambda **kw: captured.update(kw))
+    persistence.record_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        intent={"action": "STATUS_QUERY", "agents": ["finance"]},
+        outcome=_status_outcome(),
+    )
+
+    assert captured["cycle"] == "STATUS"
+    assert captured["end_code"] == "S1_ANSWERED"
+    assert captured["request_id"] == "REQ-20251231-0001"
+
+
+def test_조회는_품목_축이_아니다(monkeypatch):
+    """★ 조회는 부서에 묻는다. 무엇을 물었는지는 request_payload 의 agents 에 남는다.
+
+    품목 칸을 억지로 채우면 "이 조회는 피마늘에 대한 것" 이라는 없는 사실이 생긴다.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "try_save_run", lambda **kw: captured.update(kw))
+    persistence.record_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        intent={"action": "STATUS_QUERY", "agents": ["finance"]},
+        outcome=_status_outcome(),
+    )
+
+    assert captured.get("item") is None
+    assert captured["request_payload"]["intent"]["agents"] == ["finance"]
+
+
+def test_아무도_못_답하면_미가동이다(monkeypatch):
+    """`S3` 만 미가동이다 - 일부라도 답했으면 돌긴 돈 날이다.
+
+    매입에서 `E4` 만 `RUNTIME_NOT_READY` 인 것과 같은 구분이다.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(persistence, "try_save_run", lambda **kw: captured.update(kw))
+    for code, expected in (
+        ("S1_ANSWERED", "READY"),
+        ("S2_PARTIAL", "READY"),
+        ("S3_UNAVAILABLE", "RUNTIME_NOT_READY"),
+    ):
+        persistence.record_status(
+            request_id="REQ-20251231-0001",
+            as_of=date(2025, 12, 31),
+            policy_version="v1.3",
+            intent={},
+            outcome=_status_outcome(code),
+        )
+        assert captured["runtime_status"] == expected, code
+
+
+def test_읽는_쪽이_사이클을_밝힌다():
+    """🔴 **조회와 매입이 같은 업무 키를 쓴다.**
+
+    둘 다 `make_request_id(as_of)` 로 REQ-20251231-0001 을 만든다 - 순번 관리가
+    호출자 몫이라 화면이 안 주면 같아진다.
+
+    조회를 적재하기 시작했으므로, 사이클을 안 밝히면 조회가 최신 행이 되는 날
+
+    ```text
+    결정 경로   승인할 실행을 찾다가 조회를 집는다 - 조회는 승인 대상이 아니다
+    이력 화면   매입 실행 자리에 조회가 뜬다
+    보고서      안이 없는 실행으로 매입안 보고서를 만들려 한다
+    ```
+
+    셋 다 예외가 안 나고 화면만 조용히 틀린다. 그래서 호출자를 고정한다.
+    """
+    import inspect as _inspect
+
+    from app.master import decision_service, service
+
+    for module in (service, decision_service):
+        source = _inspect.getsource(module)
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or "get_run_by_request_id(" not in stripped:
+                continue
+            if "def " in stripped or "import" in stripped:
+                continue
+            assert "cycle=" in stripped, (
+                f"{module.__name__} 이 사이클 없이 실행을 찾는다: {stripped}"
+            )
+
+
+def test_조회_경로가_적재를_부른다(monkeypatch):
+    """🔴 **적재 함수가 있어도 아무도 안 부르면 이력은 안 남는다.**
+
+    앞의 테스트들은 `record_status` 를 직접 부른다 - 그것만으로는 `_run_status` 가
+    실제로 그 함수를 부르는지 알 수 없다. 변이 테스트에서 호출을 통째로 지웠는데
+    한 건도 안 걸렸다 (2026-09-02). 그 구멍을 메운다.
+    """
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    called: dict[str, object] = {}
+    monkeypatch.setattr(ask_service.persistence, "record_status", lambda **kw: called.update(kw))
+    monkeypatch.setattr(ask_service.wiring, "missing", lambda: ("finance", "inventory", "purchase"))
+
+    ask_service._run_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        budget=12,
+        intent=Intent(action="STATUS_QUERY", agents=["finance"], confidence="HIGH"),
+    )
+
+    assert called, "_run_status 가 record_status 를 부르지 않았다"
+    assert called["request_id"] == "REQ-20251231-0001"
+    assert called["outcome"].status_code == "S3_UNAVAILABLE"
+
+
+def test_어댑터가_없어_못_물어본_날도_남는다(monkeypatch):
+    """★ **안 부른 것과 못 부른 것은 다르다.**
+
+    미등록으로 접히는 경로에서 먼저 돌려주면 그 날이 이력에서 사라진다.
+    "조회를 안 했다" 와 "조회했는데 아무도 없었다" 가 같아 보이면 안 된다.
+    """
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    called: dict[str, object] = {}
+    monkeypatch.setattr(ask_service.persistence, "record_status", lambda **kw: called.update(kw))
+    monkeypatch.setattr(ask_service.wiring, "missing", lambda: ("inventory",))
+    monkeypatch.setattr(ask_service.wiring, "registry", dict)
+
+    ask_service._run_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        budget=12,
+        intent=Intent(action="STATUS_QUERY", agents=["inventory"], confidence="HIGH"),
+    )
+
+    outcome = called["outcome"]
+    assert outcome.status_code == "S3_UNAVAILABLE"
+    assert "inventory" in outcome.unavailable
+
+
+def test_미등록이_없는_정상_경로도_적재한다(monkeypatch):
+    """🔴 **변이 테스트가 찾아낸 구멍이다** (2026-09-02).
+
+    미등록 부서가 있는 경로만 덮고 있었다. 그래서 "미등록이 없으면 먼저 return"
+    이라는 변이를 넣었는데 한 건도 안 걸렸다 - 정상 경로에서 적재가 통째로
+    빠져도 테스트가 초록이었다.
+
+    **정상 경로가 오히려 대부분이다.** 거기서 이력이 안 남으면 조회는 영영
+    안 보이는 호출이 된다.
+    """
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    called: dict[str, object] = {}
+    monkeypatch.setattr(ask_service.persistence, "record_status", lambda **kw: called.update(kw))
+    monkeypatch.setattr(ask_service.wiring, "missing", tuple)
+    monkeypatch.setattr(ask_service.wiring, "registry", dict)
+
+    ask_service._run_status(
+        request_id="REQ-20251231-0001",
+        as_of=date(2025, 12, 31),
+        policy_version="v1.3",
+        budget=12,
+        intent=Intent(action="STATUS_QUERY", agents=[], confidence="HIGH"),
+    )
+
+    assert called, "미등록이 없는 경로에서 적재를 건너뛰었다"
+    assert called["request_id"] == "REQ-20251231-0001"
