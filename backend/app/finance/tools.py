@@ -268,3 +268,156 @@ def rank_collection_preferences(
         )
         for term in channel_terms
     ]
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 1 — 결정론적 계산만 담당한다 (판정·정책 없음)
+#
+# 이 절의 함수들은 "계산 사실"만 만든다. PASS/FAIL·REVIEW_REQUIRED 같은 판정,
+# Sales Margin 임계값, 회수 위험도는 Finance ↔ Master/Sales 계약이 정해진 뒤
+# Rule 계층에서 다룬다 — 여기서 앞당겨 결정하지 않는다.
+# ---------------------------------------------------------------------------
+
+
+class SalesCalculationFacts(TypedDict):
+    """Finance 내부 전용 매출 계산 사실 — Master/Router 계약이 아니다."""
+
+    recalculated_sales_amount_krw: Decimal
+    reported_amount_comparison: ReportedAmountComparison | None
+    contribution_margin_krw: Decimal | None
+    contribution_margin_rate: Decimal | None
+    collection_date: date | None
+
+
+def calculate_sales_amount(
+    *,
+    quantity_kg: Decimal,
+    unit_price_krw: Decimal,
+) -> Decimal:
+    """매출액을 수량 × 단가로 재계산한다.
+
+    Purchase 재계산(`calculate_purchase_scenario_amount`)과 같은 규약이다 —
+    곱만 하고 임의로 반올림하지 않는다. 0은 '없음'이 아니라 값 0으로 다룬다.
+    """
+    if quantity_kg < 0:
+        raise ValueError("quantity_kg must not be negative")
+    if unit_price_krw < 0:
+        raise ValueError("unit_price_krw must not be negative")
+    return quantity_kg * unit_price_krw
+
+
+def compare_reported_sales_amount(
+    *,
+    reported_amount_krw: Decimal,
+    recalculated_amount_krw: Decimal,
+) -> ReportedAmountComparison:
+    """보고 매출액 대비 비교 — 기존 `compare_reported_amount`를 그대로 쓴다.
+
+    별도 허용오차(±1원, ±0.1%)를 두지 않는다. 현행 Finance 계약의 기본은
+    정확한 항등이고, 이 wrapper는 키워드 호출만 얹는 얇은 층이다.
+    """
+    return compare_reported_amount(reported_amount_krw, recalculated_amount_krw)
+
+
+def calculate_contribution_margin(
+    *,
+    sales_amount_krw: Decimal,
+    sales_cost_basis_krw: Decimal,
+) -> Decimal:
+    """공헌이익 = 매출액 - 매출원가 기준액.
+
+    원가 기준액은 이미 권위 있는 값으로 전달받는다 — 없을 때 0이나 추정치로
+    대체하지 않는다(호출자가 아예 계산하지 않는다). 음수 공헌이익은 계산 사실로
+    그대로 반환하며, 여기서 FAIL로 바꾸지 않는다.
+    """
+    if sales_amount_krw < 0:
+        raise ValueError("sales_amount_krw must not be negative")
+    if sales_cost_basis_krw < 0:
+        raise ValueError("sales_cost_basis_krw must not be negative")
+    return sales_amount_krw - sales_cost_basis_krw
+
+
+def calculate_contribution_margin_rate(
+    *,
+    sales_amount_krw: Decimal,
+    contribution_margin_krw: Decimal,
+) -> Decimal | None:
+    """공헌이익률 = 공헌이익 / 매출액. 매출액이 0이면 None(계산 불가)이다.
+
+    0으로 나누지 않고, 계산할 수 없다는 사실을 None으로 명시한다 — 0.0 같은
+    값을 지어내지 않는다. 반환값은 나눗셈 결과 그대로이며 표시용 반올림은
+    호출자 몫이다(새 반올림 정책을 만들지 않는다).
+    """
+    if sales_amount_krw < 0:
+        raise ValueError("sales_amount_krw must not be negative")
+    if sales_amount_krw == 0:
+        return None
+    return contribution_margin_krw / sales_amount_krw
+
+
+def calculate_collection_date(
+    *,
+    reference_date: date,
+    payment_days: int,
+) -> date:
+    """회수일 = 기준일 + 결제일수(D+N).
+
+    `reference_date`의 의미(납품일·송장일·계약일·출하일 중 무엇인지)는 호출자가
+    가진다. Finance ↔ Master/Sales 계약에서 회수일 기준점이 아직 확정되지
+    않았기 때문에, 이 함수는 의도적으로 기준점을 고르지 않는다.
+    """
+    if payment_days < 0:
+        raise ValueError("payment_days must not be negative")
+    return reference_date + timedelta(days=payment_days)
+
+
+def build_sales_calculation_facts(
+    *,
+    quantity_kg: Decimal,
+    unit_price_krw: Decimal,
+    reported_amount_krw: Decimal | None = None,
+    sales_cost_basis_krw: Decimal | None = None,
+    reference_date: date | None = None,
+    payment_days: int | None = None,
+) -> SalesCalculationFacts:
+    """위 원시 계산들을 Finance 내부 사실 묶음으로 모은다.
+
+    없는 입력은 없는 채로 둔다 — 권위 있는 원가 기준액이 없으면 공헌이익을
+    계산하지 않고, 회수일 기준점이나 결제일수가 없으면 회수일을 만들지 않는다.
+    """
+    sales_amount = calculate_sales_amount(
+        quantity_kg=quantity_kg, unit_price_krw=unit_price_krw
+    )
+
+    comparison: ReportedAmountComparison | None = None
+    if reported_amount_krw is not None:
+        comparison = compare_reported_sales_amount(
+            reported_amount_krw=reported_amount_krw,
+            recalculated_amount_krw=sales_amount,
+        )
+
+    margin: Decimal | None = None
+    margin_rate: Decimal | None = None
+    if sales_cost_basis_krw is not None:
+        margin = calculate_contribution_margin(
+            sales_amount_krw=sales_amount,
+            sales_cost_basis_krw=sales_cost_basis_krw,
+        )
+        margin_rate = calculate_contribution_margin_rate(
+            sales_amount_krw=sales_amount,
+            contribution_margin_krw=margin,
+        )
+
+    collection_date: date | None = None
+    if reference_date is not None and payment_days is not None:
+        collection_date = calculate_collection_date(
+            reference_date=reference_date, payment_days=payment_days
+        )
+
+    return {
+        "recalculated_sales_amount_krw": sales_amount,
+        "reported_amount_comparison": comparison,
+        "contribution_margin_krw": margin,
+        "contribution_margin_rate": margin_rate,
+        "collection_date": collection_date,
+    }
