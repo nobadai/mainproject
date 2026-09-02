@@ -44,6 +44,21 @@ class ExecutionStep:
     finding_codes: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
 
+    #: 🔴 **부서가 스스로 밝힌 사유.** `missing_data` 가 *"무엇이 없어서"* 라면
+    #: 이건 *"왜 터졌는지"* 다 — 어댑터 예외 메시지가 `error_reply` 를 거쳐 여기 온다.
+    #:
+    #: 값은 처음부터 `AgentReply.reasoning` 에 있었는데 여기로 옮기지 않아
+    #: **실행 계획에 안 남았다.** 그래서 경계에서 부서가 죽으면 이력을 파도
+    #: `runtime_status=ERROR` 까지만 알고 그 ERROR 의 사유는 어디에도 없었다
+    #: (재현성 측정 2026-09-02 · 6회 중 2회가 왜 실패했는지 모름).
+    #:
+    #: ★ **봉투 검증을 우회하지 않는다.** `check_reasoning` 은 `runner.call` 이
+    #:   `plan.record` **전에** 돌리므로, 여기 실린다고 규칙을 피해 가지 않는다.
+    #:   나르기만 하고 판정에는 쓰지 않는다.
+    #:
+    #: ★ **재현성 비교에는 안 쓴다** — `plan_signature` 는 (agent, mode, call_seq) 뿐이다.
+    reasoning: str = ""
+
     #: 🔴 **그 부서 안에서 LLM 이 실제로 돌았나.** `ExecutionMetadata` 는 처음부터
     #: 이 넷을 담고 있었는데 여기로 옮기지 않아, 마스터는 **부서가 규칙으로 답했는지
     #: 모델로 답했는지 구분하지 못했다** (실측 2026-08-31).
@@ -109,6 +124,7 @@ class ExecutionPlan:
             used_tools=tuple(metadata.used_tools),
             finding_codes=tuple(f.code for f in findings),
             missing_data=tuple(reply.missing_data),
+            reasoning=reply.reasoning,
             llm_status=metadata.llm_status,
             llm_model=metadata.llm_model,
             llm_attempts=metadata.llm_attempts,

@@ -190,6 +190,26 @@ export interface ProcurementRunResponse {
     evidence_detail?: string;
     ref_ids: string[];
   }>;
+  /**
+   * 기여하지 못한 부서가 **왜** 막았는가.
+   *
+   * 🔴 **전에는 이름조차 화면에 없었다** (2026-09-02 배선). `E4` 화면은
+   *   *"경계를 내지 못한 에이전트: finance"* 한 줄이 전부였고, 그것을 읽은 사람이
+   *   할 수 있는 것은 *"다시 돌려 본다"* 뿐이었다 — 그건 조사가 아니라 추측이다.
+   *
+   * ★ `detail` 은 **서버가 만든다.** `reason` 문장에 들어간 것과 같은 값이라
+   *   화면이 다시 조립하다 둘이 갈리는 일이 없다.
+   */
+  blocked_failures: {
+    agent: string;
+    /** ERROR · RUNTIME_NOT_READY, 그리고 아예 안 불린 경우 NOT_CALLED. */
+    runtime_status: string;
+    /** 부서가 쓴 문장 그대로. 마스터가 요약하지 않는다. */
+    reasoning: string;
+    /** `RUNTIME_NOT_READY` 일 때 **여기가 답이다** — 무엇이 없어서 못 냈는지. */
+    missing_data: string[];
+    detail: string;
+  }[];
   findings: string[];
   concerns: string[];
   skipped_checks: string[];

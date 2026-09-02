@@ -129,6 +129,11 @@ class StepOut(BaseModel):
     finding_codes: list[str] = []
     missing_data: list[str] = []
 
+    #: 🔴 **부서가 밝힌 사유.** `missing_data` 가 *"무엇이 없어서"* 라면 이건
+    #: *"왜 터졌는지"* 다. 없으면 이력을 파도 `runtime_status=ERROR` 까지만 알고
+    #: 그 ERROR 의 사유는 어디에도 없다 (재현성 측정 2026-09-02).
+    reasoning: str = ""
+
     #: 🔴 **그 부서 안에서 LLM 이 돌았나.** 없으면 부서가 규칙으로 답한 것과
     #: 모델로 답한 것이 화면에서 같아 보인다 — 오늘 마스터에서 고친 것과 같은 종류다.
     llm_status: str = "DISABLED"
@@ -140,6 +145,27 @@ class StepOut(BaseModel):
     #: `llm_attempts` 는 Planner + Finalizer 호출 수라 툴 개수를 따라 커지고
     #: 재시도가 아니다 (재무 정정 2026-09-02). 재계획은 이 값이다.
     replans: int = 0
+
+
+class BlockedAgentOut(BaseModel):
+    """기여하지 못한 부서 하나 — **이름 옆에 사유가 있다.**
+
+    🔴 `blocked_by` 는 이름만 든다. 그것만 받은 사람이 할 수 있는 것은
+      *"다시 돌려 본다"* 뿐이고, 그건 조사가 아니라 추측이다 (2026-09-02).
+    """
+
+    agent: AgentName
+    runtime_status: str = Field(
+        description="ERROR · RUNTIME_NOT_READY, 그리고 아예 안 불린 경우 NOT_CALLED."
+    )
+    reasoning: str = ""
+    missing_data: list[str] = []
+    detail: str = Field(
+        description=(
+            "사람이 읽는 한 줄. **서버가 한 곳에서 만든다** — `reason` 문장에 들어간 "
+            "것과 같은 값이라 화면이 다시 조립하다 갈리지 않는다."
+        )
+    )
 
 
 class ProcurementRunResponse(BaseModel):
@@ -185,6 +211,14 @@ class ProcurementRunResponse(BaseModel):
     )
 
     blocked_by: list[AgentName] = []
+    blocked_failures: list[BlockedAgentOut] = Field(
+        default=[],
+        description=(
+            "막은 부서가 **왜** 막았는가. `blocked_by` 와 같은 부서를 가리키되 사유를 "
+            "함께 든다. 비어 있는데 `blocked_by` 가 차 있으면 Flow 밖에서 막힌 것이다 "
+            "(어댑터 미등록)."
+        ),
+    )
     findings: list[str] = Field(
         default=[],
         description="**매입 재호출을 유발한** 발견. 다시 만들면 달라질 수 있는 것만 여기 든다.",

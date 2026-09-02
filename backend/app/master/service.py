@@ -21,6 +21,7 @@ from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
 from app.master.runner import MasterRunner
 from app.master.schemas import (
+    BlockedAgentOut,
     BurnInOut,
     DailyClosingOut,
     EvidenceOut,
@@ -222,6 +223,7 @@ def _to_response(
         evidences=_evidences_out(outcome),
         verdicts={k: dict(v) for k, v in outcome.verdicts.items()},
         blocked_by=list(outcome.blocked_by),
+        blocked_failures=_blocked_out(outcome),
         findings=list(outcome.findings),
         concerns=list(outcome.concerns),
         skipped_checks=list(outcome.skipped_checks),
@@ -309,6 +311,24 @@ def _evidences_out(outcome: ProcurementOutcome) -> list[EvidenceOut]:
     ]
 
 
+def _blocked_out(outcome: ProcurementOutcome) -> list[BlockedAgentOut]:
+    """막은 부서를 사유째로 옮긴다. **순서를 바꾸지 않는다.**
+
+    ★ `detail` 을 여기서 다시 만들지 않고 `AgentFailure.detail` 을 부른다 -
+      `reason` 문장에 들어간 것과 **같은 함수**여야 둘이 갈리지 않는다.
+    """
+    return [
+        BlockedAgentOut(
+            agent=f.agent,
+            runtime_status=f.runtime_status,
+            reasoning=f.reasoning,
+            missing_data=list(f.missing_data),
+            detail=f.detail,
+        )
+        for f in outcome.blocked_failures
+    ]
+
+
 def _steps(plan: ExecutionPlan) -> list[StepOut]:
     return [
         StepOut(
@@ -322,6 +342,7 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             used_tools=list(s.used_tools),
             finding_codes=list(s.finding_codes),
             missing_data=list(s.missing_data),
+            reasoning=s.reasoning,
             llm_status=s.llm_status,
             llm_model=s.llm_model,
             llm_attempts=s.llm_attempts,

@@ -3,6 +3,7 @@
 import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
 import { EvidencePanel } from "@/components/EvidencePanel";
 import { Panel, SourceBadges } from "@/components/Badges";
+import { AGENT_LABEL } from "@/components/LlmTrace";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
 import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
 
@@ -61,6 +62,29 @@ export function ProcurementResult({
         <div className="rounded-lg border border-line bg-sunk px-3.5 py-3">
           {run.reason && (
             <p className="m-0 text-[13px] leading-relaxed">{run.reason}</p>
+          )}
+          {/*
+            🔴 **막은 부서가 왜 막았는지** (2026-09-02). 전에는 `run.reason` 한 줄이
+            전부라 *"경계를 내지 못한 에이전트: finance"* 만 보였다. 그것을 읽은
+            사람이 할 수 있는 것은 *"다시 돌려 본다"* 뿐이고, 그건 조사가 아니라
+            추측이다 (재현성 측정에서 6회 중 2회를 그렇게 놓쳤다).
+
+            ★ **문장은 서버가 만든다** (`detail`). 화면이 다시 조립하면 결론 문장과
+              여기가 갈린다 — 근거를 검증과 화면이 같은 객체로 보게 한 것과 같다.
+          */}
+          {run.blocked_failures.length > 0 && (
+            <ul className="m-0 mt-2 list-none space-y-1 p-0">
+              {run.blocked_failures.map((f) => (
+                <li key={f.agent} className="text-[12.5px] text-warn">
+                  <b className="font-semibold">{AGENT_LABEL[f.agent] ?? f.agent}</b>
+                  <span className="ml-1 font-mono text-[11.5px] text-faint">
+                    {f.runtime_status}
+                  </span>
+                  {/* 부서가 쓴 문장 그대로 — 화면이 다시 쓰지 않는다 */}
+                  <span className="ml-1.5">{f.detail}</span>
+                </li>
+              ))}
+            </ul>
           )}
           {run.judgment?.no_proposal_reason && (
             <p className="m-0 mt-2 text-[13px] leading-relaxed text-warn">
