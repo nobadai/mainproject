@@ -35,7 +35,7 @@ from app.finance.application.harness import (
     FinanceHarness,
     FinanceToolDenied,
     FinanceToolRegistry,
-    build_tool_adapter,
+    build_planner_tool_adapter,
 )
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.capabilities.procurement import (
@@ -495,9 +495,9 @@ def test_adjustment_validation_receives_only_source_owned_values():
     planner = ScriptedPlanner(
         [
             ToolAction("evaluate_purchase_scenario"),
-            ToolAction(
-                "validate_amount_adjustment",
-                {"axis": "amount", "candidate_amount_krw": invented},
+                ToolAction(
+                    "validate_amount_adjustment",
+                    {"axis": "amount", "candidate_amount_krw": invented},
             ),
             ToolAction(finalize=True),
         ]
@@ -509,6 +509,40 @@ def test_adjustment_validation_receives_only_source_owned_values():
     assert reply.runtime_status == "READY"
     for evidence in reply.evidences:
         assert evidence.value != float(invented)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"axis": "quantity"},
+        {"axis": "amount", "invented_field": 123},
+    ],
+)
+def test_malformed_adjustment_arguments_replan_without_execution(malformed):
+    planner = ScriptedPlanner(
+        [
+            ToolAction("evaluate_purchase_scenario"),
+            ToolAction("validate_amount_adjustment", malformed),
+            ToolAction("validate_amount_adjustment", {"axis": "amount"}),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, metadata = FinanceAgentController(Port(), planner, Finalizer()).run(
+        request("SCENARIO_VALIDATION", scenario_payload())
+    )
+
+    trace = _trace(metadata)
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "reject"
+    assert metadata.replans == 1
+    assert metadata.used_tools == ("evaluate_purchase_scenario", "validate_amount_adjustment")
+    assert trace["failure_kind"] != "INVALID_REQUEST"
+    rejected = [
+        step for step in trace["steps"]
+        if step["denied_reason"] == "PLANNER_CONTRACT_VIOLATION"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["executed_tool"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -969,7 +1003,7 @@ def test_tool_arguments_the_finance_contract_does_not_declare_are_refused():
 
 def test_adjustment_axis_is_declared_as_a_single_allowed_value():
     """금액 축만 조정한다는 불변식이 **모델이 보는 스키마에도** 적혀 있다."""
-    tool = build_tool_adapter("validate_amount_adjustment", lambda *_a, **_k: {})
+    tool = build_planner_tool_adapter("validate_amount_adjustment", lambda *_a, **_k: {})
 
     assert tool.args["axis"]["const"] == "amount"
-    assert set(tool.args) == {"axis", "candidate_amount_krw"}
+    assert set(tool.args) == {"axis"}

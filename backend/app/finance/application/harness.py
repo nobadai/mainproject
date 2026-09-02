@@ -33,7 +33,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.finance.capabilities import procurement as _pre
 from app.finance.capabilities import scenario as _scn
@@ -137,9 +137,9 @@ class _NoArguments(BaseModel):
 class _AmountAdjustmentArguments(BaseModel):
     """유일하게 값을 받는 Tool 의 인자.
 
-    ★ 값은 받되 **쓰지 않는다.** 실제로 실행에 들어가는 금액은
-      `guards.source_owned_arguments` 가 원천(payload · 결정론 Tool 결과)에서 다시
-      고른다 — 모델이 만든 숫자는 여기서 끝난다.
+    ★ Planner에는 금액을 노출하지 않는다. 실제로 실행에 들어가는 금액은
+      `source_owned_arguments` 가 원천(payload · 결정론 Tool 결과)에서 다시 고른다.
+      Planner가 숫자를 복사하거나 만들 자리를 주지 않는다.
 
     ★ `axis` 는 `Literal["amount"]` 다. 재무가 금액 축만 조정한다는 것은 이미
       `source_owned_arguments` 와 capability 양쪽이 막는 불변식이고, 여기서는 그것을
@@ -151,11 +151,14 @@ class _AmountAdjustmentArguments(BaseModel):
     axis: Literal["amount"] = Field(
         default="amount", description="Finance may adjust only the amount axis."
     )
+class _AmountAdjustmentCompatibilityArguments(_AmountAdjustmentArguments):
+    """기존 호출자 호환용 입력 계약. 실행값으로는 절대 사용하지 않는다."""
+
     candidate_amount_krw: float | None = Field(
         default=None,
         description=(
-            "Copy the exact finance_cap_amount_krw observed from a deterministic "
-            "Finance tool. Never create a number."
+            "Compatibility-only field. Its value is ignored; the Harness injects "
+            "the source-owned candidate amount immediately before execution."
         ),
     )
 
@@ -169,27 +172,33 @@ _ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
     "validate_amount_adjustment": _AmountAdjustmentArguments,
 }
 
+_EXECUTION_ARGUMENT_SCHEMAS: dict[str, type[BaseModel]] = {
+    **_ARGUMENT_SCHEMAS,
+    "validate_amount_adjustment": _AmountAdjustmentCompatibilityArguments,
+}
+
 #: 모델이 읽는 설명. **업무 규칙을 여기 적지 않는다** — 계산과 판정은 결정론 코드가
 #: 하고, 여기 있는 것은 *"이 Tool 이 어느 사실을 만든다"* 뿐이다.
 _TOOL_DESCRIPTIONS: dict[str, str] = {
     "assess_finance_position": (
         "Read the deterministic Finance position: available cash, payroll day and "
-        "the Finance policy values that carry evidence."
+        "the Finance policy values that carry evidence. Takes no arguments."
     ),
     "project_cashflow": (
         "Run the deterministic base cash-flow projection for the policy horizon. "
-        "Every Finance capability that needs a projection depends on this."
+        "Every Finance capability that needs a projection depends on this. Takes no arguments."
     ),
     "calculate_purchase_finance_cap": (
-        "Derive the deterministic purchase Finance Cap from the base projection."
+        "Derive the deterministic purchase Finance Cap from the base projection. "
+        "Takes no arguments."
     ),
     "analyze_payment_pressure": (
         "Derive the deterministic cash-pressure level and the critical payment dates "
-        "from the base projection."
+        "from the base projection. Takes no arguments."
     ),
     "evaluate_purchase_scenario": (
         "Evaluate the submitted purchase scenario deterministically: BASE/STRESS "
-        "projections, Finance Cap and the Finance verdict."
+        "projections, Finance Cap and the Finance verdict. Takes no arguments."
     ),
     "validate_amount_adjustment": (
         "Validate a source-owned amount alternative against the deterministic "
@@ -213,13 +222,18 @@ def finalize_tool() -> BaseTool:
     )
 
 
-def build_tool_adapter(name: str, run: Callable[[str, dict[str, Any]], Any]) -> BaseTool:
+def _build_tool_adapter(
+    name: str,
+    run: Callable[[str, dict[str, Any]], Any],
+    *,
+    argument_schemas: dict[str, type[BaseModel]],
+) -> BaseTool:
     """Finance Tool 하나를 LangChain Tool 로 감싼다.
 
     `run` 은 Harness 가 준다 — 어댑터는 무엇을 실행할지 정하지 않고, 정해진 통로로
     넘길 뿐이다.
     """
-    if name not in _ARGUMENT_SCHEMAS:
+    if name not in argument_schemas:
         raise KeyError(f"Finance tool has no LangChain adapter contract: {name}")
 
     def _invoke(**arguments: Any) -> Any:
@@ -229,8 +243,20 @@ def build_tool_adapter(name: str, run: Callable[[str, dict[str, Any]], Any]) -> 
         func=_invoke,
         name=name,
         description=_TOOL_DESCRIPTIONS[name],
-        args_schema=_ARGUMENT_SCHEMAS[name],
+        args_schema=argument_schemas[name],
     )
+
+
+def build_tool_adapter(name: str, run: Callable[[str, dict[str, Any]], Any]) -> BaseTool:
+    """Registry 직전 adapter: source-owned 값 주입 뒤의 실행 계약을 검증한다."""
+    return _build_tool_adapter(name, run, argument_schemas=_EXECUTION_ARGUMENT_SCHEMAS)
+
+
+def build_planner_tool_adapter(
+    name: str, run: Callable[[str, dict[str, Any]], Any]
+) -> BaseTool:
+    """Planner 노출 adapter: source-owned 금액을 모델 schema에서 제외한다."""
+    return _build_tool_adapter(name, run, argument_schemas=_ARGUMENT_SCHEMAS)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +478,36 @@ def source_owned_arguments(action: ToolAction, state: FinanceAgentState) -> dict
     return {"axis": "amount", "candidate_amount_krw": source_amount}
 
 
+def validate_planner_tool_arguments(action: ToolAction) -> dict[str, Any]:
+    """모델이 낸 인자를 실행 전에 정본 Pydantic 계약으로 검증한다.
+
+    LangChain adapter까지 미루면 ``ValidationError``가 실행 예외가 되어 모델의
+    잘못이 사용자 ``INVALID_REQUEST``로 바뀐다. 여기서는 Planner 계약 위반으로
+    올려 Controller의 bounded replan 경계로 보낸다.
+    """
+    schema = _ARGUMENT_SCHEMAS.get(action.tool_name or "")
+    if schema is None:
+        # Tool 이름 검사는 authorize가 소유한다. 여기서는 이름을 먼저 바꿔
+        # PLANNER_CONTRACT_VIOLATION으로 접지 않는다.
+        return action.arguments
+    try:
+        if action.tool_name == "validate_amount_adjustment":
+            # 기존 호출자가 보낸 알려진 compatibility field만 검증해서 받아들이되,
+            # Planner의 실행 요청에서는 즉시 제거한다. unknown field는 여전히 forbid다.
+            compatible = _AmountAdjustmentCompatibilityArguments.model_validate(
+                action.arguments
+            )
+            return {"axis": compatible.axis}
+        return schema.model_validate(action.arguments).model_dump()
+    except ValidationError as exc:
+        from app.finance.llm.planner import FinancePlannerContractViolation
+
+        raise FinancePlannerContractViolation(
+            f"Finance Planner tool arguments violate {action.tool_name} contract: "
+            f"{_short_reason(str(exc))}"
+        ) from exc
+
+
 # ---------------------------------------------------------------------------
 # Harness — 승인과 강제
 # ---------------------------------------------------------------------------
@@ -512,6 +568,10 @@ class FinanceHarness:
             name: build_tool_adapter(name, self._execute_validated)
             for name in CAPABILITY_OWNER.values()
         }
+        self._planner_adapters: dict[str, BaseTool] = {
+            name: build_planner_tool_adapter(name, self._execute_validated)
+            for name in CAPABILITY_OWNER.values()
+        }
         self._finalize_tool = finalize_tool()
 
     # ── capability 지형 ─────────────────────────────────────────
@@ -560,7 +620,8 @@ class FinanceHarness:
         if not capability_state.missing:
             return (self._finalize_tool,)
         return tuple(
-            self._adapters[name] for name in sorted(capability_state.executable_tools)
+            self._planner_adapters[name]
+            for name in sorted(capability_state.executable_tools)
         )
 
     # ── 승인 ───────────────────────────────────────────────────

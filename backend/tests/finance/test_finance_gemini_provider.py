@@ -12,7 +12,7 @@ import pytest
 from app.finance import messages
 from app.finance.application.harness import (
     FINALIZE_TOOL_NAME,
-    build_tool_adapter,
+    build_planner_tool_adapter,
     finalize_tool,
 )
 from app.finance.application.orchestration import FinanceAgentController
@@ -195,7 +195,7 @@ def _adapters(*names: str) -> tuple:
     """Harness 가 노출하는 것과 **같은** Tool 객체. 실행은 하지 않는다."""
     return tuple(
         finalize_tool() if name == FINALIZE_TOOL_NAME
-        else build_tool_adapter(name, lambda *_a, **_k: {})
+        else build_planner_tool_adapter(name, lambda *_a, **_k: {})
         for name in names
     )
 
@@ -734,7 +734,7 @@ def test_gemini_restricts_callable_functions_to_the_exposed_set(monkeypatch):
 
 
 def test_gemini_amount_argument_stays_a_declared_field(monkeypatch):
-    """유일하게 값을 받는 Tool 의 인자도 전송 형식에 그대로 실린다."""
+    """Planner에는 금액이 노출되지 않고 실행 경계에서 source-owned로 주입된다."""
     payload = _sent_gemini_payload(
         monkeypatch,
         ("validate_amount_adjustment",),
@@ -742,12 +742,10 @@ def test_gemini_amount_argument_stays_a_declared_field(monkeypatch):
     )
     declaration = payload["tools"][0]["function_declarations"][0]
     properties = declaration["parameters"]["properties"]
-    assert set(properties) == {"axis", "candidate_amount_krw"}
+    assert set(properties) == {"axis"}
     _assert_gemini_schema_is_wire_safe(declaration["parameters"])
     # 🔴 표현만 낮춘 것이지 계약은 그대로다 — 금액 축 하나만 부를 수 있다.
     assert properties["axis"]["enum"] == ["amount"]
-    assert properties["candidate_amount_krw"]["type"] == "number"
-    assert properties["candidate_amount_krw"]["nullable"] is True
 
 
 # ---------------------------------------------------------------------------
