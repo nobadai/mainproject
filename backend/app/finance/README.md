@@ -219,8 +219,15 @@ SCENARIO  = BASE + PROPOSED_SALES_COLLECTION
 ```
 
 제안 회수는 **확정 채권이 아니다.** BASE 로 승격되지 않고 실제 AR 로 적재되지도
-않는다. SCENARIO 최저 현금이 그 유입 덕분에만 기준을 넘으면
-(`depends_on_projected_inflow`) 통과가 아니라 `REVIEW_REQUIRED` 다.
+않는다. BASE 가 최소 현금을 밑돌면 SCENARIO 가 안전해도 `FAIL` 이다 — 아직 안 들어온
+돈이 이미 난 구멍을 가리지 못한다.
+
+`depends_on_projected_inflow` 는 **사실이지 판정이 아니다.** SCENARIO 최저 현금이 그
+유입 덕분에 올라갔다는 것은 reason code 로 남고, 종합 판정은 권위 있는 규칙(최소 현금
+정책)만 움직인다. 판정을 낮출 근거가 저장소에 없기 때문이다 — 설계서 v2.2.2 §9 의
+BASE/STRESS 규칙은 *매입 STRESS 오버레이가 기준을 밑돌 때* conditional 이라는 규칙이지
+*유입에 기대는가* 를 다루지 않는다. 판매 현금흐름 판정 기준이 정해지면 그때 근거와
+함께 넣는다.
 
 horizon 밖 회수일은 **날짜를 옮기지 않는다.** 동적 horizon 연장 규칙이 계약에 없어서
 연장을 지어내지 않고 `collection_within_horizon=False` 로 드러낸다.
@@ -273,16 +280,36 @@ payload.max_finance_allowed_payment_terms_days   상한(경계)이지 조정이 
 payload.max_finance_allowed_amount_krw
 ```
 
-### 아직 열지 않은 것
+### 실행 경로 상태
+
+재무 쪽은 열려 있다.
 
 ```text
-Controller 라우팅       finance_agent_runs_v22.mode CHECK 가 매입 두 mode 만 허용한다
-                        → DB 마이그레이션 필요
+finance_port(mode=SALES_VALIDATION)
+  → _controller_sales_validation
+  → FinanceAgentController
+  → Harness (SALES_VALIDATION_TOOLS)
+  → evaluate_sales_scenario
+  → AgentReply + ExecutionMetadata
+  → finance_agent_runs_v22 저장
+```
+
+저장 제약도 함께 열었다 — 신규 DDL 과 기존 DB 마이그레이션
+(`database/finance_agent_runs_v22_sales_validation.sql`) 둘 다.
+**순서가 중요하다.** 제약보다 Controller 를 먼저 열면 판정은 되는데 저장이 전부
+실패한다.
+
+아직 막힌 것은 재무 밖이다.
+
+```text
 Master capability 라우팅  FINANCIAL_VALIDATION → (finance, SALES_VALIDATION)
                         → 마스터에 capability 어휘 자체가 없다
-Sales AgentName         AgentName 에 sales 가 없다
+Sales AgentName         AgentName 에 sales 가 없다 (부를 대상이 아니다)
 Feedback Envelope       최종 필드명 미확정 (팀 결정)
 ```
+
+공통 `Mode` 에는 `SALES_VALIDATION` 어휘만 넣었다 — 그게 없으면 유효한 재무
+`AgentRequest` 자체를 만들 수 없다. 어휘와 라우팅은 다른 일이다.
 
 권위 있는 값이 없어 **오늘은 항상 닫히는** 정책들:
 

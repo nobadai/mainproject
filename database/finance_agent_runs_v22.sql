@@ -2,7 +2,12 @@ CREATE TABLE IF NOT EXISTS haetdeul.finance_agent_runs_v22 (
     run_id UUID PRIMARY KEY,
     request_id TEXT NOT NULL,
     agent TEXT NOT NULL CHECK (agent = 'finance'),
-    mode TEXT NOT NULL CHECK (mode IN ('PRE_PURCHASE', 'SCENARIO_VALIDATION')),
+    -- SALES_VALIDATION 은 판매 제안 재무 검증이다 (2026-09-02 Master 회신).
+    -- 매입 SCENARIO_VALIDATION 과 다른 책임이라 mode 를 나눠 둔다 — 합치면
+    -- (agent, mode, call_seq) 로 매입 검증과 판매 검증을 구분할 수 없다.
+    mode TEXT NOT NULL CHECK (
+        mode IN ('PRE_PURCHASE', 'SCENARIO_VALIDATION', 'SALES_VALIDATION')
+    ),
     as_of DATE NOT NULL,
     policy_version TEXT NOT NULL,
     trigger TEXT NOT NULL CHECK (trigger IN ('ML_COMPLETE', 'USER_REQUEST')),

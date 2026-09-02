@@ -24,10 +24,11 @@
 """
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.finance.capabilities.procurement import load_context
 from app.finance.db import FinanceAsOfDataPort
 from app.finance.rules import (
     SalesRuleResult,
@@ -50,6 +51,7 @@ from app.finance.sales_models import (
     VerifiedDirectCost,
 )
 from app.finance.tools import (
+    build_proposed_sales_collection_event,
     calculate_available_credit,
     calculate_collection_date,
     calculate_contribution_margin,
@@ -58,6 +60,7 @@ from app.finance.tools import (
     calculate_sales_amount,
     compare_reported_sales_amount,
     compose_sales_cost_basis,
+    project_sales_scenario_cashflow,
 )
 
 #: Finance 가 판매 제안 하나를 판정하려면 반드시 있어야 하는 Sales 유래 사실.
@@ -542,6 +545,95 @@ def _unique_refs(values: Sequence[str]) -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
+# 봉투 매핑 — 도메인 판정을 공통 어휘로 옮긴다
+#
+# ★ **마스터가 재무 판정을 다시 해석하지 않는다.** 재무가 PASS/REVIEW_REQUIRED/
+#   FAIL 로 말한 것을 봉투 어휘로 옮기는 일은 재무 소유다. 마스터가 옮기면 재무
+#   판정의 뜻이 마스터 코드에 흩어지고, 그때부터 두 곳을 같이 고쳐야 한다.
+#
+# ★ 원본을 지우지 않는다. `payload.finance_verdict` 는 봉투 상태와 **함께** 나간다 —
+#   `conditional` 만 남으면 "마진 경고"인지 "현금 의존"인지 되돌릴 수 없다.
+#
+# ★ 여기 사는 이유: Adapter 가 소유하는 계약이지만 Orchestration 도 같은 표를 읽어야
+#   한다. Adapter 는 Orchestration 을 import 하므로 반대 방향은 순환이 된다. 그래서
+#   **표는 상류(여기)에 한 벌 두고** Adapter 가 그것을 다시 내보낸다.
+# ---------------------------------------------------------------------------
+
+#: 재무 도메인 판정 → 공통 봉투 어휘. **이 방향으로만 쓴다.**
+SALES_VERDICT_TO_BUSINESS_STATUS: dict[str, str] = {
+    "PASS": "ok",
+    "REVIEW_REQUIRED": "conditional",
+    "FAIL": "reject",
+}
+
+
+def map_sales_finance_verdict(result: SalesValidationResult) -> tuple[str, str]:
+    """판매 검증 결과를 ``(runtime_status, business_status)`` 로 옮긴다.
+
+    판정이 없는 세 경우는 전부 `skipped` 다 — 없는 판정을 `reject` 로 바꾸면
+    "재무가 거절했다"가 되고, `ok` 로 바꾸면 보지 않은 것을 통과시킨 것이 된다.
+    """
+    if result.status == "INPUT_INCOMPLETE":
+        # Finance 는 멀쩡하다. 제안에 사실이 빠졌을 뿐이다.
+        return "READY", "skipped"
+    if result.status == "RUNTIME_NOT_READY":
+        return "RUNTIME_NOT_READY", "skipped"
+    if result.status == "ERROR":
+        return "ERROR", "skipped"
+    if result.finance_verdict is None:
+        return result.runtime_status, "skipped"
+    return result.runtime_status, SALES_VERDICT_TO_BUSINESS_STATUS[result.finance_verdict]
+
+
+def sales_business_status(payload: Mapping[str, Any]) -> str:
+    """이미 payload 로 굳은 판매 결과에서 봉투 업무 상태만 읽는다.
+
+    Orchestration 은 Tool 이 낸 payload 만 들고 있다 — 같은 표를 두 벌 만들지 않으려고
+    `map_sales_finance_verdict` 와 같은 규칙을 여기서 dict 입력으로 쓴다.
+    """
+    if payload.get("status") != "EVALUATED":
+        return "skipped"
+    verdict = payload.get("finance_verdict")
+    if verdict is None:
+        return "skipped"
+    return SALES_VERDICT_TO_BUSINESS_STATUS[str(verdict)]
+
+
+def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
+    """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
+
+    ★ 마스터는 이것을 **통째로** 나른다. 그래서 판정을 만든 근거가 전부 여기 있어야
+      한다 — 하나라도 내부 상태에 남겨두면 회송된 회신에서 그 사실이 사라진다.
+
+    ★ 결제일수 상한은 payload 필드다. 공통 `SuggestedAdjustment` 축이 아니다 —
+      재무의 조정 축은 `amount` 하나뿐이고, 상한은 조정이 아니라 경계다.
+    """
+    summary = result.financial_summary
+    return {
+        "status": result.status,
+        # 봉투 상태와 나란히 원본 판정을 남긴다.
+        "finance_verdict": result.finance_verdict,
+        "scenario_id": result.scenario_id,
+        "financial_summary": (None if summary is None else summary.model_dump()),
+        "rule_results": [dict(rule) for rule in result.rule_results],
+        "reason_codes": list(result.reason_codes),
+        "missing_fields": list(result.missing_fields),
+        "missing_data": list(result.missing_data),
+        "data_quality": (
+            "COMPLETE"
+            if not result.missing_fields and not result.missing_data
+            else "INCOMPLETE"
+        ),
+        "max_finance_allowed_amount_krw": result.max_finance_allowed_amount_krw,
+        "max_finance_allowed_payment_terms_days": (
+            result.max_finance_allowed_payment_terms_days
+        ),
+        "evidence_refs": list(result.evidence_refs),
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # Harness 진입점 — 인자를 받지 않는다
 # ---------------------------------------------------------------------------
 
@@ -555,20 +647,73 @@ def run_sales_validation(
       정책은 Finance Policy 가 소유한다 — 모델이 수량·단가·원가·결제일수·여신을
       만들거나 베껴 넣을 자리를 두지 않는다.
 
-    ★ 판매 마진 임계값 · 최대 결제일수 · 여신한도 · 회수위험 정책은 현재
-      `FinancePolicy` 의 닫힌 키에도 `agent_policy_config` 의 finance domain 에도
-      없다. 그래서 아래 호출은 오늘 전부 ``None`` 을 넘기고, 결과는 값을 지어내는
-      대신 RUNTIME_NOT_READY 와 없는 정책 이름을 돌려준다.
+    ★ **있는 것은 쓰고 없는 것은 없는 채로 넘긴다.** 최소 현금과 현금흐름은 권위
+      있는 Finance 자료라 실제로 읽는다. 반면 판매 마진 임계값 · 최대 결제일수 ·
+      여신한도 · 회수위험 정책은 `FinancePolicy` 의 닫힌 키에도
+      `agent_policy_config` 의 finance domain 에도 없다 — 그 자리에는 ``None`` 이
+      가고, 결과는 값을 지어내는 대신 RUNTIME_NOT_READY 와 없는 정책 이름을 낸다.
     """
-    del args, data_port
-    return evaluate_sales_scenario(
-        state.request.payload,
-        finance_minimum_margin_rate=None,
-        finance_warning_margin_rate=None,
-        max_finance_allowed_payment_terms_days=None,
-        minimum_cash_balance_krw=None,
-        credit_limit_krw=None,
-        receivable_facts=None,
-        scenario_cashflow=None,
-        collection_risk_policy=None,
-    ).model_dump()
+    del args
+    payload = state.request.payload
+    sales_input, _ = parse_sales_validation_input(payload)
+
+    minimum_cash: Decimal | None = None
+    scenario_cashflow: SalesScenarioCashflow | None = None
+    if sales_input is not None:
+        minimum_cash, scenario_cashflow = _load_sales_cashflow_context(
+            data_port, state, sales_input
+        )
+
+    return build_sales_validation_payload(
+        evaluate_sales_scenario(
+            payload,
+            # 아래 넷은 저장소에 권위 있는 값이 아직 없다 (팀 결정 대기).
+            finance_minimum_margin_rate=None,
+            finance_warning_margin_rate=None,
+            max_finance_allowed_payment_terms_days=None,
+            credit_limit_krw=None,
+            # 거래처 채권 조회 계약이 아직 없다 — 0으로 메우지 않는다.
+            receivable_facts=None,
+            collection_risk_policy=None,
+            # 여기 둘은 실재하는 Finance 자료다.
+            minimum_cash_balance_krw=minimum_cash,
+            scenario_cashflow=scenario_cashflow,
+        )
+    )
+
+
+def _load_sales_cashflow_context(
+    data_port: FinanceAsOfDataPort,
+    state: Any,
+    sales_input: SalesValidationInput,
+) -> tuple[Decimal | None, SalesScenarioCashflow | None]:
+    """확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영을 만든다.
+
+    회수일을 못 구하면(기준일이나 결제일수가 없으면) 투영을 만들지 않는다 —
+    날짜를 지어내면 그 순간 없는 사실이 현금흐름에 들어간다.
+    """
+    if sales_input.collection_reference_date is None or sales_input.payment_days is None:
+        return None, None
+
+    position, policy, base_events = load_context(data_port, state)
+    horizon = state.request.context.as_of + timedelta(days=policy.cashflow_projection_days)
+    sales_amount = calculate_sales_amount(
+        quantity_kg=sales_input.quantity_kg, unit_price_krw=sales_input.unit_price_krw
+    )
+    proposed = build_proposed_sales_collection_event(
+        proposal_ref=sales_input.scenario_id,
+        collection_date=calculate_collection_date(
+            reference_date=sales_input.collection_reference_date,
+            payment_days=sales_input.payment_days,
+        ),
+        sales_amount_krw=sales_amount,
+        source_ref=sales_input.source_ref,
+    )
+    scenario_cashflow = project_sales_scenario_cashflow(
+        as_of=state.request.context.as_of,
+        current_cash_krw=Decimal(position["current_cash_krw"]),
+        horizon_end=horizon,
+        base_cash_events=base_events,
+        proposed_collection=proposed,
+    )
+    return policy.minimum_cash_balance_krw, scenario_cashflow

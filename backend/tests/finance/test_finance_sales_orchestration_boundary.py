@@ -99,18 +99,32 @@ def test_master_still_has_no_sales_agent_name():
     assert "sales" not in get_args(AgentName)
 
 
-def test_master_has_no_capability_vocabulary_to_route_financial_validation():
-    """🔴 `FINANCIAL_VALIDATION → (finance, SALES_VALIDATION)` 라우팅의 전제가 없다.
+def test_master_knows_the_sales_validation_mode_but_not_the_routing():
+    """어휘는 들어왔고 **라우팅은 아직 없다.** 둘을 섞지 않는다.
 
-    마스터에 capability 어휘 자체가 없다. 여기에 라우팅을 만들면 그것은 연동이
-    아니라 **마스터 재설계**다 — 이 작업의 범위가 아니다.
+    `Mode` 에 SALES_VALIDATION 이 있어야 유효한 재무 `AgentRequest` 를 만들 수 있다.
+    하지만 영업 제안이 거기까지 오는 길(`FINANCIAL_VALIDATION` capability 라우팅)은
+    없다 — capability 어휘 자체가 마스터에 없다. 만들면 연동이 아니라 마스터
+    재설계다.
     """
+    from typing import get_args
+
     from app.master import envelope
+    from app.master.envelope import AgentName, Mode, agent_allowed_modes
 
-    source = pathlib.Path(envelope.__file__).read_text(encoding="utf-8")
+    assert "SALES_VALIDATION" in get_args(Mode)
+    assert "SALES_VALIDATION" in agent_allowed_modes("finance")
 
-    assert "FINANCIAL_VALIDATION" not in source
-    assert "SALES_VALIDATION" not in source
+    # 라우팅의 전제가 없다 — capability 어휘도, 부를 대상으로서의 영업도 없다.
+    assert not hasattr(envelope, "Capability")
+    assert "sales" not in get_args(AgentName)
+
+
+def test_sales_validation_is_not_opened_to_other_agents():
+    from app.master.envelope import agent_allowed_modes
+
+    assert "SALES_VALIDATION" not in agent_allowed_modes("inventory")
+    assert "SALES_VALIDATION" not in agent_allowed_modes("purchase")
 
 
 def test_finance_side_of_the_contract_is_nevertheless_complete():

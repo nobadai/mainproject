@@ -5,10 +5,9 @@
     · Planner 는 판매 Tool 에 숫자를 실을 자리가 없다
     · 매입 Tool 계약(이름·의존·필수 capability)은 그대로다
 
-★ 그리고 **아직 열지 않은 문**을 사고가 아니라 결정으로 남긴다.
-  `finance_agent_runs_v22.mode` 의 CHECK 제약이 두 매입 mode 만 허용해서,
-  Controller 에 연결하면 실행이력 저장이 전부 깨진다. DB 마이그레이션과 Master
-  capability 라우팅이 함께 와야 열 수 있다.
+★ 그리고 **열린 문의 순서**를 못 박는다. 실행이력 `mode` CHECK 에 SALES_VALIDATION 을
+  넣은 뒤에 Controller 를 열었다 — 반대로 하면 판정은 되는데 저장이 전부 깨진다.
+  그래서 DDL/마이그레이션과 Controller 허용목록은 같이 움직인다.
 """
 
 from types import SimpleNamespace
@@ -197,8 +196,9 @@ def test_missing_sales_policies_are_reported_not_invented():
 
     result = run_sales_validation(None, {}, state)  # type: ignore[arg-type]
 
-    assert result["runtime_status"] == "RUNTIME_NOT_READY"
+    assert result["status"] == "RUNTIME_NOT_READY"
     assert result["finance_verdict"] is None
+    assert result["data_quality"] == "INCOMPLETE"
     for policy in (
         "finance_minimum_margin_rate",
         "finance_warning_margin_rate",
@@ -214,26 +214,54 @@ def test_missing_sales_policies_are_reported_not_invented():
 # ---------------------------------------------------------------------------
 
 
-def test_sales_validation_is_not_yet_routed_through_the_controller():
-    """🔴 여기를 열기 전에 두 가지가 먼저 와야 한다.
+def test_sales_validation_is_routed_through_the_controller():
+    """실행이력 `mode` CHECK 에 SALES_VALIDATION 이 들어간 뒤에 열었다.
 
-        · `finance_agent_runs_v22.mode` CHECK 제약에 SALES_VALIDATION 추가 (DB 마이그레이션)
-        · Master capability 라우팅 FINANCIAL_VALIDATION → (finance, SALES_VALIDATION)
-
-    지금 연결하면 실행이력 저장이 CHECK 위반으로 전부 깨진다. 이 시험은 그 경계를
-    **의도된 것으로** 못 박아 둔다 — 지우려면 위 둘을 먼저 해야 한다.
+    ★ 순서가 중요하다. 제약보다 먼저 열면 판정은 되는데 **저장이 전부 실패한다.**
+      그래서 DDL/마이그레이션과 이 허용목록은 같이 움직인다.
     """
-    assert _CONTROLLER_MODES == ("PRE_PURCHASE", "SCENARIO_VALIDATION")
-    assert "SALES_VALIDATION" not in _CONTROLLER_MODES
+    assert _CONTROLLER_MODES == (
+        "PRE_PURCHASE",
+        "SCENARIO_VALIDATION",
+        "SALES_VALIDATION",
+    )
 
 
-def test_finance_port_does_not_silently_treat_sales_as_a_purchase_mode():
+def test_controller_mode_allowlist_stays_closed():
+    # 모르는 mode 가 실행이력에 새어 들어가지 않는다.
+    assert "GENERATE_SCENARIOS" not in _CONTROLLER_MODES
+    assert "STATUS_QUERY" not in _CONTROLLER_MODES
+
+
+def test_finance_port_dispatches_sales_explicitly_not_by_falling_through():
     import inspect
 
     from app.finance import adapter
 
     source = inspect.getsource(adapter.finance_port)
 
-    # 판매 요청이 매입 분기로 흘러들지 않는다 — 미구현으로 떨어진다.
-    assert "SALES_VALIDATION" not in source
+    # 판매는 **자기 분기**로 간다 — 매입 분기로 흘러들지도, 미구현으로 떨어지지도 않는다.
+    assert '"SALES_VALIDATION"' in source
+    assert "_controller_sales_validation(request)" in source
+    # 모르는 mode 는 여전히 닫힌다.
     assert "_not_implemented(request)" in source
+
+
+def test_sales_controller_does_not_reuse_the_purchase_scenario_path():
+    import ast
+    import inspect
+
+    from app.finance import adapter
+
+    tree = ast.parse(inspect.getsource(adapter._controller_sales_validation))
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    # 매입 제안 스키마로 판매 payload 를 검증하지 않는다.
+    assert "_purchase_proposal" not in called
+    assert "PurchaseProposal" not in called
+    # 경계 확인과 Controller 실행만 한다.
+    assert {"_controller_boundary", "_controller_run"} <= called

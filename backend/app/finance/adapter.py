@@ -32,6 +32,11 @@ from pydantic import ValidationError
 
 from app.finance import messages
 from app.finance.application.orchestration import FinanceAgentController
+from app.finance.capabilities.sales import (
+    SALES_VERDICT_TO_BUSINESS_STATUS,
+    build_sales_validation_payload,
+    map_sales_finance_verdict,
+)
 from app.finance.db import FinanceDataNotReady, get_current_finance_runtime_context
 from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
@@ -40,7 +45,6 @@ from app.finance.execution import (
     save_finance_execution,
 )
 from app.finance.llm.client import finance_llm_enabled
-from app.finance.sales_models import SalesValidationResult
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
@@ -87,6 +91,8 @@ def finance_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         return _status_query(request)
     if request.mode == "SCENARIO_VALIDATION":
         return _controller_scenario_validation(request)
+    if request.mode == "SALES_VALIDATION":
+        return _controller_sales_validation(request)
     return _not_implemented(request)
 
 
@@ -174,6 +180,21 @@ def _controller_scenario_validation(request: AgentRequest) -> tuple[AgentReply, 
     proposal = _purchase_proposal(request.payload)
     if proposal.meta.as_of != request.context.as_of:
         return _invalid_scenario_as_of(request, run_id, proposal.meta.as_of)
+    context, not_ready = _controller_boundary(request)
+    if not_ready is not None:
+        return not_ready
+    assert context is not None
+    return _controller_run(request, context)
+
+
+def _controller_sales_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """판매 제안 재무 검증. **매입 시나리오 검증 경로를 재사용하지 않는다.**
+
+    ★ 매입처럼 `PurchaseProposal` 로 payload 를 미리 검증하지 않는다. 판매 payload 의
+      필수 항목이 무엇인지는 재무 판매 Capability 가 소유하고, 빠진 것은 `ERROR` 가
+      아니라 `INPUT_INCOMPLETE`(→ `skipped`) 로 나간다 — 제안이 미완성인 것은 재무
+      고장이 아니다.
+    """
     context, not_ready = _controller_boundary(request)
     if not_ready is not None:
         return not_ready
@@ -664,7 +685,12 @@ def _not_ready(
     return _recorded(request, reply, _meta(request, run_id, tools))
 
 
-_CONTROLLER_MODES = ("PRE_PURCHASE", "SCENARIO_VALIDATION")
+#: 실행이력에 남기는 mode. **닫힌 허용목록이다** — 모르는 mode 는 여기 없다.
+#:
+#: ★ `SALES_VALIDATION` 은 `finance_agent_runs_v22.mode` CHECK 에
+#:   SALES_VALIDATION 이 들어간 뒤에 열었다 (신규 DDL + 기존 DB 마이그레이션).
+#:   제약보다 먼저 열면 판정은 되는데 **저장이 전부 실패한다.**
+_CONTROLLER_MODES = ("PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION")
 
 
 def _recorded(
@@ -700,75 +726,17 @@ def _recorded(
 
 
 # ---------------------------------------------------------------------------
-# Sales Core Phase 8 — 판매 재무 판정의 봉투 매핑
+# 판매 재무 판정 봉투 매핑 — **재무가 소유한다**
 #
-# ★ **도메인 판정을 마스터가 다시 해석하지 않는다.** 재무가 PASS/REVIEW_REQUIRED/
-#   FAIL 로 말한 것을 봉투 어휘로 옮기는 일은 Finance Adapter 소유다. 마스터가
-#   옮기면 재무 판정의 뜻이 마스터 코드에 흩어지고, 그때부터 두 곳을 같이 고쳐야
-#   한다.
-#
-# ★ 원본을 지우지 않는다. `payload.finance_verdict` 는 봉투 상태와 **함께** 나간다 —
-#   `conditional` 만 남으면 "마진 경고"인지 "현금 의존"인지 되돌릴 수 없다.
-#
-# 🔴 아직 `finance_port` 에 연결되지 않았다. `finance_agent_runs_v22.mode` CHECK 와
-#   Master capability 라우팅(FINANCIAL_VALIDATION → finance/SALES_VALIDATION)이
-#   함께 와야 열 수 있다. 그때까지 이 매핑은 계약으로만 존재하고 시험된다.
+# 표와 함수는 `capabilities/sales.py` 에 한 벌만 둔다 (Orchestration 도 같은 표를
+# 읽어야 하는데, Adapter → Orchestration 방향 import 라 반대는 순환이 된다).
+# 여기서 다시 내보내는 이유는 **밖에서 보는 주소를 재무 Adapter 로 고정**하기
+# 위해서다 — 마스터가 이 매핑을 자기 코드에서 다시 하지 않는다.
 # ---------------------------------------------------------------------------
 
-#: 재무 도메인 판정 → 공통 봉투 어휘. **이 방향으로만 쓴다.**
-SALES_VERDICT_TO_BUSINESS_STATUS: dict[str, str] = {
-    "PASS": "ok",
-    "REVIEW_REQUIRED": "conditional",
-    "FAIL": "reject",
-}
-
-
-def map_sales_finance_verdict(result: SalesValidationResult) -> tuple[str, str]:
-    """판매 검증 결과를 ``(runtime_status, business_status)`` 로 옮긴다.
-
-    판정이 없는 세 경우는 전부 `skipped` 다 — 없는 판정을 `reject` 로 바꾸면
-    "재무가 거절했다"가 되고, `ok` 로 바꾸면 보지 않은 것을 통과시킨 것이 된다.
-    """
-    if result.status == "INPUT_INCOMPLETE":
-        # Finance 는 멀쩡하다. 제안에 사실이 빠졌을 뿐이다.
-        return "READY", "skipped"
-    if result.status == "RUNTIME_NOT_READY":
-        return "RUNTIME_NOT_READY", "skipped"
-    if result.status == "ERROR":
-        return "ERROR", "skipped"
-    if result.finance_verdict is None:
-        return result.runtime_status, "skipped"
-    return result.runtime_status, SALES_VERDICT_TO_BUSINESS_STATUS[result.finance_verdict]
-
-
-def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
-    """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
-
-    ★ 마스터는 이것을 **통째로** 나른다. 그래서 판정을 만든 근거가 전부 여기 있어야
-      한다 — 하나라도 내부 상태에 남겨두면 회송된 회신에서 그 사실이 사라진다.
-
-    ★ 결제일수 상한은 payload 필드다. 공통 `SuggestedAdjustment` 축이 아니다 —
-      재무의 조정 축은 `amount` 하나뿐이고, 상한은 조정이 아니라 경계다.
-    """
-    summary = result.financial_summary
-    return {
-        "status": result.status,
-        # 봉투 상태와 나란히 원본 판정을 남긴다.
-        "finance_verdict": result.finance_verdict,
-        "scenario_id": result.scenario_id,
-        "financial_summary": (None if summary is None else summary.model_dump()),
-        "rule_results": [dict(rule) for rule in result.rule_results],
-        "reason_codes": list(result.reason_codes),
-        "missing_fields": list(result.missing_fields),
-        "missing_data": list(result.missing_data),
-        "data_quality": (
-            "COMPLETE"
-            if not result.missing_fields and not result.missing_data
-            else "INCOMPLETE"
-        ),
-        "max_finance_allowed_amount_krw": result.max_finance_allowed_amount_krw,
-        "max_finance_allowed_payment_terms_days": (
-            result.max_finance_allowed_payment_terms_days
-        ),
-        "evidence_refs": list(result.evidence_refs),
-    }
+__all__ = [
+    "SALES_VERDICT_TO_BUSINESS_STATUS",
+    "build_sales_validation_payload",
+    "finance_port",
+    "map_sales_finance_verdict",
+]

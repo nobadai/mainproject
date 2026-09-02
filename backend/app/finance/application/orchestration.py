@@ -42,6 +42,7 @@ from app.finance.application.harness import (
     validate_finance_scenario_output,
     validate_planner_tool_arguments,
 )
+from app.finance.capabilities.sales import sales_business_status
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import (
     _adjustment_from_dict,
@@ -86,6 +87,10 @@ def build_business_result(
 ) -> tuple[dict[str, Any], list[Evidence], str, list[SuggestedAdjustment]]:
     if runtime_status != "READY":
         return {}, [], "skipped", []
+    if request.mode == "SALES_VALIDATION":
+        # ★ 매입 분기로 흘려보내지 않는다. 흘려보내면 아래 PRE_PURCHASE 조립이
+        #   판정과 무관하게 `"ok"` 를 내놓는다 — 재무가 보지도 않은 제안이 통과된다.
+        return _sales_business_result(states)
     if request.mode == "SCENARIO_VALIDATION":
         results = [scenario_result(state) for state in states]
         verdicts = [result["verdict"] for result in results]
@@ -126,6 +131,59 @@ def build_business_result(
         evidences.extend(result.get("evidence", []))
     evidence_by_claim = {item.claim: item for item in evidences}
     return payload, list(evidence_by_claim.values()), "ok", []
+
+
+#: Controller 가 실제로 돌리는 mode. **닫힌 허용목록이다** — 모르는 mode 는 여기 없고,
+#: 없으면 실행 전에 죽는다. 조용히 매입 경로로 흘려보내지 않는다.
+_CONTROLLER_EXECUTION_MODES: frozenset[str] = frozenset(
+    {"PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION"}
+)
+
+
+def _lift_sales_runtime_status(
+    request: AgentRequest, outcome: Any, payload: dict[str, Any]
+) -> None:
+    """판매 판정이 '재무 쪽 사정으로 못 봤다' 면 봉투 runtime 도 그렇게 세운다.
+
+    ★ 매입에서는 자료 부족이 `FinanceDataNotReady` 예외로 올라와 곧장
+      `RUNTIME_NOT_READY` 가 된다. 판매에서는 **없는 정책이 예외가 아니라 사실**이라
+      결과 안에 담겨 나온다 — 그대로 두면 봉투는 `READY` 인데 내용은 "못 봤다" 인
+      상태가 되고, 마스터는 재무가 정상 판정한 것으로 읽는다.
+
+    ★ `INPUT_INCOMPLETE` 은 올리지 않는다. 제안에 사실이 빠진 것은 **재무 고장이
+      아니므로** runtime 은 `READY` 로 두고 업무 상태만 `skipped` 다.
+    """
+    if request.mode != "SALES_VALIDATION" or outcome.runtime_status != "READY":
+        return
+    if payload.get("status") != "RUNTIME_NOT_READY":
+        return
+    outcome.runtime_status = "RUNTIME_NOT_READY"
+    outcome.failure_kind = "NOT_READY"
+    missing = payload.get("missing_data") or ()
+    outcome.missing_data = tuple(dict.fromkeys((*outcome.missing_data, *missing)))
+
+
+def _sales_business_result(
+    states: list[FinanceAgentState],
+) -> tuple[dict[str, Any], list[Evidence], str, list[SuggestedAdjustment]]:
+    """판매 검증 Tool 이 낸 payload 를 그대로 회신 payload 로 쓴다.
+
+    ★ 다시 조립하지 않는다. 그 payload 는 이미 Refeed 를 견디도록 자기 완결적으로
+      만들어졌다 — 여기서 골라 담으면 그 순간 근거가 잘려 나간다.
+
+    ★ 조정안을 만들지 않는다. 재무의 조정 축은 `amount` 하나인데, 판매 제안에 대한
+      권위 있는 금액 대안을 낼 근거(마진·여신 정책)가 아직 없다. 없는 근거로 조정을
+      제안하지 않는다.
+    """
+    payload: dict[str, Any] = {}
+    for state in states:
+        for observation in state.observations:
+            result = observation.get("result", {})
+            if result.get("status") is not None:
+                payload = _json_value(dict(result))
+    if not payload:
+        return {}, [], "skipped", []
+    return payload, [], sales_business_status(payload), []
 
 
 def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
@@ -522,11 +580,10 @@ class FinanceAgentController:
         ★ 순서가 곧 계약이다. 설명은 결과가 확정된 뒤에만 만들 수 있고(Finalizer 는
           검증된 Evidence 만 본다), 이력은 회신이 확정된 뒤에 남는다.
         """
-        if request.agent != "finance" or request.mode not in (
-            "PRE_PURCHASE",
-            "SCENARIO_VALIDATION",
-        ):
-            raise ValueError("Finance v2.2 supports only its two core modes")
+        if request.agent != "finance" or request.mode not in _CONTROLLER_EXECUTION_MODES:
+            raise ValueError(
+                f"Finance Controller supports only {sorted(_CONTROLLER_EXECUTION_MODES)}"
+            )
         started = time.monotonic()
         run_id = str(uuid4())
 
@@ -534,6 +591,7 @@ class FinanceAgentController:
         payload, evidences, business_status, adjustments = build_business_result(
             request, outcome.states, outcome.runtime_status
         )
+        _lift_sales_runtime_status(request, outcome, payload)
         explanation = self._explain(request, outcome, payload, evidences, business_status)
         elapsed = int((time.monotonic() - started) * 1000)
 
