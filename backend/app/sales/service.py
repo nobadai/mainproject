@@ -435,7 +435,7 @@ def _missing_capabilities(
             capabilities.append(
                 MissingCapability(
                     candidate_id=candidate.candidate_id,
-                    capability="FINANCE_SALES_VALIDATION",
+                    capability="FINANCIAL_VALIDATION",
                     reason="결제 조건·신용·매출채권·현금 상태는 Finance 검증이 필요합니다.",
                 )
             )
@@ -443,7 +443,7 @@ def _missing_capabilities(
             capabilities.append(
                 MissingCapability(
                     candidate_id=candidate.candidate_id,
-                    capability="LOGISTICS_SUPPLY_FEASIBILITY",
+                    capability="SELLABLE_SUPPLY_CONTEXT",
                     reason="수량·신선도·납기 가능성은 Logistics 검증이 필요합니다.",
                 )
             )
@@ -458,7 +458,7 @@ def _missing_capabilities(
             capabilities.append(
                 MissingCapability(
                     candidate_id=candidate.candidate_id,
-                    capability="ADDITIONAL_PROCUREMENT_FEASIBILITY",
+                    capability="ADDITIONAL_SUPPLY_CONTEXT",
                     reason="요청 수량을 유지하려면 추가 확보 가능 여부를 확인해야 합니다.",
                 )
             )
