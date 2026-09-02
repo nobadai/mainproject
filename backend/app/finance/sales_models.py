@@ -20,7 +20,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.finance.schemas import CashflowProjection, _reject_boolean
+from app.finance.rules import SalesRuleResult
+from app.finance.schemas import (
+    CashflowProjection,
+    FinalVerdict,
+    RuntimeStatus,
+    _reject_boolean,
+)
 from app.orchestrator.contracts_core import EvidenceGrade
 
 # ---------------------------------------------------------------------------
@@ -183,3 +189,115 @@ class PartnerReceivableFacts(BaseModel):
     open_receivable_count: int = Field(ge=0)
     overdue_receivable_count: int = Field(ge=0)
     source_refs: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 6 — Finance 내부 판매 검증 입력/결과
+#
+# ★ Sales 의 Pydantic API 모델을 Finance 정본으로 쓰지 않는다. 편해 보이지만 그
+#   순간 Sales 의 화면 계약이 Finance 판정의 계약이 된다 — 저쪽이 필드 하나를
+#   바꾸면 이쪽 판정이 조용히 바뀐다. Finance 는 **자기가 쓰는 사실만** 자기 모양
+#   으로 갖는다. Master 가 Sales 회신 payload 를 통째로 넘겨도 여기서 필요한
+#   부분집합만 엄격히 검증한다.
+# ---------------------------------------------------------------------------
+
+#: 결제 방식. INSTALLMENT 는 권위 있는 분할결제 정책이 없어 판정되지 않는다.
+SalesPaymentTermsType = Literal["SINGLE", "INSTALLMENT"]
+
+
+class SalesSupply(BaseModel):
+    """공급 확정/조건부 구분.
+
+    ★ 조건부 물량을 확정 재고인 것처럼 원가에 넣지 않으려고 나눠 받는다.
+      확정 재고원가는 확정 물량에 대한 사실이지 제안 전체에 대한 사실이 아니다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    confirmed_quantity_kg: Decimal = Field(ge=0)
+    conditional_quantity_kg: Decimal = Field(default=Decimal(0), ge=0)
+    dependency_ref: str | None = None
+
+    @field_validator("confirmed_quantity_kg", "conditional_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_quantity(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesValidationInput(BaseModel):
+    """Finance 가 판매 제안 1건을 검증하는 데 실제로 쓰는 사실만 담는다.
+
+    envelope 이 소유하는 것(request_id · as_of · mode · call_seq · run 계보)은
+    여기 두지 않는다 — 정본을 두 벌 만들면 어느 쪽이 맞는지 알 수 없게 된다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(min_length=1)
+    partner_id: str = Field(min_length=1)
+    item: str = Field(min_length=1)
+    quantity_kg: Decimal = Field(ge=0)
+    unit_price_krw: Decimal = Field(ge=0)
+    reported_sales_amount_krw: Decimal = Field(ge=0)
+    payment_terms_type: SalesPaymentTermsType
+    #: null 은 0 도 "제한 없음"도 아니다 — 결제일수를 못 받았다는 사실이다.
+    payment_days: int | None = Field(default=None, ge=0)
+    #: 회수일 기준점. 그 의미(납품일·송장일·계약일)는 여전히 호출자가 소유한다.
+    collection_reference_date: date | None = None
+    supply: SalesSupply | None = None
+    inventory_cost_basis: InventoryCostBasis | None = None
+    direct_costs: tuple[VerifiedDirectCost, ...] = ()
+    source_ref: str = Field(min_length=1)
+
+    @field_validator("quantity_kg", "unit_price_krw", "reported_sales_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesFinancialSummary(BaseModel):
+    """계산된 사실만. 못 구한 값은 0이 아니라 None 이다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recalculated_sales_amount_krw: Decimal
+    reported_sales_amount_krw: Decimal
+    amount_difference_krw: Decimal
+    amount_match: bool
+    sales_cost_basis_krw: Decimal | None = None
+    contribution_margin_krw: Decimal | None = None
+    contribution_margin_rate: Decimal | None = None
+    collection_date: date | None = None
+    current_partner_ar_krw: Decimal | None = None
+    projected_partner_ar_krw: Decimal | None = None
+    credit_limit_krw: Decimal | None = None
+    available_credit_krw: Decimal | None = None
+    overdue_ar_krw: Decimal | None = None
+    base_projected_cash_min: Decimal | None = None
+    scenario_projected_cash_min: Decimal | None = None
+    depends_on_projected_inflow: bool | None = None
+    collection_within_horizon: bool | None = None
+
+
+class SalesValidationResult(BaseModel):
+    """Finance 내부 판매 검증 결과 — Master AgentReply 가 아니다.
+
+    Refeed 를 견디도록 **자기 완결적**으로 만든다. 판정을 만든 근거(개별 규칙 ·
+    reason code · 없는 데이터/정책 · Evidence 계보)를 임시 상태에 숨기지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str | None
+    runtime_status: RuntimeStatus
+    #: INPUT_INCOMPLETE 는 Finance 고장이 아니라 제안에 사실이 빠졌다는 뜻이다.
+    status: Literal["EVALUATED", "INPUT_INCOMPLETE", "RUNTIME_NOT_READY", "ERROR"]
+    finance_verdict: FinalVerdict | None
+    financial_summary: SalesFinancialSummary | None = None
+    rule_results: tuple[SalesRuleResult, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    max_finance_allowed_amount_krw: Decimal | None = None
+    max_finance_allowed_payment_terms_days: int | None = None
+    missing_fields: tuple[str, ...] = ()
+    missing_data: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
