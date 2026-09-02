@@ -46,13 +46,6 @@ _REQUIRED_FINANCE_STATE_FIELDS = (
 )
 
 
-class FinanceRuleResult(TypedDict):
-    verdict: Verdict
-    max_feasible_amount_krw: Decimal | None
-    hard_constraints: list[HardConstraint]
-    soft_warnings: list[SoftWarning]
-
-
 class FinanceRuntimeRuleResult(TypedDict):
     runtime_status: RuntimeStatus
     verdict: FinalVerdict | None
