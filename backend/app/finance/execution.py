@@ -1,17 +1,245 @@
-"""실행 관측 — Critic 이 재무를 검사할 수 있게 하는 사이드카.
+"""실행 흔적 — Evidence · DeptMeta · 실행이력.
 
-★ **선언이 아니라 관측이다.** 실제로 성공한 Tool(`state.tool_order`)과 실제로 실린
-  payload 키만 보고 만든다. 목록을 손으로 적어 두고 실행과 어긋나면, Critic 은 우리가
-  적은 거짓말을 검사하게 된다.
+이 파일이 소유하는 것
+    Evidence 생성과 정책 출처 규율 · Critic 이 읽는 DeptMeta(입력 계보/산출 필드) ·
+    Agent 실행이력 저장(append-only)과 조회
+
+여기 **없는 것**
+    금액 계산 · 판정 · 실행 통제 · 사람이 읽는 문장
+
+★ 셋은 한 가지를 다룬다 — **무슨 일이 있었고, 무엇이 그것을 받치며, 어떻게 남기는가.**
+  Evidence 없이 DeptMeta 를 못 만들고, 둘 없이 남길 이력이 없다. 갈라 두면 근거 하나를
+  고칠 때마다 세 파일을 오간다.
+
+★ **선언이 아니라 관측이다.** DeptMeta 는 실제로 성공한 Tool(`state.tool_order`)과
+  실제로 실린 payload 키만 보고 만든다. 손으로 적은 목록이 실행과 어긋나면 Critic 은
+  우리가 적은 거짓말을 검사하게 된다.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from uuid import UUID, uuid4
 
-from app.finance.state import FinanceAgentState
+from psycopg import sql
+from psycopg.types.json import Jsonb
+
+from app.finance.db import (
+    FinanceDataNotReady,
+    execute_returning_one,
+    fetch_all,
+    fetch_one,
+    get_db_schema,
+)
+from app.finance.schemas import (
+    FinalVerdict,
+    FinanceAgentRunResponse,
+    FinanceCycle,
+    FinancePolicy,
+    RuntimeStatus,
+)
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
+from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
+from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
+
+# ---------------------------------------------------------------------------
+# Evidence 생성 · 정책 출처 규율
+# ---------------------------------------------------------------------------
+
+if TYPE_CHECKING:  # 순환 import 방지 — 상태는 타입으로만 필요하다.
+    from app.finance.state import FinanceAgentState
+
+def missing_source_name(key: str) -> str:
+    """근거 없이 뺀 정책값을 `missing_data` 에 적을 때 쓰는 이름.
+
+    ★ **한 이름으로만 부른다.** 어댑터 경계와 Tool 이 서로 다른 이름으로 적으면, 같은
+      사실이 두 이름으로 이력에 남아 나중에 세어 볼 수 없다.
+    """
+    return f"{key}@policy_source_ref"
+
+
+def resolve_optional_source_ref(
+    policy: FinancePolicy, key: str, record: Callable[[str], None]
+) -> str | None:
+    """급여 외 정책값의 출처를 찾고, 없으면 **그 사실을 기록한 뒤 `None`** 을 준다.
+
+    이 규칙의 **유일한 주인**이다. Controller 경로(`_optional_source_ref`)와 조회
+    경로(`adapter._policy_ref`)가 담는 곳만 다르고 규칙은 같다 — 두 벌로 두면 한쪽만
+    고쳐지고, 그때 갈리는 것은 *"근거 없는 값을 냈는가"* 다.
+
+    `record` 는 빠진 이름을 어디에 적을지만 정한다 (실행 상태 · 조회의 missing 목록).
+    """
+    ref = policy.source_refs.get(key)
+    if ref:
+        return ref
+    record(missing_source_name(key))
+    return None
+
+
+_PAYROLL_SOURCE_KEYS: tuple[str, ...] = ("monthly_labor_cost_krw", "payroll_date")
+"""이 둘만 **출처가 없으면 계산 자체가 안 된다** (재무 #63 · M-23).
+
+출처 없는 급여 이벤트를 만들지 않기로 재무가 정했으므로 급여 유출이 통째로 빠지고,
+그 상태의 `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다** — 그 상한으로 매입이
+실행된다. 나머지 정책값은 값 자체를 쓸 수 있어 실행을 세우지 않는다
+(`_optional_source_ref`)."""
+
+
+def _source_ref(policy: FinancePolicy, key: str) -> str:
+    """**계산 자체가 성립하지 않는** 정책 출처. 없으면 멈춘다.
+
+    급여 두 키 전용이다 (`_PAYROLL_SOURCE_KEYS`). 출처 없는 급여 이벤트를 만들지
+    않기로 재무가 정했으므로(재무 #63 · M-23) 급여 유출이 통째로 빠지고, 그 상태의
+    `finance_cap` 은 틀린 게 아니라 **낙관적으로 틀린다** — 그 상한으로 매입이 실행된다.
+
+    ★ `KeyError` 로 두지 않는 이유: Controller 의 일반 예외 경로로 빠져 `ERROR` 가
+      된다. **출처가 없는 것은 프로그램 오류가 아니라 그날의 사실**이므로
+      `RUNTIME_NOT_READY` + `missing_data` 다 — 둘은 재시도 가치가 다르다 (M-1 §5.1).
+    """
+    ref = policy.source_refs.get(key)
+    if not ref:
+        raise FinanceDataNotReady(missing_source_name(key))
+    return ref
+
+
+def _optional_source_ref(
+    policy: FinancePolicy, key: str, state: FinanceAgentState
+) -> str | None:
+    """급여 외 정책값의 출처. **없어도 실행은 계속한다.**
+
+    ★ 급여만 특별하다 (`_PAYROLL_SOURCE_KEYS`). 나머지는 값 자체를 쓸 수 있으므로
+      계산은 그대로 돌고, 실행을 통째로 세우지 않는다 — 기존 재무 정책이다.
+
+    ★ 다만 **지어내지 않는다.** 없는 출처를 `finance-policy:{version}:{key}` 같은
+      문자열이나 스냅샷 id 로 채우면, 값은 멀쩡히 나오고 에러도 안 나지만 그 ref 는
+      따라갔을 때 **아무 데도 닿지 않는다.** 근거가 있는 척하는 판정만 남는다.
+
+    ★ 그래서 `None` 을 돌려주고, 부르는 쪽이 **그 claim 의 payload 필드와 Evidence 를
+      함께 뺀다.** 숫자만 남기고 근거를 빼면 봉투 검증이 `E-EVIDENCE-MISSING` 을
+      낸다 — 낼 수 없는 근거를 요구받는 것이 아니라, 낼 수 없는 값을 안 내는 것이다.
+      빠진 사실은 `missing_data` 의 `<key>@policy_source_ref` 로 밝힌다.
+    """
+    return resolve_optional_source_ref(
+        policy, key, lambda name: state.note_missing_source_name(name)
+    )
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value) if "." in value else int(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _evidence(
+    claim: str,
+    value: Any,
+    unit: str,
+    ref_id: str,
+    *,
+    source: Literal["finance", "tool_calc", "persona"] = "tool_calc",
+) -> Evidence:
+    numeric = float(value)
+    return Evidence(
+        claim=claim,
+        source=source,
+        ref_ids=(ref_id,),
+        value=numeric,
+        unit=unit,
+        evidence_grade="OFFICIAL",
+    )
+
+
+def _tool_ref(tool_name: str, state: FinanceAgentState) -> str:
+    return _branch_ref(tool_name, state)
+
+
+def _branch_ref(kind: str, state: FinanceAgentState) -> str:
+    return (
+        f"FIN-AGENT:{state.request.context.request_id}:{state.request.call_seq}:"
+        f"{state.branch_id}:{kind}"
+    )
+
+
+def _evidence_dict(evidence: Evidence) -> dict[str, Any]:
+    return {
+        "claim": evidence.claim,
+        "source": evidence.source,
+        "ref_ids": list(evidence.ref_ids),
+        "value": evidence.value,
+        "unit": evidence.unit,
+        "evidence_grade": evidence.evidence_grade,
+        "evidence_detail": evidence.evidence_detail,
+    }
+
+
+def _evidence_from_dict(value: dict[str, Any]) -> Evidence:
+    return Evidence(
+        claim=value["claim"],
+        source=value["source"],
+        ref_ids=tuple(value["ref_ids"]),
+        value=value["value"],
+        unit=value["unit"],
+        evidence_grade=value["evidence_grade"],
+        evidence_detail=value["evidence_detail"],
+    )
+
+
+def _indexed_verdict_evidence(results: list[dict[str, Any]]) -> list[Evidence]:
+    """실제 숫자 branch claim을 Envelope v0.4 인덱스 경로에 다시 바인딩한다."""
+    indexed: list[Evidence] = []
+    for index, result in enumerate(results):
+        raw_evidence = result.get("evidences", [])
+        by_claim = {
+            item.get("claim"): item
+            for item in raw_evidence
+            if isinstance(item, dict) and isinstance(item.get("claim"), str)
+        }
+        for claim, value in result.items():
+            if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            source = by_claim.get(claim)
+            if source is None:
+                continue
+            indexed.append(
+                Evidence(
+                    claim=f"verdicts[{index}].{claim}",
+                    source=source["source"],
+                    ref_ids=tuple(source["ref_ids"]),
+                    value=float(value),
+                    unit=source["unit"],
+                    evidence_grade=source["evidence_grade"],
+                    evidence_detail=source.get("evidence_detail"),
+                )
+            )
+    return indexed
+
+
+def _adjustment_from_dict(value: dict[str, Any]) -> SuggestedAdjustment:
+    return SuggestedAdjustment(
+        dept="finance",
+        axis="amount",
+        target_value=value["target_value"],
+        unit=value["unit"],
+        reason=value["reason"],
+        ref_ids=tuple(value["ref_ids"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# DeptMeta — Critic 이 재무를 검사할 수 있게 하는 사이드카
+# ---------------------------------------------------------------------------
 
 #: Critic에 전달되는 검사 id의 정본은 합성 주체인 Master가 소유한다.
 FINANCE_CAP_CHECK_ID = DEPT_CAP_CHECK_ID["finance"]
@@ -65,13 +293,13 @@ _CAP_TOOL_INPUTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Tool 이 **내부에서 부르는** Tool.
+#: Tool 이 **선행으로 요구하는** Tool — 입력 계보용.
 #:
-#: 🔴 이걸 빠뜨리면 metadata 가 실제 의존을 **적게** 말한다. `calculate_purchase_finance_cap`
-#:    은 투영이 없으면 `project_cashflow` 를 직접 부르는데, 결정론 Planner 처럼
-#:    `project_cashflow` 를 따로 고르지 않은 실행에서는 그 Tool 이 `tool_order` 에
-#:    없다 — 그러면 cap 을 만든 현금흐름 입력이 통째로 보고에서 빠진다.
-_TOOL_INTERNAL_CALLS: dict[str, tuple[str, ...]] = {
+#: 🔴 `capability_graph.TOOL_DEPENDENCIES` 와 겹쳐 보이지만 **묻는 것이 다르다.**
+#:    저쪽은 *"지금 이 Tool 을 부를 수 있는가"* 이고, 여기는 *"이 Tool 의 결과는
+#:    무엇을 읽고 만들어졌는가"* 다. 전이 폐포를 끊으면 cap 을 만든 현금흐름 입력이
+#:    `inputs_used` 에서 사라지고, Critic 의 등급 누출 검사가 대상을 못 본다.
+_TOOL_PREREQUISITE_TOOLS: dict[str, tuple[str, ...]] = {
     "calculate_purchase_finance_cap": ("project_cashflow",),
     "analyze_payment_pressure": ("project_cashflow",),
 }
@@ -109,7 +337,7 @@ def _resolve_tool_inputs(tool: str, *, has_debt: bool) -> list[str]:
         if current not in _CAP_TOOL_INPUTS:
             raise FinanceToolDependencyMissing(current)
         names.extend(_CAP_TOOL_INPUTS[current])
-        pending.extend(_TOOL_INTERNAL_CALLS.get(current, ()))
+        pending.extend(_TOOL_PREREQUISITE_TOOLS.get(current, ()))
     return names
 
 
@@ -186,23 +414,239 @@ def _produced_fields(payload: dict[str, Any]) -> list[str]:
     return sorted(key for key, value in payload.items() if value is not None)
 
 
-def _assert_dependency_contract_is_complete() -> None:
+def _assert_dependency_contract_is_complete(pre_purchase_tools: frozenset[str]) -> None:
     """PRE_PURCHASE Tool 은 **전부** 의존 계약을 가져야 한다.
 
     기동 시점에 확인한다 — Tool 을 새로 만들고 계약을 안 적으면, 그 사실이 조용한
     `inputs_used` 누락이 아니라 **import 실패**로 즉시 드러난다.
-    """
-    from app.finance.tool_registry import PRE_PURCHASE_TOOLS
 
-    undeclared = sorted(PRE_PURCHASE_TOOLS - set(_CAP_TOOL_INPUTS))
+    ★ Tool 목록을 **받아서** 검사한다. 여기서 Harness 를 import 하면 순환이 된다
+      (Harness → capabilities → execution). 부르는 쪽은 `application.harness` 이고,
+      실행 경로는 반드시 그 모듈을 지나므로 확인 시점은 그대로다.
+    """
+    undeclared = sorted(pre_purchase_tools - set(_CAP_TOOL_INPUTS))
     if undeclared:
         raise FinanceToolDependencyMissing(", ".join(undeclared))
     unknown_targets = sorted(
-        {target for targets in _TOOL_INTERNAL_CALLS.values() for target in targets}
+        {target for targets in _TOOL_PREREQUISITE_TOOLS.values() for target in targets}
         - set(_CAP_TOOL_INPUTS)
     )
     if unknown_targets:
         raise FinanceToolDependencyMissing(", ".join(unknown_targets))
 
 
-_assert_dependency_contract_is_complete()
+# ---------------------------------------------------------------------------
+# 실행이력 — 저장(append-only)과 조회
+# ---------------------------------------------------------------------------
+
+class FinanceAgentRun(TypedDict):
+    run_id: UUID
+    cycle: FinanceCycle
+    as_of: date
+    snapshot_id: str | None
+    runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
+    request_payload: dict[str, object]
+    response_payload: dict[str, object]
+    created_at: datetime
+
+
+_SELECT_COLUMNS = sql.SQL(
+    """
+    SELECT
+        run_id,
+        cycle,
+        as_of,
+        snapshot_id,
+        runtime_status,
+        verdict,
+        request_payload,
+        response_payload,
+        created_at
+    FROM {}.finance_agent_runs
+    """
+)
+
+
+def save_finance_agent_run(
+    *,
+    cycle: FinanceCycle,
+    as_of: date,
+    snapshot_id: str | None,
+    runtime_status: RuntimeStatus,
+    verdict: FinalVerdict | None,
+    request_payload: dict[str, object],
+    response_payload: dict[str, object],
+) -> FinanceAgentRun:
+    """완성된 Finance Agent Request와 Response를 실행이력으로 저장한다."""
+    if response_payload.get("verdict") != verdict:
+        raise ValueError("Finance run verdict metadata must match response_payload.verdict")
+    query = sql.SQL(
+        """
+        INSERT INTO {}.finance_agent_runs (
+            run_id,
+            cycle,
+            as_of,
+            snapshot_id,
+            runtime_status,
+            verdict,
+            request_payload,
+            response_payload
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING
+            run_id,
+            cycle,
+            as_of,
+            snapshot_id,
+            runtime_status,
+            verdict,
+            request_payload,
+            response_payload,
+            created_at
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    row = execute_returning_one(
+        query,
+        (
+            uuid4(),
+            cycle,
+            as_of,
+            snapshot_id,
+            runtime_status,
+            verdict,
+            Jsonb(request_payload),
+            Jsonb(response_payload),
+        ),
+    )
+    return cast(FinanceAgentRun, row)
+
+
+def get_finance_agent_run(run_id: UUID) -> FinanceAgentRun:
+    """run_id로 Finance Agent 실행이력 한 건을 조회한다."""
+    query = _SELECT_COLUMNS.format(sql.Identifier(get_db_schema())) + sql.SQL(" WHERE run_id = %s")
+    row = fetch_one(query, (run_id,))
+    if row is None:
+        raise LookupError(f"Finance Agent run was not found: {run_id}")
+    return cast(FinanceAgentRun, row)
+
+
+def list_finance_agent_runs(
+    *,
+    cycle: FinanceCycle | None = None,
+    as_of: date | None = None,
+    runtime_status: RuntimeStatus | None = None,
+    verdict: FinalVerdict | None = None,
+    limit: int = 100,
+) -> list[FinanceAgentRun]:
+    """선택한 필터로 최신 Finance Agent 실행이력을 조회한다."""
+    conditions: list[sql.Composable] = []
+    params: list[object] = []
+    if cycle is not None:
+        conditions.append(sql.SQL("cycle = %s"))
+        params.append(cycle)
+    if as_of is not None:
+        conditions.append(sql.SQL("as_of = %s"))
+        params.append(as_of)
+    if runtime_status is not None:
+        conditions.append(sql.SQL("runtime_status = %s"))
+        params.append(runtime_status)
+    if verdict is not None:
+        conditions.append(sql.SQL("verdict = %s"))
+        params.append(verdict)
+
+    query = _SELECT_COLUMNS.format(sql.Identifier(get_db_schema()))
+    if conditions:
+        query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(conditions)
+    query += sql.SQL(" ORDER BY created_at DESC, run_id DESC LIMIT %s")
+    params.append(limit)
+    return cast(list[FinanceAgentRun], fetch_all(query, params))
+
+
+def save_finance_execution(
+    *, request: AgentRequest, reply: AgentReply, metadata: ExecutionMetadata
+) -> None:
+    """마이그레이션이 설치된 경우 v2.2 하위 trace를 저장한다.
+
+    저장 실패는 의도적으로 삼키지 않는다. 정상적인 Business 완료에는 해석 가능한
+    run_id가 반드시 있어야 한다.
+    """
+    query = sql.SQL(
+        """
+        INSERT INTO {}.finance_agent_runs_v22 (
+            run_id, request_id, agent, mode, as_of, policy_version, trigger, call_seq,
+            runtime_status,
+            business_status, request_payload, response_payload,
+            used_tools, tool_order, observations, rules_applied, replans,
+            llm_status, llm_model, llm_attempts, llm_fallback_used, elapsed_ms
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    execute_returning_one(
+        query + sql.SQL(" RETURNING run_id"),
+        (
+            UUID(reply.run_id),
+            request.context.request_id,
+            "finance",
+            request.mode,
+            request.context.as_of,
+            request.context.policy_version,
+            request.context.trigger,
+            request.call_seq,
+            reply.runtime_status,
+            reply.business_status,
+            Jsonb(dict(request.payload)),
+            Jsonb(dict(reply.payload)),
+            Jsonb(list(metadata.used_tools)),
+            Jsonb(list(metadata.tool_order)),
+            Jsonb(list(metadata.observations)),
+            Jsonb(list(metadata.rules_applied)),
+            metadata.replans,
+            metadata.llm_status,
+            metadata.llm_model,
+            metadata.llm_attempts,
+            metadata.llm_fallback_used,
+            metadata.elapsed_ms,
+        ),
+    )
+
+
+def get_finance_execution(run_id: UUID) -> dict[str, object]:
+    query = sql.SQL("SELECT * FROM {}.finance_agent_runs_v22 WHERE run_id = %s").format(
+        sql.Identifier(get_db_schema())
+    )
+    row = fetch_one(query, (run_id,))
+    if row is None:
+        raise LookupError(f"Finance v2.2 run was not found: {run_id}")
+    return row
+
+
+# ---------------------------------------------------------------------------
+# 실행이력 조회 서비스 (UI · `/finance/runs`)
+# ---------------------------------------------------------------------------
+
+def get_finance_run(run_id: UUID) -> FinanceAgentRunResponse:
+    """UI 조회용 Finance Agent 실행이력 한 건을 반환한다."""
+    return FinanceAgentRunResponse.model_validate(get_finance_agent_run(run_id))
+
+
+def list_finance_runs(
+    *,
+    cycle: FinanceCycle | None = None,
+    as_of: date | None = None,
+    runtime_status: RuntimeStatus | None = None,
+    verdict: FinalVerdict | None = None,
+    limit: int = 100,
+) -> list[FinanceAgentRunResponse]:
+    """UI 조회용 Finance Agent 실행이력 목록을 반환한다."""
+    rows = list_finance_agent_runs(
+        cycle=cycle,
+        as_of=as_of,
+        runtime_status=runtime_status,
+        verdict=verdict,
+        limit=limit,
+    )
+    return [FinanceAgentRunResponse.model_validate(row) for row in rows]

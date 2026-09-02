@@ -7,13 +7,13 @@ import pytest
 from psycopg import OperationalError
 from psycopg.types.json import Jsonb
 
-from app.finance.run_repository import (
+from app.finance.execution import (
     get_finance_agent_run,
     list_finance_agent_runs,
     save_finance_agent_run,
 )
+from app.finance.legacy.deterministic_service import run_finance_procurement
 from app.finance.schemas import PurchaseAgentOutput
-from app.finance.service import run_finance_procurement
 
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
 _LEGACY_SERVICE = "app.finance.legacy.deterministic_service"
@@ -36,8 +36,8 @@ def _run_row() -> dict[str, object]:
 def test_save_finance_agent_run_uses_jsonb_and_preserves_metadata():
     row = _run_row()
     with (
-        patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
-        patch("app.finance.run_repository.execute_returning_one", return_value=row) as execute,
+        patch("app.finance.execution.get_db_schema", return_value="haetdeul"),
+        patch("app.finance.execution.execute_returning_one", return_value=row) as execute,
     ):
         saved = save_finance_agent_run(
             cycle="PROCUREMENT",
@@ -65,8 +65,8 @@ def test_save_finance_agent_run_uses_jsonb_and_preserves_metadata():
 def test_list_finance_agent_runs_passes_filters_and_limit():
     row = _run_row()
     with (
-        patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
-        patch("app.finance.run_repository.fetch_all", return_value=[row]) as fetch,
+        patch("app.finance.execution.get_db_schema", return_value="haetdeul"),
+        patch("app.finance.execution.fetch_all", return_value=[row]) as fetch,
     ):
         rows = list_finance_agent_runs(
             cycle="PROCUREMENT",
@@ -101,8 +101,8 @@ def test_save_finance_agent_run_rejects_verdict_metadata_mismatch():
 
 def test_get_finance_agent_run_raises_lookup_error():
     with (
-        patch("app.finance.run_repository.get_db_schema", return_value="haetdeul"),
-        patch("app.finance.run_repository.fetch_one", return_value=None),
+        patch("app.finance.execution.get_db_schema", return_value="haetdeul"),
+        patch("app.finance.execution.fetch_one", return_value=None),
         pytest.raises(LookupError),
     ):
         get_finance_agent_run(UUID("00000000-0000-0000-0000-000000000001"))

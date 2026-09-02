@@ -5,19 +5,19 @@ from unittest.mock import patch
 import pytest
 from psycopg import OperationalError
 
-from app.finance.repository import (
+from app.finance.db import (
     get_current_finance_runtime_context,
     get_current_finance_snapshot,
     get_current_finance_state,
 )
+from app.finance.legacy.deterministic_service import run_finance_procurement, run_finance_sales
 from app.finance.schemas import FinanceSalesRequest, PurchaseAgentOutput
-from app.finance.service import run_finance_procurement, run_finance_sales
 
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
 _LEGACY_SERVICE = "app.finance.legacy.deterministic_service"
 
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
-_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+_STATE_REPO = "app.finance.db"
 
 
 def test_procurement_service_returns_one_band_without_cost_warning(
