@@ -97,6 +97,10 @@ def _cashflow(collection=date(2026, 4, 9), amount="1000000"):
     )
 
 
+def _rule_of(result, rule_id):
+    return next(item for item in result.rule_results if item["rule_id"] == rule_id)
+
+
 def _evaluate(payload=None, **overrides):
     kwargs = {
         "finance_minimum_margin_rate": MIN_RATE,
@@ -474,3 +478,48 @@ def test_installment_is_not_silently_treated_as_single():
 
     assert payment_rule["verdict"] is None
     assert payment_rule["missing_policy"] == ("sales_installment_payment_policy",)
+
+
+# ---------------------------------------------------------------------------
+# 13. 사실 없음 ≠ 0 — 자리 메우기 금지
+# ---------------------------------------------------------------------------
+
+
+def test_absent_receivable_facts_do_not_become_zero_ar():
+    result = _evaluate(receivable_facts=None)
+    summary = result.financial_summary
+
+    assert summary is not None
+    # 0원 채권(사실)과 채권 자료 없음을 섞지 않는다.
+    assert summary.current_partner_ar_krw is None
+    assert summary.projected_partner_ar_krw is None
+    assert summary.overdue_ar_krw is None
+    assert "partner_receivable_facts" in result.missing_data
+
+
+def test_credit_rule_stays_closed_when_receivable_facts_are_absent():
+    # 한도가 있어도 채권 사실이 없으면 판정하지 않는다.
+    result = _evaluate(receivable_facts=None, credit_limit_krw=CREDIT_LIMIT)
+    credit_rule = _rule_of(result, "FIN-SALES-CREDIT")
+
+    assert credit_rule["runtime_status"] == "RUNTIME_NOT_READY"
+    assert credit_rule["verdict"] is None
+
+
+def test_collection_risk_stays_closed_when_overdue_is_unknown():
+    result = _evaluate(receivable_facts=None)
+    risk_rule = _rule_of(result, "FIN-SALES-COLLECTION-RISK")
+
+    assert risk_rule["runtime_status"] == "RUNTIME_NOT_READY"
+    assert risk_rule["verdict"] is None
+    assert "partner_receivable_facts" in risk_rule["missing_policy"]
+
+
+def test_zero_overdue_is_a_fact_distinct_from_unknown_overdue():
+    known_zero = _evaluate(receivable_facts=_receivables())
+    unknown = _evaluate(receivable_facts=None)
+
+    assert known_zero.financial_summary is not None
+    assert unknown.financial_summary is not None
+    assert known_zero.financial_summary.overdue_ar_krw == Decimal(0)
+    assert unknown.financial_summary.overdue_ar_krw is None

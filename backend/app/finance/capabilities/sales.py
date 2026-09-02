@@ -308,10 +308,21 @@ def evaluate_receivable_capacity(
             credit_limit_krw=credit_limit_krw, current_partner_ar_krw=current_ar
         )
     )
-    rule = evaluate_receivable_capacity_rule(
-        projected_partner_ar_krw=projected_ar if projected_ar is not None else Decimal(0),
-        credit_limit_krw=None if projected_ar is None else credit_limit_krw,
-    )
+    if projected_ar is None:
+        # ★ 채권 사실이 없으면 규칙에 0을 대신 넣지 않는다. 0원 채권은 사실이고,
+        #   사실 없음은 사실이 아니다 — 자리를 메우면 둘이 같아진다.
+        rule: SalesRuleResult = {
+            "rule_id": "FIN-SALES-CREDIT",
+            "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
+            "reason_codes": ("REQUIRED_FINANCE_POLICY_MISSING",),
+            "missing_policy": tuple(missing_data),
+        }
+    else:
+        rule = evaluate_receivable_capacity_rule(
+            projected_partner_ar_krw=projected_ar,
+            credit_limit_krw=credit_limit_krw,
+        )
     return {
         "current_partner_ar_krw": current_ar,
         "projected_partner_ar_krw": projected_ar,
@@ -364,10 +375,20 @@ def assess_collection_risk(
 ) -> dict[str, Any]:
     """연체 사실은 나르고, 위험 등급/점수는 정책이 없으면 만들지 않는다."""
     overdue = receivable_facts.overdue_ar_krw if receivable_facts is not None else None
-    rule = evaluate_collection_risk_rule(
-        overdue_ar_krw=overdue if overdue is not None else Decimal(0),
-        collection_risk_policy=collection_risk_policy,
-    )
+    if overdue is None:
+        # ★ 연체액을 모르는 것과 연체가 0원인 것은 다른 사실이다. 0으로 메우지 않는다.
+        rule: SalesRuleResult = {
+            "rule_id": "FIN-SALES-COLLECTION-RISK",
+            "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
+            "reason_codes": ("REQUIRED_FINANCE_POLICY_MISSING",),
+            "missing_policy": ("partner_receivable_facts", "sales_collection_risk_policy"),
+        }
+    else:
+        rule = evaluate_collection_risk_rule(
+            overdue_ar_krw=overdue,
+            collection_risk_policy=collection_risk_policy,
+        )
     missing_data = () if receivable_facts is not None else ("partner_receivable_facts",)
     return {"overdue_ar_krw": overdue, "rule": rule, "missing_data": missing_data}
 
