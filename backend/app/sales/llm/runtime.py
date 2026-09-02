@@ -41,7 +41,13 @@ def load_settings() -> LLMSettings:
         enabled = _read_bool("LLM_ENABLED")
     provider = (os.getenv("SALES_LLM_PROVIDER") or "gemini").strip().lower()
     explicit_model = os.getenv("SALES_LLM_MODEL")
-    model = explicit_model or _DEFAULT_MODEL
+    common_provider = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    common_model = os.getenv("LLM_MODEL")
+    # 공통 Provider가 다르면 다른 Agent의 모델명을 Sales에 물려주지 않는다.
+    inherited_model = (
+        common_model if provider == common_provider and common_model else _DEFAULT_MODEL
+    )
+    model = explicit_model or inherited_model
     return LLMSettings(
         enabled=False if enabled is None else enabled,
         provider=provider,
@@ -156,10 +162,16 @@ def _validated(candidates, output, settings) -> SalesRecommendation:
     if any(not text.strip() or _NUMBER.search(text) for text in texts):
         raise ValueError("unsafe LLM output")
     return SalesRecommendation(
-        status="SUCCESS", recommended_candidate_id=output.recommended_candidate_id,
-        summary=output.summary, recommendation_reason=output.recommendation_reason,
-        risk_explanation=output.risk_explanation, user_message=output.user_message,
-        llm_provider="gemini", llm_model=settings.model, llm_attempts=1, llm_fallback_used=False,
+        status="SUCCESS",
+        recommended_candidate_id=output.recommended_candidate_id,
+        summary=output.summary,
+        recommendation_reason=output.recommendation_reason,
+        risk_explanation=output.risk_explanation,
+        user_message=output.user_message,
+        llm_provider="gemini",
+        llm_model=settings.model,
+        llm_attempts=1,
+        llm_fallback_used=False,
     )
 
 
@@ -169,13 +181,16 @@ def _fallback(candidates, status, settings, attempts) -> SalesRecommendation:
     if candidate is None and selectable:
         candidate = selectable[0]
     return SalesRecommendation(
-        status=status, recommended_candidate_id=candidate.candidate_id if candidate else None,
+        status=status,
+        recommended_candidate_id=candidate.candidate_id if candidate else None,
         summary="규칙 기반 판매안을 준비했습니다.",
         recommendation_reason="외부 해석 없이 근거가 있는 판매 조건을 우선 표시합니다.",
         risk_explanation="외부 검증 결과와 조건부 조달 여부를 함께 확인해 주세요.",
         user_message="현재 확인된 조건을 기준으로 판매안을 검토해 주세요.",
-        llm_provider=settings.provider if settings.enabled else None, llm_model=settings.model,
-        llm_attempts=attempts, llm_fallback_used=status == "FALLBACK",
+        llm_provider=settings.provider if settings.enabled else None,
+        llm_model=settings.model,
+        llm_attempts=attempts,
+        llm_fallback_used=status == "FALLBACK",
     )
 
 

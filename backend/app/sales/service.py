@@ -353,10 +353,14 @@ def _apply_refeed(
             data["messages"].append(
                 "요청한 결제조건이 현재 재무 기준을 초과하여 허용 가능한 기간으로 조정했습니다."
             )
-        elif result.source == "PURCHASE" and result.conditional and (
-            candidate.conditional
-            or result.additional_qty_kg is None
-            or result.available_date is None
+        elif (
+            result.source == "PURCHASE"
+            and result.conditional
+            and (
+                candidate.conditional
+                or result.additional_qty_kg is None
+                or result.available_date is None
+            )
         ):
             data["conditional"] = True
             data["uncertainties"].append("PURCHASE_SUPPLY_CONDITIONAL")
