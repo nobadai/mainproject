@@ -194,6 +194,23 @@ def test_순서를_바꾸지_않는다():
     assert [a.reason for a in run.adjustments] == ["첫째", "둘째"]
 
 
+def test_응답_변환도_순서를_안_바꾼다():
+    """🔴 **결과만 보고 끝내면 변이가 안 걸린다.**
+
+    지난주 근거(`_evidences_out`)에서 똑같이 밟았다 — `outcome` 만 검사하고 응답
+    변환은 안 봐서, 거기서 정렬해도 초록불이었다. **층마다 잠근다.**
+
+    값이 큰 것부터/작은 것부터 어느 쪽으로 정렬해도 걸리게 순서를 어긋나게 둔다.
+    """
+    first = _adj("inventory", "quantity", 9000.0, "kg", "첫째")
+    second = _adj("inventory", "timing", 1.0, "d", "둘째")
+    run = _run(inventory=_advisor(validation_adjustments=(first, second), verdict="conditional"))
+    response = _to_response(_ctx(), run)
+
+    assert [a.reason for a in response.adjustments] == ["첫째", "둘째"]
+    assert [a.target_value for a in response.adjustments] == [9000.0, 1.0]
+
+
 def test_두_부서가_내면_둘_다_남는다():
     run = _run(
         finance=_advisor(
@@ -263,6 +280,22 @@ def test_응답_변환에서_사라지지_않는다():
     assert (out.target_value, out.unit) == (7120.0, "kg")
     assert out.reason == "창고 부족"
     assert out.ref_ids == ["REF-SNAP-1"]
+
+
+def test_응답_변환이_값을_반올림하지_않는다():
+    """화면과 원본이 다른 숫자를 말하면 안 된다.
+
+    ★ 정수만 넣고 검사하면 반올림해도 안 걸린다 — **소수를 쓴다.**
+    """
+    run = _run(
+        inventory=_advisor(
+            validation_adjustments=(_adj("inventory", "quantity", 7120.5, "kg"),),
+            verdict="conditional",
+        )
+    )
+    response = _to_response(_ctx(), run)
+
+    assert response.adjustments[0].target_value == 7120.5
 
 
 def test_이력에_적재되는_모양에_들어간다():
