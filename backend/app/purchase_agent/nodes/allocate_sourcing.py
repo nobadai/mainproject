@@ -510,6 +510,19 @@ _CANDIDATE_LABELS = {
 }
 
 
+def candidate_summary(candidate_id: str) -> str:
+    """후보 id → **사람이 읽는 설명**. 모르는 id면 그대로 돌려준다.
+
+    ★ ``_CANDIDATE_LABELS`` 를 뒤집어 쓴다 — 설명을 어디에 또 적으면 후보를 늘릴 때
+      한쪽만 바뀐다 (규칙 7). id 는 계약 값이라 **바꾸지 않고**, 화면·근거 문장에서만
+      이 설명을 곁들인다.
+    """
+    for cid, summary in _CANDIDATE_LABELS.values():
+        if cid == candidate_id:
+            return summary
+    return candidate_id
+
+
 def candidate_label(fraction: float) -> tuple[str, str]:
     """배수 → ``(id, 설명)``. **모르는 배수도 후보가 된다.**
 

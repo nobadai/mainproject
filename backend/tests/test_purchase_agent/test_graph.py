@@ -253,8 +253,8 @@ def test_deferred_n4_check_is_disclosed_in_risks(as_of: date, proposals: dict) -
     """
     assert load_constraints()["pending"]["inbound_lead_days"] is None
     for scenario in proposals[as_of]["scenarios"]:
-        assert any("inbound_lead_days" in risk for risk in scenario["risks"])
-    assert not any("inbound_lead_days" in r["reason"] for r in proposals[as_of]["rejected_reasons"])
+        assert any("입고 소요일" in risk for risk in scenario["risks"])
+    assert not any("입고 소요일" in r["reason"] for r in proposals[as_of]["rejected_reasons"])
 
 
 def test_item_without_shelf_life_defers_the_freshness_check() -> None:

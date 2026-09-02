@@ -609,7 +609,7 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             evidence_grade="SIM_FIXED",
             evidence_detail=(
                 f"D+{judgment_day} 구간폭을 임계 {threshold}와 비교해 "
-                f"{payload.get('situation')} 판정"
+                f"{_situation_ko(payload.get('situation'))}으로 판정"
             ),
         ),
         # ── allowed_axes는 **게이트마다 한 건**이다 (현서님 회신 8/27) ──────────
@@ -637,7 +637,7 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             # **없는 인과를 주장하게 된다** (Codex 교차검증 P1, 합성 입력으로 재현).
             evidence_detail=(
                 f"구간폭 {ci_width:.3f} {_relation(ci_width, threshold, comparison)} {threshold}"
-                f" → {payload.get('situation')} → 선매입 궤적 "
+                f" → {_situation_ko(payload.get('situation'))} → 선매입 궤적 "
                 f"{'차단' if payload.get('situation') == 'uncertain' else '허용'}"
             ),
         ),
@@ -655,7 +655,7 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             evidence_detail=(
                 f"추정 총량 {round(estimated_total_kg):,}kg "
                 f"{'≥' if estimated_total_kg >= volume_threshold else '<'} "
-                f"임계 {volume_threshold:,}kg → 총량 트리거 "
+                f"임계 {volume_threshold:,}kg → 총량 진입 조건 "
                 f"{'충족' if estimated_total_kg >= volume_threshold else '미달'}"
             ),
         ),
@@ -676,7 +676,7 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             evidence_detail=(
                 f"품목 편중 최대 {top_mix_ratio:.3f} "
                 f"{'<' if top_mix_ratio < mix_threshold else '≥'} {mix_threshold} → "
-                f"mix {'개방' if 'mix' in axes else '제외'}"
+                f"등급 구성 {'개방' if 'mix' in axes else '제외'}"
             ),
         ),
         Evidence(
@@ -688,8 +688,8 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             evidence_grade="SIM_FIXED",
             # 개수는 독립 파라미터가 아니라 **상황 판정의 파생값**이다 (변경요청 1).
             evidence_detail=(
-                f"{payload.get('situation')} 판정에서 파생 — "
-                "불확실이면 공격안을 만들지 않아 두 안이 된다"
+                f"{_situation_ko(payload.get('situation'))} 판정에서 파생 — "
+                "예측이 불확실하면 공격안을 만들지 않아 두 안이 된다"
             ),
         ),
         *_scenario_evidences(payload, ref),
@@ -735,12 +735,26 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
 #: **라벨은 면제다** — ``label``·``strategy_type``까지 요구하면 안마다 근거를 만들어야
 #: 해서 과하다. 숫자만 다르다: 어디서 왔는지 없으면 **LLM이 만든 값과 구분되지 않는다.**
 _SCENARIO_NUMERIC_SOURCES: dict[str, str] = {
-    "coverage_days": "constraints.coverage_days.by_label — 안별 커버일수 매핑",
-    "total_qty_kg": "일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)으로 클립",
-    "total_amount_krw": "Σ(sourcing_plan[].qty_kg × grade_unit_price) — 등급 배분에서 파생",
-    "max_price": "커버 구간 예측 상단(q90)의 최대값",
-    "expected_margin_rate": "(contract_price − 가중 매입단가) ÷ contract_price",
+    "coverage_days": "안별 커버일수 설정",
+    "total_qty_kg": "일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)의 상한에 맞춰 줄임",
+    "total_amount_krw": "등급별 수량 × 단가의 합 — 등급 배분에서 파생",
+    "max_price": "커버 구간 예측 상단의 최대값",
+    "expected_margin_rate": "(계약단가 − 가중 매입단가) ÷ 계약단가",
 }
+
+
+#: ``situation`` 의 **화면 표기**. 계약 값(``stable``/``uncertain``)은 그대로 두고
+#: 사람이 읽는 문장에서만 이 표기를 쓴다 — 근거는 H1 화면과 Critic 이 읽는다.
+#: 🔴 여기서 값을 바꾸면 안 된다. `payload["situation"]` 은 계약이고 이건 표기일 뿐이다.
+_SITUATION_KO: dict[str, str] = {
+    "stable": "예측이 안정적",
+    "uncertain": "예측이 불확실",
+}
+
+
+def _situation_ko(situation: Any) -> str:
+    """근거 문장에 쓰는 표기. 모르는 값이면 **그대로 둔다** (숨기지 않는다)."""
+    return _SITUATION_KO.get(str(situation), str(situation))
 
 
 def _scenario_evidences(payload: Mapping[str, Any], ref: Any) -> list[Evidence]:

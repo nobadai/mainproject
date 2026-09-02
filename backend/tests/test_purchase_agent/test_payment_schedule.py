@@ -152,7 +152,7 @@ def test_mock_path_omits_the_key_and_discloses_why() -> None:
     split = _split_scenario(proposal)
     assert len(split["split_plan"]) > 1, "분할 안인데도"
     assert "payment_schedule" not in split, "N5가 없으면 키를 만들지 않는다"
-    assert [note for note in split["risks"] if "N5" in note], "왜 없는지 남아야 한다"
+    assert [note for note in split["risks"] if "대금 지급 소요일" in note], "왜 없는지 남아야 한다"
 
 
 def test_adapter_path_carries_the_key_on_the_same_day() -> None:
