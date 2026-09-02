@@ -8,12 +8,15 @@
 실제            같은 입력으로 두 번 돌렸다
 ```
 
-`_purchase_input` 이 루프 밖 값만 읽어(`flow.py`) 2회차 payload 가 1회차와 같다.
-검증 지적도 부서 기각 사유도 매입에 가지 않는다.
+`_purchase_input` 이 루프 밖 값만 읽어(`flow.py`) 2회차 payload 가 1회차와 같았다.
+검증 지적도 부서 기각 사유도 매입에 가지 않았다.
 
-★ **되먹임을 배선하지 않은 것은 선택이다. 안 한 것을 한 것처럼 읽히게 두는 것은
-  선택이 아니다.** 배선(이슈 ②-ㄷ)이 끝나면 이 문장은 전달 건수와 반영 건수를 적는
-  쪽으로 바뀐다.
+★ **2026-09-02 배선했다** (#169 · 계약 v0.2). 이 파일의 docstring 이 예고한 대로
+  문장이 뒤집혔다 — *"전달되지 않은 것"* 이 *"전달한 것"* 이 됐다.
+
+⚠️ **다만 "반영 건수" 까지는 안 적는다.** 매입이 `applied_adjustments` 를 회신하기
+  전까지 마스터가 아는 것은 **"보냈다" 까지**다. 문장이 그 이상을 말하면 지금 고친
+  것과 같은 종류의 거짓이 된다.
 """
 
 from __future__ import annotations
@@ -22,23 +25,36 @@ from app.master.verifier import VerificationResult
 from tests.master.test_flow import advisor, happy
 
 
-def test_검증_지적이_전달되지_않았다고_적는다():
+def test_검증_지적을_전달했다고_적는다():
     out = happy(verifier=lambda s, c, v, p, ctx=None: VerificationResult(("E-IDENTITY",))).run()
 
     assert out.end_code == "E3_REJECTED"
     assert "매입 재호출 2 회에도 통과안 없음" in out.reason
-    assert "매입에 전달되지 않은 것" in out.reason
+    assert "매입에 전달한 것" in out.reason
     assert "검증 지적 1건" in out.reason
-    assert "되먹임 미배선" in out.reason
+    assert "되먹임 미배선" not in out.reason, "배선했는데 미배선이라고 말한다"
 
 
-def test_부서_기각_사유가_전달되지_않았다고_적는다():
+def test_보낸_것까지만_말한다():
+    """🔴 **보낸 것과 반영된 것은 다르다.**
+
+    매입이 `applied_adjustments` 를 회신하기 전까지 마스터가 아는 것은 "보냈다"
+    까지다. 문장이 "고쳐졌다" 로 읽히면 지금 고친 것과 같은 종류의 거짓이 된다.
+    """
+    out = happy(verifier=lambda s, c, v, p, ctx=None: VerificationResult(("E-IDENTITY",))).run()
+
+    assert "반영 여부는 매입 회신에 달림" in out.reason
+    for 과장 in ("반영했", "고쳤", "적용했"):
+        assert 과장 not in out.reason
+
+
+def test_부서_기각_사유를_전달했다고_적는다():
     """부서 이름을 적는다 — *"누가 기각했는지"* 가 화면에서 사라지지 않게."""
     out = happy(finance=advisor(validation_status="reject")).run()
 
     assert out.end_code == "E3_REJECTED"
     assert "재무 기각 사유" in out.reason
-    assert "되먹임 미배선" in out.reason
+    assert "매입에 전달한 것" in out.reason
 
 
 def test_둘_다면_둘_다_적는다():
