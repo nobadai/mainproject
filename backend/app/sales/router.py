@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.sales.proposal import run_proposal
 from app.sales.schemas import (
     RuntimeStatus,
     SalesAgentRunResponse,
@@ -14,6 +15,8 @@ from app.sales.schemas import (
     SalesCycle,
     SalesFloorInput,
     SalesFloorReply,
+    SalesProposalInput,
+    SalesProposalReply,
 )
 from app.sales.service import (
     get_sales_run,
@@ -43,6 +46,16 @@ def review_sales_procurement(request: SalesFloorInput) -> SalesFloorReply:
 def review_sales_allocation(request: SalesAllocationInput) -> SalesAllocationReply:
     """동결 스냅샷으로 날짜별 전략 판매 가능 재고를 계산하고 실행이력을 저장한다."""
     return run_allocation(request)
+
+
+@router.post(
+    "/proposal",
+    response_model=SalesProposalReply,
+    summary="영업 판매 시나리오 제안",
+)
+def review_sales_proposal(request: SalesProposalInput) -> SalesProposalReply:
+    """Master 연동 전 Sales 전용 시나리오 생성·해석 경로다."""
+    return run_proposal(request)
 
 
 @router.get(
