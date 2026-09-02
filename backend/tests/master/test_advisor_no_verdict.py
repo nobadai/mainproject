@@ -37,6 +37,7 @@ class _Response:
         self.concerns = kw.get("concerns", [])
         self.skipped_checks = kw.get("skipped_checks", [])
         self.blocked_by = kw.get("blocked_by", ())
+        self.blocked_failures = kw.get("blocked_failures", ())
         self.missing_adapters = kw.get("missing_adapters", ())
         self.single_option = kw.get("single_option", False)
         self.verification_skipped = kw.get("verification_skipped", False)

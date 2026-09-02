@@ -327,7 +327,13 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
         gaps.append(f"지적: {finding}")
     for concern in response.concerns:
         gaps.append(f"확인 필요: {concern}")
-    if response.blocked_by:
+    # 🔴 **막았다는 사실 옆에 사유를 둔다** (2026-09-02). 이름만 읽은 사람이 할 수
+    #    있는 것은 "다시 돌려 본다" 뿐이었다.
+    if response.blocked_failures:
+        for failure in response.blocked_failures:
+            gaps.append(f"막은 부서: {agent_label(failure.agent)} — {failure.detail}")
+    elif response.blocked_by:
+        # Flow 밖에서 막힌 경우 — 어댑터 미등록이라 회신 자체가 없다.
         gaps.append(f"막은 부서: {', '.join(agent_label(a) for a in response.blocked_by)}")
     if response.missing_adapters:
         gaps.append(

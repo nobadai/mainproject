@@ -271,6 +271,9 @@ def test_계획에_실행_시각이_없다():
         "used_tools",
         "finding_codes",
         "missing_data",
+        # 부서가 밝힌 사유 (2026-09-02). `missing_data` 가 "무엇이 없어서" 라면
+        # 이건 "왜 터졌는지" 다. 시계가 아니라 결과값이므로 들어와도 된다.
+        "reasoning",
         # 그 부서 안에서 LLM 이 돌았나 — 규칙으로 답한 것과 모델로 답한 것을 가른다
         "llm_status",
         "llm_model",

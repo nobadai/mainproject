@@ -32,7 +32,7 @@ from typing import Any, Protocol
 
 from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted
-from app.master.envelope import AgentName, AgentReply
+from app.master.envelope import AgentName, AgentReply, Mode
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
@@ -117,6 +117,43 @@ class SourcedEvidence:
 
 
 @dataclass(frozen=True)
+class AgentFailure:
+    """기여하지 못한 부서 하나 — **이름만이 아니라 사유까지.**
+
+    🔴 전에는 이름만 실었다. `"경계를 내지 못한 에이전트: finance"` 를 받은 사람이
+      할 수 있는 것은 *"다시 돌려 본다"* 뿐이었고, 그건 조사가 아니라 추측이다
+      (재현성 측정 2026-09-02 · 6회 중 2회 실패 사유를 이력만으로는 못 봄).
+
+    ★ **같은 파일 안에서 매입은 이미 사유를 실었다** (`_run` 의 매입 미가동 분기).
+      새 규칙이 아니라 **대칭을 맞추는 것**이다.
+
+    ★ **마스터는 해석하지 않는다** (§3.2.2). 부서가 쓴 문장을 그대로 옮긴다.
+    """
+
+    agent: AgentName
+
+    #: `ERROR` · `RUNTIME_NOT_READY`, 그리고 **아예 안 불린 경우** `NOT_CALLED`.
+    #: 마지막 것은 `RuntimeStatus` 가 아니다 — 회신이 없었다는 뜻이라 회신의 상태로는
+    #: 적을 수 없다. "안 부른 것과 못 부른 것은 다르다" 를 여기서도 지킨다.
+    runtime_status: str
+
+    reasoning: str = ""
+    missing_data: tuple[str, ...] = ()
+
+    @property
+    def detail(self) -> str:
+        """사람이 읽는 한 줄. **여기서만 만든다.**
+
+        사유 문장과 화면 표시를 각자 조립하면 둘이 갈린다 - 근거를 검증과 화면이
+        같은 객체로 보게 한 것과 같은 이유다.
+        """
+        parts = [self.reasoning.strip() or self.runtime_status]
+        if self.missing_data:
+            parts.append(f"없는 입력: {', '.join(self.missing_data)}")
+        return " / ".join(parts)
+
+
+@dataclass(frozen=True)
 class ProcurementOutcome:
     """Flow 한 번의 결과. **무엇을 못 했는지도 담는다.**"""
 
@@ -144,6 +181,14 @@ class ProcurementOutcome:
     evidences: tuple[SourcedEvidence, ...] = ()
 
     blocked_by: tuple[AgentName, ...] = ()
+
+    #: 🔴 **막은 부서가 왜 막았는가** (2026-09-02). `blocked_by` 는 이름만 든다.
+    #:
+    #: `reason` 문장에도 같은 내용이 들어가지만 문장은 사람이 읽는 것이고, 이쪽은
+    #: 화면이 부서별로 펼치기 위한 것이다 — `AdvisorVerdicts` 가 판정 사유를 펴는
+    #: 자리와 같다.
+    blocked_failures: tuple[AgentFailure, ...] = ()
+
     findings: tuple[str, ...] = ()
     concerns: tuple[str, ...] = ()
     skipped_checks: tuple[str, ...] = ()
@@ -216,11 +261,13 @@ class ProcurementFlow:
 
         if not self.runner.band_is_formed(self.advisors):
             blocked = self.runner.blocking_agents(self.advisors)
+            failures = self._failures_of(blocked, "PRE_PURCHASE")
             return self._outcome(
                 "E4_NOT_STARTED",
-                f"경계를 내지 못한 에이전트: {', '.join(blocked)}",
+                _blocked_reason(failures),
                 constraints=constraints,
                 blocked_by=blocked,
+                blocked_failures=failures,
             )
 
         attempts = 0
@@ -240,12 +287,16 @@ class ProcurementFlow:
             judgment = _judgment_of(purchase)
 
             if not purchase.contributes_to_band:
+                # 사유는 전부터 실었다. 바뀐 것은 **`missing_data` 도 같이 나른다**는
+                # 것과, 조언자 쪽과 **같은 자리(`blocked_failures`)** 에 담는다는 것이다.
+                purchase_failures = self._failures_of(("purchase",), "GENERATE_SCENARIOS")
                 return self._outcome(
                     "E4_NOT_STARTED",
-                    f"매입 에이전트 미가동: {purchase.reasoning or purchase.runtime_status}",
+                    f"매입 에이전트 미가동: {purchase_failures[0].detail}",
                     judgment=judgment,
                     constraints=constraints,
                     blocked_by=("purchase",),
+                    blocked_failures=purchase_failures,
                     purchase_attempts=attempts,
                 )
 
@@ -562,6 +613,31 @@ class ProcurementFlow:
             out.append(f"{'·'.join(rejected)} 기각 사유")
         return tuple(out)
 
+    def _failures_of(self, agents: tuple[AgentName, ...], mode: Mode) -> tuple[AgentFailure, ...]:
+        """기여하지 못한 부서의 **사유를 실행 계획에서 꺼낸다.**
+
+        ★ **회신이 아니라 계획을 본다.** `_collect_constraints` 는 실패한 회신을
+          `contributes_to_band` 로 걸러 버리므로 그 자리에는 이미 값이 없다. 계획에는
+          남아 있고, `retryable` 도 같은 이유로 계획을 본다 —
+          *"무슨 일이 일어났나"* 의 단일 출처를 하나로 둔다.
+        """
+        out: list[AgentFailure] = []
+        for agent in agents:
+            step = self.runner.plan.last(agent, mode)
+            if step is None:
+                # 회신 자체가 없다. `RuntimeStatus` 로 적을 수 없는 상태다.
+                out.append(AgentFailure(agent, "NOT_CALLED"))
+                continue
+            out.append(
+                AgentFailure(
+                    agent,
+                    step.runtime_status,
+                    reasoning=step.reasoning,
+                    missing_data=tuple(step.missing_data),
+                )
+            )
+        return tuple(out)
+
     def _outcome(self, end_code: EndCode, reason: str, **kw: Any) -> ProcurementOutcome:
         plan: ExecutionPlan = self.runner.plan
         return ProcurementOutcome(
@@ -575,6 +651,17 @@ class ProcurementFlow:
             evidences=tuple(self.sourced_evidences),
             **kw,
         )
+
+
+def _blocked_reason(failures: tuple[AgentFailure, ...]) -> str:
+    """E4 사유 한 줄. **누구인지 다음에 왜인지가 온다.**
+
+    ★ 앞머리(`경계를 내지 못한 에이전트: `)와 부서 이름은 그대로 둔다 - 읽던 사람과
+      이것을 찾던 코드가 있다. 뒤에 사유를 붙일 뿐이다.
+    """
+    if not failures:
+        return "경계를 내지 못한 에이전트: (목록 없음)"
+    return "경계를 내지 못한 에이전트: " + ", ".join(f"{f.agent}({f.detail})" for f in failures)
 
 
 def _scenarios_of(reply: AgentReply) -> tuple[Mapping[str, Any], ...]:
