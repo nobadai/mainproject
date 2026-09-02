@@ -165,6 +165,31 @@ export interface ProcurementRunResponse {
       reasoning?: string | null;
     }
   >;
+  /**
+   * 부서가 낸 근거 — **시나리오 숫자의 출처.**
+   *
+   * 🔴 **전에는 이 자리가 없었다** (2026-09-02 배선). 서버가 근거를 모아 검증에만
+   *   넘기고 응답에서 끊겨, 화면은 *"재무 상한 2,000만원"* 은 보여주면서 그 숫자가
+   *   어디서 왔는지는 못 보여줬다. `verdicts[].reasoning` 은 부서가 쓴 **설명
+   *   문장**이지 출처가 아니다.
+   *
+   * ★ **비어 있는 것은 "근거가 완비됐다" 가 아니라 "부서가 근거를 안 냈다" 이다.**
+   *   `skipped_checks` 를 감추지 않는 것과 같은 이유다.
+   */
+  evidences: Array<{
+    agent: string;
+    /** PRE_PURCHASE 는 경계("상한이 왜 그 값인가"), SCENARIO_VALIDATION 은 판정. */
+    mode: string;
+    claim: string;
+    source: string;
+    /** 🔴 숫자가 아닐 수 있다 — 재무 `policy_version_used` 가 버전 문자열을 싣는다. */
+    value: number | string;
+    unit: string;
+    /** OFFICIAL · VENDOR · SIM_FIXED · ASSUMED · INVALID_FOR_HARD. 값만큼 중요하다. */
+    evidence_grade: string;
+    evidence_detail?: string;
+    ref_ids: string[];
+  }>;
   findings: string[];
   concerns: string[];
   skipped_checks: string[];
