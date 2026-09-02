@@ -369,6 +369,8 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             llm_attempts=s.llm_attempts,
             llm_fallback_used=s.llm_fallback_used,
             replans=s.replans,
+            # 마스터는 읽지 않고 나른다 - 순서도 부서가 낸 그대로다
+            observations=list(s.observations),
         )
         for s in plan.steps
     ]
