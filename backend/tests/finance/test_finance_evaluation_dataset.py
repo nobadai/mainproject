@@ -13,7 +13,8 @@ from typing import ClassVar
 import pytest
 
 from app.finance import adapter
-from app.finance.agent import FinanceAgentController, ToolAction
+from app.finance.application.orchestration import FinanceAgentController
+from app.finance.llm.planner import ToolAction
 from app.finance.schemas import CashEvent
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
@@ -48,7 +49,7 @@ def controller_wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _EvaluationPlanner()),
     )
-    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
 
 
 @dataclass(frozen=True)
