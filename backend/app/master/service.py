@@ -18,6 +18,7 @@ from app.master.inputs import MasterInputs, collect_inputs
 from app.master.ledger_repository import get_burn_in
 from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
+from app.master.run_repository import get_run_by_request_id
 from app.master.runner import MasterRunner
 from app.master.schemas import (
     BurnInOut,
@@ -29,7 +30,6 @@ from app.master.schemas import (
     StepOut,
 )
 from app.master.verifier import MasterVerifier
-from app.orchestrator.run_repository import get_run_by_request_id
 
 
 def make_request_id(as_of: str, seq: int = 1) -> str:
@@ -104,7 +104,7 @@ def run_procurement(
 def _decision_collision(request_id: str) -> list[str]:
     """🔴 **이미 결정이 붙은 업무 키로 다시 도는가.**
 
-    `orchestrator_agent_runs` 는 append-only 라 같은 키로 두 번 돌면 **행이 둘**이
+    `master_agent_runs` 는 append-only 라 같은 키로 두 번 돌면 **행이 둘**이
     되고, `get_run_by_request_id` 는 **최신 1건**을 돌려준다(그게 맞는 동작이다 —
     *"그 요청 어떻게 됐냐"* 에는 마지막 결과가 답이다).
 
@@ -261,6 +261,7 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             llm_model=s.llm_model,
             llm_attempts=s.llm_attempts,
             llm_fallback_used=s.llm_fallback_used,
+            replans=s.replans,
         )
         for s in plan.steps
     ]
@@ -327,7 +328,10 @@ def get_run_history(request_id: str) -> RunHistoryOut:
         request_id=row.get("request_id") or request_id,
         run_id=(None if row.get("run_id") is None else str(row["run_id"])),
         as_of=row["as_of"],
-        agent=row["agent"],
+        # ★ 표에 `agent` 컬럼이 없다 (2026-09-02, master_agent_runs 로 이전).
+        #   마스터 전용 표라 늘 같은 값이었고, 상수를 컬럼으로 두면 "언젠가 다른 값이
+        #   들어올 수 있다" 로 읽힌다. 응답 모양은 유지한다 - 화면이 쓰고 있다.
+        agent="master",
         cycle=row["cycle"],
         runtime_status=row["runtime_status"],
         elapsed_ms=row.get("elapsed_ms"),

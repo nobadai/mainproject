@@ -275,6 +275,10 @@ def test_계획에_실행_시각이_없다():
         "llm_status",
         "llm_model",
         "llm_attempts",
+        # 부서가 계획을 다시 세운 횟수 (2026-09-02). `llm_attempts` 와 뜻이 다르다 —
+        # 그쪽은 Planner+Finalizer 호출 수라 툴 개수를 따라 커지고 재시도가 아니다.
+        # 시계가 아니라 결과값이므로 들어와도 된다.
+        "replans",
         "llm_fallback_used",
         # 부서가 스스로 남긴 관측 — 마스터는 읽지 않고 Critic 까지 나른다.
         # 재무의 `finance_dept_meta` 가 여기로 온다 (E-AUTHORITY · E-GRADE-LEAK).

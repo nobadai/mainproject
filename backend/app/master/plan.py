@@ -59,6 +59,17 @@ class ExecutionStep:
     llm_attempts: int = 0
     llm_fallback_used: bool = False
 
+    #: 🔴 **부서가 계획을 다시 세운 횟수.** `llm_attempts` 와 다르다 (재무 정정 2026-09-02).
+    #:
+    #: `llm_attempts` 는 **Planner + Finalizer 호출 횟수**다. capability 별로 Tool 을
+    #: 하나씩 고르는 구조라 정상 실행에서도 여러 번 불린다 — 툴이 4개면 6, 3개면 8 처럼
+    #: 툴 개수를 따라 움직인다. **재시도 횟수가 아니다.**
+    #:
+    #: 실제 재계획은 이 값이다. `ExecutionMetadata` 는 처음부터 담고 있었는데 여기로
+    #: 옮기지 않아 **실행 계획에 안 남았다** — 부서가 보내 준 것을 마스터가 버리고
+    #: 있었다. "그날 무엇이 오래 걸렸나" 를 이력으로 볼 수 없던 이유 하나가 이것이다.
+    replans: int = 0
+
     #: 부서가 스스로 남긴 관측. **마스터는 읽지 않고 나른다.**
     #:
     #: 부서만 아는 사실 중에는 봉투에 자리가 없는 것이 있다 — 재무가 cap 을 낼 때
@@ -102,6 +113,7 @@ class ExecutionPlan:
             llm_model=metadata.llm_model,
             llm_attempts=metadata.llm_attempts,
             llm_fallback_used=metadata.llm_fallback_used,
+            replans=metadata.replans,
             observations=tuple(metadata.observations),
         )
         self.steps.append(step)

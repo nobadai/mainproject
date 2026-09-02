@@ -9,14 +9,24 @@ persistence.py — 마스터 실행 계획 적재 (정의서 §1.2-11)
 
 ★ 마스터는 UUID 가 아니라 **업무 키**(`REQ-20260827-0001`)로 조회된다.
   사용자가 "그 요청 어떻게 됐냐"고 묻는 단위가 `request_id` 이기 때문이다.
+
+★ **표는 `master_agent_runs` 다** (2026-09-02 이전). 옛 `orchestrator_agent_runs` 는
+  오케 · Critic 과 함께 쓰던 표라 어휘의 소유가 없었다 - 조회(`STATUS`)를 이력에
+  남기려 해도 남의 행의 뜻까지 건드려야 해서 지금까지 안 적어 왔다.
+  Critic 은 옛 표를 그대로 쓴다.
+
+★ `item` · `end_code` 를 컬럼으로도 넘긴다.
+  payload 안에도 있지만 "배추가 며칠째 E2 인가" 를 JSONB 를 파지 않고 보기 위해서다.
+  **꺼내는 것은 여기서 한다** - 저장소가 payload 모양을 알면 응답 스키마가 바뀔 때마다
+  적재가 흔들린다.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.master.run_repository import try_save_run
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse
-from app.orchestrator.run_repository import try_save_run
 
 # 마스터의 1차 Flow 는 매입 의사결정이다. 판매(2차)가 붙으면 cycle 이 갈린다.
 _CYCLE = "PROCUREMENT"
@@ -65,10 +75,11 @@ def record(
       때문이다. 두 번 쓰지 않는다 — 행의 `run_id` 가 이미 그 답이다.
     """
     run_id = try_save_run(
-        agent="master",
         cycle=_CYCLE,
         as_of=response.as_of,
         request_id=response.request_id,
+        item=request.item,
+        end_code=response.end_code,
         runtime_status=runtime_status_of(response.end_code),
         elapsed_ms=elapsed_ms,
         plan=plan_rows(response),

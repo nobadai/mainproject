@@ -92,6 +92,11 @@ class StepOut(BaseModel):
     llm_attempts: int = 0
     llm_fallback_used: bool = False
 
+    #: 🔴 **부서가 계획을 다시 세운 횟수.** `llm_attempts` 와 뜻이 다르다.
+    #: `llm_attempts` 는 Planner + Finalizer 호출 수라 툴 개수를 따라 커지고
+    #: 재시도가 아니다 (재무 정정 2026-09-02). 재계획은 이 값이다.
+    replans: int = 0
+
 
 class ProcurementRunResponse(BaseModel):
     request_id: str
@@ -101,7 +106,7 @@ class ProcurementRunResponse(BaseModel):
     #:
     #: `plan[].run_id` 와 **다른 것이다** — 저쪽은 그 *부서 호출* 의 id 이고,
     #: 이것은 *마스터 실행 한 번* 의 id 다. 이름이 겹쳐 헷갈리므로 여기서는
-    #: `history_run_id` 로 부른다 (DB 컬럼은 `orchestrator_agent_runs.run_id`).
+    #: `history_run_id` 로 부른다 (DB 컬럼은 `master_agent_runs.run_id`).
     #:
     #: 화면이 승인할 때 이 값을 되돌려 준다 — 그래야 *"내가 본 그것을 승인했다"* 가
     #: 기록된다. 없으면 서버가 최신 실행을 고르는데, 그 사이 재실행이 있었으면
