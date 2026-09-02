@@ -36,11 +36,15 @@ import type { ProcurementRunResponse } from "@/lib/types";
 const MODE_LABEL: Record<string, string> = {
   PRE_PURCHASE: "경계",
   SCENARIO_VALIDATION: "판정",
+  // 🔴 **제안자 자리** (2026-09-02). 전에는 이 줄이 없어 매입 근거가 와도 화면이
+  //    모드를 못 읽었다 — 서버 쪽에서도 안 모으고 있었다 (근거 63건 중 매입 0건).
+  GENERATE_SCENARIOS: "제안",
 };
 
 const MODE_HINT: Record<string, string> = {
   PRE_PURCHASE: "상한이 왜 그 값인가",
   SCENARIO_VALIDATION: "이 안이 왜 그 판정인가",
+  GENERATE_SCENARIOS: "왜 이 수량인가",
 };
 
 /**

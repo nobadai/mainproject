@@ -303,6 +303,37 @@ class ProcurementFlow:
             scenarios = _scenarios_of(purchase)
             judgment = _judgment_of(purchase)
 
+            # 🔴 **제안자 근거도 모은다** (2026-09-02 · 매입 실측으로 발견).
+            #
+            #   근거를 모으는 곳이 `_collect_constraints` 와 `_validate` 둘뿐이었고
+            #   **둘 다 `self.advisors` 를 돌았다.** 매입은 조언자 목록에 없으니
+            #   구조적으로 빠졌다 — 실측에서 근거 63건 중 매입이 0건이었다
+            #   (inventory 44 · finance 19).
+            #
+            #   **"왜 이 수량인가" 를 아는 쪽의 근거가 화면에 하나도 없었다.**
+            #   멘토 지시("매입 시나리오 근거를 보이게")의 주어가 매입인데 매입만
+            #   빠져 있었다.
+            #
+            # ★ **`ADVISORS` 에 매입을 넣지 않는다.** 그 목록은 *"경계를 내야 밴드가
+            #   선다"* 는 뜻이라 매입을 넣으면 `band_is_formed` · `blocking_agents` 가
+            #   전부 틀린다. 근거 수집만 조언자 목록에서 떼어낸다.
+            #
+            # ★ **기여 여부로 거르지 않는다.** 바로 아래 E4 분기가 같은 회신의
+            #   `judgment` 를 이미 싣는다 — 근거만 버리면 *"판정은 보이는데 그 근거는
+            #   없는"* 화면이 된다. `_validate` 도 거르지 않는다
+            #   (`_collect_constraints` 만 거르는데, 그쪽은 안 쓰인 경계값의 근거라
+            #   뜻이 다르다).
+            #
+            # ★ **재호출이면 두 회차가 다 남는다.** 같은 주장이 두 번 보이는 것이
+            #   맞다 — 매입을 두 번 불렀다는 사실이 근거에도 남아야 한다.
+            #
+            # ★ **조정안은 안 모은다.** 매입은 축 조정을 제안할 권한이 없고
+            #   (`_AGENT_DEPT` 에 없어 봉투가 `ContractViolation` 으로 막는다),
+            #   여기서 모으면 *"올 수도 있다"* 로 읽힌다. 제안자와 조언자의 차이다.
+            self.sourced_evidences.extend(
+                SourcedEvidence("purchase", "GENERATE_SCENARIOS", ev) for ev in purchase.evidences
+            )
+
             if not purchase.contributes_to_band:
                 # 사유는 전부터 실었다. 바뀐 것은 **`missing_data` 도 같이 나른다**는
                 # 것과, 조언자 쪽과 **같은 자리(`blocked_failures`)** 에 담는다는 것이다.
