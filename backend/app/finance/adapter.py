@@ -30,14 +30,16 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.finance.agent import FinanceAgentController, finance_llm_enabled
-from app.finance.evidence import (
+from app.finance import messages
+from app.finance.application.orchestration import FinanceAgentController
+from app.finance.db import FinanceDataNotReady, get_current_finance_runtime_context
+from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
     missing_source_name,
     resolve_optional_source_ref,
+    save_finance_execution,
 )
-from app.finance.repository import FinanceDataNotReady, get_current_finance_runtime_context
-from app.finance.run_repository import save_finance_execution
+from app.finance.llm.client import finance_llm_enabled
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
@@ -216,16 +218,13 @@ def _controller_boundary(
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=("finance_state", "finance_policy"),
-            reason="재무 상태 또는 정책을 읽지 못했다",
+            reason=messages.CONTEXT_UNAVAILABLE,
         )
     if context.snapshot.state_date != request.context.as_of:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=(f"finance_state@{request.context.as_of.isoformat()}",),
-            reason=(
-                f"재무 상태 기준일이 {context.snapshot.state_date} 다 — "
-                f"요청은 {request.context.as_of} 다"
-            ),
+            reason=messages.AS_OF_MISMATCH,
         )
     payroll_refs = tuple(
         missing_source_name(key)
@@ -236,13 +235,13 @@ def _controller_boundary(
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=payroll_refs,
-            reason="급여 정책값의 출처가 없어 현금 투영을 만들지 못했다 (M-23)",
+            reason=messages.PAYROLL_SOURCE_MISSING,
         )
     if context.policy.purchase_payment_days is None:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=("purchase_payment_days",),
-            reason="매입 지급일을 산출할 purchase_payment_days 정책값이 없다.",
+            reason=messages.PAYMENT_DAYS_MISSING,
         )
     return context, None
 
@@ -276,7 +275,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             run_id,
             tools,
             missing=("finance_state", "finance_policy"),
-            reason="재무 상태 또는 정책을 읽지 못했다",
+            reason=messages.CONTEXT_UNAVAILABLE,
         )
 
     state_date = context.snapshot.state_date
@@ -286,7 +285,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             run_id,
             tools,
             missing=(f"finance_state@{as_of.isoformat()}",),
-            reason=f"재무 상태 기준일이 {state_date} 다 — 요청은 {as_of} 다",
+            reason=messages.AS_OF_MISMATCH,
         )
 
     policy = context.policy
@@ -412,9 +411,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         evidences=evidences,
         judgment_fields=_JUDGMENT_FIELDS if "payment_pressure" in payload else (),
         missing_data=tuple(missing),
-        reasoning="현재 자금 상태를 조회했다."
-        if not missing
-        else "현재 잔액은 답했고, 급여 출처가 없어 현금 투영은 내지 못했다.",
+        reasoning=messages.STATUS_QUERY if not missing else messages.STATUS_QUERY_PARTIAL,
     )
     return reply, _meta(request, run_id, tools)
 
@@ -439,7 +436,7 @@ def _invalid_scenario_input(
                 for item in exc.errors()
             ]
         },
-        reasoning="매입 시나리오 입력이 재무 계약 검증을 통과하지 못했습니다.",
+        reasoning=messages.INVALID_REQUEST,
     )
     return _recorded(request, reply, _meta(request, run_id, []))
 
@@ -451,7 +448,7 @@ def _invalid_scenario_as_of(
         request_id=request.context.request_id, as_of=request.context.as_of, agent="finance",
         mode=request.mode, run_id=run_id, runtime_status="ERROR", business_status="skipped",
         payload={"validation_errors": ["proposal.meta.as_of"]},
-        reasoning="매입 제안의 기준시점이 마스터 요청과 일치하지 않습니다.",
+        reasoning=messages.INVALID_REQUEST_AS_OF,
     )
     return _recorded(request, reply, _meta(request, run_id, []))
 
@@ -475,10 +472,10 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
     #    마스터가 사용자에게 요청할 대상을 잘못 알려 준다.
     if request.mode == "SCENARIO_VALIDATION":
         missing = ("purchase_scenario_schema",)
-        reason = "매입 시나리오 필드명이 확정되지 않아 판정하지 못했다."
+        reason = messages.SCENARIO_SCHEMA_MISSING
     else:
         missing = (f"{request.mode}_translation",)
-        reason = f"{request.mode} 는 재무 어댑터에 아직 없다."
+        reason = messages.MODE_NOT_SUPPORTED
     reply = AgentReply(
         request_id=request.context.request_id,
         as_of=request.context.as_of,

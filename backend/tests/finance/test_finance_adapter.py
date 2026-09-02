@@ -15,7 +15,8 @@ from typing import ClassVar
 import pytest
 
 from app.finance import adapter
-from app.finance.agent import FinanceAgentController, ToolAction
+from app.finance.application.orchestration import FinanceAgentController
+from app.finance.llm.planner import ToolAction
 from app.master.envelope import (
     AgentReply,
     AgentRequest,
@@ -111,7 +112,7 @@ def controller_wired(monkeypatch):
         "FinanceAgentController",
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
-    monkeypatch.setattr("app.finance.run_repository.save_finance_execution", lambda **_kwargs: None)
+    monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
 
 
 @pytest.fixture

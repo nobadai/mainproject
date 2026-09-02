@@ -16,16 +16,17 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from app.finance.infrastructure.finance_state_repository import (
+from app.finance.db import (
+    FinanceDataNotReady,
+    PostgresFinanceAsOfDataPort,
     _get_current_finance_state_row,
     get_current_finance_runtime_context,
 )
-from app.finance.repository import FinanceDataNotReady, PostgresFinanceAsOfDataPort
 from app.finance.schemas import FinanceSnapshot
 from tests.finance.test_finance_policy_repository import _debt_rows, _rows
 
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
-_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+_STATE_REPO = "app.finance.db"
 
 
 def _snapshot(debt: Decimal) -> FinanceSnapshot:

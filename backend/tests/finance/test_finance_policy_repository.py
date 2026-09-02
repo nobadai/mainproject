@@ -5,10 +5,10 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from app.finance.repository import get_active_finance_debt_policy, get_active_finance_policy
+from app.finance.db import get_active_finance_debt_policy, get_active_finance_policy
 
 #: `patch()` 대상 모듈 경로 — 소유 모듈을 직접 가리킨다.
-_STATE_REPO = "app.finance.infrastructure.finance_state_repository"
+_STATE_REPO = "app.finance.db"
 
 
 def _rows() -> list[dict[str, object]]:
