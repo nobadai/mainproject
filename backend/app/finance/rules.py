@@ -219,6 +219,8 @@ SalesRuleId = Literal[
     "FIN-SALES-MARGIN",
     "FIN-SALES-PAYMENT-TERM",
     "FIN-SALES-CASHFLOW",
+    "FIN-SALES-CREDIT",
+    "FIN-SALES-COLLECTION-RISK",
 ]
 
 
@@ -482,3 +484,80 @@ def aggregate_sales_finance_rules(
         "missing_policy": missing_policy,
         "rule_results": results,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 5 — 여신 여력 · 회수 위험
+#
+# ★ **여신한도는 저장소에 없다.** `partners` 에도 `agent_policy_config` 에도
+#   credit_limit 컬럼이 없다. 그래서 아래 두 규칙은 오늘 항상 닫힌다.
+#   닫히는 것과 FAIL 은 다르다 — 한도를 모르는 것은 거래처 잘못이 아니다.
+#
+# ★ 거래이력이 없다는 이유만으로 신규 거래처를 FAIL 로 만들지 않는다. 채권 0원은
+#   **사실**이고, 판정을 막는 것은 언제나 없는 정책 쪽이다.
+# ---------------------------------------------------------------------------
+
+
+
+def evaluate_receivable_capacity_rule(
+    *,
+    projected_partner_ar_krw: Decimal,
+    credit_limit_krw: Decimal | None,
+) -> SalesRuleResult:
+    """제안 성사 후 거래처 채권이 권위 있는 여신한도 안인지 본다.
+
+        projected AR <= limit   PASS
+        projected AR >  limit   FAIL
+
+    한도가 없으면 판정하지 않는다 — 회사 현금·판매이력·마진에서 한도를 역산하지
+    않는다.
+    """
+    if projected_partner_ar_krw < 0:
+        raise ValueError("projected_partner_ar_krw must not be negative")
+    if credit_limit_krw is None:
+        return _sales_rule(
+            "FIN-SALES-CREDIT",
+            runtime_status="RUNTIME_NOT_READY",
+            verdict=None,
+            reason_codes=("REQUIRED_FINANCE_POLICY_MISSING",),
+            missing_policy=("partner_credit_limit_krw",),
+        )
+    if credit_limit_krw < 0:
+        raise ValueError("credit_limit_krw must not be negative")
+    if projected_partner_ar_krw <= credit_limit_krw:
+        return _sales_rule(
+            "FIN-SALES-CREDIT",
+            verdict="PASS",
+            reason_codes=("SALES_CREDIT_WITHIN_LIMIT",),
+        )
+    return _sales_rule(
+        "FIN-SALES-CREDIT",
+        verdict="FAIL",
+        reason_codes=("SALES_CREDIT_LIMIT_EXCEEDED",),
+    )
+
+
+def evaluate_collection_risk_rule(
+    *,
+    overdue_ar_krw: Decimal,
+    collection_risk_policy: Mapping[str, object] | None = None,
+) -> SalesRuleResult:
+    """회수 위험 판정 — 권위 있는 임계값/가중치가 없으면 점수를 만들지 않는다.
+
+    ★ 연체 금액 같은 **사실**은 이미 `summarize_partner_receivables` 가 계산해
+      두었고 그대로 밖으로 나간다. 여기서 막는 것은 그 사실을 등급·점수로 바꾸는
+      일이다. 가중치 없는 점수는 숫자처럼 보이는 추측이다.
+    """
+    if overdue_ar_krw < 0:
+        raise ValueError("overdue_ar_krw must not be negative")
+    if collection_risk_policy is None:
+        return _sales_rule(
+            "FIN-SALES-COLLECTION-RISK",
+            runtime_status="RUNTIME_NOT_READY",
+            verdict=None,
+            reason_codes=("REQUIRED_FINANCE_POLICY_MISSING",),
+            missing_policy=("sales_collection_risk_policy",),
+        )
+    raise NotImplementedError(
+        "collection risk scoring requires an authoritative threshold/weight contract"
+    )

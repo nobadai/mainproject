@@ -8,7 +8,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import TypedDict
 
 from app.finance.sales_models import (
+    OPEN_RECEIVABLE_STATUSES,
     InventoryCostBasis,
+    PartnerReceivable,
+    PartnerReceivableFacts,
     SalesCostBasis,
     SalesScenarioCashflow,
     VerifiedDirectCost,
@@ -600,3 +603,72 @@ def project_sales_scenario_cashflow(
             scenario_projection.projected_cash_min > base_projection.projected_cash_min
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 5 — 매출채권 · 여신 산술
+#
+# ★ 채권 원장(`receivables`)은 실재한다. **여신한도는 실재하지 않는다** — 저장소
+#   어디에도 credit_limit 이 없다. 그래서 여기서는 한도가 주어졌을 때의 산술만
+#   두고, 한도를 회사 현금·판매이력·마진에서 역산하지 않는다.
+# ---------------------------------------------------------------------------
+
+
+def summarize_partner_receivables(
+    *,
+    partner_id: str,
+    as_of: date,
+    receivables: Sequence[PartnerReceivable],
+) -> PartnerReceivableFacts:
+    """거래처 채권 잔액과 연체 잔액을 집계한다 (사실만, 판정 없음).
+
+    빈 목록은 **채권이 없다는 사실**이다 — 신규 거래처를 자료 미비로 취급하지
+    않는다. 연체는 `due_date < as_of` 인 미회수 채권으로만 정의한다.
+    """
+    if not partner_id.strip():
+        raise ValueError("partner_id must not be blank")
+    open_items = [item for item in receivables if item.status in OPEN_RECEIVABLE_STATUSES]
+    overdue_items = [item for item in open_items if item.due_date < as_of]
+    return PartnerReceivableFacts(
+        partner_id=partner_id,
+        as_of=as_of,
+        current_ar_krw=sum(
+            (item.outstanding_amount_krw for item in open_items), start=Decimal(0)
+        ),
+        overdue_ar_krw=sum(
+            (item.outstanding_amount_krw for item in overdue_items), start=Decimal(0)
+        ),
+        open_receivable_count=len(open_items),
+        overdue_receivable_count=len(overdue_items),
+        source_refs=tuple(item.source_ref for item in open_items),
+    )
+
+
+def calculate_available_credit(
+    *,
+    credit_limit_krw: Decimal,
+    current_partner_ar_krw: Decimal,
+) -> Decimal:
+    """여신 여력 = 여신한도 - 현재 거래처 채권.
+
+    음수를 0으로 깎지 않는다 — 한도를 이미 넘긴 상태는 그 자체로 드러나야 하는
+    사실이고, 0으로 만들면 "딱 맞게 찼다"와 구분되지 않는다.
+    """
+    if credit_limit_krw < 0:
+        raise ValueError("credit_limit_krw must not be negative")
+    if current_partner_ar_krw < 0:
+        raise ValueError("current_partner_ar_krw must not be negative")
+    return credit_limit_krw - current_partner_ar_krw
+
+
+def calculate_projected_partner_ar(
+    *,
+    current_partner_ar_krw: Decimal,
+    proposed_sales_amount_krw: Decimal,
+) -> Decimal:
+    """제안이 성사됐을 때의 거래처 채권 = 현재 채권 + 제안 매출액."""
+    if current_partner_ar_krw < 0:
+        raise ValueError("current_partner_ar_krw must not be negative")
+    if proposed_sales_amount_krw < 0:
+        raise ValueError("proposed_sales_amount_krw must not be negative")
+    return current_partner_ar_krw + proposed_sales_amount_krw

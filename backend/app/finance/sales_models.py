@@ -137,3 +137,49 @@ class SalesScenarioCashflow(BaseModel):
     #: 정의: scenario_projected_cash_min > base_projected_cash_min.
     #: True 면 그 현금 여력은 아직 확정되지 않은 돈에 기대고 있다는 뜻이다.
     depends_on_projected_inflow: bool
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 5 — 매출채권 사실
+#
+# ★ `receivables` 원장은 실재하고 Finance 가 이미 읽는다. 반면 **여신한도는 저장소
+#   어디에도 없다** — `partners` 에도, `agent_policy_config` 에도, 어떤 테이블에도
+#   credit_limit 컬럼이 없다. 그래서 채권 사실은 계산하되 여신 판정은 닫는다.
+#
+# ★ 빈 목록은 "채권이 없다"는 **사실**이고 "자료를 못 받았다"가 아니다. 둘을 섞지
+#   않으려고 목록을 항상 명시적으로 받는다.
+# ---------------------------------------------------------------------------
+
+#: 미회수로 남아 있는 채권 상태. COLLECTED·WRITEOFF 는 잔액에 넣지 않는다.
+OPEN_RECEIVABLE_STATUSES: frozenset[str] = frozenset({"OPEN", "PARTIAL"})
+
+
+class PartnerReceivable(BaseModel):
+    """거래처 채권 1건. `receivables` 원장 행을 Finance 안으로 옮긴 모양이다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    receivable_id: str = Field(min_length=1)
+    due_date: date
+    outstanding_amount_krw: Decimal = Field(ge=0)
+    status: Literal["OPEN", "PARTIAL", "COLLECTED", "WRITEOFF"]
+    source_ref: str = Field(min_length=1)
+
+    @field_validator("outstanding_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class PartnerReceivableFacts(BaseModel):
+    """거래처 채권 집계 — **사실만이다.** 위험도 점수도, 판정도 들어있지 않다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    partner_id: str = Field(min_length=1)
+    as_of: date
+    current_ar_krw: Decimal = Field(ge=0)
+    overdue_ar_krw: Decimal = Field(ge=0)
+    open_receivable_count: int = Field(ge=0)
+    overdue_receivable_count: int = Field(ge=0)
+    source_refs: tuple[str, ...] = ()
