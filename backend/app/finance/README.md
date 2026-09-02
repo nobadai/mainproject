@@ -42,7 +42,7 @@ Tool 객체와 실제로 실행되는 Tool 객체는 같지만, 그 사이에 Ha
 
 ### capability 소유와 의존
 
-정본은 `capability_graph.py` 하나다. 소유는 **1:1** 이다.
+정본은 `application/harness.py` 하나다. 소유는 **1:1** 이다.
 
 ```text
 finance_position              → assess_finance_position
