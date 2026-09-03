@@ -840,12 +840,27 @@ def purchase_port(
     ``mode``는 둘뿐이다 — ``GENERATE_SCENARIOS``·``STATUS_QUERY``. 다른 mode는 봉투가
     **보내기 전에** 막으므로 여기서 다시 검사하지 않는다 (``_AGENT_MODES``).
 
-    ``quotes``는 등급별 시세 공급자다 (#70). 기본값은 mock 이고, 실데이터로 돌리려면
-    등록 시점에 ``partial(purchase_port, quotes=auction_quote_source())``로 꽂는다.
+    ``quotes``는 등급별 시세 공급자다 (#70). 이 인자의 기본값은 여전히 mock 이지만
+    **실운영 등록은 실 경락가를 꽂는다** — ``app/main.py`` 가
+    ``partial(purchase_port, quotes=auction_quote_source())`` 로 등록한다 (2026-09-03).
 
-    ⚠️ **실운영 기본값을 아직 바꾸지 않았다.** 우리 물량가중 시리즈가 ML ``current_price``와
-      일치하지 않는 것이 확인됐고(2026-08-31 실측), 두 시리즈를 어떻게 병기할지가 ML 회신
-      대기 중이다. 전환은 ``app/main.py``의 등록 한 줄이다.
+    🔴 **mock 으로 두면 안이 하나도 안 나온다.** 실측으로 확인했다.
+
+    .. code-block:: text
+
+        같은 payload · as_of=2025-12-31
+          mock      배추 0안 · 무 0안   self_check 가 전부 컷
+          실 경락가  배추 2안 · 무 2안   business=ok
+
+    ``max_price`` 는 실 ML 예측 q90 에서 오고 ``grade_unit_price`` 는 시세에서 온다.
+    한쪽만 mock 이면 **출처가 다른 두 값을 비교**하게 되고, 그 판정은 뜻이 없다.
+
+    ★ 인자 기본값을 mock 으로 남겨 둔 이유는 테스트다 — 결정론 스위트가 DB 없이 돈다.
+      실운영 기본값은 등록 자리에서 정한다.
+
+    ⚠️ ML ``current_price`` 와 매입 물량가중 시리즈가 일치하지 않는 것은 여전히 미결이다
+      (2026-08-31 실측 · 배추 812 vs 933). 그것은 **두 값을 어떻게 병기해 보여줄지**의
+      문제이지 매입단가로 무엇을 쓸지가 아니다.
     """
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
