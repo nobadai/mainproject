@@ -116,7 +116,7 @@ def _evaluate(payload=None, **overrides):
         "credit_limit_krw": CREDIT_LIMIT,
         "receivable_facts": _receivables(_receivable()),
         "scenario_cashflow": _cashflow(),
-        "collection_risk_policy": None,
+        "collection_risk_mode": None,
     }
     kwargs.update(overrides)
     return evaluate_sales_scenario(payload if payload is not None else _payload(), **kwargs)
@@ -271,7 +271,7 @@ def test_fully_confirmed_supply_still_computes_margin():
 
 
 def test_payment_term_over_authoritative_max_fails():
-    result = _evaluate(_payload(payment_days=90), collection_risk_policy=None)
+    result = _evaluate(_payload(payment_days=90), collection_risk_mode=None)
     payment_rule = next(
         r for r in result.rule_results if r["rule_id"] == "FIN-SALES-PAYMENT-TERM"
     )

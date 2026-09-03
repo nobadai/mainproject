@@ -342,15 +342,11 @@ def test_batch_never_invents_a_sales_policy_number(finance_context):
 
     result = reply.payload["scenario_results"][0]
     summary = result["financial_summary"] or {}
+    # 거래처가 소유한 사실은 여전히 없다 — 재무가 만들지 않는다.
     assert summary.get("credit_limit_krw") is None
     assert summary.get("contribution_margin_rate") is None
-    for policy in (
-        "finance_minimum_margin_rate",
-        "finance_warning_margin_rate",
-        "max_finance_allowed_payment_terms_days",
-        "partner_credit_limit_krw",
-    ):
-        assert policy in result["missing_data"], policy
+    for fact in ("partner_credit_limit_krw", "partner_receivable_facts"):
+        assert fact in result["missing_data"], fact
 
 
 # ---------------------------------------------------------------------------

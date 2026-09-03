@@ -546,17 +546,26 @@ def evaluate_receivable_capacity_rule(
 def evaluate_collection_risk_rule(
     *,
     overdue_ar_krw: Decimal,
-    collection_risk_policy: Mapping[str, object] | None = None,
+    collection_risk_mode: str | None = None,
 ) -> SalesRuleResult:
-    """회수 위험 판정 — 권위 있는 임계값/가중치가 없으면 점수를 만들지 않는다.
+    """회수 위험 판정 — 연체 **사실**만 보고 사람이 볼지 말지를 정한다.
 
-    ★ 연체 금액 같은 **사실**은 이미 `summarize_partner_receivables` 가 계산해
-      두었고 그대로 밖으로 나간다. 여기서 막는 것은 그 사실을 등급·점수로 바꾸는
-      일이다. 가중치 없는 점수는 숫자처럼 보이는 추측이다.
+    ★ 연체 금액 같은 사실은 이미 `summarize_partner_receivables` 가 계산해 두었고
+      그대로 밖으로 나간다. 여기서 막는 것은 그 사실을 등급·점수로 바꾸는 일이다.
+      가중치 없는 점수는 숫자처럼 보이는 추측이다.
+
+    ANY_OVERDUE_REVIEW (MVP v0.1):
+
+        연체 0원   PASS
+        연체 > 0   REVIEW_REQUIRED
+
+    ★ **연체가 있다는 이유로 FAIL 하지 않는다.** 거래를 막는 판단은 여신 한도를
+      가진 `FIN-SALES-CREDIT` 이 소유한다. 여기서도 FAIL 을 내면 같은 사실로 두 번
+      막게 되고, 어느 규칙이 막았는지도 흐려진다.
     """
     if overdue_ar_krw < 0:
         raise ValueError("overdue_ar_krw must not be negative")
-    if collection_risk_policy is None:
+    if collection_risk_mode is None:
         return _sales_rule(
             "FIN-SALES-COLLECTION-RISK",
             runtime_status="RUNTIME_NOT_READY",
@@ -564,6 +573,23 @@ def evaluate_collection_risk_rule(
             reason_codes=("REQUIRED_FINANCE_POLICY_MISSING",),
             missing_policy=("sales_collection_risk_policy",),
         )
-    raise NotImplementedError(
-        "collection risk scoring requires an authoritative threshold/weight contract"
+    if collection_risk_mode != "ANY_OVERDUE_REVIEW":
+        # 모르는 판정 방식을 아는 척하지 않는다.
+        return _sales_rule(
+            "FIN-SALES-COLLECTION-RISK",
+            runtime_status="RUNTIME_NOT_READY",
+            verdict=None,
+            reason_codes=("SALES_COLLECTION_RISK_MODE_UNSUPPORTED",),
+            missing_policy=("sales_collection_risk_policy",),
+        )
+    if overdue_ar_krw > 0:
+        return _sales_rule(
+            "FIN-SALES-COLLECTION-RISK",
+            verdict="REVIEW_REQUIRED",
+            reason_codes=("SALES_PARTNER_HAS_OVERDUE_AR",),
+        )
+    return _sales_rule(
+        "FIN-SALES-COLLECTION-RISK",
+        verdict="PASS",
+        reason_codes=("SALES_PARTNER_HAS_NO_OVERDUE_AR",),
     )

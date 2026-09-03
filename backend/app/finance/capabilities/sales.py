@@ -50,6 +50,7 @@ from app.finance.sales_models import (
     SalesValidationResult,
     VerifiedDirectCost,
 )
+from app.finance.sales_policy import load_finance_sales_mvp_policy
 from app.finance.tools import (
     build_proposed_sales_collection_event,
     calculate_available_credit,
@@ -389,7 +390,7 @@ def evaluate_sales_cashflow(
 def assess_collection_risk(
     *,
     receivable_facts: PartnerReceivableFacts | None,
-    collection_risk_policy: Mapping[str, object] | None = None,
+    collection_risk_mode: str | None = None,
 ) -> dict[str, Any]:
     """연체 사실은 나르고, 위험 등급/점수는 정책이 없으면 만들지 않는다."""
     overdue = receivable_facts.overdue_ar_krw if receivable_facts is not None else None
@@ -405,7 +406,7 @@ def assess_collection_risk(
     else:
         rule = evaluate_collection_risk_rule(
             overdue_ar_krw=overdue,
-            collection_risk_policy=collection_risk_policy,
+            collection_risk_mode=collection_risk_mode,
         )
     missing_data = () if receivable_facts is not None else ("partner_receivable_facts",)
     return {"overdue_ar_krw": overdue, "rule": rule, "missing_data": missing_data}
@@ -426,7 +427,7 @@ def evaluate_sales_scenario(
     credit_limit_krw: Decimal | None = None,
     receivable_facts: PartnerReceivableFacts | None = None,
     scenario_cashflow: SalesScenarioCashflow | None = None,
-    collection_risk_policy: Mapping[str, object] | None = None,
+    collection_risk_mode: str | None = None,
 ) -> SalesValidationResult:
     """Sales 제안 하나를 Finance 사실과 규칙으로 끝까지 검증한다.
 
@@ -468,7 +469,7 @@ def evaluate_sales_scenario(
         minimum_cash_balance_krw=minimum_cash_balance_krw,
     )
     risk = assess_collection_risk(
-        receivable_facts=receivable_facts, collection_risk_policy=collection_risk_policy
+        receivable_facts=receivable_facts, collection_risk_mode=collection_risk_mode
     )
 
     rules: list[SalesRuleResult] = [
@@ -662,15 +663,17 @@ def run_sales_validation(
       정책은 Finance Policy 가 소유한다 — 모델이 수량·단가·원가·결제일수·여신을
       만들거나 베껴 넣을 자리를 두지 않는다.
 
-    ★ **있는 것은 쓰고 없는 것은 없는 채로 넘긴다.** 최소 현금과 현금흐름은 권위
-      있는 Finance 자료라 실제로 읽는다. 반면 판매 마진 임계값 · 최대 결제일수 ·
-      여신한도 · 회수위험 정책은 `FinancePolicy` 의 닫힌 키에도
-      `agent_policy_config` 의 finance domain 에도 없다 — 그 자리에는 ``None`` 이
-      가고, 결과는 값을 지어내는 대신 RUNTIME_NOT_READY 와 없는 정책 이름을 낸다.
+    ★ **정책과 사실을 가른다.**
+        정책 — 마진 임계값 · 최대 결제일수 · 회수위험 판정 방식.
+               Finance/Sales MVP Policy v0.1 이 소유하고 실행마다 같다.
+        사실 — 여신한도 · 거래처 채권. 거래처/계약이 소유하는 권위 있는 값이라
+               재무가 기본값을 만들 수 없다. 아직 조회 계약이 없어 ``None`` 이고,
+               그때 판정은 값을 지어내는 대신 RUNTIME_NOT_READY 로 닫힌다.
     """
     del args
     payload = state.request.payload
     sales_input, _ = parse_sales_validation_input(payload)
+    policy = load_finance_sales_mvp_policy()
 
     minimum_cash: Decimal | None = None
     scenario_cashflow: SalesScenarioCashflow | None = None
@@ -682,14 +685,17 @@ def run_sales_validation(
     return build_sales_validation_payload(
         evaluate_sales_scenario(
             payload,
-            # 아래 넷은 저장소에 권위 있는 값이 아직 없다 (팀 결정 대기).
-            finance_minimum_margin_rate=None,
-            finance_warning_margin_rate=None,
-            max_finance_allowed_payment_terms_days=None,
+            finance_minimum_margin_rate=policy.finance_minimum_margin_rate,
+            finance_warning_margin_rate=policy.finance_warning_margin_rate,
+            max_finance_allowed_payment_terms_days=(
+                policy.max_finance_allowed_payment_terms_days
+            ),
+            collection_risk_mode=policy.collection_risk_mode,
+            # 🔴 아래 둘은 정책이 아니라 **거래처가 소유한 사실**이다. 여기 기본값을
+            #    두면 없는 한도를 재무가 발명하게 된다 — 조회 계약이 설 때까지 없는
+            #    채로 두고 판정을 닫는다.
             credit_limit_krw=None,
-            # 거래처 채권 조회 계약이 아직 없다 — 0으로 메우지 않는다.
             receivable_facts=None,
-            collection_risk_policy=None,
             # 여기 둘은 실재하는 Finance 자료다.
             minimum_cash_balance_krw=minimum_cash,
             scenario_cashflow=scenario_cashflow,

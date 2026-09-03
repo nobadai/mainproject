@@ -139,17 +139,23 @@ def test_missing_sales_policy_is_runtime_not_ready_and_still_persists(finance_co
     assert saved["params"][9] == "skipped"
 
 
-def test_missing_policy_names_survive_into_the_reply(finance_context):
+def test_missing_authoritative_fact_names_survive_into_the_reply(finance_context):
+    """★ 이름이 남는 대상이 **정책에서 사실로** 바뀌었다.
+
+    마진 임계값·최대 결제일수는 이제 MVP 정책이 공급한다. 여전히 없는 것은 거래처가
+    소유한 여신한도와 채권 사실이고, 그것들은 재무가 만들 수 없다.
+    """
     reply, _, _ = _run(_request(), finance_context)
     missing = reply.payload.get("missing_data", [])
 
-    for policy in (
+    for fact in ("partner_credit_limit_krw", "partner_receivable_facts"):
+        assert fact in missing, fact
+    for supplied in (
         "finance_minimum_margin_rate",
         "finance_warning_margin_rate",
         "max_finance_allowed_payment_terms_days",
-        "partner_credit_limit_krw",
     ):
-        assert policy in missing, policy
+        assert supplied not in missing, supplied
 
 
 def test_no_sales_policy_value_is_invented(finance_context):

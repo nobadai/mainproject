@@ -199,14 +199,17 @@ def test_missing_sales_policies_are_reported_not_invented():
     assert result["status"] == "RUNTIME_NOT_READY"
     assert result["finance_verdict"] is None
     assert result["data_quality"] == "INCOMPLETE"
-    for policy in (
+    # ★ 이제 남는 것은 **정책이 아니라 거래처가 소유한 사실**이다.
+    #   마진 임계값·최대 결제일수·회수위험 판정 방식은 MVP 정책이 공급하므로 더 이상
+    #   없는 것으로 보고되지 않는다.
+    for fact in ("partner_credit_limit_krw", "partner_receivable_facts"):
+        assert fact in result["missing_data"], fact
+    for supplied in (
         "finance_minimum_margin_rate",
         "finance_warning_margin_rate",
         "max_finance_allowed_payment_terms_days",
-        "partner_credit_limit_krw",
-        "sales_collection_risk_policy",
     ):
-        assert policy in result["missing_data"], policy
+        assert supplied not in result["missing_data"], supplied
 
 
 # ---------------------------------------------------------------------------
