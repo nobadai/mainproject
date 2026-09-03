@@ -113,7 +113,7 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
 
 
 def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
-    quantity, price, delivery, payment, term, refs = _baseline(request)
+    quantity, price, delivery, payment, terms_type, term, source_ref, refs = _baseline(request)
     if quantity is None:
         return []
     result: list[SalesScenario] = []
@@ -164,7 +164,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 sales_amount_krw=scenario_quantity * price if price is not None else None,
                 delivery_date=delivery,
                 payment_days=payment,
+                payment_terms_type=terms_type,
                 contract_term_days=term,
+                source_ref=source_ref,
                 supply=supply,
                 sales_decision_axes=axes,
                 required_validations=validations,
@@ -183,6 +185,25 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
     return result
 
 
+#: 사용자가 이 중 하나라도 명시하면 **사용자 제안**으로 본다 (갱신 override 판정).
+_RENEWAL_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "requested_quantity_kg",
+    "preferred_unit_price_krw",
+    "preferred_delivery_date",
+    "preferred_payment_days",
+    "preferred_payment_terms_type",
+    "preferred_contract_term_days",
+)
+
+
+def _user_overrides_contract(request: SalesProposalInput) -> bool:
+    """갱신 제안에서 사용자가 상업조건을 실제로 바꿨는가."""
+    return any(
+        getattr(request.user_request, field) is not None
+        for field in _RENEWAL_OVERRIDE_FIELDS
+    )
+
+
 def _baseline(request: SalesProposalInput):
     contract = request.contract_context
     user = request.user_request
@@ -191,21 +212,34 @@ def _baseline(request: SalesProposalInput):
         price = contract.contract_unit_price_krw
         delivery = contract.contract_delivery_date
         payment = contract.contract_payment_days
+        terms_type = contract.contract_payment_terms_type
         term = contract.contract_term_days
+        # 계약 이행은 계약이 상업조건의 직접 출발점이다.
+        source_ref = contract.source_ref
     else:
         quantity = user.requested_quantity_kg
         price = user.preferred_unit_price_krw
         delivery = user.preferred_delivery_date
         payment = user.preferred_payment_days
+        terms_type = user.preferred_payment_terms_type
         term = user.preferred_contract_term_days
+        source_ref = user.source_ref
         if request.business_mode == "CONTRACT_PROPOSAL_RENEWAL" and contract:
             quantity = quantity if quantity is not None else contract.contract_quantity_kg
             price = price if price is not None else contract.contract_unit_price_krw
             delivery = delivery if delivery is not None else contract.contract_delivery_date
             payment = payment if payment is not None else contract.contract_payment_days
+            terms_type = (
+                terms_type if terms_type is not None else contract.contract_payment_terms_type
+            )
             term = term if term is not None else contract.contract_term_days
+            # ★ 사용자가 조건을 바꿨으면 **계약 ref 를 그 변경안의 출처로 쓰지 않는다.**
+            #   바꾼 사람은 사용자인데 계약을 근거로 달면 누가 정한 조건인지 뒤바뀐다.
+            #   사용자 ref 가 없으면 없는 채로 둔다 — 발명하지 않는다.
+            if not _user_overrides_contract(request):
+                source_ref = contract.source_ref
     refs = [contract.source_ref] if contract and contract.source_ref else []
-    return quantity, price, delivery, payment, term, refs
+    return quantity, price, delivery, payment, terms_type, term, source_ref, refs
 
 
 def resolve_applicable_confirmed_supply(
