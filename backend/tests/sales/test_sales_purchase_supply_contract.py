@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.sales.proposal import run_proposal
+from app.sales.proposal import run_proposal, self_check_scenarios
 from app.sales.schemas import PurchaseAdditionalSupplyResult, SalesProposalInput
 
 
@@ -173,6 +173,26 @@ def test_zero_quantity_is_preserved_and_not_conditional():
     assert scenario.conditional_purchase is False
 
 
+def test_skipped_with_zero_is_a_normal_answer_not_a_leak():
+    """`READY + skipped + 0kg` 은 정상 조합이다 — 오류로 만들지 않는다."""
+    reply = run_proposal(
+        _request(
+            [
+                _reply(
+                    business="skipped",
+                    payload={"procurable_quantity_kg": 0, "risks": []},
+                )
+            ]
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.conditional_quantity_kg == Decimal(0)
+    assert scenario.conditional_purchase is False
+    assert "PURCHASE_REFERENCE_LEAK" not in reply.self_check.issue_codes
+    assert reply.self_check.passed is True
+
+
 def test_runtime_not_ready_keeps_the_quantity_unknown():
     reply = run_proposal(
         _request(
@@ -197,6 +217,51 @@ def test_explicit_null_quantity_stays_unknown():
     )
 
     assert _aggressive(reply).supply.conditional_quantity_kg is None
+
+
+# ---------------------------------------------------------------------------
+# capability guard
+# ---------------------------------------------------------------------------
+
+
+def test_wrong_capability_is_not_consumed_as_supply():
+    reply = run_proposal(
+        _request(
+            [
+                _reply(
+                    capability="FINANCIAL_VALIDATION",
+                    payload={"procurable_quantity_kg": 2000, "risks": []},
+                )
+            ]
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.conditional_quantity_kg is None
+    assert scenario.conditional_purchase is False
+    assert "PURCHASE_CAPABILITY_MISMATCH" in reply.self_check.issue_codes
+
+
+def test_generate_scenarios_shaped_payload_is_not_read_as_supply():
+    """🔴 매입 시나리오 생성 회신의 `scenarios[i].risks` 를 추가공급으로 읽지 않는다."""
+    reply = run_proposal(
+        _request([_reply(payload={"scenarios": [{"risks": ["창고 점유"]}]})])
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.conditional_quantity_kg is None
+    assert scenario.conditional_purchase is False
+    # 최상위 risks 가 없으니 "위험 0건" 으로 조용히 바뀌지 않는다.
+    assert "창고 점유" not in scenario.risks
+    assert "PURCHASE_SUPPLY_PAYLOAD_INVALID" in reply.self_check.issue_codes
+
+
+def test_payload_without_risks_is_not_read_as_no_risk():
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 25})]))
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.conditional_quantity_kg is None
+    assert "PURCHASE_SUPPLY_PAYLOAD_INVALID" in reply.self_check.issue_codes
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +301,58 @@ def test_replies_do_not_bleed_between_scenarios():
     for scenario in reply.scenarios[:2]:
         assert scenario.supply.dependency_ref is None
         assert not [r for r in scenario.domain_replies if r.source_agent == "purchase"]
+
+
+def test_purchase_reply_on_a_scenario_that_did_not_ask_is_a_leak():
+    """추가조달을 묻지 않은 안에 그 검증 결과가 붙으면 self-check 가 잡는다."""
+    from app.sales.schemas import SalesDomainReply, SalesScenario, ScenarioSupply
+
+    scenario = SalesScenario(
+        scenario_id="SALES-001-A",
+        scenario_type="CONSERVATIVE",
+        objective="RISK_DEFENSE",
+        business_mode="SPOT_SALES",
+        item="배추",
+        quantity_kg=Decimal(3000),
+        unit_price_krw=Decimal(2000),
+        sales_amount_krw=Decimal(6_000_000),
+        supply=ScenarioSupply(confirmed_quantity_kg=Decimal(3000)),
+        # ADDITIONAL_SUPPLY_CONTEXT 를 요구하지 않았다.
+        required_validations=["FINANCIAL_VALIDATION"],
+        domain_replies=[
+            SalesDomainReply.model_validate(
+                _reply(payload={"procurable_quantity_kg": 25, "risks": []})
+            )
+        ],
+    )
+
+    check = self_check_scenarios([scenario])
+
+    assert "PURCHASE_REFERENCE_LEAK" in check.issue_codes
+
+
+def test_no_purchase_reply_produces_no_purchase_issue():
+    reply = run_proposal(
+        SalesProposalInput.model_validate(
+            {
+                "business_mode": "SPOT_SALES",
+                "user_request": {
+                    "item": "배추",
+                    "requested_quantity_kg": 3000,
+                    "preferred_unit_price_krw": 2000,
+                    "preferred_delivery_date": "2026-09-10",
+                },
+                "logistics_context": _LOGISTICS,
+            }
+        )
+    )
+
+    for code in (
+        "PURCHASE_REFERENCE_LEAK",
+        "PURCHASE_CAPABILITY_MISMATCH",
+        "PURCHASE_SUPPLY_PAYLOAD_INVALID",
+    ):
+        assert code not in reply.self_check.issue_codes
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +417,104 @@ def test_original_payload_is_preserved_on_the_reply():
     )
 
     assert carried.payload["extra"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# ADDITIONAL_SUPPLY_VALIDATION_MISSING — 오탐 제거가 과하지 않은가 (Case A~E)
+# ---------------------------------------------------------------------------
+
+
+def _issues(reply):
+    return reply.self_check.issue_codes
+
+
+def test_case_a_no_purchase_reply_keeps_validation_missing():
+    """추가공급이 필요한데 답이 아예 없다 — 미검증 그대로."""
+    reply = run_proposal(
+        SalesProposalInput.model_validate(
+            {
+                "business_mode": "SPOT_SALES",
+                "user_request": {
+                    "item": "배추",
+                    "requested_quantity_kg": 5000,
+                    "preferred_unit_price_krw": 2000,
+                    "preferred_delivery_date": "2026-09-10",
+                },
+                "logistics_context": _LOGISTICS,
+            }
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.additional_supply_required is True
+    assert "ADDITIONAL_SUPPLY_CONTEXT" in scenario.required_validations
+
+
+def test_case_b_wrong_capability_does_not_resolve_validation():
+    reply = run_proposal(
+        _request([_reply(capability="FINANCIAL_VALIDATION")])
+    )
+
+    assert "PURCHASE_CAPABILITY_MISMATCH" in _issues(reply)
+    # 잘못된 답으로 검증이 끝난 것처럼 되지 않는다.
+    assert "ADDITIONAL_SUPPLY_CONTEXT" in _aggressive(reply).required_validations
+
+
+def test_case_c_invalid_payload_does_not_resolve_validation():
+    """🔴 오탐을 고치려다 미검증을 통과시키지 않는다."""
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 25})]))
+
+    assert "PURCHASE_SUPPLY_PAYLOAD_INVALID" in _issues(reply)
+    assert "ADDITIONAL_SUPPLY_VALIDATION_MISSING" in _issues(reply)
+
+
+def test_case_d_valid_skipped_zero_resolves_validation():
+    reply = run_proposal(
+        _request(
+            [
+                _reply(
+                    business="skipped",
+                    payload={"procurable_quantity_kg": 0, "risks": []},
+                )
+            ]
+        )
+    )
+
+    assert "ADDITIONAL_SUPPLY_VALIDATION_MISSING" not in _issues(reply)
+    assert _aggressive(reply).conditional_purchase is False
+    assert reply.self_check.passed is True
+
+
+def test_case_e_reply_bound_to_another_scenario_leaves_this_one_missing():
+    """다른 안에만 배정된 답이 이 안의 검증을 끝내 주지 않는다."""
+    request = SalesProposalInput.model_validate(
+        {
+            "business_mode": "SPOT_SALES",
+            "is_refeed": True,
+            "feedback_attempt": 1,
+            "user_request": {
+                "item": "배추",
+                "requested_quantity_kg": 5000,
+                "preferred_unit_price_krw": 2000,
+                "preferred_delivery_date": "2026-09-10",
+            },
+            "logistics_context": _LOGISTICS,
+            "feedback": {
+                "attempt": 1,
+                "domain_replies": [_reply(ref="PUR-B")],
+                # C 가 아니라 B 에 배정했다.
+                "scenario_feedback": [
+                    {"scenario_id": "SALES-001-B", "reply_refs": ["PUR-B"]}
+                ],
+            },
+        }
+    )
+
+    reply = run_proposal(request)
+    aggressive = _aggressive(reply)
+
+    assert aggressive.supply.conditional_quantity_kg is None
+    assert "ADDITIONAL_SUPPLY_CONTEXT" in aggressive.required_validations
 
 
 # ---------------------------------------------------------------------------
