@@ -137,7 +137,7 @@ class Finalizer:
     def __init__(self):
         self.attempts = 0
 
-    def finalize(self, *, mode, business_status, evidences):
+    def finalize(self, *, mode, business_status, evidences, has_verified_adjustment=False):
         """★ 문장을 여기 다시 적지 않는다 — **정본을 그대로 고른다.**
 
         가짜가 자기 문장을 들고 있으면, 실제 실행을 도는 테스트가 사용자에게 나가는
@@ -944,7 +944,7 @@ def test_finalizer_explains_a_result_that_already_exists():
     seen: list[str] = []
 
     class _Recording(Finalizer):
-        def finalize(self, *, mode, business_status, evidences):
+        def finalize(self, *, mode, business_status, evidences, has_verified_adjustment=False):
             # Finalizer 가 불릴 때 이미 결정론 Evidence 가 다 있다.
             seen.extend(item.claim for item in evidences)
             return super().finalize(
@@ -962,7 +962,7 @@ def test_finalizer_cannot_change_the_deterministic_verdict():
     """설명이 판정을 뒤집지 못한다 — 판정은 Rule 이 이미 정했다."""
 
     class _LyingFinalizer(Finalizer):
-        def finalize(self, *, mode, business_status, evidences):
+        def finalize(self, *, mode, business_status, evidences, has_verified_adjustment=False):
             del mode, business_status, evidences
             self.attempts += 1
             return "검증된 재무 근거가 보고된 시나리오 판정을 뒷받침합니다."

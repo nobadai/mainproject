@@ -41,14 +41,30 @@ FINANCE_EXPLANATIONS: dict[str, str] = {
     ),
     # ★ `conditional` 을 `ok` 와 같은 문장으로 묶지 않는다. 두 결과는 사용자가 할 일이
     #   다르다 — 하나는 그대로 진행이고, 하나는 조정한 뒤 다시 보는 것이다.
+    # 🔴 예전에는 뒤에 "매입 금액이나 지급 시기를 조정하시면 안전하게 진행하실 수
+    #    있습니다" 가 붙어 있었다. 두 가지가 틀렸다.
+    #      · 검증된 금액 대안이 없을 때도 "조정하면 된다" 고 단정했다
+    #      · 재무가 검증하는 조정축은 금액 하나인데 **지급 시기**까지 권했다
+    #    기계 계약은 `NOT_ADJUSTABLE` 인데 문장은 조정을 권하는 상태가 나갈 수 있었다.
     "SCENARIO_CONDITIONAL": (
         "평소 흐름이라면 감당할 수 있지만, 대금 회수가 늦어지는 상황까지 "
         "가정하면 운영에 필요한 자금이 빠듯해집니다. "
-        "매입 금액이나 지급 시기를 조정하시면 안전하게 진행하실 수 있습니다."
+        "현재 조건은 추가 검토가 필요합니다."
+    ),
+    # 아래 둘은 **검증된 금액 대안이 실제로 나온 경우에만** 고를 수 있다.
+    # 조정 범위를 말할 근거가 결과에 같이 실려 있을 때만 그 사실을 알린다.
+    "SCENARIO_CONDITIONAL_ADJUSTABLE": (
+        "평소 흐름이라면 감당할 수 있지만, 대금 회수가 늦어지는 상황까지 "
+        "가정하면 운영에 필요한 자금이 빠듯해집니다. "
+        "현재 조건은 추가 검토가 필요하며, 확인된 매입 금액 조정 범위를 "
+        "함께 안내해 드렸습니다."
     ),
     "SCENARIO_REJECT": (
+        "현재 자금 상태에서는 제안하신 조건 그대로 매입을 진행하기 어렵습니다."
+    ),
+    "SCENARIO_REJECT_ADJUSTABLE": (
         "현재 자금 상태에서는 제안하신 조건 그대로 매입을 진행하기 어렵습니다. "
-        "진행할 수 있는 조정 범위가 있는 경우에는 함께 안내해 드렸습니다."
+        "확인된 매입 금액 조정 범위를 함께 안내해 드렸습니다."
     ),
 }
 
@@ -150,25 +166,46 @@ SCENARIO_REASON_CONDITIONAL = (
 SCENARIO_REASON_REJECT = "평소 흐름에서도 운영에 필요한 자금이 부족해집니다."
 
 
-def explanation_keys(mode: FinanceMode, business_status: str) -> list[str]:
+def explanation_keys(
+    mode: FinanceMode,
+    business_status: str,
+    *,
+    has_verified_adjustment: bool = False,
+) -> list[str]:
     """이 결과에 **고를 수 있는** 설명 키.
 
     ★ 한 벌만 만든다. Provider 별로 따로 적으면 같은 재무 결과가 Provider 에 따라 다른
       설명을 고를 수 있게 열린다 — 결과는 같은데 사용자에게 다른 말이 나가는 것이다.
+
+    ★ `has_verified_adjustment` 는 **결정론 결과에서 온 사실**이다. 실제로 검증된 금액
+      대안이 결과에 실렸을 때만 조정 범위를 언급하는 문장을 후보에 넣는다. 모델이
+      스스로 "금액을 낮추세요" 같은 행동을 만들 자리는 없다 — 고를 수 있는 키가
+      애초에 없기 때문이다.
     """
     if mode == "PRE_PURCHASE":
         return ["PRE_BOUNDARY"]
     if business_status == "reject":
-        return ["SCENARIO_REJECT"]
+        return ["SCENARIO_REJECT_ADJUSTABLE" if has_verified_adjustment else "SCENARIO_REJECT"]
     if business_status == "conditional":
-        return ["SCENARIO_CONDITIONAL"]
+        return [
+            "SCENARIO_CONDITIONAL_ADJUSTABLE"
+            if has_verified_adjustment
+            else "SCENARIO_CONDITIONAL"
+        ]
     return ["SCENARIO_ACCEPT"]
 
 
-def explanation_for(mode: FinanceMode, business_status: str) -> str:
+def explanation_for(
+    mode: FinanceMode,
+    business_status: str,
+    *,
+    has_verified_adjustment: bool = False,
+) -> str:
     """결정론 확정 설명. LLM 이 답하지 못해도 **사용자는 같은 뜻의 문장을 받는다.**
 
     🔴 LLM 경로만 다듬고 대체 경로를 두면, 모델이 죽은 날에만 사용자에게 다른 말투가
        나간다 — 가장 설명이 필요한 날에 설명이 제일 나빠진다.
     """
-    return FINANCE_EXPLANATIONS[explanation_keys(mode, business_status)[0]]
+    return FINANCE_EXPLANATIONS[
+        explanation_keys(mode, business_status, has_verified_adjustment=has_verified_adjustment)[0]
+    ]
