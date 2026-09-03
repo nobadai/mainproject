@@ -38,7 +38,11 @@ from app.finance.capabilities.sales import (
     build_sales_validation_payload,
     map_sales_finance_verdict,
 )
-from app.finance.db import FinanceDataNotReady, get_current_finance_runtime_context
+from app.finance.db import (
+    FinanceDataNotReady,
+    get_current_finance_runtime_context,
+    load_partner_receivables,
+)
 from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
     missing_source_name,
@@ -46,6 +50,7 @@ from app.finance.execution import (
     save_finance_execution,
 )
 from app.finance.llm.client import finance_llm_enabled
+from app.finance.sales_models import PartnerReceivable
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
@@ -155,6 +160,21 @@ class _RuntimeContextDataPort:
     def load_debt_schedule(self, as_of: date, horizon: date) -> list:
         self._check_as_of(as_of)
         return []
+
+    def load_partner_receivables(self, as_of: date, partner_id: str) -> list[PartnerReceivable]:
+        """거래처 채권만은 **고정된 컨텍스트 밖**에서 읽는다.
+
+        ★ 컨텍스트는 요청 payload 를 보기 전에 선다. 어느 거래처인지는 그때 알 수
+          없으므로 채권을 미리 담아 둘 수 없다 — 여기서 이 실행의 `sim_run_id` 와
+          `as_of` 를 걸고 읽는다.
+
+        ★ `_check_as_of` 를 먼저 통과시켜, 다른 날짜 요청이 오늘 채권을 대신 받는
+          일이 없게 한다.
+        """
+        self._check_as_of(as_of)
+        return load_partner_receivables(
+            sim_run_id=self.context.snapshot.sim_run_id, as_of=as_of, partner_id=partner_id
+        )
 
 
 def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:
