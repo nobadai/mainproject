@@ -103,6 +103,9 @@ def run_procurement(
         approved_commitments=commitments.carried,
         # ★ 값과 출처를 **떼어 놓지 않는다.** 응답에만 싣던 것을 payload 에도 나른다.
         input_sources=inputs.sources() if inputs else {},
+        # 🔴 실어 주기만 하지 않고 **막는 쪽까지** 잇는다 (2026-09-03).
+        #   응답의 `mocked_inputs` 는 화면 경고용이고, 이것은 실행을 세우는 용도다.
+        mocked_inputs=inputs.mocked if inputs else (),
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)

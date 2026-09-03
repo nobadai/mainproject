@@ -267,6 +267,7 @@ class ProcurementFlow:
         policy_values: Mapping[str, Any] | None = None,
         prior_feedback: Mapping[str, Any] | None = None,
         input_sources: Mapping[str, str] | None = None,
+        mocked_inputs: Sequence[str] = (),
         approved_commitments: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.runner = runner
@@ -293,6 +294,18 @@ class ProcurementFlow:
         #:   `forecast`·`confirmed_orders` 와 같은 성격이고, 루프에서 누적되는
         #:   `suggested_adjustments` 와 다르다 (매입 지적 2026-09-03).
         self.input_sources: Mapping[str, str] = dict(input_sources or {})
+
+        #: 🔴 **mock 에서 온 입력. 하나라도 있으면 실행을 세운다** (2026-09-03).
+        #:
+        #:   전에는 `mocked_inputs` 가 응답까지만 갔다. 화면(`answer.py`)과
+        #:   리포트(`report.py`)가 *"mock 에서 왔습니다"* 로 경고는 냈지만
+        #:   **아무것도 막지 않았다** — ML DB 가 죽어도 관통이 돌고 `E1_APPROVED`
+        #:   까지 갔다.
+        #:
+        #: ★ **경고와 차단은 다르다.** 사람이 리포트를 안 읽으면 경고는 없는 것과
+        #:   같다. mock 으로 내린 결론은 실측으로 읽히면 안 되는 정도가 아니라
+        #:   **아예 내리면 안 되는** 것이다.
+        self.mocked_inputs: tuple[str, ...] = tuple(mocked_inputs)
 
         self.suggested_adjustments: list[SuggestedAdjustment] = []
 
@@ -328,6 +341,20 @@ class ProcurementFlow:
             return self._outcome("E3_REJECTED", f"호출 예산 소진: {exc}")
 
     def _run(self, has_unmet_obligation: bool) -> ProcurementOutcome:
+        # 🔴 **mock 이 섞이면 아무것도 시작하지 않는다** (2026-09-03).
+        #
+        #   부서를 부르기 전에 선다. 한 번이라도 부르면 그 회신이 이력에 남고,
+        #   나중에 읽는 사람이 **"돌긴 돌았다"** 로 읽는다.
+        #
+        # ★ 어느 입력이 mock 인지 이름을 말한다 — 다음에 무엇을 볼지 알아야 한다.
+        if self.mocked_inputs:
+            keys = " · ".join(self.mocked_inputs)
+            return self._outcome(
+                "E4_NOT_STARTED",
+                f"mock 입력으로는 판단하지 않는다: {keys}. "
+                f"실 데이터를 못 읽은 것이므로 그 조회부터 고쳐야 한다",
+            )
+
         constraints = self._collect_constraints()
 
         if not self.runner.band_is_formed(self.advisors):
