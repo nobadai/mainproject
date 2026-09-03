@@ -299,6 +299,12 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             band 가 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이었다. 그대로
             넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 됐다.
             우리가 #93 구현 중 물어 #181 이 서고, band 가 **net 전제로** 바뀌었다.
+            ⚠️ **뜻만 맞췄고 칸은 남는다.** ``confirmed_occupancy_by_date`` 를 지우려던
+            계획은 철회됐다 — ``critic_v0_4.py:929`` L4-7 이 그 칸으로 gross 를 복원해서,
+            지우면 **L4-7 이 영영 죽는다** (#181 · 2026-09-03 정정).
+            🟢 **표준은 net 으로 확정됐다** (#181 CLOSED 2026-09-03). 물류가 세 자리를
+            표로 내면서 생산자(물류)·소비자 하나(우리)가 net 이고 band 만 gross 였음이
+            확인됐고, band 가 net 으로 왔다.
         ㄴ. 타입이 다르다 — ``Band.cap_by_date_kg`` 는 ``date`` 키, 우리는 ISO 문자열.
             조회가 전부 미스 나면 값이 와 있는데도 "받지 못했다"로 고지된다.
         ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.
@@ -308,10 +314,13 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             뿐이고, ``tests/master/test_no_orchestrator_runtime.py`` 는 마스터에 대해
             ``app.orchestrator.band`` 를 금지 목록에 올려 뒀다.
 
-      🔴 **ㄱ이 풀렸어도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다 *"부를 수는
-        있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고, 그건 공용화가
-        아니라 **결합**이다. ``#181`` 은 아직 열려 있다 — 뜻은 맞췄지만 *"어느 쪽이
-        표준인가"* 는 안 닫혔다.
+      🔴 **ㄱ이 풀리고 #181 이 닫혀도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다
+        *"부를 수는 있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고,
+        그건 공용화가 아니라 **결합**이다.
+
+        ⚠️ 이 자리에 *"``#181`` 은 아직 열려 있다 — 어느 쪽이 표준인가는 안 닫혔다"* 라고
+          적었었다 (2026-09-03 정정). **닫혔고 표준도 정해졌다.** 남은 것은 표준이 아니라
+          **부르는 비용**이고, 그건 #181 이 답할 질문이 아니었다.
 
       나머지가 풀리고 공용 모듈이 생기면 **이 함수를 지우고 import 로 바꾼다** —
       ``check_warehouse_capacity`` 와 같은 약속이다.
