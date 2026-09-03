@@ -1,9 +1,4 @@
-"""판단 재료를 못 읽으면 안을 내지 않고, **그 사유가 화면에 나온다** (2026-09-03).
-
-사용자 지시:
-
-> 무조건 매입안 0개를 쓰는데 **근거와 이유가 보이게 화면에 뿌려주면 좋겠어**
-> (매입안의 확신이 없는거니까 측정하지 않는다는 식의 근거)
+"""안이 없는 날 **매입 사유가 화면에 나온다** (2026-09-03).
 
 🔴 **전에는 마스터 사유만 화면에 있었습니다.**
 
@@ -14,6 +9,10 @@
 
 `report.py` 는 매입 사유를 쓰는데 `answer.py`(화면)는 안 썼습니다 — 마크다운
 리포트를 여는 사람만 볼 수 있었습니다.
+
+⚠️ **문서 부재는 더는 0안의 사유가 아닙니다** (2026-09-04 · 마스터 결정 — 문서 없으면
+없이 진행). 그래서 예시 사유를 실제로 나올 수 있는 **가격 컷**으로 바꿨습니다 —
+`no_proposal_reason` 이 무슨 문구든 화면에 그대로 올린다는 것을 재는 검사입니다.
 """
 
 from __future__ import annotations
@@ -22,8 +21,8 @@ from app.master.answer import facts_from_procurement, render_answer
 from app.master.schemas import ProcurementRunResponse
 
 _PURCHASE_REASON = (
-    "판단 재료(관측월보·기상·작년동기)를 읽지 못해 이 안의 확신을 세울 수 없다 — "
-    "확신 없는 안은 내지 않는다 (해당 안: 보수 · 기본)"
+    "모든 안이 self_check에서 컷됨: 보수(매입단가 1,650원이 max_price 992원 초과); "
+    "기본(매입단가 1,650원이 max_price 1,007원 초과)"
 )
 
 
@@ -43,8 +42,8 @@ def test_매입_사유가_화면에_나온다():
     """🔴 이 파일의 주장이다."""
     text = render_answer(facts_from_procurement(_response()))
 
-    assert "확신 없는 안은 내지 않는다" in text
-    assert "관측월보" in text, "무엇을 못 읽었는지가 화면에 없다"
+    assert "self_check에서 컷됨" in text
+    assert "max_price" in text, "무엇 때문에 컷됐는지가 화면에 없다"
 
 
 def test_마스터_사유도_같이_나온다():
@@ -58,7 +57,7 @@ def test_마스터_사유도_같이_나온다():
     text = render_answer(facts_from_procurement(_response()))
 
     assert "유효한 안이 없어 제안을 내지 못했다" in text
-    assert "확신 없는 안은 내지 않는다" in text
+    assert "self_check에서 컷됨" in text
 
 
 def test_안이_있으면_매입_사유를_안_싣는다():
@@ -75,7 +74,7 @@ def test_안이_있으면_매입_사유를_안_싣는다():
         )
     )
 
-    assert "확신 없는 안은 내지 않는다" not in text
+    assert "self_check에서 컷됨" not in text
     assert "2개" in text
 
 

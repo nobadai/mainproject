@@ -34,6 +34,8 @@ from app.purchase_agent.nodes.package_scenarios import (
     package_scenarios,
 )
 from app.purchase_agent.nodes.self_check import (
+    _CONTEXT_NOTE,
+    _with_context_note,
     check_document_publication,
     check_document_refs,
     check_excerpt_fidelity,
@@ -668,3 +670,51 @@ def test_rule_stage_never_declares_the_context_sufficient() -> None:
 def test_document_rationale_is_empty_without_documents() -> None:
     """안 읽었으면 아무것도 안 붙는다 — 없는 근거를 적지 않는다."""
     assert _context_rationale([]) == []
+
+
+# ── 문서 없으면 없이 진행 (2026-09-04 · 마스터 결정) ────────────────────────
+
+
+def test_문서를_못_읽으면_없이_진행하고_사유만_남긴다(monkeypatch) -> None:
+    """🟢 마스터 결정: *"문서 없으면 없이 진행. 내가 통제한다."*
+
+    실 소스가 없어 mock 이 막히면(`MockNotAllowed`), 멈추지 않고 빈 문서로 계속한다.
+    못 읽었다는 사실은 `context_unavailable` 에 남고, 컷은 ⑦이 안 한다.
+    """
+    from app.purchase_agent import ports
+    from app.purchase_agent.ports import MockNotAllowed
+
+    def blocked(*a, **k):
+        raise MockNotAllowed("스냅샷 부가값 는 mock 뿐이라 운영에서 쓸 수 없다")
+
+    monkeypatch.setattr(ports, "get_context_docs", blocked)
+
+    result = collect_context(_classified())  # uncertain 이라 ②가 돈다
+
+    assert result["context_docs"] == []
+    assert "context_unavailable" in result, "못 읽은 사유를 안 남겼다"
+    # 예외 없이 여기 도달한 것 자체가 "멈추지 않았다"의 증거다
+
+
+def test_문서_고지는_컷이_아니라_risks_에_붙는다() -> None:
+    """`_with_context_note` — 문서를 못 읽으면 각 안의 risks 에 한 줄, 안은 그대로."""
+    scenarios = [
+        {"label": "보수", "risks": ["기존 위험"]},
+        {"label": "기본", "risks": []},
+    ]
+
+    noted = _with_context_note(scenarios, "mock 막힘")
+
+    assert len(noted) == 2, "안을 지우지 않는다"
+    assert all(_CONTEXT_NOTE in s["risks"] for s in noted), "고지가 안 붙었다"
+    assert noted[0]["risks"][0] == "기존 위험", "기존 risks 를 지우지 않는다"
+
+
+def test_문서를_읽었으면_고지가_안_붙는다() -> None:
+    """`context_unavailable` 이 없으면 risks 는 그대로 — 없는 위험을 만들지 않는다."""
+    scenarios = [{"label": "보수", "risks": ["기존 위험"]}]
+
+    same = _with_context_note(scenarios, None)
+
+    assert same == scenarios
+    assert _CONTEXT_NOTE not in same[0]["risks"]
