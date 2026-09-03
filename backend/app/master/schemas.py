@@ -10,9 +10,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.contracts.core import EndCode
+from app.contracts.core import ITEMS, EndCode
 from app.master.decision import DecisionOut
 from app.master.envelope import AgentName, Trigger
 
@@ -44,6 +44,27 @@ class ProcurementRunRequest(BaseModel):
             "전 품목을 한 번에 도는 것은 미결 — 재무 cap 이 품목 공통이라 배분 규칙이 없다(M-26)."
         ),
     )
+
+    @field_validator("item")
+    @classmethod
+    def _item_is_in_the_contract(cls, value: str | None) -> str | None:
+        """🔴 **계약 밖 품목을 문 앞에서 거른다** (2026-09-03).
+
+        전에는 아무도 안 걸렀다. 피마늘을 계약에서 뺀 뒤 실측하니 요청이 **Critic
+        L0 까지 가서** `E-UNKNOWN-ITEM` 으로 죽었다. 막히기는 하는데 늦다 —
+        그때까지 매입을 부르고 안을 만들고 세 부서를 다 돈다.
+
+        ★ **`None` 은 통과시킨다.** 품목을 안 준 것과 없는 품목을 준 것은 다르다.
+          안 주면 매입이 `missing_data: ["item"]` 으로 그 사실을 낸다 (§1.2-10).
+
+        ★ **`app/ml/router.py:35` 와 같은 모양이다.** ML 이 이미 이렇게 거르고
+          있었고, 같은 일을 다른 방식으로 하지 않는다.
+        """
+        if value is not None and value not in ITEMS:
+            raise ValueError(
+                f"지원하지 않는 품목입니다: {value}. 가능: {', '.join(ITEMS)}"
+            )
+        return value
 
     # ── §3.2.5 의 명시적 예외 — 마스터가 실어 주는 값 ───────────────
     forecast: dict[str, Any] | None = Field(
