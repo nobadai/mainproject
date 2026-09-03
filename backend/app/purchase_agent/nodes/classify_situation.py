@@ -99,7 +99,40 @@ def estimate_daily_demand(confirmed_orders: dict, constraints: dict) -> float:
 
 
 def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
-    """신뢰구간 폭으로 stable/uncertain을 가르고, 그날 허용 축을 계산한다."""
+    """신뢰구간 폭으로 stable/uncertain을 가르고, 그날 허용 축을 계산한다.
+
+    🔴 **"이 예측을 써도 되나"를 우리는 안 묻는다** (실측 2026-09-03).
+      ML 이 신뢰도 플래그 셋을 붙여 보내는데 **매입은 하나도 읽지 않는다**::
+
+          use_recommended   이 조합에서 우리 모델이 "어제 값 그대로"보다 나은가
+          is_gated          이 행을 판단에 쓰지 말라는 표시
+          gate_reason       그 사유 — lead_time(쓸 수 있다) / quality(빼라)
+
+      층이 다르기 때문이다 (#67 본문)::
+
+          ML    use_recommended · is_gated   "이 예측을 쓸 수 있나"   ← 앞
+          매입  ci_width                     "얼마나 자신 있나"       ← 뒤
+
+      **앞 질문을 건너뛰고 뒤 질문만 하고 있다.**
+
+    ⚠️ **지금은 안 걸린다 — 우연이 아니라 우리가 AUC 만 보기 때문이다.**
+
+          use_recommended = false   양파 × WHSL(중도매) 하나뿐. AUC 는 세 품목 다 true
+          gate_reason = quality     WHSL 에만 있다. AUC 는 lead_time 뿐
+          is_gated (AUC)            offset 1~5 에만. 판정일 D+14 는 false
+
+      계열이 늘거나 AUC 가 false 가 되는 날 **아무도 모른다** — 값이 오고 계산도 되니
+      에러가 안 난다.
+
+    🔴 **읽고 싶어도 지금은 못 읽는다.** ``ml/service`` 의 ``DailyPoint`` 가
+      ``date/predicted/lower/upper`` 넷만 담고, 마스터 ``_FORECAST_ENVELOPE_KEYS`` 에도
+      없다. **payload 에 칸이 없다.** 배선이 먼저다 — ``use_recommended`` 처리는
+      IO명세 §8 이 #57 로 배정해 뒀다.
+
+    ★ 같은 가족인 ``is_filled`` 는 **다른 방식으로 막아 뒀다** — 판정일이 주(週)의
+      배수라 복사값을 안 밟는다(``judgment_row`` · ``test_judgment_day.py``).
+      그쪽은 **날짜 선택으로** 피했고, 이 셋은 **아직 안 피했다.**
+    """
     constraints = load_constraints()
     rules = constraints["situation"]
     ci_width = compute_ci_width(state["forecast"], rules["ci_judgment_day"])
