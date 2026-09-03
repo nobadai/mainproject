@@ -133,28 +133,54 @@ def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
       계열이 늘거나 AUC 가 false 가 되는 날 **아무도 모른다** — 값이 오고 계산도 되니
       에러가 안 난다.
 
-    🔴 **읽고 싶어도 지금은 못 읽는다 — 그런데 셋이 같은 층이 아니다.**
+    🔴 **못 읽는 것은 둘뿐이다 — ``is_gated`` 는 이미 와 있다** (실측 2026-09-03)::
 
-      전에는 여기 *"payload 에 칸이 없다"* 한 문장으로 뭉갰다. **배선이 틀리는
-      뭉갬이다** (현서님 리뷰 2026-09-03)::
+          use_recommended   뷰가 내지만 payload 가 안 고른다      ← 마스터 몫
+          is_gated          ✅ **온다** — daily 원소 안에 있다     ← 우리가 안 읽을 뿐
+          gate_reason       표엔 있고 **뷰가 daily 에 안 넣는다**  ← 뷰 몫
 
-          use_recommended   조합(품목 × 계열)별   봉투/품목 블록        ← 마스터 몫
-          is_gated          행(offset)별         DailyPoint            ← ML 몫
-          gate_reason       행(offset)별         DailyPoint            ← ML 몫
+      ``v_ml_price_forecast`` 의 ``daily`` 원소는 여섯 칸이다 (뷰 DDL
+      ``database/10_domain_schema.sql``)::
 
-      ``_FORECAST_ENVELOPE_KEYS``(``master/flow.py``)는 **품목 블록으로 내려보내는
-      봉투 공통 필드**다. 거기에 ``is_gated`` 를 넣으면 **행별 값을 품목 하나로
-      뭉개게** 된다 — offset 1~5 만 gated 인 지금 상태에서 **그 품목 전체가 gated**
-      로 읽힌다.
+          date · predicted · lower · upper · is_filled · is_gated
 
-      ⚠️ **위 실측이 바로 그 근거인데 우리가 그걸 뭉갰다.** *"is_gated (AUC) 는
-        offset 1~5 에만"* 이라고 적어 놓고, 같은 문단에서 셋을 한 칸 문제로 묶었다.
+      ``master/inputs.py`` 의 ``_forecast_payload`` 가 *"키를 고르기만 하고 값은
+      손대지 않는다"* 며 ``daily`` 를 통째로 넘기므로, **우리 State 까지 그대로
+      온다.** 12-31 배추 관통 실측::
 
-      순서가 있다::
+          state["forecast"]["daily"][13] =
+            {"date": "2026-01-14", "lower": 604, "predicted": 761, "upper": 1107,
+             "is_filled": false, "is_gated": false}
 
-          ①  ML      DailyPoint 에 is_gated · gate_reason 을 담는다
+      ``gate_reason`` 만 다르다. 표 ``ml_price_forecasts`` 에는 컬럼이 있는데
+      (AUC 실측: ``lead_time`` 75행 · ``NULL`` 303행) 뷰의 ``jsonb_build_object``
+      가 그 칸을 안 만든다 — 고칠 자리는 ML 이 아니라 **뷰**다.
+
+    🔴 **이 자리에 셋 다 "읽고 싶어도 못 읽는다" 고 적었었다 (2026-09-03 정정).**
+
+      틀린 표는 이랬다::
+
+          is_gated          행(offset)별   DailyPoint   ← ML 몫
+          gate_reason       행(offset)별   DailyPoint   ← ML 몫
+
+      **``DailyPoint`` 를 근거로 삼은 것이 틀렸다.** 그 모델(``app/ml/schemas.py``)
+      은 네 칸에 ``extra="forbid"`` 라 실제로 ``is_gated`` 를 못 담는다 — 그건 맞다.
+      다만 **마스터는 그 모델을 안 거친다.** 뷰를 직접 읽어 ``daily`` 를 그대로
+      나른다(현서님 지적 2026-09-03). 없는 경로의 한계를 보고 "안 온다"고 적었다.
+
+      ⚠️ **한 판 앞에서 같은 실수를 이미 고쳤었다.** *"payload 에 칸이 없다"* 를
+        층별로 가르면서, 가른 뒤에도 **실제로 오는지는 안 재봤다.** 층을 나눈 것이
+        곧 확인은 아니다.
+
+      순서가 있다 (정정판)::
+
+          ①  뷰       daily 에 gate_reason 을 더한다
           ②  마스터   use_recommended 를 _FORECAST_ENVELOPE_KEYS 에 더한다
-          ③  매입     읽어서 판정 **앞에** 건다
+          ③  매입     is_gated 는 **지금 당장** 읽을 수 있다 — 판정 **앞에** 건다
+
+      🟢 **③이 ①②를 안 기다린다.** ``is_gated`` 하나만으로도 *"이 행을 쓰지 말라"*
+        는 표시는 읽힌다. 사유(``gate_reason``)와 조합 판정(``use_recommended``)이
+        붙으면 더 정확해질 뿐이다. 남을 기다릴 이유가 없다.
 
       ``use_recommended`` 처리는 IO명세 §8 이 **#57** 로 배정해 뒀다.
 
@@ -169,7 +195,21 @@ def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
 
     ★ 같은 가족인 ``is_filled`` 는 **다른 방식으로 막아 뒀다** — 판정일이 주(週)의
       배수라 복사값을 안 밟는다(``judgment_row`` · ``test_judgment_day.py``).
-      그쪽은 **날짜 선택으로** 피했고, 이 셋은 **아직 안 피했다.**
+      그쪽은 **날짜 선택으로** 피했고, 나머지는 **아직 안 피했다.**
+
+      ⚠️ 이 자리에 *"이 셋은 아직 안 피했다"* 라고 적었었다 (2026-09-03 정정).
+        ``is_gated`` 가 위에서 빠지므로 남는 것은 둘이다.
+
+      🔴 **``is_filled`` 도 payload 에 온다** — 날짜 선택은 *"안 밟는다"* 이지
+        *"못 본다"* 가 아니었다. 지금은 **아무도 안 본다**::
+
+            판정일이 복사값인가   is_filled 로 그 자리에서 볼 수 있다   ← 안 본다
+            그런 배치가 오는가    -m db 검사가 잰다                     ← 사람이 손으로
+
+        날짜 선택은 **오늘의 데이터**가 안전하다는 것이고, 새 ``base_dt`` 가 그 가정을
+        깨는 날은 사람이 ``-m db`` 를 돌려야 안다(``test_judgment_day.py`` 머리말).
+        값이 payload 에 있으므로 그 창은 런타임에서 닫을 수 있다 — ``is_gated`` ③과
+        같은 자리이고, 둘 다 *"읽기만 하면 되는데 안 읽는다"* 다.
     """
     constraints = load_constraints()
     rules = constraints["situation"]
