@@ -263,7 +263,9 @@ ok(
     "v0.4 check_axis_intrusion 도 동일 — 두 경로가 계약이라는 단일 출처를 읽는다",
 )
 
-bogus = SuggestedAdjustment("inventory", "timing", 1.0, "d", "이연", ("SRC-I-1",))
+bogus = SuggestedAdjustment(
+    "inventory", "timing", 1.0, "d", "이연", ("SRC-I-1",), split_date=AS_OF
+)
 r_inv = T2Reply("inventory", AS_OF, (), (bogus,))
 ok(
     not legacy_run_l3(_clip(_scenario()), _wide_band(), {"inventory": r_inv}, dict(PRICE_BASE))
