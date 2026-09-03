@@ -19,6 +19,12 @@ def judgment_row(forecast: dict, ci_judgment_day: int) -> dict[str, Any]:
 
     상세설계 §4-①이 D+14 단일로 확정했다. index를 직접 쓰지 않고 이 함수를 거치게 한 이유:
     daily의 시작이 D+0으로 바뀌면 판정이 하루 밀린 채 조용히 돈다 — 고칠 지점을 하나로 모은다.
+
+    🔴 **D+14는 바꿔도 되는 값이 아니다 — 주(週)의 배수여야 한다.**
+      장이 안 서는 날은 직전 개장일 값이 복사되고 **예측 구간까지 복사되므로**, 주기를
+      벗어난 날을 고르면 그날이 아니라 **전 장날의 불확실성**을 재게 된다.
+      **근거와 실측표는 ``constraints.yaml`` 의 ``situation.ci_judgment_day`` 에 있다** —
+      여기 옮겨 적지 않는다(한쪽만 바뀐다). 잠그는 검사는 ``test_judgment_day.py``.
     """
     daily = forecast["daily"]
     if len(daily) < ci_judgment_day:
