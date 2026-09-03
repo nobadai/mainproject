@@ -25,6 +25,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
 
+from app.contracts.core import Evidence, SuggestedAdjustment
 from app.finance import execution, messages
 from app.finance.application.harness import (
     DUPLICATE_UNRESOLVED_TOOL_CALL,
@@ -68,7 +69,6 @@ from app.finance.llm.planner import (
 from app.finance.messages import explanation_for
 from app.finance.state import FinanceAgentState
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
-from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 
 # ---------------------------------------------------------------------------
 # 업무 결과 확정 — Tool 관측에서 payload/Evidence 로
@@ -186,6 +186,25 @@ def _sales_business_result(
     return payload, [], sales_business_status(payload), []
 
 
+def _branch_scenario_labels(state: FinanceAgentState) -> list[str]:
+    """이 분기가 판정한 안의 **권위 있는 라벨**.
+
+    ★ 라벨 어휘를 재무가 갖지 않는다. `보수·기본·공격` 은 매입의 계약이라
+      (`purchase_agent.schemas.ScenarioLabel`), 여기에 복제하면 매입이 라벨을 바꿀 때
+      조용히 어긋난다. 그래서 **들어온 시나리오가 말한 label 을 그대로** 되돌린다 —
+      마스터도 같은 방식으로 응답에서 읽는다(`master.decision.scenario_labels_of`).
+
+    ★ `scenario_id` 로 대신하지 않는다. 둘은 다른 값일 수 있고, 마스터는 label 로
+      대조한다 — id 를 라벨 자리에 넣으면 아무 안과도 안 맞는 조정이 된다.
+
+    ★ label 이 없으면 **빈 목록**이다. 모르는 라벨을 지어내지 않는다.
+    """
+    label = state.request.payload.get("label")
+    if isinstance(label, str) and label.strip():
+        return [label.strip()]
+    return []
+
+
 def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     evidence: list[Evidence] = []
@@ -217,6 +236,10 @@ def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
                 "unit": "krw",
                 "reason": "Verified Finance amount alternative.",
                 "ref_ids": [_tool_ref("validate_amount_adjustment", state)],
+                # 이 조정은 **이 분기의 안 하나**에 대한 것이다. 분기마다 시나리오가
+                # 따로 도는데 라벨을 안 실으면, 받는 쪽은 세 안 중 어디에 적용할
+                # 조정인지 알 수 없어 문장을 파싱하거나 전부에 적용하게 된다.
+                "scenario_labels": _branch_scenario_labels(state),
             }
         )
     else:

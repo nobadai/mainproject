@@ -245,7 +245,7 @@ def test_the_payload_declares_no_adjustment_axis_at_all():
 
 
 def test_finance_adjustment_axis_vocabulary_is_untouched_by_sales():
-    from app.orchestrator.contracts_core import SuggestedAdjustment
+    from app.contracts.core import SuggestedAdjustment
 
     # 판매 작업이 공통 조정 계약을 넓히지 않았다.
     assert "payment_terms" not in str(SuggestedAdjustment.__annotations__)

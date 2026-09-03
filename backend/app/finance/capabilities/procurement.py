@@ -20,6 +20,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.contracts.core import Evidence
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
@@ -39,7 +40,6 @@ from app.finance.tools import (
 from app.finance.tools import (
     project_cashflow as project_cashflow_tool,
 )
-from app.orchestrator.contracts_core import Evidence
 
 # ---------------------------------------------------------------------------
 # 실행 컨텍스트 적재

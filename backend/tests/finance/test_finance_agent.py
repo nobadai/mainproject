@@ -652,6 +652,147 @@ def test_missing_payroll_is_not_ready_and_never_zero_filled(save_run):
 
 
 @patch("app.finance.execution.save_finance_execution")
+def test_scenario_adjustment_carries_the_label_of_the_branch_it_judged(save_run):
+    """🔴 판정한 안의 라벨이 조정안까지 살아서 가는가.
+
+    재무는 분기마다 **안 하나씩** 판정한다. 그런데 조정안에 라벨을 안 실으면 받는
+    쪽은 세 안 중 어디에 적용할 조정인지 알 수 없다 — 문장을 파싱하거나 전부에
+    적용하게 된다. 그래서 상류(분기 결과)부터 공용 계약까지 통째로 확인한다.
+    """
+    planner = Planner(
+        [
+            ToolAction("evaluate_purchase_scenario"),
+            ToolAction(
+                "validate_amount_adjustment",
+                {"axis": "amount", "candidate_amount_krw": 800},
+            ),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, _ = FinanceAgentController(Port(), planner).run(
+        request(
+            "SCENARIO_VALIDATION",
+            scenario("S1", 1000, payment_schedule=None, label="기본"),
+        )
+    )
+
+    assert reply.payload["adjustability"] == "ADJUSTABLE"
+    # 공용 계약까지 살아서 갔다.
+    assert reply.suggested_adjustments[0].scenario_labels == ("기본",)
+    assert reply.suggested_adjustments[0].split_date is None
+
+
+@patch("app.finance.execution.save_finance_execution")
+def test_scenario_adjustment_has_no_label_when_the_proposal_gave_none(save_run):
+    """라벨 없이 들어온 안에는 라벨을 지어내지 않는다.
+
+    `scenario_id` 로 대신 채우지도 않는다 — 마스터는 label 로 대조하므로, id 를
+    라벨 자리에 넣으면 **아무 안과도 안 맞는** 조정이 된다.
+    """
+    planner = Planner(
+        [
+            ToolAction("evaluate_purchase_scenario"),
+            ToolAction(
+                "validate_amount_adjustment",
+                {"axis": "amount", "candidate_amount_krw": 800},
+            ),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, _ = FinanceAgentController(Port(), planner).run(
+        request("SCENARIO_VALIDATION", scenario("S1", 1000, payment_schedule=None))
+    )
+
+    assert reply.payload["adjustability"] == "ADJUSTABLE"
+    assert reply.suggested_adjustments[0].scenario_labels == ()
+    assert "S1" not in reply.suggested_adjustments[0].scenario_labels
+
+
+@patch("app.finance.execution.save_finance_execution")
+def test_each_branch_adjustment_carries_only_its_own_label(save_run):
+    """여러 안을 한 번에 판정해도 조정안은 **자기 안의 라벨만** 든다."""
+    planner = Planner(
+        [
+            ToolAction("evaluate_purchase_scenario", reason="Validate S1."),
+            ToolAction(finalize=True),
+            ToolAction("evaluate_purchase_scenario", reason="Validate S2."),
+            ToolAction("validate_amount_adjustment", reason="Validate S2 amount."),
+            ToolAction(finalize=True),
+            ToolAction("evaluate_purchase_scenario", reason="Validate S3."),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, _ = FinanceAgentController(Port(), planner).run(
+        request(
+            "SCENARIO_VALIDATION",
+            {
+                "scenarios": [
+                    scenario("S1", 700, label="보수"),
+                    scenario("S2", 900, label="기본"),
+                    scenario("S3", 600, label="공격"),
+                ]
+            },
+        )
+    )
+
+    labels = {"S1": "보수", "S2": "기본", "S3": "공격"}
+    # 중첩 payload(상류 dict)에도 그 안의 라벨만 실린다.
+    for result in reply.payload["verdicts"]:
+        for raw in result["suggested_adjustments"]:
+            assert raw["scenario_labels"] == [labels[result["scenario_id"]]]
+
+    adjusted = list(reply.suggested_adjustments)
+    assert adjusted, "조정안이 하나도 안 생기면 이 검사는 아무것도 지키지 못한다"
+    # 조정이 붙은 안에는 그 안의 라벨 하나만 실린다 — 세 안 전체가 실리지 않는다.
+    for adjustment in adjusted:
+        assert len(adjustment.scenario_labels) == 1
+        branch = adjustment.ref_ids[0]
+        expected = next(label for sid, label in labels.items() if sid in branch)
+        assert adjustment.scenario_labels == (expected,)
+
+
+@patch("app.finance.execution.save_finance_execution")
+def test_unlabelled_branch_does_not_borrow_a_sibling_label(save_run):
+    """라벨이 없는 안의 조정은 **빈 채로** 나간다 — 옆 안의 라벨을 빌려오지 않는다.
+
+    빈 목록을 '전체 적용' 으로 넓히는 것과 같은 실수가 여기서 난다. 세 안 중 하나만
+    조정 대상인데 라벨이 비어 있다고 나머지를 채우면, 재무가 판정하지 않은 안에
+    조정이 붙는다.
+    """
+    planner = Planner(
+        [
+            ToolAction("evaluate_purchase_scenario", reason="Validate S1."),
+            ToolAction(finalize=True),
+            ToolAction("evaluate_purchase_scenario", reason="Validate S2."),
+            ToolAction("validate_amount_adjustment", reason="Validate S2 amount."),
+            ToolAction(finalize=True),
+            ToolAction("evaluate_purchase_scenario", reason="Validate S3."),
+            ToolAction(finalize=True),
+        ]
+    )
+    reply, _ = FinanceAgentController(Port(), planner).run(
+        request(
+            "SCENARIO_VALIDATION",
+            {
+                "scenarios": [
+                    scenario("S1", 700, label="보수"),
+                    # 조정 대상이 되는 이 안에만 라벨이 없다.
+                    scenario("S2", 900),
+                    scenario("S3", 600, label="공격"),
+                ]
+            },
+        )
+    )
+
+    assert reply.suggested_adjustments, "조정안이 없으면 이 검사는 아무것도 지키지 못한다"
+    for adjustment in reply.suggested_adjustments:
+        assert adjustment.scenario_labels == ()
+        # 옆 안의 라벨도, scenario_id 도 대신 들어가지 않는다.
+        for borrowed in ("보수", "공격", "S2"):
+            assert borrowed not in adjustment.scenario_labels
+
+
+@patch("app.finance.execution.save_finance_execution")
 def test_scenario_reject_stays_reject_with_verified_amount_adjustment(save_run):
     planner = Planner(
         [
