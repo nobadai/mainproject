@@ -124,10 +124,39 @@ def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
       계열이 늘거나 AUC 가 false 가 되는 날 **아무도 모른다** — 값이 오고 계산도 되니
       에러가 안 난다.
 
-    🔴 **읽고 싶어도 지금은 못 읽는다.** ``ml/service`` 의 ``DailyPoint`` 가
-      ``date/predicted/lower/upper`` 넷만 담고, 마스터 ``_FORECAST_ENVELOPE_KEYS`` 에도
-      없다. **payload 에 칸이 없다.** 배선이 먼저다 — ``use_recommended`` 처리는
-      IO명세 §8 이 #57 로 배정해 뒀다.
+    🔴 **읽고 싶어도 지금은 못 읽는다 — 그런데 셋이 같은 층이 아니다.**
+
+      전에는 여기 *"payload 에 칸이 없다"* 한 문장으로 뭉갰다. **배선이 틀리는
+      뭉갬이다** (현서님 리뷰 2026-09-03)::
+
+          use_recommended   조합(품목 × 계열)별   봉투/품목 블록        ← 마스터 몫
+          is_gated          행(offset)별         DailyPoint            ← ML 몫
+          gate_reason       행(offset)별         DailyPoint            ← ML 몫
+
+      ``_FORECAST_ENVELOPE_KEYS``(``master/flow.py``)는 **품목 블록으로 내려보내는
+      봉투 공통 필드**다. 거기에 ``is_gated`` 를 넣으면 **행별 값을 품목 하나로
+      뭉개게** 된다 — offset 1~5 만 gated 인 지금 상태에서 **그 품목 전체가 gated**
+      로 읽힌다.
+
+      ⚠️ **위 실측이 바로 그 근거인데 우리가 그걸 뭉갰다.** *"is_gated (AUC) 는
+        offset 1~5 에만"* 이라고 적어 놓고, 같은 문단에서 셋을 한 칸 문제로 묶었다.
+
+      순서가 있다::
+
+          ①  ML      DailyPoint 에 is_gated · gate_reason 을 담는다
+          ②  마스터   use_recommended 를 _FORECAST_ENVELOPE_KEYS 에 더한다
+          ③  매입     읽어서 판정 **앞에** 건다
+
+      ``use_recommended`` 처리는 IO명세 §8 이 **#57** 로 배정해 뒀다.
+
+      ⚠️ **#57 은 본문이 아니라 코멘트에 있다.** 본문(*"rise_rate 분모를 당일 시세
+        조회로 전환"*)에는 ``use_recommended`` 가 **0건**이라, 제목만 보면 딴 이슈로
+        읽힌다. 실제 배정은 코멘트 넷이다::
+
+            2026-08-27 05:23   "착수 시 수신 검증에 is_filled(판정일)·use_recommended 처리 포함"
+            2026-08-27 08:45   ML 실계약 확정 — 같은 문장
+            2026-08-27 09:20   "is_filled 확정 편입 … use_recommended 와 함께 수신 검증에 포함"
+            2026-09-01 04:48   남는 작업 셋 — "is_filled(판정일 복사값) · use_recommended 처리"
 
     ★ 같은 가족인 ``is_filled`` 는 **다른 방식으로 막아 뒀다** — 판정일이 주(週)의
       배수라 복사값을 안 밟는다(``judgment_row`` · ``test_judgment_day.py``).
