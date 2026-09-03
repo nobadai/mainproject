@@ -341,9 +341,39 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
         }:
             risks.append("FINANCE_FAIL")
         if reply.source_agent == "purchase":
-            conditional = True
-            uncertainties.append("PURCHASE_SUPPLY_CONDITIONAL")
+            purchase_risks, depends_on_purchase = _purchase_effects(reply)
+            # Purchase가 전달한 위험 문구는 Sales가 새 코드로 재해석하지 않는다.
+            risks.extend(purchase_risks)
+            if depends_on_purchase:
+                conditional = True
+                uncertainties.append("PURCHASE_SUPPLY_CONDITIONAL")
     return risks, uncertainties, conditional
+
+
+def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
+    """Purchase의 권위 회신을 조건부 공급 의존성으로만 소비한다.
+
+    ``skipped + 0kg``도 응답된 capability이지만, 확보 가능한 조건부 물량이 없으므로
+    Sales Scenario를 조건부로 표시하지 않는다. Purchase 수량은 확정 Logistics 공급에
+    합산하거나 Sales 수량을 자동 조정하는 데 사용하지 않는다.
+    """
+    payload = reply.payload
+    raw_risks = payload.get("risks", [])
+    risks = (
+        [risk for risk in raw_risks if isinstance(risk, str)] if isinstance(raw_risks, list) else []
+    )
+    quantity = payload.get("procurable_quantity_kg")
+    has_positive_quantity = (
+        isinstance(quantity, (int, float, Decimal))
+        and not isinstance(quantity, bool)
+        and quantity > 0
+    )
+    depends_on_purchase = (
+        reply.runtime_status == "READY"
+        and (reply.business_status or "").lower() == "ok"
+        and has_positive_quantity
+    )
+    return risks, depends_on_purchase
 
 
 def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
