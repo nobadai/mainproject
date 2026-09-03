@@ -13,7 +13,11 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
-from app.purchase_agent.nodes.classify_situation import compute_ci_width, compute_rise_rate_2w
+from app.purchase_agent.nodes.classify_situation import (
+    compute_ci_width,
+    compute_rise_rate_2w,
+    is_gate_excluded,
+)
 from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
 from app.purchase_agent.quotes import observed_date, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
@@ -316,6 +320,29 @@ def materialize_sourcing(total_qty_kg: int, ratios: list[dict]) -> list[dict]:
     return lines
 
 
+def usable_forecast_window(forecast: dict, coverage_days: int) -> list[dict]:
+    """커버 구간에서 **판단에 쓸 수 있는 행만** 남긴다 (#213 · ML 회신 2026-08-27).
+
+    ``gate_reason`` 에 ``quality`` 가 든 행을 뺀다 — ``is_gate_excluded`` 가 기준이고
+    **``is_gated`` 는 안 본다.** 왜 그 둘을 가르는지는 그 함수에 적었다.
+
+    🔴 **빌 수 있다.** 창 전체가 ``quality`` 면 이 구간으로는 상한을 못 정한다.
+      그 상태는 여기서 터뜨리지 않고 **어댑터가 앞에서 막는다**
+      (``adapter.validate_forecast`` — 가장 짧은 커버 구간을 본다). 큰 창은 짧은 창을
+      포함하므로, 짧은 창에 쓸 행이 하나라도 있으면 큰 창도 빈 적이 없다.
+
+    ⚠️ 그래도 여기서 한 번 더 터뜨리는 이유: 어댑터를 안 거치는 경로
+      (``run_purchase_agent`` 단독 실행)가 있고, **조용히 빈 max() 를 부르면
+      ``ValueError: max() arg is an empty sequence`` 라는 아무 말도 아닌 메시지가 난다.**
+    """
+    window = [row for row in forecast["daily"][:coverage_days] if not is_gate_excluded(row)]
+    if not window:
+        raise ValueError(
+            f"커버 {coverage_days}일 구간의 예측이 전부 품질 게이트라 매입 상한을 정할 수 없다"
+        )
+    return window
+
+
 def compute_max_price(forecast: dict, coverage_days: int) -> int:
     """max_price = 커버 구간 안 예측 상단의 최대값 (규칙 5 · §4-⑦ "예측 q90 기반").
 
@@ -325,8 +352,11 @@ def compute_max_price(forecast: dict, coverage_days: int) -> int:
     - ``contract_price`` 초과 → 컷이 아니라 ``margin_warning=true`` 표시만
 
     커버 구간으로 자르는 이유: 그 안에서만 실제로 사기 때문이다.
+
+    ★ **``quality`` 게이트 행은 빠진다** (``usable_forecast_window``). 지금 AUC 에는
+      그런 행이 0건이라 값이 안 바뀐다 — 실측으로 확인했다 (12-31 관통 무변동).
     """
-    return max(row["upper"] for row in forecast["daily"][:coverage_days])
+    return max(row["upper"] for row in usable_forecast_window(forecast, coverage_days))
 
 
 def compute_margin(
@@ -559,6 +589,39 @@ def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
         (
             f"조정안 {len(adjustments)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
             "반영 규칙이 아직 정해지지 않았다"
+        )
+    ]
+
+
+def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
+    """``max_price`` 를 정한 날이 **장이 안 선 날의 복사값**이면 고지한다 (#213).
+
+    🔴 **최댓값을 낸 행만 본다 — 창 전체를 세지 않는다.** 실측 3품목 × 7배치 × 3안
+    (2026-09-04)::
+
+          창에 복사값이 섞인 조합    48 / 63   ← 76%. 매일 붙으면 신호가 죽는다
+          최댓값 행이 복사값         6 / 63    ← 9.5%. 이때만 상한이 복사값에서 나온다
+
+      ``max_price`` 는 **최댓값 하나로 정해지는 컷 기준**이다 (규칙 5). 창 어딘가에
+      복사값이 있다는 사실은 그 기준을 안 움직이므로, 세어 봐야 *"오늘도 그렇다"* 가
+      매일 붙을 뿐이다. 걸린 6건은 전부 **신정(2026-01-01)과 토요일(2026-08-29)** 이고
+      전부 보수안(D=2)이다 — 창이 이틀뿐이라 휴장일 하나가 창의 절반이 된다.
+
+    ★ **판정에는 안 쓴다.** ML 이 ``is_filled`` 로 무엇을 하라는 지시를 준 적이 없고,
+      복사값이라고 틀린 값인 것도 아니다 — *"그날 장이 안 섰다"* 는 사실일 뿐이다.
+      컷하지 않고 사람이 감안하도록 문장만 남긴다.
+
+    ⚠️ mock 예측에는 이 칸이 아예 없어 **4앵커에 아무 줄도 안 붙는다** (규칙 3 —
+      없는 것을 ``false`` 로 채우지 않는다).
+    """
+    window = usable_forecast_window(forecast, coverage_days)
+    top = max(window, key=lambda row: row["upper"])
+    if not top.get("is_filled"):
+        return []
+    return [
+        (
+            f"매입 상한({top['upper']}원)을 정한 {top['date']}은 장이 서지 않아 "
+            "앞 장날 값을 그대로 쓴 날이다"
         )
     ]
 
@@ -1133,6 +1196,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    *_forecast_risks(state["forecast"], draft["coverage_days"]),
                     *_adjustment_risks(state.get("adjustments")),
                     *_context_risks(state["context_loop_count"], state["context_docs"]),
                     *_sourcing_risks(sourcing, decision),
