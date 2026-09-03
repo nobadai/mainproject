@@ -16,6 +16,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.ml.schemas import Forecast
+
 SalesCycle = Literal["PROCUREMENT", "SALES"]
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 SalesBusinessMode = Literal[
@@ -556,10 +558,6 @@ class SalesContractContext(BaseModel):
         return _reject_boolean(value)
 
 
-class SalesMlContext(PassThrough):
-    """ML 예측은 시장 맥락일 뿐 Sales 가격을 결정하지 않는다."""
-
-
 class LogisticsQueryScope(BaseModel):
     model_config = ConfigDict(extra="forbid")
     item: str | None = None
@@ -587,11 +585,47 @@ class LogisticsDeliveryFeasibility(BaseModel):
         return _reject_boolean(value)
 
 
+class LogisticsInventoryByItem(BaseModel):
+    """Logistics가 확정한 현재 판매 가능 수량 뷰다."""
+
+    model_config = ConfigDict(extra="forbid")
+    item: str
+    available_qty_kg: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("available_qty_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsLotConstraint(BaseModel):
+    """Lot은 근거 컨텍스트이며 Sales가 이를 합산하거나 필터링하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+    lot_id: str
+    item: str
+    available_qty_kg: Decimal | None = Field(default=None, ge=0)
+    remaining_freshness_days: int | None = Field(default=None, ge=0)
+    effective_freshness_limit_days: int | None = Field(default=None, ge=0)
+    grade: str | None = None
+    status: str | None = None
+
+    @field_validator(
+        "available_qty_kg",
+        "remaining_freshness_days",
+        "effective_freshness_limit_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class LogisticsSupplyByDate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date: date
-    confirmed_sellable_quantity_kg: Decimal = Field(ge=0)
-    freshness_unresolved_inbound_quantity_kg: Decimal = Field(default=Decimal(0), ge=0)
+    confirmed_sellable_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    freshness_unresolved_inbound_quantity_kg: Decimal | None = Field(default=None, ge=0)
     uncertainties: list[str] = Field(default_factory=list)
 
     @field_validator(
@@ -602,16 +636,24 @@ class LogisticsSupplyByDate(BaseModel):
         return _reject_boolean(value)
 
 
+class LogisticsSellableSupply(BaseModel):
+    """최종 Logistics PRE_SALES의 판매 가능 공급 블록을 그대로 소비한다."""
+
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["READY", "UNRESOLVED", "FAIL"]
+    inventory_by_item: list[LogisticsInventoryByItem] = Field(default_factory=list)
+    lot_constraints: list[LogisticsLotConstraint] = Field(default_factory=list)
+    supply_capacity_by_date: list[LogisticsSupplyByDate] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
 class SalesLogisticsContext(BaseModel):
     """Logistics PRE_SALES 결과를 재계산 없이 보존하는 입력 모델이다."""
 
     model_config = ConfigDict(extra="forbid")
     query_scope: LogisticsQueryScope | None = None
-    sellable_supply_status: Literal["READY", "UNRESOLVED", "FAIL"] | None = None
-    # Logistics의 상세 lot·재고 산식은 Sales가 해석하거나 재계산하지 않고 보존만 한다.
-    sellable_supply: PassThrough | None = None
+    sellable_supply: LogisticsSellableSupply | None = None
     delivery_feasibility: LogisticsDeliveryFeasibility | None = None
-    supply_capacity_by_date: list[LogisticsSupplyByDate] = Field(default_factory=list)
     hard_constraints: list[PassThrough] = Field(default_factory=list)
     soft_warnings: list[PassThrough] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
@@ -627,7 +669,8 @@ class SalesDomainReply(BaseModel):
     reply_ref: str
     runtime_status: RuntimeStatus
     business_status: str | None = None
-    scenario_id: str | None = None
+    # scenario_feedback가 최종 분배 키다. 기존 호출 입력 호환을 위해서만 남긴다.
+    scenario_id: str | None = Field(default=None, deprecated=True)
     payload: dict[str, object] = Field(default_factory=dict)
 
 
@@ -654,7 +697,7 @@ class SalesProposalInput(BaseModel):
     feedback_attempt: int = Field(default=0, ge=0)
     user_request: SalesUserRequest
     contract_context: SalesContractContext | None = None
-    ml_context: SalesMlContext | None = None
+    ml_context: Forecast | None = None
     finance_context: PassThrough | None = None
     logistics_context: SalesLogisticsContext | None = None
     feedback: SalesFeedback | None = None
@@ -708,10 +751,18 @@ class ProposalSelfCheck(BaseModel):
 class SalesProposalReply(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent: Literal["sales"] = "sales"
+    status: Literal["SCENARIOS_GENERATED", "INPUT_INCOMPLETE"]
     business_mode: SalesBusinessMode
+    is_refeed: bool
+    feedback_attempt: int
+    variant_collapsed: bool = False
+    variant_collapsed_reason: str | None = None
     scenarios: list[SalesScenario] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
     missing_capabilities: list[SalesCapability] = Field(default_factory=list)
     recommended_scenario_id: str | None = None
+    llm: SalesRecommendation
+    # 레거시 호출자가 recommendation을 읽는 동안 하나의 해석 결과를 호환 제공한다.
     recommendation: SalesRecommendation
     self_check: ProposalSelfCheck
 
