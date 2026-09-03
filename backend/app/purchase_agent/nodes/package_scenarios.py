@@ -534,6 +534,30 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ]
 
 
+def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
+    """받았지만 **반영하지 않은** 조정안을 고지한다. 안 왔으면 아무 줄도 안 붙는다.
+
+    🔴 **이 줄이 없으면 "값을 실어 주고 안 쓰는" 자리가 된다.** 마스터가 2회차에
+      조정안을 실어 보내는데(``flow.py`` ``_purchase_input``) 우리가 조용히 안 쓰면,
+      보내는 쪽은 **자기 제안이 반영된 줄 안다.** 반영 안 된 이유를 물을 기회조차 없다 —
+      우리가 다른 파트에 지적했던 것과 같은 종류다 (#165 · #166).
+
+    ``_context_risks`` 가 *"충분성을 아무도 묻지 않았다"* 를 고지하는 것과 같은 자리다:
+    **하지 않은 일을 한 것처럼 보이게 두지 않는다.**
+
+    ⚠️ 반영이 붙는 날 이 함수는 지운다 — 그때는 ``applied_adjustments`` 가 사실을
+      말하므로, 이 줄이 남아 있으면 거짓이 된다.
+    """
+    if not adjustments:
+        return []
+    return [
+        (
+            f"조정안 {len(adjustments)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
+            "반영 규칙이 아직 정해지지 않았다"
+        )
+    ]
+
+
 def _context_risks(loop_count: int, context_docs: list[dict]) -> list[str]:
     """문서 수집에서 나온 유의사항. **②가 안 돈 날은 아무 줄도 안 붙는다.**
 
@@ -1088,6 +1112,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    *_adjustment_risks(state.get("adjustments")),
                     *_context_risks(state["context_loop_count"], state["context_docs"]),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(

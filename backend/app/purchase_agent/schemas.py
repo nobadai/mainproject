@@ -175,8 +175,18 @@ class ProposalMeta(BaseModel):
     agent_version: NonEmptyStr
     is_refeed: bool = False
     feedback_attempt: int = Field(default=0, ge=0)
+    #: 🆕 마스터가 이번 회차에 실어 보낸 **부서 조정안 건수** (되먹임 계약 v0.2).
+    #:
+    #: 🔴 **``applied_`` 가 아니라 ``received_`` 다.** 지금은 받기만 하고 반영하지
+    #:   않는다 — ``target_value`` 의 뜻(지시값이냐 상한이냐)이 미확정이라 반영 규칙을
+    #:   만들 수 없다. 반영한 척하는 이름을 먼저 두면, 나중에 실제로 반영했을 때
+    #:   **그 전후를 구분할 수 없다.** 반영이 붙는 날 ``applied_adjustments`` 를 따로 만든다.
+    #:
+    #: ★ 0 은 "안 왔다" 다 — 1회차는 항상 0이다. "받았는데 0건" 과 구분할 필요가
+    #:   아직 없다(마스터가 빈 배열을 보내지 않는다). 생기면 그때 나눈다.
+    received_adjustments: int = Field(default=0, ge=0)
 
-    @field_validator("feedback_attempt", mode="before")
+    @field_validator("feedback_attempt", "received_adjustments", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
