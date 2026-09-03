@@ -438,6 +438,10 @@ def _assemble(
             "agent_version": AGENT_VERSION,
             "is_refeed": bool(state["feedback"]),
             "feedback_attempt": feedback.get("attempt", 0),
+            # **받은 사실을 산출물에 남긴다.** 반영은 안 하지만(⑥이 risks 에 고지),
+            # 몇 건이 도착했는지는 보내는 쪽이 대조할 수 있어야 한다 — 0 으로만
+            # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
+            "received_adjustments": len(state.get("adjustments") or []),
         },
         "scenarios": survivors,
         "confidence": state["confidence"],
