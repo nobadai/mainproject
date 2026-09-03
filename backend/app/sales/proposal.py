@@ -26,17 +26,87 @@ _TYPES = (
 )
 
 
+def validate_context(request: SalesProposalInput) -> list[str]:
+    """Sales가 원안을 만들 수 있는 최소 사실과 항목 일치만 결정론적으로 검사한다."""
+    issues: list[str] = []
+    contract = request.contract_context
+    if request.business_mode == "CONTRACT_FULFILLMENT":
+        if contract is None:
+            issues.append("CONTRACT_CONTEXT_REQUIRED")
+        elif contract.contract_quantity_kg is None:
+            issues.append("CONTRACT_QUANTITY_REQUIRED")
+    if request.business_mode == "CONTRACT_PROPOSAL_RENEWAL" and contract is None:
+        issues.append("PREVIOUS_CONTRACT_CONTEXT_REQUIRED")
+    if request.is_refeed and request.feedback_attempt <= 0:
+        issues.append("REFEED_ATTEMPT_REQUIRED")
+    if (
+        request.feedback
+        and request.is_refeed
+        and request.feedback.attempt != request.feedback_attempt
+    ):
+        issues.append("REFEED_ATTEMPT_INCONSISTENT")
+    if (
+        request.business_mode != "CONTRACT_FULFILLMENT"
+        and request.user_request.requested_quantity_kg is None
+        and not (request.business_mode == "CONTRACT_PROPOSAL_RENEWAL" and contract)
+    ):
+        issues.append("PROPOSAL_QUANTITY_REQUIRED")
+    expected_item = request.user_request.item
+    for actual, code in (
+        (contract.item if contract else None, "CONTRACT_ITEM_MISMATCH"),
+        (request.ml_context.item if request.ml_context else None, "ML_ITEM_MISMATCH"),
+        (
+            request.logistics_context.query_scope.item
+            if request.logistics_context and request.logistics_context.query_scope
+            else None,
+            "LOGISTICS_ITEM_MISMATCH",
+        ),
+    ):
+        if actual is not None and actual != expected_item:
+            issues.append(code)
+    if request.feedback:
+        known_refs = {reply.reply_ref for reply in request.feedback.domain_replies}
+        expected_ids = {f"SALES-001-{suffix}" for suffix, _, _ in _TYPES}
+        for feedback in request.feedback.scenario_feedback:
+            if feedback.scenario_id not in expected_ids:
+                issues.append("SCENARIO_FEEDBACK_UNKNOWN_SCENARIO")
+            if any(reply_ref not in known_refs for reply_ref in feedback.reply_refs):
+                issues.append("SCENARIO_FEEDBACK_UNKNOWN_REPLY_REF")
+    return list(dict.fromkeys(issues))
+
+
 def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
     """입력 사실로 세 유형의 Sales 시나리오를 만들고 안전하게 추천한다."""
-    scenarios = _generate_scenarios(request)
+    missing_data = validate_context(request)
+    scenarios = [] if missing_data else _generate_scenarios(request)
     missing = _missing_capabilities(request)
     check = self_check_scenarios(scenarios)
     recommendation = _interpret_scenarios(scenarios)
+    collapse_reasons = list(
+        dict.fromkeys(
+            scenario.variant_collapsed_reason
+            for scenario in scenarios
+            if scenario.variant_collapsed_reason
+        )
+    )
     return SalesProposalReply(
+        status="INPUT_INCOMPLETE" if missing_data else "SCENARIOS_GENERATED",
         business_mode=request.business_mode,
+        is_refeed=request.is_refeed,
+        feedback_attempt=request.feedback_attempt,
         scenarios=scenarios,
+        variant_collapsed=bool(collapse_reasons),
+        variant_collapsed_reason=(
+            collapse_reasons[0]
+            if len(collapse_reasons) == 1
+            else "SCENARIO_VARIANTS_PARTIALLY_COLLAPSED"
+            if collapse_reasons
+            else None
+        ),
+        missing_data=missing_data,
         missing_capabilities=missing,
         recommended_scenario_id=recommendation.recommended_candidate_id,
+        llm=recommendation,
         recommendation=recommendation,
         self_check=check,
     )
@@ -46,13 +116,13 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
     quantity, price, delivery, payment, term, refs = _baseline(request)
     if quantity is None:
         return []
-    confirmed = _confirmed_supply(request)
     result: list[SalesScenario] = []
     for suffix, scenario_type, objective in _TYPES:
         scenario_quantity = quantity
         axes: list[str] = []
         collapsed = False
         collapse_reason = None
+        confirmed, supply_uncertainties = resolve_applicable_confirmed_supply(request, delivery)
         if scenario_type == "CONSERVATIVE" and confirmed is not None and confirmed < quantity:
             scenario_quantity = confirmed
             axes.append("QUANTITY")
@@ -65,12 +135,13 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             collapse_reason = "CONFIRMED_SUPPLY_LIMIT_NOT_PROVIDED"
         scenario_id, parent, revision = _scenario_lineage(suffix, request)
         supply = _supply(scenario_quantity, confirmed)
-        validations = _required_validations(request, supply)
+        validations = _required_validations(request, supply, parent or scenario_id, delivery)
         replies = _replies_for_scenario(request, parent or scenario_id)
         # 조건부 Purchase 회신은 확정 공급안을 오염시키지 않는다.
         if scenario_type != "AGGRESSIVE":
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
         risks, uncertainties, conditional = _feedback_effects(replies)
+        uncertainties.extend(supply_uncertainties)
         if price is None:
             uncertainties.append("PRICE_CONTEXT_REQUIRED")
         if request.logistics_context and request.logistics_context.delivery_feasibility:
@@ -97,7 +168,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 supply=supply,
                 sales_decision_axes=axes,
                 required_validations=validations,
-                evidence_refs=refs + _reply_refs(replies),
+                evidence_refs=_unique_refs(
+                    refs + _logistics_refs(request, confirmed) + _reply_refs(replies)
+                ),
                 rationale=["전달된 계약·사용자 요청·외부 컨텍스트만 사용해 구성했습니다."],
                 risks=risks,
                 uncertainties=list(dict.fromkeys(uncertainties)),
@@ -135,13 +208,33 @@ def _baseline(request: SalesProposalInput):
     return quantity, price, delivery, payment, term, refs
 
 
-def _confirmed_supply(request: SalesProposalInput) -> Decimal | None:
+def resolve_applicable_confirmed_supply(
+    request: SalesProposalInput, delivery_date
+) -> tuple[Decimal | None, list[str]]:
+    """납기일에 맞는 Logistics 권위 수량만 사용하며 scope 최대값은 대체하지 않는다."""
     context = request.logistics_context
-    return (
-        context.query_scope.max_confirmed_sellable_quantity_kg
-        if context and context.query_scope
-        else None
-    )
+    supply = context.sellable_supply if context else None
+    if not supply:
+        return None, ["SELLABLE_SUPPLY_CONTEXT_REQUIRED"]
+    if delivery_date is not None:
+        entry = next(
+            (entry for entry in supply.supply_capacity_by_date if entry.date == delivery_date), None
+        )
+        if entry is None:
+            return None, ["SUPPLY_DATE_CONTEXT_REQUIRED"]
+        return entry.confirmed_sellable_quantity_kg, list(entry.uncertainties)
+    if supply.status == "READY":
+        current = next(
+            (
+                entry
+                for entry in supply.inventory_by_item
+                if entry.item == request.user_request.item
+            ),
+            None,
+        )
+        if current is not None:
+            return current.available_qty_kg, []
+    return None, ["CURRENT_SELLABLE_SUPPLY_UNRESOLVED"]
 
 
 def _supply(quantity: Decimal, confirmed: Decimal | None) -> ScenarioSupply:
@@ -154,23 +247,27 @@ def _supply(quantity: Decimal, confirmed: Decimal | None) -> ScenarioSupply:
     )
 
 
-def _required_validations(request: SalesProposalInput, supply: ScenarioSupply) -> list[str]:
+def _required_validations(
+    request: SalesProposalInput, supply: ScenarioSupply, original_id: str, delivery_date
+) -> list[str]:
     validations: list[str] = []
-    if not _has_reply(request, "FINANCIAL_VALIDATION"):
+    if not _has_reply(request, "FINANCIAL_VALIDATION", original_id):
         validations.append("FINANCIAL_VALIDATION")
-    if request.logistics_context is None or request.logistics_context.query_scope is None:
+    if supply.confirmed_quantity_kg is None:
         validations.append("SELLABLE_SUPPLY_CONTEXT")
     delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
     if delivery is None or delivery.status != "READY":
         validations.append("DELIVERY_FEASIBILITY_CONTEXT")
-    if supply.additional_supply_required and not _has_reply(request, "ADDITIONAL_SUPPLY_CONTEXT"):
+    if supply.additional_supply_required and not _has_reply(
+        request, "ADDITIONAL_SUPPLY_CONTEXT", original_id
+    ):
         validations.append("ADDITIONAL_SUPPLY_CONTEXT")
     return validations
 
 
 def _missing_capabilities(request: SalesProposalInput) -> list[str]:
     capabilities: list[str] = []
-    if request.logistics_context is None or request.logistics_context.query_scope is None:
+    if request.logistics_context is None or request.logistics_context.sellable_supply is None:
         capabilities.append("SELLABLE_SUPPLY_CONTEXT")
     delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
     if delivery is None or delivery.status == "UNRESOLVED":
@@ -180,10 +277,16 @@ def _missing_capabilities(request: SalesProposalInput) -> list[str]:
     return capabilities
 
 
-def _has_reply(request: SalesProposalInput, capability: str) -> bool:
-    return bool(
-        request.feedback
-        and any(r.capability == capability for r in request.feedback.domain_replies)
+def _has_reply(
+    request: SalesProposalInput, capability: str, original_id: str | None = None
+) -> bool:
+    if original_id is None:
+        return bool(
+            request.feedback
+            and any(reply.capability == capability for reply in request.feedback.domain_replies)
+        )
+    return any(
+        reply.capability == capability for reply in _replies_for_scenario(request, original_id)
     )
 
 
@@ -198,11 +301,29 @@ def _scenario_lineage(suffix: str, request: SalesProposalInput) -> tuple[str, st
 def _replies_for_scenario(request: SalesProposalInput, original_id: str) -> list[SalesDomainReply]:
     if not request.feedback:
         return []
-    return [
-        reply
-        for reply in request.feedback.domain_replies
-        if reply.scenario_id in {None, original_id}
-    ]
+    refs = next(
+        (
+            feedback.reply_refs
+            for feedback in request.feedback.scenario_feedback
+            if feedback.scenario_id == original_id
+        ),
+        [],
+    )
+    by_ref = {reply.reply_ref: reply for reply in request.feedback.domain_replies}
+    return [by_ref[reply_ref] for reply_ref in refs if reply_ref in by_ref]
+
+
+def _logistics_refs(request: SalesProposalInput, confirmed: Decimal | None) -> list[str]:
+    """권위 Logistics 수량을 실제 사용한 경우에만 해당 근거를 연결한다."""
+    return (
+        list(request.logistics_context.evidence_refs)
+        if confirmed is not None and request.logistics_context
+        else []
+    )
+
+
+def _unique_refs(refs: list[str]) -> list[str]:
+    return list(dict.fromkeys(ref for ref in refs if ref))
 
 
 def _reply_refs(replies: list[SalesDomainReply]) -> list[str]:
@@ -256,10 +377,16 @@ def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
     if len(ids) != len(set(ids)):
         issues.append("DUPLICATE_SCENARIO_ID")
     for scenario in scenarios:
+        if scenario.revision == 0 and scenario.parent_scenario_id is not None:
+            issues.append("INITIAL_LINEAGE_INVALID")
         if scenario.revision > 0 and (
             not scenario.parent_scenario_id or "-R" not in scenario.scenario_id
         ):
             issues.append("REFEED_LINEAGE_INVALID")
+        if scenario.quantity_kg is not None and scenario.quantity_kg < 0:
+            issues.append("NEGATIVE_QUANTITY")
+        if scenario.unit_price_krw is not None and scenario.unit_price_krw < 0:
+            issues.append("NEGATIVE_PRICE")
         expected_amount = (
             scenario.quantity_kg * scenario.unit_price_krw
             if scenario.quantity_kg is not None and scenario.unit_price_krw is not None
