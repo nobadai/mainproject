@@ -222,7 +222,7 @@ def test_source_ref_and_evidence_refs_are_different_roles():
 
 
 def _purchase_reply(status="ok", runtime="READY", quantity=2000, ref="PUR-1", omit=False):
-    payload = {} if omit else {"procurable_quantity_kg": quantity}
+    payload = {} if omit else {"procurable_quantity_kg": quantity, "risks": []}
     return {
         "source_agent": "purchase",
         "capability": "ADDITIONAL_SUPPLY_CONTEXT",

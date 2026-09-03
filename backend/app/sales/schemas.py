@@ -690,6 +690,42 @@ class SalesDomainReply(BaseModel):
     payload: dict[str, object] = Field(default_factory=dict)
 
 
+class PurchaseAdditionalSupplyResult(BaseModel):
+    """Purchase 추가공급 회신에서 Sales 가 **실제로 읽는** 사실.
+
+    ★ Sales 안에 두는 **수신 전용** 모델이다. Purchase 모델을 import 하지 않는다 —
+      두 Agent 를 실행 계층에서 붙이면 마스터가 중개할 자리가 사라진다.
+
+    🔴 **칸은 필수, 값은 nullable 이다.** 예전에는 `payload.get(...)` 로 읽어서
+       *키가 없는 것*과 *명시적 null* 이 같아졌다. 앞의 것은 "약속한 사실을 안 보냈다"
+       이고 뒤의 것은 "모른다고 답했다" 라 대응이 다르다.
+
+           {"procurable_quantity_kg": null, "risks": []}   유효 — 모른다고 답함
+           {"risks": []}                                   무효 — 수량 칸이 없음
+           {"procurable_quantity_kg": 0}                   무효 — risks 칸이 없음
+
+    ★ `risks: []` 는 정상 사실이다 — "위험 0건 확인". 키가 없을 때 `[]` 로 메우면
+      *확인 안 함*이 *위험 없음*이 된다.
+
+    ★ **모르는 칸은 무시한다 (`extra="ignore"`).** 이 모델은 Purchase 가 소유한 전체
+      공급가능성 DTO 의 정본이 아니라 Sales 가 쓰는 부분집합 계약이다. 매입이 나중에
+      도착예정일·제약축·원가 같은 칸을 더 실어 보낼 때 Sales 가 안 쓰는 칸 때문에
+      회신 전체를 무효로 만들면 안 된다 — 그건 남의 계약을 Sales 가 소유하는 셈이다.
+      원본 payload 는 `SalesDomainReply.payload` 에 그대로 남으므로 잃는 것도 없다.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    #: > 0 확보 가능량 확인 / 0 확보 가능량 0kg 확인 / None 미실행·확인 불가
+    procurable_quantity_kg: Decimal | None
+    risks: list[str]
+
+    @field_validator("procurable_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_quantity(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class SalesScenarioFeedback(BaseModel):
     model_config = ConfigDict(extra="forbid")
     scenario_id: str

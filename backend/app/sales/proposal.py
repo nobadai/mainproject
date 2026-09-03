@@ -6,10 +6,13 @@
 
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.schemas import (
     AllocationLeg,
     ProposalSelfCheck,
+    PurchaseAdditionalSupplyResult,
     SalesCandidate,
     SalesDomainReply,
     SalesProposalInput,
@@ -290,29 +293,62 @@ def _supply(
     )
 
 
+#: Purchase 추가공급 회신으로 **읽을 수 있는 유일한** capability.
+#:
+#: 🔴 출처(source_agent)만 보면 안 된다. Purchase 의 `GENERATE_SCENARIOS` 회신은
+#:    `scenarios[i].risks` 를 담은 완전히 다른 모양인데, 출처만 맞다고 추가공급
+#:    결과로 읽으면 최상위 `risks` 가 없어 조용히 "위험 0건" 이 되고 수량은 None 이
+#:    된다. 물어보지 않은 질문에 답을 받은 셈이 된다.
+_ADDITIONAL_SUPPLY_CAPABILITY = "ADDITIONAL_SUPPLY_CONTEXT"
+
+
+def _is_additional_supply_reply(reply: SalesDomainReply) -> bool:
+    """이 회신을 추가공급 결과로 읽어도 되는가 — 출처와 capability 를 **둘 다** 본다."""
+    return (
+        reply.source_agent == "purchase"
+        and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
+    )
+
+
+def _parse_additional_supply(
+    reply: SalesDomainReply,
+) -> PurchaseAdditionalSupplyResult | None:
+    """추가공급 회신 payload 를 약속한 모양으로만 읽는다.
+
+    ★ 약속을 안 지킨 payload 는 **소비하지 않는다.** 키가 없으면 None 을 돌려주고,
+      호출부는 그것을 정상 사실로 취급하지 않는다 — `[]`·`0` 으로 메우지 않는다.
+    """
+    try:
+        return PurchaseAdditionalSupplyResult.model_validate(reply.payload)
+    except ValidationError:
+        return None
+
+
 def _purchase_conditional_supply(
     replies: list[SalesDomainReply],
 ) -> tuple[Decimal | None, str | None]:
     """Purchase 가 **실제로 확인해 준** 조건부 확보 가능량만 옮긴다.
 
-    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다 —
-      missing 으로 바꾸지 않는다.
+    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다.
+      `READY + skipped + 0kg` 도 정상 조합이다 — 안이 만들어지지 않았지만 확보
+      가능량은 0kg 으로 확인됐다는 뜻이라, 그 0 을 None 이나 오류로 바꾸지 않는다.
 
-    ★ 못 돈 회신(skipped·RUNTIME_NOT_READY)이나 수량이 아예 없는 회신은 `None`(모름)
-      이다. 0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
+    ★ 확보 가능량을 **모르는** 경우만 `None` 이다. 회신이 `RUNTIME_NOT_READY` 이거나,
+      수량 칸을 명시적 null 로 보냈거나, 약속한 모양이 아니어서 읽을 수 없을 때다.
+      0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
 
     ★ 수량과 근거를 같이 나른다. 수량만 남고 어느 회신에서 왔는지 사라지면 나중에
       되짚을 수 없다.
     """
     for reply in replies:
-        if reply.source_agent != "purchase":
+        if not _is_additional_supply_reply(reply):
             continue
         if reply.runtime_status != "READY":
             continue
-        quantity = reply.payload.get("procurable_quantity_kg")
-        if isinstance(quantity, bool) or not isinstance(quantity, (int, float, Decimal)):
+        parsed = _parse_additional_supply(reply)
+        if parsed is None or parsed.procurable_quantity_kg is None:
             continue
-        return Decimal(str(quantity)), reply.reply_ref
+        return parsed.procurable_quantity_kg, reply.reply_ref
     return None, None
 
 
@@ -409,7 +445,7 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
             "reject",
         }:
             risks.append("FINANCE_FAIL")
-        if reply.source_agent == "purchase":
+        if _is_additional_supply_reply(reply):
             purchase_risks, depends_on_purchase = _purchase_effects(reply)
             # Purchase가 전달한 위험 문구는 Sales가 새 코드로 재해석하지 않는다.
             risks.extend(purchase_risks)
@@ -422,27 +458,25 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
 def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
     """Purchase의 권위 회신을 조건부 공급 의존성으로만 소비한다.
 
-    ``skipped + 0kg``도 응답된 capability이지만, 확보 가능한 조건부 물량이 없으므로
-    Sales Scenario를 조건부로 표시하지 않는다. Purchase 수량은 확정 Logistics 공급에
-    합산하거나 Sales 수량을 자동 조정하는 데 사용하지 않는다.
+    ``READY + skipped + 0kg``도 응답된 capability이지만, 확보 가능한 조건부 물량이
+    없으므로 Sales Scenario를 조건부로 표시하지 않는다. Purchase 수량은 확정 Logistics
+    공급에 합산하거나 Sales 수량을 자동 조정하는 데 사용하지 않는다.
+
+    🔴 약속한 모양이 아닌 payload 는 **위험 0건으로 읽지 않는다.** 예전에는
+       `payload.get("risks", [])` 라서 `risks` 칸이 없는 회신이 "위험 없음" 이 됐다.
+       확인하지 않은 것과 확인해서 없는 것은 다른 사실이다.
     """
-    payload = reply.payload
-    raw_risks = payload.get("risks", [])
-    risks = (
-        [risk for risk in raw_risks if isinstance(risk, str)] if isinstance(raw_risks, list) else []
-    )
-    quantity = payload.get("procurable_quantity_kg")
-    has_positive_quantity = (
-        isinstance(quantity, (int, float, Decimal))
-        and not isinstance(quantity, bool)
-        and quantity > 0
-    )
+    parsed = _parse_additional_supply(reply)
+    if parsed is None:
+        # 읽을 수 없는 회신에서 사실을 만들어 내지 않는다.
+        return [], False
     depends_on_purchase = (
         reply.runtime_status == "READY"
         and (reply.business_status or "").lower() == "ok"
-        and has_positive_quantity
+        and parsed.procurable_quantity_kg is not None
+        and parsed.procurable_quantity_kg > 0
     )
-    return risks, depends_on_purchase
+    return list(parsed.risks), depends_on_purchase
 
 
 def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
@@ -467,6 +501,64 @@ def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
         for scenario in scenarios
     ]
     return interpret_candidates(candidates)
+
+
+def _purchase_reference_issues(scenario: SalesScenario) -> list[str]:
+    """이 안에 붙은 Purchase 회신이 **여기 있어도 되는 것인가.**
+
+    🔴 예전에는 `조건부 아님 + Purchase 회신 존재` 를 통째로 누수로 봤다. 그러면
+       정상 조합인 `READY + skipped + 0kg`(= 확보 가능량 0kg 확인)까지 오류가 된다.
+       회신이 붙어 있다는 사실과 조건부 물량에 의존한다는 사실은 다르다.
+
+    지금 가르는 것은 셋이다.
+
+        A. 추가공급이 아닌 Purchase capability 가 붙음  → capability 결합 오류
+        B. 추가공급 검증이 필요 없는 안에 붙음          → scenario 결합 오류
+        C. 약속한 모양이 아닌 추가공급 payload          → 읽을 수 없는 회신
+
+    셋 다 "조용히 정상 처리" 하지 않는다.
+    """
+    issues: list[str] = []
+    purchase_replies = [
+        reply for reply in scenario.domain_replies if reply.source_agent == "purchase"
+    ]
+    if not purchase_replies:
+        return issues
+    for reply in purchase_replies:
+        if reply.capability != _ADDITIONAL_SUPPLY_CAPABILITY:
+            # A — 물어보지 않은 질문의 답이 붙었다.
+            issues.append("PURCHASE_CAPABILITY_MISMATCH")
+        elif _parse_additional_supply(reply) is None:
+            # C — 추가공급이라고 왔는데 약속한 칸이 없다.
+            issues.append("PURCHASE_SUPPLY_PAYLOAD_INVALID")
+    if not scenario.supply.additional_supply_required and any(
+        reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY for reply in purchase_replies
+    ):
+        # B — 추가조달이 필요하지 않은 안에 그 검증 결과가 붙었다.
+        #
+        # ★ 판단 기준은 **이 안이 추가공급을 필요로 하는가**이지 `required_validations`
+        #   에 남아 있는가가 아니다. 저 목록은 *아직 answered 되지 않은 요청*이라,
+        #   답이 온 순간 사라진다 — 그것을 "묻지 않았다" 로 읽으면 정상 회신이 누수가 된다.
+        issues.append("PURCHASE_REFERENCE_LEAK")
+    return issues
+
+
+def _answered_additional_supply(scenario: SalesScenario) -> bool:
+    """이 안의 추가공급 질문에 **읽을 수 있는 답이 왔는가.**
+
+    ★ 셋을 모두 만족해야 답으로 친다 — 출처가 매입이고, capability 가 추가공급이고,
+      약속한 칸(`procurable_quantity_kg`·`risks`)이 실제로 있어야 한다.
+
+    🔴 여기를 "매입 회신이 하나라도 있으면 답이 왔다" 로 넓히면, capability 가 틀린
+       회신이나 칸이 빠진 회신이 검증을 끝낸 것으로 읽힌다. 물어본 것에 대한 답이
+       아직 없는데 "확인했다" 가 되는 것이라, 오탐을 고치려다 미검증을 통과시킨다.
+    """
+    return any(
+        reply.source_agent == "purchase"
+        and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
+        and _parse_additional_supply(reply) is not None
+        for reply in scenario.domain_replies
+    )
 
 
 def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
@@ -502,13 +594,13 @@ def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
             issues.append("SUPPLY_DEPENDENCY_INCONSISTENT")
         if (
             scenario.supply.additional_supply_required
-            and "ADDITIONAL_SUPPLY_CONTEXT" not in scenario.required_validations
+            and _ADDITIONAL_SUPPLY_CAPABILITY not in scenario.required_validations
+            # 🔴 답이 온 질문을 "안 물어봤다" 로 읽지 않는다. `required_validations` 는
+            #    *아직 답이 없는 요청* 목록이라, 회신이 오면 사라지는 것이 정상이다.
+            and not _answered_additional_supply(scenario)
         ):
             issues.append("ADDITIONAL_SUPPLY_VALIDATION_MISSING")
-        if not scenario.conditional_purchase and any(
-            reply.source_agent == "purchase" for reply in scenario.domain_replies
-        ):
-            issues.append("PURCHASE_REFERENCE_LEAK")
+        issues.extend(_purchase_reference_issues(scenario))
     issues = list(dict.fromkeys(issues))
     return ProposalSelfCheck(
         passed=not issues,
