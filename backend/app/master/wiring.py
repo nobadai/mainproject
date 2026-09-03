@@ -39,6 +39,42 @@ def missing(required: tuple[AgentName, ...] = REQUIRED_FOR_PROCUREMENT) -> tuple
 
 
 def reset() -> None:
-    """테스트 전용 — 등록을 비운다."""
+    """테스트 전용 — 등록을 비운다.
+
+    🔴 **이것만으로는 되돌릴 수 없다** (2026-09-03 실측).
+
+      등록은 `app/main.py` 가 **import 시점에 한 번** 한다. 여기서 비우면 그 모듈은
+      이미 import 돼 있어 **다시 등록되지 않는다** — 그 프로세스에서 영영 빈 채로
+      남는다.
+
+      실제로 새어 나가고 있었다.
+
+      ```text
+      pytest tests/master tests/finance/test_finance_api.py   → 1 failed
+      pytest tests/finance/test_finance_api.py tests/master   → 통과
+      ```
+
+      전체 스위트는 알파벳순이라 재무가 먼저 돌아 안 걸렸다. **부분 실행에서만
+      깨지는 것이라 아무도 못 봤다.**
+
+    ★ **부르기 전에 `snapshot()` 을 뜨고 끝나면 `restore()` 한다.** 루트
+      `tests/conftest.py` 가 모든 테스트에 그것을 걸어 두므로, 이 함수를 그냥 불러도
+      그 테스트 밖으로는 안 샌다.
+    """
     global _REGISTRY
     _REGISTRY = AgentRegistry()
+
+
+def snapshot() -> dict[AgentName, AgentPort]:
+    """지금 등록 상태. **되돌리기 위한 것**이지 읽어서 판단할 값이 아니다."""
+    return {name: _REGISTRY.get(name) for name in _REGISTRY.registered}
+
+
+def restore(saved: dict[AgentName, AgentPort]) -> None:
+    """`snapshot()` 뜬 상태로 되돌린다. **지금 등록된 것은 버린다.**
+
+    ★ 합치지 않는다. 테스트가 남긴 등록이 섞여 나가면 되돌린 것이 아니다.
+    """
+    reset()
+    for name, port in saved.items():
+        register(name, port)
