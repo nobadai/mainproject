@@ -71,10 +71,10 @@ def test_품목_어휘를_값으로_막는다():
 
     실제로 `contracts_core.py:975` 가 그 값을 품목 자리에 넣고 있다. 여기서는 막는다.
     """
-    with pytest.raises(CommitmentNotBuildable, match="4품목"):
+    with pytest.raises(CommitmentNotBuildable, match="계약 품목이 아니다"):
         _build(item="(승인분)")
 
-    with pytest.raises(CommitmentNotBuildable, match="4품목"):
+    with pytest.raises(CommitmentNotBuildable, match="계약 품목이 아니다"):
         _build(item="딸기")
 
 
@@ -238,18 +238,37 @@ def test_계약_품목은_전부_매입이_받을_수_있다():
     assert ITEM_CODES <= _purchase_item_names()
 
 
-def test_전환이_끝나면_같음으로_좁힌다():
-    """2026-09-03 피마늘 제외 — 계약은 셋이 됐고 매입 `ItemName` 은 아직 넷이다.
+def test_매입이_더_넓은_것은_전환이_아니라_결정이다():
+    """🔴 **여기를 "끝내려" 하지 마라.** 차이가 남는 것이 결정이다.
 
-    매입이 옮기면 이 검사가 `skip` 으로 알린다. 그때 위 검사를 **같음**으로
-    좁히고 이 검사를 지운다. 전환 창을 열어 둔 채 잊지 않기 위한 자리다.
+    처음에 이 검사를 *"전환이 끝나면 같음으로 좁힌다"* 로 썼다. **틀렸다** —
+    매입이 좁히지 않기로 했고 그것이 맞는 판단이다 (매입 회신 2026-09-03).
+
+    ```text
+    피마늘은 mock 에서 "규격 미확정 → 0안" 경로를 타는 유일한 품목이다
+      constraints.yaml:284  피마늘: null   (배추 18kg · 양파 15kg 은 값이 있다)
+      quotes.py:371         그 null 분기
+      adapter.py:895        "12-31 피마늘이 그 모양" 을 payload 설계 근거로 인용
+    ```
+
+    `#57` 의 *"ML 3품목 + mock 4품목 시연용 유지"* 가 **한 쌍으로 선 결정**이라,
+    mock 을 좁히면 그 후반부를 뒤집는다.
+
+    ★ **대신 마스터가 문 앞에서 막는다** (`#223` ·
+      `tests/master/test_item_gate_at_the_door.py`). 계약 밖 품목이 매입에
+      도달하지 않으므로 매입이 넓어도 안전하다.
+
+    ⚠️ 그래서 이 검사는 `skip` 으로 끝나지 않는다. **차이가 정확히 피마늘 하나인지**
+      만 본다 — 다른 품목이 끼면 그건 결정이 아니라 사고다.
     """
     from app.master.commitment import ITEM_CODES
 
     extra = _purchase_item_names() - ITEM_CODES
-    if not extra:
-        pytest.skip("🟢 매입도 계약과 같아졌다 — 이제 위 검사를 같음으로 좁힌다")
-    assert extra == {"피마늘"}, f"예상 못 한 차이: {sorted(extra)}"
+
+    assert extra == {"피마늘"}, (
+        f"매입과 계약의 차이가 피마늘 하나가 아니다: {sorted(extra)}. "
+        f"넓은 것 자체는 사고가 아니지만 무엇이 넓은지는 알고 있어야 한다"
+    )
 
 
 # ---------------------------------------------------------------------------
