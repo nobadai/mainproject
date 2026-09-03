@@ -513,7 +513,7 @@ def check_occupancy_detailed(
       쓰는 자리 셋 중 둘이 net 이고 band 만 gross 였다.
 
           물류 `_available_capacity`   net   제안 물량만 밖에서 누적
-          매입 PR #178·#179            net   〃
+          매입 PR #179                 net   〃
           여기                         gross ← 이 판에서 net 으로 맞춘다
 
     ⚠️ **프로덕션 결과는 안 바뀐다.** `T0Snapshot.confirmed_occupancy_by_date` 를
