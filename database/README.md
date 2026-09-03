@@ -43,9 +43,14 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 |---|---|---|
 | `master_runs_migration.sql` | `orchestrator_agent_runs` 에 `agent='master'` · `request_id` · `plan` | 2026-08-27 |
 | `master_decisions_run_id.sql` | `master_decisions.run_id` + 복합 FK + 인덱스 | 2026-08-30 · **팀 승인 대기** |
+| `ml_forecast_view_gate_reason.sql` | `v_ml_price_forecast` 의 `daily[]` 에 `gate_reason` 추가 | 2026-09-03 · **실 DB 적용 대기** |
 
 **같은 변경이 두 곳에 있습니다** — 본 DDL(신규 구축용)과 ALTER 판(이관용).
 어느 하나만 고치면 갈립니다. **둘 다 고칩니다.**
+
+🔴 **적어 두는 것만으로는 안 지켜집니다.** 갈려도 어느 쪽도 에러를 안 내고
+**서로 다른 스키마가 조용히 생깁니다.** 그래서 검사로 겁니다 —
+`backend/tests/master/test_schema_files_agree.py` 가 두 파일의 뷰 본문을 대조합니다.
 
 ---
 

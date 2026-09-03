@@ -3861,7 +3861,7 @@ CREATE VIEW haetdeul.v_ml_price_forecast AS
     min(current_price) AS current_price,
     (count(*))::integer AS horizon_days,
     min(model_version) AS model_version,
-    jsonb_agg(jsonb_build_object('date', to_char((target_dt)::timestamp with time zone, 'YYYY-MM-DD'::text), 'predicted', predicted, 'lower', lower, 'upper', upper, 'is_filled', is_filled, 'is_gated', is_gated) ORDER BY offset_days) AS daily,
+    jsonb_agg(jsonb_build_object('date', to_char((target_dt)::timestamp with time zone, 'YYYY-MM-DD'::text), 'predicted', predicted, 'lower', lower, 'upper', upper, 'is_filled', is_filled, 'is_gated', is_gated, 'gate_reason', gate_reason) ORDER BY offset_days) AS daily,
     bool_or(is_filled) AS has_filled_rows,
     (count(*) FILTER (WHERE is_filled))::integer AS filled_count,
     bool_and(COALESCE(use_recommended, true)) AS use_recommended,
