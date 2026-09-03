@@ -16,8 +16,16 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.ml.schemas import Forecast
+
 SalesCycle = Literal["PROCUREMENT", "SALES"]
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+SalesBusinessMode = Literal[
+    "CONTRACT_FULFILLMENT",
+    "CONTRACT_PROPOSAL_NEW",
+    "CONTRACT_PROPOSAL_RENEWAL",
+    "SPOT_SALES",
+]
 
 
 def _reject_boolean(value: object) -> object:
@@ -236,12 +244,13 @@ class SalesSnapshotB(BaseModel):
     as_of: date
     item: str = Field(min_length=1)
     policy_version: str | None
+    business_mode: SalesBusinessMode | None = None
     inventory: Inventory
     cost_basis: PassThrough | None
     # 확정 주문은 null을 허용하지 않는다. "주문 없음"은 빈 배열로 표현한다.
     # null(정보 미수신)을 허용하면 confirmed_obligation_kg=0(사실)과 구분되지 않는다.
     confirmed_orders: list[ConfirmedOrder]
-    sales_opportunities: list[PassThrough] | None
+    sales_opportunities: list["SalesOpportunity"] | None
     forecast: PassThrough | None = None
     response_state: list[PassThrough] | None = None
     policy: PassThrough | None = None
@@ -255,6 +264,81 @@ class ApprovedPurchase(BaseModel):
     approval_id: str | None = None
 
 
+class SalesOpportunity(BaseModel):
+    """Master가 전달하는 근거 보유 계약·제안 사실.
+
+    선택 상업값은 의도적으로 null을 허용한다. 가격이 없는 기회에 Sales가 가격을 채우지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    opportunity_id: str = Field(min_length=1)
+    channel: str = Field(min_length=1)
+    qty_kg: Decimal | None = Field(default=None, ge=0)
+    unit_price: Decimal | None = Field(default=None, ge=0)
+    delivery_date: date | None = None
+    payment_days: int | None = Field(default=None, ge=0)
+    contract_term_days: int | None = Field(default=None, ge=0)
+    evidence_ref: str | None = None
+    rationale: str | None = None
+
+    @field_validator("qty_kg", "unit_price", "payment_days", "contract_term_days", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class FinanceBaseContext(BaseModel):
+    """Master가 제공하는 간결한 Finance 상태 뷰. Sales는 값을 계산하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+    reference: str | None = None
+    cash_status: str | None = None
+    receivable_status: str | None = None
+    restrictions: list[str] = Field(default_factory=list)
+
+
+class LogisticsBaseContext(BaseModel):
+    """상황 파악용으로 Master가 제공하는 간결한 Inventory/Logistics 상태 뷰."""
+
+    model_config = ConfigDict(extra="forbid")
+    reference: str | None = None
+    sellable_status: str | None = None
+    outbound_capacity_status: str | None = None
+    earliest_delivery_date: date | None = None
+
+
+class SalesInitialContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    finance: FinanceBaseContext | None = None
+    logistics: LogisticsBaseContext | None = None
+
+
+class ExternalValidationResult(BaseModel):
+    """기작성 후보에 대한 외부 Agent의 권위 있는 결과.
+
+    수치 한도는 담당 Agent가 반환한 사실이며 Sales가 산출하지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str = Field(min_length=1)
+    source: Literal["FINANCE", "LOGISTICS", "PURCHASE"]
+    verdict: Literal["PASS", "FAIL", "UNRESOLVED"]
+    ref_id: str | None = None
+    max_qty_kg: Decimal | None = Field(default=None, ge=0)
+    max_payment_days: int | None = Field(default=None, ge=0)
+    earliest_delivery_date: date | None = None
+    additional_qty_kg: Decimal | None = Field(default=None, ge=0)
+    available_date: date | None = None
+    conditional: bool = False
+    unresolved_fields: list[str] = Field(default_factory=list)
+
+    @field_validator("max_qty_kg", "additional_qty_kg", "max_payment_days", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class SalesAllocationInput(BaseModel):
     """POST /sales/allocation 요청."""
 
@@ -264,6 +348,8 @@ class SalesAllocationInput(BaseModel):
     as_of: date
     approved_purchase: ApprovedPurchase | None = None
     sales_snapshot: SalesSnapshotB
+    initial_context: SalesInitialContext | None = None
+    refeed_results: list[ExternalValidationResult] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def as_of_matches_snapshot(self) -> "SalesAllocationInput":
@@ -307,6 +393,67 @@ class SalesCandidate(BaseModel):
     rationale: list[Rationale] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
+    adjustment_axis: Literal[
+        "NONE", "QUANTITY", "PRICE", "DELIVERY", "PAYMENT_TERMS", "CONTRACT_TERM", "MIX"
+    ] = "NONE"
+    payment_days: int | None = None
+    contract_term_days: int | None = None
+    conditional: bool = False
+    external_validation_refs: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+    strategy_label: str | None = None
+    base_proposal_id: str | None = None
+
+
+class MissingCapability(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    capability: Literal[
+        "SELLABLE_SUPPLY_CONTEXT",
+        "DELIVERY_FEASIBILITY_CONTEXT",
+        "FINANCIAL_VALIDATION",
+        "ADDITIONAL_SUPPLY_CONTEXT",
+    ]
+    reason: str
+
+
+class SalesSelfCheck(BaseModel):
+    """반환 직전 Sales 책임 범위만 검사한 결과다."""
+
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    issue_codes: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
+class BaseSalesProposal(BaseModel):
+    """외부 제약을 적용하기 전, 근거가 있는 원안의 고정 표현이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    proposal_id: str
+    source_opportunity_id: str
+    allocation: AllocationLeg
+    delivery_date: date
+    payment_days: int | None = None
+    contract_term_days: int | None = None
+    evidence_ref: str | None = None
+
+
+class SalesRecommendation(BaseModel):
+    """숫자 없이 후보 선택과 설명만 담는 해석 결과다."""
+
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["SUCCESS", "SKIPPED_TEMPLATE", "FALLBACK", "DISABLED"]
+    recommended_candidate_id: str | None = None
+    summary: str
+    recommendation_reason: str
+    risk_explanation: str
+    user_message: str = ""
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_attempts: int = Field(default=0, ge=0)
+    llm_fallback_used: bool = False
 
 
 class SalesProposalMeta(BaseModel):
@@ -336,6 +483,288 @@ class SalesAllocationReply(BaseModel):
     confirmed_obligation_kg: Decimal
     coverable_kg: Decimal | None
     no_feasible_reason: str | None = None
+    no_feasible_message: str | None = None
+    missing_capabilities: list[MissingCapability] = Field(default_factory=list)
+    business_mode: SalesBusinessMode | None = None
+    situation: str
+    self_check: SalesSelfCheck
+    base_proposals: list[BaseSalesProposal] = Field(default_factory=list)
+    recommendation: SalesRecommendation
+
+
+# ---------------------------------------------------------------------------
+# 최종 Sales Proposal Core — 레거시 allocation 계약과 병행한다.
+# ---------------------------------------------------------------------------
+
+SalesCapability = Literal[
+    "SELLABLE_SUPPLY_CONTEXT",
+    "DELIVERY_FEASIBILITY_CONTEXT",
+    "FINANCIAL_VALIDATION",
+    "ADDITIONAL_SUPPLY_CONTEXT",
+]
+ScenarioType = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
+ScenarioObjective = Literal["RISK_DEFENSE", "BALANCE", "SALES_OPPORTUNITY"]
+
+
+class SalesUserRequest(BaseModel):
+    """Sales가 제안의 기준으로 삼는 사용자 요청이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    raw_text: str | None = None
+    item: str = Field(min_length=1)
+    partner_id: str | None = None
+    requested_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    preferred_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    preferred_delivery_date: date | None = None
+    preferred_payment_days: int | None = Field(default=None, ge=0)
+    preferred_contract_term_days: int | None = Field(default=None, ge=0)
+
+    @field_validator(
+        "requested_quantity_kg",
+        "preferred_unit_price_krw",
+        "preferred_payment_days",
+        "preferred_contract_term_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesContractContext(BaseModel):
+    """계약 사실을 소비만 하는 Sales용 축약 뷰다."""
+
+    model_config = ConfigDict(extra="forbid")
+    contract_id: str | None = None
+    previous_contract_id: str | None = None
+    partner_id: str | None = None
+    item: str | None = None
+    contract_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    contract_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    contract_delivery_date: date | None = None
+    contract_payment_days: int | None = Field(default=None, ge=0)
+    contract_term_days: int | None = Field(default=None, ge=0)
+    source_ref: str | None = None
+
+    @field_validator(
+        "contract_quantity_kg",
+        "contract_unit_price_krw",
+        "contract_payment_days",
+        "contract_term_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsQueryScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item: str | None = None
+    as_of: date | None = None
+    delivery_window_start: date | None = None
+    delivery_window_end: date | None = None
+    max_confirmed_sellable_quantity_kg: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("max_confirmed_sellable_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsDeliveryFeasibility(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["READY", "UNRESOLVED", "FAIL"] = "UNRESOLVED"
+    daily_outbound_capacity_kg: Decimal | None = Field(default=None, ge=0)
+    reason_codes: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator("daily_outbound_capacity_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsInventoryByItem(BaseModel):
+    """Logistics가 확정한 현재 판매 가능 수량 뷰다."""
+
+    model_config = ConfigDict(extra="forbid")
+    item: str
+    available_qty_kg: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("available_qty_kg", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsLotConstraint(BaseModel):
+    """Lot은 근거 컨텍스트이며 Sales가 이를 합산하거나 필터링하지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+    lot_id: str
+    item: str
+    available_qty_kg: Decimal | None = Field(default=None, ge=0)
+    remaining_freshness_days: int | None = Field(default=None, ge=0)
+    effective_freshness_limit_days: int | None = Field(default=None, ge=0)
+    grade: str | None = None
+    status: str | None = None
+
+    @field_validator(
+        "available_qty_kg",
+        "remaining_freshness_days",
+        "effective_freshness_limit_days",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsSupplyByDate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    date: date
+    confirmed_sellable_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    freshness_unresolved_inbound_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    uncertainties: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "confirmed_sellable_quantity_kg", "freshness_unresolved_inbound_quantity_kg", mode="before"
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class LogisticsSellableSupply(BaseModel):
+    """최종 Logistics PRE_SALES의 판매 가능 공급 블록을 그대로 소비한다."""
+
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["READY", "UNRESOLVED", "FAIL"]
+    inventory_by_item: list[LogisticsInventoryByItem] = Field(default_factory=list)
+    lot_constraints: list[LogisticsLotConstraint] = Field(default_factory=list)
+    supply_capacity_by_date: list[LogisticsSupplyByDate] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+
+
+class SalesLogisticsContext(BaseModel):
+    """Logistics PRE_SALES 결과를 재계산 없이 보존하는 입력 모델이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    query_scope: LogisticsQueryScope | None = None
+    sellable_supply: LogisticsSellableSupply | None = None
+    delivery_feasibility: LogisticsDeliveryFeasibility | None = None
+    hard_constraints: list[PassThrough] = Field(default_factory=list)
+    soft_warnings: list[PassThrough] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class SalesDomainReply(BaseModel):
+    """Master가 전달한 원본 Domain 회신을 손실 없이 보관한다."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_agent: Literal["finance", "logistics", "purchase"]
+    capability: SalesCapability
+    reply_ref: str
+    runtime_status: RuntimeStatus
+    business_status: str | None = None
+    # scenario_feedback가 최종 분배 키다. 기존 호출 입력 호환을 위해서만 남긴다.
+    scenario_id: str | None = Field(default=None, deprecated=True)
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class SalesScenarioFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario_id: str
+    reply_refs: list[str] = Field(default_factory=list)
+
+
+class SalesFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    original_run_id: str | None = None
+    attempt: int = Field(default=1, ge=1)
+    domain_replies: list[SalesDomainReply] = Field(default_factory=list)
+    scenario_feedback: list[SalesScenarioFeedback] = Field(default_factory=list)
+
+
+class SalesProposalInput(BaseModel):
+    """Master 연동 전에도 독립 실행 가능한 최종 Sales 제안 입력이다."""
+
+    model_config = ConfigDict(extra="forbid")
+    business_mode: SalesBusinessMode
+    is_refeed: bool = False
+    feedback_attempt: int = Field(default=0, ge=0)
+    user_request: SalesUserRequest
+    contract_context: SalesContractContext | None = None
+    ml_context: Forecast | None = None
+    finance_context: PassThrough | None = None
+    logistics_context: SalesLogisticsContext | None = None
+    feedback: SalesFeedback | None = None
+
+
+class ScenarioSupply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    required_additional_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    additional_supply_required: bool = False
+
+
+class SalesScenario(BaseModel):
+    """Sales가 소유한 제안과 외부 검증 의존성을 분리한 최종 시나리오다."""
+
+    model_config = ConfigDict(extra="forbid")
+    scenario_id: str
+    parent_scenario_id: str | None = None
+    revision: int = Field(default=0, ge=0)
+    scenario_type: ScenarioType
+    objective: ScenarioObjective
+    business_mode: SalesBusinessMode
+    item: str
+    partner_id: str | None = None
+    quantity_kg: Decimal | None = Field(default=None, ge=0)
+    unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    sales_amount_krw: Decimal | None = Field(default=None, ge=0)
+    delivery_date: date | None = None
+    payment_days: int | None = Field(default=None, ge=0)
+    contract_term_days: int | None = Field(default=None, ge=0)
+    supply: ScenarioSupply
+    sales_decision_axes: list[str] = Field(default_factory=list)
+    required_validations: list[SalesCapability] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    rationale: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    conditional_purchase: bool = False
+    variant_collapsed: bool = False
+    variant_collapsed_reason: str | None = None
+    domain_replies: list[SalesDomainReply] = Field(default_factory=list)
+
+
+class ProposalSelfCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    issue_codes: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
+class SalesProposalReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent: Literal["sales"] = "sales"
+    status: Literal["SCENARIOS_GENERATED", "INPUT_INCOMPLETE"]
+    business_mode: SalesBusinessMode
+    is_refeed: bool
+    feedback_attempt: int
+    variant_collapsed: bool = False
+    variant_collapsed_reason: str | None = None
+    scenarios: list[SalesScenario] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    missing_capabilities: list[SalesCapability] = Field(default_factory=list)
+    recommended_scenario_id: str | None = None
+    llm: SalesRecommendation
+    # 레거시 호출자가 recommendation을 읽는 동안 하나의 해석 결과를 호환 제공한다.
+    recommendation: SalesRecommendation
+    self_check: ProposalSelfCheck
 
 
 # ---------------------------------------------------------------------------

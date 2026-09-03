@@ -161,10 +161,253 @@ def test_allocation_reports_facts_without_fake_candidates(monkeypatch):
     assert body["confirmed_obligation_kg"] == "200"
     assert body["candidates"] == []
     assert body["coverable_kg"] is None
-    assert body["no_feasible_reason"] == "CANDIDATE_GENERATION_NOT_IMPLEMENTED"
+    assert body["no_feasible_reason"] == "CANDIDATE_EVIDENCE_MISSING"
     assert saved["cycle"] == "SALES"
-    # S1 제안이 미완성이라 실행이력도 READY로 과장하지 않는다
+    # 후보 근거가 없어 실행이력도 READY로 과장하지 않는다
     assert saved["runtime_status"] == "RUNTIME_NOT_READY"
+
+
+def test_allocation_builds_deduplicated_evidenced_candidates_and_accepts_context(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 100,
+                "unit_price": 2000,
+                "delivery_date": "2026-08-24",
+                "payment_days": 30,
+                "evidence_ref": "CON-1",
+            },
+            {
+                "opportunity_id": "OP-dup",
+                "channel": "B2B",
+                "qty_kg": 100,
+                "unit_price": 2000,
+                "delivery_date": "2026-08-24",
+                "payment_days": 30,
+                "evidence_ref": "CON-2",
+            },
+        ]
+    )
+    payload["initial_context"] = {
+        "finance": {"reference": "FIN-1", "cash_status": "WATCH"},
+        "logistics": {"reference": "LOG-1", "sellable_status": "KNOWN"},
+    }
+    response = client.post("/sales/allocation", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["allocation"][0]["unit_price"] == "2000"
+    assert len(body["missing_capabilities"]) == 2
+
+
+def test_allocation_refeed_applies_authoritative_constraints(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 10000,
+                "unit_price": 2000,
+                "delivery_date": "2026-08-24",
+                "payment_days": 30,
+                "evidence_ref": "CON-1",
+            },
+        ]
+    )
+    payload["refeed_results"] = [
+        {
+            "candidate_id": "OP-1",
+            "source": "LOGISTICS",
+            "verdict": "PASS",
+            "max_qty_kg": 8000,
+            "ref_id": "LOG-RESULT",
+        },
+        {
+            "candidate_id": "OP-1",
+            "source": "FINANCE",
+            "verdict": "PASS",
+            "max_payment_days": 15,
+            "ref_id": "FIN-RESULT",
+        },
+        {
+            "candidate_id": "OP-1",
+            "source": "PURCHASE",
+            "verdict": "PASS",
+            "conditional": True,
+            "ref_id": "PUR-RESULT",
+        },
+    ]
+    body = client.post("/sales/allocation", json=payload).json()
+    candidate = body["candidates"][0]
+    assert candidate["allocation"][0]["qty_kg"] == "8000"
+    assert candidate["payment_days"] == 15
+    assert candidate["adjustment_axis"] == "MIX"
+    assert candidate["conditional"] is True
+
+
+def test_finance_fail_is_not_promoted_to_pass(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 1,
+                "unit_price": 2,
+                "delivery_date": "2026-08-24",
+                "evidence_ref": "CON-1",
+            },
+        ]
+    )
+    payload["refeed_results"] = [{"candidate_id": "OP-1", "source": "FINANCE", "verdict": "FAIL"}]
+    candidate = client.post("/sales/allocation", json=payload).json()["candidates"][0]
+    assert "FINANCE_FAIL" in candidate["risks"]
+
+
+def test_allocation_does_not_invent_missing_commercial_numbers(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "NO-PRICE",
+                "channel": "B2B",
+                "qty_kg": 0,
+                "delivery_date": "2026-08-24",
+                "evidence_ref": "LEAD-1",
+            },
+            {
+                "opportunity_id": "NO-QTY",
+                "channel": "B2B",
+                "unit_price": 2,
+                "delivery_date": "2026-08-24",
+                "evidence_ref": "LEAD-2",
+            },
+        ]
+    )
+    body = client.post("/sales/allocation", json=payload).json()
+    assert body["candidates"] == []
+    assert body["no_feasible_reason"] == "PRICE_EVIDENCE_MISSING"
+    assert body["no_feasible_message"] == (
+        "현재 정보만으로 판매가격을 확정하기 어렵습니다. "
+        "계약가, 기존 거래가격 또는 시장가격 정보가 필요합니다."
+    )
+
+
+def test_allocation_limits_candidates_to_three_and_self_checks(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": f"OP-{number}",
+                "channel": f"B2B-{number}",
+                "qty_kg": number,
+                "unit_price": number,
+                "delivery_date": "2026-08-24",
+                "evidence_ref": f"CON-{number}",
+            }
+            for number in range(1, 5)
+        ]
+    )
+    body = client.post("/sales/allocation", json=payload).json()
+    assert len(body["candidates"]) == 3
+    assert body["self_check"] == {"passed": True, "issue_codes": [], "messages": []}
+
+
+def test_situation_is_represented_without_activating_spot_sales(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 1,
+                "unit_price": 2,
+                "delivery_date": "2026-08-24",
+                "evidence_ref": "CON-1",
+            },
+        ]
+    )
+    body = client.post("/sales/allocation", json=payload).json()
+    assert body["business_mode"] is None
+    assert body["situation"] == "CONTRACT_FULFILLMENT"
+
+
+def test_conditional_purchase_creates_separate_delivery_scenario(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 10000,
+                "unit_price": 2300,
+                "delivery_date": "2026-09-10",
+                "payment_days": 30,
+                "evidence_ref": "USER-1",
+            },
+        ]
+    )
+    payload["refeed_results"] = [
+        {"candidate_id": "OP-1", "source": "LOGISTICS", "verdict": "PASS", "max_qty_kg": 8000},
+        {"candidate_id": "OP-1", "source": "FINANCE", "verdict": "PASS", "max_payment_days": 15},
+        {
+            "candidate_id": "OP-1",
+            "source": "PURCHASE",
+            "verdict": "PASS",
+            "conditional": True,
+            "additional_qty_kg": 2000,
+            "available_date": "2026-09-13",
+        },
+    ]
+    candidates = client.post("/sales/allocation", json=payload).json()["candidates"]
+    assert len(candidates) == 2
+    assert candidates[0]["adjustment_axis"] == "MIX"
+    assert candidates[0]["allocation"][0]["qty_kg"] == "8000"
+    assert candidates[1]["conditional"] is True
+    assert candidates[1]["outbound_by_date"][0]["date"] == "2026-09-13"
+
+
+def test_refeed_equal_limits_do_not_create_adjustment_or_repeat_capability(monkeypatch):
+    monkeypatch.setattr("app.sales.service.save_sales_agent_run", lambda **kwargs: kwargs)
+    payload = _snapshot_b(
+        sales_opportunities=[
+            {
+                "opportunity_id": "OP-1",
+                "channel": "B2B",
+                "qty_kg": 4000,
+                "unit_price": 2000,
+                "delivery_date": "2026-09-12",
+                "payment_days": 15,
+                "evidence_ref": "CON-1",
+            },
+        ]
+    )
+    payload["refeed_results"] = [
+        {
+            "candidate_id": "OP-1",
+            "source": "LOGISTICS",
+            "verdict": "PASS",
+            "max_qty_kg": 4000,
+            "earliest_delivery_date": "2026-09-12",
+            "ref_id": "LOG-1",
+        },
+        {
+            "candidate_id": "OP-1",
+            "source": "FINANCE",
+            "verdict": "PASS",
+            "max_payment_days": 15,
+            "ref_id": "FIN-1",
+        },
+    ]
+    body = client.post("/sales/allocation", json=payload).json()
+    candidate = body["candidates"][0]
+    assert candidate["adjustment_axis"] == "NONE"
+    assert candidate["messages"] == []
+    assert body["missing_capabilities"] == []
 
 
 def test_as_of_must_match_snapshot():
