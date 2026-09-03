@@ -15,6 +15,22 @@
 앞은 *"주말을 밟지 않는 값인가"* 이고 뒤는 *"실제로 안 밟았나"* 다. 앞만 두면
 공휴일을 놓치고, 뒤만 두면 DB 없는 날 아무 검사도 안 돈다.
 
+🔴 **``-m db`` 둘은 기본 스위트에서 안 돈다** (``addopts = "-m 'not llm and not db'"``).
+  *"뒤가 진짜로 잰다"* 고 해 놓고 그 진짜를 아무도 안 돌리면 **있으나 마나**가 된다 —
+  이 파일이 막으려는 바로 그 모양이다 (현서님 지적 2026-09-03).
+
+    언제   **새 ``base_dt`` 가 들어온 날.** 이 검사가 재는 것이 *"판정일 행이
+           복사값인가"* 이고, 그 답은 **배치가 들어올 때만** 바뀐다. 배포 전이나
+           주기(주 1회)로 두면 예측이 안 들어온 날 같은 행을 다시 세고, 들어온
+           날은 놓친다.
+    누가   🔴 **지금은 사람이 손으로 돌린다.** 자동이 아니다.
+
+           DB_SCHEMA=haetdeul uv run pytest -q -m db
+
+  ⚠️ **자동이 아니라는 사실을 감추지 않는다.** 배치 도착을 우리가 감지하지 못하므로
+    (ML 이 알려 주는 것도 우리가 폴링하는 것도 없다), 지금 이 검사는 **누가 기억하는가**
+    에 매달려 있다. 그 약점을 적어 두지 않으면 다음 사람이 *"CI 가 본다"* 로 읽는다.
+
 🔴 **값 비교를 쓰지 않는다** (규칙 8). ``ci_judgment_day == 14`` 로 잠그면 코드가
 같은 상수를 들고 있어도 통과한다 — 아무것도 증명하지 못한다. 여기서는 **선언을 읽어
 그 값으로 판정을 만들고**, 선언을 바꾸면 판정이 따라 바뀐다.
@@ -64,18 +80,6 @@ def test_the_judgment_day_lands_on_the_same_weekday_as_the_base_date() -> None:
     )
 
 
-def test_a_non_multiple_would_fail_this_check() -> None:
-    """🔴 **검사가 실제로 무는지** 본다.
-
-    위 검사가 통과하는 것만으로는 *"14 라서 통과"* 인지 *"무엇이든 통과"* 인지
-    구분되지 않는다. 주기를 벗어난 값이 실제로 걸리는지 여기서 확인한다.
-    """
-    for bad in (10, 11, 13, 18):
-        assert bad % DAYS_IN_WEEK != 0, f"{bad} 이 주기 조건을 통과하면 검사가 헛돈다"
-    for good in (7, 14):
-        assert good % DAYS_IN_WEEK == 0
-
-
 def test_the_horizon_can_actually_reach_the_judgment_day() -> None:
     """판정일이 지평 안에 있어야 한다 — 밖이면 ``judgment_row`` 가 멈춘다.
 
@@ -87,6 +91,67 @@ def test_the_horizon_can_actually_reach_the_judgment_day() -> None:
     assert day <= horizon, (
         f"ci_judgment_day={day} 가 지평 {horizon}일을 넘는다 — 그 줄은 예측에 없다"
     )
+
+
+def _swap_judgment_day(monkeypatch: pytest.MonkeyPatch, day: int) -> None:
+    """**선언만 바꾼다.** 코드는 한 줄도 안 건드리고 판정이 따라 움직이는지 본다.
+
+    ``load_constraints`` 를 이 모듈이 이름으로 들고 있으므로(``from … import``)
+    원본이 아니라 **여기 붙은 이름**을 갈아 끼운다 — 원본을 패치하면 이미 바인딩된
+    이름이 그대로라 안 먹는다.
+
+    ``coverage_days`` 는 그대로 옮긴다. 지평 검사가 같은 dict 를 읽으므로 빠뜨리면
+    *"주기 때문에 울었는지 dict 가 깨져서 울었는지"* 가 구분되지 않는다.
+    """
+    real = load_constraints()
+    swapped = {**real, "situation": {**real["situation"], "ci_judgment_day": day}}
+    monkeypatch.setattr(f"{__name__}.load_constraints", lambda: swapped)
+
+
+@pytest.mark.parametrize(
+    ("day", "check"),
+    [
+        (13, test_the_judgment_day_lands_on_the_same_weekday_as_the_base_date),
+        (21, test_the_horizon_can_actually_reach_the_judgment_day),
+    ],
+    ids=["주기밖_13", "지평밖_21"],
+)
+def test_a_bad_declaration_makes_the_check_cry(
+    monkeypatch: pytest.MonkeyPatch, day: int, check: object
+) -> None:
+    """🔴 **위 검사들이 실제로 무는지** — 선언을 흔들어 본다 (규칙 8).
+
+    두 값이 서로 다른 것을 잡는다. 하나만 두면 나머지 조건이 죽어도 모른다::
+
+        13   주기 밖              → 주기 검사가 운다 (지평 18 안이라 지평은 통과)
+        21   주기 위이지만 지평 밖  → 지평 검사가 운다 (21 % 7 == 0 이라 주기는 통과)
+
+    ⚠️ **전에는 이 검사가 ``bad % 7 != 0`` 이었다** (현서님 리뷰 2026-09-03).
+      파이썬 산술을 단언해서 ``judgment_row`` 를 어떻게 깨뜨려도, ``constraints.yaml``
+      을 어떻게 바꿔도 **절대 안 울었다.** 이름이 ``would_fail_this_check`` 인데
+      **그 검사를 안 불렀다.**
+
+      🔴 **규칙 8 을 피했다고 PR 본문에 적으면서 같은 자리에서 어겼다.** 값 비교를
+        안 쓴다고 해 놓고 상수 대조를 넣었다 — 전제를 단언하려다 **전제 대신 상수를
+        단언**한 것이고, 이 파일이 막으려던 바로 그 모양이다.
+    """
+    _swap_judgment_day(monkeypatch, day)
+    with pytest.raises(AssertionError):
+        check()  # type: ignore[operator]
+
+
+def test_the_declared_value_passes_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**양성 대조** — 지금 선언(14)으로는 둘 다 통과한다.
+
+    위 검사만 두면 *"바꾸면 운다"* 는 알아도 **"안 바꾸면 안 운다"** 를 모른다.
+    두 검사가 무엇을 넣어도 우는 상태여도 위가 초록이기 때문이다.
+
+    ★ ``== 14`` 로 대조하지 않는다 — 선언을 읽어 그대로 다시 넣고, **판정이 서는지**만
+      본다. 선언이 15 로 바뀌면 이 검사가 아니라 위 두 검사가 운다.
+    """
+    _swap_judgment_day(monkeypatch, _judgment_day())
+    test_the_judgment_day_lands_on_the_same_weekday_as_the_base_date()
+    test_the_horizon_can_actually_reach_the_judgment_day()
 
 
 # ── 실제 복사 여부 (-m db) ────────────────────────────────────────────────
