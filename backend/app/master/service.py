@@ -101,6 +101,8 @@ def run_procurement(
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
         prior_feedback=request.prior_feedback,
         approved_commitments=commitments.carried,
+        # ★ 값과 출처를 **떼어 놓지 않는다.** 응답에만 싣던 것을 payload 에도 나른다.
+        input_sources=inputs.sources() if inputs else {},
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)

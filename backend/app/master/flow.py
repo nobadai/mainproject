@@ -266,6 +266,7 @@ class ProcurementFlow:
         confirmed_orders: Mapping[str, Any] | None = None,
         policy_values: Mapping[str, Any] | None = None,
         prior_feedback: Mapping[str, Any] | None = None,
+        input_sources: Mapping[str, str] | None = None,
         approved_commitments: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.runner = runner
@@ -278,6 +279,21 @@ class ProcurementFlow:
         #: 검증이 본 것과 화면이 보는 것이 갈리면 "검증은 통과했는데 근거는 다른 값" 이 된다.
         self.sourced_evidences: list[SourcedEvidence] = []
         #: 부서가 낸 조정안. **마스터는 고르지도 정렬하지도 않는다** - 온 차례 그대로.
+        #: 🔴 **실어 준 값이 어디서 왔는가** (2026-09-03 · 판매 요청 · 매입 A-1).
+        #:
+        #:   마스터는 등급을 안다 — `MEASURED` · `DERIVED` · **`MOCK`** · `MISSING`.
+        #:   그런데 부서에게는 **값만** 보냈다. 응답 `input_sources` 로 화면에는
+        #:   가는데 payload 에는 안 갔다.
+        #:
+        #: ⚠️ **부서가 스스로 조심하는 수밖에 없는 상태**였고, 그건 계약이 아니라
+        #:   습관이다. 매입 `#190` 이 *"`ci_width_threshold` 는 mock 시연값"* 이라
+        #:   적었는데, 정작 매입은 자기가 받은 예측이 mock 인지 payload 로 몰랐다.
+        #:
+        #: ★ **생성자 인자다.** 실행 시작에 정해지고 안 바뀐다 —
+        #:   `forecast`·`confirmed_orders` 와 같은 성격이고, 루프에서 누적되는
+        #:   `suggested_adjustments` 와 다르다 (매입 지적 2026-09-03).
+        self.input_sources: Mapping[str, str] = dict(input_sources or {})
+
         self.suggested_adjustments: list[SuggestedAdjustment] = []
 
         #: 조정안 전달 대조에서 어긋난 것. **정상이면 비어 있다** — 대조군이 조용해야
@@ -596,6 +612,15 @@ class ProcurementFlow:
             payload["confirmed_orders"] = dict(self.confirmed_orders)
         if self.policy_values is not None:
             payload["policy_values"] = dict(self.policy_values)
+        if self.input_sources:
+            # ★ **응답 `input_sources` 와 같은 모양이다** (매입 A-1 답 · ㄴ).
+            #   화면과 payload 가 같은 이름을 써야, 부서가 나중에 화면에서 본 것과
+            #   대조할 때 이름이 안 갈린다.
+            #
+            # ⚠️ **forecast 블록 안에 넣지 않는다.** `_FORECAST_ENVELOPE_KEYS` 는
+            #   *"ML 봉투에서 내려보내는 필드"* 라, ML 이 안 보낸 키를 얹으면 받는
+            #   쪽이 **"ML 이 준 것"** 으로 읽는다 (매입이 ㄱ 을 반대한 이유).
+            payload["input_sources"] = dict(self.input_sources)
         if self.prior_feedback is not None:
             # ★ **사용자의 말 그대로 나른다.** 조건을 숫자로 바꿔 제약에 꽂으면 마스터가
             #   부서 판단을 덮어쓰는 것이 된다 — 해석은 매입이 한다 (§3.2.2).
