@@ -29,10 +29,17 @@ SuggestedAdjustment(dept=…, axis=…, target_value=…, unit=…, reason=…, 
   **지금 물류가 던지는 것이 계약 위반**이 된다. 남의 파트를 깨뜨리지 않는다.
 
 ```text
-지금     안 채워진 사실을 고정한다        ← 이 파일
-채운 뒤   검사를 뒤집는다
-그 뒤    __post_init__ 으로 강제한다      아무도 안 깨진다
+지금     안 채워진 사실을 고정한다        2026-09-03 오전
+채운 뒤   검사를 뒤집는다                 2026-09-03 저녁 · 물류 #214
+그 뒤    __post_init__ 으로 강제한다      같은 판 — 아무도 안 깨졌다
 ```
+
+🟢 **셋이 다 끝났다 (2026-09-03).** 물류가 `#214` 로 두 칸을 채웠고, 같은 판에서
+강제를 걸었다. 이 파일은 이제 *"안 채운다"* 가 아니라 **"채운다"** 를 고정한다.
+
+★ **강제를 미룬 것이 옳았다.** 오전에 걸었으면 물류가 던지는 것이 계약 위반이
+  됐다. 저녁에 거니 전 스위트가 초록불이다 — `04` 문서 §6.1 의 *"선언은 있는데
+  강제가 없다"* 를 **시점을 적어 두는 것**으로 끊은 첫 사례다.
 
 ⚠️ `04` 문서 §6.1 에 *"선언은 있는데 강제가 없다"* 를 반복 패턴으로 적어 뒀다.
 **강제 시점을 미리 적어 두는 것**이 그 반복을 끊는 방법이다.
@@ -45,8 +52,10 @@ from dataclasses import fields
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 import app.master
-from app.contracts.core import SuggestedAdjustment
+from app.contracts.core import ContractViolation, SuggestedAdjustment
 from app.master.answer import _scope
 from app.master.flow import _wire
 
@@ -75,18 +84,20 @@ def _kwargs_of_construction(path: Path) -> tuple[str, ...]:
 # ── ① 지금 상태 (고정) ─────────────────────────────────────────────────────
 
 
-def test_물류는_split_date_를_표준형에_안_싣는다():
-    """🔴 **이 파일의 주장이다.** 채우시면 빨간불이 되어 알려 준다."""
+def test_물류가_split_date_를_싣는다():
+    """🟢 **뒤집힌 검사다** (물류 `#214` · 2026-09-03).
+
+    전에는 *"안 싣는다"* 를 고정했다. 이제는 **싣는 것**을 고정한다 —
+    되돌아가면 여기가 운다.
+    """
     passed = _kwargs_of_construction(_LOGISTICS)
 
-    assert "split_date" not in passed, (
-        "물류가 split_date 를 싣기 시작했다. 🟢 좋은 변화다 — 이 검사를 "
-        "test_물류가_split_date_를_싣는다 로 뒤집고, answer._scope 의 "
-        "'N 회차' 문장이 실제로 뜨는지 확인한다"
+    assert "split_date" in passed, (
+        "물류가 split_date 를 다시 안 싣는다 — 화면의 'N 회차' 문장이 없어진다"
     )
 
 
-def test_물류는_scenario_labels_도_안_싣는다():
+def test_물류가_scenario_labels_도_싣는다():
     """🔴 **빈 칸이 하나가 아니라 둘이다** (물류 지적 2026-09-03).
 
     화면이 **두 칸을 읽는다** (`answer._scope`).
@@ -111,9 +122,9 @@ def test_물류는_scenario_labels_도_안_싣는다():
     """
     passed = _kwargs_of_construction(_LOGISTICS)
 
-    assert "scenario_labels" not in passed, (
-        "물류가 scenario_labels 를 싣기 시작했다. 🟢 좋은 변화다 — 이 검사와 "
-        "test_물류는_split_date_를_표준형에_안_싣는다 를 같이 뒤집는다"
+    assert "scenario_labels" in passed, (
+        "물류가 scenario_labels 를 다시 안 싣는다 — 같은 조정이 세 안에서 나와도 "
+        "화면에 안이 하나만 보인다"
     )
 
 
@@ -170,11 +181,14 @@ def test_화면이_그_값을_이미_읽는다():
         ref_ids=("REF-1",),
         split_date=date(2026, 1, 5),
     )
+    # ⚠️ **대조군은 재무 `amount` 다.** timing 은 이제 계약이 회차를 강제해서
+    #   split_date 없이 세울 수 없다. 회차 개념이 없는 축이 그 자리를 대신한다 —
+    #   재는 것은 그대로다: **값이 없으면 문장을 안 만든다.**
     without = SuggestedAdjustment(
-        dept="inventory",
-        axis="timing",
+        dept="finance",
+        axis="amount",
         target_value=3.0,
-        unit="d",
+        unit="krw",
         reason="사유",
         ref_ids=("REF-1",),
     )
@@ -195,6 +209,7 @@ def test_화면이_라벨도_이미_읽는다():
         reason="사유",
         ref_ids=("REF-1",),
         scenario_labels=("보수", "기본"),
+        split_date=date(2026, 1, 5),
     )
 
     assert "보수·기본안" in _scope(with_labels)
@@ -225,22 +240,45 @@ def test_채우면_전선에서_안_터진다():
 # ── ③ 강제는 아직 안 한다 (시점을 못 박는다) ────────────────────────────────
 
 
-def test_아직_timing_에_split_date_를_강제하지_않는다():
-    """⚠️ **강제하면 지금 물류가 던지는 것이 계약 위반이 된다.**
+def test_timing_에_split_date_를_강제한다():
+    """🟢 **미뤄 뒀던 3단계다** (2026-09-03 저녁).
 
-    남의 파트를 깨뜨리지 않는다. 물류가 채운 뒤에 강제하면 아무도 안 깨진다.
+    물류가 `#214` 로 채운 뒤에 걸었더니 **아무도 안 깨졌다.**
+    오전에 걸었으면 물류가 던지는 것이 계약 위반이 됐다.
 
-    🔴 **그 시점을 여기 못 박는다.** `04` 문서 §6.1 의 *"선언은 있는데 강제가
-      없다"* 가 세 번 반복된 패턴이라, **언제 강제할지를 적어 두는 것**으로 끊는다.
+    ★ **`None` 의 두 뜻이 하나가 된다.**
+
+    ```text
+    이제      timing 이면 회차가 반드시 있다
+    그래서    화면의 None 은 "회차 개념이 없는 축" 하나만 뜻한다
+    ```
     """
-    SuggestedAdjustment(
-        dept="inventory",
-        axis="timing",
-        target_value=3.0,
-        unit="d",
-        reason="사유",
-        ref_ids=("REF-1",),
-    )  # split_date 없이도 지금은 선다 — 강제가 붙으면 여기가 터진다
+    with pytest.raises(ContractViolation, match="split_date"):
+        SuggestedAdjustment(
+            dept="inventory",
+            axis="timing",
+            target_value=3.0,
+            unit="d",
+            reason="사유",
+            ref_ids=("REF-1",),
+        )
+
+
+def test_회차_개념이_없는_축은_그대로_None_이다():
+    """⚠️ **강제가 재무를 안 문다.** `amount` 는 회차가 없는 것이 정상이다.
+
+    여기가 빨간불이면 강제를 너무 넓게 건 것이다.
+    """
+    adjustment = SuggestedAdjustment(
+        dept="finance",
+        axis="amount",
+        target_value=20_000_000.0,
+        unit="krw",
+        reason="한도",
+        ref_ids=("REF-F-1",),
+    )
+
+    assert adjustment.split_date is None
 
 
 def test_칸_자체는_계약에_있다():

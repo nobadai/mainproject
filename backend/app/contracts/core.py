@@ -447,6 +447,19 @@ class SuggestedAdjustment:
             )
         if not self.ref_ids:
             raise ContractViolation("suggested_adjustment 에도 ref_ids 필수 (§1.2-5).")
+        if self.axis == "timing" and self.split_date is None:
+            # 🔴 **`None` 이 두 뜻이던 것을 하나로 만든다** (2026-09-03).
+            #
+            #   재무 amount    회차 개념이 없다        → None 이 정상
+            #   물류 timing    회차가 있는데 안 실었다 → None 이 누락
+            #
+            #   화면(`master/answer.py`)이 둘을 같게 봐서 *"N 회차"* 가 한 번도 안 떴다.
+            #   물류가 채운 지금(#214) 강제해도 아무도 안 깨진다 — timing 을 내는 곳은
+            #   `logistics/scenario_engine.py:139` 하나다.
+            raise ContractViolation(
+                "timing 조정은 어느 회차인지 밝혀야 한다 — split_date 필수. "
+                "회차 개념이 없는 축은 timing 이 아니다."
+            )
 
 
 # ---------------------------------------------------------------------------
