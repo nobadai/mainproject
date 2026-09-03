@@ -51,6 +51,12 @@ def _payload(**overrides):
             "source_ref": "INV-LOT:L-1",
             "evidence_grade": "OFFICIAL",
         },
+        # 전부 확정된 제안이다. 조건부 0 은 **명시된 사실**이라 마진을 낼 수 있다 —
+        # 공급을 아예 안 보내는 경우(모름)와 다르다.
+        "supply": {
+            "confirmed_quantity_kg": Decimal(100),
+            "conditional_quantity_kg": Decimal(0),
+        },
         # Sales 가 Finance 와 무관한 키를 더 실어 보내도 통과해야 한다.
         "objective": "MAXIMIZE_MARGIN",
         "adjustment_axes": ["channel_mix"],
@@ -523,3 +529,61 @@ def test_zero_overdue_is_a_fact_distinct_from_unknown_overdue():
     assert unknown.financial_summary is not None
     assert known_zero.financial_summary.overdue_ar_krw == Decimal(0)
     assert unknown.financial_summary.overdue_ar_krw is None
+
+
+def test_unknown_conditional_supply_does_not_cover_the_whole_proposal():
+    """🔴 조건부 칸이 비어 있으면 '조건부 0' 이 아니라 '모름' 이다.
+
+    모르는 채로 확정 재고원가를 제안 전체에 씌우면 역마진이 마진처럼 보인다.
+    확정 물량은 그대로 받되(정보를 잃지 않는다), 마진은 fail closed 한다.
+    """
+    result = _evaluate(_payload(supply={"confirmed_quantity_kg": Decimal(60)}))
+    summary = result.financial_summary
+
+    assert summary is not None
+    assert summary.contribution_margin_krw is None
+    assert summary.sales_cost_basis_krw is None
+    assert "sales_supply_conditional_quantity" in result.missing_data
+
+
+def test_explicit_zero_conditional_supply_still_computes_margin():
+    """0 은 사실이다 — '조건부 물량 없음' 을 명시하면 마진을 낸다."""
+    result = _evaluate(
+        _payload(
+            supply={
+                "confirmed_quantity_kg": Decimal(100),
+                "conditional_quantity_kg": Decimal(0),
+            }
+        )
+    )
+    summary = result.financial_summary
+
+    assert summary is not None
+    assert summary.contribution_margin_krw == Decimal(300_000)
+    assert "sales_supply_conditional_quantity" not in result.missing_data
+
+
+def test_absent_supply_is_unknown_not_zero_conditional():
+    """🔴 공급을 못 받은 것은 **모름**이지 '조건부 공급 없음' 이 아니다.
+
+    예전에는 여기서 조건부 0 으로 읽어, 확정 재고원가가 제안 전체를 덮는 것을 막는
+    방어가 통째로 풀렸다. 모르면 그 판단을 할 수 없다 — fail closed.
+    """
+    result = _evaluate(_payload(supply=_ABSENT))
+    summary = result.financial_summary
+
+    assert summary is not None
+    assert summary.contribution_margin_krw is None
+    assert summary.sales_cost_basis_krw is None
+    assert "sales_supply_context" in result.missing_data
+
+
+def test_absent_supply_does_not_block_rules_that_do_not_need_it():
+    """공급이 없다고 공급과 무관한 사실까지 못 내지는 않는다."""
+    result = _evaluate(_payload(supply=_ABSENT))
+    summary = result.financial_summary
+
+    assert summary is not None
+    # 금액 정합성은 공급과 무관하게 계산된다.
+    assert summary.recalculated_sales_amount_krw == Decimal(1_000_000)
+    assert summary.amount_match is True

@@ -113,7 +113,7 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
 
 
 def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
-    quantity, price, delivery, payment, term, refs = _baseline(request)
+    quantity, price, delivery, payment, terms_type, term, source_ref, refs = _baseline(request)
     if quantity is None:
         return []
     result: list[SalesScenario] = []
@@ -134,12 +134,13 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             collapsed = True
             collapse_reason = "CONFIRMED_SUPPLY_LIMIT_NOT_PROVIDED"
         scenario_id, parent, revision = _scenario_lineage(suffix, request)
-        supply = _supply(scenario_quantity, confirmed)
-        validations = _required_validations(request, supply, parent or scenario_id, delivery)
         replies = _replies_for_scenario(request, parent or scenario_id)
         # 조건부 Purchase 회신은 확정 공급안을 오염시키지 않는다.
         if scenario_type != "AGGRESSIVE":
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
+        # 조건부 수량은 회신에서 나오므로 회신을 먼저 고른 뒤 공급을 세운다.
+        supply = _supply(scenario_quantity, confirmed, replies)
+        validations = _required_validations(request, supply, parent or scenario_id, delivery)
         risks, uncertainties, conditional = _feedback_effects(replies)
         uncertainties.extend(supply_uncertainties)
         if price is None:
@@ -164,7 +165,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 sales_amount_krw=scenario_quantity * price if price is not None else None,
                 delivery_date=delivery,
                 payment_days=payment,
+                payment_terms_type=terms_type,
                 contract_term_days=term,
+                source_ref=source_ref,
                 supply=supply,
                 sales_decision_axes=axes,
                 required_validations=validations,
@@ -183,6 +186,25 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
     return result
 
 
+#: 사용자가 이 중 하나라도 명시하면 **사용자 제안**으로 본다 (갱신 override 판정).
+_RENEWAL_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "requested_quantity_kg",
+    "preferred_unit_price_krw",
+    "preferred_delivery_date",
+    "preferred_payment_days",
+    "preferred_payment_terms_type",
+    "preferred_contract_term_days",
+)
+
+
+def _user_overrides_contract(request: SalesProposalInput) -> bool:
+    """갱신 제안에서 사용자가 상업조건을 실제로 바꿨는가."""
+    return any(
+        getattr(request.user_request, field) is not None
+        for field in _RENEWAL_OVERRIDE_FIELDS
+    )
+
+
 def _baseline(request: SalesProposalInput):
     contract = request.contract_context
     user = request.user_request
@@ -191,21 +213,34 @@ def _baseline(request: SalesProposalInput):
         price = contract.contract_unit_price_krw
         delivery = contract.contract_delivery_date
         payment = contract.contract_payment_days
+        terms_type = contract.contract_payment_terms_type
         term = contract.contract_term_days
+        # 계약 이행은 계약이 상업조건의 직접 출발점이다.
+        source_ref = contract.source_ref
     else:
         quantity = user.requested_quantity_kg
         price = user.preferred_unit_price_krw
         delivery = user.preferred_delivery_date
         payment = user.preferred_payment_days
+        terms_type = user.preferred_payment_terms_type
         term = user.preferred_contract_term_days
+        source_ref = user.source_ref
         if request.business_mode == "CONTRACT_PROPOSAL_RENEWAL" and contract:
             quantity = quantity if quantity is not None else contract.contract_quantity_kg
             price = price if price is not None else contract.contract_unit_price_krw
             delivery = delivery if delivery is not None else contract.contract_delivery_date
             payment = payment if payment is not None else contract.contract_payment_days
+            terms_type = (
+                terms_type if terms_type is not None else contract.contract_payment_terms_type
+            )
             term = term if term is not None else contract.contract_term_days
+            # ★ 사용자가 조건을 바꿨으면 **계약 ref 를 그 변경안의 출처로 쓰지 않는다.**
+            #   바꾼 사람은 사용자인데 계약을 근거로 달면 누가 정한 조건인지 뒤바뀐다.
+            #   사용자 ref 가 없으면 없는 채로 둔다 — 발명하지 않는다.
+            if not _user_overrides_contract(request):
+                source_ref = contract.source_ref
     refs = [contract.source_ref] if contract and contract.source_ref else []
-    return quantity, price, delivery, payment, term, refs
+    return quantity, price, delivery, payment, terms_type, term, source_ref, refs
 
 
 def resolve_applicable_confirmed_supply(
@@ -237,14 +272,48 @@ def resolve_applicable_confirmed_supply(
     return None, ["CURRENT_SELLABLE_SUPPLY_UNRESOLVED"]
 
 
-def _supply(quantity: Decimal, confirmed: Decimal | None) -> ScenarioSupply:
+def _supply(
+    quantity: Decimal,
+    confirmed: Decimal | None,
+    replies: list[SalesDomainReply] | None = None,
+) -> ScenarioSupply:
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
+    conditional, dependency_ref = _purchase_conditional_supply(replies or [])
     return ScenarioSupply(
         confirmed_quantity_kg=confirmed,
         required_additional_quantity_kg=required,
         additional_supply_required=required is not None and required > 0,
+        # ★ 확정 공급에 더하지 않는다. 조건부는 조건부 자리에만 산다.
+        conditional_quantity_kg=conditional,
+        dependency_ref=dependency_ref,
     )
+
+
+def _purchase_conditional_supply(
+    replies: list[SalesDomainReply],
+) -> tuple[Decimal | None, str | None]:
+    """Purchase 가 **실제로 확인해 준** 조건부 확보 가능량만 옮긴다.
+
+    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다 —
+      missing 으로 바꾸지 않는다.
+
+    ★ 못 돈 회신(skipped·RUNTIME_NOT_READY)이나 수량이 아예 없는 회신은 `None`(모름)
+      이다. 0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
+
+    ★ 수량과 근거를 같이 나른다. 수량만 남고 어느 회신에서 왔는지 사라지면 나중에
+      되짚을 수 없다.
+    """
+    for reply in replies:
+        if reply.source_agent != "purchase":
+            continue
+        if reply.runtime_status != "READY":
+            continue
+        quantity = reply.payload.get("procurable_quantity_kg")
+        if isinstance(quantity, bool) or not isinstance(quantity, (int, float, Decimal)):
+            continue
+        return Decimal(str(quantity)), reply.reply_ref
+    return None, None
 
 
 def _required_validations(

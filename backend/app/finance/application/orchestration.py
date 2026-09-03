@@ -90,7 +90,7 @@ def build_business_result(
     if request.mode == "SALES_VALIDATION":
         # ★ 매입 분기로 흘려보내지 않는다. 흘려보내면 아래 PRE_PURCHASE 조립이
         #   판정과 무관하게 `"ok"` 를 내놓는다 — 재무가 보지도 않은 제안이 통과된다.
-        return _sales_business_result(states)
+        return _sales_business_result(request, states)
     if request.mode == "SCENARIO_VALIDATION":
         results = [scenario_result(state) for state in states]
         verdicts = [result["verdict"] for result in results]
@@ -152,38 +152,102 @@ def _lift_sales_runtime_status(
 
     ★ `INPUT_INCOMPLETE` 은 올리지 않는다. 제안에 사실이 빠진 것은 **재무 고장이
       아니므로** runtime 은 `READY` 로 두고 업무 상태만 `skipped` 다.
+
+    ★ batch 에서는 **모든 안이** RUNTIME_NOT_READY 일 때만 올린다. 재무 정책은 안마다
+      다르지 않으므로 보통 전부 같이 막히지만, 일부만 막힌 상태를 통째로
+      RUNTIME_NOT_READY 로 올리면 실제로 판정된 안의 결과까지 "못 봤다" 로 덮인다.
+      섞인 경우는 안별 `status` 가 사실을 나르고 top-level 은 `skipped` 로 남는다.
     """
     if request.mode != "SALES_VALIDATION" or outcome.runtime_status != "READY":
         return
-    if payload.get("status") != "RUNTIME_NOT_READY":
-        return
+    results = payload.get("scenario_results")
+    if isinstance(results, list):
+        if not results or not all(
+            isinstance(item, dict) and item.get("status") == "RUNTIME_NOT_READY"
+            for item in results
+        ):
+            return
+        missing: tuple[str, ...] = tuple(
+            name
+            for item in results
+            for name in (item.get("missing_data") or ())
+            if isinstance(name, str)
+        )
+    else:
+        if payload.get("status") != "RUNTIME_NOT_READY":
+            return
+        missing = tuple(payload.get("missing_data") or ())
     outcome.runtime_status = "RUNTIME_NOT_READY"
     outcome.failure_kind = "NOT_READY"
-    missing = payload.get("missing_data") or ()
     outcome.missing_data = tuple(dict.fromkeys((*outcome.missing_data, *missing)))
 
 
+def _sales_branch_payload(state: FinanceAgentState) -> dict[str, Any]:
+    """한 분기가 낸 자기 완결적 판매 검증 결과."""
+    payload: dict[str, Any] = {}
+    for observation in state.observations:
+        result = observation.get("result", {})
+        if result.get("status") is not None:
+            payload = _json_value(dict(result))
+    return payload
+
+
 def _sales_business_result(
-    states: list[FinanceAgentState],
+    request: AgentRequest, states: list[FinanceAgentState]
 ) -> tuple[dict[str, Any], list[Evidence], str, list[SuggestedAdjustment]]:
     """판매 검증 Tool 이 낸 payload 를 그대로 회신 payload 로 쓴다.
 
     ★ 다시 조립하지 않는다. 그 payload 는 이미 Refeed 를 견디도록 자기 완결적으로
       만들어졌다 — 여기서 골라 담으면 그 순간 근거가 잘려 나간다.
 
+    ★ **단일과 batch 의 모양을 섞지 않는다.** `scenarios` 로 들어온 요청만
+      `scenario_results` 로 나간다. 단일 요청은 예전 모양 그대로다.
+
     ★ 조정안을 만들지 않는다. 재무의 조정 축은 `amount` 하나인데, 판매 제안에 대한
       권위 있는 금액 대안을 낼 근거(마진·여신 정책)가 아직 없다. 없는 근거로 조정을
       제안하지 않는다.
     """
-    payload: dict[str, Any] = {}
-    for state in states:
-        for observation in state.observations:
-            result = observation.get("result", {})
-            if result.get("status") is not None:
-                payload = _json_value(dict(result))
-    if not payload:
+    if "scenarios" not in request.payload:
+        payload = _sales_branch_payload(states[0]) if states else {}
+        if not payload:
+            return {}, [], "skipped", []
+        return payload, [], sales_business_status(payload), []
+
+    results = [_sales_branch_payload(state) for state in states]
+    if not any(results):
         return {}, [], "skipped", []
-    return payload, [], sales_business_status(payload), []
+    return (
+        {"scenario_results": results},
+        [],
+        aggregate_sales_business_status(results),
+        [],
+    )
+
+
+def aggregate_sales_business_status(results: list[dict[str, Any]]) -> str:
+    """안별 재무 판정을 **재무 안에서** 하나로 모은다.
+
+    ★ 마스터가 안별 판정을 다시 계산하지 않게 하려고 여기서 끝낸다.
+
+    규칙 — 판정된 것만 모으고, 판정 못 한 것을 판정으로 바꾸지 않는다.
+
+        하나라도 reject            → reject
+        아니고 하나라도 conditional → conditional
+        전부 판정됐고 전부 ok       → ok
+        그 밖(판정 못 한 안이 섞임) → skipped
+
+    ★ 마지막 줄이 핵심이다. 한 안이 `INPUT_INCOMPLETE`/`RUNTIME_NOT_READY` 인데
+      나머지가 통과했다고 top-level 을 `ok` 로 내면, **보지 않은 안이 통과한 것으로**
+      읽힌다. reject 는 그대로 우선한다 — 실제로 막힌 안은 막힌 것이다.
+    """
+    statuses = [sales_business_status(result) for result in results]
+    if "reject" in statuses:
+        return "reject"
+    if "conditional" in statuses:
+        return "conditional"
+    if statuses and all(status == "ok" for status in statuses):
+        return "ok"
+    return "skipped"
 
 
 def _branch_scenario_labels(state: FinanceAgentState) -> list[str]:
@@ -285,6 +349,8 @@ _TERMINAL_DENIALS = frozenset({DUPLICATE_UNRESOLVED_TOOL_CALL, TOOL_BUDGET_EXHAU
 
 
 def branch_requests(request: AgentRequest) -> list[AgentRequest]:
+    if request.mode == "SALES_VALIDATION":
+        return _sales_branches(request)
     if request.mode != "SCENARIO_VALIDATION":
         return [request]
     scenarios = request.payload.get("scenarios")
@@ -299,6 +365,33 @@ def branch_requests(request: AgentRequest) -> list[AgentRequest]:
         payload = dict(scenario)
         payload["scenario_id"] = _scenario_identity(payload)
         branches.append(replace(request, payload=payload))
+    return branches
+
+
+def _sales_branches(request: AgentRequest) -> list[AgentRequest]:
+    """판매 제안 1~3안을 분기로 나눈다.
+
+    ★ 매입 분기 규칙을 그대로 쓰지 않는다. 매입은 `label` 을 식별자로 대신 쓰고
+      `total_amount_krw` 를 요구하는데, 그건 매입 계약이다 — 판매 payload 에 억지로
+      끼우면 판매 제안이 매입 모양이어야 하는 것처럼 굳는다.
+
+    ★ 단일 payload(= `scenarios` 키 없음)는 **손대지 않고 그대로** 한 분기로 둔다.
+      기존 단일 경로가 batch 도입 때문에 달라지지 않는다.
+
+    ★ `scenario_id` 가 없어도 여기서 만들어 주지 않는다. 그건 업무 사실이 빠진 것이라
+      분기 안에서 `INPUT_INCOMPLETE` 로 드러나야 한다 — 여기서 번호를 붙이면 재무가
+      식별자를 발명한 셈이 된다.
+    """
+    scenarios = request.payload.get("scenarios")
+    if scenarios is None:
+        return [request]
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        raise ValueError("SALES_VALIDATION requires one to three scenarios")
+    branches: list[AgentRequest] = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise TypeError("each Sales scenario must be an object")
+        branches.append(replace(request, payload=dict(scenario)))
     return branches
 
 

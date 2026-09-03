@@ -27,6 +27,15 @@ SalesBusinessMode = Literal[
     "SPOT_SALES",
 ]
 
+#: 결제방식. **Sales 가 소비하는 사용자·계약 사실이지 재무가 추론하는 값이 아니다.**
+#:
+#: ★ Sales-local 어휘로 둔다. 재무 실행계층 타입을 import 하면 두 Agent 가 실행
+#:   계층에서 붙는다 — 마스터가 중개할 자리가 사라진다.
+#:
+#: 🔴 `payment_days` 가 있다는 이유로 `SINGLE` 을 만들지 않는다. 결제일수는 *언제*
+#:   받는지이고 결제방식은 *몇 번에 나눠* 받는지다 — 하나에서 다른 하나가 따라오지 않는다.
+SalesPaymentTermsType = Literal["SINGLE", "INSTALLMENT"]
+
 
 def _reject_boolean(value: object) -> object:
     """bool을 숫자 입력으로 위장해 들어오는 것을 막는다."""
@@ -517,7 +526,12 @@ class SalesUserRequest(BaseModel):
     preferred_unit_price_krw: Decimal | None = Field(default=None, ge=0)
     preferred_delivery_date: date | None = None
     preferred_payment_days: int | None = Field(default=None, ge=0)
+    #: None 은 "사용자가 결제방식을 말하지 않았다" 이지 SINGLE 이 아니다.
+    preferred_payment_terms_type: SalesPaymentTermsType | None = None
     preferred_contract_term_days: int | None = Field(default=None, ge=0)
+    #: 이 요청 자체의 권위 있는 출처 ref. 마스터가 구조화된 사용자 요청을 넘길 때
+    #: 채우는 자리이며, 독립 실행에서는 없다(None).
+    source_ref: str | None = None
 
     @field_validator(
         "requested_quantity_kg",
@@ -543,6 +557,8 @@ class SalesContractContext(BaseModel):
     contract_unit_price_krw: Decimal | None = Field(default=None, ge=0)
     contract_delivery_date: date | None = None
     contract_payment_days: int | None = Field(default=None, ge=0)
+    #: 계약 원문이 정한 결제방식. Context 가 주지 않으면 None 이다.
+    contract_payment_terms_type: SalesPaymentTermsType | None = None
     contract_term_days: int | None = Field(default=None, ge=0)
     source_ref: str | None = None
 
@@ -704,10 +720,30 @@ class SalesProposalInput(BaseModel):
 
 
 class ScenarioSupply(BaseModel):
+    """세 수량은 **서로 다른 사실**이다. 섞거나 합산하지 않는다.
+
+        confirmed_quantity_kg          Logistics 가 확정한 판매 가능 수량
+        required_additional_quantity_kg Sales 가 계산한 부족량 (필요한 양)
+        conditional_quantity_kg        Purchase 가 조건부 확보 가능하다고 확인한 수량
+
+    🔴 '필요한 양' 은 '확보 가능한 양' 이 아니다. 앞의 것을 뒤의 칸에 넣으면 아직
+       아무도 확보해 주지 않은 수량이 확보된 것처럼 읽힌다.
+    """
+
     model_config = ConfigDict(extra="forbid")
     confirmed_quantity_kg: Decimal | None = Field(default=None, ge=0)
     required_additional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     additional_supply_required: bool = False
+    #: Purchase 가 **실제로 확인해 준** 조건부 확보 가능량.
+    #: None = 모름(검증 전·미실행·수량 미제공), 0 = 확보 가능량이 0으로 확인됨.
+    conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    #: 위 조건부 수량을 만든 원본 Purchase 회신 ref. 수량과 근거가 같이 다닌다.
+    dependency_ref: str | None = None
+
+    @field_validator("conditional_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_conditional(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
 class SalesScenario(BaseModel):
@@ -727,7 +763,15 @@ class SalesScenario(BaseModel):
     sales_amount_krw: Decimal | None = Field(default=None, ge=0)
     delivery_date: date | None = None
     payment_days: int | None = Field(default=None, ge=0)
+    #: 결제방식. 사용자/계약이 말해 준 경우에만 값이 있고, 아니면 None 이다.
+    payment_terms_type: SalesPaymentTermsType | None = None
     contract_term_days: int | None = Field(default=None, ge=0)
+    #: 이 Scenario 의 **상업조건이 출발한 직접 authoritative source** 하나.
+    #:
+    #: ★ `evidence_refs` 와 역할이 다르다. 저쪽은 Logistics·계약·ML·Domain 회신까지
+    #:   포함한 전체 보조 근거 계보이고, 이쪽은 "이 조건을 누가 정했나" 한 곳이다.
+    #:   그래서 `evidence_refs[0]` 같은 위치 기반 선택으로 만들지 않는다.
+    source_ref: str | None = None
     supply: ScenarioSupply
     sales_decision_axes: list[str] = Field(default_factory=list)
     required_validations: list[SalesCapability] = Field(default_factory=list)
