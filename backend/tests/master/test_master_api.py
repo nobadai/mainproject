@@ -308,3 +308,54 @@ def test_예측을_요청에_실으면_매입에_전달된다(client):
     assert r.status_code == 200
     assert seen["forecast"]["horizon_days"] == 18
     assert seen["policy_values"]["contract_price_krw"] == 1900
+
+
+# ---------------------------------------------------------------------------
+# 약정 조회 실패가 응답에 남는가 (#185 후속)
+# ---------------------------------------------------------------------------
+
+
+def test_약정을_못_읽으면_응답_concerns_에_남는다(client, monkeypatch):
+    """🔴 **만드는 쪽만 재고 나르는 쪽을 안 재면 여기서 끊긴다.**
+
+    `_approved_commitments` 가 concern 을 만들어도 `run_procurement` 이 응답에
+    안 붙이면 화면까지 안 온다. `test_feedback_wiring` 이 정확히 그 모양으로
+    뚫려 있었다 (`06` 문서 §7.1).
+    """
+    wire_all()
+
+    def boom(item, as_of, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("app.master.service.commitments_before", boom)
+
+    data = client.post("/master/request", json=body(item="피마늘")).json()
+
+    assert any("못 읽었다" in c for c in data["concerns"]), (
+        f"조회 실패가 응답까지 안 왔다: {data['concerns']}"
+    )
+
+
+def test_약정을_못_읽어도_실행은_끝까지_돈다(client, monkeypatch):
+    """이력이 없는 것보다 결과를 못 주는 것이 나쁘다 (`try_save_run` 과 같은 규약)."""
+    wire_all()
+
+    def boom(item, as_of, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("app.master.service.commitments_before", boom)
+
+    r = client.post("/master/request", json=body(item="피마늘"))
+
+    assert r.status_code == 200
+    assert r.json()["end_code"] != "E4_NOT_STARTED", "조회 실패가 실행을 막았다"
+
+
+def test_약정_조회가_되면_concern_이_안_붙는다(client, monkeypatch):
+    """대조군. 없으면 위 둘이 **항상 concern 을 내는 코드**로도 통과한다."""
+    wire_all()
+    monkeypatch.setattr("app.master.service.commitments_before", lambda item, as_of, **kw: [])
+
+    data = client.post("/master/request", json=body(item="피마늘")).json()
+
+    assert not any("못 읽었다" in c for c in data["concerns"]), data["concerns"]

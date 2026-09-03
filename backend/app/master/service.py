@@ -6,12 +6,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.master import persistence, wiring
 from app.master.answer import facts_from_procurement, render_answer
 from app.master.budget import CallBudget
+from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
@@ -34,6 +37,8 @@ from app.master.schemas import (
     StepOut,
 )
 from app.master.verifier import MasterVerifier
+
+logger = logging.getLogger(__name__)
 
 
 def make_request_id(as_of: str, seq: int = 1) -> str:
@@ -85,6 +90,7 @@ def run_procurement(
         return response
 
     inputs = _inputs_for(request)
+    commitments = _approved_commitments(request)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
         runner,
@@ -94,7 +100,7 @@ def run_procurement(
         confirmed_orders=request.confirmed_orders or _payload(inputs, "confirmed_orders"),
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
         prior_feedback=request.prior_feedback,
-        approved_commitments=_approved_commitments(request),
+        approved_commitments=commitments.carried,
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
@@ -102,6 +108,9 @@ def run_procurement(
         *response.concerns,
         *_decision_collision(request_id),
         *_evidence_contract_concerns(outcome),
+        # ★ 약정을 못 읽었거나 못 실은 사실 (#185 후속). 재호출로 안 고쳐지므로
+        #   findings 가 아니라 concerns 다.
+        *commitments.concerns,
     ]
     response.report_text = render_answer(facts_from_procurement(response))
     # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
@@ -192,26 +201,80 @@ def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
         return None
 
 
-def _approved_commitments(request: ProcurementRunRequest) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _CommitmentLookup:
+    """어제까지의 약정 조회 결과. **실은 것과 못 실은 이유를 같이 든다** (#185 후속).
+
+    🔴 전에는 `list[dict]` 하나였다. 그래서 **셋이 전부 빈 목록**이었다.
+
+    ```text
+    승인이 없었다        정상
+    조회가 깨졌다        사고
+    승인은 있는데 못 만들었다  사고
+    ```
+
+    받는 쪽에서 셋이 구별되지 않으면 *"어제 승인이 없었나 보다"* 로 읽힌다.
+    §1.2-10 의 **0 과 모름은 다르다**가 그대로 걸리는 자리다.
+    """
+
+    carried: list[dict[str, Any]] = field(default_factory=list)
+    concerns: tuple[str, ...] = ()
+
+
+def _approved_commitments(request: ProcurementRunRequest) -> _CommitmentLookup:
     """어제까지 승인된 확정 입고 약정 (#185).
 
-    🔴 **못 읽는 것을 없는 것으로 만들지 않는다.** 조회가 깨지면 빈 목록이 아니라
-      예외가 올라가야 하는데, 이력 DB 는 없어도 Flow 가 도는 것이 계약이라
-      (`history_enabled`) 여기서는 조용히 비운다. **그 사실이 응답에 남는 자리가
-      아직 없다** — `#185` 후속으로 둔다.
+    🔴 **못 읽는 것을 없는 것으로 만들지 않는다.** 이력 DB 는 없어도 Flow 가 도는
+      것이 계약이라(`history_enabled`) 예외를 올리지는 않는다. 대신 **못 읽었다는
+      사실을 `concerns` 로 응답에 남긴다** — 조용히 비우면 어제 승인이 없었던 것과
+      같아진다.
+
+    ★ **재호출로 안 고쳐지므로 `findings` 가 아니다.** 매입을 몇 번 다시 불러도
+      DB 가 안 읽히는 사실은 그대로다. 사람이 볼 것이지 재시도할 것이 아니다.
 
     ★ 품목이 없으면 묻지 않는다. 약정은 품목별이라 물을 대상이 없다.
     """
     if not request.item:
-        return []
+        return _CommitmentLookup()
     try:
-        return [
-            c.model_dump(mode="json")
-            for c in commitments_before(request.item, request.as_of)
-            if c.buildable
-        ]
-    except Exception:  # noqa: BLE001 — 이력 조회 실패가 매입 실행을 막지 않는다
-        return []
+        found = commitments_before(request.item, request.as_of)
+    except Exception as exc:
+        # ★ 이력 조회 실패가 매입 실행을 막지 않는다. 다만 조용히 넘어가지도 않는다.
+        logger.exception("어제까지의 승인 약정 조회 실패 - 실행은 그대로 돈다")
+        note = (
+            f"어제까지 승인된 확정 입고 약정을 못 읽었다 (조회 실패: {type(exc).__name__})"
+            " - 이번 실행은 어제 승인분을 모른 채 돌았다. '승인이 없었다' 와 다르다."
+        )
+        return _CommitmentLookup(concerns=(note,))
+    return _CommitmentLookup(
+        [c.model_dump(mode="json") for c in found if c.buildable],
+        tuple(_commitment_gap(c) for c in found if _commitment_gap(c)),
+    )
+
+
+def _commitment_gap(commitment: CommitmentOut) -> str:
+    """이 약정이 **온전히 실렸는가.** 아니면 그 사유. 온전하면 빈 문자열이다.
+
+    🔴 **두 갈래를 다 본다.**
+
+    ```text
+    buildable=False              아예 안 실린다
+    buildable + 빈 arrival_schedule  실리는데 도착 일정이 없다
+    ```
+
+      뒤가 더 위험하다 - 물류가 받기는 받고 **"입고 예정이 없다"** 로 읽는다.
+      `CommitmentOut.notes` 가 그 사유를 이미 들고 있는데 아무도 안 봤다.
+    """
+    label = commitment.approval_id or commitment.scenario_label or "승인분"
+    if not commitment.buildable:
+        return (
+            f"{label}: 어제 승인된 매입의 약정을 못 만들어 경계 호출에 안 실었다"
+            f" - {commitment.reason}"
+        )
+    if not commitment.arrival_schedule:
+        note = " / ".join(commitment.notes) or "사유 없음"
+        return f"{label}: 약정은 섰는데 도착 일정이 비었다 - {note}"
+    return ""
 
 
 def _payload(inputs: MasterInputs | None, key: str):
