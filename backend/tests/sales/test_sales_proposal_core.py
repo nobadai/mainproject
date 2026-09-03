@@ -1,3 +1,4 @@
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,10 +14,17 @@ def _request(**overrides):
             "item": "배추",
             "requested_quantity_kg": 5000,
             "preferred_unit_price_krw": 2000,
+            "preferred_delivery_date": "2026-09-10",
         },
         "logistics_context": {
             "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 3000},
-            "sellable_supply_status": "READY",
+            "sellable_supply": {
+                "status": "READY",
+                "inventory_by_item": [{"item": "배추", "available_qty_kg": 3000}],
+                "supply_capacity_by_date": [
+                    {"date": "2026-09-10", "confirmed_sellable_quantity_kg": 3000}
+                ],
+            },
             "delivery_feasibility": {
                 "status": "UNRESOLVED",
                 "daily_outbound_capacity_kg": 5000,
@@ -26,6 +34,28 @@ def _request(**overrides):
     }
     data.update(overrides)
     return SalesProposalInput.model_validate(data)
+
+
+def _forecast(item="배추"):
+    as_of = date(2026, 9, 1)
+    return {
+        "as_of": as_of.isoformat(),
+        "item": item,
+        "target_kind": "AUC",
+        "unit": "원/kg",
+        "current_price": 9999,
+        "horizon_days": 1,
+        "model_version": "test",
+        "generated_at": datetime(2026, 9, 1, tzinfo=UTC).isoformat(),
+        "daily": [
+            {
+                "date": (as_of + timedelta(days=1)).isoformat(),
+                "predicted": 9999,
+                "lower": 9000,
+                "upper": 11000,
+            }
+        ],
+    }
 
 
 def test_final_core_generates_three_typed_scenarios_without_fake_intermediate(monkeypatch):
@@ -51,7 +81,7 @@ def test_price_is_null_and_amount_does_not_use_market_or_invented_value(monkeypa
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
     request = _request(
         user_request={"item": "배추", "requested_quantity_kg": 5000},
-        ml_context={"current_price": 9999, "daily": [{"price": 8888}]},
+        ml_context=_forecast(),
     )
     reply = run_proposal(request)
 
@@ -63,6 +93,7 @@ def test_refeed_creates_new_lineage_and_keeps_purchase_reference_conditional(mon
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
     request = _request(
         is_refeed=True,
+        feedback_attempt=1,
         feedback={
             "attempt": 1,
             "domain_replies": [
@@ -71,10 +102,10 @@ def test_refeed_creates_new_lineage_and_keeps_purchase_reference_conditional(mon
                     "capability": "ADDITIONAL_SUPPLY_CONTEXT",
                     "reply_ref": "PUR-1",
                     "runtime_status": "READY",
-                    "scenario_id": "SALES-001-C",
                     "payload": {"procurable_quantity_kg": 2000},
                 }
             ],
+            "scenario_feedback": [{"scenario_id": "SALES-001-C", "reply_refs": ["PUR-1"]}],
         },
     )
     reply = run_proposal(request)
@@ -87,6 +118,15 @@ def test_refeed_creates_new_lineage_and_keeps_purchase_reference_conditional(mon
     assert "PUR-1" in aggressive.evidence_refs
     assert "PUR-1" not in confirmed.evidence_refs
     assert confirmed.conditional_purchase is False
+
+
+def test_second_refeed_attempt_creates_r2_lineage(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(is_refeed=True, feedback_attempt=2))
+    scenario = reply.scenarios[0]
+    assert scenario.scenario_id == "SALES-001-A-R2"
+    assert scenario.parent_scenario_id == "SALES-001-A"
+    assert scenario.revision == 2
 
 
 def test_finance_fail_remains_visible_but_is_not_recommended(monkeypatch):
@@ -103,6 +143,11 @@ def test_finance_fail_remains_visible_but_is_not_recommended(monkeypatch):
                         "runtime_status": "READY",
                         "business_status": "reject",
                     }
+                ],
+                "scenario_feedback": [
+                    {"scenario_id": "SALES-001-A", "reply_refs": ["FIN-1"]},
+                    {"scenario_id": "SALES-001-B", "reply_refs": ["FIN-1"]},
+                    {"scenario_id": "SALES-001-C", "reply_refs": ["FIN-1"]},
                 ],
             }
         )
@@ -126,6 +171,12 @@ def test_zero_confirmed_supply_is_not_missing_value(monkeypatch):
     request = _request(
         logistics_context={
             "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 0},
+            "sellable_supply": {
+                "status": "READY",
+                "supply_capacity_by_date": [
+                    {"date": "2026-09-10", "confirmed_sellable_quantity_kg": 0}
+                ],
+            },
             "delivery_feasibility": {"status": "UNRESOLVED"},
         }
     )
@@ -162,3 +213,140 @@ def test_all_sales_business_modes_are_represented_without_implicit_policy(
         assert reply.scenarios[2].quantity_kg == Decimal(5000)
         assert reply.scenarios[0].quantity_kg == Decimal(3000)
         assert reply.scenarios[0].sales_decision_axes == ["QUANTITY"]
+
+
+def test_delivery_date_uses_exact_logistics_vector_not_query_scope_max(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    request = _request(
+        user_request={
+            "item": "배추",
+            "requested_quantity_kg": 6000,
+            "preferred_delivery_date": "2026-09-10",
+        },
+        logistics_context={
+            "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 7000},
+            "sellable_supply": {
+                "status": "READY",
+                "supply_capacity_by_date": [
+                    {
+                        "date": "2026-09-10",
+                        "confirmed_sellable_quantity_kg": 4200,
+                        "freshness_unresolved_inbound_quantity_kg": 1800,
+                        "uncertainties": ["CONFIRMED_INBOUND_FRESHNESS_UNRESOLVED"],
+                    }
+                ],
+            },
+            "delivery_feasibility": {"status": "UNRESOLVED", "daily_outbound_capacity_kg": 5000},
+            "evidence_refs": ["LOG-1"],
+        },
+    )
+    scenario = run_proposal(request).scenarios[2]
+    assert scenario.supply.confirmed_quantity_kg == Decimal(4200)
+    assert scenario.supply.required_additional_quantity_kg == Decimal(1800)
+    assert "CONFIRMED_INBOUND_FRESHNESS_UNRESOLVED" in scenario.uncertainties
+    assert "LOG-1" in scenario.evidence_refs
+
+
+def test_missing_delivery_vector_does_not_fall_back_to_scope_max(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    request = _request(
+        logistics_context={
+            "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 7000},
+            "sellable_supply": {"status": "READY", "supply_capacity_by_date": []},
+            "delivery_feasibility": {"status": "UNRESOLVED"},
+        }
+    )
+    scenario = run_proposal(request).scenarios[2]
+    assert scenario.supply.confirmed_quantity_kg is None
+    assert scenario.supply.required_additional_quantity_kg is None
+    assert "SELLABLE_SUPPLY_CONTEXT" in scenario.required_validations
+
+
+def test_no_date_uses_current_inventory_view_without_summing_lots(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    request = _request(
+        user_request={"item": "배추", "requested_quantity_kg": 8000},
+        logistics_context={
+            "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 9999},
+            "sellable_supply": {
+                "status": "READY",
+                "inventory_by_item": [{"item": "배추", "available_qty_kg": 7000}],
+                "lot_constraints": [
+                    {"lot_id": "A", "item": "배추", "available_qty_kg": 4000},
+                    {"lot_id": "B", "item": "배추", "available_qty_kg": 4000},
+                ],
+            },
+            "delivery_feasibility": {"status": "UNRESOLVED"},
+        },
+    )
+    scenario = run_proposal(request).scenarios[2]
+    assert scenario.supply.confirmed_quantity_kg == Decimal(7000)
+    assert scenario.supply.required_additional_quantity_kg == Decimal(1000)
+
+
+@pytest.mark.parametrize(
+    ("business_mode", "extra", "reason"),
+    [
+        ("CONTRACT_FULFILLMENT", {}, "CONTRACT_CONTEXT_REQUIRED"),
+        ("CONTRACT_PROPOSAL_RENEWAL", {}, "PREVIOUS_CONTRACT_CONTEXT_REQUIRED"),
+    ],
+)
+def test_contract_modes_without_authoritative_contract_are_input_incomplete(
+    monkeypatch, business_mode, extra, reason
+):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(business_mode=business_mode, **extra))
+    assert reply.status == "INPUT_INCOMPLETE"
+    assert reply.scenarios == []
+    assert reason in reply.missing_data
+
+
+@pytest.mark.parametrize(
+    ("context_key", "context", "reason"),
+    [
+        ("logistics_context", {"query_scope": {"item": "무"}}, "LOGISTICS_ITEM_MISMATCH"),
+        ("ml_context", _forecast("양파"), "ML_ITEM_MISMATCH"),
+    ],
+)
+def test_item_mismatch_is_input_incomplete(monkeypatch, context_key, context, reason):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(**{context_key: context}))
+    assert reply.status == "INPUT_INCOMPLETE"
+    assert reason in reply.missing_data
+
+
+def test_feedback_distribution_uses_reply_refs_and_rejects_unknown_ref(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    valid = _request(
+        feedback={
+            "domain_replies": [
+                {
+                    "source_agent": "finance",
+                    "capability": "FINANCIAL_VALIDATION",
+                    "reply_ref": "FIN-A",
+                    "runtime_status": "READY",
+                    "business_status": "reject",
+                }
+            ],
+            "scenario_feedback": [{"scenario_id": "SALES-001-A", "reply_refs": ["FIN-A"]}],
+        }
+    )
+    reply = run_proposal(valid)
+    assert "FINANCE_FAIL" in reply.scenarios[0].risks
+    assert "FINANCE_FAIL" not in reply.scenarios[1].risks
+
+    invalid = _request(
+        feedback={"scenario_feedback": [{"scenario_id": "SALES-001-A", "reply_refs": ["UNKNOWN"]}]}
+    )
+    invalid_reply = run_proposal(invalid)
+    assert invalid_reply.status == "INPUT_INCOMPLETE"
+    assert "SCENARIO_FEEDBACK_UNKNOWN_REPLY_REF" in invalid_reply.missing_data
+
+
+def test_proposal_reply_exposes_state_and_llm_alias(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(is_refeed=True, feedback_attempt=2))
+    assert reply.status == "SCENARIOS_GENERATED"
+    assert reply.is_refeed is True
+    assert reply.feedback_attempt == 2
+    assert reply.llm == reply.recommendation
