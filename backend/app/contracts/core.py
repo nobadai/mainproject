@@ -177,6 +177,23 @@ RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 #   차입여력·예정 유출입까지 포함해서 *"현금"* 은 좁게 읽힌다.
 BindingConstraint = Literal["WAREHOUSE", "FINANCE", "FRESHNESS"]
 
+# 🔴 **`ClipResult.binding_constraints` 를 흡수하지 않는다** (매입 지적 2026-09-03).
+#
+#   같은 질문(*"무엇이 안을 깎았나"*)에 답하지만 **층이 다르다.**
+#
+#       BindingConstraint               자원     창고 · 자금 · 신선도
+#       ClipResult.binding_constraints  밴드 축   cap_total_kg · cap_amount_krw ·
+#                                                cap_by_date.{날짜}
+#
+# ⚠️ **셋이 안 겹친다.** `신선도` 는 밴드 축에 없고(매입 내부 제약),
+#   `cap_by_date.{날짜}` 는 날짜가 붙어 어휘를 못 닫는다.
+#
+# ★ **합치면 Critic 이 잃는다.** `cap_total_kg` 과 `cap_by_date.2026-01-05` 가
+#   같은 `WAREHOUSE` 가 되면 LLM 이 인과를 대조할 재료가 줄어든다
+#   (`critic/llm/runtime.py:74`).
+#
+# ⬜ **다만 대응표는 필요하다.** 안 두면 Critic 결과와 화면이 다른 이름을 말한다.
+#   목표 도착일 칸(②)과 같은 판에서 정한다 — 지금 정하면 두 번 바뀐다.
 BINDING_CONSTRAINT_LABELS: Mapping[str, str] = {
     "WAREHOUSE": "창고",
     "FINANCE": "자금",

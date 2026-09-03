@@ -52,6 +52,24 @@ def _purchase_cap_keys() -> tuple[str, ...]:
     raise AssertionError(f"{_DRAFT_PLAN} 에서 caps= 를 못 찾았다 — 대조가 성립하지 않는다")
 
 
+def _band_binding_axes() -> tuple[str, ...]:
+    """`band` 가 `binding_constraints` 에 넣는 축 이름."""
+    tree = ast.parse((_BACKEND / "app" / "orchestrator" / "band.py").read_text(encoding="utf-8"))
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value.startswith("cap_")
+        ):
+            out.append(node.args[0].value)
+    return tuple(dict.fromkeys(out))
+
+
 def _rationale_sources() -> tuple[str, ...]:
     """매입 `RationaleSource` 어휘. 축 충돌을 보는 데 쓴다."""
     tree = ast.parse(_PURCHASE_SCHEMAS.read_text(encoding="utf-8"))
@@ -104,7 +122,14 @@ def test_현금이_두_어휘에_동시에_있다():
 
     ⚠️ 이 검사는 **충돌이 사라지면 빨간불**이다. 그때는 축이 갈렸다는 뜻이므로
       이 문장을 지우고 §① 만 남기면 된다.
+
+    ★ **전환 중에는 안 본다.** 매입이 `caps` 를 새 어휘로 옮기면 자원 축에서
+      `"현금"` 이 사라져 충돌도 같이 없어진다 — 그때 이 검사가 죽는 것은
+      **고장이 아니라 목적 달성**이다 (매입이 *"뒤집는 대상이 둘"* 이라고 짚었다).
     """
+    if _purchase_cap_keys() != _OLD_KEYS:
+        return  # 전환 완료 — test_전환이_끝나면_좁힌다 가 정리 시점을 알린다
+
     assert "현금" in _purchase_cap_keys()
     assert "현금" in _rationale_sources(), (
         "RationaleSource 에서 '현금' 이 빠졌다 — 축 충돌이 풀렸으면 이 검사를 정리한다"
@@ -114,18 +139,65 @@ def test_현금이_두_어휘에_동시에_있다():
 # ── ③ 매입이 아직 안 옮겼다 (고정) ─────────────────────────────────────────
 
 
-def test_매입은_아직_옛_한글_어휘를_쓴다():
-    """⚠️ **고정한 것이 최종 상태가 아니다.**
+#: 전환 중에 허용하는 두 상태. **둘 다 아니면 빨간불이다.**
+_OLD_KEYS = ("창고", "현금", "신선도")
+_NEW_KEYS = ("WAREHOUSE", "FINANCE", "FRESHNESS")
 
-    어휘는 정해졌고 매입이 옮기는 것은 매입 일정이다. 옮기면 이 검사가 빨간불이
-    되어 알려 준다 — 그때 이 파일을 **§④ 쪽으로 뒤집는다.**
 
-    🔴 **마스터가 매입 코드를 런타임에 읽지 않는다.** 읽으면 마스터가 부서 설정을
-      배우는 것이 된다. 대조는 여기서만 한다 (`test_retry_cap_ownership` 과 같다).
+def test_매입_caps_키가_옛것이거나_새것이다():
+    """🔴 **전환 창을 없앤다** (매입 지적 2026-09-03).
+
+    처음에는 옛 한글만 허용해 *"매입이 옮기면 빨간불"* 로 뒀는데, 그러면 **어느
+    순서로 가도 dev 가 빨간불이 되는 구간**이 생긴다.
+
+    ```text
+    매입이 먼저 바꾼다     → 이 검사가 옛 값을 단언해서 깨진다
+    마스터가 먼저 뒤집는다  → 매입이 아직 안 바꿔서 깨진다
+    ```
+
+    **한 PR 에 둘 다 넣지 않는 한 창이 남는다.** 그런데 마스터 검사를 매입 PR 이
+    고치면 소유 규율이 깨진다 (매입이 ⓑ 를 스스로 뺀 이유).
+
+    ★ **그래서 전환 기간을 검사가 표현한다.** 둘 중 하나면 통과하고, 셋도 아닌
+      값이 오면 여전히 잡는다. 전환이 끝나면 `_OLD_KEYS` 를 지워 다시 좁힌다.
+
+    ⚠️ **"뒤집는 것은 마스터 몫" 이다** — 매입이 주어가 빠졌다고 짚어 줬다.
+      이 파일이 `tests/master/` 에 있고 어휘 소유가 마스터다
+      (`test_retry_cap_ownership` 선례와 같다).
     """
-    assert _purchase_cap_keys() == ("창고", "현금", "신선도"), (
-        "매입 caps 키가 달라졌다. 새 어휘로 옮기셨으면 이 검사를 "
-        "test_매입이_새_어휘를_쓴다 로 뒤집는다"
+    keys = _purchase_cap_keys()
+
+    assert keys in (_OLD_KEYS, _NEW_KEYS), (
+        f"매입 caps 키가 {keys} 다. 옛 어휘도 새 어휘도 아니다 — "
+        f"{_OLD_KEYS} 또는 {_NEW_KEYS} 여야 한다"
+    )
+
+
+def test_전환이_끝나면_좁힌다():
+    """⚠️ **허용 목록이 둘인 것은 한시 상태다.** 좁힐 시점을 여기서 알린다.
+
+    🔴 **실패가 아니라 `skip` 이다.** 실패로 두면 매입이 옮기는 순간 dev 가
+      빨간불이 되고, 그것이 이 판이 없애려던 **전환 창**이다.
+
+    ```text
+    실패로 두면   매입 PR 머지 → dev 빨간불 → 마스터가 급히 고침
+    skip 이면     매입 PR 머지 → skipped 에 사유가 남음 → 마스터가 정리
+    ```
+
+    ★ **`skipped` 로 사실을 남기는 것이 규율이다** (`04` 문서 §3.3).
+      통과로 읽히면 안 되는 것을 통과시키지 않으면서 사실을 남긴다.
+    """
+    import pytest
+
+    if _purchase_cap_keys() == _NEW_KEYS:
+        pytest.skip(
+            "🟢 매입이 새 어휘로 옮겼다 — 이제 마스터가 좁힌다. "
+            "_OLD_KEYS 를 지우고 test_매입_caps_키가_옛것이거나_새것이다 를 "
+            "새 어휘만 보게 하며, test_현금이_두_어휘에_동시에_있다 도 정리한다"
+        )
+
+    assert _purchase_cap_keys() == _OLD_KEYS, (
+        f"매입 caps 키가 {_purchase_cap_keys()} 다 — 옛 어휘도 새 어휘도 아니다"
     )
 
 
@@ -142,4 +214,51 @@ def test_옛_키와_새_어휘가_일대일로_대응한다():
     assert {"창고", "신선도"} <= labels, "그대로 가는 둘이 표시 매핑에 없다"
     assert "자금" in labels and "현금" not in labels, (
         "'현금' 을 표시 문구로 되돌리면 매입·판매가 정리한 뜻이 사라진다"
+    )
+
+
+# ── ④ 🔴 밴드 축은 다른 어휘다 (매입 지적) ─────────────────────────────────
+
+
+def test_밴드_축_어휘를_흡수하지_않는다():
+    """🔴 **"무엇이 안을 깎았나" 가 두 어휘로 다닌다 — 그리고 그것이 의도다.**
+
+    매입이 짚었다.
+
+    > `#203` 이 `band.py` 를 한 줄도 안 건드렸습니다. 그런데 `band.py` 의
+    > `binding_constraints` 를 Critic 이 읽습니다.
+
+    **사실이다. 다만 층이 다르다.**
+
+    ```text
+    BindingConstraint               자원     창고 · 자금 · 신선도
+    ClipResult.binding_constraints  밴드 축   cap_total_kg · cap_amount_krw ·
+                                             cap_by_date.{날짜}
+    ```
+
+    ⚠️ **셋이 안 겹친다.** `신선도` 는 밴드 축에 없고(매입 내부 제약),
+      `cap_by_date.{날짜}` 는 날짜가 붙어 어휘를 못 닫는다.
+
+    ★ **합치면 Critic 이 잃는다** — `cap_total_kg` 과 `cap_by_date.2026-01-05` 가
+      같은 `WAREHOUSE` 가 되면 LLM 이 인과를 대조할 재료가 줄어든다
+      (`critic/llm/runtime.py:74` 가 그것으로 판정한다).
+    """
+    band_axes = _band_binding_axes()
+
+    assert band_axes, "band 가 축 이름을 안 만든다 — 대조가 성립하지 않는다"
+    assert not (set(band_axes) & set(get_args(BindingConstraint))), (
+        f"두 어휘가 겹친다: {sorted(set(band_axes) & set(get_args(BindingConstraint)))}"
+    )
+
+
+def test_밴드_축은_어휘를_닫을_수_없다():
+    """⚠️ `cap_by_date.{날짜}` 는 **날짜가 붙는다** — `Literal` 로 못 막는다.
+
+    이것이 두 어휘를 합칠 수 없는 기술적 이유다.
+    """
+    source = (_BACKEND / "app" / "orchestrator" / "band.py").read_text(encoding="utf-8")
+
+    assert 'f"cap_by_date.{' in source, (
+        "cap_by_date 축이 날짜를 안 붙인다 — 그러면 어휘를 닫을 수 있고 "
+        "이 검사의 근거가 사라진다"
     )
