@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from app.contracts.core import Evidence, SuggestedAdjustment
 from app.finance.db import (
     FinanceDataNotReady,
     execute_returning_one,
@@ -43,7 +44,6 @@ from app.finance.schemas import (
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
-from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 
 # ---------------------------------------------------------------------------
 # Evidence 생성 · 정책 출처 규율
@@ -227,6 +227,19 @@ def _indexed_verdict_evidence(results: list[dict[str, Any]]) -> list[Evidence]:
 
 
 def _adjustment_from_dict(value: dict[str, Any]) -> SuggestedAdjustment:
+    """재무 조정안 dict 를 공용 계약으로 옮긴다.
+
+    🔴 예전에는 여섯 칸만 옮겼다. 그래서 상류가 `scenario_labels` 를 채워도 이 지점에서
+       **조용히 사라졌다** — 마스터는 "어느 안에 대한 조정인지"를 영영 알 수 없고,
+       빈 목록만 받는다. 값을 옮기면서 옮기는 자리를 빠뜨리는 그 모양이다.
+
+    ★ 없으면 만들지 않는다. `scenario_labels` 가 없으면 빈 tuple 그대로 나간다 —
+      빈 tuple 은 *"적용 대상을 특정하지 못했다"* 이지 *"모든 안에 적용"* 이 아니다.
+
+    ★ `split_date` 는 회차 개념이 있는 축의 칸이다. 재무 `amount` 에는 회차가 없어서
+      보통 `None` 이고, 그 `None` 은 정상이다 — 완전성을 위해 옮기기만 하고 재무가
+      날짜를 지어내지 않는다.
+    """
     return SuggestedAdjustment(
         dept="finance",
         axis="amount",
@@ -234,6 +247,8 @@ def _adjustment_from_dict(value: dict[str, Any]) -> SuggestedAdjustment:
         unit=value["unit"],
         reason=value["reason"],
         ref_ids=tuple(value["ref_ids"]),
+        scenario_labels=tuple(value.get("scenario_labels") or ()),
+        split_date=value.get("split_date"),
     )
 
 

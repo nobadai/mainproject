@@ -36,6 +36,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
+from app.contracts.core import Evidence
 from app.finance.llm.client import (
     _DEFAULT_MODELS,
     _finance_model,
@@ -54,7 +55,6 @@ from app.finance.llm.finalizer import (
 )
 from app.finance.schemas import FinanceMode
 from app.master.envelope import AgentRequest
-from app.orchestrator.contracts_core import Evidence
 
 # ---------------------------------------------------------------------------
 # Planner/Finalizer 계약과 출력 검증

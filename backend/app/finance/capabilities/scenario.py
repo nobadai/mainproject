@@ -346,7 +346,7 @@ data_port: FinanceAsOfDataPort, args: dict[str, Any], state: FinanceAgentState
             #    없어서 "이 시나리오가 있다"는 존재 표시로 1 을 넣는다. 값을 시나리오
             #    번호로 읽으면 안 된다.
             #
-            #    제대로 고치려면 공용 계약(`orchestrator.contracts_core.Evidence`)이
+            #    제대로 고치려면 공용 계약(`app.contracts.core.Evidence`)이
             #    비수치 식별을 허용해야 한다 — 재무 밖이라 이번 범위에서 바꾸지 않는다
             #    (CROSS-DOMAIN). 현재 이 값을 읽는 소비자는 없다(Critic 의 재무 claim
             #    목록에도 없다).

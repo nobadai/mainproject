@@ -20,6 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.contracts.core import EvidenceGrade
 from app.finance.rules import SalesRuleResult
 from app.finance.schemas import (
     CashflowProjection,
@@ -27,7 +28,6 @@ from app.finance.schemas import (
     RuntimeStatus,
     _reject_boolean,
 )
-from app.orchestrator.contracts_core import EvidenceGrade
 
 # ---------------------------------------------------------------------------
 # 원가 산출방식 — EvidenceGrade 와 **다른 축이다**
