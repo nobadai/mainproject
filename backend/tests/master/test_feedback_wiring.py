@@ -135,7 +135,7 @@ def _run(*, rejecting: bool = True, prior_feedback: dict[str, Any] | None = None
     flow = ProcurementFlow(
         runner,
         verifier=over.get("verifier"),
-        item="피마늘",
+        item="배추",
         prior_feedback=prior_feedback,
     )
     return flow.run(), purchaser

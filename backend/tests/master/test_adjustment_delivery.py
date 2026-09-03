@@ -141,7 +141,7 @@ def _run(
     purchaser = _purchaser(meta_by_call)
     registry.register("purchase", purchaser)
     flow = ProcurementFlow(
-        MasterRunner(_ctx(), registry, CallBudget(limit=12)), verifier=None, item="피마늘"
+        MasterRunner(_ctx(), registry, CallBudget(limit=12)), verifier=None, item="배추"
     )
     return flow.run(), purchaser
 

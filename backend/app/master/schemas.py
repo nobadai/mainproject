@@ -39,9 +39,9 @@ class ProcurementRunRequest(BaseModel):
     item: str | None = Field(
         default=None,
         description=(
-            "이번 실행이 다루는 품목 (배추·무·양파·피마늘). 매입은 품목 하나씩 돈다. "
+            "이번 실행이 다루는 품목 (배추·무·양파). 매입은 품목 하나씩 돈다. "
             "주지 않으면 마스터가 싣지 않고, 매입이 missing_data: ['item'] 을 낸다. "
-            "4품목을 한 번에 도는 것은 미결 — 재무 cap 이 품목 공통이라 배분 규칙이 없다(M-26)."
+            "전 품목을 한 번에 도는 것은 미결 — 재무 cap 이 품목 공통이라 배분 규칙이 없다(M-26)."
         ),
     )
 

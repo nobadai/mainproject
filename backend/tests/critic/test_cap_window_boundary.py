@@ -28,7 +28,7 @@ from dataclasses import replace as dc_replace
 from datetime import timedelta
 from types import SimpleNamespace
 
-from fixtures import AS_OF, ITEMS4, make_snapshot
+from fixtures import AS_OF, FIXTURE_ITEMS, make_snapshot
 
 from app.contracts.core import (
     Band,
@@ -101,7 +101,9 @@ def _run_critic(scn: MinimalScenario, clip: ClipResult, band: Band):
 
 
 def _band(cap_by_date: dict) -> Band:
-    return Band({i: 0.0 for i in ITEMS4}, {i: 1e9 for i in ITEMS4}, 1e9, 1e12, {}, cap_by_date)
+    return Band(
+        {i: 0.0 for i in FIXTURE_ITEMS}, {i: 1e9 for i in FIXTURE_ITEMS}, 1e9, 1e12, {}, cap_by_date
+    )
 
 
 def _clip(*legs: tuple[int, float, object]) -> ClipResult:
@@ -138,9 +140,7 @@ def test_창_밖_도착은_통과가_아니라_미검사로_남는다():
 
 def test_창_안_도착만_있으면_아무것도_안_적는다():
     """대조군. 이것이 없으면 위 검사가 **항상 skipped 를 내는 코드**로도 통과한다."""
-    result = check_occupancy_detailed(
-        _clip((0, 100.0, D_FIRST)), _band({D_FIRST: 1_000.0}), SNAP
-    )
+    result = check_occupancy_detailed(_clip((0, 100.0, D_FIRST)), _band({D_FIRST: 1_000.0}), SNAP)
 
     assert result.ran
     assert result.skipped == (), f"검사가 시끄러워졌다: {result.skipped}"

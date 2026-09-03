@@ -468,7 +468,7 @@ def test_split_legs_는_매입_도착일을_그대로_옮긴다():
             {"date": "2025-12-31", "qty_kg": 44.0, "expected_arrival_date": "2026-01-09"}
         ]
     }
-    legs = _split_legs(scenario, "피마늘", date(2025, 12, 31), lead=2)
+    legs = _split_legs(scenario, "배추", date(2025, 12, 31), lead=2)
 
     assert legs[0]["expected_arrival_date"] == "2026-01-09"
 
@@ -477,7 +477,7 @@ def test_split_legs_는_매입_값이_없으면_폴백_계산한다():
     from app.master.critic_bridge import _split_legs
 
     scenario = {"split_plan": [{"date": "2025-12-31", "qty_kg": 44.0}]}
-    legs = _split_legs(scenario, "피마늘", date(2025, 12, 31), lead=2)
+    legs = _split_legs(scenario, "배추", date(2025, 12, 31), lead=2)
 
     assert legs[0]["expected_arrival_date"] == "2026-01-02"
 

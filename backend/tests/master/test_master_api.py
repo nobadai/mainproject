@@ -329,7 +329,7 @@ def test_약정을_못_읽으면_응답_concerns_에_남는다(client, monkeypat
 
     monkeypatch.setattr("app.master.service.commitments_before", boom)
 
-    data = client.post("/master/request", json=body(item="피마늘")).json()
+    data = client.post("/master/request", json=body(item="배추")).json()
 
     assert any("못 읽었다" in c for c in data["concerns"]), (
         f"조회 실패가 응답까지 안 왔다: {data['concerns']}"
@@ -345,7 +345,7 @@ def test_약정을_못_읽어도_실행은_끝까지_돈다(client, monkeypatch)
 
     monkeypatch.setattr("app.master.service.commitments_before", boom)
 
-    r = client.post("/master/request", json=body(item="피마늘"))
+    r = client.post("/master/request", json=body(item="배추"))
 
     assert r.status_code == 200
     assert r.json()["end_code"] != "E4_NOT_STARTED", "조회 실패가 실행을 막았다"
@@ -356,6 +356,6 @@ def test_약정_조회가_되면_concern_이_안_붙는다(client, monkeypatch):
     wire_all()
     monkeypatch.setattr("app.master.service.commitments_before", lambda item, as_of, **kw: [])
 
-    data = client.post("/master/request", json=body(item="피마늘")).json()
+    data = client.post("/master/request", json=body(item="배추")).json()
 
     assert not any("못 읽었다" in c for c in data["concerns"]), data["concerns"]

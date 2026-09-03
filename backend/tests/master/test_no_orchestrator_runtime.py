@@ -122,7 +122,10 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
     # ★ 2026-09-02 에 셋이 빠졌다 — decision_service · persistence · service 가
     #   `app.orchestrator.run_repository` 를 부르던 자리다. 마스터가 자기 표로
     #   나오면서 없어졌고, 그 모듈은 이제 FORBIDDEN 이다.
+    # ★ 2026-09-03 에 commitment.py 가 들어왔다 — 피마늘을 빼면서 `ITEM_CODES` 를
+    #   계약에서 가져오게 했다. 품목 목록을 여기서 다시 세던 것이 어긋남의 뿌리였다.
     assert users == {
+        "commitment.py": ["app.contracts.core"],
         "critic_bridge.py": ["app.contracts.core"],
         "envelope.py": ["app.contracts.core"],
         "flow.py": ["app.contracts.core"],

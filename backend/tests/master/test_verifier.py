@@ -338,7 +338,7 @@ def test_정상적인_위험_고지는_잡지_않는다():
 
 
 def test_짧은_키가_긴_키_안에_걸리지_않는다():
-    """🔴 **이름 전체로만 건다.** 실측 2026-08-31 (피마늘 관통) — 중첩 한 겹을 보게
+    """🔴 **이름 전체로만 건다.** 실측 2026-08-31 (피마늘 관통 · 당시 4품목) — 중첩 한 겹을 보게
     되면서 `item` 이 `supplied` 에 들어왔고, 그 순간 매입 문장 **하나가 지적 두 줄**이
     됐다. 화면에 같은 사유가 두 번 떴다.
 
@@ -353,8 +353,8 @@ def test_짧은_키가_긴_키_안에_걸리지_않는다():
     """
     nested = {
         "inventory": {
-            "item": "피마늘",
-            "item_storage_policies": [{"item": "피마늘", "operational_limit_days": 7}],
+            "item": "배추",
+            "item_storage_policies": [{"item": "배추", "operational_limit_days": 7}],
         }
     }
 

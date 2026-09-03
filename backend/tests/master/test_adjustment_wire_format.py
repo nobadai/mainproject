@@ -117,7 +117,7 @@ def _run(adjustments: tuple[SuggestedAdjustment, ...]):
     registry.register("inventory", _advisor(verdict="reject", adjustments=adjustments))
     registry.register("purchase", purchaser)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    ProcurementFlow(runner, item="피마늘").run()
+    ProcurementFlow(runner, item="배추").run()
     return purchaser
 
 
