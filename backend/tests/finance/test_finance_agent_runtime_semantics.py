@@ -130,7 +130,7 @@ class ScriptedFinalizer:
         self.attempts = 0
         self.fail = fail
 
-    def finalize(self, *, mode, business_status, evidences):
+    def finalize(self, *, mode, business_status, evidences, has_verified_adjustment=False):
         """★ 문장은 정본(`messages`)에서 고른다 — 가짜가 자기 말투를 갖지 않는다."""
         del evidences
         self.attempts += 1

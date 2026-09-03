@@ -79,7 +79,10 @@ def test_explanation_keys_stay_machine_contract():
         "PRE_BOUNDARY",
         "SCENARIO_ACCEPT",
         "SCENARIO_CONDITIONAL",
+        # 검증된 금액 대안이 실제로 나온 경우에만 고를 수 있는 짝이다.
+        "SCENARIO_CONDITIONAL_ADJUSTABLE",
         "SCENARIO_REJECT",
+        "SCENARIO_REJECT_ADJUSTABLE",
     }
 
 
@@ -492,7 +495,7 @@ def test_explanation_cannot_change_the_verdict_or_add_numbers():
         def __init__(self):
             self.attempts = 0
 
-        def finalize(self, *, mode, business_status, evidences):
+        def finalize(self, *, mode, business_status, evidences, has_verified_adjustment=False):
             del mode, business_status, evidences
             self.attempts += 1
             # 판정을 뒤집으려 하고, 없던 숫자를 만들어 낸다.
@@ -506,5 +509,11 @@ def test_explanation_cannot_change_the_verdict_or_add_numbers():
     assert reply.payload["verdict"] == "reject"
     assert "999999" not in reply.reasoning
     # 숫자를 실은 설명은 버려지고 결정론 문장이 나간다.
-    assert reply.reasoning == messages.explanation_for("SCENARIO_VALIDATION", "reject")
+    # ★ 어느 문장인지는 **결과에 실제로 실린 조정안**이 정한다 — 검증된 금액 대안이
+    #   있을 때만 조정 범위를 언급하는 짝이 나간다.
+    assert reply.reasoning == messages.explanation_for(
+        "SCENARIO_VALIDATION",
+        "reject",
+        has_verified_adjustment=bool(reply.suggested_adjustments),
+    )
     assert metadata.llm_status == "FALLBACK"

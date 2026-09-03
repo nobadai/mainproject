@@ -269,6 +269,21 @@ def _branch_scenario_labels(state: FinanceAgentState) -> list[str]:
     return []
 
 
+def _amount_adjustment_was_evaluated(state: FinanceAgentState) -> bool:
+    """금액 대안 검증이 **실제로 돌았는가** — 실행 사실로만 판단한다.
+
+    ★ 설명 문장을 읽지 않는다. 실행 순서(`tool_order`)와 관측만 본다 — 사람이 읽는
+      문장에서 실행 사실을 되짚으면, 문구를 다듬는 순간 계약이 흔들린다.
+
+    ★ 평소 흐름이 이미 최소 현금을 밑돈 경우(`base_state_violated`)는 상한이 0 으로
+      확정되어 어떤 금액도 안전하지 않다. 결정론 판정이 이미 답을 냈으므로 Tool 을
+      부르지 않고도 "대안 없음" 이 성립한다 — 유일한 예외다.
+    """
+    if state.base_state_violated:
+        return True
+    return "validate_amount_adjustment" in state.tool_order
+
+
 def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     evidence: list[Evidence] = []
@@ -290,6 +305,16 @@ def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     adjustments: list[dict[str, Any]] = []
     if payload["verdict"] == "ok":
         payload["adjustability"] = "NOT_NEEDED"
+    elif not _amount_adjustment_was_evaluated(state):
+        # 🔴 검증을 **안 한 것**을 "대안이 없다" 로 포장하지 않는다.
+        #
+        #    Harness 가 non-ok 판정에 금액 대안 검증을 필수로 걸어 두므로 정상 실행에서
+        #    여기 오지 않는다. 그래도 남겨 두는 이유는, 이 자리가 조용히 통과하면
+        #    Planner 가 Tool 을 안 골랐다는 사실이 `NOT_ADJUSTABLE` 뒤에 숨어 버리기
+        #    때문이다. 숨기지 말고 계약 위반으로 세운다.
+        raise ValueError(
+            "amount adjustment validation must run before a non-ok scenario completes"
+        )
     elif validation and Decimal(str(validation["candidate_amount_krw"])) > 0:
         payload["adjustability"] = "ADJUSTABLE"
         adjustments.append(
@@ -327,14 +352,18 @@ def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     return payload
 
 
-def fallback_reasoning(mode: str, business: str) -> str:
+def fallback_reasoning(
+    mode: str, business: str, *, has_verified_adjustment: bool = False
+) -> str:
     """LLM 이 설명을 못 골랐을 때 나가는 문장.
 
     🔴 **LLM 경로와 같은 정본을 쓴다.** 예전처럼 대체 경로를 따로 두면, 모델이 죽은
        날에만 사용자에게 다른 말투가 나간다 — 설명이 가장 필요한 날에 설명이 제일
        나빠진다.
     """
-    return explanation_for(mode, business)
+    return explanation_for(
+        mode, business, has_verified_adjustment=has_verified_adjustment
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +737,9 @@ class FinanceAgentController:
             request, outcome.states, outcome.runtime_status
         )
         _lift_sales_runtime_status(request, outcome, payload)
-        explanation = self._explain(request, outcome, payload, evidences, business_status)
+        explanation = self._explain(
+            request, outcome, payload, evidences, business_status, adjustments
+        )
         elapsed = int((time.monotonic() - started) * 1000)
 
         metadata = self._build_metadata(
@@ -801,6 +832,7 @@ class FinanceAgentController:
         payload: dict[str, Any],
         evidences: list[Evidence],
         business_status: str,
+        adjustments: list[SuggestedAdjustment] | None = None,
     ) -> _Explanation:
         """검증된 Evidence 로 설명을 **고른다.** 설명이 결과를 바꾸지는 않는다.
 
@@ -829,18 +861,27 @@ class FinanceAgentController:
             finalization_evidence.extend(
                 _evidence_from_dict(item) for item in verdict.get("evidences", [])
             )
+        # ★ 조정 범위를 언급할 수 있는지는 **결정론 결과**가 정한다. 검증된 금액 대안이
+        #   실제로 실렸을 때만 그 사실을 말하는 문장이 후보가 된다 — LLM 경로든 대체
+        #   경로든 같은 사실을 본다.
+        has_verified_adjustment = bool(adjustments)
         try:
             reasoning = self.finalizer.finalize(
                 mode=request.mode,
                 business_status=business_status,
                 evidences=tuple(finalization_evidence),
+                has_verified_adjustment=has_verified_adjustment,
             )
             _validate_ready_reasoning(reasoning)
         except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
             # ★ 답은 나간다 — 규칙이 만든 답이다. 검증된 Evidence 가 이미 있으므로
             #   설명을 못 골랐다고 업무 결과를 버릴 이유가 없다.
             return _Explanation(
-                fallback_reasoning(request.mode, business_status),
+                fallback_reasoning(
+                    request.mode,
+                    business_status,
+                    has_verified_adjustment=has_verified_adjustment,
+                ),
                 "DISABLED" if not self.llm_enabled else "FALLBACK",
                 self.llm_enabled,
             )

@@ -62,9 +62,12 @@ class OllamaFinanceFinalizer:
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str:
         self.attempts += 1
-        allowed = explanation_keys(mode, business_status)
+        allowed = explanation_keys(
+            mode, business_status, has_verified_adjustment=has_verified_adjustment
+        )
         body = {
             "model": self.model,
             "stream": False,
@@ -118,9 +121,12 @@ class GeminiFinanceFinalizer:
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str:
         self.attempts += 1
-        allowed = explanation_keys(mode, business_status)
+        allowed = explanation_keys(
+            mode, business_status, has_verified_adjustment=has_verified_adjustment
+        )
         selected = json.loads(
             _gemini_generate(
                 model=self.model,
@@ -159,7 +165,12 @@ class DeterministicFinanceFinalizer:
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str:
         self.attempts += 1
         del evidences
-        return _FINAL_EXPLANATIONS[explanation_keys(mode, business_status)[0]]
+        return _FINAL_EXPLANATIONS[
+            explanation_keys(
+                mode, business_status, has_verified_adjustment=has_verified_adjustment
+            )[0]
+        ]

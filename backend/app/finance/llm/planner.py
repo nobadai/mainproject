@@ -140,6 +140,7 @@ class FinanceFinalizer(Protocol):
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str: ...
 
 
@@ -471,11 +472,15 @@ class _AvailabilityFallbackFinanceFinalizer:
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str:
+        # ★ Provider 가 갈려도 **같은 사실**을 넘긴다. 한쪽만 조정 여부를 못 받으면
+        #   같은 결과가 Provider 에 따라 다른 문장을 고르게 된다.
         kwargs = {
             "mode": mode,
             "business_status": business_status,
             "evidences": evidences,
+            "has_verified_adjustment": has_verified_adjustment,
         }
         if self.state.active:
             return self.fallback.finalize(**kwargs)
