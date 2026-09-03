@@ -242,6 +242,28 @@ def _critic_request(rationale: str = "재고 상한에 걸려 물량을 줄였�
     }
 
 
+def _force_unreachable_ollama(monkeypatch) -> None:
+    """LLM 을 **켠 채로 못 닿게** 만든다.
+
+    🔴 `LLM_BASE_URL` 만 죽은 포트로 두면 안 막힌다 (매입 실측 2026-09-03).
+      `.env` 에 `CRITIC_LLM_PROVIDER=gemini` 가 있고 Critic 런타임이 그것을 읽는데
+      **Gemini 는 자체 엔드포인트를 써서 `LLM_BASE_URL` 을 무시**한다
+      (`critic/llm/runtime.py:53` 이 그 사정을 이미 적어 뒀다).
+
+      그래서 *"LLM 이 없음"* 을 시험하려는 검사가 **실제 구글 API 를 불렀다.**
+      빠르게 성공하면 `SUCCESS` 라 빨간불, 느리거나 429 면 `FALLBACK` 이라 초록불 —
+      **상시 실패가 아니라 플래키**였고 요금과 429 한도까지 같이 썼다.
+
+    ⚠️ `LLM_ENABLED=false` 로 막으면 안 된다. 그러면 `DISABLED` 가 나오는데
+      이 검사가 재는 것은 `FALLBACK` 이다 — **"안 불렀다" 와 "부르고 실패했다" 는
+      다르다** (`envelope.LLMStatus`).
+    """
+    monkeypatch.delenv("CRITIC_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:1")
+
+
 def test_critic_api_reports_zero_l5_coverage_when_llm_unavailable(monkeypatch):
     """★ 검사하지 못한 것을 검사했다고 말하지 않는다 (설계서 §8).
 
@@ -254,8 +276,7 @@ def test_critic_api_reports_zero_l5_coverage_when_llm_unavailable(monkeypatch):
     from app.critic.router import router
 
     # 아무도 듣지 않는 포트 — 실제 Ollama 없이 장애 상황을 만든다.
-    monkeypatch.setenv("LLM_ENABLED", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:1")
+    _force_unreachable_ollama(monkeypatch)
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
 
     app = FastAPI()
@@ -290,8 +311,7 @@ def test_critic_api_skips_l5_when_no_rationale_submitted(monkeypatch):
 
     from app.critic.router import router
 
-    monkeypatch.setenv("LLM_ENABLED", "true")
-    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:1")
+    _force_unreachable_ollama(monkeypatch)
 
     app = FastAPI()
     app.include_router(router)
