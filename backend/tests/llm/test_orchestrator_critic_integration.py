@@ -7,7 +7,7 @@ Finance / Logistics 통합테스트와 같은 방식이다 — Provider 를 실�
 from datetime import date
 
 from app.critic.llm.judge import JudgeRunner
-from app.critic.llm.runtime import JudgeService
+from app.critic.llm.runtime import JudgeService, get_llm_settings
 from app.critic.llm.runtime import LLMSettings as CriticLLMSettings
 from app.orchestrator.interpretation import build_orchestrator_context, enrich_orchestrator_response
 from app.orchestrator.llm.runtime import LLMSettings as OrchestratorLLMSettings
@@ -257,11 +257,39 @@ def _force_unreachable_ollama(monkeypatch) -> None:
     ⚠️ `LLM_ENABLED=false` 로 막으면 안 된다. 그러면 `DISABLED` 가 나오는데
       이 검사가 재는 것은 `FALLBACK` 이다 — **"안 불렀다" 와 "부르고 실패했다" 는
       다르다** (`envelope.LLMStatus`).
+
+    🔴 **`delenv` 로는 안 지워진다** (매입 실측 2026-09-03 · 2차 지적).
+
+      `get_llm_settings()` 가 **함수 안에서** `load_dotenv(_ENV_FILE)` 을 부르고,
+      그 기본값이 `override=False` 다. *"이미 설정된 변수만 안 덮는다"* 는 뜻이라
+      **지워서 없는 상태로 만들면 `.env` 값이 그대로 채워진다.**
+
+      ```text
+      delenv 후 실제 provider   gemini   ← 되살아난다 (실측)
+      setenv 후 실제 provider   ollama
+      ```
+
+      **지우는 것이 아니라 덮어써야 한다.** 값이 환경에 있어야 `.env` 가 못 이긴다.
+
+      ⚠️ 저장소가 이 함정을 이미 세 곳에 적어 뒀다
+      (`test_per_agent_model_override.py:23` · `test_purchase_agent/conftest.py:34` ·
+      `test_mix_llm.py:107`). 그것을 안 읽고 `delenv` 를 썼다.
     """
-    monkeypatch.delenv("CRITIC_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("CRITIC_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_ENABLED", "true")
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:1")
+
+    # 🔴 **여기서 확인하지 않으면 다시 조용히 새어 나간다.**
+    #   `.env` 가 이기면 이 검사가 재려던 것(닿지 않는 ollama)이 아니라 **실제 구글
+    #   API 호출**이 된다. 빠르면 SUCCESS 라 빨간불 · 느리거나 429 면 FALLBACK 이라
+    #   초록불인 **플래키**가 되고, 요금과 429 한도까지 같이 쓴다.
+    settings = get_llm_settings()
+    assert settings.provider == "ollama", (
+        f"Critic 이 실제로 쓰는 프로바이더가 {settings.provider!r} 다. "
+        f".env 가 이겼다 — 이 검사는 네트워크로 나가면 안 된다"
+    )
+    assert settings.base_url == "http://127.0.0.1:1", f"닿지 않아야 한다: {settings.base_url}"
 
 
 def test_critic_api_reports_zero_l5_coverage_when_llm_unavailable(monkeypatch):
@@ -289,6 +317,12 @@ def test_critic_api_reports_zero_l5_coverage_when_llm_unavailable(monkeypatch):
     # LLM 은 죽었다
     assert body["llm_status"] == "FALLBACK"
     assert body["llm_fallback_used"] is True
+    # 🔴 **무엇을 불러서 죽었는지까지 본다.** 픽스처 단언과 층이 다르다 —
+    #   저쪽은 설정을 보고 여기는 결과를 본다. `.env` 가 이겨 gemini 로 나갔는데
+    #   마침 실패하면 FALLBACK 이 나오고, 그때 이 줄이 잡는다.
+    assert body["llm_provider"] == "ollama", (
+        f"닿지 않는 ollama 를 재려던 검사가 {body['llm_provider']!r} 를 불렀다"
+    )
     # 커버리지는 정직하다
     assert tuple(body["coverage"]["L5"]) == (0, 6)
     assert any("L5" in entry for entry in body["skipped"])
