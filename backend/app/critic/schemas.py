@@ -105,6 +105,9 @@ class CriticProcurementRequest(BaseModel):
     price_basis: str = "AUCTION"
     contract_price_basis: str = "AUCTION"
     inbound_lead_days: int | None = None
+    cap_by_date_window_days: int | None = None
+    """`cap_by_date_kg` 를 계산한 창의 길이. `inbound_lead_days` 와 짝이다 (#183).
+       없으면 창 밖 도착과 창 안 키 누락을 가르지 못한다 — 물류 IO Contract §6."""
     items: list[str] | None = None
     spot_price_krw_per_kg: dict[str, float] | None = None
     scenarios: list[ScenarioIn] = Field(min_length=1)

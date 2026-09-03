@@ -143,6 +143,12 @@ def build_request(
         run_seq=run_seq,
         items=[item],
         inbound_lead_days=_int_of((constraints.get(_INVENTORY) or {}).get("inbound_lead_days")),
+        # ★ 창의 두 조각을 **같이** 보낸다 (#183). 시작이 as_of + lead, 길이가 이 값이다.
+        #   전에는 lead 만 보내서, 받는 쪽이 "cap 키가 없는 날짜" 를 읽을 수 없었다 —
+        #   창 밖(검사 대상 아님)인지 창 안 누락(미결)인지 가를 재료가 없었다.
+        cap_by_date_window_days=_int_of(
+            (constraints.get(_INVENTORY) or {}).get("cap_by_date_window_days")
+        ),
         scenarios=scenarios,
         replies=replies,
         # ★ dept_meta 는 **부서가 적어 보낸 것만** 옮긴다 (모듈 주석 참고).

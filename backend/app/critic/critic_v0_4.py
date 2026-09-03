@@ -52,7 +52,7 @@ from app.critic.critic import (
 from app.critic.critic import (
     run_l4 as _run_llm_rationale,
 )
-from app.orchestrator.band import check_occupancy_by_date, detect_collapse_type
+from app.orchestrator.band import check_occupancy_detailed, detect_collapse_type
 from app.orchestrator.contracts_core import (
     _DEPT_AXES,
     ITEMS,
@@ -760,11 +760,18 @@ def run_critic_v04(
         l4_ran += 1 if not arr_s else 0
 
         # 날짜별 창고 점유 — T1 · T3 와 **같은 함수**를 쓴다 (설계서 §4)
-        occ = check_occupancy_by_date(clip, band, snapshot)
-        findings += [CriticFinding("L3_band_axis", "check_occupancy_by_date", p) for p in occ]
-        l4_ran += 1 if band.cap_by_date_kg else 0
-        if not band.cap_by_date_kg:
-            skipped.append("check_occupancy_by_date: cap_by_date 미제공 (N15) — 생략")
+        #
+        # 🔴 **`check_occupancy_by_date` 가 아니라 상세형을 쓴다** (#183). 짧은 쪽은
+        #   problems 만 돌려주므로 **검사하지 못한 회차가 여기서 통째로 사라졌다** —
+        #   창 밖 도착이 빈 problems 로 와서 통과로 집계됐다. 설계서 §8 이 막는 자리다.
+        occ = check_occupancy_detailed(clip, band, snapshot)
+        findings += [
+            CriticFinding("L3_band_axis", "check_occupancy_by_date", p) for p in occ.problems
+        ]
+        skipped += [f"check_occupancy_by_date: {note}" for note in occ.skipped]
+        # 못 본 회차가 하나라도 있으면 이 검사는 **돈 것이 아니다.**
+        # 위 `check_arrival_decomposition` 이 이미 같은 규율을 쓴다.
+        l4_ran += 1 if occ.ran and not occ.skipped else 0
     coverage["L4"] = (l4_ran, _LAYER_TOTALS["L4"])
 
     # ── L5 논리 일관성 (LLM) — FAIL 이 아니라 CONCERN ─────────────

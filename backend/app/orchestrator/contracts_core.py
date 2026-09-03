@@ -603,6 +603,22 @@ class T0Snapshot:
     confirmed_occupancy_by_date: Mapping[date, float] = field(default_factory=dict)
     """날짜별 확정 창고 점유 (현재 로트 + 확정 입고 − 확정주문 납품)."""
 
+    cap_by_date_window_days: int | None = None
+    """`cap_by_date` 를 계산한 창의 길이 (물류 IO Contract §6 · #183).
+
+    ★ **`inbound_lead_days` 와 짝이다.** 창의 시작이 `as_of + inbound_lead_days`,
+      길이가 이 값이다. 둘 다 물류가 준다 (`logistics/tools.build_cap_window`).
+
+    🔴 **이 값이 없으면 "키가 없는 날짜" 를 읽을 수 없다.** 물류가 정한 규약이
+      셋으로 갈리는데, 창을 모르면 뒤의 둘을 못 가른다.
+
+        키 존재 + 값 0    입고 가능량이 0 이다
+        창 안인데 키 없음  계산 누락 또는 미결
+        창 밖             계산 대상이 아니다   ← 0 도 무한대도 아니다
+
+      가르지 못하면 마스터는 **무한대 쪽으로 틀린다** — 창 밖 도착이 어느 비교에도
+      안 걸리고 조용히 통과한다."""
+
     # ★ v1.2 정정 — has_unmet_obligation 은 T0 필드가 아니다.
     #   부서는 자기 도메인 사실만 알 뿐 납품 의무 충족 여부를 판정할 위치가 아니다.
     #     매입 → no_proposal_reason      (유효 시나리오 없음 + 사유)
