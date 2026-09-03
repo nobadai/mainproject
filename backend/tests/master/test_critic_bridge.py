@@ -58,6 +58,7 @@ CONSTRAINTS = {
         "warehouse_free_kg": 7636.72,
         "inbound_lead_days": 2,
         "cap_by_date": {"2026-01-03": 5000.0},
+        "cap_by_date_window_days": 18,
     },
 }
 
@@ -479,3 +480,56 @@ def test_split_legs_는_매입_값이_없으면_폴백_계산한다():
     legs = _split_legs(scenario, "피마늘", date(2025, 12, 31), lead=2)
 
     assert legs[0]["expected_arrival_date"] == "2026-01-02"
+
+
+# ── 창의 두 조각 (#183) ─────────────────────────────────────────────────────
+
+
+def test_창_길이를_같이_나른다():
+    """🔴 **lead 만 보내면 받는 쪽이 창을 못 만든다** (#183 · 물류 IO Contract §6).
+
+    창의 시작은 `as_of + inbound_lead_days`, 길이는 `cap_by_date_window_days` 다.
+    앞만 보내면 Critic 이 *"cap 키가 없는 날짜"* 를 **창 밖(검사 대상 아님)인지
+    창 안 누락(미결)인지** 가르지 못하고, 창 밖 도착이 조용히 통과한다.
+    """
+    req = bridge.build_request(
+        as_of=AS_OF,
+        item="배추",
+        proposal=_proposal(),
+        constraints=CONSTRAINTS,
+        evidences=EVIDENCES,
+    )
+
+    assert req.inbound_lead_days == 2, "창의 시작"
+    assert req.cap_by_date_window_days == 18, "창의 길이 — 이것이 안 가면 앞이 무의미하다"
+
+
+def test_물류가_창_길이를_안_보내면_지어내지_않는다():
+    """없는 것을 만들지 않는다. 받는 쪽이 *"못 가린다"* 로 남길 수 있어야 한다."""
+    inventory = {
+        k: v for k, v in CONSTRAINTS["inventory"].items() if k != "cap_by_date_window_days"
+    }
+    req = bridge.build_request(
+        as_of=AS_OF,
+        item="배추",
+        proposal=_proposal(),
+        constraints={**CONSTRAINTS, "inventory": inventory},
+        evidences=EVIDENCES,
+    )
+
+    assert req.cap_by_date_window_days is None
+
+
+def test_창_길이가_float_로_와도_나른다():
+    """⚠️ 실 payload 는 숫자를 float 로 싣는다 — `inbound_lead_days` 가 `2.0` 으로
+    온다는 것이 실측으로 확인됐다 (2026-09-03 매입). 창 길이도 같은 전선을 탄다."""
+    inventory = {**CONSTRAINTS["inventory"], "cap_by_date_window_days": 18.0}
+    req = bridge.build_request(
+        as_of=AS_OF,
+        item="배추",
+        proposal=_proposal(),
+        constraints={**CONSTRAINTS, "inventory": inventory},
+        evidences=EVIDENCES,
+    )
+
+    assert req.cap_by_date_window_days == 18, "float 로 오면 버렸다 — 창이 통째로 사라진다"

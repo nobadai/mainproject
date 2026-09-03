@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.orchestrator.contracts_core import (
     ITEMS,
@@ -470,6 +470,28 @@ class OccupancyResult:
         return bool(self.problems)
 
 
+def _window_end(as_of: date, lead: float | None, window_days: int | None) -> date | None:
+    """`cap_by_date` 창의 마지막 날. 두 조각이 다 있어야 만든다 (#183).
+
+    🔴 **`build_cap_window` 와 같은 산술이어야 한다** (`app/logistics/tools.py`).
+
+    ```python
+    start = as_of + timedelta(days=lead)
+    return [start + timedelta(days=offset) for offset in range(CAP_BY_DATE_WINDOW_DAYS)]
+    ```
+
+      마지막 offset 이 `window_days - 1` 이다. 여기서 `-1` 을 빠뜨리면 **경계 하루가
+      통째로 갈래를 바꾼다** — 창 밖 도착 하나가 "창 안 누락" 으로 읽힌다
+      (2026-09-03 매입 조언).
+
+    ⚠️ `lead` 는 실 payload 에서 `2.0`(float) 로 온다. `isinstance(x, int)` 로 막으면
+      창을 **한 번도 못 만든다** — 그러면 이 검사가 조용히 안 도는 것으로 되돌아간다.
+    """
+    if lead is None or window_days is None:
+        return None
+    return as_of + timedelta(days=lead + window_days - 1)
+
+
 def check_occupancy_by_date(
     clip: ClipResult,
     band: Band,
@@ -521,6 +543,13 @@ def check_occupancy_detailed(
       늘 `0` 이라 `확정 + 도착분` 이 이미 `도착분` 과 같았다. **채우는 날 조용히
       틀리는 것**을 막는 판이다.
 
+    🔴 **cap 이 있는 날짜만 도는 것이 구멍이었다** (#183 · 2026-09-03).
+
+      마지막 cap 날짜보다 뒤에 도착하는 회차는 어느 비교에도 안 걸려 **빈
+      problems 로 통과처럼** 읽혔다. 창 밖을 `0` 이 아니라 무한대로 읽은 셈이다.
+      이제 그 회차를 `skipped` 로 남기고, 창을 알면 *창 밖*(검사 대상 아님)과
+      *창 안 키 누락*(미결)을 가른다. 창을 모르면 **모른다고 적는다.**
+
     ★ cap_by_date 는 **확정분만** 반영한다 (v0.13 명문화).
       전략적 판매를 창고 여유로 계산하면 판매가 안 됐을 때 창고가 넘친다.
       사이클 A 는 전략 판매 = 0 을 가정하고 **안전한 방향으로만 틀린다.**
@@ -564,6 +593,36 @@ def check_occupancy_detailed(
             legs_dated=0,
             skipped=tuple(skipped),
         )
+
+    # 🔴 **마지막 cap 날짜 뒤에 도착하는 회차는 아래 루프의 어느 비교에도 안 걸린다**
+    #   (#183). 아무 problem 도 안 남으므로 **통과한 것처럼 읽힌다** — 창 밖을 0 이
+    #   아니라 무한대로 읽는 셈이다. 물류 IO Contract §6 은 셋을 가른다.
+    #
+    #       키 존재 + 값 0    입고 가능량이 0 이다        → 아래 루프가 잡는다
+    #       창 안인데 키 없음  계산 누락 또는 미결
+    #       창 밖             계산 대상이 아니다
+    #
+    #   ★ 창 안에서 키가 빠진 날짜는 **누적 비교가 이미 흡수한다** — `arrived` 가
+    #     `a <= d` 누적이라 그 다음 cap 날짜에서 같이 세어진다. 통째로 새는 것은
+    #     마지막 cap 날짜보다 뒤인 도착뿐이라 여기서만 가른다.
+    horizon = max(band.cap_by_date_kg)
+    window_end = _window_end(snapshot.as_of, lead, snapshot.cap_by_date_window_days)
+    for d in sorted(a for a in arrivals if a > horizon):
+        qty = arrivals[d]
+        if window_end is None:
+            skipped.append(
+                f"{d} 도착 {qty:,.0f}kg: cap_by_date 마지막 날짜({horizon}) 이후 — "
+                f"창 길이(cap_by_date_window_days) 미제공이라 창 밖인지 키 누락인지 못 가린다"
+            )
+        elif d > window_end:
+            skipped.append(
+                f"{d} 도착 {qty:,.0f}kg: cap_by_date 창(~{window_end}) 밖 — 검사 대상 아님"
+            )
+        else:
+            skipped.append(
+                f"{d} 도착 {qty:,.0f}kg: 창(~{window_end}) 안인데 cap_by_date 키 없음 — "
+                f"계산 누락 또는 미결"
+            )
 
     for d in sorted(band.cap_by_date_kg):
         # 🔴 **확정 점유를 더하지 않는다** (#181). cap 이 net 이라 이미 빠져 있다.

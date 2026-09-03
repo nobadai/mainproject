@@ -52,7 +52,7 @@ def _snapshot(req: CriticProcurementRequest) -> T0Snapshot:
     """Critic 이 읽는 최소 스냅샷. 나머지 필수 필드는 안전한 기본값으로 채운다.
 
     Critic 이 실제로 읽는 것: as_of · snapshot_id · price_basis · contract_price_basis
-    · inbound_lead_days. 그 외 필드는 검증에서 참조하지 않는다.
+    · inbound_lead_days · cap_by_date_window_days. 그 외 필드는 검증에서 참조하지 않는다.
     """
     zero_finance = FinanceSnapshot(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     return T0Snapshot(
@@ -69,6 +69,7 @@ def _snapshot(req: CriticProcurementRequest) -> T0Snapshot:
         contract_price_basis=req.contract_price_basis,
         snapshot_id=req.snapshot_id or "",
         inbound_lead_days=req.inbound_lead_days,
+        cap_by_date_window_days=req.cap_by_date_window_days,
     )
 
 
