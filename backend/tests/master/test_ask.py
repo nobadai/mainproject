@@ -471,6 +471,24 @@ def test_조건은_사용자의_말_그대로_매입에_넘어간다(client, rer
     assert rerun["request"].policy_values is None
 
 
+def test_조건_회차는_condition_seq_로_나간다(client, rerun):
+    """🔴 **`attempt` 가 아니다** (#178 · 매입 실측 2026-09-03).
+
+    슬롯을 둘로 나누면서(계약 v0.2 §2) **안의 키 이름은 안 갈랐다.** 매입이
+    `state["feedback"].get("attempt", 0)` 으로 **되먹임** 회차를 찾다가 여기 있는
+    **조건** 회차를 만났다 — 틀린 값이 아니라 다른 개념이었다.
+
+    ★ **만드는 자리에서 잰다.** `test_feedback_wiring` 은 `prior_feedback` 을 Flow 에
+      직접 넣어 *"나르는가"* 만 보므로, 여기 이름을 바꿔도 그쪽은 안 깨진다 —
+      변이로 확인했다. 매입이 내 `test_adjustment_scope` 에 지적한 것과 같은 구멍이다.
+    """
+    client.post("/master/ask/execute", json=rerun_body())
+
+    feedback = rerun["request"].prior_feedback
+    assert isinstance(feedback["condition_seq"], int)
+    assert "attempt" not in feedback, "attempt 는 되먹임 슬롯이 가진다"
+
+
 def test_재요청은_새_업무_키로_돌고_결정에_이어진다(client, rerun):
     data = client.post("/master/ask/execute", json=rerun_body()).json()
 
