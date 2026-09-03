@@ -103,7 +103,7 @@ def test_refeed_creates_new_lineage_and_keeps_purchase_reference_conditional(mon
                     "reply_ref": "PUR-1",
                     "runtime_status": "READY",
                     "business_status": "ok",
-                    "payload": {"procurable_quantity_kg": 2000},
+                    "payload": {"procurable_quantity_kg": 2000, "risks": []},
                 }
             ],
             "scenario_feedback": [{"scenario_id": "SALES-001-C", "reply_refs": ["PUR-1"]}],

@@ -6,10 +6,13 @@
 
 from decimal import Decimal
 
+from pydantic import ValidationError
+
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.schemas import (
     AllocationLeg,
     ProposalSelfCheck,
+    PurchaseAdditionalSupplyResult,
     SalesCandidate,
     SalesDomainReply,
     SalesProposalInput,
@@ -290,29 +293,62 @@ def _supply(
     )
 
 
+#: Purchase 추가공급 회신으로 **읽을 수 있는 유일한** capability.
+#:
+#: 🔴 출처(source_agent)만 보면 안 된다. Purchase 의 `GENERATE_SCENARIOS` 회신은
+#:    `scenarios[i].risks` 를 담은 완전히 다른 모양인데, 출처만 맞다고 추가공급
+#:    결과로 읽으면 최상위 `risks` 가 없어 조용히 "위험 0건" 이 되고 수량은 None 이
+#:    된다. 물어보지 않은 질문에 답을 받은 셈이 된다.
+_ADDITIONAL_SUPPLY_CAPABILITY = "ADDITIONAL_SUPPLY_CONTEXT"
+
+
+def _is_additional_supply_reply(reply: SalesDomainReply) -> bool:
+    """이 회신을 추가공급 결과로 읽어도 되는가 — 출처와 capability 를 **둘 다** 본다."""
+    return (
+        reply.source_agent == "purchase"
+        and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
+    )
+
+
+def _parse_additional_supply(
+    reply: SalesDomainReply,
+) -> PurchaseAdditionalSupplyResult | None:
+    """추가공급 회신 payload 를 약속한 모양으로만 읽는다.
+
+    ★ 약속을 안 지킨 payload 는 **소비하지 않는다.** 키가 없으면 None 을 돌려주고,
+      호출부는 그것을 정상 사실로 취급하지 않는다 — `[]`·`0` 으로 메우지 않는다.
+    """
+    try:
+        return PurchaseAdditionalSupplyResult.model_validate(reply.payload)
+    except ValidationError:
+        return None
+
+
 def _purchase_conditional_supply(
     replies: list[SalesDomainReply],
 ) -> tuple[Decimal | None, str | None]:
     """Purchase 가 **실제로 확인해 준** 조건부 확보 가능량만 옮긴다.
 
-    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다 —
-      missing 으로 바꾸지 않는다.
+    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다.
+      `READY + skipped + 0kg` 도 정상 조합이다 — 안이 만들어지지 않았지만 확보
+      가능량은 0kg 으로 확인됐다는 뜻이라, 그 0 을 None 이나 오류로 바꾸지 않는다.
 
-    ★ 못 돈 회신(skipped·RUNTIME_NOT_READY)이나 수량이 아예 없는 회신은 `None`(모름)
-      이다. 0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
+    ★ 확보 가능량을 **모르는** 경우만 `None` 이다. 회신이 `RUNTIME_NOT_READY` 이거나,
+      수량 칸을 명시적 null 로 보냈거나, 약속한 모양이 아니어서 읽을 수 없을 때다.
+      0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
 
     ★ 수량과 근거를 같이 나른다. 수량만 남고 어느 회신에서 왔는지 사라지면 나중에
       되짚을 수 없다.
     """
     for reply in replies:
-        if reply.source_agent != "purchase":
+        if not _is_additional_supply_reply(reply):
             continue
         if reply.runtime_status != "READY":
             continue
-        quantity = reply.payload.get("procurable_quantity_kg")
-        if isinstance(quantity, bool) or not isinstance(quantity, (int, float, Decimal)):
+        parsed = _parse_additional_supply(reply)
+        if parsed is None or parsed.procurable_quantity_kg is None:
             continue
-        return Decimal(str(quantity)), reply.reply_ref
+        return parsed.procurable_quantity_kg, reply.reply_ref
     return None, None
 
 
@@ -409,7 +445,7 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
             "reject",
         }:
             risks.append("FINANCE_FAIL")
-        if reply.source_agent == "purchase":
+        if _is_additional_supply_reply(reply):
             purchase_risks, depends_on_purchase = _purchase_effects(reply)
             # Purchase가 전달한 위험 문구는 Sales가 새 코드로 재해석하지 않는다.
             risks.extend(purchase_risks)
@@ -422,27 +458,25 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
 def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
     """Purchase의 권위 회신을 조건부 공급 의존성으로만 소비한다.
 
-    ``skipped + 0kg``도 응답된 capability이지만, 확보 가능한 조건부 물량이 없으므로
-    Sales Scenario를 조건부로 표시하지 않는다. Purchase 수량은 확정 Logistics 공급에
-    합산하거나 Sales 수량을 자동 조정하는 데 사용하지 않는다.
+    ``READY + skipped + 0kg``도 응답된 capability이지만, 확보 가능한 조건부 물량이
+    없으므로 Sales Scenario를 조건부로 표시하지 않는다. Purchase 수량은 확정 Logistics
+    공급에 합산하거나 Sales 수량을 자동 조정하는 데 사용하지 않는다.
+
+    🔴 약속한 모양이 아닌 payload 는 **위험 0건으로 읽지 않는다.** 예전에는
+       `payload.get("risks", [])` 라서 `risks` 칸이 없는 회신이 "위험 없음" 이 됐다.
+       확인하지 않은 것과 확인해서 없는 것은 다른 사실이다.
     """
-    payload = reply.payload
-    raw_risks = payload.get("risks", [])
-    risks = (
-        [risk for risk in raw_risks if isinstance(risk, str)] if isinstance(raw_risks, list) else []
-    )
-    quantity = payload.get("procurable_quantity_kg")
-    has_positive_quantity = (
-        isinstance(quantity, (int, float, Decimal))
-        and not isinstance(quantity, bool)
-        and quantity > 0
-    )
+    parsed = _parse_additional_supply(reply)
+    if parsed is None:
+        # 읽을 수 없는 회신에서 사실을 만들어 내지 않는다.
+        return [], False
     depends_on_purchase = (
         reply.runtime_status == "READY"
         and (reply.business_status or "").lower() == "ok"
-        and has_positive_quantity
+        and parsed.procurable_quantity_kg is not None
+        and parsed.procurable_quantity_kg > 0
     )
-    return risks, depends_on_purchase
+    return list(parsed.risks), depends_on_purchase
 
 
 def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
