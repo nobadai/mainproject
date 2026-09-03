@@ -279,6 +279,10 @@ class ProcurementFlow:
         self.sourced_evidences: list[SourcedEvidence] = []
         #: 부서가 낸 조정안. **마스터는 고르지도 정렬하지도 않는다** - 온 차례 그대로.
         self.suggested_adjustments: list[SuggestedAdjustment] = []
+
+        #: 조정안 전달 대조에서 어긋난 것. **정상이면 비어 있다** — 대조군이 조용해야
+        #: 어긋남이 눈에 띈다.
+        self.delivery_notes: list[str] = []
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
@@ -333,12 +337,23 @@ class ProcurementFlow:
 
         while attempts < self.max_purchase_attempts:
             attempts += 1
-            purchase = self.runner.call(
-                "purchase", "GENERATE_SCENARIOS", self._purchase_input(constraints, feedback)
-            )
+            # ★ **보낸 건수를 여기서 센다.** payload 를 만든 자리에서 세지 않으면
+            #   나중에 `self.suggested_adjustments` 를 다시 세게 되는데, 그것은
+            #   *"이 회차에 실제로 실려 나간 것"* 이 아니라 **누적된 것**이다.
+            #   1회차에는 `feedback` 이 없어 안 실린다 — 그 차이가 사라진다.
+            purchase_payload = self._purchase_input(constraints, feedback)
+            sent_adjustments = len(purchase_payload.get("adjustments") or ())
+            purchase = self.runner.call("purchase", "GENERATE_SCENARIOS", purchase_payload)
             proposal = dict(purchase.payload)
             scenarios = _scenarios_of(purchase)
             judgment = _judgment_of(purchase)
+
+            # 🔴 **보낸 것과 받았다고 적힌 것을 대조한다** (2026-09-03).
+            #   매입이 `meta.received_adjustments` 를 채우는데 마스터가 안 읽고 있었다 —
+            #   내가 여러 파트에 지적한 *"값을 실어 주고 안 쓴다"* 의 **반대편**이다.
+            delivery = self._adjustment_delivery(attempts, sent_adjustments, judgment)
+            if delivery:
+                self.delivery_notes.append(delivery)
 
             # 🔴 **제안자 근거도 모은다** (2026-09-02 · 매입 실측으로 발견).
             #
@@ -477,6 +492,7 @@ class ProcurementFlow:
         self.constraint_evidences = {}
         self.sourced_evidences = []
         self.suggested_adjustments = []
+        self.delivery_notes = []
         for agent in self.advisors:
             reply = self.runner.call(agent, "PRE_PURCHASE", self._boundary_input())
             if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
@@ -843,6 +859,48 @@ class ProcurementFlow:
         ]
         return f"판정을 받지 못해 올리지 않는다 — {' · '.join(parts)}"
 
+    def _adjustment_delivery(
+        self, attempt: int, sent: int, judgment: Mapping[str, Any]
+    ) -> str:
+        """보낸 조정안과 **매입이 받았다고 적은 수**를 대조한다. 맞으면 빈 문자열이다.
+
+        🔴 **매입이 채우는데 마스터가 안 읽고 있었다.**
+
+        ```text
+        app/purchase_agent/nodes/self_check.py:722
+            "received_adjustments": len(state.get("adjustments") or [])
+        ```
+
+        내가 여러 파트에 지적해 온 *"값을 실어 주고 안 쓴다"* 의 **정확한 반대편**이다.
+        조정안을 보내 놓고 **닿았는지를 아무도 안 봤다.**
+
+        ★ **맞으면 아무것도 안 적는다.** 정상 경로가 시끄러우면 어긋남이 안 보인다.
+
+        ★ **`findings` 가 아니라 `concerns` 다.** 매입을 다시 불러도 배선이 끊긴
+          사실은 그대로다 — 사람이 볼 것이지 재시도할 것이 아니다 (`04` §3.2).
+
+        ⚠️ **이것은 "반영됐나" 가 아니라 "닿았나" 다.** 반영은 매입이
+          `applied_adjustments` 를 회신해야 알 수 있고 그 칸은 아직 없다
+          (매입 ①timing 에서 만든다). 두 사실을 한 문장으로 뭉개지 않는다.
+        """
+        if not sent:
+            return ""  # 안 보낸 회차는 대조할 것이 없다 (1회차가 늘 그렇다)
+
+        meta = judgment.get("meta")
+        if not isinstance(meta, Mapping) or "received_adjustments" not in meta:
+            return (
+                f"{attempt}회차: 조정안 {sent}건을 보냈는데 매입 회신에 "
+                f"received_adjustments 가 없다 — 닿았는지 알 수 없다"
+            )
+
+        received = meta["received_adjustments"]
+        if received != sent:
+            return (
+                f"{attempt}회차: 조정안 {sent}건을 보냈는데 매입은 {received}건 "
+                f"받았다고 적었다 — 전선에서 빠진 것이 있다"
+            )
+        return ""
+
     def _exhausted_reason(
         self,
         attempts: int,
@@ -858,8 +916,18 @@ class ProcurementFlow:
           매입에 안 간다.
 
         ★ **되먹임을 배선하지 않은 것은 선택이다. 안 한 것을 한 것처럼 읽히게 두는 것은
-          선택이 아니다.** 배선이 끝나면 이 문장은 전달 건수와 반영 건수를 적는 쪽으로
-          바뀐다 — 그때까지 여기가 그 사실을 말하는 유일한 자리다.
+          선택이 아니다.**
+
+        🟢 **전달 대조는 여기서 안 한다** (2026-09-03). 예고했던 *"전달 건수와 반영
+          건수를 적는 쪽으로 바뀐다"* 를 다시 갈랐다 — 셋이 다른 사실이다.
+
+        ```text
+        그 지적이 매입에 갔는가        이 문장이 소유한다
+        조정안이 닿았는가             _adjustment_delivery 가 concerns 로 낸다
+        조정안이 반영됐는가           applied_adjustments 가 와야 안다 (아직 없다)
+        ```
+
+          한 문장이 셋을 말하면 어느 것이 틀렸는지 못 가린다.
 
         ★ **왜 못 냈는지는 안 쓴다.** 그건 `findings` 와 `verdicts` 가 이미 응답에
           싣고 있고, 여기서 한 번 더 요약하면 같은 사실의 주인이 둘이 된다.
@@ -930,6 +998,10 @@ class ProcurementFlow:
 
     def _outcome(self, end_code: EndCode, reason: str, **kw: Any) -> ProcurementOutcome:
         plan: ExecutionPlan = self.runner.plan
+        # ★ **모든 종료 코드에서 싣는다.** 배관이 끊긴 날이야말로 그 사실이 필요하다 —
+        #   E1 로 끝나도 조정안이 안 닿았으면 그 통과는 되먹임과 무관하게 난 것이다.
+        if self.delivery_notes:
+            kw["concerns"] = (*kw.get("concerns", ()), *self.delivery_notes)
         return ProcurementOutcome(
             end_code=end_code,
             reason=reason,
