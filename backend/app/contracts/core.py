@@ -156,6 +156,37 @@ Severity = Literal["HIGH", "MEDIUM", "LOW"]
 #   **부서가 죽은 날에 무제한 매입이 통과한다.** Band.not_ready 로 명시적으로 막는다.
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 
+# ★ 2026-09-03 — 안이 무엇 때문에 깎였는가. **소유는 마스터**다 (매입 P-4 답).
+#
+#   매입 `draft_plan` 이 `clipped_by[].constraint` 로 내고, 앞으로 `applied_adjustments`
+#   의 `binding` 에도 같은 어휘가 실린다. 공용 계약이고 Critic 도 검사해야 하므로
+#   **한 파트가 정하면 그 파트 화면 문구에 맞는 값**이 된다.
+#
+# 🔴 **한글을 쓰지 않는 이유가 있다.** 지금 매입은 `{"창고", "현금", "신선도"}` 를
+#   쓰는데, `"현금"` 이 **다른 축에도 있다**.
+#
+#   ```text
+#   자원 축     clipped_by[].constraint     창고 · 현금 · 신선도
+#   근거 출처 축 RationaleSource            예측 · 시세관측 · 재고 · 주문 · 현금 · 문서ID
+#                (app/purchase_agent/schemas.py:91)
+#   ```
+#
+#   **같은 문자열인데 뜻이 다르다.** 표시 문구를 값으로 쓰면 축이 섞인다.
+#
+# ⚠️ `"현금"` 이 아니라 `자금` 인 것도 그래서다 (매입·판매 정리) — 재무 제약은
+#   차입여력·예정 유출입까지 포함해서 *"현금"* 은 좁게 읽힌다.
+BindingConstraint = Literal["WAREHOUSE", "FINANCE", "FRESHNESS"]
+
+BINDING_CONSTRAINT_LABELS: Mapping[str, str] = {
+    "WAREHOUSE": "창고",
+    "FINANCE": "자금",
+    "FRESHNESS": "신선도",
+}
+"""사람이 읽는 문구. **어휘는 마스터가, 표시는 부서가 정한다** — 뜻을 아는 쪽이
+   문구를 정하는 것이 맞다 (매입 제공 2026-09-03).
+
+⚠️ **표시 문구로 판정하지 않는다.** 값 비교는 위 `BindingConstraint` 로만 한다."""
+
 
 class ContractViolation(Exception):
     """계약 위반. 문서 규칙이 아니라 타입 레벨에서 즉시 터뜨린다."""
