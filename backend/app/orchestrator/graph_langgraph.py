@@ -35,9 +35,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 
-from app.orchestrator import contracts_core
+from app.contracts import core as contracts_core
+from app.contracts.core import Dept, PipelineState, T0Snapshot
 from app.orchestrator import graph as G
-from app.orchestrator.contracts_core import Dept, PipelineState, T0Snapshot
 from app.orchestrator.llm.selector import make_selector
 
 DEPTS: tuple[Dept, ...] = ("sales", "inventory", "finance")
@@ -46,6 +46,15 @@ DEPTS: tuple[Dept, ...] = ("sales", "inventory", "finance")
 # 기본(permissive)은 타입마다 경고를 뿌리고 **향후 버전에서 차단**된다 — 미리 못박아 둔다.
 # ★ 목록을 손으로 적지 않는다. 계약에 dataclass 가 늘면 조용히 빠져 역직렬화가 dict 로
 #   무너지고, 그 증상은 한참 뒤 노드에서 AttributeError 로 나타난다.
+#
+# 🔴 **이 파일만 자리 이전 ③ 을 먼저 했다** (2026-09-03). 아래 판별식이
+#   `obj.__module__` 을 보기 때문에 **재수출 shim 으로는 안 덮인다** — 계약이
+#   `app.contracts.core` 로 옮겨진 순간 `__module__` 이 갈려 이 튜플이 통째로
+#   비었고, 위 주석이 예고한 그대로 `AttributeError: 'dict' object has no
+#   attribute 'deadlock'` 이 났다.
+#
+#   ⚠️ **경로가 아니라 모듈 정체성에 의존하는 코드는 shim 이 못 살린다.**
+#     저장소 전체를 훑어 같은 패턴은 여기 하나뿐인 것을 확인했다.
 _CONTRACT_TYPES: tuple[type, ...] = tuple(
     obj
     for _, obj in inspect.getmembers(contracts_core, inspect.isclass)
