@@ -57,8 +57,17 @@ def _adj(axis: str = "quantity", unit: str = "kg") -> SuggestedAdjustment:
     )
 
 
-def _advisor(adjustments: tuple[SuggestedAdjustment, ...], verdict: str):
-    """판정에서 조정안을 내는 조언자. **`reject` 여야 재호출이 일어난다.**"""
+def _advisor(
+    adjustments: tuple[SuggestedAdjustment, ...],
+    verdict: str,
+    pre_adjustments: tuple[SuggestedAdjustment, ...] = (),
+):
+    """판정에서 조정안을 내는 조언자. **`reject` 여야 재호출이 일어난다.**
+
+    ★ `pre_adjustments` 는 **경계 단계**에서 오는 조정안이다. 지금 그러는 부서는
+      없지만 계약이 허용하고 `_collect_constraints:504` 가 버리지 않는다.
+      **누적과 실려 나간 것이 갈리는 유일한 자리**라 여기서만 재현된다.
+    """
 
     def port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         run_id = f"{request.agent.upper()}-{request.mode[:3]}-{request.call_seq}"
@@ -71,7 +80,12 @@ def _advisor(adjustments: tuple[SuggestedAdjustment, ...], verdict: str):
             "runtime_status": "READY",
         }
         if request.mode == "PRE_PURCHASE":
-            reply = AgentReply(**common, business_status="ok", payload={"cap": 1})
+            reply = AgentReply(
+                **common,
+                business_status="ok",
+                payload={"cap": 1},
+                suggested_adjustments=pre_adjustments,
+            )
         else:
             reply = AgentReply(
                 **common,
@@ -115,10 +129,15 @@ def _purchaser(meta_by_call: dict[int, dict[str, Any]]):
     return port
 
 
-def _run(*, meta_by_call: dict[int, dict[str, Any]], verdict: str = "reject"):
+def _run(
+    *,
+    meta_by_call: dict[int, dict[str, Any]],
+    verdict: str = "reject",
+    pre_adjustments: tuple[SuggestedAdjustment, ...] = (),
+):
     registry = AgentRegistry()
     registry.register("finance", _advisor((), "ok"))
-    registry.register("inventory", _advisor((_adj(),), verdict))
+    registry.register("inventory", _advisor((_adj(),), verdict, pre_adjustments))
     purchaser = _purchaser(meta_by_call)
     registry.register("purchase", purchaser)
     flow = ProcurementFlow(
@@ -204,3 +223,31 @@ def test_findings_가_아니라_concerns_다():
 
     assert any("조정안" in c for c in outcome.concerns)
     assert not any("조정안 1건을 보냈는데" in f for f in outcome.findings)
+
+
+def test_누적이_아니라_이번에_실려_나간_것을_센다():
+    """🔴 **경계 단계 조정안이 있으면 두 세는 법이 갈린다.**
+
+    ```text
+    self.suggested_adjustments   경계 + 판정을 누적한다
+    payload["adjustments"]       feedback 이 있을 때만 실린다 (1회차에는 없다)
+    ```
+
+    누적을 세면 **1회차에 안 보낸 것을 보냈다고 세어** 없는 어긋남을 만든다.
+    지금 경계에서 조정안을 내는 부서는 없지만 계약이 허용하고
+    `_collect_constraints:504` 가 그것을 버리지 않는다.
+
+    ★ 이 검사가 없으면 두 세는 법이 같은 값을 내서 **변이가 살아남는다**
+      (실측 2026-09-03 — M6 이 그렇게 통과했다).
+    """
+    outcome, purchaser = _run(
+        meta_by_call={1: {"received_adjustments": 0}},
+        verdict="ok",
+        pre_adjustments=(_adj(),),
+    )
+
+    assert len(purchaser.calls) == 1, "재호출이 없어야 1회차만 도는 상황이 된다"
+    assert outcome.adjustments, "경계 조정안이 실제로 모여야 이 검사가 의미 있다"
+    assert not [c for c in outcome.concerns if "조정안" in c], (
+        f"1회차에 안 보낸 것을 보냈다고 셌다: {outcome.concerns}"
+    )
