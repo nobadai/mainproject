@@ -10,7 +10,11 @@
   그래서 DDL/마이그레이션과 Controller 허용목록은 같이 움직인다.
 """
 
+from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
+
+import pytest
 
 from app.finance.adapter import _CONTROLLER_MODES
 from app.finance.application.harness import (
@@ -26,7 +30,46 @@ from app.finance.application.harness import (
     dependencies_of,
     required_capabilities,
 )
+from app.finance.db import FinanceDataNotReady
 from app.finance.schemas import FinanceMode
+
+# ---------------------------------------------------------------------------
+# 판매 Capability 를 직접 부를 때 쓰는 최소 도구
+#
+# ★ 거래처 채권은 이제 실 원장에서 온다. 그래서 Port 없이 이 Capability 를 부를 수
+#   없다 — `None` 을 넘기던 예전 모양은 "조회가 아예 없다" 는 뜻이었다.
+# ---------------------------------------------------------------------------
+
+_AS_OF = date(2025, 12, 31)
+
+
+def _sales_state(**over):
+    payload = {
+        "scenario_id": "SC-1",
+        "partner_id": "P-1",
+        "item": "red_pepper",
+        "quantity_kg": "100",
+        "unit_price_krw": "10000",
+        "reported_sales_amount_krw": "1000000",
+        "payment_terms_type": "SINGLE",
+        "source_ref": "SALES-REPLY:R-1",
+    }
+    payload.update(over)
+    return SimpleNamespace(
+        request=SimpleNamespace(payload=payload, context=SimpleNamespace(as_of=_AS_OF))
+    )
+
+
+def _receivable_port(*receivables):
+    """실 조회를 대신하는 최소 Port. **행을 주는 일만 한다.**"""
+
+    class _Port:
+        def load_partner_receivables(self, as_of, partner_id):
+            del as_of, partner_id
+            return list(receivables)
+
+    return _Port()
+
 
 # ---------------------------------------------------------------------------
 # mode 어휘
@@ -177,39 +220,54 @@ def test_harness_entrypoint_discards_planner_arguments():
 
 
 def test_missing_sales_policies_are_reported_not_invented():
+    """실 채권을 읽고 난 뒤에도 **없는 것은 여전히 없다.**
+
+    ★ 채권이 실데이터로 들어왔다고 여신한도까지 생기지 않는다. 한도는 거래처가
+      소유한 별개의 사실이고 권위 있는 저장 위치가 아직 없다 — 채권 잔액으로
+      한도를 역산하는 순간 없는 값이 판정에 들어간다.
+    """
     from app.finance.capabilities.sales import run_sales_validation
 
-    state = SimpleNamespace(
-        request=SimpleNamespace(
-            payload={
-                "scenario_id": "SC-1",
-                "partner_id": "P-1",
-                "item": "red_pepper",
-                "quantity_kg": "100",
-                "unit_price_krw": "10000",
-                "reported_sales_amount_krw": "1000000",
-                "payment_terms_type": "SINGLE",
-                "source_ref": "SALES-REPLY:R-1",
-            }
-        )
-    )
-
-    result = run_sales_validation(None, {}, state)  # type: ignore[arg-type]
+    result = run_sales_validation(_receivable_port(), {}, _sales_state())
 
     assert result["status"] == "RUNTIME_NOT_READY"
     assert result["finance_verdict"] is None
     assert result["data_quality"] == "INCOMPLETE"
-    # ★ 이제 남는 것은 **정책이 아니라 거래처가 소유한 사실**이다.
-    #   마진 임계값·최대 결제일수·회수위험 판정 방식은 MVP 정책이 공급하므로 더 이상
-    #   없는 것으로 보고되지 않는다.
-    for fact in ("partner_credit_limit_krw", "partner_receivable_facts"):
-        assert fact in result["missing_data"], fact
+    # ★ 남는 것은 **여신한도 하나**다. 마진 임계값·최대 결제일수·회수위험 판정
+    #   방식은 MVP 정책이, 거래처 채권은 실 원장이 공급한다.
+    assert "partner_credit_limit_krw" in result["missing_data"]
     for supplied in (
         "finance_minimum_margin_rate",
         "finance_warning_margin_rate",
         "max_finance_allowed_payment_terms_days",
+        "partner_receivable_facts",
     ):
         assert supplied not in result["missing_data"], supplied
+
+
+def test_an_empty_ledger_is_a_fact_not_a_missing_fact():
+    """🔴 조회가 성공했고 미회수 행이 0건인 것은 **채권이 0원이라는 사실**이다.
+
+    신규 거래처를 "자료 미비" 로 다루면 영영 아무 판정도 받지 못한다.
+    """
+    from app.finance.capabilities.sales import run_sales_validation
+
+    result = run_sales_validation(_receivable_port(), {}, _sales_state())
+
+    assert result["financial_summary"]["current_partner_ar_krw"] == Decimal(0)
+    assert result["financial_summary"]["overdue_ar_krw"] == Decimal(0)
+
+
+def test_a_failed_lookup_is_not_an_empty_ledger():
+    """🔴 못 읽은 것은 0원이 아니다 — 실행 자체가 서야 한다."""
+    from app.finance.capabilities.sales import run_sales_validation
+
+    class _BrokenPort:
+        def load_partner_receivables(self, as_of, partner_id):
+            raise FinanceDataNotReady("partner_receivables")
+
+    with pytest.raises(FinanceDataNotReady):
+        run_sales_validation(_BrokenPort(), {}, _sales_state())  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ def _run(request, finance_context):
             "app.finance.adapter.get_current_finance_runtime_context",
             return_value=finance_context,
         ),
+        patch("app.finance.adapter.load_partner_receivables", return_value=[]),
         patch("app.finance.llm.planner.finance_llm_enabled", return_value=False),
         patch("app.finance.adapter.finance_llm_enabled", return_value=False),
         patch(f"{_EXECUTION}.get_db_schema", return_value="haetdeul"),
@@ -342,11 +343,11 @@ def test_batch_never_invents_a_sales_policy_number(finance_context):
 
     result = reply.payload["scenario_results"][0]
     summary = result["financial_summary"] or {}
-    # 거래처가 소유한 사실은 여전히 없다 — 재무가 만들지 않는다.
+    # 여신한도는 여전히 없다 — 채권을 읽었다고 한도가 생기지 않는다.
     assert summary.get("credit_limit_krw") is None
     assert summary.get("contribution_margin_rate") is None
-    for fact in ("partner_credit_limit_krw", "partner_receivable_facts"):
-        assert fact in result["missing_data"], fact
+    assert "partner_credit_limit_krw" in result["missing_data"]
+    assert "partner_receivable_facts" not in result["missing_data"]
 
 
 # ---------------------------------------------------------------------------
