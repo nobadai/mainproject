@@ -210,8 +210,11 @@ def test_service_가_출처를_flow_에_넘긴다(monkeypatch):
     from app.master.schemas import ProcurementRunRequest
     from app.master.service import run_procurement
 
+    # ⚠️ 등급이 `MEASURED` 다. 전에는 `MOCK` 이었는데, 2026-09-03 부터 mock 입력은
+    #   부서를 부르기 전에 실행을 세운다 — 그러면 이 검사가 재려는 것(출처가 매입까지
+    #   가는가)을 못 잰다. 막는 쪽은 아래 짝 검사가 따로 본다.
     loaded = MasterInputs(
-        forecast=SourcedInput("forecast", {"horizon_days": 18}, "MOCK", "mocks", ""),
+        forecast=SourcedInput("forecast", {"horizon_days": 18}, "MEASURED", "뷰", ""),
         confirmed_orders=SourcedInput("confirmed_orders", {"total_kg": 1.0}, "DERIVED", "뷰", ""),
         policy_values=SourcedInput("policy_values", {"contract_price_krw": 1}, "DERIVED", "표", ""),
     )
@@ -232,9 +235,49 @@ def test_service_가_출처를_flow_에_넘긴다(monkeypatch):
     )
 
     assert got, "매입이 불려야 이 검사가 의미 있다"
-    assert got[0]["input_sources"]["forecast"].startswith("MOCK"), (
+    assert got[0]["input_sources"]["forecast"].startswith("MEASURED"), (
         f"service 가 출처를 안 넘겼다: {got[0].get('input_sources')}"
     )
+
+
+def test_service_가_mock_차단도_flow_에_넘긴다(monkeypatch):
+    """🔴 **같은 파일이 경고한 그 짝이다** (2026-09-03).
+
+    위 검사가 *"옮기는 쪽을 재는 검사를 짝으로 두지 않으면 배선이 끊겨도 초록불"* 이라
+    적어 뒀다. `mocked_inputs` 배선에 같은 짝을 둔다.
+
+    ★ 재는 것은 **부서를 안 부른다**는 것이다. 한 번이라도 부르면 그 회신이 이력에
+      남고, 나중에 읽는 사람이 *"돌긴 돌았다"* 로 읽는다.
+    """
+    from app.master import wiring
+    from app.master.inputs import MasterInputs, SourcedInput
+    from app.master.schemas import ProcurementRunRequest
+    from app.master.service import run_procurement
+
+    loaded = MasterInputs(
+        forecast=SourcedInput("forecast", {"horizon_days": 18}, "MOCK", "mocks", ""),
+        confirmed_orders=SourcedInput("confirmed_orders", {"total_kg": 1.0}, "DERIVED", "뷰", ""),
+        policy_values=SourcedInput("policy_values", {"contract_price_krw": 1}, "DERIVED", "표", ""),
+    )
+    monkeypatch.setattr("app.master.service.collect_inputs", lambda *a, **k: loaded)
+    monkeypatch.setattr("app.master.service.persistence.record", lambda *a, **k: None)
+
+    got, purchase = _seen()
+    wiring.reset()
+    wiring.register("finance", _port())
+    wiring.register("inventory", _port())
+    wiring.register("purchase", purchase)
+
+    response = run_procurement(
+        ProcurementRunRequest(
+            as_of=AS_OF, policy_version="v1.3", item="배추", request_id="REQ-SRC-2"
+        ),
+        verifier=None,
+    )
+
+    assert not got, "mock 입력인데 매입을 불렀다 — 차단 배선이 끊겼다"
+    assert response.end_code == "E4_NOT_STARTED"
+    assert "forecast" in response.reason, f"어느 입력이 mock 인지 안 말한다: {response.reason}"
 
 
 # ── ④ ML 신뢰도 — use_recommended ─────────────────────────────────────────

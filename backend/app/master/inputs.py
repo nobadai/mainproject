@@ -18,11 +18,23 @@ policy_values     정책 테이블 — 운반 주체 미결 (M-19)
   `missing_data` 로 답하게 한다 — 0 이나 평균값으로 메우면 **그럴듯하게 틀린 계획**이
   나온다.
 
-🔴 **`MOCK` 등급은 한시 조치다.** 지금 mock 으로 떨어지는 것은 `forecast` 하나이고,
-  이유는 값이 없어서가 아니라 **앵커가 어긋나서**다 — ML 예측은 `2026-08-26~27` 에만
-  있고 재무·물류·판매는 `2025-12-01~31` 에 있다. 어느 날을 잡아도 셋이 함께 서지
-  않는 것이 M-24 이고, **이 파일이 그 사실의 실측 증거다.** 앵커가 정렬되면
-  `_forecast_from_db` 가 그대로 답하고 fallback 은 죽는다.
+🟢 **`MOCK` 다리를 걷었다** (2026-09-03).
+
+  앵커가 어긋나 있던 동안(`M-24`) `forecast` 가 mock 으로 떨어졌다. `D-2` 가
+  `2025-12-31` 로 확정되면서 세 품목 전부 실 예측이 선다 — 실측으로 확인했다.
+
+  .. code-block:: text
+
+      배추 · 무 · 양파   grade=MEASURED   v_ml_price_forecast(as_of=2025-12-31, AUC)
+
+🔴 **그리고 다시 놓지 않는다.** ML DB 가 죽었는데 mock 으로 돌면 **장애가 정상으로
+  보인다.** 그 갈래가 마스터 실측을 두 번 오염시켰다 (2026-08-31 · 09-03 피마늘).
+
+  이제 못 읽으면 `MISSING` 이고, 매입이 `missing_data: ["forecast"]` 로
+  `RUNTIME_NOT_READY` 를 낸다. **못 한 것이 한 것으로 안 보인다.**
+
+★ `MOCK` 은 어휘에 남긴다. 만드는 곳이 지금은 없지만, 새 다리가 생기면 그것이
+  스스로 `MOCK` 이라고 말할 자리가 있어야 하고 그때 `ProcurementFlow` 가 세운다.
 """
 
 from __future__ import annotations
@@ -109,9 +121,9 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
     try:
         row = _forecast_from_db(item, as_of)
     except Exception as error:  # noqa: BLE001 — 적재 실패가 Flow 를 죽이면 안 된다
-        return _forecast_fallback(item, as_of, f"DB 조회 실패 ({error})")
+        return _forecast_missing(f"DB 조회 실패 ({error})")
     if row is None:
-        return _forecast_fallback(item, as_of, f"{as_of} 이전 예측 배치가 없다")
+        return _forecast_missing(f"{as_of} 이전 예측 배치가 없다")
     return SourcedInput(
         key="forecast",
         payload=_forecast_payload(row),
@@ -165,27 +177,17 @@ def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _forecast_fallback(item: str, as_of: date, why: str) -> SourcedInput:
-    """🔴 **한시 조치.** 앵커가 정렬되면 이 갈래는 죽는다.
+def _forecast_missing(why: str) -> SourcedInput:
+    """🔴 **못 읽으면 비운다. mock 으로 메우지 않는다** (2026-09-03).
 
-    ML 예측이 `2026-08-26~27` 에만 있고 재무·물류는 `2025-12-31` 에 있어, **둘이 함께
-    서는 날이 없다**(M-24). 관통을 한 번 뚫어 보기 위해 mock 으로 메우되 **등급을
-    `MOCK` 으로 올려** 리포트에 그대로 드러낸다.
+    전에는 여기서 `app.purchase_agent.mocks` 를 집어 왔다. 그러면 ML DB 장애가
+    **정상 실행처럼** 보인다 — 매입이 안을 만들고 세 부서가 판정하고 `E1_APPROVED`
+    까지 간다. 사람이 `input_sources` 를 읽지 않으면 아무도 모른다.
+
+    ★ 비우면 매입이 `missing_data: ["forecast"]` 로 `RUNTIME_NOT_READY` 를 낸다.
+      **없는 것과 못 만든 것을 가르는 것**이 이 프로젝트의 §1.2-10 이다.
     """
-    try:
-        from app.purchase_agent import ports  # 🔴 한시 다리 — 앵커 정렬 시 제거
-
-        return SourcedInput(
-            key="forecast",
-            payload=ports.get_forecast(item, as_of),
-            grade="MOCK",
-            source="purchase_agent/mocks",
-            note=f"{why} — 앵커 정렬(M-24) 전까지의 한시 조치",
-        )
-    except Exception as error:  # noqa: BLE001
-        return SourcedInput(
-            key="forecast", payload=None, grade="MISSING", source="-", note=f"{why} · {error}"
-        )
+    return SourcedInput(key="forecast", payload=None, grade="MISSING", source="-", note=why)
 
 
 # ── confirmed_orders ────────────────────────────────────────────────────
