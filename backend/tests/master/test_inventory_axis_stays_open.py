@@ -45,9 +45,12 @@ def _annotation_of(path: Path, cls_name: str, field: str) -> str:
     classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == cls_name]
     assert len(classes) == 1, f"{path.name} 에 {cls_name} 이 {len(classes)} 개다"
     for node in classes[0].body:
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.target.id == field:
-                return ast.unparse(node.annotation)
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == field
+        ):
+            return ast.unparse(node.annotation)
     raise AssertionError(f"{cls_name} 에 {field} 칸이 없다")
 
 
