@@ -318,7 +318,7 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
       `prior_feedback` 으로 매입에 넘기고, **해석은 매입이 한다** (§3.2.2).
 
     🔴 **지금 매입은 그 조건으로 안을 바꾸지 않는다.** `prior_feedback` 을
-      `is_refeed`·`attempt` 메타로만 읽는다(`self_check.py`). 그래서 재실행 결과에
+      `is_refeed` 메타로만 읽는다(`self_check.py`). 그래서 재실행 결과에
       **그 사실을 적어 내보낸다** — 안 적으면 사용자는 조건이 반영된 줄 안다.
       값을 실어 주고 안 쓰는 것을 매입에 지적해 놓고 같은 일을 조용히 할 수는 없다.
 
@@ -356,7 +356,22 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
             budget=request.budget,
             prior_feedback={
                 "condition_text": intent.condition,
-                "attempt": decision.decision_seq,
+                # 🔴 **`attempt` 가 아니다** (#178 · 매입 실측 2026-09-03).
+                #
+                #   슬롯을 둘로 나누면서(계약 v0.2 §2) **안의 키 이름은 안 갈랐다.**
+                #   수명·모양·권위가 다르다고 슬롯을 나눠 놓고 같은 이름을 양쪽에 뒀다.
+                #
+                #     prior_feedback["condition_seq"]   사람이 조건을 건 회차   ← 여기
+                #     feedback_context["attempt"]       매입 재호출 회차
+                #
+                #   매입이 `state["feedback"].get("attempt", 0)` 으로 되먹임 회차를
+                #   찾다가 늘 0을 받았다 — 틀린 값을 읽은 것이 아니라 **다른 개념을
+                #   같은 이름으로 찾고 있었다.**
+                #
+                # ★ **`attempt` 는 되먹임 쪽이 가진다.** 매입 `constraints.yaml` 의
+                #   `attempt_max`(= `MAX_PURCHASE_ATTEMPTS` 인용)가 세는 것이 그쪽이라
+                #   이름이 이미 그 뜻으로 쓰이고 있다. 옮기면 더 헷갈린다.
+                "condition_seq": decision.decision_seq,
                 "requested_by": request.decided_by,
                 "origin_request_id": request.target_request_id,
             },

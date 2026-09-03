@@ -485,6 +485,15 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         "inbound_lead_days": inventory.get("inbound_lead_days"),
         "critical_payment_dates": list(finance.get("critical_payment_dates") or []),
         "feedback": dict(payload.get("prior_feedback") or {}) or None,
+        # 🔴 **``feedback`` 과 다른 슬롯이다** (되먹임 계약 v0.2 §2 · state.py 주석 참조).
+        #   저쪽은 사람이 준 조건이고 이쪽은 조언자가 준 조정안이다 — 수명·모양·권위가
+        #   달라 한 칸에 담으면 받는 쪽이 타입으로 갈라야 한다.
+        #
+        # ⚠️ **받기만 한다.** 반영 규칙이 미정이라 어느 노드도 아직 안 읽는다.
+        #   전에는 마스터가 2회차에 실어 보내는데 이 자리에서 **조용히 버렸다** —
+        #   보내는 쪽은 우리가 안 쓰는 줄 모른다.
+        "adjustments": [dict(item) for item in payload.get("adjustments") or []],
+        "feedback_context": dict(payload.get("feedback_context") or {}) or None,
         "context_docs": [],
         "context_loop_count": 0,
         "rejected_reasons": [],
@@ -609,7 +618,7 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             evidence_grade="SIM_FIXED",
             evidence_detail=(
                 f"D+{judgment_day} 구간폭을 임계 {threshold}와 비교해 "
-                f"{_situation_ko(payload.get('situation'))}으로 판정"
+                f"{_situation_josa(payload.get('situation'))} 판정"
             ),
         ),
         # ── allowed_axes는 **게이트마다 한 건**이다 (현서님 회신 8/27) ──────────
@@ -750,6 +759,27 @@ _SITUATION_KO: dict[str, str] = {
     "stable": "예측이 안정적",
     "uncertain": "예측이 불확실",
 }
+
+
+def _situation_josa(situation: Any) -> str:
+    """``_situation_ko`` 에 ``으로``/``로`` 를 붙여 돌려준다.
+
+    🔴 **조사를 문자열에 고정할 수 없다.** 같은 자리에 두 값이 들어오는데 받침이 다르다 —
+      "안정적" 은 ㄱ 받침이라 *안정적으로* 이고 "불확실" 은 ㄹ 받침이라 *불확실로* 다.
+      ``…으로`` 로 박아두었더니 uncertain 인 날마다 **"예측이 불확실으로 판정"** 이
+      나갔다 (12-31 관통 4품목 중 3품목 · 2026-09-03 실측).
+
+    받침이 없거나 ㄹ 이면 ``로``, 그 밖의 받침이면 ``으로`` — 한글 음절이 아니면
+    (``_situation_ko`` 가 모르는 값을 그대로 흘리는 경우) ``로`` 로 둔다.
+    """
+    word = _situation_ko(situation)
+    if not word:
+        return "로"
+    code = ord(word[-1])
+    if not 0xAC00 <= code <= 0xD7A3:
+        return f"{word}로"
+    jongseong = (code - 0xAC00) % 28
+    return f"{word}로" if jongseong in (0, 8) else f"{word}으로"
 
 
 def _situation_ko(situation: Any) -> str:

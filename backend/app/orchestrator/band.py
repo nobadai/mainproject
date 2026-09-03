@@ -489,11 +489,37 @@ def check_occupancy_detailed(
     inbound_lead_days: int | None = None,
 ) -> OccupancyResult:
     """
-        날짜 d 점유 = 확정 점유[d] + Σ(매입안 중 d까지 도착분) ≤ cap_by_date[d]
+        Σ(매입안 중 d까지 도착분) ≤ cap_by_date[d]
 
     ★ 선매입은 며칠 뒤 도착한다. 오늘 창고가 여유로워도 D+5 에 이미 다른 입고가
       잡혀 있으면 그 매입은 실행 불가능하다. 반대로 오늘 꽉 찼어도 내일 대량
       납품이 확정돼 있으면 선매입이 가능하다. 스칼라 cap 으로는 둘 다 못 잡는다.
+
+    🔴 **`cap_by_date` 는 net 이다 — 확정 점유가 이미 빠져 있다** (#181 · 2026-09-03).
+
+      전에는 `확정 점유[d] + 도착분` 을 cap 과 비교했다. 그러면 **확정분을 두 번
+      센다** — 한 번은 cap 에서 빠지고 한 번은 점유에 더해진다.
+
+      ```python
+      # app/logistics/tools.py:270  — 이 값을 만드는 유일한 곳
+      max(0, guaranteed_capacity_kg - projected_occupancy)
+      ```
+
+      `projected_occupancy` 는 **확정 입고·확정 출고만** 재생한 값이다. 계획 매입도
+      후보 시나리오도 안 들어간다. 그래서 도착분은 밖에서 더하는 것이 맞고
+      **확정 점유는 더하면 안 된다.**
+
+    ★ **뜻을 net 으로 정한 근거는 다수결이 아니라 생산자다** (물류 IO Contract §6).
+      쓰는 자리 셋 중 둘이 net 이고 band 만 gross 였다.
+
+          물류 `_available_capacity`   net   제안 물량만 밖에서 누적
+          매입 PR #179                 net   〃
+          여기                         gross ← 이 판에서 net 으로 맞춘다
+
+    ⚠️ **프로덕션 결과는 안 바뀐다.** `T0Snapshot.confirmed_occupancy_by_date` 를
+      운영 경로에서 아무도 안 채운다 (마스터 `critic_bridge` 도 안 보낸다) —
+      늘 `0` 이라 `확정 + 도착분` 이 이미 `도착분` 과 같았다. **채우는 날 조용히
+      틀리는 것**을 막는 판이다.
 
     ★ cap_by_date 는 **확정분만** 반영한다 (v0.13 명문화).
       전략적 판매를 창고 여유로 계산하면 판매가 안 됐을 때 창고가 넘친다.
@@ -540,14 +566,14 @@ def check_occupancy_detailed(
         )
 
     for d in sorted(band.cap_by_date_kg):
+        # 🔴 **확정 점유를 더하지 않는다** (#181). cap 이 net 이라 이미 빠져 있다.
+        #   더하면 확정분을 두 번 센다 — 검사가 실제보다 빡빡해진다.
         arrived = sum(v for a, v in arrivals.items() if a <= d)  # d 까지 도착한 누적분
-        confirmed = snapshot.confirmed_occupancy_by_date.get(d, 0.0)
-        occupied = confirmed + arrived
         cap_d = band.cap_by_date_kg[d]
-        if occupied - cap_d > EPS:
+        if arrived - cap_d > EPS:
             problems.append(
-                f"{d} 점유 {occupied:,.0f}kg > cap_by_date {cap_d:,.0f}kg "
-                f"(확정 {confirmed:,.0f} + 매입안 도착 {arrived:,.0f})"
+                f"{d} 매입안 도착 누적 {arrived:,.0f}kg > 잔여 여유 {cap_d:,.0f}kg "
+                f"(cap_by_date 는 확정 점유가 빠진 값이다)"
             )
     return OccupancyResult(
         problems=tuple(problems),

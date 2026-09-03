@@ -112,9 +112,14 @@ def arrival_dates(
     ]
 
 
-#: 회차 수량을 재배분하지 못한 사유. ⑥이 안별 risks에 싣는다.
-#: 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과 같다 — 결과는 "균등 유지" 하나인데
-#: 원인이 넷이라, 뭉치면 무엇을 고쳐야 하는지가 사라진다.
+#: 회차 수량을 **재배분하지 못한** 사유. 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과
+#: 같다 — 결과는 "균등 유지" 하나인데 원인이 넷이라, 뭉치면 무엇을 고쳐야 하는지가 사라진다.
+#:
+#: ⚠️ **더 이상 risks 로 나가지 않는다** (#93 · 2026-09-03). 날짜 축 고지는 ⑦
+#:   ``ARRIVAL_SKIP_REASONS`` 가 소유한다 — ⑥의 고지 경로가 timing 축 전용이라
+#:   quantity 축 안이 통째로 빠졌기 때문이다. 여기 남는 것은 ``cap_constrained_quantities``
+#:   가 *어느 갈래로 갔는지* 를 밝히는 **함수 자신의 반환값**이고, 그 갈래를 시험하는
+#:   단위 테스트가 소비자다.
 CAP_BLOCK_REASONS = {
     "no_cap": (
         "회차별 창고 여유 검사를 하지 않았다 — 물류에서 날짜별 입고 여유를 받지 못했다. "
@@ -531,6 +536,30 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
             "evidence_detail": f"{doc['published_at']} 발행 · 발췌: \"{doc['excerpt']}\"",
         }
         for doc in context_docs
+    ]
+
+
+def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
+    """받았지만 **반영하지 않은** 조정안을 고지한다. 안 왔으면 아무 줄도 안 붙는다.
+
+    🔴 **이 줄이 없으면 "값을 실어 주고 안 쓰는" 자리가 된다.** 마스터가 2회차에
+      조정안을 실어 보내는데(``flow.py`` ``_purchase_input``) 우리가 조용히 안 쓰면,
+      보내는 쪽은 **자기 제안이 반영된 줄 안다.** 반영 안 된 이유를 물을 기회조차 없다 —
+      우리가 다른 파트에 지적했던 것과 같은 종류다 (#165 · #166).
+
+    ``_context_risks`` 가 *"충분성을 아무도 묻지 않았다"* 를 고지하는 것과 같은 자리다:
+    **하지 않은 일을 한 것처럼 보이게 두지 않는다.**
+
+    ⚠️ 반영이 붙는 날 이 함수는 지운다 — 그때는 ``applied_adjustments`` 가 사실을
+      말하므로, 이 줄이 남아 있으면 거짓이 된다.
+    """
+    if not adjustments:
+        return []
+    return [
+        (
+            f"조정안 {len(adjustments)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
+            "반영 규칙이 아직 정해지지 않았다"
+        )
     ]
 
 
@@ -967,13 +996,29 @@ def _split_risks(
         return [f"분할 불가({reason})로 일괄 전환 — timing 축 안이지만 회차는 하나다"]
     # 재배분 결과를 여기서 다시 계산한다 — 바로 위 ``split_infeasible_reason``과 같은
     # 방식이다. 순수 함수라 같은 입력이면 같은 답이고, 수량과 고지가 갈라질 수 없다.
-    _, cap_note = cap_constrained_quantities(
-        split_quantities(total_qty_kg, chosen or []),
+    even = split_quantities(total_qty_kg, chosen or [])
+    adjusted, cap_note = cap_constrained_quantities(
+        even,
         arrival_dates(as_of, coverage_days, len(rounds), lead_days),
         cap_by_date,
     )
     head = f"{len(rounds)}회 분할"
-    return [f"{head} — {cap_note}" if cap_note else f"{head} — 회차별 도착일 수용량 안에 든다"]
+    # 🔴 **⑥은 자기가 *한 일*만 말한다 — 판정은 ⑦이 말한다** (#93 결정 2026-09-03).
+    #
+    #   전에는 여기서 미검사 사유(``CAP_BLOCK_REASONS``)와 위반("여유를 넘는다")까지
+    #   실었다. 그런데 이 함수는 **timing 축 · 분할 진입 안에서만** 돈다(위 두 줄의 조기
+    #   반환). 그래서 quantity 축 안은 **검사도 고지도 없었다** — 여유 100kg 에 2,571kg 을
+    #   넣는 계획이 risks 줄조차 없이 나갔다(#93 재현).
+    #
+    #   "검사를 누가 하는가"와 "결과를 누가 말하는가"가 갈라져 있던 것이 그 구멍의
+    #   원인이다. 이제 ⑦ ``arrival_capacity`` 가 **모든 안**을 검사하고 그 결과를 말한다.
+    #
+    # ★ 남는 것은 **재배분이 실제로 일어났다**는 사실 하나다. 그건 ⑥의 행동이라 ⑥이
+    #   말해야 한다. 문면이 아니라 ``adjusted != even`` 으로 가른다 — 문구를 다듬는 날
+    #   고지가 조용히 바뀌지 않게.
+    if adjusted != even:
+        return [f"{head} — {cap_note}"]
+    return [head]
 
 
 def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str) -> list[str]:
@@ -1088,6 +1133,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    *_adjustment_risks(state.get("adjustments")),
                     *_context_risks(state["context_loop_count"], state["context_docs"]),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(

@@ -66,6 +66,31 @@ class PurchaseAgentState(TypedDict):
     # 재계산은 재무 SCENARIO_VALIDATION 소관이다 (도메인 침범 + 이중 계산).
     critical_payment_dates: NotRequired[list[str] | None]
 
+    # ── 마스터 되먹임 수신값 (어댑터 경로 · 2회차부터) ──────────────────────
+    # 재무 수신값 넷과 **같은 방식**이다 — 선택 필드라 ``build_initial_state``(mock 경로)는
+    # 채우지 않고, 어댑터 경로에서만 값이 실린다.
+    #
+    # 🔴 **``feedback`` 슬롯과 섞지 않는다** (되먹임 계약 v0.2 §2). 셋이 다르다::
+    #
+    #     수명   ``feedback``(사용자 조건)은 실행 단위 · 되먹임은 회차 단위
+    #     모양   자연어 하나 vs 구조화 배열
+    #     권위   사람 → 제안자 vs 조언자 → 제안자
+    #
+    #   v0.1 은 한 슬롯에 ``source`` 로 갈랐는데, **payload 의 타입이 source 값에 딸려
+    #   가서** 계약이 아니라 관례가 됐다. 마스터가 두 칸으로 나눠 보내므로
+    #   (``flow.py`` ``_purchase_input``) 받는 쪽도 두 칸으로 받는다.
+    #
+    # ⚠️ **지금은 받기만 한다.** 어느 노드도 이 값을 읽어 수량을 바꾸지 않는다 —
+    #   ``target_value`` 가 *"이 값으로 바꿔라"* 인지 *"이 값을 넘지 마라"* 인지가
+    #   미확정이라 반영 규칙을 만들 수 없다. **받았는데 안 쓴다는 사실은 ⑥이 risks 에,
+    #   건수는 ⑦이 meta 에 적는다** — 값을 받고 조용히 버리면 보내는 쪽은 알 수 없다.
+    #
+    # ``adjustments``: 부서 조정안 표준형(``SuggestedAdjustment``)을 편 dict 목록.
+    adjustments: NotRequired[list[dict] | None]
+    # ``feedback_context``: 그 회차의 방아쇠 — attempt · reason · findings ·
+    # verdicts · verdict_reasons. 마스터가 1회차 산출물에서만 만든다.
+    feedback_context: NotRequired[dict | None]
+
     # ── 중간 산출 ───────────────────────────────────────────────────────────
     situation: Literal["stable", "uncertain"]
     context_docs: list[dict]  # 주입된 문서 (published_at <= as_of)

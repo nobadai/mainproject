@@ -41,6 +41,30 @@ from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode, Suggest
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
 
+_PASSING_VERDICTS: frozenset[str] = frozenset({"ok", "conditional"})
+"""사람에게 올려도 되는 판정. **허용목록이다 — 부정형이 아니다.**
+
+🔴 전에는 `business_status != "reject"` 로 정했다. *"기각이 아니면 통과"* 이므로
+  **어휘가 늘 때마다 새 값이 전부 통과 쪽으로 샜다.** 통과 조건을 세는 것이 아니라
+  실패 하나를 빼는 구조였다 (#173).
+
+  2026-09-02 에 실제로 하나 늘었다 — 재무가 `SALES_VALIDATION` 을 내면서
+  `READY + skipped`(`INPUT_INCOMPLETE`) 가 생겼다. 재무 코드가 마스터가 어떻게
+  읽을지까지 적어 뒀다: *"마스터는 재무가 정상 판정한 것으로 읽는다."*
+
+★ `conditional` 은 통과에 남는다. 마스터는 최적안을 고르는 자리가 아니고 사람이
+  보고 정한다 (계약 §3.4). `skipped` 는 다르다 — **판정을 안 낸 것**이지
+  *"조건부로 괜찮다"* 가 아니다.
+"""
+
+_JUDGED_VERDICTS: frozenset[str] = _PASSING_VERDICTS | {"reject"}
+"""**부서가 판정을 낸** 값. 여기 없으면 판정 자체가 없는 것이다.
+
+`reject` 는 통과는 아니지만 **판정이다** — 매입을 다시 부르면 고쳐질 수 있다.
+`skipped` 와 어휘 밖 값은 판정이 아니다. 그중 **부서 쪽 사정인 것**만
+`_dept_blocked` 가 잡는다 — `READY` 인 것은 제안이 바뀌면 채워질 수 있다.
+"""
+
 _FORECAST_ENVELOPE_KEYS: tuple[str, ...] = (
     "generated_at",
     "model_version",
@@ -242,6 +266,7 @@ class ProcurementFlow:
         confirmed_orders: Mapping[str, Any] | None = None,
         policy_values: Mapping[str, Any] | None = None,
         prior_feedback: Mapping[str, Any] | None = None,
+        approved_commitments: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.runner = runner
         self.verifier = verifier
@@ -257,6 +282,15 @@ class ProcurementFlow:
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
+        #: 🔴 **어제까지 승인된 확정 입고 약정** (#185). 부서 경계 호출에 실어 보낸다.
+        #:
+        #: 전에는 마스터가 약정을 만들어 저장까지 해 놓고 **다음 실행에 안 실었다.**
+        #: 어제 승인한 매입이 오늘 창고에 없는 것처럼 됐다 — 만들어 놓고 안 보내는
+        #: 것은 값을 보내고 안 쓰는 것과 같은 병의 반대편이다.
+        #:
+        #: ★ **마스터가 해석하지 않는다** (§3.2.2). 약정을 그대로 나르고, 그것을
+        #:   창고 점유로 볼지 현금 유출로 볼지는 받는 부서가 정한다.
+        self.approved_commitments = tuple(approved_commitments)
         self.prior_feedback = prior_feedback
 
     # ── 진입점 ──────────────────────────────────────────────────
@@ -367,6 +401,33 @@ class ProcurementFlow:
             if self._acceptable(scenarios, verdicts, verification.findings):
                 break
 
+            # 🔴 **판정을 못 받은 것은 재호출로 안 고쳐진다** (#173).
+            #
+            #   `_acceptable` 이 거짓인 이유가 갈린다. `reject`·검증 지적은 매입이
+            #   안을 바꾸면 풀릴 수 있지만, **부서 쪽 사정으로 판정이 없는 것**은
+            #   새 안을 줘도 같은 답이 온다.
+            #
+            # ⚠️ `READY` 인 판정 없음은 여기서 안 잡는다 — 재무 `INPUT_INCOMPLETE`
+            #   처럼 **제안이 바뀌면 채워질 수 있는 것**이라 재호출 경로에 남긴다.
+            #
+            # ★ **`_acceptable` 뒤에 둔다.** 통과 여부를 정하는 자리는 하나여야 한다
+            #   (`_PASSING_VERDICTS`). 여기는 *"통과가 아닌 다음에 무엇을 하나"* 만
+            #   가른다 — 두 판단을 한 함수에 넣으면 둘 다 흐려진다.
+            blocked = self._dept_blocked(verdicts)
+            if blocked:
+                return self._outcome(
+                    "E2_HELD",
+                    self._unjudged_reason(blocked, verdicts),
+                    scenarios=scenarios,
+                    judgment=judgment,
+                    constraints=constraints,
+                    verdicts=verdicts,
+                    findings=verification.findings,
+                    concerns=verification.concerns,
+                    skipped_checks=verification.skipped,
+                    purchase_attempts=attempts,
+                )
+
             # 🔴 **다음 회차를 위한 되먹임.** 여기가 없어서 2회차가 1회차와 같은 입력으로
             #   돌았다 (매입 Q4 지적 2026-09-02). `_exhausted_reason` 이 그 사실을
             #   문장으로 내보내고 있었는데, **적어 둔 것과 고친 것은 다르다.**
@@ -417,7 +478,7 @@ class ProcurementFlow:
         self.sourced_evidences = []
         self.suggested_adjustments = []
         for agent in self.advisors:
-            reply = self.runner.call(agent, "PRE_PURCHASE")
+            reply = self.runner.call(agent, "PRE_PURCHASE", self._boundary_input())
             if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
                 # 🔴 **한 번만 다시 부른다.** `ERROR` 는 어댑터가 터진 것이라 다시 부르면
                 #   달라질 수 있다 — `RUNTIME_NOT_READY` 는 입력이 없어서 못 낸 답이라
@@ -429,7 +490,7 @@ class ProcurementFlow:
                 # ★ **실패를 감추지 않는다 — 오히려 드러낸다.** 실행 계획에 같은 단계가
                 #   두 줄로 남아 *"한 번 실패"* 가 아니라 **"다시 불렀는데도 안 됐다"** 가
                 #   된다. 사람이 보는 문장이 달라진다.
-                reply = self.runner.call(agent, "PRE_PURCHASE")
+                reply = self.runner.call(agent, "PRE_PURCHASE", self._boundary_input())
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
                 self.constraint_evidences[agent] = reply.evidences
@@ -442,6 +503,24 @@ class ProcurementFlow:
                 # 부서가 무엇을 보내도 되는지는 봉투가 정하지 마스터가 정하지 않는다.
                 self.suggested_adjustments.extend(reply.suggested_adjustments)
         return out
+
+    def _boundary_input(self) -> dict[str, Any] | None:
+        """① 경계 호출에 실어 보내는 것.
+
+        🔴 **어제까지 승인된 약정을 싣는다** (#185). 물류는 그것을 미래 입고로 보고
+          창고 여유를 다시 계산할 수 있고, 재무는 현금 유출로 볼 수 있다 — **어느
+          쪽으로 볼지는 부서가 정한다.**
+
+        ★ **없으면 칸을 안 만든다.** 빈 배열을 보내면 받는 쪽이 *"어제 승인이 없었다"*
+          와 *"마스터가 안 보낸다"* 를 구별할 수 없다 (§1.2-10).
+
+        ⚠️ **받는 쪽은 아직 없다.** 되먹임 `adjustments` 때와 같은 순서로, 보내는
+          쪽을 먼저 만든다 — 버려지는 상태는 *"안 왔다"* 로 보이지 조용히 틀리지
+          않는다 (매입 2026-09-03).
+        """
+        if not self.approved_commitments:
+            return None
+        return {"approved_commitments": [dict(c) for c in self.approved_commitments]}
 
     def _feedback(
         self,
@@ -518,7 +597,7 @@ class ProcurementFlow:
             # ★ **조정안은 부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도
             #   않는다 — 같은 축이 둘 이상이어도 그대로 나른다 (매입·재무 합의).
             #   dataclass 를 dict 로 펴기만 한다 (모양을 바꾸는 것이 아니다).
-            payload["adjustments"] = [asdict(a) for a in self.suggested_adjustments]
+            payload["adjustments"] = [_wire(a) for a in self.suggested_adjustments]
             payload["feedback_context"] = dict(feedback)
         return payload
 
@@ -675,11 +754,94 @@ class ProcurementFlow:
 
         ★ **전원 통과를 요구하지 않는다.** 조언자 하나가 `conditional` 을 내도 사람이
           보고 정할 수 있다 — 마스터는 최적안을 고르는 자리가 아니다 (§3.4).
-          `reject` 가 있거나 검증 발견이 있으면 매입을 다시 부른다.
+
+        ★ **허용목록으로 정한다** (`_PASSING_VERDICTS`). 통과를 *"reject 가 아닌 것"*
+          으로 정하면 어휘가 늘 때마다 새 값이 통과로 샌다 (#173).
+
+        🔴 **여기가 거짓인 이유는 둘로 갈린다.** 무엇을 할지가 다르다.
+
+            reject · 검증 지적   판정은 났고 통과가 아니다   → 매입을 다시 부른다
+            그 밖의 값           판정 자체가 없다            → `_dept_blocked` 가 가른다
         """
         if findings:
             return False
-        return all(v.get("business_status") != "reject" for v in verdicts.values())
+        return all(
+            str(v.get("business_status") or "") in _PASSING_VERDICTS for v in verdicts.values()
+        )
+
+    def _dept_blocked(
+        self, verdicts: Mapping[AgentName, Mapping[str, Any]]
+    ) -> tuple[AgentName, ...]:
+        """**부서 쪽 사정으로** 판정이 없는 조언자. 온 차례 그대로 돌려준다.
+
+        걸리는 조건이 둘이고 **둘 다 만족해야** 한다.
+
+            ① 판정을 안 냈다        `business_status` 가 `_JUDGED_VERDICTS` 밖
+            ② 부서 쪽 사정이다      `runtime_status != "READY"`
+
+        🔴 **②가 없으면 안 된다** (물류·재무 회신 2026-09-02). 판정 없음은
+          `runtime_status` 가 갈라 준다.
+
+            RUNTIME_NOT_READY   판정할 사실이 없다   매입이 새 안을 줘도 같다
+            ERROR               실행이 실패했다      매입이 새 안을 줘도 같다
+            READY               **호출자가 보낸 입력이 부족하다**
+                                → 🔴 **새 제안이면 달라질 수 있다.** 여기서 잡으면
+                                  고쳐질 수 있는 것을 안 고치고 끝낸다
+
+          재무 `INPUT_INCOMPLETE` 가 바로 ③이다 — *"제안에 사실이 빠진 것은 재무
+          고장이 아니다"* (`finance/application/orchestration.py:153`). 제안이 바뀌면
+          채워질 수 있으므로 **기존 재호출 경로에 그대로 둔다.**
+
+        ★ 여기 걸리면 매입을 다시 불러도 같은 답이 온다. 재호출은 호출 예산과 LLM 만
+          태운다 — `#159` 에서 그렇게 6회를 태웠다.
+
+        ★ **어휘 밖 값도 ①에 해당한다.** `#162` 가 `E-VOCAB-BUSINESS-STATUS` 로
+          드러내기는 했지만 그 지적은 실행 계획으로 가고 `_acceptable` 은
+          `verification.findings` 만 본다 — **지적이 그 게이트에 안 닿았다.**
+          다만 ② 를 같이 요구하므로, `READY` 인 모르는 값은 여기서 끝내지 않고
+          재호출로 보낸다. **통과로 읽히지 않는 것**이 이 이슈의 주장이다.
+
+        ⚠️ **조언자만 본다.** 같은 `skipped` 라도 제안자 자리에서는 뜻이 다르다 —
+          매입은 *"낼 안이 없다"* 를 `READY + skipped` 로 보내고(`adapter.py:892`),
+          그것은 `if not scenarios` 가 E2/E5 로 받는 정상 경로다. 여기서 같이 잡으면
+          **매입이 제대로 답한 것을 "판정 없음" 으로 바꿔 버린다.**
+        """
+        return tuple(
+            agent
+            for agent in self.advisors
+            if agent in verdicts
+            and str(verdicts[agent].get("business_status") or "") not in _JUDGED_VERDICTS
+            and str(verdicts[agent].get("runtime_status") or "") != "READY"
+        )
+
+    def _unjudged_reason(
+        self,
+        unjudged: tuple[AgentName, ...],
+        verdicts: Mapping[AgentName, Mapping[str, Any]],
+    ) -> str:
+        """판정을 못 받아 못 올린다는 **사람이 읽는 사유.**
+
+        🔴 **`runtime_status` 를 같이 적는다** (물류 지적 2026-09-02). `skipped`
+          하나로는 갈리지 않는다 — 갈래는 `runtime_status` 가 가른다.
+
+            RUNTIME_NOT_READY   판정할 사실이 없다        다시 불러도 같다
+            ERROR               실행이 실패했다           **재시도 가치가 있다**
+            READY               호출자가 보낸 입력이 부족  부른 쪽이 고친다
+
+          이 구분 없이 *"판정 없음"* 으로만 적으면 물류 스냅샷 조회 실패처럼
+          **재시도 가치가 있는 실패를 "입력 없음" 으로 처리하게 된다**
+          (`logistics/adapter.py:1385` 가 그 사실을 사유에 직접 적어 보낸다).
+
+        ★ **왜인지는 안 쓴다.** 부서가 보낸 `reasoning` 이 이미 응답에 실려 있고,
+          여기서 한 번 더 요약하면 같은 사실의 주인이 둘이 된다 (§3.2.2).
+        """
+        parts = [
+            f"{agent_label(agent)}"
+            f"({verdicts[agent].get('runtime_status') or '?'}"
+            f"/{verdicts[agent].get('business_status') or '?'})"
+            for agent in unjudged
+        ]
+        return f"판정을 받지 못해 올리지 않는다 — {' · '.join(parts)}"
 
     def _exhausted_reason(
         self,
@@ -782,6 +944,40 @@ class ProcurementFlow:
             adjustments=tuple(self.suggested_adjustments),
             **kw,
         )
+
+
+def _wire(adjustment: SuggestedAdjustment) -> dict[str, Any]:
+    """봉투 표준형을 **전선에 실을 수 있는 모양**으로 편다 (#175).
+
+    🔴 `asdict` 는 `date` 를 그대로 둔다. 그 dict 를 `json.dumps` 에 넣으면
+      **TypeError 로 죽는다** — *"Object of type date is not JSON serializable"*.
+
+      지금 안 터지는 이유가 더 나쁘다. 물류 어댑터가 `split_date` 를 표준형에
+      **안 옮겨서**(`logistics/adapter.py:1122`) 늘 `None` 이라 통과한다.
+      **물류가 칸을 채우는 순간 터진다** — 지금 그 작업 중이다 (매입 지적 2026-09-03).
+
+    ★ **dataclass 의 타입은 안 바꾼다.** `split_date: date | None` 은 객체 안에서
+      비교·연산이 되는 것이 맞다. **전선에 실을 때만** ISO 문자열로 편다.
+      화면 쪽(pydantic)은 이미 알아서 한다 — 여기만 손으로 해야 하는 자리다.
+
+    ★ **정규화는 보내는 쪽이 한다.** 매입은 *"받아서 바꾸는 쪽이 자연스럽다"* 고
+      했지만, `asdict` 로 편 것이 마스터라 마스터가 책임진다. 받는 쪽이 여럿이 되면
+      **각자 변환해 같은 사실의 주인이 여럿**이 된다.
+
+    ★ **튜플도 목록으로 편다.** `asdict` 는 튜플을 그대로 두는데 JSON 을 한 번
+      왕복하면 목록이 된다 — **같은 칸이 경로에 따라 두 모양**이 되고, 받는 쪽이
+      `== [...]` 로 비교하면 in-process 에서만 조용히 어긋난다.
+
+      기준은 하나다. **여기서 나간 dict 는 JSON 왕복을 거쳐도 같아야 한다**
+      (`test_전선에_실은_것은_왕복해도_같다`). 칸마다 세지 않고 이 성질로 잠근다.
+    """
+    out: dict[str, Any] = {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in asdict(adjustment).items()
+    }
+    if adjustment.split_date is not None:
+        out["split_date"] = adjustment.split_date.isoformat()
+    return out
 
 
 def _feedback_reason(

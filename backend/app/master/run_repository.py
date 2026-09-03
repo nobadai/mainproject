@@ -253,6 +253,7 @@ def list_runs(
     *,
     request_id: str | None = None,
     as_of: date | None = None,
+    as_of_before: date | None = None,
     cycle: str | None = None,
     item: str | None = None,
     limit: int = 50,
@@ -261,6 +262,10 @@ def list_runs(
 
     ★ 조건을 주지 않으면 전체에서 최신 `limit` 건이다. 필터는 전부 선택이고
       주어진 것만 AND 로 붙는다 - 없는 조건을 기본값으로 채우지 않는다.
+
+    ★ `as_of_before` 는 **그 날 이전**이다 (`<`). 오늘 실행이 어제까지 승인된 것을
+      물을 때 쓴다 (#185) - 오늘 것을 같이 세면 자기 자신을 입력으로 먹는다.
+      `as_of` 와 함께 주면 둘 다 AND 로 걸린다.
     """
     clauses: list[sql.Composable] = []
     params: list[Any] = []
@@ -273,6 +278,9 @@ def list_runs(
         if value is not None:
             clauses.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
             params.append(value)
+    if as_of_before is not None:
+        clauses.append(sql.SQL("{} < %s").format(sql.Identifier("as_of")))
+        params.append(as_of_before)
 
     query = _select()
     if clauses:
