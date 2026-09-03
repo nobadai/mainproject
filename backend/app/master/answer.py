@@ -320,6 +320,30 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
         #    안이 있을 때는 안 싣는다 — 그때 `reason` 은 `사용자 선택 대기` 라
         #    머리말과 겹친다. **안이 없을 때만 사유가 새 정보다.**
         facts.append(Fact(label="사유", value=response.reason))
+
+    # 🔴 **매입이 밝힌 사유를 따로 올린다** (2026-09-03).
+    #
+    #   마스터 `reason` 은 *"유효한 안이 없어 제안을 내지 못했다"* 로 끝난다 —
+    #   **무엇이 없어서인지는 말하지 않는다.** 그 답은 매입이 갖고 있다.
+    #
+    #   .. code-block:: text
+    #
+    #       마스터   유효한 안이 없어 제안을 내지 못했다
+    #       매입     판단 재료(관측월보·기상·작년동기)를 읽지 못해 이 안의 확신을
+    #                세울 수 없다 — 확신 없는 안은 내지 않는다 (해당 안: 보수 · 기본)
+    #
+    # ★ **둘은 층이 다르다.** 앞은 *"마스터가 왜 보류하나"*, 뒤는 *"매입이 왜 안을
+    #   안 냈나"* 다. 하나만 두면 읽는 사람이 다음에 무엇을 볼지 모른다.
+    #
+    # ⚠️ `report.py` 가 같은 값을 이미 쓰는데 **화면(`answer`)에는 없었다** —
+    #   마크다운 리포트를 여는 사람만 볼 수 있었다.
+    if not labels:
+        # ⚠️ `getattr` 로 읽는다. 이 함수는 응답 스키마뿐 아니라 **검사용 스텁**도 받고
+        #   (`test_no_plan_answer.py`), 그쪽에는 `judgment` 칸이 없다.
+        judgment = getattr(response, "judgment", None) or {}
+        purchase_reason = str(judgment.get("no_proposal_reason") or "").strip()
+        if purchase_reason:
+            facts.append(Fact(label="매입 사유", value=purchase_reason))
     if response.single_option:
         facts.append(Fact(label="남은 안", value="1개뿐입니다"))
 

@@ -618,6 +618,16 @@ def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str 
     return None
 
 
+#: 문서를 못 읽어 컷할 때의 사유. **사람이 읽는 문장이다.**
+#:
+#: ★ *"mock 이 막혔다"* 같은 기술 사정을 쓰지 않는다. 화면을 보는 사람에게 필요한 것은
+#:   **왜 오늘 아무것도 못 받는가** 이고, 그 답은 "확신이 없다" 다.
+_CONTEXT_CUT_REASON = (
+    "판단 재료(관측월보·기상·작년동기)를 읽지 못해 이 안의 확신을 세울 수 없다 — "
+    "확신 없는 안은 내지 않는다"
+)
+
+
 def self_check(state: PurchaseAgentState) -> dict[str, Any]:
     """안별 검사로 컷하고, 살아남은 것으로 제안을 조립해 계약을 재확인한다."""
     constraints = load_constraints()
@@ -661,6 +671,24 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)
         survivors = []
 
+    # 🔴 **판단 재료를 못 읽은 날은 안을 내지 않는다** (2026-09-03 · 사용자 지시).
+    #
+    #   `uncertain` 이라 문서를 읽으러 갔는데 못 읽었다는 것은, **불확실하다고 판단해
+    #   놓고 그 불확실을 줄일 재료를 못 구한** 상태다. 그때 안을 내면 숫자는 그럴듯한데
+    #   그 숫자가 선 근거가 없다.
+    #
+    # ★ **컷 사유를 안마다 붙인다.** 화면이 `rejected_reasons` 를 그대로 보여주므로,
+    #   사람이 *"왜 오늘은 아무것도 안 나왔나"* 를 한 줄로 읽는다.
+    #
+    # ⚠️ `context_docs` 가 빈 것만으로는 컷하지 않는다 — 무·양파는 원래 기상·작년동기
+    #   문서가 없고 그건 그날의 사실이다. **못 읽은 것**일 때만 컷한다.
+    unavailable = state.get("context_unavailable")
+    if unavailable and survivors:
+        rejected.extend(
+            {"label": s["label"], "reason": _CONTEXT_CUT_REASON} for s in survivors
+        )
+        survivors = []
+
     # 이 노드가 **직접 컷한 것**만 세어 넘긴다 — 아래 no_proposal_reason 이 원인을
     # self_check 으로 돌릴 자격이 여기서 갈린다.
     cut_here = len(rejected) - len(state["rejected_reasons"])
@@ -680,6 +708,14 @@ def _no_proposal_reason(rejected: list[dict], cut_here: int) -> str:
     ``cut_here`` 는 ⑦이 직접 컷한 안의 수다. 0이면 여기 오기 전에 이미 없었다는 뜻이다.
     """
     detail = "; ".join(f"{item['label']}({item['reason']})" for item in rejected)
+    # 🔴 **원인이 "검사에서 걸렸다" 가 아니라 "잴 수가 없었다" 인 날** (2026-09-03).
+    #
+    #   같은 사유가 안마다 붙어 있으면 *"보수(...); 기본(...)"* 로 두 번 나가는데,
+    #   읽는 사람에게는 한 문장이면 된다 — 안별로 다른 이유가 아니라 **그날 전체의
+    #   사정**이기 때문이다.
+    if rejected and all(item["reason"] == _CONTEXT_CUT_REASON for item in rejected):
+        labels = " · ".join(item["label"] for item in rejected)
+        return f"{_CONTEXT_CUT_REASON} (해당 안: {labels})"
     if cut_here == 0:
         return f"안이 만들어지지 않았다: {detail}"
     if cut_here == len(rejected):

@@ -22,14 +22,67 @@ ton으로 되돌리지 않는다 — 숫자만 1000배 어긋나고 타입은 �
 반환 형태로 materialize해 돌려준다. 시나리오는 ``as_of``로 고른다 —
 ``mocks/scenarios.json``의 앵커일 4개가 단위 테스트 4종에 대응한다.
 DB/스냅샷으로 갈아끼울 때 바뀌는 건 이 파일의 본문뿐이고, 호출부는 그대로다.
+
+🔴 **운영에서는 mock 을 쓸 수 없다** (2026-09-03 · 사용자 지시).
+
+  전에는 실 공급자를 안 꽂으면 **조용히 mock 으로 떨어졌다.** 그래서 실 ML 예측에서
+  나온 상한과 mock 단가를 비교하는 일이 벌어졌고, 매입 안이 전부 컷됐다 (`#226`).
+  마스터 쪽도 같은 모양이었다 — ML DB 장애를 mock forecast 가 덮었다 (`#227`).
+
+  .. code-block:: text
+
+      실 데이터를 못 읽었다
+        → mock 으로 메운다        ← 장애가 정상으로 보인다
+        → mock 이라고 막는다      ← 지금
+
+  ★ **막는 기준은 "테스트인가"** 다 (`PYTEST_CURRENT_TEST`). 저장소가 실행이력 적재를
+    막을 때 쓰는 것과 같은 가드다 (`master/run_repository.py:168`). 환경변수 스위치를
+    새로 만들지 않는다 — 끄는 방법이 있으면 운영에서 켜진다.
 """
 
+import os
+import sys
 from collections.abc import Mapping
 from datetime import date
 
 from app.purchase_agent import mocks
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.schemas import FIXED_MARKET
+
+
+class MockNotAllowed(RuntimeError):
+    """🔴 운영 경로가 mock 을 집으려 했다.
+
+    ★ **조용히 빈 값을 돌려주지 않는다.** 빈 값은 *"오늘은 없다"* 로 읽히고, 그건
+      *"연습 데이터를 쓰려다 막혔다"* 와 완전히 다른 사실이다 (§1.2-10).
+    """
+
+
+def _under_pytest() -> bool:
+    """지금 pytest 안인가.
+
+    ⚠️ **둘을 같이 본다.** `PYTEST_CURRENT_TEST` 는 **테스트가 도는 동안에만** 있고
+      수집(collection) 단계에는 없다. 모듈 최상위에서 포트를 부르는 테스트가 실제로
+      있어(`test_feedback_intake.py:98`) 수집에서 터졌다.
+
+    `sys.modules` 쪽은 pytest 가 **임포트됐는가**를 본다 — 운영 프로세스는 pytest 를
+    임포트하지 않으므로 이 신호가 운영에서 켜질 일이 없다.
+    """
+    return bool(os.getenv("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
+def _no_mock_in_production(what: str) -> None:
+    """테스트가 아니면 막는다.
+
+    ⚠️ **끄는 스위치를 두지 않는다.** 환경변수로 열 수 있게 만들면 시연 전날 누가
+      켜고 그대로 남는다 — 이 저장소가 `_forecast_fallback` 으로 겪은 그 모양이다.
+    """
+    if _under_pytest():
+        return
+    raise MockNotAllowed(
+        f"{what} 는 mock 뿐이라 운영에서 쓸 수 없다. "
+        f"실 공급자를 주입하거나, 없으면 그 사실이 그대로 나가야 한다"
+    )
 
 
 def get_forecast(item: str, as_of: date) -> dict:
@@ -50,6 +103,7 @@ def get_forecast(item: str, as_of: date) -> dict:
     에이전트가 여기서 파생 계산: ``ci_width = (upper - lower) / predicted``,
     ``rise_rate_2w``, ``peak_date``, 궤적 형태(지속상승/단봉/하락).
     """
+    _no_mock_in_production("ML 예측(get_forecast)")
     return mocks.load_forecast(item, as_of)
 
 
@@ -81,6 +135,7 @@ def get_market_quotes(
     """
     if source is not None:
         return _checked_quotes(source(item, as_of), item)
+    _no_mock_in_production("등급별 시세(get_market_quotes)")
     return mocks.load_quotes(item, as_of)
 
 
@@ -132,6 +187,7 @@ def get_inventory(item: str, as_of: date) -> dict:
     에이전트가 파생 계산: 로트별 잔여신선도 = ``shelf_life_days - (as_of - stocked_at)``,
     납품 소요일 내 소진가능량, "신규 매입 시 기존 로트가 밀리는가".
     """
+    _no_mock_in_production("재고(get_inventory)")
     return mocks.load_inventory(item, as_of)
 
 
@@ -147,6 +203,7 @@ def get_confirmed_orders(item: str, as_of: date, days: int = 14) -> dict:
     용도: 기본 수요 산정(총량 + 안전재고), 그리고 **due_date별 분포 → 등급-신선도 매칭**
     (가까운 납품분은 중품 가능, 먼 납품분은 불가 등).
     """
+    _no_mock_in_production("확정 주문(get_confirmed_orders)")
     return mocks.load_orders(item, as_of, days)
 
 
@@ -160,6 +217,7 @@ def get_projected_cash_min(as_of: date, horizon_days: int) -> int:
     ⚠️ 2종이 존재한다. **우리(사이클 A T1)는 ``base_projected_cash_min``을 참조**한다
     (H1 승인 후 재계산분인 ``post_h1_``이 아니다).
     """
+    _no_mock_in_production("현금 하한(get_projected_cash_min)")
     return mocks.load_cash(as_of, horizon_days)
 
 
@@ -177,6 +235,7 @@ def get_snapshot_extras(item: str, as_of: date) -> dict:
     안쪽에서 끝나지 않는다. 스냅샷 형식이 확정되면 이 함수가 §1의 7번째 항목이 되거나,
     기존 포트에 흡수되어 사라진다.
     """
+    _no_mock_in_production("스냅샷 부가값(get_snapshot_extras)")
     return mocks.load_snapshot_extras(item, as_of)
 
 
@@ -205,4 +264,5 @@ def get_context_docs(item: str, as_of: date, doc_types: list[str]) -> list[dict]
 
     코퍼스가 작으므로 벡터 검색 없이 전문을 통째로 주입한다 (상세설계 §2).
     """
+    _no_mock_in_production("문서 컨텍스트(get_context_docs)")
     return mocks.load_documents(item, as_of, doc_types)
