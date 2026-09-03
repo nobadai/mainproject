@@ -9,7 +9,7 @@
 
 from datetime import date, timedelta
 from itertools import pairwise
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
@@ -91,20 +91,273 @@ def check_max_price(scenario: dict) -> str | None:
 
 
 def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
-    """총수량 ≤ 창고 여유 + 외부임차 한도.
+    """창고 **총량 축** — 총수량 ≤ 창고 여유 + 외부임차 한도.
+
+    ⚠️ **날짜 축은 여기가 아니라** ``check_arrival_capacity`` 가 본다. 같은 자원(창고)의
+    두 축이라 둘 다 있어야 하고, 둘 다 통과해야 안이 산다::
+
+        총량 축   Σ회차 ≤ 여유 + 임차            ← 이 함수
+        날짜 축   도착일까지 누적 ≤ 그날 여유     ← check_arrival_capacity
+
+    🔴 **전에는 여기 주석이 "날짜별 검사는 하지 않는다 — N4가 NULL이라"였다.** 그 사유가
+      낡았다: N4는 물류가 보내고 State 최상위에 실린다(#58). 사유가 사라진 뒤에도 주석이
+      남아 있어, 검사가 없는 것이 **여전히 옳은 것처럼** 읽혔다 (#93).
 
     ⚠️ **공용화 지점.** §4-⑦은 이 검사를 공용 모듈의 ``check_warehouse_capacity()``로 두고
     매입·T3·Critic이 import하라고 규정한다 — "자체 구현 금지, 매입 통과·T3 FAIL 반복 방지".
     그 모듈이 아직 없어 여기 있다. 생기면 이 함수를 지우고 import로 바꾼다 (현서님 협의 항목).
     상한 식 자체는 ③과 공유한다(``warehouse_cap_kg``) — 두 곳에 복제하면 한쪽만 바뀐다.
-
-    ⚠️ 날짜별 검사(``cap_by_date``)는 하지 않는다. 입고일 = 회차 date + N4인데 N4가 NULL이라
-    계산 자체를 막는다 (규칙 3 · §1.2-10). 그 사실은 안의 risks에 실린다.
     """
     cap = warehouse_cap_kg(inventory)
     if scenario["total_qty_kg"] > cap:
         return f"창고 초과: {scenario['total_qty_kg']:,}kg > 여유+임차 {cap:,}kg"
     return None
+
+
+#: 날짜 축 검사를 **하지 않은** 사유 중 **문장이 고정된 것**들. 나머지 둘
+#: (``out_of_window`` · ``missing``)은 날짜를 이름으로 짚어야 해서 아래에서 만든다.
+#:
+#: ⚠️ ⑥ ``CAP_BLOCK_REASONS`` 와 **머리는 같고 꼬리가 다르다.** 저쪽은 *"그래서 회차를
+#:   균등하게 나눴다"*(재배분을 안 했다)이고 여기는 *"그래서 컷하지 않았다"*(판정을 안 했다)다.
+#:   같은 원인이 두 단계에서 서로 다른 결과를 낳으므로 문장도 갈린다 — 복제가 아니다.
+#:
+#: 🔴 **고지는 여기서만 나간다** (#93 결정). 전에는 ⑥이 말했는데, ⑥의 고지 경로가
+#:   timing 축 전용이라 **quantity 축 안은 검사도 고지도 없었다.** 검사하는 쪽과 말하는
+#:   쪽이 갈라져 있던 것이 그 구멍의 원인이다.
+ARRIVAL_SKIP_REASONS = {
+    "no_cap": (
+        "회차별 창고 여유 검사를 하지 않았다 — 물류에서 날짜별 입고 여유를 받지 못했다. "
+        "여유를 0으로 가정하지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
+    ),
+    "no_lead": (
+        "회차별 창고 여유 검사를 하지 않았다 — 입고 소요일이 정해지지 않아 도착일을 "
+        "계산할 수 없다. 이 안은 날짜 축으로 판정받지 않았다"
+    ),
+}
+
+#: 물류가 날짜별 여유를 **계산한 구간의 길이**를 밝히는 칸 (물류 payload).
+#:
+#: ⚠️ **이름을 상수로 둔 것은 오타 방지이지 값 소유가 아니다.** 값(18)은 물류
+#:   ``tools.CAP_BY_DATE_WINDOW_DAYS`` 소유이고 우리는 payload 로 받은 것만 쓴다 —
+#:   여기 숫자를 적으면 물류가 창을 바꾼 날 우리만 옛 창으로 판정한다 (규칙 7).
+CAP_WINDOW_KEY = "cap_by_date_window_days"
+
+
+class ArrivalCapacity(NamedTuple):
+    """날짜 축 판정 결과. **컷과 미검사를 한 값으로 뭉치지 않는다.**
+
+    둘 다 "통과가 아님"이지만 하나는 안을 죽이고 하나는 안 죽인다. 한 문자열로 돌려주면
+    호출부가 *"이걸 컷 사유로 쓸 수 있나"* 를 문면으로 판단하게 되고, 문구를 다듬는 날
+    컷이 조용히 멈춘다.
+    """
+
+    violation: str | None = None
+    """컷 사유. 채워지면 그 안은 죽는다."""
+
+    skipped: str | None = None
+    """미검사 고지. 채워지면 안은 살고 risks 에 한 줄이 붙는다."""
+
+
+def _whole_days(value: Any) -> int | None:
+    """일 단위 정수로 읽는다. 아니면 ``None`` — **0으로 대체하지 않는다** (규칙 3).
+
+    🔴 **``isinstance(value, int)`` 로 보면 안 된다.** 물류는 숫자를 ``_num()`` 으로
+      싸서 보내므로 실제 payload 의 ``inbound_lead_days`` 는 **``2.0``(float)** 이다
+      (실측 2026-09-03 · 12-31 피마늘). ``int`` 만 받으면 **실운영에서 창을 한 번도
+      못 만들고** 늘 *"가르지 못했다"* 로 떨어진다 — 검사가 있는데 안 도는 상태다.
+
+    ★ 판정 규칙은 ``adapter._arrival_input_problems`` 와 **같다**: 수치이고 소수부가
+      없으면 정수로 읽는다. 두 곳이 다르면 어댑터가 통과시킨 값을 여기서 버린다.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if value != int(value):
+        return None
+    return int(value)
+
+
+def cap_window(state: PurchaseAgentState) -> tuple[str, str] | None:
+    """물류가 날짜별 여유를 **계산한 구간** ``[시작, 끝]`` (ISO 문자열, 양끝 포함).
+
+    물류 ``tools.build_cap_window`` 와 **같은 식**이다::
+
+        start = as_of + N4
+        dates = [start + d for d in range(window_days)]      # 끝 = start + (window_days - 1)
+
+      N4=2 · 창 18일이면 **D+2 ~ D+19** 다 (실측 2026-09-03).
+
+    🔴 **두 값을 같은 dict 에서 읽는다.** ``inbound_lead_days`` 와 ``cap_by_date_window_days``
+      는 물류가 **같은 payload 에 함께** 실어 보내고, 물류는 그 둘로 창을 만들었다.
+      한쪽을 설정 기본값(``pending``)에서 읽으면 **물류가 쓴 적 없는 창**을 재구성하게 된다.
+
+    못 만들면 ``None`` — 창을 지어내지 않는다 (규칙 3). 창을 모르면 "창 밖"과
+    "창 안 누락"을 가를 수 없고, **가를 수 없다는 사실 자체가 고지 대상**이다.
+    """
+    inventory = state["inventory"]
+    lead = _whole_days(inventory.get("inbound_lead_days"))
+    window = _whole_days(inventory.get(CAP_WINDOW_KEY))
+    if lead is None or lead < 0 or window is None or window < 1:
+        return None
+    start = date.fromisoformat(state["date"]) + timedelta(days=lead)
+    return start.isoformat(), (start + timedelta(days=window - 1)).isoformat()
+
+
+def _unknown_reason(unknown: list[str], state: PurchaseAgentState) -> str:
+    """값이 안 온 도착일들을 **두 갈래로 갈라** 문장을 만든다 (물류 규약 2026-09-03).
+
+    🔴 **뭉치면 안 되는 이유.** 물류 규약은 셋을 다른 상태로 규정한다::
+
+        키 존재 + 값 0      계산 결과 입고 가능량이 0        → 판정 대상
+        창 안인데 키 누락    계산 누락 또는 미결              → **고쳐야 할 것**
+        창 밖               계산 대상이 아니다               → **정상**
+
+      전에는 뒤 둘을 *"조회 기간 밖이거나 값이 비어 있다"* 한 문장으로 냈다. 읽는 사람이
+      **고쳐야 할 것과 정상을 구분할 수 없었다** — 매일 같은 문장이 나가면 둘 다 배경이 된다.
+
+    ★ **행동은 셋 다 같다 — 컷하지 않는다.** 갈리는 것은 문장뿐이다. 창 밖이라고 통과로
+      치지 않고, 누락이라고 죽이지도 않는다. 둘 다 *"판정하지 않았다"* 이고 **왜** 가 다르다.
+
+    창을 못 만들면(``cap_window`` 가 ``None``) 갈리지 않는다. 그때는 **가를 수 없다는
+    사실을 밝힌다** — 물류가 창 길이를 payload 에 싣기로 했으므로(2026-09-03), 없으면
+    그것이 곧 확인할 거리다.
+    """
+    window = cap_window(state)
+    if window is None:
+        return (
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
+            "물류에서 받지 못했다. 계산 구간의 길이를 함께 받지 못해 **구간 밖이라 대상이 "
+            "아닌 것인지, 구간 안인데 값이 빠진 것인지 가르지 못했다.** 받지 못한 날을 "
+            "여유 0으로 읽지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
+        )
+
+    start, end = window
+    outside = [day for day in unknown if day < start or day > end]
+    inside = [day for day in unknown if start <= day <= end]
+    span = f"물류가 계산한 구간은 {start}~{end}이다"
+
+    if inside:
+        head = (
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(inside)}가 "
+            f"**계산 구간 안인데 여유 값이 오지 않았다**({span}). 계산이 빠졌거나 아직 "
+            "정해지지 않은 것이라 확인이 필요하다"
+        )
+        if outside:
+            head += f". 도착일 {', '.join(outside)}는 구간 밖이라 애초에 계산 대상이 아니다"
+        return head + (
+            ". 받지 못한 날을 여유 0으로 읽지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
+        )
+
+    return (
+        f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(outside)}가 "
+        f"**계산 구간 밖이라 애초에 대상이 아니다**({span}). 빠진 값이 아니라 물류가 "
+        "그 날짜까지는 계산하지 않는다는 뜻이다. 구간 밖을 여유 0으로 읽지 않았으므로 "
+        "이 안은 날짜 축으로 판정받지 않았다"
+    )
+
+
+def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapacity:
+    """창고 **날짜 축** — 도착일까지의 누적이 그날 여유를 넘는가 (§4-⑦ · #93).
+
+    ★ **``split_plan[].expected_arrival_date`` 를 읽는다. 다시 계산하지 않는다.**
+      PR #141로 안에 이미 실려 있다(``schemas.py``). 도착일을 여기서 또 만들면
+      ⑥이 옮긴 결과와 ⑦이 검사하는 대상이 어긋날 수 있는데, 실린 값을 읽으면
+      **그 어긋남이 구조적으로 불가능해진다.**
+
+    🔴 **``chosen``·``axis``·``entered`` 를 보지 않는다.** 회차가 하나든 둘이든 같은
+      코드가 돈다. ⑥의 재배분은 timing 축 분할 진입 경로에서만 도는데(``materialize_split``
+      가 ``if not chosen: return`` 으로 조기 반환한다), 컷까지 그 경로에만 두면
+      **"회차를 안 나눌수록 검사를 안 받는" 구조**가 된다 — 실측으로 보수 2,571kg ·
+      기본 6,429kg 이 여유 100kg 을 넘는데 risks 줄조차 없었다 (#93 재현).
+      ``_rounds()`` 가 일괄·분할불가·정상 세 경로를 전부 지나므로 **1회차 안도
+      도착일을 갖고 있다** — 그래서 같은 코드로 검사할 수 있다.
+
+    ★ **누적으로 본다.** ``cap_by_date[d]`` 는 그날의 *여유 공간*이고, 물류는 **기존
+      일정만** 재생해 그 값을 낸다 (``logistics/tools.py`` ``calculate_cap_by_date``:
+      guaranteed − projected_occupancy). **우리가 새로 넣을 회차는 거기 없다.**
+      날짜마다 독립으로 비교하면 1회차가 아직 창고에 있는데도 2회차가 그날 상한을
+      통째로 쓰는 계획이 통과한다. ⑥ ``cap_constrained_quantities`` 와 같은 셈이다.
+
+    ⚠️ **한계 — 중간 출고를 해제하지 않는다.**
+      회차를 도착일 순으로 **더하기만 하고 빼지 않는다.** 중간에 확정 출고가 앞 회차를
+      실제로 소진해도 해제하지 않는다. 물류 ``_available_capacity`` 도 같은 방식이고
+      (``arrival <= day``), **방향은 안전하다 — 덜 사게 틀린다.**
+
+      *"왜 이렇게 빡빡한가"* 가 나오면 원인이 여기일 수 있다
+      (물류 지적 2026-09-03 · 물류 미결 §0-3).
+
+      ★ **risks 에는 안 싣는다.** 매일 모든 안에 붙으면 신호가 죽는다 — 이건 *"이 안이
+        위험하다"* 가 아니라 우리 검사 방식의 성질이다. 되짚을 실마리는 컷 사유에 이미
+        있다: *"누적 N kg … M회차 …까지 더한 값"*.
+
+    🔴 **왜 ``orchestrator/band.py`` 의 ``check_occupancy_by_date`` 를 안 쓰나** (2026-09-03 판단).
+      §4-⑦이 "자체 구현 금지"라고 했고 그 함수가 실재하는데도 안 쓴 이유가 넷이었다.
+      나중에 *"왜 안 썼지"* 로 되돌리지 않도록 **지우지 않고** 적어 둔다::
+
+        ㄱ. cap_by_date 의 뜻이 다르다   ✅ **고쳐졌다** (PR #184 · 2026-09-03 02:44)
+              물류  guaranteed − projected_occupancy       → 잔여 여유 (net)
+              band  confirmed_occupancy[d] + arrived ≤ cap → 총 용량 (gross)  ← 이랬다
+            band 가 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이었다. 그대로
+            넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 됐다.
+            우리가 #93 구현 중 물어 #181 이 서고, band 가 **net 전제로** 바뀌었다.
+        ㄴ. 타입이 다르다 — ``Band.cap_by_date_kg`` 는 ``date`` 키, 우리는 ISO 문자열.
+            조회가 전부 미스 나면 값이 와 있는데도 "받지 못했다"로 고지된다.
+        ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.
+            ``T0Snapshot`` 만 해도 forecasts·spot_price·finance·budget 을 요구하는데
+            이 검사와 무관하다. **가짜 값을 채워야 부를 수 있는 함수는 공용 모듈이 아니다.**
+        ㄹ. 소유가 저쪽이다 — band.py 를 import 하는 것은 critic/* 과 orchestrator/graph
+            뿐이고, ``tests/master/test_no_orchestrator_runtime.py`` 는 마스터에 대해
+            ``app.orchestrator.band`` 를 금지 목록에 올려 뒀다.
+
+      🔴 **ㄱ이 풀렸어도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다 *"부를 수는
+        있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고, 그건 공용화가
+        아니라 **결합**이다. ``#181`` 은 아직 열려 있다 — 뜻은 맞췄지만 *"어느 쪽이
+        표준인가"* 는 안 닫혔다.
+
+      나머지가 풀리고 공용 모듈이 생기면 **이 함수를 지우고 import 로 바꾼다** —
+      ``check_warehouse_capacity`` 와 같은 약속이다.
+    """
+    cap_by_date = state["inventory"].get("cap_by_date")
+    if cap_by_date is None:
+        return ArrivalCapacity(skipped=ARRIVAL_SKIP_REASONS["no_cap"])
+
+    rounds = scenario["split_plan"]
+    arrivals = [item.get("expected_arrival_date") for item in rounds]
+    if any(day is None for day in arrivals):
+        # N4 미결이면 ⑥이 전 회차를 None 으로 채운다. 0으로 읽지 않는다 (규칙 3).
+        return ArrivalCapacity(skipped=ARRIVAL_SKIP_REASONS["no_lead"])
+
+    unknown = [day for day in arrivals if cap_by_date.get(day) is None]
+    if unknown:
+        # **하나라도 모르면 아무 회차도 판정하지 않는다.** 아는 날짜만 컷하면 판정이
+        # "어느 도착일이 우연히 계산 구간 안이었나"에 좌우된다 — ⑥이 재배분을 통째로
+        # 포기하는 것과 같은 이유다.
+        return ArrivalCapacity(skipped=_unknown_reason(unknown, state))
+
+    occupied = 0
+    for item, day in zip(rounds, arrivals, strict=True):
+        occupied += item["qty_kg"]
+        # 수용량은 **상한**이라 내림한다 — ⑥·``warehouse_cap_kg`` 와 같은 방향이다.
+        cap = int(cap_by_date[day])
+        if occupied > cap:
+            # 🔴 **정도를 보지 않는다.** cap_by_date 는 물류 guaranteed 기반 하드 제약이라
+            #   넘으면 물리적으로 안 들어간다. 완화 임계를 두면 물류 값을 우리가 무르는
+            #   것이 되고, 총량 축(``check_warehouse_capacity``)이 1kg 초과도 컷하는 것과
+            #   기준이 갈린다 (#93 결정).
+            return ArrivalCapacity(
+                violation=(
+                    f"날짜별 창고 초과: {day} 도착 누적 {occupied:,}kg > 그날 여유 {cap:,}kg "
+                    f"({item['seq']}회차 {item['qty_kg']:,}kg까지 더한 값)"
+                )
+            )
+    return ArrivalCapacity()
+
+
+def check_arrival_capacity(scenario: dict, state: PurchaseAgentState) -> str | None:
+    """검사 체인용 얇은 껍데기 — 컷 사유만 돌려준다.
+
+    미검사 고지는 ``self_check`` 가 ``arrival_capacity`` 에서 직접 꺼내 risks 에 얹는다.
+    """
+    return arrival_capacity(scenario, state).violation
 
 
 def check_cash_ceiling(scenario: dict, state: PurchaseAgentState, constraints: dict) -> str | None:
@@ -363,12 +616,18 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
     rejected: list[dict] = list(state["rejected_reasons"])
 
     for scenario in state["scenarios_final"]:
+        # **한 번만 계산한다.** 컷 사유와 미검사 고지가 배타적인 두 결과라 같은 판정에서
+        # 나와야 한다 — 따로 부르면 체인이 컷한 안에 "검사 안 했다"가 붙을 수 있다.
+        arrival = arrival_capacity(scenario, state)
         reason = (
             check_quadruple_match(scenario)
             or check_axis_allowed(scenario, state["allowed_axes"])
             or check_prices_exist(scenario, state["market_quotes"])
             or check_max_price(scenario)
+            # 창고 두 축은 붙여 둔다 — **총량이 먼저다.** 총량이 이미 넘으면 날짜별
+            # 사유는 부차적이고, 컷 사유는 한 안에 하나만 나간다.
             or check_warehouse_capacity(scenario, state["inventory"])
+            or arrival.violation
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
             or check_document_refs(scenario, state["context_docs"])
@@ -381,6 +640,10 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})
+        elif arrival.skipped:
+            # **새 dict 를 만든다.** ``state["scenarios_final"]`` 을 제자리에서 고치면
+            # ⑥이 만든 값과 ⑦이 내보내는 값이 같은 객체가 되어, 나중에 둘을 대조할 수 없다.
+            survivors.append({**scenario, "risks": [*scenario["risks"], arrival.skipped]})
         else:
             survivors.append(scenario)
 
@@ -430,14 +693,29 @@ def _assemble(
     나면 **직렬화하지 않고 터진다**. 계약 위반은 사업적 결과가 아니라 버그이므로 조용히
     빈 제안으로 바꾸지 않는다.
     """
+    # 🔴 **회차를 세는 이름이 슬롯마다 다르다** (#178 · 2026-09-03 확정)::
+    #
+    #     prior_feedback["condition_seq"]   사람이 조건을 건 회차
+    #     feedback_context["attempt"]       매입 재호출 회차   ← ``feedback_attempt`` 는 이것
+    #
+    #   전에는 ``prior_feedback`` 에서 ``attempt`` 를 읽었다. 슬롯을 둘로 나누면서
+    #   (계약 v0.2 §2) **안의 키 이름을 안 갈랐던** 탓이고, 마스터가 ``condition_seq`` 로
+    #   양보하면서 그 슬롯에는 ``attempt`` 가 아예 없어졌다 — **늘 0 이 나온다.**
+    #   틀린 값을 읽은 것이 아니라 **다른 개념을 같은 이름으로 찾고 있었다.**
     feedback = state["feedback"] or {}
+    refeed = state.get("feedback_context") or {}
     raw = {
         "meta": {
             "as_of": state["date"],
             "item": state["item"],
             "agent_version": AGENT_VERSION,
-            "is_refeed": bool(state["feedback"]),
-            "feedback_attempt": feedback.get("attempt", 0),
+            # ★ **둘 다 되먹임이다.** 사람이 조건을 걸어 다시 도는 것과 조언자 판정으로
+            #   다시 도는 것은 권위가 다를 뿐 **"다시 먹인 실행"** 인 것은 같다.
+            #   ``feedback_context`` 만 보면 2회차가 ``False`` 로 나가고, 바로 아래
+            #   ``feedback_attempt`` 가 2 인데 재호출이 아니라는 **서로를 부정하는 meta**
+            #   가 된다.
+            "is_refeed": bool(feedback) or bool(refeed),
+            "feedback_attempt": refeed.get("attempt", 0),
             # **받은 사실을 산출물에 남긴다.** 반영은 안 하지만(⑥이 risks 에 고지),
             # 몇 건이 도착했는지는 보내는 쪽이 대조할 수 있어야 한다 — 0 으로만
             # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
