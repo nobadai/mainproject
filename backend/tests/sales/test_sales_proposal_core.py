@@ -102,6 +102,7 @@ def test_refeed_creates_new_lineage_and_keeps_purchase_reference_conditional(mon
                     "capability": "ADDITIONAL_SUPPLY_CONTEXT",
                     "reply_ref": "PUR-1",
                     "runtime_status": "READY",
+                    "business_status": "ok",
                     "payload": {"procurable_quantity_kg": 2000},
                 }
             ],
@@ -350,3 +351,64 @@ def test_proposal_reply_exposes_state_and_llm_alias(monkeypatch):
     assert reply.is_refeed is True
     assert reply.feedback_attempt == 2
     assert reply.llm == reply.recommendation
+
+
+def _purchase_feedback(*, status="ok", fulfillable=None, quantity=1500, risks=None):
+    return {
+        "domain_replies": [
+            {
+                "source_agent": "purchase",
+                "capability": "ADDITIONAL_SUPPLY_CONTEXT",
+                "reply_ref": "PUR-1",
+                "runtime_status": "READY",
+                "business_status": status,
+                "payload": {
+                    "fulfillable": fulfillable,
+                    "procurable_quantity_kg": quantity,
+                    "binding_constraint": None,
+                    "expected_purchase_date": None,
+                    "expected_arrival_date": None,
+                    "risks": risks or [],
+                    "rationale": [],
+                },
+            }
+        ],
+        "scenario_feedback": [{"scenario_id": "SALES-001-C", "reply_refs": ["PUR-1"]}],
+    }
+
+
+@pytest.mark.parametrize("fulfillable", [True, False, None])
+def test_purchase_positive_supply_is_conditional_without_quantity_clipping(
+    monkeypatch, fulfillable
+):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(feedback=_purchase_feedback(fulfillable=fulfillable)))
+    conservative, aggressive = reply.scenarios[0], reply.scenarios[2]
+    assert aggressive.conditional_purchase is True
+    assert aggressive.quantity_kg == Decimal(5000)
+    assert aggressive.supply.confirmed_quantity_kg == Decimal(3000)
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert "PUR-1" in aggressive.evidence_refs
+    assert "PUR-1" not in conservative.evidence_refs
+    assert conservative.conditional_purchase is False
+
+
+def test_purchase_skipped_zero_is_resolved_but_not_conditional(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    reply = run_proposal(_request(feedback=_purchase_feedback(status="skipped", quantity=0)))
+    aggressive = reply.scenarios[2]
+    assert aggressive.conditional_purchase is False
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert "ADDITIONAL_SUPPLY_CONTEXT" not in aggressive.required_validations
+
+
+def test_purchase_risks_are_preserved_without_redefining_business_status(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    raw_risk = "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정입니다"
+    reply = run_proposal(
+        _request(feedback=_purchase_feedback(fulfillable=None, quantity=1500, risks=[raw_risk]))
+    )
+    aggressive = reply.scenarios[2]
+    assert raw_risk in aggressive.risks
+    assert aggressive.conditional_purchase is True
+    assert aggressive.domain_replies[0].business_status == "ok"
