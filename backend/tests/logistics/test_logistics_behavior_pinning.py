@@ -508,7 +508,14 @@ def test_혼합_케이스에서_어댑터는_비reject_조정만_승격한다(mo
     suggested = reply.suggested_adjustments[0]
     assert suggested.axis == "timing"
     assert suggested.target_value == 5.0  # 8/26 − as_of(8/21)
-    assert "기본" in suggested.reason
+    # 🔴 라벨은 **칸**으로 간다 (#209 · 미결 §0-6 갈래 ㄱ). 전에는 reason 문자열에만
+    #   있어 받는 쪽이 부서 문장을 파싱해야 했다.
+    assert suggested.scenario_labels == ("기본",)
+    assert suggested.split_date == date(2026, 8, 21)
+    # 문장에서는 라벨·회차 앞머리가 빠졌다. 목표 도착일은 남는다 — 절대 날짜 칸이
+    # 아직 없어 지금 빼면 그 값이 어디에도 없다.
+    assert suggested.reason == "도착일을 2026-08-26 로 조정 제안"
+    assert "기본" not in suggested.reason
     assert reply.needs_followup is True
 
     # preferred Evidence 건수 = 비-reject 모집단의 timing 조정 수 = 1 (전체로 세면 2).

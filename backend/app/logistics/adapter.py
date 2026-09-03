@@ -36,6 +36,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from app.contracts.core import Evidence, SuggestedAdjustment
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     derive_procurement_verdict,
@@ -57,7 +58,6 @@ from app.logistics.tools import (
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
-from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
 
 logger = logging.getLogger(__name__)
@@ -1090,15 +1090,18 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     # `reply.suggested_adjustments` 는 0건이고, 사람 화면과 Critic 의 축 침범 검사가
     # 전부 빈 튜플을 본다. 축 어휘는 `_DEPT_AXES["inventory"] = ("quantity","timing")`
     # 과 정확히 같아 추측 없이 옮긴다.
-    suggested: list[SuggestedAdjustment] = []
-    seen_adjustments: set[tuple[str, date, float]] = set()
+    # 🔴 **두 단계로 나눈다** (#209 · 되먹임 ④). 전에는 중복 키를 만나면 그 자리에서
+    #   `continue` 해서 **두 번째 시나리오의 라벨이 사라졌다.** 같은 조정이 세 안에서
+    #   나와도 첫 라벨 하나만 손에 남는다. 키별로 라벨을 먼저 모으고, 다 모은 뒤
+    #   표준형을 만든다. 중복 제거의 뜻(같은 key 는 하나)은 그대로이고 라벨만 합친다.
+    collected: dict[tuple[str, date, float], dict[str, Any]] = {}
     for result in scenario["scenario_results"]:
         # ★ reject 안의 adjustment 는 승격하지 않는다 (#121 2단계). multi-split 에서
         #   앞 회차의 조정이 남은 채 전체가 reject 될 수 있는데, 구제 불가 판정한 안의
         #   조정을 행동 제안으로 내보내면 "reject 는 조정으로 구제 불가"와 모순된다.
         #   진단 기록은 payload.scenario_results 에 그대로 남는다 — 사실이 사라지는
         #   것이 아니라 제안으로 격상되지 않을 뿐이다. needs_followup 도 이에 따라
-        #   reject 만으로는 서지 않는다.
+        #   reject 만으로는 서지 않는다. 라벨 수집 대상도 아니다.
         if result.verdict == "reject":
             continue
         for adjustment in result.adjustments:
@@ -1106,8 +1109,12 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
                 target, unit = _num(adjustment.suggested_qty_kg), "kg"
                 what = f"수량을 {target:g}kg 로 조정 제안"
             elif adjustment.axis == "timing" and adjustment.suggested_arrival_date is not None:
-                # 날짜는 float 로 실을 수 없어 as_of 기준 D+N 으로 옮긴다 — 실제 날짜는
-                # reason 에 그대로 남으므로 손실 없는 표기 변환이지 새 판단이 아니다.
+                # 날짜는 float 로 실을 수 없어 as_of 기준 D+N 으로 옮긴다.
+                # ⚠️ 전에 이 자리에 "손실 없는 표기 변환" 이라고 적어 뒀는데 **틀렸다**
+                #   (#209). 사람에게는 손실이 없지만 **기계가 읽을 수 있는 형태로는
+                #   손실**이다 — 목표 날짜가 reason 문자열 안에만 남는다. 그래서 목표
+                #   도착일은 아래 reason 에 그대로 남긴다. 절대 날짜 칸이 생기면
+                #   그때 문장에서도 뺀다 (마스터가 정해 통보).
                 target = float((adjustment.suggested_arrival_date - as_of).days)
                 unit = "d"
                 what = f"도착일을 {adjustment.suggested_arrival_date.isoformat()} 로 조정 제안"
@@ -1116,21 +1123,38 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
                 # 그대로 남아 있어 사실이 사라지지는 않는다.
                 continue
             key = (adjustment.axis, adjustment.split_date, target)
-            if key in seen_adjustments:
-                continue
-            seen_adjustments.add(key)
-            suggested.append(
-                SuggestedAdjustment(
-                    dept="inventory",
-                    axis=adjustment.axis,
-                    target_value=target,
-                    unit=unit,
-                    reason=(
-                        f"{result.label} 시나리오 {adjustment.split_date.isoformat()} 회차 — {what}"
-                    ),
-                    ref_ids=(ref,),
-                )
-            )
+            entry = collected.get(key)
+            if entry is None:
+                # dict 는 삽입 순서를 보존하므로 시나리오 등장 순서가 그대로 남는다.
+                collected[key] = {
+                    "axis": adjustment.axis,
+                    "split_date": adjustment.split_date,
+                    "target": target,
+                    "unit": unit,
+                    "what": what,
+                    "labels": [result.label],
+                }
+            elif result.label not in entry["labels"]:
+                entry["labels"].append(result.label)
+
+    # ★ `reason` 에서 라벨·회차 앞머리를 뺐다 (미결 §0-6 갈래 ㄱ · 2026-09-03 마스터
+    #   통보). 같은 사실이 칸과 문장 두 곳에 있으면 한쪽만 고쳐지는 날이 오고, 그 날이
+    #   이미 왔다 — 화면(`master/answer.py:295`)은 칸을 읽게 고쳐졌는데 물류가 안 채워
+    #   문장에만 남아 "N 회차" 가 한 번도 안 떴다.
+    #   ⚠️ **빼는 것은 라벨과 대상 회차뿐이다.** 목표 도착일은 `what` 안에 남긴다.
+    suggested: list[SuggestedAdjustment] = [
+        SuggestedAdjustment(
+            dept="inventory",
+            axis=entry["axis"],
+            target_value=entry["target"],
+            unit=entry["unit"],
+            reason=entry["what"],
+            ref_ids=(ref,),
+            scenario_labels=tuple(entry["labels"]),
+            split_date=entry["split_date"],
+        )
+        for entry in collected.values()
+    ]
 
     reply = AgentReply(
         request_id=request.context.request_id,
