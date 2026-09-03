@@ -128,7 +128,7 @@ def _response(end_code: str = "E1_APPROVED") -> ProcurementRunResponse:
     )
 
 
-def _request(item: str | None = "피마늘") -> ProcurementRunRequest:
+def _request(item: str | None = "배추") -> ProcurementRunRequest:
     return ProcurementRunRequest(
         as_of=date(2025, 12, 31),
         policy_version="v1.3",
@@ -150,7 +150,7 @@ def test_품목과_종료코드가_컬럼으로_넘어간다(monkeypatch):
     monkeypatch.setattr(persistence, "try_save_run", _capture)
     persistence.record(_request(), _response())
 
-    assert captured["item"] == "피마늘"
+    assert captured["item"] == "배추"
     assert captured["end_code"] == "E1_APPROVED"
     assert captured["cycle"] == "PROCUREMENT"
 
@@ -242,7 +242,7 @@ def test_조회도_이력에_남는다(monkeypatch):
 def test_조회는_품목_축이_아니다(monkeypatch):
     """★ 조회는 부서에 묻는다. 무엇을 물었는지는 request_payload 의 agents 에 남는다.
 
-    품목 칸을 억지로 채우면 "이 조회는 피마늘에 대한 것" 이라는 없는 사실이 생긴다.
+    품목 칸을 억지로 채우면 "이 조회는 배추에 대한 것" 이라는 없는 사실이 생긴다.
     """
     captured: dict[str, object] = {}
     monkeypatch.setattr(persistence, "try_save_run", lambda **kw: captured.update(kw))

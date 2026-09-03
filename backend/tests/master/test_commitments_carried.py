@@ -39,9 +39,9 @@ SCN = [{"scenario_id": "SCN-1", "total_amount_krw": 30000000}]
 
 COMMITMENT = {
     "approval_id": "H1-REQ-20251230-0001-1",
-    "item": "피마늘",
+    "item": "배추",
     "as_of": "2025-12-30",
-    "arrival_schedule": [{"date": "2026-01-02", "qty_kg": 500.0, "item": "피마늘"}],
+    "arrival_schedule": [{"date": "2026-01-02", "qty_kg": 500.0, "item": "배추"}],
 }
 
 
@@ -107,7 +107,7 @@ def _run(commitments=()):
     registry.register("purchase", _purchase)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
     outcome = ProcurementFlow(
-        runner, item="피마늘", approved_commitments=commitments
+        runner, item="배추", approved_commitments=commitments
     ).run()
     return outcome, finance, inventory
 
@@ -204,7 +204,7 @@ def test_재시도도_같은_입력으로_부른다():
     registry.register("inventory", flaky)
     registry.register("purchase", _purchase)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    ProcurementFlow(runner, item="피마늘", approved_commitments=(COMMITMENT,)).run()
+    ProcurementFlow(runner, item="배추", approved_commitments=(COMMITMENT,)).run()
 
     assert len(calls) == 2, "재시도가 일어나야 이 검사가 의미 있다"
     assert calls[0] == calls[1], "재시도가 다른 입력으로 불렀다"

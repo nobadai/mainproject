@@ -45,7 +45,7 @@ def _build(**over):
     kw = {
         "request_id": "REQ-1",
         "as_of": AS_OF,
-        "item": "피마늘",
+        "item": "배추",
         "scenario": _scenario(),
         "inbound_lead_days": 2.0,
         "decision_seq": 1,
@@ -62,8 +62,8 @@ def _build(**over):
 def test_회차마다_품목이_붙는다():
     commitment = _build()
 
-    assert commitment.item == "피마늘"
-    assert [leg.item for leg in commitment.arrival_schedule] == ["피마늘"]
+    assert commitment.item == "배추"
+    assert [leg.item for leg in commitment.arrival_schedule] == ["배추"]
 
 
 def test_품목_어휘를_값으로_막는다():
@@ -156,7 +156,7 @@ def test_회차_품목이_다르면_막는다():
             approval_id="H1-x-1",
             request_id="REQ-1",
             as_of=AS_OF,
-            item="피마늘",
+            item="무",
             scenario_label="보수",
             total_qty_kg=44.0,
             total_amount_krw=1.0,
@@ -218,18 +218,38 @@ def test_음수_리드타임은_과거_도착을_만들지_않는다():
     assert commitment.notes
 
 
-def test_품목_어휘가_매입_ItemName_과_같다():
-    """★ `attempt_max` 와 같은 자리 — 같은 4품목이 두 곳에 선언돼 있다.
-
-    매입 `ItemName` 은 Literal, 마스터 `ITEM_CODES` 는 frozenset. 어느 쪽이
-    품목을 늘리면 **다른 쪽은 에러 없이 낡는다.** 갈리는 날 여기가 운다.
-    """
+def _purchase_item_names() -> frozenset[str]:
     from typing import get_args
 
-    from app.master.commitment import ITEM_CODES
     from app.purchase_agent.schemas import ItemName
 
-    assert ITEM_CODES == frozenset(get_args(ItemName))
+    return frozenset(get_args(ItemName))
+
+
+def test_계약_품목은_전부_매입이_받을_수_있다():
+    """🔴 **이것이 안전 속성이다.** 마스터가 보낼 수 있는 품목을 매입이 못 받으면
+    그 요청은 문 앞에서 죽는다.
+
+    ⚠️ 반대 방향(매입이 더 넓은 것)은 사고가 아니다 — 마스터가 안 보내면 그만이다.
+      그래서 같음이 아니라 **포함**으로 건다.
+    """
+    from app.master.commitment import ITEM_CODES
+
+    assert ITEM_CODES <= _purchase_item_names()
+
+
+def test_전환이_끝나면_같음으로_좁힌다():
+    """2026-09-03 피마늘 제외 — 계약은 셋이 됐고 매입 `ItemName` 은 아직 넷이다.
+
+    매입이 옮기면 이 검사가 `skip` 으로 알린다. 그때 위 검사를 **같음**으로
+    좁히고 이 검사를 지운다. 전환 창을 열어 둔 채 잊지 않기 위한 자리다.
+    """
+    from app.master.commitment import ITEM_CODES
+
+    extra = _purchase_item_names() - ITEM_CODES
+    if not extra:
+        pytest.skip("🟢 매입도 계약과 같아졌다 — 이제 위 검사를 같음으로 좁힌다")
+    assert extra == {"피마늘"}, f"예상 못 한 차이: {sorted(extra)}"
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from checks_finance_cycle_b import check_cash_recovery_priority
-from fixtures import AS_OF, DEMAND, ITEMS4, PRICE_BASE
+from fixtures import AS_OF, DEMAND, FIXTURE_ITEMS, PRICE_BASE
 
 from app.contracts.core import (
     ChannelLeg,
@@ -28,8 +28,8 @@ from app.contracts.core import (
 
 # ── 플레이스홀더 ──────────────────────────────────────────────────
 SHARED_OUTBOUND_KG = 2_500.0  # ⏳ N17 — 하루 공용 출고 능력
-_ON_HAND_KG = {i: 200.0 for i in ITEMS4}  # T0 스냅샷 inventory_available_kg 와 일치
-CONTRACT_PRICE = {"배추": 2293.11, "무": 1400.0, "양파": 1600.0, "피마늘": 8000.0}
+_ON_HAND_KG = {i: 200.0 for i in FIXTURE_ITEMS}  # T0 스냅샷 inventory_available_kg 와 일치
+CONTRACT_PRICE = {"배추": 2293.11, "무": 1400.0, "양파": 1600.0}
 
 CHANNELS = {
     "KIMCHI_FACTORY_001": {"due_days": 2, "settlement_days": 30},

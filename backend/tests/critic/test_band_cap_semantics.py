@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import replace as dc_replace
 from datetime import timedelta
 
-from fixtures import AS_OF, ITEMS4, make_snapshot
+from fixtures import AS_OF, FIXTURE_ITEMS, make_snapshot
 
 from app.contracts.core import Band, ClipResult, SplitLeg
 from app.orchestrator.band import check_occupancy_detailed
@@ -39,8 +39,8 @@ SNAP = make_snapshot()
 
 def _band(cap_by_date: dict) -> Band:
     return Band(
-        {i: 0.0 for i in ITEMS4},
-        {i: 1e9 for i in ITEMS4},
+        {i: 0.0 for i in FIXTURE_ITEMS},
+        {i: 1e9 for i in FIXTURE_ITEMS},
         1e9,
         1e12,
         {},

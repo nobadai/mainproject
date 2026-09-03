@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from fixtures import AS_OF, DEMAND, ITEMS4, PRICE_BASE, make_snapshot, sales_reply
+from fixtures import AS_OF, DEMAND, FIXTURE_ITEMS, PRICE_BASE, make_snapshot, sales_reply
 
 from app.contracts.core import (
     Band,
@@ -65,7 +65,7 @@ def _ev(claim, ref, value, unit, grade="OFFICIAL") -> Evidence:
 
 
 def _scenario(**kw) -> MinimalScenario:
-    qty = kw.pop("qty", {i: DEMAND[i] * 5 for i in ITEMS4})
+    qty = kw.pop("qty", {i: DEMAND[i] * 5 for i in FIXTURE_ITEMS})
     item = next(iter(qty))
     base = {
         "scenario_id": "SCN-TEST",
@@ -97,8 +97,8 @@ def _clip(scn: MinimalScenario, clipped=None) -> ClipResult:
 
 def _wide_band() -> Band:
     return Band(
-        floor_kg={i: 0.0 for i in ITEMS4},
-        cap_kg={i: 1e9 for i in ITEMS4},
+        floor_kg={i: 0.0 for i in FIXTURE_ITEMS},
+        cap_kg={i: 1e9 for i in FIXTURE_ITEMS},
         cap_total_kg=1e9,
         cap_amount_krw=1e12,
         contributors={},
@@ -136,7 +136,10 @@ def _resolver(mapping):
 
 
 _REPLIES = {"sales": sales_reply(), "finance": _finance_reply()}
-_REFS = {"SRC-SALES-001": sum(round(DEMAND[i], 1) for i in ITEMS4), "SRC-FIN-001": 30_000_000.0}
+_REFS = {
+    "SRC-SALES-001": sum(round(DEMAND[i], 1) for i in FIXTURE_ITEMS),
+    "SRC-FIN-001": 30_000_000.0,
+}
 
 
 def _run(scn, clip, replies=None, meta=None, band=None, **kw):
@@ -304,8 +307,8 @@ section("\n[B-6] L4 — 날짜별 창고 점유 (cap_by_date, T1·T3·Critic 공
 
 d_arrive = AS_OF + timedelta(days=2)
 tight = Band(
-    floor_kg={i: 0.0 for i in ITEMS4},
-    cap_kg={i: 1e9 for i in ITEMS4},
+    floor_kg={i: 0.0 for i in FIXTURE_ITEMS},
+    cap_kg={i: 1e9 for i in FIXTURE_ITEMS},
     cap_total_kg=1e9,
     cap_amount_krw=1e12,
     contributors={},
@@ -442,8 +445,8 @@ _no_date = ClipResult(
     clipped_split_plan=(SplitLeg(0, {"배추": 100.0}, None),),
 )
 _tight = Band(
-    {i: 0.0 for i in ITEMS4},
-    {i: 1e9 for i in ITEMS4},
+    {i: 0.0 for i in FIXTURE_ITEMS},
+    {i: 1e9 for i in FIXTURE_ITEMS},
     1e9,
     1e12,
     {},
@@ -564,10 +567,10 @@ _allocs = make_allocations()
 _bb = combine_outbound_band({"inventory": inventory_reply_b(shared_outbound_kg=400.0)})
 ok(_bb.cap_total_kg == 400.0, "공용 출고 능력이 cap_total_kg 로 결합된다")
 ok(
-    set(_bb.cap_kg) == set(ITEMS4) and all(v == 200.0 for v in _bb.cap_kg.values()),
+    set(_bb.cap_kg) == set(FIXTURE_ITEMS) and all(v == 200.0 for v in _bb.cap_kg.values()),
     "품목별 상한이 cap_kg 로 결합된다",
 )
-ok(_bb.cap_total_effective_kg == 400.0, "실효 상한 = min(공용 능력 400, 재고 합 800)")
+ok(_bb.cap_total_effective_kg == 400.0, "실효 상한 = min(공용 능력 400, 재고 합 600)")
 
 # ── 공용 자원이 결합 제약으로 실제 작동하는가 (§3.7.4 검사 3번) ──
 _cl = clip_allocations(_allocs, _bb)
@@ -591,8 +594,12 @@ ok(
 # ── 금액은 단가 재계산 없이 비율만 적용 ─────────────────────────
 _src = next(a for a in _allocs if a.allocation_id == "ALO-100")
 _orig_amt = sum(l.qty_kg * l.unit_price_krw_per_kg for l in _src.legs)
+# ★ 축소비율을 상수로 안 쓴다. 0.5 는 4품목(합 800kg) 시절의 400/800 이었고,
+#   품목이 셋이 되자 2/3 이 되면서 이 검사만 깨졌다. 비율은 바로 위에서 이미
+#   "품목 간 동일" 로 잠갔으니, 그 값을 그대로 쓰는 편이 관계를 재는 것이다.
+_ratio = next(iter(_ratios.values()))
 ok(
-    abs(_full.clipped_amount_krw - _orig_amt * 0.5) < 1.0,
+    abs(_full.clipped_amount_krw - _orig_amt * _ratio) < 1.0,
     "클리핑 금액 = 원금액 × 축소비율 (오케스트레이터가 단가를 만들지 않는다, §5.1)",
 )
 
@@ -657,7 +664,7 @@ _a = MinimalAllocation("S-A", "균형", _legs, outbound_by_date=(OutboundLeg(AS_
 ok(_a.qty_by_item["배추"] == 500.0, "qty_by_item 은 배분 총량 (HOLD 포함)")
 ok(_a.outbound_qty_by_item["배추"] == 350.0, "outbound_qty_by_item 은 HOLD 제외")
 
-_wide = Band({i: 0.0 for i in ITEMS4}, {"배추": 1e9}, 1e9, 1e12, {}, {})
+_wide = Band({i: 0.0 for i in FIXTURE_ITEMS}, {"배추": 1e9}, 1e9, 1e12, {}, {})
 _c = clip_allocation(_a, _wide)
 ok(
     _c.qty_kg["배추"] == 350.0,
@@ -675,7 +682,7 @@ _a2 = MinimalAllocation(
     (ChannelLeg("KIMCHI_FACTORY", "배추", 100.0, 2293.0, ("L1",)),),
     outbound_by_date=(OutboundLeg(AS_OF, 300.0),),
 )
-_tight2 = Band({i: 0.0 for i in ITEMS4}, {"배추": 1e9}, 250.0, 1e12, {}, {})
+_tight2 = Band({i: 0.0 for i in FIXTURE_ITEMS}, {"배추": 1e9}, 250.0, 1e12, {}, {})
 _c2 = clip_allocation(_a2, _tight2)
 ok(
     "cap_total_kg" in _c2.binding_constraints,
@@ -764,13 +771,13 @@ def _sales_for(item, floor=None):
 
 _per_item = combine_band(
     {
-        "sales": [_sales_for(i) for i in ITEMS4],
+        "sales": [_sales_for(i) for i in FIXTURE_ITEMS],
         "inventory": inventory_reply(),
         "finance": finance_reply(30_000_000.0),
     }
 )
 ok(
-    all(abs(_per_item.floor_kg[i] - DEMAND[i]) < 0.1 for i in ITEMS4),
+    all(abs(_per_item.floor_kg[i] - DEMAND[i]) < 0.1 for i in FIXTURE_ITEMS),
     "품목별 영업 회신 4개가 하나의 floor 벡터로 결합된다",
 )
 ok(
@@ -818,7 +825,11 @@ except ContractViolation:
 # runtime_status 가 READY 가 아니면 밴드에 넣지 않는다
 _down = T2Reply("inventory", AS_OF, inventory_reply().checks, runtime_status="RUNTIME_NOT_READY")
 _b_down = combine_band(
-    {"sales": [_sales_for(i) for i in ITEMS4], "inventory": _down, "finance": finance_reply(3e7)}
+    {
+        "sales": [_sales_for(i) for i in FIXTURE_ITEMS],
+        "inventory": _down,
+        "finance": finance_reply(3e7),
+    }
 )
 ok(_b_down.not_ready == ("inventory",), "미가동 부서가 not_ready 에 기록된다")
 ok(not _b_down.usable, "not_ready 가 있으면 밴드를 쓸 수 없다")
@@ -829,7 +840,7 @@ ok(
 
 _st = PipelineState(snapshot=SNAP)
 _st.replies = {
-    "sales": [_sales_for(i) for i in ITEMS4],
+    "sales": [_sales_for(i) for i in FIXTURE_ITEMS],
     "inventory": _down,
     "finance": finance_reply(3e7),
 }

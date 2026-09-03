@@ -111,7 +111,7 @@ def _run_once():
     registry.register("inventory", _port({"free": 2}, (_evidence("warehouse_free_kg", 7637.0),)))
     registry.register("purchase", _port(_SCENARIOS))
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    return ProcurementFlow(runner, verifier=None, item="피마늘").run()
+    return ProcurementFlow(runner, verifier=None, item="배추").run()
 
 
 # ── ① 실행 계획 ─────────────────────────────────────────────────────────────

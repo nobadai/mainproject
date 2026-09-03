@@ -127,7 +127,7 @@ def _run(*, purchaser: _Purchaser | None = None, **over: Any):
     for name, port in ports.items():
         registry.register(name, port)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    flow = ProcurementFlow(runner, item="피마늘")
+    flow = ProcurementFlow(runner, item="배추")
     return flow.run(), purchaser
 
 
