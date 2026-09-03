@@ -546,7 +546,6 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     for name in (
         "guaranteed_capacity_kg",
         "burst_capacity_kg",
-        "inbound_lead_days",
         "daily_inbound_capacity_kg",
         "inbound_transport_capacity_kg",
         "shared_daily_outbound_capacity_kg",
@@ -556,6 +555,25 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
             missing.append(name)
         else:
             payload[name] = _num(value)
+
+    # 🔴 `inbound_lead_days` 는 **위 루프에 넣지 않는다** (#221 · 매입 지적 2026-09-03).
+    #
+    #   위 다섯은 kg(`Decimal`)이고 이것 하나가 **일수(`int`)** 다. 한 루프로 묶여
+    #   `_num()` = `float()` 을 타면서 `2` 가 `2.0` 으로 나갔다.
+    #
+    #       물류 내부   schemas.py  inbound_lead_days: int = Field(ge=0)
+    #       봉투        2.0                                         ← 이탈자
+    #       IO Contract §3  "inbound_lead_days": 2
+    #
+    # ★ 비용이 매입 하나가 아니었다 — 마스터가 `critic_bridge.py` `_int_of` 와
+    #   `commitment.py` 의 `lead != int(lead)` 로 방어를 둘 만들어 뒀고, 매입도
+    #   `purchase_agent/adapter.py` 에서 `lead != int(lead)` 를 세운다. 생산자가
+    #   맞게 보내면 그 방어들이 **무해해진다** — 지우지는 않는다. 다른 생산자가
+    #   붙을 수 있고, 그때도 같은 자리에서 막혀야 한다.
+    if snapshot.inbound_lead_days is None:
+        missing.append("inbound_lead_days")
+    else:
+        payload["inbound_lead_days"] = int(snapshot.inbound_lead_days)
 
     # ── 날짜별 입고 Band ─────────────────────────────────────────
     tools.append(_T_CAP)

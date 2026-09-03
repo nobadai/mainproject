@@ -855,3 +855,81 @@ def test_번역표에_죽은_이름이_없다():
     stale = sorted(code for code in _MISSING_DATA_NAMES if code not in published)
 
     assert stale == []
+
+
+def _two_axis_case() -> tuple[InventoryLogisticsSnapshot, dict[str, Any]]:
+    """한 시나리오에서 **축이 다른 조정 둘**이 서는 케이스 (#221 · #209 M7).
+
+    창고 만석(8,000/8,000)에 확정 출고 1,000kg(8/25)·1,000kg(8/27) 이 있어
+    8/26부터 1,000 · 8/28부터 2,000 이 열린다. lead=2.
+
+        split1  500@8/21  → 도착 8/23 cap 0        → timing 조정 (8/26 에 500 가능)
+        split2  800@8/24  → 도착 8/26 여유 1,000 − 원안 500 = 500
+                            800 > 500 이고 여유가 0 이 아니다  → quantity 조정 (500)
+
+    ★ 조정안이 **2건 나오는 유일한 픽스처**다. 다른 픽스처는 전부 1건이라
+      리스트 순서를 뒤집어도 결과가 같았다.
+    """
+    snapshot = _snapshot(
+        used_capacity_kg=Decimal(8000),
+        on_hand_by_lot=[
+            {
+                "lot_id": "LOT-TWO-AXIS",
+                "item": "배추",
+                "available_qty_kg": Decimal(2000),
+                "remaining_freshness_days": 5,
+                "effective_freshness_limit_days": 10,
+                "status": "ACTIVE",
+            }
+        ],
+        confirmed_outbound_schedule=[
+            {"date": date(2026, 8, 25).isoformat(), "quantity_kg": 1000, "item": "배추"},
+            {"date": date(2026, 8, 27).isoformat(), "quantity_kg": 1000, "item": "배추"},
+        ],
+    )
+    payload = _payload_of(
+        [
+            _scenario_block(
+                "기본",
+                [
+                    {"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 500},
+                    {"seq": 2, "date": date(2026, 8, 24).isoformat(), "qty_kg": 800},
+                ],
+                1300,
+            )
+        ]
+    )
+    return snapshot, payload
+
+
+def test_조정안이_둘이면_등장_순서를_지킨다(monkeypatch):
+    """✅ 계약 — 조정안 **리스트의 순서**를 고정한다 (#221 · `#209` 가 남긴 구멍).
+
+    🔴 `#209` 변이 7건 중 `M7`(조정안 리스트 순서 뒤집기)만 안 잡혔다. 조정안이
+    1건 나오는 픽스처뿐이라 뒤집어도 결과가 같았기 때문이다. 라벨 순서(`M5`)는
+    잡혔지만 **리스트 순서는 재는 수단이 없었다.**
+
+    받는 쪽이 순서에 뜻을 둔다 — 마스터 화면이 첫 조정안을 먼저 읽고,
+    `preferred_adjustment` 는 별도 축이라 리스트가 뒤집히면 화면의 우선순위와
+    엇갈린다. 조용히 바뀌면 아무도 모른다.
+
+    ⚠️ 운영 코드는 이 판에서 안 고쳤다. 지금 동작이 이미 맞다(수집 `dict` 의
+    삽입 순서 보존). 재는 검사만 없었다.
+    """
+    snapshot, payload = _two_axis_case()
+    _wire(monkeypatch, snapshot)
+
+    reply, _meta = adapter.logistics_port(_request(payload))
+
+    assert reply.payload["scenario_results"][0]["verdict"] == "conditional"
+
+    # 🔴 축이 다른 조정 둘이 서고, split_plan 등장 순서를 그대로 지킨다.
+    assert [row.axis for row in reply.suggested_adjustments] == ["timing", "quantity"]
+    assert [row.split_date for row in reply.suggested_adjustments] == [
+        AS_OF,
+        date(2026, 8, 24),
+    ]
+
+    # 두 조정이 합쳐지지 않는다 — dedup 키가 다르다.
+    assert len(reply.suggested_adjustments) == 2
+    assert all(row.scenario_labels == ("기본",) for row in reply.suggested_adjustments)

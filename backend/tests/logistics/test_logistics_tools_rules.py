@@ -476,12 +476,20 @@ def test_outbound_row_without_item_omits_inventory_but_keeps_pre_ready(
 
 
 def test_item_without_ml_forecast_stays_in_inventory(complete_logistics_snapshot):
-    """TC-16: 피마늘은 ML Forecast가 없어도 재고 응답에서 제외하지 않는다."""
+    """TC-16: 계약 품목 밖이라도 창고에 실물이 있으면 재고 응답에서 제외하지 않는다.
+
+    ⚠️ **품목을 피마늘에서 건고추로 바꿨다** (#216). 피마늘이 `ITEMS` 에서 빠지며
+    DB Lot 도 소진 처리 대상이 됐다. 건고추는 같은 조건(ML Forecast 없음 · `ITEMS`
+    밖)이면서 이미 소진된 선례 품목이라, 이 검사가 재는 것이 달라지지 않는다.
+
+    재는 것은 품목 이름이 아니라 **`ITEMS` 로 거르지 않는다**는 계약 원칙이다
+    (`app/contracts/core.py` `ITEMS` 주석).
+    """
     snapshot = complete_logistics_snapshot.model_copy(
         update={
             "on_hand_by_lot": [
                 *complete_logistics_snapshot.on_hand_by_lot,
-                _lot("LOT-PIMANUL", "피마늘", "8.88", 20, "ACTIVE"),
+                _lot("LOT-GEONGOCHU", "건고추", "8.88", 20, "ACTIVE"),
             ]
         }
     )
@@ -489,8 +497,8 @@ def test_item_without_ml_forecast_stays_in_inventory(complete_logistics_snapshot
     inventory = build_inventory_by_item(snapshot)
 
     assert inventory is not None
-    assert ("피마늘", Decimal("8.88")) in [(row.item, row.available_qty_kg) for row in inventory]
-    assert any(lot.item == "피마늘" for lot in build_lot_constraints(snapshot))
+    assert ("건고추", Decimal("8.88")) in [(row.item, row.available_qty_kg) for row in inventory]
+    assert any(lot.item == "건고추" for lot in build_lot_constraints(snapshot))
 
 
 def test_lot_constraints_carry_grade_and_freshness_unchanged(complete_logistics_snapshot):
