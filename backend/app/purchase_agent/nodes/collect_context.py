@@ -25,6 +25,7 @@ from typing import Any
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.ports import MockNotAllowed
 from app.purchase_agent.state import PurchaseAgentState
 
 #: 절단 표시. **발췌가 문장 경계가 아니라 글자 수로 잘렸다는 사실을 발췌 자체에 남긴다.**
@@ -135,9 +136,26 @@ def collect_context(state: PurchaseAgentState) -> dict[str, Any]:
             break
         doc_type = remaining.pop(0)
         loops += 1
-        # 요청한 유형에 문서가 없는 날도 정상이다 (무·양파·피마늘엔 기상·작년동기 문서가
+        # 요청한 유형에 문서가 없는 날도 정상이다 (무·양파엔 기상·작년동기 문서가
         # 없다). 빈 회차도 한 번의 시도로 세어야 "찾아봤지만 없었다"가 루프 수에 남는다.
-        for doc in ports.get_context_docs(state["item"], as_of, [doc_type]):
+        #
+        # 🔴 **"없다" 와 "못 읽는다" 는 다르다** (2026-09-03).
+        #
+        #   앞엣것은 그날의 사실이고, 뒤엣것은 **판단 재료를 아예 못 구한 상태**다.
+        #   둘을 같이 빈 목록으로 두면 화면에 *"문서를 찾아봤지만 없었다"* 로 나가는데,
+        #   실제로는 **연습 데이터를 쓰려다 막힌 것**이다 (§1.2-10).
+        #
+        # ★ 여기서 멈추지 않고 사실만 담는다. 안을 낼지 말지는 ⑦ self_check 이 정한다 —
+        #   판정은 한 자리에 모여 있어야 사유가 갈리지 않는다.
+        try:
+            found = ports.get_context_docs(state["item"], as_of, [doc_type])
+        except MockNotAllowed as blocked:
+            return {
+                "context_docs": collected,
+                "context_loop_count": loops,
+                "context_unavailable": str(blocked),
+            }
+        for doc in found:
             if doc["doc_id"] in seen:
                 continue
             seen.add(doc["doc_id"])

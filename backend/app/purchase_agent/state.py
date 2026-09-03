@@ -95,6 +95,17 @@ class PurchaseAgentState(TypedDict):
     situation: Literal["stable", "uncertain"]
     context_docs: list[dict]  # 주입된 문서 (published_at <= as_of)
     context_loop_count: int  # max 3
+
+    #: 🔴 **문서를 못 읽은 사유.** 비어 있으면 정상이다 (2026-09-03).
+    #:
+    #:   `context_docs == []` 는 두 뜻이 될 수 있다.
+    #:
+    #:     그날 그 유형의 문서가 없다        정상 — 무·양파가 그렇다
+    #:     판단 재료를 아예 못 구했다        비정상 — 이 칸이 채워진다
+    #:
+    #: ★ 둘을 같은 빈 목록으로 두면 화면에 *"찾아봤지만 없었다"* 로 나간다.
+    #:   ⑦ `self_check` 이 이 칸을 보고 **안을 내지 않는다.**
+    context_unavailable: NotRequired[str]
     allowed_axes: list[str]  # ★ 그날 허용 strategy_type (규칙 계산)
     coverage_days: int  # ★ 커버일수 D
     base_plan: dict  # 수량·타이밍 초안
