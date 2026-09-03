@@ -618,16 +618,6 @@ def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str 
     return None
 
 
-#: 문서를 못 읽어 컷할 때의 사유. **사람이 읽는 문장이다.**
-#:
-#: ★ *"mock 이 막혔다"* 같은 기술 사정을 쓰지 않는다. 화면을 보는 사람에게 필요한 것은
-#:   **왜 오늘 아무것도 못 받는가** 이고, 그 답은 "확신이 없다" 다.
-_CONTEXT_CUT_REASON = (
-    "판단 재료(관측월보·기상·작년동기)를 읽지 못해 이 안의 확신을 세울 수 없다 — "
-    "확신 없는 안은 내지 않는다"
-)
-
-
 def self_check(state: PurchaseAgentState) -> dict[str, Any]:
     """안별 검사로 컷하고, 살아남은 것으로 제안을 조립해 계약을 재확인한다."""
     constraints = load_constraints()
@@ -671,29 +661,43 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)
         survivors = []
 
-    # 🔴 **판단 재료를 못 읽은 날은 안을 내지 않는다** (2026-09-03 · 사용자 지시).
+    # 🟢 **문서를 못 읽어도 안을 낸다** (2026-09-04 · 마스터 결정).
     #
-    #   `uncertain` 이라 문서를 읽으러 갔는데 못 읽었다는 것은, **불확실하다고 판단해
-    #   놓고 그 불확실을 줄일 재료를 못 구한** 상태다. 그때 안을 내면 숫자는 그럴듯한데
-    #   그 숫자가 선 근거가 없다.
+    #   앞선 판(#228)은 문서를 못 읽으면 컷했다. 마스터가 뒤집었다 —
+    #   *"문서 없으면 없이 진행하고, 생기면 생긴대로 진행한다. 내가 통제한다."*
     #
-    # ★ **컷 사유를 안마다 붙인다.** 화면이 `rejected_reasons` 를 그대로 보여주므로,
-    #   사람이 *"왜 오늘은 아무것도 안 나왔나"* 를 한 줄로 읽는다.
+    #   ★ **mock 을 쓰는 것과 다르다.** 문서가 실제로 없어(실 소스 없음) 없이 가는
+    #     것이지, 연습 데이터로 메우는 게 아니다 — `get_context_docs` 는 여전히 mock 을
+    #     막는다. 없으면 없는 채로 판단하고, 그 사실만 고지한다.
     #
-    # ⚠️ `context_docs` 가 빈 것만으로는 컷하지 않는다 — 무·양파는 원래 기상·작년동기
-    #   문서가 없고 그건 그날의 사실이다. **못 읽은 것**일 때만 컷한다.
-    unavailable = state.get("context_unavailable")
-    if unavailable and survivors:
-        rejected.extend(
-            {"label": s["label"], "reason": _CONTEXT_CUT_REASON} for s in survivors
-        )
-        survivors = []
+    #   고지는 `_assemble` 이 `context_unavailable` 을 risks 로 올린다 (컷하지 않는다).
+    #
+    # ⚠️ 무·양파는 원래 기상·작년동기 문서가 없다 — 그건 `context_unavailable` 이
+    #   아니라 빈 `context_docs` 다. 둘 다 이제 안을 안 막는다.
 
     # 이 노드가 **직접 컷한 것**만 세어 넘긴다 — 아래 no_proposal_reason 이 원인을
     # self_check 으로 돌릴 자격이 여기서 갈린다.
     cut_here = len(rejected) - len(state["rejected_reasons"])
     proposal = _assemble(state, survivors, rejected, cut_here=cut_here)
     return {"scenarios_final": survivors, "rejected_reasons": rejected, "proposal": proposal}
+
+
+#: 문서를 못 읽고 판단했다는 **고지**. 컷 사유가 아니다 (2026-09-04 · 마스터 결정).
+#:
+#: ★ *"문서 없으면 없이 진행"* 이라, 이건 안을 죽이는 게 아니라 **안에 붙는 위험 표시**다.
+#:   사람이 화면에서 *"이 안은 문서 보강 없이 나왔다"* 를 읽고 감안한다.
+_CONTEXT_NOTE = "판단 재료(관측월보·기상·작년동기)를 읽지 못해 문서 보강 없이 판단했다"
+
+
+def _with_context_note(scenarios: list[dict], unavailable: str | None) -> list[dict]:
+    """문서를 못 읽었으면 각 안의 risks 에 고지를 얹는다. **컷하지 않는다.**
+
+    ⚠️ 빈 `context_docs`(무·양파처럼 원래 문서가 없는 날)와 다르다 — 그건 사실이라
+      고지도 안 붙는다. `context_unavailable` 은 *"읽으려 했는데 못 읽었다"* 일 때만 찬다.
+    """
+    if not unavailable:
+        return scenarios
+    return [{**s, "risks": [*s.get("risks", []), _CONTEXT_NOTE]} for s in scenarios]
 
 
 def _no_proposal_reason(rejected: list[dict], cut_here: int) -> str:
@@ -708,14 +712,6 @@ def _no_proposal_reason(rejected: list[dict], cut_here: int) -> str:
     ``cut_here`` 는 ⑦이 직접 컷한 안의 수다. 0이면 여기 오기 전에 이미 없었다는 뜻이다.
     """
     detail = "; ".join(f"{item['label']}({item['reason']})" for item in rejected)
-    # 🔴 **원인이 "검사에서 걸렸다" 가 아니라 "잴 수가 없었다" 인 날** (2026-09-03).
-    #
-    #   같은 사유가 안마다 붙어 있으면 *"보수(...); 기본(...)"* 로 두 번 나가는데,
-    #   읽는 사람에게는 한 문장이면 된다 — 안별로 다른 이유가 아니라 **그날 전체의
-    #   사정**이기 때문이다.
-    if rejected and all(item["reason"] == _CONTEXT_CUT_REASON for item in rejected):
-        labels = " · ".join(item["label"] for item in rejected)
-        return f"{_CONTEXT_CUT_REASON} (해당 안: {labels})"
     if cut_here == 0:
         return f"안이 만들어지지 않았다: {detail}"
     if cut_here == len(rejected):
@@ -766,7 +762,7 @@ def _assemble(
             # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
             "received_adjustments": len(state.get("adjustments") or []),
         },
-        "scenarios": survivors,
+        "scenarios": _with_context_note(survivors, state.get("context_unavailable")),
         "confidence": state["confidence"],
         "situation": state["situation"],
         "context_docs_used": [document_ref(doc["doc_id"]) for doc in state["context_docs"]],
