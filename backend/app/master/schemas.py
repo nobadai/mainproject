@@ -12,9 +12,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.contracts.core import EndCode
 from app.master.decision import DecisionOut
 from app.master.envelope import AgentName, Trigger
-from app.orchestrator.contracts_core import EndCode
 
 
 class ProcurementRunRequest(BaseModel):

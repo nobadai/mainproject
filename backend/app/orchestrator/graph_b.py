@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     AdjustAttempt,
     CycleBState,
     Dept,

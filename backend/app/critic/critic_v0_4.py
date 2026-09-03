@@ -35,6 +35,23 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
 
+from app.contracts.core import (
+    _DEPT_AXES,
+    ITEMS,
+    ApprovedPurchaseCommitment,
+    Band,
+    CheckResult,
+    ClipResult,
+    CriticFinding,
+    Dept,
+    ItemCode,
+    LotConstraint,
+    OutboundBand,
+    PurchaseScenario,
+    SaleAllocation,
+    T0Snapshot,
+    T2Reply,
+)
 from app.critic.critic import (
     EvidenceResolver,
     RationaleJudge,
@@ -53,23 +70,6 @@ from app.critic.critic import (
     run_l4 as _run_llm_rationale,
 )
 from app.orchestrator.band import check_occupancy_detailed, detect_collapse_type
-from app.orchestrator.contracts_core import (
-    _DEPT_AXES,
-    ITEMS,
-    ApprovedPurchaseCommitment,
-    Band,
-    CheckResult,
-    ClipResult,
-    CriticFinding,
-    Dept,
-    ItemCode,
-    LotConstraint,
-    OutboundBand,
-    PurchaseScenario,
-    SaleAllocation,
-    T0Snapshot,
-    T2Reply,
-)
 
 EPS = 1e-6
 

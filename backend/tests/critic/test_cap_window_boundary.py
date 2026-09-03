@@ -30,16 +30,16 @@ from types import SimpleNamespace
 
 from fixtures import AS_OF, ITEMS4, make_snapshot
 
-from app.critic.critic_v0_4 import run_critic_v04
-from app.logistics.tools import CAP_BY_DATE_WINDOW_DAYS, build_cap_window
-from app.orchestrator.band import check_occupancy_detailed
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     Band,
     ClipResult,
     MinimalScenario,
     SourcingLot,
     SplitLeg,
 )
+from app.critic.critic_v0_4 import run_critic_v04
+from app.logistics.tools import CAP_BY_DATE_WINDOW_DAYS, build_cap_window
+from app.orchestrator.band import check_occupancy_detailed
 
 LEAD = 2
 

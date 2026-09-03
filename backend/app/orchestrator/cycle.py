@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ApprovedPurchaseCommitment,
     ArrivalLeg,
     Cycle,

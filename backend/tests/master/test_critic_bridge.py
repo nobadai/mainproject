@@ -15,10 +15,10 @@ from datetime import date
 
 import pytest
 
+from app.contracts.core import Evidence
 from app.master import critic_bridge as bridge
 from app.master.plan import ExecutionPlan
 from app.master.verifier import MasterVerifier, VerificationContext
-from app.orchestrator.contracts_core import Evidence
 
 AS_OF = date(2025, 12, 31)
 

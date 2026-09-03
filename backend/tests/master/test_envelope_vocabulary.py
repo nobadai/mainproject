@@ -29,6 +29,11 @@ from typing import get_args
 
 import pytest
 
+from app.contracts.core import (
+    ContractViolation,
+    RuntimeStatus,
+    Verdict,
+)
 from app.master.envelope import (
     LLM_STATUSES,
     RUNTIME_STATUSES,
@@ -41,11 +46,6 @@ from app.master.envelope import (
     Trigger,
     check_vocabulary,
     validate_reply,
-)
-from app.orchestrator.contracts_core import (
-    ContractViolation,
-    RuntimeStatus,
-    Verdict,
 )
 from tests.master.test_envelope import reply, req
 

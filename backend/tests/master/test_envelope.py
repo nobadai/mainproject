@@ -9,6 +9,11 @@ from datetime import date
 
 import pytest
 
+from app.contracts.core import (
+    ContractViolation,
+    Evidence,
+    SuggestedAdjustment,
+)
 from app.master.envelope import (
     AgentReply,
     AgentRequest,
@@ -18,11 +23,6 @@ from app.master.envelope import (
     check_evidence_coverage,
     check_reasoning,
     validate_reply,
-)
-from app.orchestrator.contracts_core import (
-    ContractViolation,
-    Evidence,
-    SuggestedAdjustment,
 )
 
 AS_OF = date(2026, 8, 26)

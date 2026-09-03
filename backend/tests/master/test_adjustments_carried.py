@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.contracts.core import SuggestedAdjustment
 from app.master.answer import facts_from_procurement
 from app.master.budget import CallBudget
 from app.master.envelope import (
@@ -37,7 +38,6 @@ from app.master.envelope import (
 from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _to_response
-from app.orchestrator.contracts_core import SuggestedAdjustment
 
 AS_OF = date(2025, 12, 31)
 

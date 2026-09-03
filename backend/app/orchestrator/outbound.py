@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ITEMS,
     ClipResult,
     Dept,

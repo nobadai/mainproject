@@ -8,6 +8,7 @@
 
 from fastapi import APIRouter, HTTPException, status
 
+from app.contracts.core import ContractViolation
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
@@ -27,7 +28,6 @@ from app.master.service import (
     get_run_report,
     run_procurement,
 )
-from app.orchestrator.contracts_core import ContractViolation
 
 router = APIRouter(prefix="/master", tags=["master"])
 

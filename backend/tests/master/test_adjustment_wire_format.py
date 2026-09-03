@@ -24,6 +24,7 @@ from dataclasses import asdict
 from datetime import date
 from typing import Any
 
+from app.contracts.core import SuggestedAdjustment
 from app.master.budget import CallBudget
 from app.master.envelope import (
     AgentReply,
@@ -33,7 +34,6 @@ from app.master.envelope import (
 )
 from app.master.flow import ProcurementFlow, _wire
 from app.master.runner import AgentRegistry, MasterRunner
-from app.orchestrator.contracts_core import SuggestedAdjustment
 
 AS_OF = date(2025, 12, 31)
 SPLIT = date(2026, 9, 11)

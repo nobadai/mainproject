@@ -9,7 +9,17 @@ envelope.py — 마스터 ↔ 에이전트 공용 봉투 (M-1 공통 이벤트 �
 
 ★ 새 어휘를 만들지 않는다.
   `RuntimeStatus` · `Verdict` · `Evidence` · `SuggestedAdjustment` 는 전부
-  `contracts_core` 의 기존 타입을 그대로 쓴다. 신설은 봉투와 `Mode` 뿐이다.
+  `app.contracts.core` 의 기존 타입을 그대로 쓴다. 신설은 봉투와 `Mode` 뿐이다.
+
+🔴 **이 파일을 자리 이전 ③ 에서 제일 먼저 옮겼다** (2026-09-03).
+  물류·판매가 봉투를 경유해 공용 계약을 **두 번째 경로로** 읽는다.
+
+  ```text
+  logistics/adapter.py:59 → app.master.envelope → 공용 계약
+  ```
+
+  파트가 자기 import 를 다 고쳐도 **여기가 옛 자리를 가리키면 shim 제거(④)에서
+  같이 깨진다.** 물류 지적이고, 순서를 그래서 이렇게 잡았다.
 
 ★ 두 층으로 나눠 강제한다.
   ┌─ 타입 레벨 (즉시 ContractViolation) ─ 봉투가 성립하지 않는 것
@@ -30,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal, get_args
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ContractViolation,
     Dept,
     Evidence,
