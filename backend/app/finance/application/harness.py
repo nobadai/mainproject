@@ -340,7 +340,38 @@ def _validate_ready_reasoning(reasoning: str) -> None:
 
 
 
+def _validate_sales_payload(request: AgentRequest) -> None:
+    """판매 batch 요청의 **모양**만 본다. 업무 사실의 유무는 안에서 판정한다.
+
+    ★ 매입 검사를 재사용하지 않는다. `total_amount_krw` · `label` 은 매입 계약이라
+      판매 제안에 요구하면 판매가 매입 모양을 흉내내야 한다.
+
+    ★ 여기서 막는 것은 **결과를 안과 짝지을 수 없게 만드는 것**뿐이다 — 개수가
+      1~3 을 벗어나거나, 같은 `scenario_id` 가 두 번 오는 경우다. 빠진 업무 사실은
+      오류가 아니라 안별 `INPUT_INCOMPLETE` 로 나간다.
+    """
+    scenarios = request.payload.get("scenarios")
+    if scenarios is None:
+        return
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        raise ValueError("SALES_VALIDATION requires one to three scenarios")
+    seen: set[str] = set()
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise TypeError("each Sales scenario must be an object")
+        scenario_id = scenario.get("scenario_id")
+        if not isinstance(scenario_id, str) or not scenario_id.strip():
+            # 식별자가 없는 것은 계약 오류가 아니다 — 안에서 INPUT_INCOMPLETE 로 나간다.
+            continue
+        if scenario_id in seen:
+            raise ValueError("scenario_id must be unique within the request")
+        seen.add(scenario_id)
+
+
 def _validate_finance_payload(request: AgentRequest) -> None:
+    if request.mode == "SALES_VALIDATION":
+        _validate_sales_payload(request)
+        return
     if request.mode != "SCENARIO_VALIDATION":
         return
     raw_scenarios = request.payload.get("scenarios")
