@@ -36,6 +36,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from app.contracts.core import Evidence, SuggestedAdjustment
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     derive_procurement_verdict,
@@ -57,7 +58,6 @@ from app.logistics.tools import (
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
-from app.orchestrator.contracts_core import Evidence, SuggestedAdjustment
 from app.purchase_agent.schemas import PurchaseProposal
 
 logger = logging.getLogger(__name__)
