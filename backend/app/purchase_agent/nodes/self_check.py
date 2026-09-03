@@ -299,6 +299,9 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             band 가 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이었다. 그대로
             넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 됐다.
             우리가 #93 구현 중 물어 #181 이 서고, band 가 **net 전제로** 바뀌었다.
+            ⚠️ **뜻만 맞췄고 칸은 남는다.** ``confirmed_occupancy_by_date`` 를 지우려던
+            계획은 철회됐다 — ``critic_v0_4.py:929`` L4-7 이 그 칸으로 gross 를 복원해서,
+            지우면 **L4-7 이 영영 죽는다** (#181 · 2026-09-03 정정). ``#181`` 은 열려 있다.
         ㄴ. 타입이 다르다 — ``Band.cap_by_date_kg`` 는 ``date`` 키, 우리는 ISO 문자열.
             조회가 전부 미스 나면 값이 와 있는데도 "받지 못했다"로 고지된다.
         ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.

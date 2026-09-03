@@ -25,6 +25,9 @@ def judgment_row(forecast: dict, ci_judgment_day: int) -> dict[str, Any]:
       벗어난 날을 고르면 그날이 아니라 **전 장날의 불확실성**을 재게 된다.
       **근거와 실측표는 ``constraints.yaml`` 의 ``situation.ci_judgment_day`` 에 있다** —
       여기 옮겨 적지 않는다(한쪽만 바뀐다). 잠그는 검사는 ``test_judgment_day.py``.
+
+      ⚠️ 이 제약은 **2026-08-27 #57 코멘트로 이미 들어와 있었고 6일간 코드에 안 옮겨져
+      있었다.** 2026-09-03 에 실측으로 확인하고 검사로 잠갔다.
     """
     daily = forecast["daily"]
     if len(daily) < ci_judgment_day:
