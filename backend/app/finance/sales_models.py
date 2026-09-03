@@ -215,7 +215,13 @@ class SalesSupply(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     confirmed_quantity_kg: Decimal = Field(ge=0)
-    conditional_quantity_kg: Decimal = Field(default=Decimal(0), ge=0)
+    #: 조건부로 **확보 가능하다고 확인된** 양.
+    #:
+    #: 🔴 `None` 은 0 이 아니다. 0 은 "조건부 물량이 없다"는 사실이고, `None` 은
+    #:   "조건부로 얼마를 확보할 수 있는지 아직 모른다"는 뜻이다. 둘을 같게 두면
+    #:   *모르는 상태*가 *확정 물량뿐인 상태*로 읽혀서, 확정 재고원가가 제안 전체를
+    #:   덮는 것을 막는 방어가 조용히 풀린다.
+    conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     dependency_ref: str | None = None
 
     @field_validator("confirmed_quantity_kg", "conditional_quantity_kg", mode="before")

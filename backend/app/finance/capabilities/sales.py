@@ -159,9 +159,14 @@ def _parse_supply(value: Any) -> SalesSupply | None:
         return None
     if not isinstance(value, Mapping):
         raise TypeError("supply must be a mapping")
+    raw_conditional = value.get("conditional_quantity_kg")
     return SalesSupply(
         confirmed_quantity_kg=_decimal(value["confirmed_quantity_kg"]),
-        conditional_quantity_kg=_decimal(value.get("conditional_quantity_kg", 0)),
+        # 🔴 없는 칸을 0 으로 읽지 않는다. 보내는 쪽이 확정 물량만 알고 조건부 물량을
+        #   모를 수 있는데, 그것을 "조건부 0" 으로 바꾸면 모르는 것이 사실이 된다.
+        conditional_quantity_kg=(
+            None if raw_conditional is None else _decimal(raw_conditional)
+        ),
         dependency_ref=(
             None if value.get("dependency_ref") is None else str(value["dependency_ref"])
         ),
@@ -241,7 +246,6 @@ def evaluate_sales_margin(
     """
     missing_data: list[str] = []
     supply = sales_input.supply
-    conditional = supply.conditional_quantity_kg if supply is not None else Decimal(0)
 
     cost_basis = compose_sales_cost_basis(
         inventory_cost_basis=sales_input.inventory_cost_basis,
@@ -249,7 +253,18 @@ def evaluate_sales_margin(
     )
     if cost_basis is None:
         missing_data.append("authoritative_inventory_cost_basis")
-    elif conditional > 0:
+    elif supply is None:
+        # 🔴 공급 자체를 못 받은 것은 **모름**이지 "조건부 공급 없음" 이 아니다.
+        #    예전에는 여기서 조건부 0 으로 읽어, 확정 재고원가가 제안 전체를 덮는 것을
+        #    막는 방어가 통째로 풀렸다. 공급을 모르면 그 판단을 할 수 없다 — fail closed.
+        missing_data.append("sales_supply_context")
+        cost_basis = None
+    elif supply.conditional_quantity_kg is None:
+        # 조건부 물량을 모르면 확정 재고원가가 제안 전체를 덮는지 알 수 없다.
+        # 모르는 채로 덮으면 역마진이 마진처럼 보인다 — fail closed.
+        missing_data.append("sales_supply_conditional_quantity")
+        cost_basis = None
+    elif supply.conditional_quantity_kg > 0:
         # 확정 재고원가는 확정 물량에 대한 사실이다. 조건부 물량까지 덮지 않는다.
         missing_data.append("sales_cost_basis_for_conditional_supply")
         cost_basis = None
