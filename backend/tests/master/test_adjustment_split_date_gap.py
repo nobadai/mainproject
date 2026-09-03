@@ -86,6 +86,37 @@ def test_물류는_split_date_를_표준형에_안_싣는다():
     )
 
 
+def test_물류는_scenario_labels_도_안_싣는다():
+    """🔴 **빈 칸이 하나가 아니라 둘이다** (물류 지적 2026-09-03).
+
+    화면이 **두 칸을 읽는다** (`answer._scope`).
+
+    ```python
+    if adjustment.scenario_labels:  parts.append(f"{'·'.join(...)}안")
+    if adjustment.split_date:       parts.append(f"{...} 회차")
+    ```
+
+    ⚠️ **이쪽은 한 줄이 아니다.** 중복 제거 루프가 라벨을 그 자리에서 버린다.
+
+    ```python
+    key = (adjustment.axis, adjustment.split_date, target)
+    if key in seen_adjustments:
+        continue          # ← 두 번째 시나리오의 라벨이 여기서 사라진다
+    ```
+
+      같은 조정이 세 시나리오에서 나와도 **첫 라벨 하나만** 손에 남는다.
+      수집 → 조립 2단계로 바꿔야 채울 수 있다 (물류 미결 §0-5).
+
+    ★ 그래서 둘을 **같이** 잠근다 — 물류가 한 판에서 만들면 한 번에 뒤집힌다.
+    """
+    passed = _kwargs_of_construction(_LOGISTICS)
+
+    assert "scenario_labels" not in passed, (
+        "물류가 scenario_labels 를 싣기 시작했다. 🟢 좋은 변화다 — 이 검사와 "
+        "test_물류는_split_date_를_표준형에_안_싣는다 를 같이 뒤집는다"
+    )
+
+
 def test_물류는_그_값을_손에_들고_있다():
     """전제 단언. **값이 없어서 못 싣는 것이 아니다** — 그러면 부탁이 성립하지 않는다.
 
@@ -98,15 +129,27 @@ def test_물류는_그_값을_손에_들고_있다():
     )
 
 
-def test_재무는_옮기는_코드가_있다():
+def test_재무는_두_칸을_다_옮긴다():
     """대조군. **물류만의 문제**라는 것을 보인다.
 
-    재무 `amount` 축은 회차 개념이 없어 값이 `None` 인 것이 정상인데,
+    재무 `amount` 축은 회차 개념이 없어 `split_date` 가 `None` 인 것이 정상인데,
     **옮기는 코드는 있다.** 오는 날 그대로 흐른다.
+
+    🟢 `scenario_labels` 는 실제로 채운다 (`#197`). 그 자리 주석이 왜 둘 다
+    필요한지를 적어 뒀다.
+
+    > 예전에는 여섯 칸만 옮겼다. 그래서 상류가 `scenario_labels` 를 채워도 이
+    > 지점에서 잃었다.
+
+    **재무는 생성부와 변환부를 둘 다 고쳤고 물류는 둘 다 안 했다.**
     """
-    assert "split_date" in _kwargs_of_construction(_FINANCE), (
-        "재무도 안 옮긴다 — 그러면 이 문제는 물류 하나가 아니라 계약 전달의 문제다"
-    )
+    passed = _kwargs_of_construction(_FINANCE)
+
+    for name in ("split_date", "scenario_labels"):
+        assert name in passed, (
+            f"재무도 {name} 을 안 옮긴다 — 그러면 이 문제는 물류 하나가 아니라 "
+            f"계약 전달의 문제다"
+        )
 
 
 # ── ② 읽는 쪽은 이미 있다 ──────────────────────────────────────────────────
@@ -140,6 +183,21 @@ def test_화면이_그_값을_이미_읽는다():
     assert "회차" not in _scope(without), (
         "값이 없는데 회차 문장이 나온다 — 마스터가 없는 것을 지어내고 있다"
     )
+
+
+def test_화면이_라벨도_이미_읽는다():
+    """`scenario_labels` 도 같은 함수가 읽는다. **둘 다 늘 비어 있었다.**"""
+    with_labels = SuggestedAdjustment(
+        dept="inventory",
+        axis="timing",
+        target_value=3.0,
+        unit="d",
+        reason="사유",
+        ref_ids=("REF-1",),
+        scenario_labels=("보수", "기본"),
+    )
+
+    assert "보수·기본안" in _scope(with_labels)
 
 
 def test_채우면_전선에서_안_터진다():

@@ -133,7 +133,26 @@ def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
 
 
 def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """뷰 행을 매입이 받는 형태로. **키를 고르기만 하고 값은 손대지 않는다.**"""
+    """뷰 행을 매입이 받는 형태로. **키를 고르기만 하고 값은 손대지 않는다.**
+
+    🔴 **`use_recommended` 를 더했다** (2026-09-03 · 매입 `#192`).
+
+      ML 이 신뢰도 플래그 셋을 붙여 보내는데 매입이 하나도 안 읽고 있었다.
+      매입은 *"payload 에 칸이 없어서 못 읽는다"* 로 진단했는데 **절반만 맞았다.**
+
+      ```text
+      is_filled · is_gated   행별   뷰가 daily[] 안에 넣어 이미 간다
+      use_recommended        조합별  여기서 버리고 있었다
+      ```
+
+    ★ **`daily` 안의 둘은 손대지 않는다.** 뷰가 `jsonb_build_object` 로 넣은
+      그대로 나른다 — 마스터가 풀어 다시 조립하면 ML 이 준 모양이 바뀐다.
+
+    ⚠️ 아직 안 나르는 것이 셋 있다 — `has_filled_rows` · `filled_count` ·
+      `quality_note`. 앞 둘은 `daily` 에서 셀 수 있는 파생이고, `quality_note` 는
+      사람이 읽는 문장이라 `SourcedInput.note` 로 이미 화면에 간다.
+      **읽겠다는 파트가 생기면 그때 더한다.**
+    """
     return {
         "generated_at": row["generated_at"],
         "item": row["item"],
@@ -142,6 +161,7 @@ def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
         "horizon_days": _plain(row["horizon_days"]),
         "daily": row["daily"],
         "model_version": row["model_version"],
+        "use_recommended": row.get("use_recommended"),
     }
 
 
