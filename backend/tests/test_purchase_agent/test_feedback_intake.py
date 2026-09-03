@@ -13,37 +13,89 @@
   바뀌었나"* 를 보지 않고 **"받았고, 받았다고 정직하게 적었나"** 를 본다.
 """
 
+import json
 from datetime import date
 
 import pytest
 
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
+from app.master.flow import ProcurementFlow
+from app.master.ports import AgentRegistry
+from app.master.runner import MasterRunner
+from app.orchestrator.contracts_core import SuggestedAdjustment
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import build_state, purchase_port
 
 AS_OF = date(2026, 9, 11)  # stable 앵커 — 3안이 다 서는 날이라 risks 를 안별로 볼 수 있다
 ITEM = "피마늘"
 
-#: 물류가 내는 표준형을 ``asdict`` 로 편 모양. **마스터가 보내는 그대로**를 쓴다 —
-#: 우리가 다시 조립하면 실제 payload 와 어긋나도 검사가 통과한다.
-ADJUSTMENT = {
-    "dept": "inventory",
-    "axis": "quantity",
-    "target_value": 900.0,
-    "unit": "kg",
-    "reason": "기본 시나리오 2026-09-11 회차 — 수량을 900kg 로 조정 제안",
-    "ref_ids": ("INV-CAP-0911",),
-    "scenario_labels": (),
-    "split_date": None,
-}
+#: 부서가 내는 표준형. **dataclass 그대로** 둔다 — 전선용 dict 는 마스터가 만든다.
+_ADJUSTMENT_OBJECT = SuggestedAdjustment(
+    dept="inventory",
+    axis="quantity",
+    target_value=900.0,
+    unit="kg",
+    reason="기본 시나리오 2026-09-11 회차 — 수량을 900kg 로 조정 제안",
+    ref_ids=("INV-CAP-0911",),
+    scenario_labels=("보수", "기본"),
+    split_date=date(2026, 9, 11),
+)
 
 FEEDBACK_CONTEXT = {
     "attempt": 2,
     "reason": "물류 conditional 1건",
     "findings": ["창고 여유가 회차 수량에 못 미친다"],
     "verdicts": {"inventory": "conditional"},
-    "verdict_reasons": {"inventory": "2회차 도착일에 여유가 부족하다"},
+    "verdict_reasons": {"inventory": "2026-09-11 도착일에 여유가 부족하다"},
 }
+
+
+def _master_payload() -> dict:
+    """🔴 **마스터가 실제로 보내는 payload 를 마스터에게 만들게 한다** (2026-09-03).
+
+    전에는 이 파일이 dict 를 **손으로 조립**했다. 주석에는 *"마스터가 보내는 그대로를
+    쓴다"* 고 적혀 있었는데, 손으로 적은 순간 그게 아니게 된다 — 그리고 실제로 어긋났다::
+
+        2026-09-03  마스터가 `asdict` → `_wire` 로 바꿨다 (#175 · 커밋 8ac244e)
+                      ref_ids · scenario_labels   튜플 → 목록
+                      split_date                  date 객체 → ISO 문자열
+
+      우리 검사는 **그대로 통과했다.** 우리 어댑터가 ``dict(item)`` 으로 모양을 안 가려서
+      받기는 계속 됐지만, 픽스처가 이미 없는 모양을 잠그고 있었다. 마스터 쪽 계약이
+      바뀐 것을 우리 쪽에서는 아무도 못 봤다.
+
+    ★ **``_wire`` 만 부르지 않는다.** 그건 조정안 한 칸이고, 여기가 잠그려는 것은
+      *"매입에게 가는 payload 전체"* 다 — ``prior_feedback`` 과 ``feedback_context`` 가
+      어느 칸에 어떤 모양으로 실리는지까지 이 함수가 정한다.
+
+    ⚠️ ``ProcurementFlow._purchase_input`` 은 비공개다. 그래도 부르는 편이 낫다 —
+      이름이 바뀌면 **import 가 즉시 터져** 우리가 알게 된다. 손으로 조립하면 아무 일도
+      일어나지 않고 조용히 어긋난다. 위 2026-09-03 이 그 실례다.
+    """
+    extras = ports.get_snapshot_extras(ITEM, AS_OF)
+    runner = MasterRunner(
+        ExecutionContext(f"REQ-{AS_OF.isoformat()}-{ITEM}", AS_OF, "ML_COMPLETE", "v2.3"),
+        AgentRegistry(),  # `_purchase_input` 은 부서를 부르지 않는다 — 조립만 한다
+    )
+    flow = ProcurementFlow(
+        runner,
+        item=ITEM,
+        forecast=ports.get_forecast(ITEM, AS_OF),
+        confirmed_orders=ports.get_confirmed_orders(ITEM, AS_OF, days=14),
+        policy_values={
+            "contract_price_krw": extras["contract_price"],
+            "item_mix_ratio": extras["item_mix_ratio"],
+        },
+    )
+    flow.suggested_adjustments = [_ADJUSTMENT_OBJECT]
+    return flow._purchase_input(
+        {"finance": {}, "inventory": {}},  # 제약은 아래 `_payload` 가 실물로 덮는다
+        FEEDBACK_CONTEXT,
+    )
+
+
+#: 마스터가 전선에 실은 조정안 한 건. **이 파일 어디에도 손으로 적은 dict 가 없다.**
+ADJUSTMENT = _master_payload()["adjustments"][0]
 
 
 def _payload(**over) -> dict:
@@ -83,6 +135,53 @@ def _request(**over) -> AgentRequest:
 def _proposal(**over) -> dict:
     reply, _ = purchase_port(_request(**over))
     return reply.payload
+
+
+# ── 픽스처가 실제 모양인가 ────────────────────────────────────────────────
+
+
+def test_the_fixture_is_what_the_master_actually_sends() -> None:
+    """🔴 **픽스처가 마스터 출력에서 나왔는지** 잠근다.
+
+    손으로 적은 dict 로 되돌리면 이 검사가 운다 — ``_master_payload()`` 를 다시 부르므로
+    픽스처와 실제 출력이 같은 함수에서 나온다.
+    """
+    assert ADJUSTMENT == _master_payload()["adjustments"][0]
+    assert ADJUSTMENT["dept"] == _ADJUSTMENT_OBJECT.dept
+    assert ADJUSTMENT["reason"] == _ADJUSTMENT_OBJECT.reason
+
+
+def test_what_the_master_sends_survives_a_json_round_trip() -> None:
+    """🔴 **전선에 실리는 모양이다** — 마스터가 자기 쪽에서 잠근 성질을 여기서도 본다.
+
+    ``asdict`` 는 ``date`` 를 그대로 두고 튜플도 그대로 둔다. 그 dict 는
+    ``json.dumps`` 에서 **죽거나**(*"Object of type date is not JSON serializable"*),
+    한 번 왕복하면 **튜플이 목록으로 바뀐다.** 같은 칸이 경로에 따라 두 모양이 되면
+    받는 쪽의 ``== [...]`` 비교가 **in-process 에서만** 통과한다 (#175 · 커밋 8ac244e).
+
+    ★ 칸마다 세지 않고 **성질 하나로** 잠근다. 다음에 ``date`` 칸이 하나 더 생겨도
+      같은 병에 안 걸린다 — 마스터 ``test_전선에_실은_것은_왕복해도_같다`` 와 같은 기준이다.
+
+    ⚠️ 이 검사는 **마스터를 감시하려는 것이 아니다.** 우리 픽스처가 실제 전선 모양인지를
+      본다 — 손으로 적은 값이 슬며시 들어오면 여기서 걸린다.
+    """
+    payload = _master_payload()
+    for key in ("adjustments", "feedback_context", "prior_feedback"):
+        value = payload.get(key)
+        if value is None:
+            continue
+        assert json.loads(json.dumps(value)) == value, f"{key} 가 JSON 왕복에서 달라진다"
+
+
+def test_the_wire_has_no_python_only_types() -> None:
+    """``date`` 객체·튜플이 남아 있으면 전선에 못 싣는다 — 어긋난 칸을 이름으로 짚는다.
+
+    위 왕복 검사가 성질을 보는 것과 달리 이건 **어디가 문제인지**를 말한다. 왕복만
+    있으면 실패 메시지가 *"달라진다"* 뿐이라 어느 칸인지 찾아 들어가야 한다.
+    """
+    for key, value in ADJUSTMENT.items():
+        assert not isinstance(value, tuple), f"{key} 가 튜플이다 — JSON 왕복에서 목록이 된다"
+        assert not isinstance(value, date), f"{key} 가 date 객체다 — JSON 직렬화에서 죽는다"
 
 
 # ── 받는다 ────────────────────────────────────────────────────────────────
