@@ -15,7 +15,7 @@ from app.orchestrator.llm.runtime import SelectionService, get_selection_service
 from app.orchestrator.llm.schemas import CandidateContext, SanitizedLLMContext
 
 if TYPE_CHECKING:  # 런타임 순환 임포트를 만들지 않는다.
-    from app.orchestrator.contracts_core import PipelineState
+    from app.contracts.core import PipelineState
 
 _MINOR_CLIP_THRESHOLD = 0.95
 

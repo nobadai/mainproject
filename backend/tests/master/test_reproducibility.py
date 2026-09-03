@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.contracts.core import Evidence
 from app.master.budget import CallBudget
 from app.master.envelope import (
     AgentReply,
@@ -35,7 +36,6 @@ from app.master.envelope import (
 from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _evidences_out
-from app.orchestrator.contracts_core import Evidence
 
 AS_OF = date(2025, 12, 31)
 ROUNDS = 5

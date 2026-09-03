@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     _DEPT_AXES,
     HARD_ALLOWED_GRADES,
     Band,

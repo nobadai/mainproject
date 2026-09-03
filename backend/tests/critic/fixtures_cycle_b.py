@@ -15,7 +15,7 @@ from typing import Any
 from checks_finance_cycle_b import check_cash_recovery_priority
 from fixtures import AS_OF, DEMAND, ITEMS4, PRICE_BASE
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ChannelLeg,
     CheckResult,
     CycleBState,

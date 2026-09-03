@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ITEMS,
     STRUCTURAL_SLACK_MIN,
     VARIANT_SPREAD_MIN,

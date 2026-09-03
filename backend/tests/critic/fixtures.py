@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     CheckResult,
     Evidence,
     FinanceSnapshot,

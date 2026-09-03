@@ -40,9 +40,9 @@ from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from typing import Any
 
+from app.contracts.core import Evidence
 from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 from app.master.envelope import AgentName
-from app.orchestrator.contracts_core import Evidence
 
 _FINANCE = "finance"
 _INVENTORY = "inventory"

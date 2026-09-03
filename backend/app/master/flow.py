@@ -30,13 +30,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from app.contracts.core import EndCode, Evidence, ItemCode, SuggestedAdjustment
 from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted
 from app.master.envelope import AgentName, AgentReply, Mode
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
-from app.orchestrator.contracts_core import EndCode, Evidence, ItemCode, SuggestedAdjustment
 
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""

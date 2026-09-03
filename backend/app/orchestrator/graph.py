@@ -22,16 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from app.orchestrator.band import (
-    build_feedback,
-    check_occupancy_detailed,
-    clip_all,
-    combine_band,
-    detect_deadlock,
-    detect_variant_collapse,
-    is_structurally_narrow,
-)
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     AdjustAttempt,
     ClipResult,
     CriticVerdict,
@@ -40,6 +31,15 @@ from app.orchestrator.contracts_core import (
     PipelineState,
     T0Snapshot,
     T2Reply,
+)
+from app.orchestrator.band import (
+    build_feedback,
+    check_occupancy_detailed,
+    clip_all,
+    combine_band,
+    detect_deadlock,
+    detect_variant_collapse,
+    is_structurally_narrow,
 )
 
 # 루프 예산 — 백테스트 후 실값 확정 (§10.2-4). 지금은 계약서 §5.3 관행값.

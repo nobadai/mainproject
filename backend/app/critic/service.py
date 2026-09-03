@@ -11,6 +11,23 @@
 
 from __future__ import annotations
 
+from app.contracts.core import (
+    ITEMS,
+    ApprovedPurchaseCommitment,
+    ArrivalLeg,
+    ChannelLeg,
+    CheckResult,
+    Evidence,
+    FinanceSnapshot,
+    LotConstraint,
+    MinimalAllocation,
+    MinimalScenario,
+    OutboundLeg,
+    SourcingLot,
+    SplitLeg,
+    T0Snapshot,
+    T2Reply,
+)
 from app.critic.critic_v0_4 import (
     CriticVerdictV04,
     DeptMeta,
@@ -28,23 +45,6 @@ from app.critic.schemas import (
     ScenarioIn,
 )
 from app.orchestrator.band import clip_all, combine_band
-from app.orchestrator.contracts_core import (
-    ITEMS,
-    ApprovedPurchaseCommitment,
-    ArrivalLeg,
-    ChannelLeg,
-    CheckResult,
-    Evidence,
-    FinanceSnapshot,
-    LotConstraint,
-    MinimalAllocation,
-    MinimalScenario,
-    OutboundLeg,
-    SourcingLot,
-    SplitLeg,
-    T0Snapshot,
-    T2Reply,
-)
 from app.orchestrator.outbound import clip_allocations, combine_outbound_band
 
 

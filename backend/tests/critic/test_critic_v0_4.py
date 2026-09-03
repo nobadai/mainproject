@@ -16,6 +16,17 @@ from datetime import timedelta
 
 from fixtures import AS_OF, DEMAND, ITEMS4, PRICE_BASE, make_snapshot, sales_reply
 
+from app.contracts.core import (
+    Band,
+    CheckResult,
+    ClipResult,
+    Evidence,
+    MinimalScenario,
+    SourcingLot,
+    SplitLeg,
+    SuggestedAdjustment,
+    T2Reply,
+)
 from app.critic.critic import run_l3 as legacy_run_l3
 from app.critic.critic_v0_4 import (
     CONTRACT_AMENDMENTS,
@@ -27,17 +38,6 @@ from app.critic.critic_v0_4 import (
     classify_collapse,
     run_critic_v04,
     run_l0,
-)
-from app.orchestrator.contracts_core import (
-    Band,
-    CheckResult,
-    ClipResult,
-    Evidence,
-    MinimalScenario,
-    SourcingLot,
-    SplitLeg,
-    SuggestedAdjustment,
-    T2Reply,
 )
 
 PASS, FAIL = "✅", "❌"
@@ -410,14 +410,14 @@ from dataclasses import replace as _dc_replace
 
 from fixtures import _std_replies, make_scenarios, make_split_variants
 
-from app.orchestrator.band import check_occupancy_detailed
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     ApprovedPurchaseCommitment,
     ArrivalLeg,
     ContractViolation,
     CycleBState,
     PipelineState,
 )
+from app.orchestrator.band import check_occupancy_detailed
 from app.orchestrator.cycle import CycleHooks, build_commitment, run_day
 
 _REPLIES_STD = _std_replies()
@@ -638,7 +638,7 @@ section("\n[B-13] 영업 IO 명세 v0.6 반영")
 
 from fixtures_cycle_b import make_sales_facts
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     HOLD_CHANNEL,
     ChannelLeg,
     MinimalAllocation,
@@ -738,7 +738,7 @@ section("\n[B-14] combine_band 품목별 수용 · runtime_status")
 
 from fixtures import _ev, finance_reply, inventory_reply
 
-from app.orchestrator.contracts_core import ContractViolation
+from app.contracts.core import ContractViolation
 
 
 def _sales_for(item, floor=None):
@@ -1021,7 +1021,7 @@ ok(_r.cycle_b.outbound_band is not None, "OutboundBand 도 하루 한 번 결합
 
 section("\n[B-18] 갱신 PDF — 시나리오 독립성 범위 축소 (밴드만) · S2 출력 타입")
 
-from app.orchestrator.contracts_core import CollectionPreference, LotConstraint
+from app.contracts.core import CollectionPreference, LotConstraint
 
 # 밴드를 채우는 검사가 매입안을 읽으면 여전히 FAIL
 _band_chk = _finance_reply().checks[0]  # cap_amount_krw 를 채운다
