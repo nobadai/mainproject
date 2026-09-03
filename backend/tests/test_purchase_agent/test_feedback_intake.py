@@ -146,17 +146,60 @@ def test_prior_feedback_and_adjustments_are_independent_slots() -> None:
     assert both["adjustments"] == [ADJUSTMENT]
 
 
-def test_adjustments_do_not_move_feedback_attempt() -> None:
-    """``feedback_attempt`` 는 ``feedback`` 소유다 — 조정안이 와도 안 움직인다.
+def test_feedback_attempt_comes_from_the_refeed_slot() -> None:
+    """🔴 **회차는 ``feedback_context["attempt"]`` 가 말한다** (#178 확정 2026-09-03).
 
-    ⚠️ 그래서 ``feedback_context["attempt"]`` 가 2 여도 ``meta.feedback_attempt`` 는
-      0 이다. **의도한 상태이고 미결이다** — 회차 번호를 어느 칸이 말하는지가
-      아직 안 정해졌다. 여기서 조용히 바꾸면 그 미결이 사라진다.
+    ``attempt`` 라는 이름이 두 슬롯에 있었다. 슬롯을 둘로 나누면서(계약 v0.2 §2)
+    **안의 키 이름을 안 갈랐던** 탓이다. 마스터가 나중에 온 자기 쪽을 양보해
+    ``condition_seq`` 로 바꿨다::
+
+        prior_feedback["condition_seq"]   사람이 조건을 건 회차
+        feedback_context["attempt"]       매입 재호출 회차   ← 이쪽이 ``attempt`` 를 가진다
+
+    ``attempt`` 를 되먹임 쪽에 남긴 근거는 **우리 것**이다 — ``constraints.yaml`` 의
+    ``feedback.attempt_max``(= ``MAX_PURCHASE_ATTEMPTS`` 인용)가 세는 것이 그쪽이라
+    옮기면 더 헷갈린다.
+
+    ⚠️ **실제 값을 기대한다.** 전에는 넷 다 ``== 0`` 이라, 죽은 슬롯을 읽어도 검사가
+      통과했다 — 실측(12-31 피마늘 2회차)에서 부딪히고서야 드러났다.
     """
     proposal = _proposal(adjustments=[ADJUSTMENT], feedback_context=FEEDBACK_CONTEXT)
-    assert proposal["meta"]["feedback_attempt"] == 0
-    assert proposal["meta"]["is_refeed"] is False
+    assert FEEDBACK_CONTEXT["attempt"] == 2, "픽스처가 2회차여야 이 검사가 성립한다"
+    assert proposal["meta"]["feedback_attempt"] == 2
     assert proposal["meta"]["received_adjustments"] == 1
+
+
+def test_a_refeed_round_says_it_is_a_refeed() -> None:
+    """🔴 **``is_refeed`` 도 같은 슬롯을 잘못 보고 있었다.**
+
+    ``bool(prior_feedback)`` 만 보면 순수 되먹임 2회차가 ``False`` 로 나간다 —
+    바로 옆 ``feedback_attempt`` 가 2 인데 재호출이 아니라는, **서로를 부정하는 meta**
+    가 된다. 사람 조건이든 조언자 판정이든 *"다시 먹인 실행"* 인 것은 같다.
+    """
+    refeed_only = _proposal(feedback_context=FEEDBACK_CONTEXT)
+    assert refeed_only["meta"]["is_refeed"] is True
+    assert refeed_only["meta"]["feedback_attempt"] == 2
+
+    condition_only = _proposal(prior_feedback={"condition_text": "예산을 낮춰서"})
+    assert condition_only["meta"]["is_refeed"] is True, "사람 조건도 되먹임이다 (기존 동작)"
+    assert condition_only["meta"]["feedback_attempt"] == 0, "회차는 되먹임 슬롯 소유다"
+
+
+def test_the_first_round_is_not_a_refeed() -> None:
+    """1회차는 둘 다 안 오므로 ``False`` · 0 이다 — 회귀."""
+    proposal = _proposal()
+    assert proposal["meta"]["is_refeed"] is False
+    assert proposal["meta"]["feedback_attempt"] == 0
+
+
+def test_condition_seq_is_not_read_as_attempt() -> None:
+    """🔴 사용자 조건 슬롯의 회차를 ``feedback_attempt`` 로 싣지 않는다.
+
+    개명 전에는 그 자리에 ``decision_seq`` 가 실렸다. **다른 개념을 싣던 것이 멈추는
+    것**이라 의도한 방향이다 (#178). 여기서 다시 읽으면 두 개념이 한 칸으로 합쳐진다.
+    """
+    proposal = _proposal(prior_feedback={"condition_text": "예산을 낮춰서", "condition_seq": 3})
+    assert proposal["meta"]["feedback_attempt"] == 0, "condition_seq 를 회차로 읽으면 안 된다"
 
 
 # ── 받았다고 적는다 ───────────────────────────────────────────────────────

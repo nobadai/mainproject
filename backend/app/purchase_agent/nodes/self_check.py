@@ -290,14 +290,15 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
         있다: *"누적 N kg … M회차 …까지 더한 값"*.
 
     🔴 **왜 ``orchestrator/band.py`` 의 ``check_occupancy_by_date`` 를 안 쓰나** (2026-09-03 판단).
-      §4-⑦이 "자체 구현 금지"라고 했고 그 함수가 실재하는데도 안 쓴 이유가 넷이다.
-      나중에 *"왜 안 썼지"* 로 되돌리지 않도록 적어 둔다::
+      §4-⑦이 "자체 구현 금지"라고 했고 그 함수가 실재하는데도 안 쓴 이유가 넷이었다.
+      나중에 *"왜 안 썼지"* 로 되돌리지 않도록 **지우지 않고** 적어 둔다::
 
-        ㄱ. cap_by_date 의 뜻이 다르다
+        ㄱ. cap_by_date 의 뜻이 다르다   ✅ **고쳐졌다** (PR #184 · 2026-09-03 02:44)
               물류  guaranteed − projected_occupancy       → 잔여 여유 (net)
-              band  confirmed_occupancy[d] + arrived ≤ cap → 총 용량 (gross)
-            band 는 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이다. 그대로
-            넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 된다.
+              band  confirmed_occupancy[d] + arrived ≤ cap → 총 용량 (gross)  ← 이랬다
+            band 가 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이었다. 그대로
+            넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 됐다.
+            우리가 #93 구현 중 물어 #181 이 서고, band 가 **net 전제로** 바뀌었다.
         ㄴ. 타입이 다르다 — ``Band.cap_by_date_kg`` 는 ``date`` 키, 우리는 ISO 문자열.
             조회가 전부 미스 나면 값이 와 있는데도 "받지 못했다"로 고지된다.
         ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.
@@ -307,7 +308,12 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             뿐이고, ``tests/master/test_no_orchestrator_runtime.py`` 는 마스터에 대해
             ``app.orchestrator.band`` 를 금지 목록에 올려 뒀다.
 
-      ㄱ이 풀리고 공용 모듈이 생기면 **이 함수를 지우고 import 로 바꾼다** —
+      🔴 **ㄱ이 풀렸어도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다 *"부를 수는
+        있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고, 그건 공용화가
+        아니라 **결합**이다. ``#181`` 은 아직 열려 있다 — 뜻은 맞췄지만 *"어느 쪽이
+        표준인가"* 는 안 닫혔다.
+
+      나머지가 풀리고 공용 모듈이 생기면 **이 함수를 지우고 import 로 바꾼다** —
       ``check_warehouse_capacity`` 와 같은 약속이다.
     """
     cap_by_date = state["inventory"].get("cap_by_date")
@@ -687,14 +693,29 @@ def _assemble(
     나면 **직렬화하지 않고 터진다**. 계약 위반은 사업적 결과가 아니라 버그이므로 조용히
     빈 제안으로 바꾸지 않는다.
     """
+    # 🔴 **회차를 세는 이름이 슬롯마다 다르다** (#178 · 2026-09-03 확정)::
+    #
+    #     prior_feedback["condition_seq"]   사람이 조건을 건 회차
+    #     feedback_context["attempt"]       매입 재호출 회차   ← ``feedback_attempt`` 는 이것
+    #
+    #   전에는 ``prior_feedback`` 에서 ``attempt`` 를 읽었다. 슬롯을 둘로 나누면서
+    #   (계약 v0.2 §2) **안의 키 이름을 안 갈랐던** 탓이고, 마스터가 ``condition_seq`` 로
+    #   양보하면서 그 슬롯에는 ``attempt`` 가 아예 없어졌다 — **늘 0 이 나온다.**
+    #   틀린 값을 읽은 것이 아니라 **다른 개념을 같은 이름으로 찾고 있었다.**
     feedback = state["feedback"] or {}
+    refeed = state.get("feedback_context") or {}
     raw = {
         "meta": {
             "as_of": state["date"],
             "item": state["item"],
             "agent_version": AGENT_VERSION,
-            "is_refeed": bool(state["feedback"]),
-            "feedback_attempt": feedback.get("attempt", 0),
+            # ★ **둘 다 되먹임이다.** 사람이 조건을 걸어 다시 도는 것과 조언자 판정으로
+            #   다시 도는 것은 권위가 다를 뿐 **"다시 먹인 실행"** 인 것은 같다.
+            #   ``feedback_context`` 만 보면 2회차가 ``False`` 로 나가고, 바로 아래
+            #   ``feedback_attempt`` 가 2 인데 재호출이 아니라는 **서로를 부정하는 meta**
+            #   가 된다.
+            "is_refeed": bool(feedback) or bool(refeed),
+            "feedback_attempt": refeed.get("attempt", 0),
             # **받은 사실을 산출물에 남긴다.** 반영은 안 하지만(⑥이 risks 에 고지),
             # 몇 건이 도착했는지는 보내는 쪽이 대조할 수 있어야 한다 — 0 으로만
             # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
