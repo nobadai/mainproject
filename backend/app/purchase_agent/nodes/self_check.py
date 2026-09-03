@@ -114,7 +114,8 @@ def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
     return None
 
 
-#: 날짜 축 검사를 **하지 않은** 사유 셋. 넷째 갈래(정상)는 여기 없다 — 그때는 판정이 난다.
+#: 날짜 축 검사를 **하지 않은** 사유 중 **문장이 고정된 것**들. 나머지 둘
+#: (``out_of_window`` · ``missing``)은 날짜를 이름으로 짚어야 해서 아래에서 만든다.
 #:
 #: ⚠️ ⑥ ``CAP_BLOCK_REASONS`` 와 **머리는 같고 꼬리가 다르다.** 저쪽은 *"그래서 회차를
 #:   균등하게 나눴다"*(재배분을 안 했다)이고 여기는 *"그래서 컷하지 않았다"*(판정을 안 했다)다.
@@ -134,6 +135,13 @@ ARRIVAL_SKIP_REASONS = {
     ),
 }
 
+#: 물류가 날짜별 여유를 **계산한 구간의 길이**를 밝히는 칸 (물류 payload).
+#:
+#: ⚠️ **이름을 상수로 둔 것은 오타 방지이지 값 소유가 아니다.** 값(18)은 물류
+#:   ``tools.CAP_BY_DATE_WINDOW_DAYS`` 소유이고 우리는 payload 로 받은 것만 쓴다 —
+#:   여기 숫자를 적으면 물류가 창을 바꾼 날 우리만 옛 창으로 판정한다 (규칙 7).
+CAP_WINDOW_KEY = "cap_by_date_window_days"
+
 
 class ArrivalCapacity(NamedTuple):
     """날짜 축 판정 결과. **컷과 미검사를 한 값으로 뭉치지 않는다.**
@@ -148,6 +156,103 @@ class ArrivalCapacity(NamedTuple):
 
     skipped: str | None = None
     """미검사 고지. 채워지면 안은 살고 risks 에 한 줄이 붙는다."""
+
+
+def _whole_days(value: Any) -> int | None:
+    """일 단위 정수로 읽는다. 아니면 ``None`` — **0으로 대체하지 않는다** (규칙 3).
+
+    🔴 **``isinstance(value, int)`` 로 보면 안 된다.** 물류는 숫자를 ``_num()`` 으로
+      싸서 보내므로 실제 payload 의 ``inbound_lead_days`` 는 **``2.0``(float)** 이다
+      (실측 2026-09-03 · 12-31 피마늘). ``int`` 만 받으면 **실운영에서 창을 한 번도
+      못 만들고** 늘 *"가르지 못했다"* 로 떨어진다 — 검사가 있는데 안 도는 상태다.
+
+    ★ 판정 규칙은 ``adapter._arrival_input_problems`` 와 **같다**: 수치이고 소수부가
+      없으면 정수로 읽는다. 두 곳이 다르면 어댑터가 통과시킨 값을 여기서 버린다.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if value != int(value):
+        return None
+    return int(value)
+
+
+def cap_window(state: PurchaseAgentState) -> tuple[str, str] | None:
+    """물류가 날짜별 여유를 **계산한 구간** ``[시작, 끝]`` (ISO 문자열, 양끝 포함).
+
+    물류 ``tools.build_cap_window`` 와 **같은 식**이다::
+
+        start = as_of + N4
+        dates = [start + d for d in range(window_days)]      # 끝 = start + (window_days - 1)
+
+      N4=2 · 창 18일이면 **D+2 ~ D+19** 다 (실측 2026-09-03).
+
+    🔴 **두 값을 같은 dict 에서 읽는다.** ``inbound_lead_days`` 와 ``cap_by_date_window_days``
+      는 물류가 **같은 payload 에 함께** 실어 보내고, 물류는 그 둘로 창을 만들었다.
+      한쪽을 설정 기본값(``pending``)에서 읽으면 **물류가 쓴 적 없는 창**을 재구성하게 된다.
+
+    못 만들면 ``None`` — 창을 지어내지 않는다 (규칙 3). 창을 모르면 "창 밖"과
+    "창 안 누락"을 가를 수 없고, **가를 수 없다는 사실 자체가 고지 대상**이다.
+    """
+    inventory = state["inventory"]
+    lead = _whole_days(inventory.get("inbound_lead_days"))
+    window = _whole_days(inventory.get(CAP_WINDOW_KEY))
+    if lead is None or lead < 0 or window is None or window < 1:
+        return None
+    start = date.fromisoformat(state["date"]) + timedelta(days=lead)
+    return start.isoformat(), (start + timedelta(days=window - 1)).isoformat()
+
+
+def _unknown_reason(unknown: list[str], state: PurchaseAgentState) -> str:
+    """값이 안 온 도착일들을 **두 갈래로 갈라** 문장을 만든다 (물류 규약 2026-09-03).
+
+    🔴 **뭉치면 안 되는 이유.** 물류 규약은 셋을 다른 상태로 규정한다::
+
+        키 존재 + 값 0      계산 결과 입고 가능량이 0        → 판정 대상
+        창 안인데 키 누락    계산 누락 또는 미결              → **고쳐야 할 것**
+        창 밖               계산 대상이 아니다               → **정상**
+
+      전에는 뒤 둘을 *"조회 기간 밖이거나 값이 비어 있다"* 한 문장으로 냈다. 읽는 사람이
+      **고쳐야 할 것과 정상을 구분할 수 없었다** — 매일 같은 문장이 나가면 둘 다 배경이 된다.
+
+    ★ **행동은 셋 다 같다 — 컷하지 않는다.** 갈리는 것은 문장뿐이다. 창 밖이라고 통과로
+      치지 않고, 누락이라고 죽이지도 않는다. 둘 다 *"판정하지 않았다"* 이고 **왜** 가 다르다.
+
+    창을 못 만들면(``cap_window`` 가 ``None``) 갈리지 않는다. 그때는 **가를 수 없다는
+    사실을 밝힌다** — 물류가 창 길이를 payload 에 싣기로 했으므로(2026-09-03), 없으면
+    그것이 곧 확인할 거리다.
+    """
+    window = cap_window(state)
+    if window is None:
+        return (
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
+            "물류에서 받지 못했다. 계산 구간의 길이를 함께 받지 못해 **구간 밖이라 대상이 "
+            "아닌 것인지, 구간 안인데 값이 빠진 것인지 가르지 못했다.** 받지 못한 날을 "
+            "여유 0으로 읽지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
+        )
+
+    start, end = window
+    outside = [day for day in unknown if day < start or day > end]
+    inside = [day for day in unknown if start <= day <= end]
+    span = f"물류가 계산한 구간은 {start}~{end}이다"
+
+    if inside:
+        head = (
+            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(inside)}가 "
+            f"**계산 구간 안인데 여유 값이 오지 않았다**({span}). 계산이 빠졌거나 아직 "
+            "정해지지 않은 것이라 확인이 필요하다"
+        )
+        if outside:
+            head += f". 도착일 {', '.join(outside)}는 구간 밖이라 애초에 계산 대상이 아니다"
+        return head + (
+            ". 받지 못한 날을 여유 0으로 읽지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
+        )
+
+    return (
+        f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(outside)}가 "
+        f"**계산 구간 밖이라 애초에 대상이 아니다**({span}). 빠진 값이 아니라 물류가 "
+        "그 날짜까지는 계산하지 않는다는 뜻이다. 구간 밖을 여유 0으로 읽지 않았으므로 "
+        "이 안은 날짜 축으로 판정받지 않았다"
+    )
 
 
 def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapacity:
@@ -171,6 +276,18 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
       guaranteed − projected_occupancy). **우리가 새로 넣을 회차는 거기 없다.**
       날짜마다 독립으로 비교하면 1회차가 아직 창고에 있는데도 2회차가 그날 상한을
       통째로 쓰는 계획이 통과한다. ⑥ ``cap_constrained_quantities`` 와 같은 셈이다.
+
+    ⚠️ **한계 — 중간 출고를 해제하지 않는다.**
+      회차를 도착일 순으로 **더하기만 하고 빼지 않는다.** 중간에 확정 출고가 앞 회차를
+      실제로 소진해도 해제하지 않는다. 물류 ``_available_capacity`` 도 같은 방식이고
+      (``arrival <= day``), **방향은 안전하다 — 덜 사게 틀린다.**
+
+      *"왜 이렇게 빡빡한가"* 가 나오면 원인이 여기일 수 있다
+      (물류 지적 2026-09-03 · 물류 미결 §0-3).
+
+      ★ **risks 에는 안 싣는다.** 매일 모든 안에 붙으면 신호가 죽는다 — 이건 *"이 안이
+        위험하다"* 가 아니라 우리 검사 방식의 성질이다. 되짚을 실마리는 컷 사유에 이미
+        있다: *"누적 N kg … M회차 …까지 더한 값"*.
 
     🔴 **왜 ``orchestrator/band.py`` 의 ``check_occupancy_by_date`` 를 안 쓰나** (2026-09-03 판단).
       §4-⑦이 "자체 구현 금지"라고 했고 그 함수가 실재하는데도 안 쓴 이유가 넷이다.
@@ -206,15 +323,9 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
     unknown = [day for day in arrivals if cap_by_date.get(day) is None]
     if unknown:
         # **하나라도 모르면 아무 회차도 판정하지 않는다.** 아는 날짜만 컷하면 판정이
-        # "어느 도착일이 우연히 조회 기간 안이었나"에 좌우된다 — ⑥이 재배분을 통째로
+        # "어느 도착일이 우연히 계산 구간 안이었나"에 좌우된다 — ⑥이 재배분을 통째로
         # 포기하는 것과 같은 이유다.
-        return ArrivalCapacity(
-            skipped=(
-                f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
-                "물류에서 받지 못했다(조회 기간 밖이거나 값이 비어 있다). 받지 못한 날을 "
-                "여유 0으로 읽지 않았으므로 이 안은 날짜 축으로 판정받지 않았다"
-            )
-        )
+        return ArrivalCapacity(skipped=_unknown_reason(unknown, state))
 
     occupied = 0
     for item, day in zip(rounds, arrivals, strict=True):

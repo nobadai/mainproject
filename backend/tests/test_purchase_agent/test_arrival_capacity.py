@@ -20,7 +20,11 @@ import pytest
 from app.master.envelope import AgentRequest, ExecutionContext
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import purchase_port
-from app.purchase_agent.nodes.self_check import arrival_capacity, check_arrival_capacity
+from app.purchase_agent.nodes.self_check import (
+    arrival_capacity,
+    cap_window,
+    check_arrival_capacity,
+)
 
 AS_OF = date(2025, 12, 31)
 ITEM = "배추"
@@ -84,11 +88,20 @@ def _scenario(*rounds: tuple[int, str, int]) -> dict:
     }
 
 
-def _state(cap_by_date=None) -> dict:
+def _state(cap_by_date=None, *, lead: int | None = None, window: int | None = None) -> dict:
+    """단위 검사용 최소 State. ``lead``·``window`` 를 주면 계산 구간을 만들 수 있다.
+
+    ⚠️ 둘은 **물류가 같은 payload 에 함께** 싣는 값이라 여기서도 같은 dict 에 둔다 —
+      한쪽만 주면 창을 못 만드는 경로(``cap_window`` → ``None``)를 시험하게 된다.
+    """
     inventory: dict = {}
     if cap_by_date is not None:
         inventory["cap_by_date"] = cap_by_date
-    return {"inventory": inventory}  # type: ignore[return-value]
+    if lead is not None:
+        inventory["inbound_lead_days"] = lead
+    if window is not None:
+        inventory["cap_by_date_window_days"] = window
+    return {"inventory": inventory, "date": "2025-12-31"}  # type: ignore[return-value]
 
 
 # ── #93 재현: 컷이 실제로 난다 ────────────────────────────────────────────
@@ -230,6 +243,159 @@ def test_skipped_notice_reaches_every_scenario() -> None:
 def test_a_cut_scenario_does_not_also_claim_it_was_unchecked() -> None:
     """컷과 미검사는 배타다 — 죽은 안에 "검사 안 했다"가 붙으면 둘 다 못 읽는다."""
     verdict = arrival_capacity(_scenario((1, "2026-01-02", 500)), _state({"2026-01-02": 100}))  # type: ignore[arg-type]
+    assert verdict.violation is not None
+    assert verdict.skipped is None
+
+
+# ── 창 밖 vs 창 안 누락 (물류 규약 2026-09-03) ────────────────────────────
+#
+# 물류 규약은 셋을 다른 상태로 규정한다:
+#   키 존재 + 값 0     계산 결과 입고 가능량이 0        → 판정 대상
+#   창 안인데 키 누락   계산 누락 또는 미결              → **고쳐야 할 것**
+#   창 밖             계산 대상이 아니다               → **정상**
+#
+# 전에는 뒤 둘을 한 문장으로 뭉쳐 냈다. 행동(컷 안 함)은 같아도 **읽는 사람이
+# 고쳐야 할 것과 정상을 구분할 수 없었다.**
+
+#: N4=2 · 창 18일 → 2026-01-02 ~ 2026-01-19 (물류 build_cap_window 와 같은 식)
+LEAD = 2
+WINDOW = 18
+
+
+def test_the_window_matches_what_logistics_built() -> None:
+    """🔴 물류 ``build_cap_window`` 와 **같은 창**을 만드는지.
+
+    저쪽은 ``as_of + lead`` 부터 ``range(window_days)`` 라 **끝이 start + (n-1)** 이다.
+    off-by-one 이 나면 경계 하루가 통째로 갈래를 바꾼다.
+    """
+    from datetime import timedelta
+
+    from app.logistics.tools import build_cap_window
+
+    state = _state({}, lead=LEAD, window=WINDOW)
+    ours = cap_window(state)  # type: ignore[arg-type]
+    assert ours == ("2026-01-02", "2026-01-19")
+
+    class _Snap:
+        inbound_lead_days = LEAD
+
+    theirs = build_cap_window(_Snap(), date(2025, 12, 31))  # type: ignore[arg-type]
+    assert theirs is not None
+    assert len(theirs) == WINDOW
+    assert (theirs[0].isoformat(), theirs[-1].isoformat()) == ours
+    assert theirs[-1] == theirs[0] + timedelta(days=WINDOW - 1)
+
+
+@pytest.mark.parametrize("lead", [2, 2.0], ids=["int", "float"])
+def test_the_window_reads_the_shape_logistics_actually_sends(lead) -> None:
+    """🔴 **실 payload 의 ``inbound_lead_days`` 는 ``2.0`` 이다** (실측 2026-09-03).
+
+    물류가 숫자를 ``_num()`` 으로 싸서 보내므로 float 로 온다. ``isinstance(v, int)``
+    로 보면 **실운영에서 창을 한 번도 못 만들고** 늘 "가르지 못했다"로 떨어진다 —
+    검사가 있는데 안 도는 상태이고, 단위 검사가 int 만 쓰면 아무도 모른다.
+
+    ``adapter._arrival_input_problems`` 도 float 를 통과시킨다 — 두 곳이 갈리면
+    어댑터가 받은 값을 여기서 버린다.
+    """
+    assert cap_window(_state({}, lead=lead, window=WINDOW)) == (  # type: ignore[arg-type]
+        "2026-01-02",
+        "2026-01-19",
+    )
+
+
+def test_a_fractional_lead_does_not_build_a_window() -> None:
+    """소수 리드타임은 일 단위가 아니다 — 반올림해 창을 지어내지 않는다 (규칙 3)."""
+    assert cap_window(_state({}, lead=2.5, window=WINDOW)) is None  # type: ignore[arg-type]
+
+
+def test_outside_the_window_is_not_a_gap() -> None:
+    """창 밖 — **계산 대상이 아니다.** 빠진 값이 아니라 정상이다."""
+    scenario = _scenario((1, "2026-01-02", 50), (2, "2026-01-25", 50))  # 01-25 는 창 밖
+    verdict = arrival_capacity(
+        scenario, _state({"2026-01-02": 10_000}, lead=LEAD, window=WINDOW)  # type: ignore[arg-type]
+    )
+    assert verdict.violation is None, "창 밖을 여유 0으로 읽어 컷하면 안 된다"
+    assert verdict.skipped
+    assert "계산 구간 밖이라 애초에 대상이 아니다" in verdict.skipped
+    assert "2026-01-25" in verdict.skipped
+    assert "2026-01-02~2026-01-19" in verdict.skipped, "구간을 밝혀야 읽는 사람이 확인한다"
+
+
+def test_a_gap_inside_the_window_asks_for_a_fix() -> None:
+    """창 안 누락 — **고쳐야 할 것.** 계산이 빠졌거나 아직 안 정해졌다."""
+    scenario = _scenario((1, "2026-01-02", 50), (2, "2026-01-08", 50))  # 01-08 은 창 안
+    verdict = arrival_capacity(
+        scenario, _state({"2026-01-02": 10_000}, lead=LEAD, window=WINDOW)  # type: ignore[arg-type]
+    )
+    assert verdict.violation is None
+    assert verdict.skipped
+    assert "계산 구간 안인데 여유 값이 오지 않았다" in verdict.skipped
+    assert "확인이 필요하다" in verdict.skipped
+    assert "2026-01-08" in verdict.skipped
+
+
+def test_the_two_gaps_do_not_read_the_same() -> None:
+    """🔴 **이 작업의 급소** — 둘의 문면이 실제로 갈리는지.
+
+    행동은 같다(둘 다 컷 안 함). 갈리는 것은 문장뿐이라, 문장이 같으면 이 작업은
+    아무것도 안 한 것이 된다.
+    """
+    caps = {"2026-01-02": 10_000}
+    outside = arrival_capacity(
+        _scenario((1, "2026-01-02", 50), (2, "2026-01-25", 50)),
+        _state(caps, lead=LEAD, window=WINDOW),  # type: ignore[arg-type]
+    ).skipped
+    inside = arrival_capacity(
+        _scenario((1, "2026-01-02", 50), (2, "2026-01-08", 50)),
+        _state(caps, lead=LEAD, window=WINDOW),  # type: ignore[arg-type]
+    ).skipped
+
+    assert outside and inside
+    assert outside != inside, "창 밖과 창 안 누락이 같은 문장으로 나간다"
+    # 한쪽에만 있어야 하는 말 — 뭉쳐 쓰면 양쪽에 다 들어간다
+    assert "확인이 필요하다" in inside and "확인이 필요하다" not in outside
+    assert "애초에 대상이 아니다" in outside and "애초에 대상이 아니다" not in inside
+
+
+def test_both_kinds_at_once_name_both() -> None:
+    """둘이 함께 오면 **둘 다 짚는다** — 급한 쪽(누락)이 먼저다."""
+    scenario = _scenario(
+        (1, "2026-01-02", 50), (2, "2026-01-08", 50), (3, "2026-01-25", 50)
+    )
+    verdict = arrival_capacity(
+        scenario, _state({"2026-01-02": 10_000}, lead=LEAD, window=WINDOW)  # type: ignore[arg-type]
+    )
+    assert verdict.skipped
+    assert "2026-01-08" in verdict.skipped and "2026-01-25" in verdict.skipped
+    assert verdict.skipped.index("2026-01-08") < verdict.skipped.index("2026-01-25")
+
+
+@pytest.mark.parametrize(
+    ("lead", "window"),
+    [(None, WINDOW), (LEAD, None), (None, None)],
+)
+def test_without_the_window_we_say_we_could_not_tell(lead, window) -> None:
+    """창을 못 만들면 **가르지 못했다는 사실을 밝힌다** — 지어내지 않는다 (규칙 3).
+
+    물류가 창 길이를 payload 에 싣기로 했으므로(2026-09-03), 없으면 그것이 확인할
+    거리다. 조용히 옛 문장으로 돌아가면 아무도 안 본다.
+    """
+    verdict = arrival_capacity(
+        _scenario((1, "2026-01-02", 50), (2, "2026-01-25", 50)),
+        _state({"2026-01-02": 10_000}, lead=lead, window=window),  # type: ignore[arg-type]
+    )
+    assert verdict.violation is None
+    assert verdict.skipped
+    assert "가르지 못했다" in verdict.skipped
+    assert "2026-01-25" in verdict.skipped
+
+
+def test_a_zero_inside_the_window_is_still_judged() -> None:
+    """창을 알아도 **있는 0** 은 판정 대상이다 — 갈래가 늘어도 그건 안 바뀐다."""
+    verdict = arrival_capacity(
+        _scenario((1, "2026-01-02", 50)),
+        _state({"2026-01-02": 0}, lead=LEAD, window=WINDOW),  # type: ignore[arg-type]
+    )
     assert verdict.violation is not None
     assert verdict.skipped is None
 
