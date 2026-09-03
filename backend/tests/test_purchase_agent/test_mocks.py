@@ -584,24 +584,49 @@ def test_unknown_item_is_rejected() -> None:
         ports.get_forecast("건고추", RISING)
 
 
-#: 앵커일이 아닌 날. 어느 포트로 들어와도 같은 대접을 받아야 한다.
+#: 앵커일이 아닌 날. **T0 포트**는 어느 쪽으로 들어와도 같은 대접을 받아야 한다.
 NOT_AN_ANCHOR = date(2026, 8, 22)
 
-PORT_CALLS = (
+#: T0(``build_initial_state``)가 한 번씩 부르는 포트. 앵커 밖이면 거부한다.
+#:
+#: 🔴 **``get_context_docs`` 는 여기 없다** (#151-② · 2026-09-03). 그 포트만 T0 밖에서
+#:   **런타임에** 불리고(정의서 §3.1.1 · IO명세 §0), 코퍼스가 앵커별로 갈리지 않아
+#:   앵커일을 알 필요가 없다. 아래 ``test_the_document_port_is_the_one_exception`` 이
+#:   그 예외를 따로 잠근다 — 목록에서 조용히 빠지면 "빠뜨린 것"과 구분되지 않는다.
+T0_PORT_CALLS = (
     ("get_forecast", lambda as_of: ports.get_forecast("배추", as_of)),
     ("get_market_quotes", lambda as_of: ports.get_market_quotes("배추", as_of)),
     ("get_inventory", lambda as_of: ports.get_inventory("배추", as_of)),
     ("get_confirmed_orders", lambda as_of: ports.get_confirmed_orders("배추", as_of)),
     ("get_projected_cash_min", lambda as_of: ports.get_projected_cash_min(as_of, 30)),
-    ("get_context_docs", lambda as_of: ports.get_context_docs("배추", as_of, ["관측월보"])),
 )
 
 
-@pytest.mark.parametrize(("name", "call"), PORT_CALLS, ids=[name for name, _ in PORT_CALLS])
-def test_unknown_as_of_is_rejected_by_every_port(name: str, call: object) -> None:
+@pytest.mark.parametrize(
+    ("name", "call"), T0_PORT_CALLS, ids=[name for name, _ in T0_PORT_CALLS]
+)
+def test_unknown_as_of_is_rejected_by_every_t0_port(name: str, call: object) -> None:
     """포트 하나만 날짜 검증을 빼먹으면 그 경로로 앵커 밖 데이터가 새어 들어온다."""
     with pytest.raises(KeyError, match="no mock scenario"):
         call(NOT_AN_ANCHOR)
+
+
+def test_the_document_port_is_the_one_exception() -> None:
+    """🔴 **문서 포트만 앵커 밖에서 산다** (#151-②).
+
+    ② ``collect_context`` 는 ``uncertain`` 인 날만 도는데 **실 예측은 거의 항상
+    uncertain** 이다 — 관문이 남아 있으면 앵커 밖 날짜가 통째로 죽는다.
+
+    ⚠️ **"안 죽는다" 만 보면 부족하다.** 관문을 빼면서 필터까지 같이 빠져도 안 죽기
+      때문이다. 그래서 **실제로 문서가 나오는지** 와 **발행일 필터가 살아 있는지** 를
+      같이 본다. `DOC-6`(2026-09-05 발행)이 그 리트머스다.
+    """
+    docs = ports.get_context_docs("배추", NOT_AN_ANCHOR, ["관측월보"])
+    ids = {doc["doc_id"] for doc in docs}
+    assert ids == {3}, f"앵커 밖(2026-08-22)에서 8월호만 보여야 한다: {ids}"
+
+    later = ports.get_context_docs("배추", date(2026, 9, 20), ["관측월보"])
+    assert {doc["doc_id"] for doc in later} == {3, 6}, "9-20 이면 9월호도 보인다"
 
 
 def test_unknown_cash_horizon_is_rejected() -> None:
