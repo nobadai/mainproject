@@ -381,9 +381,15 @@ def build_inventory_by_item(
     """가용재고 정의를 적용한 품목별 자유재고를 집계한다.
 
     가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0), 확정 출고 예약분.
-    예상 판매·계획 출고는 차감하지 않는다. ML Forecast 유무는 재고 사실과 무관하다
-    (피마늘 유지). 확정 출고 행에 item이 없으면 임의 배분하지 않고 None을 돌려준다 —
-    호출부는 필드를 생략해야 하며 `[]`(0건 확인)로 대체하면 안 된다.
+    예상 판매·계획 출고는 차감하지 않는다. 확정 출고 행에 item이 없으면 임의 배분하지
+    않고 None을 돌려준다 — 호출부는 필드를 생략해야 하며 `[]`(0건 확인)로 대체하면
+    안 된다.
+
+    ★ **품목을 `ITEMS` 로 거르지 않는다.** ML Forecast 가 없거나 계약 품목에서 빠진
+      품목이라도 창고에 실물이 있으면 그 사실은 나간다 — 계약 `app/contracts/core.py`
+      `ITEMS` 주석의 *"예측이 없다는 이유로 재고를 숨기지 않는다"* 가 이 자리를 가리킨다.
+      재고 축과 제안 축은 다르다: `E-UNKNOWN-ITEM`(`critic_v0_4.py`)이 거르는 것은
+      `scenario.qty_kg` 의 제안 품목이고 재고 집계가 아니다.
     """
     if snapshot.confirmed_outbound_schedule is None or has_unattributed_confirmed_outbound(
         snapshot

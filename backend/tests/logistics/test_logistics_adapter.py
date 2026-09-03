@@ -515,6 +515,31 @@ def test_조회는_봉투_검증을_통과한다(wired):
     assert validate_reply(request, reply, meta) == ()
 
 
+def test_봉투의_inbound_lead_days_는_int_다(wired):
+    """🔴 일수를 kg 변환기에 태우지 않는다 (#221 · 매입 지적 2026-09-03).
+
+    정책값 여섯을 한 루프로 묶어 `_num()` = `float()` 을 태우고 있었는데, 다섯은
+    kg(`Decimal`)이고 **이것 하나가 일수(`int`)** 였다. 그래서 `2` 가 `2.0` 으로
+    나갔다 — 물류 내부(`schemas.py`)도 IO Contract §3 도 `int` 인데 봉투만 달랐다.
+
+    받는 쪽 셋이 전부 방어를 만들어 뒀다(`critic_bridge.py` `_int_of` ·
+    `commitment.py` · `purchase_agent/adapter.py` 의 `lead != int(lead)`).
+    생산자가 맞게 보내면 그 방어들이 무해해진다.
+
+    ⚠️ `2.0 == 2` 가 참이라 값 비교로는 안 잡힌다. **타입을 직접 잰다.**
+    """
+    reply, _ = adapter.logistics_port(req())
+
+    lead = reply.payload["inbound_lead_days"]
+    assert isinstance(lead, int)
+    assert not isinstance(lead, bool)  # True 가 1일로 통과하는 자리를 막는다
+    assert lead == 2
+
+    # kg 축은 그대로 float 다 — 루프에서 하나만 갈라 낸 것이지 전부 바꾼 것이 아니다.
+    assert isinstance(reply.payload["guaranteed_capacity_kg"], float)
+    assert isinstance(reply.payload["daily_inbound_capacity_kg"], float)
+
+
 def test_조회는_상태를_싣고_경계는_안_싣는다(wired):
     """★ `PRE_PURCHASE` 와 읽는 것은 같고 **싣는 것이 다르다.**
 
