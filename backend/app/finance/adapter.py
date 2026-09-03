@@ -259,7 +259,15 @@ def _controller_boundary(
             missing=payroll_refs,
             reason=messages.PAYROLL_SOURCE_MISSING,
         )
-    if context.policy.purchase_payment_days is None:
+    # 🔴 매입 전용 정책이 **모든 mode** 를 막고 있었다.
+    #
+    #    `purchase_payment_days` 는 매입 지급일 상한(`calculate_finance_cap`)에만 쓰인다 —
+    #    판매 검증은 이 값을 한 번도 읽지 않는다. 그런데 공통 boundary 에 있어서, 매입
+    #    지급일 정책이 없는 날에는 **판매 검증도 실행 전에 통째로 막혔다.** 재무가 판매를
+    #    못 본 이유가 "매입 정책이 없어서" 가 되는 것이라 사유 자체가 거짓이다.
+    #
+    # ★ 매입 쪽 방어는 그대로다. 아래 두 mode 에서는 여전히 실행 전에 요구한다.
+    if request.mode in _PURCHASE_POLICY_MODES and context.policy.purchase_payment_days is None:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=("purchase_payment_days",),
@@ -684,6 +692,13 @@ def _not_ready(
     )
     return _recorded(request, reply, _meta(request, run_id, tools))
 
+
+#: 매입 실행 정책(`purchase_payment_days`)을 **실행 전에** 요구하는 mode.
+#:
+#: ★ 판매 검증은 여기 없다. 그 값은 매입 지급일 상한 계산에만 쓰이므로, 판매를
+#:   막을 이유가 되지 않는다 — 막으면 "매입 정책이 없어서 판매를 못 봤다" 는
+#:   거짓 사유가 이력에 남는다.
+_PURCHASE_POLICY_MODES: frozenset[str] = frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION"})
 
 #: 실행이력에 남기는 mode. **닫힌 허용목록이다** — 모르는 mode 는 여기 없다.
 #:
