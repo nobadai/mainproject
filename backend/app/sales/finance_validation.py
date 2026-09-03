@@ -130,7 +130,14 @@ def _supply(scenario: SalesScenario) -> dict[str, Any] | None:
         # 재무 계약이 확정 수량을 필수로 요구한다. 모르는 채로 블록을 만들 수 없으므로
         # 통째로 생략하고, 재무는 `supply=None` 을 **모름** 으로 읽어 fail closed 한다.
         return None
-    return {"confirmed_quantity_kg": _plain(confirmed)}
+    supply: dict[str, Any] = {"confirmed_quantity_kg": _plain(confirmed)}
+    conditional = scenario.supply.conditional_quantity_kg
+    if conditional is not None:
+        # Purchase 가 실제로 확인해 준 값만 실린다. 0 도 사실이라 그대로 나른다.
+        supply["conditional_quantity_kg"] = _plain(conditional)
+        if scenario.supply.dependency_ref is not None:
+            supply["dependency_ref"] = scenario.supply.dependency_ref
+    return supply
 
 
 def _plain(value: Decimal) -> str:

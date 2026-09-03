@@ -134,12 +134,13 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             collapsed = True
             collapse_reason = "CONFIRMED_SUPPLY_LIMIT_NOT_PROVIDED"
         scenario_id, parent, revision = _scenario_lineage(suffix, request)
-        supply = _supply(scenario_quantity, confirmed)
-        validations = _required_validations(request, supply, parent or scenario_id, delivery)
         replies = _replies_for_scenario(request, parent or scenario_id)
         # 조건부 Purchase 회신은 확정 공급안을 오염시키지 않는다.
         if scenario_type != "AGGRESSIVE":
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
+        # 조건부 수량은 회신에서 나오므로 회신을 먼저 고른 뒤 공급을 세운다.
+        supply = _supply(scenario_quantity, confirmed, replies)
+        validations = _required_validations(request, supply, parent or scenario_id, delivery)
         risks, uncertainties, conditional = _feedback_effects(replies)
         uncertainties.extend(supply_uncertainties)
         if price is None:
@@ -271,14 +272,48 @@ def resolve_applicable_confirmed_supply(
     return None, ["CURRENT_SELLABLE_SUPPLY_UNRESOLVED"]
 
 
-def _supply(quantity: Decimal, confirmed: Decimal | None) -> ScenarioSupply:
+def _supply(
+    quantity: Decimal,
+    confirmed: Decimal | None,
+    replies: list[SalesDomainReply] | None = None,
+) -> ScenarioSupply:
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
+    conditional, dependency_ref = _purchase_conditional_supply(replies or [])
     return ScenarioSupply(
         confirmed_quantity_kg=confirmed,
         required_additional_quantity_kg=required,
         additional_supply_required=required is not None and required > 0,
+        # ★ 확정 공급에 더하지 않는다. 조건부는 조건부 자리에만 산다.
+        conditional_quantity_kg=conditional,
+        dependency_ref=dependency_ref,
     )
+
+
+def _purchase_conditional_supply(
+    replies: list[SalesDomainReply],
+) -> tuple[Decimal | None, str | None]:
+    """Purchase 가 **실제로 확인해 준** 조건부 확보 가능량만 옮긴다.
+
+    ★ 0 은 사실이다. Purchase 가 "0kg 확보 가능" 이라고 답했으면 0으로 보존한다 —
+      missing 으로 바꾸지 않는다.
+
+    ★ 못 돈 회신(skipped·RUNTIME_NOT_READY)이나 수량이 아예 없는 회신은 `None`(모름)
+      이다. 0 으로 바꾸면 *답을 못 받은 것*이 *확보 가능량 0* 이라는 사실이 된다.
+
+    ★ 수량과 근거를 같이 나른다. 수량만 남고 어느 회신에서 왔는지 사라지면 나중에
+      되짚을 수 없다.
+    """
+    for reply in replies:
+        if reply.source_agent != "purchase":
+            continue
+        if reply.runtime_status != "READY":
+            continue
+        quantity = reply.payload.get("procurable_quantity_kg")
+        if isinstance(quantity, bool) or not isinstance(quantity, (int, float, Decimal)):
+            continue
+        return Decimal(str(quantity)), reply.reply_ref
+    return None, None
 
 
 def _required_validations(

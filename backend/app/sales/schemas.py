@@ -720,10 +720,30 @@ class SalesProposalInput(BaseModel):
 
 
 class ScenarioSupply(BaseModel):
+    """세 수량은 **서로 다른 사실**이다. 섞거나 합산하지 않는다.
+
+        confirmed_quantity_kg          Logistics 가 확정한 판매 가능 수량
+        required_additional_quantity_kg Sales 가 계산한 부족량 (필요한 양)
+        conditional_quantity_kg        Purchase 가 조건부 확보 가능하다고 확인한 수량
+
+    🔴 '필요한 양' 은 '확보 가능한 양' 이 아니다. 앞의 것을 뒤의 칸에 넣으면 아직
+       아무도 확보해 주지 않은 수량이 확보된 것처럼 읽힌다.
+    """
+
     model_config = ConfigDict(extra="forbid")
     confirmed_quantity_kg: Decimal | None = Field(default=None, ge=0)
     required_additional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     additional_supply_required: bool = False
+    #: Purchase 가 **실제로 확인해 준** 조건부 확보 가능량.
+    #: None = 모름(검증 전·미실행·수량 미제공), 0 = 확보 가능량이 0으로 확인됨.
+    conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    #: 위 조건부 수량을 만든 원본 Purchase 회신 ref. 수량과 근거가 같이 다닌다.
+    dependency_ref: str | None = None
+
+    @field_validator("conditional_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_conditional(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
 class SalesScenario(BaseModel):
