@@ -95,7 +95,9 @@ class ApprovedCommitment:
 
     def __post_init__(self) -> None:
         if self.item not in ITEM_CODES:
-            raise CommitmentNotBuildable(f"품목이 4품목 어휘가 아니다: {self.item!r}")
+            raise CommitmentNotBuildable(
+                f"계약 품목이 아니다: {self.item!r}. 가능: {', '.join(sorted(ITEM_CODES))}"
+            )
         if not self.arrival_schedule:
             return
         drift = self.total_qty_kg - sum(leg.qty_kg for leg in self.arrival_schedule)
