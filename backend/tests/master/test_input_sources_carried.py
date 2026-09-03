@@ -190,3 +190,95 @@ def test_재호출에도_같이_간다():
 
     assert len(got) == 2, "재호출이 일어나야 이 검사가 의미 있다"
     assert got[1]["input_sources"] == SOURCES
+
+
+# ── ③ 🔴 나르는 쪽 — service 배선 ──────────────────────────────────────────
+
+
+def test_service_가_출처를_flow_에_넘긴다(monkeypatch):
+    """🔴 **만드는 쪽만 재면 여기서 끊긴다.**
+
+    위 검사들은 `ProcurementFlow` 를 **직접 세워** `input_sources` 를 넘긴다.
+    `run_procurement` 이 `inputs.sources()` 를 안 넘겨도 전부 통과한다 —
+    실제로 그 변이가 살아남았다 (실측 2026-09-03).
+
+    ★ `#202` · `#206` 에 이어 **세 번째로 같은 모양**이다. 옮기는 쪽을 재는
+      검사를 짝으로 두지 않으면 배선이 끊겨도 초록불이다.
+    """
+    from app.master import wiring
+    from app.master.inputs import MasterInputs, SourcedInput
+    from app.master.schemas import ProcurementRunRequest
+    from app.master.service import run_procurement
+
+    loaded = MasterInputs(
+        forecast=SourcedInput("forecast", {"horizon_days": 18}, "MOCK", "mocks", ""),
+        confirmed_orders=SourcedInput("confirmed_orders", {"total_kg": 1.0}, "DERIVED", "뷰", ""),
+        policy_values=SourcedInput("policy_values", {"contract_price_krw": 1}, "DERIVED", "표", ""),
+    )
+    monkeypatch.setattr("app.master.service.collect_inputs", lambda *a, **k: loaded)
+    monkeypatch.setattr("app.master.service.persistence.record", lambda *a, **k: None)
+
+    got, purchase = _seen()
+    wiring.reset()
+    wiring.register("finance", _port())
+    wiring.register("inventory", _port())
+    wiring.register("purchase", purchase)
+
+    run_procurement(
+        ProcurementRunRequest(
+            as_of=AS_OF, policy_version="v1.3", item="배추", request_id="REQ-SRC-1"
+        ),
+        verifier=None,
+    )
+
+    assert got, "매입이 불려야 이 검사가 의미 있다"
+    assert got[0]["input_sources"]["forecast"].startswith("MOCK"), (
+        f"service 가 출처를 안 넘겼다: {got[0].get('input_sources')}"
+    )
+
+
+# ── ④ ML 신뢰도 — use_recommended ─────────────────────────────────────────
+
+
+def test_use_recommended_가_예측_payload_에_실린다():
+    """🔴 매입 `#192` 가 *"payload 에 칸이 없다"* 로 진단했는데 **절반만 맞았다.**
+
+    ```text
+    is_filled · is_gated   행별   뷰가 daily[] 안에 넣어 이미 간다
+    use_recommended        조합별  여기서 버리고 있었다
+    ```
+    """
+    from app.master.inputs import _forecast_payload
+
+    row = {
+        "generated_at": "2025-12-31T06:00:00+09:00",
+        "item": "배추",
+        "unit": "원/kg",
+        "current_price": 1650,
+        "horizon_days": 18,
+        "daily": [{"date": "2026-01-02", "predicted": 1700, "is_filled": False, "is_gated": False}],
+        "model_version": "v1",
+        "use_recommended": False,
+    }
+
+    out = _forecast_payload(row)
+
+    assert out["use_recommended"] is False, "ML 이 '쓰지 말라' 고 한 사실이 안 갔다"
+    assert out["daily"] is row["daily"], "daily 를 풀어 다시 조립하면 ML 이 준 모양이 바뀐다"
+
+
+def test_행별_플래그는_daily_안에_그대로_있다():
+    """★ `daily` 는 뷰가 만든 그대로 나른다 — 마스터가 손대지 않는다."""
+    from app.master.inputs import _forecast_payload
+
+    daily = [{"date": "2026-01-02", "predicted": 1700, "is_filled": True, "is_gated": True}]
+    out = _forecast_payload(
+        {
+            "generated_at": "x", "item": "배추", "unit": "원/kg", "current_price": 1,
+            "horizon_days": 1, "daily": daily, "model_version": "v1",
+            "use_recommended": True,
+        }
+    )
+
+    assert out["daily"][0]["is_filled"] is True
+    assert out["daily"][0]["is_gated"] is True
