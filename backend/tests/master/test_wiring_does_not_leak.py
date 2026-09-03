@@ -82,16 +82,38 @@ def test_restore_는_합치지_않고_되돌린다():
     """★ **합치면 되돌린 것이 아니다.**
 
     테스트가 남긴 등록이 섞여 나가면 그 뒤 테스트가 *"누가 등록했는지"* 를 모른다.
-    """
-    saved = wiring.snapshot()
-    wiring.register("finance", _fake_port)  # type: ignore[arg-type]
 
+    🔴 **빈 상태를 떠야 차이가 보인다** (실측 2026-09-03).
+
+      등록된 상태를 뜨고 같은 이름을 덮어쓰면, 합치든 되돌리든 **같은 결과**가
+      나온다 — `saved` 가 그 이름을 다시 덮기 때문이다. `restore` 에서 `reset()` 을
+      빼는 변이가 그렇게 살아남았다.
+
+      `saved` 에 **없는** 이름이 등록돼 있어야 갈린다.
+    """
+    wiring.reset()
+    saved = wiring.snapshot()
+    assert saved == {}, "빈 상태를 떠야 이 검사가 의미 있다"
+
+    wiring.register("finance", _fake_port)  # type: ignore[arg-type]
     wiring.restore(saved)
 
-    assert wiring.registry().get("finance") is saved["finance"]
-    assert wiring.registry().registered == tuple(sorted(saved)), (
+    assert wiring.registry().registered == (), (
         "restore 가 지금 등록된 것을 남겼다 — 되돌린 것이 아니라 합친 것이다"
     )
+
+
+def test_restore_는_뜬_그대로_되살린다():
+    """되돌리는 쪽도 본다 — 비우기만 하면 그것도 복원이 아니다."""
+    saved = wiring.snapshot()
+    assert saved, "등록된 상태를 떠야 이 검사가 의미 있다"
+
+    wiring.reset()
+    wiring.restore(saved)
+
+    assert wiring.registry().registered == tuple(sorted(saved))
+    for name, port in saved.items():
+        assert wiring.registry().get(name) is port
 
 
 def test_snapshot_은_그때의_사본이다():
