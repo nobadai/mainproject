@@ -200,11 +200,34 @@ def test_사용자_조건이_2회차에도_살아_있다():
 
     사람이 건 조건은 **실행 단위**라 회차가 바뀌어도 유효하다.
     """
-    조건 = {"condition_text": "예산 2천만원으로 낮춰서", "attempt": 3}
+    조건 = {"condition_text": "예산 2천만원으로 낮춰서", "condition_seq": 3}
     _, purchaser = _run(prior_feedback=조건)
 
     for payload in purchaser.payloads:
         assert payload["prior_feedback"] == 조건
+
+
+def test_회차를_세는_이름이_슬롯마다_다르다():
+    """🔴 **슬롯을 나눠 놓고 이름을 안 갈랐던 자리다** (#178 · 매입 실측 2026-09-03).
+
+    ```text
+    prior_feedback["condition_seq"]   사람이 조건을 건 회차
+    feedback_context["attempt"]       매입 재호출 회차
+    ```
+
+    매입이 `state["feedback"].get("attempt", 0)` 으로 되먹임 회차를 찾다가 늘 0을
+    받았다 — **틀린 값을 읽은 것이 아니라 다른 개념을 같은 이름으로 찾고 있었다.**
+
+    ★ 이 검사가 잠그는 것은 개명 자체가 아니라 **다시 합쳐지지 않는 것**이다.
+      한 이름으로 되돌아가면 같은 실수가 그대로 반복된다.
+    """
+    _, purchaser = _run(prior_feedback={"condition_text": "예산 2천만원으로", "condition_seq": 3})
+    second = purchaser.payloads[1]
+
+    assert second["prior_feedback"]["condition_seq"] == 3
+    assert second["feedback_context"]["attempt"] == 2, "되먹임 회차는 조건 회차와 다르다"
+    assert "attempt" not in second["prior_feedback"], "사용자 조건 슬롯은 attempt 를 안 쓴다"
+    assert "condition_seq" not in second["feedback_context"], "되먹임 슬롯도 서로 안 쓴다"
 
 
 def test_사용자_조건과_되먹임이_다른_칸에_있다():
