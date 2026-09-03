@@ -31,7 +31,22 @@ from app.contracts.core import (
     gate_variant_axes,
 )
 
-AS_OF = date(2023, 3, 15)  # ← 플레이스홀더. sim_start_date 확정 시 교체.
+#: 🟢 **시뮬레이션 기준일** (`M-24` `D-2` 확정 · 2026-09-03).
+#:
+#: 오래 `date(2023, 3, 15)` 플레이스홀더였다. 네 파트가 모두 READY 인 날이
+#: **이 하루뿐**이라 선택지가 없었다.
+#:
+#: ```text
+#: ML     v_ml_price_forecast   3품목 · 각 378행 / 7배치
+#: 재무   v_current_finance_state 가 한 행 고정 — 다른 날은 READY 가 안 된다
+#: 물류   logistics_runtime_fixture 2행 중 하나 (나머지는 2026-01-01)
+#: 매입   mock 앵커 (#73)
+#: ```
+#:
+#: ★ **다른 날짜는 전부 이 값 상대로 쓴다** (`AS_OF + timedelta(...)`).
+#:   그래서 이 교체가 한 줄로 끝났다 — 절대 날짜를 흩뿌렸으면 스무 곳이었다.
+#:   `test_fixtures_follow_contract.py` 가 그 규율을 지킨다.
+AS_OF = date(2025, 12, 31)
 
 #: 픽스처 품목은 **계약에서 가져온다**. 여기서 따로 세면 계약이 바뀐 날 조용히
 #: 어긋나고, 그때 깨지는 것은 계약이 아니라 픽스처다.
