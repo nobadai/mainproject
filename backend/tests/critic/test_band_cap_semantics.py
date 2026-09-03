@@ -13,7 +13,7 @@ max(0, guaranteed_capacity_kg - projected_occupancy)
 **한 번 빠지고 한 번 더해져** 확정분을 두 번 셌다.
 
 ★ 뜻을 net 으로 정한 근거는 다수결이 아니라 **생산자**다 (물류 IO Contract §6).
-  쓰는 자리 셋 중 둘(물류 `_available_capacity` · 매입 PR #178·#179)이 net 이고
+  쓰는 자리 셋 중 둘(물류 `_available_capacity` · 매입 PR #179)이 net 이고
   여기만 gross 였다.
 
 ⚠️ **프로덕션 결과는 안 바뀐다.** `confirmed_occupancy_by_date` 를 운영 경로에서
