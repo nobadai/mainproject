@@ -24,7 +24,7 @@ from app.master.decision import (
     scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
-from app.master.run_repository import get_run, get_run_by_request_id
+from app.master.run_repository import get_run, get_run_by_request_id, list_runs
 
 
 def _end_code_of(response_payload: dict[str, Any]) -> str:
@@ -218,6 +218,40 @@ def current_commitment(request_id: str) -> CommitmentOut | None:
     return _commitment_for(
         request_id, current.decision_seq, replay, dict(row.get("response_payload") or {})
     )
+
+
+def commitments_before(item: str, as_of: date, *, limit: int = 50) -> list[CommitmentOut]:
+    """그 품목에서 **`as_of` 이전에** 승인된 확정 입고 약정 전부 (#185).
+
+    🔴 **오늘 실행이 어제를 아는 유일한 길이다.** 전에는 `current_commitment` 이
+      `request_id` 를 알아야만 답할 수 있어, *"피마늘 · 1-02 까지 승인된 것을 다
+      다오"* 를 물을 수가 없었다. 그래서 **어제 승인한 매입이 오늘 창고에 없는 것처럼**
+      됐다.
+
+    ★ **새로 적재하지 않는다.** `current_commitment` 을 그대로 부른다 — 약정을
+      만드는 함수가 하나뿐이어야 **같은 사실의 주인이 하나**로 남는다. 표를 새로
+      만들어 두 벌로 두면 재조립본과 적재본이 갈리는 날이 온다.
+
+    ★ **`as_of` 당일은 뺀다** (`as_of_before` 가 `<`). 오늘 것을 같이 세면 실행이
+      자기 자신을 입력으로 먹는다.
+
+    ★ **번복은 저절로 빠진다** — `current_commitment` 이 `is_current` 하나만 보므로
+      뒤집힌 승인의 약정은 이 목록에 안 들어온다.
+
+    :returns: 승인이 없으면 **빈 목록**. 없는 것을 만들지 않는다 — 빈 목록과
+              *"조회를 못 했다"* 는 다르고, 후자는 예외로 올라간다.
+    """
+    seen: set[str] = set()
+    out: list[CommitmentOut] = []
+    for run in list_runs(item=item, as_of_before=as_of, limit=limit):
+        request_id = run["request_id"] if isinstance(run, dict) else run.request_id
+        if request_id in seen:
+            continue  # 한 업무 키에 실행이 여럿이어도 약정은 하나다
+        seen.add(request_id)
+        commitment = current_commitment(request_id)
+        if commitment is not None:
+            out.append(commitment)
+    return out
 
 
 # ── 승인 → 약정 (H1) ────────────────────────────────────────────────────

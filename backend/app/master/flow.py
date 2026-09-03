@@ -266,6 +266,7 @@ class ProcurementFlow:
         confirmed_orders: Mapping[str, Any] | None = None,
         policy_values: Mapping[str, Any] | None = None,
         prior_feedback: Mapping[str, Any] | None = None,
+        approved_commitments: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         self.runner = runner
         self.verifier = verifier
@@ -281,6 +282,15 @@ class ProcurementFlow:
         self.forecast = forecast
         self.confirmed_orders = confirmed_orders
         self.policy_values = policy_values
+        #: 🔴 **어제까지 승인된 확정 입고 약정** (#185). 부서 경계 호출에 실어 보낸다.
+        #:
+        #: 전에는 마스터가 약정을 만들어 저장까지 해 놓고 **다음 실행에 안 실었다.**
+        #: 어제 승인한 매입이 오늘 창고에 없는 것처럼 됐다 — 만들어 놓고 안 보내는
+        #: 것은 값을 보내고 안 쓰는 것과 같은 병의 반대편이다.
+        #:
+        #: ★ **마스터가 해석하지 않는다** (§3.2.2). 약정을 그대로 나르고, 그것을
+        #:   창고 점유로 볼지 현금 유출로 볼지는 받는 부서가 정한다.
+        self.approved_commitments = tuple(approved_commitments)
         self.prior_feedback = prior_feedback
 
     # ── 진입점 ──────────────────────────────────────────────────
@@ -468,7 +478,7 @@ class ProcurementFlow:
         self.sourced_evidences = []
         self.suggested_adjustments = []
         for agent in self.advisors:
-            reply = self.runner.call(agent, "PRE_PURCHASE")
+            reply = self.runner.call(agent, "PRE_PURCHASE", self._boundary_input())
             if not reply.contributes_to_band and self.runner.retryable(agent, "PRE_PURCHASE"):
                 # 🔴 **한 번만 다시 부른다.** `ERROR` 는 어댑터가 터진 것이라 다시 부르면
                 #   달라질 수 있다 — `RUNTIME_NOT_READY` 는 입력이 없어서 못 낸 답이라
@@ -480,7 +490,7 @@ class ProcurementFlow:
                 # ★ **실패를 감추지 않는다 — 오히려 드러낸다.** 실행 계획에 같은 단계가
                 #   두 줄로 남아 *"한 번 실패"* 가 아니라 **"다시 불렀는데도 안 됐다"** 가
                 #   된다. 사람이 보는 문장이 달라진다.
-                reply = self.runner.call(agent, "PRE_PURCHASE")
+                reply = self.runner.call(agent, "PRE_PURCHASE", self._boundary_input())
             if reply.contributes_to_band:
                 out[agent] = dict(reply.payload)
                 self.constraint_evidences[agent] = reply.evidences
@@ -493,6 +503,24 @@ class ProcurementFlow:
                 # 부서가 무엇을 보내도 되는지는 봉투가 정하지 마스터가 정하지 않는다.
                 self.suggested_adjustments.extend(reply.suggested_adjustments)
         return out
+
+    def _boundary_input(self) -> dict[str, Any] | None:
+        """① 경계 호출에 실어 보내는 것.
+
+        🔴 **어제까지 승인된 약정을 싣는다** (#185). 물류는 그것을 미래 입고로 보고
+          창고 여유를 다시 계산할 수 있고, 재무는 현금 유출로 볼 수 있다 — **어느
+          쪽으로 볼지는 부서가 정한다.**
+
+        ★ **없으면 칸을 안 만든다.** 빈 배열을 보내면 받는 쪽이 *"어제 승인이 없었다"*
+          와 *"마스터가 안 보낸다"* 를 구별할 수 없다 (§1.2-10).
+
+        ⚠️ **받는 쪽은 아직 없다.** 되먹임 `adjustments` 때와 같은 순서로, 보내는
+          쪽을 먼저 만든다 — 버려지는 상태는 *"안 왔다"* 로 보이지 조용히 틀리지
+          않는다 (매입 2026-09-03).
+        """
+        if not self.approved_commitments:
+            return None
+        return {"approved_commitments": [dict(c) for c in self.approved_commitments]}
 
     def _feedback(
         self,

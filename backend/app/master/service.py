@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from app.master import persistence, wiring
 from app.master.answer import facts_from_procurement, render_answer
 from app.master.budget import CallBudget
-from app.master.decision_service import get_decisions
+from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.inputs import MasterInputs, collect_inputs
@@ -93,6 +94,7 @@ def run_procurement(
         confirmed_orders=request.confirmed_orders or _payload(inputs, "confirmed_orders"),
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
         prior_feedback=request.prior_feedback,
+        approved_commitments=_approved_commitments(request),
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
@@ -188,6 +190,28 @@ def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
         return collect_inputs(request.item, request.as_of)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _approved_commitments(request: ProcurementRunRequest) -> list[dict[str, Any]]:
+    """어제까지 승인된 확정 입고 약정 (#185).
+
+    🔴 **못 읽는 것을 없는 것으로 만들지 않는다.** 조회가 깨지면 빈 목록이 아니라
+      예외가 올라가야 하는데, 이력 DB 는 없어도 Flow 가 도는 것이 계약이라
+      (`history_enabled`) 여기서는 조용히 비운다. **그 사실이 응답에 남는 자리가
+      아직 없다** — `#185` 후속으로 둔다.
+
+    ★ 품목이 없으면 묻지 않는다. 약정은 품목별이라 물을 대상이 없다.
+    """
+    if not request.item:
+        return []
+    try:
+        return [
+            c.model_dump(mode="json")
+            for c in commitments_before(request.item, request.as_of)
+            if c.buildable
+        ]
+    except Exception:  # noqa: BLE001 — 이력 조회 실패가 매입 실행을 막지 않는다
+        return []
 
 
 def _payload(inputs: MasterInputs | None, key: str):
