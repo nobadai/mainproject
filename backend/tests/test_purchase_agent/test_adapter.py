@@ -1063,16 +1063,25 @@ def test_split_quantities_and_the_risk_note_never_disagree() -> None:
 
 
 def test_cap_by_date_absence_is_the_normal_path() -> None:
-    """mock 재고에는 ``cap_by_date``가 없다 — 회귀 픽스처 전량이 이 길로 간다."""
+    """mock 재고에는 ``cap_by_date``가 없다 — 회귀 픽스처 전량이 이 길로 간다.
+
+    🔴 **미검사 고지는 ⑥의 "N회 분할" 줄에서 떨어져 나왔다** (#93 · 2026-09-03).
+      ⑥의 고지 경로가 timing 축 전용이라 quantity 축 안은 검사도 고지도 없었다.
+      이제 ⑦이 **모든 안**에 대해 판정하고 그 결과를 말한다 — 그래서 아래 검사는
+      분할 안만이 아니라 **안 전부**를 훑는다.
+    """
     received = purchase_port(_request("배추", SPREAD_WIDE))[0].payload
-    notes = [
-        note
-        for scenario in received["scenarios"]
-        for note in scenario["risks"]
-        if "회 분할" in note
-    ]
-    assert notes, "분할 고지는 남는다"
-    assert all("검사를 하지 않았다" in note for note in notes), "부재는 미검사로 고지된다"
+    assert received["scenarios"], "안이 없으면 이 검사가 아무것도 안 본다"
+
+    for scenario in received["scenarios"]:
+        skipped = [note for note in scenario["risks"] if "검사를 하지 않았다" in note]
+        assert skipped, f"{scenario['label']} 안에 미검사 고지가 없다: {scenario['risks']}"
+        assert "받지 못했다" in skipped[0], "부재는 미수신으로 고지된다"
+        # ⑥의 분할 줄은 **판정을 말하지 않는다** — 자기가 한 일만 말한다
+        splits = [note for note in scenario["risks"] if "회 분할" in note]
+        assert all("검사를 하지 않았다" not in note for note in splits), (
+            "⑥이 다시 판정을 말하면 같은 사실이 두 곳에서 나온다"
+        )
 
 
 @pytest.mark.parametrize(
