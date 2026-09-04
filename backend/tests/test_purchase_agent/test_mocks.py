@@ -11,6 +11,7 @@ mock은 장식용 샘플이 아니라 **노드 단위 테스트 4종의 입력**
 
 import json
 import operator
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -211,25 +212,40 @@ def test_judgment_day_ci_width_classifies_each_scenario(
 
 
 @pytest.mark.parametrize(
-    ("threshold", "expected"),
-    [(0.5, "stable"), (0.01, "uncertain")],
+    ("pick", "factor", "expected"),
+    [(max, 2.0, "stable"), (min, 0.5, "uncertain")],
     ids=["전_밴드보다_높은_임계", "전_밴드보다_낮은_임계"],
 )
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 def test_the_verdict_follows_the_declared_threshold(
-    as_of: date, threshold: float, expected: str, monkeypatch: pytest.MonkeyPatch
+    as_of: date,
+    pick: Callable[[list[float]], float],
+    factor: float,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """🔴 **선언을 바꾸면 판정이 따라 움직이는가** — 규칙 8 의 변이 검사.
 
     이 검사가 없어서 **임계가 설정에서 온다는 것을 아무도 증명하지 않고 있었다.**
-    실측(2026-09-04): ① 이 ``constraints`` 를 안 읽고 ``0.08`` 을 박도록 갈아 끼워도
-    ``1117 passed`` — 한 건도 울지 않았다. ``ci_width_threshold == 0.08`` 같은 값
-    비교는 선언이 있다는 것만 보여줄 뿐 코드가 그걸 쓴다는 증명이 아니다.
+    실측: ① 이 ``constraints`` 를 안 읽고 ``0.08`` 을 박도록 갈아 끼워도 **한 건도 울지
+    않았다** (2026-09-04 · ``dev@645a18d`` · ``pytest tests/test_purchase_agent`` ·
+    변이 전후 모두 ``1117 passed``). ``ci_width_threshold == 0.08`` 같은 값 비교는
+    선언이 있다는 것만 보여줄 뿐 코드가 그걸 쓴다는 증명이 아니다.
 
     양쪽 방향을 다 흔든다. 한쪽만 두면 반대편이 죽어도 모른다 —
     ``test_judgment_day.test_a_bad_declaration_makes_the_check_cry`` 와 같은 이유다.
+
+    ⚠️ **임계를 상수로 두면 이름(관계)과 값(고정)이 갈린다.** mock 밴드가 바뀌면
+      *"전 밴드보다 높은"* 이 거짓이 되는데 검사는 초록이다. 실 구간 ``0.254~1.107``
+      에서 ``0.5`` 는 **밴드 한가운데**다 (현서님 리뷰 · 2026-09-04). 그래서 그날 밴드
+      에서 뽑는다 — ``max × 2`` 와 ``min × 0.5`` 는 어떤 밴드에서도 밖에 선다.
+
+    ★ **비교 방향과 무관하게 성립한다.** ``>`` 든 ``>=`` 든 ``max × 2`` 는 전 구간폭보다
+      크고 ``min × 0.5`` 는 전부보다 작아서, 경계에 걸치는 값이 없다. 경계 자신은
+      바로 아래 ``test_the_boundary_value_itself_follows_the_declared_comparison`` 이 본다.
     """
-    swap_threshold(monkeypatch, threshold)
+    widths = [w for item in mocks.ITEMS for w in _ci_widths(item, as_of)]
+    swap_threshold(monkeypatch, pick(widths) * factor)
     for item in mocks.ITEMS:
         state = build_initial_state(item, as_of)
         assert classify_situation(state)["situation"] == expected
