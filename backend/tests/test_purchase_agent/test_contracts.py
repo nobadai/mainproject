@@ -11,6 +11,23 @@
 예시의 sourcing 합계는 7,125,000이라 사중 일치를 위반했다 — 문서 수정으로 해결.
 ② 수량 단위가 ton에서 kg로 통일되면서 금액 공식의 ``× 1000``이 사라졌다. 총액 7,125,000은
 그대로다.)
+
+🔴 **⑦과 같은 사실을 검사하는 스키마 validator 는 반드시 이 파일에 직접 겨누는 판을
+짝으로 갖는다.**
+
+이유: ``self_check()`` 가 **dict 위에서 먼저 돌고**, 스키마는 살아남은 안만 본다.
+순서가 고정이라 ⑦ 이 컷하면 스키마 validator 를 지나는 실행이 없다 —
+**무력화해도 아무도 안 운다.**
+
+지금 짝이 있는 다섯::
+
+    validate_quadruple_match                ← test_quantity_must_match_split_plan
+    validate_split_amount_axis              ← test_amount_must_match_split_plan
+    validate_split_sequence                 ← test_split_seq_must_be_sequential
+    validate_margin_fields_are_synchronised ← test_half_null_margin_pair_is_rejected
+    validate_proposal_rules                 ← test_cited_document_must_appear_in_...
+
+(2026-09-04 · schemas 12 + ⑦ 13 전수 변이에서 나온 규칙)
 """
 
 import inspect
@@ -85,6 +102,59 @@ def test_amount_must_match_sourcing_plan() -> None:
     data["scenarios"][0]["total_amount_krw"] = 10318995  # sourcing 합계 7,125,000과 다른 값
     with pytest.raises(ValidationError, match="sourcing_plan amount total"):
         PurchaseProposal.model_validate(data)
+
+
+def test_amount_must_match_split_plan() -> None:
+    """🔴 **금액의 회차 변** — ``total_amount != Σ split_plan[].amount_krw`` (마스터 #265).
+
+    ⑦ ``check_split_amounts`` 가 같은 검사를 안 단위로 하지만, 거기서는 그 안만 컷하고
+    **여기서는 제안 전체가 죽는다.** 출력 경계 백스톱이라 ⑦을 우회한 경로(어댑터 바깥
+    호출·수동 조립)도 걸린다.
+
+    ⚠️ **이 검사가 없으면 스키마 백스톱을 지우는 변이가 아무도 안 잡는다** —
+      실제로 변이를 넣어 확인했다(2026-09-04). ⑦이 먼저 컷해서 스키마까지 가지 않기
+      때문에, 그 자리를 직접 겨누는 판이 따로 있어야 한다 (규칙 8).
+    """
+    data = _proposal()
+    # 수량·sourcing 축은 그대로 두고 **회차 금액만** 어긋낸다 — 다른 변이 걸리면
+    # 이 검사가 무엇을 잡았는지 알 수 없다.
+    data["scenarios"][0]["split_plan"][0]["amount_krw"] = 7125001
+    with pytest.raises(ValidationError, match="split_plan amount total"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_split_amount_is_all_rounds_or_none() -> None:
+    """🔴 **부분 공급을 금지한다** — 전 회차에 있거나 전 회차에 없거나.
+
+    마스터 ``commitment.py:_legs`` 가 ``amount_filled == len(amounts)`` 일 때만 금액을
+    나르고, ``contracts/core.py`` ``_split_amount_problems`` 도 같은 규칙이다. 실린 것만
+    더해 총액과 비교하면 **출처가 섞인 값**으로 판정하게 된다.
+
+    ⚠️ **아무 회차에도 없는 것은 위반이 아니다.** 이 모델은 재무·물류가
+      ``PurchaseAgentOutput`` 으로 그대로 쓰는 공유 계약이라, 그쪽 payload 는 이 필드를
+      안 싣는다. 우리 산출물이 그 상태가 되는 것은 ⑦ ``check_split_amounts`` 가 막는다.
+    """
+    data = _proposal()
+    data["scenarios"][0]["strategy_type"] = "timing"
+    data["scenarios"][0]["split_plan"] = [
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000},  # 🔴 이 회차만 비어 있다
+    ]
+    with pytest.raises(ValidationError, match="every round or none"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_a_payload_without_any_round_amount_still_validates() -> None:
+    """재무·물류가 보내는 payload 는 회차 금액을 안 싣는다 — **거부하지 않는다.**
+
+    ``finance/schemas.py:332`` 가 ``PurchaseAgentOutput = PurchaseProposal`` 로 이 모델을
+    자기 API 요청 모델로 쓴다. 여기서 필수로 만들면 **그 두 부서 엔드포인트가 이 필드
+    없는 요청을 422 로 거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다.
+    """
+    data = _proposal()
+    del data["scenarios"][0]["split_plan"][0]["amount_krw"]
+    proposal = PurchaseProposal.model_validate(data)
+    assert proposal.scenarios[0].split_plan[0].amount_krw is None
 
 
 def test_cited_document_must_appear_in_context_docs_used() -> None:
@@ -228,8 +298,8 @@ def test_split_seq_must_be_sequential() -> None:
     data = _proposal()
     scenario = data["scenarios"][0]
     scenario["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
-        {"seq": 3, "date": "2026-08-25", "qty_kg": 2000},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 3, "date": "2026-08-25", "qty_kg": 2000, "amount_krw": 3125000},
     ]
     with pytest.raises(ValidationError, match="seq must start at 1"):
         PurchaseProposal.model_validate(data)
@@ -240,8 +310,8 @@ def test_split_plan_supports_multiple_rounds() -> None:
     data = _proposal()
     data["scenarios"][0]["strategy_type"] = "timing"
     data["scenarios"][0]["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
-        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000, "amount_krw": 3125000},
     ]
     assert len(PurchaseProposal.model_validate(data).scenarios[0].split_plan) == 2
 
@@ -254,11 +324,54 @@ def test_unknown_field_is_rejected() -> None:
         PurchaseProposal.model_validate(data)
 
 
-def test_boolean_is_rejected_for_numeric_field() -> None:
-    """bool은 int의 서브클래스라 ge/gt를 통과한다 — 숫자 자리에서 막는다."""
+#: ``True`` 를 넣어 볼 숫자 자리. ``(이름, 픽스처에서 그 dict 로 가는 길)``.
+#:
+#: 🔴 **합에 안 들어가는 필드가 핵심이다.** 아래 docstring 참조.
+_NUMERIC_SLOTS = (
+    ("scenarios[].coverage_days", lambda d: d["scenarios"][0]),
+    ("meta.feedback_attempt", lambda d: d["meta"]),
+    ("meta.received_adjustments", lambda d: d["meta"]),
+    ("split_plan[].seq", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("split_plan[].qty_kg", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("split_plan[].amount_krw", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("sourcing_plan[].qty_kg", lambda d: d["scenarios"][0]["sourcing_plan"][0]),
+    ("sourcing_plan[].grade_unit_price", lambda d: d["scenarios"][0]["sourcing_plan"][0]),
+)
+
+
+@pytest.mark.parametrize("where, holder", _NUMERIC_SLOTS, ids=[s[0] for s in _NUMERIC_SLOTS])
+def test_boolean_is_rejected_for_numeric_field(where: str, holder) -> None:
+    """bool은 int의 서브클래스라 ge/gt를 통과한다 — 숫자 자리에서 막는다.
+
+    🔴 **이 셋은 합에 안 들어가는 필드라 사중 일치가 못 잡는다.**
+    ``qty_kg``·``amount_krw``·``grade_unit_price`` 는 ``True``→``1`` 이 되면 합이 깨져
+    사중 일치가 걸리는데, ``seq`` 와 ``meta`` 는 그 그물 밖이다.
+
+    ```text
+    feedback_attempt = True → 1        "1회차 재요청" 으로 읽힌다
+    received_adjustments = True → 1    "조정안 1건 받음" 이 된다
+                                       마스터 _adjustment_delivery 와 어긋난다
+    split_plan[].seq = True → 1        1회차 안에서는 정상으로 보인다
+                                       (다회차면 validate_split_sequence 가 잡는다)
+    ```
+
+    ⚠️ **가드는 정상 작동하는데 검사가 없었다** — 2026-09-04 전수 변이에서
+      ``ProposalMeta``·``SplitPlanItem``·``SourcingPlanItem`` 의 bool 가드를 지워도
+      **아무도 안 울었다.** 나머지 넷은 사중 일치가 우연히 잡아 줬고, 이 셋은 그대로
+      새어 나갔다 (규칙 8 — 검사는 있는데 변이가 안 물리는 자리).
+
+    ⚠️ **``match=`` 로 오류 문면에 묶는다.** ``_reject_boolean`` 의 메시지를 바꾸면
+      여덟 판이 같이 운다 — **그게 맞다.**
+
+    🔴 **없으면 이 검사가 이름값을 못 한다.** 사중 일치가 먼저 ``ValidationError`` 를
+      내므로 가드를 지워도 **5/8 이 통과한다** (*"무언가가 거부한다"* 만 증명하고
+      *"이 가드가 거부한다"* 는 증명하지 못한다). 2026-09-04 전수 변이에서 그 상태를
+      실측했다.
+    """
     data = _proposal()
-    data["scenarios"][0]["coverage_days"] = True
-    with pytest.raises(ValidationError):
+    field = where.split(".")[-1]
+    holder(data)[field] = True
+    with pytest.raises(ValidationError, match="boolean"):
         PurchaseProposal.model_validate(data)
 
 

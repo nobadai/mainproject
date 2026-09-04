@@ -219,8 +219,49 @@ class SplitPlanItem(BaseModel):
     #: **마스터가 이 값을 받으면 자기 계산을 건너뛴다** (2026-09-01 합의 · PR #138).
     #: 같은 사실을 두 곳에서 각자 계산하면 어긋나는 날이 온다.
     expected_arrival_date: date | None = None
+    #: 이 회차의 **매입 금액** = Σ(그 회차에 배분된 등급 kg × 등급 단가).
+    #: ⑥ ``with_round_amounts`` 가 ``_round_amounts`` 로 만든다.
+    #:
+    #: 🔴 **마스터가 이 칸을 읽는다** (``master/commitment.py`` ``_legs`` · PR #265).
+    #:   승인 약정의 ``ArrivalLeg.amount_krw`` 와 원장 ``purchase_items.line_amount_krw``
+    #:   가 여기서 온다. 마스터는 총액을 회차 수로 나누지 않는다 — 회차마다 등급 구성이
+    #:   달라 단가가 다르기 때문이다(재무 ``transition.py`` ``_single_purchase_date`` 가
+    #:   같은 이유로 비율 분배를 거부한다).
+    #:
+    #: 🔴 **우리 산출물에는 항상 찬다. 그런데 스키마에서는 선택 필드다** — 이유가 있다.
+    #:
+    #:   이 모델은 **우리만 쓰는 것이 아니다.** 재무·물류가
+    #:   ``PurchaseAgentOutput = PurchaseProposal`` 로 **그대로 import 해서 자기 API 의
+    #:   요청 모델로 쓴다** (``finance/schemas.py:332`` · ``logistics/router.py``).
+    #:   여기서 필수로 만들면 **그 두 부서의 엔드포인트가 이 필드 없는 요청을 422 로
+    #:   거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다. 통보 없이 할 일이 아니다.
+    #:
+    #:   대신 **부분 공급을 금지**한다 (``validate_split_amount_axis``):
+    #:   전 회차에 있거나 전 회차에 없거나, 일부만 실리면 위반이다. 마스터 ``_legs`` 의
+    #:   ``carry_amounts`` 와 **같은 규칙**이고 ``contracts/core.py``
+    #:   ``_split_amount_problems`` 도 같다 — 출처가 섞인 금액을 만들지 않는다.
+    #:
+    #:   그리고 **우리 경로에서는 ⑦ ``check_split_amounts`` 가 ``None`` 을 위반으로 본다.**
+    #:   스키마는 공유 계약이라 관대하고, ⑦은 우리 산출물만 보므로 엄격하다 — 그 비대칭이
+    #:   각자의 역할이다. *"우리가 늘 채운다"* 는
+    #:   ``test_every_round_carries_an_amount`` 가 전 품목·전 앵커로 잠근다.
+    #:
+    #:   ⚠️ 필수로 올리려면 재무·물류 픽스처 19파일(81건)과 두 부서의 요청 계약을 함께
+    #:   바꿔야 한다. 그건 통보와 합의가 먼저다 (2026-09-04 · 답 대기).
+    #:
+    #: ⚠️ **일괄(1회차) 안에도 싣는다.** 그때 값은 ``total_amount_krw`` 와 같지만,
+    #:   빼면 마스터의 "전 회차 실림" 이 성립하지 않아 금액이 통째로 안 실린다.
+    #:
+    #: ⚠️ ``payment_schedule[].amount_krw`` 와 **같은 숫자다.** 나누지 않은 이유는
+    #:   실리는 조건이 다르기 때문이다 — 저쪽은 분할이고 N5(재무 지급일수)를 받은 날에만
+    #:   실리는데, 원장 금액은 지급일과 무관하게 승인 시점에 필요하다.
+    #:   둘이 갈라지지 않게 ⑦ ``check_payment_schedule`` 이 대조한다.
+    #:
+    #: ``ge=0`` 인 이유: 등급별 반올림 잔차가 한 회차로 몰리면 수량이 있어도 금액이 0원인
+    #: 회차가 나올 수 있다(등급 3종 이상 · 극단 수량 분포). ``gt=0`` 이면 그날 터진다.
+    amount_krw: int | None = Field(default=None, ge=0)
 
-    @field_validator("seq", "qty_kg", mode="before")
+    @field_validator("seq", "qty_kg", "amount_krw", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -395,6 +436,14 @@ class Scenario(BaseModel):
 
         금액 축이 없으면 T3가 재무 cap(금액)과 매입 제안(수량)을 결합할 수 없다.
         등급 배분이 수량↔금액 변환 계수이기 때문이다.
+
+        ⚠️ **이 검사가 bool 가드의 그물 노릇도 한다 — 우연이다.**
+        ``qty_kg``·``amount_krw``·``grade_unit_price`` 에 ``True`` 가 들어오면 ``1`` 이
+        되어 합이 깨지므로 여기서 걸린다.
+
+        🔴 **설계가 아니다. 사중 일치를 손대면 그 방어가 같이 사라진다.**
+        합에 안 들어가는 필드(``seq``·``meta.*``)는 지금도 이 그물 밖이라
+        ``test_contracts.py`` 가 따로 잡는다 (2026-09-04 전수 변이).
         """
         split_total = sum(item.qty_kg for item in self.split_plan)
         sourcing_total = sum(item.qty_kg for item in self.sourcing_plan)
@@ -407,6 +456,38 @@ class Scenario(BaseModel):
         amount_total = sum(item.qty_kg * item.grade_unit_price for item in self.sourcing_plan)
         if self.total_amount_krw != amount_total:
             raise ValueError("total_amount_krw must equal sourcing_plan amount total")
+        return self
+
+    @model_validator(mode="after")
+    def validate_split_amount_axis(self) -> "Scenario":
+        """``total_amount_krw == Σ split_plan[].amount_krw`` — **금액의 회차 변**.
+
+        🔴 **사중 일치와 별개로 센다.** 사중 일치(규칙 4)는 수량 3변 + 금액 1변
+        (``total ↔ sourcing``)이고, 이건 마스터 요청(PR #265)으로 새로 선 **다섯 번째
+        변**이다. 기존 항목에 끼워 넣으면 "사중" 이라는 이름이 조용히 다른 것을 뜻하게
+        된다 — 규칙 4를 고치려면 ``CLAUDE.md`` 를 먼저 고쳐야 한다.
+
+        ★ **왜 필요한가.** 이 어긋남은 그대로 원장으로 간다 —
+        ``purchases.total_amount_krw`` 와 ``purchase_items.line_amount_krw`` 가 각각
+        NOT NULL 이라, 합이 안 맞는 채로 승인되면 **재무 cap 검증을 통과한 안이 cap 을
+        넘는 원장을 만든다.** 그 상태를 아무도 에러로 만나지 않는다
+        (``contracts/core.py`` ``_split_amount_problems`` 가 같은 사실을 적고 있다).
+
+        ⑦ ``check_split_amounts`` 가 같은 검사를 **안 단위로** 한다 — 거기서는 그 안만
+        컷하고 여기서는 출력 경계의 백스톱이다. 사중 일치·분할 날짜와 같은 이중 배치다.
+        """
+        loaded = [item.amount_krw for item in self.split_plan if item.amount_krw is not None]
+        if not loaded:
+            # 아무 회차에도 안 실렸다 — 우리 산출물이 아니라 **외부 소비자가 만든 payload**다
+            # (재무·물류가 이 모델을 자기 요청 모델로 쓴다). 검사할 것이 없다.
+            return self
+        if len(loaded) < len(self.split_plan):
+            # 🔴 같은 안에서 회차마다 있고 없고는 자기모순이다. 실린 것만 더해 총액과
+            #   비교하면 **출처가 섞인 값**으로 판정하게 된다 — 마스터 ``_legs`` 와
+            #   ``contracts/core.py`` ``_split_amount_problems`` 가 같은 이유로 거부한다.
+            raise ValueError("split_plan amount must be present on every round or none")
+        if self.total_amount_krw != sum(loaded):
+            raise ValueError("total_amount_krw must equal split_plan amount total")
         return self
 
     @model_validator(mode="after")
