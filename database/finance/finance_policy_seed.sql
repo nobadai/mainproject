@@ -13,12 +13,25 @@
 --
 -- 🔴 **`purchase_payment_days` 는 0 이다** (D+0 · 매입 당일 지급).
 --
---    2026-09-04 관측 시점의 운영 DB 행은 아직 `7` 을 들고 있다. 원장은 그 값과
---    맞지 않는다 — `purchases` 16/16 이 `payment_due_date = purchase_date` 이고,
---    `payables` 16/16 이 `due_date = purchase_date` 다. 승인된 정책은 0 이고
---    DB 행이 뒤처져 있다. 이 파일은 **승인된 정책**을 적는다.
+--    2026-09-04 관측 시점의 운영 DB 행은 `7` 을 들고 있다. 세 갈래 근거가 전부
+--    0 을 가리킨다.
 --
---    이 브랜치는 운영 DB 의 값을 바꾸지 않았다. 반영은 운영 반영 절차로 한다.
+--    ```text
+--    Persona   company_personas PERSONA-V1.3 (active) . purchase_payment_days = 0
+--              note "D+0 지급 / D+30 회수"
+--    근거      persona_evidences.purchase_payment_days → EV-SRC-FIN-PERSONA
+--              (evidences.source_ref = 'SRC-FIN-PERSONA', PROJECT_SOURCE)
+--    원장      purchases  16/16  payment_due_date = purchase_date
+--              payables   16/16  due_date        = purchase_date
+--    ```
+--
+--    반면 운영 행의 `7` 이 달고 있던 `FINANCE-DECISION-20260827:N5` 는 `evidences`
+--    에 **행이 없다.** 저장소 SQL 어디에도 그 값을 넣는 구문이 없고, 기존 Finance
+--    테스트가 문자열로만 들고 있다. 즉 저장소 밖에서 손으로 바꾼 값이고 근거를
+--    따라갈 수 없다. 그래서 이 파일은 `SRC-FIN-PERSONA` 를 단다 — 실제로 0 을
+--    받치는 근거이고, `monthly_labor_cost_krw` 가 이미 쓰는 것과 같은 출처다.
+--
+--    이 브랜치는 운영 DB 를 읽기만 했다. 운영 행 반영은 별도 절차다.
 
 INSERT INTO haetdeul.agent_policy_config (
     domain,
@@ -56,7 +69,7 @@ INSERT INTO haetdeul.agent_policy_config (
     ('finance', 'minimum_cash_balance_krw', 'NUMERIC', 12941280, NULL, 'KRW', 'SIM_FIXED', 'PROJECT-DEFINITION-V1.2:minimum_cash_balance', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, '프로젝트 정의서 기준 최소 현금 잔고. 월 기본 인건비 1개월 Reserve 12,941,280원.'),
     ('finance', 'monthly_labor_cost_krw', 'NUMERIC', 12941280, NULL, 'KRW/month', 'SIM_FIXED', 'SRC-FIN-PERSONA', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, '통합 Persona v1.5의 월 기본 인건비를 MVP Cashflow Event 기준으로 사용.'),
     ('finance', 'payroll_date', 'NUMERIC', 10, NULL, 'day-of-month', 'SIM_FIXED', 'SRC-FIN-N6', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, 'Finance v2.2.1 / 프로젝트 v2.3 후속 결정. 급여 지급일 매월 10일 확정. 기존 25일 Seed를 supersede.'),
-    ('finance', 'purchase_payment_days', 'NUMERIC', 0, NULL, 'day', 'SIM_FIXED', 'FINANCE-DECISION-20260827:N5', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, 'Finance MVP 확정 정책. 매입대금 지급일은 매입일 기준 D+0 calendar days — 매입 당일 지급. 분할 매입은 각 회차별 실제 매입일 기준 D+0 적용. 계약 만기일이 토·일이어도 원장 due_date 는 계약일 그대로이고, 실제 현금 유출만 다음 월요일이다. H1에 확정 payment_date가 존재하면 해당 값이 authoritative.')
+    ('finance', 'purchase_payment_days', 'NUMERIC', 0, NULL, 'day', 'SIM_FIXED', 'SRC-FIN-PERSONA', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, '매입대금 지급일은 매입일 기준 D+0 calendar days — 매입 당일 지급. 출처는 재무 Persona (PERSONA-V1.3.purchase_payment_days = 0, persona_evidences → EV-SRC-FIN-PERSONA). 분할 매입은 각 회차별 실제 매입일 기준 D+0 적용. 계약 만기일이 토·일이어도 원장 due_date 는 계약일 그대로이고, 실제 현금 유출만 다음 월요일이다. H1에 확정 payment_date가 존재하면 해당 값이 authoritative.')
 ON CONFLICT (policy_version, domain, policy_key) DO UPDATE SET
     value_kind = EXCLUDED.value_kind,
     value_numeric = EXCLUDED.value_numeric,

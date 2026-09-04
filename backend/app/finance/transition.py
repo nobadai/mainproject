@@ -21,6 +21,17 @@ T0 상태 읽기 → 승인 약정 수신 → build_finance_transition (계산�
    현금은 실제 지급일에 나간다. 승인일에 현금을 깎으면 아직 나가지 않은 돈이
    사라지고, 정작 지급일에는 아무 일도 일어나지 않는다.
 
+🔴 **다음 상태가 설 날을 재무가 정하지 않는다.** 예전 초안은 `as_of + 1 달력일`
+   을 안에서 세웠는데, 그러면 금요일 승인이 **토요일 상태**를 만든다. 다음 실행일은
+   월요일이라 그 상태는 아무도 읽지 못하고, 재무가 조용히 실행일 달력을 소유한
+   꼴이 된다. 그래서 `target_state_date` 를 **인자로 받는다** — 재무는 그 날짜가
+   승인일보다 뒤인지만 본다. 평일 계산은 하지 않는다.
+
+   ★ 지금 그 값을 줄 권위 있는 원천이 계약에 없다. `master.execution_day
+     .next_execution_day` 가 답을 알지만 재무가 닿을 수 있는 마스터 표면이 아니고
+     (`envelope` · `critic_bridge` 뿐), `ApprovedCommitment` 도 `ExecutionContext` 도
+     그 날짜를 싣지 않는다.
+
 🔴 **아직 마스터(`master.transition.register_transition`)에 등록하지 않는다.**
    `payables.purchase_id` 는 `purchases` 를 참조하는 NOT NULL 컬럼인데,
    `ApprovedCommitment` 에는 그 ID 가 없다. 등록하면 마스터가 *"아직 안 돈다"*
@@ -103,12 +114,7 @@ class FinanceTransition:
     #: 이 계산이 딛고 선 T0 행. 나머지 컬럼은 여기서 그대로 이어 간다.
     source_finance_state_id: str
     next_finance_state_id: str
-    #: 다음 상태가 서는 날. **달력일**이다 — 주말에도 시간은 흐른다. 어느 날 실행하는지는
-    #: 마스터가 정하므로 재무가 평일 계산을 대신 하지 않는다.
-    #:
-    #: ★ 그래서 금요일 승인은 토요일 상태를 만들고, 다음 실행일인 월요일 요청은
-    #:   `state_date == as_of` 를 못 맞춰 `RUNTIME_NOT_READY` 가 된다. 다음 실행일이
-    #:   언제인지는 마스터의 실행일 달력이 아는 사실이라 여기서 정하지 않는다.
+    #: 다음 상태가 서는 날. **부르는 쪽이 준 값**이다 — 재무가 세지 않는다.
     next_state_date: date
     payables: tuple[FinancePayableWrite, ...]
     #: 승인 뒤 미결제 매입채무 총액. 현금은 **바뀌지 않는다.**
@@ -120,17 +126,25 @@ class FinanceTransition:
 
 
 def build_finance_transition(
-    commitment: ApprovedCommitmentFacts, *, purchase_id: str
+    commitment: ApprovedCommitmentFacts,
+    *,
+    purchase_id: str,
+    target_state_date: date,
 ) -> FinanceTransition:
     """승인 약정을 재무 변경으로 옮긴다. **계산만 한다 — DB 를 바꾸지 않는다.**
 
     :param purchase_id: 이 승인이 만든 매입 Header 의 ID. `payables.purchase_id` 는
         `purchases` 를 참조하는 NOT NULL 컬럼이라 재무가 지어낼 수 없다 — 매입/마스터가
         같은 트랜잭션에서 넣는 값을 받는다.
+    :param target_state_date: 승인 결과 상태가 설 날. **부르는 쪽이 준다.**
     :raises FinanceDataNotReady: 재무가 지급 시점이나 금액을 확정할 수 없을 때.
     """
     if not purchase_id.strip():
         raise ValueError("purchase_id must not be blank")
+    if target_state_date <= commitment.as_of:
+        # 재무 정합성 조건이지 일정 규칙이 아니다 — 승인일 이하로 두면 T0 행과 같은
+        # 날에 두 상태가 서고, 그다음부터 어느 쪽이 그날의 사실인지 말할 수 없다.
+        raise ValueError("target_state_date must be after the approval as_of")
 
     state = load_finance_state_row(commitment.as_of)
     if state["state_date"] != commitment.as_of:
@@ -150,8 +164,6 @@ def build_finance_transition(
     # 하지 않는다 — 원장은 계약일을 그대로 들고, 현금이 나가는 날은 현금흐름 조회가
     # `tools.effective_cash_date` 로 정한다.
     due_date = purchase_date + timedelta(days=int(policy.purchase_payment_days))
-    # 승인일은 상태를 딛는 날일 뿐이고, 매입일·계약 만기일과 다르다. 넷을 겹치지 않는다.
-    next_state_date = commitment.as_of + timedelta(days=1)
 
     sim_run_id = str(state["sim_run_id"])
     payable = FinancePayableWrite(
@@ -167,7 +179,7 @@ def build_finance_transition(
         sim_run_id=sim_run_id,
         source_finance_state_id=str(state["finance_state_id"]),
         next_finance_state_id=f"FIN-{commitment.approval_id}",
-        next_state_date=next_state_date,
+        next_state_date=target_state_date,
         payables=(payable,),
         next_unsettled_purchase_payables_krw=(
             Decimal(str(state["unsettled_purchase_payables_krw"])) + amount

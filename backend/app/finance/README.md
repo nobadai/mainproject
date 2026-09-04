@@ -337,6 +337,7 @@ proposed sale 의 정본 재고원가   어느 Lot 을 쓸지는 Inventory 의 �
 그래서 `sales_cost_basis` 는 **주입받는다**. 권위 있는 재고원가가 없으면 마진을
 계산하지 않고, 0 으로 대체하지 않는다. 조건부 물량이 섞이면 확정 재고원가를 제안
 전체의 원가처럼 쓰지 않는다.
+
 ## 승인 → 다음 재무 Actual State
 
 승인된 매입 약정이 재무의 다음 상태가 되는 경로다. **값은 재무가, 트랜잭션은
@@ -348,14 +349,33 @@ build_finance_transition(commitment, ...)     계산만 — DB 를 바꾸지 않
 persist_finance_transition(conn, transition)  받은 연결로 쓰기만 — commit 하지 않는다
 ```
 
-부르는 쪽(마스터)이 기대하는 모양은 다음과 같다.
+부르는 쪽이 기대하는 모양은 다음과 같다.
 
 ```python
-fin = finance.build_finance_transition(commitment, purchase_id=purchase_id)
+fin = finance.build_finance_transition(
+    commitment,
+    purchase_id=purchase_id,        # 매입 소유 — 약정에 아직 없다
+    target_state_date=next_day,     # 실행일 달력 소유 — 계약에 아직 없다
+)
 with shared_connection as conn:
     finance.persist_finance_transition(conn, fin)
     # 물류 적재는 재무 밖에서, commit 은 마스터가 한 번만
 ```
+
+🔴 **아직 `master.transition.register_transition` 에 등록하지 않는다.** 위 두 인자를
+   실어 줄 권위 있는 원천이 계약에 없다. 억지로 등록하면 마스터가 *"아직 안 돈다"*
+   (`NOT_APPLIED`) 대신 **승인마다 `FAILED`** 를 내게 되고, 미구현이 장애로 둔갑한다.
+
+### 다음 상태가 설 날은 재무가 정하지 않는다
+
+```text
+금 승인 → as_of + 1 달력일 = 토요일 상태 → 다음 실행일 월요일이 못 읽는다
+```
+
+초안은 안에서 `as_of + 1` 을 세웠고, 그 결과가 위 한 줄이다. 실행일 달력은 마스터
+소유(`master/execution_day.py`)이고 재무가 닿을 수 있는 마스터 표면이 아니므로,
+`target_state_date` 를 **인자로 받는다.** 재무가 보는 것은 정합성 한 가지뿐이다 —
+승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의 사실을 말할 수 없다.
 
 ### 상태 선택은 as_of 가 한다
 
