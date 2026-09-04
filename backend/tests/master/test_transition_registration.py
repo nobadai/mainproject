@@ -111,7 +111,7 @@ def 재무_읽기를_대역으로(monkeypatch: pytest.MonkeyPatch) -> None:
             "state_date": AS_OF,
             "sim_run_id": BURN_IN_SIM_RUN_ID,
             "finance_state_id": "FIN-BURNIN-DAY30",
-            "unsettled_purchase_payables_krw": Decimal("0"),
+            "unsettled_purchase_payables_krw": Decimal(0),
         },
     )
     monkeypatch.setattr(finance_transition, "get_active_finance_policy", lambda: _정책())

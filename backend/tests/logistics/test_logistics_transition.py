@@ -349,9 +349,7 @@ def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
     adapter = _adapter()
     conn = 가짜커넥션()
 
-    adapter.persist(
-        conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
-    )
+    adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
 
     params = conn.커서.params[0]
     assert SIM_RUN_ID in params, "sim_run_id 를 그대로 넘겨야 WHERE 가 그 행을 찾는다"
@@ -364,9 +362,7 @@ def test_adapter_persist_does_not_commit_or_rollback():
     adapter = _adapter()
     conn = 가짜커넥션()
 
-    adapter.persist(
-        conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
-    )
+    adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
 
     assert conn.commits == 0
     assert conn.rollbacks == 0
@@ -378,6 +374,4 @@ def test_adapter_passes_the_missing_fixture_error_through():
     conn = 가짜커넥션(rowcount=0)
 
     with pytest.raises(LogisticsFixtureMissing):
-        adapter.persist(
-            conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
-        )
+        adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
