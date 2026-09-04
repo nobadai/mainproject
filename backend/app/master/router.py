@@ -6,12 +6,16 @@
   마스터는 요청 본문과 실행 이력만 다룬다.
 """
 
+from datetime import date
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.contracts.core import ContractViolation
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
+from app.master.day_open import DayOpenOut
+from app.master.day_open import open_day as run_open_day
 from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
 from app.master.decision_service import current_commitment, get_decisions, record_decision
 from app.master.schemas import (
@@ -289,3 +293,28 @@ def master_decision_history(request_id: str) -> list[DecisionOut]:
       구분하지 않는다 — 그 구분은 `GET /master/runs/{request_id}` 가 404 로 답한다.
     """
     return get_decisions(request_id)
+
+
+@router.post(
+    "/days/{as_of}/open",
+    response_model=DayOpenOut,
+    summary="하루를 연다 — 그날 상태 행을 파트마다 보장한다",
+)
+def master_open_day(as_of: date) -> DayOpenOut:
+    """`as_of` 날 상태 행이 없으면 전날에서 물려받아 만든다.
+
+    🔴 **명시적 호출이다. 실행의 부작용이 아니다.** `run_procurement` 이 시작할 때
+       자동으로 열지 않는다 — 판단 한 번이 장부를 바꾸면 *"같은 as_of 로 백번 돌려도
+       같은 답"* 이 깨진다. 하루가 넘어가는 것은 **사건**이고, 사건에는 자기 자리가 있다.
+
+    ★ **멱등이다.** 같은 날을 두 번 열면 두 번째는 아무것도 안 한다 — 파트마다
+      `opened` 가 빈 목록으로 나가는 것이 *"이미 열려 있었다"* 다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 열었다 · 이미 열려 있었다 · 막혔다 · 미등록이다 — 전부 **그날의 사실**이다 |
+
+    ★ **실패도 200 이다** (`/master/request` 와 같은 태도). 미등록·상한 초과는 오류가
+      아니라 상태이고, 적재 실패는 롤백되어 어제 그대로다 — 사유가 본문에 실린다.
+    """
+    return run_open_day(as_of)

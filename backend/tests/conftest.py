@@ -40,7 +40,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from app.master import transition, wiring
+from app.master import day_open, transition, wiring
 
 
 @pytest.fixture(autouse=True)
@@ -80,3 +80,28 @@ def 전역_전이_등록소를_되돌린다() -> Iterator[None]:
         transition.reset()
         for part, impl in saved.items():
             transition.register_transition(part, impl)
+
+
+@pytest.fixture(autouse=True)
+def 전역_하루넘김_등록소를_되돌린다() -> Iterator[None]:
+    """하루 넘김 등록소도 프로세스 전역이다 — **끝나면 원래대로**.
+
+    ⚠️ **오늘은 함정이 아직 없다.** `app/master/day_open._OPENINGS` 는 전역이지만
+       `app/main.py` 에 등록 줄이 없다 (재무 미회신 · 물류 파트 소유). 그래서
+       `reset()` 을 부른 테스트가 그대로 나가도 지워질 등록 자체가 없다.
+
+    ★ **그래도 지금 세워 둔다.** 전이 등록소가 정확히 그 순서로 물렸다 — 0건이던
+      동안에는 비워도 티가 안 나다가, 등록이 서는 날(`#272`) 갑자기 다른 파트
+      검사에 닿았다. 여기서 새는 방향은 반대다: 대역을 등록한 테스트가 그대로
+      나가면 **가짜 구현이 다음 테스트로 흘러든다.**
+
+    ★ 위 전이 fixture 와 같은 방식이다 — `registered()` 로 뜨고 `reset()` +
+      `register_day_opening()` 으로 되돌린다.
+    """
+    saved = dict(day_open.registered())
+    try:
+        yield
+    finally:
+        day_open.reset()
+        for part, impl in saved.items():
+            day_open.register_day_opening(part, impl)
