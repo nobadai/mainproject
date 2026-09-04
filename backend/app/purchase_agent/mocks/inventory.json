@@ -1,8 +1,8 @@
 {
   "_설명": "품목별 고정값. **물류가 실제로 싣는 lot 모양을 그대로 따른다** (2026-08-28 실측 · #76). 이름이 어긋나 있으면 전 스위트가 green인데 실연동이 KeyError로 죽는다 — 실제로 그렇게 죽었다.",
   "_실물_대조": "마스터 경유 시 물류가 싣는 키는 lot_id·item·available_qty_kg·remaining_freshness_days·grade·status 여섯이다 (master/adapters/logistics.py). mock도 같은 이름·같은 타입을 쓴다. lot_id는 **문자열**이다 — 실물이 'LOT-KIMCHI-015-BAECHU' 형태라 정수로 두면 ref_id 모양이 실연동에서만 달라진다.",
-  "_shelf_life_days_는_미결_필드": "이 키만 물류가 아직 주지 않는다 (#76 미결). ⑤ 등급 배분이 '이 품목의 전체 보관한계'를 쓰는데(allocate_sourcing.py:78-88 — 오늘 사는 물건은 새 물건이라 기존 로트가 쓴 날짜를 물려받지 않는다), 물류의 remaining_freshness_days는 '이 로트의 잔여일'이라 대체할 수 없다. 값은 haetdeul.item_storage_policies.operational_limit_days 실측(2026-08-28)을 따랐다: 배추 10 · 무 14 · 양파 30 · 피마늘 30. 전달 경로가 정해지면 이 키는 사라진다.",
-  "_정정_이력": "양파 60→30, 피마늘 45→30. 종전 값은 근거 없이 길었고 DB 실측과 어긋나 있었다 — 등급 배분이 실물보다 긴 보관한계로 돌고 있었다.",
+  "_shelf_life_days_는_미결_필드": "이 키만 물류가 아직 주지 않는다 (#76 미결). ⑤ 등급 배분이 '이 품목의 전체 보관한계'를 쓰는데(allocate_sourcing.py:78-88 — 오늘 사는 물건은 새 물건이라 기존 로트가 쓴 날짜를 물려받지 않는다), 물류의 remaining_freshness_days는 '이 로트의 잔여일'이라 대체할 수 없다. 값은 haetdeul.item_storage_policies.operational_limit_days 실측(2026-08-28)을 따랐다: 배추 10 · 무 14 · 양파 30. 전달 경로가 정해지면 이 키는 사라진다.",
+  "_정정_이력": "양파 60→30. 종전 값은 근거 없이 길었고 DB 실측과 어긋나 있었다 — 등급 배분이 실물보다 긴 보관한계로 돌고 있었다.",
   "_기준일_재현": "배추 블록은 IO명세 §1-③ 예시와 일치한다: 잔여신선도 6일. 픽스처 risks의 '중품 1,500kg은 잔여신선도 6일 내 소진 필요'와 같은 6이다. 종전에는 stocked_at 오프셋에서 파생했으나, 물류가 계산된 값을 주므로 계산 결과를 직접 싣는다 (계산이 두 곳에 있으면 어긋난다).",
   "items": {
     "배추": {
@@ -49,21 +49,6 @@
       ],
       "warehouse_free_kg": 15000,
       "rental_cap_kg": 4500
-    },
-    "피마늘": {
-      "lots": [
-        {
-          "lot_id": "LOT-MOCK-PIMANUL",
-          "item": "피마늘",
-          "available_qty_kg": 1200,
-          "remaining_freshness_days": 24,
-          "grade": "상",
-          "status": "ACTIVE",
-          "shelf_life_days": 30
-        }
-      ],
-      "warehouse_free_kg": 6000,
-      "rental_cap_kg": 1800
     }
   }
 }

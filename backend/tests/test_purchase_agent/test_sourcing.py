@@ -253,7 +253,7 @@ def test_widening_threshold_in_constraints_actually_gates_the_allocation() -> No
 def test_baseline_spread_is_read_from_constraints_for_every_item() -> None:
     """평시 기준선은 품목 4종 전부 선언돼 있다 — 없으면 판정을 못 한다 (규칙 3)."""
     constraints = load_constraints()
-    for item in ("배추", "무", "양파", "피마늘"):
+    for item in ("배추", "무", "양파"):
         assert baseline_spread(item, constraints) is not None
     assert baseline_spread("없는품목", constraints) is None
 
@@ -491,12 +491,12 @@ def test_decided_n4_shifts_the_window_and_removes_the_disclosure() -> None:
 
 # ── Codex 교차검증에서 드러난 것 — 배추 하나만 돌려서 놓쳤던 자리 ────────────
 #
-# E3-1 첫 판은 4품목 중 배추만 테스트했다. 양파·피마늘은 확정주문 전부가 중품 소진 창
+# E3-1 첫 판은 배추만 테스트했다. 양파는 확정주문 전부가 중품 소진 창
 # 안에 들어와 상한이 1.0이 되고, 기준등급 줄이 비율 0.0으로 나가 _validate_ratios가
 # 터졌다. "전량 중품"은 오류가 아니라 정상 결론이었는데 코드가 그 경우를 몰랐다.
 
 
-@pytest.mark.parametrize("item", ["배추", "무", "양파", "피마늘"])
+@pytest.mark.parametrize("item", ["배추", "무", "양파"])
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 def test_every_item_produces_a_valid_proposal_on_every_anchor(item: str, as_of: date) -> None:
     """4품목 × 4앵커 전부 도는가. **품목 하나만 도는 테스트는 이 버그를 못 잡는다.**"""

@@ -27,7 +27,7 @@ from app.purchase_agent import ports
 from app.purchase_agent.adapter import build_state, purchase_port
 
 AS_OF = date(2026, 9, 11)  # stable 앵커 — 3안이 다 서는 날이라 risks 를 안별로 볼 수 있다
-ITEM = "피마늘"
+ITEM = "양파"
 
 #: 부서가 내는 표준형. **dataclass 그대로** 둔다 — 전선용 dict 는 마스터가 만든다.
 _ADJUSTMENT_OBJECT = SuggestedAdjustment(

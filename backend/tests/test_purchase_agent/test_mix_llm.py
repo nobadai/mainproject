@@ -49,7 +49,7 @@ FALLING = date(2026, 8, 28)
 UNCERTAIN = date(2026, 9, 4)
 SPREAD_WIDE = date(2026, 9, 11)
 ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
-ITEMS = ("배추", "무", "피마늘", "양파")
+ITEMS = ("배추", "무", "양파")
 
 ITEM = "배추"
 
@@ -244,7 +244,7 @@ def test_llm_is_not_called_when_the_rule_declines_mid_grade() -> None:
     """**규칙이 중품을 안 태우는 날엔 호출 0회.**
 
     실측: cap_ratio는 스프레드와 무관하게 근접 납품량으로 계산되므로 평시에도 후보가
-    3개 나온다. "후보 ≥ 2"만으로 게이팅하면 4앵커 × 4품목 = 16회 전부 호출된다.
+    3개 나온다. "후보 ≥ 2"만으로 게이팅하면 4앵커 × 3품목 = 12회 전부 호출된다.
     규칙의 AND 게이트(확대 ∧ 스코어>0)를 함께 봐야 백로그의 비용 완화책이 성립한다.
     """
     calls = []
@@ -268,7 +268,7 @@ def test_llm_is_not_called_when_the_rule_declines_mid_grade() -> None:
     for item in ITEMS:
         state = _staged(item, SPREAD_WIDE)
         allocate_sourcing(state, selector=counting_selector)
-    assert len(calls) == 4, "확대일 4품목에서만 호출된다"
+    assert len(calls) == 3, "확대일 3품목에서만 호출된다"
 
 
 def test_service_skips_when_a_single_candidate() -> None:

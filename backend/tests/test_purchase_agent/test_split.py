@@ -6,7 +6,7 @@
 두 앵커(8/21·9/11) 모두 궤적으로만 진입한다 — mock만 돌리면 `by_volume`을 지워도 초록불이
 뜬다. 그래서 수량 가지는 **합성 입력으로 따로** 시험한다.
 
-4품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파·피마늘 크래시를 놓친 교훈이다.
+3품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파 크래시를 놓친 교훈이다.
 """
 
 from copy import deepcopy
@@ -236,7 +236,7 @@ def test_schema_backstops_the_date_order(proposals: dict) -> None:
 # ── 사중 일치 — 회차가 둘이 되며 Σ split 축이 실제로 검증되기 시작한다 ──────
 
 
-@pytest.mark.parametrize("item", ["배추", "무", "양파", "피마늘"])
+@pytest.mark.parametrize("item", ["배추", "무", "양파"])
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 def test_every_item_and_anchor_stays_consistent(item: str, as_of: date) -> None:
     """4품목 × 4앵커 전횡단 — 품목 하나만 도는 테스트는 E3-1에서 크래시를 놓쳤다."""

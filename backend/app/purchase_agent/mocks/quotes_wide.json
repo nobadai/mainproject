@@ -19,11 +19,6 @@
       {"market": "가락", "grade": "특", "price": 1460},
       {"market": "가락", "grade": "상", "price": 1300},
       {"market": "가락", "grade": "중", "price": 1025}
-    ],
-    "피마늘": [
-      {"market": "가락", "grade": "특", "price": 5800},
-      {"market": "가락", "grade": "상", "price": 5200},
-      {"market": "가락", "grade": "중", "price": 4100}
     ]
   }
 }

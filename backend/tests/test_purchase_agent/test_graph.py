@@ -292,7 +292,7 @@ def test_deferred_n4_check_is_disclosed_in_risks(as_of: date, proposals: dict) -
 
 
 def test_item_without_shelf_life_defers_the_freshness_check() -> None:
-    """무·양파·피마늘은 품목 보관한계가 미확정이라 신선도 상한을 **계산하지 않는다**.
+    """무·양파는 품목 보관한계가 미확정이라 신선도 상한을 **계산하지 않는다**.
 
     0으로 채우면 매입량이 눌리고 큰 수로 채우면 검사가 있었던 것처럼 보인다 — 둘 다 거짓이다.
     """
