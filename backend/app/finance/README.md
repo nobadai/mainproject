@@ -377,21 +377,39 @@ with shared_connection as conn:
 `target_state_date` 를 **인자로 받는다.** 재무가 보는 것은 정합성 한 가지뿐이다 —
 승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의 사실을 말할 수 없다.
 
-### 상태 선택은 as_of 가 한다
-
-`v_current_finance_state` 는 `finance_state_id = 'FIN-DAY30-LOAN'` 을 박아 두고 있어
-상태 **한 행을 고정한다**. 그 View 정의는 공유 스키마가 소유해서 재무가 못 고치므로,
-재무는 View 에서 **축(`sim_run_id` · `financing_mode`)만** 읽고 상태 선택은 직접 한다.
+### 두 층을 나눈다 — DB "지금" 과 요청 "그때"
 
 ```text
-같은 sim_run · 같은 financing_mode 안에서 state_date <= as_of 중 가장 늦은 행
+v_current_finance_state   축 위에서 가장 늦은 상태          "지금"
+as-of 질의                state_date <= as_of 중 가장 늦은 행  "그때"
+신선도 게이트             고른 행의 state_date == as_of 여야 한다
 ```
 
-🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 날짜에 `BASE_NO_LOAN` 과
-`LOAN_BASELINE` 두 행이 실제로 있어서, 날짜만으로 고르면 무차입 상태가 대출
-baseline 자리에 조용히 들어온다.
+PostgreSQL VIEW 는 인자를 받지 않는다. `v_current_finance_state(as_of)` 같은 것은
+없고, 요청 `as_of` 는 View 가 아니라 **질의**가 건다.
 
-★ 최신 행이 같은 날짜로 둘이면 고르지 않고 `finance_state_ambiguous` 로 세운다.
+**공유 기본 스키마가 만드는 View 는 `finance_state_id = 'FIN-DAY30-LOAN'` 을 박아
+둔다.** 그래서 승인 전이가 다음 상태를 넣어도 DB 는 계속 T0 만 돌려줬다.
+`database/finance/finance_current_state_view.sql` 이 그 고정을 걷어낸다 — 기본 스키마
+파일은 건드리지 않고, 그 뒤에 `CREATE OR REPLACE VIEW` 로 덮는다.
+
+```text
+FROM finance_states fs
+JOIN sim_runs sr ON sr.sim_run_id = fs.sim_run_id
+               AND sr.financing_mode = fs.financing_mode
+WHERE fs.state_date = (그 축의 max(state_date))
+```
+
+★ **축은 `sim_runs` 가 준다.** 리터럴을 다른 리터럴로 바꾸지 않는다. 같은 날짜에
+`BASE_NO_LOAN` 과 `LOAN_BASELINE` 두 행이 실제로 있는데, 어느 쪽이 이 실행의
+상태인지는 `sim_runs.financing_mode` 가 정한다.
+
+🔴 **`sim_runs.as_of` 로 고르지 않는다.** 시드된 뒤 아무도 전진시키지 않아서
+   (`status = SEEDED`), 그것으로 고르면 상태 ID 대신 날짜가 박힐 뿐이다.
+
+🔴 **동률을 View 가 줄이지 않는다.** 한 축에서 같은 날짜에 상태가 둘이면 View 는 두
+   행을 그대로 보여 주고, 고르기를 거부하는 판단은 런타임이 한다
+   (`finance_state_ambiguous`). View 가 대신 고르면 못 믿을 상태가 정상 응답이 된다.
 
 ### 승인은 현금을 줄이지 않는다
 

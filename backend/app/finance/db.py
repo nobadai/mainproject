@@ -715,24 +715,31 @@ class FinanceRuntimeAxis(TypedDict):
 def get_finance_runtime_axis() -> FinanceRuntimeAxis:
     """이 런타임이 서 있는 재무 축 — 시뮬레이션 실행과 조달 방식.
 
-    ★ `v_current_finance_state` 를 **축을 읽는 데만** 쓴다. View 는
-      `finance_state_id = 'FIN-DAY30-LOAN'` 을 박아 두고 있어서 상태 한 건을
-      고정하지만, 그 행이 말해 주는 `sim_run_id` · `financing_mode` 는 고정이 아니라
-      **이 실행의 경계**다. 답이 아니라 축만 가져온다.
+    ★ `v_current_finance_state` 에서 축을 읽는다. 그 View 는 이제 상태 ID 에 매여
+      있지 않다 — `database/finance/finance_current_state_view.sql` 이 공유 기본
+      스키마의 `finance_state_id = 'FIN-DAY30-LOAN'` 고정을 걷어내고, `sim_runs` 가
+      정한 축에서 **가장 늦은 상태**를 돌려주도록 바꾼다.
 
     🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 sim_run · 같은 날짜에
        `BASE_NO_LOAN` 과 `LOAN_BASELINE` 두 행이 실제로 있다 — 날짜만으로 고르면
        **무차입 상태가 대출 baseline 자리에 조용히 들어온다.**
 
-    ★ View 정의는 공유 스키마(`10_domain_schema.sql`)에 있어 여기서 못 고친다.
-      축만 읽고 상태 선택은 아래 as-of 질의가 한다.
+    🔴 **축이 여러 개면 고르지 않는다.** 고정이 풀린 View 는 실행이 여럿이면 실행마다
+       한 행씩 돌려준다. 거기서 아무거나 집으면 **남의 run 상태 위에서 판단**하게
+       되고, 그 사고는 에러 없이 숫자만 바꾼다.
+
+    ★ 현재 시점 조회는 여기까지다. 과거 시점 선택은 아래 as-of 질의가 한다 —
+      View 는 "지금", 질의는 "그때" 를 맡는다.
     """
-    query = sql.SQL("SELECT sim_run_id, financing_mode FROM {}.v_current_finance_state").format(
-        sql.Identifier(get_db_schema())
-    )
-    row = fetch_one(query)
-    if row is None:
+    query = sql.SQL(
+        "SELECT DISTINCT sim_run_id, financing_mode FROM {}.v_current_finance_state"
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(query)
+    if not rows:
         raise LookupError("Current Finance State was not found")
+    if len(rows) > 1:
+        raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
+    row = rows[0]
     return FinanceRuntimeAxis(
         sim_run_id=str(row["sim_run_id"]), financing_mode=str(row["financing_mode"])
     )
