@@ -667,6 +667,10 @@ class _BranchOutcome:
     #:   요청 내용이 틀린 것과 우리 쪽 실행이 어긋난 것은 사용자가 할 일이 다르다.
     failure_kind: Literal["", "INVALID_REQUEST", "NOT_READY", "INTERNAL"] = ""
     planner_failed: bool = False
+    #: 이번 실행에서 **실제로 Tool 을 고른** 구성요소. `llm_model` 은 LLM Provider 가
+    #: 고른 모델을 뜻하므로 결정론 Planner 이름을 그 자리에 넣지 않는다 — 둘은 다른
+    #: 사실이고, 섞으면 "어느 LLM 이 붙어 있었나" 를 되짚을 수 없다.
+    effective_planner: str = ""
     #: 이번 실행의 Harness. 실패한 실행에서도 **예산과 반려 사유가 남아야** 한다.
     harness: FinanceHarness | None = None
 
@@ -784,7 +788,7 @@ class FinanceAgentController:
             max_tool_calls=self.max_tool_calls,
             max_replans=self.max_replans,
         )
-        outcome = _BranchOutcome(harness=harness)
+        outcome = _BranchOutcome(harness=harness, effective_planner=self.planner.model)
         shared_context = None
         active_planner = self.planner
         deterministic_planner = DeterministicFinancePlanner()
@@ -846,6 +850,9 @@ class FinanceAgentController:
         except Exception as exc:  # noqa: BLE001 - Agent boundary converts failures to ERROR.
             outcome.runtime_status, outcome.error_reason = "ERROR", str(exc)
             outcome.failure_kind = "INTERNAL"
+        # ★ **실행이 끝난 뒤에** 읽는다. Provider 대체 Planner 의 `model` 은 실제로
+        #   답한 쪽을 가리키는데, 루프 전에 읽으면 아직 갈리기 전 값이 박힌다.
+        outcome.effective_planner = active_planner.model
         return outcome
 
     def _explain(
@@ -998,6 +1005,8 @@ class FinanceAgentController:
             "replans": sum(state.replans for state in outcome.states),
             "max_tool_calls": harness.max_tool_calls,
             "max_replans": harness.max_replans,
+            # ★ 어느 구성요소가 Tool 을 골랐는가. `llm_model` 과 별개다.
+            "effective_planner": outcome.effective_planner,
             "executed_tools": list(used_tools),
             "rules_applied": list(rules),
             "runtime_status": outcome.runtime_status,

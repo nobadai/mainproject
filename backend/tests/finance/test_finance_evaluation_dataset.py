@@ -126,7 +126,7 @@ def test_평가_데이터셋이_필수_라벨을_모두_가진다():
 
 
 def test_정상과_Cap_초과는_결정론_Adapter_결과를_라벨로_쓴다(monkeypatch, evaluation_request):
-    monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
     healthy, metadata = adapter.finance_port(evaluation_request)
     assert healthy.runtime_status == "READY"
     assert healthy.business_status == "ok"
@@ -202,7 +202,7 @@ def _call(
         cash_events=tuple(cash_events),
         unresolved_sources=(),
     )
-    monkeypatch.setattr(adapter, "_load_context", lambda: context)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: context)
     return adapter.finance_port(request)
 
 

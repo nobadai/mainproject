@@ -27,7 +27,7 @@ from app.finance.execution import _branch_ref, _evidence, _tool_ref
 from app.finance.rules import classify_base_stress
 from app.finance.schemas import CashEvent
 from app.finance.state import FinanceAgentState, ScenarioPayment
-from app.finance.tools import project_cashflow
+from app.finance.tools import effective_cash_date, project_cashflow
 
 # ---------------------------------------------------------------------------
 # 지급 일정 재구성 · 정규화 · BASE/STRESS 현금 사건
@@ -77,8 +77,9 @@ def _reconstructed_payment(
         raise FinanceDataNotReady("scenario_split_plan_date")
     purchase_date = date.fromisoformat(str(raw_date))
 
+    # N5 는 **계약 지급일까지의 달력일수**다. 주말 보정은 현금 사건에서만 한다.
     payment_date = purchase_date + timedelta(days=default_payment_days)
-    if not as_of < payment_date <= horizon:
+    if not as_of <= effective_cash_date(payment_date) <= horizon:
         raise FinanceDataNotReady("default_purchase_payment_date")
 
     qty = _positive_decimal(scenario.get("total_qty_kg"), "scenario_total_qty_kg")
@@ -155,7 +156,9 @@ def _scenario_schedule(
         max_amount = Decimal(str(row["amount_max_krw"]))
         qty = Decimal(str(row["qty_kg"]))
         basis = str(row["basis"]).strip()
-        if not isinstance(payment_date, date) or not as_of < payment_date <= horizon:
+        if not isinstance(payment_date, date) or not (
+            as_of <= effective_cash_date(payment_date) <= horizon
+        ):
             raise ValueError("payment_date must be inside the Finance projection horizon")
         if int(row["seq"]) != index or int(split["seq"]) != index:
             raise ValueError("payment_schedule and split_plan seq must align")
@@ -190,9 +193,12 @@ def _scenario_schedule(
 def _schedule_events(
     scenario_id: object, schedule: tuple[ScenarioPayment, ...], *, stress: bool
 ) -> tuple[CashEvent, ...]:
+    # ★ 현금 사건은 **현금이 나가는 날**에 얹는다. 계약 지급일(`payment.payment_date`)은
+    #   그대로 두고 주말만 다음 월요일로 민다 — `ref_id` 도 계약일을 유지해서
+    #   일정 행과 사건이 같은 이름으로 이어진다.
     return tuple(
         CashEvent(
-            event_date=payment.payment_date,
+            event_date=effective_cash_date(payment.payment_date),
             event_type="EXTRA_PURCHASE",
             amount_krw=payment.amount_max_krw if stress else payment.amount_krw,
             direction="OUTFLOW",
@@ -217,15 +223,18 @@ def _calculate_schedule_cap(
         point.projection_date: point.cash_balance_krw
         for point in base_projection.projected_cash_by_date
     }
-    dates = sorted({*balances, *(item.payment_date for item in schedule)})
+    # 상한도 **현금이 나가는 날** 기준이다 — 사건과 다른 날짜를 쓰면 같은 일정이
+    # 투영과 상한에서 서로 다른 날에 놓인다.
+    schedule_by_date: dict[date, Decimal] = {}
+    for payment in schedule:
+        cash_date = effective_cash_date(payment.payment_date)
+        schedule_by_date[cash_date] = (
+            schedule_by_date.get(cash_date, Decimal(0)) + payment.amount_krw
+        )
+    dates = sorted({*balances, *schedule_by_date})
     current_balance = balances[base_projection.as_of]
     paid = Decimal(0)
     bounds: list[Decimal] = []
-    schedule_by_date: dict[date, Decimal] = {}
-    for payment in schedule:
-        schedule_by_date[payment.payment_date] = (
-            schedule_by_date.get(payment.payment_date, Decimal(0)) + payment.amount_krw
-        )
     for current_date in dates:
         if current_date in balances:
             current_balance = balances[current_date]

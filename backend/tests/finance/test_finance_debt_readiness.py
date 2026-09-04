@@ -192,9 +192,11 @@ def test_negative_debt_cannot_bypass_through_the_as_of_data_port():
       스키마 제약만 믿으면 여기로 음수가 빠져나간다. 그래서 원천 행에서 막아야 한다.
     """
     port = PostgresFinanceAsOfDataPort()
+    # as-of 경로는 축(`fetch_one`)을 읽고 상태 행(`fetch_all`)을 고른다.
     with (
         patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
         patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=[_raw_state_row(Decimal(-1))]),
         pytest.raises(FinanceDataNotReady) as raised,
     ):
         port.load_finance_position(date(2025, 12, 31))
@@ -204,6 +206,7 @@ def test_negative_debt_cannot_bypass_through_the_as_of_data_port():
     with (
         patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
         patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=[_raw_state_row(Decimal(-1))]),
         pytest.raises(FinanceDataNotReady),
     ):
         port.load_debt_schedule(date(2025, 12, 31), date(2026, 1, 30))

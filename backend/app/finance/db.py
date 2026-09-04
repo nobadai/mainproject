@@ -37,7 +37,7 @@ from app.finance.schemas import (
     FinanceRuntimeContext,
     FinanceSnapshot,
 )
-from app.finance.tools import build_debt_service_schedule
+from app.finance.tools import build_debt_service_schedule, effective_cash_date
 
 # ---------------------------------------------------------------------------
 # PostgreSQL 연결과 조회 헬퍼 (재무 밖 도메인도 쓴다)
@@ -194,38 +194,30 @@ def get_current_finance_state() -> FinanceState:
     return cast(FinanceState, _get_current_finance_state_row())
 
 
-def get_current_finance_snapshot() -> FinanceSnapshot:
-    """현재 View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
-    return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row())
+def get_current_finance_snapshot(as_of: date | None = None) -> FinanceSnapshot:
+    """``as_of`` 시점의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row(as_of))
 
 
-def get_current_finance_runtime_context() -> FinanceRuntimeContext:
-    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다."""
-    snapshot = get_current_finance_snapshot()
+def get_current_finance_runtime_context(as_of: date | None = None) -> FinanceRuntimeContext:
+    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다.
+
+    ★ ``as_of`` 는 **어느 상태 행을 고를지**만 정한다. 고른 뒤의 투영 기준일은
+      그대로 그 행의 ``state_date`` 다 — 상태가 적힌 날의 잔액을 다른 날 잔액으로
+      옮겨 쓰지 않는다. 어긋나면 위(`adapter._controller_boundary`)에서 닫는다.
+    """
+    snapshot = get_current_finance_snapshot(as_of)
     policy = get_active_finance_policy()
     horizon_end = snapshot.state_date + timedelta(days=policy.cashflow_projection_days)
     events: list[CashEvent] = []
     unresolved: list[str] = []
 
-    payable_rows = _fetch_scheduled_rows(
-        table="payables",
-        columns=("payable_id", "due_date", "outstanding_amount_krw"),
+    payable_rows, payable_events = _fetch_open_payable_events(
         sim_run_id=snapshot.sim_run_id,
         as_of=snapshot.state_date,
         horizon_end=horizon_end,
-        status_column="status",
-        active_status="OPEN",
     )
-    events.extend(
-        _rows_to_events(
-            payable_rows,
-            id_column="payable_id",
-            date_column="due_date",
-            amount_column="outstanding_amount_krw",
-            event_type="PURCHASE_PAYABLE",
-            direction="OUTFLOW",
-        )
-    )
+    events.extend(payable_events)
     if snapshot.unsettled_purchase_payables_krw != 0 and not payable_rows:
         unresolved.append("PURCHASE_PAYABLE")
 
@@ -493,6 +485,46 @@ def _build_finance_debt_policy(rows: list[dict[str, object]]) -> FinanceDebtPoli
     )
 
 
+def _fetch_open_payable_events(
+    *, sim_run_id: str, as_of: date, horizon_end: date
+) -> tuple[list[dict[str, object]], list[CashEvent]]:
+    """미결제 매입채무를 **현금이 나가는 날**에 얹는다.
+
+    🔴 **하한을 `due_date > as_of` 로 두면 안 된다.** 계약 만기가 토·일인 채무는
+       실제 현금이 다음 월요일에 나가는데, 월요일에 실행하면 `due_date < as_of` 가
+       되어 그 의무가 미래 현금흐름에서 **통째로 사라졌다.** 원장에 이미 주말 만기
+       4건이 있다. 연체된 미결제 채무도 같은 이유로 버리지 않는다.
+
+    ★ 대신 상태를 믿는다 — `OPEN` 이면 아직 안 나간 돈이다. 지나간 만기를 임의로
+      `PAID` 로 바꾸지 않고, 현금 사건만 `as_of` 이후로 당겨 세운다.
+
+    ★ 채권·비용에는 손대지 않는다. 이 하한 완화는 **매입채무의 사실**이다.
+    """
+    query = sql.SQL(
+        """
+        SELECT payable_id, due_date, outstanding_amount_krw
+        FROM {}.payables
+        WHERE sim_run_id = %s
+          AND due_date <= %s
+          AND status = 'OPEN'
+        ORDER BY due_date, payable_id
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(query, [sim_run_id, horizon_end])
+    events: list[CashEvent] = []
+    for event in _rows_to_events(
+        rows,
+        id_column="payable_id",
+        date_column="due_date",
+        amount_column="outstanding_amount_krw",
+        event_type="PURCHASE_PAYABLE",
+        direction="OUTFLOW",
+    ):
+        cash_date = max(effective_cash_date(event.event_date), as_of)
+        events.append(event.model_copy(update={"event_date": cash_date}))
+    return rows, events
+
+
 def _fetch_scheduled_rows(
     *,
     table: str,
@@ -657,25 +689,116 @@ def load_partner_receivables(
     return receivables
 
 
-def _get_current_finance_state_row() -> dict[str, object]:
+_FINANCE_STATE_COLUMNS = (
+    "finance_state_id",
+    "sim_run_id",
+    "state_date",
+    "state_type",
+    "financing_mode",
+    "current_cash_krw",
+    "minimum_operating_cash_krw",
+    "committed_outflows_krw",
+    "unsettled_purchase_payables_krw",
+    "receivables_krw",
+    "current_debt_krw",
+    "financial_limit_krw",
+)
+
+
+class FinanceRuntimeAxis(TypedDict):
+    """상태 한 건이 아니라 **어느 축 위에서 고르는가**."""
+
+    sim_run_id: str
+    financing_mode: str
+
+
+def get_finance_runtime_axis() -> FinanceRuntimeAxis:
+    """이 런타임이 서 있는 재무 축 — 시뮬레이션 실행과 조달 방식.
+
+    ★ `v_current_finance_state` 에서 축을 읽는다. 그 View 는 이제 상태 ID 에 매여
+      있지 않다 — `database/finance/finance_current_state_view.sql` 이 공유 기본
+      스키마의 `finance_state_id = 'FIN-DAY30-LOAN'` 고정을 걷어내고, `sim_runs` 가
+      정한 축에서 **가장 늦은 상태**를 돌려주도록 바꾼다.
+
+    🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 sim_run · 같은 날짜에
+       `BASE_NO_LOAN` 과 `LOAN_BASELINE` 두 행이 실제로 있다 — 날짜만으로 고르면
+       **무차입 상태가 대출 baseline 자리에 조용히 들어온다.**
+
+    🔴 **축이 여러 개면 고르지 않는다.** 고정이 풀린 View 는 실행이 여럿이면 실행마다
+       한 행씩 돌려준다. 거기서 아무거나 집으면 **남의 run 상태 위에서 판단**하게
+       되고, 그 사고는 에러 없이 숫자만 바꾼다.
+
+    ★ 현재 시점 조회는 여기까지다. 과거 시점 선택은 아래 as-of 질의가 한다 —
+      View 는 "지금", 질의는 "그때" 를 맡는다.
+    """
+    query = sql.SQL(
+        "SELECT DISTINCT sim_run_id, financing_mode FROM {}.v_current_finance_state"
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(query)
+    if not rows:
+        raise LookupError("Current Finance State was not found")
+    if len(rows) > 1:
+        raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
+    row = rows[0]
+    return FinanceRuntimeAxis(
+        sim_run_id=str(row["sim_run_id"]), financing_mode=str(row["financing_mode"])
+    )
+
+
+def load_finance_state_row(as_of: date) -> dict[str, object]:
+    """``as_of`` 시점에 유효한 재무 상태 한 건. **미래를 읽지 않는다.**
+
+    ```text
+    같은 sim_run · 같은 financing_mode 안에서
+    state_date <= as_of 중 가장 늦은 행
+    ```
+
+    🔴 최신 행 두 건이 **같은 날짜**면 고르지 않고 세운다. 승인 전이가 같은 날에
+       상태를 하나 더 만들면 "가장 늦은 행" 이 둘이 되는데, 그중 하나를 말없이
+       집으면 어느 쪽이 답인지 아무도 모른 채 숫자가 달라진다.
+    """
+    axis = get_finance_runtime_axis()
     query = sql.SQL(
         """
-        SELECT
-            finance_state_id,
-            sim_run_id,
-            state_date,
-            state_type,
-            financing_mode,
-            current_cash_krw,
-            minimum_operating_cash_krw,
-            committed_outflows_krw,
-            unsettled_purchase_payables_krw,
-            receivables_krw,
-            current_debt_krw,
-            financial_limit_krw
+        SELECT {}
+        FROM {}.finance_states
+        WHERE sim_run_id = %s
+          AND financing_mode = %s
+          AND state_date <= %s
+        ORDER BY state_date DESC
+        LIMIT 2
+        """
+    ).format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS),
+        sql.Identifier(get_db_schema()),
+    )
+    rows = fetch_all(query, [axis["sim_run_id"], axis["financing_mode"], as_of])
+    if not rows:
+        raise FinanceDataNotReady("historical_finance_position")
+    if len(rows) == 2 and rows[0]["state_date"] == rows[1]["state_date"]:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    row = rows[0]
+    _reject_negative_debt(row)
+    return row
+
+
+def _get_current_finance_state_row(as_of: date | None = None) -> dict[str, object]:
+    """``as_of`` 를 주면 그 시점의 행, 주지 않으면 View 가 고정한 현재 행.
+
+    ★ `as_of` 없는 경로는 "지금 상태" 를 묻는 조회(레거시 · STATUS 화면)다.
+      판단 경로는 모두 `as_of` 를 넘긴다.
+    """
+    if as_of is not None:
+        return load_finance_state_row(as_of)
+    query = sql.SQL(
+        """
+        SELECT {}
         FROM {}.v_current_finance_state
         """
-    ).format(sql.Identifier(get_db_schema()))
+    ).format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS),
+        sql.Identifier(get_db_schema()),
+    )
     row = fetch_one(query)
     if row is None:
         raise LookupError("Current Finance State was not found")
@@ -714,9 +837,10 @@ def _reject_negative_debt(row: Mapping[str, object]) -> None:
 class PostgresFinanceAsOfDataPort:
     """명시적인 재현성 보호 장치를 둔 현재 Schema용 Adapter.
 
-    현재 DB에는 완전한 이중 시간 상태 저장소가 아니라 현재 상태 View만 있다.
-    따라서 View의 state_date가 as_of와 정확히 일치할 때만 안전하다. 이전 요청은
-    오늘 상태를 읽지 않고 준비되지 않은 것으로 보고한다.
+    상태 선택은 `load_finance_state_row` 가 ``as_of`` 로 한다 — 고정된 한 행이
+    아니라 그 시점에 유효한 행이다. 그 위에 **잔액을 옮겨 쓰지 않는** 보호를 한 겹
+    더 둔다: 고른 행의 날짜가 ``as_of`` 와 다르면 그날 잔액을 모르는 것이므로
+    준비되지 않은 것으로 보고한다.
     """
 
     def __init__(self) -> None:
@@ -726,7 +850,7 @@ class PostgresFinanceAsOfDataPort:
     def load_finance_position(self, as_of: date) -> dict[str, object]:
         if self._position_cache is not None and self._position_cache[0] == as_of:
             return self._position_cache[1]
-        row = _get_current_finance_state_row()
+        row = _get_current_finance_state_row(as_of)
         if row.get("state_date") != as_of:
             raise FinanceDataNotReady("historical_finance_position")
         self._position_cache = (as_of, row)
@@ -761,14 +885,8 @@ class PostgresFinanceAsOfDataPort:
 
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
         position = self.load_finance_position(as_of)
-        payable_rows = _fetch_scheduled_rows(
-            table="payables",
-            columns=("payable_id", "due_date", "outstanding_amount_krw"),
-            sim_run_id=str(position["sim_run_id"]),
-            as_of=as_of,
-            horizon_end=horizon,
-            status_column="status",
-            active_status="OPEN",
+        _, payable_events = _fetch_open_payable_events(
+            sim_run_id=str(position["sim_run_id"]), as_of=as_of, horizon_end=horizon
         )
         expense_rows = _fetch_scheduled_rows(
             table="expenses",
@@ -780,14 +898,7 @@ class PostgresFinanceAsOfDataPort:
             excluded_status="PAID",
         )
         return [
-            *_rows_to_events(
-                payable_rows,
-                id_column="payable_id",
-                date_column="due_date",
-                amount_column="outstanding_amount_krw",
-                event_type="PURCHASE_PAYABLE",
-                direction="OUTFLOW",
-            ),
+            *payable_events,
             *_rows_to_events(
                 expense_rows,
                 id_column="expense_id",

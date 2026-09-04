@@ -255,7 +255,7 @@ def _controller_boundary(
 ) -> tuple[FinanceRuntimeContext | None, tuple[AgentReply, ExecutionMetadata] | None]:
     """Controller 위임 전에 Adapter 수준의 준비 상태 의미를 보존한다."""
     run_id = _run_id(request)
-    context = _load_context()
+    context = _load_context(request.context.as_of)
     if context is None:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
@@ -318,7 +318,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_POSITION]
 
-    context = _load_context()
+    context = _load_context(as_of)
     if context is None:
         return _not_ready(
             request,
@@ -546,9 +546,10 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
 # ---------------------------------------------------------------------------
 
 
-def _load_context() -> FinanceRuntimeContext | None:
+def _load_context(as_of: date) -> FinanceRuntimeContext | None:
+    """요청의 ``as_of`` 로 상태를 고른다. **고정된 한 행을 되돌려 주지 않는다.**"""
     try:
-        return get_current_finance_runtime_context()
+        return get_current_finance_runtime_context(as_of)
     except Exception:  # noqa: BLE001 — 없는 것은 예외가 아니라 상태다
         return None
 
