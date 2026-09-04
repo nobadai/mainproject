@@ -84,6 +84,20 @@ class ArrivalLeg:
       0.0 으로 채우지 않는다 — 없는 것과 0 원은 다르다 (§1.2-10).
     """
 
+    payment_due_date: date | None = None
+    """매입대금 지급예정일. **매입일 + N5(재무 `purchase_payment_days`)** 다.
+
+    ★ **`arrival_date` 와 완전히 같은 모양이다.** 물류가 봉투로 N4 를 주고 마스터가
+      도착일을 만들듯, 재무가 봉투로 N5 를 주고 마스터가 지급일을 만든다 —
+      **값은 부서가 공급하고 계산은 쓰는 쪽이 한다.** 마스터가 재무 DB 를 다시 읽으면
+      같은 사실의 주인이 둘이 된다.
+
+    🔴 **N5 가 없으면 `None` 이다 — 0 으로 대체하지 않는다.** N4 를 0 으로 못 쓰게 한
+       것과 같은 이유다. 0 이면 *"오늘 승인분이 오늘 지급"* 이 되어 지급일이라는
+       사실 자체가 사라진다. 없으면 없는 채로 두고, `purchases.payment_due_date` 가
+       NOT NULL 이므로 **원장 쓰기가 그때 멈춘다** (`master/transition.py`).
+    """
+
 
 @dataclass(frozen=True)
 class ApprovedCommitment:
@@ -143,9 +157,13 @@ def build_commitment(
     scenario: Mapping[str, Any],
     inbound_lead_days: Any,
     decision_seq: int,
+    purchase_payment_days: Any = None,
 ) -> ApprovedCommitment:
     """승인된 시나리오 하나를 약정으로 옮긴다.
 
+    :param purchase_payment_days: N5. **재무가 봉투로 준다** — 마스터는 옮기기만 한다.
+        `inbound_lead_days`(N4)와 완전히 같은 자리다. 없으면 `None` 이고, 그러면
+        회차의 `payment_due_date` 도 `None` 으로 남는다 — 0 으로 대체하지 않는다.
     :raises CommitmentNotBuildable: 옮길 수 없을 때. **빈 약정을 만들지 않는다.**
     """
     if not item:
@@ -159,7 +177,13 @@ def build_commitment(
         raise CommitmentNotBuildable("안에 총액이 없다.")
 
     lead = _number(inbound_lead_days)
-    legs, notes = _legs(scenario.get("split_plan"), item, as_of, lead)
+    legs, notes = _legs(
+        scenario.get("split_plan"),
+        item,
+        as_of,
+        lead,
+        _number(purchase_payment_days),
+    )
 
     return ApprovedCommitment(
         approval_id=f"H1-{request_id}-{decision_seq}",
@@ -180,11 +204,17 @@ def _legs(
     item: str,
     as_of: date,
     lead: float | None,
+    payment_days: float | None = None,
 ) -> tuple[tuple[ArrivalLeg, ...], tuple[str, ...]]:
     """회차별 입고. **N4 가 없으면 일정을 만들지 않는다.**
 
     🔴 `lead` 를 0 으로 대체하면 *"오늘 승인분이 오늘 도착"* 이 되어 재고 전환 금지가
       무의미해진다 (§1.2-10 · §3.2.3). 일정 없이 약정만 남기고, **왜 없는지를 적는다.**
+
+    ★ **N5(`payment_days`)는 다르다 — 없어도 일정은 선다.** 지급일이 없다고 입고가
+      없는 것은 아니다. `payment_due_date` 만 `None` 으로 두고, 그 상태로 원장을 쓸 수
+      없다는 판단은 전이 경계가 한다. 다만 **일수로 읽히지 않는 값**은 도착일과 같은
+      태도로 막는다 — 지어낸 지급일이 원장에 남는 것보다 멈추는 편이 낫다.
     """
     if not isinstance(split_plan, Sequence) or isinstance(split_plan, (str, bytes)):
         return (), ("안에 분할 계획이 없어 회차별 입고 일정을 만들지 못했다.",)
@@ -233,6 +263,18 @@ def _legs(
         #   값이면 자르지 않고 일정을 안 만든다. N4 를 마스터가 고쳐 주지 않는다.
         return (), (f"inbound_lead_days 가 일수로 읽히지 않아({lead:g}) 도착일을 계산하지 않았다.",)
 
+    # ★ N5 도 도착일과 같은 문을 지난다. 없으면(`None`) 통과하고 지급일만 안 싣는다 —
+    #   그 경우가 오늘의 정상 상태다. 있는데 일수로 안 읽히면 지어내지 않고 멈춘다.
+    pay_days: int | None = None
+    if payment_days is not None:
+        if payment_days < 0 or payment_days != int(payment_days):
+            note = (
+                f"purchase_payment_days 가 일수로 읽히지 않아({payment_days:g})"
+                " 지급일을 계산하지 않았다."
+            )
+            return (), (note,)
+        pay_days = int(payment_days)
+
     legs: list[ArrivalLeg] = []
     for index, raw in enumerate(split_plan, 1):
         if not isinstance(raw, Mapping):
@@ -269,6 +311,12 @@ def _legs(
                 purchase_date=purchase_date,
                 seq=int(raw.get("seq") or index),
                 amount_krw=_number(raw.get("amount_krw")) if carry_amounts else None,
+                # ★ **도착일 옆에서 같이 만든다.** 기준은 매입일이다 — 재무 전이가
+                #   `purchase_date + N5` 로 만기를 세우는 것과 같은 식이어야 원장의
+                #   `purchases.payment_due_date` 와 `payables.due_date` 가 갈리지 않는다.
+                payment_due_date=(
+                    purchase_date + timedelta(days=pay_days) if pay_days is not None else None
+                ),
             )
         )
     if not legs:

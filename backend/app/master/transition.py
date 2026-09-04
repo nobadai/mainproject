@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
+from app.master.ledger import build_purchase_rows, persist_purchases
 
 __all__ = [
     "PARTS",
@@ -278,6 +279,38 @@ def purchase_item_id_for(purchase_id: str, item_code: str) -> str:
     return f"PITEM-{purchase_id[len('PUR-') :]}-{item_code}"
 
 
+# ── 원장을 쓸 수 있는 상태인가 ──────────────────────────────────────────
+
+
+def _ledger_blocked(commitment: ApprovedCommitment) -> str:
+    """매입 원장을 쓸 수 없는 사유. 쓸 수 있으면 **빈 문자열**이다.
+
+    ★ **`FAILED` 가 아니라 `NOT_APPLIED` 로 가는 자리다.** 둘 다 아직 못 쓴 상태지만,
+      여기 걸리는 것은 *"바꾸려다 실패했다"* 가 아니라 *"쓸 값이 아직 없다"* 다.
+
+    🔴 **회차가 둘 이상이면 쓰지 않는다.** 매입이 회차별 금액을 아직 안 보내
+       어느 회차에 얼마가 걸리는지 말할 방법이 없다. 수량 비율로 쪼개면 회차마다
+       단가가 다른 분할 매입에서 **조용히 틀린 원장**이 생긴다.
+
+       ★ 재무 `_single_leg` 이 이미 같은 이유로 막고 있다. 같은 사실을 두 곳이 다르게
+         판정하지 않게 마스터가 **앞에서 같은 사유로** 멈춘다 — 뒤에서 재무가 막으면
+         같은 상태가 `FAILED` 로 나간다.
+
+    🔴 **지급일이 없으면 쓰지 않는다.** `purchases.payment_due_date` 는 NOT NULL 이고
+       그 값의 근거는 재무 N5 다. 없는 날짜를 지어내지 않는다.
+
+    ★ 회차가 **하나도 없는** 경우는 여기서 가르지 않는다 — 그건 원장 이전에 재무가
+      `commitment_arrival_schedule` 로 먼저 막는 상태이고, 그 사유를 여기서 다시
+      쓰면 같은 사실이 두 문장으로 나간다.
+    """
+    legs = commitment.arrival_schedule
+    if len(legs) > 1:
+        return "회차가 둘 이상이라 원장을 쓸 수 없다 — 회차별 금액이 아직 없다"
+    if legs and legs[0].payment_due_date is None:
+        return "재무 purchase_payment_days(N5) 가 없어 지급일을 만들 수 없다"
+    return ""
+
+
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
 
 
@@ -291,11 +324,18 @@ def apply_approval(
     순서가 이 함수의 전부다.
 
     ```text
-    1. 미등록 확인   → 커넥션을 열지 않는다
-    2. build 두 번   → 커넥션 밖에서 (실패해도 DB 를 안 건드린다)
-    3. persist 두 번 → 한 커넥션으로
-    4. commit 한 번  → 실패하면 rollback
+    1. 미등록 확인    → 커넥션을 열지 않는다
+    2. 회차·지급일 확인 → 쓸 수 없으면 NOT_APPLIED, 역시 커넥션을 열지 않는다
+    3. build 세 번    → 커넥션 밖에서 (실패해도 DB 를 안 건드린다)
+    4. persist 세 번  → 한 커넥션으로 · **매입 원장이 재무보다 먼저**
+    5. commit 한 번   → 실패하면 rollback
     ```
+
+    ★ **매입 원장이 재무보다 먼저인 이유는 FK 다.** `payables.purchase_id` 가
+      `purchases` 를 참조한다 — 부모 행이 없으면 재무 write 가 FK 에서 터진다.
+
+    🔴 **여기에 SQL 은 없다.** 무슨 값을 어느 칸에 쓸지는 `master/ledger.py` 가 알고,
+       이 함수는 **언제 부를지**만 정한다 (`test_전이_모듈에_SQL_이_없다`).
 
     🔴 **예외를 밖으로 던지지 않는다.** 이 함수가 불릴 때 결정은 **이미 적재됐다.**
        전이 실패가 예외로 올라가면 라우터가 500 을 내고, 사람이 보기에는 승인이
@@ -319,6 +359,12 @@ def apply_approval(
             missing=list(absent),
         )
 
+    blocked = _ledger_blocked(commitment)
+    if blocked:
+        # ★ **`FAILED` 가 아니다.** 쓸 수 없다는 것은 우리가 아는 사실이지 실패가
+        #   아니다. 그리고 여기서도 **커넥션을 열지 않는다.**
+        return TransitionOut(status="NOT_APPLIED", reason=blocked)
+
     finance = _TRANSITIONS["finance"]
     logistics = _TRANSITIONS["logistics"]
 
@@ -340,6 +386,9 @@ def apply_approval(
             leg.seq: purchase_id_for(commitment, leg.seq)
             for leg in commitment.arrival_schedule
         }
+        # ★ 매입 원장도 **커넥션 밖에서** 계산한다 — 재무·물류와 같은 규율이다.
+        #   `items` 조회만 커넥션이 필요하고 그것은 `persist_purchases` 안에 있다.
+        ledger_rows = build_purchase_rows(commitment, purchase_ids=purchase_ids)
         finance_row = finance.build(
             commitment,
             target_state_date=target_state_date,
@@ -352,6 +401,9 @@ def apply_approval(
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
     try:
+        # 🔴 **재무보다 먼저다.** `payables.purchase_id` 가 `purchases` 를 참조하는
+        #    FK 라 부모 행이 먼저 서야 한다.
+        persist_purchases(conn, ledger_rows)
         finance.persist(conn, finance_row)
         logistics.persist(conn, logistics_rows)
         conn.commit()
