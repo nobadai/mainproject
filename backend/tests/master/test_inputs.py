@@ -16,15 +16,19 @@ from app.master import inputs
 
 AS_OF = date(2025, 12, 31)
 
+#: ★ `as_of` 는 `AS_OF` 와 같아야 한다. 당일 배치만 쓴다.
+#: 🔴 전 판은 `2026-08-27` 이라 요청일보다 239일 미래였다.
+#: 🔴 그래서 look-ahead 행을 MEASURED 로 받는 검사였다.
+#: ⚠️ 이 값을 다시 벌리면 `test_forecast_must_be_todays_batch.py` 가 잡는다.
 FORECAST_ROW = {
-    "as_of": date(2026, 8, 27),
+    "as_of": AS_OF,
     "item": "배추",
     "target_kind": "AUC",
-    "generated_at": "2026-08-27T06:00:00+09:00",
+    "generated_at": "2025-12-31T06:00:00+09:00",
     "unit": "원/kg",
     "current_price": 645,
     "horizon_days": 18,
-    "daily": [{"date": "2026-08-28", "predicted": 645}],
+    "daily": [{"date": "2026-01-01", "predicted": 645}],
     "model_version": "ops_auc",
     "quality_note": "세 구간 모두 양수",
 }
