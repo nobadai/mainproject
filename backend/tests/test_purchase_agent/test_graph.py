@@ -9,6 +9,7 @@
 from datetime import date
 
 import pytest
+from _injection import INJECTED_THRESHOLD, forced_proposals, swap_threshold
 from pydantic import ValidationError
 
 from app.purchase_agent import ports
@@ -58,8 +59,23 @@ ITEM = "배추"
 
 @pytest.fixture(scope="module")
 def proposals() -> dict[date, dict]:
-    """앵커일별 제안. 그래프를 앵커당 한 번만 돌린다."""
+    """앵커일별 제안. 그래프를 앵커당 한 번만 돌린다.
+
+    **실제 분류 경로를 그대로 돈다** — 상황이 단언에 안 들어가는 검사(사중 일치·시세
+    실재·컷 없음 …)를 먹인다. 상황 자체가 단언인 검사는 아래 ``forced`` 를 쓴다.
+    """
     return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+
+
+@pytest.fixture(scope="module")
+def forced() -> dict[str, dict[date, dict]]:
+    """``{상황: {앵커: 제안}}`` — ③ 상황 주입 (현서님 §1.4-③).
+
+    상황이 **단언의 일부인** 검사는 여기서 받는다. 그러면 "그날 mock 밴드가 선언 임계를
+    넘느냐"에 안 매달린다 — 임계 0.08 과 0.15 에서 산출물이 **완전히 같음을 실측했다**
+    (2026-09-04).
+    """
+    return forced_proposals(run_purchase_agent, ITEM, ANCHORS)
 
 
 # ── E2-1: 그래프 골격 ───────────────────────────────────────────────────────
@@ -73,14 +89,19 @@ def test_graph_compiles_with_all_seven_nodes() -> None:
 
 
 def test_stable_days_skip_the_context_loop() -> None:
-    """§4-②: "stable한 날은 이 노드를 건너뛴다" — 문서를 읽을지 말지부터가 판단이다."""
-    stable = build_initial_state(ITEM, RISING)
-    stable.update(classify_situation(stable))
-    assert route_after_classify(stable) == "draft_plan"
+    """§4-②: "stable한 날은 이 노드를 건너뛴다" — 문서를 읽을지 말지부터가 판단이다.
 
-    uncertain = build_initial_state(ITEM, UNCERTAIN)
-    uncertain.update(classify_situation(uncertain))
-    assert route_after_classify(uncertain) == "collect_context"
+    🟢 **여기엔 주입이 필요 없다.** 분기는 ``situation`` 한 필드만 보는 **순수 함수**라
+      그 필드를 직접 주면 된다. 예전엔 앵커를 골라 ①을 돌려 상황을 *만들어* 왔는데,
+      그건 분기를 재면서 **mock 밴드와 선언 임계를 함께** 재는 것이었다 — 임계를 0.15 로
+      올리자 이 검사가 깨졌다. 분기 자체는 그때도 멀쩡했다.
+
+    미지값도 함께 본다. ``draft_plan`` 으로 떨어지는 것이 안전한 쪽이다 — 상황이 깨졌을 때
+    문서를 읽으러 가는 것보다 안 읽고 진행하는 편이 덜 위험하다.
+    """
+    assert route_after_classify({"situation": "uncertain"}) == "collect_context"
+    assert route_after_classify({"situation": "stable"}) == "draft_plan"
+    assert route_after_classify({"situation": "알수없음"}) == "draft_plan"
 
 
 # ── E2-2: ① 상황 분류 + 허용 축 ─────────────────────────────────────────────
@@ -95,8 +116,16 @@ SITUATION_BY_ANCHOR = (
 
 
 @pytest.mark.parametrize(("as_of", "situation", "axes"), SITUATION_BY_ANCHOR, ids=lambda v: str(v))
-def test_classify_matches_each_mock_scenario(as_of: date, situation: str, axes: list[str]) -> None:
-    """E2-2 DoD "mock 3종 정확 분류" + 그날 허용 축."""
+def test_classify_matches_each_mock_scenario(
+    as_of: date, situation: str, axes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E2-2 DoD "mock 3종 정확 분류" + 그날 허용 축.
+
+    임계는 **검사가 주입한다** (②). 이 검사가 재는 것은 *"그날 밴드가 선언 임계 어느
+    쪽이냐"* 가 아니라 **"주입한 임계 기준으로 상황과 축이 시나리오 이름대로 나오나"** 다.
+    선언값이 ``#127`` 로 움직이면 축 배분까지 같이 무너지던 자리다.
+    """
+    swap_threshold(monkeypatch, INJECTED_THRESHOLD)
     state = build_initial_state(ITEM, as_of)
     result = classify_situation(state)
     assert result["situation"] == situation
@@ -117,24 +146,29 @@ def test_mix_axis_is_gated_out_by_item_concentration(as_of: date) -> None:
 
 # ── E2-3: ③⑥ 수량과 패키징 ─────────────────────────────────────────────────
 
-SCENARIO_COUNT = (
-    (INTEGRATION, 3),
-    (RISING, 3),
-    (FALLING, 3),
-    (UNCERTAIN, 2),
-    (SPREAD_WIDE, 3),
-)
+#: 안 개수는 **상황의 파생값**이다 (§4.2.2 "하나의 신뢰도 판정이 개수·허용 축·분할 진입
+#: 셋을 동시에 결정한다"). 예전엔 앵커별 표였는데, 그러면 같은 규칙을 앵커 수만큼 적어
+#: 두고 **어느 앵커가 어느 상황인지**까지 이 표가 떠안는다 — 임계가 움직이는 순간 표가
+#: 통째로 거짓말이 된다. 상황을 키로 두면 앵커 다섯에 **전부** 걸린다(5→10건).
+SCENARIO_COUNT = (("stable", 3), ("uncertain", 2))
 
 
-@pytest.mark.parametrize(("as_of", "count"), SCENARIO_COUNT, ids=lambda v: str(v))
-def test_scenario_count_per_situation(as_of: date, count: int, proposals: dict) -> None:
+@pytest.mark.parametrize(("situation", "count"), SCENARIO_COUNT, ids=lambda v: str(v))
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_scenario_count_per_situation(
+    as_of: date, situation: str, count: int, forced: dict
+) -> None:
     """E2-3 DoD "stable→3안, uncertain→2안(공격 차단)"."""
-    assert len(proposals[as_of]["scenarios"]) == count
+    assert len(forced[situation][as_of]["scenarios"]) == count
 
 
-def test_uncertain_never_produces_an_aggressive_scenario(proposals: dict) -> None:
-    """구간이 넓은 날엔 공격안을 만들지 않는다 (규칙 4 · §4-③)."""
-    labels = [s["label"] for s in proposals[UNCERTAIN]["scenarios"]]
+def test_uncertain_never_produces_an_aggressive_scenario(forced: dict) -> None:
+    """구간이 넓은 날엔 공격안을 만들지 않는다 (규칙 4 · §4-③).
+
+    ③ 로 상황을 고정한다 — 이 검사의 주제는 *"9/4 가 uncertain 이다"* 가 아니라
+    **"uncertain 이면 공격안이 안 나온다"** 다.
+    """
+    labels = [s["label"] for s in forced["uncertain"][UNCERTAIN]["scenarios"]]
     assert "공격" not in labels
     assert labels == ["보수", "기본"]
 
@@ -338,23 +372,33 @@ def test_normal_run_cuts_nothing(as_of: date, proposals: dict) -> None:
     assert "no_proposal_reason" not in proposals[as_of]
 
 
-def test_situation_and_confidence_travel_together(proposals: dict) -> None:
-    assert proposals[RISING]["confidence"] == "high"
-    assert proposals[UNCERTAIN]["confidence"] == "medium"
+def test_situation_and_confidence_travel_together(forced: dict) -> None:
+    """신뢰도는 상황을 따라간다 — 둘이 갈리면 소비자가 어느 쪽을 믿을지 알 수 없다.
+
+    ③ 로 상황을 고정한다. 앵커가 아니라 **상황이** 신뢰도를 정한다는 것이 주제다.
+    """
+    assert forced["stable"][RISING]["confidence"] == "high"
+    assert forced["uncertain"][UNCERTAIN]["confidence"] == "medium"
 
 
-def test_context_docs_used_lists_only_documents_actually_loaded(proposals: dict) -> None:
+def test_context_docs_used_lists_only_documents_actually_loaded(forced: dict) -> None:
     """② 구현(E3-4) 후: uncertain에서만 문서가 실리고, stable한 날은 비어 있다.
 
     스텁 시절엔 "언제나 빈 목록"을 검사했다. 이제 **비어 있음이 노드를 안 돌았다는 뜻**이라,
     같은 필드가 두 상태를 구분한다 — 그게 이 필드의 존재 이유다.
+
+    ③ 로 상황을 고정하므로 **날짜가 아니라 상황이** 두 상태를 가른다.
+
+    🔴 ``["DOC-3","DOC-4","DOC-5"]`` 는 **9/4 의 성질이 아니다** — 8/5~9/4 아무 날이나
+      같다 (코퍼스 실측: 8/21·8/28·9/4 전부 같고, 9/11 은 DOC-6 이 하나 더 보인다).
+      여기서 잠그는 것은 **루프이지 날짜가 아니다.**
     """
-    assert proposals[UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
+    assert forced["uncertain"][UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
     # INTEGRATION(12-31)도 여기 든다. documents.json 은 절대 날짜(2026-08~09)라 그날
     # 가시 문서가 0건이지만, **stable 이라 ② 자체를 안 탄다** — 0건이어서 비는 것과
     # 안 돌아서 비는 것은 다르고, 여기서 검사하는 것은 뒤쪽이다.
     for as_of in (INTEGRATION, RISING, FALLING, SPREAD_WIDE):
-        assert proposals[as_of]["context_docs_used"] == []
+        assert forced["stable"][as_of]["context_docs_used"] == []
 
 
 def test_rejected_scenario_is_recorded_with_label_and_reason(proposals: dict) -> None:

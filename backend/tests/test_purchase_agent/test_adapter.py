@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
+from _injection import force_situation
 
 from app.master.envelope import (
     AgentRequest,
@@ -301,7 +302,9 @@ def test_concentration_detail_matches_the_gate_condition_at_the_boundary() -> No
     assert "등급 구성 제외" in mix_gate.evidence_detail
 
 
-def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation() -> None:
+def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """🔴 **timing은 ``situation``과 무관하게도 열린다** (Codex 교차검증 P1).
 
     ``by_volume OR by_trend``인데 ``by_volume``은 추정 총량만 본다. 그래서 uncertain인
@@ -309,8 +312,13 @@ def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
     이라는 **없는 인과**를 주장하게 된다.
 
     현서님 회신이 물은 *"축을 닫는 다른 게이트가 있습니까?"*의 답이 이것이다.
+
+    ③ 로 uncertain 을 고정한다. 아래 ``situation == "uncertain"`` 단언은 **발견이 아니라
+    전제**다 — 주입이 실제로 산출물까지 닿았는지 확인하는 자리로 남긴다. 이 검사가 재는
+    것은 그 전제 위에서 **timing 이 총량으로 열리는가** 다.
     """
     as_of = UNCERTAIN
+    force_situation(monkeypatch, "uncertain")
     payload = _payload("배추", as_of)
     payload["confirmed_orders"] = {**payload["confirmed_orders"], "total_kg": 300_000}
     payload["constraints"]["finance"] = {
@@ -325,7 +333,7 @@ def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
             payload=payload,
         )
     )
-    assert reply.payload["situation"] == "uncertain"
+    assert reply.payload["situation"] == "uncertain"  # 전제 — ③ 주입이 닿았는지
     assert "timing" in reply.payload["allowed_axes"], "총량으로 열린다"
 
     ci_gate = next(e for e in _axes_evidence(reply) if "CI" in e.ref_ids[0])
@@ -495,9 +503,18 @@ def test_used_tools_includes_document_loading_only_on_uncertain_days() -> None:
 
     ``collect_market_context``가 빠진 날이 *"불확실한 날에만 문서를 읽는다"*를 이력으로
     보여 주는 값이다. 그래프의 조건부 간선이 그 사실을 만든다.
+
+    ③ 로 상황을 고정한다 (현서님 §1.4). 예전에는 **날짜 둘**을 골라 비교했는데, 그러면
+    같은 검사가 *"9/4 는 uncertain 이고 9/11 은 stable 이다"* 까지 함께 재게 된다 —
+    임계가 움직이면 무너지고, 무너진 이유가 이력 기록인지 분류인지 구분되지 않는다.
+    **같은 날짜로** 상황만 갈라 비교하면 남는 변수가 하나다.
     """
-    uncertain = purchase_port(_request("배추", UNCERTAIN))[1]
-    stable = purchase_port(_request("배추", SPREAD_WIDE))[1]
+    with pytest.MonkeyPatch.context() as mp:
+        force_situation(mp, "uncertain")
+        uncertain = purchase_port(_request("배추", SPREAD_WIDE))[1]
+    with pytest.MonkeyPatch.context() as mp:
+        force_situation(mp, "stable")
+        stable = purchase_port(_request("배추", SPREAD_WIDE))[1]
     assert "collect_market_context" in uncertain.used_tools
     assert "collect_market_context" not in stable.used_tools
 
