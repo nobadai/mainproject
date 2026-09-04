@@ -66,6 +66,8 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `master_runs_migration.sql` | 마스터 | 2026-08-27 ALTER 판 |
 | `finance_agent_runs*.sql` | 재무 | |
 | `logistics_agent_runs.sql` | 물류 | |
+| `25_logistics_runtime_fixture_20260102.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행. 다른 파트는 읽기만 |
+| `27_logistics_runtime_fixture_20260105_20260106.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행 · 관통 실행일 쌍. 다른 파트는 읽기만 |
 | `sales_agent_runs.sql` | 판매 | |
 | `ml_calendar_days.sql` | **ML** | ML 이 만들고 ML 이 채운다. 조사일·경매일·공휴일 달력 + `v_ml_batch_days`. 다른 파트는 읽기만 |
 | `mvp_demo_remove_dried_pepper.sql` | 데모 | 스키마가 아니라 데이터 정리 |
