@@ -11,6 +11,23 @@
 예시의 sourcing 합계는 7,125,000이라 사중 일치를 위반했다 — 문서 수정으로 해결.
 ② 수량 단위가 ton에서 kg로 통일되면서 금액 공식의 ``× 1000``이 사라졌다. 총액 7,125,000은
 그대로다.)
+
+🔴 **⑦과 같은 사실을 검사하는 스키마 validator 는 반드시 이 파일에 직접 겨누는 판을
+짝으로 갖는다.**
+
+이유: ``self_check()`` 가 **dict 위에서 먼저 돌고**, 스키마는 살아남은 안만 본다.
+순서가 고정이라 ⑦ 이 컷하면 스키마 validator 를 지나는 실행이 없다 —
+**무력화해도 아무도 안 운다.**
+
+지금 짝이 있는 다섯::
+
+    validate_quadruple_match                ← test_quantity_must_match_split_plan
+    validate_split_amount_axis              ← test_amount_must_match_split_plan
+    validate_split_sequence                 ← test_split_seq_must_be_sequential
+    validate_margin_fields_are_synchronised ← test_half_null_margin_pair_is_rejected
+    validate_proposal_rules                 ← test_cited_document_must_appear_in_...
+
+(2026-09-04 · schemas 12 + ⑦ 13 전수 변이에서 나온 규칙)
 """
 
 import inspect
@@ -307,10 +324,45 @@ def test_unknown_field_is_rejected() -> None:
         PurchaseProposal.model_validate(data)
 
 
-def test_boolean_is_rejected_for_numeric_field() -> None:
-    """bool은 int의 서브클래스라 ge/gt를 통과한다 — 숫자 자리에서 막는다."""
+#: ``True`` 를 넣어 볼 숫자 자리. ``(이름, 픽스처에서 그 dict 로 가는 길)``.
+#:
+#: 🔴 **합에 안 들어가는 필드가 핵심이다.** 아래 docstring 참조.
+_NUMERIC_SLOTS = (
+    ("scenarios[].coverage_days", lambda d: d["scenarios"][0]),
+    ("meta.feedback_attempt", lambda d: d["meta"]),
+    ("meta.received_adjustments", lambda d: d["meta"]),
+    ("split_plan[].seq", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("split_plan[].qty_kg", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("split_plan[].amount_krw", lambda d: d["scenarios"][0]["split_plan"][0]),
+    ("sourcing_plan[].qty_kg", lambda d: d["scenarios"][0]["sourcing_plan"][0]),
+    ("sourcing_plan[].grade_unit_price", lambda d: d["scenarios"][0]["sourcing_plan"][0]),
+)
+
+
+@pytest.mark.parametrize("where, holder", _NUMERIC_SLOTS, ids=[s[0] for s in _NUMERIC_SLOTS])
+def test_boolean_is_rejected_for_numeric_field(where: str, holder) -> None:
+    """bool은 int의 서브클래스라 ge/gt를 통과한다 — 숫자 자리에서 막는다.
+
+    🔴 **이 셋은 합에 안 들어가는 필드라 사중 일치가 못 잡는다.**
+    ``qty_kg``·``amount_krw``·``grade_unit_price`` 는 ``True``→``1`` 이 되면 합이 깨져
+    사중 일치가 걸리는데, ``seq`` 와 ``meta`` 는 그 그물 밖이다.
+
+    ```text
+    feedback_attempt = True → 1        "1회차 재요청" 으로 읽힌다
+    received_adjustments = True → 1    "조정안 1건 받음" 이 된다
+                                       마스터 _adjustment_delivery 와 어긋난다
+    split_plan[].seq = True → 1        1회차 안에서는 정상으로 보인다
+                                       (다회차면 validate_split_sequence 가 잡는다)
+    ```
+
+    ⚠️ **가드는 정상 작동하는데 검사가 없었다** — 2026-09-04 전수 변이에서
+      ``ProposalMeta``·``SplitPlanItem``·``SourcingPlanItem`` 의 bool 가드를 지워도
+      **아무도 안 울었다.** 나머지 넷은 사중 일치가 우연히 잡아 줬고, 이 셋은 그대로
+      새어 나갔다 (규칙 8 — 검사는 있는데 변이가 안 물리는 자리).
+    """
     data = _proposal()
-    data["scenarios"][0]["coverage_days"] = True
+    field = where.split(".")[-1]
+    holder(data)[field] = True
     with pytest.raises(ValidationError):
         PurchaseProposal.model_validate(data)
 

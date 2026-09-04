@@ -436,6 +436,14 @@ class Scenario(BaseModel):
 
         금액 축이 없으면 T3가 재무 cap(금액)과 매입 제안(수량)을 결합할 수 없다.
         등급 배분이 수량↔금액 변환 계수이기 때문이다.
+
+        ⚠️ **이 검사가 bool 가드의 그물 노릇도 한다 — 우연이다.**
+        ``qty_kg``·``amount_krw``·``grade_unit_price`` 에 ``True`` 가 들어오면 ``1`` 이
+        되어 합이 깨지므로 여기서 걸린다.
+
+        🔴 **설계가 아니다. 사중 일치를 손대면 그 방어가 같이 사라진다.**
+        합에 안 들어가는 필드(``seq``·``meta.*``)는 지금도 이 그물 밖이라
+        ``test_contracts.py`` 가 따로 잡는다 (2026-09-04 전수 변이).
         """
         split_total = sum(item.qty_kg for item in self.split_plan)
         sourcing_total = sum(item.qty_kg for item in self.sourcing_plan)
