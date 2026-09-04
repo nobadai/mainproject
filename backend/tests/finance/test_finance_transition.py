@@ -178,30 +178,32 @@ def test_current_n5_zero_makes_due_date_equal_purchase_date():
 
 def test_master_purchase_due_date_and_finance_payable_due_date_match():
     """같은 회차의 Master 구매원장 날짜와 Finance 채무 날짜는 같은 N5 식이다."""
-    from app.master.commitment import ApprovedCommitment, ArrivalLeg
+    from app.master.commitment import build_commitment
 
     purchase_date = date(2026, 1, 2)
     n5 = 2
     due_date = purchase_date + timedelta(days=n5)
-    commitment = ApprovedCommitment(
-        approval_id="H1-REQ-1-1",
+    commitment = build_commitment(
         request_id="REQ-1",
         as_of=WED,
         item="배추",
-        scenario_label="기본",
-        total_qty_kg=100,
-        total_amount_krw=4_500_000,
-        arrival_schedule=(
-            ArrivalLeg(
-                item="배추",
-                qty_kg=100,
-                arrival_date=date(2026, 1, 5),
-                purchase_date=purchase_date,
-                seq=1,
-                amount_krw=4_500_000,
-                payment_due_date=due_date,
-            ),
-        ),
+        scenario={
+            "label": "기본",
+            "total_qty_kg": 100,
+            "total_amount_krw": 4_500_000,
+            "split_plan": [
+                {
+                    "seq": 1,
+                    "date": purchase_date.isoformat(),
+                    "qty_kg": 100,
+                    "expected_arrival_date": "2026-01-05",
+                    "amount_krw": 4_500_000,
+                }
+            ],
+        },
+        inbound_lead_days=3,
+        decision_seq=1,
+        purchase_payment_days=n5,
     )
 
     transition = _build(commitment, policy=_Policy(n5))
