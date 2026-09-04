@@ -14,6 +14,7 @@
 from datetime import date
 
 import pytest
+from _injection import force_situation, forced_proposals
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
@@ -58,15 +59,35 @@ ITEM = "배추"
 
 
 def _classified(item: str = ITEM, as_of: date = UNCERTAIN) -> dict:
-    """①까지 돌린 상태 — ②는 situation 분기 뒤에 오므로 ①이 선행해야 한다."""
+    """①까지 돌린 상태 — 그래프에서 ②가 실제로 받는 모양 그대로 준다.
+
+    ⚠️ **②가 ``situation`` 을 읽어서가 아니다.** ``collect_context`` 는 ``date`` ·
+      ``item`` · ``context_loop_count`` 만 본다 (실측: ①을 안 돌리고 불러도, stable 한
+      날짜로 불러도 같은 결과가 나온다). 게이팅은 노드가 아니라 **배선**
+      (``route_after_classify``)에 있다.
+
+      그래서 이 파일의 **직접 호출 검사들은 임계와 무관하다** — 임계를 0.15 로 올린
+      스윕에서 깨진 것은 전부 그래프·어댑터를 타는 검사였다. 여기 ①을 부르는 이유는
+      의존이 아니라 *"실제로 받는 상태와 같게"* 뿐이다.
+    """
     state = build_initial_state(item, as_of)
     state.update(classify_situation(state))
     return state
 
 
 @pytest.fixture(scope="module")
-def proposals() -> dict[date, dict]:
-    return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+def proposals() -> dict[str, dict[date, dict]]:
+    """``{상황: {앵커: 제안}}`` — **상황은 검사가 고정한다** (③ · 현서님 §1.4).
+
+    예전엔 ``{앵커: 제안}`` 이었고 상황은 그날 mock 밴드가 선언 임계 어느 쪽이냐로
+    *정해졌다*. 그래서 임계를 0.15 로 올리자 이 파일에서만 8건이 깨졌는데, 그 8건 중
+    임계를 재려던 것은 하나도 없었다 — 전부 *"uncertain 이면 문서를 읽는가"* 였다.
+
+    🔴 그중 ``test_future_document_is_invisible_on_the_uncertain_day`` 는 **깨지지도
+      않았다.** 목록이 비어 ``"DOC-6" not in []`` 이 공허하게 참이 됐다 — 검사가 죽은
+      줄도 모르고 초록이었다. 상황을 주입하면 그 경로가 안 생긴다.
+    """
+    return forced_proposals(run_purchase_agent, ITEM, ANCHORS)
 
 
 # ── E3-4 DoD: 9/4에서 DOC-3~5 로드 ──────────────────────────────────────────
@@ -79,13 +100,13 @@ def test_uncertain_day_loads_the_whole_priority_list(proposals: dict) -> None:
     조기 종료하면 DOC-4·5가 조용히 사라진다 — 규칙은 충분성을 판정할 수 없으므로
     판정한 척하지 않는다 (``is_enough``).
     """
-    assert proposals[UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
+    assert proposals["uncertain"][UNCERTAIN]["context_docs_used"] == ["DOC-3", "DOC-4", "DOC-5"]
 
 
 def test_stable_days_never_enter_the_node(proposals: dict) -> None:
     """stable한 날은 ②를 통째로 건너뛴다 (§4-②). 빈 목록이 그 사실을 그대로 보여준다."""
     for as_of in (RISING, FALLING, SPREAD_WIDE):
-        assert proposals[as_of]["context_docs_used"] == []
+        assert proposals["stable"][as_of]["context_docs_used"] == []
 
 
 def test_loop_count_records_every_attempt() -> None:
@@ -108,7 +129,9 @@ def test_future_document_is_invisible_on_the_uncertain_day(proposals: dict) -> N
     필터가 없으면 같은 유형·같은 품목이라 DOC-3과 함께 딸려 나온다. 코퍼스에 "보이면 안 되는
     문서"를 넣어둔 이유가 이 한 줄이다 (``documents.json._published_at``).
     """
-    assert "DOC-6" not in proposals[UNCERTAIN]["context_docs_used"]
+    loaded = proposals["uncertain"][UNCERTAIN]["context_docs_used"]
+    assert loaded, "빈 목록이면 아래 단언이 공허하게 참이 된다 — 실제로 그런 적이 있다"
+    assert "DOC-6" not in loaded
     # 9/11이면 보이는 문서다 — 안 보이는 게 as_of 때문이지 코퍼스 누락이 아님을 확인한다
     later = {doc["doc_id"] for doc in ports.get_context_docs(ITEM, SPREAD_WIDE, ["관측월보"])}
     assert 6 in later
@@ -320,7 +343,7 @@ def test_document_rationale_carries_ref_id_and_excerpt(proposals: dict) -> None:
     Critic은 DB 조회가 금지라(계약서 §0) 발췌 없이는 근거 대조 자체가 성립하지 않는다.
     """
     loaded = {doc["doc_id"]: doc for doc in collect_context(_classified())["context_docs"]}
-    scenarios = proposals[UNCERTAIN]["scenarios"]
+    scenarios = proposals["uncertain"][UNCERTAIN]["scenarios"]
     assert len(scenarios) == 2  # uncertain은 보수·기본 2안 (공격 금지)
     for scenario in scenarios:  # **양쪽 안 모두**에 붙는다 — 문서 근거는 안 공통이다
         items = [r for r in scenario["rationale"] if r["source"] == "문서ID"]
@@ -336,7 +359,7 @@ def test_document_rationale_carries_ref_id_and_excerpt(proposals: dict) -> None:
 def test_stable_day_gets_no_document_rationale(proposals: dict) -> None:
     """다른 3앵커 불변 — ②가 안 돌았으니 문서 근거도 없어야 한다."""
     for as_of in (RISING, FALLING, SPREAD_WIDE):
-        for scenario in proposals[as_of]["scenarios"]:
+        for scenario in proposals["stable"][as_of]["scenarios"]:
             assert not [r for r in scenario["rationale"] if r["source"] == "문서ID"]
             assert not [risk for risk in scenario["risks"] if "문서" in risk]
 
@@ -350,7 +373,7 @@ def test_uncertain_day_discloses_that_no_sufficiency_judgment_was_made(proposals
     고지가 없으면 소비자는 "검토를 거친 근거"로 읽는다 — E3-3의 일괄 fallback 고지와 같은
     라벨/행동 불일치다. 문구에 내부 단계 이름을 쓰지 않는다(H1 화면·Critic이 읽는다).
     """
-    for scenario in proposals[UNCERTAIN]["scenarios"]:
+    for scenario in proposals["uncertain"][UNCERTAIN]["scenarios"]:
         notes = [risk for risk in scenario["risks"] if "충분성" in risk]
         assert len(notes) == 1
         assert "rule_only" not in notes[0]
@@ -668,42 +691,61 @@ def test_look_ahead_document_reaches_rejected_reasons() -> None:
 # ── 포트 호출 위치 잠금 (실패 모드 e·f) ────────────────────────────────────
 
 
-def test_documents_are_loaded_at_runtime_only_on_uncertain_days(monkeypatch) -> None:
+@pytest.mark.parametrize(("situation", "expected_calls"), [("uncertain", 3), ("stable", 0)])
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_documents_are_loaded_at_runtime_only_on_uncertain_days(
+    as_of: date, situation: str, expected_calls: int, monkeypatch
+) -> None:
     """호출 **위치**의 런타임 쪽을 잠근다 — T0 잠금(``test_contracts``)의 짝이다.
 
     ①~⑤는 T0 only이고 ⑥ 문서만 ② 노드의 런타임 예외다 (정의서 §3.1.1 · IO명세 §0).
     T0 쪽은 "``build_initial_state``가 문서를 안 부른다"를 잠그지만, **stable한 날 ②가
     돌아버리는 것**은 아무도 안 보고 있었다. 문서를 불필요하게 당겨오면 예외의 안전 근거
     ("uncertain일 때만")가 사라진다.
+
+    ③ 로 상황을 고정하므로 **앵커 다섯 전부에 양쪽 상황이** 걸린다 — 예전에는 그날
+    mock 밴드가 정해 주는 상황 하나씩만 봤다(앵커당 1건 → 2건).
+
+    빈 회차도 한 번의 호출이라 ``uncertain`` 은 앵커·품목과 무관하게 항상 3회다.
     """
-    calls: dict[date, int] = {}
+    calls: list[str] = []
     original = ports.get_context_docs
 
-    for as_of in ANCHORS:
+    def wrapper(item, when, doc_types):
+        calls.append(item)
+        return original(item, when, doc_types)
 
-        def wrapper(item, when, doc_types, *, _as_of=as_of):
-            calls[_as_of] = calls.get(_as_of, 0) + 1
-            return original(item, when, doc_types)
+    monkeypatch.setattr(ports, "get_context_docs", wrapper)
+    force_situation(monkeypatch, situation)
+    build_graph().invoke(build_initial_state(ITEM, as_of))
 
-        monkeypatch.setattr(ports, "get_context_docs", wrapper)
-        build_graph().invoke(build_initial_state(ITEM, as_of))
-
-    assert calls.get(UNCERTAIN, 0) == 3
-    for as_of in (RISING, FALLING, SPREAD_WIDE):
-        assert calls.get(as_of, 0) == 0
+    assert len(calls) == expected_calls
 
 
 # ── 4품목 전횡단 ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("situation", ["uncertain", "stable"])
 @pytest.mark.parametrize("item", ITEMS)
 @pytest.mark.parametrize("as_of", ANCHORS)
-def test_every_item_and_anchor_survives_the_document_loop(item: str, as_of: date) -> None:
+def test_every_item_and_anchor_survives_the_document_loop(
+    item: str, as_of: date, situation: str, monkeypatch
+) -> None:
     """전횡단. 무·양파·피마늘은 기상·작년동기 문서가 없어 **빈 회차**를 지난다.
 
     빈 회차가 크래시를 내거나 ``None``을 담으면 여기서 드러난다 — E3-1에서 배추만 돌려
     양파·피마늘 크래시를 놓친 자리와 같다.
+
+    ③ 로 상황을 고정한다. 예전에는 ``as_of == UNCERTAIN`` 일 때만 로드를 기대했는데,
+    🔴 **그건 9/4 의 성질이 아니었다** — 문서 코퍼스는 앵커를 구분하지 않는다
+    (실측: 8/21·8/28·9/4 전부 ``[3,4,5]`` · 9/11 은 ``[3,4,5,6]``). *"9/4 에서 DOC-3~5"*
+    가 잠그는 것은 **루프이지 날짜가 아니다.**
+
+    12-31 만 다르다 — ``documents.json`` 이 절대 날짜(2026-08~09)라 그날은 **가시 문서가
+    0건**이다. 그건 "안 돌아서 빔"이 아니라 "돌았는데 없음"이고, 둘이 다르다는 것은
+    ``test_no_documents_found_is_a_different_fact_from_never_looking`` 이 따로 잠근다.
     """
+    force_situation(monkeypatch, situation)
     proposal = run_purchase_agent(item, as_of)
     cited = {
         r["ref_id"]
@@ -711,11 +753,12 @@ def test_every_item_and_anchor_survives_the_document_loop(item: str, as_of: date
         for r in scenario["rationale"]
         if r["source"] == "문서ID"
     }
-    assert cited <= set(proposal["context_docs_used"])
-    if as_of == UNCERTAIN:
-        assert proposal["context_docs_used"]  # uncertain엔 최소 관측월보 1건이 있다
+    loaded = proposal["context_docs_used"]
+    assert cited <= set(loaded)
+    if situation == "stable" or as_of == INTEGRATION:
+        assert loaded == []
     else:
-        assert proposal["context_docs_used"] == []
+        assert loaded  # 어느 품목이든 최소 관측월보 1건은 보인다
 
 
 # ── 순수 함수 / 계약 ───────────────────────────────────────────────────────
