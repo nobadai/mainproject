@@ -359,11 +359,19 @@ def test_boolean_is_rejected_for_numeric_field(where: str, holder) -> None:
       ``ProposalMeta``·``SplitPlanItem``·``SourcingPlanItem`` 의 bool 가드를 지워도
       **아무도 안 울었다.** 나머지 넷은 사중 일치가 우연히 잡아 줬고, 이 셋은 그대로
       새어 나갔다 (규칙 8 — 검사는 있는데 변이가 안 물리는 자리).
+
+    ⚠️ **``match=`` 로 오류 문면에 묶는다.** ``_reject_boolean`` 의 메시지를 바꾸면
+      여덟 판이 같이 운다 — **그게 맞다.**
+
+    🔴 **없으면 이 검사가 이름값을 못 한다.** 사중 일치가 먼저 ``ValidationError`` 를
+      내므로 가드를 지워도 **5/8 이 통과한다** (*"무언가가 거부한다"* 만 증명하고
+      *"이 가드가 거부한다"* 는 증명하지 못한다). 2026-09-04 전수 변이에서 그 상태를
+      실측했다.
     """
     data = _proposal()
     field = where.split(".")[-1]
     holder(data)[field] = True
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="boolean"):
         PurchaseProposal.model_validate(data)
 
 
