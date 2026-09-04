@@ -1,13 +1,14 @@
-"""승인 약정 → `in_transit` 반영의 build·persist 검사.
+"""승인 약정 → `in_transit` · `confirmed_inbound` 반영의 build·persist 검사.
 
 ★ **DB 를 부르지 않는다.** 가짜 커넥션·커서로 잰다. 여기서 재는 것은 값이 DB 에
-  들어갔는지가 아니라 **물류가 소유한 규율 넷**이다.
+  들어갔는지가 아니라 **물류가 소유한 규율 다섯**이다.
 
   ```text
   회차 값을 그대로 옮기나           도착일을 다시 계산하지 않는다
   같은 승인이 같은 id 를 내나       두 번 반영해도 부풀지 않는다
   커밋·커넥션을 쥐지 않나           트랜잭션은 마스터 것이다
   없는 행을 지어내지 않나           evidence_grade 는 물류 판단이다
+  남의 칸을 덮지 않나               confirmed_inbound 는 병합이지 덮어쓰기가 아니다
   ```
 """
 
@@ -15,11 +16,13 @@ import ast
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import pytest
 
 from app.logistics import transition
+from app.logistics.schemas import InTransitItem, ScheduledQuantity
+from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import (
     InventoryTransition,
     LogisticsFixtureMissing,
@@ -34,14 +37,28 @@ SIM_RUN_ID = "LOG-RUNTIME-SIM-BURNIN-202512-DAY30"
 #: 승인 다음 달력일. 마스터가 정해 `build` 로 준다 — 물류가 세지 않는다.
 TARGET_STATE_DATE = AS_OF + timedelta(days=1)
 
+#: 물류가 이미 확정해 둔 입고 한 건. **이번 승인과 무관한 남의 사실이다** — 승인
+#: 반영 뒤에도 그대로 있어야 한다.
+남의_확정입고 = {
+    "inbound_id": "INB-OTHER-9",
+    "item": "무",
+    "quantity_kg": "120.5",
+    "date": "2026-01-04",
+}
+
 
 class 가짜커서:
-    """실행된 SQL 과 파라미터를 기록한다. `rowcount` 는 밖에서 정한다."""
+    """실행된 SQL 과 파라미터를 기록한다. `rowcount` · 읽어 줄 값은 밖에서 정한다.
 
-    def __init__(self, rowcount: int) -> None:
+    ★ `persist_inventory` 는 **읽고 나서 쓴다** — `fetchone` 이 그 읽기다.
+      `rowcount=0` 은 그날 fixture 행이 없다는 뜻이라 읽기도 빈손이어야 한다.
+    """
+
+    def __init__(self, rowcount: int, confirmed_inbound: object) -> None:
         self.rowcount = rowcount
         self.queries: list[object] = []
         self.params: list[object] = []
+        self._행 = None if rowcount == 0 else (confirmed_inbound,)
 
     def __enter__(self) -> Self:
         return self
@@ -53,14 +70,22 @@ class 가짜커서:
         self.queries.append(query)
         self.params.append(params)
 
+    def fetchone(self) -> object:
+        return self._행
+
+
+#: 기본값과 **명시적 `None`** 을 가르는 표식. `None` 은 *"아직 확인한 적 없다"*
+#: (`UNRESOLVED`) 라는 사실이라 기본값으로 뭉개면 안 된다.
+_기본 = object()
+
 
 class 가짜커넥션:
     """commit 이 **몇 번** 불렸나를 센다 — 0 이어야 한다."""
 
-    def __init__(self, rowcount: int = 1) -> None:
+    def __init__(self, rowcount: int = 1, confirmed_inbound: object = _기본) -> None:
         self.commits = 0
         self.rollbacks = 0
-        self.커서 = 가짜커서(rowcount)
+        self.커서 = 가짜커서(rowcount, [] if confirmed_inbound is _기본 else confirmed_inbound)
 
     def cursor(self) -> 가짜커서:
         return self.커서
@@ -70,6 +95,27 @@ class 가짜커넥션:
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+
+def _update_params(conn: 가짜커넥션) -> tuple[Any, ...]:
+    """UPDATE 로 넘어간 파라미터. **SELECT 가 앞에 하나 더 있다.**"""
+    assert len(conn.커서.params) == 2, "읽기 한 번 · 쓰기 한 번이다"
+    params = conn.커서.params[-1]
+    assert isinstance(params, tuple)
+    return params
+
+
+def _written_in_transit(conn: 가짜커넥션) -> list[dict[str, Any]]:
+    return _update_params(conn)[0].obj
+
+
+def _written_confirmed_inbound(conn: 가짜커넥션) -> list[dict[str, Any]] | None:
+    written = _update_params(conn)[2]
+    return None if written is None else written.obj
+
+
+def _written_confirmed_status(conn: 가짜커넥션) -> str:
+    return _update_params(conn)[3]
 
 
 def _commitment(
@@ -252,20 +298,192 @@ def test_persist_status_follows_whether_rows_exist(legs가_있나, 기대_status
 
     persist_inventory(conn, **_fixture_인자(rows))
 
-    assert 기대_status in conn.커서.params[0]
+    assert 기대_status in _update_params(conn)
 
 
 def test_persist_update_does_not_touch_other_status_columns():
-    """`confirmed_inbound_*` · `confirmed_outbound_*` 는 다른 사실이고 다른 근거다."""
+    """⑤ `confirmed_outbound_*` · `evidence_grade` · `approved_by` 는 남의 칸이다.
+
+    ⚠️ `confirmed_inbound_*` 는 **2026-09-04 부터 이 UPDATE 가 겸한다** (임시). 덮지
+       않고 병합하는지는 아래 `test_persist_merges_...` 가 잰다 — 여기서는 그 둘
+       말고는 아무 칸도 늘지 않았음을 잠근다.
+    """
     conn = 가짜커넥션()
 
     persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
 
-    statement = str(conn.커서.queries[0])
-    assert "confirmed_inbound_status" not in statement
+    statement = str(conn.커서.queries[-1])
     assert "confirmed_outbound_status" not in statement
+    assert "confirmed_outbound_json" not in statement
     assert "evidence_grade" not in statement
     assert "approved_by" not in statement
+    assert "lot_priority" not in statement
+    assert "zone_capacity" not in statement
+
+
+# ── persist_inventory · confirmed_inbound 병합 (임시 조치) ───────────────
+#
+# ⚠️ **이 절 전체가 임시다.** 승인과 발주 확정은 다른 사실인데 지금은 발주 확정
+#    단계에 코드가 없어 승인을 그것으로 대신 본다. 물류가 그 단계를 만들면 병합도
+#    이 검사들도 함께 걷어낸다 (`transition.py` 모듈 docstring 참조).
+#
+# 🔴 걷어내기 전까지 지켜야 하는 것은 하나다 — **덮지 않고 더한다.**
+
+
+def test_persist_merges_into_the_existing_confirmed_inbound_instead_of_overwriting():
+    """① 기존 확정 입고가 남고 이번 승인분이 **더해진다.**
+
+    🔴 덮어쓰면 그날 이미 확정돼 있던 남의 입고가 에러 없이 사라진다. 사라진 뒤에는
+       처음부터 없었던 것과 구별되지 않는다.
+    """
+    conn = 가짜커넥션(confirmed_inbound=[남의_확정입고])
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+
+    written = _written_confirmed_inbound(conn)
+    assert written is not None
+    assert written[0] == 남의_확정입고, "남의 확정 입고를 그대로 둔다 (모양도 안 바꾼다)"
+    assert [row["inbound_id"] for row in written] == [
+        "INB-OTHER-9",
+        "INB-H1-REQ-1-1-1",
+        "INB-H1-REQ-1-1-2",
+    ]
+    assert _written_confirmed_status(conn) == "CONFIRMED"
+
+
+def test_persist_is_idempotent_for_the_same_approval():
+    """② 같은 승인을 두 번 반영해도 목록이 안 부푼다.
+
+    ★ 첫 반영이 쓴 목록을 그대로 두 번째 반영의 기존 목록으로 물린다 — 실제로 같은
+      날 같은 승인이 두 번 흐를 때 일어나는 일이다.
+
+    ⚠️ 중복이 생기면 B-1 이 `CONFIRMED_INBOUND_ID_DUPLICATED` 로 잡지만, **여기서 안
+       만드는 것이 먼저다.**
+    """
+    rows = build_next_inventory(_두회차())
+    첫번 = 가짜커넥션()
+    persist_inventory(첫번, **_fixture_인자(rows))
+
+    두번 = 가짜커넥션(confirmed_inbound=_written_confirmed_inbound(첫번))
+    persist_inventory(두번, **_fixture_인자(rows))
+
+    assert _written_confirmed_inbound(두번) == _written_confirmed_inbound(첫번)
+
+
+def test_persist_writes_values_that_pass_the_b1_gap_rule(complete_logistics_snapshot):
+    """③ 🔴 **이 PR 의 핵심이다.** 쓴 두 칸이 B-1 을 실제로 통과한다.
+
+    ★ **값 비교를 재구현하지 않는다.** `find_in_transit_schedule_gap` 을 그대로 불러
+      `None` 이 나오는지 본다 — 재구현하면 물류가 규칙을 바꾼 날 검사만 통과한다.
+
+    ★ 두 payload 를 **JSON 을 지나 스키마로 되돌려** 넘긴다. `quantity_kg` 가 `!=` 로
+      비교되므로 직렬화·역직렬화 왕복 뒤에도 같은 `Decimal` 이어야 한다.
+    """
+    conn = 가짜커넥션()
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "in_transit": [InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
+            "confirmed_inbound_schedule": [
+                ScheduledQuantity.model_validate(row)
+                for row in _written_confirmed_inbound(conn) or []
+            ],
+        }
+    )
+
+    assert find_in_transit_schedule_gap(snapshot) is None
+
+
+def test_persist_quantity_survives_the_json_round_trip(complete_logistics_snapshot):
+    """③-보강: 소수 수량이 왕복 뒤에도 같은 `Decimal` 로 돌아온다.
+
+    🔴 `Decimal` 을 문자열로 뭉개거나 `float` 을 거치면 값은 같아 보이는데 B-1 이
+       `IN_TRANSIT_CONFIRMED_SCHEDULE_MISMATCH` 를 낸다.
+    """
+    commitment = _commitment(
+        legs=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=0.1,
+                arrival_date=date(2026, 1, 2),
+                purchase_date=AS_OF,
+                seq=1,
+            ),
+        ),
+        total_qty_kg=0.1,
+    )
+    conn = 가짜커넥션()
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(commitment)))
+
+    확정 = ScheduledQuantity.model_validate((_written_confirmed_inbound(conn) or [])[0])
+    전이 = InTransitItem.model_validate(_written_in_transit(conn)[0])
+    assert 확정.quantity_kg == Decimal("0.1")
+    assert 확정.quantity_kg == 전이.quantity_kg
+    assert 확정.date == 전이.expected_arrival_date == date(2026, 1, 2)
+    assert 확정.item == 전이.item
+
+
+def test_persist_empty_approval_keeps_the_existing_confirmed_inbound():
+    """④ 빈 승인은 `confirmed_inbound` 를 **비우지 않는다.**
+
+    ★ *"더할 것이 없다"* 와 *"기존 것을 지워라"* 는 다르다. `in_transit` 은 승인이
+      유일한 주인이라 `CONFIRMED_ZERO` 로 덮지만, `confirmed_inbound` 는 아니다.
+    """
+    conn = 가짜커넥션(confirmed_inbound=[남의_확정입고])
+
+    persist_inventory(conn, **_fixture_인자([]))
+
+    assert _written_in_transit(conn) == [], "in_transit 은 승인분이 없다고 적는다"
+    assert "CONFIRMED_ZERO" in _update_params(conn)
+    assert _written_confirmed_inbound(conn) == [남의_확정입고]
+    assert _written_confirmed_status(conn) == "CONFIRMED"
+
+
+def test_persist_empty_approval_does_not_turn_unresolved_into_confirmed_zero():
+    """④-보강: 더할 것이 없는데 기존이 `None` 이면 `None` 그대로 둔다.
+
+    🔴 `[]` 로 적으면 *"확인했고 0 건"* 이라는, **우리가 하지 않은 확인**이 장부에
+       남는다. 0 과 null 은 다르다.
+    """
+    conn = 가짜커넥션(confirmed_inbound=None)
+
+    persist_inventory(conn, **_fixture_인자([]))
+
+    assert _written_confirmed_inbound(conn) is None
+    assert _written_confirmed_status(conn) == "UNRESOLVED"
+
+
+def test_persist_reads_before_writing_on_the_given_connection():
+    """★ 병합은 **읽기 없이는 못 한다.** 그 읽기가 같은 커넥션·같은 커서다.
+
+    🔴 자기 커넥션을 새로 열면 마스터가 쥔 트랜잭션 밖에서 읽게 되어, 같은 커밋 안의
+       앞선 write 를 못 보고 그것을 덮는다.
+    """
+    conn = 가짜커넥션()
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+
+    읽기, 쓰기 = (str(q) for q in conn.커서.queries)
+    assert "SELECT confirmed_inbound_json" in 읽기
+    assert "UPDATE" not in 읽기
+    assert "UPDATE" in 쓰기 and "SELECT" not in 쓰기
+    # ★ 읽은 행과 쓴 행이 갈리면 남의 목록에 이번 승인분을 얹는다.
+    assert conn.커서.params[0] == (SIM_RUN_ID, AS_OF, transition.USAGE_SCOPE)
+    assert _update_params(conn)[-3:] == (SIM_RUN_ID, AS_OF, transition.USAGE_SCOPE)
+
+
+def test_persist_does_not_send_an_update_when_the_row_is_missing():
+    """⑥-보강: 읽을 행이 없으면 **UPDATE 를 보내기 전에** 멈춘다."""
+    conn = 가짜커넥션(rowcount=0)
+
+    with pytest.raises(LogisticsFixtureMissing):
+        persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+
+    assert len(conn.커서.queries) == 1
+    assert "UPDATE" not in str(conn.커서.queries[0])
 
 
 def test_transition_module_does_not_write_inventory_lots():
@@ -336,7 +554,7 @@ def test_adapter_empty_commitment_still_writes_confirmed_zero():
     adapter.persist(conn, bundles)
 
     assert len(bundles) == 1 and bundles[0].items == ()
-    assert "CONFIRMED_ZERO" in conn.커서.params[0]
+    assert "CONFIRMED_ZERO" in _update_params(conn)
 
 
 def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
@@ -351,7 +569,7 @@ def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
 
     adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
 
-    params = conn.커서.params[0]
+    params = _update_params(conn)
     assert SIM_RUN_ID in params, "sim_run_id 를 그대로 넘겨야 WHERE 가 그 행을 찾는다"
     assert TARGET_STATE_DATE in params
     assert AS_OF not in params, "승인일 행에 썼다 — 재무 상태와 하루 어긋난다"
