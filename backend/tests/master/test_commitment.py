@@ -382,3 +382,105 @@ def test_받은_도착일이_매입일보다_앞서면_막는다():
                 ]
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# 회차 금액 (v0.4) — 총액의 **분해**이지 새 축이 아니다
+#
+# 매입이 회차별 금액을 보내면 마스터가 원장에 쓴다.
+#
+#     purchases.total_amount_krw     NOT NULL    회차마다 한 행
+#     purchase_items.line_amount_krw NOT NULL    회차·품목마다 한 줄
+#
+# `Σ 회차금액 ≠ total_amount_krw` 여도 전에는 아무도 안 봤다.
+# ★ 금액은 선택 필드다 — 매입이 아직 안 보내므로 오늘은 늘 비어 있고, 그때는 검사가
+#   통째로 건너뛴다. 값이 오는 날부터 걸린다.
+# ---------------------------------------------------------------------------
+
+
+def _amount_legs(first_amount, second_amount, total_amount=228800.0):
+    plan = [
+        {"seq": 1, "date": "2025-12-31", "qty_kg": 60.0},
+        {"seq": 2, "date": "2026-01-06", "qty_kg": 40.0},
+    ]
+    if first_amount is not ...:
+        plan[0]["amount_krw"] = first_amount
+    if second_amount is not ...:
+        plan[1]["amount_krw"] = second_amount
+    return _scenario(total_qty_kg=100.0, total_amount_krw=total_amount, split_plan=plan)
+
+
+def test_회차_금액이_없으면_오늘과_같다():
+    """이 변경이 기존 동작을 하나도 안 바꾼다는 것이 여기서 증명된다."""
+    commitment = _build(scenario=_amount_legs(..., ...))
+
+    assert len(commitment.arrival_schedule) == 2
+    assert all(leg.amount_krw is None for leg in commitment.arrival_schedule)
+    assert commitment.notes == ()
+
+
+def test_전_회차에_금액이_있으면_그대로_싣는다():
+    """마스터가 총액을 회차 수로 나눠 만들지 않는다 — 매입이 보낸 값을 옮긴다."""
+    commitment = _build(scenario=_amount_legs(137280.0, 91520.0))
+
+    assert [leg.amount_krw for leg in commitment.arrival_schedule] == [137280.0, 91520.0]
+    assert commitment.notes == ()
+
+
+def test_회차_금액_합이_총액과_어긋나면_못_만든다():
+    """★ 수량과 같은 문구다 — **마스터가 둘 중 하나를 고쳐 맞추지 않는다.**"""
+    with pytest.raises(CommitmentNotBuildable, match="회차 금액 합이 총액과 어긋난다"):
+        _build(scenario=_amount_legs(137280.0, 90000.0))
+
+
+def test_일부_회차만_금액이면_금액을_안_싣고_사유를_남긴다():
+    """⚠️ 도착일 부분 공급은 **일정 전체를 버리지만** 금액은 **금액만 안 싣는다.**
+
+    도착일이 없으면 회차가 성립하지 않지만 금액이 없어도 회차는 선다 — 오늘이
+    정확히 그 상태다.
+    """
+    commitment = _build(scenario=_amount_legs(137280.0, ...))
+
+    assert len(commitment.arrival_schedule) == 2, "일정까지 버리지 않는다"
+    assert all(leg.amount_krw is None for leg in commitment.arrival_schedule)
+    assert any("섞어 만들지 않는다" in note for note in commitment.notes), commitment.notes
+    assert any("2회차 중 1회차" in note for note in commitment.notes), commitment.notes
+
+
+def test_부분_공급이면_총액과_맞아떨어져도_안_싣는다():
+    """실린 회차만 총액과 같아도 나머지 회차 금액을 **모르는** 것은 그대로다."""
+    commitment = _build(scenario=_amount_legs(228800.0, ...))
+
+    assert all(leg.amount_krw is None for leg in commitment.arrival_schedule)
+    assert commitment.notes
+
+
+def test_금액_허용오차는_수량과_같은_자리다():
+    """같은 자리에서 다른 상수를 쓰면 왜 다른지를 아무도 모른다 — 1e-6 로 둔다."""
+    ok = ApprovedCommitment(
+        approval_id="H1-REQ-1-1",
+        request_id="REQ-1",
+        as_of=AS_OF,
+        item="배추",
+        scenario_label="보수",
+        total_qty_kg=100.0,
+        total_amount_krw=228800.0,
+        arrival_schedule=(
+            ArrivalLeg("배추", 100.0, date(2026, 1, 2), AS_OF, 1, amount_krw=228800.0000001),
+        ),
+    )
+    assert ok.arrival_schedule[0].amount_krw == pytest.approx(228800.0)
+
+    with pytest.raises(CommitmentNotBuildable, match="회차 금액"):
+        ApprovedCommitment(
+            approval_id="H1-REQ-1-1",
+            request_id="REQ-1",
+            as_of=AS_OF,
+            item="배추",
+            scenario_label="보수",
+            total_qty_kg=100.0,
+            total_amount_krw=228800.0,
+            arrival_schedule=(
+                ArrivalLeg("배추", 100.0, date(2026, 1, 2), AS_OF, 1, amount_krw=228799.0),
+            ),
+        )
