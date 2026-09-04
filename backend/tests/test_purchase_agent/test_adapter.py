@@ -623,6 +623,14 @@ def test_forecast_day_axis_must_start_at_the_day_after_as_of() -> None:
     """🔴 판정 기준일이 ``daily[13]``이라 축이 하루만 밀려도 **다른 날을 본다.**
 
     에러가 나지 않아 아무도 모르는 종류의 오류다.
+
+    ⚠️ 이 테스트는 전 행을 한꺼번에 민다 — ``daily[0]``도 같이 틀어지므로 루프를
+      ``daily[0]`` 한 줄로 되돌려도 통과한다. 뒷부분 잠금은 :861
+      ``test_forecast_axis_shifted_from_the_middle_is_caught`` 가 한다
+      (첫 행은 두고 나머지만 민다).
+
+    🔴 둘이 240줄 떨어져 있어, 이 테스트만 보고 *"축 뒷부분이 안 잠겼다"*고 판단한 적이
+      있다 (2026-09-04). grep 결과에 그 줄이 있었는데 열어보지 않았다.
     """
     as_of = SPREAD_WIDE
     forecast = ports.get_forecast("배추", as_of)
@@ -855,6 +863,9 @@ def test_forecast_axis_shifted_from_the_middle_is_caught() -> None:
 
     ``daily[0]``만 D+1로 맞춰 두고 이후를 하루씩 밀면 예전 검사는 통과했다. 판정 기준일을
     **배열 인덱스**로 고르므로 중간부터 밀리면 D+15를 D+14로 착각한 채 조용히 돈다.
+
+    ⚠️ 짝은 :622 ``test_forecast_day_axis_must_start_at_the_day_after_as_of`` 다.
+      그쪽은 전 행을 밀고 여기는 첫 행을 남긴다. **둘 다 있어야 루프가 잠긴다.**
     """
     as_of = SPREAD_WIDE
     forecast = ports.get_forecast("배추", as_of)
