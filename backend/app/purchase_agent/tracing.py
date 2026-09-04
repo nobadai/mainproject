@@ -32,7 +32,16 @@ class ToolRecorder:
     ⚠️ **④ ``split_plan``·⑤ ``allocate_sourcing``은 미진입·미적용인 날에도 담긴다.**
     두 노드는 조건부 간선이 아니라 무조건 지나며 **판정을 수행하기** 때문이다.
     "판정했는데 미진입"과 "판정 자체를 안 함"은 다른 사실이고, 후자는 ② 하나뿐이다.
-    미진입 사유는 ``provenance.split.entry_miss_reason``이 따로 싣는다.
+    🔴 **``provenance.split.entry_miss_reason``이라는 필드는 없다** (2026-09-04 전수
+    확인). 이 줄이 오래 그것을 가리키고 있었는데, 출력 스키마에 ``provenance``라는
+    칸 자체가 없다 — 찾으러 간 사람이 못 찾는다.
+
+    실제로는 ``package_scenarios._entry_miss_reason()``이 만든 **문장이 risks 안에
+    끼어 나간다** (``package_scenarios.py:1103`` · 2026-09-04 기준 — *"timing 축
+    안이지만 분할 미진입(…)으로 일괄"*). 줄 번호는 밀리므로 **함수 이름으로 찾을 것.**
+
+    ⚠️ **enum도 아니다.** 숫자를 품은 자유 문장이라(*"최대안 N kg < 임계 M kg"*)
+    그대로는 코드값이 될 수 없다 — ``{code, detail}`` 두 칸으로 갈라야 enum이 된다.
     """
 
     def __init__(self) -> None:
