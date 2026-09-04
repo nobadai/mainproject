@@ -30,6 +30,7 @@ from app.contracts.core import (
 from app.critic.critic import run_l3 as legacy_run_l3
 from app.critic.critic_v0_4 import (
     CONTRACT_AMENDMENTS,
+    CONTRACT_AMENDMENTS_CLOSED,
     DeptMeta,
     check_arrival_decomposition,
     check_axis_intrusion,
@@ -1074,12 +1075,23 @@ ok(_cp.liquidity_rank == 1, "CollectionPreference — 재무 B 출력, 순위 �
 
 section("\n[B-10] 계약 개정 요청 목록")
 
+# 🔴 **개수를 세지 않는다 (2026-09-04 정정).** 전에는 `== 6` 이었는데, 그 6 은
+#   `arrival_schedule` 이 v1.2.1 로 닫힌 뒤에도 그대로였다 — 상수가 목록이 낡은 것을
+#   지켜 준 셈이다. 항목이 **정말 아직 열려 있는지**는 계약을 직접 읽는
+#   `test_contract_amendments_are_open.py` 가 본다. 여기서는 사유가 붙어 있는지만 본다.
 ok(
-    len(CONTRACT_AMENDMENTS) == 6,
-    f"계약 개정 필요 항목 {len(CONTRACT_AMENDMENTS)}건이 코드에 명시됨",
+    bool(CONTRACT_AMENDMENTS) and all(name and why for name, why in CONTRACT_AMENDMENTS),
+    f"계약 개정 요청 {len(CONTRACT_AMENDMENTS)}건이 사유와 함께 코드에 명시됨",
 )
 for name, why in CONTRACT_AMENDMENTS:
     print(f"     · {name}")
+
+ok(
+    all(closed_by for _, closed_by, _ in CONTRACT_AMENDMENTS_CLOSED),
+    f"닫힌 개정 {len(CONTRACT_AMENDMENTS_CLOSED)}건에 무엇이 닫았는지가 남아 있음",
+)
+for name, closed_by, _why in CONTRACT_AMENDMENTS_CLOSED:
+    print(f"     · {name}  ← {closed_by}")
 
 
 # ---------------------------------------------------------------------------
