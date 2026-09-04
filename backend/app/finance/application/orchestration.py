@@ -63,6 +63,7 @@ from app.finance.llm.planner import (
     FinancePlanner,
     FinancePlannerContractViolation,
     FinancePlannerFailure,
+    FinancePlannerUnavailable,
     ToolAction,
     _configured_finance_llms,
 )
@@ -769,7 +770,8 @@ class FinanceAgentController:
 
         네 갈래를 구분해서 접는 것이 핵심이다.
           · 요청 계약 위반    → ERROR, 사용자가 **요청을 고치면** 되는 것
-          · Planner 실패      → ERROR, 그리고 `llm_status` 는 FALLBACK 이 된다
+          · LLM 실행 불가     → 같은 Harness 안에서 결정론 Planner 로 계속한다
+          · 그 밖의 Planner 실패 → ERROR, 그리고 `llm_status` 는 FALLBACK 이 된다
           · 입력이 없어서 못 함 → RUNTIME_NOT_READY + missing_data (다시 불러도 같다)
           · 그 밖의 예외       → ERROR (프로그램 오류를 사실로 위장하지 않는다)
 
@@ -784,6 +786,8 @@ class FinanceAgentController:
         )
         outcome = _BranchOutcome(harness=harness)
         shared_context = None
+        active_planner = self.planner
+        deterministic_planner = DeterministicFinancePlanner()
         try:
             # ★ 요청 계약 검증만 따로 감싼다. 여기서 나는 잘못은 **보내 주신 내용이
             #   맞지 않는다** 이고, 루프 안에서 나는 잘못은 우리 쪽 사정이다.
@@ -804,7 +808,26 @@ class FinanceAgentController:
                 # ★ 루프 **전에** 담는다. 실패해도 그때까지의 observation 과 재계획
                 #   횟수가 이력에 남아야 한다 — 실패한 실행일수록 흔적이 필요하다.
                 outcome.states.append(state)
-                execute_loop(state, planner=self.planner, harness=harness)
+                try:
+                    execute_loop(state, planner=active_planner, harness=harness)
+                except FinancePlannerUnavailable as unavailable:
+                    # Provider 두 곳이 모두 실행 불가한 경우만 선택 계층을 결정론으로
+                    # 내린다. 같은 state와 Harness를 이어 쓰므로 Tool/replan 예산,
+                    # duplicate guard, 승인 순서는 초기화되거나 우회되지 않는다.
+                    outcome.planner_failed = True
+                    active_planner = deterministic_planner
+                    fallback_observation = {
+                        "observation_type": "finance_planner_fallback",
+                        "planner_fallback_used": True,
+                        "planner_fallback_reason": "LLM_PROVIDERS_UNAVAILABLE",
+                        "effective_planner": deterministic_planner.model,
+                    }
+                    if unavailable.provider is not None:
+                        fallback_observation["unavailable_provider"] = unavailable.provider
+                    if unavailable.reason is not None:
+                        fallback_observation["provider_failure_reason"] = unavailable.reason
+                    state.observations.append(fallback_observation)
+                    execute_loop(state, planner=active_planner, harness=harness)
                 shared_context = state.context_cache
         except FinancePlannerFailure as exc:
             outcome.planner_failed = True
