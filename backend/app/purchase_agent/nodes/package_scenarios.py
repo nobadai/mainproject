@@ -614,7 +614,6 @@ def _document_age(context_docs: list[dict], as_of: str) -> str:
     return f"가장 최근 발간물은 {newest} 발행({days}일 전)"
 
 
-def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> list[str]:
 def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
     """``max_price`` 를 정한 날이 **장이 안 선 날의 복사값**이면 고지한다 (#213).
 
@@ -648,7 +647,7 @@ def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
     ]
 
 
-def _context_risks(loop_count: int, context_docs: list[dict]) -> list[str]:
+def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> list[str]:
     """문서 수집에서 나온 유의사항. **②가 안 돈 날은 아무 줄도 안 붙는다.**
 
     판정 기준이 ``situation`` 문자열이 아니라 **``context_loop_count``**인 이유: 알고 싶은
