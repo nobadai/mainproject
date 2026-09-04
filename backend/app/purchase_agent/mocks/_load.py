@@ -210,9 +210,39 @@ def load_snapshot_extras(item: str, as_of: date) -> dict[str, Any]:
 
 
 def load_documents(item: str, as_of: date, doc_types: list[str]) -> list[dict[str, Any]]:
-    """IO명세 §1-⑥ 형태. item · doc_type · published_at 세 필터를 모두 통과한 것만."""
+    """IO명세 §1-⑥ 형태. item · doc_type · published_at 세 필터를 모두 통과한 것만.
+
+    🔴 **이 포트만 앵커일 검증을 하지 않는다** (#151-② · 2026-09-03).
+
+      전에는 ``scenario_for(as_of)`` 를 불러 *"6개 포트가 같은 날짜 규칙을 따른다 —
+      문서만 예외를 두지 않는다"* 고 적어 뒀다. **그 관문이 ② collect_context 를
+      앵커 5일 안에 묶고 있었다.**
+
+      실 예측은 거의 항상 ``uncertain`` 이고(D+14 실측 21건 중 임계 미만 0건),
+      ``uncertain`` 인 날만 ②가 돈다 — 즉 **앵커 밖 날짜는 ②에서 죽었다.**
+      실측(2026-09-03): 실 예측·실 경락가를 물려도 여기서 ``KeyError`` 가 났다.
+
+    ★ **뺄 수 있는 이유: 이 로더는 앵커를 안 쓴다.** ``scenario_for`` 의 반환값을
+      한 번도 참조하지 않는 **순수 관문**이었다. 코퍼스는 ``item`` · ``doc_type`` ·
+      ``published_at`` 셋으로만 갈리고 앵커별로 갈리는 블록이 없다 —
+      ``load_forecast`` · ``load_quotes`` 가 ``scenario_for(as_of)['forecast']`` 로
+      **파일을 고르는** 것과 다르다. 그 둘은 관문을 유지한다.
+
+      그래서 *"앵커 밖이라 못 본다"* 로 빈 목록을 내는 쪽을 택하지 않았다 —
+      **문서는 실제로 있다.** 없다고 적으면 그건 사유가 아니라 거짓이다 (규칙 3의
+      반대 방향: 아는 값을 모른다고 하지 않는다).
+
+    ⚠️ **T0 규칙이 깨지는 것이 아니다.** ``get_context_docs`` 는 원래부터 6개 포트 중
+      **유일하게 T0 밖에서 불리는 런타임 호출**이다(정의서 §3.1.1 · IO명세 §0 ·
+      ``ports.get_context_docs`` docstring). 같은 예외의 다른 면일 뿐이고, T0 를 만드는
+      ``build_initial_state`` 는 나머지 포트로 여전히 앵커 밖을 거른다.
+
+    🔴 **대신 열리는 위험 하나 — 문서의 나이.** 앵커가 2026-09-11 까지라 그 뒤 날짜는
+      우연히 막혀 있었다. 이제 as_of 가 멀어져도 발행일 필터만 통과하면 다 보인다.
+      시세는 나이를 본다(``quotes.provenance_problem``). **문서는 임계를 정할 근거가
+      없어 판정하지 않고, ⑥이 나이를 사실로 적는다** (``_context_risks``).
+    """
     _require_item(item)
-    scenario_for(as_of)  # 6개 포트가 같은 날짜 규칙을 따른다 — 문서만 예외를 두지 않는다
     corpus = _pick(_read("documents.json"), "documents", "documents.json")
 
     known = sorted({record["doc_type"] for record in corpus})

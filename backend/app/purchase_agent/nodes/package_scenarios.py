@@ -593,6 +593,28 @@ def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
     ]
 
 
+def _document_age(context_docs: list[dict], as_of: str) -> str:
+    """가장 최근 발행일과 **as_of 로부터 며칠 전인지**. 판정하지 않고 사실만 적는다.
+
+    🔴 **관문이 우연히 막던 자리다** (#151-② · 2026-09-03). ``load_documents`` 가
+      앵커일을 검증하던 동안에는 as_of 가 2026-09-11 을 넘을 수 없어 **문서가 오래될 수
+      없었다.** 관문을 걷으면 발행일 필터만 남고, 그 필터는 *"as_of 이전"* 만 볼 뿐
+      **얼마나 이전인지는 안 본다** — 9개월 지난 관측월보도 통과한다.
+
+    ★ **임계를 두지 않는다.** 시세는 나이를 판정하지만(``quotes.provenance_problem``
+      · ``max_calendar_days_behind``) 그건 거래일 분포라는 근거가 있어서다. 문서는
+      *"며칠이면 낡았나"* 를 정할 근거가 우리에게 없다 — 없는 임계를 지어내면
+      ``is_enough`` 가 충분성을 판정하지 않는 것과 같은 자리에서 규칙이 판단하는 척하게
+      된다 (규칙 6). **사실만 적고 판단은 읽는 쪽에 남긴다.**
+
+    ⚠️ 발행일이 없는 문서는 로더가 적재를 거부하므로(IO명세 §1-⑥) 여기 오지 않는다.
+    """
+    newest = max(doc["published_at"] for doc in context_docs)
+    days = (date.fromisoformat(as_of) - date.fromisoformat(newest)).days
+    return f"가장 최근 발간물은 {newest} 발행({days}일 전)"
+
+
+def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> list[str]:
 def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
     """``max_price`` 를 정한 날이 **장이 안 선 날의 복사값**이면 고지한다 (#213).
 
@@ -655,7 +677,8 @@ def _context_risks(loop_count: int, context_docs: list[dict]) -> list[str]:
         (
             f"문서 {len(context_docs)}건 참조 — 규칙 기반 수집이라 "
             "문서 선별·충분성 판단은 미적용(우선순위 순서대로 로드). "
-            "발췌는 관련 구절 선별 없이 각 문서 서두에서 기계적으로 뜬 것이다"
+            "발췌는 관련 구절 선별 없이 각 문서 서두에서 기계적으로 뜬 것이다. "
+            f"{_document_age(context_docs, as_of)}"
         )
     ]
 
@@ -1198,7 +1221,9 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
                     *_adjustment_risks(state.get("adjustments")),
-                    *_context_risks(state["context_loop_count"], state["context_docs"]),
+                    *_context_risks(
+                        state["context_loop_count"], state["context_docs"], state["date"]
+                    ),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
                         split_decision,

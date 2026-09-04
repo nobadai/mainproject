@@ -363,9 +363,10 @@ def test_no_documents_found_is_a_different_fact_from_never_looking() -> None:
     "그날이 uncertain인가"가 아니라 "문서를 실제로 찾아봤는가"를 직접 묻는다 — situation으로
     물으면 ②의 실행 여부를 그래프 배선을 통해 간접 추론하게 된다.
     """
-    assert _context_risks(0, []) == []  # ② 미실행
-    assert "0건" in _context_risks(3, [])[0]  # 찾았는데 없음
-    assert "3건 참조" in _context_risks(3, [{"doc_id": 3}] * 3)[0]  # 찾아서 있음
+    aged = [{"doc_id": 3, "published_at": "2026-08-05"}] * 3
+    assert _context_risks(0, [], "2026-09-04") == []  # ② 미실행
+    assert "0건" in _context_risks(3, [], "2026-09-04")[0]  # 찾았는데 없음
+    assert "3건 참조" in _context_risks(3, aged, "2026-09-04")[0]  # 찾아서 있음
 
 
 def test_risk_note_does_not_claim_more_than_the_rule_does() -> None:
@@ -374,10 +375,89 @@ def test_risk_note_does_not_claim_more_than_the_rule_does() -> None:
     발췌는 문장 경계 파서가 아니라 서두 잘라내기다 — "첫 문장"이라 쓰면 소비자가 발췌 범위를
     잘못 믿는다. 내부 단계 이름도 쓰지 않는다 (H1 화면·Critic이 읽는다).
     """
-    note = _context_risks(3, [{"doc_id": 3}])[0]
+    note = _context_risks(3, [{"doc_id": 3, "published_at": "2026-08-05"}], "2026-09-04")[0]
     assert "첫 문장" not in note
     assert "서두" in note
     assert "rule_only" not in note
+
+
+# ── #151-② 앵커 종속 해제 ──────────────────────────────────────────────────
+
+
+def test_the_node_survives_a_date_outside_the_mock_anchors() -> None:
+    """🔴 **앵커 밖 날짜에서 ②가 죽지 않는다** (#151-②).
+
+    전에는 ``load_documents`` 가 ``scenario_for(as_of)`` 로 앵커일을 검증해 ``KeyError`` 를
+    던졌다. ② 는 ``uncertain`` 한 날만 도는데 **실 예측은 거의 항상 uncertain** 이라,
+    앵커 밖 날짜는 이 노드에서 통째로 죽었다 (실측 2026-09-03: 실 예측·실 경락가를 물려도
+    같은 자리에서 났다).
+
+    ⚠️ **"안 죽는다" 만 보지 않는다.** 문서를 실제로 가져오는지까지 본다 — 관문과 함께
+      코퍼스 조회가 빠져도 안 죽기 때문이다.
+    """
+    state = {
+        "item": "배추",
+        "date": "2026-08-22",  # 앵커 5일 어디에도 없다
+        "context_loop_count": 0,
+    }
+    out = collect_context(state)  # type: ignore[arg-type]
+    assert out["context_loop_count"] == 3, "루프는 앵커와 무관하게 목록을 다 돈다"
+    assert {doc["doc_id"] for doc in out["context_docs"]} == {3, 4, 5}, (
+        "8-22 이면 배추 3종이 다 보인다 — 관측월보 8월호(8-05) · 기상(8-10) · "
+        "작년동기(8-01). 9월호(DOC-6 · 9-05)만 아직 안 보인다"
+    )
+
+
+def test_the_published_at_filter_still_bites_outside_the_anchors() -> None:
+    """🔴 관문을 걷었다고 **look-ahead 방어까지 걷힌 것이 아니다.**
+
+    앵커일 검증과 발행일 필터는 다른 것을 막는데, 한 함수 안에 나란히 있어서 같이 빠질 수
+    있었다. `DOC-6`(2026-09-05 발행)이 리트머스다.
+    """
+    before = ports.get_context_docs("배추", date(2026, 9, 1), ["관측월보"])
+    after = ports.get_context_docs("배추", date(2026, 9, 20), ["관측월보"])
+    assert {d["doc_id"] for d in before} == {3}, "9-01 에는 9월호가 아직 안 보인다"
+    assert {d["doc_id"] for d in after} == {3, 6}, "9-20 이면 보인다"
+
+
+def test_the_age_of_the_newest_document_is_stated() -> None:
+    """🔴 **관문이 우연히 막던 것을 사실로 대신한다** (#151-②).
+
+    앵커가 2026-09-11 까지라 그 전에는 문서가 오래될 수 없었다. 관문을 걷으면 발행일
+    필터만 남는데 그것은 *"as_of 이전"* 만 보고 **얼마나 이전인지는 안 본다.**
+
+    ★ **판정하지 않는다.** *"낡았다"* 고 쓰면 없는 임계를 지어내는 것이다 — 사실만 적고
+      판단은 읽는 쪽에 남긴다 (``is_enough`` 가 충분성을 판정하지 않는 것과 같은 자리).
+    """
+    docs = [{"doc_id": 3, "published_at": "2026-08-05"}]
+    near = _context_risks(1, docs, "2026-08-06")[0]
+    far = _context_risks(1, docs, "2027-06-01")[0]
+
+    assert "2026-08-05 발행(1일 전)" in near
+    assert "2026-08-05 발행(300일 전)" in far
+    for note in (near, far):
+        assert "낡" not in note and "오래" not in note, "규칙은 나이를 판정하지 않는다"
+
+
+def test_the_age_uses_the_newest_document_not_the_first() -> None:
+    """여럿이면 **가장 최근**이다. 첫 항목을 쓰면 목록 순서에 답이 좌우된다."""
+    docs = [
+        {"doc_id": 5, "published_at": "2026-08-01"},
+        {"doc_id": 3, "published_at": "2026-08-05"},
+        {"doc_id": 4, "published_at": "2026-08-10"},
+    ]
+    assert "2026-08-10 발행" in _context_risks(3, docs, "2026-08-20")[0]
+
+
+def test_zero_documents_says_nothing_about_age() -> None:
+    """🔴 **0건일 때 나이를 적으면 없는 문서의 발행일을 지어내게 된다.**
+
+    두 사유가 서로 다른 사실을 말한다 — "참조할 것이 없다" 와 "참조한 것이 오래됐다" 는
+    같이 설 수 없다. ⑦ 5갈래가 *"행동은 같고 왜가 다르다"* 로 갈린 것과 같은 형태다.
+    """
+    note = _context_risks(3, [], "2027-06-01")[0]
+    assert "0건" in note
+    assert "발행" not in note and "일 전" not in note
 
 
 # ── 실패 모드 (h) 환각 / (i) 읽고 안 씀 ────────────────────────────────────
