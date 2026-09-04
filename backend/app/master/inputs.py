@@ -113,10 +113,36 @@ def collect_inputs(item: str, as_of: date) -> MasterInputs:
 
 
 def load_forecast(item: str, as_of: date) -> SourcedInput:
-    """ML 예측. **`generated_at <= as_of` 인 최신 배치만 본다.**
+    """ML 예측. **`as_of` 당일 배치만 쓴다.**
 
     ★ 미래 배치를 집으면 백테스트 성적이 통째로 무효가 된다 (look-ahead).
-      뷰가 `as_of` 컬럼을 갖고 있으므로 그 이하만 고른다.
+      뷰가 `as_of` 컬럼을 갖고 있으므로 **그 이하만** 고른다 — 이 조건은 그대로다.
+
+    🔴 **그런데 상한이 없었다** (2026-09-04).
+
+      전 판의 docstring 은 *"`generated_at <= as_of` 인 최신 배치만 본다"* 라고만
+      적어 두어, **얼마나 옛것이어도 되는지**가 안 보였다. 실제로는 그날 배치가
+      없으면 조용히 옛 배치를 집고 `MEASURED` 로 실어 보냈다. 실측(배추):
+
+      .. code-block:: text
+
+          as_of        집은 배치      지연     등급
+          2026-09-04   2026-09-04     0일      MEASURED   ← 정상
+          2026-08-25   2026-01-27     210일    MEASURED   ← 🔴 결함
+          2026-08-01   2026-01-27     186일    MEASURED   ← 🔴 결함
+          2026-06-01   2026-01-27     125일    MEASURED   ← 🔴 결함
+
+      **210일 전 예측으로 오늘 매입안을 만들었다.** `#227` 이 *"ML DB 가 죽으면
+      선다"* 를 만들었는데, **배치가 없는 날은 죽은 것으로 안 쳤다.**
+
+    ★ 이제 집은 행의 `as_of` 가 요청 `as_of` 와 **같을 때만** `MEASURED` 다.
+      하루만 밀려도 안 쓴다. 다르면 `MISSING` 이고, `#227` 이 낸 기존 경로
+      (MISSING → 매입 `RUNTIME_NOT_READY` → `E4_NOT_STARTED`)를 그대로 탄다.
+
+    ★ **공휴일 달력을 심지 않는다.** ML 배치 유무가 곧 개장 여부다 — 배치일
+      실측에서 평일은 `base_dt == 그날` 로 배치가 있고, 2026-01-01(신정) 에만
+      배치가 없어 간격이 2일로 벌어졌다. 달력을 따로 두면 그 달력이 틀리는 날이
+      온다.
     """
     try:
         row = _forecast_from_db(item, as_of)
@@ -124,6 +150,8 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
         return _forecast_missing(f"DB 조회 실패 ({error})")
     if row is None:
         return _forecast_missing(f"{as_of} 이전 예측 배치가 없다")
+    if row["as_of"] != as_of:
+        return _forecast_missing(_stale_batch_why(as_of, row["as_of"]))
     return SourcedInput(
         key="forecast",
         payload=_forecast_payload(row),
@@ -134,6 +162,16 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
 
 
 def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
+    """`as_of` **이하** 최신 배치 한 행. **당일인지는 여기서 안 본다.**
+
+    ★ `as_of <= %s` 를 걷으면 미래 배치를 집는다 (look-ahead). 그러면 백테스트
+      성적이 통째로 무효가 되므로 이 조건은 남는다.
+
+    🔴 **그러나 이 조회에는 지연 상한이 없다.** 그날 배치가 없으면 210일 전
+      배치가 그대로 올라온다 (2026-08-25 → 2026-01-27, 실측 2026-09-04).
+      **당일인지를 거르는 것은 `load_forecast` 의 몫이다** — 조회는 후보를
+      집어 오고, 쓸지 말지는 부르는 쪽이 정한다.
+    """
     query = sql.SQL("""
         SELECT * FROM {}.v_ml_price_forecast
          WHERE item = %s AND as_of <= %s AND target_kind = 'AUC'
@@ -142,6 +180,21 @@ def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
     """).format(sql.Identifier(get_db_schema()))
     row = fetch_one(query, (item, as_of))
     return dict(row) if row else None
+
+
+def _stale_batch_why(as_of: date, batch_as_of: date) -> str:
+    """당일 배치가 아니라는 사유. **셋을 다 적는다** — 요청일 · 최신 배치일 · 지연일수.
+
+    사람이 읽고 *"언제 것을 집을 뻔했는지"* 를 알아야 한다. 지연일수가 없으면
+    두 날짜를 눈으로 빼야 하고, 210일과 1일이 같은 문장으로 보인다.
+
+    ⚠️ **원인을 단정하지 않는다.** 당일 배치가 없는 이유는 공휴일일 수도, ML 이
+      안 돈 것일 수도, 적재가 늦은 것일 수도 있는데 **마스터는 그 셋을 구분할
+      수단이 없다.** 뷰에는 "배치가 있다/없다" 만 있고 "왜 없다" 가 없다.
+      사유가 원인을 단정하면 다음 사람이 엉뚱한 데를 판다 — 사실만 적는다.
+    """
+    delay = (as_of - batch_as_of).days
+    return f"{as_of} 당일 예측 배치가 없다 (가장 최신 배치 {batch_as_of} · {delay}일 전)"
 
 
 def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
