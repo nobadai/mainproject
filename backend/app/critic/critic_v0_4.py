@@ -19,12 +19,25 @@ v0.4 설계서가 요구하는 6레이어(L0~L5)로 재배치하고, 설계서 �
   L5  논리 일관성             LLM   6   ← 기존 critic.run_l4. FAIL 대신 CONCERN
 
 ────────────────────────────────────────────────────────────────────────────
-★ contracts_core.py 는 FROZEN 이므로 건드리지 않는다.
+★ 이 파일의 사이드카는 **contracts/core.py 가 FROZEN 이던 시절의 산물**이다.
 
-  설계서가 요구하는 `CheckResult.inputs_used` 와 부서 산출 필드 목록은
-  계약에 없다. 계약을 고치는 대신 **사이드카**(`DeptMeta`)로 받는다.
-  계약 개정(v1.3)이 이뤄지면 DeptMeta 를 걷어내고 CheckResult 를 직접 읽으면 된다.
-  개정 대상 목록은 이 파일 맨 아래 `CONTRACT_AMENDMENTS` 에 있다.
+  ① 그때 — 설계서가 요구하는 `CheckResult.inputs_used` 와 부서 산출 필드 목록이
+     계약에 없는데 계약을 고칠 수 없었다. 그래서 **사이드카**(`DeptMeta`)로 받았다.
+     `DeptMeta` 가 여기 있는 이유가 이것이다. 유래를 지우지 않는다.
+
+  ② 지금 — 계약은 FROZEN 이 아니다. 그 뒤로 최소 두 번 개정됐다.
+
+         v1.2.1   ArrivalLeg 신설 + ApprovedPurchaseCommitment.arrival_schedule
+         #265     SplitLeg.amount_krw 신설
+
+  ③ 그러니 — 남은 개정은 **사이드카를 늘리는 쪽이 아니라 계약을 고치는 쪽**으로 간다.
+     새 사실이 계약에 없으면 먼저 계약 개정을 검토한다. 사이드카는 그것이
+     막혔을 때의 차선이지 기본값이 아니다. `DeptMeta` 를 걷어내는 것은 계약이
+     `inputs_used`·`produced_fields` 를 받은 뒤의 일이다.
+
+  남은 개정 목록은 이 파일 맨 아래 `CONTRACT_AMENDMENTS` 에 있다.
+  닫힌 것은 `CONTRACT_AMENDMENTS_CLOSED` 로 옮긴다 — 목록이 낡으면
+  `tests/critic/test_contract_amendments_are_open.py` 가 운다.
 ────────────────────────────────────────────────────────────────────────────
 """
 
@@ -1107,8 +1120,19 @@ def run_critic_b(
 
 
 # ---------------------------------------------------------------------------
-# 계약 개정 요청 목록 — contracts_core.py 가 FROZEN 이라 여기 적어 둔다
+# 계약 개정 요청 목록
 # ---------------------------------------------------------------------------
+#
+# 처음에는 contracts/core.py 가 FROZEN 이라 여기 적어 두는 대기표였다.
+# 계약이 열린 지금은 **아직 안 된 일의 목록**이다 — 여기 있는 것은 사이드카로
+# 우회할 것이 아니라 계약을 고칠 것이다 (파일 머리 ③).
+#
+# 🔴 닫힌 항목을 그냥 지우지 않는다. 지우기만 하면 왜 없어졌는지 아무 데도 안 남고,
+#   다음 사람이 같은 사이드카를 또 만든다. 아래 `CONTRACT_AMENDMENTS_CLOSED` 로
+#   옮기고 **무엇이 닫았는지**를 같이 적는다.
+#
+# `tests/critic/test_contract_amendments_are_open.py` 가 항목마다 계약을 직접
+# 들여다본다. 누가 개정을 구현하는 날 그 검사가 red 가 되어 목록에서 걷도록 만든다.
 
 CONTRACT_AMENDMENTS: tuple[tuple[str, str], ...] = (
     (
@@ -1131,8 +1155,17 @@ CONTRACT_AMENDMENTS: tuple[tuple[str, str], ...] = (
         "CriticVerdict.status: PASS|CONCERN|FAIL",
         "설계서 §1 불일치 ③. UI v1.3 에도 critic_verdict·critic_issues 영역이 필요.",
     ),
+)
+
+
+#: 계약에 반영되어 **닫힌** 개정. (요청, 무엇이 닫았나, 원래 왜 필요했나)
+#:
+#: 요청 문구를 그대로 남긴다 — 이유가 사라지면 다음 사람이 "이 필드 왜 있지" 로
+#: 되돌아온다. `CONTRACT_AMENDMENTS` 와 이 표는 같은 검사가 함께 본다.
+CONTRACT_AMENDMENTS_CLOSED: tuple[tuple[str, str, str], ...] = (
     (
         "ApprovedPurchaseCommitment.arrival_schedule",
+        "contracts/core.py v1.2.1 — ArrivalLeg 신설 + arrival_schedule 필드",
         (
             "설계서 §1 불일치 ①. SplitLeg 는 회차별 도착일을 갖는데 Commitment 는 단수라 "
             "사이클 B overlay 에서 날짜 분포가 소실된다."
