@@ -1,7 +1,7 @@
 """① classify_situation + compute_allowed_axes (계산, LLM 없음) — 상세설계 §4-①."""
 
 import operator
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from itertools import pairwise
 from typing import Any
 
@@ -36,6 +36,39 @@ def judgment_row(forecast: dict, ci_judgment_day: int) -> dict[str, Any]:
             f"forecast horizon {len(daily)}일로는 D+{ci_judgment_day} 판정을 할 수 없다"
         )
     return daily[ci_judgment_day - 1]
+
+
+#: 판단에서 **빼야 하는** 게이트 사유. ML 회신 2026-08-27 (#57 코멘트 09:49) ::
+#:
+#:     quality      → 제외    값 자체를 못 믿는다
+#:     lead_time    → 사용    "값이 나쁜 게 아니라 어제 가격이 이미 정답에 가까운 구간"
+#:     None         → 사용    게이트가 안 걸렸다
+#:
+#: 🔴 **부분 문자열로 본다.** 표에 ``lead_time+quality`` 복합값이 25건 있어
+#:   ``== "quality"`` 로 비교하면 그 25건을 놓친다 (실측 2026-09-03).
+EXCLUDED_GATE_REASON = "quality"
+
+
+def is_gate_excluded(row: Mapping[str, Any]) -> bool:
+    """이 예측 행을 판단에서 빼야 하나 — **``gate_reason`` 으로만 본다.**
+
+    🔴 **``is_gated`` 를 안 본다.** ML 이 *"둘은 다른 축"* 이라고 확정했다 (ⓒ · 8/27) —
+      ``is_gated`` 는 **출처**(모델이 냈나, 어제 가격을 그대로 썼나)이고
+      ``use_recommended`` 는 **사용 권고**다. 게이트됐다는 것 자체는 배제 사유가 아니다.
+
+    ⚠️ **``is_gated`` 로 걸렀다면 터졌다.** 실측(3품목 × 7배치)::
+
+          보수(D=2) 창 21개  →  전부 100% gated (AUC 는 offset 1~5 가 lead_time)
+          gated 를 빼면      →  max_price 가 21조합에서 None
+
+      ``max_price`` 는 컷 기준이라(규칙 5) ``None`` 이면 **보수안이 통째로 판정
+      불가**가 된다. 사유를 안 보고 표시만 봤을 때 생기는 일이다.
+
+    ★ **값이 없으면 제외하지 않는다** (규칙 3). mock 예측에는 이 칸이 아예 없고,
+      *"게이트 정보가 없다"* 와 *"게이트가 quality 다"* 는 다른 사실이다.
+    """
+    reason = row.get("gate_reason")
+    return isinstance(reason, str) and EXCLUDED_GATE_REASON in reason
 
 
 def compute_ci_width(forecast: dict, ci_judgment_day: int) -> float:
@@ -110,66 +143,52 @@ def estimate_daily_demand(confirmed_orders: dict, constraints: dict) -> float:
 def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
     """신뢰구간 폭으로 stable/uncertain을 가르고, 그날 허용 축을 계산한다.
 
-    🔴 **"이 예측을 써도 되나"를 우리는 안 묻는다** (실측 2026-09-03).
-      ML 이 신뢰도 플래그 셋을 붙여 보내는데 **매입은 하나도 읽지 않는다**::
+    🟢 **"이 예측을 써도 되나"를 먼저 묻는다** (#213 · 2026-09-04).
 
-          use_recommended   이 조합에서 우리 모델이 "어제 값 그대로"보다 나은가
-          is_gated          이 행을 판단에 쓰지 말라는 표시
-          gate_reason       그 사유 — lead_time(쓸 수 있다) / quality(빼라)
+      ML 이 신뢰도 플래그 넷을 붙여 보내고 **넷 다 payload 에 온다**::
 
-      층이 다르기 때문이다 (#67 본문)::
+          use_recommended   조합(품목 × 계열)별   forecast 최상위    이 예측을 쓸 수 있나
+          gate_reason       행(offset)별         daily 원소 안      왜 게이트됐나
+          is_gated          행별                 daily 원소 안      출처 (모델 vs 어제 값)
+          is_filled         행별                 daily 원소 안      장이 안 선 날의 복사값
 
-          ML    use_recommended · is_gated   "이 예측을 쓸 수 있나"   ← 앞
-          매입  ci_width                     "얼마나 자신 있나"       ← 뒤
+      층이 다르다 (#67 본문)::
 
-      **앞 질문을 건너뛰고 뒤 질문만 하고 있다.**
+          ML    use_recommended · gate_reason   "이 예측을 쓸 수 있나"   ← 앞
+          매입  ci_width                        "얼마나 자신 있나"       ← 뒤
 
-    ⚠️ **지금은 안 걸린다 — 우연이 아니라 우리가 AUC 만 보기 때문이다.**
+      **앞 질문은 어댑터가 한다** (``adapter.validate_forecast``). 여기까지 온
+      예측은 이미 *"써도 된다"* 가 확인된 것이라, 이 노드는 뒤 질문만 한다.
 
-          use_recommended = false   양파 × WHSL(중도매) 하나뿐. AUC 는 세 품목 다 true
-          gate_reason = quality     WHSL 에만 있다. AUC 는 lead_time 뿐
-          is_gated (AUC)            offset 1~5 에만. 판정일 D+14 는 false
+    🔴 **이 자리에 "셋 다 읽고 싶어도 못 읽는다" 고 적었었다 (2026-09-04 정정).**
 
-      계열이 늘거나 AUC 가 false 가 되는 날 **아무도 모른다** — 값이 오고 계산도 되니
-      에러가 안 난다.
+      그때 적은 순서는 이랬다::
 
-    🔴 **읽고 싶어도 지금은 못 읽는다 — 그런데 셋이 같은 층이 아니다.**
+          ①  뷰       daily 에 gate_reason 을 더한다        ✅ #220 (09-03 19:20)
+          ②  마스터   use_recommended 를 나른다             ✅ #208 (09-03 17:50)
+          ③  매입     읽어서 판정 앞에 건다                  ← 이 판
 
-      전에는 여기 *"payload 에 칸이 없다"* 한 문장으로 뭉갰다. **배선이 틀리는
-      뭉갬이다** (현서님 리뷰 2026-09-03)::
+      ①②는 **우리가 "못 읽는다"고 적던 그날 남이 이미 끝냈다.** 우리 정정 커밋이
+      ②보다 19분 늦었고, 남이 고친 것을 안 보고 우리 판단을 옮겨 적었다.
+      ⚠️ 그리고 ②의 처방도 틀렸었다 — 마스터는 ``_FORECAST_ENVELOPE_KEYS`` 가 아니라
+      ``_forecast_payload`` 에 넣었다. 앞은 *"ML 봉투에서 내려보내는 필드"* 라
+      **ML 이 안 보낸 키를 얹으면 받는 쪽이 ML 이 준 것으로 읽는다.**
 
-          use_recommended   조합(품목 × 계열)별   봉투/품목 블록        ← 마스터 몫
-          is_gated          행(offset)별         DailyPoint            ← ML 몫
-          gate_reason       행(offset)별         DailyPoint            ← ML 몫
+    ⚠️ **지금은 아무것도 안 걸린다 — 우연이 아니라 우리가 AUC 만 보기 때문이다.**
+      실측 3품목 × 7배치 = 21조합 (2026-09-04)::
 
-      ``_FORECAST_ENVELOPE_KEYS``(``master/flow.py``)는 **품목 블록으로 내려보내는
-      봉투 공통 필드**다. 거기에 ``is_gated`` 를 넣으면 **행별 값을 품목 하나로
-      뭉개게** 된다 — offset 1~5 만 gated 인 지금 상태에서 **그 품목 전체가 gated**
-      로 읽힌다.
+          use_recommended = false   양파 × WHSL 하나뿐. AUC 는 21조합 다 true
+          gate_reason = quality     WHSL 에만 101건. AUC 는 lead_time 75건뿐
+          판정일(D+14) is_gated     21조합 다 false
+          판정일(D+14) is_filled    21조합 다 false
 
-      ⚠️ **위 실측이 바로 그 근거인데 우리가 그걸 뭉갰다.** *"is_gated (AUC) 는
-        offset 1~5 에만"* 이라고 적어 놓고, 같은 문단에서 셋을 한 칸 문제로 묶었다.
+      **계열이 늘거나 AUC 에 quality 가 생기는 날 자리가 이미 있다.** 값이 오고
+      계산도 되니 에러가 안 나는 종류라, 그날 아무도 모르는 것이 원래 문제였다.
 
-      순서가 있다::
-
-          ①  ML      DailyPoint 에 is_gated · gate_reason 을 담는다
-          ②  마스터   use_recommended 를 _FORECAST_ENVELOPE_KEYS 에 더한다
-          ③  매입     읽어서 판정 **앞에** 건다
-
-      ``use_recommended`` 처리는 IO명세 §8 이 **#57** 로 배정해 뒀다.
-
-      ⚠️ **#57 은 본문이 아니라 코멘트에 있다.** 본문(*"rise_rate 분모를 당일 시세
-        조회로 전환"*)에는 ``use_recommended`` 가 **0건**이라, 제목만 보면 딴 이슈로
-        읽힌다. 실제 배정은 코멘트 넷이다::
-
-            2026-08-27 05:23   "착수 시 수신 검증에 is_filled(판정일)·use_recommended 처리 포함"
-            2026-08-27 08:45   ML 실계약 확정 — 같은 문장
-            2026-08-27 09:20   "is_filled 확정 편입 … use_recommended 와 함께 수신 검증에 포함"
-            2026-09-01 04:48   남는 작업 셋 — "is_filled(판정일 복사값) · use_recommended 처리"
-
-    ★ 같은 가족인 ``is_filled`` 는 **다른 방식으로 막아 뒀다** — 판정일이 주(週)의
-      배수라 복사값을 안 밟는다(``judgment_row`` · ``test_judgment_day.py``).
-      그쪽은 **날짜 선택으로** 피했고, 이 셋은 **아직 안 피했다.**
+    ★ ``is_filled`` 는 **판정에 안 쓴다.** 판정일이 주(週)의 배수라 복사값을 안 밟고
+      (``judgment_row`` · ``test_judgment_day.py``), ML 도 이 값으로 무엇을 하라는
+      지시를 준 적이 없다. 대신 ``max_price`` 창에는 섞이므로 ⑥이 고지만 붙인다
+      (``package_scenarios._forecast_risks``).
     """
     constraints = load_constraints()
     rules = constraints["situation"]

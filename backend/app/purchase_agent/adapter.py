@@ -30,6 +30,7 @@ from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     estimate_daily_demand,
+    is_gate_excluded,
 )
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
@@ -209,7 +210,59 @@ def validate_forecast(forecast: Any, as_of: date) -> list[str]:
         if any(row.get(key) is None for key in ("predicted", "lower", "upper")):
             missing.append("forecast.daily")
             break
+
+    if "forecast.daily" not in missing:
+        missing.extend(_unusable_forecast_names(forecast, daily))
     return sorted(set(missing))
+
+
+#: 값이 **왔는데 쓰지 말라고 표시된** 입력. ``missing_data`` 에 이 이름만 실리면
+#: 사유 문장이 *"없다"* 가 아니라 *"쓰지 말라고 왔다"* 가 된다 (``_generate_scenarios``).
+UNUSABLE_FORECAST_NAMES: tuple[str, ...] = (
+    "forecast.use_recommended",
+    "forecast.daily.gate_reason",
+)
+
+
+def _unusable_forecast_names(forecast: Mapping[str, Any], daily: list[Any]) -> list[str]:
+    """**왔는데 쓰면 안 되는** 예측인가 (#213 · ML 회신 2026-08-27).
+
+    ``missing_data`` 는 원래 *"안 왔다"* 를 담는 칸인데 여기 둔다. **같은 함수에 선례가
+    있다** — ``generated_at > as_of`` 도 값이 왔지만 쓰면 look-ahead 라 ``missing`` 에
+    넣는다. *"쓸 수 없는 입력"* 이라는 점이 같고, 봉투가 ``RUNTIME_NOT_READY`` 에
+    요구하는 것은 **이름**이지 부재의 증명이 아니다.
+
+    ⚠️ **노드에서 예외를 던지지 않는 이유.** 노드가 죽으면 ``missing_data`` 가 비어
+      마스터는 *"매입이 왜 안 돌았는지"* 를 못 받는다. 봉투도 빈 ``missing_data`` 의
+      ``RUNTIME_NOT_READY`` 를 거부한다 (``ContractViolation``).
+
+    거는 것은 둘이다::
+
+        use_recommended is False    ML: "FALSE 면 쓰지 마세요" — 조합 전체가 무효
+        판정일 행이 quality 게이트   ci_width 를 그 행 하나로 재므로 판정이 성립 안 한다
+        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 컷 기준)
+          quality 게이트
+
+    ★ **세 번째가 가장 짧은 창인 이유**: 큰 창은 짧은 창을 포함하므로, 짧은 창에 쓸
+      행이 하나라도 있으면 ``usable_forecast_window`` 는 어느 안에서도 안 빈다.
+
+    🔴 **``None`` 은 안 건다** (규칙 3). mock 예측에는 이 칸들이 아예 없고,
+      *"권고가 없다"* 와 *"쓰지 말라고 했다"* 는 다른 사실이다. ``is False`` 로 본다.
+    """
+    names: list[str] = []
+    if forecast.get("use_recommended") is False:
+        names.append("forecast.use_recommended")
+
+    constraints = load_constraints()
+    day = constraints["situation"]["ci_judgment_day"]
+    if len(daily) >= day and is_gate_excluded(daily[day - 1]):
+        names.append("forecast.daily.gate_reason")
+
+    shortest = min(constraints["coverage_days"]["by_label"].values())
+    window = daily[:shortest]
+    if window and all(is_gate_excluded(row) for row in window):
+        names.append("forecast.daily.gate_reason")
+    return names
 
 
 #: 물류가 로트마다 싣는 키 (`master/adapters/logistics.py` · 2026-08-28 실측).
@@ -936,11 +989,21 @@ def _generate_scenarios(
         #   재무·물류도 이 자리에 payload를 안 싣는다(둘 다 ``_not_ready()``). 무엇이
         #   없는지는 ``missing_data``가, 왜인지는 ``reasoning``이 말한다 — 봉투는
         #   ``RUNTIME_NOT_READY``에 ``missing_data``가 비지 않을 것만 요구한다.
+        #
+        # 🔴 **"안 왔다" 와 "쓰지 말라고 왔다" 를 문장으로 가른다** (#213).
+        #   ``missing_data`` 이름은 어느 쪽이든 실리지만, 사람이 읽는 사유가 같으면
+        #   *"ML 이 이 예측을 쓰지 말라고 했다"* 가 *"마스터가 값을 안 보냈다"* 로
+        #   읽힌다 — 마스터가 사용자에게 요청할 대상이 서로 다르다.
+        unusable = [name for name in missing if name in UNUSABLE_FORECAST_NAMES]
         reply = _reply(
             request,
             runtime_status="RUNTIME_NOT_READY",
             business_status="skipped",
-            reasoning="필수 입력이 없어 시나리오를 만들지 못했다.",
+            reasoning=(
+                "예측을 만든 쪽이 오늘 값을 쓰지 말라고 표시해 시나리오를 만들지 않았다."
+                if unusable and len(unusable) == len(missing)
+                else "필수 입력이 없어 시나리오를 만들지 못했다."
+            ),
             missing_data=tuple(missing),
         )
         return reply, _metadata(request, None)
