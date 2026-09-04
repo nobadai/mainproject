@@ -429,8 +429,8 @@ class MasterVerifier:
         """🔴 **판정을 못 낸 조언자가 화면에서 사라지지 않게 한다.**
 
         ★ **실측에서 나왔다 (2026-08-31).** 물류가 기준일 불일치를 fail-closed 로
-          막으면서 `runtime_status=ERROR` · `business_status=skipped` 를 낸다. 그때
-          세 곳이 서로 다르게 말하고 있었다.
+          막으면서 그때 `runtime_status=ERROR` · `business_status=skipped` 를 냈다.
+          그때 세 곳이 서로 다르게 말하고 있었다.
 
         ```text
         화면     answer.py 가 라벨 없는 판정을 continue 로 건너뛴다 → 물류가 통째로 사라진다
@@ -440,6 +440,25 @@ class MasterVerifier:
 
           **"물어보지 않았다" 와 "물어봤는데 못 답했다" 가 화면에서 같아 보였다.**
           앞엣것은 마스터 배선 문제고 뒤엣것은 그 부서 문제라 완전히 다른 얘기다.
+
+        ★ **지금 물류가 내는 값은 `RUNTIME_NOT_READY` 다 (2026-09-04 물류 변경).**
+          `ERROR` 는 *"실행이 실패했다"* 라 다시 불러 볼 가치가 있고
+          (`runner.retryable`), `RUNTIME_NOT_READY` 는 *"입력이 없어서 못 낸 답이다"*
+          라 다시 불러도 같다. 기준일 불일치는 뒤엣것이라 물류가 바꿨고 마스터도
+          동의한다. 같이 `missing_data = ("proposal.meta.as_of",)` 가 붙는다.
+
+        ★ **그래도 이 함수는 안 바뀐다.** 아래 분기가 두 값 모두에서 참이다 —
+          `RUNTIME_NOT_READY` 도 `READY` 가 아니고 `business_status` 도 여전히
+          `skipped` 다. *"부서가 값을 바꿨는데 왜 안 고쳤나"* 의 답이 이것이다.
+
+          ```python
+          if runtime != "READY" or status in ("", "skipped")
+          ```
+
+          🔴 **여기서 `ERROR` 만 따로 알아보게 적지 않는다.** 이 함수가 재는 것은
+          *"판정을 냈나"* 뿐이고, 못 낸 이유를 나누는 것은 부서 어휘의 일이다.
+          런타임 값 하나하나를 여기 적어 두면 부서가 값을 늘릴 때마다 이 자리가
+          따라 낡는다 — 오늘 이 주석이 낡았던 것이 정확히 그 모양이다.
 
         ★ `findings` 가 아니라 `concerns` 다. 매입을 다시 불러도 안 고쳐진다 —
           제안 기준일을 맞추거나 그 부서를 고쳐야 하는 일이라 **사람이 봐야 한다.**
