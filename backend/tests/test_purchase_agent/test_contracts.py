@@ -558,7 +558,24 @@ def test_feedback_attempt_max_is_declared_but_not_yet_consumed_here() -> None:
 
 
 def test_ci_width_boundary_is_explicit() -> None:
-    """상세설계 §4-①: ``< 0.08`` stable / ``>= 0.08`` uncertain — 경계값을 못박는다."""
+    """🔴 **선언 감시자다 — 판정 검사가 아니다.** 값이 바뀌면 여기가 운다.
+
+    ``ci_width_threshold`` 는 아직 확정 전인 **mock 시연값**이고(``constraints.yaml``
+    §situation · ``#127`` 의 ``s`` 역산이 나와야 정해진다), 실측 분포(0.254~1.107)는
+    통째로 이 값 위에 있다. 즉 **언젠가 반드시 바뀔 값**이고, 그날 바뀌었다는 사실이
+    누구에게도 안 보이면 안 된다. 그래서 한 줄 남긴다 — 값을 고치려면 이 검사도 같이
+    고치게 되어 **의식적인 편집**이 된다.
+
+    ⚠️ **이 단언은 "코드가 설정을 읽는다"를 증명하지 않는다** (규칙 8). 실측으로 ①이
+      ``constraints`` 를 안 읽고 ``0.08`` 을 박아도 스위트 1,117건이 전부 통과했다
+      (2026-09-04). 그 증명은 ``test_mocks.test_the_verdict_follows_the_declared_threshold``
+      가 한다 — 선언을 흔들고 판정이 따라 움직이는지 본다. 둘은 **짝이고, 둘 다 있어야
+      한다**: 하나는 값이 조용히 바뀌는 것을, 하나는 값이 안 읽히는 것을 막는다.
+
+    🟢 **판정 검사들은 더 이상 이 값에 안 걸린다** (현서님 §1.4-②③). 임계를 흔드는
+      스윕에서 이 검사가 우는 것은 **정상이다** — 우라고 둔 자리다. 예전에는 그 스윕에서
+      25건이 함께 울었고, 그중 임계를 재려던 것은 몇 건뿐이었다.
+    """
     situation = _constraints()["situation"]
     assert situation["ci_width_threshold"] == 0.08
     assert situation["ci_width_comparison"] == ">="

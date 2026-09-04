@@ -16,9 +16,12 @@ from pathlib import Path
 
 import pytest
 from _fixtures import AS_OF, _proposal
+from _injection import INJECTED_THRESHOLD, swap_threshold
 
 from app.purchase_agent import mocks, ports
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.nodes.classify_situation import classify_situation
+from app.purchase_agent.state import build_initial_state
 
 MOCK_DIR = Path(mocks.__file__).parent
 MOCK_FILES = sorted(MOCK_DIR.glob("*.json"))
@@ -187,20 +190,69 @@ def test_judgment_day_row_is_the_fourteenth_calendar_day(item: str, as_of: date)
 @pytest.mark.parametrize(("as_of", "expected"), SITUATION_BY_ANCHOR, ids=lambda v: str(v))
 @pytest.mark.parametrize("item", mocks.ITEMS)
 def test_judgment_day_ci_width_classifies_each_scenario(
-    item: str, as_of: date, expected: str
+    item: str, as_of: date, expected: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """실제 판정 경로(기준일 한 줄)로 계산해도 시나리오 이름과 같은 결과가 나오는가.
+    """시나리오 이름이 뜻하는 판정을 **① 노드가 실제로** 내는가.
 
-    아래 ``max``/``min`` 검사는 전 구간을 보므로 더 강하지만, ① 노드가 쓸 식은 이것이다.
-    둘을 함께 두는 이유: 전 구간 검사는 데이터가 고르다는 걸, 이 검사는 **확정된 규칙이
-    의도한 판정을 낸다**는 걸 각각 지킨다.
+    🔴 **임계는 검사가 주입한다** (현서님 §1.4-②). 예전엔 선언값을 읽어 mock 밴드와
+      비교했는데, 그러면 이 검사가 재는 것이 *"mock 분포가 선언값을 넘나"* 가 된다.
+      선언값은 아직 확정 전인 시연값이라(``constraints.yaml`` §situation · ``#127``)
+      그게 움직이는 날 시나리오 이름과 아무 상관 없이 무너진다 — 실제로 임계를 0.15 로
+      올리자 이 검사 4건이 함께 깨졌다 (2026-09-04 스윕).
+
+    지금 재는 것은 **임계보다 크면 uncertain, 작으면 stable 로 갈리는가** 다.
+    mock 값이 얼마인지는 이 검사의 관심이 아니다.
+
+    판정식을 여기서 다시 쓰지 않고 ① 노드를 부른다 — 재구현하면 노드가 비교 방향을
+    잘못 읽어도 검사는 자기 식으로 맞는 답을 내서 통과한다.
     """
-    situation = load_constraints()["situation"]
-    exceeds = _COMPARISONS[situation["ci_width_comparison"]]
-    row = _judgment_row(item, as_of)
-    ci_width = (row["upper"] - row["lower"]) / row["predicted"]
-    verdict = "uncertain" if exceeds(ci_width, situation["ci_width_threshold"]) else "stable"
-    assert verdict == expected
+    swap_threshold(monkeypatch, INJECTED_THRESHOLD)
+    assert classify_situation(build_initial_state(item, as_of))["situation"] == expected
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected"),
+    [(0.5, "stable"), (0.01, "uncertain")],
+    ids=["전_밴드보다_높은_임계", "전_밴드보다_낮은_임계"],
+)
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_the_verdict_follows_the_declared_threshold(
+    as_of: date, threshold: float, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **선언을 바꾸면 판정이 따라 움직이는가** — 규칙 8 의 변이 검사.
+
+    이 검사가 없어서 **임계가 설정에서 온다는 것을 아무도 증명하지 않고 있었다.**
+    실측(2026-09-04): ① 이 ``constraints`` 를 안 읽고 ``0.08`` 을 박도록 갈아 끼워도
+    ``1117 passed`` — 한 건도 울지 않았다. ``ci_width_threshold == 0.08`` 같은 값
+    비교는 선언이 있다는 것만 보여줄 뿐 코드가 그걸 쓴다는 증명이 아니다.
+
+    양쪽 방향을 다 흔든다. 한쪽만 두면 반대편이 죽어도 모른다 —
+    ``test_judgment_day.test_a_bad_declaration_makes_the_check_cry`` 와 같은 이유다.
+    """
+    swap_threshold(monkeypatch, threshold)
+    for item in mocks.ITEMS:
+        state = build_initial_state(item, as_of)
+        assert classify_situation(state)["situation"] == expected
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_the_boundary_value_itself_follows_the_declared_comparison(
+    item: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """경계값 **자신**이 어느 쪽인지는 ``ci_width_comparison`` 이 정한다 (``>=`` 면 uncertain).
+
+    임계를 그날 구간폭과 **똑같이** 맞춰 경계를 만든다. mock 에 경계 앵커를 새로 만들지
+    않고 경계를 보는 유일한 방법이고, 밴드를 안 건드린다는 조건과도 맞는다.
+
+    ⚠️ 값 비교(``comparison == ">="``)로는 이걸 못 잡는다 — 노드가 ``>`` 를 하드코딩해도
+      선언은 그대로 ``>=`` 라 통과한다. 선언을 읽어 **기대를 그 선언에서 만든다.**
+    """
+    row = _judgment_row(item, UNCERTAIN)
+    boundary = (row["upper"] - row["lower"]) / row["predicted"]
+    exceeds = _COMPARISONS[load_constraints()["situation"]["ci_width_comparison"]]
+    swap_threshold(monkeypatch, boundary)
+    expected = "uncertain" if exceeds(boundary, boundary) else "stable"
+    assert classify_situation(build_initial_state(item, UNCERTAIN))["situation"] == expected
 
 
 def _ci_widths(item: str, as_of: date) -> list[float]:
@@ -245,10 +297,28 @@ def test_falling_is_stable_and_misses_the_pre_purchase_trigger(item: str) -> Non
 
 
 @pytest.mark.parametrize("item", mocks.ITEMS)
-def test_uncertain_exceeds_the_confidence_interval_threshold(item: str) -> None:
-    """mock_uncertain → 보수·기본 2안만. 전 구간이 임계 이상이어야 판정이 흔들리지 않는다."""
-    threshold = load_constraints()["situation"]["ci_width_threshold"]
-    assert min(_ci_widths(item, UNCERTAIN)) >= threshold
+def test_the_two_mock_bands_never_overlap(item: str) -> None:
+    """mock 이 임계에 대해 하는 약속은 *"넘는다"* 가 아니라 **"갈라진다"** 이다.
+
+    예전엔 ``min(uncertain 구간폭) >= 선언 임계`` 를 봤다. 그건 mock 을 **선언값에**
+    묶는 단언이라, 선언이 움직이면 mock 을 안 건드렸는데도 깨진다. mock 이 실제로
+    보장해야 하는 것은 두 층위가 **겹치지 않는다** 는 것뿐이고, 그래야 그 사이 아무
+    임계나 주입해 판정을 가를 수 있다.
+
+    두 번째 단언이 ``INJECTED_THRESHOLD`` 를 그 틈에 못 박는다 — ② 검사들이 딛고 선
+    전제라, 밴드가 움직여 틈이 사라지면 저 검사들이 조용히 뜻을 잃기 전에 여기서 운다.
+
+    ⚠️ 밴드 값 자체는 **안 건드린다** (현서님 ④). ``upper`` 는 ``ci_width`` 말고
+      ``compute_max_price`` 도 먹이므로 넓히면 ⑦ 컷 기준이 함께 풀린다.
+    """
+    stable = [
+        width
+        for as_of in (INTEGRATION, RISING, FALLING, SPREAD_WIDE)
+        for width in _ci_widths(item, as_of)
+    ]
+    uncertain = _ci_widths(item, UNCERTAIN)
+    assert max(stable) < min(uncertain), "두 층위가 겹치면 어떤 임계로도 못 가른다"
+    assert max(stable) < INJECTED_THRESHOLD < min(uncertain)
 
 
 @pytest.mark.parametrize("item", mocks.ITEMS)
