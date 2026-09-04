@@ -394,9 +394,10 @@ def test_적재가_터지면_전부_되돌린다() -> None:
 
 def test_적재_실패가_예외로_올라가지_않는다() -> None:
     """★ 500 이 되면 사람이 보기에 다음 날로 못 가는 것이 된다 — 실제로는 어제 그대로다."""
-    finance, _ = _both({AS_OF - timedelta(days=1)})
+    _both({AS_OF - timedelta(days=1)})
     day_open.register_day_opening(
-        "logistics", 가짜하루열기("logistics", {AS_OF - timedelta(days=1)}, raises=OSError("끊겼다"))
+        "logistics",
+        가짜하루열기("logistics", {AS_OF - timedelta(days=1)}, raises=OSError("끊겼다")),
     )
 
     out = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션())
