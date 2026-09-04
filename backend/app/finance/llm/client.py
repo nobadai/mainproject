@@ -227,6 +227,32 @@ def _is_gemini_availability_failure(error: Exception) -> bool:
     return _gemini_availability_failure_reason(error) is not None
 
 
+def _ollama_availability_failure_reason(error: Exception) -> str | None:
+    """Ollama가 지금 Planner 요청을 수행할 수 없는 경우만 분류한다.
+
+    404는 endpoint 또는 model 부재이고, 429/5xx·timeout·network 오류도 provider가
+    현재 실행 불가한 상태다. 반면 400은 tool/schema 계약 문제일 수 있으므로 가용성
+    장애로 낮추지 않는다.
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code == 404:
+            return "HTTP_404"
+        if error.code == 429:
+            return "HTTP_429"
+        if 500 <= error.code < 600:
+            return "HTTP_5XX"
+        return None
+    if isinstance(error, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error, urllib.error.URLError):
+        return "NETWORK_ERROR"
+    if isinstance(error.__cause__, TimeoutError):
+        return "TIMEOUT"
+    if isinstance(error.__cause__, urllib.error.URLError):
+        return "NETWORK_ERROR"
+    return None
+
+
 def _ollama_base_url() -> str:
     return os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 

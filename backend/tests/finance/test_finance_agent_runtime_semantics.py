@@ -21,6 +21,7 @@ from app.finance.llm.finalizer import DeterministicFinanceFinalizer
 from app.finance.llm.planner import (
     DeterministicFinancePlanner,
     FinancePlannerContractViolation,
+    FinancePlannerUnavailable,
     ToolAction,
 )
 from app.finance.schemas import FinancePolicy
@@ -139,6 +140,19 @@ class ScriptedFinalizer:
         return messages.explanation_for(mode, business_status)
 
 
+class UnavailablePlanner:
+    """Provider 계층이 모두 실행 불가라고 분류한 Planner."""
+
+    model = "unavailable-llm-planner"
+
+    def __init__(self):
+        self.attempts = 0
+
+    def decide(self, **_kwargs):
+        self.attempts += 1
+        raise FinancePlannerUnavailable("all configured Finance LLM providers unavailable")
+
+
 def request(mode="PRE_PURCHASE", payload=None):
     return AgentRequest(
         context=ExecutionContext(
@@ -161,6 +175,34 @@ def pre_purchase_plan():
         ToolAction("analyze_payment_pressure"),
         ToolAction(finalize=True),
     ]
+
+
+def scenario_payload(amount, *, max_price=None):
+    quantity = Decimal(100)
+    return {
+        "proposal_id": "P-1",
+        "scenario_id": "S-1",
+        "total_amount_krw": amount,
+        "total_qty_kg": quantity,
+        "max_price": max_price if max_price is not None else Decimal(amount) / quantity,
+        "split_plan": [{"seq": 1, "date": "2025-01-01", "qty_kg": quantity}],
+        "meta": {"as_of": "2025-01-01"},
+    }
+
+
+def sales_payload():
+    return {
+        "scenario_id": "SC-1",
+        "partner_id": "P-1",
+        "item": "red_pepper",
+        "quantity_kg": "100",
+        "unit_price_krw": "10000",
+        "reported_sales_amount_krw": "1000000",
+        "payment_terms_type": "SINGLE",
+        "payment_days": 30,
+        "collection_reference_date": "2025-01-05",
+        "source_ref": "SALES:R-1",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -570,6 +612,121 @@ def test_calculations_survive_a_provider_change(monkeypatch):
     assert [item.claim for item in first.evidences] == [
         item.claim for item in second.evidences
     ]
+
+
+def _business_identity(reply):
+    return (
+        reply.runtime_status,
+        reply.business_status,
+        reply.payload,
+        reply.evidences,
+        reply.suggested_adjustments,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        (scenario_payload(600), "ok"),
+        (scenario_payload(700, max_price=Decimal(9)), "conditional"),
+        (scenario_payload(900), "reject"),
+    ],
+)
+def test_planner_unavailability_preserves_each_scenario_business_result(
+    payload, expected_status
+):
+    """ok/conditional/reject와 검증된 조정은 Planner 상태가 아니라 Rule이 정한다."""
+    expected, expected_metadata = FinanceAgentController(
+        Port(), DeterministicFinancePlanner()
+    ).run(request("SCENARIO_VALIDATION", payload))
+    actual, metadata = FinanceAgentController(Port(), UnavailablePlanner()).run(
+        request("SCENARIO_VALIDATION", payload)
+    )
+
+    assert expected.business_status == expected_status
+    assert _business_identity(actual) == _business_identity(expected)
+    assert metadata.used_tools == expected_metadata.used_tools
+    assert metadata.rules_applied == expected_metadata.rules_applied
+    assert metadata.llm_status == "FALLBACK"
+    assert metadata.llm_fallback_used is True
+
+
+def test_planner_unavailability_preserves_sales_runtime_not_ready_meaning():
+    """실제 여신/채권 사실 부재는 LLM fallback으로 READY가 되지 않는다."""
+    expected, expected_metadata = FinanceAgentController(
+        Port(), DeterministicFinancePlanner()
+    ).run(request("SALES_VALIDATION", sales_payload()))
+    actual, metadata = FinanceAgentController(Port(), UnavailablePlanner()).run(
+        request("SALES_VALIDATION", sales_payload())
+    )
+
+    assert expected.runtime_status == "RUNTIME_NOT_READY"
+    assert _business_identity(actual) == _business_identity(expected)
+    assert metadata.used_tools == expected_metadata.used_tools == (
+        "evaluate_sales_scenario",
+    )
+    assert metadata.llm_status == "FALLBACK"
+
+
+def test_planner_unavailability_does_not_hide_finance_data_failure():
+    class _MissingFinancePosition(Port):
+        def load_finance_position(self, as_of):
+            del as_of
+            raise FinanceDataNotReady("finance_position")
+
+    reply, metadata = FinanceAgentController(
+        _MissingFinancePosition(), UnavailablePlanner()
+    ).run(request())
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ("finance_position",)
+    assert metadata.llm_status == "FALLBACK"
+
+
+def test_planner_unavailability_does_not_hide_deterministic_tool_failure():
+    reply, metadata = FinanceAgentController(BrokenPort(), UnavailablePlanner()).run(
+        request()
+    )
+
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert metadata.llm_status == "FALLBACK"
+
+
+def test_planner_fallback_keeps_the_existing_tool_budget():
+    planner = ScriptedPlanner(
+        [
+            ToolAction("assess_finance_position"),
+            FinancePlannerUnavailable("providers unavailable"),
+        ]
+    )
+    reply, metadata = FinanceAgentController(
+        Port(), planner, max_tool_calls=3
+    ).run(request())
+
+    trace = next(
+        json.loads(item)
+        for item in metadata.observations
+        if json.loads(item).get("observation_type") == "finance_harness_trace"
+    )
+    assert reply.runtime_status == "ERROR"
+    assert trace["tool_calls"] == trace["max_tool_calls"] == 3
+    assert metadata.llm_status == "FALLBACK"
+
+
+def test_planner_fallback_keeps_the_existing_replan_count():
+    planner = ScriptedPlanner(
+        [
+            FinancePlannerContractViolation("invalid tool selection"),
+            FinancePlannerUnavailable("providers unavailable"),
+        ]
+    )
+    reply, metadata = FinanceAgentController(Port(), planner).run(request())
+
+    assert reply.runtime_status == "READY"
+    assert metadata.replans == 1
+    assert metadata.llm_status == "FALLBACK"
 
 
 # ---------------------------------------------------------------------------
