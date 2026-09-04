@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from itertools import pairwise
 from typing import Any
 
-from app.purchase_agent.config import load_constraints
+from app.purchase_agent.config import ci_width_threshold, load_constraints
 from app.purchase_agent.nodes._guards import require_positive
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -192,9 +192,17 @@ def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
     """
     constraints = load_constraints()
     rules = constraints["situation"]
+    # 🔴 **임계는 품목별이다** — 그래서 이 노드가 ``state["item"]`` 을 읽는다.
+    #   전에는 안 읽었다. 품목이 판정에 안 들어가던 시절의 흔적이고, 임계가 갈리는
+    #   순간부터는 **어느 품목의 임계인지**가 판정의 일부다.
+    #   없으면 기본값으로 안 떨어지고 멈춘다 (``ThresholdNotDeclared`` · 규칙 3).
+    #   여기까지 온 요청은 어댑터가 문 앞에서 같은 조건을 이미 봤다
+    #   (``adapter.validate_payload`` → ``RUNTIME_NOT_READY``) — 이 줄은 그 뒤의
+    #   백스톱이다. mock 경로(``build_initial_state``)는 문을 안 지나므로 여기서 처음 걸린다.
+    threshold = ci_width_threshold(state["item"], constraints)
     ci_width = compute_ci_width(state["forecast"], rules["ci_judgment_day"])
     exceeds = _COMPARISONS[rules["ci_width_comparison"]]
-    situation = "uncertain" if exceeds(ci_width, rules["ci_width_threshold"]) else "stable"
+    situation = "uncertain" if exceeds(ci_width, threshold) else "stable"
     return {
         "situation": situation,
         "allowed_axes": compute_allowed_axes(state, situation, constraints),

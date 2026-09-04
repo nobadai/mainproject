@@ -675,7 +675,9 @@ def test_ci_width_boundary_is_explicit() -> None:
 
     ``ci_width_threshold`` 는 아직 확정 전인 **mock 시연값**이고(``constraints.yaml``
     §situation · ``#127`` 의 ``s`` 역산이 나와야 정해진다), 실측 분포(0.254~1.107)는
-    통째로 이 값 위에 있다. 즉 **언젠가 반드시 바뀔 값**이고, 그날 바뀌었다는 사실이
+    통째로 이 값 위에 있다. **셋이 같은 값인 것도 시연값이라서다** — ``#67`` 이 확정한
+    순서는 양파 < 무 < 배추이므로, ``s`` 가 오면 셋은 갈라진다.
+    즉 **언젠가 반드시 바뀔 값**이고, 그날 바뀌었다는 사실이
     누구에게도 안 보이면 안 된다. 그래서 한 줄 남긴다 — 값을 고치려면 이 검사도 같이
     고치게 되어 **의식적인 편집**이 된다.
 
@@ -692,7 +694,13 @@ def test_ci_width_boundary_is_explicit() -> None:
       25건이 함께 울었고, 그중 임계를 재려던 것은 몇 건뿐이었다.
     """
     situation = _constraints()["situation"]
-    assert situation["ci_width_threshold"] == 0.08
+    # 🔴 **품목별 dict 를 통째로 적는다** (2026-09-05 · #67 의 역산 순서가 확정돼 구조를
+    #   먼저 바꿨다). ``len(...) == 3`` 이나 ``all(v == 0.08 …)`` 로 적으면 **한 품목만
+    #   움직인 날** 이 검사가 초록이다 — 여기가 막으려는 것이 정확히 그 상황이다.
+    #
+    #   피마늘이 없는 것도 단언의 일부다. 계약이 3품목이고(#216) mock 도 3품목인데
+    #   (#281), 누가 ``ItemName`` 을 보고 네 번째 줄을 채우면 여기가 운다.
+    assert situation["ci_width_threshold"] == {"배추": 0.08, "무": 0.08, "양파": 0.08}
     assert situation["ci_width_comparison"] == ">="
 
 

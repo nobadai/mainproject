@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
-from _injection import force_situation
+from _injection import declare_thresholds, force_situation
 
 from app.master.envelope import (
     AgentRequest,
@@ -26,7 +26,7 @@ from app.purchase_agent.adapter import (
     purchase_port,
     validate_payload,
 )
-from app.purchase_agent.config import load_constraints
+from app.purchase_agent.config import ci_width_threshold, load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 from app.purchase_agent.nodes.package_scenarios import split_quantities
 
@@ -264,13 +264,11 @@ def test_evidence_relation_never_states_a_false_comparison(
 
 def test_axes_evidence_reads_the_comparison_from_constraints() -> None:
     """실제 산출물의 부등호가 설정값 방향과 맞는가 (하드코딩 회귀)."""
-    from app.purchase_agent.config import load_constraints
-
     constraints = load_constraints()
     reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
     situation = next(e for e in reply.evidences if e.claim == "situation")
     gate = next(e for e in _axes_evidence(reply) if e.ref_ids == situation.ref_ids)
-    threshold = constraints["situation"]["ci_width_threshold"]
+    threshold = ci_width_threshold("배추", constraints)
     # 9/11 배추는 stable(0.060 < 0.08)이라 "<"가 나와야 한다
     assert gate.value < threshold
     assert f"{gate.value:.3f} < {threshold}" in gate.evidence_detail
@@ -862,6 +860,105 @@ def test_missing_item_is_reported_instead_of_crashing() -> None:
     as_of = SPREAD_WIDE
     payload = {k: v for k, v in _payload("배추", as_of).items() if k != "item"}
     assert "item" in validate_payload(payload, as_of)
+
+
+# ── 품목별 임계 미선언 (#67 · #127) ────────────────────────────────────────
+
+#: 배추 임계를 지운 선언 둘. 없는 키와 ``null`` 은 **같은 사실**이다 — 아직 안 정했다.
+_UNDECLARED = {
+    "없는_키": {"무": 0.08, "양파": 0.08},
+    "null": {"배추": None, "무": 0.08, "양파": 0.08},
+}
+
+
+@pytest.mark.parametrize("declared", _UNDECLARED.values(), ids=_UNDECLARED)
+def test_an_undeclared_threshold_is_runtime_not_ready(
+    declared: dict, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """🔴 **임계를 안 정한 품목으로는 시나리오를 만들지 않는다** (규칙 3).
+
+    ⚠️ **노드에서 터뜨리면 안 된다.** ①이 죽으면 ``missing_data`` 가 비고, 봉투는 빈
+      ``missing_data`` 의 ``RUNTIME_NOT_READY`` 를 거부한다(``ContractViolation``) —
+      마스터는 *"매입이 왜 안 돌았는지"* 를 못 받는다. 그래서 어댑터가 **문 앞에서**
+      같은 조건을 먼저 본다. ``_unusable_forecast_names`` 를 노드가 아니라 어댑터에
+      둔 것과 같은 이유다.
+
+    ★ 노드 쪽 백스톱(``ThresholdNotDeclared``)은
+      ``test_mocks.test_an_undeclared_threshold_stops_instead_of_falling_back`` 이 본다.
+      mock 경로는 문을 안 지나므로 둘 다 있어야 한다.
+    """
+    declare_thresholds(monkeypatch, tmp_path, declared)
+    reply, _ = purchase_port(_request("배추", SPREAD_WIDE))
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.payload == {}, f"안 돌았는데 뭔가 실렸다: {reply.payload}"
+    # 🔴 **이름과 사유를 글자 그대로 적는다** — 마스터가 사용자에게 그대로 보여 주는
+    #   문자열이라, 함수를 불러 대조하면 양쪽이 같이 바뀌어도 아무도 모른다
+    #   (``test_contracts.test_ci_width_boundary_is_explicit`` 과 같은 성격).
+    assert reply.missing_data == ("constraints_yaml.situation.ci_width_threshold.배추",)
+    assert reply.reasoning == "임계가 정해지지 않아 상황을 판정할 수 없다 — 배추"
+
+
+def test_the_threshold_name_does_not_borrow_the_advisor_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """🔴 **``constraints.`` 로 시작하면 안 된다** — 고칠 사람이 다르다.
+
+    ``missing_data`` 의 ``constraints.*`` 는 payload 안의 부서 제약이다
+    (``constraints.finance`` · ``constraints.inventory``). 같은 접두사를 쓰면 마스터가
+    **재무·물류에 다시 물으러 간다** — 그쪽은 줄 것이 없다. 이 값은 우리가 정해야 풀린다.
+    """
+    declare_thresholds(monkeypatch, tmp_path, _UNDECLARED["없는_키"])
+    reply, _ = purchase_port(_request("배추", SPREAD_WIDE))
+
+    name = reply.missing_data[0]
+    assert not name.startswith("constraints."), f"부서 제약과 같은 접두사다: {name}"
+
+
+def test_the_evidence_quotes_the_threshold_of_its_own_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """근거 문장이 **그 품목의** 임계를 인용하는가.
+
+    🔴 **오늘은 틀려도 안 보인다.** 셋이 같은 값(0.08)이라 어댑터가 다른 품목 임계를
+      뽑아도 문장이 똑같다 — 변이를 걸어도 아무 검사가 안 운다(2026-09-05 실측).
+      ``s``(#127)가 오면 셋이 갈라지고(#67) 그날 처음 드러난다. 그래서 **지금 갈라
+      놓고** 잰다.
+
+    ⚠️ 판정과 근거가 **같은 함수**로 임계를 뽑는 것도 여기서 같이 확인된다. 근거가
+      자기 식으로 다시 읽으면 *"구간폭 0.06 < 0.33"* 이라 적어 놓고 판정은 다른 임계로
+      내린 상태가 만들어진다 — 사람이 재현할 수 없는 산출물이다.
+    """
+    declared = {"배추": 0.11, "무": 0.22, "양파": 0.33}
+    declare_thresholds(monkeypatch, tmp_path, declared)
+    for item, threshold in declared.items():
+        reply, _ = purchase_port(_request(item, SPREAD_WIDE))
+        detail = next(e for e in reply.evidences if e.claim == "situation").evidence_detail
+        assert f"임계 {threshold}" in detail, f"{item} 근거가 인용한 임계가 다르다: {detail}"
+
+
+def test_the_threshold_reason_yields_when_something_else_is_also_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """임계도 없고 예측도 없으면 **임계 사유만 말하는 것이 거짓**이 된다.
+
+    사유는 *"그것만이 사유일 때"* 만 말한다 — ``_unusable_forecast_names`` 쪽 사유가
+    ``len(unusable) == len(missing)`` 을 보는 것과 같은 규칙이다. 그때도 이름은
+    **둘 다** 실린다: 무엇이 없는지는 ``missing_data`` 가 전부 말한다.
+    """
+    declare_thresholds(monkeypatch, tmp_path, _UNDECLARED["없는_키"])
+    request = _request("배추", SPREAD_WIDE)
+    stripped = {k: v for k, v in request.payload.items() if k != "forecast"}
+    reply, _ = purchase_port(
+        AgentRequest(
+            context=request.context, agent="purchase", mode=request.mode, payload=stripped
+        )
+    )
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert "constraints_yaml.situation.ci_width_threshold.배추" in reply.missing_data
+    assert "forecast" in reply.missing_data
+    assert reply.reasoning == "필수 입력이 없어 시나리오를 만들지 못했다."
 
 
 def test_missing_advisor_constraints_report_their_names() -> None:
