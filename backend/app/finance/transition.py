@@ -16,9 +16,17 @@ T0 상태 읽기 → 승인 약정 수신 → build_finance_transition (계산�
   받기만 하고 열지도 닫지도 않는다 — 재무 쓰기와 물류 쓰기가 한 번에 서거나 한
   번에 물러나야 하는데, 그 판단은 이 파일이 할 수 없다.
 
-🔴 **승인은 현금을 줄이지 않는다.** `purchase_payment_days` 가 지급을 미루는 한,
-   승인 시점에 생기는 것은 **매입채무**다. 승인일에 현금을 깎으면 아직 나가지
-   않은 돈이 사라지고, 정작 지급일에는 아무 일도 일어나지 않는다.
+🔴 **승인은 현금을 줄이지 않는다.** 승인 시점에 생기는 것은 **매입채무**다.
+   N5=0(당일 지급)이어도 마찬가지다 — 매입 회차가 미래이면 그날 만기가 서고,
+   현금은 실제 지급일에 나간다. 승인일에 현금을 깎으면 아직 나가지 않은 돈이
+   사라지고, 정작 지급일에는 아무 일도 일어나지 않는다.
+
+🔴 **아직 마스터(`master.transition.register_transition`)에 등록하지 않는다.**
+   `payables.purchase_id` 는 `purchases` 를 참조하는 NOT NULL 컬럼인데,
+   `ApprovedCommitment` 에는 그 ID 가 없다. 등록하면 마스터가 *"아직 안 돈다"*
+   (`NOT_APPLIED`) 대신 **매 승인마다 `FAILED`** 를 내게 된다 — 미구현이 장애로
+   둔갑한다. 아래 `purchase_id` 인자는 재무 단독 검증용이고, 매입/마스터가 권위
+   있는 ID 를 실어 줄 때 등록한다. 재무가 그 ID 를 지어내지 않는다.
 """
 
 from __future__ import annotations
@@ -65,6 +73,7 @@ class ApprovedCommitmentFacts(Protocol):
     total_amount_krw: float
     arrival_schedule: Sequence[ArrivalLegFacts]
 
+
 #: 승인 전이가 만든 상태임을 상태 행에 남긴다. `state_type` 은 재무 소유 컬럼이고
 #: 공유 CHECK 도 enum 도 없다 — 다만 `DAY30` 을 그대로 물려주면 승인으로 생긴 행이
 #: 번인 마감처럼 읽힌다.
@@ -79,6 +88,8 @@ class FinancePayableWrite:
     sim_run_id: str
     purchase_id: str
     issued_date: date
+    #: **계약 만기일**이다. 주말이어도 그대로 원장에 남는다 — 현금이 실제로 나가는
+    #: 날은 `tools.effective_cash_date` 가 조회 시점에 정한다.
     due_date: date
     amount_krw: Decimal
 
@@ -92,6 +103,12 @@ class FinanceTransition:
     #: 이 계산이 딛고 선 T0 행. 나머지 컬럼은 여기서 그대로 이어 간다.
     source_finance_state_id: str
     next_finance_state_id: str
+    #: 다음 상태가 서는 날. **달력일**이다 — 주말에도 시간은 흐른다. 어느 날 실행하는지는
+    #: 마스터가 정하므로 재무가 평일 계산을 대신 하지 않는다.
+    #:
+    #: ★ 그래서 금요일 승인은 토요일 상태를 만들고, 다음 실행일인 월요일 요청은
+    #:   `state_date == as_of` 를 못 맞춰 `RUNTIME_NOT_READY` 가 된다. 다음 실행일이
+    #:   언제인지는 마스터의 실행일 달력이 아는 사실이라 여기서 정하지 않는다.
     next_state_date: date
     payables: tuple[FinancePayableWrite, ...]
     #: 승인 뒤 미결제 매입채무 총액. 현금은 **바뀌지 않는다.**
@@ -129,13 +146,12 @@ def build_finance_transition(
         raise FinanceDataNotReady("commitment_total_amount")
 
     purchase_date = _single_purchase_date(commitment)
+    # N5 는 **계약 지급일까지의 달력일수**다 (현재 0 = 매입 당일). 주말 보정은 여기서
+    # 하지 않는다 — 원장은 계약일을 그대로 들고, 현금이 나가는 날은 현금흐름 조회가
+    # `tools.effective_cash_date` 로 정한다.
     due_date = purchase_date + timedelta(days=int(policy.purchase_payment_days))
+    # 승인일은 상태를 딛는 날일 뿐이고, 매입일·계약 만기일과 다르다. 넷을 겹치지 않는다.
     next_state_date = commitment.as_of + timedelta(days=1)
-    if due_date <= next_state_date:
-        # 🔴 다음 상태의 투영 창은 `due_date > state_date` 다. 그 밖으로 떨어지는
-        #    채무는 총액만 늘리고 현금흐름에는 **한 번도 나타나지 않는다** —
-        #    재무가 "출처를 확인하지 못한 채무" 로 읽게 된다. 세운다.
-        raise FinanceDataNotReady("commitment_payment_date")
 
     sim_run_id = str(state["sim_run_id"])
     payable = FinancePayableWrite(

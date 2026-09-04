@@ -3,12 +3,22 @@
 -- ★ 이 파일은 **행만** 넣는다. `agent_policy_config` 테이블 정의는 공유 스키마
 --   (`database/10_domain_schema.sql`) 가 소유한다 — 여기서 다시 만들지 않는다.
 --
--- ★ 값은 현재 운영 DB 가 들고 있는 것 그대로다. 없는 값을 채우지 않는다.
+-- ★ 값은 **승인된 재무 정책**이다. 없는 값을 채우지 않는다. 아래 N5 한 건을 빼면
+--   2026-09-04 운영 DB 행과 같다.
 --
 -- ★ `evidence_grade` 는 공유 CHECK 가 정한 어휘만 쓴다. 팀이 고정한 시뮬레이션
 --   값은 `SIM_FIXED` 다 — 재무 전용 등급을 새로 만들지 않는다.
 --
 -- 재실행 안전: `uq_agent_policy_version (policy_version, domain, policy_key)`.
+--
+-- 🔴 **`purchase_payment_days` 는 0 이다** (D+0 · 매입 당일 지급).
+--
+--    2026-09-04 관측 시점의 운영 DB 행은 아직 `7` 을 들고 있다. 원장은 그 값과
+--    맞지 않는다 — `purchases` 16/16 이 `payment_due_date = purchase_date` 이고,
+--    `payables` 16/16 이 `due_date = purchase_date` 다. 승인된 정책은 0 이고
+--    DB 행이 뒤처져 있다. 이 파일은 **승인된 정책**을 적는다.
+--
+--    이 브랜치는 운영 DB 의 값을 바꾸지 않았다. 반영은 운영 반영 절차로 한다.
 
 INSERT INTO haetdeul.agent_policy_config (
     domain,
@@ -46,7 +56,7 @@ INSERT INTO haetdeul.agent_policy_config (
     ('finance', 'minimum_cash_balance_krw', 'NUMERIC', 12941280, NULL, 'KRW', 'SIM_FIXED', 'PROJECT-DEFINITION-V1.2:minimum_cash_balance', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, '프로젝트 정의서 기준 최소 현금 잔고. 월 기본 인건비 1개월 Reserve 12,941,280원.'),
     ('finance', 'monthly_labor_cost_krw', 'NUMERIC', 12941280, NULL, 'KRW/month', 'SIM_FIXED', 'SRC-FIN-PERSONA', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, '통합 Persona v1.5의 월 기본 인건비를 MVP Cashflow Event 기준으로 사용.'),
     ('finance', 'payroll_date', 'NUMERIC', 10, NULL, 'day-of-month', 'SIM_FIXED', 'SRC-FIN-N6', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, 'Finance v2.2.1 / 프로젝트 v2.3 후속 결정. 급여 지급일 매월 10일 확정. 기존 25일 Seed를 supersede.'),
-    ('finance', 'purchase_payment_days', 'NUMERIC', 7, NULL, 'day', 'SIM_FIXED', 'FINANCE-DECISION-20260827:N5', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, 'Finance v2.2.1 확정 정책. 매입대금 지급일은 매입일 기준 D+7 calendar days. 분할 매입은 각 회차별 실제 매입일 기준 D+7 적용. H1에 확정 payment_date가 존재하면 해당 값이 authoritative.')
+    ('finance', 'purchase_payment_days', 'NUMERIC', 0, NULL, 'day', 'SIM_FIXED', 'FINANCE-DECISION-20260827:N5', 'HUMAN', 'v1.3-PROVISIONAL', 'v1.5', 'AGENT_MVP_DEMO', TRUE, 'Finance MVP 확정 정책. 매입대금 지급일은 매입일 기준 D+0 calendar days — 매입 당일 지급. 분할 매입은 각 회차별 실제 매입일 기준 D+0 적용. 계약 만기일이 토·일이어도 원장 due_date 는 계약일 그대로이고, 실제 현금 유출만 다음 월요일이다. H1에 확정 payment_date가 존재하면 해당 값이 authoritative.')
 ON CONFLICT (policy_version, domain, policy_key) DO UPDATE SET
     value_kind = EXCLUDED.value_kind,
     value_numeric = EXCLUDED.value_numeric,

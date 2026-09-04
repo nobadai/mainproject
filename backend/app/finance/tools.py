@@ -37,6 +37,31 @@ class ReportedAmountComparison(TypedDict):
     difference: Decimal
 
 
+#: **당일(`as_of`) 만기가 유효한 사건**. 매입지급만이다 — N5=0 은 당일 지급이라는
+#: 유효한 정책이고, 미결제(OPEN) 의무는 오늘 만기라도 아직 나가지 않았다.
+#:
+#: 🔴 채권·비용·판매 회수까지 같이 열지 않는다. 제안 회수의 horizon 계약
+#:    (`collection_within_horizon = as_of < event_date`)이 여전히 `as_of` 를 제외하므로,
+#:    투영만 열면 **투영과 그 플래그가 서로 다른 말을 한다.**
+_SAME_DAY_DUE_EVENT_TYPES = frozenset({"PURCHASE_PAYABLE", "EXTRA_PURCHASE"})
+
+#: 토·일에는 회사가 돈을 내보내지 않는다. **계약일이 아니라 현금이 나가는 날만** 민다.
+_WEEKEND_SHIFT = {6: 2, 7: 1}  # ISO 요일: 토 → 월(+2), 일 → 월(+1)
+
+
+def effective_cash_date(contractual_due_date: date) -> date:
+    """계약 지급일이 주말이면 현금이 실제로 나가는 날은 다음 월요일이다.
+
+    🔴 **계약일을 고쳐 쓰는 함수가 아니다.** 원장의 `due_date` 는 토·일 그대로
+       남는다 (실제 원장에 이미 주말 만기가 4건 있다). 여기서 나오는 값은
+       *현금흐름에 얹는 날*뿐이다 — 둘을 합치면 계약 사실이 사라진다.
+
+    ★ 공휴일은 다루지 않는다. 토·일만이 현재 계약이다.
+    """
+    shift = _WEEKEND_SHIFT.get(contractual_due_date.isoweekday(), 0)
+    return contractual_due_date + timedelta(days=shift)
+
+
 def build_debt_service_schedule(
     *, debt_policy: FinanceDebtPolicy, as_of: date, horizon_end: date
 ) -> tuple[CashEvent, ...]:
@@ -175,12 +200,18 @@ def project_cashflow(
         if identity in seen:
             raise ValueError(f"Duplicate cash event: {event.ref_id}")
         seen.add(identity)
-        if not as_of < event.event_date <= horizon_end:
+        if not as_of <= event.event_date <= horizon_end:
+            continue
+        if event.event_date == as_of and event.event_type not in _SAME_DAY_DUE_EVENT_TYPES:
             continue
         signed_amount = event.amount_krw if event.direction == "INFLOW" else -event.amount_krw
         by_date[event.event_date] += signed_amount
 
-    balance = current_cash_krw
+    # ★ **당일 만기 매입지급은 시작점에 접어 넣는다.** N5=0 이면 지급일이 `as_of` 와
+    #   같은데, 예전처럼 `as_of <` 로 걸러 내면 그 유출이 투영에서 통째로 사라졌다.
+    #   별도 점으로 붙이면 같은 날짜 점이 둘이 되므로, 시작 잔액 자체를 그날 의무가
+    #   빠진 값으로 연다 — 당일 사건이 없으면 예전과 같은 값이다.
+    balance = current_cash_krw + by_date.pop(as_of, Decimal(0))
     points = [CashflowPoint(projection_date=as_of, cash_balance_krw=balance)]
     minimum = balance
     minimum_date = as_of
@@ -222,8 +253,12 @@ def calculate_finance_cap(*, base_projection: CashflowProjection, policy: Financ
     """단일 D+N 매입 지급을 Overlay할 때의 보수적 원 단위 상한."""
     if policy.purchase_payment_days is None:
         raise ValueError("purchase_payment_days is required for Finance Cap")
-    payment_date = base_projection.as_of + timedelta(days=policy.purchase_payment_days)
-    if not base_projection.as_of < payment_date <= base_projection.horizon_end:
+    # 계약 지급일과 **현금이 나가는 날**은 다른 값이다. 상한은 현금이 나가는 날로 잰다.
+    contractual_due_date = base_projection.as_of + timedelta(days=policy.purchase_payment_days)
+    payment_date = effective_cash_date(contractual_due_date)
+    # 🔴 `as_of <` 가 아니라 `as_of <=` 다. N5=0 은 **당일 지급**이라는 유효한 정책이고,
+    #    예전 경계는 그 정책을 값이 아니라 오류로 취급했다.
+    if not base_projection.as_of <= payment_date <= base_projection.horizon_end:
         raise ValueError("purchase payment date is outside projection horizon")
     balance_at_payment = [
         point.cash_balance_krw

@@ -37,7 +37,7 @@ from app.finance.schemas import (
     FinanceRuntimeContext,
     FinanceSnapshot,
 )
-from app.finance.tools import build_debt_service_schedule
+from app.finance.tools import build_debt_service_schedule, effective_cash_date
 
 # ---------------------------------------------------------------------------
 # PostgreSQL 연결과 조회 헬퍼 (재무 밖 도메인도 쓴다)
@@ -212,25 +212,12 @@ def get_current_finance_runtime_context(as_of: date | None = None) -> FinanceRun
     events: list[CashEvent] = []
     unresolved: list[str] = []
 
-    payable_rows = _fetch_scheduled_rows(
-        table="payables",
-        columns=("payable_id", "due_date", "outstanding_amount_krw"),
+    payable_rows, payable_events = _fetch_open_payable_events(
         sim_run_id=snapshot.sim_run_id,
         as_of=snapshot.state_date,
         horizon_end=horizon_end,
-        status_column="status",
-        active_status="OPEN",
     )
-    events.extend(
-        _rows_to_events(
-            payable_rows,
-            id_column="payable_id",
-            date_column="due_date",
-            amount_column="outstanding_amount_krw",
-            event_type="PURCHASE_PAYABLE",
-            direction="OUTFLOW",
-        )
-    )
+    events.extend(payable_events)
     if snapshot.unsettled_purchase_payables_krw != 0 and not payable_rows:
         unresolved.append("PURCHASE_PAYABLE")
 
@@ -496,6 +483,46 @@ def _build_finance_debt_policy(rows: list[dict[str, object]]) -> FinanceDebtPoli
         usage_scope=FINANCE_POLICY_USAGE_SCOPE,
         source_refs=source_refs,
     )
+
+
+def _fetch_open_payable_events(
+    *, sim_run_id: str, as_of: date, horizon_end: date
+) -> tuple[list[dict[str, object]], list[CashEvent]]:
+    """미결제 매입채무를 **현금이 나가는 날**에 얹는다.
+
+    🔴 **하한을 `due_date > as_of` 로 두면 안 된다.** 계약 만기가 토·일인 채무는
+       실제 현금이 다음 월요일에 나가는데, 월요일에 실행하면 `due_date < as_of` 가
+       되어 그 의무가 미래 현금흐름에서 **통째로 사라졌다.** 원장에 이미 주말 만기
+       4건이 있다. 연체된 미결제 채무도 같은 이유로 버리지 않는다.
+
+    ★ 대신 상태를 믿는다 — `OPEN` 이면 아직 안 나간 돈이다. 지나간 만기를 임의로
+      `PAID` 로 바꾸지 않고, 현금 사건만 `as_of` 이후로 당겨 세운다.
+
+    ★ 채권·비용에는 손대지 않는다. 이 하한 완화는 **매입채무의 사실**이다.
+    """
+    query = sql.SQL(
+        """
+        SELECT payable_id, due_date, outstanding_amount_krw
+        FROM {}.payables
+        WHERE sim_run_id = %s
+          AND due_date <= %s
+          AND status = 'OPEN'
+        ORDER BY due_date, payable_id
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(query, [sim_run_id, horizon_end])
+    events: list[CashEvent] = []
+    for event in _rows_to_events(
+        rows,
+        id_column="payable_id",
+        date_column="due_date",
+        amount_column="outstanding_amount_krw",
+        event_type="PURCHASE_PAYABLE",
+        direction="OUTFLOW",
+    ):
+        cash_date = max(effective_cash_date(event.event_date), as_of)
+        events.append(event.model_copy(update={"event_date": cash_date}))
+    return rows, events
 
 
 def _fetch_scheduled_rows(
@@ -851,14 +878,8 @@ class PostgresFinanceAsOfDataPort:
 
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
         position = self.load_finance_position(as_of)
-        payable_rows = _fetch_scheduled_rows(
-            table="payables",
-            columns=("payable_id", "due_date", "outstanding_amount_krw"),
-            sim_run_id=str(position["sim_run_id"]),
-            as_of=as_of,
-            horizon_end=horizon,
-            status_column="status",
-            active_status="OPEN",
+        _, payable_events = _fetch_open_payable_events(
+            sim_run_id=str(position["sim_run_id"]), as_of=as_of, horizon_end=horizon
         )
         expense_rows = _fetch_scheduled_rows(
             table="expenses",
@@ -870,14 +891,7 @@ class PostgresFinanceAsOfDataPort:
             excluded_status="PAID",
         )
         return [
-            *_rows_to_events(
-                payable_rows,
-                id_column="payable_id",
-                date_column="due_date",
-                amount_column="outstanding_amount_krw",
-                event_type="PURCHASE_PAYABLE",
-                direction="OUTFLOW",
-            ),
+            *payable_events,
             *_rows_to_events(
                 expense_rows,
                 id_column="expense_id",
