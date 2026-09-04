@@ -489,9 +489,20 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         #   저쪽은 사람이 준 조건이고 이쪽은 조언자가 준 조정안이다 — 수명·모양·권위가
         #   달라 한 칸에 담으면 받는 쪽이 타입으로 갈라야 한다.
         #
-        # ⚠️ **받기만 한다.** 반영 규칙이 미정이라 어느 노드도 아직 안 읽는다.
+        # ⚠️ **받되 반영은 안 한다.** ``target_value`` 가 *"이 값으로 바꿔라"* 인지
+        #   *"이 값을 넘지 마라"* 인지가 미확정이라 반영 규칙을 만들 수 없다.
         #   전에는 마스터가 2회차에 실어 보내는데 이 자리에서 **조용히 버렸다** —
         #   보내는 쪽은 우리가 안 쓰는 줄 모른다.
+        #
+        #   **그래서 읽기는 두 곳이 한다.** 반영은 안 해도 *"받았다"* 는 산출물에 남긴다::
+        #
+        #       ⑥ package_scenarios._adjustment_risks  받고 안 썼다는 사실을 risks 에
+        #       ⑦ self_check._assemble                 건수를 meta.received_adjustments 에
+        #
+        # 🔴 **이 자리에 "어느 노드도 아직 안 읽는다" 고 적었었다 (2026-09-03 정정).**
+        #   위 두 곳을 **같은 판(#177)에서** 넣고 이 문장을 남겼다 — 쓴 순간부터 틀렸다.
+        #   ``state.py`` 의 같은 설명은 *"읽어 **수량을 바꾸지** 않는다"* 로 정확했다.
+        #   **반영과 독해는 다른 말이고, 뭉치면 "값을 실어 주고 안 쓰는" 자리가 다시 열린다.**
         "adjustments": [dict(item) for item in payload.get("adjustments") or []],
         "feedback_context": dict(payload.get("feedback_context") or {}) or None,
         "context_docs": [],
