@@ -226,6 +226,10 @@ def _값(식: str, base: dict[str, Any], params: dict[str, Any]) -> Any:
         return params[벗긴[2:-2]]
     if 벗긴 == "TRUE":
         return True
+    # ⚠️ `NULL` 은 값이다 — *"아직 확인한 적 없다"*(`UNRESOLVED`)의 짝이라 `_모른다` 로
+    #    뭉개면 그 자리를 물려받지 않게 바꾼 변이가 TypeError 로 터진다.
+    if 벗긴 == "NULL":
+        return None
     if 벗긴.startswith("'") and 벗긴.endswith("'"):
         리터럴 = 벗긴[1:-1]
         return json.loads(리터럴) if jsonb else 리터럴
