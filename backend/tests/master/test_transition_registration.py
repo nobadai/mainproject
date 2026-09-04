@@ -123,6 +123,7 @@ def 재무_읽기를_대역으로(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda as_of: {
             "state_date": AS_OF,
             "sim_run_id": BURN_IN_SIM_RUN_ID,
+            "financing_mode": "LOAN_BASELINE",
             "finance_state_id": "FIN-BURNIN-DAY30",
             "unsettled_purchase_payables_krw": Decimal(0),
         },

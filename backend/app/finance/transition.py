@@ -54,6 +54,7 @@ from app.finance.db import (
     get_db_schema,
     load_finance_state_row,
 )
+from app.finance.state_identity import daily_finance_state_id
 
 __all__ = [
     "ApprovedCommitmentFacts",
@@ -163,6 +164,7 @@ def build_finance_transition(
         raise FinanceDataNotReady("commitment_total_amount")
 
     sim_run_id = str(state["sim_run_id"])
+    financing_mode = str(state["financing_mode"])
     legs = _payment_legs(commitment, total_amount=amount)
     payables = tuple(
         FinancePayableWrite(
@@ -182,7 +184,11 @@ def build_finance_transition(
         approval_id=commitment.approval_id,
         sim_run_id=sim_run_id,
         source_finance_state_id=str(state["finance_state_id"]),
-        next_finance_state_id=f"FIN-{commitment.approval_id}",
+        next_finance_state_id=daily_finance_state_id(
+            sim_run_id=sim_run_id,
+            financing_mode=financing_mode,
+            state_date=target_state_date,
+        ),
         next_state_date=target_state_date,
         payables=payables,
         next_unsettled_purchase_payables_krw=(
@@ -264,6 +270,7 @@ def persist_finance_transition(
     """
     schema = sql.Identifier(get_db_schema())
     written = {"finance_states": 0, "payables": 0}
+    newly_persisted_payables = Decimal(0)
     with conn.cursor() as cursor:
         for payable in transition.payables:
             cursor.execute(
@@ -288,40 +295,55 @@ def persist_finance_transition(
                 ],
             )
             written["payables"] += cursor.rowcount
+            if cursor.rowcount:
+                # State는 계획 금액이 아니라 이 트랜잭션에서 실제로 새로 선 의무만
+                # 누적한다. retry에서는 Payable INSERT가 0건이므로 다시 더하지 않는다.
+                newly_persisted_payables += payable.amount_krw
 
-        # ★ 나머지 컬럼은 **원천 행에서 그대로 이어 간다.** 재고 평가액처럼 재무가
-        #   만들지 않는 값을 여기서 다시 적으면, 옮겨 적는 순간 남의 숫자가 된다.
-        cursor.execute(
-            sql.SQL(
-                """
-                INSERT INTO {schema}.finance_states (
-                    finance_state_id, sim_run_id, state_date, state_type, financing_mode,
-                    current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
-                    unsettled_purchase_payables_krw, receivables_krw,
-                    inventory_book_value_krw, operational_inventory_value_krw,
-                    current_debt_krw, recommended_loan_amount_krw, note
-                )
-                SELECT
-                    %s, sim_run_id, %s, %s, financing_mode,
-                    current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
-                    %s, receivables_krw,
-                    inventory_book_value_krw, operational_inventory_value_krw,
-                    current_debt_krw, recommended_loan_amount_krw, %s
-                FROM {schema}.finance_states
-                WHERE finance_state_id = %s
-                ON CONFLICT (finance_state_id) DO NOTHING
-                """
-            ).format(schema=schema),
-            [
-                transition.next_finance_state_id,
-                transition.next_state_date,
-                H1_STATE_TYPE,
-                transition.next_unsettled_purchase_payables_krw,
-                f"H1 승인 {transition.approval_id} 반영",
-                transition.source_finance_state_id,
-            ],
-        )
-        written["finance_states"] += cursor.rowcount
+        if newly_persisted_payables:
+            # 첫 승인은 원천 상태를 carry하고, 같은 target 축/날짜의 다음 승인은 기존
+            # 일별 상태에 **새 Payable 금액만** 원자적으로 더한다. composite UNIQUE가
+            # 동시 승인도 한 행으로 직렬화한다. 기존 target의 cash/AR 등은 보존한다.
+            cursor.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {schema}.finance_states AS current_state (
+                        finance_state_id, sim_run_id, state_date, state_type, financing_mode,
+                        current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
+                        unsettled_purchase_payables_krw, receivables_krw,
+                        inventory_book_value_krw, operational_inventory_value_krw,
+                        current_debt_krw, recommended_loan_amount_krw, note
+                    )
+                    SELECT
+                        %s, sim_run_id, %s, %s, financing_mode,
+                        current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
+                        unsettled_purchase_payables_krw + %s, receivables_krw,
+                        inventory_book_value_krw, operational_inventory_value_krw,
+                        current_debt_krw, recommended_loan_amount_krw, %s
+                    FROM {schema}.finance_states
+                    WHERE finance_state_id = %s
+                    ON CONFLICT (sim_run_id, financing_mode, state_date) DO UPDATE SET
+                        state_type = EXCLUDED.state_type,
+                        unsettled_purchase_payables_krw =
+                            current_state.unsettled_purchase_payables_krw + %s,
+                        note = EXCLUDED.note
+                    """
+                ).format(schema=schema),
+                [
+                    transition.next_finance_state_id,
+                    transition.next_state_date,
+                    H1_STATE_TYPE,
+                    newly_persisted_payables,
+                    "H1 승인 매입채무 반영",
+                    transition.source_finance_state_id,
+                    newly_persisted_payables,
+                ],
+            )
+            if cursor.rowcount != 1:
+                # Payable을 새로 세웠는데 source state에서 일별 상태를 만들거나 갱신하지
+                # 못했다면 부분 성공으로 돌려주지 않는다. Master 트랜잭션이 전부 rollback한다.
+                raise FinanceDataNotReady("historical_finance_position")
+            written["finance_states"] += cursor.rowcount
     return written
 
 

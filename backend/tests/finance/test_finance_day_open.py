@@ -169,6 +169,23 @@ def test_first_open_carries_state_and_second_open_is_idempotent():
     assert conn.calls == []
 
 
+def test_transition_created_target_means_open_day_does_not_create_another_state():
+    transition_state = dict(
+        SOURCE,
+        # 과거 E2E가 만든 approval 기반 ID여도 exact axis/date가 이미 열렸다는 의미다.
+        finance_state_id="FIN-H1-REQ-EXISTING-1",
+        state_date=AS_OF,
+        state_type="H1_COMMITMENT",
+        unsettled_purchase_payables_krw=Decimal(5_000_000),
+    )
+    conn = _Conn([SOURCE, transition_state])
+
+    FinanceDayOpening().open_day(conn, as_of=AS_OF, carry_from=CARRY_FROM)
+
+    assert len([row for row in conn.states if row["state_date"] == AS_OF]) == 1
+    assert not any("INSERT INTO" in query for query, _params in conn.executed)
+
+
 def test_weekend_calendar_date_can_be_opened():
     friday = date(2026, 1, 2)
     saturday = date(2026, 1, 3)

@@ -477,17 +477,19 @@ WHERE fs.state_date = (그 축의 max(state_date))
 ★ **주말 실행 판단은 재무가 하지 않는다.** 시뮬레이션이 평일만 도는 것은 마스터
 소유이고, 경과 시간은 달력일 그대로다.
 
-### 같은 승인을 두 번 적용해도 의무는 하나다
+### 같은 날 승인 여러 건은 상태 하나에 누적되고 retry는 다시 더하지 않는다
 
-식별자는 약정이 이미 들고 있는 `approval_id` 다. 재무는 그것으로 행 ID 를 정하고,
-중복은 DB 가 막는다.
+Payable은 회차별 의무이고 Finance State는 날짜별 snapshot이다. 두 축을 섞지 않는다.
 
 ```text
-finance_states  PK (finance_state_id = FIN-{approval_id})
-payables        UNIQUE (purchase_id)
+payables        UNIQUE (purchase_id)                         승인·회차별 의무
+finance_states  UNIQUE (sim_run_id, financing_mode, state_date)  일별 snapshot
 ```
 
-두 번째 적용은 쓴 행 수 0 으로 돌아온다.
+상태 ID는 `FIN-DAY-{sim_run_id}-{financing_mode}-{YYYYMMDD}`로 transition과
+`open_day`가 같이 쓴다. persist는 **이번 호출에서 실제 새로 INSERT된 Payable 금액만**
+일별 상태에 원자적으로 더한다. 같은 승인 retry는 Payable INSERT가 0건이므로 상태도
+다시 증가하지 않는다. 같은 날짜 승인 순서가 바뀌어도 최종 업무 숫자는 같다.
 
 ## 패키지 구조
 
@@ -502,6 +504,8 @@ app/finance/
 │                                                          ← master · orchestrator 도 import
 ├─ schemas.py         요청·응답 계약 전체 (어휘·현금흐름·정책·상태·매입·판매·이력)
 ├─ state.py           한 실행 동안 살아 있는 값
+├─ state_identity.py  한 Finance 축·날짜의 결정론 state ID
+├─ day_open.py        Master DayOpening 구조 계약의 Finance 구현
 ├─ transition.py      승인 약정 → 다음 재무 상태 · 재무 원장 쓰기 (연결은 부르는 쪽 것)
 ├─ tools.py           결정론 재무 계산 (공식의 유일한 주인)
 ├─ rules.py           결정론 판정 (verdict 소유)

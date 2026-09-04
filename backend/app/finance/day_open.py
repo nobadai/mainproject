@@ -13,6 +13,7 @@ from typing import Any
 from psycopg import sql
 
 from app.finance.db import FinanceDataNotReady, get_db_schema
+from app.finance.state_identity import daily_finance_state_id
 
 __all__ = ["FinanceDayOpening"]
 
@@ -71,7 +72,11 @@ class FinanceDayOpening:
             cursor.execute(
                 self._carry_forward_query(schema),
                 {
-                    "finance_state_id": (f"FIN-DAY-{sim_run_id}-{financing_mode}-{as_of:%Y%m%d}"),
+                    "finance_state_id": daily_finance_state_id(
+                        sim_run_id=sim_run_id,
+                        financing_mode=financing_mode,
+                        state_date=as_of,
+                    ),
                     "sim_run_id": sim_run_id,
                     "financing_mode": financing_mode,
                     "as_of": as_of,
@@ -80,6 +85,14 @@ class FinanceDayOpening:
                     "note": f"하루 넘김이 {carry_from} 재무 상태에서 물려받아 세운 행",
                 },
             )
+            inserted = cursor.rowcount
+        if not inserted and not self._has_exact_state(
+            conn,
+            as_of=as_of,
+            sim_run_id=sim_run_id,
+            financing_mode=financing_mode,
+        ):
+            raise FinanceDataNotReady("historical_finance_position")
 
     @staticmethod
     def _runtime_axis(conn: Any) -> tuple[str, str]:

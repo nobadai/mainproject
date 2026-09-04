@@ -29,10 +29,11 @@ WED = date(2025, 12, 31)  # 수요일
 THU = date(2026, 1, 1)
 SAT = date(2026, 1, 3)
 SUN = date(2026, 1, 4)
+SIM_RUN_ID = "SIM-BURNIN-202512"
 
 _STATE = {
     "finance_state_id": "FIN-DAY30-LOAN",
-    "sim_run_id": "SIM-BURNIN-202512",
+    "sim_run_id": SIM_RUN_ID,
     "state_date": WED,
     "state_type": "DAY30",
     "financing_mode": "LOAN_BASELINE",
@@ -58,8 +59,15 @@ class _Leg:
 class _Commitment:
     """회차는 `(seq, 매입일)` 로 준다 — 마스터가 실어 주는 모양 그대로다."""
 
-    def __init__(self, *, as_of: date = WED, legs=(), amount: float = 4_500_000.0):
-        self.approval_id = "H1-REQ-1-1"
+    def __init__(
+        self,
+        *,
+        approval_id: str = "H1-REQ-1-1",
+        as_of: date = WED,
+        legs=(),
+        amount: float = 4_500_000.0,
+    ):
+        self.approval_id = approval_id
         self.as_of = as_of
         self.total_amount_krw = amount
         self.arrival_schedule = tuple(_Leg(*leg) for leg in legs)
@@ -141,6 +149,74 @@ def _persist(transition, *, rowcount=1):
     return conn, written
 
 
+class _LedgerCursor:
+    """Payable 신규 INSERT 여부와 일별 state 누적만 모사한다."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, params=None):
+        text = query.as_string(None)
+        self.conn.executed.append((text, params))
+        if ".payables" in text:
+            purchase_id = params[2]
+            if purchase_id in self.conn.payables:
+                self.rowcount = 0
+            else:
+                self.conn.payables[purchase_id] = Decimal(str(params[5]))
+                self.rowcount = 1
+            return
+        if ".finance_states" in text:
+            state_id = params[0]
+            target_date = params[1]
+            delta = Decimal(str(params[3]))
+            key = (SIM_RUN_ID, "LOAN_BASELINE", target_date)
+            if key not in self.conn.states:
+                self.conn.states[key] = {
+                    "finance_state_id": state_id,
+                    "current_cash_krw": _STATE["current_cash_krw"],
+                    "receivables_krw": _STATE["receivables_krw"],
+                    "unsettled_purchase_payables_krw": (
+                        _STATE["unsettled_purchase_payables_krw"] + delta
+                    ),
+                }
+            else:
+                self.conn.states[key]["unsettled_purchase_payables_krw"] += delta
+            self.rowcount = 1
+
+
+class _LedgerConn:
+    def __init__(self):
+        self.payables = {}
+        self.states = {}
+        self.executed = []
+        self.calls = []
+
+    def cursor(self):
+        return _LedgerCursor(self)
+
+    def commit(self):
+        self.calls.append("commit")
+
+    def rollback(self):
+        self.calls.append("rollback")
+
+    def close(self):
+        self.calls.append("close")
+
+
+def _persist_to_ledger(conn, transition):
+    with patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"):
+        return persist_finance_transition(conn, transition)
+
+
 # ---------------------------------------------------------------------------
 # build — 한 회차 (지금 계약으로 만들 수 있는 유일한 모양)
 # ---------------------------------------------------------------------------
@@ -157,6 +233,7 @@ def test_single_leg_makes_one_payable_from_authoritative_values():
     assert payable.issued_date == WED
     assert payable.amount_krw == Decimal("4500000.0")
     assert transition.payable_total_krw == Decimal(str(_Commitment().total_amount_krw))
+    assert transition.next_finance_state_id == ("FIN-DAY-SIM-BURNIN-202512-LOAN_BASELINE-20260101")
 
 
 def test_due_date_is_purchase_date_plus_calendar_n5():
@@ -463,6 +540,90 @@ def test_persist_reports_zero_rows_when_the_same_approval_is_reapplied():
     _, written = _persist(_build(_Commitment(legs=[(1, WED)])), rowcount=0)
 
     assert written == {"finance_states": 0, "payables": 0}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_day_approvals_accumulate_in_one_state_and_retries_do_not_double_count(reverse):
+    """승인 순서와 retry는 일별 상태 숫자에 영향을 주지 않는다."""
+    approval_a = _build(
+        _Commitment(
+            approval_id="H1-REQ-A-1",
+            legs=[(1, WED, 3_000_000)],
+            amount=3_000_000,
+        ),
+        purchase_ids={1: "PUR-A-S1"},
+    )
+    approval_b = _build(
+        _Commitment(
+            approval_id="H1-REQ-B-1",
+            legs=[(1, WED, 2_000_000)],
+            amount=2_000_000,
+        ),
+        purchase_ids={1: "PUR-B-S1"},
+    )
+    ordered = [approval_b, approval_a] if reverse else [approval_a, approval_b]
+    conn = _LedgerConn()
+
+    first = [_persist_to_ledger(conn, plan) for plan in ordered]
+    retries = [_persist_to_ledger(conn, plan) for plan in ordered]
+
+    assert first == [
+        {"finance_states": 1, "payables": 1},
+        {"finance_states": 1, "payables": 1},
+    ]
+    assert retries == [
+        {"finance_states": 0, "payables": 0},
+        {"finance_states": 0, "payables": 0},
+    ]
+    assert conn.payables == {
+        "PUR-A-S1": Decimal(3_000_000),
+        "PUR-B-S1": Decimal(2_000_000),
+    }
+    assert len(conn.states) == 1
+    (state,) = conn.states.values()
+    assert state["finance_state_id"] == ("FIN-DAY-SIM-BURNIN-202512-LOAN_BASELINE-20260101")
+    assert state["unsettled_purchase_payables_krw"] == Decimal(5_000_000)
+    assert state["current_cash_krw"] == _STATE["current_cash_krw"]
+    assert state["receivables_krw"] == _STATE["receivables_krw"]
+    assert conn.calls == []
+
+
+def test_state_upsert_uses_daily_axis_conflict_and_only_new_payable_delta():
+    transition = _build(_Commitment(legs=[(1, WED)]))
+    conn = _LedgerConn()
+
+    _persist_to_ledger(conn, transition)
+    state_query, state_params = next(item for item in conn.executed if ".finance_states" in item[0])
+
+    assert "ON CONFLICT (sim_run_id, financing_mode, state_date)" in state_query
+    assert "current_state.unsettled_purchase_payables_krw + %s" in state_query
+    assert state_params[3] == transition.payable_total_krw
+    assert state_params[-1] == transition.payable_total_krw
+
+
+def test_existing_same_day_state_keeps_its_id_while_new_obligation_accumulates():
+    """기존 E2E의 approval 기반 ID를 재작성하지 않고 날짜축 숫자만 누적한다."""
+    transition = _build(
+        _Commitment(
+            approval_id="H1-REQ-NEW-1",
+            legs=[(1, WED, 2_000_000)],
+            amount=2_000_000,
+        ),
+        purchase_ids={1: "PUR-NEW-S1"},
+    )
+    conn = _LedgerConn()
+    key = (SIM_RUN_ID, "LOAN_BASELINE", THU)
+    conn.states[key] = {
+        "finance_state_id": "FIN-H1-REQ-EXISTING-1",
+        "current_cash_krw": _STATE["current_cash_krw"],
+        "receivables_krw": _STATE["receivables_krw"],
+        "unsettled_purchase_payables_krw": Decimal(3_000_000),
+    }
+
+    _persist_to_ledger(conn, transition)
+
+    assert conn.states[key]["finance_state_id"] == "FIN-H1-REQ-EXISTING-1"
+    assert conn.states[key]["unsettled_purchase_payables_krw"] == Decimal(5_000_000)
 
 
 def test_persist_writes_each_multi_leg_payable_on_the_supplied_connection():
