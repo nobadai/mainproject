@@ -170,10 +170,29 @@ class AgentFailure:
 
         사유 문장과 화면 표시를 각자 조립하면 둘이 갈린다 - 근거를 검증과 화면이
         같은 객체로 보게 한 것과 같은 이유다.
+
+        🔴 **이름 절의 문구는 세 경우에 다 참이어야 한다.** `missing_data` 에는
+        세 종류가 같은 칸으로 온다::
+
+            안 왔다              부서가 값을 안 보냈다
+            왔는데 쓰지 말라      ML 이 `use_recommended=False` 로 표시했다 (#231)
+            값이 look-ahead 다    `generated_at > as_of` (`purchase_agent/adapter.py`)
+
+        *"없는 입력"* 은 첫째에만 참이라, 둘째가 오는 날 화면에 *"쓰지 말라고 표시해
+        시나리오를 만들지 않았다 / 없는 입력: forecast.use_recommended"* 라는 앞뒤가
+        반대인 줄이 나갔다.
         """
         parts = [self.reasoning.strip() or self.runtime_status]
         if self.missing_data:
-            parts.append(f"없는 입력: {', '.join(self.missing_data)}")
+            # 어휘 출처: 매입 `purchase_agent/adapter.py` 의 `_unusable_forecast_names`
+            # 가 쓴 *"쓸 수 없는 입력"* 을 그대로 가져온다. 마스터가 말을 새로 만들면
+            # 같은 사실에 부서마다 다른 낱말이 붙는다.
+            #
+            # ★ **두 갈래로 가르지 않는다.** 가르려면 마스터가 매입의
+            #   `UNUSABLE_FORECAST_NAMES` 를 읽어야 하고, 그러면 마스터 문구가 매입
+            #   내부 목록에 묶인다. 어느 쪽인지는 부서가 `reasoning` 으로 이미 말한다 -
+            #   마스터는 문장을 새로 쓰지 않는다 (§3.2.2).
+            parts.append(f"쓸 수 없는 입력: {', '.join(self.missing_data)}")
         return " / ".join(parts)
 
 
