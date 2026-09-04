@@ -67,6 +67,7 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `finance_agent_runs*.sql` | 재무 | |
 | `logistics_agent_runs.sql` | 물류 | |
 | `sales_agent_runs.sql` | 판매 | |
+| `ml_calendar_days.sql` | **ML** | ML 이 만들고 ML 이 채운다. 조사일·경매일·공휴일 달력 + `v_ml_batch_days`. 다른 파트는 읽기만 |
 | `mvp_demo_remove_dried_pepper.sql` | 데모 | 스키마가 아니라 데이터 정리 |
 | `mvp_demo_remove_pimanul.sql` | 데모 | 스키마가 아니라 데이터 정리 · #216 피마늘 제외 · 실 DB 적용 대기 |
 
