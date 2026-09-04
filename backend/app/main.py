@@ -14,8 +14,10 @@ from app.finance.adapter import finance_port
 from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
+from app.logistics.day_open import LogisticsDayOpening
 from app.logistics.router import router as logistics_router
 from app.logistics.transition import LogisticsTransitionAdapter
+from app.master.day_open import register_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
 from app.master.transition import register_transition
@@ -77,6 +79,19 @@ register_agent("purchase", partial(purchase_port, quotes=auction_quote_source())
 #    (`ledger.sim_run_id_for`)도 같은 상수를 가리킨다 — 새로 만들지 않는다.
 register_transition("finance", FinanceTransitionAdapter())
 register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
+
+# ── 하루 넘김 (day_open) ────────────────────────────────────────────────
+#
+# 🔴 **또 하나의 다른 등록소다.** 위 `register_transition` 은 **승인이 장부를 바꾸는
+#    방법**을 담고 이쪽은 **하루가 넘어가는 방법**을 담는다. 한 사전에 섞으면 전이가
+#    없는 것과 하루 넘김이 없는 것이 같은 문장으로 나가고, 둘은 다른 사실이다.
+#
+# ⚠️ **물류만 등록한다. 재무는 미회신이다.** 미등록은 오류가 아니라 상태다 —
+#    `open_day` 가 `missing: [finance]` 를 달고 물류만 걷는다.
+#
+# ★ **생성 인자가 없다.** 위 `LogisticsTransitionAdapter` 와 다른 자리다. 하루 넘김은
+#   `sim_run_id` 를 **정하지 않고 전날 행에서 물려받는다** — 그래서 마스터가 줄 값이 없다.
+register_day_opening("logistics", LogisticsDayOpening())
 
 app.include_router(critic_router)
 app.include_router(sales_router)
