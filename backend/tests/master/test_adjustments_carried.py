@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.contracts.core import SuggestedAdjustment
 from app.master.answer import facts_from_procurement
 from app.master.budget import CallBudget
 from app.master.envelope import (
@@ -37,7 +38,6 @@ from app.master.envelope import (
 from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _to_response
-from app.orchestrator.contracts_core import SuggestedAdjustment
 
 AS_OF = date(2025, 12, 31)
 
@@ -54,8 +54,18 @@ def _ctx() -> ExecutionContext:
 
 
 def _adj(
-    dept: str, axis: str, value: float, unit: str, reason: str = "사유"
+    dept: str,
+    axis: str,
+    value: float,
+    unit: str,
+    reason: str = "사유",
+    split_date: date | None = None,
 ) -> SuggestedAdjustment:
+    # ★ `timing` 은 계약이 회차를 요구한다 (2026-09-03 강제 · 물류 #214 가 채운 뒤).
+    #   여기서 기본값을 주는 이유는 이 파일의 관심사가 회차가 아니라
+    #   **값을 안 고치고 나르는가** 라서다.
+    if axis == "timing" and split_date is None:
+        split_date = date(2026, 1, 3)
     return SuggestedAdjustment(
         dept=dept,  # type: ignore[arg-type]
         axis=axis,  # type: ignore[arg-type]
@@ -63,6 +73,7 @@ def _adj(
         unit=unit,
         reason=reason,
         ref_ids=("REF-SNAP-1",),
+        split_date=split_date,
     )
 
 
@@ -134,7 +145,7 @@ def _flow(**ports: Any) -> ProcurementFlow:
     for name, port in ports.items():
         registry.register(name, port)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    return ProcurementFlow(runner, verifier=None, item="피마늘")
+    return ProcurementFlow(runner, verifier=None, item="배추")
 
 
 def _run(**over: Any):

@@ -30,6 +30,7 @@ from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     estimate_daily_demand,
+    is_gate_excluded,
 )
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
@@ -209,7 +210,59 @@ def validate_forecast(forecast: Any, as_of: date) -> list[str]:
         if any(row.get(key) is None for key in ("predicted", "lower", "upper")):
             missing.append("forecast.daily")
             break
+
+    if "forecast.daily" not in missing:
+        missing.extend(_unusable_forecast_names(forecast, daily))
     return sorted(set(missing))
+
+
+#: 값이 **왔는데 쓰지 말라고 표시된** 입력. ``missing_data`` 에 이 이름만 실리면
+#: 사유 문장이 *"없다"* 가 아니라 *"쓰지 말라고 왔다"* 가 된다 (``_generate_scenarios``).
+UNUSABLE_FORECAST_NAMES: tuple[str, ...] = (
+    "forecast.use_recommended",
+    "forecast.daily.gate_reason",
+)
+
+
+def _unusable_forecast_names(forecast: Mapping[str, Any], daily: list[Any]) -> list[str]:
+    """**왔는데 쓰면 안 되는** 예측인가 (#213 · ML 회신 2026-08-27).
+
+    ``missing_data`` 는 원래 *"안 왔다"* 를 담는 칸인데 여기 둔다. **같은 함수에 선례가
+    있다** — ``generated_at > as_of`` 도 값이 왔지만 쓰면 look-ahead 라 ``missing`` 에
+    넣는다. *"쓸 수 없는 입력"* 이라는 점이 같고, 봉투가 ``RUNTIME_NOT_READY`` 에
+    요구하는 것은 **이름**이지 부재의 증명이 아니다.
+
+    ⚠️ **노드에서 예외를 던지지 않는 이유.** 노드가 죽으면 ``missing_data`` 가 비어
+      마스터는 *"매입이 왜 안 돌았는지"* 를 못 받는다. 봉투도 빈 ``missing_data`` 의
+      ``RUNTIME_NOT_READY`` 를 거부한다 (``ContractViolation``).
+
+    거는 것은 둘이다::
+
+        use_recommended is False    ML: "FALSE 면 쓰지 마세요" — 조합 전체가 무효
+        판정일 행이 quality 게이트   ci_width 를 그 행 하나로 재므로 판정이 성립 안 한다
+        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 컷 기준)
+          quality 게이트
+
+    ★ **세 번째가 가장 짧은 창인 이유**: 큰 창은 짧은 창을 포함하므로, 짧은 창에 쓸
+      행이 하나라도 있으면 ``usable_forecast_window`` 는 어느 안에서도 안 빈다.
+
+    🔴 **``None`` 은 안 건다** (규칙 3). mock 예측에는 이 칸들이 아예 없고,
+      *"권고가 없다"* 와 *"쓰지 말라고 했다"* 는 다른 사실이다. ``is False`` 로 본다.
+    """
+    names: list[str] = []
+    if forecast.get("use_recommended") is False:
+        names.append("forecast.use_recommended")
+
+    constraints = load_constraints()
+    day = constraints["situation"]["ci_judgment_day"]
+    if len(daily) >= day and is_gate_excluded(daily[day - 1]):
+        names.append("forecast.daily.gate_reason")
+
+    shortest = min(constraints["coverage_days"]["by_label"].values())
+    window = daily[:shortest]
+    if window and all(is_gate_excluded(row) for row in window):
+        names.append("forecast.daily.gate_reason")
+    return names
 
 
 #: 물류가 로트마다 싣는 키 (`master/adapters/logistics.py` · 2026-08-28 실측).
@@ -451,6 +504,12 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
 
     ``quotes``는 그 시세의 공급자다 (#70). ``None``이면 mock 이고, 실데이터로 돌리려면
     ``quotes.auction_quote_source()``를 넘긴다 — 환경변수가 아니라 **명시 주입**이다.
+
+    ⚠️ **#228(2026-09-03) 이후로 이 문장은 pytest 안에서만 참이다.** 운영 경로에서
+    mock 포트를 부르면 ``MockNotAllowed`` 로 막힌다 (``ports.py`` —
+    ``PYTEST_CURRENT_TEST`` 또는 ``sys.modules`` 로 판단). **실운영 등록은
+    ``main.py`` 가 실 공급자를 꽂는다** (#226 ·
+    ``partial(purchase_port, quotes=auction_quote_source())``).
     """
     from app.purchase_agent import ports
 
@@ -489,9 +548,20 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         #   저쪽은 사람이 준 조건이고 이쪽은 조언자가 준 조정안이다 — 수명·모양·권위가
         #   달라 한 칸에 담으면 받는 쪽이 타입으로 갈라야 한다.
         #
-        # ⚠️ **받기만 한다.** 반영 규칙이 미정이라 어느 노드도 아직 안 읽는다.
+        # ⚠️ **받되 반영은 안 한다.** ``target_value`` 가 *"이 값으로 바꿔라"* 인지
+        #   *"이 값을 넘지 마라"* 인지가 미확정이라 반영 규칙을 만들 수 없다.
         #   전에는 마스터가 2회차에 실어 보내는데 이 자리에서 **조용히 버렸다** —
         #   보내는 쪽은 우리가 안 쓰는 줄 모른다.
+        #
+        #   **그래서 읽기는 두 곳이 한다.** 반영은 안 해도 *"받았다"* 는 산출물에 남긴다::
+        #
+        #       ⑥ package_scenarios._adjustment_risks  받고 안 썼다는 사실을 risks 에
+        #       ⑦ self_check._assemble                 건수를 meta.received_adjustments 에
+        #
+        # 🔴 **이 자리에 "어느 노드도 아직 안 읽는다" 고 적었었다 (2026-09-03 정정).**
+        #   위 두 곳을 **같은 판(#177)에서** 넣고 이 문장을 남겼다 — 쓴 순간부터 틀렸다.
+        #   ``state.py`` 의 같은 설명은 *"읽어 **수량을 바꾸지** 않는다"* 로 정확했다.
+        #   **반영과 독해는 다른 말이고, 뭉치면 "값을 실어 주고 안 쓰는" 자리가 다시 열린다.**
         "adjustments": [dict(item) for item in payload.get("adjustments") or []],
         "feedback_context": dict(payload.get("feedback_context") or {}) or None,
         "context_docs": [],
@@ -840,12 +910,31 @@ def purchase_port(
     ``mode``는 둘뿐이다 — ``GENERATE_SCENARIOS``·``STATUS_QUERY``. 다른 mode는 봉투가
     **보내기 전에** 막으므로 여기서 다시 검사하지 않는다 (``_AGENT_MODES``).
 
-    ``quotes``는 등급별 시세 공급자다 (#70). 기본값은 mock 이고, 실데이터로 돌리려면
-    등록 시점에 ``partial(purchase_port, quotes=auction_quote_source())``로 꽂는다.
+    ``quotes``는 등급별 시세 공급자다 (#70). 이 인자의 기본값은 여전히 mock 이지만
+    **실운영 등록은 실 경락가를 꽂는다** — ``app/main.py`` 가
+    ``partial(purchase_port, quotes=auction_quote_source())`` 로 등록한다 (2026-09-03).
 
-    ⚠️ **실운영 기본값을 아직 바꾸지 않았다.** 우리 물량가중 시리즈가 ML ``current_price``와
-      일치하지 않는 것이 확인됐고(2026-08-31 실측), 두 시리즈를 어떻게 병기할지가 ML 회신
-      대기 중이다. 전환은 ``app/main.py``의 등록 한 줄이다.
+    🔴 **mock 으로 두면 안이 하나도 안 나온다.** 실측으로 확인했다.
+
+    .. code-block:: text
+
+        같은 payload · as_of=2025-12-31
+          mock      배추 0안 · 무 0안   self_check 가 전부 컷
+          실 경락가  배추 2안 · 무 2안   business=ok
+
+    ``max_price`` 는 실 ML 예측 q90 에서 오고 ``grade_unit_price`` 는 시세에서 온다.
+    한쪽만 mock 이면 **출처가 다른 두 값을 비교**하게 되고, 그 판정은 뜻이 없다.
+
+    ★ 인자 기본값을 mock 으로 남겨 둔 이유는 테스트다 — 결정론 스위트가 DB 없이 돈다.
+      실운영 기본값은 등록 자리에서 정한다.
+
+      ⚠️ **그 기본값은 pytest 안에서만 닿는다** (#228 · 2026-09-03). 운영 경로에서
+      mock 포트를 부르면 ``MockNotAllowed`` 로 막히므로, 등록에서 실 공급자를
+      빠뜨려도 조용히 mock 으로 도는 일은 이제 없다 — **터진다.**
+
+    ⚠️ ML ``current_price`` 와 매입 물량가중 시리즈가 일치하지 않는 것은 여전히 미결이다
+      (2026-08-31 실측 · 배추 812 vs 933). 그것은 **두 값을 어떻게 병기해 보여줄지**의
+      문제이지 매입단가로 무엇을 쓸지가 아니다.
     """
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
@@ -900,11 +989,21 @@ def _generate_scenarios(
         #   재무·물류도 이 자리에 payload를 안 싣는다(둘 다 ``_not_ready()``). 무엇이
         #   없는지는 ``missing_data``가, 왜인지는 ``reasoning``이 말한다 — 봉투는
         #   ``RUNTIME_NOT_READY``에 ``missing_data``가 비지 않을 것만 요구한다.
+        #
+        # 🔴 **"안 왔다" 와 "쓰지 말라고 왔다" 를 문장으로 가른다** (#213).
+        #   ``missing_data`` 이름은 어느 쪽이든 실리지만, 사람이 읽는 사유가 같으면
+        #   *"ML 이 이 예측을 쓰지 말라고 했다"* 가 *"마스터가 값을 안 보냈다"* 로
+        #   읽힌다 — 마스터가 사용자에게 요청할 대상이 서로 다르다.
+        unusable = [name for name in missing if name in UNUSABLE_FORECAST_NAMES]
         reply = _reply(
             request,
             runtime_status="RUNTIME_NOT_READY",
             business_status="skipped",
-            reasoning="필수 입력이 없어 시나리오를 만들지 못했다.",
+            reasoning=(
+                "예측을 만든 쪽이 오늘 값을 쓰지 말라고 표시해 시나리오를 만들지 않았다."
+                if unusable and len(unusable) == len(missing)
+                else "필수 입력이 없어 시나리오를 만들지 못했다."
+            ),
             missing_data=tuple(missing),
         )
         return reply, _metadata(request, None)

@@ -515,6 +515,31 @@ def test_조회는_봉투_검증을_통과한다(wired):
     assert validate_reply(request, reply, meta) == ()
 
 
+def test_봉투의_inbound_lead_days_는_int_다(wired):
+    """🔴 일수를 kg 변환기에 태우지 않는다 (#221 · 매입 지적 2026-09-03).
+
+    정책값 여섯을 한 루프로 묶어 `_num()` = `float()` 을 태우고 있었는데, 다섯은
+    kg(`Decimal`)이고 **이것 하나가 일수(`int`)** 였다. 그래서 `2` 가 `2.0` 으로
+    나갔다 — 물류 내부(`schemas.py`)도 IO Contract §3 도 `int` 인데 봉투만 달랐다.
+
+    받는 쪽 셋이 전부 방어를 만들어 뒀다(`critic_bridge.py` `_int_of` ·
+    `commitment.py` · `purchase_agent/adapter.py` 의 `lead != int(lead)`).
+    생산자가 맞게 보내면 그 방어들이 무해해진다.
+
+    ⚠️ `2.0 == 2` 가 참이라 값 비교로는 안 잡힌다. **타입을 직접 잰다.**
+    """
+    reply, _ = adapter.logistics_port(req())
+
+    lead = reply.payload["inbound_lead_days"]
+    assert isinstance(lead, int)
+    assert not isinstance(lead, bool)  # True 가 1일로 통과하는 자리를 막는다
+    assert lead == 2
+
+    # kg 축은 그대로 float 다 — 루프에서 하나만 갈라 낸 것이지 전부 바꾼 것이 아니다.
+    assert isinstance(reply.payload["guaranteed_capacity_kg"], float)
+    assert isinstance(reply.payload["daily_inbound_capacity_kg"], float)
+
+
 def test_조회는_상태를_싣고_경계는_안_싣는다(wired):
     """★ `PRE_PURCHASE` 와 읽는 것은 같고 **싣는 것이 다르다.**
 
@@ -866,6 +891,44 @@ def test_조정_제안은_전용_채널에도_실린다(stocked):
         assert adjustment.axis in {"quantity", "timing"}
         assert adjustment.ref_ids
     assert reply.needs_followup is True
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_같은_조정이_여러_안에서_나오면_라벨이_합쳐진다(stocked):
+    """🔴 전에는 중복 키를 만나면 그 자리에서 `continue` 해 **두 번째 안의 라벨이
+    사라졌다** (#209 · 되먹임 ④).
+
+    같은 회차·같은 목표값이면 조정안은 하나로 합치는 것이 맞다. 다만 그 하나가
+    **어느 안들에서 나왔는지**는 잃으면 안 된다 — 마스터 화면(`answer.py:295`)이
+    `scenario_labels` 를 읽어 "보수·기본안" 을 조립한다.
+
+    같은 split_plan 을 가진 안 둘을 넣으면 조정도 같은 key 로 나온다.
+    """
+    payload = _proposal_payload()
+    scenario = payload["scenarios"][0]
+    scenario["total_qty_kg"] = 20000
+    scenario["total_amount_krw"] = 33000000
+    scenario["split_plan"] = [{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 20000}]
+    scenario["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 20000, "grade_unit_price": 1650}
+    ]
+    payload["scenarios"] = [scenario, {**scenario, "label": "공격"}]
+
+    request = req(mode="SCENARIO_VALIDATION", payload=payload)
+    reply, meta = adapter.logistics_port(request)
+
+    # 중복 제거의 뜻은 그대로 — 같은 key 는 하나다.
+    assert len(reply.suggested_adjustments) == 1
+    suggested = reply.suggested_adjustments[0]
+
+    # 🔴 라벨은 둘 다 남고 시나리오 등장 순서를 지킨다.
+    assert suggested.scenario_labels == ("기본", "공격")
+    # 대상 회차도 칸으로 간다 — reason 문자열을 파싱하지 않아도 된다.
+    assert suggested.split_date == AS_OF
+    # 문장에는 라벨·회차가 없다 (미결 §0-6 갈래 ㄱ).
+    assert "기본" not in suggested.reason
+    assert "회차" not in suggested.reason
+
     assert validate_reply(request, reply, meta) == ()
 
 

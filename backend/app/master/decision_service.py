@@ -12,7 +12,11 @@ from datetime import date
 from typing import Any
 from uuid import UUID
 
-from app.master.commitment import CommitmentNotBuildable, build_commitment
+from app.master.commitment import (
+    ApprovedCommitment,
+    CommitmentNotBuildable,
+    build_commitment,
+)
 from app.master.decision import (
     CommitmentOut,
     DecisionIn,
@@ -25,6 +29,7 @@ from app.master.decision import (
 )
 from app.master.decision_repository import list_decisions, save_decision
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
+from app.master.transition import TransitionOut, apply_approval
 
 
 def _end_code_of(response_payload: dict[str, Any]) -> str:
@@ -73,9 +78,25 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         history_run_id=str(row["run_id"]),
         note=payload.note,
     )
+    out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
-        update={"commitment": _commitment_for(request_id, seq, payload, response_payload)}
+        update={"commitment": out, "transition": _transition_for(commitment)}
     )
+
+
+def _transition_for(commitment: ApprovedCommitment | None) -> TransitionOut | None:
+    """약정이 섰으면 그것을 재무·물류 장부에 반영한다 (C 형태 ⑦).
+
+    ★ **약정이 없으면 부르지 않는다.** 승인이 아니거나 약정을 못 만든 날에는 반영할
+      사실 자체가 없다 — 그때의 `None` 은 *"전이가 실패했다"* 가 아니다.
+
+    ★ **여기서도 결정을 죽이지 않는다.** `apply_approval` 은 예외를 밖으로 내지
+      않고 `FAILED` 를 값으로 돌려준다. 적재된 결정이 전이 실패로 지워지면,
+      사람이 승인한 사실이 사라진다.
+    """
+    if commitment is None:
+        return None
+    return apply_approval(commitment)
 
 
 def _commitment_for(
@@ -84,7 +105,25 @@ def _commitment_for(
     payload: DecisionIn,
     response_payload: Mapping[str, Any],
 ) -> CommitmentOut | None:
+    """승인이 만든 약정의 **응답 모양**만 낸다.
+
+    ★ `_commitment_parts` 의 앞쪽만 돌려주는 얇은 겉면이다. 재조립 경로
+      (`current_commitment`)는 약정 객체가 필요 없고, 응답 모양만 쓴다.
+    """
+    return _commitment_parts(request_id, decision_seq, payload, response_payload)[0]
+
+
+def _commitment_parts(
+    request_id: str,
+    decision_seq: int,
+    payload: DecisionIn,
+    response_payload: Mapping[str, Any],
+) -> tuple[CommitmentOut | None, ApprovedCommitment | None]:
     """승인이면 **확정 입고 약정**을 같이 낸다 (H1).
+
+    ★ 응답 모양(`CommitmentOut`)과 **약정 객체**를 함께 돌려준다. 상태전이는 객체가
+      있어야 걸리는데, 응답 모양에서 되만드는 것은 **같은 사실을 두 번 만드는 것**이라
+      둘이 갈리는 날이 온다. 만든 자리에서 그대로 넘긴다.
 
     ★ **적재 뒤에 만든다.** 약정을 못 만들어도 결정은 남아야 한다 — 사람이 승인한
       것은 사실이고, 그 사실을 약정 조립 실패가 지우면 안 된다.
@@ -96,24 +135,26 @@ def _commitment_for(
       있지만 그 경로는 M-1 에서 안 돌고, 회차 수량을 합쳐 **품목을 없앤다.**
     """
     if payload.decision != "APPROVE":
-        return None
+        return None, None
 
     matches = _scenarios_of(response_payload, payload.scenario_label)
     if not matches:
-        return CommitmentOut(buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다.")
+        return CommitmentOut(
+            buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다."
+        ), None
     if len(matches) > 1:
         # 🔴 첫 것을 조용히 고르면 **어느 안을 약정했는지가 운에 걸린다** (자기 리뷰).
         return CommitmentOut(
             buildable=False,
             reason=f"라벨 '{payload.scenario_label}' 이 {len(matches)}개다 — 유일하지 않다.",
-        )
+        ), None
     scenario = matches[0]
 
     as_of = _as_of_of(response_payload)
     if as_of is None:
         return CommitmentOut(
             buildable=False, reason="실행 이력에 기준일이 없어 도착일을 걸 수 없다."
-        )
+        ), None
 
     try:
         commitment = build_commitment(
@@ -125,8 +166,8 @@ def _commitment_for(
             decision_seq=decision_seq,
         )
     except CommitmentNotBuildable as exc:
-        return CommitmentOut(buildable=False, reason=str(exc))
-    return CommitmentOut.of(commitment)
+        return CommitmentOut(buildable=False, reason=str(exc)), None
+    return CommitmentOut.of(commitment), commitment
 
 
 def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:

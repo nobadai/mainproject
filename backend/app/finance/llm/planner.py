@@ -43,6 +43,7 @@ from app.finance.llm.client import (
     _finance_provider_name,
     _gemini_availability_failure_reason,
     _gemini_tool_call,
+    _ollama_availability_failure_reason,
     _ollama_tool_call,
     _ollama_tool_calling_model,
     finance_llm_enabled,
@@ -140,6 +141,7 @@ class FinanceFinalizer(Protocol):
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str: ...
 
 
@@ -149,6 +151,21 @@ class FinancePlannerFailure(RuntimeError):
     Provider 장애·네트워크 오류·구조화 출력 파싱 불가처럼 **다시 물어도 같은 것**이
     여기로 온다. 모델이 계약을 어긴 것은 `FinancePlannerContractViolation` 이다.
     """
+
+
+class FinancePlannerUnavailable(FinancePlannerFailure):
+    """구성된 LLM Planner들이 모두 실행 불가해 결정론 선택으로 내릴 수 있는 실패."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.reason = reason
 
 
 class FinancePlannerContractViolation(ValueError):
@@ -435,7 +452,7 @@ class _AvailabilityFallbackFinancePlanner:
         # ★ 인자를 **그대로 흘린다.** 여기서 목록을 다시 적으면 Harness 가 넘긴
         #   실행 가능 Tool 같은 새 인자가 대체 경로에서만 조용히 사라진다.
         if self.state.active:
-            return self.fallback.decide(**kwargs)
+            return self._fallback_decide(**kwargs)
         try:
             return self.primary.decide(**kwargs)
         except Exception as error:
@@ -443,7 +460,20 @@ class _AvailabilityFallbackFinancePlanner:
             if reason is None:
                 raise
             self.state.activate(reason)
+            return self._fallback_decide(**kwargs)
+
+    def _fallback_decide(self, **kwargs: Any) -> ToolAction:
+        try:
             return self.fallback.decide(**kwargs)
+        except Exception as error:
+            reason = _ollama_availability_failure_reason(error)
+            if reason is None:
+                raise
+            raise FinancePlannerUnavailable(
+                f"Finance LLM providers unavailable: ollama {reason}",
+                provider="ollama",
+                reason=reason,
+            ) from error
 
 
 class _AvailabilityFallbackFinanceFinalizer:
@@ -471,11 +501,15 @@ class _AvailabilityFallbackFinanceFinalizer:
         mode: FinanceMode,
         business_status: str,
         evidences: tuple[Evidence, ...],
+        has_verified_adjustment: bool = False,
     ) -> str:
+        # ★ Provider 가 갈려도 **같은 사실**을 넘긴다. 한쪽만 조정 여부를 못 받으면
+        #   같은 결과가 Provider 에 따라 다른 문장을 고르게 된다.
         kwargs = {
             "mode": mode,
             "business_status": business_status,
             "evidences": evidences,
+            "has_verified_adjustment": has_verified_adjustment,
         }
         if self.state.active:
             return self.fallback.finalize(**kwargs)

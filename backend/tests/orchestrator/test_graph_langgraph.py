@@ -8,7 +8,7 @@ from datetime import date
 
 import pytest
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     Band,
     CheckResult,
     ClipResult,

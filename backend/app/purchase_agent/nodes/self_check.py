@@ -299,6 +299,12 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             band 가 점유를 따로 더하는데 우리가 받는 값은 이미 뺀 값이었다. 그대로
             넘기면 이중 계상이거나, confirmed 가 비어 **우연히** 맞는 상태가 됐다.
             우리가 #93 구현 중 물어 #181 이 서고, band 가 **net 전제로** 바뀌었다.
+            ⚠️ **뜻만 맞췄고 칸은 남는다.** ``confirmed_occupancy_by_date`` 를 지우려던
+            계획은 철회됐다 — ``critic_v0_4.py:929`` L4-7 이 그 칸으로 gross 를 복원해서,
+            지우면 **L4-7 이 영영 죽는다** (#181 · 2026-09-03 정정).
+            🟢 **표준은 net 으로 확정됐다** (#181 CLOSED 2026-09-03). 물류가 세 자리를
+            표로 내면서 생산자(물류)·소비자 하나(우리)가 net 이고 band 만 gross 였음이
+            확인됐고, band 가 net 으로 왔다.
         ㄴ. 타입이 다르다 — ``Band.cap_by_date_kg`` 는 ``date`` 키, 우리는 ISO 문자열.
             조회가 전부 미스 나면 값이 와 있는데도 "받지 못했다"로 고지된다.
         ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.
@@ -308,10 +314,13 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
             뿐이고, ``tests/master/test_no_orchestrator_runtime.py`` 는 마스터에 대해
             ``app.orchestrator.band`` 를 금지 목록에 올려 뒀다.
 
-      🔴 **ㄱ이 풀렸어도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다 *"부를 수는
-        있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고, 그건 공용화가
-        아니라 **결합**이다. ``#181`` 은 아직 열려 있다 — 뜻은 맞췄지만 *"어느 쪽이
-        표준인가"* 는 안 닫혔다.
+      🔴 **ㄱ이 풀리고 #181 이 닫혀도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다
+        *"부를 수는 있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고,
+        그건 공용화가 아니라 **결합**이다.
+
+        ⚠️ 이 자리에 *"``#181`` 은 아직 열려 있다 — 어느 쪽이 표준인가는 안 닫혔다"* 라고
+          적었었다 (2026-09-03 정정). **닫혔고 표준도 정해졌다.** 남은 것은 표준이 아니라
+          **부르는 비용**이고, 그건 #181 이 답할 질문이 아니었다.
 
       나머지가 풀리고 공용 모듈이 생기면 **이 함수를 지우고 import 로 바꾼다** —
       ``check_warehouse_capacity`` 와 같은 약속이다.
@@ -652,11 +661,43 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)
         survivors = []
 
+    # 🟢 **문서를 못 읽어도 안을 낸다** (2026-09-04 · 마스터 결정).
+    #
+    #   앞선 판(#228)은 문서를 못 읽으면 컷했다. 마스터가 뒤집었다 —
+    #   *"문서 없으면 없이 진행하고, 생기면 생긴대로 진행한다. 내가 통제한다."*
+    #
+    #   ★ **mock 을 쓰는 것과 다르다.** 문서가 실제로 없어(실 소스 없음) 없이 가는
+    #     것이지, 연습 데이터로 메우는 게 아니다 — `get_context_docs` 는 여전히 mock 을
+    #     막는다. 없으면 없는 채로 판단하고, 그 사실만 고지한다.
+    #
+    #   고지는 `_assemble` 이 `context_unavailable` 을 risks 로 올린다 (컷하지 않는다).
+    #
+    # ⚠️ 무·양파는 원래 기상·작년동기 문서가 없다 — 그건 `context_unavailable` 이
+    #   아니라 빈 `context_docs` 다. 둘 다 이제 안을 안 막는다.
+
     # 이 노드가 **직접 컷한 것**만 세어 넘긴다 — 아래 no_proposal_reason 이 원인을
     # self_check 으로 돌릴 자격이 여기서 갈린다.
     cut_here = len(rejected) - len(state["rejected_reasons"])
     proposal = _assemble(state, survivors, rejected, cut_here=cut_here)
     return {"scenarios_final": survivors, "rejected_reasons": rejected, "proposal": proposal}
+
+
+#: 문서를 못 읽고 판단했다는 **고지**. 컷 사유가 아니다 (2026-09-04 · 마스터 결정).
+#:
+#: ★ *"문서 없으면 없이 진행"* 이라, 이건 안을 죽이는 게 아니라 **안에 붙는 위험 표시**다.
+#:   사람이 화면에서 *"이 안은 문서 보강 없이 나왔다"* 를 읽고 감안한다.
+_CONTEXT_NOTE = "판단 재료(관측월보·기상·작년동기)를 읽지 못해 문서 보강 없이 판단했다"
+
+
+def _with_context_note(scenarios: list[dict], unavailable: str | None) -> list[dict]:
+    """문서를 못 읽었으면 각 안의 risks 에 고지를 얹는다. **컷하지 않는다.**
+
+    ⚠️ 빈 `context_docs`(무·양파처럼 원래 문서가 없는 날)와 다르다 — 그건 사실이라
+      고지도 안 붙는다. `context_unavailable` 은 *"읽으려 했는데 못 읽었다"* 일 때만 찬다.
+    """
+    if not unavailable:
+        return scenarios
+    return [{**s, "risks": [*s.get("risks", []), _CONTEXT_NOTE]} for s in scenarios]
 
 
 def _no_proposal_reason(rejected: list[dict], cut_here: int) -> str:
@@ -721,7 +762,7 @@ def _assemble(
             # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
             "received_adjustments": len(state.get("adjustments") or []),
         },
-        "scenarios": survivors,
+        "scenarios": _with_context_note(survivors, state.get("context_unavailable")),
         "confidence": state["confidence"],
         "situation": state["situation"],
         "context_docs_used": [document_ref(doc["doc_id"]) for doc in state["context_docs"]],

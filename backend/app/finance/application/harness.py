@@ -82,6 +82,12 @@ PRE_REQUIRED_CAPABILITIES = frozenset(
     {"finance_position", "cashflow_projection", "finance_cap", "payment_pressure"}
 )
 SCENARIO_REQUIRED_CAPABILITIES = frozenset({"scenario_evaluation"})
+
+#: 금액 대안 검증까지 마쳐야 결과가 완성되는 판정.
+#:
+#: ★ 원안대로 진행할 수 없다고 나온 판정은 전부 여기 있다. `ok` 만 빠진다 —
+#:   조정할 이유가 없는 결과에 조정 검증을 요구하면 없는 일을 시키는 것이다.
+_ADJUSTMENT_REQUIRED_VERDICTS = frozenset({"reject", "conditional"})
 SALES_REQUIRED_CAPABILITIES = frozenset({"sales_scenario_evaluation"})
 
 #: 호환 재노출 — capability 하나가 한 Tool 만 갖는다.
@@ -340,7 +346,38 @@ def _validate_ready_reasoning(reasoning: str) -> None:
 
 
 
+def _validate_sales_payload(request: AgentRequest) -> None:
+    """판매 batch 요청의 **모양**만 본다. 업무 사실의 유무는 안에서 판정한다.
+
+    ★ 매입 검사를 재사용하지 않는다. `total_amount_krw` · `label` 은 매입 계약이라
+      판매 제안에 요구하면 판매가 매입 모양을 흉내내야 한다.
+
+    ★ 여기서 막는 것은 **결과를 안과 짝지을 수 없게 만드는 것**뿐이다 — 개수가
+      1~3 을 벗어나거나, 같은 `scenario_id` 가 두 번 오는 경우다. 빠진 업무 사실은
+      오류가 아니라 안별 `INPUT_INCOMPLETE` 로 나간다.
+    """
+    scenarios = request.payload.get("scenarios")
+    if scenarios is None:
+        return
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        raise ValueError("SALES_VALIDATION requires one to three scenarios")
+    seen: set[str] = set()
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise TypeError("each Sales scenario must be an object")
+        scenario_id = scenario.get("scenario_id")
+        if not isinstance(scenario_id, str) or not scenario_id.strip():
+            # 식별자가 없는 것은 계약 오류가 아니다 — 안에서 INPUT_INCOMPLETE 로 나간다.
+            continue
+        if scenario_id in seen:
+            raise ValueError("scenario_id must be unique within the request")
+        seen.add(scenario_id)
+
+
 def _validate_finance_payload(request: AgentRequest) -> None:
+    if request.mode == "SALES_VALIDATION":
+        _validate_sales_payload(request)
+        return
     if request.mode != "SCENARIO_VALIDATION":
         return
     raw_scenarios = request.payload.get("scenarios")
@@ -602,9 +639,20 @@ class FinanceHarness:
         """무엇이 찼고 무엇이 남았고 **지금 무엇을 부를 수 있는가.**"""
         mode = state.request.mode
         required = set(required_capabilities(mode))
-        # 반려된 시나리오는 금액 대안 검증까지가 한 벌이다. 이 조건은 업무 규칙을
-        # 만드는 것이 아니라 **이미 나온 결정론 판정을 읽는 것**이다.
-        if _scenario_verdict(state) == "reject" and not state.base_state_violated:
+        # 원안대로 못 가는 시나리오는 금액 대안 검증까지가 한 벌이다. 이 조건은 업무
+        # 규칙을 만드는 것이 아니라 **이미 나온 결정론 판정을 읽는 것**이다.
+        #
+        # 🔴 예전에는 `reject` 만 걸었다. 그래서 `conditional` 은 Planner 가 금액 대안
+        #    Tool 을 고르지 않아도 그대로 종료됐고, 검증을 **안 한 것**이 결과에서는
+        #    `NOT_ADJUSTABLE`(= 검증했는데 대안이 없음) 로 나갔다. 같은 입력이라도
+        #    모델이 Tool 을 고르느냐에 따라 기계 계약이 달라지는 상태였다.
+        #
+        # ★ `base_state_violated` 는 예외로 남긴다. 평소 흐름 자체가 최소 현금을 밑돌면
+        #   상한이 0 으로 확정되어 **어떤 금액도 안전하지 않다** — 결정론 판정이 이미
+        #   답을 냈으므로 Tool 을 부를 이유가 없다.
+        if _scenario_verdict(state) in _ADJUSTMENT_REQUIRED_VERDICTS and (
+            not state.base_state_violated
+        ):
             required.add("amount_adjustment_validation")
         completed = completed_capabilities(state.tool_order)
         missing = required - completed

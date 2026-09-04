@@ -18,11 +18,23 @@ policy_values     정책 테이블 — 운반 주체 미결 (M-19)
   `missing_data` 로 답하게 한다 — 0 이나 평균값으로 메우면 **그럴듯하게 틀린 계획**이
   나온다.
 
-🔴 **`MOCK` 등급은 한시 조치다.** 지금 mock 으로 떨어지는 것은 `forecast` 하나이고,
-  이유는 값이 없어서가 아니라 **앵커가 어긋나서**다 — ML 예측은 `2026-08-26~27` 에만
-  있고 재무·물류·판매는 `2025-12-01~31` 에 있다. 어느 날을 잡아도 셋이 함께 서지
-  않는 것이 M-24 이고, **이 파일이 그 사실의 실측 증거다.** 앵커가 정렬되면
-  `_forecast_from_db` 가 그대로 답하고 fallback 은 죽는다.
+🟢 **`MOCK` 다리를 걷었다** (2026-09-03).
+
+  앵커가 어긋나 있던 동안(`M-24`) `forecast` 가 mock 으로 떨어졌다. `D-2` 가
+  `2025-12-31` 로 확정되면서 세 품목 전부 실 예측이 선다 — 실측으로 확인했다.
+
+  .. code-block:: text
+
+      배추 · 무 · 양파   grade=MEASURED   v_ml_price_forecast(as_of=2025-12-31, AUC)
+
+🔴 **그리고 다시 놓지 않는다.** ML DB 가 죽었는데 mock 으로 돌면 **장애가 정상으로
+  보인다.** 그 갈래가 마스터 실측을 두 번 오염시켰다 (2026-08-31 · 09-03 피마늘).
+
+  이제 못 읽으면 `MISSING` 이고, 매입이 `missing_data: ["forecast"]` 로
+  `RUNTIME_NOT_READY` 를 낸다. **못 한 것이 한 것으로 안 보인다.**
+
+★ `MOCK` 은 어휘에 남긴다. 만드는 곳이 지금은 없지만, 새 다리가 생기면 그것이
+  스스로 `MOCK` 이라고 말할 자리가 있어야 하고 그때 `ProcurementFlow` 가 세운다.
 """
 
 from __future__ import annotations
@@ -101,17 +113,45 @@ def collect_inputs(item: str, as_of: date) -> MasterInputs:
 
 
 def load_forecast(item: str, as_of: date) -> SourcedInput:
-    """ML 예측. **`generated_at <= as_of` 인 최신 배치만 본다.**
+    """ML 예측. **`as_of` 당일 배치만 쓴다.**
 
     ★ 미래 배치를 집으면 백테스트 성적이 통째로 무효가 된다 (look-ahead).
-      뷰가 `as_of` 컬럼을 갖고 있으므로 그 이하만 고른다.
+      뷰가 `as_of` 컬럼을 갖고 있으므로 **그 이하만** 고른다 — 이 조건은 그대로다.
+
+    🔴 **그런데 상한이 없었다** (2026-09-04).
+
+      전 판의 docstring 은 *"`generated_at <= as_of` 인 최신 배치만 본다"* 라고만
+      적어 두어, **얼마나 옛것이어도 되는지**가 안 보였다. 실제로는 그날 배치가
+      없으면 조용히 옛 배치를 집고 `MEASURED` 로 실어 보냈다. 실측(배추):
+
+      .. code-block:: text
+
+          as_of        집은 배치      지연     등급
+          2026-09-04   2026-09-04     0일      MEASURED   ← 정상
+          2026-08-25   2026-01-27     210일    MEASURED   ← 🔴 결함
+          2026-08-01   2026-01-27     186일    MEASURED   ← 🔴 결함
+          2026-06-01   2026-01-27     125일    MEASURED   ← 🔴 결함
+
+      **210일 전 예측으로 오늘 매입안을 만들었다.** `#227` 이 *"ML DB 가 죽으면
+      선다"* 를 만들었는데, **배치가 없는 날은 죽은 것으로 안 쳤다.**
+
+    ★ 이제 집은 행의 `as_of` 가 요청 `as_of` 와 **같을 때만** `MEASURED` 다.
+      하루만 밀려도 안 쓴다. 다르면 `MISSING` 이고, `#227` 이 낸 기존 경로
+      (MISSING → 매입 `RUNTIME_NOT_READY` → `E4_NOT_STARTED`)를 그대로 탄다.
+
+    ★ **공휴일 달력을 심지 않는다.** ML 배치 유무가 곧 개장 여부다 — 배치일
+      실측에서 평일은 `base_dt == 그날` 로 배치가 있고, 2026-01-01(신정) 에만
+      배치가 없어 간격이 2일로 벌어졌다. 달력을 따로 두면 그 달력이 틀리는 날이
+      온다.
     """
     try:
         row = _forecast_from_db(item, as_of)
     except Exception as error:  # noqa: BLE001 — 적재 실패가 Flow 를 죽이면 안 된다
-        return _forecast_fallback(item, as_of, f"DB 조회 실패 ({error})")
+        return _forecast_missing(f"DB 조회 실패 ({error})")
     if row is None:
-        return _forecast_fallback(item, as_of, f"{as_of} 이전 예측 배치가 없다")
+        return _forecast_missing(f"{as_of} 이전 예측 배치가 없다")
+    if row["as_of"] != as_of:
+        return _forecast_missing(_stale_batch_why(as_of, row["as_of"]))
     return SourcedInput(
         key="forecast",
         payload=_forecast_payload(row),
@@ -122,6 +162,16 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
 
 
 def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
+    """`as_of` **이하** 최신 배치 한 행. **당일인지는 여기서 안 본다.**
+
+    ★ `as_of <= %s` 를 걷으면 미래 배치를 집는다 (look-ahead). 그러면 백테스트
+      성적이 통째로 무효가 되므로 이 조건은 남는다.
+
+    🔴 **그러나 이 조회에는 지연 상한이 없다.** 그날 배치가 없으면 210일 전
+      배치가 그대로 올라온다 (2026-08-25 → 2026-01-27, 실측 2026-09-04).
+      **당일인지를 거르는 것은 `load_forecast` 의 몫이다** — 조회는 후보를
+      집어 오고, 쓸지 말지는 부르는 쪽이 정한다.
+    """
     query = sql.SQL("""
         SELECT * FROM {}.v_ml_price_forecast
          WHERE item = %s AND as_of <= %s AND target_kind = 'AUC'
@@ -132,8 +182,42 @@ def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _stale_batch_why(as_of: date, batch_as_of: date) -> str:
+    """당일 배치가 아니라는 사유. **셋을 다 적는다** — 요청일 · 최신 배치일 · 지연일수.
+
+    사람이 읽고 *"언제 것을 집을 뻔했는지"* 를 알아야 한다. 지연일수가 없으면
+    두 날짜를 눈으로 빼야 하고, 210일과 1일이 같은 문장으로 보인다.
+
+    ⚠️ **원인을 단정하지 않는다.** 당일 배치가 없는 이유는 공휴일일 수도, ML 이
+      안 돈 것일 수도, 적재가 늦은 것일 수도 있는데 **마스터는 그 셋을 구분할
+      수단이 없다.** 뷰에는 "배치가 있다/없다" 만 있고 "왜 없다" 가 없다.
+      사유가 원인을 단정하면 다음 사람이 엉뚱한 데를 판다 — 사실만 적는다.
+    """
+    delay = (as_of - batch_as_of).days
+    return f"{as_of} 당일 예측 배치가 없다 (가장 최신 배치 {batch_as_of} · {delay}일 전)"
+
+
 def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
-    """뷰 행을 매입이 받는 형태로. **키를 고르기만 하고 값은 손대지 않는다.**"""
+    """뷰 행을 매입이 받는 형태로. **키를 고르기만 하고 값은 손대지 않는다.**
+
+    🔴 **`use_recommended` 를 더했다** (2026-09-03 · 매입 `#192`).
+
+      ML 이 신뢰도 플래그 셋을 붙여 보내는데 매입이 하나도 안 읽고 있었다.
+      매입은 *"payload 에 칸이 없어서 못 읽는다"* 로 진단했는데 **절반만 맞았다.**
+
+      ```text
+      is_filled · is_gated   행별   뷰가 daily[] 안에 넣어 이미 간다
+      use_recommended        조합별  여기서 버리고 있었다
+      ```
+
+    ★ **`daily` 안의 둘은 손대지 않는다.** 뷰가 `jsonb_build_object` 로 넣은
+      그대로 나른다 — 마스터가 풀어 다시 조립하면 ML 이 준 모양이 바뀐다.
+
+    ⚠️ 아직 안 나르는 것이 셋 있다 — `has_filled_rows` · `filled_count` ·
+      `quality_note`. 앞 둘은 `daily` 에서 셀 수 있는 파생이고, `quality_note` 는
+      사람이 읽는 문장이라 `SourcedInput.note` 로 이미 화면에 간다.
+      **읽겠다는 파트가 생기면 그때 더한다.**
+    """
     return {
         "generated_at": row["generated_at"],
         "item": row["item"],
@@ -142,30 +226,21 @@ def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
         "horizon_days": _plain(row["horizon_days"]),
         "daily": row["daily"],
         "model_version": row["model_version"],
+        "use_recommended": row.get("use_recommended"),
     }
 
 
-def _forecast_fallback(item: str, as_of: date, why: str) -> SourcedInput:
-    """🔴 **한시 조치.** 앵커가 정렬되면 이 갈래는 죽는다.
+def _forecast_missing(why: str) -> SourcedInput:
+    """🔴 **못 읽으면 비운다. mock 으로 메우지 않는다** (2026-09-03).
 
-    ML 예측이 `2026-08-26~27` 에만 있고 재무·물류는 `2025-12-31` 에 있어, **둘이 함께
-    서는 날이 없다**(M-24). 관통을 한 번 뚫어 보기 위해 mock 으로 메우되 **등급을
-    `MOCK` 으로 올려** 리포트에 그대로 드러낸다.
+    전에는 여기서 `app.purchase_agent.mocks` 를 집어 왔다. 그러면 ML DB 장애가
+    **정상 실행처럼** 보인다 — 매입이 안을 만들고 세 부서가 판정하고 `E1_APPROVED`
+    까지 간다. 사람이 `input_sources` 를 읽지 않으면 아무도 모른다.
+
+    ★ 비우면 매입이 `missing_data: ["forecast"]` 로 `RUNTIME_NOT_READY` 를 낸다.
+      **없는 것과 못 만든 것을 가르는 것**이 이 프로젝트의 §1.2-10 이다.
     """
-    try:
-        from app.purchase_agent import ports  # 🔴 한시 다리 — 앵커 정렬 시 제거
-
-        return SourcedInput(
-            key="forecast",
-            payload=ports.get_forecast(item, as_of),
-            grade="MOCK",
-            source="purchase_agent/mocks",
-            note=f"{why} — 앵커 정렬(M-24) 전까지의 한시 조치",
-        )
-    except Exception as error:  # noqa: BLE001
-        return SourcedInput(
-            key="forecast", payload=None, grade="MISSING", source="-", note=f"{why} · {error}"
-        )
+    return SourcedInput(key="forecast", payload=None, grade="MISSING", source="-", note=why)
 
 
 # ── confirmed_orders ────────────────────────────────────────────────────

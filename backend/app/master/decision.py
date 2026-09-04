@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from app.master.commitment import ApprovedCommitment
+from app.master.transition import TransitionOut
 
 Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE"]
 
@@ -186,6 +187,12 @@ class DecisionOut(BaseModel):
     #: 만들었으면 `buildable=False` 와 사유가 실린다 — 둘을 섞지 않는다.
     #: 적재 대상이 아니라 응답 전용이라 이력 조회에는 안 실린다.
     commitment: CommitmentOut | None = None
+
+    #: 그 약정이 재무·물류 장부를 실제로 바꾼 결과 (C 형태 ⑦). **약정이 서지
+    #: 않았으면 `None`** 이고, 섰는데 전이 구현이 아직 없으면 `NOT_APPLIED` 와
+    #: 빠진 파트가 실린다 — `None` 과 섞지 않는다. 반영하려다 실패한 것은 `FAILED` 다.
+    #: 이것도 적재 대상이 아니라 응답 전용이라 이력 조회에는 안 실린다.
+    transition: TransitionOut | None = None
 
 
 # ── 판단 ────────────────────────────────────────────────────────────────

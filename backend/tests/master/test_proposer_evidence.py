@@ -24,6 +24,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.contracts.core import Evidence
 from app.master.budget import CallBudget
 from app.master.envelope import (
     AgentReply,
@@ -34,7 +35,6 @@ from app.master.envelope import (
 from app.master.flow import ADVISORS, ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _evidences_out, _to_response
-from app.orchestrator.contracts_core import Evidence
 
 AS_OF = date(2025, 12, 31)
 
@@ -148,7 +148,7 @@ def _flow(**ports: Any) -> ProcurementFlow:
     for name, port in ports.items():
         registry.register(name, port)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    return ProcurementFlow(runner, verifier=None, item="피마늘")
+    return ProcurementFlow(runner, verifier=None, item="배추")
 
 
 def _run(**over: Any):

@@ -98,10 +98,30 @@ from typing import Any, Literal, Protocol
 # 0. 기본 타입
 # ---------------------------------------------------------------------------
 
-ItemCode = str  # "배추" | "무" | "양파" | "피마늘"  — v0.9 4품목 체제
+ItemCode = str  # "배추" | "무" | "양파"  — v1.0 3품목 체제
 Grade = str  # "특" | "상" | "중"
 
-ITEMS: tuple[ItemCode, ...] = ("배추", "무", "양파", "피마늘")
+#: 취급 품목. **여기가 정본이다** — 파트별로 따로 세면 어긋난 날을 아무도 못 본다.
+#:
+#: 🔴 v1.0 (2026-09-03) 에서 피마늘을 뺐다. 근거 둘이 각각 독립으로 선다.
+#:   ① ML 에 피마늘 예측이 없다 — 경락가 결측 11%(타 품목 1%) · 피마늘/깐마늘
+#:      미분리 · 서울 소매 없음 · 중도매가가 94% 날에 전일과 동일. 지금 넣으면
+#:      조용히 틀린 값이 간다 (ML 2026-08-27). ``app/ml/schemas.py`` 는 이미 셋이었다.
+#:   ② 물류가 운영 품목을 셋으로 확정했다 (페르소나 v0.5.2 · Policy §8).
+#:
+#: 선례는 건고추다 (v0.9). 계약에서 빼고 DB Lot 은 지우지 않고 소진 처리했다.
+#: ★ 뺀다고 창고의 실물이 없어지지는 않는다. 재고가 있으면 그 사실은 나가야 한다 —
+#:   예측이 없다는 이유로 재고를 숨기지 않는다.
+#:
+#: 🔴 **그래서 이 목록은 제안 축에만 건다** (2026-09-03 · 물류 회신).
+#:
+#:   제안 축   "사자고 제안한 품목"   ITEMS 로 거른다 (critic_v0_4.py:226 · 문 앞 검증)
+#:   재고 축   "창고에 있는 품목"     자유 문자열 — 좁히지 않는다
+#:
+#:   재고 축의 `item` 을 `Literal` 로 좁히는 날, `ITEMS` 밖 재고가 **검증 에러로
+#:   죽는다.** 원칙이 조용히 뒤집히고 아무도 못 본다. 그 자리를
+#:   `tests/master/test_inventory_axis_stays_open.py` 가 지킨다.
+ITEMS: tuple[ItemCode, ...] = ("배추", "무", "양파")
 
 Dept = Literal["sales", "inventory", "finance"]
 
@@ -155,6 +175,54 @@ Severity = Literal["HIGH", "MEDIUM", "LOW"]
 #   READY 가 아니면 밴드 기여가 없다. 그때 밴드를 그냥 비우면 cap 이 무한대가 되어
 #   **부서가 죽은 날에 무제한 매입이 통과한다.** Band.not_ready 로 명시적으로 막는다.
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+
+# ★ 2026-09-03 — 안이 무엇 때문에 깎였는가. **소유는 마스터**다 (매입 P-4 답).
+#
+#   매입 `draft_plan` 이 `clipped_by[].constraint` 로 내고, 앞으로 `applied_adjustments`
+#   의 `binding` 에도 같은 어휘가 실린다. 공용 계약이고 Critic 도 검사해야 하므로
+#   **한 파트가 정하면 그 파트 화면 문구에 맞는 값**이 된다.
+#
+# 🔴 **한글을 쓰지 않는 이유가 있다.** 지금 매입은 `{"창고", "현금", "신선도"}` 를
+#   쓰는데, `"현금"` 이 **다른 축에도 있다**.
+#
+#   ```text
+#   자원 축     clipped_by[].constraint     창고 · 현금 · 신선도
+#   근거 출처 축 RationaleSource            예측 · 시세관측 · 재고 · 주문 · 현금 · 문서ID
+#                (app/purchase_agent/schemas.py:91)
+#   ```
+#
+#   **같은 문자열인데 뜻이 다르다.** 표시 문구를 값으로 쓰면 축이 섞인다.
+#
+# ⚠️ `"현금"` 이 아니라 `자금` 인 것도 그래서다 (매입·판매 정리) — 재무 제약은
+#   차입여력·예정 유출입까지 포함해서 *"현금"* 은 좁게 읽힌다.
+BindingConstraint = Literal["WAREHOUSE", "FINANCE", "FRESHNESS"]
+
+# 🔴 **`ClipResult.binding_constraints` 를 흡수하지 않는다** (매입 지적 2026-09-03).
+#
+#   같은 질문(*"무엇이 안을 깎았나"*)에 답하지만 **층이 다르다.**
+#
+#       BindingConstraint               자원     창고 · 자금 · 신선도
+#       ClipResult.binding_constraints  밴드 축   cap_total_kg · cap_amount_krw ·
+#                                                cap_by_date.{날짜}
+#
+# ⚠️ **셋이 안 겹친다.** `신선도` 는 밴드 축에 없고(매입 내부 제약),
+#   `cap_by_date.{날짜}` 는 날짜가 붙어 어휘를 못 닫는다.
+#
+# ★ **합치면 Critic 이 잃는다.** `cap_total_kg` 과 `cap_by_date.2026-01-05` 가
+#   같은 `WAREHOUSE` 가 되면 LLM 이 인과를 대조할 재료가 줄어든다
+#   (`critic/llm/runtime.py:74`).
+#
+# ⬜ **다만 대응표는 필요하다.** 안 두면 Critic 결과와 화면이 다른 이름을 말한다.
+#   목표 도착일 칸(②)과 같은 판에서 정한다 — 지금 정하면 두 번 바뀐다.
+BINDING_CONSTRAINT_LABELS: Mapping[str, str] = {
+    "WAREHOUSE": "창고",
+    "FINANCE": "자금",
+    "FRESHNESS": "신선도",
+}
+"""사람이 읽는 문구. **어휘는 마스터가, 표시는 부서가 정한다** — 뜻을 아는 쪽이
+   문구를 정하는 것이 맞다 (매입 제공 2026-09-03).
+
+⚠️ **표시 문구로 판정하지 않는다.** 값 비교는 위 `BindingConstraint` 로만 한다."""
 
 
 class ContractViolation(Exception):
@@ -388,6 +456,19 @@ class SuggestedAdjustment:
             )
         if not self.ref_ids:
             raise ContractViolation("suggested_adjustment 에도 ref_ids 필수 (§1.2-5).")
+        if self.axis == "timing" and self.split_date is None:
+            # 🔴 **`None` 이 두 뜻이던 것을 하나로 만든다** (2026-09-03).
+            #
+            #   재무 amount    회차 개념이 없다        → None 이 정상
+            #   물류 timing    회차가 있는데 안 실었다 → None 이 누락
+            #
+            #   화면(`master/answer.py`)이 둘을 같게 봐서 *"N 회차"* 가 한 번도 안 떴다.
+            #   물류가 채운 지금(#214) 강제해도 아무도 안 깨진다 — timing 을 내는 곳은
+            #   `logistics/scenario_engine.py:139` 하나다.
+            raise ContractViolation(
+                "timing 조정은 어느 회차인지 밝혀야 한다 — split_date 필수. "
+                "회차 개념이 없는 축은 timing 이 아니다."
+            )
 
 
 # ---------------------------------------------------------------------------

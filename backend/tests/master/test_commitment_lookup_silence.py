@@ -35,18 +35,18 @@ from app.master.service import _approved_commitments
 AS_OF = date(2026, 1, 2)
 
 
-def _request(item: str | None = "피마늘") -> ProcurementRunRequest:
+def _request(item: str | None = "배추") -> ProcurementRunRequest:
     return ProcurementRunRequest(as_of=AS_OF, policy_version="v1.3", item=item)
 
 
 def _built(**kw) -> CommitmentOut:
     base = {
         "approval_id": "H1-REQ-20260101-0001-1",
-        "item": "피마늘",
+        "item": "배추",
         "scenario_label": "기본",
         "arrival_schedule": [
             ArrivalLegOut(
-                item="피마늘",
+                item="배추",
                 qty_kg=500.0,
                 arrival_date=date(2026, 1, 4),
                 purchase_date=date(2026, 1, 2),

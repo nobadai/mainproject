@@ -95,6 +95,17 @@ class PurchaseAgentState(TypedDict):
     situation: Literal["stable", "uncertain"]
     context_docs: list[dict]  # 주입된 문서 (published_at <= as_of)
     context_loop_count: int  # max 3
+
+    #: 🟢 **문서를 못 읽은 사유.** 비어 있으면 정상이다 (2026-09-04 · 마스터 결정).
+    #:
+    #:   `context_docs == []` 는 두 뜻이 될 수 있다.
+    #:
+    #:     그날 그 유형의 문서가 없다        정상 — 무·양파가 그렇다 (이 칸 안 참)
+    #:     읽으려다 못 읽었다                실 소스 없어 mock 이 막힘 (이 칸이 참)
+    #:
+    #: ★ **둘 다 안을 막지 않는다.** 마스터가 *"문서 없으면 없이 진행"* 으로 정했다.
+    #:   이 칸이 차면 ⑦ `self_check` 이 각 안의 risks 에 **고지만** 붙인다 (컷 아님).
+    context_unavailable: NotRequired[str]
     allowed_axes: list[str]  # ★ 그날 허용 strategy_type (규칙 계산)
     coverage_days: int  # ★ 커버일수 D
     base_plan: dict  # 수량·타이밍 초안
@@ -135,6 +146,16 @@ def build_initial_state(
     ``quotes.auction_quote_source()``를 넘긴다 — **환경변수가 아니라 명시 주입**이다.
     시세만 주입 지점을 여는 이유: 나머지 다섯은 마스터 봉투가 실어 보내거나(어댑터 경로)
     mock 이고, **시세만 매입 자기 도메인이라 우리가 직접 읽는다** (정의서 §4.1).
+
+    ⚠️ **#228(2026-09-03) 이후로 이 문장은 pytest 안에서만 참이다.** 운영 경로에서
+    mock 포트를 부르면 ``MockNotAllowed`` 로 막힌다 (``ports.py`` —
+    ``PYTEST_CURRENT_TEST`` 또는 ``sys.modules`` 로 판단). **실운영 등록은
+    ``main.py`` 가 실 공급자를 꽂는다** (#226 ·
+    ``partial(purchase_port, quotes=auction_quote_source())``).
+
+    ★ **그래서 이 함수는 실운영 경로가 아니다.** 어댑터(``adapter.build_state``)는
+      마스터 봉투에서 State 를 만들고 시세 하나만 포트로 읽는다. 여기 다섯 포트를
+      부르는 것은 ``run_purchase_agent`` — 단독 실행과 회귀 스위트의 경로다.
     """
     constraints = load_constraints()
     # 창·지평을 파라미터로 받지 않는다. 여기서 쓴 창과 ③이 나눌 창이 달라지면 수량이

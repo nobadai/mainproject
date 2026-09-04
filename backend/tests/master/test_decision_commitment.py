@@ -39,7 +39,7 @@ def _response(**over: Any) -> dict[str, Any]:
         "end_code": "E1_APPROVED",
         "as_of": "2025-12-31",
         "scenarios": [_scenario()],
-        "judgment": {"meta": {"item": "피마늘"}},
+        "judgment": {"meta": {"item": "배추"}},
         "constraints": {"inventory": {"inbound_lead_days": 2.0}},
     }
     base.update(over)
@@ -81,7 +81,7 @@ def test_승인하면_약정이_같이_나온다(wired):
     assert out.commitment is not None
     commitment = out.commitment
     assert commitment.buildable
-    assert commitment.item == "피마늘"
+    assert commitment.item == "배추"
     assert commitment.approval_id == "H1-REQ-1-1"
     assert [leg.arrival_date for leg in commitment.arrival_schedule] == [date(2026, 1, 2)]
     assert commitment.first_arrival == date(2026, 1, 2)
@@ -194,7 +194,7 @@ def test_현재_승인의_약정을_재조립한다(monkeypatch):
 
     assert out is not None and out.buildable
     assert out.approval_id == "H1-REQ-1-1"
-    assert out.item == "피마늘"
+    assert out.item == "배추"
 
 
 def test_승인이_없으면_None_이다(monkeypatch):

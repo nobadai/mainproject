@@ -31,12 +31,12 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from app.contracts.core import Evidence
 from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 from app.critic.service import run_critic_procurement
 from app.master.critic_bridge import CriticSkipped, build_request, fold
 from app.master.envelope import ENVELOPE_META_KEYS, AgentName
 from app.master.plan import ExecutionPlan
-from app.orchestrator.contracts_core import Evidence
 
 
 class CriticPort(Protocol):

@@ -16,15 +16,19 @@ from app.master import inputs
 
 AS_OF = date(2025, 12, 31)
 
+#: ★ `as_of` 는 `AS_OF` 와 같아야 한다. 당일 배치만 쓴다.
+#: 🔴 전 판은 `2026-08-27` 이라 요청일보다 239일 미래였다.
+#: 🔴 그래서 look-ahead 행을 MEASURED 로 받는 검사였다.
+#: ⚠️ 이 값을 다시 벌리면 `test_forecast_must_be_todays_batch.py` 가 잡는다.
 FORECAST_ROW = {
-    "as_of": date(2026, 8, 27),
+    "as_of": AS_OF,
     "item": "배추",
     "target_kind": "AUC",
-    "generated_at": "2026-08-27T06:00:00+09:00",
+    "generated_at": "2025-12-31T06:00:00+09:00",
     "unit": "원/kg",
     "current_price": 645,
     "horizon_days": 18,
-    "daily": [{"date": "2026-08-28", "predicted": 645}],
+    "daily": [{"date": "2026-01-01", "predicted": 645}],
     "model_version": "ops_auc",
     "quality_note": "세 구간 모두 양수",
 }
@@ -55,14 +59,20 @@ def test_실_DB_에서_읽으면_MEASURED_다(monkeypatch):
     assert got.payload["daily"] == FORECAST_ROW["daily"]
 
 
-def test_예측_배치가_없으면_MOCK_으로_떨어지고_그_사실을_적는다(monkeypatch):
-    """🔴 **값이 없어서가 아니라 앵커가 어긋나서다** (M-24). 그 사실이 리포트에 나와야 한다."""
+def test_예측_배치가_없으면_비운다_mock_으로_안_메운다(monkeypatch):
+    """🟢 **뒤집힌 검사다** (2026-09-03).
+
+    전에는 `MOCK` 으로 떨어지고 *"그래도 관통은 시킨다"* 였다. 그 갈래가 ML DB
+    장애를 정상 실행으로 보이게 했고, 마스터 실측을 두 번 오염시켰다.
+
+    ★ 이제 비운다. 매입이 `missing_data: ["forecast"]` 로 답한다.
+    """
     patch(monkeypatch)  # fetch_one → None
     got = inputs.load_forecast("배추", AS_OF)
 
-    assert got.grade == "MOCK"
-    assert "M-24" in got.note
-    assert got.payload is not None  # 그래도 관통은 시킨다
+    assert got.grade == "MISSING"
+    assert got.payload is None, "못 읽었는데 값이 있다 — mock 다리가 다시 생겼다"
+    assert "예측 배치가 없다" in got.note
 
 
 def test_DB_가_터져도_Flow_를_죽이지_않는다(monkeypatch):
@@ -72,7 +82,10 @@ def test_DB_가_터져도_Flow_를_죽이지_않는다(monkeypatch):
     patch(monkeypatch, one=boom)
     got = inputs.load_forecast("배추", AS_OF)
 
-    assert got.grade in {"MOCK", "MISSING"}
+    # ⚠️ 전에는 {"MOCK", "MISSING"} 둘 다 받았다. 그 느슨함이 mock 다리를 가렸다.
+    assert got.grade == "MISSING"
+    assert got.payload is None
+    assert "커넥션 없음" in got.note, "왜 못 읽었는지가 안 남는다"
 
 
 # ── confirmed_orders ────────────────────────────────────────────────────
@@ -152,13 +165,17 @@ def test_수요_행이_없으면_비중을_지어내지_않는다(monkeypatch):
 # ── 출처표 ──────────────────────────────────────────────────────────────
 
 
-def test_mock_에서_온_것을_위로_올린다(monkeypatch):
-    """**감추지 않는다.** 검증 커버리지를 분수로 내는 것과 같은 이유다."""
+def test_이제_mock_에서_오는_것이_없다(monkeypatch):
+    """🔴 **만드는 곳이 사라졌다** (2026-09-03).
+
+    `MOCK` 은 어휘에 남지만 마스터 적재층이 그것을 만들지 않는다.
+    새 다리가 생기면 여기가 운다 — 그리고 `ProcurementFlow` 가 실행을 세운다.
+    """
     patch(monkeypatch, many=lambda *a: DEMAND_ROWS)
     got = inputs.collect_inputs("배추", AS_OF)
 
-    assert got.mocked == ("forecast",)
-    assert got.sources()["forecast"].startswith("MOCK:")
+    assert got.mocked == (), f"mock 다리가 다시 생겼다: {got.mocked}"
+    assert got.sources()["forecast"].startswith("MISSING:")
     assert got.sources()["policy_values"].startswith("DERIVED:")
 
 

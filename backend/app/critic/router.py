@@ -9,13 +9,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.contracts.core import ContractViolation
 from app.critic.schemas import (
     CriticProcurementRequest,
     CriticSalesRequest,
     CriticVerdictOut,
 )
 from app.critic.service import run_critic_procurement, run_critic_sales
-from app.orchestrator.contracts_core import ContractViolation
 from app.orchestrator.persistence import record
 from app.orchestrator.run_repository import get_run, list_runs
 

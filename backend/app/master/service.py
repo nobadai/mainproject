@@ -17,6 +17,7 @@ from app.master.budget import CallBudget
 from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
+from app.master.execution_day import is_execution_day, next_execution_day
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.inputs import MasterInputs, collect_inputs
 from app.master.ledger_repository import get_burn_in
@@ -39,6 +40,10 @@ from app.master.schemas import (
 from app.master.verifier import MasterVerifier
 
 logger = logging.getLogger(__name__)
+
+# 사유 문장에 요일을 적기 위한 이름. `date.weekday()` 순서 (월 0 … 일 6).
+# ★ 로케일을 타지 않게 직접 적는다 — 서버 로케일에 따라 사유 문장이 갈리면 안 된다.
+_WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
 
 
 def make_request_id(as_of: str, seq: int = 1) -> str:
@@ -73,6 +78,31 @@ def run_procurement(
         policy_version=request.policy_version,
     )
 
+    if not is_execution_day(request.as_of):
+        # 주말은 오류가 아니라 **안 도는 날**이다 — 어댑터 미등록과 같은 태도다 (§5.3).
+        # 토·일에는 시장이 안 서서 ML 예측이 없다. 없는 값을 복사본으로 채워 판단하면
+        # 그건 시장을 본 것이 아니라 금요일을 두 번 본 것이다.
+        response = _empty_response(
+            context,
+            reason=(
+                f"실행일이 아니다: {request.as_of.isoformat()}"
+                f"({_WEEKDAY_NAMES[request.as_of.weekday()]})은 주말이라 시장이 안 서고"
+                " ML 예측이 없다. 다음 실행일은 "
+                f"{next_execution_day(request.as_of).isoformat()}"
+                f"({_WEEKDAY_NAMES[next_execution_day(request.as_of).weekday()]})이다."
+                " 경과일수는 달력일 그대로 센다 — 주말이 사라지는 것이 아니다."
+            ),
+            skipped_note="전 검사: 실행일이 아니어서 Flow 가 시작되지 않음",
+        )
+        # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
+        response.report_text = render_answer(facts_from_procurement(response))
+        # 🔴 **안 돈 날도 이력에 남긴다.** 어댑터 갈래와 같은 이유다 —
+        #   안 부른 것과 안 도는 날인 것은 다르고, 이력이 비면 둘이 같아 보인다.
+        response.history_run_id = persistence.record(
+            request, response, elapsed_ms=_elapsed(started)
+        )
+        return response
+
     missing = wiring.missing()
     if missing:
         # 어댑터 미구현은 오류가 아니라 "그 부서가 오늘 돌지 않는다"와 같다 (§5.3)
@@ -101,6 +131,11 @@ def run_procurement(
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
         prior_feedback=request.prior_feedback,
         approved_commitments=commitments.carried,
+        # ★ 값과 출처를 **떼어 놓지 않는다.** 응답에만 싣던 것을 payload 에도 나른다.
+        input_sources=inputs.sources() if inputs else {},
+        # 🔴 실어 주기만 하지 않고 **막는 쪽까지** 잇는다 (2026-09-03).
+        #   응답의 `mocked_inputs` 는 화면 경고용이고, 이것은 실행을 세우는 용도다.
+        mocked_inputs=inputs.mocked if inputs else (),
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
@@ -326,18 +361,27 @@ def _to_response(
 
 
 def _empty_response(
-    context: ExecutionContext, reason: str, missing_adapters: list[str]
+    context: ExecutionContext,
+    reason: str,
+    missing_adapters: list[str] | None = None,
+    skipped_note: str = "전 검사: 어댑터 미등록으로 Flow 가 시작되지 않음",
 ) -> ProcurementRunResponse:
+    """안 돈 날의 응답. **왜 안 돌았는지가 `reason` 과 `skipped_note` 로 남는다.**
+
+    ⚠️ `skipped_note` 는 기본값이 어댑터 문구다. 다른 이유로 접을 때 그대로 쓰면
+      **없던 어댑터 문제를 지어내는 것**이 되므로 부르는 쪽이 자기 사유를 준다.
+    """
+    adapters = list(missing_adapters or [])
     return ProcurementRunResponse(
         request_id=context.request_id,
         as_of=context.as_of,
         end_code="E4_NOT_STARTED",
         reason=reason,
-        blocked_by=missing_adapters,
-        missing_adapters=missing_adapters,
+        blocked_by=adapters,
+        missing_adapters=adapters,
         verification_skipped=True,
-        # 어댑터가 없어 못 돈 날도 **무엇을 못 봤는지**는 남긴다 (§3.7.6)
-        skipped_checks=["전 검사: 어댑터 미등록으로 Flow 가 시작되지 않음"],
+        # 못 돈 날도 **무엇을 못 봤는지**는 남긴다 (§3.7.6)
+        skipped_checks=[skipped_note],
     )
 
 

@@ -39,8 +39,10 @@ IntentAction = Literal[
     "UNKNOWN",
 ]
 
-#: 품목. 매입이 도는 4종으로 닫는다 — 없는 품목을 지어낼 자리가 없다.
-ItemName = Literal["배추", "무", "양파", "피마늘"]
+#: 품목. 계약 `ITEMS` 3종으로 닫는다 — 없는 품목을 지어낼 자리가 없다.
+#: ⚠️ `Literal` 은 상수만 받아 계약에서 못 가져온다. 계약이 바뀌면 여기도 바뀌어야
+#:   하고, 그것을 `tests/master/test_item_set_follows_contract.py` 가 지킨다.
+ItemName = Literal["배추", "무", "양파"]
 
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 

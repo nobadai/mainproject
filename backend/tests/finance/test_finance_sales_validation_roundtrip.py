@@ -80,6 +80,7 @@ def _run(request, finance_context):
             "app.finance.adapter.get_current_finance_runtime_context",
             return_value=finance_context,
         ),
+        patch("app.finance.adapter.load_partner_receivables", return_value=[]),
         patch("app.finance.llm.planner.finance_llm_enabled", return_value=False),
         patch("app.finance.adapter.finance_llm_enabled", return_value=False),
         patch(f"{_EXECUTION}.get_db_schema", return_value="haetdeul"),
@@ -139,17 +140,24 @@ def test_missing_sales_policy_is_runtime_not_ready_and_still_persists(finance_co
     assert saved["params"][9] == "skipped"
 
 
-def test_missing_policy_names_survive_into_the_reply(finance_context):
+def test_missing_authoritative_fact_names_survive_into_the_reply(finance_context):
+    """★ 이름이 남는 대상이 계속 **좁아진다.**
+
+    마진 임계값·최대 결제일수는 MVP 정책이, 거래처 채권은 실 원장이 공급한다.
+    여전히 없는 것은 거래처 여신한도 하나이고, 그것은 재무가 만들 수 없다.
+    """
     reply, _, _ = _run(_request(), finance_context)
     missing = reply.payload.get("missing_data", [])
 
-    for policy in (
+    assert "partner_credit_limit_krw" in missing
+    for supplied in (
         "finance_minimum_margin_rate",
         "finance_warning_margin_rate",
         "max_finance_allowed_payment_terms_days",
-        "partner_credit_limit_krw",
+        # 🔴 채권은 이제 조회된다 — 없는 사실 목록에 남아 있으면 안 된다.
+        "partner_receivable_facts",
     ):
-        assert policy in missing, policy
+        assert supplied not in missing, supplied
 
 
 def test_no_sales_policy_value_is_invented(finance_context):

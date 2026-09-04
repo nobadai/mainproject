@@ -15,6 +15,9 @@
 ★ **이름을 손으로 세지 않는다.** 저장소를 AST 로 훑어 *"옛 경로에서 실제로 import
   하는 이름"* 을 모은다. `import *` 가 빠뜨리는 것이 있으면 여기서 빨간불이다 —
   실제로 `_DEPT_AXES` 하나가 그렇게 걸렸다 (언더스코어라 별표가 건너뛴다).
+
+🟢 **마스터 몫 ③ 이 끝나 지금은 옛 경로로 비공개 이름을 읽는 곳이 없다**
+  (2026-09-03). 그래서 shim 의 명시 재수출을 지웠다. 다시 생기면 이 파일이 잡는다.
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ def _imported_names(module_path: str) -> dict[str, set[str]]:
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module == module_path:
                     for alias in node.names:
-                        out.setdefault(alias.name, set()).add(str(path.relative_to(_ROOT)))
+                        rel = path.relative_to(_ROOT).as_posix()  # 윈도우 역슬래시를 통일한다
+                        out.setdefault(alias.name, set()).add(rel)
     return out
 
 
@@ -63,18 +67,45 @@ def test_옛_자리가_쓰이는_이름을_전부_내보낸다():
     assert not missing, f"shim 이 안 내보내는 이름: {missing}"
 
 
-def test_별표가_건너뛰는_이름이_실제로_있다():
-    """전제 단언. 언더스코어 이름을 아무도 안 쓰면 위 검사가 `import *` 만으로도 통과한다.
+def test_옛_경로로_비공개_이름을_읽는_곳이_없다():
+    """🟢 **방향을 뒤집었다** (2026-09-03).
 
-    ⚠️ 비공개 이름을 남이 읽는 것 자체가 문제지만, 이 판은 **위치와 import 만**
-      바꾸기로 합의했으므로 이름을 안 건드린다. 별건이다.
+    전에는 *"`_DEPT_AXES` 하나가 있으니 shim 이 명시로 재수출해야 한다"* 를
+    고정했다. 마스터 몫 ③ 이 끝나 Critic 이 새 자리를 직접 읽는다.
+
+    ⚠️ **`import *` 는 언더스코어를 건너뛴다.** 누가 옛 경로로 비공개 이름을 새로
+      읽으면 shim 이 못 내보내고, 그 순간 이 검사가 빨간불이다.
     """
-    used = _imported_names(OLD)
-    private = sorted(n for n in used if n.startswith("_"))
+    private = {n: f for n, f in _imported_names(OLD).items() if n.startswith("_")}
+    missing = {n: f for n, f in private.items() if not hasattr(shim, n)}
 
-    assert private == ["_DEPT_AXES"], (
-        f"밖에서 읽히는 비공개 계약 이름이 달라졌다: {private}. "
-        f"shim 의 명시 재수출을 같이 고쳐야 한다"
+    assert not missing, (
+        f"옛 경로로 읽히는 비공개 계약 이름을 shim 이 못 내보낸다: {missing}. "
+        f"shim 에 명시 재수출을 더하거나 그 파일의 import 를 새 자리로 바꿔라"
+    )
+    assert not private, (
+        f"비공개 계약 이름을 옛 경로로 읽는 곳이 생겼다: {private}. "
+        f"지금은 shim 이 살아 있어 돌지만 ④ 에서 깨진다"
+    )
+
+
+def test_비공개_계약_이름을_읽는_곳을_고정한다():
+    """🔴 **자리를 옮겨도 사실은 그대로다** — `_` 를 남이 읽고 있다.
+
+    `_` 는 *"밖에서 쓰지 말라"* 는 표시인데 Critic 이 계약을 그렇게 쓴다.
+    이 판의 합의가 **위치와 import 만**이라 이름을 안 건드렸다.
+
+    고칠 때까지 **어디가 읽는지 고정한다** — 늘어나면 여기서 빨간불이다
+    (`test_known_gaps` 와 같은 규율).
+    """
+    readers: set[str] = set()
+    for module in (OLD, NEW):
+        for name, files in _imported_names(module).items():
+            if name.startswith("_"):
+                readers |= files
+
+    assert readers == {"app/critic/critic.py", "app/critic/critic_v0_4.py"}, (
+        f"계약의 비공개 이름을 읽는 곳이 달라졌다: {sorted(readers)}"
     )
 
 

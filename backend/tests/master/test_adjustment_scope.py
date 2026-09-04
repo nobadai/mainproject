@@ -26,6 +26,7 @@ from dataclasses import fields
 from datetime import date
 from typing import Any
 
+from app.contracts.core import SuggestedAdjustment
 from app.master.answer import facts_from_procurement
 from app.master.budget import CallBudget
 from app.master.envelope import (
@@ -37,7 +38,6 @@ from app.master.envelope import (
 from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _adjustments_out, _to_response
-from app.orchestrator.contracts_core import SuggestedAdjustment
 
 AS_OF = date(2025, 12, 31)
 
@@ -111,7 +111,7 @@ def _run(adjustments: tuple[SuggestedAdjustment, ...]):
     registry.register("inventory", _advisor(adjustments, verdict="conditional"))
     registry.register("purchase", _purchaser)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    return ProcurementFlow(runner, verifier=None, item="피마늘").run()
+    return ProcurementFlow(runner, verifier=None, item="배추").run()
 
 
 # ── ① 칸이 계약에 있다 ──────────────────────────────────────────────────────
@@ -271,7 +271,7 @@ def test_회차_개념이_없는_축은_None_이다():
     registry.register("inventory", _advisor())
     registry.register("purchase", _purchaser)
     runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
-    run = ProcurementFlow(runner, verifier=None, item="피마늘").run()
+    run = ProcurementFlow(runner, verifier=None, item="배추").run()
 
     실린_것 = _adjustments_out(run)
     assert len(실린_것) == 1, "재무 조정안이 안 실렸다"

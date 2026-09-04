@@ -63,6 +63,7 @@ from app.finance.llm.planner import (
     FinancePlanner,
     FinancePlannerContractViolation,
     FinancePlannerFailure,
+    FinancePlannerUnavailable,
     ToolAction,
     _configured_finance_llms,
 )
@@ -90,7 +91,7 @@ def build_business_result(
     if request.mode == "SALES_VALIDATION":
         # ★ 매입 분기로 흘려보내지 않는다. 흘려보내면 아래 PRE_PURCHASE 조립이
         #   판정과 무관하게 `"ok"` 를 내놓는다 — 재무가 보지도 않은 제안이 통과된다.
-        return _sales_business_result(states)
+        return _sales_business_result(request, states)
     if request.mode == "SCENARIO_VALIDATION":
         results = [scenario_result(state) for state in states]
         verdicts = [result["verdict"] for result in results]
@@ -152,38 +153,102 @@ def _lift_sales_runtime_status(
 
     ★ `INPUT_INCOMPLETE` 은 올리지 않는다. 제안에 사실이 빠진 것은 **재무 고장이
       아니므로** runtime 은 `READY` 로 두고 업무 상태만 `skipped` 다.
+
+    ★ batch 에서는 **모든 안이** RUNTIME_NOT_READY 일 때만 올린다. 재무 정책은 안마다
+      다르지 않으므로 보통 전부 같이 막히지만, 일부만 막힌 상태를 통째로
+      RUNTIME_NOT_READY 로 올리면 실제로 판정된 안의 결과까지 "못 봤다" 로 덮인다.
+      섞인 경우는 안별 `status` 가 사실을 나르고 top-level 은 `skipped` 로 남는다.
     """
     if request.mode != "SALES_VALIDATION" or outcome.runtime_status != "READY":
         return
-    if payload.get("status") != "RUNTIME_NOT_READY":
-        return
+    results = payload.get("scenario_results")
+    if isinstance(results, list):
+        if not results or not all(
+            isinstance(item, dict) and item.get("status") == "RUNTIME_NOT_READY"
+            for item in results
+        ):
+            return
+        missing: tuple[str, ...] = tuple(
+            name
+            for item in results
+            for name in (item.get("missing_data") or ())
+            if isinstance(name, str)
+        )
+    else:
+        if payload.get("status") != "RUNTIME_NOT_READY":
+            return
+        missing = tuple(payload.get("missing_data") or ())
     outcome.runtime_status = "RUNTIME_NOT_READY"
     outcome.failure_kind = "NOT_READY"
-    missing = payload.get("missing_data") or ()
     outcome.missing_data = tuple(dict.fromkeys((*outcome.missing_data, *missing)))
 
 
+def _sales_branch_payload(state: FinanceAgentState) -> dict[str, Any]:
+    """한 분기가 낸 자기 완결적 판매 검증 결과."""
+    payload: dict[str, Any] = {}
+    for observation in state.observations:
+        result = observation.get("result", {})
+        if result.get("status") is not None:
+            payload = _json_value(dict(result))
+    return payload
+
+
 def _sales_business_result(
-    states: list[FinanceAgentState],
+    request: AgentRequest, states: list[FinanceAgentState]
 ) -> tuple[dict[str, Any], list[Evidence], str, list[SuggestedAdjustment]]:
     """판매 검증 Tool 이 낸 payload 를 그대로 회신 payload 로 쓴다.
 
     ★ 다시 조립하지 않는다. 그 payload 는 이미 Refeed 를 견디도록 자기 완결적으로
       만들어졌다 — 여기서 골라 담으면 그 순간 근거가 잘려 나간다.
 
+    ★ **단일과 batch 의 모양을 섞지 않는다.** `scenarios` 로 들어온 요청만
+      `scenario_results` 로 나간다. 단일 요청은 예전 모양 그대로다.
+
     ★ 조정안을 만들지 않는다. 재무의 조정 축은 `amount` 하나인데, 판매 제안에 대한
       권위 있는 금액 대안을 낼 근거(마진·여신 정책)가 아직 없다. 없는 근거로 조정을
       제안하지 않는다.
     """
-    payload: dict[str, Any] = {}
-    for state in states:
-        for observation in state.observations:
-            result = observation.get("result", {})
-            if result.get("status") is not None:
-                payload = _json_value(dict(result))
-    if not payload:
+    if "scenarios" not in request.payload:
+        payload = _sales_branch_payload(states[0]) if states else {}
+        if not payload:
+            return {}, [], "skipped", []
+        return payload, [], sales_business_status(payload), []
+
+    results = [_sales_branch_payload(state) for state in states]
+    if not any(results):
         return {}, [], "skipped", []
-    return payload, [], sales_business_status(payload), []
+    return (
+        {"scenario_results": results},
+        [],
+        aggregate_sales_business_status(results),
+        [],
+    )
+
+
+def aggregate_sales_business_status(results: list[dict[str, Any]]) -> str:
+    """안별 재무 판정을 **재무 안에서** 하나로 모은다.
+
+    ★ 마스터가 안별 판정을 다시 계산하지 않게 하려고 여기서 끝낸다.
+
+    규칙 — 판정된 것만 모으고, 판정 못 한 것을 판정으로 바꾸지 않는다.
+
+        하나라도 reject            → reject
+        아니고 하나라도 conditional → conditional
+        전부 판정됐고 전부 ok       → ok
+        그 밖(판정 못 한 안이 섞임) → skipped
+
+    ★ 마지막 줄이 핵심이다. 한 안이 `INPUT_INCOMPLETE`/`RUNTIME_NOT_READY` 인데
+      나머지가 통과했다고 top-level 을 `ok` 로 내면, **보지 않은 안이 통과한 것으로**
+      읽힌다. reject 는 그대로 우선한다 — 실제로 막힌 안은 막힌 것이다.
+    """
+    statuses = [sales_business_status(result) for result in results]
+    if "reject" in statuses:
+        return "reject"
+    if "conditional" in statuses:
+        return "conditional"
+    if statuses and all(status == "ok" for status in statuses):
+        return "ok"
+    return "skipped"
 
 
 def _branch_scenario_labels(state: FinanceAgentState) -> list[str]:
@@ -203,6 +268,21 @@ def _branch_scenario_labels(state: FinanceAgentState) -> list[str]:
     if isinstance(label, str) and label.strip():
         return [label.strip()]
     return []
+
+
+def _amount_adjustment_was_evaluated(state: FinanceAgentState) -> bool:
+    """금액 대안 검증이 **실제로 돌았는가** — 실행 사실로만 판단한다.
+
+    ★ 설명 문장을 읽지 않는다. 실행 순서(`tool_order`)와 관측만 본다 — 사람이 읽는
+      문장에서 실행 사실을 되짚으면, 문구를 다듬는 순간 계약이 흔들린다.
+
+    ★ 평소 흐름이 이미 최소 현금을 밑돈 경우(`base_state_violated`)는 상한이 0 으로
+      확정되어 어떤 금액도 안전하지 않다. 결정론 판정이 이미 답을 냈으므로 Tool 을
+      부르지 않고도 "대안 없음" 이 성립한다 — 유일한 예외다.
+    """
+    if state.base_state_violated:
+        return True
+    return "validate_amount_adjustment" in state.tool_order
 
 
 def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
@@ -226,6 +306,16 @@ def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     adjustments: list[dict[str, Any]] = []
     if payload["verdict"] == "ok":
         payload["adjustability"] = "NOT_NEEDED"
+    elif not _amount_adjustment_was_evaluated(state):
+        # 🔴 검증을 **안 한 것**을 "대안이 없다" 로 포장하지 않는다.
+        #
+        #    Harness 가 non-ok 판정에 금액 대안 검증을 필수로 걸어 두므로 정상 실행에서
+        #    여기 오지 않는다. 그래도 남겨 두는 이유는, 이 자리가 조용히 통과하면
+        #    Planner 가 Tool 을 안 골랐다는 사실이 `NOT_ADJUSTABLE` 뒤에 숨어 버리기
+        #    때문이다. 숨기지 말고 계약 위반으로 세운다.
+        raise ValueError(
+            "amount adjustment validation must run before a non-ok scenario completes"
+        )
     elif validation and Decimal(str(validation["candidate_amount_krw"])) > 0:
         payload["adjustability"] = "ADJUSTABLE"
         adjustments.append(
@@ -263,14 +353,18 @@ def scenario_result(state: FinanceAgentState) -> dict[str, Any]:
     return payload
 
 
-def fallback_reasoning(mode: str, business: str) -> str:
+def fallback_reasoning(
+    mode: str, business: str, *, has_verified_adjustment: bool = False
+) -> str:
     """LLM 이 설명을 못 골랐을 때 나가는 문장.
 
     🔴 **LLM 경로와 같은 정본을 쓴다.** 예전처럼 대체 경로를 따로 두면, 모델이 죽은
        날에만 사용자에게 다른 말투가 나간다 — 설명이 가장 필요한 날에 설명이 제일
        나빠진다.
     """
-    return explanation_for(mode, business)
+    return explanation_for(
+        mode, business, has_verified_adjustment=has_verified_adjustment
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +379,8 @@ _TERMINAL_DENIALS = frozenset({DUPLICATE_UNRESOLVED_TOOL_CALL, TOOL_BUDGET_EXHAU
 
 
 def branch_requests(request: AgentRequest) -> list[AgentRequest]:
+    if request.mode == "SALES_VALIDATION":
+        return _sales_branches(request)
     if request.mode != "SCENARIO_VALIDATION":
         return [request]
     scenarios = request.payload.get("scenarios")
@@ -299,6 +395,33 @@ def branch_requests(request: AgentRequest) -> list[AgentRequest]:
         payload = dict(scenario)
         payload["scenario_id"] = _scenario_identity(payload)
         branches.append(replace(request, payload=payload))
+    return branches
+
+
+def _sales_branches(request: AgentRequest) -> list[AgentRequest]:
+    """판매 제안 1~3안을 분기로 나눈다.
+
+    ★ 매입 분기 규칙을 그대로 쓰지 않는다. 매입은 `label` 을 식별자로 대신 쓰고
+      `total_amount_krw` 를 요구하는데, 그건 매입 계약이다 — 판매 payload 에 억지로
+      끼우면 판매 제안이 매입 모양이어야 하는 것처럼 굳는다.
+
+    ★ 단일 payload(= `scenarios` 키 없음)는 **손대지 않고 그대로** 한 분기로 둔다.
+      기존 단일 경로가 batch 도입 때문에 달라지지 않는다.
+
+    ★ `scenario_id` 가 없어도 여기서 만들어 주지 않는다. 그건 업무 사실이 빠진 것이라
+      분기 안에서 `INPUT_INCOMPLETE` 로 드러나야 한다 — 여기서 번호를 붙이면 재무가
+      식별자를 발명한 셈이 된다.
+    """
+    scenarios = request.payload.get("scenarios")
+    if scenarios is None:
+        return [request]
+    if not isinstance(scenarios, list) or not 1 <= len(scenarios) <= 3:
+        raise ValueError("SALES_VALIDATION requires one to three scenarios")
+    branches: list[AgentRequest] = []
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise TypeError("each Sales scenario must be an object")
+        branches.append(replace(request, payload=dict(scenario)))
     return branches
 
 
@@ -615,7 +738,9 @@ class FinanceAgentController:
             request, outcome.states, outcome.runtime_status
         )
         _lift_sales_runtime_status(request, outcome, payload)
-        explanation = self._explain(request, outcome, payload, evidences, business_status)
+        explanation = self._explain(
+            request, outcome, payload, evidences, business_status, adjustments
+        )
         elapsed = int((time.monotonic() - started) * 1000)
 
         metadata = self._build_metadata(
@@ -645,7 +770,8 @@ class FinanceAgentController:
 
         네 갈래를 구분해서 접는 것이 핵심이다.
           · 요청 계약 위반    → ERROR, 사용자가 **요청을 고치면** 되는 것
-          · Planner 실패      → ERROR, 그리고 `llm_status` 는 FALLBACK 이 된다
+          · LLM 실행 불가     → 같은 Harness 안에서 결정론 Planner 로 계속한다
+          · 그 밖의 Planner 실패 → ERROR, 그리고 `llm_status` 는 FALLBACK 이 된다
           · 입력이 없어서 못 함 → RUNTIME_NOT_READY + missing_data (다시 불러도 같다)
           · 그 밖의 예외       → ERROR (프로그램 오류를 사실로 위장하지 않는다)
 
@@ -660,6 +786,8 @@ class FinanceAgentController:
         )
         outcome = _BranchOutcome(harness=harness)
         shared_context = None
+        active_planner = self.planner
+        deterministic_planner = DeterministicFinancePlanner()
         try:
             # ★ 요청 계약 검증만 따로 감싼다. 여기서 나는 잘못은 **보내 주신 내용이
             #   맞지 않는다** 이고, 루프 안에서 나는 잘못은 우리 쪽 사정이다.
@@ -680,7 +808,26 @@ class FinanceAgentController:
                 # ★ 루프 **전에** 담는다. 실패해도 그때까지의 observation 과 재계획
                 #   횟수가 이력에 남아야 한다 — 실패한 실행일수록 흔적이 필요하다.
                 outcome.states.append(state)
-                execute_loop(state, planner=self.planner, harness=harness)
+                try:
+                    execute_loop(state, planner=active_planner, harness=harness)
+                except FinancePlannerUnavailable as unavailable:
+                    # Provider 두 곳이 모두 실행 불가한 경우만 선택 계층을 결정론으로
+                    # 내린다. 같은 state와 Harness를 이어 쓰므로 Tool/replan 예산,
+                    # duplicate guard, 승인 순서는 초기화되거나 우회되지 않는다.
+                    outcome.planner_failed = True
+                    active_planner = deterministic_planner
+                    fallback_observation = {
+                        "observation_type": "finance_planner_fallback",
+                        "planner_fallback_used": True,
+                        "planner_fallback_reason": "LLM_PROVIDERS_UNAVAILABLE",
+                        "effective_planner": deterministic_planner.model,
+                    }
+                    if unavailable.provider is not None:
+                        fallback_observation["unavailable_provider"] = unavailable.provider
+                    if unavailable.reason is not None:
+                        fallback_observation["provider_failure_reason"] = unavailable.reason
+                    state.observations.append(fallback_observation)
+                    execute_loop(state, planner=active_planner, harness=harness)
                 shared_context = state.context_cache
         except FinancePlannerFailure as exc:
             outcome.planner_failed = True
@@ -708,6 +855,7 @@ class FinanceAgentController:
         payload: dict[str, Any],
         evidences: list[Evidence],
         business_status: str,
+        adjustments: list[SuggestedAdjustment] | None = None,
     ) -> _Explanation:
         """검증된 Evidence 로 설명을 **고른다.** 설명이 결과를 바꾸지는 않는다.
 
@@ -736,18 +884,27 @@ class FinanceAgentController:
             finalization_evidence.extend(
                 _evidence_from_dict(item) for item in verdict.get("evidences", [])
             )
+        # ★ 조정 범위를 언급할 수 있는지는 **결정론 결과**가 정한다. 검증된 금액 대안이
+        #   실제로 실렸을 때만 그 사실을 말하는 문장이 후보가 된다 — LLM 경로든 대체
+        #   경로든 같은 사실을 본다.
+        has_verified_adjustment = bool(adjustments)
         try:
             reasoning = self.finalizer.finalize(
                 mode=request.mode,
                 business_status=business_status,
                 evidences=tuple(finalization_evidence),
+                has_verified_adjustment=has_verified_adjustment,
             )
             _validate_ready_reasoning(reasoning)
         except Exception:  # noqa: BLE001 - complete Evidence permits safe fallback.
             # ★ 답은 나간다 — 규칙이 만든 답이다. 검증된 Evidence 가 이미 있으므로
             #   설명을 못 골랐다고 업무 결과를 버릴 이유가 없다.
             return _Explanation(
-                fallback_reasoning(request.mode, business_status),
+                fallback_reasoning(
+                    request.mode,
+                    business_status,
+                    has_verified_adjustment=has_verified_adjustment,
+                ),
                 "DISABLED" if not self.llm_enabled else "FALLBACK",
                 self.llm_enabled,
             )

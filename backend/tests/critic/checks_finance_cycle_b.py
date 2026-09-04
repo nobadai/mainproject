@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
     CheckResult,
     Evidence,
     ItemCode,

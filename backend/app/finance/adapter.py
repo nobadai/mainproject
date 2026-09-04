@@ -38,7 +38,11 @@ from app.finance.capabilities.sales import (
     build_sales_validation_payload,
     map_sales_finance_verdict,
 )
-from app.finance.db import FinanceDataNotReady, get_current_finance_runtime_context
+from app.finance.db import (
+    FinanceDataNotReady,
+    get_current_finance_runtime_context,
+    load_partner_receivables,
+)
 from app.finance.execution import (
     _PAYROLL_SOURCE_KEYS,
     missing_source_name,
@@ -46,6 +50,7 @@ from app.finance.execution import (
     save_finance_execution,
 )
 from app.finance.llm.client import finance_llm_enabled
+from app.finance.sales_models import PartnerReceivable
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,
@@ -156,6 +161,21 @@ class _RuntimeContextDataPort:
         self._check_as_of(as_of)
         return []
 
+    def load_partner_receivables(self, as_of: date, partner_id: str) -> list[PartnerReceivable]:
+        """거래처 채권만은 **고정된 컨텍스트 밖**에서 읽는다.
+
+        ★ 컨텍스트는 요청 payload 를 보기 전에 선다. 어느 거래처인지는 그때 알 수
+          없으므로 채권을 미리 담아 둘 수 없다 — 여기서 이 실행의 `sim_run_id` 와
+          `as_of` 를 걸고 읽는다.
+
+        ★ `_check_as_of` 를 먼저 통과시켜, 다른 날짜 요청이 오늘 채권을 대신 받는
+          일이 없게 한다.
+        """
+        self._check_as_of(as_of)
+        return load_partner_receivables(
+            sim_run_id=self.context.snapshot.sim_run_id, as_of=as_of, partner_id=partner_id
+        )
+
 
 def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:
     """Master 컨텍스트를 다시 쓰지 않고 Data Port가 Finance 자체 Policy를 해석하게 한다."""
@@ -259,7 +279,15 @@ def _controller_boundary(
             missing=payroll_refs,
             reason=messages.PAYROLL_SOURCE_MISSING,
         )
-    if context.policy.purchase_payment_days is None:
+    # 🔴 매입 전용 정책이 **모든 mode** 를 막고 있었다.
+    #
+    #    `purchase_payment_days` 는 매입 지급일 상한(`calculate_finance_cap`)에만 쓰인다 —
+    #    판매 검증은 이 값을 한 번도 읽지 않는다. 그런데 공통 boundary 에 있어서, 매입
+    #    지급일 정책이 없는 날에는 **판매 검증도 실행 전에 통째로 막혔다.** 재무가 판매를
+    #    못 본 이유가 "매입 정책이 없어서" 가 되는 것이라 사유 자체가 거짓이다.
+    #
+    # ★ 매입 쪽 방어는 그대로다. 아래 두 mode 에서는 여전히 실행 전에 요구한다.
+    if request.mode in _PURCHASE_POLICY_MODES and context.policy.purchase_payment_days is None:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
             missing=("purchase_payment_days",),
@@ -684,6 +712,13 @@ def _not_ready(
     )
     return _recorded(request, reply, _meta(request, run_id, tools))
 
+
+#: 매입 실행 정책(`purchase_payment_days`)을 **실행 전에** 요구하는 mode.
+#:
+#: ★ 판매 검증은 여기 없다. 그 값은 매입 지급일 상한 계산에만 쓰이므로, 판매를
+#:   막을 이유가 되지 않는다 — 막으면 "매입 정책이 없어서 판매를 못 봤다" 는
+#:   거짓 사유가 이력에 남는다.
+_PURCHASE_POLICY_MODES: frozenset[str] = frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION"})
 
 #: 실행이력에 남기는 mode. **닫힌 허용목록이다** — 모르는 mode 는 여기 없다.
 #:

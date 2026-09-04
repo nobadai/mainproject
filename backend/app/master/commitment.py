@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+from app.contracts.core import ITEMS
+
 __all__ = [
     "ITEM_CODES",
     "ApprovedCommitment",
@@ -42,12 +44,14 @@ __all__ = [
     "build_commitment",
 ]
 
-#: 4품목 체제. **여기가 마스터의 어휘 정본이다.**
+#: 🔴 `contracts/core.py` 의 `ItemCode` 는 `str` 별칭이고 품목 목록은 **주석**이다.
+#:   그래서 `InventoryLot(item="(승인분)")` 같은 값이 품목 자리에 들어가도 아무도
+#:   안 막았다 (2026-09-01 실측). 여기서는 값으로 막는다.
 #:
-#: 🔴 `orchestrator/contracts_core.py:88` 의 `ItemCode` 는 `str` 별칭이고 4품목은
-#:   **주석**이다. 그래서 `InventoryLot(item="(승인분)")` 같은 값이 품목 자리에
-#:   들어가도 아무도 안 막았다 (2026-09-01 실측). 여기서는 값으로 막는다.
-ITEM_CODES: frozenset[str] = frozenset({"배추", "무", "양파", "피마늘"})
+#: ★ 다만 **목록을 여기서 다시 세지 않는다.** 2026-09-03 에 피마늘을 뺄 때, 계약은
+#:   셋인데 여기만 넷으로 남는 것이 정확히 이 파일이 만들 수 있는 사고였다.
+#:   막는 자리는 여기지만 무엇을 막을지는 계약이 정한다.
+ITEM_CODES: frozenset[str] = frozenset(ITEMS)
 
 
 class CommitmentNotBuildable(ValueError):
@@ -91,7 +95,9 @@ class ApprovedCommitment:
 
     def __post_init__(self) -> None:
         if self.item not in ITEM_CODES:
-            raise CommitmentNotBuildable(f"품목이 4품목 어휘가 아니다: {self.item!r}")
+            raise CommitmentNotBuildable(
+                f"계약 품목이 아니다: {self.item!r}. 가능: {', '.join(sorted(ITEM_CODES))}"
+            )
         if not self.arrival_schedule:
             return
         drift = self.total_qty_kg - sum(leg.qty_kg for leg in self.arrival_schedule)

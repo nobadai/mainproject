@@ -9,6 +9,13 @@
 **시세만 여기로 온다.** 예측·재고·주문·현금은 마스터 봉투로 오거나 mock 이고, 시세만
 매입 자기 도메인이라 우리가 직접 읽는다 (정의서 §4.1 · ``adapter.build_state`` 주석).
 
+⚠️ **#228(2026-09-03) 이후로 위 문장의 "mock 이고" 는 pytest 안에서만 참이다.** 운영
+경로에서 mock 포트를 부르면 ``MockNotAllowed`` 로 막힌다 (``ports.py`` —
+``PYTEST_CURRENT_TEST`` 또는 ``sys.modules`` 로 판단). **실운영 등록은 ``main.py`` 가
+실 공급자를 꽂는다** (#226 · ``partial(purchase_port, quotes=auction_quote_source())``).
+운영에서 예측·재고·주문·현금은 **봉투로만** 오고, 안 오면 mock 으로 메우는 대신
+``missing_data`` 로 나간다 (#227 · ``adapter.validate_payload``).
+
 🔴 **``get_db_schema`` 를 두지 않는다.** 다른 파트의 ``db.py`` 에는 있지만, 우리가
 읽는 스키마는 ``constraints.yaml`` 의 ``market_quotes.source`` 가 정한다 (``quotes.source_table``).
 헬퍼를 남겨 두면 다음 사람이 그걸로 다시 배선하고, 그 순간 **``.env`` 가 어느 테이블을

@@ -31,6 +31,7 @@ from app.finance.llm.client import (
 )
 from app.finance.llm.finalizer import GeminiFinanceFinalizer, OllamaFinanceFinalizer
 from app.finance.llm.planner import (
+    DeterministicFinancePlanner,
     FinanceChatModel,
     FinancePlannerContractViolation,
     LangChainFinancePlanner,
@@ -269,6 +270,14 @@ def _provider_observation(metadata):
     )
 
 
+def _planner_fallback_observation(metadata):
+    return next(
+        json.loads(item)
+        for item in metadata.observations
+        if json.loads(item).get("observation_type") == "finance_planner_fallback"
+    )
+
+
 def test_finance_settings_load_env_independent_of_working_directory(tmp_path, monkeypatch):
     env_file = tmp_path / "config" / ".env"
     env_file.parent.mkdir()
@@ -408,6 +417,94 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
         "provider_fallback_used": True,
     }
     urlopen.assert_not_called()
+    save_run.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("primary_error", "primary_reason"),
+    [
+        (TimeoutError("timed out"), "TIMEOUT"),
+        (
+            urllib.error.HTTPError("https://gemini.invalid", 429, "quota", {}, None),
+            "HTTP_429",
+        ),
+    ],
+)
+@patch("app.finance.execution.save_finance_execution")
+def test_double_provider_failure_uses_deterministic_planner_without_changing_business_result(
+    save_run, monkeypatch, primary_error, primary_reason
+):
+    """LLM 두 곳이 모두 죽어도 Finance Core가 가능한 요청은 그대로 완주한다."""
+    monkeypatch.setenv("FINANCE_LLM_ENABLED", "true")
+    monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "configured-test-key")
+
+    expected, expected_metadata = FinanceAgentController(
+        _FinancePort(), planner=DeterministicFinancePlanner()
+    ).run(_request())
+    save_run.reset_mock()
+
+    def both_providers_fail(request, timeout):
+        del timeout
+        if "generativelanguage.googleapis.com" in request.full_url:
+            raise primary_error
+        raise urllib.error.HTTPError(request.full_url, 404, "model missing", {}, None)
+
+    monkeypatch.setattr(
+        "app.finance.llm.client.urllib.request.urlopen", both_providers_fail
+    )
+
+    actual, metadata = FinanceAgentController(_FinancePort()).run(_request())
+
+    assert actual.runtime_status == expected.runtime_status == "READY"
+    assert actual.business_status == expected.business_status
+    assert actual.payload == expected.payload
+    assert actual.evidences == expected.evidences
+    assert actual.suggested_adjustments == expected.suggested_adjustments
+    assert actual.reasoning == expected.reasoning
+    assert metadata.used_tools == expected_metadata.used_tools
+    assert metadata.rules_applied == expected_metadata.rules_applied
+    assert metadata.llm_status == "FALLBACK"
+    assert metadata.llm_fallback_used is True
+    assert _provider_observation(metadata)["provider_fallback_reason"] == primary_reason
+    assert _planner_fallback_observation(metadata) == {
+        "effective_planner": "deterministic-finance-planner",
+        "observation_type": "finance_planner_fallback",
+        "planner_fallback_reason": "LLM_PROVIDERS_UNAVAILABLE",
+        "planner_fallback_used": True,
+        "provider_failure_reason": "HTTP_404",
+        "unavailable_provider": "ollama",
+    }
+    save_run.assert_called_once()
+
+
+@patch("app.finance.execution.save_finance_execution")
+def test_gemini_http_400_does_not_use_deterministic_planner_fallback(
+    save_run, monkeypatch
+):
+    """Schema/config 오류는 provider availability 장애로 정상화하지 않는다."""
+    monkeypatch.setenv("FINANCE_LLM_ENABLED", "true")
+    monkeypatch.setenv("FINANCE_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("FINANCE_GEMINI_API_KEY", "configured-test-key")
+    error = urllib.error.HTTPError("https://gemini.invalid", 400, "schema", {}, None)
+
+    def schema_failure(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(
+        "app.finance.llm.client.urllib.request.urlopen", schema_failure
+    )
+
+    reply, metadata = FinanceAgentController(_FinancePort()).run(_request())
+
+    assert reply.runtime_status == "ERROR"
+    assert reply.business_status == "skipped"
+    assert metadata.used_tools == ()
+    assert _provider_observation(metadata)["provider_fallback_used"] is False
+    assert not any(
+        json.loads(item).get("observation_type") == "finance_planner_fallback"
+        for item in metadata.observations
+    )
     save_run.assert_called_once()
 
 

@@ -17,7 +17,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from app.orchestrator.contracts_core import (
+from app.contracts.core import (
+    ITEMS,
     CheckResult,
     Evidence,
     FinanceSnapshot,
@@ -30,15 +31,38 @@ from app.orchestrator.contracts_core import (
     gate_variant_axes,
 )
 
-AS_OF = date(2023, 3, 15)  # ← 플레이스홀더. sim_start_date 확정 시 교체.
+#: 🟢 **시뮬레이션 기준일** (`M-24` `D-2` 확정 · 2026-09-03).
+#:
+#: 오래 `date(2023, 3, 15)` 플레이스홀더였다. 네 파트가 모두 READY 인 날이
+#: **이 하루뿐**이라 선택지가 없었다.
+#:
+#: ```text
+#: ML     v_ml_price_forecast   3품목 · 각 378행 / 7배치
+#: 재무   v_current_finance_state 가 한 행 고정 — 다른 날은 READY 가 안 된다
+#: 물류   logistics_runtime_fixture 2행 중 하나 (나머지는 2026-01-01)
+#: 매입   mock 앵커 (#73)
+#: ```
+#:
+#: ★ **다른 날짜는 전부 이 값 상대로 쓴다** (`AS_OF + timedelta(...)`).
+#:   그래서 이 교체가 한 줄로 끝났다 — 절대 날짜를 흩뿌렸으면 스무 곳이었다.
+#:   `test_fixtures_follow_contract.py` 가 그 규율을 지킨다.
+AS_OF = date(2025, 12, 31)
 
-ITEMS4 = ("배추", "무", "양파", "피마늘")
-PRICE_BASE = {"배추": 1500.0, "무": 900.0, "양파": 1100.0, "피마늘": 6000.0}
-PRICE_HIGH = {"배추": 1800.0, "무": 900.0, "양파": 1100.0, "피마늘": 6000.0}
-DEMAND = {"배추": 737.5, "무": 84.5, "양파": 11.8, "피마늘": 74.4}  # 합 908.2 kg/일
+#: 픽스처 품목은 **계약에서 가져온다**. 여기서 따로 세면 계약이 바뀐 날 조용히
+#: 어긋나고, 그때 깨지는 것은 계약이 아니라 픽스처다.
+FIXTURE_ITEMS = ITEMS
+
+PRICE_BASE = {"배추": 1500.0, "무": 900.0, "양파": 1100.0}
+PRICE_HIGH = {"배추": 1800.0, "무": 900.0, "양파": 1100.0}
+DEMAND = {"배추": 737.5, "무": 84.5, "양파": 11.8}  # 합 833.8 kg/일
 
 # 금액 비중 (정의서 §7.0) — mix 게이팅의 정본
-MIX_AMOUNT = {"배추": 0.812, "무": 0.093, "양파": 0.013, "피마늘": 0.082}
+#
+# ⚠️ 합이 1.0 이 아니라 0.918 이다. 피마늘 몫 0.082 를 뺐고 **정규화하지 않았다** —
+#   정의서에 있는 값을 그대로 두는 쪽이 지어낸 값보다 낫다. 게이팅은
+#   ``max(...) < ITEM_CONCENTRATION_THRESHOLD`` 로 최대값만 보므로(0.812 vs 0.70)
+#   정규화해도(배추 0.884) 결과가 같다.
+MIX_AMOUNT = {"배추": 0.812, "무": 0.093, "양파": 0.013}
 
 # 등급 배분 (특 20% / 상 60% / 중 20%) — 단가는 상 등급 대비 ±10%
 GRADE_SPLIT = {"특": 0.2, "상": 0.6, "중": 0.2}
@@ -65,7 +89,7 @@ def make_snapshot(as_of: date = AS_OF, cash: float = 40_000_000.0, run_seq: int 
         run_seq=run_seq,
         forecasts=(),
         spot_price_krw_per_kg=dict(PRICE_BASE),
-        inventory_available_kg={i: 200.0 for i in ITEMS4},
+        inventory_available_kg={i: 200.0 for i in FIXTURE_ITEMS},
         warehouse_free_kg=17_600.0,
         confirmed_orders_kg=dict(DEMAND),
         finance=fin,
@@ -74,15 +98,17 @@ def make_snapshot(as_of: date = AS_OF, cash: float = 40_000_000.0, run_seq: int 
         price_basis="AUCTION",  # N11 종결 — 경락가 확정
         contract_price_basis="AUCTION",
         item_mix_ratio_amount=dict(MIX_AMOUNT),
-        item_mix_ratio_qty={i: DEMAND[i] / sum(DEMAND.values()) for i in ITEMS4},
+        item_mix_ratio_qty={i: DEMAND[i] / sum(DEMAND.values()) for i in FIXTURE_ITEMS},
         allowed_variant_axes=gate_variant_axes(MIX_AMOUNT, split_entry_ok=True),
         snapshot_id=f"SNAP-{as_of}-{run_seq}",
         inbound_lead_days=2,  # N4 미확정 — 플레이스홀더
-        lots=tuple(InventoryLot(f"lot_{i}", i, 200.0, 30) for i in ITEMS4),
+        lots=tuple(InventoryLot(f"lot_{i}", i, 200.0, 30) for i in FIXTURE_ITEMS),
         confirmed_occupancy_by_date={as_of + timedelta(days=d): 3_000.0 for d in range(8)},
         contract_price_krw_per_kg={"배추": 2293.11},
         margin_defense_floor_rate=0.267,  # 거치 구간
-        grade_unit_price={(i, g): PRICE_BASE[i] * m for i in ITEMS4 for g, m in GRADE_MULT.items()},
+        grade_unit_price={
+            (i, g): PRICE_BASE[i] * m for i in FIXTURE_ITEMS for g, m in GRADE_MULT.items()
+        },
     )
 
 
@@ -116,7 +142,7 @@ def make_scenarios(
     wp = _weighted_price(price)
     out = []
     for d in cover_days:
-        qty = {i: round(DEMAND[i] * d, 1) for i in ITEMS4}
+        qty = {i: round(DEMAND[i] * d, 1) for i in FIXTURE_ITEMS}
         legs = (splits or {}).get(d)
         if legs is None:
             legs = (SplitLeg(0, dict(qty), as_of + timedelta(days=2)),)
@@ -139,7 +165,7 @@ def make_scenarios(
 def make_split_variants(d: int = 6, price=PRICE_BASE) -> list[MinimalScenario]:
     """총량 동일 · 분할 상이 2안 — B2 검증용."""
     wp = _weighted_price(price)
-    qty = {i: round(DEMAND[i] * d, 1) for i in ITEMS4}
+    qty = {i: round(DEMAND[i] * d, 1) for i in FIXTURE_ITEMS}
     half = {i: round(v / 2, 1) for i, v in qty.items()}
     variants = [
         ("SCN-T1", "기준", (SplitLeg(0, dict(qty), AS_OF + timedelta(days=2)),)),
@@ -166,7 +192,7 @@ def make_split_variants(d: int = 6, price=PRICE_BASE) -> list[MinimalScenario]:
 
 
 def sales_reply(floor_mult: float = 1.0, as_of: date = AS_OF) -> T2Reply:
-    floor = {i: round(DEMAND[i] * floor_mult, 1) for i in ITEMS4}
+    floor = {i: round(DEMAND[i] * floor_mult, 1) for i in FIXTURE_ITEMS}
     return T2Reply(
         "sales",
         as_of,

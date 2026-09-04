@@ -25,6 +25,7 @@ from typing import Any
 
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.ports import MockNotAllowed
 from app.purchase_agent.state import PurchaseAgentState
 
 #: 절단 표시. **발췌가 문장 경계가 아니라 글자 수로 잘렸다는 사실을 발췌 자체에 남긴다.**
@@ -135,9 +136,30 @@ def collect_context(state: PurchaseAgentState) -> dict[str, Any]:
             break
         doc_type = remaining.pop(0)
         loops += 1
-        # 요청한 유형에 문서가 없는 날도 정상이다 (무·양파·피마늘엔 기상·작년동기 문서가
+        # 요청한 유형에 문서가 없는 날도 정상이다 (무·양파엔 기상·작년동기 문서가
         # 없다). 빈 회차도 한 번의 시도로 세어야 "찾아봤지만 없었다"가 루프 수에 남는다.
-        for doc in ports.get_context_docs(state["item"], as_of, [doc_type]):
+        #
+        # 🟢 **문서를 못 읽으면 없이 진행한다** (2026-09-04 · 마스터 결정).
+        #
+        #   *"문서 없으면 없이 진행하고, 생기면 생긴대로 진행한다. 내가 통제한다."*
+        #   실 문서 소스가 아직 DB 에 없어 `get_context_docs` 가 mock 을 막으면
+        #   (`MockNotAllowed`), 여기서 멈추지 않고 **빈 문서로 계속**한다.
+        #
+        # ★ **mock 을 쓰는 게 아니다.** 연습 데이터로 메우는 것과, 문서가 없어 없이
+        #   가는 것은 다르다 — mock 은 여전히 안 쓴다. 못 읽었다는 사실만 남겨
+        #   ⑦ self_check 이 각 안의 risks 에 고지한다 (컷하지 않는다).
+        #
+        # ⚠️ "그날 그 유형이 없다"(무·양파)와 "읽으려다 못 읽었다"는 다르다 —
+        #   앞은 빈 `context_docs`, 뒤는 `context_unavailable` 에 남는다. 둘 다 안은 낸다.
+        try:
+            found = ports.get_context_docs(state["item"], as_of, [doc_type])
+        except MockNotAllowed as blocked:
+            return {
+                "context_docs": collected,
+                "context_loop_count": loops,
+                "context_unavailable": str(blocked),
+            }
+        for doc in found:
             if doc["doc_id"] in seen:
                 continue
             seen.add(doc["doc_id"])
