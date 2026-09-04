@@ -1,3 +1,9 @@
+-- Finance A/B 결정론 경로의 실행이력 (`finance_agent_runs`).
+--
+-- ★ **아직 살아 있다.** `POST /finance/sales` → `legacy.deterministic_service` 가
+--   여기에 쓰고, `GET /finance/runs` 가 여기서 읽는다. Agent v2.2 이력은
+--   `finance_agent_runs_v22` 로 따로 선다 — 둘은 다른 경로의 이력이다.
+
 CREATE TABLE IF NOT EXISTS haetdeul.finance_agent_runs (
     run_id UUID PRIMARY KEY,
     cycle TEXT NOT NULL CHECK (cycle IN ('PROCUREMENT', 'SALES')),

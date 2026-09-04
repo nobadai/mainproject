@@ -79,6 +79,10 @@ class Port:
         del as_of, horizon
         return []
 
+    def load_partner_receivables(self, as_of, partner_id):
+        del as_of, partner_id
+        return []
+
 
 class NoRefPort(Port):
     """Evidence 를 받칠 정책 출처가 없는 그날의 사실."""

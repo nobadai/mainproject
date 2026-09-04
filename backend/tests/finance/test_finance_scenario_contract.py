@@ -52,7 +52,7 @@ def _wired(monkeypatch):
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
     monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
-    monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
 
 
 def _non_split(**over) -> dict:

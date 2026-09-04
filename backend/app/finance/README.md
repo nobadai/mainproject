@@ -337,6 +337,68 @@ proposed sale 의 정본 재고원가   어느 Lot 을 쓸지는 Inventory 의 �
 그래서 `sales_cost_basis` 는 **주입받는다**. 권위 있는 재고원가가 없으면 마진을
 계산하지 않고, 0 으로 대체하지 않는다. 조건부 물량이 섞이면 확정 재고원가를 제안
 전체의 원가처럼 쓰지 않는다.
+## 승인 → 다음 재무 Actual State
+
+승인된 매입 약정이 재무의 다음 상태가 되는 경로다. **값은 재무가, 트랜잭션은
+마스터가** 소유한다.
+
+```text
+load_finance_state_row(as_of)                 as_of 시점에 유효한 상태 한 건
+build_finance_transition(commitment, ...)     계산만 — DB 를 바꾸지 않는다
+persist_finance_transition(conn, transition)  받은 연결로 쓰기만 — commit 하지 않는다
+```
+
+부르는 쪽(마스터)이 기대하는 모양은 다음과 같다.
+
+```python
+fin = finance.build_finance_transition(commitment, purchase_id=purchase_id)
+with shared_connection as conn:
+    finance.persist_finance_transition(conn, fin)
+    # 물류 적재는 재무 밖에서, commit 은 마스터가 한 번만
+```
+
+### 상태 선택은 as_of 가 한다
+
+`v_current_finance_state` 는 `finance_state_id = 'FIN-DAY30-LOAN'` 을 박아 두고 있어
+상태 **한 행을 고정한다**. 그 View 정의는 공유 스키마가 소유해서 재무가 못 고치므로,
+재무는 View 에서 **축(`sim_run_id` · `financing_mode`)만** 읽고 상태 선택은 직접 한다.
+
+```text
+같은 sim_run · 같은 financing_mode 안에서 state_date <= as_of 중 가장 늦은 행
+```
+
+🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 날짜에 `BASE_NO_LOAN` 과
+`LOAN_BASELINE` 두 행이 실제로 있어서, 날짜만으로 고르면 무차입 상태가 대출
+baseline 자리에 조용히 들어온다.
+
+★ 최신 행이 같은 날짜로 둘이면 고르지 않고 `finance_state_ambiguous` 로 세운다.
+
+### 승인은 현금을 줄이지 않는다
+
+`purchase_payment_days`(현재 D+7)가 지급을 미루는 한, 승인 시점에 생기는 것은
+**매입채무**다.
+
+```text
+승인일      payables OPEN 생성 (due_date = 매입일 + purchase_payment_days)
+            finance_states.unsettled_purchase_payables_krw 증가
+            current_cash_krw 그대로
+지급일      기존 현금흐름 투영이 그 채무를 유출로 본다
+```
+
+`financial_limit_krw` 는 생성 컬럼이라 채무가 늘면 자동으로 줄어든다.
+
+### 같은 승인을 두 번 적용해도 의무는 하나다
+
+식별자는 약정이 이미 들고 있는 `approval_id` 다. 재무는 그것으로 행 ID 를 정하고,
+중복은 DB 가 막는다.
+
+```text
+finance_states  PK (finance_state_id = FIN-{approval_id})
+payables        UNIQUE (purchase_id)
+```
+
+두 번째 적용은 쓴 행 수 0 으로 돌아온다.
+
 ## 패키지 구조
 
 책임이 어디 사는지가 파일 위치로 보이게 정리했다. 전체 디렉터리 이동보다 **책임 분리와
@@ -350,6 +412,7 @@ app/finance/
 │                                                          ← master · orchestrator 도 import
 ├─ schemas.py         요청·응답 계약 전체 (어휘·현금흐름·정책·상태·매입·판매·이력)
 ├─ state.py           한 실행 동안 살아 있는 값
+├─ transition.py      승인 약정 → 다음 재무 상태 · 재무 원장 쓰기 (연결은 부르는 쪽 것)
 ├─ tools.py           결정론 재무 계산 (공식의 유일한 주인)
 ├─ rules.py           결정론 판정 (verdict 소유)
 ├─ execution.py       Evidence · DeptMeta(Critic 사이드카) · 실행이력 저장/조회

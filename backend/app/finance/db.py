@@ -194,14 +194,19 @@ def get_current_finance_state() -> FinanceState:
     return cast(FinanceState, _get_current_finance_state_row())
 
 
-def get_current_finance_snapshot() -> FinanceSnapshot:
-    """현재 View의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
-    return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row())
+def get_current_finance_snapshot(as_of: date | None = None) -> FinanceSnapshot:
+    """``as_of`` 시점의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    return FinanceSnapshot(snapshot_id=None, **_get_current_finance_state_row(as_of))
 
 
-def get_current_finance_runtime_context() -> FinanceRuntimeContext:
-    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다."""
-    snapshot = get_current_finance_snapshot()
+def get_current_finance_runtime_context(as_of: date | None = None) -> FinanceRuntimeContext:
+    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다.
+
+    ★ ``as_of`` 는 **어느 상태 행을 고를지**만 정한다. 고른 뒤의 투영 기준일은
+      그대로 그 행의 ``state_date`` 다 — 상태가 적힌 날의 잔액을 다른 날 잔액으로
+      옮겨 쓰지 않는다. 어긋나면 위(`adapter._controller_boundary`)에서 닫는다.
+    """
+    snapshot = get_current_finance_snapshot(as_of)
     policy = get_active_finance_policy()
     horizon_end = snapshot.state_date + timedelta(days=policy.cashflow_projection_days)
     events: list[CashEvent] = []
@@ -657,25 +662,109 @@ def load_partner_receivables(
     return receivables
 
 
-def _get_current_finance_state_row() -> dict[str, object]:
+_FINANCE_STATE_COLUMNS = (
+    "finance_state_id",
+    "sim_run_id",
+    "state_date",
+    "state_type",
+    "financing_mode",
+    "current_cash_krw",
+    "minimum_operating_cash_krw",
+    "committed_outflows_krw",
+    "unsettled_purchase_payables_krw",
+    "receivables_krw",
+    "current_debt_krw",
+    "financial_limit_krw",
+)
+
+
+class FinanceRuntimeAxis(TypedDict):
+    """상태 한 건이 아니라 **어느 축 위에서 고르는가**."""
+
+    sim_run_id: str
+    financing_mode: str
+
+
+def get_finance_runtime_axis() -> FinanceRuntimeAxis:
+    """이 런타임이 서 있는 재무 축 — 시뮬레이션 실행과 조달 방식.
+
+    ★ `v_current_finance_state` 를 **축을 읽는 데만** 쓴다. View 는
+      `finance_state_id = 'FIN-DAY30-LOAN'` 을 박아 두고 있어서 상태 한 건을
+      고정하지만, 그 행이 말해 주는 `sim_run_id` · `financing_mode` 는 고정이 아니라
+      **이 실행의 경계**다. 답이 아니라 축만 가져온다.
+
+    🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 sim_run · 같은 날짜에
+       `BASE_NO_LOAN` 과 `LOAN_BASELINE` 두 행이 실제로 있다 — 날짜만으로 고르면
+       **무차입 상태가 대출 baseline 자리에 조용히 들어온다.**
+
+    ★ View 정의는 공유 스키마(`10_domain_schema.sql`)에 있어 여기서 못 고친다.
+      축만 읽고 상태 선택은 아래 as-of 질의가 한다.
+    """
+    query = sql.SQL("SELECT sim_run_id, financing_mode FROM {}.v_current_finance_state").format(
+        sql.Identifier(get_db_schema())
+    )
+    row = fetch_one(query)
+    if row is None:
+        raise LookupError("Current Finance State was not found")
+    return FinanceRuntimeAxis(
+        sim_run_id=str(row["sim_run_id"]), financing_mode=str(row["financing_mode"])
+    )
+
+
+def load_finance_state_row(as_of: date) -> dict[str, object]:
+    """``as_of`` 시점에 유효한 재무 상태 한 건. **미래를 읽지 않는다.**
+
+    ```text
+    같은 sim_run · 같은 financing_mode 안에서
+    state_date <= as_of 중 가장 늦은 행
+    ```
+
+    🔴 최신 행 두 건이 **같은 날짜**면 고르지 않고 세운다. 승인 전이가 같은 날에
+       상태를 하나 더 만들면 "가장 늦은 행" 이 둘이 되는데, 그중 하나를 말없이
+       집으면 어느 쪽이 답인지 아무도 모른 채 숫자가 달라진다.
+    """
+    axis = get_finance_runtime_axis()
     query = sql.SQL(
         """
-        SELECT
-            finance_state_id,
-            sim_run_id,
-            state_date,
-            state_type,
-            financing_mode,
-            current_cash_krw,
-            minimum_operating_cash_krw,
-            committed_outflows_krw,
-            unsettled_purchase_payables_krw,
-            receivables_krw,
-            current_debt_krw,
-            financial_limit_krw
+        SELECT {}
+        FROM {}.finance_states
+        WHERE sim_run_id = %s
+          AND financing_mode = %s
+          AND state_date <= %s
+        ORDER BY state_date DESC
+        LIMIT 2
+        """
+    ).format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS),
+        sql.Identifier(get_db_schema()),
+    )
+    rows = fetch_all(query, [axis["sim_run_id"], axis["financing_mode"], as_of])
+    if not rows:
+        raise FinanceDataNotReady("historical_finance_position")
+    if len(rows) == 2 and rows[0]["state_date"] == rows[1]["state_date"]:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    row = rows[0]
+    _reject_negative_debt(row)
+    return row
+
+
+def _get_current_finance_state_row(as_of: date | None = None) -> dict[str, object]:
+    """``as_of`` 를 주면 그 시점의 행, 주지 않으면 View 가 고정한 현재 행.
+
+    ★ `as_of` 없는 경로는 "지금 상태" 를 묻는 조회(레거시 · STATUS 화면)다.
+      판단 경로는 모두 `as_of` 를 넘긴다.
+    """
+    if as_of is not None:
+        return load_finance_state_row(as_of)
+    query = sql.SQL(
+        """
+        SELECT {}
         FROM {}.v_current_finance_state
         """
-    ).format(sql.Identifier(get_db_schema()))
+    ).format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS),
+        sql.Identifier(get_db_schema()),
+    )
     row = fetch_one(query)
     if row is None:
         raise LookupError("Current Finance State was not found")
@@ -714,9 +803,10 @@ def _reject_negative_debt(row: Mapping[str, object]) -> None:
 class PostgresFinanceAsOfDataPort:
     """명시적인 재현성 보호 장치를 둔 현재 Schema용 Adapter.
 
-    현재 DB에는 완전한 이중 시간 상태 저장소가 아니라 현재 상태 View만 있다.
-    따라서 View의 state_date가 as_of와 정확히 일치할 때만 안전하다. 이전 요청은
-    오늘 상태를 읽지 않고 준비되지 않은 것으로 보고한다.
+    상태 선택은 `load_finance_state_row` 가 ``as_of`` 로 한다 — 고정된 한 행이
+    아니라 그 시점에 유효한 행이다. 그 위에 **잔액을 옮겨 쓰지 않는** 보호를 한 겹
+    더 둔다: 고른 행의 날짜가 ``as_of`` 와 다르면 그날 잔액을 모르는 것이므로
+    준비되지 않은 것으로 보고한다.
     """
 
     def __init__(self) -> None:
@@ -726,7 +816,7 @@ class PostgresFinanceAsOfDataPort:
     def load_finance_position(self, as_of: date) -> dict[str, object]:
         if self._position_cache is not None and self._position_cache[0] == as_of:
             return self._position_cache[1]
-        row = _get_current_finance_state_row()
+        row = _get_current_finance_state_row(as_of)
         if row.get("state_date") != as_of:
             raise FinanceDataNotReady("historical_finance_position")
         self._position_cache = (as_of, row)

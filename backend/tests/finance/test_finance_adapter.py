@@ -117,7 +117,7 @@ def controller_wired(monkeypatch):
 
 @pytest.fixture
 def wired(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_context", lambda: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
 
 
 class _AdapterPlanner:
@@ -237,7 +237,7 @@ def test_마진_방어선이_없으면_missing_data_로_밝힌다(monkeypatch):
         class policy(_Policy):
             margin_defense_floor_rate = None
 
-    monkeypatch.setattr(adapter, "_load_context", lambda: _NoFloor())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _NoFloor())
     reply, _ = adapter.finance_port(req())
     assert "margin_defense_floor_rate" not in reply.payload
     assert "margin_defense_floor_rate" in reply.missing_data
@@ -257,7 +257,7 @@ def test_as_of_가_다르면_RUNTIME_NOT_READY(wired):
 
 def test_컨텍스트가_없으면_ERROR_가_아니라_NOT_READY(monkeypatch):
     """다시 불러도 같은 답이면 재시도 가치가 없다 (M-1 §5.1)."""
-    monkeypatch.setattr(adapter, "_load_context", lambda: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert not reply.worth_retry
@@ -313,7 +313,7 @@ def _with_events(monkeypatch, events):
     class _C(_Context):
         cash_events = tuple(events)
 
-    monkeypatch.setattr(adapter, "_load_context", lambda: _C())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _C())
 
 
 def test_지급이_없는_날은_후보가_아니다(monkeypatch):
@@ -386,7 +386,7 @@ def test_급여_출처가_없으면_투영을_만들지_않는다(monkeypatch):
         class policy(_Policy):
             source_refs: ClassVar[dict[str, str]] = {}
 
-    monkeypatch.setattr(adapter, "_load_context", lambda: _NoRef())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _NoRef())
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.business_status == "skipped"
@@ -412,7 +412,7 @@ def test_급여_아닌_정책값은_출처가_없어도_돈다(monkeypatch):
                 "payroll_date": "SRC-FIN-N6",
             }
 
-    monkeypatch.setattr(adapter, "_load_context", lambda: _PayrollOnly())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _PayrollOnly())
     reply, _ = adapter.finance_port(req())
     assert reply.runtime_status == "READY"
     assert "purchase_payment_days@policy_source_ref" in reply.missing_data
@@ -477,7 +477,7 @@ def test_급여_출처가_없으면_현금은_답하고_투영만_뺀다(monkeyp
     class _Ctx(_Context):
         policy = _NoPayroll()
 
-    monkeypatch.setattr(adapter, "_load_context", lambda: _Ctx())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Ctx())
     request = req(mode="STATUS_QUERY")
     reply, meta = adapter.finance_port(request)
 

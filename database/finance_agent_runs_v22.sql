@@ -1,3 +1,9 @@
+-- Finance Agent v2.2 실행이력 — **신규 구축용 최종 모양.**
+--
+-- ★ 이미 만들어진 DB 를 올리는 것은 `finance_agent_runs_v22_sales_validation.sql`
+--   이 한다. 여기에 마이그레이션 로직을 겹쳐 적지 않는다 — 이 파일은 "지금의 최종
+--   모양", 그 파일은 "옛 DB 를 그 모양으로 옮기는 법" 이다.
+
 CREATE TABLE IF NOT EXISTS haetdeul.finance_agent_runs_v22 (
     run_id UUID PRIMARY KEY,
     request_id TEXT NOT NULL,
