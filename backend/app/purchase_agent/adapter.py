@@ -24,7 +24,13 @@ from app.master.envelope import (
 )
 from app.orchestrator.contracts_core import Evidence
 from app.purchase_agent import AGENT_VERSION, mocks
-from app.purchase_agent.config import load_constraints
+from app.purchase_agent.config import (
+    ThresholdNotDeclared,
+    ci_width_threshold,
+    load_constraints,
+    threshold_missing_data_name,
+    threshold_not_declared_reason,
+)
 from app.purchase_agent.graph import build_graph
 from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
@@ -314,8 +320,22 @@ def validate_payload(payload: Mapping[str, Any], as_of: date) -> list[str]:
     (필요데이터 §1.3-①). 그래서 ``in`` 으로 존재를 먼저 본다.
     """
     missing: list[str] = []
-    if not payload.get("item"):
+    item = payload.get("item")
+    if not item:
         missing.append("item")
+    else:
+        # 🔴 **임계가 품목별이라 품목을 알아야 볼 수 있다.** 그래서 ``item`` 검사 다음이다.
+        #   여기서 안 막으면 ①이 ``ThresholdNotDeclared`` 로 죽는데, **노드가 죽으면
+        #   ``missing_data`` 가 비어** 마스터는 *"매입이 왜 안 돌았는지"* 를 못 받는다
+        #   (봉투가 빈 ``missing_data`` 의 ``RUNTIME_NOT_READY`` 를 거부한다).
+        #   ``_unusable_forecast_names`` 를 노드가 아니라 여기 둔 것과 같은 이유다.
+        #
+        # ⚠️ **다른 ``missing`` 과 성격이 다르다** — 마스터가 다시 보낸다고 풀리지 않는다.
+        #   그 사실은 이름이 말한다 (``ThresholdNotDeclared.missing_data_name``).
+        try:
+            ci_width_threshold(item, load_constraints())
+        except ThresholdNotDeclared as undeclared:
+            missing.append(undeclared.missing_data_name)
 
     constraints = payload.get("constraints")
     if not isinstance(constraints, Mapping):
@@ -649,9 +669,13 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     게이트의 수치가 사라진다.
     """
     constraints = load_constraints()
-    threshold = constraints["situation"]["ci_width_threshold"]
-    judgment_day = constraints["situation"]["ci_judgment_day"]
+    # 🔴 **``item`` 을 먼저 읽는다** — 임계가 품목별이라 품목 없이는 못 뽑는다.
+    #   전에는 ``threshold`` 가 위에 있었다. 순서만 남겨두면 ``item`` 이 정의되기 전에
+    #   쓰는 ``NameError`` 라 바로 걸리지만, 근거 문장이 **판정과 다른 임계를 인용하는**
+    #   길로도 갈 수 있어서 ①과 **같은 함수**로 뽑는다.
     item = payload["meta"]["item"]
+    threshold = ci_width_threshold(item, constraints)
+    judgment_day = constraints["situation"]["ci_judgment_day"]
     as_of = payload["meta"]["as_of"]
     # ① 노드가 ``situation``·``allowed_axes``만 돌려주고 판정 **수치**는 남기지 않는다.
     # 여기서 같은 함수로 다시 구한다 — 값을 State에 얹으면 노드 계약이 바뀌고 949건이
@@ -967,6 +991,29 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     return reply, _metadata(request, None)
 
 
+def _not_ready_reason(missing: list[str], item: Any) -> str:
+    """``RUNTIME_NOT_READY`` 의 **사람이 읽는 사유.** 이름 목록으로는 못 가르는 것을 가른다.
+
+    ``missing_data`` 는 어느 쪽이든 이름을 싣지만, 사유가 같으면 **마스터가 누구에게
+    무엇을 요청해야 하는지** 가 사라진다. 셋이 서로 다르다::
+
+        임계 미선언   우리가 값을 정해야 풀린다      다시 보내도 그대로다
+        쓰지 말라고 왔다  ML 이 표시한 것             예측을 다시 내야 풀린다
+        그 밖          마스터가 값을 안 보냈다        다시 보내면 풀린다
+
+    ★ **각각 "그것만이 사유일 때"만 말한다.** 임계도 없고 예측도 없으면 임계 문장만
+      내보내는 것이 거짓이 된다 — 그때는 일반 문장으로 내리고, 무엇이 없는지는
+      ``missing_data`` 가 전부 싣는다. 앞의 둘이 같은 모양(``len(...) == len(missing)``)인
+      것은 우연이 아니라 같은 규칙이다.
+    """
+    if item and missing == [threshold_missing_data_name(item)]:
+        return threshold_not_declared_reason(item)
+    unusable = [name for name in missing if name in UNUSABLE_FORECAST_NAMES]
+    if unusable and len(unusable) == len(missing):
+        return "예측을 만든 쪽이 오늘 값을 쓰지 말라고 표시해 시나리오를 만들지 않았다."
+    return "필수 입력이 없어 시나리오를 만들지 못했다."
+
+
 def _generate_scenarios(
     request: AgentRequest, *, quotes: QuoteSource | None = None
 ) -> tuple[AgentReply, ExecutionMetadata]:
@@ -990,20 +1037,16 @@ def _generate_scenarios(
         #   없는지는 ``missing_data``가, 왜인지는 ``reasoning``이 말한다 — 봉투는
         #   ``RUNTIME_NOT_READY``에 ``missing_data``가 비지 않을 것만 요구한다.
         #
-        # 🔴 **"안 왔다" 와 "쓰지 말라고 왔다" 를 문장으로 가른다** (#213).
+        # 🔴 **사유를 무엇으로 쓸지는 ``_not_ready_reason`` 이 정한다** (#213 · #67).
         #   ``missing_data`` 이름은 어느 쪽이든 실리지만, 사람이 읽는 사유가 같으면
         #   *"ML 이 이 예측을 쓰지 말라고 했다"* 가 *"마스터가 값을 안 보냈다"* 로
         #   읽힌다 — 마스터가 사용자에게 요청할 대상이 서로 다르다.
-        unusable = [name for name in missing if name in UNUSABLE_FORECAST_NAMES]
+        #   가르는 경우가 셋이 되면서 조건식을 함수로 옮겼다 (2026-09-05).
         reply = _reply(
             request,
             runtime_status="RUNTIME_NOT_READY",
             business_status="skipped",
-            reasoning=(
-                "예측을 만든 쪽이 오늘 값을 쓰지 말라고 표시해 시나리오를 만들지 않았다."
-                if unusable and len(unusable) == len(missing)
-                else "필수 입력이 없어 시나리오를 만들지 못했다."
-            ),
+            reasoning=_not_ready_reason(missing, request.payload.get("item")),
             missing_data=tuple(missing),
         )
         return reply, _metadata(request, None)

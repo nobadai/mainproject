@@ -17,10 +17,14 @@ from pathlib import Path
 
 import pytest
 from _fixtures import AS_OF, _proposal
-from _injection import INJECTED_THRESHOLD, swap_threshold
+from _injection import INJECTED_THRESHOLD, declare_thresholds, swap_threshold
 
 from app.purchase_agent import mocks, ports
-from app.purchase_agent.config import load_constraints
+from app.purchase_agent.config import (
+    ThresholdNotDeclared,
+    ci_width_threshold,
+    load_constraints,
+)
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.state import build_initial_state
 
@@ -271,6 +275,138 @@ def test_the_boundary_value_itself_follows_the_declared_comparison(
     assert classify_situation(build_initial_state(item, UNCERTAIN))["situation"] == expected
 
 
+# ── 품목별 임계 (#67 · #127) ────────────────────────────────────────────────
+
+
+def _judgment_width(item: str, as_of: date) -> float:
+    """판정 기준일 **한 줄**의 구간폭 — ①이 실제로 재는 그 값.
+
+    ``_ci_widths`` 는 전 지평을 돌려주므로 여기 쓰면 안 된다. 판정은 한 줄로 한다
+    (``constraints.yaml`` §situation ``ci_judgment_day`` 의 세 번째 정정).
+    """
+    row = _judgment_row(item, as_of)
+    return (row["upper"] - row["lower"]) / row["predicted"]
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_each_item_reads_its_own_declared_threshold(
+    as_of: date, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **같은 날 같은 코드인데 품목마다 판정이 갈리는가** — 품목별 임계의 존재 이유.
+
+    스칼라 시절에는 이 질문 자체가 성립하지 않았다. ①이 ``state["item"]`` 을 안 읽었으니
+    품목이 무엇이든 임계가 같았고, 그래서 **색인을 빠뜨려도 아무 검사도 울지 않는다.**
+
+    임계를 그날 그 품목의 구간폭에서 뽑는다 — 선언값(현재 셋 다 0.08)으로는 갈림을
+    만들 수 없고, 상수를 적으면 mock 밴드가 움직이는 날 이유 없이 깨진다
+    (``test_the_verdict_follows_the_declared_threshold`` 와 같은 이유).
+    """
+    widths = {item: _judgment_width(item, as_of) for item in mocks.ITEMS}
+    # 번갈아 아래·위로 둔다. 한쪽으로 몰면 "갈린다"가 아니라 "전부 같다"를 재게 된다.
+    below = {item: index % 2 == 0 for index, item in enumerate(sorted(widths))}
+    swap_threshold(monkeypatch, {i: widths[i] * (0.5 if below[i] else 2.0) for i in widths})
+
+    expected = {item: "uncertain" if flag else "stable" for item, flag in below.items()}
+    assert set(expected.values()) == {"stable", "uncertain"}, (
+        "한 날에 두 판정이 다 나와야 '갈린다'를 잰 것이다 — mock 품목이 하나로 줄면 여기서 운다"
+    )
+    got = {i: classify_situation(build_initial_state(i, as_of))["situation"] for i in mocks.ITEMS}
+    assert got == expected
+
+
+@pytest.mark.parametrize("moved", mocks.ITEMS)
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_moving_one_item_leaves_the_others_where_they_were(
+    as_of: date, moved: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **한 품목 임계를 흔들어도 나머지가 안 움직이는가.**
+
+    ``s``(#127)가 오면 셋이 갈라진다 — #67 이 확정한 순서가 양파 < 무 < 배추다.
+    그날 고치는 것은 **한 줄**인데, 그 한 줄이 다른 품목 판정까지 옮기면 고친 사람은
+    모른다. 값이 틀려서가 아니라 **색인이 없어서** 생기는 종류라, 값을 대조하는
+    검사로는 안 잡힌다 (규칙 8).
+
+    전 품목을 stable 로 눕혀 놓고 하나만 아래로 내린다. 기준선이 균일해야 움직인 것이
+    **그 한 품목뿐**임을 말할 수 있다.
+    """
+    widths = {item: _judgment_width(item, as_of) for item in mocks.ITEMS}
+    declared = {item: width * 2.0 for item, width in widths.items()}
+    declared[moved] = widths[moved] * 0.5
+    swap_threshold(monkeypatch, declared)
+
+    got = {i: classify_situation(build_initial_state(i, as_of))["situation"] for i in mocks.ITEMS}
+    assert got == {i: ("uncertain" if i == moved else "stable") for i in mocks.ITEMS}
+
+
+def _without(item: str) -> dict[str, float]:
+    return {other: 0.08 for other in mocks.ITEMS if other != item}
+
+
+def _nulled(item: str) -> dict[str, float | None]:
+    return {other: (None if other == item else 0.08) for other in mocks.ITEMS}
+
+
+@pytest.mark.parametrize("build", [_without, _nulled], ids=["없는_키", "null"])
+def test_an_undeclared_threshold_stops_instead_of_falling_back(
+    build: Callable[[str], dict], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **없는 키를 기본값으로 채우지 않는다** (규칙 3).
+
+    ``declared.get(item, 0.08)`` 한 줄이면 그날 아무 일도 안 일어난 것처럼 판정이 나온다 —
+    **에러 없이 결과만 조용히 틀어지는** 종류다. 임계가 없다는 것은 *"0.08 이다"* 가 아니라
+    *"아직 안 정했다"* 이고, 안 정한 임계로 낸 stable/uncertain 은 근거가 없다.
+
+    ★ **없는 키와 ``null`` 을 같은 자리에서 본다.** 둘 다 미결이고 판정을 막는다는 결과도
+      같다 — ``shelf_life_days`` 의 ``null`` 과 같은 뜻이다. 조건을 둘로 가르면 한쪽만
+      고치는 날이 온다.
+
+    ⚠️ **다른 품목은 그대로 돈다.** 한 품목의 미결이 그날 전체를 세우면, 값을 하나씩
+      확정해 나가는 동안 아무도 아무것도 못 돌린다.
+    """
+    baseline = {
+        item: classify_situation(build_initial_state(item, UNCERTAIN))["situation"]
+        for item in mocks.ITEMS
+        if item != "배추"
+    }
+    declare_thresholds(monkeypatch, tmp_path, build("배추"))
+
+    with pytest.raises(ThresholdNotDeclared, match="배추"):
+        classify_situation(build_initial_state("배추", UNCERTAIN))
+    assert {
+        item: classify_situation(build_initial_state(item, UNCERTAIN))["situation"]
+        for item in baseline
+    } == baseline
+
+
+def test_a_scalar_declaration_stops_every_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """스칼라로 되돌아간 선언(``ci_width_threshold: 0.08``)은 **전 품목이 같이** 멈춘다.
+
+    🔴 한 품목이라도 통과시키면 나머지가 그 값을 물려받는 꼴이고, 그건 품목별로 가른
+      이유를 통째로 되돌린 것이다. 되돌린 사람에게 *"고쳤는데 안 고쳐졌다"* 가
+      조용히 성립한다.
+    """
+    declare_thresholds(monkeypatch, tmp_path, 0.08)
+    for item in mocks.ITEMS:
+        with pytest.raises(ThresholdNotDeclared, match=item):
+            classify_situation(build_initial_state(item, UNCERTAIN))
+
+
+def test_every_mock_item_has_a_declared_threshold() -> None:
+    """mock 품목이 늘면 임계도 같이 늘어야 한다 — 안 그러면 그 품목은 **아무 날도 못 돈다.**
+
+    ``ThresholdNotDeclared`` 가 크게 울기는 하지만 우는 자리가 그래프 한가운데다.
+    여기서 먼저 울면 *"임계를 안 정했다"* 가 목록으로 바로 보인다.
+
+    🔴 **반대 방향은 안 막는다.** 선언에 mock 에 없는 품목이 있어도 된다 — 실데이터로
+      가면 mock 목록이 먼저 사라지고, 선언은 계약(#216)을 따른다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    missing = set(mocks.ITEMS) - set(declared)
+    assert not missing, f"임계가 선언되지 않은 mock 품목: {sorted(missing)}"
+
+
 def _ci_widths(item: str, as_of: date) -> list[float]:
     """ci_width = (upper − lower) / predicted — 상세설계 §4-①."""
     daily = ports.get_forecast(item, as_of)["daily"]
@@ -292,7 +428,7 @@ def _predicted(item: str, as_of: date) -> list[int]:
 def test_rising_is_stable_and_clears_the_pre_purchase_trigger(item: str) -> None:
     """mock_rising → 선매입(D 큰 안)이 나오려면 stable이면서 timing 축이 열려야 한다."""
     constraints = load_constraints()
-    assert max(_ci_widths(item, RISING)) < constraints["situation"]["ci_width_threshold"]
+    assert max(_ci_widths(item, RISING)) < ci_width_threshold(item, constraints)
     assert _rise_rate_2w(item, RISING) >= constraints["triggers"]["pre_purchase_rise_rate"]
     predicted = _predicted(item, RISING)
     assert predicted == sorted(predicted)
@@ -303,7 +439,7 @@ def test_rising_is_stable_and_clears_the_pre_purchase_trigger(item: str) -> None
 def test_falling_is_stable_and_misses_the_pre_purchase_trigger(item: str) -> None:
     """mock_falling → 최소 매입(D=2). 하락 궤적이면 선매입 트리거가 열리면 안 된다."""
     constraints = load_constraints()
-    assert max(_ci_widths(item, FALLING)) < constraints["situation"]["ci_width_threshold"]
+    assert max(_ci_widths(item, FALLING)) < ci_width_threshold(item, constraints)
     rise = _rise_rate_2w(item, FALLING)
     assert rise < 0
     assert rise < constraints["triggers"]["pre_purchase_rise_rate"]
@@ -370,7 +506,7 @@ def test_wide_spread_moves_only_the_mid_grade(item: str) -> None:
 @pytest.mark.parametrize("item", mocks.ITEMS)
 def test_spread_wide_day_stays_stable_so_the_grade_axis_is_isolated(item: str) -> None:
     """등급만 보려면 그날이 uncertain이면 안 된다 — 안 개수가 줄어 배분을 볼 여지가 사라진다."""
-    threshold = load_constraints()["situation"]["ci_width_threshold"]
+    threshold = ci_width_threshold(item, load_constraints())
     assert max(_ci_widths(item, SPREAD_WIDE)) < threshold
 
 
@@ -729,8 +865,12 @@ def test_load_constraints_returns_a_fresh_object_each_call() -> None:
     first, second = load_constraints(), load_constraints()
     assert first == second
     assert first is not second
-    first["situation"]["ci_width_threshold"] = 999
-    assert load_constraints()["situation"]["ci_width_threshold"] != 999
+    # 🔴 **중첩 안쪽을 흔든다.** 최상위 키를 갈아 끼우는 것으로는 부족하다 —
+    #   ``{**real, ...}`` 같은 얕은 복사가 어딘가에 있어도 그건 통과하고, 실제로 새는
+    #   것은 **안쪽 dict 를 공유하는** 경우다. 임계가 품목별 dict 가 되면서 그 안쪽이
+    #   생겼다.
+    first["situation"]["ci_width_threshold"]["배추"] = 999
+    assert ci_width_threshold("배추", load_constraints()) != 999
 
 
 def test_load_constraints_rejects_a_file_missing_sections(tmp_path: Path) -> None:
