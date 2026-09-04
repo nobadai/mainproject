@@ -349,33 +349,60 @@ build_finance_transition(commitment, ...)     계산만 — DB 를 바꾸지 않
 persist_finance_transition(conn, transition)  받은 연결로 쓰기만 — commit 하지 않는다
 ```
 
-부르는 쪽이 기대하는 모양은 다음과 같다.
+마스터 전이 Protocol(#256)이 부르는 모양이다. `FinanceTransitionAdapter` 가 그 입구다.
 
 ```python
-fin = finance.build_finance_transition(
+finance = FinanceTransitionAdapter()
+plan = finance.build(
     commitment,
-    purchase_id=purchase_id,        # 매입 소유 — 약정에 아직 없다
-    target_state_date=next_day,     # 실행일 달력 소유 — 계약에 아직 없다
+    target_state_date=next_day,   # as_of + 1 달력일 — 마스터가 준다
+    purchase_ids=purchase_ids,    # {seq: purchase_id} — 마스터가 만든다
 )
-with shared_connection as conn:
-    finance.persist_finance_transition(conn, fin)
-    # 물류 적재는 재무 밖에서, commit 은 마스터가 한 번만
+finance.persist(conn, plan)       # 받은 연결로만, commit 은 마스터가 한 번만
 ```
 
-🔴 **아직 `master.transition.register_transition` 에 등록하지 않는다.** 위 두 인자를
-   실어 줄 권위 있는 원천이 계약에 없다. 억지로 등록하면 마스터가 *"아직 안 돈다"*
-   (`NOT_APPLIED`) 대신 **승인마다 `FAILED`** 를 내게 되고, 미구현이 장애로 둔갑한다.
+★ **`purchase_ids` 는 회차별이다.** `purchases.purchase_date` 가 header 에 하나뿐이라
+회차마다 `purchases` 한 행이 선다. 재무는 자기 회차의 값을 **`seq` 로 찾아 쓰기만**
+한다 — 하나뿐이라고 첫 값을 집거나 정렬해서 고르지 않는다. 없거나 빈 값이면
+`commitment_purchase_ids` 로 세운다.
 
-### 다음 상태가 설 날은 재무가 정하지 않는다
+🔴 **어댑터는 섰지만 아직 등록하지 않는다.** `register_transition("finance", ...)` 은
+   이 브랜치가 하지 않는다. `payables.purchase_id` 가 참조하는 `purchases` 부모 행을
+   재무 persist **전에** 누가 넣는지가 아직 안 서 있고, 물류 연결도 남아 있다. 재무만
+   먼저 등록하면 마스터가 *"아직 안 돈다"* (`NOT_APPLIED`) 대신 **승인마다 `FAILED`**
+   를 내게 되고, 미구현이 장애로 둔갑한다.
+
+### 지금은 회차 하나만 채무가 된다
 
 ```text
-금 승인 → as_of + 1 달력일 = 토요일 상태 → 다음 실행일 월요일이 못 읽는다
+회차 1건   → 채무 1건 (purchase_ids[seq] · 총액 · 매입일 + N5)
+회차 2건+  → commitment_payment_amounts 로 세운다
+회차 0건   → commitment_arrival_schedule 로 세운다
 ```
 
-초안은 안에서 `as_of + 1` 을 세웠고, 그 결과가 위 한 줄이다. 실행일 달력은 마스터
-소유(`master/execution_day.py`)이고 재무가 닿을 수 있는 마스터 표면이 아니므로,
-`target_state_date` 를 **인자로 받는다.** 재무가 보는 것은 정합성 한 가지뿐이다 —
-승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의 사실을 말할 수 없다.
+#256 이 **ID 전달 문제**를 풀었지만 **금액 배분 문제**는 아직 열려 있다. 약정이 드는
+금액은 `total_amount_krw` 하나뿐이고 `ArrivalLeg` 에는 금액 칸이 없다. 매입일이 같아도
+합치지 않는다 — 회차가 둘이면 매입 의무도 구조적으로 둘이라, 하나로 접는 순간 원장이
+매입과 어긋난다. 회차별 지급액 계약이 서면 그때 N건으로 연다.
+
+### 실행일과 장부일은 다른 축이다
+
+```text
+매입 판단   평일만 돈다              ← 마스터 실행일 달력
+장부 상태   매 달력일 전진한다        ← 토·일·공휴일 포함
+```
+
+주말에도 판매와 원장 활동이 일어나므로 재무 상태는 주말에도 서야 한다. 그래서
+다음 상태 날짜는 **`as_of + 1 달력일`** 이고 금요일 승인은 **토요일 상태**를
+만든다 — 그것이 정상이다. 예전에 이 자리를 *"다음 실행일 월요일이 못 읽는다"* 로
+적었는데 그건 두 축을 겹쳐 본 것이다.
+
+★ 그 날짜를 재무가 세지 않는다. `target_state_date` 를 **인자로 받고**, 보는 것은
+정합성 한 가지뿐이다 — 승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의
+사실을 말할 수 없다.
+
+🔴 `master.execution_day.next_execution_day` 를 쓰지 않는다. 재무는 그 모듈을
+   import 하지 않고 평일 계산도 하지 않는다.
 
 ### 두 층을 나눈다 — DB "지금" 과 요청 "그때"
 
