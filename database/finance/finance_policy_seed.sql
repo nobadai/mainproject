@@ -32,6 +32,23 @@
 --    받치는 근거이고, `monthly_labor_cost_krw` 가 이미 쓰는 것과 같은 출처다.
 --
 --    이 브랜치는 운영 DB 를 읽기만 했다. 운영 행 반영은 별도 절차다.
+--
+-- ★ **`persona_version` 은 출처 Persona 행을 가리키지 않는다.** 그래서 이 행이
+--    `SRC-FIN-PERSONA`(→ PERSONA-V1.3)를 달고도 `v1.5` 로 남는 것이 모순이 아니다.
+--
+--    ```text
+--    source_ref       이 값을 받치는 출처        → SRC-FIN-PERSONA (PERSONA-V1.3)
+--    persona_version  통합 Persona 계약 세대      → v1.5 (재무·물류 공통 라벨)
+--    ```
+--
+--    근거: `company_personas.persona_version` 은 UNIQUE 이고 지금껏 `v1.3` 한 행뿐이라
+--    `v1.5` 라는 Persona 행은 존재한 적이 없다. `agent_policy_config` 에서 `v1.5` 는
+--    재무 21행뿐 아니라 **물류 8행**도 같이 쓰고, 두 표 사이에 FK 도 컬럼 COMMENT 도
+--    없으며 읽는 코드도 없다. 기존 `monthly_labor_cost_krw` 주석이 이 값을
+--    *"통합 Persona v1.5"* 라고 부른다 — DB Persona 행이 아니라 문서 세대다.
+--
+--    여기서만 `v1.3` 으로 바꾸면 표 전체에서 이 한 행만 달라지고, 이 컬럼이 Persona
+--    행을 가리키는 것처럼 읽히게 된다. 바꾸지 않는다.
 
 INSERT INTO haetdeul.agent_policy_config (
     domain,
