@@ -33,17 +33,17 @@ T0 상태 읽기 → 승인 약정 수신 → build_finance_transition (계산�
    🔴 그래서 `master.execution_day.next_execution_day` 를 쓰지 않는다. 재무는
      그 모듈을 import 하지도 않고 평일 계산을 하지도 않는다. 날짜는 마스터가 준다.
 
-🔴 **아직 마스터(`master.transition.register_transition`)에 등록하지 않는다.**
-   `payables.purchase_id` 는 `purchases` 를 참조하는 NOT NULL 컬럼인데,
-   `ApprovedCommitment` 에는 그 ID 가 없다. 등록하면 마스터가 *"아직 안 돈다"*
-   (`NOT_APPLIED`) 대신 **매 승인마다 `FAILED`** 를 내게 된다 — 미구현이 장애로
-   둔갑한다. 아래 `purchase_id` 인자는 재무 단독 검증용이고, 매입/마스터가 권위
-   있는 ID 를 실어 줄 때 등록한다. 재무가 그 ID 를 지어내지 않는다.
+🔴 **어댑터는 섰지만 아직 등록하지 않는다.** `FinanceTransitionAdapter` 는 마스터
+   Protocol 모양에 맞지만, `register_transition("finance", ...)` 은 이 브랜치가
+   하지 않는다. `payables.purchase_id` 가 참조하는 `purchases` 부모 행을 재무
+   persist **전에** 누가 넣는지가 아직 안 서 있고, 물류 쪽 연결도 남아 있다.
+   재무만 먼저 등록하면 마스터가 *"아직 안 돈다"* (`NOT_APPLIED`) 대신 **승인마다
+   `FAILED`** 를 내게 된다 — 미구현이 장애로 둔갑한다.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -61,13 +61,15 @@ from app.finance.db import (
 __all__ = [
     "ApprovedCommitmentFacts",
     "FinancePayableWrite",
-    "FinanceTransition",
+    "FinanceTransitionAdapter",
+    "FinanceTransitionPlan",
     "build_finance_transition",
     "persist_finance_transition",
 ]
 
 
 class ArrivalLegFacts(Protocol):
+    seq: int
     purchase_date: date
 
 
@@ -107,7 +109,7 @@ class FinancePayableWrite:
 
 
 @dataclass(frozen=True)
-class FinanceTransition:
+class FinanceTransitionPlan:
     """승인 1건이 만드는 재무 변경 전부. **아직 아무것도 쓰지 않았다.**"""
 
     approval_id: str
@@ -130,21 +132,20 @@ class FinanceTransition:
 def build_finance_transition(
     commitment: ApprovedCommitmentFacts,
     *,
-    purchase_id: str,
     target_state_date: date,
-) -> FinanceTransition:
+    purchase_ids: Mapping[int, str],
+) -> FinanceTransitionPlan:
     """승인 약정을 재무 변경으로 옮긴다. **계산만 한다 — DB 를 바꾸지 않는다.**
 
-    :param purchase_id: 이 승인이 만든 매입 Header 의 ID. `payables.purchase_id` 는
-        `purchases` 를 참조하는 NOT NULL 컬럼이라 재무가 지어낼 수 없다 — 매입/마스터가
-        같은 트랜잭션에서 넣는 값을 받는다.
-    :param target_state_date: 승인 결과 상태가 설 날. **부르는 쪽이 준다.**
+    :param target_state_date: 승인 결과 상태가 설 날. **마스터가 준다.**
         마스터 계약상 `commitment.as_of + 1 달력일` 이고 토·일·공휴일도 그대로다 —
         재무는 계산하지 않고 승인일보다 뒤인지만 본다.
+    :param purchase_ids: 회차(`seq`) → `purchase_id` 매핑. **마스터가 만든다.**
+        `payables.purchase_id` 는 `purchases` 를 참조하는 NOT NULL 컬럼이라 재무가
+        지어낼 수 없다. 재무는 자기 회차의 값을 **`seq` 로 찾아 쓰기만** 한다 —
+        하나뿐이라고 첫 값을 집거나 정렬해서 고르지 않는다.
     :raises FinanceDataNotReady: 재무가 지급 시점이나 금액을 확정할 수 없을 때.
     """
-    if not purchase_id.strip():
-        raise ValueError("purchase_id must not be blank")
     if target_state_date <= commitment.as_of:
         # 재무 정합성 조건이지 일정 규칙이 아니다 — 승인일 이하로 두면 T0 행과 같은
         # 날에 두 상태가 서고, 그다음부터 어느 쪽이 그날의 사실인지 말할 수 없다.
@@ -163,7 +164,9 @@ def build_finance_transition(
     if amount <= 0:
         raise FinanceDataNotReady("commitment_total_amount")
 
-    purchase_date = _single_purchase_date(commitment)
+    leg = _single_leg(commitment)
+    purchase_id = _purchase_id_for_leg(purchase_ids, leg.seq)
+    purchase_date = leg.purchase_date
     # N5 는 **계약 지급일까지의 달력일수**다 (현재 0 = 매입 당일). 주말 보정은 여기서
     # 하지 않는다 — 원장은 계약일을 그대로 들고, 현금이 나가는 날은 현금흐름 조회가
     # `tools.effective_cash_date` 로 정한다.
@@ -178,7 +181,7 @@ def build_finance_transition(
         due_date=due_date,
         amount_krw=amount,
     )
-    return FinanceTransition(
+    return FinanceTransitionPlan(
         approval_id=commitment.approval_id,
         sim_run_id=sim_run_id,
         source_finance_state_id=str(state["finance_state_id"]),
@@ -191,23 +194,51 @@ def build_finance_transition(
     )
 
 
-def _single_purchase_date(commitment: ApprovedCommitmentFacts) -> date:
-    """지급의 기준이 되는 매입 실행일.
+def _single_leg(commitment: ApprovedCommitmentFacts) -> ArrivalLegFacts:
+    """채무를 세울 회차. **지금은 하나일 때만 세울 수 있다.**
 
-    🔴 **회차별 금액이 없으면 나누지 않는다.** `ApprovedCommitment` 는 회차마다
-       수량과 매입일을 싣지만 금액은 총액 하나뿐이다. 수량 비율로 쪼개면 회차마다
-       단가가 다른 분할 매입에서 조용히 틀린 채무가 생긴다 — 안 만드는 편이 낫다.
+    🔴 **회차가 둘 이상이면 매입일이 같아도 합치지 않는다.** 마스터 계약상 회차마다
+       `purchases` 한 행이 서므로 회차가 둘이면 매입 의무도 구조적으로 둘이다.
+       그런데 약정이 드는 금액은 `total_amount_krw` 하나뿐이라 어느 회차에 얼마가
+       걸리는지 말할 방법이 없다. 수량 비율로 쪼개면 회차마다 단가가 다른 분할
+       매입에서 조용히 틀린 채무가 생긴다 — 회차별 지급액을 실어 주는 계약이
+       설 때까지 여기는 닫혀 있다.
+
+    🔴 **회차가 없으면 채무도 없다.** 회차가 없으면 `purchase_ids` 도 비어 있고,
+       재무는 매입 ID 를 지어낼 수 없다. 승인일을 매입일로 대신 쓰던 예전 경로는
+       이제 없는 ID 로 채무를 세우게 되므로 막는다.
+
+    ★ **`commitment_purchase_ids` 와 합치지 않는다.** 여기서 없는 것은 매핑이 아니라
+      **일정 자체**다 — 매핑이 빈 것은 결과이지 원인이 아니고, 원인은 대개 매입이
+      N4 미결로 일정을 못 만든 것이다(`commitment.notes` 가 그 사유를 든다).
+      매핑 쪽을 가리키면 읽는 사람이 마스터를 먼저 뒤진다. 같은 코드 모양을
+      `capabilities/scenario.py` 가 이미 이렇게 나눠 둔다 — 구조가 없는 것은
+      `scenario_split_plan`, 그 안의 칸이 없는 것은 `scenario_split_plan_date`.
     """
-    dates = {leg.purchase_date for leg in commitment.arrival_schedule}
-    if not dates:
-        return commitment.as_of
-    if len(dates) > 1:
+    legs = tuple(commitment.arrival_schedule)
+    if not legs:
+        raise FinanceDataNotReady("commitment_arrival_schedule")
+    if len(legs) > 1:
         raise FinanceDataNotReady("commitment_payment_amounts")
-    return dates.pop()
+    return legs[0]
+
+
+def _purchase_id_for_leg(purchase_ids: Mapping[int, str], seq: int) -> str:
+    """이 회차의 매입 ID. **없으면 다른 값으로 대신하지 않는다.**
+
+    🔴 매핑에 값이 하나뿐이라고 그것을 집으면, 마스터가 다른 회차 ID 를 실어 준
+       날에 **엉뚱한 매입에 채무가 붙는다.** 에러 없이 원장만 어긋난다.
+    """
+    if seq not in purchase_ids:
+        raise FinanceDataNotReady("commitment_purchase_ids")
+    purchase_id = purchase_ids[seq]
+    if not isinstance(purchase_id, str) or not purchase_id.strip():
+        raise FinanceDataNotReady("commitment_purchase_ids")
+    return purchase_id
 
 
 def persist_finance_transition(
-    conn: Connection[dict[str, object]], transition: FinanceTransition
+    conn: Connection[dict[str, object]], transition: FinanceTransitionPlan
 ) -> dict[str, int]:
     """재무 소유 원장을 **부르는 쪽 연결로** 기록한다.
 
@@ -279,3 +310,36 @@ def persist_finance_transition(
         )
         written["finance_states"] += cursor.rowcount
     return written
+
+
+class FinanceTransitionAdapter:
+    """마스터 전이 Protocol 이 부르는 재무 쪽 얇은 입구.
+
+    ★ **여기에는 업무가 없다.** 계산은 `build_finance_transition`, 쓰기는
+      `persist_finance_transition` 이 한다. 이 클래스가 하는 일은 마스터가 쓰는
+      호출 모양에 이름을 맞춰 주는 것뿐이다 — 얇게 두어야 계약이 바뀔 때 고칠
+      자리가 한 곳으로 남는다.
+
+    ★ **마스터를 import 하지 않는다.** Protocol 은 구조적 타이핑이라 상속이 필요
+      없고, 재무가 닿아도 되는 마스터 표면은 공유 계약뿐이다.
+
+    🔴 연결을 열지 않고 commit·rollback 도 하지 않는다. 승인 트랜잭션은 마스터 것이다.
+    """
+
+    def build(
+        self,
+        commitment: ApprovedCommitmentFacts,
+        *,
+        target_state_date: date,
+        purchase_ids: Mapping[int, str],
+    ) -> FinanceTransitionPlan:
+        return build_finance_transition(
+            commitment,
+            target_state_date=target_state_date,
+            purchase_ids=purchase_ids,
+        )
+
+    def persist(
+        self, conn: Connection[dict[str, object]], row: FinanceTransitionPlan
+    ) -> dict[str, int]:
+        return persist_finance_transition(conn, row)
