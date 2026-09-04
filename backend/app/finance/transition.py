@@ -33,12 +33,9 @@ T0 상태 읽기 → 승인 약정 수신 → build_finance_transition (계산�
    🔴 그래서 `master.execution_day.next_execution_day` 를 쓰지 않는다. 재무는
      그 모듈을 import 하지도 않고 평일 계산을 하지도 않는다. 날짜는 마스터가 준다.
 
-🔴 **어댑터는 섰지만 아직 등록하지 않는다.** `FinanceTransitionAdapter` 는 마스터
-   Protocol 모양에 맞지만, `register_transition("finance", ...)` 은 이 브랜치가
-   하지 않는다. `payables.purchase_id` 가 참조하는 `purchases` 부모 행을 재무
-   persist **전에** 누가 넣는지가 아직 안 서 있고, 물류 쪽 연결도 남아 있다.
-   재무만 먼저 등록하면 마스터가 *"아직 안 돈다"* (`NOT_APPLIED`) 대신 **승인마다
-   `FAILED`** 를 내게 된다 — 미구현이 장애로 둔갑한다.
+★ **등록과 실행 순서는 마스터 소유다.** 이 모듈은 구조적 Protocol 구현만 제공한다.
+  최신 런타임은 `app.main`에서 어댑터를 등록하고 Master가 purchases 부모 행을 먼저
+  쓴 뒤 이 persist를 같은 트랜잭션으로 호출한다.
 """
 
 from __future__ import annotations
@@ -46,7 +43,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 from psycopg import Connection, sql
@@ -71,6 +68,7 @@ __all__ = [
 class ArrivalLegFacts(Protocol):
     seq: int
     purchase_date: date
+    amount_krw: float | None
 
 
 class ApprovedCommitmentFacts(Protocol):
@@ -164,22 +162,21 @@ def build_finance_transition(
     if amount <= 0:
         raise FinanceDataNotReady("commitment_total_amount")
 
-    leg = _single_leg(commitment)
-    purchase_id = _purchase_id_for_leg(purchase_ids, leg.seq)
-    purchase_date = leg.purchase_date
-    # N5 는 **계약 지급일까지의 달력일수**다 (현재 0 = 매입 당일). 주말 보정은 여기서
-    # 하지 않는다 — 원장은 계약일을 그대로 들고, 현금이 나가는 날은 현금흐름 조회가
-    # `tools.effective_cash_date` 로 정한다.
-    due_date = purchase_date + timedelta(days=int(policy.purchase_payment_days))
-
     sim_run_id = str(state["sim_run_id"])
-    payable = FinancePayableWrite(
-        payable_id=f"AP-{commitment.approval_id}",
-        sim_run_id=sim_run_id,
-        purchase_id=purchase_id,
-        issued_date=commitment.as_of,
-        due_date=due_date,
-        amount_krw=amount,
+    legs = _payment_legs(commitment, total_amount=amount)
+    payables = tuple(
+        FinancePayableWrite(
+            # 회차는 매입 의무의 축이다. 배열 위치가 아니라 Master가 실어 준 seq를 쓴다.
+            payable_id=f"AP-{commitment.approval_id}-S{leg.seq}",
+            sim_run_id=sim_run_id,
+            purchase_id=_purchase_id_for_leg(purchase_ids, leg.seq),
+            issued_date=commitment.as_of,
+            # N5 는 계약 지급일까지의 달력일수다 (현재 0 = 매입 당일). 주말 보정은
+            # 하지 않는다. 실제 현금일만 `tools.effective_cash_date`가 옮긴다.
+            due_date=leg.purchase_date + timedelta(days=int(policy.purchase_payment_days)),
+            amount_krw=leg.amount_krw,
+        )
+        for leg in legs
     )
     return FinanceTransitionPlan(
         approval_id=commitment.approval_id,
@@ -187,40 +184,56 @@ def build_finance_transition(
         source_finance_state_id=str(state["finance_state_id"]),
         next_finance_state_id=f"FIN-{commitment.approval_id}",
         next_state_date=target_state_date,
-        payables=(payable,),
+        payables=payables,
         next_unsettled_purchase_payables_krw=(
             Decimal(str(state["unsettled_purchase_payables_krw"])) + amount
         ),
     )
 
 
-def _single_leg(commitment: ApprovedCommitmentFacts) -> ArrivalLegFacts:
-    """채무를 세울 회차. **지금은 하나일 때만 세울 수 있다.**
+@dataclass(frozen=True)
+class _PaymentLeg:
+    seq: int
+    purchase_date: date
+    amount_krw: Decimal
 
-    🔴 **회차가 둘 이상이면 매입일이 같아도 합치지 않는다.** 마스터 계약상 회차마다
-       `purchases` 한 행이 서므로 회차가 둘이면 매입 의무도 구조적으로 둘이다.
-       그런데 약정이 드는 금액은 `total_amount_krw` 하나뿐이라 어느 회차에 얼마가
-       걸리는지 말할 방법이 없다. 수량 비율로 쪼개면 회차마다 단가가 다른 분할
-       매입에서 조용히 틀린 채무가 생긴다 — 회차별 지급액을 실어 주는 계약이
-       설 때까지 여기는 닫혀 있다.
 
-    🔴 **회차가 없으면 채무도 없다.** 회차가 없으면 `purchase_ids` 도 비어 있고,
-       재무는 매입 ID 를 지어낼 수 없다. 승인일을 매입일로 대신 쓰던 예전 경로는
-       이제 없는 ID 로 채무를 세우게 되므로 막는다.
+def _payment_legs(
+    commitment: ApprovedCommitmentFacts, *, total_amount: Decimal
+) -> tuple[_PaymentLeg, ...]:
+    """Master가 확정한 회차 금액을 원화 Decimal 채무로 좁힌다.
 
-    ★ **`commitment_purchase_ids` 와 합치지 않는다.** 여기서 없는 것은 매핑이 아니라
-      **일정 자체**다 — 매핑이 빈 것은 결과이지 원인이 아니고, 원인은 대개 매입이
-      N4 미결로 일정을 못 만든 것이다(`commitment.notes` 가 그 사유를 든다).
-      매핑 쪽을 가리키면 읽는 사람이 마스터를 먼저 뒤진다. 같은 코드 모양을
-      `capabilities/scenario.py` 가 이미 이렇게 나눠 둔다 — 구조가 없는 것은
-      `scenario_split_plan`, 그 안의 칸이 없는 것은 `scenario_split_plan_date`.
+    단일 회차의 금액이 아직 없는 오래된 입력은 약정 총액과 축이 하나뿐이므로 기존
+    의미를 보존한다. 회차가 둘 이상이면 모든 `amount_krw`가 정본으로 와야 한다.
+    일부/전부 누락, 음수·비유한 값, 총액 불일치를 재무가 비율 배분이나 0으로 고치지
+    않는다.
     """
     legs = tuple(commitment.arrival_schedule)
     if not legs:
         raise FinanceDataNotReady("commitment_arrival_schedule")
-    if len(legs) > 1:
+
+    raw_amounts = tuple(getattr(leg, "amount_krw", None) for leg in legs)
+    if len(legs) > 1 and any(value is None for value in raw_amounts):
         raise FinanceDataNotReady("commitment_payment_amounts")
-    return legs[0]
+
+    resolved: list[_PaymentLeg] = []
+    for leg, raw_amount in zip(legs, raw_amounts, strict=True):
+        if raw_amount is None:
+            leg_amount = total_amount
+        else:
+            try:
+                leg_amount = Decimal(str(raw_amount))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise FinanceDataNotReady("commitment_payment_amounts") from exc
+        # Master의 현재 금액 계약은 0과 missing을 구분한다. 0은 유효하지만 음수와
+        # NaN/Infinity는 원장 금액으로 쓸 수 없다.
+        if not leg_amount.is_finite() or leg_amount < 0:
+            raise FinanceDataNotReady("commitment_payment_amounts")
+        resolved.append(_PaymentLeg(leg.seq, leg.purchase_date, leg_amount))
+
+    if sum((leg.amount_krw for leg in resolved), Decimal(0)) != total_amount:
+        raise FinanceDataNotReady("commitment_payment_amounts")
+    return tuple(resolved)
 
 
 def _purchase_id_for_leg(purchase_ids: Mapping[int, str], seq: int) -> str:

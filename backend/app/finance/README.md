@@ -366,24 +366,21 @@ finance.persist(conn, plan)       # 받은 연결로만, commit 은 마스터가
 한다 — 하나뿐이라고 첫 값을 집거나 정렬해서 고르지 않는다. 없거나 빈 값이면
 `commitment_purchase_ids` 로 세운다.
 
-🔴 **어댑터는 섰지만 아직 등록하지 않는다.** `register_transition("finance", ...)` 은
-   이 브랜치가 하지 않는다. `payables.purchase_id` 가 참조하는 `purchases` 부모 행을
-   재무 persist **전에** 누가 넣는지가 아직 안 서 있고, 물류 연결도 남아 있다. 재무만
-   먼저 등록하면 마스터가 *"아직 안 돈다"* (`NOT_APPLIED`) 대신 **승인마다 `FAILED`**
-   를 내게 되고, 미구현이 장애로 둔갑한다.
+★ 어댑터 등록은 최신 런타임의 `app.main`에서 Master가 소유한다. Finance는 구조적
+Protocol 구현만 제공하고 등록 순서나 트랜잭션 경계를 가져오지 않는다.
 
-### 지금은 회차 하나만 채무가 된다
+### 회차별 정본 금액으로 N개 채무를 만든다
 
 ```text
-회차 1건   → 채무 1건 (purchase_ids[seq] · 총액 · 매입일 + N5)
-회차 2건+  → commitment_payment_amounts 로 세운다
-회차 0건   → commitment_arrival_schedule 로 세운다
+회차 1건   → 채무 1건 (금액 누락 시 축이 하나이므로 약정 총액과 기존 의미 유지)
+회차 N건   → 각 ArrivalLeg.amount_krw · purchase_ids[seq] 로 채무 N건
+금액 일부/전부 누락 또는 합계 불일치 → commitment_payment_amounts
+회차 0건   → commitment_arrival_schedule
 ```
 
-#256 이 **ID 전달 문제**를 풀었지만 **금액 배분 문제**는 아직 열려 있다. 약정이 드는
-금액은 `total_amount_krw` 하나뿐이고 `ArrivalLeg` 에는 금액 칸이 없다. 매입일이 같아도
-합치지 않는다 — 회차가 둘이면 매입 의무도 구조적으로 둘이라, 하나로 접는 순간 원장이
-매입과 어긋난다. 회차별 지급액 계약이 서면 그때 N건으로 연다.
+Master가 Purchase `split_plan[].amount_krw`를 `ArrivalLeg.amount_krw`로 운반한다.
+Finance는 균등·수량비례 배분을 하지 않고 정본 금액을 그대로 쓴다. 매입일이 같아도
+회차가 둘이면 매입 의무도 둘이며 Payable ID는 `AP-{approval_id}-S{seq}`다.
 
 ### 실행일과 장부일은 다른 축이다
 
