@@ -164,6 +164,7 @@ def _commitment_parts(
             scenario=scenario,
             inbound_lead_days=_lead_days_of(response_payload),
             decision_seq=decision_seq,
+            purchase_payment_days=_payment_days_of(response_payload),
         )
     except CommitmentNotBuildable as exc:
         return CommitmentOut(buildable=False, reason=str(exc)), None
@@ -343,3 +344,14 @@ def _lead_days_of(response_payload: Mapping[str, Any]) -> Any:
     """N4. **물류가 준 값을 그대로 읽는다** — 없으면 없는 대로 넘긴다."""
     inventory = (response_payload.get("constraints") or {}).get("inventory") or {}
     return inventory.get("inbound_lead_days")
+
+
+def _payment_days_of(response_payload: Mapping[str, Any]) -> Any:
+    """N5. **재무가 준 값을 그대로 읽는다** — 없으면 없는 대로 넘긴다.
+
+    ★ `_lead_days_of`(N4)와 **같은 모양이다.** 부서가 봉투로 값을 주고 마스터는
+      옮기기만 한다 — 마스터가 재무 정책 표를 다시 읽으면 같은 사실의 주인이 둘이 된다
+      (`finance/capabilities/procurement.py` 가 `purchase_payment_days` 를 싣는다).
+    """
+    finance = (response_payload.get("constraints") or {}).get("finance") or {}
+    return finance.get("purchase_payment_days")

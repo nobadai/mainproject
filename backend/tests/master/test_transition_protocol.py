@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
@@ -54,6 +54,10 @@ def _commitment(
                 arrival_date=as_of + timedelta(days=2),
                 purchase_date=as_of,
                 seq=1,
+                # ★ 지급일이 없으면 원장을 못 써 전이가 `NOT_APPLIED` 로 돌아선다 —
+                #   그 판정은 `test_purchase_ledger.py` 가 잰다. 여기서는 규약 모양을
+                #   재는 것이 목적이라 **쓸 수 있는 약정**을 기본으로 둔다.
+                payment_due_date=as_of,
             ),
         )
     return ApprovedCommitment(
@@ -79,6 +83,7 @@ def _두회차(as_of: date = FRIDAY) -> ApprovedCommitment:
                 arrival_date=as_of + timedelta(days=2),
                 purchase_date=as_of,
                 seq=1,
+                payment_due_date=as_of,
             ),
             ArrivalLeg(
                 item="배추",
@@ -86,9 +91,33 @@ def _두회차(as_of: date = FRIDAY) -> ApprovedCommitment:
                 arrival_date=as_of + timedelta(days=5),
                 purchase_date=as_of + timedelta(days=3),
                 seq=2,
+                payment_due_date=as_of + timedelta(days=3),
             ),
         ),
     )
+
+
+class 가짜커서:
+    """`items` 조회만 답하고 나머지 SQL 은 센다. **진짜 DB 를 부르지 않는다.**"""
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self.rowcount = 1
+        self._row: dict[str, str] | None = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, query: Any, params: Any = None) -> None:
+        text = str(query)
+        self.executed.append(text)
+        self._row = {"item_id": "ITEM-BAECHU"} if "FROM" in text and "items" in text else None
+
+    def fetchone(self) -> dict[str, str] | None:
+        return self._row
 
 
 class 가짜커넥션:
@@ -96,6 +125,12 @@ class 가짜커넥션:
         self.commits = 0
         self.rollbacks = 0
         self.closed = 0
+        self.cursors: list[가짜커서] = []
+
+    def cursor(self) -> 가짜커서:
+        cur = 가짜커서()
+        self.cursors.append(cur)
+        return cur
 
     def commit(self) -> None:
         self.commits += 1
@@ -296,15 +331,21 @@ def test_purchase_item_id_형식() -> None:
 # ── d. 회차마다 purchases 한 행 ─────────────────────────────────────────
 
 
-def test_회차가_둘이면_purchase_ids_도_둘이다() -> None:
+def test_회차가_둘이면_purchase_id_도_둘이다() -> None:
     """★ 회차마다 `purchases` 한 행이다. `purchases.purchase_date` 가 header 에
     하나뿐이라 매입일이 다른 회차를 한 header 에 담을 수 없다.
+
+    ⚠️ 전에는 `apply_approval` 을 돌려 재무가 받은 매핑으로 쟀다. 이제 회차가 둘이면
+      **매입 원장을 쓸 수 없어 전이가 앞에서 돌아서므로**(`test_purchase_ledger.py`)
+      재무를 부르지 않는다. 재는 사실은 그대로고, 재는 자리만 ID 함수로 옮겼다.
     """
-    finance, _ = _등록한다()
+    commitment = _두회차()
 
-    transition.apply_approval(_두회차(), connect=lambda: 가짜커넥션())
+    purchase_ids = {
+        leg.seq: transition.purchase_id_for(commitment, leg.seq)
+        for leg in commitment.arrival_schedule
+    }
 
-    _, purchase_ids = finance.calls[0]
     assert set(purchase_ids) == {1, 2}, "seq 로 갈려 있어야 한다"
     assert purchase_ids[1] == "PUR-REQ-7-D2-S1"
     assert purchase_ids[2] == "PUR-REQ-7-D2-S2"

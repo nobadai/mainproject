@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from uuid import uuid4
 
 import pytest
@@ -56,19 +56,56 @@ def _commitment() -> ApprovedCommitment:
                 arrival_date=date(2026, 1, 2),
                 purchase_date=AS_OF,
                 seq=1,
+                # ★ 지급일이 있어야 매입 원장을 쓸 수 있다 — 없으면 전이가 앞에서
+                #   `NOT_APPLIED` 로 돌아서고 이 파일이 재는 순서에 닿지 못한다.
+                payment_due_date=AS_OF,
             ),
         ),
         inbound_lead_days=2.0,
     )
 
 
+class 가짜커서:
+    """`items` 조회만 답하고 나머지 SQL 은 센다. **진짜 DB 를 부르지 않는다.**"""
+
+    def __init__(self, log: list[tuple[str, Any]] | None = None) -> None:
+        self.executed: list[str] = []
+        self.rowcount = 1
+        self._row: dict[str, str] | None = None
+        self._log = log
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, query: Any, params: Any = None) -> None:
+        text = str(query)
+        self.executed.append(text)
+        if "INSERT INTO" in text and self._log is not None:
+            표 = "purchase_items" if "purchase_items" in text else "purchases"
+            self._log.append((f"ledger.{표}", None))
+        self._row = {"item_id": "ITEM-BAECHU"} if "FROM" in text and "items" in text else None
+
+    def fetchone(self) -> dict[str, str] | None:
+        return self._row
+
+
 class 가짜커넥션:
     """세는 것만 한다 — commit · rollback · close 가 **몇 번** 불렸나."""
 
-    def __init__(self) -> None:
+    def __init__(self, log: list[tuple[str, Any]] | None = None) -> None:
         self.commits = 0
         self.rollbacks = 0
         self.closed = 0
+        self.cursors: list[가짜커서] = []
+        self._log = log
+
+    def cursor(self) -> 가짜커서:
+        cur = 가짜커서(self._log)
+        self.cursors.append(cur)
+        return cur
 
     def commit(self) -> None:
         self.commits += 1
@@ -310,7 +347,11 @@ def _response(**over: Any) -> dict[str, Any]:
             }
         ],
         "judgment": {"meta": {"item": "배추"}},
-        "constraints": {"inventory": {"inbound_lead_days": 2.0}},
+        "constraints": {
+            "inventory": {"inbound_lead_days": 2.0},
+            # ★ N5 다. 재무가 봉투로 준다 — 없으면 지급일이 안 서고 원장을 못 쓴다.
+            "finance": {"purchase_payment_days": 0},
+        },
     }
     base.update(over)
     return base
