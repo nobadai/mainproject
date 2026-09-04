@@ -31,6 +31,24 @@
    물건이 실제로 도착해 로트가 되는 순간을 무엇으로 볼지(도착일 경과 · 검수 완료 ·
    `purchase_items` 행 생성)는 **물류 판단이고 아직 미결이다.** 여기서 정하지 않는다 —
    지금 임의로 정하면 그 규칙이 근거 없이 굳는다.
+
+⚠️ **`confirmed_inbound` 를 같이 쓰는 것은 임시 조치다 (2026-09-04).**
+
+   ```text
+   ① 왜 임시인가   승인과 발주 확정은 다른 사실이다. 지금은 발주 확정 단계에
+                    코드가 없어(현실 순서에서 한 칸이 비었다) 승인을 그것으로
+                    대신 본다
+   ② 언제 걷나     물류가 발주 확정 단계를 만들면 이 병합을 걷어낸다 —
+                    `persist_inventory` 에서 `confirmed_inbound_*` 두 칸만 빼면 된다
+   ③ 무엇을 지켰나 물류가 경고한 *"승인 반영이 조용히 남의 칸을 덮는다"* 를
+                    **덮어쓰기가 아니라 병합**으로 피했다
+   ```
+
+   ★ 그 한 칸이 비어 있어서 관통 Day2 가 섰다. B-1(`tools.py`
+     `find_in_transit_schedule_gap`)이 `in_transit` 의 `inbound_id` 를
+     `confirmed_inbound_schedule` 에서 찾는데, 그 칸에 쓰는 운영 코드가 아무 데도
+     없어 `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 가 나온다. **B-1 규칙은 맞다** —
+     고쳐야 할 쪽은 값을 안 채우는 이쪽이다.
 """
 
 from __future__ import annotations
@@ -45,7 +63,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
-from app.logistics.schemas import InTransitItem
+from app.logistics.schemas import InTransitItem, ScheduledQuantity
 from app.master.commitment import ApprovedCommitment
 
 __all__ = [
@@ -105,6 +123,83 @@ def build_next_inventory(commitment: ApprovedCommitment) -> list[InTransitItem]:
     return rows
 
 
+def _confirmed_inbound_json(found: Any) -> Sequence[Any] | None:
+    """`fetchone()` 결과에서 `confirmed_inbound_json` 값을 꺼낸다.
+
+    ★ row_factory 가 무엇이냐에 따라 튜플로도 매핑으로도 온다. 커넥션을 만드는 곳은
+      배선 자리(`app/main.py`)이고 이 모듈은 받아 쓸 뿐이라, 여기서 한쪽 모양을
+      강요하지 않는다.
+    """
+    if isinstance(found, dict):
+        return found.get("confirmed_inbound_json")
+    return found[0]
+
+
+def _confirmed_inbound_row(item: InTransitItem) -> dict[str, Any]:
+    """`InTransitItem` 하나를 `confirmed_inbound_schedule` 의 한 행으로 옮긴다.
+
+    🔴 **B-1 이 세 값을 `!=` 로 대조한다** (`tools.py` `find_in_transit_schedule_gap`).
+
+    ```text
+    date         ← expected_arrival_date   🔴 필드 이름이 다르다
+    quantity_kg  ← 그대로
+    item         ← 그대로
+    inbound_id   ← 그대로 (대조의 열쇠)
+    ```
+
+    ★ **직렬화 방식을 `in_transit_json` 과 같게 둔다** (`model_dump(mode="json")`).
+      한쪽만 다른 방식으로 뭉개면 `quantity_kg` 가 왕복 뒤 다른 `Decimal` 로 돌아와
+      값은 같은데 `IN_TRANSIT_CONFIRMED_SCHEDULE_MISMATCH` 가 난다.
+    """
+    return ScheduledQuantity(
+        inbound_id=item.inbound_id,
+        item=item.item,
+        quantity_kg=item.quantity_kg,
+        date=item.expected_arrival_date,
+    ).model_dump(mode="json")
+
+
+def _merge_confirmed_inbound(
+    existing: Sequence[Any] | None,
+    rows: Sequence[InTransitItem],
+) -> tuple[list[Any] | None, str]:
+    """기존 `confirmed_inbound` 목록에 이번 승인분을 **더한다. 덮지 않는다.**
+
+    🔴 **덮으면 이전에 확정된 입고가 사라진다.** 그날 이미 다른 승인이 반영돼 있으면
+       그 건이 에러 없이 없어지고, 사라진 뒤에는 없었던 것과 구별되지 않는다.
+
+    ★ **같은 `inbound_id` 가 이미 있으면 더하지 않는다 — 갈아 끼우지도 않는다.**
+      같은 승인을 두 번 반영해도 목록이 안 부푸는 자리가 여기다. 중복이 생기면 B-1 이
+      `CONFIRMED_INBOUND_ID_DUPLICATED` 로 잡지만, **여기서 안 만드는 것이 먼저다.**
+      갈아 끼우지 않는 이유는 어느 쪽이 진짜인지 이 자리에서 고를 근거가 없어서다.
+
+    ⚠️ **아직 모른다(`None`)를 아는 척으로 바꾸지 않는다.** 더할 것이 없는데 기존이
+       `None` 이면 `None` 그대로 둔다 — `[]` 로 적으면 *"확인했고 0 건"* 이라는, 우리가
+       하지 않은 확인이 장부에 남는다.
+
+    :returns: `(쓸 목록, 그에 맞는 status)`.
+    """
+    merged = list(existing) if existing is not None else []
+    seen = {
+        row.get("inbound_id")
+        for row in merged
+        if isinstance(row, dict) and row.get("inbound_id") is not None
+    }
+    additions: list[dict[str, Any]] = []
+    for item in rows:
+        if item.inbound_id is not None and item.inbound_id in seen:
+            continue
+        if item.inbound_id is not None:
+            seen.add(item.inbound_id)
+        additions.append(_confirmed_inbound_row(item))
+
+    if existing is None and not additions:
+        return None, "UNRESOLVED"
+    merged.extend(additions)
+    # ★ `in_transit_status` 를 정하는 식과 같다 — 두 칸이 같은 뜻의 상태값을 쓴다.
+    return merged, ("CONFIRMED" if merged else "CONFIRMED_ZERO")
+
+
 def persist_inventory(
     conn: Any,
     *,
@@ -113,7 +208,7 @@ def persist_inventory(
     rows: Sequence[InTransitItem],
     source_ref: str,
 ) -> None:
-    """계산된 입고 예정을 runtime fixture 의 `in_transit` 칸에 쓴다.
+    """계산된 입고 예정을 runtime fixture 의 `in_transit` · `confirmed_inbound` 에 쓴다.
 
     🔴 **commit 하지 않는다.** 커밋은 재무 write 와 함께 마스터가 한 번 한다.
        여기서 커밋하면 물류만 먼저 확정되고, 뒤이어 재무가 터졌을 때 **현금은 안
@@ -122,11 +217,22 @@ def persist_inventory(
     🔴 **자기 커넥션을 새로 열지 않는다.** 여기서 커넥션을 만들면 마스터가 쥔
        트랜잭션 밖에서 쓰게 되어 위와 같은 반쪽 상태가 다시 생긴다. 인자로 받은
        `conn` 만 쓴다 — 이 모듈이 `repository.py` 의 `fetch_all` 을 안 쓰는 이유다.
+       기존 목록을 읽는 SELECT 도 같은 커넥션 · 같은 트랜잭션에서 한다.
 
-    ★ 건드리는 칸은 넷뿐이다 — `in_transit_json` · `in_transit_status` · `source_ref` ·
-      `updated_at`. `confirmed_inbound_*` · `confirmed_outbound_*` · `evidence_grade` ·
-      `approved_by` 는 **다른 사실이고 다른 근거를 갖는다.** 같은 UPDATE 에 얹으면
-      승인 반영이 조용히 남의 칸을 덮는다.
+    ⚠️ **`confirmed_inbound_*` 두 칸은 임시로 얹은 것이다** (모듈 docstring 참조).
+       승인과 발주 확정은 다른 사실이고, 지금은 발주 확정 단계에 코드가 없어 승인을
+       그것으로 대신 본다. **물류가 그 단계를 만들면 이 두 칸을 여기서 걷어낸다.**
+
+    ★ 건드리는 칸은 여섯이다.
+
+      ```text
+      in_transit_json · in_transit_status                덮어쓴다 (승인이 유일한 주인)
+      confirmed_inbound_json · confirmed_inbound_status   🔴 병합한다 (남의 칸을 겸한다)
+      source_ref · updated_at                             덮어쓴다
+      ```
+
+      `confirmed_outbound_*` · `evidence_grade` · `approved_by` · `lot_priority_*` ·
+      `zone_capacity_*` 는 **다른 사실이고 다른 근거를 갖는다.** 손대지 않는다.
 
     :raises LogisticsFixtureMissing: 그날의 fixture 행이 없을 때. **만들지 않는다.**
     """
@@ -135,33 +241,67 @@ def persist_inventory(
     status = "CONFIRMED" if rows else "CONFIRMED_ZERO"
     payload = [row.model_dump(mode="json") for row in rows]
 
+    schema = sql.Identifier(get_db_schema())
+    # ★ 세 조건이 UPDATE 의 WHERE 와 **같아야 한다.** 다르면 읽은 행과 쓴 행이
+    #   갈려 남의 목록에 이번 승인분을 얹게 된다.
+    select_query = sql.SQL(
+        """
+        SELECT confirmed_inbound_json
+        FROM {}.logistics_runtime_fixture
+        WHERE sim_run_id = %s
+          AND as_of = %s
+          AND usage_scope = %s
+        """
+    ).format(schema)
     query = sql.SQL(
         """
         UPDATE {}.logistics_runtime_fixture
         SET in_transit_json = %s,
             in_transit_status = %s,
+            confirmed_inbound_json = %s,
+            confirmed_inbound_status = %s,
             source_ref = %s,
             updated_at = NOW()
         WHERE sim_run_id = %s
           AND as_of = %s
           AND usage_scope = %s
         """
-    ).format(sql.Identifier(get_db_schema()))
+    ).format(schema)
+
+    missing = LogisticsFixtureMissing(
+        # ★ 무엇이 없는지 보이게 적는다. "행이 없다" 만으로는 sim_run_id 가 틀린
+        #   것인지 그날 fixture 가 아직 안 만들어진 것인지 가릴 수 없다.
+        "갱신할 물류 runtime fixture 행이 없다"
+        f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={USAGE_SCOPE})."
+        " 새 행을 만들지 않는다 — evidence_grade · approved_by · 나머지 두"
+        " status 는 물류 판단이다."
+    )
 
     with conn.cursor() as cursor:
+        cursor.execute(select_query, (sim_run_id, as_of, USAGE_SCOPE))
+        found = cursor.fetchone()
+        if found is None:
+            # ★ 읽을 행이 없으면 병합할 것도 없다 — UPDATE 를 보내기 전에 멈춘다.
+            raise missing
+        confirmed_json, confirmed_status = _merge_confirmed_inbound(
+            _confirmed_inbound_json(found), rows
+        )
+
         cursor.execute(
             query,
-            (Jsonb(payload), status, source_ref, sim_run_id, as_of, USAGE_SCOPE),
+            (
+                Jsonb(payload),
+                status,
+                None if confirmed_json is None else Jsonb(confirmed_json),
+                confirmed_status,
+                source_ref,
+                sim_run_id,
+                as_of,
+                USAGE_SCOPE,
+            ),
         )
         if cursor.rowcount != 1:
-            # ★ 무엇이 없는지 보이게 적는다. "행이 없다" 만으로는 sim_run_id 가 틀린
-            #   것인지 그날 fixture 가 아직 안 만들어진 것인지 가릴 수 없다.
-            raise LogisticsFixtureMissing(
-                "갱신할 물류 runtime fixture 행이 없다"
-                f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={USAGE_SCOPE})."
-                " 새 행을 만들지 않는다 — evidence_grade · approved_by · 나머지 두"
-                " status 는 물류 판단이다."
-            )
+            raise missing
 
 
 # ── 마스터 전이 Protocol 어댑터 ─────────────────────────────────────────

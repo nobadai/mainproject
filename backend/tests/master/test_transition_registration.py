@@ -55,12 +55,19 @@ def _commitment() -> ApprovedCommitment:
 
 
 class 가짜커서:
-    """`items` 조회만 답하고 나머지 SQL 은 **파라미터째로 기록한다.**"""
+    """읽기 둘만 답하고 나머지 SQL 은 **파라미터째로 기록한다.**
+
+    ★ **물류 fixture 읽기가 둘째다.** `logistics/transition.py` 의 `persist_inventory`
+      는 `confirmed_inbound` 를 덮지 않고 **더하려고** 기존 목록을 먼저 읽는다 —
+      여기서 빈손을 주면 그 행이 없다는 뜻이 되어 전이가 `FAILED` 로 선다.
+      **그 병합은 임시 조치다** (물류 모듈 docstring 참조) — 걷어낼 때 이 가지도
+      같이 걷는다.
+    """
 
     def __init__(self, executed: list[tuple[str, Any]]) -> None:
         self.rowcount = 1
         self._executed = executed
-        self._row: dict[str, str] | None = None
+        self._row: dict[str, Any] | None = None
 
     def __enter__(self) -> Self:
         return self
@@ -71,9 +78,15 @@ class 가짜커서:
     def execute(self, query: Any, params: Any = None) -> None:
         text = str(query)
         self._executed.append((text, params))
-        self._row = {"item_id": "ITEM-BAECHU"} if "FROM" in text and "items" in text else None
+        if "confirmed_inbound_json" in text and "SELECT" in text:
+            # ★ 이미 확정된 입고가 없는 그날 행이다 — 확인했고 0 건.
+            self._row = {"confirmed_inbound_json": []}
+        elif "FROM" in text and "items" in text:
+            self._row = {"item_id": "ITEM-BAECHU"}
+        else:
+            self._row = None
 
-    def fetchone(self) -> dict[str, str] | None:
+    def fetchone(self) -> dict[str, Any] | None:
         return self._row
 
 
@@ -193,7 +206,10 @@ def test_물류_write_가_상태가_설_날의_행을_고른다(재무_읽기를
     transition.apply_approval(_commitment(), connect=lambda: conn)
 
     물류 = [params for text, params in conn.executed if "logistics_runtime_fixture" in text]
-    assert len(물류) == 1
-    assert BURN_IN_SIM_RUN_ID in 물류[0]
-    assert TARGET_STATE_DATE in 물류[0]
-    assert AS_OF not in 물류[0], "승인일 행에 썼다 — 재무 상태와 하루 어긋난다"
+    # ★ 읽기 하나 · 쓰기 하나다 — 물류가 `confirmed_inbound` 를 덮지 않고 더하려고
+    #   기존 목록을 먼저 읽는다. **둘이 같은 날 행을 가리켜야 한다.**
+    assert len(물류) == 2
+    for params in 물류:
+        assert BURN_IN_SIM_RUN_ID in params
+        assert TARGET_STATE_DATE in params
+        assert AS_OF not in params, "승인일 행을 짚었다 — 재무 상태와 하루 어긋난다"
