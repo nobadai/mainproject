@@ -26,8 +26,14 @@ from app.purchase_agent.nodes.package_scenarios import (
     package_scenarios,
     split_infeasible_reason,
     split_offsets,
+    with_round_amounts,
 )
-from app.purchase_agent.nodes.self_check import check_quadruple_match, check_split_dates
+from app.purchase_agent.nodes.self_check import (
+    check_payment_schedule,
+    check_quadruple_match,
+    check_split_amounts,
+    check_split_dates,
+)
 from app.purchase_agent.nodes.split_plan import (
     choose_rounds,
     equal_ratios,
@@ -675,3 +681,199 @@ def test_arrival_dates_match_the_helper_used_for_cap_checks() -> None:
     rounds = materialize_split(AS_OF, 100, [{"ratio": 0.5}, {"ratio": 0.5}], 12, lead_days=2)
 
     assert [line["expected_arrival_date"] for line in rounds] == arrival_dates(AS_OF, 12, 2, 2)
+
+
+# ── 회차 금액 (#265 · 마스터가 원장에 쓴다) ────────────────────────────────
+#
+# 마스터 `commitment.py:_legs` 가 `split_plan[].amount_krw` 를 읽어
+# `ArrivalLeg.amount_krw` 로 옮기고, 그것이 `purchase_items.line_amount_krw` 가 된다.
+# 그 값이 총액과 어긋나면 **재무 cap 검증을 통과한 안이 cap 을 넘는 원장을 만든다.**
+
+
+ALL_ITEMS = ("배추", "무", "피마늘", "양파")
+
+
+@pytest.mark.parametrize("as_of", ANCHORS)
+@pytest.mark.parametrize("item", ALL_ITEMS)
+def test_every_round_carries_an_amount(item: str, as_of: date) -> None:
+    """🔴 **전 회차에 실린다** — 일괄이든 분할이든, 전 품목·전 앵커에서.
+
+    마스터 `_legs` 가 `amount_filled == len(amounts)` 일 때만 금액을 나른다.
+    한 회차라도 비면 그 안은 금액 변 검증이 **통째로 건너뛰어진다** — 조용히.
+    """
+    proposal = run_purchase_agent(item, as_of)
+    assert proposal["scenarios"], f"{item}/{as_of} 에 안이 없어 검사가 공허해진다"
+    for scenario in proposal["scenarios"]:
+        loaded = [line.get("amount_krw") for line in scenario["split_plan"]]
+        assert all(a is not None for a in loaded), f"{scenario['label']}: 빈 회차 {loaded}"
+
+
+@pytest.mark.parametrize("as_of", ANCHORS)
+@pytest.mark.parametrize("item", ALL_ITEMS)
+def test_round_amounts_sum_to_the_scenario_total(item: str, as_of: date) -> None:
+    """`Σ split_plan[].amount_krw == total_amount_krw` — 금액의 회차 변."""
+    for scenario in run_purchase_agent(item, as_of)["scenarios"]:
+        total = sum(line["amount_krw"] for line in scenario["split_plan"])
+        assert total == scenario["total_amount_krw"], scenario["label"]
+
+
+def test_a_single_round_carries_the_whole_amount() -> None:
+    """일괄(1회차)이면 회차 금액 == 총액.
+
+    ⚠️ **중복이지만 일부러 싣는다** — 근거는 `with_round_amounts` docstring 에 있다.
+    빼면 마스터의 *"전 회차 실림"* 이 성립하지 않아 금액이 통째로 안 실린다.
+    """
+    scenario = next(
+        s
+        for s in run_purchase_agent(ITEM, FALLING)["scenarios"]
+        if len(s["split_plan"]) == 1
+    )
+    assert scenario["split_plan"][0]["amount_krw"] == scenario["total_amount_krw"]
+
+
+def test_a_split_scenario_splits_the_amount_too() -> None:
+    """분할이면 회차마다 다른 금액이고 합은 총액이다. **총액을 회차 수로 나눈 값이 아니다.**"""
+    scenario = next(
+        s
+        for s in run_purchase_agent(ITEM, RISING)["scenarios"]
+        if len(s["split_plan"]) > 1
+    )
+    amounts = [line["amount_krw"] for line in scenario["split_plan"]]
+
+    assert sum(amounts) == scenario["total_amount_krw"]
+    assert len(set(amounts)) > 1, (
+        "회차 금액이 전부 같다 — 총액을 회차 수로 나눈 것과 구분되지 않는다"
+    )
+
+
+def test_the_payment_schedule_reads_the_round_amounts() -> None:
+    """🔴 `payment_schedule[i].amount_krw == split_plan[i].amount_krw`.
+
+    같은 숫자가 두 필드에 산다. 갈라지면 **마스터는 원장에, 재무는 Cashflow 에
+    다른 금액을 쓴다.**
+    """
+    rounds = with_round_amounts(
+        materialize_split(AS_OF, 1000, [{"ratio": 0.5}, {"ratio": 0.5}], 12),
+        [
+            {"market": "가락", "grade": "중", "qty_kg": 600, "grade_unit_price": 1300},
+            {"market": "가락", "grade": "상", "qty_kg": 400, "grade_unit_price": 1650},
+        ],
+    )
+    scenario = {
+        "label": "공격",
+        "total_qty_kg": 1000,
+        "total_amount_krw": sum(line["amount_krw"] for line in rounds),
+        "max_price": 1800,
+        "split_plan": rounds,
+        "payment_schedule": [
+            {
+                "seq": line["seq"],
+                "purchase_date": line["date"],
+                "payment_date": line["date"],
+                "qty_kg": line["qty_kg"],
+                "amount_krw": line["amount_krw"],
+                "amount_max_krw": line["qty_kg"] * 1800,
+                "basis": "as_of_unit_price",
+            }
+            for line in rounds
+        ],
+    }
+    state = {"purchase_payment_days": 0}
+
+    assert check_split_amounts(scenario) is None
+    assert check_payment_schedule(scenario, state) is None
+
+
+# ── 변이 — 검사가 실제로 무는가 (규칙 8) ──────────────────────────────────
+
+
+def test_a_shifted_round_amount_is_caught() -> None:
+    """🔴 한 회차 금액을 흔들면 ⑦이 운다.
+
+    합만 보면 못 잡는 이동이 아니라 **합 자체가 깨지는** 변이다 — 마스터가 원장에
+    쓰는 값이 총액과 어긋나는 그 상태다.
+    """
+    scenario = {
+        "total_amount_krw": 1_000_000,
+        "split_plan": [
+            {"seq": 1, "date": AS_OF, "qty_kg": 500, "amount_krw": 400_000},
+            {"seq": 2, "date": "2026-01-06", "qty_kg": 500, "amount_krw": 600_000},
+        ],
+    }
+    assert check_split_amounts(scenario) is None
+
+    shifted = deepcopy(scenario)
+    shifted["split_plan"][0]["amount_krw"] += 1
+    reason = check_split_amounts(shifted)
+    assert reason is not None and "회차 금액 합" in reason
+
+
+def test_an_empty_round_amount_is_caught_by_the_node() -> None:
+    """🔴 ⑦ 은 ``None`` 을 **위반으로 본다** — 스키마와 규칙이 다르다.
+
+    스키마는 재무·물류가 ``PurchaseAgentOutput`` 으로 쓰는 공유 계약이라 *"아무 회차에도
+    없음"* 을 허용한다. 이 노드는 **우리 산출물만** 보므로 그 관용이 필요 없다 —
+    ⑥이 ``with_round_amounts`` 를 지났으면 전 회차에 값이 있어야 한다.
+
+    ⚠️ 이 판이 없으면 ⑦의 빈 회차 검사를 지우는 변이가 아무도 안 잡는다 —
+      우리 산출물이 늘 채워져 있어 그 경로를 지나는 검사가 없기 때문이다
+      (2026-09-04 변이 실측 · 규칙 8).
+    """
+    scenario = {
+        "total_amount_krw": 1_000_000,
+        "split_plan": [
+            {"seq": 1, "date": AS_OF, "qty_kg": 500, "amount_krw": 400_000},
+            {"seq": 2, "date": "2026-01-06", "qty_kg": 500, "amount_krw": 600_000},
+        ],
+    }
+    assert check_split_amounts(scenario) is None
+
+    blank = deepcopy(scenario)
+    blank["split_plan"][1]["amount_krw"] = None
+    reason = check_split_amounts(blank)
+    assert reason is not None and "회차 금액이 비었다" in reason and "seq 2" in reason
+
+    missing_key = deepcopy(scenario)
+    del missing_key["split_plan"][0]["amount_krw"]
+    assert check_split_amounts(missing_key) is not None, "키가 없는 것도 같은 위반이다"
+
+
+def test_a_round_amount_that_diverges_from_the_payment_schedule_is_caught() -> None:
+    """🔴 회차 금액과 지급 계획이 갈라지면 ⑦이 운다.
+
+    합은 그대로 두고 **한 행만** 어긋내는 변이다 — `check_split_amounts` 도
+    `Σ qty` 검사도 통과한다. 이 대조가 없으면 아무도 안 잡는다.
+    """
+    rounds = [
+        {"seq": 1, "date": AS_OF, "qty_kg": 500, "amount_krw": 400_000},
+        {"seq": 2, "date": "2026-01-06", "qty_kg": 500, "amount_krw": 600_000},
+    ]
+    scenario = {
+        "label": "공격",
+        "total_qty_kg": 1000,
+        "total_amount_krw": 1_000_000,
+        "max_price": 1800,
+        "split_plan": rounds,
+        "payment_schedule": [
+            {
+                "seq": line["seq"],
+                "purchase_date": line["date"],
+                "payment_date": line["date"],
+                "qty_kg": line["qty_kg"],
+                "amount_krw": line["amount_krw"],
+                "amount_max_krw": line["qty_kg"] * 1800,
+                "basis": "as_of_unit_price",
+            }
+            for line in rounds
+        ],
+    }
+    state = {"purchase_payment_days": 0}
+    assert check_payment_schedule(scenario, state) is None
+
+    diverged = deepcopy(scenario)
+    diverged["payment_schedule"][0]["amount_krw"] = 399_999
+    diverged["payment_schedule"][1]["amount_krw"] = 600_001  # 합은 그대로 둔다
+
+    assert check_split_amounts(diverged) is None, "합은 안 깨졌다 — 그래서 이 대조가 필요하다"
+    reason = check_payment_schedule(diverged, state)
+    assert reason is not None and "금액이 분할과 다르다" in reason

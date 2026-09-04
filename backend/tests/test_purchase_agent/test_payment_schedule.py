@@ -15,7 +15,10 @@ from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.graph import run_purchase_agent
-from app.purchase_agent.nodes.package_scenarios import build_payment_schedule
+from app.purchase_agent.nodes.package_scenarios import (
+    build_payment_schedule,
+    with_round_amounts,
+)
 from app.purchase_agent.nodes.self_check import check_payment_schedule
 
 SPLIT_DAY = date(2026, 8, 21)  # 공격안이 2회 분할되는 앵커
@@ -406,13 +409,16 @@ def test_builder_returns_none_for_three_reasons() -> None:
     N5 미결은 *"계산할 수 없다"*, 회차 1은 *"실을 것이 없다"*, 음수 N5는 *"지급일이
     매입일보다 앞선다"*는 모순이다.
     """
-    rounds = [
-        {"seq": 1, "date": "2026-08-21", "qty_kg": 500},
-        {"seq": 2, "date": "2026-08-27", "qty_kg": 500},
-    ]
-    assert build_payment_schedule(rounds, _SOURCING, 1_800, None) is None  # N5 미결
-    assert build_payment_schedule(rounds[:1], _SOURCING, 1_800, N5) is None  # 회차 1
-    assert build_payment_schedule(rounds, _SOURCING, 1_800, -7) is None  # 음수 N5
+    rounds = with_round_amounts(
+        [
+            {"seq": 1, "date": "2026-08-21", "qty_kg": 500},
+            {"seq": 2, "date": "2026-08-27", "qty_kg": 500},
+        ],
+        _SOURCING,
+    )
+    assert build_payment_schedule(rounds, 1_800, None) is None  # N5 미결
+    assert build_payment_schedule(rounds[:1], 1_800, N5) is None  # 회차 1
+    assert build_payment_schedule(rounds, 1_800, -7) is None  # 음수 N5
 
 
 def test_amounts_are_reproducible_from_the_grade_mix() -> None:
@@ -421,15 +427,20 @@ def test_amounts_are_reproducible_from_the_grade_mix() -> None:
     처음엔 전체 가중단가를 회차 수량에 곱했는데, 그러면 **어떤 정수 kg 등급 구성으로도
     나올 수 없는 금액**이 된다. 재무가 ``sourcing_plan``으로 검산하면 어긋난다.
     """
-    rounds = [
-        {"seq": 1, "date": "2026-08-21", "qty_kg": 500},
-        {"seq": 2, "date": "2026-08-27", "qty_kg": 500},
-    ]
-    schedule = build_payment_schedule(rounds, _SOURCING, 1_800, N5)
+    rounds = with_round_amounts(
+        [
+            {"seq": 1, "date": "2026-08-21", "qty_kg": 500},
+            {"seq": 2, "date": "2026-08-27", "qty_kg": 500},
+        ],
+        _SOURCING,
+    )
+    schedule = build_payment_schedule(rounds, 1_800, N5)
     assert schedule is not None
 
     total = sum(line["qty_kg"] * line["grade_unit_price"] for line in _SOURCING)
     assert sum(r["amount_krw"] for r in schedule) == total
+    # 🔴 지급 계획이 **회차 목록에서 읽는다** — 두 곳에서 계산하지 않는다 (#265).
+    assert [r["amount_krw"] for r in schedule] == [r["amount_krw"] for r in rounds]
 
     # 각 회차 금액이 **정수 kg 조합**으로 설명된다: 중 300 + 상 200 = 720,000
     assert schedule[0]["amount_krw"] == 300 * 1300 + 200 * 1650
@@ -441,16 +452,19 @@ def test_amounts_sum_exactly_with_indivisible_quantities() -> None:
 
     ``Σ amount_krw == total_amount_krw``가 재무 BASE 검증의 전제다.
     """
-    rounds = [
-        {"seq": 1, "date": "2026-08-21", "qty_kg": 333},
-        {"seq": 2, "date": "2026-08-24", "qty_kg": 333},
-        {"seq": 3, "date": "2026-08-27", "qty_kg": 334},
-    ]
     sourcing = [
         {"market": "가락", "grade": "중", "qty_kg": 667, "grade_unit_price": 1301},
         {"market": "가락", "grade": "상", "qty_kg": 333, "grade_unit_price": 1657},
     ]
-    schedule = build_payment_schedule(rounds, sourcing, 1_800, N5)
+    rounds = with_round_amounts(
+        [
+            {"seq": 1, "date": "2026-08-21", "qty_kg": 333},
+            {"seq": 2, "date": "2026-08-24", "qty_kg": 333},
+            {"seq": 3, "date": "2026-08-27", "qty_kg": 334},
+        ],
+        sourcing,
+    )
+    schedule = build_payment_schedule(rounds, 1_800, N5)
     assert schedule is not None
     total = sum(line["qty_kg"] * line["grade_unit_price"] for line in sourcing)
     assert sum(r["amount_krw"] for r in schedule) == total

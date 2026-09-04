@@ -381,6 +381,35 @@ def check_cash_ceiling(scenario: dict, state: PurchaseAgentState, constraints: d
     return None
 
 
+def check_split_amounts(scenario: dict) -> str | None:
+    """``Σ split_plan[].amount_krw == total_amount_krw`` — **금액의 회차 변** (마스터 #265).
+
+    🔴 **사중 일치(규칙 4)와 별개다.** 저쪽은 수량 3변 + 금액 1변(``total ↔ sourcing``)
+    이고 이건 새로 선 다섯 번째 변이다. ``check_quadruple_match`` 에 끼워 넣지 않는
+    이유는 *"사중"* 이라는 이름이 조용히 다른 것을 뜻하게 되기 때문이다.
+
+    ★ **이 어긋남은 원장으로 간다.** 마스터가 ``split_plan[].amount_krw`` 를 읽어
+      ``ArrivalLeg.amount_krw`` 로 옮기고, 그것이 ``purchase_items.line_amount_krw``
+      (NOT NULL)가 된다. 합이 안 맞으면 **재무 cap 검증을 통과한 안이 cap 을 넘는
+      원장을 만든다** — 어느 쪽도 에러를 내지 않는다.
+
+    스키마 ``validate_split_amount_axis`` 가 같은 검사를 출력 경계에서 한 번 더 한다.
+    여기서는 그 안만 컷하고 거기서는 제안 전체를 죽인다 — 사중 일치와 같은 이중 배치다.
+    """
+    # ⚠️ **여기서는 ``None`` 이 위반이다.** 스키마는 재무·물류가 공유하는 모델이라
+    #   "아무 회차에도 없음"을 허용하지만, 이 노드는 **우리 산출물만** 본다 —
+    #   ⑥이 ``with_round_amounts`` 를 지났으면 전 회차에 값이 있다.
+    missing = [item["seq"] for item in scenario["split_plan"] if item.get("amount_krw") is None]
+    if missing:
+        return f"회차 금액이 비었다: seq {', '.join(str(s) for s in missing)}"
+    split_amount = sum(item["amount_krw"] for item in scenario["split_plan"])
+    if split_amount != scenario["total_amount_krw"]:
+        return (
+            f"회차 금액 합 {split_amount:,}원 ≠ 총액 {scenario['total_amount_krw']:,}원"
+        )
+    return None
+
+
 def check_split_dates(scenario: dict, as_of: str) -> str | None:
     """seq 1의 date는 as_of, seq는 1부터 연속, **날짜는 앞으로만 간다** (IO명세 §2).
 
@@ -533,6 +562,7 @@ def check_payment_schedule(scenario: dict, state: PurchaseAgentState) -> str | N
     3. ``purchase_date == split_plan[i].date`` — seq 대응. 어긋나면 다른 회차의 돈이 된다
     4. ``payment_date == purchase_date + N5``  — calendar day, 영업일 보정 없음
     5. **일괄 안에는 키가 없다**               — 있으면 실을 것이 없는데 실은 것이다
+    6. ``amount_krw == split_plan[i].amount_krw`` — 같은 숫자가 두 필드에 산다 (#265)
 
     N5가 미결이면 애초에 만들어지지 않으므로(``build_payment_schedule``) 검사 대상도
     아니다 — 그 사실은 ``deferred_checks``가 싣는다.
@@ -576,6 +606,16 @@ def check_payment_schedule(scenario: dict, state: PurchaseAgentState) -> str | N
             return (
                 f"회차 {item['seq']} 수량이 분할과 다르다: "
                 f"{row['qty_kg']:,}kg ≠ {item['qty_kg']:,}kg"
+            )
+        # 🔴 **같은 숫자가 두 필드에 산다** (``split_plan[].amount_krw`` · 마스터 #265).
+        #   지금은 ``build_payment_schedule`` 이 회차 목록에서 **읽어** 쓰므로 구조적으로
+        #   같지만, 한쪽이 다시 자기 계산을 갖는 순간 갈린다. 그때 마스터는 원장에
+        #   ``split_plan`` 값을, 재무는 Cashflow 에 ``payment_schedule`` 값을 써서
+        #   **두 장부가 다른 금액을 든다.** 백스톱을 여기 둔다.
+        if row["amount_krw"] != item["amount_krw"]:
+            return (
+                f"회차 {item['seq']} 금액이 분할과 다르다: "
+                f"{row['amount_krw']:,}원 ≠ {item['amount_krw']:,}원"
             )
         due = date.fromisoformat(row["purchase_date"]) + timedelta(days=payment_days)
         if row["payment_date"] != due.isoformat():
@@ -639,6 +679,7 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or arrival.violation
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
+            or check_split_amounts(scenario)
             or check_document_refs(scenario, state["context_docs"])
             # 문서 검사 3종은 순서가 있다: 인용이 로드분인가(refs) → 발행일이 as_of 이전인가
             # (publication) → 발췌가 원문 문자인가(fidelity). 뒤 두 검사는 앞이 통과했다고

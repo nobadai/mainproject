@@ -87,6 +87,59 @@ def test_amount_must_match_sourcing_plan() -> None:
         PurchaseProposal.model_validate(data)
 
 
+def test_amount_must_match_split_plan() -> None:
+    """🔴 **금액의 회차 변** — ``total_amount != Σ split_plan[].amount_krw`` (마스터 #265).
+
+    ⑦ ``check_split_amounts`` 가 같은 검사를 안 단위로 하지만, 거기서는 그 안만 컷하고
+    **여기서는 제안 전체가 죽는다.** 출력 경계 백스톱이라 ⑦을 우회한 경로(어댑터 바깥
+    호출·수동 조립)도 걸린다.
+
+    ⚠️ **이 검사가 없으면 스키마 백스톱을 지우는 변이가 아무도 안 잡는다** —
+      실제로 변이를 넣어 확인했다(2026-09-04). ⑦이 먼저 컷해서 스키마까지 가지 않기
+      때문에, 그 자리를 직접 겨누는 판이 따로 있어야 한다 (규칙 8).
+    """
+    data = _proposal()
+    # 수량·sourcing 축은 그대로 두고 **회차 금액만** 어긋낸다 — 다른 변이 걸리면
+    # 이 검사가 무엇을 잡았는지 알 수 없다.
+    data["scenarios"][0]["split_plan"][0]["amount_krw"] = 7125001
+    with pytest.raises(ValidationError, match="split_plan amount total"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_split_amount_is_all_rounds_or_none() -> None:
+    """🔴 **부분 공급을 금지한다** — 전 회차에 있거나 전 회차에 없거나.
+
+    마스터 ``commitment.py:_legs`` 가 ``amount_filled == len(amounts)`` 일 때만 금액을
+    나르고, ``contracts/core.py`` ``_split_amount_problems`` 도 같은 규칙이다. 실린 것만
+    더해 총액과 비교하면 **출처가 섞인 값**으로 판정하게 된다.
+
+    ⚠️ **아무 회차에도 없는 것은 위반이 아니다.** 이 모델은 재무·물류가
+      ``PurchaseAgentOutput`` 으로 그대로 쓰는 공유 계약이라, 그쪽 payload 는 이 필드를
+      안 싣는다. 우리 산출물이 그 상태가 되는 것은 ⑦ ``check_split_amounts`` 가 막는다.
+    """
+    data = _proposal()
+    data["scenarios"][0]["strategy_type"] = "timing"
+    data["scenarios"][0]["split_plan"] = [
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000},  # 🔴 이 회차만 비어 있다
+    ]
+    with pytest.raises(ValidationError, match="every round or none"):
+        PurchaseProposal.model_validate(data)
+
+
+def test_a_payload_without_any_round_amount_still_validates() -> None:
+    """재무·물류가 보내는 payload 는 회차 금액을 안 싣는다 — **거부하지 않는다.**
+
+    ``finance/schemas.py:332`` 가 ``PurchaseAgentOutput = PurchaseProposal`` 로 이 모델을
+    자기 API 요청 모델로 쓴다. 여기서 필수로 만들면 **그 두 부서 엔드포인트가 이 필드
+    없는 요청을 422 로 거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다.
+    """
+    data = _proposal()
+    del data["scenarios"][0]["split_plan"][0]["amount_krw"]
+    proposal = PurchaseProposal.model_validate(data)
+    assert proposal.scenarios[0].split_plan[0].amount_krw is None
+
+
 def test_cited_document_must_appear_in_context_docs_used() -> None:
     """출력 경계 백스톱 (E3-4) — 인용한 DOC이 실제 로드분에 없으면 **제안 전체가 죽는다**.
 
@@ -228,8 +281,8 @@ def test_split_seq_must_be_sequential() -> None:
     data = _proposal()
     scenario = data["scenarios"][0]
     scenario["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
-        {"seq": 3, "date": "2026-08-25", "qty_kg": 2000},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 3, "date": "2026-08-25", "qty_kg": 2000, "amount_krw": 3125000},
     ]
     with pytest.raises(ValidationError, match="seq must start at 1"):
         PurchaseProposal.model_validate(data)
@@ -240,8 +293,8 @@ def test_split_plan_supports_multiple_rounds() -> None:
     data = _proposal()
     data["scenarios"][0]["strategy_type"] = "timing"
     data["scenarios"][0]["split_plan"] = [
-        {"seq": 1, "date": AS_OF, "qty_kg": 2500},
-        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000},
+        {"seq": 1, "date": AS_OF, "qty_kg": 2500, "amount_krw": 4000000},
+        {"seq": 2, "date": "2026-08-25", "qty_kg": 2000, "amount_krw": 3125000},
     ]
     assert len(PurchaseProposal.model_validate(data).scenarios[0].split_plan) == 2
 

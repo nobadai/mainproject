@@ -948,9 +948,34 @@ def _round_amounts(rounds: list[dict], sourcing: list[dict]) -> list[int]:
     return amounts
 
 
+def with_round_amounts(rounds: list[dict], sourcing: list[dict]) -> list[dict]:
+    """회차 목록에 ``amount_krw`` 를 얹는다. **여기가 회차 금액의 유일한 생산지다.**
+
+    🔴 **한 번만 계산한다.** 전에는 ``build_payment_schedule`` 이 ``_round_amounts`` 를
+      따로 불렀다 — 회차 금액이 두 곳에서 나면 한쪽 계산만 바뀌는 날이 오고, 그때
+      ``split_plan`` 과 ``payment_schedule`` 이 다른 금액을 들고 나간다. 이 저장소가
+      도착일(#141)·N4(#58)에서 두 번 겪은 자리다.
+
+      이제 ``build_payment_schedule`` 은 여기서 얹은 값을 **읽는다.**
+
+    ⚠️ **일괄 안(1회차)에도 ``amount_krw`` 를 싣는다.**
+
+      근거: 마스터 ``commitment.py:_legs`` 가 ``amount_filled == len(amounts)`` 일 때만
+      ``carry_amounts`` 를 켠다 — 부분 공급을 거부한다. 일괄에 안 실으면 그 안은 금액 변
+      검증이 통째로 건너뛰어진다.
+
+      ⚠️ 1회차면 ``amount_krw == total_amount_krw`` 로 같은 값이 두 번 나간다.
+      중복이지만 *"전 회차에 있다"* 가 계약이므로 그쪽을 택했다. 마스터 판단이 다르면
+      이 한 줄을 바꾸면 된다 (2026-09-04 · 답 대기).
+    """
+    return [
+        {**item, "amount_krw": amount}
+        for item, amount in zip(rounds, _round_amounts(rounds, sourcing), strict=True)
+    ]
+
+
 def build_payment_schedule(
     rounds: list[dict],
-    sourcing: list[dict],
     max_price: int,
     payment_days: int | None,
 ) -> list[dict] | None:
@@ -973,10 +998,10 @@ def build_payment_schedule(
     ⚠️ **``by_grade``를 넣지 않는다.** 등급별 수량·단가는 ``sourcing_plan``이 정본이고,
     여기는 회차별 Cashflow 정보만 있으면 충분하다 (회신 §2).
 
-    ⚠️ **금액은 등급 구성에서 만든다.** 처음엔 전체 가중단가를 회차 수량에 곱했는데,
-    그러면 **어떤 정수 kg 등급 구성으로도 재현되지 않는 금액**이 나온다 (Codex 교차검증).
-    재무가 ``sourcing_plan``으로 검산하면 어긋난다 — ``_round_amounts``가 등급별 kg를
-    회차에 배분해 실제 단가로 곱한다.
+    ⚠️ **금액은 ``rounds`` 에서 읽는다 — 여기서 계산하지 않는다.**
+    ``with_round_amounts`` 가 등급별 kg를 회차에 배분해 실제 단가로 곱한 값을 이미
+    얹어 두었다. 전체 가중단가를 쓰면 **어떤 정수 kg 등급 구성으로도 재현되지 않는
+    금액**이 나와 재무 검산이 어긋난다 (Codex 교차검증) — 그 계산은 한 곳에만 있다.
 
     ⚠️ **``payment_days``가 음수면 만들지 않는다.** 지급일이 매입일보다 앞서는 것은
     N5의 뜻(매입 후 며칠 뒤 지급)과 모순이고, 그대로 두면 ⑦도 같은 음수로 재계산해
@@ -985,9 +1010,8 @@ def build_payment_schedule(
     if payment_days is None or payment_days < 0 or len(rounds) <= 1:
         return None
 
-    amounts = _round_amounts(rounds, sourcing)
     schedule = []
-    for item, amount in zip(rounds, amounts, strict=True):
+    for item in rounds:
         purchase_date = date.fromisoformat(item["date"])
         schedule.append(
             {
@@ -995,7 +1019,9 @@ def build_payment_schedule(
                 "purchase_date": item["date"],
                 "payment_date": (purchase_date + timedelta(days=payment_days)).isoformat(),
                 "qty_kg": item["qty_kg"],
-                "amount_krw": amount,
+                # ★ **재계산하지 않고 읽는다** — ``with_round_amounts`` 가 이미 얹었다.
+                #   같은 사실을 두 곳에서 계산하면 어긋나는 날이 온다.
+                "amount_krw": item["amount_krw"],
                 "amount_max_krw": item["qty_kg"] * max_price,
                 # ``amount_krw``를 **어떻게 추정했는가**다. 재무의 BASE/STRESS는 두 금액을
                 # 각각 어느 Cashflow에 넣는지의 소비 프레이밍이라 축이 다르다.
@@ -1006,10 +1032,13 @@ def build_payment_schedule(
 
 
 def _payment_schedule_field(
-    rounds: list[dict], sourcing: list[dict], max_price: int, payment_days: int | None
+    rounds: list[dict], max_price: int, payment_days: int | None
 ) -> dict:
-    """실을 것이 있을 때만 키를 만든다 — ``None``을 담으면 "빈 계획"으로 읽힌다."""
-    schedule = build_payment_schedule(rounds, sourcing, max_price, payment_days)
+    """실을 것이 있을 때만 키를 만든다 — ``None``을 담으면 "빈 계획"으로 읽힌다.
+
+    ``rounds`` 는 ``with_round_amounts`` 를 지난 것이어야 한다 (``amount_krw`` 를 읽는다).
+    """
+    schedule = build_payment_schedule(rounds, max_price, payment_days)
     return {"payment_schedule": schedule} if schedule else {}
 
 
@@ -1177,13 +1206,19 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         axis = axes[draft["label"]]
         chosen = split_choice if axis == TIMING_AXIS else None
         coverage_days = draft["coverage_days"]
-        rounds = materialize_split(
-            state["date"],
-            total,
-            chosen,
-            coverage_days,
-            lead_days=lead_days,
-            cap_by_date=cap_by_date,
+        # ★ 회차 금액을 여기서 얹는다 — ``sourcing`` 이 있어야 계산되므로
+        #   ``materialize_split`` 안이 아니라 밖이다. 이후 ``split_plan`` 과
+        #   ``payment_schedule`` 이 **같은 목록**을 본다.
+        rounds = with_round_amounts(
+            materialize_split(
+                state["date"],
+                total,
+                chosen,
+                coverage_days,
+                lead_days=lead_days,
+                cap_by_date=cap_by_date,
+            ),
+            sourcing,
         )
         rationale_input = {**draft, "daily_demand_kg": base["daily_demand_kg"]}
         unit_price = _weighted_unit_price(sourcing, total)
@@ -1205,7 +1240,6 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 # 분할 안이고 N5를 받은 날만 실린다 — 아니면 **키 자체가 없다**.
                 **_payment_schedule_field(
                     rounds,
-                    sourcing,
                     compute_max_price(state["forecast"], draft["coverage_days"]),
                     pending_value(state, constraints, "purchase_payment_days"),
                 ),

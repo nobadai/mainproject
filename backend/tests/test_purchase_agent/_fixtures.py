@@ -17,6 +17,8 @@ def _proposal() -> dict:
     수량: 4500 == 4500(split) == 3000 + 1500(sourcing)
     금액: 3000 x 1650 + 1500 x 1450 = 4,950,000 + 2,175,000 = 7,125,000
           (kg x 원/kg = 원 — 단위가 맞아떨어져 변환 계수가 없다)
+
+    금액의 회차 변(#265): 7,125,000 == split_plan[0].amount_krw — 1회차라 총액과 같다.
     """
     return {
         "meta": {
@@ -35,7 +37,10 @@ def _proposal() -> dict:
                 "total_amount_krw": 7125000,
                 "max_price": 1750,
                 "margin_warning": False,
-                "split_plan": [{"seq": 1, "date": AS_OF, "qty_kg": 4500}],
+                # 1회차라 amount_krw == total_amount_krw 다 (schemas.SplitPlanItem 주석).
+                "split_plan": [
+                    {"seq": 1, "date": AS_OF, "qty_kg": 4500, "amount_krw": 7125000}
+                ],
                 "sourcing_plan": [
                     {
                         "market": "가락",
