@@ -21,16 +21,17 @@ T0 상태 읽기 → 승인 약정 수신 → build_finance_transition (계산�
    현금은 실제 지급일에 나간다. 승인일에 현금을 깎으면 아직 나가지 않은 돈이
    사라지고, 정작 지급일에는 아무 일도 일어나지 않는다.
 
-🔴 **다음 상태가 설 날을 재무가 정하지 않는다.** 예전 초안은 `as_of + 1 달력일`
-   을 안에서 세웠는데, 그러면 금요일 승인이 **토요일 상태**를 만든다. 다음 실행일은
-   월요일이라 그 상태는 아무도 읽지 못하고, 재무가 조용히 실행일 달력을 소유한
-   꼴이 된다. 그래서 `target_state_date` 를 **인자로 받는다** — 재무는 그 날짜가
-   승인일보다 뒤인지만 본다. 평일 계산은 하지 않는다.
+🔴 **다음 상태가 설 날을 재무가 정하지 않는다.** `target_state_date` 를 **인자로
+   받는다** — 재무는 그 날짜가 승인일보다 뒤인지만 본다.
 
-   ★ 지금 그 값을 줄 권위 있는 원천이 계약에 없다. `master.execution_day
-     .next_execution_day` 가 답을 알지만 재무가 닿을 수 있는 마스터 표면이 아니고
-     (`envelope` · `critic_bridge` 뿐), `ApprovedCommitment` 도 `ExecutionContext` 도
-     그 날짜를 싣지 않는다.
+   ★ **토요일 상태는 정상이다.** 매입 판단은 평일만 돌지만 장부는 매 달력일
+     전진한다 — 주말에도 판매와 원장 활동이 일어나기 때문이다. 그래서 다음 상태
+     날짜는 `as_of + 1 달력일`(토·일·공휴일 포함)이고, 재무가 **평일로 미루지
+     않는다.** 예전 주석이 이 자리를 "다음 실행일" 로 적었는데 그건 틀렸다 —
+     실행일과 장부일은 다른 축이다.
+
+   🔴 그래서 `master.execution_day.next_execution_day` 를 쓰지 않는다. 재무는
+     그 모듈을 import 하지도 않고 평일 계산을 하지도 않는다. 날짜는 마스터가 준다.
 
 🔴 **아직 마스터(`master.transition.register_transition`)에 등록하지 않는다.**
    `payables.purchase_id` 는 `purchases` 를 참조하는 NOT NULL 컬럼인데,
@@ -115,6 +116,7 @@ class FinanceTransition:
     source_finance_state_id: str
     next_finance_state_id: str
     #: 다음 상태가 서는 날. **부르는 쪽이 준 값**이다 — 재무가 세지 않는다.
+    #: 달력일이라 토·일도 그대로 선다.
     next_state_date: date
     payables: tuple[FinancePayableWrite, ...]
     #: 승인 뒤 미결제 매입채무 총액. 현금은 **바뀌지 않는다.**
@@ -137,6 +139,8 @@ def build_finance_transition(
         `purchases` 를 참조하는 NOT NULL 컬럼이라 재무가 지어낼 수 없다 — 매입/마스터가
         같은 트랜잭션에서 넣는 값을 받는다.
     :param target_state_date: 승인 결과 상태가 설 날. **부르는 쪽이 준다.**
+        마스터 계약상 `commitment.as_of + 1 달력일` 이고 토·일·공휴일도 그대로다 —
+        재무는 계산하지 않고 승인일보다 뒤인지만 본다.
     :raises FinanceDataNotReady: 재무가 지급 시점이나 금액을 확정할 수 없을 때.
     """
     if not purchase_id.strip():

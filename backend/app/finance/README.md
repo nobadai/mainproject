@@ -355,7 +355,7 @@ persist_finance_transition(conn, transition)  받은 연결로 쓰기만 — com
 fin = finance.build_finance_transition(
     commitment,
     purchase_id=purchase_id,        # 매입 소유 — 약정에 아직 없다
-    target_state_date=next_day,     # 실행일 달력 소유 — 계약에 아직 없다
+    target_state_date=next_day,     # as_of + 1 달력일 — 마스터 소유, 계약에 아직 없다
 )
 with shared_connection as conn:
     finance.persist_finance_transition(conn, fin)
@@ -366,16 +366,24 @@ with shared_connection as conn:
    실어 줄 권위 있는 원천이 계약에 없다. 억지로 등록하면 마스터가 *"아직 안 돈다"*
    (`NOT_APPLIED`) 대신 **승인마다 `FAILED`** 를 내게 되고, 미구현이 장애로 둔갑한다.
 
-### 다음 상태가 설 날은 재무가 정하지 않는다
+### 실행일과 장부일은 다른 축이다
 
 ```text
-금 승인 → as_of + 1 달력일 = 토요일 상태 → 다음 실행일 월요일이 못 읽는다
+매입 판단   평일만 돈다              ← 마스터 실행일 달력
+장부 상태   매 달력일 전진한다        ← 토·일·공휴일 포함
 ```
 
-초안은 안에서 `as_of + 1` 을 세웠고, 그 결과가 위 한 줄이다. 실행일 달력은 마스터
-소유(`master/execution_day.py`)이고 재무가 닿을 수 있는 마스터 표면이 아니므로,
-`target_state_date` 를 **인자로 받는다.** 재무가 보는 것은 정합성 한 가지뿐이다 —
-승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의 사실을 말할 수 없다.
+주말에도 판매와 원장 활동이 일어나므로 재무 상태는 주말에도 서야 한다. 그래서
+다음 상태 날짜는 **`as_of + 1 달력일`** 이고 금요일 승인은 **토요일 상태**를
+만든다 — 그것이 정상이다. 예전에 이 자리를 *"다음 실행일 월요일이 못 읽는다"* 로
+적었는데 그건 두 축을 겹쳐 본 것이다.
+
+★ 그 날짜를 재무가 세지 않는다. `target_state_date` 를 **인자로 받고**, 보는 것은
+정합성 한 가지뿐이다 — 승인일보다 뒤여야 한다. 같은 날에 상태가 둘 서면 그날의
+사실을 말할 수 없다.
+
+🔴 `master.execution_day.next_execution_day` 를 쓰지 않는다. 재무는 그 모듈을
+   import 하지 않고 평일 계산도 하지 않는다.
 
 ### 두 층을 나눈다 — DB "지금" 과 요청 "그때"
 
