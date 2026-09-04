@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from app.finance.sales_models import PartnerReceivable
 from app.finance.schemas import (
     CashEvent,
     FinanceDebtPolicy,
@@ -127,6 +128,9 @@ class FinanceAsOfDataPort(Protocol):
     def load_payroll(self, as_of: date, horizon: date) -> Decimal | None: ...
     def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy: ...
     def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_partner_receivables(
+        self, as_of: date, partner_id: str
+    ) -> list[PartnerReceivable]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +563,100 @@ def _rows_to_events(
     return events
 
 
+# ---------------------------------------------------------------------------
+# 거래처 매출채권 — 실 원장에서 읽는다
+#
+# ★ 이 절이 소유하는 것은 **조회와 옮겨 담기**뿐이다. 무엇이 미회수인지, 무엇이
+#   연체인지는 `tools.summarize_partner_receivables` 가 소유한다 — 어휘를 SQL 에도
+#   한 번 더 적으면 둘이 조용히 갈라진다.
+#
+# 🔴 **못 읽은 것을 "채권 없음" 으로 바꾸지 않는다.** 연결 실패 · 조회 실패 ·
+#    모양이 다른 값은 전부 `FinanceDataNotReady` 로 세운다. 0원 채권은 조회가
+#    성공했고 미회수 행이 0건일 때만 나오는 **사실**이다.
+# ---------------------------------------------------------------------------
+
+
+def _partner_receivable_rows(
+    *, sim_run_id: str, as_of: date, partner_id: str
+) -> list[dict[str, object]]:
+    """거래처 채권 행. **같은 sim_run 안에서만, as_of 까지만 본다.**
+
+    ★ `sim_run_id` 를 채권과 판매 양쪽에 모두 건다. 조인 한쪽만 걸면 다른 실행의
+      판매 Header 를 타고 남의 run 채권이 딸려 들어온다.
+
+    ★ `issued_date <= as_of` 와 `sale_date <= as_of` 를 함께 건다. 발행일만 막으면
+      아직 일어나지 않은 판매에 붙은 채권이 과거 시점 조회에 섞인다 — as-of 재현이
+      깨지는 순간이다.
+    """
+    schema = get_db_schema()
+    query = sql.SQL(
+        """
+        SELECT
+            r.receivable_id,
+            r.due_date,
+            r.outstanding_amount_krw,
+            r.status
+        FROM {}.{} AS r
+        JOIN {}.{} AS s
+          ON s.sale_id = r.sale_id
+         AND s.sim_run_id = r.sim_run_id
+        WHERE r.sim_run_id = %s
+          AND s.sim_run_id = %s
+          AND s.customer_partner_id = %s
+          AND r.issued_date <= %s
+          AND s.sale_date <= %s
+        ORDER BY r.receivable_id
+        """
+    ).format(
+        sql.Identifier(schema),
+        sql.Identifier("receivables"),
+        sql.Identifier(schema),
+        sql.Identifier("sales"),
+    )
+    return fetch_all(query, [sim_run_id, sim_run_id, partner_id, as_of, as_of])
+
+
+def load_partner_receivables(
+    *, sim_run_id: str, as_of: date, partner_id: str
+) -> list[PartnerReceivable]:
+    """거래처 채권 원장을 Finance 사실로 옮긴다.
+
+    ★ 상태를 여기서 거르지 않는다. `COLLECTED` · `WRITEOFF` 를 빼는 것은 집계의
+      판단이고, 그 판단은 한 곳에만 있어야 한다.
+
+    ★ `receivable_id` 를 그대로 `source_ref` 로 쓴다 — 이미 `load_receivables` 가
+      같은 값을 `ref_id` 로 쓰고 있다. 따라가면 실제 원장 행에 닿는다.
+    """
+    if not partner_id.strip():
+        raise ValueError("partner_id must not be blank")
+    try:
+        rows = _partner_receivable_rows(
+            sim_run_id=sim_run_id, as_of=as_of, partner_id=partner_id
+        )
+    except Exception as exc:  # 조회 실패는 "채권 없음" 이 아니다 — 세운다.
+        raise FinanceDataNotReady("partner_receivables") from exc
+
+    receivables: list[PartnerReceivable] = []
+    for row in rows:
+        amount = row.get("outstanding_amount_krw")
+        if isinstance(amount, bool) or not isinstance(amount, Decimal):
+            # 🔴 float 로 바꾸지 않는다. 못 읽은 금액은 못 읽은 것이다.
+            raise FinanceDataNotReady("partner_receivables")
+        try:
+            receivables.append(
+                PartnerReceivable(
+                    receivable_id=str(row["receivable_id"]),
+                    due_date=cast(date, row["due_date"]),
+                    outstanding_amount_krw=amount,
+                    status=cast(Any, row["status"]),
+                    source_ref=str(row["receivable_id"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("partner_receivables") from exc
+    return receivables
+
+
 def _get_current_finance_state_row() -> dict[str, object]:
     query = sql.SQL(
         """
@@ -648,6 +746,18 @@ class PostgresFinanceAsOfDataPort:
             raise FinanceDataNotReady("finance_policy") from exc
         self._policy_cache = (as_of, policy_version, policy)
         return policy
+
+
+    def load_partner_receivables(self, as_of: date, partner_id: str) -> list[PartnerReceivable]:
+        """이 실행의 sim_run 과 as_of 안에서만 거래처 채권을 읽는다.
+
+        ★ `load_finance_position` 을 먼저 통과한다 — 과거 시점을 오늘 상태로 대신
+          답하지 않는 보호가 채권에도 그대로 걸려야 한다.
+        """
+        position = self.load_finance_position(as_of)
+        return load_partner_receivables(
+            sim_run_id=str(position["sim_run_id"]), as_of=as_of, partner_id=partner_id
+        )
 
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
         position = self.load_finance_position(as_of)

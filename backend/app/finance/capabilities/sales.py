@@ -62,6 +62,7 @@ from app.finance.tools import (
     compare_reported_sales_amount,
     compose_sales_cost_basis,
     project_sales_scenario_cashflow,
+    summarize_partner_receivables,
 )
 
 #: Finance 가 판매 제안 하나를 판정하려면 반드시 있어야 하는 Sales 유래 사실.
@@ -677,10 +678,12 @@ def run_sales_validation(
 
     minimum_cash: Decimal | None = None
     scenario_cashflow: SalesScenarioCashflow | None = None
+    receivable_facts: PartnerReceivableFacts | None = None
     if sales_input is not None:
         minimum_cash, scenario_cashflow = _load_sales_cashflow_context(
             data_port, state, sales_input
         )
+        receivable_facts = _load_partner_receivable_facts(data_port, state, sales_input)
 
     return build_sales_validation_payload(
         evaluate_sales_scenario(
@@ -691,15 +694,41 @@ def run_sales_validation(
                 policy.max_finance_allowed_payment_terms_days
             ),
             collection_risk_mode=policy.collection_risk_mode,
-            # 🔴 아래 둘은 정책이 아니라 **거래처가 소유한 사실**이다. 여기 기본값을
-            #    두면 없는 한도를 재무가 발명하게 된다 — 조회 계약이 설 때까지 없는
-            #    채로 두고 판정을 닫는다.
+            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 권위 있는
+            #    저장 위치가 아직 없어서 여기 기본값을 두면 없는 한도를 재무가
+            #    발명하게 된다 — 없는 채로 두고 여신 판정을 닫는다.
             credit_limit_krw=None,
-            receivable_facts=None,
+            # 채권은 실 원장에 있다. 그래서 이쪽만 실제 사실로 채운다 —
+            # 여신이 안 열렸다고 회수위험까지 눈을 감을 이유는 없다.
+            receivable_facts=receivable_facts,
             # 여기 둘은 실재하는 Finance 자료다.
             minimum_cash_balance_krw=minimum_cash,
             scenario_cashflow=scenario_cashflow,
         )
+    )
+
+
+def _load_partner_receivable_facts(
+    data_port: FinanceAsOfDataPort,
+    state: Any,
+    sales_input: SalesValidationInput,
+) -> PartnerReceivableFacts:
+    """거래처 채권 사실을 실 원장에서 만든다. **없으면 없는 채로 세운다.**
+
+    ★ 빈 목록은 **채권이 0원이라는 사실**이다 — 신규 거래처를 자료 미비로 다루지
+      않는다. 반대로 조회 자체가 실패하면 `load_partner_receivables` 가
+      `FinanceDataNotReady` 로 세우고, 그 실행은 `RUNTIME_NOT_READY` 가 된다.
+      "못 읽었다" 와 "0원이다" 가 같은 결과를 내면 안 된다.
+
+    ★ 기준일은 이 실행의 `as_of` 하나다. 연체 판정(`due_date < as_of`)도 같은 날을
+      쓴다 — 조회 기준일과 판정 기준일이 갈리면 어제 기준으로 읽은 채권을 오늘
+      기준으로 연체 판정하는 일이 생긴다.
+    """
+    as_of = state.request.context.as_of
+    return summarize_partner_receivables(
+        partner_id=sales_input.partner_id,
+        as_of=as_of,
+        receivables=data_port.load_partner_receivables(as_of, sales_input.partner_id),
     )
 
 
