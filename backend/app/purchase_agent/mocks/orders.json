@@ -14,10 +14,6 @@
     "양파": [
       {"sale_id": 15, "qty_kg": 9000, "due_date_offset_days": 4},
       {"sale_id": 17, "qty_kg": 3000, "due_date_offset_days": 11}
-    ],
-    "피마늘": [
-      {"sale_id": 19, "qty_kg": 2000, "due_date_offset_days": 3},
-      {"sale_id": 21, "qty_kg": 1200, "due_date_offset_days": 10}
     ]
   }
 }

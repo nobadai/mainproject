@@ -49,21 +49,6 @@
       ],
       "warehouse_free_kg": 15000,
       "rental_cap_kg": 4500
-    },
-    "피마늘": {
-      "lots": [
-        {
-          "lot_id": "LOT-MOCK-PIMANUL",
-          "item": "피마늘",
-          "available_qty_kg": 1200,
-          "remaining_freshness_days": 24,
-          "grade": "상",
-          "status": "ACTIVE",
-          "shelf_life_days": 30
-        }
-      ],
-      "warehouse_free_kg": 6000,
-      "rental_cap_kg": 1800
     }
   }
 }

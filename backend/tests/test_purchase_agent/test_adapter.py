@@ -32,7 +32,7 @@ from app.purchase_agent.nodes.package_scenarios import split_quantities
 
 # "2025-12-31" 은 통합 시연 앵커 (#73) — 재무·물류 DB 데이터가 이 날에만 있다.
 ANCHORS = ["2025-12-31", "2026-08-21", "2026-08-28", "2026-09-04", "2026-09-11"]
-ITEMS = ["배추", "무", "양파", "피마늘"]
+ITEMS = ["배추", "무", "양파"]
 UNCERTAIN = date(2026, 9, 4)
 SPREAD_WIDE = date(2026, 9, 11)
 

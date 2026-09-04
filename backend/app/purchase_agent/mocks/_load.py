@@ -21,8 +21,13 @@ from typing import Any
 
 _HERE = Path(__file__).parent
 
-#: 취급 품목 (상세설계 §3). 이 밖의 품목은 mock이 없다 — 조용히 빈 값을 주지 않는다.
-ITEMS: tuple[str, ...] = ("배추", "무", "피마늘", "양파")
+#: mock 이 데이터를 가진 품목. 이 밖의 품목은 mock이 없다 — 조용히 빈 값을 주지 않는다.
+#:
+#: ⚠️ **계약 품목(``app/contracts/core.py`` ITEMS)과 같은 목록이고, 매입 스키마
+#:   (``schemas.ItemName``)보다는 좁다.** 매입이 더 넓은 것은 전환이 아니라 결정이다
+#:   (``tests/master/test_commitment.py`` · #224) — 계약 밖 품목은 마스터가 문 앞에서
+#:   막으므로(#223) 넓어도 안전하고, 스키마를 좁히면 그 결정이 뒤집힌다.
+ITEMS: tuple[str, ...] = ("배추", "무", "양파")
 
 
 def _read(name: str) -> dict[str, Any]:

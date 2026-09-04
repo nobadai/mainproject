@@ -6,7 +6,7 @@
 두 앵커(8/21·9/11) 모두 궤적으로만 진입한다 — mock만 돌리면 `by_volume`을 지워도 초록불이
 뜬다. 그래서 수량 가지는 **합성 입력으로 따로** 시험한다.
 
-4품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파·피마늘 크래시를 놓친 교훈이다.
+3품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파 크래시를 놓친 교훈이다.
 """
 
 from copy import deepcopy
@@ -14,6 +14,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from app.purchase_agent import mocks
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
@@ -236,10 +237,14 @@ def test_schema_backstops_the_date_order(proposals: dict) -> None:
 # ── 사중 일치 — 회차가 둘이 되며 Σ split 축이 실제로 검증되기 시작한다 ──────
 
 
-@pytest.mark.parametrize("item", ["배추", "무", "양파", "피마늘"])
+@pytest.mark.parametrize("item", mocks.ITEMS)
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
 def test_every_item_and_anchor_stays_consistent(item: str, as_of: date) -> None:
-    """4품목 × 4앵커 전횡단 — 품목 하나만 도는 테스트는 E3-1에서 크래시를 놓쳤다."""
+    """전 품목 × 4앵커 전횡단 — 품목 하나만 도는 테스트는 E3-1에서 크래시를 놓쳤다.
+
+    🔴 **목록을 여기 적지 않고 ``mocks.ITEMS`` 를 읽는다.** 적어 두면 mock 이 좁아진
+    날 이 줄만 남아 없는 품목을 돌린다 — 실제로 그렇게 깨졌다 (아래 ``ALL_ITEMS`` 주석).
+    """
     proposal = run_purchase_agent(item, as_of)
     PurchaseProposal.model_validate(proposal)
     assert proposal["scenarios"]
@@ -690,7 +695,12 @@ def test_arrival_dates_match_the_helper_used_for_cap_checks() -> None:
 # 그 값이 총액과 어긋나면 **재무 cap 검증을 통과한 안이 cap 을 넘는 원장을 만든다.**
 
 
-ALL_ITEMS = ("배추", "무", "피마늘", "양파")
+#: 🔴 **품목 목록을 여기 적지 않는다 — ``mocks.ITEMS`` 가 정본이다.**
+#:
+#:   전에는 ``ALL_ITEMS = ("배추", "무", "피마늘", "양파")`` 로 적어 뒀다. mock 에서
+#:   피마늘을 빼자 **이 줄만 남아 없는 품목을 돌았고 8건이 깨졌다** (2026-09-05).
+#:   목록이 두 곳에 있으면 한쪽만 바뀐다 — 규칙 7 이 임계에 대해 말하는 것과 같다.
+ALL_ITEMS = mocks.ITEMS
 
 
 @pytest.mark.parametrize("as_of", ANCHORS)

@@ -52,7 +52,7 @@ IO명세·상세설계의 예시들이 흩어져 보이지만 **한 날의 스�
 | `quotes_{normal,wide}.json` | 4품목 특/상/중 (market="가락" 고정) |
 | `inventory.json` · `orders.json` | 품목별 고정값, 날짜는 as_of 상대 오프셋 |
 | `cash.json` | horizon_days → projected_cash_min (`base_` 계열) |
-| `documents.json` | 발간물 스타일 7건 (배추 4 · 무/양파/피마늘 각 1), `published_at` 필수 |
+| `documents.json` | 발간물 스타일 6건 (배추 4 · 무/양파 각 1), `published_at` 필수 |
 | `_load.py` | 위 JSON을 IO명세 §1 반환 형태로 materialize |
 
 `_`로 시작하는 JSON 키(`_scenario` · `_설명` 등)는 **설명용이며 포트 반환값에 실리지 않는다.**

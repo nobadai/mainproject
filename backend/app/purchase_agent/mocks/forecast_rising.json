@@ -78,29 +78,6 @@
         {"offset_days": 17, "predicted": 1524, "lower": 1478, "upper": 1570},
         {"offset_days": 18, "predicted": 1539, "lower": 1493, "upper": 1585}
       ]
-    },
-    "피마늘": {
-      "current_price": 5200,
-      "daily": [
-        {"offset_days":  1, "predicted": 5249, "lower": 5092, "upper": 5406},
-        {"offset_days":  2, "predicted": 5298, "lower": 5139, "upper": 5457},
-        {"offset_days":  3, "predicted": 5348, "lower": 5188, "upper": 5508},
-        {"offset_days":  4, "predicted": 5398, "lower": 5236, "upper": 5560},
-        {"offset_days":  5, "predicted": 5449, "lower": 5286, "upper": 5612},
-        {"offset_days":  6, "predicted": 5500, "lower": 5335, "upper": 5665},
-        {"offset_days":  7, "predicted": 5552, "lower": 5385, "upper": 5719},
-        {"offset_days":  8, "predicted": 5604, "lower": 5436, "upper": 5772},
-        {"offset_days":  9, "predicted": 5657, "lower": 5487, "upper": 5827},
-        {"offset_days": 10, "predicted": 5710, "lower": 5539, "upper": 5881},
-        {"offset_days": 11, "predicted": 5764, "lower": 5591, "upper": 5937},
-        {"offset_days": 12, "predicted": 5818, "lower": 5643, "upper": 5993},
-        {"offset_days": 13, "predicted": 5873, "lower": 5697, "upper": 6049},
-        {"offset_days": 14, "predicted": 5928, "lower": 5750, "upper": 6106},
-        {"offset_days": 15, "predicted": 5984, "lower": 5804, "upper": 6164},
-        {"offset_days": 16, "predicted": 6040, "lower": 5859, "upper": 6221},
-        {"offset_days": 17, "predicted": 6097, "lower": 5914, "upper": 6280},
-        {"offset_days": 18, "predicted": 6154, "lower": 5969, "upper": 6339}
-      ]
     }
   }
 }

@@ -264,6 +264,54 @@ def test_spec_for_item_returns_none_for_the_unsettled_item() -> None:
     assert spec_for_item("배추", constraints)["unit_weight_kg"] == 10
 
 
+def test_an_item_declared_null_yields_no_plan_with_the_spec_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **규격이 ``null`` 이면 끝까지 가서 "규격 미확정" 사유로 0안이 나오는가.**
+
+    앞의 둘은 *포트* 층을 본다 — 조회를 안 한다 · 사유 문장이 맞다. 이 검사는 그 사유가
+    **그래프 끝까지 살아 나오는지**를 본다. 중간에서 다른 사유로 덮이면 화면에 *"낙찰
+    기록이 없다"*(휴장·미거래)가 나가는데, 그건 원인이 다른 말이다.
+
+    ⚠️ **선언을 바꿔서 본다** — 코드에 값을 꽂지 않는다 (규칙 8). ``constraints.yaml``
+      사본에서 배추 규격만 ``null`` 로 만들고 ``CONSTRAINTS_PATH`` 를 갈아 끼운다.
+      로더가 캐시를 안 하고 경로를 **호출 시점에** 읽으므로 노드·포트가 모두 같은 선언을
+      본다. ``monkeypatch`` 라 검사가 끝나면 원래 파일로 돌아간다.
+
+      전역 교체를 여기서 쓰는 이유는, 사유가 **포트와 ③ 노드 두 곳**을 지나기 때문이다
+      (``quotes.quote_block_reason`` ← ``nodes/draft_plan``). 모듈 하나만 갈아 끼우면
+      포트는 조회를 안 하는데 사유는 옛 선언으로 만들어져 **둘이 어긋난다** — 실제로
+      그 상태를 재현해 확인했다.
+
+    🔴 **배추로 시험하는 이유.** 실제로 ``null`` 인 품목(피마늘)은 mock 데이터가 없다.
+      "선언이 ``null`` 이다" 는 위 ``test_spec_for_item_returns_none_for_the_unsettled_item``
+      이 **실 파일로** 잠그고, "그러면 무슨 일이 나는가" 는 여기가 잠근다. 둘이 짝이다.
+    """
+    original = CONSTRAINTS_PATH.read_text(encoding="utf-8")
+    swapped = tmp_path / "constraints.yaml"
+    declared = (
+        '    배추: {packages: ["그물망", "파렛트"], '
+        'unit_weight_kg: 10, label: "그물망·파렛트 10kg"}'
+    )
+    replaced = original.replace(declared, "    배추: null", 1)
+    assert replaced != original, "배추 규격 줄을 못 찾았다 — 선언이 바뀌면 이 검사부터 고친다"
+    swapped.write_text(replaced, encoding="utf-8")
+    monkeypatch.setattr("app.purchase_agent.config.CONSTRAINTS_PATH", swapped)
+
+    def never(query, params=None):
+        raise AssertionError("규격이 null 인데 조회했다 — 아무 규격으로나 물어보면 안 된다")
+
+    proposal = run_purchase_agent(
+        "배추", INTEGRATION, quotes=quotes.auction_quote_source(fetch=never)
+    )
+
+    assert proposal["scenarios"] == []
+    reason = proposal["no_proposal_reason"]
+    assert "조회 규격이 아직 정해지지 않아" in reason
+    # 원인이 갈려야 한다 — 휴장·미거래 사유로 덮이면 받는 쪽이 ML·시장 문제로 읽는다
+    assert "낙찰 기록이 없다" not in reason
+
+
 def test_every_purchase_item_is_declared_even_when_the_answer_is_null() -> None:
     """4품목이 모두 표에 있어야 한다. 키가 **없는** 것과 값이 **null**인 것은 다르다 —
     없으면 "빠뜨렸다"이고 null이어야 "미결이라 안 읽는다"가 된다."""
