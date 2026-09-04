@@ -154,6 +154,7 @@ def test_valid_debt_contract_resolves_with_zero_events_in_horizon(
             return_value=finance_debt_policy,
         ),
         patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}._fetch_open_payable_events", return_value=([], [])),
     ):
         context = get_current_finance_runtime_context()
     assert context.debt_policy == finance_debt_policy
@@ -171,6 +172,7 @@ def test_missing_or_malformed_debt_contract_is_unresolved(
         patch(f"{_STATE_REPO}.get_active_finance_policy", return_value=finance_policy),
         patch(f"{_STATE_REPO}.get_active_finance_debt_policy", side_effect=debt_error),
         patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}._fetch_open_payable_events", return_value=([], [])),
     ):
         context = get_current_finance_runtime_context()
     assert context.debt_policy is None
@@ -189,6 +191,7 @@ def test_debt_principal_mismatch_is_unresolved(
             return_value=finance_debt_policy,
         ),
         patch(f"{_STATE_REPO}._fetch_scheduled_rows", return_value=[]),
+        patch(f"{_STATE_REPO}._fetch_open_payable_events", return_value=([], [])),
     ):
         context = get_current_finance_runtime_context()
     assert context.unresolved_sources == ("DEBT_SERVICE",)
