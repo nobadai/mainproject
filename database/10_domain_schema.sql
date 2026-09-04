@@ -4269,6 +4269,14 @@ ALTER TABLE ONLY haetdeul.finance_states
 
 
 --
+-- Name: finance_states uq_finance_states_axis_date; Type: CONSTRAINT; Schema: haetdeul; Owner: -
+--
+
+ALTER TABLE ONLY haetdeul.finance_states
+    ADD CONSTRAINT uq_finance_states_axis_date UNIQUE (sim_run_id, financing_mode, state_date);
+
+
+--
 -- Name: forecasts forecasts_pkey; Type: CONSTRAINT; Schema: haetdeul; Owner: -
 --
 
