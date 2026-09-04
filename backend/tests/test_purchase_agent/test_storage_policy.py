@@ -60,10 +60,30 @@ def test_policy_is_picked_by_item_not_by_position() -> None:
     assert picked["operational_limit_days"] == 10, "무(14)를 집었다면 위치로 고른 것이다"
 
 
-def test_items_outside_our_scope_are_ignored() -> None:
-    """건고추(90)는 목록에 있어도 매입 품목이 아니다 — 정책을 읽지 않는다."""
+@pytest.mark.parametrize(
+    ("item", "days"),
+    [("건고추", 90), ("피마늘", 30)],
+    ids=["계약에_없던_품목", "계약에서_빠진_품목"],
+)
+def test_items_outside_our_scope_are_ignored(item: str, days: int) -> None:
+    """목록에 있어도 매입 품목이 아니면 정책을 읽지 않는다.
+
+    🔴 **피마늘이 없으면 이 검사가 목록의 폭을 안 잰다** (2026-09-05).
+      ``PURCHASE_ITEMS`` 를 4품목(피마늘 포함)으로 되돌려도 **한 건도 울지 않았다**
+      (실측 · ``dev@974fcba`` · ``pytest tests/test_purchase_agent`` · 변이 전후 모두
+      ``1154 passed``). 건고추 하나만 보면 목록이 셋이든 넷이든 답이 같기 때문이다.
+      ``#216`` 이 계약에서 뺀 품목을 같이 걸어야 **폭**이 잠긴다.
+
+    ⚠️ **물류는 둘 다 그대로 보낸다** — 재고 축을 안 좁히는 것이 계약이다
+      (``app/contracts/core.py`` ``ITEMS`` 주석 · ``#42``). 거르는 것은 우리 몫이고,
+      그 한 줄이 ``allocate_sourcing.PURCHASE_ITEMS`` 다.
+    """
+    assert {"item": item, "operational_limit_days": days, "medium_grade_factor": 0.6} in (
+        REAL_POLICIES
+    ), "픽스처에 그 행이 없으면 이 검사는 아무것도 안 잰다"
+
     inventory = {"item_storage_policies": REAL_POLICIES}
-    assert item_storage_policy(inventory, "건고추") is None
+    assert item_storage_policy(inventory, item) is None
 
 
 def test_shelf_days_use_the_policy_of_this_item() -> None:
