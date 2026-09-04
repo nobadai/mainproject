@@ -284,17 +284,30 @@ def _scale_split(
     """
     ★ v1.2.1 — expected_arrival_date 를 반드시 함께 넘긴다.
 
-      축소 대상은 **수량뿐이다.** 도착일은 클리핑으로 변하지 않는다.
+      도착일은 클리핑으로 변하지 않는다.
       v1.2 까지는 이 값을 넘기지 않아 SplitLeg 가 기본값 None 으로 재생성됐고,
       **클리핑이 일어나지 않은 안에서도 회차별 도착일이 사라졌다.**
       그 결과 N4 미확정 구간에서 check_occupancy_by_date() 가 전 회차를 스킵해
       창고 점유 검사가 통째로 무검사가 됐다 (§3.4.5-③ 위반).
+
+    ★ v0.4 — 축소 대상은 **수량과 금액**이다. 금액을 안 줄이면 ClipResult 가 이미
+      적어 둔 v0.1 실패가 금액 축에서 그대로 재현된다 — *"split_plan 이 원안 그대로
+      남아 삼중 일치가 깨지고, 클리핑이 발생하는 모든 날이 보류로 끝난다."*
+
+      배율은 `qty_kg` 와 **같은 품목별 factor** 다. `_scale_sourcing` 도 같은 factor 를
+      쓰므로, 품목마다 배율이 다른 클리핑에서도 Σsplit 금액과 Σsourcing 금액이 정확히
+      같은 비율로 줄어 §7 의 품목별 금액 변이 유지된다.
+
+    ⚠️ 반올림 자리가 다르다 — 수량은 소수 3자리, 금액은 원 단위라 2자리다.
     """
     return tuple(
         SplitLeg(
             leg.offset_days,
             {i: round(v * factor.get(i, 1.0), 3) for i, v in leg.qty_kg.items()},
             leg.expected_arrival_date,
+            None
+            if leg.amount_krw is None
+            else {i: round(v * factor.get(i, 1.0), 2) for i, v in leg.amount_krw.items()},
         )
         for leg in legs
     )

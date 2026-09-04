@@ -777,6 +777,24 @@ class SplitLeg:
     qty_kg: Mapping[ItemCode, float]
     expected_arrival_date: date | None = None
 
+    amount_krw: Mapping[ItemCode, float] | None = None
+    """회차별 금액. **매입이 보낸다** — 마스터도 오케도 계산하지 않는다.
+
+    ★ 스칼라가 아니라 `qty_kg` 와 같은 **품목별 매핑**이다. 근거 둘.
+
+    ```text
+    ① 원장이 요구한다    purchase_items 는 (회차, 품목) 마다 한 줄이고
+                         line_amount_krw 가 NOT NULL 이다. 회차당 스칼라 하나로는
+                         그 줄을 못 채운다
+    ② 클리핑이 정확해진다 클리핑 배율(factor)이 품목별이라, 금액도 품목별이어야
+                         축소가 sourcing 과 정확히 같은 비율로 간다
+    ```
+
+    ★ **기본값이 `None` 이다. `0.0` 이나 빈 매핑으로 채우지 않는다** — 없는 것과
+      0 원은 다르다 (§1.2-10). 매입이 아직 이 값을 안 보내므로 오늘은 늘 None 이고,
+      `check_triple_identity` 의 금액 변은 통째로 건너뛴다.
+    """
+
 
 @dataclass(frozen=True)
 class SourcingLot:
@@ -1206,6 +1224,7 @@ def check_triple_identity(
     """
         수량:  total == Σ split == Σ sourcing
         금액:  total_amount == Σ(sourcing.qty × grade_unit_price)   ← v0.2 신설
+        금액:  total_amount == Σ split == Σ sourcing (품목별)       ← v0.4 신설
 
     위반 사유 리스트를 반환한다. 빈 리스트면 통과.
 
@@ -1213,6 +1232,13 @@ def check_triple_identity(
       계약서 §6.4 — 룰은 공유, 입력만 분리.
     ★ Critic 은 **원안이 아니라 클리핑된 값**에 대해 호출해야 한다.
       원안에 대고 검사하면 클리핑되는 날마다 FAIL 이 난다 (B1).
+
+    ★ **split 금액 변은 `SplitLeg.amount_krw` 가 실려 있을 때만 돈다.** 매입이 회차별
+      금액을 아직 안 보내므로 오늘은 통째로 건너뛰고, 그것이 위반이 아니다. 값이 오면
+      그때부터 `Σ 회차금액 ≠ total_amount_krw` 가 잡힌다 — 그 어긋남이 그대로 원장의
+      `purchases.total_amount_krw` 와 `purchase_items.line_amount_krw` 로 간다.
+    ★ 금액 허용 오차는 수량과 따로 두지 않고 기존 `tol_krw`(IDENTITY_TOL_KRW) 를 쓴다.
+      같은 금액 축에 상수가 둘이면 왜 다른지를 아무도 모른다.
     """
     problems: list[str] = []
 
@@ -1230,6 +1256,54 @@ def check_triple_identity(
         a = sum(lot.amount_krw for lot in sourcing_plan)
         if abs(a - amount_krw) > tol_krw:
             problems.append(f"금액 항등식 위반: total {amount_krw:,.0f}원 ≠ Σsourcing {a:,.0f}원")
+
+    problems.extend(_split_amount_problems(split_plan, sourcing_plan, amount_krw, tol_krw))
+
+    return problems
+
+
+def _split_amount_problems(
+    split_plan: Sequence[SplitLeg],
+    sourcing_plan: Sequence[SourcingLot],
+    amount_krw: float | None,
+    tol_krw: float,
+) -> list[str]:
+    """`total ↔ split` 의 **금액 변**. v0.4 신설.
+
+    수량 변은 total·split·sourcing 세 축을 다 보는데 금액은 sourcing 한 변만 봤다.
+    그 사이로 `Σ 회차금액 ≠ total_amount_krw` 가 아무도 안 보는 채로 지나갔다.
+
+    ⚠️ 금액이 **한 회차도 안 실렸으면 전부 건너뛴다.** 오늘 상태가 그것이고 위반이 아니다.
+    """
+    if not split_plan:
+        return []
+
+    loaded = [leg.amount_krw for leg in split_plan if leg.amount_krw is not None]
+    if not loaded:
+        return []
+    if len(loaded) < len(split_plan):
+        # 🔴 같은 제안에서 회차마다 있고 없고는 자기모순이다. 실린 회차만 더해 총액과
+        #   비교하면 **출처가 섞인 값**으로 판정하게 된다 — 섞지 않고 위반으로 본다.
+        partial = (
+            f"회차 금액이 {len(split_plan)}회차 중 {len(loaded)}회차만 실려 있다"
+            " — 출처를 섞지 않는다"
+        )
+        return [partial]
+
+    problems: list[str] = []
+
+    if amount_krw is not None:
+        s = sum(sum(leg.values()) for leg in loaded)
+        if abs(s - amount_krw) > tol_krw:
+            problems.append(f"금액 항등식 위반: total {amount_krw:,.0f}원 ≠ Σsplit {s:,.0f}원")
+
+    if sourcing_plan:
+        items = {i for leg in loaded for i in leg} | {lot.item for lot in sourcing_plan}
+        for i in sorted(items):
+            s = sum(leg.get(i, 0.0) for leg in loaded)
+            g = sum(lot.amount_krw for lot in sourcing_plan if lot.item == i)
+            if abs(s - g) > tol_krw:
+                problems.append(f"금액 항등식 위반 [{i}]: Σsplit {s:,.0f}원 ≠ Σsourcing {g:,.0f}원")
 
     return problems
 

@@ -22,6 +22,7 @@ commitment.py — 승인된 매입안 → **확정 입고 약정** (H1)
   ```text
   도착일 = 매입 실행일 + inbound_lead_days     N4 는 물류가 준다
   회차 수량 = 안이 적은 회차 수량 그대로        재계산하지 않는다
+  회차 금액 = 안이 적은 회차 금액 그대로        총액을 회차 수로 나누지 않는다
   ```
 
   두 값 다 부서가 낸 것이고, 마스터는 **자리를 옮기기만** 한다 (§3.2.2).
@@ -72,6 +73,17 @@ class ArrivalLeg:
     purchase_date: date
     seq: int
 
+    amount_krw: float | None = None
+    """회차 금액. **매입이 보낸다** — 마스터가 총액을 회차 수로 나눠 만들지 않는다.
+
+    ★ 여기는 스칼라다. 약정 하나가 품목 하나라 회차마다 품목이 하나뿐이다
+      (`__post_init__` 이 `leg.item != self.item` 을 이미 막는다).
+      `SplitLeg.amount_krw` 가 품목별 매핑인 것과 모순이 아니라, 축이 이미 좁혀진 자리다.
+
+    ★ `None` 이 기본이고 매입이 값을 보내기 전까지는 늘 None 이다.
+      0.0 으로 채우지 않는다 — 없는 것과 0 원은 다르다 (§1.2-10).
+    """
+
 
 @dataclass(frozen=True)
 class ApprovedCommitment:
@@ -107,6 +119,16 @@ class ApprovedCommitment:
             )
         if any(leg.item != self.item for leg in self.arrival_schedule):
             raise CommitmentNotBuildable("회차 품목이 약정 품목과 다르다.")
+        # ★ 금액도 수량과 같다 — 전 회차에 실려 있을 때만 본다. 하나도 없으면 오늘
+        #   상태이므로 검사하지 않는다. 허용 오차를 수량과 같은 1e-6 으로 둔 것은
+        #   같은 자리에서 다른 상수를 쓰면 왜 다른지를 아무도 모르기 때문이다.
+        loaded = [leg.amount_krw for leg in self.arrival_schedule]
+        if all(a is not None for a in loaded):
+            drift = self.total_amount_krw - sum(a for a in loaded if a is not None)
+            if abs(drift) > 1e-6:
+                raise CommitmentNotBuildable(
+                    f"회차 금액 합이 총액과 어긋난다 (차 {drift:g}원) — 마스터가 맞춰 주지 않는다."
+                )
 
     @property
     def first_arrival(self) -> date | None:
@@ -182,6 +204,24 @@ def _legs(
             " 일정을 만들지 않았다 — 출처를 섞어 만들지 않는다."
         )
         return (), (note,)
+    # ★ **금액도 도착일과 같은 부분 공급 규칙을 따른다.** 같은 제안에서 회차마다 있고
+    #   없고는 자기모순이고, 섞어 만들면 출처가 섞인 값이 원장(purchase_items)으로 간다.
+    #
+    #   ⚠️ 다만 **버리는 것이 다르다.** 도착일이 없으면 회차가 성립하지 않아 일정을
+    #     통째로 버리지만, 금액이 없어도 회차는 선다 — 오늘이 정확히 그 상태다.
+    #     그래서 금액만 안 싣고 일정은 만든다.
+    amounts = [_number(raw.get("amount_krw")) for raw in split_plan if isinstance(raw, Mapping)]
+    amount_filled = sum(1 for a in amounts if a is not None)
+    carry_amounts = bool(amounts) and amount_filled == len(amounts)
+    amount_notes: tuple[str, ...] = ()
+    if 0 < amount_filled < len(amounts):
+        amount_notes = (
+            (
+                f"회차 금액이 {len(amounts)}회차 중 {amount_filled}회차만 실려 있어"
+                " 금액을 싣지 않았다 — 출처를 섞어 만들지 않는다."
+            ),
+        )
+
     if filled and filled == len(supplied):
         lead = 0.0  # 계산 안 함 — 아래 게이트만 지나가는 무해한 값. 회차마다 매입 값을 쓴다
     elif lead is None:
@@ -228,11 +268,12 @@ def _legs(
                 arrival_date=eta,
                 purchase_date=purchase_date,
                 seq=int(raw.get("seq") or index),
+                amount_krw=_number(raw.get("amount_krw")) if carry_amounts else None,
             )
         )
     if not legs:
         return (), ("분할 계획이 비어 회차별 입고 일정을 만들지 못했다.",)
-    return tuple(legs), ()
+    return tuple(legs), amount_notes
 
 
 def _number(value: Any) -> float | None:
