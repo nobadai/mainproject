@@ -451,6 +451,12 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
 
     ``quotes``는 그 시세의 공급자다 (#70). ``None``이면 mock 이고, 실데이터로 돌리려면
     ``quotes.auction_quote_source()``를 넘긴다 — 환경변수가 아니라 **명시 주입**이다.
+
+    ⚠️ **#228(2026-09-03) 이후로 이 문장은 pytest 안에서만 참이다.** 운영 경로에서
+    mock 포트를 부르면 ``MockNotAllowed`` 로 막힌다 (``ports.py`` —
+    ``PYTEST_CURRENT_TEST`` 또는 ``sys.modules`` 로 판단). **실운영 등록은
+    ``main.py`` 가 실 공급자를 꽂는다** (#226 ·
+    ``partial(purchase_port, quotes=auction_quote_source())``).
     """
     from app.purchase_agent import ports
 
@@ -868,6 +874,10 @@ def purchase_port(
 
     ★ 인자 기본값을 mock 으로 남겨 둔 이유는 테스트다 — 결정론 스위트가 DB 없이 돈다.
       실운영 기본값은 등록 자리에서 정한다.
+
+      ⚠️ **그 기본값은 pytest 안에서만 닿는다** (#228 · 2026-09-03). 운영 경로에서
+      mock 포트를 부르면 ``MockNotAllowed`` 로 막히므로, 등록에서 실 공급자를
+      빠뜨려도 조용히 mock 으로 도는 일은 이제 없다 — **터진다.**
 
     ⚠️ ML ``current_price`` 와 매입 물량가중 시리즈가 일치하지 않는 것은 여전히 미결이다
       (2026-08-31 실측 · 배추 812 vs 933). 그것은 **두 값을 어떻게 병기해 보여줄지**의
