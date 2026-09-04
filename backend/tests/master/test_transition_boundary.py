@@ -11,8 +11,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from collections.abc import Iterator, Mapping
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -96,8 +96,16 @@ class 가짜전이:
         self.build_raises = build_raises
         self.persist_raises = persist_raises
 
-    def build(self, commitment: ApprovedCommitment, as_of: date | None = None) -> Any:
-        self.log.append((f"{self.name}.build", as_of))
+    def build(
+        self,
+        commitment: ApprovedCommitment,
+        *,
+        target_state_date: date,
+        purchase_ids: Mapping[int, str] | None = None,
+    ) -> Any:
+        # ★ 재무만 `purchase_ids` 를 받는다 — 물류 자리에 들어가는 대역은 안 받는다.
+        #   기본값을 둬 두 파트가 같은 대역을 쓴다.
+        self.log.append((f"{self.name}.build", target_state_date))
         if self.build_raises is not None:
             raise self.build_raises
         return f"{self.name}-row"
@@ -172,14 +180,19 @@ def test_둘_다_등록되면_한_커넥션으로_한_번_커밋한다() -> None
     assert [got for _, got in persisted] == [conn, conn], "두 파트가 같은 커넥션을 써야 한다"
 
 
-def test_재무_build_는_약정의_기준일을_받는다() -> None:
+def test_재무_build_는_상태가_설_날을_받는다() -> None:
+    """★ 재는 것은 그대로다 — 재무 `build` 가 마스터가 정한 날짜를 받는다.
+
+    ⚠️ 받는 값이 `as_of` 에서 **다음 날**로 바뀌었다 (`target_state_date`).
+      그 날짜 규칙 자체는 `test_transition_protocol.py` 가 잰다.
+    """
     log: list[tuple[str, Any]] = []
     transition.register_transition("finance", 가짜전이("finance", log))
     transition.register_transition("logistics", 가짜전이("logistics", log))
 
     transition.apply_approval(_commitment(), connect=_connect_spy(가짜커넥션(), []))
 
-    assert ("finance.build", AS_OF) in log
+    assert ("finance.build", AS_OF + timedelta(days=1)) in log
 
 
 # ── d. 터지면 되돌린다 ──────────────────────────────────────────────────
