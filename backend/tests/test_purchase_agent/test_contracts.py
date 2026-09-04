@@ -680,8 +680,10 @@ def test_ci_width_boundary_is_explicit() -> None:
     고치게 되어 **의식적인 편집**이 된다.
 
     ⚠️ **이 단언은 "코드가 설정을 읽는다"를 증명하지 않는다** (규칙 8). 실측으로 ①이
-      ``constraints`` 를 안 읽고 ``0.08`` 을 박아도 스위트 1,117건이 전부 통과했다
-      (2026-09-04). 그 증명은 ``test_mocks.test_the_verdict_follows_the_declared_threshold``
+      ``constraints`` 를 안 읽고 ``0.08`` 을 박아도 **한 건도 울지 않았다**
+      (2026-09-04 · ``dev@645a18d`` · ``pytest tests/test_purchase_agent`` ·
+      변이 전후 모두 ``1117 passed``). 그 증명은
+      ``test_mocks.test_the_verdict_follows_the_declared_threshold``
       가 한다 — 선언을 흔들고 판정이 따라 움직이는지 본다. 둘은 **짝이고, 둘 다 있어야
       한다**: 하나는 값이 조용히 바뀌는 것을, 하나는 값이 안 읽히는 것을 막는다.
 
