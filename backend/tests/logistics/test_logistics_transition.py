@@ -12,7 +12,7 @@
 """
 
 import ast
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Self
@@ -21,7 +21,9 @@ import pytest
 
 from app.logistics import transition
 from app.logistics.transition import (
+    InventoryTransition,
     LogisticsFixtureMissing,
+    LogisticsTransitionAdapter,
     build_next_inventory,
     persist_inventory,
 )
@@ -29,6 +31,8 @@ from app.master.commitment import ApprovedCommitment, ArrivalLeg
 
 AS_OF = date(2025, 12, 31)
 SIM_RUN_ID = "LOG-RUNTIME-SIM-BURNIN-202512-DAY30"
+#: 승인 다음 달력일. 마스터가 정해 `build` 로 준다 — 물류가 세지 않는다.
+TARGET_STATE_DATE = AS_OF + timedelta(days=1)
 
 
 class 가짜커서:
@@ -279,3 +283,101 @@ def test_transition_module_does_not_write_inventory_lots():
     code = source.replace(module_docstring, "", 1)
 
     assert "inventory_lots" not in code
+
+
+# ── LogisticsTransitionAdapter ──────────────────────────────────────────
+#
+# ★ 어댑터는 **얇다.** 여기서 재는 것은 계산도 SQL 도 아니고 *"인자가 제대로
+#   옮겨지는가"* 하나다 — 그 자리가 틀리면 하루 어긋난 행에 조용히 쓰인다.
+
+
+def _adapter() -> LogisticsTransitionAdapter:
+    return LogisticsTransitionAdapter(sim_run_id=SIM_RUN_ID)
+
+
+def test_adapter_build_makes_one_bundle_carrying_the_date_and_source_ref():
+    """① `build` 는 회차 낱개가 아니라 **묶음 하나**를 낸다.
+
+    🔴 회차에는 `target_state_date` 가 없다 — 낱개로 내면 `persist` 가 어느 날 행에
+       쓸지 모른다.
+    """
+    bundles = _adapter().build(_두회차(), target_state_date=TARGET_STATE_DATE)
+
+    assert len(bundles) == 1, "승인 하나가 바꾸는 fixture 행은 하나다"
+    bundle = bundles[0]
+    assert isinstance(bundle, InventoryTransition)
+    assert bundle.target_state_date == TARGET_STATE_DATE
+    assert [row.inbound_id for row in bundle.items] == [
+        "INB-H1-REQ-1-1-1",
+        "INB-H1-REQ-1-1-2",
+    ], "묶음 안의 회차는 build_next_inventory 가 낸 그대로다"
+
+
+def test_adapter_source_ref_names_the_master_approval():
+    """② `MASTER-APPROVAL:{approval_id}` 다 — 어느 승인이 이 행을 바꿨는지 남는다."""
+    bundle = _adapter().build(_두회차(), target_state_date=TARGET_STATE_DATE)[0]
+
+    assert bundle.source_ref == "MASTER-APPROVAL:H1-REQ-1-1"
+
+
+def test_adapter_empty_commitment_still_writes_confirmed_zero():
+    """③ 빈 약정도 **그날 행을 `CONFIRMED_ZERO` 로 적는다.**
+
+    ★ *"쓸 것이 없다"* 와 *"어느 행인지 모른다"* 는 다른 사실이다. 묶음이 회차 낱개면
+      빈 약정에서 시퀀스가 비어 `persist` 가 아무 일도 안 하고, 그러면 승인분이
+      없다는 우리가 아는 사실이 장부에 안 남는다.
+    """
+    adapter = _adapter()
+    conn = 가짜커넥션()
+
+    bundles = adapter.build(
+        _commitment(legs=(), total_qty_kg=500.0), target_state_date=TARGET_STATE_DATE
+    )
+    adapter.persist(conn, bundles)
+
+    assert len(bundles) == 1 and bundles[0].items == ()
+    assert "CONFIRMED_ZERO" in conn.커서.params[0]
+
+
+def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
+    """④ 🔴 **하루 어긋난 행에 쓰는 것을 잡는다.**
+
+    `as_of` 로 넘어가는 값은 승인일(`commitment.as_of`)이 아니라 마스터가 준
+    `target_state_date` 다. 재무가 같은 날짜로 `finance_states` 를 세우므로, 여기서
+    하루 앞 행에 쓰면 두 장부가 다른 날에 앉는다 — 에러 없이 갈린다.
+    """
+    adapter = _adapter()
+    conn = 가짜커넥션()
+
+    adapter.persist(
+        conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
+    )
+
+    params = conn.커서.params[0]
+    assert SIM_RUN_ID in params, "sim_run_id 를 그대로 넘겨야 WHERE 가 그 행을 찾는다"
+    assert TARGET_STATE_DATE in params
+    assert AS_OF not in params, "승인일 행에 썼다 — 재무 상태와 하루 어긋난다"
+
+
+def test_adapter_persist_does_not_commit_or_rollback():
+    """⑤ 커밋은 재무 write 와 함께 **마스터가 한 번** 한다."""
+    adapter = _adapter()
+    conn = 가짜커넥션()
+
+    adapter.persist(
+        conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
+    )
+
+    assert conn.commits == 0
+    assert conn.rollbacks == 0
+
+
+def test_adapter_passes_the_missing_fixture_error_through():
+    """★ 행이 없으면 어댑터가 삼키지 않는다 — 마스터가 `FAILED` 로 사유를 남긴다."""
+    adapter = _adapter()
+    conn = 가짜커넥션(rowcount=0)
+
+    with pytest.raises(LogisticsFixtureMissing):
+        adapter.persist(
+            conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE)
+        )

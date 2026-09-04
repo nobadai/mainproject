@@ -12,9 +12,13 @@ from fastapi import FastAPI
 from app.critic.router import router as critic_router
 from app.finance.adapter import finance_port
 from app.finance.router import router as finance_router
+from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
 from app.logistics.router import router as logistics_router
+from app.logistics.transition import LogisticsTransitionAdapter
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
+from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.quotes import auction_quote_source
@@ -55,6 +59,25 @@ register_agent("inventory", logistics_port)
 #   (2026-08-31 실측 · 배추 812 vs 933). 다만 그것은 **두 값을 어떻게 병기해 보여줄지**의
 #   문제이고, 매입단가로 무엇을 쓸지는 아니다 — 매입단가는 실제로 살 때 낼 돈이다.
 register_agent("purchase", partial(purchase_port, quotes=auction_quote_source()))
+
+# ── 승인 → 장부 상태전이 (C 형태 ⑦) ────────────────────────────────────
+#
+# 🔴 **호출이 0건이었다.** 어댑터는 재무·물류 양쪽에 다 섰는데 등록하는 줄이 없어
+#    `apply_approval` 이 매 승인마다 *"상태전이 미등록"* 으로 돌아섰다 — 사람이
+#    승인해도 장부가 안 바뀌었다. 배선은 마스터 몫이고 그 자리가 여기다.
+#
+# ★ **위의 `register_agent` 와 다른 등록소다.** 저쪽은 **부를 대상**(에이전트)을,
+#   이쪽은 **장부를 바꿀 방법**을 담는다. 한 사전에 섞으면 "어댑터가 없다" 와
+#   "전이가 없다" 가 같은 문장으로 나가는데, 둘은 다른 사실이다.
+#
+# 🔴 **`sim_run_id` 는 마스터가 정한다.** `persist_inventory` 의 WHERE 가 그 값을
+#    쓰지만 *"어느 실행의 장부인가"* 는 물류 사실이 아니다. 물류 모듈에 상수로
+#    박으면 실행이 둘이 되는 날 물류 코드를 고쳐야 하므로 여기서 눈에 보이게 준다.
+#    값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 매입 원장
+#    (`ledger.sim_run_id_for`)도 같은 상수를 가리킨다 — 새로 만들지 않는다.
+register_transition("finance", FinanceTransitionAdapter())
+register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
+
 app.include_router(critic_router)
 app.include_router(sales_router)
 

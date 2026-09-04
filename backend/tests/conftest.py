@@ -40,7 +40,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from app.master import wiring
+from app.master import transition, wiring
 
 
 @pytest.fixture(autouse=True)
@@ -55,3 +55,28 @@ def 전역_에이전트_레지스트리를_되돌린다() -> Iterator[None]:
         yield
     finally:
         wiring.restore(saved)
+
+
+@pytest.fixture(autouse=True)
+def 전역_전이_등록소를_되돌린다() -> Iterator[None]:
+    """전이 등록소도 같은 자리에서 샌다 — **끝나면 원래대로**.
+
+    🔴 **위 레지스트리와 똑같은 함정이다.** `app/master/transition._TRANSITIONS` 도
+       프로세스 전역이고 등록은 `app/main.py` 가 **import 시점에 한 번** 한다.
+       `transition.reset()` 을 부른 테스트가 그대로 나가면 그 프로세스에서 **영영
+       빈 채로** 남는다 — 이미 import 된 `app.main` 은 다시 등록되지 않는다.
+
+    ⚠️ 전이 등록이 0건이던 동안에는 비워도 비운 티가 안 났다. 등록이 서는 순간
+       (`#272`) 부터 이 새는 자리가 실제로 다른 파트 검사에 닿는다.
+
+    ★ `wiring` 과 달리 `snapshot`/`restore` 가 없어 여기서 `registered()` 로 뜨고
+      `reset()` + `register_transition()` 으로 되돌린다 — 마스터 모듈에 검사 전용
+      함수를 더하지 않는다.
+    """
+    saved = dict(transition.registered())
+    try:
+        yield
+    finally:
+        transition.reset()
+        for part, impl in saved.items():
+            transition.register_transition(part, impl)
