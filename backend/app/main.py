@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from app.critic.router import router as critic_router
 from app.finance.adapter import finance_port
+from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
@@ -86,12 +87,17 @@ register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_S
 #    방법**을 담고 이쪽은 **하루가 넘어가는 방법**을 담는다. 한 사전에 섞으면 전이가
 #    없는 것과 하루 넘김이 없는 것이 같은 문장으로 나가고, 둘은 다른 사실이다.
 #
-# ⚠️ **물류만 등록한다. 재무는 미회신이다.** 미등록은 오류가 아니라 상태다 —
-#    `open_day` 가 `missing: [finance]` 를 달고 물류만 걷는다.
-#
 # ★ **생성 인자가 없다.** 위 `LogisticsTransitionAdapter` 와 다른 자리다. 하루 넘김은
 #   `sim_run_id` 를 **정하지 않고 전날 행에서 물려받는다** — 그래서 마스터가 줄 값이 없다.
+#
+# 🔴 **재무를 먼저 켤 수 없었던 이유가 DB 였다 (2026-09-05).** `#285` 가 일별 상태를
+#    `ON CONFLICT (sim_run_id, financing_mode, state_date)` 로 누적하는데, 실 DB 에 그
+#    UNIQUE 가 없어 승인 전이가 그 자리에서 터졌다 (실측:
+#    *"there is no unique or exclusion constraint matching the ON CONFLICT
+#    specification"*). `database/finance/finance_state_daily_unique.sql` 을 적용한 뒤
+#    켰다 — **마이그레이션과 이 두 줄은 짝이다.**
 register_day_opening("logistics", LogisticsDayOpening())
+register_day_opening("finance", FinanceDayOpening())
 
 app.include_router(critic_router)
 app.include_router(sales_router)
