@@ -1,7 +1,28 @@
 # `database/` — 스키마 파일과 실행 순서
 
-> 마지막 갱신 2026-08-30 · 검증: 빈 PostgreSQL 17 컨테이너에 아래 순서로 세워
-> **38표 · 8뷰**가 서는 것을 확인했습니다.
+> 마지막 갱신 2026-09-05
+
+**검증 결과는 시점마다 다릅니다. 셋을 섞어 읽지 마십시오.**
+
+| 시점 | 무엇을 세웠나 | 실측 결과 |
+|---|---|---|
+| 2026-08-30 | 빈 PostgreSQL 17 컨테이너 · 당시 §1 순서(`30_` **없음**) | **38표 · 8뷰** |
+| 2026-09-05 | `30_logistics_wms_schema.sql` **하나가 만드는 물류 객체** | **21표 · 2뷰** |
+| 2026-09-05 | 현재 §1 순서 전체(`30_` **포함**) | **59표 · 10뷰** |
+
+- **38표 · 8뷰는 2026-08-30 의 옛 결과입니다.** `30_` 추가 후의 총수가 아닙니다.
+- 59표 · 10뷰는 §1 에 적힌 9개 파일을 임시 스키마에 실제로 세워 센 값입니다
+  (2026-09-05 · 방법은 §6). §1 에 없는 파일(`master_agent_runs.sql` ·
+  `ml_calendar_days.sql` 등)은 여기 포함되지 않습니다 — 그래서 공유 DB 의
+  62표 · 11뷰와 다릅니다(아래 §1 끝 주석).
+- `30_logistics_wms_schema.sql` 이 만드는 21표 · 2뷰는 실 DB 카탈로그와
+  컬럼·타입·NULL·DEFAULT·제약·인덱스·주석·뷰정의를 1:1 대조해 **완전히 같음**을
+  확인했습니다.
+
+🔴 **`30_logistics_wms_schema.sql` 은 공유 외부 DB(`haetdeul`)에 이미 존재하는 WMS
+구조를 저장소로 회수한 파일이며, 그 DB 에 다시 적용하는 것이 이 파일의 목적이
+아닙니다.** 목적은 *저장소만으로 같은 스키마를 세울 수 있게 하는 것*입니다 —
+공유 DB 는 이미 이 모양이라 돌릴 이유가 없고, 검증도 임시 스키마에서만 했습니다.
 
 ---
 
@@ -11,6 +32,7 @@
 psql "$DSN" -v ON_ERROR_STOP=1 \
   -f database/00_init_schema.sql \
   -f database/10_domain_schema.sql \
+  -f database/30_logistics_wms_schema.sql \
   -f database/orchestrator_agent_runs.sql \
   -f database/finance_agent_runs.sql \
   -f database/finance_agent_runs_v22.sql \
@@ -24,6 +46,8 @@ psql "$DSN" -v ON_ERROR_STOP=1 \
 ```text
 00_init_schema              스키마를 만든다 — 나머지가 전부 이것을 필요로 한다
 10_domain_schema            도메인 표·뷰
+30_logistics_wms_schema     ← 10_domain 보다 **뒤**. items · sim_runs ·
+                              purchase_items · sales · inventory_lots 를 FK 로 참조한다
 orchestrator_agent_runs     ← master_decisions 보다 **먼저**
 master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 (복합 FK)
 ```
@@ -31,6 +55,13 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 `*_agent_runs` 끼리는 서로를 참조하지 않아 순서가 상관없습니다.
 
 > **시드 데이터는 여기 없습니다.** 이 파일들은 스키마만 만듭니다.
+
+> ⚠️ **이 목록이 공유 DB 전체를 만들지는 않습니다.** 위 9개로 세우면 59표 · 10뷰이고
+> 공유 DB 는 62표 · 11뷰입니다(2026-09-05 실측). 차이 4개는 **저장소에 파일은 있으나
+> §1 목록에 없는** 것들입니다 — `master_agent_runs` · `ml_calendar_days` ·
+> `ml_batch_day_status` · `v_ml_batch_days`(`master_agent_runs.sql` ·
+> `ml_calendar_days.sql`). 목록에 넣을지는 **마스터·ML 파트 판단**이라 물류가
+> 여기서 고치지 않았습니다.
 
 ---
 
@@ -45,6 +76,28 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `master_decisions_run_id.sql` | `master_decisions.run_id` + 복합 FK + 인덱스 | 2026-08-30 · **팀 승인 대기** |
 | `ml_forecast_view_gate_reason.sql` | `v_ml_price_forecast` 의 `daily[]` 에 `gate_reason` 추가 | 2026-09-03 · **실 DB 적용 대기** |
 | `finance/finance_state_daily_unique.sql` | `finance_states` 의 `UNIQUE(sim_run_id, financing_mode, state_date)` · 적용 전 duplicate preflight · 기존 데이터 자동 정리 없음 | 2026-09-05 · **실 DB 적용 대기** |
+| `30_logistics_wms_schema.sql` | 물류 WMS 표 21 · 뷰 2 회수 + `inventory_lots` 컬럼 6·제약 5 · `inventory_moves` UNIQUE 1 | 2026-09-05 · **실 DB 에는 이미 있음**(회수) · 신규 구축 DB 에는 필수 |
+
+### ⚠️ `30_logistics_wms_schema.sql` 은 판을 나누지 않았습니다
+
+이 파일 하나가 **신규 구축과 기존 DB 양쪽**을 겸합니다. 나눌 수 없어서입니다 —
+두 방향의 의존이 얽혀 있습니다.
+
+```text
+uq_inventory_moves_id_lot (기존 표 ALTER)  →  inventory_move_lines (신규) 가 참조
+inbound_receipts (신규)                    →  inventory_lots FK (기존 표 ALTER) 가 참조
+```
+
+그래서 **의존 순서대로 한 파일에 담고, 모든 문장을 멱등·가산으로만** 썼습니다
+(`CREATE TABLE IF NOT EXISTS` · `ADD COLUMN IF NOT EXISTS` ·
+`CREATE INDEX IF NOT EXISTS` · 제약은 `pg_constraint` 조회로 감쌈). `DROP` 이
+한 줄도 없습니다. 위 §2 규칙이 막으려던 것(두 판이 조용히 갈리는 것)은 **판이
+하나라 성립하지 않습니다.**
+
+🔴 **`10_domain_schema.sql` 을 고치지 않았습니다.** `inventory_lots` ·
+`inventory_moves` 는 물류 소유지만 그 파일은 여러 파트의 표가 한 덩어리인 pg_dump
+스냅샷이라, 물류 변경을 거기 섞으면 같은 변경이 두 곳으로 갈립니다. 대신 30\_ 이
+`10_domain` 뒤에서 ALTER 로 더합니다 — 신규 구축도 이 경로를 지납니다.
 
 **같은 변경이 두 곳에 있습니다** — 본 DDL(신규 구축용)과 ALTER 판(이관용).
 어느 하나만 고치면 갈립니다. **둘 다 고칩니다.**
@@ -67,6 +120,7 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `master_runs_migration.sql` | 마스터 | 2026-08-27 ALTER 판 |
 | `finance_agent_runs*.sql` | 재무 | |
 | `logistics_agent_runs.sql` | 물류 | |
+| `30_logistics_wms_schema.sql` | **물류** | WMS 표 21 · 뷰 2 회수 (2026-09-04 cutover 분). 다른 파트 표는 FK 로 가리키기만 한다 |
 | `25_logistics_runtime_fixture_20260102.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행. 다른 파트는 읽기만 |
 | `27_logistics_runtime_fixture_20260105_20260106.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행 · 관통 실행일 쌍. 다른 파트는 읽기만 |
 | `sales_agent_runs.sql` | 판매 | |
@@ -149,3 +203,26 @@ docker exec ddl-check psql -U postgres -c "SELECT count(*) FROM information_sche
 ```bash
 docker rm -f ddl-check
 ```
+
+### 컨테이너를 못 쓸 때 — 임시 스키마에 세워 보고 되돌립니다
+
+`30_logistics_wms_schema.sql` 은 이 방법으로 검증했습니다(2026-09-05). 스크립트의
+`haetdeul.` 을 임시 스키마 이름으로 바꿔 한 트랜잭션 안에서 세우고, 실 DB 카탈로그와
+대조한 뒤 `ROLLBACK` 합니다.
+
+```text
+① 임시 스키마 + 다른 도메인 PK-only stub (items · partners · sim_runs ·
+   purchase_items · sales · sale_items)
+② inventory_lots · inventory_moves 는 **저장소 10_domain 원문**으로 세운다
+   → 30_ 의 ALTER 가 실제로 실행되고 "신규 구축 = 실 DB" 가 증명된다
+③ 대상 스크립트 실행 → 실 DB 와 컬럼·타입·NULL·DEFAULT·제약·인덱스·주석·뷰 대조
+④ 한 번 더 실행해 멱등 확인
+⑤ ROLLBACK
+```
+
+🔴 **`haetdeul` 을 건드리지 않습니다** — 이름을 바꿔 돌리므로 FK 가 `haetdeul` 표를
+가리키지 않고, 따라서 잠금도 걸리지 않습니다. `haetdeul` 은 **세는 데만** 읽습니다.
+
+**총수(59표 · 10뷰)도 같은 방법으로 쟀습니다** — §1 의 9개 파일을 순서대로 임시
+스키마에 세우고 `pg_class` 를 센 뒤 `ROLLBACK` 했습니다. 상단 표의 숫자는 전부
+이렇게 실측한 값이며, 계산으로 더한 값이 아닙니다.
