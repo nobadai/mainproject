@@ -164,22 +164,68 @@ def _run(as_of: date):
 
 
 def test_run_procurement_이_봉투를_만들어_매입에_준다(적재를_막는다: None):
-    """🔴 **라이브 경로다.** 단위 검사가 아니라 `run_procurement` 이 만든 값이다.
-
-    ★ conftest 가 꽂는 가짜 달력은 **공휴일이 하나도 없다** — 그래서 여기 실리는 것은
-      주말뿐이고, 그 사실이 이 검사를 *"안 돌았는데 초록"* 에서 지켜 준다:
-      **주말이 하나도 없으면 목록이 빈다.**
-    """
+    """🔴 **라이브 경로다.** 단위 검사가 아니라 `run_procurement` 이 만든 값이다."""
     seen = _wire_capturing()
     _run(AS_OF)
 
     assert seen, "매입이 불려야 한다"
     envelope = seen[0]["execution_calendar"]
-
     assert envelope["horizon_end"] == (AS_OF + timedelta(days=MAX_WALK_DAYS)).isoformat()
-    assert "2026-01-10" in envelope["non_execution_days"]  # 토요일
-    assert "2026-01-11" in envelope["non_execution_days"]  # 일요일
-    assert "2026-01-12" not in envelope["non_execution_days"]  # 월요일
+
+
+def test_봉투가_개장_축을_타고_온다_요일이_아니다(
+    monkeypatch: pytest.MonkeyPatch, 적재를_막는다: None
+):
+    """🔴 **이 파일의 핵심이다.** 통로가 뚫렸는지가 아니라 **어느 축이 왔는지**를 잰다.
+
+    ★ 토요일을 열고 수요일을 닫은 가짜를 꽂는다. 요일 축이 조금이라도 섞여 있으면
+      토요일이 목록에 들어와 여기가 운다 — `is_open` 만 보는 것을 잠그는 자리다.
+    """
+    토요일 = date(2026, 1, 10)
+    수요일 = date(2026, 1, 14)
+
+    class _토요일은_열고_수요일은_닫는_시장:
+        def is_market_open(self, day: date) -> bool:
+            return day != 수요일
+
+    monkeypatch.setattr(
+        "app.master.service.get_market_calendar", lambda: _토요일은_열고_수요일은_닫는_시장()
+    )
+    seen = _wire_capturing()
+    _run(AS_OF)
+
+    days = seen[0]["execution_calendar"]["non_execution_days"]
+    assert days == [수요일.isoformat()], f"개장 축이 아니라 다른 축이 왔다 — {days}"
+    assert 토요일.isoformat() not in days, "토요일을 요일로 밀었다"
+
+
+def test_문_앞_축과_봉투_축이_따로_돈다(monkeypatch: pytest.MonkeyPatch, 적재를_막는다: None):
+    """★ **두 축이 다른 물음에 답한다.**
+
+    ```text
+    문 앞   "ML 예측이 있어 판단을 도는가"   holiday_nm + 주말
+    봉투    "시장에서 살 수 있는가"          is_open
+    ```
+
+    `as_of` 를 공휴일로 만들면 문 앞이 접고, 장은 계속 서게 둬도 그 판단이 안 바뀐다 —
+    한 축이 다른 축을 덮어쓰지 않는다는 뜻이다.
+    """
+
+    class _언제나_공휴일:
+        def is_holiday(self, day: date) -> bool:
+            return True
+
+    class _언제나_개장:
+        def is_market_open(self, day: date) -> bool:
+            return True
+
+    monkeypatch.setattr("app.master.service.get_calendar", lambda: _언제나_공휴일())
+    monkeypatch.setattr("app.master.service.get_market_calendar", lambda: _언제나_개장())
+    seen = _wire_capturing()
+    response = _run(AS_OF)
+
+    assert response.end_code == "E4_NOT_STARTED", "문 앞이 공휴일 축으로 접어야 한다"
+    assert not seen, "안 도는 날에는 매입을 안 부른다"
 
 
 def test_달력이_끊기면_봉투를_안_싣고_못_봤다고_남긴다(
@@ -187,17 +233,17 @@ def test_달력이_끊기면_봉투를_안_싣고_못_봤다고_남긴다(
 ):
     """🔴 **반쪽 달력보다 없는 달력이 낫다.**
 
-    덮인 데까지만 실으면 `horizon_end` 가 거짓말을 한다 — 받는 쪽은 그 날까지 다
-    봤다고 읽는다. 안 실으면 매입은 오늘까지의 동작으로 돌고 **그 사실이 남는다.**
+    덮인 데까지만 실으면 `horizon_end` 가 거짓말을 합니다 — 받는 쪽은 그 날까지 다
+    봤다고 읽습니다. 안 실으면 매입은 오늘까지의 동작으로 돌고 **그 사실이 남습니다.**
     """
 
-    class 지평_끝이_없는_달력:
-        def is_holiday(self, day: date) -> bool:
+    class 지평_끝이_없는_시장:
+        def is_market_open(self, day: date) -> bool:
             if day > date(2026, 1, 20):
                 raise CalendarNotCovered(f"{day.isoformat()} 이 달력에 없다")
-            return False
+            return True
 
-    monkeypatch.setattr("app.master.service.get_calendar", lambda: 지평_끝이_없는_달력())
+    monkeypatch.setattr("app.master.service.get_market_calendar", lambda: 지평_끝이_없는_시장())
     seen = _wire_capturing()
     response = _run(AS_OF)
 
@@ -216,13 +262,13 @@ def test_문_앞_판정은_통과하는데_봉투만_못_싣는_경우가_있다
     E4 로 접히면 달력 한 칸 때문에 매입 판단이 멈춘 것이 된다.
     """
 
-    class 오늘만_아는_달력:
-        def is_holiday(self, day: date) -> bool:
+    class 오늘만_아는_시장:
+        def is_market_open(self, day: date) -> bool:
             if day > AS_OF:
                 raise CalendarNotCovered(f"{day.isoformat()} 이 달력에 없다")
-            return False
+            return True
 
-    monkeypatch.setattr("app.master.service.get_calendar", lambda: 오늘만_아는_달력())
+    monkeypatch.setattr("app.master.service.get_market_calendar", lambda: 오늘만_아는_시장())
     seen = _wire_capturing()
     response = _run(AS_OF)
 
