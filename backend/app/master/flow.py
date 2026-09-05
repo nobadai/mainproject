@@ -288,6 +288,7 @@ class ProcurementFlow:
         input_sources: Mapping[str, str] | None = None,
         mocked_inputs: Sequence[str] = (),
         approved_commitments: Sequence[Mapping[str, Any]] = (),
+        execution_calendar: Mapping[str, Any] | None = None,
     ) -> None:
         self.runner = runner
         self.verifier = verifier
@@ -313,6 +314,25 @@ class ProcurementFlow:
         #:   `forecast`·`confirmed_orders` 와 같은 성격이고, 루프에서 누적되는
         #:   `suggested_adjustments` 와 다르다 (매입 지적 2026-09-03).
         self.input_sources: Mapping[str, str] = dict(input_sources or {})
+
+        #: 🔴 **실행일 봉투. 매입이 회차일을 밀 때 쓰는 값이다** (2026-09-05).
+        #:
+        #:   실측으로 `app/purchase_agent/` 에 요일·공휴일 판정이 **0곳**이다. 회차일은
+        #:   `as_of + offset` 으로만 만들어져서, `as_of` 가 화요일이고 3분할 D=12 면
+        #:   2회차가 **토요일**에 선다.
+        #:
+        #: ★ **인용으로는 안 풀린다** — 매입은 봉투만 받는 파트라 `is_execution_day` 에
+        #:   `calendar` 를 못 준다. 달력 없이 인용하면 주말만 피하고, 그건 매입이 애초에
+        #:   걱정한 자리다 (*"설·추석에 같은 일이 난다"*).
+        #:
+        #: ★ **부서 값이 아니라 마스터 값이라 `constraints` 밖이다.** `constraints` 는
+        #:   `AgentName` 으로 갈린 *"부서가 낸 것"* 이고 (`adapter.py:560` — *"N4는
+        #:   물류 payload에 있다"*), 달력의 주인은 ML → 마스터다. `forecast` ·
+        #:   `policy_values` 와 같은 자리에 둔다.
+        #:
+        #: ⚠️ `None` 이면 **안 싣는다.** 빈 매핑으로 안 채운다 — 빈 목록은 *"비영업일이
+        #:   없다"* 라는 확정이고, 못 실은 것은 *"모른다"* 다.
+        self.execution_calendar: Mapping[str, Any] | None = execution_calendar
 
         #: 🔴 **mock 에서 온 입력. 하나라도 있으면 실행을 세운다** (2026-09-03).
         #:
@@ -658,6 +678,11 @@ class ProcurementFlow:
             payload["confirmed_orders"] = dict(self.confirmed_orders)
         if self.policy_values is not None:
             payload["policy_values"] = dict(self.policy_values)
+        if self.execution_calendar is not None:
+            # ★ **`constraints` 에 안 넣는다.** 부서가 낸 값이 아니라 마스터가 만든
+            #   값이고, `constraints` 는 부서별로 갈린 자리다 (§3.2.2 의 "예외 셋" 과
+            #   같은 성격 — 마스터가 싣는 넷째다).
+            payload["execution_calendar"] = dict(self.execution_calendar)
         if self.input_sources:
             # ★ **응답 `input_sources` 와 같은 모양이다** (매입 A-1 답 · ㄴ).
             #   화면과 payload 가 같은 이름을 써야, 부서가 나중에 화면에서 본 것과
