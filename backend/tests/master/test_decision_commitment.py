@@ -210,7 +210,22 @@ def test_승인이_없으면_None_이다(monkeypatch):
 
 
 def test_번복되면_현재_결정의_약정만_나온다(monkeypatch):
-    """★ 앞 승인(보수)은 접혔다 — is_current 인 공격만 재조립된다."""
+    """★ 앞 승인(보수)은 접혔다 — is_current 인 공격만 재조립된다.
+
+    🔴 **이 상태는 지금 API 로 만들 수 없다** (`#290`). `_reject_repeat_approval` 이
+       승인 위에 다른 승인을 얹는 것을 막으므로, 승인 둘이 한 요청에 붙은 이력은
+       `record_decision` 을 지나서는 안 생긴다. 이 검사는 `DecisionOut` 을 손으로
+       만들어 그 상태를 흉내 낸다.
+
+    ⚠️ **그래서 초록인 것이 "이 경로가 돈다" 는 뜻이 아니다.** 검사는 살아 있고
+       재조립 규칙도 살아 있지만, 그 규칙을 밟는 실행이 없다.
+
+    ★ **그래도 지운다면 잃는 것이 있다.** 취소 경로(`purchases.CANCELLED` ·
+      payable 역분개 · `confirmed_inbound` 정리)가 생기면 `#290` 의 차단이
+      *"취소되지 않은 승인이 있으면 막는다"* 로 완화되고, 그때 이 상태가 다시
+      API 로 생긴다. 그날 *"번복되면 약정이 어떻게 되나"* 를 처음부터 다시 묻지
+      않으려고 남긴다.
+    """
     decisions = [
         _decision(decision_seq=1, scenario_label="보수", is_current=False),
         _decision(decision_seq=2, scenario_label="공격", is_current=True),
