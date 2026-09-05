@@ -312,7 +312,7 @@ def confirm_disposal(
     ② 출고/재고확보 전역 잠금            예약·할당과 같은 줄에 선다
     ③ 같은 폐기가 이미 있나              있으면 사실 대조 후 applied=False
     ④ 폐기대기 근거 확인                 disposal_candidate 가 참이어야 한다
-    ⑤ 두 한도 검사                      lot_disposable · item_disposable
+    ⑤ Lot 폐기 가능량 검사               살아있는 할당은 건드리지 않는다
     ⑥ _record_disposal_move → 잔량 감소
     ⑦ 잔량 0 이면 Lot status = DISPOSED
     ```
@@ -406,7 +406,7 @@ def confirm_disposal(
             " 그것은 판매불가가 아니다."
         )
 
-    # ── ⑤ 두 한도 ─────────────────────────────────────────────────────
+    # ── ⑤ Lot 폐기 가능량 ─────────────────────────────────────────────
     lot_disposable, _ = _lot_disposable_qty(conn, schema, sim_run_id=sim_run_id, lot_id=lot_id)
     if quantity > lot_disposable:
         raise InvalidDisposalRequest(
@@ -414,23 +414,8 @@ def confirm_disposal(
             f" 요청 {quantity} · 가능 {lot_disposable}."
             " 이미 출고에 배정된 몫은 없애지 않는다."
         )
-    # 🔴 **품목 축은 이제 Lot 축이 대신 지킨다 — 이 자리에서 다시 세지 않는다.**
-    #
-    #    ```text
-    #    폐기대기 Lot 은 outbound._available_lots 가 이미 뺀다
-    #    → 예약도 할당도 그 Lot 을 새로 잡을 수 없다
-    #    → 이 Lot 을 없애도 **판매 가능 재고가 줄지 않는다**
-    #    ```
-    #
-    #    ⚠️ 그래서 `item_free_stock_qty` 로 재면 **엉뚱한 Pool 을 보게 된다.** 그 값은
-    #       "다른 (판매 가능한) Lot 에 여유가 있나" 인데, 그 여유는 이 Lot 을 없애든
-    #       말든 변하지 않는다. 재면 멀쩡한 폐기가 남의 재고 사정으로 막힌다.
-    #
-    #    ★ **아직 잡혀 있는 몫은 여전히 보호된다** — 이 Lot 이 판매 가능하던 시절에
-    #      붙은 할당은 위 `lot_disposable` 이 그대로 뺀다.
-    #
-    #    ⚠️ 이것은 이 판에서 폐기대기 Lot 을 예약·할당 대상에서 **뺀 결과**다.
-    #       그 규칙이 바뀌면 여기 품목 축 검사를 되살려야 한다.
+    # ★ 품목 전체 여유량은 여기서 재지 않는다 — 폐기대기 Lot 은 판매 가용 풀에
+    #   없어서, 없애도 팔 수 있는 양이 줄지 않는다. 모듈 docstring 참고.
 
     # ── ⑥ 잔량을 줄이는 것은 원장뿐이다 ───────────────────────────────
     move = _record_disposal_move(
