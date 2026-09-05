@@ -35,7 +35,8 @@
 🔴 **`transition.py` 를 손대지 않았다.** `build_next_inventory` · `persist_inventory`
    는 승인이 부르는 경로이고 이 파일은 하루 넘김이 부르는 경로다. 두 경로가 같은 표의
    같은 행을 건드리지만 **쓰는 칸도 시점도 다르다** — 하루 넘김이 행을 세우고, 그날
-   승인이 나면 `persist_inventory` 가 그 행의 `in_transit` 두 칸을 덮는다.
+   승인이 나면 `persist_inventory` 가 그 행의 `in_transit` 두 칸에 승인분을 **더한다**
+   (2026-09-05 부터 덮어쓰기가 아니라 `inbound_id` 기준 누적이다).
 
 ⚠️ **물류가 자기 판단으로 바꿀 수 있는 자리다.** 팀 리드 지시로 마스터 파트가 옮겨
    적었을 뿐, 어느 칸을 물려받을지는 물류 소유다. 바꿀 때 `in_transit` 과

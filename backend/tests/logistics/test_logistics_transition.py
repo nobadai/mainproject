@@ -21,7 +21,11 @@ from typing import Any, Self
 import pytest
 
 from app.logistics import transition
-from app.logistics.schemas import InTransitItem, ScheduledQuantity
+from app.logistics.schemas import (
+    InTransitItem,
+    InventoryLogisticsSnapshot,
+    ScheduledQuantity,
+)
 from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import (
     InventoryTransition,
@@ -54,11 +58,13 @@ class 가짜커서:
       `rowcount=0` 은 그날 fixture 행이 없다는 뜻이라 읽기도 빈손이어야 한다.
     """
 
-    def __init__(self, rowcount: int, confirmed_inbound: object) -> None:
+    def __init__(self, rowcount: int, in_transit: object, confirmed_inbound: object) -> None:
         self.rowcount = rowcount
         self.queries: list[object] = []
         self.params: list[object] = []
-        self._행 = None if rowcount == 0 else (confirmed_inbound,)
+        # ★ 칸 순서가 `persist_inventory` 의 SELECT 와 짝이다 —
+        #   `SELECT in_transit_json, confirmed_inbound_json`.
+        self._행 = None if rowcount == 0 else (in_transit, confirmed_inbound)
 
     def __enter__(self) -> Self:
         return self
@@ -82,10 +88,19 @@ _기본 = object()
 class 가짜커넥션:
     """commit 이 **몇 번** 불렸나를 센다 — 0 이어야 한다."""
 
-    def __init__(self, rowcount: int = 1, confirmed_inbound: object = _기본) -> None:
+    def __init__(
+        self,
+        rowcount: int = 1,
+        confirmed_inbound: object = _기본,
+        in_transit: object = _기본,
+    ) -> None:
         self.commits = 0
         self.rollbacks = 0
-        self.커서 = 가짜커서(rowcount, [] if confirmed_inbound is _기본 else confirmed_inbound)
+        self.커서 = 가짜커서(
+            rowcount,
+            [] if in_transit is _기본 else in_transit,
+            [] if confirmed_inbound is _기본 else confirmed_inbound,
+        )
 
     def cursor(self) -> 가짜커서:
         return self.커서
@@ -97,6 +112,15 @@ class 가짜커넥션:
         self.rollbacks += 1
 
 
+def _is_write(query: str) -> bool:
+    """쓰기 질의인가.
+
+    ⚠️ `"UPDATE" in query` 로 재면 안 된다 — fixture 행 **잠금**이
+       `SELECT … FOR UPDATE` 라 읽기가 쓰기로 잡힌다. 잠금 문구를 걷어내고 본다.
+    """
+    return "INSERT" in query or "UPDATE" in query.replace("FOR UPDATE", "")
+
+
 def _update_params(conn: 가짜커넥션) -> tuple[Any, ...]:
     """UPDATE 로 넘어간 파라미터. **SELECT 가 앞에 하나 더 있다.**"""
     assert len(conn.커서.params) == 2, "읽기 한 번 · 쓰기 한 번이다"
@@ -105,8 +129,13 @@ def _update_params(conn: 가짜커넥션) -> tuple[Any, ...]:
     return params
 
 
-def _written_in_transit(conn: 가짜커넥션) -> list[dict[str, Any]]:
-    return _update_params(conn)[0].obj
+def _written_in_transit(conn: 가짜커넥션) -> list[dict[str, Any]] | None:
+    written = _update_params(conn)[0]
+    return None if written is None else written.obj
+
+
+def _written_in_transit_status(conn: 가짜커넥션) -> str:
+    return _update_params(conn)[1]
 
 
 def _written_confirmed_inbound(conn: 가짜커넥션) -> list[dict[str, Any]] | None:
@@ -429,8 +458,10 @@ def test_persist_quantity_survives_the_json_round_trip(complete_logistics_snapsh
 def test_persist_empty_approval_keeps_the_existing_confirmed_inbound():
     """④ 빈 승인은 `confirmed_inbound` 를 **비우지 않는다.**
 
-    ★ *"더할 것이 없다"* 와 *"기존 것을 지워라"* 는 다르다. `in_transit` 은 승인이
-      유일한 주인이라 `CONFIRMED_ZERO` 로 덮지만, `confirmed_inbound` 는 아니다.
+    ★ *"더할 것이 없다"* 와 *"기존 것을 지워라"* 는 다르다. 두 칸 모두 기존 목록을
+      지키고, 더할 것이 없으면 그대로 둔다 — 여기 기존 `in_transit` 이 비어 있어
+      결과가 `CONFIRMED_ZERO` 인 것이지 승인이 덮은 것이 아니다
+      (기존 행이 남는 경우는 `test_G_승인분이_없으면_기존_운송중을_지키다`).
     """
     conn = 가짜커넥션(confirmed_inbound=[남의_확정입고])
 
@@ -467,23 +498,62 @@ def test_persist_reads_before_writing_on_the_given_connection():
     persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
 
     읽기, 쓰기 = (str(q) for q in conn.커서.queries)
-    assert "SELECT confirmed_inbound_json" in 읽기
-    assert "UPDATE" not in 읽기
-    assert "UPDATE" in 쓰기 and "SELECT" not in 쓰기
+    # ★ **두 칸을 함께 읽는다.** 둘 다 병합 대상이 됐다 (2026-09-05) — 한 칸만 읽으면
+    #   나머지 한 칸은 병합할 기존값을 모른 채 덮게 된다.
+    assert "SELECT in_transit_json, confirmed_inbound_json" in 읽기
+    assert not _is_write(읽기)
+    assert _is_write(쓰기) and "SELECT" not in 쓰기
     # ★ 읽은 행과 쓴 행이 갈리면 남의 목록에 이번 승인분을 얹는다.
     assert conn.커서.params[0] == (SIM_RUN_ID, AS_OF, transition.USAGE_SCOPE)
     assert _update_params(conn)[-3:] == (SIM_RUN_ID, AS_OF, transition.USAGE_SCOPE)
 
 
+def test_persist_locks_the_fixture_row_before_merging():
+    """🔴 **A: 잠금 없이 병합하면 마지막 쓴 쪽이 이긴다 (lost update).**
+
+    ```text
+    초기            in_transit = [A]
+    T1 승인 B        SELECT → [A]   병합 → [A, B]
+    T2 승인 C        SELECT → [A]   병합 → [A, C]   ← 같은 옛 목록을 읽었다
+    T1 UPDATE·COMMIT               [A, B]
+    T2 UPDATE·COMMIT               [A, C]           🔴 승인 B 가 사라진다
+    ```
+
+    ★ 3-B1 의 병합만으로는 못 막는다 — 병합은 *"한 트랜잭션이 본 목록"* 위에서만
+      정확하고, 둘이 같은 옛 목록을 보는 것 자체를 막지 못한다. B-1 도 못 잡는다:
+      사라진 쪽이 두 칸에서 **함께** 빠져 대조가 성립한다.
+    """
+    conn = 가짜커넥션()
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+
+    읽기, 쓰기 = (str(q) for q in conn.커서.queries)
+    assert "FOR UPDATE" in 읽기, "병합 전에 그 fixture 행을 잠근다"
+    assert "FOR UPDATE" not in 쓰기
+    # ★ 잠근 행과 쓰는 행이 같아야 한다 — 갈리면 잠금이 아무것도 안 지킨다.
+    assert conn.커서.params[0] == _update_params(conn)[-3:]
+
+
+def test_persist_does_not_create_an_advisory_lock():
+    """★ 바꾸는 것이 **이미 알고 있는 행 하나**라 행 잠금으로 충분하다.
+
+    `ledger.py` 가 전역 advisory lock 을 쓰는 이유는 거기가 여러 행·여러 표를
+    오가기 때문이라 사정이 다르다.
+    """
+    source = Path(transition.__file__).read_text(encoding="utf-8")
+
+    assert "pg_advisory" not in source
+
+
 def test_persist_does_not_send_an_update_when_the_row_is_missing():
-    """⑥-보강: 읽을 행이 없으면 **UPDATE 를 보내기 전에** 멈춘다."""
+    """⑥-보강 / E: 읽을 행이 없으면 **UPDATE 를 보내기 전에** 멈춘다."""
     conn = 가짜커넥션(rowcount=0)
 
     with pytest.raises(LogisticsFixtureMissing):
         persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
 
     assert len(conn.커서.queries) == 1
-    assert "UPDATE" not in str(conn.커서.queries[0])
+    assert not _is_write(str(conn.커서.queries[0]))
 
 
 def test_transition_module_does_not_write_inventory_lots():
@@ -593,3 +663,199 @@ def test_adapter_passes_the_missing_fixture_error_through():
 
     with pytest.raises(LogisticsFixtureMissing):
         adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
+
+
+# ── persist_inventory · in_transit 누적 (3-B1) ──────────────────────────
+#
+# 🔴 **종전에는 `in_transit` 을 덮어썼다.** 같은 fixture 행을 겨냥한 승인이 둘이면
+#    뒤엣것이 앞엣것을 **에러 없이 지웠다.**
+#
+#    ```text
+#    승인 A   in_transit=[A]  confirmed=[A]
+#    승인 B   in_transit=[B]  confirmed=[A, B]   ← A 의 운송 중 물량이 사라진다
+#    ```
+#
+#    B-1 은 *"in_transit 의 행마다 confirmed 에 짝이 있나"* 를 보므로 이 손실을
+#    **못 잡는다** — 없어진 쪽이 in_transit 이라 검사할 대상 자체가 사라진다.
+#    그래서 읽는 쪽(B-1)이 아니라 **쓰는 쪽**을 고쳤다.
+
+
+#: 앞선 승인이 이미 반영해 둔 운송 중 한 건. **이번 승인과 무관한 남의 사실이다.**
+남의_운송중 = {
+    "inbound_id": "INB-OTHER-9",
+    "item": "무",
+    "quantity_kg": "120.5",
+    "expected_arrival_date": "2026-01-04",
+}
+
+
+def _한회차(*, approval_id: str = "H1-REQ-1-1", qty_kg: float = 300.0) -> Any:
+    return _commitment(
+        legs=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=qty_kg,
+                arrival_date=date(2026, 1, 2),
+                purchase_date=AS_OF,
+                seq=1,
+            ),
+        ),
+        total_qty_kg=qty_kg,
+        approval_id=approval_id,
+    )
+
+
+def test_A_기존이_None_이고_승인분이_없으면_None_을_지킨다():
+    """★ *"아직 확인한 적 없다"* 를 *"확인했고 0 건"* 으로 바꾸지 않는다."""
+    conn = 가짜커넥션(in_transit=None, confirmed_inbound=None)
+
+    persist_inventory(conn, **_fixture_인자([]))
+
+    assert _written_in_transit(conn) is None
+    assert _written_in_transit_status(conn) == "UNRESOLVED"
+
+
+def test_B_기존이_빈목록이고_승인분이_없으면_CONFIRMED_ZERO_다():
+    conn = 가짜커넥션(in_transit=[])
+
+    persist_inventory(conn, **_fixture_인자([]))
+
+    assert _written_in_transit(conn) == []
+    assert _written_in_transit_status(conn) == "CONFIRMED_ZERO"
+
+
+def test_C_기존이_빈목록이고_승인분이_있으면_CONFIRMED_다():
+    conn = 가짜커넥션(in_transit=[])
+    rows = build_next_inventory(_한회차())
+
+    persist_inventory(conn, **_fixture_인자(rows))
+
+    assert len(_written_in_transit(conn)) == 1
+    assert _written_in_transit_status(conn) == "CONFIRMED"
+
+
+def test_D_다른_승인은_기존_운송중에_더해진다():
+    """🔴 이 단계가 고치는 자리다. 종전에는 `[B]` 만 남았다."""
+    conn = 가짜커넥션(in_transit=[남의_운송중])
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
+
+    적힌것 = _written_in_transit(conn)
+    assert len(적힌것) == 2, "앞선 승인분이 사라지면 안 된다"
+    assert 남의_운송중 in 적힌것
+    assert {row["inbound_id"] for row in 적힌것} == {"INB-OTHER-9", "INB-H1-REQ-1-1-1"}
+
+
+def test_E_같은_승인을_두_번_반영해도_목록이_안_부푼다():
+    """멱등 재반영 — 같은 `inbound_id` · 같은 사실이면 더하지 않는다."""
+    rows = build_next_inventory(_한회차())
+    첫번 = 가짜커넥션(in_transit=[])
+    persist_inventory(첫번, **_fixture_인자(rows))
+
+    두번 = 가짜커넥션(in_transit=_written_in_transit(첫번))
+    persist_inventory(두번, **_fixture_인자(rows))
+
+    assert _written_in_transit(두번) == _written_in_transit(첫번)
+
+
+def test_E2_직렬화_자릿수가_달라도_같은_수량이면_멱등이다():
+    """🔴 문자열로 비교하면 `"300.0"` 과 `"300.00"` 이 갈려 정상 재반영이 터진다."""
+    rows = build_next_inventory(_한회차())
+    자릿수만_다른_기존 = [
+        {**rows[0].model_dump(mode="json"), "quantity_kg": "300.00"},
+    ]
+    conn = 가짜커넥션(in_transit=자릿수만_다른_기존)
+
+    persist_inventory(conn, **_fixture_인자(rows))
+
+    assert _written_in_transit(conn) == 자릿수만_다른_기존, "더하지도 갈아 끼우지도 않는다"
+
+
+def test_F_같은_id_에_다른_수량이면_멈춘다():
+    """★ 어느 쪽이 진짜인지 여기서 고르지 않는다 — 덮지도 버리지도 않는다."""
+    기존 = build_next_inventory(_한회차(qty_kg=300.0))[0].model_dump(mode="json")
+    conn = 가짜커넥션(in_transit=[기존])
+
+    with pytest.raises(transition.InboundScheduleConflict) as 오류:
+        persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(qty_kg=999.0))))
+
+    assert "INB-H1-REQ-1-1-1" in str(오류.value)
+    assert len(conn.커서.queries) == 1, "읽기만 하고 UPDATE 를 보내지 않는다"
+
+
+def test_G_승인분이_없으면_기존_운송중을_지키다():
+    conn = 가짜커넥션(in_transit=[남의_운송중])
+
+    persist_inventory(conn, **_fixture_인자([]))
+
+    assert _written_in_transit(conn) == [남의_운송중]
+    assert _written_in_transit_status(conn) == "CONFIRMED"
+
+
+def test_H_기존에_중복된_id_가_있으면_멈춘다():
+    """🔴 깨진 목록 위에 병합하지 않는다."""
+    conn = 가짜커넥션(in_transit=[남의_운송중, dict(남의_운송중)])
+
+    with pytest.raises(transition.InboundScheduleConflict) as 오류:
+        persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
+
+    assert "INB-OTHER-9" in str(오류.value)
+    assert len(conn.커서.queries) == 1
+
+
+def test_I_승인분_안에_충돌하는_중복_id_가_있으면_멈춘다():
+    conn = 가짜커넥션(in_transit=[])
+    같은_id_다른_수량 = [
+        InTransitItem(
+            inbound_id="INB-DUP-1",
+            item="배추",
+            quantity_kg=Decimal(10),
+            expected_arrival_date=date(2026, 1, 2),
+        ),
+        InTransitItem(
+            inbound_id="INB-DUP-1",
+            item="배추",
+            quantity_kg=Decimal(20),
+            expected_arrival_date=date(2026, 1, 2),
+        ),
+    ]
+
+    with pytest.raises(transition.InboundScheduleConflict):
+        persist_inventory(conn, **_fixture_인자(같은_id_다른_수량))
+
+
+def test_I2_승인분_안의_동일한_중복은_한_행만_남는다():
+    conn = 가짜커넥션(in_transit=[])
+    똑같은_두_행 = build_next_inventory(_한회차()) * 2
+
+    persist_inventory(conn, **_fixture_인자(똑같은_두_행))
+
+    assert len(_written_in_transit(conn)) == 1
+
+
+def test_J_누적_뒤에도_B1_이_선다():
+    """★ 두 칸이 같은 규칙으로 자라므로 in_transit 의 행마다 confirmed 에 짝이 있다."""
+    conn = 가짜커넥션(
+        in_transit=[남의_운송중],
+        confirmed_inbound=[남의_확정입고],
+    )
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
+
+    스냅샷 = InventoryLogisticsSnapshot(
+        snapshot_id=None,
+        as_of=AS_OF,
+        on_hand_by_lot=[],
+        in_transit=[InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
+        confirmed_inbound_schedule=[
+            ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
+        ],
+        confirmed_outbound_schedule=[],
+        used_capacity_kg=Decimal(0),
+        guaranteed_capacity_by_zone_kg=None,
+        evidence_refs=[],
+    )
+
+    assert find_in_transit_schedule_gap(스냅샷) is None
+    assert len(_written_in_transit(conn)) == 2
+    assert len(_written_confirmed_inbound(conn)) == 2
