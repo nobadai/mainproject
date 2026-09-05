@@ -180,12 +180,21 @@ class ArrivalSelection:
 
 
 def _있나(값: str | None) -> bool:
-    """식별자가 실제로 있는가. **빈 문자열은 없는 것으로 본다.**
+    """식별자가 실제로 있는가. **빈 문자열과 공백뿐인 값은 없는 것으로 본다.**
 
     ★ `transition.build_next_inventory` 가 매입 참조를 볼 때와 같은 눈이다 —
       있는 척하는 값을 통과시키면 뒤 단계가 그 값으로 조회를 나간다.
+
+    🔴 **공백뿐인 값도 막는다 (2026-09-05 · 3-B4-C 와 맞춘다).** `receipts` 의
+       Receipt 존재 조회가 `"   "` 를 열쇠로 받으면 0건이 돌아오고, 그 0건은
+       *"아직 Receipt 가 없다"* 로 읽힌다. 그러면 뒤 단계가 그 쓰레기 식별자로 행을
+       만들어 `uq_inbound_receipts_inbound_id` 축을 오염시킨다 — `inbound_id` 가
+       nullable 이라 DB 도 그것을 안 막는다.
+
+    ⚠️ 이 판정이 옮기는 방향은 **`due` → `blocked` 뿐이다.** 통과하던 정상 식별자가
+       막히는 일은 없다 (`INB-…` · `PUR-…` 에 공백이 없다).
     """
-    return bool(값)
+    return bool(값 and 값.strip())
 
 
 def _지문(item: InTransitItem) -> str:
