@@ -233,7 +233,7 @@ def _reject_repeat_approval(existing: list[DecisionOut], payload: DecisionIn) ->
     if current is None or current.decision != "APPROVE":
         return
     raise DecisionRejected(
-        f"'{payload.scenario_label}' 을 승인할 수 없다 — 이 실행에는 이미 승인된 안이 "
+        f"'{payload.scenario_label}' 를 승인할 수 없다 — 이 실행에는 이미 승인된 안이 "
         f"있다 (회차 {current.decision_seq} · '{current.scenario_label}'). "
         "앞 승인이 만든 장부를 되돌리는 경로가 아직 없어, 번복하면 두 승인이 모두 "
         "장부에 남는다.",
