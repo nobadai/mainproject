@@ -89,6 +89,6 @@ def 공휴일_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> Non
     """문 앞의 공휴일 축을 **DB 대신 가짜로** 준다.
 
     ★ **입력 적재를 끄는 것과 같은 이유다.** `.env` 의 `DB_HOST` 가 팀 공용 서버라
-      `run_procurement` 을 그냥 부르면 `v_ml_batch_days` 로 실제 조회가 나간다.
+      `run_procurement` 을 그냥 부르면 `ml_calendar_days` 로 실제 조회가 나간다.
     """
     monkeypatch.setattr("app.master.service.get_calendar", lambda: _공휴일이_없는_달력())
