@@ -312,10 +312,19 @@ def _split_legs(
         offset = (day - as_of).days
         if offset < 0:
             continue  # 과거 날짜의 회차는 옮기지 않는다 — 별도 검사 대상이다
+        amount = _float_of(leg.get("amount_krw"))
         out.append(
             {
                 "offset_days": offset,
                 "qty_kg": {item: qty},
+                # ★ 매입은 회차 금액을 **스칼라**로 보내고 계약은 품목별 매핑을 요구한다
+                #   (`contracts.core.SplitLeg.amount_krw` 에 근거가 적혀 있다).
+                #   실행 하나가 품목 하나라 여기서 붙이는 것은 **이름표뿐**이다 - 키가
+                #   하나뿐이고 값은 매입이 보낸 그대로다.
+                #
+                # ⚠️ 매입이 안 실으면 `None` 을 그대로 넘긴다. `0` 이나 빈 매핑으로
+                #   채우면 없는 것이 0 원이 되어 금액 변이 조용히 통과한다.
+                "amount_krw": None if amount is None else {item: amount},
                 "expected_arrival_date": (
                     supplied.isoformat()
                     if (supplied := _date_of(leg.get("expected_arrival_date"))) is not None

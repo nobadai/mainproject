@@ -68,6 +68,13 @@ class SplitLegIn(BaseModel):
     offset_days: int = Field(ge=0)
     qty_kg: dict[str, float]
     expected_arrival_date: date | None = None
+    amount_krw: dict[str, float] | None = None
+    """회차별 금액. `contracts.core.SplitLeg.amount_krw` 와 **같은 모양**이다 -
+       품목별 매핑인 근거는 그쪽에 적혀 있다.
+
+       ⚠️ 선택 필드다. 없으면 `SplitLeg.amount_krw` 가 None 으로 남고
+       `check_triple_identity` 의 split 금액 변은 통째로 건너뛴다 - 그것이 위반이 아니다.
+       🔴 `0.0` 이나 빈 매핑으로 채우지 않는다 - 없는 것과 0 원은 다르다."""
 
 
 class SourcingLotIn(BaseModel):

@@ -165,6 +165,8 @@ def _to_scenario(scenario: ScenarioIn) -> MinimalScenario:
             offset_days=leg.offset_days,
             qty_kg=leg.qty_kg,
             expected_arrival_date=leg.expected_arrival_date,
+            # ★ 실려 있으면 넘긴다. 없으면 None 그대로다 - 여기서 만들지 않는다.
+            amount_krw=leg.amount_krw,
         )
         for leg in scenario.split_plan
     )
