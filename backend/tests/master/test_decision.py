@@ -179,25 +179,83 @@ def test_통과안이_없는_날은_승인할_수_없다(client, monkeypatch):
     assert "승인할 안이 없다" in response.json()["detail"]
 
 
-# ── 번복 ────────────────────────────────────────────────────────────────
+# ── 승인이 서 있으면 다시 승인하지 않는다 (#289) ────────────────────────
+#
+# 전에는 **번복이 열려 있었다** — '기본' 을 승인했다가 '보수' 로 바꾸는 것을 정상 업무로
+# 봤고, 승인이 이력에만 남던 때에는 그 판단이 맞았다. 지금은 승인이 장부를 바꾼다.
+# 번복은 `decision_seq` 를 올려 `purchase_id` 를 갈라놓으므로 `ON CONFLICT` 가 안 걸리고
+# **두 승인이 모두 장부에 남는다.** 되돌리는 경로가 아직 없어 막는다.
 
 
-def test_같은_안_재승인은_막고_다른_안으로는_번복된다(client, monkeypatch, store):
+def test_같은_안_재승인은_거부된다(client, monkeypatch):
+    """기존 동작 유지 — 보통 버튼을 두 번 누른 것이다."""
     _set_run(monkeypatch, _run_row())
-
     assert _post(client, decision="APPROVE", scenario_label="기본").status_code == 201
+
     assert _post(client, decision="APPROVE", scenario_label="기본").status_code == 409
 
-    second = _post(client, decision="APPROVE", scenario_label="보수")
-    assert second.status_code == 201
-    assert second.json()["decision_seq"] == 2
 
-    # 이전 결정은 지워지지 않고 접힌다
-    rows = store.list_decisions(REQ)
-    assert [(r.decision_seq, r.scenario_label, r.is_current) for r in rows] == [
-        (1, "기본", False),
-        (2, "보수", True),
-    ]
+def test_다른_안_승인도_거부되고_사유가_앞_안을_짚는다(client, monkeypatch, store):
+    """🔴 **이 검사가 #289 의 핵심이다.** 라벨이 달라도 막힌다.
+
+    사유는 **무엇이 막았나**를 말해야 한다 — 앞 승인의 회차와 라벨이 없으면 읽는
+    사람이 어느 결정을 되돌려야 하는지 모른다.
+    """
+    _set_run(monkeypatch, _run_row())
+    assert _post(client, decision="APPROVE", scenario_label="기본").status_code == 201
+
+    second = _post(client, decision="APPROVE", scenario_label="보수")
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert "회차 1" in detail
+    assert "기본" in detail
+
+    # 막았으므로 결정은 하나로 남는다 — 이력이 늘지 않는다
+    assert [(r.decision_seq, r.scenario_label) for r in store.list_decisions(REQ)] == [(1, "기본")]
+
+
+def test_거부_사유가_왜_막았는지를_말한다(client, monkeypatch):
+    """★ *"안 된다"* 만 적으면 읽는 사람이 할 수 있는 것이 없다.
+
+    막힌 이유는 **되돌리는 경로가 없다**는 것이고, 그것이 사유에 있어야 언제 풀리는지도
+    같이 읽힌다.
+    """
+    _set_run(monkeypatch, _run_row())
+    _post(client, decision="APPROVE", scenario_label="기본")
+
+    detail = _post(client, decision="APPROVE", scenario_label="보수").json()["detail"]
+    assert "되돌리는 경로가 아직 없어" in detail
+    assert "두 승인이 모두" in detail
+
+
+def test_거절_뒤_승인은_된다(client, monkeypatch, store):
+    """🔴 앞 결정이 승인일 때**만** 막는다. 여기가 열려 있지 않으면 사람이 거절한 뒤
+    아무것도 못 한다."""
+    _set_run(monkeypatch, _run_row())
+    assert _post(client, decision="APPROVE", scenario_label="기본").status_code == 201
+    assert _post(client, decision="REJECT_ALL").status_code == 201
+
+    again = _post(client, decision="APPROVE", scenario_label="보수")
+    assert again.status_code == 201
+    assert again.json()["decision_seq"] == 3
+    assert [r.is_current for r in store.list_decisions(REQ)] == [False, False, True]
+
+
+def test_조건부_재요청_뒤_승인은_된다(client, monkeypatch):
+    _set_run(monkeypatch, _run_row())
+    assert _post(client, decision="APPROVE", scenario_label="기본").status_code == 201
+    assert (
+        _post(client, decision="REQUEST_CHANGE", condition_text="예산을 2천만원으로").status_code
+        == 201
+    )
+
+    assert _post(client, decision="APPROVE", scenario_label="보수").status_code == 201
+
+
+def test_첫_승인은_막히지_않는다(client, monkeypatch):
+    """앞 결정이 없으면 걸 것이 없다 — 게이트가 입구를 막으면 안 된다."""
+    _set_run(monkeypatch, _run_row())
+    assert _post(client, decision="APPROVE", scenario_label="보수").status_code == 201
 
 
 # ── 거절 · 조건부 재요청 ─────────────────────────────────────────────────
@@ -242,12 +300,18 @@ def test_없는_요청에_결정하면_404(client, monkeypatch):
 
 
 def test_결정_이력은_오래된_것부터_최신만_current(client, monkeypatch):
+    """★ 이 검사가 재는 것은 **정렬과 접힘**이지 번복이 아니다.
+
+    전에는 승인 두 건으로 두 행을 만들었는데, #289 로 그 길이 막혀 도구만 바꿨다 —
+    승인 뒤 거절도 똑같이 두 행이고, 재던 것은 그대로다.
+    """
     _set_run(monkeypatch, _run_row())
     _post(client, decision="APPROVE", scenario_label="기본")
-    _post(client, decision="APPROVE", scenario_label="공격")
+    _post(client, decision="REJECT_ALL")
 
     rows = client.get(f"/master/runs/{REQ}/decisions").json()
-    assert [r["scenario_label"] for r in rows] == ["기본", "공격"]
+    assert [r["scenario_label"] for r in rows] == ["기본", None]
+    assert [r["decision"] for r in rows] == ["APPROVE", "REJECT_ALL"]
     assert [r["is_current"] for r in rows] == [False, True]
 
 

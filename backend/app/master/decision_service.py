@@ -205,23 +205,40 @@ def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:
 
 
 def _reject_repeat_approval(existing: list[DecisionOut], payload: DecisionIn) -> None:
-    """같은 안을 두 번 승인하는 것만 막는다.
+    """이미 승인이 서 있으면 **어느 안이든** 다시 승인하지 못한다.
 
-    ★ 번복 자체는 막지 않는다 — '기본' 을 승인했다가 '보수' 로 바꾸는 것은 정상적인
-      업무다. 다만 **같은 안을 다시 승인**하는 것은 새 사실이 없어 이력만 늘린다
-      (보통 버튼 두 번 누른 것이다).
+    ★ 전에는 *"번복 자체는 막지 않는다 — '기본' 을 승인했다가 '보수' 로 바꾸는 것은
+      정상적인 업무다"* 였고, **그때는 맞았다.** 승인이 이력에만 남고 장부를 바꾸지
+      않던 때의 판단이다. 같은 안 재승인만 막으면 됐다 (버튼 두 번).
+
+    🔴 **지금은 승인이 장부를 바꾼다.** 번복은 `decision_seq` 를 올리므로
+      `purchase_id` 도 달라져 `ON CONFLICT` 가 안 걸린다 — 앞 승인이 만든
+      `purchases` · `payables` · `unsettled` 가 **그대로 남고 뒤 승인이 얹힌다.**
+      되돌리는 경로가 저장소에 없다 (`purchases.CANCELLED` 는 CHECK 에만 있고 쓰는
+      코드가 0곳이다). 어제까지는 번복이 `finance_state_ambiguous` 로 다음 날을
+      막아 우연히 드러났는데, #285 가 한 행에 누적하게 되면서 **다음 날이 정상으로
+      서고 조용히 틀린다.**
+
+    ★ **언제 푸나** — 취소 경로(`purchases.CANCELLED` 쓰기 · payable 역분개 ·
+      `confirmed_inbound` 정리)가 생기면 이 조건을 도로 라벨 비교로 좁힌다. 그때까지는
+      번복을 받는 것보다 막고 이유를 말하는 것이 낫다.
+
+    ★ **`current.decision == "APPROVE"` 일 때만 막는다.** 첫 승인 · 거절 뒤 승인 ·
+      조건부 재요청 뒤 승인은 앞선 장부가 없거나 이미 접혔으므로 그대로 열려 있다.
+      이 조건을 지우면 사람이 거절한 뒤 아무것도 못 하게 된다.
     """
     if payload.decision != "APPROVE":
         return
     current = next((row for row in existing if row.is_current), None)
-    if current is None:
+    if current is None or current.decision != "APPROVE":
         return
-    if current.decision == "APPROVE" and current.scenario_label == payload.scenario_label:
-        raise DecisionRejected(
-            f"'{payload.scenario_label}' 은 이미 승인됐다 (회차 {current.decision_seq}). "
-            "다른 안으로 바꾸려면 그 안을 보내라.",
-            conflict=True,
-        )
+    raise DecisionRejected(
+        f"'{payload.scenario_label}' 를 승인할 수 없다 — 이 실행에는 이미 승인된 안이 "
+        f"있다 (회차 {current.decision_seq} · '{current.scenario_label}'). "
+        "앞 승인이 만든 장부를 되돌리는 경로가 아직 없어, 번복하면 두 승인이 모두 "
+        "장부에 남는다.",
+        conflict=True,
+    )
 
 
 def get_decisions(request_id: str) -> list[DecisionOut]:
