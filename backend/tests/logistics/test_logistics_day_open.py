@@ -532,6 +532,10 @@ def test_master_open_day_walks_logistics_after_registration():
     ★ 마스터가 `is_open` 으로 뒤로 걸어 전날을 찾고, 그 다음 날부터 `open_day` 를
       부른다. 커밋은 **마스터가** 한 번 한다 — 물류는 0 번이다 (⑧).
     """
+    # 🔴 **물류만 남기고 잰다 (2026-09-05).** `app/main.py` 가 이제 재무도 등록하므로
+    #    비우지 않으면 이 가짜 커넥션이 재무 질의까지 받게 되고, 그러면 이 검사가
+    #    재는 것이 "물류를 부르는가" 가 아니라 "두 파트가 다 도는가" 로 바뀐다.
+    master_day_open.reset()
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
     conn = 가짜커넥션({CARRY_FROM})
 
@@ -540,13 +544,14 @@ def test_master_open_day_walks_logistics_after_registration():
     assert 결과.status == "OPENED"
     assert [part.part for part in 결과.parts] == ["logistics"]
     assert 결과.parts[0].opened == [AS_OF]
-    assert 결과.missing == ["finance"], "재무는 미회신이라 등록하지 않았다"
+    assert 결과.missing == ["finance"], "이 검사는 물류만 등록해 물류 경로만 잰다"
     assert "INSERT INTO" in _insert_문(conn)
     assert conn.commits == 1, "커밋은 마스터가 한 번 한다"
 
 
 def test_master_open_day_is_idempotent_for_an_already_open_day():
     """⑨ 이미 열려 있으면 아무것도 안 한다 — INSERT 자체가 없다."""
+    master_day_open.reset()  # 위와 같은 이유 — 물류만 남기고 잰다
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
     conn = 가짜커넥션({CARRY_FROM, AS_OF})
 

@@ -22,8 +22,10 @@ import pytest
 
 import app.main  # noqa: F401  — import 시점에 두 전이를 등록한다. 이 검사의 전제다
 from app.finance import transition as finance_transition
+from app.finance.day_open import FinanceDayOpening
+from app.logistics.day_open import LogisticsDayOpening
 from app.logistics.transition import LogisticsTransitionAdapter
-from app.master import transition
+from app.master import day_open, transition
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
@@ -139,6 +141,26 @@ def test_두_전이가_다_등록되어_있다() -> None:
     assert transition.missing() == (), (
         "전이가 미등록이다 — app/main.py 의 register_transition 두 줄을 확인하라"
     )
+
+
+def test_두_하루넘김이_다_등록되어_있다() -> None:
+    """🔴 **다른 등록소다.** 전이가 다 서 있어도 하루 넘김이 비면 승인 없는 날 다음이 막힌다.
+
+    ⚠️ 재무를 켜기 전에 `database/finance/finance_state_daily_unique.sql` 이 실 DB 에
+       먼저 서야 한다. `#285` 의 `ON CONFLICT (sim_run_id, financing_mode, state_date)`
+       가 그 UNIQUE 를 가리키고, 없으면 승인 전이가 거기서 터진다 (2026-09-05 실측).
+    """
+    assert day_open.missing() == (), (
+        "하루 넘김이 미등록이다 — app/main.py 의 register_day_opening 두 줄을 확인하라"
+    )
+
+
+def test_하루넘김_자리에_각_파트_구현이_앉아_있다() -> None:
+    """★ 이름만 채운 것이 아니라 **그 파트가 소유한 구현**이 앉아야 한다."""
+    registered = day_open.registered()
+
+    assert isinstance(registered["logistics"], LogisticsDayOpening)
+    assert isinstance(registered["finance"], FinanceDayOpening)
 
 
 def test_물류_자리에_물류_어댑터가_앉아_있다() -> None:
