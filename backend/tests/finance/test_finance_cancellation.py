@@ -303,21 +303,22 @@ def test_two_legs_cancel_independently_and_leave_other_approval_open():
     assert conn.states["FIN-TARGET"]["unsettled_purchase_payables_krw"] == Decimal(50)
 
 
-def test_partially_retried_set_finishes_only_the_still_open_leg():
+def test_mixed_open_and_cancelled_set_fails_without_stable_cancellation_identity():
     cancelled = _payable("PUR-A-S1", "100", status="CANCELLED", cancelled="100", outstanding="0")
     cancelled["cancelled_date"] = AS_OF
     conn = _existing_target_conn(cancelled, _payable("PUR-A-S2", "200"), unsettled="200")
 
-    result = cancel_finance_payables(
-        conn,
-        purchase_ids=["PUR-A-S1", "PUR-A-S2"],
-        as_of=AS_OF,
-        target_state_date=TARGET,
-    )
+    with pytest.raises(FinanceCancellationConflict) as raised:
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A-S1", "PUR-A-S2"],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+        )
 
-    assert result.newly_cancelled_count == 1
-    assert result.newly_cancelled_amount_krw == Decimal(200)
-    assert conn.states["FIN-TARGET"]["unsettled_purchase_payables_krw"] == 0
+    assert raised.value.reason == "payable_cancellation_state_mixed"
+    assert conn.payables["PUR-A-S2"]["status"] == "OPEN"
+    assert conn.states["FIN-TARGET"]["unsettled_purchase_payables_krw"] == 200
 
 
 @pytest.mark.parametrize(

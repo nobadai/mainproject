@@ -236,6 +236,13 @@ def _validate_complete_target_set(
         blocked.append(row.purchase_id)
     if blocked:
         raise FinanceCancellationConflict("payable_not_cancellable", purchase_ids=tuple(blocked))
+    statuses = {row.status for row in payables}
+    if statuses == {"OPEN", "CANCELLED"}:
+        # This operation changes the complete locked set atomically, so its legitimate retry
+        # states are all OPEN (not applied) or all CANCELLED (already applied). Without a
+        # stable Master cancellation-event ID, a mixed set cannot be proven to be this
+        # operation's partial retry and must not be silently completed.
+        raise FinanceCancellationConflict("payable_cancellation_state_mixed")
 
 
 def _one_state(

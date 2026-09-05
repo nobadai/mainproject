@@ -514,7 +514,9 @@ settled_date    → 그대로
 `OPEN → CANCELLED`로 바뀐 행의 `RETURNING cancelled_amount_krw` 합계만 target daily
 state의 `unsettled_purchase_payables_krw`에서 뺀다. retry의 이미 `CANCELLED`인 행은
 변경 0건이므로 다시 차감하지 않는다. target state가 없을 때만 exact `as_of` state를
-carry하며, 날짜는 Master가 준 값을 그대로 쓴다.
+carry하며, 날짜는 Master가 준 값을 그대로 쓴다. 안정적인 취소 사건 ID가 없는 현재
+계약에서는 `OPEN`과 `CANCELLED`가 섞인 대상 집합을 합법적 부분 retry로 증명할 수
+없으므로 fail-closed한다.
 
 ## 패키지 구조
 
