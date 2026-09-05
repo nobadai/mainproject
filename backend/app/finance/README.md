@@ -366,24 +366,21 @@ finance.persist(conn, plan)       # 받은 연결로만, commit 은 마스터가
 한다 — 하나뿐이라고 첫 값을 집거나 정렬해서 고르지 않는다. 없거나 빈 값이면
 `commitment_purchase_ids` 로 세운다.
 
-🔴 **어댑터는 섰지만 아직 등록하지 않는다.** `register_transition("finance", ...)` 은
-   이 브랜치가 하지 않는다. `payables.purchase_id` 가 참조하는 `purchases` 부모 행을
-   재무 persist **전에** 누가 넣는지가 아직 안 서 있고, 물류 연결도 남아 있다. 재무만
-   먼저 등록하면 마스터가 *"아직 안 돈다"* (`NOT_APPLIED`) 대신 **승인마다 `FAILED`**
-   를 내게 되고, 미구현이 장애로 둔갑한다.
+★ 어댑터 등록은 최신 런타임의 `app.main`에서 Master가 소유한다. Finance는 구조적
+Protocol 구현만 제공하고 등록 순서나 트랜잭션 경계를 가져오지 않는다.
 
-### 지금은 회차 하나만 채무가 된다
+### 회차별 정본 금액으로 N개 채무를 만든다
 
 ```text
-회차 1건   → 채무 1건 (purchase_ids[seq] · 총액 · 매입일 + N5)
-회차 2건+  → commitment_payment_amounts 로 세운다
-회차 0건   → commitment_arrival_schedule 로 세운다
+회차 1건   → 채무 1건 (금액 누락 시 축이 하나이므로 약정 총액과 기존 의미 유지)
+회차 N건   → 각 ArrivalLeg.amount_krw · purchase_ids[seq] 로 채무 N건
+금액 일부/전부 누락 또는 합계 불일치 → commitment_payment_amounts
+회차 0건   → commitment_arrival_schedule
 ```
 
-#256 이 **ID 전달 문제**를 풀었지만 **금액 배분 문제**는 아직 열려 있다. 약정이 드는
-금액은 `total_amount_krw` 하나뿐이고 `ArrivalLeg` 에는 금액 칸이 없다. 매입일이 같아도
-합치지 않는다 — 회차가 둘이면 매입 의무도 구조적으로 둘이라, 하나로 접는 순간 원장이
-매입과 어긋난다. 회차별 지급액 계약이 서면 그때 N건으로 연다.
+Master가 Purchase `split_plan[].amount_krw`를 `ArrivalLeg.amount_krw`로 운반한다.
+Finance는 균등·수량비례 배분을 하지 않고 정본 금액을 그대로 쓴다. 매입일이 같아도
+회차가 둘이면 매입 의무도 둘이며 Payable ID는 `AP-{approval_id}-S{seq}`다.
 
 ### 실행일과 장부일은 다른 축이다
 
@@ -480,17 +477,19 @@ WHERE fs.state_date = (그 축의 max(state_date))
 ★ **주말 실행 판단은 재무가 하지 않는다.** 시뮬레이션이 평일만 도는 것은 마스터
 소유이고, 경과 시간은 달력일 그대로다.
 
-### 같은 승인을 두 번 적용해도 의무는 하나다
+### 같은 날 승인 여러 건은 상태 하나에 누적되고 retry는 다시 더하지 않는다
 
-식별자는 약정이 이미 들고 있는 `approval_id` 다. 재무는 그것으로 행 ID 를 정하고,
-중복은 DB 가 막는다.
+Payable은 회차별 의무이고 Finance State는 날짜별 snapshot이다. 두 축을 섞지 않는다.
 
 ```text
-finance_states  PK (finance_state_id = FIN-{approval_id})
-payables        UNIQUE (purchase_id)
+payables        UNIQUE (purchase_id)                         승인·회차별 의무
+finance_states  UNIQUE (sim_run_id, financing_mode, state_date)  일별 snapshot
 ```
 
-두 번째 적용은 쓴 행 수 0 으로 돌아온다.
+상태 ID는 `FIN-DAY-{sim_run_id}-{financing_mode}-{YYYYMMDD}`로 transition과
+`open_day`가 같이 쓴다. persist는 **이번 호출에서 실제 새로 INSERT된 Payable 금액만**
+일별 상태에 원자적으로 더한다. 같은 승인 retry는 Payable INSERT가 0건이므로 상태도
+다시 증가하지 않는다. 같은 날짜 승인 순서가 바뀌어도 최종 업무 숫자는 같다.
 
 ## 패키지 구조
 
@@ -505,6 +504,8 @@ app/finance/
 │                                                          ← master · orchestrator 도 import
 ├─ schemas.py         요청·응답 계약 전체 (어휘·현금흐름·정책·상태·매입·판매·이력)
 ├─ state.py           한 실행 동안 살아 있는 값
+├─ state_identity.py  한 Finance 축·날짜의 결정론 state ID
+├─ day_open.py        Master DayOpening 구조 계약의 Finance 구현
 ├─ transition.py      승인 약정 → 다음 재무 상태 · 재무 원장 쓰기 (연결은 부르는 쪽 것)
 ├─ tools.py           결정론 재무 계산 (공식의 유일한 주인)
 ├─ rules.py           결정론 판정 (verdict 소유)
