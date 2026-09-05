@@ -206,6 +206,7 @@ def _예약(conn: psycopg.Connection, *, rid: str = RSV, qty: str = "100") -> No
         item_id=ITEM_ID,
         required_qty_kg=Decimal(qty),
         sale_id=SALE_ID,
+        as_of=AS_OF,
     )
 
 
@@ -223,6 +224,7 @@ def _할당한다(
         decided_by=DECIDED_BY,
         decided_at=DECIDED_AT,
         allocation_basis=basis,  # type: ignore[arg-type]
+        as_of=AS_OF,
     )
 
 
@@ -239,6 +241,7 @@ def test_1_정상_예약(conn: psycopg.Connection) -> None:
         item_id=ITEM_ID,
         required_qty_kg=Decimal(80),
         sale_id=SALE_ID,
+        as_of=AS_OF,
     )
 
     assert 결과.applied is True
@@ -257,6 +260,7 @@ def test_2_같은_사실_재실행은_멱등이다(conn: psycopg.Connection) -> 
         item_id=ITEM_ID,
         required_qty_kg=Decimal(80),
         sale_id=SALE_ID,
+        as_of=AS_OF,
     )
 
     assert 두번.applied is False
@@ -275,6 +279,7 @@ def test_3_같은_id_다른_사실은_충돌이다(conn: psycopg.Connection) -> 
             item_id=ITEM_ID,
             required_qty_kg=Decimal(90),
             sale_id=SALE_ID,
+            as_of=AS_OF,
         )
 
 
@@ -289,6 +294,7 @@ def test_4_가용_초과_예약은_거부된다(conn: psycopg.Connection) -> Non
             item_id=ITEM_ID,
             required_qty_kg=Decimal(101),
             sale_id=SALE_ID,
+            as_of=AS_OF,
         )
 
 
@@ -306,6 +312,7 @@ def test_5_다른_예약의_할당이_가용에서_빠진다(conn: psycopg.Conne
             item_id=ITEM_ID,
             required_qty_kg=Decimal(30),
             sale_id=SALE_ID,
+            as_of=AS_OF,
         )
 
 
@@ -683,6 +690,7 @@ def _예약한다(conn: psycopg.Connection, rid: str, qty: str):
         item_id=ITEM_ID,
         required_qty_kg=Decimal(qty),
         sale_id=SALE_ID,
+        as_of=AS_OF,
     )
 
 
@@ -807,6 +815,7 @@ def test_D11_다른_품목의_예약은_영향을_주지_않는다(conn: psycopg
         item_id=OTHER_ITEM,
         required_qty_kg=Decimal(100),
         sale_id=SALE_ID,
+        as_of=AS_OF,
     )
 
     assert _예약한다(conn, "RSV-A", "100").applied is True
@@ -880,6 +889,7 @@ def test_B3_할당_근거에_기본값이_없다(conn: psycopg.Connection) -> No
             requests=[AllocationRequest(lot_id="LOT-A", quantity_kg=Decimal(80))],
             decided_by=DECIDED_BY,
             decided_at=DECIDED_AT,
+            as_of=AS_OF,
         )
 
     assert _할당(conn) == []

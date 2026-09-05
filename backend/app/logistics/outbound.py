@@ -90,10 +90,7 @@ from psycopg import sql
 
 from app.logistics.db import get_db_schema
 from app.logistics.ledger import record_inventory_move
-
-# 🔴 **등급 정규화를 복제하지 않는다.** 신선도 식과 그 등급 판단의 주인은
-#    `repository` 다 — 여기서 표를 다시 만들면 두 곳이 갈린다.
-from app.logistics.repository import _normalize_grade
+from app.logistics.turnover import freshness_days_of, is_disposal_candidate
 
 __all__ = [
     "AllocationRequest",
@@ -107,6 +104,7 @@ __all__ = [
     "ShipmentResult",
     "allocate_stock",
     "allocation_id_for",
+    "item_free_stock_qty",
     "lock_outbound_writes",
     "move_id_for_allocation",
     "recommend_fefo_candidates",
@@ -320,7 +318,7 @@ _LOT_AVAILABILITY_COLUMNS = (
 
 
 def _available_lots(
-    conn: Any, schema: sql.Identifier, *, sim_run_id: str, item_id: str
+    conn: Any, schema: sql.Identifier, *, sim_run_id: str, item_id: str, as_of: date
 ) -> list[dict[str, Any]]:
     """이 품목의 **가용** Lot 들. 반드시 잠금 안에서 부른다.
 
@@ -333,6 +331,18 @@ def _available_lots(
 
     ★ **`status='ACTIVE'` 와 `remaining > 0` 로 거른다** — `repository` 가 가용 재고를
       보는 눈과 같다 (비-ACTIVE 는 물리 점유만 하고 가용에서 빠진다).
+
+    🔴 **신선도가 소진된 Lot(`remaining_freshness_days <= 0`)도 뺀다.** 그 Lot 은
+       `tools.build_inventory_by_item` 이 이미 판매 가용에서 빼고 있고,
+       `turnover.is_disposal_candidate` 가 폐기대기로 표시하는 바로 그 재고다.
+       여기서 안 빼면 **판매 못 하는 재고를 예약·할당이 다시 잡는다.**
+
+       ⚠️ **재고를 없애는 것이 아니다.** `remaining_qty_kg` 도 Lot 상태도 그대로이고,
+          창고 점유도 그대로다 — 빠지는 것은 *"팔 수 있는 양"* 하나뿐이다.
+          실제 감소는 `disposal.confirm_disposal` 만 한다.
+
+    ★ **신선도 식을 새로 만들지 않는다.** `turnover.freshness_days_of` 를 그대로 쓴다 —
+      그쪽이 `repository` 와 같은 계산을 이미 하고 있어 세 곳이 갈릴 자리가 없다.
 
     ⚠️ 신선도 계산에 쓰는 두 값(`operational_limit_days` · `medium_grade_factor`)도
        같은 조인에서 가져온다 — `repository` 와 **같은 출처**여야 두 곳이 안 갈린다.
@@ -359,7 +369,7 @@ def _available_lots(
         ORDER BY l.lot_id
         """
     ).format(schema=schema)
-    return _rows(
+    행들 = _rows(
         conn,
         query,
         (
@@ -370,86 +380,82 @@ def _available_lots(
         ),
         _LOT_AVAILABILITY_COLUMNS,
     )
+    # 🔴 판매 가용에서 이미 빠진 Lot 은 예약·FEFO·할당 어디에도 오르지 않는다.
+    #    ★ `0 != null` — 신선도를 **모르는** Lot 은 빼지 않는다 (확인된 만료가 아니다).
+    return [
+        행
+        for 행 in 행들
+        if not is_disposal_candidate(remaining_freshness_days=freshness_days_of(행, as_of=as_of))
+    ]
 
 
 def _available_qty(행: Mapping[str, Any]) -> Decimal:
     return Decimal(행["remaining_qty_kg"]) - Decimal(행["held_qty_kg"])
 
 
-def _item_reservable_qty(
-    conn: Any, schema: sql.Identifier, *, sim_run_id: str, item_id: str
+def item_free_stock_qty(
+    conn: Any, schema: sql.Identifier, *, sim_run_id: str, item_id: str, as_of: date
 ) -> Decimal:
-    """이 품목에 **새로 예약할 수 있는 총량.** 반드시 잠금 안에서 부른다.
+    """이 품목에서 **아무도 잡지 않은, 팔 수 있는 총량.** 반드시 잠금 안에서 부른다.
 
-    🔴 **Lot 별 가용량의 합과 다르다.** Lot 가용량은 *"이 Lot 에서 아직 어떤 할당에도
-       안 묶인 물리량"* 이고, 예약 가능량은 *"아직 아무도 잡지 않은 총량"* 이다.
+    ★ **두 곳이 같은 사실을 쓴다** — 예약(`reserve_stock`)은 *"새로 잡을 수 있는 양"*
+      으로, 폐기 확정(`disposal.confirm_disposal`)은 *"없애도 되는 양"* 으로 읽는다.
+      같은 수치라서 한 함수로 둔다. 두 벌로 만들면 한쪽만 고쳐지는 날이 온다.
+
+    🔴 **Lot 가용량의 합과 다르다.** Lot 가용량은 *"이 Lot 에서 아직 어떤 할당에도
+       안 묶인 물리량"* 이고, 이 값은 *"아직 아무도 잡지 않은 총량"* 이다.
        **아직 Lot 을 안 고른 예약**은 특정 Lot 에 안 붙어 있어 Lot 가용량에서
        안 빠진다 — 그것만 보면 같은 재고를 두 번 예약하게 된다.
 
     ```text
     Lot remaining 100 · 예약 A 80 (할당 0)
     Lot 가용량 합   = 100      ← 예약 B 80 이 통과해 버린다 🔴
-    예약 가능량      = 20       ← 이 함수
+    이 함수         = 20
     ```
 
     ```text
-    reservable = on_hand
-               − holding_allocations      아직 안 나간 할당 (ALLOCATED · PICKED)
-               − unallocated_reservations 잡아 뒀지만 Lot 을 안 고른 몫
+    free = Σ(_available_lots 의 가용량)   판매 가능 Lot 만 · 살아있는 할당은 이미 빠졌다
+         − unallocated_reservations       잡아 뒀지만 Lot 을 안 고른 몫
     ```
 
-    ⚠️ **이중 차감을 피하는 두 규칙.**
+    🔴 **`_available_lots` 를 거쳐 센다.** 그래야 비-ACTIVE·신선도 소진 Lot 이
+       **재고와 할당 양쪽에서 함께** 빠진다 — 한쪽만 빼면 과다·과소 차감이 된다.
+
+    ⚠️ **이중 차감을 피하는 규칙.**
 
     ```text
     unallocated = max(reserved_qty − 이미 배정한 몫, 0)
                   이미 배정한 몫 = ALLOCATED · PICKED · SHIPPED
 
-    SHIPPED 를 빼는 이유   그 몫은 원장 OUT 이 remaining 에서 이미 덜어냈다.
-                          예약 쪽에서 또 잡고 있으면 같은 수량이 두 번 깎인다
-    ALLOCATED/PICKED 는    holding_allocations 로 이미 한 번 빠졌으므로
-    unallocated 에서 빼는  예약 잔여에서 다시 세지 않는다
+    SHIPPED 를 빼는 이유   그 몫은 원장 OUT 이 remaining 에서 이미 덜어냈다
+    ALLOCATED/PICKED 는    _available_lots 가 이미 뺐으므로 여기서 다시 세지 않는다
     ```
 
-    ⚠️ **`RELEASED` · `CANCELLED` 예약과 `CANCELLED` 할당은 세지 않는다** — 놓아준
-       몫이라 가용으로 돌아와야 한다.
-
-    ⚠️ **비-ACTIVE Lot 은 양쪽에서 함께 뺀다.** `on_hand` 에 안 들어가므로 그 Lot 의
-       할당도 빼면 과다 차감이 된다.
+    ⚠️ **`RELEASED` · `CANCELLED` 예약은 세지 않는다** — 놓아준 몫이라 돌아와야 한다.
 
     :raises OutboundIntegrityError: 계산이 음수일 때. **0 으로 보정하지 않는다** —
         음수는 이미 잡힌 몫이 실재 재고를 넘었다는 뜻이라 데이터 문제다.
     """
+    가용합 = sum(
+        (
+            _available_qty(행)
+            for 행 in _available_lots(
+                conn, schema, sim_run_id=sim_run_id, item_id=item_id, as_of=as_of
+            )
+        ),
+        start=Decimal(0),
+    )
     query = sql.SQL(
         """
-        SELECT
-          COALESCE((
-              SELECT SUM(l.remaining_qty_kg)
-              FROM {schema}.inventory_lots l
-              WHERE l.sim_run_id = %(sim)s AND l.item_id = %(item)s
-                AND l.status = 'ACTIVE'
-          ), 0) AS on_hand,
-          COALESCE((
-              SELECT SUM(a.allocated_qty_kg)
-              FROM {schema}.inventory_allocations a
-              JOIN {schema}.inventory_lots l ON l.lot_id = a.lot_id
-              JOIN {schema}.inventory_reservations r
-                ON r.reservation_id = a.reservation_id
-              WHERE l.sim_run_id = %(sim)s AND l.item_id = %(item)s
-                AND l.status = 'ACTIVE'
-                AND a.status = ANY(%(holding_alloc)s)
-                AND r.status = ANY(%(holding_rsv)s)
-          ), 0) AS holding_allocations,
-          COALESCE((
-              SELECT SUM(GREATEST(r.reserved_qty_kg - COALESCE((
-                          SELECT SUM(a2.allocated_qty_kg)
-                          FROM {schema}.inventory_allocations a2
-                          WHERE a2.reservation_id = r.reservation_id
-                            AND a2.status = ANY(%(assigned_alloc)s)
-                     ), 0), 0))
-              FROM {schema}.inventory_reservations r
-              WHERE r.sim_run_id = %(sim)s AND r.item_id = %(item)s
-                AND r.status = ANY(%(holding_rsv)s)
-          ), 0) AS unallocated_reservations
+        SELECT COALESCE(SUM(GREATEST(r.reserved_qty_kg - COALESCE((
+                   SELECT SUM(a.allocated_qty_kg)
+                   FROM {schema}.inventory_allocations a
+                   WHERE a.reservation_id = r.reservation_id
+                     AND a.status = ANY(%(assigned)s)
+               ), 0), 0)), 0) AS unallocated_reservations
+        FROM {schema}.inventory_reservations r
+        WHERE r.sim_run_id = %(sim)s AND r.item_id = %(item)s
+          AND r.status = ANY(%(holding)s)
         """
     ).format(schema=schema)
     found = _rows(
@@ -458,41 +464,20 @@ def _item_reservable_qty(
         {
             "sim": sim_run_id,
             "item": item_id,
-            "holding_alloc": sorted(_HOLDING_ALLOCATION),
-            "assigned_alloc": sorted(_ASSIGNED_ALLOCATION),
-            "holding_rsv": sorted(_HOLDING_RESERVATION),
+            "assigned": sorted(_ASSIGNED_ALLOCATION),
+            "holding": sorted(_HOLDING_RESERVATION),
         },
-        ("on_hand", "holding_allocations", "unallocated_reservations"),
+        ("unallocated_reservations",),
     )
-    값 = found[0]
-    reservable = (
-        Decimal(값["on_hand"])
-        - Decimal(값["holding_allocations"])
-        - Decimal(값["unallocated_reservations"])
-    )
-    if reservable < 0:
+    미할당 = Decimal(found[0]["unallocated_reservations"])
+    free = 가용합 - 미할당
+    if free < 0:
         raise OutboundIntegrityError(
-            f"예약 가능량이 음수다 (item_id={item_id!r}): 재고 {값['on_hand']}"
-            f" · 할당 {값['holding_allocations']}"
-            f" · 미할당 예약 {값['unallocated_reservations']}."
+            f"예약 가능량이 음수다 (item_id={item_id!r}): 판매가능 {가용합}"
+            f" · 미할당 예약 {미할당}."
             " 0 으로 보정하지 않는다 — 잡힌 몫이 실재 재고를 넘었다는 뜻이다."
         )
-    return reservable
-
-
-def _freshness_days(행: Mapping[str, Any], *, as_of: date) -> int | None:
-    """`repository._inventory_lot_from_row` 와 **같은 식**이다.
-
-    🔴 **새 유통기한 공식을 만들지 않는다.** 등급 의존 판단도 거기와 같이 raw 가 아니라
-       정규화 결과 기준이고, 정규화표가 비어 있어 `상품` 계열은 `None` 이 된다 —
-       즉 `중` 계수는 지금 실제로 걸리지 않는다. 그 사실을 여기서 바꾸지 않는다.
-    """
-    limit = 행["operational_limit_days"]
-    if limit is None:
-        return None
-    if _normalize_grade(행["grade"]) == "중" and 행["medium_grade_factor"] is not None:
-        limit = int(Decimal(limit) * Decimal(행["medium_grade_factor"]))
-    return int(limit) - (as_of - 행["received_at"]).days
+    return free
 
 
 # ── 예약 ────────────────────────────────────────────────────────────────
@@ -533,6 +518,7 @@ def reserve_stock(
     sim_run_id: str,
     item_id: str,
     required_qty_kg: Decimal,
+    as_of: date,
     sale_id: str | None = None,
     due_date: date | None = None,
 ) -> ReservationResult:
@@ -552,6 +538,9 @@ def reserve_stock(
     같은 id + 다른 사실  ReservationConflict   ★ 수량을 조용히 덮지 않는다
     가용 부족            InvalidOutboundRequest (DML 전)
     ```
+
+    :param as_of: 가용량 기준일. **신선도가 날짜에 달려 있어** 필요하다 — 폐기대기
+        Lot(`remaining_freshness_days <= 0`)은 이 날짜로 걸러진다.
     """
     _require_text(reservation_id, 칸="reservation_id")
     _require_text(sim_run_id, 칸="sim_run_id")
@@ -590,8 +579,10 @@ def reserve_stock(
     # ★ 잠금 안에서 다시 센다.
     # 🔴 **Lot 가용량의 합이 아니라 품목 예약 가능량이다.** 아직 Lot 을 안 고른
     #    남의 예약은 어떤 Lot 에도 안 붙어 있어 Lot 가용량에서 안 빠진다 —
-    #    그것만 보면 같은 재고를 두 번 예약하게 된다 (`_item_reservable_qty`).
-    예약가능 = _item_reservable_qty(conn, schema, sim_run_id=sim_run_id, item_id=item_id)
+    #    그것만 보면 같은 재고를 두 번 예약하게 된다 (`item_free_stock_qty`).
+    예약가능 = item_free_stock_qty(
+        conn, schema, sim_run_id=sim_run_id, item_id=item_id, as_of=as_of
+    )
     if 예약가능 < required:
         raise InvalidOutboundRequest(
             f"가용재고가 모자라 예약할 수 없다 (item_id={item_id!r}):"
@@ -723,7 +714,7 @@ def recommend_fefo_candidates(
     ```text
     Lot remaining 100 · 예약 A 80 (아직 Lot 미지정)
     → 이 후보의 available_qty_kg = 100    ★ A 가 어느 Lot 도 안 골랐으니 맞다
-    → 그러나 새로 예약할 수 있는 양은 20  (`_item_reservable_qty`)
+    → 그러나 새로 예약할 수 있는 양은 20  (`item_free_stock_qty`)
     ```
 
        ⚠️ 이 값을 예약 가능량으로 쓰면 **같은 재고를 두 번 예약한다.** 이 수치는
@@ -737,7 +728,7 @@ def recommend_fefo_candidates(
     schema = sql.Identifier(get_db_schema())
 
     후보: list[FefoCandidate] = []
-    for 행 in _available_lots(conn, schema, sim_run_id=sim_run_id, item_id=item_id):
+    for 행 in _available_lots(conn, schema, sim_run_id=sim_run_id, item_id=item_id, as_of=as_of):
         가용 = _available_qty(행)
         if 가용 <= 0:
             continue
@@ -745,7 +736,7 @@ def recommend_fefo_candidates(
             FefoCandidate(
                 lot_id=행["lot_id"],
                 available_qty_kg=가용,
-                remaining_freshness_days=_freshness_days(행, as_of=as_of),
+                remaining_freshness_days=freshness_days_of(행, as_of=as_of),
                 received_at=행["received_at"],
                 grade=행["grade"],
             )
@@ -790,6 +781,7 @@ def allocate_stock(
     decided_by: str,
     decided_at: datetime,
     allocation_basis: AllocationBasis,
+    as_of: date,
 ) -> AllocationResult:
     """**사람이 고른** Lot 과 수량으로 할당을 확정한다.
 
@@ -886,7 +878,7 @@ def allocate_stock(
         가용 = {
             행["lot_id"]: _available_qty(행)
             for 행 in _available_lots(
-                conn, schema, sim_run_id=예약["sim_run_id"], item_id=예약["item_id"]
+                conn, schema, sim_run_id=예약["sim_run_id"], item_id=예약["item_id"], as_of=as_of
             )
         }
         for allocation_id, lot_id, 수량 in 새것:

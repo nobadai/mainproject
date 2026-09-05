@@ -83,10 +83,19 @@ __all__ = [
     "record_inventory_move",
 ]
 
-#: 이번 판이 실행할 수 있는 Move Type. DB CHECK 은 `DISPOSE` · `ADJUST` 도 받지만
-#: 그 둘의 업무 규칙(무엇을 언제 얼마나)이 정해지지 않아 여기서 막는다.
+#: **공개 진입점**(`record_inventory_move`)이 실행할 수 있는 Move Type.
+#: DB CHECK 은 `DISPOSE` · `ADJUST` 도 받지만 여기서는 받지 않는다.
 MoveType = Literal["IN", "OUT"]
 _SUPPORTED_MOVE_TYPES: frozenset[str] = frozenset({"IN", "OUT"})
+
+#: 🔴 **`DISPOSE` 는 폐기 확정 전용 진입점(`_record_disposal_move`)으로만 들어온다.**
+#:
+#: ★ 아무 데서나 쓸 수 있게 열지 않는다 — 폐기는 되돌릴 수 없고 `ADJUST_IN` 도 없어서,
+#:   *"업무 규칙을 통과한 경로"* 하나만 남겨 두는 것이 이 상수의 일이다.
+#:   그 규칙(폐기대기 근거 · 예약/할당 보호 · 수량 한도)은 `disposal.py` 가 갖는다.
+#:
+#: ⚠️ `ADJUST` 는 여전히 어느 쪽으로도 안 들어온다 — 실사가 이번 범위 밖이다.
+_DISPOSE_MOVE_TYPES: frozenset[str] = frozenset({"DISPOSE"})
 
 #: 같은 `move_id` 로 다시 들어왔을 때 *"같은 건인가"* 를 가르는 칸.
 #: 🔴 `note` 도 넣는다 — 같은 id 로 다른 설명이 오면 그것도 다른 사실이다.
@@ -306,6 +315,49 @@ def _lock_ledger_writes(cursor: Any) -> None:
     )
 
 
+def _record_disposal_move(
+    conn: Any,
+    *,
+    move_id: str,
+    sim_run_id: str,
+    lot_id: str,
+    quantity_kg: Decimal,
+    moved_at: date,
+    reason_code: str,
+    note: str | None = None,
+) -> LedgerResult:
+    """폐기 확정이 남기는 `DISPOSE` Move. **`disposal.confirm_disposal()` 전용이다.**
+
+    🔴 **공개 API 가 아니다.** `__all__` 에 없고 이름도 밑줄로 시작한다 —
+       폐기의 업무 진입점은 `disposal.confirm_disposal()` **하나**여야 하고,
+       이 함수가 밖에서 보이면 후보 검증·예약 보호를 건너뛰는 우회로가 생긴다.
+
+    🔴 **다른 곳에서 부르지 않는다.** 폐기 여부·수량 한도·예약 보호는 `disposal.py`
+       가 판단하고, 이 함수는 그 판단이 끝난 뒤 **원장에 적는 일만** 한다.
+       여기에 업무 규칙을 얹으면 원장이 다시 판단하는 자리가 되고, 두 곳이 갈린다.
+
+    ★ **검증된 경로를 그대로 쓴다.** 잠금 → 멱등 대조 → Lot `FOR UPDATE` → 수량 검사
+      → 쓰기 순서가 `record_inventory_move` 와 **같은 함수**다. 폐기만 다른 길로
+      가면 그 길에서 잔량이 어긋난다.
+
+    ⚠️ `sale_item_id` 와 `lines` 를 받지 않는다 — 폐기는 판매 건도 Pallet 배분도 없다.
+    """
+    return _record_move(
+        conn,
+        move_id=move_id,
+        sim_run_id=sim_run_id,
+        lot_id=lot_id,
+        move_type="DISPOSE",
+        quantity_kg=quantity_kg,
+        moved_at=moved_at,
+        reason_code=reason_code,
+        sale_item_id=None,
+        note=note,
+        lines=(),
+        allowed_move_types=_DISPOSE_MOVE_TYPES,
+    )
+
+
 def record_inventory_move(
     conn: Any,
     *,
@@ -377,10 +429,49 @@ def record_inventory_move(
     :raises OriginalQuantityExceeded: IN 이 Lot 최초 수량을 넘게 만든다.
     :raises MoveLineTotalMismatch: Line 합계가 Header 수량과 다르다.
     """
-    if move_type not in _SUPPORTED_MOVE_TYPES:
+    return _record_move(
+        conn,
+        move_id=move_id,
+        sim_run_id=sim_run_id,
+        lot_id=lot_id,
+        move_type=move_type,
+        quantity_kg=quantity_kg,
+        moved_at=moved_at,
+        reason_code=reason_code,
+        sale_item_id=sale_item_id,
+        note=note,
+        lines=lines,
+        allowed_move_types=_SUPPORTED_MOVE_TYPES,
+    )
+
+
+def _record_move(
+    conn: Any,
+    *,
+    move_id: str,
+    sim_run_id: str,
+    lot_id: str,
+    move_type: str,
+    quantity_kg: Decimal,
+    moved_at: date,
+    reason_code: str,
+    sale_item_id: str | None,
+    note: str | None,
+    lines: Sequence[MoveLine],
+    allowed_move_types: frozenset[str],
+) -> LedgerResult:
+    """원장 쓰기의 **공통 경로**. 두 공개 진입점이 이 하나를 나눠 쓴다.
+
+    ★ **어떤 Move Type 을 받을지는 부르는 쪽이 정한다** (`allowed_move_types`).
+      그래서 `DISPOSE` 가 열려도 `record_inventory_move` 는 여전히 IN·OUT 만 받는다 —
+      폐기가 아무 데서나 새어 들어오지 않는 자리가 여기다.
+    """
+    if move_type not in allowed_move_types:
         raise UnsupportedMoveType(
-            f"이번 판이 실행하는 Move Type 은 IN · OUT 뿐이다 (받은 것: {move_type!r})."
-            " DISPOSE · ADJUST 는 DB 어휘로만 남아 있고 업무 규칙이 정해지지 않았다."
+            f"이 진입점이 받는 Move Type 이 아니다 (받은 것: {move_type!r},"
+            f" 허용: {sorted(allowed_move_types)})."
+            " DISPOSE 는 폐기 확정 전용 진입점으로만 들어오고, ADJUST 는 아직"
+            " 업무 규칙이 정해지지 않았다."
         )
     quantity = _quantity(quantity_kg, label="quantity_kg")
     line_quantities = [_quantity(line.quantity_kg, label="lines[].quantity_kg") for line in lines]
@@ -669,10 +760,12 @@ def _next_remaining(
     ⚠️ DB CHECK 둘(`remaining >= 0` · `remaining <= original`)을 우회하지 않는다.
        같은 규칙을 앞에서 한 번 더 볼 뿐이고, 그래야 실패해도 트랜잭션이 살아 있다.
     """
-    if move_type == "OUT":
+    # ★ `DISPOSE` 도 잔량을 **줄이는** 방향이다 — OUT 과 같은 규칙을 쓴다.
+    #   두 방향을 한 자리에서 보게 두어야 "폐기만 다르게 센다" 가 생기지 않는다.
+    if move_type in ("OUT", "DISPOSE"):
         if quantity > current_remaining:
             raise RemainingQuantityInsufficient(
-                f"OUT 수량({quantity})이 현재 잔량({current_remaining})보다 크다"
+                f"{move_type} 수량({quantity})이 현재 잔량({current_remaining})보다 크다"
                 f" (lot_id={lot_id}, move_id={move_id}). Move 를 남기지 않는다."
             )
         return current_remaining - quantity
