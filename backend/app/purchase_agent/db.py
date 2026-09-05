@@ -53,6 +53,32 @@ def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
     return values
 
 
+#: 접속 시도를 포기하는 시각(초). ``psycopg.connect`` 로 그대로 넘어간다.
+#:
+#: ⚠️ **없으면 libpq 기본이 0(무제한)** 이라 TCP connect 가 커널 재시도 정책까지
+#:   매달린다. 접속이 **거부**되는 경우와 **무응답**인 경우가 다르게 동작한다
+#:   (``#81`` 실측 2026-08-28)::
+#:
+#:       접속 거부     16ms 에 E4_NOT_STARTED 로 정상 종료
+#:       접속 무응답   180초 클라이언트 타임아웃까지 CONNECT 3회 · SQL 0건
+#:
+#: 🔴 **화면은 지금도 안 멈춘다** — 프론트가 15초에 끊고 폴백한다
+#:   (``frontend/src/lib/api.ts``). 물리는 것은 **백엔드 워커**이고, 요청이 쌓이면
+#:   고갈된다.
+#:
+#: **왜 5초인가**
+#:
+#: - LAN(``192.168.0.38``)이고 정상 접속은 밀리초 단위다
+#: - 프론트 15초의 1/3 — **백엔드가 먼저 정리돼야** 워커가 안 물린다
+#: - **재시도 로직이 우리 코드에 없다** (``quotes.py`` 에 retry 0건). 너무 짧으면
+#:   일시 실패에 그대로 0안이 된다 — ``#81`` 본문이 *"``No route to host`` 로 한 번
+#:   실패한 적이 있고 재시도에서 붙었다"* 를 적어 두었다
+#:
+#: ⚠️ ``#81`` 이 ⓑ(공통 헬퍼)로 정해지면 이 인자가 헬퍼로 옮겨간다. 그때 이 줄은
+#:   지워도 되고 **값은 따라간다.**
+CONNECT_TIMEOUT_SECONDS = 5
+
+
 def get_connection() -> psycopg.Connection[dict[str, Any]]:
     """읽기용 연결. 이 모듈은 이 연결로 ``SELECT`` 만 보낸다."""
     config = _required_environment(_CONNECTION_ENV_KEYS)
@@ -63,6 +89,7 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
         user=config["DB_USER"],
         password=config["DB_PASSWORD"],
         row_factory=dict_row,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )
 
 
