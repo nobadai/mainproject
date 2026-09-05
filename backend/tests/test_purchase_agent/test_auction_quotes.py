@@ -348,6 +348,44 @@ def test_the_purchase_db_module_exposes_only_read_helpers() -> None:
     assert public == {"fetch_all", "fetch_one", "get_connection"}
 
 
+def test_the_connection_carries_a_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 ``connect_timeout`` 이 **실제로 인자로 나가는지** 본다 (``#81``).
+
+    없으면 libpq 기본이 **0(무제한)** 이라 TCP connect 가 커널 재시도 정책까지 매달린다.
+    화면은 프론트 15초 폴백이 막지만 **백엔드 워커가 물리고**, 요청이 쌓이면 고갈된다.
+
+    🔴 **선언 상수를 읽지 않고 나간 인자를 본다.** ``db.CONNECT_TIMEOUT_SECONDS`` 와
+      비교하면 코드가 그 상수를 안 넘겨도 통과한다 — 양쪽이 같은 값을 들고 있을 뿐이다
+      (CLAUDE.md 규칙 8과 같은 사고).
+
+    🔴 **값을 못 박지 않고 범위로 잠근다.** 재려는 것은 *"5냐"* 가 아니라
+      *"무제한이 아니고 프론트보다 먼저 끊나"* 다. 못 박으면 5→4 로 바꾸는 날
+      의미 없이 깨지고, 그때 검사를 지우게 된다.
+
+    ⚠️ ``psycopg.connect`` 를 스파이로 갈아 끼우므로 **실제 접속이 일어나지 않는다.**
+      환경변수도 주입해 ``.env`` 에 안 기댄다 (``load_dotenv`` 는 기본이
+      ``override=False`` 라 여기서 넣은 값이 이긴다).
+    """
+    captured: dict[str, Any] = {}
+
+    def spy(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    for key in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"):
+        monkeypatch.setenv(key, "x")
+    monkeypatch.setattr(db.psycopg, "connect", spy)
+
+    db.get_connection()
+
+    assert "connect_timeout" in captured, (
+        "psycopg.connect 에 connect_timeout 이 안 넘어간다 — libpq 기본 0(무제한)이 된다"
+    )
+    # 프론트(frontend/src/lib/api.ts)가 15초에 끊는다. 그보다 늦게 포기하면
+    # 사람이 화면을 되찾은 뒤에도 워커가 남는다.
+    assert 0 < captured["connect_timeout"] < 15
+
+
 # --------------------------------------------------------------------- 주입 (환경변수 아님)
 
 
