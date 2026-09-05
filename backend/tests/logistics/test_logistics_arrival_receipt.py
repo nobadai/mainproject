@@ -54,7 +54,10 @@ def _insert_칸이름(text: str) -> list[str]:
     """
     본문 = re.search(r"inbound_receipts\s*\((.*?)\)", text, re.DOTALL)
     assert 본문 is not None, text
-    return [칸.strip() for 칸 in 본문.group(1).split(",") if 칸.strip()]
+    # ⚠️ `str(Composed)` 는 줄바꿈을 **글자 두 개**(\n)로 적는다 — 그냥 strip 하면
+    #    첫 칸 이름에 그 두 글자가 붙어 남는다.
+    칸들 = 본문.group(1).replace(chr(92) + "n", " ")
+    return [칸.strip() for 칸 in 칸들.split(",") if 칸.strip()]
 
 
 @pytest.fixture(autouse=True)

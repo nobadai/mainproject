@@ -24,16 +24,23 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import psycopg
 import pytest
 
-from app.logistics import receipts
+from app.logistics import inspections, receipts
 from app.logistics.arrival import DueInbound
 from app.logistics.db import get_connection
+from app.logistics.inspections import (
+    InspectionConflict,
+    InspectionIntegrityError,
+    InspectionOutcome,
+    InvalidInspectionOutcome,
+    record_inspection,
+)
 from app.logistics.purchase_detail import PurchaseDetail
 from app.logistics.receipts import check_receipt_state, create_arrived_receipt
 from app.logistics.schemas import InTransitItem
@@ -46,6 +53,8 @@ ITEM_ID = "ITEM-TEST"
 PURCHASE_ITEM_ID = "PI-TEST"
 INBOUND_ID = "INB-H1-THRU-20260105-BAECHU-1-1"
 ETA = date(2026, 1, 7)
+INSPECTED_AT = datetime(2026, 1, 7, 9, 30, tzinfo=UTC)
+INSPECTOR = "WH-INSPECTOR-01"
 
 _DB_DIR = Path(__file__).resolve().parents[3] / "database"
 
@@ -94,6 +103,7 @@ def conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[psycopg.Connection]:
             cur.execute(f"INSERT INTO {TMP_SCHEMA}.sim_runs VALUES (%s)", (SIM_RUN_ID,))
             cur.execute(f"INSERT INTO {TMP_SCHEMA}.purchase_items VALUES (%s)", (PURCHASE_ITEM_ID,))
         monkeypatch.setattr(receipts, "get_db_schema", lambda: TMP_SCHEMA)
+        monkeypatch.setattr(inspections, "get_db_schema", lambda: TMP_SCHEMA)
         yield connection
     finally:
         # 🔴 COMMIT 하지 않는다 — 공유 DB 에 시험 흔적을 남기지 않는다.
@@ -303,3 +313,183 @@ def test_다른_실행의_같은_입고는_안_보인다(conn: psycopg.Connectio
     존재 = check_receipt_state(conn, sim_run_id="SIM-DIFFERENT", inbound_id=INBOUND_ID)
 
     assert 존재.status == "NEW"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3-B4-H — 검수 기록 + Receipt 마감 (실물)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _outcome(verdict="PASS", *, inspected="3587.000000", accepted=None, hold="0", reject="0"):
+    return InspectionOutcome(
+        verdict=verdict,
+        inspected_qty_kg=Decimal(inspected),
+        accepted_qty_kg=Decimal(inspected if accepted is None else accepted),
+        hold_qty_kg=Decimal(hold),
+        reject_qty_kg=Decimal(reject),
+    )
+
+
+def _영수를_만든다(conn: psycopg.Connection) -> str:
+    return create_arrived_receipt(
+        conn, sim_run_id=SIM_RUN_ID, inbound=_due(), purchase_detail=_detail()
+    ).receipt_id
+
+
+def _검수행들(conn: psycopg.Connection) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT inspection_id, verdict, inspected_qty_kg, accepted_qty_kg,"
+            f" hold_qty_kg, reject_qty_kg, fact_source, inspector, inspected_at"
+            f" FROM {TMP_SCHEMA}.inbound_inspections ORDER BY inspection_id"
+        )
+        이름 = [d.name for d in cur.description]
+        return [
+            r if isinstance(r, dict) else dict(zip(이름, r, strict=True)) for r in cur.fetchall()
+        ]
+
+
+def test_검수가_실제로_들어가고_Receipt_가_마감된다(conn: psycopg.Connection) -> None:
+    """🔴 가짜로는 못 재는 것 — CHECK 넷(판정 어휘 · 항등식 · 판정↔수량 · fact_source)과
+    FK 를 실제 PostgreSQL 이 받아 주는지 본다.
+    """
+    receipt_id = _영수를_만든다(conn)
+
+    결과 = record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=_outcome("HOLD", inspected="100", accepted="70", hold="30", reject="0"),
+    )
+
+    assert 결과.applied is True
+    assert 결과.receipt_status == "INSPECTED"
+    검수 = _검수행들(conn)
+    assert len(검수) == 1
+    assert 검수[0]["inspection_id"] == f"INSP-{receipt_id}"
+    assert 검수[0]["verdict"] == "HOLD"
+    assert 검수[0]["fact_source"] == "SCENARIO_SIMULATED"
+    assert 검수[0]["inspector"] == INSPECTOR
+    assert 검수[0]["inspected_at"] == INSPECTED_AT
+
+    행 = _row(conn)
+    assert 행["receipt_status"] == "INSPECTED"
+    assert 행["accepted_qty_kg"] == Decimal(70)
+    assert 행["hold_qty_kg"] == Decimal(30)
+    assert 행["rejected_qty_kg"] == Decimal(0)
+
+
+def test_적치_칸은_여전히_NULL_이다(conn: psycopg.Connection) -> None:
+    """★ 검수 단계는 위치·팔레트를 정하지 않는다."""
+    receipt_id = _영수를_만든다(conn)
+
+    record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=_outcome(),
+    )
+
+    행 = _row(conn)
+    for 칸 in ("receiving_location_id", "estimated_pallet_count", "actual_pallet_count"):
+        assert 행[칸] is None, f"{칸} 을 지어냈다"
+
+
+def test_검수_항목_행이_생기지_않는다(conn: psycopg.Connection) -> None:
+    """🔴 하지 않은 관찰을 적지 않는다."""
+    receipt_id = _영수를_만든다(conn)
+
+    record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=_outcome(),
+    )
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {TMP_SCHEMA}.inbound_inspection_checks")
+        found = cur.fetchone()
+    assert (found[0] if not isinstance(found, dict) else found["count"]) == 0
+
+
+def test_같은_사실로_재실행해도_한_행이다(conn: psycopg.Connection) -> None:
+    """🔴 **잠금 재진입 + 잠금 안 재조회를 실물로 잰다.**
+
+    같은 트랜잭션이 도착·검수를 이어 부르므로 잠금이 자기를 막으면 여기서 걸린다.
+    """
+    receipt_id = _영수를_만든다(conn)
+    outcome = _outcome()
+
+    첫번 = record_inspection(
+        conn, receipt_id=receipt_id, inspected_at=INSPECTED_AT, inspector=INSPECTOR, outcome=outcome
+    )
+    두번 = record_inspection(
+        conn, receipt_id=receipt_id, inspected_at=INSPECTED_AT, inspector=INSPECTOR, outcome=outcome
+    )
+
+    assert 첫번.applied is True
+    assert 두번.applied is False
+    assert len(_검수행들(conn)) == 1
+    assert _row(conn)["receipt_status"] == "INSPECTED"
+
+
+def test_다른_사실로_재실행하면_충돌이다(conn: psycopg.Connection) -> None:
+    receipt_id = _영수를_만든다(conn)
+    record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=_outcome("PASS", inspected="100"),
+    )
+
+    with pytest.raises(InspectionConflict):
+        record_inspection(
+            conn,
+            receipt_id=receipt_id,
+            inspected_at=INSPECTED_AT,
+            inspector=INSPECTOR,
+            outcome=_outcome("REJECT", inspected="100", accepted="0", hold="0", reject="100"),
+        )
+
+    assert len(_검수행들(conn)) == 1
+
+
+def test_계약을_어긴_결과는_DB_까지_가지_않는다(conn: psycopg.Connection) -> None:
+    """★ 검증이 DML 앞이라 **트랜잭션이 살아 있다** — 바로 다음 정상 호출이 성공한다.
+
+    🔴 DB CHECK 에 맡겼으면 여기서 트랜잭션이 aborted 되어 뒤 작업까지 잃는다.
+    """
+    receipt_id = _영수를_만든다(conn)
+
+    with pytest.raises(InvalidInspectionOutcome):
+        record_inspection(
+            conn,
+            receipt_id=receipt_id,
+            inspected_at=INSPECTED_AT,
+            inspector=INSPECTOR,
+            outcome=_outcome("HOLD", inspected="100", accepted="70", hold="20", reject="0"),
+        )
+
+    결과 = record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=_outcome("PASS", inspected="100"),
+    )
+    assert 결과.applied is True
+
+
+def test_도착_기록_없이_검수만_적지_않는다(conn: psycopg.Connection) -> None:
+    with pytest.raises(InspectionIntegrityError):
+        record_inspection(
+            conn,
+            receipt_id="RCPT-NO-SUCH-RECEIPT",
+            inspected_at=INSPECTED_AT,
+            inspector=INSPECTOR,
+            outcome=_outcome(),
+        )

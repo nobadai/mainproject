@@ -104,6 +104,7 @@ __all__ = [
     "ReceiptWriteResult",
     "check_receipt_state",
     "create_arrived_receipt",
+    "lock_arrival_writes",
     "receipt_id_for",
 ]
 
@@ -336,7 +337,7 @@ def receipt_id_for(*, sim_run_id: str, inbound_id: str) -> str:
     return f"RCPT-{sim_run_id}-{inbound_id}"
 
 
-def _lock_arrival_writes(cursor: Any) -> None:
+def lock_arrival_writes(cursor: Any) -> None:
     """도착 Receipt 쓰기를 **하나의 전역 잠금으로 직렬화한다.**
 
     🔴 **이 잠금이 read-before-write 의 틈을 닫는다.**
@@ -611,7 +612,7 @@ def create_arrived_receipt(
 
     with conn.cursor() as cursor:
         # ── ② 잠금이 먼저다 ────────────────────────────────────────────
-        _lock_arrival_writes(cursor)
+        lock_arrival_writes(cursor)
 
     # ── ③ 잠금 안에서 다시 묻는다 ──────────────────────────────────────
     existing = check_receipt_state(conn, sim_run_id=sim_run_id, inbound_id=inbound.inbound_id)
