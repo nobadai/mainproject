@@ -986,6 +986,7 @@ def test_J_누적_뒤에도_B1_이_선다():
             ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
         ],
         confirmed_outbound_schedule=[],
+        outbound_commitments=[],
         used_capacity_kg=Decimal(0),
         guaranteed_capacity_by_zone_kg=None,
         evidence_refs=[],
@@ -1088,6 +1089,7 @@ def test_O_매입_참조가_실려도_B1_이_그대로_선다():
             ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
         ],
         confirmed_outbound_schedule=[],
+        outbound_commitments=[],
         used_capacity_kg=Decimal(0),
         guaranteed_capacity_by_zone_kg=None,
         evidence_refs=[],

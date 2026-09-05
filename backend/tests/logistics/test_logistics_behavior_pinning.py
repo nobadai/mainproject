@@ -80,6 +80,7 @@ def _snapshot(**overrides: Any) -> InventoryLogisticsSnapshot:
         "in_transit": [],
         "confirmed_inbound_schedule": [],
         "confirmed_outbound_schedule": [],
+        "outbound_commitments": [],
         "used_capacity_kg": Decimal(1000),
         "guaranteed_capacity_kg": Decimal(8000),
         "burst_capacity_kg": Decimal(9600),
@@ -454,6 +455,7 @@ def _mixed_verdict_case() -> tuple[InventoryLogisticsSnapshot, dict[str, Any]]:
             {"date": date(2026, 8, 25).isoformat(), "quantity_kg": 1000, "item": "배추"},
             {"date": date(2026, 8, 27).isoformat(), "quantity_kg": 1000, "item": "배추"},
         ],
+        outbound_commitments=[],
     )
     payload = _payload_of(
         [
@@ -886,6 +888,7 @@ def _two_axis_case() -> tuple[InventoryLogisticsSnapshot, dict[str, Any]]:
             {"date": date(2026, 8, 25).isoformat(), "quantity_kg": 1000, "item": "배추"},
             {"date": date(2026, 8, 27).isoformat(), "quantity_kg": 1000, "item": "배추"},
         ],
+        outbound_commitments=[],
     )
     payload = _payload_of(
         [

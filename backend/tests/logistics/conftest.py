@@ -92,6 +92,8 @@ def complete_logistics_snapshot() -> InventoryLogisticsSnapshot:
         in_transit=[],
         confirmed_inbound_schedule=[],
         confirmed_outbound_schedule=[],
+        # `[]` 는 **예약·할당 0건 확인**이다 (None = 미조회와 다르다).
+        outbound_commitments=[],
         used_capacity_kg=Decimal(1000),
         guaranteed_capacity_kg=Decimal(8000),
         burst_capacity_kg=Decimal(2000),
@@ -114,6 +116,7 @@ def unresolved_logistics_snapshot(
             "in_transit": None,
             "confirmed_inbound_schedule": None,
             "confirmed_outbound_schedule": None,
+            "outbound_commitments": None,
             "guaranteed_capacity_kg": None,
             "burst_capacity_kg": None,
             "inbound_lead_days": None,

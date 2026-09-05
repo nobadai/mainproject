@@ -190,6 +190,7 @@ def test_effective_limit_is_the_denominator_not_operational_raw():
         in_transit=[],
         confirmed_inbound_schedule=[],
         confirmed_outbound_schedule=[],
+        outbound_commitments=[],
         used_capacity_kg=Decimal(500),
         guaranteed_capacity_by_zone_kg=None,
         evidence_refs=[],

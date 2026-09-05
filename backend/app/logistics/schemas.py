@@ -183,6 +183,31 @@ class ItemStoragePolicyFact(BaseModel):
         return _reject_boolean(value)
 
 
+class OutboundCommitment(BaseModel):
+    """출고가 **이미 잡아 둔** 몫 한 줄. 아직 창고에는 있지만 남에게 팔 수 없는 양이다.
+
+    ```text
+    lot_id 있음   그 Lot 에 붙은 살아있는 할당 (ALLOCATED · PICKED)
+    lot_id 없음   아직 Lot 을 안 고른 예약의 미할당 잔여
+    ```
+
+    🔴 **`SHIPPED` 는 여기 없다.** 나간 몫은 원장 OUT 이 `remaining_qty_kg` 에서 이미
+       덜어냈다 — 다시 빼면 같은 수량을 두 번 차감한다 (`outbound.py` 와 같은 규율).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1)
+    #: `None` 은 **Lot 미지정 예약**이다. 없는 Lot 을 가리키는 것이 아니다.
+    lot_id: str | None = None
+    quantity_kg: Decimal = Field(gt=0)
+
+    @field_validator("quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_quantity(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class InventoryLogisticsSnapshot(BaseModel):
     """Repository가 한 호출 진입 시점에 읽어 고정한 Inventory/Logistics 사실과 정책값.
 
@@ -207,6 +232,15 @@ class InventoryLogisticsSnapshot(BaseModel):
     in_transit: list[InTransitItem] | None
     confirmed_inbound_schedule: list[ScheduledQuantity] | None
     confirmed_outbound_schedule: list[ScheduledQuantity] | None
+    #: 🔴 **출고가 이미 잡아 둔 몫** (`inventory_reservations` · `inventory_allocations`).
+    #: `None` 은 미조회, `[]` 는 **0건 확인**이다 — 둘을 뭉개면 예약을 못 읽은 것이
+    #: *"예약이 없다"* 로 둔갑해 같은 재고가 두 번 팔린다.
+    #:
+    #: ⚠️ `confirmed_outbound_schedule` 과 **다른 축이다.** 저쪽은 fixture 가 적어 둔
+    #:    확정 출고이고 이쪽은 WMS 표의 예약·할당이다. 실측(2026-09-05) 상 fixture 쪽은
+    #:    전부 `CONFIRMED_ZERO` 라 지금은 겹치지 않는다 — fixture 에 실제 값이 들어오는
+    #:    날 **한 축으로 합쳐야 한다** (지금 둘을 다 빼면 이중 차감이다).
+    outbound_commitments: list[OutboundCommitment] | None = None
     used_capacity_kg: Decimal = Field(ge=0)
     guaranteed_capacity_kg: Decimal | None = Field(default=None, gt=0)
     burst_capacity_kg: Decimal | None = Field(default=None, gt=0)

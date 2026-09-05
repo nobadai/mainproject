@@ -19,6 +19,11 @@ from typing import NamedTuple
 from psycopg import sql
 
 from app.logistics.db import fetch_all, get_db_schema
+from app.logistics.outbound import (
+    _ASSIGNED_ALLOCATION,
+    _HOLDING_ALLOCATION,
+    _HOLDING_RESERVATION,
+)
 from app.logistics.schemas import (
     POLICY_VERSION,
     InventoryLogisticsSnapshot,
@@ -26,6 +31,7 @@ from app.logistics.schemas import (
     ItemStoragePolicyFact,
     LogisticsPolicy,
     LogisticsRuntimeFixture,
+    OutboundCommitment,
 )
 
 #: 계약(Literal)과 같은 값을 쓴다 — schemas 가 단일 소유다 (#121 ⑤).
@@ -326,6 +332,9 @@ def get_current_logistics_read(*, as_of: date) -> LogisticsRead:
         in_transit=fixture.in_transit,
         confirmed_inbound_schedule=fixture.confirmed_inbound_schedule,
         confirmed_outbound_schedule=fixture.confirmed_outbound_schedule,
+        # 🔴 예약·할당 축을 **여기서 한 번** 읽는다. 안 읽으면 매입에 나가는
+        #    `inventory_by_item` 이 이미 팔린 재고를 다시 팔 수 있다고 답한다.
+        outbound_commitments=get_outbound_commitments(sim_run_id=fixture.sim_run_id),
         used_capacity_kg=used_capacity,
         guaranteed_capacity_kg=policy.guaranteed_capacity_kg,
         burst_capacity_kg=policy.burst_capacity_kg,
@@ -395,3 +404,103 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         status=row.get("status"),
         storage_zone=row.get("storage_zone"),
     )
+
+
+def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
+    """출고가 **이미 잡아 둔 몫**을 읽는다. `outbound.py` 와 같은 규율로 센다.
+
+    ```text
+    lot_id 있음   살아있는 할당      ALLOCATED · PICKED
+    lot_id 없음   미할당 예약 잔여   reserved − (ALLOCATED·PICKED·SHIPPED)  · 음수는 0
+    ```
+
+    🔴 **`SHIPPED` 를 할당 쪽에서는 빼고 예약 쪽에서는 뺀다.** 헷갈리는 자리라 이유를
+       적는다.
+
+    ```text
+    할당 축   SHIPPED 는 제외   원장 OUT 이 remaining_qty_kg 에서 이미 덜어냈다
+    예약 축   SHIPPED 도 포함   그 예약이 더 이상 새로 잡아 둘 필요가 없는 몫이다
+    ```
+
+       ⚠️ 이 두 줄이 `outbound._HOLDING_ALLOCATION` · `_ASSIGNED_ALLOCATION` 과 **글자
+          그대로 같아야 한다.** 다르면 같은 재고를 두 곳이 다르게 세고, 매입에 나가는
+          `inventory_by_item` 과 예약이 실제로 잡을 수 있는 양이 어긋난다.
+
+    ⚠️ **놓아준 예약(`RELEASED`·`CANCELLED`)은 세지 않는다** — 돌려준 몫이다.
+
+    ★ 빈 목록은 *"0건 확인"* 이다. 못 읽은 것과 구분하려고 예외를 삼키지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    # ── 살아있는 할당: Lot 축 ──────────────────────────────────────────
+    allocation_rows = fetch_all(
+        sql.SQL(
+            """
+            SELECT a.lot_id, i.item_name, SUM(a.allocated_qty_kg) AS quantity_kg
+            FROM {}.inventory_allocations a
+            JOIN {}.inventory_reservations r ON r.reservation_id = a.reservation_id
+            JOIN {}.inventory_lots l ON l.lot_id = a.lot_id
+            JOIN {}.items i ON i.item_id = l.item_id
+            WHERE r.sim_run_id = %s AND a.status = ANY(%s)
+            GROUP BY a.lot_id, i.item_name
+            ORDER BY a.lot_id
+            """
+        ).format(schema, schema, schema, schema),
+        [sim_run_id, sorted(_HOLDING_ALLOCATION)],
+    )
+    # ── 미할당 예약: 품목 축 ──────────────────────────────────────────
+    reservation_rows = fetch_all(
+        sql.SQL(
+            """
+            SELECT i.item_name,
+                   SUM(GREATEST(r.required_qty_kg - COALESCE(a.assigned_qty_kg, 0), 0))
+                       AS quantity_kg
+            FROM {}.inventory_reservations r
+            JOIN {}.items i ON i.item_id = r.item_id
+            LEFT JOIN (
+                SELECT reservation_id, SUM(allocated_qty_kg) AS assigned_qty_kg
+                FROM {}.inventory_allocations
+                WHERE status = ANY(%s)
+                GROUP BY reservation_id
+            ) a ON a.reservation_id = r.reservation_id
+            WHERE r.sim_run_id = %s AND r.status = ANY(%s)
+            GROUP BY i.item_name
+            ORDER BY i.item_name
+            """
+        ).format(schema, schema, schema),
+        [
+            sorted(_ASSIGNED_ALLOCATION),
+            sim_run_id,
+            sorted(_HOLDING_RESERVATION),
+        ],
+    )
+    commitments = [
+        OutboundCommitment(
+            item=_text(row.get("item_name"), 칸="item_name"),
+            lot_id=_text(row.get("lot_id"), 칸="lot_id"),
+            quantity_kg=_decimal(row.get("quantity_kg"), 칸="allocated_qty_kg"),
+        )
+        for row in allocation_rows
+        if _decimal(row.get("quantity_kg"), 칸="allocated_qty_kg") > 0
+    ]
+    commitments += [
+        OutboundCommitment(
+            item=_text(row.get("item_name"), 칸="item_name"),
+            lot_id=None,
+            quantity_kg=_decimal(row.get("quantity_kg"), 칸="unallocated_qty_kg"),
+        )
+        for row in reservation_rows
+        if _decimal(row.get("quantity_kg"), 칸="unallocated_qty_kg") > 0
+    ]
+    return commitments
+
+
+def _text(value: object, *, 칸: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"Outbound commitment {칸} must be a non-empty str")
+    return value
+
+
+def _decimal(value: object, *, 칸: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        raise TypeError(f"Outbound commitment {칸} must be a Decimal")
+    return value

@@ -96,6 +96,7 @@ def _snapshot(**overrides) -> InventoryLogisticsSnapshot:
         "in_transit": [],
         "confirmed_inbound_schedule": [],
         "confirmed_outbound_schedule": [],
+        "outbound_commitments": [],
         "used_capacity_kg": Decimal(1000),
         "guaranteed_capacity_kg": Decimal(8000),
         "burst_capacity_kg": Decimal(9600),
