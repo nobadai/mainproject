@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from app.master import persistence, wiring
@@ -17,8 +18,15 @@ from app.master.budget import CallBudget
 from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
-from app.master.execution_day import is_execution_day, next_execution_day
+from app.master.execution_day import (
+    CalendarNotCovered,
+    ExecutionDayNotFound,
+    HolidayCalendar,
+    is_execution_day,
+    next_execution_day,
+)
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
+from app.master.holiday_calendar import get_calendar
 from app.master.inputs import MasterInputs, collect_inputs
 from app.master.ledger_repository import get_burn_in
 from app.master.plan import ExecutionPlan
@@ -44,6 +52,10 @@ logger = logging.getLogger(__name__)
 # 사유 문장에 요일을 적기 위한 이름. `date.weekday()` 순서 (월 0 … 일 6).
 # ★ 로케일을 타지 않게 직접 적는다 — 서버 로케일에 따라 사유 문장이 갈리면 안 된다.
 _WEEKDAY_NAMES = ("월", "화", "수", "목", "금", "토", "일")
+
+# `date.weekday()` 가 토요일에 주는 값. 사유 문장이 **주말인지 공휴일인지**를 가리는 데만
+# 쓴다 — 판정은 `execution_day` 가 한다.
+_SATURDAY = 5
 
 
 def make_request_id(as_of: str, seq: int = 1) -> str:
@@ -78,22 +90,19 @@ def run_procurement(
         policy_version=request.policy_version,
     )
 
-    if not is_execution_day(request.as_of):
-        # 주말은 오류가 아니라 **안 도는 날**이다 — 어댑터 미등록과 같은 태도다 (§5.3).
-        # 토·일에는 시장이 안 서서 ML 예측이 없다. 없는 값을 복사본으로 채워 판단하면
+    execution_day = _execution_day_verdict(request.as_of)
+    if not execution_day.runs:
+        # 주말·공휴일은 오류가 아니라 **안 도는 날**이다 — 어댑터 미등록과 같은 태도다 (§5.3).
+        # 그날에는 시장이 안 서서 ML 예측이 없다. 없는 값을 복사본으로 채워 판단하면
         # 그건 시장을 본 것이 아니라 금요일을 두 번 본 것이다.
         response = _empty_response(
             context,
-            reason=(
-                f"실행일이 아니다: {request.as_of.isoformat()}"
-                f"({_WEEKDAY_NAMES[request.as_of.weekday()]})은 주말이라 시장이 안 서고"
-                " ML 예측이 없다. 다음 실행일은 "
-                f"{next_execution_day(request.as_of).isoformat()}"
-                f"({_WEEKDAY_NAMES[next_execution_day(request.as_of).weekday()]})이다."
-                " 경과일수는 달력일 그대로 센다 — 주말이 사라지는 것이 아니다."
-            ),
+            reason=_not_execution_day_reason(request.as_of, execution_day.following),
             skipped_note="전 검사: 실행일이 아니어서 Flow 가 시작되지 않음",
         )
+        # ★ 공휴일 축을 못 봤으면 그 사실도 같이 남긴다 — 접힌 이유가 주말이라도
+        #   *"공휴일까지 봤다"* 로 읽히면 안 된다.
+        response.skipped_checks = [*response.skipped_checks, *execution_day.skipped]
         # 못 돈 날도 사람이 읽을 수 있어야 한다 — 빈 응답을 그대로 내보내면 화면이 침묵한다
         response.report_text = render_answer(facts_from_procurement(response))
         # 🔴 **안 돈 날도 이력에 남긴다.** 어댑터 갈래와 같은 이유다 —
@@ -147,11 +156,118 @@ def run_procurement(
         #   findings 가 아니라 concerns 다.
         *commitments.concerns,
     ]
+    # 🔴 **돈 날에도 못 본 축은 적는다.** 공휴일 축이 빠진 채 "실행일이다" 라고 답했으면
+    #   그건 *"주말이 아니다"* 까지만 확인한 것이다 — 비워 두면 다 봤다고 읽힌다
+    #   (`verifier.py` 의 `skipped` 와 같은 규율).
+    response.skipped_checks = [*response.skipped_checks, *execution_day.skipped]
     response.report_text = render_answer(facts_from_procurement(response))
     # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
     #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
     response.history_run_id = persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
+
+
+@dataclass(frozen=True)
+class _ExecutionDayVerdict:
+    """문 앞의 실행일 판정 하나. **본 것과 못 본 것을 같이 든다.**
+
+    ```text
+    runs       이 날 도는가
+    following  안 돈다면 다음은 언제인가 (못 찾으면 None)
+    skipped    못 본 축 — 비어 있으면 주말·공휴일을 다 봤다는 뜻이다
+    ```
+    """
+
+    runs: bool
+    following: date | None
+    skipped: tuple[str, ...] = ()
+
+
+def _execution_day_verdict(
+    as_of: date, calendar: HolidayCalendar | None = None
+) -> _ExecutionDayVerdict:
+    """이 날 도는가. **공휴일 축을 붙여서 묻고, 못 붙으면 주말 축만으로 답한다.**
+
+    🔴 **달력이 죽었다고 매입 판단이 멈추면 안 된다.** 공휴일을 못 보는 것은
+       `#282` 이전의 동작이고, 그때도 판단은 돌았다. 여기서 막으면 ML 쪽 뷰 하나가
+       마스터 전체의 정지 스위치가 된다.
+
+    🔴 **그렇다고 조용히 넘어가지도 않는다.** 못 본 축은 `skipped` 로 나가서
+       응답에 남는다 — *"안 한 것을 안 했다고 적는다"* (`verifier.py`).
+
+    ★ **두 물음을 따로 판단한다.** *"오늘 도는가"* 는 달력이 오늘을 덮으면 답이
+      나오고, *"다음은 언제인가"* 는 앞으로 걷다가 달력 밖으로 나갈 수 있다. 뒤가
+      실패했다고 앞의 답까지 버리면, **덮이는 날의 공휴일 판정을 덮이지 않는 날
+      때문에 잃는다.**
+
+    ⚠️ 뷰가 `CURRENT_DATE` 까지만 나오므로 **오늘·미래를 묻는 호출은 달력 밖이다**
+      (실측 2026-09-04: 뷰가 2025-09-04~2026-09-04). 그 경로가 곧 여기다.
+    """
+    calendar = get_calendar() if calendar is None else calendar
+    skipped: list[str] = []
+
+    try:
+        runs = is_execution_day(as_of, calendar=calendar)
+    except CalendarNotCovered as exc:
+        skipped.append(f"공휴일 축: {as_of.isoformat()} 을 판정 못 함 — {exc}. 주말 축만 돌았다")
+        runs = is_execution_day(as_of)
+
+    if runs:
+        return _ExecutionDayVerdict(True, None, tuple(skipped))
+
+    following, why = _next_execution_day_or_none(as_of, calendar)
+    if why:
+        skipped.append(why)
+    return _ExecutionDayVerdict(False, following, tuple(skipped))
+
+
+def _next_execution_day_or_none(
+    as_of: date, calendar: HolidayCalendar
+) -> tuple[date | None, str]:
+    """다음 실행일과, 그것을 **어떻게 골랐는지.** 사유가 비면 공휴일까지 보고 골랐다.
+
+    ★ 달력 밖으로 나가면 **주말 축만으로 다시 고른다.** 사람이 읽는 사유에 *"다음에
+      언제 도나"* 가 없는 것보다, 공휴일을 못 본 채 고른 날짜와 **그 사실**을 같이
+      주는 편이 낫다.
+    """
+    try:
+        return next_execution_day(as_of, calendar=calendar), ""
+    except CalendarNotCovered as exc:
+        why = f"공휴일 축: 다음 실행일을 찾다 달력 밖으로 나갔다 — {exc}. 주말 축만으로 골랐다"
+    except ExecutionDayNotFound as exc:
+        # 달력은 읽혔는데 상한까지 실행일이 없다 — 달력이 틀렸을 가능성이 크다.
+        return None, f"다음 실행일: 못 찾았다 — {exc}"
+
+    try:
+        return next_execution_day(as_of), why
+    except ExecutionDayNotFound as exc:  # pragma: no cover - 주말은 최대 이틀이다
+        return None, f"다음 실행일: 못 찾았다 — {exc}"
+
+
+def _not_execution_day_reason(as_of: date, following: date | None) -> str:
+    """안 도는 날의 사유. **왜 안 도는지와 언제 다시 도는지를 같이 적는다.**
+
+    ★ **주말과 공휴일을 구분해 적는다.** 설날을 *"주말이라"* 로 적으면 사유가
+      거짓말을 한다 — 사람이 달력을 다시 보게 된다.
+
+    ★ 판정은 여기서 하지 않는다. `execution_day` 가 *"안 도는 날"* 이라고 했고,
+      평일인데 안 도는 날은 공휴일뿐이다.
+    """
+    label = "주말" if as_of.weekday() >= _SATURDAY else "공휴일"
+    head = (
+        f"실행일이 아니다: {as_of.isoformat()}"
+        f"({_WEEKDAY_NAMES[as_of.weekday()]})은 {label}이라 시장이 안 서고 ML 예측이 없다. "
+    )
+    if following is None:
+        # ⚠️ 못 찾은 것을 지어내지 않는다. 사유에 날짜가 없는 것이 **사실**이다.
+        middle = "다음 실행일은 찾지 못했다. "
+    else:
+        middle = (
+            f"다음 실행일은 {following.isoformat()}"
+            f"({_WEEKDAY_NAMES[following.weekday()]})이다. "
+        )
+    tail = "경과일수는 달력일 그대로 센다 — 안 도는 날이 사라지는 것이 아니다."
+    return head + middle + tail
 
 
 def _decision_collision(request_id: str) -> list[str]:

@@ -49,6 +49,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
+from app.master.calendar_walk import MAX_WALK_DAYS
 
 __all__ = [
     "MAX_CARRY_DAYS",
@@ -78,7 +79,14 @@ PARTS: tuple[DayOpenPart, ...] = ("finance", "logistics")
 #: ⚠️ **넘으면 막고 사유를 낸다 — 행을 만들지 않는다.** 실수로 먼 날을 열면 수백 행이
 #:    조용히 생긴다. 번인이 30일이므로 그보다 크게 건너뛰는 것은 의도보다 실수일
 #:    가능성이 크다.
-MAX_CARRY_DAYS = 31
+#:
+#: 🔴 **수를 여기 적어 두지 않는다** (`#282`). 달력을 하루씩 걷는 자리가 마스터에 둘이고
+#:    (여기는 뒤로, 실행일 달력은 앞으로) 멈추는 이유가 같다. 같은 수를 두 곳에 적으면
+#:    언젠가 한쪽만 바뀐다 — 이유와 수는 `calendar_walk.py` 에 한 번만 있다.
+#:
+#: ★ **이름은 남긴다.** 하루 넘김의 어휘는 *"물려받는다(carry)"* 이지 *"걷는다"* 가
+#:   아니고, 밖에서 이 이름을 부르고 있다 (`tests/master/test_day_open.py`).
+MAX_CARRY_DAYS = MAX_WALK_DAYS
 
 
 class DayOpening(Protocol):
