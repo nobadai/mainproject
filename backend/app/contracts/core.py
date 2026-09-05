@@ -791,8 +791,12 @@ class SplitLeg:
     ```
 
     ★ **기본값이 `None` 이다. `0.0` 이나 빈 매핑으로 채우지 않는다** — 없는 것과
-      0 원은 다르다 (§1.2-10). 매입이 아직 이 값을 안 보내므로 오늘은 늘 None 이고,
-      `check_triple_identity` 의 금액 변은 통째로 건너뛴다.
+      0 원은 다르다 (§1.2-10). None 이면 `check_triple_identity` 의 split 금액 변은
+      통째로 건너뛴다.
+
+    ★ 매입 → 여기까지의 통로는 셋이고 **다 이어져 있다** (#295). `SplitLegIn.amount_krw`
+      → `critic_bridge._split_legs` (스칼라에 실행 품목 이름표) → `critic.service._to_scenario`.
+      한 칸만 끊겨도 값이 안 닿고, 그때 금액 변은 *"통과"* 가 아니라 *"안 돈 것"* 이 된다.
     """
 
 
@@ -1233,10 +1237,10 @@ def check_triple_identity(
     ★ Critic 은 **원안이 아니라 클리핑된 값**에 대해 호출해야 한다.
       원안에 대고 검사하면 클리핑되는 날마다 FAIL 이 난다 (B1).
 
-    ★ **split 금액 변은 `SplitLeg.amount_krw` 가 실려 있을 때만 돈다.** 매입이 회차별
-      금액을 아직 안 보내므로 오늘은 통째로 건너뛰고, 그것이 위반이 아니다. 값이 오면
-      그때부터 `Σ 회차금액 ≠ total_amount_krw` 가 잡힌다 — 그 어긋남이 그대로 원장의
-      `purchases.total_amount_krw` 와 `purchase_items.line_amount_krw` 로 간다.
+    ★ **split 금액 변은 `SplitLeg.amount_krw` 가 실려 있을 때만 돈다.** 안 실렸으면
+      통째로 건너뛰고, 그것이 위반이 아니다. 실려 있으면 `Σ 회차금액 ≠ total_amount_krw`
+      가 잡힌다 — 그 어긋남이 그대로 원장의 `purchases.total_amount_krw` 와
+      `purchase_items.line_amount_krw` 로 간다.
     ★ 금액 허용 오차는 수량과 따로 두지 않고 기존 `tol_krw`(IDENTITY_TOL_KRW) 를 쓴다.
       같은 금액 축에 상수가 둘이면 왜 다른지를 아무도 모른다.
     """
