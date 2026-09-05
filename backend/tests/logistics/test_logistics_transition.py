@@ -284,6 +284,141 @@ def test_build_quantity_is_decimal_without_binary_drift():
     assert str(quantity) == "0.1"
 
 
+def _코드만(source: str) -> str:
+    """docstring 과 `#` 주석을 걷어낸 **실제로 실행되는 코드**.
+
+    ⚠️ 원문을 그대로 뒤지면 *"마스터 ID 함수를 부르지 않는다"* 고 **설명하는 문장**이
+       호출로 잡힌다. 설명과 실행문은 다른 것이고, 잠가야 할 것은 후자다.
+
+    ★ **문자열 리터럴은 남긴다.** `f"PUR-{…}"` 로 ID 를 조립하는 것이 바로 잡으려는
+      위반이라, 문자열까지 걷어내면 검사가 아무것도 안 잰다.
+    """
+    tree = ast.parse(source)
+    코드 = source
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            docstring = ast.get_docstring(node, clean=False)
+            if docstring:
+                코드 = 코드.replace(docstring, "", 1)
+    return chr(10).join(line.split("#", 1)[0] for line in 코드.splitlines())
+
+
+# ── build_next_inventory · 매입 참조 (아직 안 켜진 계약) ────────────────
+#
+# 🟡 **마스터는 아직 `purchase_ids` 를 안 넘긴다.** 그 규약은 마스터 소유 파일에
+#    있어 물류가 고칠 자리가 아니다 — 여기서 재는 것은 **물류 쪽 준비가 끝났는가**와
+#    **현행 마스터가 그대로 도는가** 둘이다.
+
+#: 마스터가 계약을 켜는 날 넘겨 줄 매핑의 모양. 🔴 **물류가 만드는 값이 아니라서**
+#: 여기서도 `purchase_id_for()` 를 부르지 않고 마스터가 준 모양 그대로 적는다 —
+#: 테스트가 그 함수를 부르면 물류가 그래도 된다는 신호를 남기게 된다.
+매입참조 = {1: "PUR-REQ-1-D1-S1", 2: "PUR-REQ-1-D1-S2"}
+
+
+def test_build_without_purchase_ids_keeps_working_for_the_current_master():
+    """🔴 **현행 마스터 호출이 그대로 돈다.** 인자를 필수로 만들면 여기서 터진다.
+
+    `apply_approval` 은 아직 `logistics.build(commitment, target_state_date=…)` 로
+    부른다 — 물류가 남의 규약을 혼자 강제할 수 없다.
+    """
+    rows = build_next_inventory(_두회차())
+
+    assert len(rows) == 2
+    assert [row.purchase_id for row in rows] == [None, None]
+    assert [row.inbound_id for row in rows] == ["INB-H1-REQ-1-1-1", "INB-H1-REQ-1-1-2"]
+
+
+def test_build_with_purchase_ids_carries_the_master_owned_value_per_leg():
+    """★ 계약이 켜지면 회차마다 **그 회차의** 참조가 실린다."""
+    rows = build_next_inventory(_두회차(), purchase_ids=매입참조)
+
+    assert [row.purchase_id for row in rows] == ["PUR-REQ-1-D1-S1", "PUR-REQ-1-D1-S2"]
+    assert all(row.purchase_id == 매입참조[seq] for seq, row in zip((1, 2), rows, strict=True))
+
+
+def test_build_does_not_reconstruct_the_purchase_id_itself():
+    """🔴 **받은 값을 그대로 쓴다 — 모양을 보고 짐작하지 않는다.**
+
+    마스터 형식(`PUR-…`)과 전혀 다른 문자열을 넘겨도 그대로 실려야 한다. 여기서
+    `approval_id` 를 뜯어 재조립하거나 `purchase_id_for()` 를 부르면 이 검사가 깨진다.
+    """
+    rows = build_next_inventory(_한회차(), purchase_ids={1: "완전히-다른-문자열"})
+
+    assert rows[0].purchase_id == "완전히-다른-문자열"
+
+
+def test_build_stops_when_a_supplied_mapping_misses_this_leg():
+    """🔴 **계약을 받고서 회차가 빠진 것은 무결성 문제다.**
+
+    ★ `purchase_ids=None`(계약이 안 켜졌다)과 **다른 사실**이다. 여기서 `None` 을
+      넣고 넘어가면 둘이 같은 값으로 뭉개져, 나중에 도착 처리가 구별하지 못한다.
+    """
+    with pytest.raises(transition.PurchaseReferenceMissing) as 오류:
+        build_next_inventory(_두회차(), purchase_ids={1: "PUR-REQ-1-D1-S1"})
+
+    assert "seq=2" in str(오류.value)
+
+
+def test_build_does_not_borrow_another_legs_purchase_id():
+    """🔴 **매핑에 값이 하나뿐이어도 그것을 집지 않는다.**
+
+    `next(iter(purchase_ids.values()))` 같은 대체가 들어가면 이 물건이 **남의 매입
+    줄**에 달리고, 도착 뒤 그 줄에서 등급·단가를 읽어 **틀린 원가의 로트**로 굳는다.
+    """
+    seq2만_있는_약정 = _commitment(
+        legs=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=200.0,
+                arrival_date=date(2026, 1, 5),
+                purchase_date=AS_OF,
+                seq=2,
+            ),
+        ),
+        total_qty_kg=200.0,
+    )
+
+    with pytest.raises(transition.PurchaseReferenceMissing):
+        build_next_inventory(seq2만_있는_약정, purchase_ids={1: "PUR-REQ-1-D1-S1"})
+
+
+def test_build_rejects_an_empty_purchase_reference():
+    """★ 빈 문자열도 참조가 아니다 — 있는 척하는 값을 통과시키지 않는다."""
+    with pytest.raises(transition.PurchaseReferenceMissing):
+        build_next_inventory(_한회차(), purchase_ids={1: ""})
+
+
+def test_build_with_an_empty_mapping_and_no_legs_is_fine():
+    """★ 회차가 없으면 대조할 것도 없다 — 빈 매핑은 예외가 아니다."""
+    assert build_next_inventory(_commitment(legs=(), total_qty_kg=500.0), purchase_ids={}) == []
+
+
+def test_build_keeps_inbound_id_and_purchase_id_as_separate_identities():
+    """🔴 **`purchase_id` 가 `inbound_id` 를 대신하지 않는다.**
+
+    `inbound_id` 는 *"물류가 셈하는 입고 건"*, `purchase_id` 는 *"매입 원장의 어느
+    행에서 왔나"* 다. B-1 대조의 열쇠는 여전히 `inbound_id` 다.
+    """
+    row = build_next_inventory(_한회차(), purchase_ids=매입참조)[0]
+
+    assert row.inbound_id == "INB-H1-REQ-1-1-1"
+    assert row.purchase_id == "PUR-REQ-1-D1-S1"
+    assert row.inbound_id != row.purchase_id
+
+
+def test_build_does_not_call_the_master_id_factory():
+    """🔴 **원문을 읽어 잠근다.** 물류가 마스터 ID 규칙을 복사하면 같은 사실의 주인이
+    둘이 되고, 마스터가 형식을 바꾸는 날 두 곳이 어긋난 채로 조용히 돈다.
+
+    ⚠️ 주석·docstring 은 걷어내고 본다 — *"부르지 않는다"* 고 **설명하는 문장**이
+       호출로 잡히면 안 된다.
+    """
+    코드 = _코드만(Path(transition.__file__).read_text(encoding="utf-8"))
+
+    assert "purchase_id_for" not in 코드, "물류가 마스터 ID 함수를 부르고 있다"
+    assert "PUR-" not in 코드, "물류가 매입 ID 문자열을 조립하고 있다"
+
+
 # ── persist_inventory ───────────────────────────────────────────────────
 
 
@@ -859,3 +994,135 @@ def test_J_누적_뒤에도_B1_이_선다():
     assert find_in_transit_schedule_gap(스냅샷) is None
     assert len(_written_in_transit(conn)) == 2
     assert len(_written_confirmed_inbound(conn)) == 2
+
+
+# ── persist_inventory · 매입 참조의 멱등과 충돌 ────────────────────────
+#
+# ★ 여기서 재는 것은 **참조가 실린 뒤에도 3-B1 의 병합 규율이 그대로인가**다.
+#   `_merge_schedule()` 을 약하게 만들지 않았는지 확인하는 자리다.
+
+
+def test_K_같은_매입_참조로_재반영하면_목록이_안_부푼다():
+    """★ `purchase_id` 가 실려도 **멱등 재반영은 그대로다.**"""
+    rows = build_next_inventory(_한회차(), purchase_ids=매입참조)
+    첫번 = 가짜커넥션(in_transit=[])
+    persist_inventory(첫번, **_fixture_인자(rows))
+
+    두번 = 가짜커넥션(in_transit=_written_in_transit(첫번))
+    persist_inventory(두번, **_fixture_인자(rows))
+
+    적힌것 = _written_in_transit(두번)
+    assert 적힌것 == _written_in_transit(첫번)
+    assert len(적힌것) == 1
+    assert 적힌것[0]["purchase_id"] == "PUR-REQ-1-D1-S1"
+
+
+def test_L_같은_inbound_id_에_다른_매입_참조면_멈춘다():
+    """🔴 **`purchase_id` 만 대조에서 빼는 예외를 두지 않는다.**
+
+    같은 `inbound_id` 인데 매입 출처가 다르면 같은 건이 아니다. 조용히 한쪽을
+    남기면 도착 뒤 **틀린 매입 줄에서 등급·단가를 읽는다.**
+
+    ★ UPDATE 전에 오른다 — 마스터가 승인 전이 전체를 롤백할 수 있다.
+    """
+    기존 = build_next_inventory(_한회차(), purchase_ids={1: "PUR-REQ-1-D1-S1"})[0]
+    conn = 가짜커넥션(in_transit=[기존.model_dump(mode="json")])
+    다른_매입 = build_next_inventory(_한회차(), purchase_ids={1: "PUR-OTHER-D1-S1"})
+
+    with pytest.raises(transition.InboundScheduleConflict) as 오류:
+        persist_inventory(conn, **_fixture_인자(다른_매입))
+
+    assert "INB-H1-REQ-1-1-1" in str(오류.value)
+    assert len(conn.커서.queries) == 1, "읽기만 하고 UPDATE 를 보내지 않는다"
+
+
+def test_M_참조_없던_행에_참조가_붙는_것도_다른_사실이다():
+    """⚠️ 계약이 켜지는 날 한 번은 여기서 부딪힌다. **그것이 맞다.**
+
+    ★ 조용한 되메우기(backfill)를 이 자리에서 하지 않는다 — 그것은 별도 결정이고,
+      여기서 하면 *"언제 무엇이 채워졌나"* 가 아무 데도 안 남는다.
+    """
+    참조없는_옛_행 = build_next_inventory(_한회차())[0].model_dump(mode="json")
+    conn = 가짜커넥션(in_transit=[참조없는_옛_행])
+
+    assert 참조없는_옛_행["purchase_id"] is None
+    with pytest.raises(transition.InboundScheduleConflict):
+        persist_inventory(
+            conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조))
+        )
+
+
+def test_N_confirmed_inbound_모양은_그대로다():
+    """🔴 **일정·수량 사실에는 출처를 얹지 않는다.**
+
+    `ScheduledQuantity` 는 outbound 등 다른 일정에도 재사용된다. 어느 매입에서
+    왔는지는 **운송 중인 물건의 속성**이지 일정의 속성이 아니다.
+    """
+    conn = 가짜커넥션(in_transit=[], confirmed_inbound=[])
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
+
+    적힌_일정 = _written_confirmed_inbound(conn)
+    assert 적힌_일정, "확정 일정이 비면 이 검사가 아무것도 안 잰다"
+    assert all(set(row) == {"date", "quantity_kg", "item", "inbound_id"} for row in 적힌_일정)
+    assert all("purchase_id" in row for row in _written_in_transit(conn)), (
+        "운송 중 쪽에는 반대로 반드시 있어야 한다"
+    )
+
+
+def test_O_매입_참조가_실려도_B1_이_그대로_선다():
+    """★ B-1 이 대조하는 값은 여전히 넷이다 — 한쪽에만 필드가 늘어도 짝이 맞는다.
+
+    ★ 참조가 **있는 행**과 **없는 옛 행**이 한 목록에 섞여도 성립한다.
+    """
+    conn = 가짜커넥션(in_transit=[남의_운송중], confirmed_inbound=[남의_확정입고])
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조)))
+
+    스냅샷 = InventoryLogisticsSnapshot(
+        snapshot_id=None,
+        as_of=AS_OF,
+        on_hand_by_lot=[],
+        in_transit=[InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
+        confirmed_inbound_schedule=[
+            ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
+        ],
+        confirmed_outbound_schedule=[],
+        used_capacity_kg=Decimal(0),
+        guaranteed_capacity_by_zone_kg=None,
+        evidence_refs=[],
+    )
+
+    assert find_in_transit_schedule_gap(스냅샷) is None
+    참조 = {row["inbound_id"]: row.get("purchase_id") for row in _written_in_transit(conn)}
+    assert 참조 == {"INB-OTHER-9": None, "INB-H1-REQ-1-1-1": "PUR-REQ-1-D1-S1"}
+
+
+# ── LogisticsTransitionAdapter · 매입 참조 통과 ────────────────────────
+
+
+def test_adapter_build_works_without_purchase_ids():
+    """🔴 **현행 마스터 호출이 그대로 돈다.** 기본값이 없으면 여기서 `TypeError` 다."""
+    bundle = _adapter().build(_두회차(), target_state_date=TARGET_STATE_DATE)[0]
+
+    assert [row.purchase_id for row in bundle.items] == [None, None]
+
+
+def test_adapter_build_forwards_purchase_ids_untouched():
+    """★ 어댑터에는 업무가 없다 — 받은 매핑을 그대로 흘려보낸다."""
+    bundle = _adapter().build(
+        _두회차(), target_state_date=TARGET_STATE_DATE, purchase_ids=매입참조
+    )[0]
+
+    assert [row.purchase_id for row in bundle.items] == [
+        "PUR-REQ-1-D1-S1",
+        "PUR-REQ-1-D1-S2",
+    ]
+
+
+def test_adapter_build_passes_the_missing_reference_error_through():
+    """★ 어댑터가 삼키지 않는다 — 마스터가 `FAILED` 로 사유를 남긴다."""
+    with pytest.raises(transition.PurchaseReferenceMissing):
+        _adapter().build(
+            _두회차(), target_state_date=TARGET_STATE_DATE, purchase_ids={1: "PUR-REQ-1-D1-S1"}
+        )

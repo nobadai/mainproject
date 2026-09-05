@@ -27,6 +27,25 @@
    계약은 `schemas.py` 의 `InTransitItem` 이고, `in_transit_status` 는
    `CONFIRMED · CONFIRMED_ZERO · UNRESOLVED` 셋 중 하나다. 스키마를 바꾸지 않는다.
 
+🟡 **매입 참조(`purchase_id`)를 받을 자리는 뚫어 뒀다. 아직 안 켜졌다 (2026-09-05).**
+   운송 중인 물건이 도착하면 물류는 그 매입 줄에서 `purchase_item_id` · `item_id` ·
+   `grade` · `unit_price_krw_per_kg` 를 읽어야 한다. 그 참조를 **물류가 지어내면 안
+   되고**, 만드는 곳은 마스터다 (`app/master/transition.py` 의 `purchase_id_for`).
+
+   ```text
+   지금        logistics.build(commitment, target_state_date=…)
+               → purchase_ids=None → purchase_id=None            ★ 정상 상태다
+   협의 뒤      logistics.build(…, purchase_ids={leg.seq: purchase_id})
+               → purchase_ids[leg.seq] 를 그대로 보관
+   ```
+
+   🔴 **마스터 규약을 물류가 고치지 않는다.** `LogisticsTransition.build` 는 마스터
+      소유 파일에 있고, 거기에 `purchase_ids` 를 더하는 것은 **후속 협의 안건**이다.
+      그래서 이쪽 인자는 **기본값 `None`** 이고, 현행 마스터 호출이 그대로 돈다.
+
+   ⚠️ **읽는 쪽은 아직 없다.** `purchase_items` 조회 · 도착 판정 · 검수 · 로트 생성은
+      다음 단계다. 지금 하는 일은 **받을 준비**까지다.
+
 🔴 **`in_transit` → 실제 입고(`inventory_lots`) 전환 시점은 이 판에서 안 정했다.**
    물건이 실제로 도착해 로트가 되는 순간을 무엇으로 볼지(도착일 경과 · 검수 완료 ·
    `purchase_items` 행 생성)는 **물류 판단이고 아직 미결이다.** 여기서 정하지 않는다 —
@@ -53,7 +72,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -71,6 +90,7 @@ __all__ = [
     "InventoryTransition",
     "LogisticsFixtureMissing",
     "LogisticsTransitionAdapter",
+    "PurchaseReferenceMissing",
     "build_next_inventory",
     "persist_inventory",
 ]
@@ -102,7 +122,68 @@ class InboundScheduleConflict(ValueError):
     """
 
 
-def build_next_inventory(commitment: ApprovedCommitment) -> list[InTransitItem]:
+class PurchaseReferenceMissing(LookupError):
+    """매입 참조 매핑을 **받았는데** 이 회차의 값이 그 안에 없다.
+
+    ★ 이 예외는 *"마스터가 참조 계약을 켰다"* 는 전제에서만 오른다. 매핑을 아예 안
+      받은 호출(현행 마스터)은 여기 오지 않는다 — 그때는 `purchase_id` 가 `None` 인
+      것이 **정상 상태**다. 두 경우를 가르는 것이 이 예외의 일이다.
+
+      ```text
+      purchase_ids=None    참조 계약이 아직 안 켜졌다   → purchase_id=None (정상)
+      purchase_ids={…}     켜졌는데 이 회차가 빠졌다     → 멈춘다 (무결성)
+      ```
+
+    🔴 **대신할 값을 고르지 않는다.** 매핑에 값이 하나뿐이어도 그것을 쓰지 않는다 —
+       `purchase_ids` 는 **회차별** 매핑이라, 다른 회차의 값을 집으면 이 물건이
+       남의 매입 줄에 달린다. 도착 뒤 그 참조로 등급·단가를 읽으므로 그 오배정은
+       **원가와 등급이 틀린 로트**로 굳는다.
+
+    🔴 **`None` 을 넣고 넘어가지도 않는다.** 그 `None` 은 위 표의 첫 줄과 구별되지
+       않아, *"계약이 아직 안 켜졌다"* 와 *"켜졌는데 값이 빠졌다"* 가 같은 사실이 된다.
+    """
+
+
+def _purchase_reference(
+    commitment: ApprovedCommitment,
+    leg: Any,
+    purchase_ids: Mapping[int, str] | None,
+) -> str | None:
+    """이 회차가 가리킬 매입 참조. **없으면 `None` 이거나 예외다 — 지어내지 않는다.**
+
+    🔴 **`None` 인 매핑과 값이 빠진 매핑은 다른 사실이다.**
+
+    ```text
+    purchase_ids is None            계약이 아직 안 켜졌다        → None (정상)
+    purchase_ids 에 leg.seq 없음     켜졌는데 이 회차가 빠졌다     → 예외
+    purchase_ids[leg.seq] 가 빈 값   있는 척하는 값이다            → 예외
+    ```
+
+    ★ **찾는 열쇠는 반드시 `leg.seq` 다.** 매핑에 값이 하나뿐이어도
+      `next(iter(purchase_ids.values()))` 로 집지 않는다 — 회차가 늘어난 날 이
+      물건이 남의 매입 줄에 조용히 달린다.
+    """
+    if purchase_ids is None:
+        # ★ 현행 마스터 경로다. *"아직 안 넘긴다"* 는 정상 상태이고, 그 사실을
+        #   `None` 이 그대로 적는다 — 여기서 대신 만들지 않는다.
+        return None
+    purchase_id = purchase_ids.get(leg.seq)
+    if not purchase_id:
+        raise PurchaseReferenceMissing(
+            f"승인 {commitment.approval_id!r} 의 회차 seq={leg.seq} 에 매입 참조가"
+            f" 없다 (받은 회차: {sorted(purchase_ids)})."
+            " 매입 참조 계약을 받고서 이 회차만 빠진 것이라 무결성 문제다 —"
+            " purchase_id 는 마스터가 만드는 값이라 물류가 지어내지 않고,"
+            " 다른 회차의 값으로 대신하지도 않는다."
+        )
+    return purchase_id
+
+
+def build_next_inventory(
+    commitment: ApprovedCommitment,
+    *,
+    purchase_ids: Mapping[int, str] | None = None,
+) -> list[InTransitItem]:
     """승인 약정의 회차별 입고를 `InTransitItem` 목록으로 옮긴다. **순수 계산이다.**
 
     ★ DB 를 부르지 않는다 — 계산이 실패하면 커넥션을 열기도 전에 멈춰야 한다
@@ -117,6 +198,33 @@ def build_next_inventory(commitment: ApprovedCommitment) -> list[InTransitItem]:
     ★ 빈 `arrival_schedule` 은 예외가 아니다. 회차 일정을 못 만든 약정도 승인은 살아
       있고(마스터 `commitment.py` 의 `notes` 가 왜 못 만들었는지 적는다), 그때 물류가
       반영할 입고 예정이 **없다**는 것은 정상 상태다.
+
+    🟢 **매입 참조를 받을 준비만 해 둔 자리다 (2026-09-05).**
+       운송 중인 물건이 도착하면 물류는 그 매입 줄에서 `purchase_item_id` ·
+       `item_id` · `grade` · `unit_price_krw_per_kg` 를 읽어야 한다. 그 참조
+       (`purchase_id`)를 만드는 곳은 **마스터**이고, 물류는 받아서 보관만 한다.
+
+       ```text
+       purchase_ids=None    현행 마스터. 아직 안 넘긴다 → purchase_id=None
+       purchase_ids={1: …}  계약이 켜진 뒤             → purchase_ids[leg.seq]
+       ```
+
+    🔴 **기본값이 `None` 인 것이 이 판의 핵심이다.** 마스터 전이 규약
+       (`app/master/transition.py` 의 `LogisticsTransition`)은 아직 이 인자를 안
+       넘기고, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.** 필수로 만들면
+       현행 `apply_approval` 이 `TypeError` 로 터진다 — 물류 혼자 도메인 경계를
+       넘어 남의 규약을 강제하는 셈이다.
+
+    🔴 **물류가 이 ID 를 짓지 않는다.** `purchase_id_for()` 를 부르거나 `approval_id`
+       를 뜯어 `PUR-…` 를 다시 조립하지 않는다. 같은 규칙이 두 곳에 있으면 같은
+       사실의 주인이 둘이 되고, 마스터가 형식을 바꾸는 날 두 곳이 어긋난 채로
+       조용히 돈다.
+
+    :param purchase_ids: **회차(`leg.seq`) → `purchase_id` 매핑.** 마스터가 승인 한
+        건에 대해 만들어 매입 원장·재무에도 **같은 것**을 넘기는 값이다. `None` 이면
+        *"아직 그 계약이 안 켜졌다"* 는 뜻이고, 예외가 아니다.
+    :raises PurchaseReferenceMissing: 매핑을 **받았는데** 이 회차의 값이 없을 때.
+        **다른 항목으로 대신하지 않는다.**
     """
     rows: list[InTransitItem] = []
     for leg in commitment.arrival_schedule:
@@ -127,6 +235,10 @@ def build_next_inventory(commitment: ApprovedCommitment) -> list[InTransitItem]:
                 #   반영이 같은 물건을 다른 건으로 만들어 `in_transit` 이 부풀고,
                 #   `confirmed_inbound_schedule` 과 대조할 열쇠(B-1)도 사라진다.
                 inbound_id=f"INB-{commitment.approval_id}-{leg.seq}",
+                # ★ **`inbound_id` 를 대신하지 않는다.** 둘은 다른 정체성이다 —
+                #   위는 *"물류가 셈하는 입고 건"*, 아래는 *"매입 원장의 어느 행에서
+                #   왔나"* 다. B-1 대조의 열쇠는 여전히 `inbound_id` 다.
+                purchase_id=_purchase_reference(commitment, leg, purchase_ids),
                 item=leg.item,
                 # ★ `Decimal(str(x))` 를 쓴다. `Decimal(float)` 은 0.1 이 갖고 있는
                 #   이진 오차를 그대로 들여와 수량에 안 보이는 꼬리를 남긴다.
@@ -163,6 +275,13 @@ def _confirmed_inbound_item(item: InTransitItem) -> ScheduledQuantity:
     item         ← 그대로
     inbound_id   ← 그대로 (대조의 열쇠)
     ```
+
+    🔴 **`purchase_id` 를 옮기지 않는다. 일부러다.** `confirmed_inbound_schedule` 은
+       *"그날 몇 kg 이 확정으로 들어온다"* 는 **일정·수량 사실**이고, 그 모델
+       (`ScheduledQuantity`)은 outbound 등 다른 일정에도 재사용된다. 어느 매입에서
+       왔는지는 **운송 중인 물건의 속성**이지 일정의 속성이 아니다.
+
+    ★ B-1 이 대조하는 값은 그대로 넷이다 — 한쪽에만 필드가 늘어도 대조는 성립한다.
 
     ★ **직렬화 방식을 `in_transit_json` 과 같게 둔다** (`model_dump(mode="json")`).
       한쪽만 다른 방식으로 뭉개면 `quantity_kg` 가 왕복 뒤 다른 `Decimal` 로 돌아와
@@ -333,6 +452,17 @@ def _merge_in_transit(
 
     ★ 그 결과 `confirmed_inbound` 와 규칙이 같아졌다. 두 칸이 같은 승인분을 같은
       방식으로 받으므로 **B-1 이 대조하는 두 목록이 어긋날 자리가 줄어든다.**
+
+    🔴 **`purchase_id` 도 사실 대조에 들어간다.** `_같은_사실` 이 모델 전체 값을
+       비교하므로 필드가 늘면 자동으로 포함된다 — **일부러 그대로 둔다.**
+       같은 `inbound_id` 인데 매입 출처가 다르면 그것은 같은 건이 아니고, 조용히
+       한쪽을 남기면 도착 뒤 **틀린 매입 줄에서 등급·단가를 읽는다.**
+       `purchase_id` 만 대조에서 빼는 예외를 두지 않는다.
+
+    ⚠️ **참조 계약이 켜지는 날 한 번은 부딪힌다.** 이미 적힌 행은 `purchase_id` 가
+       없어 `None` 으로 읽히므로, 같은 `inbound_id` 가 값을 달고 다시 오면
+       `InboundScheduleConflict` 가 난다. **그것이 맞다** — 조용한 되메우기는
+       *"언제 무엇이 채워졌나"* 를 아무 데도 안 남긴다.
     """
     return _merge_schedule(
         existing,
@@ -564,11 +694,28 @@ class LogisticsTransitionAdapter:
         commitment: ApprovedCommitment,
         *,
         target_state_date: date,
+        purchase_ids: Mapping[int, str] | None = None,
     ) -> Sequence[InventoryTransition]:
         """묶음 **하나를 담은 시퀀스**를 낸다.
 
         ★ Protocol 이 `Sequence[object]` 라 하나만 담아도 어기지 않는다. 승인 하나가
           바꾸는 fixture 행이 하나뿐이라 묶음도 하나다.
+
+        🔴 **`purchase_ids` 는 기본값 `None` 이어야 한다.** 마스터 전이 규약
+           (`app/master/transition.py` 의 `LogisticsTransition`)은 아직 이 인자를
+           안 넘기고, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.**
+           필수로 만들면 현행 호출이 그대로 `TypeError` 로 터진다 —
+
+           ```text
+           현행 마스터  logistics.build(commitment, target_state_date=…)        계속 돈다
+           계약 개정 뒤  logistics.build(…, purchase_ids=purchase_ids)          값이 실린다
+           ```
+
+           즉 **물류 쪽 준비를 먼저 끝내 두고, 마스터가 준비되는 날 인자 하나만
+           더 받으면 된다.** 그 개정은 마스터 담당자와의 후속 협의 안건이다.
+
+        ★ 인자는 **그대로 흘려보낸다.** 어댑터에는 업무가 없다 — 회차마다 어느 값을
+          집을지도, 없을 때 어떻게 할지도 `build_next_inventory` 가 정한다.
         """
         return (
             InventoryTransition(
@@ -576,7 +723,7 @@ class LogisticsTransitionAdapter:
                 # ★ 마스터 승인에서 왔다는 것을 행에 남긴다. 접두사를 붙이는 이유는
                 #   같은 칸에 다른 출처(번인 적재 등)가 앉을 수 있어서다.
                 source_ref=f"MASTER-APPROVAL:{commitment.approval_id}",
-                items=tuple(build_next_inventory(commitment)),
+                items=tuple(build_next_inventory(commitment, purchase_ids=purchase_ids)),
             ),
         )
 

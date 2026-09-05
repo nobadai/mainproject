@@ -114,6 +114,40 @@ class InTransitItem(BaseModel):
 
     #: B-1: 행이 존재하면 confirmed_inbound_schedule과 같은 건인지 이 ID로 대조한다.
     inbound_id: str | None = None
+    #: 이 운송 건이 **어느 매입에서 왔나**. 도착 시점에 이 참조로 `purchase_items` 를
+    #: 읽어 `purchase_item_id` · `item_id` · `grade` · `unit_price_krw_per_kg` 를
+    #: **그때의 권위값**으로 가져오려는 자리다.
+    #:
+    #: 🟡 **받을 자리는 뚫려 있지만 아직 안 켜졌다 (2026-09-05).** `purchase_id` 를
+    #:    만드는 곳은 마스터(`app/master/transition.py` 의 `purchase_id_for`)이고,
+    #:    그 값이 물류로 넘어오려면 **마스터 전이 규약
+    #:    (`LogisticsTransition.build`)이 바뀌어야 한다.** 그것은 마스터 소유
+    #:    파일이라 물류가 고칠 자리가 아니다 — **후속 협의 안건**이다.
+    #:
+    #:    ```text
+    #:    지금      transition.build_next_inventory(commitment)                 → None
+    #:    협의 뒤    transition.build_next_inventory(…, purchase_ids={seq: id})  → 그 값
+    #:    ```
+    #:
+    #:    물류 쪽 준비는 끝났다 — `purchase_ids` 인자가 기본값 `None` 으로 이미 있고,
+    #:    마스터가 넘겨 주는 날 값이 그대로 실린다.
+    #:
+    #: ★ **물류가 이 ID 를 지어내지 않는다.** 같은 규칙으로 다시 조립하면 같은
+    #:   사실의 주인이 둘이 되고, 마스터가 형식을 바꾸는 날 두 곳이 어긋난 채로
+    #:   조용히 돈다. 받아서 보관하는 것 외의 경로를 만들지 않는다.
+    #:
+    #: 🔴 **`inbound_id` 를 대신하지 않는다.** 둘은 다른 정체성이다 —
+    #:    `inbound_id` 는 *"물류가 셈하는 입고 건"*, `purchase_id` 는 *"매입 원장의
+    #:    어느 행에서 왔나"* 다. B-1 대조의 열쇠는 여전히 `inbound_id` 다.
+    #:
+    #: ★ **여기에 매입 사실을 복제하지 않는다.** `item_id` · `grade` ·
+    #:   `unit_price_krw_per_kg` 는 `purchase_items` 가 주인이다. 복사해 두면 매입이
+    #:   값을 고치는 날 이쪽만 옛 값을 들고 남는다.
+    #:
+    #: ⚠️ **읽기 계약은 관대하다 (`None` 허용).** 이 필드가 생기기 전에 적힌 fixture
+    #:    행에는 이 키가 없다 — 전역 필수로 올리면 그 행들이 통째로 파싱에 실패해
+    #:    물류가 `RUNTIME_NOT_READY` 로 돌아선다.
+    purchase_id: str | None = None
     item: str = Field(min_length=1)
     quantity_kg: Decimal = Field(gt=0)
     expected_arrival_date: date | None
