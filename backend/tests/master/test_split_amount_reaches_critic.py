@@ -166,9 +166,7 @@ def test_스칼라를_실행_품목으로_이름표_붙여_옮긴다():
     ★ 창작이 아니다 - 실행 하나가 품목 하나라 **키가 하나뿐**이고 값은 매입이 보낸
       그대로다. 품목이 바뀌면 키도 따라 바뀌어야 한다.
     """
-    legs = bridge._split_legs(
-        {"split_plan": _split(WRONG_AMOUNT_KRW)}, "무", AS_OF, lead=2
-    )
+    legs = bridge._split_legs({"split_plan": _split(WRONG_AMOUNT_KRW)}, "무", AS_OF, lead=2)
 
     assert legs[0]["amount_krw"] == {"무": float(WRONG_AMOUNT_KRW)}
     assert legs[0]["qty_kg"] == {"무": float(TOTAL_QTY_KG)}
