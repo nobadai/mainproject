@@ -965,8 +965,9 @@ def with_round_amounts(rounds: list[dict], sourcing: list[dict]) -> list[dict]:
       검증이 통째로 건너뛰어진다.
 
       ⚠️ 1회차면 ``amount_krw == total_amount_krw`` 로 같은 값이 두 번 나간다.
-      중복이지만 *"전 회차에 있다"* 가 계약이므로 그쪽을 택했다. 마스터 판단이 다르면
-      이 한 줄을 바꾸면 된다 (2026-09-04 · 답 대기).
+      중복이지만 *"전 회차에 있다"* 가 계약이므로 그쪽을 택했다.
+
+      🟢 **``#296`` 이 우리 방식대로 날랐다 (2026-09-05). 답이 왔다.**
     """
     return [
         {**item, "amount_krw": amount}
