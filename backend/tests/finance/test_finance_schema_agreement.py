@@ -10,6 +10,7 @@ import app.finance
 _REPO = Path(app.finance.__file__).parent.parent.parent.parent
 _FRESH_DDL = _REPO / "database" / "10_domain_schema.sql"
 _MIGRATION_DDL = _REPO / "database" / "finance" / "finance_state_daily_unique.sql"
+_PAYABLE_MIGRATION_DDL = _REPO / "database" / "finance" / "payable_cancellation.sql"
 _AXIS = ("sim_run_id", "financing_mode", "state_date")
 
 
@@ -53,3 +54,36 @@ def test_migration_preflights_the_same_axis_without_repairing_data():
 
     assert group_axis == _AXIS
     assert not re.search(r"\b(?:DELETE|UPDATE|TRUNCATE)\b", migration_sql, re.IGNORECASE)
+
+
+def _normalized_sql(path: Path) -> str:
+    return re.sub(r"\s+", " ", path.read_text(encoding="utf-8")).lower()
+
+
+def test_fresh_and_migration_ddl_agree_on_payable_cancellation_contract():
+    fresh = _normalized_sql(_FRESH_DDL)
+    migration = _normalized_sql(_PAYABLE_MIGRATION_DDL)
+
+    assert "cancelled_amount_krw numeric(18,6) default 0 not null" in fresh
+    assert (
+        "add column if not exists cancelled_amount_krw numeric(18,6) default 0 not null"
+        in migration
+    )
+    assert "cancelled_date date" in fresh
+    assert "add column if not exists cancelled_date date" in migration
+
+    for sql_text in (fresh, migration):
+        assert "'cancelled'" in sql_text
+        assert "original_amount_krw - paid_amount_krw" in sql_text
+        assert "- cancelled_amount_krw" in sql_text
+        assert "- outstanding_amount_krw" in sql_text
+        assert "cancelled_amount_krw >=" in sql_text
+        assert "status <> 'cancelled'" in sql_text
+        assert "outstanding_amount_krw =" in sql_text
+        assert "cancelled_date is not null" in sql_text
+
+
+def test_payable_cancellation_migration_does_not_rewrite_existing_rows():
+    migration = _PAYABLE_MIGRATION_DDL.read_text(encoding="utf-8")
+
+    assert not re.search(r"\b(?:DELETE|UPDATE|TRUNCATE)\b", migration, re.IGNORECASE)

@@ -45,6 +45,7 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `master_decisions_run_id.sql` | `master_decisions.run_id` + 복합 FK + 인덱스 | 2026-08-30 · **팀 승인 대기** |
 | `ml_forecast_view_gate_reason.sql` | `v_ml_price_forecast` 의 `daily[]` 에 `gate_reason` 추가 | 2026-09-03 · **실 DB 적용 대기** |
 | `finance/finance_state_daily_unique.sql` | `finance_states` 의 `UNIQUE(sim_run_id, financing_mode, state_date)` · 적용 전 duplicate preflight · 기존 데이터 자동 정리 없음 | 2026-09-05 · **실 DB 적용 대기** |
+| `finance/payable_cancellation.sql` | `payables` 의 `CANCELLED` · 취소금액/취소일 · 지급/취소/미지급 금액 항등식. 기존 행은 취소금액 0, 자동 상태 변경·삭제 없음 | 2026-09-05 · **실 DB 적용 대기** |
 
 **같은 변경이 두 곳에 있습니다** — 본 DDL(신규 구축용)과 ALTER 판(이관용).
 어느 하나만 고치면 갈립니다. **둘 다 고칩니다.**
