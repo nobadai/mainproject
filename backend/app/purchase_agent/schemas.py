@@ -15,44 +15,17 @@ read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모�
 * 재고·현금·재무 cap 대조 → 부서 밴드·T0 스냅샷 필요
 * 근거 환각 대조 → 원문 문서 필요
 
-⚠️ **finance 측 kg 전환 반영 대기.** 수량 단위는 **kg 통일로 확정**됐다(팀 결정).
-아래 표는 전환이 끝날 때까지의 임시 대조표다 — **전환 완료 시 이 표는 삭제한다.**
+★ **단위는 kg 다.** ton 대조표가 있었는데 전환이 끝나 걷었다 (2026-09-05).
+회귀는 ``tests/finance/test_finance_schemas.py:16``
+``test_purchase_agent_contract_rejects_legacy_ton_fields`` 가 막는다.
 
-현재 이 출력을 받는 소비자가 셋이고, 그중 부서 DTO 둘이 아직 ton이다::
-
-    소비자 (진입점)                                    수량 필드                축 필드
-    -----------------------------------------------  ----------------------  -------------
-    orchestrator/contracts_core.py:PurchaseScenario   qty_kg                  strategy_type
-      Protocol v1.2 — band 클리핑·critic이 사용         unit_price_krw_per_kg   ← kg, 정합
-    finance·logistics:PurchaseAgentScenario (v0.4)    total_quantity_ton      strategy_type
-      POST /finance|logistics/procurement             quantity_ton            ← ton
-    finance/schemas.py:PurchaseScenario (v0.3)        total_quantity_ton      timing
-      POST /finance/core (review_finance_core)        unit_price              ← ton, 구판
-
-**v0.4에서 정합이 끝난 것**: ``coverage_days`` · ``strategy_type`` · ``grade_unit_price`` ·
-``total_amount_krw``. 이름도 의미도 일치한다 (v0.3에서는 각각 없음 / ``timing`` /
-``unit_price`` / ``expected_cost`` 였다).
-
-**남은 차이는 수량 필드 3개뿐이다** — finance·logistics v0.4 기준::
-
-    finance·logistics (v0.4)              IO명세 v1.1 (이 파일)
-    ------------------------------------  ---------------------------
-    total_quantity_ton: Decimal           total_qty_kg: int
-    SplitPlanItem.quantity_ton            SplitPlanItem.qty_kg
-    PurchaseSourcingPlanItem.quantity_ton SourcingPlanItem.qty_kg
-
-전 모델이 ``extra="forbid"`` 라 지금 그대로 보내면 422로 거부된다. 덧붙여 v0.4 쪽에는
-``max_price`` · ``margin_warning`` · ``expected_margin_rate`` · ``rationale`` · ``risks``가
-아예 없다 — 부서가 안 보는 필드인지 누락인지 확인이 필요하다.
-
-⚠️ **거부되는 것보다 변환 코드가 더 위험하다.** 나중에 옮겨 담는 코드가 생기면
-**1000배 오차가 조용히 통과**한다. ``finance/tools.py``는
-``quantity_ton × KG_PER_TON × grade_unit_price``로, 우리는 ``qty_kg × grade_unit_price``로
-계산한다 — 결과는 같지만 입력 단위가 다르다.
-
-전환 방향은 **부서 DTO를 kg로** 맞추는 쪽이다. 팀 코어 계약인
-``contracts_core.py:PurchaseScenario``가 이미 ``qty_kg`` · ``unit_price_krw_per_kg``라,
-kg로 모으면 세 소비자가 한 단위로 정렬된다. 이 파일은 그대로 IO명세 v1.1(kg)을 따른다.
+⚠️ **그 검사가 잠그는 것은 이 파일 쪽이다** — 이름이 *"부서가 ton 을 거부한다"* 로
+읽히지만, ``PurchaseAgentOutput`` 은 재무 DTO 가 아니라 아래 ``PurchaseProposal`` 이다.
+무는 기전도 ``extra="forbid"`` 가 아니라 **``total_qty_kg`` 가 필수**라는 쪽이다
+(변이 실측 2026-09-05: ``Scenario`` 의 ``extra`` 를 ``allow`` 로 풀어도 통과한다).
+부서 DTO 의 단위 회귀는 이 검사가 아니라 **필드명이 자기 validator 에 묶여 있어**
+지켜진다 — ``total_quantity_kg`` 를 되돌리면 ``reject_boolean_numbers`` 가
+``PydanticUserError`` 로 import 부터 깨진다.
 """
 
 from datetime import date
@@ -227,6 +200,12 @@ class SplitPlanItem(BaseModel):
     #:   가 여기서 온다. 마스터는 총액을 회차 수로 나누지 않는다 — 회차마다 등급 구성이
     #:   달라 단가가 다르기 때문이다(재무 ``transition.py`` ``_single_purchase_date`` 가
     #:   같은 이유로 비율 분배를 거부한다).
+    #:
+    #:   🟢 **Critic 까지 간다** — ``#296`` 이 통로 셋을 열었다 (2026-09-05):
+    #:   ``SplitLegIn.amount_krw`` (계약이 칸을 연다) → ``master/critic_bridge.py``
+    #:   ``_split_legs`` (스칼라에 실행 품목 이름표를 붙여 ``{품목: 금액}`` 으로 옮긴다)
+    #:   → ``critic/service.py`` ``_to_scenario``. 이제 **Critic 금액 변이가 실경로에서
+    #:   돈다** — ``#265`` 가 세운 검사가 그전까지 라이브에서 한 번도 안 돌았다.
     #:
     #: 🔴 **우리 산출물에는 항상 찬다. 그런데 스키마에서는 선택 필드다** — 이유가 있다.
     #:
