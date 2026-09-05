@@ -9,18 +9,27 @@ next_execution_day(2025-12-31) = 2026-01-01   신정이다
 ```
 
 ★ **이제 달력이 저장소에 있다.** `#264` 로 ML 이 `database/ml_calendar_days.sql` 을
-  넣었고 실 DB 에 뷰가 있다. 실측(2026-09-04):
+  넣었고 실 DB 에 표와 뷰가 있다.
+
+🔴 **읽는 것은 표다** (`#298`). 처음에는 `v_ml_batch_days` 를 읽었는데 그 뷰가
+  `WHERE c.dt <= CURRENT_DATE` 로 잘려 **공휴일의 절반을 가렸다.** 실측(2026-09-05):
 
 ```text
-haetdeul.v_ml_batch_days   2025-09-04 ~ 2026-09-04   366행   공휴일 22일
+haetdeul.ml_calendar_days   2025-09-04 ~ 2027-09-05   732행   공휴일 44일
+haetdeul.v_ml_batch_days    2025-09-04 ~ 2026-09-05   367행   공휴일 22일
 2026-01-01  holiday_nm = '1월1일'
 ```
 
-🔴 **판정 근거는 `holiday_nm` 하나다.** `is_open` · `status` · `has_batch` 는 안 본다.
+★ **뷰가 틀린 것이 아니다.** `CURRENT_DATE` 컷은 배치 상태의 제약이고 공휴일 축이
+  그것을 물려받았을 뿐이다. 공휴일의 주인은 표다.
+
+🔴 **판정 근거는 `holiday_nm` 하나다.** `is_open` · `is_survey` · `status` ·
+`has_batch` 는 안 본다.
 
 ```text
 is_open      뜻이 흔들린다 — 실측 2026-01-02 는 is_open=False 인데 holiday_nm 이
              없고 배치는 있다. 2026-01-03(토)은 is_open=True 다
+is_survey    조사일 축이다 — 예측 기준일이 거기서 나오지 공휴일이 거기서 나오지 않는다
 has_batch    #242 가 이미 따로 본다 — 같은 사실을 두 곳에서 판정하지 않는다
 ```
 
@@ -46,12 +55,12 @@ from app.master.execution_day import (
     is_execution_day,
     next_execution_day,
 )
-from app.master.holiday_calendar import MlBatchDayCalendar
+from app.master.holiday_calendar import MlCalendarDays
 
 # ── 실측값 ─────────────────────────────────────────────────────────────────
 #
-# 아래 날짜와 이름은 전부 `haetdeul.v_ml_batch_days` 실측이다 (2026-09-04 조회).
-# 지어낸 달력이 아니라 **저 뷰가 실제로 들고 있는 값**이어야, 이 검사가 통과하는 것과
+# 아래 날짜와 이름은 전부 `haetdeul.ml_calendar_days` 실측이다 (2026-09-05 조회).
+# 지어낸 달력이 아니라 **저 표가 실제로 들고 있는 값**이어야, 이 검사가 통과하는 것과
 # 운영에서 도는 것이 같아진다.
 
 _신정 = date(2026, 1, 1)  # 목 · holiday_nm = '1월1일'
@@ -69,6 +78,17 @@ _추석_연휴 = {
 }
 _연휴_전날 = date(2025, 10, 2)  # 목
 _연휴_다음_실행일 = date(2025, 10, 10)  # 금
+
+#: 🔴 **뷰였으면 못 답하던 날들이다.** 표에는 있고 뷰에는 없다 (실측 2026-09-05).
+_뷰_밖의_공휴일 = {
+    date(2026, 9, 24): "추석",
+    date(2026, 12, 25): "기독탄신일",
+    date(2027, 1, 1): "1월1일",
+}
+#: 표에는 있는데 공휴일이 아닌 미래 날. 뷰였으면 이 날도 `CalendarNotCovered` 였다.
+_뷰_밖의_평일 = date(2026, 9, 7)  # 월 · holiday_nm 없음
+#: 표도 못 덮는 날. **범위가 넓어진 것이지 무한해진 것이 아니다.**
+_표_밖의_날 = date(2028, 1, 3)
 
 # 2026-09-07(월) ~ 2026-09-13(일). `test_execution_day.py` 와 같은 주다.
 _MONDAY = date(2026, 9, 7)
@@ -101,10 +121,10 @@ class 가짜달력:
 
 
 class 죽은달력:
-    """뷰를 못 읽는 달력. **어느 날을 물어도 못 봤다고 한다.**"""
+    """표를 못 읽는 달력. **어느 날을 물어도 못 봤다고 한다.**"""
 
     def is_holiday(self, day: date) -> bool:
-        raise CalendarNotCovered("v_ml_batch_days 를 못 읽었다 (가짜)")
+        raise CalendarNotCovered("ml_calendar_days 를 못 읽었다 (가짜)")
 
 
 def _신정을_아는_달력() -> 가짜달력:
@@ -266,9 +286,9 @@ def test_걷다가_달력_밖으로_나가면_답하지_않는다():
         next_execution_day(_신정_전날, calendar=calendar)
 
 
-def test_뷰가_안_덮는_날을_구현체도_평일로_안_넘긴다():
-    """★ 실측 뷰는 `dt <= CURRENT_DATE` 로 잘려 있어 **미래가 애초에 안 들어온다.**"""
-    calendar = MlBatchDayCalendar(
+def test_표가_안_덮는_날을_구현체도_평일로_안_넘긴다():
+    """★ 표가 넓어져도 끝은 있다 — 범위 밖은 **덮는 범위를 사유에 적고** 답하지 않는다."""
+    calendar = MlCalendarDays(
         read=lambda: [
             {"dt": _신정, "holiday_nm": "1월1일"},
             {"dt": _신정_다음_평일, "holiday_nm": None},
@@ -282,11 +302,11 @@ def test_뷰가_안_덮는_날을_구현체도_평일로_안_넘긴다():
     assert "2026-01-01~2026-01-02" in 사유, f"덮는 범위를 사유에 안 적었다: {사유}"
 
 
-def test_뷰를_못_읽으면_공휴일이_없다고_하지_않는다():
+def test_표를_못_읽으면_공휴일이_없다고_하지_않는다():
     def 터진다() -> list[dict[str, Any]]:
         raise RuntimeError("connection refused")
 
-    calendar = MlBatchDayCalendar(read=터진다)
+    calendar = MlCalendarDays(read=터진다)
 
     with pytest.raises(CalendarNotCovered) as caught:
         calendar.is_holiday(_신정)
@@ -294,20 +314,95 @@ def test_뷰를_못_읽으면_공휴일이_없다고_하지_않는다():
     assert "connection refused" in str(caught.value), "무엇 때문인지 안 말한다"
 
 
-def test_뷰가_비어_있으면_공휴일이_없다고_하지_않는다():
+def test_표가_비어_있으면_공휴일이_없다고_하지_않는다():
     """★ 빈 표는 *"공휴일이 하나도 없다"* 가 아니라 **달력이 안 심겼다**는 사실이다."""
-    calendar = MlBatchDayCalendar(read=list)
+    calendar = MlCalendarDays(read=list)
 
     with pytest.raises(CalendarNotCovered):
         calendar.is_holiday(_신정)
 
 
-# ── 구현체 — 뷰를 어떻게 읽는가 ────────────────────────────────────────────
+# ── 구현체 — 무엇을 어떻게 읽는가 ──────────────────────────────────────────
+
+
+def _표를_흉내낸_달력() -> MlCalendarDays:
+    """실측 표의 모양 그대로다 — **오늘 이후가 들어 있다.** 뷰에는 없던 행들이다."""
+    return MlCalendarDays(
+        read=lambda: [
+            {"dt": _신정, "holiday_nm": "1월1일"},
+            {"dt": _신정_다음_평일, "holiday_nm": None},
+            {"dt": _뷰_밖의_평일, "holiday_nm": None},
+            *({"dt": d, "holiday_nm": nm} for d, nm in sorted(_뷰_밖의_공휴일.items())),
+        ]
+    )
+
+
+def _잡은_질의(monkeypatch: pytest.MonkeyPatch) -> str:
+    """조회를 가로채 **원문만** 본다. DB 는 안 부른다."""
+    잡은질의: list[Any] = []
+
+    monkeypatch.setattr(holiday_calendar, "get_db_schema", lambda: "haetdeul")
+    monkeypatch.setattr(
+        holiday_calendar,
+        "fetch_all",
+        lambda query: (잡은질의.append(query), [])[1],
+    )
+
+    with pytest.raises(CalendarNotCovered):  # 빈 결과 — 질의만 보면 된다
+        MlCalendarDays().is_holiday(_신정)
+
+    return str(잡은질의[0])
+
+
+def test_조회가_뷰가_아니라_표를_가리킨다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 **이 판의 핵심이다** (`#298`).
+
+    뷰는 `WHERE c.dt <= CURRENT_DATE` 로 잘려 있어 실측 공휴일 44일 중 22일만 보였다.
+    그 컷은 **배치 상태**의 제약이지 달력의 제약이 아니다 — 공휴일의 주인은 표다.
+    """
+    질의 = _잡은_질의(monkeypatch)
+
+    assert "ml_calendar_days" in 질의, f"표를 안 읽는다: {질의}"
+    assert "v_ml_batch_days" not in 질의, f"뷰로 되돌아갔다 — 미래가 다시 잘린다: {질의}"
+
+
+def test_조회가_판정에_안_쓰는_칸을_가져오지_않는다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 **`SELECT *` 를 안 쓴다.** 안 가져오면 나중에 누가 그 칸으로 판정하지 못한다."""
+    질의 = _잡은_질의(monkeypatch)
+
+    assert "holiday_nm" in 질의, f"공휴일 이름을 안 가져온다: {질의}"
+    for 금지 in ("is_open", "is_survey", "status", "has_batch", "*"):
+        assert 금지 not in 질의, f"판정에 안 쓰는 칸을 가져온다: {금지} — {질의}"
+
+
+def test_뷰였으면_못_답하던_미래를_답한다():
+    """🔴 **뷰에 묶여 있을 때 아프던 자리다.**
+
+    `2026-09-05`(토)에 이런 문장이 남았다 — *"다음 실행일을 찾다 달력 밖으로 나갔다
+    — 2026-09-07 이 달력에 없다"*. 금요일 거절 문구가 *"다음 실행일은 월요일"* 이라
+    하는데 **그 월요일이 공휴일이어도 몰랐다.**
+    """
+    calendar = _표를_흉내낸_달력()
+
+    assert calendar.is_holiday(_뷰_밖의_평일) is False, "월요일을 이제도 못 본다"
+    for day, name in _뷰_밖의_공휴일.items():
+        assert calendar.is_holiday(day) is True, f"{day} {name} 을 못 본다"
+
+
+def test_미래를_답해도_표_밖은_여전히_답하지_않는다():
+    """★ **덮는 범위가 넓어진 것이지 무한해진 것이 아니다.**
+
+    이 검사가 없으면 `#298` 이 *"이제 어느 날이든 답한다"* 로 읽힌다.
+    """
+    calendar = _표를_흉내낸_달력()
+
+    with pytest.raises(CalendarNotCovered):
+        calendar.is_holiday(_표_밖의_날)
 
 
 def test_holiday_nm_하나로_판정한다():
-    """★ 실측 그대로다. `is_open` · `status` · `has_batch` 를 같이 줘도 안 본다."""
-    calendar = MlBatchDayCalendar(
+    """★ 실측 그대로다. `is_open` · `is_survey` · `status` 를 같이 줘도 안 본다."""
+    calendar = MlCalendarDays(
         read=lambda: [
             # 공휴일인데 경매는 선다 (실측 2025-10-03 개천절 · is_open=True)
             {"dt": date(2025, 10, 3), "holiday_nm": "개천절", "is_open": True},
@@ -320,7 +415,7 @@ def test_holiday_nm_하나로_판정한다():
     assert calendar.is_holiday(_신정_다음_평일) is False
 
 
-def test_뷰를_한_번만_읽는다():
+def test_표를_한_번만_읽는다():
     """🔴 `is_execution_day` 는 문 앞에서 매 요청 불린다 — 캐시가 없으면 커넥션이 는다."""
     읽음: list[int] = []
 
@@ -328,11 +423,11 @@ def test_뷰를_한_번만_읽는다():
         읽음.append(1)
         return [{"dt": _신정, "holiday_nm": "1월1일"}]
 
-    calendar = MlBatchDayCalendar(read=읽는다)
+    calendar = MlCalendarDays(read=읽는다)
     for _ in range(5):
         calendar.is_holiday(_신정)
 
-    assert len(읽음) == 1, f"뷰를 {len(읽음)}번 읽었다"
+    assert len(읽음) == 1, f"표를 {len(읽음)}번 읽었다"
 
 
 def test_못_읽은_것은_캐시하지_않는다():
@@ -345,31 +440,31 @@ def test_못_읽은_것은_캐시하지_않는다():
             raise RuntimeError("잠깐 끊겼다")
         return [{"dt": _신정, "holiday_nm": "1월1일"}]
 
-    calendar = MlBatchDayCalendar(read=처음만_터진다)
+    calendar = MlCalendarDays(read=처음만_터진다)
     with pytest.raises(CalendarNotCovered):
         calendar.is_holiday(_신정)
 
     assert calendar.is_holiday(_신정) is True, "한 번 실패했다고 축이 죽었다"
 
 
-def test_조회가_판정에_안_쓰는_칸을_가져오지_않는다(monkeypatch: pytest.MonkeyPatch):
-    """🔴 **`SELECT *` 를 안 쓴다.** 안 가져오면 나중에 누가 그 칸으로 판정하지 못한다."""
-    잡은질의: list[Any] = []
+@pytest.mark.db
+def test_실_DB_의_표가_미래_공휴일을_답한다():
+    """🔴 **가짜를 안 꽂고 실제로 읽는다** (`#298` §D · `uv run pytest -m db`).
 
-    monkeypatch.setattr(holiday_calendar, "get_db_schema", lambda: "haetdeul")
-    monkeypatch.setattr(
-        holiday_calendar,
-        "fetch_all",
-        lambda query: (잡은질의.append(query), [])[1],
-    )
+    위의 `test_뷰였으면_못_답하던_미래를_답한다` 는 가짜 조회라 **읽는 대상이
+    바뀌어도 안 운다.** 대상이 바뀌었다는 사실은 여기가 잡는다.
 
-    with pytest.raises(CalendarNotCovered):  # 빈 결과 — 질의만 보면 된다
-        MlBatchDayCalendar().is_holiday(_신정)
+    ⚠️ 기본 스위트에서는 빠진다 — 사내망 밖에서 스위트가 전원 빨간불이 되면 아무도
+      스위트를 안 믿는다 (`pyproject.toml` 의 `db` 마커 주석).
+    """
+    holiday_calendar.reset()
+    calendar = holiday_calendar.get_calendar()
 
-    질의 = str(잡은질의[0])
-    assert "holiday_nm" in 질의, f"공휴일 이름을 안 가져온다: {질의}"
-    for 금지 in ("is_open", "status", "has_batch", "*"):
-        assert 금지 not in 질의, f"판정에 안 쓰는 칸을 가져온다: {금지} — {질의}"
+    for day, name in _뷰_밖의_공휴일.items():
+        assert calendar.is_holiday(day) is True, f"{day} {name} 을 못 본다"
+    assert calendar.is_holiday(_뷰_밖의_평일) is False
+
+    holiday_calendar.reset()
 
 
 # ── ⑦ 달력을 못 읽어도 주말 판정은 계속 돈다 ───────────────────────────────
