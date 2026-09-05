@@ -18,19 +18,36 @@ execution_calendar.py — 실행일 축을 **봉투에 실을 모양**으로 만
 매입     목록에 있으면 다음 날로 민다              ← 매입 몫
 ```
 
-🔴 **주말도 목록에 넣는다. 그래서 이름이 `holidays` 가 아니다.**
+🔴 **축은 `is_open` 이다 — `is_execution_day` 가 아니다** (`#303` 후속 · 매입 리뷰).
 
-  ```python
-  # 매입이 쓰게 되는 전부
-  if day.isoformat() in non_execution_days: ...
+  첫 판은 *주말 + `holiday_nm`* 으로 냈는데 **틀렸다.** 2026년 365일 전수:
+
+  ```text
+                        주말+holiday_nm      is_open
+  실제 못 사는 날 67일   맞힘 64               맞힘 67
+  살 수 있는데 민다      56일 🔴              0일
+  못 사는데 안 민다       3일 🔴              0일
   ```
 
-  주말을 빼면 매입이 `weekday()` 를 다시 갖고, **판정이 두 곳**이 된다 — 마스터의
-  `is_execution_day` 와 매입의 `weekday()`. 같은 사실의 주인이 둘이 되면 언젠가
-  갈리고, 갈린 날 아무도 어느 쪽이 맞는지 말해 주지 않는다.
+  ⚠️ **과잉 56의 몸통이 토요일 45일이고, 토요일에는 가락이 선다** (3년 전수 개장 94 ·
+    휴장 11). 살 수 있는 날에 못 산다고 계획하는 것은 보수적인 것이 아니라 **틀린
+    것**이다.
 
-  ⚠️ 주말이 들어 있는 목록을 `holidays` 라 부르면 다음 사람이 *"주말은 따로 봐야겠네"*
-    라고 읽는다. 이름이 규율을 지운다.
+  ★ **두 축이 다른 물음에 답한다.** 마스터가 토요일에 안 도는 이유는 *"장이 안 서서"*
+    가 아니라 **ML 예측이 없어서**다. 장은 서는데 예측이 없다.
+
+    ```text
+    마스터 실행일   "그날 ML 예측이 있어 판단을 도는가"   holiday_nm + 주말  (#282 §A 그대로)
+    매입 회차일     "그날 시장에서 살 수 있는가"          is_open            ← 이 모듈
+    ```
+
+🔴 **요일을 안 본다.** 일요일은 3년 내내 개장 0일이라 `is_open` 이 이미 잡고, 토요일은
+  대부분 개장이라 요일로 밀면 틀린다. **주말을 보태면 과잉 56이 그대로 남는다** —
+  합집합이 아니라 갈아타는 이유다.
+
+  ⚠️ 그래서 이름이 `holidays` 가 아니다. 공휴일이면서 장이 서는 날이 2026년에만
+    **14일**(설날·추석 포함)이고, 공휴일이 아닌데 장이 안 서는 날이 3일이다. 이 목록은
+    둘 중 어느 쪽도 아닌 **"못 사는 날"** 이다.
 
 🔴 **`horizon_end` 가 없으면 목록을 못 쓴다.**
 
@@ -75,8 +92,8 @@ execution_calendar.py — 실행일 축을 **봉투에 실을 모양**으로 만
     적고 있다 (`package_scenarios.py:909` · `self_check.py:563` · `state.py:54`).
     봉투가 그것을 뒤집으면 안 된다.
 
-⚠️ **이 모듈은 DB 를 부르지 않는다.** `HolidayCalendar` 를 받기만 하고, 그것을 만드는
-  것은 `holiday_calendar.py` 의 일이다 — `execution_day.py` 와 같은 규율이다.
+⚠️ **이 모듈은 DB 를 부르지 않는다.** `MarketCalendar` 를 받기만 하고, 그것을 만드는
+  것은 `market_calendar.py` 의 일이다 — `execution_day.py` 와 같은 규율이다.
 
 ⚠️ **`CalendarNotCovered` 를 잡지 않는다.** 잡아서 그 날을 영업일로 넘기면 *"달력이
   끊긴 것"* 과 *"영업일인 것"* 이 같아진다. 부르는 쪽(`service.py`)이 정한다 — 봉투를
@@ -90,7 +107,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.master.calendar_walk import MAX_WALK_DAYS
-from app.master.execution_day import HolidayCalendar, is_execution_day
+from app.master.market_calendar import MarketCalendar
 
 __all__ = [
     "ExecutionCalendarEnvelope",
@@ -106,7 +123,10 @@ class ExecutionCalendarEnvelope:
     """
 
     non_execution_days: tuple[date, ...]
-    """`as_of` 부터 `horizon_end` 까지 중 **판단을 안 도는 날.** 주말 + 공휴일이다.
+    """`as_of` 부터 `horizon_end` 까지 중 **장이 안 서는 날** (`is_open=f`).
+
+    ⚠️ *"공휴일"* 도 *"주말"* 도 아니다. 2026년에 공휴일이면서 장이 서는 날이 14일이고,
+      공휴일이 아닌데 장이 안 서는 날이 3일이다.
 
     ★ 오름차순이고 중복이 없다. 받는 쪽이 정렬을 다시 하지 않아도 된다.
     """
@@ -134,28 +154,29 @@ class ExecutionCalendarEnvelope:
 
 
 def build_execution_calendar(
-    as_of: date, *, calendar: HolidayCalendar | None = None
+    as_of: date, *, market: MarketCalendar
 ) -> ExecutionCalendarEnvelope:
-    """`as_of` 부터 `MAX_WALK_DAYS` 일까지의 비영업일을 모은다. **양 끝 포함.**
+    """`as_of` 부터 `MAX_WALK_DAYS` 일까지 **장이 안 서는 날**을 모은다. **양 끝 포함.**
 
     ★ **`as_of` 자신을 뺀 목록이 아니다.** 1회차 offset 이 0 이라 `as_of` 가 회차일이
       되고, 받는 쪽이 그 날만 따로 판정하게 두면 판정이 또 두 곳이 된다.
 
-      ⚠️ 실제로 `as_of` 가 목록에 들어가는 일은 마스터 경로에서는 없다 — 문 앞에서
-        비영업일이면 Flow 가 시작되지 않는다. **그래도 넣는다.** 안 들어간다는 사실에
-        기대면, 문 앞 판정이 바뀌는 날 이 목록이 조용히 거짓말한다.
+      ⚠️ 마스터가 도는 날이라도 **그날 장이 안 설 수 있다** — 두 축이 다르기 때문이다
+        (`2026-01-02`(금)이 그 예다: 평일이고 공휴일이 아니어서 마스터는 도는데
+        `is_open=f` 다). 그래서 `as_of` 를 특별 취급하지 않는다.
 
-    ★ **`calendar` 를 안 주면 주말만 걸린다** — `is_execution_day` 의 기본값 그대로다.
-      공휴일 축이 빠진 봉투를 만드는 셈이라 마스터 경로는 항상 달력을 준다.
+    🔴 **`market` 은 기본값이 없다.** 없으면 *"장이 다 선다"* 로 돌게 되고, 그건 조용히
+       틀리는 쪽이다 — 못 사는 날에 회차를 세우고 아무도 모른다. 부르는 쪽이 반드시
+       축을 준다.
 
-    :raises CalendarNotCovered: 지평 안의 어떤 평일을 달력이 안 덮을 때. **잡지 않는다** —
-        조용히 영업일로 넘기면 *"달력이 끊긴 것"* 과 *"영업일인 것"* 이 같아진다.
+    :raises CalendarNotCovered: 지평 안의 어떤 날을 달력이 안 덮을 때. **잡지 않는다** —
+        조용히 개장으로 넘기면 *"달력이 끊긴 것"* 과 *"장이 서는 것"* 이 같아진다.
     """
     horizon_end = as_of + timedelta(days=MAX_WALK_DAYS)
     closed: list[date] = []
     day = as_of
     while day <= horizon_end:
-        if not is_execution_day(day, calendar=calendar):
+        if not market.is_market_open(day):
             closed.append(day)
         day = day + timedelta(days=1)
     return ExecutionCalendarEnvelope(non_execution_days=tuple(closed), horizon_end=horizon_end)

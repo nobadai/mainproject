@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from app.master.inputs import MasterInputs, SourcedInput
@@ -84,11 +86,28 @@ class _공휴일이_없는_달력:
         return False
 
 
+class _주말만_쉬는_시장:
+    """토·일에 장이 안 서고 평일에는 다 서는 **개장 축** 가짜 (`MarketCalendar`).
+
+    ⚠️ **실제 달력과 다르다** — 실 표에서는 토요일 대부분이 개장이다 (2026년 45일).
+      여기서 토요일을 닫는 것은 **기존 검사들의 답을 안 바꾸려는 것**이고, 개장 축이
+      실제로 붙는 경로는 `test_execution_calendar*.py` 가 가짜를 직접 꽂아 본다.
+
+    ★ 이 fixture 로는 *"봉투가 실렸는가"* 만 재고, *"어느 날이 실렸는가"* 는 못 잰다.
+    """
+
+    def is_market_open(self, day: date) -> bool:
+        return day.weekday() < 5
+
+
 @pytest.fixture(autouse=True)
 def 공휴일_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """문 앞의 공휴일 축을 **DB 대신 가짜로** 준다.
+    """문 앞의 공휴일 축과 봉투의 개장 축을 **DB 대신 가짜로** 준다.
 
     ★ **입력 적재를 끄는 것과 같은 이유다.** `.env` 의 `DB_HOST` 가 팀 공용 서버라
       `run_procurement` 을 그냥 부르면 `ml_calendar_days` 로 실제 조회가 나간다.
+
+    ⚠️ **둘 다 꽂는다.** 축이 둘이라 한쪽만 막으면 나머지가 조용히 실 DB 를 친다.
     """
     monkeypatch.setattr("app.master.service.get_calendar", lambda: _공휴일이_없는_달력())
+    monkeypatch.setattr("app.master.service.get_market_calendar", lambda: _주말만_쉬는_시장())

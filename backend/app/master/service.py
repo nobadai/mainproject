@@ -28,6 +28,7 @@ from app.master.execution_day import (
 )
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
+from app.master.market_calendar import get_market_calendar
 from app.master.inputs import MasterInputs, collect_inputs
 from app.master.ledger_repository import get_burn_in
 from app.master.plan import ExecutionPlan
@@ -256,8 +257,19 @@ def _next_execution_day_or_none(
 def _execution_calendar_payload(as_of: date) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
     """매입에 실을 실행일 봉투와, **못 실었으면 그 사유.**
 
-    ★ **문 앞 판정과 다른 물음이다.** 문 앞은 *"오늘 도는가"* 하나를 묻고, 봉투는
-      **지평 전체**를 묻는다. 오늘은 덮이는데 지평 끝이 안 덮이는 날이 있다.
+    🔴 **문 앞과 축이 다르다** (`#303` 후속 · 매입 리뷰).
+
+      ```text
+      문 앞     "그날 ML 예측이 있어 판단을 도는가"   holiday_nm + 주말   get_calendar()
+      봉투      "그날 시장에서 살 수 있는가"          is_open            get_market_calendar()
+      ```
+
+      ★ 마스터가 토요일에 안 도는 이유는 *"장이 안 서서"* 가 아니라 **예측이 없어서**다.
+        2026년 토요일 45일에 가락이 서고, 그 45일을 문 앞 축으로 밀면 **살 수 있는 날에
+        못 산다고 계획한다.**
+
+    ★ **묻는 범위도 다르다.** 문 앞은 하루를 묻고 봉투는 **지평 전체**를 묻는다 —
+      오늘은 덮이는데 지평 끝이 안 덮이는 날이 있다.
 
     🔴 **못 덮으면 봉투를 통째로 안 싣는다.** 덮인 데까지만 실으면 지평이 거짓말을
        한다 — 받는 쪽은 `horizon_end` 까지 다 봤다고 읽는다. 반쪽 달력보다 **없는
@@ -268,7 +280,7 @@ def _execution_calendar_payload(as_of: date) -> tuple[dict[str, Any] | None, tup
       `execution_day.py` 가 정한 태도 그대로다 — *"부르는 쪽이 정한다."*
     """
     try:
-        envelope = build_execution_calendar(as_of, calendar=get_calendar())
+        envelope = build_execution_calendar(as_of, market=get_market_calendar())
     except CalendarNotCovered as exc:
         return None, (
             f"실행일 봉투: {as_of.isoformat()} 부터의 지평을 달력이 다 안 덮는다 — {exc}."
