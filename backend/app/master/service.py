@@ -18,6 +18,7 @@ from app.master.budget import CallBudget
 from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
+from app.master.day_gate import check_day_gate
 from app.master.execution_calendar import build_execution_calendar
 from app.master.execution_day import (
     CalendarNotCovered,
@@ -92,6 +93,24 @@ def run_procurement(
         policy_version=request.policy_version,
     )
 
+    # 🔴 **첫 관문은 개장이다** (계약 · 2026-09-06). 실행일 판정보다 **먼저**다 —
+    #    그 날 장부가 안 열렸으면 실행일이어도 읽을 상태가 없다.
+    #
+    # ★ **두 관문은 다른 물음이다.** 토요일은 여기를 통과하고 아래에서 막힌다.
+    day_gate = check_day_gate(request.as_of)
+    if day_gate.gate == "BLOCKED":
+        response = _empty_response(
+            context,
+            reason=day_gate.reason or "그날 장부가 안 열렸다",
+            skipped_note="전 검사: 그날이 안 열려서 Flow 가 시작되지 않음",
+        )
+        response.day_gate = day_gate
+        response.report_text = render_answer(facts_from_procurement(response))
+        response.history_run_id = persistence.record(
+            request, response, elapsed_ms=_elapsed(started)
+        )
+        return response
+
     execution_day = _execution_day_verdict(request.as_of)
     if not execution_day.runs:
         # 주말·공휴일은 오류가 아니라 **안 도는 날**이다 — 어댑터 미등록과 같은 태도다 (§5.3).
@@ -102,6 +121,9 @@ def run_procurement(
             reason=_not_execution_day_reason(request.as_of, execution_day.following),
             skipped_note="전 검사: 실행일이 아니어서 Flow 가 시작되지 않음",
         )
+        # ★ **개장은 통과했다는 사실을 같이 낸다.** 토요일이 여기서 막힐 때 화면이
+        #   *"안 열려서"* 와 *"장이 안 서서"* 를 구분할 수 있어야 한다.
+        response.day_gate = day_gate
         # ★ 공휴일 축을 못 봤으면 그 사실도 같이 남긴다 — 접힌 이유가 주말이라도
         #   *"공휴일까지 봤다"* 로 읽히면 안 된다.
         response.skipped_checks = [*response.skipped_checks, *execution_day.skipped]
@@ -155,6 +177,7 @@ def run_procurement(
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
     response = _to_response(context, outcome, inputs)
+    response.day_gate = day_gate
     response.concerns = [
         *response.concerns,
         *_decision_collision(request_id),

@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.contracts.core import ITEMS, EndCode
+from app.master.day_gate import DayGate
 from app.master.decision import DecisionOut
 from app.master.envelope import AgentName, Trigger
 
@@ -239,6 +240,19 @@ class BlockedAgentOut(BaseModel):
 class ProcurementRunResponse(BaseModel):
     request_id: str
     as_of: date
+
+    #: 🔴 **개장 관문 결과** (계약 `260904_마스터_통보_개장Gate_응답모양_next_action`).
+    #:
+    #:   ```text
+    #:   요청 진입 → open_day Gate → execution day Gate → Purchase Flow
+    #:   ```
+    #:
+    #: ★ **화면은 `day_gate.gate` 만 보고 막는다.** `end_code` 는 *"시작 안 했다"* 까지만
+    #:   말하고, **왜** 인지는 이 블록이 나른다 — 토요일은 개장을 통과하고 실행일에서
+    #:   막히는데, `E4_NOT_STARTED` 하나로는 그 둘이 같아 보인다.
+    #:
+    #: ⚠️ `None` 은 **관문을 안 물었다**는 뜻이다 (개장 구현이 없는 경로).
+    day_gate: DayGate | None = None
 
     #: 🔴 **이 실행이 이력에 남은 행의 id** (2026-08-30 신설).
     #:
