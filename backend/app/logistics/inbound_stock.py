@@ -89,9 +89,11 @@ from app.logistics.transition import USAGE_SCOPE
 __all__ = [
     "InboundStockError",
     "InboundStockResult",
+    "InvalidReceivingAxis",
     "LotConflict",
     "LotIntegrityError",
     "ScheduleIntegrityError",
+    "load_in_transit_for_receiving",
     "lot_id_for",
     "materialize_inspected_inbound",
     "move_id_for",
@@ -139,6 +141,28 @@ class LotConflict(InboundStockError, ValueError):
 
     🔴 덮지도 버리지도 않는다 — 그 Lot 의 원가·등급으로 이미 판매·평가가 돌았을 수
        있어, 갈아 끼우면 그 계산들이 소리 없이 근거를 잃는다.
+    """
+
+
+class InvalidReceivingAxis(InboundStockError, ValueError):
+    """일정을 읽을 **조회 축**의 어느 칸이 비어 있다.
+
+    ```text
+    uq_log_runtime_fixture (sim_run_id, as_of, usage_scope)
+                            ↑                   ↑
+                            이 둘이 비면 여기서 멈춘다
+    ```
+
+    🔴 **없는 열쇠로 묻지 않는다.** 빈 값으로 fixture 를 조회하면 0건이 돌아오고, 그
+       0건은 *"그날 행이 없다"* 로 읽힌다 — **없는 것과 물어보지 못한 것이 같은
+       답으로 뭉개진다** (`day_open.LogisticsDayOpening.__init__` ·
+       `receipts.InvalidInboundIdentity` 와 같은 규율).
+
+    ★ **`as_of` 는 여기서 안 본다.** 타입이 `date` 라 빈 값이 될 수 없다 — 빈 문자열이
+      들어올 수 있는 두 칸만 막는다.
+
+    ⚠️ **`None` 으로 접어 "모든 실행" · "모든 범위" 를 뜻하게 하지 않는다.** 도착
+       처리는 남의 실행 장부를 건드리면 안 되는 쓰기 경로다.
     """
 
 
@@ -485,7 +509,11 @@ def _mark_putaway_done(conn: Any, schema: sql.Identifier, *, receipt_id: str) ->
         )
 
 
-# ── 일정 정리 ───────────────────────────────────────────────────────────
+# ── 일정 읽기·정리 ──────────────────────────────────────────────────────
+#
+# ★ **같은 fixture 행을 읽는 쪽과 걷는 쪽이 한 파일에 있다.** 도착 처리는 그 행을
+#   시작에서 잠그고(`load_in_transit_for_receiving`) 끝에서 고친다(`_clear_schedule`)
+#   — 잠금 순서와 `None`/`[]` 구분이 두 곳에서 갈리면 안 되므로 나누지 않았다.
 
 
 def _fixture_row(
@@ -516,6 +544,97 @@ def _fixture_row(
             f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={usage_scope})."
         )
     return _cell(row, 0, "in_transit_json"), _cell(row, 1, "confirmed_inbound_json")
+
+
+def load_in_transit_for_receiving(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    as_of: date,
+    usage_scope: str = USAGE_SCOPE,
+) -> list[InTransitItem] | None:
+    """도착 처리를 위해 그날 **내 실행의** 운송 중 목록을 읽는다.
+
+    ```text
+    ① 도착 쓰기 전역 advisory lock       receipts.lock_arrival_writes
+    ② 그날 fixture 행 SELECT … FOR UPDATE
+    ③ in_transit_json → InTransitItem 목록
+    ```
+
+    🔴 **`repository.get_active_logistics_runtime_fixture` 를 쓸 수 없어서 있다.**
+       그쪽은 `db.fetch_all` 로 **자기 커넥션을 연다** — 마스터가 쥔 트랜잭션 밖에서
+       읽게 되어, 이번 도착 처리가 쓸 목록과 실제로 고칠 행이 갈린다.
+
+    🔴 **잠금 순서가 계약이다** (`materialize_inspected_inbound` 과 같은 순서).
+
+    ```text
+    ① 도착 전역 (20260905, 2)   ← 여기서 먼저 잡는다
+    ② fixture 행 FOR UPDATE      ← 그다음
+    ③ Receipt · 검수
+    ④ Lot · 원장 IN (원장 전역 → Lot 행)
+    ⑤ 일정 정리
+    ```
+
+       ⚠️ **② 를 ① 앞에 두면 안 된다.** 그러면 두 트랜잭션이 요청하는 잠금 집합에
+          전순서가 없어져 교착이 생긴다 (`ledger._lock_ledger_writes` 가 겪은 자리).
+
+    ★ **읽기인데 `FOR UPDATE` 를 쓴다.** 여기서 읽은 목록이 곧 이번 실행이 처리할
+      대상이고, 마지막에 `_clear_schedule` 이 **같은 행**을 고친다. 그 사이에
+      `persist_inventory`(승인 전이)가 끼어들면 이번에 못 본 승인분이 생기거나
+      정리 대상이 어긋난다 — 시작부터 끝까지 한 행 잠금 아래 둔다.
+
+    🔴 **`None` 과 `[]` 를 가른다.**
+
+    ```text
+    in_transit_json IS NULL   None   확인한 적 없다 (UNRESOLVED)
+    in_transit_json = '[]'    []     확인했고 0 건이다 (CONFIRMED_ZERO)
+    ```
+
+       ⚠️ 둘을 뭉치면 *"오늘 도착할 게 없다"* 와 *"오늘 뭐가 도착할지 모른다"* 가 같은
+          값으로 나간다 (`arrival.ArrivalSelection.source_status` 가 그 둘을 가른다).
+
+    🔴 **`sim_run_id=None` 을 허용하지 않는다.** 도착 처리는 쓰기 경로라 남의 실행
+       장부를 건드리면 안 된다 — 조회 축은 `uq_log_runtime_fixture` 와 같아야 한다.
+
+    🔴 **커밋도 롤백도 하지 않고 커넥션을 새로 열지 않는다.** advisory lock 도 행
+       잠금도 트랜잭션 수명이라 호출자의 커밋/롤백과 함께 풀린다.
+
+    :param conn: 호출자가 소유한 커넥션. 이 함수는 수명을 관리하지 않는다.
+    :param sim_run_id: 어느 실행의 장부인가. **마스터가 소유한 값**이다.
+    :param as_of: 읽을 fixture 행의 날짜. **마스터가 정하는 달력값**이다.
+    :raises InvalidReceivingAxis: `sim_run_id` 나 `usage_scope` 가 비었거나 공백뿐일 때.
+    :raises ScheduleIntegrityError: 그날 그 실행의 fixture 행이 없을 때.
+    """
+    # ★ **조회 축 세 칸 중 문자열 둘을 함께 막는다.** 하나만 막으면 나머지 한 칸으로
+    #   같은 구멍이 그대로 남는다 — 0건이 돌아오고 그 0건이 '그날 행이 없다' 로 읽힌다.
+    #
+    # ⚠️ `usage_scope` 는 기본값이 있어 정상 경로에서는 비지 않는다. 그래도 보는 이유는
+    #    이 함수가 **public export** 이고, 기본값을 안 쓰는 호출자가 언제든 생기기
+    #    때문이다 (`check_receipt_state` 가 상류의 검증을 믿지 않는 것과 같은 이유).
+    for axis, value in (("sim_run_id", sim_run_id), ("usage_scope", usage_scope)):
+        if not value or not value.strip():
+            raise InvalidReceivingAxis(
+                f"도착 처리에 쓸 수 없는 {axis} 다: {value!r}"
+                f" (sim_run_id={sim_run_id!r}, as_of={as_of}, usage_scope={usage_scope!r})."
+                " 없는 열쇠로 물으면 0건이 돌아오고 그것은 '그날 행이 없다' 로 읽힌다 —"
+                " 없는 것과 물어보지 못한 것은 다른 사실이다."
+            )
+
+    schema = sql.Identifier(get_db_schema())
+
+    # ── ① 도착 전역 잠금이 먼저다 ─────────────────────────────────────
+    with conn.cursor() as cursor:
+        lock_arrival_writes(cursor)
+
+    # ── ② 그날 행을 잠그고 읽는다 ─────────────────────────────────────
+    in_transit, _ = _fixture_row(
+        conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
+    )
+    if in_transit is None:
+        # 🔴 `[]` 로 바꾸지 않는다. 모르는 것을 0 건으로 적으면 그 순간 아는 척이 된다.
+        return None
+    # ★ 계약 밖 모양은 여기서 터진다 — 조용히 걸러 내면 그 행이 사라진 줄 아무도 모른다.
+    return [InTransitItem.model_validate(row) for row in in_transit]
 
 
 def _찾는다(목록: Sequence[Any] | None, inbound_id: str) -> list[dict[str, Any]]:
