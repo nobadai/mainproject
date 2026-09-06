@@ -15,6 +15,7 @@ def _request(**overrides):
             "requested_quantity_kg": 5000,
             "preferred_unit_price_krw": 2000,
             "preferred_delivery_date": "2026-09-10",
+            "allow_additional_sourcing": True,
         },
         "logistics_context": {
             "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 3000},
@@ -378,16 +379,17 @@ def _purchase_feedback(*, status="ok", fulfillable=None, quantity=1500, risks=No
 
 
 @pytest.mark.parametrize("fulfillable", [True, False, None])
-def test_purchase_positive_supply_is_conditional_without_quantity_clipping(
+def test_purchase_positive_supply_is_conditional_and_clipped_to_supported_quantity(
     monkeypatch, fulfillable
 ):
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
     reply = run_proposal(_request(feedback=_purchase_feedback(fulfillable=fulfillable)))
     conservative, aggressive = reply.scenarios[0], reply.scenarios[2]
     assert aggressive.conditional_purchase is True
-    assert aggressive.quantity_kg == Decimal(5000)
+    assert aggressive.quantity_kg == Decimal(4500)
+    assert aggressive.unmet_quantity_kg == Decimal(500)
     assert aggressive.supply.confirmed_quantity_kg == Decimal(3000)
-    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(1500)
     assert "PUR-1" in aggressive.evidence_refs
     assert "PUR-1" not in conservative.evidence_refs
     assert conservative.conditional_purchase is False
@@ -398,7 +400,8 @@ def test_purchase_skipped_zero_is_resolved_but_not_conditional(monkeypatch):
     reply = run_proposal(_request(feedback=_purchase_feedback(status="skipped", quantity=0)))
     aggressive = reply.scenarios[2]
     assert aggressive.conditional_purchase is False
-    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(0)
+    assert aggressive.unmet_quantity_kg == Decimal(2000)
     assert "ADDITIONAL_SUPPLY_CONTEXT" not in aggressive.required_validations
 
 

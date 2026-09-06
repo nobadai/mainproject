@@ -27,9 +27,7 @@ _LOGISTICS = {
     "sellable_supply": {
         "status": "READY",
         "inventory_by_item": [{"item": "배추", "available_qty_kg": 3000}],
-        "supply_capacity_by_date": [
-            {"date": "2026-09-10", "confirmed_sellable_quantity_kg": 3000}
-        ],
+        "supply_capacity_by_date": [{"date": "2026-09-10", "confirmed_sellable_quantity_kg": 3000}],
     },
     "delivery_feasibility": {
         "status": "READY",
@@ -53,9 +51,7 @@ def _reply(
         "reply_ref": ref,
         "runtime_status": runtime,
         "business_status": business,
-        "payload": {"procurable_quantity_kg": 2000, "risks": []}
-        if payload is None
-        else payload,
+        "payload": {"procurable_quantity_kg": 2000, "risks": []} if payload is None else payload,
     }
 
 
@@ -70,6 +66,7 @@ def _request(replies, scenario_id="SALES-001-C"):
                 "requested_quantity_kg": 5000,
                 "preferred_unit_price_krw": 2000,
                 "preferred_delivery_date": "2026-09-10",
+                "allow_additional_sourcing": True,
             },
             "logistics_context": _LOGISTICS,
             "feedback": {
@@ -126,9 +123,7 @@ def test_zero_quantity_is_a_fact():
 
 def test_boolean_quantity_is_rejected():
     with pytest.raises(ValidationError):
-        PurchaseAdditionalSupplyResult.model_validate(
-            {"procurable_quantity_kg": True, "risks": []}
-        )
+        PurchaseAdditionalSupplyResult.model_validate({"procurable_quantity_kg": True, "risks": []})
 
 
 def test_extra_purchase_fields_are_tolerated():
@@ -164,9 +159,7 @@ def test_positive_quantity_becomes_conditional_supply_with_lineage():
 
 
 def test_zero_quantity_is_preserved_and_not_conditional():
-    reply = run_proposal(
-        _request([_reply(payload={"procurable_quantity_kg": 0, "risks": []})])
-    )
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 0, "risks": []})]))
     scenario = _aggressive(reply)
 
     assert scenario.supply.conditional_quantity_kg == Decimal(0)
@@ -212,9 +205,7 @@ def test_runtime_not_ready_keeps_the_quantity_unknown():
 
 
 def test_explicit_null_quantity_stays_unknown():
-    reply = run_proposal(
-        _request([_reply(payload={"procurable_quantity_kg": None, "risks": []})])
-    )
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": None, "risks": []})]))
 
     assert _aggressive(reply).supply.conditional_quantity_kg is None
 
@@ -244,9 +235,7 @@ def test_wrong_capability_is_not_consumed_as_supply():
 
 def test_generate_scenarios_shaped_payload_is_not_read_as_supply():
     """🔴 매입 시나리오 생성 회신의 `scenarios[i].risks` 를 추가공급으로 읽지 않는다."""
-    reply = run_proposal(
-        _request([_reply(payload={"scenarios": [{"risks": ["창고 점유"]}]})])
-    )
+    reply = run_proposal(_request([_reply(payload={"scenarios": [{"risks": ["창고 점유"]}]})]))
     scenario = _aggressive(reply)
 
     assert scenario.supply.conditional_quantity_kg is None
@@ -287,9 +276,7 @@ def test_replies_do_not_bleed_between_scenarios():
                 "domain_replies": [
                     _reply(ref="PUR-C", payload={"procurable_quantity_kg": 25, "risks": []})
                 ],
-                "scenario_feedback": [
-                    {"scenario_id": "SALES-001-C", "reply_refs": ["PUR-C"]}
-                ],
+                "scenario_feedback": [{"scenario_id": "SALES-001-C", "reply_refs": ["PUR-C"]}],
             },
         }
     )
@@ -341,6 +328,7 @@ def test_no_purchase_reply_produces_no_purchase_issue():
                     "requested_quantity_kg": 3000,
                     "preferred_unit_price_krw": 2000,
                     "preferred_delivery_date": "2026-09-10",
+                    "allow_additional_sourcing": True,
                 },
                 "logistics_context": _LOGISTICS,
             }
@@ -406,14 +394,10 @@ def test_wrong_type_on_a_required_key_is_invalid():
 def test_original_payload_is_preserved_on_the_reply():
     """부분집합만 검증해도 원본은 잃지 않는다."""
     reply = run_proposal(
-        _request(
-            [_reply(payload={"procurable_quantity_kg": 25, "risks": [], "extra": "x"})]
-        )
+        _request([_reply(payload={"procurable_quantity_kg": 25, "risks": [], "extra": "x"})])
     )
     carried = next(
-        item
-        for item in _aggressive(reply).domain_replies
-        if item.source_agent == "purchase"
+        item for item in _aggressive(reply).domain_replies if item.source_agent == "purchase"
     )
 
     assert carried.payload["extra"] == "x"
@@ -439,6 +423,7 @@ def test_case_a_no_purchase_reply_keeps_validation_missing():
                     "requested_quantity_kg": 5000,
                     "preferred_unit_price_krw": 2000,
                     "preferred_delivery_date": "2026-09-10",
+                    "allow_additional_sourcing": True,
                 },
                 "logistics_context": _LOGISTICS,
             }
@@ -451,9 +436,7 @@ def test_case_a_no_purchase_reply_keeps_validation_missing():
 
 
 def test_case_b_wrong_capability_does_not_resolve_validation():
-    reply = run_proposal(
-        _request([_reply(capability="FINANCIAL_VALIDATION")])
-    )
+    reply = run_proposal(_request([_reply(capability="FINANCIAL_VALIDATION")]))
 
     assert "PURCHASE_CAPABILITY_MISMATCH" in _issues(reply)
     # 잘못된 답으로 검증이 끝난 것처럼 되지 않는다.
@@ -497,15 +480,14 @@ def test_case_e_reply_bound_to_another_scenario_leaves_this_one_missing():
                 "requested_quantity_kg": 5000,
                 "preferred_unit_price_krw": 2000,
                 "preferred_delivery_date": "2026-09-10",
+                "allow_additional_sourcing": True,
             },
             "logistics_context": _LOGISTICS,
             "feedback": {
                 "attempt": 1,
                 "domain_replies": [_reply(ref="PUR-B")],
                 # C 가 아니라 B 에 배정했다.
-                "scenario_feedback": [
-                    {"scenario_id": "SALES-001-B", "reply_refs": ["PUR-B"]}
-                ],
+                "scenario_feedback": [{"scenario_id": "SALES-001-B", "reply_refs": ["PUR-B"]}],
             },
         }
     )
@@ -526,9 +508,7 @@ def test_case_e_reply_bound_to_another_scenario_leaves_this_one_missing():
 def test_risk_count_never_drives_the_conditional_verdict(count):
     risks = [f"R{index}" for index in range(count)]
 
-    reply = run_proposal(
-        _request([_reply(payload={"procurable_quantity_kg": 25, "risks": risks})])
-    )
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 25, "risks": risks})]))
     scenario = _aggressive(reply)
 
     # 조건부 여부는 수량이 정한다 — 위험 개수가 아니다.
@@ -540,8 +520,6 @@ def test_risk_count_never_drives_the_conditional_verdict(count):
 def test_risks_are_carried_verbatim_without_reinterpretation():
     raw = "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정입니다"
 
-    reply = run_proposal(
-        _request([_reply(payload={"procurable_quantity_kg": 25, "risks": [raw]})])
-    )
+    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 25, "risks": [raw]})]))
 
     assert raw in _aggressive(reply).risks

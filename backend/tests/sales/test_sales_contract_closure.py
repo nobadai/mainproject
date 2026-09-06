@@ -58,6 +58,7 @@ def _user(**over):
         "requested_quantity_kg": 3000,
         "preferred_unit_price_krw": 2000,
         "preferred_delivery_date": "2026-09-10",
+        "allow_additional_sourcing": True,
     }
     base.update(over)
     return base
@@ -321,7 +322,7 @@ def test_conditional_supply_is_never_added_to_confirmed():
     assert supply.confirmed_quantity_kg != Decimal(4500)
 
 
-def test_scenario_quantity_is_not_raised_by_conditional_supply():
+def test_scenario_quantity_is_clipped_to_authoritative_conditional_supply():
     baseline = run_proposal(
         _request("SPOT_SALES", user={"requested_quantity_kg": 5000,
                                      "preferred_unit_price_krw": 2000,
@@ -329,4 +330,5 @@ def test_scenario_quantity_is_not_raised_by_conditional_supply():
     )
     refed = run_proposal(_refeed(_purchase_reply(quantity=1500)))
 
-    assert _aggressive(refed).quantity_kg == _aggressive(baseline).quantity_kg
+    assert _aggressive(refed).quantity_kg == Decimal(4500)
+    assert _aggressive(baseline).quantity_kg == Decimal(5000)

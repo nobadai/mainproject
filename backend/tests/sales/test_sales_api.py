@@ -368,7 +368,8 @@ def test_conditional_purchase_creates_separate_delivery_scenario(monkeypatch):
     assert candidates[0]["adjustment_axis"] == "MIX"
     assert candidates[0]["allocation"][0]["qty_kg"] == "8000"
     assert candidates[1]["conditional"] is True
-    assert candidates[1]["outbound_by_date"][0]["date"] == "2026-09-13"
+    assert candidates[1]["outbound_by_date"][0]["date"] == "2026-09-10"
+    assert "DELIVERY_REVALIDATION_REQUIRED" in candidates[1]["uncertainties"]
 
 
 def test_refeed_equal_limits_do_not_create_adjustment_or_repeat_capability(monkeypatch):

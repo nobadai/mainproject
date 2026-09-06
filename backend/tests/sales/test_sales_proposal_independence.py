@@ -230,7 +230,7 @@ def test_business_facts_do_not_depend_on_the_llm(monkeypatch):
 
     monkeypatch.setattr(
         "app.sales.proposal.interpret_candidates",
-        lambda candidates: with_llm_off.llm.model_copy(
+        lambda candidates, **_kwargs: with_llm_off.llm.model_copy(
             update={"summary": "완전히 다른 문장"}
         ),
     )
