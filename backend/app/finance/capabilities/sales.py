@@ -41,6 +41,7 @@ from app.finance.rules import (
     evaluate_sales_payment_term_rule,
 )
 from app.finance.sales_models import (
+    ConditionalSupplyCostBasis,
     InventoryCostBasis,
     PartnerReceivableFacts,
     SalesFinancialSummary,
@@ -113,8 +114,9 @@ def parse_sales_validation_input(
             payment_days=_optional_int(payload.get("payment_days")),
             collection_reference_date=_optional_date(payload.get("collection_reference_date")),
             supply=_parse_supply(payload.get("supply")),
-            inventory_cost_basis=_parse_inventory_cost_basis(
-                payload.get("inventory_cost_basis")
+            inventory_cost_basis=_parse_inventory_cost_basis(payload.get("inventory_cost_basis")),
+            conditional_supply_cost_basis=_parse_conditional_supply_cost_basis(
+                payload.get("conditional_supply_cost_basis")
             ),
             direct_costs=_parse_direct_costs(payload.get("direct_costs")),
             source_ref=str(payload["source_ref"]),
@@ -166,9 +168,7 @@ def _parse_supply(value: Any) -> SalesSupply | None:
         confirmed_quantity_kg=_decimal(value["confirmed_quantity_kg"]),
         # 🔴 없는 칸을 0 으로 읽지 않는다. 보내는 쪽이 확정 물량만 알고 조건부 물량을
         #   모를 수 있는데, 그것을 "조건부 0" 으로 바꾸면 모르는 것이 사실이 된다.
-        conditional_quantity_kg=(
-            None if raw_conditional is None else _decimal(raw_conditional)
-        ),
+        conditional_quantity_kg=(None if raw_conditional is None else _decimal(raw_conditional)),
         dependency_ref=(
             None if value.get("dependency_ref") is None else str(value["dependency_ref"])
         ),
@@ -181,6 +181,22 @@ def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
     if not isinstance(value, Mapping):
         raise TypeError("inventory_cost_basis must be a mapping")
     return InventoryCostBasis(
+        amount_krw=_decimal(value["amount_krw"]),
+        cost_method=str(value["cost_method"]),
+        included_components=tuple(str(item) for item in value.get("included_components", ())),
+        source_ref=str(value["source_ref"]),
+        evidence_grade=str(value["evidence_grade"]),
+    )
+
+
+def _parse_conditional_supply_cost_basis(
+    value: Any,
+) -> ConditionalSupplyCostBasis | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("conditional_supply_cost_basis must be a mapping")
+    return ConditionalSupplyCostBasis(
         amount_krw=_decimal(value["amount_krw"]),
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),
@@ -249,8 +265,16 @@ def evaluate_sales_margin(
     missing_data: list[str] = []
     supply = sales_input.supply
 
+    conditional_cost_basis = (
+        sales_input.conditional_supply_cost_basis
+        if supply is not None
+        and supply.conditional_quantity_kg is not None
+        and supply.conditional_quantity_kg > 0
+        else None
+    )
     cost_basis = compose_sales_cost_basis(
         inventory_cost_basis=sales_input.inventory_cost_basis,
+        conditional_supply_cost_basis=conditional_cost_basis,
         direct_costs=sales_input.direct_costs,
     )
     if cost_basis is None:
@@ -266,8 +290,8 @@ def evaluate_sales_margin(
         # 모르는 채로 덮으면 역마진이 마진처럼 보인다 — fail closed.
         missing_data.append("sales_supply_conditional_quantity")
         cost_basis = None
-    elif supply.conditional_quantity_kg > 0:
-        # 확정 재고원가는 확정 물량에 대한 사실이다. 조건부 물량까지 덮지 않는다.
+    elif supply.conditional_quantity_kg > 0 and sales_input.conditional_supply_cost_basis is None:
+        # 확정 재고원가는 조건부 물량까지 덮지 않는다.
         missing_data.append("sales_cost_basis_for_conditional_supply")
         cost_basis = None
 
@@ -637,17 +661,12 @@ def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, A
         "missing_fields": list(result.missing_fields),
         "missing_data": list(result.missing_data),
         "data_quality": (
-            "COMPLETE"
-            if not result.missing_fields and not result.missing_data
-            else "INCOMPLETE"
+            "COMPLETE" if not result.missing_fields and not result.missing_data else "INCOMPLETE"
         ),
         "max_finance_allowed_amount_krw": result.max_finance_allowed_amount_krw,
-        "max_finance_allowed_payment_terms_days": (
-            result.max_finance_allowed_payment_terms_days
-        ),
+        "max_finance_allowed_payment_terms_days": (result.max_finance_allowed_payment_terms_days),
         "evidence_refs": list(result.evidence_refs),
     }
-
 
 
 # ---------------------------------------------------------------------------
@@ -690,9 +709,7 @@ def run_sales_validation(
             payload,
             finance_minimum_margin_rate=policy.finance_minimum_margin_rate,
             finance_warning_margin_rate=policy.finance_warning_margin_rate,
-            max_finance_allowed_payment_terms_days=(
-                policy.max_finance_allowed_payment_terms_days
-            ),
+            max_finance_allowed_payment_terms_days=(policy.max_finance_allowed_payment_terms_days),
             collection_risk_mode=policy.collection_risk_mode,
             # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 권위 있는
             #    저장 위치가 아직 없어서 여기 기본값을 두면 없는 한도를 재무가

@@ -9,6 +9,7 @@ from typing import TypedDict
 
 from app.finance.sales_models import (
     OPEN_RECEIVABLE_STATUSES,
+    ConditionalSupplyCostBasis,
     InventoryCostBasis,
     PartnerReceivable,
     PartnerReceivableFacts,
@@ -430,9 +431,7 @@ def build_sales_calculation_facts(
     없는 입력은 없는 채로 둔다 — 권위 있는 원가 기준액이 없으면 공헌이익을
     계산하지 않고, 회수일 기준점이나 결제일수가 없으면 회수일을 만들지 않는다.
     """
-    sales_amount = calculate_sales_amount(
-        quantity_kg=quantity_kg, unit_price_krw=unit_price_krw
-    )
+    sales_amount = calculate_sales_amount(quantity_kg=quantity_kg, unit_price_krw=unit_price_krw)
 
     comparison: ReportedAmountComparison | None = None
     if reported_amount_krw is not None:
@@ -484,6 +483,7 @@ def build_sales_calculation_facts(
 def compose_sales_cost_basis(
     *,
     inventory_cost_basis: InventoryCostBasis | None,
+    conditional_supply_cost_basis: ConditionalSupplyCostBasis | None = None,
     direct_costs: Sequence[VerifiedDirectCost] = (),
 ) -> SalesCostBasis | None:
     """재고원가에 아직 포함되지 않은 검증된 직접비만 더한다.
@@ -507,17 +507,25 @@ def compose_sales_cost_basis(
     if inventory_cost_basis is None:
         return None
 
+    included_base_components = {
+        *inventory_cost_basis.included_components,
+        *(
+            conditional_supply_cost_basis.included_components
+            if conditional_supply_cost_basis is not None
+            else ()
+        ),
+    }
+
     already_included = tuple(
-        cost.component
-        for cost in direct_costs
-        if cost.component in inventory_cost_basis.included_components
+        cost.component for cost in direct_costs if cost.component in included_base_components
     )
-    added = tuple(
-        cost
-        for cost in direct_costs
-        if cost.component not in inventory_cost_basis.included_components
+    added = tuple(cost for cost in direct_costs if cost.component not in included_base_components)
+    base_amount = inventory_cost_basis.amount_krw + (
+        conditional_supply_cost_basis.amount_krw
+        if conditional_supply_cost_basis is not None
+        else Decimal(0)
     )
-    amount = sum((cost.amount_krw for cost in added), start=inventory_cost_basis.amount_krw)
+    amount = sum((cost.amount_krw for cost in added), start=base_amount)
 
     return SalesCostBasis(
         amount_krw=amount,
@@ -525,14 +533,44 @@ def compose_sales_cost_basis(
         inventory_cost_method=inventory_cost_basis.cost_method,
         inventory_source_ref=inventory_cost_basis.source_ref,
         inventory_evidence_grade=inventory_cost_basis.evidence_grade,
+        conditional_supply_amount_krw=(
+            conditional_supply_cost_basis.amount_krw
+            if conditional_supply_cost_basis is not None
+            else None
+        ),
+        conditional_supply_cost_method=(
+            conditional_supply_cost_basis.cost_method
+            if conditional_supply_cost_basis is not None
+            else None
+        ),
+        conditional_supply_source_ref=(
+            conditional_supply_cost_basis.source_ref
+            if conditional_supply_cost_basis is not None
+            else None
+        ),
+        conditional_supply_evidence_grade=(
+            conditional_supply_cost_basis.evidence_grade
+            if conditional_supply_cost_basis is not None
+            else None
+        ),
         added_direct_costs=added,
         already_included_components=already_included,
         included_components=(
             *inventory_cost_basis.included_components,
+            *(
+                conditional_supply_cost_basis.included_components
+                if conditional_supply_cost_basis is not None
+                else ()
+            ),
             *(cost.component for cost in added),
         ),
         source_refs=(
             inventory_cost_basis.source_ref,
+            *(
+                (conditional_supply_cost_basis.source_ref,)
+                if conditional_supply_cost_basis is not None
+                else ()
+            ),
             *(cost.source_ref for cost in added),
         ),
     )
@@ -601,9 +639,7 @@ def project_sales_scenario_cashflow(
         raise ValueError("proposed_collection must be a PROPOSED_SALES_COLLECTION event")
     if proposed_collection.direction != "INFLOW":
         raise ValueError("proposed_collection must be an INFLOW event")
-    if any(
-        event.event_type == PROPOSED_SALES_COLLECTION_EVENT_TYPE for event in base_cash_events
-    ):
+    if any(event.event_type == PROPOSED_SALES_COLLECTION_EVENT_TYPE for event in base_cash_events):
         raise ValueError("base_cash_events must not contain a proposed sales collection")
 
     # 두 투영은 서로 다른 리스트를 본다 — 공유 리스트를 제자리에서 바꾸지 않는다.
@@ -667,9 +703,7 @@ def summarize_partner_receivables(
     return PartnerReceivableFacts(
         partner_id=partner_id,
         as_of=as_of,
-        current_ar_krw=sum(
-            (item.outstanding_amount_krw for item in open_items), start=Decimal(0)
-        ),
+        current_ar_krw=sum((item.outstanding_amount_krw for item in open_items), start=Decimal(0)),
         overdue_ar_krw=sum(
             (item.outstanding_amount_krw for item in overdue_items), start=Decimal(0)
         ),
