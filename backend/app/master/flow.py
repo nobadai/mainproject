@@ -612,9 +612,18 @@ class ProcurementFlow:
         ★ **없으면 칸을 안 만든다.** 빈 배열을 보내면 받는 쪽이 *"어제 승인이 없었다"*
           와 *"마스터가 안 보낸다"* 를 구별할 수 없다 (§1.2-10).
 
-        ⚠️ **받는 쪽은 아직 없다.** 되먹임 `adjustments` 때와 같은 순서로, 보내는
-          쪽을 먼저 만든다 — 버려지는 상태는 *"안 왔다"* 로 보이지 조용히 틀리지
-          않는다 (매입 2026-09-03).
+        ⚠️ **받는 쪽이 생겼다** (`#310` · 2026-09-06). 이 docstring 이 *"받는 쪽은
+          아직 없다"* 라고 적어 두었는데, 매입이 *"어제 승인분 3,587kg 이 01-07 에
+          온다"* 를 쓰려고 이 값을 찾았다. 이제 `_purchase_input` 도 같은 값을 싣는다.
+        """
+        return self._commitments_block()
+
+    def _commitments_block(self) -> dict[str, Any] | None:
+        """어제까지 승인된 약정을 봉투 모양으로. **없으면 칸을 안 만든다.**
+
+        ★ **경계 호출과 매입이 같은 값을 본다** (`#310`). 두 곳이 다른 목록을 보면
+          *"물류가 본 미래 입고"* 와 *"매입이 말하는 어제 승인"* 이 갈리고, 갈린 날
+          화면과 창고가 다른 이야기를 한다.
         """
         if not self.approved_commitments:
             return None
@@ -683,6 +692,20 @@ class ProcurementFlow:
             #   값이고, `constraints` 는 부서별로 갈린 자리다 (§3.2.2 의 "예외 셋" 과
             #   같은 성격 — 마스터가 싣는 넷째다).
             payload["execution_calendar"] = dict(self.execution_calendar)
+        commitments = self._commitments_block()
+        if commitments is not None:
+            # 🔴 **어제 승인분을 매입도 본다** (`#310` · 2026-09-06).
+            #
+            #   매입이 *"어제 승인 때문에 창고 여유가 줄었다"* 를 쓸 근거가 없었다.
+            #   숫자는 이어지는데(`cap_by_date` 7,645.6 → 4,058.6) **무엇이** 그
+            #   3,587kg 인지는 봉투에 없었다.
+            #
+            # ★ **경계 호출(`_boundary_input`)과 같은 값·같은 이름이다.** 두 곳이 다른
+            #   목록을 보면 물류가 본 미래 입고와 매입이 말하는 어제 승인이 갈린다.
+            #
+            # ⚠️ **`constraints` 밖이다.** 부서가 낸 값이 아니라 마스터가 이력에서
+            #   재조립한 값이다 — `execution_calendar` 와 같은 자리다.
+            payload.update(commitments)
         if self.input_sources:
             # ★ **응답 `input_sources` 와 같은 모양이다** (매입 A-1 답 · ㄴ).
             #   화면과 payload 가 같은 이름을 써야, 부서가 나중에 화면에서 본 것과

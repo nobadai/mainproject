@@ -208,3 +208,82 @@ def test_재시도도_같은_입력으로_부른다():
 
     assert len(calls) == 2, "재시도가 일어나야 이 검사가 의미 있다"
     assert calls[0] == calls[1], "재시도가 다른 입력으로 불렀다"
+
+
+# ── ④ #310 — 매입도 같은 값을 받는다 (2026-09-06) ───────────────────────────
+#
+# 🔴 **`②` 의 docstring 이 *"받는 쪽은 아직 없다"* 라고 적어 두었는데, 생겼다.**
+#
+#   매입이 *"어제 승인 때문에 창고 여유가 줄었다"* 를 쓸 근거가 없었다. 숫자는
+#   이어지는데(`cap_by_date` 7,645.6 → 4,058.6) **무엇이** 그 3,587kg 인지가
+#   봉투에 없었다 — `approved_commitments` 가 경계 호출에만 실렸기 때문이다.
+
+
+def _run_capturing(commitments=()):
+    """매입이 **실제로 받은 payload** 까지 모은다."""
+    got: list[dict[str, Any]] = []
+
+    def purchase(request: AgentRequest):
+        got.append(dict(request.payload))
+        return _purchase(request)
+
+    finance = _Advisor()
+    registry = AgentRegistry()
+    registry.register("finance", finance)
+    registry.register("inventory", _Advisor())
+    registry.register("purchase", purchase)
+    runner = MasterRunner(_ctx(), registry, CallBudget(limit=12))
+    ProcurementFlow(runner, item="배추", approved_commitments=commitments).run()
+    return got, finance
+
+
+def test_매입도_약정을_받는다():
+    """🔴 **`#310` 의 본문이다.** 전에는 경계 호출에만 실렸다."""
+    got, _ = _run_capturing((COMMITMENT,))
+
+    assert got, "매입이 불려야 이 검사가 의미 있다"
+    assert got[0]["approved_commitments"] == [COMMITMENT]
+
+
+def test_경계와_매입이_같은_값을_본다():
+    """★ 두 곳이 다른 목록을 보면 **물류가 본 미래 입고**와 **매입이 말하는 어제
+    승인**이 갈리고, 갈린 날 화면과 창고가 다른 이야기를 한다."""
+    got, finance = _run_capturing((COMMITMENT,))
+
+    assert got[0]["approved_commitments"] == finance.pre_payloads[0]["approved_commitments"]
+
+
+def test_매입_payload_의_constraints_밖이다():
+    """⚠️ 부서가 낸 값이 아니라 **마스터가 이력에서 재조립한 값**이다 —
+    `execution_calendar` 와 같은 자리다."""
+    got, _ = _run_capturing((COMMITMENT,))
+
+    assert "approved_commitments" not in got[0].get("constraints", {})
+    assert "approved_commitments" in got[0], "최상위에 있어야 한다"
+
+
+def test_매입도_없으면_칸을_안_만든다():
+    """🔴 빈 배열을 보내면 *"어제 승인이 없었다"* 와 *"마스터가 안 보낸다"* 가 같아진다."""
+    got, _ = _run_capturing()
+
+    assert "approved_commitments" not in got[0]
+
+
+def test_매입이_받는_약정에_도착_일정이_들어_있다():
+    """★ 매입이 쓰려는 문장이 *"어제 승인분 3,587kg 이 01-07 에 온다"* 다.
+
+    **수량과 도착일이 있어야** 그 문장이 나온다 — 라이브 실측에서
+    `arrival_schedule` 이 `qty_kg · arrival_date · purchase_date · seq` 를 든다.
+    """
+    got, _ = _run_capturing((COMMITMENT,))
+    schedule = got[0]["approved_commitments"][0]["arrival_schedule"]
+
+    assert schedule, "도착 일정이 비면 '언제 온다' 를 못 쓴다"
+    assert "qty_kg" in schedule[0]
+
+
+def test_마스터가_매입_쪽에서도_해석하지_않는다():
+    """★ 경계 호출과 같은 규율 — 온 그대로 나른다."""
+    got, _ = _run_capturing((COMMITMENT,))
+
+    assert got[0]["approved_commitments"][0] == COMMITMENT
