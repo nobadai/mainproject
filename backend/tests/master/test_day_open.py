@@ -399,7 +399,16 @@ def test_적재가_터지면_전부_되돌린다() -> None:
 
     assert out.status == "NOT_OPENED"
     assert "전날 행이 없다" in out.reason, "사유를 안 남기면 무엇이 터졌는지 모른다"
-    assert out.parts == [], "되돌렸는데 만든 날 목록이 나가면 안 된다"
+    # 🔄 **`parts` 는 남는다** (2026-09-06 정정). 계약 §6 이 *"`PART_FAILED` 의
+    #    `reason` 이 화면까지 나간다"* 고 했고, 그러려면 어느 파트가 왜 못 열었는지가
+    #    파트 결과로 있어야 한다.
+    assert {part.part: part.status for part in out.parts} == {
+        "finance": "PART_OPENED",
+        "logistics": "PART_FAILED",
+    }
+    assert "전날 행이 없다" in out.parts[1].reason
+    # ★ 다만 **만든 날 목록은 비운다** — 되돌렸으니 그 행들은 없다.
+    assert all(part.opened == [] for part in out.parts), "되돌렸는데 만든 날이 나갔다"
     assert conn.commits == 0
     assert conn.rollbacks == 1
     assert conn.closed == 1
@@ -534,10 +543,13 @@ def test_강제_개장이_PART_FAILED_를_성공으로_안_만든다() -> None:
     day_open.register_day_opening("finance", _터지는파트())
     day_open.register_day_opening("logistics", _터지는파트())
 
-    out = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션(), force=True)
+    conn = 가짜커넥션()
+    out = day_open.open_day(AS_OF, connect=lambda: conn, force=True)
 
     assert out.status == "NOT_OPENED", "강제로도 실패는 실패다"
-    assert out.status != "OPENED"
+    assert [part.status for part in out.parts] == ["PART_FAILED", "PART_FAILED"]
+    assert "재무가 못 연다" in out.reason, "무엇이 막았는지 화면까지 가야 한다"
+    assert conn.rollbacks == 1, "파트가 터졌으면 되돌린다"
 
 
 def test_파트는_강제인지_모른다() -> None:

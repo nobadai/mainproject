@@ -290,12 +290,31 @@ def _walk_part(
 
     opened: list[date] = []
     day = anchor + timedelta(days=1)
-    while day <= as_of:
+    try:
+        while day <= as_of:
         # 🔴 `carry_from` 은 **언제나 바로 전날**이다. 건너뛴 날에서 물려받으면 그
         #    사이 하루치 사실이 장부에 없는 채로 다음 행이 선다.
-        impl.open_day(conn, as_of=day, carry_from=day - timedelta(days=1))
-        opened.append(day)
-        day += timedelta(days=1)
+            impl.open_day(conn, as_of=day, carry_from=day - timedelta(days=1))
+            opened.append(day)
+            day += timedelta(days=1)
+    except Exception as exc:  # noqa: BLE001 - 파트 실패를 파트 어휘로 옮긴다.
+        # 🔴 **예외를 밖으로 내보내면 `parts` 가 비어 화면이 어느 파트인지 모른다.**
+        #
+        #    전에는 그랬다 — `open_day` 의 바깥 `except` 가 잡아 전체 `reason` 에
+        #    메시지만 뭉쳐 넣었고, `PART_FAILED` 경로는 **gap 으로만** 도달할 수
+        #    있었다(그리고 그건 `REJECTED_GAP` 으로 올라간다). 변이로 찾은 자리다.
+        #
+        # ★ **계약이 `PART_FAILED.reason` 은 화면까지 간다고 했다** (§6). 그러려면
+        #   어느 파트가 왜 못 열었는지가 파트 결과로 남아야 한다.
+        #
+        # ⚠️ **롤백은 그대로다.** 이 함수는 사유만 옮기고, 되돌리는 것은 `open_day`
+        #   가 한다 — 한 파트가 실패하면 다른 파트가 만든 행도 되돌린다.
+        return DayOpenPartOut(
+            part=part,
+            status="PART_FAILED",
+            reason=f"{type(exc).__name__}: {exc}",
+            opened=opened,
+        )
 
     if not opened:
         # ★ **`PART_ALREADY_OPENED` 다.** anchor 가 `as_of` 자신이라 만들 날이 없었다 —
@@ -379,7 +398,21 @@ def open_day(
         parts = [
             _walk_part(part, _OPENINGS[part], conn, as_of=as_of, limit=limit) for part in present
         ]
-        conn.commit()
+        if any(part.status == "PART_FAILED" and part.gap_days is None for part in parts):
+            # 🔴 **파트가 터지면 전체를 되돌린다.** 다른 파트가 만든 행도 되돌린다 —
+            #    반쯤 만들다 만 행이 남으면 다음 날이 그 위에 선다.
+            conn.rollback()
+            # 🔴 **`opened` 를 비운다. 되돌렸으니 그 행들은 없다.**
+            #
+            #    남겨 두면 화면이 *"이 날들을 만들었다"* 로 읽는데 DB 에는 없다 —
+            #    `parts` 자체는 남긴다. 어느 파트가 **왜** 못 열었는지가 계약상
+            #    화면까지 가야 하기 때문이다 (§6).
+            parts = [part.model_copy(update={"opened": []}) for part in parts]
+        else:
+            # ★ **상한 초과(`gap_days`)는 롤백이 아니다.** 그 파트는 **아무것도 안
+            #   만들었고**, 다른 파트가 만든 행은 살려야 한다 — *"한 파트가 뒤처졌다고
+            #   다른 파트를 되돌리지 않는다"* (계약 C.1).
+            conn.commit()
     except Exception as exc:  # noqa: BLE001 - 하루 넘김 실패가 500 으로 올라가면 안 된다.
         conn.rollback()
         # ⚠️ 계약 어휘에 `FAILED` 가 없다 — *"한 파트라도 실패하면 전체는
@@ -451,10 +484,14 @@ def _aggregate(
         )
     failed = [part for part in parts if part.status == "PART_FAILED"]
     if failed:
+        # 🔴 **파트 사유를 전체 사유에 싣는다** (계약 §6 — 화면까지 나간다).
+        #    파트 이름만 적으면 *"logistics 가 막혔다"* 로 끝나고, **무엇이 막았는지**를
+        #    화면이 못 말한다.
+        말 = "; ".join(f"{part.part}: {part.reason}" if part.reason else part.part for part in failed)
         return DayOpenOut(
             as_of=as_of,
             status="NOT_OPENED",
-            reason=f"막혔다: {', '.join(part.part for part in failed)}",
+            reason=f"막혔다 — {말}",
             parts=parts,
             missing=list(absent),
         )
