@@ -101,6 +101,35 @@ class InboundExecution(Protocol):
     🔴 **멱등이어야 한다.** 같은 날 두 번 불러도 두 번 입고되면 안 된다. **판정 기준은
        물류가 정한다** — `inbound_id` 로 볼지, 로트 존재로 볼지는 물류 지식이다.
 
+    🔴 **당일 도착만 처리하는 것이 아니다** (물류 회신 2026-09-06 §5).
+
+      ```text
+      expected_arrival_date >  as_of   not_due
+      expected_arrival_date == as_of   due
+      expected_arrival_date <  as_of   **overdue 이지만 여전히 due**   ← 빠뜨리면 안 된다
+      ```
+
+      ★ **어느 날 `receive_arrivals` 가 안 돌았어도 다음 날이 밀린 것을 받는다.** 당일만
+        보면 그 하루가 영원히 안 오는 물건으로 남고, 지금 아프고 있는 자리가 정확히
+        그것이다 (도착 예정 2026-01-07 이 02-06 까지 `in_transit` 에 남아 있다).
+
+      ⚠️ **판정은 파트가 한다.** 마스터는 `as_of` 만 준다 — *"무엇이 도착 자격을
+        얻었나"* 는 물류 지식이다.
+
+    🔴 **멱등 축은 `(sim_run_id, inbound_id)` 다** (물류 회신 §6).
+
+      ```text
+      도메인 식별          inbound_id
+      실행/DB 중복 방지    (sim_run_id, inbound_id)
+      ```
+
+      ★ 같은 `inbound_id` 문자열이라도 **다른 `sim_run_id` 는 별개의 실행 장부**다.
+
+      ⚠️ **`sim_run_id` 는 이 Protocol 이 안 받는다.** *"어느 실행의 장부인가"* 는 실행
+        정체성이라 **어댑터 생성 인자**로 온다 — `LogisticsTransitionAdapter` ·
+        `LogisticsCancellationAdapter` 와 같은 자리이고, 배선(`app/main.py`)에서 눈에
+        보이게 주입한다. 호출마다 나르면 마스터가 매번 그 값을 정하는 셈이 된다.
+
     :param as_of: 받는 날. **달력일**이다 (토·일·공휴일 포함).
     :returns: 무엇을 받았는지. 받을 것이 없으면 `NOTHING_DUE` 이고 그것은 정상이다.
     """
