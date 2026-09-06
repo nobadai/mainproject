@@ -28,6 +28,7 @@ from typing import Any, Self
 
 import pytest
 
+import app.main  # noqa: F401  — import 시점에 하루 넘김을 등록한다. ⑩ 의 전제다
 from app.logistics import day_open
 from app.logistics.day_open import LogisticsDayOpening, LogisticsRunAmbiguous
 from app.logistics.repository import get_active_logistics_runtime_fixture
@@ -35,6 +36,7 @@ from app.logistics.schemas import InTransitItem, ScheduledQuantity
 from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import USAGE_SCOPE, LogisticsFixtureMissing
 from app.master import day_open as master_day_open
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 CARRY_FROM = date(2026, 1, 6)
 AS_OF = CARRY_FROM + timedelta(days=1)
@@ -770,3 +772,48 @@ def test_master_open_day_walks_each_run_on_its_own_row():
     assert b결과.status == "OPENED"
     assert b결과.parts[0].opened == [AS_OF]
     assert _insert_파라미터(b_conn)["sim_run_id"] == SIM_B
+
+
+# ── ⑩ 실제 배선이 실행 축을 들고 있다 ───────────────────────────────────
+
+
+def test_production_wiring_pins_the_day_opening_to_the_master_owned_run():
+    """⑩ 🔴 **`app/main.py` 가 등록한 그 인스턴스**가 실행 축을 갖고 있는가.
+
+    ★ **위 검사들로는 이 자리를 못 잰다.** 저기서는 검사가 스스로
+      `LogisticsDayOpening(sim_run_id=...)` 를 만들어 쓰므로, 배선 줄에 주입이 통째로
+      빠져 있어도 전부 초록불이다 — 그리고 실제로 `#324` 직전까지 그 상태였다
+      (`tests/master/test_transition_registration.py` 가 전이 어댑터에 같은 검사를
+      두고 있는 이유와 같다).
+
+    ⚠️ **값을 물류가 정하지 않는다.** `BURN_IN_SIM_RUN_ID` 는 마스터 소유이고, 승인
+       전이(`LogisticsTransitionAdapter`)와 승인 취소(`LogisticsCancellationAdapter`)가
+       **이미 같은 값**을 받고 있다. 셋이 갈리면 승인이 갱신하는 행과 하루 넘김이
+       세우는 행이 서로 다른 실행에 앉는다.
+    """
+    등록된 = master_day_open.registered()["logistics"]
+    assert isinstance(등록된, LogisticsDayOpening)
+
+    # ★ **행동으로 잰다.** 같은 날에 실행이 둘 보이는 커넥션을 준다 — 주입이 빠진
+    #   인스턴스라면 여기서 `LogisticsRunAmbiguous` 가 올라 검사가 터진다.
+    conn = 가짜커넥션({CARRY_FROM: {BURN_IN_SIM_RUN_ID, SIM_B}})
+
+    assert 등록된.is_open(conn, as_of=CARRY_FROM) is True
+    assert conn.커서.params[0]["sim_run_id"] == BURN_IN_SIM_RUN_ID
+
+
+def test_production_wiring_reuses_the_run_the_other_two_adapters_already_use():
+    """⑩ ★ **새 상수를 만들지 않았다.** 세 등록소가 같은 값 하나를 가리킨다.
+
+    ⚠️ 물류가 자기 실행 ID 를 지어내면 그 순간 *"어느 실행의 장부인가"* 의 주인이
+       둘이 된다.
+    """
+    from app.master import cancellation as master_cancellation
+    from app.master import transition as master_transition
+
+    하루넘김 = master_day_open.registered()["logistics"]
+    전이 = master_transition.registered()["logistics"]
+    취소 = master_cancellation.registered_cancellations()["logistics"]
+
+    assert 하루넘김._sim_run_id == BURN_IN_SIM_RUN_ID
+    assert 하루넘김._sim_run_id == 전이._sim_run_id == 취소._sim_run_id
