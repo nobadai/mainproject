@@ -9,12 +9,15 @@ from decimal import Decimal
 from pydantic import ValidationError
 
 from app.sales.llm.runtime import interpret_candidates
+from app.sales.ranking import rank_scenarios, recommended_scenario_id, remove_dominated_scenarios
 from app.sales.schemas import (
     AllocationLeg,
     ProposalSelfCheck,
     PurchaseAdditionalSupplyResult,
     SalesCandidate,
+    SalesDecisionTrace,
     SalesDomainReply,
+    SalesFinanceReplySubset,
     SalesProposalInput,
     SalesProposalReply,
     SalesRecommendation,
@@ -81,10 +84,58 @@ def validate_context(request: SalesProposalInput) -> list[str]:
 def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
     """입력 사실로 세 유형의 Sales 시나리오를 만들고 안전하게 추천한다."""
     missing_data = validate_context(request)
-    scenarios = [] if missing_data else _generate_scenarios(request)
+    generated = [] if missing_data else _generate_scenarios(request)
+    scenarios, exclusions = remove_dominated_scenarios(generated)
     missing = _missing_capabilities(request)
     check = self_check_scenarios(scenarios)
-    recommendation = _interpret_scenarios(scenarios)
+    fixed_recommendation = recommended_scenario_id(scenarios)
+    recommendation = _interpret_scenarios(scenarios, fixed_recommendation)
+    ranked_ids = [scenario.scenario_id for scenario in rank_scenarios(scenarios)]
+    trace = [
+        SalesDecisionTrace(
+            candidate_id=scenario.scenario_id,
+            status=scenario.status,
+            rank=(
+                ranked_ids.index(scenario.scenario_id) + 1
+                if scenario.scenario_id in ranked_ids
+                else None
+            ),
+            recommended=scenario.scenario_id == fixed_recommendation,
+            finance_verdict=scenario.finance_verdict,
+            profitability_krw=scenario.contribution_margin_krw,
+            inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
+            sell_priority=scenario.sell_priority,
+            remaining_freshness_days=scenario.remaining_freshness_days,
+            dependencies=scenario.execution_dependencies,
+            ml_support_used=scenario.ml_support_used,
+            changed_axes=scenario.sales_decision_axes,
+            exclusion_reasons=exclusions.get(scenario.scenario_id, []),
+            unresolved_fields=scenario.uncertainties,
+            reply_refs=_reply_refs(scenario.domain_replies),
+            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+        )
+        for scenario in scenarios
+    ]
+    trace.extend(
+        SalesDecisionTrace(
+            candidate_id=scenario.scenario_id,
+            status=scenario.status,
+            finance_verdict=scenario.finance_verdict,
+            profitability_krw=scenario.contribution_margin_krw,
+            inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
+            sell_priority=scenario.sell_priority,
+            remaining_freshness_days=scenario.remaining_freshness_days,
+            dependencies=scenario.execution_dependencies,
+            ml_support_used=scenario.ml_support_used,
+            changed_axes=scenario.sales_decision_axes,
+            exclusion_reasons=exclusions[scenario.scenario_id],
+            unresolved_fields=scenario.uncertainties,
+            reply_refs=_reply_refs(scenario.domain_replies),
+            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+        )
+        for scenario in generated
+        if scenario.scenario_id in exclusions
+    )
     collapse_reasons = list(
         dict.fromkeys(
             scenario.variant_collapsed_reason
@@ -108,10 +159,11 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
         ),
         missing_data=missing_data,
         missing_capabilities=missing,
-        recommended_scenario_id=recommendation.recommended_candidate_id,
+        recommended_scenario_id=fixed_recommendation,
         llm=recommendation,
         recommendation=recommendation,
         self_check=check,
+        decision_trace=trace,
     )
 
 
@@ -143,8 +195,31 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
         # 조건부 수량은 회신에서 나오므로 회신을 먼저 고른 뒤 공급을 세운다.
         supply = _supply(scenario_quantity, confirmed, replies)
+        unmet_quantity = None
+        purchase = _purchase_result(replies)
+        if scenario_type == "AGGRESSIVE" and confirmed is not None and purchase is not None:
+            procurable = purchase.procurable_quantity_kg
+            if procurable is not None:
+                supported = confirmed + min(max(quantity - confirmed, Decimal(0)), procurable)
+                scenario_quantity = min(quantity, supported)
+                unmet_quantity = quantity - scenario_quantity
+                supply = _supply(scenario_quantity, confirmed, replies)
+                if scenario_quantity != quantity:
+                    axes.append("QUANTITY")
         validations = _required_validations(request, supply, parent or scenario_id, delivery)
         risks, uncertainties, conditional = _feedback_effects(replies)
+        finance = _finance_reply(replies)
+        sell_priority, inventory_severity, remaining_freshness = _logistics_ranking_facts(replies)
+        dependencies = _dependencies(request, supply, purchase, delivery, replies)
+        if scenario_type == "BALANCED":
+            payment, finance, finance_adjusted = _finance_payment_alternative(
+                payment, finance, replies
+            )
+            if finance_adjusted:
+                axes.append("PAYMENT_TERMS")
+                dependencies.extend(
+                    ["USER_PAYMENT_TERM_ACCEPTANCE_REQUIRED", "FINANCE_REVALIDATION_REQUIRED"]
+                )
         uncertainties.extend(supply_uncertainties)
         if price is None:
             uncertainties.append("PRICE_CONTEXT_REQUIRED")
@@ -152,6 +227,20 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             delivery_status = request.logistics_context.delivery_feasibility.status
             if delivery_status != "READY":
                 uncertainties.extend(request.logistics_context.delivery_feasibility.reason_codes)
+        ml_support, ml_issue = _ml_support(request, delivery)
+        if ml_issue:
+            uncertainties.append(ml_issue)
+        status = _candidate_status(
+            request=request,
+            scenario_type=scenario_type,
+            validations=validations,
+            supply=supply,
+            purchase=purchase,
+            finance=finance,
+            dependencies=dependencies,
+            replies=replies,
+            unmet_quantity=unmet_quantity,
+        )
         result.append(
             SalesScenario(
                 scenario_id=scenario_id,
@@ -184,6 +273,24 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 variant_collapsed=collapsed,
                 variant_collapsed_reason=collapse_reason,
                 domain_replies=replies,
+                status=status,
+                execution_dependencies=list(dict.fromkeys(dependencies)),
+                unmet_quantity_kg=unmet_quantity,
+                finance_verdict=finance.finance_verdict if finance else None,
+                contribution_margin_krw=(
+                    finance.financial_summary.contribution_margin_krw
+                    if finance and finance.financial_summary
+                    else None
+                ),
+                contribution_margin_rate=(
+                    finance.financial_summary.contribution_margin_rate
+                    if finance and finance.financial_summary
+                    else None
+                ),
+                sell_priority=sell_priority,
+                authoritative_inventory_risk_severity=inventory_severity,
+                remaining_freshness_days=remaining_freshness,
+                ml_support_used=ml_support,
             )
         )
     return result
@@ -203,8 +310,7 @@ _RENEWAL_OVERRIDE_FIELDS: tuple[str, ...] = (
 def _user_overrides_contract(request: SalesProposalInput) -> bool:
     """갱신 제안에서 사용자가 상업조건을 실제로 바꿨는가."""
     return any(
-        getattr(request.user_request, field) is not None
-        for field in _RENEWAL_OVERRIDE_FIELDS
+        getattr(request.user_request, field) is not None for field in _RENEWAL_OVERRIDE_FIELDS
     )
 
 
@@ -304,10 +410,7 @@ _ADDITIONAL_SUPPLY_CAPABILITY = "ADDITIONAL_SUPPLY_CONTEXT"
 
 def _is_additional_supply_reply(reply: SalesDomainReply) -> bool:
     """이 회신을 추가공급 결과로 읽어도 되는가 — 출처와 capability 를 **둘 다** 본다."""
-    return (
-        reply.source_agent == "purchase"
-        and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
-    )
+    return reply.source_agent == "purchase" and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
 
 
 def _parse_additional_supply(
@@ -352,6 +455,16 @@ def _purchase_conditional_supply(
     return None, None
 
 
+def _purchase_result(replies: list[SalesDomainReply]) -> PurchaseAdditionalSupplyResult | None:
+    for reply in replies:
+        if not _is_additional_supply_reply(reply) or reply.runtime_status != "READY":
+            continue
+        parsed = _parse_additional_supply(reply)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _required_validations(
     request: SalesProposalInput, supply: ScenarioSupply, original_id: str, delivery_date
 ) -> list[str]:
@@ -363,8 +476,13 @@ def _required_validations(
     delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
     if delivery is None or delivery.status != "READY":
         validations.append("DELIVERY_FEASIBILITY_CONTEXT")
-    if supply.additional_supply_required and not _has_reply(
-        request, "ADDITIONAL_SUPPLY_CONTEXT", original_id
+    sourcing_allowed = not (
+        request.business_mode == "SPOT_SALES" and not request.user_request.allow_additional_sourcing
+    )
+    if (
+        supply.additional_supply_required
+        and sourcing_allowed
+        and not _has_reply(request, "ADDITIONAL_SUPPLY_CONTEXT", original_id)
     ):
         validations.append("ADDITIONAL_SUPPLY_CONTEXT")
     return validations
@@ -455,6 +573,161 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
     return risks, uncertainties, conditional
 
 
+def _finance_reply(replies: list[SalesDomainReply]) -> SalesFinanceReplySubset | None:
+    for reply in replies:
+        if reply.source_agent != "finance" or reply.capability != "FINANCIAL_VALIDATION":
+            continue
+        try:
+            parsed = SalesFinanceReplySubset.model_validate(reply.payload)
+        except ValidationError:
+            return None
+        if parsed.finance_verdict is not None:
+            return parsed
+        fallback = {
+            "ok": "PASS",
+            "conditional": "REVIEW_REQUIRED",
+            "reject": "FAIL",
+            "fail": "FAIL",
+        }.get((reply.business_status or "").lower())
+        return parsed.model_copy(update={"finance_verdict": fallback})
+    return None
+
+
+def _finance_payment_alternative(payment, finance, replies):
+    """Finance가 명시한 상한이 있을 때만 사용자 수락 대상 수정안을 만든다."""
+    if finance is None or finance.finance_verdict != "FAIL" or payment is None:
+        return payment, finance, False
+    reply = next((item for item in replies if item.source_agent == "finance"), None)
+    if reply is None:
+        return payment, finance, False
+    value = reply.payload.get("max_finance_allowed_payment_terms_days")
+    if isinstance(value, bool) or not isinstance(value, int) or value >= payment or value < 0:
+        return payment, finance, False
+    # 원안 FAIL을 수정안 PASS로 바꾸지 않는다. 새 조건은 Finance 재검증 전이다.
+    return value, None, True
+
+
+def _dependencies(request, supply, purchase, delivery_date, replies):
+    dependencies: list[str] = []
+    if (
+        purchase
+        and purchase.procurable_quantity_kg is not None
+        and purchase.procurable_quantity_kg > 0
+    ):
+        dependencies.append("PURCHASE_COMMITMENT_REQUIRED")
+        if purchase.available_date is not None and purchase.available_date != delivery_date:
+            dependencies.append("DELIVERY_REVALIDATION_REQUIRED")
+    if _logistics_revalidation_required(replies):
+        dependencies.append("DELIVERY_REVALIDATION_REQUIRED")
+    finance = _finance_reply(replies)
+    if finance and finance.finance_verdict == "REVIEW_REQUIRED":
+        dependencies.append("FINANCE_REVALIDATION_REQUIRED")
+    return dependencies
+
+
+def _logistics_revalidation_required(replies: list[SalesDomainReply]) -> bool:
+    marker = "LOGISTICS_REVALIDATION_REQUIRED"
+    for reply in replies:
+        if reply.source_agent != "logistics":
+            continue
+        if (reply.business_status or "").upper() == marker:
+            return True
+        reason_codes = reply.payload.get("reason_codes")
+        if isinstance(reason_codes, list) and marker in reason_codes:
+            return True
+        constraints = reply.payload.get("hard_constraints")
+        if isinstance(constraints, list):
+            for constraint in constraints:
+                if isinstance(constraint, dict) and constraint.get("code") == marker:
+                    return True
+    return False
+
+
+def _logistics_ranking_facts(
+    replies: list[SalesDomainReply],
+) -> tuple[str | None, str | None, int | None]:
+    """Logistics가 명시한 보조 사실만 읽고 severity나 우선순위를 만들지 않는다."""
+    for reply in replies:
+        if reply.source_agent != "logistics":
+            continue
+        priority = reply.payload.get("sell_priority")
+        severity = reply.payload.get("inventory_risk_severity")
+        freshness = reply.payload.get("remaining_freshness_days")
+        return (
+            priority if isinstance(priority, str) else None,
+            severity if isinstance(severity, str) else None,
+            freshness if isinstance(freshness, int) and not isinstance(freshness, bool) else None,
+        )
+    return None, None, None
+
+
+def _candidate_status(
+    *,
+    request,
+    scenario_type,
+    validations,
+    supply,
+    purchase,
+    finance,
+    dependencies,
+    replies,
+    unmet_quantity,
+):
+    if _logistics_revalidation_required(replies):
+        return "REVIEW_REQUIRED"
+    if finance and finance.finance_verdict == "FAIL":
+        return (
+            "REVIEW_REQUIRED" if request.business_mode == "CONTRACT_FULFILLMENT" else "INFEASIBLE"
+        )
+    if finance and (
+        finance.finance_verdict == "REVIEW_REQUIRED"
+        or (
+            finance.financial_summary
+            and finance.financial_summary.overdue_ar_krw is not None
+            and finance.financial_summary.overdue_ar_krw > 0
+        )
+    ):
+        return "REVIEW_REQUIRED"
+    if validations:
+        return "UNRESOLVED"
+    if (
+        supply.additional_supply_required
+        and purchase is not None
+        and purchase.procurable_quantity_kg is None
+    ):
+        return "UNRESOLVED"
+    if (
+        request.business_mode == "SPOT_SALES"
+        and not request.user_request.allow_additional_sourcing
+        and supply.additional_supply_required
+    ):
+        return "INFEASIBLE"
+    if (
+        scenario_type == "AGGRESSIVE"
+        and supply.additional_supply_required
+        and purchase is not None
+        and purchase.procurable_quantity_kg == 0
+    ):
+        return "INFEASIBLE"
+    if unmet_quantity is not None and unmet_quantity > 0 and not dependencies:
+        return "INFEASIBLE"
+    if dependencies:
+        return "CONDITIONAL"
+    return "EXECUTABLE"
+
+
+def _ml_support(request: SalesProposalInput, relevant_date) -> tuple[bool, str | None]:
+    forecast = request.ml_context
+    if forecast is None or forecast.use_recommended is not True:
+        return False, None
+    if relevant_date is None:
+        return False, None
+    point = next((point for point in forecast.daily if point.date == relevant_date), None)
+    if point is None:
+        return False, "ML_HORIZON_EXCEEDED"
+    return True, None
+
+
 def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
     """Purchase의 권위 회신을 조건부 공급 의존성으로만 소비한다.
 
@@ -479,14 +752,16 @@ def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
     return list(parsed.risks), depends_on_purchase
 
 
-def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
+def _interpret_scenarios(
+    scenarios: list[SalesScenario], fixed_recommendation: str | None
+) -> SalesRecommendation:
     candidates = [
         SalesCandidate(
             candidate_id=scenario.scenario_id,
             allocation=[
                 AllocationLeg(
                     channel="proposal",
-                    qty_kg=scenario.quantity_kg or Decimal(0),
+                    qty_kg=scenario.quantity_kg if scenario.quantity_kg is not None else Decimal(0),
                     unit_price=scenario.unit_price_krw,
                 )
             ],
@@ -499,8 +774,9 @@ def _interpret_scenarios(scenarios: list[SalesScenario]) -> SalesRecommendation:
             strategy_label=scenario.scenario_type,
         )
         for scenario in scenarios
+        if scenario.status in {"EXECUTABLE", "CONDITIONAL"}
     ]
-    return interpret_candidates(candidates)
+    return interpret_candidates(candidates, recommended_candidate_id=fixed_recommendation)
 
 
 def _purchase_reference_issues(scenario: SalesScenario) -> list[str]:
@@ -598,9 +874,11 @@ def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
             # 🔴 답이 온 질문을 "안 물어봤다" 로 읽지 않는다. `required_validations` 는
             #    *아직 답이 없는 요청* 목록이라, 회신이 오면 사라지는 것이 정상이다.
             and not _answered_additional_supply(scenario)
+            and not (scenario.business_mode == "SPOT_SALES" and scenario.status == "INFEASIBLE")
         ):
             issues.append("ADDITIONAL_SUPPLY_VALIDATION_MISSING")
-        issues.extend(_purchase_reference_issues(scenario))
+        if not (scenario.unmet_quantity_kg is not None and scenario.unmet_quantity_kg > 0):
+            issues.extend(_purchase_reference_issues(scenario))
     issues = list(dict.fromkeys(issues))
     return ProposalSelfCheck(
         passed=not issues,

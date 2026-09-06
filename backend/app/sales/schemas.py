@@ -511,6 +511,16 @@ SalesCapability = Literal[
     "FINANCIAL_VALIDATION",
     "ADDITIONAL_SUPPLY_CONTEXT",
 ]
+SalesCandidateStatus = Literal[
+    "EXECUTABLE", "CONDITIONAL", "REVIEW_REQUIRED", "UNRESOLVED", "INFEASIBLE"
+]
+ExecutionDependency = Literal[
+    "PURCHASE_COMMITMENT_REQUIRED",
+    "DELIVERY_REVALIDATION_REQUIRED",
+    "USER_DELIVERY_ACCEPTANCE_REQUIRED",
+    "FINANCE_REVALIDATION_REQUIRED",
+    "USER_PAYMENT_TERM_ACCEPTANCE_REQUIRED",
+]
 ScenarioType = Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
 ScenarioObjective = Literal["RISK_DEFENSE", "BALANCE", "SALES_OPPORTUNITY"]
 
@@ -532,6 +542,8 @@ class SalesUserRequest(BaseModel):
     #: 이 요청 자체의 권위 있는 출처 ref. 마스터가 구조화된 사용자 요청을 넘길 때
     #: 채우는 자리이며, 독립 실행에서는 없다(None).
     source_ref: str | None = None
+    # SPOT에서 미제공은 추가 소싱 허용이 아니다.
+    allow_additional_sourcing: bool = False
 
     @field_validator(
         "requested_quantity_kg",
@@ -621,7 +633,8 @@ class LogisticsLotConstraint(BaseModel):
     lot_id: str
     item: str
     available_qty_kg: Decimal | None = Field(default=None, ge=0)
-    remaining_freshness_days: int | None = Field(default=None, ge=0)
+    # 음수는 freshness 기준을 지난 실제 일수다. 0으로 보정하지 않는다.
+    remaining_freshness_days: int | None = None
     effective_freshness_limit_days: int | None = Field(default=None, ge=0)
     grade: str | None = None
     status: str | None = None
@@ -719,6 +732,7 @@ class PurchaseAdditionalSupplyResult(BaseModel):
     #: > 0 확보 가능량 확인 / 0 확보 가능량 0kg 확인 / None 미실행·확인 불가
     procurable_quantity_kg: Decimal | None
     risks: list[str]
+    available_date: date | None = None
 
     @field_validator("procurable_quantity_kg", mode="before")
     @classmethod
@@ -740,6 +754,38 @@ class SalesFeedback(BaseModel):
     scenario_feedback: list[SalesScenarioFeedback] = Field(default_factory=list)
 
 
+class SalesExecutionIdentity(BaseModel):
+    """Master wiring 전에도 받을 수 있는 Sales-local 실행 식별자."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: str | None = None
+    run_id: str | None = None
+    as_of: date | None = None
+    feedback_attempt: int | None = Field(default=None, ge=0)
+
+
+class SalesFinanceSummarySubset(BaseModel):
+    """Sales가 실제로 소비하는 Finance 회신의 최소 부분집합."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+    contribution_margin_krw: Decimal | None = None
+    contribution_margin_rate: Decimal | None = None
+    scenario_projected_cash_min: Decimal | None = None
+    depends_on_projected_inflow: bool | None = None
+    overdue_ar_krw: Decimal | None = None
+
+
+class SalesFinanceReplySubset(BaseModel):
+    """Finance 내부 모델과 결합하지 않는 Sales-local typed receiver."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+    finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
+    financial_summary: SalesFinanceSummarySubset | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    missing_data: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
 class SalesProposalInput(BaseModel):
     """Master 연동 전에도 독립 실행 가능한 최종 Sales 제안 입력이다."""
 
@@ -753,6 +799,7 @@ class SalesProposalInput(BaseModel):
     finance_context: PassThrough | None = None
     logistics_context: SalesLogisticsContext | None = None
     feedback: SalesFeedback | None = None
+    execution_identity: SalesExecutionIdentity | None = None
 
 
 class ScenarioSupply(BaseModel):
@@ -819,6 +866,36 @@ class SalesScenario(BaseModel):
     variant_collapsed: bool = False
     variant_collapsed_reason: str | None = None
     domain_replies: list[SalesDomainReply] = Field(default_factory=list)
+    status: SalesCandidateStatus = "UNRESOLVED"
+    execution_dependencies: list[ExecutionDependency] = Field(default_factory=list)
+    unmet_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
+    contribution_margin_krw: Decimal | None = None
+    contribution_margin_rate: Decimal | None = None
+    sell_priority: str | None = None
+    authoritative_inventory_risk_severity: str | None = None
+    remaining_freshness_days: int | None = None
+    ml_support_used: bool = False
+
+
+class SalesDecisionTrace(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str
+    status: SalesCandidateStatus
+    rank: int | None = Field(default=None, ge=1)
+    recommended: bool = False
+    finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
+    profitability_krw: Decimal | None = None
+    inventory_risk_severity: str | None = None
+    sell_priority: str | None = None
+    remaining_freshness_days: int | None = None
+    dependencies: list[ExecutionDependency] = Field(default_factory=list)
+    ml_support_used: bool = False
+    changed_axes: list[str] = Field(default_factory=list)
+    exclusion_reasons: list[str] = Field(default_factory=list)
+    unresolved_fields: list[str] = Field(default_factory=list)
+    reply_refs: list[str] = Field(default_factory=list)
+    policy_model_refs: list[str] = Field(default_factory=list)
 
 
 class ProposalSelfCheck(BaseModel):
@@ -845,6 +922,7 @@ class SalesProposalReply(BaseModel):
     # 레거시 호출자가 recommendation을 읽는 동안 하나의 해석 결과를 호환 제공한다.
     recommendation: SalesRecommendation
     self_check: ProposalSelfCheck
+    decision_trace: list[SalesDecisionTrace] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

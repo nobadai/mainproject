@@ -261,10 +261,12 @@ def _build_candidates(
                 conditional.allocation[0].qty_kg = base.allocation.qty_kg
                 conditional.outbound_by_date[0].kg = base.allocation.qty_kg
             if purchase.available_date is not None:
-                conditional.outbound_by_date[0].date = purchase.available_date
-                conditional_data = conditional.model_dump()
-                _add_adjustment_axis(conditional_data, "DELIVERY")
-                conditional = SalesCandidate.model_validate(conditional_data)
+                # Purchase 입고 가능일은 고객 납기일이 아니다. 실제 대체 납기는
+                # Logistics 재검증이 오기 전까지 만들지 않는다.
+                conditional.uncertainties.append("DELIVERY_REVALIDATION_REQUIRED")
+                conditional.messages.append(
+                    "추가 확보 가능일을 반영하려면 물류 납기 재검증이 필요합니다."
+                )
             candidates.append(_apply_refeed(conditional, request.refeed_results))
         if len(candidates) == 3:
             break
