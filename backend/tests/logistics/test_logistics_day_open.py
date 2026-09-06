@@ -557,6 +557,8 @@ def test_master_open_day_is_idempotent_for_an_already_open_day():
 
     결과 = master_day_open.open_day(AS_OF, connect=lambda: conn)
 
-    assert 결과.status == "NOT_OPENED"
+    # 🔴 **`ALREADY_OPENED` 다** (계약 어휘 · 2026-09-06 정정). 멱등 no-op 은 실패가
+    #    아니다 — `NOT_OPENED` 로 접으면 매일 도는 정상 상태가 실패로 보인다.
+    assert 결과.status == "ALREADY_OPENED"
     assert 결과.parts[0].opened == []
     assert not [query for query in conn.커서.queries if "INSERT INTO" in query]

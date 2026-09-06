@@ -140,12 +140,28 @@ class DayOpenPartOut(BaseModel):
     """
 
     part: str
-    #: `OPENED` 는 걸었다는 뜻이고, 몇 날을 만들었는지는 `opened` 가 말한다.
-    #: **빈 목록이면 이미 열려 있었다는 뜻**이다 (멱등).
-    status: Literal["OPENED", "BLOCKED"]
+    #: 🔴 **계약 어휘 셋이다** (`260904_마스터_전달_재무물류_open_day_파트계약` §어휘).
+    #:
+    #:   ```text
+    #:   PART_OPENED           이번 호출로 내 몫을 열었다
+    #:   PART_ALREADY_OPENED   이미 열려 있었다 (멱등 no-op)
+    #:   PART_FAILED           못 열었다
+    #:   ```
+    #:
+    #: ⚠️ 전에는 `OPENED | BLOCKED` 였고 *"이미 열려 있었다"* 를 `opened` 가 빈
+    #:    목록인 것으로 표현했다. **계약을 내고 그보다 작게 만든 자리**였다
+    #:    (재무가 계약 어휘로 회신해 와서 드러났다 · 2026-09-06).
+    status: Literal["PART_OPENED", "PART_ALREADY_OPENED", "PART_FAILED"]
     reason: str = ""
     #: 이번에 만든 날. 오래된 날부터이며 **하루도 건너뛰지 않는다.**
     opened: list[date] = Field(default_factory=list)
+    #: 🔴 상한을 넘겨 막혔으면 **밀린 날 수.** 마스터가 전체를 `REJECTED_GAP` 으로
+    #:   올리는 근거다.
+    #:
+    #: ★ **사유 문자열을 읽지 않으려고 칸으로 둔다.** 마스터가 파트의 말을 해석하기
+    #:   시작하면 `§3.2.5` 가 무너진다 — 그건 `next_action` 을 횟수로 가르는 것과
+    #:   같은 판단이다.
+    gap_days: int | None = None
 
 
 class DayOpenOut(BaseModel):
@@ -154,14 +170,21 @@ class DayOpenOut(BaseModel):
     🔴 **세 값을 섞지 않는다** (`TransitionOut` 과 같은 결).
 
       ```text
-      OPENED       한 파트라도 행을 만들었다
-      NOT_OPENED   만든 행이 없다 — 이미 열려 있었거나, 막혔거나, 미등록이다
-      FAILED       만들려다 실패했다 — 아무것도 안 만들었다
+      OPENED         한 파트라도 이번에 열었다
+      ALREADY_OPENED 전부 이미 열려 있었다 — 할 일이 없었다
+      NOT_OPENED     한 파트라도 실패했다 · 미등록이다 · 커밋이 터졌다
+      REJECTED_GAP   상한(31일)을 넘겨 거절했다 — 관리자 강제 개장이 필요하다
       ```
+
+    🔴 **`ALREADY_OPENED` 를 `NOT_OPENED` 로 접지 않는다.** 앞은 *"할 일이 없었다"* 이고
+       뒤는 *"못 했다"* 다. 접으면 **매일 도는 정상 상태가 실패로 보인다.**
+
+    ⚠️ 전에는 `OPENED / NOT_OPENED / FAILED` 셋이었다 — 계약이 넷인데 구현이 셋이었고,
+       `ALREADY_OPENED` 와 `REJECTED_GAP` 이 `NOT_OPENED` 안에 뭉쳐 있었다.
     """
 
     as_of: date
-    status: Literal["OPENED", "NOT_OPENED", "FAILED"]
+    status: Literal["OPENED", "ALREADY_OPENED", "NOT_OPENED", "REJECTED_GAP"]
     reason: str = ""
     #: 파트별 결과. `FAILED` 면 비어 있다 — 전부 되돌렸기 때문이다.
     parts: list[DayOpenPartOut] = Field(default_factory=list)
@@ -237,9 +260,13 @@ def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOp
 
     if anchor is None:
         # ★ **막는다.** 여기서 상한을 넘겨 걸으면 수백 행이 조용히 생긴다.
+        #
+        # 🔴 `gap_days` 를 채운다 — 마스터가 이 칸을 보고 전체를 `REJECTED_GAP` 으로
+        #    올린다. 사유 문자열을 읽지 않는다.
         return DayOpenPartOut(
             part=part,
-            status="BLOCKED",
+            status="PART_FAILED",
+            gap_days=MAX_CARRY_DAYS,
             reason=(
                 f"{as_of} 부터 {MAX_CARRY_DAYS}일 뒤로 가도 열린 날이 없다 —"
                 " 상한을 넘는 것은 의도보다 실수일 가능성이 크다. 행을 만들지 않는다"
@@ -255,7 +282,11 @@ def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOp
         opened.append(day)
         day += timedelta(days=1)
 
-    return DayOpenPartOut(part=part, status="OPENED", opened=opened)
+    if not opened:
+        # ★ **`PART_ALREADY_OPENED` 다.** anchor 가 `as_of` 자신이라 만들 날이 없었다 —
+        #   *"할 일이 없었다"* 이지 *"못 했다"* 가 아니다 (계약 §어휘 · 멱등 no-op).
+        return DayOpenPartOut(part=part, status="PART_ALREADY_OPENED")
+    return DayOpenPartOut(part=part, status="PART_OPENED", opened=opened)
 
 
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
@@ -309,36 +340,63 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - 하루 넘김 실패가 500 으로 올라가면 안 된다.
         conn.rollback()
+        # ⚠️ 계약 어휘에 `FAILED` 가 없다 — *"한 파트라도 실패하면 전체는
+        #    `NOT_OPENED`"* 가 계약이고 커밋 실패도 *"못 열었다"* 다. 무엇이 터졌는지는
+        #    `reason` 이 나른다.
         return DayOpenOut(
             as_of=as_of,
-            status="FAILED",
+            status="NOT_OPENED",
             reason=f"하루 넘김 실패: {exc}",
             missing=list(absent),
         )
     finally:
         conn.close()
 
-    made = [day for part in parts for day in part.opened]
-    if made:
+    return _aggregate(as_of, parts, absent)
+
+
+def _aggregate(as_of: date, parts: list[DayOpenPartOut], absent: tuple[str, ...]) -> DayOpenOut:
+    """파트 결과를 **전체 어휘 넷**으로 취합한다 (계약 §어휘).
+
+    ```text
+    gap_days 가 있는 파트가 하나라도  → REJECTED_GAP   (상한을 넘겼다)
+    PART_FAILED 가 하나라도            → NOT_OPENED     (한 파트라도 실패하면 전체가)
+    PART_OPENED 가 하나라도            → OPENED
+    전부 PART_ALREADY_OPENED           → ALREADY_OPENED
+    ```
+
+    🔴 **순서가 계약이다.** `REJECTED_GAP` 을 먼저 보는 이유는 그것만 *"관리자 강제
+       개장"* 이라는 다른 다음 걸음을 갖기 때문이다 — `NOT_OPENED` 로 접으면 화면이
+       재시도를 권하고, 재시도로는 안 풀린다.
+    """
+    gapped = [part for part in parts if part.gap_days is not None]
+    if gapped:
+        names = ", ".join(part.part for part in gapped)
+        return DayOpenOut(
+            as_of=as_of,
+            status="REJECTED_GAP",
+            reason=f"상한({MAX_CARRY_DAYS}일)을 넘겨 거절했다: {names}",
+            parts=parts,
+            missing=list(absent),
+        )
+    failed = [part for part in parts if part.status == "PART_FAILED"]
+    if failed:
+        return DayOpenOut(
+            as_of=as_of,
+            status="NOT_OPENED",
+            reason=f"막혔다: {', '.join(part.part for part in failed)}",
+            parts=parts,
+            missing=list(absent),
+        )
+    if any(part.status == "PART_OPENED" for part in parts):
         return DayOpenOut(as_of=as_of, status="OPENED", parts=parts, missing=list(absent))
     return DayOpenOut(
         as_of=as_of,
-        status="NOT_OPENED",
-        reason=_no_rows_reason(parts),
+        status="ALREADY_OPENED",
+        reason="이미 열려 있었다 — 만든 행이 없다",
         parts=parts,
         missing=list(absent),
     )
 
 
-def _no_rows_reason(parts: list[DayOpenPartOut]) -> str:
-    """행을 하나도 안 만든 이유.
 
-    🔴 **"이미 열려 있었다" 와 "막혔다" 를 한 문장으로 접지 않는다.** 앞은 아무것도 할
-       일이 없었던 것이고 뒤는 사람이 봐야 하는 것이다.
-    """
-    blocked = [part.part for part in parts if part.status == "BLOCKED"]
-    if not blocked:
-        return "이미 열려 있었다 — 만든 행이 없다"
-    if len(blocked) == len(parts):
-        return f"막혔다: {', '.join(blocked)}"
-    return f"일부가 막혔다: {', '.join(blocked)} (나머지는 이미 열려 있었다)"

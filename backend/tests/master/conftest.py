@@ -101,6 +101,28 @@ class _주말만_쉬는_시장:
 
 
 @pytest.fixture(autouse=True)
+def 개장_관문을_통과시킨다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """개장 관문을 **DB 없이 통과**시킨다.
+
+    🔴 **`run_procurement` 이 첫 관문에서 `is_open` 을 묻는다** (2026-09-06 · 계약).
+       등록소가 전역이라 다른 검사가 하루 넘김을 등록해 두면, 그 뒤 실행이 **실 DB 로
+       개장 여부를 물으러 나간다.**
+
+    ★ **관문 자체를 재는 검사는 `test_day_gate.py` 가 가짜를 직접 꽂는다.** 여기서는
+      *"관문 때문에 다른 검사가 막히지 않는다"* 만 보장한다 — 공휴일 달력을 가짜로
+      주는 것과 같은 이유다.
+    """
+    from app.master.day_gate import DayGate
+
+    monkeypatch.setattr(
+        "app.master.service.check_day_gate",
+        lambda as_of, **kw: DayGate(
+            as_of=as_of, gate="PASS", result="ALREADY_OPENED", last_opened_date=as_of
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
 def 공휴일_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> None:
     """문 앞의 공휴일 축과 봉투의 개장 축을 **DB 대신 가짜로** 준다.
 

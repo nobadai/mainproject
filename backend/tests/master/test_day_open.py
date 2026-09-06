@@ -121,7 +121,7 @@ def test_등록이_0건이면_커넥션을_열지_않는다() -> None:
 
     out = day_open.open_day(AS_OF, connect=_connect_spy(가짜커넥션(), calls))
 
-    assert out.status == "NOT_OPENED"
+    assert out.status == "NOT_OPENED", "미등록은 '못 했다' 다"
     assert out.missing == ["finance", "logistics"]
     assert "finance" in out.reason and "logistics" in out.reason
     assert out.parts == []
@@ -132,13 +132,18 @@ def test_등록이_0건이면_커넥션을_열지_않는다() -> None:
 
 
 def test_이미_열려_있으면_아무것도_안_하고_빈_목록을_낸다() -> None:
-    """★ 같은 날을 두 번 열면 두 번째는 할 일이 없다. **빈 목록이 그 사실이다.**"""
+    """★ 같은 날을 두 번 열면 두 번째는 할 일이 없다.
+
+    🔴 **`ALREADY_OPENED` 다. `NOT_OPENED` 가 아니다** (계약 §어휘 · 2026-09-06 정정).
+       앞은 *"할 일이 없었다"* 이고 뒤는 *"못 했다"* 다 — 접으면 **매일 도는 정상
+       상태가 실패로 보인다.**
+    """
     finance, logistics = _both({AS_OF})
     conn = 가짜커넥션()
 
     out = day_open.open_day(AS_OF, connect=lambda: conn)
 
-    assert out.status == "NOT_OPENED"
+    assert out.status == "ALREADY_OPENED"
     assert "이미 열려" in out.reason
     assert [part.opened for part in out.parts] == [[], []]
     assert finance.opened == [] and logistics.opened == []
@@ -153,7 +158,7 @@ def test_두_번_열어도_두_번째는_아무것도_안_만든다() -> None:
     둘째 = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션())
 
     assert 첫째.status == "OPENED"
-    assert 둘째.status == "NOT_OPENED"
+    assert 둘째.status == "ALREADY_OPENED", "멱등 no-op 은 실패가 아니다"
     assert [part.opened for part in 둘째.parts] == [[], []]
     assert len(finance.opened) == 2, "두 번째 호출이 행을 더 만들었다"
 
@@ -251,6 +256,10 @@ def test_하루넘김_모듈이_실행일_달력을_임포트하지_않는다() 
 def test_31일을_넘으면_막고_행을_안_만든다() -> None:
     """⚠️ **실수로 먼 날을 열면 수백 행이 조용히 생긴다.**
 
+    🔴 **`REJECTED_GAP` 이다. `NOT_OPENED` 가 아니다** (계약 §5 · 2026-09-06 정정).
+       이것만 *"관리자 강제 개장"* 이라는 **다른 다음 걸음**을 갖는다 — 접으면 화면이
+       재시도를 권하고, 재시도로는 안 풀린다.
+
     마지막 열린 날이 32일 전이면 뒤로 31일까지 걸어도 못 찾는다 — 막는다.
     """
     먼날 = AS_OF - timedelta(days=32)
@@ -259,8 +268,8 @@ def test_31일을_넘으면_막고_행을_안_만든다() -> None:
 
     out = day_open.open_day(AS_OF, connect=lambda: conn)
 
-    assert out.status == "NOT_OPENED"
-    assert [part.status for part in out.parts] == ["BLOCKED", "BLOCKED"]
+    assert out.status == "REJECTED_GAP"
+    assert [part.status for part in out.parts] == ["PART_FAILED", "PART_FAILED"]
     assert "31" in out.parts[0].reason, "상한을 사유에 안 적으면 왜 막혔는지 모른다"
     assert finance.opened == [] and logistics.opened == [], "막혔는데 행을 만들었다"
     assert conn.commits == 1 and conn.rollbacks == 0, "막힘은 실패가 아니다"
@@ -328,9 +337,13 @@ def test_한쪽이_막혀도_다른_쪽을_되돌리지_않는다() -> None:
 
     out = day_open.open_day(AS_OF, connect=lambda: conn)
 
-    assert out.status == "OPENED", "물류가 열었는데 전체가 안 열렸다고 나갔다"
+    # 🔴 **전체는 REJECTED_GAP 이다** (계약 §5 · 2026-09-06 정정).
+    #    재무가 상한을 넘겨 막혔으면 그 날은 온전히 열리지 않았고, 다음 걸음이
+    #    "관리자 강제 개장" 이다. 물류가 열었다는 이유로 OPENED 를 내면 화면이
+    #    **그 날을 정상으로 보고 지나간다.**
+    assert out.status == "REJECTED_GAP"
     상태 = {part.part: part.status for part in out.parts}
-    assert 상태 == {"finance": "BLOCKED", "logistics": "OPENED"}
+    assert 상태 == {"finance": "PART_FAILED", "logistics": "PART_OPENED"}
     assert [as_of for as_of, _ in logistics.opened] == [AS_OF]
     assert conn.commits == 1 and conn.rollbacks == 0
 
@@ -384,7 +397,7 @@ def test_적재가_터지면_전부_되돌린다() -> None:
 
     out = day_open.open_day(AS_OF, connect=lambda: conn)
 
-    assert out.status == "FAILED"
+    assert out.status == "NOT_OPENED"
     assert "전날 행이 없다" in out.reason, "사유를 안 남기면 무엇이 터졌는지 모른다"
     assert out.parts == [], "되돌렸는데 만든 날 목록이 나가면 안 된다"
     assert conn.commits == 0
@@ -402,7 +415,7 @@ def test_적재_실패가_예외로_올라가지_않는다() -> None:
 
     out = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션())
 
-    assert out.status == "FAILED"
+    assert out.status == "NOT_OPENED"
 
 
 def test_with_conn_을_쓰지_않는다() -> None:
