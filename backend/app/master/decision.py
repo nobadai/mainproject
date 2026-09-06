@@ -25,9 +25,23 @@ from pydantic import BaseModel, Field, model_validator
 from app.master.commitment import ApprovedCommitment
 from app.master.transition import TransitionOut
 
-Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE"]
+Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE", "CANCEL"]
+
+#: 🔴 **`CANCEL` 은 `REJECT_ALL` 과 다르다** (2026-09-05 전원 합의).
+#:
+#:   ```text
+#:   REJECT_ALL   "이 안을 안 쓴다"      — 승인 **전** 판단. 장부를 안 건드린다
+#:   CANCEL       "승인했던 것을 물린다"  — 승인 **후** 사실. 장부 다섯을 되돌린다
+#:   ```
+#:
+#: ★ 둘을 한 어휘로 적으면 *"거절해서 장부가 없는 것"* 과 *"취소해서 장부가 물린
+#:   것"* 이 같아진다. `#290` 이 `REJECT_ALL` 로 우회되는 것도 그 둘이 갈려 있지
+#:   않아서였다.
 
 #: 승인은 통과안이 있는 날에만 성립한다.
+#:
+#: ★ **취소도 같다.** 물릴 승인이 있으려면 그날 통과안이 있었어야 한다 — `E2_HELD` 인
+#:   날에 "취소" 를 받으면 물릴 것이 없는데 이력에는 취소가 남는다.
 _APPROVE_END_CODES: frozenset[str] = frozenset({"E1_APPROVED"})
 
 #: 사람이 결정할 것이 있는 종료 코드.
@@ -230,6 +244,14 @@ def check_decidable(end_code: str, decision: Decision) -> None:
     if decision == "APPROVE" and end_code not in _APPROVE_END_CODES:
         raise DecisionRejected(
             f"{end_code} 에는 승인할 안이 없다 (통과안은 E1_APPROVED 에만 있다).",
+            conflict=True,
+        )
+    if decision == "CANCEL" and end_code not in _APPROVE_END_CODES:
+        # ★ **물릴 승인이 있으려면 그날 통과안이 있었어야 한다.** 없는 승인을 취소하면
+        #   이력에는 취소가 남고 장부에는 아무 일도 안 일어난다 — 그 둘이 갈리면
+        #   나중에 *"왜 취소했는데 그대로지"* 를 아무도 못 푼다.
+        raise DecisionRejected(
+            f"{end_code} 에는 물릴 승인이 없다 (승인은 E1_APPROVED 에만 선다).",
             conflict=True,
         )
 

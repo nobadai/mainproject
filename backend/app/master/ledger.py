@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -51,6 +51,7 @@ __all__ = [
     "PurchaseLedgerNotWritable",
     "PurchaseWrite",
     "build_purchase_rows",
+    "cancel_purchases",
     "persist_purchases",
     "sim_run_id_for",
 ]
@@ -288,6 +289,49 @@ def persist_purchases(conn: Any, rows: Sequence[PurchaseWrite]) -> dict[str, int
             )
             written["purchase_items"] += cursor.rowcount
     return written
+
+
+def cancel_purchases(conn: Any, purchase_ids: Iterable[str]) -> int:
+    """이 승인이 만든 매입 header 를 `CANCELLED` 로 **적는다.**
+
+    🔴 **DELETE 하지 않는다.** 승인이 있었다는 사실이 사라지면 *"승인했고 취소했다"*
+       를 아무도 말할 수 없다 — `master_decisions` 가 append-only 인 것과 같은 규율이다.
+       `purchases.settlement_status` 에 `CANCELLED` 칸이 이미 있다 (실 DB CHECK 실측).
+
+    🔴 **commit 하지 않는다.** 커밋은 재무·물류 취소와 함께 마스터가 한 번 한다.
+       여기서 커밋하면 매입만 먼저 물리고, 뒤이어 재무가 터졌을 때 **채무는 살아 있는데
+       매입은 취소된** 장부가 남는다.
+
+    ★ **이미 `CANCELLED` 인 행은 안 센다.** `WHERE settlement_status <> 'CANCELLED'`
+      가 재시도를 멱등으로 만든다 — 두 번째 취소는 **0** 을 돌려준다. 재무 `#302` 의
+      *"retry no-op"* 과 같은 모양이고, 그래야 마스터가 *"이번에 실제로 물린 것"* 을
+      말할 수 있다.
+
+    ⚠️ **`SETTLED` 도 물린다.** 지급 여부를 여기서 판정하지 않는다 — 그 판정은
+      `payables` 를 든 재무 몫이고(`OPEN + paid=0` 만 취소), 재무가 거절하면 이
+      write 도 **같은 트랜잭션에서 롤백된다.** 두 곳이 각자 판정하면 어느 날 갈린다.
+
+    :returns: 이번 호출로 `CANCELLED` 가 된 header 수.
+    """
+    ids = [pid for pid in purchase_ids if pid]
+    if not ids:
+        # ★ 회차 일정이 없던 약정도 승인은 살아 있다 — 물릴 원장이 **없다**는 것은
+        #   정상 상태이지 예외가 아니다 (`build_purchase_rows` 와 같은 태도).
+        return 0
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {}.purchases
+                   SET settlement_status = 'CANCELLED'
+                 WHERE purchase_id = ANY(%s)
+                   AND settlement_status <> 'CANCELLED'
+                """
+            ).format(schema),
+            (ids,),
+        )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
 
 def _item_id_of(cursor: Any, schema: sql.Identifier, item_name: str) -> str:
