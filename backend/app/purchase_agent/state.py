@@ -91,6 +91,34 @@ class PurchaseAgentState(TypedDict):
     # verdicts · verdict_reasons. 마스터가 1회차 산출물에서만 만든다.
     feedback_context: NotRequired[dict | None]
 
+    # ── 승인 이력 (어댑터 경로에만 실린다) ──────────────────────────────────
+    #
+    # ``approved_commitments``: **어제까지** 승인된 약정 (`#310` → 마스터 `#312`).
+    #   ``constraints`` 밖 최상위로 온다 — 부서가 낸 값이 아니라 마스터가 이력에서
+    #   재조립한 값이라 ``execution_calendar`` 와 같은 자리다.
+    #
+    # 🔴 **``None`` 과 ``[]`` 가 다른 사실이다.** 마스터가 *"없으면 칸을 안 만든다 —
+    #   빈 배열은 '어제 승인이 없었다' 와 '마스터가 안 보낸다' 를 구별할 수 없다"* 로
+    #   보낸다 (`flow.py._commitments_block`). 받는 쪽에서 ``or []`` 로 접으면
+    #   **보내는 쪽이 지킨 구분이 여기서 사라진다** (규칙 3).
+    #
+    # ⚠️ **지금 이 값을 읽는 노드가 없다 (2026-09-06).**
+    #   마스터가 `#312` 로 실어 주기 시작했고, 받는 자리만 먼저 만든다.
+    #
+    #   ★ 쓸 자리는 정해져 있다 — ``_warehouse_rationale`` 이 *"어제 승인분 N kg 이
+    #     언제 온다"* 를 말할 때다 (`#332` 후속). 그때까지 이 필드는 실려 오기만 하고
+    #     판정에 안 쓰인다.
+    #
+    #   🔴 ``adjustments`` 가 그 상태로 오래 있었고, 그 주석이 규율을 적어 뒀다 —
+    #     *"반영과 독해는 다른 말이다"*. 여기도 같다.
+    #
+    #   ⚠️ **그래서 이 문장이 틀리는 순간을 검사가 잡는다.**
+    #     ``test_approved_commitments.py`` 의 ``test_아직_어느_노드도_안_읽는다`` 가
+    #     노드 원문에서 이 키를 찾아, 읽기 시작하면 운다 — 그때 이 주석과 검사를
+    #     같이 고친다. (``adjustments`` 는 *"어느 노드도 아직 안 읽는다"* 를 적은
+    #     바로 그 판에서 이미 두 곳이 읽고 있었다 · 2026-09-03 정정.)
+    approved_commitments: NotRequired[list[dict] | None]
+
     # ── 중간 산출 ───────────────────────────────────────────────────────────
     situation: Literal["stable", "uncertain"]
     context_docs: list[dict]  # 주입된 문서 (published_at <= as_of)
