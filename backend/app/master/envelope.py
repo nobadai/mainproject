@@ -107,9 +107,10 @@ Mode = Literal[
   🔴 두 mode 를 한 이름으로 합치지 않는다. 물류가 두 사이클에 같은 이름으로 답하면
   회신을 받은 마스터가 **어느 사이클의 경계인지** 를 payload 로 되짚어야 한다.
 
-🔴 여기 있는 것은 **어휘뿐이다.** 판매 Flow·어댑터·라우팅은 아직 없다 —
-  영업 제안이 재무까지 오는 길(`FINANCIAL_VALIDATION` capability 라우팅)도
-  capability 어휘 자체가 마스터에 없어 성립하지 않는다. 그것은 별도 작업이다."""
+★ **capability 라우팅이 이 아래에 붙었다** (`Capability` · `CAPABILITY_ROUTING`).
+  이 docstring 은 *"판매 Flow·어댑터·라우팅은 아직 없다"* 라고 적어 두었었는데,
+  그중 라우팅 어휘와 Flow 골격(`sales_flow.py`)이 들어왔다. **어댑터 배선은
+  여전히 없다** — 판매·물류 포트를 등록하는 일은 별도 작업이다."""
 
 Trigger = Literal["ML_COMPLETE", "USER_REQUEST"]
 
@@ -207,6 +208,79 @@ def agent_dept(agent: AgentName) -> Dept | None:
 
 def agent_allowed_modes(agent: AgentName) -> frozenset[Mode]:
     return _AGENT_MODES[agent]
+
+
+# ---------------------------------------------------------------------------
+# 1-2. Capability — 판매가 요구하고 마스터가 라우팅한다 (판매 2026-09-06 통보)
+# ---------------------------------------------------------------------------
+
+Capability = Literal[
+    "SELLABLE_SUPPLY_CONTEXT",
+    "DELIVERY_FEASIBILITY_CONTEXT",
+    "FINANCIAL_VALIDATION",
+    "ADDITIONAL_SUPPLY_CONTEXT",
+]
+"""판매 후보가 **무엇으로 검증받아야 하는지** 스스로 말하는 어휘.
+
+★ **매입과 방향이 반대다.** 매입 사이클은 마스터가 조언자(`flow.ADVISORS`)를 정해
+  부른다. 판매는 후보마다 `required_validations[]` 로 capability 를 요구하고,
+  마스터가 그것을 `(agent, mode)` 로 바꾼다 — **무엇이 필요한지는 제안자가 알고,
+  누가 그것을 하는지는 조정자가 안다.**
+
+🔴 **마스터는 `app.sales.schemas` 를 import 하지 않는다.** 같은 어휘가 그쪽
+  `SalesCapability` 에 이미 있지만, 조정자가 부서 스키마를 런타임에 읽으면 부서가
+  자기 파일을 고치는 날 마스터가 같이 깨진다 — 재무가 `ApprovedCommitmentFacts` 를
+  Protocol 로 받은 것과 같은 이유다.
+
+  **두 벌이 되어 갈리는 것은 테스트가 막는다.** `tests/master/test_sales_flow.py`
+  가 양쪽을 import 해 `set(get_args(...))` 를 대조한다 — 테스트에서는 남의 모듈을
+  읽어도 되고, 갈린 날 빨간불이 뜬다. 런타임 의존 없이 어휘만 잠그는 자리다.
+
+★ **제자리는 `app/contracts/core.py` 승격이다.** 그건 판매 파일을 고쳐야 해서 판매
+  owner 확인이 필요하고, 그때까지 여기 둔다 (설계 2026-09-06 정정 절)."""
+
+CAPABILITIES: frozenset[str] = frozenset(get_args(Capability))
+"""집합의 주인은 위 `Literal` 하나다 — `TRIGGERS` 와 같은 이유로 `get_args` 로 읽는다."""
+
+CAPABILITY_ROUTING: dict[Capability, tuple[AgentName, Mode] | None] = {
+    "FINANCIAL_VALIDATION": ("finance", "SALES_VALIDATION"),
+    # 🔴 **기존 `/logistics/sales` 계산엔진을 그대로 부르지 않는다.** 판매 v1.7 §10 은
+    #   *"existing Logistics /sales Adapter"* 로 적었지만, 그렇게 부르면 그 호출에는
+    #   **봉투도 `call_seq` 도 `plan.signature` 도 CallBudget 도 Reply 보존도 없다** —
+    #   같은 문서 §1 이 마스터 소유라고 적은 바로 그것들이다.
+    #
+    #   엔진은 재사용하고 **호출 경로만 봉투로 감싼다.** 어댑터가 안에서 기존 엔진을
+    #   부르는 것은 자유다 — 바깥이 봉투여야 한다.
+    "SELLABLE_SUPPLY_CONTEXT": ("inventory", "PRE_SALES"),
+    "DELIVERY_FEASIBILITY_CONTEXT": ("inventory", "PRE_SALES"),
+    # 🔴 **`None` 은 "아직 값을 안 정했다" 가 아니라 "부를 대상이 없다" 다.**
+    #
+    #   매입은 호출 단위(batch / ONE_BY_ONE)를 아직 회신하지 않았고, 그래서 매입에
+    #   판매용 mode 를 만들지 않았다. 만들면 마스터가 매입 대신 호출 단위를 정하는
+    #   것이 된다.
+    #
+    #   여기를 **비워 두면 `KeyError` 로 죽고**(마스터 배선 실수처럼 보인다),
+    #   표에서 **빼면 조용히 건너뛴다**(사람이 *"검증됐다"* 로 읽는다). 둘 다 틀렸다.
+    #   `None` 으로 적어 두면 `SalesFlow` 가 `unroutable_capabilities` 에 담아
+    #   결과에 싣고, 화면에서 **"안 왔다"** 로 보인다 (§1.2-10 과 같은 태도).
+    #
+    #   매입이 호출 단위를 회신하면 여기에 `(agent, mode)` 를 채운다.
+    "ADDITIONAL_SUPPLY_CONTEXT": None,
+}
+"""capability → 부를 대상. **`None` 은 못 부른다는 사실 자체다.**"""
+
+
+def route_capability(capability: str) -> tuple[AgentName, Mode] | None:
+    """capability 를 호출 대상으로 바꾼다. **못 부르면 `None`.**
+
+    ★ **표에 없는 값도 `None` 이다.** 어휘가 갈려 마스터가 모르는 capability 가 오는
+      날은 부를 대상이 없는 날과 결과가 같다 — 둘 다 *"이 후보를 통과로 칠 수 없다"* 로
+      떨어져야 한다. 어휘가 갈렸다는 사실 자체는 `Capability` 대조 테스트가 잡는다.
+
+    🔴 **`KeyError` 를 내지 않는다.** 부서가 보낸 값 하나로 사이클을 죽이지 않는다는
+      봉투 규칙(`check_vocabulary` 와 같은 자리)이 라우팅에도 그대로 적용된다.
+    """
+    return CAPABILITY_ROUTING.get(capability)
 
 
 # ---------------------------------------------------------------------------
