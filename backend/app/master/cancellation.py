@@ -84,6 +84,7 @@ __all__ = [
     "cancellation_missing",
     "register_cancellation",
     "registered_cancellations",
+    "financing_mode_of",
     "undo_approval",
 ]
 
@@ -99,10 +100,26 @@ class ApprovalCancellation(Protocol):
     ★ **`conn` 은 받기만 한다.** commit·rollback·close 를 하지 않는다 — 트랜잭션
       경계는 마스터가 쥔다.
 
+    🔴 **`financing_mode` 를 마스터가 싣는다** (재무 요청 2026-09-06).
+
+      `finance_states` 정본이 `(sim_run_id, financing_mode, state_date)` 인데 취소
+      조회는 `sim_run_id + state_date` 만 보고 있었고, **같은 날짜에 mode 가 둘이면
+      ambiguous 로 막힙니다.** 실측으로 `2025-12-31` 하루가 이미 그렇다.
+
+      ★ **재무가 고르지 않겠다고 했고 그것이 맞다.** 고르는 순간 그 선택이 조용히
+        굳고, 나중에 누구도 왜 그 축이었는지 못 찾는다 — `purchase_ids` 를 재무가
+        지어내면 안 되는 것과 같은 자리다.
+
+      ⚠️ **물류도 같은 인자를 받는다. 안 쓰더라도.** 두 파트가 같은 모양이어야
+        호출부가 하나로 서고, `purchase_ids` 를 반쪽으로 뒀다가 물류 Arrival 이
+        막힌 자리가 그 교훈이다.
+
     :param commitment: 무엇을 승인했었나. `as_of` 는 **승인일**이다.
     :param cancelled_on: **취소 사건일.** `commitment.as_of` 와 다를 수 있다.
     :param target_state_date: `cancelled_on + 1일`. 부서가 다시 계산하지 않는다.
     :param purchase_ids: 회차(seq) → purchase_id. 승인 때와 **같은 매핑**이다.
+    :param financing_mode: 이 실행의 재무 축. **마스터가 실어 준다** (재무 요청
+        2026-09-06) — 부서가 임의로 고르거나 최신 상태를 추론하지 않는다.
     """
 
     def cancel(
@@ -113,6 +130,7 @@ class ApprovalCancellation(Protocol):
         cancelled_on: date,
         target_state_date: date,
         purchase_ids: Mapping[int, str],
+        financing_mode: str,
     ) -> None: ...
 
 
@@ -186,6 +204,31 @@ def purchase_ids_of(commitment: ApprovedCommitment) -> dict[int, str]:
     return {leg.seq: purchase_id_for(commitment, leg.seq) for leg in commitment.arrival_schedule}
 
 
+def financing_mode_of(commitment: ApprovedCommitment) -> str:
+    """이 승인이 속한 실행의 재무 축.
+
+    ★ **마스터가 이미 읽고 나르는 값이다.** `sim_runs.financing_mode` 를
+      `ledger_repository` 가 읽고 `service.py` 가 응답에 싣는다 — 지어내는 값이
+      아니라서 재무가 요청한 *"호출자가 축을 명시"* 가 성립한다.
+
+    ⚠️ `sim_run_id_for` 와 같은 자리에서 온다. 그 함수가 *"마스터가 이미 소유한
+      하나뿐인 포인터"* 를 쓰므로 여기도 같은 실행을 가리킨다.
+
+    :raises LookupError: 그 실행을 못 찾을 때. **지어내지 않는다.**
+    """
+    from app.master.ledger import sim_run_id_for
+    from app.master.ledger_repository import get_burn_in
+
+    run = get_burn_in(sim_run_id_for(commitment))
+    mode = run.get("financing_mode")
+    if not isinstance(mode, str) or not mode.strip():
+        raise LookupError(
+            f"sim_runs.financing_mode 를 읽을 수 없다 ({sim_run_id_for(commitment)}) —"
+            " 축을 지어내지 않는다"
+        )
+    return mode
+
+
 def undo_approval(
     commitment: ApprovedCommitment,
     *,
@@ -222,6 +265,12 @@ def undo_approval(
         )
 
     adapters = registered_cancellations()
+    try:
+        # ★ **커넥션을 열기 전에 읽는다.** 축을 못 읽으면 트랜잭션을 시작하지도 않는다 —
+        #   `apply_approval` 이 build 를 커넥션 밖에서 부르는 것과 같은 규율이다.
+        financing_mode = financing_mode_of(commitment)
+    except Exception as exc:  # noqa: BLE001 - 축을 못 읽은 것도 값으로 돌려준다.
+        return CancellationOut(status="FAILED", reason=f"재무 축을 못 읽었다: {exc}")
     # 🔴 **취소일 + 1일이다.** 승인과 **같은 규칙**이고, 부서가 다시 계산하지 않게
     #    마스터가 실어 준다 (재무 요청 2026-09-06).
     target_state_date = cancelled_on + timedelta(days=1)
@@ -240,6 +289,7 @@ def undo_approval(
                 cancelled_on=cancelled_on,
                 target_state_date=target_state_date,
                 purchase_ids=purchase_ids,
+                financing_mode=financing_mode,
             )
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - 취소 실패가 적재된 결정을 지우면 안 된다.

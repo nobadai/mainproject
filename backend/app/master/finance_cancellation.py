@@ -72,7 +72,21 @@ class FinanceCancellationAdapter:
         cancelled_on: date,
         target_state_date: date,
         purchase_ids: Mapping[int, str],
+        financing_mode: str,
     ) -> None:
+        """🟡 **`financing_mode` 를 받되 아직 안 넘긴다.**
+
+        재무가 *"Master 가 전달한 축으로 Finance cancellation 도 exact lookup 하겠다"*
+        고 확정했지만(2026-09-06), `cancel_finance_payables` 의 시그니처가 아직 그
+        인자를 안 받는다. **재무 파일이라 마스터가 안 고친다.**
+
+        ★ **받는 자리를 먼저 뚫어 둔다.** 재무가 여는 날 이 줄 하나만 켜면 되고, 그때까지
+          마스터 호출부는 안 바뀐다 — 물류가 `purchase_ids=None` 을 기본값으로 열어
+          두었던 것과 같은 순서다 (`#311` → `#313`).
+
+        ⚠️ **안 쓰는 인자를 조용히 버리지 않는다.** 이 docstring 이 그 사실이고,
+          검사가 *"받기는 받는다"* 를 잠근다.
+        """
         ids = [purchase_ids[seq] for seq in sorted(purchase_ids)]
         if not ids:
             # ★ 회차 일정이 없던 약정도 승인은 살아 있다 — 물릴 채무가 **없다**는 것은
@@ -85,4 +99,5 @@ class FinanceCancellationAdapter:
             # 🔴 **취소 사건일이다.** commitment.as_of(승인일)가 아니다.
             as_of=cancelled_on,
             target_state_date=target_state_date,
+            # 🟡 재무가 받는 쪽을 열면 여기에 financing_mode=financing_mode 한 줄
         )
