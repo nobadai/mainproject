@@ -124,6 +124,11 @@ def _inventory_rows() -> list[dict[str, object]]:
     ]
 
 
+#: 🔴 Snapshot 조립은 예약·할당을 **두 번** 조회한다 (할당 축 · 미할당 예약 축).
+#: 가짜 `fetch_all` 순서에서 이 둘을 빠뜨리면 StopIteration 이 난다.
+_COMMITMENT_ROWS: list[list[dict[str, object]]] = [[], []]
+
+
 def _storage_policy_rows() -> list[dict[str, object]]:
     """items JOIN item_storage_policies 결과.
 
@@ -360,6 +365,7 @@ def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():
                 _policy_rows(),
                 _inventory_rows(),
                 _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
             ],
         ) as fetch,
     ):
@@ -406,6 +412,7 @@ def test_lot_grade_in_purchase_vocabulary_passes_through():
                 _policy_rows(),
                 _inventory_rows(),
                 _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
             ],
         ),
     ):
@@ -428,7 +435,13 @@ def test_lot_grade_without_normalization_evidence_is_none():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                rows,
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -452,7 +465,13 @@ def test_medium_grade_lot_applies_medium_grade_factor():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                rows,
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -471,7 +490,13 @@ def test_non_active_lot_occupies_capacity_when_physically_present():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                rows,
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -501,7 +526,7 @@ def test_item_storage_policy_is_separate_from_lot_freshness():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows, storage_rows],
+            side_effect=[[_fixture_row()], _policy_rows(), rows, storage_rows, *_COMMITMENT_ROWS],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -523,7 +548,13 @@ def test_item_storage_policy_covers_items_without_lots():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), rows, _storage_policy_rows()],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                rows,
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
         ) as fetch,
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
@@ -549,7 +580,13 @@ def test_item_storage_policy_preserves_missing_values():
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch(
             "app.logistics.repository.fetch_all",
-            side_effect=[[_fixture_row()], _policy_rows(), _inventory_rows(), storage_rows],
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                _inventory_rows(),
+                storage_rows,
+                *_COMMITMENT_ROWS,
+            ],
         ),
     ):
         snapshot = get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))

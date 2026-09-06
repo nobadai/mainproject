@@ -380,10 +380,26 @@ def build_inventory_by_item(
 ) -> list[InventoryByItem] | None:
     """가용재고 정의를 적용한 품목별 자유재고를 집계한다.
 
-    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0), 확정 출고 예약분.
-    예상 판매·계획 출고는 차감하지 않는다. 확정 출고 행에 item이 없으면 임의 배분하지
-    않고 None을 돌려준다 — 호출부는 필드를 생략해야 하며 `[]`(0건 확인)로 대체하면
-    안 된다.
+    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0), 확정 출고 예약분,
+    **출고가 이미 잡아 둔 몫(예약·할당)**. 예상 판매·계획 출고는 차감하지 않는다.
+    확정 출고 행에 item이 없으면 임의 배분하지 않고 None을 돌려준다 — 호출부는 필드를
+    생략해야 하며 `[]`(0건 확인)로 대체하면 안 된다.
+
+    🔴 **`outbound.item_free_stock_qty` 와 같은 답을 내야 한다.** 매입에 나가는 이 값이
+       예약이 실제로 잡을 수 있는 양보다 크면, 매입은 팔 수 있다고 보고 판매는 못 잡는
+       상태가 된다. 그래서 차감 규칙을 글자 그대로 맞춘다.
+
+    ```text
+    Lot 기여   = available_qty_kg − 그 Lot 의 살아있는 할당 (ALLOCATED · PICKED)
+    품목 차감  = 아직 Lot 을 안 고른 예약의 미할당 잔여
+    ```
+
+      ★ 제외된 Lot(비-ACTIVE·신선도 만료)의 할당은 **자동으로 함께 빠진다** — 그 Lot 이
+        애초에 합계에 안 들어가므로 따로 빼면 과다 차감이 된다.
+
+    ⚠️ `outbound_commitments` 가 `None`(미조회)이면 `None` 을 돌려준다.
+       `confirmed_outbound_schedule` 이 `None` 일 때와 같은 규율이다 — 못 읽은 축을
+       0 으로 놓으면 이미 팔린 재고를 다시 팔 수 있다고 답하게 된다.
 
     ★ **품목을 `ITEMS` 로 거르지 않는다.** ML Forecast 가 없거나 계약 품목에서 빠진
       품목이라도 창고에 실물이 있으면 그 사실은 나간다 — 계약 `app/contracts/core.py`
@@ -395,6 +411,20 @@ def build_inventory_by_item(
         snapshot
     ):
         return None
+    if snapshot.outbound_commitments is None:
+        return None
+
+    allocated_by_lot: dict[str, Decimal] = {}
+    unallocated_by_item: dict[str, Decimal] = {}
+    for commitment in snapshot.outbound_commitments:
+        if commitment.lot_id is None:
+            unallocated_by_item[commitment.item] = (
+                unallocated_by_item.get(commitment.item, Decimal(0)) + commitment.quantity_kg
+            )
+        else:
+            allocated_by_lot[commitment.lot_id] = (
+                allocated_by_lot.get(commitment.lot_id, Decimal(0)) + commitment.quantity_kg
+            )
 
     totals: dict[str, Decimal] = {}
     for lot in snapshot.on_hand_by_lot:
@@ -404,7 +434,12 @@ def build_inventory_by_item(
         # 가용에서 숨기지 않는다 (0 != null).
         if lot.remaining_freshness_days is not None and lot.remaining_freshness_days <= 0:
             continue
-        totals[lot.item] = totals.get(lot.item, Decimal(0)) + lot.available_qty_kg
+        # 이 Lot 에 이미 붙은 할당분은 남에게 팔 수 없다. 음수로 내려가지 않게 0에서 멈춘다.
+        기여 = max(Decimal(0), lot.available_qty_kg - allocated_by_lot.get(lot.lot_id, Decimal(0)))
+        totals[lot.item] = totals.get(lot.item, Decimal(0)) + 기여
+    for item, reserved in unallocated_by_item.items():
+        if item in totals:
+            totals[item] = max(Decimal(0), totals[item] - reserved)
     for outbound in snapshot.confirmed_outbound_schedule:
         assert outbound.item is not None
         if outbound.item in totals:

@@ -1534,14 +1534,19 @@ CREATE TABLE haetdeul.inventory_lots (
     sim_run_id text NOT NULL,
     purchase_item_id text NOT NULL,
     item_id text NOT NULL,
-    grade text NOT NULL,
+    -- 🔴 grade · derivation_status 는 NOT NULL 이 아니다 (2026-09-05 · 물류 변경).
+    --    실제로 도착·검수를 거친 Lot 은 권위 있는 등급이 없을 수 있고
+    --    (`purchase_items.grade` 가 NULL 이며 `상품 → 상` 매핑은 금지다),
+    --    Burn-in 파생도 아니다. 없는 것을 NULL 로 적는다 — 대체값을 지어내지 않는다.
+    --    같은 변경의 이관 판은 `database/logistics_inventory_lots_nullable.sql` 이다.
+    grade text,
     received_at date NOT NULL,
     original_qty_kg numeric(18,6) NOT NULL,
     remaining_qty_kg numeric(18,6) NOT NULL,
     unit_cost_krw_per_kg numeric(18,6) NOT NULL,
     storage_zone text NOT NULL,
     status text NOT NULL,
-    derivation_status text NOT NULL,
+    derivation_status text,
     CONSTRAINT inventory_lots_check CHECK ((remaining_qty_kg <= original_qty_kg)),
     CONSTRAINT inventory_lots_original_qty_kg_check CHECK ((original_qty_kg >= (0)::numeric)),
     CONSTRAINT inventory_lots_remaining_qty_kg_check CHECK ((remaining_qty_kg >= (0)::numeric)),
@@ -1588,7 +1593,7 @@ COMMENT ON COLUMN haetdeul.inventory_lots.item_id IS '품목 고유 ID.';
 -- Name: COLUMN inventory_lots.grade; Type: COMMENT; Schema: haetdeul; Owner: -
 --
 
-COMMENT ON COLUMN haetdeul.inventory_lots.grade IS '품질등급.';
+COMMENT ON COLUMN haetdeul.inventory_lots.grade IS '권위 있는 품질등급. 미확정이면 NULL.';
 
 
 --
@@ -1637,7 +1642,7 @@ COMMENT ON COLUMN haetdeul.inventory_lots.status IS '상태값.';
 -- Name: COLUMN inventory_lots.derivation_status; Type: COMMENT; Schema: haetdeul; Owner: -
 --
 
-COMMENT ON COLUMN haetdeul.inventory_lots.derivation_status IS 'Burn-in Lot이 어떤 파생규칙으로 생성됐는지 나타내는 상태.';
+COMMENT ON COLUMN haetdeul.inventory_lots.derivation_status IS 'Burn-in Lot이 어떤 파생규칙으로 생성됐는지 나타내는 상태. Burn-in이 아닌 Lot은 NULL.';
 
 
 --
