@@ -90,8 +90,20 @@ register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_S
 #    방법**을 담고 이쪽은 **하루가 넘어가는 방법**을 담는다. 한 사전에 섞으면 전이가
 #    없는 것과 하루 넘김이 없는 것이 같은 문장으로 나가고, 둘은 다른 사실이다.
 #
-# ★ **생성 인자가 없다.** 위 `LogisticsTransitionAdapter` 와 다른 자리다. 하루 넘김은
-#   `sim_run_id` 를 **정하지 않고 전날 행에서 물려받는다** — 그래서 마스터가 줄 값이 없다.
+# 🔴 **`sim_run_id` 를 여기서도 준다 (`#324`).** 종전에는 *"하루 넘김은 그 값을 정하지
+#    않고 전날 행에서 물려받으니 마스터가 줄 값이 없다"* 고 적혀 있었다. 그 말은
+#    **새 행에 쓰는 값**에 대해서는 지금도 맞다 — carry-forward 는 `base.sim_run_id` 를
+#    그대로 옮기고 여기서 준 값을 칸에 적지 않는다.
+#
+#    ⚠️ **틀렸던 것은 "어느 전날 행을 물려받을지" 였다.** `uq_log_runtime_fixture` 가
+#       `(sim_run_id, as_of, usage_scope)` 라 다른 실행의 행이 같은 날에 공존할 수
+#       있고, 안 좁히면 하루 넘김이 **남의 실행 행을 보고 "열렸다"** 고 답한다. 그건
+#       물려받는 값이 아니라 **읽기 전에 알고 있어야 하는 실행 정체성**이라 위 두
+#       어댑터와 같은 자리에서 받는다.
+#
+# ★ **새 값을 만들지 않는다.** `register_transition` · `register_cancellation` 이 이미
+#   쓰는 그 상수 하나를 그대로 넘긴다 — 셋이 다른 실행에 앉으면 승인이 갱신하는 행과
+#   하루 넘김이 세우는 행이 갈린다.
 #
 # 🔴 **재무를 먼저 켤 수 없었던 이유가 DB 였다 (2026-09-05).** `#285` 가 일별 상태를
 #    `ON CONFLICT (sim_run_id, financing_mode, state_date)` 로 누적하는데, 실 DB 에 그
@@ -99,7 +111,7 @@ register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_S
 #    *"there is no unique or exclusion constraint matching the ON CONFLICT
 #    specification"*). `database/finance/finance_state_daily_unique.sql` 을 적용한 뒤
 #    켰다 — **마이그레이션과 이 두 줄은 짝이다.**
-register_day_opening("logistics", LogisticsDayOpening())
+register_day_opening("logistics", LogisticsDayOpening(sim_run_id=BURN_IN_SIM_RUN_ID))
 register_day_opening("finance", FinanceDayOpening())
 
 

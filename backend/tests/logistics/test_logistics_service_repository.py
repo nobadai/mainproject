@@ -280,6 +280,113 @@ def test_runtime_fixture_separates_absence_from_duplication(rows, expected_error
         get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
 
 
+# ── runtime fixture 조회의 실행 축 ──────────────────────────────────────
+#
+# 🔴 **여기서는 고정 반환값을 쓰지 않는다.** `patch(..., return_value=rows)` 는 질의를
+#    무엇으로 보내든 같은 행을 돌려주므로 **WHERE 절을 아예 재지 못한다.** 재려는 것이
+#    정확히 *"조회가 다른 실행의 행을 집어 오는가"* 라 가짜 표를 두고 조건을 흉내 낸다.
+
+_OTHER_RUN = "SIM-WHATIF-20260906"
+
+
+def _가짜표(*rows: dict[str, object]):
+    """`fetch_all` 을 대신한다 — 보낸 조건대로 걸러 준다.
+
+    ★ `repository` 가 만드는 파라미터 순서(`usage_scope, as_of[, sim_run_id]`)를 그대로
+      읽는다. 순서가 바뀌면 이 가짜가 먼저 깨져 눈에 띈다.
+    """
+
+    def fetch_all(query, params):
+        usage_scope, as_of, *실행 = params
+        보이는 = [
+            row
+            for row in rows
+            if row["usage_scope"] == usage_scope and row["as_of"] == as_of
+        ]
+        if "sim_run_id = %s" in str(query):
+            assert 실행, "조건을 걸었으면 값도 실려야 한다"
+            보이는 = [row for row in 보이는 if row["sim_run_id"] == 실행[0]]
+        else:
+            assert not 실행, "조건이 없는데 값만 실리면 축이 반쯤 열린 것이다"
+        return sorted(보이는, key=lambda row: row["fixture_id"])
+
+    return fetch_all
+
+
+def _두_실행의_같은_날() -> tuple[dict[str, object], dict[str, object]]:
+    """같은 `as_of` · 같은 `usage_scope` 에 선 서로 다른 실행의 행 둘.
+
+    ⚠️ **DB 가 이것을 허용한다.** `uq_log_runtime_fixture` 가
+       `(sim_run_id, as_of, usage_scope)` 라 `sim_run_id` 만 다르면 공존한다.
+    """
+    a = _fixture_row()
+    b = _fixture_row(
+        fixture_id="LOG-RUNTIME-SIM-WHATIF-20260906",
+        sim_run_id=_OTHER_RUN,
+        source_ref="MVP-DECISION-20260906:WHATIF",
+    )
+    return a, b
+
+
+@pytest.mark.parametrize("실행", ["SIM-BURNIN-202512", _OTHER_RUN])
+def test_runtime_fixture_reads_only_the_requested_run(실행):
+    """🔴 같은 날에 실행 둘이 서 있어도 **물어본 실행의 행만** 나온다."""
+    a, b = _두_실행의_같은_날()
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", side_effect=_가짜표(a, b)),
+    ):
+        fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31), sim_run_id=실행)
+
+    assert fixture.sim_run_id == 실행
+
+
+def test_runtime_fixture_absent_for_this_run_is_absence_not_another_runs_row():
+    """🔴 **다른 실행에는 있고 내 실행에는 없으면 그것은 부재다.**
+
+    ⚠️ 남의 행을 집어 오면 *"이 실행에 그날 상태가 있다"* 가 거짓으로 성립하고, 그
+       아래의 `inventory_lots` · `outbound_commitments` 조회가 **남의 실행 열쇠로**
+       나간다 (`get_current_logistics_read` 가 `fixture.sim_run_id` 로 묻는다).
+    """
+    (a, _) = _두_실행의_같은_날()
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", side_effect=_가짜표(a)),
+        pytest.raises(LookupError, match=_OTHER_RUN),
+    ):
+        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31), sim_run_id=_OTHER_RUN)
+
+
+def test_runtime_fixture_without_a_run_still_refuses_to_pick_one_of_two():
+    """🔴 **주입을 안 받았다고 아무 행이나 고르지 않는다** — fail-open 금지.
+
+    ★ 종전 동작 그대로다 (`found 2` ValueError). 이번 변경이 넓힌 것은 축이지 이
+      규율이 아니다.
+    """
+    a, b = _두_실행의_같은_날()
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch("app.logistics.repository.fetch_all", side_effect=_가짜표(a, b)),
+        pytest.raises(ValueError, match="found 2"),
+    ):
+        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+
+
+def test_runtime_fixture_rejects_a_row_from_a_run_it_did_not_ask_for():
+    """🔴 **읽어 온 행이 물어본 실행의 것인지 다시 본다.**
+
+    ⚠️ `as_of mismatch` · `usage_scope mismatch` 와 같은 규율이다 — WHERE 한 줄이
+       조용히 빠지는 날 이 검사가 그 순간을 잡는다.
+    """
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        # ★ 조건을 무시하고 남의 행을 돌려주는 표 — WHERE 가 빠진 상황 그 자체다.
+        patch("app.logistics.repository.fetch_all", return_value=[_fixture_row()]),
+        pytest.raises(ValueError, match="sim_run_id mismatch"),
+    ):
+        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31), sim_run_id=_OTHER_RUN)
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [

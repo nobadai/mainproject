@@ -139,9 +139,36 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
     )
 
 
-def get_active_logistics_runtime_fixture(*, as_of: date) -> LogisticsRuntimeFixture:
-    """요청 기준일과 정확히 일치하는 active MVP runtime fixture 한 건을 조회한다."""
+def get_active_logistics_runtime_fixture(
+    *, as_of: date, sim_run_id: str | None = None
+) -> LogisticsRuntimeFixture:
+    """요청 기준일과 정확히 일치하는 active MVP runtime fixture 한 건을 조회한다.
+
+    🔴 **조회 축은 `(sim_run_id, as_of, usage_scope)` 다** — DB 의 유일성 축
+       (`uq_log_runtime_fixture`)과 **같은 축이다.** 다르면 유일해야 할 조회가 유일하지
+       않고, 실제로 그랬다: `sim_run_id` 가 다른 활성 행 둘이 같은 날에 공존할 수 있어
+       **다른 실행의 상태를 이번 실행의 상태로 읽을 수 있었다.**
+
+    ⚠️ **`sim_run_id` 는 아직 선택 인자다.** 이 함수를 부르는 두 경로
+       (`adapter._load` · `service._get_snapshot_or_none`)가 HTTP 요청에서 `as_of` 만
+       받고 실행 식별자를 안 나른다. 필수로 만들면 물류가 값을 **지어내야** 하므로
+       (그것이 곧 fail-open 이다) 축만 열어 두고 값은 위에서 내려오기를 기다린다.
+
+       🔴 **안 받았다고 아무 행이나 고르지 않는다.** 그 경우 실행이 둘 보이면 종전처럼
+          `ValueError` 로 멈춘다 — *"둘 중 하나를 고르지 않는다"* 가 이 함수의 규율이고
+          그건 안 바뀐다. 값을 받으면 그 실행으로 좁혀 애초에 둘이 안 보인다.
+
+    :param sim_run_id: 어느 실행의 장부인가. **마스터가 소유한 값**이다. `None` 이면
+        실행으로 좁히지 않는다 (그리고 둘 이상 보이면 실패한다).
+    """
     schema = sql.Identifier(get_db_schema())
+    # ★ 파라미터 순서를 안 바꾼다 — 실행 조건은 **뒤에** 붙인다. 앞을 흔들면 이
+    #   질의를 파라미터로 재는 검사들이 축과 무관하게 깨진다.
+    params: list[object] = [LOGISTICS_POLICY_USAGE_SCOPE, as_of]
+    실행조건 = sql.SQL("")
+    if sim_run_id is not None:
+        실행조건 = sql.SQL("AND sim_run_id = %s")
+        params.append(sim_run_id)
     rows = fetch_all(
         sql.SQL(
             """
@@ -163,10 +190,11 @@ def get_active_logistics_runtime_fixture(*, as_of: date) -> LogisticsRuntimeFixt
             WHERE usage_scope = %s
               AND as_of = %s
               AND is_active = TRUE
+              {}
             ORDER BY fixture_id
             """
-        ).format(schema),
-        [LOGISTICS_POLICY_USAGE_SCOPE, as_of],
+        ).format(schema, 실행조건),
+        params,
     )
     # 🔴 0건과 2건 이상은 **다른 종류의 실패다** (#121 4단계 · 2026-09-01 교차검증 지적).
     #
@@ -177,28 +205,37 @@ def get_active_logistics_runtime_fixture(*, as_of: date) -> LogisticsRuntimeFixt
     #   RUNTIME_NOT_READY 로, 실행 오류를 ERROR 로 나누는데(M-1 §5.1) 중복이 부재로
     #   섞이면 **깨진 데이터가 "데이터를 주세요" 로 나간다.**
     #
-    # ★ DB 가 막아 주지 않는다 — `uq_log_runtime_fixture` 는
-    #   `(sim_run_id, as_of, usage_scope)` 라 sim_run_id 가 다른 활성 행 둘이 같은
-    #   날짜에 공존할 수 있고, 이 조회는 sim_run_id 를 조건에 넣지 않는다.
+    # ★ `sim_run_id` 를 받으면 DB 가 막아 준다 — 그때 2건은 `uq_log_runtime_fixture`
+    #   위반이라 실제로 일어날 수 없고, 그래도 검사를 남기는 것은 이 함수가 그 제약을
+    #   전제하지 않고도 옳아야 하기 때문이다 (WHERE 한 줄이 지워지는 날 여기가 잡는다).
     #
     # ★ 여기서 하나를 고르지 않는다 — 뒤 행이 앞 행을 덮는 것도 고르는 것이다
     #   (`find_in_transit_schedule_gap` 의 inbound_id 중복 처리와 같은 규율).
+    실행 = "" if sim_run_id is None else f", sim_run_id={sim_run_id}"
     if not rows:
-        raise LookupError(f"No active Logistics runtime fixture for as_of={as_of}")
+        raise LookupError(f"No active Logistics runtime fixture for as_of={as_of}{실행}")
     if len(rows) > 1:
         raise ValueError(
-            f"Expected exactly one active Logistics runtime fixture, found {len(rows)}"
+            f"Expected exactly one active Logistics runtime fixture, found {len(rows)}{실행}"
         )
-    return _build_logistics_runtime_fixture(rows[0], expected_as_of=as_of)
+    return _build_logistics_runtime_fixture(
+        rows[0], expected_as_of=as_of, expected_sim_run_id=sim_run_id
+    )
 
 
 def _build_logistics_runtime_fixture(
-    row: dict[str, object], *, expected_as_of: date
+    row: dict[str, object], *, expected_as_of: date, expected_sim_run_id: str | None = None
 ) -> LogisticsRuntimeFixture:
     if row.get("as_of") != expected_as_of:
         raise ValueError("Logistics runtime fixture as_of mismatch")
     if row.get("usage_scope") != LOGISTICS_POLICY_USAGE_SCOPE:
         raise ValueError("Logistics runtime fixture usage_scope mismatch")
+    # 🔴 **읽어 온 행이 물어본 실행의 행인지 다시 본다.** 위 두 줄과 같은 규율이다 —
+    #    WHERE 가 조용히 빠지면 이 검사가 그 순간을 잡는다. `fixture.sim_run_id` 는
+    #    바로 아래에서 `inventory_lots` · `outbound_commitments` 조회 열쇠가 되므로,
+    #    여기서 안 잡으면 **한 스냅샷 안에 두 실행의 사실이 섞인다.**
+    if expected_sim_run_id is not None and row.get("sim_run_id") != expected_sim_run_id:
+        raise ValueError("Logistics runtime fixture sim_run_id mismatch")
     return LogisticsRuntimeFixture(
         fixture_id=row.get("fixture_id"),
         sim_run_id=row.get("sim_run_id"),
@@ -277,18 +314,25 @@ class LogisticsRead(NamedTuple):
     policy: LogisticsPolicy
 
 
-def get_current_inventory_logistics_snapshot(*, as_of: date) -> InventoryLogisticsSnapshot:
+def get_current_inventory_logistics_snapshot(
+    *, as_of: date, sim_run_id: str | None = None
+) -> InventoryLogisticsSnapshot:
     """Snapshot 만 필요한 소비자용 (독립 Service 경로)."""
-    return get_current_logistics_read(as_of=as_of).snapshot
+    return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id).snapshot
 
 
-def get_current_logistics_read(*, as_of: date) -> LogisticsRead:
+def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) -> LogisticsRead:
     """Fixture, direct physical lots, Policy를 한 번 읽어 호출 중 고정될 값을 만든다.
 
     "한 번"이 계약이다 (정의서 §1.2-13) — 같은 호출이 같은 값을 다시 읽으면 그 사이
     원장이 바뀌어 **같은 `as_of` 인데 값이 다른** 상태가 성립한다.
+
+    ★ **실행 축은 fixture 한 곳에서만 정해진다.** 아래 `inventory_lots` ·
+      `get_outbound_commitments` 는 이미 `fixture.sim_run_id` 로 묻고 있었다 — 즉 실행을
+      가르는 자리는 처음부터 **fixture 조회 하나**였고, 그래서 이번 변경이 그 한 곳만
+      넓히면 스냅샷 전체가 같은 실행 위에 선다.
     """
-    fixture = get_active_logistics_runtime_fixture(as_of=as_of)
+    fixture = get_active_logistics_runtime_fixture(as_of=as_of, sim_run_id=sim_run_id)
     policy = get_active_logistics_policy()
     schema = sql.Identifier(get_db_schema())
 
