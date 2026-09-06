@@ -4,7 +4,8 @@
 
 ```text
 마스터 Protocol   cancel(conn, *, commitment, cancelled_on, target_state_date, purchase_ids)
-재무              cancel_finance_payables(conn, *, purchase_ids, as_of, target_state_date)
+재무              cancel_finance_payables(conn, *, purchase_ids, as_of, target_state_date,
+                                           financing_mode)
 물류              withdraw_inventory(conn, *, sim_run_id, as_of, inbound_ids, source_ref)
 ```
 
@@ -343,19 +344,11 @@ def test_main_이_두_파트를_다_등록한다():
     assert "BURN_IN_SIM_RUN_ID" in 원문.split("register_cancellation(\"logistics\"")[1][:120]
 
 
-# ── ⑥ financing_mode — 받되 아직 안 넘긴다 (재무 확정 2026-09-06) ──────────
+# ── ⑥ financing_mode — 권위 축을 그대로 넘긴다 ────────────────────────────
 
 
 def test_재무_어댑터가_financing_mode_를_받는다(monkeypatch: pytest.MonkeyPatch):
-    """🟡 **받는 자리를 먼저 뚫어 둔다.**
-
-    재무가 *"Master 가 전달한 축으로 exact lookup 하겠다"* 고 확정했지만
-    `cancel_finance_payables` 시그니처가 아직 그 인자를 안 받는다 — **재무 파일이라
-    마스터가 안 고친다.**
-
-    ★ 물류가 `purchase_ids=None` 을 기본값으로 열어 두었던 것과 같은 순서다
-      (`#311` → `#313`). 이 검사는 *"받기는 받는다"* 를 잠근다.
-    """
+    """Master가 읽은 권위 축을 Finance core에 한 글자도 바꾸지 않고 넘긴다."""
     받은것: dict[str, Any] = {}
     monkeypatch.setattr(
         "app.master.finance_cancellation.cancel_finance_payables",
@@ -371,8 +364,7 @@ def test_재무_어댑터가_financing_mode_를_받는다(monkeypatch: pytest.Mo
         financing_mode="LOAN_BASELINE",
     )
 
-    # 🟡 아직 안 넘어간다 — 재무가 받는 쪽을 열면 이 줄이 뒤집힌다
-    assert "financing_mode" not in 받은것
+    assert 받은것["financing_mode"] == "LOAN_BASELINE"
 
 
 def test_물류_어댑터도_financing_mode_를_받는다():
@@ -400,7 +392,15 @@ def test_두_Protocol_구현이_같은_인자를_요구한다():
     재무 = inspect.signature(FinanceCancellationAdapter.cancel).parameters
     물류 = inspect.signature(LogisticsCancellationAdapter.cancel).parameters
 
-    assert set(재무) == set(물류), f"두 어댑터의 인자가 갈렸다 — 재무 {set(재무)} · 물류 {set(물류)}"
-    for 이름 in ("commitment", "cancelled_on", "target_state_date", "purchase_ids", "financing_mode"):
+    assert set(재무) == set(물류), (
+        f"두 어댑터의 인자가 갈렸다 — 재무 {set(재무)} · 물류 {set(물류)}"
+    )
+    for 이름 in (
+        "commitment",
+        "cancelled_on",
+        "target_state_date",
+        "purchase_ids",
+        "financing_mode",
+    ):
         assert 이름 in 물류, f"물류 어댑터에 {이름} 이 없다"
         assert 물류[이름].kind is inspect.Parameter.KEYWORD_ONLY

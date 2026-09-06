@@ -18,6 +18,7 @@ from app.finance.db import FinanceDataNotReady, _fetch_open_payable_events
 
 AS_OF = date(2026, 1, 5)
 TARGET = date(2026, 1, 6)
+FINANCING_MODE = "NONE"
 
 
 def _payable(
@@ -48,13 +49,15 @@ def _state(
     state_date: date,
     *,
     unsettled: str = "500",
+    financing_mode: str = FINANCING_MODE,
+    sim_run_id: str = "SIM-1",
 ) -> dict[str, object]:
     return {
         "finance_state_id": state_id,
-        "sim_run_id": "SIM-1",
+        "sim_run_id": sim_run_id,
         "state_date": state_date,
         "state_type": "DAY",
-        "financing_mode": "NONE",
+        "financing_mode": financing_mode,
         "current_cash_krw": Decimal(1000),
         "minimum_operating_cash_krw": Decimal(100),
         "committed_outflows_krw": Decimal(20),
@@ -94,6 +97,7 @@ class _Cursor:
             return
 
         if "SELECT finance_state_id" in text and ".finance_states" in text:
+            assert "AND financing_mode = %(financing_mode)s" in text
             self.rows = [
                 {
                     "finance_state_id": row["finance_state_id"],
@@ -102,6 +106,7 @@ class _Cursor:
                 }
                 for row in self.conn.states.values()
                 if row["sim_run_id"] == params["sim_run_id"]
+                and row["financing_mode"] == params["financing_mode"]
                 and row["state_date"] == params["state_date"]
             ]
             return
@@ -134,7 +139,9 @@ class _Cursor:
         if "INSERT INTO" in text and ".finance_states" in text:
             assert text.count("unsettled_purchase_payables_krw - %(cancelled_amount)s") == 2
             assert "ON CONFLICT (sim_run_id, financing_mode, state_date)" in text
+            assert "source.financing_mode = %(financing_mode)s" in text
             source = self.conn.states[params["source_finance_state_id"]]
+            assert source["financing_mode"] == params["financing_mode"]
             amount = params["cancelled_amount"]
             matching = next(
                 (
@@ -223,6 +230,7 @@ def test_open_payable_is_cancelled_without_becoming_paid_or_deleted():
         purchase_ids=["PUR-A"],
         as_of=AS_OF,
         target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
 
     row = conn.payables["PUR-A"]
@@ -237,12 +245,25 @@ def test_open_payable_is_cancelled_without_becoming_paid_or_deleted():
     assert not any("DELETE" in query.upper() for query, _ in conn.executed)
 
 
+def test_financing_mode_is_a_required_keyword_axis():
+    import inspect
+
+    parameter = inspect.signature(cancel_finance_payables).parameters["financing_mode"]
+
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
 def test_existing_target_state_reverses_only_newly_cancelled_amount_and_keeps_cash():
     conn = _existing_target_conn(_payable("PUR-A", "300"))
     before = deepcopy(conn.states["FIN-TARGET"])
 
     result = cancel_finance_payables(
-        conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
 
     after = conn.states["FIN-TARGET"]
@@ -261,15 +282,56 @@ def test_existing_target_state_reverses_only_newly_cancelled_amount_and_keeps_ca
         assert after[field] == before[field]
 
 
+def test_same_date_multiple_modes_updates_only_authoritative_axis():
+    conn = _Conn(
+        payables=[_payable("PUR-A", "300")],
+        states=[
+            _state(
+                "FIN-TARGET-BASE",
+                TARGET,
+                unsettled="700",
+                financing_mode="BASE_NO_LOAN",
+            ),
+            _state(
+                "FIN-TARGET-LOAN",
+                TARGET,
+                unsettled="500",
+                financing_mode="LOAN_BASELINE",
+            ),
+        ],
+    )
+    unselected_before = deepcopy(conn.states["FIN-TARGET-BASE"])
+
+    result = cancel_finance_payables(
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode="LOAN_BASELINE",
+    )
+
+    assert result.finance_state_id == "FIN-TARGET-LOAN"
+    assert conn.states["FIN-TARGET-LOAN"]["unsettled_purchase_payables_krw"] == Decimal(200)
+    assert conn.states["FIN-TARGET-BASE"] == unselected_before
+
+
 def test_retry_is_a_noop_for_payable_and_state():
     conn = _existing_target_conn(_payable("PUR-A", "300"))
     first = cancel_finance_payables(
-        conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
     after_first = deepcopy(conn.states["FIN-TARGET"])
 
     second = cancel_finance_payables(
-        conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
 
     assert first.newly_cancelled_count == 1
@@ -292,6 +354,7 @@ def test_two_legs_cancel_independently_and_leave_other_approval_open():
         purchase_ids=["PUR-A-S1", "PUR-A-S2"],
         as_of=AS_OF,
         target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
 
     assert result.newly_cancelled_count == 2
@@ -314,6 +377,7 @@ def test_mixed_open_and_cancelled_set_fails_without_stable_cancellation_identity
             purchase_ids=["PUR-A-S1", "PUR-A-S2"],
             as_of=AS_OF,
             target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
         )
 
     assert raised.value.reason == "payable_cancellation_state_mixed"
@@ -330,7 +394,13 @@ def test_paid_or_written_off_payable_fails_closed(status, paid, outstanding):
     conn = _existing_target_conn(payable)
 
     with pytest.raises(FinanceCancellationConflict) as raised:
-        cancel_finance_payables(conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET)
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A"],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
+        )
 
     assert raised.value.reason == "payable_not_cancellable"
     assert conn.payables["PUR-A"] == payable
@@ -347,6 +417,7 @@ def test_missing_target_fails_before_any_partial_cancellation():
             purchase_ids=["PUR-A", "PUR-MISSING"],
             as_of=AS_OF,
             target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
         )
 
     assert raised.value.reason == "payable_not_found"
@@ -361,7 +432,11 @@ def test_missing_target_state_carries_exact_source_and_subtracts():
     )
 
     result = cancel_finance_payables(
-        conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode=FINANCING_MODE,
     )
 
     target_id = "FIN-DAY-SIM-1-NONE-20260106"
@@ -372,12 +447,81 @@ def test_missing_target_state_carries_exact_source_and_subtracts():
     assert conn.states["FIN-SOURCE"]["unsettled_purchase_payables_krw"] == Decimal(500)
 
 
+def test_missing_target_carries_only_authoritative_source_axis():
+    conn = _Conn(
+        payables=[_payable("PUR-A", "300")],
+        states=[
+            _state(
+                "FIN-SOURCE-BASE",
+                AS_OF,
+                unsettled="900",
+                financing_mode="BASE_NO_LOAN",
+            ),
+            _state(
+                "FIN-SOURCE-LOAN",
+                AS_OF,
+                unsettled="500",
+                financing_mode="LOAN_BASELINE",
+            ),
+        ],
+    )
+    unselected_before = deepcopy(conn.states["FIN-SOURCE-BASE"])
+
+    result = cancel_finance_payables(
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=TARGET,
+        financing_mode="LOAN_BASELINE",
+    )
+
+    target_id = "FIN-DAY-SIM-1-LOAN_BASELINE-20260106"
+    assert result.finance_state_id == target_id
+    assert conn.states[target_id]["financing_mode"] == "LOAN_BASELINE"
+    assert conn.states[target_id]["unsettled_purchase_payables_krw"] == Decimal(200)
+    assert conn.states["FIN-SOURCE-LOAN"]["unsettled_purchase_payables_krw"] == Decimal(500)
+    assert conn.states["FIN-SOURCE-BASE"] == unselected_before
+
+
+def test_missing_authoritative_mode_does_not_fallback_to_other_mode():
+    payable = _payable("PUR-A", "100")
+    conn = _Conn(
+        payables=[payable],
+        states=[
+            _state(
+                "FIN-SOURCE-BASE",
+                AS_OF,
+                financing_mode="BASE_NO_LOAN",
+            )
+        ],
+    )
+
+    with pytest.raises(FinanceDataNotReady) as raised:
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A"],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+            financing_mode="LOAN_BASELINE",
+        )
+
+    assert raised.value.key == "historical_finance_position"
+    assert conn.payables["PUR-A"] == payable
+    assert set(conn.states) == {"FIN-SOURCE-BASE"}
+
+
 def test_missing_exact_source_state_fails_before_payable_change():
     payable = _payable("PUR-A", "100")
     conn = _Conn(payables=[payable], states=[])
 
     with pytest.raises(FinanceDataNotReady) as raised:
-        cancel_finance_payables(conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET)
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A"],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
+        )
 
     assert raised.value.key == "historical_finance_position"
     assert conn.payables["PUR-A"] == payable
@@ -388,7 +532,13 @@ def test_negative_unsettled_fails_before_payable_change():
     conn = _existing_target_conn(payable, unsettled="200")
 
     with pytest.raises(FinanceCancellationConflict) as raised:
-        cancel_finance_payables(conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=TARGET)
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A"],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
+        )
 
     assert raised.value.reason == "finance_unsettled_underflow"
     assert conn.payables["PUR-A"] == payable
@@ -403,7 +553,11 @@ def test_weekend_target_is_accepted_and_caller_connection_is_not_managed():
     )
 
     result = cancel_finance_payables(
-        conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=saturday
+        conn,
+        purchase_ids=["PUR-A"],
+        as_of=AS_OF,
+        target_state_date=saturday,
+        financing_mode=FINANCING_MODE,
     )
 
     assert result.finance_state_id == "FIN-DAY-SIM-1-NONE-20260110"
@@ -432,8 +586,20 @@ def test_invalid_target_date_and_empty_purchase_ids_fail_before_sql():
     conn = _existing_target_conn(_payable("PUR-A", "100"))
 
     with pytest.raises(ValueError, match="must not be empty"):
-        cancel_finance_payables(conn, purchase_ids=[], as_of=AS_OF, target_state_date=TARGET)
+        cancel_finance_payables(
+            conn,
+            purchase_ids=[],
+            as_of=AS_OF,
+            target_state_date=TARGET,
+            financing_mode=FINANCING_MODE,
+        )
     with pytest.raises(ValueError, match="must be after"):
-        cancel_finance_payables(conn, purchase_ids=["PUR-A"], as_of=AS_OF, target_state_date=AS_OF)
+        cancel_finance_payables(
+            conn,
+            purchase_ids=["PUR-A"],
+            as_of=AS_OF,
+            target_state_date=AS_OF,
+            financing_mode=FINANCING_MODE,
+        )
 
     assert conn.executed == []
