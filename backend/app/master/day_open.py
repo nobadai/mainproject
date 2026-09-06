@@ -55,6 +55,7 @@ from app.master.calendar_walk import MAX_WALK_DAYS
 
 __all__ = [
     "MAX_CARRY_DAYS",
+    "MAX_FORCE_CARRY_DAYS",
     "PARTS",
     "DayOpenOut",
     "DayOpenPart",
@@ -89,6 +90,16 @@ PARTS: tuple[DayOpenPart, ...] = ("finance", "logistics")
 #: ★ **이름은 남긴다.** 하루 넘김의 어휘는 *"물려받는다(carry)"* 이지 *"걷는다"* 가
 #:   아니고, 밖에서 이 이름을 부르고 있다 (`tests/master/test_day_open.py`).
 MAX_CARRY_DAYS = MAX_WALK_DAYS
+
+#: 🔴 **강제 개장이 푸는 상한.** 평소 상한(`MAX_CARRY_DAYS`)만 풀고 그 이상은 안 연다.
+#:
+#: ★ **강제 개장이 무한대가 아니다** (계약 §5 · `day_gate` 의 `SPLIT_THRESHOLD_DAYS`).
+#:   366일을 넘기면 관리자가 눌러도 안 열리고, 그때는 나눠서 불러야 한다
+#:   (`SPLIT_FORCE_OPEN_REQUIRED`).
+#:
+#: ⚠️ **`day_gate` 와 같은 수여야 한다.** 관문이 *"관리자 강제 개장이 필요하다"* 고
+#:    말했는데 눌러도 안 열리면 화면이 왜인지 못 말한다.
+MAX_FORCE_CARRY_DAYS = 366
 
 
 class DayOpening(Protocol):
@@ -236,7 +247,9 @@ def reset() -> None:
 # ── 달력을 걷는다 ───────────────────────────────────────────────────────
 
 
-def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOpenPartOut:
+def _walk_part(
+    part: DayOpenPart, impl: Any, conn: Any, *, as_of: date, limit: int = MAX_CARRY_DAYS
+) -> DayOpenPartOut:
     """한 파트의 달력을 걷는다. **구멍을 남기지 않는다.**
 
     ```text
@@ -254,7 +267,7 @@ def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOp
        정한 *"실행일은 평일만, 경과일수는 달력일"* 과 같은 결).
     """
     anchor: date | None = None
-    for back in range(MAX_CARRY_DAYS + 1):
+    for back in range(limit + 1):
         day = as_of - timedelta(days=back)
         if impl.is_open(conn, as_of=day):
             anchor = day
@@ -268,9 +281,9 @@ def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOp
         return DayOpenPartOut(
             part=part,
             status="PART_FAILED",
-            gap_days=MAX_CARRY_DAYS,
+            gap_days=limit,
             reason=(
-                f"{as_of} 부터 {MAX_CARRY_DAYS}일 뒤로 가도 열린 날이 없다 —"
+                f"{as_of} 부터 {limit}일 뒤로 가도 열린 날이 없다 —"
                 " 상한을 넘는 것은 의도보다 실수일 가능성이 크다. 행을 만들지 않는다"
             ),
         )
@@ -294,7 +307,9 @@ def _walk_part(part: DayOpenPart, impl: Any, conn: Any, *, as_of: date) -> DayOp
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
 
 
-def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpenOut:
+def open_day(
+    as_of: date, *, connect: Callable[[], Any] | None = None, force: bool = False
+) -> DayOpenOut:
     """`as_of` 날 상태 행을 **파트마다** 보장한다. 한 트랜잭션이다.
 
     순서가 이 함수의 전부다.
@@ -320,8 +335,26 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
        날로 갈 수 없는 것이 되는데, 실제로는 롤백되어 어제 그대로다. **다만 삼키되
        사유는 반드시 남긴다.**
 
+    🔴 **`force` 는 상한 하나만 푼다** (계약 §5).
+
+      ```text
+      강제 개장이 푸는 것    31일 상한 → 366일
+      강제 개장이 못 푸는 것 PART_FAILED · 366일 초과
+      ```
+
+      ★ **실패를 성공으로 승격시키는 문이 아니다.** 강제 개장 중에도 한 파트가
+        실패하면 전체는 계속 `NOT_OPENED` 다.
+
+      ★ **파트는 강제인지 아닌지를 모른다.** Protocol 이 안 바뀌고 평소와 똑같이
+        답한다 — 마스터가 상한만 풀고 나머지는 동일하게 취합한다.
+
+      ⚠️ **366일을 넘기면 강제로도 안 열린다.** 관리자가 눌러도 안 열리는 것을
+        `ADMIN_FORCE_OPEN_REQUIRED` 로 보내면 화면이 왜인지 못 말하므로,
+        `day_gate` 가 그 경우를 `SPLIT_FORCE_OPEN_REQUIRED` 로 따로 낸다.
+
     :param connect: 커넥션 팩토리. 안 주면 `app.finance.db.get_connection` 을 쓴다 —
                     재무·물류가 같은 DB(같은 `DB_*`)를 쓰므로 커넥션도 하나면 된다.
+    :param force: 관리자 강제 개장. **상한만 푼다.**
     """
     absent = missing()
     present = [part for part in PARTS if part in _OPENINGS]
@@ -342,7 +375,10 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
     try:
-        parts = [_walk_part(part, _OPENINGS[part], conn, as_of=as_of) for part in present]
+        limit = MAX_FORCE_CARRY_DAYS if force else MAX_CARRY_DAYS
+        parts = [
+            _walk_part(part, _OPENINGS[part], conn, as_of=as_of, limit=limit) for part in present
+        ]
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - 하루 넘김 실패가 500 으로 올라가면 안 된다.
         conn.rollback()
@@ -360,7 +396,7 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
     finally:
         conn.close()
 
-    out = _aggregate(as_of, parts, absent)
+    out = _aggregate(as_of, parts, absent, force=force)
     _record(out)
     return out
 
@@ -383,7 +419,9 @@ def _record(out: DayOpenOut) -> None:
     )
 
 
-def _aggregate(as_of: date, parts: list[DayOpenPartOut], absent: tuple[str, ...]) -> DayOpenOut:
+def _aggregate(
+    as_of: date, parts: list[DayOpenPartOut], absent: tuple[str, ...], *, force: bool = False
+) -> DayOpenOut:
     """파트 결과를 **전체 어휘 넷**으로 취합한다 (계약 §어휘).
 
     ```text
@@ -400,10 +438,14 @@ def _aggregate(as_of: date, parts: list[DayOpenPartOut], absent: tuple[str, ...]
     gapped = [part for part in parts if part.gap_days is not None]
     if gapped:
         names = ", ".join(part.part for part in gapped)
+        limit = MAX_FORCE_CARRY_DAYS if force else MAX_CARRY_DAYS
+        # ⚠️ **강제 개장이었으면 그것도 적는다.** 관리자가 눌렀는데 또 거절당한 것이라
+        #    다음 걸음이 다르다 — 나눠서 불러야 한다.
+        꼬리 = " — 강제 개장으로도 못 연다. 나눠서 불러야 한다" if force else ""
         return DayOpenOut(
             as_of=as_of,
             status="REJECTED_GAP",
-            reason=f"상한({MAX_CARRY_DAYS}일)을 넘겨 거절했다: {names}",
+            reason=f"상한({limit}일)을 넘겨 거절했다: {names}{꼬리}",
             parts=parts,
             missing=list(absent),
         )

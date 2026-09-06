@@ -476,3 +476,90 @@ def test_라우터에_명시적_자리가_있다() -> None:
     # ★ 오늘은 등록이 0건이라 `NOT_OPENED` 다 — 그것도 **말해 주어야 하는 사실**이다.
     assert 본문["status"] == "NOT_OPENED"
     assert 본문["missing"] == ["finance", "logistics"]
+
+
+# ── ⑦ 강제 개장 — 상한 하나만 푼다 (계약 §5 · 2026-09-06) ─────────────────
+
+
+def test_강제_개장이_31일_상한을_푼다() -> None:
+    """🔴 **평소에는 막히는 날이 강제로는 열린다.**
+
+    ★ 그것이 `day_gate` 가 `ADMIN_FORCE_OPEN_REQUIRED` 를 낼 때 약속한 동작이다 —
+      관리자가 눌렀는데 안 열리면 화면이 왜인지 못 말한다.
+    """
+    먼날 = AS_OF - timedelta(days=40)
+    day_open.register_day_opening("finance", 가짜하루열기("finance", {먼날}))
+    day_open.register_day_opening("logistics", 가짜하루열기("logistics", {먼날}))
+    conn = 가짜커넥션()
+
+    막힘 = day_open.open_day(AS_OF, connect=lambda: conn)
+    assert 막힘.status == "REJECTED_GAP", "평소에는 막혀야 이 검사가 의미 있다"
+
+    열림 = day_open.open_day(AS_OF, connect=lambda: conn, force=True)
+
+    assert 열림.status == "OPENED"
+    assert len(열림.parts[0].opened) == 40, "먼날 다음 날부터 as_of 까지 다 만든다"
+
+
+def test_강제_개장도_366일을_넘기면_거절한다() -> None:
+    """⚠️ **강제 개장이 무한대가 아니다** (계약 §5).
+
+    ★ 366일을 넘기면 관리자가 눌러도 안 열리고, 그때는 나눠서 불러야 한다 —
+      `day_gate` 가 그 경우를 `SPLIT_FORCE_OPEN_REQUIRED` 로 따로 내는 이유다.
+    """
+    아주먼날 = AS_OF - timedelta(days=400)
+    day_open.register_day_opening("finance", 가짜하루열기("finance", {아주먼날}))
+    day_open.register_day_opening("logistics", 가짜하루열기("logistics", {아주먼날}))
+
+    out = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션(), force=True)
+
+    assert out.status == "REJECTED_GAP"
+    assert "강제 개장으로도 못 연다" in out.reason
+    assert "나눠서" in out.reason
+
+
+def test_강제_개장이_PART_FAILED_를_성공으로_안_만든다() -> None:
+    """🔴 **실패를 승격시키는 문이 아니다** (계약 §5).
+
+    강제 개장 중에도 한 파트가 실패하면 전체는 계속 `NOT_OPENED` 다.
+    """
+
+    class _터지는파트:
+        def is_open(self, conn: object, *, as_of: date) -> bool:
+            return as_of == AS_OF - timedelta(days=1)
+
+        def open_day(self, conn: object, *, as_of: date, carry_from: date) -> None:
+            raise RuntimeError("재무가 못 연다")
+
+    day_open.register_day_opening("finance", _터지는파트())
+    day_open.register_day_opening("logistics", _터지는파트())
+
+    out = day_open.open_day(AS_OF, connect=lambda: 가짜커넥션(), force=True)
+
+    assert out.status == "NOT_OPENED", "강제로도 실패는 실패다"
+    assert out.status != "OPENED"
+
+
+def test_파트는_강제인지_모른다() -> None:
+    """★ **Protocol 이 안 바뀐다.** 파트는 평소와 똑같이 답하고, 마스터가 상한만 푼다.
+
+    🔴 `open_day(conn, as_of, carry_from)` 에 `force` 가 없어야 한다 — 있으면 파트가
+       *"강제니까 다르게 하자"* 를 할 수 있고, 그건 계약이 막은 자리다.
+    """
+    import inspect
+
+    받는것 = set(inspect.signature(day_open.DayOpening.open_day).parameters)
+
+    assert "force" not in 받는것
+    assert 받는것 == {"self", "conn", "as_of", "carry_from"}
+
+
+def test_강제_상한이_관문의_절대_상한과_같은_수다() -> None:
+    """🔴 **둘이 갈리면 관문이 거짓말을 한다.**
+
+    관문이 *"관리자 강제 개장이 필요하다"* 라 했는데 눌러도 안 열리면 화면이 왜인지
+    못 말한다. 반대로 관문이 *"나눠서 불러라"* 했는데 강제로 열리면 그것도 거짓이다.
+    """
+    from app.master.day_gate import SPLIT_THRESHOLD_DAYS
+
+    assert day_open.MAX_FORCE_CARRY_DAYS == SPLIT_THRESHOLD_DAYS
