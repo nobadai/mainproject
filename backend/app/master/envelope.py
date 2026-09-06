@@ -55,18 +55,33 @@ SCHEMA_VERSION = "1.0"
 # 1. 어휘
 # ---------------------------------------------------------------------------
 
-AgentName = Literal["finance", "inventory", "purchase"]
+AgentName = Literal["finance", "inventory", "purchase", "sales"]
 """★ `Dept` 와 다르다.
 
 `Dept` 는 **밴드에 기여하는 조언자**(sales·inventory·finance)이고,
-`AgentName` 은 **마스터가 호출하는 대상**이다. 매입은 제안자라 조언자가 아니고,
-영업은 1차 구성에서 빠졌다 (정의서 v2.2 §2.1)."""
+`AgentName` 은 **마스터가 호출하는 대상**이다. 매입은 제안자라 조언자가 아니다
+(정의서 v2.2 §2.1).
+
+★ **판매가 들어왔다** (판매 2026-09-06 통보). 판매 사이클에서 시나리오를 만드는 쪽이
+  판매이므로 **마스터가 부를 대상**이다 — 매입 사이클의 매입과 같은 자리다.
+
+  🔴 **그래서 판매는 `Dept` 어휘의 sales 와 같은 것이 아니다.** 한 글자가 두 어휘에
+  다 있지만 뜻이 갈린다.
+
+  ```text
+  Dept 의 sales         매입 밴드에 조언을 보태는 쪽 — 축 조정을 제안할 수 있다
+  AgentName 의 sales    판매 사이클의 제안자 — 조언자가 아니다
+  ```
+
+  `_AGENT_DEPT` 가 판매를 담지 않는 이유가 이것이다 (그 주석 참조)."""
 
 Mode = Literal[
     "PRE_PURCHASE",
+    "PRE_SALES",
     "SCENARIO_VALIDATION",
     "SALES_VALIDATION",
     "GENERATE_SCENARIOS",
+    "GENERATE_SALES_PROPOSAL",
     "STATUS_QUERY",
 ]
 """호출 목적 (정의서 §3.2.3).
@@ -79,9 +94,22 @@ Mode = Literal[
   `(agent, mode, call_seq)` 로 매입 검증과 판매 검증을 구분할 수 없고, 그러면
   payload 모양을 보고 무엇인지 **추측하는** 코드가 생긴다.
 
-  🔴 여기 있는 것은 **어휘뿐이다.** 영업 제안이 여기까지 오는 라우팅
-  (`FINANCIAL_VALIDATION` → 재무)은 아직 없다 — `AgentName` 에 sales 가 없고
-  capability 어휘도 없다. 그것은 별도 작업이다."""
+★ `GENERATE_SALES_PROPOSAL` 은 **판매가 시나리오를 만드는 호출**이다
+  (판매 2026-09-06 통보). 매입 `GENERATE_SCENARIOS` 와 나눠 두는 이유는 바로 위
+  `SALES_VALIDATION` 과 같다 — 합치면 `(agent, mode, call_seq)` 로 매입 시나리오
+  생성과 판매 제안 생성을 구분할 수 없고, 그러면 payload 모양을 보고 무엇인지
+  **추측하는** 코드가 다시 생긴다.
+
+★ `PRE_SALES` 는 **물류가 판매용 판매가능·납기 컨텍스트를 주는 호출**이다
+  (판매 2026-09-06 통보). `PRE_PURCHASE` 가 매입의 *경계*이듯 판매의 *경계*다.
+  경계와 판정을 mode 로 가르는 결이 사이클을 건너서도 같다.
+
+  🔴 두 mode 를 한 이름으로 합치지 않는다. 물류가 두 사이클에 같은 이름으로 답하면
+  회신을 받은 마스터가 **어느 사이클의 경계인지** 를 payload 로 되짚어야 한다.
+
+🔴 여기 있는 것은 **어휘뿐이다.** 판매 Flow·어댑터·라우팅은 아직 없다 —
+  영업 제안이 재무까지 오는 길(`FINANCIAL_VALIDATION` capability 라우팅)도
+  capability 어휘 자체가 마스터에 없어 성립하지 않는다. 그것은 별도 작업이다."""
 
 Trigger = Literal["ML_COMPLETE", "USER_REQUEST"]
 
@@ -140,15 +168,28 @@ _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     "finance": frozenset(
         {"PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION", "STATUS_QUERY"}
     ),
-    "inventory": frozenset({"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
+    # 물류는 두 사이클의 경계를 다 낸다 — `PRE_SALES` 가 판매 쪽 경계다.
+    "inventory": frozenset({"PRE_PURCHASE", "PRE_SALES", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
     "purchase": frozenset({"GENERATE_SCENARIOS", "STATUS_QUERY"}),
+    # 판매는 제안만 만든다. 판매 제안의 재무 검증(`SALES_VALIDATION`)은 재무가 받는다 —
+    # 제안자가 자기 제안을 검증하면 검증이 아니다.
+    "sales": frozenset({"GENERATE_SALES_PROPOSAL", "STATUS_QUERY"}),
 }
 
 _AGENT_DEPT: dict[AgentName, Dept] = {
     "finance": "finance",
     "inventory": "inventory",
 }
-"""매입은 여기 없다 — 축 조정을 제안할 권한이 없다 (제안자 ≠ 조언자)."""
+"""매입은 여기 없다 — 축 조정을 제안할 권한이 없다 (제안자 ≠ 조언자).
+
+🔴 **판매도 여기 없다.** `Dept` 에 `"sales"` 가 있으니 넣을 수 있어 보이지만, 그것은
+  **매입 밴드에 조언을 보태는 쪽**의 어휘다 (`app/contracts/core.py` `Dept`).
+  판매 사이클의 판매는 제안자이지 조언자가 아니다.
+
+  넣으면 `band_is_formed` · `blocking_agents` 가 판매를 조언자로 세어, 판매가
+  답하지 않은 날 **매입 밴드가 성립하지 않은 것으로 읽힌다** — 없는 의존이
+  생긴다. 판매가 축 조정을 제안하는 날이 오면 그때 별도로 정한다
+  (판매 2026-09-06 통보 범위 밖)."""
 
 
 def agent_dept(agent: AgentName) -> Dept | None:
