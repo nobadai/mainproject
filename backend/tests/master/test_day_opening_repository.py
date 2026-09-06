@@ -199,6 +199,43 @@ def test_조회가_터져도_None_이다():
 # ── ④ open_day 가 정본을 남긴다 ───────────────────────────────────────────
 
 
+def test_성공한_개장도_정본에_남긴다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 **변이가 구멍을 찾은 자리다** (2026-09-06).
+
+    `_record(out)` 를 통째로 지웠는데 검사가 하나도 안 울었다 — 미등록 경로만 재고
+    **정상 경로를 안 쟀기 때문**이다. 그러면 *"매일 도는 성공"* 이 정본에 안 남고,
+    `failure_count` 가 영영 0 으로 안 돌아간다.
+    """
+    from app.master import day_open
+
+    남긴것: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "app.master.day_open.record_day_opening",
+        lambda **kw: (남긴것.append(kw), True)[1],
+        raising=False,
+    )
+
+    class _이미열린파트:
+        def is_open(self, conn: Any, *, as_of: date) -> bool:
+            return True
+
+        def open_day(self, conn: Any, *, as_of: date, carry_from: date) -> None:
+            raise AssertionError("이미 열려 있으면 안 부른다")
+
+    day_open.reset()
+    day_open.register_day_opening("finance", _이미열린파트())
+    day_open.register_day_opening("logistics", _이미열린파트())
+    try:
+        out = day_open.open_day(AS_OF, connect=lambda: _커넥션())
+    finally:
+        day_open.reset()
+
+    assert out.status == "ALREADY_OPENED"
+    assert 남긴것, "🔴 성공한 개장이 정본에 안 남았다 — failure_count 가 영영 안 리셋된다"
+    assert 남긴것[0]["result"] == "ALREADY_OPENED"
+    assert [p.part for p in 남긴것[0]["parts"]] == ["finance", "logistics"]
+
+
 def test_open_day_가_파트_트랜잭션_밖에서_남긴다(monkeypatch: pytest.MonkeyPatch):
     """🔴 **파트 트랜잭션 안에 넣으면 롤백될 때 *"실패했다"* 까지 사라진다.**
 
