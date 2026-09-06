@@ -27,29 +27,44 @@
    계약은 `schemas.py` 의 `InTransitItem` 이고, `in_transit_status` 는
    `CONFIRMED · CONFIRMED_ZERO · UNRESOLVED` 셋 중 하나다. 스키마를 바꾸지 않는다.
 
-🟡 **매입 참조(`purchase_id`)를 받을 자리는 뚫어 뒀다. 아직 안 켜졌다 (2026-09-05).**
+🟡 **매입 참조(`purchase_id`)를 받을 자리는 뚫려 있고, 마스터는 그것을 넘기지 않는다.**
    운송 중인 물건이 도착하면 물류는 그 매입 줄에서 `purchase_item_id` · `item_id` ·
-   `grade` · `unit_price_krw_per_kg` 를 읽어야 한다. 그 참조를 **물류가 지어내면 안
-   되고**, 만드는 곳은 마스터다 (`app/master/transition.py` 의 `purchase_id_for`).
+   `grade` · `unit_price_krw_per_kg` 를 읽는다. 그 참조를 **물류가 지어내면 안 되고**,
+   만드는 곳은 마스터다 (`app/master/transition.py` 의 `purchase_id_for`).
 
    ```text
-   지금        logistics.build(commitment, target_state_date=…)
-               → purchase_ids=None → purchase_id=None            ★ 정상 상태다
-   협의 뒤      logistics.build(…, purchase_ids={leg.seq: purchase_id})
-               → purchase_ids[leg.seq] 를 그대로 보관
+   마스터 경로   logistics.build(commitment, target_state_date=…)
+                 → purchase_ids=None → purchase_id=None          ★ 확정된 정상 상태다
+   값을 주는 호출 logistics.build(…, purchase_ids={leg.seq: purchase_id})
+                 → purchase_ids[leg.seq] 를 그대로 보관
    ```
 
-   🔴 **마스터 규약을 물류가 고치지 않는다.** `LogisticsTransition.build` 는 마스터
-      소유 파일에 있고, 거기에 `purchase_ids` 를 더하는 것은 **후속 협의 안건**이다.
-      그래서 이쪽 인자는 **기본값 `None`** 이고, 현행 마스터 호출이 그대로 돈다.
+   🔴 **마스터 규약이 이 인자를 빼기로 확정했다.** `LogisticsTransition.build` 는
+      마스터 소유 파일에 있고, 그쪽 주석이 못박고 있다 —
+      *"`purchase_ids` 를 받지 않는다. 물류가 쓰는 `in_transit` 은 `purchases` 를
+      참조하지 않는다 — 필요 없는 값을 규약에 얹지 않는다."*
+      그래서 `purchase_ids=None` 은 **미결이 아니라 확정된 계약**이다.
 
-   ⚠️ **읽는 쪽은 아직 없다.** `purchase_items` 조회 · 도착 판정 · 검수 · 로트 생성은
-      다음 단계다. 지금 하는 일은 **받을 준비**까지다.
+   ★ **그래도 인자를 지우지 않는다.** 기본값 `None` 인 선택 경로를 남겨 두면, 참조를
+     아는 호출자가 생겼을 때 물류 쪽을 고치지 않고 값만 실어 보낼 수 있다. 없애면
+     그날 이 파일을 다시 열어야 한다.
 
-🔴 **`in_transit` → 실제 입고(`inventory_lots`) 전환 시점은 이 판에서 안 정했다.**
-   물건이 실제로 도착해 로트가 되는 순간을 무엇으로 볼지(도착일 경과 · 검수 완료 ·
-   `purchase_items` 행 생성)는 **물류 판단이고 아직 미결이다.** 여기서 정하지 않는다 —
-   지금 임의로 정하면 그 규칙이 근거 없이 굳는다.
+   ⚠️ **참조가 없는 행은 도착일에 `blocked` 로 드러난다.** `arrival.select_due_inbound`
+      가 `purchase_id` 없는 행을 `due` 로 넘기지 않는다. 조용히 통과시키지 않으므로
+      *"참조 없이 만들어진 행"* 이 로트가 되는 일은 없다.
+
+🟢 **`in_transit` → 실제 입고(`inventory_lots`) 전환은 이제 구현돼 있다.**
+
+   ```text
+   arrival.select_due_inbound       도착 자격 판정 (eta · inbound_id · purchase_id)
+   purchase_detail.fetch_...        매입 줄 조회 — 등급·단가의 권위 출처
+   receipts.create_arrived_receipt  ARRIVED Receipt
+   inspections.record_inspection    검수 → INSPECTED
+   inbound_stock.materialize_...    accepted 수량으로 Lot 생성 + 원장 IN → PUTAWAY_DONE
+   ```
+
+   ★ **이 파일은 그 경로에 관여하지 않는다.** 여기가 하는 일은 승인 시점의 입고 예정을
+     runtime fixture 에 적는 것까지이고, 그 뒤는 위 모듈들이 각자 소유한다.
 
 ⚠️ **`confirmed_inbound` 를 같이 쓰는 것은 임시 조치다 (2026-09-04).**
 
@@ -125,13 +140,13 @@ class InboundScheduleConflict(ValueError):
 class PurchaseReferenceMissing(LookupError):
     """매입 참조 매핑을 **받았는데** 이 회차의 값이 그 안에 없다.
 
-    ★ 이 예외는 *"마스터가 참조 계약을 켰다"* 는 전제에서만 오른다. 매핑을 아예 안
-      받은 호출(현행 마스터)은 여기 오지 않는다 — 그때는 `purchase_id` 가 `None` 인
+    ★ 이 예외는 *"호출자가 매핑을 줬다"* 는 전제에서만 오른다. 매핑을 아예 안 받은
+      호출(마스터 규약이 그렇다)은 여기 오지 않는다 — 그때는 `purchase_id` 가 `None` 인
       것이 **정상 상태**다. 두 경우를 가르는 것이 이 예외의 일이다.
 
       ```text
-      purchase_ids=None    참조 계약이 아직 안 켜졌다   → purchase_id=None (정상)
-      purchase_ids={…}     켜졌는데 이 회차가 빠졌다     → 멈춘다 (무결성)
+      purchase_ids=None    마스터 규약이 안 넘긴다      → purchase_id=None (정상)
+      purchase_ids={…}     줬는데 이 회차가 빠졌다      → 멈춘다 (무결성)
       ```
 
     🔴 **대신할 값을 고르지 않는다.** 매핑에 값이 하나뿐이어도 그것을 쓰지 않는다 —
@@ -140,7 +155,7 @@ class PurchaseReferenceMissing(LookupError):
        **원가와 등급이 틀린 로트**로 굳는다.
 
     🔴 **`None` 을 넣고 넘어가지도 않는다.** 그 `None` 은 위 표의 첫 줄과 구별되지
-       않아, *"계약이 아직 안 켜졌다"* 와 *"켜졌는데 값이 빠졌다"* 가 같은 사실이 된다.
+       않아, *"규약이 안 넘긴다"* 와 *"줬는데 값이 빠졌다"* 가 같은 사실이 된다.
     """
 
 
@@ -154,8 +169,8 @@ def _purchase_reference(
     🔴 **`None` 인 매핑과 값이 빠진 매핑은 다른 사실이다.**
 
     ```text
-    purchase_ids is None            계약이 아직 안 켜졌다        → None (정상)
-    purchase_ids 에 leg.seq 없음     켜졌는데 이 회차가 빠졌다     → 예외
+    purchase_ids is None            마스터 규약이 안 넘긴다       → None (정상)
+    purchase_ids 에 leg.seq 없음     줬는데 이 회차가 빠졌다       → 예외
     purchase_ids[leg.seq] 가 빈 값   있는 척하는 값이다            → 예외
     ```
 
@@ -164,8 +179,8 @@ def _purchase_reference(
       물건이 남의 매입 줄에 조용히 달린다.
     """
     if purchase_ids is None:
-        # ★ 현행 마스터 경로다. *"아직 안 넘긴다"* 는 정상 상태이고, 그 사실을
-        #   `None` 이 그대로 적는다 — 여기서 대신 만들지 않는다.
+        # ★ 마스터 경로다. 규약이 이 값을 빼기로 확정했으므로 *"안 넘어온다"* 는
+        #   정상 상태이고, 그 사실을 `None` 이 그대로 적는다 — 대신 만들지 않는다.
         return None
     purchase_id = purchase_ids.get(leg.seq)
     if not purchase_id:
@@ -199,21 +214,21 @@ def build_next_inventory(
       있고(마스터 `commitment.py` 의 `notes` 가 왜 못 만들었는지 적는다), 그때 물류가
       반영할 입고 예정이 **없다**는 것은 정상 상태다.
 
-    🟢 **매입 참조를 받을 준비만 해 둔 자리다 (2026-09-05).**
+    🟢 **매입 참조를 받을 수 있는 자리다. 마스터는 그것을 넘기지 않는다.**
        운송 중인 물건이 도착하면 물류는 그 매입 줄에서 `purchase_item_id` ·
-       `item_id` · `grade` · `unit_price_krw_per_kg` 를 읽어야 한다. 그 참조
+       `item_id` · `grade` · `unit_price_krw_per_kg` 를 읽는다. 그 참조
        (`purchase_id`)를 만드는 곳은 **마스터**이고, 물류는 받아서 보관만 한다.
 
        ```text
-       purchase_ids=None    현행 마스터. 아직 안 넘긴다 → purchase_id=None
-       purchase_ids={1: …}  계약이 켜진 뒤             → purchase_ids[leg.seq]
+       purchase_ids=None    마스터 경로. 규약이 안 넘긴다 → purchase_id=None
+       purchase_ids={1: …}  값을 주는 호출               → purchase_ids[leg.seq]
        ```
 
     🔴 **기본값이 `None` 인 것이 이 판의 핵심이다.** 마스터 전이 규약
-       (`app/master/transition.py` 의 `LogisticsTransition`)은 아직 이 인자를 안
-       넘기고, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.** 필수로 만들면
-       현행 `apply_approval` 이 `TypeError` 로 터진다 — 물류 혼자 도메인 경계를
-       넘어 남의 규약을 강제하는 셈이다.
+       (`app/master/transition.py` 의 `LogisticsTransition`)은 이 인자를 **받지
+       않기로 확정했고**, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.**
+       필수로 만들면 마스터의 `apply_approval` 이 `TypeError` 로 터진다 — 물류 혼자
+       도메인 경계를 넘어 남의 규약을 강제하는 셈이다.
 
     🔴 **물류가 이 ID 를 짓지 않는다.** `purchase_id_for()` 를 부르거나 `approval_id`
        를 뜯어 `PUR-…` 를 다시 조립하지 않는다. 같은 규칙이 두 곳에 있으면 같은
@@ -221,8 +236,8 @@ def build_next_inventory(
        조용히 돈다.
 
     :param purchase_ids: **회차(`leg.seq`) → `purchase_id` 매핑.** 마스터가 승인 한
-        건에 대해 만들어 매입 원장·재무에도 **같은 것**을 넘기는 값이다. `None` 이면
-        *"아직 그 계약이 안 켜졌다"* 는 뜻이고, 예외가 아니다.
+        건에 대해 만들어 매입 원장·재무에 넘기는 값과 **같은 것**이다. 물류 규약에는
+        올리지 않기로 확정돼 마스터 경로에서는 늘 `None` 이 오고, 그것은 예외가 아니다.
     :raises PurchaseReferenceMissing: 매핑을 **받았는데** 이 회차의 값이 없을 때.
         **다른 항목으로 대신하지 않는다.**
     """
@@ -702,17 +717,17 @@ class LogisticsTransitionAdapter:
           바꾸는 fixture 행이 하나뿐이라 묶음도 하나다.
 
         🔴 **`purchase_ids` 는 기본값 `None` 이어야 한다.** 마스터 전이 규약
-           (`app/master/transition.py` 의 `LogisticsTransition`)은 아직 이 인자를
-           안 넘기고, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.**
-           필수로 만들면 현행 호출이 그대로 `TypeError` 로 터진다 —
+           (`app/master/transition.py` 의 `LogisticsTransition`)은 이 인자를 **받지
+           않기로 확정했고**, **그 파일은 마스터 소유라 물류가 고칠 자리가 아니다.**
+           필수로 만들면 마스터 호출이 그대로 `TypeError` 로 터진다 —
 
            ```text
-           현행 마스터  logistics.build(commitment, target_state_date=…)        계속 돈다
-           계약 개정 뒤  logistics.build(…, purchase_ids=purchase_ids)          값이 실린다
+           마스터 경로    logistics.build(commitment, target_state_date=…)      계속 돈다
+           값을 주는 호출  logistics.build(…, purchase_ids=purchase_ids)        값이 실린다
            ```
 
-           즉 **물류 쪽 준비를 먼저 끝내 두고, 마스터가 준비되는 날 인자 하나만
-           더 받으면 된다.** 그 개정은 마스터 담당자와의 후속 협의 안건이다.
+           ★ 확정된 계약이라고 인자를 지우지 않는다. 참조를 아는 호출자가 생기면
+             물류를 고치지 않고 값만 실어 보낼 수 있어야 한다.
 
         ★ 인자는 **그대로 흘려보낸다.** 어댑터에는 업무가 없다 — 회차마다 어느 값을
           집을지도, 없을 때 어떻게 할지도 `build_next_inventory` 가 정한다.
