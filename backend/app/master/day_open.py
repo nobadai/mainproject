@@ -49,6 +49,8 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
+from app.master.day_opening_repository import record_day_opening
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.calendar_walk import MAX_WALK_DAYS
 
 __all__ = [
@@ -326,12 +328,16 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
     if not present:
         # ★ 여기서 돌아선다 — **커넥션을 열지 않는다.** 열고 나서 아무 일도 안 하면
         #   빈 트랜잭션이 하루 넘김마다 열렸다 닫힌다.
-        return DayOpenOut(
+        out = DayOpenOut(
             as_of=as_of,
             status="NOT_OPENED",
             reason=f"하루 넘김 미등록: {', '.join(absent)}",
             missing=list(absent),
         )
+        # ★ **미등록도 남긴다.** *"안 열렸다"* 는 사실이고, 화면이 그 날을 지나가지
+        #   않으려면 정본에 있어야 한다.
+        _record(out)
+        return out
 
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
@@ -343,16 +349,38 @@ def open_day(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayOpe
         # ⚠️ 계약 어휘에 `FAILED` 가 없다 — *"한 파트라도 실패하면 전체는
         #    `NOT_OPENED`"* 가 계약이고 커밋 실패도 *"못 열었다"* 다. 무엇이 터졌는지는
         #    `reason` 이 나른다.
-        return DayOpenOut(
+        out = DayOpenOut(
             as_of=as_of,
             status="NOT_OPENED",
             reason=f"하루 넘김 실패: {exc}",
             missing=list(absent),
         )
+        _record(out)
+        return out
     finally:
         conn.close()
 
-    return _aggregate(as_of, parts, absent)
+    out = _aggregate(as_of, parts, absent)
+    _record(out)
+    return out
+
+
+def _record(out: DayOpenOut) -> None:
+    """개장 정본에 남긴다. **파트 트랜잭션 밖이다.**
+
+    🔴 **실패도 남아야 시도 횟수를 셀 수 있다.** 파트 트랜잭션 안에 넣으면 롤백될 때
+       *"실패했다는 사실"* 까지 사라지고, 그러면 `day_gate` 가 재시도와 사람을 못 가른다.
+
+    ★ **적재 실패가 개장을 죽이지 않는다.** 이력이 없는 것보다 하루를 못 여는 것이
+      나쁘다 (`try_save_run` 과 같은 판단).
+    """
+    record_day_opening(
+        as_of=out.as_of,
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        result=out.status,
+        reason=out.reason,
+        parts=out.parts,
+    )
 
 
 def _aggregate(as_of: date, parts: list[DayOpenPartOut], absent: tuple[str, ...]) -> DayOpenOut:

@@ -210,14 +210,56 @@ def test_366일을_넘으면_SPLIT_FORCE_OPEN_REQUIRED():
     assert gate.gap_days > SPLIT_THRESHOLD_DAYS
 
 
-def test_횟수를_아직_안_센다는_것을_사유에_적는다():
-    """🟡 계약은 실패 1회째와 2회 이상을 **횟수로** 가르는데
-    `master_day_openings.attempt_count` 가 아직 없다. **조용히 근사하지 않는다.**"""
+def test_정본이_없으면_첫_실패로_보고_그렇게_적는다():
+    """⚠️ **근사하되 근사라고 적는다.** 못 읽었다고 판단을 멈추지 않는다."""
     _등록(AS_OF - timedelta(days=2), AS_OF - timedelta(days=2))
 
     gate = check_day_gate(AS_OF, connect=lambda: _가짜커넥션())
 
-    assert "시도 횟수를 아직 안 세" in gate.reason
+    assert gate.next_action == "RETRY_OPEN_DAY"
+    assert "개장 정본이 없어 첫 실패로 본다" in gate.reason
+
+
+def test_연속_실패_2회부터_사람을_부른다(monkeypatch: pytest.MonkeyPatch):
+    """🔴 **계약 §2 — 한 번은 재시도, 두 번째부터는 사람.**
+
+    ★ **`failure_count`(연속 실패)를 본다. `attempt_count` 가 아니다.** 어제 성공하고
+      오늘 처음 실패한 것을 *"2번째"* 로 세면 **재시도 한 번 없이 사람을 부른다.**
+    """
+    from app.master.day_opening_repository import DayOpeningRecord
+
+    def 정본(failure_count: int):
+        return DayOpeningRecord(
+            as_of=AS_OF, sim_run_id="SIM-1", result="NOT_OPENED",
+            attempt_count=99, failure_count=failure_count, reason=None,
+        )
+
+    _등록(AS_OF - timedelta(days=2), AS_OF - timedelta(days=2))
+
+    monkeypatch.setattr("app.master.day_gate.read_day_opening", lambda **kw: 정본(1))
+    assert check_day_gate(AS_OF, connect=lambda: _가짜커넥션()).next_action == "RETRY_OPEN_DAY"
+
+    monkeypatch.setattr("app.master.day_gate.read_day_opening", lambda **kw: 정본(2))
+    gate = check_day_gate(AS_OF, connect=lambda: _가짜커넥션())
+    assert gate.next_action == "CONTACT_OPERATOR"
+    assert "연속 2회 실패" in gate.reason
+
+
+def test_attempt_count_가_많아도_연속_실패가_적으면_재시도다(monkeypatch: pytest.MonkeyPatch):
+    """★ **어제 성공하고 오늘 처음 실패한 경우다.** `attempt_count` 로 갈랐으면 여기서
+    사람을 불렀을 것이다."""
+    from app.master.day_opening_repository import DayOpeningRecord
+
+    monkeypatch.setattr(
+        "app.master.day_gate.read_day_opening",
+        lambda **kw: DayOpeningRecord(
+            as_of=AS_OF, sim_run_id="SIM-1", result="NOT_OPENED",
+            attempt_count=17, failure_count=1, reason=None,
+        ),
+    )
+    _등록(AS_OF - timedelta(days=2), AS_OF - timedelta(days=2))
+
+    assert check_day_gate(AS_OF, connect=lambda: _가짜커넥션()).next_action == "RETRY_OPEN_DAY"
 
 
 # ── ④ 못 물어본 것과 안 열린 것은 다르다 ──────────────────────────────────
