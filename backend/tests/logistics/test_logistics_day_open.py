@@ -20,22 +20,26 @@
 """
 
 import ast
+import importlib
 import inspect
 import json
+from collections.abc import Iterator
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Self
 
 import pytest
 
-import app.main  # noqa: F401  — import 시점에 하루 넘김을 등록한다. ⑩ 의 전제다
+import app.main  # ⑩ 의 `실제_배선` fixture 가 이 모듈을 다시 실행한다
 from app.logistics import day_open
 from app.logistics.day_open import LogisticsDayOpening, LogisticsRunAmbiguous
 from app.logistics.repository import get_active_logistics_runtime_fixture
 from app.logistics.schemas import InTransitItem, ScheduledQuantity
 from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import USAGE_SCOPE, LogisticsFixtureMissing
+from app.master import cancellation as master_cancellation
 from app.master import day_open as master_day_open
+from app.master import transition as master_transition
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 CARRY_FROM = date(2026, 1, 6)
@@ -777,7 +781,54 @@ def test_master_open_day_walks_each_run_on_its_own_row():
 # ── ⑩ 실제 배선이 실행 축을 들고 있다 ───────────────────────────────────
 
 
-def test_production_wiring_pins_the_day_opening_to_the_master_owned_run():
+@pytest.fixture
+def 실제_배선() -> Iterator[None]:
+    """`app/main.py` 의 등록을 **이 검사 안에서 다시 실행**한다.
+
+    🔴 **`import app.main` 만으로는 부족하다.** 모듈 캐시 때문에 등록은 프로세스에서
+       **딱 한 번** 일어나고, 그 뒤 누군가 등록소를 비우면 다시 채워지지 않는다.
+       그러면 아래 두 검사가 *"실제 배선"* 이 아니라 **앞 검사가 남긴 것**을 재게 된다.
+
+    ⚠️ **실제로 새는 자리가 있다 (2026-09-06 실측).**
+
+    ```text
+    tests/conftest.py 가 되돌리는 것    wiring · transition · day_open
+    안 되돌리는 것                      cancellation
+
+    tests/master/test_cancellation.py 의 autouse `_빈_등록소` 가
+    teardown 에서 cancellation.reset() 만 하고 복원하지 않는다.
+    ```
+
+       ```powershell
+       uv run pytest tests/master/test_cancellation.py tests/logistics/test_logistics_day_open.py -q
+       # 이 fixture 가 없으면 -> KeyError: 'logistics'
+       ```
+
+       기본 실행에서는 `tests/logistics` 가 `tests/master` 보다 알파벳순으로 먼저 돌아
+       우연히 초록불이었다. **부분 실행·순서 변경에서만 깨지는 자리**다.
+
+    ★ **값을 검사가 지어내지 않는다.** 비어 있으면 상수를 들고 다시 등록하는 것이
+      아니라 `app/main.py` 를 **다시 실행**해 그 파일이 적은 그대로를 세운다 — 검사가
+      production 사실을 복제하면 배선이 틀려도 초록불이 된다.
+
+    ★ **되돌리는 것은 `cancellation` 하나다.** 나머지 셋은 `tests/conftest.py` 의
+      autouse fixture 가 이미 이 fixture 보다 **먼저 떠서** 스냅샷을 들고 있다.
+      여기서 또 뜨면 같은 일을 두 번 하는 것이고, 어느 쪽이 정본인지가 흐려진다.
+    """
+    이전_취소 = dict(master_cancellation.registered_cancellations())
+    try:
+        # ★ 모듈 레벨 코드(등록 네 벌)를 다시 돌린다. FastAPI 앱을 새로 만들지만
+        #   기존 참조(`test_logistics_persistence_api` 의 `app`)는 그대로 살아 있고,
+        #   등록은 키 덮어쓰기라 몇 번 돌려도 같다. I/O 는 없다.
+        importlib.reload(app.main)
+        yield
+    finally:
+        master_cancellation.reset()
+        for part, impl in 이전_취소.items():
+            master_cancellation.register_cancellation(part, impl)
+
+
+def test_production_wiring_pins_the_day_opening_to_the_master_owned_run(실제_배선):
     """⑩ 🔴 **`app/main.py` 가 등록한 그 인스턴스**가 실행 축을 갖고 있는가.
 
     ★ **위 검사들로는 이 자리를 못 잰다.** 저기서는 검사가 스스로
@@ -802,15 +853,15 @@ def test_production_wiring_pins_the_day_opening_to_the_master_owned_run():
     assert conn.커서.params[0]["sim_run_id"] == BURN_IN_SIM_RUN_ID
 
 
-def test_production_wiring_reuses_the_run_the_other_two_adapters_already_use():
+def test_production_wiring_reuses_the_run_the_other_two_adapters_already_use(실제_배선):
     """⑩ ★ **새 상수를 만들지 않았다.** 세 등록소가 같은 값 하나를 가리킨다.
 
     ⚠️ 물류가 자기 실행 ID 를 지어내면 그 순간 *"어느 실행의 장부인가"* 의 주인이
        둘이 된다.
-    """
-    from app.master import cancellation as master_cancellation
-    from app.master import transition as master_transition
 
+    🔴 **세 등록소 중 `cancellation` 만 `tests/conftest.py` 의 복원 밖이다.** 그래서
+       이 검사가 앞 검사의 잔재를 보지 않도록 `실제_배선` 이 배선을 다시 세운다.
+    """
     하루넘김 = master_day_open.registered()["logistics"]
     전이 = master_transition.registered()["logistics"]
     취소 = master_cancellation.registered_cancellations()["logistics"]
