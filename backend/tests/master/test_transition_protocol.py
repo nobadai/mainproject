@@ -223,6 +223,24 @@ def test_물류_build_는_날짜를_키워드로_받는다() -> None:
     assert isinstance(logistics.calls[0][0], date)
 
 
+def test_두_Protocol_이_같은_인자를_요구한다() -> None:
+    """🔴 **규약 원문을 잠근다.** Protocol 은 구조적 타이핑이라 런타임에 안 걸린다 —
+    인자를 지워도 검사가 안 울면 **문서만 낡고 아무도 모른다.**
+
+    ★ `#256` 이 두 Protocol 을 같은 모양으로 맞췄는데 `purchase_ids` 만 재무 쪽에
+      반쪽으로 남아 있었고, 그 반쪽이 물류 WMS 의 Arrival 을 막았다 (`#311`).
+    """
+    import inspect
+
+    재무 = inspect.signature(transition.FinanceTransition.build).parameters
+    물류 = inspect.signature(transition.LogisticsTransition.build).parameters
+
+    assert set(재무) == set(물류), f"두 Protocol 의 인자가 갈렸다 — 재무 {set(재무)} · 물류 {set(물류)}"
+    for 이름 in ("target_state_date", "purchase_ids"):
+        assert 이름 in 물류, f"물류 규약에 {이름} 가 없다"
+        assert 물류[이름].kind is inspect.Parameter.KEYWORD_ONLY, f"{이름} 는 키워드여야 한다"
+
+
 def test_두_파트가_같은_purchase_ids_를_받는다() -> None:
     """🔴 **`#311` — 전에는 재무만 받았다** (2026-09-06 · 물류 요청).
 
