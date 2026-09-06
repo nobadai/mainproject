@@ -32,11 +32,18 @@ gate = BLOCKED   NOT_OPENED · REJECTED_GAP · NEVER_OPENED
   없다. `apply_approval` 이 미등록을 오류로 안 보는 것과 같은 태도이고, 이것이 없으면
   개장 구현이 붙기 전까지 **모든 판단이 막힌다.**
 
-🟡 **`next_action` 의 `RETRY_OPEN_DAY` / `CONTACT_OPERATOR` 를 아직 못 가른다.**
+🟢 **`RETRY_OPEN_DAY` / `CONTACT_OPERATOR` 를 이제 횟수로 가른다** (정본 표가 섰다).
 
-  계약은 *"실패 1회째는 재시도, 2회 이상은 사람"* 으로 **횟수로** 가르고, 그러려면
-  `master_day_openings.attempt_count` 가 필요한데 **그 표가 아직 없다.** 지금은 늘
-  `RETRY_OPEN_DAY` 를 내고 **그 한계를 `reason` 에 적는다** — 조용히 근사하지 않는다.
+  ```text
+  연속 실패 0~1회   → RETRY_OPEN_DAY      다시 부르면 풀릴 수 있다
+  연속 실패 2회 이상 → CONTACT_OPERATOR    재시도로 안 풀린다
+  ```
+
+  ★ **`attempt_count` 가 아니라 `failure_count`(연속 실패)를 본다.** 어제 성공하고
+    오늘 처음 실패한 것을 *"2번째"* 로 세면 **재시도 한 번 없이 사람을 부른다.**
+
+  ⚠️ **정본을 못 읽으면 근사한다.** 그때는 `RETRY_OPEN_DAY` 를 내고 **근사라는 것을
+    사유에 적는다** — 못 읽었다고 판단을 멈추지 않는다.
 """
 
 from __future__ import annotations
@@ -50,6 +57,8 @@ from pydantic import BaseModel, Field
 from app.finance.db import get_connection
 from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.day_open import PARTS, registered
+from app.master.day_opening_repository import read_day_opening
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 __all__ = ["DayGate", "FailedPart", "check_day_gate"]
 
@@ -198,9 +207,18 @@ def _blocked(as_of: date, *, closed: list[str], last: date | None, gap: int | No
         action = "ADMIN_FORCE_OPEN_REQUIRED"
         why = f"{gap}일이 밀려 상한({MAX_WALK_DAYS}일)을 넘었다 — 관리자 강제 개장이 필요하다"
     else:
-        # 🟡 **`master_day_openings.attempt_count` 가 아직 없다.** 계약은 실패 1회째와
-        #    2회 이상을 **횟수로** 가르는데 셀 자리가 없다. 늘 재시도를 권하되 **그
-        #    한계를 사유에 적는다** — 조용히 근사하지 않는다.
+        # 🟢 **연속 실패 횟수로 가른다** (계약 §2 · 정본 표가 섰다).
+        record = read_day_opening(as_of=as_of, sim_run_id=BURN_IN_SIM_RUN_ID)
+        if record is None:
+            # ⚠️ 못 읽었거나 한 번도 안 불렀다. **근사하되 근사라고 적는다.**
+            꼬리 = " 개장 정본이 없어 첫 실패로 본다"
+            action = "RETRY_OPEN_DAY"
+        elif record.failure_count >= 2:
+            꼬리 = f" 연속 {record.failure_count}회 실패했다 — 재시도로 안 풀린다"
+            action = "CONTACT_OPERATOR"
+        else:
+            꼬리 = f" 연속 실패 {record.failure_count}회 — 다시 부르면 풀릴 수 있다"
+            action = "RETRY_OPEN_DAY"
         return DayGate(
             as_of=as_of,
             gate="BLOCKED",
@@ -208,11 +226,8 @@ def _blocked(as_of: date, *, closed: list[str], last: date | None, gap: int | No
             last_opened_date=last,
             gap_days=gap,
             failed_parts=failed,
-            reason=(
-                f"{', '.join(closed)} 가 안 열렸다 (마지막 개장 {last} · {gap}일 전)."
-                " 시도 횟수를 아직 안 세므로 재시도를 권한다"
-            ),
-            next_action="RETRY_OPEN_DAY",
+            reason=f"{', '.join(closed)} 가 안 열렸다 (마지막 개장 {last} · {gap}일 전).{꼬리}",
+            next_action=action,  # type: ignore[arg-type]
         )
     return DayGate(
         as_of=as_of,

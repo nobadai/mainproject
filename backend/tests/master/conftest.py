@@ -101,6 +101,25 @@ class _주말만_쉬는_시장:
 
 
 @pytest.fixture(autouse=True)
+def 개장_정본_적재를_막는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """개장 정본(`master_day_openings`) 적재를 **DB 대신 가짜로** 받는다.
+
+    🔴 **`record_day_opening` 이 예외를 삼킨다** (이력이 없는 것보다 하루를 못 여는
+       것이 나쁘므로). 그래서 안 막으면 검사가 **조용히 실 DB 를 치고도 초록**이다.
+
+    ★ 정본 자체를 재는 검사는 `test_day_opening_repository.py` 가 가짜 커넥션을 직접
+      꽂는다.
+    """
+    monkeypatch.setattr("app.master.day_open.record_day_opening", lambda **kw: True, raising=False)
+    monkeypatch.setattr(
+        "app.master.day_opening_repository.record_day_opening", lambda **kw: True
+    )
+    monkeypatch.setattr(
+        "app.master.day_opening_repository.read_day_opening", lambda **kw: None
+    )
+
+
+@pytest.fixture(autouse=True)
 def 개장_관문을_통과시킨다(monkeypatch: pytest.MonkeyPatch) -> None:
     """개장 관문을 **DB 없이 통과**시킨다.
 
