@@ -506,7 +506,79 @@ def _rationale(
         # 주장하는 금액보다 실제 안이 클 수 있어 **근거가 산출물과 어긋났다.**
         # ⑥은 계산하지 않고 ③·⑦이 쓴 것과 같은 함수(``purchase_budget_krw``)를 부른다.
         _cash_rationale(state, constraints, as_of),
+        # 창고는 ③(총량 클립)과 ⑦(도착일 컷)이 둘 다 읽는데 근거 문장에는 없었다.
+        # **못 받은 날은 항목 자체를 안 만든다** (규칙 3) — 아래 함수가 ``None``을 낸다.
+        *filter(None, [_warehouse_rationale(state["inventory"], as_of)]),
     ]
+
+
+#: 예정분 뺄셈이 음수로 미끄러지는 것을 **오차로 볼 상한(kg)**. 이 값을 넘는 음수는
+#: 오차가 아니라 세 값의 출처가 갈라진 것이다.
+#:
+#: ⚠️ **1kg 인 이유는 표시 단위다.** 문장이 kg 정수로 반올림되므로 1kg 미만의 어긋남은
+#:   어차피 화면에 안 나타난다. 실제 오차는 실측에서 ``3.4e-13`` 규모였다.
+_CAP_EPSILON_KG = 1.0
+
+
+def _warehouse_rationale(inventory: dict, as_of: str) -> dict | None:
+    """창고 근거. **지금 이렇다만 말하고 왜 이렇게 됐나는 말하지 않는다.**
+
+    ⚠️ *"예정"* 이라 쓰는 근거는 ``cap_by_date_policy = CONFIRMED_ONLY`` 하나다 —
+      확정분만 반영한다는 뜻이라 그 수량이 **확정된 무엇**임은 안다.
+
+    🔴 그런데 *"무엇이"* 인지는 모른다. payload 에 ``approved_commitments`` 도
+      ``in_transit`` 도 안 온다 (전수 0곳). 우리 승인분일 수도 있고 다른 점유일 수도
+      있다.
+
+    🔴 그리고 *"줄었다"* 도 못 쓴다. 매 실행이 독립이라 **전날 payload 를 안 들고
+      있다** — 비교 대상이 없다.
+
+    ★ 그래서 이 문장은 *"지금 이렇다"* 만 말한다. *"왜 이렇게 됐나"* 는 ``#310`` 이
+      열리면 쓸 수 있다.
+
+    ⚠️ 실측 (2026-01-06 · ``THRU-20260106-BAECHU-D2B``)::
+
+        guaranteed 8,000 − cap_by_date 4,058.6 − used 354.4 = 3,587.0
+
+      그날 승인 수량과 정확히 같았다. 다만 그 일치는 **우리가 알아본 것**이지 payload 가
+      말해준 것이 아니다.
+
+    🔴 **창 안 최솟값을 쓴다.** 실측(관통 사흘)에서는 18일이 전부 같은 값이라 첫날과
+      구분되지 않았지만, 반출 예정이 생기면 날짜별로 갈린다. 그때 첫날을 쓰면 창
+      뒤쪽이 더 좁은 날을 **넓다고 말하게 된다** — 상한이 아니라 하한을 말해야
+      보수적이다. 도착일별 개별 판정은 ⑦ ``arrival_capacity`` 가 따로 한다.
+    """
+    cap_by_date = inventory.get("cap_by_date")
+    guaranteed = inventory.get("guaranteed_capacity_kg")
+    used = inventory.get("used_capacity_kg")
+    if not cap_by_date or guaranteed is None or used is None:
+        # 셋 중 하나라도 없으면 뺄셈이 성립하지 않는다. 0으로 채우면 "전량이 비어 있다"
+        # 또는 "전량이 찼다"를 **사실처럼** 적게 된다 (규칙 3).
+        return None
+    free = min(cap_by_date.values())
+    reserved = guaranteed - free - used
+    if reserved < -_CAP_EPSILON_KG:
+        # 세 값의 출처가 갈라진 날이다 — 지어내지 않고 안 적는다.
+        return None
+    # 🔴 **0 은 확정된 0 이다** (규칙 3). 승인 전인 날은 예정분이 정확히 0인데, 부동소수점
+    #   뺄셈이 음수 쪽으로 미끄러진다 — 실측으로 ``8000.0 − 7645.6 − 354.4 =
+    #   -3.4e-13`` 이 나왔고(2026-01-05 · ``THRU-20260105-BAECHU``) 그 날 항목이
+    #   **통째로 사라졌다.** 오차만 걷고 값은 그대로 둔다.
+    reserved = max(0.0, reserved)
+    return {
+        "source": "재고",
+        "claim": (
+            f"날짜별 입고 여유 {free:,.0f}kg "
+            f"(전량 {guaranteed:,.0f}kg 중 {reserved:,.0f}kg 이 예정)"
+        ),
+        "ref_id": f"CAP-{as_of}",
+        "evidence_grade": "SIM_FIXED",
+        "evidence_detail": (
+            "물류 cap_by_date 창의 최솟값. 예정분 = 보장용량 − 그 여유 − 현재 점유이고, "
+            "cap_by_date_policy 가 CONFIRMED_ONLY 라 확정분만 잡혀 있다 — "
+            "다만 무엇이 예정인지는 봉투에 오지 않는다"
+        ),
+    }
 
 
 def _cash_rationale(state: PurchaseAgentState, constraints: dict, as_of: str) -> dict:
