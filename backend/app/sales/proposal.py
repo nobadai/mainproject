@@ -103,6 +103,8 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
             recommended=scenario.scenario_id == fixed_recommendation,
             finance_verdict=scenario.finance_verdict,
             profitability_krw=scenario.contribution_margin_krw,
+            scenario_projected_cash_min=scenario.scenario_projected_cash_min,
+            depends_on_projected_inflow=scenario.depends_on_projected_inflow,
             inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
             sell_priority=scenario.sell_priority,
             remaining_freshness_days=scenario.remaining_freshness_days,
@@ -122,6 +124,8 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
             status=scenario.status,
             finance_verdict=scenario.finance_verdict,
             profitability_krw=scenario.contribution_margin_krw,
+            scenario_projected_cash_min=scenario.scenario_projected_cash_min,
+            depends_on_projected_inflow=scenario.depends_on_projected_inflow,
             inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
             sell_priority=scenario.sell_priority,
             remaining_freshness_days=scenario.remaining_freshness_days,
@@ -284,6 +288,16 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 ),
                 contribution_margin_rate=(
                     finance.financial_summary.contribution_margin_rate
+                    if finance and finance.financial_summary
+                    else None
+                ),
+                scenario_projected_cash_min=(
+                    finance.financial_summary.scenario_projected_cash_min
+                    if finance and finance.financial_summary
+                    else None
+                ),
+                depends_on_projected_inflow=(
+                    finance.financial_summary.depends_on_projected_inflow
                     if finance and finance.financial_summary
                     else None
                 ),

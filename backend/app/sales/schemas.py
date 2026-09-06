@@ -872,6 +872,8 @@ class SalesScenario(BaseModel):
     finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
     contribution_margin_krw: Decimal | None = None
     contribution_margin_rate: Decimal | None = None
+    scenario_projected_cash_min: Decimal | None = None
+    depends_on_projected_inflow: bool | None = None
     sell_priority: str | None = None
     authoritative_inventory_risk_severity: str | None = None
     remaining_freshness_days: int | None = None
@@ -886,6 +888,8 @@ class SalesDecisionTrace(BaseModel):
     recommended: bool = False
     finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
     profitability_krw: Decimal | None = None
+    scenario_projected_cash_min: Decimal | None = None
+    depends_on_projected_inflow: bool | None = None
     inventory_risk_severity: str | None = None
     sell_priority: str | None = None
     remaining_freshness_days: int | None = None

@@ -189,6 +189,17 @@ def test_s12_s13_exact_profit_tie_uses_stable_id_without_threshold():
     assert rank_scenarios([left, right])[0].scenario_id == "B"
 
 
+def test_exact_profit_tie_uses_finance_soft_facts_before_sales_tiebreakers():
+    base = run_proposal(_request(quantity=7000, replies=[_finance()])).scenarios[-1]
+    inflow_dependent = base.model_copy(
+        update={"scenario_id": "A", "status": "EXECUTABLE", "depends_on_projected_inflow": True}
+    )
+    self_funded = base.model_copy(
+        update={"scenario_id": "B", "status": "EXECUTABLE", "depends_on_projected_inflow": False}
+    )
+    assert rank_scenarios([inflow_dependent, self_funded])[0].scenario_id == "B"
+
+
 def test_s14_dominance_removes_only_same_terms_without_authority_advantage():
     base = run_proposal(_request(quantity=7000, replies=[_finance()])).scenarios[-1]
     better = base.model_copy(
