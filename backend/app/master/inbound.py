@@ -158,13 +158,28 @@ class InboundOut(BaseModel):
 
     ```text
     RECEIVED     한 파트라도 실제로 받았다
-    NOTHING_DUE  받은 것이 없다 — 오늘 도착 예정이 없었거나, 막혔거나, 미등록이다
+    NOTHING_DUE  **받을 대상이 없었다** — 오늘 도착 예정이 없었거나 미등록이다
+    BLOCKED      **받을 대상은 있는데 처리할 수 없다** — purchase 참조 누락 · 깨진 상태
     FAILED       받으려다 실패했다 — **아무것도 안 바뀌었다**
     ```
+
+    🔴 **`BLOCKED` 를 `NOTHING_DUE` 로 접지 않는다** (물류 지적 2026-09-06).
+
+      ```text
+      NOTHING_DUE   실제로 받을 대상이 없음
+      BLOCKED       받을 대상은 존재하지만 처리할 수 없음
+      ```
+
+      ⚠️ 접으면 **due 입고가 막힌 상태를 뒤의 orchestration 이 정상으로 오해한다.**
+        `purchase_id` 누락이나 깨진 참조로 막힌 날이 *"오늘은 올 게 없었다"* 로 보인다.
+
+      ★ **파트가 `BLOCKED` 면 전체도 `BLOCKED` 다.** 한 파트라도 받았더라도 그렇다 —
+        *"받을 게 있었는데 못 받았다"* 가 *"받았다"* 보다 먼저 알려야 하는 사실이다
+        (`day_open` 이 `REJECTED_GAP` 을 먼저 보는 것과 같은 판단).
     """
 
     as_of: date
-    status: Literal["RECEIVED", "NOTHING_DUE", "FAILED"]
+    status: Literal["RECEIVED", "NOTHING_DUE", "BLOCKED", "FAILED"]
     reason: str = ""
     parts: list[InboundPartOut] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
@@ -214,6 +229,21 @@ def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
     ★ **예외를 밖으로 내지 않는다.** `apply_approval` · `undo_approval` 과 같다 —
       입고 실패가 판단을 멈추면 그날 하루가 통째로 서고, 그건 입고 하나보다 크다.
 
+    🔴 **예외 전파 여부와 후속 진행 여부는 다른 물음이다** (물류 지적 2026-09-06).
+
+      ```text
+      예외를 안 올린다        🟢 이 함수의 계약
+      그러니 판단을 계속한다   🔴 **그런 뜻이 아니다**
+      ```
+
+      ⚠️ **입고가 `FAILED` · `BLOCKED` 인데 매입 판단을 계속하면 현재고와 capacity 가
+        실제보다 적게 반영된 상태로 판단한다.** 받았어야 할 물건이 장부에 없는 채로
+        *"창고가 비었으니 더 사자"* 가 나온다.
+
+      ★ **부르는 쪽이 정한다.** 이 함수는 상태를 값으로 돌려주고, `run_procurement`
+        진행 여부는 그것을 본 orchestration 의 결정이다 — 호출 배선은 아직 이 모듈
+        밖이다.
+
     ⚠️ **달력일이다.** 창고는 토요일에도 받는다. 실행일 달력을 쓰지 않는다.
     """
     absent = missing()
@@ -239,9 +269,29 @@ def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
     finally:
         conn.close()
 
-    received = any(part.status == "RECEIVED" for part in results)
-    return InboundOut(
-        as_of=as_of,
-        status="RECEIVED" if received else "NOTHING_DUE",
-        parts=results,
-    )
+    return _aggregate(as_of, results)
+
+
+def _aggregate(as_of: date, parts: list[InboundPartOut]) -> InboundOut:
+    """파트 결과를 전체 어휘로 취합한다.
+
+    ```text
+    BLOCKED 가 하나라도   → BLOCKED     받을 게 있었는데 못 받았다
+    RECEIVED 가 하나라도  → RECEIVED
+    전부 NOTHING_DUE      → NOTHING_DUE
+    ```
+
+    🔴 **순서가 계약이다.** `BLOCKED` 를 먼저 보는 이유는 그것이 **사람이 봐야 하는
+       사실**이기 때문이다 — `RECEIVED` 뒤로 밀면 *"오늘 받았다"* 로 지나간다.
+    """
+    blocked = [part for part in parts if part.status == "BLOCKED"]
+    if blocked:
+        return InboundOut(
+            as_of=as_of,
+            status="BLOCKED",
+            reason=f"받을 것이 있는데 막혔다: {', '.join(part.part for part in blocked)}",
+            parts=parts,
+        )
+    if any(part.status == "RECEIVED" for part in parts):
+        return InboundOut(as_of=as_of, status="RECEIVED", parts=parts)
+    return InboundOut(as_of=as_of, status="NOTHING_DUE", parts=parts)

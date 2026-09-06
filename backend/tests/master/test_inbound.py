@@ -177,14 +177,18 @@ def test_실패해도_예외가_안_오른다():
     assert out.parts == [], "실패했으면 파트 결과를 내지 않는다"
 
 
-# ── ⑤ 달력일이다 ─────────────────────────────────────────────────────────
+# ── ⑤ 날짜를 보정하지 않는다 ──────────────────────────────────────────────
 
 
-def test_토요일에도_받는다():
-    """🔴 **창고는 토요일에도 물건을 받는다.**
+def test_실행일_달력으로_as_of_를_보정하지_않는다():
+    """🔴 **마스터가 넘긴 달력일을 그대로 물류에 전달한다.**
 
-    `is_open` 은 *"시장이 서는가"* 이지 창고가 여는가가 아니다 — `open_day` 와 같은
-    결이고 `#240` 의 *"실행일은 평일만, 경과일수는 달력일"* 과 같다.
+    `next_execution_day` 로 밀면 토요일 `as_of` 가 월요일이 되고, 그건 **마스터가
+    물류 운영 정책을 대신 정하는 것**이다.
+
+    ⚠️ **주말에 창고가 실제로 여는지는 여기서 단정하지 않는다** (물류 지적
+      2026-09-06). 그건 물류 정책이고, 이 검사가 잠그는 것은 *"마스터가 날짜를 안
+      건드린다"* 하나다.
     """
     assert 토요일.weekday() == 5
     물류 = _물류(out=_받음("INB-SAT-1"))
@@ -205,7 +209,59 @@ def test_받는_날을_그대로_넘긴다():
     assert 물류.calls == [AS_OF]
 
 
-# ── ⑥ 모듈 규율 ───────────────────────────────────────────────────────────
+# ── ⑥ BLOCKED 를 NOTHING_DUE 로 접지 않는다 (물류 지적 2026-09-06) ────────
+
+
+def test_파트가_BLOCKED_면_전체도_BLOCKED_다():
+    """🔴 **접으면 뒤의 orchestration 이 정상으로 오해한다.**
+
+    ```text
+    NOTHING_DUE   실제로 받을 대상이 없음
+    BLOCKED       **받을 대상은 존재하지만 처리할 수 없음**
+    ```
+
+    ★ `purchase_id` 누락이나 깨진 참조로 막힌 날이 *"오늘은 올 게 없었다"* 로 보이면,
+      **받았어야 할 물건이 장부에 없는 채로 다음 판단이 돈다.**
+    """
+    막힘 = InboundPartOut(
+        part="logistics", status="BLOCKED", reason="purchase_id 가 없어 원장을 못 읽는다"
+    )
+    inbound.register_inbound("logistics", _물류(out=막힘))
+
+    out = receive_arrivals(AS_OF, connect=lambda: _가짜커넥션())
+
+    assert out.status == "BLOCKED"
+    assert out.status != "NOTHING_DUE", "받을 게 있는데 없다고 말했다"
+    assert "막혔다" in out.reason
+    assert out.parts[0].reason == "purchase_id 가 없어 원장을 못 읽는다"
+
+
+def test_받은_것이_있어도_막힌_것이_있으면_BLOCKED_다():
+    """★ *"받을 게 있었는데 못 받았다"* 가 *"받았다"* 보다 **먼저 알려야 하는 사실**이다.
+
+    `day_open` 이 `REJECTED_GAP` 을 `OPENED` 보다 먼저 보는 것과 같은 판단이다.
+    """
+
+    class _둘을_내는_물류:
+        def receive(self, conn: Any, *, as_of: date) -> InboundPartOut:
+            return InboundPartOut(part="logistics", status="BLOCKED", received=["INB-A-1"])
+
+    inbound.register_inbound("logistics", _둘을_내는_물류())
+
+    out = receive_arrivals(AS_OF, connect=lambda: _가짜커넥션())
+
+    assert out.status == "BLOCKED"
+
+
+def test_전부_NOTHING_DUE_면_NOTHING_DUE_다():
+    inbound.register_inbound("logistics", _물류())
+
+    out = receive_arrivals(AS_OF, connect=lambda: _가짜커넥션())
+
+    assert out.status == "NOTHING_DUE"
+
+
+# ── ⑦ 모듈 규율 ───────────────────────────────────────────────────────────
 
 
 def test_실행일_달력을_안_쓴다():
