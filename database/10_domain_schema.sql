@@ -2685,11 +2685,15 @@ CREATE TABLE haetdeul.payables (
     due_date date NOT NULL,
     original_amount_krw numeric(18,6) NOT NULL,
     paid_amount_krw numeric(18,6) DEFAULT 0 NOT NULL,
+    cancelled_amount_krw numeric(18,6) DEFAULT 0 NOT NULL,
     outstanding_amount_krw numeric(18,6) NOT NULL,
     status text NOT NULL,
     settled_date date,
-    CONSTRAINT payables_check CHECK ((abs(((original_amount_krw - paid_amount_krw) - outstanding_amount_krw)) < 0.1)),
-    CONSTRAINT payables_status_check CHECK ((status = ANY (ARRAY['OPEN'::text, 'PARTIAL'::text, 'SETTLED'::text, 'WRITEOFF'::text])))
+    cancelled_date date,
+    CONSTRAINT payables_cancelled_amount_nonnegative_check CHECK ((cancelled_amount_krw >= (0)::numeric)),
+    CONSTRAINT payables_cancelled_state_check CHECK (((status <> 'CANCELLED'::text) OR ((outstanding_amount_krw = (0)::numeric) AND (cancelled_date IS NOT NULL)))),
+    CONSTRAINT payables_check CHECK ((abs((((original_amount_krw - paid_amount_krw) - cancelled_amount_krw) - outstanding_amount_krw)) < 0.1)),
+    CONSTRAINT payables_status_check CHECK ((status = ANY (ARRAY['OPEN'::text, 'PARTIAL'::text, 'SETTLED'::text, 'WRITEOFF'::text, 'CANCELLED'::text])))
 );
 
 
@@ -2750,6 +2754,13 @@ COMMENT ON COLUMN haetdeul.payables.paid_amount_krw IS '현재까지 지급금�
 
 
 --
+-- Name: COLUMN payables.cancelled_amount_krw; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.payables.cancelled_amount_krw IS '승인/매입 원인 철회로 지급 없이 소멸한 금액(원).';
+
+
+--
 -- Name: COLUMN payables.outstanding_amount_krw; Type: COMMENT; Schema: haetdeul; Owner: -
 --
 
@@ -2768,6 +2779,13 @@ COMMENT ON COLUMN haetdeul.payables.status IS '상태값.';
 --
 
 COMMENT ON COLUMN haetdeul.payables.settled_date IS '완전 정산일.';
+
+
+--
+-- Name: COLUMN payables.cancelled_date; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.payables.cancelled_date IS '미지급 채무가 승인/매입 원인 철회로 취소된 날짜.';
 
 
 --
@@ -4946,4 +4964,3 @@ ALTER TABLE ONLY haetdeul.sim_runs
 --
 
 \unrestrict Dp8ylbnM0ZMqDiePndhCz0JGMhE5efg3O7zdJq3b0elL1tFA7Z8szCyzeMyeSmR
-

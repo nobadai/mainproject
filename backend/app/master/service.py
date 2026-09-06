@@ -18,6 +18,7 @@ from app.master.budget import CallBudget
 from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
+from app.master.execution_calendar import build_execution_calendar
 from app.master.execution_day import (
     CalendarNotCovered,
     ExecutionDayNotFound,
@@ -27,6 +28,7 @@ from app.master.execution_day import (
 )
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
+from app.master.market_calendar import get_market_calendar
 from app.master.inputs import MasterInputs, collect_inputs
 from app.master.ledger_repository import get_burn_in
 from app.master.plan import ExecutionPlan
@@ -130,6 +132,7 @@ def run_procurement(
 
     inputs = _inputs_for(request)
     commitments = _approved_commitments(request)
+    calendar_envelope, calendar_skipped = _execution_calendar_payload(request.as_of)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
         runner,
@@ -140,6 +143,10 @@ def run_procurement(
         policy_values=request.policy_values or _payload(inputs, "policy_values"),
         prior_feedback=request.prior_feedback,
         approved_commitments=commitments.carried,
+        # ★ **달력을 값으로 싣는다.** 매입은 봉투만 받는 파트라 `is_execution_day` 를
+        #   인용해도 `calendar` 를 못 준다 — 인용하면 주말만 피한다.
+        #   N4 · N5 와 같은 모양이다: 값은 아는 쪽이, 계산은 쓰는 쪽이.
+        execution_calendar=calendar_envelope,
         # ★ 값과 출처를 **떼어 놓지 않는다.** 응답에만 싣던 것을 payload 에도 나른다.
         input_sources=inputs.sources() if inputs else {},
         # 🔴 실어 주기만 하지 않고 **막는 쪽까지** 잇는다 (2026-09-03).
@@ -159,7 +166,10 @@ def run_procurement(
     # 🔴 **돈 날에도 못 본 축은 적는다.** 공휴일 축이 빠진 채 "실행일이다" 라고 답했으면
     #   그건 *"주말이 아니다"* 까지만 확인한 것이다 — 비워 두면 다 봤다고 읽힌다
     #   (`verifier.py` 의 `skipped` 와 같은 규율).
-    response.skipped_checks = [*response.skipped_checks, *execution_day.skipped]
+    #
+    # ★ **봉투를 못 실은 것도 같은 자리에 적는다.** 문 앞 판정은 통과했는데 지평 어딘가가
+    #   안 덮이는 경우가 있다 — 그때 매입은 오늘까지의 동작(밀지 않음)으로 돈다.
+    response.skipped_checks = [*response.skipped_checks, *execution_day.skipped, *calendar_skipped]
     response.report_text = render_answer(facts_from_procurement(response))
     # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
     #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
@@ -242,6 +252,41 @@ def _next_execution_day_or_none(
         return next_execution_day(as_of), why
     except ExecutionDayNotFound as exc:  # pragma: no cover - 주말은 최대 이틀이다
         return None, f"다음 실행일: 못 찾았다 — {exc}"
+
+
+def _execution_calendar_payload(as_of: date) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    """매입에 실을 실행일 봉투와, **못 실었으면 그 사유.**
+
+    🔴 **문 앞과 축이 다르다** (`#303` 후속 · 매입 리뷰).
+
+      ```text
+      문 앞     "그날 ML 예측이 있어 판단을 도는가"   holiday_nm + 주말   get_calendar()
+      봉투      "그날 시장에서 살 수 있는가"          is_open            get_market_calendar()
+      ```
+
+      ★ 마스터가 토요일에 안 도는 이유는 *"장이 안 서서"* 가 아니라 **예측이 없어서**다.
+        2026년 토요일 45일에 가락이 서고, 그 45일을 문 앞 축으로 밀면 **살 수 있는 날에
+        못 산다고 계획한다.**
+
+    ★ **묻는 범위도 다르다.** 문 앞은 하루를 묻고 봉투는 **지평 전체**를 묻는다 —
+      오늘은 덮이는데 지평 끝이 안 덮이는 날이 있다.
+
+    🔴 **못 덮으면 봉투를 통째로 안 싣는다.** 덮인 데까지만 실으면 지평이 거짓말을
+       한다 — 받는 쪽은 `horizon_end` 까지 다 봤다고 읽는다. 반쪽 달력보다 **없는
+       달력이 낫다**: 없으면 매입이 오늘까지의 동작(밀지 않음)으로 돌고, 그 사실이
+       `skipped_checks` 에 남는다.
+
+    ⚠️ **달력이 죽었다고 매입 판단을 멈추지 않는다.** 멈추면 시뮬레이션 전체가 선다.
+      `execution_day.py` 가 정한 태도 그대로다 — *"부르는 쪽이 정한다."*
+    """
+    try:
+        envelope = build_execution_calendar(as_of, market=get_market_calendar())
+    except CalendarNotCovered as exc:
+        return None, (
+            f"실행일 봉투: {as_of.isoformat()} 부터의 지평을 달력이 다 안 덮는다 — {exc}."
+            " 매입에 비영업일 목록을 안 실었다 (매입은 회차일을 밀지 않는다)",
+        )
+    return envelope.as_payload(), ()
 
 
 def _not_execution_day_reason(as_of: date, following: date | None) -> str:

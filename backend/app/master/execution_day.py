@@ -107,8 +107,8 @@ class ExecutionDayNotFound(RuntimeError):
 class HolidayCalendar(Protocol):
     """공휴일 축. **이 날이 공휴일인가** 하나만 답한다.
 
-    🔴 **판정 근거는 `holiday_nm` 하나다** (`#282` §A). 구현체가 `v_ml_batch_days`
-       를 읽더라도 `is_open` · `status` · `has_batch` 는 안 본다.
+    🔴 **판정 근거는 `holiday_nm` 하나다** (`#282` §A). 구현체가 `ml_calendar_days`
+       를 읽더라도 `is_open` · `is_survey` · `status` · `has_batch` 는 안 본다.
 
        ```text
        is_open      뜻이 흔들린다 — 실측 2026-01-02 는 is_open=False 인데

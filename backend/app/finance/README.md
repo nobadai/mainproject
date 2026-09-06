@@ -491,6 +491,33 @@ finance_states  UNIQUE (sim_run_id, financing_mode, state_date)  일별 snapshot
 일별 상태에 원자적으로 더한다. 같은 승인 retry는 Payable INSERT가 0건이므로 상태도
 다시 증가하지 않는다. 같은 날짜 승인 순서가 바뀌어도 최종 업무 숫자는 같다.
 
+### 미지급 매입채무 취소는 지급이나 상각이 아니다
+
+`FinanceCancellationAdapter.cancel(conn, *, purchase_ids, as_of, target_state_date)`는
+향후 Master 취소 전이가 부를 Finance-owned 표면이다. Master 취소 Protocol은 아직
+없으므로 이 브랜치에서 등록하거나 다른 파트의 원장을 건드리지 않는다.
+
+```text
+OPEN + paid=0   → CANCELLED
+original        → 그대로
+paid            → 그대로 0
+cancelled       → 취소 직전 outstanding 전액
+outstanding     → 0
+settled_date    → 그대로
+```
+
+`WRITEOFF`는 존재하던 채무의 상각이고, `CANCELLED`는 승인·매입 원인이 철회되어
+지급 전 의무가 소멸한 사실이다. 취소를 DELETE·가짜 지급·음수 승인으로 만들지 않는다.
+
+호출은 대상 `purchase_id` 전체를 먼저 `FOR UPDATE`로 잠그고 검증한다. `PARTIAL`·
+`SETTLED`·`WRITEOFF` 또는 없는 ID가 하나라도 섞이면 일부 성공 없이 실패한다. 실제
+`OPEN → CANCELLED`로 바뀐 행의 `RETURNING cancelled_amount_krw` 합계만 target daily
+state의 `unsettled_purchase_payables_krw`에서 뺀다. retry의 이미 `CANCELLED`인 행은
+변경 0건이므로 다시 차감하지 않는다. target state가 없을 때만 exact `as_of` state를
+carry하며, 날짜는 Master가 준 값을 그대로 쓴다. 안정적인 취소 사건 ID가 없는 현재
+계약에서는 `OPEN`과 `CANCELLED`가 섞인 대상 집합을 합법적 부분 retry로 증명할 수
+없으므로 fail-closed한다.
+
 ## 패키지 구조
 
 책임이 어디 사는지가 파일 위치로 보이게 정리했다. 전체 디렉터리 이동보다 **책임 분리와
@@ -507,6 +534,7 @@ app/finance/
 ├─ state_identity.py  한 Finance 축·날짜의 결정론 state ID
 ├─ day_open.py        Master DayOpening 구조 계약의 Finance 구현
 ├─ transition.py      승인 약정 → 다음 재무 상태 · 재무 원장 쓰기 (연결은 부르는 쪽 것)
+├─ cancellation.py    미지급 Payable 취소 · 일별 상태 역분개 (Master 배선 대기)
 ├─ tools.py           결정론 재무 계산 (공식의 유일한 주인)
 ├─ rules.py           결정론 판정 (verdict 소유)
 ├─ execution.py       Evidence · DeptMeta(Critic 사이드카) · 실행이력 저장/조회
