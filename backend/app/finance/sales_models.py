@@ -81,6 +81,32 @@ class InventoryCostBasis(BaseModel):
         return value
 
 
+class ConditionalSupplyCostBasis(BaseModel):
+    """Purchase/Master가 넘긴 조건부 공급분의 권위 원가."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount_krw: Decimal = Field(ge=0)
+    cost_method: SalesCostMethod
+    included_components: tuple[str, ...] = ()
+    source_ref: str = Field(min_length=1)
+    evidence_grade: EvidenceGrade
+
+    @field_validator("amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @field_validator("included_components")
+    @classmethod
+    def reject_blank_or_duplicate_components(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name.strip() for name in value):
+            raise ValueError("included_components must not contain blank names")
+        if len(set(value)) != len(value):
+            raise ValueError("included_components must not repeat a component")
+        return value
+
+
 class VerifiedDirectCost(BaseModel):
     """재고원가 밖에서 검증된 직접비 1건. 추정치·LLM 산출값은 들어올 수 없다."""
 
@@ -115,6 +141,10 @@ class SalesCostBasis(BaseModel):
     inventory_cost_method: SalesCostMethod
     inventory_source_ref: str = Field(min_length=1)
     inventory_evidence_grade: EvidenceGrade
+    conditional_supply_amount_krw: Decimal | None = None
+    conditional_supply_cost_method: SalesCostMethod | None = None
+    conditional_supply_source_ref: str | None = None
+    conditional_supply_evidence_grade: EvidenceGrade | None = None
     #: 실제로 더해진 직접비만 남는다.
     added_direct_costs: tuple[VerifiedDirectCost, ...] = ()
     #: 이미 재고원가에 포함돼 있어 더하지 않은 구성요소 — 중복 계상을 막았다는 기록.
@@ -252,6 +282,7 @@ class SalesValidationInput(BaseModel):
     collection_reference_date: date | None = None
     supply: SalesSupply | None = None
     inventory_cost_basis: InventoryCostBasis | None = None
+    conditional_supply_cost_basis: ConditionalSupplyCostBasis | None = None
     direct_costs: tuple[VerifiedDirectCost, ...] = ()
     source_ref: str = Field(min_length=1)
 

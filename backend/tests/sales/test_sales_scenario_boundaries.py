@@ -52,6 +52,7 @@ def _request(requested, confirmed, **over):
             "requested_quantity_kg": requested,
             "preferred_unit_price_krw": 2000,
             "preferred_delivery_date": "2026-09-10",
+            "allow_additional_sourcing": True,
         },
         "logistics_context": _logistics(confirmed),
     }

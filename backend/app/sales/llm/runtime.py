@@ -56,18 +56,20 @@ def load_settings() -> LLMSettings:
     )
 
 
-def interpret_candidates(candidates: list[SalesCandidate]) -> SalesRecommendation:
+def interpret_candidates(
+    candidates: list[SalesCandidate], *, recommended_candidate_id: str | None = None
+) -> SalesRecommendation:
     """Gemini 실패는 Scenario를 바꾸지 않고 결정론 fallback으로만 전환한다."""
     settings = load_settings()
     if not candidates:
-        return _fallback(candidates, "SKIPPED_TEMPLATE", settings, 0)
+        return _fallback(candidates, "SKIPPED_TEMPLATE", settings, 0, recommended_candidate_id)
     if not settings.enabled:
-        return _fallback(candidates, "DISABLED", settings, 0)
+        return _fallback(candidates, "DISABLED", settings, 0, recommended_candidate_id)
     try:
         output = _call_gemini(_safe_context(candidates), settings)
-        return _validated(candidates, output, settings)
+        return _validated(candidates, output, settings, recommended_candidate_id)
     except Exception:  # noqa: BLE001 - 외부 호출 실패는 Sales 제안 실패가 아니다.
-        return _fallback(candidates, "FALLBACK", settings, 1)
+        return _fallback(candidates, "FALLBACK", settings, 1, recommended_candidate_id)
 
 
 def _safe_context(candidates: list[SalesCandidate]) -> list[CandidateInterpretationInput]:
@@ -148,11 +150,13 @@ def _gemini_safe_schema(node: Any) -> Any:
     return safe
 
 
-def _validated(candidates, output, settings) -> SalesRecommendation:
+def _validated(candidates, output, settings, fixed_recommendation=None) -> SalesRecommendation:
     """후보 ID·빈 문장·숫자 포함 여부를 검사해 LLM의 권한을 제한한다."""
     selectable = {c.candidate_id for c in candidates if "FINANCE_FAIL" not in c.risks}
-    if output.recommended_candidate_id not in selectable:
+    if fixed_recommendation is None and output.recommended_candidate_id not in selectable:
         raise ValueError("unknown candidate")
+    if fixed_recommendation is not None and fixed_recommendation not in selectable:
+        raise ValueError("deterministic recommendation is not selectable")
     texts = (
         output.summary,
         output.recommendation_reason,
@@ -163,7 +167,7 @@ def _validated(candidates, output, settings) -> SalesRecommendation:
         raise ValueError("unsafe LLM output")
     return SalesRecommendation(
         status="SUCCESS",
-        recommended_candidate_id=output.recommended_candidate_id,
+        recommended_candidate_id=(fixed_recommendation or output.recommended_candidate_id),
         summary=output.summary,
         recommendation_reason=output.recommendation_reason,
         risk_explanation=output.risk_explanation,
@@ -175,14 +179,22 @@ def _validated(candidates, output, settings) -> SalesRecommendation:
     )
 
 
-def _fallback(candidates, status, settings, attempts) -> SalesRecommendation:
+def _fallback(
+    candidates, status, settings, attempts, fixed_recommendation=None
+) -> SalesRecommendation:
     selectable = [c for c in candidates if "FINANCE_FAIL" not in c.risks]
     candidate = next((c for c in selectable if not c.conditional), None)
     if candidate is None and selectable:
         candidate = selectable[0]
     return SalesRecommendation(
         status=status,
-        recommended_candidate_id=candidate.candidate_id if candidate else None,
+        recommended_candidate_id=(
+            fixed_recommendation
+            if fixed_recommendation in {item.candidate_id for item in selectable}
+            else candidate.candidate_id
+            if candidate
+            else None
+        ),
         summary="규칙 기반 판매안을 준비했습니다.",
         recommendation_reason="외부 해석 없이 근거가 있는 판매 조건을 우선 표시합니다.",
         risk_explanation="외부 검증 결과와 조건부 조달 여부를 함께 확인해 주세요.",
