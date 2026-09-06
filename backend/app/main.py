@@ -18,6 +18,9 @@ from app.logistics.adapter import logistics_port
 from app.logistics.day_open import LogisticsDayOpening
 from app.logistics.router import router as logistics_router
 from app.logistics.transition import LogisticsTransitionAdapter
+from app.logistics.cancellation import LogisticsCancellationAdapter
+from app.master.cancellation import register_cancellation
+from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.day_open import register_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
@@ -98,6 +101,32 @@ register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_S
 #    켰다 — **마이그레이션과 이 두 줄은 짝이다.**
 register_day_opening("logistics", LogisticsDayOpening())
 register_day_opening("finance", FinanceDayOpening())
+
+
+# ── 승인 취소 (undo_approval) ───────────────────────────────────────────
+#
+# 🔴 **세 번째 등록소다.** 전이는 *"승인이 장부를 바꾸는 방법"*, 하루 넘김은 *"하루가
+#    넘어가는 방법"*, 여기는 *"승인을 물리는 방법"* 이다. 한 사전에 섞으면
+#    **전이는 되는데 취소는 안 되는 상태**를 표현할 수 없고, 실제로 어제까지가 그
+#    상태였다 (재무만 `#302` 로 섰고 물류는 없었다).
+#
+# ⚠️ **어댑터 둘 다 마스터가 임시로 얹은 것이다** (`#280` 전례).
+#
+#    ```text
+#    app/master/finance_cancellation.py    재무 함수(#302)를 Protocol 에 잇기만 한다
+#    app/logistics/cancellation.py          걷는 규칙까지 마스터가 썼다 (물류 통보 · 이견 없음)
+#    ```
+#
+#    각 부서가 자기 구현을 올리면 **그 파일을 지우고 이 두 줄만 바꾸면 된다.**
+#
+# 🔴 **DB 어휘가 아직 없다.** `master_decisions.decision` 에 `CANCEL` 이,
+#    `payables.status` 에 `CANCELLED` 가 없어 실 DB 에서는 이 경로가 CHECK 로 막힌다 —
+#    `database/master/master_decision_cancel.sql` 과
+#    `database/finance/payable_cancellation.sql` 을 **한 번에** 적용하는 날 열린다.
+#    등록을 먼저 해 두는 이유는 `apply_approval` 때와 같다: 배선이 없는 것과 어휘가
+#    없는 것은 다른 사실이고, 둘을 같은 문장으로 접으면 무엇을 고칠지가 사라진다.
+register_cancellation("finance", FinanceCancellationAdapter())
+register_cancellation("logistics", LogisticsCancellationAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
 
 app.include_router(critic_router)
 app.include_router(sales_router)
