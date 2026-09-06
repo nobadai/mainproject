@@ -60,12 +60,20 @@ DECLARE
     ok boolean := false;
 BEGIN
     BEGIN
+        -- ⚠️ `decision_id` 는 NOT NULL 이고 default 가 없다 (실측). 안 주면 CHECK 가
+        --    아니라 NOT NULL 로 터지고, 그러면 "CANCEL 이 막혔다" 로 잘못 읽힌다.
         INSERT INTO haetdeul.master_decisions
-            (request_id, decision_seq, decision, decided_by, end_code_at_decision)
-        VALUES ('MIGRATION-PROBE', 1, 'CANCEL', 'migration', 'E1_APPROVED');
+            (decision_id, request_id, decision_seq, decision, decided_by, end_code_at_decision)
+        VALUES (gen_random_uuid(), 'MIGRATION-PROBE', 1, 'CANCEL', 'migration', 'E1_APPROVED');
         ok := true;
-    EXCEPTION WHEN check_violation THEN
-        ok := false;
+    EXCEPTION
+        WHEN check_violation THEN
+            ok := false;
+        WHEN others THEN
+            -- 🔴 **CHECK 말고 다른 이유로 터진 것을 "어휘가 안 열렸다" 로 읽지 않는다.**
+            --    실측에서 여기가 NOT NULL 위반으로 터졌고, 사유가 뭉개져 있었다면
+            --    한참을 CHECK 만 들여다봤을 것이다.
+            RAISE EXCEPTION '검증 삽입이 CHECK 가 아닌 이유로 실패했다: %', SQLERRM;
     END;
     IF NOT ok THEN
         RAISE EXCEPTION 'CANCEL 이 여전히 CHECK 에 걸린다 — 어휘가 안 열렸다';
