@@ -20,6 +20,7 @@
 """
 
 import ast
+import inspect
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,7 +29,8 @@ from typing import Any, Self
 import pytest
 
 from app.logistics import day_open
-from app.logistics.day_open import LogisticsDayOpening
+from app.logistics.day_open import LogisticsDayOpening, LogisticsRunAmbiguous
+from app.logistics.repository import get_active_logistics_runtime_fixture
 from app.logistics.schemas import InTransitItem, ScheduledQuantity
 from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import USAGE_SCOPE, LogisticsFixtureMissing
@@ -36,6 +38,11 @@ from app.master import day_open as master_day_open
 
 CARRY_FROM = date(2026, 1, 6)
 AS_OF = CARRY_FROM + timedelta(days=1)
+
+#: 이 검사가 쓰는 두 시뮬레이션 실행. **같은 `as_of` · 같은 `usage_scope` 에 공존할 수
+#: 있는 것이 DB 사실이다** (`uq_log_runtime_fixture (sim_run_id, as_of, usage_scope)`).
+SIM_A = "SIM-BURNIN-202512-DAY30"
+SIM_B = "SIM-WHATIF-20260906"
 
 #: 전날 행. **어제 떠 있던 입고 한 건**이 `in_transit` 과 `confirmed_inbound` 양쪽에
 #: 짝으로 들어 있다 — 승인 전이(`persist_inventory`)가 두 칸을 함께 쓴 뒤의 모양이다.
@@ -53,8 +60,8 @@ _그_입고의_확정일정 = {
 }
 
 기준행: dict[str, Any] = {
-    "fixture_id": "LOG-RUNTIME-SIM-BURNIN-202512-DAY30-20260106",
-    "sim_run_id": "SIM-BURNIN-202512-DAY30",
+    "fixture_id": f"LOG-RUNTIME-{SIM_A}-20260106",
+    "sim_run_id": SIM_A,
     "as_of": CARRY_FROM,
     "in_transit_status": "CONFIRMED",
     "in_transit_json": [_떠있는_입고],
@@ -79,13 +86,22 @@ _그_입고의_확정일정 = {
 
 
 class 가짜커서:
-    """실행된 SQL 과 파라미터를 기록한다. **어느 날이 열려 있는지는 밖에서 정한다.**"""
+    """실행된 SQL 과 파라미터를 기록한다. **어느 실행의 어느 날이 열려 있는지는 밖에서
+    정한다.**
 
-    def __init__(self, 열린_날: set[date]) -> None:
+    🔴 **날짜 집합이 아니라 `{날: {실행…}}` 이다 (2026-09-06).** 종전에는 `set[date]`
+       였고, 그 모양 자체가 *"그날이 열렸다"* 만 표현할 수 있어 **어느 실행의 그날인지를
+       물어볼 수 없었다.** 재려는 버그가 정확히 그 구분이라 저장 모양부터 바꾼다.
+
+    ★ `is_open` 의 `WHERE` 를 흉내 낸다 — `sim_run_id` 조건이 있으면 그 실행만,
+      없으면 그날의 모든 실행을 `SELECT DISTINCT` 결과로 돌려준다.
+    """
+
+    def __init__(self, 열린_날: dict[date, set[str]]) -> None:
         self.열린_날 = 열린_날
         self.queries: list[str] = []
         self.params: list[Any] = []
-        self._행: tuple[int, ...] | None = None
+        self._행들: list[tuple[str]] = []
 
     def __enter__(self) -> Self:
         return self
@@ -97,24 +113,29 @@ class 가짜커서:
         statement = str(query)
         self.queries.append(statement)
         self.params.append(params)
-        if "SELECT 1" not in statement:
-            self._행 = None
+        if "SELECT DISTINCT sim_run_id" not in statement:
+            self._행들 = []
             return
         assert isinstance(params, dict)
-        self._행 = (1,) if params["as_of"] in self.열린_날 else None
+        실행들 = self.열린_날.get(params["as_of"], set())
+        if "sim_run_id = %(sim_run_id)s" in statement:
+            # ★ 조건이 걸린 질의는 **그 실행만** 돌려준다. 여기서 다 돌려주면 가짜
+            #   커서가 진짜 DB 보다 관대해져, WHERE 가 빠져도 검사가 통과한다.
+            실행들 = 실행들 & {params["sim_run_id"]}
+        self._행들 = [(실행,) for 실행 in sorted(실행들)][:2]  # LIMIT 2
 
-    def fetchone(self) -> object:
-        return self._행
+    def fetchall(self) -> list[tuple[str]]:
+        return self._행들
 
 
 class 가짜커넥션:
     """commit · rollback 이 **몇 번** 불렸나를 센다 — 물류 쪽에서는 0 이어야 한다."""
 
-    def __init__(self, 열린_날: set[date] | None = None) -> None:
+    def __init__(self, 열린_날: dict[date, set[str]] | None = None) -> None:
         self.commits = 0
         self.rollbacks = 0
         self.closes = 0
-        self.커서 = 가짜커서(set() if 열린_날 is None else 열린_날)
+        self.커서 = 가짜커서({} if 열린_날 is None else 열린_날)
 
     def cursor(self) -> 가짜커서:
         return self.커서
@@ -127,6 +148,11 @@ class 가짜커넥션:
 
     def close(self) -> None:
         self.closes += 1
+
+
+def _한_실행이_연_날들(*날: date, 실행: str = SIM_A) -> dict[date, set[str]]:
+    """단일 run 환경 — 기존 검사들이 서 있던 그 모양이다."""
+    return {하루: {실행} for 하루 in 날}
 
 
 def _insert_문(conn: 가짜커넥션) -> str:
@@ -258,9 +284,9 @@ def _스냅샷(행: dict[str, Any], 바탕):
     )
 
 
-def _연다(conn: 가짜커넥션 | None = None) -> 가짜커넥션:
-    사용할 = 가짜커넥션({CARRY_FROM}) if conn is None else conn
-    LogisticsDayOpening().open_day(사용할, as_of=AS_OF, carry_from=CARRY_FROM)
+def _연다(conn: 가짜커넥션 | None = None, *, sim_run_id: str | None = None) -> 가짜커넥션:
+    사용할 = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM)) if conn is None else conn
+    LogisticsDayOpening(sim_run_id=sim_run_id).open_day(사용할, as_of=AS_OF, carry_from=CARRY_FROM)
     return 사용할
 
 
@@ -273,26 +299,119 @@ def _연다(conn: 가짜커넥션 | None = None) -> 가짜커넥션:
 )
 def test_is_open_tells_whether_that_days_row_exists(물어본_날, 기대):
     """① 있는 날 True · 없는 날 False."""
-    conn = 가짜커넥션({CARRY_FROM})
+    conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM))
 
     assert LogisticsDayOpening().is_open(conn, as_of=물어본_날) is 기대
 
 
-def test_is_open_asks_by_usage_scope_and_as_of_only():
-    """① `sim_run_id` 를 조건에 넣지 않는다.
+def test_is_open_asks_by_sim_run_id_and_as_of_and_usage_scope():
+    """① 🔴 **조회 축이 `(sim_run_id, as_of, usage_scope)` 다.**
 
-    ⚠️ `is_open` 은 인자가 `as_of` 뿐이라 `sim_run_id` 를 **받을 자리가 없다.** 모듈
-       상수로 박으면 실행이 둘이 되는 날 물류 코드를 고쳐야 한다. 읽는 쪽
-       (`repository.get_active_logistics_runtime_fixture`)도 `usage_scope + as_of` 로
-       고르므로 같은 눈으로 본다.
+    DB 의 유일성 축(`uq_log_runtime_fixture`)과 같은 축이어야 한다 — 다르면 유일해야
+    할 질문이 유일하지 않다.
     """
-    conn = 가짜커넥션({CARRY_FROM})
+    conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM))
+
+    LogisticsDayOpening(sim_run_id=SIM_A).is_open(conn, as_of=CARRY_FROM)
+
+    문장 = conn.커서.queries[0]
+    assert "sim_run_id = %(sim_run_id)s" in 문장
+    assert conn.커서.params[0] == {
+        "as_of": CARRY_FROM,
+        "usage_scope": USAGE_SCOPE,
+        "sim_run_id": SIM_A,
+    }
+
+
+def test_is_open_does_not_pin_a_run_it_was_not_given():
+    """① 주입을 안 받았으면 조건에 `sim_run_id` 를 **지어내 넣지 않는다.**
+
+    ⚠️ 모듈 상수를 박아 넣으면 실행이 둘이 되는 날 물류 코드를 고쳐야 하고, 그때까지
+       **틀린 실행으로 좁힌 조회**가 조용히 돈다 — 안 좁히는 것보다 나쁘다.
+    """
+    conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM))
 
     LogisticsDayOpening().is_open(conn, as_of=CARRY_FROM)
 
-    문장 = conn.커서.queries[0]
-    assert "sim_run_id" not in 문장
+    assert "sim_run_id = %(sim_run_id)s" not in conn.커서.queries[0]
     assert conn.커서.params[0] == {"as_of": CARRY_FROM, "usage_scope": USAGE_SCOPE}
+
+
+# ── ①-A 다른 실행의 행으로 오판하지 않는다 (Case 1) ─────────────────────
+
+
+def test_is_open_does_not_read_another_runs_row_as_open():
+    """①-A 🔴 **이 PR 의 핵심이다.** SIM-A 가 열려 있어도 SIM-B 는 안 열린 것이다.
+
+    ```text
+    SIM-A / 2026-01-06 / AGENT_MVP_DEMO   있다
+    SIM-B / 2026-01-06 / AGENT_MVP_DEMO   없다
+
+    SIM-B is_open → False
+    ```
+
+    ⚠️ **True 가 나오면 SIM-B 행은 영영 안 선다.** 마스터는 `is_open` 이 참인 날을
+       anchor 로 잡고 **그 다음 날부터** 만들기 때문에, 남의 행 하나가 내 실행의 모든
+       날을 이미 열린 것으로 만든다.
+    """
+    conn = 가짜커넥션({CARRY_FROM: {SIM_A}})
+
+    assert LogisticsDayOpening(sim_run_id=SIM_A).is_open(conn, as_of=CARRY_FROM) is True
+    assert LogisticsDayOpening(sim_run_id=SIM_B).is_open(conn, as_of=CARRY_FROM) is False
+
+
+def test_is_open_sees_its_own_run_when_two_runs_share_the_day():
+    """①-A 두 실행이 같은 날에 공존해도 각자 자기 것만 본다."""
+    conn = 가짜커넥션({CARRY_FROM: {SIM_A, SIM_B}, AS_OF: {SIM_A}})
+
+    열린것 = LogisticsDayOpening(sim_run_id=SIM_A)
+    아직 = LogisticsDayOpening(sim_run_id=SIM_B)
+
+    assert 열린것.is_open(conn, as_of=AS_OF) is True
+    assert 아직.is_open(conn, as_of=AS_OF) is False
+
+
+def test_is_open_refuses_to_answer_when_two_runs_share_the_day_and_none_was_given():
+    """①-A 🔴 **주입을 안 받았는데 실행이 둘 보이면 답하지 않는다.**
+
+    fail-open 금지의 자리다 — 여기서 True 를 내면 *"어느 실행의 열림인지 모르는 채"*
+    하루 넘김이 통과한다. `LogisticsFixtureMissing`(부재)이 아니라 무결성 위반이라
+    다른 예외로 낸다.
+    """
+    conn = 가짜커넥션({CARRY_FROM: {SIM_A, SIM_B}})
+
+    with pytest.raises(LogisticsRunAmbiguous) as excinfo:
+        LogisticsDayOpening().is_open(conn, as_of=CARRY_FROM)
+
+    assert "sim_run_id" in str(excinfo.value)
+
+
+def test_blank_sim_run_id_is_rejected_at_construction():
+    """①-A 빈 문자열은 미주입과 다른 **배선 실수**다 — 조용히 접지 않는다."""
+    with pytest.raises(ValueError, match="sim_run_id"):
+        LogisticsDayOpening(sim_run_id="   ")
+
+
+def test_the_opening_eye_and_the_reading_eye_share_the_run_axis():
+    """①-A 🔴 **한쪽만 실행 축을 갖는 상태를 막는다.**
+
+    ```text
+    is_open      ┐
+    open_day     ├─→ sim_run_id + as_of + usage_scope
+    repository   ┘
+    ```
+
+    ⚠️ *"열렸다"* 를 판정하는 눈과 *"그날 상태"* 를 읽는 눈이 다른 축을 쓰면, 열렸다고
+       본 행과 실제로 읽는 행이 다른 실행의 것일 수 있다 — 이 이슈가 고친 바로 그
+       모양이라 구조로 잠근다.
+    """
+    조회 = inspect.signature(get_active_logistics_runtime_fixture).parameters
+    생성 = inspect.signature(LogisticsDayOpening.__init__).parameters
+
+    assert "sim_run_id" in 조회, "읽는 쪽이 실행 축을 못 받으면 반쪽이다"
+    assert "sim_run_id" in 생성, "판정하는 쪽이 실행 축을 못 받으면 반쪽이다"
+    assert 조회["sim_run_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert 생성["sim_run_id"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 # ── ② open_day 가 물려받아 행을 만든다 ──────────────────────────────────
@@ -477,7 +596,7 @@ def test_open_day_raises_when_the_carry_from_row_is_missing():
     물려받을 곳이 없는데 행을 세우면 `evidence_grade` · `approved_by` · status 들을
     기본값으로 지어내게 되고, **지어낸 값이 그날의 사실로 남는다.**
     """
-    conn = 가짜커넥션(열린_날=set())
+    conn = 가짜커넥션(열린_날={})
 
     with pytest.raises(LogisticsFixtureMissing) as excinfo:
         LogisticsDayOpening().open_day(conn, as_of=AS_OF, carry_from=CARRY_FROM)
@@ -486,6 +605,61 @@ def test_open_day_raises_when_the_carry_from_row_is_missing():
     assert str(CARRY_FROM) in 메시지
     assert USAGE_SCOPE in 메시지
     assert not [query for query in conn.커서.queries if "INSERT INTO" in query], "행을 안 만든다"
+
+
+# ── ⑦-A carry-forward 도 같은 실행에서만 (Case 3) ───────────────────────
+
+
+def test_open_day_refuses_to_carry_from_another_runs_previous_day():
+    """⑦-A 🔴 **SIM-B 의 다음 날을 SIM-A 의 전날에서 물려받지 않는다.**
+
+    ```text
+    SIM-A / 01-06   있다
+    SIM-B / 01-06   없다
+
+    SIM-B open_day(as_of=01-07, carry_from=01-06)  → LogisticsFixtureMissing
+    ```
+
+    ⚠️ 종전에는 가드(`is_open`)가 SIM-A 를 보고 통과했다. 그 뒤 INSERT 의 WHERE 도
+       실행을 안 좁혔으므로 **SIM-A 의 01-07 행이 한 번 더 시도**됐고 SIM-B 는 아무
+       행도 못 얻은 채 마스터에게 `PART_OPENED` 로 답했다.
+    """
+    conn = 가짜커넥션({CARRY_FROM: {SIM_A}})
+
+    with pytest.raises(LogisticsFixtureMissing) as excinfo:
+        LogisticsDayOpening(sim_run_id=SIM_B).open_day(conn, as_of=AS_OF, carry_from=CARRY_FROM)
+
+    assert SIM_B in str(excinfo.value), "어느 실행에 없는지가 메시지에 남는다"
+    assert not [query for query in conn.커서.queries if "INSERT INTO" in query]
+
+
+def test_open_day_pins_the_carry_forward_select_to_its_own_run():
+    """⑦-A 🔴 **가드와 INSERT 가 같은 실행으로 좁는다.**
+
+    한쪽만 좁히면 *"SIM-A 를 보고 통과했는데 만든 행은 SIM-B 것"* 처럼 **본 행과 만든
+    행이 갈린다.** 그래서 두 질의 모두를 여기서 잰다.
+    """
+    conn = _연다(가짜커넥션({CARRY_FROM: {SIM_A, SIM_B}}), sim_run_id=SIM_B)
+
+    가드 = conn.커서.queries[0]
+    assert "sim_run_id = %(sim_run_id)s" in 가드
+
+    문장 = _insert_문(conn)
+    assert "base.sim_run_id = %(sim_run_id)s" in 문장
+    assert _insert_파라미터(conn)["sim_run_id"] == SIM_B
+
+
+def test_open_day_still_carries_the_sim_run_id_column_from_the_base_row():
+    """⑦-A ⚠️ **좁히는 것과 쓰는 것은 다른 자리다.**
+
+    `WHERE` 는 *"어느 전날 행을 고를 것인가"* 이고 `sim_run_id` 칸은 여전히
+    `base.sim_run_id` 다 — 주입값을 칸에 직접 쓰면 그 값이 전날 행과 다를 때 **주입이
+    조용히 이겨** 없던 실행의 행이 선다.
+    """
+    assert _칸과_식()["sim_run_id"] == "base.sim_run_id"
+
+    행 = _물려받은_행(_insert_파라미터(_연다(sim_run_id=SIM_A)))
+    assert 행["sim_run_id"] == 기준행["sim_run_id"]
 
 
 # ── ⑧ 트랜잭션은 마스터 것이다 ─────────────────────────────────────────
@@ -537,7 +711,7 @@ def test_master_open_day_walks_logistics_after_registration():
     #    재는 것이 "물류를 부르는가" 가 아니라 "두 파트가 다 도는가" 로 바뀐다.
     master_day_open.reset()
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
-    conn = 가짜커넥션({CARRY_FROM})
+    conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM))
 
     결과 = master_day_open.open_day(AS_OF, connect=lambda: conn)
 
@@ -553,7 +727,7 @@ def test_master_open_day_is_idempotent_for_an_already_open_day():
     """⑨ 이미 열려 있으면 아무것도 안 한다 — INSERT 자체가 없다."""
     master_day_open.reset()  # 위와 같은 이유 — 물류만 남기고 잰다
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
-    conn = 가짜커넥션({CARRY_FROM, AS_OF})
+    conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM, AS_OF))
 
     결과 = master_day_open.open_day(AS_OF, connect=lambda: conn)
 
@@ -562,3 +736,37 @@ def test_master_open_day_is_idempotent_for_an_already_open_day():
     assert 결과.status == "ALREADY_OPENED"
     assert 결과.parts[0].opened == []
     assert not [query for query in conn.커서.queries if "INSERT INTO" in query]
+
+
+def test_master_open_day_walks_each_run_on_its_own_row():
+    """⑨ 🔴 **주입된 배선은 마스터 경계에서도 자기 실행만 걷는다.**
+
+    SIM-A 는 01-06·01-07 이 이미 서 있고 SIM-B 는 01-06 만 서 있다. 같은 `as_of` 로
+    두 배선을 각각 돌리면 —
+
+    ```text
+    SIM-A  ALREADY_OPENED   만들 날이 없다
+    SIM-B  OPENED           01-07 하나를 만든다
+    ```
+
+    ⚠️ 종전 코드에서는 **둘 다** `ALREADY_OPENED` 였다. SIM-A 의 01-07 을 보고
+       SIM-B 도 이미 열렸다고 답했고, SIM-B 의 01-07 은 영영 안 섰다.
+    """
+    열린_날 = {CARRY_FROM: {SIM_A, SIM_B}, AS_OF: {SIM_A}}
+
+    master_day_open.reset()
+    master_day_open.register_day_opening("logistics", LogisticsDayOpening(sim_run_id=SIM_A))
+    a_conn = 가짜커넥션(dict(열린_날))
+    a결과 = master_day_open.open_day(AS_OF, connect=lambda: a_conn)
+
+    master_day_open.reset()
+    master_day_open.register_day_opening("logistics", LogisticsDayOpening(sim_run_id=SIM_B))
+    b_conn = 가짜커넥션(dict(열린_날))
+    b결과 = master_day_open.open_day(AS_OF, connect=lambda: b_conn)
+
+    assert a결과.status == "ALREADY_OPENED"
+    assert not [query for query in a_conn.커서.queries if "INSERT INTO" in query]
+
+    assert b결과.status == "OPENED"
+    assert b결과.parts[0].opened == [AS_OF]
+    assert _insert_파라미터(b_conn)["sim_run_id"] == SIM_B
