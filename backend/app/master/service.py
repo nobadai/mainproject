@@ -31,7 +31,7 @@ from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
 from app.master.market_calendar import get_market_calendar
 from app.master.inputs import MasterInputs, collect_inputs
-from app.master.ledger_repository import get_burn_in
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID, get_burn_in
 from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
@@ -91,6 +91,10 @@ def run_procurement(
         as_of=request.as_of,
         trigger=request.trigger,
         policy_version=request.policy_version,
+        # 🔴 **어느 실행의 장부인가는 마스터가 정한다** (물류 `#325` · 2026-09-06).
+        #   물류 조회 경로에는 생성자가 없어 봉투 말고 줄 자리가 없다 —
+        #   `ExecutionContext` docstring 의 ①.
+        sim_run_id=BURN_IN_SIM_RUN_ID,
     )
 
     # 🔴 **첫 관문은 개장이다** (계약 · 2026-09-06). 실행일 판정보다 **먼저**다 —

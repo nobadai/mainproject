@@ -40,6 +40,7 @@ from dataclasses import replace
 from datetime import date
 
 from app.master import persistence, wiring
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.answer import (
     AnswerFacts,
     Fact,
@@ -216,6 +217,9 @@ def _run_status(
         as_of=as_of,
         trigger="USER_REQUEST",
         policy_version=policy_version,
+        # ★ **조회도 같은 장부를 본다.** 판단 경로만 채우면 *"물어본 값과 돈 값이
+        #   다른"* 자리가 생긴다 — 조회는 부서를 실제로 부른다 (§ 위 docstring).
+        sim_run_id=BURN_IN_SIM_RUN_ID,
     )
     asked = tuple(intent.agents)
     missing = set(wiring.missing())
