@@ -200,6 +200,7 @@ class LogisticsCancellationAdapter:
         cancelled_on: date,
         target_state_date: date,
         purchase_ids: Mapping[int, str],
+        financing_mode: str,
     ) -> None:
         """🔴 **`target_state_date` 행에서 걷는다. 승인이 쓴 행이 아니다.**
 
@@ -207,9 +208,13 @@ class LogisticsCancellationAdapter:
         걷는다. 둘이 다르면 그 사이 날들은 **그대로 둔다** — 그때는 실제로 오는
         중이었다.
 
-        ⚠️ `purchase_ids` 는 안 쓴다. 물류가 걷는 열쇠는 `inbound_id` 이고, 그것은
-          `approval_id` + `seq` 로 만든다. **받되 안 쓰는 것이 규약이 반쪽인 것보다
-          낫다** — 두 파트가 같은 인자를 받아야 호출부가 하나로 선다.
+        ⚠️ `purchase_ids` 와 `financing_mode` 는 **안 쓴다.** 물류가 걷는 열쇠는
+          `inbound_id` 이고 물류 축은 `(sim_run_id, as_of, usage_scope)` 라 재무 축이
+          안 걸린다.
+
+        ★ **받되 안 쓰는 것이 규약이 반쪽인 것보다 낫다** — 두 파트가 같은 인자를
+          받아야 호출부가 하나로 선다. `purchase_ids` 를 재무에만 줬다가 물류 Arrival 이
+          막힌 자리가 그 교훈이다 (`#313`).
         """
         withdraw_inventory(
             conn,

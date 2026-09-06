@@ -108,6 +108,7 @@ class _파트:
         cancelled_on: date,
         target_state_date: date,
         purchase_ids: Mapping[int, str],
+        financing_mode: str,
     ) -> None:
         self.calls.append(
             {
@@ -115,6 +116,7 @@ class _파트:
                 "target_state_date": target_state_date,
                 "purchase_ids": dict(purchase_ids),
                 "approval_id": commitment.approval_id,
+                "financing_mode": financing_mode,
             }
         )
         if self._raises is not None:
@@ -126,6 +128,21 @@ def _빈_등록소() -> Any:
     cancellation.reset()
     yield
     cancellation.reset()
+
+
+MODE = "LOAN_BASELINE"
+
+
+@pytest.fixture(autouse=True)
+def _재무_축을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **경계가 `sim_runs` 를 읽는다** (재무 요청 2026-09-06).
+
+    ★ **입력 적재·공휴일 달력을 가짜로 주는 것과 같은 이유다.** 안 꽂으면 이 검사들이
+      실 DB 로 축을 물으러 나간다.
+
+    ⚠️ **못 읽는 경로는 따로 잰다** (`test_축을_못_읽으면_막는다`).
+    """
+    monkeypatch.setattr("app.master.cancellation.financing_mode_of", lambda commitment: MODE)
 
 
 def _등록한다(*, logistics_raises: Exception | None = None) -> tuple[_파트, _파트]:
@@ -390,3 +407,42 @@ def test_거절은_여전히_통과안이_없어도_받는다():
 
     check_decidable("E2_HELD", "REJECT_ALL")
     check_decidable("E3_REJECTED", "REQUEST_CHANGE")
+
+
+# ── ⑧ 재무 축 — 마스터가 싣는다 (재무 요청 2026-09-06) ────────────────────
+
+
+def test_두_파트가_같은_financing_mode_를_받는다():
+    """🔴 **재무가 고르지 않겠다고 했고 그것이 맞다.**
+
+    고르는 순간 그 선택이 조용히 굳고, 나중에 누구도 왜 그 축이었는지 못 찾는다 —
+    `purchase_ids` 를 재무가 지어내면 안 되는 것과 같은 자리다.
+    """
+    finance, logistics = _등록한다()
+
+    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+
+    assert finance.calls[0]["financing_mode"] == MODE
+    assert logistics.calls[0]["financing_mode"] == MODE
+
+
+def test_축을_못_읽으면_막는다(monkeypatch: pytest.MonkeyPatch):
+    """⚠️ **축을 지어내지 않는다.** 못 읽으면 트랜잭션을 시작하지도 않는다.
+
+    ★ `apply_approval` 이 build 를 커넥션 밖에서 부르는 것과 같은 규율이다 — 계산이
+      실패하면 **DB 를 열지도 않은 채** 멈춘다.
+    """
+
+    def 터진다(commitment: Any) -> str:
+        raise LookupError("sim_runs 를 못 읽었다")
+
+    monkeypatch.setattr("app.master.cancellation.financing_mode_of", 터진다)
+    finance, _ = _등록한다()
+    conn = _가짜커넥션()
+
+    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+
+    assert out.status == "FAILED"
+    assert "재무 축을 못 읽었다" in out.reason
+    assert not finance.calls, "부서를 부르기 전에 막아야 한다"
+    assert conn.committed == 0
