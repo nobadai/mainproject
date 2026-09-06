@@ -180,8 +180,9 @@ class 가짜물류:
         commitment: ApprovedCommitment,
         *,
         target_state_date: date,
+        purchase_ids: Mapping[int, str],
     ) -> list[Any]:
-        self.calls.append(target_state_date)
+        self.calls.append((target_state_date, dict(purchase_ids)))
         return ["logistics-row"]
 
     def persist(self, conn: Any, rows: Any) -> None:
@@ -219,7 +220,53 @@ def test_물류_build_는_날짜를_키워드로_받는다() -> None:
     transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
 
     assert len(logistics.calls) == 1
-    assert isinstance(logistics.calls[0], date)
+    assert isinstance(logistics.calls[0][0], date)
+
+
+def test_두_파트가_같은_purchase_ids_를_받는다() -> None:
+    """🔴 **`#311` — 전에는 재무만 받았다** (2026-09-06 · 물류 요청).
+
+    물류 WMS 가 도착 시점에 `purchase_items` 의 권위값을 읽어야 하는데, 그 참조가
+    안 와서 `InTransitItem.purchase_id = None` 이었고 **Arrival 이 막혔다.**
+
+    ★ 마스터가 *"물류에는 필요 없다"* 를 규약에 못 박았던 자리다 — 필요를 판정할
+      자리는 그 값을 **쓰는 부서**다.
+    """
+    finance, logistics = _등록한다()
+
+    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
+
+    assert logistics.calls[0][1], "물류가 빈 매핑을 받았다 — 참조가 안 실렸다"
+    assert finance.calls[0][1] == logistics.calls[0][1], (
+        "두 파트가 다른 purchase_id 를 본다 — 원장과 입고가 갈린다"
+    )
+
+
+def test_물류가_받는_purchase_id_가_원장_키와_같다() -> None:
+    """★ **같은 승인의 같은 회차는 같은 ID 다.** 물류가 그 값으로 `purchase_items` 를
+    읽으므로, 원장이 쓴 키와 한 글자라도 다르면 도착일에 아무것도 못 찾는다."""
+    commitment = _commitment()
+    _, logistics = _등록한다()
+
+    transition.apply_approval(commitment, connect=lambda: 가짜커넥션())
+
+    받은것 = logistics.calls[0][1]
+    기대 = {
+        leg.seq: transition.purchase_id_for(commitment, leg.seq)
+        for leg in commitment.arrival_schedule
+    }
+    assert 받은것 == 기대
+
+
+def test_회차가_없으면_물류도_빈_매핑이다() -> None:
+    """★ 재무와 같다 — 회차 일정을 못 만든 약정도 승인은 살아 있고, 그때 실을 참조가
+    **없다**는 것은 정상 상태다."""
+    _, logistics = _등록한다()
+
+    out = transition.apply_approval(_commitment(legs=()), connect=lambda: 가짜커넥션())
+
+    assert out.status == "APPLIED"
+    assert logistics.calls[0][1] == {}
 
 
 def test_두_파트가_같은_날짜를_받는다() -> None:
@@ -228,7 +275,7 @@ def test_두_파트가_같은_날짜를_받는다() -> None:
 
     transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
 
-    assert finance.calls[0][0] == logistics.calls[0]
+    assert finance.calls[0][0] == logistics.calls[0][0]
 
 
 # ── b. 달력 다음 날이다 — 주말을 건너뛰지 않는다 ────────────────────────
@@ -248,7 +295,7 @@ def test_상태가_설_날은_승인_다음_달력일이다() -> None:
     토요일 = date(2026, 1, 3)
     assert 토요일.weekday() == 5
     assert finance.calls[0][0] == 토요일, "주말을 건너뛰었다 — 실행일 달력을 쓴 것이다"
-    assert logistics.calls[0] == 토요일
+    assert logistics.calls[0][0] == 토요일
 
 
 def test_평일_승인도_그냥_다음_날이다() -> None:

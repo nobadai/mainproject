@@ -93,14 +93,21 @@ PARTS: tuple[TransitionPart, ...] = ("finance", "logistics")
 # ★ **공통은 `commitment` 와 `target_state_date` 다.** 두 파트가 같은 승인분을
 #   같은 날짜 기준으로 옮긴다 — 다를 이유가 없다.
 #
-# ★ **재무만 `purchase_ids` 를 더 받는다.** `payables.purchase_id` 는 `purchases` 를
-#   참조하는 **NOT NULL 컬럼**이라 재무가 지어낼 수 없다 (재무 `transition.py` 가
-#   등록을 미룬 이유가 그것이다). 그 ID 를 만들 자리는 승인을 쥔 마스터다.
+# ★ **`purchase_ids` 도 공통이다** (2026-09-06 · 물류 요청 · `#311`).
 #
-# ⚠️ **재무 회신 전이다.** 재무의 현재 함수는 `purchase_id: str` **단수**를 받는다.
-#    회차별 매핑으로 바꾼다는 것은 계약 문서로 통보했고 **아직 답이 오지 않았다.**
-#    지금은 `register_transition` 에 등록된 구현이 0건이라 이 규약을 바꿔도
-#    깨지는 것이 없다 — 재무가 붙는 날 시그니처를 맞춰서 붙인다.
+#   ```text
+#   재무   payables.purchase_id 가 purchases 를 참조하는 NOT NULL 컬럼이다
+#   물류   도착 시점에 purchase_items 의 권위값을 읽어야 한다
+#          (purchase_item_id · item_id · grade · unit_price_krw_per_kg)
+#   ```
+#
+#   **둘 다 매입 원장을 가리켜야 하고, 둘 다 그 ID 를 지어낼 수 없다.** 만들 자리는
+#   승인을 쥔 마스터다 (`purchase_id_for`).
+#
+# 🔴 **전에는 "재무만 받는다" 였고 그것이 틀렸다.** 마스터가 *"물류에는 필요 없다"* 를
+#    단정했는데, 필요를 판정할 자리는 그 값을 쓰는 부서다. `#256` 이 두 Protocol 을
+#    같은 모양으로 맞췄는데 이 인자만 반쪽으로 남아 있었고, 그래서 물류 WMS 의
+#    Arrival 이 도착일에 막혔다 (`InTransitItem.purchase_id = None`).
 
 
 class FinanceTransition(Protocol):
@@ -139,8 +146,28 @@ class LogisticsTransition(Protocol):
     ★ `persist` 는 재무와 같이 인자가 **`(conn, …)` 두 개뿐**이고 **commit 하지
       않는다.**
 
-    ★ `purchase_ids` 를 받지 않는다. 물류가 쓰는 `in_transit` 은 `purchases` 를
-      참조하지 않는다 — 필요 없는 값을 규약에 얹지 않는다.
+    🔴 **`purchase_ids` 도 받는다** (2026-09-06 · 물류 요청 · `#311`).
+
+      전에 이 자리에 이렇게 적혀 있었다 —
+
+      > `purchase_ids` 를 받지 않는다. 물류가 쓰는 `in_transit` 은 `purchases` 를
+      > 참조하지 않는다 — **필요 없는 값을 규약에 얹지 않는다.**
+
+      ⚠️ **그 "필요 없다" 를 마스터가 단정한 것이 틀렸다.** 물류 WMS 가 도착 시점에
+        `purchase_items` 의 권위값(`purchase_item_id` · `item_id` · `grade` ·
+        `unit_price_krw_per_kg`)을 읽어야 하고, 그러려면 **매입 원장을 가리키는 ID**가
+        필요하다. 그것을 만드는 곳은 마스터(`purchase_id_for`)이고 물류는 생성·파싱·
+        재구성을 하지 않는다 — 그 원칙이 옳다.
+
+      ```text
+      전   Master 승인 → purchase_ids → Purchase · Finance 만 사용
+                       → 물류에는 미전달 → InTransitItem.purchase_id = None
+                       → 도착일에 Arrival 이 막힘 (E2E 끊김)
+      후   재무와 **같은 값·같은 모양**을 물류도 받는다
+      ```
+
+    ★ **재무와 대칭이다.** `#238` 에서 두 Protocol 이 서로 달랐던 것을 `#256` 이
+      맞췄는데, `purchase_ids` 만 재무 쪽에 남아 반쪽이었다. 이제 같아진다.
     """
 
     def build(
@@ -148,6 +175,7 @@ class LogisticsTransition(Protocol):
         commitment: ApprovedCommitment,
         *,
         target_state_date: date,
+        purchase_ids: Mapping[int, str],
     ) -> Sequence[object]: ...
     def persist(self, conn: Any, rows: Sequence[object]) -> None: ...
 
@@ -394,7 +422,17 @@ def apply_approval(
             target_state_date=target_state_date,
             purchase_ids=purchase_ids,
         )
-        logistics_rows = logistics.build(commitment, target_state_date=target_state_date)
+        # 🔴 **재무와 같은 매핑을 준다** (`#311` · 물류 요청 2026-09-06). 물류가 도착일에
+        #    `purchase_items` 의 권위값을 읽으려면 매입 원장을 가리키는 ID 가 필요하고,
+        #    물류는 그 ID 를 만들지도 파싱하지도 않는다.
+        #
+        # ★ **`persist_purchases` 가 먼저 돈다** (아래). 물류가 저장하는 `purchase_id` 가
+        #   가리키는 부모 행은 **같은 트랜잭션 안에서 이미 서 있다.**
+        logistics_rows = logistics.build(
+            commitment,
+            target_state_date=target_state_date,
+            purchase_ids=purchase_ids,
+        )
     except Exception as exc:  # noqa: BLE001 - 전이 실패가 적재된 결정을 지우면 안 된다.
         return TransitionOut(status="FAILED", reason=f"전이 계산 실패: {exc}")
 
