@@ -1376,18 +1376,23 @@ def _sales_snapshot(**overrides) -> InventoryLogisticsSnapshot:
 
     ```text
     LOT-A  배추 1,000kg  신선도 10   할당 400 (LOT-A 지정)
-    LOT-B  배추   500kg  신선도 -3   ← 신선도 만료 · 가용에서 빠진다
+    LOT-B  배추   700kg  신선도 -3   ← 신선도 만료 · 가용에서 빠진다
     LOT-C  무     300kg  신선도  7
                           + 배추 미할당 예약 100 (Lot 미지정)
 
     배추 가용   = (1,000 − 400) − 100 = 500      무 가용 = 300
-    Lot 물리 합계(배추) = 1,500                  ← 500 과 다르다. 이것이 요점이다
+    Lot 물리 합계(배추) = 1,700                  ← 500 과 다르다. 이것이 요점이다
     ```
+
+    🔴 **어느 Lot 수량도 정답(500·300)과 같지 않게 골랐다.** 종전에 LOT-B 를 500 으로
+       뒀더니, 차감을 빼먹고 Lot 을 그대로 싣는 **뮤턴트가 살아남았다** — 검사가
+       `{item: qty}` 로 접는 순간 배추 두 행 중 뒤엣것(500)만 남아 우연히 정답이 됐다.
+       숫자가 겹치면 검사는 조용히 통과한다.
     """
     base: dict = {
         "on_hand_by_lot": [
             _sales_lot("LOT-A", "배추", "1000", 10),
-            _sales_lot("LOT-B", "배추", "500", -3),
+            _sales_lot("LOT-B", "배추", "700", -3),
             _sales_lot("LOT-C", "무", "300", 7),
         ],
         "outbound_commitments": [
@@ -1491,8 +1496,13 @@ def test_판매가능량은_예약과_할당을_차감한_값이다(wired_sales)
     """
     _, reply, _ = _pre_sales_reply()
 
-    by_item = {row["item"]: row["available_qty_kg"] for row in reply.payload["inventory_by_item"]}
-    assert by_item == {"배추": 500.0, "무": 300.0}
+    # 🔴 **배열 그대로 잰다.** `{item: qty}` 로 접으면 같은 품목의 여러 행이 뒤엣것
+    #    하나로 뭉개져, Lot 을 차감 없이 그대로 실은 회신도 통과한다 (뮤턴트 실측).
+    #    품목당 한 행이라는 것도 이 계약의 일부다 — 합계는 물류가 이미 냈다.
+    assert reply.payload["inventory_by_item"] == [
+        {"item": "무", "available_qty_kg": 300.0},
+        {"item": "배추", "available_qty_kg": 500.0},
+    ]
 
 
 def test_Lot_수량을_합산해도_판매가능량이_되지_않는다(wired_sales):
@@ -1509,7 +1519,7 @@ def test_Lot_수량을_합산해도_판매가능량이_되지_않는다(wired_sa
     confirmed = next(
         row["available_qty_kg"] for row in payload["inventory_by_item"] if row["item"] == "배추"
     )
-    assert lot_total == 1500.0  # 1,000 + 500(만료분 포함)
+    assert lot_total == 1700.0  # 1,000 + 700(만료분 포함)
     assert confirmed == 500.0
     assert lot_total != confirmed
 
