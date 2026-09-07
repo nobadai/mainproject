@@ -161,32 +161,51 @@ def test_the_declared_value_passes_both(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.db
-def test_the_judgment_day_is_never_a_copied_row() -> None:
-    """🔴 **진짜로 잰다** — 선언된 판정일에 실제로 복사값이 있는지 DB 에서 본다.
+def test_a_copied_judgment_day_is_always_a_holiday() -> None:
+    """🔴 **판정일이 복사값인 날은 반드시 공휴일이다** (2026-09-07 정정 · ``#384``).
 
-    ★ **선언을 읽어 조회 좌표로 쓴다.** ``ci_judgment_day`` 를 13 으로 바꾸면 이
-      검사가 offset 13 을 조회해 복사값 3건을 찾아 운다 — 값 비교가 아니라 **판정이
-      선언을 따라 움직인다** (규칙 8).
+    전에는 이 검사가 *"복사값이 아예 없다"* 를 단언했고, 이름도
+    ``..._is_never_a_copied_row`` 였다. **21조합에서만 참이었다** — 504조합으로
+    넓히니 27건이 복사값이고 전부 **``target_dt`` 가 공휴일**이었다.
 
-    ⚠️ 행이 0건이면 **통과가 아니라 실패**다. 조회가 빗나간 채 조용히 초록불이 되면
-      이 검사는 있으나 마나다.
+    ★ **주기 가정이 틀린 게 아니다.** ``base_dt + 14`` 는 같은 요일이라 **주말**을
+      안 밟는다 — 그건 위 기본 스위트 검사가 그대로 잠근다. 공휴일은 요일과 무관해서
+      주기로 못 막을 뿐이다.
+
+    🟢 그래서 잠그는 성질이 바뀐다::
+
+        전   복사값이 없다                     🔴 사실이 아니다
+        후   복사값이면 그날은 공휴일이다        🟢 사실이고, 깨지면 진짜 이상이다
+
+    ⚠️ **공휴일이 아닌 복사값이 나오면 그때는 진짜 문제다** — 개장일인데 예측이 없어
+      복사됐다는 뜻이고, 그건 ML 적재 쪽 사고다.
+
+    ★ **선언을 읽어 조회 좌표로 쓴다** — ``ci_judgment_day`` 를 바꾸면 이 검사가
+      그 offset 을 조회한다 (규칙 8).
     """
     day = _judgment_day()
     rows = db.fetch_all(
-        "SELECT base_dt, item_nm, target_dt, is_filled "
-        "FROM haetdeul.ml_price_forecasts "
-        "WHERE target_kind = %(kind)s AND offset_days = %(day)s "
-        "ORDER BY base_dt, item_nm",
+        "SELECT f.base_dt, f.item_nm, f.target_dt, f.is_filled, "
+        "       c.holiday_nm, c.is_open "
+        "FROM haetdeul.ml_price_forecasts f "
+        "LEFT JOIN haetdeul.ml_calendar_days c ON c.dt = f.target_dt "
+        "WHERE f.target_kind = %(kind)s AND f.offset_days = %(day)s "
+        "ORDER BY f.base_dt, f.item_nm",
         {"kind": JUDGMENT_TARGET_KIND, "day": day},
     )
     assert rows, (
         f"offset_days={day} · target_kind={JUDGMENT_TARGET_KIND} 행이 0건이다 — "
         "조회가 빗나갔거나 예측이 안 들어왔다. 빈 결과를 통과로 읽지 않는다"
     )
-    copied = [f"{r['base_dt']} {r['item_nm']}(→{r['target_dt']})" for r in rows if r["is_filled"]]
-    assert not copied, (
-        f"판정일 D+{day} 이 복사값인 행 {len(copied)}/{len(rows)}건: "
-        f"{', '.join(copied[:5])} — {_WHY}"
+    unexplained = [
+        f"{r['base_dt']} {r['item_nm']}(→{r['target_dt']})"
+        for r in rows
+        if r["is_filled"] and not r["holiday_nm"]
+    ]
+    assert not unexplained, (
+        f"판정일 D+{day} 이 복사값인데 공휴일이 아닌 행 {len(unexplained)}건: "
+        f"{', '.join(unexplained[:5])} — 개장일인데 예측이 없어 복사된 것이라면 "
+        f"ML 적재 쪽 사고다. {_WHY}"
     )
 
 
@@ -215,10 +234,73 @@ def test_the_weekly_cycle_is_what_makes_it_safe() -> None:
     off_cycle = {r["offset_days"]: r for r in rows if r["offset_days"] % DAYS_IN_WEEK}
     assert on_cycle and off_cycle, "양쪽 offset 이 다 있어야 대조가 성립한다"
 
-    dirty_on = {day: r["copied"] for day, r in on_cycle.items() if r["copied"]}
-    assert not dirty_on, f"주기 위 offset 에 복사값이 있다: {dirty_on} — 주기 가정이 깨졌다"
+    # 🔴 **주기 위에도 복사값이 있다 — 공휴일이다** (2026-09-07 · `#384`).
+    #   전에는 여기서 `not dirty_on` 을 단언했는데 21조합에서만 참이었다. 잠그는 것은
+    #   *"주기 위가 깨끗하다"* 가 아니라 **"주기 위가 주기 밖보다 훨씬 깨끗하다"** 로
+    #   바꾼다 — 그게 판정일을 주기 위에 둔 실제 이유다.
+    def _rate(group: dict) -> float:
+        copied = sum(r["copied"] for r in group.values())
+        total = sum(r["total"] for r in group.values())
+        return copied / total if total else 0.0
+
+    on_rate, off_rate = _rate(on_cycle), _rate(off_cycle)
+    assert on_rate < off_rate / 2, (
+        f"주기 위 복사율 {on_rate:.1%} 이 주기 밖 {off_rate:.1%} 의 절반 아래가 아니다 "
+        "— 판정일을 주기 위에 둔 근거가 데이터에서 사라졌다"
+    )
 
     assert any(r["copied"] for r in off_cycle.values()), (
         "주기 밖 offset 에도 복사값이 하나도 없다 — 그러면 판정일이 안전한 이유가 "
         "주기가 아니라 다른 것이고, 이 검사가 근거로 삼는 설명이 틀렸다"
     )
+
+
+# ── 복사값인 날 고지가 나가는가 (기본 스위트) ──────────────────────────────
+
+
+def _risks_with_filled_judgment_day(filled: bool) -> list[str]:
+    """판정일 행의 ``is_filled`` 만 바꿔 ⑥까지 돌린 risks.
+
+    **합성 입력이다.** mock 예측에는 이 칸이 아예 없어(규칙 3) 앵커만 돌려서는
+    이 경로가 한 번도 안 선다 — 그런데 실 경로에서는 504조합 중 27건이 이 경로다.
+    """
+    import os
+
+    os.environ["PURCHASE_LLM_ENABLED"] = "false"
+    from datetime import date
+
+    from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
+    from app.purchase_agent.nodes.classify_situation import classify_situation
+    from app.purchase_agent.nodes.draft_plan import draft_plan
+    from app.purchase_agent.nodes.package_scenarios import package_scenarios
+    from app.purchase_agent.nodes.split_plan import split_plan
+    from app.purchase_agent.state import build_initial_state
+
+    state = build_initial_state("배추", date(2026, 8, 21))
+    row = state["forecast"]["daily"][_judgment_day() - 1]
+    state["forecast"]["daily"][_judgment_day() - 1] = {**row, "is_filled": filled}
+    state.update(classify_situation(state))
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+    return [risk for s in state["scenarios_final"] for risk in s["risks"]]
+
+
+def test_a_copied_judgment_day_is_named_in_risks() -> None:
+    """판정일이 복사값이면 **그 사실이 화면으로 나간다** (``#384`` ㄴ).
+
+    🔴 컷하지 않는다. 복사값이라고 틀린 값이 아니다 — 다만 그날 판정은 **그날이 아니라
+    앞 장날의 예측 구간**으로 낸 것이라, 그 사실이 사람에게 보여야 한다.
+    """
+    named = [r for r in _risks_with_filled_judgment_day(True) if "상황 판정일" in r]
+    assert named, "복사값인데 고지가 없다"
+    assert "앞 장날" in named[0], named[0]
+
+
+def test_a_normal_judgment_day_leaves_no_note() -> None:
+    """복사값이 아닌 날에는 **안 붙는다.**
+
+    매일 붙으면 신호가 죽는다 — 실 경로에서 이 경로는 504조합 중 27건(5.4%)이다.
+    """
+    assert not [r for r in _risks_with_filled_judgment_day(False) if "상황 판정일" in r]

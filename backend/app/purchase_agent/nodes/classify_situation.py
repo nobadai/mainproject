@@ -225,14 +225,23 @@ def classify_situation(state: PurchaseAgentState) -> dict[str, Any]:
           gate_reason = quality     WHSL 에만 101건. AUC 는 lead_time 75건뿐
           판정일(D+14) is_gated     21조합 다 false
           판정일(D+14) is_filled    21조합 다 false
+                                    🔴 504조합에서는 27건이 true — 전부 공휴일이다 (#384)
 
       **계열이 늘거나 AUC 에 quality 가 생기는 날 자리가 이미 있다.** 값이 오고
       계산도 되니 에러가 안 나는 종류라, 그날 아무도 모르는 것이 원래 문제였다.
 
-    ★ ``is_filled`` 는 **판정에 안 쓴다.** 판정일이 주(週)의 배수라 복사값을 안 밟고
-      (``judgment_row`` · ``test_judgment_day.py``), ML 도 이 값으로 무엇을 하라는
-      지시를 준 적이 없다. 대신 ``max_price`` 창에는 섞이므로 ⑥이 고지만 붙인다
-      (``package_scenarios._forecast_risks``).
+    ★ ``is_filled`` 는 **판정에 안 쓴다 — 다만 고지는 한다** (2026-09-07 정정 · ``#384``).
+
+      전에는 *"판정일이 주(週)의 배수라 복사값을 안 밟는다"* 를 근거로 고지도 안 했다.
+      🔴 **그 근거가 위 21조합에서만 참이었다.** 504조합으로 넓히니 D+14 에 **27건**이
+      복사값이고, 전부 **``target_dt`` 가 공휴일**이다 (``base_dt`` 는 정상 개장일).
+
+      ★ 주기 가정 자체는 살아 있다 — ``base_dt + 14`` 는 같은 요일이라 **주말**을
+        안 밟는다. 다만 **공휴일은 요일과 무관하다.**
+
+      ⚠️ 그래도 **판정에는 안 쓴다.** 복사값이라고 틀린 값이 아니고, ML 이 이 값으로
+        무엇을 하라는 지시를 준 적도 없다. ⑥이 문장만 붙인다
+        (``package_scenarios._judgment_day_risks`` · ``max_price`` 창은 별도로 ``_forecast_risks``).
     """
     constraints = load_constraints()
     rules = constraints["situation"]
