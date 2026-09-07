@@ -105,7 +105,7 @@ def master_trigger(request: ProcurementRunRequest) -> TriggerAck:
     ★ **예측값은 마스터가 실어 준다** (§3.2.5 예외 · 매입 파트 지적으로 뒤집음).
       ML 은 매입의 도메인이 아니라 매입이 직접 읽으면 §1.2-9 를 어기고, ML 은 호출
       구조 밖이라 §4.1 의 "해당 에이전트에게 요청"도 성립하지 않는다. 대신 마스터가
-      `generated_at` 을 `as_of` 와 대조한다 (`ProcurementFlow._forecast_is_clean`).
+      `generated_at` 을 `as_of` 와 대조한다 (`envelope.forecast_is_clean`).
 
     ⚠️ **지금은 동기로 즉시 실행한다.** 회의 3.1 이 요구한 Queue·비동기는 별도 이슈다.
       그래서 `note` 가 항상 `executed` 이며, 큐가 붙으면 `queued` 가 나온다.
