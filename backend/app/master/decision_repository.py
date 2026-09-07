@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 from psycopg import sql
 
 from app.finance.db import execute_returning_one, fetch_all, fetch_one, get_db_schema
-from app.master.decision import Decision, DecisionOut, mark_current
+from app.master.decision import Decision, DecisionOut, RevalidationOutcome, mark_current
 
 _TABLE = "master_decisions"
 _COLUMNS = (
@@ -31,6 +31,12 @@ _COLUMNS = (
     # DB 컬럼은 `run_id` 지만 코드에서는 `history_run_id` 로 부른다 —
     # `plan[].run_id`(부서 호출 id) 와 헷갈리지 않게 하려는 것이다.
     "run_id",
+    # 최종 승인 시점 재검증 (2026-09-07 · M-3). **`follow_up_request_id` 와 다른
+    # 칸이다** — 저쪽은 조건부 재요청 체인이고 이쪽은 승인 직전 재검증이다.
+    # 아직 채우는 코드가 없다 (M-4). 지금은 늘 NULL 이고, 그 NULL 은
+    # **"재검증을 하지 않았다"** 이지 실패가 아니다.
+    "revalidation_request_id",
+    "revalidation_outcome",
     "note",
     "created_at",
 )
@@ -52,6 +58,8 @@ def _row_to_out(row: dict[str, Any]) -> DecisionOut:
         follow_up_request_id=row.get("follow_up_request_id"),
         end_code_at_decision=row["end_code_at_decision"],
         history_run_id=(None if row.get("run_id") is None else str(row["run_id"])),
+        revalidation_request_id=row.get("revalidation_request_id"),
+        revalidation_outcome=cast("RevalidationOutcome | None", row.get("revalidation_outcome")),
         note=row.get("note"),
         created_at=row["created_at"],
     )
@@ -82,6 +90,8 @@ def save_decision(
     condition_text: str | None = None,
     follow_up_request_id: str | None = None,
     history_run_id: str | None = None,
+    revalidation_request_id: str | None = None,
+    revalidation_outcome: RevalidationOutcome | None = None,
     note: str | None = None,
 ) -> DecisionOut:
     """결정 1건을 적재한다.
@@ -89,15 +99,22 @@ def save_decision(
     ★ `UNIQUE (request_id, decision_seq)` 가 동시 결정을 막는다. 두 사람이 같은 회차로
       동시에 밀면 뒤엣것이 `UniqueViolation` 으로 떨어진다 — **조용히 덮어쓰지 않는다.**
       호출자가 회차를 다시 읽어 재시도할지 정한다.
+
+    ★ 재검증 두 칸은 **기본이 `None`** 이다. 부르는 쪽이 아직 없어서다 (M-4) —
+      🔴 **칸을 만들어 두고 안 채우면 늘 NULL 이라는 것을 알고 연다.** 여기서 NULL 은
+      *"재검증을 하지 않았다"* 이고, 그것이 지금의 사실이다.
+
+    ⚠️ `revalidation_request_id` 를 `follow_up_request_id` 자리에 넘기지 않는다.
+      DB 도 두 칸으로 갈라 두었다 (`master/master_decision_revalidation.sql`).
     """
     query = sql.SQL(
         """
         INSERT INTO {}.{} (
             decision_id, request_id, decision_seq, decision, scenario_label,
             condition_text, decided_by, follow_up_request_id, end_code_at_decision,
-            run_id, note
+            run_id, revalidation_request_id, revalidation_outcome, note
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING {}
         """
     ).format(
@@ -118,6 +135,8 @@ def save_decision(
             follow_up_request_id,
             end_code_at_decision,
             history_run_id,
+            revalidation_request_id,
+            revalidation_outcome,
             note,
         ),
     )
