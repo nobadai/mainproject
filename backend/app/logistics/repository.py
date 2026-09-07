@@ -431,7 +431,19 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         raise TypeError("Inventory lot received_at must be a date")
     if isinstance(quantity, bool) or not isinstance(quantity, Decimal):
         raise TypeError("Inventory lot remaining_qty_kg must be a Decimal")
-    if not isinstance(operational_limit, int):
+    # 보관한계는 **없을 수 있다** — `item_storage_policies.operational_limit_days` 는
+    # nullable 이고, 같은 칸을 읽는 `_item_storage_policy_from_row` 는 이미 NULL 을
+    # 부재로 받아 `None` 으로 보존한다. 같은 식을 쓰는 `turnover.freshness_days_of`
+    # 도 한계가 없으면 `None` 을 돌려준다 — **셋이 같은 칸을 같게 읽어야 한다.**
+    #
+    # 🔴 **여기만 예외를 냈다.** 그 예외는 Repository 밖에서 회사 상태가 아니라
+    #    실행 실패로 읽혀(`adapter._load_read` → `_SnapshotLoadError` → `ERROR`),
+    #    보관한계 미등록 한 건이 물류 에이전트 **네 mode 를 통째로 끈다.** 게다가
+    #    `ERROR` 는 재시도 가치가 있는 쪽이라(`envelope.worth_retry`) 마스터가 풀리지
+    #    않을 호출을 되풀이한다. 부재는 `None` 으로 답하는 것이 답이다.
+    #
+    # 🔴 0 · 평균 · 품목 기본값으로 메우지 않는다. 없는 것은 없는 것이다.
+    if operational_limit is not None and not isinstance(operational_limit, int):
         raise TypeError("Inventory lot operational_limit_days must be an int")
     if isinstance(medium_factor, bool) or not isinstance(medium_factor, Decimal):
         raise TypeError("Inventory lot medium_grade_factor must be a Decimal")
@@ -440,16 +452,21 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
     # 해석 불가 사실이 lots[].grade = None으로 드러난다.
     normalized_grade = _normalize_grade(row.get("grade"))
     freshness_limit = operational_limit
-    if normalized_grade == "중":
-        freshness_limit = int(Decimal(operational_limit) * medium_factor)
+    if freshness_limit is not None and normalized_grade == "중":
+        freshness_limit = int(Decimal(freshness_limit) * medium_factor)
     return InventoryLotSnapshot(
         lot_id=row.get("lot_id"),
         item=row.get("item_name"),
         grade=normalized_grade,
         available_qty_kg=quantity,
-        remaining_freshness_days=freshness_limit - (as_of - received_at).days,
+        # ★ 한계를 모르면 **잔여도 모른다.** 경과일만으로는 셈이 서지 않는다.
+        remaining_freshness_days=(
+            None if freshness_limit is None else freshness_limit - (as_of - received_at).days
+        ),
         # remaining 계산에 쓴 그 한계를 그대로 싣는다 — 신선도 잔여 비율의 분모는
         # operational_limit 원값이 아니라 이 값이어야 한다 (중 등급 왜곡 방지).
+        # 🔴 **둘은 함께 없거나 함께 있다.** 한쪽만 실으면 받는 쪽이 남은 하나로
+        #    역산하는데, 그 역산이 정확히 이 칸이 막으려던 왜곡이다.
         effective_freshness_limit_days=freshness_limit,
         status=row.get("status"),
         storage_zone=row.get("storage_zone"),
