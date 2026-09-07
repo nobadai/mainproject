@@ -183,7 +183,7 @@ def _ratio(value: Any) -> float | None:
 
     ⚠️ 범위를 안 보면 조용히 틀린다 (Codex 교차검증, 전부 재현함).
     ``0`` 이나 음수는 "물류값 수신 완료"로 처리되어 **폴백도 고지도 없이** 중품 배분을
-    0으로 만들고, ``1`` 초과는 중품 소진 한계를 상품 한계일보다 **길게** 만든다 —
+    0으로 만들고, ``1`` 초과는 중품 소진 한계를 운영 보관한계보다 **길게** 만든다 —
     중품이 상품보다 오래 간다는 뜻이라 개념이 뒤집힌다.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -193,12 +193,27 @@ def _ratio(value: Any) -> float | None:
     return float(value)
 
 
-def top_grade_shelf_days(inventory: dict, top_grade: str, item: str) -> int | None:
-    """기준등급(상)의 "상품 한계일".
+def top_grade_operational_days(inventory: dict, top_grade: str, item: str) -> int | None:
+    """기준등급(상) 로트의 "운영 보관한계" (회전목표).
+
+    🔴 **상품 한계일이 아니다** (2026-09-07 · 물류 페르소나 05 §8.1)::
+
+        operational_turnover_target_days   회사가 언제든 바꾸는 운영 파라미터
+        물리 저장한계                       품목의 성질 — 🔴 별도 필드로 신설 예정
+
+    물류가 그 둘을 갈랐다 — *"섞으면 재고 회전 정책 변경이 매입 등급 배분을 조용히
+    바꾼다."*
+
+    ⚠️ 새 필드는 **이름·값·시점이 다 미정이다** (07 §7:128). 산정 규칙을 먼저 정한다고
+    했다 — 등급·저장환경·수확시기에 따라 범위로 나와서.
+
+    ★ **그때까지 이 값을 쓴다.** 대안이 없고, 물류가 *"쓰는 방식은 Purchase 가
+      정의한다"* 로 넘겼다 (05 §8).
 
     **값의 출처는 둘이고 물류가 우선이다.**
 
-    1. 물류 ``item_storage_policies[item].operational_limit_days`` — 운영 보관한계.
+    1. 물류 ``item_storage_policies[item].operational_limit_days`` — 운영 보관한계
+       (= 회전목표 · 물류 확정 2026-09-07).
        실측값이고 품목 마스터에서 온다 (배추 10 · 무 14 · 양파 30 · 피마늘 30).
     2. 재고 로트의 ``shelf_life_days`` — 물류가 이 키를 싣지 않을 때의 경로다.
 
@@ -313,7 +328,7 @@ _SHELF_DAYS_GRADE_UNRESOLVED = (
 
 
 def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
-    """``top_grade_shelf_days``가 ``None``을 돌려준 **이유**.
+    """``top_grade_operational_days``가 ``None``을 돌려준 **이유**.
 
     호출부가 ``blocked_by``에 그대로 싣는다 — risks 로 나가 *"무엇을 못 봤는지"*가
     사용자에게 남는다 (§3.7.6 · 규칙 3). 사유를 안 남기면 "중품을 검토하고 안 쓴 것"과
@@ -324,16 +339,16 @@ def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
     걸리면 *"물류가 안 줬다"* 는 **거짓 사유**가 나간다 — 침묵도 오답이지만 틀린 사유는
     더 나쁘다.
 
-    ⚠️ **판정 기준을 ``top_grade_shelf_days`` 와 맞춘다.** 전에는 "키가 있는가"로 봤는데
+    ⚠️ **판정 기준을 ``top_grade_operational_days`` 와 맞춘다.** 전에는 "키가 있는가"로 봤는데
     그쪽은 "값이 있는가"로 본다. 두 기준이 갈리면 사유가 거짓이 된다 — 상 등급 로트의
     ``shelf_life_days`` 가 ``None`` 이면 *"상 등급 로트가 없어"* 라고 답했다. **로트는
     있다.** 없는 것은 값이다 (Codex 교차검증, 재현함).
     """
     lots = inventory.get("lots")
     if lots is None:
-        return "재고 로트를 받지 못해 상품 한계일을 알 수 없다"
+        return "재고 로트를 받지 못해 운영 보관한계를 알 수 없다"
     if not lots:
-        return "보유 로트가 없어 상품 한계일을 알 수 없다"
+        return "보유 로트가 없어 운영 보관한계를 알 수 없다"
 
     policy = item_storage_policy(inventory, item)
     limit = _positive_int(policy.get("operational_limit_days")) if policy else None
@@ -347,14 +362,14 @@ def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
             return (
                 _SHELF_DAYS_GRADE_UNRESOLVED
                 if has_limit
-                else "보유 로트의 등급이 모두 미상이라 상품 한계일을 알 수 없다"
+                else "보유 로트의 등급이 모두 미상이라 운영 보관한계를 알 수 없다"
             )
-        return f"{top_grade} 등급 로트가 없어 상품 한계일을 알 수 없다"
+        return f"{top_grade} 등급 로트가 없어 운영 보관한계를 알 수 없다"
 
     # ③ 기준등급 로트는 있다 — 여기까지 왔다면 없는 것은 **값**이다.
     if not has_limit and all(lot.get("shelf_life_days") is None for lot in graded):
         return _SHELF_DAYS_MISSING_KEY
-    return f"{top_grade} 등급 로트의 상품 한계일을 읽지 못했다"
+    return f"{top_grade} 등급 로트의 운영 보관한계를 읽지 못했다"
 
 
 def near_term_demand_kg(
@@ -437,7 +452,7 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
         spread, baseline, constraints["triggers"]["grade_spread_widening_ratio"]
     )
 
-    top_shelf = top_grade_shelf_days(state["inventory"], top_grade, state["item"])
+    top_shelf = top_grade_operational_days(state["inventory"], top_grade, state["item"])
     facts["top_shelf_days"] = top_shelf
     if top_shelf is None:
         facts["blocked_by"] = shelf_days_block_reason(

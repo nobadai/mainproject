@@ -873,7 +873,7 @@ def _sourcing_rationale(decision: dict, quote_ref: str) -> list[dict]:
             "ref_id": quote_ref,
             "evidence_grade": "ASSUMED",
             "evidence_detail": (
-                f"소진 한계 {decision['shelf_days']:.0f}일 = 상품 한계일 "
+                f"소진 한계 {decision['shelf_days']:.0f}일 = 운영 보관한계 "
                 f"{decision['top_shelf_days']}일 × {decision['shelf_ratio']} · "
                 f"스코어 {decision['score']:+.3f}"
             ),
