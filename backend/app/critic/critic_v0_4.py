@@ -82,7 +82,7 @@ from app.critic.critic import (
 from app.critic.critic import (
     run_l4 as _run_llm_rationale,
 )
-from app.orchestrator.band import check_occupancy_detailed, detect_collapse_type
+from app.master.band import check_occupancy_detailed, detect_collapse_type
 
 EPS = 1e-6
 

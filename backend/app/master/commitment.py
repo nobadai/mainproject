@@ -9,8 +9,8 @@ commitment.py — 승인된 매입안 → **확정 입고 약정** (H1)
 ```
 
 ★ **오케스트레이터를 거치지 않는다** (지시 2026-09-01).
-  같은 변환이 `orchestrator/cycle.py` 에도 있지만 그 경로는 M-1 관통에서 안 돈다.
-  거기 것을 부르지 않고 여기서 만든다 — `tests/master/test_no_orchestrator_runtime.py`
+  같은 변환이 `master/cycle.py` 에도 있지만 그 경로는 M-1 관통에서 안 돈다.
+  거기 것을 부르지 않고 여기서 만든다 — `tests/master/test_orchestrator_is_gone.py`
   가 그 방향을 잠근다.
 
 ★ **품목을 잃지 않는다.** 오케 쪽 변환은 회차 수량을 `sum(leg.qty_kg.values())` 로

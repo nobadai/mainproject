@@ -44,8 +44,8 @@ from app.critic.schemas import (
     FindingOut,
     ScenarioIn,
 )
-from app.orchestrator.band import clip_all, combine_band
-from app.orchestrator.outbound import clip_allocations, combine_outbound_band
+from app.master.band import clip_all, combine_band
+from app.master.outbound import clip_allocations, combine_outbound_band
 
 
 def _snapshot(req: CriticProcurementRequest) -> T0Snapshot:

@@ -1,4 +1,9 @@
-"""Orchestrator-owned Ollama provider, policy, validator, retry and fallback runtime.
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 옮겨 온 사이클 묶음을 한 이름 아래 모으려고 붙였다.**
+  마스터의 Flow 골격과 섞이지 않게 한다.
+
+Orchestrator-owned Ollama provider, policy, validator, retry and fallback runtime.
 
 SYSTEM_PROMPT 와 환각 방지 검사는 `selector_llm.py`(설계 원본)에서 옮겨왔다.
 런타임 골격(설정·재시도·상태 결정 순서)은 Finance / Logistics 와 동일하다.
@@ -17,7 +22,7 @@ from typing import Protocol
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from app.orchestrator.llm.schemas import (
+from app.master.cycle_llm.schemas import (
     InterpretationResult,
     LLMStatus,
     SanitizedLLMContext,

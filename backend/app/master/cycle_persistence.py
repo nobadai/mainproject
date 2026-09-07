@@ -4,7 +4,12 @@
 #   마스터의 실행 계획 기록(§1.2-11)이 이 위에 얹힌다 — 이름이 orchestrator_* 라 헷갈리지만
 #   **파트 소유가 아니라 공용 인프라**다. contracts_core 와 함께 위치 재검토 대상.
 # ─────────────────────────────────────────────────────────────────────────────
-"""라우터가 계산 뒤에 실행이력을 적재하는 얇은 층.
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 이름이 겹쳐서 붙였다** — `app/master/persistence.py` 가 이미 있다.
+  그대로 옮기면 덮어쓴다.
+
+라우터가 계산 뒤에 실행이력을 적재하는 얇은 층.
 
 ★ 계산과 적재를 섞지 않는다. `service.py` 는 여전히 순수하고, 여기서만 DB 를 만진다.
   적재 실패는 응답을 막지 않는다 (`try_save_run` 이 삼킨다).
@@ -18,7 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.orchestrator.run_repository import Agent, RunCycle, try_save_run
+from app.master.cycle_run_repository import Agent, RunCycle, try_save_run
 
 # 응답 모델 → (agent, cycle) 을 무엇으로 적을지. 응답이 스스로 밝히는 값만 쓴다.
 _CYCLE_BY_AGENT: dict[str, str] = {

@@ -400,7 +400,7 @@ def test_null_margin_gets_no_fabricated_evidence() -> None:
     """
     from dataclasses import replace as dc_replace
 
-    from app.orchestrator.contracts_core import Evidence
+    from app.contracts.core import Evidence
 
     as_of = SPREAD_WIDE
     payload = _payload("배추", as_of)

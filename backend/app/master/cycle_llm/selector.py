@@ -1,4 +1,9 @@
-"""T3-5 Selector — `graph.node_t3_select` 에 주입하는 어댑터.
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 옮겨 온 사이클 묶음을 한 이름 아래 모으려고 붙였다.**
+  마스터의 Flow 골격과 섞이지 않게 한다.
+
+T3-5 Selector — `cycle_graph.node_t3_select` 에 주입하는 어댑터.
 
 원본 `selector_llm.py`(설계 산출물)의 `build_payload` · `make_selector` 를 옮겨온 것이다.
 API 경로(`service.run_procurement`)는 응답 객체에서 Context 를 만들지만,
@@ -11,8 +16,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.orchestrator.llm.runtime import SelectionService, get_selection_service
-from app.orchestrator.llm.schemas import CandidateContext, SanitizedLLMContext
+from app.master.cycle_llm.runtime import SelectionService, get_selection_service
+from app.master.cycle_llm.schemas import CandidateContext, SanitizedLLMContext
 
 if TYPE_CHECKING:  # 런타임 순환 임포트를 만들지 않는다.
     from app.contracts.core import PipelineState
