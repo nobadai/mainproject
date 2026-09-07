@@ -875,3 +875,98 @@ def test_t0_snapshot_calls_ports_one_to_five_once_and_never_loads_documents(
     assert calls.get("get_snapshot_extras") == 1
     # ② 노드가 아직 안 돌았으므로 문서 자리는 비어 있어야 한다 (빈 목록 = "아직 안 읽음")
     assert state["context_docs"] == []
+
+
+#: 🔴 **선언만 있고 아무도 안 읽는 키** — 그 사실을 목록으로 고정한다 (`#379` · 2026-09-07).
+#:
+#: ⚠️ **여덟이 아니라 일곱인 것이 핵심이다.** `collapsed_threshold` 를 걷어낸 자리이고,
+#:   되살리면 이 목록과 실측이 갈려 아래 검사가 운다.
+#:
+#: ★ **왜 「없어야 한다」 로 안 짓는가.** 그렇게 지으면 그 키 하나만 막고 **다음 죽은
+#:   선언은 못 잡는다.** 규칙 8(*"선언을 바꾸면 판정이 따라 바뀌는가"*)이 이 자리를
+#:   못 잡은 것도 같은 이유다 — **아무도 안 읽으면 바꿔도 아무 일이 없다.**
+#:
+#: 🟡 남은 일곱은 이번 범위가 아니다. 각각 주인·근거가 다르고, 지우는 것이 답인지도
+#:   따로 봐야 한다 (예: `feedback.attempt_max` 는 마스터 `MAX_PURCHASE_ATTEMPTS` 와
+#:   짝이고 우리가 재시도 루프를 갖는 날 읽는다고 YAML 이 적어 두었다).
+_KNOWN_UNREAD_KEYS = frozenset(
+    {
+        "segment_threshold",
+        "clip_warning_threshold",
+        "delivery_cost_per_kg",
+        "safety_stock_ratio",
+        "rental_cap_ratio",
+        "item_split_rule",
+        "attempt_max",
+    }
+)
+
+
+def _leaf_keys(node: object, path: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    if isinstance(node, dict):
+        return [p for k, v in node.items() for p in _leaf_keys(v, (*path, str(k)))]
+    return [path]
+
+
+def test_constraints_has_no_new_unread_declaration() -> None:
+    """🔴 **선언만 있고 코드가 안 읽는 키가 늘지 않는다** (`#379`).
+
+    `collapsed_threshold` 가 그렇게 죽어 있었다 — 같은 값을 마스터가
+    `VARIANT_SPREAD_MIN` 으로 들고 판정하는데 우리 YAML 에도 `0.15` 가 적혀 있었다.
+    값이 같아서 안 아팠을 뿐 **한쪽만 바꾸는 날 조용히 갈린다.**
+
+    ⚠️ **규칙 8 로는 못 잡는 종류다.** 그 규칙은 *"선언을 바꾸면 판정이 따라 바뀌는가"*
+    를 재는데, **아무도 안 읽으면 바꿔도 아무 일이 없다.** 그래서 판정이 아니라
+    **참조**를 센다.
+
+    ★ **`ast` 로 잰다** (`260905_기록을_읽는_법` ⑦). `code_string_literals` 는 docstring 을
+      걷어내므로, 주석에 키 이름을 적어 설명해도 *"읽는다"* 로 세지 않는다.
+
+    🟡 **이미 죽어 있는 일곱은 통과시킨다.** 지금 다 막으면 이 검사를 켜지 못하고,
+      켜지 못하면 **다음 하나가 또 조용히 들어온다.** 목록을 줄이는 것은 별건이다.
+    """
+    import yaml
+
+    from app.purchase_agent.config import CONSTRAINTS_PATH
+    from tests.test_purchase_agent._ast_helpers import code_string_literals
+
+    declared = yaml.safe_load(CONSTRAINTS_PATH.read_text(encoding="utf-8"))
+    source_dir = CONSTRAINTS_PATH.parent
+    read: set[str] = set()
+    for path in source_dir.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        read |= set(code_string_literals(path))
+
+    unread = {
+        ".".join(p): p[-1]
+        for p in _leaf_keys(declared)
+        if p[-1] not in read and p[-1] not in _KNOWN_UNREAD_KEYS
+    }
+    assert not unread, (
+        "선언만 있고 코드가 안 읽는 키가 새로 생겼다 — 값의 주인이 둘이 되는 자리다:\n  "
+        + "\n  ".join(sorted(unread))
+        + "\n(읽는 곳을 만들거나, 선언을 걷거나, 이유를 적고 _KNOWN_UNREAD_KEYS 에 넣는다)"
+    )
+
+
+def test_collapsed_threshold_stays_removed() -> None:
+    """🔴 **`collapsed_threshold` 를 되살리면 운다** (`#379` · 마스터 회신 2026-09-07).
+
+    위 검사는 *"새로 생긴 것"* 만 잡는다 — 이 키를 되살리면 `_KNOWN_UNREAD_KEYS` 에
+    남아 있어 **통과해 버린다.** 그래서 이 한 줄을 따로 겨눈다.
+
+    ⚠️ 주인은 `app/contracts/core.py` 의 `VARIANT_SPREAD_MIN` 하나다. 되살리면 둘이 된다.
+    """
+    from app.purchase_agent.config import CONSTRAINTS_PATH
+
+    text = CONSTRAINTS_PATH.read_text(encoding="utf-8")
+    declared = [
+        line
+        for line in text.splitlines()
+        if line.strip().startswith("collapsed_threshold")
+    ]
+    assert not declared, (
+        f"collapsed_threshold 가 되살아났다: {declared} — "
+        "주인은 app/contracts/core.py 의 VARIANT_SPREAD_MIN 하나다 (#379)"
+    )
