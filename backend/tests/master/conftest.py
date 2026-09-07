@@ -68,8 +68,13 @@ def 입력_적재를_끈다(monkeypatch: pytest.MonkeyPatch) -> None:
     ★ 빈 값이어도 기존 테스트는 그대로 돈다 — 셋이 없으면 매입이 `missing_data` 로
       답하는 것이 **원래 계약**이고, 그 경로를 테스트가 이미 검사하고 있다.
       실 적재는 `test_inputs.py` 가 따로 본다.
+
+    🔴 **판매 경로는 `load_forecast` 를 따로 부른다** (M-1). 판매가 나르는 것은 예측
+      하나뿐이라 셋을 모으지 않는다 — 그래서 `collect_inputs` 만 막으면 `run_sales` 가
+      **조용히 실 DB 를 친다.** 두 자리를 같이 막는다.
     """
     monkeypatch.setattr("app.master.service.collect_inputs", lambda *a, **k: _NOT_LOADED)
+    monkeypatch.setattr("app.master.service.load_forecast", lambda *a, **k: _NOT_LOADED.forecast)
 
 
 class _공휴일이_없는_달력:

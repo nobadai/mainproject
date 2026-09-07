@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Literal
 
 from app.contracts.core import SuggestedAdjustment
@@ -41,6 +42,10 @@ from app.master.budget import BudgetExhausted, CallBudget
 #   `PASSING_VERDICTS` · `SourcedEvidence` · `AgentFailure` · `wire_adjustment` 는
 #   **사이클에 매인 것이 아니라 봉투 수준의 것**이다. 부서 회신 하나에서 무엇을 뽑아
 #   나르고 무엇을 전선에 싣는가는 매입이든 판매든 같은 질문이라 주인이 하나여야 한다.
+#
+#   `forecast_is_clean` 도 같은 자리다 — 매입 Flow 의 private 메서드였던 것을 M-1 에서
+#   봉투로 올렸다. *"오늘 이후에 생성된 예측을 싣지 않는다"* 는 사이클이 아니라 **예측을
+#   나르는 모든 경로**의 규칙이라, 베끼면 한쪽만 고쳐지는 날 판매가 미래를 본다.
 #
 #   베끼면 `#173` 이 고친 허용목록과 `#175` 가 고친 ISO 변환이 두 벌이 된다 —
 #   어휘가 늘어난 날 한쪽만 늘고, JSON 왕복 성질
@@ -55,6 +60,7 @@ from app.master.envelope import (
     AgentReply,
     Mode,
     SourcedEvidence,
+    forecast_is_clean,
     route_capability,
     wire_adjustment,
 )
@@ -266,6 +272,18 @@ class SalesOutcome:
     #: 나중에 읽는 사람이 볼 수 있어야 한다.
     context_failure: AgentFailure | None = None
 
+    #: 🔴 **ML 예측을 못 실은 이유. 실었으면 빈 문자열이다** (M-1).
+    #:
+    #:   판매 v1.7 은 *"ML missing 은 전체 Sales 실패가 아니다"* 라고 적었다. 그래서
+    #:   여기서 Flow 를 세우지 않는다 — `context_failure` 와 같은 태도다.
+    #:
+    #: ★ **멈추지 않는 것과 없던 일로 하는 것은 다르다.** 예측 없이 만든 후보와 예측을
+    #:   보고 만든 후보는 무게가 다른데, 조용히 빠지면 화면이 둘을 같게 보여준다.
+    #:
+    #: ⚠️ **`AgentFailure` 가 아니다.** ML 은 호출 대상이 아니라 **입력**이라
+    #:   (`inputs.py` 머리말) 부서 실패 모양에 담으면 없는 에이전트를 지어내게 된다.
+    ml_context_note: str = ""
+
     evidences: tuple[SourcedEvidence, ...] = ()
     adjustments: tuple[SuggestedAdjustment, ...] = ()
 
@@ -304,6 +322,8 @@ class SalesFlow:
         user_request: Mapping[str, Any] | None = None,
         mocked_inputs: Sequence[str] = (),
         max_feedback_attempts: int = MAX_FEEDBACK_ATTEMPTS,
+        forecast: Mapping[str, Any] | None = None,
+        forecast_note: str = "",
     ) -> None:
         self.runner = runner
         #: 사용자가 말한 조건 그대로. **숫자로 바꿔 제약에 꽂지 않는다** — 해석은
@@ -314,6 +334,23 @@ class SalesFlow:
         #: 아니라 **아예 내리면 안 되는** 것이다.
         self.mocked_inputs: tuple[str, ...] = tuple(mocked_inputs)
         self.max_feedback_attempts = max_feedback_attempts
+
+        #: 🔴 **ML 예측은 마스터가 실어 나른다 — 판매가 직접 안 부른다** (판매 v1.7 §11).
+        #:
+        #:   ML 은 호출 구조 밖의 독립 실행이라 부를 대상이 없다 (`inputs.py` 머리말).
+        #:   매입이 `forecast` 로 받는 것과 **같은 값 같은 자리**이고, 이름만 받는 쪽
+        #:   낱말(`ml_context`)로 바뀌어 나간다.
+        #:
+        #: ★ **실행 시작에 정해지고 안 바뀐다.** `as_of` 도 예측도 회차마다 안 바뀌므로
+        #:   여기서 한 번 판정한다 — 회차마다 다시 재면 같은 실행 안에서 답이 갈릴
+        #:   자리를 만드는 것이다 (§3.4 재현성).
+        #:
+        #: ⚠️ **받은 원본을 따로 들지 않는다.** `self.forecast` 와 `self.ml_context` 를
+        #:   같이 두면 *"받은 것"* 과 *"실은 것"* 이 두 칸이 되고, 읽는 쪽이 어느 것을
+        #:   봐야 하는지 알 수 없다. 나가는 값 하나와 못 나간 사유 하나면 족하다.
+        self.ml_context, self.ml_context_note = _carriable_forecast(
+            forecast, forecast_note, runner.context.as_of
+        )
 
         #: ②의 회신을 담아 둔다. **S-1 재사용의 원본이다** — 같은 회신을 두 번 부르지
         #: 않는다는 것을 이 한 칸이 보증한다.
@@ -487,12 +524,22 @@ class SalesFlow:
         ★ **물류가 못 답한 회차에는 `supply_context` 칸을 안 만든다.** 빈 값을 실으면
           판매가 *"물류가 팔 수 있는 게 없다고 했다"* 로 읽는다. 안 실으면 판매가
           `missing_capabilities` 로 그 사실을 낸다 — 그것이 §1.2-10 이 원하는 모양이다.
+
+        🔴 **`ml_context` 도 같은 규칙이다** (M-1). 못 읽었거나 look-ahead 로 걸렸으면
+          **칸을 아예 안 만든다.** `None` 을 실으면 판매가 *"예측이 없었다"* 와
+          *"마스터가 안 보냈다"* 를 구별할 수 없다 — 매입 `_purchase_input` 이 같은
+          이유로 그렇게 한다. 못 실은 사실은 `ml_context_note` 로 결과에 남는다.
         """
         payload: dict[str, Any] = {}
         if self.user_request is not None:
             payload["user_request"] = dict(self.user_request)
         if self.context_failure is None and self.supply_context is not None:
             payload["supply_context"] = dict(self.supply_context)
+        if self.ml_context is not None:
+            # ★ **칸 이름은 판매 것이다** (`app/sales/schemas.py` `SalesProposalInput`).
+            #   매입은 같은 값을 `forecast` 로 받는다 — 받는 쪽 낱말에 맞춘다
+            #   (`feedback_attempt` 와 같은 자리).
+            payload["ml_context"] = dict(self.ml_context)
         if feedback is not None:
             payload["feedback_context"] = dict(feedback)
             # ★ **부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도 않는다 —
@@ -599,6 +646,9 @@ class SalesFlow:
             adjustments=tuple(self.suggested_adjustments),
             supply_context=dict(self.supply_context or {}),
             context_failure=self.context_failure,
+            # ★ **모든 종료 코드에서 싣는다** — 근거와 같은 이유다. 후보가 안 나온 날
+            #   *"예측을 못 실었다"* 가 그 이유의 일부일 수 있다.
+            ml_context_note=self.ml_context_note,
             **kw,
         )
 
@@ -606,6 +656,32 @@ class SalesFlow:
 # ---------------------------------------------------------------------------
 # 회신 읽기 — 마스터는 **꺼내기만** 한다
 # ---------------------------------------------------------------------------
+
+
+def _carriable_forecast(
+    forecast: Mapping[str, Any] | None, note: str, as_of: date
+) -> tuple[dict[str, Any] | None, str]:
+    """실어도 되는 예측인가. **실을 것과 못 실은 이유를 같이 돌려준다.**
+
+    🔴 **둘을 따로 돌려주면 같은 사실의 주인이 둘이 된다.** *"안 실었다"* 와 *"왜 안
+      실었나"* 가 갈리면 한쪽만 채워지는 날이 오고, 그날 화면은 예측이 빠진 것을
+      모른 채 후보를 보여준다.
+
+    ★ **look-ahead 대조는 봉투 것을 그대로 부른다** (`forecast_is_clean`). 매입과 같은
+      규칙이어야 하므로 여기서 다시 쓰지 않는다 — 베끼면 어휘가 갈리는 날 판매만
+      미래를 본다.
+
+    ★ **진입점이 준 사유가 있으면 그것을 쓴다.** 못 읽은 이유(`SourcedInput.note`)를
+      아는 곳은 적재층이고, Flow 는 자기가 아는 이유(look-ahead)만 쓴다.
+    """
+    if forecast is None:
+        return None, note or "ML 예측을 못 받아 싣지 않았다"
+    if not forecast_is_clean(forecast, as_of):
+        return None, (
+            f"ML 예측 `generated_at` 이 {as_of.isoformat()} 이후이거나 타임존이 없어 "
+            "싣지 않았다 — 오늘 이후에 생성된 예측으로 오늘을 판단할 수 없다"
+        )
+    return dict(forecast), ""
 
 
 def _verdict_of(reply: AgentReply) -> dict[str, Any]:

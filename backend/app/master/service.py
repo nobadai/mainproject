@@ -30,7 +30,7 @@ from app.master.execution_day import (
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
 from app.master.market_calendar import get_market_calendar
-from app.master.inputs import MasterInputs, collect_inputs
+from app.master.inputs import MasterInputs, SourcedInput, collect_inputs, load_forecast
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID, get_burn_in
 from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
@@ -289,8 +289,25 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         )
         return response
 
+    # 🔴 **ML 예측은 마스터가 읽어 실어 준다** (판매 v1.7 §11 · M-1). 판매는 ML 을
+    #    직접 부르지 않는다 — 부를 대상이 없다 (`inputs.py` 머리말).
+    #
+    # ★ **매입과 같은 자리다.** 매입은 `_inputs_for(request)` 로 읽어
+    #   `ProcurementFlow(forecast=...)` 로 넘긴다. 여기도 진입점이 읽고 Flow 에 넘긴다 —
+    #   Flow 가 직접 조회하면 조립기가 적재층을 겸하게 되고, 백테스트가 그날 값을
+    #   꽂아 넣을 자리도 사라진다.
+    forecast = _sales_forecast(request)
     runner = MasterRunner(context, wiring.registry(), sales_call_budget(request.budget))
-    outcome = SalesFlow(runner, user_request=_sales_user_request(request)).run()
+    outcome = SalesFlow(
+        runner,
+        user_request=_sales_user_request(request),
+        forecast=forecast.payload if forecast.usable else None,
+        # ★ 못 읽은 이유를 아는 곳은 여기다. Flow 는 자기가 아는 이유(look-ahead)만 쓴다.
+        forecast_note=_sales_forecast_note(forecast),
+        # 🔴 **mock 이면 세운다** — 매입과 같은 태도이고, 골격이 이미 그렇게 적어 두었다
+        #    (`SalesFlow.mocked_inputs`). 실어 주기 시작했으니 막는 쪽도 같이 잇는다.
+        mocked_inputs=("forecast",) if forecast.grade == "MOCK" else (),
+    ).run()
 
     response = _to_sales_response(context, outcome)
     response.day_gate = day_gate
@@ -299,6 +316,54 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         request, response, elapsed_ms=_elapsed(started)
     )
     return response
+
+
+def _sales_forecast(request: SalesRunRequest) -> SourcedInput:
+    """판매에 실어 줄 ML 예측 하나 (§3.2.5 예외 · M-1).
+
+    🔴 **셋을 다 모으지 않는다.** 매입은 `collect_inputs` 로 예측·확정주문·정책값을
+      한꺼번에 읽지만 판매가 나르는 것은 **예측뿐**이다. 셋을 읽으면 판매가 쓰지도
+      않는 `policy_values` 가 mock 인 날 판매가 서고, 그것은 없는 이유로 멈추는 것이다.
+
+    ★ **못 읽어도 예외를 올리지 않는다** — 매입 `_inputs_for` 와 같은 태도다. ML DB 가
+      죽었다고 판매가 통째로 못 도는 것은 아니다 (판매 v1.7: *"ML missing 은 전체
+      Sales 실패가 아니다"*). 대신 **못 읽었다는 사실이 `SourcedInput` 에 남아** Flow 를
+      거쳐 응답까지 간다.
+
+    ★ 품목이 없으면 묻지 않는다 — 예측은 품목별이라 물을 대상이 없다.
+    """
+    if not request.item:
+        return SourcedInput(
+            key="forecast",
+            payload=None,
+            grade="MISSING",
+            source="-",
+            note="품목이 없어 ML 예측을 읽지 않았다",
+        )
+    try:
+        return load_forecast(request.item, request.as_of)
+    except Exception as exc:
+        # ★ 조회 실패가 판매 실행을 막지 않는다. 다만 조용히 넘어가지도 않는다 —
+        #   `_approved_commitments` 와 같은 자리다.
+        logger.exception("판매에 실을 ML 예측 조회 실패 - 실행은 그대로 돈다")
+        return SourcedInput(
+            key="forecast",
+            payload=None,
+            grade="MISSING",
+            source="-",
+            note=f"ML 예측 조회 실패 ({type(exc).__name__})",
+        )
+
+
+def _sales_forecast_note(forecast: SourcedInput) -> str:
+    """못 실은 이유 한 줄. **실을 수 있으면 빈 문자열이다.**
+
+    ★ **문장을 새로 짓지 않는다.** 적재층이 쓴 `note` 를 그대로 옮기고, 없을 때만
+      등급을 적는다 (`AgentFailure.detail` 과 같은 자리).
+    """
+    if forecast.usable:
+        return ""
+    return forecast.note or f"ML 예측을 못 실었다 ({forecast.grade})"
 
 
 def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
@@ -734,6 +799,10 @@ def _to_sales_response(context: ExecutionContext, outcome: SalesOutcome) -> Sale
         judgment=dict(outcome.judgment),
         supply_context=dict(outcome.supply_context),
         context_failure=_sales_context_failure_out(outcome),
+        # ★ **못 실은 사실을 응답까지 나른다** (M-1). 매입 `mocked_inputs` ·
+        #   `input_sources` 와 같은 자리다 — 값이 어디서 왔는지(또는 안 왔는지)를
+        #   결론과 떼어 놓지 않는다.
+        ml_context_note=outcome.ml_context_note,
         # ★ 근거·조정안은 **고르지도 정렬하지도 않는다** — 매입과 같은 함수를 쓴다.
         #   부서가 낸 차례가 그 부서의 설명 순서다 (§3.2.2).
         evidences=_evidences_out(outcome),

@@ -621,6 +621,38 @@ def wire_adjustment(adjustment: SuggestedAdjustment) -> dict[str, Any]:
     return out
 
 
+_HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
+"""ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
+
+
+def forecast_is_clean(forecast: Mapping[str, Any] | None, as_of: date) -> bool:
+    """예측 생성 시각이 `as_of` 이후면 싣지 않는다.
+
+    오염된 입력으로 시나리오를 만들면 **백테스트 손익만 좋아진다.**
+    싣지 않으면 매입이 `RUNTIME_NOT_READY` 를 내고, 그 사실이 이력에 남는다.
+
+    ★ **타임존이 없으면 싣지 않는다** (2026-08-27 매입 요청 반영).
+      앞 10자만 비교하므로 오프셋이 없으면 `2026-09-04T23:00` 이 KST 로 09-05 인지
+      UTC 로 09-04 인지 갈리지 않는다 — **이 검사 자체가 성립하지 않는다.**
+      매입도 수신 시 거부하지만, 여기서 막으면 매입 호출 한 번을 아낀다.
+
+    🔴 **매입 `ProcurementFlow._forecast_is_clean` 에서 여기로 올렸다** (M-1 · 순수 이동).
+
+      판매도 같은 예측을 나르므로 검사가 두 벌이 되면 **한쪽만 고쳐지는 날**이 온다.
+      그날 판매는 *"오늘 이후에 생성된 예측"* 으로 오늘을 판단하는데, 그것은 오류를
+      내지 않고 **손익만 좋아진다** — 아무도 모른다.
+
+      `PASSING_VERDICTS` · `wire_adjustment` 를 봉투로 올린 것과 같은 이유다.
+      *"무엇을 실어도 되는가"* 는 사이클에 매인 물음이 아니다.
+    """
+    generated = (forecast or {}).get("generated_at")
+    if not isinstance(generated, str):
+        return True  # 시점 필드가 없으면 판단하지 않는다 — 매입이 수신 시 재검증한다
+    if not _HAS_TIMEZONE.search(generated):
+        return False
+    return generated[:10] <= as_of.isoformat()
+
+
 # ---------------------------------------------------------------------------
 # 5. ExecutionMetadata — 별도 저장 (§7.1-②)
 # ---------------------------------------------------------------------------
