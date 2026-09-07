@@ -48,7 +48,7 @@ from psycopg.types.json import Jsonb
 
 from app.finance.db import get_connection, get_db_schema
 
-__all__ = ["DayOpeningRecord", "record_day_opening", "read_day_opening"]
+__all__ = ["DayOpeningRecord", "read_day_opening", "record_day_opening"]
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,9 @@ def record_day_opening(
     :returns: 적었으면 참. **못 적어도 거짓을 돌려줄 뿐 개장을 죽이지 않는다.**
     """
     succeeded = result in _SUCCESS
-    payload = [part.model_dump(mode="json") if hasattr(part, "model_dump") else part for part in parts]
+    payload = [
+        part.model_dump(mode="json") if hasattr(part, "model_dump") else part for part in parts
+    ]
     query = sql.SQL(
         """
         INSERT INTO {} (as_of, sim_run_id, result, attempt_count, failure_count, reason, parts_json)
@@ -134,7 +136,7 @@ def record_day_opening(
     open_connection = get_connection if connect is None else connect
     try:
         conn = open_connection()
-    except Exception:  # noqa: BLE001 - 정본을 못 열어도 개장은 이미 끝났다.
+    except Exception:
         logger.exception("개장 정본 커넥션 실패 - 개장 결과는 그대로 나간다")
         return False
     try:
@@ -152,7 +154,7 @@ def record_day_opening(
                 ),
             )
         conn.commit()
-    except Exception:  # noqa: BLE001 - 이력이 없는 것보다 하루를 못 여는 것이 나쁘다.
+    except Exception:
         conn.rollback()
         logger.exception("개장 정본 적재 실패 - 개장 결과는 그대로 나간다")
         return False
@@ -177,14 +179,14 @@ def read_day_opening(
     open_connection = get_connection if connect is None else connect
     try:
         conn = open_connection()
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("개장 정본 커넥션 실패 - 근사로 답한다")
         return None
     try:
         with conn.cursor() as cursor:
             cursor.execute(query, (as_of, sim_run_id))
             row = cursor.fetchone()
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("개장 정본 조회 실패 - 근사로 답한다")
         return None
     finally:
@@ -205,3 +207,59 @@ def read_day_opening(
         failure_count=int(failure_v),
         reason=reason_v,
     )
+
+
+def opened_days_after(
+    *, after: date, sim_run_id: str, connect: Callable[[], Any] | None = None
+) -> tuple[date, ...]:
+    """`after` **보다 뒤에** 이미 열린 날들. 오래된 것부터.
+
+    🔴 **왜 이 함수가 필요한가** (물류 물음 2026-09-07 · 실측 2026-09-07).
+
+      승인 전이는 `target_state_date`(= 승인일 + 1) **한 행에만** 쓴다. 그런데 그
+      다음 날들이 **이미 열려 있으면** 그 행들은 승인 이전의 전날에서 물려받은
+      것이라 **새 도착분을 모른다.**
+
+      ```text
+      2026-01-14   in_transit 2건   ← 승인이 여기 들어갔다
+      2026-01-15   in_transit 1건   ← **도착일인데 새 것이 없다**
+      ```
+
+      ★ 정방향 운영에서는 안 생긴다 — 내일은 아직 없으니까. 다만 *"내일을 미리 열어
+        두고 오늘 승인"* 은 실제로 있을 수 있는 순서이고, 실측 장부가 그 상태였다.
+
+    🔴 **마스터가 물류 표를 읽지 않는다** (정의서 §3.2.5). 어느 날이 열렸는지는
+       `master_day_openings` 가 아는 **마스터 사실**이라 여기서 답할 수 있다.
+
+       ⚠️ 그래서 **정본에 없는 날은 안 보인다.** 이 표가 생기기 전에 열린 날은
+         마스터도 모르고, 그것은 근사가 아니라 **모르는 것**이다 — 지어내지 않는다.
+
+    ★ **성공한 개장만 센다.** `NOT_OPENED` · `REJECTED_GAP` 인 날은 파트 행이 안 섰
+      으므로 물려줄 것도 없다.
+
+    ⚠️ **못 읽으면 빈 튜플이다.** 이 값이 없다고 승인을 멈추지 않는다 —
+      `record_day_opening` 이 절대 raise 하지 않는 것과 같은 규율이다. 다만 그때는
+      낡은 행이 그대로 남고, 그 사실은 `TransitionOut.carried_forward` 가 비어 있는
+      것으로 드러난다.
+    """
+    query = sql.SQL(
+        "SELECT as_of FROM {} WHERE sim_run_id = %s AND as_of > %s"
+        " AND result IN ('OPENED', 'ALREADY_OPENED') ORDER BY as_of"
+    ).format(_table())
+
+    open_connection = get_connection if connect is None else connect
+    try:
+        conn = open_connection()
+    except Exception:
+        logger.exception("개장 정본 조회 실패 - 앞질러 열린 날을 모른 채 간다")
+        return ()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (sim_run_id, after))
+            rows = cur.fetchall()
+    except Exception:
+        logger.exception("개장 정본 조회 실패 - 앞질러 열린 날을 모른 채 간다")
+        return ()
+    finally:
+        conn.close()
+    return tuple(row["as_of"] if isinstance(row, Mapping) else row[0] for row in rows)

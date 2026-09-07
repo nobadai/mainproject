@@ -46,7 +46,8 @@ from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
-from app.master.ledger import build_purchase_rows, persist_purchases
+from app.master.day_opening_repository import opened_days_after
+from app.master.ledger import build_purchase_rows, persist_purchases, sim_run_id_for
 
 __all__ = [
     "PARTS",
@@ -201,6 +202,10 @@ class TransitionOut(BaseModel):
     parts: list[str] = Field(default_factory=list)
     #: 아직 어댑터가 없는 파트.
     missing: list[str] = Field(default_factory=list)
+    #: 🔴 **이미 열려 있어 같이 실어 준 다음 날들.** 비어 있는 것이 정상이다 —
+    #: 정방향이면 내일이 아직 없다. 값이 있으면 *"앞질러 열린 장부를 따라잡았다"*
+    #: 는 사실이고, 화면에 나가 **왜 하루가 여러 번 바뀌었는지**를 설명한다.
+    carried_forward: list[date] = Field(default_factory=list)
 
 
 # ── 등록소 ──────────────────────────────────────────────────────────────
@@ -411,8 +416,7 @@ def apply_approval(
         #   이 비면 **빈 매핑**이고 그것은 예외가 아니다 — 회차 일정을 못 만든 약정도
         #   승인은 살아 있다 (`commitment.py` 의 `notes` 가 왜 못 만들었는지 적는다).
         purchase_ids = {
-            leg.seq: purchase_id_for(commitment, leg.seq)
-            for leg in commitment.arrival_schedule
+            leg.seq: purchase_id_for(commitment, leg.seq) for leg in commitment.arrival_schedule
         }
         # ★ 매입 원장도 **커넥션 밖에서** 계산한다 — 재무·물류와 같은 규율이다.
         #   `items` 조회만 커넥션이 필요하고 그것은 `persist_purchases` 안에 있다.
@@ -428,10 +432,46 @@ def apply_approval(
         #
         # ★ **`persist_purchases` 가 먼저 돈다** (아래). 물류가 저장하는 `purchase_id` 가
         #   가리키는 부모 행은 **같은 트랜잭션 안에서 이미 서 있다.**
-        logistics_rows = logistics.build(
-            commitment,
-            target_state_date=target_state_date,
-            purchase_ids=purchase_ids,
+        #
+        # 🔴 **이미 열린 다음 날들에도 같은 사실을 싣는다** (물류 물음 2026-09-07).
+        #
+        #    `in_transit` 은 **승인 ~ 도착 ~ 검수까지 여러 날에 걸쳐 유지되는 상태**다
+        #    (물류 `day_open.py` 가 그렇게 적었다). 물류는 그것을 **하루 넘김의
+        #    carry-forward** 로 유지하는데, 그러면 전날에서 물려받는 것이라
+        #    **다음 날이 이미 열려 있으면 그 행은 이 승인을 모른 채 굳는다.**
+        #
+        #    ```text
+        #    2026-01-14   in_transit 2건   ← 전이가 여기 들어간다
+        #    2026-01-15   in_transit 1건   ← **도착일인데 새 것이 없다** (실측 2026-09-07)
+        #    ```
+        #
+        # ★ **정방향에서는 안 생긴다** — 내일은 아직 없으니까. 다만 *"내일을 미리 열어
+        #   두고 오늘 승인"* 은 있을 수 있는 순서이고, 아티팩트로 보고 덮으면 그 순서가
+        #   실제로 오는 날 **도착분이 조용히 사라진다.**
+        #
+        # ⚠️ **물류 코드를 안 고친다.** `InventoryTransition` 이 날짜를 행마다 들고 있고
+        #    어댑터 `persist` 가 행마다 `persist_inventory` 를 부른다 — **묶음을 여러 개
+        #    주면 되는 계약**이다. 그리고 `in_transit` 은 덮어쓰기가 아니라 **병합**이라
+        #    (`_merge_in_transit`) 같은 `inbound_id` 를 여러 날에 실어도 안전하다.
+        #
+        # 🔴 **어느 날이 열렸는지는 마스터 사실이다.** `master_day_openings` 를 읽는다 —
+        #    물류 표를 읽지 않는다 (정의서 §3.2.5).
+        #
+        #    ⚠️ **정본에 없는 날은 안 보인다.** 이 표가 생기기(2026-09-07) 전에 열린
+        #      날은 마스터도 모르고, 그것은 근사가 아니라 **모르는 것**이다.
+        carried_forward = opened_days_after(
+            after=target_state_date,
+            sim_run_id=sim_run_id_for(commitment),
+            connect=connect,
+        )
+        logistics_rows = tuple(
+            row
+            for state_date in (target_state_date, *carried_forward)
+            for row in logistics.build(
+                commitment,
+                target_state_date=state_date,
+                purchase_ids=purchase_ids,
+            )
         )
     except Exception as exc:  # noqa: BLE001 - 전이 실패가 적재된 결정을 지우면 안 된다.
         return TransitionOut(status="FAILED", reason=f"전이 계산 실패: {exc}")
@@ -450,4 +490,4 @@ def apply_approval(
         return TransitionOut(status="FAILED", reason=f"전이 적재 실패: {exc}")
     finally:
         conn.close()
-    return TransitionOut(status="APPLIED", parts=list(PARTS))
+    return TransitionOut(status="APPLIED", parts=list(PARTS), carried_forward=list(carried_forward))
