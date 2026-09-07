@@ -14,7 +14,6 @@
   때문이다. 임계를 내리는 순간(`#308`) 갈린다: mock 15조합 중 2개가 닫힌다.
 """
 
-import ast
 from datetime import date
 from pathlib import Path
 
@@ -23,6 +22,7 @@ import pytest
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.classify_situation import compute_allowed_axes, coverage_by_label
 from app.purchase_agent.state import build_initial_state
+from tests.test_purchase_agent._ast_helpers import called_names, references
 
 _NODES = Path(__file__).resolve().parents[2] / "app" / "purchase_agent" / "nodes"
 
@@ -102,28 +102,14 @@ def test_두_노드가_같은_함수를_쓴다() -> None:
     ★ 그래서 **③이 그 함수를 실제로 부르는지**를 구문으로 본다. ③이 자기 필터를 다시
       쓰면 여기가 운다.
     """
-    source = (_NODES / "draft_plan.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    draft = _NODES / "draft_plan.py"
 
-    calls = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert "coverage_by_label" in calls, "③이 ①의 라벨 규칙을 안 부른다"
+    assert "coverage_by_label" in called_names(draft), "③이 ①의 라벨 규칙을 안 부른다"
 
     # 🔴 ③ 안에 "공격" 을 직접 거르는 조건이 남아 있으면 두 곳이 다시 갈린 것이다.
-    prose = {
-        id(node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-    }
-    literals = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant) and node.value == "공격" and id(node) not in prose
-    ]
-    assert not literals, "③에 «공격» 리터럴이 남았다 — 라벨 규칙이 두 곳에 있다"
+    #   docstring·주석에는 그 낱말이 셋 있다 (:127 · :132 · :134) — `_ast_helpers` 가
+    #   걷어내므로 여기서는 **코드가 쓰는 것만** 남는다.
+    assert not references(draft, "공격"), "③에 «공격» 리터럴이 남았다 — 라벨 규칙이 두 곳에 있다"
 
 
 def test_두_노드의_목록이_실제로_같다() -> None:
