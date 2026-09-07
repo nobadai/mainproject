@@ -16,12 +16,15 @@ from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
 from app.logistics.day_open import LogisticsDayOpening
+from app.logistics.inbound_execution import LogisticsInboundExecution
 from app.logistics.router import router as logistics_router
 from app.logistics.transition import LogisticsTransitionAdapter
 from app.logistics.cancellation import LogisticsCancellationAdapter
 from app.master.cancellation import register_cancellation
 from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.day_open import register_day_opening
+from app.master.inbound import register_inbound
+from app.master.inbound_inspection import NoInspectionSource
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
 from app.master.transition import register_transition
@@ -139,6 +142,48 @@ register_day_opening("finance", FinanceDayOpening())
 #    없는 것은 다른 사실이고, 둘을 같은 문장으로 접으면 무엇을 고칠지가 사라진다.
 register_cancellation("finance", FinanceCancellationAdapter())
 register_cancellation("logistics", LogisticsCancellationAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
+
+
+# ── 입고 실행 (receive_arrivals) ────────────────────────────────────────
+#
+# 🔴 **네 번째 등록소다.** 전이는 *"승인이 장부를 바꾸는 방법"*, 하루 넘김은 *"하루가
+#    넘어가는 방법"*, 취소는 *"승인을 물리는 방법"*, 여기는 *"도착분을 받는 방법"* 이다.
+#    한 사전에 섞으면 **전이는 되는데 입고는 안 되는 상태**를 표현할 수 없다.
+#
+# 🔴 **구현은 `#329` 로 섰는데 이 줄이 없었다.** 경계(`#316`)와 구현이 다 있는데
+#    등록이 없어 `receive_arrivals` 가 매일 *"입고 실행 미등록"* 으로 돌아섰다 —
+#    `apply_approval` 이 승인마다 *"상태전이 미등록"* 으로 돌아서던 것과 **같은
+#    모양**이다. 배선은 마스터 몫이고 그 자리가 여기다.
+#
+# ⚠️ **`inspection_provider` 에 기본값이 없다. 물류가 일부러 안 뒀다.**
+#
+#    > 자동 검수 규칙(합격률·등급별 판정·수량 배분)을 정한 문서도 코드도 씨앗
+#    > 데이터도 없다. 여기에 기본 구현을 놓으면 **아무도 정한 적 없는 비율이 곧
+#    > 업무 사실이 되어** 원가·폐기·판매 판단으로 흘러간다.
+#
+#    그리고 길을 열어 뒀다 — *"항상 `None` 을 내는 provider 는 정당한 배선이다."*
+#
+# ★ **그래서 도착분이 매일 `BLOCKED / INSPECTION_FACT_UNAVAILABLE` 로 보인다.
+#   그것이 이 배선의 목적이다.** 지금 도착 예정 `2026-01-07` 이 `02-06` 까지
+#   `in_transit` 에 **묻혀서 안 보인다** — 배선을 미루면 계속 안 보이고, 붙이면
+#   매일 보인다. 조용해지면 그때가 이상한 것이다.
+#
+#   ```text
+#   배선 안 함      "입고 실행 미등록"     배선 문제 — **사실이 아니다**, 구현은 섰다
+#   Null provider   "검수 사실을 모른다"   그날의 사실
+#   ```
+#
+# ⚠️ **검수 규칙의 주인은 마스터가 안 정한다.** 여기서 고르면 *"아무도 정한 적 없는
+#    비율"* 을 막으려던 물류의 판단을 마스터가 우회하는 셈이다. 주인이 정해져 자기
+#    provider 를 올리면 `app/master/inbound_inspection.py` 를 지우고 이 한 줄만
+#    바꾸면 된다 — `FinanceCancellationAdapter` 와 같은 전례다.
+register_inbound(
+    "logistics",
+    LogisticsInboundExecution(
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        inspection_provider=NoInspectionSource(),
+    ),
+)
 
 app.include_router(critic_router)
 app.include_router(sales_router)
