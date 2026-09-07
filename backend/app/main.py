@@ -191,6 +191,41 @@ register_inbound(
     ),
 )
 
+
+# ── 수금 (collect_receipts) ─────────────────────────────────────────────
+#
+# 🔴 **다섯 번째 등록소가 생겼다** (`app/master/collection.py` · 2026-09-07). 전이는
+#    *"승인이 장부를 바꾸는 방법"*, 하루 넘김은 *"하루가 넘어가는 방법"*, 취소는
+#    *"승인을 물리는 방법"*, 입고는 *"도착분을 받는 방법"*, 수금은 *"채권이 돈으로
+#    들어오는 방법"* 이다. 한 사전에 섞으면 **입고는 되는데 수금은 안 되는 상태**를
+#    표현할 수 없고, 지금이 정확히 그 상태다.
+#
+# 🔴 **여기에 `register_collection` 이 없다. 일부러 없다.**
+#
+#    ```text
+#    경계        app/master/collection.py            🟢 섰다 (여기 등록소)
+#    구현        app/finance/collection.py           🟢 섰다 (apply_explicit_collection)
+#    어댑터      CollectionSource 를 만족하는 재무 구현체   🔴 **아직 없다**
+#    배선        register_collection("finance", ...)  🔴 그래서 못 적는다
+#    ```
+#
+#    ★ **재무 경계는 이미 서 있다.** 누적 target 을 delta 로 접는 전이도, 역행·초과를
+#      막는 불변식도 `apply_explicit_collection(conn, CollectionEvent(...))` 안에 다
+#      있다. 실측하면 **그것을 부르는 production 호출자가 0건**이고(2026-09-07),
+#      이 등록소가 붙을 자리를 만든다.
+#
+#    ⚠️ **마스터가 그 어댑터를 대신 쓰지 않는다.** 어느 채권을 얼마 수금할지는 재무
+#      사실이고(재무 결정 2026-09-07), 마스터가 `due_date` 경과를 보고 정하면 **없는
+#      현금이 장부에 생긴다.**
+#
+#    ★ **부재를 부재로 적는다.** 그래서 `collect_receipts` 가 매일 `NOTHING_DUE` +
+#      `missing=["finance"]` 로 돌아선다 — *"오늘 들어올 게 없었다"* 가 아니라
+#      *"수금 실행 미등록"* 이라고 사유에 적힌다. 둘을 가르려고 등록소를 둔 것이다.
+#
+#    ⚠️ `register_inbound` 가 `#337` 까지 0건이던 것과 **같은 모양이고 다른 단계**다.
+#      그때는 구현이 있는데 이 줄이 없었고, 지금은 어댑터가 아직 없다. 재무가 구현체를
+#      내면 이 자리에 한 줄이 붙는다.
+
 app.include_router(critic_router)
 app.include_router(sales_router)
 

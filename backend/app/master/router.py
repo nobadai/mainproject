@@ -14,6 +14,8 @@ from app.contracts.core import ContractViolation
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
+from app.master.collection import CollectionOut
+from app.master.collection import collect_receipts as run_collect_receipts
 from app.master.day_open import DayOpenOut
 from app.master.day_open import open_day as run_open_day
 from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
@@ -415,3 +417,51 @@ def master_receive_arrivals(as_of: date) -> InboundOut:
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
     return run_receive_arrivals(as_of)
+
+
+@router.post(
+    "/days/{as_of}/collect",
+    response_model=CollectionOut,
+    summary="그날 수금 사건을 반영한다 — 개장 다음이고 판단과는 별개다",
+)
+def master_collect_receipts(as_of: date) -> CollectionOut:
+    """`as_of` 의 수금 사건을 파트마다 반영한다.
+
+    🔴 **왜 자기 엔드포인트인가.**
+
+      바로 위 두 형제가 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의 부작용이
+      아니다. 사건에는 자기 자리가 있다."* **수금도 사건이다.** 채권이 돈으로 들어오면
+      `receivables` 와 `finance_states` 가 바뀌고 그것은 장부가 바뀌는 것이다.
+
+    ★ **`run_procurement` 안으로 넣지 않는다.** 넣으면 **판단 한 번이 현금을 움직이고**
+      *"같은 `as_of` 로 백번 돌려도 같은 답"* 이 깨진다. 개장·입고를 판단 밖에 둔
+      이유와 같고, 현금이라 더 그렇다.
+
+    🔴 **마스터는 수금 대상이나 수금액을 스스로 정하지 않는다** (재무 결정 2026-09-07).
+
+      ```text
+      Finance   실제 수금 사건의 정본 의미 — receivable_id · collection_date
+                · cumulative target_received_total_krw · (sim_run_id, financing_mode)
+      Master    날짜에 해당하는 사건을 **운반하고 호출**한다
+      Sales     계약 결제조건·채권 발생의 상업적 원천
+      ```
+
+      ⚠️ **`due_date` 경과는 수금이 아니다.** 기일이 지난 것과 돈이 들어온 것을 접으면
+        **없는 현금으로 매입 판단이 돈다.**
+
+    ★ **순서는 문장이 아니라 Gate 가 지킨다.** 안 열린 날 부르면 `NOT_OPENED` 로
+      돌아서고 `next_action` 이 `OPEN_DAY_REQUIRED` 를 준다 — `/days/{as_of}/receive`
+      와 같은 모양이다.
+
+    ⚠️ **달력일이다.** 입금은 토요일에도 찍힌다. 그래서 이 호출은 실행일 판정을 안
+      본다 — 토요일에 `open_day` · `receive` · `collect` 는 돌고 `run_procurement` 만
+      안 돈다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 수금했다 · 들어올 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/receive` 와 같은 태도). `FAILED` 는 롤백되어
+      아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
+    """
+    return run_collect_receipts(as_of)
