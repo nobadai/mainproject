@@ -9,7 +9,6 @@ from functools import partial
 
 from fastapi import FastAPI
 
-from app.critic.router import router as critic_router
 from app.finance.adapter import finance_port
 from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
@@ -22,6 +21,7 @@ from app.logistics.router import router as logistics_router
 from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.transition import LogisticsTransitionAdapter
 from app.master.cancellation import register_cancellation
+from app.master.critic.router import router as critic_router
 from app.master.day_open import register_day_opening
 from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.inbound import register_inbound

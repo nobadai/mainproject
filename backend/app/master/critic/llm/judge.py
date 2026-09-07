@@ -1,4 +1,6 @@
-"""L5 Judge — `run_critic_v04(judge=...)` / `run_critic_b(...)` 에 주입하는 어댑터.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+L5 Judge — `run_critic_v04(judge=...)` / `run_critic_b(...)` 에 주입하는 어댑터.
 
 `RationaleJudge` 프로토콜은 `(payload: Mapping) -> tuple[bool, str]` 이다.
 Critic 러너는 이 콜러블만 알면 되고, LLM 설정·검증·재시도는 여기서 끝난다.
@@ -12,8 +14,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.critic.llm.runtime import JudgeService, get_judge_service
-from app.critic.llm.schemas import InterpretationResult, SanitizedLLMContext
+from app.master.critic.llm.runtime import JudgeService, get_judge_service
+from app.master.critic.llm.schemas import InterpretationResult, SanitizedLLMContext
 
 
 def build_judge_context(payload: Mapping[str, Any], *, cycle: str) -> SanitizedLLMContext:

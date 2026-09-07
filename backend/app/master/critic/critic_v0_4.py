@@ -4,7 +4,8 @@
 #   → `app/master/flow.py` 의 `VerifierPort` 에 주입될 구현. 파일은 그대로 둔다.
 #   ⚠️ 삭제 대상이 아니다. 마스터 구조에서 오히려 호출 지점이 늘어난다(④ 실행 계획 온전성).
 # ─────────────────────────────────────────────────────────────────────────────
-"""
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
 critic_v0_4.py — Critic 설계서 v0.4 구현 (기준: 프로젝트_정의서_v1.2 · 유저플로우_v1.4 · UI_v1.3)
 
 기존 `critic.py`(v0.3 계열, L1~L4)를 **대체하지 않고 감싼다.**
@@ -37,7 +38,7 @@ v0.4 설계서가 요구하는 6레이어(L0~L5)로 재배치하고, 설계서 �
 
   남은 개정 목록은 이 파일 맨 아래 `CONTRACT_AMENDMENTS` 에 있다.
   닫힌 것은 `CONTRACT_AMENDMENTS_CLOSED` 로 옮긴다 — 목록이 낡으면
-  `tests/critic/test_contract_amendments_are_open.py` 가 운다.
+  `tests/master/critic/test_contract_amendments_are_open.py` 가 운다.
 ────────────────────────────────────────────────────────────────────────────
 """
 
@@ -65,7 +66,8 @@ from app.contracts.core import (
     T0Snapshot,
     T2Reply,
 )
-from app.critic.critic import (
+from app.master.band import check_occupancy_detailed, detect_collapse_type
+from app.master.critic.critic import (
     EvidenceResolver,
     RationaleJudge,
     check_constraint_independence,
@@ -73,16 +75,15 @@ from app.critic.critic import (
     check_identity_on_clipped,
     check_price_basis_consistency,
 )
-from app.critic.critic import (
+from app.master.critic.critic import (
     run_l1 as _run_hard_recheck,
 )
-from app.critic.critic import (
+from app.master.critic.critic import (
     run_l2 as _run_evidence_match,
 )
-from app.critic.critic import (
+from app.master.critic.critic import (
     run_l4 as _run_llm_rationale,
 )
-from app.master.band import check_occupancy_detailed, detect_collapse_type
 
 EPS = 1e-6
 
@@ -1131,7 +1132,7 @@ def run_critic_b(
 #   다음 사람이 같은 사이드카를 또 만든다. 아래 `CONTRACT_AMENDMENTS_CLOSED` 로
 #   옮기고 **무엇이 닫았는지**를 같이 적는다.
 #
-# `tests/critic/test_contract_amendments_are_open.py` 가 항목마다 계약을 직접
+# `tests/master/critic/test_contract_amendments_are_open.py` 가 항목마다 계약을 직접
 # 들여다본다. 누가 개정을 구현하는 날 그 검사가 red 가 되어 목록에서 걷도록 만든다.
 
 CONTRACT_AMENDMENTS: tuple[tuple[str, str], ...] = (

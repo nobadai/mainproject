@@ -166,8 +166,8 @@ def test_dept_meta_is_absent_without_states():
 
 
 def _critic_verdict(observations: dict[str, tuple[str, ...]]):
-    from app.critic.service import run_critic_procurement
     from app.master import critic_bridge as bridge
+    from app.master.critic.service import run_critic_procurement
     from tests.master.test_critic_bridge import CONSTRAINTS, EVIDENCES, _proposal
 
     request = bridge.build_request(

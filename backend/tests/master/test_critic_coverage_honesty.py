@@ -21,8 +21,8 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from app.critic.service import run_critic_procurement
 from app.master import critic_bridge as bridge
+from app.master.critic.service import run_critic_procurement
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from tests.master.test_critic_bridge import CONSTRAINTS, EVIDENCES, _proposal
 

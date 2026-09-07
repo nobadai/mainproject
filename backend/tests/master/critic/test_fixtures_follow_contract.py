@@ -1,7 +1,7 @@
 """Critic 픽스처가 계약 품목을 따르는지 (2026-09-03 피마늘 제외).
 
 🔴 픽스처가 품목을 **따로 세고 있었다** (`ITEMS4`). 계약이 셋이 된 날
-`tests/critic/test_critic_v0_4.py` 가 12건 깨졌고, 깨진 것은 계약이 아니라
+`tests/master/critic/test_critic_v0_4.py` 가 12건 깨졌고, 깨진 것은 계약이 아니라
 픽스처였다 — 픽스처가 계약을 못 따라간 것이다.
 
 이제 `FIXTURE_ITEMS = ITEMS` 로 계약에서 가져온다. 이 파일은 그 연결이

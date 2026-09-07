@@ -1,4 +1,6 @@
-"""Critic Local LLM contracts and response extension fields.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+Critic Local LLM contracts and response extension fields.
 
 ★ Critic 의 LLM 지점은 L5 논리 일관성 판정 하나뿐이다 (설계서 §6.4).
   Judge 는 **설명문이 데이터와 모순되는지만** 본다. 수량을 바꾸라고 제안하지 않는다 —

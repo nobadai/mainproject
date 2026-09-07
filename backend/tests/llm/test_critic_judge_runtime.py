@@ -8,15 +8,15 @@ import json
 
 import pytest
 
-from app.critic.llm.judge import JudgeRunner, build_judge_context
-from app.critic.llm.runtime import (
+from app.master.critic.llm.judge import JudgeRunner, build_judge_context
+from app.master.critic.llm.runtime import (
     JudgeService,
     JudgeValidationError,
     LLMSettings,
     ValidationIssue,
     validate_judgement,
 )
-from app.critic.llm.schemas import SanitizedLLMContext
+from app.master.critic.llm.schemas import SanitizedLLMContext
 
 RATIONALE = "재고 상한에 걸려 물량을 줄였습니다."
 

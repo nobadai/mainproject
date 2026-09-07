@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.critic.critic_v0_4 import _judge_ran, _l5_skip_reason
+from app.master.critic.critic_v0_4 import _judge_ran, _l5_skip_reason
 
 
 class _Judge:

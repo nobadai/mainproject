@@ -1084,7 +1084,7 @@ def test_선언한_입력에_매입_시나리오_이름이_없다(wired):
     (`master/flow.py::_collect_constraints` 가 PRE 회신만 모은다), 그 사실이 관측에도
     유지되는지는 따로 봐야 한다.
     """
-    from app.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
+    from app.master.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
 
     _, meta = adapter.logistics_port(req())
     declared = set(_dept_meta(meta)["inputs_used"][adapter._CAP_CHECK_ID])
@@ -1194,7 +1194,7 @@ def test_계약_없는_Tool_은_조용히_0개가_아니라_예외다():
 def test_시나리오_Tool_은_금지_이름을_정직하게_선언한다():
     """지금은 SCENARIO_VALIDATION 에서만 돌아 `inputs_used` 에 실리지 않는다. 언젠가
     경계 경로로 새면 Critic 이 잡아야 하므로 계약을 비워 두지 않는다."""
-    from app.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
+    from app.master.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
 
     assert FORBIDDEN_SCENARIO_INPUTS & set(adapter._TOOL_INPUTS[adapter._T_ARRIVAL])
 

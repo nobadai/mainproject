@@ -1,4 +1,6 @@
-"""Critic API 요청·응답 스키마.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+Critic API 요청·응답 스키마.
 
 ★ Critic 은 오케스트레이터 산출물을 **검증만** 한다. 숫자를 바꾸지 않는다.
   요청은 오케 procurement 와 같은 입력(부서 회신·매입 후보)을 받아, 내부에서 T3 결합·클리핑을
@@ -12,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.critic.llm.schemas import LLMResponseFields
+from app.master.critic.llm.schemas import LLMResponseFields
 
 # 매입/판매 후보 입력 계약은 오케와 공유한다 (같은 것을 두 벌 정의하지 않는다).
 from app.master.cycle_schemas import AllocationIn, ScenarioIn

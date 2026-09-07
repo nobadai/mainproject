@@ -37,9 +37,9 @@ from app.contracts.core import (
     SourcingLot,
     SplitLeg,
 )
-from app.critic.critic_v0_4 import run_critic_v04
 from app.logistics.tools import CAP_BY_DATE_WINDOW_DAYS, build_cap_window
 from app.master.band import check_occupancy_detailed
+from app.master.critic.critic_v0_4 import run_critic_v04
 
 LEAD = 2
 
