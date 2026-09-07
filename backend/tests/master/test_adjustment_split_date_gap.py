@@ -57,7 +57,7 @@ import pytest
 import app.master
 from app.contracts.core import ContractViolation, SuggestedAdjustment
 from app.master.answer import _scope
-from app.master.flow import _wire
+from app.master.envelope import wire_adjustment
 
 _BACKEND = Path(app.master.__file__).parent.parent.parent
 _LOGISTICS = _BACKEND / "app" / "logistics" / "adapter.py"
@@ -219,9 +219,9 @@ def test_채우면_전선에서_안_터진다():
     """`#175` 가 미리 막아 둔 자리. **지금 채우셔도 안전하다.**
 
     `asdict` 는 `date` 를 그대로 둬서 `json.dumps` 에서 죽는다.
-    `_wire` 가 ISO 문자열로 편다 — 그때는 물류가 안 채워서 안 터지고 있었다.
+    `wire_adjustment` 가 ISO 문자열로 편다 — 그때는 물류가 안 채워서 안 터지고 있었다.
     """
-    wired = _wire(
+    wired = wire_adjustment(
         SuggestedAdjustment(
             dept="inventory",
             axis="timing",

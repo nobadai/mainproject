@@ -31,8 +31,9 @@ from app.master.envelope import (
     AgentRequest,
     ExecutionContext,
     ExecutionMetadata,
+    wire_adjustment,
 )
-from app.master.flow import ProcurementFlow, _wire
+from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 
 AS_OF = date(2025, 12, 31)
@@ -127,8 +128,8 @@ def _run(adjustments: tuple[SuggestedAdjustment, ...]):
 def test_asdict_만으로는_json_이_안_된다():
     """🔴 **이것이 병이다.** 고쳐야 할 이유를 검사 안에 남긴다.
 
-    `_wire` 를 안 쓰고 `asdict` 를 그대로 쓰면 어떻게 되는지 고정한다 — 나중에
-    누가 `_wire` 를 지우고 `asdict` 로 되돌리면 무엇이 깨지는지 여기서 보인다.
+    `wire_adjustment` 를 안 쓰고 `asdict` 를 그대로 쓰면 어떻게 되는지 고정한다 — 나중에
+    누가 `wire_adjustment` 를 지우고 `asdict` 로 되돌리면 무엇이 깨지는지 여기서 보인다.
     """
     import pytest
 
@@ -140,21 +141,21 @@ def test_asdict_만으로는_json_이_안_된다():
 
 
 def test_split_date_가_ISO_문자열로_나간다():
-    assert _wire(_adj())["split_date"] == "2026-09-11"
+    assert wire_adjustment(_adj())["split_date"] == "2026-09-11"
 
 
 def test_없으면_None_그대로다():
     """**없는 것을 만들지 않는다** — 안 채운 부서의 빈 칸을 날짜로 지어내지 않는다."""
-    assert _wire(_adj(split_date=None))["split_date"] is None
+    assert wire_adjustment(_adj(split_date=None))["split_date"] is None
 
 
 def test_라벨은_배열로_나간다():
-    assert _wire(_adj())["scenario_labels"] == ["보수", "기본"]
+    assert wire_adjustment(_adj())["scenario_labels"] == ["보수", "기본"]
 
 
 def test_나머지_칸은_그대로다():
     """마스터는 **모양만 편다.** 값을 고치지 않는다 (§3.2.2)."""
-    wired = _wire(_adj())
+    wired = wire_adjustment(_adj())
 
     assert wired["dept"] == "inventory"
     assert wired["axis"] == "quantity"
@@ -174,7 +175,7 @@ def test_전선에_실은_것은_왕복해도_같다():
     ★ 새 칸이 늘어도 이 검사는 그대로 유효하다. `split_date` 만 검사했으면
       다음 `date` 칸에서 같은 병이 다시 난다.
     """
-    wired = _wire(_adj())
+    wired = wire_adjustment(_adj())
 
     assert json.loads(json.dumps(wired)) == wired
 
@@ -183,7 +184,7 @@ def test_dataclass_는_여전히_date_객체다():
     """🔴 **계약 타입은 안 바꾼다.** 객체 안에서는 비교·연산이 되는 것이 맞다."""
     adjustment = _adj()
 
-    _wire(adjustment)
+    wire_adjustment(adjustment)
 
     assert adjustment.split_date == SPLIT
     assert isinstance(adjustment.split_date, date)
@@ -205,7 +206,7 @@ def test_매입에_가는_payload_전체가_json_을_통과한다():
 
 
 def test_2회차_payload_의_조정안이_편_모양이다():
-    """실제로 마스터가 보내는 값이 문자열인지 본다 — `_wire` 단위 검사와 별개다."""
+    """실제로 마스터가 보내는 값이 문자열인지 본다 — `wire_adjustment` 단위 검사와 별개다."""
     purchaser = _run((_adj(),))
     sent = purchaser.payloads[1]["adjustments"]
 

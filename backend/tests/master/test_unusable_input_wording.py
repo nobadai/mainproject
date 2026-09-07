@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.master.answer import facts_from_status
-from app.master.flow import AgentFailure
+from app.master.envelope import AgentFailure
 from app.master.plan import ExecutionPlan
 from app.master.status_flow import StatusOutcome
 

@@ -35,27 +35,29 @@ from typing import Any, Literal
 
 from app.contracts.core import SuggestedAdjustment
 from app.master.budget import BudgetExhausted, CallBudget
+
+# 🔴 **넷은 봉투에 있다 — 매입 Flow 에서 가져오지 않는다.**
+#
+#   `PASSING_VERDICTS` · `SourcedEvidence` · `AgentFailure` · `wire_adjustment` 는
+#   **사이클에 매인 것이 아니라 봉투 수준의 것**이다. 부서 회신 하나에서 무엇을 뽑아
+#   나르고 무엇을 전선에 싣는가는 매입이든 판매든 같은 질문이라 주인이 하나여야 한다.
+#
+#   베끼면 `#173` 이 고친 허용목록과 `#175` 가 고친 ISO 변환이 두 벌이 된다 —
+#   어휘가 늘어난 날 한쪽만 늘고, JSON 왕복 성질
+#   (`test_전선에_실은_것은_왕복해도_같다`)이 판매 경로에서만 조용히 깨진다.
+#
+# ★ 처음에는 `flow.py` 에서 private 로 읽어 왔다. **판매가 매입 모듈에 매인 것**이라
+#   매입을 손대면 판매가 깨졌고, 그래서 넷을 봉투로 올렸다 (순수 이동).
 from app.master.envelope import (
+    PASSING_VERDICTS,
+    AgentFailure,
     AgentName,
     AgentReply,
     Mode,
+    SourcedEvidence,
     route_capability,
+    wire_adjustment,
 )
-
-# 🔴 **매입 flow 에서 **읽어만** 온다 — 베끼지 않는다.**
-#
-#   `_PASSING_VERDICTS` 는 *"사람에게 올려도 되는 봉투 판정"* 이고 그 사실의 주인은
-#   한 곳이어야 한다. 손으로 복사하면 `#173` 이 고친 자리가 판매에서 되살아난다 —
-#   어휘가 늘어난 날 한쪽만 늘어난다.
-#
-#   `_wire` 도 같다. `SuggestedAdjustment.split_date` 를 ISO 로 펴는 규칙이 두 벌이
-#   되면, JSON 왕복 성질(`test_전선에_실은_것은_왕복해도_같다`)이 판매 경로에서만
-#   조용히 깨진다.
-#
-# ★ **제자리는 봉투(또는 `app/contracts/core.py`)다.** 옮기려면 `flow.py` 를 고쳐야
-#   하는데 이번 조각은 매입 파일을 건드리지 않기로 했다. 옮기는 날 여기 import 도
-#   같이 따라간다.
-from app.master.flow import _PASSING_VERDICTS, AgentFailure, SourcedEvidence, _wire
 from app.master.plan import ExecutionPlan
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
@@ -204,13 +206,13 @@ class CandidateVerdict:
     def passed(self) -> bool:
         """사용자에게 올려도 되는가.
 
-        ★ **허용목록으로 정한다** (`_PASSING_VERDICTS`). *"reject 가 아니면 통과"* 로
+        ★ **허용목록으로 정한다** (`PASSING_VERDICTS`). *"reject 가 아니면 통과"* 로
           정하면 봉투 어휘가 늘 때마다 새 값이 통과 쪽으로 샌다 (#173).
         """
         if self.unroutable:
             return False
         return all(
-            str(v.get("business_status") or "") in _PASSING_VERDICTS
+            str(v.get("business_status") or "") in PASSING_VERDICTS
             for v in self.validations.values()
         )
 
@@ -226,7 +228,7 @@ class CandidateVerdict:
             parts.append(f"부를 대상이 없는 요구: {', '.join(self.unroutable)}")
         for capability, verdict in self.validations.items():
             business = str(verdict.get("business_status") or "?")
-            if business in _PASSING_VERDICTS:
+            if business in PASSING_VERDICTS:
                 continue
             runtime = str(verdict.get("runtime_status") or "?")
             head = f"{capability}({runtime}/{business})"
@@ -495,7 +497,7 @@ class SalesFlow:
             payload["feedback_context"] = dict(feedback)
             # ★ **부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도 않는다 —
             #   같은 축이 둘 이상이어도 그대로 나른다 (매입·재무 합의).
-            payload["adjustments"] = [_wire(a) for a in self.suggested_adjustments]
+            payload["adjustments"] = [wire_adjustment(a) for a in self.suggested_adjustments]
         return payload
 
     def _judge(self, scenario: Mapping[str, Any]) -> CandidateVerdict:
