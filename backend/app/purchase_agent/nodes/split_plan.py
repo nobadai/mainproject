@@ -58,9 +58,10 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
     ``timing ∈ allowed_axes AND (최대안 총량 ≥ split_entry_qty_kg OR 지속 상승 궤적)``
     (§4-④ v1.1 정정 — 구 "D ≥ 임계"는 낡은 표현이고 임계는 수량이다).
 
-    ⚠️ 수량 가지는 현재 mock에서 **한 번도 서지 않는다** (최대안 8,727kg < 20,000).
-    두 앵커(8/21·9/11) 모두 궤적으로만 진입한다 — mock만 돌려서는 이 가지가 살아 있는지
-    알 수 없으므로 합성 입력 테스트로 따로 시험한다.
+    ⚠️ 수량 가지는 현재 mock에서 **한 번도 서지 않는다** — 품목별 최대가 배추 8,727 ·
+    무 9,429 · 양파 10,286kg 이라 전부 20,000 미만이다 (2026-09-07 실측 · 15조합).
+    **세 앵커**(2025-12-31 · 8/21 · 9/11) 아홉 조합이 전부 궤적으로만 진입한다 — mock만
+    돌려서는 이 가지가 살아 있는지 알 수 없으므로 합성 입력 테스트로 따로 시험한다.
     """
     threshold = constraints["triggers"]["split_entry_qty_kg"]
     day = constraints["situation"]["ci_judgment_day"]
