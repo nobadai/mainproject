@@ -26,12 +26,13 @@ from typing import Any
 from app.master.answer import facts_from_procurement
 from app.master.budget import CallBudget
 from app.master.envelope import (
+    AgentFailure,
     AgentReply,
     AgentRequest,
     ExecutionContext,
     ExecutionMetadata,
 )
-from app.master.flow import AgentFailure, ProcurementFlow
+from app.master.flow import ProcurementFlow
 from app.master.runner import AgentRegistry, MasterRunner
 from app.master.service import _to_response
 from tests.master.test_flow import advisor, purchaser

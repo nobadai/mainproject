@@ -36,6 +36,7 @@ from app.contracts.core import (
 )
 from app.master.envelope import (
     LLM_STATUSES,
+    PASSING_VERDICTS,
     RUNTIME_STATUSES,
     TRIGGERS,
     VERDICTS,
@@ -191,6 +192,24 @@ def test_집합이_비어_있지_않다():
         ("LLM_STATUSES", LLM_STATUSES),
     ):
         assert s, f"{name} 가 비었다 — 검사가 무력해진다"
+
+
+def test_통과_판정은_봉투_어휘_안에_있다():
+    """`PASSING_VERDICTS <= VERDICTS`. **파생이 아니라 대조다.**
+
+    🔴 `VERDICTS - {"reject", "skipped"}` 로 만들면 안 된다. 그건 *"실패를 빼는 구조"*
+      라 어휘가 늘어난 날 새 값이 전부 통과 쪽으로 샌다 — `#173` 이 고친 자리다.
+      그래서 `PASSING_VERDICTS` 는 손으로 적은 허용목록이다.
+
+    ★ 손으로 적으면 **오타가 조용히 산다.** `"conditonal"` 을 적어도 그 값이 회신에
+      안 오니 아무 판정도 통과하지 않을 뿐, 아무것도 터지지 않는다. 여기가 그것을
+      잡는다 — 통과 목록의 값은 전부 봉투가 아는 판정이어야 한다.
+
+    ★ **같다고는 하지 않는다.** `reject`·`skipped` 는 봉투 어휘이면서 통과가 아니다.
+      부분집합 관계만 본다.
+    """
+    assert PASSING_VERDICTS <= VERDICTS, f"어휘 밖 값: {sorted(PASSING_VERDICTS - VERDICTS)}"
+    assert PASSING_VERDICTS < VERDICTS, "통과 목록이 봉투 어휘 전체와 같아졌다 — 검사가 사라졌다"
 
 
 def test_AgentReply_는_모르는_값을_받아_준다():

@@ -27,13 +27,21 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.contracts.core import EndCode, Evidence, ItemCode, SuggestedAdjustment
 from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted
-from app.master.envelope import AgentName, AgentReply, Mode
+from app.master.envelope import (
+    PASSING_VERDICTS,
+    AgentFailure,
+    AgentName,
+    AgentReply,
+    Mode,
+    SourcedEvidence,
+    wire_adjustment,
+)
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
@@ -41,23 +49,7 @@ from app.master.verifier import VerificationContext, VerificationResult
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
 
-_PASSING_VERDICTS: frozenset[str] = frozenset({"ok", "conditional"})
-"""사람에게 올려도 되는 판정. **허용목록이다 — 부정형이 아니다.**
-
-🔴 전에는 `business_status != "reject"` 로 정했다. *"기각이 아니면 통과"* 이므로
-  **어휘가 늘 때마다 새 값이 전부 통과 쪽으로 샜다.** 통과 조건을 세는 것이 아니라
-  실패 하나를 빼는 구조였다 (#173).
-
-  2026-09-02 에 실제로 하나 늘었다 — 재무가 `SALES_VALIDATION` 을 내면서
-  `READY + skipped`(`INPUT_INCOMPLETE`) 가 생겼다. 재무 코드가 마스터가 어떻게
-  읽을지까지 적어 뒀다: *"마스터는 재무가 정상 판정한 것으로 읽는다."*
-
-★ `conditional` 은 통과에 남는다. 마스터는 최적안을 고르는 자리가 아니고 사람이
-  보고 정한다 (계약 §3.4). `skipped` 는 다르다 — **판정을 안 낸 것**이지
-  *"조건부로 괜찮다"* 가 아니다.
-"""
-
-_JUDGED_VERDICTS: frozenset[str] = _PASSING_VERDICTS | {"reject"}
+_JUDGED_VERDICTS: frozenset[str] = PASSING_VERDICTS | {"reject"}
 """**부서가 판정을 낸** 값. 여기 없으면 판정 자체가 없는 것이다.
 
 `reject` 는 통과는 아니지만 **판정이다** — 매입을 다시 부르면 고쳐질 수 있다.
@@ -122,78 +114,6 @@ class VerifierPort(Protocol):
 
     `allowed_axes` · `situation` · `confidence` 가 `scenarios[]` 안이 아니라 제안
     최상위에 있어서다 (2026-08-27 매입 스키마). 배열만 넘기면 그 판정을 못 본다."""
-
-
-@dataclass(frozen=True)
-class SourcedEvidence:
-    """부서가 낸 근거 하나 + **누가 어느 모드에서 냈는가.**
-
-    ★ `Evidence` 자체에는 부서도 모드도 없다. 봉투가 그 문맥을 들고 있기 때문이다 -
-      회신이 누구 것인지는 `AgentReply.agent` 가 안다. 응답으로 나갈 때는 그 문맥이
-      사라지므로 여기서 붙여 준다.
-
-    ★ **값은 손대지 않는다.** `evidence` 는 부서가 낸 것 그대로다.
-    """
-
-    agent: AgentName
-    mode: str
-    evidence: Evidence
-
-
-@dataclass(frozen=True)
-class AgentFailure:
-    """기여하지 못한 부서 하나 — **이름만이 아니라 사유까지.**
-
-    🔴 전에는 이름만 실었다. `"경계를 내지 못한 에이전트: finance"` 를 받은 사람이
-      할 수 있는 것은 *"다시 돌려 본다"* 뿐이었고, 그건 조사가 아니라 추측이다
-      (재현성 측정 2026-09-02 · 6회 중 2회 실패 사유를 이력만으로는 못 봄).
-
-    ★ **같은 파일 안에서 매입은 이미 사유를 실었다** (`_run` 의 매입 미가동 분기).
-      새 규칙이 아니라 **대칭을 맞추는 것**이다.
-
-    ★ **마스터는 해석하지 않는다** (§3.2.2). 부서가 쓴 문장을 그대로 옮긴다.
-    """
-
-    agent: AgentName
-
-    #: `ERROR` · `RUNTIME_NOT_READY`, 그리고 **아예 안 불린 경우** `NOT_CALLED`.
-    #: 마지막 것은 `RuntimeStatus` 가 아니다 — 회신이 없었다는 뜻이라 회신의 상태로는
-    #: 적을 수 없다. "안 부른 것과 못 부른 것은 다르다" 를 여기서도 지킨다.
-    runtime_status: str
-
-    reasoning: str = ""
-    missing_data: tuple[str, ...] = ()
-
-    @property
-    def detail(self) -> str:
-        """사람이 읽는 한 줄. **여기서만 만든다.**
-
-        사유 문장과 화면 표시를 각자 조립하면 둘이 갈린다 - 근거를 검증과 화면이
-        같은 객체로 보게 한 것과 같은 이유다.
-
-        🔴 **이름 절의 문구는 세 경우에 다 참이어야 한다.** `missing_data` 에는
-        세 종류가 같은 칸으로 온다::
-
-            안 왔다              부서가 값을 안 보냈다
-            왔는데 쓰지 말라      ML 이 `use_recommended=False` 로 표시했다 (#231)
-            값이 look-ahead 다    `generated_at > as_of` (`purchase_agent/adapter.py`)
-
-        *"없는 입력"* 은 첫째에만 참이라, 둘째가 오는 날 화면에 *"쓰지 말라고 표시해
-        시나리오를 만들지 않았다 / 없는 입력: forecast.use_recommended"* 라는 앞뒤가
-        반대인 줄이 나갔다.
-        """
-        parts = [self.reasoning.strip() or self.runtime_status]
-        if self.missing_data:
-            # 어휘 출처: 매입 `purchase_agent/adapter.py` 의 `_unusable_forecast_names`
-            # 가 쓴 *"쓸 수 없는 입력"* 을 그대로 가져온다. 마스터가 말을 새로 만들면
-            # 같은 사실에 부서마다 다른 낱말이 붙는다.
-            #
-            # ★ **두 갈래로 가르지 않는다.** 가르려면 마스터가 매입의
-            #   `UNUSABLE_FORECAST_NAMES` 를 읽어야 하고, 그러면 마스터 문구가 매입
-            #   내부 목록에 묶인다. 어느 쪽인지는 부서가 `reasoning` 으로 이미 말한다 -
-            #   마스터는 문장을 새로 쓰지 않는다 (§3.2.2).
-            parts.append(f"쓸 수 없는 입력: {', '.join(self.missing_data)}")
-        return " / ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -508,7 +428,7 @@ class ProcurementFlow:
             #   처럼 **제안이 바뀌면 채워질 수 있는 것**이라 재호출 경로에 남긴다.
             #
             # ★ **`_acceptable` 뒤에 둔다.** 통과 여부를 정하는 자리는 하나여야 한다
-            #   (`_PASSING_VERDICTS`). 여기는 *"통과가 아닌 다음에 무엇을 하나"* 만
+            #   (`PASSING_VERDICTS`). 여기는 *"통과가 아닌 다음에 무엇을 하나"* 만
             #   가른다 — 두 판단을 한 함수에 넣으면 둘 다 흐려진다.
             blocked = self._dept_blocked(verdicts)
             if blocked:
@@ -732,7 +652,7 @@ class ProcurementFlow:
             # ★ **조정안은 부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도
             #   않는다 — 같은 축이 둘 이상이어도 그대로 나른다 (매입·재무 합의).
             #   dataclass 를 dict 로 펴기만 한다 (모양을 바꾸는 것이 아니다).
-            payload["adjustments"] = [_wire(a) for a in self.suggested_adjustments]
+            payload["adjustments"] = [wire_adjustment(a) for a in self.suggested_adjustments]
             payload["feedback_context"] = dict(feedback)
         return payload
 
@@ -890,7 +810,7 @@ class ProcurementFlow:
         ★ **전원 통과를 요구하지 않는다.** 조언자 하나가 `conditional` 을 내도 사람이
           보고 정할 수 있다 — 마스터는 최적안을 고르는 자리가 아니다 (§3.4).
 
-        ★ **허용목록으로 정한다** (`_PASSING_VERDICTS`). 통과를 *"reject 가 아닌 것"*
+        ★ **허용목록으로 정한다** (`PASSING_VERDICTS`). 통과를 *"reject 가 아닌 것"*
           으로 정하면 어휘가 늘 때마다 새 값이 통과로 샌다 (#173).
 
         🔴 **여기가 거짓인 이유는 둘로 갈린다.** 무엇을 할지가 다르다.
@@ -901,7 +821,7 @@ class ProcurementFlow:
         if findings:
             return False
         return all(
-            str(v.get("business_status") or "") in _PASSING_VERDICTS for v in verdicts.values()
+            str(v.get("business_status") or "") in PASSING_VERDICTS for v in verdicts.values()
         )
 
     def _dept_blocked(
@@ -1135,40 +1055,6 @@ class ProcurementFlow:
             adjustments=tuple(self.suggested_adjustments),
             **kw,
         )
-
-
-def _wire(adjustment: SuggestedAdjustment) -> dict[str, Any]:
-    """봉투 표준형을 **전선에 실을 수 있는 모양**으로 편다 (#175).
-
-    🔴 `asdict` 는 `date` 를 그대로 둔다. 그 dict 를 `json.dumps` 에 넣으면
-      **TypeError 로 죽는다** — *"Object of type date is not JSON serializable"*.
-
-      지금 안 터지는 이유가 더 나쁘다. 물류 어댑터가 `split_date` 를 표준형에
-      **안 옮겨서**(`logistics/adapter.py:1122`) 늘 `None` 이라 통과한다.
-      **물류가 칸을 채우는 순간 터진다** — 지금 그 작업 중이다 (매입 지적 2026-09-03).
-
-    ★ **dataclass 의 타입은 안 바꾼다.** `split_date: date | None` 은 객체 안에서
-      비교·연산이 되는 것이 맞다. **전선에 실을 때만** ISO 문자열로 편다.
-      화면 쪽(pydantic)은 이미 알아서 한다 — 여기만 손으로 해야 하는 자리다.
-
-    ★ **정규화는 보내는 쪽이 한다.** 매입은 *"받아서 바꾸는 쪽이 자연스럽다"* 고
-      했지만, `asdict` 로 편 것이 마스터라 마스터가 책임진다. 받는 쪽이 여럿이 되면
-      **각자 변환해 같은 사실의 주인이 여럿**이 된다.
-
-    ★ **튜플도 목록으로 편다.** `asdict` 는 튜플을 그대로 두는데 JSON 을 한 번
-      왕복하면 목록이 된다 — **같은 칸이 경로에 따라 두 모양**이 되고, 받는 쪽이
-      `== [...]` 로 비교하면 in-process 에서만 조용히 어긋난다.
-
-      기준은 하나다. **여기서 나간 dict 는 JSON 왕복을 거쳐도 같아야 한다**
-      (`test_전선에_실은_것은_왕복해도_같다`). 칸마다 세지 않고 이 성질로 잠근다.
-    """
-    out: dict[str, Any] = {
-        key: list(value) if isinstance(value, tuple) else value
-        for key, value in asdict(adjustment).items()
-    }
-    if adjustment.split_date is not None:
-        out["split_date"] = adjustment.split_date.isoformat()
-    return out
 
 
 def _feedback_reason(

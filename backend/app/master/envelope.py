@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any, Literal, get_args
 
@@ -107,9 +107,10 @@ Mode = Literal[
   🔴 두 mode 를 한 이름으로 합치지 않는다. 물류가 두 사이클에 같은 이름으로 답하면
   회신을 받은 마스터가 **어느 사이클의 경계인지** 를 payload 로 되짚어야 한다.
 
-🔴 여기 있는 것은 **어휘뿐이다.** 판매 Flow·어댑터·라우팅은 아직 없다 —
-  영업 제안이 재무까지 오는 길(`FINANCIAL_VALIDATION` capability 라우팅)도
-  capability 어휘 자체가 마스터에 없어 성립하지 않는다. 그것은 별도 작업이다."""
+★ **capability 라우팅이 이 아래에 붙었다** (`Capability` · `CAPABILITY_ROUTING`).
+  이 docstring 은 *"판매 Flow·어댑터·라우팅은 아직 없다"* 라고 적어 두었었는데,
+  그중 라우팅 어휘와 Flow 골격(`sales_flow.py`)이 들어왔다. **어댑터 배선은
+  여전히 없다** — 판매·물류 포트를 등록하는 일은 별도 작업이다."""
 
 Trigger = Literal["ML_COMPLETE", "USER_REQUEST"]
 
@@ -163,6 +164,32 @@ RUNTIME_STATUSES: frozenset[str] = frozenset(get_args(RuntimeStatus))
 VERDICTS: frozenset[str] = frozenset(get_args(Verdict))
 LLM_STATUSES: frozenset[str] = frozenset(get_args(LLMStatus))
 
+PASSING_VERDICTS: frozenset[str] = frozenset({"ok", "conditional"})
+"""사람에게 올려도 되는 판정. **허용목록이다 — 부정형이 아니다.**
+
+🔴 전에는 `business_status != "reject"` 로 정했다. *"기각이 아니면 통과"* 이므로
+  **어휘가 늘 때마다 새 값이 전부 통과 쪽으로 샜다.** 통과 조건을 세는 것이 아니라
+  실패 하나를 빼는 구조였다 (#173).
+
+  2026-09-02 에 실제로 하나 늘었다 — 재무가 `SALES_VALIDATION` 을 내면서
+  `READY + skipped`(`INPUT_INCOMPLETE`) 가 생겼다. 재무 코드가 마스터가 어떻게
+  읽을지까지 적어 뒀다: *"마스터는 재무가 정상 판정한 것으로 읽는다."*
+
+★ `conditional` 은 통과에 남는다. 마스터는 최적안을 고르는 자리가 아니고 사람이
+  보고 정한다 (계약 §3.4). `skipped` 는 다르다 — **판정을 안 낸 것**이지
+  *"조건부로 괜찮다"* 가 아니다.
+
+🔴 **바로 위 넷과 달리 `get_args` 로 파생시키지 않는다.** `VERDICTS - {...}` 로 쓰면
+  다시 *"실패를 빼는 구조"* 가 되어 `#173` 이 고친 자리로 되돌아간다. 어휘가 늘면
+  이 목록은 **손으로 늘리는 것이 맞다** — 늘리라고 빨간불이 나야 한다.
+
+  대신 두 집합이 어긋나지 않는지는 대조한다 (`PASSING_VERDICTS <= VERDICTS` ·
+  `tests/master/test_envelope_vocabulary.py`). 오타로 어휘 밖 값이 들어오면 잡힌다.
+
+★ **두 Flow 가 같이 쓴다.** 매입(`flow.py`)과 판매(`sales_flow.py`)가 같은 질문을
+  하므로 사이클이 아니라 **봉투**가 주인이다.
+"""
+
 _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     # 판매 검증은 재무만 받는다 — 재고에 열면 없는 책임을 만든다.
     "finance": frozenset(
@@ -207,6 +234,79 @@ def agent_dept(agent: AgentName) -> Dept | None:
 
 def agent_allowed_modes(agent: AgentName) -> frozenset[Mode]:
     return _AGENT_MODES[agent]
+
+
+# ---------------------------------------------------------------------------
+# 1-2. Capability — 판매가 요구하고 마스터가 라우팅한다 (판매 2026-09-06 통보)
+# ---------------------------------------------------------------------------
+
+Capability = Literal[
+    "SELLABLE_SUPPLY_CONTEXT",
+    "DELIVERY_FEASIBILITY_CONTEXT",
+    "FINANCIAL_VALIDATION",
+    "ADDITIONAL_SUPPLY_CONTEXT",
+]
+"""판매 후보가 **무엇으로 검증받아야 하는지** 스스로 말하는 어휘.
+
+★ **매입과 방향이 반대다.** 매입 사이클은 마스터가 조언자(`flow.ADVISORS`)를 정해
+  부른다. 판매는 후보마다 `required_validations[]` 로 capability 를 요구하고,
+  마스터가 그것을 `(agent, mode)` 로 바꾼다 — **무엇이 필요한지는 제안자가 알고,
+  누가 그것을 하는지는 조정자가 안다.**
+
+🔴 **마스터는 `app.sales.schemas` 를 import 하지 않는다.** 같은 어휘가 그쪽
+  `SalesCapability` 에 이미 있지만, 조정자가 부서 스키마를 런타임에 읽으면 부서가
+  자기 파일을 고치는 날 마스터가 같이 깨진다 — 재무가 `ApprovedCommitmentFacts` 를
+  Protocol 로 받은 것과 같은 이유다.
+
+  **두 벌이 되어 갈리는 것은 테스트가 막는다.** `tests/master/test_sales_flow.py`
+  가 양쪽을 import 해 `set(get_args(...))` 를 대조한다 — 테스트에서는 남의 모듈을
+  읽어도 되고, 갈린 날 빨간불이 뜬다. 런타임 의존 없이 어휘만 잠그는 자리다.
+
+★ **제자리는 `app/contracts/core.py` 승격이다.** 그건 판매 파일을 고쳐야 해서 판매
+  owner 확인이 필요하고, 그때까지 여기 둔다 (설계 2026-09-06 정정 절)."""
+
+CAPABILITIES: frozenset[str] = frozenset(get_args(Capability))
+"""집합의 주인은 위 `Literal` 하나다 — `TRIGGERS` 와 같은 이유로 `get_args` 로 읽는다."""
+
+CAPABILITY_ROUTING: dict[Capability, tuple[AgentName, Mode] | None] = {
+    "FINANCIAL_VALIDATION": ("finance", "SALES_VALIDATION"),
+    # 🔴 **기존 `/logistics/sales` 계산엔진을 그대로 부르지 않는다.** 판매 v1.7 §10 은
+    #   *"existing Logistics /sales Adapter"* 로 적었지만, 그렇게 부르면 그 호출에는
+    #   **봉투도 `call_seq` 도 `plan.signature` 도 CallBudget 도 Reply 보존도 없다** —
+    #   같은 문서 §1 이 마스터 소유라고 적은 바로 그것들이다.
+    #
+    #   엔진은 재사용하고 **호출 경로만 봉투로 감싼다.** 어댑터가 안에서 기존 엔진을
+    #   부르는 것은 자유다 — 바깥이 봉투여야 한다.
+    "SELLABLE_SUPPLY_CONTEXT": ("inventory", "PRE_SALES"),
+    "DELIVERY_FEASIBILITY_CONTEXT": ("inventory", "PRE_SALES"),
+    # 🔴 **`None` 은 "아직 값을 안 정했다" 가 아니라 "부를 대상이 없다" 다.**
+    #
+    #   매입은 호출 단위(batch / ONE_BY_ONE)를 아직 회신하지 않았고, 그래서 매입에
+    #   판매용 mode 를 만들지 않았다. 만들면 마스터가 매입 대신 호출 단위를 정하는
+    #   것이 된다.
+    #
+    #   여기를 **비워 두면 `KeyError` 로 죽고**(마스터 배선 실수처럼 보인다),
+    #   표에서 **빼면 조용히 건너뛴다**(사람이 *"검증됐다"* 로 읽는다). 둘 다 틀렸다.
+    #   `None` 으로 적어 두면 `SalesFlow` 가 `unroutable_capabilities` 에 담아
+    #   결과에 싣고, 화면에서 **"안 왔다"** 로 보인다 (§1.2-10 과 같은 태도).
+    #
+    #   매입이 호출 단위를 회신하면 여기에 `(agent, mode)` 를 채운다.
+    "ADDITIONAL_SUPPLY_CONTEXT": None,
+}
+"""capability → 부를 대상. **`None` 은 못 부른다는 사실 자체다.**"""
+
+
+def route_capability(capability: str) -> tuple[AgentName, Mode] | None:
+    """capability 를 호출 대상으로 바꾼다. **못 부르면 `None`.**
+
+    ★ **표에 없는 값도 `None` 이다.** 어휘가 갈려 마스터가 모르는 capability 가 오는
+      날은 부를 대상이 없는 날과 결과가 같다 — 둘 다 *"이 후보를 통과로 칠 수 없다"* 로
+      떨어져야 한다. 어휘가 갈렸다는 사실 자체는 `Capability` 대조 테스트가 잡는다.
+
+    🔴 **`KeyError` 를 내지 않는다.** 부서가 보낸 값 하나로 사이클을 죽이지 않는다는
+      봉투 규칙(`check_vocabulary` 와 같은 자리)이 라우팅에도 그대로 적용된다.
+    """
+    return CAPABILITY_ROUTING.get(capability)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +499,126 @@ class AgentReply:
         재시도하면 호출 예산만 태운다 (정의서 §1.2-12).
         """
         return self.runtime_status == "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# 4-1. 회신에서 마스터가 뽑아 나르는 것 — **두 Flow 가 같이 쓴다**
+# ---------------------------------------------------------------------------
+#
+# 🔴 셋 다 처음에는 `flow.py`(매입 Flow) 안에 있었고, 판매 Flow 가 생기면서
+#   `from app.master.flow import ...` 로 남의 사이클 모듈을 가리켰다. **판매가 매입
+#   모듈에 매인 것**이라 매입을 손대면 판매가 깨진다.
+#
+# ★ 셋은 사이클에 매인 것이 아니다. *"부서 회신 하나에서 무엇을 뽑아 나르나"* 는
+#   봉투 수준의 질문이라 제자리가 여기다. 베껴서 두 벌로 만들면 `#173`(허용목록) ·
+#   `#175`(전선 표준형)가 고친 자리가 한쪽에서만 살아난다.
+
+
+@dataclass(frozen=True)
+class SourcedEvidence:
+    """부서가 낸 근거 하나 + **누가 어느 모드에서 냈는가.**
+
+    ★ `Evidence` 자체에는 부서도 모드도 없다. 봉투가 그 문맥을 들고 있기 때문이다 -
+      회신이 누구 것인지는 `AgentReply.agent` 가 안다. 응답으로 나갈 때는 그 문맥이
+      사라지므로 여기서 붙여 준다.
+
+    ★ **값은 손대지 않는다.** `evidence` 는 부서가 낸 것 그대로다.
+    """
+
+    agent: AgentName
+    mode: str
+    evidence: Evidence
+
+
+@dataclass(frozen=True)
+class AgentFailure:
+    """기여하지 못한 부서 하나 — **이름만이 아니라 사유까지.**
+
+    🔴 전에는 이름만 실었다. `"경계를 내지 못한 에이전트: finance"` 를 받은 사람이
+      할 수 있는 것은 *"다시 돌려 본다"* 뿐이었고, 그건 조사가 아니라 추측이다
+      (재현성 측정 2026-09-02 · 6회 중 2회 실패 사유를 이력만으로는 못 봄).
+
+    ★ **매입 Flow 는 이미 사유를 실었다** (`flow.py` `_run` 의 매입 미가동 분기).
+      새 규칙이 아니라 **대칭을 맞추는 것**이다. (이 문장은 셋이 `flow.py` 안에
+      있을 때 *"같은 파일 안에서"* 라고 적혀 있었다 — 자리만 옮겼다.)
+
+    ★ **마스터는 해석하지 않는다** (§3.2.2). 부서가 쓴 문장을 그대로 옮긴다.
+    """
+
+    agent: AgentName
+
+    #: `ERROR` · `RUNTIME_NOT_READY`, 그리고 **아예 안 불린 경우** `NOT_CALLED`.
+    #: 마지막 것은 `RuntimeStatus` 가 아니다 — 회신이 없었다는 뜻이라 회신의 상태로는
+    #: 적을 수 없다. "안 부른 것과 못 부른 것은 다르다" 를 여기서도 지킨다.
+    runtime_status: str
+
+    reasoning: str = ""
+    missing_data: tuple[str, ...] = ()
+
+    @property
+    def detail(self) -> str:
+        """사람이 읽는 한 줄. **여기서만 만든다.**
+
+        사유 문장과 화면 표시를 각자 조립하면 둘이 갈린다 - 근거를 검증과 화면이
+        같은 객체로 보게 한 것과 같은 이유다.
+
+        🔴 **이름 절의 문구는 세 경우에 다 참이어야 한다.** `missing_data` 에는
+        세 종류가 같은 칸으로 온다::
+
+            안 왔다              부서가 값을 안 보냈다
+            왔는데 쓰지 말라      ML 이 `use_recommended=False` 로 표시했다 (#231)
+            값이 look-ahead 다    `generated_at > as_of` (`purchase_agent/adapter.py`)
+
+        *"없는 입력"* 은 첫째에만 참이라, 둘째가 오는 날 화면에 *"쓰지 말라고 표시해
+        시나리오를 만들지 않았다 / 없는 입력: forecast.use_recommended"* 라는 앞뒤가
+        반대인 줄이 나갔다.
+        """
+        parts = [self.reasoning.strip() or self.runtime_status]
+        if self.missing_data:
+            # 어휘 출처: 매입 `purchase_agent/adapter.py` 의 `_unusable_forecast_names`
+            # 가 쓴 *"쓸 수 없는 입력"* 을 그대로 가져온다. 마스터가 말을 새로 만들면
+            # 같은 사실에 부서마다 다른 낱말이 붙는다.
+            #
+            # ★ **두 갈래로 가르지 않는다.** 가르려면 마스터가 매입의
+            #   `UNUSABLE_FORECAST_NAMES` 를 읽어야 하고, 그러면 마스터 문구가 매입
+            #   내부 목록에 묶인다. 어느 쪽인지는 부서가 `reasoning` 으로 이미 말한다 -
+            #   마스터는 문장을 새로 쓰지 않는다 (§3.2.2).
+            parts.append(f"쓸 수 없는 입력: {', '.join(self.missing_data)}")
+        return " / ".join(parts)
+
+
+def wire_adjustment(adjustment: SuggestedAdjustment) -> dict[str, Any]:
+    """봉투 표준형을 **전선에 실을 수 있는 모양**으로 편다 (#175).
+
+    🔴 `asdict` 는 `date` 를 그대로 둔다. 그 dict 를 `json.dumps` 에 넣으면
+      **TypeError 로 죽는다** — *"Object of type date is not JSON serializable"*.
+
+      지금 안 터지는 이유가 더 나쁘다. 물류 어댑터가 `split_date` 를 표준형에
+      **안 옮겨서**(`logistics/adapter.py:1122`) 늘 `None` 이라 통과한다.
+      **물류가 칸을 채우는 순간 터진다** — 지금 그 작업 중이다 (매입 지적 2026-09-03).
+
+    ★ **dataclass 의 타입은 안 바꾼다.** `split_date: date | None` 은 객체 안에서
+      비교·연산이 되는 것이 맞다. **전선에 실을 때만** ISO 문자열로 편다.
+      화면 쪽(pydantic)은 이미 알아서 한다 — 여기만 손으로 해야 하는 자리다.
+
+    ★ **정규화는 보내는 쪽이 한다.** 매입은 *"받아서 바꾸는 쪽이 자연스럽다"* 고
+      했지만, `asdict` 로 편 것이 마스터라 마스터가 책임진다. 받는 쪽이 여럿이 되면
+      **각자 변환해 같은 사실의 주인이 여럿**이 된다.
+
+    ★ **튜플도 목록으로 편다.** `asdict` 는 튜플을 그대로 두는데 JSON 을 한 번
+      왕복하면 목록이 된다 — **같은 칸이 경로에 따라 두 모양**이 되고, 받는 쪽이
+      `== [...]` 로 비교하면 in-process 에서만 조용히 어긋난다.
+
+      기준은 하나다. **여기서 나간 dict 는 JSON 왕복을 거쳐도 같아야 한다**
+      (`test_전선에_실은_것은_왕복해도_같다`). 칸마다 세지 않고 이 성질로 잠근다.
+    """
+    out: dict[str, Any] = {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in asdict(adjustment).items()
+    }
+    if adjustment.split_date is not None:
+        out["split_date"] = adjustment.split_date.isoformat()
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -99,25 +99,34 @@ def test_master_has_sales_vocabulary_without_claiming_routing_is_complete():
     assert set(get_args(AgentName)) == {"finance", "inventory", "purchase", "sales"}
 
 
-def test_master_knows_sales_modes_but_not_the_routing():
-    """어휘는 들어왔고 **라우팅은 아직 없다.** 둘을 섞지 않는다.
+def test_master_routes_financial_validation_to_the_finance_mode():
+    """어휘가 들어왔고 **이제 그 어휘로 오는 길도 있다.**
 
-    `Mode` 에 SALES_VALIDATION 이 있어야 유효한 재무 `AgentRequest` 를 만들 수 있다.
-    하지만 영업 제안이 거기까지 오는 길(`FINANCIAL_VALIDATION` capability 라우팅)은
-    없다 — capability 어휘 자체가 마스터에 없다. 만들면 연동이 아니라 마스터
-    재설계다.
+    `Mode` 에 SALES_VALIDATION 이 있어야 유효한 재무 `AgentRequest` 를 만들 수 있고,
+    영업 제안이 거기까지 오는 길이 `FINANCIAL_VALIDATION` capability 라우팅이다.
+
+    🔴 **이 검사는 원래 `assert not hasattr(envelope, "Capability")` 였다** — 라우팅이
+      아직 없다는 것을 이름으로 남긴 것이었다. 마스터가 라우팅을 열면서(판매 Flow 골격)
+      그 전제가 사실이 아니게 됐으므로, 없다는 단언 대신 **어디로 오는가**를 잠근다.
+
+      재무가 지키려는 것은 그대로다 — 판매 제안은 재무의 SALES_VALIDATION 으로만 와야
+      하고, 다른 모드나 다른 에이전트로 새면 안 된다
+      (`test_sales_validation_is_not_opened_to_other_agents`).
     """
     from typing import get_args
 
-    from app.master import envelope
-    from app.master.envelope import Mode, agent_allowed_modes
+    from app.master.envelope import (
+        CAPABILITY_ROUTING,
+        Mode,
+        agent_allowed_modes,
+    )
 
     assert "SALES_VALIDATION" in get_args(Mode)
     assert "SALES_VALIDATION" in agent_allowed_modes("finance")
     assert "GENERATE_SALES_PROPOSAL" in agent_allowed_modes("sales")
 
-    # 호출 어휘만 열렸고 실제 capability routing은 아직 별도 계약이다.
-    assert not hasattr(envelope, "Capability")
+    # 재무로 오는 길은 하나다 — FINANCIAL_VALIDATION 이 재무의 SALES_VALIDATION 으로.
+    assert CAPABILITY_ROUTING["FINANCIAL_VALIDATION"] == ("finance", "SALES_VALIDATION")
 
 
 def test_sales_validation_is_not_opened_to_other_agents():
