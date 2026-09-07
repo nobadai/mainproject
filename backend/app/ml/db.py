@@ -31,6 +31,23 @@ Params = Sequence[object] | Mapping[str, object] | None
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 
+#: 접속이 안 되면 이만큼 기다리고 포기한다 (초). 매입 파트 #81 · #358.
+#:
+#:   libpq 기본은 0 = **무제한**이다. DB 가 "안 됩니다" 라고 거절하면 즉시
+#:   오류가 나지만, **아무 답도 안 하면** 계속 기다린다. 방화벽이 패킷을
+#:   조용히 버리는 경우가 그렇다.
+#:
+#:   실측 (2026-09-07 · 응답 없는 주소로 접속)
+#:       connect_timeout=3   3.1초 만에 ConnectionTimeout
+#:       없음                60초가 지나도 안 끝남
+#:
+#:   그리고 프론트에도 타임아웃이 없어(`api.ts` 에 AbortController 0건)
+#:   **끊는 쪽이 아무도 없다.** 화면은 오류도 없이 멈춘 채로 남는다.
+#:
+#:   5초는 매입이 `purchase_agent/db.py` 에 넣은 값과 맞춘 것이다 (#305).
+#:   파트마다 다르면 어느 쪽이 먼저 끊겼는지 화면만 보고 알 수 없다.
+CONNECT_TIMEOUT_SECONDS = 5
+
 
 def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
     load_dotenv(_ENV_FILE)
@@ -56,6 +73,7 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
         user=config["DB_USER"],
         password=config["DB_PASSWORD"],
         row_factory=dict_row,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )
 
 
@@ -80,6 +98,7 @@ def get_source_connection() -> psycopg.Connection[dict[str, Any]]:
         user=os.getenv("ML_SOURCE_DB_USER", base["DB_USER"]),
         password=os.getenv("ML_SOURCE_DB_PASSWORD", base["DB_PASSWORD"]),
         row_factory=dict_row,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )
 
 
