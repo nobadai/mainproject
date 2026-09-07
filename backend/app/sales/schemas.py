@@ -761,6 +761,7 @@ class SalesExecutionIdentity(BaseModel):
     request_id: str | None = None
     run_id: str | None = None
     as_of: date | None = None
+    policy_version: str | None = None
     feedback_attempt: int | None = Field(default=None, ge=0)
 
 
