@@ -59,16 +59,12 @@ def test_sales_never_imports_the_finance_agent():
 
 
 def test_finance_touches_master_only_through_shared_contract_modules():
-    """재무가 마스터에서 아는 것은 **계약 모듈뿐**이다.
-
-    ★ `critic_bridge` 는 이 작업 이전부터 있던 계약 통로다(판정 근거를 Critic 형태로
-      옮긴다). 여기서 넓히지 않는다 — 늘어나면 라우팅이 재무 안으로 새는 신호다.
-    """
+    """재무는 마스터를 직접 import 하지 않는다."""
     master_modules = {
         name for name in _imported_modules(FINANCE) if name.startswith("app.master")
     }
 
-    assert master_modules == {"app.master.envelope", "app.master.critic_bridge"}
+    assert master_modules == set()
 
 
 def test_the_sales_capability_takes_a_payload_not_a_sales_client():

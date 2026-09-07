@@ -765,6 +765,46 @@ class SalesExecutionIdentity(BaseModel):
     feedback_attempt: int | None = Field(default=None, ge=0)
 
 
+class SalesApprovalLine(BaseModel):
+    """판매 승인 결과의 단일 행. Sales 원장 1건에 대응한다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_name: str = Field(min_length=1)
+    quantity_kg: Decimal = Field(ge=0)
+    unit_price_krw_per_kg: Decimal = Field(ge=0)
+    grade: str | None = None
+    contribution_profit_krw: Decimal | None = Field(default=None, ge=0)
+    contribution_margin_rate: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator(
+        "quantity_kg",
+        "unit_price_krw_per_kg",
+        "contribution_profit_krw",
+        "contribution_margin_rate",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesConfirmationInput(BaseModel):
+    """Sales 승인 결과를 실제 원장 write로 옮기기 위한 입력 계약."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_identity: SalesExecutionIdentity
+    selected_scenario: "SalesScenario"
+    selected_scenario_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    sale_date: date
+    order_date: date
+    source_order_id: str | None = Field(default=None, min_length=1)
+    note: str | None = None
+    line: SalesApprovalLine
+
+
 class SalesFinanceSummarySubset(BaseModel):
     """Sales가 실제로 소비하는 Finance 회신의 최소 부분집합."""
 

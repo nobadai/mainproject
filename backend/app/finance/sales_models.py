@@ -221,6 +221,20 @@ class PartnerReceivableFacts(BaseModel):
     source_refs: tuple[str, ...] = ()
 
 
+class ReceivableCreateInput(BaseModel):
+    """Sales 확정분을 Finance 매출채권으로 옮기기 위한 최소 입력."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sale_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    sale_date: date
+    customer_partner_id: str = Field(min_length=1)
+    due_date: date
+    original_amount_krw: Decimal = Field(ge=0)
+
+
 # ---------------------------------------------------------------------------
 # Sales Core Phase 6 — Finance 내부 판매 검증 입력/결과
 #
