@@ -18,6 +18,8 @@ from app.master.day_open import DayOpenOut
 from app.master.day_open import open_day as run_open_day
 from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
 from app.master.decision_service import current_commitment, get_decisions, record_decision
+from app.master.inbound import InboundOut
+from app.master.inbound import receive_arrivals as run_receive_arrivals
 from app.master.schemas import (
     BurnInOut,
     ProcurementRunRequest,
@@ -318,3 +320,48 @@ def master_open_day(as_of: date) -> DayOpenOut:
       아니라 상태이고, 적재 실패는 롤백되어 어제 그대로다 — 사유가 본문에 실린다.
     """
     return run_open_day(as_of)
+
+
+@router.post(
+    "/days/{as_of}/receive",
+    response_model=InboundOut,
+    summary="그날 도착분을 받는다 — 개장 다음이고 판단과는 별개다",
+)
+def master_receive_arrivals(as_of: date) -> InboundOut:
+    """`as_of` 에 도착 예정인 것을 파트마다 받는다.
+
+    🔴 **왜 자기 엔드포인트인가** (물류 물음 2026-09-07).
+
+      바로 위 `master_open_day` 가 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의
+      부작용이 아니다. 사건에는 자기 자리가 있다."* **입고도 사건이다.** 도착분을
+      받으면 Receipt · Lot · Inventory Move 가 생기고 그것은 장부가 바뀌는 것이다.
+
+    ★ **`run_procurement` 안으로 넣지 않는다.** 넣으면 판단 한 번이 재고를 늘리고,
+      *"같은 `as_of` 로 백번 돌려도 같은 답"* 이 깨진다. 개장을 판단 밖에 둔 이유와
+      같다.
+
+    ⚠️ **상위 `run_day` 하나로 묶지도 않는다.** 물류가 그 안을 주셨는데(`B`), 묶으면
+      **실패 조합을 한 응답으로 못 낸다.**
+
+      ```text
+      개장 성공 · 입고 BLOCKED · 판단 성공     ← 이 상태를 한 status 로 어떻게 적나
+      ```
+
+      `#316` 에서 `BLOCKED` 를 `NOTHING_DUE` 로 접었다가 물류가 잡아 준 것과 같은
+      병이다. **사건 셋은 상태 셋이고, 순서는 부르는 쪽이 지킨다.**
+
+    ★ **순서는 문장이 아니라 Gate 가 지킨다.** 안 열린 날 부르면 `NOT_OPENED` 로
+      돌아서고 `next_action` 이 `OPEN_DAY_REQUIRED` 를 준다 — 전에는 docstring 에
+      *"`open_day` 다음이다"* 라고만 적혀 있어 코드가 아무것도 안 봤다.
+
+    ⚠️ **달력일이다.** 창고는 토요일에도 받는다. 그래서 이 호출은 실행일 판정을 안
+      본다 — 토요일에 `open_day` · `receive` 는 돌고 `run_procurement` 만 안 돈다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 받았다 · 받을 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/open` 과 같은 태도). `FAILED` 는 롤백되어
+      아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
+    """
+    return run_receive_arrivals(as_of)

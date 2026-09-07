@@ -61,6 +61,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
+from app.master.day_gate import check_day_gate
 
 __all__ = [
     "PARTS",
@@ -160,8 +161,23 @@ class InboundOut(BaseModel):
     RECEIVED     한 파트라도 실제로 받았다
     NOTHING_DUE  **받을 대상이 없었다** — 오늘 도착 예정이 없었거나 미등록이다
     BLOCKED      **받을 대상은 있는데 처리할 수 없다** — purchase 참조 누락 · 깨진 상태
+    NOT_OPENED   **그날 장부가 안 열렸다** — 받을 것이 있는지조차 묻지 않았다
     FAILED       받으려다 실패했다 — **아무것도 안 바뀌었다**
     ```
+
+    🔴 **`NOT_OPENED` 를 `BLOCKED` 로 접지 않는다** (물류 물음 2026-09-07 · `§3`).
+
+      ```text
+      BLOCKED      받을 대상이 있는데 **그 건이** 처리 불가 — inbound_id 가 나온다
+      NOT_OPENED   **아직 아무것도 안 봤다** — 장부가 없어 물어보지도 못했다
+      ```
+
+      ⚠️ 접으면 *"도착분에 문제가 있다"* 와 *"어제 개장을 안 돌렸다"* 가 같은 문장으로
+        나간다. 고칠 곳이 완전히 다른데 화면은 같아 보인다 — `#316` 에서 `BLOCKED` 를
+        `NOTHING_DUE` 로 접었다가 물류가 잡아 준 것과 **같은 병**이다.
+
+      ★ **다음에 할 일도 다르다.** `BLOCKED` 는 그 건을 봐야 하고, `NOT_OPENED` 는
+        `open_day` 를 부르면 된다 — 그래서 `next_action` 을 같이 싣는다.
 
     🔴 **`BLOCKED` 를 `NOTHING_DUE` 로 접지 않는다** (물류 지적 2026-09-06).
 
@@ -179,10 +195,14 @@ class InboundOut(BaseModel):
     """
 
     as_of: date
-    status: Literal["RECEIVED", "NOTHING_DUE", "BLOCKED", "FAILED"]
+    status: Literal["RECEIVED", "NOTHING_DUE", "BLOCKED", "NOT_OPENED", "FAILED"]
     reason: str = ""
     parts: list[InboundPartOut] = Field(default_factory=list)
     missing: list[str] = Field(default_factory=list)
+    #: 🔴 **키가 항상 있고 막히지 않았으면 `None` 이다.** `DayGate.next_action` 과 같은
+    #: 모양이다 — 칸을 없애면 화면이 `'next_action' in resp` 를 먼저 물어야 한다.
+    #: `NOT_OPENED` 일 때 개장 Gate 가 준 값을 **해석하지 않고 그대로** 옮긴다.
+    next_action: str | None = None
 
 
 # ── 등록소 ──────────────────────────────────────────────────────────────
@@ -241,11 +261,41 @@ def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
         *"창고가 비었으니 더 사자"* 가 나온다.
 
       ★ **부르는 쪽이 정한다.** 이 함수는 상태를 값으로 돌려주고, `run_procurement`
-        진행 여부는 그것을 본 orchestration 의 결정이다 — 호출 배선은 아직 이 모듈
-        밖이다.
+        진행 여부는 그것을 본 orchestration 의 결정이다.
 
     ⚠️ **달력일이다.** 창고는 토요일에도 받는다. 실행일 달력을 쓰지 않는다.
+
+    ---
+
+    🔴 **개장 Gate 를 먼저 본다** (물류 물음 2026-09-07).
+
+      전에는 *"`open_day` 다음이다"* 라고 **문장으로만** 적어 두고 코드가 아무것도
+      안 봤다. 그러면 순서를 지키는 책임이 부르는 쪽에 통째로 있고, 안 지킨 날
+      `NOTHING_DUE` 가 나가 *"오늘은 올 게 없었다"* 로 읽힌다.
+
+      ```text
+      Gate BLOCKED   →  NOT_OPENED     받을 것이 있는지조차 안 묻는다
+      Gate PASS      →  평소대로
+      ```
+
+      ★ **`check_day_gate` 는 열지 않는다. 묻기만 한다.** 여기서 `open_day` 를 부르면
+        입고가 개장의 부작용이 되고, `router.py` 가 개장에 대해 적어 둔
+        *"명시적 호출이다. 실행의 부작용이 아니다"* 를 입고가 어긴다.
+
+      ⚠️ **미등록은 PASS 다** (`day_gate` 계약). 정본 표가 없는 환경에서 이 Gate 가
+        입고를 막지 않는다 — 없는 것과 안 열린 것은 다르다.
     """
+    gate = check_day_gate(as_of, connect=connect)
+    if gate.gate == "BLOCKED":
+        return InboundOut(
+            as_of=as_of,
+            status="NOT_OPENED",
+            reason=gate.reason,
+            # ★ **해석하지 않고 옮긴다.** 무엇을 해야 하는지는 개장이 아는 사실이고,
+            #   입고가 다시 판정하면 같은 사실의 주인이 둘이 된다.
+            next_action=gate.next_action,
+        )
+
     absent = missing()
     if absent:
         # ★ **미등록은 오류가 아니다.** 그 파트가 아직 입고를 실행하지 않는다는 뜻이고,
