@@ -179,6 +179,7 @@ def test_정방향이면_다음날_하나뿐이다(
     assert out.status == "APPLIED"
     assert 물류.dates == [다음날]
     assert out.carried_forward == []
+    assert out.carried_forward_status == "OK", "읽었는데 못 읽은 것으로 나갔다"
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +262,8 @@ def test_정본을_못_읽어도_승인을_멈추지_않는다(
       드러난다 — 조용히 성공한 것처럼 보이지 않는다.
     """
 
-    def _못읽음(*, after: date, sim_run_id: str, connect: Any = None) -> tuple[date, ...]:
-        return ()
+    def _못읽음(*, after: date, sim_run_id: str, connect: Any = None) -> None:
+        return None
 
     _, 물류 = _배선
     monkeypatch.setattr(transition, "opened_days_after", _못읽음)
@@ -273,3 +274,6 @@ def test_정본을_못_읽어도_승인을_멈추지_않는다(
     assert out.status == "APPLIED"
     assert 물류.dates == [다음날]
     assert out.carried_forward == []
+    assert out.carried_forward_status == "UNREADABLE", (
+        "못 읽은 것이 '앞질러 열린 날이 없었다' 와 같은 문장으로 나갔다"
+    )

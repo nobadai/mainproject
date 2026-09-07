@@ -206,6 +206,19 @@ class TransitionOut(BaseModel):
     #: 정방향이면 내일이 아직 없다. 값이 있으면 *"앞질러 열린 장부를 따라잡았다"*
     #: 는 사실이고, 화면에 나가 **왜 하루가 여러 번 바뀌었는지**를 설명한다.
     carried_forward: list[date] = Field(default_factory=list)
+    #: 🔴 **빈 목록이 두 가지 뜻이면 안 된다** (물류 지적 2026-09-07).
+    #:
+    #: ```text
+    #: OK          앞질러 열린 날이 **없었다** — 정방향이다
+    #: UNREADABLE  개장 정본을 **못 읽었다** — 있었는지조차 모른다
+    #: ```
+    #:
+    #: ⚠️ 둘 다 `carried_forward=[]` 로 나가면, 낡은 미래 행이 남아 있는데도 화면은
+    #: *"따라잡을 것이 없었다"* 로 읽는다. **없는 것과 못 읽은 것은 다르다** —
+    #: `day_gate` 가 근사를 근사라고 적는 것과 같은 자리다.
+    #:
+    #: ★ `UNREADABLE` 이어도 승인은 선다. 못 읽는 것이 승인을 멈추면 안 된다.
+    carried_forward_status: Literal["OK", "UNREADABLE"] = "OK"
 
 
 # ── 등록소 ──────────────────────────────────────────────────────────────
@@ -459,11 +472,16 @@ def apply_approval(
         #
         #    ⚠️ **정본에 없는 날은 안 보인다.** 이 표가 생기기(2026-09-07) 전에 열린
         #      날은 마스터도 모르고, 그것은 근사가 아니라 **모르는 것**이다.
-        carried_forward = opened_days_after(
+        읽힌_날들 = opened_days_after(
             after=target_state_date,
             sim_run_id=sim_run_id_for(commitment),
             connect=connect,
         )
+        # 🔴 **`None`(못 읽음)과 `()`(없음)을 여기서 가른다** (물류 지적 2026-09-07).
+        #    접으면 낡은 미래 행이 남아 있는데도 화면이 *"따라잡을 것이 없었다"* 로
+        #    읽는다 — **없는 것과 못 읽은 것은 다르다.**
+        carry_status = "OK" if 읽힌_날들 is not None else "UNREADABLE"
+        carried_forward = 읽힌_날들 or ()
         logistics_rows = tuple(
             row
             for state_date in (target_state_date, *carried_forward)
@@ -490,4 +508,9 @@ def apply_approval(
         return TransitionOut(status="FAILED", reason=f"전이 적재 실패: {exc}")
     finally:
         conn.close()
-    return TransitionOut(status="APPLIED", parts=list(PARTS), carried_forward=list(carried_forward))
+    return TransitionOut(
+        status="APPLIED",
+        parts=list(PARTS),
+        carried_forward=list(carried_forward),
+        carried_forward_status=carry_status,
+    )

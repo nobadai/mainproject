@@ -211,7 +211,7 @@ def read_day_opening(
 
 def opened_days_after(
     *, after: date, sim_run_id: str, connect: Callable[[], Any] | None = None
-) -> tuple[date, ...]:
+) -> tuple[date, ...] | None:
     """`after` **보다 뒤에** 이미 열린 날들. 오래된 것부터.
 
     🔴 **왜 이 함수가 필요한가** (물류 물음 2026-09-07 · 실측 2026-09-07).
@@ -237,10 +237,19 @@ def opened_days_after(
     ★ **성공한 개장만 센다.** `NOT_OPENED` · `REJECTED_GAP` 인 날은 파트 행이 안 섰
       으므로 물려줄 것도 없다.
 
-    ⚠️ **못 읽으면 빈 튜플이다.** 이 값이 없다고 승인을 멈추지 않는다 —
-      `record_day_opening` 이 절대 raise 하지 않는 것과 같은 규율이다. 다만 그때는
-      낡은 행이 그대로 남고, 그 사실은 `TransitionOut.carried_forward` 가 비어 있는
-      것으로 드러난다.
+    🔴 **못 읽으면 `None` 이다. 빈 튜플이 아니다** (물류 지적 2026-09-07).
+
+      ```text
+      ()      앞질러 열린 날이 **없다**        정방향이다
+      None    **못 읽었다**                    있었는지조차 모른다
+      ```
+
+      ⚠️ 둘을 `()` 하나로 접으면 낡은 미래 행이 남아 있는데도 호출자가 *"따라잡을
+        것이 없었다"* 로 읽는다. **없는 것과 못 읽은 것은 다르다.**
+
+    ★ 못 읽는 것이 승인을 멈추지는 않는다 — `record_day_opening` 이 절대 raise 하지
+      않는 것과 같은 규율이다. 다만 그 사실이 `TransitionOut.carried_forward_status`
+      로 나간다.
     """
     query = sql.SQL(
         "SELECT as_of FROM {} WHERE sim_run_id = %s AND as_of > %s"
@@ -252,14 +261,14 @@ def opened_days_after(
         conn = open_connection()
     except Exception:
         logger.exception("개장 정본 조회 실패 - 앞질러 열린 날을 모른 채 간다")
-        return ()
+        return None
     try:
         with conn.cursor() as cur:
             cur.execute(query, (sim_run_id, after))
             rows = cur.fetchall()
     except Exception:
         logger.exception("개장 정본 조회 실패 - 앞질러 열린 날을 모른 채 간다")
-        return ()
+        return None
     finally:
         conn.close()
     return tuple(row["as_of"] if isinstance(row, Mapping) else row[0] for row in rows)
