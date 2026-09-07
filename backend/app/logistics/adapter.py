@@ -1742,13 +1742,17 @@ def _load_read(*, as_of: date, sim_run_id: str) -> LogisticsRead | None:
     재시도하지 않고 "데이터를 달라"로 오독한다 (M-1 §5.1 — ERROR 가 재시도 가치가
     있는 쪽).
 
-    ★ **예외가 하나 알려져 있다** — `item_storage_policies.operational_limit_days`
-      는 DB 가 nullable 인데 `_inventory_lot_from_row` 가 NULL 을 TypeError 로 낸다.
-      그 NULL 은 "보관한계 미등록"(부재)이라 여기서는 ERROR 로 분류되지만 재시도해도
-      풀리지 않는다. Repository 안에서 같은 컬럼을 두 경로가 다르게 다루는 것이
-      원인이라 어댑터 특례가 아니라 Repository 어휘를 고쳐야 하고, 그러면 독립
-      Service 도 함께 고쳐진다 — **별도 안건**이다 (2026-09-01 교차검증 I-1).
-      NULL 인 Lot 의 신선도를 어떻게 볼지가 함께 정해져야 해 기계적 수정이 아니다.
+    ★ **알려져 있던 예외 하나는 닫혔다** (#366) — `item_storage_policies.
+      operational_limit_days` 는 DB 가 nullable 인데 `_inventory_lot_from_row` 만
+      NULL 을 TypeError 로 냈다. 그 NULL 은 "보관한계 미등록"(부재)이라 여기서
+      ERROR 로 분류되면 재시도해도 풀리지 않는다.
+
+      🔴 **어댑터 특례로 막지 않았다.** 여기서 그 TypeError 만 걸러내면 *"어떤
+         TypeError 는 상태"* 라는 예외의 예외가 생기고, 같은 NULL 을 읽는 독립
+         Service 경로는 그대로 죽는다. 고친 자리는 Repository 어휘 한 곳이고,
+         이제 부재는 `remaining_freshness_days=None` 으로 나와 `evaluate_sales_rules`
+         의 `N17-LOT`(`N17_LOT_FRESHNESS_UNRESOLVED`)이 받는다 — **없는 사실은
+         UNRESOLVED 로, 실행 실패만 ERROR 로** 라는 이 함수의 구분이 그대로 산다.
     """
     try:
         return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id)

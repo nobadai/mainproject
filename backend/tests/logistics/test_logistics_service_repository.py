@@ -705,6 +705,134 @@ def test_item_storage_policy_preserves_missing_values():
     assert mu.medium_grade_factor is None
 
 
+def _snapshot_with_rows(rows: list[dict[str, object]]):
+    """`fetch_all` 을 가짜로 세우고 스냅샷 하나를 만든다. **DB 를 안 읽는다.**"""
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                rows,
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
+        ),
+    ):
+        return get_current_inventory_logistics_snapshot(as_of=date(2025, 12, 31))
+
+
+def test_lot_freshness_is_none_when_storage_limit_is_missing():
+    """🔴 **보관한계 NULL 은 부재지 예외가 아니다** (#366).
+
+    같은 칸(`item_storage_policies.operational_limit_days`)을 읽는 세 자리가 같은
+    답을 내야 한다 — `_item_storage_policy_from_row` 는 이미 `None` 을 보존하고,
+    같은 식을 쓴다고 적어 둔 `turnover.freshness_days_of` 도 `None` 을 돌려준다.
+    Lot 경로만 `TypeError` 를 냈고, 그 예외는 Repository 밖에서 **실행 실패**로
+    읽혀(`adapter._load_read` → `ERROR`) 물류 에이전트를 통째로 껐다.
+
+    ★ **두 칸이 함께 비어야 한다.** 하나만 남기면 받는 쪽이 남은 하나로 역산한다.
+    """
+    rows = _inventory_rows()
+    rows[0]["operational_limit_days"] = None
+
+    snapshot = _snapshot_with_rows(rows)
+
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    # 🔴 `is None` 으로 잰다 — `== 0` 이면 NULL 을 0 으로 메우는 변이가 통과한다.
+    assert baechu.remaining_freshness_days is None
+    assert baechu.effective_freshness_limit_days is None
+
+
+def test_lot_without_storage_limit_keeps_its_physical_facts():
+    """신선도를 못 셌다고 **재고가 사라지지 않는다.**
+
+    보관 정책은 *"며칠 쓸 수 있나"* 이고 Lot 물리 잔량은 *"창고에 얼마가 있나"* 다.
+    앞을 모른다고 뒤를 지우면 없는 공간이 열린다.
+    """
+    rows = _inventory_rows()
+    rows[0]["operational_limit_days"] = None
+
+    snapshot = _snapshot_with_rows(rows)
+
+    # Lot 이 목록에서 빠지지 않았다
+    assert [lot.lot_id for lot in snapshot.on_hand_by_lot] == [
+        row["lot_id"] for row in _inventory_rows()
+    ]
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    assert baechu.available_qty_kg == Decimal("286.92")
+    assert baechu.status == "ACTIVE"
+    assert baechu.grade == "상"
+    assert baechu.storage_zone == "COLD_HUMID_0_3"
+    # 🔴 점유도 그대로다 — 이 Lot 을 빼면 363.28 → 76.36 으로 줄어든다.
+    assert snapshot.used_capacity_kg == Decimal("363.28")
+
+
+def test_other_lots_keep_their_freshness_when_one_limit_is_missing():
+    """🔴 **부재는 한 Lot 에만 머문다.** 한 품목의 정책 공백이 다른 Lot 의 셈을
+    바꾸면 그건 부재가 아니라 오염이다.
+
+    ★ 정상 int 경로의 값을 **정확히** 고정한다 — 계산식이 바뀌면 여기가 빨간불이다.
+    """
+    rows = _inventory_rows()
+    rows[0]["operational_limit_days"] = None
+
+    snapshot = _snapshot_with_rows(rows)
+
+    by_item = {lot.item: lot for lot in snapshot.on_hand_by_lot}
+    # 무: 한계 12 · 12-30 입고 · 기준일 12-31 → 12 - 1
+    assert by_item["무"].remaining_freshness_days == 11
+    assert by_item["무"].effective_freshness_limit_days == 12
+    # 피마늘 · 양파: 당일 입고라 경과 0
+    assert by_item["피마늘"].remaining_freshness_days == 30
+    assert by_item["양파"].remaining_freshness_days == 14
+    assert by_item["양파"].effective_freshness_limit_days == 14
+
+
+def test_medium_grade_factor_is_not_applied_without_a_storage_limit():
+    """`중` 등급이어도 **곱할 한계가 없으면 곱하지 않는다.**
+
+    🔴 계수만 있고 한계가 없을 때 0 이나 계수 자체를 한계로 쓰면 갓 입고된 Lot 이
+       즉시 임박으로 읽힌다 — `effective_freshness_limit_days` 가 막으려던 그 왜곡이다.
+    """
+    rows = _inventory_rows()
+    rows[0]["grade"] = "중"
+    rows[0]["operational_limit_days"] = None
+
+    snapshot = _snapshot_with_rows(rows)
+
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    assert baechu.grade == "중"
+    assert baechu.remaining_freshness_days is None
+    assert baechu.effective_freshness_limit_days is None
+    assert baechu.available_qty_kg == Decimal("286.92")
+
+
+def test_medium_grade_still_scales_a_present_storage_limit():
+    """🔴 **회귀 방어.** `중` 등급의 정상 계산을 NULL 허용이 건드리지 않는다.
+
+    한계 10 · 계수 0.8 → 유효 한계 8 이고, 원값 10 이 아니다.
+    """
+    rows = _inventory_rows()
+    rows[0]["grade"] = "중"
+
+    snapshot = _snapshot_with_rows(rows)
+
+    baechu = next(lot for lot in snapshot.on_hand_by_lot if lot.item == "배추")
+    assert baechu.effective_freshness_limit_days == 8
+    assert baechu.remaining_freshness_days == 8
+
+
+def test_broken_storage_limit_type_is_still_rejected():
+    """🔴 **NULL 만 열었다.** 모양이 깨진 값은 여전히 실행 실패다 — 부재가 아니다."""
+    rows = _inventory_rows()
+    rows[0]["operational_limit_days"] = "열흘"
+
+    with pytest.raises(TypeError, match="operational_limit_days"):
+        _snapshot_with_rows(rows)
+
+
 def test_logistics_a_ready_response_and_persistence(
     complete_logistics_snapshot, logistics_purchase_payload
 ):
@@ -849,3 +977,64 @@ def test_logistics_persistence_failure_is_not_runtime_warning(
         pytest.raises(OperationalError, match="persistence unavailable"),
     ):
         run_logistics_procurement(request)
+
+
+def test_missing_storage_limit_does_not_promote_to_runtime_error():
+    """🔴 **부재가 실행 실패로 승격되지 않는다** (#366) — 원인 제거의 최종 증명.
+
+    종전 사슬은 이랬다.
+
+    ```text
+    operational_limit_days NULL
+      → _inventory_lot_from_row TypeError
+      → adapter._load_read  except Exception → _SnapshotLoadError
+      → runtime_status "ERROR"
+      → envelope.worth_retry(ERROR) = True → 마스터가 풀리지 않을 호출을 되풀이
+    ```
+
+    ★ **어댑터를 진짜로 통과시킨다** — `_load_read` 를 갈아 끼우지 않고 `fetch_all`
+      만 가짜로 세워, Repository → `_load_read` → handler 사슬 전체를 지난다.
+      seam 을 위에서 막으면 정작 고친 자리를 안 지나간다.
+
+    ★ **대표 두 mode 만 고정한다.** 넷이 같은 `_load_read` 하나를 지나므로
+      (`adapter._RUNTIME_AXIS_MODES` 주석) 매입 경계와 판매 컨텍스트면 사슬이 증명된다.
+    """
+    from app.logistics import adapter
+    from app.master.envelope import AgentRequest, ExecutionContext
+
+    rows = _inventory_rows()
+    rows[0]["operational_limit_days"] = None
+
+    for mode in ("PRE_PURCHASE", "PRE_SALES"):
+        request = AgentRequest(
+            context=ExecutionContext(
+                request_id="REQ-366",
+                as_of=date(2025, 12, 31),
+                trigger="USER_REQUEST",
+                policy_version="v1.3-PROVISIONAL",
+                sim_run_id="SIM-BURNIN-202512",
+            ),
+            agent="inventory",
+            mode=mode,
+            payload={},
+        )
+        with (
+            patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+            patch(
+                "app.logistics.repository.fetch_all",
+                side_effect=[
+                    [_fixture_row()],
+                    _policy_rows(),
+                    rows,
+                    _storage_policy_rows(),
+                    *_COMMITMENT_ROWS,
+                ],
+            ),
+        ):
+            reply, _ = adapter.logistics_port(request)
+
+        # 🔴 이 한 줄이 이 이슈다 — 보관한계 하나가 없다고 실행이 실패한 것이 아니다
+        assert reply.runtime_status != "ERROR", mode
+        assert reply.runtime_status == "READY", mode
+        # 한계를 못 센 그 Lot 도 사실로 남는다
+        assert "logistics_snapshot" not in reply.missing_data

@@ -2074,3 +2074,139 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     # 키만 옮겼고 값은 정책 원값 그대로다 — mapper 가 계산하지 않는다
     assert context.delivery_feasibility.daily_outbound_capacity_kg == Decimal("5000.0")
     assert context.missing_data == list(payload["missing_data"])
+
+
+# ── 보관한계 부재 Lot (#366) ────────────────────────────────────
+
+
+def test_보관한계가_없는_Lot_은_신선도를_지어내지_않는다(monkeypatch):
+    """🔴 **부재는 `null` 로 나간다 — 0 도 생략도 아니다** (#366).
+
+    Repository 가 보관한계 NULL 을 `remaining_freshness_days=None` 으로 내게 되면서
+    이 Lot 이 PRE_SALES 까지 도달한다. 여기서 0 으로 접거나 키를 빼면 받는 쪽이
+    *"신선도를 확인했다"* 나 *"물류가 칸을 안 보냈다"* 로 읽는다 — 둘 다 틀렸다.
+
+    ★ **칸은 있고 값이 없다.** `§1.2-10` 이 요구하는 모양이다.
+    """
+    _with_read(
+        monkeypatch,
+        _sales_snapshot(
+            on_hand_by_lot=[
+                _sales_lot("LOT-A", "배추", "1000", 10),
+                _sales_lot("LOT-N", "배추", "700", None, limit=None),
+                _sales_lot("LOT-C", "무", "300", 7),
+            ]
+        ),
+    )
+
+    _, reply, _ = _pre_sales_reply()
+    payload = reply.payload
+    row = next(r for r in payload["lot_constraints"] if r["lot_id"] == "LOT-N")
+
+    # 🔴 키는 있고 값은 None 이다 — `is None` 으로 재야 0 치환 뮤턴트가 잡힌다
+    assert "remaining_freshness_days" in row
+    assert row["remaining_freshness_days"] is None
+    assert "effective_freshness_limit_days" in row
+    assert row["effective_freshness_limit_days"] is None
+
+    # 나머지 Fact 는 그대로 실린다 — 신선도를 못 냈다고 재고가 사라지지 않는다
+    assert row["item"] == "배추"
+    assert row["available_qty_kg"] == 700.0
+    assert row["status"] == "ACTIVE"
+    assert row["grade"] is None
+
+    # 정상 Lot 두 개는 값이 그대로다 (회귀 방어)
+    others = {r["lot_id"]: r for r in payload["lot_constraints"]}
+    assert others["LOT-A"]["remaining_freshness_days"] == 10
+    assert others["LOT-A"]["effective_freshness_limit_days"] == 15
+    assert others["LOT-C"]["remaining_freshness_days"] == 7
+
+
+def test_보관한계가_없는_Lot_도_판매가능량에서_빠지지_않는다(monkeypatch):
+    """🔴 **만료 확인(<= 0)과 확인 불가(None)는 다르다.**
+
+    None 을 만료로 접으면 창고에 실물이 있는 재고가 판매가능량에서 조용히 사라진다.
+    `build_inventory_by_item` 이 이미 그렇게 적어 두었고(*"0 != null"*), 이 검사는
+    그 규율이 PRE_SALES 경계를 건너서도 살아 있는지를 잰다.
+
+    ```text
+    배추  (1,000 − 할당 400) + 700(한계 미등록) − 미할당 예약 100 = 1,200
+    ```
+    """
+    _with_read(
+        monkeypatch,
+        _sales_snapshot(
+            on_hand_by_lot=[
+                _sales_lot("LOT-A", "배추", "1000", 10),
+                _sales_lot("LOT-N", "배추", "700", None, limit=None),
+                _sales_lot("LOT-C", "무", "300", 7),
+            ]
+        ),
+    )
+
+    _, reply, _ = _pre_sales_reply()
+
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "ok"
+    qty = {row["item"]: row["available_qty_kg"] for row in reply.payload["inventory_by_item"]}
+    # 🔴 700 이 빠지면 500 이 된다 — 그 뮤턴트를 이 숫자가 잡는다
+    assert qty == {"배추": 1200.0, "무": 300.0}
+
+
+def test_보관한계_부재는_신선도_근거를_만들지_않는다(monkeypatch):
+    """근거는 **값이 있는 칸에만** 붙는다.
+
+    🔴 `null` 에 Evidence 를 달면 *"신선도를 이만큼 확인했다"* 가 되고, 안 달면서
+       값을 실으면 `E-EVIDENCE-ORPHAN` 이 된다. 값을 안 싣는 것이 답이라 근거도 없다.
+    """
+    _with_read(
+        monkeypatch,
+        _sales_snapshot(
+            on_hand_by_lot=[
+                _sales_lot("LOT-A", "배추", "1000", 10),
+                _sales_lot("LOT-N", "배추", "700", None, limit=None),
+            ]
+        ),
+    )
+
+    _, reply, _ = _pre_sales_reply()
+    claims = {ev.claim for ev in reply.evidences}
+
+    assert "lot_constraints[LOT-N].remaining_freshness_days" not in claims
+    assert "lot_constraints[LOT-N].effective_freshness_limit_days" not in claims
+    # 물리 잔량은 여전히 근거가 붙는다 — 그 값은 실제로 냈다
+    assert "lot_constraints[LOT-N].available_qty_kg" in claims
+    # 정상 Lot 은 셋 다 그대로 (회귀 방어)
+    assert "lot_constraints[LOT-A].remaining_freshness_days" in claims
+    assert "lot_constraints[LOT-A].effective_freshness_limit_days" in claims
+
+
+def test_보관한계_부재_Lot_이_판매_계약으로도_읽힌다(monkeypatch):
+    """🔴 판매 DTO 가 `null` 신선도를 거부하면 여기가 빨간불이다.
+
+    `LogisticsLotConstraint` 는 두 칸을 `int | None` 으로 열어 두었다 — 그 계약이
+    좁아지는 날 물류가 낼 수 있는 사실이 경계에서 막힌다.
+    """
+    from app.sales.schemas import SalesLogisticsContext
+
+    _with_read(
+        monkeypatch,
+        _sales_snapshot(on_hand_by_lot=[_sales_lot("LOT-N", "배추", "700", None, limit=None)]),
+    )
+
+    payload = _pre_sales_reply()[1].payload
+    context = SalesLogisticsContext.model_validate(
+        {
+            "sellable_supply": {
+                **payload["sellable_supply"],
+                "inventory_by_item": payload["inventory_by_item"],
+                "lot_constraints": payload["lot_constraints"],
+            },
+        }
+    )
+
+    lot = context.sellable_supply.lot_constraints[0]
+    assert lot.lot_id == "LOT-N"
+    assert lot.remaining_freshness_days is None
+    assert lot.effective_freshness_limit_days is None
+    assert lot.available_qty_kg == Decimal("700.0")

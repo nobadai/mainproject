@@ -946,6 +946,62 @@ def test_sales_rule_requires_n17(complete_logistics_snapshot):
     assert n17.status == "UNRESOLVED"
 
 
+def test_lot_freshness_unresolved_reaches_n17_lot(complete_logistics_snapshot):
+    """🔴 **`N17-LOT` 이 실제로 도달 가능해졌다** (#366).
+
+    이 UNRESOLVED 어휘는 *"Lot 의 잔여 신선도를 못 냈다"* 를 위해 진작 설계돼 있었지만,
+    Repository 가 그런 Lot 을 **만들기 전에 TypeError 로 죽어서** 닿을 수 없었다.
+    보관한계 NULL 이 `remaining_freshness_days=None` 으로 나오게 되면서 그 자리가 열린다.
+
+    ★ **새 code 를 만들지 않았다** — 있던 어휘가 이제 쓰인다.
+    """
+    snapshot = complete_logistics_snapshot.model_copy(
+        update={
+            "on_hand_by_lot": [
+                complete_logistics_snapshot.on_hand_by_lot[0].model_copy(
+                    update={
+                        "remaining_freshness_days": None,
+                        "effective_freshness_limit_days": None,
+                    }
+                )
+            ]
+        }
+    )
+
+    result = evaluate_sales_rules(
+        as_of=AS_OF,
+        snapshot=snapshot,
+        future_occupancy_by_date={ARRIVAL: Decimal(5500)},
+    )
+
+    lot_constraint = next(item for item in result["hard_constraints"] if item.code == "N17-LOT")
+    assert lot_constraint.status == "UNRESOLVED"
+    assert lot_constraint.skip_reason == "N17_LOT_FRESHNESS_UNRESOLVED"
+    # 🔴 **ERROR 가 아니라 RUNTIME_NOT_READY 다.** 없는 사실은 상태이지 실행 실패가 아니다.
+    assert result["runtime_status"] == "RUNTIME_NOT_READY"
+    assert result["calculation_ready"] is False
+    # 다른 축은 멀쩡하다 — 신선도 부재가 창고 판정까지 끌고 내려가지 않는다.
+    warehouse = next(item for item in result["hard_constraints"] if item.code == "LOG-H01")
+    assert warehouse.status == "PASS"
+    n17 = next(item for item in result["hard_constraints"] if item.code == "N17")
+    assert n17.status == "PASS"
+
+
+def test_lot_freshness_present_keeps_n17_lot_passing(complete_logistics_snapshot):
+    """🔴 **회귀 방어.** 신선도가 있는 Lot 은 그대로 통과다 — 위 경로가 상시로 켜지면
+    모든 판매 판정이 UNRESOLVED 가 된다."""
+    result = evaluate_sales_rules(
+        as_of=AS_OF,
+        snapshot=complete_logistics_snapshot,
+        future_occupancy_by_date={ARRIVAL: Decimal(5500)},
+    )
+
+    lot_constraint = next(item for item in result["hard_constraints"] if item.code == "N17-LOT")
+    assert lot_constraint.status == "PASS"
+    assert lot_constraint.skip_reason is None
+    assert result["runtime_status"] == "READY"
+
+
 def test_logistics_rules_fail_closed_on_as_of_mismatch(complete_logistics_snapshot):
     result = evaluate_procurement_rules(
         as_of=date(2026, 8, 22),
