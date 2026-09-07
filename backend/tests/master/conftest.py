@@ -13,10 +13,13 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import date
+from types import ModuleType
 
 import pytest
 
+from app.master import day_opening_repository as _개장_정본_저장소
 from app.master.inputs import MasterInputs, SourcedInput
 from app.master.llm.answer_runtime import NarrativeService
 from app.master.llm.runtime import LLMSettings
@@ -105,23 +108,58 @@ class _주말만_쉬는_시장:
         return day.weekday() < 5
 
 
+#: 개장 정본 저장소에서 **실 DB 를 치는 함수들.** 이름을 가져간 자리를 전부 막아야 한다.
+_개장_정본_실_DB_함수 = ("read_day_opening", "record_day_opening")
+
+#: 막기 전에 잡아 둔 **진짜 함수.** conftest 는 fixture 보다 먼저 import 되므로 여기
+#: 담기는 것은 언제나 원본이다. `test_db_isolation.py` 가 이것과 비교해 격리를 잰다.
+진짜_개장_정본_함수 = {이름: getattr(_개장_정본_저장소, 이름) for 이름 in _개장_정본_실_DB_함수}
+
+
+def 개장_정본_이름을_가져간_모듈들(이름: str) -> list[ModuleType]:
+    """`이름` 을 자기 네임스페이스에 들고 있는 `app.master.*` 모듈을 **전부** 준다.
+
+    🔴 **원본 모듈만 막으면 샌다.** `from X import f` 는 import 시점에 `f` 를 부르는
+       쪽 네임스페이스로 **복사한다.** 뒤에 `X.f` 를 바꿔도 이미 복사된 이름은 그대로라
+       그 모듈은 **진짜 함수를 계속 부르고, 실 DB 를 친다** — `day_gate` 가 그랬다.
+
+    ⚠️ **손으로 한 줄씩 적지 않는다.** 다음에 다른 모듈이 같은 이름을 가져가면 그때 또
+       조용히 새고, 증상이 *"DB 상태에 따라 검사가 갈린다"* 라 **재현이 안 되는
+       빨간불**이 된다.
+
+    ★ **fixture 뒤에 import 되는 모듈은 걱정하지 않아도 된다.** 원본 모듈의 속성이
+      이미 가짜로 바뀌어 있으므로, 늦게 `from X import f` 하는 쪽은 가짜를 가져간다.
+    """
+    return [
+        모듈
+        for 모듈이름, 모듈 in list(sys.modules.items())
+        if 모듈이름.startswith("app.master") and 모듈 is not None and hasattr(모듈, 이름)
+    ]
+
+
 @pytest.fixture(autouse=True)
 def 개장_정본_적재를_막는다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """개장 정본(`master_day_openings`) 적재를 **DB 대신 가짜로** 받는다.
+    """개장 정본(`master_day_openings`) 조회·적재를 **DB 대신 가짜로** 받는다.
 
     🔴 **`record_day_opening` 이 예외를 삼킨다** (이력이 없는 것보다 하루를 못 여는
        것이 나쁘므로). 그래서 안 막으면 검사가 **조용히 실 DB 를 치고도 초록**이다.
 
+    🔴 **조회(`read_day_opening`)도 같이 막는다.** 이쪽은 예외를 삼키지도 않고 값을
+       돌려주므로, 안 막으면 검사의 답이 **그날 실 DB 에 행이 있느냐로 갈린다** —
+       `day_gate` 의 근사 분기가 정확히 그렇게 무너져 있었다.
+
+    ★ 이름을 가져간 모듈까지 훑어 막는다 — `개장_정본_이름을_가져간_모듈들` 참조.
+
     ★ 정본 자체를 재는 검사는 `test_day_opening_repository.py` 가 가짜 커넥션을 직접
-      꽂는다.
+      꽂고, **격리가 실제로 섰는지는 `test_db_isolation.py` 가 잰다.**
     """
-    monkeypatch.setattr("app.master.day_open.record_day_opening", lambda **kw: True, raising=False)
-    monkeypatch.setattr(
-        "app.master.day_opening_repository.record_day_opening", lambda **kw: True
-    )
-    monkeypatch.setattr(
-        "app.master.day_opening_repository.read_day_opening", lambda **kw: None
-    )
+    가짜 = {
+        "read_day_opening": lambda **kw: None,
+        "record_day_opening": lambda **kw: True,
+    }
+    for 이름, 대체 in 가짜.items():
+        for 모듈 in 개장_정본_이름을_가져간_모듈들(이름):
+            monkeypatch.setattr(모듈, 이름, 대체)
 
 
 @pytest.fixture(autouse=True)
