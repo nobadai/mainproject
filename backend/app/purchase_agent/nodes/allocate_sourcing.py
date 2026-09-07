@@ -749,6 +749,23 @@ def allocate_sourcing(
 
     decision = evaluate_mid_grade(state, constraints)
     decision["base_grade"] = base_grade
+    if base_grade != top_grade:
+        # 🔴 **대체했다는 사실을 따로 남긴다.** ``base_grade`` 만으로는 그것이 선언한
+        #   기준등급인지 대체값인지 읽는 쪽이 알 수 없다 — 이름이 같으니 ⑥이 조용히
+        #   "기준등급으로 배정" 이라고 적게 된다(바로 위 주석이 막으려던 그 모양이다).
+        #
+        # ⚠️ **실데이터에서 늘 걸리는 자리다** (2026-09-07 실측 · `#69`)::
+        #
+        #       배추   특만 있다        → 선언 "상" 이 없어 특으로 간다
+        #       양파   특·중·하        → 마찬가지
+        #       무     특·상           → 선언대로 상
+        #
+        #   품목마다 사다리가 달라 상수 교체로 못 없앤다. 없애는 대신 **보이게** 한다.
+        decision["reference_grade_fallback"] = {
+            "declared": top_grade,
+            "used": base_grade,
+            "used_price": prices[base_grade],
+        }
     mid_ratio, mix = _select_mix(state, decision, constraints, selector)
     decision["ratio"] = mid_ratio
     decision["mix"] = mix

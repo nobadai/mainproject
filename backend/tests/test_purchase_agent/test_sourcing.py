@@ -706,3 +706,75 @@ def test_warehouse_cap_mixes_decimal_and_float_without_dying() -> None:
     """
     mixed = warehouse_cap_kg({"warehouse_free_kg": Decimal("7636.72"), "rental_cap_kg": 0.0})
     assert mixed == warehouse_cap_kg({"warehouse_free_kg": 7636.72, "rental_cap_kg": 0.0}) == 7636
+
+
+# ── 기준등급이 당일 시세에 없는 날 (#69 · 2026-09-07) ──────────────────────
+
+
+def _risks_without_reference_grade(as_of: date = RISING, item: str = ITEM) -> list[str]:
+    """시세에서 기준등급을 빼고 ⑤→⑥을 돌려 나온 risks.
+
+    **합성 입력이다.** mock 시세에는 기준등급이 늘 있어서 이 경로가 mock 만으로는
+    한 번도 안 선다 — 그런데 실데이터에서는 배추·양파가 **늘** 이 경로다
+    (`auction_prices_daily` 우리 규격에 '상'이 없다 · `#69`).
+    """
+    state = _staged(item, as_of)
+    top = load_constraints()["allocation"]["reference_grade"]
+    state["market_quotes"] = [q for q in state["market_quotes"] if q["grade"] != top]
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+    return [risk for s in state["scenarios_final"] for risk in s["risks"]]
+
+
+def test_missing_reference_grade_is_named_in_risks() -> None:
+    """기준등급이 당일 시세에 없으면 **무엇으로 대신했는지**가 risks 로 나간다.
+
+    🔴 이름만 실으면 화면에서 구분이 안 된다. ``sourcing_plan``의 등급이 선언한
+    기준등급인지 대체값인지 읽는 쪽이 알 방법이 그 문장뿐이다.
+    """
+    risks = _risks_without_reference_grade()
+    named = [r for r in risks if "기준등급" in r and "당일 시세에 없어" in r]
+    assert named, f"대체 고지가 없다: {risks}"
+    top = load_constraints()["allocation"]["reference_grade"]
+    assert f"'{top}'" in named[0], f"선언한 기준등급 이름이 없다: {named[0]}"
+
+
+def test_reference_grade_present_leaves_no_fallback_note() -> None:
+    """대체하지 않은 날에는 그 문장이 **안 나간다.**
+
+    늘 붙으면 신호가 죽는다 — 매일 모든 안에 붙는 문장은 아무도 안 읽는다
+    (⑦ ``check_arrival_capacity``가 자기 한계를 risks에 안 싣는 것과 같은 이유).
+    """
+    state = _staged()
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+    risks = [risk for s in state["scenarios_final"] for risk in s["risks"]]
+    assert not [r for r in risks if "당일 시세에 없어" in r], risks
+
+
+def test_fallback_note_survives_every_risk_branch() -> None:
+    """``_sourcing_risks``의 세 갈래 **전부**에서 고지가 살아남는다.
+
+    🔴 한 갈래에만 두면 *"배분이 막힌 날에는 고지를 안 받는"* 구조가 된다. 배분이
+    막히는 것과 기준등급이 없는 것은 **다른 사실**이고, 막힌 날이야말로 어느 등급으로
+    갔는지가 더 중요하다.
+    """
+    from app.purchase_agent.nodes.package_scenarios import _sourcing_risks
+
+    fallback = {"declared": "상", "used": "특", "used_price": 824}
+    branches = {
+        "blocked": {"blocked_by": "확정주문이 없어 근접 납품 비중을 낼 수 없다"},
+        "no_ratio": {"ratio": 0.0},
+        "normal": {
+            "ratio": 0.3,
+            "mid_grade": "중",
+            "shelf_days": 6.0,
+            "near_qty_kg": 1000,
+        },
+    }
+    sourcing = [{"grade": "중", "qty_kg": 300}, {"grade": "특", "qty_kg": 700}]
+    for name, decision in branches.items():
+        risks = _sourcing_risks(sourcing, {**decision, "reference_grade_fallback": fallback})
+        assert any("당일 시세에 없어" in r for r in risks), f"{name} 갈래에서 사라졌다: {risks}"

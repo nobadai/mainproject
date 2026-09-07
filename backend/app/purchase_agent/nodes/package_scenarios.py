@@ -915,21 +915,53 @@ def _mix_choice_rationale(decision: dict, quote_ref: str) -> list[dict]:
     ]
 
 
+def _grade_fallback_risks(decision: dict) -> list[str]:
+    """선언한 기준등급이 당일 시세에 없어 **다른 등급으로 배정한 날**의 한 줄.
+
+    걸리지 않은 날은 빈 목록이라 문장이 안 나간다 — ⑤가 대체했을 때만 키를 세운다
+    (``allocate_sourcing.reference_grade_fallback``).
+
+    🔴 **왜 필요한가.** ``sourcing_plan`` 에는 배정한 등급 이름만 실린다. 그게 선언한
+      기준등급인지 대체값인지 화면에서 구분이 안 되고, 실데이터에서는 배추·양파가
+      **늘** 대체 경로다 (`#69` · 2026-09-07 실측). 읽는 사람이 *"기준등급이 뭐냐"* 를
+      물었을 때 산출물이 스스로 답해야 한다.
+
+    ⚠️ **원인이 아니라 사실만 적는다.** *"규격 안에 상 등급이 없다"* 는 ML 소유의
+      설명이고 품목마다 다르다 — 우리가 아는 것은 *"오늘 시세에 그 등급이 없었다"* 뿐이다.
+    """
+    fallback = decision.get("reference_grade_fallback")
+    if not fallback:
+        return []
+    return [
+        (
+            f"기준등급 '{fallback['declared']}'이 당일 시세에 없어 "
+            f"'{fallback['used']}'({fallback['used_price']:,}원/kg)으로 배정했다"
+        )
+    ]
+
+
 def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
     """등급 배분에서 나온 유의사항. **미결로 건너뛴 검사도 여기 싣는다** (규칙 3).
 
     §4-⑦ 예시 출력의 risks("중품 1,500kg은 잔여신선도 6일 내 소진 필요 — 확정주문
     일정상 충족")를 재현한다.
+
+    🔴 **등급 대체 고지는 세 갈래 전부에 붙는다.** 어느 한 갈래에만 두면 *"배분이 막힌
+      날에는 고지를 안 받는"* 구조가 된다 — ⑦ ``check_arrival_capacity`` 가 회차 수와
+      무관하게 같은 코드를 태우는 것과 같은 이유다.
     """
+    fallback_notes = _grade_fallback_risks(decision)
     if decision.get("blocked_by"):
         # 배정한 등급을 **이름으로** 적는다. 기준등급 시세가 없으면 ⑤가 다른 등급으로
         # 대체하므로, "기준등급으로 배정했다"고 쓰면 형식만 맞고 내용이 거짓인 근거가 된다.
         grade = decision.get("base_grade", "?")
-        return [f"등급 배분 보류 — {decision['blocked_by']}. 전량 {grade} 단일 등급으로 배정했다"]
+        return fallback_notes + [
+            f"등급 배분 보류 — {decision['blocked_by']}. 전량 {grade} 단일 등급으로 배정했다"
+        ]
     if not decision.get("ratio"):
         # 중품 미사용. 판단 미적용 고지는 여기서도 살아야 한다 — 판단자가 있었는지
         # 없었는지는 배분 결과와 별개의 사실이다 (rationale 쪽과 같은 이유).
-        return _mix_choice_risks(decision)
+        return fallback_notes + _mix_choice_risks(decision)
     mid_kg = sum(line["qty_kg"] for line in sourcing if line["grade"] == decision["mid_grade"])
     notes = [
         (
@@ -954,7 +986,7 @@ def _sourcing_risks(sourcing: list[dict], decision: dict) -> list[str]:
             "계산했다 — 물류 값이 다르면 중품 비중이 달라진다"
         )
     notes.extend(_mix_choice_risks(decision))
-    return notes
+    return fallback_notes + notes
 
 
 def _mix_choice_risks(decision: dict) -> list[str]:
