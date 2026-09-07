@@ -183,7 +183,7 @@ def _ratio(value: Any) -> float | None:
 
     ⚠️ 범위를 안 보면 조용히 틀린다 (Codex 교차검증, 전부 재현함).
     ``0`` 이나 음수는 "물류값 수신 완료"로 처리되어 **폴백도 고지도 없이** 중품 배분을
-    0으로 만들고, ``1`` 초과는 중품 소진 한계를 상품 한계일보다 **길게** 만든다 —
+    0으로 만들고, ``1`` 초과는 중품 소진 한계를 운영 보관한계보다 **길게** 만든다 —
     중품이 상품보다 오래 간다는 뜻이라 개념이 뒤집힌다.
     """
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -346,9 +346,9 @@ def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
     """
     lots = inventory.get("lots")
     if lots is None:
-        return "재고 로트를 받지 못해 상품 한계일을 알 수 없다"
+        return "재고 로트를 받지 못해 운영 보관한계를 알 수 없다"
     if not lots:
-        return "보유 로트가 없어 상품 한계일을 알 수 없다"
+        return "보유 로트가 없어 운영 보관한계를 알 수 없다"
 
     policy = item_storage_policy(inventory, item)
     limit = _positive_int(policy.get("operational_limit_days")) if policy else None
@@ -362,14 +362,14 @@ def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
             return (
                 _SHELF_DAYS_GRADE_UNRESOLVED
                 if has_limit
-                else "보유 로트의 등급이 모두 미상이라 상품 한계일을 알 수 없다"
+                else "보유 로트의 등급이 모두 미상이라 운영 보관한계를 알 수 없다"
             )
-        return f"{top_grade} 등급 로트가 없어 상품 한계일을 알 수 없다"
+        return f"{top_grade} 등급 로트가 없어 운영 보관한계를 알 수 없다"
 
     # ③ 기준등급 로트는 있다 — 여기까지 왔다면 없는 것은 **값**이다.
     if not has_limit and all(lot.get("shelf_life_days") is None for lot in graded):
         return _SHELF_DAYS_MISSING_KEY
-    return f"{top_grade} 등급 로트의 상품 한계일을 읽지 못했다"
+    return f"{top_grade} 등급 로트의 운영 보관한계를 읽지 못했다"
 
 
 def near_term_demand_kg(

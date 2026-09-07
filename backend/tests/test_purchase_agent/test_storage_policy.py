@@ -21,6 +21,7 @@ from app.purchase_agent.nodes.allocate_sourcing import (
     top_grade_operational_days,
 )
 from app.purchase_agent.state import build_initial_state
+from tests.test_purchase_agent._ast_helpers import code_string_literals
 
 SPREAD_WIDE = date(2026, 9, 11)
 ITEM = "배추"
@@ -87,7 +88,7 @@ def test_items_outside_our_scope_are_ignored(item: str, days: int) -> None:
 
 
 def test_shelf_days_use_the_policy_of_this_item() -> None:
-    """상품 한계일이 **이 품목의** ``operational_limit_days`` 로 온다.
+    """운영 보관한계가 **이 품목의** ``operational_limit_days`` 로 온다.
 
     등급을 특정할 수 있어야 하므로 로트에 ``grade`` 를 준다 — 실물은 None 이라 여기까지
     오지 못하고, 그 상태는 아래 사유 검사가 따로 잠근다.
@@ -319,7 +320,7 @@ def test_bad_medium_grade_factor_falls_back_instead_of_distorting(bad: object) -
     """🟡 **Codex 지적 재현.** 범위 밖 계수는 폴백으로 보내고 **고지한다.**
 
     ``0``·음수는 폴백도 고지도 없이 중품 배분을 0으로 만들었고, ``1`` 초과는 중품
-    소진 한계를 상품 한계일보다 길게 만들어 개념을 뒤집었다.
+    소진 한계를 운영 보관한계보다 길게 만들어 개념을 뒤집었다.
     """
     constraints = load_constraints()
     inventory = {"item_storage_policies": [
@@ -439,3 +440,41 @@ def test_the_docstring_does_not_call_it_a_shelf_life_limit() -> None:
         "그 값은 회전목표다 (물류 페르소나 05 §8.1)"
     )
     assert "상품 한계일이 아니다" in doc, "정정 문장이 사라졌다 — 왜 아닌지가 근거다"
+
+
+def test_the_screen_wording_does_not_say_shelf_life_limit() -> None:
+    """🔴 **화면에 나가는 문구가 다시 "상품 한계일" 이 되면 운다.**
+
+    ``__doc__`` 을 재는 위 검사와 **축이 다르다.** 저쪽은 우리끼리 읽는 산문이고
+    여기는 ``rationale``·``risks`` 로 **사람 화면에 뜨는 글자**다. 틀린 이름이 화면에
+    있으면 읽는 사람이 *"이 물건은 10일이면 상한다"* 로 이해한다 — 그 값은 회전목표라
+    **회사가 언제든 바꾸는 숫자**다.
+
+    🔴 **파일을 문자열로 훑지 않는다** (`260905_기록을_읽는_법` ⑦). ``ast`` 로
+    **코드가 실제로 쓰는 문자열 리터럴**만 센다 — 그러면 docstring 과 주석이 저절로
+    빠지고, 다음 사람이 설명하려고 그 낱말을 적어도 안 깨진다.
+
+    ⚠️ 돌려서 재지 않는 이유: 문구가 **분기마다 다른 문자열**이라 한 번 실행으로는
+    다섯 갈래를 다 못 밟는다. f-string 의 고정 부분은 ``Constant`` 로 남아 잡힌다.
+
+    ★ **부정문은 통과시킨다** — ``상품 한계일이 아니다`` 는 정정이라 남아야 한다
+      (위 검사와 같은 이유). 지금은 둘 다 docstring 에만 있어 애초에 안 걸리지만,
+      코드 문자열로 옮겨 적는 날을 위해 조건을 적어 둔다.
+    """
+    from pathlib import Path
+
+    import app.purchase_agent.nodes.allocate_sourcing as alloc
+    import app.purchase_agent.nodes.package_scenarios as pkg
+
+
+    offenders = []
+    for module in (alloc, pkg):
+        path = Path(module.__file__)
+        for text in code_string_literals(path):
+            if "상품 한계일" in text and "상품 한계일이 아니다" not in text:
+                offenders.append(f"{path.name}: {text!r}")
+
+    assert not offenders, (
+        "화면 문구가 회전목표를 '상품 한계일' 이라고 부른다 "
+        "(물류 페르소나 05 §8.1 · 2026-09-07):\n  " + "\n  ".join(offenders)
+    )

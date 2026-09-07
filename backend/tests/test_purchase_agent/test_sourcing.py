@@ -115,9 +115,9 @@ def test_near_delivery_takes_mid_grade_but_far_delivery_does_not() -> None:
 
 
 def test_mid_grade_shelf_days_comes_from_the_top_grade_lot() -> None:
-    """중품 소진 한계 6일 = 상품 한계일 10일 × 0.6 (상세설계 §7 임계표).
+    """중품 소진 한계 6일 = 운영 보관한계 10일 × 0.6 (상세설계 §7 임계표).
 
-    "상품 한계일"의 출처는 재고 로트다 — §7이 값을 주지 않아 추론한 것이고,
+    "운영 보관한계"의 출처는 재고 로트다 — §7이 값을 주지 않아 추론한 것이고,
     그 추론이 §4-⑤ 예시의 6일과 맞는지가 여기서 확인된다.
     """
     constraints = load_constraints()
@@ -194,7 +194,7 @@ def test_grade_pair_is_read_from_constraints(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert {line["grade"] for line in allocate_sourcing(state)["sourcing_plan"]} == {"상"}
 
-    # ② 기준등급만 특으로 → 보유 로트가 상 등급뿐이라 상품 한계일을 못 재고 배분이 막힌다.
+    # ② 기준등급만 특으로 → 보유 로트가 상 등급뿐이라 운영 보관한계를 못 재고 배분이 막힌다.
     #    코드가 "상"을 박고 있으면 종전대로 중품이 실린다.
     top_swapped = load_constraints()
     top_swapped["allocation"]["reference_grade"] = "특"
@@ -294,7 +294,7 @@ def test_score_flips_sign_on_the_freshness_risk() -> None:
 def test_widened_spread_alone_does_not_adopt_mid_grade() -> None:
     """스프레드가 확대돼도 **스코어가 음수면 채택하지 않는다** — 두 게이트의 AND.
 
-    상품 한계일을 2일로 낮춰 신선도 리스크만 키운다. 시세는 9/11 그대로다.
+    운영 보관한계를 2일로 낮춰 신선도 리스크만 키운다. 시세는 9/11 그대로다.
     """
     state = _staged(as_of=SPREAD_WIDE)
     state["inventory"]["lots"][0]["shelf_life_days"] = 2
@@ -322,14 +322,14 @@ def test_positive_score_alone_does_not_adopt_mid_grade() -> None:
 
 
 def test_missing_top_grade_lot_blocks_the_allocation_instead_of_guessing() -> None:
-    """상 등급 로트가 없으면 상품 한계일을 모른다 — 중품 배정을 하지 않고 사유를 남긴다."""
+    """상 등급 로트가 없으면 운영 보관한계를 모른다 — 중품 배정을 하지 않고 사유를 남긴다."""
     state = _staged(as_of=SPREAD_WIDE)
     state["inventory"]["lots"] = []
     assert top_grade_operational_days(state["inventory"], "상", ITEM) is None
 
     decision = evaluate_mid_grade(state, load_constraints())
     assert decision["ratio"] == 0
-    assert "상품 한계일" in decision["blocked_by"]
+    assert "운영 보관한계" in decision["blocked_by"]
 
     state.update(split_plan(state))
     state.update(allocate_sourcing(state))
