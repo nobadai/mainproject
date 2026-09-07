@@ -170,7 +170,7 @@ section("[A] 오케스트레이터 — 기존 파이프라인 회귀")
 
 from fixtures import CASES
 
-from app.orchestrator.band import clip_all, combine_band
+from app.master.band import clip_all, combine_band
 
 for name, case in CASES.items():
     replies = case["replies"]
@@ -423,8 +423,8 @@ from app.contracts.core import (
     CycleBState,
     PipelineState,
 )
-from app.orchestrator.band import check_occupancy_detailed
-from app.orchestrator.cycle import CycleHooks, build_commitment, run_day
+from app.master.band import check_occupancy_detailed
+from app.master.cycle import CycleHooks, build_commitment, run_day
 
 _REPLIES_STD = _std_replies()
 
@@ -557,9 +557,9 @@ from fixtures_cycle_b import (
 )
 from run_day_stub import _hooks_a, _hooks_b
 
-from app.orchestrator.graph import node_t3_combine
-from app.orchestrator.graph_b import build_cycle_b_hooks
-from app.orchestrator.outbound import (
+from app.master.cycle_graph import node_t3_combine
+from app.master.cycle_graph_b import build_cycle_b_hooks
+from app.master.outbound import (
     clip_allocations,
     combine_outbound_band,
     detect_allocation_collapse,
@@ -655,7 +655,7 @@ from app.contracts.core import (
     OutboundLeg,
     SalesFacts,
 )
-from app.orchestrator.outbound import clip_allocation
+from app.master.outbound import clip_allocation
 
 # ── HOLD 는 출고가 아니다 (§5) ──────────────────────────────────
 _legs = (
@@ -918,7 +918,7 @@ ok(
 
 section("\n[B-16] 부서당 1회 회신 — 회송은 T1 만 다시 돈다 (§3.1 · §3.6.1)")
 
-from app.orchestrator.cycle import run_subcycle
+from app.master.cycle import run_subcycle
 
 
 def _count_calls(n_retry: int, critic_route=None):

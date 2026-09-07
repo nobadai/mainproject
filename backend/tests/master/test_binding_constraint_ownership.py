@@ -54,7 +54,7 @@ def _purchase_cap_keys() -> tuple[str, ...]:
 
 def _band_binding_axes() -> tuple[str, ...]:
     """`band` 가 `binding_constraints` 에 넣는 축 이름."""
-    tree = ast.parse((_BACKEND / "app" / "orchestrator" / "band.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_BACKEND / "app" / "master" / "band.py").read_text(encoding="utf-8"))
     out: list[str] = []
     for node in ast.walk(tree):
         if (
@@ -256,7 +256,7 @@ def test_밴드_축은_어휘를_닫을_수_없다():
 
     이것이 두 어휘를 합칠 수 없는 기술적 이유다.
     """
-    source = (_BACKEND / "app" / "orchestrator" / "band.py").read_text(encoding="utf-8")
+    source = (_BACKEND / "app" / "master" / "band.py").read_text(encoding="utf-8")
 
     assert 'f"cap_by_date.{' in source, (
         "cap_by_date 축이 날짜를 안 붙인다 — 그러면 어휘를 닫을 수 있고 "

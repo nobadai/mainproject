@@ -29,7 +29,7 @@ from datetime import timedelta
 from fixtures import AS_OF, FIXTURE_ITEMS, make_snapshot
 
 from app.contracts.core import Band, ClipResult, SplitLeg
-from app.orchestrator.band import check_occupancy_detailed
+from app.master.band import check_occupancy_detailed
 
 D2 = AS_OF + timedelta(days=2)
 D5 = AS_OF + timedelta(days=5)

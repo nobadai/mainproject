@@ -27,16 +27,17 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
 
 from app.contracts.core import Evidence
-from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
-from app.critic.service import run_critic_procurement
 from app.master.critic_bridge import CriticSkipped, build_request, fold
 from app.master.envelope import ENVELOPE_META_KEYS, AgentName
 from app.master.plan import ExecutionPlan
+
+if TYPE_CHECKING:  # 🔴 런타임에 들이면 순환이 된다 — `critic_bridge.py` 의 설명과 같다.
+    from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 
 
 class CriticPort(Protocol):
@@ -44,6 +45,20 @@ class CriticPort(Protocol):
     검증 Tool 이 도메인 구현에 직접 묶이면 Critic 이 바뀔 때 마스터가 흔들린다."""
 
     def __call__(self, req: CriticProcurementRequest) -> CriticVerdictOut: ...
+
+
+def _default_critic(req: CriticProcurementRequest) -> CriticVerdictOut:
+    """기본 Critic — `app.critic.service.run_critic_procurement` 을 부를 때 들인다.
+
+    🔴 **모듈 최상단에서 들이면 순환이 된다** (2026-09-07 · `critic_bridge.py` 참조).
+
+    ★ **`None` 을 기본값으로 쓸 수 없다.** `critic=None` 은 *"Critic 을 돌리지
+      않았다"* 는 뜻이고 그 사실이 `skipped` 에 남는다. 기본값과 뜻이 다르므로
+      센티넬로 못 쓴다 — 그래서 함수 하나를 세운다.
+    """
+    from app.critic.service import run_critic_procurement
+
+    return run_critic_procurement(req)
 
 
 @dataclass(frozen=True)
@@ -250,7 +265,7 @@ class MasterVerifier:
     def __init__(
         self,
         required_advisors: tuple[AgentName, ...] = ("finance", "inventory"),
-        critic: CriticPort | None = run_critic_procurement,
+        critic: CriticPort | None = _default_critic,
     ):
         self.required_advisors = required_advisors
         self.critic = critic

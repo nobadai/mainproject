@@ -3,7 +3,11 @@
 #   사이클 B 조립. 판매가 2차 MVP 라 1차 범위 밖이다.
 #   ⚠️ `test_critic_v0_4.py` 와 `run_day_stub.py` 가 `build_cycle_b_hooks` 를 쓴다.
 # ─────────────────────────────────────────────────────────────────────────────
-"""
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 옮겨 온 사이클 묶음을 한 이름 아래 모으려고 붙였다.**
+  마스터의 Flow 골격과 섞이지 않게 한다.
+
 graph_b.py — 사이클 B 파이프라인 S1→H2 (담당: 이현서)
 
 ═══════════════════════════════════════════════════════════════════════
@@ -43,8 +47,8 @@ from app.contracts.core import (
     T0Snapshot,
     T2Reply,
 )
-from app.orchestrator.cycle import CycleHooks
-from app.orchestrator.outbound import (
+from app.master.cycle import CycleHooks
+from app.master.outbound import (
     clip_allocations,
     combine_outbound_band,
     detect_allocation_collapse,

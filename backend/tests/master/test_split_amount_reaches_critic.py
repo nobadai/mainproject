@@ -3,13 +3,13 @@
 🔴 **이 파일이 재는 것은 판정 규칙이 아니라 통로다.**
 
 `#265` 가 `check_triple_identity` 에 split 금액 변을 세웠고 그 판정은 이미
-`tests/orchestrator/test_split_amount_identity.py` 가 잰다. 여기서 그것을 다시 재면
+`tests/master/test_split_amount_identity.py` 가 잰다. 여기서 그것을 다시 재면
 안 된다 - 같은 사실의 주인이 둘이 된다.
 
 여기서 재는 것은 **그 함수까지 값이 닿는가** 다. 통로가 셋이다.
 
 ```text
-① orchestrator/schemas.py   SplitLegIn.amount_krw
+① master/cycle_schemas.py   SplitLegIn.amount_krw
 ② master/critic_bridge.py   스칼라에 실행 품목 이름표를 붙여 나른다
 ③ critic/service.py         _to_scenario 가 SplitLeg 에 넘긴다
 ```
@@ -31,9 +31,9 @@ from pydantic import ValidationError
 
 from app.critic.service import _to_scenario
 from app.master import critic_bridge as bridge
+from app.master.cycle_schemas import SplitLegIn
 from app.master.plan import ExecutionPlan
 from app.master.verifier import MasterVerifier, VerificationContext
-from app.orchestrator.schemas import SplitLegIn
 from tests.master.test_critic_bridge import CONSTRAINTS, EVIDENCES, _proposal, _scenario
 
 AS_OF = date(2025, 12, 31)

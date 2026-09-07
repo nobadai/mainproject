@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.critic.llm.schemas import LLMResponseFields
 
 # 매입/판매 후보 입력 계약은 오케와 공유한다 (같은 것을 두 벌 정의하지 않는다).
-from app.orchestrator.schemas import AllocationIn, ScenarioIn
+from app.master.cycle_schemas import AllocationIn, ScenarioIn
 
 Dept = Literal["sales", "inventory", "finance"]
 CriticStatus = Literal["PASS", "CONCERN", "FAIL"]

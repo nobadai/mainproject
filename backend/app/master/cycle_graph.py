@@ -3,7 +3,11 @@
 #   T1~T4 노드와 훅 조립. 마스터가 호출 순서를 정하는 구조에서는 자리가 없다.
 #   ⚠️ `test_critic_v0_4.py` 가 `node_t3_combine` 을 쓴다. cycle.py 와 함께 3단계에서 제거.
 # ─────────────────────────────────────────────────────────────────────────────
-"""
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 옮겨 온 사이클 묶음을 한 이름 아래 모으려고 붙였다.**
+  마스터의 Flow 골격과 섞이지 않게 한다.
+
 graph.py — 일일 파이프라인 T0→T4 (담당: 이현서)
 
 ★ 이 파일의 목적은 "끝에서 끝까지 한 바퀴 도는 것"이다 (계약서 §11).
@@ -11,7 +15,7 @@ graph.py — 일일 파이프라인 T0→T4 (담당: 이현서)
   "내 함수가 어디에 꽂히는지"를 눈으로 보게 되고, 그때부터 질문의 질이 달라진다.
 
 노드는 전부 `def node(state: PipelineState) -> PipelineState` 시그니처다.
-LangGraph 로 옮길 때 배선만 바꾸면 된다 (graph_langgraph.py 참조).
+LangGraph 로 옮길 때 배선만 바꾸면 된다.
 
 ★★ 노드 시그니처에 session 인자가 없다.
    이것이 계약서 §5.1("오케스트레이터는 원본 DB를 읽지 않는다")의 구현체다.
@@ -32,7 +36,7 @@ from app.contracts.core import (
     T0Snapshot,
     T2Reply,
 )
-from app.orchestrator.band import (
+from app.master.band import (
     build_feedback,
     check_occupancy_detailed,
     clip_all,

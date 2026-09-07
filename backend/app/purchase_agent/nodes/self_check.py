@@ -310,9 +310,10 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
         ㄷ. dataclass 셋을 지어내야 부를 수 있다 — ``ClipResult``·``Band``·``T0Snapshot``.
             ``T0Snapshot`` 만 해도 forecasts·spot_price·finance·budget 을 요구하는데
             이 검사와 무관하다. **가짜 값을 채워야 부를 수 있는 함수는 공용 모듈이 아니다.**
-        ㄹ. 소유가 저쪽이다 — band.py 를 import 하는 것은 critic/* 과 orchestrator/graph
-            뿐이고, ``tests/master/test_no_orchestrator_runtime.py`` 는 마스터에 대해
-            ``app.orchestrator.band`` 를 금지 목록에 올려 뒀다.
+        ㄹ. 소유가 저쪽이다 — band.py 를 import 하는 것은 critic/* 과 사이클 그래프
+            뿐이다. 2026-09-07 에 그 파일이 ``app/orchestrator/band.py`` 에서
+            ``app/master/band.py`` 로 옮겨졌고, 주인이 마스터로 바뀌었을 뿐
+            **매입이 부를 자리가 아니라는 것은 그대로다.**
 
       🔴 **ㄱ이 풀리고 #181 이 닫혀도 결론은 그대로다** — ㄴ·ㄷ·ㄹ 이 남는다. 셋 다
         *"부를 수는 있는데 부르기 위해 없는 것을 지어내야 한다"* 는 같은 성질이고,

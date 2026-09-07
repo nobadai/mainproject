@@ -19,9 +19,9 @@ from fixtures_cycle_b import (
     make_sales_facts,
 )
 
-from app.orchestrator.band import clip_all, combine_band, detect_deadlock
-from app.orchestrator.cycle import CycleHooks, run_day
-from app.orchestrator.graph_b import build_cycle_b_hooks
+from app.master.band import clip_all, combine_band, detect_deadlock
+from app.master.cycle import CycleHooks, run_day
+from app.master.cycle_graph_b import build_cycle_b_hooks
 
 BAR = "=" * 78
 

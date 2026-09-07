@@ -3,7 +3,7 @@
 🔴 **실측 2026-09-01 — 오케 경로가 품목을 없애고 있었다.**
 
 ```python
-# orchestrator/cycle.py:311
+# master/cycle.py:311
 ArrivalLeg(qty_kg=sum(leg.qty_kg.values()), ...)      # ← 품목이 여기서 사라진다
 ```
 
@@ -11,7 +11,7 @@ ArrivalLeg(qty_kg=sum(leg.qty_kg.values()), ...)      # ← 품목이 여기서 
 났다 (물류 질의 §1).
 
 ★ **오케를 부르지 않고 마스터가 만든다** (지시 2026-09-01 · ⓐ).
-  `tests/master/test_no_orchestrator_runtime.py` 가 그 방향을 잠근다.
+  `tests/master/test_orchestrator_is_gone.py` 가 그 방향을 잠근다.
 """
 
 from __future__ import annotations
@@ -182,8 +182,23 @@ def test_bool_은_숫자가_아니다():
 # ---------------------------------------------------------------------------
 
 
+#: 옛 `app/orchestrator/` 에서 마스터로 옮겨 온 사이클 모듈들 (2026-09-07 · 지시).
+#: 폴더가 없어졌다고 이 검사의 뜻이 없어지지 않는다 — 같은 변환을 저기서 가져오지
+#: 않는다는 주장이고, 이름만 새 자리로 바뀌었다.
+_CYCLE_MODULES = (
+    "app.master.band",
+    "app.master.outbound",
+    "app.master.cycle",
+    "app.master.cycle_graph",
+    "app.master.cycle_graph_b",
+    "app.master.cycle_schemas",
+    "app.master.cycle_persistence",
+    "app.master.cycle_run_repository",
+)
+
+
 def test_오케를_import_하지_않는다():
-    """★ ⓐ 의 요지 — 같은 변환을 오케에서 가져오지 않는다."""
+    """★ ⓐ 의 요지 — 같은 변환을 사이클 모듈에서 가져오지 않는다."""
     import ast
     from pathlib import Path
 
@@ -194,7 +209,7 @@ def test_오케를_import_하지_않는다():
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
     }
 
-    assert not any(m.startswith("app.orchestrator") for m in modules), modules
+    assert not any(m in _CYCLE_MODULES for m in modules), modules
 
 
 # ---------------------------------------------------------------------------

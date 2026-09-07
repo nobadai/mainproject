@@ -30,7 +30,7 @@ from __future__ import annotations
 import pytest
 
 from app.contracts.core import VARIANT_SPREAD_MIN, ClipResult, SplitLeg
-from app.orchestrator.band import detect_collapse_type, detect_variant_collapse
+from app.master.band import detect_collapse_type, detect_variant_collapse
 
 
 def _r(scenario_id: str, qty: float, legs: list[tuple[int, float]]) -> ClipResult:

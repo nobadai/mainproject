@@ -1,4 +1,9 @@
-"""오케스트레이터 API 요청·응답 스키마.
+"""★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
+
+⚠️ **`cycle_` 는 이름이 겹쳐서 붙였다** — `app/master/schemas.py` 가 이미 있다.
+  그대로 옮기면 덮어쓴다.
+
+오케스트레이터 API 요청·응답 스키마.
 
 ★ 오케스트레이터는 원본 DB 를 직접 읽지 않는다 (§5.1). 모든 입력은 요청 본문으로 온다 —
   부서 회신(밴드 기여)·매입/판매 후보를 받아 T3(매입)·S3(판매) 결합·클리핑을 수행한다.
@@ -11,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.orchestrator.llm.schemas import LLMResponseFields
+from app.master.cycle_llm.schemas import LLMResponseFields
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
 Dept = Literal["sales", "inventory", "finance"]

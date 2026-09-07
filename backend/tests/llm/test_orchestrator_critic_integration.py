@@ -2,6 +2,12 @@
 
 Finance / Logistics 통합테스트와 같은 방식이다 — Provider 를 실패시켜 놓고
 결정론 결과가 그대로 남는지 본다. 네트워크에 나가지 않는다.
+
+★ **2026-09-07 에 사이클 쪽 셋이 빠졌다** (`test_context_carries_no_quantities` ·
+  `test_core_survives_when_ollama_is_down` · `test_disabled_llm_keeps_deterministic_ranking`).
+  셋 다 `interpretation.py` 를 불렀는데, 그 파일은 **앱 참조가 0건**이라 폴더를
+  마스터로 옮기면서 지웠다. 자기 테스트만 부르는 코드를 남기면 안 쓰는 코드가
+  초록불로 살아 있는 모양이 된다.
 """
 
 from datetime import date
@@ -9,10 +15,7 @@ from datetime import date
 from app.critic.llm.judge import JudgeRunner
 from app.critic.llm.runtime import JudgeService, get_llm_settings
 from app.critic.llm.runtime import LLMSettings as CriticLLMSettings
-from app.orchestrator.interpretation import build_orchestrator_context, enrich_orchestrator_response
-from app.orchestrator.llm.runtime import LLMSettings as OrchestratorLLMSettings
-from app.orchestrator.llm.runtime import SelectionService
-from app.orchestrator.schemas import BandOut, ClipResultOut, ProcurementResponse
+from app.master.cycle_schemas import BandOut, ClipResultOut, ProcurementResponse
 
 _LLM_FIELDS = {
     "interpretation",
@@ -28,20 +31,6 @@ class FailingProvider:
     def generate(self, context, *, retry_guidance=None):
         del context, retry_guidance
         raise RuntimeError("ollama unavailable")
-
-
-def _failing_selection_service() -> SelectionService:
-    return SelectionService(
-        OrchestratorLLMSettings(
-            enabled=True,
-            provider="ollama",
-            model="gemma3:4b",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=1,
-            max_retries=1,
-        ),
-        FailingProvider(),
-    )
 
 
 def _failing_judge_service() -> JudgeService:
@@ -111,47 +100,6 @@ def test_default_response_is_disabled_not_crashing():
     assert response.llm_status == "DISABLED"
     assert response.llm_attempts == 0
     assert response.interpretation.ranked_scenario_ids == []
-
-
-def test_context_carries_no_quantities():
-    """Context 에 수량·금액이 실리면 안 된다 — 라벨과 코드만 넘긴다."""
-    context = build_orchestrator_context(_procurement_response())
-    dumped = context.model_dump_json()
-    assert "5000" not in dumped
-    assert "4000" not in dumped
-    assert [c.clip_magnitude for c in context.candidates] == ["FULL", "MAJOR_CLIP"]
-
-
-def test_core_survives_when_ollama_is_down():
-    """★ LLM 이 죽어도 밴드·클리핑·순위는 그대로다."""
-    original = _procurement_response()
-    enriched = enrich_orchestrator_response(original, _failing_selection_service())
-
-    assert enriched.llm_status == "FALLBACK"
-    assert enriched.llm_fallback_used is True
-    assert enriched.llm_model == "gemma3:4b"
-    # Core 결과 무손실
-    assert enriched.ranked_ids == original.ranked_ids
-    assert enriched.recommended_id == original.recommended_id
-    assert enriched.band == original.band
-    assert enriched.clip_results == original.clip_results
-
-
-def test_disabled_llm_keeps_deterministic_ranking():
-    service = SelectionService(
-        OrchestratorLLMSettings(
-            enabled=False,
-            provider="ollama",
-            model="gemma3:4b",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=1,
-            max_retries=1,
-        ),
-        FailingProvider(),
-    )
-    enriched = enrich_orchestrator_response(_procurement_response(), service)
-    assert enriched.llm_status == "DISABLED"
-    assert enriched.ranked_ids == ["SCN-1", "SCN-2"]
 
 
 # --- Critic -------------------------------------------------------------------

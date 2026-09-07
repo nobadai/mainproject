@@ -7,14 +7,14 @@ import json
 
 import pytest
 
-from app.orchestrator.llm.runtime import (
+from app.master.cycle_llm.runtime import (
     LLMSettings,
     SelectionService,
     SelectionValidationError,
     ValidationIssue,
     validate_selection,
 )
-from app.orchestrator.llm.schemas import CandidateContext, SanitizedLLMContext
+from app.master.cycle_llm.schemas import CandidateContext, SanitizedLLMContext
 
 DETERMINISTIC = ["SCN-2", "SCN-1"]
 
@@ -219,7 +219,7 @@ class _StubState:
 
 
 def test_graph_selector_uses_llm_order():
-    from app.orchestrator.llm.selector import make_selector
+    from app.master.cycle_llm.selector import make_selector
 
     provider = _StubProvider(_payload(["SCN-2", "SCN-1"]))
     selector = make_selector(SelectionService(_settings(), provider))
@@ -231,7 +231,7 @@ def test_graph_selector_uses_llm_order():
 
 def test_graph_selector_survives_llm_failure():
     """그래프가 LLM 때문에 멈추면 안 된다 — 후보 순서를 그대로 돌려준다."""
-    from app.orchestrator.llm.selector import make_selector
+    from app.master.cycle_llm.selector import make_selector
 
     provider = _StubProvider(RuntimeError("down"), RuntimeError("down"))
     selector = make_selector(SelectionService(_settings(), provider))

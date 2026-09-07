@@ -15,15 +15,15 @@ from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
+from app.logistics.cancellation import LogisticsCancellationAdapter
 from app.logistics.day_open import LogisticsDayOpening
 from app.logistics.inbound_execution import LogisticsInboundExecution
-from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.router import router as logistics_router
+from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.transition import LogisticsTransitionAdapter
-from app.logistics.cancellation import LogisticsCancellationAdapter
 from app.master.cancellation import register_cancellation
-from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.day_open import register_day_opening
+from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.inbound import register_inbound
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
@@ -239,11 +239,20 @@ app.include_router(sales_router)
 #   쓰는 실행이력이고, `agent` 축이 셋을 구분한다. 과거 행(agent='orchestrator'
 #   21건)은 그때 실제로 있었던 일이라 지우거나 옮기지 않는다.
 #
-#   🔴 **`app/orchestrator/` 폴더도 남는다.** `contracts_core.py` 는 재무·물류·
-#   매입·Critic·마스터가 전부 쓰는 **공용 계약**이다 (`Evidence`·`EndCode`·
-#   `ContractViolation`). 폴더 이름만 오케일 뿐 내용은 공용이라, 중립 위치로
-#   옮기는 것은 저장소 전체의 import 를 건드리는 별도 작업이다
-#   (`docs/260830_오케_Critic_정리안.md`).
+#   🟢 **`app/orchestrator/` 폴더는 2026-09-07 에 없어졌다** (지시).
+#
+#   전에는 이 자리에 *"폴더도 남는다 — `contracts_core.py` 가 다섯 파트의 공용
+#   계약이라 중립 위치로 옮기는 것은 저장소 전체의 import 를 건드리는 별도 작업"*
+#   이라고 적어 뒀다. 그 별도 작업이 두 판에 걸쳐 끝났다.
+#
+#   ```text
+#   2026-09-03  공용 계약 → app/contracts/core.py   (재수출 shim 을 남겨 파트별 이전)
+#   2026-09-07  나머지 전부 → app/master/           (shim 을 닫고 폴더를 지웠다)
+#   ```
+#
+#   ⚠️ **표는 그대로다** — 위 문단의 `orchestrator_agent_runs` 는 안 건드렸다.
+#   코드 경로만 옮겼다. `tests/master/test_orchestrator_is_gone.py` 가 폴더가
+#   돌아오지 못하게 잠근다.
 
 
 @app.get("/health")

@@ -16,13 +16,13 @@ from decimal import Decimal
 from math import isfinite
 from typing import Any
 
+from app.contracts.core import Evidence
 from app.master.envelope import (
     AgentReply,
     AgentRequest,
     ExecutionMetadata,
     LLMStatus,
 )
-from app.orchestrator.contracts_core import Evidence
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import (
     ThresholdNotDeclared,

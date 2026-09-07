@@ -18,11 +18,11 @@ from datetime import date
 
 import pytest
 
+from app.contracts.core import SuggestedAdjustment
 from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 from app.master.flow import ProcurementFlow
 from app.master.ports import AgentRegistry
 from app.master.runner import MasterRunner
-from app.orchestrator.contracts_core import SuggestedAdjustment
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import build_state, purchase_port
 
