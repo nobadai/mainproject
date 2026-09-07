@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import 개장_정본_이름을_가져간_모듈들, 진짜_개장_정본_함수
+from 개장정본_격리 import 개장_정본_이름을_가져간_모듈들, 진짜_개장_정본_함수
 
 
 @pytest.mark.parametrize("이름", sorted(진짜_개장_정본_함수))
