@@ -32,12 +32,22 @@
 
 ---
 
-🔴 **세 번째로 잠그는 것 — 아직 못 가는 자리를 못 간다고 적는다.**
+🔴 **세 번째로 잠그는 것 — 지금 어디까지 가는가.**
 
-경로는 `finance / SALES_VALIDATION` 앞에서 멈춘다. 판매 배선 탓이 아니라 **마스터가
-실어 보내는 payload 에 `business_mode` 최상위 칸이 없어서**다 (`service.py`
-`_sales_user_request` 가 그 사실을 이미 적어 두었다). 아래 ③ 블록이 그 자리를 이름으로
-적는다 — **고쳐지는 날 빨간불이 나서** 이 파일이 따라 늘어야 한다는 것을 알린다.
+`#373` 이 이 블록에 *"경로는 `finance / SALES_VALIDATION` 앞에서 멈춘다"* 를 못 박고
+**이어지는 날 빨간불이 나게** 적어 두었다. `#377` 이 정확히 그것을 이었다 —
+`business_mode` 를 최상위로 나르고 `requested_quantity_kg` 를 넓혔다. 예고대로 빨개졌고,
+아래 ③ 이 **새 도달점**으로 늘어난 자리다.
+
+```text
+#337 이전   SL4_NOT_STARTED   어댑터 미등록 — 부서를 한 번도 안 부른다
+#373 시점   SL2_NO_CANDIDATE  validation_errors=['business_mode'] — 문 앞에서 거부
+지금(#377)  수량 없이         SL2_NO_CANDIDATE · PROPOSAL_QUANTITY_REQUIRED
+            수량과 함께       SL1_PRESENTED · 후보 3안 · finance 를 후보마다 부른다
+```
+
+★ **갈래가 둘이다.** 앞은 *"판매가 무엇이 없어서 못 냈는지 말한다"* 를, 뒤는 *"경로가
+  재무까지 간다"* 를 증명한다. 뒤엣것이 이 파이프라인이 **처음 끝까지 도는 자리**다.
 """
 
 from __future__ import annotations
@@ -145,7 +155,11 @@ def client() -> TestClient:
     return TestClient(app.main.app)
 
 
-def _본문(client: TestClient) -> dict[str, Any]:
+def _본문(client: TestClient, **추가: Any) -> dict[str, Any]:
+    """기본 요청은 **수량 없이** 던진다 — 자유 문장만 실린 날이 기본값이다.
+
+    ★ `requested_quantity_kg=...` 를 얹으면 재무까지 가는 갈래가 된다 (아래 ③).
+    """
     r = client.post(
         "/master/sales/run",
         json={
@@ -155,6 +169,7 @@ def _본문(client: TestClient) -> dict[str, Any]:
             "item": "배추",
             "user_request": "배추 2톤 다음 주에",
             "partner_id": "P-1",
+            **추가,
         },
     )
     assert r.status_code == 200, r.text
@@ -222,38 +237,94 @@ def test_이력에_돌긴_돈_날로_적힌다(client: TestClient, 부른_부서
 
 
 # ---------------------------------------------------------------------------
-# 3. 🔴 못 가는 자리 — **경로는 재무 앞에서 멈춘다**
+# 3. 🔴 도달점 — **수량 없이 어디서 멈추고, 수량과 함께 어디까지 가는가**
 # ---------------------------------------------------------------------------
 
 
-def test_재무_최종검증까지는_아직_못_간다(client: TestClient, 부른_부서) -> None:
-    """🔴 **판매 배선 탓이 아니다 — 마스터가 `business_mode` 를 안 실어 보낸다.**
+def test_수량이_없으면_판매가_무엇이_없는지_말한다(client: TestClient, 부른_부서) -> None:
+    """🔴 **못 냈다는 사실이 아니라 *무엇이 없어서* 못 냈는지가 잠글 값이다** (실측 #377).
 
-    `SalesProposalInput.business_mode` 는 **최상위 필수 칸**인데 마스터 payload 에는
-    그 칸이 없다 (`sales_flow._proposal_input` · `service._sales_user_request` 가 그
-    사실을 이미 적어 두었다). 그래서 실 어댑터가 문 앞에서 `ValidationError` 로
-    돌아서고, 후보가 0이라 `finance / SALES_VALIDATION` 까지 못 간다.
+    자유 문장(`user_request`)만 실린 요청은 판매가 수량을 못 읽는다 — `raw_text` 를
+    해석해 수량을 뽑지 않기 때문이다 (`service._sales_user_request` 가 그 사실을
+    적어 두었다). 그래서 후보가 0이고 `finance / SALES_VALIDATION` 까지 안 간다.
 
     ```text
-    마스터가 보내는 것            ERROR              validation_errors=['business_mode']
-    + business_mode              RUNTIME_NOT_READY  PROPOSAL_QUANTITY_REQUIRED
-    + user_request.requested_quantity_kg  READY     후보 3안 · FINANCIAL_VALIDATION 요구
+    end_code   SL2_NO_CANDIDATE
+    judgment   status=INPUT_INCOMPLETE · missing_data=['PROPOSAL_QUANTITY_REQUIRED']
+    후보       0안
+    부른 부서   inventory / PRE_SALES 하나 (재무는 안 부른다)
     ```
 
-    ⚠️ **이 검사는 그 자리가 이어지는 날 빨간불이다.** 그것이 의도다 — 고치는 사람이
-      **이 파일도 같이 늘려야 한다**는 것을 여기서 알게 된다. 지금 `SL1` 을 기대하도록
-      적어 두면 배선이 빠진 채로 초록이 뜬다.
+    ★ **`missing_capabilities` 는 안 잠근다.** 셋(`SELLABLE_SUPPLY_CONTEXT` ·
+      `DELIVERY_FEASIBILITY_CONTEXT` · `FINANCIAL_VALIDATION`)은 **두 갈래 모두**에
+      실려 나와 갈래를 가르지 못한다 — 갈래를 가르는 칸은 `missing_data` 다.
+
+    ⚠️ **판매가 `raw_text` 에서 수량을 뽑기 시작하면 이 검사가 빨개진다.** 그날은
+      `missing_data` 가 비고 아래 재무 갈래와 같은 도달점이 된다 — 그러면 이 검사를
+      *"수량을 아예 말하지 않은 요청"* 으로 다시 세우거나 지운다.
     """
     본문 = _본문(client)
 
     assert 본문["end_code"] == "SL2_NO_CANDIDATE", (
-        f"판매 경로가 여기서 안 멈춘다: {본문['end_code']}. "
-        "business_mode 최상위 칸이 이어졌다면 이 검사와 위 블록을 같이 늘리고, "
+        f"수량 없는 요청이 여기서 안 멈춘다: {본문['end_code']}. "
+        "판매가 자유 문장에서 수량을 뽑기 시작했다면 이 검사를 다시 세우고, "
         "SL4 라면 app/main.py 의 등록이 사라진 것이다"
     )
-    assert 본문["judgment"] == {"validation_errors": ["business_mode"]}, (
-        f"실 어댑터가 낸 계약 오류가 아니다: {본문['judgment']}"
+    assert 본문["judgment"]["status"] == "INPUT_INCOMPLETE", (
+        f"판매가 '입력이 모자란다' 고 말하지 않는다: {본문['judgment'].get('status')}"
     )
+    assert 본문["judgment"]["missing_data"] == ["PROPOSAL_QUANTITY_REQUIRED"], (
+        f"판매가 없다고 말한 것이 수량이 아니다: {본문['judgment']['missing_data']}. "
+        "판매가 요구하는 칸이 늘었다면 마스터가 나를 칸도 늘어야 한다 "
+        "(SalesRunRequest · service._sales_user_request)"
+    )
+    assert 본문["candidates"] == [], f"입력이 모자란데 후보가 나왔다: {len(본문['candidates'])}안"
     assert ("finance", "SALES_VALIDATION") not in 부른_부서, (
         "후보가 0인데 재무를 불렀다 — 마스터가 없는 후보를 지어냈다"
+    )
+
+
+def test_수량을_실으면_재무_최종검증까지_간다(client: TestClient, 부른_부서) -> None:
+    """🔴 **이 파이프라인이 처음 끝까지 도는 자리다** (실측 #377).
+
+    `requested_quantity_kg` 가 실리면 판매가 후보를 내고, 마스터가 **후보마다 한 번씩**
+    `finance / SALES_VALIDATION` 을 부른다 (설계 정정 ② · `test_sales_flow.py`).
+
+    ```text
+    end_code   SL1_PRESENTED · reason="사용자 선택 대기"
+    judgment   status=SCENARIOS_GENERATED · missing_data=[]
+    후보       3안 (SALES-001-A · B · C)
+    부른 부서   inventory / PRE_SALES → finance / SALES_VALIDATION × 후보 수
+    ```
+
+    ★ **후보 수를 숫자로 박지 않는다.** 실측은 3안이지만 몇 안이 나오는지는 **판매
+      소유의 사실**이라 판매가 변형 축을 늘리는 날 마스터 검사가 깨진다. 여기서
+      잠그는 마스터 소유의 사실은 **순서**와 *"후보 하나에 재무 호출 하나"* 다.
+
+    ⚠️ **재무가 후보를 배열로 받게 바뀌면 이 검사가 빨개진다.** 그날은 재무 호출이
+      후보 수만큼이 아니라 한 번이므로, 아래 목록을 `× 1` 로 줄이고 위 블록도 같이
+      고친다. `SL3` 으로 바뀌었다면 재무 대역이 후보를 떨어뜨린 것이고,
+      `SL4` 라면 `app/main.py` 의 등록이 사라진 것이다.
+    """
+    본문 = _본문(client, requested_quantity_kg=2000)
+
+    후보 = 본문["candidates"]
+    assert 본문["end_code"] == "SL1_PRESENTED", (
+        f"수량을 실었는데 제시까지 못 갔다: {본문['end_code']} / {본문['reason']}. "
+        "SL2 라면 판매가 요구하는 칸이 또 늘었고 (judgment.missing_data 를 본다), "
+        "SL4 라면 app/main.py 의 등록이 사라진 것이다"
+    )
+    assert 본문["judgment"]["status"] == "SCENARIOS_GENERATED", (
+        f"판매가 후보를 냈다고 말하지 않는다: {본문['judgment'].get('status')}"
+    )
+    assert 본문["judgment"]["missing_data"] == [], (
+        f"수량을 실었는데 아직 모자란 입력이 있다: {본문['judgment']['missing_data']}"
+    )
+    assert 후보, "후보가 0안이다 — 재무까지 갈 것이 없다"
+
+    # 🔴 **순서까지 잠근다.** 판매는 실물이라 이 목록에 안 남는다 (대역만 기록한다) —
+    #    판매 자리는 위 `test_물류와_판매를_실제로_부른다` 가 `plan` 으로 본다.
+    기대 = [("inventory", "PRE_SALES")] + [("finance", "SALES_VALIDATION")] * len(후보)
+    assert 부른_부서 == 기대, (
+        f"재무까지 가는 순서가 설계와 다르다: {부른_부서} (후보 {len(후보)}안)"
     )
