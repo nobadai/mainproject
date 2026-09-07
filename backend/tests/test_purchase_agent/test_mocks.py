@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from _ast_helpers import called_attributes
 from _fixtures import AS_OF, _proposal
 from _injection import INJECTED_THRESHOLD, declare_thresholds, swap_threshold
 
@@ -120,15 +121,32 @@ def test_mock_never_carries_pending_parameters(path: Path, key: str) -> None:
     assert key not in path.read_text(encoding="utf-8")
 
 
+#: 벽시계. 이름 그대로 부르는 형태만 적는다 — ``from datetime import date`` 뒤의
+#: ``date.today()`` 와 ``datetime.datetime.now()`` 둘 다 점 표기가 이 안에 들어온다.
+_WALL_CLOCK_CALLS = frozenset({"date.today", "datetime.now", "datetime.date.today",
+                               "datetime.datetime.now"})
+
+
 def test_agent_sources_never_read_the_wall_clock() -> None:
-    """규칙 1 — 패키지 어디에도 벽시계 호출이 없다. 날짜는 항상 as_of로 주입된다."""
-    offenders = [
-        path.relative_to(AGENT_DIR).as_posix()
+    """규칙 1 — 패키지 어디에도 벽시계 호출이 없다. 날짜는 항상 as_of로 주입된다.
+
+    ⚠️ **문자열로 훑던 것을 ast 로 바꿨다** (2026-09-08).
+
+      전에는 파일 전문을 ``read_text`` 해서 낱말을 셌다. 그러면 주석이나 docstring 에
+      *"``date.today()`` 를 쓰지 않는다"* 라고 적는 순간 검사가 운다 — **설명을 못 쓴다.**
+
+      🔴 그리고 ``docs/보관/260905_기록을_읽는_법.md`` ⑦ 이 그걸 금지한다.
+        ``#378`` 에서 같은 이유로 한 번 고쳤고, **이 자리를 놓쳤다.**
+
+    ★ 짝이 되는 동적 검사가 ``test_lookahead.py`` 에 있다 — *"안 부른다"* 와
+      *"산출물이 오늘에 안 물든다"* 는 다른 사실이라 둘 다 잰다.
+    """
+    offenders = {
+        path.relative_to(AGENT_DIR).as_posix(): sorted(hits)
         for path in sorted(AGENT_DIR.rglob("*.py"))
-        if "date.today()" in path.read_text(encoding="utf-8")
-        or "datetime.now()" in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == []
+        if (hits := called_attributes(path) & _WALL_CLOCK_CALLS)
+    }
+    assert offenders == {}, f"벽시계 호출: {offenders}"
 
 
 # ── 시나리오 구분이 데이터에 드러나는가 ─────────────────────────────────────
