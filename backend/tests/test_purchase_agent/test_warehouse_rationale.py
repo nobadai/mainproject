@@ -105,12 +105,13 @@ def test_a_negative_reservation_is_not_reported() -> None:
     assert _warehouse_rationale(broken, AS_OF) is None
 
 
-def test_the_sentence_does_not_claim_a_cause() -> None:
-    """🔴 *"어제"* · *"승인"* · *"줄었다"* 를 쓰지 않는다 — 근거가 없다 (``#310``).
+def test_the_sentence_does_not_claim_a_cause_without_commitments() -> None:
+    """🔴 **약정이 안 온 날**은 *"어제"* · *"승인"* · *"줄었다"* 를 쓰지 않는다.
 
-    ``approved_commitments`` 도 ``in_transit`` 도 봉투에 안 오고, 전날 payload 도 안 들고
-    있다. 셋 중 하나라도 문장에 들어가면 **형식만 맞고 내용이 우리 것이 아닌 주장**이
-    된다.
+    ⚠️ **금지어 목록을 줄이지 않았다** (`#312` 뒤에도). ``approved_commitments`` 는
+      *"없으면 칸을 안 만든다"* 로 오는 값이라 **안 오는 날이 계속 있다.** 목록에서
+      *"어제"* · *"승인"* 을 빼면 그 날을 못 잡는다 — 근거가 생긴 것은 **약정이 온
+      날뿐**이고, 검사는 입력으로 갈린다.
     """
     item = _warehouse_rationale(LIVE, AS_OF)
     assert item is not None
@@ -142,3 +143,130 @@ def test_the_item_actually_reaches_the_rationale_list() -> None:
     items = _rationale(state, draft, load_constraints(), "AUC-2026-08-21")
     refs = [row["ref_id"] for row in items]
     assert "CAP-2026-08-21" in refs, f"창고 근거가 rationale 에 안 실렸다 — {refs}"
+
+
+# ── 승인 이력이 온 날 (`#312`) ────────────────────────────────────────────────
+#
+# 🟢 마스터가 `approved_commitments` 를 싣기 시작했다. 예정분 3,587kg 과 승인
+#   3,587kg 이 같다는 것을 **우리가 눈으로 맞춰보던 자리**를 이제 코드가 잰다.
+#
+# 🔴 **대조가 맞을 때만 인과를 쓴다.** 어긋나면 종전 문장 그대로다 — 예정분에 승인분
+#   아닌 점유가 섞였다는 뜻이라, 그때 "어제 승인분" 이라고 적으면 남의 물량을 우리
+#   것이라고 말하게 된다.
+
+#: 관통 Day2 실측 (`#310` 회신 · ``H1-THRU-20260105-BAECHU-1``). LIVE 의 예정분 3,587 과 맞는다.
+COMMITMENT = {
+    "approval_id": "H1-THRU-20260105-BAECHU-1",
+    "item": "배추",
+    "total_qty_kg": 3587.0,
+    "arrival_schedule": [{"qty_kg": 3587.0, "arrival_date": "2026-01-07", "seq": 1}],
+}
+
+
+def test_a_matching_commitment_names_the_cause() -> None:
+    """🟢 **이 판의 본문이다.** 대조가 맞으면 *"어제 승인분 N kg 이 D 에 옵니다"*.
+
+    ``8,000 − 4,058.6 − 354.4 = 3,587.0`` 이고 약정 ``total_qty_kg`` 도 3,587.0 이다.
+    """
+    item = _warehouse_rationale(LIVE, AS_OF, [COMMITMENT], "배추")
+    assert item is not None
+    assert item["claim"] == "날짜별 입고 여유 4,059kg — 어제 승인분 3,587kg 이 2026-01-07 에 옵니다"
+
+
+def test_the_named_quantity_is_the_commitment_not_our_arithmetic() -> None:
+    """🔴 문장의 N 은 **약정이 말한 수량**이지 우리 뺄셈 결과가 아니다.
+
+    둘이 같아야 여기까지 오지만, 적을 때는 **출처가 있는 쪽**을 적는다.
+    """
+    item = _warehouse_rationale(LIVE, AS_OF, [COMMITMENT], "배추")
+    assert item is not None
+    assert f"{COMMITMENT['total_qty_kg']:,.0f}kg" in item["claim"]
+
+
+def test_a_mismatched_commitment_keeps_the_old_sentence() -> None:
+    """🔴 **대조가 어긋나면 인과를 안 쓴다** — 예정분에 다른 점유가 섞인 날이다.
+
+    승인은 3,587kg 인데 예정분이 4,000kg 이면, 413kg 은 우리가 모르는 무엇이다.
+    """
+    off = {**LIVE, "used_capacity_kg": 0.0}  # 예정분이 3,941.4 로 벌어진다
+    item = _warehouse_rationale(off, AS_OF, [COMMITMENT], "배추")
+    assert item is not None
+    assert "승인" not in item["claim"], item["claim"]
+    assert "이 예정)" in item["claim"]
+
+
+def test_another_items_commitment_is_not_ours() -> None:
+    """★ 배추 안의 근거에 무 승인을 적을 수 없다 — 수량이 우연히 맞아도 남의 것이다."""
+    other = {**COMMITMENT, "item": "무"}
+    item = _warehouse_rationale(LIVE, AS_OF, [other], "배추")
+    assert item is not None
+    assert "승인" not in item["claim"], item["claim"]
+
+
+def test_several_arrival_dates_drop_the_cause() -> None:
+    """⚠️ 도착일이 여러 날이면 *"언제"* 를 한 날로 못 적는다.
+
+    수량 대조는 맞았으니 *"어제 승인분"* 까지는 사실인데, 날짜를 빼고 적으면 문장이
+    *"온다"* 만 남아 **언제인지 모른다는 사실이 사라진다.** 반쯤 아는 것을 다 아는
+    것처럼 적느니 종전 문장이 정확하다.
+    """
+    split = {
+        **COMMITMENT,
+        "arrival_schedule": [
+            {"qty_kg": 1793.5, "arrival_date": "2026-01-07", "seq": 1},
+            {"qty_kg": 1793.5, "arrival_date": "2026-01-13", "seq": 2},
+        ],
+    }
+    item = _warehouse_rationale(LIVE, AS_OF, [split], "배추")
+    assert item is not None
+    assert "승인" not in item["claim"], item["claim"]
+
+
+def test_two_commitments_of_the_same_item_are_summed() -> None:
+    """같은 품목 약정이 둘이면 합이 예정분과 맞는지 본다 — 한 건만 보면 늘 어긋난다."""
+    halves = [
+        {**COMMITMENT, "approval_id": "A", "total_qty_kg": 1800.0,
+         "arrival_schedule": [{"qty_kg": 1800.0, "arrival_date": "2026-01-07", "seq": 1}]},
+        {**COMMITMENT, "approval_id": "B", "total_qty_kg": 1787.0,
+         "arrival_schedule": [{"qty_kg": 1787.0, "arrival_date": "2026-01-07", "seq": 1}]},
+    ]
+    item = _warehouse_rationale(LIVE, AS_OF, halves, "배추")
+    assert item is not None
+    assert "어제 승인분 3,587kg 이 2026-01-07 에 옵니다" in item["claim"]
+
+
+def test_shrinkage_words_are_never_allowed() -> None:
+    """🔴 *"줄었"* · *"감소"* 는 **약정이 와도** 못 쓴다.
+
+    전날 payload 를 안 들고 있어 비교 대상이 없다. 우리가 말할 수 있는 것은
+    *"이만큼이 이 날 온다"* 이지 *"이만큼 줄었다"* 가 아니다.
+    """
+    for commitments in ([COMMITMENT], None):
+        item = _warehouse_rationale(LIVE, AS_OF, commitments, "배추")
+        assert item is not None
+        text = item["claim"] + item["evidence_detail"]
+        for forbidden in ("줄었", "감소"):
+            assert forbidden not in text, f"비교 대상이 없는데 {forbidden} 를 썼다"
+
+
+def test_the_cause_actually_reaches_the_rationale_list() -> None:
+    """🔴 **`_rationale` 을 통과하는지 잰다** (규칙 8).
+
+    위 검사들은 ``_warehouse_rationale`` 을 직접 부른다 — 그것만으로는 **승인 이력이
+    거기까지 전달되는지**를 증명하지 못한다. ``_rationale`` 이 ``state`` 에서 약정을
+    꺼내 넘기는 그 줄을 지우면 여기가 운다.
+    """
+    from datetime import date
+
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.package_scenarios import _rationale
+    from app.purchase_agent.state import build_initial_state
+
+    state = build_initial_state("배추", date(2026, 8, 21))
+    state["inventory"] = {**state["inventory"], **LIVE}  # type: ignore[typeddict-item]
+    state["approved_commitments"] = [COMMITMENT]
+    draft = {"daily_demand_kg": 717.0, "coverage_days": 5}
+
+    items = _rationale(state, draft, load_constraints(), "AUC-2026-08-21")
+    cap = next(row for row in items if row["ref_id"] == "CAP-2026-08-21")
+    assert "어제 승인분 3,587kg" in cap["claim"], cap["claim"]
