@@ -31,6 +31,7 @@ from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.quotes import auction_quote_source
+from app.sales.adapter import sales_port
 from app.sales.router import router as sales_router
 
 app = FastAPI(title="mainproject")
@@ -68,6 +69,17 @@ register_agent("inventory", logistics_port)
 #   (2026-08-31 실측 · 배추 812 vs 933). 다만 그것은 **두 값을 어떻게 병기해 보여줄지**의
 #   문제이고, 매입단가로 무엇을 쓸지는 아니다 — 매입단가는 실제로 살 때 낼 돈이다.
 register_agent("purchase", partial(purchase_port, quotes=auction_quote_source()))
+# 🔴 **넷째가 붙었다 — 판매 어댑터가 `#364` 로 들어왔다** (2026-09-07).
+#
+#   그전까지 이 줄이 없어서 `POST /master/sales/run` 이 **부르기 전에** 섰다.
+#   `REQUIRED_FOR_SALES = ("sales", "finance")` 를 문 앞에서 보는데 `sales` 가 없어
+#   매번 `SL4_NOT_STARTED` 로 돌아섰다 — 판매 Flow 는 다 서 있었고 **배선 한 줄만**
+#   없었다.
+#
+# ★ **미등록과 후보 0건은 다른 사실이다.** 앞은 아무도 못 부른 상태이고 뒤는
+#   판매가 답을 낸 결과다. 이 줄이 그 둘을 가른다 —
+#   `tests/master/test_sales_registration.py` 가 등록과 그 경로를 같이 잰다.
+register_agent("sales", sales_port)
 
 # ── 승인 → 장부 상태전이 (C 형태 ⑦) ────────────────────────────────────
 #
