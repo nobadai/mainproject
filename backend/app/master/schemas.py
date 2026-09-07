@@ -674,6 +674,16 @@ class SalesRunResponse(BaseModel):
         ),
     )
 
+    ml_context_note: str = Field(
+        default="",
+        description=(
+            "🔴 ML 예측을 **못 실은 이유**. 실었으면 비어 있다. "
+            "판매는 ML 을 직접 부르지 않고 마스터가 받아 실어 나른다 (판매 v1.7 §11) — "
+            "못 실으면 후보가 시장 예측 없이 만들어지므로, 멈추지는 않되 그 사실이 "
+            "결론과 함께 보여야 한다. 매입 `mocked_inputs` · `input_sources` 와 같은 자리다."
+        ),
+    )
+
     evidences: list[EvidenceOut] = Field(
         default=[],
         description="부서가 낸 근거. **마스터가 고르거나 요약하지 않는다** — 매입과 같은 규율이다.",

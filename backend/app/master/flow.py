@@ -25,7 +25,6 @@ flow.py — 매입 의사결정 Flow (정의서 v2.2 §3.4)
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -40,14 +39,12 @@ from app.master.envelope import (
     AgentReply,
     Mode,
     SourcedEvidence,
+    forecast_is_clean,
     wire_adjustment,
 )
 from app.master.plan import ExecutionPlan
 from app.master.runner import MasterRunner
 from app.master.verifier import VerificationContext, VerificationResult
-
-_HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
-"""ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
 
 _JUDGED_VERDICTS: frozenset[str] = PASSING_VERDICTS | {"reject"}
 """**부서가 판정을 낸** 값. 여기 없으면 판정 자체가 없는 것이다.
@@ -599,7 +596,9 @@ class ProcurementFlow:
         payload: dict[str, Any] = {"constraints": dict(constraints)}
         if self.item is not None:
             payload["item"] = self.item
-        if self.forecast is not None and self._forecast_is_clean():
+        if self.forecast is not None and forecast_is_clean(
+            self.forecast, self.runner.context.as_of
+        ):
             unwrapped = self._forecast_for_item()
             if unwrapped is not None:
                 payload["forecast"] = unwrapped
@@ -690,24 +689,6 @@ class ProcurementFlow:
         out.update(block)
         out["item"] = self.item
         return out
-
-    def _forecast_is_clean(self) -> bool:
-        """예측 생성 시각이 `as_of` 이후면 싣지 않는다.
-
-        오염된 입력으로 시나리오를 만들면 **백테스트 손익만 좋아진다.**
-        싣지 않으면 매입이 `RUNTIME_NOT_READY` 를 내고, 그 사실이 이력에 남는다.
-
-        ★ **타임존이 없으면 싣지 않는다** (2026-08-27 매입 요청 반영).
-          앞 10자만 비교하므로 오프셋이 없으면 `2026-09-04T23:00` 이 KST 로 09-05 인지
-          UTC 로 09-04 인지 갈리지 않는다 — **이 검사 자체가 성립하지 않는다.**
-          매입도 수신 시 거부하지만, 여기서 막으면 매입 호출 한 번을 아낀다.
-        """
-        generated = (self.forecast or {}).get("generated_at")
-        if not isinstance(generated, str):
-            return True  # 시점 필드가 없으면 판단하지 않는다 — 매입이 수신 시 재검증한다
-        if not _HAS_TIMEZONE.search(generated):
-            return False
-        return generated[:10] <= self.runner.context.as_of.isoformat()
 
     def _validate(
         self, proposal: Mapping[str, Any], scenarios: Sequence[Mapping[str, Any]]
