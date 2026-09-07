@@ -17,7 +17,12 @@
   ② 2안 설계 근거는 그대로다              총량이 같아도 분할이 다르면 다른 선택지다
   ③ spread_min 이 실제로 결과를 바꾼다     전에는 죽어 있었다
   ④ Critic 까지 닿는다                    룰을 두 벌 짜지 않는다 (§6.4)
+  ⑤ 3안은 총량까지 본다                   매입 결정 2026-09-07 — 안의 개수가 뜻을 바꾼다
   ```
+
+⚠️ **⑤ 는 발표(2026-09-13)까지 실데이터로는 한 번도 안 돈다.** 실데이터가 전부
+  `uncertain` 이라 `classify_situation.py:121` 이 공격안을 빼고 2안만 내보내기 때문이다.
+  그래서 이 파일이 유일한 증거다.
 """
 
 from __future__ import annotations
@@ -75,15 +80,33 @@ def test_총량이_크게_벌어져_있으면_붕괴가_아니다():
     assert detect_variant_collapse(results) is False
 
 
-def test_총량이_붙어_있어도_지문이_다_다르면_통과한다():
+def test_3안은_지문이_다_달라도_총량이_붙으면_붕괴다():
     """`cap=4,500,000` 실측 — 2,571 / 2,727 / 2,727(분할). 스프레드 0.057.
 
-    🟡 **이 판이 바꾸지 않는 자리다.** 총량이 임계 안으로 붙었는데 분할이 달라 통과한다 —
-      *"총량이 붙었는데 분할만 다른 안을 선택지로 볼 것인가"* 는 `:690` 이 이미 한쪽으로
-      정한 도메인 판단이고, 뒤집으려면 매입·팀 결정이 필요하다.
+    🔴 **매입 결정 2026-09-07 로 뒤집힌 자리다.** 전에는 지문 3/3 이라 `①` 에서 통과하고
+      스프레드 0.057 을 아무도 안 봤다.
+
+    ★ *"3안에서 둘이 5% 차이면 셋째가 있어도 고를 게 없다"* — 안의 개수가 「선택지」의
+      뜻을 바꾼다.
     """
     results = [_one("보수", 2571), _one("기본", 2727), _split("공격", 2727)]
 
+    assert len({r.signature() for r in results}) == 3, "지문이 3/3 인 것이 이 검사의 전제다"
+    spread = (2727 - 2571) / 2727
+    assert spread < VARIANT_SPREAD_MIN, f"스프레드 {spread:.3f} 이 임계 아래인 것이 전제다"
+    assert detect_variant_collapse(results) is True
+
+
+def test_3안이라도_총량이_충분히_벌어지면_통과한다():
+    """★ 위 검사의 짝 — **바뀐 것은 `②` 에 닿는 조건뿐이고 `②` 의 계산식은 그대로다.**
+
+    지문 3/3 · 스프레드 0.150 — 임계에 걸리지 않으므로 `②` 가 통과시킨다.
+    """
+    results = [_one("보수", 2550), _one("기본", 3000), _split("공격", 3000)]
+
+    assert len({r.signature() for r in results}) == 3
+    spread = (3000 - 2550) / 3000
+    assert spread >= VARIANT_SPREAD_MIN, f"스프레드 {spread:.3f} 이 임계 위인 것이 전제다"
     assert detect_variant_collapse(results) is False
 
 
@@ -93,10 +116,29 @@ def test_총량이_붙어_있어도_지문이_다_다르면_통과한다():
 def test_2안_총량이_같고_분할만_달라도_붕괴가_아니다():
     """★ `:690` 이 적은 그 예시다 — 5,449kg 을 오늘 전량 vs 오늘 2,725 / D+3 2,724.
 
-    🔴 **바뀌는 것은 "몇 개가 달라야 하는가" 뿐이고 2안에서는 답이 같다** (`2 == 2`).
+    🔴 **이 검사가 안 깨지는 것이 매입 결정 2026-09-07 의 핵심 조건이다.**
+
+    ★ 총량 스프레드는 0 이라 `②` 에 닿으면 곧바로 붕괴로 걸린다. 3안이 `②` 로
+      내려가게 바뀌었어도 **2안은 `①` 에서 끊긴다** — 둘 중 하나를 고르는 자리에서는
+      분할 구조가 그 자체로 선택지이기 때문이다.
     """
     results = [_one("a", 5449), _r("b", 5449, [(0, 2725), (3, 2724)])]
 
+    totals = [r.total_kg for r in results]
+    assert max(totals) == min(totals), "총량이 같은 것이 이 검사의 전제다"
+    assert detect_variant_collapse(results) is False
+
+
+def test_2안은_총량이_붙어도_지문이_다르면_통과한다():
+    """★ 같은 2,571 / 2,727 을 2안으로 주면 통과한다 — **3안일 때만 `②` 로 내려간다.**
+
+    🔴 위 `test_3안은_지문이_다_달라도_총량이_붙으면_붕괴다` 와 총량도 스프레드도 같다.
+      갈리는 것은 **안의 개수 하나**다.
+    """
+    results = [_one("보수", 2571), _one("기본", 2727)]
+
+    assert len({r.signature() for r in results}) == 2
+    assert (2727 - 2571) / 2727 < VARIANT_SPREAD_MIN
     assert detect_variant_collapse(results) is False
 
 
@@ -185,11 +227,16 @@ def test_Critic_의_classify_collapse_까지_닿는다():
     [
         ("셋 다 같음", ["one:2571", "one:2571", "one:2571"], True),
         ("둘만 같음", ["one:2571", "one:2571", "split:2571"], True),
-        ("셋 다 다름", ["one:2571", "one:2727", "split:2727"], False),
+        ("셋 다 다른데 총량이 붙음", ["one:2571", "one:2727", "split:2727"], True),
+        ("셋 다 다르고 총량도 벌어짐", ["one:2550", "one:3000", "split:3000"], False),
+        ("둘 다 다른데 총량이 붙음", ["one:2571", "one:2727"], False),
     ],
 )
 def test_같은_안의_개수로_갈린다(kind: str, results: list[str], expected: bool):
-    """★ 규칙 한 줄로 말하면 — **모든 안이 서로 달라야 붕괴가 아니다.**"""
+    """★ 규칙 한 줄로 말하면 — **2안은 서로 다르기만 하면 되고, 3안은 총량도 벌어져야 한다.**
+
+    🔴 매입 결정 2026-09-07 — *"안의 개수가 「선택지」의 뜻을 바꾼다."*
+    """
     clips = [
         (_one if spec.split(":")[0] == "one" else _split)(f"s{i}", float(spec.split(":")[1]))
         for i, spec in enumerate(results)
