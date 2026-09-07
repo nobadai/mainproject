@@ -166,13 +166,16 @@ def financier(verdicts: dict[str, str] | None = None, adjustments: tuple = ()):
 
 
 def flow(
-    budget: int = SALES_BUDGET, max_attempts: int = MAX_FEEDBACK_ATTEMPTS, **ports
+    budget: int = SALES_BUDGET,
+    max_attempts: int = MAX_FEEDBACK_ATTEMPTS,
+    business_mode: str | None = None,
+    **ports,
 ) -> SalesFlow:
     registry = AgentRegistry()
     for name, port in ports.items():
         registry.register(name, port)
     runner = MasterRunner(ctx(), registry, CallBudget(limit=budget))
-    return SalesFlow(runner, max_feedback_attempts=max_attempts)
+    return SalesFlow(runner, business_mode=business_mode, max_feedback_attempts=max_attempts)
 
 
 def happy(**over) -> SalesFlow:
@@ -364,6 +367,7 @@ def test_물류가_못_답하면_컨텍스트_칸을_안_만든다():
     ).run()
 
     assert "supply_context" not in 보낸것[0]
+    assert "logistics_context" not in 보낸것[0]
 
 
 def test_물류가_답하면_컨텍스트를_실어_보낸다():
@@ -371,6 +375,69 @@ def test_물류가_답하면_컨텍스트를_실어_보낸다():
     happy(sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
 
     assert 보낸것[0]["supply_context"]["payload"] == {"sellable": "yes"}
+
+
+def test_물류_컨텍스트가_아직_판매에_안_닿는다():
+    """🔴 **지금은 못 닿는다. 그 사실을 적어 둔다** (실측 2026-09-07 · 계약 미결).
+
+    판매 칸 이름은 `logistics_context` 인데 마스터는 `supply_context` 로 싣고, 어댑터가
+    모르는 키를 걸러내므로(`app/sales/adapter.py` 가 `model_fields` 로 거른다) 이 값은
+    **아무 소리 없이 사라진다.**
+
+    ⚠️ **그렇다고 이름만 맞추면 더 나빠진다.** 실측으로 확인했다 — 이름을 바꾸면
+      후보 3안·재무 3회까지 가던 경로가 `extra_forbidden` 6건으로 **선다.** 두 겹으로
+      모양이 안 맞기 때문이다.
+
+    ```text
+    ① 마스터가 싣는 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼다  ← 마스터 소유
+    ② 래퍼를 벗겨도 SalesLogisticsContext(extra="forbid") 가 다섯을 거부한다
+       as_of · policy_version_used · inventory_by_item · lot_constraints
+       · shared_daily_outbound_capacity_kg
+       물류가 근거 주소지정 때문에 일부러 최상위로 올린 셋이 그중 셋이다  ← 물류·판매 계약
+    ```
+
+    ★ **이 검사는 현재 상태를 잠그는 것이 아니라 미결을 드러내는 것이다.**
+      ②가 정해져 마스터가 이름을 맞추는 날 **빨개진다** — 그때 고치는 사람이 이 문서를
+      읽고 무엇이 정해졌는지 같이 적게 된다.
+    """
+    from app.sales.schemas import SalesLogisticsContext, SalesProposalInput
+
+    보낸것: list[dict] = []
+    happy(sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
+
+    assert "logistics_context" in SalesProposalInput.model_fields
+    assert "supply_context" not in SalesProposalInput.model_fields
+    assert "supply_context" in 보낸것[0], "마스터가 드는 이름 그대로다 — 미결이라 안 바꿨다"
+    assert SalesLogisticsContext.model_config.get("extra") == "forbid", (
+        "extra 가 열리면 이름만 맞춰도 되는 날이다 — 이 검사를 다시 봐라"
+    )
+
+
+def test_business_mode_는_최상위로_나간다():
+    """🔴 **`SalesProposalInput` 최상위 필수 칸이다** — `user_request` 안이 아니다.
+
+    저쪽 `SalesUserRequest` 는 `extra="forbid"` 라 안에 넣으면 요청 전체가 문 앞에서
+    거부되고, 안 실으면 `validation_errors=['business_mode']` 로 되돌아온다 (실측).
+    """
+    from app.sales.schemas import SalesProposalInput
+
+    보낸것: list[dict] = []
+    happy(business_mode="SPOT_SALES", sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
+
+    assert "business_mode" in SalesProposalInput.model_fields
+    assert 보낸것[0]["business_mode"] == "SPOT_SALES"
+
+
+def test_business_mode_를_모르면_칸을_안_만든다():
+    """★ 빈 값을 실으면 받는 쪽이 *"안 정했다"* 와 *"마스터가 안 보냈다"* 를 못 가른다.
+
+    ★ 진입점은 늘 값을 들고 온다 (`SalesRunRequest.business_mode` 는 필수). Flow 를
+      직접 만드는 자리에서 없는 값을 지어내지 않는다는 것만 여기서 잠근다.
+    """
+    보낸것: list[dict] = []
+    happy(sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
+
+    assert "business_mode" not in 보낸것[0]
 
 
 # ---------------------------------------------------------------------------

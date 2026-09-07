@@ -323,6 +323,7 @@ class SalesFlow:
         self,
         runner: MasterRunner,
         user_request: Mapping[str, Any] | None = None,
+        business_mode: str | None = None,
         mocked_inputs: Sequence[str] = (),
         max_feedback_attempts: int = MAX_FEEDBACK_ATTEMPTS,
         forecast: Mapping[str, Any] | None = None,
@@ -332,6 +333,19 @@ class SalesFlow:
         #: 사용자가 말한 조건 그대로. **숫자로 바꿔 제약에 꽂지 않는다** — 해석은
         #: 판매가 한다 (§3.2.2 · 매입 `prior_feedback` 과 같은 자리).
         self.user_request = user_request
+
+        #: 🔴 **무슨 판매인가 — `SalesProposalInput` 최상위 필수 칸이다.**
+        #:
+        #:   `SalesUserRequest` 안에 넣지 않는다. 저쪽은 `extra="forbid"` 이라 넣는
+        #:   순간 문 앞에서 통째로 거부되고, 그 칸의 자리는 **한 층 위**다.
+        #:
+        #: ★ **어휘의 주인은 판매다** (`SalesBusinessMode`). 여기서 값을 검사하지
+        #:   않는다 — 문 앞 판정은 `SalesRunRequest.business_mode` 가 이미 했고,
+        #:   Flow 가 다시 세면 같은 판정의 주인이 둘이 된다.
+        #:
+        #: ★ **없으면 칸을 안 만든다** (§1.2-10). 진입점은 늘 들고 오지만 Flow 를
+        #:   직접 만드는 자리(검사·재검증)까지 값을 강제하지는 않는다.
+        self.business_mode = business_mode
         #: 🔴 **mock 에서 온 입력. 하나라도 있으면 실행을 세운다** (매입과 같은 태도).
         #: 경고와 차단은 다르다 — mock 으로 내린 결론은 실측으로 읽히면 안 되는 정도가
         #: 아니라 **아예 내리면 안 되는** 것이다.
@@ -524,7 +538,7 @@ class SalesFlow:
     def _proposal_input(self, feedback: Mapping[str, Any] | None) -> dict[str, Any]:
         """③ 에 실어 보내는 것. **묶기만 한다** (§3.2.2).
 
-        ★ **물류가 못 답한 회차에는 `supply_context` 칸을 안 만든다.** 빈 값을 실으면
+        ★ **물류가 못 답한 회차에는 물류 컨텍스트 칸을 안 만든다.** 빈 값을 실으면
           판매가 *"물류가 팔 수 있는 게 없다고 했다"* 로 읽는다. 안 실으면 판매가
           `missing_capabilities` 로 그 사실을 낸다 — 그것이 §1.2-10 이 원하는 모양이다.
 
@@ -534,9 +548,33 @@ class SalesFlow:
           이유로 그렇게 한다. 못 실은 사실은 `ml_context_note` 로 결과에 남는다.
         """
         payload: dict[str, Any] = {}
+        if self.business_mode is not None:
+            # 🔴 **최상위다 — `user_request` 안이 아니다** (`SalesProposalInput`).
+            payload["business_mode"] = self.business_mode
         if self.user_request is not None:
             payload["user_request"] = dict(self.user_request)
         if self.context_failure is None and self.supply_context is not None:
+            # 🔴 **이 칸은 지금 판매에 안 닿는다** (실측 2026-09-07 · 계약 미결).
+            #
+            #   판매 칸 이름은 `logistics_context` 이고 어댑터가 모르는 키를 걸러내므로
+            #   이 값은 **조용히 사라진다.** 그런데 이름만 맞춰서는 안 된다 — 두 겹으로
+            #   모양이 안 맞고, 둘 다 마스터 혼자 못 정한다.
+            #
+            #   ```text
+            #   ① 마스터가 싣는 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼다
+            #      (agent · mode · business_status · runtime_status · payload · reasoning)
+            #      → 마스터 소유. 고칠 수 있다
+            #   ② 래퍼를 벗겨도 SalesLogisticsContext(extra="forbid") 가 다섯을 거부한다
+            #      as_of · policy_version_used · inventory_by_item · lot_constraints
+            #      · shared_daily_outbound_capacity_kg
+            #      → 물류가 근거 주소지정(_CLAIM_PATH) 때문에 일부러 최상위로 올린 셋이다.
+            #        누가 제자리로 옮기는지는 물류·판매 계약이다
+            #   ```
+            #
+            # ⚠️ **이름만 맞추면 침묵이 하드 ERROR 로 바뀌어 경로가 도로 막힌다** —
+            #   실측으로 후보 3안·재무 3회까지 가던 것이 `extra_forbidden` 6건으로 섰다.
+            #   ②가 정해질 때까지 마스터 이름을 그대로 두고, 못 닿는다는 사실을
+            #   `test_sales_flow.py` 가 적어 둔다.
             payload["supply_context"] = dict(self.supply_context)
         if self.ml_context is not None:
             # ★ **칸 이름은 판매 것이다** (`app/sales/schemas.py` `SalesProposalInput`).
