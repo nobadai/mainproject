@@ -38,6 +38,16 @@
 --               🔴 `decision` 에 값을 더하지 않는다. 사용자가 APPROVE 를 눌렀는데
 --               재검증에서 막힌 것과, 사용자가 승인하지 않은 것은 다른 사건이다.
 --               섞으면 "승인하려다 막혔다" 가 사라진다 (판매 2026-09-04 합의).
+--   2026-09-07  decision 어휘에 CANCEL 을 더한다 — 이관 판이 이미 열어 둔 것을
+--               본 DDL 이 안 따라가서 갈려 있었다. 갈린 채로 새 DB 를 세우면
+--               CANCEL 결정 저장이 전부 CHECK 로 막힌다 (코드의 Decision 은 4종).
+--               ALTER 판은 `master/master_decision_cancel.sql`.
+--               🔴 갈림은 이제 검사로 건다 — `backend/tests/master/
+--               test_schema_files_agree.py` 가 두 파일의 **어휘 집합**과
+--               **제약 이름**을 대조한다. 이름까지 보는 이유는 같은 날
+--               revalidation 짝 제약이 `_pair` 대 `_pairing` 으로 갈려 있었기
+--               때문이다 — 조건식이 같아도 이관 판의 IF NOT EXISTS 는 이름으로
+--               판정해, 같은 뜻의 제약이 둘 걸린다.
 
 BEGIN;
 
@@ -85,8 +95,11 @@ CREATE TABLE IF NOT EXISTS haetdeul.master_decisions (
     note                  TEXT        NULL,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    -- 🔴 CANCEL 이 REJECT_ALL 과 어떻게 다른지는 이관 판 머리말이 말한다 —
+    --    `master/master_decision_cancel.sql`. 여기 옮겨 적지 않는다. 같은 설명이
+    --    두 곳에 있으면 **그 설명이 갈린다** (이 어휘가 갈린 것과 같은 병이다).
     CONSTRAINT master_decisions_decision_check
-        CHECK (decision IN ('APPROVE', 'REJECT_ALL', 'REQUEST_CHANGE')),
+        CHECK (decision IN ('APPROVE', 'REJECT_ALL', 'REQUEST_CHANGE', 'CANCEL')),
 
     -- 승인에는 반드시 고른 안이 있고, 나머지는 안을 고르지 않는다.
     -- 거절인데 라벨이 붙어 있으면 "무엇을 거절했나"가 두 가지로 읽힌다.
@@ -110,7 +123,7 @@ CREATE TABLE IF NOT EXISTS haetdeul.master_decisions (
     -- 예외를 안 두면 가짜 업무 키를 지어 넣게 된다.
     -- 반대 방향(키만 있고 결과 NULL)도 막는다. 안 막으면 NULL 의 뜻이
     -- "안 했다" 와 "결과를 못 적었다" 둘이 된다.
-    CONSTRAINT master_decisions_revalidation_pair
+    CONSTRAINT master_decisions_revalidation_pairing
         CHECK (
             (revalidation_outcome IS NULL AND revalidation_request_id IS NULL)
          OR (revalidation_outcome = 'ERROR')
