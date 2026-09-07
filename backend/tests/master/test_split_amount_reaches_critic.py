@@ -29,8 +29,8 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from app.critic.service import _to_scenario
 from app.master import critic_bridge as bridge
+from app.master.critic.service import _to_scenario
 from app.master.cycle_schemas import SplitLegIn
 from app.master.plan import ExecutionPlan
 from app.master.verifier import MasterVerifier, VerificationContext

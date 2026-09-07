@@ -3,7 +3,9 @@
 #   오케 T3/S3 를 재현한 뒤 검증한다. 마스터가 검증을 부를 때는 HTTP 가 아니라
 #   `critic_v0_4.run_critic_v04` 를 직접 부른다 — 이 파일은 외부 노출 계약이다.
 # ─────────────────────────────────────────────────────────────────────────────
-"""Critic A/B 검증 서비스.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+Critic A/B 검증 서비스.
 
 ★ DB 미접근. 요청 본문만으로 오케 T3 결합·클리핑을 재현한 뒤 6레이어로 검증한다.
   Critic 은 숫자를 바꾸지 않는다 - 판정(status)·발견(findings)·커버리지만 낸다.
@@ -28,14 +30,15 @@ from app.contracts.core import (
     T0Snapshot,
     T2Reply,
 )
-from app.critic.critic_v0_4 import (
+from app.master.band import clip_all, combine_band
+from app.master.critic.critic_v0_4 import (
     CriticVerdictV04,
     DeptMeta,
     run_critic_b,
     run_critic_v04,
 )
-from app.critic.llm.judge import JudgeRunner, make_rationale_judge
-from app.critic.schemas import (
+from app.master.critic.llm.judge import JudgeRunner, make_rationale_judge
+from app.master.critic.schemas import (
     ConcernOut,
     CriticProcurementRequest,
     CriticSalesRequest,
@@ -44,7 +47,6 @@ from app.critic.schemas import (
     FindingOut,
     ScenarioIn,
 )
-from app.master.band import clip_all, combine_band
 from app.master.outbound import clip_allocations, combine_outbound_band
 
 

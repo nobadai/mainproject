@@ -71,7 +71,11 @@ def test_비공개_계약_이름을_읽는_곳을_고정한다():
         if name.startswith("_"):
             readers |= files
 
-    assert readers == {"app/critic/critic.py", "app/critic/critic_v0_4.py"}, (
+    # ★ **2026-09-07 에 경로만 바뀌었다.** Critic 을 마스터의 툴로 쓰기로 확정해
+    #   `app/critic/` 을 `app/master/critic/` 으로 옮겼다. 읽는 파일은 여전히 같은
+    #   둘이고 개수도 그대로다 — **늘어난 것이 아니라 자리가 바뀐 것**이라는 게
+    #   이 대조로 보인다. 개수가 달라졌다면 그때는 진짜 검토가 필요한 변화다.
+    assert readers == {"app/master/critic/critic.py", "app/master/critic/critic_v0_4.py"}, (
         f"계약의 비공개 이름을 읽는 곳이 달라졌다: {sorted(readers)}"
     )
 

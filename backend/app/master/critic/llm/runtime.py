@@ -1,4 +1,6 @@
-"""Critic-owned Ollama provider, policy, validator, retry and fallback runtime.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+Critic-owned Ollama provider, policy, validator, retry and fallback runtime.
 
 L5_SYSTEM_PROMPT 는 `selector_llm.py`(설계 원본)의 L4 판정 프롬프트에서 옮겨왔다.
 런타임 골격(설정·재시도·상태 결정 순서)은 Finance / Logistics / Orchestrator 와 동일하다.
@@ -20,7 +22,7 @@ from typing import Protocol
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
-from app.critic.llm.schemas import (
+from app.master.critic.llm.schemas import (
     InterpretationResult,
     JudgeInterpretation,
     LLMStatus,

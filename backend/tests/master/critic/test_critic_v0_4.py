@@ -27,8 +27,8 @@ from app.contracts.core import (
     SuggestedAdjustment,
     T2Reply,
 )
-from app.critic.critic import run_l3 as legacy_run_l3
-from app.critic.critic_v0_4 import (
+from app.master.critic.critic import run_l3 as legacy_run_l3
+from app.master.critic.critic_v0_4 import (
     CONTRACT_AMENDMENTS,
     CONTRACT_AMENDMENTS_CLOSED,
     DeptMeta,
@@ -858,7 +858,7 @@ ok(not _st.clip_results, "클리핑을 수행하지 않는다 — 무제한 매�
 
 section("\n[B-15] 시나리오 독립성 — 부서 회신은 매입안을 읽지 않는다 (§3.6.1)")
 
-from app.critic.critic_v0_4 import check_scenario_independence
+from app.master.critic.critic_v0_4 import check_scenario_independence
 
 _inv_chk = inventory_reply().checks[0]
 _fin_chk = _finance_reply().checks[0]
@@ -1110,7 +1110,7 @@ def test_critic_v0_4(passed: bool, label: str) -> None:
     assert passed, label
 
 
-if __name__ == "__main__":  # 자체 러너: python tests/critic/test_critic_v0_4.py
+if __name__ == "__main__":  # 자체 러너: python tests/master/critic/test_critic_v0_4.py
     _ok = sum(1 for c, _ in _results if c)
     print("\n" + "=" * 62)
     print(f"  {_ok} / {len(_results)} 통과")

@@ -1,4 +1,6 @@
-"""Critic Agent API 라우터.
+"""★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
+
+Critic Agent API 라우터.
 
 Critic 은 오케 산출물을 검증만 한다 (숫자 불변). 요청 본문만으로 T3/S3 를 재현해 검증한다.
 계약 위반(밴드 기여 방향 등)은 422 로 돌려준다.
@@ -10,12 +12,12 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.contracts.core import ContractViolation
-from app.critic.schemas import (
+from app.master.critic.schemas import (
     CriticProcurementRequest,
     CriticSalesRequest,
     CriticVerdictOut,
 )
-from app.critic.service import run_critic_procurement, run_critic_sales
+from app.master.critic.service import run_critic_procurement, run_critic_sales
 from app.master.cycle_persistence import record
 from app.master.cycle_run_repository import get_run, list_runs
 

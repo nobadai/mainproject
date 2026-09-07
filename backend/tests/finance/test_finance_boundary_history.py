@@ -465,10 +465,10 @@ def test_finance_dept_meta_reaches_critic_and_runs_both_checks(wired):
       연결과 무관한 이유로 깨진 것이다. Controller · Tool · Evidence · DeptMeta ·
       마스터 운반 · Critic 은 **전부 실제로** 돈다.
     """
-    from app.critic.service import run_critic_procurement
     from app.master import critic_bridge as bridge
     from app.master import wiring
     from app.master.budget import CallBudget
+    from app.master.critic.service import run_critic_procurement
     from app.master.runner import MasterRunner
     from tests.master.test_critic_bridge import CONSTRAINTS, EVIDENCES, _proposal
 

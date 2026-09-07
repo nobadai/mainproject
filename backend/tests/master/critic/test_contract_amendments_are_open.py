@@ -33,7 +33,7 @@ from app.contracts.core import (
     EndStage,
     T2Reply,
 )
-from app.critic.critic_v0_4 import CONTRACT_AMENDMENTS, CONTRACT_AMENDMENTS_CLOSED
+from app.master.critic.critic_v0_4 import CONTRACT_AMENDMENTS, CONTRACT_AMENDMENTS_CLOSED
 
 
 def _field_names(cls: type) -> set[str]:
@@ -113,7 +113,7 @@ def test_열린_개정은_계약에_아직_없다(key: str) -> None:
     assert still_open(), (
         f"계약 개정 '{key}' 이 이미 반영됐다.\n"
         f"  확인한 것: {reads}\n"
-        f"  할 일: `app/critic/critic_v0_4.py` 의 CONTRACT_AMENDMENTS 에서 이 항목을 걷고,\n"
+        f"  할 일: `app/master/critic/critic_v0_4.py` 의 CONTRACT_AMENDMENTS 에서 이 항목을 걷고,\n"
         f"         CONTRACT_AMENDMENTS_CLOSED 로 옮겨라\n"
         f"         (요청, 무엇이 닫았나, 원래 왜 필요했나).\n"
         f"         사이드카(DeptMeta 등)로 우회하던 자리가 있으면 계약을 직접 읽도록 바꿔라.\n"

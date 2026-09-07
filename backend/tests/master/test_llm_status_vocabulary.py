@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.critic.llm import runtime as critic_runtime
-from app.critic.llm.schemas import SanitizedLLMContext
+from app.master.critic.llm import runtime as critic_runtime
+from app.master.critic.llm.schemas import SanitizedLLMContext
 from app.master.envelope import LLMStatus
 from app.master.llm import runtime as master_runtime
 

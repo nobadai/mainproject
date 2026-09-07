@@ -11,9 +11,9 @@ from typing import Any, Self
 
 import pytest
 
-from app.critic.llm import runtime
-from app.critic.llm.runtime import GeminiProvider, LLMSettings, get_judge_service
-from app.critic.llm.schemas import JudgeInterpretation, SanitizedLLMContext
+from app.master.critic.llm import runtime
+from app.master.critic.llm.runtime import GeminiProvider, LLMSettings, get_judge_service
+from app.master.critic.llm.schemas import JudgeInterpretation, SanitizedLLMContext
 
 
 def _settings(**over: Any) -> LLMSettings:

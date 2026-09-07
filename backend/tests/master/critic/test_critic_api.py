@@ -7,7 +7,7 @@ psycopg 의존을 피하려 app.main 대신 critic 라우터만 격리해 올린
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.critic.router import router
+from app.master.critic.router import router
 
 app = FastAPI()
 app.include_router(router)

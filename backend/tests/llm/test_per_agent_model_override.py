@@ -4,7 +4,7 @@
 ★ Critic judge 를 생성 측(selector)과 다른 모델로 돌리는 것이 설계서 §6.4 의 요구다.
 """
 
-from app.critic.llm.runtime import get_llm_settings as critic_settings
+from app.master.critic.llm.runtime import get_llm_settings as critic_settings
 from app.master.cycle_llm.runtime import get_llm_settings as orchestrator_settings
 
 _KEYS = (
@@ -23,7 +23,7 @@ def _clear(monkeypatch):
     ★ 런타임이 매번 `load_dotenv(.env)` 를 부르므로, 지운 변수가 .env 값으로 되살아난다.
       이 테스트가 보려는 것은 **해석 순서**이지 .env 내용이 아니므로 로딩 자체를 끊는다.
     """
-    for module in ("app.master.cycle_llm.runtime", "app.critic.llm.runtime"):
+    for module in ("app.master.cycle_llm.runtime", "app.master.critic.llm.runtime"):
         monkeypatch.setattr(f"{module}.load_dotenv", lambda *a, **k: False)
     for key in _KEYS:
         monkeypatch.delenv(key, raising=False)

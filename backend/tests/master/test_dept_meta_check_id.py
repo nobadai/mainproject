@@ -71,7 +71,7 @@ def test_물류_검사는_밴드를_채운다():
     `_fills_band` 는 밴드 필드 중 하나라도 값이 있으면 참이다. 물류 합성 검사는
     `cap_total_kg`·`cap_by_date_kg` 를 채운다 — 자문 검사가 아니라 밴드 검사다.
     """
-    from app.critic.critic_v0_4 import _fills_band
+    from app.master.critic.critic_v0_4 import _fills_band
 
     inventory = next(r for r in _request().replies if r.dept == "inventory")
     check = inventory.checks[0]
@@ -82,7 +82,7 @@ def test_물류_검사는_밴드를_채운다():
 
 def test_이름이_맞으면_입력이_검사에_닿는다():
     """★ **검사가 공허하지 않다는 증명 (맞는 쪽).**"""
-    from app.critic.service import run_critic_procurement
+    from app.master.critic.service import run_critic_procurement
 
     observations = {
         "inventory": (
@@ -105,7 +105,7 @@ def test_이름이_틀리면_같은_위반이_조용히_통과한다():
     입력도 위반도 위와 **완전히 같은데** 키 하나가 달라서 아무 일도 안 일어난다.
     에러도 경고도 없다 — 그래서 부서가 문자열을 베끼면 안 된다.
     """
-    from app.critic.service import run_critic_procurement
+    from app.master.critic.service import run_critic_procurement
 
     observations = {
         "inventory": (

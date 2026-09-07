@@ -209,7 +209,7 @@ def test_Critic_의_classify_collapse_까지_닿는다():
     ★ `critic_v0_4.classify_collapse` 가 `detect_collapse_type` 에 위임한다 (§6.4 —
       룰을 두 벌 짜지 않는다). **통로가 끊기면 T3 는 잡는데 Critic 은 못 잡는다.**
     """
-    from app.critic.critic_v0_4 import classify_collapse
+    from app.master.critic.critic_v0_4 import classify_collapse
 
     results = [_one("보수", 2571), _one("기본", 2571), _split("공격", 2571)]
 

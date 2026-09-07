@@ -8,7 +8,7 @@ critic_bridge.py — 마스터 검증 Tool ↔ Critic 56검사 번역
     조언자 Evidence            EvidenceIn[]
                                → CriticProcurementRequest
 
-★ **번역만 한다.** 판정은 `app.critic` 이 내리고, 여기는 이름을 옮긴다.
+★ **번역만 한다.** 판정은 `app.master.critic` 이 내리고, 여기는 이름을 옮긴다.
 
 ★ **없는 것을 만들지 않는다.**
   `inputs_used` 는 *"재무가 cap 을 낼 때 무엇을 읽었나"* 인데 **마스터는 그걸 모른다.**
@@ -38,34 +38,32 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from app.contracts.core import Evidence
+from app.master.critic.schemas import CriticProcurementRequest, CriticVerdictOut
 from app.master.envelope import AgentName
 
-if TYPE_CHECKING:  # 🔴 런타임에 들이면 순환이 된다 — 아래 설명.
-    from app.critic.schemas import CriticProcurementRequest, CriticVerdictOut
-
-# 🔴 **Critic 을 모듈 최상단에서 들이지 않는다** (2026-09-07).
+# 🟢 **지연 import 를 되돌렸다** (2026-09-07 · 2판).
 #
-#   `app/orchestrator/` 를 마스터로 옮기면서 `app/critic/schemas.py` 가 마스터
+#   1판에서 `app/orchestrator/` 를 마스터로 옮기자 `app/critic/schemas.py` 가 마스터
 #   패키지를 읽게 됐다 (`AllocationIn`·`ScenarioIn` 은 원래 오케 소유였고 Critic 이
-#   *"같은 것을 두 벌 정의하지 않는다"* 며 공유한다). 그러면 이 고리가 닫힌다.
+#   *"같은 것을 두 벌 정의하지 않는다"* 며 공유한다). 그때 이 고리가 닫혔다.
 #
 #   ```text
-#   app.critic.schemas → app.master(__init__) → flow → critic_bridge → app.critic.schemas
+#   (옛) app/critic/schemas.py → app.master(__init__) → flow → critic_bridge → 다시 그 파일
 #   ```
 #
-#   `app.critic.schemas` 를 먼저 import 하는 순서에서 `ImportError` 가 난다 —
-#   `app.main` 이 정확히 그 순서다 (실측 2026-09-07).
+#   그래서 어노테이션 전용 블록 + 함수 안 import 로 고리를 끊었다.
 #
-# ★ **동작은 안 바뀐다.** 이름은 어노테이션(`from __future__ import annotations` 라
-#   문자열이다)과 `build_request` 안에서만 쓰이고, 후자는 부를 때 들인다.
+# ★ **critic 이 마스터 안으로 들어오면서 그 고리가 없어졌다.** 이제
+#   `app.master.critic.schemas` 를 들이려면 부모 `app.master` 가 **먼저** 끝까지 도는데,
+#   그 도중 여기서 부르는 `app.master.critic.schemas` 는 아직 sys.modules 에 없어
+#   처음부터 온전히 실행된다. 1판이 근본 원인으로 짚은 *"입력 계약의 소유"* 가
+#   같은 패키지 안으로 들어오면서 해소됐다.
 #
-# ⚠️ **근본 원인은 소유다** — 입력 계약(`AllocationIn`·`ScenarioIn`)이 마스터 밑에
-#   있는데 Critic 이 그것을 읽는다. 어느 파트도 아닌 자리(`app/contracts/`)로
-#   옮기면 지연 import 가 필요 없어진다. 이 판의 합의가 **위치 이동과 import 정정
-#   까지**라 여기서는 고리만 끊는다.
+#   실측 2026-09-07 — `app.main` · `app.master.critic.schemas` 먼저 · `app.master`
+#   먼저 · `app.master.critic_bridge` 먼저, 네 순서 모두 통과한다.
 
 _FINANCE = "finance"
 _INVENTORY = "inventory"
@@ -150,8 +148,6 @@ def build_request(
 
     넘길 수 없으면 `CriticSkipped` 를 올린다 — **부르는 쪽이 `skipped` 로 적는다.**
     """
-    from app.critic.schemas import CriticProcurementRequest  # 순환 회피 — 위 주석 참조
-
     if not item:
         raise CriticSkipped("품목이 정해지지 않아 Critic 에 넘기지 못했다 (M-26 · 품목 축)")
 

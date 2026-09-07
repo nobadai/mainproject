@@ -12,9 +12,9 @@ Finance / Logistics 통합테스트와 같은 방식이다 — Provider 를 실�
 
 from datetime import date
 
-from app.critic.llm.judge import JudgeRunner
-from app.critic.llm.runtime import JudgeService, get_llm_settings
-from app.critic.llm.runtime import LLMSettings as CriticLLMSettings
+from app.master.critic.llm.judge import JudgeRunner
+from app.master.critic.llm.runtime import JudgeService, get_llm_settings
+from app.master.critic.llm.runtime import LLMSettings as CriticLLMSettings
 from app.master.cycle_schemas import BandOut, ClipResultOut, ProcurementResponse
 
 _LLM_FIELDS = {
@@ -104,7 +104,7 @@ def test_default_response_is_disabled_not_crashing():
 
 # --- Critic -------------------------------------------------------------------
 def test_critic_verdict_carries_llm_fields():
-    from app.critic.schemas import CriticVerdictOut
+    from app.master.critic.schemas import CriticVerdictOut
 
     assert _LLM_FIELDS <= set(CriticVerdictOut.model_fields)
 
@@ -249,7 +249,7 @@ def test_critic_api_reports_zero_l5_coverage_when_llm_unavailable(monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from app.critic.router import router
+    from app.master.critic.router import router
 
     # 아무도 듣지 않는 포트 — 실제 Ollama 없이 장애 상황을 만든다.
     _force_unreachable_ollama(monkeypatch)
@@ -291,7 +291,7 @@ def test_critic_api_skips_l5_when_no_rationale_submitted(monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from app.critic.router import router
+    from app.master.critic.router import router
 
     _force_unreachable_ollama(monkeypatch)
 
