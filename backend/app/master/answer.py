@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.master.envelope import agent_dept
+from app.master.inputs import injected_keys
 from app.master.status_flow import StatusOutcome
 
 #: 부서 이름을 사람 말로. **없는 이름은 그대로 쓴다** (지어내지 않는다).
@@ -428,8 +429,16 @@ def facts_from_procurement(response: Any) -> AnswerFacts:
 
     # 🔴 **입력이 어디서 왔는지를 결론과 같은 화면에 둔다.** mock 에서 온 값이 섞였는데
     #    결론만 읽으면 실측으로 오해한다 (`inputs.py`).
-    for key, source in (getattr(response, "input_sources", None) or {}).items():
+    sources = getattr(response, "input_sources", None) or {}
+    for key, source in sources.items():
         facts.append(Fact(label=f"입력 {key}", value=source))
+    # 🔴 **주입한 값을 DB 값으로 보이게 두지 않는다** (매입 실측 2026-09-07).
+    #    백테스트 통로가 실은 값은 이번 실행이 실제로 쓴 것인데, 전에는 출처표가
+    #    비거나(셋 다 주입) DB 출처를 적었다(일부 주입) — **뒤가 더 나쁘다.**
+    #    `mocked_inputs` 와는 **별도 줄**이다. 주입은 mock 이 아니다.
+    injected = injected_keys(sources)
+    if injected:
+        gaps.append(f"⚠️ {', '.join(injected)} 는 요청이 직접 준 값입니다 — DB 를 안 읽었습니다")
     if getattr(response, "mocked_inputs", None):
         gaps.append(
             f"🔴 {', '.join(response.mocked_inputs)} 는 mock 에서 왔습니다 — "

@@ -56,6 +56,30 @@ Grade = Literal[
     "MISSING",  # 못 구했다. 지어내지 않고 비운다
 ]
 
+#: 🔴 **요청 본문이 직접 준 값**의 등급 (매입 실측 2026-09-07).
+#:
+#: `Grade` 에 넣지 않는다 — `Grade` 는 *"적재층이 어디서 읽었는가"* 이고, 이것은
+#: **적재층을 아예 안 탔다**는 사실이라 같은 축이 아니다. `SourcedInput` 이 생기지도
+#: 않는 자리라 등급을 붙일 대상이 없다.
+#:
+#: ★ 그래도 출처표(`input_sources`)에는 같은 `등급:소스` 모양으로 나간다 — 화면과
+#:   부서 payload 가 한 표를 읽기 때문이다.
+REQUEST_GRADE = "REQUEST"
+
+
+def injected_keys(sources: Any) -> tuple[str, ...]:
+    """출처표에서 **주입분만** 추린다 — 화면 문구가 읽는 자리.
+
+    ★ `ProcurementRunResponse` 에 칸을 새로 만들지 않는다. 같은 사실의 주인은
+      `input_sources` 하나이고, 화면은 그것을 읽어 문장으로 옮기기만 한다.
+
+    ★ **`mocked_inputs` 와 섞지 않는다.** 그것은 `grade == "MOCK"` 만 세고 실행을
+      세우는 데 쓴다. 주입은 세울 일이 아니라 적을 일이다.
+    """
+    prefix = f"{REQUEST_GRADE}:"
+    return tuple(key for key, source in (sources or {}).items() if str(source).startswith(prefix))
+
+
 #: 확정 주문을 내다볼 기간. 매입 ③이 `total_kg ÷ order_window_days` 로 일수요를 낸다.
 _ORDER_WINDOW_DAYS = 14
 
