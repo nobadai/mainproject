@@ -13,7 +13,6 @@
   자리**뿐이다.
 """
 
-import ast
 from datetime import date
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from app.purchase_agent.adapter import build_state, validate_payload
 # ★ **봉투를 다시 짓지 않는다.** ``test_adapter.py`` 가 이미 mock 포트로 정상 payload 를
 #   만든다 — 여기서 또 지으면 필수 키 목록이 두 곳이 되고, 어댑터가 요구 사항을 늘리는
 #   날 이 파일만 조용히 낡는다.
+from tests.test_purchase_agent._ast_helpers import code_string_literals, references
 from tests.test_purchase_agent.test_adapter import _payload, _request
 
 #: 마스터 실측 (`#310` 회신 · ``as_of=2026-01-08`` 배추). 이 모양이 실제로 온다.
@@ -50,29 +50,6 @@ _NODES = Path(__file__).resolve().parents[2] / "app" / "purchase_agent" / "nodes
 
 #: 이 검사가 쓰는 앵커. mock 포트가 이 날짜로 3품목을 다 낸다.
 AS_OF = date(2026, 8, 21)
-
-
-def _references(path: Path) -> bool:
-    """이 파일이 ``approved_commitments`` 를 **실제로 참조하는가.**
-
-    🔴 **docstring 과 주석은 안 센다.** 문자열 검색으로 세던 판이 `#332` 머지에서
-      깨졌다 — ``_warehouse_rationale`` 의 docstring 이 *"approved_commitments 도
-      in_transit 도 안 온다"* 라고 **안 온다는 사실을 적고 있었는데**, 그것을
-      *"읽는다"* 로 셌다.
-    """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    # docstring 은 문(statement) 자리에 홀로 선 문자열이다 — 그 노드만 걷어낸다.
-    prose = {
-        id(node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-    }
-    return any(
-        isinstance(node, ast.Constant)
-        and node.value == "approved_commitments"
-        and id(node) not in prose
-        for node in ast.walk(tree)
-    )
 
 
 def test_승인_약정이_state_에_실린다() -> None:
@@ -156,7 +133,11 @@ def test_이_값을_읽는_노드가_어디인지_잠근다() -> None:
       이력은 안 본다 — 그쪽이 읽기 시작하면 여기가 울고, 그때 *"판정에 쓰는가"* 를
       다시 물어야 한다. 근거 문장에 적는 것과 수량을 바꾸는 것은 다른 일이다.
     """
-    readers = {path.name for path in sorted(_NODES.glob("*.py")) if _references(path)}
+    readers = {
+        path.name
+        for path in sorted(_NODES.glob("*.py"))
+        if references(path, "approved_commitments")
+    }
 
     assert readers == {"package_scenarios.py"}, (
         f"승인 이력을 읽는 노드가 바뀌었다: {sorted(readers)}. "
@@ -170,13 +151,12 @@ def test_받는_줄이_adjustments_옆에_있다() -> None:
 
     🔴 **문자열이 아니라 구문으로 본다** (규칙 8). 주석이나 docstring 에 이름이
       적혀 있는 것으로는 *"실제로 그 dict 에 담기는가"* 를 증명하지 못한다.
+
+    ⚠️ 이 검사도 처음엔 docstring 을 같이 셌다 (2026-09-07 정정). *"구문으로 본다"* 고
+      적어 놓고 ``ast.Constant`` 를 전부 세고 있었으니, 어댑터 docstring 에 두 이름이
+      적혀 있기만 해도 통과했을 것이다 — `_ast_helpers` 가 그 자리를 막는다.
     """
-    source = (_NODES.parent / "adapter.py").read_text(encoding="utf-8")
-    keys = {
-        node.value
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
+    keys = set(code_string_literals(_NODES.parent / "adapter.py"))
 
     assert "approved_commitments" in keys
     assert "adjustments" in keys
