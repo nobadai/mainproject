@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -30,7 +31,13 @@ from app.master.execution_day import (
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
 from app.master.market_calendar import get_market_calendar
-from app.master.inputs import MasterInputs, SourcedInput, collect_inputs, load_forecast
+from app.master.inputs import (
+    REQUEST_GRADE,
+    MasterInputs,
+    SourcedInput,
+    collect_inputs,
+    load_forecast,
+)
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID, get_burn_in
 from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
@@ -161,6 +168,8 @@ def run_procurement(
         return response
 
     inputs = _inputs_for(request)
+    # 🔴 **주입한 키는 주입이라고 적는다** (매입 실측 2026-09-07 · `_input_sources`).
+    sources = _input_sources(request, inputs)
     commitments = _approved_commitments(request)
     calendar_envelope, calendar_skipped = _execution_calendar_payload(request.as_of)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
@@ -178,13 +187,13 @@ def run_procurement(
         #   N4 · N5 와 같은 모양이다: 값은 아는 쪽이, 계산은 쓰는 쪽이.
         execution_calendar=calendar_envelope,
         # ★ 값과 출처를 **떼어 놓지 않는다.** 응답에만 싣던 것을 payload 에도 나른다.
-        input_sources=inputs.sources() if inputs else {},
+        input_sources=sources,
         # 🔴 실어 주기만 하지 않고 **막는 쪽까지** 잇는다 (2026-09-03).
         #   응답의 `mocked_inputs` 는 화면 경고용이고, 이것은 실행을 세우는 용도다.
         mocked_inputs=inputs.mocked if inputs else (),
     ).run(has_unmet_obligation=request.has_unmet_obligation)
 
-    response = _to_response(context, outcome, inputs)
+    response = _to_response(context, outcome, inputs, sources)
     response.day_gate = day_gate
     response.concerns = [
         *response.concerns,
@@ -635,6 +644,46 @@ def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
         return None
 
 
+#: 요청 본문이 직접 실을 수 있는 입력 3종 (§3.2.5 의 백테스트 통로).
+#: `run_procurement` 이 `request.<key> or _payload(inputs, key)` 로 쓰는 그 셋이고,
+#: 이름이 갈리면 출처표가 값과 어긋나므로 **한 자리에서만 적는다.**
+_INJECTABLE_INPUTS: tuple[str, ...] = ("forecast", "confirmed_orders", "policy_values")
+
+
+def _input_sources(request: ProcurementRunRequest, inputs: MasterInputs | None) -> dict[str, str]:
+    """이번 실행이 **실제로 쓴 값**의 출처표.
+
+    🔴 **주입은 mock 이 아니고 측정도 아니다** (매입 실측 2026-09-07).
+
+      백테스트 통로는 정당하다 — *"요청이 직접 준 값이 이긴다"* 는 `_inputs_for` 가
+      이미 적어 둔 계약이다. 문제는 **그 사실이 화면까지 안 갔다**는 것이다.
+
+      .. code-block:: text
+
+          전   셋 다 주입   input_sources {}          화면에 경고 0건
+               forecast 만  MEASURED:v_ml_price_forecast
+                            🔴 실제로 쓴 값은 주입분이다 — **틀린 사실을 적극적으로 말한다**
+
+    ★ 빈 것은 *"모른다"* 이지만 틀린 출처는 *"안다고 잘못 말하는 것"* 이다. 뒤가 나쁘다.
+
+    ★ **`mocked_inputs` 와 섞지 않는다.** 그것은 `grade == "MOCK"` 만 세고, 세면
+      `ProcurementFlow` 가 실행을 세운다. 주입은 세울 일이 아니라 적을 일이다 —
+      한 칸에 두 사실을 담으면 둘 다 못 읽는다.
+
+    ```text
+    REQUEST:<key>      요청 본문이 준 값 — 이번 실행이 실제로 쓴 것
+    MEASURED:<source>  DB 에서 읽은 값
+    DERIVED:<source>   DB 값에서 규칙으로 파생
+    MISSING:- · MOCK:  (`inputs.py` 그대로)
+    ```
+    """
+    sources = dict(inputs.sources()) if inputs else {}
+    for key in _INJECTABLE_INPUTS:
+        if getattr(request, key, None):
+            sources[key] = f"{REQUEST_GRADE}:{key}"
+    return sources
+
+
 @dataclass(frozen=True)
 class _CommitmentLookup:
     """어제까지의 약정 조회 결과. **실은 것과 못 실은 이유를 같이 든다** (#185 후속).
@@ -731,9 +780,20 @@ def _to_response(
     context: ExecutionContext,
     outcome: ProcurementOutcome,
     inputs: MasterInputs | None = None,
+    sources: Mapping[str, str] | None = None,
 ) -> ProcurementRunResponse:
+    """★ **출처표는 부서 payload 와 같은 표다** (`_input_sources`).
+
+    같은 실행에서 `run_procurement` 이 한 번 만든 것을 그대로 받는다 — 여기서 다시
+    `inputs.sources()` 를 부르면 주입분이 빠져 **화면과 payload 가 갈린다.**
+
+    ⚠️ `mocked_inputs` 는 여기서도 `inputs.mocked` 그대로다. 주입은 mock 이 아니라
+      섞지 않는다 (`inputs.injected_keys`).
+    """
+    if sources is None:
+        sources = inputs.sources() if inputs else {}
     return ProcurementRunResponse(
-        input_sources=inputs.sources() if inputs else {},
+        input_sources=dict(sources),
         mocked_inputs=list(inputs.mocked) if inputs else [],
         request_id=context.request_id,
         as_of=context.as_of,
