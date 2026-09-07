@@ -42,6 +42,7 @@ from app.logistics.rules import (
     derive_procurement_verdict,
     evaluate_procurement_business_signals,
     evaluate_procurement_rules,
+    evaluate_sales_business_signals,
     merge_business_warnings,
 )
 from app.logistics.scenario_engine import (
@@ -71,6 +72,7 @@ _T_ARRIVAL = "calculate_expected_arrival_dates"
 _T_LOTS = "build_lot_constraints"
 _T_INVENTORY = "build_inventory_by_item"
 _T_SIGNALS = "evaluate_procurement_business_signals"
+_T_SALES_SIGNALS = "evaluate_sales_business_signals"
 
 
 # --- Critic DeptMeta (#134) -------------------------------------------------
@@ -145,6 +147,13 @@ _TOOL_INPUTS: dict[str, tuple[str, ...]] = {
         "logistics_snapshot.on_hand_by_lot",
         "logistics_snapshot.confirmed_outbound_schedule",
     ),
+    # PRE_SALES 전용 — `inputs_used` 에 실리지 않는다 (PRE_SALES 는 DeptMeta 를 내지
+    # 않는다, `_inventory_dept_meta` 참조). 그래도 적는 이유는 위 ★ 넷째 항목과 같다:
+    # **관측을 내게 되는 날 이 표가 이미 맞아 있어야** 조용한 누락이 안 생긴다.
+    _T_SALES_SIGNALS: (
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.freshness_pressure_ratio",
+    ),
     # 아래 둘은 SCENARIO_VALIDATION 전용이라 `inputs_used` 에 실리지 않는다. 계약을
     # 비워 두지 않는 이유는 위 ★ 넷째 항목이다.
     _T_ARRIVAL: ("scenarios", "split_plan"),
@@ -178,7 +187,8 @@ def _assert_tool_input_contracts_complete() -> None:
     `inputs_used` 누락이 아니라 **import 실패**로 즉시 드러난다 (재무와 같은 규율).
     """
     undeclared = sorted(
-        {_T_RULES, _T_CAP, _T_ARRIVAL, _T_LOTS, _T_INVENTORY, _T_SIGNALS} - set(_TOOL_INPUTS)
+        {_T_RULES, _T_CAP, _T_ARRIVAL, _T_LOTS, _T_INVENTORY, _T_SIGNALS, _T_SALES_SIGNALS}
+        - set(_TOOL_INPUTS)
     )
     if undeclared:
         raise _ToolInputContractMissing(", ".join(undeclared))
@@ -215,6 +225,15 @@ def _inventory_dept_meta(
     검사 축이 없다. 없는 검사에 가짜 `inputs_used` 를 지어내지 않고 **실제 산출 필드만**
     낸다 — `E-AUTHORITY` 는 그것으로 돈다. 마스터가 두 mode 의 관측을 **합쳐서** 나르므로
     빈 `inputs_used` 가 경계 관측을 덮지 않는다 (`critic_bridge._dept_meta_in`).
+
+    🔴 **`PRE_SALES` 는 관측 자체를 내지 않는다 — `None` 이 답이다** (#346).
+      `_dept_meta_in` 을 부르는 것은 매입 Flow(`master/flow.py` → `critic_bridge`)뿐이고
+      판매 Flow(`master/sales_flow.py`)에는 Critic 경로가 아예 없다. 소비자가 없는데
+      관측을 내면 두 가지가 동시에 틀린다 — `_CAP_CHECK_ID` 는
+      `DEPT_CAP_CHECK_ID["inventory"]`, 즉 **매입 밴드 전용 이름**이라 판매 회신의
+      입력이 그 이름으로 실리면 매입의 밴드 검사가 판매 입력을 읽고, 새 check_id 를
+      지어내면 **마스터가 만들지 않은 계약**을 물류가 먼저 만드는 것이 된다.
+      마스터가 판매용 check 계약을 내는 날 여기에 분기를 추가한다.
     """
     if mode == "SCENARIO_VALIDATION":
         return {
@@ -283,17 +302,24 @@ _VERDICT_MAP: Mapping[str, Verdict] = {
 """
 
 
-#: 실행 축을 **실제로 읽는** mode — 이 셋만 `sim_run_id` 문을 지난다 (#345).
+#: 실행 축을 **실제로 읽는** mode — 이 넷만 `sim_run_id` 문을 지난다 (#345 · #346).
 #
-# 🔴 **미구현 mode 를 이 문 앞에 세우지 않는다.** `PRE_SALES` 는 아직
-#   `_not_implemented` 가 받는 자리인데(#346), 실행 축이 비었다고 그 답을
-#   `sim_run_id` 누락으로 바꾸면 *"번역이 없다"* 가 *"값이 안 왔다"* 로 뒤바뀐다.
-#   **없는 구현을 값 탓으로 돌리는 것은 거짓이고**, 마스터는 그 말을 듣고 사용자에게
-#   줄 수 없는 것을 달라고 한다 (M-1 §5.1).
+# 🔴 **미구현 mode 를 이 문 앞에 세우지 않는다.** 실행 축이 비었다고 *"번역이 없다"* 를
+#   `sim_run_id` 누락으로 바꾸면 **없는 구현을 값 탓으로 돌리는 거짓**이 되고, 마스터는
+#   그 말을 듣고 사용자에게 줄 수 없는 것을 달라고 한다 (M-1 §5.1).
 #
-# ★ 아래 세 handler 가 전부 같은 `_load_read` 를 지나므로 문은 하나면 된다.
+#   ★ **`PRE_SALES` 가 이 문 뒤로 들어온 것은 #346 이 그 번역을 실제로 구현했기
+#     때문이다.** 종전 주석은 *"`PRE_SALES` 는 아직 `_not_implemented` 가 받는 자리"* 라고
+#     적혀 있었는데 그 문장은 이제 사실이 아니다. 규율은 그대로다 — **바뀐 것은 예시가
+#     아니라 사실이고, 규율은 아래 불변식이 지킨다.**
+#
+#   ★ **불변식: 이 집합 ⊆ `logistics_port` 가 실제 handler 로 보내는 mode.**
+#     구현보다 문이 먼저 서면 그 순간 위 거짓이 되살아난다.
+#     `tests/logistics/test_logistics_adapter.py` 가 구조로 잠근다.
+#
+# ★ 아래 네 handler 가 전부 같은 `_load_read` 를 지나므로 문은 하나면 된다.
 _RUNTIME_AXIS_MODES: frozenset[str] = frozenset(
-    {"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}
+    {"PRE_PURCHASE", "PRE_SALES", "SCENARIO_VALIDATION", "STATUS_QUERY"}
 )
 
 
@@ -305,6 +331,8 @@ def logistics_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata
         return _no_run_axis(request)
     if request.mode == "PRE_PURCHASE":
         return _pre_purchase(request)
+    if request.mode == "PRE_SALES":
+        return _pre_sales(request)
     if request.mode == "SCENARIO_VALIDATION":
         return _scenario_validation(request)
     if request.mode == "STATUS_QUERY":
@@ -888,6 +916,426 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         reasoning="물류 경계를 산출했다.",
     )
     return reply, _meta(request, run_id, tools, reply)
+
+
+# ---------------------------------------------------------------------------
+# PRE_SALES — 판매 제안 전 "지금 팔 수 있는 것" 컨텍스트 (#346)
+# ---------------------------------------------------------------------------
+
+#: 날짜별 판매가능량을 못 낸 사실의 이름. **숫자가 없다** (`rules` 어휘 규칙과 같다).
+_SUPPLY_BY_DATE_UNRESOLVED = "SUPPLY_CAPACITY_BY_DATE_UNRESOLVED"
+
+#: 납기 가능성을 못 판정한 축들. 셋 다 **실측으로 확인한 정본 부재**다.
+#:
+#: ```text
+#: DELIVERY_ROUTE_UNRESOLVED         routes/origin/destination 표가 저장소·실 DB 어디에도 없다
+#: TRANSPORT_LEAD_TIME_UNRESOLVED    standard_minutes 에 해당하는 칸이 없다
+#: EARLIEST_DELIVERY_DATE_UNRESOLVED 가장 이른 납기일을 내는 권위 함수가 없다
+#: ```
+#:
+#: 근거는 `app/logistics/transport.py` 모듈 주석의 2026-09-05 스키마 실측이다.
+#: 🔴 **지도 API·평균속도·거리÷속도로 분을 지어내지 않는다** — 저쪽이 같은 이유로
+#:    `standard_minutes=None` 을 유지하고 있고, 여기서 만들면 그 규율이 무너진다.
+_DELIVERY_UNCERTAINTIES: tuple[str, ...] = (
+    "DELIVERY_ROUTE_UNRESOLVED",
+    "TRANSPORT_LEAD_TIME_UNRESOLVED",
+    "EARLIEST_DELIVERY_DATE_UNRESOLVED",
+)
+
+
+def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """판매가 후보를 만들기 **전에** 묻는 것 — *"지금 무엇을 얼마나 팔 수 있나."*
+
+    ★ **새 판매가능량 엔진이 아니다.** 숫자는 전부 `tools` · `rules` 의 결정론 함수가
+      만들고 여기는 번역만 한다 (이 파일의 다른 handler 와 같은 규율).
+
+    🔴 **기존 `/logistics/sales` 경로를 부르지 않는다** (#346 분석 결과). 닮은 이름이라
+       재사용처럼 보이지만 **목적이 다른 사이클**이다.
+
+    ```text
+    /logistics/sales   H1 **승인 매입**을 미래 입고로 Overlay 한 뒤의 창고 판정
+    PRE_SALES          판매 제안 **전**의 초기 컨텍스트 — 승인 매입이 아직 없다
+    ```
+
+      ★ 셋이 각각 다른 이유로 막힌다.
+
+      ```text
+      run_logistics_sales()               _get_snapshot_or_none(as_of) → sim_run_id 축 소실
+                                          + save_logistics_agent_run() → DB write
+      run_logistics_sales_with_snapshot()  enrich_logistics_response() → LLM 경로
+      run_logistics_sales_scenario()       request.approved_purchase 를 반드시 읽는다
+      evaluate_sales_rules()               future_occupancy_by_date(=Overlay 산출)를 전제한다
+      ```
+
+      🔴 **가짜 승인 매입을 만들어 통과시키지 않는다.**
+         `LogisticsApprovedPurchaseCommitment` 은 `total_qty_kg > 0` ·
+         `arrival_schedule` 최소 1건이라 **빈 값도 0 도 넣을 수 없다** — 넣으려면
+         없는 입고를 지어내야 하고, 그 지어낸 입고가 `LOG-H01`(미래 점유 ≤ 보장 capacity)
+         판정을 그대로 바꾼다. 숫자는 나오고 에러도 안 나며 봉투도 통과한다.
+
+    ★ **그래서 재사용 단위는 함수다** — `build_inventory_by_item` ·
+      `build_lot_constraints` · `evaluate_sales_business_signals` 셋은 승인 매입 없이
+      돌고, 세 함수가 PRE_SALES 가 답할 수 있는 것의 전부다.
+
+    ★ **payload 는 판매 계약(`app.sales.schemas.SalesLogisticsContext`)의 낱말을 쓴다.**
+      🔴 **그 모듈을 import 하지 않는다** — 조정자를 건너뛰고 두 부서를 실행 계층에서
+      붙이면 판매가 자기 파일을 고치는 날 물류가 같이 깨진다 (마스터가 판매 어휘를
+      베껴 두고 테스트로만 대조하는 것과 같은 판단, `master/envelope.Capability`).
+      맞추는 것은 **JSON 모양뿐**이다.
+
+      🔴 **숫자를 실은 셋만 payload 최상위에 둔다.**
+
+      ```text
+      inventory_by_item                  → sellable_supply.inventory_by_item
+      lot_constraints                    → sellable_supply.lot_constraints
+      shared_daily_outbound_capacity_kg  → delivery_feasibility.daily_outbound_capacity_kg
+      ```
+
+         나머지는 판매 계약 그대로 중첩인데, 이 셋만 올라온 것은 취향이 아니라
+         **봉투가 중첩 안의 숫자를 주소지정하지 못하기 때문**이다.
+
+      ```text
+      envelope._CLAIM_PATH   ^(?P<key>[^\\[\\].]+)\\[(?P<sel>[^\\]]+)\\]\\.(?P<sub>.+)$
+                             key 에 점을 못 쓴다 → 한 겹만 판다
+      envelope.required_claims   Mapping 값은 통째로 건너뛴다
+      ```
+
+         중첩해 두면 두 가지가 동시에 일어난다 — 판매가능 수량·Lot 수량·신선도·출고
+         여력에 **근거가 하나도 요구되지 않고**(검사가 없어서 통과), 그렇다고 근거를
+         달면 `sellable_supply.inventory_by_item[배추].available_qty_kg` 가 어디도 못
+         가리켜 `E-EVIDENCE-ORPHAN` 이 된다.
+
+         ★ **가장 가까운 조상에 다는 것도 답이 아니다.** 출고 여력을
+           `delivery_feasibility` 안에 두고 근거를 그 블록 이름에 달아 봤더니
+           *"`delivery_feasibility` 라는 판정의 값이 5,000kg"* 으로 읽혔다 — 그 판정은
+           `UNRESOLVED` 라 **근거와 대상의 뜻이 어긋난 채 봉투를 통과했다.**
+           그래서 그 숫자도 정책 이름 그대로 최상위로 올렸다.
+
+         **근거를 붙일 수 있는 자리가 최상위뿐**이라 숫자를 실은 셋만 올린다.
+         받는 쪽이 제자리로 옮기는 것은 위 표대로 **키 셋을 옮기는 일**이다.
+
+    ★ **판정하지 않는다.** 판매 승인·거절은 판매와 재무가 하고 물류는 사실만 낸다 —
+      `judgment_fields` 가 비어 있고 새 verdict 도 만들지 않는다 (`_status_query` 와 같다).
+    """
+    as_of = request.context.as_of
+    run_id = _run_id(request)
+    tools: list[str] = [_T_INVENTORY]
+
+    try:
+        read = _load_read(as_of=as_of, sim_run_id=request.context.sim_run_id)
+    except _SnapshotLoadError:
+        return _snapshot_error(request, run_id, tools)
+    snapshot = read.snapshot if read is not None else None
+    if snapshot is None:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=("logistics_snapshot", "logistics_runtime_fixture"),
+            reason="물류 스냅샷을 읽지 못했다",
+        )
+    # ★ as_of 대조 — 다른 날의 재고는 그날의 사실이 아니다 (§1.2-6)
+    #
+    # ★ **사유에 날짜를 적지 않는다.** `check_reasoning` 의 `E-REASONING-NUMERIC` 은
+    #   `contributes_to_band` 와 무관하게 돌아서 `2025-12-31` 같은 문자열이 걸린다.
+    #   어긋난 기준일은 `missing_data` 이름이 이미 나른다.
+    if snapshot.as_of != as_of:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=(f"logistics_snapshot@{as_of.isoformat()}",),
+            reason="물류 스냅샷 기준일이 요청 기준일과 다르다",
+        )
+
+    # ── 현재 확정 판매가능량 ─────────────────────────────────────
+    #
+    # 🔴 **이 한 함수가 confirmed sellable 의 유일한 주인이다.** 새 계산식을 만들지
+    #    않는다 — `outbound.item_free_stock_qty`(예약이 실제로 잡을 수 있는 양)와 같은
+    #    답을 내도록 차감 규칙이 글자 그대로 맞춰져 있고, 그 둘이 갈리면 매입·판매는
+    #    팔 수 있다고 보는데 예약은 못 잡는 상태가 된다.
+    #
+    # ★ **`None` 은 fail-closed 다.** 예약·할당 축(`outbound_commitments`)이나 확정
+    #   출고의 품목 축을 못 읽었다는 뜻인데, 그때 `lot_constraints` 합계로 대신 답하면
+    #   **이미 팔린 재고를 다시 팔 수 있다고 답하게 된다.** 판매는 밴드가 없어 이
+    #   회신 없이도 시작하지만(`sales_flow._collect_supply_context`), 시작하는 것과
+    #   틀린 수량을 주는 것은 다르다.
+    inventory_by_item = build_inventory_by_item(snapshot)
+    if inventory_by_item is None:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=("inventory_by_item",),
+            reason=(
+                "현재 판매 가능 재고를 확정하지 못했다 — "
+                "예약·할당 축이나 확정 출고의 품목 축을 읽지 못했다."
+            ),
+        )
+
+    # ── 출고 여력 ────────────────────────────────────────────────
+    #
+    # ★ **없으면 READY 를 내지 않는다.** 판매 사이클의 기존 Rule 이 같은 기준이다 —
+    #   `evaluate_sales_rules` 의 `calculation_ready` 가 `N17`
+    #   (`shared_daily_outbound_capacity_kg`)을 필수로 세고 있다. 기준을 새로 정하는
+    #   것이 아니라 **그 Rule 이 이미 정해 둔 것을 따른다.**
+    outbound_capacity = snapshot.shared_daily_outbound_capacity_kg
+    if outbound_capacity is None:
+        return _not_ready(
+            request,
+            run_id,
+            tools,
+            missing=("shared_daily_outbound_capacity_kg",),
+            reason="공용 일일 출고 여력 정책이 없어 물류 상태를 답할 수 없다",
+        )
+
+    # ── Lot 근거 ─────────────────────────────────────────────────
+    tools.append(_T_LOTS)
+    lots = build_lot_constraints(snapshot)
+
+    # 🔴 **잔여 신선도를 낸 그 분모**를 함께 나른다. `remaining_freshness_days` 만 주면
+    #    받는 쪽이 *"며칠 중 며칠이 남았나"* 를 알 수 없어 `operational_limit_days`
+    #    원값으로 역산하는데, `중` 등급은 유효 한계가 `operational × medium_factor` 라
+    #    그 역산이 **갓 입고된 Lot 을 임박으로 만든다** (`InventoryLotSnapshot`
+    #    `effective_freshness_limit_days` 주석이 지적한 그 자리).
+    #
+    # ★ **다시 계산하지 않는다** — Repository 가 remaining 을 만들 때 실제로 쓴 값을
+    #   `lot_id` 로 그대로 집어 온다. `build_lot_constraints` 가 이 칸을 안 나르는 것은
+    #   `LotConstraint` 계약이라 물류 스키마를 여기서 넓히지 않는다 (#346 범위 밖).
+    freshness_limits = {
+        lot.lot_id: lot.effective_freshness_limit_days for lot in snapshot.on_hand_by_lot
+    }
+
+    # ── 신선도 업무 위험 ─────────────────────────────────────────
+    #
+    # ★ **승인 매입 없이 도는 유일한 판매 Rule 이다.** `evaluate_sales_rules` 와 달리
+    #   스냅샷만 읽는다.
+    #
+    # 🔴 **`FRESHNESS_QUALITY_RISK` 는 `SELL_PRIORITY` 가 아니다.** 이름이 비슷해 섞기
+    #    쉬운데 축이 다르다 — 이쪽은 *"지금 팔 수 있는 재고인가"*(물리 신선도)이고
+    #    `SELL_PRIORITY` 는 *"언제 팔고 싶은가"*(회전관리 · `item_turnover_policies`)다.
+    #    `turnover.py` 모듈 주석이 **둘은 동시에 다른 답을 낼 수 있어야 한다**고 못박고
+    #    있다. 이름을 바꿔 대신 쓰지 않는다.
+    tools.append(_T_SALES_SIGNALS)
+    business = evaluate_sales_business_signals(snapshot=snapshot)
+
+    # ── payload ──────────────────────────────────────────────────
+    ref = _ref(snapshot)
+    lots_ref = _lots_ref(snapshot)
+    policies_ref = _policies_ref(snapshot)
+
+    # 🔴 **구조적으로 못 내는 것의 이름.** READY 를 막지는 않지만(현재 재고와 현재
+    #    물류 상태는 권위 있게 답했다) 조용히 빠지지도 않는다 (§1.2-10).
+    #
+    # 🔴 **`delivery_feasibility` 를 여기 적지 않는다.** 그 블록은 **있다** — 판정이
+    #    `UNRESOLVED` 일 뿐이다. 있는 것을 없다고 적으면 마스터가 *"물류가 납기 블록을
+    #    안 보냈다"* 로 읽고 사용자에게 엉뚱한 것을 달라고 한다 (M-1 §5.1).
+    #
+    # ★ **실제로 없는 Fact 의 이름을 적는다.** 아래 셋은
+    #   `delivery_feasibility.uncertainties` 의 세 축과 **같은 사실**이고, 저쪽은 물류
+    #   내부 코드 어휘(`*_UNRESOLVED`)이며 이쪽은 마스터가 읽는 이름이다 —
+    #   `interpretation._MISSING_DATA_NAMES` 가 코드를 사람용 이름으로 옮기는 것과 같은
+    #   층 구분이다. 하나가 사라지면 다른 하나도 사라져야 하므로 검사로 묶어 둔다.
+    missing: list[str] = [
+        "supply_capacity_by_date",
+        "delivery_route",
+        "transport_lead_time",
+        "earliest_delivery_date",
+    ]
+
+    payload: dict[str, Any] = {
+        "as_of": as_of.isoformat(),
+        "query_scope": _query_scope(request, as_of),
+        # ↓ 최상위인 이유는 docstring 의 `_CLAIM_PATH` 절이다 — 근거를 달 수 있는 자리다
+        "inventory_by_item": [
+            {"item": entry.item, "available_qty_kg": _num(entry.available_qty_kg)}
+            for entry in inventory_by_item
+        ],
+        "lot_constraints": [
+            {
+                "lot_id": lot.lot_id,
+                "item": lot.item,
+                # 🔴 **예약·할당 차감 전 raw 다.** 위 `inventory_by_item` 과 **다른 뜻**이라
+                #    합산해서 판매가능량을 다시 만들면 안 된다 — 이 배열은 근거 컨텍스트다.
+                "available_qty_kg": _num(lot.available_qty_kg),
+                # 신선도는 **없을 수 있고 음수일 수 있다** — 둘 다 그대로 둔다 (§1.2-10).
+                # 음수는 *"신선도 기준을 지난 실제 일수"* 라는 사실이고, 0 으로 접으면
+                # **기준일 당일**과 **닷새 지난 Lot** 이 같은 값이 된다.
+                "remaining_freshness_days": lot.remaining_freshness_days,
+                "effective_freshness_limit_days": freshness_limits.get(lot.lot_id),
+                "grade": lot.grade,
+                "status": lot.status,
+            }
+            for lot in lots
+        ],
+        "sellable_supply": {
+            "status": "READY",
+            # 🔴 **비운 것이지 "0건 확인" 이 아니다.** 특정 납기일의 판매가능량을 내는
+            #    권위 계산이 물류에 없다 — `future_occupancy_by_date` 는 **창고 점유량**
+            #    이고 `cap_by_date` 는 **입고 여유 공간**이라 둘 다 공급량이 아니며,
+            #    현재 재고를 미래 날짜에 그대로 남는다고 볼 근거도 없다.
+            #    그 사실은 바로 아래 `uncertainties` 가 이름으로 말한다.
+            "supply_capacity_by_date": [],
+            "uncertainties": [_SUPPLY_BY_DATE_UNRESOLVED],
+        },
+        # 🔴 **정책 원값이라 그 이름으로 최상위에 둔다.**
+        #
+        #   종전에는 `delivery_feasibility.daily_outbound_capacity_kg` 안에 넣고
+        #   근거를 조상 블록(`claim="delivery_feasibility"`)에 달았다. **그것이 틀렸다** —
+        #   그 Evidence 는 *"delivery_feasibility 라는 판정의 값이 5,000kg"* 이라고 읽히는데
+        #   `delivery_feasibility` 는 숫자가 아니라 판정 블록이고, 그 판정은 `UNRESOLVED`
+        #   다. 근거와 대상의 뜻이 어긋난 채로 봉투를 통과했다.
+        #
+        # ★ **키 이름을 정책 이름 그대로 쓴다** (`snapshot.shared_daily_outbound_capacity_kg`).
+        #   `daily_outbound_capacity_kg` 로 줄여 적으면 *"이 회신이 계산한 무엇"* 으로
+        #   읽히지만, 이것은 3PL 공용 정책값을 **옮긴 것**이다. 이름이 출처를 말한다.
+        #
+        # ★ 받는 쪽 매핑은 **키 이동 한 번**이다 — 새 계산이 아니다.
+        #
+        #   ```text
+        #   payload.shared_daily_outbound_capacity_kg
+        #     → SalesLogisticsContext.delivery_feasibility.daily_outbound_capacity_kg
+        #   ```
+        "shared_daily_outbound_capacity_kg": _num(outbound_capacity),
+        "delivery_feasibility": {
+            # 🔴 **여력 숫자가 있다고 `READY` 로 올리지 않는다.** 하루 출고 총량은
+            #    *"얼마나 내보낼 수 있나"* 이고 납기 가능성은 *"그날 그 고객에게 닿나"* 다.
+            #    Route 도 운송 소요시간도 정본이 없어(아래 uncertainties) 뒤 질문에는
+            #    답할 수 없다 — feasible boolean 도 earliest_delivery_date 도 만들지 않는다.
+            #
+            # ★ **판정만 남았다.** 숫자는 위 최상위 칸이 소유한다 — 한 값이 두 자리에
+            #   있으면 받는 쪽이 어느 것을 볼지 갈린다.
+            "status": "UNRESOLVED",
+            # 업무 사유가 아니라 **확인 못 한 축**이라 reason_codes 가 아니라 uncertainties 다.
+            "reason_codes": [],
+            "uncertainties": list(_DELIVERY_UNCERTAINTIES),
+        },
+        # ★ **없는 판정을 지어내지 않는다.** 판매 사이클의 하드 제약은
+        #   `evaluate_sales_rules` 소유인데 그것은 승인 매입 Overlay 를 전제한다.
+        #   전제가 없는 자리에서 그 판정을 흉내 내면 근거 없는 PASS/FAIL 이 생긴다.
+        "hard_constraints": [],
+        # ★ **기존 코드명을 그대로 보존한다.** severity 도 점수도 새로 만들지 않는다 —
+        #   무엇으로 읽을지는 받는 쪽 몫이다.
+        "soft_warnings": [
+            {"code": code} for code in dict.fromkeys([*business["signals"], *business["warnings"]])
+        ],
+        "missing_data": list(missing),
+        # ★ **ref 를 발명하지 않는다** — Repository 가 스냅샷에 실어 둔 것 그대로다.
+        "evidence_refs": list(snapshot.evidence_refs),
+        "policy_version_used": read.policy.policy_version,
+    }
+
+    # ── 근거 ─────────────────────────────────────────────────────
+    evidences = _inventory_by_item_evidences(payload["inventory_by_item"], snapshot)
+    for row in payload["lot_constraints"]:
+        evidences.append(
+            _ev(
+                f"lot_constraints[{row['lot_id']}].available_qty_kg",
+                row["available_qty_kg"],
+                "kg",
+                lots_ref,
+                f"{row['item']} · 상태 {row['status']} — Lot 물리 잔량이다. "
+                "예약·할당 차감 전이라 판매가능량이 아니다",
+            )
+        )
+        if row["remaining_freshness_days"] is not None:
+            evidences.append(
+                _ev(
+                    f"lot_constraints[{row['lot_id']}].remaining_freshness_days",
+                    row["remaining_freshness_days"],
+                    "days",
+                    lots_ref,
+                    "유효 보관한계 − 입고 후 경과일. 음수는 한계를 지난 실제 일수다",
+                    extra_ref_ids=(policies_ref,) if policies_ref != lots_ref else (),
+                )
+            )
+        if row["effective_freshness_limit_days"] is not None:
+            evidences.append(
+                _ev(
+                    f"lot_constraints[{row['lot_id']}].effective_freshness_limit_days",
+                    row["effective_freshness_limit_days"],
+                    "days",
+                    policies_ref,
+                    "잔여 신선도를 낸 분모. `중` 등급은 운영 보관한계에 계수가 곱해진 값이라 "
+                    "품목 정책 원값과 다를 수 있다",
+                )
+            )
+    evidences.append(
+        # ★ **근거가 그 숫자를 정확히 가리킨다.** 조상 블록에 달면 판정 이름에 kg 값이
+        #   붙어 뜻이 어긋난다 — 그래서 숫자를 최상위로 올렸다 (payload 주석 참조).
+        _ev(
+            "shared_daily_outbound_capacity_kg",
+            outbound_capacity,
+            "kg",
+            _policy_ref(read.policy, "shared_daily_outbound_capacity_kg", ref),
+            f"3PL 공용 일일 출고 여력 정책값 ({read.policy.policy_version}) — "
+            "하루에 내보낼 수 있는 총량이지 납기 가능성 판정이 아니다",
+            grade="SIM_FIXED",
+        )
+    )
+    if payload["missing_data"]:
+        evidences.append(
+            _ev(
+                "missing_data",
+                len(payload["missing_data"]),
+                "name_count",
+                ref,
+                "이번 회신이 내지 못한 것의 이름 수 — 값이 아니라 세어 본 것이다",
+                source="tool_calc",
+            )
+        )
+    if payload["evidence_refs"]:
+        evidences.append(
+            _ev(
+                "evidence_refs",
+                len(payload["evidence_refs"]),
+                "ref_count",
+                ref,
+                "이 회신이 읽은 출처의 건수 — 값이 아니라 세어 본 것이다",
+                source="tool_calc",
+            )
+        )
+
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=as_of,
+        agent=_AGENT,
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="READY",
+        business_status="ok",
+        payload=payload,
+        evidences=tuple(evidences),
+        # 판매 승인·거절을 내지 않는다 — 낸 것이 없으니 근거를 요구할 판정도 없다
+        judgment_fields=(),
+        missing_data=tuple(dict.fromkeys(missing)),
+        reasoning=(
+            "현재 판매 가능 재고와 출고 여력을 조회했다. "
+            "날짜별 공급량과 납기 가능성은 근거가 없어 내지 않았다."
+        ),
+    )
+    return reply, _meta(request, run_id, tools, reply)
+
+
+def _query_scope(request: AgentRequest, as_of: date) -> dict[str, Any]:
+    """이 회신이 **무엇을 기준으로 답했나.** 마스터가 보낸 것만 읽는다.
+
+    ★ **추론하지 않는다.** 마스터가 ②에 싣는 것은 사용자 조건 그대로이고
+      (`sales_flow._context_input`), 거기 없는 것은 물류도 모른다.
+      `delivery_window_start/end` 도 `max_confirmed_sellable_quantity_kg` 도 만들지
+      않는다 — 특히 뒤엣것은 판매가 **쓰지 않기로 못박은** 값이다
+      (`test_delivery_date_uses_exact_logistics_vector_not_query_scope_max`).
+
+    ★ 품목이 없으면 **칸을 만들지 않는다.** `item: None` 을 실으면 받는 쪽이
+      *"품목 지정이 없었다"* 와 *"물류가 안 읽었다"* 를 구별할 수 없다 (§1.2-10).
+    """
+    scope: dict[str, Any] = {"as_of": as_of.isoformat()}
+    user_request = request.payload.get("user_request")
+    if isinstance(user_request, Mapping):
+        item = user_request.get("item")
+        if isinstance(item, str) and item.strip():
+            scope["item"] = item
+    return scope
 
 
 # ---------------------------------------------------------------------------
