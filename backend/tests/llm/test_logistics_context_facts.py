@@ -1,29 +1,43 @@
 """P6 facts 구조화 — formatter·인용 화이트리스트·상한·기록 (LLM 정책 결정서 v1.3 §5)."""
 
 import json
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
+from app.logistics import interpretation
 from app.logistics.interpretation import (
+    MASTER_LLM_ENV,
     _assemble_facts,
     _build_signal_facts,
     build_logistics_context,
+    build_sanitized_context,
     format_count,
     format_measured_percent,
     format_policy_percent,
     format_ratio_with_threshold,
+    master_interpretation_service,
+    master_llm_enabled,
+    translate_missing_data,
+    uncalled_interpretation,
 )
 from app.logistics.llm.runtime import (
     InterpretationService,
     InterpretationValidationError,
     LLMSettings,
+    UnavailableProvider,
     ValidationIssue,
     build_template_interpretation,
     validate_interpretation,
 )
 from app.logistics.llm.schemas import ContextFact, SanitizedLLMContext
-from app.logistics.schemas import LogisticsSalesResponse
+from app.logistics.schemas import (
+    InboundConstraints,
+    LogisticsBand,
+    LogisticsProcurementResponse,
+    LogisticsSalesResponse,
+)
 
 # ---------------------------------------------------------------------------
 # formatter — 표기 스펙 (2026-08-31 확정)
@@ -350,3 +364,224 @@ def test_skipped_and_disabled_record_empty_facts():
     assert skipped.llm_context_facts == []
     assert disabled.llm_status == "DISABLED"
     assert disabled.llm_context_facts == []
+
+
+# ---------------------------------------------------------------------------
+# 공통 조립기 추출 (#385) — wrapper 등가 · 번역 멱등 · 무숫자 경계
+# ---------------------------------------------------------------------------
+
+
+def _procurement_response(**overrides) -> LogisticsProcurementResponse:
+    fields = {
+        "as_of": date(2026, 1, 20),
+        "snapshot_id": None,
+        "runtime_status": "READY",
+        "verdict": "REVIEW_REQUIRED",
+        "band": LogisticsBand(cap_by_date={}),
+        "inbound_constraints": InboundConstraints(
+            inbound_lead_days=None,
+            daily_inbound_capacity_kg=None,
+            inbound_transport_capacity_kg=None,
+        ),
+        "hard_constraints": [],
+        "soft_warnings": ["SCENARIO_ADJUSTMENT_REQUIRED", "CAPACITY_TIGHT_POLICY_UNRESOLVED"],
+        "missing_data": ["capacity_tight_policy"],
+        "preferred_adjustment": "quantity",
+        "evidences": [],
+    }
+    fields.update(overrides)
+    return LogisticsProcurementResponse(**fields)
+
+
+_SCENARIO_MEASUREMENTS = {"scenario_conditional_count": 2, "scenario_total_count": 3}
+
+
+def test_sales_wrapper_equals_direct_builder_and_keeps_previous_behaviour():
+    response = _sales_response(
+        soft_warnings=["FRESHNESS_QUALITY_RISK", "SNAPSHOT_ID_UNRESOLVED"],
+        missing_data=["snapshot_id"],
+    )
+
+    via_wrapper = build_logistics_context(response, _FRESHNESS_MEASUREMENTS)
+    direct = build_sanitized_context(
+        cycle="SALES",
+        signals=response.soft_warnings,
+        measurements=_FRESHNESS_MEASUREMENTS,
+        preferred_adjustment=response.preferred_adjustment,
+        missing_data=response.missing_data,
+    )
+
+    assert via_wrapper == direct
+    # 추출 전 동작 그대로 — 핀
+    context, incomplete = via_wrapper
+    assert incomplete is False
+    assert context.signals == ["FRESHNESS_QUALITY_RISK"]
+    assert context.allowed_adjustments == ["우선 출고 대상으로 검토합니다."]
+    assert context.preferred_adjustment == "우선 출고 대상으로 검토합니다."
+    assert context.missing_data == ["snapshot_id"]
+    assert [fact.display_value for fact in context.facts] == ["3개", "25.0% (임계 30%)"]
+
+
+def test_procurement_wrapper_equals_direct_builder_and_keeps_previous_behaviour():
+    response = _procurement_response()
+
+    via_wrapper = build_logistics_context(response, _SCENARIO_MEASUREMENTS)
+    direct = build_sanitized_context(
+        cycle="PROCUREMENT",
+        signals=response.soft_warnings,
+        measurements=_SCENARIO_MEASUREMENTS,
+        preferred_adjustment=response.preferred_adjustment,
+        missing_data=response.missing_data,
+    )
+
+    assert via_wrapper == direct
+    context, incomplete = via_wrapper
+    assert incomplete is False
+    assert context.signals == ["SCENARIO_ADJUSTMENT_REQUIRED"]
+    assert context.allowed_adjustments == ["quantity", "timing"]
+    assert context.preferred_adjustment == "quantity"
+    assert context.missing_data == ["capacity_tight_policy"]
+    assert [fact.display_value for fact in context.facts] == ["조건부 2건 (전체 3건)"]
+
+
+def test_sales_without_preferred_has_no_allowed_adjustment_in_both_paths():
+    response = _sales_response(preferred_adjustment=None)
+
+    via_wrapper = build_logistics_context(response, _FRESHNESS_MEASUREMENTS)
+    direct = build_sanitized_context(
+        cycle="SALES",
+        signals=response.soft_warnings,
+        measurements=_FRESHNESS_MEASUREMENTS,
+        preferred_adjustment=None,
+        missing_data=[],
+    )
+
+    assert via_wrapper == direct
+    assert via_wrapper[0].allowed_adjustments == []
+
+
+def test_builder_translates_raw_missing_codes_and_never_carries_digits():
+    # 어댑터는 raw 코드를 준다 — `LOG-H02` 의 숫자가 Context 에 실리면 무숫자 경계가 깨진다.
+    context, _ = build_sanitized_context(
+        cycle="PROCUREMENT",
+        signals=[],
+        measurements=None,
+        preferred_adjustment=None,
+        missing_data=["LOG-H02", "CAPACITY_TIGHT_POLICY_UNRESOLVED", "LOG-H02", "WHAT_IS_THIS_9"],
+    )
+
+    assert context.missing_data == [
+        "zone_capacity",
+        "capacity_tight_policy",
+        "unrecognized_missing_information",
+    ]
+    assert not any(ch.isdigit() for name in context.missing_data for ch in name)
+
+
+def test_translate_missing_data_is_idempotent_on_translated_names():
+    once = translate_missing_data(["LOG-H01", "N17", "NOPE-1"])
+
+    assert once == [
+        "warehouse_capacity_policy",
+        "shared_outbound_capacity",
+        "unrecognized_missing_information",
+    ]
+    assert translate_missing_data(once) == once
+
+
+def test_builder_rejects_unknown_cycle():
+    with pytest.raises(ValueError):
+        build_sanitized_context(
+            cycle="sales",  # type: ignore[arg-type]
+            signals=[],
+            measurements=None,
+            preferred_adjustment=None,
+            missing_data=[],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Master-facing opt-in (#385) — 설정 부재 = DISABLED · Provider 클라이언트 생성 없음
+# ---------------------------------------------------------------------------
+
+
+def _settings(*, enabled: bool) -> LLMSettings:
+    return LLMSettings(
+        enabled=enabled,
+        provider="ollama",
+        model="gemma3:4b",
+        base_url="http://127.0.0.1:11434",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+
+
+def _pin_master(monkeypatch, value: str | None, *, base_enabled: bool = True) -> object:
+    """opt-in 값 하나만 고정하고, 독립 경로 설정과 실 팩토리는 가짜로 막는다.
+
+    `get_llm_settings` 를 갈아 끼우면 `.env` 는 읽히지 않는다 — 개발자 환경 값이 테스트
+    결과를 흔들지 않는다. 돌려주는 sentinel 은 *"opt-in 경로가 실 팩토리에 닿았다"* 의 증거다.
+    """
+    if value is None:
+        monkeypatch.delenv(MASTER_LLM_ENV, raising=False)
+    else:
+        monkeypatch.setenv(MASTER_LLM_ENV, value)
+    monkeypatch.setattr(interpretation, "get_llm_settings", lambda: _settings(enabled=base_enabled))
+    sentinel = object()
+    monkeypatch.setattr(interpretation, "get_interpretation_service", lambda: sentinel)
+    return sentinel
+
+
+@pytest.mark.parametrize("value", [None, "", "false", "0", "no", "off"])
+def test_master_service_is_disabled_without_opt_in(monkeypatch, value):
+    sentinel = _pin_master(monkeypatch, value)
+
+    service = master_interpretation_service()
+
+    assert service is not sentinel
+    assert service.settings.enabled is False
+    assert isinstance(service.provider, UnavailableProvider)
+    assert master_llm_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_master_service_reaches_real_factory_only_with_explicit_opt_in(monkeypatch, value):
+    sentinel = _pin_master(monkeypatch, value)
+
+    assert master_llm_enabled() is True
+    assert master_interpretation_service() is sentinel
+
+
+def test_opt_in_does_not_revive_a_disabled_logistics_llm(monkeypatch):
+    # AND 다 — 마스터 경로 손잡이는 추가로 여는 것이지, 꺼 둔 물류 LLM 을 되살리지 않는다.
+    sentinel = _pin_master(monkeypatch, "true", base_enabled=False)
+
+    service = master_interpretation_service()
+
+    assert service is not sentinel
+    assert service.settings.enabled is False
+
+
+def test_disabled_master_service_never_calls_a_provider(monkeypatch):
+    _pin_master(monkeypatch, None)
+    service = master_interpretation_service()
+
+    # signal 이 있고 runtime 도 READY 인 Context — 켜져 있었다면 호출됐을 조건이다.
+    # UnavailableProvider 는 불리면 예외를 내 FALLBACK 이 되므로, DISABLED 가 곧 미호출의 증거다.
+    result = service.interpret(_quote_context(), runtime_ready=True, has_blocking_constraints=False)
+
+    assert result.llm_status == "DISABLED"
+    assert result.llm_attempts == 0
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [(True, "SKIPPED_TEMPLATE"), (False, "DISABLED")])
+def test_uncalled_interpretation_uses_the_service_gate_vocabulary(enabled, expected):
+    provider = _FakeProvider([])
+
+    result = uncalled_interpretation(_service(provider, enabled=enabled))
+
+    assert result.llm_status == expected
+    assert result.llm_attempts == 0
+    assert result.llm_fallback_used is False
+    assert provider.calls == 0
+    assert result.interpretation.risks == []

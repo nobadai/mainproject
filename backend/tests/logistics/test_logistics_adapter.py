@@ -17,7 +17,15 @@ from decimal import Decimal
 import pytest
 
 from app.logistics import adapter
+from app.logistics.llm.runtime import (
+    InterpretationService,
+    LLMSettings,
+    UnavailableProvider,
+    build_template_interpretation,
+)
+from app.logistics.llm.schemas import SanitizedLLMContext
 from app.logistics.repository import LogisticsRead
+from app.logistics.rules import BUSINESS_SIGNALS
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
@@ -149,6 +157,17 @@ def _read(snapshot=None, policy=None):
 def wired(monkeypatch):
     monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read())
     monkeypatch.setattr(adapter, "build_lot_constraints", lambda snapshot: list(_LOTS))
+
+
+@pytest.fixture(autouse=True)
+def master_llm_off(monkeypatch):
+    """★ Master-facing 해석은 opt-in 이다 (#385) — 이 파일의 기본은 **꺼짐**이다.
+
+    개발자 `.env` 에 켜 둔 값이 `load_dotenv` 로 새어 들어와 실 Provider 를 부르는 일이
+    없게 여기서 고정한다 (`load_dotenv` 는 이미 있는 환경변수를 덮지 않는다). LLM 을
+    켜서 재는 테스트는 팩토리를 가짜 서비스로 갈아 끼운다 — env 로 켜지 않는다.
+    """
+    monkeypatch.setenv("LOGISTICS_MASTER_LLM_ENABLED", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +420,10 @@ def test_스냅샷이_없으면_ERROR_가_아니라_NOT_READY(wired, monkeypatch
 
 
 def test_LLM_을_타지_않는다(wired):
-    """해석 서비스를 부르는 `enrich_logistics_response` 를 지나지 않는다."""
+    """PRE_PURCHASE 에는 해석 경로가 없다 — `DISABLED` 가 사실이다.
+
+    #385 는 SCENARIO_VALIDATION 만 잇는다.
+    """
     _, meta = adapter.logistics_port(req())
     assert meta.llm_status == "DISABLED"
 
@@ -993,6 +1015,308 @@ def test_시나리오_판정에도_품목별_가용재고를_싣는다(stocked):
         {"item": "배추", "available_qty_kg": 180.0},
     ]
     assert validate_reply(request, reply, meta) == ()
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_VALIDATION — 해석 Harness 연결 (#385)
+#
+# ★ LLM 은 결정론 결과가 다 선 뒤에만 돌고, 어느 상태에서도 업무 결과를 바꾸지 않는다.
+#   Provider 는 여기서 전부 가짜다 — 실 Gemini · Ollama · HTTP 는 한 번도 열리지 않는다.
+#   주입 seam 은 `adapter.master_interpretation_service` 팩토리다 (`logistics_port` 는 그대로).
+# ---------------------------------------------------------------------------
+
+
+def _signal_payload() -> dict:
+    """조정 제안이 나오는 제안 — 창고 여유로 20,000kg 을 못 받아 `conditional` 이 되고
+    `SCENARIO_ADJUSTMENT_REQUIRED`(질적 signal → 게이트 통과)가 선다."""
+    payload = _proposal_payload()
+    scenario = payload["scenarios"][0]
+    scenario["total_qty_kg"] = 20000
+    scenario["total_amount_krw"] = 33000000
+    scenario["split_plan"] = [{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 20000}]
+    scenario["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 20000, "grade_unit_price": 1650}
+    ]
+    return payload
+
+
+class _Provider:
+    """가짜 Provider — 받은 Context 를 기록하고, 정해진 방식으로 답하거나 실패한다.
+
+    `echo` 는 받은 Context 에서만 답을 만든다 — signals 를 그대로 risks 로, preferred 를
+    그대로 suggested 로. 검증기를 통과하는 유일한 방법이 Context 인용뿐이라는 뜻이다.
+    """
+
+    def __init__(self, behaviour: str = "echo"):
+        self.behaviour = behaviour
+        self.contexts: list = []
+        self.guidance: list = []
+
+    def generate(self, context, *, retry_guidance=None):
+        self.contexts.append(context)
+        self.guidance.append(retry_guidance)
+        if self.behaviour == "timeout":
+            raise TimeoutError()
+        if self.behaviour == "invalid":
+            return "not json"
+        return json.dumps(
+            {
+                "summary": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
+                "risks": list(context.signals),
+                "suggested_adjustment": context.preferred_adjustment,
+            },
+            ensure_ascii=False,
+        )
+
+    @property
+    def calls(self) -> int:
+        return len(self.contexts)
+
+
+def _llm(provider: _Provider, *, enabled: bool = True) -> InterpretationService:
+    return InterpretationService(
+        LLMSettings(
+            enabled=enabled,
+            provider="fake",
+            model="fake-model",
+            base_url="http://127.0.0.1:11434",
+            timeout_seconds=1,
+            max_retries=0,
+        ),
+        provider,
+    )
+
+
+def _inject(monkeypatch, service: InterpretationService) -> None:
+    """주입 seam — `logistics_port` 시그니처는 그대로고 팩토리만 갈아 끼운다."""
+    monkeypatch.setattr(adapter, "master_interpretation_service", lambda: service)
+
+
+def _business_view(reply) -> dict:
+    """LLM 이 건드리면 안 되는 것 전부 — 구조 비교 대상이다. 해석 칸 하나만 뺀다."""
+    return {
+        "runtime_status": reply.runtime_status,
+        "business_status": reply.business_status,
+        "payload": {key: value for key, value in reply.payload.items() if key != "interpretation"},
+        "evidences": reply.evidences,
+        "suggested_adjustments": reply.suggested_adjustments,
+        "needs_followup": reply.needs_followup,
+        "judgment_fields": reply.judgment_fields,
+        "missing_data": reply.missing_data,
+        "reasoning": reply.reasoning,
+    }
+
+
+def _trace_view(meta) -> dict:
+    """LLM 과 무관한 실행 흔적 — Tool 순서와 DeptMeta 관측도 상태 따라 흔들리면 안 된다."""
+    return {
+        "used_tools": meta.used_tools,
+        "tool_order": meta.tool_order,
+        "observations": meta.observations,
+    }
+
+
+def _business_signals(reply) -> list[str]:
+    return [code for code in reply.payload["soft_warnings"] if code in BUSINESS_SIGNALS]
+
+
+def test_opt_in_이_없으면_DISABLED_이고_Provider_클라이언트를_만들지_않는다(stocked):
+    """★ 설정 부재 = 꺼짐. 실 팩토리를 그대로 탄다 — autouse 가 opt-in 을 끈 상태다."""
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert _business_signals(reply), "signal 이 서야 게이트를 재는 뜻이 있다"
+    assert meta.llm_status == "DISABLED"
+    assert meta.llm_attempts == 0
+    assert meta.llm_fallback_used is False
+    # 해석 칸은 있되 무숫자 Template 다 — signal 코드는 그대로 보존된다
+    assert reply.payload["interpretation"]["risks"] == _business_signals(reply)
+    assert not any(ch.isdigit() for ch in reply.payload["interpretation"]["summary"])
+    service = adapter.master_interpretation_service()
+    assert service.settings.enabled is False
+    assert isinstance(service.provider, UnavailableProvider)
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_opt_in_이_있어도_signal_이_없으면_SKIPPED_TEMPLATE(monkeypatch, stocked):
+    """★ 게이트 — 켜져 있는데 부를 이유가 없다. Provider 호출 0회."""
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert _business_signals(reply) == []
+    assert meta.llm_status == "SKIPPED_TEMPLATE"
+    assert meta.llm_attempts == 0
+    assert provider.calls == 0
+    assert "interpretation" in reply.payload
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_SUCCESS_는_해석을_payload_중첩_칸에_상태를_metadata_에_적는다(monkeypatch, stocked):
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert provider.calls == 1
+    assert meta.llm_status == "SUCCESS"
+    assert meta.llm_model == "fake-model"
+    assert meta.llm_attempts == 1
+    assert meta.llm_fallback_used is False
+    context = provider.contexts[0]
+    assert reply.payload["interpretation"] == {
+        "summary": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
+        "risks": list(context.signals),
+        "suggested_adjustment": context.preferred_adjustment,
+    }
+    # 판정 칸은 LLM 이 아니라 Rule 의 것이다 — 그대로다
+    assert reply.payload["verdict"] == "conditional"
+    assert reply.business_status == "conditional"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_timeout_은_FALLBACK_이고_업무_실패로_승격되지_않는다(monkeypatch, stocked):
+    provider = _Provider("timeout")
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert provider.calls == 1  # max_retries=0 — 전송 재시도 없이 접는다
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "conditional"
+    assert meta.llm_status == "FALLBACK"
+    assert meta.llm_fallback_used is True
+    assert meta.llm_attempts == 1
+    template = build_template_interpretation(provider.contexts[0])
+    assert reply.payload["interpretation"] == template.model_dump(mode="json")
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_검증_탈락은_correction_한_번_뒤_FALLBACK(monkeypatch, stocked):
+    provider = _Provider("invalid")
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert provider.calls == 2
+    assert provider.guidance[0] is None
+    assert provider.guidance[1], "두 번째 호출에는 correction 이 붙는다"
+    assert meta.llm_status == "FALLBACK"
+    assert meta.llm_attempts == 2
+    assert not any(ch.isdigit() for ch in reply.payload["interpretation"]["summary"])
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_결정론_보존_LLM_상태가_달라도_업무_결과는_구조적으로_같다(monkeypatch, stocked):
+    """🔴 이 파일의 핵심이다. "거의 같다" 가 아니라 **구조 비교**다.
+
+    같은 요청을 다섯 상태로 돌린다 — DISABLED · SKIPPED_TEMPLATE · SUCCESS ·
+    FALLBACK(timeout) · FALLBACK(검증 탈락). 해석 칸 하나를 뺀 reply 와, LLM 칸을 뺀
+    metadata 가 전부 같아야 한다.
+    """
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    real_builder = adapter.build_sanitized_context
+
+    def incomplete_builder(**kwargs):
+        # facts 조립 실패를 흉내 내 게이트를 닫는다 — 같은 요청으로 SKIPPED 를 만든다
+        context, _ = real_builder(**kwargs)
+        return context, True
+
+    cases = {
+        "DISABLED": (_llm(_Provider(), enabled=False), real_builder),
+        "SKIPPED_TEMPLATE": (_llm(_Provider()), incomplete_builder),
+        "SUCCESS": (_llm(_Provider()), real_builder),
+        "FALLBACK/timeout": (_llm(_Provider("timeout")), real_builder),
+        "FALLBACK/invalid": (_llm(_Provider("invalid")), real_builder),
+    }
+    views: dict[str, dict] = {}
+    traces: dict[str, dict] = {}
+    for name, (service, builder) in cases.items():
+        _inject(monkeypatch, service)
+        monkeypatch.setattr(adapter, "build_sanitized_context", builder)
+        reply, meta = adapter.logistics_port(request)
+        assert meta.llm_status == name.split("/")[0], name
+        assert validate_reply(request, reply, meta) == (), name
+        views[name] = _business_view(reply)
+        traces[name] = _trace_view(meta)
+
+    for name in cases:
+        assert views[name] == views["DISABLED"], name
+        assert traces[name] == traces["DISABLED"], name
+
+
+def test_Provider_가_받는_것은_SanitizedLLMContext_뿐이다(monkeypatch, stocked):
+    """★ 전송 경계 — Lot · 날짜 · 원본 수량 · 단가 · 식별자 · payload 는 넘어가지 않는다."""
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, _ = adapter.logistics_port(request)
+
+    assert len(provider.contexts) == 1
+    context = provider.contexts[0]
+    assert isinstance(context, SanitizedLLMContext)
+    serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
+    forbidden = ("LOT-", AS_OF.isoformat(), "20000", "33000000", "1650", "REQ-T", SIM_RUN_ID, "kg")
+    for token in forbidden:
+        assert token not in serialized, token
+    # payload 의 결정론 키가 통째로 넘어가지 않는다
+    for key in ("cap_by_date", "scenario_results", "inventory_by_item", "expected_arrival_dates"):
+        assert key not in serialized, key
+    # 미확정 이름은 번역돼 있다 — `logistics_rule/LOG-H02` 같은 raw 코드가 아니다
+    assert context.missing_data
+    assert not any(ch.isdigit() for name in context.missing_data for ch in name)
+    assert not any("/" in name or "@" in name for name in context.missing_data)
+    # facts 는 판정 수치의 확정 표기뿐이다
+    assert [fact.fact_id for fact in context.facts] == ["scenario_conditional_count"]
+    assert reply.payload["interpretation"]["risks"] == list(context.signals)
+
+
+@pytest.mark.parametrize(("enabled", "expected"), [(True, "SKIPPED_TEMPLATE"), (False, "DISABLED")])
+def test_못_낸_회신도_상태_어휘가_사실이다(monkeypatch, stocked, enabled, expected):
+    """★ 켜져 있었는데 부를 자리에 못 갔다 = SKIPPED_TEMPLATE, 꺼져 있었다 = DISABLED.
+
+    어느 쪽도 Provider 를 부르지 않고, 해석 칸도 만들지 않는다 (못 낸 회신이다).
+    """
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider, enabled=enabled))
+    request = req(mode="SCENARIO_VALIDATION", payload={"scenarios": []})
+    reply, meta = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert "interpretation" not in reply.payload
+    assert meta.llm_status == expected
+    assert meta.llm_attempts == 0
+    assert provider.calls == 0
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_기준일_불일치_ERROR_에도_상태_어휘가_사실이다(monkeypatch, stocked):
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    payload = _proposal_payload()
+    payload["meta"]["as_of"] = "2026-01-01"
+    payload["scenarios"][0]["split_plan"][0]["date"] = "2026-01-01"
+    reply, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=payload))
+
+    assert reply.runtime_status == "ERROR"
+    assert "interpretation" not in reply.payload
+    assert meta.llm_status == "SKIPPED_TEMPLATE"
+    assert provider.calls == 0
+
+
+@pytest.mark.parametrize("mode", ["PRE_PURCHASE", "PRE_SALES", "STATUS_QUERY"])
+def test_다른_mode_는_opt_in_이_있어도_LLM_경로가_없다(monkeypatch, stocked, mode):
+    """#385 는 SCENARIO_VALIDATION 만 잇는다 — 나머지는 `DISABLED` 가 여전히 사실이다."""
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    reply, meta = adapter.logistics_port(req(mode=mode))
+
+    assert provider.calls == 0
+    assert meta.llm_status == "DISABLED"
+    assert "interpretation" not in reply.payload
 
 
 # ---------------------------------------------------------------------------
@@ -1727,15 +2051,21 @@ def test_판매_Service_와_LLM_경로를_아예_들여오지_않는다():
     run_logistics_sales_with_snapshot()  enrich_logistics_response → LLM
     run_logistics_sales_scenario()       approved_purchase 필수
     ```
+
+    ★ #385 이후 `app.logistics.interpretation` 은 **허용**이다 — 어댑터가 재사용하는 것은
+      순수 Harness 조립기(`build_sanitized_context`)와 opt-in 팩토리뿐이다. Service 응답
+      타입에 묶인 `enrich_logistics_response`, Provider 층(`app.logistics.llm.runtime`),
+      쓰기 경로, 마스터의 `cycle_llm` 은 여전히 들여오지 않는다.
     """
     modules, names = _adapter_imports()
 
     금지_모듈 = {
         "app.logistics.service",
-        "app.logistics.interpretation",
         "app.logistics.run_repository",
         "app.logistics.db",
         "app.logistics.outbound",
+        "app.logistics.llm.runtime",
+        "app.master.cycle_llm",
     }
     금지_이름 = {
         "run_logistics_sales",
@@ -1743,12 +2073,24 @@ def test_판매_Service_와_LLM_경로를_아예_들여오지_않는다():
         "run_logistics_sales_scenario",
         "evaluate_sales_rules",
         "enrich_logistics_response",
+        "get_interpretation_service",
         "save_logistics_agent_run",
         "get_connection",
         "execute_returning_one",
     }
-    assert 금지_모듈 & modules == set()
+    assert {
+        module
+        for module in modules
+        for banned in 금지_모듈
+        if module == banned or module.startswith(banned + ".")
+    } == set()
     assert 금지_이름 & names == set()
+    # 허용된 것은 조립기 · opt-in 팩토리 · 미호출 상태뿐이다 — 어댑터의 LLM 표면 전부다
+    assert {
+        "build_sanitized_context",
+        "master_interpretation_service",
+        "uncalled_interpretation",
+    } <= names
 
 
 def test_승인_매입을_지어내지_않는다():

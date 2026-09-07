@@ -1,16 +1,41 @@
-"""Logistics deterministic Reply projection into the optional LLM layer."""
+"""Logistics deterministic Reply projection into the optional LLM layer.
+
+두 호출자가 **같은 조립기**를 지난다 (#385).
+
+```text
+독립 Service    LogisticsProcurementResponse | LogisticsSalesResponse
+                → build_logistics_context (얇은 wrapper)
+Master 어댑터   signals · measurements · preferred · missing 원재료
+                → build_sanitized_context
+                                     ↘ SanitizedLLMContext — 외부 Provider 전송 경계
+```
+
+★ Master-facing 해석은 **명시적 opt-in** 이다 — `master_interpretation_service` 참조.
+"""
 
 import logging
+import os
+from collections.abc import Sequence
+from dataclasses import replace
 from decimal import ROUND_HALF_UP, Decimal
 
-from app.logistics.llm.runtime import InterpretationService, get_interpretation_service
-from app.logistics.llm.schemas import ContextFact, SanitizedLLMContext
+from app.logistics.llm.runtime import (
+    InterpretationService,
+    UnavailableProvider,
+    get_interpretation_service,
+    get_llm_settings,
+)
+from app.logistics.llm.schemas import ContextFact, InterpretationResult, SanitizedLLMContext
 from app.logistics.rules import (
     BUSINESS_SIGNALS,
     SALES_PRIORITY_ADJUSTMENT,
     SignalMeasurements,
 )
-from app.logistics.schemas import LogisticsProcurementResponse, LogisticsSalesResponse
+from app.logistics.schemas import (
+    LogisticsCycle,
+    LogisticsProcurementResponse,
+    LogisticsSalesResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,18 +79,38 @@ _MISSING_DATA_NAMES = {
 #: 여기서는 이 generic 이름으로 대체하며 원본은 로그에 남긴다 (조용한 폐기 금지).
 _UNMAPPED_MISSING_DATA = "unrecognized_missing_information"
 
+#: 이미 번역된 이름의 전체 집합 — `translate_missing_data` 가 **멱등**이 되는 근거다.
+#: 독립 Service 응답의 `missing_data` 는 이미 번역돼 있고 Master 어댑터는 raw 코드를
+#: 준다. 한 조립기가 둘을 다 받으려면 번역명은 그대로 통과해야 한다 (#385).
+#: 코드(대문자 · `LOG-H01`)와 이름(소문자 snake)은 어휘가 겹치지 않는다.
+_TRANSLATED_MISSING_DATA_NAMES = frozenset({*_MISSING_DATA_NAMES.values(), _UNMAPPED_MISSING_DATA})
+
 #: Procurement 의 허용 조정 축 — 구조적 어휘. Sales 우선출고 문장과 섞지 않는다.
 _PROCUREMENT_ALLOWED_ADJUSTMENTS = ["quantity", "timing"]
 
+#: Master-facing 해석의 **명시적 opt-in** 환경변수 (#385). 전역 폴백이 없다 —
+#: `LLM_ENABLED`·`LOGISTICS_LLM_ENABLED` 는 독립 `/logistics/*` 경로의 손잡이고, 그 둘은
+#: 값이 없으면 **켜짐**으로 읽힌다(`get_llm_settings`). 그 기본값만으로 마스터 동기
+#: 경로에 외부 호출이 얹히면 안 되므로 이 변수는 값이 없으면 **꺼짐**이다.
+MASTER_LLM_ENV = "LOGISTICS_MASTER_LLM_ENABLED"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
-def translate_missing_data(codes: list[str]) -> list[str]:
-    """내부 코드 목록을 사람용 무숫자 번역명으로 옮긴다 (중복 제거, 순서 유지)."""
+
+def translate_missing_data(codes: Sequence[str]) -> list[str]:
+    """내부 코드 목록을 사람용 무숫자 번역명으로 옮긴다 (중복 제거, 순서 유지).
+
+    ★ **멱등이다** — 이미 번역된 이름은 그대로 통과한다. 그래서 Service 응답(번역됨)과
+      어댑터 원재료(raw 코드)가 같은 조립기를 지날 수 있다 (#385).
+    """
     names: list[str] = []
     for code in dict.fromkeys(codes):
-        name = _MISSING_DATA_NAMES.get(code)
-        if name is None:
-            logger.warning("Unmapped logistics missing-data code: %s", code)
-            name = _UNMAPPED_MISSING_DATA
+        if code in _TRANSLATED_MISSING_DATA_NAMES:
+            name = code
+        else:
+            name = _MISSING_DATA_NAMES.get(code)
+            if name is None:
+                logger.warning("Unmapped logistics missing-data code: %s", code)
+                name = _UNMAPPED_MISSING_DATA
         if name not in names:
             names.append(name)
     return names
@@ -207,38 +252,71 @@ def _assemble_facts(
     return facts, False
 
 
+def build_sanitized_context(
+    *,
+    cycle: LogisticsCycle,
+    signals: Sequence[str],
+    measurements: SignalMeasurements | None,
+    preferred_adjustment: str | None,
+    missing_data: Sequence[str],
+) -> tuple[SanitizedLLMContext, bool]:
+    """결정론 **원재료**에서 LLM Context 를 조립한다. 반환은 (context, facts_incomplete).
+
+    독립 Service 와 Master 어댑터가 **같은 조립기**를 지난다 (#385). 응답 타입이 아니라
+    원재료를 받는 이유는 어댑터가 `AgentReply` 를 내기 때문이다 — 그것을 Service 응답으로
+    되살리면 없는 필드를 지어내게 된다.
+
+    ```text
+    signals          BUSINESS_SIGNALS 만 남긴다 — 미확정 코드는 signal 이 아니다
+    measurements     판정에 실제 쓰인 수치 → 확정 표기 facts (없으면 fail-closed)
+    preferred        Rule/Scenario Engine 이 정한 값 그대로 — LLM 이 고르지 않는다
+    missing_data     raw 코드든 번역명이든 `translate_missing_data` 를 지난다 —
+                     `LOG-H02` 같은 숫자 든 코드가 무숫자 경계를 우회하지 못한다
+    ```
+
+    facts 는 판정에 실제 사용된 수치의 확정 표기뿐이다 — 원본 DB row·lot_id·거래처·
+    날짜·판정에 쓰이지 않은 수치는 싣지 않는다. 이 Context 가 외부 Provider 전송 경계다.
+    """
+    if cycle not in ("PROCUREMENT", "SALES"):
+        raise ValueError(f"unknown logistics cycle: {cycle!r}")
+    business_signals = _unique([signal for signal in signals if signal in BUSINESS_SIGNALS])
+    if cycle == "SALES":
+        allowed_adjustments = (
+            [SALES_PRIORITY_ADJUSTMENT] if preferred_adjustment is not None else []
+        )
+    else:
+        allowed_adjustments = list(_PROCUREMENT_ALLOWED_ADJUSTMENTS)
+    facts, incomplete = _assemble_facts(business_signals, measurements or {})
+    context = SanitizedLLMContext(
+        domain="LOGISTICS",
+        signals=business_signals,
+        facts=facts,
+        allowed_adjustments=allowed_adjustments,
+        # Rule/Scenario Engine 이 정한 값을 그대로 나른다 — LLM 이 고르지 않는다.
+        preferred_adjustment=preferred_adjustment,
+        missing_data=translate_missing_data(missing_data),
+    )
+    return context, incomplete
+
+
 def build_logistics_context(
     response: LogisticsProcurementResponse | LogisticsSalesResponse,
     measurements: SignalMeasurements | None = None,
 ) -> tuple[SanitizedLLMContext, bool]:
-    """결정론 응답에서 LLM Context 를 조립한다. 반환은 (context, facts_incomplete).
+    """결정론 응답에서 LLM Context 를 조립한다 — `build_sanitized_context` 의 얇은 wrapper.
 
     signals 와 missing_data 는 저장 위치가 아니라 **코드의 의미**로 분류한다 —
     soft_warnings 안의 업무 위험(BUSINESS_SIGNALS)만 signals 로 가고, 나머지
-    미확정 계열은 response.missing_data(이미 번역됨)로 전달된다. facts 는 판정에
-    실제 사용된 수치의 확정 표기뿐이다 — 원본 DB row·lot_id·거래처·날짜·판정에
-    쓰이지 않은 수치는 싣지 않는다. 이 Context 가 외부 Provider 전송 경계다.
+    미확정 계열은 response.missing_data(이미 번역됨 — 번역이 멱등이라 그대로 통과)로
+    전달된다. 독립 Service 경로의 동작은 추출 전과 같다 (wrapper 등가 테스트가 고정).
     """
-    signals = _unique(
-        [warning for warning in response.soft_warnings if warning in BUSINESS_SIGNALS]
-    )
-    if isinstance(response, LogisticsSalesResponse):
-        allowed_adjustments = (
-            [SALES_PRIORITY_ADJUSTMENT] if response.preferred_adjustment is not None else []
-        )
-    else:
-        allowed_adjustments = list(_PROCUREMENT_ALLOWED_ADJUSTMENTS)
-    facts, incomplete = _assemble_facts(signals, measurements or {})
-    context = SanitizedLLMContext(
-        domain="LOGISTICS",
-        signals=signals,
-        facts=facts,
-        allowed_adjustments=allowed_adjustments,
-        # Rule/Scenario Engine 이 정한 값을 그대로 나른다 — LLM 이 고르지 않는다.
+    return build_sanitized_context(
+        cycle="SALES" if isinstance(response, LogisticsSalesResponse) else "PROCUREMENT",
+        signals=response.soft_warnings,
+        measurements=measurements,
         preferred_adjustment=response.preferred_adjustment,
-        missing_data=list(response.missing_data),
+        missing_data=response.missing_data,
     )
-    return context, incomplete
 
 
 def enrich_logistics_response[
@@ -266,6 +344,60 @@ def enrich_logistics_response[
     # model_copy 는 검증하지 않으므로 dict 가 아니라 모델 객체를 그대로 싣는다.
     update["llm_context_facts"] = list(result.llm_context_facts)
     return response.model_copy(update=update)
+
+
+# ---------------------------------------------------------------------------
+# Master-facing 해석 — 명시적 opt-in (#385)
+# ---------------------------------------------------------------------------
+
+
+def master_llm_enabled() -> bool:
+    """Master-facing 해석의 opt-in 여부 — `LOGISTICS_MASTER_LLM_ENABLED` **하나만** 본다.
+
+    전역 `LLM_ENABLED` 로 폴백하지 않는다. 그 값은 독립 경로가 기본 `True` 로 읽는
+    손잡이라, 폴백하면 *"설정 부재"* 가 곧 *"마스터 경로도 켜짐"* 이 된다 — 이 함수가
+    막는 것이 그것이다.
+    """
+    value = os.getenv(MASTER_LLM_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUE_VALUES
+
+
+def master_interpretation_service() -> InterpretationService:
+    """Master-facing 경로가 쓰는 해석 서비스 (#385). **설정 부재 = DISABLED.**
+
+    ```text
+    opt-in 없음 · 또는 물류 LLM 자체가 꺼짐   enabled=False + UnavailableProvider
+                                            → 외부 클라이언트를 만들지도 않는다
+    opt-in 있음 · 물류 LLM 켜짐               독립 경로와 같은 Provider (Ollama · Gemini)
+    ```
+
+    ★ 두 조건의 AND 다. `LOGISTICS_MASTER_LLM_ENABLED` 는 마스터 경로를 **추가로** 여는
+      손잡이지, 꺼 둔 물류 LLM 을 마스터 경로에서만 되살리는 손잡이가 아니다.
+    ★ 여기서는 네트워크가 열리지 않는다 — Provider 는 `generate()` 시점에만 요청을 만든다.
+    """
+    settings = get_llm_settings()  # ★ 먼저 부른다 — `.env` 를 읽어 opt-in 값을 채운다
+    if not (master_llm_enabled() and settings.enabled):
+        return InterpretationService(replace(settings, enabled=False), UnavailableProvider())
+    return get_interpretation_service()
+
+
+def uncalled_interpretation(service: InterpretationService) -> InterpretationResult:
+    """LLM 을 부를 자리에 **이르지 못한** 회신의 상태 — DISABLED 또는 SKIPPED_TEMPLATE.
+
+    입력이 없어 판정을 못 낸 회신(RUNTIME_NOT_READY · ERROR)에도 *"켜져 있었는데 안
+    불렀다"* 와 *"애초에 꺼져 있다"* 는 다른 사실이다. 어휘 판정을 여기서 다시 적지 않고
+    서비스 자신의 게이트(`runtime_ready=False`)에 맡긴다 — Provider 는 부르지 않는다.
+    """
+    context, _ = build_sanitized_context(
+        cycle="PROCUREMENT",
+        signals=[],
+        measurements=None,
+        preferred_adjustment=None,
+        missing_data=[],
+    )
+    return service.interpret(context, runtime_ready=False, has_blocking_constraints=False)
 
 
 def _unique(values: list[str]) -> list[str]:

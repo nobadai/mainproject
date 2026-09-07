@@ -16,11 +16,22 @@ adapters/logistics.py — 재고·물류 에이전트 접점 (마스터 ↔ 물�
   ★ **`0` 은 미확정이 아니다** — *"1차 MVP 에서 임차 가능량이 0 으로 확정"* 이다.
     누락으로 되돌리지 않는다 (물류 회신 §7).
 
-★ **LLM 을 타지 않는다.**
+★ **LLM 은 판정 뒤에, `SCENARIO_VALIDATION` 에서만, 명시적 opt-in 으로 돈다** (#385).
   `run_logistics_procurement_with_snapshot()` 은 마지막에 `enrich_logistics_response()`
-  로 해석 서비스를 부른다. 마스터 경로에서는 그 앞 단계(`scenario_engine` · `rules`)만
-  직접 부른다 — 판정에 필요한 것은 전부 거기서 나오고, **`llm_status="DISABLED"` 라는
-  말이 사실이 된다.**
+  로 해석 서비스를 부른다. 마스터 경로는 그 함수를 쓰지 않는다 — Service 응답 타입에
+  묶여 있어 `AgentReply` 를 되살려야 하기 때문이다. 대신 같은 조립기
+  (`interpretation.build_sanitized_context`)에 **이미 계산한** signals · measurements ·
+  preferred · missing 원재료를 넘기고, 해석은 `payload["interpretation"]` 에, 상태는
+  `ExecutionMetadata.llm_*` 에 싣는다. 판정 · 근거 · 조정안은 LLM 전후로 같다.
+
+  ```text
+  PRE_PURCHASE · PRE_SALES · STATUS_QUERY   LLM 경로 없음 — `llm_status="DISABLED"` 가 사실
+  SCENARIO_VALIDATION                       opt-in 없음 DISABLED · 게이트 미통과 SKIPPED_TEMPLATE
+                                            · 성공 SUCCESS · 실패 FALLBACK (결정론 결과 유지)
+  ```
+
+  🔴 **설정 부재만으로 외부 Provider 가 불리지 않는다** — `LOGISTICS_MASTER_LLM_ENABLED`
+     (`interpretation.master_interpretation_service`). 테스트는 그 팩토리를 갈아 끼운다.
 
 ★ **`as_of` 는 마스터가 준 것을 쓴다** (§1.2-6).
 
@@ -37,6 +48,12 @@ from decimal import Decimal
 from typing import Any
 
 from app.contracts.core import Evidence, SuggestedAdjustment
+from app.logistics.interpretation import (
+    build_sanitized_context,
+    master_interpretation_service,
+    uncalled_interpretation,
+)
+from app.logistics.llm.schemas import InterpretationResult
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     derive_procurement_verdict,
@@ -1353,6 +1370,10 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     as_of = request.context.as_of
     run_id = _run_id(request)
     tools: list[str] = [_T_ARRIVAL, _T_CAP, _T_RULES]
+    # ★ 해석 서비스는 **설정만 읽는다** — 여기서 네트워크가 열리지 않는다 (#385).
+    #   opt-in 이 없으면 enabled=False 인 서비스가 온다. 못 낸 회신에도 이 서비스가
+    #   상태 어휘(DISABLED · SKIPPED_TEMPLATE)를 정한다 — 어댑터가 하드코딩하지 않는다.
+    llm = master_interpretation_service()
 
     proposal = _as_proposal(request.payload)
     if proposal is None:
@@ -1362,6 +1383,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             [],
             missing=("purchase_proposal",),
             reason="매입 제안을 물류 입력 모델로 되살리지 못했다",
+            llm=uncalled_interpretation(llm),
         )
 
     # 🔴 기준일이 다른 제안은 판정하지 않는다 — 재무 어댑터와 같은 fail-closed (§1.2-6).
@@ -1379,12 +1401,12 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             payload={"validation_errors": ["proposal.meta.as_of"]},
             reasoning="Purchase proposal as-of does not match the Master request.",
         )
-        return reply, _meta(request, run_id, [])
+        return reply, _meta(request, run_id, [], llm=uncalled_interpretation(llm))
 
     try:
         read = _load_read(as_of=as_of, sim_run_id=request.context.sim_run_id)
     except _SnapshotLoadError:
-        return _snapshot_error(request, run_id, tools)
+        return _snapshot_error(request, run_id, tools, llm=uncalled_interpretation(llm))
     snapshot = read.snapshot if read is not None else None
     if snapshot is None:
         return _not_ready(
@@ -1393,6 +1415,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
             tools,
             missing=("logistics_snapshot",),
             reason="물류 스냅샷을 읽지 못했다",
+            llm=uncalled_interpretation(llm),
         )
 
     policy = read.policy
@@ -1487,6 +1510,41 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
     #   이중부정 문장이 나간다 (`master/answer.py` 의 gaps 문구).
     #
     #   사실이 사라지는 것은 아니다 — `soft_warnings` 가 같은 코드를 그대로 나른다.
+
+    # ── 해석 (LLM) — 결정론 결과가 **다 선 뒤에만** 돈다 (#385) ─────────────
+    #
+    # ★ 새 계산이 없다. signals · measurements 는 위 `evaluate_procurement_business_signals`
+    #   가 낸 것이고, preferred 는 `derive_preferred_adjustment` 가 정한 것이다. 조립기는
+    #   독립 Service 와 같은 함수다 — Context 에 실리는 것은 signal 코드 · 판정 수치의 확정
+    #   표기 · 허용/우선 조정 · 번역된 미확정 이름뿐이고, Lot · 날짜 · kg · 거래처 · 이
+    #   payload 는 넘어가지 않는다.
+    # ★ missing 원재료는 독립 Service `_missing_data` 와 같은 모집단이다 — 비-PASS 하드 제약
+    #   코드 + Rule 경고 + 판정 스킵 사실. M-1 `missing_data`(`logistics_rule/LOG-H02` 같은
+    #   네임스페이스 이름)를 넘기지 않는다 — 숫자가 든 채로 무숫자 경계를 우회한다.
+    # 🔴 LLM 은 아래 어느 값도 바꾸지 않는다 — verdict · evidences · suggested_adjustments ·
+    #    preferred_adjustment · missing 은 이 블록 앞에서 이미 확정됐고, 해석은 payload 의
+    #    **별도 중첩 칸** 하나에만 실린다. 실패 · timeout · 검증 탈락은 Template 로 접힌다.
+    llm_context, facts_incomplete = build_sanitized_context(
+        cycle="PROCUREMENT",
+        signals=business["signals"],
+        measurements=business["measurements"],
+        preferred_adjustment=preferred,
+        missing_data=[
+            *(c.code for c in rules["hard_constraints"] if c.status != "PASS"),
+            *rules["soft_warnings"],
+            *business["warnings"],
+        ],
+    )
+    llm_result = llm.interpret(
+        llm_context,
+        runtime_ready=rules["runtime_status"] == "READY",
+        # FAIL 만 차단한다 — UNRESOLVED 는 호출을 막지 않는다 (독립 경로와 같은 17-A).
+        has_blocking_constraints=any(c.status == "FAIL" for c in rules["hard_constraints"]),
+        facts_incomplete=facts_incomplete,
+    )
+    # 사람이 읽는 해석 — summary · risks · suggested_adjustment. 봉투 검증은 중첩 Mapping 의
+    # 값에 근거를 요구하지 않고(`required_claims`), 마스터는 부서 payload 를 파싱하지 않는다.
+    payload["interpretation"] = llm_result.interpretation.model_dump(mode="json")
 
     ref = _ref(snapshot)
     # verdict 근거의 구성 요소 — 결합 판정에 실제로 들어간 비통과 입력의 수다.
@@ -1658,7 +1716,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         missing_data=tuple(dict.fromkeys(missing)),
         reasoning="매입 시나리오를 물류 관점에서 판정했다.",
     )
-    return reply, _meta(request, run_id, tools, reply)
+    return reply, _meta(request, run_id, tools, reply, llm=llm_result)
 
 
 def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -1891,11 +1949,17 @@ def _meta(
     run_id: str,
     tools: Sequence[str],
     reply: AgentReply | None = None,
+    *,
+    llm: InterpretationResult | None = None,
 ) -> ExecutionMetadata:
     """실행 흔적. **Business Reply 와 섞지 않는다.**
 
     `reply` 를 받으면 `runtime_status == "READY"` 일 때만 DeptMeta 관측을 붙인다.
     ★ **못 낸 회신에 관측을 달지 않는다** — *"안 돌았는데 무엇을 읽었다"* 가 된다.
+
+    `llm` 은 해석 서비스가 낸 결과다 (#385). 받으면 그 상태를 그대로 적고, 안 받으면
+    **그 mode 에 LLM 경로가 없다**는 뜻이라 `DISABLED` 다 — 지금은 `SCENARIO_VALIDATION`
+    만 준다. 어댑터가 상태 어휘를 지어내지 않는다.
     """
     observations: list[dict[str, Any]] = []
     if reply is not None and reply.runtime_status == "READY":
@@ -1908,7 +1972,10 @@ def _meta(
         agent=_AGENT,
         used_tools=tuple(tools),
         tool_order=tuple(range(1, len(tools) + 1)),
-        llm_status="DISABLED",
+        llm_status=llm.llm_status if llm is not None else "DISABLED",
+        llm_model=(llm.llm_model or "") if llm is not None else "",
+        llm_attempts=llm.llm_attempts if llm is not None else 0,
+        llm_fallback_used=llm.llm_fallback_used if llm is not None else False,
         observations=tuple(json.dumps(o, default=str, sort_keys=True) for o in observations),
     )
 
@@ -1917,6 +1984,8 @@ def _snapshot_error(
     request: AgentRequest,
     run_id: str,
     tools: Sequence[str],
+    *,
+    llm: InterpretationResult | None = None,
 ) -> tuple[AgentReply, ExecutionMetadata]:
     """스냅샷 조회의 **실행 실패** — `RUNTIME_NOT_READY` 가 아니다 (#121 4단계).
 
@@ -1938,7 +2007,7 @@ def _snapshot_error(
             "데이터 부재가 아니라 재시도 가치가 있는 실패다."
         ),
     )
-    return reply, _meta(request, run_id, tools, reply)
+    return reply, _meta(request, run_id, tools, reply, llm=llm)
 
 
 def _not_ready(
@@ -1948,6 +2017,7 @@ def _not_ready(
     *,
     missing: tuple[str, ...],
     reason: str,
+    llm: InterpretationResult | None = None,
 ) -> tuple[AgentReply, ExecutionMetadata]:
     """입력이 없어서 못 낸 답. **`ERROR` 가 아니다** — 다시 불러도 같다 (M-1 §5.1)."""
     reply = AgentReply(
@@ -1961,4 +2031,4 @@ def _not_ready(
         missing_data=missing,
         reasoning=reason,
     )
-    return reply, _meta(request, run_id, tools, reply)
+    return reply, _meta(request, run_id, tools, reply, llm=llm)
