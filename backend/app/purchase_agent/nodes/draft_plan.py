@@ -12,7 +12,10 @@ from app.purchase_agent.nodes._guards import (
     require_non_empty,
     require_positive,
 )
-from app.purchase_agent.nodes.classify_situation import estimate_daily_demand
+from app.purchase_agent.nodes.classify_situation import (
+    coverage_by_label,
+    estimate_daily_demand,
+)
 from app.purchase_agent.quotes import quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
@@ -126,12 +129,10 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     constraints = load_constraints()
     coverage = constraints["coverage_days"]
     daily_demand = estimate_daily_demand(state["confirmed_orders"], constraints)
-    labels = [
-        label
-        for label in coverage["by_label"]
-        # 구간이 넓은 날엔 공격안을 만들지 않는다
-        if not (state["situation"] == "uncertain" and label == "공격")
-    ]
+    # 구간이 넓은 날엔 공격안을 만들지 않는다 — **그 규칙은 ①과 공유한다**
+    # (`coverage_by_label` · `#340`). 전에는 여기서만 걸러서, ①이 축을 열 때는
+    # 공격안이 있는 것처럼 D=12 로 재고 있었다.
+    labels = list(coverage_by_label(state["situation"], constraints))
     blocked = quote_block_reason(state["market_quotes"], state["item"], state["date"], constraints)
     if blocked:
         return _no_quote_plan(state, constraints, daily_demand, labels, blocked)

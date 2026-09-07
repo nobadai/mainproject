@@ -93,6 +93,35 @@ def is_sustained_rise(forecast: dict, ci_judgment_day: int) -> bool:
     return all(earlier < later for earlier, later in pairwise(predicted))
 
 
+def coverage_by_label(situation: str, constraints: dict) -> dict[str, int]:
+    """그날 **실제로 만들 안**과 그 커버일수 D (상세설계 §4-③ · 규칙 4).
+
+    ``uncertain`` 이면 공격안을 빼고 돌려준다 — 구간이 넓은 날엔 선매입을 제안하지
+    않는다.
+
+    ★ **①과 ③이 같은 목록을 써야 해서 여기 둔다.** ``estimate_daily_demand`` 와 같은
+      자리이고 이유도 같다: ①은 timing 축 게이팅용 추정 총량에, ③은 만들 안 목록에
+      쓴다. **두 곳이 각자 판단하면 축은 열렸는데 그 안이 없는 모순이 난다** — 실제로
+      그랬다 (`#340`).
+
+    🔴 **③이 정본인데 물리적으로는 여기 있다.** ``draft_plan`` 이 이미 이 모듈을
+      import 하므로 (``estimate_daily_demand``) 반대로 두면 순환이 된다. 도메인
+      규칙의 주인은 ③이고, 이 함수는 그 규칙을 **한 곳에 적어 둔 것**이다.
+
+    ⚠️ 순서를 보존한다 — ``by_label`` 의 선언 순서가 곧 안이 나가는 순서이고,
+      ⑥ ``assign_axes`` 가 ``labels[-1]`` 로 마지막 안을 집는다.
+
+    ⚠️ *"공격"* 은 ③이 쓰던 그대로 여기 적는다. 선언(`constraints.yaml`)으로 빼는
+      것이 규칙 7에 맞지만 **이 판의 목적은 두 곳이 갈리지 않게 하는 것**이라
+      범위를 넓히지 않는다 — 그때는 ③·⑥의 ``aggressive_axis`` 와 함께 본다.
+    """
+    return {
+        label: days
+        for label, days in constraints["coverage_days"]["by_label"].items()
+        if not (situation == "uncertain" and label == "공격")
+    }
+
+
 def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints: dict) -> list[str]:
     """그날 허용되는 ``strategy_type`` 목록 (정의서 §3.5.1 · 상세설계 §4-①).
 
@@ -104,9 +133,24 @@ def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints:
     axes = ["quantity"]  # 수량 축은 항상 허용된다
 
     # timing: "총량 임계 초과 OR 지속 상승 궤적" 중 하나만 충족해도 열린다.
-    # 총량은 ③이 내기 전이라 아직 없으므로, 최대 D(공격)로 만든 **추정 총량**으로 판정한다.
+    # 총량은 ③이 내기 전이라 아직 없으므로, **그날 실제로 만들 안들** 중 최대 D 로
+    # 만든 추정 총량으로 판정한다.
+    #
+    # ⚠️ **uncertain 이면 공격 라벨을 뺀다** (2026-09-07 · `#340`).
+    #
+    #   전에는 ``max(by_label)`` 을 그냥 썼다. 그러면 공격안이 없는 날에도 D=12 로
+    #   재서 추정 총량이 **실제의 2.4배**가 된다::
+    #
+    #       ① 8,608kg  (717.3 × 12)
+    #       ③ 3,587kg  (717.3 × 5)   ← 실제로 만드는 안
+    #
+    #   ★ **③(draft_plan)이 정본이다** — 그쪽이 *"구간이 넓은 날엔 공격안을 만들지
+    #     않는다"* 를 이미 적었고, ①이 그걸 안 봤다.
+    #
+    #   🔴 그리고 이 값이 ``by_volume`` 에만 쓰인다. ``by_trend`` 는 아래 세 줄에서
+    #     ``situation`` 을 이미 쓰고 있었다 — 순서 문제가 아니었다.
     daily_demand = estimate_daily_demand(state["confirmed_orders"], constraints)
-    max_coverage = max(constraints["coverage_days"]["by_label"].values())
+    max_coverage = max(coverage_by_label(situation, constraints).values())
     estimated_total_kg = daily_demand * max_coverage
     by_volume = estimated_total_kg >= constraints["triggers"]["split_entry_qty_kg"]
     # 선매입 트리거는 상승률과 구간 폭을 함께 본다 (백로그 임계표) — 구간 폭 조건이 곧 stable이다.
