@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -574,6 +575,32 @@ class SalesRunRequest(BaseModel):
         description=(
             "사용자가 말한 것 **그대로**. 마스터가 숫자로 해석해 제약에 꽂지 않는다 — "
             "해석은 판매가 한다 (매입 `prior_feedback` 과 같은 자리)."
+        ),
+    )
+
+    #: 🔴 **자유 문장으로는 수량을 못 나른다** (실측 2026-09-07).
+    #:
+    #:   판매는 `raw_text` 를 해석해 수량을 뽑지 않는다. 그래서 `user_request` 만
+    #:   보내면 `PROPOSAL_QUANTITY_REQUIRED` 로 `RUNTIME_NOT_READY` 가 돌아온다 —
+    #:   **판매가 실제로 요구한 칸**이라 여기에 자리를 만든다.
+    #:
+    #: 🔴 **나머지 구조화된 칸은 지금 안 넣는다.** `SalesUserRequest` 에는
+    #:   `preferred_unit_price_krw` · `preferred_delivery_date` ·
+    #:   `preferred_payment_days` · `preferred_payment_terms_type` ·
+    #:   `preferred_contract_term_days` 가 더 있지만 **요구한 caller 가 아직 없다.**
+    #:   없는 필요를 API 표면에 미리 만들면 화면이 안 쓰는 칸을 채우기 시작하고,
+    #:   그 값이 어디서 왔는지 아무도 모른 채 제안에 실린다.
+    #:
+    #: ★ **못 나르는 칸이 조용히 잊히지는 않는다** —
+    #:   `tests/master/test_sales_user_request_fields.py` 가 판매 모델을 읽어
+    #:   나르는 칸과 안 나르는 칸을 대조한다. 판매가 칸을 더하면 그 검사가
+    #:   *"이건 어느 쪽이냐"* 고 묻는다.
+    requested_quantity_kg: Decimal | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "사용자가 말한 요청 수량 (kg). 판매 `SalesUserRequest.requested_quantity_kg` "
+            "로 그대로 나간다 — 마스터는 단위도 값도 고치지 않는다."
         ),
     )
 

@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
+from decimal import Decimal
 from typing import Any, get_args
 
 import pytest
@@ -362,8 +364,10 @@ def test_통과_후보가_그대로_응답에_실린다():
 def test_사용자_요청을_판매_낱말로_나른다():
     """★ 칸 이름은 받는 쪽 것이다 (`SalesUserRequest` — raw_text · item · partner_id).
 
-    ⚠️ `business_mode` 는 여기 안 들어간다 — 판매 쪽 모델이 `extra="forbid"` 이고 그
-      칸은 한 층 위에 있다. 그 자리를 잇는 것은 어댑터 배선 조각이다.
+    🔴 **`business_mode` 는 `user_request` **안**에 안 들어간다.** 판매 쪽
+      `SalesUserRequest` 가 `extra="forbid"` 이고 그 칸은 **한 층 위**
+      (`SalesProposalInput` 최상위)에 있다 — 안에 넣으면 요청 전체가 문 앞에서
+      거부된다. 최상위에 실리는 것은 아래 검사가 따로 잰다.
     """
     called = _wire()
 
@@ -375,9 +379,58 @@ def test_사용자_요청을_판매_낱말로_나른다():
         "item": "배추",
         "partner_id": "P-1",
     }
-    assert "business_mode" not in 보낸["sales"], (
-        "판매 모델에 없는 칸을 실었다 — 문 앞에서 통째로 거부된다"
+    assert "business_mode" not in 보낸["sales"]["user_request"], (
+        "판매 `SalesUserRequest` 에 없는 칸을 실었다 — 문 앞에서 통째로 거부된다"
     )
+
+
+def test_business_mode_는_최상위_칸으로_나른다():
+    """🔴 **없으면 판매가 `validation_errors=['business_mode']` 로 돌아선다** (실측).
+
+    `SalesProposalInput.business_mode` 는 최상위 **필수** 칸이라 안 실으면 실 어댑터가
+    문 앞에서 계약 오류를 내고, 후보가 0이라 `finance / SALES_VALIDATION` 까지 못 간다.
+
+    ★ **요청이 든 값 그대로다.** 마스터가 모드를 고르거나 기본값을 정하지 않는다 —
+      어휘의 주인은 판매이고 무슨 판매인지는 사용자가 말한다.
+    """
+    called = _wire()
+
+    run_sales(_request(business_mode="CONTRACT_FULFILLMENT"))
+
+    보낸 = {agent: payload for agent, _, payload in called}
+    assert 보낸["sales"]["business_mode"] == "CONTRACT_FULFILLMENT"
+
+
+def test_요청_수량을_구조화된_칸으로_나른다():
+    """🔴 **자유 문장으로는 수량이 안 간다** (실측 2026-09-07).
+
+    판매는 `raw_text` 를 해석해 수량을 뽑지 않아서 `user_request` 만 보내면
+    `PROPOSAL_QUANTITY_REQUIRED` 로 `RUNTIME_NOT_READY` 가 돌아온다. 그래서
+    `SalesRunRequest.requested_quantity_kg` 가 생겼고 여기서 **이름만 바꿔** 옮긴다.
+
+    🔴 **`Decimal` 을 전선에 그대로 싣지 않는다** (#175 와 같은 규율). 봉투 payload 는
+      이력으로 한 번 JSON 을 왕복하는데 `json.dumps` 가 `Decimal` 에서 죽는다.
+    """
+    called = _wire()
+
+    run_sales(_request(requested_quantity_kg=Decimal("2000.5")))
+
+    보낸 = {agent: payload for agent, _, payload in called}
+    수량 = 보낸["sales"]["user_request"]["requested_quantity_kg"]
+    assert 수량 == 2000.5
+    # `Decimal` 을 그대로 실었으면 이 줄이 `TypeError` 로 죽는다.
+    실은_것 = json.dumps(보낸["sales"]["user_request"])
+    assert "2000.5" in 실은_것, f"수량이 전선에서 값을 잃었다: {실은_것}"
+
+
+def test_수량_0_은_말하지_않은_것이_아니다():
+    """★ `if request.requested_quantity_kg` 로 적으면 *"0kg 을 말했다"* 가 사라진다."""
+    called = _wire()
+
+    run_sales(_request(requested_quantity_kg=Decimal(0)))
+
+    보낸 = {agent: payload for agent, _, payload in called}
+    assert 보낸["sales"]["user_request"]["requested_quantity_kg"] == 0
 
 
 def test_말하지_않은_칸은_안_만든다():

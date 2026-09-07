@@ -310,6 +310,10 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
     outcome = SalesFlow(
         runner,
         user_request=_sales_user_request(request),
+        # 🔴 **최상위 필수 칸이라 따로 나른다** (`SalesProposalInput.business_mode`).
+        #   `_sales_user_request` 안에 넣으면 판매 `SalesUserRequest` 가
+        #   `extra="forbid"` 라 요청 전체가 문 앞에서 거부된다.
+        business_mode=request.business_mode,
         forecast=forecast.payload if forecast.usable else None,
         # ★ 못 읽은 이유를 아는 곳은 여기다. Flow 는 자기가 아는 이유(look-ahead)만 쓴다.
         forecast_note=_sales_forecast_note(forecast),
@@ -386,9 +390,17 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
 
     ⚠️ **`business_mode` 는 여기 안 들어간다.** 판매 쪽 `SalesUserRequest` 는
       `extra="forbid"` 이고 `business_mode` 는 그 **바깥**(`SalesProposalInput`
-      최상위)에 있다. 골격 payload 에는 아직 그 최상위 칸이 없다 — **어댑터 배선
-      조각의 일**이고, 그때까지 값은 요청과 이력(`request_payload`)에 남는다.
-      없는 칸을 지어내 실으면 판매 문 앞에서 통째로 거부된다.
+      최상위)에 있다. 그 최상위 칸은 `SalesFlow(business_mode=...)` 가 나른다 —
+      여기 넣으면 판매 문 앞에서 통째로 거부된다.
+
+    🔴 **수량은 구조화된 칸으로 나른다** (실측 2026-09-07). 판매는 `raw_text` 를
+      해석해 수량을 뽑지 않아서, 자유 문장만 보내면 `PROPOSAL_QUANTITY_REQUIRED`
+      로 되돌아온다. 그래서 `SalesRunRequest.requested_quantity_kg` 가 생겼고
+      여기서 **이름만 바꿔** 옮긴다 — 값을 만들지도 반올림하지도 않는다.
+
+    ★ **나르지 않는 칸이 더 있다** (`preferred_*` 다섯). 요구한 caller 가 아직
+      없어서인데, 그 사실은 `tests/master/test_sales_user_request_fields.py` 가
+      판매 모델과 대조해 지킨다.
     """
     payload: dict[str, Any] = {}
     if request.user_request:
@@ -397,6 +409,16 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
         payload["item"] = request.item
     if request.partner_id:
         payload["partner_id"] = request.partner_id
+    if request.requested_quantity_kg is not None:
+        # ★ **0 도 사실이다.** `if request.requested_quantity_kg` 로 적으면 *"0kg 을
+        #   말했다"* 가 *"말하지 않았다"* 로 접힌다.
+        #
+        # 🔴 **`Decimal` 을 전선에 그대로 싣지 않는다** (#175 와 같은 규율).
+        #   `json.dumps` 가 `Decimal` 에서 죽는다 — 봉투 payload 는 이력으로 한 번
+        #   JSON 을 왕복하므로 여기서 편다. 봉투 표준형이 `target_value: float` 인
+        #   것과 같은 자리이고, 판매 쪽 `Decimal` 파싱은 `str(float)` 을 거쳐
+        #   값이 그대로다.
+        payload["requested_quantity_kg"] = float(request.requested_quantity_kg)
     return payload or None
 
 
