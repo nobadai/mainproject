@@ -5,12 +5,13 @@
     · 재무가 영업을 직접 부르지 않는다
     · 둘 사이의 순서는 마스터가 소유한다
 
-🔴 **E2E(Sales → Master → Finance → Master → Sales Refeed)는 아직 못 만든다.**
-  현재 저장소에 공통 계약이 없다.
+🔴 **판매 어휘가 열린 것과 E2E 라우팅 완료는 다르다.**
+  현재 저장소에는 Sales AgentName과 호출 Mode가 있지만 실제 fan-out/refeed는 아직 없다.
 
   ```text
-  AgentName            ["finance", "inventory", "purchase"] — sales 없음
-  capability 어휘      FINANCIAL_VALIDATION 이 어디에도 없음
+  AgentName            ["finance", "inventory", "purchase", "sales"]
+  판매 호출 Mode       GENERATE_SALES_PROPOSAL
+  재무 검증 Mode       SALES_VALIDATION
   Feedback Envelope    최종 필드명 미확정 (팀 결정 대기)
   ```
 
@@ -89,17 +90,16 @@ def test_the_sales_capability_takes_a_payload_not_a_sales_client():
 # ---------------------------------------------------------------------------
 
 
-def test_master_still_has_no_sales_agent_name():
-    """🔴 `AgentName` 에 sales 가 들어오기 전에는 E2E 를 만들 수 없다."""
+def test_master_has_sales_vocabulary_without_claiming_routing_is_complete():
+    """Sales 호출 어휘는 존재하지만 그것만으로 실제 routing 완료를 뜻하지 않는다."""
     from typing import get_args
 
     from app.master.envelope import AgentName
 
-    assert set(get_args(AgentName)) == {"finance", "inventory", "purchase"}
-    assert "sales" not in get_args(AgentName)
+    assert set(get_args(AgentName)) == {"finance", "inventory", "purchase", "sales"}
 
 
-def test_master_knows_the_sales_validation_mode_but_not_the_routing():
+def test_master_knows_sales_modes_but_not_the_routing():
     """어휘는 들어왔고 **라우팅은 아직 없다.** 둘을 섞지 않는다.
 
     `Mode` 에 SALES_VALIDATION 이 있어야 유효한 재무 `AgentRequest` 를 만들 수 있다.
@@ -110,14 +110,14 @@ def test_master_knows_the_sales_validation_mode_but_not_the_routing():
     from typing import get_args
 
     from app.master import envelope
-    from app.master.envelope import AgentName, Mode, agent_allowed_modes
+    from app.master.envelope import Mode, agent_allowed_modes
 
     assert "SALES_VALIDATION" in get_args(Mode)
     assert "SALES_VALIDATION" in agent_allowed_modes("finance")
+    assert "GENERATE_SALES_PROPOSAL" in agent_allowed_modes("sales")
 
-    # 라우팅의 전제가 없다 — capability 어휘도, 부를 대상으로서의 영업도 없다.
+    # 호출 어휘만 열렸고 실제 capability routing은 아직 별도 계약이다.
     assert not hasattr(envelope, "Capability")
-    assert "sales" not in get_args(AgentName)
 
 
 def test_sales_validation_is_not_opened_to_other_agents():

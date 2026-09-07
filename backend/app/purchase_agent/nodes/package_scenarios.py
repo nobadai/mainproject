@@ -506,7 +506,164 @@ def _rationale(
         # 주장하는 금액보다 실제 안이 클 수 있어 **근거가 산출물과 어긋났다.**
         # ⑥은 계산하지 않고 ③·⑦이 쓴 것과 같은 함수(``purchase_budget_krw``)를 부른다.
         _cash_rationale(state, constraints, as_of),
+        # 창고는 ③(총량 클립)과 ⑦(도착일 컷)이 둘 다 읽는데 근거 문장에는 없었다.
+        # **못 받은 날은 항목 자체를 안 만든다** (규칙 3) — 아래 함수가 ``None``을 낸다.
+        *filter(
+            None,
+            [
+                _warehouse_rationale(
+                    state["inventory"],
+                    as_of,
+                    # 🔴 **승인 이력을 넘긴다** (`#312`). 예정분과 **대조가 맞을 때만**
+                    #   *"어제 승인분이 언제 온다"* 로 넓어지고, 어긋나면 종전 문장
+                    #   그대로다 — 아래 ``_commitment_cause`` 가 그 판정을 한다.
+                    state.get("approved_commitments"),
+                    state["item"],
+                )
+            ],
+        ),
     ]
+
+
+#: 예정분 뺄셈이 음수로 미끄러지는 것을 **오차로 볼 상한(kg)**. 이 값을 넘는 음수는
+#: 오차가 아니라 세 값의 출처가 갈라진 것이다.
+#:
+#: ⚠️ **1kg 인 이유는 표시 단위다.** 문장이 kg 정수로 반올림되므로 1kg 미만의 어긋남은
+#:   어차피 화면에 안 나타난다. 실제 오차는 실측에서 ``3.4e-13`` 규모였다.
+_CAP_EPSILON_KG = 1.0
+
+
+def _commitment_cause(
+    commitments: list[dict] | None, item: str, reserved: float
+) -> tuple[float, str] | None:
+    """예정분이 **어제 승인분이라고 말해도 되는가.** 맞으면 ``(수량, 도착일)``.
+
+    ★ **이 함수가 이 판의 핵심이다.** 관통 실측에서 예정분 3,587kg 과 그날 승인
+      3,587kg 이 정확히 같았는데, **그 일치는 우리가 눈으로 맞춰본 것**이지 봉투가
+      둘을 이어 준 것이 아니었다. 이제 봉투가 승인 이력을 싣는다(`#312`) —
+      **코드가 대신 잰다.**
+
+    🔴 **대조가 맞을 때만 인과를 쓴다.** 어긋나면 ``None`` 이고, 부르는 쪽은 종전
+      문장(*"N kg 이 예정"*)을 그대로 낸다. 어긋나는 날은 예정분 안에 승인분 말고
+      **다른 점유**가 섞였다는 뜻이라, 그때 *"어제 승인분"* 이라고 적으면 남의 물량을
+      우리 것이라고 말하게 된다.
+
+    셋을 차례로 본다::
+
+        ① 우리 품목만        배추 안의 근거에 무 승인을 적을 수 없다
+        ② 수량 합 == 예정분   ±_CAP_EPSILON_KG (표시 단위가 kg 정수라 그 아래는 안 보인다)
+        ③ 도착일이 하나       여러 날이면 "언제" 를 한 날로 못 적는다
+
+    ⚠️ **③이 여러 날일 때 인과를 통째로 접는 이유.** 수량 대조가 맞았으니 *"어제
+      승인분"* 까지는 사실인데, 날짜를 빼고 적으면 문장이 *"온다"* 만 남아 **언제인지
+      모른다는 사실이 사라진다.** 반쯤 아는 것을 다 아는 것처럼 적느니 종전 문장이
+      정확하다.
+
+    🔴 **실데이터에 다건·다날짜 사례가 없다** (2026-09-06 실측 — 승인이 만든 매입은
+      ``PUR-THRU-20260105-BAECHU-D1-S1`` 하나뿐이다). 그래서 위 셋은 **실측이 아니라
+      판단**이고, 분할 승인이 실제로 서는 날 다시 볼 자리다.
+    """
+    if not commitments:
+        return None
+    mine = [row for row in commitments if row.get("item") == item]
+    if not mine:
+        return None
+    total = sum(float(row.get("total_qty_kg") or 0.0) for row in mine)
+    if abs(total - reserved) > _CAP_EPSILON_KG:
+        # 예정분에 승인분 아닌 것이 섞였다 — 인과를 안 쓴다.
+        return None
+    arrivals = {
+        leg.get("arrival_date")
+        for row in mine
+        for leg in (row.get("arrival_schedule") or [])
+        if leg.get("arrival_date")
+    }
+    if len(arrivals) != 1:
+        return None
+    return total, arrivals.pop()
+
+
+def _warehouse_rationale(
+    inventory: dict,
+    as_of: str,
+    commitments: list[dict] | None = None,
+    item: str = "",
+) -> dict | None:
+    """창고 근거. **대조가 맞는 날에만 «왜 이렇게 됐나» 를 말한다.**
+
+    ⚠️ *"예정"* 이라 쓰는 근거는 ``cap_by_date_policy = CONFIRMED_ONLY`` 하나다 —
+      확정분만 반영한다는 뜻이라 그 수량이 **확정된 무엇**임은 안다.
+
+    🟢 **이제 *"무엇이"* 를 물어볼 데가 생겼다** (`#310` → 마스터 `#312`). 봉투가
+      ``approved_commitments`` 를 싣는다. 다만 **그 값이 곧 답은 아니다** — 예정분
+      안에는 우리 승인분 말고 다른 점유가 섞일 수 있으므로, ``_commitment_cause`` 가
+      수량과 도착일을 대조해 **맞는 날에만** 인과를 쓴다.
+
+    ⚠️ 실측 (2026-01-06 · ``THRU-20260106-BAECHU-D2B``)::
+
+        guaranteed 8,000 − cap_by_date 4,058.6 − used 354.4 = 3,587.0
+
+      그날 승인 수량과 정확히 같았다. **그 일치는 우리가 눈으로 맞춰본 것이었고, 이제
+      코드가 대신 잰다.**
+
+    🔴 그래도 *"줄었다"* 는 못 쓴다. 매 실행이 독립이라 **전날 payload 를 안 들고
+      있다** — 비교 대상이 없다. 우리가 말할 수 있는 것은 *"이만큼이 이 날 온다"* 이지
+      *"이만큼 줄었다"* 가 아니다.
+
+    🔴 **창 안 최솟값을 쓴다.** 실측(관통 사흘)에서는 18일이 전부 같은 값이라 첫날과
+      구분되지 않았지만, 반출 예정이 생기면 날짜별로 갈린다. 그때 첫날을 쓰면 창
+      뒤쪽이 더 좁은 날을 **넓다고 말하게 된다** — 상한이 아니라 하한을 말해야
+      보수적이다. 도착일별 개별 판정은 ⑦ ``arrival_capacity`` 가 따로 한다.
+    """
+    cap_by_date = inventory.get("cap_by_date")
+    guaranteed = inventory.get("guaranteed_capacity_kg")
+    used = inventory.get("used_capacity_kg")
+    if not cap_by_date or guaranteed is None or used is None:
+        # 셋 중 하나라도 없으면 뺄셈이 성립하지 않는다. 0으로 채우면 "전량이 비어 있다"
+        # 또는 "전량이 찼다"를 **사실처럼** 적게 된다 (규칙 3).
+        return None
+    free = min(cap_by_date.values())
+    reserved = guaranteed - free - used
+    if reserved < -_CAP_EPSILON_KG:
+        # 세 값의 출처가 갈라진 날이다 — 지어내지 않고 안 적는다.
+        return None
+    # 🔴 **0 은 확정된 0 이다** (규칙 3). 승인 전인 날은 예정분이 정확히 0인데, 부동소수점
+    #   뺄셈이 음수 쪽으로 미끄러진다 — 실측으로 ``8000.0 − 7645.6 − 354.4 =
+    #   -3.4e-13`` 이 나왔고(2026-01-05 · ``THRU-20260105-BAECHU``) 그 날 항목이
+    #   **통째로 사라졌다.** 오차만 걷고 값은 그대로 둔다.
+    reserved = max(0.0, reserved)
+    cause = _commitment_cause(commitments, item, reserved)
+    if cause is None:
+        # 종전 문장 — *"지금 이렇다"* 만 말한다. 승인 이력이 안 왔거나, 왔는데 예정분과
+        # 어긋나거나, 도착일이 한 날로 안 모이는 날이 여기다.
+        claim = (
+            f"날짜별 입고 여유 {free:,.0f}kg "
+            f"(전량 {guaranteed:,.0f}kg 중 {reserved:,.0f}kg 이 예정)"
+        )
+        detail = (
+            "물류 cap_by_date 창의 최솟값. 예정분 = 보장용량 − 그 여유 − 현재 점유이고, "
+            "cap_by_date_policy 가 CONFIRMED_ONLY 라 확정분만 잡혀 있다 — "
+            "다만 무엇이 예정인지는 봉투에 오지 않는다"
+        )
+    else:
+        # 🟢 대조가 맞은 날 — 예정분이 어제 승인분과 같고 도착일도 하나다.
+        qty, arrival = cause
+        claim = (
+            f"날짜별 입고 여유 {free:,.0f}kg — "
+            f"어제 승인분 {qty:,.0f}kg 이 {arrival} 에 옵니다"
+        )
+        detail = (
+            "물류 cap_by_date 창의 최솟값. 예정분(보장용량 − 그 여유 − 현재 점유)이 "
+            "마스터가 실은 어제 승인 약정의 수량과 같아, 그 승인이 예정분의 정체다 — "
+            "도착일은 약정의 arrival_schedule 에서 왔다"
+        )
+    return {
+        "source": "재고",
+        "claim": claim,
+        "ref_id": f"CAP-{as_of}",
+        "evidence_grade": "SIM_FIXED",
+        "evidence_detail": detail,
+    }
 
 
 def _cash_rationale(state: PurchaseAgentState, constraints: dict, as_of: str) -> dict:

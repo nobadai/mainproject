@@ -1,0 +1,198 @@
+"""어제 승인분을 봉투에서 받는다 — **받기만 하고, 받았다는 것을 잰다** (`#310` · `#312`).
+
+매입이 *"어제 승인 때문에 창고 여유가 줄었다"* 를 쓸 근거가 없었다. 숫자는 이어지는데
+(``cap_by_date`` 7,645.6 → 4,058.6) **무엇이** 그 3,587kg 인지가 봉투에 없었다.
+마스터가 `#312` 로 실어 주면서 받는 쪽이 생겼다.
+
+🔴 **``None`` 과 ``[]`` 가 다른 사실이다.** 마스터가 *"없으면 칸을 안 만든다"* 로 보내므로
+  (`flow.py._commitments_block`), 받는 쪽에서 ``or []`` 로 접으면 **보내는 쪽이 지킨
+  구분이 여기서 사라진다** (규칙 3).
+
+⚠️ **문장을 넓히는 것은 이 판이 아니다.** *"어제 승인분 3,587kg 이 01-07 에 온다"* 는
+  ⑥ ``_warehouse_rationale`` 의 몫이고 그 함수는 `#332` 에 있다. 여기까지는 **받는
+  자리**뿐이다.
+"""
+
+import ast
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from app.purchase_agent.adapter import build_state, validate_payload
+
+# ★ **봉투를 다시 짓지 않는다.** ``test_adapter.py`` 가 이미 mock 포트로 정상 payload 를
+#   만든다 — 여기서 또 지으면 필수 키 목록이 두 곳이 되고, 어댑터가 요구 사항을 늘리는
+#   날 이 파일만 조용히 낡는다.
+from tests.test_purchase_agent.test_adapter import _payload, _request
+
+#: 마스터 실측 (`#310` 회신 · ``as_of=2026-01-08`` 배추). 이 모양이 실제로 온다.
+COMMITMENT = {
+    "approval_id": "H1-THRU-20260105-BAECHU-1",
+    "item": "배추",
+    "scenario_label": "기본",
+    "total_qty_kg": 3587.0,
+    "total_amount_krw": 3063298.0,
+    "inbound_lead_days": 2.0,
+    "first_arrival": "2026-01-07",
+    "arrival_schedule": [
+        {
+            "item": "배추",
+            "qty_kg": 3587.0,
+            "arrival_date": "2026-01-07",
+            "purchase_date": "2026-01-05",
+            "seq": 1,
+        }
+    ],
+}
+
+_NODES = Path(__file__).resolve().parents[2] / "app" / "purchase_agent" / "nodes"
+
+#: 이 검사가 쓰는 앵커. mock 포트가 이 날짜로 3품목을 다 낸다.
+AS_OF = date(2026, 8, 21)
+
+
+def _references(path: Path) -> bool:
+    """이 파일이 ``approved_commitments`` 를 **실제로 참조하는가.**
+
+    🔴 **docstring 과 주석은 안 센다.** 문자열 검색으로 세던 판이 `#332` 머지에서
+      깨졌다 — ``_warehouse_rationale`` 의 docstring 이 *"approved_commitments 도
+      in_transit 도 안 온다"* 라고 **안 온다는 사실을 적고 있었는데**, 그것을
+      *"읽는다"* 로 셌다.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    # docstring 은 문(statement) 자리에 홀로 선 문자열이다 — 그 노드만 걷어낸다.
+    prose = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+    return any(
+        isinstance(node, ast.Constant)
+        and node.value == "approved_commitments"
+        and id(node) not in prose
+        for node in ast.walk(tree)
+    )
+
+
+def test_승인_약정이_state_에_실린다() -> None:
+    """🔴 **`#310` 의 본문이다.** 전에는 봉투에 와도 어댑터가 버렸다."""
+    state = build_state(_request("배추", AS_OF, approved_commitments=[COMMITMENT]))
+
+    assert state.get("approved_commitments") == [COMMITMENT]
+
+
+def test_안_오면_None_이지_빈_목록이_아니다() -> None:
+    """🔴 *"마스터가 안 보냈다"* 와 *"어제 승인이 없었다"* 는 다른 사실이다 (규칙 3).
+
+    ``or []`` 로 접으면 둘이 같아지고, 그러면 나중에 근거 문장이 **승인이 없었다고
+    단정**하게 된다.
+    """
+    state = build_state(_request("배추", AS_OF))
+
+    assert state.get("approved_commitments") is None, "안 온 것을 빈 목록으로 접었다"
+
+
+def test_빈_목록이_오면_빈_목록이다() -> None:
+    """반대 방향 — 마스터가 ``[]`` 를 보내면 그것도 사실이라 ``None`` 으로 접지 않는다.
+
+    ⚠️ 지금 마스터는 ``[]`` 를 보내지 않는다 (`_commitments_block` 이 칸을 안 만든다).
+      그 규칙이 바뀌는 날 **여기가 조용히 틀리지 않게** 두 갈래를 다 잠근다.
+    """
+    state = build_state(_request("배추", AS_OF, approved_commitments=[]))
+
+    assert state.get("approved_commitments") == []
+
+
+def test_온_그대로_나른다() -> None:
+    """★ 마스터가 승인 이력을 해석하지 않고 싣듯, 우리도 고르거나 줄이지 않는다.
+
+    ``arrival_schedule`` 이 통째로 남아야 *"N kg 이 D 에 온다"* 를 나중에 쓸 수 있다.
+    """
+    state = build_state(_request("배추", AS_OF, approved_commitments=[COMMITMENT]))
+    carried = state["approved_commitments"][0]  # type: ignore[index]
+
+    assert carried == COMMITMENT
+    assert carried["arrival_schedule"][0]["arrival_date"] == "2026-01-07"
+
+
+def test_사본이라_봉투를_건드리지_않는다() -> None:
+    """State 를 고쳐도 원본 payload 가 안 바뀐다 — 마스터가 준 값은 우리 것이 아니다."""
+    request = _request("배추", AS_OF, approved_commitments=[COMMITMENT])
+    state = build_state(request)
+    state["approved_commitments"][0]["total_qty_kg"] = 1.0  # type: ignore[index]
+
+    assert request.payload["approved_commitments"][0]["total_qty_kg"] == 3587.0
+
+
+def test_없어도_missing_data_에_안_들어간다() -> None:
+    """★ 필수 입력이 아니다.
+
+    필수로 걸면 **어제가 없는 첫날**이 통째로 ``RUNTIME_NOT_READY`` 가 된다. 없으면
+    근거 문장 하나가 안 넓어질 뿐이라, 안은 그대로 만들어져야 한다.
+    """
+    missing = validate_payload(_payload("배추", AS_OF), AS_OF)
+
+    assert not [name for name in missing if "approved_commitments" in name], missing
+
+
+def test_이_값을_읽는_노드가_어디인지_잠근다() -> None:
+    """🔴 **누가 읽는지를 잠근다** (규칙 8) — 전에는 *"아무도 안 읽는다"* 였다.
+
+    ⚠️ **이 검사는 두 번 틀렸다.** 남겨 두는 이유가 그것이다.
+
+    ```text
+    #335       "아직 어느 노드도 안 읽는다"        받는 자리만 만든 판
+    #332 머지  🔴 깨졌다 — _warehouse_rationale 의 docstring 이
+               "approved_commitments 도 in_transit 도 안 온다" 라고 적고 있어서
+    지금       "⑥만 읽는다"                        실제로 읽기 시작한 판
+    ```
+
+    🔴 **첫 판정이 문자열 검색이었던 것이 문제였다.** *"안 온다"* 고 적어 둔
+      docstring 을 *"읽는다"* 로 셌다 — 두 브랜치가 각각은 통과하는데 합치면 깨졌다.
+      이제 ``ast`` 로 **실제 참조**만 본다 (docstring·주석은 안 센다).
+
+    ★ **⑥ 하나만이다.** ③(총량 클립)·⑦(도착일 컷)은 창고 값을 판정에 쓰지만 승인
+      이력은 안 본다 — 그쪽이 읽기 시작하면 여기가 울고, 그때 *"판정에 쓰는가"* 를
+      다시 물어야 한다. 근거 문장에 적는 것과 수량을 바꾸는 것은 다른 일이다.
+    """
+    readers = {path.name for path in sorted(_NODES.glob("*.py")) if _references(path)}
+
+    assert readers == {"package_scenarios.py"}, (
+        f"승인 이력을 읽는 노드가 바뀌었다: {sorted(readers)}. "
+        "판정에 쓰기 시작한 것인지 확인하고 이 검사와 state.py 주석을 같이 고칠 것"
+    )
+
+
+def test_받는_줄이_adjustments_옆에_있다() -> None:
+    """★ 두 값이 **같은 성격**이라 같은 자리에 둔다 — 마스터가 실어 주고 우리가 아직
+    안 쓰는 값이다.
+
+    🔴 **문자열이 아니라 구문으로 본다** (규칙 8). 주석이나 docstring 에 이름이
+      적혀 있는 것으로는 *"실제로 그 dict 에 담기는가"* 를 증명하지 못한다.
+    """
+    source = (_NODES.parent / "adapter.py").read_text(encoding="utf-8")
+    keys = {
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert "approved_commitments" in keys
+    assert "adjustments" in keys
+
+
+@pytest.mark.parametrize("bad", ["3587kg", 3587, [{"approval_id": "X"}, "낱말"]])
+def test_목록이_아닌_값은_그대로_터진다(bad: object) -> None:
+    """⚠️ **모양을 검사하지 않는다** — 조용히 삼키면 봉투가 틀린 것을 아무도 모른다.
+
+    ``missing_data`` 로 세우지 않는 이유는 이것이 *"사용자가 채울 수 있는 값"* 이
+    아니기 때문이다. 그 목록은 **마스터가 다시 보내면 풀리는 것**들인데, 약속과 다른
+    모양은 다시 보내도 같은 모양으로 온다 — 계약 위반이라 **터지는 편이 낫다.**
+
+    ⚠️ 예외 종류를 좁히지 않는다. ``dict("3")`` 은 ``ValueError`` 고 ``dict(3587)`` 은
+      ``TypeError`` 라, 하나로 못 박으면 **입력에 따라 검사가 통과했다 말았다** 한다.
+      우리가 잠그는 것은 *"조용히 넘어가지 않는다"* 이지 예외 이름이 아니다.
+    """
+    with pytest.raises((TypeError, ValueError)):
+        build_state(_request("배추", AS_OF, approved_commitments=bad))

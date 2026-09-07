@@ -91,6 +91,35 @@ class PurchaseAgentState(TypedDict):
     # verdicts · verdict_reasons. 마스터가 1회차 산출물에서만 만든다.
     feedback_context: NotRequired[dict | None]
 
+    # ── 승인 이력 (어댑터 경로에만 실린다) ──────────────────────────────────
+    #
+    # ``approved_commitments``: **어제까지** 승인된 약정 (`#310` → 마스터 `#312`).
+    #   ``constraints`` 밖 최상위로 온다 — 부서가 낸 값이 아니라 마스터가 이력에서
+    #   재조립한 값이라 ``execution_calendar`` 와 같은 자리다.
+    #
+    # 🔴 **``None`` 과 ``[]`` 가 다른 사실이다.** 마스터가 *"없으면 칸을 안 만든다 —
+    #   빈 배열은 '어제 승인이 없었다' 와 '마스터가 안 보낸다' 를 구별할 수 없다"* 로
+    #   보낸다 (`flow.py._commitments_block`). 받는 쪽에서 ``or []`` 로 접으면
+    #   **보내는 쪽이 지킨 구분이 여기서 사라진다** (규칙 3).
+    #
+    # 🟢 **⑥ 하나가 읽는다 (2026-09-06 갱신).** ``_warehouse_rationale`` 이 창고 근거
+    #   문장에서 *"어제 승인분 N kg 이 D 에 옵니다"* 를 말할 때 쓴다.
+    #
+    #   ★ **근거에만 쓰고 판정에는 안 쓴다.** 수량·회차를 이 값으로 바꾸지 않는다 —
+    #     ③(총량 클립)과 ⑦(도착일 컷)은 여전히 물류 ``cap_by_date`` 만 본다.
+    #     ``adjustments`` 주석이 적어 둔 규율이 여기서도 산다: *"반영과 독해는 다른
+    #     말이다."*
+    #
+    #   🔴 **문장을 넓히는 조건이 대조다.** 예정분(보장용량 − 여유 − 점유)과 약정
+    #     수량이 같고 도착일이 한 날일 때만 인과를 쓴다. 어긋나면 예정분에 승인분
+    #     아닌 점유가 섞였다는 뜻이라 종전 문장 그대로다 (`_commitment_cause`).
+    #
+    #   ⚠️ **누가 읽는지를 검사가 잠근다.** ``test_approved_commitments.py`` 의
+    #     ``test_이_값을_읽는_노드가_어디인지_잠근다`` 가 ``ast`` 로 실제 참조를 세어
+    #     ⑥ 하나임을 확인한다 — 다른 노드가 읽기 시작하면 울고, 그때 *"판정에
+    #     쓰는가"* 를 다시 물어야 한다.
+    approved_commitments: NotRequired[list[dict] | None]
+
     # ── 중간 산출 ───────────────────────────────────────────────────────────
     situation: Literal["stable", "uncertain"]
     context_docs: list[dict]  # 주입된 문서 (published_at <= as_of)
