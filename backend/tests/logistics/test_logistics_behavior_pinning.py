@@ -59,12 +59,17 @@ from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 AS_OF = date(2026, 8, 21)
 
 
+#: 테스트 전용 실행 축 (#345) — 운영값(`BURN_IN_SIM_RUN_ID`)을 쓰지 않는다.
+SIM_RUN_ID = "SIM-T-PIN-0001"
+
+
 def _ctx() -> ExecutionContext:
     return ExecutionContext(
         request_id="REQ-PIN-0001",
         as_of=AS_OF,
         trigger="USER_REQUEST",
         policy_version="POLICY-V1",
+        sim_run_id=SIM_RUN_ID,
     )
 
 
@@ -178,7 +183,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, snapshot: InventoryLogisticsSnapshot)
     monkeypatch.setattr(
         adapter,
         "_load_read",
-        lambda as_of: LogisticsRead(snapshot=snapshot, policy=_policy()),
+        lambda *, as_of, sim_run_id: LogisticsRead(snapshot=snapshot, policy=_policy()),
     )
 
 
@@ -740,7 +745,11 @@ def test_parity_는_시나리오가_전부_통과인_날도_성립한다(monkeyp
 
 
 def _raising_loader(error: Exception):
-    def _fn(*, as_of):
+    # ★ 실물 `get_current_logistics_read` 와 **같은 시그니처**여야 한다 (#345).
+    #   `sim_run_id` 를 안 받으면 어댑터가 넘기는 순간 `TypeError` 가 나고, 그것을
+    #   `_load_read` 의 `except Exception` 이 삼켜 **부재 검사가 ERROR 로 뒤집힌다** —
+    #   가짜의 모양이 틀려서 난 실패가 *"어댑터가 부재를 ERROR 로 뭉갠다"* 로 읽힌다.
+    def _fn(*, as_of, sim_run_id):
         raise error
 
     return _fn

@@ -149,10 +149,16 @@ def get_active_logistics_runtime_fixture(
        않고, 실제로 그랬다: `sim_run_id` 가 다른 활성 행 둘이 같은 날에 공존할 수 있어
        **다른 실행의 상태를 이번 실행의 상태로 읽을 수 있었다.**
 
-    ⚠️ **`sim_run_id` 는 아직 선택 인자다.** 이 함수를 부르는 두 경로
-       (`adapter._load` · `service._get_snapshot_or_none`)가 HTTP 요청에서 `as_of` 만
-       받고 실행 식별자를 안 나른다. 필수로 만들면 물류가 값을 **지어내야** 하므로
-       (그것이 곧 fail-open 이다) 축만 열어 두고 값은 위에서 내려오기를 기다린다.
+    ⚠️ **`sim_run_id` 는 아직 선택 인자다 — 이제 한 경로 때문이다** (`#345` 로 갱신).
+
+       ```text
+       adapter._load_read              봉투(ExecutionContext)로 받아 **나른다**   ✅ #345
+       service._get_snapshot_or_none   HTTP 요청에 실행 식별자가 없다             ⬜ 후속
+       ```
+
+       독립 Service 경로가 값을 못 나르는 동안 필수로 만들면 물류가 값을 **지어내야**
+       하므로(그것이 곧 fail-open 이다) 축은 열어 둔 채 남겨 둔다. 어댑터 경로는
+       `_load_read(*, as_of, sim_run_id)` 로 이미 닫혔다 — 거기서는 선택이 아니다.
 
        🔴 **안 받았다고 아무 행이나 고르지 않는다.** 그 경우 실행이 둘 보이면 종전처럼
           `ValueError` 로 멈춘다 — *"둘 중 하나를 고르지 않는다"* 가 이 함수의 규율이고
