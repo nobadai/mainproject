@@ -6,11 +6,13 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from psycopg import Connection, sql
 
-from app.finance.db import get_db_schema
+from app.finance.db import FinanceDataNotReady, get_db_schema
 
 
 class FinanceCollectionConflict(ValueError):
@@ -27,6 +29,17 @@ class CollectionTransitionPlan:
     next_status: str
     next_current_cash_krw: Decimal
     next_receivables_krw: Decimal
+
+
+@dataclass(frozen=True)
+class CollectionEvent:
+    """Caller-authored collection fact for one cumulative Receivable target."""
+
+    sim_run_id: str
+    financing_mode: str
+    collection_date: date
+    receivable_id: str
+    target_received_total_krw: object
 
 
 def build_collection_transition(
@@ -142,6 +155,96 @@ def apply_cumulative_collection(
         if cursor.rowcount != 1:
             raise FinanceCollectionConflict("finance state update did not affect exactly one row")
         return plan
+
+
+def apply_collection_event(
+    conn: Connection[dict[str, object]],
+    *,
+    sim_run_id: str,
+    financing_mode: str,
+    collection_date: date,
+    receivable_id: str,
+    target_received_total_krw: object,
+) -> CollectionTransitionPlan:
+    """Apply an explicit collection fact to the exact already-open Finance day.
+
+    This boundary does not infer an event from ``due_date``, choose a latest state, or carry a
+    prior state forward. The caller owns the transaction and supplies every execution axis.
+    """
+    for field, value in (
+        ("sim_run_id", sim_run_id),
+        ("financing_mode", financing_mode),
+        ("receivable_id", receivable_id),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be a non-blank string")
+
+    finance_state_id = _exact_collection_state_id(
+        conn,
+        sim_run_id=sim_run_id,
+        financing_mode=financing_mode,
+        collection_date=collection_date,
+    )
+    return apply_cumulative_collection(
+        conn,
+        receivable_id=receivable_id,
+        finance_state_id=finance_state_id,
+        target_received_total_krw=target_received_total_krw,
+    )
+
+
+def apply_explicit_collection(
+    conn: Connection[dict[str, object]], event: CollectionEvent
+) -> CollectionTransitionPlan:
+    """Command-friendly adapter for deterministic fixture-authored collection events."""
+    return apply_collection_event(
+        conn,
+        sim_run_id=event.sim_run_id,
+        financing_mode=event.financing_mode,
+        collection_date=event.collection_date,
+        receivable_id=event.receivable_id,
+        target_received_total_krw=event.target_received_total_krw,
+    )
+
+
+def _exact_collection_state_id(
+    conn: Connection[dict[str, object]],
+    *,
+    sim_run_id: str,
+    financing_mode: str,
+    collection_date: date,
+) -> str:
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT finance_state_id
+                FROM {}.finance_states
+                WHERE sim_run_id = %(sim_run_id)s
+                  AND financing_mode = %(financing_mode)s
+                  AND state_date = %(collection_date)s
+                FOR UPDATE
+                """
+            ).format(schema),
+            {
+                "sim_run_id": sim_run_id,
+                "financing_mode": financing_mode,
+                "collection_date": collection_date,
+            },
+        )
+        rows = cursor.fetchall()
+    if not rows:
+        raise FinanceDataNotReady("historical_finance_position")
+    if len(rows) != 1:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    return str(_row_value(rows[0], "finance_state_id", 0))
+
+
+def _row_value(row: Any, name: str, index: int) -> object:
+    if isinstance(row, Mapping):
+        return row[name]
+    return row[index]
 
 
 def _money(value: object, field: str) -> Decimal:
