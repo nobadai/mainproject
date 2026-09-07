@@ -283,8 +283,26 @@ _VERDICT_MAP: Mapping[str, Verdict] = {
 """
 
 
+#: 실행 축을 **실제로 읽는** mode — 이 셋만 `sim_run_id` 문을 지난다 (#345).
+#
+# 🔴 **미구현 mode 를 이 문 앞에 세우지 않는다.** `PRE_SALES` 는 아직
+#   `_not_implemented` 가 받는 자리인데(#346), 실행 축이 비었다고 그 답을
+#   `sim_run_id` 누락으로 바꾸면 *"번역이 없다"* 가 *"값이 안 왔다"* 로 뒤바뀐다.
+#   **없는 구현을 값 탓으로 돌리는 것은 거짓이고**, 마스터는 그 말을 듣고 사용자에게
+#   줄 수 없는 것을 달라고 한다 (M-1 §5.1).
+#
+# ★ 아래 세 handler 가 전부 같은 `_load_read` 를 지나므로 문은 하나면 된다.
+_RUNTIME_AXIS_MODES: frozenset[str] = frozenset(
+    {"PRE_PURCHASE", "SCENARIO_VALIDATION", "STATUS_QUERY"}
+)
+
+
 def logistics_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 접점."""
+    # 🔴 **어느 실행의 장부인지 모르면 읽지 않는다** (#345). 물류는 이 값을 지어내지
+    #    않는다 — 마스터가 소유한 값이고, 없으면 없다고 답하는 것이 답이다.
+    if request.mode in _RUNTIME_AXIS_MODES and not request.context.sim_run_id.strip():
+        return _no_run_axis(request)
     if request.mode == "PRE_PURCHASE":
         return _pre_purchase(request)
     if request.mode == "SCENARIO_VALIDATION":
@@ -320,7 +338,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     tools: list[str] = [_T_LOTS]
 
     try:
-        read = _load_read(as_of)
+        read = _load_read(as_of=as_of, sim_run_id=request.context.sim_run_id)
     except _SnapshotLoadError:
         return _snapshot_error(request, run_id, tools)
     snapshot = read.snapshot if read is not None else None
@@ -465,7 +483,7 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     tools: list[str] = [_T_RULES]
 
     try:
-        read = _load_read(as_of)
+        read = _load_read(as_of=as_of, sim_run_id=request.context.sim_run_id)
     except _SnapshotLoadError:
         return _snapshot_error(request, run_id, tools)
     snapshot = read.snapshot if read is not None else None
@@ -916,7 +934,7 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         return reply, _meta(request, run_id, [])
 
     try:
-        read = _load_read(as_of)
+        read = _load_read(as_of=as_of, sim_run_id=request.context.sim_run_id)
     except _SnapshotLoadError:
         return _snapshot_error(request, run_id, tools)
     snapshot = read.snapshot if read is not None else None
@@ -1214,6 +1232,35 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
     return reply, _meta(request, run_id, [])
 
 
+def _no_run_axis(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
+    """봉투에 실행 축이 안 실려 왔다 — **`ERROR` 가 아니다** (#345).
+
+    🔴 **`ERROR` 로 접으면 두 실패가 한 이름이 된다.** `_snapshot_error` 가 말하는 것은
+       *"DB 가 깨졌으니 다시 불러 봐라"* 인데(`worth_retry`), 값을 못 받은 것은 다시
+       불러도 같다. 재시도하면 호출 예산만 탄다 (M-1 §5.1 · 정의서 §1.2-12).
+       `failed_operation` 을 실을 수도 없다 — **조회를 시도조차 안 했다.**
+
+    ★ **예외로 올리지 않는다.** 올리면 `MasterRunner._invoke` 가 잡아 `error_reply` 로
+      바꾸므로 결국 `ERROR` 가 되고, 예외 원문이 `reasoning` 에 실려
+      `E-REASONING-NUMERIC` 함정까지 같이 온다 — 부서 회신은 값으로 답한다.
+
+    ★ **이름은 `sim_run_id` 하나다.** `logistics_runtime_fixture` 를 같이 싣지 않는다 —
+      fixture 는 **없는 것이 아니라 어느 것인지 못 고르는 것**이고, 그 이름은 진짜
+      부재(`_status_query` · `_pre_purchase`)가 이미 쓰고 있어 섞으면 마스터가 두 상황을
+      못 가린다.
+
+    ★ `tools` 가 비는 것은 사실이다 — **Tool 을 하나도 안 돌렸다.**
+    """
+    run_id = _run_id(request)
+    return _not_ready(
+        request,
+        run_id,
+        [],
+        missing=("sim_run_id",),
+        reason="어느 실행의 물류 장부인지 확인할 수 없다",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 도우미
 # ---------------------------------------------------------------------------
@@ -1223,8 +1270,19 @@ class _SnapshotLoadError(Exception):
     """스냅샷 조회가 **실행 오류**로 실패했다 — 데이터 부재(LookupError)와 다르다."""
 
 
-def _load_read(as_of: date) -> LogisticsRead | None:
+def _load_read(*, as_of: date, sim_run_id: str) -> LogisticsRead | None:
     """부재만 None 으로, 실행 오류는 구분해 올린다 (#121 4단계).
+
+    🔴 **`sim_run_id` 는 봉투에서 온다. 여기서 지어내지 않는다** (#345).
+       *"어느 실행의 장부인가"* 는 물류 사실이 아니라 마스터가 소유한 값이다
+       (`master/envelope.ExecutionContext`). 그래서 `BURN_IN_SIM_RUN_ID` 로 메우지도,
+       최신 실행을 고르지도, DB 에서 되짚지도 않는다 — 그 전부가 fail-open 이다.
+
+    ★ **선택 인자로 두지 않았다.** 어댑터 경로에는 값이 없는 경우가 없다 —
+      `logistics_port` 의 문이 이미 막는다(`_no_run_axis`). 여기에 `None` 을 남기면
+      *"안 주면 조용히 넓어지는"* 자리가 다시 생기고, 그건 이 이슈가 닫은 자리다.
+      Repository 쪽 `sim_run_id=None` 은 **독립 Service 경로 때문에 남는 것**이지
+      어댑터 때문이 아니다 (`service._get_snapshot_or_none` — 별도 안건).
 
     Repository 예외 계약 전수 확인(2026-09-01) — 정상적인 "데이터 없음/미확정"은
     **LookupError 둘**이다(runtime fixture 0건 · 필수 정책 미등재). 독립 Service
@@ -1245,13 +1303,13 @@ def _load_read(as_of: date) -> LogisticsRead | None:
       NULL 인 Lot 의 신선도를 어떻게 볼지가 함께 정해져야 해 기계적 수정이 아니다.
     """
     try:
-        return get_current_logistics_read(as_of=as_of)
+        return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id)
     except LookupError:
         return None  # 없는 것은 예외가 아니라 상태다
     except Exception as error:
         # 원문 메시지는 로그로만 남긴다 — reasoning 에 그대로 실으면 숫자가 섞여
         # E-REASONING-NUMERIC 에 걸린다 (2026-09-01 재무 400 회신에서 실측된 함정).
-        logger.exception("Logistics read failed (as_of=%s)", as_of)
+        logger.exception("Logistics read failed (as_of=%s, sim_run_id=%s)", as_of, sim_run_id)
         raise _SnapshotLoadError from error
 
 

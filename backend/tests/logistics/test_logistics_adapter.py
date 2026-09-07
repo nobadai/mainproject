@@ -30,18 +30,30 @@ from app.master.envelope import AgentRequest, ExecutionContext, validate_reply
 
 AS_OF = date(2025, 12, 31)
 
+#: 이 파일이 쓰는 **테스트 전용** 실행 축 (#345).
+#
+# ★ `BURN_IN_SIM_RUN_ID` 를 쓰지 않는다. 운영값을 넣으면 어댑터가 값을 **나르는지**
+#   아니면 어딘가에서 **주워 오는지** 구별이 안 된다 — 봉투가 준 값이 그대로
+#   Repository 로 가는 것을 보려면 여기서만 나오는 값이어야 한다.
+SIM_RUN_ID = "SIM-T-0001"
 
-def ctx(as_of: date = AS_OF) -> ExecutionContext:
+
+def ctx(as_of: date = AS_OF, sim_run_id: str = SIM_RUN_ID) -> ExecutionContext:
     return ExecutionContext(
         request_id="REQ-T-0001",
         as_of=as_of,
         trigger="USER_REQUEST",
         policy_version="POLICY-V1",
+        sim_run_id=sim_run_id,
     )
 
 
-def req(mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None) -> AgentRequest:
-    return AgentRequest(context=ctx(as_of), agent="inventory", mode=mode, payload=payload or {})
+def req(
+    mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None, sim_run_id: str = SIM_RUN_ID
+) -> AgentRequest:
+    return AgentRequest(
+        context=ctx(as_of, sim_run_id), agent="inventory", mode=mode, payload=payload or {}
+    )
 
 
 class _Lot:
@@ -134,7 +146,7 @@ def _read(snapshot=None, policy=None):
 
 @pytest.fixture
 def wired(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read())
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read())
     monkeypatch.setattr(adapter, "build_lot_constraints", lambda snapshot: list(_LOTS))
 
 
@@ -217,7 +229,7 @@ def test_리드타임이_없으면_cap_by_date_를_비우지_않고_밝힌다(wi
     """빈 dict 를 실으면 *못 받은 것* 과 *받았는데 빈 것* 이 구분되지 않는다."""
 
     monkeypatch.setattr(
-        adapter, "_load_read", lambda as_of: _read(_snapshot(inbound_lead_days=None))
+        adapter, "_load_read", lambda *, as_of, sim_run_id: _read(_snapshot(inbound_lead_days=None))
     )
     reply, _ = adapter.logistics_port(req())
     assert "cap_by_date" not in reply.payload
@@ -351,7 +363,9 @@ def test_정책값이_없는_품목은_근거를_만들지_않는다(wired):
 def test_보관정책이_미조회면_빈_배열로_덮지_않는다(wired, monkeypatch):
     """`None`(미조회)과 `[]`(정책 0 건 확인)은 다르다 (§1.2-10)."""
     monkeypatch.setattr(
-        adapter, "_load_read", lambda as_of: _read(_snapshot(item_storage_policies=None))
+        adapter,
+        "_load_read",
+        lambda *, as_of, sim_run_id: _read(_snapshot(item_storage_policies=None)),
     )
     reply, _ = adapter.logistics_port(req())
     assert "item_storage_policies" not in reply.payload
@@ -379,7 +393,7 @@ def test_스냅샷_기준일이_다르면_판단하지_않는다(wired):
 
 def test_스냅샷이_없으면_ERROR_가_아니라_NOT_READY(wired, monkeypatch):
     """다시 불러도 같다 — 재시도 가치가 다르다 (M-1 §5.1)."""
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: None)
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: None)
     reply, _ = adapter.logistics_port(req())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.business_status == "skipped"
@@ -610,7 +624,7 @@ def test_물류가_NOT_READY_면_반드시_이름이_남는다(wired, monkeypatc
     monkeypatch.setattr(
         adapter,
         "_load_read",
-        lambda as_of: _read(
+        lambda *, as_of, sim_run_id: _read(
             policy=_policy().model_copy(
                 update={"source_refs": {**_policy().source_refs, "rental_cap_kg": "MVP:RENTAL"}}
             )
@@ -724,7 +738,9 @@ def stocked(wired, monkeypatch):
       두면 payload 의 `lots`(배추 500.5)와 `inventory_by_item`(배추 180)이 **서로 다른
       재고**에서 나와, 두 필드의 정합을 보려는 후속 테스트가 헛돈다 (검증 발견 7).
     """
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(_stocked_snapshot()))
+    monkeypatch.setattr(
+        adapter, "_load_read", lambda *, as_of, sim_run_id: _read(_stocked_snapshot())
+    )
     monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
 
 
@@ -770,7 +786,9 @@ def test_출고_귀속_불명이면_가용재고를_지어내지_않는다(stock
     monkeypatch.setattr(
         adapter,
         "_load_read",
-        lambda as_of: _read(_stocked_snapshot(confirmed_outbound_schedule=unattributed)),
+        lambda *, as_of, sim_run_id: _read(
+            _stocked_snapshot(confirmed_outbound_schedule=unattributed)
+        ),
     )
     reply, _ = adapter.logistics_port(req())
     assert "inventory_by_item" not in reply.payload
@@ -823,7 +841,7 @@ def test_업무_위험_signal_이_soft_warnings_로_합류한다(wired, monkeypa
             ]
         }
     )
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(pressured))
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(pressured))
     reply, _ = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_proposal_payload()))
     assert "INVENTORY_FRESHNESS_PRESSURE" in reply.payload["soft_warnings"]
 
@@ -845,7 +863,7 @@ def test_우선_조정_축은_있을_때만_실린다(wired, monkeypatch):
 def test_시나리오_상세를_실어도_봉투_검증을_통과한다(wired, monkeypatch):
     """signal·상세·근거가 다 실린 상태로 봉투 규칙 전체를 통과해야 한다."""
     pressured = _stocked_snapshot(freshness_pressure_ratio=Decimal("0.30"))
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: _read(pressured))
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(pressured))
     request = req(mode="SCENARIO_VALIDATION", payload=_proposal_payload())
     reply, meta = adapter.logistics_port(request)
     assert reply.payload["scenario_results"]
@@ -1137,14 +1155,14 @@ def test_빈_inputs_used_가_경계_관측을_덮지_않는다(wired, stocked):
 
 def test_못_낸_회신에는_관측을_달지_않는다(monkeypatch):
     """ "안 돌았는데 무엇을 읽었다" 가 되면 안 된다."""
-    monkeypatch.setattr(adapter, "_load_read", lambda as_of: None)
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: None)
     reply, meta = adapter.logistics_port(req())
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert _dept_meta(meta) is None
 
 
 def test_스냅샷_실행오류_회신에도_관측을_달지_않는다(monkeypatch):
-    def _boom(as_of):
+    def _boom(*, as_of, sim_run_id):
         raise adapter._SnapshotLoadError("db down")
 
     monkeypatch.setattr(adapter, "_load_read", _boom)
@@ -1178,3 +1196,108 @@ def test_시나리오_Tool_은_금지_이름을_정직하게_선언한다():
     from app.critic.critic_v0_4 import FORBIDDEN_SCENARIO_INPUTS
 
     assert FORBIDDEN_SCENARIO_INPUTS & set(adapter._TOOL_INPUTS[adapter._T_ARRIVAL])
+
+
+# ---------------------------------------------------------------------------
+# 실행 축 — 마스터가 준 sim_run_id 가 그대로 Repository 까지 간다 (#345)
+# ---------------------------------------------------------------------------
+#
+# ★ **`_load_read` 를 갈아 끼우지 않는다.** 이번에 고친 자리가 바로 그 함수라, 그것을
+#   가짜로 덮으면 전달 여부를 볼 수 없다. 한 단계 아래(`get_current_logistics_read`)를
+#   잡아 **봉투에서 나온 값이 Repository 인자로 도착하는지**를 본다.
+#
+# ★ 실행 둘을 실제로 세우지 않는다. 어댑터는 DB 를 안 타고, *"남의 실행을 안 읽는다"*
+#   의 검사는 이미 Repository 쪽에 있다
+#   (`test_logistics_service_repository.py::test_runtime_fixture_reads_only_the_requested_run`).
+#   여기서 볼 것은 **축을 나르는가** 하나다.
+
+#: 실행 축을 실제로 읽는 세 mode — payload 가 있어야 하는 쪽은 만들어 준다.
+_AXIS_MODES = [
+    pytest.param("PRE_PURCHASE", dict, id="PRE_PURCHASE"),
+    pytest.param("STATUS_QUERY", dict, id="STATUS_QUERY"),
+    pytest.param("SCENARIO_VALIDATION", _proposal_payload, id="SCENARIO_VALIDATION"),
+]
+
+
+def _recorder(calls: list[dict]):
+    def _fn(*, as_of, sim_run_id):
+        calls.append({"as_of": as_of, "sim_run_id": sim_run_id})
+        return _read()
+
+    return _fn
+
+
+@pytest.mark.parametrize(("mode", "payload_factory"), _AXIS_MODES)
+@pytest.mark.parametrize("실행", ["SIM-A", "SIM-B"])
+def test_봉투가_준_실행_축을_그대로_조회에_넘긴다(monkeypatch, mode, payload_factory, 실행):
+    """🔴 **물류는 이 값을 지어내지 않는다** — 봉투가 준 것을 그대로 쓴다 (#345).
+
+    두 값을 다 도는 이유는 *"어쩌다 맞는"* 을 막기 위해서다. 하나만 재면
+    `BURN_IN_SIM_RUN_ID` 를 박아 넣은 뮤턴트가 살아남을 수 있다.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(adapter, "get_current_logistics_read", _recorder(calls))
+
+    request = req(mode=mode, payload=payload_factory(), sim_run_id=실행)
+    adapter.logistics_port(request)
+
+    assert calls == [{"as_of": AS_OF, "sim_run_id": 실행}]
+
+
+@pytest.mark.parametrize(("mode", "payload_factory"), _AXIS_MODES)
+def test_실행_축이_비면_조회하지_않고_이름을_남긴다(monkeypatch, mode, payload_factory):
+    """🔴 **읽지 않는 것이 답이다.** 축이 없으면 어느 실행의 장부인지 모르고, 모르는 채로
+    아무 행이나 고르는 것이 fail-open 이다 (`repository` 가 지키는 규율과 같은 편).
+
+    ★ **`ERROR` 가 아니다.** 다시 불러도 같으므로 재시도 가치가 없다 (M-1 §5.1) —
+      `ERROR` 로 내면 마스터가 호출 예산만 태운다.
+    """
+    # ★ 여기서 예외를 던지지 않는다. 던지면 `_load_read` 의 `except Exception` 이
+    #   삼켜 ERROR 로 나오고, 문이 사라진 날 실패 문구가 *"어댑터가 뭉갠다"* 로
+    #   읽힌다 — 세고 나서 비었는지 묻는 편이 무엇이 깨졌는지 곧바로 말한다.
+    calls: list[dict] = []
+    monkeypatch.setattr(adapter, "get_current_logistics_read", _recorder(calls))
+
+    request = req(mode=mode, payload=payload_factory(), sim_run_id="")
+    reply, meta = adapter.logistics_port(request)
+
+    assert calls == [], "실행 축이 없는데 Repository 를 불렀다"
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ("sim_run_id",)
+    # 아무 Tool 도 안 돌았다 — 안 돈 것을 돈 것처럼 적지 않는다
+    assert meta.used_tools == ()
+    # 예외 원문이 새지 않는다 — reasoning 에 숫자가 한 자리도 없어야 한다
+    assert not any(character.isdigit() for character in reply.reasoning)
+    assert validate_reply(request, reply, meta) == ()
+
+
+@pytest.mark.parametrize("실행", ["", SIM_RUN_ID])
+def test_미구현_mode_의_답을_실행_축_탓으로_바꾸지_않는다(실행):
+    """🔴 **이번 판이 건드리면 안 되는 자리다** (#345 ↔ #346).
+
+    `PRE_SALES` 는 봉투가 허용하지만 어댑터에 아직 없다. 축이 비었다고 그 답을
+    `sim_run_id` 누락으로 바꾸면 *"번역이 없다"* 가 *"값이 안 왔다"* 로 뒤바뀌고,
+    마스터는 **줄 수 없는 것을 사용자에게 달라고 한다** (M-1 §5.1).
+
+    ★ 그래서 문은 **구현된 세 mode 에만** 선다 (`_RUNTIME_AXIS_MODES`).
+    """
+    request = req(mode="PRE_SALES", sim_run_id=실행)
+    reply, _ = adapter.logistics_port(request)
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.missing_data == ("PRE_SALES_translation",)
+    assert reply.missing_capability == ("PRE_SALES 번역",)
+
+
+def test_읽는_함수는_실행_축을_이름으로_받는다():
+    """★ 구조로 잠근다 — `test_logistics_day_open.py` 가 Repository 쪽에 건 것과 같은 검사.
+
+    위치인자로 새면 호출자가 `as_of` 와 축을 뒤바꿔 넣어도 조용히 돈다. 그리고
+    **선택 인자가 아니어야** *"안 주면 넓어지는"* 자리가 안 생긴다.
+    """
+    import inspect
+
+    축 = inspect.signature(adapter._load_read).parameters["sim_run_id"]
+    assert 축.kind is inspect.Parameter.KEYWORD_ONLY
+    assert 축.default is inspect.Parameter.empty, "선택 인자로 두면 fail-open 이 돌아온다"
