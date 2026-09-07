@@ -17,6 +17,7 @@ from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
 from app.logistics.day_open import LogisticsDayOpening
 from app.logistics.inbound_execution import LogisticsInboundExecution
+from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.router import router as logistics_router
 from app.logistics.transition import LogisticsTransitionAdapter
 from app.logistics.cancellation import LogisticsCancellationAdapter
@@ -24,7 +25,6 @@ from app.master.cancellation import register_cancellation
 from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.day_open import register_day_opening
 from app.master.inbound import register_inbound
-from app.master.inbound_inspection import NoInspectionSource
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
 from app.master.transition import register_transition
@@ -161,27 +161,33 @@ register_cancellation("logistics", LogisticsCancellationAdapter(sim_run_id=BURN_
 #    > 데이터도 없다. 여기에 기본 구현을 놓으면 **아무도 정한 적 없는 비율이 곧
 #    > 업무 사실이 되어** 원가·폐기·판매 판단으로 흘러간다.
 #
-#    그리고 길을 열어 뒀다 — *"항상 `None` 을 내는 provider 는 정당한 배선이다."*
+#    그래서 **배선 자리에서 눈에 보이게 고른다.** 클래스가 저장소에 있다고 해서
+#    그것이 기본값이 되지는 않는다 — `ScenarioSimulatedInspectionProvider` 의
+#    docstring 이 그렇게 적어 뒀다.
 #
-# ★ **그래서 도착분이 매일 `BLOCKED / INSPECTION_FACT_UNAVAILABLE` 로 보인다.
-#   그것이 이 배선의 목적이다.** 지금 도착 예정 `2026-01-07` 이 `02-06` 까지
-#   `in_transit` 에 **묻혀서 안 보인다** — 배선을 미루면 계속 안 보이고, 붙이면
-#   매일 보인다. 조용해지면 그때가 이상한 것이다.
+# 🔴 **`ScenarioSimulatedInspectionProvider` 는 품질 모델이 아니다** (물류 `#336`).
+#
+#    *"실제 농산물이 늘 100% 정상"* 이라는 주장이 아니라 **이번 MVP 가 품질손실 축을
+#    아직 쓰지 않는다**는 명시적 가정이다. 물류가 그 이유를 자기 파일에 적어 뒀고,
+#    **그 판단의 주인이 물류다.**
+#
+# ★ **마스터가 잠깐 들고 있던 자리였다.** `#337` 을 처음 낼 때는 물류에 구현이 없어
+#   `app/master/inbound_inspection.py` 의 `NoInspectionSource`(항상 `None` → 매일
+#   `BLOCKED`)로 배선했다 — *"검수 규칙의 주인은 마스터가 안 정한다"* 를 지키려고
+#   **부재를 부재로 적은 것**이다. 물류가 `#336` 으로 주인 노릇을 하자 그 파일을
+#   지우고 이 한 줄을 바꿨다. `FinanceCancellationAdapter` 와 같은 전례이고,
+#   **그 임시 파일이 하루 만에 설계대로 사라졌다.**
 #
 #   ```text
-#   배선 안 함      "입고 실행 미등록"     배선 문제 — **사실이 아니다**, 구현은 섰다
-#   Null provider   "검수 사실을 모른다"   그날의 사실
+#   배선 안 함        "입고 실행 미등록"     배선 문제 — 사실이 아니다, 구현은 섰다
+#   NoInspectionSource "검수 사실을 모른다"   그날의 사실 — **주인이 없던 동안**
+#   ScenarioSimulated  전량 PASS              **주인이 정한 MVP 가정**  ← 지금
 #   ```
-#
-# ⚠️ **검수 규칙의 주인은 마스터가 안 정한다.** 여기서 고르면 *"아무도 정한 적 없는
-#    비율"* 을 막으려던 물류의 판단을 마스터가 우회하는 셈이다. 주인이 정해져 자기
-#    provider 를 올리면 `app/master/inbound_inspection.py` 를 지우고 이 한 줄만
-#    바꾸면 된다 — `FinanceCancellationAdapter` 와 같은 전례다.
 register_inbound(
     "logistics",
     LogisticsInboundExecution(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        inspection_provider=NoInspectionSource(),
+        inspection_provider=ScenarioSimulatedInspectionProvider(),
     ),
 )
 

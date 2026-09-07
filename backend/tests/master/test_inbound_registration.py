@@ -1,4 +1,4 @@
-"""입고 실행이 **실제로 등록되는가** — 그리고 검수 원천이 **없다는 것이 보이는가**.
+"""입고 실행이 **실제로 등록되는가** — 그리고 검수 원천을 **누가 골랐는가**.
 
 🔴 **`register_inbound` 호출이 0건이었다.** 경계는 `#316` 으로, 구현은 물류가 `#329`
    로 세웠는데 등록하는 줄이 어디에도 없어서 `receive_arrivals` 가 매일 *"입고 실행
@@ -12,15 +12,19 @@
 
 ---
 
-🔴 **두 번째로 잠그는 것이 더 중요하다 — `NoInspectionSource` 가 조용해지면 안 된다.**
+🔴 **두 번째로 잠그는 것 — 검수 provider 는 마스터가 고르는 것이 아니다.**
 
-검수 사실의 주인이 아직 없어서 마스터가 *"항상 `None` 을 내는 provider"* 로 배선했다
-(물류가 `InspectionProvider` docstring 에서 정당하다고 명시한 길). 그 결과 도착분이
-매일 `BLOCKED` 로 보인다. **그것이 목적이다.**
+이 파일은 처음에 `NoInspectionSource`(마스터가 임시로 든 Null)를 잠갔다. 물류가
+`#336` 으로 `ScenarioSimulatedInspectionProvider` 를 올리면서 **주인이 정해졌고**,
+그 임시 파일은 설계대로 지워졌다.
 
-⚠️ 누가 편의로 여기에 그럴듯한 검수 사실을 채워 넣으면 *"아무도 정한 적 없는 비율"*
-  이 곧 업무 사실이 되어 원가·폐기·판매 판단으로 흘러간다 — 물류가 기본 구현을
-  일부러 안 만든 이유가 그것이다. 그 날 이 파일이 빨간불이어야 한다.
+★ **그래서 여기서 재는 것이 바뀌었다.** 전에는 *"Null 이 조용해지면 안 된다"* 였고
+  지금은 *"마스터가 자기 판정을 지어내지 않는다"* 다. 잠그는 값이 아니라 **잠그는
+  이유가 같다** — 검수 규칙의 주인은 물류다.
+
+⚠️ **전량 PASS 는 품질 모델이 아니다.** 물류가 자기 파일에 적었듯 *"이번 MVP 가
+  품질손실 축을 아직 쓰지 않는다"* 는 명시적 가정이다. 마스터가 여기서 합격률을
+  손보면 **아무도 정한 적 없는 비율이 업무 사실이 된다.**
 """
 
 from __future__ import annotations
@@ -31,12 +35,12 @@ import pytest
 
 import app.main  # noqa: F401  — import 시점에 입고 실행을 등록한다. 이 검사의 전제다
 from app.logistics.inbound_execution import LogisticsInboundExecution
+from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.master import inbound
-from app.master.inbound_inspection import NoInspectionSource
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 AS_OF = date(2026, 1, 7)
-"""도착 예정이 실제로 걸려 있는 날 — `02-06` 까지 `in_transit` 에 묻혀 있던 그 건이다."""
+"""도착 예정이 실제로 걸려 있는 날 — 250일째 `in_transit` 에 묻혀 있는 그 건이다."""
 
 
 # ---------------------------------------------------------------------------
@@ -67,46 +71,45 @@ def test_마스터가_정한_장부에_앉힌다() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. 검수 원천이 **없다**는 것
+# 2. 검수 원천을 **누가 골랐는가**
 # ---------------------------------------------------------------------------
 
 
-def test_검수_provider_가_Null_이다() -> None:
-    """⚠️ 진짜 provider 가 들어오는 날 이 검사를 지우는 것이 그 PR 의 일부다."""
-    impl = inbound.registered()["logistics"]
-    assert isinstance(impl._provider, NoInspectionSource), (
-        f"검수 provider 가 바뀌었다: {type(impl._provider).__name__}. "
-        "진짜 원천이 생긴 것이면 이 검사와 app/master/inbound_inspection.py 를 같이 지운다"
-    )
+def test_검수_provider_는_물류의_것이다() -> None:
+    """🔴 **마스터가 자기 판정을 지어내지 않는다.**
 
-
-@pytest.mark.parametrize(
-    "inbound_row, detail",
-    [
-        (None, None),
-        ({"inbound_id": "IN-1"}, {"item": "배추", "qty_kg": 100}),
-        # ★ **그럴듯한 값**을 넣어 본다. 여기서 답이 갈리면 그것은 이미 검수 정책이다.
-        ({"inbound_id": "IN-2", "grade": "특"}, {"item": "배추", "qty_kg": 5000}),
-    ],
-)
-def test_무엇이_들어와도_모른다고_답한다(inbound_row: object, detail: object) -> None:
-    """🔴 **값에 따라 답이 갈리면 아무도 정한 적 없는 비율이 업무 사실이 된 것이다.**"""
-    fact = NoInspectionSource().provide(
-        as_of=AS_OF, inbound=inbound_row, purchase_detail=detail
-    )
-    assert fact is None, f"검수 사실을 지어냈다: {fact!r}"
-
-
-def test_부재를_예외로_바꾸지_않는다() -> None:
-    """★ **`None` 은 실패가 아니라 부재다** (물류 `InspectionProvider`).
-
-    예외를 올리면 마스터가 롤백하고 그날 입고를 통째로 `FAILED` 로 만든다 — 그것은
-    *"검수 원천이 없다"* 가 아니라 *"실행이 깨졌다"* 이고, 사람이 없는 장애를 찾는다.
+    `app/master/` 안의 클래스가 여기 오면 그것이 곧 마스터가 검수 규칙을 정한
+    것이다 — `NoInspectionSource` 를 지운 이유가 그것이다.
     """
-    NoInspectionSource().provide(as_of=AS_OF, inbound=None, purchase_detail=None)
+    impl = inbound.registered()["logistics"]
+    provider = impl._provider
+    assert isinstance(provider, ScenarioSimulatedInspectionProvider), (
+        f"검수 provider 가 물류 것이 아니다: {type(provider).__name__}"
+    )
+    assert type(provider).__module__.startswith("app.logistics"), (
+        f"검수 판정이 마스터 모듈에서 나온다: {type(provider).__module__}. "
+        "검수 규칙의 주인은 물류다 (#336)"
+    )
 
 
-def test_provider_없이는_물류_구현이_서지_않는다() -> None:
-    """⚠️ 기본값이 생기는 날 빨간불. **물류가 기본값을 안 둔 것이 계약이다.**"""
+def test_배선이_provider_를_명시적으로_고른다() -> None:
+    """⚠️ 기본값이 생기는 날 빨간불. **물류가 기본값을 안 둔 것이 계약이다.**
+
+    저장소에 구현이 하나뿐이라고 그것이 기본값이 되면, 둘째 구현이 생기는 날
+    **아무도 안 고른 것이 계속 돈다.**
+    """
     with pytest.raises(TypeError):
         LogisticsInboundExecution(sim_run_id=BURN_IN_SIM_RUN_ID)  # type: ignore[call-arg]
+
+
+def test_마스터가_합격률을_손대지_않는다() -> None:
+    """🔴 **전량 PASS 는 물류의 MVP 가정이지 마스터가 정한 비율이 아니다.**
+
+    마스터가 provider 를 감싸 수량을 깎거나 등급을 붙이면 그 순간 *"아무도 정한 적
+    없는 비율"* 이 업무 사실이 된다 — 물류가 `#336` 에서 `random` · `seed` ·
+    품목별 손실률을 다 거절한 이유가 그것이다.
+    """
+    impl = inbound.registered()["logistics"]
+    assert type(impl._provider) is ScenarioSimulatedInspectionProvider, (
+        "provider 가 감싸여 있다 — 마스터가 판정에 손댄 자리가 있는지 본다"
+    )
