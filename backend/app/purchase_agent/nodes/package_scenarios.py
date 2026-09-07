@@ -17,6 +17,7 @@ from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
     compute_rise_rate_2w,
     is_gate_excluded,
+    judgment_row,
 )
 from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
 from app.purchase_agent.quotes import observed_date, observed_spec
@@ -794,12 +795,48 @@ def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
     """
     window = usable_forecast_window(forecast, coverage_days)
     top = max(window, key=lambda row: row["upper"])
+    notes = _judgment_day_risks(forecast)
     if not top.get("is_filled"):
-        return []
-    return [
+        return notes
+    return notes + [
         (
             f"매입 상한({top['upper']}원)을 정한 {top['date']}은 장이 서지 않아 "
             "앞 장날 값을 그대로 쓴 날이다"
+        )
+    ]
+
+
+def _judgment_day_risks(forecast: dict) -> list[str]:
+    """상황 판정일 행이 **복사값**인 날의 한 줄. 아닌 날은 빈 목록이다.
+
+    🔴 **전에는 안 붙였고, 그 근거가 무너졌다** (2026-09-07 · ``#384``).
+
+    ①의 주석이 *"판정일이 주(週)의 배수라 복사값을 안 밟는다"* 를 근거로 이 값을
+    판정에서도 고지에서도 뺐다. 그 근거는 **21조합 실측**이었는데, 504조합으로 넓히니
+    **27건이 복사값**이었다::
+
+        D+7   30 / 504
+        D+14  27 / 504   ← 전부 target_dt 가 공휴일이다 (base_dt 는 정상 개장일)
+
+    ★ **주기 가정이 틀린 것이 아니다.** ``base_dt + 14`` 는 여전히 같은 요일이라 주말을
+      안 밟는다 — 다만 **공휴일은 요일과 무관하다.** 노동절·어린이날·제헌절처럼
+      평일에 오는 날이 그대로 걸린다.
+
+    ⚠️ **컷하지 않는다** (``#384`` ㄴ · 마스터 ``#230`` 과 같은 판단 — *"컷을 고지로"*).
+      복사값이라고 틀린 값이 아니다. 다만 그날 판정은 **그날의 불확실성이 아니라
+      전 장날의 불확실성**을 잰 것이라, 그 사실이 사람에게 보여야 한다.
+
+    ⚠️ mock 예측에는 이 칸이 없어 앵커에는 아무 줄도 안 붙는다 (규칙 3 — 없는 것을
+      ``false`` 로 채우지 않는다).
+    """
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    row = judgment_row(forecast, day)
+    if not row.get("is_filled"):
+        return []
+    return [
+        (
+            f"상황 판정일({row['date']})은 장이 서지 않아 앞 장날 값을 그대로 쓴 날이다 "
+            "— 그날이 아니라 앞 장날의 예측 구간으로 상황을 갈랐다"
         )
     ]
 
