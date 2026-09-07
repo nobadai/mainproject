@@ -40,6 +40,7 @@ _SELECT_COLUMNS = sql.SQL(
 
 def save_sales_agent_run(
     *,
+    run_id: UUID | None = None,
     cycle: SalesCycle,
     as_of: date,
     snapshot_id: str | None,
@@ -74,7 +75,7 @@ def save_sales_agent_run(
     row = execute_returning_one(
         query,
         (
-            uuid4(),
+            run_id or uuid4(),
             cycle,
             as_of,
             snapshot_id,

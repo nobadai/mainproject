@@ -4,6 +4,7 @@ import ast
 from datetime import date
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from app.master.envelope import AgentRequest, ExecutionContext
 from app.sales import adapter
@@ -62,6 +63,13 @@ def _request(
 
 def test_generate_sales_proposal_returns_ready_ok_with_payload(monkeypatch):
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    saved = {}
+
+    def fake_save_sales_agent_run(**kwargs):
+        saved.update(kwargs)
+        return {**kwargs, "run_id": kwargs["run_id"]}
+
+    monkeypatch.setattr(adapter, "save_sales_agent_run", fake_save_sales_agent_run)
 
     reply, metadata = adapter.sales_port(_request())
 
@@ -72,10 +80,20 @@ def test_generate_sales_proposal_returns_ready_ok_with_payload(monkeypatch):
     assert "recommended_scenario_id" in reply.payload
     assert metadata.run_id == reply.run_id
     assert metadata.used_tools == ("run_proposal",)
+    assert saved["run_id"] == UUID(reply.run_id)
+    assert saved["runtime_status"] == "READY"
+    assert saved["response_payload"]["payload"]["status"] == "SCENARIOS_GENERATED"
+    assert metadata.llm_status == "SKIPPED_TEMPLATE"
 
 
 def test_request_context_becomes_sales_execution_identity(monkeypatch):
     captured = {}
+
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     def fake_run(request):
         captured.update(request.model_dump(mode="json"))
@@ -100,6 +118,11 @@ def test_optional_key_absence_is_not_filled(monkeypatch):
         return _reply()
 
     monkeypatch.setattr(adapter, "run_proposal", fake_run)
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     adapter.sales_port(_request(_payload()))
 
@@ -117,6 +140,11 @@ def test_explicit_none_is_preserved(monkeypatch):
         return _reply()
 
     monkeypatch.setattr(adapter, "run_proposal", fake_run)
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     adapter.sales_port(_request(_payload(contract_context=None)))
 
@@ -126,6 +154,12 @@ def test_explicit_none_is_preserved(monkeypatch):
 
 def test_feedback_attempt_comes_from_payload_not_call_seq(monkeypatch):
     captured = {}
+
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     def fake_run(request):
         captured["feedback_attempt"] = request.feedback_attempt
@@ -148,6 +182,11 @@ def test_all_infeasible_candidates_are_still_ready_ok(monkeypatch):
     dumped["recommended_scenario_id"] = None
     fake = SalesProposalReply.model_validate(dumped)
     monkeypatch.setattr(adapter, "run_proposal", lambda _request: fake)
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     reply, _ = adapter.sales_port(_request())
 
@@ -167,16 +206,23 @@ def test_input_incomplete_maps_to_not_ready_and_carries_missing(monkeypatch):
             missing_capabilities=["FINANCIAL_VALIDATION"],
         ),
     )
+    monkeypatch.setattr(
+        adapter,
+        "save_sales_agent_run",
+        lambda **kwargs: {**kwargs, "run_id": kwargs["run_id"]},
+    )
 
     reply, _ = adapter.sales_port(_request())
 
     assert reply.runtime_status == "RUNTIME_NOT_READY"
     assert reply.business_status == "skipped"
-    assert reply.missing_data == (
-        "PROPOSAL_QUANTITY_REQUIRED",
-        "capability:FINANCIAL_VALIDATION",
-    )
+    assert reply.missing_data == ("PROPOSAL_QUANTITY_REQUIRED",)
     assert reply.missing_capability == ("FINANCIAL_VALIDATION",)
+    assert reply.additional_validation_required is True
+    assert reply.reasoning == (
+        "판매안을 만들기 위해 필요한 정보가 부족합니다. "
+        "부족한 항목을 확인해 주세요."
+    )
 
 
 def test_generated_without_scenarios_is_contract_error(monkeypatch):
@@ -205,15 +251,113 @@ def test_unsupported_mode_uses_adapter_not_implemented_convention():
     assert reply.missing_capability == ("STATUS_QUERY translation",)
 
 
+def test_not_implemented_uses_disabled_llm_metadata(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+
+    request = AgentRequest(
+        context=_context(),
+        agent="sales",
+        mode="STATUS_QUERY",
+        payload={},
+    )
+
+    reply, metadata = adapter._not_implemented(request)
+
+    assert metadata.llm_status == "DISABLED"
+    assert metadata.llm_model
+    assert reply.reasoning == "요청하신 판매 기능은 아직 연결되지 않았습니다."
+
+
 def test_status_query_uses_sales_run_history(monkeypatch):
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [])
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+
+    class Run:
+        run_id = UUID("11111111-1111-1111-1111-111111111111")
+
+        def model_dump(self, mode: str = "json") -> dict[str, str]:
+            return {"run_id": str(self.run_id), "as_of": "2026-01-07"}
+
+    runs = [Run()]
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: runs)
 
     reply, metadata = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
 
     assert reply.runtime_status == "READY"
     assert reply.business_status == "ok"
-    assert reply.payload == {"as_of": "2026-01-07", "recent_runs": []}
+    assert reply.run_id == "11111111-1111-1111-1111-111111111111"
+    assert reply.payload == {
+        "as_of": "2026-01-07",
+        "recent_runs": [runs[0].model_dump(mode="json")],
+    }
     assert metadata.used_tools == ("list_sales_runs",)
+    assert metadata.run_id == reply.run_id
+    assert metadata.llm_status == "DISABLED"
+
+
+def test_generate_persists_actual_llm_metadata(monkeypatch):
+    saved = {}
+
+    def fake_save_sales_agent_run(**kwargs):
+        saved.update(kwargs)
+        return {**kwargs, "run_id": kwargs["run_id"]}
+
+    proposal = _reply()
+    proposal_dump = proposal.model_dump()
+    proposal_dump["llm"] = {
+        "status": "SUCCESS",
+        "recommended_candidate_id": "SALES-001-A",
+        "summary": "summary",
+        "recommendation_reason": "reason",
+        "risk_explanation": "risk",
+        "user_message": "message",
+        "llm_provider": "openai",
+        "llm_model": "gpt-5",
+        "llm_attempts": 2,
+        "llm_fallback_used": True,
+    }
+    proposal_dump["recommendation"] = proposal_dump["llm"]
+    monkeypatch.setattr(
+        adapter,
+        "run_proposal",
+        lambda _request: SalesProposalReply.model_validate(proposal_dump),
+    )
+    monkeypatch.setattr(adapter, "save_sales_agent_run", fake_save_sales_agent_run)
+
+    reply, metadata = adapter.sales_port(_request())
+
+    assert saved["runtime_status"] == "READY"
+    assert metadata.llm_status == "SUCCESS"
+    assert metadata.llm_model == "gpt-5"
+    assert metadata.llm_attempts == 2
+    assert metadata.llm_fallback_used is True
+    assert reply.run_id == str(saved["run_id"])
+
+
+def test_generate_then_status_query_uses_same_run_id(monkeypatch):
+    saved = {}
+
+    def fake_save_sales_agent_run(**kwargs):
+        saved.update(kwargs)
+        return {**kwargs, "run_id": kwargs["run_id"]}
+
+    monkeypatch.setattr(adapter, "save_sales_agent_run", fake_save_sales_agent_run)
+
+    generated, _ = adapter.sales_port(_request())
+
+    class Run:
+        def __init__(self, run_id: UUID) -> None:
+            self.run_id = run_id
+
+        def model_dump(self, mode: str = "json") -> dict[str, str]:
+            return {"run_id": str(self.run_id), "as_of": "2026-01-07"}
+
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [Run(saved["run_id"])])
+
+    queried, metadata = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+
+    assert generated.run_id == str(saved["run_id"])
+    assert queried.run_id == str(saved["run_id"])
+    assert metadata.run_id == queried.run_id
 
 
 def test_sales_adapter_does_not_import_other_domain_agents():
