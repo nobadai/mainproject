@@ -493,9 +493,10 @@ finance_states  UNIQUE (sim_run_id, financing_mode, state_date)  일별 snapshot
 
 ### 미지급 매입채무 취소는 지급이나 상각이 아니다
 
-`FinanceCancellationAdapter.cancel(conn, *, purchase_ids, as_of, target_state_date)`는
-향후 Master 취소 전이가 부를 Finance-owned 표면이다. Master 취소 Protocol은 아직
-없으므로 이 브랜치에서 등록하거나 다른 파트의 원장을 건드리지 않는다.
+`FinanceCancellationAdapter.cancel(conn, *, purchase_ids, as_of, target_state_date,
+financing_mode)`는 Master 취소 전이가 부르는 Finance-owned 표면이다. Master가 전달한
+`financing_mode`를 사용해 Finance State를 exact axis로 잠그며 다른 실행 축으로 fallback하지
+않는다.
 
 ```text
 OPEN + paid=0   → CANCELLED

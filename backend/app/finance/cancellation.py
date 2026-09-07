@@ -74,6 +74,7 @@ def cancel_finance_payables(
     purchase_ids: Sequence[str],
     as_of: date,
     target_state_date: date,
+    financing_mode: str,
 ) -> FinanceCancellationResult:
     """Cancel unpaid Payables and reverse their daily-state obligation exactly once.
 
@@ -107,6 +108,7 @@ def cancel_finance_payables(
             cursor,
             schema=schema,
             sim_run_id=sim_run_id,
+            financing_mode=financing_mode,
             state_date=target_state_date,
             lock="UPDATE",
         )
@@ -116,6 +118,7 @@ def cancel_finance_payables(
                 cursor,
                 schema=schema,
                 sim_run_id=sim_run_id,
+                financing_mode=financing_mode,
                 state_date=as_of,
                 lock="UPDATE",
             )
@@ -167,6 +170,7 @@ def cancel_finance_payables(
                 schema=schema,
                 source=source_state,
                 sim_run_id=sim_run_id,
+                financing_mode=financing_mode,
                 as_of=as_of,
                 target_state_date=target_state_date,
                 cancelled_amount=newly_cancelled_amount,
@@ -250,12 +254,17 @@ def _one_state(
     *,
     schema: sql.Identifier,
     sim_run_id: str,
+    financing_mode: str,
     state_date: date,
     lock: str,
 ) -> _StateFact | None:
     cursor.execute(
         _exact_state_query(schema, lock=lock),
-        {"sim_run_id": sim_run_id, "state_date": state_date},
+        {
+            "sim_run_id": sim_run_id,
+            "financing_mode": financing_mode,
+            "state_date": state_date,
+        },
     )
     rows = cursor.fetchall()
     if len(rows) > 1:
@@ -263,13 +272,16 @@ def _one_state(
     if not rows:
         return None
     row = rows[0]
-    return _StateFact(
+    state = _StateFact(
         finance_state_id=str(_value(row, "finance_state_id", 0)),
         financing_mode=str(_value(row, "financing_mode", 1)),
         unsettled_purchase_payables_krw=Decimal(
             str(_value(row, "unsettled_purchase_payables_krw", 2))
         ),
     )
+    if state.financing_mode != financing_mode:
+        raise FinanceCancellationConflict("finance_runtime_axis_mismatch")
+    return state
 
 
 def _subtract_existing_state(
@@ -304,13 +316,16 @@ def _carry_and_subtract_state(
     schema: sql.Identifier,
     source: _StateFact,
     sim_run_id: str,
+    financing_mode: str,
     as_of: date,
     target_state_date: date,
     cancelled_amount: Decimal,
 ) -> str:
+    if source.financing_mode != financing_mode:
+        raise FinanceCancellationConflict("finance_runtime_axis_mismatch")
     target_id = daily_finance_state_id(
         sim_run_id=sim_run_id,
-        financing_mode=source.financing_mode,
+        financing_mode=financing_mode,
         state_date=target_state_date,
     )
     cursor.execute(
@@ -325,7 +340,7 @@ def _carry_and_subtract_state(
             )
             SELECT
                 %(finance_state_id)s, source.sim_run_id, %(target_state_date)s,
-                %(state_type)s, source.financing_mode,
+                %(state_type)s, %(financing_mode)s,
                 source.current_cash_krw, source.minimum_operating_cash_krw,
                 source.committed_outflows_krw,
                 source.unsettled_purchase_payables_krw - %(cancelled_amount)s,
@@ -334,6 +349,8 @@ def _carry_and_subtract_state(
                 source.recommended_loan_amount_krw, %(note)s
             FROM {schema}.finance_states source
             WHERE source.finance_state_id = %(source_finance_state_id)s
+              AND source.sim_run_id = %(sim_run_id)s
+              AND source.financing_mode = %(financing_mode)s
               AND source.state_date = %(as_of)s
               AND source.unsettled_purchase_payables_krw >= %(cancelled_amount)s
             ON CONFLICT (sim_run_id, financing_mode, state_date) DO UPDATE SET
@@ -345,6 +362,8 @@ def _carry_and_subtract_state(
         ).format(schema=schema),
         {
             "finance_state_id": target_id,
+            "sim_run_id": sim_run_id,
+            "financing_mode": financing_mode,
             "target_state_date": target_state_date,
             "state_type": CANCELLATION_STATE_TYPE,
             "cancelled_amount": cancelled_amount,
@@ -407,8 +426,8 @@ def _exact_state_query(schema: sql.Identifier, *, lock: str) -> sql.Composed:
         SELECT finance_state_id, financing_mode, unsettled_purchase_payables_krw
         FROM {}.finance_states
         WHERE sim_run_id = %(sim_run_id)s
+          AND financing_mode = %(financing_mode)s
           AND state_date = %(state_date)s
-        ORDER BY financing_mode
         FOR UPDATE
         """
     ).format(schema)
@@ -424,10 +443,12 @@ class FinanceCancellationAdapter:
         purchase_ids: Sequence[str],
         as_of: date,
         target_state_date: date,
+        financing_mode: str,
     ) -> FinanceCancellationResult:
         return cancel_finance_payables(
             conn,
             purchase_ids=purchase_ids,
             as_of=as_of,
             target_state_date=target_state_date,
+            financing_mode=financing_mode,
         )
