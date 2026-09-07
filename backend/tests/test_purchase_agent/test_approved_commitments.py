@@ -52,6 +52,29 @@ _NODES = Path(__file__).resolve().parents[2] / "app" / "purchase_agent" / "nodes
 AS_OF = date(2026, 8, 21)
 
 
+def _references(path: Path) -> bool:
+    """이 파일이 ``approved_commitments`` 를 **실제로 참조하는가.**
+
+    🔴 **docstring 과 주석은 안 센다.** 문자열 검색으로 세던 판이 `#332` 머지에서
+      깨졌다 — ``_warehouse_rationale`` 의 docstring 이 *"approved_commitments 도
+      in_transit 도 안 온다"* 라고 **안 온다는 사실을 적고 있었는데**, 그것을
+      *"읽는다"* 로 셌다.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    # docstring 은 문(statement) 자리에 홀로 선 문자열이다 — 그 노드만 걷어낸다.
+    prose = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+    return any(
+        isinstance(node, ast.Constant)
+        and node.value == "approved_commitments"
+        and id(node) not in prose
+        for node in ast.walk(tree)
+    )
+
+
 def test_승인_약정이_state_에_실린다() -> None:
     """🔴 **`#310` 의 본문이다.** 전에는 봉투에 와도 어댑터가 버렸다."""
     state = build_state(_request("배추", AS_OF, approved_commitments=[COMMITMENT]))
@@ -113,29 +136,31 @@ def test_없어도_missing_data_에_안_들어간다() -> None:
     assert not [name for name in missing if "approved_commitments" in name], missing
 
 
-def test_아직_어느_노드도_안_읽는다() -> None:
-    """🔴 **주석이 틀리는 순간을 여기서 잡는다** (규칙 8).
+def test_이_값을_읽는_노드가_어디인지_잠근다() -> None:
+    """🔴 **누가 읽는지를 잠근다** (규칙 8) — 전에는 *"아무도 안 읽는다"* 였다.
 
-    ``state.py`` 와 ``adapter.py`` 가 *"지금은 받기만 한다"* 라고 적어 두었다. 그
-    문장은 **읽기 시작하는 순간 틀린다.**
+    ⚠️ **이 검사는 두 번 틀렸다.** 남겨 두는 이유가 그것이다.
 
-    ``adjustments`` 가 정확히 그렇게 틀렸다 — *"어느 노드도 아직 안 읽는다"* 를 적은
-    바로 그 판에서 이미 두 곳이 읽고 있었고, 문장은 **쓴 순간부터** 틀린 채 남았다
-    (2026-09-03 정정).
+    ```text
+    #335       "아직 어느 노드도 안 읽는다"        받는 자리만 만든 판
+    #332 머지  🔴 깨졌다 — _warehouse_rationale 의 docstring 이
+               "approved_commitments 도 in_transit 도 안 온다" 라고 적고 있어서
+    지금       "⑥만 읽는다"                        실제로 읽기 시작한 판
+    ```
 
-    ⚠️ **이 검사가 우는 것은 결함이 아니다.** ⑥이 *"어제 승인분 N kg 이 D 에 온다"*
-      를 쓰기 시작하면 울고, 그때 **이 검사와 두 주석을 같이 고치는 것**이 맞다
-      (`#332` 뒤). 지우지 말고 갱신할 것.
+    🔴 **첫 판정이 문자열 검색이었던 것이 문제였다.** *"안 온다"* 고 적어 둔
+      docstring 을 *"읽는다"* 로 셌다 — 두 브랜치가 각각은 통과하는데 합치면 깨졌다.
+      이제 ``ast`` 로 **실제 참조**만 본다 (docstring·주석은 안 센다).
+
+    ★ **⑥ 하나만이다.** ③(총량 클립)·⑦(도착일 컷)은 창고 값을 판정에 쓰지만 승인
+      이력은 안 본다 — 그쪽이 읽기 시작하면 여기가 울고, 그때 *"판정에 쓰는가"* 를
+      다시 물어야 한다. 근거 문장에 적는 것과 수량을 바꾸는 것은 다른 일이다.
     """
-    readers = [
-        path.name
-        for path in sorted(_NODES.glob("*.py"))
-        if "approved_commitments" in path.read_text(encoding="utf-8")
-    ]
+    readers = {path.name for path in sorted(_NODES.glob("*.py")) if _references(path)}
 
-    assert readers == [], (
-        f"노드가 approved_commitments 를 읽기 시작했다: {readers}. "
-        "state.py·adapter.py 의 «지금은 받기만 한다» 주석과 이 검사를 같이 고칠 것"
+    assert readers == {"package_scenarios.py"}, (
+        f"승인 이력을 읽는 노드가 바뀌었다: {sorted(readers)}. "
+        "판정에 쓰기 시작한 것인지 확인하고 이 검사와 state.py 주석을 같이 고칠 것"
     )
 
 
