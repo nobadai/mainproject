@@ -512,6 +512,32 @@ def absorb_inventory(inventory: Mapping[str, Any], item: str) -> dict[str, Any]:
     return out
 
 
+def _approved_commitments(payload: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    """어제까지 승인된 약정을 State 로 옮긴다. **안 온 것과 0건을 구별한다** (규칙 3).
+
+    ```text
+    키 없음    → None   "마스터가 안 보냈다"
+    []         → []     "보냈는데 어제 승인이 없었다"
+    [{...}]    → 그대로  온 그대로 나른다
+    ```
+
+    ⚠️ **마스터는 지금 ``[]`` 를 보내지 않는다** — `flow.py._commitments_block` 이
+      ``if not self.approved_commitments: return None`` 으로 칸 자체를 안 만든다.
+      그래도 두 갈래를 다 두는 이유는, 그 규칙이 바뀌는 날 **여기가 조용히 틀리지
+      않게** 하기 위해서다. 빈 배열을 ``None`` 으로 접으면 *"승인이 없었다"* 가
+      *"안 왔다"* 로 둔갑한다.
+
+    ★ **모양을 검사하지 않는다.** 이 값은 `missing_data` 대상이 아니다 — 없어도
+      안이 만들어지고, 있으면 근거 문장 하나가 넓어질 뿐이다. 필수로 걸면 마스터가
+      승인 이력 없이 부르는 첫날(어제가 없는 날)이 통째로 `RUNTIME_NOT_READY` 가
+      된다.
+    """
+    raw = payload.get("approved_commitments")
+    if raw is None:
+        return None
+    return [dict(item) for item in raw]
+
+
 # ── payload → State ───────────────────────────────────────────────────────
 
 
@@ -584,6 +610,14 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         #   **반영과 독해는 다른 말이고, 뭉치면 "값을 실어 주고 안 쓰는" 자리가 다시 열린다.**
         "adjustments": [dict(item) for item in payload.get("adjustments") or []],
         "feedback_context": dict(payload.get("feedback_context") or {}) or None,
+        # 🔴 **바로 위와 달리 ``or []`` 로 접지 않는다** (`#310` · 마스터 `#312`).
+        #   마스터가 *"없으면 칸을 안 만든다 — 빈 배열은 «어제 승인이 없었다» 와
+        #   «마스터가 안 보낸다» 를 구별할 수 없다"* 로 보내는 값이라, 여기서 ``[]`` 로
+        #   접으면 **보내는 쪽이 지킨 구분이 받는 쪽에서 사라진다** (규칙 3).
+        #
+        # ★ **온 그대로 나른다.** 마스터가 승인 이력을 해석하지 않고 실어 보내듯
+        #   (`flow.py` — *"온 그대로 나른다"*), 우리도 여기서 고르거나 접지 않는다.
+        "approved_commitments": _approved_commitments(payload),
         "context_docs": [],
         "context_loop_count": 0,
         "rejected_reasons": [],
