@@ -140,7 +140,7 @@ def test_스캐너가_심어_둔_옛_참조를_잡는다(tmp_path):
     ⚠️ 저장소를 더럽히지 않는다 — `tmp_path` 에 같은 구조를 지어 같은 함수를 돌린다.
     """
     for base in _SCAN_DIRS:
-        (tmp_path / base).mkdir()
+        (tmp_path / base).mkdir(parents=True, exist_ok=True)
     (tmp_path / "app" / "planted.py").write_text(
         f"from {_OLD_PACKAGE}.band import clip_all\n", encoding="utf-8"
     )
