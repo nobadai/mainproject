@@ -32,7 +32,7 @@ from app.purchase_agent.nodes.allocate_sourcing import (
     mid_grade_score,
     near_term_demand_kg,
     shelf_days_block_reason,
-    top_grade_shelf_days,
+    top_grade_operational_days,
 )
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.draft_plan import draft_plan, warehouse_cap_kg
@@ -123,7 +123,7 @@ def test_mid_grade_shelf_days_comes_from_the_top_grade_lot() -> None:
     constraints = load_constraints()
     state = _staged()
     reference = constraints["allocation"]["reference_grade"]
-    assert top_grade_shelf_days(state["inventory"], reference, ITEM) == 10
+    assert top_grade_operational_days(state["inventory"], reference, ITEM) == 10
     # ⚠️ ``top_shelf * constraints[...] == 6`` 로 두면 **설정으로 산술만** 하고 노드를
     #   전혀 안 본다 — 계수를 코드에 박아도 통과한다 (규칙 8). 산출을 본다.
     assert evaluate_mid_grade(state, constraints)["shelf_days"] == 6
@@ -325,7 +325,7 @@ def test_missing_top_grade_lot_blocks_the_allocation_instead_of_guessing() -> No
     """상 등급 로트가 없으면 상품 한계일을 모른다 — 중품 배정을 하지 않고 사유를 남긴다."""
     state = _staged(as_of=SPREAD_WIDE)
     state["inventory"]["lots"] = []
-    assert top_grade_shelf_days(state["inventory"], "상", ITEM) is None
+    assert top_grade_operational_days(state["inventory"], "상", ITEM) is None
 
     decision = evaluate_mid_grade(state, load_constraints())
     assert decision["ratio"] == 0
@@ -587,10 +587,10 @@ def test_shelf_days_do_not_depend_on_lot_order() -> None:
     state = _staged(as_of=SPREAD_WIDE)
     lot = state["inventory"]["lots"][0]
     state["inventory"]["lots"] = [{**lot, "shelf_life_days": 20}, {**lot, "shelf_life_days": 4}]
-    assert top_grade_shelf_days(state["inventory"], "상", ITEM) == 4
+    assert top_grade_operational_days(state["inventory"], "상", ITEM) == 4
 
     state["inventory"]["lots"].reverse()
-    assert top_grade_shelf_days(state["inventory"], "상", ITEM) == 4
+    assert top_grade_operational_days(state["inventory"], "상", ITEM) == 4
 
 
 # ── #76 미결 고지 ─────────────────────────────────────────────────────────

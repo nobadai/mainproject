@@ -18,7 +18,7 @@ from app.purchase_agent.nodes.allocate_sourcing import (
     item_storage_policy,
     mid_grade_shelf_ratio,
     shelf_days_block_reason,
-    top_grade_shelf_days,
+    top_grade_operational_days,
 )
 from app.purchase_agent.state import build_initial_state
 
@@ -96,8 +96,8 @@ def test_shelf_days_use_the_policy_of_this_item() -> None:
         "item_storage_policies": REAL_POLICIES,
         "lots": [{"lot_id": "L1", "item": ITEM, "grade": "상", "available_qty_kg": 100}],
     }
-    assert top_grade_shelf_days(inventory, "상", ITEM) == 10
-    assert top_grade_shelf_days(inventory, "상", "무") == 14, "품목이 바뀌면 값도 바뀐다"
+    assert top_grade_operational_days(inventory, "상", ITEM) == 10
+    assert top_grade_operational_days(inventory, "상", "무") == 14, "품목이 바뀌면 값도 바뀐다"
 
 
 def test_policy_wins_over_lot_shelf_life() -> None:
@@ -106,7 +106,7 @@ def test_policy_wins_over_lot_shelf_life() -> None:
         "item_storage_policies": REAL_POLICIES,
         "lots": [{"lot_id": "L1", "grade": "상", "shelf_life_days": 99}],
     }
-    assert top_grade_shelf_days(inventory, "상", ITEM) == 10
+    assert top_grade_operational_days(inventory, "상", ITEM) == 10
 
 
 # ── 함정 2: 이중 소스 ────────────────────────────────────────────────────
@@ -311,7 +311,7 @@ def test_bad_operational_limit_days_is_not_silently_coerced(bad: object, why: st
         "item_storage_policies": [{"item": ITEM, "operational_limit_days": bad}],
         "lots": [{"lot_id": "L1", "grade": "상", "available_qty_kg": 100}],
     }
-    assert top_grade_shelf_days(inventory, "상", ITEM) is None, why
+    assert top_grade_operational_days(inventory, "상", ITEM) is None, why
 
 
 @pytest.mark.parametrize("bad", [0, -0.5, 5.0, True, "x", float("nan")])
@@ -347,7 +347,7 @@ def test_bad_medium_grade_factor_falls_back_instead_of_distorting(bad: object) -
 def test_reason_does_not_deny_a_lot_that_exists(lots: list, forbidden: str) -> None:
     """🟡 **Codex 지적 재현.** 있는 로트를 없다고 말하지 않는다.
 
-    사유 판정이 "키가 있는가"를 보고 ``top_grade_shelf_days`` 는 "값이 있는가"를 봤다.
+    사유 판정이 "키가 있는가"를 보고 ``top_grade_operational_days`` 는 "값이 있는가"를 봤다.
     두 기준이 갈리자 **상 등급 로트가 있는데도** *"상 등급 로트가 없어"* 라고 답했다 —
     재고에 없는 사실을 만들어 내는 것이라, 읽는 사람이 창고를 잘못 이해한다.
     """
@@ -381,7 +381,7 @@ def test_lot_shelf_life_gets_the_same_type_check_as_the_policy(bad: object, why:
         "lots": [{"lot_id": "L", "item": ITEM, "grade": "상", "shelf_life_days": bad}],
     }
 
-    assert top_grade_shelf_days(inventory, "상", ITEM) is None, why
+    assert top_grade_operational_days(inventory, "상", ITEM) is None, why
 
 
 def test_mixed_lot_types_do_not_crash_the_comparison() -> None:
@@ -398,7 +398,7 @@ def test_mixed_lot_types_do_not_crash_the_comparison() -> None:
         ],
     }
 
-    assert top_grade_shelf_days(inventory, "상", ITEM) == 10
+    assert top_grade_operational_days(inventory, "상", ITEM) == 10
 
 
 def test_the_policy_still_wins_over_a_readable_lot_value() -> None:
@@ -408,4 +408,34 @@ def test_the_policy_still_wins_over_a_readable_lot_value() -> None:
         "lots": [{"lot_id": "A", "item": ITEM, "grade": "상", "shelf_life_days": 10}],
     }
 
-    assert top_grade_shelf_days(inventory, "상", ITEM) == 14
+    assert top_grade_operational_days(inventory, "상", ITEM) == 14
+
+
+def test_the_docstring_does_not_call_it_a_shelf_life_limit() -> None:
+    """🔴 **이 함수를 다시 "상품 한계일" 이라고 부르면 운다** (물류 확정 2026-09-07).
+
+    ★ **산문을 재는 검사다.** 이름을 고친 것으로 끝나지 않는다 — 값이 그대로라
+    동작은 아무것도 안 바뀌고, **틀린 이름을 막는 것이 이 변경의 전부**다. 검사가
+    없으면 다음 사람이 첫 줄을 되돌려도 초록불이다.
+
+    ⚠️ ``_ast_helpers`` 는 반대 방향이다 — 그쪽은 docstring 을 **걷어내고** *"코드가
+    이 낱말을 쓰는가"* 를 묻는다. 여기서 재려는 것은 산문 자체라 ``__doc__`` 을 직접
+    읽는다.
+
+    🔴 **부정문은 남아 있어야 한다.** *"상품 한계일"* 이라는 낱말을 통째로 금지하면
+    ``상품 한계일이 아니다`` 라는 정정까지 지워야 통과한다 — 정정을 지우는 쪽이
+    이기는 검사가 된다. 그래서 **첫 줄에서만** 금지한다.
+
+    ⚠️ ``python -OO`` 로 돌리면 ``__doc__`` 이 ``None`` 이라 이 검사가 성립하지
+    않는다. 스위트는 그 옵션을 쓰지 않는다.
+    """
+    doc = top_grade_operational_days.__doc__
+    assert doc is not None, "docstring 이 없다 — -OO 로 돌렸거나 지워졌다"
+
+    headline = doc.strip().splitlines()[0]
+    assert "운영 보관한계" in headline, f"첫 줄이 값의 정체를 안 말한다: {headline!r}"
+    assert "상품 한계일" not in headline, (
+        f"첫 줄이 다시 '상품 한계일' 이라고 부른다: {headline!r} — "
+        "그 값은 회전목표다 (물류 페르소나 05 §8.1)"
+    )
+    assert "상품 한계일이 아니다" in doc, "정정 문장이 사라졌다 — 왜 아닌지가 근거다"

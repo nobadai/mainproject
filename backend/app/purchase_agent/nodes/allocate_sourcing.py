@@ -193,12 +193,27 @@ def _ratio(value: Any) -> float | None:
     return float(value)
 
 
-def top_grade_shelf_days(inventory: dict, top_grade: str, item: str) -> int | None:
-    """기준등급(상)의 "상품 한계일".
+def top_grade_operational_days(inventory: dict, top_grade: str, item: str) -> int | None:
+    """기준등급(상) 로트의 "운영 보관한계" (회전목표).
+
+    🔴 **상품 한계일이 아니다** (2026-09-07 · 물류 페르소나 05 §8.1)::
+
+        operational_turnover_target_days   회사가 언제든 바꾸는 운영 파라미터
+        물리 저장한계                       품목의 성질 — 🔴 별도 필드로 신설 예정
+
+    물류가 그 둘을 갈랐다 — *"섞으면 재고 회전 정책 변경이 매입 등급 배분을 조용히
+    바꾼다."*
+
+    ⚠️ 새 필드는 **이름·값·시점이 다 미정이다** (07 §7:128). 산정 규칙을 먼저 정한다고
+    했다 — 등급·저장환경·수확시기에 따라 범위로 나와서.
+
+    ★ **그때까지 이 값을 쓴다.** 대안이 없고, 물류가 *"쓰는 방식은 Purchase 가
+      정의한다"* 로 넘겼다 (05 §8).
 
     **값의 출처는 둘이고 물류가 우선이다.**
 
-    1. 물류 ``item_storage_policies[item].operational_limit_days`` — 운영 보관한계.
+    1. 물류 ``item_storage_policies[item].operational_limit_days`` — 운영 보관한계
+       (= 회전목표 · 물류 확정 2026-09-07).
        실측값이고 품목 마스터에서 온다 (배추 10 · 무 14 · 양파 30 · 피마늘 30).
     2. 재고 로트의 ``shelf_life_days`` — 물류가 이 키를 싣지 않을 때의 경로다.
 
@@ -313,7 +328,7 @@ _SHELF_DAYS_GRADE_UNRESOLVED = (
 
 
 def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
-    """``top_grade_shelf_days``가 ``None``을 돌려준 **이유**.
+    """``top_grade_operational_days``가 ``None``을 돌려준 **이유**.
 
     호출부가 ``blocked_by``에 그대로 싣는다 — risks 로 나가 *"무엇을 못 봤는지"*가
     사용자에게 남는다 (§3.7.6 · 규칙 3). 사유를 안 남기면 "중품을 검토하고 안 쓴 것"과
@@ -324,7 +339,7 @@ def shelf_days_block_reason(inventory: dict, top_grade: str, item: str) -> str:
     걸리면 *"물류가 안 줬다"* 는 **거짓 사유**가 나간다 — 침묵도 오답이지만 틀린 사유는
     더 나쁘다.
 
-    ⚠️ **판정 기준을 ``top_grade_shelf_days`` 와 맞춘다.** 전에는 "키가 있는가"로 봤는데
+    ⚠️ **판정 기준을 ``top_grade_operational_days`` 와 맞춘다.** 전에는 "키가 있는가"로 봤는데
     그쪽은 "값이 있는가"로 본다. 두 기준이 갈리면 사유가 거짓이 된다 — 상 등급 로트의
     ``shelf_life_days`` 가 ``None`` 이면 *"상 등급 로트가 없어"* 라고 답했다. **로트는
     있다.** 없는 것은 값이다 (Codex 교차검증, 재현함).
@@ -437,7 +452,7 @@ def evaluate_mid_grade(state: PurchaseAgentState, constraints: dict) -> dict[str
         spread, baseline, constraints["triggers"]["grade_spread_widening_ratio"]
     )
 
-    top_shelf = top_grade_shelf_days(state["inventory"], top_grade, state["item"])
+    top_shelf = top_grade_operational_days(state["inventory"], top_grade, state["item"])
     facts["top_shelf_days"] = top_shelf
     if top_shelf is None:
         facts["blocked_by"] = shelf_days_block_reason(
