@@ -38,6 +38,30 @@ Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE", "CANCEL"]
 #:   것"* 이 같아진다. `#290` 이 `REJECT_ALL` 로 우회되는 것도 그 둘이 갈려 있지
 #:   않아서였다.
 
+RevalidationOutcome = Literal["PASSED", "CONDITIONAL", "FAILED", "ERROR"]
+
+#: 최종 승인 클릭 시점에 **그때 선택된 1안을 다시 검증한 결과** (2026-09-04 · 판매 합의).
+#:
+#:   ```text
+#:   PASSED       재검증 통과. 승인 기록 · Write 진행
+#:   CONDITIONAL  통과했으나 새 조건이 붙었다 → 승인 기록 안 함
+#:   FAILED       재검증에서 막혔다           → 승인 기록 안 함, 실패 이력은 남긴다
+#:   ERROR        재검증 자체를 못 돌렸다     → 승인 기록 안 함 (RUNTIME_NOT_READY 등)
+#:   ```
+#:
+#: 🔴 **`CONDITIONAL` 은 통과가 아니다.** 사용자가 승인한 대상은 **그때 화면에 있던
+#:   그 안**이다. 새 조건이 붙으면 그것은 다른 안이라, `PASSED` 로 접으면 *사용자가
+#:   본 적 없는 조건이 사용자 승인으로 기록된다.*
+#:
+#: 🔴 **`Decision` 과 섞지 않는다.** 저쪽은 **사람이 무엇을 눌렀나**이고 이쪽은 **그
+#:   뒤 재검증이 어떻게 됐나**다. `decision` 에 `REVALIDATION_FAILED` 같은 값을 더하면
+#:   *"승인하려다 막혔다"* 가 *"승인하지 않았다"* 로 뭉개지고, `decision` 값으로
+#:   판단하는 번복 규칙(`next_seq` · `mark_current`)까지 흔들린다.
+#:
+#: ⚠️ **아직 채우는 코드가 없다** — 이 조각은 저장 자리까지다. 도는 것은 M-4 다.
+#:   그래서 지금은 어느 결정에서든 `None` 이고, 그 `None` 은 **"재검증에 실패했다"가
+#:   아니라 "재검증을 하지 않았다"** 이다.
+
 #: 승인은 통과안이 있는 날에만 성립한다.
 #:
 #: ★ **취소도 같다.** 물릴 승인이 있으려면 그날 통과안이 있었어야 한다 — `E2_HELD` 인
@@ -185,6 +209,19 @@ class DecisionOut(BaseModel):
     decided_by: str
     follow_up_request_id: str | None = None
     end_code_at_decision: str
+
+    #: 최종 승인 시점 재검증이 돈 **새 실행**의 업무 키. DB 컬럼도 같은 이름이다.
+    #:
+    #: 🔴 **`follow_up_request_id` 와 다른 사건이다.** 저쪽은 `REQUEST_CHANGE` 가 낳은
+    #:   재요청이라 결정 **뒤에** 사람이 다시 돌린 것이고, 이쪽은 결정을 **적기 전에**
+    #:   서버가 돌린 것이다. 게다가 재검증은 **새 `as_of` · 새 `request_id`** 로 도는
+    #:   반면 승인 자체는 원 실행(`history_run_id`)에 달려 있다 — 한 칸에 담으면 그
+    #:   값이 어느 쪽인지 아무도 모른다.
+    revalidation_request_id: str | None = None
+
+    #: 그 재검증의 결과. `None` 은 **"재검증을 하지 않았다"** 이고 실패가 아니다 —
+    #: 2026-09-07 이전 결정과, 아직 배선이 없는 지금의 모든 결정이 그렇다.
+    revalidation_outcome: RevalidationOutcome | None = None
     #: 이 결정이 가리키는 실행 이력 행. DB 컬럼은 `master_decisions.run_id` 다.
     #: `None` 은 **"실행이 없다"가 아니라 "어느 실행인지 기록되지 않았다"** 이다 —
     #: 2026-08-30 이전 결정이 그렇다.

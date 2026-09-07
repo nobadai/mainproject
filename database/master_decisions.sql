@@ -33,6 +33,11 @@
 --   2026-08-30  run_id 신설 — 결정이 어느 실행을 승인했는지 기록한다.
 --               새 DB 는 이 파일 하나로 선다. 이미 데이터가 있는 DB 를 옮길 때만
 --               `master_decisions_run_id.sql` (ALTER 판) 을 쓴다.
+--   2026-09-07  재검증 2칸 신설 — 최종 승인 클릭 때 선택된 1안을 다시 검증한 결과.
+--               ALTER 판은 `master/master_decision_revalidation.sql`.
+--               🔴 `decision` 에 값을 더하지 않는다. 사용자가 APPROVE 를 눌렀는데
+--               재검증에서 막힌 것과, 사용자가 승인하지 않은 것은 다른 사건이다.
+--               섞으면 "승인하려다 막혔다" 가 사라진다 (판매 2026-09-04 합의).
 
 BEGIN;
 
@@ -69,6 +74,14 @@ CREATE TABLE IF NOT EXISTS haetdeul.master_decisions (
     -- **무엇을 보고 결정했는지** 는 그대로 남아야 한다.
     end_code_at_decision  TEXT        NOT NULL,
 
+    -- 재검증이 돈 실행의 업무 키. 재검증은 **새 as_of · 새 request_id** 로 도는데
+    -- 승인은 원 실행에 달려 있어서, 둘을 한 칸에 담으면 무엇을 가리키는지 모른다.
+    -- `follow_up_request_id`(RERUN_WITH_CONDITION)와 **다른 칸이다.**
+    revalidation_request_id TEXT      NULL,
+
+    -- 재검증 결과. `decision` 이 사용자의 **의도**라면 이것은 **결과**다.
+    revalidation_outcome  TEXT        NULL,
+
     note                  TEXT        NULL,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -86,6 +99,23 @@ CREATE TABLE IF NOT EXISTS haetdeul.master_decisions (
     -- 조건 없는 재요청은 재요청이 아니라 그냥 거절이다.
     CONSTRAINT master_decisions_condition_required
         CHECK (decision <> 'REQUEST_CHANGE' OR condition_text IS NOT NULL),
+
+    -- 어휘를 닫는다. `decision` 을 CHECK 로 닫아 둔 것과 같은 결이다.
+    -- ⚠️ NULL 은 CHECK 를 그냥 통과한다 — NULL 은 "재검증을 안 했다" 다.
+    CONSTRAINT master_decisions_revalidation_outcome_check
+        CHECK (revalidation_outcome IN ('PASSED', 'CONDITIONAL', 'FAILED', 'ERROR')),
+
+    -- 결과가 있는데 어느 실행이었는지 모르면 "재검증했다" 가 추적 불가능해진다.
+    -- ERROR 는 예외다 — 재검증을 **못 돌린** 것이라 가리킬 실행이 없을 수 있고,
+    -- 예외를 안 두면 가짜 업무 키를 지어 넣게 된다.
+    -- 반대 방향(키만 있고 결과 NULL)도 막는다. 안 막으면 NULL 의 뜻이
+    -- "안 했다" 와 "결과를 못 적었다" 둘이 된다.
+    CONSTRAINT master_decisions_revalidation_pair
+        CHECK (
+            (revalidation_outcome IS NULL AND revalidation_request_id IS NULL)
+         OR (revalidation_outcome = 'ERROR')
+         OR (revalidation_outcome IS NOT NULL AND revalidation_request_id IS NOT NULL)
+        ),
 
     CONSTRAINT master_decisions_seq_positive
         CHECK (decision_seq >= 1),
