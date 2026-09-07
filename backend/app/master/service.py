@@ -36,6 +36,7 @@ from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
 from app.master.runner import MasterRunner
+from app.master.sales_flow import SalesFlow, SalesOutcome, sales_call_budget
 from app.master.schemas import (
     AdjustmentOut,
     BlockedAgentOut,
@@ -46,6 +47,9 @@ from app.master.schemas import (
     ProcurementRunResponse,
     ReportOut,
     RunHistoryOut,
+    SalesCandidateOut,
+    SalesRunRequest,
+    SalesRunResponse,
     StepOut,
 )
 from app.master.verifier import MasterVerifier
@@ -202,6 +206,148 @@ def run_procurement(
     #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
     response.history_run_id = persistence.record(request, response, elapsed_ms=_elapsed(started))
     return response
+
+
+def run_sales(request: SalesRunRequest) -> SalesRunResponse:
+    """판매 Flow 를 한 번 돌리고 이력에 남긴다 (설계 2026-09-07 §0).
+
+    ```text
+    개장 Gate  →  필수 어댑터 점검  →  SalesFlow  →  이력 적재
+    ```
+
+    🔴 **실행일 Gate 를 걸지 않는다 — 주말에도 판다.**
+
+      두 관문은 다른 물음이다. 개장은 *"그 날 장부가 열렸는가"* 라 판매·매입이 같이
+      지나고, 실행일은 *"장이 서서 ML 예측이 있는가"* 라 **매입만** 지난다. 팔 때는
+      예측이 필요 없다 — 그것이 개장을 달력일로 정한 이유다 (설계 §1).
+
+      토요일 요청은 개장을 통과하고 매입은 실행일에서 서지만 **판매는 그대로 간다.**
+      여기에 `_execution_day_verdict` 를 복사해 넣으면 2026년 토요일 45일에 판매가
+      멈춘다.
+
+    🔴 **필수 어댑터는 부르기 전에 본다** (`wiring.REQUIRED_FOR_SALES`).
+
+      골격이 `AgentNotRegistered` 를 `SL4_NOT_STARTED` 로 받으므로 터지지는 않는다
+      (`sales_flow.py` 의 `run`). 하지만 **그때는 이미 다른 부서를 부른 뒤일 수 있다** —
+      한 번이라도 부르면 그 회신이 이력에 남고, 나중에 읽는 사람이 *"돌긴 돌았다"* 로
+      읽는다. 매입이 `wiring.missing()` 으로 문 앞에서 접는 것과 같은 이유다.
+
+    ★ **필수는 제안자와 최종 검증자 둘뿐이다.** 물류는 여기 없다 — 판매는 밴드가 없어
+      물류가 못 답해도 시작한다 (설계 §1-2). 목록이 왜 그 둘인지는 `wiring.py` 에 적혀
+      있고, 여기서 다시 정하지 않는다.
+
+    ★ **매입과 응답 조립을 공유하지 않는다.** 응답 모델도 종료 코드도 다르다 —
+      묶으면 판매 종료 코드가 매입 어휘로 새거나 그 반대가 된다 (설계 §1).
+    """
+    started = time.perf_counter()
+    request_id = request.request_id or make_request_id(request.as_of.isoformat())
+    context = ExecutionContext(
+        request_id=request_id,
+        as_of=request.as_of,
+        trigger=request.trigger,
+        policy_version=request.policy_version,
+        # ★ 어느 실행의 장부인가는 마스터가 정한다 (물류 `#325`) — 매입과 같은 값이다.
+        #   판매도 물류를 부르므로(`PRE_SALES`) 같은 이유가 그대로 걸린다.
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+    )
+
+    # 🔴 **첫 관문은 개장이다** — 매입과 **같은 판정 함수**를 부른다.
+    #    잊으면 *"안 열린 날 판매가 돈다"* 인데, 막힌 게 아니라 안 막힌 것이라
+    #    아무 오류도 안 난다. 그 조용한 실수를
+    #    `tests/master/test_entrypoint_day_gate.py` 가 먼저 잡는다.
+    day_gate = check_day_gate(request.as_of)
+    if day_gate.gate == "BLOCKED":
+        response = _empty_sales_response(
+            context,
+            reason=day_gate.reason or "그날 장부가 안 열렸다",
+        )
+        response.day_gate = day_gate
+        response.report_text = _sales_fold_note(response.end_code, response.reason)
+        response.history_run_id = persistence.record_sales(
+            request, response, elapsed_ms=_elapsed(started)
+        )
+        return response
+
+    # 🔴 **두 번째 관문은 배선이다** — 개장 **다음**이다. 안 열린 날인데 *"어댑터
+    #    미등록"* 이라고 답하면 사람이 배선을 뒤지는데, 실제로는 그 날을 다시 열 일이다.
+    #
+    # ★ **빠진 이름을 사유에 적는다.** *"어댑터 미등록"* 만 적으면 무엇을 배선해야
+    #   하는지 모른 채 코드를 뒤지게 된다.
+    missing = wiring.missing(wiring.REQUIRED_FOR_SALES)
+    if missing:
+        # 미등록은 오류가 아니라 상태다 (§5.3) — 매입 갈래와 같은 태도, 판매 어휘.
+        response = _empty_sales_response(
+            context,
+            reason=f"어댑터 미등록: {', '.join(missing)}",
+        )
+        response.day_gate = day_gate
+        response.report_text = _sales_fold_note(response.end_code, response.reason)
+        # 🔴 **못 부른 날도 이력에 남긴다.** 안 부른 것과 못 부른 것은 다르고,
+        #    이력이 비면 둘이 같아 보인다.
+        response.history_run_id = persistence.record_sales(
+            request, response, elapsed_ms=_elapsed(started)
+        )
+        return response
+
+    runner = MasterRunner(context, wiring.registry(), sales_call_budget(request.budget))
+    outcome = SalesFlow(runner, user_request=_sales_user_request(request)).run()
+
+    response = _to_sales_response(context, outcome)
+    response.day_gate = day_gate
+    response.report_text = _sales_fold_note(response.end_code, response.reason)
+    response.history_run_id = persistence.record_sales(
+        request, response, elapsed_ms=_elapsed(started)
+    )
+    return response
+
+
+def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
+    """판매에 실어 보낼 사용자 요청. **묶기만 하고 해석하지 않는다** (§3.2.2).
+
+    ★ **칸 이름은 판매 것이다** (`app/sales/schemas.py` `SalesUserRequest`) —
+      `raw_text` · `item` · `partner_id`. 받는 쪽 낱말에 맞춘다.
+
+    ★ **없는 칸은 안 만든다.** 빈 값을 실으면 받는 쪽이 *"사용자가 말 안 했다"* 와
+      *"마스터가 안 보낸다"* 를 구별할 수 없다 (§1.2-10).
+
+    ⚠️ **`business_mode` 는 여기 안 들어간다.** 판매 쪽 `SalesUserRequest` 는
+      `extra="forbid"` 이고 `business_mode` 는 그 **바깥**(`SalesProposalInput`
+      최상위)에 있다. 골격 payload 에는 아직 그 최상위 칸이 없다 — **어댑터 배선
+      조각의 일**이고, 그때까지 값은 요청과 이력(`request_payload`)에 남는다.
+      없는 칸을 지어내 실으면 판매 문 앞에서 통째로 거부된다.
+    """
+    payload: dict[str, Any] = {}
+    if request.user_request:
+        payload["raw_text"] = request.user_request
+    if request.item:
+        payload["item"] = request.item
+    if request.partner_id:
+        payload["partner_id"] = request.partner_id
+    return payload or None
+
+
+def _sales_fold_note(end_code: str, reason: str) -> str:
+    """접힌 날 한 줄. **`SL1` 에서는 빈 문자열이다** (설계 §5).
+
+    🔴 **마스터가 판매 문장을 짓지 않는다.** 추천 문장과 순위는 판매 소유이고 마스터는
+      순위를 재계산하지 않는다 (판매 v1.7 §18). 매입은 `render_answer` 로 리포트를
+      짓지만 판매는 판매 것을 나른다 — 여기서 문장을 만들기 시작하면 마스터가 **두
+      번째 추천자**가 된다.
+
+    ★ 다만 Flow 가 접힌 날(`SL2`~`SL5`)은 판매 문장 자체가 없다. 그때만 **왜 접혔는지**
+      를 적고, 그것도 **실행 사실**이지 업무 판단이 아니다 — *"이 조건으로는 못 판다"*
+      가 아니라 *"후보를 못 받았다"* 라고 쓴다.
+    """
+    말 = {
+        "SL2_NO_CANDIDATE": "판매가 후보를 내지 못해 접혔다",
+        "SL3_ALL_REJECTED": "후보가 전부 탈락해 접혔다",
+        "SL4_NOT_STARTED": "시작하지 못했다",
+        "SL5_BUDGET_EXHAUSTED": "호출 예산이 다해 판단이 끝나지 않았다",
+    }.get(end_code)
+    if 말 is None:
+        # `SL1_PRESENTED` — 문장은 판매가 낸 것이 답이다.
+        return ""
+    return f"{말} ({end_code}): {reason}"
 
 
 @dataclass(frozen=True)
@@ -573,6 +719,84 @@ def _empty_response(
     )
 
 
+def _to_sales_response(context: ExecutionContext, outcome: SalesOutcome) -> SalesRunResponse:
+    """판매 Flow 결과를 응답 모양으로. **매입 `_to_response` 와 따로 둔다.**
+
+    🔴 공통 조립 함수로 묶지 않는 자리다 (설계 §1). 두 사이클은 응답 모델도 종료
+      코드도 다르고, 공유하는 것은 **판정(`check_day_gate`)과 순서**이지 응답이 아니다.
+    """
+    return SalesRunResponse(
+        request_id=context.request_id,
+        as_of=context.as_of,
+        end_code=outcome.end_code,
+        reason=outcome.reason,
+        candidates=_sales_candidates_out(outcome),
+        judgment=dict(outcome.judgment),
+        supply_context=dict(outcome.supply_context),
+        context_failure=_sales_context_failure_out(outcome),
+        # ★ 근거·조정안은 **고르지도 정렬하지도 않는다** — 매입과 같은 함수를 쓴다.
+        #   부서가 낸 차례가 그 부서의 설명 순서다 (§3.2.2).
+        evidences=_evidences_out(outcome),
+        adjustments=_adjustments_out(outcome),
+        feedback_attempts=outcome.feedback_attempts,
+        plan=_steps(outcome.plan),
+        plan_signature=list(outcome.plan.signature),
+    )
+
+
+def _sales_candidates_out(outcome: SalesOutcome) -> list[SalesCandidateOut]:
+    """후보와 그 판정을 옮긴다. **통과 판정을 여기서 다시 세지 않는다.**
+
+    ★ `passed` · `unvalidated` · `detail` 은 `CandidateVerdict` 의 property 를 그대로
+      읽는다. 허용목록(`PASSING_VERDICTS`)이 늘어도 답이 한 곳에서만 바뀐다 — 여기서
+      *"reject 가 아니면 통과"* 로 다시 세면 어휘가 는 날 새 값이 통과 쪽으로 샌다.
+    """
+    return [
+        SalesCandidateOut(
+            scenario=dict(c.scenario),
+            validations={k: dict(v) for k, v in c.validations.items()},
+            unroutable=list(c.unroutable),
+            passed=c.passed,
+            unvalidated=c.unvalidated,
+            detail=c.detail,
+        )
+        for c in outcome.candidates
+    ]
+
+
+def _sales_context_failure_out(outcome: SalesOutcome) -> BlockedAgentOut | None:
+    """물류가 초기 컨텍스트를 못 낸 사실. **없으면 `None` 이다.**
+
+    ★ `detail` 을 여기서 다시 만들지 않고 `AgentFailure.detail` 을 부른다 — 매입
+      `_blocked_out` 과 같은 자리다.
+    """
+    failure = outcome.context_failure
+    if failure is None:
+        return None
+    return BlockedAgentOut(
+        agent=failure.agent,
+        runtime_status=failure.runtime_status,
+        reasoning=failure.reasoning,
+        missing_data=list(failure.missing_data),
+        detail=failure.detail,
+    )
+
+
+def _empty_sales_response(context: ExecutionContext, reason: str) -> SalesRunResponse:
+    """시작조차 못 한 날의 판매 응답.
+
+    ★ **`SL4_NOT_STARTED` 다.** 매입의 `E4` 와 뜻은 같지만 **어휘는 갈려 있다** —
+      한 어휘에 두 사이클을 담으면 화면과 이력이 어느 사이클의 종료인지를 payload 로
+      되짚어야 한다 (D-3 합의).
+    """
+    return SalesRunResponse(
+        request_id=context.request_id,
+        as_of=context.as_of,
+        end_code="SL4_NOT_STARTED",
+        reason=reason,
+    )
+
+
 def _evidence_contract_concerns(outcome: ProcurementOutcome) -> list[str]:
     """🔴 **근거의 값이 계약과 다른가.**
 
@@ -607,8 +831,12 @@ def _evidence_contract_concerns(outcome: ProcurementOutcome) -> list[str]:
     return [message]
 
 
-def _evidences_out(outcome: ProcurementOutcome) -> list[EvidenceOut]:
+def _evidences_out(outcome: ProcurementOutcome | SalesOutcome) -> list[EvidenceOut]:
     """부서 근거를 응답 모양으로. **고르지도 요약하지도 않는다.**
+
+    ★ **두 사이클이 같이 쓴다.** 근거를 옮기는 규칙은 사이클에 매인 것이 아니라
+      봉투 수준의 것이다 (`SourcedEvidence` 를 봉투로 올린 것과 같은 이유). 베끼면
+      한쪽만 고쳐지는 날이 온다 — 응답 **모델**을 안 묶는 것과 다른 이야기다.
 
     ★ 순서를 손대지 않는다 - 부서가 낸 순서가 그 부서의 설명 순서다.
       마스터가 정렬하면 "이게 더 중요하다" 는 뜻이 생긴다 (§3.2.2).
@@ -632,8 +860,10 @@ def _evidences_out(outcome: ProcurementOutcome) -> list[EvidenceOut]:
     ]
 
 
-def _adjustments_out(outcome: ProcurementOutcome) -> list[AdjustmentOut]:
+def _adjustments_out(outcome: ProcurementOutcome | SalesOutcome) -> list[AdjustmentOut]:
     """조정안을 표준형 그대로 옮긴다. **고르지도 정렬하지도 않는다.**
+
+    ★ 근거(`_evidences_out`)와 같이 **두 사이클이 같이 쓴다** — 표준형은 봉투 것이다.
 
     ★ 순서는 부서가 보낸 차례다. 정렬하면 그것이 우선순위로 읽힌다 -
       근거(`_evidences_out`)와 같은 이유다 (§3.2.2).

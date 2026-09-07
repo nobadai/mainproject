@@ -23,18 +23,28 @@ persistence.py — 마스터 실행 계획 적재 (정의서 §1.2-11)
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import date
 from typing import Any
 
 from app.master.plan import ExecutionPlan
 from app.master.run_repository import try_save_run
-from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse
+from app.master.schemas import (
+    ProcurementRunRequest,
+    ProcurementRunResponse,
+    SalesRunRequest,
+    SalesRunResponse,
+    StepOut,
+)
 from app.master.status_flow import StatusOutcome
 
 # 마스터의 1차 Flow 는 매입 의사결정이다. 판매(2차)가 붙으면 cycle 이 갈린다.
 _CYCLE = "PROCUREMENT"
+
+# 판매 의사결정 (2026-09-07 신설). DB CHECK 가 이미 허용하는 어휘다
+# (`database/master_agent_runs.sql:44`) — 마이그레이션이 필요 없다.
+_SALES_CYCLE = "SALES"
 
 # 조회. 안을 만들지 않지만 예산을 쓰고 부서를 부르므로 이력에 남는다 (2026-09-02).
 _STATUS_CYCLE = "STATUS"
@@ -44,6 +54,14 @@ _RUNTIME_BY_END_CODE = {
     "E4_NOT_STARTED": "RUNTIME_NOT_READY",
 }
 
+# 🔴 **판매 매핑을 따로 둔다.** `runtime_status_of` 를 그대로 쓰면 안 된다 —
+#    기본값이 `READY` 라 `SL4_NOT_STARTED` 가 표에 안 걸리고 **`READY` 로 적힌다.**
+#    *"못 시작한 날"* 이 *"돈 날"* 로 남고, 매입에서 `E4` 만 미가동으로 가른 그 구분이
+#    판매에서는 사라진다 (설계 §4).
+_SALES_RUNTIME_BY_END_CODE = {
+    "SL4_NOT_STARTED": "RUNTIME_NOT_READY",
+}
+
 
 def runtime_status_of(end_code: str) -> str:
     """`E4` 만 미가동이다.
@@ -51,17 +69,54 @@ def runtime_status_of(end_code: str) -> str:
     `E2`(보류)·`E3`(반려)·`E5`(계획 없음)는 **돌긴 돈** 날이다 — 회사 상태이지
     실행 환경 문제가 아니다. 이 구분이 무너지면 "부서가 죽은 날"과 "부서가 반대한 날"이
     이력에서 같아 보인다.
+
+    ⚠️ **판매 종료 코드를 여기 넣지 마라.** `SL4_NOT_STARTED` 는 표에 없어 기본값
+      `READY` 를 받는다 — 아무 오류 없이 틀린 값이 들어간다. 판매는
+      `sales_runtime_status_of` 를 쓴다.
     """
     return _RUNTIME_BY_END_CODE.get(end_code, "READY")
 
 
-def plan_rows(response: ProcurementRunResponse) -> list[dict[str, Any]]:
-    """실행 계획을 JSONB 로 저장할 모양으로.
+def sales_runtime_status_of(end_code: str) -> str:
+    """판매 종료 코드 → 런타임 상태. **`SL4` 만 미가동이다** (설계 §4).
+
+    ```text
+    SL4_NOT_STARTED       RUNTIME_NOT_READY   시작 못 했다
+    SL5_BUDGET_EXHAUSTED  READY               🔴 아래 참조
+    SL1 · SL2 · SL3       READY               돌긴 돌았다
+    ```
+
+    🔴 **`SL5` 를 `ERROR` 로 적지 않는다.** 예산 소진은 환경 고장이 아니라 **마스터가
+      스스로 끊은 것**이다 (§1.2-12 *"코드가 끊는다"*). `ERROR` 로 적으면 **어댑터가
+      죽은 날과 같아 보이고**, 그건 조사 방향을 틀리게 만든다 — 사람이 어댑터 로그를
+      뒤지는데 실제로는 예산을 올리거나 후보 수를 줄일 일이다.
+
+      *"판단이 안 끝났다"* 는 사실은 종료 코드(`SL5_BUDGET_EXHAUSTED`)가 이미 말한다.
+      런타임 상태까지 겹쳐 적지 않는다 — 같은 사실의 주인은 하나다.
+
+    ⚠️ **3값 밖을 적으면 저장이 전부 실패한다** (`runtime_status` CHECK ·
+      `master_agent_runs.sql:70`). 재무가 `SALES_VALIDATION` 을 열 때 겪은 그 순서다 —
+      *"제약보다 먼저 열면 판정은 되는데 저장이 전부 실패한다."* 위 세 값은 전부 3값
+      안이다.
+    """
+    return _SALES_RUNTIME_BY_END_CODE.get(end_code, "READY")
+
+
+def _step_rows(steps: Sequence[StepOut]) -> list[dict[str, Any]]:
+    """실행 계획 한 벌을 JSONB 모양으로. **두 사이클이 같이 쓴다.**
+
+    ★ 계획의 모양(`StepOut`)은 사이클에 매인 것이 아니다 — 베끼면 칸이 하나 늘어난 날
+      한쪽만 늘어난다.
 
     ★ 시각을 담지 않는다. 계획은 **같은 입력에 같은 값**이어야 한다 (§1.2-11).
       언제 돌았는지는 행의 `created_at` 이 답한다.
     """
-    return [step.model_dump(mode="json") for step in response.plan]
+    return [step.model_dump(mode="json") for step in steps]
+
+
+def plan_rows(response: ProcurementRunResponse) -> list[dict[str, Any]]:
+    """매입 실행 계획을 JSONB 로 저장할 모양으로."""
+    return _step_rows(response.plan)
 
 
 def record(
@@ -91,6 +146,43 @@ def record(
         runtime_status=runtime_status_of(response.end_code),
         elapsed_ms=elapsed_ms,
         plan=plan_rows(response),
+        request_payload=request.model_dump(mode="json"),
+        response_payload=response.model_dump(mode="json"),
+    )
+    return None if run_id is None else str(run_id)
+
+
+def record_sales(
+    request: SalesRunRequest,
+    response: SalesRunResponse,
+    *,
+    elapsed_ms: int | None = None,
+) -> str | None:
+    """판매 실행 1건을 적재하고 **그 행의 id 를 돌려준다** (2026-09-07 신설).
+
+    ★ **`record()` 를 그대로 못 쓴다.** 저쪽은 `ProcurementRunRequest/Response` 로
+      타입이 박혀 있고, 무엇보다 **런타임 상태 매핑이 다르다** — 매입 표에는
+      `SL4_NOT_STARTED` 가 없어서 기본값 `READY` 를 받는다.
+
+    ★ **`item` 은 요청 값을 그대로 넣는다** — 매입과 같은 칸이다. 판매도 품목 축으로
+      훑는 질문(*"배추 판매가 며칠째 SL3 인가"*)이 성립한다.
+
+    🟢 **`end_code` 에 `SL*` 이 그대로 들어간다.** 컬럼에 CHECK 가 없고
+      (`master_agent_runs.sql:64`) 그건 **일부러 열어 둔 것**이다 — 사이클마다 어휘가
+      다르고(매입 E · 조회 S · 판매 SL), 이상값은 3값으로 닫힌 `runtime_status` 가
+      걸러 준다. 그래서 마이그레이션이 필요 없다.
+
+    ★ 적재 실패는 `None` 이다 — 이력이 없어도 결과는 돌려준다 (`record` 와 같은 태도).
+    """
+    run_id = try_save_run(
+        cycle=_SALES_CYCLE,
+        as_of=response.as_of,
+        request_id=response.request_id,
+        item=request.item,
+        end_code=response.end_code,
+        runtime_status=sales_runtime_status_of(response.end_code),
+        elapsed_ms=elapsed_ms,
+        plan=_step_rows(response.plan),
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
     )

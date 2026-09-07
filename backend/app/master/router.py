@@ -26,6 +26,8 @@ from app.master.schemas import (
     ProcurementRunResponse,
     ReportOut,
     RunHistoryOut,
+    SalesRunRequest,
+    SalesRunResponse,
     TriggerAck,
 )
 from app.master.service import (
@@ -33,6 +35,7 @@ from app.master.service import (
     get_run_history,
     get_run_report,
     run_procurement,
+    run_sales,
 )
 
 router = APIRouter(prefix="/master", tags=["master"])
@@ -51,6 +54,37 @@ def master_request(request: ProcurementRunRequest) -> ProcurementRunResponse:
     """
     try:
         return run_procurement(request)
+    except ContractViolation as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(error),
+        ) from error
+
+
+@router.post(
+    "/sales/run",
+    response_model=SalesRunResponse,
+    summary="판매 의사결정 Flow 실행",
+)
+def master_sales_run(request: SalesRunRequest) -> SalesRunResponse:
+    """물류 초기 컨텍스트 → 판매 후보 → 후보별 검증 라우팅 → 사용자 선택지.
+
+    **실패도 200 이다** — `/master/request` 와 같은 태도다. 후보 없음·전부 탈락·
+    미시작·예산 소진은 오류가 아니라 **그날의 결과**이며 `SL1`~`SL5` 로 구분된다 (§5.3).
+
+    🔴 **주말에도 돈다.** 개장 관문은 지나지만 실행일 관문은 **매입만** 지난다 —
+      파는 데는 ML 예측이 필요 없다 (설계 §1).
+
+    🔴 **`/master/sales/trigger`(비동기 ack)를 두지 않는다.** 매입의 그것은 ML 완료
+      이벤트를 받는 스케줄러용이고, **판매는 사람이 눌러서 시작한다.** 부를 사람이
+      없는 진입점을 만들면 어휘만 늘고 아무도 안 쓴다.
+
+    ★ `trigger` 는 판매도 `USER_REQUEST` 가 기본이다. `ML_COMPLETE` 는 판매 경로에
+      의미가 없지만 **어휘를 새로 만들지 않는다** — 쓰지 않는 값이 있는 것과 어휘가
+      갈리는 것 중 뒤가 더 비싸다.
+    """
+    try:
+        return run_sales(request)
     except ContractViolation as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

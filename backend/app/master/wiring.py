@@ -23,6 +23,32 @@ _REGISTRY = AgentRegistry()
 
 REQUIRED_FOR_PROCUREMENT: tuple[AgentName, ...] = (*ADVISORS, "purchase")
 
+REQUIRED_FOR_SALES: tuple[AgentName, ...] = ("sales", "finance")
+"""판매 사이클이 **부르기 전에** 있어야 하는 어댑터. 둘뿐이고, 둘인 이유가 있다.
+
+```text
+sales      제안자가 없으면 후보가 0이다 — 시작할 이유가 없다
+finance    FINANCIAL_VALIDATION 이 최종 재검증 필수 capability 다
+```
+
+🔴 **`inventory` 를 넣지 않는다.** 판매 Flow 는 밴드 개념이 없어 **물류가 못 답해도
+  시작하도록** 설계했다 (`sales_flow.py` 의 ② 단계 · 설계 §1-2). 필수 목록에 넣으면
+  그 결정을 배선 쪽에서 뒤집는 셈이다.
+
+  ★ **지금 실제 공백은 등록이 아니라 모드다.** `inventory` 는 등록돼 있고
+    `PRE_SALES` 분기만 없어서 회신(`RUNTIME_NOT_READY`)으로 온다 — **회신으로 오는
+    것과 배선이 빈 것은 다르다.** 앞은 후보의 탈락 사유가 되고, 뒤는 아무도 못
+    부르는 상태다.
+
+🔴 **`purchase` 도 넣지 않는다.** 부족량이 있는 후보에만 필요한 **조건부**이고,
+  지금은 `CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"]` 가 `None` 이라 아예 안
+  불린다. 조건부 대상을 문 앞 필수로 올리면 안 부르는 날에도 판매가 선다.
+
+⚠️ `REQUIRED_FOR_PROCUREMENT` 와 **겹치지만 같은 목록이 아니다.** 매입은 조언자
+  둘 + 제안자이고 판매는 제안자 + 검증자다 — 한쪽을 다른 쪽으로 대신 쓰면 판매가
+  물류 미등록으로 서거나 매입이 물류 없이 돈다.
+"""
+
 
 def register(agent: AgentName, port: AgentPort) -> None:
     """어댑터를 등록한다. 각 파트 모듈이 임포트 시점에 부른다."""
