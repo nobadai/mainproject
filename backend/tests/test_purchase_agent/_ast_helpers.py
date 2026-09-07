@@ -69,3 +69,31 @@ def called_names(path: Path) -> set[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+
+
+def called_attributes(path: Path) -> set[str]:
+    """이 파일이 부르는 **점 표기 호출**의 이름 (``a.b.c()`` → ``"a.b.c"``).
+
+    ★ ``called_names`` 는 ``foo(...)`` 만 본다 — ``date.today()`` 처럼 속성으로
+      부르는 것은 ``ast.Attribute`` 라 거기서 안 잡힌다. 벽시계 금지처럼 *"모듈의
+      그 함수를 부르는가"* 를 재는 자리가 이것을 쓴다.
+
+    ⚠️ **점 표기를 복원해서 돌려준다.** 마지막 조각(``today``)만 보면 우리 코드의
+      다른 ``today()`` 와 구분이 안 된다.
+    """
+
+    def dotted(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            head = dotted(node.value)
+            return f"{head}.{node.attr}" if head else None
+        return None
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = {
+        dotted(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    return {name for name in names if name}
