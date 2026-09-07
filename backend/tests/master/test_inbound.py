@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from app.master import inbound
+from app.master.day_gate import DayGate
 from app.master.inbound import InboundPartOut, receive_arrivals
 
 AS_OF = date(2026, 1, 7)
@@ -60,6 +61,27 @@ class _물류:
         if self._raises is not None:
             raise self._raises
         return self._out
+
+
+@pytest.fixture(autouse=True)
+def _열린_날로_둔다(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """🔴 **이 파일은 입고 경계를 잰다 — 개장 상태를 재지 않는다.**
+
+    `receive_arrivals` 가 앞에 개장 Gate 를 두면서(물류 물음 2026-09-07) 이 파일의
+    검사가 **실 DB 의 `master_day_openings` 에 매이게** 됐다. 앞선 검사가 그 표에
+    무엇을 남기면 여기 13건이 통째로 `NOT_OPENED` 로 바뀐다.
+
+    ★ **숨기지 않고 전제로 적는다.** 가려 두면 *"입고 경계가 깨졌다"* 와 *"어제 개장이
+      실패해 있었다"* 가 같은 빨간불로 나오고, 그건 이 파일이 잡으려는 것이 아니다.
+
+    ⚠️ **Gate 자체는 `test_inbound_entrypoint.py` 가 잰다.** 여기서 통과로 두는 것이
+      그 검사를 무르지 않는다 — 재는 자리가 다르다.
+    """
+    monkeypatch.setattr(
+        inbound,
+        "check_day_gate",
+        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED"),
+    )
 
 
 @pytest.fixture(autouse=True)
