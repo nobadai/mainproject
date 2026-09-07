@@ -241,3 +241,37 @@ def test_엔드포인트가_실패도_200_으로_낸다(monkeypatch: pytest.Monk
     assert resp.status_code == 200
     assert resp.json()["status"] == "NOT_OPENED"
     assert resp.json()["next_action"] == "OPEN_DAY_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# 4. `received` 의 뜻 — **파이프라인 완료**이지 신규 재고화가 아니다
+# ---------------------------------------------------------------------------
+
+
+def test_received_는_신규_재고화만을_뜻하지_않는다() -> None:
+    """🔴 **물류 확정 2026-09-07.** 계약 문구가 물류 설계보다 좁았다.
+
+    실측(회귀 2026-09-07):
+
+    ```text
+    01-28   received=[A]   inventory_lots 80 → 81   신규 재고화
+    01-29   received=[A]   inventory_lots 81 → 81   기존 검증 + 남은 일정 정리
+    ```
+
+    ★ 물류 `_receive_one` 은 *"마지막 성공 단계 다음부터 이어 처리한다"* 이고
+      `PUTAWAY_DONE`·`CLOSED` 여도 `materialize` 로 검증하고 일정을 걷은 뒤 성공으로
+      끝낸다. **그 날도 자기 몫을 다 한 것**이다.
+
+    ⚠️ 이 검사는 **문구를 잠근다.** 누가 다시 *"실제로 받은"* 으로 좁히면 빨간불이고,
+      그때 `received` 를 본 코드가 *"새 Lot 이 생겼다"* 로 오독하기 시작한다.
+    """
+    doc = InboundPartOut.model_fields["received"].description or ""
+    if not doc:
+        import inspect as _inspect
+
+        doc = _inspect.getsource(InboundPartOut)
+
+    assert "파이프라인" in doc, "received 가 파이프라인 완료라는 뜻이 사라졌다"
+    assert "권위" in doc and ("Lot" in doc or "원장" in doc), (
+        "신규 재고화의 권위 사실이 Receipt·Lot·Move 원장이라는 문장이 사라졌다"
+    )
