@@ -17,6 +17,8 @@ from datetime import date
 
 import pytest
 from 개장정본_격리 import (
+    _개장_관문_함수,
+    개장_관문_이름을_가져간_모듈들,
     개장_정본_이름을_가져간_모듈들,
 )
 
@@ -141,18 +143,22 @@ def 개장_관문을_통과시킨다(monkeypatch: pytest.MonkeyPatch) -> None:
        등록소가 전역이라 다른 검사가 하루 넘김을 등록해 두면, 그 뒤 실행이 **실 DB 로
        개장 여부를 물으러 나간다.**
 
-    ★ **관문 자체를 재는 검사는 `test_day_gate.py` 가 가짜를 직접 꽂는다.** 여기서는
-      *"관문 때문에 다른 검사가 막히지 않는다"* 만 보장한다 — 공휴일 달력을 가짜로
-      주는 것과 같은 이유다.
+    🔴 **이름을 가져간 모듈을 전부 막는다.** 진입점이 셋이 됐다 (매입 · 판매 ·
+       재검증). 손으로 한 줄씩 적으면 넷째가 생긴 날 또 조용히 샌다 —
+       **격리가 실제로 섰는지는 `test_db_isolation.py` 가 잰다.**
+
+    ★ **관문 자체를 재는 검사는 `test_day_gate.py` 가 가짜를 직접 꽂는다.** 그 파일은
+      `from app.master.day_gate import check_day_gate` 로 **자기 네임스페이스에** 이미
+      복사해 두었으므로 여기서 원본을 바꿔도 진짜를 잰다. 여기서는 *"관문 때문에 다른
+      검사가 막히지 않는다"* 만 보장한다 — 공휴일 달력을 가짜로 주는 것과 같은 이유다.
     """
     from app.master.day_gate import DayGate
 
-    monkeypatch.setattr(
-        "app.master.service.check_day_gate",
-        lambda as_of, **kw: DayGate(
-            as_of=as_of, gate="PASS", result="ALREADY_OPENED", last_opened_date=as_of
-        ),
-    )
+    def 통과(as_of: date, **kw: object) -> DayGate:
+        return DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED", last_opened_date=as_of)
+
+    for 모듈 in 개장_관문_이름을_가져간_모듈들():
+        monkeypatch.setattr(모듈, _개장_관문_함수, 통과)
 
 
 @pytest.fixture(autouse=True)

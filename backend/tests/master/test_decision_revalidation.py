@@ -9,10 +9,11 @@ revalidation_request_id  재검증이 도는 **새** request_id                 
 revalidation_outcome     PASSED · CONDITIONAL · FAILED · ERROR             ← 신설
 ```
 
-⚠️ **이 조각은 저장 자리까지다.** 재검증을 실제로 도는 것은 M-4 다. 그래서 지금
-  두 칸은 어느 결정에서든 `None` 이고, **그 `None` 은 "재검증을 하지 않았다"** 이지
-  실패가 아니다. 되먹임 · `approved_commitments` 때도 칸을 먼저 열고 채우는 쪽을
-  뒤에 붙였다 — 같은 순서다.
+⚠️ **이 파일은 저장 자리만 잰다.** 어휘 · 응답 스키마 · INSERT · DDL 이고, **재검증이
+  실제로 도는 것**(승인이 부서를 다시 부르는가 · 조건 비교 · 개장 관문)은 M-4 의
+  `test_final_revalidation.py` 가 잰다. 여기서 두 칸이 `None` 인 것은 저장소를 직접
+  불러서이지, 재검증이 없어서가 아니다 — **그 `None` 은 "재검증을 하지 않았다"** 이고
+  승인이 아닌 결정과 2026-09-07 이전 결정이 그렇다.
 
 ★ **DB 를 치지 않는다.** 어휘는 타입에서, 적재는 `execute_returning_one` 을 가로채
   읽고, DDL 은 SQL 텍스트로 본다. `tests/master/conftest.py` 의 격리와 같은 결이다.

@@ -11,7 +11,12 @@
 from __future__ import annotations
 
 import pytest
-from 개장정본_격리 import 개장_정본_이름을_가져간_모듈들, 진짜_개장_정본_함수
+from 개장정본_격리 import (
+    개장_관문_이름을_가져간_모듈들,
+    개장_정본_이름을_가져간_모듈들,
+    진짜_개장_관문_함수,
+    진짜_개장_정본_함수,
+)
 
 
 @pytest.mark.parametrize("이름", sorted(진짜_개장_정본_함수))
@@ -48,3 +53,37 @@ def test_적재_이름을_가져간_모듈도_실제로_잡힌다() -> None:
 
     assert "app.master.day_open" in 잡힌_모듈
     assert "app.master.day_opening_repository" in 잡힌_모듈
+
+
+# ── 개장 **관문** — 진입점마다 이름을 복사해 간다 ──────────────────────────────
+
+
+def test_개장_관문을_들고_있는_모듈이_하나도_안_새어_있다() -> None:
+    """🔴 **진입점이 셋이 됐다** (매입 · 판매 · 재검증 · 입고).
+
+    `check_day_gate` 는 안 막히면 `get_connection()` 으로 **실 DB 를 친다.** 전에는
+    `conftest` 가 `app.master.service` 한 줄만 막고 있었고, 그래서 새 진입점이 생길
+    때마다 그 모듈만 조용히 새 나갔다 — `read_day_opening` 이 겪은 것과 같은 함정이다.
+    """
+    샌_모듈 = [
+        모듈.__name__
+        for 모듈 in 개장_관문_이름을_가져간_모듈들()
+        if 모듈.check_day_gate is 진짜_개장_관문_함수
+    ]
+
+    assert 샌_모듈 == [], f"check_day_gate 가 안 막힌 모듈이 있다 — 실 DB 를 친다: {샌_모듈}"
+
+
+def test_관문_이름을_가져간_모듈이_실제로_잡힌다() -> None:
+    """🔴 **위 검사가 빈 목록으로 통과하는 것을 막는다.**
+
+    ★ 재검증(`revalidation`)이 **세 번째로** 이 이름을 가져간 모듈이다. 여기가 목록에서
+      빠지면 위 검사는 아무것도 안 재고도 초록이 된다.
+    """
+    잡힌_모듈 = {모듈.__name__ for 모듈 in 개장_관문_이름을_가져간_모듈들()}
+
+    assert "app.master.day_gate" in 잡힌_모듈
+    assert "app.master.service" in 잡힌_모듈
+    assert "app.master.revalidation" in 잡힌_모듈, (
+        "재검증 모듈이 안 잡힌다 — 승인 한 번이 실 DB 로 개장을 물으러 나간다"
+    )

@@ -36,9 +36,20 @@ import inspect
 
 import pytest
 
-from app.master import service
+from app.master import revalidation, service
 
-_TREE = ast.parse(inspect.getsource(service))
+#: 🔴 **모듈 하나만 훑으면 그 파일 밖의 진입점이 통째로 안 보인다.**
+#:
+#:   최종 재검증(M-4)은 `service.py` 에 못 둔다 — 저쪽이 이미 `decision_service` 를
+#:   임포트하는데 결정 적재가 재검증을 부르므로 import 가 원을 그린다. 그래서 자기
+#:   모듈로 나왔고, **스캐너를 안 넓혔으면 그날부터 재검증은 게이트를 안 지나도
+#:   초록이었다.**
+#:
+#: ★ **다음에 또 늘어난다는 전제로 목록을 여기 하나로 둔다.** 아래 검사는 전부 이
+#:   목록에서 진입점을 찾는다 — 모듈을 더하면 검사가 자동으로 따라 는다.
+_SCANNED = (service, revalidation)
+
+_TREES = {모듈.__name__: ast.parse(inspect.getsource(모듈)) for 모듈 in _SCANNED}
 
 #: 실행일 판정으로 가는 이름들. **판매 진입점에 이 중 하나라도 들어오면** 토요일
 #: 요청이 서고, 2026년 토요일 45일에 판매가 멈춘다.
@@ -48,7 +59,7 @@ _EXECUTION_DAY_NAMES = frozenset(
 
 
 def _entrypoints() -> dict[str, ast.FunctionDef]:
-    """`service.py` 의 **공개 진입점**.
+    """훑는 모듈들의 **공개 진입점**.
 
     ★ **이름을 열거하지 않는다.** 열거하면 새 진입점이 생긴 날 목록만 옛말을 하고
       검사는 초록으로 남는다 (`test_envelope_sim_run_id.py` 가 `app/master/` 전체를
@@ -58,16 +69,20 @@ def _entrypoints() -> dict[str, ast.FunctionDef]:
       *"이 실행이 부서를 부른다"* 는 뜻이고, 부서를 부르려면 그 날 장부가 서 있어야
       한다. 조회 헬퍼(`get_run_history` 등)는 봉투를 안 만들므로 여기 안 걸린다 —
       그쪽은 남은 이력을 읽을 뿐 그 날을 판단하지 않는다.
+
+    ⚠️ **함수 이름으로 키를 잡는다.** 두 모듈에 같은 이름의 공개 진입점이 생기면 한쪽이
+      가려지므로, 아래 `test_이름이_겹치지_않는다` 가 그것을 먼저 잡는다.
     """
     found: dict[str, ast.FunctionDef] = {}
-    for node in _TREE.body:
-        if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
-            continue
-        if any(
-            isinstance(inner, ast.Call) and _called_name(inner) == "ExecutionContext"
-            for inner in ast.walk(node)
-        ):
-            found[node.name] = node
+    for tree in _TREES.values():
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name.startswith("_"):
+                continue
+            if any(
+                isinstance(inner, ast.Call) and _called_name(inner) == "ExecutionContext"
+                for inner in ast.walk(node)
+            ):
+                found[node.name] = node
     return found
 
 
@@ -95,10 +110,54 @@ def test_스캐너가_진입점을_실제로_찾는다():
     """
     names = set(_entrypoints())
 
-    assert names, "service.py 에서 공개 진입점을 하나도 못 찾았다 — 스캐너가 고장 났다"
-    assert {"run_procurement", "run_sales"} <= names, (
-        f"매입·판매 두 진입점이 다 잡혀야 한다. 잡힌 것: {sorted(names)}"
+    assert names, "훑은 모듈에서 공개 진입점을 하나도 못 찾았다 — 스캐너가 고장 났다"
+    assert {"run_procurement", "run_sales", "revalidate_scenario"} <= names, (
+        f"매입·판매·재검증 세 진입점이 다 잡혀야 한다. 잡힌 것: {sorted(names)}"
     )
+
+
+def test_모든_모듈에서_적어도_하나는_잡힌다():
+    """🔴 **모듈을 목록에 더해 놓고 아무것도 안 잡히면 그 모듈은 안 재는 것과 같다.**
+
+    ★ 위 검사는 이름 셋만 보므로, 넷째 모듈을 더했는데 거기서 0건이 잡혀도 통과한다.
+      *"재는 줄은 있는데 재는 대상이 없다"* 를 모듈 단위로도 막는다.
+    """
+    빈_모듈 = [
+        이름
+        for 이름, tree in _TREES.items()
+        if not any(
+            isinstance(node, ast.FunctionDef)
+            and not node.name.startswith("_")
+            and any(
+                isinstance(inner, ast.Call) and _called_name(inner) == "ExecutionContext"
+                for inner in ast.walk(node)
+            )
+            for node in tree.body
+        )
+    ]
+
+    assert 빈_모듈 == [], f"진입점이 하나도 없는 모듈을 훑고 있다: {빈_모듈}"
+
+
+def test_이름이_겹치지_않는다():
+    """⚠️ 두 모듈에 같은 이름의 진입점이 생기면 **한쪽이 사전에서 가려진다.**
+
+    가려진 쪽은 게이트를 안 지나도 검사가 안 돈다 — 스캐너가 0건을 세는 것과 같은 병이
+    이름 하나에서만 일어나는 판이다.
+    """
+    이름들 = [
+        node.name
+        for tree in _TREES.values()
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and not node.name.startswith("_")
+        and any(
+            isinstance(inner, ast.Call) and _called_name(inner) == "ExecutionContext"
+            for inner in ast.walk(node)
+        )
+    ]
+
+    assert len(이름들) == len(set(이름들)), f"진입점 이름이 겹친다: {sorted(이름들)}"
 
 
 def test_조회_헬퍼는_진입점으로_세지_않는다():
@@ -183,3 +242,18 @@ def test_판매는_실행일_게이트를_지나지_않는다():
     샌_것 = _calls_in(_entrypoints()["run_sales"]) & _EXECUTION_DAY_NAMES
 
     assert not 샌_것, f"판매에 실행일 게이트가 걸렸다 — 주말 판매가 막힌다: {sorted(샌_것)}"
+
+
+def test_실행일_게이트는_매입_하나만_지난다():
+    """🔴 **재검증에도 걸리면 토요일에 승인이 통째로 막힌다.**
+
+    최종 재검증은 판매 후보를 다시 보는 자리라 판매와 같은 편이다 — 파는 데는 ML
+    예측이 필요 없다. 이름을 열거하지 않고 *"매입 말고 아무도"* 로 잠근다.
+    """
+    샌_진입점 = {
+        이름: sorted(_calls_in(node) & _EXECUTION_DAY_NAMES)
+        for 이름, node in _entrypoints().items()
+        if 이름 != "run_procurement" and _calls_in(node) & _EXECUTION_DAY_NAMES
+    }
+
+    assert 샌_진입점 == {}, f"매입 아닌 진입점에 실행일 게이트가 걸렸다: {샌_진입점}"
