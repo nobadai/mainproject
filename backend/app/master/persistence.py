@@ -28,6 +28,7 @@ from dataclasses import asdict
 from datetime import date
 from typing import Any
 
+from app.master.envelope import ExecutionContext
 from app.master.plan import ExecutionPlan
 from app.master.run_repository import try_save_run
 from app.master.schemas import (
@@ -60,6 +61,13 @@ _RUNTIME_BY_END_CODE = {
 #    판매에서는 사라진다 (설계 §4).
 _SALES_RUNTIME_BY_END_CODE = {
     "SL4_NOT_STARTED": "RUNTIME_NOT_READY",
+}
+
+# 🔴 **재검증은 또 다른 표다** (2026-09-07 · M-4). 어휘가 `RevalidationOutcome` 이라
+#    위 둘 중 어느 것도 이 값을 모른다 — 섞어 쓰면 `ERROR` 가 기본값 `READY` 로 적혀
+#    *"못 돌린 재검증"* 이 *"돈 재검증"* 으로 남는다. 근거는 `record_revalidation` 에.
+_REVALIDATION_RUNTIME_BY_OUTCOME = {
+    "ERROR": "RUNTIME_NOT_READY",
 }
 
 
@@ -185,6 +193,69 @@ def record_sales(
         plan=_step_rows(response.plan),
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
+    )
+    return None if run_id is None else str(run_id)
+
+
+def record_revalidation(
+    context: ExecutionContext,
+    *,
+    outcome: str,
+    reason: str,
+    validations: Mapping[str, Mapping[str, Any]],
+    unroutable: Sequence[str],
+    plan: ExecutionPlan,
+    item: str | None = None,
+    elapsed_ms: int | None = None,
+) -> str | None:
+    """최종 승인 시점 재검증 1건을 적재한다 (설계 2026-09-07 §4 · M-4).
+
+    🔴 **왜 재검증도 남기는가.** 재검증은 안을 만들지 않지만 **예산을 쓰고 부서를
+      부른다** — `record_status` 가 조회를 남기는 것과 **같은 이유**다. 안 남기면 그
+      호출이 이력에서 사라지고, M-16 이 막으려는 것이 정확히 *"안 보이는 호출"* 이다.
+
+    ★ **`cycle` 은 `SALES` 다** (설계 §4). 재검증이 부르는 것은 판매 사이클의
+      capability 둘이고, 표의 CHECK 이 이미 그 값을 받는다 — 마이그레이션이 없다.
+
+    ★ **`end_code` 에 재검증 결과를 그대로 적는다** (`PASSED` · `CONDITIONAL` ·
+      `FAILED` · `ERROR`). 컬럼에 CHECK 이 없는 이유가 *"사이클마다 어휘가 다르다"*
+      이고, 재검증의 어휘는 `RevalidationOutcome` 이다 — 새 낱말을 짓지 않는다.
+
+    🔴 **`ERROR` 는 `RUNTIME_NOT_READY` 다 — 판매 `SL5` 와 일부러 다르다.**
+
+      판매는 예산 소진을 `READY` 로 적는다. *"마스터가 스스로 끊은 것"* 이고 화면이
+      후보를 보여주는 경로라, 못 본 것을 미가동으로 적으면 사용자가 오해하기
+      때문이다. **재검증에는 보여줄 후보가 없다.** 여기서 이 칸이 답하는 물음은
+      *"이 실행이 판정을 냈는가"* 하나이고, `ERROR` 는 언제나 못 냈다는 뜻이다.
+      *"왜 못 냈나"* 는 `end_code` 와 `reason` 이 말한다 — 같은 사실의 주인은 하나다.
+
+    ★ **적재 실패는 `None` 이다.** 그때 `master_decisions.revalidation_request_id` 는
+      이 표에 없는 키를 가리키는데, 그것이 곧 *"적재가 실패했다"* 이고 설계 §4 가
+      숨기지 말라고 적은 자리다 (`history_run_id` 의 `None` 과 같은 태도).
+    """
+    run_id = try_save_run(
+        cycle=_SALES_CYCLE,
+        as_of=context.as_of,
+        request_id=context.request_id,
+        item=item,
+        end_code=outcome,
+        runtime_status=_REVALIDATION_RUNTIME_BY_OUTCOME.get(outcome, "READY"),
+        elapsed_ms=elapsed_ms,
+        plan=status_plan_rows(plan),
+        request_payload={
+            "as_of": context.as_of.isoformat(),
+            "policy_version": context.policy_version,
+            "trigger": context.trigger,
+            # ★ **무엇을 물었는지**를 남긴다. 답만 남기면 못 물어본 것과 물었는데
+            #   답이 안 온 것이 이력에서 같아 보인다.
+            "capabilities": [*validations, *unroutable],
+        },
+        response_payload={
+            "outcome": outcome,
+            "reason": reason,
+            "validations": {k: dict(v) for k, v in validations.items()},
+            "unroutable": list(unroutable),
+        },
     )
     return None if run_id is None else str(run_id)
 

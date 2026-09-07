@@ -31,9 +31,9 @@ _COLUMNS = (
     # DB 컬럼은 `run_id` 지만 코드에서는 `history_run_id` 로 부른다 —
     # `plan[].run_id`(부서 호출 id) 와 헷갈리지 않게 하려는 것이다.
     "run_id",
-    # 최종 승인 시점 재검증 (2026-09-07 · M-3). **`follow_up_request_id` 와 다른
-    # 칸이다** — 저쪽은 조건부 재요청 체인이고 이쪽은 승인 직전 재검증이다.
-    # 아직 채우는 코드가 없다 (M-4). 지금은 늘 NULL 이고, 그 NULL 은
+    # 최종 승인 시점 재검증 (2026-09-07). **`follow_up_request_id` 와 다른 칸이다** —
+    # 저쪽은 조건부 재요청 체인이고 이쪽은 승인 직전 재검증이다.
+    # `decision_service.record_decision` 이 승인에서만 채운다 (M-4). NULL 은
     # **"재검증을 하지 않았다"** 이지 실패가 아니다.
     "revalidation_request_id",
     "revalidation_outcome",
@@ -100,9 +100,13 @@ def save_decision(
       동시에 밀면 뒤엣것이 `UniqueViolation` 으로 떨어진다 — **조용히 덮어쓰지 않는다.**
       호출자가 회차를 다시 읽어 재시도할지 정한다.
 
-    ★ 재검증 두 칸은 **기본이 `None`** 이다. 부르는 쪽이 아직 없어서다 (M-4) —
-      🔴 **칸을 만들어 두고 안 채우면 늘 NULL 이라는 것을 알고 연다.** 여기서 NULL 은
-      *"재검증을 하지 않았다"* 이고, 그것이 지금의 사실이다.
+    ★ 재검증 두 칸은 **기본이 `None`** 이다. 승인이 아닌 결정에는 재검증할 대상이
+      없고, 2026-09-07 이전 결정에는 절차 자체가 없었다 — 여기서 NULL 은
+      *"재검증을 하지 않았다"* 이지 실패가 아니다.
+
+    ⚠️ **`ERROR` 만 키 없이 들어올 수 있다** (짝 CHECK
+      `master_decisions_revalidation_pairing`). *"돌리지 못한"* 재검증에는 가리킬
+      실행이 없다 — 나머지 셋은 반드시 키가 같이 온다.
 
     ⚠️ `revalidation_request_id` 를 `follow_up_request_id` 자리에 넘기지 않는다.
       DB 도 두 칸으로 갈라 두었다 (`master/master_decision_revalidation.sql`).

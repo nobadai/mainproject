@@ -30,6 +30,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+from app.master import day_gate as _개장_관문_저장소
 from app.master import day_opening_repository as _개장_정본_저장소
 
 #: 개장 정본 저장소에서 **실 DB 를 치는 함수들.** 이름을 가져간 자리를 전부 막아야 한다.
@@ -58,4 +59,29 @@ def 개장_정본_이름을_가져간_모듈들(이름: str) -> list[ModuleType]
         모듈
         for 모듈이름, 모듈 in list(sys.modules.items())
         if 모듈이름.startswith("app.master") and 모듈 is not None and hasattr(모듈, 이름)
+    ]
+
+
+#: 개장 관문 판정 함수. **`app.master` 안에서 이름을 가져간 자리를 전부 막아야 한다.**
+_개장_관문_함수 = "check_day_gate"
+
+#: 막기 전에 잡아 둔 **진짜 함수.** `진짜_개장_정본_함수` 와 같은 자리·같은 이유다.
+진짜_개장_관문_함수 = getattr(_개장_관문_저장소, _개장_관문_함수)
+
+
+def 개장_관문_이름을_가져간_모듈들() -> list[ModuleType]:
+    """`check_day_gate` 를 자기 네임스페이스에 들고 있는 `app.master.*` 모듈 전부.
+
+    🔴 **이름을 하나만 적어 두면 새 진입점이 조용히 샌다.** 전에는 `service` 한 줄만
+       막았는데, 그 뒤 `inbound` 와 재검증(`revalidation`)이 같은 이름을 가져갔다 —
+       `from X import f` 는 이름을 **복사**하므로 원본 모듈만 막아도 안 먹는다
+       (`#352` 가 고친 바로 그 함정).
+
+    ★ 안 막히면 그 모듈은 `get_connection()` 으로 **실 DB 를 친다.** 증상은
+      *"그날 공용 DB 에 무엇이 있느냐로 검사가 갈린다"* 라 재현이 안 된다.
+    """
+    return [
+        모듈
+        for 모듈이름, 모듈 in list(sys.modules.items())
+        if 모듈이름.startswith("app.master") and 모듈 is not None and hasattr(모듈, _개장_관문_함수)
     ]

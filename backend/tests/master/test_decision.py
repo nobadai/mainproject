@@ -45,6 +45,10 @@ class FakeStore:
         condition_text: str | None = None,
         follow_up_request_id: str | None = None,
         history_run_id: str | None = None,
+        # 🔴 **M-4 가 두 칸을 채우기 시작했다.** 가짜가 이 인자를 안 받으면 승인 경로가
+        #   `TypeError` 로 죽는다 — 가짜는 진짜 서명을 따라간다.
+        revalidation_request_id: str | None = None,
+        revalidation_outcome: str | None = None,
         note: str | None = None,
     ) -> DecisionOut:
         row = DecisionOut(
@@ -58,6 +62,8 @@ class FakeStore:
             follow_up_request_id=follow_up_request_id,
             end_code_at_decision=end_code_at_decision,
             history_run_id=history_run_id,
+            revalidation_request_id=revalidation_request_id,
+            revalidation_outcome=revalidation_outcome,
             note=note,
             created_at=datetime.now(UTC),
             is_current=True,

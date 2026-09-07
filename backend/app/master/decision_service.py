@@ -28,6 +28,12 @@ from app.master.decision import (
     scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
+from app.master.revalidation import (
+    Revalidation,
+    conditions_of_original,
+    find_scenario,
+    revalidate_scenario,
+)
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
 from app.master.transition import TransitionOut, apply_approval
 
@@ -50,8 +56,23 @@ def _end_code_of(response_payload: dict[str, Any]) -> str:
 def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     """결정 1건을 받아 적재하고 돌려준다.
 
-    순서가 중요하다 — **읽고 → 검사하고 → 적재한다.** 적재 후 검사하면 잘못된 결정이
-    이력에 남는다.
+    순서가 중요하다 — **읽고 → 검사하고 → 🔴 재검증하고 → 적재한다.** 적재 후
+    검사하면 잘못된 결정이 이력에 남고, **재검증 뒤에 적재해야 그 결과가 같은 행에
+    담긴다** (설계 2026-09-07 §1).
+
+    🔴 **재검증이 막혀도 결정 행은 쓴다** (설계 §0). `decision=APPROVE` 는 **사용자가
+      누른 사실**이고, `revalidation_outcome` 이 그 옆에 결과를 적는다.
+
+      ```text
+      결정 행       항상 쓴다        무엇을 눌렀나
+      승인의 효력   PASSED 일 때만    도메인 Write 로 흘러가는 것 (M-5)
+      ```
+
+      막혔다고 행을 안 쓰면 *"승인하려다 막혔다"* 가 사라지고, 그것은 M-3 이 칸을
+      나눈 이유를 되돌리는 것이다.
+
+    ⚠️ **`PASSED` 여도 아직 아무 일도 안 일어난다.** 승인 후 도메인 Write 는 M-5 이고
+      그 앞에 실행 원장(saga) 문제가 있다 (설계 §5).
 
     :raises LookupError: 그 업무 키의 실행이 없다 (라우터가 404).
     :raises DecisionRejected: 지금 상태에서 받을 수 없다 (라우터가 409/422).
@@ -67,6 +88,7 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     _reject_repeat_approval(existing, payload)
 
     seq = next_seq(existing)
+    revalidation = _revalidation_for(row, response_payload, payload, seq)
     saved = save_decision(
         request_id=request_id,
         decision_seq=seq,
@@ -76,12 +98,77 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         scenario_label=payload.scenario_label,
         condition_text=payload.condition_text,
         history_run_id=str(row["run_id"]),
+        revalidation_request_id=None if revalidation is None else revalidation.request_id,
+        revalidation_outcome=None if revalidation is None else revalidation.outcome,
         note=payload.note,
     )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
         update={"commitment": out, "transition": _transition_for(commitment)}
     )
+
+
+def _revalidation_for(
+    row: Mapping[str, Any],
+    response_payload: Mapping[str, Any],
+    payload: DecisionIn,
+    decision_seq: int,
+) -> Revalidation | None:
+    """승인이면 **선택된 1안을 오늘 다시 검증한다** (설계 2026-09-07 · M-4).
+
+    🔴 **`APPROVE` 일 때만이다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은 승인이
+      아니라 재검증할 대상이 없다 — 그때 두 칸은 `None` 이고, 그 `None` 은 *"재검증에
+      실패했다"* 가 아니라 **"재검증을 하지 않았다"** 이다.
+
+    ★ **`_commitment_parts` 앞에서 돈다.** 약정은 결정을 적은 **뒤에** 만들지만
+      재검증은 **적기 전에** 돌아야 한다 — 결과가 같은 행에 담기기 때문이다.
+
+    :returns: 승인이 아니면 `None`. 승인인데 못 돌렸으면 `ERROR` 가 실린 `Revalidation`
+              이다 — 둘을 섞지 않는다 (§1.2-10).
+    """
+    if payload.decision != "APPROVE" or payload.scenario_label is None:
+        return None
+
+    scenario = find_scenario(response_payload, payload.scenario_label)
+    if scenario is None:
+        # ★ `check_scenario_exists` 를 이미 지났는데도 못 찾는 경우가 있다 — 라벨이
+        #   겹치면 유일하지 않아 `None` 이 온다. 어느 안을 재검증했는지가 운에 걸리는
+        #   것보다 **못 돌렸다고 적는 편**이 낫다 (`_commitment_parts` 와 같은 판단).
+        return Revalidation(
+            outcome="ERROR",
+            reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
+        )
+
+    policy_version = _policy_version_of(row)
+    if policy_version is None:
+        # 🔴 **정책판 없이 봉투를 만들 수 없다** (`ExecutionContext` 가 막는다). 아무
+        #   값이나 채워 넣으면 재현 4종의 하나가 거짓이 된다 (§3.2.4).
+        return Revalidation(
+            outcome="ERROR",
+            reason="원 실행의 policy_version 을 못 읽어 재검증 봉투를 만들 수 없다.",
+        )
+
+    return revalidate_scenario(
+        scenario=scenario,
+        original_conditions=conditions_of_original(response_payload, payload.scenario_label),
+        decision_seq=decision_seq,
+        policy_version=policy_version,
+        item=row.get("item") if isinstance(row.get("item"), str) else None,
+    )
+
+
+def _policy_version_of(row: Mapping[str, Any]) -> str | None:
+    """원 실행이 돈 정책판. **실행 이력 행의 요청 원문에서 읽는다.**
+
+    ★ **재검증이 새 정책판을 고르지 않는다.** `as_of` 는 오늘로 옮기지만 정책판까지
+      바뀌면 *"그 사이 무엇이 바뀌었나"* 에 축이 둘 섞인다 — 재검증이 재는 것은
+      **시장과 장부**이지 회사가 규칙을 바꿨는지가 아니다.
+    """
+    request_payload = row.get("request_payload")
+    if not isinstance(request_payload, Mapping):
+        return None
+    value = request_payload.get("policy_version")
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _transition_for(commitment: ApprovedCommitment | None) -> TransitionOut | None:
