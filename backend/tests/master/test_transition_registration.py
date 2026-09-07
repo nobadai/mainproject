@@ -203,7 +203,9 @@ def test_승인이_두_파트를_다_거쳐_한_번_커밋한다(재무_읽기�
     assert out.parts == ["finance", "logistics"]
     assert conn.commits == 1, "커밋은 세 write 가 끝난 뒤 한 번이다"
     assert conn.rollbacks == 0
-    assert conn.closed == 1
+    # ⚠️ 정본 읽기가 같은 대역을 한 번 더 닫는다 — 실제로는 새 커넥션이다.
+    #    지키는 것은 **write 가 한 트랜잭션**이고, 위 두 줄이 그것을 잰다.
+    assert conn.closed == 2
 
 
 def test_세_장부가_한_커넥션으로_다_쓰인다(재무_읽기를_대역으로) -> None:

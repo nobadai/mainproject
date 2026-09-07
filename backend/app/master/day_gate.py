@@ -154,7 +154,7 @@ def check_day_gate(as_of: date, *, connect: Callable[[], Any] | None = None) -> 
     finally:
         conn.close()
 
-    return _blocked(as_of, closed=closed, last=last, gap=gap)
+    return _blocked(as_of, closed=closed, last=last, gap=gap, connect=connect)
 
 
 def _last_opened(
@@ -176,7 +176,14 @@ def _last_opened(
     return None, None
 
 
-def _blocked(as_of: date, *, closed: list[str], last: date | None, gap: int | None) -> DayGate:
+def _blocked(
+    as_of: date,
+    *,
+    closed: list[str],
+    last: date | None,
+    gap: int | None,
+    connect: Callable[[], Any] | None = None,
+) -> DayGate:
     """막힌 이유와 다음 걸음. **판정 규칙은 계약 §2 그대로다.**
 
     ```text
@@ -208,7 +215,12 @@ def _blocked(as_of: date, *, closed: list[str], last: date | None, gap: int | No
         why = f"{gap}일이 밀려 상한({MAX_WALK_DAYS}일)을 넘었다 — 관리자 강제 개장이 필요하다"
     else:
         # 🟢 **연속 실패 횟수로 가른다** (계약 §2 · 정본 표가 섰다).
-        record = read_day_opening(as_of=as_of, sim_run_id=BURN_IN_SIM_RUN_ID)
+        # 🔴 **`connect` 를 넘긴다.** 안 넘기면 호출자가 대역을 줘도 이 한 줄만
+        #    실 DB 로 샌다 — 그 사이 표가 생기면 검사가 조용히 다른 것을 잰다.
+        #    실제로 그랬다: `master_day_openings` 를 공유 DB 에 적용한 날
+        #    (2026-09-07) 대역을 쓰던 검사가 빨간불이 됐다. **안 터지던 이유가
+        #    '표가 없다' 였고, 그 이유가 사라진 것이다.**
+        record = read_day_opening(as_of=as_of, sim_run_id=BURN_IN_SIM_RUN_ID, connect=connect)
         if record is None:
             # ⚠️ 못 읽었거나 한 번도 안 불렀다. **근사하되 근사라고 적는다.**
             꼬리 = " 개장 정본이 없어 첫 실패로 본다"
