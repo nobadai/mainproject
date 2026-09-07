@@ -240,9 +240,24 @@ concentration:
   item_threshold: 0.70              # item_concentration_threshold
   segment_threshold: 0.70           # segment_concentration_threshold (영업 소유 — 이름만 분리)
 
-# 안 사이 차이가 너무 작으면 "3안"이 사실상 1안이다
+# 클리핑이 원안을 얼마나 깎았는지 알리는 자리
+#
+# 🔴 **``collapsed_threshold`` 를 걷었다** (2026-09-07 · `#379`).
+#
+#   *"안 사이 차이가 너무 작으면 3안이 사실상 1안이다"* 는 판정은 살아 있다. 다만 그
+#   값을 **마스터가 들고 판정한다** — ``app/contracts/core.py`` 의
+#   ``VARIANT_SPREAD_MIN = 0.15`` 이고, ``app/master/band.py`` 가 읽는다.
+#
+#   여기 있던 ``0.15`` 는 **읽는 코드가 0곳**이었다. 같은 값이 두 곳에 적혀 한쪽만
+#   읽히는 상태였고, 값이 같아서 안 아팠을 뿐 **한쪽만 바꾸는 날 조용히 갈린다**
+#   (마스터 회신 2026-09-07).
+#
+#   ★ **붕괴 판정은 매입 도메인이 아니다** — 밴드가 성립하는지 보는 것이라 마스터
+#     자리이고, 그래서 공용 계약에 사는 것이 맞다. 판정을 하는 쪽이 값을 들고 있는
+#     것이 규칙 7(단일 소스)이다. **안 읽는 값을 선언만 하고 있던 쪽이 위반이었다.**
+#
+#   ⚠️ 되살리지 않는다. 되살리면 주인이 다시 둘이 된다.
 variant:
-  collapsed_threshold: 0.15         # (max - min) / max < 0.15 → variant_collapsed (판정은 T3)
   clip_warning_threshold: 0.30      # clipped / 원안 < 0.30 → 과도 클리핑 경고
 
 costs:
