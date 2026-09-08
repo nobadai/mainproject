@@ -32,9 +32,7 @@ _DOW = ("월", "화", "수", "목", "금", "토", "일")
 def _market_open(day: date) -> bool:
     if day.weekday() == 6:  # 일요일
         return False
-    if (day.month, day.day) in ((1, 1), (1, 2)):
-        return False
-    return True
+    return (day.month, day.day) not in ((1, 1), (1, 2))
 
 
 def _survey(day: date) -> bool:

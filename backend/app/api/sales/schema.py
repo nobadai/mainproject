@@ -14,7 +14,7 @@ from app.api.primitives import Card, Note, Source, Stat
 
 
 class SalesTab(BaseModel):
-    stats: list[Stat]
-    read_only: Note
+    stats: list[Stat] = Field(description="총 판매금액 · 판매량 · 공헌이익 · 아직 받을 돈")
+    read_only: Note = Field(description="이 화면이 조회 전용이라는 안내")
     cards: list[Card] = Field(description="카드 목록. 더해도 화면은 안 고친다")
-    source: Source
+    source: Source = Field(description="예시값인지 실제 값인지")

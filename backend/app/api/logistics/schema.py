@@ -9,13 +9,15 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.primitives import Note, Pane, Source
 
 
 class LogisticsTab(BaseModel):
-    panes: list[Pane]
-    selected: str
-    principle: Note
-    source: Source
+    panes: list[Pane] = Field(
+        description="넷 다 채워 보낸다 — stock · inbound · warehouse · outbound"
+    )
+    selected: str = Field(description="지금 보고 있는 작은 탭")
+    principle: Note = Field(description="보고가 없는 날은 0 이 아니라 공란이라는 안내")
+    source: Source = Field(description="예시값인지 실제 값인지")

@@ -20,7 +20,7 @@ from app.api.dashboard.schema import DashboardTab
 from app.api.finance import query as finance_q
 from app.api.forecast import query as forecast_q
 from app.api.logistics import query as logistics_q
-from app.api.primitives import Badge, Column, Note, Source, Stat, Table
+from app.api.primitives import Badge, Column, Note, Stat, Table
 from app.api.purchase import query as purchase_q
 from app.api.sales import query as sales_q
 

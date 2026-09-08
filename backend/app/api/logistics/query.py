@@ -230,7 +230,9 @@ def dashboard_stock(n: int, at: int) -> Chart:
       곳에서 나와야 둘이 안 갈라집니다. 실제로 갈라졌던 적이 있습니다 —
       요약은 4,550kg 인데 그래프 끝은 14,600kg 이었습니다.
     """
-    pad = lambda head: list(head) + [None] * (n - len(head))  # noqa: E731
+    def pad(head: list) -> list:
+        return list(head) + [None] * (n - len(head))
+
     tail = [None] * at + list(_PROJ) + [None] * max(0, n - at - len(_PROJ))
     return Chart(
         label="창고 재고", y_min=0, y_max=40000,

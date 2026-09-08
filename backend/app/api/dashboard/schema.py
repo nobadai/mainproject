@@ -19,12 +19,14 @@ from app.api.primitives import Badge, CalendarAxis, Chart, Note, Source, Stat, T
 
 
 class DashboardTab(BaseModel):
-    axis: CalendarAxis
+    axis: CalendarAxis = Field(description="여섯 탭이 함께 쓰는 날짜축. 그래프 계열 길이의 기준")
     badges: list[Badge] = Field(description="상단 알약 — 오늘 상태")
-    stats: list[Stat]
+    stats: list[Stat] = Field(description="맨 위 요약 다섯 칸. **다섯 파트에서 하나씩 가져온다**")
     forecast_cards: list[ItemCard] = Field(description="가격 예측 탭과 **같은 값**")
     purchase: Table = Field(description="승인을 기다리는 안")
-    purchase_note: Note
-    cash_chart: Chart
-    stock_chart: Chart
+    purchase_note: Note = Field(description="상한가가 안마다 다르다는 안내")
+    cash_chart: Chart = Field(description="재무의 dashboard_cash() 가 만든 것. 여기서 만들지 말 것")
+    stock_chart: Chart = Field(
+        description="물류의 dashboard_stock() 가 만든 것. 여기서 만들지 말 것"
+    )
     sources: list[Source] = Field(description="탭마다 채워졌나 — 하나라도 예시면 화면이 알린다")

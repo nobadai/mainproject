@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 from app.api.calendar import build_axis
 from app.api.forecast.schema import ForecastTab, ItemCard
@@ -82,13 +82,16 @@ def _demo_card(item: str, target_date: str) -> ItemCard:
 
 def _real_card(item: str, as_of: date) -> ItemCard | None:
     """진짜 예측을 읽어본다. 못 읽으면 None — 부르는 쪽이 예시값으로 떨어진다."""
+    #  ★ 통째로 잡는 것이 맞습니다. 여기서 무슨 일이 나든 **화면은 떠야**
+    #    하고, 대신 「예시값」 딱지가 붙습니다. 예외 종류를 골라 잡으면
+    #    안 골라낸 하나 때문에 대시보드까지 통째로 죽습니다.
     try:
         from app.ml.service import get_forecast
-    except Exception:  # pragma: no cover - ml 모듈이 없는 환경
+    except Exception:  # noqa: BLE001  # pragma: no cover - ml 모듈이 없는 환경
         return None
     try:
         fc = get_forecast(item, as_of, "AUC")
-    except Exception as error:  # DB 미연결 · 그날 예측 없음 둘 다 여기로 온다
+    except Exception as error:  # noqa: BLE001  DB 미연결 · 그날 예측 없음 둘 다
         log.info("예측을 못 읽어 예시값을 씁니다 (%s): %s", item, error)
         return None
     first = fc.daily[0]

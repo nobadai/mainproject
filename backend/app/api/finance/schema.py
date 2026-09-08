@@ -20,8 +20,8 @@ class StateOption(BaseModel):
       데모에도 그렇게 적혀 있습니다 — 헷갈리면 안 됩니다.
     """
 
-    key: str
-    label: str
+    key: str = Field(description="base · loan 처럼 주소에 실리는 값")
+    label: str = Field(description="고르는 목록에 보일 이름")
     explain: str = Field(description="이 상태가 무엇인지 한 문단")
 
 
@@ -29,21 +29,21 @@ class FlowCell(BaseModel):
     """돈이 어디로 나가고 들어왔나 — 한 칸."""
 
     label: str = Field(description="원장 용어 말고 사람 말로")
-    value: str
+    value: str = Field(description="금액. 자릿점까지 넣어서")
     term: str = Field(description="원래 회계 용어. 작게 같이 보인다")
-    tone: str = "neutral"
+    tone: str = Field(default="neutral", description="neutral · good · warn · bad")
 
 
 class FinanceTab(BaseModel):
-    states: list[StateOption]
-    selected: str
-    stats: list[Stat]
+    states: list[StateOption] = Field(description="고를 수 있는 저장 상태")
+    selected: str = Field(description="지금 고른 상태")
+    stats: list[Stat] = Field(description="현금 · 최소 운영자금 · 받을 돈 · 부채")
     explain: Note = Field(description="고른 상태가 지금 어떤 뜻인가")
     read_only: Note = Field(description="이 화면이 조회 전용이라는 안내")
     cash_chart: Chart = Field(description="한 달 일별 현금")
-    flows: list[FlowCell]
+    flows: list[FlowCell] = Field(description="이번 달 돈의 흐름")
     balances: list[Stat] = Field(description="받을 돈 · 줄 돈")
-    balances_note: Note
+    balances_note: Note = Field(description="미지급이 없으면 경고 대신 «정산 완료» 로")
     closings: Table = Field(description="최근 일별 마감")
     tables_read: list[str] = Field(description="어느 표를 읽었나. 화면 아래에 적는다")
-    source: Source
+    source: Source = Field(description="예시값인지 실제 값인지")
