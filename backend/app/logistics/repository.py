@@ -519,7 +519,7 @@ def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
         sql.SQL(
             """
             SELECT i.item_name,
-                   SUM(GREATEST(r.required_qty_kg - COALESCE(a.assigned_qty_kg, 0), 0))
+                   SUM(GREATEST(r.reserved_qty_kg - COALESCE(a.assigned_qty_kg, 0), 0))
                        AS quantity_kg
             FROM {}.inventory_reservations r
             JOIN {}.items i ON i.item_id = r.item_id
