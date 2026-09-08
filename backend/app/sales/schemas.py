@@ -1065,7 +1065,7 @@ class SalesReceivableItem(BaseModel):
     outstanding_amount_krw: Decimal
     status: str
     display_status: str
-    d_day: int
+    d_day: int | None
 
 
 class SalesDashboardResponse(BaseModel):

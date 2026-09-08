@@ -64,7 +64,8 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         "load_sales_receivables",
         lambda **_: [
             _receivable("AR-1", date(2025, 12, 20), Decimal(10), "OPEN"),
-            _receivable("AR-2", AS_OF, Decimal(0), "COLLECTED"),
+            _receivable("AR-2", date(2026, 1, 2), Decimal(0), "COLLECTED"),
+            _receivable("AR-3", date(2026, 1, 3), Decimal(10), "PARTIAL"),
         ],
     )
 
@@ -88,6 +89,9 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
     assert [sale.sale_id for sale in response.recent_sales] == ["SALE-002", "SALE-001"]
     assert response.receivables[0].display_status == "연체"
     assert response.receivables[1].display_status == "수금 완료"
+    assert response.receivables[1].d_day is None
+    assert response.receivables[2].display_status == "일부 수금"
+    assert response.receivables[2].d_day == 3
 
 
 def test_sales_dashboard_empty_unknown_sim_run(monkeypatch):

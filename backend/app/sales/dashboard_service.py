@@ -146,7 +146,7 @@ def _receivables(rows: list[dict[str, object]], *, as_of: date) -> list[SalesRec
                 outstanding_amount_krw=outstanding,
                 status=status,
                 display_status=display_status,
-                d_day=(due_date - as_of).days,
+                d_day=None if status == "COLLECTED" else (due_date - as_of).days,
             )
         )
     return result
