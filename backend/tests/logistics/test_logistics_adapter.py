@@ -21,6 +21,8 @@ from app.logistics.llm import runtime as llm_runtime
 from app.logistics.llm.runtime import (
     InterpretationService,
     LLMSettings,
+    ProviderResult,
+    ProviderUsage,
     UnavailableProvider,
     build_template_interpretation,
     needs_llm,
@@ -1055,8 +1057,9 @@ class _Provider:
     그대로 suggested 로. 검증기를 통과하는 유일한 방법이 Context 인용뿐이라는 뜻이다.
     """
 
-    def __init__(self, behaviour: str = "echo"):
+    def __init__(self, behaviour: str = "echo", *, usage: ProviderUsage | None = None):
         self.behaviour = behaviour
+        self.usage = usage
         self.contexts: list = []
         self.guidance: list = []
 
@@ -1066,14 +1069,19 @@ class _Provider:
         if self.behaviour == "timeout":
             raise TimeoutError()
         if self.behaviour == "invalid":
-            return "not json"
-        return json.dumps(
-            {
-                "summary": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
-                "risks": list(context.signals),
-                "suggested_adjustment": context.preferred_adjustment,
-            },
-            ensure_ascii=False,
+            return ProviderResult(text="not json", usage=self.usage)
+        return ProviderResult(
+            text=json.dumps(
+                {
+                    "summary": "매입안이 물류 경계에 걸려 조정 검토가 필요합니다.",
+                    "risks": list(context.signals),
+                    "suggested_adjustment": context.preferred_adjustment,
+                },
+                ensure_ascii=False,
+            ),
+            # 기본은 `None` 이다 — usage 를 보고하지 않는 Provider 응답이 공식 계약상
+            # 정상이고, 기존 검사들이 그 경로를 그대로 재현해야 한다 (#406).
+            usage=self.usage,
         )
 
     @property
@@ -3427,13 +3435,15 @@ def test_summary_는_fact_표기를_인용해_Template_이_못_내는_문장을_
             self.contexts.append(context)
             self.guidance.append(retry_guidance)
             인용 = context.facts[0].display_value
-            return json.dumps(
-                {
-                    "summary": f"판정 창 최대 창고 사용률은 {인용} 입니다.",
-                    "risks": list(context.signals),
-                    "suggested_adjustment": context.preferred_adjustment,
-                },
-                ensure_ascii=False,
+            return ProviderResult(
+                text=json.dumps(
+                    {
+                        "summary": f"판정 창 최대 창고 사용률은 {인용} 입니다.",
+                        "risks": list(context.signals),
+                        "suggested_adjustment": context.preferred_adjustment,
+                    },
+                    ensure_ascii=False,
+                )
             )
 
     provider = _CitingProvider()
@@ -3463,13 +3473,19 @@ def test_summary_는_fact_표기를_인용해_Template_이_못_내는_문장을_
 #   아닌 관측을 조용히 건너뛴다 (`critic_bridge._dept_meta_in`).
 # ---------------------------------------------------------------------------
 
-#: 관측에 허용된 key 전부. **정확히 이 다섯이다** — `<=` 로 재면 필드가 하나 더 새도
+#: 관측에 허용된 key 전부. **정확히 이 일곱이다** — `<=` 로 재면 필드가 하나 더 새도
 #: 통과한다. `display_value` 한 줄이 늘어나는 것이 곧 누출이므로 `==` 로 잠근다.
+#:
+#: ★ #406 에서 다섯 → 일곱이 됐다. **느슨하게 푸는 것이 아니라 새 정확한 집합으로
+#:   다시 잠그는 것이다** — 늘어난 둘은 검증된 usage 숫자뿐이고, Provider 원본 필드명
+#:   (`promptTokenCount` · `prompt_eval_count`)이나 raw 응답은 여전히 들어올 수 없다.
 _LLM_TRACE_KEYS = {
     "observation_type",
     "provider",
     "error_kind",
     "provider_elapsed_ms",
+    "observed_input_tokens",
+    "observed_output_tokens",
     "context_fact_ids",
 }
 
@@ -3659,3 +3675,186 @@ def test_결정론_비교에서_제외되는_것은_LLM_관측_하나뿐이다(m
 def test_관측_이름을_문자열로_베끼지_않는다():
     """이름이 바뀌는 날 `_trace_view` 의 제외 필터만 조용히 빗나가면 안 된다."""
     assert adapter._LLM_TRACE_OBSERVATION == "inventory_llm_trace"
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_VALIDATION — Provider token usage 를 실행 관측으로 나른다 (#406)
+#
+# ★ 새 observation 을 만들지 않았다. `inventory_llm_trace` 는 이미 *"실제로 일어난
+#   Provider 호출 하나의 실행 관측"* 이고 토큰 사용량은 정확히 그 축의 사실이다.
+#   이름을 하나 더 만들면 `_trace_view` 의 "한 이름만 제외" fail-closed 설계가 무너진다.
+# ---------------------------------------------------------------------------
+
+#: 🔴 input · output 에 서로 다른 값 (뒤바꿈 변이 방어 · #406 M1·M2).
+_TRACE_USAGE = ProviderUsage(input_tokens=137, output_tokens=24)
+
+
+def test_SUCCESS_는_관측한_토큰_사용량을_남긴다(monkeypatch, stocked):
+    provider = _Provider(usage=_TRACE_USAGE)
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    trace = _llm_trace(meta)
+    assert trace is not None
+    assert set(trace) == _LLM_TRACE_KEYS, "key 집합은 정확히 일곱이다"
+    assert trace["observed_input_tokens"] == 137
+    assert trace["observed_output_tokens"] == 24
+    # 기존 #402 값은 그대로 산다 — 새 필드가 옆자리를 밀어내지 않는다
+    assert trace["provider"] == "fake"
+    assert trace["error_kind"] is None
+    assert isinstance(trace["provider_elapsed_ms"], int)
+    assert trace["context_fact_ids"] == ["scenario_conditional_count"]
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_usage_를_보고하지_않은_SUCCESS_는_key_는_두되_null_이다(monkeypatch, stocked):
+    """🔴 **키를 빼지 않는다.** 관측의 key 집합이 실행마다 달라지면 읽는 쪽이
+    *"필드가 없다"* 와 *"값이 없다"* 를 구별하지 못하고, `_LLM_TRACE_KEYS` 의 `==`
+    잠금도 성립하지 않는다. 그리고 `0` 으로 채우지도 않는다 — 미관측과 실제 0 은
+    다른 사실이다 (#406 M3).
+    """
+    provider = _Provider()  # usage 기본값 None — 보고하지 않는 Provider 응답
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    trace = _llm_trace(meta)
+    assert set(trace) == _LLM_TRACE_KEYS
+    assert trace["observed_input_tokens"] is None
+    assert trace["observed_output_tokens"] is None
+    assert meta.llm_status == "SUCCESS", "usage 부재는 업무 결과를 바꾸지 않는다"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_실제_0_은_0_으로_남는다(monkeypatch, stocked):
+    provider = _Provider(usage=ProviderUsage(input_tokens=0, output_tokens=0))
+    _inject(monkeypatch, _llm(provider))
+    _, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_signal_payload()))
+
+    trace = _llm_trace(meta)
+    assert trace["observed_input_tokens"] == 0
+    assert trace["observed_output_tokens"] == 0
+    assert trace["observed_input_tokens"] is not None
+
+
+def test_FALLBACK_도_앞선_호출에서_관측한_사용량을_보존한다(monkeypatch, stocked):
+    """검증 탈락으로 끝난 실행이야말로 *"토큰을 얼마나 쓰고 실패했나"* 가 필요하다.
+
+    `_Provider("invalid")` 는 두 호출 모두 usage 를 보고하고 두 번 다 검증에 떨어진다 —
+    두 호출분이 합산되어야 한다 (137·24 의 두 배).
+    """
+    provider = _Provider("invalid", usage=_TRACE_USAGE)
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert provider.calls == 2
+    trace = _llm_trace(meta)
+    assert trace["error_kind"] == "VALIDATION_FAILED"
+    assert trace["observed_input_tokens"] == 274
+    assert trace["observed_output_tokens"] == 48
+    # 업무 결과는 그대로다 — 관측은 판정이 아니다
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "conditional"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_timeout_FALLBACK_은_토큰을_지어내지_않는다(monkeypatch, stocked):
+    """응답 본문을 못 받은 호출의 사용량은 **모르는 값**이다 — `0` 으로 채우지 않는다."""
+    provider = _Provider("timeout", usage=_TRACE_USAGE)
+    _inject(monkeypatch, _llm(provider))
+    _, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_signal_payload()))
+
+    trace = _llm_trace(meta)
+    assert trace["error_kind"] == "TIMEOUT"
+    assert trace["observed_input_tokens"] is None
+    assert trace["observed_output_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    ("enabled", "builder_incomplete"),
+    [
+        pytest.param(False, False, id="DISABLED"),
+        pytest.param(True, True, id="SKIPPED_TEMPLATE"),
+    ],
+)
+def test_미호출_실행에는_usage_를_이유로_관측을_만들지_않는다(
+    monkeypatch, stocked, enabled, builder_incomplete
+):
+    """#402 계약 그대로 — **관측이 있다 ⇔ Provider 를 불렀다.**
+
+    usage 를 적을 자리가 생겼다고 부르지 않은 실행에 관측을 만들면, 그 실행이 이
+    Provider 를 *"썼다"* 로 읽힌다.
+    """
+    real_builder = adapter.build_sanitized_context
+    if builder_incomplete:
+        monkeypatch.setattr(
+            adapter,
+            "build_sanitized_context",
+            lambda **kwargs: (real_builder(**kwargs)[0], True),
+        )
+    provider = _Provider(usage=_TRACE_USAGE)
+    _inject(monkeypatch, _llm(provider, enabled=enabled))
+    _, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_signal_payload()))
+
+    assert provider.calls == 0
+    assert _llm_trace(meta) is None
+    assert _observation_types(meta) == ["inventory_dept_meta"]
+
+
+def test_usage_관측에는_Provider_원본_필드명이_오지_않는다(monkeypatch):
+    """🔴 #399 의 가장 두꺼운 Context 에 usage 까지 실어 **누출 검사를 넓힌다** (M7).
+
+    숫자 둘만 나르고 그 숫자가 어디서 왔는지는 나르지 않는다. 원본 필드명이 실행이력에
+    남으면 다음 사람이 *"그럼 옆 필드도 실을 수 있겠네"* 로 읽고, 그 옆에는 raw 응답이
+    있다.
+    """
+    provider = _Provider(usage=_TRACE_USAGE)
+    _inject(monkeypatch, _llm(provider))
+    snapshot = _golden_snapshot(capacity_tight=True, freshness_pressure=True)
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(snapshot))
+    monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
+    _, meta = adapter.logistics_port(
+        req(mode="SCENARIO_VALIDATION", payload=_golden_payload(adjustment_required=True))
+    )
+
+    trace = _llm_trace(meta)
+    assert set(trace) == _LLM_TRACE_KEYS
+    serialized = json.dumps(trace, ensure_ascii=False)
+    금지 = (
+        "usageMetadata",  # Gemini 응답 봉투
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "totalTokenCount",
+        "prompt_eval_count",  # Ollama 응답 필드
+        "eval_count",
+        "total_duration",
+        "message",  # raw 응답의 본문 자리
+        "content",
+        "candidates",
+    )
+    for token in 금지:
+        assert token not in serialized, token
+    # 값은 스칼라와 문자열 리스트뿐이다 — dict 가 실리면 raw 응답이 들어온 것이다
+    assert all(value is None or isinstance(value, (str, int, list)) for value in trace.values())
+
+
+def test_usage_는_결정론_결과를_바꾸지_않는다(monkeypatch, stocked):
+    """usage 를 보고하는 Provider 와 보고하지 않는 Provider 의 업무 결과가 같다.
+
+    ★ #399 의 켬/끔 비교와 같은 축이다 — 여기서는 **LLM 을 켠 두 상태** 사이를 본다.
+      `_trace_view` 가 LLM 관측을 빼므로 실행 흔적도 같아야 한다.
+    """
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+
+    _inject(monkeypatch, _llm(_Provider(usage=_TRACE_USAGE)))
+    보고_reply, 보고_meta = adapter.logistics_port(request)
+    _inject(monkeypatch, _llm(_Provider()))
+    무보고_reply, 무보고_meta = adapter.logistics_port(request)
+
+    assert _business_view(보고_reply) == _business_view(무보고_reply)
+    assert _trace_view(보고_meta) == _trace_view(무보고_meta)
+    # 그런데 관측에서는 갈린다 — 그것이 이 필드의 존재 이유다
+    assert _llm_trace(보고_meta)["observed_input_tokens"] == 137
+    assert _llm_trace(무보고_meta)["observed_input_tokens"] is None

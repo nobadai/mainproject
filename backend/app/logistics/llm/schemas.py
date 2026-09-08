@@ -106,6 +106,27 @@ class InterpretationResult(BaseModel):
     #: ★ 이 값은 **Agent 전체 실행시간이 아니다.** 공통 `ExecutionMetadata.elapsed_ms`
     #:   가 그 뜻이고(재무가 채운다), 둘을 섞으면 한 축에 비교 불가능한 두 값이 산다.
     llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
+    #: Provider 가 **스스로 보고한** 입력 토큰 수의 합 (#406).
+    #:
+    #: ```text
+    #: None    이번 실행에서 이 값을 한 번도 관측하지 못했다
+    #: 0 이상  usage 를 관측한 호출들의 합 — 0 은 "Provider 가 0 이라고 했다"는 뜻이다
+    #: ```
+    #:
+    #: 🔴 **`llm_attempts` 전체의 완전한 청구량이 아니다.** 이름이 `observed` 인 이유가
+    #:   그것이다. timeout·network 실패로 응답 본문을 못 받은 호출은 usage 가 없고,
+    #:   그 호출의 토큰은 **모르는 값이라 지어내지 않는다.** 그래서 `attempts=2` 인데
+    #:   합이 1회분일 수 있다 — *"확인된 사용량의 합"* 이지 *"전부 안다"* 가 아니다.
+    #:   아는 값을 버리는 쪽(전체 None)도 택하지 않았다: 확인된 소비는 사실이고,
+    #:   FALLBACK 실행일수록 그 사실이 필요하다.
+    #: ★ Gemini `usageMetadata.promptTokenCount` · Ollama `prompt_eval_count` 의 합.
+    #:   원본 필드명은 Provider parser 안에서만 살고 여기까지 오지 않는다.
+    llm_observed_input_tokens: int | None = Field(default=None, ge=0)
+    #: Provider 가 보고한 출력 토큰 수의 합 — 위와 같은 의미 (#406).
+    #: Gemini `usageMetadata.candidatesTokenCount` · Ollama `eval_count`.
+    #: ★ 두 필드는 **독립**이다. 한쪽만 보고하는 Provider 응답이 공식 계약상 정상이라
+    #:   input 이 `None` 이어도 output 은 숫자일 수 있다.
+    llm_observed_output_tokens: int | None = Field(default=None, ge=0)
 
 
 def default_interpretation() -> AgentInterpretation:
@@ -136,3 +157,8 @@ class LLMResponseFields(BaseModel):
     #:   값이 소리 없이 증발한다. 두 모델의 필드 집합 동일성은
     #:   `test_logistics_context_facts.py` 의 구조 테스트가 잠근다.
     llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
+    #: 관측된 Provider 호출들의 토큰 사용량 합 (`InterpretationResult` 와 같은 뜻 · #406).
+    #: 위 🔴 경고가 이 둘에도 그대로 적용된다 — 한쪽 모델에만 넣으면 독립 응답과
+    #: `response_payload` 실행이력에서 **소리 없이** 사라진다.
+    llm_observed_input_tokens: int | None = Field(default=None, ge=0)
+    llm_observed_output_tokens: int | None = Field(default=None, ge=0)
