@@ -342,6 +342,29 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
         for scenario in state.get("candidates", [])
         if scenario.scenario_id in exclusions
     )
+    traced_ids = {item.candidate_id for item in trace}
+    trace.extend(
+        SalesDecisionTrace(
+            candidate_id=scenario.scenario_id,
+            status=scenario.status,
+            finance_verdict=scenario.finance_verdict,
+            profitability_krw=scenario.contribution_margin_krw,
+            scenario_projected_cash_min=scenario.scenario_projected_cash_min,
+            depends_on_projected_inflow=scenario.depends_on_projected_inflow,
+            inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
+            sell_priority=scenario.sell_priority,
+            remaining_freshness_days=scenario.remaining_freshness_days,
+            dependencies=scenario.execution_dependencies,
+            ml_support_used=scenario.ml_support_used,
+            changed_axes=scenario.sales_decision_axes,
+            exclusion_reasons=["REJECTED_BY_FEEDBACK"],
+            unresolved_fields=scenario.uncertainties,
+            reply_refs=_reply_refs(scenario.domain_replies),
+            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+        )
+        for scenario in state.get("rejected_candidates", [])
+        if scenario.scenario_id not in traced_ids
+    )
     collapse_reasons = _unique(
         scenario.variant_collapsed_reason
         for scenario in scenarios

@@ -183,7 +183,8 @@ def test_skipped_with_zero_is_a_normal_answer_not_a_leak():
     assert scenario.supply.conditional_quantity_kg == Decimal(0)
     assert scenario.conditional_purchase is False
     assert "PURCHASE_REFERENCE_LEAK" not in reply.self_check.issue_codes
-    assert reply.self_check.passed is True
+    assert reply.recommended_scenario_id is None
+    assert "RECOMMENDATION_MISSING" in reply.self_check.issue_codes
 
 
 def test_runtime_not_ready_keeps_the_quantity_unknown():
@@ -465,7 +466,8 @@ def test_case_d_valid_skipped_zero_resolves_validation():
 
     assert "ADDITIONAL_SUPPLY_VALIDATION_MISSING" not in _issues(reply)
     assert _aggressive(reply).conditional_purchase is False
-    assert reply.self_check.passed is True
+    assert reply.recommended_scenario_id is None
+    assert "RECOMMENDATION_MISSING" in reply.self_check.issue_codes
 
 
 def test_case_e_reply_bound_to_another_scenario_leaves_this_one_missing():
