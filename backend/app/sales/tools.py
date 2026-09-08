@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-from app.sales.schemas import OnHandLot, SalesSnapshotA
+from app.sales.schemas import OnHandLot, SalesSnapshotA, SalesSnapshotB
 
 
 def _usable_on_hand_kg(on_hand: list[OnHandLot], as_of: date, target: date) -> Decimal:
@@ -75,3 +75,27 @@ def resolve_today_floor(
     if not in_window:
         return Decimal(0)
     return max(in_window)
+
+
+def strategic_inventory_by_date(snapshot: SalesSnapshotB) -> dict[date, Decimal]:
+    as_of = snapshot.as_of
+    on_hand = snapshot.inventory.on_hand
+    in_transit = snapshot.inventory.in_transit
+    projection_dates = sorted({as_of} | {lot.expected_arrival_date for lot in in_transit})
+
+    result: dict[date, Decimal] = {}
+    for target in projection_dates:
+        strategic_on_hand = sum(
+            (
+                max(Decimal(0), lot.qty_kg - lot.reserved_for_confirmed_kg)
+                for lot in on_hand
+                if as_of + timedelta(days=lot.freshness_days_left) >= target
+            ),
+            start=Decimal(0),
+        )
+        arrived_in_transit = sum(
+            (lot.qty_kg for lot in in_transit if lot.expected_arrival_date <= target),
+            start=Decimal(0),
+        )
+        result[target] = strategic_on_hand + arrived_in_transit
+    return result

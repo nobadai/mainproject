@@ -12,6 +12,7 @@ from app.finance.legacy.scenario_engine import (
 from app.finance.llm.runtime import InterpretationService
 from app.finance.rules import evaluate_finance_sales_rules
 from app.finance.schemas import (
+    CashEvent,
     FinancePolicy,
     FinanceRuntimeContext,
     FinanceSalesRequest,

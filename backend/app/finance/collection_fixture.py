@@ -49,3 +49,19 @@ class DeterministicCollectionFixtureSource:
             and event.financing_mode == financing_mode
             and event.collection_date == as_of
         )
+
+
+def collection_events_for_date(
+    *,
+    sim_run_id: str,
+    financing_mode: str,
+    as_of: date,
+    source: DeterministicCollectionFixtureSource | None = None,
+) -> tuple[CollectionEvent, ...]:
+    if source is None:
+        return ()
+    return source.events_for_date(
+        sim_run_id=sim_run_id,
+        financing_mode=financing_mode,
+        as_of=as_of,
+    )
