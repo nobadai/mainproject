@@ -52,12 +52,21 @@ class _Calendar:
         return self._is_open
 
 
-def _gate(*, ready: tuple[str, ...] = (), not_yet: tuple[str, ...] = (), unreadable: tuple[str, ...] = ()) -> DayForecastReadiness:
+def _one(item: str, readiness: str, grade: str | None) -> ItemForecastGate:
+    return ItemForecastGate(item=item, as_of=AS_OF, readiness=readiness, grade=grade)  # type: ignore[arg-type]
+
+
+def _gate(
+    *,
+    ready: tuple[str, ...] = (),
+    not_yet: tuple[str, ...] = (),
+    unreadable: tuple[str, ...] = (),
+) -> DayForecastReadiness:
     """`day_forecast_readiness` 가 내는 모양 그대로 만든다. 접는 규칙은 그쪽 것을 쓴다."""
     gates = tuple(
-        [ItemForecastGate(item=i, as_of=AS_OF, readiness="READY", grade="MEASURED") for i in ready]
-        + [ItemForecastGate(item=i, as_of=AS_OF, readiness="NOT_YET", grade="MISSING") for i in not_yet]
-        + [ItemForecastGate(item=i, as_of=AS_OF, readiness="UNREADABLE", grade=None) for i in unreadable]
+        [_one(i, "READY", "MEASURED") for i in ready]
+        + [_one(i, "NOT_YET", "MISSING") for i in not_yet]
+        + [_one(i, "UNREADABLE", None) for i in unreadable]
     )
     if unreadable:
         fold = "UNREADABLE"
@@ -76,7 +85,9 @@ NONE_READY = _gate(not_yet=ITEMS)
 UNREADABLE = _gate(not_yet=("무", "양파"), unreadable=("배추",))
 
 
-def _plan(*, now: datetime, is_open: bool | None = True, gate: DayForecastReadiness = ALL_READY) -> ScheduledAction:
+def _plan(
+    *, now: datetime, is_open: bool | None = True, gate: DayForecastReadiness = ALL_READY
+) -> ScheduledAction:
     return plan_next_action(now=now, as_of=AS_OF, calendar=_Calendar(is_open), gate_result=gate)
 
 
@@ -129,15 +140,17 @@ def _procure_response(end_code: str = "E1_APPROVED"):
     return r
 
 
-def _run(action: ScheduledAction, *, procure: object | None = None, **kwargs) -> tuple[DayRunOutcome, _Procure]:
+def _run(
+    action: ScheduledAction, *, procure: object | None = None, **kwargs
+) -> tuple[DayRunOutcome, _Procure]:
     procure_fn = _Procure() if procure is None else procure
-    defaults = dict(
-        open_day_fn=_Spy(_Out("OPENED")),
-        receive_fn=_Spy(_Out("RECEIVED")),
-        collect_fn=_Spy(_Out("COLLECTED")),
-        procure_fn=procure_fn,
-        items=ITEMS,
-    )
+    defaults = {
+        "open_day_fn": _Spy(_Out("OPENED")),
+        "receive_fn": _Spy(_Out("RECEIVED")),
+        "collect_fn": _Spy(_Out("COLLECTED")),
+        "procure_fn": procure_fn,
+        "items": ITEMS,
+    }
     defaults.update(kwargs)
     return run_scheduled_day(action, **defaults), procure_fn  # type: ignore[arg-type]
 
@@ -227,7 +240,8 @@ def test_상태를_안_들고도_같은_답이_나온다():
 def test_시간대_없는_시각은_거절한다():
     with pytest.raises(ValueError, match="시간대"):
         plan_next_action(
-            now=datetime(2026, 9, 8, 10, 0),
+            # 🔴 시간대 없는 시각이 검사 대상이다 — 여기서만 일부러 만든다.
+            now=datetime(2026, 9, 8, 10, 0),  # noqa: DTZ001
             as_of=AS_OF,
             calendar=_Calendar(True),
             gate_result=NONE_READY,
@@ -270,7 +284,9 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
         "NOT_A_MARKET_DAY": _plan(now=_at(9, 30), is_open=False, gate=NONE_READY),
         "BLOCKED": _plan(now=_at(9, 30), is_open=None, gate=ALL_READY),
     }
-    opened, received, collected = _Spy(_Out("OPENED")), _Spy(_Out("RECEIVED")), _Spy(_Out("COLLECTED"))
+    opened = _Spy(_Out("OPENED"))
+    received = _Spy(_Out("RECEIVED"))
+    collected = _Spy(_Out("COLLECTED"))
     procure = _Procure()
 
     out = run_scheduled_day(
