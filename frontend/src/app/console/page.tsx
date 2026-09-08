@@ -41,7 +41,7 @@ export default function DashboardPage() {
       <StatRow items={data.stats} />
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
-        <Panel title="내일 가격 예측" subtitle="세 품목 · 경락가 특등급">
+        <Panel title="가격 예측" subtitle="세 품목 · 경락가 특등급 · 모델이 낸 첫 날">
           <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
             {data.forecast_cards.map((c) => {
               const at = ((c.predicted - c.lower) / Math.max(1, c.upper - c.lower)) * 100;

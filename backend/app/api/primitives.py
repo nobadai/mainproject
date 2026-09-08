@@ -139,6 +139,13 @@ class Chart(BaseModel):
     bands: list[Band] = Field(default_factory=list)
     markers: list[Marker] = Field(default_factory=list)
     note: Note | None = None
+    shade_label: str = Field(
+        default="휴장 · 경매 없음",
+        description=(
+            "회색으로 눕힌 칸이 무엇인지. 탭마다 뜻이 다르다 — 대시보드는 "
+            "휴장일이고, 가격 예측은 **모델을 안 쓰는 게이트 구간**이다."
+        ),
+    )
     x_labels: list[str] = Field(
         default_factory=list,
         description=(

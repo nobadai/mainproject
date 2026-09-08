@@ -58,7 +58,9 @@ def build(as_of: date) -> DashboardTab:
                   tone=("warn" if pending else "good")),
         ],
         stats=[
-            Stat(label=f"{cabbage.item} {cabbage.grade} · 내일 예측",
+            #  ★ «내일» 이라고 쓰지 않는다. 리드타임 1~2 는 모델이 아니라
+            #    어제값이 나가므로, 카드는 **모델이 낸 첫 날**을 싣는다.
+            Stat(label=f"{cabbage.item} {cabbage.grade} · {cabbage.target_date[5:]} 예측",
                  value=f"{cabbage.predicted:,}", unit="원/kg",
                  detail=f"구간 {cabbage.lower:,}–{cabbage.upper:,} · 폭 {cabbage.ci_width}",
                  tone="info", raw=cabbage.predicted),

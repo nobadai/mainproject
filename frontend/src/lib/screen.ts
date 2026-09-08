@@ -107,6 +107,8 @@ export interface Chart {
   bands: Band[];
   markers: Marker[];
   note: Note | null;
+  /** 회색 칸이 무엇인지. 탭마다 뜻이 다르다 (휴장 · 게이트 구간). */
+  shade_label: string;
   /** 공용 날짜축을 안 쓰는 그래프의 가로 눈금. 비면 날짜축을 쓴다. */
   x_labels: string[];
   /** 세로 눈금 글자를 직접 줄 때. 비면 숫자 + `y_unit`. */
@@ -162,6 +164,8 @@ export interface ItemCard {
   ci_width: number;
   review: boolean;
   use_recommended: boolean;
+  /** 모델이 아니라 어제값 그대로인가 (리드타임 3 미만). */
+  gated?: boolean;
 }
 
 export interface DashboardTab {
@@ -176,12 +180,34 @@ export interface DashboardTab {
   sources: Source[];
 }
 
+export interface KindOption {
+  kind: string;
+  label: string;
+  role: string;
+}
+export interface BaseDateOption {
+  base_dt: string;
+  total: number;
+  scored: number;
+  /** 2026-08-28 이전 예측. 다른 날과 나란히 놓고 비교하면 안 된다. */
+  pre_fix: boolean;
+}
 export interface ForecastTab {
-  axis: CalendarAxis;
+  kinds: KindOption[];
+  selected_kind: string;
   items: string[];
   selected: string;
+  base_dates: BaseDateOption[];
+  selected_base_dt: string;
+  base_dates_truncated: boolean;
+  notice: Note | null;
   cards: ItemCard[];
+  headline: Stat[];
+  axis: CalendarAxis;
   chart: Chart;
+  rows: Table;
+  gate_lead: number;
+  quality_note: string | null;
   accuracy: Table;
   quality: Table;
   caveat: Note;
@@ -262,8 +288,12 @@ export interface SalesTab {
 /* ── 부르는 곳 ────────────────────────────────────────────────────────── */
 
 export const dashboard = (as_of: string) => get<DashboardTab>("/dashboard", { as_of });
-export const forecast = (as_of: string, item: string) =>
-  get<ForecastTab>("/forecast", { as_of, item });
+export const forecast = (
+  as_of: string,
+  item: string,
+  kind = "auc",
+  base_dt?: string,
+) => get<ForecastTab>("/forecast", { as_of, item, kind, ...(base_dt ? { base_dt } : {}) });
 export const purchase = (as_of: string) => get<PurchaseTab>("/purchase", { as_of });
 export const finance = (as_of: string, state: string) =>
   get<FinanceTab>("/finance", { as_of, state });

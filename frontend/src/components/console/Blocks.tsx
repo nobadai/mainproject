@@ -460,7 +460,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
         {ticks.some((d) => d.dim) && (
           <span className="inline-flex items-center gap-1.5">
             <i aria-hidden className="inline-block size-3 rounded-sm" style={{ background: "var(--color-shade)" }} />
-            휴장 · 경매 없음
+            {chart.shade_label || "휴장 · 경매 없음"}
           </span>
         )}
       </div>
