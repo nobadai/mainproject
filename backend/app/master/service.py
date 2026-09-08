@@ -122,7 +122,7 @@ def run_procurement(
         response.day_gate = day_gate
         response.report_text = render_answer(facts_from_procurement(response))
         response.history_run_id = persistence.record(
-            request, response, elapsed_ms=_elapsed(started)
+            request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
         )
         return response
 
@@ -147,7 +147,7 @@ def run_procurement(
         # 🔴 **안 돈 날도 이력에 남긴다.** 어댑터 갈래와 같은 이유다 —
         #   안 부른 것과 안 도는 날인 것은 다르고, 이력이 비면 둘이 같아 보인다.
         response.history_run_id = persistence.record(
-            request, response, elapsed_ms=_elapsed(started)
+            request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
         )
         return response
 
@@ -163,7 +163,7 @@ def run_procurement(
         response.report_text = render_answer(facts_from_procurement(response))
         # 어댑터가 없어 못 돈 날도 이력에 남긴다 — 안 부른 것과 못 부른 것은 다르다
         response.history_run_id = persistence.record(
-            request, response, elapsed_ms=_elapsed(started)
+            request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
         )
         return response
 
@@ -213,7 +213,9 @@ def run_procurement(
     response.report_text = render_answer(facts_from_procurement(response))
     # ★ 적재가 돌려준 행 id 를 **응답에 싣는다.** 화면이 승인할 때 이 값을 되돌려 줘야
     #   "내가 본 그것을 승인했다" 가 기록된다 (§DDL 안건 2026-08-30).
-    response.history_run_id = persistence.record(request, response, elapsed_ms=_elapsed(started))
+    response.history_run_id = persistence.record(
+        request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
+    )
     return response
 
 
@@ -273,7 +275,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         response.day_gate = day_gate
         response.report_text = _sales_fold_note(response.end_code, response.reason)
         response.history_run_id = persistence.record_sales(
-            request, response, elapsed_ms=_elapsed(started)
+            request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
         )
         return response
 
@@ -294,7 +296,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         # 🔴 **못 부른 날도 이력에 남긴다.** 안 부른 것과 못 부른 것은 다르고,
         #    이력이 비면 둘이 같아 보인다.
         response.history_run_id = persistence.record_sales(
-            request, response, elapsed_ms=_elapsed(started)
+            request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
         )
         return response
 
@@ -326,7 +328,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
     response.day_gate = day_gate
     response.report_text = _sales_fold_note(response.end_code, response.reason)
     response.history_run_id = persistence.record_sales(
-        request, response, elapsed_ms=_elapsed(started)
+        request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
     )
     return response
 

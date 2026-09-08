@@ -56,6 +56,7 @@ _COLUMNS = (
     "plan",
     "request_payload",
     "response_payload",
+    "sim_run_id",
     "created_at",
 )
 
@@ -75,7 +76,25 @@ class MasterAgentRun(TypedDict):
     plan: list[dict[str, object]] | None
     request_payload: dict[str, object]
     response_payload: dict[str, object]
+    sim_run_id: str | None
     created_at: datetime
+
+
+def _null_if_blank(value: str | None) -> str | None:
+    """빈 문자열을 `None` 으로 접는다. **이 모듈이 그 주인이다.**
+
+    🔴 **왜 필요한가.** `ExecutionContext.sim_run_id` 의 기본값이 `""` 이고 그것은
+      *"아직 안 실렸다"* 는 뜻이다 (`envelope.py` 의 ①②③). 그대로 넣으면 표 안에
+      **모르는 것이 두 모양**으로 앉는다 — 옛 행은 NULL, 안 실린 새 행은 `''`.
+      그러면 *"축이 없는 실행"* 을 세는 질문에 `IS NULL` 만으로는 답이 안 나오고,
+      `sim_run_id = ''` 를 잊은 조회가 조용히 틀린 수를 낸다.
+
+    ★ **접는 자리를 여기 하나로 둔다.** `record_*` 넷이 저마다 접으면 하나를
+      빠뜨렸을 때 그 사이클만 `''` 를 적고, 아무 오류도 안 난다.
+    """
+    if value is None:
+        return None
+    return value or None
 
 
 def _select() -> sql.Composed:
@@ -104,6 +123,7 @@ def save_run(
     coverage_total: int | None = None,
     elapsed_ms: int | None = None,
     plan: list[dict[str, object]] | None = None,
+    sim_run_id: str | None = None,
 ) -> MasterAgentRun:
     """실행 1건을 적재한다.
 
@@ -114,6 +134,13 @@ def save_run(
       "배추가 며칠째 E2 인가" 를 JSONB 를 파지 않고 보기 위해서다. 값을 여기서
       꺼내지 않고 **부르는 쪽이 준다** - 이 모듈이 payload 모양을 알면 응답
       스키마가 바뀔 때마다 적재가 흔들린다.
+
+    ★ `sim_run_id` 는 **어느 장부 위에서 돌았나**다 (2026-09-08 · `Refs #150`).
+      출처는 `ExecutionContext.sim_run_id` 하나이고, 값은 부르는 쪽이 실어 준다 -
+      전역이나 환경변수에서 집으면 봉투에 실린 값과 표에 적힌 값이 갈린다.
+
+      🔴 빈 문자열은 NULL 로 접는다 (`_null_if_blank`). 기본값 `""` 는 *"아직 안
+      실렸다"* 이지 값이 아니다.
     """
     query = sql.SQL(
         """
@@ -121,12 +148,14 @@ def save_run(
             run_id, request_id, as_of, cycle, run_seq,
             item, end_code, runtime_status,
             coverage_ran, coverage_total, elapsed_ms,
-            plan, request_payload, response_payload
+            plan, request_payload, response_payload,
+            sim_run_id
         ) VALUES (
             %s, %s, %s, %s, %s,
             %s, %s, %s,
             %s, %s, %s,
-            %s, %s, %s
+            %s, %s, %s,
+            %s
         )
         RETURNING {}
         """
@@ -152,6 +181,7 @@ def save_run(
             None if plan is None else Jsonb(plan),
             Jsonb(request_payload),
             Jsonb(response_payload),
+            _null_if_blank(sim_run_id),
         ),
     )
     return row  # type: ignore[return-value]
@@ -256,6 +286,7 @@ def list_runs(
     as_of_before: date | None = None,
     cycle: str | None = None,
     item: str | None = None,
+    sim_run_id: str | None = None,
     limit: int = 50,
 ) -> list[MasterAgentRun]:
     """조건에 맞는 실행 목록. 최신부터.
@@ -266,6 +297,13 @@ def list_runs(
     ★ `as_of_before` 는 **그 날 이전**이다 (`<`). 오늘 실행이 어제까지 승인된 것을
       물을 때 쓴다 (#185) - 오늘 것을 같이 세면 자기 자신을 입력으로 먹는다.
       `as_of` 와 함께 주면 둘 다 AND 로 걸린다.
+
+    ★ `sim_run_id` 도 **기본값이 없다** (2026-09-08 · `Refs #150`). 안 주면 안
+      좁힌다 - 기존 호출을 안 깨뜨리고, 무엇보다 *"어느 실행인지 기록되지 않은"*
+      1,206행을 조용히 감추지 않는다.
+
+      ⚠️ 이 인자로 검증 상태와 장기 상태가 **갈리지는 않는다.** 축이 붙은 행만
+        갈리고, 축이 NULL 인 옛 행은 어느 값으로도 안 걸린다 - 그것이 사실이다.
     """
     clauses: list[sql.Composable] = []
     params: list[Any] = []
@@ -274,6 +312,7 @@ def list_runs(
         ("as_of", as_of),
         ("cycle", cycle),
         ("item", item),
+        ("sim_run_id", sim_run_id),
     ):
         if value is not None:
             clauses.append(sql.SQL("{} = %s").format(sql.Identifier(column)))

@@ -258,6 +258,9 @@ def _run_status(
         intent=intent.model_dump(mode="json"),
         outcome=outcome,
         elapsed_ms=int((time.perf_counter() - started) * 1000),
+        # ★ **봉투에서 꺼낸다.** 위에서 만든 그 `context` 가 부서로 나간 값이고,
+        #   이력에는 그 값이 적혀야 한다 — 상수를 다시 적으면 둘이 갈릴 수 있다.
+        sim_run_id=context.sim_run_id,
     )
     return outcome
 

@@ -19,6 +19,19 @@ persistence.py — 마스터 실행 계획 적재 (정의서 §1.2-11)
   payload 안에도 있지만 "배추가 며칠째 E2 인가" 를 JSONB 를 파지 않고 보기 위해서다.
   **꺼내는 것은 여기서 한다** - 저장소가 payload 모양을 알면 응답 스키마가 바뀔 때마다
   적재가 흔들린다.
+
+🔴 **`sim_run_id` 는 봉투에서 온다** (2026-09-08 · `Refs #150`).
+
+  축을 가진 표가 22개인데 **판단 기록에만 없었다.** 그래서 E2E 검증으로 만든 상태와
+  장기 걷기 상태가 한 통에 섞이고, 판단 행을 실행별로 못 갈랐다.
+
+  값의 주인은 `ExecutionContext.sim_run_id` 하나다. 여기서 전역이나 환경변수를
+  집지 않는다 - 집으면 **봉투에 실려 부서로 나간 값**과 **표에 적힌 값**이 갈리고,
+  그때 이력은 자기가 무엇을 기록했는지 모르게 된다.
+
+  ⚠️ **넷 다 넘긴다** (`record` · `record_sales` · `record_status` ·
+    `record_revalidation`). 하나라도 빠지면 그 사이클만 축이 없는데, 아무 오류도
+    안 나고 그 행이 조용히 NULL 로 앉는다.
 """
 
 from __future__ import annotations
@@ -132,6 +145,7 @@ def record(
     response: ProcurementRunResponse,
     *,
     elapsed_ms: int | None = None,
+    sim_run_id: str | None = None,
 ) -> str | None:
     """실행 1건을 적재하고 **그 행의 id 를 돌려준다.** 실패해도 조용히 넘어간다.
 
@@ -156,6 +170,9 @@ def record(
         plan=plan_rows(response),
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
+        # ★ 부르는 쪽(`service.run_procurement`)이 봉투에서 꺼내 준다 — 이 모듈이
+        #   `ExecutionContext` 를 다시 만들지 않는다.
+        sim_run_id=sim_run_id,
     )
     return None if run_id is None else str(run_id)
 
@@ -165,6 +182,7 @@ def record_sales(
     response: SalesRunResponse,
     *,
     elapsed_ms: int | None = None,
+    sim_run_id: str | None = None,
 ) -> str | None:
     """판매 실행 1건을 적재하고 **그 행의 id 를 돌려준다** (2026-09-07 신설).
 
@@ -193,6 +211,8 @@ def record_sales(
         plan=_step_rows(response.plan),
         request_payload=request.model_dump(mode="json"),
         response_payload=response.model_dump(mode="json"),
+        # ★ 부르는 쪽(`service.run_sales`)이 봉투에서 꺼내 준다 — 매입과 같은 자리.
+        sim_run_id=sim_run_id,
     )
     return None if run_id is None else str(run_id)
 
@@ -241,6 +261,9 @@ def record_revalidation(
         end_code=outcome,
         runtime_status=_REVALIDATION_RUNTIME_BY_OUTCOME.get(outcome, "READY"),
         elapsed_ms=elapsed_ms,
+        # ★ **여기는 봉투를 이미 받았다** — 인자로 다시 받지 않는다. 같은 사실의
+        #   주인은 하나이고, 그 주인은 `context` 다.
+        sim_run_id=context.sim_run_id,
         plan=status_plan_rows(plan),
         request_payload={
             "as_of": context.as_of.isoformat(),
@@ -281,6 +304,7 @@ def record_status(
     intent: Mapping[str, Any],
     outcome: StatusOutcome,
     elapsed_ms: int | None = None,
+    sim_run_id: str | None = None,
 ) -> str | None:
     """조회 1건을 적재한다 (2026-09-02 신설).
 
@@ -311,6 +335,9 @@ def record_status(
         end_code=outcome.status_code,
         runtime_status=outcome.runtime_status,
         elapsed_ms=elapsed_ms,
+        # ★ 부르는 쪽(`ask_service._run_status`)이 봉투에서 꺼내 준다. 조회도 부서를
+        #   실제로 부르므로 **판단 경로와 같은 장부**를 봐야 한다.
+        sim_run_id=sim_run_id,
         plan=status_plan_rows(outcome.plan),
         request_payload={
             "as_of": as_of.isoformat(),
