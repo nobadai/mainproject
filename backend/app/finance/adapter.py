@@ -506,7 +506,7 @@ def _invalid_scenario_as_of(
 def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     """★ 시나리오 판정은 **매입 시나리오 필드명이 확정돼야** 붙는다.
 
-    재무의 판정 엔진(`run_finance_procurement_with_context`)은 이미 있다. 막힌 것은
+    재무의 판정 엔진(`FinanceAgentController`)은 이미 있다. 막힌 것은
     **번역**이다 — 마스터가 받는 `scenarios[]` 의 키 이름을 아직 받지 못했다.
 
     추측해서 매핑하면 **숫자는 나오는데 틀린 값을 판정하게 된다.** 그건 에러도 안 나고

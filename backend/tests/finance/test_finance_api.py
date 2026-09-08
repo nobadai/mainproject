@@ -4,7 +4,6 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from app.finance.schemas import FinanceSalesResponse
 from app.main import app
 from app.master.envelope import AgentReply, ExecutionMetadata
 from app.master.wiring import registry
@@ -59,41 +58,12 @@ def test_master_registry_uses_the_same_finance_port():
     assert registry().get("finance") is finance_port
 
 
-def test_finance_sales_api(sales_payload):
-    result = FinanceSalesResponse(
-        snapshot_id="FIN-DAY30-LOAN",
-        approval_id="H1-20260821-001",
-        runtime_status="RUNTIME_NOT_READY",
-        verdict=None,
-        base_cash_priority=None,
-        sales_cash_priority=None,
-        collection_preferences=[
-            {
-                "channel_type": "DIRECT_B2B",
-                "partner_id": "KIMCHI_FACTORY_001",
-                "settlement_days": 30,
-                "liquidity_rank": 1,
-            }
-        ],
-        hard_constraints=[],
-        soft_warnings=["CASH_PRIORITY_POLICY_UNRESOLVED"],
-    )
-    with patch("app.finance.router.run_finance_sales", return_value=result):
-        response = TestClient(app).post("/finance/sales", json=sales_payload)
-
-    assert response.status_code == 200
-    assert response.json()["sales_cash_priority"] is None
-    assert response.json()["interpretation"]["summary"]
-    assert response.json()["llm_status"] == "DISABLED"
-
-
-def test_finance_openapi_keeps_sales_and_drops_replaced_legacy_endpoints():
-    """`/finance/sales` 는 Finance B 호환 경로로 남고, Agent 가 대체한 경로는 사라진다."""
+def test_finance_openapi_keeps_agent_and_drops_replaced_legacy_endpoints():
     schema = TestClient(app).get("/openapi.json").json()
 
-    assert "/finance/sales" in schema["paths"]
     assert "/finance/agent" in schema["paths"]
     assert "/finance/runs" in schema["paths"]
+    assert "/finance/sales" not in schema["paths"]
     assert "/finance/procurement" not in schema["paths"]
     assert "/finance/core-review" not in schema["paths"]
 

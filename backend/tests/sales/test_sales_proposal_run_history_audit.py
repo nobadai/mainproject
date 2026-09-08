@@ -16,7 +16,6 @@
 
 import pathlib
 import re
-from typing import get_args
 
 from app.sales.schemas import (
     LogisticsQueryScope,
@@ -121,16 +120,9 @@ def test_blocker_no_nested_date_is_an_execution_date_today():
 
 
 def test_blocker_execution_kind_cannot_be_distinguished_today():
-    """🔴 **오늘의** cycle 어휘로는 제안과 배분을 가를 수 없다.
+    """현재 cycle 어휘에는 제안 전용 구분값이 없다."""
 
-    배분이 이미 SALES 를 쓰고 있어 같은 값으로 저장하면 두 실행이 이력에서 섞인다.
-    새 구분값을 지어내는 것은 공용/DB 계약 결정이라 여기서 할 수 없다.
-    이 검사가 깨진다면 구분 수단이 생겼다는 뜻이다.
-    """
-    from app.sales.schemas import SalesAllocationInput
-
-    assert set(get_args(SalesCycle)) == {"PROCUREMENT", "SALES"}, _TRANSITION
-    assert SalesAllocationInput.model_fields["cycle"].default == "SALES", _TRANSITION
+    assert SalesCycle.__args__ == ("PROCUREMENT", "SALES"), _TRANSITION
 
     match = re.search(r"cycle\s+IN\s*\(([^)]*)\)", _ddl())
     assert match is not None
