@@ -417,15 +417,134 @@ def test_터진_품목이_결과에_남는다():
     assert 터진것.end_code is None, "못 돈 실행에 종료 코드를 지어내면 안 된다"
 
 
-def test_입고가_터져도_판단은_돈다():
-    """★ 설계 지시 — 상태는 값으로 남고, 무엇을 더 할지는 결과를 보는 쪽이 정한다."""
+# ── 🔴 장부가 안 선 날에는 판단을 안 돌린다 ───────────────────────────
+#
+# `inbound.py` 가 *"부르는 쪽이 정한다"* 로 넘겨 둔 답을 `scheduler.py` 가 냈다.
+# 장부가 실제보다 적은 채로 판단하면 **과매입이 나는데 에러는 안 난다.**
+
+
+@pytest.mark.parametrize("막힌상태", ["BLOCKED", "FAILED"])
+def test_입고가_막히면_판단을_안_돌린다(막힌상태):
+    """🔴 재고와 capacity 가 실제보다 적게 반영된 채로 *"창고가 비었으니 더 사자"* 가 나온다."""
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out(막힌상태, "받을 게 있는데 막혔다")),
+    )
+
+    assert out.inbound_status == 막힌상태
+    assert procure.requests == [], "장부가 안 섰는데 판단이 돌았다 — 과매입이 난다"
+    assert out.procurement_status == "NOT_ATTEMPTED"
+
+
+@pytest.mark.parametrize("막힌상태", ["BLOCKED", "FAILED"])
+def test_수금이_막히면_판단을_안_돌린다(막힌상태):
+    """🔴 현금이 실제보다 적게 반영되면 `projected_cash_min` 이 틀린 채로 매입이 돈다."""
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        collect_fn=_Spy(_Out(막힌상태, "들어올 게 있는데 막혔다")),
+    )
+
+    assert out.collection_status == 막힌상태
+    assert procure.requests == [], "장부가 안 섰는데 판단이 돌았다"
+    assert out.procurement_status == "NOT_ATTEMPTED"
+
+
+def test_입고가_터지면_판단을_안_돌린다():
+    """★ `_stage` 가 예외를 `FAILED` 로 옮기고, 그 `FAILED` 도 막는 축이다."""
     out, procure = _run(
         _plan(now=_at(9, 30), gate=ALL_READY),
         receive_fn=_Spy(boom=RuntimeError("물류가 죽었다")),
     )
 
     assert out.inbound_status == "FAILED"
+    assert procure.requests == []
+
+
+def test_막혔어도_개장을_안_되돌린다():
+    """🔴 이 관문은 **개장과 판단 사이**에만 선다. 하루가 열린 것은 그대로 사실이다."""
+    opened = _Spy(_Out("OPENED"))
+
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        open_day_fn=opened,
+        receive_fn=_Spy(_Out("BLOCKED")),
+    )
+
+    assert out.day_open_status == "OPENED"
+    assert len(opened.calls) == 1, "되돌리려고 개장을 다시 불렀다"
+
+
+def test_막은_사유에_입고와_수금_상태가_둘_다_들어간다():
+    """🔴 한쪽만 적으면 사람이 물류를 볼지 재무를 볼지 모른 채 두 곳을 다 뒤진다."""
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out("BLOCKED")),
+        collect_fn=_Spy(_Out("NOTHING_DUE")),
+    )
+
+    막은사유 = next(note for note in out.notes if "판단을 안 돌린다" in note)
+    assert "입고: BLOCKED" in 막은사유
+    assert "수금: NOTHING_DUE" in 막은사유
+
+
+def test_조용히_건너뛰지_않는다():
+    """★ 무엇이 막았는지가 결과에 담긴다 — `notes` 가 비면 화면이 아무것도 못 말한다."""
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        collect_fn=_Spy(_Out("FAILED")),
+    )
+
+    assert any("판단을 안 돌린다" in note for note in out.notes)
+
+
+# ── 🔴 NOTHING_DUE 는 막지 않는다 ─────────────────────────────────────
+#
+# ★★ 막으면 **대부분의 날이 멈춘다.** 그 어휘를 만든 이유가 정확히
+#    *"없는 것과 못 한 것은 다르다"* 이다.
+
+
+def test_입고가_NOTHING_DUE_면_판단이_돈다():
+    """🔴 *"확인했고 받을 것이 없다"* 는 정상이다. 막으면 대부분의 날이 멈춘다."""
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out("NOTHING_DUE", "오늘 도착 예정이 없다")),
+    )
+
+    assert out.inbound_status == "NOTHING_DUE"
+    assert len(procure.requests) == 3, "없는 것을 못 한 것으로 접었다 — 대부분의 날이 멈춘다"
+    assert out.procurement_status == "RAN"
+
+
+def test_수금이_NOTHING_DUE_면_판단이_돈다():
+    """🔴 입고와 같은 규율이다. 두 축을 따로 잠근다."""
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        collect_fn=_Spy(_Out("NOTHING_DUE", "오늘 수금 사건이 없다")),
+    )
+
+    assert out.collection_status == "NOTHING_DUE"
+    assert len(procure.requests) == 3, "없는 것을 못 한 것으로 접었다"
+    assert out.procurement_status == "RAN"
+
+
+def test_둘_다_NOTHING_DUE_여도_판단이_돈다():
+    _, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out("NOTHING_DUE")),
+        collect_fn=_Spy(_Out("NOTHING_DUE")),
+    )
+
     assert len(procure.requests) == 3
+
+
+def test_정상_조합에서는_그대로_돈다():
+    """★ 회귀 방어 — `RECEIVED` · `COLLECTED` 는 손대는 축이 아니다."""
+    out, procure = _run(_plan(now=_at(9, 30), gate=ALL_READY))
+
+    assert (out.inbound_status, out.collection_status) == ("RECEIVED", "COLLECTED")
+    assert len(procure.requests) == 3
+    assert out.procurement_status == "RAN"
+    assert not any("판단을 안 돌린다" in note for note in out.notes)
 
 
 # ── 멱등 ────────────────────────────────────────────────────────────────

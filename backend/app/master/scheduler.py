@@ -90,6 +90,47 @@ run_procurement(...)      service.py     ← 품목마다
 🔴 **벽시계는 `clock` 에서만 읽는다.** 이 모듈은 `clock.seoul_now` ·
   `clock.today_in_seoul` 을 **부르는 쪽**이지 새로 읽는 쪽이 아니다
   (`tests/master/test_clock_is_the_only_wall_clock.py` 가 AST 로 지킨다).
+
+---
+
+🔴 **장부가 안 선 날에는 판단을 안 돌린다. 그 결정이 여기서 났다.**
+
+  `inbound.py` 의 `receive_arrivals` 가 이렇게 적어 두고 답을 미뤄 뒀다.
+
+  > ⚠️ **입고가 `FAILED` · `BLOCKED` 인데 매입 판단을 계속하면 현재고와 capacity 가
+  >   실제보다 적게 반영된 상태로 판단한다.** 받았어야 할 물건이 장부에 없는 채로
+  >   *"창고가 비었으니 더 사자"* 가 나온다.
+  >
+  > ★ **부르는 쪽이 정한다.** 이 함수는 상태를 값으로 돌려주고, `run_procurement`
+  >   진행 여부는 그것을 본 orchestration 의 결정이다.
+
+  ★★ **그 "부르는 쪽" 이 이 파일이다** (`collection.py` 의 `CollectionOut` 도 같은
+    말을 같은 이유로 적어 뒀다 — *"들어왔어야 할 현금이 장부에 없는 채로 매입 판단이
+    돈다"*). 그래서 `run_scheduled_day` 가 **개장과 판단 사이에서** 막는다. 두 모듈은
+    그대로 두고 답만 여기서 낸다 — 상태의 주인은 여전히 입고·수금이다.
+
+```text
+입고(InboundOut.status) 또는 수금(CollectionOut.status) 이
+  BLOCKED · FAILED   →  🔴 그날 판단을 안 돌린다
+```
+
+🔴 **무엇을 안 막는지가 더 중요하다.**
+
+```text
+RECEIVED / COLLECTED   정상
+NOTHING_DUE            **확인했고 낼 것이 없다** — 정상이다. 절대 막지 않는다
+NOT_OPENED             하루가 안 열렸다 — 그러면 개장에서 이미 멈춰 여기까지 안 온다
+NOT_ATTEMPTED          단계를 안 탔다 — 앞 단계에서 이미 멈춘 것이다
+```
+
+  ★★ `NOTHING_DUE` 를 막으면 **대부분의 날이 멈춘다.** 그 어휘를 만든 이유가 정확히
+    *"없는 것과 못 한 것은 다르다"* 이고, 여기서 접으면 그 구분이 통째로 무의미해진다.
+
+⚠️ **개장은 그대로다.** 개장이 실패하면 그 뒤를 안 하고, 판단이 실패해도 개장을
+  되돌리지 않는다. 이 관문은 **개장과 판단 사이**에만 선다.
+
+⚠️ **아직 DB 에 안 남는다.** 스케줄러 결과는 값으로만 돌아간다 — 막힌 날을 나중에
+  세려면 기록이 필요하고, 그건 다음 판이다.
 """
 
 from __future__ import annotations
@@ -152,6 +193,25 @@ DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
 #: ★ 문자열을 상수로 둔 이유는 검사가 이 문장을 찾기 때문이다. 사유를 손으로 다시
 #:   쓰면 철자가 갈리고, 그러면 그 여섯 날을 나중에 못 센다.
 _NO_ML_BATCH = "달력은 열렸는데 ML 배치가 없었다"
+
+#: 🔴 **이 상태면 그날 판단을 안 돌린다.** 입고·수금 둘 다 같은 표를 쓴다.
+#:
+#: ```text
+#: BLOCKED   받을(들어올) 대상이 있는데 못 했다 — 장부가 실제보다 적다
+#: FAILED    하려다 터졌다 — 아무것도 안 바뀌었다
+#: ```
+#:
+#: 🔴 **`NOTHING_DUE` 는 여기 없다. 넣으면 대부분의 날이 멈춘다.**
+#:   *"확인했고 낼 것이 없다"* 는 정상이고, 그 어휘를 만든 이유가 정확히
+#:   *"없는 것과 못 한 것은 다르다"* 이다.
+#:
+#: ⚠️ **`NOT_OPENED` · `NOT_ATTEMPTED` 도 여기 없다.** 둘 다 *"앞에서 이미 멈췄다"*
+#:   이고, 개장 관문이 먼저 돌아서서 여기까지 오지도 않는다.
+_LEDGER_GAP_STATUSES: frozenset[str] = frozenset({"BLOCKED", "FAILED"})
+
+#: 판단을 안 돌린 이유의 앞머리. **검사가 이 문장을 찾는다** (`_NO_ML_BATCH` 와 같은
+#: 이유다 — 손으로 다시 쓰면 철자가 갈리고 그러면 막힌 날을 나중에 못 센다).
+_LEDGER_GAP = "장부가 안 서서 판단을 안 돌린다"
 
 #: 스케줄러가 답할 수 있는 **전부**. 여섯 번째를 만들지 않는다.
 SchedulerAction = Literal[
@@ -380,6 +440,13 @@ class DayRunOutcome:
     day_open_status: str = "NOT_ATTEMPTED"
     inbound_status: str = "NOT_ATTEMPTED"
     collection_status: str = "NOT_ATTEMPTED"
+    #: 판단 단계를 **탔는가**. 🔴 좋은 답이 나왔다는 뜻이 아니다 — 품목별 결과는
+    #: `items` 가 나른다 (`ItemRunOutcome.status` 와 같은 어휘를 쓴다).
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `NOT_ATTEMPTED` 는 이 클래스가 이미 세 단계에
+    #:   쓰는 말이고 `RAN` 은 `ItemRunOutcome` 이 이미 쓰는 말이다. 단계를 안 탄
+    #:   사실을 `items == ()` 으로만 두면 *"품목 목록이 비었다"* 와 구별이 안 된다.
+    procurement_status: str = "NOT_ATTEMPTED"
     items: tuple[ItemRunOutcome, ...] = ()
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -420,8 +487,17 @@ def run_scheduled_day(
     🔴 **한 품목이 터져도 나머지는 계속 돈다.** 배추가 터졌다고 무와 양파를 안 돌면
       하루가 통째로 빈다. 터진 것은 `items` 에 `FAILED` 로 남는다.
 
-    ★ **입고 · 수금이 실패해도 판단은 돈다** (설계 지시). 그 상태는 값으로 남고,
-      무엇을 더 할지는 결과를 보는 쪽이 정한다.
+    🔴 **입고 · 수금이 `BLOCKED` · `FAILED` 면 판단을 안 돌린다.** `inbound.py` 가
+      *"부르는 쪽이 정한다"* 로 넘겨 둔 답을 이 파일이 낸다 (모듈 docstring 에 원문을
+      인용해 뒀다). 장부가 실제보다 적은 채로 판단하면 **과매입이 나는데 에러는 안
+      난다** — 재고가 적게 보이면 더 사고, 현금이 적게 보이면 `projected_cash_min`
+      이 틀린다.
+
+      ★ **조용히 건너뛰지 않는다.** 무엇이 막았는지가 `notes` 에 남고, 판단 단계를
+        안 탔다는 사실은 `procurement_status` 가 든다.
+
+      🔴 **`NOTHING_DUE` 는 막지 않는다.** *"확인했고 낼 것이 없다"* 는 정상이고,
+        막으면 대부분의 날이 멈춘다.
 
     :param items: 돌 품목. 안 주면 `scheduled_items()` — **목록을 다시 세지 않는다.**
     """
@@ -463,6 +539,22 @@ def run_scheduled_day(
     collection_status, note = _stage("수금", lambda: collect_fn(as_of))
     notes.append(note)
 
+    # ── 장부 관문 — 개장과 판단 **사이** ────────────────────────────
+    #
+    # 🔴 여기서 돌아서면 `procure_fn` 을 **한 번도 안 부른다.** 개장은 그대로 둔다 —
+    #    하루가 열린 것은 사실이고, 판단을 안 돌린 것은 별개 사실이다.
+    if _ledger_gap(inbound_status, collection_status):
+        notes.append(_ledger_gap_note(inbound_status, collection_status))
+        return DayRunOutcome(
+            as_of=as_of,
+            action=action.action,
+            reason=action.reason,
+            day_open_status=day_open_status,
+            inbound_status=inbound_status,
+            collection_status=collection_status,
+            notes=tuple(notes),
+        )
+
     # ── 판단 ────────────────────────────────────────────────────────
     results: list[ItemRunOutcome] = []
     for item in scheduled_items() if items is None else tuple(items):
@@ -502,9 +594,29 @@ def run_scheduled_day(
         day_open_status=day_open_status,
         inbound_status=inbound_status,
         collection_status=collection_status,
+        procurement_status="RAN",
         items=tuple(results),
         notes=tuple(notes),
     )
+
+
+def _ledger_gap(inbound_status: str, collection_status: str) -> bool:
+    """장부가 안 섰는가. **입고와 수금을 둘 다 본다.**
+
+    🔴 **한쪽만 보면 다른 쪽 구멍이 그대로 열려 있다.** 입고가 막히면 재고와 capacity
+      가 적게 반영되고, 수금이 막히면 현금이 적게 반영된다 — 둘 다 매입 판단이 보는
+      값이고, 어느 쪽이 틀려도 에러 없이 틀린 답이 나온다.
+    """
+    return inbound_status in _LEDGER_GAP_STATUSES or collection_status in _LEDGER_GAP_STATUSES
+
+
+def _ledger_gap_note(inbound_status: str, collection_status: str) -> str:
+    """막은 이유. 🔴 **입고·수금 상태를 둘 다 적는다 — 어느 쪽이 막았는지 보이게.**
+
+    ⚠️ 한쪽만 적으면 화면이 *"장부가 안 섰다"* 까지만 말하고, 사람이 물류를 볼지
+      재무를 볼지 모른 채 두 곳을 다 뒤진다.
+    """
+    return f"{_LEDGER_GAP} (입고: {inbound_status} · 수금: {collection_status})"
 
 
 def _stage(name: str, call: Callable[[], Any]) -> tuple[str, str]:
