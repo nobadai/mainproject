@@ -144,7 +144,8 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `amount_krw` | `int` | 필수 | 예상 금액 (원) |
 | `unit_price` | `int` | 필수 | 등급 단가 (원/kg) |
 | `grade` | `str` | 필수 | 배정된 등급 |
-| `max_price` | `int` | 필수 | 이보다 비싸면 안 산다 |
+| `max_price` | `int` | 필수 | 재무 스트레스 기준 (amount_max_krw = qty × 이것) |
+| `cut_unit_price` | `int &#124; None` | 선택 | 🔴 컷 기준 — 이보다 비싸면 안 산다. 없으면 그 실행에 칸이 없던 것이다 |
 | `legs` | `Table` | 필수 | 회차 — 언제 사서 언제 오나 |
 | `payments` | `Table` | 필수 | 언제 얼마 내나 |
 | `reasons` | `list[Reason]` | 필수 | 이 안을 왜 냈나. 여섯 갈래를 다 채운다 |
@@ -262,8 +263,22 @@ Card(
 `MQ-가락-0105`)가 없으면 나중에 되짚을 수 없습니다. 이미 그 형태로
 쓰고 있으니 그대로 실으면 됩니다.
 
-**`max_price`(이보다 비싸면 안 산다)를 빠뜨리지 마세요.** 안마다 다릅니다.
-화면에서 제일 눈에 띄는 칸이고, 이게 없으면 안을 고를 수 없습니다.
+**🔴 상한이 둘입니다. 섞지 마세요** (`#398` · `dev@a615aa6` · 2026-09-08).
+
+```text
+max_price       재무 STRESS 로 나간다 — 남이 등식을 검사한다
+                finance/capabilities/scenario.py:180
+                master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+cut_unit_price  우리 컷 (self_check.check_max_price)
+```
+
+지금은 **같은 값**이지만 `09-17` 에 밴드가 바뀌면 갈라집니다. 화면이
+「이보다 비싸면 안 산다」 자리에 `max_price` 를 보이면 그 뒤로 **조용히 틀린
+값**이 뜹니다 — 그 자리는 `cut_unit_price` 입니다.
+
+⚠️ `cut_unit_price` 가 `None` 이면 **`max_price` 로 메우지 마세요.** 그 칸이
+생기기 전에 저장된 실행이라는 뜻이고, 메우는 순간 갈라 둔 둘이 화면에서
+다시 하나가 됩니다.
 
 **`risks`(걸리는 것)를 지우지 마세요.** 비어 있으면 화면이 그 자리를
 안 그립니다. 있는데 안 실으면 위험을 숨기는 것이 됩니다.
