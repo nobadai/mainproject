@@ -13,7 +13,14 @@ const backendOrigin = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8000";
 const nextConfig: NextConfig = isDev
   ? {
       async rewrites() {
-        return [{ source: "/api/:path*", destination: `${backendOrigin}/:path*` }];
+        return [
+          // 화면용 API. 백엔드에서도 `/api` 로 시작하는데, 아래 규칙이 앞의
+          // `/api` 를 떼어 버리므로 **여기서 다시 붙여** 준다. 순서가 중요하다 —
+          // 먼저 걸리는 규칙이 이긴다.
+          { source: "/api/screen/:path*", destination: `${backendOrigin}/api/:path*` },
+          // 에이전트 API. 백엔드는 `/master`·`/finance` 처럼 `/api` 없이 받는다.
+          { source: "/api/:path*", destination: `${backendOrigin}/:path*` },
+        ];
       },
     }
   : { output: "export" };

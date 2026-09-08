@@ -27,6 +27,39 @@
   --color-sky: #2c5a78;
   --color-sky-wash: #e6eef3;
 
+
+  /* ── 운영 콘솔 (데모 260908 기준) ───────────────────────────────────────
+   * 여섯 탭 화면이 쓰는 색. 위의 토큰은 옛 콘솔이 쓰던 것이라 그대로 둔다.
+   * 데모가 종이색을 조금 더 따뜻하게(#F4F3EE) 잡았고, 사이드바를 짙은
+   * 녹회색으로 눕혔다. 표가 많은 화면이라 선을 얇고 연하게 쓴다.
+   * ------------------------------------------------------------------- */
+  --color-desk: #f4f3ee;          /* 화면 바탕 */
+  --color-panel: #ffffff;         /* 카드 바탕 */
+  --color-hair: #e3e2da;          /* 카드 테두리 */
+  --color-hair-soft: #f0efe9;     /* 카드 안 칸막이 */
+  --color-grid: #edebe4;          /* 그래프 눈금선 */
+  --color-ink2: #46514a;          /* 본문 다음 굵기 */
+  --color-mut: #8a928a;
+  --color-mut2: #9aa199;
+  --color-nav: #141d18;           /* 사이드바 */
+  --color-nav-ink: #d7dcd5;
+  --color-nav-cap: #98a69d;
+  --color-nav-on: #2e4a3a;
+
+  /* 뜻이 있는 색. 백엔드가 tone 으로 뜻만 주고, 색은 여기서 정한다 */
+  --color-t-good: #1e6e45;
+  --color-t-good-bg: #e5efe8;
+  --color-t-warn: #8f5f0b;
+  --color-t-warn-bg: #f6ead4;
+  --color-t-bad: #9c3a2c;
+  --color-t-bad-bg: #f5e2dd;
+  --color-t-info: #4b5a78;
+  --color-t-info-bg: #e5e8ef;
+  --color-t-sim: #6c4880;
+  --color-t-sim-bg: #ede4f1;
+  --color-band: #e1e5ee;          /* 예측 구간 칠 */
+  --color-shade: #f1ebdb;         /* 휴장일 바탕 */
+
   /* `next/font` 가 심는 변수를 받는다 (`layout.tsx`). 못 받으면 시스템 서체로 떨어진다. */
   --font-sans: var(--font-plex-sans), -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-plex-mono), "SFMono-Regular", monospace;
@@ -52,4 +85,17 @@ body {
 /* 수치가 세로로 줄 맞게 — 금액·수량이 표로 서는 화면이다 */
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* 표가 많은 화면이라 스크롤 막대를 얇게 — 카드 안에서 가로로 흐른다 */
+.thin-scroll::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-hair);
+  border-radius: 99px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
