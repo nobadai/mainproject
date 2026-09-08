@@ -66,6 +66,7 @@ from app.master.envelope import (
     forecast_is_clean,
     route_capability,
     wire_adjustment,
+    wire_payload,
 )
 from app.master.plan import ExecutionPlan
 from app.master.ports import AgentNotRegistered
@@ -170,6 +171,30 @@ INITIAL_CONTEXT_ROUTE: tuple[AgentName, Mode] = ("inventory", "PRE_SALES")
 S-1(기여 호출 재사용)은 *"판매가 요구한 capability 의 라우팅이 ②와 같은 곳을 가리키면
 그 회신을 다시 쓴다"* 로 판정한다. capability 이름 목록을 따로 두면
 `CAPABILITY_ROUTING` 이 바뀐 날 한쪽만 바뀐다 — 여기는 **경로 하나**만 안다.
+"""
+
+FEEDBACK_SOURCE_AGENT: dict[AgentName, str] = {"inventory": "logistics"}
+"""마스터 `AgentName` → 판매 `SalesDomainReply.source_agent`.
+
+🔴 **같은 부서를 두 어휘가 다르게 부른다.** 마스터는 물류 어댑터를 `"inventory"` 로
+  등록해 두었고 (`AgentName` · `CAPABILITY_ROUTING`), 판매 계약은 같은 자리를
+  `"logistics"` 로 적었다 (`SalesDomainReply.source_agent` Literal).
+
+  ```text
+  마스터   inventory   호출 대상의 등록 이름
+  판매     logistics   회신을 보낸 부서의 이름
+  ```
+
+★ **이름 매핑이지 의미 이동이 아니다.** 바꾸는 것은 부서를 부르는 낱말 하나뿐이고,
+  `runtime_status`·`business_status`·`payload` 는 부서가 보낸 그대로 나간다. 값을
+  다시 쓰기 시작하면 그 순간 마스터가 부서 회신의 주인이 된다 (§3.2.2).
+
+★ **여기서만 바꾼다 — 나가는 자리다.** 마스터 안에서 `"logistics"` 로 부르기
+  시작하면 `CAPABILITY_ROUTING`·`wiring`·계획 이력까지 전부 두 이름을 갖게 된다.
+
+🔴 **표에 없는 이름은 그대로 내보낸다.** 판매 Literal 에 없으면 문 앞에서 거부되는
+  것이 맞다 — 마스터가 아는 이름으로 몰래 갈아 끼우면 **어휘가 갈린 사실 자체가
+  사라진다.** 그 사실은 `test_sales_vocabulary.py` 가 잰다.
 """
 
 
@@ -374,6 +399,18 @@ class SalesFlow:
         self.supply_context: Mapping[str, Any] | None = None
         self.context_failure: AgentFailure | None = None
 
+        #: 🔴 **최초 판매 제안을 만든 run.** 되먹임이 여러 번 돌아도 계보를 잃지 않게
+        #:   `SalesFeedback.original_run_id` 로 나간다 (판매 회신 2026-09-07).
+        #:
+        #: ★ **첫 회차에 정해지고 안 바뀐다.** 회차마다 덮으면 *"최초"* 가 *"직전"* 이
+        #:   되고, 2차 되먹임에서 판매가 자기 1회차 안을 원본으로 읽는다.
+        self.original_run_id: str | None = None
+
+        #: 회신 원본을 `run_id` 로 찾는 자리. **회신을 베껴 두는 칸이 아니다** —
+        #: 되먹임에 실을 때 `domain_replies` 가 원본을 가리키기 위한 색인이다.
+        #: 판정 칸(`_verdict_of`)은 `run_id` 만 들고 있고 내용의 주인은 여기 하나다.
+        self.replies_by_ref: dict[str, AgentReply] = {}
+
         self.sourced_evidences: list[SourcedEvidence] = []
         self.suggested_adjustments: list[SuggestedAdjustment] = []
 
@@ -420,8 +457,12 @@ class SalesFlow:
         while True:
             # ③ 판매에게 후보를 받는다.
             proposal = self.runner.call(
-                "sales", "GENERATE_SALES_PROPOSAL", self._proposal_input(feedback)
+                "sales", "GENERATE_SALES_PROPOSAL", self._proposal_input(attempt, feedback)
             )
+            if self.original_run_id is None:
+                # ★ **최초 회차에서만 잡는다.** 되먹임 회차의 run 으로 덮으면
+                #   `original_run_id` 가 *"직전 회차"* 를 뜻하게 된다.
+                self.original_run_id = proposal.run_id
             judgment = _judgment_of(proposal)
             self.sourced_evidences.extend(
                 SourcedEvidence("sales", "GENERATE_SALES_PROPOSAL", ev) for ev in proposal.evidences
@@ -493,7 +534,10 @@ class SalesFlow:
                 )
 
             attempt += 1
-            feedback = self._feedback(attempt, candidates)
+            # ★ **회차 값을 여기서 안 적는다.** `attempt` 를 봉투에 찍는 자리는
+            #   `_proposal_input` 하나다 — 최상위 `feedback_attempt` 와
+            #   `feedback.attempt` 가 **같은 값이어야** 판매가 받아 주기 때문이다.
+            feedback = self._feedback(candidates)
 
     # ── 단계 ────────────────────────────────────────────────────
 
@@ -513,6 +557,7 @@ class SalesFlow:
         """
         agent, mode = INITIAL_CONTEXT_ROUTE
         reply = self.runner.call(agent, mode, self._context_input())
+        self.replies_by_ref[reply.run_id] = reply
         self.sourced_evidences.extend(SourcedEvidence(agent, mode, ev) for ev in reply.evidences)
         self.suggested_adjustments.extend(reply.suggested_adjustments)
         if reply.contributes_to_band:
@@ -535,8 +580,23 @@ class SalesFlow:
             payload["user_request"] = dict(self.user_request)
         return payload
 
-    def _proposal_input(self, feedback: Mapping[str, Any] | None) -> dict[str, Any]:
+    def _proposal_input(self, attempt: int, feedback: Mapping[str, Any] | None) -> dict[str, Any]:
         """③ 에 실어 보내는 것. **묶기만 한다** (§3.2.2).
+
+        🔴 **회차를 찍는 자리는 여기 하나다** (판매·물류 회신 2026-09-07).
+
+          ```text
+          feedback_attempt          최상위. 마스터가 소유하는 회차
+          feedback.attempt          같은 값. 다르면 판매가 계약 오류로 닫는다
+          ```
+
+          같은 값을 두 곳에 적는 자리라 **두 곳을 한 문장이 쓴다.** `_feedback` 이
+          자기 몫을 따로 찍으면 두 값이 갈리는 날이 오고, 그날 되먹임이 통째로
+          거부되는데 마스터 쪽에서는 아무 소리가 안 난다.
+
+        🔴 **`is_refeed` 를 싣지 않는다.** 판매가 `feedback_attempt > 0` 으로 정한다
+          (판매 회신). 같이 실으면 *"되먹임인가"* 의 주인이 둘이 되고, 한쪽만
+          채워지는 날 판매가 1회차를 최초 호출로 읽는다.
 
         ★ **물류가 못 답한 회차에는 물류 컨텍스트 칸을 안 만든다.** 빈 값을 실으면
           판매가 *"물류가 팔 수 있는 게 없다고 했다"* 로 읽는다. 안 실으면 판매가
@@ -548,6 +608,16 @@ class SalesFlow:
           이유로 그렇게 한다. 못 실은 사실은 `ml_context_note` 로 결과에 남는다.
         """
         payload: dict[str, Any] = {}
+        # 🔴 **최상위다 — `feedback` 안이 아니다** (`SalesProposalInput.feedback_attempt`).
+        #
+        #   전에는 `feedback_context["feedback_attempt"]` 안에 있었다. 어댑터는
+        #   `request.payload["feedback_attempt"]` 를 최상위에서 읽으므로 **되먹임
+        #   회차에도 0 이 나갔고**, `is_refeed` 가 영원히 `False` 였다 —
+        #   되먹임 상한 2 를 정해 두고 회차가 한 번도 전달되지 않았다.
+        #
+        # ★ **최초 호출에도 싣는다** (`0`). 없는 것과 0 인 것을 판매가 구별할 필요가
+        #   없는 자리라 (기본값이 0 이다) 늘 같은 모양으로 나가는 편이 낫다 — 칸이
+        #   회차마다 생겼다 사라지면 이력에서 두 모양을 비교해야 한다.
         if self.business_mode is not None:
             # 🔴 **최상위다 — `user_request` 안이 아니다** (`SalesProposalInput`).
             payload["business_mode"] = self.business_mode
@@ -582,10 +652,29 @@ class SalesFlow:
             #   (`feedback_attempt` 와 같은 자리).
             payload["ml_context"] = dict(self.ml_context)
         if feedback is not None:
-            payload["feedback_context"] = dict(feedback)
-            # ★ **부서가 낸 표준형 그대로.** 고르지도 정렬하지도 병합하지도 않는다 —
-            #   같은 축이 둘 이상이어도 그대로 나른다 (매입·재무 합의).
-            payload["adjustments"] = [wire_adjustment(a) for a in self.suggested_adjustments]
+            # 🔴 **칸 이름은 `feedback` 이다** (`SalesProposalInput.feedback`).
+            #   `feedback_context` 는 판매 스키마에 없는 이름이라 `extra="forbid"`
+            #   문 앞에서가 아니라 **어댑터의 키 거르기에서 조용히 버려졌다.**
+            #
+            # 🔴 **`adjustments` 최상위 칸을 만들지 않는다** (판매 회신 2026-09-07).
+            #   `SuggestedAdjustment` 는 그 부서 회신의 일부이므로
+            #   `domain_replies[n].payload` 안에 보존한다 — 최상위로 따로 빼면 어느
+            #   회신이 낸 대안인지가 사라지고, 같은 사실이 두 곳에 앉는다.
+            payload["feedback"] = {**dict(feedback), "attempt": attempt}
+
+        # 🔴 **회차는 최상위에도 싣는다** (판매 회신 2026-09-07).
+        #
+        #   판매 어댑터가 `request.payload["feedback_attempt"]` 를 **최상위에서** 읽고,
+        #   그 값으로 `is_refeed` 를 정한다. 되먹임 안에만 넣어 두던 동안에는 회차가
+        #   0 으로 고정돼 **되먹임이 한 번도 안 돈 것으로 처리됐다.**
+        #
+        # ★ **`is_refeed` 는 안 싣는다.** 판매가 `feedback_attempt > 0` 으로 정한다 —
+        #   같은 사실의 주인을 둘로 만들지 않는다 (판매 회신).
+        #
+        # ⚠️ **`feedback.attempt` 와 같은 값이어야 한다.** 다르면 판매가 조용히 하나를
+        #   고르지 않고 계약 오류로 닫는다. 같은 값을 두 곳에 적는 자리라 **한 인자
+        #   (`attempt`)에서 둘 다 나오게** 둔다 — 두 곳에서 따로 세면 언젠가 갈린다.
+        payload["feedback_attempt"] = attempt
         return payload
 
     def _judge(self, scenario: Mapping[str, Any]) -> CandidateVerdict:
@@ -623,6 +712,7 @@ class SalesFlow:
             #   `scenario_id`·`quantity_kg`·`supply` 가 전부 후보 최상위에 있다 —
             #   마스터가 골라 담으면 판매가 필드를 늘린 날 조용히 빠진다.
             reply = self.runner.call(agent, mode, dict(scenario))
+            self.replies_by_ref[reply.run_id] = reply
             validations[capability] = _verdict_of(reply)
             self.sourced_evidences.extend(
                 SourcedEvidence(agent, mode, ev) for ev in reply.evidences
@@ -635,28 +725,62 @@ class SalesFlow:
             unroutable=tuple(unroutable),
         )
 
-    def _feedback(self, attempt: int, candidates: Sequence[CandidateVerdict]) -> dict[str, Any]:
-        """다음 회차에 실을 되먹임.
+    def _feedback(self, candidates: Sequence[CandidateVerdict]) -> dict[str, Any]:
+        """다음 회차에 실을 되먹임 — **판매 `SalesFeedback` 모양 그대로.**
 
-        ★ **회차 이름을 판매 어휘로 쓴다.** 판매 회신이 `feedback_attempt` 로 되받으므로
-          (`SalesProposalReply.feedback_attempt`) 보내는 칸도 같은 이름이다. 매입은
-          `attempt` 인데, 두 사이클이 서로 다른 부서와 말하므로 **받는 쪽 낱말에 맞춘다.**
+        ```text
+        original_run_id   최초 판매 제안을 만든 run
+        domain_replies[]  부서 회신 원본 (source_agent · capability · reply_ref
+                          · runtime_status · business_status · payload)
+        scenario_feedback[]  scenario_id · reply_refs — **연결만 한다**
+        ```
+
+        🔴 **`attempt` 는 여기서 안 찍는다.** 최상위 `feedback_attempt` 와 같은 값이어야
+          하므로 두 칸을 한 자리(`_proposal_input`)에서 쓴다.
+
+        🔴 **원본을 나른다. 재작성하지 않는다** (판매 회신 2026-09-07).
+
+          전에는 마스터가 `reason`·`rejected[].detail` 로 **자기 문장을 지어** 보냈다.
+          그 문장은 부서 회신에서 마스터가 고른 것이고, 고르는 것이 곧 판단이다
+          (§3.2.2). 이제는 부서 회신을 통째로 실어 **판매가 직접 읽는다.**
+
+        🔴 **scenario 별 payload 를 만들지 않는다** (판매 회신 명시). `scenario_feedback`
+          은 *"이 후보에 이 회신들이 왔다"* 만 말한다. 요약을 끼워 넣으면 판매가 읽는
+          사실의 주인이 마스터가 된다.
+
+        🔴 **`scenario_id` 를 `SalesDomainReply` 에 새로 채우지 않는다** (D-2 합의).
+          그 칸은 deprecated 이고, 후보 ↔ 회신 연결의 주인은 `scenario_feedback` 이다.
+
+        ★ **회신 하나는 한 번만 싣는다.** S-1 재사용으로 같은 물류 회신이 후보 셋에
+          걸리면 목록에 셋이 아니라 하나가 실리고, 셋은 `reply_refs` 로 그것을
+          가리킨다 — 그래서 이 두 칸이 나뉘어 있다.
 
         ★ **시각·난수·외부조회를 넣지 않는다** (§3.4). 되먹임이 앞 회차 산출물에서만
           나와야 같은 입력에 같은 다음 회차가 나온다.
-
-        ★ **사유를 요약하지 않는다.** 후보별 사유 원문(`detail`)을 그대로 옮긴다 —
-          고르는 것이 곧 판단이다 (§3.2.2).
         """
+        domain_replies: dict[tuple[str, str], dict[str, Any]] = {}
+        scenario_feedback: list[dict[str, Any]] = []
+
+        for candidate in candidates:
+            reply_refs: list[str] = []
+            for capability, verdict in candidate.validations.items():
+                ref = str(verdict.get("run_id") or "")
+                reply = self.replies_by_ref.get(ref)
+                if reply is None:
+                    # 회신 원본을 못 찾으면 **가리키지 않는다.** 없는 것을 가리키는
+                    # `reply_ref` 는 판매 쪽에서 빈 회신으로 읽힌다.
+                    continue
+                if ref not in reply_refs:
+                    reply_refs.append(ref)
+                domain_replies.setdefault((capability, ref), _domain_reply(capability, reply))
+            scenario_feedback.append(
+                {"scenario_id": candidate.scenario_id, "reply_refs": reply_refs}
+            )
+
         return {
-            "feedback_attempt": attempt,
-            "reason": f"통과 후보 0건 — 탈락 {len(candidates)}건",
-            "rejected": [
-                {"scenario_id": c.scenario_id, "detail": c.detail}
-                for c in candidates
-                if not c.passed
-            ],
-            "unroutable_capabilities": sorted({cap for c in candidates for cap in c.unroutable}),
+            "original_run_id": self.original_run_id,
+            "domain_replies": list(domain_replies.values()),
+            "scenario_feedback": scenario_feedback,
         }
 
     def _failure_of(self, agent: AgentName, mode: Mode) -> AgentFailure:
@@ -726,21 +850,67 @@ def _carriable_forecast(
     return dict(forecast), ""
 
 
+def _domain_reply(capability: str, reply: AgentReply) -> dict[str, Any]:
+    """부서 회신 하나를 판매 `SalesDomainReply` 모양으로. **원본을 나른다.**
+
+    🔴 **`extra="forbid"` 이라 여기 적힌 칸 말고는 못 보낸다.** 칸을 하나 더 실으면
+      되먹임이 통째로 거부된다.
+
+    🔴 **`source_agent` 만 이름을 바꾼다** (`FEEDBACK_SOURCE_AGENT`). 나머지는 부서가
+      보낸 값 그대로다.
+
+    ⚠️ **조정안을 `payload` 안 `suggested_adjustments` 키로 붙인다.**
+
+      봉투는 `suggested_adjustments` 를 `payload` 의 **형제**로 두는데
+      (`AgentReply.suggested_adjustments`) 판매 계약에는 그 형제 칸이 없다. 그래서
+      나가는 자리에서 합쳐야 하는데, **부서 payload 는 한 글자도 안 고치고** 표준형
+      조정안을 옆에 한 칸으로 얹는 것까지만 한다 — 값을 골라 다시 쓰면 그 순간
+      마스터가 부서 회신의 주인이 된다.
+
+      붙이는 이름은 **봉투에서 그 칸이 갖던 이름 그대로**다. 다른 이름을 지어내면
+      받는 쪽이 그것이 무엇인지 마스터 코드를 읽어야 알 수 있다.
+
+      🔴 **낼 것이 없으면 칸을 안 만든다** (§1.2-10). 빈 목록을 실으면 판매가
+        *"부서가 대안이 없다고 했다"* 로 읽는다.
+    """
+    payload = wire_payload(dict(reply.payload))
+    if reply.suggested_adjustments:
+        payload["suggested_adjustments"] = [wire_adjustment(a) for a in reply.suggested_adjustments]
+    return {
+        "source_agent": FEEDBACK_SOURCE_AGENT.get(reply.agent, reply.agent),
+        "capability": capability,
+        # ★ **`AgentReply.run_id` 다** (C-4 합의). 회신 한 번을 가리키는 유일한 키다.
+        "reply_ref": reply.run_id,
+        "runtime_status": reply.runtime_status,
+        "business_status": reply.business_status,
+        "payload": payload,
+    }
+
+
 def _verdict_of(reply: AgentReply) -> dict[str, Any]:
     """회신 하나를 후보 판정 칸에 담는 모양으로.
 
     ★ **`agent`·`mode` 를 같이 담는다.** capability → 부서 매핑은 마스터만 아는
       사실이라, 담지 않으면 화면이 *"FINANCIAL_VALIDATION 이 reject"* 까지만 알고
       **누가 그렇게 말했는지**를 모른다.
+
+    ★ **`run_id` 는 원본을 가리키는 포인터다.** 되먹임에 실을 때 이 값으로
+      `SalesFlow.replies_by_ref` 에서 회신 원본을 찾는다 — 판정 칸이 회신 내용을
+      베껴 두면 같은 사실의 주인이 둘이 된다.
+
+    ★ **`missing_data` 를 목록으로 편다.** 이 dict 는 화면·이력까지 나가는데 튜플은
+      JSON 을 한 번 왕복하면 목록이 된다 (#175 · `wire_payload` 와 같은 규율).
+      `revalidation._verdict_of` 가 이미 목록으로 적고 있어 **두 경로가 같아진다.**
     """
     return {
         "agent": reply.agent,
         "mode": reply.mode,
+        "run_id": reply.run_id,
         "business_status": reply.business_status,
         "runtime_status": reply.runtime_status,
-        "payload": dict(reply.payload),
+        "payload": wire_payload(dict(reply.payload)),
         "reasoning": reply.reasoning,
-        "missing_data": tuple(reply.missing_data),
+        "missing_data": list(reply.missing_data),
     }
 
 
