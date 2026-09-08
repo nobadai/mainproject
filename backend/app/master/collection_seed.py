@@ -60,18 +60,33 @@ COLLECTED  target 300 · current 300  →  delta   0   (재수금 아님)
 
 ---
 
-🔴 **세 값을 섞지 않는다** (`transition.carried_forward_status` 와 같은 규율).
+🔴 **다섯 값을 섞지 않는다** (`transition.carried_forward_status` 와 같은 규율).
 
 ```text
 SEEDED         n 건 만들었다
 NOTHING_DUE    **확인했고** 낼 것이 없었다 (0 건)
 UNREADABLE     **못 했다** — 조회나 쓰기가 실패했다
-NOT_ATTEMPTED  개장이 안 됐거나 축이 막혀 **시도하지 않았다**
+BLOCKED        **막았다** — 실행 축이 안 맞아 fail-closed 했다
+NOT_ATTEMPTED  시도할 **이유가 없었다** — 하루가 안 열렸다
 ```
+
+  ⚠️ **왜 다섯인가.** 없는 것 ≠ 안 한 것 ≠ 못 읽은 것 ≠ 막은 것. 접으면 209일을 걷고
+    나서 *"시드 안 된 날"* 을 셀 때 개장 안 한 날과 축이 깨진 날이 같이 잡힌다 —
+    무엇을 고쳐야 할지 못 본다.
+
+  ★ **`BLOCKED` 는 `finance_collection.py` 와 같은 낱말이다.** 축 불일치는 거기서도
+    `BLOCKED` 다 (`finance_collection.py` 의 `collect`). **같은 사실에 두 낱말을 쓰지
+    않는다** — 한 저장소에서 같은 사유 문장이 두 낱말로 나가면 결정이 뒤집힌다.
 
   ⚠️ `UNREADABLE` 을 `NOTHING_DUE` 로 접으면 표가 안 서 있거나 DB 가 끊긴 날이
     *"확인했고 없었다"* 로 조용히 지나가고, 들어왔어야 할 현금이 장부에 없는 채로
     매입 판단이 돈다.
+
+  ⚠️ **재무 축 조회 실패는 `UNREADABLE` 이다.** 조회도 조회다 — 위 정의가 그렇다.
+    `finance_collection.py` 는 같은 자리에서 `BLOCKED` 로 답하는데, 그것은 고른 것이
+    아니라 `CollectionPartOut.status` 에 `UNREADABLE` 이라는 낱말이 아예 없기
+    때문이다. 그 표에 낱말이 생기는 날 둘을 다시 맞춰야 하고, 그 날을 잡는 검사가
+    `tests/master/test_collection_seed_vocabulary.py` 다.
 
 🔴 **개장을 실패시키지 않는다.** 사건 생성이 터져도 하루는 열려야 한다 —
   `seed_day` 는 어떤 예외도 밖으로 내보내지 않고 `UNREADABLE` 로 답한다.
@@ -115,7 +130,7 @@ __all__ = [
 #:   실측 입금인지 시뮬레이션 가정인지 못 가른다.
 SIM_FIXED = "SIM_FIXED"
 
-SeedStatus = Literal["SEEDED", "NOTHING_DUE", "UNREADABLE", "NOT_ATTEMPTED"]
+SeedStatus = Literal["SEEDED", "NOTHING_DUE", "UNREADABLE", "BLOCKED", "NOT_ATTEMPTED"]
 
 
 @dataclass(frozen=True)
@@ -254,21 +269,28 @@ def seed_day(
       실측으로 `finance_states` 에 `LOAN_BASELINE` 252행과 `BASE_NO_LOAN` 2행이
       공존하므로, 상수를 박으면 무차입 장부의 수금이 대출 장부에 조용히 들어간다.
 
-    🔴 **축의 `sim_run_id` 가 마스터 것과 다르면 안 만든다** (fail-closed).
-      덮어 쓰면 남의 실행 장부에 수금 사건을 적는다.
+    🔴 **축의 `sim_run_id` 가 마스터 것과 다르면 안 만든다** (fail-closed) — `BLOCKED`
+      다. 덮어 쓰면 남의 실행 장부에 수금 사건을 적는다.
+
+    ⚠️ **`NOT_ATTEMPTED` 는 이 함수가 내지 않는다.** *"하루가 안 열렸다"* 뿐이고,
+      그것은 `day_open` 이 여기 오기 전에 판단한다.
     """
     try:
         axis = read_axis()
     except (FinanceDataNotReady, LookupError, ValueError) as exc:
+        # ★ **조회 실패는 `UNREADABLE` 이다.** 재무 축 조회도 조회다 — *"시도할 이유가
+        #   없었다"* 가 아니라 *"못 했다"* 다.
         # ★ **사유를 그대로 옮긴다.** `finance_runtime_axis_ambiguous` 가 여기서
-        #   사라지면 *"안 만들었다"* 만 남고 무엇이 모호했는지가 없어진다.
+        #   사라지면 *"못 했다"* 만 남고 무엇이 모호했는지가 없어진다.
         return CollectionSeedOutcome(
-            status="NOT_ATTEMPTED", reason=f"재무 축을 읽지 못했다: {exc}"
+            status="UNREADABLE", reason=f"재무 축을 읽지 못했다: {exc}"
         )
 
     if axis["sim_run_id"] != sim_run_id:
+        # 🔴 **막은 것이다.** `finance_collection.py` 가 같은 상황에 쓰는 낱말과
+        #   같아야 한다 — 같은 사실에 두 낱말을 쓰지 않는다.
         return CollectionSeedOutcome(
-            status="NOT_ATTEMPTED",
+            status="BLOCKED",
             reason=(
                 "실행 축이 다르다: 마스터 sim_run_id="
                 f"{sim_run_id!r}, 재무 축 sim_run_id={axis['sim_run_id']!r}"

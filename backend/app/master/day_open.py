@@ -204,14 +204,17 @@ class DayOpenOut(BaseModel):
     parts: list[DayOpenPartOut] = Field(default_factory=list)
     #: 아직 구현이 없는 파트.
     missing: list[str] = Field(default_factory=list)
-    #: 🔴 **수금 사건 생성 결과. 세 값을 섞지 않는다** (재무 조건 `⑥`).
+    #: 🔴 **수금 사건 생성 결과. 다섯 값을 섞지 않는다** (재무 조건 `⑥`).
     #:
     #: ```text
     #: SEEDED         n 건 만들었다
     #: NOTHING_DUE    **확인했고** 만들 것이 없었다 (0 건)
     #: UNREADABLE     **못 했다** — 조회나 쓰기가 실패했다
-    #: NOT_ATTEMPTED  개장이 안 됐거나 축이 막혀 **시도하지 않았다**
+    #: BLOCKED        **막았다** — 실행 축이 안 맞아 fail-closed 했다
+    #: NOT_ATTEMPTED  시도할 **이유가 없었다** — 하루가 안 열렸다
     #: ```
+    #:
+    #: ★ 낱말의 주인은 `collection_seed.SeedStatus` 다. 여기는 그 값을 실어 나른다.
     #:
     #: ⚠️ `UNREADABLE` 을 `NOTHING_DUE` 로 접으면 표가 안 서 있는 날이 *"확인했고
     #: 없었다"* 로 조용히 지나간다 — `carried_forward_status` 와 같은 규율이다.
