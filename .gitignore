@@ -40,5 +40,11 @@ deploy/runtime.json
 Thumbs.db
 
 
+# Next.js 가 next dev/next build 마다 다시 쓰는 생성 파일.
+# 윈도우에서는 CRLF 로 쓰는데 .gitattributes 가 eol=lf 라 매번 변경으로 잡힌다.
+# 내용은 늘 같고 줄바꿈만 다르다 — 추적할 값이 아니다.
+# 없어도 next build 가 다시 만든다 (2026-09-09 실측). create-next-app 기본값도 이것이다.
+frontend/next-env.d.ts
+
 #예외폴더
 docs/
