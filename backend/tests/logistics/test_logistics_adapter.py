@@ -17,15 +17,23 @@ from decimal import Decimal
 import pytest
 
 from app.logistics import adapter
+from app.logistics.llm import runtime as llm_runtime
 from app.logistics.llm.runtime import (
     InterpretationService,
     LLMSettings,
     UnavailableProvider,
     build_template_interpretation,
+    needs_llm,
 )
 from app.logistics.llm.schemas import SanitizedLLMContext
 from app.logistics.repository import LogisticsRead
-from app.logistics.rules import BUSINESS_SIGNALS
+from app.logistics.rules import (
+    BUSINESS_SIGNALS,
+    CAPACITY_TIGHT,
+    FRESHNESS_QUALITY_RISK,
+    INVENTORY_FRESHNESS_PRESSURE,
+    SCENARIO_ADJUSTMENT_REQUIRED,
+)
 from app.logistics.schemas import (
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
@@ -2904,3 +2912,527 @@ def test_조회는_여전히_LLM_을_타지_않는다(monkeypatch):
     assert provider.calls == 0
     assert meta.llm_status == "DISABLED"
     assert "interpretation" not in reply.payload
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_VALIDATION — LLM Gate Golden Case (#399)
+#
+# ★ **이 절은 안전망이다.** Gate 를 넓히지도 좁히지도 않고, 지금 무엇이 불리고 무엇이
+#   Template 으로 남는지를 **도달 가능한 조합 전수**로 고정한다.
+#
+# ★ **`needs_llm` 단위 테스트와 겹치지 않는다.** 저쪽(`tests/llm/`)은 손으로 만든
+#   Context 로 게이트 산수를 재고, 여기서는 **실 스냅샷과 실 매입 제안**으로 그 signal
+#   조합이 애초에 성립하는지까지 잰다 — 도달 불가능한 조합을 고정하면 안전망이 아니라
+#   허구다.
+#
+# ★ Provider 는 전부 가짜다. 실 Gemini · Ollama · HTTP 는 한 번도 열리지 않는다.
+# ---------------------------------------------------------------------------
+
+#: 선택 정책 2종 — 실 DB seed (`database/logistics_llm_policy_seed.sql`) 와 같은 값이다.
+_GOLDEN_TIGHT_RATIO = Decimal("0.90")
+_GOLDEN_FRESHNESS_RATIO = Decimal("0.30")
+
+#: 창고 점유. 8,000 보장 기준 7,200 이면 사용률이 정확히 0.90 이라 **경계 포함**으로 선다.
+_GOLDEN_TIGHT_USED_KG = Decimal(7200)
+_GOLDEN_ROOMY_USED_KG = Decimal(1000)
+
+#: 신선도 잔여 비율. 한계 15 일 기준 3/15 = 0.20 (임계 이하) · 12/15 = 0.80 (정상).
+_GOLDEN_RISK_FRESHNESS_DAYS = 3
+_GOLDEN_SAFE_FRESHNESS_DAYS = 12
+_GOLDEN_FRESHNESS_LIMIT_DAYS = 15
+
+
+def _golden_snapshot(
+    *, capacity_tight: bool, freshness_pressure: bool, **overrides
+) -> InventoryLogisticsSnapshot:
+    """signal 두 개를 **입력으로** 켜고 끈다 — 판정은 Rule 이 한다.
+
+    ```text
+    capacity_tight      used_capacity_kg 로 사용률을 임계 위/아래로 옮긴다
+    freshness_pressure  Lot 의 잔여 신선도로 비율을 임계 이하/위로 옮긴다
+    ```
+
+    ★ 두 축이 서로 간섭하지 않는다. Lot 100kg 은 `used_capacity_kg` 안에 들어가므로
+      (`tools._initial_occupancy_by_item` 의 미귀속 버킷) 신선도를 바꿔도 사용률은
+      그대로다. 조합을 독립적으로 켤 수 있는 근거가 이것이다.
+    """
+    lot = InventoryLotSnapshot(
+        lot_id="LOT-GOLDEN",
+        item="배추",
+        available_qty_kg=Decimal(100),
+        remaining_freshness_days=(
+            _GOLDEN_RISK_FRESHNESS_DAYS if freshness_pressure else _GOLDEN_SAFE_FRESHNESS_DAYS
+        ),
+        effective_freshness_limit_days=_GOLDEN_FRESHNESS_LIMIT_DAYS,
+        status="ACTIVE",
+    )
+    return _snapshot(
+        on_hand_by_lot=[lot],
+        used_capacity_kg=_GOLDEN_TIGHT_USED_KG if capacity_tight else _GOLDEN_ROOMY_USED_KG,
+        capacity_tight_ratio=_GOLDEN_TIGHT_RATIO,
+        freshness_pressure_ratio=_GOLDEN_FRESHNESS_RATIO,
+        **overrides,
+    )
+
+
+def _golden_payload(*, adjustment_required: bool) -> dict:
+    """`SCENARIO_ADJUSTMENT_REQUIRED` 를 켜고 끈다.
+
+    ★ 20,000kg 은 어느 여유에서도 `conditional` 이고(기존 `_signal_payload`),
+      500kg 은 가장 빡빡한 경우(여유 800kg)에도 `ok` 다.
+      제안 크기를 여유에 맞춰 고른 것이라, 조정 signal 이 사용률과 얽히지 않는다.
+    """
+    if adjustment_required:
+        return _signal_payload()
+    payload = _proposal_payload()
+    scenario = payload["scenarios"][0]
+    scenario["total_qty_kg"] = 500
+    scenario["total_amount_krw"] = 825000
+    scenario["split_plan"] = [{"seq": 1, "date": AS_OF.isoformat(), "qty_kg": 500}]
+    scenario["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 500, "grade_unit_price": 1650}
+    ]
+    return payload
+
+
+def _golden_run(monkeypatch, *, capacity_tight, freshness_pressure, adjustment_required, **kwargs):
+    """Golden Case 한 건 실행 — 요청·회신·메타·Provider 를 함께 돌려준다.
+
+    ★ `_load_read` 만 갈아 끼우고 **Tool · Rule · Scenario Engine 은 진짜를 돌린다.**
+      signal 을 손으로 넣으면 "그 조합이 성립하는가" 를 못 재고 게이트 산수만 남는다.
+    """
+    provider = _Provider(kwargs.pop("behaviour", "echo"))
+    _inject(monkeypatch, _llm(provider, enabled=kwargs.pop("enabled", True)))
+    snapshot = _golden_snapshot(
+        capacity_tight=capacity_tight,
+        freshness_pressure=freshness_pressure,
+        **kwargs.pop("snapshot_overrides", {}),
+    )
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(snapshot))
+    monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
+    request = req(
+        mode="SCENARIO_VALIDATION",
+        payload=_golden_payload(adjustment_required=adjustment_required),
+    )
+    reply, meta = adapter.logistics_port(request)
+    return request, reply, meta, provider
+
+
+#: 도달 가능한 signal 부분집합 8개와 **현재** Gate 결과.
+#:
+#: 🔴 이 표는 기대를 적은 것이 아니라 **실측을 고정한 것이다.** 값을 바꾸려면 먼저
+#:    production Gate 가 바뀌어야 하고, 그것은 이 이슈의 범위 밖이다 (#399 금지 목록).
+#:
+#: ★ `FRESHNESS_QUALITY_RISK` 는 여기 없다 — SALES 사이클 signal 이라
+#:   `evaluate_sales_business_signals` 만 낸다. SCENARIO_VALIDATION 은 PROCUREMENT
+#:   사이클이므로 이 표에 넣으면 **성립하지 않는 상태를 고정하는** 테스트가 된다.
+_GOLDEN_GATE_CASES = [
+    pytest.param((False, False, False), set(), "SKIPPED_TEMPLATE", 0, id="signals_none__SKIPPED"),
+    pytest.param((True, False, False), {CAPACITY_TIGHT}, "SKIPPED_TEMPLATE", 0, id="CT__SKIPPED"),
+    pytest.param(
+        (False, True, False), {INVENTORY_FRESHNESS_PRESSURE}, "SUCCESS", 1, id="IFP__CALL"
+    ),
+    pytest.param(
+        (False, False, True), {SCENARIO_ADJUSTMENT_REQUIRED}, "SUCCESS", 1, id="SAR__CALL"
+    ),
+    pytest.param(
+        (True, True, False),
+        {CAPACITY_TIGHT, INVENTORY_FRESHNESS_PRESSURE},
+        "SUCCESS",
+        1,
+        id="CT_IFP__CALL",
+    ),
+    pytest.param(
+        (True, False, True),
+        {CAPACITY_TIGHT, SCENARIO_ADJUSTMENT_REQUIRED},
+        "SUCCESS",
+        1,
+        id="CT_SAR__CALL",
+    ),
+    pytest.param(
+        (False, True, True),
+        {INVENTORY_FRESHNESS_PRESSURE, SCENARIO_ADJUSTMENT_REQUIRED},
+        "SUCCESS",
+        1,
+        id="IFP_SAR__CALL",
+    ),
+    pytest.param(
+        (True, True, True),
+        {CAPACITY_TIGHT, INVENTORY_FRESHNESS_PRESSURE, SCENARIO_ADJUSTMENT_REQUIRED},
+        "SUCCESS",
+        1,
+        id="CT_IFP_SAR__CALL",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "expected_signals", "expected_status", "expected_calls"), _GOLDEN_GATE_CASES
+)
+def test_golden_gate(monkeypatch, inputs, expected_signals, expected_status, expected_calls):
+    """🔴 **이 절의 중심.** 도달 가능한 8조합의 signal 성립과 Gate 결과를 함께 고정한다.
+
+    두 가지를 한 번에 재는 것이 요점이다.
+
+    ```text
+    signal 이 실제로 서는가   실 스냅샷·실 제안으로 만든 조합인지
+    그래서 불렸는가           Provider 호출 횟수가 곧 답이다
+    ```
+
+    앞을 안 재면 도달 불가능한 조합을 고정할 수 있고, 뒤를 안 재면 게이트가 아니라
+    signal 판정만 재게 된다.
+    """
+    capacity_tight, freshness_pressure, adjustment_required = inputs
+    request, reply, meta, provider = _golden_run(
+        monkeypatch,
+        capacity_tight=capacity_tight,
+        freshness_pressure=freshness_pressure,
+        adjustment_required=adjustment_required,
+    )
+
+    assert reply.runtime_status == "READY"
+    assert set(_business_signals(reply)) == expected_signals
+    assert meta.llm_status == expected_status
+    assert provider.calls == expected_calls
+    assert meta.llm_attempts == expected_calls
+    # 🔴 하드 제약 FAIL 은 정상 운전에서 성립하지 않는다 — 아래 차단 절이 그 유일한
+    #    도달 경로(기준일 불일치)를 따로 고정한다.
+    assert [c for c in reply.payload["hard_constraints"] if c["status"] == "FAIL"] == []
+    assert validate_reply(request, reply, meta) == ()
+
+
+@pytest.mark.parametrize(
+    ("inputs", "expected_signals", "expected_status", "expected_calls"), _GOLDEN_GATE_CASES
+)
+def test_golden_gate_는_deterministic_결과를_바꾸지_않는다(
+    monkeypatch, inputs, expected_signals, expected_status, expected_calls
+):
+    """★ 8조합 **각각에서** LLM 을 끈 회신과 켠 회신의 업무 결과가 같다.
+
+    기존 결정론 보존 테스트는 signal 하나(조정 필요)에서 다섯 상태를 비교한다.
+    여기서는 반대 축으로 넓힌다 — signal 조합을 전수로 돌면서 **켬/끔 두 상태**를 비교해,
+    Context 가 가장 두꺼운 조합(신선도 fact 둘 + 사용률 + 시나리오)에서도 결정론 결과가
+    흔들리지 않는지 본다.
+
+    ★ 비교 helper 를 새로 만들지 않는다 — `_business_view` · `_trace_view` 가 이미
+      "LLM 이 건드리면 안 되는 것" 의 정본이다. 범위를 좁혀 통과시키는 일이 없도록
+      그대로 쓴다.
+    """
+    del expected_signals, expected_status, expected_calls
+    capacity_tight, freshness_pressure, adjustment_required = inputs
+    kwargs = {
+        "capacity_tight": capacity_tight,
+        "freshness_pressure": freshness_pressure,
+        "adjustment_required": adjustment_required,
+    }
+
+    _, 켬_reply, 켬_meta, _ = _golden_run(monkeypatch, **kwargs)
+    _, 끔_reply, 끔_meta, 끔_provider = _golden_run(monkeypatch, enabled=False, **kwargs)
+
+    assert 끔_provider.calls == 0
+    assert 끔_meta.llm_status == "DISABLED"
+    assert _business_view(켬_reply) == _business_view(끔_reply)
+    assert _trace_view(켬_meta) == _trace_view(끔_meta)
+
+
+def test_composite_분기는_도달_가능한_조합_어디서도_판정을_바꾸지_않는다(monkeypatch):
+    """★ `_COMPOSITE_SIGNALS` 휴면을 **주석이 아니라 실행으로** 고정한다.
+
+    비워도 8조합의 게이트 결과가 전부 같으면, 그 분기는 어느 조합에서도 판정을 내리지
+    않는다는 뜻이다 — `{CAPACITY_TIGHT, INVENTORY_FRESHNESS_PRESSURE}` 조합조차
+    질적 signal 분기가 먼저 잡는다.
+
+    🔴 **휴면이라고 production 코드를 지우지 않는다.** 단독 호출 대상이 아닌 업무 위험이
+      추가되는 날 살아나는 확장 자리이고, 이 이슈는 Gate 를 건드리지 않는다 (#399).
+      여기서 하는 일은 *"오늘은 안 쓰인다"* 를 사실로 남기는 것뿐이다.
+    """
+    조합 = [
+        set(),
+        {CAPACITY_TIGHT},
+        {INVENTORY_FRESHNESS_PRESSURE},
+        {SCENARIO_ADJUSTMENT_REQUIRED},
+        {CAPACITY_TIGHT, INVENTORY_FRESHNESS_PRESSURE},
+        {CAPACITY_TIGHT, SCENARIO_ADJUSTMENT_REQUIRED},
+        {INVENTORY_FRESHNESS_PRESSURE, SCENARIO_ADJUSTMENT_REQUIRED},
+        {CAPACITY_TIGHT, INVENTORY_FRESHNESS_PRESSURE, SCENARIO_ADJUSTMENT_REQUIRED},
+    ]
+
+    def gate(signals):
+        context = SanitizedLLMContext(signals=sorted(signals), facts=[], allowed_adjustments=[])
+        return needs_llm(context, runtime_ready=True, has_blocking_constraints=False)
+
+    원본 = [gate(signals) for signals in 조합]
+    monkeypatch.setattr(llm_runtime, "_COMPOSITE_SIGNALS", frozenset())
+    비운_뒤 = [gate(signals) for signals in 조합]
+
+    assert 비운_뒤 == 원본
+    # 그리고 그 결과는 "질적 signal 이 하나라도 있는가" 와 같다 — CAPACITY_TIGHT 만
+    # 단독으로 남는 조합이 유일한 SKIP 이다.
+    assert 원본 == [bool(signals - {CAPACITY_TIGHT}) for signals in 조합]
+
+
+def test_SALES_signal_은_SCENARIO_VALIDATION_에서_성립하지_않는다(monkeypatch):
+    """★ `FRESHNESS_QUALITY_RISK` 를 Golden Case 에 넣지 않은 **이유를 고정한다.**
+
+    같은 신선도 비율에서 PROCUREMENT 는 `INVENTORY_FRESHNESS_PRESSURE` 를 내고
+    SALES 만 `FRESHNESS_QUALITY_RISK` 를 낸다 (`rules.evaluate_*_business_signals`).
+    SCENARIO_VALIDATION 은 PROCUREMENT 사이클이므로 그 signal 은 여기 올 수 없다.
+
+    억지 fixture 로 만들면 성립하지 않는 상태를 고정하게 된다 — 안전망이 아니라 허구다.
+    """
+    _, reply, _, _ = _golden_run(
+        monkeypatch, capacity_tight=False, freshness_pressure=True, adjustment_required=False
+    )
+
+    signals = set(_business_signals(reply))
+    assert INVENTORY_FRESHNESS_PRESSURE in signals
+    assert FRESHNESS_QUALITY_RISK not in signals
+    assert FRESHNESS_QUALITY_RISK not in _all_keys(reply.payload)
+
+
+# ── Gate 차단 조건 — Provider 호출 0건 ──────────────────────────
+
+
+def test_차단_LLM_이_꺼져_있으면_부르지_않는다(monkeypatch):
+    """설정 부재 = 꺼짐. 질적 signal 이 서 있어도 호출은 0건이다."""
+    _, reply, meta, provider = _golden_run(
+        monkeypatch,
+        capacity_tight=False,
+        freshness_pressure=True,
+        adjustment_required=True,
+        enabled=False,
+    )
+
+    assert INVENTORY_FRESHNESS_PRESSURE in _business_signals(reply)
+    assert provider.calls == 0
+    assert meta.llm_status == "DISABLED"
+    assert meta.llm_attempts == 0
+
+
+def test_차단_runtime_이_준비되지_않으면_부르지_않는다(monkeypatch):
+    """★ 확정 출고 일정 미조회 하나로 `calculation_ready` 가 꺼진다.
+
+    🔴 이 경로가 **하드 제약 FAIL 없이** runtime 만 막는 유일한 자리다 — 아래
+      기준일 불일치 테스트와 짝이고, 둘을 나눠 두어야 어느 조건이 막았는지 알 수 있다.
+    """
+    _, reply, meta, provider = _golden_run(
+        monkeypatch,
+        capacity_tight=False,
+        freshness_pressure=True,
+        adjustment_required=False,
+        snapshot_overrides={"confirmed_outbound_schedule": None},
+    )
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert [c for c in reply.payload["hard_constraints"] if c["status"] == "FAIL"] == []
+    assert INVENTORY_FRESHNESS_PRESSURE in _business_signals(reply)
+    assert provider.calls == 0
+    assert meta.llm_status == "SKIPPED_TEMPLATE"
+
+
+def test_차단_하드_제약_FAIL_은_기준일_불일치로만_성립한다(monkeypatch):
+    """🔴 **FAIL 을 단독으로 만들 수 없다는 사실 자체가 계약이다.**
+
+    PROCUREMENT 하드 제약은 `_known_constraint` 가 만들고 그것은 `PASS` 아니면
+    `UNRESOLVED` 다 (`rules.py`). FAIL 이 나오는 자리는 `_snapshot_boundary` 둘뿐인데,
+    스냅샷 부재는 어댑터가 그 앞에서 `_not_ready` 로 접고, 남는 것은 기준일 불일치다.
+    그리고 그 경로는 `runtime_status` 도 함께 내린다.
+
+    ★ 그래서 어댑터 층에서는 두 차단 조건을 **분리할 수 없다.** 분리 검증은
+      `tests/llm/test_logistics_interpretation_runtime.py::test_fail_blocks_the_call_even_with_signals`
+      가 `needs_llm` 층에서 이미 한다 — 여기서 같은 것을 다시 만들지 않는다.
+    """
+    _, reply, meta, provider = _golden_run(
+        monkeypatch,
+        capacity_tight=False,
+        freshness_pressure=True,
+        adjustment_required=False,
+        snapshot_overrides={"as_of": date(2025, 12, 30)},
+    )
+
+    실패 = [c["code"] for c in reply.payload["hard_constraints"] if c["status"] == "FAIL"]
+    assert 실패 == ["AS_OF_MISMATCH"]
+    assert reply.runtime_status == "RUNTIME_NOT_READY"  # 둘이 함께 선다
+    assert provider.calls == 0
+    assert meta.llm_status == "SKIPPED_TEMPLATE"
+
+
+class _RecordingService(InterpretationService):
+    """`interpret()` 이 받은 게이트 인자를 기록한다. 판정은 실물 그대로 돈다."""
+
+    def __init__(self, settings, provider):
+        super().__init__(settings, provider)
+        self.gate_args: list[dict] = []
+
+    def interpret(self, context, **kwargs):
+        self.gate_args.append(dict(kwargs))
+        return super().interpret(context, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("snapshot_overrides", "expected"),
+    [
+        pytest.param({}, False, id="정상__blocking_False"),
+        pytest.param({"as_of": date(2025, 12, 30)}, True, id="기준일_불일치__blocking_True"),
+    ],
+)
+def test_어댑터가_넘기는_게이트_인자를_직접_고정한다(monkeypatch, snapshot_overrides, expected):
+    """🔴 **이 인자는 결과로 관측되지 않는다 — 그래서 인자를 직접 잰다.**
+
+    어댑터가 `has_blocking_constraints` 를 통째로 `False` 로 바꿔도 회신은 하나도 달라지지
+    않는다. 유일하게 FAIL 이 서는 경로(기준일 불일치)가 `runtime_ready=False` 도 함께
+    내려서 게이트가 그쪽에서 먼저 닫히기 때문이다.
+
+    즉 이 배선은 **지워도 아무 테스트가 안 깨지는 자리**였다. 결과가 못 보는 것을
+    인자로 본다 — `_TOOL_INPUTS` 계약을 실행이 아니라 선언으로 잠그는 것과 같은 태도다.
+    """
+    provider = _Provider()
+    service = _RecordingService(_llm(provider).settings, provider)
+    monkeypatch.setattr(adapter, "master_interpretation_service", lambda: service)
+    snapshot = _golden_snapshot(capacity_tight=False, freshness_pressure=True, **snapshot_overrides)
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(snapshot))
+    monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
+    request = req(mode="SCENARIO_VALIDATION", payload=_golden_payload(adjustment_required=False))
+    adapter.logistics_port(request)
+
+    assert len(service.gate_args) == 1
+    assert service.gate_args[0]["has_blocking_constraints"] is expected
+    # 짝이 되는 두 인자도 함께 고정한다 — 셋이 한 자리에서 정해진다
+    assert service.gate_args[0]["runtime_ready"] is not expected
+    assert service.gate_args[0]["facts_incomplete"] is False
+
+
+def test_차단_facts_조립이_불완전하면_부르지_않는다(monkeypatch):
+    """★ fact 상한 초과·조립 실패는 조용한 절단이 아니라 **미호출**이다.
+
+    signal 은 섰는데 판정 수치가 전달되지 않은 상태는 Rule to Service 배선이 깨진
+    것이라, 확인된 fact 없이 해석시키지 않고 무숫자 Template 으로 남긴다.
+    """
+    real_builder = adapter.build_sanitized_context
+
+    def incomplete_builder(**kwargs):
+        context, _ = real_builder(**kwargs)
+        return context, True
+
+    monkeypatch.setattr(adapter, "build_sanitized_context", incomplete_builder)
+    _, reply, meta, provider = _golden_run(
+        monkeypatch,
+        capacity_tight=False,
+        freshness_pressure=True,
+        adjustment_required=True,
+    )
+
+    assert reply.runtime_status == "READY"
+    assert _business_signals(reply)  # signal 은 그대로 선다
+    assert provider.calls == 0
+    assert meta.llm_status == "SKIPPED_TEMPLATE"
+
+
+# ── Context leakage · 정보 증분 진단 ────────────────────────────
+
+
+def test_가장_두꺼운_Context_에서도_원본_업무값이_새지_않는다(monkeypatch):
+    """★ 기존 leakage 테스트는 signal 하나(조정 필요)의 Context 를 본다.
+
+    여기서는 **세 signal 이 다 선 조합**을 본다. 신선도 fact 둘은 Lot 에서 나오고
+    사용률 fact 는 창고 점유에서 나오므로, 그쪽으로 lot_id 나 kg 이 새는지는 이 조합에서만
+    드러난다.
+    """
+    _, _, _, provider = _golden_run(
+        monkeypatch, capacity_tight=True, freshness_pressure=True, adjustment_required=True
+    )
+
+    assert len(provider.contexts) == 1
+    context = provider.contexts[0]
+    assert isinstance(context, SanitizedLLMContext)
+    # 세 signal 의 fact 넷 — 판정에 실제 쓰인 수치의 확정 표기뿐이다
+    assert [fact.fact_id for fact in context.facts] == [
+        "capacity_window_usage",
+        "freshness_risk_lot_count",
+        "freshness_min_remaining_ratio",
+        "scenario_conditional_count",
+    ]
+    serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
+    금지 = (
+        "LOT-GOLDEN",  # lot_id
+        AS_OF.isoformat(),  # 원본 날짜
+        SIM_RUN_ID,  # 실행 축
+        "REQ-T",  # request_id
+        "7200",  # 원본 창고 점유 kg
+        "20000",  # 원본 제안 수량 kg
+        "33000000",  # 원본 금액
+        "1650",  # 단가
+        "배추",  # 품목
+    )
+    for token in 금지:
+        assert token not in serialized, token
+
+
+def test_복수_signal_이_해석까지_하나도_빠지지_않고_간다(monkeypatch):
+    """★ 다중 signal 진단 — **배선**을 잰다.
+
+    Rule 이 낸 signal 셋이 Context 를 지나 `payload["interpretation"].risks` 까지
+    그대로 도착하는지를 본다. 중간에서 하나가 떨어지면 사람이 보는 위험 목록이
+    결정론 판정보다 짧아진다.
+
+    ⚠️ 이것은 **모델 품질 점수가 아니다.** 출력이 signal 집합과 일치해야 한다는 것은
+      검증기(`SIGNAL_MISSING` · `UNSUPPORTED_RISK`)가 이미 강제하므로 여기서 같은
+      규칙을 다시 만들지 않는다 — 여기서 새로 재는 것은 어댑터 배선이다.
+    """
+    _, reply, _, provider = _golden_run(
+        monkeypatch, capacity_tight=True, freshness_pressure=True, adjustment_required=True
+    )
+
+    context = provider.contexts[0]
+    assert set(context.signals) == {
+        CAPACITY_TIGHT,
+        INVENTORY_FRESHNESS_PRESSURE,
+        SCENARIO_ADJUSTMENT_REQUIRED,
+    }
+    assert reply.payload["interpretation"]["risks"] == list(context.signals)
+    assert set(_business_signals(reply)) == set(context.signals)
+
+
+def test_summary_는_fact_표기를_인용해_Template_이_못_내는_문장을_낼_수_있다(monkeypatch):
+    """★ 정보 증분 **가능성** 진단 — 품질 점수가 아니다.
+
+    Template 은 계약상 무숫자다 (`_TEMPLATE_SIGNAL_PHRASES`). 그래서 "측정값을 인용한
+    문장" 은 Template 이 구조적으로 못 내는 유일한 종류이고, 그것이 현재 스키마에서
+    가능한 정보 증분의 상한이다. 그 상한이 어댑터 경로 끝까지 살아 있는지 본다.
+
+    ⚠️ **모델이 실제로 인용하는지는 재지 않는다.** 여기 Provider 는 가짜라 그것을 재면
+      가짜를 재는 것이 된다. 검증기 층의 인용 허용·거부는
+      `tests/llm/test_logistics_context_facts.py` 가 이미 고정한다.
+    """
+
+    class _CitingProvider(_Provider):
+        """허용된 fact 표기를 그대로 인용하는 가짜 Provider."""
+
+        def generate(self, context, *, retry_guidance=None):
+            self.contexts.append(context)
+            self.guidance.append(retry_guidance)
+            인용 = context.facts[0].display_value
+            return json.dumps(
+                {
+                    "summary": f"판정 창 최대 창고 사용률은 {인용} 입니다.",
+                    "risks": list(context.signals),
+                    "suggested_adjustment": context.preferred_adjustment,
+                },
+                ensure_ascii=False,
+            )
+
+    provider = _CitingProvider()
+    _inject(monkeypatch, _llm(provider))
+    snapshot = _golden_snapshot(capacity_tight=True, freshness_pressure=False)
+    monkeypatch.setattr(adapter, "_load_read", lambda *, as_of, sim_run_id: _read(snapshot))
+    monkeypatch.setattr(adapter, "build_lot_constraints", real_build_lot_constraints)
+    request = req(mode="SCENARIO_VALIDATION", payload=_golden_payload(adjustment_required=True))
+    reply, meta = adapter.logistics_port(request)
+
+    assert meta.llm_status == "SUCCESS"  # 인용은 검증기를 통과한다
+    인용 = provider.contexts[0].facts[0].display_value
+    assert 인용 in reply.payload["interpretation"]["summary"]
+    # Template 은 같은 자리에서 숫자를 내지 못한다 — 그것이 증분의 정체다
+    템플릿 = build_template_interpretation(provider.contexts[0])
+    assert not any(ch.isdigit() for ch in 템플릿.summary)
+    assert validate_reply(request, reply, meta) == ()
