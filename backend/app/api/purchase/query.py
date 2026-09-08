@@ -244,18 +244,26 @@ def _legs(scenario: dict[str, Any]) -> Table:
 
 
 def _payments(scenario: dict[str, Any]) -> Table:
-    """지급 계획. ⚠️ 저장된 실행에는 **아직 없다.**
+    """지급 계획. ★ **분할 안에서만 실린다.**
 
-    ``payment_schedule`` 칸은 있지만 값이 ``null`` 이다 — 지급일 규칙
-    (`purchase_payment_days` · N5)이 미결이라 채운 적이 없다. 0 이나 매입일로
-    메우지 않는다 (규칙 3).
+    저장된 실행에서 회차 수와 완전히 맞물린다 (2026-09-08 실측)::
+
+        split_plan 1회차   719건   payment_schedule 없음
+        split_plan 2회차   228건   payment_schedule 배열     ← 228 = 228
+
+    ⚠️ 그래서 **빈 표가 흔한 것이 정상**이다. 한 번에 사는 안은 지급이 한 건이라
+    따로 계획을 만들지 않는다. 없는 것을 매입일로 메우지 않는다 (규칙 3) —
+    지급일 규칙(``purchase_payment_days`` · N5)이 아직 미결이라 더 그렇다.
+
+    ``basis`` · ``amount_max_krw`` 는 안 싣는다. 앞은 내부 어휘이고 뒤는 **재무
+    STRESS 금액**이라, 지급 표에 두면 실제로 낼 돈으로 읽힌다.
     """
     rows: list[dict[str, Any]] = []
     for pay in scenario.get("payment_schedule") or []:
         amount = pay.get("amount_krw")
         rows.append({
             "leg": pay.get("seq"),
-            "buy": pay.get("purchase_date") or pay.get("date"),
+            "buy": pay.get("purchase_date"),
             "pay": pay.get("payment_date"),
             "amount": None if amount is None else f"{_money(amount):,} 원",
         })

@@ -235,6 +235,67 @@ def test_안이_없으면_안별_컷_사유를_적는다(read):
     assert "창고" in note
 
 
+#: 실제 저장된 모양에서 그대로 옮겼다 (`2025-12-31` 배추 공격안). **지어내지 않는다** —
+#: 키를 하나라도 틀리게 적으면 검사는 통과하는데 화면만 빈다.
+_PAYMENT_SCHEDULE = [
+    {"seq": 1, "basis": "as_of_unit_price", "qty_kg": 3818, "amount_krw": 6_299_700,
+     "payment_date": "2026-01-07", "purchase_date": "2025-12-31",
+     "amount_max_krw": 7_258_018},
+    {"seq": 2, "basis": "as_of_unit_price", "qty_kg": 3818, "amount_krw": 6_299_700,
+     "payment_date": "2026-01-13", "purchase_date": "2026-01-06",
+     "amount_max_krw": 7_258_018},
+]
+
+
+def test_지급_계획이_있으면_그대로_편다(read):
+    """★ 지급 계획은 **분할 안에서만** 실린다 (2026-09-08 실측).
+
+    ::
+
+        split_plan 1회차   719건   payment_schedule 없음
+        split_plan 2회차   228건   payment_schedule 배열     ← 228 = 228
+
+    저장된 분할 안이 전부 `2025-12-31` 이고 그날 최신 실행은 1회차라, 이 갈래는
+    **실 데이터로 아직 안 탄다.** 그래서 검사로 세운다 — 안 세우면 분할 안이
+    최신이 되는 날 화면이 조용히 빈다.
+    """
+    read(_data(runs=[_run("REQ-A", _scenario("공격", payment_schedule=_PAYMENT_SCHEDULE))]))
+    table = tab.build(AS_OF).plans[0].payments
+
+    assert [row["leg"] for row in table.rows] == [1, 2]
+    assert [row["buy"] for row in table.rows] == ["2025-12-31", "2026-01-06"]
+    assert [row["pay"] for row in table.rows] == ["2026-01-07", "2026-01-13"]
+    assert [row["amount"] for row in table.rows] == ["6,299,700 원", "6,299,700 원"]
+    #  ★ 머리에 있는 칸이 행에 다 있어야 한다 — 없으면 그 칸이 통째로 빈다.
+    for row in table.rows:
+        assert not {c.key for c in tab._PAY_COLS} - set(row)
+
+
+def test_지급_표에_재무_스트레스_금액을_안_싣는다(read):
+    """🔴 `amount_max_krw` 는 **상한가로 샀을 때의 금액**이다 (재무 STRESS).
+
+    지급 표에 두면 «실제로 낼 돈» 으로 읽힌다. 이 PR 이 `max_price` 를 컷 자리에서
+    빼낸 것과 같은 이유다 — 자리가 뜻을 만든다.
+    """
+    read(_data(runs=[_run("REQ-A", _scenario("공격", payment_schedule=_PAYMENT_SCHEDULE))]))
+    rendered = str(tab.build(AS_OF).plans[0].payments.rows)
+
+    assert "7,258,018" not in rendered
+    assert "as_of_unit_price" not in rendered
+
+
+def test_지급_계획이_없으면_빈_표에_이유를_적는다(read):
+    """한 번에 사는 안은 지급이 한 건이라 계획을 따로 안 만든다.
+
+    ⚠️ **빈 표가 흔한 것이 정상**이다. 매입일로 메우면 «그날 냈다» 는 거짓이 된다.
+    """
+    read(_data(runs=[_run("REQ-A", _scenario("보수"))]))
+    table = tab.build(AS_OF).plans[0].payments
+
+    assert table.rows == []
+    assert table.empty_text.strip()
+
+
 def test_줄_금액은_원장_합계가_아니라_줄_금액이다(read):
     """레슨 ③ — ``purchases`` 와 ``purchase_items`` 를 조인하면 합계가 줄마다 반복된다.
 
