@@ -3,7 +3,12 @@
 from datetime import date
 from decimal import Decimal
 
-from app.logistics.llm.runtime import InterpretationService, LLMSettings, UnavailableProvider
+from app.logistics.llm.runtime import (
+    InterpretationService,
+    LLMSettings,
+    ProviderResult,
+    UnavailableProvider,
+)
 from app.logistics.rules import (
     CAPACITY_TIGHT,
     CAPACITY_TIGHT_POLICY_UNRESOLVED,
@@ -405,13 +410,15 @@ def test_sales_wiring_carries_rule_measurements_to_llm_context_facts(
     class _ValidProvider:
         def generate(self, context, *, retry_guidance=None):
             del context, retry_guidance
-            return json.dumps(
-                {
-                    "summary": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
-                    "risks": ["FRESHNESS_QUALITY_RISK"],
-                    "suggested_adjustment": SALES_PRIORITY_ADJUSTMENT,
-                },
-                ensure_ascii=False,
+            return ProviderResult(
+                text=json.dumps(
+                    {
+                        "summary": "재고의 우선 출고와 품질 위험 검토가 필요합니다.",
+                        "risks": ["FRESHNESS_QUALITY_RISK"],
+                        "suggested_adjustment": SALES_PRIORITY_ADJUSTMENT,
+                    },
+                    ensure_ascii=False,
+                )
             )
 
     service = InterpretationService(

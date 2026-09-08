@@ -27,6 +27,8 @@ from app.logistics.llm.runtime import (
     InterpretationService,
     InterpretationValidationError,
     LLMSettings,
+    ProviderResult,
+    ProviderUsage,
     UnavailableProvider,
     ValidationIssue,
     build_template_interpretation,
@@ -297,7 +299,10 @@ class _FakeProvider:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        return response
+        if isinstance(response, ProviderResult):
+            return response
+        # str 은 "usage 를 보고하지 않은 응답" 의 축약이다 (#406).
+        return ProviderResult(text=response)
 
 
 def _service(provider, *, enabled=True):
@@ -655,3 +660,104 @@ def test_uncalled_standalone_paths_keep_latency_none():
     assert provider.calls == 0
     assert skipped.llm_provider_elapsed_ms is None
     assert disabled.llm_provider_elapsed_ms is None
+
+
+# ---------------------------------------------------------------------------
+# Provider token usage — 독립 경로 생존과 값 계약 (#406)
+# ---------------------------------------------------------------------------
+
+
+def test_observed_token_fields_are_in_both_llm_models():
+    """🔴 한쪽에만 넣으면 **예외가 아니라 침묵이다** (#406 M9).
+
+    위 `test_interpretation_result_and_response_fields_carry_the_same_llm_contract` 가
+    집합 동일성을 잠그지만, 그 검사는 *"둘이 같다"* 만 말한다. 새 필드가 **양쪽 모두에서
+    빠졌을 때**도 통과하므로 이름을 따로 못 박는다 — `llm_provider_elapsed_ms` 에
+    같은 줄을 둔 것과 같은 이유다.
+    """
+    from app.logistics.llm.schemas import InterpretationResult, LLMResponseFields
+
+    for model in (InterpretationResult, LLMResponseFields):
+        assert "llm_observed_input_tokens" in model.model_fields, model.__name__
+        assert "llm_observed_output_tokens" in model.model_fields, model.__name__
+
+
+def test_observed_token_fields_reject_negative_counts():
+    """토큰은 개수다 — 음수는 계약 위반이고 조용히 통과시키지 않는다."""
+    from pydantic import ValidationError
+
+    from app.logistics.llm.schemas import LLMResponseFields
+
+    for field in ("llm_observed_input_tokens", "llm_observed_output_tokens"):
+        with pytest.raises(ValidationError):
+            LLMResponseFields(**{field: -1})
+
+
+@pytest.mark.parametrize("value", [None, 0, 137])
+def test_observed_token_fields_accept_none_zero_and_counts(value):
+    """`None`(미관측) · `0`(Provider 가 0 이라 보고) · 양수가 모두 유효한 상태다."""
+    from app.logistics.llm.schemas import LLMResponseFields
+
+    response = LLMResponseFields(llm_observed_input_tokens=value, llm_observed_output_tokens=value)
+
+    assert response.llm_observed_input_tokens == value
+    assert response.llm_observed_output_tokens == value
+
+
+def test_observed_usage_survives_the_standalone_service_path():
+    """독립 경로 응답과 그 직렬화까지 값이 살아 도착한다 (`llm_provider_elapsed_ms` 규율)."""
+    response = _procurement_response(
+        runtime_status="READY",
+        soft_warnings=["INVENTORY_FRESHNESS_PRESSURE"],
+        preferred_adjustment=None,
+    )
+
+    enriched = enrich_logistics_response(
+        response,
+        _service(
+            _FakeProvider(
+                [
+                    ProviderResult(
+                        text=_success_output(),
+                        usage=ProviderUsage(input_tokens=137, output_tokens=24),
+                    )
+                ]
+            )
+        ),
+        measurements={
+            "freshness_risk_lot_count": 3,
+            "freshness_min_remaining_ratio": Decimal("0.25"),
+            "freshness_pressure_ratio": Decimal("0.30"),
+        },
+    )
+
+    assert enriched.llm_status == "SUCCESS"
+    assert enriched.llm_observed_input_tokens == 137
+    assert enriched.llm_observed_output_tokens == 24
+    # 저장(response_payload)·API 응답이 지나는 직렬화에도 실린다 — 저장 스키마는 그대로다
+    dumped = enriched.model_dump(mode="json")
+    assert dumped["llm_observed_input_tokens"] == 137
+    assert dumped["llm_observed_output_tokens"] == 24
+    # 🔴 Provider 원본 필드명은 응답 어디에도 오지 않는다
+    serialized = json.dumps(dumped, ensure_ascii=False, default=str)
+    for raw_name in ("promptTokenCount", "candidatesTokenCount", "prompt_eval_count", "eval_count"):
+        assert raw_name not in serialized, raw_name
+
+
+def test_uncalled_standalone_paths_keep_observed_usage_none():
+    """미호출은 `None` 이다 — 독립 경로에서도 `0` 으로 위장하지 않는다."""
+    provider = _FakeProvider([])
+    skipped = _service(provider).interpret(
+        _quote_context(),
+        runtime_ready=True,
+        has_blocking_constraints=False,
+        facts_incomplete=True,
+    )
+    disabled = _service(provider, enabled=False).interpret(
+        _quote_context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert provider.calls == 0
+    for result in (skipped, disabled):
+        assert result.llm_observed_input_tokens is None
+        assert result.llm_observed_output_tokens is None
