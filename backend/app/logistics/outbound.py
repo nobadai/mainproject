@@ -116,6 +116,7 @@ __all__ = [
     "AllocationRequest",
     "AllocationResult",
     "FefoCandidate",
+    "HumanAllocationBasis",
     "InvalidOutboundRequest",
     "OutboundError",
     "OutboundIntegrityError",
@@ -157,6 +158,21 @@ AllocationStatus = Literal["ALLOCATED", "PICKED", "SHIPPED", "CANCELLED"]
 #:      거짓으로 서고, `HUMAN_OVERRIDE` 로 적으면 없던 사람이 생긴다. 셋째 값이
 #:      필요한 이유가 그것이고, 이 값은 **Master ↔ Logistics 합의 어휘**다.
 AllocationBasis = Literal["FEFO_TOOL_CONFIRMED", "HUMAN_OVERRIDE", "FEFO_AUTO_SELECTED"]
+
+#: 🔴 **사람이 직접 고를 수 있는 근거.** `FEFO_AUTO_SELECTED` 가 **빠져 있다.**
+#:
+#: ★ 셋 중 둘만 사람의 것이다. 자동 선택은 `fefo_allocation` 이 스스로 적는 값이고,
+#:   사람이 그 값을 손으로 넣으면 **하지 않은 일을 장부에 적는 것**이 된다 —
+#:   "규칙이 골랐다" 가 거짓으로 서고, 나중에 왜 그 Lot 이었는지 물을 때 답이 없다.
+#:
+#: ⚠️ **입력에만 쓴다. 조회에는 `AllocationBasis` 를 그대로 쓴다** — 자동으로 선
+#:    할당도 사람이 보아야 하고, 여기서 좁히면 이미 적힌 사실을 못 읽게 된다.
+#:
+#:    ```text
+#:    사람이 보내는 값 (Console Command)   HumanAllocationBasis   두 값
+#:    장부에 적히는 값 · 조회 응답          AllocationBasis        세 값
+#:    ```
+HumanAllocationBasis = Literal["FEFO_TOOL_CONFIRMED", "HUMAN_OVERRIDE"]
 
 _RESERVATION_STATUSES: frozenset[str] = frozenset(get_args(ReservationStatus))
 _ALLOCATION_BASES: frozenset[str] = frozenset(get_args(AllocationBasis))
@@ -1015,7 +1031,14 @@ def recommend_fefo_candidates(
 
 # ── 할당 ────────────────────────────────────────────────────────────────
 
-_ALLOCATION_COLUMNS = ("allocation_id", "reservation_id", "lot_id", "allocated_qty_kg", "status")
+_ALLOCATION_COLUMNS = (
+    "allocation_id",
+    "reservation_id",
+    "lot_id",
+    "allocated_qty_kg",
+    "status",
+    "allocation_basis",
+)
 
 
 def _allocations(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> list[dict[str, Any]]:
@@ -1023,7 +1046,8 @@ def _allocations(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> l
         conn,
         sql.SQL(
             """
-            SELECT allocation_id, reservation_id, lot_id, allocated_qty_kg, status
+            SELECT allocation_id, reservation_id, lot_id, allocated_qty_kg, status,
+                   allocation_basis
             FROM {}.inventory_allocations
             WHERE reservation_id = %s
             ORDER BY allocation_id
@@ -1032,6 +1056,30 @@ def _allocations(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> l
         (reservation_id,),
         _ALLOCATION_COLUMNS,
     )
+
+
+@dataclass(frozen=True)
+class AssignedAllocation:
+    """이 예약이 한 Lot 에 이미 붙여 둔 할당 한 줄.
+
+    ★ `allocation_id` 는 `(reservation_id, lot_id)` 에서 나오므로 Lot 당 **한 줄뿐**이다.
+    """
+
+    allocation_id: str
+    lot_id: str
+    allocated_qty_kg: Decimal
+    status: AllocationStatus
+    allocation_basis: AllocationBasis
+
+    @property
+    def is_auto_selected(self) -> bool:
+        """🔴 **규칙이 정한 것인가.** 사람이 정한 할당은 규칙이 다시 안 만진다."""
+        return self.allocation_basis == "FEFO_AUTO_SELECTED"
+
+    @property
+    def is_shipped(self) -> bool:
+        """🔴 **이미 나갔나.** 나간 사실은 무슨 이유로도 다시 쓰지 않는다."""
+        return self.status == "SHIPPED"
 
 
 @dataclass(frozen=True)
@@ -1062,14 +1110,23 @@ class ReservationAllocationState:
     reserved_qty_kg: Decimal
     #: 이미 Lot 에 붙은 몫 (`ALLOCATED` · `PICKED` · `SHIPPED`).
     assigned_qty_kg: Decimal
-    #: 이 예약이 이미 붙여 둔 Lot 들. **자동 선택이 건너뛰어야 하는 Lot** 이다.
-    assigned_lot_ids: frozenset[str]
+    #: 이 예약이 이미 붙여 둔 할당들, `lot_id` 로 찾는다.
+    #:
+    #: ★ **수량만이 아니라 상태와 근거도 들고 있다** — 자동 선택이 *"이 Lot 을 더 쓸 수
+    #:   있나"* 를 물으려면 셋이 다 필요하다. 나간 것(`SHIPPED`)인지, 사람이 정한
+    #:   것(`HUMAN_OVERRIDE`)인지에 따라 답이 달라진다.
+    assigned_by_lot: Mapping[str, AssignedAllocation]
 
     @property
     def unassigned_qty_kg(self) -> Decimal:
         """확보했는데 **아직 Lot 을 안 고른** 몫. 음수는 0 으로 본다."""
         남은것 = self.reserved_qty_kg - self.assigned_qty_kg
         return 남은것 if 남은것 > 0 else Decimal(0)
+
+    @property
+    def assigned_lot_ids(self) -> frozenset[str]:
+        """이 예약이 이미 붙여 둔 Lot 들."""
+        return frozenset(self.assigned_by_lot)
 
 
 def reservation_allocation_state(conn: Any, *, reservation_id: str) -> ReservationAllocationState:
@@ -1101,8 +1158,70 @@ def reservation_allocation_state(conn: Any, *, reservation_id: str) -> Reservati
         required_qty_kg=Decimal(예약["required_qty_kg"]),
         reserved_qty_kg=Decimal(예약["reserved_qty_kg"]),
         assigned_qty_kg=sum((Decimal(행["allocated_qty_kg"]) for 행 in 붙은것), start=Decimal(0)),
-        assigned_lot_ids=frozenset(행["lot_id"] for 행 in 붙은것),
+        assigned_by_lot={
+            행["lot_id"]: AssignedAllocation(
+                allocation_id=행["allocation_id"],
+                lot_id=행["lot_id"],
+                allocated_qty_kg=Decimal(행["allocated_qty_kg"]),
+                status=행["status"],
+                allocation_basis=행["allocation_basis"],
+            )
+            for 행 in 붙은것
+        },
     )
+
+
+def cancel_allocation(conn: Any, *, reservation_id: str, lot_id: str) -> Decimal:
+    """아직 **안 나간** 할당 하나를 `CANCELLED` 로 내린다. 되돌린 수량을 돌려준다.
+
+    🔴 **`SHIPPED` 는 못 내린다.** 그 몫은 원장 OUT 이 이미 잔량에서 덜어냈고,
+       상태만 되돌리면 **나간 물건이 창고에 다시 있는 것으로 보인다.**
+       환입은 이 판의 범위가 아니다 (`release_reservation` 과 같은 선이다).
+
+    ★ **행을 지우지 않는다.** 같은 `(예약, Lot)` 정체성을 `CANCELLED` 로 남겨 두면
+      `allocate_stock` 이 **이미 있는 되살리기 경로**로 새 수량을 채워 넣는다 —
+      그래서 이 함수 뒤에 오는 것은 새 계약이 아니라 기존 코어다.
+
+    ⚠️ **가용량이 그만큼 돌아온다.** `CANCELLED` 는 `_HOLDING_ALLOCATION` 에서 빠지므로
+       그 Lot 의 가용량이 곧바로 되살아난다. 반드시 **같은 잠금 안에서** 부른다.
+
+    :returns: 되돌린 수량. 내릴 것이 없으면 0 이다.
+    :raises OutboundIntegrityError: 그 할당이 이미 `SHIPPED` 일 때.
+    """
+    _require_text(reservation_id, 칸="reservation_id")
+    _require_text(lot_id, 칸="lot_id")
+    schema = sql.Identifier(get_db_schema())
+    allocation_id = allocation_id_for(reservation_id=reservation_id, lot_id=lot_id)
+
+    있던것 = next(
+        (
+            행
+            for 행 in _allocations(conn, schema, reservation_id=reservation_id)
+            if 행["allocation_id"] == allocation_id
+        ),
+        None,
+    )
+    if 있던것 is None or 있던것["status"] == "CANCELLED":
+        return Decimal(0)
+    if 있던것["status"] == "SHIPPED":
+        raise OutboundIntegrityError(
+            f"이미 출고된 할당은 되돌릴 수 없다 ({allocation_id!r}):"
+            f" {있던것['allocated_qty_kg']}kg 이 원장 OUT 으로 나갔다."
+            " 나간 재고를 상태만 되돌리면 창고에 다시 있는 것으로 보인다."
+        )
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {}.inventory_allocations
+                SET status = 'CANCELLED'
+                WHERE allocation_id = %s AND status = ANY(%s)
+                """
+            ).format(schema),
+            (allocation_id, sorted(_HOLDING_ALLOCATION)),
+        )
+    return Decimal(있던것["allocated_qty_kg"])
 
 
 def allocate_stock(

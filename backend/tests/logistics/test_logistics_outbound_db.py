@@ -21,11 +21,13 @@ CHECK · FK · 상태 어휘
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import get_args
 
 import psycopg
 import pytest
@@ -35,12 +37,15 @@ from app.logistics import fefo_allocation, ledger, outbound
 from app.logistics.db import get_connection
 from app.logistics.fefo_allocation import allocate_reserved_stock_fefo
 from app.logistics.outbound import (
+    AllocationBasis,
     AllocationRequest,
+    HumanAllocationBasis,
     InvalidOutboundRequest,
     OutboundIntegrityError,
     ReservationConflict,
     allocate_stock,
     allocation_id_for,
+    cancel_allocation,
     move_id_for_allocation,
     recommend_fefo_candidates,
     release_reservation,
@@ -49,7 +54,10 @@ from app.logistics.outbound import (
     reserve_stock,
     ship_allocated_stock,
 )
-from app.logistics.sales_outbound import reserve_confirmed_sale
+from app.logistics.sales_outbound import (
+    reserve_confirmed_sale,
+    reserve_confirmed_sale_available,
+)
 
 pytestmark = pytest.mark.db
 
@@ -1004,9 +1012,7 @@ def _예약수(conn: psycopg.Connection) -> int:
 
 
 def _자동할당(conn: psycopg.Connection, rid: str = RSV):
-    return allocate_reserved_stock_fefo(
-        conn, reservation_id=rid, as_of=AS_OF, decided_at=DECIDED_AT
-    )
+    return allocate_reserved_stock_fefo(conn, reservation_id=rid, as_of=AS_OF)
 
 
 # ── S1~S6. 부분 Reservation ─────────────────────────────────────────────
@@ -1177,7 +1183,8 @@ def test_S11_자동_할당은_합의된_근거와_결정자를_적는다(conn: p
     # ★ 상수와 장부가 갈리지 않는지도 함께 본다.
     assert fefo_allocation.ALLOCATION_BASIS == "FEFO_AUTO_SELECTED"
     assert fefo_allocation.DECIDED_BY == "LOGISTICS_FEFO_RULE"
-    assert 행["decided_at"] == DECIDED_AT
+    # 🔴 호출자가 준 값이 아니라 `as_of` 에서 나온 값이다.
+    assert 행["decided_at"] == fefo_allocation.decided_at_for(AS_OF)
 
 
 def test_S12_자동_할당_재실행은_멱등이다(conn: psycopg.Connection) -> None:
@@ -1329,17 +1336,22 @@ def test_S20_예약_상태_읽기는_확보와_배정을_함께_준다(conn: psy
     assert 상태.assigned_lot_ids == frozenset({"LOT-A"})
 
 
-def test_S21_되살아난_Lot_이_다시_차례가_되면_멈춘다(conn: psycopg.Connection) -> None:
-    """🔴 건너뛰면 **더 신선한 Lot 이 먼저 나가고** 그 사실이 아무 데도 안 남는다.
+# ── S21~S24. 되살아난 Lot 의 top-up 정책 ────────────────────────────────
+#
+# 🔴 **후보에 다시 오르는 것은 남의 예약이 풀려 그 Lot 의 가용량이 되살아난 때뿐이다.**
+#    앞선 할당이 그 Lot 을 다 썼으면 `available <= 0` 이라 후보에 안 오른다.
+
+
+def _되살아난_Lot_상황(conn: psycopg.Connection) -> None:
+    """`LOT-OLD` 가 한 번 쓰이고 **다시 1순위로 되살아나는** 자리를 만든다.
 
     ```text
     LOT-OLD 100 (01-01) · 남의 예약 60 이 Lot 미지정으로 잡고 있다
-    → 내 부분 예약 required 100 · reserved 40
-    → 자동 FEFO      ALC-…-LOT-OLD 40      (LOT-OLD 가용 60 남음)
+    → 내 부분 예약 required 100 · reserved 40   (free = 100 - 60)
+    → 자동 FEFO      ALC-…-LOT-OLD 40           (LOT-OLD 가용 60 남음)
     → LOT-NEW 100 (01-15) 입고 · 남의 예약이 풀린다
-    → top-up         reserved 100          (더 붙일 것 60)
-    → 자동 FEFO      LOT-OLD 가용 60 이 **되살아나** 다시 1순위다
-                     그런데 그 Lot 엔 이미 내 할당 40 이 서 있어 못 늘린다
+    → top-up         reserved 100               (더 붙일 것 60)
+    → 이제 LOT-OLD 가용 60 이 **되살아나** 다시 1순위다
     ```
     """
     _lot(conn, "LOT-OLD", qty="100", received_at=date(2026, 1, 1))
@@ -1353,17 +1365,359 @@ def test_S21_되살아난_Lot_이_다시_차례가_되면_멈춘다(conn: psycop
     )
     assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(40)
     _자동할당(conn)
-    assert {
-        행["lot_id"]: 행["allocated_qty_kg"] for 행 in _할당(conn) if 행["reservation_id"] == RSV
-    } == {"LOT-OLD": Decimal(40)}
+    assert _내할당(conn) == {"LOT-OLD": Decimal(40)}
 
     _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
     release_reservation(conn, reservation_id="RSV-OTHER")
     assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(100)
 
-    with pytest.raises(InvalidOutboundRequest, match="이미 서 있다"):
+
+def _내할당(conn: psycopg.Connection, rid: str = RSV) -> dict[str, Decimal]:
+    """이 예약의 **살아 있는** 할당만 `lot_id -> 수량` 으로 준다."""
+    return {
+        행["lot_id"]: 행["allocated_qty_kg"]
+        for 행 in _할당(conn)
+        if 행["reservation_id"] == rid and 행["status"] != "CANCELLED"
+    }
+
+
+def test_S21_되살아난_Lot_에_이어_붙인다(conn: psycopg.Connection) -> None:
+    """🟢 **더 신선한 Lot 이 먼저 나가지 않는다.** 되살아난 LOT-OLD 가 다 받는다.
+
+    ★ `allocate_stock` 의 수량 계약을 안 깬다 - 기존 행을 `CANCELLED` 로 내리고
+      **같은 정체성**으로 새 총량에 다시 세운다 (그 함수가 이미 갖고 있는 길이다).
+    """
+    _되살아난_Lot_상황(conn)
+
+    결과 = _자동할당(conn)
+
+    assert 결과.applied is True
+    assert 결과.allocated_qty_kg == Decimal(100)
+    # 🔴 LOT-OLD 40 이 100 으로 자랐고 LOT-NEW 는 손대지 않았다.
+    assert _내할당(conn) == {"LOT-OLD": Decimal(100)}
+    assert _예약상태(conn) == "ALLOCATED"
+    # ★ 행 정체성이 그대로다 - 새 할당을 하나 더 만들지 않았다.
+    assert [행["allocation_id"] for 행 in _할당(conn) if 행["reservation_id"] == RSV] == [
+        allocation_id_for(reservation_id=RSV, lot_id="LOT-OLD")
+    ]
+    # ⚠️ 아직 아무것도 안 나갔다.
+    assert _remaining(conn, "LOT-OLD") == Decimal(100)
+    assert _moves(conn) == []
+
+
+def test_S22_되살아난_Lot_을_이어_붙인_뒤_출고가_한_번에_나간다(
+    conn: psycopg.Connection,
+) -> None:
+    """★ 되살린 행이 정상 할당이라 실출고가 그대로 이어진다."""
+    _되살아난_Lot_상황(conn)
+    _자동할당(conn)
+
+    출고 = ship_allocated_stock(conn, reservation_id=RSV, shipped_at=AS_OF)
+
+    assert 출고.shipped_qty_kg == Decimal(100)
+    assert _remaining(conn, "LOT-OLD") == Decimal(0)
+    assert _remaining(conn, "LOT-NEW") == Decimal(100)
+    # 🔴 Move 는 할당 하나당 하나다 - 되살렸다고 두 건이 되지 않는다.
+    assert [행["move_type"] for 행 in _moves(conn)] == ["OUT"]
+
+
+def test_S23_이미_출고된_Lot_은_더_붙이지_않는다(conn: psycopg.Connection) -> None:
+    """🔴 나간 사실의 수량을 뒤에서 고치지 않는다.
+
+    늘려도 `ship_allocated_stock` 이 `SHIPPED` 행을 다시 안 보므로 원장 OUT 이 안 따라
+    나가고, 예약만 다 찬 것으로 보인다.
+    """
+    _되살아난_Lot_상황(conn)
+    ship_allocated_stock(conn, reservation_id=RSV, shipped_at=AS_OF)
+    assert _remaining(conn, "LOT-OLD") == Decimal(60)
+
+    with pytest.raises(InvalidOutboundRequest, match="이미 출고됐다"):
         _자동할당(conn)
 
-    # 🔴 **DML 전에 막는다** — 더 신선한 LOT-NEW 가 조용히 먼저 나가지 않았다.
-    assert {행["lot_id"] for 행 in _할당(conn) if 행["reservation_id"] == RSV} == {"LOT-OLD"}
+    # 🔴 DML 전에 막는다 - 더 신선한 LOT-NEW 도 안 나갔다.
+    assert _내할당(conn) == {"LOT-OLD": Decimal(40)}
     assert _remaining(conn, "LOT-NEW") == Decimal(100)
+    assert len(_moves(conn)) == 1
+
+
+def test_S24_사람이_정한_Lot_을_규칙이_덮지_않는다(conn: psycopg.Connection) -> None:
+    """🔴 `HUMAN_OVERRIDE` 는 사람이 그 Lot 을 그만큼 쓰기로 한 판단이다."""
+    _lot(conn, "LOT-OLD", qty="100", received_at=date(2026, 1, 1))
+    _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
+    _부분예약(conn, required="100")
+    # ★ 사람이 먼저 LOT-OLD 에 40 을 정해 두었다.
+    _할당한다(conn, ("LOT-OLD", "40"), basis="HUMAN_OVERRIDE")
+
+    with pytest.raises(InvalidOutboundRequest, match="사람이 이미 정해"):
+        _자동할당(conn)
+
+    assert _내할당(conn) == {"LOT-OLD": Decimal(40)}
+    assert _할당(conn)[0]["allocation_basis"] == "HUMAN_OVERRIDE"
+    assert _할당(conn)[0]["decided_by"] == DECIDED_BY
+
+
+def test_S25_사람이_안_쓴_Lot_은_규칙이_이어서_쓴다(conn: psycopg.Connection) -> None:
+    """★ 사람이 정한 Lot 만 건드리지 않는다 - 나머지는 규칙이 그대로 채운다."""
+    _lot(conn, "LOT-OLD", qty="40", received_at=date(2026, 1, 1))
+    _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
+    _부분예약(conn, required="100")
+    _할당한다(conn, ("LOT-OLD", "40"), basis="HUMAN_OVERRIDE")
+
+    결과 = _자동할당(conn)
+
+    assert 결과.allocated_qty_kg == Decimal(100)
+    assert _내할당(conn) == {"LOT-OLD": Decimal(40), "LOT-NEW": Decimal(60)}
+
+
+# ── S26~S28. Sales -> Logistics 부분예약 경계 ───────────────────────────
+
+
+def test_S26_판매_경계가_부분예약으로_이어진다(conn: psycopg.Connection) -> None:
+    """🔴 공용 DTO 를 그대로 받는다 - Master 가 코어를 직접 뜯어 부를 필요가 없다."""
+    _lot(conn, "LOT-A", qty="60", received_at=date(2026, 1, 1))
+    request = SalesOutboundReservationRequest(
+        reservation_id=RSV,
+        sim_run_id=SIM_RUN_ID,
+        sale_id=SALE_ID,
+        sale_item_id=SALE_ITEM_ID,
+        item_id=ITEM_ID,
+        quantity_kg=Decimal(100),
+        as_of=AS_OF,
+    )
+
+    결과 = reserve_confirmed_sale_available(conn, request)
+
+    assert 결과.applied is True
+    # ★ 판매 요구량은 그대로 가고 못 잡은 몫이 보이게 남는다.
+    assert (결과.required_qty_kg, 결과.reserved_qty_kg) == (Decimal(100), Decimal(60))
+    행 = _예약행(conn)
+    assert (행["required_qty_kg"], 행["reserved_qty_kg"]) == (Decimal(100), Decimal(60))
+
+
+def test_S27_판매_경계_전량_문은_그대로_멈춘다(conn: psycopg.Connection) -> None:
+    """★ `reserve_confirmed_sale` 의 fail-closed 계약은 안 바뀐다."""
+    _lot(conn, "LOT-A", qty="60", received_at=date(2026, 1, 1))
+    request = SalesOutboundReservationRequest(
+        reservation_id=RSV,
+        sim_run_id=SIM_RUN_ID,
+        sale_id=SALE_ID,
+        sale_item_id=SALE_ITEM_ID,
+        item_id=ITEM_ID,
+        quantity_kg=Decimal(100),
+        as_of=AS_OF,
+    )
+
+    with pytest.raises(InvalidOutboundRequest, match="가용재고가 모자라"):
+        reserve_confirmed_sale(conn, request)
+
+    assert _예약수(conn) == 0
+
+
+def test_S28_판매_경계에서_출고까지_관통한다(conn: psycopg.Connection) -> None:
+    """Master 가 부를 세 함수만으로 원장 OUT 까지 간다."""
+    _lot(conn, "LOT-OLD", qty="30", received_at=date(2026, 1, 1))
+    _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
+    request = SalesOutboundReservationRequest(
+        reservation_id=RSV,
+        sim_run_id=SIM_RUN_ID,
+        sale_id=SALE_ID,
+        sale_item_id=SALE_ITEM_ID,
+        item_id=ITEM_ID,
+        quantity_kg=Decimal(80),
+        as_of=AS_OF,
+    )
+
+    확보 = reserve_confirmed_sale_available(conn, request)
+    붙임 = allocate_reserved_stock_fefo(conn, reservation_id=request.reservation_id, as_of=AS_OF)
+    출고 = ship_allocated_stock(
+        conn,
+        reservation_id=request.reservation_id,
+        shipped_at=AS_OF,
+        sale_item_id=request.sale_item_id,
+    )
+
+    assert 확보.reserved_qty_kg == Decimal(80)
+    assert 붙임.allocated_qty_kg == Decimal(80)
+    assert _내할당(conn) == {"LOT-OLD": Decimal(30), "LOT-NEW": Decimal(50)}
+    assert 출고.shipped_qty_kg == Decimal(80)
+    assert _remaining(conn, "LOT-OLD") == Decimal(0)
+    assert _remaining(conn, "LOT-NEW") == Decimal(50)
+    assert {행["sale_item_id"] for 행 in _moves(conn)} == {SALE_ITEM_ID}
+
+
+# ── S29. 사람 입력 어휘는 둘뿐이다 ──────────────────────────────────────
+
+
+def test_S29_사람_입력_어휘에_자동선택이_없다() -> None:
+    """🔴 사람이 `FEFO_AUTO_SELECTED` 를 손으로 넣으면 안 한 일을 장부에 적는 것이다.
+
+    ★ 조회에는 세 값이 다 보여야 한다 - 자동으로 선 할당도 사람이 읽어야 한다.
+    """
+    assert set(get_args(HumanAllocationBasis)) == {"FEFO_TOOL_CONFIRMED", "HUMAN_OVERRIDE"}
+    assert "FEFO_AUTO_SELECTED" not in get_args(HumanAllocationBasis)
+    assert set(get_args(AllocationBasis)) == set(get_args(HumanAllocationBasis)) | {
+        "FEFO_AUTO_SELECTED"
+    }
+    # ★ 자동 경로가 쓰는 값은 사람 어휘 밖이다.
+    assert fefo_allocation.ALLOCATION_BASIS not in get_args(HumanAllocationBasis)
+
+
+# ── S30~S32. cancel_allocation 은 공개 함수다 ───────────────────────────
+#
+# ⚠️ 자동 FEFO 는 자기 가드에서 먼저 걸러 이 함수에 `SHIPPED` 를 안 넘긴다.
+#    그래도 이 함수가 `__all__` 에 있는 이상 **직접 부르는 사람**이 있을 수 있어,
+#    상위 가드에 기대지 않고 여기서도 잠근다.
+
+
+def test_S30_안_나간_할당을_내리면_가용이_돌아온다(conn: psycopg.Connection) -> None:
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
+    _자동할당(conn)
+
+    되돌린것 = cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A")
+
+    assert 되돌린것 == Decimal(80)
+    assert _할당(conn)[0]["status"] == "CANCELLED"
+    # ★ 행을 지우지 않는다 - 같은 정체성이 남아야 되살릴 수 있다.
+    assert _할당(conn)[0]["allocation_id"] == allocation_id_for(reservation_id=RSV, lot_id="LOT-A")
+    # 🔴 잔량은 애초에 안 줄었으므로 되돌릴 원장도 없다.
+    assert _remaining(conn, "LOT-A") == Decimal(100)
+    assert _moves(conn) == []
+
+
+def test_S31_이미_출고된_할당은_못_내린다(conn: psycopg.Connection) -> None:
+    """🔴 나간 재고를 상태만 되돌리면 **창고에 다시 있는 것으로 보인다.**"""
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
+    _자동할당(conn)
+    ship_allocated_stock(conn, reservation_id=RSV, shipped_at=AS_OF)
+
+    with pytest.raises(OutboundIntegrityError, match="이미 출고된 할당"):
+        cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A")
+
+    assert _할당(conn)[0]["status"] == "SHIPPED"
+    assert _remaining(conn, "LOT-A") == Decimal(20)
+
+
+def test_S32_내릴_것이_없으면_0_이다(conn: psycopg.Connection) -> None:
+    """★ 없는 것을 내리는 것은 실패가 아니다 - 재실행의 정상 경로다."""
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
+
+    assert cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A") == Decimal(0)
+
+    _자동할당(conn)
+    cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A")
+    # ★ 두 번째는 이미 CANCELLED 라 0 이다.
+    assert cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A") == Decimal(0)
+
+
+# ── S33~S39. 자동 FEFO 의 결정 시각은 as_of 에서 나온다 ──────────────────
+#
+# 🔴 **근거·결정자·시각 셋이 한 판단의 audit 사실이다.** 자동 경로에서는 셋을
+#    `fefo_allocation` 한 곳이 완성하고, 호출자는 `as_of` 만 준다.
+
+
+def test_S33_자동_FEFO_는_decided_at_을_안_받는다() -> None:
+    """★ 서명에 `decided_at` 이 없다 — 호출자가 시각을 줄 자리가 아예 없다."""
+    인자 = set(inspect.signature(allocate_reserved_stock_fefo).parameters)
+
+    assert "decided_at" not in 인자
+    assert {"conn", "reservation_id", "as_of"} <= 인자
+
+
+def test_S34_같은_as_of_는_같은_decided_at_을_준다() -> None:
+    """🔴 같은 `as_of` 를 다시 돌리면 **같은 값**이어야 한다."""
+    첫번째 = fefo_allocation.decided_at_for(AS_OF)
+    두번째 = fefo_allocation.decided_at_for(AS_OF)
+
+    assert 첫번째 == 두번째
+    assert 첫번째 == fefo_allocation.decided_at_for(date(2026, 1, 20))
+    # ★ 날짜가 다르면 값도 다르다 — 하루가 뭉개지지 않는다.
+    assert fefo_allocation.decided_at_for(date(2026, 1, 21)) != 첫번째
+
+
+def test_S35_decided_at_은_시간대를_달고_있다() -> None:
+    """`inventory_allocations.decided_at` 이 `TIMESTAMPTZ NOT NULL` 이다."""
+    결정시각 = fefo_allocation.decided_at_for(AS_OF)
+
+    assert 결정시각.tzinfo is not None
+    assert 결정시각.utcoffset() == timedelta(0)
+    assert (결정시각.hour, 결정시각.minute, 결정시각.second, 결정시각.microsecond) == (0, 0, 0, 0)
+    assert 결정시각.date() == AS_OF
+
+
+def test_S36_결정_시각이_KST_로_읽어도_같은_날이다() -> None:
+    """⚠️ `00:00 UTC` 는 KST 로 **같은 날 09:00** 이다.
+
+    반대로 `00:00 KST` 를 골랐으면 UTC 로 **전날 15:00** 이라, `as_of` 로 자른 조회와
+    하루가 어긋난다 — `simulated_inspection` 이 같은 이유로 이미 UTC 를 골랐다.
+    """
+    kst = timezone(timedelta(hours=9))
+    결정시각 = fefo_allocation.decided_at_for(AS_OF)
+
+    assert 결정시각.astimezone(kst).date() == AS_OF
+    assert 결정시각.astimezone(UTC).date() == AS_OF
+
+
+def test_S37_결정_시각_규칙이_기존_시뮬레이션_규칙과_같다() -> None:
+    """🔴 **새 규칙을 만들지 않았다.** 물류가 이미 쓰던 식 그대로다."""
+    from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
+
+    코드 = _코드만(
+        Path(inspect.getfile(ScenarioSimulatedInspectionProvider)).read_text(encoding="utf-8")
+    )
+    자동 = _코드만(Path(fefo_allocation.__file__).read_text(encoding="utf-8"))
+
+    assert "datetime.combine(as_of, time.min, tzinfo=UTC)" in 코드
+    assert "datetime.combine(as_of, time.min, tzinfo=UTC)" in 자동
+
+
+def test_S38_자동_경로가_벽시계를_안_읽는다() -> None:
+    """🔴 같은 실행을 다시 돌리면 같은 값이 나와야 한다."""
+    코드 = _코드만(Path(fefo_allocation.__file__).read_text(encoding="utf-8"))
+
+    for 금지 in (
+        "datetime.now(",
+        "utcnow(",
+        "date.today(",
+        # 🔴 물류가 마스터를 임포트하면 의존 방향이 뒤집힌다.
+        "app.master",
+        "clock",
+        # 🔴 09:30 KST 는 마스터의 스케줄러 시각이지 할당 결정 시각이 아니다.
+        "Asia/Seoul",
+        "ZoneInfo",
+        "9, 30",
+    ):
+        assert 금지 not in 코드, f"자동 경로가 벽시계나 남의 시각을 끌어왔다: {금지}"
+
+
+def test_S39_자동_할당_장부에_파생된_시각이_적힌다(conn: psycopg.Connection) -> None:
+    """★ 계산값이 아니라 **실제로 DB 에 적힌 값**을 본다."""
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
+
+    _자동할당(conn)
+
+    행 = _할당(conn)[0]
+    assert 행["allocation_basis"] == "FEFO_AUTO_SELECTED"
+    assert 행["decided_by"] == "LOGISTICS_FEFO_RULE"
+    assert 행["decided_at"] == fefo_allocation.decided_at_for(AS_OF)
+    # 🔴 사람 경로가 쓰는 시각과 **다른 값**이다 — 둘이 섞이지 않았다.
+    assert 행["decided_at"] != DECIDED_AT
+
+
+def test_S40_사람_경로는_준_시각을_그대로_적는다(conn: psycopg.Connection) -> None:
+    """🔴 사람의 실제 결정 시각을 물류가 `as_of` 로 만들어 내지 않는다."""
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _예약(conn, qty="80")
+
+    _할당한다(conn, ("LOT-A", "80"), basis="HUMAN_OVERRIDE")
+
+    행 = _할당(conn)[0]
+    assert 행["decided_at"] == DECIDED_AT
+    assert 행["decided_by"] == DECIDED_BY
+    # ★ `allocate_stock` 은 여전히 셋을 명시로 받는다 — 기본값을 안 만든다.
+    인자 = inspect.signature(allocate_stock).parameters
+    for 칸 in ("decided_by", "decided_at", "allocation_basis"):
+        assert 인자[칸].default is inspect.Parameter.empty, f"{칸} 에 기본값이 생겼다"
