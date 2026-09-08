@@ -12,7 +12,7 @@
 
 🔴 **여기 있는 것을 프로덕션에서 부르지 않는다.** 마스터의 산 경로는
   `app/master/flow.py` 이고, H1 승인 약정의 주인은 `app/master/commitment.py` 다.
-  이 파일의 `build_commitment` 는 **다른 타입**(`ApprovedPurchaseCommitment`)을 만드는
+  이 파일의 `build_cycle_commitment` 는 **다른 타입**(`ApprovedPurchaseCommitment`)을 만드는
   옛 사이클 것이며, Critic 에게 먹일 시나리오를 짓는 데만 쓴다.
 
 ⚠️ **옮기면서 안 부르는 것은 버렸다.** T1·T2·T3-select·Critic·H1·T4 노드와
@@ -20,7 +20,7 @@
   남은 것은 아래 세 묶음뿐이다.
 
 ```text
-CycleHooks · run_subcycle · run_day · build_commitment   (옛 cycle.py)
+CycleHooks · run_subcycle · run_day · build_cycle_commitment   (옛 cycle.py)
 node_t3_combine                                          (옛 cycle_graph.py)
 S1~S3 노드 · node_critic_b · build_cycle_b_hooks         (옛 cycle_graph_b.py)
 ```
@@ -202,7 +202,7 @@ def run_day(
     # ★ §3.2.3 — 사이클 B 는 T0 Snapshot + H1 Commitment overlay 로 돈다.
     #   스냅샷은 불변이고 Delta 를 겹친다. H1 이 매입 0 또는 반려면
     #   commitment = None 이고 B 는 T0 만으로 돈다.
-    commitment = build_commitment(a)
+    commitment = build_cycle_commitment(a)
     b_state = CycleBState(snapshot=snapshot, commitment=commitment)
     b = run_subcycle(snapshot, hooks_b, cycle_b_state=b_state) if hooks_b else None
 
@@ -275,7 +275,7 @@ def _fulfilled_qty(b) -> dict:
     return dict(getter) if getter is not None else dict(alloc.qty_by_item)
 
 
-def build_commitment(a: PipelineState) -> ApprovedPurchaseCommitment | None:
+def build_cycle_commitment(a: PipelineState) -> ApprovedPurchaseCommitment | None:
     """H1 승인 결과를 Delta 로 만든다.
 
     🔴 **프로덕션의 승인 약정 주인은 `app/master/commitment.py` 다.** 이건 옛 사이클이

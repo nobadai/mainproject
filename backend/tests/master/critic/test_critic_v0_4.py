@@ -414,7 +414,7 @@ section("\n[B-11] v1.2.1 패치 회귀 — 사이클 A·B 결함 4건")
 
 from dataclasses import replace as _dc_replace
 
-from cycle_harness import CycleHooks, build_commitment, run_day
+from cycle_harness import CycleHooks, build_cycle_commitment, run_day
 from fixtures import _std_replies, make_scenarios, make_split_variants
 
 from app.contracts.core import (
@@ -469,7 +469,7 @@ ok(_res2.ran and _res2.legs_dated == 2, "회차 2건 전부 도착일로 검사�
 _st = PipelineState(snapshot=SNAP)
 _st.clip_results = [_t2]
 _st.approved_scenario_id = "SCN-T2"
-_c = build_commitment(_st)
+_c = build_cycle_commitment(_st)
 ok(len(_c.arrival_schedule) == 2, "arrival_schedule 이 회차 수만큼 생성된다")
 ok(
     abs(sum(a.qty_kg for a in _c.arrival_schedule) - _c.total_qty_kg) < 0.5,

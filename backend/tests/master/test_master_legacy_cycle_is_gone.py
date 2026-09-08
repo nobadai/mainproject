@@ -141,7 +141,7 @@ def test_옮긴_받침대가_제자리에_있다():
         "class CycleHooks",
         "def run_subcycle",
         "def run_day",
-        "def build_commitment",
+        "def build_cycle_commitment",
         "def node_t3_combine",
         "def build_cycle_b_hooks",
     ):
