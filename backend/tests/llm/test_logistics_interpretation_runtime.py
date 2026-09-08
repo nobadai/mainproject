@@ -8,6 +8,8 @@ from app.logistics.llm.runtime import (
     InterpretationService,
     InterpretationValidationError,
     LLMSettings,
+    ProviderResult,
+    ProviderUsage,
     ValidationIssue,
     build_template_interpretation,
     needs_llm,
@@ -17,6 +19,14 @@ from app.logistics.llm.schemas import ContextFact, SanitizedLLMContext
 
 
 class FakeProvider:
+    """`responses` 원소는 예외 · `ProviderResult` · `str` 중 하나다.
+
+    ★ `str` 은 usage 를 보고하지 않는 응답의 축약이다 — `ProviderResult(text, None)`
+      로 감싼다. **`str` 을 그대로 돌려주는 shim 이 아니다**: production Provider 는
+      언제나 `ProviderResult` 를 내고, 이 감싸기는 fixture 를 짧게 쓰기 위한 테스트
+      쪽 편의일 뿐이다.
+    """
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
@@ -27,7 +37,9 @@ class FakeProvider:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        return response
+        if isinstance(response, ProviderResult):
+            return response
+        return ProviderResult(text=response)
 
 
 def _service(provider):
@@ -640,3 +652,265 @@ def test_provider_keeps_no_call_state(monkeypatch):
     금지 = {"last_latency", "last_usage", "last_error", "last_call", "last_elapsed_ms"}
     for provider in (OllamaProvider(settings), GeminiProvider(settings), UnavailableProvider()):
         assert 금지 & set(dir(provider)) == set(), type(provider).__name__
+
+
+# ---------------------------------------------------------------------------
+# Provider token usage 누적 — **관측한 호출만** 더한다 (#406)
+#
+# ★ latency(#402)와 나란히 두지만 규칙이 하나 다르다: 시간은 모든 호출에서 반드시
+#   측정되고(`finally`), usage 는 Provider 가 보고해야만 존재한다. 그래서 latency 는
+#   0 으로 열고 usage 는 None 으로 연다.
+# ---------------------------------------------------------------------------
+
+#: 🔴 호출마다 · 축마다 **전부 다른 숫자**를 쓴다. 값이 겹치면 "첫 호출만"·"마지막
+#:   호출만"·"input/output 뒤바꿈" 변이가 모두 살아남는다 (#406 M1·M2·M4·M5).
+_CALL1 = ProviderUsage(input_tokens=100, output_tokens=20)
+_CALL2 = ProviderUsage(input_tokens=120, output_tokens=15)
+
+
+def _used(usage, *, summary="품질 위험 검토가 필요합니다."):
+    return ProviderResult(text=_output(summary=summary), usage=usage)
+
+
+def test_single_success_records_the_reported_usage():
+    provider = FakeProvider([_used(_CALL1)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 1
+    assert result.llm_observed_input_tokens == 100
+    assert result.llm_observed_output_tokens == 20
+
+
+def test_transport_retry_sums_usage_of_every_answered_call():
+    """전송 재시도 흐름 그대로 — 먼저 예외, 그다음 응답이다.
+
+    ★ "성공 응답을 받고 다시 전송 재시도" 는 production 에서 성립하지 않는 순서다.
+      그런 fixture 를 만들면 존재하지 않는 경로를 검사하게 된다. 두 응답이 모두
+      합산되는 것은 아래 correction 경로가 잠근다.
+    """
+    provider = FakeProvider([TimeoutError(), _used(_CALL2)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 2
+    # 앞 호출은 응답 본문을 못 받았다 — 없는 토큰을 지어내지 않는다
+    assert result.llm_observed_input_tokens == 120
+    assert result.llm_observed_output_tokens == 15
+
+
+def test_validation_correction_sums_both_answered_calls():
+    """🔴 **검증에 떨어진 호출의 토큰도 실제로 소비됐다** (#406 §12).
+
+    이 호출은 HTTP 를 왕복했고 모델이 출력을 만들었다 — 우리 검증기가 그것을 거절한
+    것뿐이다. 빼고 세면 검증에 자주 걸리는 모델일수록 싸 보이는 정반대 신호가 된다.
+    """
+    provider = FakeProvider([_used(_CALL1, summary="수치 3 포함"), _used(_CALL2)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 2
+    assert result.llm_observed_input_tokens == 220
+    assert result.llm_observed_output_tokens == 35
+    # 마지막만 / 첫 호출만 기록하는 변이를 각각 잡는다 (M4 · M5)
+    assert result.llm_observed_input_tokens not in (100, 120)
+    assert result.llm_observed_output_tokens not in (20, 15)
+
+
+def test_usage_survives_when_a_later_call_times_out():
+    """확인된 사실을 버리지 않되, 모르는 호출의 값을 만들지도 않는다.
+
+    call1 은 100/20 을 보고했지만 검증에 떨어졌고, 이어진 두 호출은 응답 자체를 못
+    받았다. 전체를 `None` 으로 지우면 **확인된 소비**가 사라지고, timeout 후 FALLBACK
+    — 가장 알고 싶은 실행 — 에서 usage 가 구조적으로 항상 비게 된다.
+
+    ★ 세 호출이 최악 경로 그대로다: 응답+검증탈락 → correction → timeout → 전송
+      재시도 → timeout → FALLBACK. 예산 둘(전송 1 · 검증 1)이 각각 소진된 모습이다.
+    """
+    provider = FakeProvider([_used(_CALL1, summary="수치 3 포함"), TimeoutError(), TimeoutError()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "FALLBACK"
+    assert result.llm_error_kind == "TIMEOUT"
+    assert result.llm_attempts == 3
+    # 🔴 응답을 받은 호출은 하나뿐이다 — 나머지 둘의 토큰은 모르므로 만들지 않는다
+    assert result.llm_observed_input_tokens == 100
+    assert result.llm_observed_output_tokens == 20
+
+
+def test_all_calls_failing_leaves_usage_unobserved():
+    provider = FakeProvider([TimeoutError(), TimeoutError()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "FALLBACK"
+    assert result.llm_error_kind == "TIMEOUT"
+    assert result.llm_attempts == 2
+    assert result.llm_observed_input_tokens is None
+    assert result.llm_observed_output_tokens is None
+
+
+def test_answered_calls_without_usage_stay_none():
+    """응답은 받았지만 Provider 가 usage 를 보고하지 않았다 — `0` 이 아니라 `None`."""
+    provider = FakeProvider([_used(None)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 1
+    assert result.llm_observed_input_tokens is None
+    assert result.llm_observed_output_tokens is None
+
+
+def test_each_axis_accumulates_independently():
+    """🔴 한쪽만 보고하는 응답이 공식 계약상 정상이다 — 축을 함께 묶지 않는다.
+
+    call1 은 input 만, call2 는 output 만 보고한다. 두 축을 한 덩어리로 다루면
+    (`usage` 전체가 완전할 때만 더하는 식) 두 값 모두 사라진다.
+    """
+    provider = FakeProvider(
+        [
+            _used(ProviderUsage(input_tokens=100, output_tokens=None), summary="수치 3 포함"),
+            _used(ProviderUsage(input_tokens=None, output_tokens=15)),
+        ]
+    )
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_attempts == 2
+    assert result.llm_observed_input_tokens == 100
+    assert result.llm_observed_output_tokens == 15
+
+
+def test_a_reported_zero_is_zero_and_not_none():
+    """🔴 **`0` 과 `None` 은 다른 사실이다** — latency 와 같은 규율 (#406 §10).
+
+    `0` 은 *"Provider 가 0 이라고 보고했고 그것을 관측했다"* 이고 `None` 은 *"이 값을
+    한 번도 관측하지 못했다"* 다. 미관측을 `0` 으로 채우면 실행이력에서 둘을 구별할
+    방법이 사라진다 (M3).
+    """
+    provider = FakeProvider([_used(ProviderUsage(input_tokens=0, output_tokens=0))])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_observed_input_tokens == 0
+    assert result.llm_observed_output_tokens == 0
+    assert result.llm_observed_input_tokens is not None
+    assert result.llm_observed_output_tokens is not None
+
+
+def test_a_reported_zero_still_adds_to_a_later_count():
+    """`0` 을 관측한 뒤 숫자가 오면 합은 그 숫자다 — `None` 과 달리 이미 관측 상태다."""
+    provider = FakeProvider(
+        [
+            _used(ProviderUsage(input_tokens=0, output_tokens=0), summary="수치 3 포함"),
+            _used(_CALL2),
+        ]
+    )
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_observed_input_tokens == 120
+    assert result.llm_observed_output_tokens == 15
+
+
+def test_disabled_records_no_usage():
+    provider = FakeProvider([_used(_CALL1)])
+
+    result = _disabled_service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "DISABLED"
+    assert provider.calls == 0
+    assert result.llm_observed_input_tokens is None
+    assert result.llm_observed_output_tokens is None
+
+
+def test_skipped_template_records_no_usage():
+    provider = FakeProvider([_used(_CALL1)])
+
+    result = _service(provider).interpret(
+        _no_signal_context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SKIPPED_TEMPLATE"
+    assert provider.calls == 0
+    assert result.llm_observed_input_tokens is None
+    assert result.llm_observed_output_tokens is None
+
+
+def test_usage_does_not_leak_across_calls_on_a_reused_service():
+    """🔴 Provider 에 `last_usage` 같은 상태를 남기면 여기서 드러난다 (#406 M6).
+
+    같은 Service · 같은 Provider 인스턴스를 두 번 부른다. 한 호출의 사용량이 인스턴스에
+    남으면 두 번째 결과가 첫 번째를 상속한다 — 동시 호출·Provider 재사용에서 값이
+    섞이는 바로 그 구조다. 누적 상태는 `interpret()` 의 지역 변수로만 살아야 한다.
+    """
+    provider = FakeProvider([_used(_CALL1), _used(_CALL2)])
+    service = _service(provider)
+
+    first = service.interpret(_context(), runtime_ready=True, has_blocking_constraints=False)
+    second = service.interpret(_context(), runtime_ready=True, has_blocking_constraints=False)
+
+    assert first.llm_observed_input_tokens == 100
+    assert second.llm_observed_input_tokens == 120, "두 번째가 첫 번째를 누적하면 안 된다"
+    assert second.llm_observed_output_tokens == 15
+
+
+def test_usage_parse_failure_never_turns_success_into_fallback():
+    """🔴 Provider 가 usage 를 못 읽어도 업무 결과는 그대로다 (#406 M8).
+
+    Provider 층은 malformed usage 를 `None` 으로 정규화해 여기까지 온다 — 그 결과가
+    `llm_status` 나 `llm_error_kind` 를 건드리지 않는 것을 런타임 경계에서도 잠근다.
+    """
+    provider = FakeProvider([_used(None)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_error_kind is None
+    assert result.llm_fallback_used is False
+
+
+def test_usage_accumulation_keeps_the_402_latency_contract(monkeypatch):
+    """두 계측이 서로를 밀어내지 않는다 — #402 의 합산 의미는 그대로다.
+
+    ★ latency 는 **실패한 호출까지** 포함하고(3회 전부), usage 는 **응답받은 호출만**
+      포함한다(2회). 두 규칙이 다른 것이 정상이고, 그 차이를 한 실행에서 함께 본다.
+    """
+    _pin_clock(monkeypatch, 5, 7, 11)
+    provider = FakeProvider([TimeoutError(), _used(_CALL1, summary="수치 3 포함"), _used(_CALL2)])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_attempts == 3
+    assert result.llm_provider_elapsed_ms == 23000, "시간은 실패한 호출도 포함한다 (#402)"
+    assert result.llm_observed_input_tokens == 220, "토큰은 응답받은 호출만 포함한다 (#406)"
+    assert result.llm_observed_output_tokens == 35

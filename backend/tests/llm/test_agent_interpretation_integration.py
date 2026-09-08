@@ -24,6 +24,11 @@ _LLM_FIELDS = {
     "llm_error_kind",
     "llm_context_facts",
     "llm_provider_elapsed_ms",
+    # 🔴 새 LLM 필드는 **명시적으로** 여기 추가한다 (#406). 빠뜨려도 아래 검사들은
+    #    `FailingProvider` 라 양쪽이 `None` 이 되어 **우연히 통과한다** — 그러면 "LLM
+    #    필드를 뺀 나머지가 결정론적이다" 라는 이 검사의 뜻이 조용히 좁아진다.
+    "llm_observed_input_tokens",
+    "llm_observed_output_tokens",
 }
 
 

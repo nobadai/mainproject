@@ -269,8 +269,9 @@ LLM 변화를 잡아 매번 깨지거나, 반대로 검사를 느슨하게 만�
 def _inventory_llm_trace(llm: InterpretationResult | None) -> dict[str, Any] | None:
     """실제로 일어난 Provider 호출 하나의 실행 관측 (#402). **업무 결과가 아니다.**
 
-    `_meta()` 경계에서 종전에 통째로 유실되던 넷을 여기로 나른다 — 어떤 Provider 를
-    썼나 · 최종 실패 원인이 무엇인가 · 얼마나 걸렸나 · 어떤 종류의 Fact 가 나갔나.
+    `_meta()` 경계에서 종전에 통째로 유실되던 것을 여기로 나른다 — 어떤 Provider 를
+    썼나 · 최종 실패 원인이 무엇인가 · 얼마나 걸렸나 · **토큰을 얼마나 썼나**(#406) ·
+    어떤 종류의 Fact 가 나갔나.
     공통 `ExecutionMetadata` 에 필드를 넷 더 세우지 않고 기존 확장 채널
     (`observations`)을 쓴다 — 재무가 `finance_llm_provider` 로 같은 성격의 사실을
     싣는 자리와 같다. 마스터는 읽지 않고 나르고, Critic 은 `<dept>_dept_meta` 가
@@ -302,6 +303,13 @@ def _inventory_llm_trace(llm: InterpretationResult | None) -> dict[str, Any] | N
         # 이력을 만들지 않는다(중간 실패는 로그 몫)는 기존 의미를 그대로 나른다.
         "error_kind": llm.llm_error_kind,
         "provider_elapsed_ms": llm.llm_provider_elapsed_ms,
+        # 관측된 호출들의 토큰 합 (#406). **숫자 둘만 나른다** — 원본 필드명
+        # (`promptTokenCount` · `prompt_eval_count`)도, raw 응답도 오지 않는다.
+        # ★ 값이 `None` 이어도 키는 **뺴지 않고 null 로 남긴다.** 관측의 key 집합이
+        #   실행마다 달라지면 읽는 쪽이 "필드가 없다"와 "값이 없다"를 구별하지 못하고,
+        #   `_LLM_TRACE_KEYS` 의 `==` 잠금도 성립하지 않는다.
+        "observed_input_tokens": llm.llm_observed_input_tokens,
+        "observed_output_tokens": llm.llm_observed_output_tokens,
         "context_fact_ids": [fact.fact_id for fact in llm.llm_context_facts],
     }
 
