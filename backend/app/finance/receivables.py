@@ -10,6 +10,7 @@ from typing import Any
 
 from psycopg import sql
 
+from app.finance.common import decimal_value, row_value
 from app.finance.db import get_db_schema
 from app.finance.sales_models import ReceivableCreateInput
 from app.finance.state_identity import daily_finance_state_id
@@ -74,38 +75,6 @@ def load_sale_row(conn: Any, sale_id: str) -> dict[str, Any]:
     return dict(rows[0])
 
 
-def load_finance_state_row(
-    conn: Any, *, sim_run_id: str, financing_mode: str, state_date: date
-) -> dict[str, Any]:
-    schema = sql.Identifier(get_db_schema())
-    with conn.cursor() as cursor:
-        cursor.execute(
-            sql.SQL(
-                """
-                SELECT
-                    finance_state_id, sim_run_id, state_date, state_type, financing_mode,
-                    current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
-                    unsettled_purchase_payables_krw, receivables_krw,
-                    inventory_book_value_krw, operational_inventory_value_krw,
-                    current_debt_krw, recommended_loan_amount_krw, note
-                FROM {}.finance_states
-                WHERE sim_run_id = %s
-                  AND financing_mode = %s
-                  AND state_date = %s
-                LIMIT 2
-                """
-            ).format(schema),
-            [sim_run_id, financing_mode, state_date],
-        )
-        rows = cursor.fetchall()
-    if len(rows) != 1:
-        raise ReceivablePersistenceConflict(
-            "finance state was not found for exact axis: "
-            f"{sim_run_id}/{financing_mode}/{state_date}"
-        )
-    return dict(rows[0])
-
-
 def build_receivable_write_plan(
     request: ReceivableCreateInput, *, sale_row: Mapping[str, Any]
 ) -> ReceivableWritePlan:
@@ -116,15 +85,15 @@ def build_receivable_write_plan(
         raise ReceivablePersistenceConflict("sale row does not match the requested sale_id")
     if str(sale_row["sim_run_id"]) != request.sim_run_id:
         raise ReceivablePersistenceConflict("sale row sim_run_id does not match the request")
-    if _row_value(sale_row, "customer_partner_id") != request.customer_partner_id:
+    if row_value(sale_row, "customer_partner_id") != request.customer_partner_id:
         raise ReceivablePersistenceConflict(
             "sale row customer_partner_id does not match the request"
         )
-    if _row_value(sale_row, "sale_date") != request.sale_date:
+    if row_value(sale_row, "sale_date") != request.sale_date:
         raise ReceivablePersistenceConflict("sale row sale_date does not match the request")
-    if _row_value(sale_row, "collection_due_date") != request.due_date:
+    if row_value(sale_row, "collection_due_date") != request.due_date:
         raise ReceivablePersistenceConflict("sale row due_date does not match the request")
-    if _decimal(_row_value(sale_row, "total_amount_krw")) != request.original_amount_krw:
+    if decimal_value(row_value(sale_row, "total_amount_krw")) != request.original_amount_krw:
         raise ReceivablePersistenceConflict("sale row original amount does not match the request")
 
     due_date = request.due_date
@@ -272,19 +241,7 @@ def _assert_same_receivable(cursor: Any, schema: sql.Identifier, plan: Receivabl
         "status": plan.status,
     }
     for key, value in expected.items():
-        if _row_value(row, key) != value:
+        if row_value(row, key) != value:
             raise ReceivablePersistenceConflict(
                 f"conflicting receivable row for {plan.sale_id}: {key}"
             )
-
-
-def _decimal(value: Any) -> Decimal:
-    if isinstance(value, Decimal):
-        return value
-    return Decimal(str(value))
-
-
-def _row_value(row: Any, name: str, index: int = 0) -> Any:
-    if isinstance(row, dict):
-        return row[name]
-    return row[index]

@@ -101,6 +101,30 @@ def test_실제_납품_예정이_있으면_MEASURED_다(monkeypatch):
     assert got.payload["orders"][0]["due_date"] == "2026-01-03"
 
 
+def test_미출고_확정주문은_수요_fallback보다_우선한다(monkeypatch):
+    rows = [{"sale_id": "SALE-1", "sale_date": date(2026, 1, 3), "quantity_kg": Decimal(12000)}]
+    captured = {}
+
+    def many(query, params):
+        captured["query"] = query.as_string(None)
+        captured["params"] = params
+        return rows
+
+    def one(*_args):
+        raise AssertionError("실제 확정 주문이 있으면 demand fallback 을 호출하지 않는다")
+
+    patch(monkeypatch, one=one, many=many)
+    got = inputs.load_confirmed_orders("배추", AS_OF)
+
+    assert got.grade == "MEASURED"
+    assert got.source == "sales + sale_items"
+    assert got.payload["orders"] == [
+        {"sale_id": "SALE-1", "qty_kg": 12000, "due_date": "2026-01-03"}
+    ]
+    assert "order_status IN ('CONFIRMED', 'READY')" in captured["query"]
+    assert captured["params"] == ("배추", AS_OF, date(2026, 1, 14))
+
+
 def test_납품_예정이_없으면_수요에서_파생하되_확정이라_부르지_않는다(monkeypatch):
     """🔴 **여기가 이 모듈의 핵심이다.**
 

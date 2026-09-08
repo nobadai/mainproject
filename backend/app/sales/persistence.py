@@ -60,6 +60,8 @@ class SaleWritePlan:
 class SaleWriteResult:
     sale_id: str
     sale_item_id: str
+    item_id: str
+    quantity_kg: Decimal
     sales_written: int
     sale_items_written: int
 
@@ -130,7 +132,7 @@ def build_sale_confirmation_plan(request: SalesConfirmationInput) -> SaleWritePl
         collection_status="OPEN",
         source_order_id=request.source_order_id,
         note=request.note,
-        order_status="DELIVERED",
+        order_status="CONFIRMED",
         item_name=scenario.item,
         sale_item=line,
     )
@@ -163,9 +165,51 @@ def persist_sale(conn: Any, plan: SaleWritePlan) -> SaleWriteResult:
     return SaleWriteResult(
         sale_id=plan.sale_id,
         sale_item_id=sale_item.sale_item_id,
+        item_id=sale_item.item_id,
+        quantity_kg=sale_item.quantity_kg,
         sales_written=header_written,
         sale_items_written=item_written,
     )
+
+
+def mark_sale_delivered(conn: Any, *, sale_id: str) -> bool:
+    """Caller-owned completion hook after Logistics has shipped the sale."""
+
+    if not isinstance(sale_id, str) or not sale_id.strip():
+        raise SalesPersistenceConflict("sale_id must not be blank")
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {}.sales
+                SET order_status = 'DELIVERED'
+                WHERE sale_id = %s
+                  AND order_status IN ('CONFIRMED', 'READY')
+                """
+            ).format(schema),
+            [sale_id],
+        )
+        if cursor.rowcount == 1:
+            return True
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT order_status
+                FROM {}.sales
+                WHERE sale_id = %s
+                LIMIT 2
+                """
+            ).format(schema),
+            [sale_id],
+        )
+        rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise SalesPersistenceConflict(f"sale was not found: {sale_id}")
+    status = _row_value(rows[0], "order_status", 0)
+    if status == "DELIVERED":
+        return False
+    raise SalesPersistenceConflict(f"sale cannot be marked DELIVERED from {status!r}")
 
 
 def sale_id_for(identity: SalesExecutionIdentity, scenario: SalesScenario) -> str:
@@ -286,11 +330,15 @@ def _assert_same_sale(cursor: Any, schema: sql.Identifier, plan: SaleWritePlan) 
         "collection_status": plan.collection_status,
         "source_order_id": plan.source_order_id,
         "note": plan.note,
-        "order_status": plan.order_status,
     }
     for key, value in expected.items():
         if _row_value(row, key) != value:
             raise SalesPersistenceConflict(f"conflicting sale row for {plan.sale_id}: {key}")
+    status = _row_value(row, "order_status")
+    if status not in {"CONFIRMED", "READY", "DELIVERED"}:
+        raise SalesPersistenceConflict(
+            f"conflicting sale row for {plan.sale_id}: order_status"
+        )
 
 
 def _assert_same_sale_item(cursor: Any, schema: sql.Identifier, sale_item: SaleItemWrite) -> None:

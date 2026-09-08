@@ -316,6 +316,7 @@ def _orders_from_db(item: str, as_of: date) -> dict[str, Any] | None:
          WHERE i.item_name = %s
            AND s.sale_date > %s
            AND s.sale_date <= %s
+           AND s.order_status IN ('CONFIRMED', 'READY')
          ORDER BY s.sale_date
     """).format(sch=sql.Identifier(get_db_schema()))
     rows = fetch_all(query, (item, as_of, as_of + timedelta(days=_ORDER_WINDOW_DAYS)))

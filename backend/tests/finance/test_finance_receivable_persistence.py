@@ -39,7 +39,7 @@ def _sale_row(**overrides) -> dict[str, object]:
         "collection_status": "OPEN",
         "source_order_id": None,
         "note": "approved",
-        "order_status": "DELIVERED",
+        "order_status": "CONFIRMED",
     }
     row.update(overrides)
     return row
