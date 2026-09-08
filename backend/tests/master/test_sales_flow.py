@@ -538,7 +538,7 @@ def test_통과_후보가_0이면_되먹임한다():
 
     assert out.end_code == "SL3_ALL_REJECTED"
     assert out.feedback_attempts == MAX_FEEDBACK_ATTEMPTS
-    assert 보낸것[1]["feedback_context"]["feedback_attempt"] == 1
+    assert 보낸것[1]["feedback_attempt"] == 1
 
 
 def test_되먹임_상한을_넘기지_않는다():
@@ -553,15 +553,22 @@ def test_되먹임_상한을_넘기지_않는다():
 
 
 def test_되먹임에_부서가_낸_대안이_실린다():
-    """🔴 안 실으면 **같은 입력으로 다시 돌린다** — 매입이 `#169` 에서 고친 자리다."""
+    """🔴 안 실으면 **같은 입력으로 다시 돌린다** — 매입이 `#169` 에서 고친 자리다.
+
+    ★ **최상위 `adjustments` 칸이 아니라 그 회신 안이다** (판매 회신 2026-09-07).
+      `SuggestedAdjustment` 는 부서 회신의 일부라 최상위로 빼면 **어느 회신이 낸
+      대안인지**가 사라진다.
+    """
     보낸것: list[dict] = []
     happy(
         sales=seller([[scenario("SCN-1", "FINANCIAL_VALIDATION")]], capture=보낸것),
         finance=financier({"SCN-1": "reject"}, adjustments=(adjustment(),)),
     ).run()
 
-    assert [a["axis"] for a in 보낸것[1]["adjustments"]] == ["amount"]
-    assert 보낸것[1]["feedback_context"]["rejected"][0]["scenario_id"] == "SCN-1"
+    assert "adjustments" not in 보낸것[1], "조정안이 최상위로도 나간다 — 같은 사실이 두 곳에 있다"
+    회신 = 보낸것[1]["feedback"]["domain_replies"][0]
+    assert [a["axis"] for a in 회신["payload"]["suggested_adjustments"]] == ["amount"]
+    assert 보낸것[1]["feedback"]["scenario_feedback"][0]["scenario_id"] == "SCN-1"
 
 
 def test_권위_있는_대안이_없으면_되먹임하지_않는다():

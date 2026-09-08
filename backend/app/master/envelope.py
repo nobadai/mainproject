@@ -621,6 +621,32 @@ def wire_adjustment(adjustment: SuggestedAdjustment) -> dict[str, Any]:
     return out
 
 
+def wire_payload(value: Any) -> Any:
+    """부서 payload 를 **전선에 실을 수 있는 모양**으로 편다 — 튜플을 목록으로.
+
+    🔴 **`wire_adjustment` 와 같은 규율을 payload 에도 건다** (#175).
+
+      `wire_adjustment` 는 표준형 한 겹만 편다. 그런데 부서 회신의 `payload` 는
+      **마스터가 모양을 모르는 중첩 dict** 이고, 그 안에 튜플이 하나라도 있으면
+      같은 병이 그대로 난다 — JSON 을 한 번 왕복하면 목록이 되므로 **같은 칸이 경로에
+      따라 두 모양**이 되고, 받는 쪽이 `== [...]` 로 비교하면 in-process 에서만
+      조용히 어긋난다.
+
+    ★ **값을 고치지 않는다 — 모양만 편다** (§3.2.2). 튜플/목록의 순서도 그대로다.
+
+    ★ **집합은 안 편다.** `set` 을 목록으로 펴면 순서가 실행마다 갈려 §3.4 재현성이
+      깨진다. 부서가 집합을 실어 보내면 그 자리에서 `json.dumps` 가 죽는 것이 맞다 —
+      마스터가 조용히 순서를 지어내는 것보다 낫다.
+    """
+    if isinstance(value, Mapping):
+        return {key: wire_payload(item) for key, item in value.items()}
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return [wire_payload(item) for item in value]
+    return value
+
+
 _HAS_TIMEZONE = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
 """ISO 8601 오프셋이 붙었는가. `2026-09-04T06:00:00+09:00` · `...Z` 는 통과."""
 
