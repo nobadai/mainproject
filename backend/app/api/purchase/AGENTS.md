@@ -57,11 +57,19 @@ def build(as_of: date) -> PurchaseTab:
 
 ## 어디서 값을 읽나
 
-읽을 곳: `purchases` · `arrival_schedule` · 그리고 마스터의 실행/결정 기록.
+읽을 곳: `master_agent_runs`(저장된 실행) · `master_decisions`(사람의 결정) ·
+`purchases` + `purchase_items`(확정 매입 원장) · `items`(품목 이름).
 
 제안(후보 안)은 `app/purchase_agent/` 가 만들고, 승인·확정은
 `app/master/` 가 씁니다. **여기서 에이전트를 돌리지 마세요** — 저장된
 결과만 읽습니다 (화면을 열 때마다 LLM 이 돌면 안 됩니다).
+
+🔴 **DB 헬퍼는 `app.finance.db` 입니다.** `app.purchase_agent.db` 에는
+`get_db_schema` 가 **없습니다** — 일부러 뺐고 (그 파일 머리말) 이유는
+*"`.env` 가 어느 시세 테이블을 읽을지 정하면 안 된다"* 입니다. 그건
+에이전트 경로의 사정이고, 화면은 `haetdeul` 도메인 표를 읽으므로 스키마를
+`.env` 가 정하는 것이 맞습니다. 마스터 `ledger_repository.py` 가 같은
+이유로 같은 선택을 했습니다. ⚠️ 쓰기 헬퍼는 가져오지 않습니다.
 
 ## ★ 아직 안 정한 것 — `sim_run_id`
 
@@ -91,7 +99,7 @@ get_finance_dashboard(sim_run_id=..., as_of=as_of)
 부서 서비스로 안 되는 값만 직접 읽습니다. **먼저 위를 보세요.**
 
 ```python
-from app.purchase_agent.db import fetch_one, fetch_all, get_db_schema
+from app.finance.db import fetch_one, fetch_all, get_db_schema
 ```
 
 ```python
