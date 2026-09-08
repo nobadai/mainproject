@@ -6,20 +6,18 @@
 #     판매   `app/sales/outbound.py`      확정 판매를 봉투로 만든다 (보내는 쪽)
 #     물류   `app/logistics/sales_outbound.py`  봉투를 받아 예약 코어를 부른다 (받는 쪽)
 #
-#   ⚠️ **미완 ① — `delivery_date` 를 채우는 쪽이 아직 없다.**
-#      칸은 여기 섰지만 판매(`app/sales/outbound.py`)가 아직 안 채운다. 그 배선은
-#      판매 소관이라 이 판에서 안 했다. 채워지기 전까지 이 봉투를 만드는 곳은
-#      전부 `TypeError` 다 — **조용히 통과하지 않는다**는 것이 의도다.
-#      🔴 기본값을 두지 않는다. 기본값이 곧 업무 규칙이 되고, 아무도 그것을 정한
-#      적이 없다 (`app/logistics/inbound_execution.py` 가 같은 규율을 적어 뒀다).
+#   🔴 **납품일 칸을 두지 않는다** (2026-09-08 · 물류·판매 합의).
+#      `sales.sale_date` 가 납품일의 **정본**이고, DDL 주석이 그렇게 정의한다
+#      (`database/10_domain_schema.sql:3534` — '판매/납품 기준일.').
 #
-#   ⚠️ **미완 ② — 물류가 `delivery_date` 를 코어로 안 넘긴다.**
-#      `reserve_stock(..., due_date=)` 이 이미 그 칸을 받는데
-#      `reserve_confirmed_sale` 이 안 넘겨서 `inventory_reservations.due_date` 가
-#      전부 `NULL` 이다. 그 배선은 물류 소관이다 (PR #421).
+#      ★ 여기에 같은 날짜를 **복사**하면 두 값이 갈리는 날이 온다. 대신 마스터가
+#        그날 `sale_date` 인 판매를 골라 `reservation_id_for_sale_item` 으로
+#        예약 이름을 **계산**한다 — 결정론이라 저장할 이유가 없다.
+#
+#      ⚠️ 그래서 `inventory_reservations.due_date` 가 `NULL` 로 남는 것은
+#        **결함이 아니다.** 그 칸을 안 쓰기로 한 것이다.
 #
 #   ★ **이 판에서 필드 이름·클래스 이름은 하나도 안 바꿨다.** 물류가 이미 임포트한다.
-#      더한 것은 `delivery_date` 하나뿐이다.
 # ─────────────────────────────────────────────────────────────────────────────
 """판매가 확정한 사실을 물류 출고 경계에 넘기는 공용 계약."""
 
@@ -56,20 +54,6 @@ class SalesOutboundReservationRequest:
     quantity_kg: Decimal
     as_of: date
 
-    # 🔴 **`due_date` 라고 부르지 않는다 — 저장소에서 그 이름이 두 뜻이다.**
-    #
-    #   inventory_reservations.due_date   **납품** 기일
-    #   sales.collection_due_date         **수금** 기일 (= sale_date + payment_days)
-    #   receivables.due_date              **수금** 기일 (같은 값)
-    #
-    #   셋 다 `due_date` 인데 앞의 하나만 다른 사실이다. 이미 선 물류 칸
-    #   (`inventory_reservations.due_date`)은 안 고친다 — 이름 바꾸는 비용이 얻는
-    #   것보다 크다. **새로 내는 자리에서만 갈라 놓는다** (2026-09-08 판매·물류 통보).
-    delivery_date: date
-    """물류 `due_date` 로 간다 (**납품** 기일).
-
-    ⚠️ `sales.collection_due_date`(**수금** 기일)와 **다른 사실**이다.
-    """
 
 
 def reservation_id_for_sale_item(sale_item_id: str) -> str:
