@@ -41,6 +41,13 @@ def read_forecast(
         return get_forecast(item, as_of, target_kind)
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except RuntimeError as error:
+        # DB 환경변수 누락·연결 실패. **404 로 내보내면 안 된다** — "그날 예측이
+        # 없다"와 "창고에 못 붙었다"는 부르는 쪽이 해야 할 일이 다르다.
+        # (`push` 는 이미 이렇게 하고 있었는데 여기만 빠져 있었다.)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+        ) from error
 
 
 @router.post(

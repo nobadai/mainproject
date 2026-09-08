@@ -9,6 +9,7 @@ from functools import partial
 
 from fastapi import FastAPI
 
+from app.api.router import router as screen_router
 from app.finance.adapter import finance_port
 from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
@@ -31,12 +32,19 @@ from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
 from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
+from app.ml.router import router as ml_router
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.quotes import auction_quote_source
 from app.sales.adapter import sales_port
 from app.sales.router import router as sales_router
 
 app = FastAPI(title="mainproject")
+# 화면용 API (`/api/…`). **부서 라우터와 주소로 가른다** — `/finance/agent` 는
+# 에이전트를 돌리고, `/api/finance` 는 화면에 값을 준다. `/api` 아래는 GET 뿐이다.
+app.include_router(screen_router)
+# ML 예측 API. **여태 안 붙어 있어서 `/ml/forecast` 가 404 였다** (2026-09-08 발견).
+# 매입은 `app.ml.service` 를 파이썬으로 직접 불러 써서 아무도 모르고 있었다.
+app.include_router(ml_router)
 app.include_router(finance_router)
 app.include_router(logistics_router)
 app.include_router(master_router)
