@@ -57,6 +57,29 @@ financing_mode   🔴 **마스터 축이 아니다** — 재무 축 (sim_run_id,
   `FinanceDataNotReady("finance_runtime_axis_ambiguous")` 를 던진다. 그 사유를
   `BLOCKED` 로 접되 **무엇이 모호했는지를 문장에 남긴다** — 접기만 하고 사유를 버리면
   화면에는 *"막혔다"* 만 남고 고칠 곳이 사라진다.
+
+---
+
+🔴 **사건은 호출 시점에 표에서 읽는다** (2026-09-08 · `master_collection_events`).
+
+  전에는 이 어댑터가 `source: DeterministicCollectionFixtureSource` 를 **필드로**
+  들고 있었다. 그러면 사건 목록이 **배선 시점에 고정**되고, 표에 한 줄 넣어도 앱을
+  다시 띄우기 전까지는 아무 일도 안 일어난다.
+
+```text
+① 재무 축을 읽는다                     ← 지금 그대로
+② sim_run_id 불일치면 BLOCKED          ← 지금 그대로
+③ 그 축의 사건을 표에서 읽는다          ← 여기
+④ 재무 fixture 원천으로 감싸 위임한다
+```
+
+  ⚠️ **③ 이 실패하면 `BLOCKED` 다.** `()` 로 접으면 표가 안 서 있거나 DB 가 끊긴 날이
+    *"오늘은 들어올 게 없었다"* 로 읽힌다 — `collection_events.read_collection_events`
+    가 예외를 그대로 올리는 이유가 그것이고, 접는 자리는 여기다.
+
+🔴 **표가 비어 있다** (2026-09-08 실측 0행). **이 판은 자리를 만들 뿐 사건을 만들지
+  않는다.** 무엇을 사실로 둘지는 팀 결정이고, 재무가 *"due_date 경과를 수금으로 읽지
+  않는다"* 로 그은 선이 그 이유다. **낸 것과 도는 것은 다르다.**
 """
 
 from __future__ import annotations
@@ -66,29 +89,34 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from app.finance.collection import CollectionEvent
 from app.finance.collection_fixture import DeterministicCollectionFixtureSource
 from app.finance.collection_source import FinanceCollectionSource
 from app.finance.db import FinanceDataNotReady, FinanceRuntimeAxis, get_finance_runtime_axis
 from app.master.collection import CollectionPartOut
+from app.master.collection_events import read_collection_events
 
 __all__ = ["FinanceCollectionAdapter"]
+
+#: 사건을 읽는 방법의 모양. 축 둘을 받아 그 축의 사건 전부를 준다.
+LoadEvents = Callable[..., tuple[CollectionEvent, ...]]
 
 
 @dataclass
 class FinanceCollectionAdapter:
-    """`CollectionSource` 구현. **재무 축을 물어보고 그대로 넘긴다.**
+    """`CollectionSource` 구현. **재무 축을 물어보고 그 축의 사건을 실어 넘긴다.**
 
     :param sim_run_id: 마스터가 정한 실행. `BURN_IN_SIM_RUN_ID` 하나가 주인이다.
-    :param source: 그날 수금 사건의 원천. **재무 소유**이고 배선 자리에서 눈에 보이게
-        고른다 — 저장소에 클래스가 하나뿐이라고 그것이 기본값이 되지는 않는다
-        (`ScenarioSimulatedInspectionProvider` 와 같은 전례).
     :param read_axis: 재무 축을 읽는 방법. 기본값이 재무 함수 그대로이고, 검사가
         대역을 끼울 자리다. **마스터가 축을 계산하는 자리가 아니다.**
+    :param load_events: 수금 사건을 읽는 방법. 기본값이 `master_collection_events`
+        조회이고, 검사가 대역을 끼울 자리다. **호출마다 다시 읽는다** — 배선 시점에
+        고정하면 표에 한 줄 넣어도 앱을 다시 띄우기 전까지 아무 일도 안 일어난다.
     """
 
     sim_run_id: str
-    source: DeterministicCollectionFixtureSource
     read_axis: Callable[[], FinanceRuntimeAxis] = field(default=get_finance_runtime_axis)
+    load_events: LoadEvents = field(default=read_collection_events)
 
     def collect(self, conn: Any, *, as_of: date) -> CollectionPartOut:
         """재무 축을 읽어 `FinanceCollectionSource` 를 세우고 위임한다."""
@@ -114,9 +142,29 @@ class FinanceCollectionAdapter:
                 ),
             )
 
+        try:
+            events = self.load_events(
+                sim_run_id=self.sim_run_id,
+                financing_mode=axis["financing_mode"],
+            )
+        except Exception as exc:  # noqa: BLE001 - 조회 실패를 `()` 로 접지 않는다.
+            # 🔴 **없는 것과 못 읽은 것은 다르다.** `()` 로 접으면 표가 안 서 있거나
+            #   DB 가 끊긴 날이 *"오늘은 들어올 게 없었다"* 로 읽히고, 들어왔어야 할
+            #   현금이 장부에 없는 채로 매입 판단이 돈다.
+            return CollectionPartOut(
+                part="finance",
+                status="BLOCKED",
+                reason=f"수금 사건을 읽지 못했다: {type(exc).__name__}: {exc}",
+            )
+
         return FinanceCollectionSource(
             sim_run_id=self.sim_run_id,
             # 🔴 **고르지 않는다. 재무가 읽은 값 그대로다.**
             financing_mode=axis["financing_mode"],
-            source=self.source,
+            # ★ 사건 원천의 모양은 **재무 것**이다. 마스터는 읽어 온 사건을 그 그릇에
+            #   담아 넘길 뿐이고, 그날 것을 고르는 일은 그쪽이 한다.
+            source=DeterministicCollectionFixtureSource.from_events(
+                events,
+                source_ref="master_collection_events",
+            ),
         ).collect(conn, as_of=as_of)

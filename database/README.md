@@ -1,6 +1,6 @@
 # `database/` — 스키마 파일과 실행 순서
 
-> 마지막 갱신 2026-09-05
+> 마지막 갱신 2026-09-08
 
 **검증 결과는 시점마다 다릅니다. 셋을 섞어 읽지 마십시오.**
 
@@ -79,6 +79,7 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `finance/payable_cancellation.sql` | `payables` 의 `CANCELLED` · 취소금액/취소일 · 지급/취소/미지급 금액 항등식. 기존 행은 취소금액 0, 자동 상태 변경·삭제 없음 | 2026-09-05 · **실 DB 적용 대기** |
 | `30_logistics_wms_schema.sql` | 물류 WMS 표 21 · 뷰 2 회수 + `inventory_lots` 컬럼 6·제약 5 · `inventory_moves` UNIQUE 1 | 2026-09-05 · **실 DB 에는 이미 있음**(회수) · 신규 구축 DB 에는 필수 |
 | `logistics_inventory_lots_nullable.sql` | `inventory_lots.grade` · `derivation_status` NOT NULL 해제. **기존 행 값 변경 없음.** 정상 실입고가 미확정 등급과 비-Burn-in 상태를 NULL 로 표현할 수 있게 함 | 2026-09-05 · **실 DB 적용 대기** |
+| `master_collection_events.sql` | 수금 사건 표 `master_collection_events` 신설. **새 표 하나뿐이라 기존 표를 안 건드린다** — 적용 전후 `receivables` 15행 그대로. 표는 **비어서** 나간다 | 2026-09-08 · **실 DB 적용됨** |
 
 ### ⚠️ `30_logistics_wms_schema.sql` 은 판을 나누지 않았습니다
 
@@ -120,6 +121,7 @@ inbound_receipts (신규)                    →  inventory_lots FK (기존 표 
 | `master_decisions.sql` | 마스터 | 사람의 결정. append-only |
 | `master_decisions_run_id.sql` | 마스터 | 위의 ALTER 판 |
 | `master_runs_migration.sql` | 마스터 | 2026-08-27 ALTER 판 |
+| `master_collection_events.sql` | 마스터 | 수금 사건. **자리만 만들고 시드가 없다** — 무엇을 사실로 둘지는 팀 결정이고, 재무가 "due_date 경과를 수금으로 읽지 않는다" 로 그은 선이 그 이유다 |
 | `finance_agent_runs*.sql` | 재무 | |
 | `logistics_agent_runs.sql` | 물류 | |
 | `30_logistics_wms_schema.sql` | **물류** | WMS 표 21 · 뷰 2 회수 (2026-09-04 cutover 분). 다른 파트 표는 FK 로 가리키기만 한다 |
