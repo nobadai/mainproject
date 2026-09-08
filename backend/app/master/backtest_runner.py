@@ -65,7 +65,10 @@ CalendarNotCovered             → 🔴 멈추고 사유를 낸다
 
 ⚠️ **어휘를 새로 만들지 않았다.** 세는 값은 전부 `scheduler` 가 낸 것 그대로다
   (`DayRunOutcome.action` · `ItemRunOutcome.end_code` · `procurement_status` 의
-  `NOT_ATTEMPTED` · `failed_items`). 이 파일이 새로 만든 말은 걷기 자체에 관한 것
+  `NOT_ATTEMPTED` · `outbound_status` 의 네 값 · `failed_items`). 그 네 값은 **접지
+  않고 그대로 센다** — `NOTHING_DUE`(없다)와 `FAILED`(못 했다)와
+  `NOT_ATTEMPTED`(안 했다)를 묶으면 손익 곡선이 왜 평평한지를 성적표가 못 답한다.
+  이 파일이 새로 만든 말은 걷기 자체에 관한 것
   뿐이다 (`skipped_days` · `incidents` · `stopped_reason`) — 그것은 `scheduler` 가
   모르는 사실이다. 스케줄러는 하루만 알지 **범위를 모른다.**
 """
@@ -169,6 +172,25 @@ class WalkResult:
             for day in self.days
             for one in day.items
         )
+
+    @property
+    def outbound_statuses(self) -> Mapping[str, int]:
+        """출고 단계 분포. 🔴 **네 값을 접지 않고 그대로 센다.**
+
+        ```text
+        RAN            나갔다
+        NOTHING_DUE    나갈 것이 없었다        ← "없다"
+        FAILED         나가려다 못 나갔다      ← "못 했다"
+        NOT_ATTEMPTED  거기까지 못 갔다        ← "안 했다"
+        ```
+
+        ⚠️ **`RAN` 만 세고 나머지를 묶으면 안 된다.** 손익 곡선이 평평할 때 그것이
+          *"나갈 것이 없어서"* 인지 *"나가려다 못 나가서"* 인지를 성적표가 답해야
+          하고, 묶는 순간 그 답이 사라진다.
+
+        ★ `end_codes` 와 같은 모양이다 — `scheduler` 가 낸 값을 세기만 한다.
+        """
+        return Counter(one.outbound_status for one in self.days)
 
 
 def walk(
@@ -313,6 +335,7 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
     돌기로 했는데 procurement_status 가
       NOT_ATTEMPTED                         개장이 막혔거나 장부 관문이 돌아섰다
     failed_items 가 비지 않았다              품목이 터졌다 (나머지는 돌았다)
+    outbound_status == FAILED               나가려다 못 나갔다
     ```
 
     ⚠️ **`WAIT` 은 사고가 아니다.** *"아직"* 이지 *"못"* 이 아니다. 그 구분이
@@ -320,6 +343,14 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
 
     ⚠️ **`NOT_A_MARKET_DAY` 도 사고가 아니다.** 달력 검사가 먼저 걸러서 여기까지
       오지도 않지만, 온다 해도 *"안 서는 날"* 은 정상이다.
+
+    ⚠️ **출고 `NOTHING_DUE` 도 같은 결로 사고가 아니다.** *"나갈 것이 없다"* 는
+      *"못 나갔다"* 가 아니다 — 예약이 아직 0행인 지금 그것을 사고로 세면 **매일이
+      사고**가 되고, 사고 목록이 아무것도 안 가리킨다.
+
+    🔴 **출고 `NOT_ATTEMPTED` 를 여기서 다시 세지 않는다.** 거기까지 못 간 날은
+      판단 단계를 안 탄 날이고, 그것은 **위 줄이 이미 사고로 잡았다** — 겹쳐 적으면
+      한 사실이 사고 둘로 세진다.
     """
     if outcome.action == "BLOCKED":
         return f"BLOCKED — {outcome.reason}"
@@ -332,6 +363,10 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
         )
     if outcome.failed_items:
         return f"품목이 터졌다: {', '.join(outcome.failed_items)}"
+    if outcome.outbound_status == "FAILED":
+        # ★ **사유를 여기서 짓지 않는다.** 무엇이 못 나갔는지는 `OutboundOut.reason`
+        #   이 알고, `_stage` 가 그것을 note 로 실어 보냈다 — 그 값을 그대로 나른다.
+        return "출고가 못 나갔다" + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
     return None
 
 
@@ -378,6 +413,7 @@ def format_summary(result: WalkResult) -> str:
         f"돈 날     {len(result.days)}일 · 휴장 {len(result.skipped_days)}일",
         f"판단      {dict(sorted(result.actions.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
+        f"출고      {dict(sorted(result.outbound_statuses.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]
