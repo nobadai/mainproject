@@ -332,12 +332,16 @@ def test_main_이_두_파트를_다_등록한다():
 
     ⚠️ 전역 등록소를 읽지 않는다 — 다른 검사가 `reset()` 을 하면 순서에 따라 답이
       달라진다. **배선 원문**을 읽어 두 줄이 다 있는지 본다.
+
+    ★ **읽는 파일이 바뀌었다** (`#442` · 2026-09-09). 등록 줄이 `app/main.py` 에서
+      `app/master/bootstrap.py` 로 옮겨졌다 — 진입점이 둘(FastAPI · CLI)이라 조립
+      뿌리를 함수로 뺐다. 재는 것은 그대로다.
     """
     import pathlib
 
-    import app.main
+    from app.master import bootstrap
 
-    원문 = pathlib.Path(app.main.__file__).read_text(encoding="utf-8")
+    원문 = pathlib.Path(bootstrap.__file__).read_text(encoding="utf-8")
 
     assert 'register_cancellation("finance"' in 원문
     assert 'register_cancellation("logistics"' in 원문
