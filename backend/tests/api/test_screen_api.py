@@ -14,18 +14,45 @@
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api.finance import query as finance_query
 from app.api.router import router
+from app.api.sales import query as sales_query
+from app.finance.schemas import (
+    FinanceCashflowResponse,
+    FinanceCashflowSummary,
+    FinanceClosingItem,
+    FinanceDashboardMeta,
+    FinanceDashboardResponse,
+    FinancePayableSummary,
+    FinanceReceivableSummary,
+    FinanceStateView,
+)
+from app.sales.schemas import (
+    SalesCollectionStatusSummary,
+    SalesDashboardMeta,
+    SalesDashboardResponse,
+    SalesDashboardSummary,
+    SalesHistoryItem,
+    SalesItemSummary,
+    SalesReceivableItem,
+)
 
 AS_OF = "2026-01-06"
 FIN_AS_OF = "2025-12-31"
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(sales_query, "get_sales_dashboard", _sales_dashboard_stub)
+    monkeypatch.setattr(finance_query, "get_finance_dashboard", _finance_dashboard_stub)
+    monkeypatch.setattr(finance_query, "get_finance_cashflow", _finance_cashflow_stub)
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
@@ -71,6 +98,19 @@ def test_없는_값은_400_이지_500_이_아니다(client):
         assert "가능:" in response.json()["detail"]
 
 
+def test_재무_state가_없는_날짜도_400이다(monkeypatch):
+    monkeypatch.setattr(finance_query, "get_finance_dashboard", _empty_finance_dashboard_stub)
+    monkeypatch.setattr(finance_query, "get_finance_cashflow", _finance_cashflow_stub)
+    app = FastAPI()
+    app.include_router(router)
+    local_client = TestClient(app)
+
+    response = local_client.get("/api/finance", params={"as_of": AS_OF, "state": "base"})
+
+    assert response.status_code == 400
+    assert "Finance state was not found: BASE_NO_LOAN" == response.json()["detail"]
+
+
 def test_예시값인지_아닌지를_반드시_밝힌다(client):
     """`Source.filled` 가 없으면 화면이 「예시값」 딱지를 못 붙인다.
 
@@ -83,6 +123,89 @@ def test_예시값인지_아닌지를_반드시_밝힌다(client):
         for source in sources:
             assert isinstance(source["filled"], bool), path
             assert source["owner"], path
+
+
+def test_판매_화면은_dashboard_service_값을_쓴다(client):
+    body = client.get("/api/sales", params={"as_of": FIN_AS_OF}).json()
+
+    assert body["source"]["filled"] is True
+    assert body["stats"][0]["raw"] == 1_234_567
+    assert body["stats"][3]["raw"] == 650_000
+    summary = next(card for card in body["cards"] if card["key"] == "summary")
+    assert summary["stats"][1]["value"] == "완료 1 · 일부 1 · 예정 1"
+    recent = next(card for card in body["cards"] if card["key"] == "recent")
+    assert [row["no"] for row in recent["table"]["rows"]] == ["SALE-002", "SALE-001"]
+
+
+def test_판매_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):
+    seen: dict[str, date] = {}
+
+    def spy(sim_run_id: str, as_of: date) -> SalesDashboardResponse:
+        seen["as_of"] = as_of
+        return _sales_dashboard_stub(sim_run_id, as_of)
+
+    monkeypatch.setattr(sales_query, "get_sales_dashboard", spy)
+
+    sales_query.build(date(2026, 1, 6))
+
+    assert seen["as_of"] == date(2026, 1, 6)
+
+
+def test_판매_수금_차트는_남은_금액만_쓴다(client):
+    body = client.get("/api/sales", params={"as_of": FIN_AS_OF}).json()
+    receivables = next(card for card in body["cards"] if card["key"] == "ar")
+
+    assert receivables["chart"]["series"][0]["data"] == [0.65]
+    rows = receivables["table"]["rows"]
+    assert next(row for row in rows if row["status"] == "수금 완료")["d_day"] is None
+    assert next(row for row in rows if row["status"] == "일부 수금")["d_day"] == 3
+    assert next(row for row in rows if row["status"] == "수금 예정")["d_day"] == 4
+
+
+def test_재무_화면은_financing_mode로_state를_고른다(client):
+    base = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "base"}).json()
+    loan = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "loan"}).json()
+
+    assert base["source"]["filled"] is True
+    assert base["stats"][0]["raw"] == 100_000
+    assert base["stats"][3]["raw"] == 0
+    assert "BASE_NO_LOAN" in base["explain"]["text"]
+    assert loan["stats"][0]["raw"] == 500_000
+    assert loan["stats"][3]["raw"] == 300_000
+    assert "LOAN_BASELINE" in loan["explain"]["text"]
+
+
+def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):
+    seen: dict[str, date] = {}
+
+    def dashboard_spy(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
+        seen["dashboard_as_of"] = as_of
+        return _finance_dashboard_stub(sim_run_id, as_of)
+
+    def cashflow_spy(sim_run_id: str, as_of: date, days: int) -> FinanceCashflowResponse:
+        seen["cashflow_as_of"] = as_of
+        return _finance_cashflow_stub(sim_run_id, as_of, days)
+
+    monkeypatch.setattr(finance_query, "get_finance_dashboard", dashboard_spy)
+    monkeypatch.setattr(finance_query, "get_finance_cashflow", cashflow_spy)
+
+    finance_query.build(date(2026, 1, 6), "base")
+
+    assert seen == {
+        "dashboard_as_of": date(2026, 1, 6),
+        "cashflow_as_of": date(2026, 1, 6),
+    }
+
+
+def test_재무_화면은_cashflow와_ledger를_쓴다(client):
+    body = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "base"}).json()
+
+    assert body["cash_chart"]["series"][0]["data"] == [0.09, 0.1]
+    assert body["cash_chart"]["series"][1]["data"] == [0.49, 0.5]
+    assert body["flows"][4]["value"] == "12만원"
+    assert body["balances"][0]["raw"] == 1_000
+    assert body["balances"][2]["raw"] == 0
+    assert [row["d"] for row in body["closings"]["rows"]] == ["2025-12-31", "2025-12-30"]
 
 
 def test_그래프_계열은_날짜축과_길이가_같다(client):
@@ -144,3 +267,275 @@ def test_표의_칸_이름이_행에_있다(client):
             for row in table["rows"]:
                 missing = names - set(row)
                 assert not missing, f"{path} · {key} · 빠진 칸 {missing}"
+
+
+def _sales_dashboard_stub(sim_run_id: str, as_of: date) -> SalesDashboardResponse:
+    assert sim_run_id == sales_query.BURN_IN_SIM_RUN_ID
+    return SalesDashboardResponse(
+        meta=SalesDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
+        summary=SalesDashboardSummary(
+            sales_count=2,
+            customer_count=1,
+            total_sales_quantity_kg=Decimal(1500),
+            total_sales_amount_krw=Decimal(1234567),
+            contribution_profit_krw=Decimal(246913),
+            contribution_margin_pct=Decimal("20.00"),
+            received_amount_krw=Decimal(584567),
+            outstanding_receivables_krw=Decimal(650000),
+        ),
+        collection_summary={
+            "COLLECTED": SalesCollectionStatusSummary(
+                count=1,
+                sales_amount_krw=Decimal(584567),
+            ),
+            "PARTIAL": SalesCollectionStatusSummary(count=1, sales_amount_krw=Decimal(250000)),
+            "OPEN": SalesCollectionStatusSummary(count=1, sales_amount_krw=Decimal(400000)),
+        },
+        items=[
+            SalesItemSummary(
+                item_id="ITEM-A",
+                item_name="품목A",
+                line_count=2,
+                total_quantity_kg=Decimal(1500),
+                sales_amount_krw=Decimal(1234567),
+                contribution_profit_krw=Decimal(246913),
+                contribution_margin_pct=Decimal("20.00"),
+                avg_unit_price_krw_per_kg=Decimal("823.044667"),
+            )
+        ],
+        recent_sales=[
+            SalesHistoryItem(
+                sale_id="SALE-002",
+                sale_date=date(2025, 12, 31),
+                customer_partner_id="PARTNER-1",
+                partner_name="거래처",
+                total_quantity_kg=Decimal(500),
+                total_amount_krw=Decimal(400000),
+                contribution_profit_krw=Decimal(80000),
+                contribution_margin_pct=Decimal("20.00"),
+                collection_due_date=date(2026, 1, 4),
+                collection_status="OPEN",
+                collection_status_label="수금 예정",
+                order_status="SHIPPED",
+            ),
+            SalesHistoryItem(
+                sale_id="SALE-001",
+                sale_date=date(2025, 12, 30),
+                customer_partner_id="PARTNER-1",
+                partner_name="거래처",
+                total_quantity_kg=Decimal(1000),
+                total_amount_krw=Decimal(834567),
+                contribution_profit_krw=Decimal(166913),
+                contribution_margin_pct=Decimal("20.00"),
+                collection_due_date=date(2026, 1, 3),
+                collection_status="PARTIAL",
+                collection_status_label="일부 수금",
+                order_status="SHIPPED",
+            ),
+        ],
+        receivables=[
+            SalesReceivableItem(
+                receivable_id="AR-C",
+                sale_id="SALE-C",
+                sale_date=date(2025, 12, 29),
+                customer_partner_id="PARTNER-1",
+                partner_name="거래처",
+                issued_date=date(2025, 12, 29),
+                due_date=date(2026, 1, 2),
+                original_amount_krw=Decimal(584567),
+                received_amount_krw=Decimal(584567),
+                outstanding_amount_krw=Decimal(0),
+                status="COLLECTED",
+                display_status="수금 완료",
+                d_day=None,
+            ),
+            SalesReceivableItem(
+                receivable_id="AR-P",
+                sale_id="SALE-001",
+                sale_date=date(2025, 12, 30),
+                customer_partner_id="PARTNER-1",
+                partner_name="거래처",
+                issued_date=date(2025, 12, 30),
+                due_date=date(2026, 1, 3),
+                original_amount_krw=Decimal(834567),
+                received_amount_krw=Decimal(584567),
+                outstanding_amount_krw=Decimal(250000),
+                status="PARTIAL",
+                display_status="일부 수금",
+                d_day=3,
+            ),
+            SalesReceivableItem(
+                receivable_id="AR-O",
+                sale_id="SALE-002",
+                sale_date=date(2025, 12, 31),
+                customer_partner_id="PARTNER-1",
+                partner_name="거래처",
+                issued_date=date(2025, 12, 31),
+                due_date=date(2026, 1, 3),
+                original_amount_krw=Decimal(400000),
+                received_amount_krw=Decimal(0),
+                outstanding_amount_krw=Decimal(400000),
+                status="OPEN",
+                display_status="수금 예정",
+                d_day=4,
+            ),
+        ],
+    )
+
+
+def _finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
+    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    return FinanceDashboardResponse(
+        meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
+        states=[
+            _finance_state("FS-LOAN", as_of, "LOAN_BASELINE", Decimal(500000), Decimal(300000)),
+            _finance_state("FS-BASE", as_of, "BASE_NO_LOAN", Decimal(100000), Decimal(0)),
+        ],
+        cashflow_summary=FinanceCashflowSummary(
+            purchase_cash_out_krw=Decimal(200000),
+            logistics_cash_out_krw=Decimal(30000),
+            payroll_interest_cash_out_krw=Decimal(40000),
+            sales_recognized_krw=Decimal(500000),
+            collection_cash_in_krw=Decimal(123456),
+            base_net_cash_krw=Decimal(230000),
+            loan_execution_krw=Decimal(400),
+        ),
+        ledger_summary={
+            "receivables": FinanceReceivableSummary(
+                count=3,
+                collected_count=1,
+                partial_count=1,
+                open_count=1,
+                original_amount_krw=Decimal(1000),
+                received_amount_krw=Decimal(350),
+                outstanding_amount_krw=Decimal(650),
+                overdue_amount_krw=Decimal(0),
+            ),
+            "payables": FinancePayableSummary(
+                count=1,
+                original_amount_krw=Decimal(700),
+                paid_amount_krw=Decimal(700),
+                outstanding_amount_krw=Decimal(0),
+                overdue_amount_krw=Decimal(0),
+            ),
+        },
+        receivables=[],
+        payables=[],
+        expenses=[],
+        recent_closings=[
+            _closing(date(2025, 12, 31), 2, Decimal(100000), Decimal(500000)),
+            _closing(date(2025, 12, 30), 1, Decimal(90000), Decimal(490000)),
+        ],
+    )
+
+
+def _empty_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
+    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert as_of == date(2026, 1, 6)
+    return FinanceDashboardResponse(
+        meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
+        states=[],
+        cashflow_summary=FinanceCashflowSummary(
+            purchase_cash_out_krw=Decimal(0),
+            logistics_cash_out_krw=Decimal(0),
+            payroll_interest_cash_out_krw=Decimal(0),
+            sales_recognized_krw=Decimal(0),
+            collection_cash_in_krw=Decimal(0),
+            base_net_cash_krw=Decimal(0),
+            loan_execution_krw=Decimal(0),
+        ),
+        ledger_summary={
+            "receivables": FinanceReceivableSummary(
+                count=0,
+                collected_count=0,
+                partial_count=0,
+                open_count=0,
+                original_amount_krw=Decimal(0),
+                received_amount_krw=Decimal(0),
+                outstanding_amount_krw=Decimal(0),
+                overdue_amount_krw=Decimal(0),
+            ),
+            "payables": FinancePayableSummary(
+                count=0,
+                original_amount_krw=Decimal(0),
+                paid_amount_krw=Decimal(0),
+                outstanding_amount_krw=Decimal(0),
+                overdue_amount_krw=Decimal(0),
+            ),
+        },
+        receivables=[],
+        payables=[],
+        expenses=[],
+        recent_closings=[],
+    )
+
+
+def _finance_cashflow_stub(
+    sim_run_id: str,
+    as_of: date,
+    days: int,
+) -> FinanceCashflowResponse:
+    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    return FinanceCashflowResponse(
+        meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
+        cashflow=[
+            _closing(date(2025, 12, 30), 1, Decimal(90000), Decimal(490000)),
+            _closing(date(2025, 12, 31), 2, Decimal(100000), Decimal(500000)),
+        ][:days],
+    )
+
+
+
+def _finance_state(
+    finance_state_id: str,
+    state_date: date,
+    financing_mode: str,
+    cash: Decimal,
+    debt: Decimal,
+) -> FinanceStateView:
+    minimum = Decimal(150000)
+    return FinanceStateView(
+        finance_state_id=finance_state_id,
+        state_date=state_date,
+        state_type="DAILY_CLOSING",
+        financing_mode=financing_mode,
+        current_cash_krw=cash,
+        minimum_operating_cash_krw=minimum,
+        operating_cash_buffer_krw=cash - minimum,
+        committed_outflows_krw=Decimal(0),
+        unsettled_purchase_payables_krw=Decimal(0),
+        receivables_krw=Decimal(650),
+        inventory_book_value_krw=Decimal(800),
+        operational_inventory_value_krw=Decimal(750),
+        current_debt_krw=debt,
+        financial_limit_krw=Decimal(1000000),
+        recommended_loan_amount_krw=None,
+        note="fixture note",
+    )
+
+
+def _closing(
+    close_date: date,
+    day_no: int,
+    base_cash: Decimal,
+    loan_cash: Decimal,
+) -> FinanceClosingItem:
+    return FinanceClosingItem(
+        close_date=close_date,
+        day_no=day_no,
+        purchase_cash_out_krw=Decimal(200),
+        logistics_cash_out_krw=Decimal(30),
+        payroll_interest_cash_out_krw=Decimal(40),
+        sales_recognized_krw=Decimal(500),
+        collection_cash_in_krw=Decimal(123),
+        base_net_cash_krw=Decimal(230),
+        base_cash_balance_krw=base_cash,
+        loan_execution_krw=Decimal(400),
+        loan_cash_balance_krw=loan_cash,
+        minimum_operating_cash_krw=Decimal(150000),
+        base_operating_buffer_krw=base_cash - Decimal(150000),
+        loan_operating_buffer_krw=loan_cash - Decimal(150000),
+        receivables_balance_krw=Decimal(650),
+        inventory_qty_kg=Decimal(900),
+        accounting_inventory_cost_krw=Decimal(800),
+    )
