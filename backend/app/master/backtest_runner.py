@@ -80,6 +80,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+from app.master.bootstrap import wire_registries
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.market_calendar import MarketCalendar, get_market_calendar
@@ -386,12 +387,55 @@ def format_summary(result: WalkResult) -> str:
     return "\n".join(lines)
 
 
+def _use_utf8_output() -> None:
+    """요약을 찍다 죽지 않게 출력 스트림을 UTF-8 로 맞춘다.
+
+    🔴 **걷기를 다 마치고 `print` 에서 죽었다** (2026-09-09 실측).
+
+    ```text
+    UnicodeEncodeError: 'cp949' codec can't encode character '\\u2014'
+      File "app/master/backtest_runner.py", line 401, in main
+        print(format_summary(result))
+    ```
+
+      `format_summary` 는 한국어와 `—` 로 적는다. 윈도우 기본 인코딩이 cp949 라
+      그 한 글자에서 터졌고, **결과는 다 계산해 놓고 성적표만 잃었다** — 다시
+      보려면 걷기를 통째로 또 돌려야 한다.
+
+    ★ **요약 문장을 ASCII 로 낮추지 않는다.** 사람이 읽으라고 쓴 한국어이고,
+      바꿔야 할 것은 문장이 아니라 그 문장을 내보내는 통로다.
+
+    ⚠️ **여기서만 바꾼다 — 라이브러리 코드가 아니라 진입점이다.** `walk()` 나
+      `format_summary()` 가 프로세스 전역 스트림을 건드리면, 그것을 부르는 쪽의
+      출력 설정까지 이 모듈이 정하는 셈이 된다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # ★ 감싸인 스트림(파이프 대역·캡처)이면 그쪽 규칙을 따른다. 여기서
+            #   억지로 바꾸려다 진입점이 터지면 고치려던 것과 같은 일이 난다.
+            continue
+        reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main(argv: Sequence[str]) -> int:
     """진입점. **인자만 받아 `walk()` 에 넘긴다.**
 
     :returns: 끝까지 걸었고 사고가 없으면 0. 아니면 1 — **조용히 0 을 내지 않는다.**
     """
     args = _parser().parse_args(argv)
+    _use_utf8_output()
+    # 🔴 **걷기 전에 등록소를 채운다.** 이 진입점은 `app/main.py` 를 안 거치므로,
+    #    이 줄이 없으면 등록소가 전부 빈 채로 걷는다 — 걷는 날마다 *"하루 넘김
+    #    미등록: finance, logistics"* 로 돌아서고 5일이 5일 다 사고였다 (2026-09-09).
+    #
+    # ★ **여기서 무엇을 등록할지 정하지 않는다.** 목록의 주인은 `bootstrap` 하나이고
+    #   FastAPI 진입점도 같은 함수를 부른다. 두 진입점이 다른 세상을 보면 CLI 로 낸
+    #   성적이 앱의 성적이 아니다.
+    #
+    # ⚠️ **`walk()` 안이 아니라 여기다.** `walk` 는 검사가 대역을 꽂아 부르는 함수이고,
+    #   거기서 전역 등록소를 채우면 검사가 만든 세상을 조립 뿌리가 덮어쓴다.
+    wire_registries()
     result = walk(
         start=date.fromisoformat(args.start),
         end=date.fromisoformat(args.end),
