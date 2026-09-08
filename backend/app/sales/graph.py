@@ -5,7 +5,12 @@ from __future__ import annotations
 from langgraph.graph import END, START, StateGraph
 
 from app.sales.ranking import rank_scenarios, recommended_scenario_id, remove_dominated_scenarios
-from app.sales.schemas import SalesDecisionTrace, SalesProposalInput, SalesProposalReply
+from app.sales.schemas import (
+    ProposalSelfCheck,
+    SalesDecisionTrace,
+    SalesProposalInput,
+    SalesProposalReply,
+)
 from app.sales.state import SalesAgentState
 
 
@@ -37,7 +42,11 @@ def _graph():
     graph.add_conditional_edges(
         "plan_validations",
         _route_after_validation_plan,
-        {"feedback": "apply_feedback", "evaluate": "evaluate_candidates"},
+        {
+            "feedback": "apply_feedback",
+            "evaluate": "evaluate_candidates",
+            "self_check": "self_check",
+        },
     )
     graph.add_edge("apply_feedback", "evaluate_candidates")
     graph.add_edge("evaluate_candidates", "rank_candidates")
@@ -54,10 +63,16 @@ def _graph():
 def _prepare_context(state: SalesAgentState) -> SalesAgentState:
     request = state["request"]
     feedback = request.feedback
+    agent_trace = [
+        {
+            "stage": "prepare_context",
+            "business_mode": request.business_mode,
+            "feedback_attempt": request.feedback_attempt,
+            "has_feedback": bool(feedback and feedback.domain_replies),
+        }
+    ]
     return {
         **state,
-        "as_of": request.execution_identity.as_of if request.execution_identity else None,
-        "item": request.user_request.item,
         "business_mode": request.business_mode,
         "feedback_attempt": request.feedback_attempt,
         "external_feedback": {
@@ -70,6 +85,7 @@ def _prepare_context(state: SalesAgentState) -> SalesAgentState:
             "has_finance": request.finance_context is not None,
             "is_refeed": request.is_refeed,
         },
+        "agent_trace": agent_trace,
     }
 
 
@@ -81,6 +97,11 @@ def _classify_situation(state: SalesAgentState) -> SalesAgentState:
         **state,
         "missing_data": missing,
         "status": "INPUT_INCOMPLETE" if missing else "READY_TO_GENERATE",
+        "terminal_reason": "INPUT_INCOMPLETE" if missing else None,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {"stage": "classify_situation", "missing_data": missing},
+        ],
     }
 
 
@@ -92,76 +113,156 @@ def _generate_candidates(state: SalesAgentState) -> SalesAgentState:
     from app.sales.proposal import _generate_scenarios
 
     candidates = _generate_scenarios(state["request"])
-    return {**state, "candidates": candidates, "status": "CANDIDATES_GENERATED"}
+    terminal_reason = None if candidates else "NO_SALES_CANDIDATE"
+    return {
+        **state,
+        "candidates": candidates,
+        "status": "CANDIDATES_GENERATED" if candidates else "NO_OPPORTUNITY",
+        "terminal_reason": terminal_reason,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {"stage": "generate_candidates", "candidate_count": len(candidates)},
+        ],
+    }
 
 
 def _plan_validations(state: SalesAgentState) -> SalesAgentState:
-    required = []
+    required: list[dict[str, str]] = []
     for candidate in state.get("candidates", []):
         for validation in candidate.required_validations:
-            key = f"{candidate.scenario_id}:{validation}"
-            if key not in required:
-                required.append(key)
-    return {**state, "required_validations": required}
+            entry = {
+                "candidate_id": candidate.scenario_id,
+                "validation": validation,
+                "reason": _validation_reason(validation),
+            }
+            if entry not in required:
+                required.append(entry)
+    return {
+        **state,
+        "required_validations": required,
+        "terminal_reason": "VALIDATION_REQUIRED" if required else state.get("terminal_reason"),
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {"stage": "determine_validations", "required_validations": required},
+        ],
+    }
 
 
 def _route_after_validation_plan(state: SalesAgentState) -> str:
+    if not state.get("candidates"):
+        return "self_check"
+    if state.get("required_validations") and not state.get("external_feedback", {}).get(
+        "reply_count", 0
+    ):
+        return "self_check"
     feedback = state.get("external_feedback", {})
     return "feedback" if feedback.get("reply_count", 0) else "evaluate"
 
 
 def _apply_feedback(state: SalesAgentState) -> SalesAgentState:
     candidates = state.get("candidates", [])
-    rejected = [candidate for candidate in candidates if candidate.status == "INFEASIBLE"]
+    rejected = [candidate for candidate in candidates if _is_rejected(candidate)]
     return {
         **state,
         "candidates": candidates,
         "rejected_candidates": rejected,
-        "uncertainties": _unique(
-            uncertainty
-            for candidate in candidates
-            for uncertainty in candidate.uncertainties
-        ),
         "status": "FEEDBACK_APPLIED",
+        "terminal_reason": None,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "apply_feedback",
+                "rejected_candidate_ids": [candidate.scenario_id for candidate in rejected],
+                "conditional_candidate_ids": [
+                    candidate.scenario_id
+                    for candidate in candidates
+                    if candidate.status == "CONDITIONAL"
+                ],
+            },
+        ],
     }
 
 
 def _evaluate_candidates(state: SalesAgentState) -> SalesAgentState:
     candidates, excluded = remove_dominated_scenarios(state.get("candidates", []))
+    candidates = [candidate for candidate in candidates if not _is_rejected(candidate)]
     rejected = [
         candidate
         for candidate in state.get("candidates", [])
-        if candidate.status == "INFEASIBLE" or candidate.scenario_id in excluded
+        if _is_rejected(candidate) or candidate.scenario_id in excluded
     ]
     return {
         **state,
         "validated_candidates": candidates,
         "rejected_candidates": rejected,
         "excluded_reasons": excluded,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "evaluate_candidates",
+                "selectable_count": len(
+                    [candidate for candidate in candidates if candidate.status == "EXECUTABLE"]
+                ),
+                "conditional_count": len(
+                    [candidate for candidate in candidates if candidate.status == "CONDITIONAL"]
+                ),
+                "rejected_candidate_ids": [candidate.scenario_id for candidate in rejected],
+            },
+        ],
     }
 
 
 def _rank_candidates(state: SalesAgentState) -> SalesAgentState:
     ranked = rank_scenarios(state.get("validated_candidates", []))
-    return {**state, "ranked_candidate_ids": [candidate.scenario_id for candidate in ranked]}
+    ranked_ids = [candidate.scenario_id for candidate in ranked]
+    recommendation_id = ranked_ids[0] if ranked_ids else None
+    return {
+        **state,
+        "ranked_candidate_ids": ranked_ids,
+        "recommendation_id": recommendation_id,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {"stage": "rank_candidates", "ranked_candidate_ids": ranked_ids},
+        ],
+    }
 
 
 def _self_check(state: SalesAgentState) -> SalesAgentState:
     from app.sales.proposal import self_check_scenarios
 
     scenarios = state.get("validated_candidates", [])
-    check = self_check_scenarios(scenarios)
+    check = _agent_self_check(state, self_check_scenarios(scenarios))
     if check.passed or state.get("feedback_attempt", 0) >= 1:
-        return {**state, "self_check": check}
-    filtered = [scenario for scenario in scenarios if scenario.status != "INFEASIBLE"]
+        return {
+            **state,
+            "self_check": check,
+            "agent_trace": [
+                *state.get("agent_trace", []),
+                {"stage": "self_check", "passed": check.passed, "issues": check.issue_codes},
+            ],
+        }
+    filtered = [scenario for scenario in scenarios if not _is_rejected(scenario)]
     if len(filtered) != len(scenarios):
         return {
             **state,
             "validated_candidates": filtered,
             "self_check": check,
             "self_check_reranked": True,
+            "agent_trace": [
+                *state.get("agent_trace", []),
+                {"stage": "self_check", "passed": False, "action": "RERANK_WITHOUT_REJECTED"},
+            ],
         }
-    return {**state, "self_check": check, "self_check_reranked": True}
+    return {
+        **state,
+        "recommendation_id": None,
+        "self_check": check,
+        "self_check_reranked": True,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {"stage": "self_check", "passed": False, "action": "CLEAR_RECOMMENDATION"},
+        ],
+    }
 
 
 def _route_after_self_check(state: SalesAgentState) -> str:
@@ -180,9 +281,18 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
     from app.sales.proposal import _interpret_scenarios, _missing_capabilities, _reply_refs
 
     request = state["request"]
-    scenarios = state.get("validated_candidates", [])
+    scenarios = state.get("validated_candidates", state.get("candidates", []))
     ranked_ids = state.get("ranked_candidate_ids", [])
-    recommendation_id = recommended_scenario_id(scenarios)
+    recommendation_id = state.get("recommendation_id")
+    if recommendation_id is None and ranked_ids:
+        recommendation_id = ranked_ids[0]
+    if recommendation_id is None and not state.get("terminal_reason"):
+        recommendation_id = recommended_scenario_id(scenarios)
+    if any(
+        candidate.scenario_id == recommendation_id
+        for candidate in state.get("rejected_candidates", [])
+    ):
+        recommendation_id = None
     recommendation = _interpret_scenarios(scenarios, recommendation_id)
     exclusions = state.get("excluded_reasons", {})
     trace = [
@@ -253,7 +363,73 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
         self_check=state["self_check"],
         decision_trace=trace,
     )
-    return {**state, "decision_trace": trace, "recommendation": recommendation, "reply": reply}
+    return {
+        **state,
+        "decision_trace": trace,
+        "recommendation": recommendation,
+        "recommendation_id": recommendation_id,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "final_recommendation",
+                "terminal_reason": state.get("terminal_reason"),
+                "recommended_scenario_id": recommendation_id,
+                "self_check_passed": state["self_check"].passed,
+            },
+        ],
+        "reply": reply,
+    }
+
+
+def _agent_self_check(
+    state: SalesAgentState, base_check: ProposalSelfCheck
+) -> ProposalSelfCheck:
+    issues = list(base_check.issue_codes)
+    recommendation_id = state.get("recommendation_id")
+    rejected_ids = {candidate.scenario_id for candidate in state.get("rejected_candidates", [])}
+    candidates = {
+        candidate.scenario_id: candidate
+        for candidate in state.get("validated_candidates", [])
+    }
+    if not recommendation_id and not state.get("terminal_reason"):
+        issues.append("RECOMMENDATION_MISSING")
+    if recommendation_id in rejected_ids:
+        issues.append("REJECTED_RECOMMENDATION")
+    if recommendation_id and recommendation_id not in candidates:
+        issues.append("RECOMMENDATION_NOT_IN_CANDIDATES")
+    if recommendation_id and candidates.get(recommendation_id):
+        scenario = candidates[recommendation_id]
+        if scenario.required_validations and not state.get("external_feedback", {}).get(
+            "reply_count", 0
+        ):
+            issues.append("RECOMMENDATION_VALIDATION_PENDING")
+        if scenario.sales_amount_krw is not None and (
+            scenario.quantity_kg is None or scenario.unit_price_krw is None
+        ):
+            issues.append("RECOMMENDATION_AMOUNT_SOURCE_MISSING")
+    issues = _unique(issues)
+    return base_check.model_copy(
+        update={
+            "passed": not issues,
+            "issue_codes": issues,
+            "messages": base_check.messages
+            if not issues
+            else ["판매안의 추천 후보와 외부 검증 상태를 다시 확인해 주세요."],
+        }
+    )
+
+
+def _is_rejected(candidate) -> bool:
+    return candidate.status == "INFEASIBLE" or candidate.finance_verdict == "FAIL"
+
+
+def _validation_reason(validation: str) -> str:
+    return {
+        "FINANCIAL_VALIDATION": "결제조건·마진·현금 영향은 Finance 검증이 필요합니다.",
+        "SELLABLE_SUPPLY_CONTEXT": "판매 가능 수량은 Logistics/Inventory 검증이 필요합니다.",
+        "DELIVERY_FEASIBILITY_CONTEXT": "납기 가능 여부는 Logistics 검증이 필요합니다.",
+        "ADDITIONAL_SUPPLY_CONTEXT": "부족 물량 확보 가능성은 Purchase 검증이 필요합니다.",
+    }.get(validation, "외부 권위 검증이 필요합니다.")
 
 
 def _collapse_reason(reasons: list[str]) -> str | None:
