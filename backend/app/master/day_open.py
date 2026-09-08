@@ -49,6 +49,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
+from app.master.collection_seed import CollectionSeedOutcome, SeedStatus, seed_day
 from app.master.day_opening_repository import record_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.calendar_walk import MAX_WALK_DAYS
@@ -203,6 +204,27 @@ class DayOpenOut(BaseModel):
     parts: list[DayOpenPartOut] = Field(default_factory=list)
     #: 아직 구현이 없는 파트.
     missing: list[str] = Field(default_factory=list)
+    #: 🔴 **수금 사건 생성 결과. 세 값을 섞지 않는다** (재무 조건 `⑥`).
+    #:
+    #: ```text
+    #: SEEDED         n 건 만들었다
+    #: NOTHING_DUE    **확인했고** 만들 것이 없었다 (0 건)
+    #: UNREADABLE     **못 했다** — 조회나 쓰기가 실패했다
+    #: NOT_ATTEMPTED  개장이 안 됐거나 축이 막혀 **시도하지 않았다**
+    #: ```
+    #:
+    #: ⚠️ `UNREADABLE` 을 `NOTHING_DUE` 로 접으면 표가 안 서 있는 날이 *"확인했고
+    #: 없었다"* 로 조용히 지나간다 — `carried_forward_status` 와 같은 규율이다.
+    #:
+    #: ★ **개장을 실패시키지 않는다.** 사건 생성이 터져도 하루는 열려야 하고, 못 했다는
+    #: 사실만 응답에 실린다.
+    collection_seed_status: SeedStatus = "NOT_ATTEMPTED"
+    #: 이번 개장으로 만든 수금 사건 수.
+    collection_seeded: int = 0
+    #: 이미 있어 건너뛴 수금 사건 수. **멱등이 실제로 걸렸다는 근거다.**
+    collection_seed_skipped: int = 0
+    #: 못 했거나 시도하지 않은 이유. 성공이면 빈 문자열이다.
+    collection_seed_reason: str = ""
 
 
 # ── 등록소 ──────────────────────────────────────────────────────────────
@@ -327,7 +349,11 @@ def _walk_part(
 
 
 def open_day(
-    as_of: date, *, connect: Callable[[], Any] | None = None, force: bool = False
+    as_of: date,
+    *,
+    connect: Callable[[], Any] | None = None,
+    force: bool = False,
+    seed_collection: Callable[..., CollectionSeedOutcome] = seed_day,
 ) -> DayOpenOut:
     """`as_of` 날 상태 행을 **파트마다** 보장한다. 한 트랜잭션이다.
 
@@ -371,9 +397,16 @@ def open_day(
         `ADMIN_FORCE_OPEN_REQUIRED` 로 보내면 화면이 왜인지 못 말하므로,
         `day_gate` 가 그 경우를 `SPLIT_FORCE_OPEN_REQUIRED` 로 따로 낸다.
 
+    🔴 **개장이 성공한 뒤 그날 결제기일인 채권을 수금 사건으로 옮긴다** (재무 조건 `⑥`).
+
+      ★ **그 결과가 개장을 실패시키지 않는다.** 사건 생성이 터져도 하루는 열려야 하고,
+        *"못 했다"* 는 `collection_seed_status` 로만 실린다.
+
     :param connect: 커넥션 팩토리. 안 주면 `app.finance.db.get_connection` 을 쓴다 —
                     재무·물류가 같은 DB(같은 `DB_*`)를 쓰므로 커넥션도 하나면 된다.
     :param force: 관리자 강제 개장. **상한만 푼다.**
+    :param seed_collection: 수금 사건을 만드는 방법. 기본값이 `collection_seed.seed_day`
+                    이고, 검사가 대역을 끼울 자리다. **파트 트랜잭션 밖에서** 돈다.
     """
     absent = missing()
     present = [part for part in PARTS if part in _OPENINGS]
@@ -388,6 +421,7 @@ def open_day(
         )
         # ★ **미등록도 남긴다.** *"안 열렸다"* 는 사실이고, 화면이 그 날을 지나가지
         #   않으려면 정본에 있어야 한다.
+        out = _seed_collection(out, seed_collection)
         _record(out)
         return out
 
@@ -424,14 +458,60 @@ def open_day(
             reason=f"하루 넘김 실패: {exc}",
             missing=list(absent),
         )
+        out = _seed_collection(out, seed_collection)
         _record(out)
         return out
     finally:
         conn.close()
 
     out = _aggregate(as_of, parts, absent, force=force)
+    # 🔴 **개장이 성공한 뒤에 부른다** (재무 조건 `⑥`).
+    #
+    #    조건 `⑥` 이 *"개장 시 대상 채권을 확인해 아직 event 가 없는 건만 생성"* 이라고
+    #    못 박았다. **15건만 손으로 채우는 방식은 받기 어렵다** — 새 Receivable 이
+    #    생기면 그날 개장이 그것을 집어 온다.
+    out = _seed_collection(out, seed_collection)
     _record(out)
     return out
+
+
+def _seed_collection(
+    out: DayOpenOut, seed_collection: Callable[..., CollectionSeedOutcome]
+) -> DayOpenOut:
+    """열린 날의 수금 사건을 만든다. **개장을 실패시키지 않는다.**
+
+    🔴 **하루가 안 열렸으면 시도하지 않는다.** `NOT_OPENED` · `REJECTED_GAP` 인 날에
+      사건을 만들면 서 있지도 않은 재무 상태 행에 대고 수금을 적는 셈이 된다.
+
+    🔴 **`NOT_ATTEMPTED` 를 `NOTHING_DUE` 로 접지 않는다.** *"안 했다"* 와 *"확인했고
+      없었다"* 는 다른 사실이고, 접으면 개장이 막힌 날이 *"오늘은 낼 것이 없었다"* 로
+      읽힌다.
+
+    ★ **사건 생성이 터져도 하루는 열려 있다.** `seed_day` 가 예외를 안 내보내지만,
+      그것을 여기서 다시 한 번 잡는다 — 개장의 성공 여부가 이 줄에 걸리면 안 된다.
+    """
+    if out.status not in ("OPENED", "ALREADY_OPENED"):
+        return out.model_copy(
+            update={
+                "collection_seed_status": "NOT_ATTEMPTED",
+                "collection_seed_reason": f"하루가 안 열렸다: {out.status}",
+            }
+        )
+    try:
+        결과 = seed_collection(out.as_of, sim_run_id=BURN_IN_SIM_RUN_ID)
+    except Exception as exc:  # noqa: BLE001 - 개장이 이 줄 때문에 죽으면 안 된다.
+        결과 = CollectionSeedOutcome(
+            status="UNREADABLE",
+            reason=f"수금 사건을 만들지 못했다: {type(exc).__name__}: {exc}",
+        )
+    return out.model_copy(
+        update={
+            "collection_seed_status": 결과.status,
+            "collection_seeded": 결과.created,
+            "collection_seed_skipped": 결과.skipped,
+            "collection_seed_reason": 결과.reason,
+        }
+    )
 
 
 def _record(out: DayOpenOut) -> None:
