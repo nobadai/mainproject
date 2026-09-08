@@ -265,9 +265,6 @@ Capability = Literal[
 ★ **제자리는 `app/contracts/core.py` 승격이다.** 그건 판매 파일을 고쳐야 해서 판매
   owner 확인이 필요하고, 그때까지 여기 둔다 (설계 2026-09-06 정정 절)."""
 
-CAPABILITIES: frozenset[str] = frozenset(get_args(Capability))
-"""집합의 주인은 위 `Literal` 하나다 — `TRIGGERS` 와 같은 이유로 `get_args` 로 읽는다."""
-
 CAPABILITY_ROUTING: dict[Capability, tuple[AgentName, Mode] | None] = {
     "FINANCIAL_VALIDATION": ("finance", "SALES_VALIDATION"),
     # 🔴 **기존 `/logistics/sales` 계산엔진을 그대로 부르지 않는다.** 판매 v1.7 §10 은
