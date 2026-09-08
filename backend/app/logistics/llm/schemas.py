@@ -92,6 +92,20 @@ class InterpretationResult(BaseModel):
     #: 처럼 전송 전에 실패한 FALLBACK도 기록된다. "Gemini가 실제 수신한 값"을
     #: 뜻하지 않는다. SUCCESS·FALLBACK → 기록 / SKIPPED_TEMPLATE·DISABLED → 빈 목록.
     llm_context_facts: list[ContextFact] = Field(default_factory=list)
+    #: 실제로 발생한 **모든** Provider 호출 시간의 합 (재시도 포함 · #402).
+    #:
+    #: ```text
+    #: None    Provider 를 한 번도 부르지 않았다 (DISABLED · SKIPPED_TEMPLATE)
+    #: 0 이상  불렀고, 그 호출들의 실측 합이다 — 0 은 "쟀더니 0ms" 라는 뜻이다
+    #: ```
+    #:
+    #: 🔴 **미호출을 `0ms` 로 위장하지 않는다.** 두 사실은 다른 것이고, `llm_attempts`
+    #:   와 짝을 이룬다 (attempts 0 ⇔ 이 값 None). 마지막 성공 호출만 재지 않는 이유는
+    #:   재시도도 실제 시간과 비용을 쓰기 때문이다 — timeout 후 성공한 호출의 체감
+    #:   지연은 성공 호출 시간이 아니라 합이다.
+    #: ★ 이 값은 **Agent 전체 실행시간이 아니다.** 공통 `ExecutionMetadata.elapsed_ms`
+    #:   가 그 뜻이고(재무가 채운다), 둘을 섞으면 한 축에 비교 불가능한 두 값이 산다.
+    llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
 
 
 def default_interpretation() -> AgentInterpretation:
@@ -113,3 +127,12 @@ class LLMResponseFields(BaseModel):
     #: LLM 호출에 사용된 Sanitized ContextFact 목록 — 독립 Response로 노출되고
     #: response_payload 실행이력에 자동 기록된다 (저장 스키마 무변경).
     llm_context_facts: list[ContextFact] = Field(default_factory=list)
+    #: 재시도 포함 Provider 총 호출 시간 (`InterpretationResult` 와 같은 뜻 · #402).
+    #:
+    #: 🔴 **`InterpretationResult` 와 필드 집합이 어긋나면 조용히 사라진다.**
+    #:   `enrich_logistics_response` 는 `result.model_dump()` 를 `model_copy(update=)`
+    #:   로 싣는데, 여기 없는 키는 예외 없이 `__dict__` 에만 들어갔다가
+    #:   `model_dump()` 에서 빠진다 — 독립 응답과 `response_payload` 실행이력에서
+    #:   값이 소리 없이 증발한다. 두 모델의 필드 집합 동일성은
+    #:   `test_logistics_context_facts.py` 의 구조 테스트가 잠근다.
+    llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
