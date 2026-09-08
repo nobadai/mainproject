@@ -10,6 +10,7 @@ from functools import partial
 from fastapi import FastAPI
 
 from app.finance.adapter import finance_port
+from app.finance.collection_fixture import DeterministicCollectionFixtureSource
 from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
@@ -21,9 +22,11 @@ from app.logistics.router import router as logistics_router
 from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.transition import LogisticsTransitionAdapter
 from app.master.cancellation import register_cancellation
+from app.master.collection import register_collection
 from app.master.critic.router import router as critic_router
 from app.master.day_open import register_day_opening
 from app.master.finance_cancellation import FinanceCancellationAdapter
+from app.master.finance_collection import FinanceCollectionAdapter
 from app.master.inbound import register_inbound
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.router import router as master_router
@@ -212,31 +215,70 @@ register_inbound(
 #    들어오는 방법"* 이다. 한 사전에 섞으면 **입고는 되는데 수금은 안 되는 상태**를
 #    표현할 수 없고, 지금이 정확히 그 상태다.
 #
-# 🔴 **여기에 `register_collection` 이 없다. 일부러 없다.**
+# 🟢 **어제까지 이 자리에 `register_collection` 이 없었다. 그 이유가 없어졌다.**
+#
+#    전에는 여기에 *"일부러 없다"* 라고 적혀 있었다 — 그때는 이랬다.
 #
 #    ```text
-#    경계        app/master/collection.py            🟢 섰다 (여기 등록소)
-#    구현        app/finance/collection.py           🟢 섰다 (apply_explicit_collection)
-#    어댑터      CollectionSource 를 만족하는 재무 구현체   🔴 **아직 없다**
-#    배선        register_collection("finance", ...)  🔴 그래서 못 적는다
+#    2026-09-07   경계    app/master/collection.py            🟢 섰다 (여기 등록소)
+#                 구현    app/finance/collection.py           🟢 섰다 (apply_explicit_collection)
+#                 어댑터  CollectionSource 를 만족하는 재무 구현체   🔴 **아직 없었다**
+#                 배선    register_collection("finance", ...)  🔴 그래서 못 적었다
+#
+#    2026-09-08   어댑터  app/finance/collection_source.py    🟢 `#404` 로 섰다
+#                 배선    아래 한 줄                           🟢 그래서 적는다
 #    ```
 #
-#    ★ **재무 경계는 이미 서 있다.** 누적 target 을 delta 로 접는 전이도, 역행·초과를
-#      막는 불변식도 `apply_explicit_collection(conn, CollectionEvent(...))` 안에 다
-#      있다. 실측하면 **그것을 부르는 production 호출자가 0건**이고(2026-09-07),
-#      이 등록소가 붙을 자리를 만든다.
+#    ★ **`register_inbound` 가 `#337` 로 붙던 것과 같은 모양이다.** 경계와 구현이 다
+#      섰는데 배선이 없어 `collect_receipts` 가 매일 `NOTHING_DUE` +
+#      `missing=["finance"]` 로 돌아섰다. 배선은 마스터 몫이고 그 자리가 여기다.
 #
-#    ⚠️ **마스터가 그 어댑터를 대신 쓰지 않는다.** 어느 채권을 얼마 수금할지는 재무
-#      사실이고(재무 결정 2026-09-07), 마스터가 `due_date` 경과를 보고 정하면 **없는
-#      현금이 장부에 생긴다.**
+# 🔴 **`sim_run_id` 는 마스터가 정하고 `financing_mode` 는 마스터가 안 고른다.**
 #
-#    ★ **부재를 부재로 적는다.** 그래서 `collect_receipts` 가 매일 `NOTHING_DUE` +
-#      `missing=["finance"]` 로 돌아선다 — *"오늘 들어올 게 없었다"* 가 아니라
-#      *"수금 실행 미등록"* 이라고 사유에 적힌다. 둘을 가르려고 등록소를 둔 것이다.
+#    ```text
+#    sim_run_id       🟢 **마스터가 정한다** — 위 네 등록소가 쓰는 그 상수 하나다
+#    financing_mode   🔴 **마스터 축이 아니다** — 재무 축 (sim_run_id, as_of, financing_mode) 의 것
+#    ```
 #
-#    ⚠️ `register_inbound` 가 `#337` 까지 0건이던 것과 **같은 모양이고 다른 단계**다.
-#      그때는 구현이 있는데 이 줄이 없었고, 지금은 어댑터가 아직 없다. 재무가 구현체를
-#      내면 이 자리에 한 줄이 붙는다.
+#    ⚠️ 실측으로 `finance_states` 에 `LOAN_BASELINE` 252행과 `BASE_NO_LOAN` 2행이
+#      **공존한다.** 여기에 하나를 상수로 박으면 *"무차입 상태가 대출 baseline 자리에
+#      조용히 들어온다"* — `app/finance/db.py` 의 `get_finance_runtime_axis` 가 그
+#      문장을 이미 적어 뒀다.
+#
+#    ★ **그래서 어댑터가 `collect()` 안에서 재무에게 축을 물어본다.** 임포트 시점에
+#      DB 를 읽지 않는 것은 위 네 등록소와 같다. 재무 축의 `sim_run_id` 가 마스터가
+#      준 것과 다르면 **막는다(fail-closed)** — 조용히 남의 실행 장부에 수금을 적으면
+#      안 된다.
+#
+# ⚠️ **어댑터는 마스터가 얹은 얇은 배선이다** (`#280` · `FinanceCancellationAdapter`
+#    전례). 재무가 축 둘을 직접 들고 오는 구현을 올리면 **그 파일을 지우고 이 한 줄만
+#    바꾸면 된다.**
+#
+# 🔴 **사건 원천이 아직 비어 있다** (`DeterministicCollectionFixtureSource.events = ()`).
+#
+#    ```text
+#    전   등록 안 됨      → missing() 에 뜨고 경로가 안 돈다
+#    후   NOTHING_DUE     → **확인했고 낼 것이 없다**
+#    ```
+#
+#    ⚠️ **이 배선은 경로를 세울 뿐 수금을 만들지 않는다.** 사건을 공급하는 일은
+#      마스터의 별건이고, 재무가 *"due_date 경과를 수금으로 읽지 않는다"* 로 선을 그은
+#      그 자리다. **낸 것과 도는 것은 다르다.**
+#
+#    ★ **그래도 배선에 값이 있다.** `NOTHING_DUE` 와 「등록 안 됨」은 다른 사실이고,
+#      그 둘을 가르려고 등록소를 둔 것이다.
+#
+# ⚠️ **원천에 기본값이 없어야 하는 것과는 다른 자리다.** `inspection_provider` 는
+#    물류가 일부러 기본값을 안 뒀지만, 여기 `DeterministicCollectionFixtureSource()` 는
+#    재무가 **빈 사건 목록을 기본값으로 둔 것**이다 — *"설정된 원천이 없으면 사건도
+#    없다"* 가 그 파일의 계약이다. 그래도 배선 자리에서 눈에 보이게 고른다.
+register_collection(
+    "finance",
+    FinanceCollectionAdapter(
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        source=DeterministicCollectionFixtureSource(),
+    ),
+)
 
 app.include_router(critic_router)
 app.include_router(sales_router)
