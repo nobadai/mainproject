@@ -22,6 +22,7 @@
 여전히 따라간다 — 무엇으로 고정할지가 아직 안 정해졌다 (재무 `§2` 답 대기).
 """
 
+import ast
 import inspect
 from datetime import date
 from pathlib import Path
@@ -138,11 +139,40 @@ def test_the_payment_schedule_cannot_see_the_cut_ceiling() -> None:
     """지급 일정은 컷 기준을 **받을 자리가 없다.**
 
     ★ 구문보다 시그니처가 강하다 — 인자에 없으면 실수로도 못 읽는다.
+
+    ⚠️ **이것만으로는 부족하다.** 이 함수는 넘겨받을 뿐이고 *"무엇을 넘기는가"* 는
+      호출부가 정한다 — 아래 ``test_the_payment_schedule_is_fed_the_stress_ceiling``
+      이 그 자리를 잠근다. 실제로 변이(호출 인자를 ``cut_unit_price`` 로 교체)가
+      **이 검사를 그대로 통과했다** (2026-09-08).
     """
     params = inspect.signature(build_payment_schedule).parameters
     assert "max_price" in params
     assert "cut_unit_price" not in params
     assert not references_in(_PACKAGE, "build_payment_schedule", "cut_unit_price")
+
+
+def test_the_payment_schedule_is_fed_the_stress_ceiling() -> None:
+    """조립부가 지급 일정에 넘기는 것이 ``max_price`` **변수 그 자체**인가.
+
+    🔴 **두 값이 같은 동안은 이 자리를 값으로 못 잰다.** 컷 기준을 넘겨도
+      ``amount_max_krw`` 가 똑같이 나오기 때문이다 — 그러면 재무·마스터 검사도
+      통과하고, 갈렸다고 믿은 채 **STRESS 가 컷 기준을 따라 움직이게 된다.**
+
+    ★ 그래서 **호출 인자의 이름**을 본다. 값이 아니라 배선을 재는 자리다.
+    """
+    tree = ast.parse(_PACKAGE.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_payment_schedule_field"
+    ]
+    assert calls, "_payment_schedule_field 호출을 못 찾았다 — 이름이 바뀌었는가"
+    for call in calls:
+        ceiling = call.args[1]
+        assert isinstance(ceiling, ast.Name), "상한을 변수로 넘겨야 이 검사가 읽는다"
+        assert ceiling.id == "max_price", f"지급 일정에 {ceiling.id} 를 넘기고 있다"
 
 
 # ── ③ 계약 — 재무·마스터가 검사하는 등식 ──────────────────────────────────
