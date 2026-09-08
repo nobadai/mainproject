@@ -15,6 +15,7 @@ from app.logistics.rules import (
     SCENARIO_ADJUSTMENT_REQUIRED,
     evaluate_procurement_business_signals,
     evaluate_sales_business_signals,
+    measure_freshness_facts,
 )
 from app.logistics.scenario_engine import derive_preferred_adjustment
 from app.logistics.schemas import (
@@ -30,6 +31,7 @@ from app.logistics.service import (
 )
 from app.logistics.tools import (
     calculate_window_capacity_usage,
+    collect_freshness_lot_census,
     collect_freshness_pressure_inputs,
 )
 
@@ -453,3 +455,209 @@ def test_sales_response_without_risk_has_no_preferred(
 
     assert FRESHNESS_QUALITY_RISK not in response.soft_warnings
     assert response.preferred_adjustment is None
+
+
+# ---------------------------------------------------------------------------
+# 신선도 Lot 분류 추출 (#396)
+#
+# ★ **signal 은 그대로여야 한다.** 만료 Lot 을 새로 세면서 판정 입력이 바뀌면
+#   `INVENTORY_FRESHNESS_PRESSURE` · `FRESHNESS_QUALITY_RISK` 의 뜻이 조용히 달라진다.
+#   그래서 wrapper 등가부터 고정하고, 그 위에 새 갈래를 잰다.
+# ---------------------------------------------------------------------------
+
+
+def _census_snapshot(complete_logistics_snapshot, lots, **overrides):
+    return complete_logistics_snapshot.model_copy(update={"on_hand_by_lot": lots, **overrides})
+
+
+def test_census_splits_active_lots_into_three_exclusive_buckets(complete_logistics_snapshot):
+    """세 갈래는 배타이고 합이 ACTIVE Lot 수다 — 두 번 세이지도, 사라지지도 않는다."""
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [
+            _lot(lot_id="OK", remaining_freshness_days=8, effective_freshness_limit_days=10),
+            _lot(lot_id="NONE", remaining_freshness_days=None, effective_freshness_limit_days=None),
+            _lot(lot_id="GONE", remaining_freshness_days=-2, effective_freshness_limit_days=10),
+            _lot(lot_id="ZERO", remaining_freshness_days=0, effective_freshness_limit_days=10),
+            _lot(lot_id="LIMIT0", remaining_freshness_days=3, effective_freshness_limit_days=0),
+            _lot(lot_id="HOLD", remaining_freshness_days=1, status="HOLD"),
+        ],
+    )
+
+    census = collect_freshness_lot_census(snapshot)
+
+    assert census.ratios == [Decimal("0.8")]
+    assert census.expired_lot_count == 2  # GONE · ZERO — 0 도 만료다
+    assert census.unresolved_lot_count == 2  # NONE · LIMIT0
+    # ACTIVE 5건이 세 갈래로 남김없이 갈렸다. HOLD 는 모집단이 아니다.
+    assert len(census.ratios) + census.expired_lot_count + census.unresolved_lot_count == 5
+
+
+def test_census_counts_expired_before_limit_check(complete_logistics_snapshot):
+    """🔴 갈래의 **순서가 계약이다** — 잔여 미확인을 먼저 보고 그 다음 만료다.
+
+    순서가 뒤집히면 `remaining=None` 이 만료로 읽혀 *"모른다"* 가 *"상했다"* 가 된다.
+    """
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [_lot(remaining_freshness_days=None, effective_freshness_limit_days=None)],
+    )
+
+    census = collect_freshness_lot_census(snapshot)
+
+    assert census.unresolved_lot_count == 1
+    assert census.expired_lot_count == 0
+
+
+def test_pressure_inputs_wrapper_is_the_census_projection(complete_logistics_snapshot):
+    """★ 추출 전과 **글자 그대로 같은 반환**이다 — signal 입력이 안 바뀌었다는 근거다."""
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [
+            _lot(lot_id="OK", remaining_freshness_days=8, effective_freshness_limit_days=10),
+            _lot(lot_id="NONE", remaining_freshness_days=None, effective_freshness_limit_days=None),
+            _lot(lot_id="GONE", remaining_freshness_days=-2, effective_freshness_limit_days=10),
+        ],
+    )
+
+    census = collect_freshness_lot_census(snapshot)
+    ratios, unresolved = collect_freshness_pressure_inputs(snapshot)
+
+    assert (ratios, unresolved) == (census.ratios, census.unresolved_lot_count)
+    # 🔴 만료 Lot 은 **압박 입력에 섞이지 않는다.** 새로 세게 됐다고 판정 모집단이
+    #    넓어지면 `INVENTORY_FRESHNESS_PRESSURE` 의 뜻이 달라진다.
+    assert unresolved == 1
+    assert ratios == [Decimal("0.8")]
+
+
+def test_expired_lot_does_not_raise_a_freshness_signal(complete_logistics_snapshot):
+    """★ 만료만 있는 날 signal 은 서지 않는다 — 그 규칙을 #396 이 바꾸지 않았다."""
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [_lot(remaining_freshness_days=-5, effective_freshness_limit_days=10)],
+        freshness_pressure_ratio=Decimal("0.30"),
+    )
+
+    procurement = evaluate_procurement_business_signals(
+        as_of=AS_OF, snapshot=snapshot, scenario_results=[]
+    )
+    sales = evaluate_sales_business_signals(snapshot=snapshot)
+
+    assert INVENTORY_FRESHNESS_PRESSURE not in procurement["signals"]
+    assert FRESHNESS_QUALITY_RISK not in sales["signals"]
+    # 만료는 미확인이 아니다 — 경고도 붙지 않는다
+    assert LOT_FRESHNESS_UNRESOLVED not in procurement["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# measure_freshness_facts — signal 과 분리된 순수 측정 (#396)
+# ---------------------------------------------------------------------------
+
+
+def test_measure_facts_needs_no_signal_to_report(complete_logistics_snapshot):
+    """🔴 **이 함수의 존재 이유다.** signal 이 안 서도 측정은 나온다.
+
+    종전에는 `_record_freshness_measurements` 가 signal 발화 시에만 불려, 위험이
+    없는 날에는 최소 비율조차 어디에도 없었다.
+    """
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [_lot(remaining_freshness_days=9, effective_freshness_limit_days=10)],
+        freshness_pressure_ratio=Decimal("0.30"),
+    )
+
+    signals = evaluate_procurement_business_signals(
+        as_of=AS_OF, snapshot=snapshot, scenario_results=[]
+    )
+    facts = measure_freshness_facts(snapshot=snapshot)
+
+    assert INVENTORY_FRESHNESS_PRESSURE not in signals["signals"]  # 위험 없음
+    assert signals["measurements"] == {}  # 판정 수치도 없다
+    assert facts["freshness_min_remaining_ratio"] == Decimal("0.9")  # 그래도 잰다
+    assert facts["freshness_risk_lot_count"] == 0
+    assert facts["freshness_unresolved_lot_count"] == 0
+    assert facts["freshness_expired_lot_count"] == 0
+
+
+def test_measure_facts_and_signal_count_the_same_risk_lots(complete_logistics_snapshot):
+    """★ 비교식이 한 곳이라 두 수가 갈릴 수 없다 (`count_freshness_risk_lots`).
+
+    두 벌이면 *"signal 은 섰는데 위험 Lot 0건"* 인 회신이 나올 수 있다.
+    """
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [
+            _lot(lot_id="R1", remaining_freshness_days=3, effective_freshness_limit_days=10),
+            _lot(lot_id="R2", remaining_freshness_days=2, effective_freshness_limit_days=10),
+            _lot(lot_id="OK", remaining_freshness_days=9, effective_freshness_limit_days=10),
+        ],
+        freshness_pressure_ratio=Decimal("0.30"),
+    )
+
+    signals = evaluate_procurement_business_signals(
+        as_of=AS_OF, snapshot=snapshot, scenario_results=[]
+    )
+    facts = measure_freshness_facts(snapshot=snapshot)
+
+    assert INVENTORY_FRESHNESS_PRESSURE in signals["signals"]
+    assert signals["measurements"]["freshness_risk_lot_count"] == 2
+    assert facts["freshness_risk_lot_count"] == 2
+    assert (
+        facts["freshness_min_remaining_ratio"]
+        == signals["measurements"]["freshness_min_remaining_ratio"]
+    )
+
+
+def test_measure_facts_omits_risk_count_without_a_threshold(complete_logistics_snapshot):
+    """🔴 기준 없는 `0` 은 *"확인했고 없음"* 으로 읽힌다 — 키를 아예 안 만든다."""
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [_lot(remaining_freshness_days=1, effective_freshness_limit_days=10)],
+        freshness_pressure_ratio=None,
+    )
+
+    facts = measure_freshness_facts(snapshot=snapshot)
+
+    assert "freshness_risk_lot_count" not in facts
+    # 임계와 무관한 측정은 그대로 나온다
+    assert facts["freshness_min_remaining_ratio"] == Decimal("0.1")
+    assert facts["freshness_unresolved_lot_count"] == 0
+    assert facts["freshness_expired_lot_count"] == 0
+
+
+def test_measure_facts_omits_min_ratio_when_nothing_is_computable(complete_logistics_snapshot):
+    """비율을 셈할 Lot 이 없으면 최솟값은 **없는 것**이다 — 0 으로 덮지 않는다."""
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [
+            _lot(lot_id="NONE", remaining_freshness_days=None, effective_freshness_limit_days=None),
+            _lot(lot_id="GONE", remaining_freshness_days=-1, effective_freshness_limit_days=10),
+        ],
+        freshness_pressure_ratio=Decimal("0.30"),
+    )
+
+    facts = measure_freshness_facts(snapshot=snapshot)
+
+    assert "freshness_min_remaining_ratio" not in facts
+    assert facts["freshness_risk_lot_count"] == 0  # 임계는 있고 셈할 Lot 이 없다
+    assert facts["freshness_unresolved_lot_count"] == 1
+    assert facts["freshness_expired_lot_count"] == 1
+
+
+def test_risk_count_boundary_is_inclusive(complete_logistics_snapshot):
+    """★ 경계는 `<=` 다 — signal 을 세우는 `any(ratio <= threshold)` 와 같아야 한다.
+
+    한쪽만 `<` 로 두면 *"signal 은 섰는데 위험 Lot 0건"* 이 성립한다.
+    """
+    snapshot = _census_snapshot(
+        complete_logistics_snapshot,
+        [_lot(remaining_freshness_days=3, effective_freshness_limit_days=10)],
+        freshness_pressure_ratio=Decimal("0.30"),  # 3/10 = 정확히 0.30
+    )
+
+    signals = evaluate_procurement_business_signals(
+        as_of=AS_OF, snapshot=snapshot, scenario_results=[]
+    )
+
+    assert INVENTORY_FRESHNESS_PRESSURE in signals["signals"]
+    assert measure_freshness_facts(snapshot=snapshot)["freshness_risk_lot_count"] == 1

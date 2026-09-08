@@ -60,6 +60,7 @@ from app.logistics.rules import (
     evaluate_procurement_business_signals,
     evaluate_procurement_rules,
     evaluate_sales_business_signals,
+    measure_freshness_facts,
     merge_business_warnings,
 )
 from app.logistics.scenario_engine import (
@@ -73,6 +74,7 @@ from app.logistics.tools import (
     build_inventory_by_item,
     build_lot_constraints,
     calculate_cap_by_date,
+    calculate_window_capacity_usage,
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
@@ -90,6 +92,9 @@ _T_LOTS = "build_lot_constraints"
 _T_INVENTORY = "build_inventory_by_item"
 _T_SIGNALS = "evaluate_procurement_business_signals"
 _T_SALES_SIGNALS = "evaluate_sales_business_signals"
+# STATUS_QUERY 전용 (#396) — 판정이 아니라 **측정**을 부르는 둘이다.
+_T_USAGE = "calculate_window_capacity_usage"
+_T_FRESHNESS = "measure_freshness_facts"
 
 
 # --- Critic DeptMeta (#134) -------------------------------------------------
@@ -171,6 +176,21 @@ _TOOL_INPUTS: dict[str, tuple[str, ...]] = {
         "logistics_snapshot.on_hand_by_lot",
         "logistics_snapshot.freshness_pressure_ratio",
     ),
+    # STATUS_QUERY 전용 (#396) — 조회는 DeptMeta 를 내지 않아 `inputs_used` 에 실리지
+    # 않는다. 그래도 적는 이유는 위 ★ 넷째 항목과 같다 (관측을 내게 되는 날의 대비).
+    _T_USAGE: (
+        "logistics_snapshot.guaranteed_capacity_kg",
+        "logistics_snapshot.used_capacity_kg",
+        "logistics_snapshot.inbound_lead_days",
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.in_transit",
+        "logistics_snapshot.confirmed_inbound_schedule",
+        "logistics_snapshot.confirmed_outbound_schedule",
+    ),
+    _T_FRESHNESS: (
+        "logistics_snapshot.on_hand_by_lot",
+        "logistics_snapshot.freshness_pressure_ratio",
+    ),
     # 아래 둘은 SCENARIO_VALIDATION 전용이라 `inputs_used` 에 실리지 않는다. 계약을
     # 비워 두지 않는 이유는 위 ★ 넷째 항목이다.
     _T_ARRIVAL: ("scenarios", "split_plan"),
@@ -204,7 +224,17 @@ def _assert_tool_input_contracts_complete() -> None:
     `inputs_used` 누락이 아니라 **import 실패**로 즉시 드러난다 (재무와 같은 규율).
     """
     undeclared = sorted(
-        {_T_RULES, _T_CAP, _T_ARRIVAL, _T_LOTS, _T_INVENTORY, _T_SIGNALS, _T_SALES_SIGNALS}
+        {
+            _T_RULES,
+            _T_CAP,
+            _T_ARRIVAL,
+            _T_LOTS,
+            _T_INVENTORY,
+            _T_SIGNALS,
+            _T_SALES_SIGNALS,
+            _T_USAGE,
+            _T_FRESHNESS,
+        }
         - set(_TOOL_INPUTS)
     )
     if undeclared:
@@ -377,6 +407,31 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
 
     ★ `lots` 를 통째로 싣지 않는다. 조회에 필요한 것은 *"몇 건이 얼마나 있고 임박한
       것이 있는가"* 이지 Lot 목록이 아니다 — 목록은 매입이 배분할 때 쓴다.
+
+    ★ **운영 Fact 를 함께 싣는다** (#396). 사용률·신선도 비율과 **그 임계 정책값**을
+      나란히 두어 사람이 스스로 판단하게 한다.
+
+      ```text
+      capacity_window_usage_ratio      Tool 산출 — 창 안에서 가장 빡빡한 날의 사용률
+      capacity_tight_ratio             정책 원값 (PROVISIONAL)
+      freshness_min_remaining_ratio    Tool 산출 — 셈할 수 있었던 ACTIVE Lot 의 최소 비율
+      freshness_pressure_ratio         정책 원값 (PROVISIONAL)
+      freshness_risk_lot_count         Rule 비교식 재사용 — 임계 이하 Lot 수
+      freshness_unresolved_lot_count   잔여·한계 미확인 Lot 수 (0 이 아니라 '모른다')
+      freshness_expired_lot_count      잔여 0 이하로 **확인된** Lot 수
+      ```
+
+      🔴 **재기만 하고 판정하지 않는다.** 임계를 실어도 비교는 하지 않는다 —
+         `CAPACITY_TIGHT` · `INVENTORY_FRESHNESS_PRESSURE` · `FRESHNESS_QUALITY_RISK` 는
+         Rule 소유 signal 이고 조회는 그것도 `judgment_fields` 도 내지 않는다.
+
+      🔴 **`freshness_expired_lot_count` 는 폐기 대상 수가 아니다.** 폐기대기 판정과
+         실행은 `turnover` · `disposal` 소유이고 사람이 확정한다 — 어댑터는 그 모듈을
+         부르지도, `disposal_candidate` 어휘를 쓰지도 않는다.
+
+      🔴 **신선도 넷의 모집단은 `ACTIVE` Lot 이라 위 `lot_count` 와 다르다.**
+         `lot_count` 는 창고에 남아 있는 Lot 전부다 — 비-ACTIVE 도 반출 전이면 공간을
+         차지하므로 Repository 가 status 로 거르지 않는다. 두 수의 합은 안 맞는다.
     """
     as_of = request.context.as_of
     run_id = _run_id(request)
@@ -407,6 +462,10 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     policy = read.policy
     ref = _ref(snapshot)
     lots_ref = _lots_ref(snapshot)
+    # 신선도 비율의 **분모**(유효 보관한계)는 품목 정책에서 왔다 — Lot 참조만 달면
+    # "이 비율이 어디서 왔나" 를 따라갔을 때 분모의 출처가 빠진다 (PRE_SALES 와 같은 규율).
+    policies_ref = _policies_ref(snapshot)
+    freshness_refs = (policies_ref,) if policies_ref != lots_ref else ()
     lots = build_lot_constraints(snapshot)
 
     missing: list[str] = []
@@ -447,6 +506,73 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         # Lot 은 있는데 신선도가 하나도 안 실렸다 — 빈 값으로 덮지 않는다
         missing.append("lots[].remaining_freshness_days")
 
+    # ── 창고 사용률 (측정) ───────────────────────────────────────
+    #
+    # ★ **여전히 임계를 지어내지 않는다** (#396). 위 신선도 주석의 규율은 그대로다 —
+    #   달라진 것은 *"등록된 정책값을 그대로 나른다"* 이지 *"어댑터가 기준을 고른다"* 가
+    #   아니다. 사용률과 임계를 나란히 싣되 **비교는 하지 않는다**: `CAPACITY_TIGHT` 는
+    #   Rule 소유 signal 이고 조회는 그것을 내지 않는다.
+    #
+    # ★ `cap_by_date` 표는 여전히 안 싣는다. 사람이 읽을 것은 *"가장 빡빡한 날이 몇 %"*
+    #   한 값이고, 창의 정의(시작일·길이)는 Tool 소유라 어댑터가 다시 나열하지 않는다.
+    tools.append(_T_USAGE)
+    usage = calculate_window_capacity_usage(snapshot, as_of)
+    if usage is None:
+        # 리드타임·확정 일정이 없어 창을 못 세운 것이다. `PRE_PURCHASE` 는 같은 사실을
+        # hard_constraints 로 나르지만 **조회에는 그 칸이 없어** 여기서 이름을 밝힌다.
+        missing.append("capacity_window_usage_ratio")
+    else:
+        payload["capacity_window_usage_ratio"] = _num(usage)
+
+    capacity_tight_ratio = snapshot.capacity_tight_ratio
+    if capacity_tight_ratio is None:
+        # 선택 정책 미등재 — 값을 지어내지 않는다. "기준이 없어 못 쟀다" 와
+        # "재 봤더니 안전하다" 는 다르다 (LLM 정책 결정서 §4 와 같은 태도).
+        missing.append("capacity_tight_ratio")
+    else:
+        payload["capacity_tight_ratio"] = _num(capacity_tight_ratio)
+        if "capacity_tight_ratio" not in policy.source_refs:
+            missing.append("capacity_tight_ratio@policy_source_ref")
+
+    # ── 신선도 측정 ─────────────────────────────────────────────
+    #
+    # 🔴 **모집단이 위 `lot_count` 와 다르다.** 아래 넷은 전부 **ACTIVE Lot** 만 보고
+    #    (`tools._AVAILABLE_LOT_STATUS`), `lot_count` 는 창고에 남아 있는 Lot 전부다 —
+    #    비-ACTIVE(격리·검수)도 반출 전이면 공간을 차지하므로 Repository 가 status 로
+    #    거르지 않는다. 두 수의 합이 안 맞는 것이 정상이라 근거 문장에 모집단을 적는다.
+    #
+    # 🔴 **비교식을 어댑터가 만들지 않는다.** 위험 Lot 수의 `<= 임계` 는
+    #    `rules.count_freshness_risk_lots` 소유이고 signal 판정이 쓰는 그 함수다.
+    #    여기서 다시 세면 *"signal 은 섰는데 위험 Lot 0건"* 이 성립할 수 있다.
+    tools.append(_T_FRESHNESS)
+    freshness = measure_freshness_facts(snapshot=snapshot)
+    # 🔴 **건수는 `int` 로 둔다.** `_num()`(= `float()`) 을 태우면 `3` 이 `3.0` 으로
+    #    나간다 — `inbound_lead_days` 가 정확히 그 경로로 새어 나갔다 (#221).
+    payload["freshness_unresolved_lot_count"] = freshness["freshness_unresolved_lot_count"]
+    payload["freshness_expired_lot_count"] = freshness["freshness_expired_lot_count"]
+
+    min_freshness_ratio = freshness.get("freshness_min_remaining_ratio")
+    if min_freshness_ratio is None:
+        # 비율을 셈할 수 있는 ACTIVE Lot 이 하나도 없다 — 0 으로 덮지 않는다.
+        missing.append("freshness_min_remaining_ratio")
+    else:
+        payload["freshness_min_remaining_ratio"] = _num(min_freshness_ratio)
+
+    freshness_risk_lot_count = freshness.get("freshness_risk_lot_count")
+    if freshness_risk_lot_count is None:
+        # 임계 정책이 없어 세지 않았다. 기준 없는 `0` 은 "확인했고 없음" 으로 읽힌다.
+        missing.append("freshness_risk_lot_count")
+    else:
+        payload["freshness_risk_lot_count"] = freshness_risk_lot_count
+
+    freshness_pressure_ratio = snapshot.freshness_pressure_ratio
+    if freshness_pressure_ratio is None:
+        missing.append("freshness_pressure_ratio")
+    else:
+        payload["freshness_pressure_ratio"] = _num(freshness_pressure_ratio)
+        if "freshness_pressure_ratio" not in policy.source_refs:
+            missing.append("freshness_pressure_ratio@policy_source_ref")
+
     evidences = [
         _ev("used_capacity_kg", snapshot.used_capacity_kg, "kg", ref, "현재 점유량"),
         _ev("lot_count", len(lots), "count", lots_ref, "ACTIVE Lot 건수"),
@@ -480,6 +606,102 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
                 "days",
                 lots_ref,
                 f"Lot {payload['min_freshness_lot_id']} — 가장 짧은 잔여 신선도",
+            )
+        )
+
+    # ── 운영 Fact 근거 (#396) ────────────────────────────────────
+    #
+    # ★ 넷은 Tool 산출(`tool_calc`)이고 둘은 정책 원값(`SIM_FIXED`)이다. 표기를 나누는
+    #   이유는 읽는 사람이 *"잰 값"* 과 *"기준"* 을 구별해야 하기 때문이다.
+    if "capacity_window_usage_ratio" in payload:
+        evidences.append(
+            _ev(
+                "capacity_window_usage_ratio",
+                payload["capacity_window_usage_ratio"],
+                "ratio",
+                ref,
+                "고정 조회 창에서 가장 빡빡한 날의 창고 사용률 — "
+                "1 − (창 내 최소 여유 ÷ 보장 Capacity). 확정 입·출고만 반영하며 "
+                "임계와 비교하지 않는다",
+                source="tool_calc",
+            )
+        )
+    if "capacity_tight_ratio" in payload:
+        evidences.append(
+            _ev(
+                "capacity_tight_ratio",
+                payload["capacity_tight_ratio"],
+                "ratio",
+                _policy_ref(policy, "capacity_tight_ratio", ref),
+                f"창고 압박 판정 임계 정책값 ({policy.policy_version}) — 실업계 기준이 아니라 "
+                "시뮬레이션·Agent 검증용 PROVISIONAL 운영값이다. 이 회신은 나란히 싣기만 "
+                "하고 비교하지 않는다",
+                grade="SIM_FIXED",
+            )
+        )
+
+    evidences.append(
+        _ev(
+            "freshness_unresolved_lot_count",
+            payload["freshness_unresolved_lot_count"],
+            "count",
+            lots_ref,
+            "ACTIVE Lot 중 잔여 신선도 또는 유효 보관한계를 확인하지 못해 비율 계산에서 "
+            "뺀 건수 — 위 lot_count 와 모집단이 다르고, 0 취급이 아니라 '모른다' 의 건수다",
+            source="tool_calc",
+            extra_ref_ids=freshness_refs,
+        )
+    )
+    evidences.append(
+        _ev(
+            "freshness_expired_lot_count",
+            payload["freshness_expired_lot_count"],
+            "count",
+            lots_ref,
+            "ACTIVE Lot 중 잔여 신선도가 0 이하로 확인된 건수 — 판매 가용에서 빠지는 상태 "
+            "사실이다. 폐기 판정도 폐기 대상 수도 아니며, 폐기는 turnover·disposal 이 "
+            "소유하고 사람이 확정한다",
+            source="tool_calc",
+            extra_ref_ids=freshness_refs,
+        )
+    )
+    if "freshness_min_remaining_ratio" in payload:
+        evidences.append(
+            _ev(
+                "freshness_min_remaining_ratio",
+                payload["freshness_min_remaining_ratio"],
+                "ratio",
+                lots_ref,
+                "비율을 셈할 수 있었던 ACTIVE Lot 의 최소 잔여 비율 — "
+                "잔여 신선도 ÷ 유효 보관한계. 분모는 중 등급 계수가 반영된 값이라 "
+                "품목 보관 정책 원값과 다를 수 있다",
+                source="tool_calc",
+                extra_ref_ids=freshness_refs,
+            )
+        )
+    if "freshness_risk_lot_count" in payload:
+        evidences.append(
+            _ev(
+                "freshness_risk_lot_count",
+                payload["freshness_risk_lot_count"],
+                "count",
+                lots_ref,
+                "비율을 셈할 수 있었던 ACTIVE Lot 중 잔여 비율이 정책 임계 이하인 건수 — "
+                "Rule 이 소유한 비교식을 그대로 쓴다. 이 건수는 signal 을 만들지 않는다",
+                source="tool_calc",
+                extra_ref_ids=freshness_refs,
+            )
+        )
+    if "freshness_pressure_ratio" in payload:
+        evidences.append(
+            _ev(
+                "freshness_pressure_ratio",
+                payload["freshness_pressure_ratio"],
+                "ratio",
+                _policy_ref(policy, "freshness_pressure_ratio", ref),
+                f"신선도 압박 판정 임계 정책값 ({policy.policy_version}) — 실업계 기준이 아니라 "
+                "시뮬레이션·Agent 검증용 PROVISIONAL 운영값이다",
+                grade="SIM_FIXED",
             )
         )
 

@@ -13,6 +13,7 @@ from app.logistics.schemas import (
 )
 from app.logistics.tools import (
     calculate_window_capacity_usage,
+    collect_freshness_lot_census,
     collect_freshness_pressure_inputs,
     find_in_transit_schedule_gap,
     has_unattributed_confirmed_outbound,
@@ -170,15 +171,93 @@ def evaluate_sales_business_signals(
     return {"signals": signals, "warnings": warnings, "measurements": measurements}
 
 
+def count_freshness_risk_lots(ratios: list[Decimal], threshold: Decimal) -> int:
+    """잔여 비율이 임계 **이하**인 Lot 수. 이 비교식의 유일한 주인이다.
+
+    ★ signal 판정(`evaluate_*_business_signals`)과 운영 Fact(`measure_freshness_facts`)가
+      같은 함수를 쓴다 — 비교가 두 곳에 있으면 *"위험 Lot 3개"* 라고 답한 회신과
+      signal 이 서로 다른 수를 세는 날이 온다.
+    ★ 경계는 `<=` 다. `any(ratio <= threshold)` 로 signal 을 세우는 자리와 같아야
+      *"signal 은 섰는데 위험 Lot 이 0건"* 이 성립하지 않는다.
+    """
+    return sum(1 for ratio in ratios if ratio <= threshold)
+
+
 def _record_freshness_measurements(
     measurements: SignalMeasurements,
     ratios: list[Decimal],
     threshold: Decimal,
 ) -> None:
     """신선도 signal의 판정 사용 수치 — 위험 Lot 수와 최소 잔여비율(집계만, lot_id 미전송)."""
-    measurements["freshness_risk_lot_count"] = sum(1 for ratio in ratios if ratio <= threshold)
+    measurements["freshness_risk_lot_count"] = count_freshness_risk_lots(ratios, threshold)
     measurements["freshness_min_remaining_ratio"] = min(ratios)
     measurements["freshness_pressure_ratio"] = threshold
+
+
+class _FreshnessLotCounts(TypedDict):
+    """ACTIVE Lot 을 훑으면 **언제나** 나오는 건수 둘. 없을 수 없으므로 필수다."""
+
+    freshness_unresolved_lot_count: int
+    freshness_expired_lot_count: int
+
+
+class FreshnessOperationalFacts(_FreshnessLotCounts, total=False):
+    """신선도 운영 Fact — **signal 발화와 무관하게** 측정만 담는다 (#396).
+
+    `SignalMeasurements` 와 키 이름이 겹치는 것은 의도다. 저쪽은 *"판정에 실제 쓰인
+    수치"* 라 signal 이 섰을 때만 채워지고, 이쪽은 *"지금 재면 이렇다"* 라 상태 조회가
+    쓴다. **같은 값을 두 식으로 재지 않도록** 둘 다 같은 Tool·같은 비교 함수를 지난다.
+
+    ★ **필수와 선택을 타입으로 가른다.** 건수 둘은 훑으면 나오므로 항상 있고, 아래 둘은
+      조건이 있어 없을 수 있다 — 키가 없는 것은 0 이 아니라 **못 잰 것**이다 (§1.2-10).
+      임계 정책이 없으면 `freshness_risk_lot_count` 가 없고, 비율을 셈할 Lot 이 하나도
+      없으면 `freshness_min_remaining_ratio` 가 없다.
+    """
+
+    freshness_min_remaining_ratio: Decimal
+    freshness_risk_lot_count: int
+
+
+def measure_freshness_facts(
+    *,
+    snapshot: InventoryLogisticsSnapshot,
+) -> FreshnessOperationalFacts:
+    """가용 Lot 신선도의 운영 측정치. **signal 도 verdict 도 만들지 않는다** (#396).
+
+    ```text
+    freshness_unresolved_lot_count  항상 — ACTIVE Lot 을 훑으면 나오는 건수다
+    freshness_expired_lot_count     항상 — 〃
+    freshness_min_remaining_ratio   비율을 셈할 수 있는 Lot 이 하나라도 있을 때
+    freshness_risk_lot_count        임계 정책이 등록돼 있을 때
+    ```
+
+    🔴 **새 임계도 새 분류도 만들지 않는다.** 모집단 분류는
+      `tools.collect_freshness_lot_census`, 임계 비교는 `count_freshness_risk_lots` 로
+      둘 다 signal 판정이 쓰는 그 함수다. 여기서 하는 일은 **골라 담는 것**뿐이다.
+
+    🔴 **`freshness_expired_lot_count` 를 폐기 판정으로 읽지 않는다.** 잔여가 0 이하로
+      확인된 ACTIVE Lot 의 수일 뿐이고, 폐기대기 판정과 실행은 `turnover` · `disposal`
+      소유이며 사람 확정을 거친다 (`disposal.confirm_disposal`).
+
+    ★ **`snapshot` 은 필수다.** `evaluate_*_business_signals` 가 `None` 을 받는 것은
+      독립 Service 가 스냅샷 부재에도 회신을 조립해야 해서인데, 이 함수의 호출자는
+      스냅샷을 이미 확인한 뒤다 — `None` 을 받아 빈 dict 를 돌려주면 *"측정했더니
+      아무것도 없었다"* 와 *"측정할 것이 없었다"* 가 같아진다.
+    """
+    census = collect_freshness_lot_census(snapshot)
+    facts: FreshnessOperationalFacts = {
+        "freshness_unresolved_lot_count": census.unresolved_lot_count,
+        "freshness_expired_lot_count": census.expired_lot_count,
+    }
+    if census.ratios:
+        facts["freshness_min_remaining_ratio"] = min(census.ratios)
+    # 임계가 없으면 위험 Lot 수를 세지 않는다 — 기준 없는 0 은 "확인했고 없음" 으로
+    # 읽혀 정책 미등재를 안전 신호로 둔갑시킨다 (결정서 §4 와 같은 태도).
+    if snapshot.freshness_pressure_ratio is not None:
+        facts["freshness_risk_lot_count"] = count_freshness_risk_lots(
+            census.ratios, snapshot.freshness_pressure_ratio
+        )
+    return facts
 
 
 class LogisticsRuleResult(TypedDict):

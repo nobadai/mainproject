@@ -2552,3 +2552,355 @@ def test_보관한계_부재_Lot_이_판매_계약으로도_읽힌다(monkeypatc
     assert lot.remaining_freshness_days is None
     assert lot.effective_freshness_limit_days is None
     assert lot.available_qty_kg == Decimal("700.0")
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — 운영 Fact (#396)
+#
+# ★ **조회는 재기만 한다.** 측정치와 임계를 나란히 싣되 **비교하지 않는다** — 비교는
+#   Rule 소유이고 그 결과(signal)는 조회에 실리지 않는다. 이 절의 절반이 그 경계다.
+#
+# ★ 이 절은 `_load_read` 만 갈아 끼우고 **Tool 은 진짜를 돌린다**. 가짜 측정값을 넣으면
+#   어댑터가 값을 *나르는지* 아니면 *스스로 세는지* 를 구별할 수 없다.
+# ---------------------------------------------------------------------------
+
+#: 실 DB seed (`database/logistics_llm_policy_seed.sql`) 와 같은 선택 정책 2종.
+_CAPACITY_TIGHT_RATIO = Decimal("0.90")
+_FRESHNESS_PRESSURE_RATIO = Decimal("0.30")
+
+
+def _fact_policy(**overrides) -> LogisticsPolicy:
+    """선택 정책 2종이 **등록된** Policy — 값도 출처도 seed 와 같은 모양이다."""
+    base = _policy()
+    update: dict = {
+        "capacity_tight_ratio": _CAPACITY_TIGHT_RATIO,
+        "freshness_pressure_ratio": _FRESHNESS_PRESSURE_RATIO,
+        "source_refs": {
+            **base.source_refs,
+            "capacity_tight_ratio": "MVP-DECISION-20260830:LLM-CAPACITY-TIGHT",
+            "freshness_pressure_ratio": "MVP-DECISION-20260830:LLM-FRESHNESS-PRESSURE",
+        },
+    }
+    return base.model_copy(update={**update, **overrides})
+
+
+def _fact_snapshot(**overrides) -> InventoryLogisticsSnapshot:
+    """신선도 네 갈래를 **한 스냅샷에** 담는다 — 갈래가 섞여도 서로 안 침범해야 한다.
+
+    ```text
+    LOT-OK    ACTIVE  잔여 12 / 한계 15  → 비율 0.8   비율 계산 대상
+    LOT-RISK  ACTIVE  잔여  3 / 한계 15  → 비율 0.2   임계 0.30 이하
+    LOT-NONE  ACTIVE  잔여 None          → 미확인 (0 이 아니다)
+    LOT-GONE  ACTIVE  잔여 -2            → 만료 확인
+    LOT-HOLD  HOLD    잔여  1            → 모집단 밖 — ACTIVE 가 아니다
+    ```
+
+    🔴 **`lot_count` 는 5 이고 신선도 모집단은 4 다.** 두 수가 다른 것이 정상이며,
+       그 사실 자체를 아래 테스트가 고정한다.
+    """
+    base: dict = {
+        "on_hand_by_lot": [
+            _sales_lot("LOT-OK", "배추", "100", 12),
+            _sales_lot("LOT-RISK", "배추", "100", 3),
+            _sales_lot("LOT-NONE", "배추", "100", None, limit=None),
+            _sales_lot("LOT-GONE", "배추", "100", -2),
+            _sales_lot("LOT-HOLD", "배추", "100", 1, status="HOLD"),
+        ],
+        "capacity_tight_ratio": _CAPACITY_TIGHT_RATIO,
+        "freshness_pressure_ratio": _FRESHNESS_PRESSURE_RATIO,
+    }
+    return _snapshot(**{**base, **overrides})
+
+
+def _status_reply(monkeypatch, snapshot=None, policy=None):
+    """운영 Fact 를 실은 STATUS_QUERY 회신 — 요청까지 함께 돌려준다 (봉투 검증용)."""
+    monkeypatch.setattr(
+        adapter,
+        "_load_read",
+        lambda *, as_of, sim_run_id: _read(snapshot or _fact_snapshot(), policy or _fact_policy()),
+    )
+    request = req(mode="STATUS_QUERY")
+    reply, meta = adapter.logistics_port(request)
+    return request, reply, meta
+
+
+# -- 1. 정상 정책 + 계산 가능 -------------------------------------
+
+
+def test_운영_Fact_일곱을_측정값과_임계로_함께_싣는다(monkeypatch):
+    """★ 값이 **나란히** 있어야 사람이 스스로 판단한다.
+
+    사용률만 싣고 임계를 빼면 `0.125` 가 큰 건지 작은 건지 알 수 없다 —
+    `warehouse_free_kg` 옆에 `guaranteed_capacity_kg` 를 두는 것과 같은 이유다.
+    """
+    _, reply, _ = _status_reply(monkeypatch)
+
+    assert reply.payload["capacity_window_usage_ratio"] == 0.125  # 1 − (7,000 ÷ 8,000)
+    assert reply.payload["capacity_tight_ratio"] == 0.9
+    assert reply.payload["freshness_min_remaining_ratio"] == 0.2  # LOT-RISK 3/15
+    assert reply.payload["freshness_pressure_ratio"] == 0.3
+    assert reply.payload["freshness_risk_lot_count"] == 1  # 0.2 <= 0.30
+    assert reply.payload["freshness_unresolved_lot_count"] == 1  # LOT-NONE
+    assert reply.payload["freshness_expired_lot_count"] == 1  # LOT-GONE
+    assert reply.runtime_status == "READY"
+
+
+def test_신선도_모집단은_ACTIVE_라_lot_count_와_다르다(monkeypatch):
+    """🔴 **합이 안 맞는 것이 정상이다.**
+
+    `lot_count` 는 창고에 남아 있는 Lot 전부이고(비-ACTIVE 도 공간을 차지한다),
+    신선도 넷은 `ACTIVE` 만 본다. 이것을 같게 만들려고 어느 한쪽을 고치면
+    *"격리 재고가 사라지거나"* *"격리 재고의 신선도가 압박 신호에 섞이거나"* 둘 중
+    하나가 된다.
+    """
+    _, reply, _ = _status_reply(monkeypatch)
+
+    assert reply.payload["lot_count"] == 5  # HOLD 포함
+    셈한_ACTIVE = (
+        reply.payload["freshness_unresolved_lot_count"]
+        + reply.payload["freshness_expired_lot_count"]
+        + 2  # 비율을 셈한 LOT-OK · LOT-RISK
+    )
+    assert 셈한_ACTIVE == 4  # HOLD 는 빠진다
+
+
+def test_조회는_측정하고_판정하지_않는다(monkeypatch):
+    """🔴 **이 절에서 가장 중요한 검사** — Fact 를 늘리면서 판정기가 되지 않았는가.
+
+    사용률·비율을 실으면서 signal 이나 verdict 가 따라 나오면 조회의 계약
+    (`judgment_fields=()` · "위험 여부는 사람이 본다")이 무너진다.
+    """
+    _, reply, _ = _status_reply(monkeypatch)
+
+    assert reply.judgment_fields == ()
+    assert reply.business_status == "ok"
+    assert reply.suggested_adjustments == ()
+    assert reply.needs_followup is False
+    # 업무 위험 signal 은 조회 payload 어디에도 없다 — 중첩 안까지 훑는다
+    assert BUSINESS_SIGNALS & _all_keys(reply.payload) == set()
+    실린_문자열 = {value for value in reply.payload.values() if isinstance(value, str)}
+    assert BUSINESS_SIGNALS & 실린_문자열 == set()
+    assert "soft_warnings" not in reply.payload
+
+
+def test_임계를_넘어도_조회는_같은_모양으로_답한다(monkeypatch):
+    """★ 사용률 0.95 ≥ 임계 0.90 — 그래도 **달라지는 것은 숫자 하나뿐**이다.
+
+    임계를 넘는 날 signal 이 붙거나 business_status 가 바뀌면, 그것이 곧 조회가
+    판정을 시작했다는 뜻이다.
+    """
+    _, 낮음, _ = _status_reply(monkeypatch)
+    _, 높음, _ = _status_reply(monkeypatch, snapshot=_fact_snapshot(used_capacity_kg=Decimal(7600)))
+
+    assert 높음.payload["capacity_window_usage_ratio"] == 0.95  # 1 − (400 ÷ 8,000)
+    assert 높음.payload["capacity_tight_ratio"] == 0.9
+    assert 높음.business_status == 낮음.business_status == "ok"
+    assert 높음.judgment_fields == ()
+    assert set(높음.payload) == set(낮음.payload)  # 키 구성이 임계에 따라 흔들리지 않는다
+
+
+# -- 2. 정책 미등재 -----------------------------------------------
+
+
+def test_임계_정책이_없으면_값을_지어내지_않고_이름을_밝힌다(monkeypatch):
+    """🔴 *"기준이 없어 못 쟀다"* 와 *"재 봤더니 안전하다"* 는 다르다.
+
+    임계가 없을 때 위험 Lot 수를 `0` 으로 채우면 **정책 미등재가 안전 신호로
+    둔갑한다.** 반대로 조용히 빼면 마스터가 무엇을 달라고 할지 모른다 (§1.2-10).
+    """
+    _, reply, _ = _status_reply(
+        monkeypatch,
+        snapshot=_fact_snapshot(capacity_tight_ratio=None, freshness_pressure_ratio=None),
+        policy=_policy(),  # 선택 정책 2종이 없는 기본 Policy
+    )
+
+    for key in ("capacity_tight_ratio", "freshness_pressure_ratio", "freshness_risk_lot_count"):
+        assert key not in reply.payload, key
+        assert key in reply.missing_data, key
+
+    # 임계와 무관한 측정치는 그대로 답한다 — 못 한 것만 못 했다고 적는다
+    assert reply.payload["capacity_window_usage_ratio"] == 0.125
+    assert reply.payload["freshness_min_remaining_ratio"] == 0.2
+    assert reply.payload["freshness_unresolved_lot_count"] == 1
+    assert reply.payload["freshness_expired_lot_count"] == 1
+    assert reply.runtime_status == "READY"  # 선택 정책 부재가 조회를 막지 않는다
+
+
+def test_정책_출처가_없으면_값은_쓰되_출처_부재를_밝힌다(monkeypatch):
+    """★ `guaranteed_capacity_kg@policy_source_ref` 와 같은 자리다.
+
+    값이 아니라 **출처**의 문제라 READY 는 유지한다.
+    """
+    policy = _fact_policy(source_refs=_policy().source_refs)  # 선택 정책 2종의 출처만 없다
+
+    _, reply, _ = _status_reply(monkeypatch, policy=policy)
+
+    assert reply.payload["capacity_tight_ratio"] == 0.9
+    assert "capacity_tight_ratio@policy_source_ref" in reply.missing_data
+    assert "freshness_pressure_ratio@policy_source_ref" in reply.missing_data
+    assert reply.runtime_status == "READY"
+
+
+def test_창을_못_세우면_사용률_대신_이름을_남긴다(monkeypatch):
+    """★ 조회에는 `hard_constraints` 칸이 없다 — 여기서 안 밝히면 사실이 사라진다.
+
+    `PRE_PURCHASE` 는 같은 사실을 `LOG-H05`(리드타임 미확정)로 나르지만 조회는 그
+    채널이 없어 `missing_data` 가 유일한 자리다.
+    """
+    _, reply, _ = _status_reply(monkeypatch, snapshot=_fact_snapshot(inbound_lead_days=None))
+
+    assert "capacity_window_usage_ratio" not in reply.payload
+    assert "capacity_window_usage_ratio" in reply.missing_data
+    assert reply.runtime_status == "READY"
+
+
+# -- 3. 신선도 갈래 -----------------------------------------------
+
+
+def test_잔여_미확인_Lot_은_0_이_아니라_미확인으로_센다(monkeypatch):
+    """🔴 `None` 을 `0` 으로 읽으면 **한계를 모르는 재고가 만료로 둔갑한다.**"""
+    snapshot = _fact_snapshot(on_hand_by_lot=[_sales_lot("LOT-N", "배추", "100", None, limit=None)])
+
+    _, reply, _ = _status_reply(monkeypatch, snapshot=snapshot)
+
+    assert reply.payload["freshness_unresolved_lot_count"] == 1
+    assert reply.payload["freshness_expired_lot_count"] == 0
+    assert reply.payload["freshness_risk_lot_count"] == 0  # 셈할 Lot 이 없다 — 임계는 있다
+    # 비율을 셈할 Lot 이 없으므로 최솟값은 **없는 것**이지 0 이 아니다
+    assert "freshness_min_remaining_ratio" not in reply.payload
+    assert "freshness_min_remaining_ratio" in reply.missing_data
+
+
+def test_잔여가_0_이하인_Lot_은_만료로_따로_센다(monkeypatch):
+    """★ 종전에는 이 Lot 이 비율에서도 미확인에서도 **조용히 빠졌다** (#396 이 연 자리).
+
+    `collect_freshness_pressure_inputs` 가 `continue` 로 건너뛰던 갈래라, 만료 재고가
+    있어도 어느 수에도 안 잡혔다.
+    """
+    snapshot = _fact_snapshot(
+        on_hand_by_lot=[
+            _sales_lot("LOT-GONE", "배추", "100", 0),  # 0 도 만료다 (<= 0)
+            _sales_lot("LOT-PAST", "배추", "100", -5),
+        ]
+    )
+
+    _, reply, _ = _status_reply(monkeypatch, snapshot=snapshot)
+
+    assert reply.payload["freshness_expired_lot_count"] == 2
+    assert reply.payload["freshness_unresolved_lot_count"] == 0
+
+
+def test_만료_건수를_폐기_어휘로_부르지_않는다(monkeypatch):
+    """🔴 **폐기는 turnover · disposal 소유이고 사람이 확정한다.**
+
+    어댑터가 `disposal_candidate` 라는 이름을 내면 그 순간 폐기 판정의 주인이 둘이
+    되고, 화면은 *"폐기 대상 2건"* 으로 읽는다 — `confirm_disposal` 은 그런 근거로
+    돌지 않는다.
+    """
+    _, reply, meta = _status_reply(monkeypatch)
+
+    금지 = {"disposal_candidate", "disposal_candidate_count", "disposal_target_lot_count"}
+    assert 금지 & _all_keys(reply.payload) == set()
+    # 어휘뿐 아니라 **경로**도 막는다 — 회전 모듈은 조회가 부르지 않는다
+    assert "load_lot_turnover" not in meta.used_tools
+    근거 = next(e for e in reply.evidences if e.claim == "freshness_expired_lot_count")
+    assert "폐기 판정도 폐기 대상 수도 아니" in 근거.evidence_detail
+
+
+# -- 4. 근거 · 봉투 -----------------------------------------------
+
+
+def test_새_숫자_Fact_에는_전부_근거가_붙는다(monkeypatch):
+    """🔴 근거 없는 최상위 숫자는 **LLM 이 만든 값과 구분되지 않는다** (§1.2-5).
+
+    봉투가 `E-EVIDENCE-MISSING` 으로 잡지만, 무엇이 요구되는지를 여기서 한 번 더
+    이름으로 고정한다 — 검사만 믿으면 키를 늘릴 때 이유를 잊는다.
+    """
+    request, reply, meta = _status_reply(monkeypatch)
+
+    새_Fact = {
+        "capacity_window_usage_ratio",
+        "capacity_tight_ratio",
+        "freshness_min_remaining_ratio",
+        "freshness_pressure_ratio",
+        "freshness_risk_lot_count",
+        "freshness_unresolved_lot_count",
+        "freshness_expired_lot_count",
+    }
+    assert 새_Fact <= set(reply.payload)
+    assert 새_Fact <= {e.claim for e in reply.evidences}
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_정책_원값과_측정값의_근거_등급을_가른다(monkeypatch):
+    """★ 읽는 사람이 *"잰 값"* 과 *"기준"* 을 구별해야 한다.
+
+    임계는 시뮬레이션 검증용 PROVISIONAL 값이라 그 사실이 근거에 남아야 하고
+    (`SIM_FIXED`), 측정값은 Tool 산출이라 `tool_calc` 다.
+    """
+    _, reply, _ = _status_reply(monkeypatch)
+    근거 = {e.claim: e for e in reply.evidences}
+
+    for claim in ("capacity_tight_ratio", "freshness_pressure_ratio"):
+        assert 근거[claim].evidence_grade == "SIM_FIXED", claim
+        assert "PROVISIONAL" in 근거[claim].evidence_detail, claim
+
+    for claim in (
+        "capacity_window_usage_ratio",
+        "freshness_min_remaining_ratio",
+        "freshness_risk_lot_count",
+        "freshness_unresolved_lot_count",
+        "freshness_expired_lot_count",
+    ):
+        assert 근거[claim].source == "tool_calc", claim
+
+
+def test_신선도_비율_근거는_분모의_출처도_가리킨다(monkeypatch):
+    """★ 분모(유효 보관한계)는 품목 정책에서 왔다 — Lot 참조만 달면 출처가 반쪽이다."""
+    _, reply, _ = _status_reply(monkeypatch)
+
+    근거 = next(e for e in reply.evidences if e.claim == "freshness_min_remaining_ratio")
+    assert "DB:inventory_lots/sim_run_id=SIM-1" in 근거.ref_ids
+    assert "DB:item_storage_policies" in 근거.ref_ids
+
+
+def test_건수는_int_로_나간다(monkeypatch):
+    """🔴 `inbound_lead_days` 가 `2.0` 으로 새어 나간 경로를 되풀이하지 않는다 (#221).
+
+    `_num()`(= `float()`) 을 건수에 태우면 `1` 이 `1.0` 이 된다. 값 비교로는 안 잡히므로
+    **타입을 직접 잰다.**
+    """
+    _, reply, _ = _status_reply(monkeypatch)
+
+    for key in (
+        "freshness_risk_lot_count",
+        "freshness_unresolved_lot_count",
+        "freshness_expired_lot_count",
+    ):
+        value = reply.payload[key]
+        assert isinstance(value, int), key
+        assert not isinstance(value, bool), key
+
+
+def test_측정_Tool_을_실행_계획에_정직하게_적는다(monkeypatch):
+    """안 돈 것을 돈 것처럼 적지 않는다 — 그 반대도 마찬가지다."""
+    _, _, meta = _status_reply(monkeypatch)
+
+    assert meta.used_tools == (
+        "build_lot_constraints",
+        "calculate_window_capacity_usage",
+        "measure_freshness_facts",
+    )
+    assert meta.tool_order == (1, 2, 3)
+
+
+def test_조회는_여전히_LLM_을_타지_않는다(monkeypatch):
+    """#396 은 Fact 확장이다 — opt-in 을 켜도 조회에는 LLM 경로가 없다."""
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+
+    _, reply, meta = _status_reply(monkeypatch)
+
+    assert provider.calls == 0
+    assert meta.llm_status == "DISABLED"
+    assert "interpretation" not in reply.payload

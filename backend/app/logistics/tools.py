@@ -1,5 +1,6 @@
 """재고·물류 Agent의 결정론적 계산 도구."""
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -88,23 +89,51 @@ def calculate_window_capacity_usage(
     return Decimal(1) - (min(caps.values()) / guaranteed)
 
 
-def collect_freshness_pressure_inputs(
+@dataclass(frozen=True)
+class FreshnessLotCensus:
+    """가용(ACTIVE) Lot 을 신선도 계산 가능성으로 가른 결과. **분류의 유일한 주인이다.**
+
+    ```text
+    ratios                비율을 셈할 수 있었던 Lot (잔여 > 0 · 유효 한계 > 0)
+    unresolved_lot_count  잔여 또는 유효 한계를 확인하지 못해 뺀 Lot
+    expired_lot_count     잔여가 0 이하로 **확인된** Lot
+    ```
+
+    ★ 세 갈래는 서로 배타이고 합이 ACTIVE Lot 수다 — 어느 Lot 도 두 번 세이지 않고,
+      어느 Lot 도 조용히 사라지지 않는다.
+
+    🔴 **`expired_lot_count` 는 폐기 판정이 아니다.** 잔여가 0 이하라는 사실은
+       `build_inventory_by_item` 이 판매 가용에서 빼는 기준이고
+       `turnover.is_disposal_candidate` 가 폐기**대기**로 읽는 입력이지만, 폐기 여부의
+       판정과 실행은 `turnover` · `disposal` 소유이며 사람 확정을 거친다. 여기서
+       세는 것은 상태 건수뿐이다.
+    """
+
+    ratios: list[Decimal]
+    unresolved_lot_count: int
+    expired_lot_count: int
+
+
+def collect_freshness_lot_census(
     snapshot: InventoryLogisticsSnapshot,
-) -> tuple[list[Decimal], int]:
-    """가용 Lot 의 신선도 잔여 비율 목록과, 비율을 셈할 수 없어 제외된 Lot 수.
+) -> FreshnessLotCensus:
+    """가용 Lot 을 신선도 계산 가능성으로 가른다. **비교도 판정도 하지 않는다.**
 
     비율 = remaining_freshness_days ÷ effective_freshness_limit_days.
     분모는 remaining 계산에 실제 사용된 유효 한계다 — operational_limit 원값을
     쓰면 `중` 등급이 갓 입고돼도 임박 판정된다 (LLM 정책 결정서 §3).
 
-    대상은 가용 재고 Lot 이다: 비-ACTIVE(격리·검수 등)와 신선도 만료(<= 0) 확인
-    Lot 은 `build_inventory_by_item` 과 같은 기준으로 제외한다. remaining 이나
-    유효 한계가 None 인 Lot 은 0 취급도 위험 강제도 하지 않고 계산에서 빼되,
-    제외 수를 함께 반환해 호출부가 그 사실을 드러낼 수 있게 한다 (조용한 누락 금지).
-    grade=None 은 제외 사유가 아니다 — remaining 은 등급과 무관하게 계산된다.
+    대상은 가용 재고 Lot 이다: 비-ACTIVE(격리·검수 등)는 `build_inventory_by_item` 과
+    같은 기준으로 제외한다. remaining 이나 유효 한계가 None 인 Lot 은 0 취급도 위험
+    강제도 하지 않고 비율에서 빼되 **센다** (조용한 누락 금지). grade=None 은 제외
+    사유가 아니다 — remaining 은 등급과 무관하게 계산된다.
+
+    ★ **갈래의 순서가 계약이다.** 잔여가 `None` 인지 먼저 보고(미확인), 그 다음 0 이하
+      인지 본다(만료 확인). 순서를 바꾸면 `None` 이 만료로 읽힌다.
     """
     ratios: list[Decimal] = []
     unresolved = 0
+    expired = 0
     for lot in snapshot.on_hand_by_lot:
         if lot.status != _AVAILABLE_LOT_STATUS:
             continue
@@ -112,6 +141,7 @@ def collect_freshness_pressure_inputs(
             unresolved += 1
             continue
         if lot.remaining_freshness_days <= 0:
+            expired += 1
             continue
         if lot.effective_freshness_limit_days <= 0:
             unresolved += 1
@@ -119,7 +149,24 @@ def collect_freshness_pressure_inputs(
         ratios.append(
             Decimal(lot.remaining_freshness_days) / Decimal(lot.effective_freshness_limit_days)
         )
-    return ratios, unresolved
+    return FreshnessLotCensus(
+        ratios=ratios,
+        unresolved_lot_count=unresolved,
+        expired_lot_count=expired,
+    )
+
+
+def collect_freshness_pressure_inputs(
+    snapshot: InventoryLogisticsSnapshot,
+) -> tuple[list[Decimal], int]:
+    """가용 Lot 의 신선도 잔여 비율 목록과, 비율을 셈할 수 없어 제외된 Lot 수.
+
+    ★ **`collect_freshness_lot_census` 의 얇은 wrapper 다** (#396). 분류를 한 곳에 두어
+      *"만료로 빠진 Lot"* 을 새로 세면서도 signal 판정의 입력은 글자 그대로 같게 남긴다 —
+      이 함수의 반환은 추출 전과 동일하고, `rules` 의 두 signal 도 그대로다.
+    """
+    census = collect_freshness_lot_census(snapshot)
+    return census.ratios, census.unresolved_lot_count
 
 
 #: 품목을 식별할 수 없는 물리 점유·입고·출고를 담는 버킷 키.
