@@ -674,8 +674,12 @@ CREATE TABLE IF NOT EXISTS haetdeul.inventory_allocations (
         FOREIGN KEY (lot_id) REFERENCES haetdeul.inventory_lots(lot_id),
     CONSTRAINT inventory_allocations_pallet_id_fkey
         FOREIGN KEY (pallet_id) REFERENCES haetdeul.pallets(pallet_id),
+    -- FEFO_AUTO_SELECTED 는 2026-09-08 에 더했다 (물류 · 시뮬레이션 자동 할당).
+    -- 🔴 앞의 둘은 **사람이 무엇을 했나**를 적는 값이라 사람이 없는 선택을 담을 수 없다.
+    --    ⚠️ 기존 두 값의 뜻은 그대로다 — 넓히기만 하고 좁히지 않았다.
     CONSTRAINT ck_inventory_allocations_basis
-        CHECK (allocation_basis IN ('FEFO_TOOL_CONFIRMED', 'HUMAN_OVERRIDE')),
+        CHECK (allocation_basis IN ('FEFO_TOOL_CONFIRMED', 'HUMAN_OVERRIDE',
+                                    'FEFO_AUTO_SELECTED')),
     CONSTRAINT ck_inventory_allocations_status
         CHECK (status IN ('ALLOCATED', 'PICKED', 'SHIPPED', 'CANCELLED')),
     CONSTRAINT ck_inventory_allocations_qty CHECK (allocated_qty_kg > 0)
@@ -689,7 +693,7 @@ CREATE INDEX IF NOT EXISTS idx_inventory_allocations_lot
 COMMENT ON TABLE haetdeul.inventory_allocations IS
     '출고 준비 시 실제 Lot/Pallet 지정 (02 §11). 한 주문이 여러 Lot/Pallet 에서 충당될 수 있다.';
 COMMENT ON COLUMN haetdeul.inventory_allocations.allocation_basis IS
-    'FEFO_TOOL_CONFIRMED = Tool 후보를 사람이 그대로 확정 / HUMAN_OVERRIDE = 사람이 다르게 정함. 자동 Allocation 은 후속이다 (02 §12).';
+    'FEFO_TOOL_CONFIRMED = Tool 후보를 사람이 그대로 확정 / HUMAN_OVERRIDE = 사람이 다르게 정함 / FEFO_AUTO_SELECTED = 사람 없이 FEFO 규칙이 고름 (시뮬레이션). 기본값을 두지 않는다 — 호출자가 반드시 말한다.';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
