@@ -23,6 +23,7 @@ _LLM_FIELDS = {
     "llm_fallback_used",
     "llm_error_kind",
     "llm_context_facts",
+    "llm_provider_elapsed_ms",
 }
 
 

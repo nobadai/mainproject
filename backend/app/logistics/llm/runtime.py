@@ -8,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 
 from dotenv import load_dotenv
@@ -299,6 +300,11 @@ class InterpretationService:
         # 여기부터는 호출 확정이다 — provider.generate(context)의 입력으로 쓰이므로
         # 전송 전에 실패(AUTH_ERROR 등)해도 llm_context_facts에 기록된다 (v1.3 §5).
         context_facts = list(context.facts)
+        # 같은 자리에서 latency 누적도 연다 (#402). **0 으로 여는 것이 계약이다** —
+        # 위 두 조기 반환(DISABLED · SKIPPED_TEMPLATE)은 이 줄에 닿지 못하므로
+        # `_result` 의 기본값 None 을 그대로 받는다. "안 불렀다(None)" 와 "불렀는데
+        # 0ms 였다(0)" 가 코드 구조로 갈린다 — 어느 쪽도 손으로 적지 않는다.
+        provider_elapsed_ms = 0
 
         # 전송 재시도와 검증(correction) 재시도는 **별도 예산**이다 (결정서 §6).
         # 하나의 카운터를 공유하면 첫 호출이 timeout 일 때 검증 실패의 correction
@@ -313,6 +319,15 @@ class InterpretationService:
         validation_retries_left = 1
         while True:
             attempts += 1
+            # 🔴 **계측은 여기 한 곳이다** (#402). Provider 구현체 안에 넣지 않는다 —
+            #    Ollama·Gemini 두 벌로 복제되고, 무엇보다 **예외로 끝난 호출의 시간을
+            #    잃는다.** timeout 10초가 곧 FALLBACK 의 원인인데 그 10초가 기록되지
+            #    않으면 가장 알아야 할 실행에서 숫자가 사라진다 — `replans` 를 지역
+            #    변수가 아니라 상태에서 세는 재무의 판단과 같은 편이다.
+            # ★ Provider 에는 아무 상태도 남기지 않는다 (`last_latency` 금지) — 한
+            #   호출의 시간은 이 루프의 지역 변수로만 산다. 동시 호출·인스턴스 재사용
+            #   에서 값이 섞일 자리가 구조적으로 없다.
+            started = perf_counter()
             try:
                 raw_output = self.provider.generate(context, retry_guidance=guidance)
             except Exception as error:  # noqa: BLE001 - optional LLM cannot fail Logistics Core.
@@ -323,6 +338,11 @@ class InterpretationService:
                     transport_retries_left -= 1
                     continue
                 break
+            finally:
+                # ★ `finally` 다 — 성공·예외·`continue`·`break` 어느 경로로 나가도
+                #   이 호출의 시간이 합에 들어간다. 검증(`validate_interpretation`)은
+                #   밖에 두어 Provider 시간에 검증기 시간이 섞이지 않는다.
+                provider_elapsed_ms += int((perf_counter() - started) * 1000)
             try:
                 interpretation = validate_interpretation(raw_output, context)
             except InterpretationValidationError as error:
@@ -339,6 +359,7 @@ class InterpretationService:
                 attempts=attempts,
                 fallback=False,
                 context_facts=context_facts,
+                provider_elapsed_ms=provider_elapsed_ms,
             )
         return self._result(
             template,
@@ -347,6 +368,7 @@ class InterpretationService:
             fallback=True,
             error_kind=error_kind,
             context_facts=context_facts,
+            provider_elapsed_ms=provider_elapsed_ms,
         )
 
     def _result(
@@ -358,6 +380,7 @@ class InterpretationService:
         fallback: bool,
         error_kind: LLMErrorKind | None = None,
         context_facts: list[ContextFact] | None = None,
+        provider_elapsed_ms: int | None = None,
     ) -> InterpretationResult:
         return InterpretationResult(
             interpretation=interpretation,
@@ -370,6 +393,9 @@ class InterpretationService:
             llm_error_kind=error_kind,
             # 호출 확정된 facts만 기록 — SKIPPED_TEMPLATE·DISABLED는 빈 목록.
             llm_context_facts=list(context_facts or []),
+            # 실제 호출들의 시간 합. 기본값 None 은 **미호출**이다 — 부르지 않은 실행을
+            # `0ms` 로 적지 않는다 (#402). `or 0` 같은 강제를 넣지 않는 이유가 그것이다.
+            llm_provider_elapsed_ms=provider_elapsed_ms,
         )
 
 

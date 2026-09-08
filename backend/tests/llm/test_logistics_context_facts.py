@@ -13,6 +13,7 @@ from app.logistics.interpretation import (
     _build_signal_facts,
     build_logistics_context,
     build_sanitized_context,
+    enrich_logistics_response,
     format_count,
     format_measured_percent,
     format_policy_percent,
@@ -585,3 +586,72 @@ def test_uncalled_interpretation_uses_the_service_gate_vocabulary(enabled, expec
     assert result.llm_fallback_used is False
     assert provider.calls == 0
     assert result.interpretation.risks == []
+
+
+# ---------------------------------------------------------------------------
+# 응답 스키마 동기화 — 새 trace 필드가 독립 경로에서 조용히 사라지지 않는가 (#402)
+# ---------------------------------------------------------------------------
+
+
+def test_interpretation_result_and_response_fields_carry_the_same_llm_contract():
+    """🔴 **어긋나면 예외가 아니라 침묵이다.**
+
+    `enrich_logistics_response` 는 `result.model_dump()` 를 `model_copy(update=)` 로
+    싣는다. pydantic 은 update 의 미지 키를 **거부하지 않고** `__dict__` 에만 넣었다가
+    `model_dump()` 에서 뺀다 (실측 2.13.4) — 즉 `InterpretationResult` 에만 필드를
+    추가하면 독립 응답과 `response_payload` 실행이력에서 값이 **소리 없이 증발한다.**
+    테스트도 안 깨지고 로그도 없다. 그래서 집합 동일성을 계약으로 잠근다.
+
+    ★ 두 모델은 오늘 8+1 필드로 정확히 같다. 언젠가 의도적으로 갈라야 한다면 그때
+      이 테스트를 고치면서 **왜** 다른지를 여기 적는다 — 조용히 갈리는 것만 막는다.
+    """
+    from app.logistics.llm.schemas import InterpretationResult, LLMResponseFields
+
+    assert set(InterpretationResult.model_fields) == set(LLMResponseFields.model_fields)
+    assert "llm_provider_elapsed_ms" in InterpretationResult.model_fields
+
+
+def test_provider_latency_survives_the_standalone_service_path():
+    """독립 경로 응답과 그 직렬화까지 값이 살아 도착한다 (`llm_context_facts` 와 같은 규율)."""
+    response = _procurement_response(
+        runtime_status="READY",
+        soft_warnings=["INVENTORY_FRESHNESS_PRESSURE"],
+        # Rule 이 방향을 안 정했으므로 추천도 null 이어야 한다 — `_success_output` 이
+        # 내는 값과 맞춰야 검증기를 통과해 SUCCESS 경로가 재현된다.
+        preferred_adjustment=None,
+    )
+
+    enriched = enrich_logistics_response(
+        response,
+        _service(_FakeProvider([_success_output()])),
+        measurements={
+            "freshness_risk_lot_count": 3,
+            "freshness_min_remaining_ratio": Decimal("0.25"),
+            "freshness_pressure_ratio": Decimal("0.30"),
+        },
+    )
+
+    assert enriched.llm_status == "SUCCESS"
+    assert enriched.llm_attempts == 1
+    assert enriched.llm_provider_elapsed_ms is not None
+    assert enriched.llm_provider_elapsed_ms >= 0
+    # 저장(response_payload)·API 응답이 지나는 직렬화에도 실린다 — 저장 스키마는 그대로다.
+    assert "llm_provider_elapsed_ms" in enriched.model_dump(mode="json")
+
+
+def test_uncalled_standalone_paths_keep_latency_none():
+    """미호출은 `None` 이다 — 독립 경로에서도 `0` 으로 위장하지 않는다."""
+    provider = _FakeProvider([])
+    skipped = _service(provider).interpret(
+        _quote_context(),
+        runtime_ready=True,
+        has_blocking_constraints=False,
+        facts_incomplete=True,
+    )
+    disabled = _service(provider, enabled=False).interpret(
+        _quote_context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert provider.calls == 0
+    assert skipped.llm_provider_elapsed_ms is None
+    assert disabled.llm_provider_elapsed_ms is None

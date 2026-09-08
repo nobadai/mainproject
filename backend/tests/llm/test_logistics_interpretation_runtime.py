@@ -3,6 +3,7 @@ import urllib.error
 
 import pytest
 
+from app.logistics.llm import runtime as llm_runtime
 from app.logistics.llm.runtime import (
     InterpretationService,
     InterpretationValidationError,
@@ -418,3 +419,224 @@ def test_zero_transport_retries_fall_back_on_first_timeout():
     assert provider.calls == 1
     assert result.llm_status == "FALLBACK"
     assert result.llm_error_kind == "TIMEOUT"
+
+
+# ---------------------------------------------------------------------------
+# Provider 호출 latency — 재시도 포함 합산 · 미호출은 None (#402)
+#
+# ★ 실 sleep 을 쓰지 않는다. 시간을 재는 테스트가 실제로 시간을 쓰면 느리고 기계 부하에
+#   따라 흔들린다. production 에 Clock 추상 클래스를 새로 만들지도 않는다 — 저장소
+#   어디에도 그런 것이 없고(전부 `time.perf_counter()` 직접 호출), 테스트 하나 때문에
+#   생산 코드에 층을 얹는 것은 과설계다. `runtime` 이 `perf_counter` 를 **모듈 수준
+#   이름**으로 들여오므로 그 이름 하나만 갈아 끼우면 된다 — 어댑터 테스트가
+#   `adapter._load_read` 를 갈아 끼우는 것과 같은 seam 이다.
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """호출 쌍(시작·끝)마다 정해진 간격만큼 흐르는 결정적 시계.
+
+    🔴 **간격의 단위는 초다 — 밀리초가 아니다.** 밀리초로 만들면 `now_ms / 1000` 이
+      이진 부동소수로 정확히 떨어지지 않아 production 의 `int((끝-시작)*1000)` 이
+      값에 따라 1 씩 어긋난다. 실측: 간격 `[10, 20, 30]` ms 는 `[10, 19, 30]` 으로
+      읽힌다. 정수 초는 이진수로 정확하므로 차이도 곱도 정확하다 — **테스트가 재는
+      것은 합산 규칙이지 부동소수 반올림이 아니다.**
+
+    ★ `perf_counter` 는 한 호출당 정확히 두 번 읽힌다(시작 · `finally` 의 끝).
+      그 전제가 깨지면 간격이 조용히 어긋나므로 `reads` 를 함께 고정한다.
+    """
+
+    def __init__(self, *deltas_seconds: int):
+        self.deltas = deltas_seconds
+        self.now = 0.0
+        self.reads = 0
+
+    def __call__(self) -> float:
+        index = self.reads
+        self.reads += 1
+        if index % 2 == 1:
+            # 끝 읽기 — 이번 호출의 간격만큼 밀어 둔다.
+            self.now += float(self.deltas[index // 2])
+        return self.now
+
+
+def _pin_clock(monkeypatch, *deltas_seconds: int) -> _Clock:
+    clock = _Clock(*deltas_seconds)
+    monkeypatch.setattr(llm_runtime, "perf_counter", clock)
+    return clock
+
+
+def _disabled_service(provider):
+    return InterpretationService(
+        LLMSettings(
+            enabled=False,
+            provider="fake",
+            model="fake-model",
+            base_url="http://127.0.0.1:11434",
+            timeout_seconds=1,
+            max_retries=1,
+        ),
+        provider,
+    )
+
+
+def _no_signal_context():
+    """게이트가 닫히는 Context — signal 이 없으면 부를 이유가 없다 (SKIPPED_TEMPLATE)."""
+    return SanitizedLLMContext(signals=[], facts=[], allowed_adjustments=[])
+
+
+def test_success_records_the_single_provider_call_latency(monkeypatch):
+    clock = _pin_clock(monkeypatch, 5)
+    provider = FakeProvider([_output()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 1
+    assert result.llm_provider_elapsed_ms == 5000
+    assert clock.reads == 2, "한 호출당 시작·끝 두 번이다 — 전제가 깨지면 간격이 어긋난다"
+
+
+def test_transport_retry_latency_is_summed_not_replaced(monkeypatch):
+    """🔴 마지막 호출만 남기는 것이 이 이슈의 대표 반례다 (#402 M1).
+
+    간격을 **서로 다르게** 준다 — 같은 값이면 "마지막만 기록" 변이가 살아남는다.
+    """
+    _pin_clock(monkeypatch, 5, 7)
+    provider = FakeProvider([TimeoutError(), _output()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 2
+    assert result.llm_provider_elapsed_ms == 12000
+    assert result.llm_provider_elapsed_ms != 7000, "마지막 호출만 기록하면 안 된다"
+    assert result.llm_provider_elapsed_ms != 5000, "첫 호출만 기록해도 안 된다"
+
+
+def test_validation_correction_latency_is_summed(monkeypatch):
+    _pin_clock(monkeypatch, 3, 4)
+    provider = FakeProvider([_output(summary="수치 3 포함"), _output()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SUCCESS"
+    assert result.llm_attempts == 2
+    assert result.llm_provider_elapsed_ms == 7000
+
+
+def test_transport_and_validation_retries_sum_all_three_calls(monkeypatch):
+    """최악 경로 3회 — 전송 재시도와 correction 은 별도 예산이고 시간은 하나로 합친다."""
+    _pin_clock(monkeypatch, 5, 7, 11)
+    provider = FakeProvider([TimeoutError(), _output(summary="수치 3 포함"), _output()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_attempts == 3
+    assert result.llm_provider_elapsed_ms == 23000
+
+
+def test_failed_provider_calls_are_counted_in_the_total(monkeypatch):
+    """🔴 **예외로 끝난 호출의 시간이 합에 들어간다.**
+
+    Provider 안에서 재면(반환 객체 설계) 이 값이 사라진다 — 그런데 timeout 이야말로
+    가장 오래 걸린 호출이고, FALLBACK 진단에서 제일 알고 싶은 숫자다. 계측을
+    `InterpretationService` 의 `try/finally` 에 둔 이유가 이것이다.
+    """
+    _pin_clock(monkeypatch, 5, 7)
+    provider = FakeProvider([TimeoutError(), TimeoutError()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "FALLBACK"
+    assert result.llm_error_kind == "TIMEOUT"
+    assert result.llm_attempts == 2
+    assert result.llm_provider_elapsed_ms == 12000
+
+
+def test_disabled_records_no_provider_latency(monkeypatch):
+    _pin_clock(monkeypatch, 5)
+    provider = FakeProvider([_output()])
+
+    result = _disabled_service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "DISABLED"
+    assert result.llm_attempts == 0
+    assert provider.calls == 0
+    assert result.llm_provider_elapsed_ms is None
+
+
+def test_skipped_template_records_no_provider_latency(monkeypatch):
+    _pin_clock(monkeypatch, 5)
+    provider = FakeProvider([_output()])
+
+    result = _service(provider).interpret(
+        _no_signal_context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_status == "SKIPPED_TEMPLATE"
+    assert result.llm_attempts == 0
+    assert provider.calls == 0
+    assert result.llm_provider_elapsed_ms is None
+
+
+def test_a_call_measured_at_zero_is_zero_and_not_none(monkeypatch):
+    """🔴 **`0` 과 `None` 은 다른 사실이다.**
+
+    `0` 은 *"불렀고 쟀더니 0ms"* 이고 `None` 은 *"안 불렀다"* 다. 미호출을 `0ms` 로
+    적으면 실행이력에서 둘을 구별할 방법이 사라진다.
+    """
+    _pin_clock(monkeypatch, 0)
+    provider = FakeProvider([_output()])
+
+    result = _service(provider).interpret(
+        _context(), runtime_ready=True, has_blocking_constraints=False
+    )
+
+    assert result.llm_attempts == 1
+    assert result.llm_provider_elapsed_ms == 0
+    assert result.llm_provider_elapsed_ms is not None
+
+
+def test_latency_does_not_leak_across_calls_on_a_reused_service(monkeypatch):
+    """🔴 Provider 에 `last_latency` 같은 상태를 남기면 여기서 드러난다 (#402 M5).
+
+    같은 Service · 같은 Provider 인스턴스를 두 번 부른다. 한 호출의 정보가 인스턴스에
+    남으면 두 번째 결과가 첫 번째를 상속한다 — 동시 호출·Provider 재사용에서 값이
+    섞이는 바로 그 구조다. 한 호출의 시간은 그 호출의 지역 변수로만 살아야 한다.
+    """
+    _pin_clock(monkeypatch, 5, 7)
+    provider = FakeProvider([_output(), _output()])
+    service = _service(provider)
+
+    first = service.interpret(_context(), runtime_ready=True, has_blocking_constraints=False)
+    second = service.interpret(_context(), runtime_ready=True, has_blocking_constraints=False)
+
+    assert first.llm_provider_elapsed_ms == 5000
+    assert second.llm_provider_elapsed_ms == 7000, "두 번째가 첫 번째를 누적하면 안 된다"
+
+
+def test_provider_keeps_no_call_state(monkeypatch):
+    """계약을 실행이 아니라 **구조**로도 잠근다 — mutable Provider 상태 금지 (#402).
+
+    ★ 계측 후 Provider 객체에 호출 흔적이 생기지 않는다. `_Provider` 가 아니라 실제
+      Provider 구현체 셋을 본다 — 금지 대상은 테스트 stub 이 아니라 production 이다.
+    """
+    from app.logistics.llm.runtime import GeminiProvider, OllamaProvider, UnavailableProvider
+
+    settings = _service(None).settings
+    금지 = {"last_latency", "last_usage", "last_error", "last_call", "last_elapsed_ms"}
+    for provider in (OllamaProvider(settings), GeminiProvider(settings), UnavailableProvider()):
+        assert 금지 & set(dir(provider)) == set(), type(provider).__name__

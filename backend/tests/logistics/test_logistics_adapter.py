@@ -1116,11 +1116,26 @@ def _business_view(reply) -> dict:
 
 
 def _trace_view(meta) -> dict:
-    """LLM 과 무관한 실행 흔적 — Tool 순서와 DeptMeta 관측도 상태 따라 흔들리면 안 된다."""
+    """LLM 과 무관한 실행 흔적 — Tool 순서와 DeptMeta 관측도 상태 따라 흔들리면 안 된다.
+
+    🔴 **`inventory_llm_trace` 하나만 뺀다** (#402). observations 비교를 통째로 지우거나
+      "`inventory_dept_meta` 만 본다" 로 좁히지 않는다 — 전자는 DeptMeta drift 를 무검사로
+      만들고, 후자는 **앞으로 추가될 관측이 조용히 비교에서 빠진다**(fail-open). 이름 하나를
+      제외하면 나머지 전부가 결정론 비교에 남는다 (fail-closed).
+
+    ★ 문자열을 베끼지 않고 `adapter._LLM_TRACE_OBSERVATION` 을 참조한다 — 이름이 바뀌는 날
+      필터만 조용히 빗나가면 이 비교가 LLM 관측까지 삼켜 매번 깨진다.
+    ★ 제외가 관측을 **전부** 지워 버리는 변이는
+      `test_결정론_비교에서_제외되는_것은_LLM_관측_하나뿐이다` 가 따로 잡는다.
+    """
     return {
         "used_tools": meta.used_tools,
         "tool_order": meta.tool_order,
-        "observations": meta.observations,
+        "observations": tuple(
+            item
+            for item in meta.observations
+            if json.loads(item).get("observation_type") != adapter._LLM_TRACE_OBSERVATION
+        ),
     }
 
 
@@ -3436,3 +3451,211 @@ def test_summary_는_fact_표기를_인용해_Template_이_못_내는_문장을_
     템플릿 = build_template_interpretation(provider.contexts[0])
     assert not any(ch.isdigit() for ch in 템플릿.summary)
     assert validate_reply(request, reply, meta) == ()
+
+
+# ---------------------------------------------------------------------------
+# SCENARIO_VALIDATION — Master-facing LLM 실행 관측 (#402)
+#
+# ★ 결정론 관측(`inventory_dept_meta`)과 **책임을 나눈다.** 저쪽은 LLM 상태와 무관하게
+#   같아야 하고(#399 가 잠근다), 이쪽은 상태에 따라 달라지는 것이 정상이다.
+# ★ 공통 `ExecutionMetadata` 를 넓히지 않았다 — 기존 `observations` 확장 채널만 쓴다.
+#   재무가 `finance_llm_provider` 를 싣는 자리와 같고, Critic 은 `<dept>_dept_meta` 가
+#   아닌 관측을 조용히 건너뛴다 (`critic_bridge._dept_meta_in`).
+# ---------------------------------------------------------------------------
+
+#: 관측에 허용된 key 전부. **정확히 이 다섯이다** — `<=` 로 재면 필드가 하나 더 새도
+#: 통과한다. `display_value` 한 줄이 늘어나는 것이 곧 누출이므로 `==` 로 잠근다.
+_LLM_TRACE_KEYS = {
+    "observation_type",
+    "provider",
+    "error_kind",
+    "provider_elapsed_ms",
+    "context_fact_ids",
+}
+
+
+def _llm_trace(meta) -> dict | None:
+    """ExecutionMetadata 의 observations 에서 LLM 실행 관측 하나를 꺼낸다."""
+    found = [
+        json.loads(item)
+        for item in meta.observations
+        if json.loads(item).get("observation_type") == adapter._LLM_TRACE_OBSERVATION
+    ]
+    return found[0] if found else None
+
+
+def _observation_types(meta) -> list[str]:
+    return [json.loads(item).get("observation_type") for item in meta.observations]
+
+
+def test_SUCCESS_는_LLM_실행_관측을_남긴다(monkeypatch, stocked):
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert provider.calls == 1
+    trace = _llm_trace(meta)
+    assert trace is not None
+    assert set(trace) == _LLM_TRACE_KEYS
+    assert trace["provider"] == "fake"
+    assert trace["error_kind"] is None, "성공으로 끝나면 최종 실패 원인이 없다"
+    assert isinstance(trace["provider_elapsed_ms"], int)
+    assert trace["provider_elapsed_ms"] >= 0
+    assert trace["context_fact_ids"] == ["scenario_conditional_count"]
+    # 결정론 관측은 그대로 남는다 — 새 관측이 기존 것을 밀어내지 않는다
+    assert _dept_meta(meta) is not None
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_FALLBACK_timeout_은_최종_실패_원인을_관측에_남긴다(monkeypatch, stocked):
+    """🔴 `llm_error_kind` 는 `_meta()` 경계에서 통째로 유실되던 값이다 (#402 M3)."""
+    provider = _Provider("timeout")
+    _inject(monkeypatch, _llm(provider))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    trace = _llm_trace(meta)
+    assert trace is not None
+    assert trace["error_kind"] == "TIMEOUT"
+    assert isinstance(trace["provider_elapsed_ms"], int)
+    # 업무 결과는 그대로다 — 관측은 판정이 아니다
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "conditional"
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_FALLBACK_검증탈락은_VALIDATION_FAILED_를_남긴다(monkeypatch, stocked):
+    provider = _Provider("invalid")
+    _inject(monkeypatch, _llm(provider))
+    reply, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_signal_payload()))
+
+    assert provider.calls == 2  # correction 한 번 뒤 접는다
+    trace = _llm_trace(meta)
+    assert trace is not None
+    assert trace["error_kind"] == "VALIDATION_FAILED"
+    assert reply.runtime_status == "READY"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "builder_incomplete", "expected_status"),
+    [
+        pytest.param(False, False, "DISABLED", id="DISABLED"),
+        pytest.param(True, True, "SKIPPED_TEMPLATE", id="SKIPPED_TEMPLATE"),
+    ],
+)
+def test_부르지_않은_실행에는_LLM_관측을_남기지_않는다(
+    monkeypatch, stocked, enabled, builder_incomplete, expected_status
+):
+    """🔴 **관측이 있다 ⇔ Provider 를 불렀다.**
+
+    미호출 실행에 provider 이름을 적으면 *"이 Provider 를 썼다"* 로 읽힌다. 그 사실은
+    이미 `llm_status` + `llm_attempts=0` 이 정확히 말하므로 관측은 중복이자 오독의
+    씨앗이다. 결정론 관측(`inventory_dept_meta`)은 영향받지 않는다.
+    """
+    real_builder = adapter.build_sanitized_context
+    if builder_incomplete:
+        monkeypatch.setattr(
+            adapter,
+            "build_sanitized_context",
+            lambda **kwargs: (real_builder(**kwargs)[0], True),
+        )
+    provider = _Provider()
+    _inject(monkeypatch, _llm(provider, enabled=enabled))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    reply, meta = adapter.logistics_port(request)
+
+    assert meta.llm_status == expected_status
+    assert meta.llm_attempts == 0
+    assert provider.calls == 0
+    assert _llm_trace(meta) is None
+    assert _observation_types(meta) == ["inventory_dept_meta"]
+    assert validate_reply(request, reply, meta) == ()
+
+
+def test_LLM_경로가_없는_mode_는_관측도_없다(wired, stocked):
+    """PRE_PURCHASE · STATUS_QUERY 는 `_meta` 에 llm 을 주지 않는다."""
+    for request in (req(), req(mode="STATUS_QUERY")):
+        _, meta = adapter.logistics_port(request)
+        assert _llm_trace(meta) is None, request.mode
+
+
+def test_LLM_관측은_공통_봉투_필드를_늘리지_않는다(monkeypatch, stocked):
+    """🔴 `elapsed_ms` 는 **Agent 전체 실행시간**이다 (재무가 채운다).
+
+    LLM latency 를 그 칸에 넣으면 한 컬럼에 비교 불가능한 두 값이 섞인다. 물류는
+    그 칸을 채우지 않고, Provider latency 는 관측으로만 나른다.
+    """
+    _inject(monkeypatch, _llm(_Provider()))
+    _, meta = adapter.logistics_port(req(mode="SCENARIO_VALIDATION", payload=_signal_payload()))
+
+    assert meta.llm_status == "SUCCESS"
+    assert meta.elapsed_ms == 0, "물류는 이 칸을 채우지 않는다"
+    assert not hasattr(meta, "llm_provider_elapsed_ms")
+    assert _llm_trace(meta)["provider_elapsed_ms"] is not None
+
+
+def test_LLM_관측에는_원본_업무값이_없다(monkeypatch):
+    """★ #399 의 가장 두꺼운 Context(3 signal · fact 4개)를 그대로 재사용한다.
+
+    Provider 전송 경계에서 막은 값이 **실행이력으로 우회해 나가는지**를 본다 — 관측은
+    마스터 run history 와 화면까지 원문 그대로 실리므로 Context 보다 더 엄하게 본다.
+    """
+    _, _, meta, provider = _golden_run(
+        monkeypatch, capacity_tight=True, freshness_pressure=True, adjustment_required=True
+    )
+
+    trace = _llm_trace(meta)
+    assert trace is not None
+    assert set(trace) == _LLM_TRACE_KEYS
+    # fact 는 **id 만** 간다 — label · display_value 는 오지 않는다
+    assert trace["context_fact_ids"] == [
+        "capacity_window_usage",
+        "freshness_risk_lot_count",
+        "freshness_min_remaining_ratio",
+        "scenario_conditional_count",
+    ]
+    assert all(isinstance(fact_id, str) for fact_id in trace["context_fact_ids"])
+    assert [fact.fact_id for fact in provider.contexts[0].facts] == trace["context_fact_ids"]
+
+    serialized = json.dumps(trace, ensure_ascii=False)
+    금지 = (
+        "LOT-GOLDEN",  # lot_id
+        AS_OF.isoformat(),  # 원본 날짜
+        SIM_RUN_ID,  # 실행 축
+        "REQ-T",  # request_id
+        "7200",  # 원본 창고 점유 kg
+        "20000",  # 원본 제안 수량 kg
+        "33000000",  # 원본 금액
+        "1650",  # 단가
+        "배추",  # 품목
+        "임계",  # display_value 의 관계 표기
+        "%",  # display_value 의 비율 단위
+        "개",  # display_value 의 건수 단위
+        "label",
+        "display_value",
+    )
+    for token in 금지:
+        assert token not in serialized, token
+
+
+def test_결정론_비교에서_제외되는_것은_LLM_관측_하나뿐이다(monkeypatch, stocked):
+    """🔴 **안전핀** — `_trace_view` 가 관측 비교를 통째로 잃는 변이를 잡는다 (#402 M6).
+
+    LLM trace 를 제외하되 `inventory_dept_meta` 는 **반드시 남아야** 한다. 제외 필터가
+    넓어지거나 observations 자체가 빠지면 결정론 관측 drift 가 무검사가 된다 —
+    그것이 #399 가 세운 안전망의 핵심이다.
+    """
+    _inject(monkeypatch, _llm(_Provider()))
+    request = req(mode="SCENARIO_VALIDATION", payload=_signal_payload())
+    _, meta = adapter.logistics_port(request)
+
+    assert _observation_types(meta) == ["inventory_dept_meta", "inventory_llm_trace"]
+    남은_것 = [json.loads(item) for item in _trace_view(meta)["observations"]]
+    assert [o["observation_type"] for o in 남은_것] == ["inventory_dept_meta"]
+    assert 남은_것, "관측 비교가 통째로 비면 DeptMeta drift 를 아무도 못 본다"
+
+
+def test_관측_이름을_문자열로_베끼지_않는다():
+    """이름이 바뀌는 날 `_trace_view` 의 제외 필터만 조용히 빗나가면 안 된다."""
+    assert adapter._LLM_TRACE_OBSERVATION == "inventory_llm_trace"

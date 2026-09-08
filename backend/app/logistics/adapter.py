@@ -254,6 +254,58 @@ def _produced_fields(payload: Mapping[str, Any]) -> list[str]:
     return sorted(key for key, value in payload.items() if value is not None)
 
 
+_LLM_TRACE_OBSERVATION = "inventory_llm_trace"
+"""LLM 실행 관측의 이름 — 결정론 관측(`inventory_dept_meta`)과 **다른 축이다.**
+
+DeptMeta 는 LLM 상태와 무관하게 같아야 하고(그것을 #399 가 잠근다), 이쪽은 LLM
+상태에 따라 달라지는 것이 정상이다. 두 책임을 한 이름에 담으면 결정론 보존 검사가
+LLM 변화를 잡아 매번 깨지거나, 반대로 검사를 느슨하게 만들게 된다.
+
+★ 상수로 두는 것은 테스트가 문자열을 베끼지 않게 하려는 것이다 (`_CAP_CHECK_ID` 와
+  같은 규율). 이름이 바뀌는 날 `_trace_view` 의 제외 필터가 조용히 빗나가면
+  결정론 비교가 LLM 관측까지 삼켜 매번 깨진다."""
+
+
+def _inventory_llm_trace(llm: InterpretationResult | None) -> dict[str, Any] | None:
+    """실제로 일어난 Provider 호출 하나의 실행 관측 (#402). **업무 결과가 아니다.**
+
+    `_meta()` 경계에서 종전에 통째로 유실되던 넷을 여기로 나른다 — 어떤 Provider 를
+    썼나 · 최종 실패 원인이 무엇인가 · 얼마나 걸렸나 · 어떤 종류의 Fact 가 나갔나.
+    공통 `ExecutionMetadata` 에 필드를 넷 더 세우지 않고 기존 확장 채널
+    (`observations`)을 쓴다 — 재무가 `finance_llm_provider` 로 같은 성격의 사실을
+    싣는 자리와 같다. 마스터는 읽지 않고 나르고, Critic 은 `<dept>_dept_meta` 가
+    아닌 관측을 조용히 건너뛴다 (`critic_bridge._dept_meta_in`).
+
+    🔴 **`llm_attempts > 0` 일 때만 만든다.** 그래서
+
+    ```text
+    관측이 있다  ⇔  Provider 를 실제로 불렀다
+    ```
+
+    가 계약이 된다. `llm_status` 문자열 목록을 여기 복제하지 않는 이유이기도 하다 —
+    상태 어휘가 늘면 그 목록만 낡는다. DISABLED · SKIPPED_TEMPLATE 은 관측을 내지
+    않는다: 부르지 않은 실행에 provider 이름을 적으면 *"썼다"* 로 읽히고, 그 사실은
+    이미 `llm_status` + `llm_attempts=0` 이 정확히 말한다.
+
+    ★ **Sanitized Context 에서 `fact_id` 만 옮긴다.** `label` · `display_value` 는
+      싣지 않는다 — display_value 가 곧 판정 수치의 확정 표기라("91.7% (임계 90%)"),
+      그것을 실행이력에 복제하면 Provider 전송 경계에서 막은 업무 데이터가 마스터
+      실행이력·화면으로 우회해 나간다. 여기서 알아야 할 것은 *"어떤 종류의 Fact 가
+      나갔나"* 이지 *"그 값이 얼마였나"* 가 아니다.
+    """
+    if llm is None or llm.llm_attempts <= 0:
+        return None
+    return {
+        "observation_type": _LLM_TRACE_OBSERVATION,
+        "provider": llm.llm_provider or "",
+        # 최종 실패 원인 하나. SUCCESS(재시도 후 성공 포함)면 null 이다 — attempt 별
+        # 이력을 만들지 않는다(중간 실패는 로그 몫)는 기존 의미를 그대로 나른다.
+        "error_kind": llm.llm_error_kind,
+        "provider_elapsed_ms": llm.llm_provider_elapsed_ms,
+        "context_fact_ids": [fact.fact_id for fact in llm.llm_context_facts],
+    }
+
+
 def _inventory_dept_meta(
     mode: str,
     payload: Mapping[str, Any],
@@ -2182,12 +2234,26 @@ def _meta(
     `llm` 은 해석 서비스가 낸 결과다 (#385). 받으면 그 상태를 그대로 적고, 안 받으면
     **그 mode 에 LLM 경로가 없다**는 뜻이라 `DISABLED` 다 — 지금은 `SCENARIO_VALIDATION`
     만 준다. 어댑터가 상태 어휘를 지어내지 않는다.
+
+    `ExecutionMetadata` 는 LLM 칸이 넷뿐이라(status · model · attempts · fallback)
+    provider · error_kind · Provider latency · Context fact 는 여기서 유실됐다.
+    공통 봉투를 넓히는 대신 `inventory_llm_trace` 관측 하나로 나른다 (#402).
+    ★ `elapsed_ms` 는 **건드리지 않는다** — 그 칸은 Agent 전체 실행시간이고(재무가
+      채운다) LLM 시간을 넣으면 한 컬럼에 비교 불가능한 두 값이 섞인다.
     """
     observations: list[dict[str, Any]] = []
     if reply is not None and reply.runtime_status == "READY":
         dept_meta = _inventory_dept_meta(request.mode, reply.payload, tools)
         if dept_meta is not None:
             observations.append(dept_meta)
+    # ★ 맨 뒤에 붙인다 — 앞자리는 DeptMeta 가 쓰던 자리이고 읽는 쪽이 그것을 전제로
+    #   붙어 있다 (재무가 harness trace 를 뒤에 붙인 것과 같은 판단).
+    # ★ `reply` 의 READY 를 다시 묻지 않는다. Gate 가 `runtime_ready=True` 일 때만
+    #   호출을 허용하므로 attempts>0 이면 이미 READY 다 — 같은 조건을 두 번 적으면
+    #   한쪽이 낡는 날 둘이 어긋난다.
+    llm_trace = _inventory_llm_trace(llm)
+    if llm_trace is not None:
+        observations.append(llm_trace)
     return ExecutionMetadata(
         run_id=run_id,
         request_id=request.context.request_id,
