@@ -175,6 +175,22 @@ def test_재무_화면은_financing_mode로_state를_고른다(client):
     assert "LOAN_BASELINE" in loan["explain"]["text"]
 
 
+def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeypatch):
+    monkeypatch.setattr(finance_query, "get_finance_dashboard", _loan_only_finance_dashboard_stub)
+    monkeypatch.setattr(finance_query, "get_finance_cashflow", _finance_cashflow_stub)
+    app = FastAPI()
+    app.include_router(router)
+    local_client = TestClient(app)
+
+    response = local_client.get("/api/finance", params={"as_of": AS_OF, "state": "base"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selected"] == "loan"
+    assert [state["key"] for state in body["states"]] == ["base", "loan"]
+    assert body["stats"][0]["detail"] == "2026-01-06 LOAN_BASELINE 기준"
+
+
 def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):
     seen: dict[str, date] = {}
 
@@ -467,6 +483,17 @@ def _empty_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashbo
         payables=[],
         expenses=[],
         recent_closings=[],
+    )
+
+
+def _loan_only_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
+    dashboard = _finance_dashboard_stub(sim_run_id, as_of)
+    return dashboard.model_copy(
+        update={
+            "states": [
+                state for state in dashboard.states if state.financing_mode == "LOAN_BASELINE"
+            ]
+        }
     )
 
 

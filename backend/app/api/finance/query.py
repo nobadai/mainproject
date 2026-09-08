@@ -27,7 +27,7 @@ _DASH_FLOOR = 30.0
 def build(as_of: date, state: str) -> FinanceTab:
     dash = get_finance_dashboard(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
     flow = get_finance_cashflow(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of, days=30)
-    selected = _state_by_key(dash, state)
+    selected_key, selected = _select_state(dash, state)
     receivables = dash.ledger_summary["receivables"]
     payables = dash.ledger_summary["payables"]
     receivable_detail = (
@@ -43,9 +43,8 @@ def build(as_of: date, state: str) -> FinanceTab:
                 explain=_state_explain(_state_by_mode(dash, mode)),
             )
             for key, mode in _STATE_TO_MODE.items()
-            if _state_by_mode(dash, mode) is not None
         ],
-        selected=state,
+        selected=selected_key,
         stats=[
             Stat(
                 label="현금 잔액",
@@ -179,6 +178,17 @@ def dashboard_cash(n: int, at: int) -> Chart:
             text="점선부터는 **아직 안 일어난 일**입니다. 승인한 매입의 지급 예정이 반영됩니다.",
         ),
     )
+
+
+def _select_state(dash: FinanceDashboardResponse, state: str) -> tuple[str, FinanceStateView]:
+    selected = _state_by_mode(dash, _STATE_TO_MODE[state])
+    if selected is not None:
+        return state, selected
+    for fallback_key in STATES:
+        fallback = _state_by_mode(dash, _STATE_TO_MODE[fallback_key])
+        if fallback is not None:
+            return fallback_key, fallback
+    raise LookupError(f"Finance state was not found: {_STATE_TO_MODE[state]}")
 
 
 def _state_by_key(dash: FinanceDashboardResponse, state: str) -> FinanceStateView:
