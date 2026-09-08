@@ -23,4 +23,7 @@ def finance_tab(
             status.HTTP_400_BAD_REQUEST,
             detail=f"없는 상태입니다: {state}. 가능: {', '.join(STATES)}",
         )
-    return build(as_of, state)
+    try:
+        return build(as_of, state)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
