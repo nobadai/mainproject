@@ -68,7 +68,7 @@ from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
     _HOLDING_RESERVATION,
-    AllocationBasis,
+    HumanAllocationBasis,
     ReservationStatus,
 )
 from app.logistics.repository import (
@@ -932,10 +932,18 @@ def allocate_reservation(
     requests: Sequence[ConsoleAllocationRequestItem],
     decided_by: str,
     decided_at: datetime,
-    allocation_basis: AllocationBasis,
+    allocation_basis: HumanAllocationBasis,
     as_of: date,
 ) -> ConsoleAllocateResponse:
-    """사람이 고른 Lot 으로 할당을 확정한다. 🔴 **원장 OUT 은 나가지 않는다.**"""
+    """사람이 고른 Lot 으로 할당을 확정한다. 🔴 **원장 OUT 은 나가지 않는다.**
+
+    🔴 **`HumanAllocationBasis` 만 받는다.** 이 문은 사람의 것이고
+       `FEFO_AUTO_SELECTED` 는 자동 경로가 스스로 적는 값이다 — 사람이 그 값을 넣으면
+       하지 않은 일이 장부에 선다.
+
+       ⚠️ **`outbound.allocate_stock` 의 타입은 안 좁힌다.** 그 코어는 사람 경로와
+          자동 경로가 함께 쓰는 자리라 셋을 다 받아야 한다. 좁히는 것은 **이 입구**다.
+    """
     with _write_connection() as conn:
         result = outbound.allocate_stock(
             conn,

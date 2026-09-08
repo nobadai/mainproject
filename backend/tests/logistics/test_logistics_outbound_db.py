@@ -1012,7 +1012,9 @@ def _예약수(conn: psycopg.Connection) -> int:
 
 
 def _자동할당(conn: psycopg.Connection, rid: str = RSV):
-    return allocate_reserved_stock_fefo(conn, reservation_id=rid, as_of=AS_OF)
+    return allocate_reserved_stock_fefo(
+        conn, reservation_id=rid, as_of=AS_OF, decided_at=DECIDED_AT
+    )
 
 
 # ── S1~S6. 부분 Reservation ─────────────────────────────────────────────
@@ -1183,8 +1185,8 @@ def test_S11_자동_할당은_합의된_근거와_결정자를_적는다(conn: p
     # ★ 상수와 장부가 갈리지 않는지도 함께 본다.
     assert fefo_allocation.ALLOCATION_BASIS == "FEFO_AUTO_SELECTED"
     assert fefo_allocation.DECIDED_BY == "LOGISTICS_FEFO_RULE"
-    # 🔴 호출자가 준 값이 아니라 `as_of` 에서 나온 값이다.
-    assert 행["decided_at"] == fefo_allocation.decided_at_for(AS_OF)
+    # ★ 호출자가 준 값 그대로다 — 물류가 시각을 만들지 않는다.
+    assert 행["decided_at"] == DECIDED_AT
 
 
 def test_S12_자동_할당_재실행은_멱등이다(conn: psycopg.Connection) -> None:
@@ -1528,7 +1530,9 @@ def test_S28_판매_경계에서_출고까지_관통한다(conn: psycopg.Connect
     )
 
     확보 = reserve_confirmed_sale_available(conn, request)
-    붙임 = allocate_reserved_stock_fefo(conn, reservation_id=request.reservation_id, as_of=AS_OF)
+    붙임 = allocate_reserved_stock_fefo(
+        conn, reservation_id=request.reservation_id, as_of=AS_OF, decided_at=DECIDED_AT
+    )
     출고 = ship_allocated_stock(
         conn,
         reservation_id=request.reservation_id,
@@ -1612,103 +1616,112 @@ def test_S32_내릴_것이_없으면_0_이다(conn: psycopg.Connection) -> None:
     assert cancel_allocation(conn, reservation_id=RSV, lot_id="LOT-A") == Decimal(0)
 
 
-# ── S33~S39. 자동 FEFO 의 결정 시각은 as_of 에서 나온다 ──────────────────
+# ── S33~S40. 결정 시각의 주인은 마스터다 ────────────────────────────────
 #
-# 🔴 **근거·결정자·시각 셋이 한 판단의 audit 사실이다.** 자동 경로에서는 셋을
-#    `fefo_allocation` 한 곳이 완성하고, 호출자는 `as_of` 만 준다.
+# 🔴 **audit 값 셋의 주인이 다르다.**
+#
+#    allocation_basis  FEFO_AUTO_SELECTED     물류가 정한다
+#    decided_by        LOGISTICS_FEFO_RULE    물류가 정한다
+#    decided_at        호출자가 준다           **시간축은 마스터 것이다**
+#
+# ⚠️ `09:34 KST` 같은 값을 여기서 정본으로 박지 않는다. 그 시각의 주인은
+#    `app/master/sim_time.py` 이고, 물류는 **받은 값을 그대로 적는** 데까지만 책임진다.
 
 
-def test_S33_자동_FEFO_는_decided_at_을_안_받는다() -> None:
-    """★ 서명에 `decided_at` 이 없다 — 호출자가 시각을 줄 자리가 아예 없다."""
-    인자 = set(inspect.signature(allocate_reserved_stock_fefo).parameters)
+def test_S33_자동_FEFO_는_decided_at_을_필수로_받는다() -> None:
+    """🔴 물류가 시각을 만들지 않는다 — 호출자가 반드시 말해야 한다."""
+    인자 = inspect.signature(allocate_reserved_stock_fefo).parameters
 
-    assert "decided_at" not in 인자
-    assert {"conn", "reservation_id", "as_of"} <= 인자
-
-
-def test_S34_같은_as_of_는_같은_decided_at_을_준다() -> None:
-    """🔴 같은 `as_of` 를 다시 돌리면 **같은 값**이어야 한다."""
-    첫번째 = fefo_allocation.decided_at_for(AS_OF)
-    두번째 = fefo_allocation.decided_at_for(AS_OF)
-
-    assert 첫번째 == 두번째
-    assert 첫번째 == fefo_allocation.decided_at_for(date(2026, 1, 20))
-    # ★ 날짜가 다르면 값도 다르다 — 하루가 뭉개지지 않는다.
-    assert fefo_allocation.decided_at_for(date(2026, 1, 21)) != 첫번째
+    assert "decided_at" in 인자
+    assert 인자["decided_at"].default is inspect.Parameter.empty, "decided_at 에 기본값이 생겼다"
+    assert {"conn", "reservation_id", "as_of", "decided_at"} == set(인자)
 
 
-def test_S35_decided_at_은_시간대를_달고_있다() -> None:
+def test_S34_물류에_자체_시각_생성_규칙이_없다() -> None:
+    """★ 한 실행에 시간축이 둘이면 장부에서 단계 순서가 사라진다."""
+    assert not hasattr(fefo_allocation, "decided_at_for")
+    assert "decided_at_for" not in fefo_allocation.__all__
+
+
+def test_S35_시간대_없는_decided_at_은_거부된다(conn: psycopg.Connection) -> None:
     """`inventory_allocations.decided_at` 이 `TIMESTAMPTZ NOT NULL` 이다."""
-    결정시각 = fefo_allocation.decided_at_for(AS_OF)
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
 
-    assert 결정시각.tzinfo is not None
-    assert 결정시각.utcoffset() == timedelta(0)
-    assert (결정시각.hour, 결정시각.minute, 결정시각.second, 결정시각.microsecond) == (0, 0, 0, 0)
-    assert 결정시각.date() == AS_OF
+    with pytest.raises(InvalidOutboundRequest, match="시간대를 단 datetime"):
+        allocate_reserved_stock_fefo(
+            conn,
+            reservation_id=RSV,
+            as_of=AS_OF,
+            # ★ 일부러 naive 다 — 이 테스트가 재는 것이 그것이다.
+            decided_at=datetime(2026, 1, 20, 9, 34),  # noqa: DTZ001
+        )
 
-
-def test_S36_결정_시각이_KST_로_읽어도_같은_날이다() -> None:
-    """⚠️ `00:00 UTC` 는 KST 로 **같은 날 09:00** 이다.
-
-    반대로 `00:00 KST` 를 골랐으면 UTC 로 **전날 15:00** 이라, `as_of` 로 자른 조회와
-    하루가 어긋난다 — `simulated_inspection` 이 같은 이유로 이미 UTC 를 골랐다.
-    """
-    kst = timezone(timedelta(hours=9))
-    결정시각 = fefo_allocation.decided_at_for(AS_OF)
-
-    assert 결정시각.astimezone(kst).date() == AS_OF
-    assert 결정시각.astimezone(UTC).date() == AS_OF
+    assert _할당(conn) == []
 
 
-def test_S37_결정_시각_규칙이_기존_시뮬레이션_규칙과_같다() -> None:
-    """🔴 **새 규칙을 만들지 않았다.** 물류가 이미 쓰던 식 그대로다."""
-    from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
+@pytest.mark.parametrize(
+    "준시각",
+    [
+        datetime(2026, 1, 20, 9, 34, tzinfo=timezone(timedelta(hours=9))),
+        datetime(2026, 1, 20, 0, 34, tzinfo=UTC),
+        datetime(2026, 1, 20, 23, 59, 59, tzinfo=timezone(timedelta(hours=-5))),
+    ],
+)
+def test_S36_호출자가_준_시각이_그대로_적힌다(conn: psycopg.Connection, 준시각: datetime) -> None:
+    """🔴 물류가 고쳐 쓰지 않는다 — 마스터가 준 순간이 그대로 장부에 선다."""
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
 
-    코드 = _코드만(
-        Path(inspect.getfile(ScenarioSimulatedInspectionProvider)).read_text(encoding="utf-8")
+    allocate_reserved_stock_fefo(conn, reservation_id=RSV, as_of=AS_OF, decided_at=준시각)
+
+    적힌것 = _할당(conn)[0]["decided_at"]
+    assert 적힌것 == 준시각
+    assert 적힌것.tzinfo is not None
+
+
+def test_S37_자동_할당_장부의_세_칸(conn: psycopg.Connection) -> None:
+    """근거·결정자는 물류가 정하고, 시각은 받은 것을 적는다."""
+    준시각 = datetime(2026, 1, 20, 9, 34, tzinfo=timezone(timedelta(hours=9)))
+    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
+    _부분예약(conn, required="80")
+
+    allocate_reserved_stock_fefo(conn, reservation_id=RSV, as_of=AS_OF, decided_at=준시각)
+
+    행 = _할당(conn)[0]
+    assert 행["allocation_basis"] == "FEFO_AUTO_SELECTED"
+    assert 행["decided_by"] == "LOGISTICS_FEFO_RULE"
+    assert 행["decided_at"] == 준시각
+    assert (fefo_allocation.ALLOCATION_BASIS, fefo_allocation.DECIDED_BY) == (
+        "FEFO_AUTO_SELECTED",
+        "LOGISTICS_FEFO_RULE",
     )
-    자동 = _코드만(Path(fefo_allocation.__file__).read_text(encoding="utf-8"))
-
-    assert "datetime.combine(as_of, time.min, tzinfo=UTC)" in 코드
-    assert "datetime.combine(as_of, time.min, tzinfo=UTC)" in 자동
 
 
-def test_S38_자동_경로가_벽시계를_안_읽는다() -> None:
-    """🔴 같은 실행을 다시 돌리면 같은 값이 나와야 한다."""
+def test_S38_물류가_벽시계도_남의_시각도_안_읽는다() -> None:
+    """🔴 의존 방향은 `Master → Logistics` 다. 뒤집지 않는다."""
     코드 = _코드만(Path(fefo_allocation.__file__).read_text(encoding="utf-8"))
 
     for 금지 in (
         "datetime.now(",
         "utcnow(",
         "date.today(",
-        # 🔴 물류가 마스터를 임포트하면 의존 방향이 뒤집힌다.
+        # 🔴 마스터를 임포트하면 의존 방향이 뒤집힌다.
         "app.master",
+        "sim_time",
+        "phase_instant",
         "clock",
-        # 🔴 09:30 KST 는 마스터의 스케줄러 시각이지 할당 결정 시각이 아니다.
+        # 🔴 단계 시각을 물류가 정본으로 박지 않는다.
+        "09:3",
         "Asia/Seoul",
         "ZoneInfo",
-        "9, 30",
+        "datetime.combine",
     ):
-        assert 금지 not in 코드, f"자동 경로가 벽시계나 남의 시각을 끌어왔다: {금지}"
+        assert 금지 not in 코드, f"물류가 시간축을 스스로 만들었다: {금지}"
 
 
-def test_S39_자동_할당_장부에_파생된_시각이_적힌다(conn: psycopg.Connection) -> None:
-    """★ 계산값이 아니라 **실제로 DB 에 적힌 값**을 본다."""
-    _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
-    _부분예약(conn, required="80")
-
-    _자동할당(conn)
-
-    행 = _할당(conn)[0]
-    assert 행["allocation_basis"] == "FEFO_AUTO_SELECTED"
-    assert 행["decided_by"] == "LOGISTICS_FEFO_RULE"
-    assert 행["decided_at"] == fefo_allocation.decided_at_for(AS_OF)
-    # 🔴 사람 경로가 쓰는 시각과 **다른 값**이다 — 둘이 섞이지 않았다.
-    assert 행["decided_at"] != DECIDED_AT
-
-
-def test_S40_사람_경로는_준_시각을_그대로_적는다(conn: psycopg.Connection) -> None:
-    """🔴 사람의 실제 결정 시각을 물류가 `as_of` 로 만들어 내지 않는다."""
+def test_S39_사람_경로는_준_시각을_그대로_적는다(conn: psycopg.Connection) -> None:
+    """🔴 사람의 실제 결정 시각을 물류가 만들어 내지 않는다."""
     _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
     _예약(conn, qty="80")
 
@@ -1717,7 +1730,17 @@ def test_S40_사람_경로는_준_시각을_그대로_적는다(conn: psycopg.Co
     행 = _할당(conn)[0]
     assert 행["decided_at"] == DECIDED_AT
     assert 행["decided_by"] == DECIDED_BY
-    # ★ `allocate_stock` 은 여전히 셋을 명시로 받는다 — 기본값을 안 만든다.
+
+
+def test_S40_allocate_stock_은_셋을_계속_명시로_받는다() -> None:
+    """★ 코어가 기본값을 만들면 사람 경로와 자동 경로가 다시 섞인다."""
     인자 = inspect.signature(allocate_stock).parameters
+
     for 칸 in ("decided_by", "decided_at", "allocation_basis"):
         assert 인자[칸].default is inspect.Parameter.empty, f"{칸} 에 기본값이 생겼다"
+    # 🔴 코어의 타입은 **좁히지 않는다** — 자동 경로가 셋째 값을 넣어야 한다.
+    assert set(get_args(AllocationBasis)) == {
+        "FEFO_TOOL_CONFIRMED",
+        "HUMAN_OVERRIDE",
+        "FEFO_AUTO_SELECTED",
+    }

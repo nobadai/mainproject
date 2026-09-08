@@ -32,7 +32,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.logistics.outbound import AllocationBasis, AllocationStatus, ReservationStatus
+from app.logistics.outbound import (
+    AllocationBasis,
+    AllocationStatus,
+    HumanAllocationBasis,
+    ReservationStatus,
+)
 from app.logistics.schemas import RuntimeSourceStatus
 from app.logistics.turnover import TurnoverStatus
 
@@ -434,7 +439,16 @@ class ConsoleAllocateRequest(ConsoleModel):
     decided_at: datetime
     #: 🔴 **기본값이 없다.** FEFO 후보를 불러 봤다는 사실과 그 추천을 따랐다는 사실은
     #:    다르다 — 기본값을 두면 묻지도 않고 뒤엣것을 장부에 적는다.
-    allocation_basis: AllocationBasis
+    #:
+    #: 🔴 **`HumanAllocationBasis` 다. 어휘가 셋이 아니라 둘이다.**
+    #:    `FEFO_AUTO_SELECTED` 는 시뮬레이션 자동 경로
+    #:    (`fefo_allocation.allocate_reserved_stock_fefo`) 가 **스스로 적는 값**이라,
+    #:    사람이 이 문으로 보내면 *"규칙이 골랐다"* 가 거짓으로 선다 — 나중에 왜 그
+    #:    Lot 이었는지 물을 때 답이 없다.
+    #:
+    #:    ⚠️ 조회 쪽(`ConsoleAllocation.allocation_basis`)은 **좁히지 않는다.**
+    #:       자동으로 선 할당도 사람이 읽어야 한다.
+    allocation_basis: HumanAllocationBasis
     as_of: date
 
 

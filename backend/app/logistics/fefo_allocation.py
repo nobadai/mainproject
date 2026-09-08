@@ -6,20 +6,29 @@ reservation_id + as_of
    → reservation_allocation_state    확보했는데 아직 Lot 을 안 고른 몫
    → recommend_fefo_candidates       ★ 잠금 안에서 다시 읽는다
    → 순서대로 필요한 만큼만 집는다
-   → allocate_stock(FEFO_AUTO_SELECTED · LOGISTICS_FEFO_RULE · decided_at_for(as_of))
+   → allocate_stock(FEFO_AUTO_SELECTED · LOGISTICS_FEFO_RULE · 호출자가 준 decided_at)
 ```
 
-🔴 **자동 경로는 audit 값 셋을 스스로 완성한다.** 근거·결정자·시각은 한 판단의 사실이라
-   호출자가 나눠 들고 있으면 어긋난다.
+🔴 **audit 값 셋의 주인이 다르다.**
 
   ```text
-  allocation_basis  FEFO_AUTO_SELECTED     이 파일이 정한다
-  decided_by        LOGISTICS_FEFO_RULE    이 파일이 정한다
-  decided_at        as_of 00:00 UTC        이 파일이 as_of 에서 만든다
+  allocation_basis  FEFO_AUTO_SELECTED     🟢 물류가 정한다 (누가 골랐나의 근거)
+  decided_by        LOGISTICS_FEFO_RULE    🟢 물류가 정한다 (고른 주체)
+  decided_at        호출자가 준다           🔴 **시간축은 마스터 것이다**
   ```
 
-  ⚠️ **`allocate_stock` 은 그대로 셋을 명시로 받는다.** 그 코어는 사람 경로와 자동
-     경로가 함께 쓰는 자리라, 거기서 기본 시각을 만들면 두 계약이 다시 섞인다.
+  ⚠️ **물류가 시각을 만들지 않는다.** 시뮬레이션의 하루가 몇 시에 어느 단계를 지나는지는
+     마스터가 정한 축이고 (`app/master/sim_time.py` 의 `phase_instant(as_of, "ALLOCATE")`),
+     물류가 자기 규칙으로 또 만들면 **같은 실행에 두 시간축이 생긴다.**
+
+  🔴 **그 함수를 여기서 임포트하지도 않는다.** 의존 방향은 `Master → Logistics` 다.
+     물류는 **받은 값을 검증하고 적을** 뿐이고, 조립은 마스터가 한다.
+
+  ```python
+  # 마스터가 조립한다 (이 판에서는 구현하지 않는다)
+  decided_at = phase_instant(as_of, "ALLOCATE")
+  allocate_reserved_stock_fefo(conn, reservation_id=..., as_of=as_of, decided_at=decided_at)
+  ```
 
 🔴 **사람 경로를 덮지 않는다.** `outbound.allocate_stock` 은 그대로 *"사람이 고른
    Lot 과 수량"* 이고, 이 파일은 **그 함수를 부르는 또 하나의 호출자**일 뿐이다.
@@ -61,7 +70,7 @@ reservation_id + as_of
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -83,7 +92,6 @@ __all__ = [
     "ALLOCATION_BASIS",
     "DECIDED_BY",
     "allocate_reserved_stock_fefo",
-    "decided_at_for",
 ]
 
 #: 🔴 **사람이 없다.** 이 선택을 한 것은 사람이 아니라 FEFO 규칙이다.
@@ -100,44 +108,6 @@ ALLOCATION_BASIS: AllocationBasis = "FEFO_AUTO_SELECTED"
 #:    골랐나"*, 하나는 *"누가 골랐나"* 이고, 사람 경로에서는 둘이 실제로 갈린다
 #:    (근거 `HUMAN_OVERRIDE` · 결정자 `WH-PLANNER-01`).
 DECIDED_BY = "LOGISTICS_FEFO_RULE"
-
-
-def decided_at_for(as_of: date) -> datetime:
-    """이 자동 할당의 **결정 시각.** `as_of` 하나에서 결정론적으로 나온다.
-
-    ```text
-    decided_at = as_of 00:00 UTC
-    ```
-
-    🔴 **시계를 읽지 않는다.** `datetime.now()` · `utcnow()` · `date.today()` 를 부르지
-       않는다 — 같은 `(reservation_id, as_of, 재고 상태)` 를 다시 돌리면 **같은 값**이
-       나와야 하고, 벽시계가 섞이면 재실행이 다른 장부를 만든다.
-
-    ⚠️ **`00:00` 은 업무 시각 주장이 아니다.** *"사람이 자정에 정했다"* 가 아니라
-       *"이 시뮬레이션 영업일(`as_of`)에 규칙이 만든 결정"* 을 가리키는 **표준
-       시뮬레이션 시각**이다. 우리가 아는 시간 사실은 **날짜 하나**뿐이고, 시·분을
-       지어내면 없는 업무 규칙이 하나 생긴다.
-
-    ★ **새 규칙이 아니다.** 물류가 같은 문제(`as_of` 하나로 `TIMESTAMPTZ` 를 채우는
-      일)를 이미 한 번 풀어 뒀고, 그 식을 그대로 쓴다.
-
-    ```text
-    simulated_inspection.provide   inspected_at = datetime.combine(as_of, time.min, tzinfo=UTC)
-    여기                            decided_at   = datetime.combine(as_of, time.min, tzinfo=UTC)
-    ```
-
-    ⚠️ **UTC 인 이유도 그 파일이 이미 적어 두었다.** `00:00 UTC` 는 KST 로 **같은 날
-       09:00** 이라 어느 쪽으로 읽어도 날짜가 안 밀린다. 반대로 `00:00 KST` 는 UTC 로
-       **전날 15:00** 이라, `as_of` 로 자른 조회와 하루가 어긋난다.
-
-    🔴 **`app.master.clock` 을 부르지 않는다.** 물류가 마스터를 임포트하면 의존 방향이
-       뒤집힌다. `09:30 KST` 도 쓰지 않는다 — 그것은 마스터의 예측·스케줄러 시작
-       시각이지 **출고 할당의 결정 시각으로 정해진 적이 없다.**
-
-    :returns: 시간대를 단 `datetime`. `inventory_allocations.decided_at` 이
-        `TIMESTAMPTZ NOT NULL` 이라 naive 값은 `allocate_stock` 이 거부한다.
-    """
-    return datetime.combine(as_of, time.min, tzinfo=UTC)
 
 
 def _더_붙일_수_있는지_본다(
@@ -197,6 +167,7 @@ def allocate_reserved_stock_fefo(
     *,
     reservation_id: str,
     as_of: date,
+    decided_at: datetime,
 ) -> AllocationResult:
     """예약이 **확보해 둔 몫**을 FEFO 순서로 Lot 에 붙인다.
 
@@ -251,20 +222,13 @@ def allocate_reserved_stock_fefo(
        ★ 둘을 같은 상황으로 보지 않는다. 뒤엣것은 같은 잠금 아래에서 일어날 수 없어야
          하고, 일어났다면 예약 축과 Lot 축이 어긋났다는 뜻이다.
 
-    :param as_of: 가용·신선도 기준일이고 **결정 시각의 출처**다.
-        `recommend_fefo_candidates` 와 `allocate_stock` 에 같은 값이 가고
-        (두 곳이 다른 날짜로 보면 후보에는 있는 Lot 을 할당이 거절한다),
-        `decided_at_for` 가 이 날짜로 장부에 적을 시각을 만든다.
-    🔴 **`decided_at` 을 인자로 받지 않는다.** 자동 경로에서는 근거·결정자·시각 셋이
-       **한 판단의 audit 사실**이라 한 곳에서 완성한다 (`decided_at_for`).
-
-    ```text
-    사람 경로   decided_by · decided_at   사람이 준다  (allocate_stock 계약 그대로)
-    자동 경로   셋 다 이 파일이 정한다     as_of 하나에서 결정론적으로 나온다
-    ```
-
-       ⚠️ `allocate_stock` 은 여전히 셋을 **명시 입력**으로 받는다. 그 코어가 시각을
-          만들면 사람 경로와 자동 경로가 다시 섞인다.
+    :param as_of: 가용·신선도 기준일. `recommend_fefo_candidates` 와 `allocate_stock`
+        에 **같은 값**이 간다 — 두 곳이 다른 날짜로 보면 후보에는 있는 Lot 을 할당이
+        거절한다.
+    :param decided_at: 이 결정의 시각. 🔴 **물류가 만들지 않고 호출자가 준다.**
+        시뮬레이션 시간축의 주인은 마스터이고 (`master/sim_time.phase_instant`),
+        물류가 자기 규칙으로 또 만들면 같은 실행에 두 시간축이 생긴다.
+        시간대를 단 값이어야 한다 — `allocate_stock` 이 naive 를 거부한다.
     :raises InvalidOutboundRequest: FEFO 차례가 된 Lot 의 할당이 이미 나갔거나 집혔거나
         사람이 정한 것일 때. **DML 전에 막는다.**
     :raises OutboundIntegrityError: 예약이 없거나, 확보한 몫을 Lot 에서 못 채울 때.
@@ -353,8 +317,8 @@ def allocate_reserved_stock_fefo(
         reservation_id=reservation_id,
         requests=요청,
         decided_by=DECIDED_BY,
-        # ★ 호출자가 준 값이 아니라 `as_of` 에서 나온 값이다.
-        decided_at=decided_at_for(as_of),
+        # ★ **호출자가 준 값 그대로다.** 물류가 만들지 않는다.
+        decided_at=decided_at,
         allocation_basis=ALLOCATION_BASIS,
         as_of=as_of,
     )
