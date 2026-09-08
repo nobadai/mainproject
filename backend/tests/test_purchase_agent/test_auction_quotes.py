@@ -974,7 +974,10 @@ def test_a_real_self_check_cut_still_says_self_check() -> None:
 
     assert proposal["scenarios"] == []
     assert proposal["no_proposal_reason"].startswith("모든 안이 self_check에서 컷됨")
-    assert "max_price" in proposal["no_proposal_reason"]
+    # 🔴 ``max_price`` 가 아니라 **상한**이다 (2026-09-08). 컷 기준이 ``cut_unit_price``
+    #   로 갈리면서 사유 문장에서 그 필드 이름이 빠졌다 — 사람이 읽는 자리라 값으로 본다.
+    assert "상한" in proposal["no_proposal_reason"]
+    assert "2,000원" in proposal["no_proposal_reason"]
 
 
 # --------------------------------------------------------------------- look-ahead

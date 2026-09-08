@@ -77,16 +77,29 @@ def check_prices_exist(scenario: dict, market_quotes: list[dict]) -> str | None:
 
 
 def check_max_price(scenario: dict) -> str | None:
-    """매입단가가 max_price를 넘는가.
+    """매입단가가 **컷 기준**(``cut_unit_price``)을 넘는가.
 
-    max_price는 예측 q90 기반 **하드 상한**이다 (§4-⑦). 계약단가(contract_price) 초과와
-    혼동하지 않는다 — 그쪽은 컷이 아니라 margin_warning 표시일 뿐이다 (규칙 5).
+    🔴 **``max_price`` 를 읽지 않는다** (2026-09-08). 그 값은 이제 **재무 STRESS 전용**이고
+    (``amount_max_krw = qty × max_price``), 컷은 이 함수가 ``cut_unit_price`` 로 한다.
+    지금 두 값은 같지만 **경로가 갈렸다** — ML 여유율 표가 오면 컷만 움직인다.
+
+    ⚠️ 하나였을 때는 밴드가 좁아지면 **컷이 엄격해지고 재무 STRESS 는 느슨해졌다.**
+    방향이 반대인데 값이 하나였다.
+
+    계약단가(``contract_price``) 초과와 혼동하지 않는다 — 그쪽은 컷이 아니라
+    ``margin_warning`` 표시일 뿐이다 (규칙 5).
+
+    ★ **없으면 컷 사유를 남긴다.** 스키마가 ``None`` 을 허용하는 것은 남의 픽스처 때문이고
+    (``schemas.Scenario.cut_unit_price``), 기준이 없는 것을 **통과로 읽으면 상한 검사가
+    조용히 꺼진다** — 0과 NULL 을 가르는 규칙 3 이 여기서도 그대로다.
     """
-    ceiling = scenario["max_price"]
+    ceiling = scenario.get("cut_unit_price")
+    if ceiling is None:
+        return "매입단가 상한을 검사하지 못했다 — 그 기준값이 시나리오에 없다"
     over = [line for line in scenario["sourcing_plan"] if line["grade_unit_price"] > ceiling]
     if over:
         worst = max(line["grade_unit_price"] for line in over)
-        return f"매입단가 {worst:,}원이 max_price {scenario['max_price']:,}원 초과"
+        return f"매입단가 {worst:,}원이 상한 {ceiling:,}원 초과"
     return None
 
 

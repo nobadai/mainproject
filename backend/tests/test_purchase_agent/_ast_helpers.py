@@ -57,6 +57,39 @@ def references(path: Path, word: str) -> bool:
     return word in code_string_literals(path)
 
 
+def references_in(path: Path, function: str, word: str) -> bool:
+    """**그 함수 몸통 안에서** 코드가 그 낱말을 쓰는가.
+
+    ★ 파일 단위(``references``)로는 못 재는 자리가 있다. 한 파일이 두 값을 **다른
+      함수에서** 쓰는 경우가 그것이다 — ``self_check.py`` 는 컷에서 ``cut_unit_price``
+      를, STRESS 검산에서 ``max_price`` 를 쓴다. 파일 단위로 물으면 둘 다 참이라
+      **경로가 갈렸는지를 못 가른다.**
+
+    같은 이름의 함수가 여럿이면 **처음 것**을 본다 — 이 저장소에 그런 자리가 없고,
+    생기면 이 검사가 먼저 이상해지므로 그때 정하면 된다.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name == function
+        ),
+        None,
+    )
+    if target is None:
+        raise AssertionError(f"{path.name} 에 {function} 가 없다 — 이름이 바뀌었는가")
+    prose = prose_node_ids(target)
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value == word
+        and id(node) not in prose
+        for node in ast.walk(target)
+    )
+
+
 def called_names(path: Path) -> set[str]:
     """이 파일이 **이름으로 부르는** 함수들 (``foo(...)`` 의 ``foo``).
 
