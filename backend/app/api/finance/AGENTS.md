@@ -57,12 +57,49 @@ def build(as_of: date, state: str) -> FinanceTab:
 
 ## 어디서 값을 읽나
 
-읽을 곳: `finance_states` · `daily_closings` · `receivables` · `payables` ·
-`expenses`.
+**★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요.**
 
-읽은 표 이름을 `tables_read` 에 그대로 실으세요 — 화면 아래에 적힙니다.
+```python
+from app.finance.dashboard_service import get_finance_dashboard, get_finance_cashflow
+dash = get_finance_dashboard(sim_run_id=..., as_of=as_of)
+flow = get_finance_cashflow(sim_run_id=..., as_of=as_of)
+```
+
+`GET /finance/dashboard` · `/finance/dashboard/cashflow` 가 쓰는 함수입니다.
+**같은 쿼리를 두 벌 두면 언젠가 값이 갈라집니다.**
+
+이 `query.py` 가 할 일은 **읽는 것이 아니라 옮기는 것**입니다 —
+저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Chart`)에 담습니다.
+
+원래 표: `finance_states` · `daily_closings` · `receivables` · `payables` ·
+`expenses`. 읽은 표 이름을 `tables_read` 에 실으세요 — 화면 아래에 적힙니다.
+
+## ★ 아직 안 정한 것 — `sim_run_id`
+
+부서 서비스들이 `sim_run_id` 를 받습니다.
+
+```python
+get_finance_dashboard(sim_run_id=..., as_of=as_of)
+```
+
+그런데 **화면 API 는 지금 `as_of` 만 받습니다.** 어디서 얻을지 아직
+안 정했습니다. 세 가지가 있습니다.
+
+```
+㉮ 주소에 파라미터를 더한다      /api/finance?as_of=…&sim_run_id=…
+㉯ 서버가 그날의 기본 실행을 고른다
+㉰ 설정값으로 하나 못 박는다
+```
+
+**혼자 정하지 말고 물어보세요.** 잘못 고르면 다른 실행의 값을 화면에
+띄우게 되고, 그건 **틀린 줄도 모르는** 오류입니다.
+급하면 ㉰ 로 두고 `Note` 에 «어느 실행을 보고 있는지» 를 적으세요.
+
+---
 
 ## DB 는 이미 있는 것을 쓰세요
+
+부서 서비스로 안 되는 값만 직접 읽습니다. **먼저 위를 보세요.**
 
 ```python
 from app.finance.db import fetch_one, fetch_all, get_db_schema

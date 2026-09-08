@@ -63,7 +63,32 @@ def build(as_of: date) -> PurchaseTab:
 `app/master/` 가 씁니다. **여기서 에이전트를 돌리지 마세요** — 저장된
 결과만 읽습니다 (화면을 열 때마다 LLM 이 돌면 안 됩니다).
 
+## ★ 아직 안 정한 것 — `sim_run_id`
+
+부서 서비스들이 `sim_run_id` 를 받습니다.
+
+```python
+get_finance_dashboard(sim_run_id=..., as_of=as_of)
+```
+
+그런데 **화면 API 는 지금 `as_of` 만 받습니다.** 어디서 얻을지 아직
+안 정했습니다. 세 가지가 있습니다.
+
+```
+㉮ 주소에 파라미터를 더한다      /api/finance?as_of=…&sim_run_id=…
+㉯ 서버가 그날의 기본 실행을 고른다
+㉰ 설정값으로 하나 못 박는다
+```
+
+**혼자 정하지 말고 물어보세요.** 잘못 고르면 다른 실행의 값을 화면에
+띄우게 되고, 그건 **틀린 줄도 모르는** 오류입니다.
+급하면 ㉰ 로 두고 `Note` 에 «어느 실행을 보고 있는지» 를 적으세요.
+
+---
+
 ## DB 는 이미 있는 것을 쓰세요
+
+부서 서비스로 안 되는 값만 직접 읽습니다. **먼저 위를 보세요.**
 
 ```python
 from app.purchase_agent.db import fetch_one, fetch_all, get_db_schema

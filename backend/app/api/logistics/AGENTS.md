@@ -57,14 +57,53 @@ def build(as_of: date, pane: str) -> LogisticsTab:
 
 ## 어디서 값을 읽나
 
-읽을 곳: `inventory_lots` · `inventory_reservations` ·
+**★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요** (#415).
+
+```python
+from app.logistics.console_service import get_inventory_console
+snap = get_inventory_console(sim_run_id=..., as_of=as_of)
+```
+
+`app/logistics/console_service.py` 에 `/logistics/inventory` · `/inbound` ·
+`/warehouse` · `/outbound` 가 쓰는 함수가 다 있습니다. **같은 쿼리를 두 벌
+두면 언젠가 값이 갈라집니다.**
+
+이 `query.py` 가 할 일은 **읽는 것이 아니라 옮기는 것**입니다 —
+저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Card`)에 담습니다.
+
+원래 표를 직접 봐야 하면: `inventory_lots` · `inventory_reservations` ·
 `inventory_allocations` · `arrival_schedule` · `zone_capacity`.
 
 **`panes` 는 넷 다 채워서 보냅니다** (`stock` `inbound` `warehouse`
 `outbound`). `selected` 가 지금 보고 있는 것이고, 화면이 나머지를
 미리 들고 있어 탭을 눌러도 깜빡이지 않습니다.
 
+## ★ 아직 안 정한 것 — `sim_run_id`
+
+부서 서비스들이 `sim_run_id` 를 받습니다.
+
+```python
+get_finance_dashboard(sim_run_id=..., as_of=as_of)
+```
+
+그런데 **화면 API 는 지금 `as_of` 만 받습니다.** 어디서 얻을지 아직
+안 정했습니다. 세 가지가 있습니다.
+
+```
+㉮ 주소에 파라미터를 더한다      /api/finance?as_of=…&sim_run_id=…
+㉯ 서버가 그날의 기본 실행을 고른다
+㉰ 설정값으로 하나 못 박는다
+```
+
+**혼자 정하지 말고 물어보세요.** 잘못 고르면 다른 실행의 값을 화면에
+띄우게 되고, 그건 **틀린 줄도 모르는** 오류입니다.
+급하면 ㉰ 로 두고 `Note` 에 «어느 실행을 보고 있는지» 를 적으세요.
+
+---
+
 ## DB 는 이미 있는 것을 쓰세요
+
+부서 서비스로 안 되는 값만 직접 읽습니다. **먼저 위를 보세요.**
 
 ```python
 from app.logistics.db import fetch_one, fetch_all, get_db_schema
