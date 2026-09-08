@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-from app.sales.schemas import OnHandLot, SalesSnapshotA, SalesSnapshotB
+from app.sales.schemas import OnHandLot, SalesSnapshotA
 
 
 def _usable_on_hand_kg(on_hand: list[OnHandLot], as_of: date, target: date) -> Decimal:
@@ -75,36 +75,3 @@ def resolve_today_floor(
     if not in_window:
         return Decimal(0)
     return max(in_window)
-
-
-def strategic_inventory_by_date(snapshot: SalesSnapshotB) -> dict[date, Decimal]:
-    """날짜별 전략 판매 가능 재고를 계산한다.
-
-    오늘 배분 원금 = on_hand − 확정 주문 예약분(reserved_for_confirmed_kg).
-    in_transit 은 도착일 이후 날짜의 전망에만 더하고, 오늘 판매 후보 물량으로는
-    잡지 않는다. 신선도가 지난 로트는 해당 날짜의 가용에서 빠진다.
-    """
-    as_of = snapshot.as_of
-    on_hand = snapshot.inventory.on_hand
-    in_transit = snapshot.inventory.in_transit
-
-    projection_dates = sorted(
-        {as_of} | {lot.expected_arrival_date for lot in in_transit}
-    )
-
-    result: dict[date, Decimal] = {}
-    for target in projection_dates:
-        strategic_on_hand = sum(
-            (
-                max(Decimal(0), lot.qty_kg - lot.reserved_for_confirmed_kg)
-                for lot in on_hand
-                if as_of + timedelta(days=lot.freshness_days_left) >= target
-            ),
-            start=Decimal(0),
-        )
-        arrived_in_transit = sum(
-            (lot.qty_kg for lot in in_transit if lot.expected_arrival_date <= target),
-            start=Decimal(0),
-        )
-        result[target] = strategic_on_hand + arrived_in_transit
-    return result

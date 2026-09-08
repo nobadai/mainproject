@@ -1,21 +1,15 @@
-"""최종 Sales Proposal Core.
-
-다른 Domain의 수치·판정을 계산하지 않고, 전달된 사실로만 시나리오와 검증 의존성을
-표현한다. 레거시 allocation 흐름은 이 모듈과 독립적으로 유지한다.
-"""
+"""Sales Proposal Core."""
 
 from decimal import Decimal
 
 from pydantic import ValidationError
 
 from app.sales.llm.runtime import interpret_candidates
-from app.sales.ranking import rank_scenarios, recommended_scenario_id, remove_dominated_scenarios
 from app.sales.schemas import (
     AllocationLeg,
     ProposalSelfCheck,
     PurchaseAdditionalSupplyResult,
     SalesCandidate,
-    SalesDecisionTrace,
     SalesDomainReply,
     SalesFinanceReplySubset,
     SalesProposalInput,
@@ -82,93 +76,9 @@ def validate_context(request: SalesProposalInput) -> list[str]:
 
 
 def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
-    """입력 사실로 세 유형의 Sales 시나리오를 만들고 안전하게 추천한다."""
-    missing_data = validate_context(request)
-    generated = [] if missing_data else _generate_scenarios(request)
-    scenarios, exclusions = remove_dominated_scenarios(generated)
-    missing = _missing_capabilities(request)
-    check = self_check_scenarios(scenarios)
-    fixed_recommendation = recommended_scenario_id(scenarios)
-    recommendation = _interpret_scenarios(scenarios, fixed_recommendation)
-    ranked_ids = [scenario.scenario_id for scenario in rank_scenarios(scenarios)]
-    trace = [
-        SalesDecisionTrace(
-            candidate_id=scenario.scenario_id,
-            status=scenario.status,
-            rank=(
-                ranked_ids.index(scenario.scenario_id) + 1
-                if scenario.scenario_id in ranked_ids
-                else None
-            ),
-            recommended=scenario.scenario_id == fixed_recommendation,
-            finance_verdict=scenario.finance_verdict,
-            profitability_krw=scenario.contribution_margin_krw,
-            scenario_projected_cash_min=scenario.scenario_projected_cash_min,
-            depends_on_projected_inflow=scenario.depends_on_projected_inflow,
-            inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
-            sell_priority=scenario.sell_priority,
-            remaining_freshness_days=scenario.remaining_freshness_days,
-            dependencies=scenario.execution_dependencies,
-            ml_support_used=scenario.ml_support_used,
-            changed_axes=scenario.sales_decision_axes,
-            exclusion_reasons=exclusions.get(scenario.scenario_id, []),
-            unresolved_fields=scenario.uncertainties,
-            reply_refs=_reply_refs(scenario.domain_replies),
-            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
-        )
-        for scenario in scenarios
-    ]
-    trace.extend(
-        SalesDecisionTrace(
-            candidate_id=scenario.scenario_id,
-            status=scenario.status,
-            finance_verdict=scenario.finance_verdict,
-            profitability_krw=scenario.contribution_margin_krw,
-            scenario_projected_cash_min=scenario.scenario_projected_cash_min,
-            depends_on_projected_inflow=scenario.depends_on_projected_inflow,
-            inventory_risk_severity=scenario.authoritative_inventory_risk_severity,
-            sell_priority=scenario.sell_priority,
-            remaining_freshness_days=scenario.remaining_freshness_days,
-            dependencies=scenario.execution_dependencies,
-            ml_support_used=scenario.ml_support_used,
-            changed_axes=scenario.sales_decision_axes,
-            exclusion_reasons=exclusions[scenario.scenario_id],
-            unresolved_fields=scenario.uncertainties,
-            reply_refs=_reply_refs(scenario.domain_replies),
-            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
-        )
-        for scenario in generated
-        if scenario.scenario_id in exclusions
-    )
-    collapse_reasons = list(
-        dict.fromkeys(
-            scenario.variant_collapsed_reason
-            for scenario in scenarios
-            if scenario.variant_collapsed_reason
-        )
-    )
-    return SalesProposalReply(
-        status="INPUT_INCOMPLETE" if missing_data else "SCENARIOS_GENERATED",
-        business_mode=request.business_mode,
-        is_refeed=request.is_refeed,
-        feedback_attempt=request.feedback_attempt,
-        scenarios=scenarios,
-        variant_collapsed=bool(collapse_reasons),
-        variant_collapsed_reason=(
-            collapse_reasons[0]
-            if len(collapse_reasons) == 1
-            else "SCENARIO_VARIANTS_PARTIALLY_COLLAPSED"
-            if collapse_reasons
-            else None
-        ),
-        missing_data=missing_data,
-        missing_capabilities=missing,
-        recommended_scenario_id=fixed_recommendation,
-        llm=recommendation,
-        recommendation=recommendation,
-        self_check=check,
-        decision_trace=trace,
-    )
+    from app.sales.graph import run_sales_agent
+
+    return run_sales_agent(request)
 
 
 def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
