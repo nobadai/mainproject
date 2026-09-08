@@ -39,6 +39,7 @@ transition.py — 승인 → 상태전이의 **트랜잭션 경계** (C 형태 �
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any, Literal, Protocol
 
@@ -210,6 +211,10 @@ class TransitionOut(BaseModel):
     #: 🔴 **이미 열려 있어 같이 실어 준 다음 날들.** 비어 있는 것이 정상이다 —
     #: 정방향이면 내일이 아직 없다. 값이 있으면 *"앞질러 열린 장부를 따라잡았다"*
     #: 는 사실이고, 화면에 나가 **왜 하루가 여러 번 바뀌었는지**를 설명한다.
+    #:
+    #: 🔴 **열린 날이 아니라 실제로 쓴 날이다** (`#381`). 열려 있었지만 도착일이
+    #: 이미 지나 실을 회차가 없던 날은 여기 안 들어간다. 화면이 *"따라잡았다"* 고
+    #: 말하는 날과 행이 실제로 선 날이 갈리면, 그 문장은 근거가 아니라 장식이다.
     carried_forward: list[date] = Field(default_factory=list)
     #: 🔴 **빈 목록이 두 가지 뜻이면 안 된다** (물류 지적 2026-09-07).
     #:
@@ -356,6 +361,60 @@ def _ledger_blocked(commitment: ApprovedCommitment) -> str:
     return ledger_block_reason(commitment)
 
 
+def _still_incoming_on(
+    commitment: ApprovedCommitment, state_date: date
+) -> ApprovedCommitment | None:
+    """`state_date` 시점에 **아직 안 온 도착분**만 남긴 약정 사본. 없으면 `None`.
+
+    🔴 **`confirmed_inbound` 의 뜻이 그것이다** (`#381`). 그 칸은 *"D 시점에 아직 안
+       온, 앞으로 올 도착분"* 이고, 도착일이 `D` 보다 이르면 **이미 왔거나(로트가
+       됐거나) 안 온 사고**다 — 둘 다 「앞으로 올 도착분」이 아니다.
+
+    ⚠️ **carry-forward 가 이것을 안 하면 유령 확정입고가 남는다.** 물류
+      `_clear_schedule` 은 입고 처리 때 **그날 한 행만** 걷는데
+      (`WHERE sim_run_id=%s AND as_of=%s AND usage_scope=%s`), carry-forward 는
+      **열린 여러 날**에 같은 회차를 실었다. 도착일 뒤의 날에 실린 몫은 아무도 안
+      걷고 남아, 실물 로트(`on_hand`)와 예약(`confirmed_inbound`)으로 **두 번
+      세어지며** `cap_by_date` 를 0 으로 만든다 (DB 실측 2026-09-08).
+
+      ```text
+      도착일 01-22 · 열린 날 {01-21, 01-22, 01-23, 01-27, 01-28}
+      전   다섯 날 전부에 싣는다 → 01-22 만 receive 가 걷는다 → 유령 3
+      후   01-21 · 01-22 에만 싣는다                       → 유령 0
+      ```
+
+    🔴 **이 함수는 새 유령을 막을 뿐, 이미 DB 에 박힌 유령 행은 안 지운다.**
+       위 실측의 `01-23` · `01-27` · `01-28` 은 그대로 남는다. 데이터 정리는
+       별건이고, 이 고침을 *"이제 걷기가 좋아진다"* 로 읽으면 안 된다.
+
+    ★ **물류 코드도 Protocol 도 안 고친다.** 좁힌 것은 넘겨 주는 값뿐이다.
+
+    ★ 회차 일정이 **비어 있는** 약정은 좁힐 것이 없다 — 지금 동작 그대로 통과시킨다.
+    """
+    if not commitment.arrival_schedule:
+        return commitment
+    legs = tuple(leg for leg in commitment.arrival_schedule if leg.arrival_date >= state_date)
+    if not legs:
+        return None
+    if len(legs) == len(commitment.arrival_schedule):
+        return commitment
+    # ★ 사본도 `__post_init__` 검증을 지난다 — 총량은 남긴 회차 합으로 맞춘다.
+    amounts = [leg.amount_krw for leg in legs]
+    # 🔴 **금액은 전 회차에 실려 있을 때만 다시 센다.** 하나라도 `None` 이면 검증이
+    #    금액을 안 보고, 그때 총액을 건드리면 **없는 근거로 값을 지어내는** 것이 된다.
+    total_amount_krw = (
+        sum(amount for amount in amounts if amount is not None)
+        if all(amount is not None for amount in amounts)
+        else commitment.total_amount_krw
+    )
+    return replace(
+        commitment,
+        total_qty_kg=sum(leg.qty_kg for leg in legs),
+        total_amount_krw=total_amount_krw,
+        arrival_schedule=legs,
+    )
+
+
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
 
 
@@ -480,16 +539,29 @@ def apply_approval(
         #    접으면 낡은 미래 행이 남아 있는데도 화면이 *"따라잡을 것이 없었다"* 로
         #    읽는다 — **없는 것과 못 읽은 것은 다르다.**
         carry_status = "OK" if 읽힌_날들 is not None else "UNREADABLE"
-        carried_forward = 읽힌_날들 or ()
-        logistics_rows = tuple(
-            row
-            for state_date in (target_state_date, *carried_forward)
-            for row in logistics.build(
-                commitment,
-                target_state_date=state_date,
-                purchase_ids=purchase_ids,
+        열린_날들 = 읽힌_날들 or ()
+        # 🔴 **날마다 그 날에 유효한 회차만 싣는다** (`#381` · `_still_incoming_on`).
+        #    도착일이 지난 날에 같은 회차를 또 실으면 아무도 안 걷는 **유령 확정입고**가
+        #    남는다 — 물류 `_clear_schedule` 은 그날 한 행만 걷는다.
+        #
+        # ★ 실을 회차가 없는 날은 **`build` 를 아예 안 부른다.** 빈 묶음을 넘겨 물류가
+        #   *"오늘 도착 예정 0"* 을 새로 쓰게 하는 것과 다르다 — 그 날은 이 승인과
+        #   상관이 없다.
+        logistics_rows: tuple[Any, ...] = ()
+        실제로_쓴_날들: list[date] = []
+        for state_date in (target_state_date, *열린_날들):
+            그날_약정 = _still_incoming_on(commitment, state_date)
+            if 그날_약정 is None:
+                continue
+            logistics_rows += tuple(
+                logistics.build(
+                    그날_약정,
+                    target_state_date=state_date,
+                    purchase_ids=purchase_ids,
+                )
             )
-        )
+            if state_date != target_state_date:
+                실제로_쓴_날들.append(state_date)
     except Exception as exc:  # noqa: BLE001 - 전이 실패가 적재된 결정을 지우면 안 된다.
         return TransitionOut(status="FAILED", reason=f"전이 계산 실패: {exc}")
 
@@ -510,6 +582,7 @@ def apply_approval(
     return TransitionOut(
         status="APPLIED",
         parts=list(PARTS),
-        carried_forward=list(carried_forward),
+        # 🔴 **열린 날이 아니라 실제로 쓴 날이다** (`#381`).
+        carried_forward=list(실제로_쓴_날들),
         carried_forward_status=carry_status,
     )

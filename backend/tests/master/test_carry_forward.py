@@ -91,14 +91,23 @@ class _가짜커넥션:
 
 
 class _전이:
-    """`build` 가 받은 날짜를 그대로 기록한다."""
+    """`build` 가 받은 날짜와 **그 날 실린 회차**를 그대로 기록한다."""
 
     def __init__(self) -> None:
         self.dates: list[date] = []
         self.persisted: list[Any] = []
+        #: 날짜 → 그 날 `build` 가 받은 회차 번호. `#381` 이 보는 자리다.
+        self.실린회차: dict[date, tuple[int, ...]] = {}
+        self.실린총량: dict[date, float] = {}
+        self.실린총액: dict[date, float] = {}
 
     def build(self, commitment: Any, *, target_state_date: date, **_: Any) -> tuple[Any, ...]:
         self.dates.append(target_state_date)
+        self.실린회차[target_state_date] = tuple(
+            leg.seq for leg in commitment.arrival_schedule
+        )
+        self.실린총량[target_state_date] = commitment.total_qty_kg
+        self.실린총액[target_state_date] = commitment.total_amount_krw
         return (f"row@{target_state_date}",)
 
     def persist(self, conn: Any, rows: Any) -> None:
@@ -114,7 +123,8 @@ class _재무전이(_전이):
         self.persisted.append(row)
 
 
-def _commitment() -> ApprovedCommitment:
+def _commitment(*, 도착=2) -> ApprovedCommitment:
+    """회차 하나짜리 약정. `도착` 은 승인일로부터 며칠 뒤 도착인지다."""
     return ApprovedCommitment(
         approval_id="H1-REQ-CARRY-1",
         request_id="REQ-CARRY",
@@ -127,7 +137,7 @@ def _commitment() -> ApprovedCommitment:
             ArrivalLeg(
                 item="배추",
                 qty_kg=100.0,
-                arrival_date=AS_OF + timedelta(days=2),
+                arrival_date=AS_OF + timedelta(days=도착),
                 purchase_date=AS_OF,
                 seq=1,
                 payment_due_date=AS_OF,
@@ -190,12 +200,16 @@ def test_정방향이면_다음날_하나뿐이다(
 def test_이미_열린_날들에도_같은_사실을_싣는다(
     monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
 ) -> None:
-    """🔴 **이것이 없으면 도착일 행이 승인을 모른 채 굳는다.**"""
+    """🔴 **이것이 없으면 도착일 행이 승인을 모른 채 굳는다.**
+
+    ★ 도착일이 **열린 날들보다 뒤**라 다섯 날 모두 「앞으로 올 도착분」이다 —
+      `#381` 이 좁히는 자리와 겹치지 않는다.
+    """
     _, 물류 = _배선
     나중 = [다음날 + timedelta(days=n) for n in (1, 2, 5)]
     monkeypatch.setattr(transition, "opened_days_after", _열린날(*나중))
 
-    out = transition.apply_approval(_commitment(), connect=_가짜커넥션)
+    out = transition.apply_approval(_commitment(도착=9), connect=_가짜커넥션)
     assert out.status == "APPLIED", out.reason
 
     assert 물류.dates == [다음날, *나중], "이미 열린 날에 안 실었다"
@@ -277,3 +291,180 @@ def test_정본을_못_읽어도_승인을_멈추지_않는다(
     assert out.carried_forward_status == "UNREADABLE", (
         "못 읽은 것이 '앞질러 열린 날이 없었다' 와 같은 문장으로 나갔다"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. 🔴 **도착일이 지난 날에는 안 싣는다** (`#381`)
+#
+#    `confirmed_inbound` 의 뜻은 *"D 시점에 아직 안 온, 앞으로 올 도착분"* 이다.
+#    도착일이 `D` 보다 이르면 이미 왔거나(로트가 됐거나) 안 온 사고이고, 둘 다
+#    「앞으로 올 도착분」이 아니다.
+#
+#    ⚠️ DB 실측 2026-09-08 — 도착일 `01-22`, carry-forward 가 연 날
+#      `{01-21, 01-22, 01-23, 01-27, 01-28}`. 입고 처리는 `01-22` **한 행만** 걷고
+#      (`_clear_schedule` 의 `WHERE ... as_of=%s`), 나머지 셋은 아무도 안 걷는
+#      **유령 확정입고**로 남아 `cap_by_date` 를 0 으로 만들었다.
+# ---------------------------------------------------------------------------
+
+
+def test_도착일이_지난_날에는_그_회차를_안_싣는다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """🔴 **실측 모양 그대로다.** 도착일 하루 뒤·닷새 뒤·엿새 뒤가 열려 있다."""
+    _, 물류 = _배선
+    도착일 = 다음날 + timedelta(days=1)
+    지난뒤 = [도착일 + timedelta(days=n) for n in (1, 5, 6)]
+    monkeypatch.setattr(transition, "opened_days_after", _열린날(도착일, *지난뒤))
+
+    out = transition.apply_approval(_commitment(도착=2), connect=_가짜커넥션)
+    assert out.status == "APPLIED", out.reason
+
+    assert 물류.dates == [다음날, 도착일], f"도착일이 지난 날에도 실었다: {물류.dates}"
+    assert all(d not in 물류.실린회차 for d in 지난뒤), "유령 확정입고가 또 실렸다"
+
+
+def test_실을_회차가_없으면_그_날은_build_를_안_부른다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """★ 빈 묶음을 넘겨 물류가 *"오늘 도착 예정 0"* 을 쓰게 하는 것과 다르다."""
+    _, 물류 = _배선
+    도착일 = 다음날 + timedelta(days=1)
+    monkeypatch.setattr(
+        transition,
+        "opened_days_after",
+        _열린날(*[도착일 + timedelta(days=n) for n in (1, 2, 3)]),
+    )
+
+    out = transition.apply_approval(_commitment(도착=2), connect=_가짜커넥션)
+    assert out.status == "APPLIED", out.reason
+
+    assert 물류.dates == [다음날], f"실을 회차가 없는 날에 build 를 불렀다: {물류.dates}"
+
+
+def test_carried_forward_는_열린_날이_아니라_실제로_쓴_날이다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """🔴 화면이 *"따라잡았다"* 고 말하는 날과 행이 실제로 선 날이 갈리면 안 된다."""
+    도착일 = 다음날 + timedelta(days=1)
+    지난뒤 = [도착일 + timedelta(days=n) for n in (1, 5, 6)]
+    monkeypatch.setattr(transition, "opened_days_after", _열린날(도착일, *지난뒤))
+
+    out = transition.apply_approval(_commitment(도착=2), connect=_가짜커넥션)
+    assert out.status == "APPLIED", out.reason
+
+    assert out.carried_forward == [도착일], f"안 쓴 날이 따라잡은 날로 나갔다: {out.carried_forward}"
+    assert out.carried_forward_status == "OK"
+
+
+# ---------------------------------------------------------------------------
+# 6. 🔴 **다회차는 날마다 상한이 다르다** (`#397` 로 다회차가 열렸다)
+# ---------------------------------------------------------------------------
+
+
+def _두회차() -> ApprovedCommitment:
+    """1회차 `AS_OF+2` 도착 40kg · 2회차 `AS_OF+5` 도착 60kg."""
+    return ApprovedCommitment(
+        approval_id="H1-REQ-CARRY-1",
+        request_id="REQ-CARRY",
+        as_of=AS_OF,
+        item="배추",
+        scenario_label="분할",
+        total_qty_kg=100.0,
+        total_amount_krw=100000.0,
+        arrival_schedule=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=40.0,
+                arrival_date=AS_OF + timedelta(days=2),
+                purchase_date=AS_OF,
+                seq=1,
+                amount_krw=40000.0,
+                payment_due_date=AS_OF,
+            ),
+            ArrivalLeg(
+                item="배추",
+                qty_kg=60.0,
+                arrival_date=AS_OF + timedelta(days=5),
+                purchase_date=AS_OF,
+                seq=2,
+                amount_krw=60000.0,
+                payment_due_date=AS_OF,
+            ),
+        ),
+    )
+
+
+def test_1회차_도착_뒤_2회차_도착_전_날에는_2회차만_실린다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """🔴 **날마다 상한이 다르다.** 1회차는 이미 왔고 2회차만 앞으로 올 도착분이다."""
+    _, 물류 = _배선
+    첫도착, 둘도착 = AS_OF + timedelta(days=2), AS_OF + timedelta(days=5)
+    사이 = AS_OF + timedelta(days=3)
+    둘_지난뒤 = AS_OF + timedelta(days=7)
+    monkeypatch.setattr(
+        transition, "opened_days_after", _열린날(첫도착, 사이, 둘도착, 둘_지난뒤)
+    )
+
+    out = transition.apply_approval(_두회차(), connect=_가짜커넥션)
+    assert out.status == "APPLIED", out.reason
+
+    assert 물류.실린회차[다음날] == (1, 2), "승인 다음 날에는 두 회차가 다 앞으로 올 도착분이다"
+    assert 물류.실린회차[첫도착] == (1, 2), "도착일 당일은 아직 안 온 것으로 센다"
+    assert 물류.실린회차[사이] == (2,), f"1회차가 도착 뒤에도 실렸다: {물류.실린회차[사이]}"
+    assert 물류.실린회차[둘도착] == (2,)
+    assert 둘_지난뒤 not in 물류.실린회차, "두 회차가 다 지난 날에도 실었다"
+    assert out.carried_forward == [첫도착, 사이, 둘도착]
+
+
+def test_좁힌_사본은_남긴_회차의_합으로_선다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """★ 사본도 `__post_init__` 검증을 지나야 한다 — 총량·총액이 남긴 회차와 맞는다."""
+    _, 물류 = _배선
+    사이 = AS_OF + timedelta(days=3)
+    monkeypatch.setattr(transition, "opened_days_after", _열린날(사이))
+
+    out = transition.apply_approval(_두회차(), connect=_가짜커넥션)
+    assert out.status == "APPLIED", out.reason
+
+    assert 물류.실린총량[다음날] == 100.0
+    assert 물류.실린총량[사이] == 60.0, "좁혔는데 총량은 원래 값 그대로였다"
+    assert 물류.실린총액[사이] == 60000.0, "좁혔는데 총액은 원래 값 그대로였다"
+
+
+def test_회차_금액이_비면_총액을_지어내지_않는다() -> None:
+    """🔴 하나라도 `None` 이면 **검증이 금액을 안 본다** — 그때 총액을 건드리면 창작이다.
+
+    ⚠️ 이 모양은 `apply_approval` 로는 안 온다 — 회차가 둘 이상인데 금액이 비면
+      `ledger_block_reason` 이 먼저 `NOT_APPLIED` 로 막는다. 그래서 좁히는 함수를
+      **직접** 부른다. 막는 조건이 언젠가 느슨해져도 여기서 총액을 지어내지 않는다.
+    """
+    사이 = AS_OF + timedelta(days=3)
+    금액없음 = ApprovedCommitment(
+        approval_id="H1-REQ-CARRY-1",
+        request_id="REQ-CARRY",
+        as_of=AS_OF,
+        item="배추",
+        scenario_label="분할",
+        total_qty_kg=100.0,
+        total_amount_krw=100000.0,
+        arrival_schedule=tuple(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=qty,
+                arrival_date=AS_OF + timedelta(days=days),
+                purchase_date=AS_OF,
+                seq=seq,
+                payment_due_date=AS_OF,
+            )
+            for seq, qty, days in ((1, 40.0, 2), (2, 60.0, 5))
+        ),
+    )
+
+    좁힌것 = transition._still_incoming_on(금액없음, 사이)
+
+    assert 좁힌것 is not None
+    assert tuple(leg.seq for leg in 좁힌것.arrival_schedule) == (2,)
+    assert 좁힌것.total_qty_kg == 60.0
+    assert 좁힌것.total_amount_krw == 100000.0, "금액이 없는데 총액을 다시 만들었다"
