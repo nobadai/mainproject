@@ -1,11 +1,13 @@
 """에이전트별 LLM 모델 override 해석 규칙 검증.
 
 `<AGENT>_LLM_*` → `LLM_*` → 기본값 순으로 읽는다.
-★ Critic judge 를 생성 측(selector)과 다른 모델로 돌리는 것이 설계서 §6.4 의 요구다.
+
+★ **오케 selector 쪽 검사는 2026-09-08 에 걷어냈다.**
+  `cycle_llm/runtime.py` 를 지웠고 `ORCHESTRATOR_LLM_*` 을 읽는 코드가 남지 않았다.
+  남은 검사는 Critic 하나가 접두사 규칙을 그대로 지키는지를 본다.
 """
 
 from app.master.critic.llm.runtime import get_llm_settings as critic_settings
-from app.master.cycle_llm.runtime import get_llm_settings as orchestrator_settings
 
 _KEYS = (
     "LLM_ENABLED",
@@ -23,40 +25,25 @@ def _clear(monkeypatch):
     ★ 런타임이 매번 `load_dotenv(.env)` 를 부르므로, 지운 변수가 .env 값으로 되살아난다.
       이 테스트가 보려는 것은 **해석 순서**이지 .env 내용이 아니므로 로딩 자체를 끊는다.
     """
-    for module in ("app.master.cycle_llm.runtime", "app.master.critic.llm.runtime"):
-        monkeypatch.setattr(f"{module}.load_dotenv", lambda *a, **k: False)
+    monkeypatch.setattr("app.master.critic.llm.runtime.load_dotenv", lambda *a, **k: False)
     for key in _KEYS:
         monkeypatch.delenv(key, raising=False)
-        monkeypatch.delenv(f"ORCHESTRATOR_{key}", raising=False)
         monkeypatch.delenv(f"CRITIC_{key}", raising=False)
 
 
 def test_shared_model_is_used_when_no_override(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "gemma3:4b")
-    assert orchestrator_settings().model == "gemma3:4b"
     assert critic_settings().model == "gemma3:4b"
 
 
-def test_each_agent_can_use_its_own_model(monkeypatch):
-    """★ 핵심 — selector 와 judge 가 서로 다른 모델을 쓴다 (§6.4)."""
+def test_agent_override_wins_over_shared(monkeypatch):
+    """★ 핵심 — Critic judge 는 공통 모델과 다른 모델을 쓸 수 있다 (§6.4)."""
     _clear(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "gemma3:4b")
-    monkeypatch.setenv("ORCHESTRATOR_LLM_MODEL", "qwen2.5:7b")
     monkeypatch.setenv("CRITIC_LLM_MODEL", "exaone3.5:7.8b")
 
-    assert orchestrator_settings().model == "qwen2.5:7b"
     assert critic_settings().model == "exaone3.5:7.8b"
-
-
-def test_override_does_not_leak_across_agents(monkeypatch):
-    """오케 전용 설정이 Critic 을 건드리면 안 된다."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL", "gemma3:4b")
-    monkeypatch.setenv("ORCHESTRATOR_LLM_MODEL", "qwen2.5:7b")
-
-    assert orchestrator_settings().model == "qwen2.5:7b"
-    assert critic_settings().model == "gemma3:4b"
 
 
 def test_empty_override_falls_back_to_shared(monkeypatch):
@@ -82,16 +69,11 @@ def test_all_settings_are_overridable_per_agent(monkeypatch):
     assert critic.timeout_seconds == 60
     assert critic.max_retries == 0
 
-    orchestrator = orchestrator_settings()
-    assert orchestrator.base_url == "http://127.0.0.1:11434"
-    assert orchestrator.timeout_seconds == 30
-
 
 def test_llm_can_be_disabled_per_agent(monkeypatch):
-    """Critic 만 LLM 을 끄고 오케는 켜 둘 수 있다."""
+    """공통으로 켜 두고 Critic 만 끌 수 있다."""
     _clear(monkeypatch)
     monkeypatch.setenv("LLM_ENABLED", "true")
     monkeypatch.setenv("CRITIC_LLM_ENABLED", "false")
 
-    assert orchestrator_settings().enabled is True
     assert critic_settings().enabled is False

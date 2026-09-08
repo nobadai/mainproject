@@ -65,7 +65,14 @@ class DeptAgent(Protocol):
 
 
 class Selector(Protocol):
-    """T3-5. 오케스트레이터의 유일한 LLM 지점. 숫자를 출력하지 않는다."""
+    """T3-5. 오케스트레이터의 유일한 LLM 지점. 숫자를 출력하지 않는다.
+
+    ★ **LLM selector 구현은 2026-09-08 에 걷어냈다.** (`cycle_llm/runtime.py` ·
+      `cycle_llm/selector.py`) 앱 경로에서 부르는 곳이 0곳이었고 1차 Flow 에 그 단계가
+      없다 — `critic_bridge.py` 가 *"selector 가 쓴 문장인데 1차 Flow 에는 그 단계가
+      없다"* 로 이미 적어 두었다.
+      Protocol 은 남긴다. 그 자리가 다시 필요해지는 날 구현만 끼우면 된다.
+    """
 
     def __call__(self, state: PipelineState) -> list[str]: ...
 
