@@ -442,8 +442,14 @@ def test_financing_mode_를_재무_축에서_받는다() -> None:
     assert 키 in db.events, f"재무가 준 모드로 안 적혔다: {sorted(db.events)}"
 
 
-def test_축의_실행이_다르면_안_만든다() -> None:
-    """🔴 **fail-closed.** 덮어 쓰면 남의 실행 장부에 수금 사건을 적는다."""
+def test_축의_실행이_다르면_막는다() -> None:
+    """🔴 **fail-closed 다. `BLOCKED` 다.** 덮어 쓰면 남의 실행 장부에 수금 사건을 적는다.
+
+    ★ **`finance_collection.py` 가 같은 상황에 쓰는 낱말과 같다.** 같은 사실에 두
+      낱말을 쓰면 한 저장소 안에서 결정이 뒤집힌다.
+
+    ⚠️ **`NOT_ATTEMPTED` 가 아니다.** 시도할 이유가 없었던 것이 아니라 **막은** 것이다.
+    """
     db = _가짜DB(receivables=[열림])
 
     결과 = seed_day(
@@ -453,20 +459,25 @@ def test_축의_실행이_다르면_안_만든다() -> None:
         read_axis=_축(sim_run_id=남의_실행),
     )
 
-    assert 결과.status == "NOT_ATTEMPTED"
+    assert 결과.status == "BLOCKED", f"막은 것이 {결과.status} 로 접혔다"
+    assert 결과.status != "NOT_ATTEMPTED"
     assert db.events == {}, "축이 다른데 사건을 만들었다"
     assert 남의_실행 in 결과.reason
 
 
-def test_축이_모호하면_사유를_남긴다() -> None:
-    """⚠️ 접기만 하고 사유를 버리면 *"안 만들었다"* 만 남고 고칠 곳이 사라진다."""
+def test_축을_못_읽으면_UNREADABLE_이고_사유를_남긴다() -> None:
+    """🔴 **재무 축 조회도 조회다.** 실패했으면 *"못 했다"* 이지 *"안 했다"* 가 아니다.
+
+    ⚠️ 접기만 하고 사유를 버리면 *"못 했다"* 만 남고 고칠 곳이 사라진다.
+    """
 
     def 모호하다() -> FinanceRuntimeAxis:
         raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
 
     결과 = seed_day(AS_OF, sim_run_id=BURN_IN_SIM_RUN_ID, read_axis=모호하다)
 
-    assert 결과.status == "NOT_ATTEMPTED"
+    assert 결과.status == "UNREADABLE", f"조회 실패가 {결과.status} 로 접혔다"
+    assert 결과.status != "NOT_ATTEMPTED"
     assert "finance_runtime_axis_ambiguous" in 결과.reason
 
 
@@ -617,10 +628,14 @@ def test_사건_생성이_터져도_하루는_열린다(등록소를_비운다: 
 
 
 def test_하루가_안_열리면_시도하지_않는다(등록소를_비운다: None) -> None:
-    """🔴 **`NOT_ATTEMPTED` 를 `NOTHING_DUE` 로 접지 않는다.**
+    """🔴 **`NOT_ATTEMPTED` 가 남는 자리는 여기 하나다.**
 
-    서 있지도 않은 재무 상태 행에 대고 수금을 적으면 안 되고, *"안 했다"* 와
-    *"확인했고 없었다"* 는 다른 사실이다.
+    서 있지도 않은 재무 상태 행에 대고 수금을 적으면 안 되고, *"시도할 이유가
+    없었다"* 는 *"확인했고 없었다"* 와도 *"못 했다"* 와도 *"막았다"* 와도 다른 사실이다.
+
+    ★ **회귀 방어다.** 축 조회 실패(`UNREADABLE`)와 축 불일치(`BLOCKED`)가 이 칸으로
+      다시 흘러들면 209일을 걷고 나서 *"시드 안 된 날"* 을 셀 때 개장 안 한 날과 축이
+      깨진 날이 같이 잡힌다.
     """
     day_open.register_day_opening("finance", _못연다())
     불렸나: list[Any] = []
@@ -636,7 +651,7 @@ def test_하루가_안_열리면_시도하지_않는다(등록소를_비운다: 
     assert out.status == "NOT_OPENED"
     assert 불렸나 == [], "하루가 안 열렸는데 사건을 만들러 갔다"
     assert out.collection_seed_status == "NOT_ATTEMPTED"
-    assert out.collection_seed_status != "NOTHING_DUE"
+    assert out.collection_seed_status not in ("NOTHING_DUE", "UNREADABLE", "BLOCKED")
     assert "NOT_OPENED" in out.collection_seed_reason
 
 
