@@ -17,9 +17,16 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { DEFAULT_AS_OF } from "@/lib/demo_as_of";
 import { ScreenError } from "@/lib/screen";
 
-export const AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-01-06";
+/**
+ * 기본 기준일. 🔴 **값의 주인은 `lib/demo_as_of.ts` 하나다** (`#431`).
+ *
+ * 예전에는 이 파일이 `2026-01-06`, `lib/api.ts` 가 `2025-12-31` 을 각자 들고 있었다.
+ * 지금 화면이 실제로 보는 값은 각 탭이 `asOfSnapshot()` 으로 읽는다.
+ */
+export const AS_OF = DEFAULT_AS_OF;
 
 interface State<T> {
   data: T | null;

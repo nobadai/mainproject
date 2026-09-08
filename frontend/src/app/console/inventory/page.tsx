@@ -7,7 +7,7 @@
  *   카드가 목록으로 오므로, 물류가 카드를 하나 더해도 **이 파일은 안 고칩니다.**
  */
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import {
   CardBlock,
@@ -18,12 +18,16 @@ import {
   StatRow,
   TabButtons,
 } from "@/components/console/Blocks";
-import { AS_OF, useTab } from "@/components/console/useTab";
+import { useTab } from "@/components/console/useTab";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
+//     `useTab` 의 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { logistics, type LogisticsTab } from "@/lib/screen";
 
 export default function InventoryPage() {
   const [pane, setPane] = useState("stock");
-  const { data, error } = useTab<LogisticsTab>(pane, () => logistics(AS_OF, pane));
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const { data, error } = useTab<LogisticsTab>(`${asOf}|${pane}`, () => logistics(asOf, pane));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="재고 · 물류" />;

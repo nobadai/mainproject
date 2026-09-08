@@ -8,7 +8,7 @@
  *   백엔드가 같이 준 눈금(`chart.x_labels`)으로 그립니다.
  */
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import {
   DataTable,
@@ -21,12 +21,16 @@ import {
   StatRow,
   TabButtons,
 } from "@/components/console/Blocks";
-import { AS_OF, useTab } from "@/components/console/useTab";
+import { useTab } from "@/components/console/useTab";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
+//     `useTab` 의 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { finance, type FinanceTab } from "@/lib/screen";
 
 export default function FinancePage() {
   const [state, setState] = useState("base");
-  const { data, error } = useTab<FinanceTab>(state, () => finance(AS_OF, state));
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const { data, error } = useTab<FinanceTab>(`${asOf}|${state}`, () => finance(asOf, state));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="재무" />;

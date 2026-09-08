@@ -9,6 +9,8 @@
  *   이 화면은 **무엇을 고를지 판단할 근거**를 보이는 자리입니다.
  */
 
+import { useSyncExternalStore } from "react";
+
 import {
   DataTable,
   ErrorBox,
@@ -19,7 +21,10 @@ import {
   SourceTag,
   StatRow,
 } from "@/components/console/Blocks";
-import { AS_OF, useTab } from "@/components/console/useTab";
+import { useTab } from "@/components/console/useTab";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
+//     `useTab` 의 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { purchase, type Plan, type PurchaseTab } from "@/lib/screen";
 
 function PlanCard({ plan }: { plan: Plan }) {
@@ -128,7 +133,8 @@ function PlanCard({ plan }: { plan: Plan }) {
 }
 
 export default function PurchasePage() {
-  const { data, error } = useTab<PurchaseTab>(AS_OF, () => purchase(AS_OF));
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const { data, error } = useTab<PurchaseTab>(asOf, () => purchase(asOf));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="매입" />;

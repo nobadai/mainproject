@@ -15,6 +15,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useSyncExternalStore } from "react";
 
 import { MasterDock } from "@/components/console/MasterDock";
+//  🔴 시연용 기준일 선택기 (`#431`). 시연이 끝나면 이 줄과 아래 <DemoAsOfPicker /> 를 지운다.
+import { asOfSnapshot, serverAsOf, setDemoAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import {
   ROLE_LABEL,
   clearSession,
@@ -31,6 +33,45 @@ const TABS = [
   { href: "/console/inventory", label: "재고 · 물류", mark: "LG", group: "dept" },
   { href: "/console/sales", label: "판매", mark: "SL", group: "dept" },
 ] as const;
+
+/**
+ * 🔴 **임시다. 2026-09-08 시연이 끝나면 지운다** (`#431`).
+ *
+ * 운영에서 기준일은 스케줄러가 정한다 (`app/master/clock.py` · `#422`). 화면이 고르는
+ * 동안에는 **시간축의 주인이 둘**이라, 화면에도 그렇게 적어 둔다 — 시연에서 누가 보고
+ * *"이건 왜 있나"* 를 묻기 전에 답이 옆에 있어야 하고, 우리도 지우는 것을 안 잊는다.
+ */
+function DemoAsOfPicker() {
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+
+  return (
+    <span className="ml-auto flex items-center gap-2">
+      <label
+        className="flex items-center gap-1.5 text-[11.5px]"
+        style={{ color: "var(--color-mut2)" }}
+      >
+        기준일
+        <input
+          type="date"
+          value={asOf}
+          onChange={(e) => {
+            //  ★ 빈 값(달력을 지운 상태)은 무시한다. 날짜가 맞는지는 **서버가 답한다**
+            //    — 개장일 판정 같은 규칙을 화면에 새로 만들지 않는다.
+            if (e.target.value) setDemoAsOf(e.target.value);
+          }}
+          className="rounded-md border px-2 py-1 font-mono text-[11.5px]"
+          style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
+        />
+      </label>
+      <small
+        className="rounded-md px-1.5 py-0.5 text-[10px]"
+        style={{ background: "rgba(190,120,40,.12)", color: "#9a6410" }}
+      >
+        시연용 · 곧 지웁니다 (#431)
+      </small>
+    </span>
+  );
+}
 
 export default function ConsoleLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -168,6 +209,8 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
           style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
         >
           <h1 className="m-0 text-[17px] font-semibold tracking-[-0.02em]">{active.label}</h1>
+          {/* 🔴 시연용. 지울 때는 이 한 줄과 위 DemoAsOfPicker 정의를 같이 지운다 (`#431`) */}
+          <DemoAsOfPicker />
         </header>
 
         {/* 아래 서랍이 화면을 가리므로 바닥에 자리를 비워 둔다 */}

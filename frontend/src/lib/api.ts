@@ -10,6 +10,7 @@
  *   **무엇을 고쳐야 하는지 알려주는 문장**이 사라진다.
  */
 
+import { DEFAULT_AS_OF, asOfSnapshot } from "./demo_as_of";
 import type {
   AskResponse,
   BurnIn,
@@ -56,15 +57,28 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(body) as T;
 }
 
-/** 오늘 기준일. 재무·물류 실 DB 가 있는 날이라 시연은 이 날짜로 돈다. */
-export const AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2025-12-31";
+/**
+ * 기본 기준일.
+ *
+ * 🔴 값의 주인은 `lib/demo_as_of.ts` 하나다 (`#431`). 예전에는 이 파일과
+ *    `components/console/useTab.ts` 가 **각자 다른 기본값을 들고 있었다** —
+ *    마스터는 `2025-12-31` 로 판단하고 탭은 `2026-01-06` 을 보여 줬다.
+ *
+ * ★ 이 상수는 **기본값 자리로만 남는다.** 실제로 부를 때 쓰는 값은
+ *   `asOfSnapshot()` 이 준다 — 시연 중에 화면에서 날짜를 바꾸면 그 값이 바뀐다.
+ */
+export const AS_OF = DEFAULT_AS_OF;
 export const POLICY_VERSION = "v1.3";
 
 /** ① 발화문을 분류한다. **확인이 필요하면 아무것도 실행하지 않는다.** */
 export function ask(utterance: string): Promise<AskResponse> {
   return call<AskResponse>("/master/ask", {
     method: "POST",
-    body: JSON.stringify({ utterance, as_of: AS_OF, policy_version: POLICY_VERSION }),
+    body: JSON.stringify({
+      utterance,
+      as_of: asOfSnapshot(),
+      policy_version: POLICY_VERSION,
+    }),
   });
 }
 
@@ -86,7 +100,7 @@ export function execute(args: {
     method: "POST",
     body: JSON.stringify({
       intent: args.intent,
-      as_of: AS_OF,
+      as_of: asOfSnapshot(),
       policy_version: POLICY_VERSION,
       request_id: args.requestId ?? null,
       // 발화문에 없어 화면이 실어야 하는 셋 (SELECT · RERUN 필수)

@@ -11,7 +11,7 @@
  *   1,000원짜리를 배추는 197원 틀립니다.
  */
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import {
   DataTable,
@@ -25,7 +25,10 @@ import {
   StatRow,
   TabButtons,
 } from "@/components/console/Blocks";
-import { AS_OF, useTab } from "@/components/console/useTab";
+import { useTab } from "@/components/console/useTab";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
+//     `useTab` 의 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { forecast, type ForecastTab } from "@/lib/screen";
 
 export default function ForecastPage() {
@@ -36,9 +39,10 @@ export default function ForecastPage() {
   //    끄면 운영에서 보이는 모습이 됩니다 — 예측 시점에는 정답이 없습니다.
   const [showActual, setShowActual] = useState(true);
 
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   const { data, error } = useTab<ForecastTab>(
-    `${kind}|${item}|${baseDt ?? ""}`,
-    () => forecast(AS_OF, item, kind, baseDt),
+    `${asOf}|${kind}|${item}|${baseDt ?? ""}`,
+    () => forecast(asOf, item, kind, baseDt),
   );
 
   if (error) return <ErrorBox message={error} />;
