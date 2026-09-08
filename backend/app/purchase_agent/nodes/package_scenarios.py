@@ -360,6 +360,32 @@ def compute_max_price(forecast: dict, coverage_days: int) -> int:
     return max(row["upper"] for row in usable_forecast_window(forecast, coverage_days))
 
 
+def compute_cut_unit_price(forecast: dict, coverage_days: int) -> int:
+    """매입 **컷 기준**. ⚠️ 값이 둘인데 지금은 같다 (2026-09-08 · `dev@de7e132` · #394 기준).
+
+    ::
+
+        max_price       재무 STRESS 로 나간다 (amount_max_krw = qty × 이것)
+                        🔴 재무·마스터가 그 등식을 검사한다
+                           finance/capabilities/scenario.py:180 · master/verifier.py:711
+        cut_unit_price  우리 컷 기준 (self_check.check_max_price)
+
+    🔴 **왜 갈랐나** — 하나였을 때 밴드가 좁아지면 컷이 엄격해지고 재무 STRESS 는
+    느슨해졌다. **방향이 반대인데 값이 하나였다.**
+
+    ★ 이 판은 **"고정"이 아니라 "갈라놓기"** 다. `09-17` 에 밴드가 바뀌면 STRESS 는
+    여전히 따라간다 — **무엇으로 고정할지가 아직 안 정해졌다** (재무 `§2` 답 대기).
+
+    ⚠️ ML 여유율 표가 오면 **여기 산식만** ``predicted × (1 + 여유율)`` 로 바꾼다.
+    ``max_price`` 는 안 건드린다.
+
+    ★ **지금은 위임한다 — 복제하지 않는다.** 같은 산식을 두 벌 적으면 한쪽만 고쳐지는
+    날이 오고, 그때 갈리는 것이 판정이다 (규칙 8 · `#388` 이 그 병이다). 갈라야 할 때
+    이 함수의 몸통만 바뀐다.
+    """
+    return compute_max_price(forecast, coverage_days)
+
+
 def compute_margin(
     unit_price: float, contract_price: float | None
 ) -> tuple[bool | None, float | None]:
@@ -1450,6 +1476,10 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         rationale_input = {**draft, "daily_demand_kg": base["daily_demand_kg"]}
         unit_price = _weighted_unit_price(sourcing, total)
         margin_warning, expected_margin_rate = compute_margin(unit_price, contract_price)
+        # ⚠️ **둘을 따로 부른다 — 지금은 같은 값이다** (`compute_cut_unit_price` 참조).
+        #   재무 STRESS 로 나가는 것은 ``max_price`` 뿐이고, 컷은 ``cut_unit_price`` 가 한다.
+        max_price = compute_max_price(state["forecast"], draft["coverage_days"])
+        cut_unit_price = compute_cut_unit_price(state["forecast"], draft["coverage_days"])
         scenarios.append(
             {
                 "label": draft["label"],
@@ -1459,15 +1489,19 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "total_amount_krw": sum(
                     line["qty_kg"] * line["grade_unit_price"] for line in sourcing
                 ),
-                "max_price": compute_max_price(state["forecast"], draft["coverage_days"]),
+                # 🔴 **재무 STRESS 전용이다** — 컷은 ``cut_unit_price`` 가 한다.
+                "max_price": max_price,
+                "cut_unit_price": cut_unit_price,
                 # 규칙 5 — 계약단가 초과는 컷이 아니라 표시다.
                 "margin_warning": margin_warning,
                 "split_plan": rounds,
                 "sourcing_plan": sourcing,
                 # 분할 안이고 N5를 받은 날만 실린다 — 아니면 **키 자체가 없다**.
+                # ★ **``max_price`` 다 — ``cut_unit_price`` 가 아니다.** 재무·마스터가
+                #   ``amount_max_krw == qty × max_price`` 를 검사한다.
                 **_payment_schedule_field(
                     rounds,
-                    compute_max_price(state["forecast"], draft["coverage_days"]),
+                    max_price,
                     pending_value(state, constraints, "purchase_payment_days"),
                 ),
                 "expected_margin_rate": expected_margin_rate,

@@ -341,8 +341,23 @@ class Scenario(BaseModel):
     coverage_days: int = Field(gt=0)
     total_qty_kg: int = Field(gt=0)
     total_amount_krw: int = Field(ge=0)
-    #: q90 기반 하드 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
+    #: 예측 상단 기반 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
+    #:
+    #: 🔴 **재무 STRESS 전용이다** (2026-09-08 · `#394` 기준). ``amount_max_krw = qty ×
+    #: max_price`` 를 **재무와 마스터가 검사한다** (``finance/capabilities/scenario.py:180``
+    #: · ``master/verifier.py:711``). 컷은 이 값이 아니라 ``cut_unit_price`` 가 한다.
     max_price: int = Field(ge=0)
+    #: 매입 **컷 기준**. ``sourcing_plan`` 단가가 이걸 넘으면 ⑦이 컷한다.
+    #:
+    #: ⚠️ **지금은 ``max_price`` 와 같은 값이다** — 갈라만 두었다
+    #: (``nodes/package_scenarios.compute_cut_unit_price``). 하나였을 때는 밴드가
+    #: 좁아지면 **컷이 엄격해지고 재무 STRESS 는 느슨해졌다** — 방향이 반대인데 값이
+    #: 하나였다.
+    #:
+    #: ★ **``None`` 을 허용하는 이유는 남의 픽스처다.** 재무가 우리 스키마로 검증하는데
+    #: (``finance/adapter.py:469``) 그쪽 픽스처는 이 필드를 모른다. 우리 산출물은 항상
+    #: 채우고, 없으면 ⑦이 **컷 사유를 남긴다** — 조용히 통과시키지 않는다 (규칙 3).
+    cut_unit_price: int | None = Field(default=None, ge=0)
     #: 매입단가가 contract_price 방어선을 넘었다는 **표시**. 컷이 아니다(영업이 T2에서 판정).
     #:
     #: 규칙 3(0/NULL 구분)을 bool에 적용한 것 — ``None``은 "아직 계산되지 않음"이다.
@@ -381,7 +396,9 @@ class Scenario(BaseModel):
             data.pop("payment_schedule", None)
         return data
 
-    @field_validator("coverage_days", "max_price", "expected_margin_rate", mode="before")
+    @field_validator(
+        "coverage_days", "max_price", "cut_unit_price", "expected_margin_rate", mode="before"
+    )
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)

@@ -875,7 +875,8 @@ _SCENARIO_NUMERIC_SOURCES: dict[str, str] = {
     "coverage_days": "안별 커버일수 설정",
     "total_qty_kg": "일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)의 상한에 맞춰 줄임",
     "total_amount_krw": "등급별 수량 × 단가의 합 — 등급 배분에서 파생",
-    "max_price": "커버 구간 예측 상단의 최대값",
+    "max_price": "커버 구간 예측 상단의 최대값 — 재무 STRESS 로 나간다",
+    "cut_unit_price": "커버 구간 예측 상단의 최대값 — 매입 컷 기준 (STRESS 상한과 지금은 같다)",
     "expected_margin_rate": "(계약단가 − 가중 매입단가) ÷ 계약단가",
 }
 
@@ -956,6 +957,7 @@ _SCENARIO_UNITS: dict[str, str] = {
     "total_qty_kg": "kg",
     "total_amount_krw": "KRW",
     "max_price": "KRW/kg",
+    "cut_unit_price": "KRW/kg",
     "expected_margin_rate": "ratio",
 }
 

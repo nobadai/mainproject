@@ -462,19 +462,23 @@ def test_price_check_rejects_an_invented_price() -> None:
     assert reason is not None
 
 
-def test_max_price_is_a_hard_cut_but_contract_price_is_only_a_warning() -> None:
+def test_the_cut_ceiling_is_a_hard_cut_but_contract_price_is_only_a_warning() -> None:
     """혼동하기 쉬운 두 값을 갈라놓는다 (규칙 5).
 
-    ``max_price`` 초과는 컷, ``contract_price`` 초과는 margin_warning 표시일 뿐이다.
+    컷 기준 초과는 컷, ``contract_price`` 초과는 margin_warning 표시일 뿐이다.
+
+    🔴 **컷을 정하는 것은 ``cut_unit_price`` 다** (2026-09-08). ``max_price`` 는 재무
+    STRESS 로 나가는 값이고 컷과 경로가 갈렸다 — 그 갈림을 따로 재는 것은
+    ``test_cut_price_lineage.py`` 다.
     """
-    over_ceiling = {"sourcing_plan": [_line(price=2000)], "max_price": 1900}
+    over_ceiling = {"sourcing_plan": [_line(price=2000)], "cut_unit_price": 1900}
     assert check_max_price(over_ceiling) is not None
 
-    within = {"sourcing_plan": [_line(price=1650)], "max_price": 1900}
+    within = {"sourcing_plan": [_line(price=1650)], "cut_unit_price": 1900}
     assert check_max_price(within) is None
 
-    # 계약단가(2,293)를 넘는 단가여도 max_price 안이면 컷되지 않는다
-    above_contract = {"sourcing_plan": [_line(price=2400)], "max_price": 2500}
+    # 계약단가(2,293)를 넘는 단가여도 컷 기준 안이면 컷되지 않는다
+    above_contract = {"sourcing_plan": [_line(price=2400)], "cut_unit_price": 2500}
     assert check_max_price(above_contract) is None
 
 
