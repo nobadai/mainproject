@@ -3,7 +3,8 @@
 🔴 **실측 2026-09-01 — 오케 경로가 품목을 없애고 있었다.**
 
 ```python
-# master/cycle.py:311
+# 옛 master/cycle.py:311 — 그 파일은 2026-09-08 에 지웠고, 같은 줄이 지금은
+# tests/master/critic/cycle_harness.py 의 build_commitment 에만 남아 있다
 ArrivalLeg(qty_kg=sum(leg.qty_kg.values()), ...)      # ← 품목이 여기서 사라진다
 ```
 
@@ -185,12 +186,14 @@ def test_bool_은_숫자가_아니다():
 #: 옛 `app/orchestrator/` 에서 마스터로 옮겨 온 사이클 모듈들 (2026-09-07 · 지시).
 #: 폴더가 없어졌다고 이 검사의 뜻이 없어지지 않는다 — 같은 변환을 저기서 가져오지
 #: 않는다는 주장이고, 이름만 새 자리로 바뀌었다.
+#:
+#: ★ **2026-09-08 에 셋을 뺐다** — `cycle`·`cycle_graph`·`cycle_graph_b` 는 저장소에
+#:   없다 (`test_master_legacy_cycle_is_gone.py` 가 다시 생기는 것을 막는다).
+#:   없는 모듈을 목록에 남기면 **유령을 가리키는 검사**가 된다 — 아무것도 안 봐 주면서
+#:   봐 주는 인상만 남는다.
 _CYCLE_MODULES = (
     "app.master.band",
     "app.master.outbound",
-    "app.master.cycle",
-    "app.master.cycle_graph",
-    "app.master.cycle_graph_b",
     "app.master.cycle_schemas",
     "app.master.cycle_persistence",
     "app.master.cycle_run_repository",

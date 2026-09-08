@@ -414,6 +414,7 @@ section("\n[B-11] v1.2.1 패치 회귀 — 사이클 A·B 결함 4건")
 
 from dataclasses import replace as _dc_replace
 
+from cycle_harness import CycleHooks, build_cycle_commitment, run_day
 from fixtures import _std_replies, make_scenarios, make_split_variants
 
 from app.contracts.core import (
@@ -424,7 +425,6 @@ from app.contracts.core import (
     PipelineState,
 )
 from app.master.band import check_occupancy_detailed
-from app.master.cycle import CycleHooks, build_commitment, run_day
 
 _REPLIES_STD = _std_replies()
 
@@ -469,7 +469,7 @@ ok(_res2.ran and _res2.legs_dated == 2, "회차 2건 전부 도착일로 검사�
 _st = PipelineState(snapshot=SNAP)
 _st.clip_results = [_t2]
 _st.approved_scenario_id = "SCN-T2"
-_c = build_commitment(_st)
+_c = build_cycle_commitment(_st)
 ok(len(_c.arrival_schedule) == 2, "arrival_schedule 이 회차 수만큼 생성된다")
 ok(
     abs(sum(a.qty_kg for a in _c.arrival_schedule) - _c.total_qty_kg) < 0.5,
@@ -549,6 +549,7 @@ ok(_seen["B"].commitment is not None, "overlay 에 H1 승인 약정이 실려 �
 
 section("\n[B-12] 사이클 B 골격 배선")
 
+from cycle_harness import build_cycle_b_hooks, node_t3_combine
 from fixtures_cycle_b import (
     CASES_B,
     finance_reply_b,
@@ -557,8 +558,6 @@ from fixtures_cycle_b import (
 )
 from run_day_stub import _hooks_a, _hooks_b
 
-from app.master.cycle_graph import node_t3_combine
-from app.master.cycle_graph_b import build_cycle_b_hooks
 from app.master.outbound import (
     clip_allocations,
     combine_outbound_band,
@@ -918,7 +917,7 @@ ok(
 
 section("\n[B-16] 부서당 1회 회신 — 회송은 T1 만 다시 돈다 (§3.1 · §3.6.1)")
 
-from app.master.cycle import run_subcycle
+from cycle_harness import run_subcycle
 
 
 def _count_calls(n_retry: int, critic_route=None):
