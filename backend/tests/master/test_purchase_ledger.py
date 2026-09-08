@@ -10,11 +10,16 @@
 ★ 재는 것은 넷이다.
 
   ```text
-  쓰는가      회차 하나면 header 한 행 · 품목 한 줄
+  쓰는가      회차마다 header 한 행 · 품목 한 줄 (회차 금액이 다 실려 있을 때)
   순서        원장이 재무보다 먼저 (payables.purchase_id 가 FK 다)
-  안 쓰는가   회차가 둘이면 · 지급일이 없으면 — 커넥션도 안 연다
+  안 쓰는가   회차 금액이 비면 · 지급일이 없으면 — 커넥션도 안 연다
   어휘        item_id 는 items 표에서 조회한다 — 하드코딩 맵이 아니다
   ```
+
+⚠️ **다회차는 이 저장소에서 값이 지나간 적이 없는 길이다** (매입 실측 2026-09-08).
+   `purchases` 20행 중 관통 승인분 4행은 전부 `-S1` 이고 번인 seed 16행은 회차
+   접미사가 없다. 분할 게이트도 `by_volume 0/31 · by_trend 0/81` 이다. 그래서
+   **여기서 재는 것이 그 길의 첫 발자국**이다.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ def _leg(
     qty_kg: float = 3587.0,
     purchase_date: date = AS_OF,
     payment_due_date: date | None = AS_OF,
+    amount_krw: float | None = None,
 ) -> ArrivalLeg:
     return ArrivalLeg(
         item="배추",
@@ -56,6 +62,31 @@ def _leg(
         purchase_date=purchase_date,
         seq=seq,
         payment_due_date=payment_due_date,
+        amount_krw=amount_krw,
+    )
+
+
+#: 🟢 회차 금액이 다 실린 두 회차. 3,587kg × 854원을 2,000 + 1,587 로 가른 것이라
+#:   회차 금액 합이 총액과 정확히 떨어진다 (`commitment.py` 가 그 합을 본다).
+def _두회차(
+    *,
+    payment_due_dates: tuple[date | None, date | None] = (AS_OF, AS_OF),
+    amounts: tuple[float | None, float | None] = (1708000.0, 1355298.0),
+) -> tuple[ArrivalLeg, ...]:
+    return (
+        _leg(
+            seq=1,
+            qty_kg=2000.0,
+            payment_due_date=payment_due_dates[0],
+            amount_krw=amounts[0],
+        ),
+        _leg(
+            seq=2,
+            qty_kg=1587.0,
+            purchase_date=AS_OF + timedelta(days=3),
+            payment_due_date=payment_due_dates[1],
+            amount_krw=amounts[1],
+        ),
     )
 
 
@@ -236,24 +267,22 @@ def test_원장이_재무_persist_보다_먼저_불린다() -> None:
     assert conn.commits == 1, "커밋은 여전히 한 번이다"
 
 
-# ── ③ 회차가 둘이면 쓰지 않는다 ─────────────────────────────────────────
+# ── ③ 다회차는 **회차 금액이 다 있을 때만** 쓴다 ────────────────────────
 
 
-def test_회차가_둘이면_NOT_APPLIED_이고_커넥션을_안_연다() -> None:
-    """★ 재무 `_single_leg` 이 이미 같은 이유로 막는다. **같은 사실을 두 곳이 다르게
-    판정하지 않게** 마스터가 앞에서 같은 사유로 멈춘다.
+def test_회차가_둘인데_금액이_비면_NOT_APPLIED_이고_커넥션을_안_연다() -> None:
+    """★ 막는 것은 *"회차가 둘"* 이 아니라 **회차 금액이 비었다**는 사실이다.
+
+    ⚠️ 전에는 회차가 둘이면 무조건 막았고, 주석은 재무도 그렇다고 적었다. 재무
+      `_payment_legs`(`app/finance/transition.py:207`)는 `len(legs) > 1` 이면서 금액이
+      비었을 때만 막는 **조건부**다 — 이제 두 곳이 같은 조건으로 막는다.
     """
     log: list[tuple[str, Any]] = []
     transition.register_transition("finance", 가짜전이("finance", log))
     transition.register_transition("logistics", 가짜전이("logistics", log))
     calls: list[int] = []
 
-    두회차 = _commitment(
-        legs=(
-            _leg(seq=1, qty_kg=2000.0),
-            _leg(seq=2, qty_kg=1587.0, purchase_date=AS_OF + timedelta(days=3)),
-        )
-    )
+    두회차 = _commitment(legs=_두회차(amounts=(None, None)))
 
     def _connect() -> 가짜커넥션:
         calls.append(1)
@@ -262,9 +291,111 @@ def test_회차가_둘이면_NOT_APPLIED_이고_커넥션을_안_연다() -> Non
     out = transition.apply_approval(두회차, connect=_connect)
 
     assert out.status == "NOT_APPLIED"
-    assert "회차가 둘 이상" in out.reason
+    assert "1, 2회차 금액이 없어" in out.reason, "비어 있는 seq 를 이름으로 대야 한다"
     assert calls == [], "쓸 수 없는데 커넥션을 열었다"
     assert log == [], "쓸 수 없는데 부서를 불렀다"
+
+
+def test_비어_있는_회차만_사유에_이름이_오른다() -> None:
+    """🔴 *"회차별 금액이 아직 없다"* 처럼 뭉뚱그리지 않는다. **어느 회차를 채워야
+    하는지**를 사유가 말해야 한다 — 채워진 seq1 을 사유가 부르면 안 된다.
+    """
+    transition.register_transition("finance", 가짜전이("finance", []))
+    transition.register_transition("logistics", 가짜전이("logistics", []))
+
+    out = transition.apply_approval(
+        _commitment(legs=_두회차(amounts=(1708000.0, None))),
+        connect=lambda: 가짜커넥션(),
+    )
+
+    assert out.status == "NOT_APPLIED"
+    assert "2회차 금액이 없어" in out.reason
+    assert "1, 2" not in out.reason, "채워진 회차까지 비었다고 부르면 안 된다"
+
+
+def test_회차_금액이_다_있으면_회차마다_원장_한_행이_된다() -> None:
+    """🔴 **회차마다 자기 금액이다.** 총액을 회차마다 실으면 원장이 승인 총액의 두 배로
+    부풀어 오르고, 재무 채무 합과 갈린다.
+
+    ⚠️ 이 길로 값이 지나간 적이 한 번도 없다 (매입 실측 2026-09-08 · `purchases` 20행
+      중 승인분 4행 전부 `-S1`, 분할 게이트 `by_volume 0/31 · by_trend 0/81`).
+    """
+    commitment = _commitment(legs=_두회차())
+
+    rows = _rows_of(commitment)
+
+    assert [row.purchase_id for row in rows] == ["PUR-REQ-1-D1-S1", "PUR-REQ-1-D1-S2"]
+    assert [row.total_amount_krw for row in rows] == [
+        Decimal("1708000.000000"),
+        Decimal("1355298.000000"),
+    ], "회차 금액이 아니라 총액이 실렸다"
+    # 🟢 회차 금액 합 = 승인 총액. 원장이 부풀지 않는다.
+    assert sum(row.total_amount_krw for row in rows) == Decimal("3063298.000000")
+    # ★ 단가는 **회차 금액 ÷ 회차 수량**이다 — 축을 섞지 않는다.
+    assert [row.unit_price_krw_per_kg for row in rows] == [
+        Decimal("854.000000"),
+        Decimal("854.000000"),
+    ]
+    assert [row.quantity_kg for row in rows] == [
+        Decimal("2000.000000"),
+        Decimal("1587.000000"),
+    ]
+    # ★ 매입일도 지급일도 **회차 것**이다. header 에 날짜가 하나뿐이라 회차마다 행이다.
+    assert [row.purchase_date for row in rows] == [AS_OF, AS_OF + timedelta(days=3)]
+
+
+def test_다회차가_전이를_지나_purchases_두_행으로_나간다() -> None:
+    """★ 계산만 맞고 전이가 앞에서 돌아서면 원장에는 여전히 아무것도 안 남는다."""
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition("logistics", 가짜전이("logistics", log))
+    conn = 가짜커넥션()
+
+    def _connect() -> 가짜커넥션:
+        conn.log = log
+        return conn
+
+    out = transition.apply_approval(_commitment(legs=_두회차()), connect=_connect)
+
+    assert out.status == "APPLIED"
+    나간_SQL = [text for text, _ in conn.log]
+    assert sum("INSERT INTO" in t and ".purchases" in t for t in 나간_SQL) == 2
+    assert sum("INSERT INTO" in t and "purchase_items" in t for t in 나간_SQL) == 2
+    assert conn.commits == 1, "커밋은 여전히 한 번이다"
+
+
+def test_다회차_지급일이_하나라도_없으면_NOT_APPLIED_다() -> None:
+    """★ 금액이 다 실려도 지급일이 비면 열지 않는다 —
+    `purchases.payment_due_date` 는 NOT NULL 이고 없는 날짜를 지어내지 않는다.
+    """
+    transition.register_transition("finance", 가짜전이("finance", []))
+    transition.register_transition("logistics", 가짜전이("logistics", []))
+    calls: list[int] = []
+
+    def _connect() -> 가짜커넥션:
+        calls.append(1)
+        return 가짜커넥션()
+
+    out = transition.apply_approval(
+        _commitment(legs=_두회차(payment_due_dates=(AS_OF, None))), connect=_connect
+    )
+
+    assert out.status == "NOT_APPLIED"
+    assert "2회차 지급일이 없다" in out.reason
+    assert "purchase_payment_days" in out.reason
+    assert calls == [], "쓸 수 없는데 커넥션을 열었다"
+
+
+def test_다회차_지급일이_없으면_원장_계산_자체가_멈춘다() -> None:
+    """★ 전이 앞단을 지나쳐 들어와도 원장이 다시 막는다 — 첫 회차만 조용히 쓰지 않는다."""
+    with pytest.raises(ledger.PurchaseLedgerNotWritable, match="2회차 지급일이 없다"):
+        _rows_of(_commitment(legs=_두회차(payment_due_dates=(AS_OF, None))))
+
+
+def test_다회차_금액이_비면_원장_계산_자체가_멈춘다() -> None:
+    """★ 최후 방어. 여기서 총액으로 때우면 회차 하나가 승인 전액을 진다."""
+    with pytest.raises(ledger.PurchaseLedgerNotWritable, match="2회차 금액이 없어"):
+        _rows_of(_commitment(legs=_두회차(amounts=(1708000.0, None))))
 
 
 # ── ④ 지급일이 없으면 쓰지 않는다 ───────────────────────────────────────

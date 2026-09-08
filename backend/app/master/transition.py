@@ -47,7 +47,12 @@ from pydantic import BaseModel, Field
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
 from app.master.day_opening_repository import opened_days_after
-from app.master.ledger import build_purchase_rows, persist_purchases, sim_run_id_for
+from app.master.ledger import (
+    build_purchase_rows,
+    ledger_block_reason,
+    persist_purchases,
+    sim_run_id_for,
+)
 
 __all__ = [
     "PARTS",
@@ -334,27 +339,21 @@ def _ledger_blocked(commitment: ApprovedCommitment) -> str:
     ★ **`FAILED` 가 아니라 `NOT_APPLIED` 로 가는 자리다.** 둘 다 아직 못 쓴 상태지만,
       여기 걸리는 것은 *"바꾸려다 실패했다"* 가 아니라 *"쓸 값이 아직 없다"* 다.
 
-    🔴 **회차가 둘 이상이면 쓰지 않는다.** 매입이 회차별 금액을 아직 안 보내
-       어느 회차에 얼마가 걸리는지 말할 방법이 없다. 수량 비율로 쪼개면 회차마다
-       단가가 다른 분할 매입에서 **조용히 틀린 원장**이 생긴다.
+    🔴 **판정도 문장도 여기서 짓지 않는다.** 주인은 `ledger.ledger_block_reason` 이고
+       `build_purchase_rows` 가 최후 방어로 같은 함수를 다시 부른다. 여기 규칙을 한 줄
+       복사해 두면 원장이 여는 조건과 전이가 여는 조건이 갈리는 날이 온다.
 
-       ★ 재무 `_single_leg` 이 이미 같은 이유로 막고 있다. 같은 사실을 두 곳이 다르게
-         판정하지 않게 마스터가 **앞에서 같은 사유로** 멈춘다 — 뒤에서 재무가 막으면
-         같은 상태가 `FAILED` 로 나간다.
-
-    🔴 **지급일이 없으면 쓰지 않는다.** `purchases.payment_due_date` 는 NOT NULL 이고
-       그 값의 근거는 재무 N5 다. 없는 날짜를 지어내지 않는다.
+    ★ **회차가 둘 이상이어도 회차 금액이 다 실려 있으면 지나간다** (2026-09-08).
+      전에는 무조건 막았고 그 시절 주석은 *"재무도 같은 이유로 무조건 막는다"* 고
+      적었는데 **사실이 아니었다** — 재무 `_payment_legs`
+      (`app/finance/transition.py:207`)는 `len(legs) > 1` 일 때 금액이 비었으면만
+      막는 **조건부**다. 이제 두 곳이 같은 조건으로 막는다.
 
     ★ 회차가 **하나도 없는** 경우는 여기서 가르지 않는다 — 그건 원장 이전에 재무가
       `commitment_arrival_schedule` 로 먼저 막는 상태이고, 그 사유를 여기서 다시
       쓰면 같은 사실이 두 문장으로 나간다.
     """
-    legs = commitment.arrival_schedule
-    if len(legs) > 1:
-        return "회차가 둘 이상이라 원장을 쓸 수 없다 — 회차별 금액이 아직 없다"
-    if legs and legs[0].payment_due_date is None:
-        return "재무 purchase_payment_days(N5) 가 없어 지급일을 만들 수 없다"
-    return ""
+    return ledger_block_reason(commitment)
 
 
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────

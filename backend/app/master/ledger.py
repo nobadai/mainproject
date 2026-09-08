@@ -21,10 +21,22 @@
   자리는 승인을 쥔 마스터다 (`transition.purchase_id_for`). 부모 행이 없으면
   재무 FK 가 막는다 — 그래서 원장 쓰기가 재무보다 **먼저**다.
 
-🔴 **회차 하나짜리 길만 있다.** 회차가 둘 이상이면 여기까지 오지 않는다 —
-   `transition.apply_approval` 이 앞에서 멈춘다. 매입이 회차별 금액을 아직 안 보내
-   어느 회차에 얼마가 걸리는지 말할 방법이 없기 때문이고, 재무 `_single_leg` 이
-   이미 같은 이유로 막고 있다. **같은 사실을 두 곳이 다르게 판정하지 않게** 한다.
+🔴 **다회차 원장은 회차 금액이 다 실려 있을 때만 연다** (2026-09-08). 전에는 회차가
+   둘 이상이면 **무조건** 막았다 — 매입이 회차별 금액을 안 보내던 시절의 규칙이다.
+   지금은 매입이 `#265` 로 회차 금액을 싣고(seq1 6,182,450 + seq2 6,180,800 = total),
+   재무 `_payment_legs`(`app/finance/transition.py:207`)가 **조건부**로 지나가며,
+   물류가 `purchase_ids.get(leg.seq)` 로 회차별 매입 ID 를 받는다. 마스터 한 곳만
+   막고 있었다. 새 규칙은 **모든 leg 에 `amount_krw` 와 `payment_due_date` 가 다
+   있을 때만 연다**이고, 하나라도 없으면 **어느 seq 가 비었는지 이름을 대고** 멈춘다.
+
+   ⚠️ **이 길로 값이 지나간 적이 한 번도 없다** (매입 실측 2026-09-08).
+   `purchases` 20행 중 관통 승인분 4행은 전부 `-S1` 이고 번인 seed 16행은 회차
+   접미사 자체가 없다. 분할 게이트도 `by_volume 0/31 · by_trend 0/81` 로 한 번도
+   열리지 않았다. **여기는 새로 여는 길이고, 처음 밟히는 길이다.**
+
+★ **막는 문장의 주인은 `ledger_block_reason` 하나다.** `transition._ledger_blocked`
+  가 앞에서 그것을 부르고 `build_purchase_rows` 가 최후 방어로 다시 부른다 —
+  같은 사실을 두 곳이 다른 문장으로 말하지 않는다.
 """
 
 from __future__ import annotations
@@ -38,7 +50,7 @@ from typing import Any
 from psycopg import sql
 
 from app.finance.db import get_db_schema
-from app.master.commitment import ApprovedCommitment
+from app.master.commitment import ApprovedCommitment, ArrivalLeg
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 # ⚠️ **`transition` 을 모듈 맨 위에서 부르지 않는다.** 전이 경계가 이 파일을 부르고
@@ -52,6 +64,7 @@ __all__ = [
     "PurchaseWrite",
     "build_purchase_rows",
     "cancel_purchases",
+    "ledger_block_reason",
     "persist_purchases",
     "sim_run_id_for",
 ]
@@ -82,6 +95,54 @@ class PurchaseLedgerNotWritable(ValueError):
     ★ 여기서 값을 맞춰 넣으면 그 순간 마스터가 남의 숫자를 만든 것이 된다.
       멈추면 `apply_approval` 이 `FAILED` 로 사유를 남긴다.
     """
+
+
+def _seq_목록(seqs: Sequence[int]) -> str:
+    """비어 있는 회차를 **이름으로** 부른다.
+
+    🔴 *"회차별 금액이 아직 없다"* 처럼 뭉뚱그린 문장을 쓰지 않는다. 회차가 넷인데
+       둘만 비어 있을 때 그 문장은 어느 것을 채워야 하는지 말해 주지 않는다.
+    """
+    return ", ".join(str(seq) for seq in seqs)
+
+
+def ledger_block_reason(commitment: ApprovedCommitment) -> str:
+    """매입 원장을 쓸 수 없는 사유. 쓸 수 있으면 **빈 문자열**이다.
+
+    ★ **이 문장의 주인은 여기 하나다.** `transition._ledger_blocked` 가 앞에서
+      부르고 `build_purchase_rows` 가 최후 방어로 다시 부른다.
+
+    🔴 **회차가 둘 이상이면 회차마다 금액이 있어야 한다.** 없는 회차를 총액이나
+       수량 비율로 채우면 회차마다 단가가 다른 분할 매입에서 **조용히 틀린 원장**이
+       생긴다. 재무 `_payment_legs`(`app/finance/transition.py:207`)가 같은 자리를
+       같은 조건으로 막는다 — 마스터가 앞에서 먼저 멈추는 것뿐이다.
+
+    ★ **회차가 하나면 금액이 없어도 막지 않는다.** 축이 하나뿐이라 총액이 곧 그
+      회차 금액이고, 이것이 회차 금액을 안 싣던 옛 입력이 지나가던 길이다.
+      재무가 `len(legs) > 1` 을 조건으로 붙여 같은 보존을 한다.
+
+    🔴 **지급일이 없으면 쓰지 않는다.** `purchases.payment_due_date` 는 NOT NULL 이고
+       그 값의 근거는 재무 N5 다. 없는 날짜를 지어내지 않는다.
+
+    ★ 회차가 **하나도 없는** 경우는 여기서 가르지 않는다 — 그건 원장 이전에 재무가
+      `commitment_arrival_schedule` 로 먼저 막는 상태이고, 그 사유를 여기서 다시
+      쓰면 같은 사실이 두 문장으로 나간다.
+    """
+    legs = tuple(commitment.arrival_schedule)
+    if len(legs) > 1:
+        빈금액 = [leg.seq for leg in legs if leg.amount_krw is None]
+        if 빈금액:
+            return (
+                f"{_seq_목록(빈금액)}회차 금액이 없어 원장을 쓸 수 없다"
+                " — 매입이 그 회차 금액을 아직 안 보냈다"
+            )
+    빈지급일 = [leg.seq for leg in legs if leg.payment_due_date is None]
+    if 빈지급일:
+        return (
+            f"{_seq_목록(빈지급일)}회차 지급일이 없다"
+            " — 재무 purchase_payment_days(N5) 가 없어 만들 수 없다"
+        )
+    return ""
 
 
 def sim_run_id_for(commitment: ApprovedCommitment) -> str:
@@ -136,13 +197,15 @@ def build_purchase_rows(
 ) -> tuple[PurchaseWrite, ...]:
     """승인 약정을 매입 원장 행으로 옮긴다. **계산만 한다 — DB 를 부르지 않는다.**
 
+    ★ **회차마다 한 행이다.** `purchases.purchase_date` 가 header 에 하나뿐이라
+      매입일이 다른 회차를 한 header 에 담을 수 없다 (`transition.purchase_id_for`).
+
     :param purchase_ids: 회차(`seq`) → `purchase_id` 매핑. 재무에 넘기는 것과 **같은
         매핑**이다 — 여기서 따로 지으면 `payables.purchase_id` 가 가리키는 부모 행과
         이름이 갈린다.
-    :raises PurchaseLedgerNotWritable: 지급일이 없거나, 단가가 DB CHECK 를 못 지킬 때.
+    :raises PurchaseLedgerNotWritable: 회차 금액이나 지급일이 없거나, 단가가
+        DB CHECK 를 못 지킬 때.
     """
-    from app.master.transition import purchase_id_for
-
     legs = tuple(commitment.arrival_schedule)
     if not legs:
         # ★ **빈 것은 예외가 아니다.** 회차 일정을 못 만든 약정도 승인은 살아 있고
@@ -150,19 +213,30 @@ def build_purchase_rows(
         #   **없다**는 것은 정상 상태다 — 물류 `build_next_inventory` 가 빈 목록을
         #   정상으로 보는 것과 같다. 매입일도 지급일도 여기서 지어내지 않는다.
         return ()
-    if len(legs) > 1:
-        # ★ 여기까지 오면 앞에서 막았어야 하는 것이 안 막힌 것이다. 조용히 첫 회차만
-        #   쓰면 나머지 회차의 매입이 원장에서 사라진다.
-        raise PurchaseLedgerNotWritable(
-            f"회차가 {len(legs)}개다 — 회차별 금액이 없어 원장을 쓸 수 없다."
-        )
-    leg = legs[0]
+    # ★ **최후 방어다.** `transition._ledger_blocked` 가 같은 함수를 앞에서 이미
+    #   불렀다. 그래도 여기서 다시 부르는 이유는 원장 계산이 전이 밖에서도 불릴 수
+    #   있기 때문이고, 두 자리가 **같은 문장**을 쓰므로 판정이 갈리지 않는다.
+    blocked = ledger_block_reason(commitment)
+    if blocked:
+        raise PurchaseLedgerNotWritable(blocked)
 
-    if leg.payment_due_date is None:
-        raise PurchaseLedgerNotWritable(
-            "재무 purchase_payment_days(N5) 가 없어 지급일을 만들 수 없다"
-            " — purchases.payment_due_date 는 NOT NULL 이고 지어내지 않는다."
-        )
+    sim_run_id = sim_run_id_for(commitment)
+    return tuple(
+        _row_for_leg(commitment, leg, purchase_ids=purchase_ids, sim_run_id=sim_run_id)
+        for leg in legs
+    )
+
+
+def _row_for_leg(
+    commitment: ApprovedCommitment,
+    leg: ArrivalLeg,
+    *,
+    purchase_ids: Mapping[int, str],
+    sim_run_id: str,
+) -> PurchaseWrite:
+    """회차 하나가 만드는 매입 Header 한 행과 품목 한 줄."""
+    from app.master.transition import purchase_id_for
+
     if leg.seq not in purchase_ids:
         # 🔴 매핑에 값이 하나뿐이라고 그것을 집지 않는다 (재무 `_purchase_id_for_leg`
         #    와 같은 규율). 엉뚱한 매입에 품목이 붙어도 에러가 안 난다.
@@ -173,15 +247,26 @@ def build_purchase_rows(
             f"{leg.seq}회차 purchase_id 가 승인이 짓는 값과 다르다: {purchase_id!r}"
         )
 
-    amount = _scaled(commitment.total_amount_krw)
     quantity = _scaled(leg.qty_kg)
-    total_qty = _scaled(commitment.total_qty_kg)
-    if total_qty <= 0:
-        raise PurchaseLedgerNotWritable("총량이 0 이하라 단가를 만들 수 없다.")
+    if leg.amount_krw is None:
+        # ★ **회차가 하나뿐인 옛 입력만 여기로 온다** (`ledger_block_reason` 이 다회차의
+        #   빈 금액을 위에서 이미 막았다). 축이 하나뿐이라 총액이 곧 그 회차 금액이고,
+        #   재무 `_payment_legs`(`app/finance/transition.py:207`)가 같은 보존을 한다.
+        amount = _scaled(commitment.total_amount_krw)
+        나눌_수량 = _scaled(commitment.total_qty_kg)
+    else:
+        # 🔴 **다회차에서 총액을 쓰지 않는다.** 회차마다 총액이 실리면 원장이 승인
+        #    총액의 회차 수만큼 부풀어 오르고, 재무 채무 합과도 갈린다. 금액과 수량을
+        #    **같은 축에서** 집는다 — 회차 금액 ÷ 회차 수량이다.
+        amount = _scaled(leg.amount_krw)
+        나눌_수량 = quantity
+    if 나눌_수량 <= 0:
+        raise PurchaseLedgerNotWritable(f"{leg.seq}회차 수량이 0 이하라 단가를 만들 수 없다.")
 
-    # ★ 단가는 **총액 ÷ 총량**이다. 회차가 하나뿐이라 회차 단가와 같은 값이고,
-    #   회차별 금액이 실리는 날 이 식이 회차 금액 ÷ 회차 수량으로 바뀐다.
-    unit_price = _scaled(amount / total_qty)
+    # ⚠️ **회차 금액 합 = 총액은 여기서 다시 세지 않는다.** `commitment.__post_init__`
+    #    이 이미 본다 (`commitment.py:139-141`). 두 곳이 세면 허용 오차가 갈리는 날
+    #    같은 약정을 한 곳은 통과시키고 한 곳은 막는다.
+    unit_price = _scaled(amount / 나눌_수량)
     line_amount = amount
     drift = abs(line_amount - quantity * unit_price)
     if drift >= _LINE_TOLERANCE:
@@ -193,20 +278,23 @@ def build_purchase_rows(
             " 총액을 고쳐 맞추지 않는다."
         )
 
-    return (
-        PurchaseWrite(
-            purchase_id=purchase_id,
-            sim_run_id=sim_run_id_for(commitment),
-            purchase_date=leg.purchase_date,
-            payment_due_date=leg.payment_due_date,
-            total_amount_krw=amount,
-            proposal_id=f"PROP-{commitment.request_id}",
-            scenario_id=f"SCN-{commitment.request_id}-{commitment.scenario_label}",
-            item_name=leg.item,
-            quantity_kg=quantity,
-            unit_price_krw_per_kg=unit_price,
-            line_amount_krw=line_amount,
-        ),
+    if leg.payment_due_date is None:
+        # ★ 여기까지 오면 `build_purchase_rows` 의 최후 방어를 지나쳐 들어온 것이다.
+        #   사유 문장은 지어내지 않고 **주인에게 다시 묻는다.**
+        raise PurchaseLedgerNotWritable(ledger_block_reason(commitment))
+
+    return PurchaseWrite(
+        purchase_id=purchase_id,
+        sim_run_id=sim_run_id,
+        purchase_date=leg.purchase_date,
+        payment_due_date=leg.payment_due_date,
+        total_amount_krw=amount,
+        proposal_id=f"PROP-{commitment.request_id}",
+        scenario_id=f"SCN-{commitment.request_id}-{commitment.scenario_label}",
+        item_name=leg.item,
+        quantity_kg=quantity,
+        unit_price_krw_per_kg=unit_price,
+        line_amount_krw=line_amount,
     )
 
 
