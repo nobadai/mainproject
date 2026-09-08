@@ -7,6 +7,8 @@
  *   이 파일은 안 고칩니다.
  */
 
+import { useSyncExternalStore } from "react";
+
 import {
   CardBlock,
   ErrorBox,
@@ -15,11 +17,15 @@ import {
   SourceTag,
   StatRow,
 } from "@/components/console/Blocks";
-import { AS_OF, useTab } from "@/components/console/useTab";
+import { useTab } from "@/components/console/useTab";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
+//     `useTab` 의 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { sales, type SalesTab } from "@/lib/screen";
 
 export default function SalesPage() {
-  const { data, error } = useTab<SalesTab>(AS_OF, () => sales(AS_OF));
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const { data, error } = useTab<SalesTab>(asOf, () => sales(asOf));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="판매" />;

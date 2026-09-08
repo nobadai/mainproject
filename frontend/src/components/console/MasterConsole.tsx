@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
@@ -10,7 +10,9 @@ import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
 import { BurnInPanel } from "@/components/BurnInPanel";
 import { LlmTrace } from "@/components/LlmTrace";
-import { ApiError, AS_OF, ask, execute } from "@/lib/api";
+import { ApiError, ask, execute } from "@/lib/api";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { CAN, type Session } from "@/lib/session";
 import {
   isProcurement,
@@ -87,6 +89,9 @@ const SHORTCUT: Record<string, string> = {
 };
 
 export function MasterConsole({ session }: { session: Session }) {
+  //  🔴 시연용 기준일 (`#431`). `ask` · `execute` 가 실제로 싣는 값과 같은 곳을 읽는다
+  //     — 머리에 적힌 날짜와 서버에 보내는 날짜가 갈리면 안 된다.
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
   //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
   const [tab, setTab] = useState<"master" | "runs" | "burnin">("master");
@@ -321,7 +326,7 @@ export function MasterConsole({ session }: { session: Session }) {
             </button>
           ))}
         </span>
-        <span className="ml-auto font-mono text-[11px] text-faint">기준일 {AS_OF}</span>
+        <span className="ml-auto font-mono text-[11px] text-faint">기준일 {asOf}</span>
       </header>
 
         {isBurnIn ? (
