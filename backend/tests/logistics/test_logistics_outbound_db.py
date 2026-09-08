@@ -30,6 +30,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from app.contracts.sales_logistics import SalesOutboundReservationRequest
 from app.logistics import ledger, outbound
 from app.logistics.db import get_connection
 from app.logistics.outbound import (
@@ -45,6 +46,7 @@ from app.logistics.outbound import (
     reserve_stock,
     ship_allocated_stock,
 )
+from app.logistics.sales_outbound import reserve_confirmed_sale
 
 pytestmark = pytest.mark.db
 
@@ -636,6 +638,57 @@ def test_전체_흐름이_한_트랜잭션에서_되돌려진다(conn: psycopg.C
         cur.execute("SELECT to_regclass(%s)", [f"{TMP_SCHEMA}.inventory_reservations"])
         남았나 = cur.fetchone()
     assert (남았나[0] if not isinstance(남았나, dict) else 남았나["to_regclass"]) is None
+
+
+def test_sales_boundary_request에서_명시적_lot_선택으로_inventory_OUT까지_간다(
+    conn: psycopg.Connection,
+) -> None:
+    """Sales 사실은 예약까지만 만들고, 테스트가 명시적으로 Lot 을 선택한다."""
+    _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
+    _lot(conn, "LOT-OLD", qty="100", received_at=date(2026, 1, 1))
+    request = SalesOutboundReservationRequest(
+        reservation_id="RSV-SI-SALE-1-1",
+        sim_run_id=SIM_RUN_ID,
+        sale_id=SALE_ID,
+        sale_item_id=SALE_ITEM_ID,
+        item_id=ITEM_ID,
+        quantity_kg=Decimal(80),
+        as_of=AS_OF,
+    )
+
+    reserved = reserve_confirmed_sale(conn, request)
+    candidates = recommend_fefo_candidates(
+        conn,
+        sim_run_id=SIM_RUN_ID,
+        item_id=ITEM_ID,
+        as_of=AS_OF,
+    )
+    chosen = candidates[0]
+    allocated = allocate_stock(
+        conn,
+        reservation_id=request.reservation_id,
+        requests=[AllocationRequest(lot_id=chosen.lot_id, quantity_kg=request.quantity_kg)],
+        decided_by=DECIDED_BY,
+        decided_at=DECIDED_AT,
+        allocation_basis="FEFO_TOOL_CONFIRMED",
+        as_of=AS_OF,
+    )
+    shipped = ship_allocated_stock(
+        conn,
+        reservation_id=request.reservation_id,
+        shipped_at=AS_OF,
+        sale_item_id=request.sale_item_id,
+    )
+
+    moves = _moves(conn)
+    assert reserved.status == "RESERVED"
+    assert [candidate.lot_id for candidate in candidates] == ["LOT-OLD", "LOT-NEW"]
+    assert allocated.reservation_status == "ALLOCATED"
+    assert shipped.applied is True
+    assert _remaining(conn, "LOT-OLD") == Decimal(20)
+    assert _remaining(conn, "LOT-NEW") == Decimal(100)
+    assert moves[0]["move_type"] == "OUT"
+    assert moves[0]["sale_item_id"] == SALE_ITEM_ID
 
 
 # ── 34~38. 범위 ────────────────────────────────────────────────────────

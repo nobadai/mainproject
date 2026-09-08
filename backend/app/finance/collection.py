@@ -8,10 +8,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
 
 from psycopg import Connection, sql
 
+from app.finance.common import row_value
 from app.finance.db import FinanceDataNotReady, get_db_schema
 
 
@@ -238,13 +238,7 @@ def _exact_collection_state_id(
         raise FinanceDataNotReady("historical_finance_position")
     if len(rows) != 1:
         raise FinanceDataNotReady("finance_state_ambiguous")
-    return str(_row_value(rows[0], "finance_state_id", 0))
-
-
-def _row_value(row: Any, name: str, index: int) -> object:
-    if isinstance(row, Mapping):
-        return row[name]
-    return row[index]
+    return str(row_value(rows[0], "finance_state_id", 0))
 
 
 def _money(value: object, field: str) -> Decimal:

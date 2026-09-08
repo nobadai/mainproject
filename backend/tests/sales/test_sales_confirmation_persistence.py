@@ -13,6 +13,7 @@ from app.sales.persistence import (
     SalesPersistenceConflict,
     build_sale_confirmation_plan,
     confirm_sale,
+    mark_sale_delivered,
     sale_id_for,
 )
 from app.sales.schemas import SalesConfirmationInput, SalesScenario
@@ -185,6 +186,18 @@ class _Cursor:
                 self.rowcount = 1
             return
 
+        if "UPDATE" in text and ".sales" in text and "SET order_status = 'DELIVERED'" in text:
+            row = self.conn.sales.get(params[0])
+            if row is not None and row["order_status"] in {"CONFIRMED", "READY"}:
+                row["order_status"] = "DELIVERED"
+                self.rowcount = 1
+            return
+
+        if "SELECT order_status" in text and ".sales" in text:
+            row = self.conn.sales.get(params[0])
+            self.rows = [] if row is None else [{"order_status": row["order_status"]}]
+            return
+
         if "SELECT * FROM" in text and ".sales" in text:
             row = self.conn.sales.get(params[0])
             self.rows = [] if row is None else [deepcopy(row)]
@@ -236,6 +249,7 @@ def test_build_sale_confirmation_plan_is_deterministic():
     assert plan.total_quantity_kg == Decimal(8500)
     assert plan.total_amount_krw == Decimal(19550000)
     assert plan.collection_due_date == date(2026, 10, 10)
+    assert plan.order_status == "CONFIRMED"
     assert plan.sale_item.sale_item_id == "SI-SALE-RUN-1-SCN-1-1"
 
 
@@ -246,7 +260,10 @@ def test_confirm_sale_persists_header_and_item_without_commit():
     assert result.sales_written == 1
     assert result.sale_items_written == 1
     assert result.sale_id == "SALE-RUN-1-SCN-1"
+    assert result.item_id == "ITEM-BAECHU"
+    assert result.quantity_kg == Decimal(8500)
     assert conn.sales[result.sale_id]["source_order_id"] == "ORD-1"
+    assert conn.sales[result.sale_id]["order_status"] == "CONFIRMED"
     assert conn.sale_items[result.sale_item_id]["item_id"] == "ITEM-BAECHU"
     assert conn.transaction_calls == []
 
@@ -292,3 +309,35 @@ def test_confirm_sale_accepts_null_source_order_id_when_present_in_contract():
 
     assert result.sales_written == 1
     assert conn.sales[result.sale_id]["source_order_id"] is None
+
+
+def test_confirm_sale_does_not_mark_delivered_before_shipping():
+    conn = _Connection()
+    result = confirm_sale(conn, _request())
+
+    assert conn.sales[result.sale_id]["order_status"] == "CONFIRMED"
+
+
+def test_mark_sale_delivered_is_the_post_shipping_boundary():
+    conn = _Connection()
+    result = confirm_sale(conn, _request())
+
+    changed = mark_sale_delivered(conn, sale_id=result.sale_id)
+    second = mark_sale_delivered(conn, sale_id=result.sale_id)
+
+    assert changed is True
+    assert second is False
+    assert conn.sales[result.sale_id]["order_status"] == "DELIVERED"
+    assert conn.transaction_calls == []
+
+
+def test_confirm_sale_retry_after_delivery_is_still_idempotent():
+    conn = _Connection()
+    result = confirm_sale(conn, _request())
+    mark_sale_delivered(conn, sale_id=result.sale_id)
+
+    retry = confirm_sale(conn, _request())
+
+    assert retry.sales_written == 0
+    assert retry.sale_items_written == 0
+    assert conn.sales[result.sale_id]["order_status"] == "DELIVERED"

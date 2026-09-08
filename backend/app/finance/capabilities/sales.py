@@ -29,6 +29,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.finance.capabilities.procurement import load_context
+from app.finance.common import decimal_value
 from app.finance.db import FinanceAsOfDataPort
 from app.finance.rules import (
     SalesRuleResult,
@@ -107,9 +108,9 @@ def parse_sales_validation_input(
             scenario_id=str(payload["scenario_id"]),
             partner_id=str(payload["partner_id"]),
             item=str(payload["item"]),
-            quantity_kg=_decimal(payload["quantity_kg"]),
-            unit_price_krw=_decimal(payload["unit_price_krw"]),
-            reported_sales_amount_krw=_decimal(payload["reported_sales_amount_krw"]),
+            quantity_kg=decimal_value(payload["quantity_kg"]),
+            unit_price_krw=decimal_value(payload["unit_price_krw"]),
+            reported_sales_amount_krw=decimal_value(payload["reported_sales_amount_krw"]),
             payment_terms_type=str(payload["payment_terms_type"]),
             payment_days=_optional_int(payload.get("payment_days")),
             collection_reference_date=_optional_date(payload.get("collection_reference_date")),
@@ -129,17 +130,6 @@ def parse_sales_validation_input(
 
 def _is_blank(value: Any) -> bool:
     return isinstance(value, str) and not value.strip()
-
-
-def _decimal(value: Any) -> Decimal:
-    if isinstance(value, bool):
-        raise TypeError("boolean values are not valid numeric inputs")
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, float):
-        # 업무 숫자를 float 로 받지 않는다 — 이미 정밀도를 잃은 값이다.
-        raise TypeError("float is not an accepted business numeric input")
-    return Decimal(str(value))
 
 
 def _optional_int(value: Any) -> int | None:
@@ -165,10 +155,12 @@ def _parse_supply(value: Any) -> SalesSupply | None:
         raise TypeError("supply must be a mapping")
     raw_conditional = value.get("conditional_quantity_kg")
     return SalesSupply(
-        confirmed_quantity_kg=_decimal(value["confirmed_quantity_kg"]),
+        confirmed_quantity_kg=decimal_value(value["confirmed_quantity_kg"]),
         # 🔴 없는 칸을 0 으로 읽지 않는다. 보내는 쪽이 확정 물량만 알고 조건부 물량을
         #   모를 수 있는데, 그것을 "조건부 0" 으로 바꾸면 모르는 것이 사실이 된다.
-        conditional_quantity_kg=(None if raw_conditional is None else _decimal(raw_conditional)),
+        conditional_quantity_kg=(
+            None if raw_conditional is None else decimal_value(raw_conditional)
+        ),
         dependency_ref=(
             None if value.get("dependency_ref") is None else str(value["dependency_ref"])
         ),
@@ -181,7 +173,7 @@ def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
     if not isinstance(value, Mapping):
         raise TypeError("inventory_cost_basis must be a mapping")
     return InventoryCostBasis(
-        amount_krw=_decimal(value["amount_krw"]),
+        amount_krw=decimal_value(value["amount_krw"]),
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),
         source_ref=str(value["source_ref"]),
@@ -197,7 +189,7 @@ def _parse_conditional_supply_cost_basis(
     if not isinstance(value, Mapping):
         raise TypeError("conditional_supply_cost_basis must be a mapping")
     return ConditionalSupplyCostBasis(
-        amount_krw=_decimal(value["amount_krw"]),
+        amount_krw=decimal_value(value["amount_krw"]),
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),
         source_ref=str(value["source_ref"]),
@@ -213,7 +205,7 @@ def _parse_direct_costs(value: Any) -> tuple[VerifiedDirectCost, ...]:
     return tuple(
         VerifiedDirectCost(
             component=str(item["component"]),
-            amount_krw=_decimal(item["amount_krw"]),
+            amount_krw=decimal_value(item["amount_krw"]),
             cost_method=str(item["cost_method"]),
             source_ref=str(item["source_ref"]),
             evidence_grade=str(item["evidence_grade"]),

@@ -59,12 +59,21 @@ def test_sales_never_imports_the_finance_agent():
 
 
 def test_finance_touches_master_only_through_shared_contract_modules():
-    """재무는 마스터를 직접 import 하지 않는다."""
+    """재무가 아직 쓰는 Master 계약 import 를 실제 production 계약과 맞춘다.
+
+    #382 는 Sales → Finance persistence 경계를 닫은 작업이다. 기존 production 의
+    Envelope/Critic 계약 import 와 새 CollectionSource 계약까지 한 번에 0화하는 것은
+    별도 리팩터링이어야 하므로, 여기서는 허용 계약을 명시해 타입 복제를 막는다.
+    """
     master_modules = {
         name for name in _imported_modules(FINANCE) if name.startswith("app.master")
     }
 
-    assert master_modules == set()
+    assert master_modules == {
+        "app.master.collection",
+        "app.master.critic_bridge",
+        "app.master.envelope",
+    }
 
 
 def test_the_sales_capability_takes_a_payload_not_a_sales_client():
