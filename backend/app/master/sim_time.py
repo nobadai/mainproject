@@ -27,7 +27,7 @@ Master 가 as_of 에서 파생한다   🟢 같은 입력 → 같은 값. 시간
 
 ## 기준점 — 09:30 KST
 
-기준점은 `scheduler.SCHEDULE_START` **그 값을 가져다 쓴다.** 여기서 `time(9, 30)`
+기준점은 `clock.SCHEDULE_START` **그 값을 가져다 쓴다.** 여기서 `time(9, 30)`
 을 새로 적지 않는다.
 
 ★ **왜 09:30 이 유일하게 근거 있는 기준점인가.** 스케줄러가 실제로 그 시각에
@@ -74,8 +74,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Literal
 
-from app.master.clock import SEOUL
-from app.master.scheduler import SCHEDULE_START
+from app.master.clock import SCHEDULE_START, SEOUL
 
 __all__ = ["PHASES", "SimPhase", "phase_instant"]
 
@@ -114,9 +113,7 @@ def phase_instant(as_of: date, phase: SimPhase) -> datetime:
     """
     ordinal = _PHASE_ORDINAL.get(phase)
     if ordinal is None:
-        raise ValueError(
-            f"모르는 단계다: {phase!r}. 아는 것은 {', '.join(PHASES)} 뿐이다"
-        )
+        raise ValueError(f"모르는 단계다: {phase!r}. 아는 것은 {', '.join(PHASES)} 뿐이다")
 
     naive = datetime.combine(as_of, SCHEDULE_START) + ordinal * _STEP
     return naive.replace(tzinfo=SEOUL)

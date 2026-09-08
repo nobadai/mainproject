@@ -8,14 +8,14 @@
 from __future__ import annotations
 
 import ast
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 
 from app.master import sim_time
-from app.master.clock import SEOUL
-from app.master.scheduler import SCHEDULE_START
+from app.master.clock import SCHEDULE_START, SEOUL
 from app.master.sim_time import PHASES, phase_instant
 
 _AS_OF = date(2026, 9, 8)
@@ -32,13 +32,11 @@ def test_여섯_단계가_선언_순서대로_증가한다():
     assert len(set(moments)) == len(PHASES), (
         f"단계마다 다른 시각이어야 한다: {dict(zip(PHASES, moments))}"
     )
-    assert moments == sorted(moments), (
-        f"선언 순서대로 증가해야 한다: {dict(zip(PHASES, moments))}"
-    )
+    assert moments == sorted(moments), f"선언 순서대로 증가해야 한다: {dict(zip(PHASES, moments))}"
 
 
 def test_기준점은_스케줄러가_깨어나는_시각이다():
-    """★ **09:30 의 주인은 `scheduler.SCHEDULE_START` 다.**
+    """★ **09:30 의 주인은 `clock.SCHEDULE_START` 다.**
 
     ⚠️ 여기서 `time(9, 30)` 을 새로 적으면 마감을 옮기는 날 둘이 조용히 갈린다.
       그래서 상수를 비교하지 않고 **그 상수로 기대값을 만든다.**
@@ -52,7 +50,7 @@ def test_기준점은_스케줄러가_깨어나는_시각이다():
 def test_단계_간격은_정확히_일분이다():
     """**순서 표지는 1분 간격이다.** 🔴 이 분에 업무적 의미는 없다."""
     moments = [phase_instant(_AS_OF, phase) for phase in PHASES]
-    gaps = [b - a for a, b in zip(moments, moments[1:])]
+    gaps = [b - a for a, b in pairwise(moments)]
 
     assert gaps == [timedelta(minutes=1)] * (len(PHASES) - 1), f"간격이 다르다: {gaps}"
 
@@ -135,9 +133,11 @@ def test_스캐너가_실제로_시계를_찾아낸다():
     ★ 이게 없으면 스캐너가 망가진 날 **공짜 초록**이 난다 — 그때는 이 모듈이
       벽시계를 열 줄 적어도 아래 검사가 통과한다.
     """
-    sample = "import clock\nfrom datetime import date, datetime\n" + "\n".join(
-        f"x = {call}()" for call in ("datetime.now", "date.today", "datetime.utcnow")
-    ) + "\ny = clock.seoul_now()\nz = clock.today_in_seoul()\n"
+    sample = (
+        "import clock\nfrom datetime import date, datetime\n"
+        + "\n".join(f"x = {call}()" for call in ("datetime.now", "date.today", "datetime.utcnow"))
+        + "\ny = clock.seoul_now()\nz = clock.today_in_seoul()\n"
+    )
 
     detected = _called_names(sample) & _FORBIDDEN
 
@@ -178,4 +178,36 @@ def test_기준점_상수를_새로_만들지_않는다():
     }
 
     assert not literals, f"시각 상수를 새로 만들었다: {literals}"
-    assert "from app.master.scheduler import SCHEDULE_START" in source
+    assert "from app.master.clock import SCHEDULE_START" in source
+
+
+def test_시각_모듈이_스케줄러를_안_들인다():
+    """🔴 **방향을 잠근다** (2026-09-08).
+
+    `sim_time` 이 `scheduler` 를 들이면 `sim_time → scheduler → service` 가 되고,
+    `service` 가 `phase_instant` 를 쓰는 날 **순환이 난다.** 그 경로는 가설이 아니다 —
+    `sim_time` 이 먹여 살리려는 자리가 정확히 `scheduler` 가 모는 자리다.
+
+    ★ 그래서 `SCHEDULE_START` 의 집을 leaf 인 `clock.py` 로 옮겼다. 이 검사는
+      **되돌아가는 것**을 막는다.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(sim_time.__file__).read_text(encoding="utf-8")
+    나무 = ast.parse(source)
+
+    들인_것 = {
+        마디.module for 마디 in ast.walk(나무) if isinstance(마디, ast.ImportFrom) and 마디.module
+    } | {
+        별칭.name for 마디 in ast.walk(나무) if isinstance(마디, ast.Import) for 별칭 in 마디.names
+    }
+
+    # ★ 자기 생존 검사 — 스캐너가 실제로 임포트를 찾았는가. 0건을 세면 공짜 초록이다.
+    assert "app.master.clock" in 들인_것, f"스캐너가 임포트를 못 찾았다: {sorted(들인_것)}"
+
+    막힌 = {이름 for 이름 in 들인_것 if "scheduler" in 이름 or "service" in 이름}
+    assert not 막힌, (
+        f"sim_time 이 {sorted(막힌)} 을 들였다 — 순환이 난다."
+        " 시각 상수는 leaf 인 app.master.clock 에서 가져온다"
+    )

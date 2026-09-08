@@ -137,10 +137,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from app.master import clock
+from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
 from app.master.collection import collect_receipts
 from app.master.commitment import ITEM_CODES
 from app.master.day_open import open_day
@@ -170,20 +171,12 @@ __all__ = [
 
 # ── 시각 상수 ───────────────────────────────────────────────────────────
 #
-# ★ **이름을 붙여 둔다.** 09:30 · 5분 · 10:30 이 코드 여기저기에 숫자로 흩어지면
-#   마감을 11:00 로 옮기는 날 한 군데를 빠뜨리고, 그 한 군데가 조용히 다르게 돈다.
-
-#: ML 적재(09:23 쯤)가 끝났을 시각. **첫 깨어남.**
-SCHEDULE_START: time = time(9, 30)
-
-#: `WAIT` 일 때 다음 깨어남까지. **판단을 안 돌리고 그냥 다시 온다.**
-SCHEDULE_INTERVAL: timedelta = timedelta(minutes=5)
-
-#: 마감. 여기를 넘기면 **한 번 돌려 `E4_NOT_STARTED` 로 확정 기록**한다.
-#:
-#: ⚠️ 마감을 안 두면 예측이 영영 안 오는 날 스케줄러가 하루 종일 `WAIT` 하고,
-#:   *"오늘 못 돌았다"* 가 어디에도 안 남는다.
-SCHEDULE_DEADLINE: time = time(10, 30)
+# 🔴 **선언은 `clock.py` 에 있다** (2026-09-08 에 옮겼다). 여기서 다시 세지 않고
+#    이름만 다시 내보낸다 — `sim_time` 이 기준점을 가져갈 때 `scheduler` 를 통과하면
+#    `sim_time → scheduler → service` 고리가 생기기 때문이다.
+#
+# ★ 값의 **뜻**(언제 깨우고 언제 마감하나)은 그대로 이 파일의 것이다. `clock.py` 는
+#   표준 라이브러리만 들이는 leaf 라 그 숫자를 두는 자리일 뿐이다.
 
 #: 하루 실행이 싣는 정책 판. **부르는 쪽이 바꿀 수 있게 인자로도 열어 둔다.**
 DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
