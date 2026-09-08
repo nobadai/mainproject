@@ -37,11 +37,12 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import Any
 
 from app.master import wiring
 from app.master.budget import BudgetExhausted, CallBudget
+from app.master.clock import today_in_seoul
 from app.master.day_gate import check_day_gate
 from app.master.decision import RevalidationOutcome
 from app.master.envelope import (
@@ -111,23 +112,27 @@ REVALIDATION_BUDGET = 4
   `FAILED` 와 갈라 둔다 (판매가 `SL5` 를 `SL3` 으로 안 접는 것과 같은 판단).
 """
 
-_KST = timezone(timedelta(hours=9))
-"""회사가 하루를 세는 시간대.
-
-🔴 **서버 타임존에 답이 끌려가면 안 된다.** `date.today()` 는 프로세스가 도는 기계의
-  로케일을 따르므로, UTC 로 도는 서버에서는 **한국 시간 아침 9시 전까지 어제로
-  재검증한다.** 개장 · 실행일 · 도착일이 전부 달력일로 도는 표에서 하루가 밀리면
-  *"안 열린 날"* 이 되어 승인이 통째로 `ERROR` 가 된다.
-"""
-
 
 def today() -> date:
     """재검증이 도는 날. **`as_of` 의 단일 출처다.**
 
     ★ **함수로 둔다.** 값으로 박으면 프로세스가 자정을 넘겨도 어제로 남고, 부르는
       곳마다 각자 계산하면 한 재검증 안에서 날이 갈릴 수 있다.
+
+    🟢 **시간대를 여기서 안 만든다** (2026-09-08 · 스케줄러 경계).
+
+      전에는 `_KST = timezone(timedelta(hours=9))` 를 이 파일이 직접 들고
+      `datetime.now(_KST)` 를 읽었다. 이유는 그대로 옳다 — 🔴 **서버 타임존에 답이
+      끌려가면 안 된다.** UTC 로 도는 서버에서는 한국 시간 아침 9시 전까지 어제로
+      재검증하고, 개장 · 실행일 · 도착일이 전부 달력일로 도는 표에서 하루가 밀리면
+      *"안 열린 날"* 이 되어 승인이 통째로 `ERROR` 가 된다.
+
+    ★ **다만 그 사실의 주인이 둘일 이유는 없다.** 스케줄러도 같은 물음을 물어야
+      해서 `clock.py` 가 섰고, 시간대가 두 파일에 있으면 조용히 갈린다. 여기서는
+      가리키기만 한다 — 벽시계를 읽는 곳은 `clock.py` 하나이고,
+      `tests/master/test_clock_is_the_only_wall_clock.py` 가 그것을 지킨다.
     """
-    return datetime.now(_KST).date()
+    return today_in_seoul()
 
 
 _REVALIDATION_KEY_PREFIX = "REV"

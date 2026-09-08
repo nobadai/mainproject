@@ -728,6 +728,33 @@ class SalesRunResponse(BaseModel):
         ),
     )
 
+    findings: list[str] = Field(
+        default=[],
+        description=(
+            "판매 Critic(B)이 낸 발견. **매입 `findings` 와 같은 칸 이름이고 같은 뜻이다** "
+            "— 다시 만들면 달라질 수 있는 것."
+        ),
+    )
+    concerns: list[str] = Field(
+        default=[],
+        description=(
+            "사실이지만 **다시 만들어도 안 고쳐지는** 것 — 부서 계약 위반 · 마스터 배선 "
+            "문제 · 검증 Tool 이 돌다 죽은 사실. 사람이 봐야 한다 (§3.4)."
+        ),
+    )
+    skipped_checks: list[str] = Field(
+        default=[],
+        description=(
+            "🔴 검증 Tool 이 **판정하지 못한** 검사와 사유. 판매는 오늘 여기가 대부분이다 "
+            "— `inventory_allocations` 가 0행이라 배분·로트 재료가 없다. 비어 있는 "
+            "findings 를 '전부 통과' 로 읽지 않게 한다 (§3.7.6)."
+        ),
+    )
+    verification_skipped: bool = Field(
+        default=False,
+        description="검증 자체가 **안 돌았는가.** 시작조차 못 한 날(SL4)이 참이다.",
+    )
+
     plan: list[StepOut] = []
     plan_signature: list[tuple[str, str, int]] = Field(
         default=[],

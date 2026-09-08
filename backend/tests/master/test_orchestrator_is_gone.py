@@ -200,6 +200,9 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
     #   계약에서 가져오게 했다. 품목 목록을 여기서 다시 세던 것이 어긋남의 뿌리였다.
     # ★ 2026-09-06 에 sales_flow.py 가 들어왔다 — 판매 Flow 골격이 부서 조정안을
     #   `SuggestedAdjustment` 표준형으로 나른다.
+    # ★ 2026-09-08 에 forecast_gate.py 가 들어왔다 — 날 단위 예측 게이트가 물어볼
+    #   품목의 기본값으로 `ITEMS` 를 읽는다. 🔴 **품목 목록을 게이트가 다시 적지
+    #   않는다** — commitment.py 가 피마늘로 어긋나던 것과 같은 자리다.
     assert users == {
         "band.py": ["app.contracts.core"],
         "commitment.py": ["app.contracts.core"],
@@ -209,6 +212,7 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
         "cycle_graph_b.py": ["app.contracts.core"],
         "envelope.py": ["app.contracts.core"],
         "flow.py": ["app.contracts.core"],
+        "forecast_gate.py": ["app.contracts.core"],
         "outbound.py": ["app.contracts.core"],
         "router.py": ["app.contracts.core"],
         "sales_flow.py": ["app.contracts.core"],
