@@ -28,16 +28,24 @@ financing_mode   🔴 **마스터 축이 아니다** — 재무 축 (sim_run_id,
 
 🔴 **세 번째로 잠그는 것 — 사건이 0건이면 `NOTHING_DUE` 이고 `BLOCKED` 가 아니다.**
 
-`DeterministicCollectionFixtureSource.events` 기본값이 `()` 라 **배선해도 수금은 한
-건도 안 일어난다.** 그것이 지금의 정상 상태다.
+`master_collection_events` 표가 **비어 있다** (2026-09-08 실측 0행). 그래서 배선해도
+수금은 한 건도 안 일어난다. 그것이 지금의 정상 상태다.
 
 ```text
 전   등록 안 됨      → missing() 에 뜨고 경로가 안 돈다
 후   NOTHING_DUE     → **확인했고 낼 것이 없다**
 ```
 
-⚠️ **이 배선은 경로를 세울 뿐 수금을 만들지 않는다.** 사건을 공급하는 일은 별건이고,
-  재무가 *"due_date 경과를 수금으로 읽지 않는다"* 로 선을 그은 그 자리다.
+⚠️ **이 배선은 자리를 세울 뿐 수금을 만들지 않는다.** 무엇을 사실로 둘지는 팀 결정이고,
+  재무가 *"due_date 경과를 수금으로 읽지 않는다"* 로 그은 선이 그 이유다.
+
+---
+
+🔴 **네 번째로 잠그는 것 — 사건을 배선 시점에 들고 있지 않다.**
+
+배선 자리에서 사건 목록을 만들어 넘기면 **그 목록이 앱이 뜨는 순간에 고정**된다.
+표에 한 줄 넣어도 앱을 다시 띄우기 전까지 아무 일도 안 일어나고, 그것은 에러 없이
+*"오늘은 들어올 게 없었다"* 로 보인다.
 """
 
 from __future__ import annotations
@@ -48,9 +56,10 @@ from typing import Any
 import pytest
 
 import app.main  # noqa: F401  — import 시점에 수금 실행을 등록한다. 이 검사의 전제다
-from app.finance.collection_fixture import DeterministicCollectionFixtureSource
+from app.finance.collection import CollectionEvent
 from app.finance.db import FinanceDataNotReady, FinanceRuntimeAxis
 from app.master import collection
+from app.master.collection_events import read_collection_events
 from app.master.finance_collection import FinanceCollectionAdapter
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
@@ -60,23 +69,20 @@ AS_OF = date(2026, 1, 10)
 남의_실행 = "SIM-SOMEONE-ELSE"
 
 
-class _사건원천기록:
-    """`FinanceCollectionSource` 가 **어느 축으로** 사건을 물었는지 잡는다.
+class _사건조회기록:
+    """어댑터가 **어느 축으로** 사건을 읽으러 갔는지 잡는다.
 
     ★ 축이 실제로 실려 갔는지는 이 호출로만 보인다 — 어댑터가 만든
       `FinanceCollectionSource` 는 밖에서 안 보인다.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, events: tuple[CollectionEvent, ...] = ()) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.events = events
 
-    def events_for_date(
-        self, *, sim_run_id: str, financing_mode: str, as_of: date
-    ) -> tuple[Any, ...]:
-        self.calls.append(
-            {"sim_run_id": sim_run_id, "financing_mode": financing_mode, "as_of": as_of}
-        )
-        return ()
+    def __call__(self, *, sim_run_id: str, financing_mode: str) -> tuple[CollectionEvent, ...]:
+        self.calls.append({"sim_run_id": sim_run_id, "financing_mode": financing_mode})
+        return self.events
 
 
 def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str) -> Any:
@@ -125,24 +131,27 @@ def test_배선이_financing_mode_를_들고_있지_않다() -> None:
     )
 
 
-def test_사건_원천이_재무_것이다() -> None:
-    """★ 사건 원천의 주인은 재무다. `app/master/` 의 클래스가 오면 마스터가 사건을 지어낸 것이다."""
+def test_배선이_사건_목록을_들고_있지_않다() -> None:
+    """🔴 **사건은 배선이 아니라 표에서 온다.**
+
+    ⚠️ 배선 자리에서 사건 목록을 만들어 넘기면 **그 목록이 앱이 뜨는 순간에 고정된다.**
+      표에 한 줄 넣어도 다시 띄우기 전까지 아무 일도 안 일어나고, 그것은 에러 없이
+      *"오늘은 들어올 게 없었다"* 로 보인다.
+    """
     impl = collection.registered()["finance"]
-    assert isinstance(impl.source, DeterministicCollectionFixtureSource)
-    assert type(impl.source).__module__.startswith("app.finance"), (
-        f"수금 사건이 마스터 모듈에서 나온다: {type(impl.source).__module__}"
+    assert not hasattr(impl, "source"), (
+        "배선 자리의 어댑터가 사건 원천을 들고 있다 — 사건은 호출 시점에 표에서 읽는다"
     )
 
 
-def test_배선한_사건_원천이_비어_있다() -> None:
-    """🔴 **배선은 경로를 세울 뿐 수금을 만들지 않는다.**
+def test_사건을_정본_표에서_읽는다() -> None:
+    """★ 읽는 방법의 주인은 `master_collection_events` 조회 하나다.
 
-    ⚠️ 여기에 사건이 생기는 날은 **누가 그것을 공급하기로 했는지**가 정해진 날이다.
-      그전에 채우면 마스터가 재무 사실을 발명하는 것이다.
+    ⚠️ 여기에 다른 함수가 오면 **사건을 어디서 얻는지가 두 곳이 된다.**
     """
     impl = collection.registered()["finance"]
-    assert impl.source.events == (), (
-        "배선 자리의 사건 원천이 비어 있지 않다 — 수금 사건의 주인이 누구인지 먼저 정한다"
+    assert impl.load_events is read_collection_events, (
+        f"배선이 정본 표 조회가 아닌 것을 쓴다: {impl.load_events!r}"
     )
 
 
@@ -157,10 +166,10 @@ def test_재무_축의_financing_mode_를_그대로_싣는다(mode: str) -> None
 
     ⚠️ 실 DB 에 `LOAN_BASELINE` 252행과 `BASE_NO_LOAN` 2행이 공존한다.
     """
-    원천 = _사건원천기록()
+    원천 = _사건조회기록()
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=원천,  # type: ignore[arg-type]
+        load_events=원천,
         read_axis=_축(financing_mode=mode),
     )
 
@@ -173,7 +182,6 @@ def test_재무_축의_financing_mode_를_그대로_싣는다(mode: str) -> None
         f"{원천.calls[0]['financing_mode']!r} 가 실렸다"
     )
     assert 원천.calls[0]["sim_run_id"] == BURN_IN_SIM_RUN_ID, "sim_run_id 는 마스터 값이다"
-    assert 원천.calls[0]["as_of"] == AS_OF
 
 
 def test_축_조회를_임포트_시점에_하지_않는다() -> None:
@@ -190,8 +198,8 @@ def test_축_조회를_임포트_시점에_하지_않는다() -> None:
 
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=DeterministicCollectionFixtureSource(),
         read_axis=read_axis,
+        load_events=_사건조회기록(),
     )
     assert 호출 == [], "생성만 했는데 축을 읽었다"
 
@@ -212,10 +220,10 @@ def test_실행_축이_다르면_막는다() -> None:
     ⚠️ `FinanceCollectionSource` 는 자기가 받은 축으로만 사건을 고르므로 덮어 써도
       **아무 예외 없이 돈다** — 그래서 어댑터가 여기서 세운다.
     """
-    원천 = _사건원천기록()
+    원천 = _사건조회기록()
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=원천,  # type: ignore[arg-type]
+        load_events=원천,
         read_axis=_축(sim_run_id=남의_실행, financing_mode="LOAN_BASELINE"),
     )
 
@@ -229,14 +237,14 @@ def test_실행_축이_다르면_막는다() -> None:
 
 def test_축이_모호하면_사유에_그대로_남는다() -> None:
     """⚠️ **삼키지 않는다.** 접기만 하고 사유를 버리면 *"막혔다"* 만 남고 고칠 곳이 사라진다."""
-    원천 = _사건원천기록()
+    원천 = _사건조회기록()
 
     def read_axis() -> FinanceRuntimeAxis:
         raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
 
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=원천,  # type: ignore[arg-type]
+        load_events=원천,
         read_axis=read_axis,
     )
 
@@ -253,8 +261,8 @@ def test_축이_없으면_사유에_그대로_남는다() -> None:
     """★ `get_finance_runtime_axis` 는 행이 0건이면 `LookupError` 를 던진다."""
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=DeterministicCollectionFixtureSource(),
         read_axis=_없는_축,
+        load_events=_사건조회기록(),
     )
 
     out = adapter.collect(conn=None, as_of=AS_OF)
@@ -275,13 +283,13 @@ def _없는_축() -> FinanceRuntimeAxis:
 def test_사건이_0건이면_NOTHING_DUE_다() -> None:
     """🔴 **`BLOCKED` 로 접으면 뒤의 orchestration 이 사람을 부른다.**
 
-    ★ 지금 배선의 사건 원천이 비어 있으므로 **이것이 매일 나오는 답**이다.
+    ★ 지금 정본 표가 비어 있으므로 **이것이 매일 나오는 답**이다.
       *"확인했고 낼 것이 없다"* 이지 *"막혔다"* 가 아니다.
     """
     adapter = FinanceCollectionAdapter(
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=DeterministicCollectionFixtureSource(),
         read_axis=_축(financing_mode="LOAN_BASELINE"),
+        load_events=_사건조회기록(),
     )
 
     out = adapter.collect(conn=None, as_of=AS_OF)

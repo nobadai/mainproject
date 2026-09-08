@@ -10,7 +10,6 @@ from functools import partial
 from fastapi import FastAPI
 
 from app.finance.adapter import finance_port
-from app.finance.collection_fixture import DeterministicCollectionFixtureSource
 from app.finance.day_open import FinanceDayOpening
 from app.finance.router import router as finance_router
 from app.finance.transition import FinanceTransitionAdapter
@@ -254,30 +253,29 @@ register_inbound(
 #    전례). 재무가 축 둘을 직접 들고 오는 구현을 올리면 **그 파일을 지우고 이 한 줄만
 #    바꾸면 된다.**
 #
-# 🔴 **사건 원천이 아직 비어 있다** (`DeterministicCollectionFixtureSource.events = ()`).
+# 🔴 **사건은 이 줄이 아니라 표에서 온다** (`master_collection_events` · 2026-09-08).
+#
+#    전에는 여기서 `DeterministicCollectionFixtureSource()` 를 만들어 넘겼다. 그러면
+#    **사건 목록이 배선 시점에 고정**돼, 표에 한 줄 넣어도 앱을 다시 띄우기 전까지는
+#    아무 일도 안 일어난다. 지금은 어댑터가 `collect()` **안에서** 그 축의 사건을
+#    읽는다 — 축 조회를 임포트 시점에 안 하는 것과 같은 이유다.
+#
+# 🔴 **그 표가 비어 있다** (2026-09-08 실측 0행). 그래서 지금도 매일 `NOTHING_DUE` 다.
 #
 #    ```text
 #    전   등록 안 됨      → missing() 에 뜨고 경로가 안 돈다
 #    후   NOTHING_DUE     → **확인했고 낼 것이 없다**
 #    ```
 #
-#    ⚠️ **이 배선은 경로를 세울 뿐 수금을 만들지 않는다.** 사건을 공급하는 일은
-#      마스터의 별건이고, 재무가 *"due_date 경과를 수금으로 읽지 않는다"* 로 선을 그은
-#      그 자리다. **낸 것과 도는 것은 다르다.**
+#    ⚠️ **이 배선은 자리를 만들 뿐 사건을 만들지 않는다.** 무엇을 사실로 둘지는 팀
+#      결정이고, 재무가 *"due_date 경과를 수금으로 읽지 않는다"* 로 그은 선이 그
+#      이유다. **낸 것과 도는 것은 다르다.**
 #
-#    ★ **그래도 배선에 값이 있다.** `NOTHING_DUE` 와 「등록 안 됨」은 다른 사실이고,
-#      그 둘을 가르려고 등록소를 둔 것이다.
-#
-# ⚠️ **원천에 기본값이 없어야 하는 것과는 다른 자리다.** `inspection_provider` 는
-#    물류가 일부러 기본값을 안 뒀지만, 여기 `DeterministicCollectionFixtureSource()` 는
-#    재무가 **빈 사건 목록을 기본값으로 둔 것**이다 — *"설정된 원천이 없으면 사건도
-#    없다"* 가 그 파일의 계약이다. 그래도 배선 자리에서 눈에 보이게 고른다.
+#    ★ **그래도 값이 있다.** 어제까지는 **사건을 넣을 자리조차 없었다.** 표가 섰으니
+#      한 줄 INSERT 로 시연이 되고, `NOTHING_DUE` 와 「등록 안 됨」이 갈린다.
 register_collection(
     "finance",
-    FinanceCollectionAdapter(
-        sim_run_id=BURN_IN_SIM_RUN_ID,
-        source=DeterministicCollectionFixtureSource(),
-    ),
+    FinanceCollectionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID),
 )
 
 app.include_router(critic_router)
