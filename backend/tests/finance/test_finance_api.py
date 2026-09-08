@@ -64,6 +64,8 @@ def test_finance_openapi_keeps_agent_and_drops_replaced_legacy_endpoints():
     assert "/finance/agent" in schema["paths"]
     assert "/finance/runs" in schema["paths"]
     assert "/finance/sales" not in schema["paths"]
+    assert "/finance/dashboard" not in schema["paths"]
+    assert "/finance/dashboard/cashflow" not in schema["paths"]
     assert "/finance/procurement" not in schema["paths"]
     assert "/finance/core-review" not in schema["paths"]
 

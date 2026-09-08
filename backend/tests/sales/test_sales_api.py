@@ -28,6 +28,7 @@ def test_sales_openapi_exposes_proposal_and_drops_legacy_endpoints():
 
     assert "/sales/proposal" in schema["paths"]
     assert "/sales/runs" in schema["paths"]
+    assert "/sales/dashboard" not in schema["paths"]
     assert "/sales/procurement" not in schema["paths"]
     assert "/sales/allocation" not in schema["paths"]
 
