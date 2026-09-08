@@ -345,7 +345,8 @@ class Scenario(BaseModel):
     #:
     #: 🔴 **재무 STRESS 전용이다** (2026-09-08 · `#394` 기준). ``amount_max_krw = qty ×
     #: max_price`` 를 **재무와 마스터가 검사한다** (``finance/capabilities/scenario.py:180``
-    #: · ``master/verifier.py:711``). 컷은 이 값이 아니라 ``cut_unit_price`` 가 한다.
+    #: · ``master/verifier.py:734`` — 검사 이름 ``L-PAYSCHED-MAX``). 컷은 이 값이 아니라
+    #: ``cut_unit_price`` 가 한다.
     max_price: int = Field(ge=0)
     #: 매입 **컷 기준**. ``sourcing_plan`` 단가가 이걸 넘으면 ⑦이 컷한다.
     #:

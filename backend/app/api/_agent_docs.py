@@ -509,15 +509,23 @@ fc = get_forecast(item, as_of, "AUC")   # LookupError · RuntimeError 를 낸다
     Part(
         key="purchase", owner="매입", title="매입",
         route="/api/purchase?as_of=2026-01-06", screen="/console/purchase",
-        db_module="app.purchase_agent.db", table="purchases",
+        db_module="app.finance.db", table="purchases",
         model=PurchaseTab,
         signature="def build(as_of: date) -> PurchaseTab:",
         tables="""\
-읽을 곳: `purchases` · `arrival_schedule` · 그리고 마스터의 실행/결정 기록.
+읽을 곳: `master_agent_runs`(저장된 실행) · `master_decisions`(사람의 결정) ·
+`purchases` + `purchase_items`(확정 매입 원장) · `items`(품목 이름).
 
 제안(후보 안)은 `app/purchase_agent/` 가 만들고, 승인·확정은
 `app/master/` 가 씁니다. **여기서 에이전트를 돌리지 마세요** — 저장된
 결과만 읽습니다 (화면을 열 때마다 LLM 이 돌면 안 됩니다).
+
+🔴 **DB 헬퍼는 `app.finance.db` 입니다.** `app.purchase_agent.db` 에는
+`get_db_schema` 가 **없습니다** — 일부러 뺐고 (그 파일 머리말) 이유는
+*"`.env` 가 어느 시세 테이블을 읽을지 정하면 안 된다"* 입니다. 그건
+에이전트 경로의 사정이고, 화면은 `haetdeul` 도메인 표를 읽으므로 스키마를
+`.env` 가 정하는 것이 맞습니다. 마스터 `ledger_repository.py` 가 같은
+이유로 같은 선택을 했습니다. ⚠️ 쓰기 헬퍼는 가져오지 않습니다.
 """,
         notes="""\
 ## ★ 이 파트만의 규칙
@@ -530,8 +538,22 @@ fc = get_forecast(item, as_of, "AUC")   # LookupError · RuntimeError 를 낸다
 `MQ-가락-0105`)가 없으면 나중에 되짚을 수 없습니다. 이미 그 형태로
 쓰고 있으니 그대로 실으면 됩니다.
 
-**`max_price`(이보다 비싸면 안 산다)를 빠뜨리지 마세요.** 안마다 다릅니다.
-화면에서 제일 눈에 띄는 칸이고, 이게 없으면 안을 고를 수 없습니다.
+**🔴 상한이 둘입니다. 섞지 마세요** (`#398` · `dev@a615aa6` · 2026-09-08).
+
+```text
+max_price       재무 STRESS 로 나간다 — 남이 등식을 검사한다
+                finance/capabilities/scenario.py:180
+                master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+cut_unit_price  우리 컷 (self_check.check_max_price)
+```
+
+지금은 **같은 값**이지만 `09-17` 에 밴드가 바뀌면 갈라집니다. 화면이
+「이보다 비싸면 안 산다」 자리에 `max_price` 를 보이면 그 뒤로 **조용히 틀린
+값**이 뜹니다 — 그 자리는 `cut_unit_price` 입니다.
+
+⚠️ `cut_unit_price` 가 `None` 이면 **`max_price` 로 메우지 마세요.** 그 칸이
+생기기 전에 저장된 실행이라는 뜻이고, 메우는 순간 갈라 둔 둘이 화면에서
+다시 하나가 됩니다.
 
 **`risks`(걸리는 것)를 지우지 마세요.** 비어 있으면 화면이 그 자리를
 안 그립니다. 있는데 안 실으면 위험을 숨기는 것이 됩니다.

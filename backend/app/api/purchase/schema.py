@@ -25,7 +25,21 @@ class Reason(BaseModel):
 
 
 class Plan(BaseModel):
-    """매입안 하나."""
+    """매입안 하나.
+
+    🔴 **상한이 둘이다. 09-08 에 갈렸다** (`#398` · `dev@a615aa6`). 지금은 같은
+    값이지만 `09-17` 에 밴드가 바뀌면 갈라진다.
+
+    .. code-block:: text
+
+        max_price       재무 STRESS 로 나간다 — 남이 등식을 검사한다
+                        finance/capabilities/scenario.py:180
+                        master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+        cut_unit_price  우리 컷 (self_check.check_max_price)
+
+    ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 `09-17` 뒤로
+    조용히 틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
+    """
 
     key: str = Field(description="보수 · 기본 · 공격")
     coverage: str = Field(description="며칠치인가")
@@ -34,7 +48,11 @@ class Plan(BaseModel):
     amount_krw: int = Field(description="예상 금액 (원)")
     unit_price: int = Field(description="등급 단가 (원/kg)")
     grade: str = Field(description="배정된 등급")
-    max_price: int = Field(description="이보다 비싸면 안 산다")
+    max_price: int = Field(description="재무 스트레스 기준 (amount_max_krw = qty × 이것)")
+    cut_unit_price: int | None = Field(
+        default=None,
+        description="🔴 컷 기준 — 이보다 비싸면 안 산다. 없으면 그 실행에 칸이 없던 것이다",
+    )
     legs: Table = Field(description="회차 — 언제 사서 언제 오나")
     payments: Table = Field(description="언제 얼마 내나")
     reasons: list[Reason] = Field(description="이 안을 왜 냈나. 여섯 갈래를 다 채운다")
