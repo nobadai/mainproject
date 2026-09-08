@@ -32,6 +32,7 @@ from typing import Any
 
 from app.api.primitives import Column, Note, Source, Stat, Table
 from app.api.purchase.schema import Plan, PurchaseTab, Reason
+from app.contracts.core import ITEMS
 
 log = logging.getLogger(__name__)
 
@@ -147,20 +148,42 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
 
         ① runtime_status = 'READY'   — 미가동(E4)은 안을 못 낸 날이다
         ② scenarios 가 비지 않은 것
-        ③ 품목별 created_at 최신 하나
+        ③ 🔴 item 이 계약 품목일 것 (contracts.core.ITEMS)
+        ④ 품목별 created_at 최신 하나
+
+    🔴 **③ 이 없으면 화면에 피마늘이 뜬다.** 저장된 실행에 피마늘 행이 143건
+    남아 있다 — `#216` 으로 계약에서 뺐지만 **기록은 일부러 안 고쳤다**
+    (`e63f990` *"고쳐 쓰면 기록이 거짓이 된다"*). 기록을 고칠 자리가 아니라
+    **보일 때 거를 자리**다. 계약이 그렇게 적어 두었다::
+
+        contracts/core.py:118
+        제안 축   "사자고 제안한 품목"   ITEMS 로 거른다
+        재고 축   "창고에 있는 품목"     자유 문자열 — 좁히지 않는다
+
+    이 화면은 **제안 축**이다.
+
+    ⚠️ 거른 것을 조용히 없애지 않는다 — 몇 건을 왜 뺐는지 돌려주는 글에 적는다.
     """
     ready = [r for r in runs if r["runtime_status"] == "READY"]
     with_plans = [r for r in ready if (r["payload"] or {}).get("scenarios")]
+    ours = [r for r in with_plans if r["item"] in ITEMS]
+    dropped = sorted({str(r["item"]) for r in with_plans if r["item"] not in ITEMS})
+
     picked: dict[str, dict[str, Any]] = {}
-    for run in with_plans:  # 이미 created_at DESC 라 처음 만난 것이 최신이다
-        picked.setdefault(run["item"] or "(품목 미상)", run)
+    for run in ours:  # 이미 created_at DESC 라 처음 만난 것이 최신이다
+        picked.setdefault(str(run["item"]), run)
     chosen = list(picked.values())
+
+    aside = ""
+    if dropped:
+        names = " · ".join(x if x != "None" else "품목 미상" for x in dropped)
+        aside = f". 계약 밖 품목({names})은 뺐습니다 — 지금 사는 것은 {'·'.join(ITEMS)} 입니다"
     if not chosen:
-        return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 실행 0건"
+        return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 계약 품목 실행 0건{aside}"
     names = " · ".join(f"{r['item']} {r['request_id']}" for r in chosen)
     return chosen, (
         f"그날 실행 {len(runs)}건 중 환경이 선 것 {len(ready)}건 · "
-        f"안을 낸 것 {len(with_plans)}건 — 품목별 최신 하나를 보입니다 ({names})"
+        f"안을 낸 것 {len(with_plans)}건 — 품목별 최신 하나를 보입니다 ({names}){aside}"
     )
 
 
@@ -420,7 +443,8 @@ def build(as_of: date) -> PurchaseTab:
     skipped = 0
     for run in chosen:
         for scenario in (run["payload"] or {}).get("scenarios") or []:
-            plan = _plan(run["item"] or "(품목 미상)", scenario, decided, run["request_id"])
+            #  _pick 이 ITEMS 로 걸렀으므로 여기서 item 은 언제나 계약 품목이다
+            plan = _plan(str(run["item"]), scenario, decided, run["request_id"])
             if plan is None:
                 skipped += 1
             else:

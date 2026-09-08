@@ -175,6 +175,45 @@ def test_같은_날_실행이_여럿이면_무엇을_골랐는지_적는다(read
     assert "3건" in result.plans_note.text  # 몇 개 중에 골랐는지
 
 
+def test_계약_밖_품목은_화면에_안_올린다(read):
+    """🔴 저장된 실행에 **피마늘**이 143건 남아 있다.
+
+    `#216` 으로 계약에서 뺐지만 기록은 일부러 안 고쳤다 (`e63f990` — *"고쳐 쓰면
+    기록이 거짓이 된다"*). 그러니 **보일 때 거른다.** 계약이 그렇게 적어 두었다 —
+    제안 축은 ``ITEMS`` 로 거르고 재고 축은 안 좁힌다 (`contracts/core.py:118`).
+
+    ⚠️ 조용히 없애지 않는다. 몇 건을 왜 뺐는지 화면이 말해야 한다.
+    """
+    read(_data(runs=[
+        _run("REQ-BAECHU", _scenario("보수")),
+        _run("REQ-PIMANUL", _scenario("보수"), item="피마늘"),
+        _run("REQ-NOITEM", _scenario("보수"), item=None),
+    ]))
+    result = tab.build(AS_OF)
+    assert [p.key for p in result.plans] == ["배추 · 보수"]
+    assert "피마늘" in result.plans_note.text
+    assert "품목 미상" in result.plans_note.text
+
+
+def test_어휘를_여기서_다시_세지_않는다():
+    """품목 목록의 주인은 계약이다 (규칙 7).
+
+    ⚠️ 값 비교가 아니라 **같은 객체를 보고 있는가**를 본다 — 사본을 만들어 두면
+    계약이 바뀌어도 화면만 옛 목록으로 남는다. `#281` 이 그 병이었다.
+    """
+    from app.contracts.core import ITEMS
+
+    assert tab.ITEMS is ITEMS
+
+
+def test_계약_품목_실행이_하나도_없으면_그렇게_적는다(read):
+    """피마늘만 있는 날은 «안 0개» 이고, 그 이유가 화면에 있어야 한다."""
+    read(_data(runs=[_run("REQ-PIMANUL", _scenario("보수"), item="피마늘")]))
+    result = tab.build(AS_OF)
+    assert result.plans == []
+    assert "피마늘" in result.plans_note.text
+
+
 def test_안이_없으면_안별_컷_사유를_적는다(read):
     """레슨 ② — ``no_proposal_reason`` 이라는 칸은 **없다.**
 
