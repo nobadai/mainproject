@@ -460,3 +460,150 @@ class FinanceAgentRunResponse(BaseModel):
     request_payload: dict[str, object]
     response_payload: dict[str, object]
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Dashboard 조회 응답
+# ---------------------------------------------------------------------------
+
+class FinanceDashboardMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sim_run_id: str
+    as_of: date
+    data_type: str | None = None
+
+
+class FinanceStateView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finance_state_id: str
+    state_date: date
+    state_type: str
+    financing_mode: str
+    current_cash_krw: Decimal
+    minimum_operating_cash_krw: Decimal
+    operating_cash_buffer_krw: Decimal
+    committed_outflows_krw: Decimal
+    unsettled_purchase_payables_krw: Decimal
+    receivables_krw: Decimal
+    inventory_book_value_krw: Decimal
+    operational_inventory_value_krw: Decimal
+    current_debt_krw: Decimal
+    financial_limit_krw: Decimal
+    recommended_loan_amount_krw: Decimal | None = None
+    note: str | None = None
+
+
+class FinanceCashflowSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    purchase_cash_out_krw: Decimal
+    logistics_cash_out_krw: Decimal
+    payroll_interest_cash_out_krw: Decimal
+    sales_recognized_krw: Decimal
+    collection_cash_in_krw: Decimal
+    base_net_cash_krw: Decimal
+    loan_execution_krw: Decimal
+
+
+class FinanceReceivableSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    collected_count: int
+    partial_count: int
+    open_count: int
+    original_amount_krw: Decimal
+    received_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    overdue_amount_krw: Decimal
+
+
+class FinancePayableSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    original_amount_krw: Decimal
+    paid_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    overdue_amount_krw: Decimal
+
+
+class FinanceReceivableItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receivable_id: str
+    sale_id: str
+    issued_date: date
+    due_date: date
+    original_amount_krw: Decimal
+    received_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    status: str
+
+
+class FinancePayableItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payable_id: str
+    purchase_id: str
+    issued_date: date
+    due_date: date
+    original_amount_krw: Decimal
+    paid_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    status: str
+
+
+class FinanceExpenseSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expense_category: str
+    status: str
+    expense_count: int
+    total_amount_krw: Decimal
+    fixed_amount_krw: Decimal
+    variable_amount_krw: Decimal
+
+
+class FinanceClosingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    close_date: date
+    day_no: int
+    purchase_cash_out_krw: Decimal
+    logistics_cash_out_krw: Decimal
+    payroll_interest_cash_out_krw: Decimal
+    sales_recognized_krw: Decimal
+    collection_cash_in_krw: Decimal
+    base_net_cash_krw: Decimal
+    base_cash_balance_krw: Decimal
+    loan_execution_krw: Decimal
+    loan_cash_balance_krw: Decimal
+    minimum_operating_cash_krw: Decimal | None = None
+    base_operating_buffer_krw: Decimal | None = None
+    loan_operating_buffer_krw: Decimal | None = None
+    receivables_balance_krw: Decimal
+    inventory_qty_kg: Decimal
+    accounting_inventory_cost_krw: Decimal
+
+
+class FinanceDashboardResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: FinanceDashboardMeta
+    states: list[FinanceStateView]
+    cashflow_summary: FinanceCashflowSummary
+    ledger_summary: dict[str, FinanceReceivableSummary | FinancePayableSummary]
+    receivables: list[FinanceReceivableItem]
+    payables: list[FinancePayableItem]
+    expenses: list[FinanceExpenseSummary]
+    recent_closings: list[FinanceClosingItem]
+
+
+class FinanceCashflowResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: FinanceDashboardMeta
+    cashflow: list[FinanceClosingItem]

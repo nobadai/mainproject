@@ -986,3 +986,94 @@ class SalesAgentRunResponse(BaseModel):
     request_payload: dict[str, object]
     response_payload: dict[str, object]
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Dashboard 조회 응답
+# ---------------------------------------------------------------------------
+
+class SalesDashboardMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sim_run_id: str
+    as_of: date
+    data_type: str | None = None
+
+
+class SalesDashboardSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sales_count: int
+    customer_count: int
+    total_sales_quantity_kg: Decimal
+    total_sales_amount_krw: Decimal
+    contribution_profit_krw: Decimal
+    contribution_margin_pct: Decimal
+    received_amount_krw: Decimal
+    outstanding_receivables_krw: Decimal
+
+
+class SalesCollectionStatusSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    sales_amount_krw: Decimal
+
+
+class SalesItemSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    item_name: str
+    line_count: int
+    total_quantity_kg: Decimal
+    sales_amount_krw: Decimal
+    contribution_profit_krw: Decimal
+    contribution_margin_pct: Decimal
+    avg_unit_price_krw_per_kg: Decimal
+
+
+class SalesHistoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sale_id: str
+    sale_date: date
+    customer_partner_id: str
+    partner_name: str | None = None
+    total_quantity_kg: Decimal
+    total_amount_krw: Decimal
+    contribution_profit_krw: Decimal
+    contribution_margin_pct: Decimal
+    collection_due_date: date
+    collection_status: str
+    collection_status_label: str
+    order_status: str
+
+
+class SalesReceivableItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receivable_id: str
+    sale_id: str
+    sale_date: date
+    customer_partner_id: str
+    partner_name: str | None = None
+    issued_date: date
+    due_date: date
+    original_amount_krw: Decimal
+    received_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    status: str
+    display_status: str
+    d_day: int
+
+
+class SalesDashboardResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: SalesDashboardMeta
+    summary: SalesDashboardSummary
+    collection_summary: dict[str, SalesCollectionStatusSummary]
+    items: list[SalesItemSummary]
+    recent_sales: list[SalesHistoryItem]
+    receivables: list[SalesReceivableItem]

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.sales.dashboard_service import get_sales_dashboard
 from app.sales.proposal import run_proposal
 from app.sales.schemas import (
     RuntimeStatus,
@@ -13,6 +14,7 @@ from app.sales.schemas import (
     SalesAllocationInput,
     SalesAllocationReply,
     SalesCycle,
+    SalesDashboardResponse,
     SalesFloorInput,
     SalesFloorReply,
     SalesProposalInput,
@@ -26,6 +28,20 @@ from app.sales.service import (
 )
 
 router = APIRouter(prefix="/sales", tags=["sales"])
+
+
+@router.get(
+    "/dashboard",
+    response_model=SalesDashboardResponse,
+    summary="영업 Dashboard 조회",
+)
+def read_sales_dashboard(
+    sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+) -> SalesDashboardResponse:
+    """저장된 판매·수금 원장 사실만 집계해 반환한다."""
+    return get_sales_dashboard(sim_run_id=sim_run_id, as_of=as_of, recent_limit=limit)
 
 
 @router.post(
