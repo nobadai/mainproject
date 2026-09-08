@@ -111,8 +111,22 @@ run_procurement(...)      service.py     ← 품목마다
 
 ```text
 입고(InboundOut.status) 또는 수금(CollectionOut.status) 이
-  BLOCKED · FAILED   →  🔴 그날 판단을 안 돌린다
+  BLOCKED · FAILED   →  🔴 그날 판단을 안 돌린다 · **출고도 안 돌린다**
 ```
+
+🔴 **출고는 장부 관문 뒤, 판단 뒤다.**
+
+```text
+개장 → 입고 → 수금 → [장부 관문] → 판단 → **출고**
+```
+
+  ★ **왜 판단 뒤인가.** 오늘 산 것이 오늘 나가지 않는다 — 도착이 며칠 뒤다. 그래서
+    출고가 보는 재고는 판단이 만든 매입과 무관하고, 순서를 바꿔도 결과가 같아야
+    하는데 **같지 않게 보이는 날**이 생긴다. 판단 뒤에 두면 그 물음이 없다.
+
+  ★★ **왜 관문 뒤인가.** 장부가 안 선 날에 출고까지 하면 **재고가 두 번 틀린다** —
+    입고가 안 들어온 채로 물건이 나가고, 그 위에서 다음 날 판단이 선다. 판단을
+    막는 이유가 그대로 출고를 막는 이유다.
 
 🔴 **무엇을 안 막는지가 더 중요하다.**
 
@@ -149,6 +163,7 @@ from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.outbound_flow import ship_due_sales
 from app.master.schemas import ProcurementRunRequest
 from app.master.service import run_procurement
 
@@ -440,6 +455,13 @@ class DayRunOutcome:
     #:   쓰는 말이고 `RAN` 은 `ItemRunOutcome` 이 이미 쓰는 말이다. 단계를 안 탄
     #:   사실을 `items == ()` 으로만 두면 *"품목 목록이 비었다"* 와 구별이 안 된다.
     procurement_status: str = "NOT_ATTEMPTED"
+    #: 출고 단계를 **탔는가**. 🔴 `procurement_status` 와 **같은 모양·같은 어휘**다
+    #: (`RAN` · `NOTHING_DUE` · `FAILED` · `NOT_ATTEMPTED`).
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `NOTHING_DUE` 는 입고·수금이 이미 쓰는 말이고
+    #:   나머지 셋은 이 클래스가 이미 쓴다. 판매 품목별 결과는 `OutboundOut.items` 가
+    #:   나르고, 여기 다시 담지 않는다 — 같은 사실의 주인은 하나다.
+    outbound_status: str = "NOT_ATTEMPTED"
     items: tuple[ItemRunOutcome, ...] = ()
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -458,13 +480,18 @@ def run_scheduled_day(
     receive_fn: Callable[..., Any] = receive_arrivals,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    outbound_fn: Callable[..., Any] = ship_due_sales,
     items: Sequence[str] | None = None,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 수금 → 판단(품목마다)
+    개장 → 입고 → 수금 → [장부 관문] → 판단(품목마다) → 출고
     ```
+
+    🔴 **출고가 판단 뒤이고 관문 뒤다.** 오늘 산 것은 오늘 안 나가고(도착이 며칠
+      뒤다), 장부가 안 선 날에 물건을 내보내면 재고가 두 번 틀린다. 관문에서
+      돌아서면 `outbound_status` 는 `NOT_ATTEMPTED` 로 남는다.
 
     🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
@@ -580,6 +607,13 @@ def run_scheduled_day(
             )
         )
 
+    # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
+    #
+    # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
+    #   그것이 *"장부가 안 선 날에는 출고도 안 한다"* 이다.
+    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of))
+    notes.append(note)
+
     return DayRunOutcome(
         as_of=as_of,
         action=action.action,
@@ -588,6 +622,7 @@ def run_scheduled_day(
         inbound_status=inbound_status,
         collection_status=collection_status,
         procurement_status="RAN",
+        outbound_status=outbound_status,
         items=tuple(results),
         notes=tuple(notes),
     )
@@ -641,6 +676,7 @@ def wake_up(
     receive_fn: Callable[..., Any] = receive_arrivals,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    outbound_fn: Callable[..., Any] = ship_due_sales,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
 
@@ -668,4 +704,5 @@ def wake_up(
         receive_fn=receive_fn,
         collect_fn=collect_fn,
         procure_fn=procure_fn,
+        outbound_fn=outbound_fn,
     )
