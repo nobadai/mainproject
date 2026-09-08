@@ -19,6 +19,8 @@ def test_sales_reservation_request_calls_existing_reserve_stock(monkeypatch):
             reservation_id=kwargs["reservation_id"],
             status="RESERVED",
             required_qty_kg=kwargs["required_qty_kg"],
+            # ★ `reserve_stock` 은 **전량 확보**라 둘이 늘 같다. 가짜도 그 계약을 흉내낸다.
+            reserved_qty_kg=kwargs["required_qty_kg"],
         )
 
     monkeypatch.setattr("app.logistics.sales_outbound.reserve_stock", fake_reserve_stock)

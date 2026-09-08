@@ -80,6 +80,7 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 | `30_logistics_wms_schema.sql` | 물류 WMS 표 21 · 뷰 2 회수 + `inventory_lots` 컬럼 6·제약 5 · `inventory_moves` UNIQUE 1 | 2026-09-05 · **실 DB 에는 이미 있음**(회수) · 신규 구축 DB 에는 필수 |
 | `logistics_inventory_lots_nullable.sql` | `inventory_lots.grade` · `derivation_status` NOT NULL 해제. **기존 행 값 변경 없음.** 정상 실입고가 미확정 등급과 비-Burn-in 상태를 NULL 로 표현할 수 있게 함 | 2026-09-05 · **실 DB 적용 대기** |
 | `master_collection_events.sql` | 수금 사건 표 `master_collection_events` 신설. **새 표 하나뿐이라 기존 표를 안 건드린다** — 적용 전후 `receivables` 15행 그대로. 표는 **비어서** 나간다 | 2026-09-08 · **실 DB 적용됨** |
+| `logistics_allocation_basis_fefo_auto.sql` | `inventory_allocations.allocation_basis` 에 `FEFO_AUTO_SELECTED` 추가 (시뮬레이션 자동 FEFO 할당). **어휘를 넓히기만 한다** — 기존 `FEFO_TOOL_CONFIRMED` · `HUMAN_OVERRIDE` 행은 그대로 유효하고 행 변경이 없다. CHECK 를 넓히려면 `DROP` 이 불가피해 한 트랜잭션 안에서 지웠다 다시 건다 | 2026-09-08 · **실 DB 적용 대기** |
 
 ### ⚠️ `30_logistics_wms_schema.sql` 은 판을 나누지 않았습니다
 
@@ -126,6 +127,7 @@ inbound_receipts (신규)                    →  inventory_lots FK (기존 표 
 | `logistics_agent_runs.sql` | 물류 | |
 | `30_logistics_wms_schema.sql` | **물류** | WMS 표 21 · 뷰 2 회수 (2026-09-04 cutover 분). 다른 파트 표는 FK 로 가리키기만 한다 |
 | `logistics_inventory_lots_nullable.sql` | **물류** | 재고·물류 동작을 바꾸는 변경이라 물류가 낸다. 대상 표(`inventory_lots`)의 본 DDL 은 `10_domain_schema.sql` 안에 있고 그 파일은 여전히 주인이 없다(§5) |
+| `logistics_allocation_basis_fefo_auto.sql` | **물류** | 위 `30_` 의 ALTER 판. 값 이름은 Master ↔ Logistics 합의 어휘이고, 표와 제약의 주인은 물류다 |
 | `25_logistics_runtime_fixture_20260102.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행. 다른 파트는 읽기만 |
 | `27_logistics_runtime_fixture_20260105_20260106.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행 · 관통 실행일 쌍. 다른 파트는 읽기만 |
 | `sales_agent_runs.sql` | 판매 | |
