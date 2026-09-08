@@ -56,6 +56,7 @@ from app.logistics.outbound import (
     AllocationBasis,
     AllocationRequest,
     AllocationResult,
+    InvalidOutboundRequest,
     OutboundIntegrityError,
     allocate_stock,
     lock_outbound_writes,
@@ -113,12 +114,16 @@ def allocate_reserved_stock_fefo(
     ★ **재실행이 안전하다.** 목표량이 0 이면 아무것도 안 쓰고 `applied=False` 로
       돌아선다 — 이미 다 붙은 예약을 다시 불러도 할당이 두 배가 되지 않는다.
 
-    🔴 **이 예약이 이미 붙여 둔 Lot 은 건너뛴다.** 할당의 정체성이
+    🔴 **이 예약이 이미 붙여 둔 Lot 이 다시 차례가 되면 멈춘다.** 할당의 정체성이
        `(reservation_id, lot_id)` 한 쌍이고 `allocate_stock` 은 **이미 선 할당의
-       수량을 덮지 않는다** (`ReservationConflict`). 그래서 top-up 뒤 같은 Lot 을
-       다시 집으면 늘리는 대신 부딪힌다.
+       수량을 덮지 않으므로** 그 Lot 에서 더 집는 길이 없다.
 
-       ⚠️ 건너뛴 만큼은 **다음 FEFO 후보가 받는다.** 확보량이 사라지지 않는다.
+       ⚠️ **건너뛰지 않는다.** 건너뛰면 더 신선한 Lot 이 먼저 나가고, FEFO 를 어긴
+          사실이 **아무 기록 없이** 남는다 — 조용히 틀리느니 멈춘다.
+
+       ★ 흔한 흐름에서는 안 걸린다. 앞선 할당이 그 Lot 의 가용량을 다 썼으면
+         `available <= 0` 이라 후보에 아예 안 오르기 때문이다. 걸리는 것은 남의 예약이
+         풀려 **그 Lot 의 가용량이 되살아난** 때뿐이다.
 
     🔴 **모자라면 조용히 줄이지 않는다.** 후보를 다 훑고도 목표량이 남으면
        `OutboundIntegrityError` 다.
@@ -136,6 +141,8 @@ def allocate_reserved_stock_fefo(
         거절한다.
     :param decided_at: 이 결정의 시각. **시계를 읽지 않고 호출자가 준다** (tz 필요) —
         같은 시뮬레이션을 다시 돌리면 같은 값이 나와야 한다.
+    :raises InvalidOutboundRequest: FEFO 차례가 된 Lot 에 이 예약의 할당이 이미 서 있을 때.
+        **DML 전에 막는다.**
     :raises OutboundIntegrityError: 예약이 없거나, 확보한 몫을 Lot 에서 못 채울 때.
     """
     # ── ① 잠금 먼저 ────────────────────────────────────────────────────
@@ -164,9 +171,27 @@ def allocate_reserved_stock_fefo(
     for 후보하나 in 후보:
         if 남은목표 <= 0:
             break
-        # 🔴 이미 이 예약이 붙여 둔 Lot 이다. 수량을 늘리는 길이 없어 건너뛴다.
+        # 🔴 **이 예약이 이미 붙여 둔 Lot 이 FEFO 순서에 다시 올라왔다.**
+        #
+        #    할당의 정체성이 `(reservation_id, lot_id)` 한 쌍이고 `allocate_stock` 은
+        #    **이미 선 할당의 수량을 덮지 않는다** (`ReservationConflict`). 그래서
+        #    이 Lot 에서 더 집는 길이 없다.
+        #
+        #    ⚠️ **건너뛰고 다음 후보로 가면 안 된다.** 그러면 **더 신선한 Lot 이
+        #       먼저 나가고**, FEFO 를 어긴 사실이 아무 기록 없이 남는다 —
+        #       *"에러가 안 나고 숫자만 틀리는"* 바로 그 모양이다.
+        #
+        #    ★ 흔한 흐름에서는 안 걸린다. 앞선 할당이 그 Lot 의 가용량을 이미 다 썼으면
+        #      `available <= 0` 이라 후보에 아예 안 오른다. 걸리는 것은 남의 예약이
+        #      풀려 **그 Lot 의 가용량이 되살아난** 때뿐이다.
         if 후보하나.lot_id in 상태.assigned_lot_ids:
-            continue
+            raise InvalidOutboundRequest(
+                f"FEFO 다음 차례인 Lot 에 이 예약의 할당이 이미 서 있다"
+                f" ({reservation_id!r} · {후보하나.lot_id!r}):"
+                f" 가용 {후보하나.available_qty_kg} · 더 붙일 것 {남은목표}."
+                " 같은 (예약, Lot) 할당의 수량은 못 늘리고, 건너뛰면 더 신선한 Lot 이"
+                " 먼저 나간다. 사람이 정하거나 예약을 놓아주고 다시 잡아야 한다."
+            )
         집을것 = min(후보하나.available_qty_kg, 남은목표)
         if 집을것 <= 0:
             continue

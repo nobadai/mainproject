@@ -1327,3 +1327,43 @@ def test_S20_예약_상태_읽기는_확보와_배정을_함께_준다(conn: psy
     assert 상태.assigned_qty_kg == Decimal(80)
     assert 상태.unassigned_qty_kg == Decimal(0)
     assert 상태.assigned_lot_ids == frozenset({"LOT-A"})
+
+
+def test_S21_되살아난_Lot_이_다시_차례가_되면_멈춘다(conn: psycopg.Connection) -> None:
+    """🔴 건너뛰면 **더 신선한 Lot 이 먼저 나가고** 그 사실이 아무 데도 안 남는다.
+
+    ```text
+    LOT-OLD 100 (01-01) · 남의 예약 60 이 Lot 미지정으로 잡고 있다
+    → 내 부분 예약 required 100 · reserved 40
+    → 자동 FEFO      ALC-…-LOT-OLD 40      (LOT-OLD 가용 60 남음)
+    → LOT-NEW 100 (01-15) 입고 · 남의 예약이 풀린다
+    → top-up         reserved 100          (더 붙일 것 60)
+    → 자동 FEFO      LOT-OLD 가용 60 이 **되살아나** 다시 1순위다
+                     그런데 그 Lot 엔 이미 내 할당 40 이 서 있어 못 늘린다
+    ```
+    """
+    _lot(conn, "LOT-OLD", qty="100", received_at=date(2026, 1, 1))
+    reserve_stock(
+        conn,
+        reservation_id="RSV-OTHER",
+        sim_run_id=SIM_RUN_ID,
+        item_id=ITEM_ID,
+        required_qty_kg=Decimal(60),
+        as_of=AS_OF,
+    )
+    assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(40)
+    _자동할당(conn)
+    assert {
+        행["lot_id"]: 행["allocated_qty_kg"] for 행 in _할당(conn) if 행["reservation_id"] == RSV
+    } == {"LOT-OLD": Decimal(40)}
+
+    _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
+    release_reservation(conn, reservation_id="RSV-OTHER")
+    assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(100)
+
+    with pytest.raises(InvalidOutboundRequest, match="이미 서 있다"):
+        _자동할당(conn)
+
+    # 🔴 **DML 전에 막는다** — 더 신선한 LOT-NEW 가 조용히 먼저 나가지 않았다.
+    assert {행["lot_id"] for 행 in _할당(conn) if 행["reservation_id"] == RSV} == {"LOT-OLD"}
+    assert _remaining(conn, "LOT-NEW") == Decimal(100)
