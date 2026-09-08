@@ -59,7 +59,12 @@ from app.master.schemas import (
     SalesRunResponse,
     StepOut,
 )
-from app.master.verifier import MasterVerifier
+from app.master.verifier import (
+    MasterVerifier,
+    SalesVerificationContext,
+    SalesVerifier,
+    SalesVerifierPort,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,12 +224,25 @@ def run_procurement(
     return response
 
 
-def run_sales(request: SalesRunRequest) -> SalesRunResponse:
+def run_sales(
+    request: SalesRunRequest,
+    verifier: SalesVerifierPort | None = None,
+) -> SalesRunResponse:
     """판매 Flow 를 한 번 돌리고 이력에 남긴다 (설계 2026-09-07 §0).
 
     ```text
-    개장 Gate  →  필수 어댑터 점검  →  SalesFlow  →  이력 적재
+    개장 Gate  →  필수 어댑터 점검  →  SalesFlow  →  검증(Critic B)  →  이력 적재
     ```
+
+    🔴 **검증을 지나간다** (2026-09-08). 그 전까지 `run_critic_sales` 는
+      `critic/router.py` 에서 **HTTP 로만** 불렸다 — 매입은 판단 안에서 도는데 판매는
+      아니었고, 그래서 *"두 시나리오 다 critic 검증을 거친다"* 가 사실이 아니었다.
+
+    ★ `verifier` 를 주지 않으면 **기본 검증 Tool 이 붙는다** (`SalesVerifier`) —
+      매입 `run_procurement` 와 같은 규율이다. 끄려면 명시적으로 꺼야 한다.
+
+    ⚠️ **온전한 판정은 아직 안 난다.** 배분·로트 재료가 DB 에 0행이라 대개
+      `skipped_checks` 에 *"못 냈다"* 가 남는다 — **통과가 아니다** (§3.7.6).
 
     🔴 **실행일 Gate 를 걸지 않는다 — 주말에도 판다.**
 
@@ -250,6 +268,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
     ★ **매입과 응답 조립을 공유하지 않는다.** 응답 모델도 종료 코드도 다르다 —
       묶으면 판매 종료 코드가 매입 어휘로 새거나 그 반대가 된다 (설계 §1).
     """
+    verifier = SalesVerifier() if verifier is None else verifier
     started = time.perf_counter()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
     context = ExecutionContext(
@@ -271,6 +290,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         response = _empty_sales_response(
             context,
             reason=day_gate.reason or "그날 장부가 안 열렸다",
+            skipped_note="전 검사: 그날이 안 열려서 판매 Flow 가 시작되지 않음",
         )
         response.day_gate = day_gate
         response.report_text = _sales_fold_note(response.end_code, response.reason)
@@ -290,6 +310,7 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
         response = _empty_sales_response(
             context,
             reason=f"어댑터 미등록: {', '.join(missing)}",
+            skipped_note="전 검사: 어댑터가 없어 판매 Flow 가 시작되지 않음",
         )
         response.day_gate = day_gate
         response.report_text = _sales_fold_note(response.end_code, response.reason)
@@ -326,6 +347,23 @@ def run_sales(request: SalesRunRequest) -> SalesRunResponse:
 
     response = _to_sales_response(context, outcome)
     response.day_gate = day_gate
+
+    # 🔴 **판단이 Critic B 를 지나간다.** 응답을 만든 뒤에 붙이는 이유는 검증이 후보와
+    #    물류 컨텍스트를 **둘 다** 봐야 해서다 — 둘은 Flow 결과에만 같이 있다.
+    #
+    # ★ 매입이 싣는 모양을 그대로 따른다 — findings · concerns · skipped_checks.
+    verification = verifier(
+        SalesVerificationContext(
+            as_of=request.as_of,
+            item=request.item,
+            candidates=tuple(c.scenario for c in outcome.candidates),
+            supply_context=outcome.supply_context,
+        )
+    )
+    response.findings = list(verification.findings)
+    response.concerns = list(verification.concerns)
+    response.skipped_checks = list(verification.skipped)
+
     response.report_text = _sales_fold_note(response.end_code, response.reason)
     response.history_run_id = persistence.record_sales(
         request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
@@ -935,18 +973,26 @@ def _sales_context_failure_out(outcome: SalesOutcome) -> BlockedAgentOut | None:
     )
 
 
-def _empty_sales_response(context: ExecutionContext, reason: str) -> SalesRunResponse:
+def _empty_sales_response(
+    context: ExecutionContext, reason: str, skipped_note: str = ""
+) -> SalesRunResponse:
     """시작조차 못 한 날의 판매 응답.
 
     ★ **`SL4_NOT_STARTED` 다.** 매입의 `E4` 와 뜻은 같지만 **어휘는 갈려 있다** —
       한 어휘에 두 사이클을 담으면 화면과 이력이 어느 사이클의 종료인지를 payload 로
       되짚어야 한다 (D-3 합의).
+
+    🔴 **검증이 안 돈 날이다.** `verification_skipped` 를 세우고 무엇을 못 봤는지도
+      남긴다 — 매입 `_empty_response` 와 같은 자리다. 비워 두면 빈 `findings` 가
+      *"Critic 을 지나 통과했다"* 로 읽힌다 (§3.7.6).
     """
     return SalesRunResponse(
         request_id=context.request_id,
         as_of=context.as_of,
         end_code="SL4_NOT_STARTED",
         reason=reason,
+        verification_skipped=True,
+        skipped_checks=[skipped_note] if skipped_note else [],
     )
 
 

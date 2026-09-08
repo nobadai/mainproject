@@ -32,9 +32,13 @@ from typing import Any, Protocol
 from pydantic import ValidationError
 
 from app.contracts.core import Evidence
-from app.master.critic.schemas import CriticProcurementRequest, CriticVerdictOut
-from app.master.critic.service import run_critic_procurement
-from app.master.critic_bridge import CriticSkipped, build_request, fold
+from app.master.critic.schemas import (
+    CriticProcurementRequest,
+    CriticSalesRequest,
+    CriticVerdictOut,
+)
+from app.master.critic.service import run_critic_procurement, run_critic_sales
+from app.master.critic_bridge import CriticSkipped, build_request, build_sales_request, fold
 from app.master.envelope import ENVELOPE_META_KEYS, AgentName
 from app.master.plan import ExecutionPlan
 
@@ -53,6 +57,20 @@ class CriticPort(Protocol):
     검증 Tool 이 도메인 구현에 직접 묶이면 Critic 이 바뀔 때 마스터가 흔들린다."""
 
     def __call__(self, req: CriticProcurementRequest) -> CriticVerdictOut: ...
+
+
+class SalesCriticPort(Protocol):
+    """판매 Critic 진입점 (사이클 B).
+
+    ★ `CriticPort` 와 **따로 둔다.** 받는 계약이 다르다 —
+      `CriticProcurementRequest` 와 `CriticSalesRequest` 는 필수 칸부터 갈린다
+      (`allocations` · `lot_constraints`). 하나로 묶으면 타입이 `Any` 로 넓어지고,
+      그러면 갈아 끼울 때 잘못된 사이클을 꽂아도 아무 데서도 안 걸린다.
+
+    ★ 갈아 끼울 수 있게 두는 이유는 `CriticPort` 와 같다 — 테스트가 아니라 **격리**다.
+    """
+
+    def __call__(self, req: CriticSalesRequest) -> CriticVerdictOut: ...
 
 
 @dataclass(frozen=True)
@@ -920,3 +938,136 @@ class MasterVerifier:
           붙지 않은 것을 조용히 두는 것이 커버리지를 감추는 가장 흔한 방식이다.
         """
         skipped.append("②마스터 계산 재검산: 결합·클리핑 Tool 이 Flow 에 붙은 뒤 가능")
+
+
+# ===========================================================================
+# 판매 (사이클 B) — 판단 경로에서 Critic 을 지나간다
+# ===========================================================================
+#
+# 🔴 **실측 2026-09-08 — 판매는 자기 Critic 을 안 불렀다.**
+#
+#   ```text
+#   매입(A)   verifier → critic_bridge → run_critic_procurement   판단 안에서 돈다
+#   판매(B)   run_critic_sales ← critic/router.py 에서만          HTTP 로만 불렸다
+#   ```
+#
+#   그래서 *"두 시나리오 다 critic 검증을 거친다"* 가 사실이 아니었다. 여기서 그
+#   자리를 세운다 — 매입과 **같은 모양**(Protocol + 기본값 + 갈아끼우기)이다.
+#
+# ⚠️ **온전한 판정은 아직 안 난다.** `inventory_allocations` ·
+#   `inventory_reservations` 가 0행이라 `allocation` · `lot_constraints` 재료가
+#   없다(물류 답 대기). 그 사실은 `CriticSkipped` 문장으로 `skipped` 에 남는다 —
+#   **통과로 접지 않는다.**
+
+
+@dataclass(frozen=True)
+class SalesVerificationContext:
+    """판매 판정을 Critic 에 넘기려면 필요한 것.
+
+    ★ `VerificationContext`(매입) 와 **따로 둔다.** 매입은 조언자 cap 과 근거가 필요하고
+      판매는 후보 배분과 물류 sellable 컨텍스트가 필요하다 — 한 dataclass 에 둘을 담으면
+      어느 사이클이 무엇을 쓰는지가 필드 목록에서 사라진다.
+    """
+
+    as_of: date
+    item: str | None = None
+
+    #: 판매가 낸 후보 그대로. **마스터는 고르지도 재계산하지도 않는다** (§3.2.2).
+    candidates: tuple[Mapping[str, Any], ...] = ()
+
+    #: 물류 sellable 컨텍스트 회신 봉투(`sales_flow._verdict_of`). 로트·가용재고·창고
+    #: 여유가 그 안 `payload` 에 있다. **여기서 벗기지 않는다** — 번역은 bridge 몫이다.
+    supply_context: Mapping[str, Any] = field(default_factory=dict)
+
+
+class SalesVerifierPort(Protocol):
+    """판매 판단이 지나가는 검증 자리 (매입 `flow.VerifierPort` 와 같은 역할).
+
+    ★ 주입하지 않으면 **기본 검증 Tool 이 붙는다** — 매입 진입점이 `MasterVerifier()`
+      를 세운 것과 같다. 끄려면 명시적으로 꺼야 한다.
+    """
+
+    def __call__(self, context: SalesVerificationContext | None = None) -> VerificationResult: ...
+
+
+class SalesVerifier:
+    """판매 판단의 검증 Tool. **Critic B 를 부르는 자리다.**
+
+    ★ 매입 `MasterVerifier` 와 합치지 않는다. 저쪽은 제안·조언자 경계·실행 계획을
+      함께 보는 네 갈래 검사이고 이쪽은 지금 Critic 한 갈래다. 합치면 매입 검사가
+      판매 입력 위에서 돌게 되고, 그때 나오는 것은 검증처럼 보이는 것이다.
+    """
+
+    def __init__(self, critic: SalesCriticPort | None = run_critic_sales):
+        self.critic = critic
+        """Critic B. `None` 이면 **돌리지 않은 사실이 `skipped` 에 남는다.**
+
+        🔴 `None` 은 *"Critic 을 안 돌렸다"* 는 뜻이라 **기본값 자리에 못 쓴다.**
+          기본값은 `run_critic_sales` **자체**다 — 매입이 `run_critic_procurement`
+          를 기본값으로 세운 것과 같은 규율이고, 그 이력은 이 파일 머리에 있다.
+        """
+
+    def __call__(self, context: SalesVerificationContext | None = None) -> VerificationResult:
+        """판매 판정을 Critic B 에 넘기고 결과를 3단으로 돌려준다.
+
+        🔴 **세 값을 섞지 않는다** (§3.7.6).
+
+        ```text
+        판정이 났다          findings / concerns 에 Critic 이 낸 것이 담긴다
+        재료가 없어 못 냈다   skipped 에 CriticSkipped 문장이 남는다
+        부르다 실패했다       concerns 에 CRITIC 오류 + skipped 에 미판정
+        ```
+        """
+        findings: list[str] = []
+        concerns: list[str] = []
+        skipped: list[str] = []
+
+        self._run_critic(context, findings, concerns, skipped)
+        return VerificationResult(tuple(findings), tuple(concerns), tuple(skipped))
+
+    def _run_critic(
+        self,
+        context: SalesVerificationContext | None,
+        findings: list[str],
+        concerns: list[str],
+        skipped: list[str],
+    ) -> None:
+        """★ Critic 이 던지는 예외를 위로 올리지 않는다. 검증 Tool 이 죽으면 판매
+        판단이 통째로 `ERROR` 가 되는데, **검증 실패는 판매 판단의 실패가 아니다.**
+        매입 `MasterVerifier._run_critic` 과 같은 태도이고 같은 낱말을 쓴다.
+        """
+        if self.critic is None:
+            skipped.append("Critic B (판매): 검증 Tool 에 주입되지 않음")
+            return
+        if context is None:
+            skipped.append("Critic B (판매): 실행 맥락 미전달 — as_of · 품목 · 후보 없음")
+            return
+
+        try:
+            request = build_sales_request(
+                as_of=context.as_of,
+                item=context.item,
+                candidates=context.candidates,
+                supply_context=context.supply_context,
+            )
+            verdict = self.critic(request)
+        except CriticSkipped as exc:
+            skipped.append(f"Critic B (판매): {exc}")
+            return
+        except ValidationError as exc:
+            # ★ 매입과 같은 자리다 — 입력이 Critic 계약에 안 맞는 것은 **검증 Tool 의
+            #   고장이 아니다.** 어느 필드인지 적어 `skipped` 로 남긴다.
+            fields = " · ".join(
+                ".".join(str(part) for part in err["loc"]) for err in exc.errors()[:5]
+            )
+            skipped.append(f"Critic B (판매): 입력이 Critic 계약에 맞지 않는다 — {fields}")
+            return
+        except Exception as exc:  # noqa: BLE001 — 검증이 죽어도 판매 판단은 살아야 한다
+            concerns.append(f"CRITIC: 검증 Tool 이 돌지 못했다 — {type(exc).__name__}: {exc}")
+            skipped.append("Critic B (판매): 실행 중 오류로 미판정")
+            return
+
+        critic_findings, critic_concerns, critic_skipped = fold(verdict)
+        findings.extend(critic_findings)
+        concerns.extend(critic_concerns)
+        skipped.extend(critic_skipped)

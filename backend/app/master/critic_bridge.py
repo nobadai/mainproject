@@ -8,7 +8,15 @@ critic_bridge.py — 마스터 검증 Tool ↔ Critic 56검사 번역
     조언자 Evidence            EvidenceIn[]
                                → CriticProcurementRequest
 
+    판매 후보 payload           AllocationIn[]
+    물류 sellable 컨텍스트      DeptReplyIn[] · LotConstraintIn[] · warehouse_free_kg
+                               → CriticSalesRequest
+
 ★ **번역만 한다.** 판정은 `app.master.critic` 이 내리고, 여기는 이름을 옮긴다.
+
+★ **매입 전용 파일이 아니다** (2026-09-08). 판매 번역이 여기 나란히 앉는 이유는
+  규율이 같기 때문이다 — 없는 것을 만들지 않고, 못 옮기면 `CriticSkipped` 로 말한다.
+  두 사이클이 서로의 함수를 부르지는 않는다.
 
 ★ **없는 것을 만들지 않는다.**
   `inputs_used` 는 *"재무가 cap 을 낼 때 무엇을 읽었나"* 인데 **마스터는 그걸 모른다.**
@@ -41,7 +49,11 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.contracts.core import Evidence
-from app.master.critic.schemas import CriticProcurementRequest, CriticVerdictOut
+from app.master.critic.schemas import (
+    CriticProcurementRequest,
+    CriticSalesRequest,
+    CriticVerdictOut,
+)
 from app.master.envelope import AgentName
 
 # 🟢 **지연 import 를 되돌렸다** (2026-09-07 · 2판).
@@ -466,6 +478,276 @@ def _cap_by_date(raw: Any) -> dict[str, float]:
         amount = _float_of(value)
         if day is not None and amount is not None:
             out[day.isoformat()] = amount
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 판매 (사이클 B)
+#
+# 🔴 **위의 매입 함수를 부르지 않고, 고치지도 않는다.** 두 사이클은 입력 계약이
+#    다르다 (`CriticProcurementRequest` vs `CriticSalesRequest`). 공유하는 것은
+#    `CriticSkipped` 와 `fold()` — *"못 넘긴 이유"* 와 *"판정을 3단으로 편다"* 는
+#    같은 사실이라 낱말을 하나로 둔다.
+# ---------------------------------------------------------------------------
+
+#: 판매 후보가 채널 배분을 싣는 칸. 판매 소유 이름이다 (`app/sales/schemas.py`
+#: `SalesCandidate.allocation`). 마스터가 여기서 다시 정하지 않는다.
+_ALLOCATION = "allocation"
+
+#: 물류 sellable 컨텍스트가 로트를 싣는 칸 (`app/logistics/adapter.py` payload["lots"]).
+_LOTS = "lots"
+_INVENTORY_BY_ITEM = "inventory_by_item"
+_WAREHOUSE_FREE = "warehouse_free_kg"
+
+#: `LotConstraintIn.status` 가 받는 값. 밖의 값은 **고쳐서 넣지 않고 버린다** —
+#: 물류가 다른 어휘를 쓰기 시작하면 그 사실이 로트 수 감소로 드러나야 한다.
+_LOT_STATUSES = frozenset({"AVAILABLE", "RESERVED", "EXPIRED"})
+
+
+def build_sales_request(
+    *,
+    as_of: date,
+    item: str | None,
+    candidates: Sequence[Mapping[str, Any]],
+    supply_context: Mapping[str, Any],
+    run_seq: int = 1,
+) -> CriticSalesRequest:
+    """마스터 판매 상태 → `CriticSalesRequest`.
+
+    넘길 수 없으면 `CriticSkipped` 를 올린다 — **부르는 쪽이 `skipped` 로 적는다.**
+    매입 `build_request` 와 같은 규율이고, 낱말도 같은 것을 쓴다.
+
+    🔴 **오늘은 대개 여기서 선다** (실측 2026-09-08). `inventory_allocations` ·
+      `inventory_reservations` 가 **0행**이라 판매 후보에 채널 배분이 실리지 않는다.
+      그러면 `AllocationIn` 을 만들 재료가 없고, **없는 것을 지어내면 Critic 이
+      마스터가 만든 숫자를 검증하게 된다** — 검증처럼 보이는 것이지 검증이 아니다.
+      그래서 `CriticSkipped` 로 세우고, 그 문장이 응답의 `skipped_checks` 에 남는다.
+
+    ⚠️ **`lot_constraints` 를 빈 목록으로 흘려보내지 않는다.** 계약상 기본값이 `[]`
+      라 통과는 하지만, 그러면 L4-7·L4-8(on_hand 초과 · 신선도 납기)이 *"검사할
+      로트가 없다"* 로 조용히 지나가고 `findings: []` 가 **통과로 읽힌다.**
+      재료가 없는 것은 통과가 아니다 (§3.7.6).
+    """
+    if not item:
+        raise CriticSkipped("품목이 정해지지 않아 Critic 에 넘기지 못했다 (M-26 · 품목 축)")
+
+    supply = _supply_payload(supply_context)
+
+    replies = _sales_replies_in(supply, item)
+    if not replies:
+        raise CriticSkipped(
+            "조언자 경계를 Critic 입력으로 옮기지 못했다 — 물류 sellable 컨텍스트에 cap 축 결측"
+        )
+
+    allocations = _allocations_in(candidates, item)
+    if not allocations:
+        raise CriticSkipped(
+            "배분안을 Critic 입력으로 옮기지 못했다 — 판매 후보에 채널 배분이 없다 "
+            "(inventory_allocations 0행 · 물류 계약 미결)"
+        )
+
+    lots = _lot_constraints_in(supply)
+    if not lots:
+        raise CriticSkipped(
+            "로트 제약을 Critic 입력으로 옮기지 못했다 — 물류가 로트를 안 냈다. "
+            "빈 목록으로 넘기면 on_hand 초과·신선도 검사가 통과로 읽힌다"
+        )
+
+    return CriticSalesRequest(
+        as_of=as_of,
+        run_seq=run_seq,
+        items=[item],
+        replies=replies,
+        allocations=allocations,
+        lot_constraints=lots,
+        # ⚠️ 계약이 `float` 이라 *"모름"* 을 담을 칸이 없다. 못 읽었으면 0.0 이 가고,
+        #   그 사실은 위 `replies` 가 cap_total 없이 만들어진 것으로 드러난다.
+        warehouse_free_kg=free if (free := _float_of(supply.get(_WAREHOUSE_FREE))) else 0.0,
+        # ★ 매입과 같은 이유로 비운다 — L5 가 검사할 selector 문장이 1차 Flow 에 없다.
+        rationale="",
+    )
+
+
+def _supply_payload(supply_context: Mapping[str, Any]) -> Mapping[str, Any]:
+    """물류 회신 봉투에서 payload 만 꺼낸다.
+
+    ★ 마스터가 나르는 것은 `_verdict_of` 래퍼다 (`sales_flow.py`) — agent · mode ·
+      runtime_status · payload. 래퍼째로 읽으면 키가 한 겹 어긋나 **전부 결측**이 된다.
+    """
+    if not isinstance(supply_context, Mapping):
+        return {}
+    payload = supply_context.get("payload")
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _sales_replies_in(supply: Mapping[str, Any], item: str) -> list[dict[str, Any]]:
+    """물류 sellable 컨텍스트 → 재고 `DeptReplyIn` 하나.
+
+    ★ **check_id 를 새로 만들지 않는다.** `DEPT_CAP_CHECK_ID["inventory"]` 를 그대로
+      쓴다 — 같은 부서가 내는 같은 종류의 사실(창고 cap)이고, 그 이름의 주인은 이미
+      이 파일이다. 사이클마다 이름을 갈면 부서 `DeptMeta.inputs_used` 키가 갈라진다.
+
+    ★ 재무는 여기 없다. 사이클 B 에서 재무는 밴드를 못 움직인다 (`outbound.py` §3.1) —
+      soft 신호를 지어내 넣으면 없는 판정이 생긴다.
+    """
+    cap_kg = _sellable_cap(supply, item)
+    cap_total = _float_of(supply.get(_WAREHOUSE_FREE))
+    if cap_kg is None and cap_total is None:
+        return []
+
+    check: dict[str, Any] = {
+        "check_id": _INVENTORY_CAP_CHECK,
+        "kind": "hard",
+        "verdict": "ok",
+        "evidences": [],
+    }
+    if cap_kg is not None:
+        check["cap_kg"] = {item: cap_kg}
+    if cap_total is not None:
+        check["cap_total_kg"] = cap_total
+    return [{"dept": _INVENTORY, "runtime_status": "READY", "checks": [check]}]
+
+
+def _sellable_cap(supply: Mapping[str, Any], item: str) -> float | None:
+    """`inventory_by_item` 에서 그 품목의 가용재고. 없으면 `None` 이다.
+
+    ★ **로트를 다시 합산하지 않는다** (물류 #111 A1). 가용재고 정의(비-ACTIVE 제외 ·
+      신선도 만료 제외 · 확정 출고 예약분 차감)는 물류 Tool 이 소유한다.
+    """
+    rows = supply.get(_INVENTORY_BY_ITEM)
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return None
+    for row in rows:
+        if isinstance(row, Mapping) and row.get("item") == item:
+            return _float_of(row.get("available_qty_kg"))
+    return None
+
+
+def _lot_constraints_in(supply: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """물류 `lots[]` → `LotConstraintIn[]`. **읽을 수 없는 로트는 버린다.**
+
+    ⚠️ `remaining_freshness_days` 는 **없을 수 있다** — 물류가 일부러 `None` 으로
+      낸다(§1.2-10). 0 으로 채우면 *"오늘 만료"* 라는 없는 사실이 생기고 신선도
+      검사가 그 위에서 돈다. 그런 로트는 안 넘긴다.
+    """
+    rows = supply.get(_LOTS)
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        lot_id = row.get("lot_id")
+        lot_item = row.get("item")
+        qty = _float_of(row.get("available_qty_kg"))
+        fresh = _int_of(row.get("remaining_freshness_days"))
+        status = row.get("status")
+        if not isinstance(lot_id, str) or not lot_id or not isinstance(lot_item, str):
+            continue
+        if qty is None or qty < 0 or fresh is None or status not in _LOT_STATUSES:
+            continue
+        out.append(
+            {
+                "lot_id": lot_id,
+                "item": lot_item,
+                "available_qty_kg": qty,
+                "remaining_freshness_days": fresh,
+                "status": status,
+            }
+        )
+    return out
+
+
+def _allocations_in(candidates: Sequence[Mapping[str, Any]], item: str) -> list[dict[str, Any]]:
+    """판매 후보 → `AllocationIn[]`. **채널 배분이 없는 후보는 안 옮긴다.**"""
+    out: list[dict[str, Any]] = []
+    for candidate in candidates or ():
+        if not isinstance(candidate, Mapping):
+            continue
+        converted = _allocation_in(candidate, item)
+        if converted is not None:
+            out.append(converted)
+    return out
+
+
+def _allocation_in(candidate: Mapping[str, Any], item: str) -> dict[str, Any] | None:
+    allocation_id = candidate.get("candidate_id") or candidate.get("scenario_id")
+    if not isinstance(allocation_id, str) or not allocation_id:
+        return None
+
+    legs = _channel_legs(candidate.get(_ALLOCATION), candidate.get("item") or item)
+    if not legs:
+        # 🔴 배분 없는 후보를 **수량 하나로 접어 만들지 않는다.** 채널·로트가 빠진
+        #    배분은 L4-8(신선도 납기) 이 볼 것이 없는 배분이고, 그러면 검사가 돈
+        #    것처럼 보이면서 아무것도 안 본다.
+        return None
+
+    out: dict[str, Any] = {"allocation_id": allocation_id, "legs": legs}
+    strategy = candidate.get("strategy_label") or candidate.get("scenario_type")
+    if isinstance(strategy, str) and strategy:
+        out["strategy_type"] = strategy
+    contribution = _float_of(candidate.get("expected_contribution_krw"))
+    if contribution is not None:
+        out["expected_contribution_krw"] = contribution
+    confidence = candidate.get("estimation_confidence")
+    if isinstance(confidence, str):
+        out["estimation_confidence"] = confidence
+    outbound = _outbound_legs(candidate.get("outbound_by_date"))
+    if outbound:
+        out["outbound_by_date"] = outbound
+    return out
+
+
+def _channel_legs(raw: Any, item: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    out: list[dict[str, Any]] = []
+    for leg in raw:
+        if not isinstance(leg, Mapping):
+            continue
+        channel = leg.get("channel")
+        qty = _float_of(leg.get("qty_kg"))
+        # ★ 판매 낱말은 `unit_price`, Critic 낱말은 `unit_price_krw_per_kg` 다.
+        #   단위가 같아(원/kg) 이름만 옮긴다.
+        price = _float_of(leg.get("unit_price"))
+        leg_item = leg.get("item") or item
+        if not isinstance(channel, str) or not channel or not isinstance(leg_item, str):
+            continue
+        if qty is None or qty < 0 or price is None or price < 0:
+            continue
+        due = _date_of(leg.get("due_date"))
+        out.append(
+            {
+                "channel": channel,
+                "item": leg_item,
+                "qty_kg": qty,
+                "unit_price_krw_per_kg": price,
+                "lot_ids": [str(x) for x in (leg.get("lot_ids") or ()) if isinstance(x, str)],
+                "due_date": due.isoformat() if due is not None else None,
+            }
+        )
+    return out
+
+
+def _outbound_legs(raw: Any) -> list[dict[str, Any]]:
+    """`outbound_by_date` → `OutboundLegIn[]`.
+
+    ★ 판매 낱말은 `kg`, Critic 낱말은 `qty_kg` 다. 둘 다 읽어 본다 — 어느 쪽이 오든
+      **이름만** 옮기고 값은 손대지 않는다.
+    """
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    out: list[dict[str, Any]] = []
+    for leg in raw:
+        if not isinstance(leg, Mapping):
+            continue
+        day = _date_of(leg.get("date"))
+        qty = _float_of(leg.get("qty_kg"))
+        if qty is None:
+            qty = _float_of(leg.get("kg"))
+        if day is None or qty is None or qty < 0:
+            continue
+        out.append({"date": day.isoformat(), "qty_kg": qty})
     return out
 
 
