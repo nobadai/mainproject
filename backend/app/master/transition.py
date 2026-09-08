@@ -39,6 +39,7 @@ transition.py — 승인 → 상태전이의 **트랜잭션 경계** (C 형태 �
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any, Literal, Protocol
 
@@ -210,6 +211,10 @@ class TransitionOut(BaseModel):
     #: 🔴 **이미 열려 있어 같이 실어 준 다음 날들.** 비어 있는 것이 정상이다 —
     #: 정방향이면 내일이 아직 없다. 값이 있으면 *"앞질러 열린 장부를 따라잡았다"*
     #: 는 사실이고, 화면에 나가 **왜 하루가 여러 번 바뀌었는지**를 설명한다.
+    #:
+    #: 🔴 **열린 날이 아니라 실제로 쓴 날이다** (`#381`). 열려 있었지만 도착일이
+    #: 이미 지나 실을 회차가 없던 날은 여기 안 들어간다. 화면이 *"따라잡았다"* 고
+    #: 말하는 날과 행이 실제로 선 날이 갈리면, 그 문장은 근거가 아니라 장식이다.
     carried_forward: list[date] = Field(default_factory=list)
     #: 🔴 **빈 목록이 두 가지 뜻이면 안 된다** (물류 지적 2026-09-07).
     #:
@@ -356,6 +361,124 @@ def _ledger_blocked(commitment: ApprovedCommitment) -> str:
     return ledger_block_reason(commitment)
 
 
+def _still_incoming_on(
+    commitment: ApprovedCommitment, state_date: date
+) -> ApprovedCommitment | None:
+    """`state_date` 시점에 **아직 안 온 도착분**만 남긴 약정 사본. 없으면 `None`.
+
+    🔴 **`confirmed_inbound` 의 뜻이 그것이다** (`#381`). 그 칸은 *"D 시점에 아직 안
+       온, 앞으로 올 도착분"* 이고, 도착일이 `D` 보다 이르면 **이미 왔거나(로트가
+       됐거나) 안 온 사고**다 — 둘 다 「앞으로 올 도착분」이 아니다.
+
+    ⚠️ **carry-forward 가 이것을 안 하면 유령 확정입고가 남는다.** 물류
+      `_clear_schedule` 은 입고 처리 때 **그날 한 행만** 걷는데
+      (`WHERE sim_run_id=%s AND as_of=%s AND usage_scope=%s`), carry-forward 는
+      **열린 여러 날**에 같은 회차를 실었다. 도착일 뒤의 날에 실린 몫은 아무도 안
+      걷고 남아, 실물 로트(`on_hand`)와 예약(`confirmed_inbound`)으로 **두 번
+      세어지며** `cap_by_date` 를 0 으로 만든다 (DB 실측 2026-09-08).
+
+      ```text
+      도착일 01-22 · 열린 날 {01-21, 01-22, 01-23, 01-27, 01-28}
+      전   다섯 날 전부에 싣는다 → 01-22 만 receive 가 걷는다 → 유령 3
+      후   01-21 · 01-22 에만 싣는다                       → 유령 0
+      ```
+
+    🔴 **이 함수는 새 유령을 막을 뿐, 이미 DB 에 박힌 유령 행은 안 지운다.**
+       위 실측의 `01-23` · `01-27` · `01-28` 은 그대로 남는다. 데이터 정리는
+       별건이고, 이 고침을 *"이제 걷기가 좋아진다"* 로 읽으면 안 된다.
+
+    ★ **물류 코드도 Protocol 도 안 고친다.** 좁힌 것은 넘겨 주는 값뿐이다.
+
+    ★ 회차 일정이 **비어 있는** 약정은 좁힐 것이 없다 — 지금 동작 그대로 통과시킨다.
+    """
+    if not commitment.arrival_schedule:
+        return commitment
+    legs = tuple(leg for leg in commitment.arrival_schedule if leg.arrival_date >= state_date)
+    if not legs:
+        return None
+    if len(legs) == len(commitment.arrival_schedule):
+        return commitment
+    # ★ 사본도 `__post_init__` 검증을 지난다 — 총량은 남긴 회차 합으로 맞춘다.
+    amounts = [leg.amount_krw for leg in legs]
+    # 🔴 **금액은 전 회차에 실려 있을 때만 다시 센다.** 하나라도 `None` 이면 검증이
+    #    금액을 안 보고, 그때 총액을 건드리면 **없는 근거로 값을 지어내는** 것이 된다.
+    total_amount_krw = (
+        sum(amount for amount in amounts if amount is not None)
+        if all(amount is not None for amount in amounts)
+        else commitment.total_amount_krw
+    )
+    return replace(
+        commitment,
+        total_qty_kg=sum(leg.qty_kg for leg in legs),
+        total_amount_krw=total_amount_krw,
+        arrival_schedule=legs,
+    )
+
+
+def _target_state_date(commitment: ApprovedCommitment) -> date:
+    """이 승인으로 **상태가 설 날**.
+
+    🔴 **달력 다음 날이다. 실행일 달력(평일만 도는 그것)을 쓰지 않는다.**
+       금요일 승인이면 토요일이다. 주말에도 판매 시나리오로 물류·재무가 움직여
+       장부는 **날마다 흐른다** — 다음 평일까지 상태를 미루면 토·일 이틀치 사실이
+       장부에 없는 채로 월요일 상태가 선다. `#240` 이 정한 *"실행일은 평일만,
+       경과일수는 달력일"* 과 같은 결이다. 여기서 세는 것은 **상태가 설 날**이지
+       *"다음에 언제 판단을 도는가"* 가 아니다.
+
+    ★ 함수로 뺀 이유는 **가드와 본문이 같은 날을 봐야 하기 때문**이다. 두 자리에
+      `as_of + 1` 을 각각 적으면 한쪽만 바뀌는 날이 온다.
+    """
+    return commitment.as_of + timedelta(days=1)
+
+
+def _arrival_blocked(commitment: ApprovedCommitment, target_state_date: date) -> str:
+    """목표 상태일에 **「앞으로 올 도착분」이 하나도 없는** 상태의 사유. 없으면 빈 문자열.
+
+    🔴 **이것은 버그를 고치는 가드가 아니라 미정 상태를 드러내는 가드다.**
+
+       리드타임 0 은 **계약상 허용되는 값**이다 (`app/logistics/schemas.py:283` 의
+       `inbound_lead_days: int = Field(ge=0)`). 그런데 리드타임이 0 이면
+       `arrival_date == commitment.as_of` 이고 목표 상태일은 그 **다음 날**이라
+       `_still_incoming_on` 이 `None` 을 돌려준다 — 물류 `build` 를 한 번도 안 부르고
+       `logistics.persist(conn, ())` 로 아무것도 안 쓴다.
+
+       ⚠️ **그런데 `purchases` 와 재무 행은 써지고 `APPLIED` 가 나간다.** 물류만
+         조용히 빠진다. 이 변경(`#381`) 전에도 조용했다 — 그때는 유령이 될 행을 조용히
+         **썼고** 지금은 조용히 **안 쓴다. 둘 다 조용한 것이 문제다.**
+
+    ★ 그래서 *"틀렸다"* 고 단정하지 않는다. **리드타임 0 일 때 이 경로가 무엇을 해야
+      하는지가 정해진 적이 없다**는 사실을 소리 나게 만드는 것이 여기서 하는 전부다.
+      막는 자리도 방식도 `_ledger_blocked` 와 같다 — 트랜잭션 **밖**에서 `NOT_APPLIED`
+      로 돌아서서 `purchases` 도 재무 행도 안 쓴다.
+
+    🔴 **정할 자리는 물류·매입이다.** 도착일이 목표 상태일보다 이른 승인을
+       (ㄱ) 승인일 당일 상태에 싣는지 (ㄴ) 도착분 없이 매입·재무만 세우는지
+       (ㄷ) 애초에 리드타임 0 을 매입안이 못 내게 막는지 — 셋 다 마스터가 혼자
+       고를 사실이 아니다.
+
+    ⚠️ **좁혀진 뒤 어떤 날에 실을 것이 없어 `continue` 하는 것은 정상이다**
+      (`carried_forward` 쪽). 이 가드는 **`target_state_date` 한 날에만** 건다.
+
+    ★ 회차 일정이 **비어 있는** 약정은 여기서 안 가른다 — 좁힐 것이 없는 상태이고,
+      그건 재무가 `commitment_arrival_schedule` 로 먼저 막는 자리다.
+    """
+    if not commitment.arrival_schedule:
+        return ""
+    if _still_incoming_on(commitment, target_state_date) is not None:
+        return ""
+    # ★ **숫자로 적는다.** "도착일이 목표 상태일보다 이르다" 를 사람이 바로 알아보게.
+    도착일들 = ", ".join(
+        f"{leg.seq}회차 {leg.arrival_date.isoformat()}" for leg in commitment.arrival_schedule
+    )
+    return (
+        f"목표 상태일 {target_state_date.isoformat()} 에 앞으로 올 도착분이 없다:"
+        f" 회차 도착일 {도착일들} (승인일 {commitment.as_of.isoformat()},"
+        f" 리드타임 {commitment.inbound_lead_days}). 리드타임 0 은 계약상 허용되는데"
+        " (app/logistics/schemas.py:283 inbound_lead_days ge=0)"
+        " 그때 이 경로가 무엇을 해야 하는지가 정해진 적이 없다 — 물류·매입과 정할 자리다."
+    )
+
+
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
 
 
@@ -371,6 +494,7 @@ def apply_approval(
     ```text
     1. 미등록 확인    → 커넥션을 열지 않는다
     2. 회차·지급일 확인 → 쓸 수 없으면 NOT_APPLIED, 역시 커넥션을 열지 않는다
+    2'. 도착분 확인    → 목표 상태일에 앞으로 올 도착분이 없으면 NOT_APPLIED
     3. build 세 번    → 커넥션 밖에서 (실패해도 DB 를 안 건드린다)
     4. persist 세 번  → 한 커넥션으로 · **매입 원장이 재무보다 먼저**
     5. commit 한 번   → 실패하면 rollback
@@ -410,6 +534,14 @@ def apply_approval(
         #   아니다. 그리고 여기서도 **커넥션을 열지 않는다.**
         return TransitionOut(status="NOT_APPLIED", reason=blocked)
 
+    target_state_date = _target_state_date(commitment)
+    # 🔴 **`_ledger_blocked` 와 나란히 선다** — 트랜잭션 밖에서 막아야
+    #    `purchases` 도 재무 행도 안 써진다. 리드타임 0 일 때 물류만 조용히 빠지던
+    #    자리이고, 여기 걸리는 것은 오류가 아니라 **아무도 안 정한 상태**다.
+    arrival_blocked = _arrival_blocked(commitment, target_state_date)
+    if arrival_blocked:
+        return TransitionOut(status="NOT_APPLIED", reason=arrival_blocked)
+
     finance = _TRANSITIONS["finance"]
     logistics = _TRANSITIONS["logistics"]
 
@@ -417,13 +549,7 @@ def apply_approval(
         # 🔴 **커넥션 밖에서 계산한다.** 순수 계산이 터지는 것은 흔한 일인데
         #   (약정 모양이 예상과 다르다 등), 커넥션을 연 뒤에 터지면 열린 트랜잭션이
         #   남는다. 계산 실패는 DB 를 만나기 전에 끝나야 한다.
-        # 🔴 **달력 다음 날이다. 실행일 달력(평일만 도는 그것)을 쓰지 않는다.**
-        #   금요일 승인이면 토요일이다. 주말에도 판매 시나리오로 물류·재무가 움직여
-        #   장부는 **날마다 흐른다** — 다음 평일까지 상태를 미루면 토·일 이틀치 사실이
-        #   장부에 없는 채로 월요일 상태가 선다. `#240` 이 정한 *"실행일은 평일만,
-        #   경과일수는 달력일"* 과 같은 결이다. 여기서 세는 것은 **상태가 설 날**이지
-        #   *"다음에 언제 판단을 도는가"* 가 아니다.
-        target_state_date = commitment.as_of + timedelta(days=1)
+        # ★ `target_state_date` 는 위에서 이미 섰다 — 새 가드가 같은 날을 봐야 한다.
         # ★ 회차마다 `purchases` 한 행이므로 회차마다 ID 하나다. `arrival_schedule`
         #   이 비면 **빈 매핑**이고 그것은 예외가 아니다 — 회차 일정을 못 만든 약정도
         #   승인은 살아 있다 (`commitment.py` 의 `notes` 가 왜 못 만들었는지 적는다).
@@ -480,16 +606,29 @@ def apply_approval(
         #    접으면 낡은 미래 행이 남아 있는데도 화면이 *"따라잡을 것이 없었다"* 로
         #    읽는다 — **없는 것과 못 읽은 것은 다르다.**
         carry_status = "OK" if 읽힌_날들 is not None else "UNREADABLE"
-        carried_forward = 읽힌_날들 or ()
-        logistics_rows = tuple(
-            row
-            for state_date in (target_state_date, *carried_forward)
-            for row in logistics.build(
-                commitment,
-                target_state_date=state_date,
-                purchase_ids=purchase_ids,
+        열린_날들 = 읽힌_날들 or ()
+        # 🔴 **날마다 그 날에 유효한 회차만 싣는다** (`#381` · `_still_incoming_on`).
+        #    도착일이 지난 날에 같은 회차를 또 실으면 아무도 안 걷는 **유령 확정입고**가
+        #    남는다 — 물류 `_clear_schedule` 은 그날 한 행만 걷는다.
+        #
+        # ★ 실을 회차가 없는 날은 **`build` 를 아예 안 부른다.** 빈 묶음을 넘겨 물류가
+        #   *"오늘 도착 예정 0"* 을 새로 쓰게 하는 것과 다르다 — 그 날은 이 승인과
+        #   상관이 없다.
+        logistics_rows: tuple[Any, ...] = ()
+        실제로_쓴_날들: list[date] = []
+        for state_date in (target_state_date, *열린_날들):
+            그날_약정 = _still_incoming_on(commitment, state_date)
+            if 그날_약정 is None:
+                continue
+            logistics_rows += tuple(
+                logistics.build(
+                    그날_약정,
+                    target_state_date=state_date,
+                    purchase_ids=purchase_ids,
+                )
             )
-        )
+            if state_date != target_state_date:
+                실제로_쓴_날들.append(state_date)
     except Exception as exc:  # noqa: BLE001 - 전이 실패가 적재된 결정을 지우면 안 된다.
         return TransitionOut(status="FAILED", reason=f"전이 계산 실패: {exc}")
 
@@ -510,6 +649,7 @@ def apply_approval(
     return TransitionOut(
         status="APPLIED",
         parts=list(PARTS),
-        carried_forward=list(carried_forward),
+        # 🔴 **열린 날이 아니라 실제로 쓴 날이다** (`#381`).
+        carried_forward=list(실제로_쓴_날들),
         carried_forward_status=carry_status,
     )
