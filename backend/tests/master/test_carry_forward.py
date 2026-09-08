@@ -468,3 +468,98 @@ def test_회차_금액이_비면_총액을_지어내지_않는다() -> None:
     assert tuple(leg.seq for leg in 좁힌것.arrival_schedule) == (2,)
     assert 좁힌것.total_qty_kg == 60.0
     assert 좁힌것.total_amount_krw == 100000.0, "금액이 없는데 총액을 다시 만들었다"
+
+
+# ---------------------------------------------------------------------------
+# 7. 🔴 **리드타임 0 은 미정 상태다 — 조용히 지나가지 않는다**
+#
+#    `inbound_lead_days` 는 계약상 `ge=0` 이라 **0 이 허용되는 값**이다
+#    (`app/logistics/schemas.py:283`). 그런데 0 이면 `arrival_date == as_of` 이고
+#    목표 상태일은 그 **다음 날**이라 `_still_incoming_on` 이 `None` 을 돌려준다 —
+#    물류 `build` 를 한 번도 안 부르고 `persist(conn, ())` 로 아무것도 안 쓴다.
+#
+#    ⚠️ **그런데 `purchases` 와 재무 행은 써지고 `APPLIED` 가 나갔다.** 물류만
+#      조용히 빠진다. 이 변경 전에도 조용했다 — 그때는 유령이 될 행을 조용히 **썼고**
+#      지금은 조용히 **안 쓴다. 둘 다 조용한 것이 문제다.**
+#
+#    ★ 그래서 *"틀렸다"* 로 단정하지 않고 **아무도 안 정했다는 사실을 드러낸다.**
+# ---------------------------------------------------------------------------
+
+
+def _리드타임0() -> ApprovedCommitment:
+    """리드타임 0 — 도착일이 승인일 당일이다. 계약상 허용되는 값이다."""
+    return ApprovedCommitment(
+        approval_id="H1-REQ-CARRY-1",
+        request_id="REQ-CARRY",
+        as_of=AS_OF,
+        item="배추",
+        scenario_label="기본",
+        total_qty_kg=100.0,
+        total_amount_krw=100000.0,
+        arrival_schedule=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=100.0,
+                arrival_date=AS_OF,
+                purchase_date=AS_OF,
+                seq=1,
+                payment_due_date=AS_OF,
+            ),
+        ),
+        inbound_lead_days=0.0,
+    )
+
+
+def test_리드타임0이면_NOT_APPLIED_이고_커넥션을_안_연다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """🔴 **`purchases` 도 재무 행도 안 써야 한다** — `_ledger_blocked` 와 같은 자리다."""
+    재무, 물류 = _배선
+    monkeypatch.setattr(transition, "opened_days_after", _열린날())
+    열린횟수: list[int] = []
+
+    def _connect() -> _가짜커넥션:
+        열린횟수.append(1)
+        return _가짜커넥션()
+
+    out = transition.apply_approval(_리드타임0(), connect=_connect)
+
+    assert out.status == "NOT_APPLIED", f"물류만 빠진 채 {out.status} 가 나갔다"
+    assert 열린횟수 == [], "쓸 수 없는데 커넥션을 열었다"
+    assert 재무.persisted == [] and 물류.persisted == [], "물류만 빠진 채 다른 파트를 썼다"
+    assert 물류.dates == [] and 재무.dates == [], "막았는데 build 를 불렀다"
+
+
+def test_사유가_도착일과_목표_상태일을_숫자로_적는다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """★ *"도착일이 목표 상태일보다 이르다"* 를 사람이 바로 알아보게 적는다."""
+    monkeypatch.setattr(transition, "opened_days_after", _열린날())
+
+    out = transition.apply_approval(_리드타임0(), connect=_가짜커넥션)
+
+    assert out.status == "NOT_APPLIED"
+    assert AS_OF.isoformat() in out.reason, "회차 도착일이 사유에 없다"
+    assert 다음날.isoformat() in out.reason, "목표 상태일이 사유에 없다"
+    assert "1회차" in out.reason, "어느 회차인지 이름을 안 불렀다"
+    # 🔴 *"틀렸다"* 가 아니라 **아무도 안 정했다** 는 사실을 적어야 한다.
+    assert "정해진 적이 없다" in out.reason
+    assert "물류·매입" in out.reason, "정할 자리를 안 가리켰다"
+
+
+def test_도착일이_목표_상태일과_같으면_지나간다(
+    monkeypatch: pytest.MonkeyPatch, _배선: tuple[_재무전이, _전이]
+) -> None:
+    """🔴 **회귀 방어.** 리드타임 1 이상은 지금 그대로다 — 새 가드는 거기 안 건다.
+
+    ★ 경계는 `arrival_date == target_state_date` 다. 도착일 당일은 아직 안 온 것으로
+      세므로(`_still_incoming_on` 의 `>=`) 여기서 막으면 정상 승인이 다 막힌다.
+    """
+    _, 물류 = _배선
+    monkeypatch.setattr(transition, "opened_days_after", _열린날())
+
+    out = transition.apply_approval(_commitment(도착=1), connect=_가짜커넥션)
+
+    assert out.status == "APPLIED", out.reason
+    assert 물류.dates == [다음날], f"경계 승인이 안 실렸다: {물류.dates}"
+    assert 물류.실린회차[다음날] == (1,)

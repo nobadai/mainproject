@@ -415,6 +415,70 @@ def _still_incoming_on(
     )
 
 
+def _target_state_date(commitment: ApprovedCommitment) -> date:
+    """이 승인으로 **상태가 설 날**.
+
+    🔴 **달력 다음 날이다. 실행일 달력(평일만 도는 그것)을 쓰지 않는다.**
+       금요일 승인이면 토요일이다. 주말에도 판매 시나리오로 물류·재무가 움직여
+       장부는 **날마다 흐른다** — 다음 평일까지 상태를 미루면 토·일 이틀치 사실이
+       장부에 없는 채로 월요일 상태가 선다. `#240` 이 정한 *"실행일은 평일만,
+       경과일수는 달력일"* 과 같은 결이다. 여기서 세는 것은 **상태가 설 날**이지
+       *"다음에 언제 판단을 도는가"* 가 아니다.
+
+    ★ 함수로 뺀 이유는 **가드와 본문이 같은 날을 봐야 하기 때문**이다. 두 자리에
+      `as_of + 1` 을 각각 적으면 한쪽만 바뀌는 날이 온다.
+    """
+    return commitment.as_of + timedelta(days=1)
+
+
+def _arrival_blocked(commitment: ApprovedCommitment, target_state_date: date) -> str:
+    """목표 상태일에 **「앞으로 올 도착분」이 하나도 없는** 상태의 사유. 없으면 빈 문자열.
+
+    🔴 **이것은 버그를 고치는 가드가 아니라 미정 상태를 드러내는 가드다.**
+
+       리드타임 0 은 **계약상 허용되는 값**이다 (`app/logistics/schemas.py:283` 의
+       `inbound_lead_days: int = Field(ge=0)`). 그런데 리드타임이 0 이면
+       `arrival_date == commitment.as_of` 이고 목표 상태일은 그 **다음 날**이라
+       `_still_incoming_on` 이 `None` 을 돌려준다 — 물류 `build` 를 한 번도 안 부르고
+       `logistics.persist(conn, ())` 로 아무것도 안 쓴다.
+
+       ⚠️ **그런데 `purchases` 와 재무 행은 써지고 `APPLIED` 가 나간다.** 물류만
+         조용히 빠진다. 이 변경(`#381`) 전에도 조용했다 — 그때는 유령이 될 행을 조용히
+         **썼고** 지금은 조용히 **안 쓴다. 둘 다 조용한 것이 문제다.**
+
+    ★ 그래서 *"틀렸다"* 고 단정하지 않는다. **리드타임 0 일 때 이 경로가 무엇을 해야
+      하는지가 정해진 적이 없다**는 사실을 소리 나게 만드는 것이 여기서 하는 전부다.
+      막는 자리도 방식도 `_ledger_blocked` 와 같다 — 트랜잭션 **밖**에서 `NOT_APPLIED`
+      로 돌아서서 `purchases` 도 재무 행도 안 쓴다.
+
+    🔴 **정할 자리는 물류·매입이다.** 도착일이 목표 상태일보다 이른 승인을
+       (ㄱ) 승인일 당일 상태에 싣는지 (ㄴ) 도착분 없이 매입·재무만 세우는지
+       (ㄷ) 애초에 리드타임 0 을 매입안이 못 내게 막는지 — 셋 다 마스터가 혼자
+       고를 사실이 아니다.
+
+    ⚠️ **좁혀진 뒤 어떤 날에 실을 것이 없어 `continue` 하는 것은 정상이다**
+      (`carried_forward` 쪽). 이 가드는 **`target_state_date` 한 날에만** 건다.
+
+    ★ 회차 일정이 **비어 있는** 약정은 여기서 안 가른다 — 좁힐 것이 없는 상태이고,
+      그건 재무가 `commitment_arrival_schedule` 로 먼저 막는 자리다.
+    """
+    if not commitment.arrival_schedule:
+        return ""
+    if _still_incoming_on(commitment, target_state_date) is not None:
+        return ""
+    # ★ **숫자로 적는다.** "도착일이 목표 상태일보다 이르다" 를 사람이 바로 알아보게.
+    도착일들 = ", ".join(
+        f"{leg.seq}회차 {leg.arrival_date.isoformat()}" for leg in commitment.arrival_schedule
+    )
+    return (
+        f"목표 상태일 {target_state_date.isoformat()} 에 앞으로 올 도착분이 없다:"
+        f" 회차 도착일 {도착일들} (승인일 {commitment.as_of.isoformat()},"
+        f" 리드타임 {commitment.inbound_lead_days}). 리드타임 0 은 계약상 허용되는데"
+        " (app/logistics/schemas.py:283 inbound_lead_days ge=0)"
+        " 그때 이 경로가 무엇을 해야 하는지가 정해진 적이 없다 — 물류·매입과 정할 자리다."
+    )
+
+
 # ── 트랜잭션 경계 ───────────────────────────────────────────────────────
 
 
@@ -430,6 +494,7 @@ def apply_approval(
     ```text
     1. 미등록 확인    → 커넥션을 열지 않는다
     2. 회차·지급일 확인 → 쓸 수 없으면 NOT_APPLIED, 역시 커넥션을 열지 않는다
+    2'. 도착분 확인    → 목표 상태일에 앞으로 올 도착분이 없으면 NOT_APPLIED
     3. build 세 번    → 커넥션 밖에서 (실패해도 DB 를 안 건드린다)
     4. persist 세 번  → 한 커넥션으로 · **매입 원장이 재무보다 먼저**
     5. commit 한 번   → 실패하면 rollback
@@ -469,6 +534,14 @@ def apply_approval(
         #   아니다. 그리고 여기서도 **커넥션을 열지 않는다.**
         return TransitionOut(status="NOT_APPLIED", reason=blocked)
 
+    target_state_date = _target_state_date(commitment)
+    # 🔴 **`_ledger_blocked` 와 나란히 선다** — 트랜잭션 밖에서 막아야
+    #    `purchases` 도 재무 행도 안 써진다. 리드타임 0 일 때 물류만 조용히 빠지던
+    #    자리이고, 여기 걸리는 것은 오류가 아니라 **아무도 안 정한 상태**다.
+    arrival_blocked = _arrival_blocked(commitment, target_state_date)
+    if arrival_blocked:
+        return TransitionOut(status="NOT_APPLIED", reason=arrival_blocked)
+
     finance = _TRANSITIONS["finance"]
     logistics = _TRANSITIONS["logistics"]
 
@@ -476,13 +549,7 @@ def apply_approval(
         # 🔴 **커넥션 밖에서 계산한다.** 순수 계산이 터지는 것은 흔한 일인데
         #   (약정 모양이 예상과 다르다 등), 커넥션을 연 뒤에 터지면 열린 트랜잭션이
         #   남는다. 계산 실패는 DB 를 만나기 전에 끝나야 한다.
-        # 🔴 **달력 다음 날이다. 실행일 달력(평일만 도는 그것)을 쓰지 않는다.**
-        #   금요일 승인이면 토요일이다. 주말에도 판매 시나리오로 물류·재무가 움직여
-        #   장부는 **날마다 흐른다** — 다음 평일까지 상태를 미루면 토·일 이틀치 사실이
-        #   장부에 없는 채로 월요일 상태가 선다. `#240` 이 정한 *"실행일은 평일만,
-        #   경과일수는 달력일"* 과 같은 결이다. 여기서 세는 것은 **상태가 설 날**이지
-        #   *"다음에 언제 판단을 도는가"* 가 아니다.
-        target_state_date = commitment.as_of + timedelta(days=1)
+        # ★ `target_state_date` 는 위에서 이미 섰다 — 새 가드가 같은 날을 봐야 한다.
         # ★ 회차마다 `purchases` 한 행이므로 회차마다 ID 하나다. `arrival_schedule`
         #   이 비면 **빈 매핑**이고 그것은 예외가 아니다 — 회차 일정을 못 만든 약정도
         #   승인은 살아 있다 (`commitment.py` 의 `notes` 가 왜 못 만들었는지 적는다).
