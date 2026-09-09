@@ -98,7 +98,9 @@ _CLOCK_READERS = frozenset({"seoul_now", "today_in_seoul"})
 #: 🔴 **깊은 자리는 여기 못 들어온다.** 들어오는 순간 백테스트가 그 지점부터 오늘로
 #:   답한다 — `revalidation.py` 를 여기 다시 적으려면 걷기가 승인 경로를 탈 때
 #:   무슨 일이 나는지부터 설명해야 한다.
-_CLOCK_READER_IMPORTERS = frozenset({"router.py", "scheduler.py"})
+#: 🔴 **스케줄러 하나다** (2026-09-09). 전에는 `router.py` 도 있었는데, 승인 재검증이
+#: 서는 날을 **실행 이력 행**이 정하게 바꾸면서 진입점이 시계를 안 읽게 됐다.
+_CLOCK_READER_IMPORTERS = frozenset({"scheduler.py"})
 
 
 def _clock_readers_used(path: Path) -> set[str]:
@@ -265,7 +267,7 @@ def test_스캐너가_시계를_가져가는_진입점을_실제로_찾는다():
     assert "seoul_now" in hits.get("scheduler.py", set()), (
         f"`from app.master import clock` + `clock.seoul_now` 모양을 못 잡았다: {hits}"
     )
-    assert "today_in_seoul" in hits.get("router.py", set()), (
+    assert "today_in_seoul" in hits.get("scheduler.py", set()), (
         f"`from app.master.clock import today_in_seoul` 모양을 못 잡았다: {hits}"
     )
 

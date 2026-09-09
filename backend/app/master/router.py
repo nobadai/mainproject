@@ -14,7 +14,6 @@ from app.contracts.core import ContractViolation
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
-from app.master.clock import today_in_seoul
 from app.master.collection import CollectionOut
 from app.master.collection import collect_receipts as run_collect_receipts
 from app.master.day_open import DayOpenOut
@@ -297,10 +296,10 @@ def master_decide(request_id: str, body: DecisionIn) -> DecisionOut:
     | 422 | 요청이 틀렸다 — 제시되지 않은 안 · 라벨/조건 누락 |
     """
     try:
-        # 🔴 **벽시계를 읽는 자리가 여기다** (2026-09-09 · `#452`). 화면이 누른 승인에는
-        #    `as_of` 가 안 실려 오므로 이 진입점이 정해서 넘긴다. 아래로는 인자로만
-        #    흐르고, 그래야 걷기가 승인 경로를 타는 날 곡선에 오늘이 안 섞인다.
-        return record_decision(request_id, body, as_of=today_in_seoul())
+        # 🔴 **여기서 날짜를 안 정한다** (2026-09-09). 재검증이 설 날은 **그 실행의
+        #    날**이고, 그것은 실행 이력 행이 들고 있다 — 진입점이 정하면 화면이 언제
+        #    누르느냐에 따라 재검증이 딴 날로 돈다.
+        return record_decision(request_id, body)
     except LookupError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
