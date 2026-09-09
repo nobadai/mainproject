@@ -304,11 +304,24 @@ def test_파이썬이_아니라_SQL_이_센다(monkeypatch):
     assert "GROUP BY" in query.upper()
 
 
-def test_관문_행의_종료코드는_주인이_하나다(monkeypatch):
-    """★ 적는 쪽과 되찾는 쪽이 같은 값을 본다 — 두 벌이면 한쪽만 바뀌는 날이 온다."""
-    _, params = _asked(monkeypatch)
+def test_관문_행을_업무_키로_되찾는다(monkeypatch):
+    """🔴 **모양으로 되찾지 않는다** (2026-09-09).
 
-    assert run_repository.LEDGER_GAP_END_CODE in params
+    옛 판정은 `item IS NULL AND end_code = 'E4_NOT_STARTED'` 였는데, 그 모양은 관문
+    행만의 것이 아니다 — 품목을 정하기 전에 죽은 옛 매입 실행 14행이 실측으로 같은
+    모양이다. 축이 막고 있었을 뿐이다.
+
+    ★ 적는 쪽과 되찾는 쪽이 같은 꼬리를 본다 — 두 벌이면 한쪽만 바뀌는 날이 온다.
+    """
+    query, params = _asked(monkeypatch)
+
+    assert "request_id LIKE %s" in query, f"업무 키로 안 묻는다: {query}"
+    assert run_repository.LEDGER_GAP_REQUEST_LIKE in params
+    assert "item IS NULL AND end_code" not in query, "옛 모양 판정이 남아 있다"
+
+
+def test_종료코드는_적는_쪽에서_주인이_하나다():
+    """★ 판정에서는 빠졌어도 **적을 때 쓰는 값**의 주인은 여전히 하나다."""
     assert persistence._LEDGER_GAP_END_CODE is run_repository.LEDGER_GAP_END_CODE
 
 

@@ -28,7 +28,7 @@ from app.master.procurement_boundary import (
     ProcurementBoundary,
     read_procurement_boundary,
 )
-from app.master.run_repository import LEDGER_GAP_END_CODE
+from app.master.run_repository import LEDGER_GAP_END_CODE, ledger_gap_request_id
 
 #: 실행일(금요일). 실측으로 이 날 매입 판단 행이 서 있다.
 평일 = date(2026, 1, 23)
@@ -58,6 +58,7 @@ def _row(
     finance: dict[str, Any] | None = None,
     constraints: dict[str, Any] | None = None,
     run_id: str = "11111111-1111-1111-1111-111111111111",
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """표의 행 하나. **실측 payload 모양을 그대로 쓴다.**"""
     if constraints is None:
@@ -68,7 +69,7 @@ def _row(
             constraints["finance"] = finance
     return {
         "run_id": UUID(run_id),
-        "request_id": f"REQ-DAILY-{as_of:%Y%m%d}-{item}",
+        "request_id": f"REQ-DAILY-{as_of:%Y%m%d}-{item}" if request_id is None else request_id,
         "as_of": as_of,
         "cycle": "PROCUREMENT",
         "run_seq": 1,
@@ -103,7 +104,12 @@ def _경계행(**kwargs: Any) -> dict[str, Any]:
 
 
 def _관문행(*, as_of: date = 평일, **kwargs: Any) -> dict[str, Any]:
-    """장부 관문 행 (`#465`). **품목이 없고** 경계를 안 든다."""
+    """장부 관문 행 (`#465`). **업무 키가 이 행의 정체다** — 품목이 없고 경계를 안 든다.
+
+    ★ **키를 손으로 안 적는다.** `record_ledger_gap` 이 표에 적는 값과 같은 함수를
+      부른다 — 여기서 문자열을 지어내면 되찾는 쪽만 초록인 검사가 된다.
+    """
+    kwargs.setdefault("request_id", ledger_gap_request_id(as_of))
     return _row(
         as_of=as_of,
         item=None,
