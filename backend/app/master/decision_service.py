@@ -53,7 +53,7 @@ def _end_code_of(response_payload: dict[str, Any]) -> str:
     return end_code
 
 
-def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
+def record_decision(request_id: str, payload: DecisionIn, *, as_of: date) -> DecisionOut:
     """결정 1건을 받아 적재하고 돌려준다.
 
     순서가 중요하다 — **읽고 → 검사하고 → 🔴 재검증하고 → 적재한다.** 적재 후
@@ -74,6 +74,18 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     ⚠️ **`PASSED` 여도 아직 아무 일도 안 일어난다.** 승인 후 도메인 Write 는 M-5 이고
       그 앞에 실행 원장(saga) 문제가 있다 (설계 §5).
 
+    🔴 **`as_of` 는 여기서 안 만든다** (2026-09-09 · `#452`). 재검증이 설 날이고,
+      **진입점이 정해서 넘긴다** — 운영은 `router.master_decide` 가 `clock` 을 읽고,
+      발화문 경로는 `ask_service` 가 그 요청의 `as_of` 를 넘긴다. 이 함수가 시계를
+      읽으면 걷기가 승인 경로를 타는 날 곡선에 벽시계가 섞인다.
+
+      ⚠️ **기본값을 두지 않는다.** 안 넘기면 터져야 한다 — 기본값은 곧 업무 규칙이다.
+
+    ⚠️ **승인이 아니어도 받는다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은
+      재검증을 안 돌리므로 이 값을 안 쓰지만, 넘기고 안 넘기고가 결정 종류에 따라
+      갈리면 **부르는 쪽이 종류를 먼저 알아야 한다.** 받는 것은 항상 같다.
+
+    :param as_of: 이 결정이 서는 날. 승인이면 재검증이 그날로 돈다.
     :raises LookupError: 그 업무 키의 실행이 없다 (라우터가 404).
     :raises DecisionRejected: 지금 상태에서 받을 수 없다 (라우터가 409/422).
     """
@@ -88,7 +100,7 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     _reject_repeat_approval(existing, payload)
 
     seq = next_seq(existing)
-    revalidation = _revalidation_for(row, response_payload, payload, seq)
+    revalidation = _revalidation_for(row, response_payload, payload, seq, as_of)
     saved = save_decision(
         request_id=request_id,
         decision_seq=seq,
@@ -113,8 +125,12 @@ def _revalidation_for(
     response_payload: Mapping[str, Any],
     payload: DecisionIn,
     decision_seq: int,
+    as_of: date,
 ) -> Revalidation | None:
-    """승인이면 **선택된 1안을 오늘 다시 검증한다** (설계 2026-09-07 · M-4).
+    """승인이면 **선택된 1안을 `as_of` 로 다시 검증한다** (설계 2026-09-07 · M-4).
+
+    ★ **`as_of` 를 만들지 않고 흘린다.** 받은 날을 그대로 `revalidate_scenario` 에
+      넘긴다 — 중간에서 손대면 진입점이 정한 날과 부서가 받은 날이 갈린다.
 
     🔴 **`APPROVE` 일 때만이다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은 승인이
       아니라 재검증할 대상이 없다 — 그때 두 칸은 `None` 이고, 그 `None` 은 *"재검증에
@@ -153,6 +169,7 @@ def _revalidation_for(
         original_conditions=conditions_of_original(response_payload, payload.scenario_label),
         decision_seq=decision_seq,
         policy_version=policy_version,
+        as_of=as_of,
         item=row.get("item") if isinstance(row.get("item"), str) else None,
     )
 
@@ -160,7 +177,7 @@ def _revalidation_for(
 def _policy_version_of(row: Mapping[str, Any]) -> str | None:
     """원 실행이 돈 정책판. **실행 이력 행의 요청 원문에서 읽는다.**
 
-    ★ **재검증이 새 정책판을 고르지 않는다.** `as_of` 는 오늘로 옮기지만 정책판까지
+    ★ **재검증이 새 정책판을 고르지 않는다.** `as_of` 는 고르는 날로 옮기지만 정책판까지
       바뀌면 *"그 사이 무엇이 바뀌었나"* 에 축이 둘 섞인다 — 재검증이 재는 것은
       **시장과 장부**이지 회사가 규칙을 바꿨는지가 아니다.
     """
