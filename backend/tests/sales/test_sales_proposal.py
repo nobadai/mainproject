@@ -380,18 +380,50 @@ def _purchase_feedback(*, status="ok", fulfillable=None, quantity=1500, risks=No
     }
 
 
+def _resolved_purchase_request(**purchase_kwargs):
+    feedback = _purchase_feedback(**purchase_kwargs)
+    feedback["domain_replies"].append(
+        {
+            "source_agent": "finance",
+            "capability": "FINANCIAL_VALIDATION",
+            "reply_ref": "FIN-1",
+            "runtime_status": "READY",
+            "business_status": "ok",
+            "payload": {"finance_verdict": "PASS"},
+        }
+    )
+    feedback["scenario_feedback"][0]["reply_refs"].append("FIN-1")
+    return _request(
+        logistics_context={
+            "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 3000},
+            "sellable_supply": {
+                "status": "READY",
+                "inventory_by_item": [{"item": "배추", "available_qty_kg": 3000}],
+                "supply_capacity_by_date": [
+                    {"date": "2026-09-10", "confirmed_sellable_quantity_kg": 3000}
+                ],
+            },
+            "delivery_feasibility": {"status": "READY"},
+        },
+        feedback=feedback,
+    )
+
+
 @pytest.mark.parametrize("fulfillable", [True, False, None])
 def test_purchase_positive_supply_is_conditional_and_clipped_to_supported_quantity(
     monkeypatch, fulfillable
 ):
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
-    reply = run_proposal(_request(feedback=_purchase_feedback(fulfillable=fulfillable)))
+    reply = run_proposal(_resolved_purchase_request(fulfillable=fulfillable))
     conservative, aggressive = reply.scenarios[0], reply.scenarios[2]
     assert aggressive.conditional_purchase is True
     assert aggressive.quantity_kg == Decimal(4500)
     assert aggressive.unmet_quantity_kg == Decimal(500)
     assert aggressive.supply.confirmed_quantity_kg == Decimal(3000)
-    assert aggressive.supply.required_additional_quantity_kg == Decimal(1500)
+    # Original shortage stays separate from conditional Purchase supply and unmet quantity.
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert aggressive.supply.conditional_quantity_kg == Decimal(1500)
+    assert aggressive.status == "CONDITIONAL"
     assert "PUR-1" in aggressive.evidence_refs
     assert "PUR-1" not in conservative.evidence_refs
     assert conservative.conditional_purchase is False
@@ -402,8 +434,13 @@ def test_purchase_skipped_zero_is_resolved_but_not_conditional(monkeypatch):
     reply = run_proposal(_request(feedback=_purchase_feedback(status="skipped", quantity=0)))
     aggressive = reply.scenarios[2]
     assert aggressive.conditional_purchase is False
-    assert aggressive.supply.required_additional_quantity_kg == Decimal(0)
+    assert aggressive.supply.required_additional_quantity_kg == Decimal(2000)
+    assert aggressive.supply.conditional_quantity_kg == Decimal(0)
     assert aggressive.unmet_quantity_kg == Decimal(2000)
+
+    resolved = run_proposal(_resolved_purchase_request(status="skipped", quantity=0))
+    trace = next(item for item in resolved.decision_trace if item.candidate_id == "SALES-001-C")
+    assert trace.status == "INFEASIBLE"
     assert "ADDITIONAL_SUPPLY_CONTEXT" not in aggressive.required_validations
 
 
