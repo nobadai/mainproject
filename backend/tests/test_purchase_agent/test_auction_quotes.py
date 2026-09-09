@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from app.contracts.core import ITEMS
 from app.purchase_agent import db, mocks, ports, quotes
 from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.graph import run_purchase_agent
@@ -237,13 +238,21 @@ def test_the_real_1231_rows_become_one_weighted_quote() -> None:
     ]
 
 
-# --------------------------------------------------------------------- 피마늘 (규칙 3)
+# ------------------------------------------------------- 계약 밖 품목 (규칙 3)
+#
+# 🔴 **여기는 전에 「피마늘」 자리였다** (2026-09-09 에 바꿨다).
+#   피마늘은 규격이 ``null`` 로 선언돼 있어 «조회하지 않는다» 를 재는 자리였는데,
+#   계약에서 빠져(`#216`) 선언에서도 걷었다. 그래서 이제 **키 자체가 없고**,
+#   재는 것이 «null 이라 안 읽는다» 가 아니라 «계약 밖이라 아예 못 부른다» 다.
+#
+#   ★ 약해진 게 아니라 세졌다 — null 은 통과시키고 넘어가지만 키 부재는 멈춘다.
 
 
-def test_item_without_a_settled_spec_is_not_queried_at_all() -> None:
-    """피마늘은 조회 규격이 미확정이다 — **아무 규격으로나 물어보지 않는다** (규칙 3).
+def test_contract_outsider_is_stopped_before_any_query() -> None:
+    """계약 밖 품목은 **조회 한 번도 안 나간다.** 조용히 빈 목록을 주지도 않는다.
 
-    물어보면 값이 오고, 그 값은 우리가 뜻한 시리즈가 아니다.
+    빈 목록은 *"오늘 낙찰이 없었다"* 로 읽힌다. 계약 밖이라 안 부른 것과 완전히
+    다른 사실이라, 여기서 멈춰서 그 둘이 섞이지 않게 한다.
     """
     calls: list = []
 
@@ -251,16 +260,17 @@ def test_item_without_a_settled_spec_is_not_queried_at_all() -> None:
         calls.append(params)
         return []
 
-    result = auction_quote_source(fetch=fetch)("피마늘", INTEGRATION)
+    with pytest.raises(KeyError, match="spec_by_item"):
+        auction_quote_source(fetch=fetch)("피마늘", INTEGRATION)
 
-    assert result == []
     assert calls == []
 
 
-def test_spec_for_item_returns_none_for_the_unsettled_item() -> None:
+def test_spec_for_item_stops_on_an_item_outside_the_contract() -> None:
     constraints = load_constraints()
 
-    assert spec_for_item("피마늘", constraints) is None
+    with pytest.raises(KeyError, match="spec_by_item"):
+        spec_for_item("피마늘", constraints)
     assert spec_for_item("배추", constraints)["unit_weight_kg"] == 10
 
 
@@ -312,13 +322,16 @@ def test_an_item_declared_null_yields_no_plan_with_the_spec_reason(
     assert "낙찰 기록이 없다" not in reason
 
 
-def test_every_purchase_item_is_declared_even_when_the_answer_is_null() -> None:
-    """4품목이 모두 표에 있어야 한다. 키가 **없는** 것과 값이 **null**인 것은 다르다 —
-    없으면 "빠뜨렸다"이고 null이어야 "미결이라 안 읽는다"가 된다."""
+def test_every_contract_item_is_declared_and_nothing_else_is() -> None:
+    """계약 품목은 **모두** 표에 있고, 계약 밖은 **하나도** 없어야 한다.
+
+    🔴 양쪽을 다 잰다. 앞만 재면 계약에서 뺀 품목이 선언에 남아 있어도 통과하고,
+      그러면 «지웠다» 고 믿으면서 계속 불린다 (2026-09-09 에 실제로 그 상태였다).
+    """
     spec_by_item = load_constraints()["market_quotes"]["spec_by_item"]
 
     assert set(mocks.ITEMS) <= set(spec_by_item)
-    assert spec_by_item["피마늘"] is None
+    assert set(spec_by_item) == set(ITEMS)
 
 
 # --------------------------------------------------------------------- read-only 경계
@@ -458,15 +471,15 @@ def test_a_market_holiday_leaves_one_reason_per_plan_label() -> None:
     assert [row["label"] for row in proposal["rejected_reasons"]] == ["보수", "기본", "공격"]
 
 
-def test_the_unsettled_item_gets_its_own_reason_not_the_holiday_one() -> None:
-    """피마늘이 빈 목록인 이유는 휴장이 아니라 **규격 미확정**이다. 둘을 같은 말로 적으면
-    없는 원인을 보고하는 것이다."""
-    reason = missing_quote_reason("피마늘", "2025-12-31", load_constraints())
+def test_no_reason_is_invented_for_an_item_outside_the_contract() -> None:
+    """계약 밖 품목에는 **사유를 지어내지 않는다.** 여기까지 오면 안 되기 때문이다.
 
-    assert reason.startswith("피마늘 조회 규격이 아직 정해지지 않아")
-    assert "휴장" not in reason
-    # 조사를 붙이면 "피마늘는"이 된다 — 실제로 한 번 나갔다 (2026-08-31 관통).
-    assert "피마늘는" not in reason
+    🔴 전에는 이 자리가 *"피마늘은 규격 미확정이라 못 받았다"* 는 문장을 냈다.
+      그 문장이 나온다는 것은 **계약 밖 품목이 사유를 낼 자리까지 걸어왔다**는 뜻이라,
+      문 앞 게이트(`#223`)가 뚫린 것을 «정상 사유» 로 덮게 된다.
+    """
+    with pytest.raises(KeyError, match="spec_by_item"):
+        missing_quote_reason("피마늘", "2025-12-31", load_constraints())
 
 
 def test_the_empty_quote_guard_still_refuses_to_compute() -> None:

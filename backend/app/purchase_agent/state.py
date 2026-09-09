@@ -29,7 +29,7 @@ class PurchaseAgentState(TypedDict):
 
     # ── 입력 (T0 스냅샷에서 주입) ───────────────────────────────────────────
     date: str  # as_of. 노드는 이 값만 보고, 벽시계를 읽지 않는다 (규칙 1)
-    item: Literal["배추", "무", "피마늘", "양파"]
+    item: Literal["배추", "무", "양파"]
     forecast: dict  # 경락가 예측 (daily는 D+1 ~ D+18)
     market_quotes: list[dict]  # 가락 등급별 당일 경락가
     inventory: dict

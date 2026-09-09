@@ -39,6 +39,7 @@ import pytest
 from _fixtures import AS_OF, _proposal
 from pydantic import ValidationError
 
+from app.contracts.core import ITEMS
 from app.purchase_agent import mocks, ports
 from app.purchase_agent.config import CONSTRAINTS_PATH, load_constraints
 from app.purchase_agent.schemas import PurchaseProposal, revalidate_for_output
@@ -650,7 +651,8 @@ def test_unconfirmed_shelf_life_is_null() -> None:
     assert shelf_life["배추"] == 135
     assert shelf_life["양파"] is None
     assert shelf_life["무"] is None
-    assert shelf_life["피마늘"] is None
+    # 🔴 계약 밖 품목은 칸 자체가 없다 (2026-09-09). 전에는 피마늘이 null 로 있었다.
+    assert set(shelf_life) == set(ITEMS)
 
 
 def test_feedback_attempt_max_is_declared_but_not_yet_consumed_here() -> None:

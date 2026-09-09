@@ -893,6 +893,20 @@ def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> lis
     목록을 순서대로 소진했을 뿐이고, **"이만하면 충분한가"를 아무도 묻지 않았다.**
     E3-3에서 일괄 fallback을 고지하기로 한 것과 같은 라벨/행동 불일치다.
 
+    ⚠️ **"고를 여지가 없어서"라고 적지 않는다.** 지금은 참이지만(``loop_max`` == 유형 수)
+    유형이 늘면 거짓이 된다 — 근거는 ``collect_context.select_doc_types`` docstring 과
+    ``test_ordering_is_moot_while_the_list_fits_the_loop_budget`` 가 들고 있고, 이 문장은
+    **한 일과 안 한 일**만 적는다. 그래야 전제가 바뀌어도 문장이 거짓이 되지 않는다.
+
+    ★ 같은 사실을 ``adapter.build_evidences`` 도 ``context_docs_used`` 근거에 적는다.
+    두 자리가 갈리면 화면과 봉투가 다른 말을 하므로, 문면을 고칠 때 **둘을 같이** 본다.
+
+    🔴 **전에 ``adapter._evidence`` 로 적었다 — 그런 이름은 없다** (2026-09-09 정정).
+      `#480` 이 새로 넣은 줄인데 **그때 이름을 안 쟀다.** 자리는 grep 으로 맞게 찾아
+      놓고 **함수 이름만 기억으로** 적었고, 반대쪽 주석이 ``_context_risks`` 로 정확해서
+      한쪽만 틀린 것도 안 보였다. `#454` 가 걷어낸 유형이 하루 만에 다시 났다 —
+      **가리키는 이름은 적기 전에 정의를 확인한다** (줄 번호는 밀리므로 안 적는다).
+
     문구에 내부 단계 이름을 쓰지 않고, **하지 않은 일을 한 것처럼 적지도 않는다** — 발췌는
     문장 경계 파서가 아니라 서두 잘라내기라 "첫 문장"이라고 주장하지 않는다. 이 필드를
     읽는 쪽은 코드가 아니라 H1 승인 화면과 Critic이다 (계약서 §0).
@@ -908,8 +922,8 @@ def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> lis
         ]
     return [
         (
-            f"문서 {len(context_docs)}건 참조 — 규칙 기반 수집이라 "
-            "문서 선별·충분성 판단은 미적용(우선순위 순서대로 로드). "
+            f"문서 {len(context_docs)}건 참조 — 정해진 우선순위 순서대로 읽었고 "
+            "어느 문서가 더 맞는지도, 이만하면 충분한지도 판정하지 않는다. "
             "발췌는 관련 구절 선별 없이 각 문서 서두에서 기계적으로 뜬 것이다. "
             f"{_document_age(context_docs, as_of)}"
         )
