@@ -19,6 +19,7 @@
 
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -121,6 +122,91 @@ def row_value(row: Any, name: str, index: int = 0) -> Any:
     if isinstance(row, Mapping):
         return row[name]
     return row[index]
+
+
+@dataclass(frozen=True)
+class InventorySnapshot:
+    """재고 원장을 특정 날짜까지 재생한 Finance용 파생 스냅샷."""
+
+    quantity_kg: Decimal
+    inventory_book_value_krw: Decimal
+    operational_inventory_value_krw: Decimal
+
+
+def load_inventory_snapshot_as_of(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    as_of: date,
+) -> InventorySnapshot:
+    """Inventory Ledger를 ``as_of``까지 재생해 재무 재고가치를 계산한다.
+
+    두 금액은 서로 다른 Finance 표현이지만 현재 저장 계약의 수량·원가 근거는 같다.
+    회계 재고원가는 남아 있는 취득원가이고, 운영 재고가치는 운영 시점의 Lot 잔량에
+    취득원가를 적용한 값이다. 수량 정본은 이동 원장, 역사 원가는 입고 때 확정되어
+    production에서 재평가되지 않는 Lot 원가다. 현재 잔량과 현재 상태값은 과거 계산에
+    사용하지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT
+                    lot.lot_id,
+                    lot.unit_cost_krw_per_kg,
+                    move.move_type,
+                    move.quantity_kg
+                FROM {schema}.inventory_lots lot
+                LEFT JOIN {schema}.inventory_moves move
+                  ON move.lot_id = lot.lot_id
+                 AND move.sim_run_id = lot.sim_run_id
+                 AND move.moved_at <= %(as_of)s
+                WHERE lot.sim_run_id = %(sim_run_id)s
+                  AND lot.received_at <= %(as_of)s
+                ORDER BY lot.lot_id, move.moved_at, move.move_id
+                """
+            ).format(schema=schema),
+            {"sim_run_id": sim_run_id, "as_of": as_of},
+        )
+        rows = cursor.fetchall()
+    return _inventory_snapshot_from_ledger_rows(rows)
+
+
+def _inventory_snapshot_from_ledger_rows(rows: Sequence[Any]) -> InventorySnapshot:
+    quantities: dict[str, Decimal] = {}
+    costs: dict[str, Decimal] = {}
+    for row in rows:
+        lot_id = str(row_value(row, "lot_id", 0))
+        unit_cost = decimal_value(row_value(row, "unit_cost_krw_per_kg", 1))
+        prior_cost = costs.setdefault(lot_id, unit_cost)
+        if prior_cost != unit_cost:
+            raise FinanceDataNotReady("inventory_lot_cost_ambiguous")
+        quantities.setdefault(lot_id, Decimal(0))
+
+        move_type = row_value(row, "move_type", 2)
+        if move_type is None:
+            continue
+        quantity = decimal_value(row_value(row, "quantity_kg", 3))
+        if move_type == "IN":
+            quantities[lot_id] += quantity
+        elif move_type in {"OUT", "DISPOSE"}:
+            quantities[lot_id] -= quantity
+        else:
+            raise FinanceDataNotReady(f"unsupported_inventory_move_type:{move_type}")
+        if quantities[lot_id] < 0:
+            raise FinanceDataNotReady(f"negative_inventory_lot_balance:{lot_id}")
+
+    total_quantity = sum(quantities.values(), Decimal(0))
+    acquisition_cost = sum(
+        (quantity * costs[lot_id] for lot_id, quantity in quantities.items()),
+        Decimal(0),
+    )
+    return InventorySnapshot(
+        quantity_kg=total_quantity,
+        inventory_book_value_krw=acquisition_cost,
+        operational_inventory_value_krw=acquisition_cost,
+    )
 
 
 # ---------------------------------------------------------------------------

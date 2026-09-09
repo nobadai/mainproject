@@ -17,7 +17,7 @@ from app.finance.collection import (
     apply_explicit_collection,
 )
 from app.finance.day_open import FinanceDayOpening
-from app.finance.db import FinanceDataNotReady, PostgresFinanceAsOfDataPort
+from app.finance.db import FinanceDataNotReady, InventorySnapshot, PostgresFinanceAsOfDataPort
 from app.finance.state_identity import daily_finance_state_id
 
 SIM_RUN_ID = "SIM-COLLECTION-30D"
@@ -26,6 +26,17 @@ START = date(2026, 1, 7)
 END = date(2026, 2, 5)
 RECEIVABLE_ID = "AR-COLLECTION-1"
 ORIGINAL = Decimal(10_000_000)
+
+
+@pytest.fixture(autouse=True)
+def _inventory_snapshot():
+    with patch(
+        "app.finance.day_open.load_inventory_snapshot_as_of",
+        return_value=InventorySnapshot(
+            Decimal(1), Decimal(3_000_000), Decimal(2_500_000)
+        ),
+    ):
+        yield
 
 
 def _state(
@@ -130,6 +141,10 @@ class _Cursor:
                     finance_state_id=params["finance_state_id"],
                     state_date=params["as_of"],
                     state_type=params["state_type"],
+                    inventory_book_value_krw=params["inventory_book_value_krw"],
+                    operational_inventory_value_krw=params[
+                        "operational_inventory_value_krw"
+                    ],
                     note=params["note"],
                 )
                 self.conn.states[str(carried["finance_state_id"])] = carried
