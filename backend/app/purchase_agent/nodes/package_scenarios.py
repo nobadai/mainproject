@@ -19,7 +19,11 @@ from app.purchase_agent.nodes.classify_situation import (
     is_gate_excluded,
     judgment_row,
 )
-from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
+from app.purchase_agent.nodes.draft_plan import (
+    pending_value,
+    purchase_budget_krw,
+    split_adjustments,
+)
 from app.purchase_agent.quotes import observed_date, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
@@ -776,7 +780,7 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ]
 
 
-def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
+def _adjustment_risks(adjustments: list[dict] | None, constraints: dict) -> list[str]:
     """받았지만 **반영하지 않은** 조정안을 고지한다. 안 왔으면 아무 줄도 안 붙는다.
 
     🔴 **이 줄이 없으면 "값을 실어 주고 안 쓰는" 자리가 된다.** 마스터가 2회차에
@@ -787,17 +791,43 @@ def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
     ``_context_risks`` 가 *"충분성을 아무도 묻지 않았다"* 를 고지하는 것과 같은 자리다:
     **하지 않은 일을 한 것처럼 보이게 두지 않는다.**
 
-    ⚠️ 반영이 붙는 날 이 함수는 지운다 — 그때는 ``applied_adjustments`` 가 사실을
-      말하므로, 이 줄이 남아 있으면 거짓이 된다.
+    🔴 **두 갈래다** (2026-09-09 · E3-6). 전에는 *"받았으나 반영하지 않았다"* 한 줄이
+      전부였는데, **왜 못 쓰는지가 갈린다.**
+
+      ``draft_plan.split_adjustments`` 가 항목·단위·대상 안으로 거른 것은 사유를
+      같이 적는다 — 보내는 쪽이 **고쳐서 다시 보낼 수 있는** 종류이기 때문이다.
+      *"반영 규칙이 없다"* 는 우리 사정이고, *"단위가 안 맞는다"* 는 그쪽 사정이다.
+      한 문장으로 뭉치면 보내는 쪽이 무엇을 고쳐야 할지 모른다.
+
+    ⚠️ 반영이 붙어도 **이 함수는 안 지운다** — 못 쓰는 조정안이 남으므로 고지할 대상이
+      사라지지 않는다. (``#177`` 이 *"반영이 붙는 날 지운다"* 라고 적었는데, 그때는
+      «못 쓰는 것» 이라는 갈래를 안 보고 있었다.)
     """
     if not adjustments:
         return []
-    return [
-        (
-            f"조정안 {len(adjustments)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
+    usable, unusable = split_adjustments(adjustments, constraints)
+    notes = [
+        f"조정안 {len(item)}건은 반영하지 않았다 — {reason}"
+        for reason, item in _grouped_by_reason(unusable).items()
+    ]
+    if usable:
+        notes.append(
+            f"조정안 {len(usable)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
             "반영 규칙이 아직 정해지지 않았다"
         )
-    ]
+    return notes
+
+
+def _grouped_by_reason(unusable: list[tuple[dict, str]]) -> dict[str, list[dict]]:
+    """같은 사유끼리 묶는다. **사유가 하나면 줄도 하나다.**
+
+    ⚠️ 조정안마다 한 줄씩 내면 같은 말이 여러 번 화면에 뜬다 — 실측상 한 회차에 같은
+      항목이 여러 건 온다. 사유가 정보이지 건수가 정보가 아니다.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for item, reason in unusable:
+        grouped.setdefault(reason, []).append(item)
+    return grouped
 
 
 def _document_age(context_docs: list[dict], as_of: str) -> str:
@@ -1587,7 +1617,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
-                    *_adjustment_risks(state.get("adjustments")),
+                    *_adjustment_risks(state.get("adjustments"), constraints),
                     *_context_risks(
                         state["context_loop_count"],
                         state["context_docs"],

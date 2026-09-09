@@ -317,13 +317,151 @@ def test_every_scenario_says_it_did_not_apply_them() -> None:
 
     이 줄이 없으면 보내는 쪽은 자기 제안이 반영된 줄 안다 — 우리가 다른 파트에
     지적했던 "값을 실어 주고 안 쓰는" 자리와 같아진다.
+
+    🔴 **기대를 뜻에 맞췄다** (2026-09-09 · E3-6). 전에는 *"조정안 2건을 받았으나"*
+      라는 **한 문면**을 봤는데, 고지가 두 갈래로 갈렸다 — *"반영 규칙이 없다"*(우리
+      사정)와 *"이 조정안은 못 쓴다"*(그쪽 사정). 이 픽스처의 조정안은 물류
+      ``quantity`` 축이라 뒤쪽에 걸린다. **잡으려던 사실은 그대로다.**
     """
     proposal = _proposal(adjustments=[ADJUSTMENT, ADJUSTMENT])
     assert proposal["scenarios"], "이 앵커는 안이 서야 검사가 성립한다"
     for scenario in proposal["scenarios"]:
-        notice = [r for r in scenario["risks"] if "조정안 2건을 받았으나" in r]
+        notice = [r for r in scenario["risks"] if "조정안 2건" in r]
         assert notice, f"{scenario['label']} 안에 미반영 고지가 없다: {scenario['risks']}"
         assert "반영하지 않았다" in notice[0]
+        assert " — " in notice[0], "왜 안 썼는지가 없다 — 사유 없는 고지는 물을 자리를 안 준다"
+
+
+def test_declared_axes_are_names_the_contract_owns() -> None:
+    """🔴 **축 이름의 주인은 우리가 아니다** (``contracts.core.AdjustAxis``).
+
+    ``applicable_axis_units`` 에 계약에 없는 축을 적으면 그 줄은 **영원히 안 맞는다** —
+    들어오는 조정안의 축이 그 이름일 수 없기 때문이다. 조용히 «반영할 수 있는 항목이
+    아니다» 로만 나가고 아무도 안 운다.
+
+    ⚠️ 규칙 8 로는 못 잡는다 — 선언을 바꿔도 판정이 «못 씀» 그대로다. 그래서 판정이
+      아니라 **이름을 계약과 대조**한다 (``test_constraints_has_no_new_unread_declaration``
+      이 참조를 세는 것과 같은 종류).
+    """
+    from typing import get_args
+
+    from app.contracts.core import AdjustAxis
+    from app.purchase_agent.config import load_constraints
+
+    declared = {row["axis"] for row in load_constraints()["feedback"]["applicable_axis_units"]}
+    assert declared, "반영할 수 있는 항목이 하나도 없으면 이 층 전체가 죽은 코드다"
+    assert declared <= set(get_args(AdjustAxis)), (
+        f"계약에 없는 축을 선언했다: {sorted(declared - set(get_args(AdjustAxis)))}"
+    )
+
+
+# ── 축·단위가 안 맞는 조정안 (E3-6 · 2026-09-09) ──────────────────────────
+#
+# 계약(`SuggestedAdjustment`)의 `unit` 은 자유 문자열이라 **축과 안 맞아도 봉투가 안
+# 막는다.** 마스터 IO Contract 가 *"받는 쪽이 risks 로 걸러야 합니다"* 로 넘긴 자리다.
+#
+# 🔴 실측(2026-09-09 · `master_agent_runs`)에 `axis=amount` 인데 `unit=kg` ·
+#   `target_value=900` 인 조정안이 6건 있다. 아래 픽스처는 **그 실측 모양 그대로**다.
+
+#: 실측에서 본 «축과 단위가 어긋난» 조정안. 원으로 알고 환산하면 900 ÷ 단가 = 0kg 이다.
+WRONG_UNIT = {
+    "dept": "finance",
+    "axis": "amount",
+    "target_value": 900.0,
+    "unit": "kg",
+    "reason": "Verified Finance amount alternative.",
+    "ref_ids": ["FIN-AGENT:WRONG-UNIT"],
+    "scenario_labels": ["기본"],
+    "split_date": None,
+}
+
+#: 실측에서 본 «쓸 수 있는» 재무 조정안.
+FINANCE_AMOUNT = {**WRONG_UNIT, "target_value": 2_953_738.0, "unit": "krw"}
+
+
+def test_an_amount_in_kilograms_is_not_taken_as_won() -> None:
+    """🔴 **이 검사가 없으면 매입량이 조용히 0 이 된다.**
+
+    ``axis=amount`` 를 원으로 알고 ``900 ÷ 단가`` 를 하면 ``0kg`` 이고, ③이 ``min()``
+    으로 클립하므로 **그 안의 수량이 0** 이 된다. 예외도 경고도 없다.
+    """
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.draft_plan import split_adjustments
+
+    usable, unusable = split_adjustments([WRONG_UNIT], load_constraints())
+
+    assert usable == [], "축과 단위가 어긋난 조정안이 반영 대상에 들어갔다"
+    assert len(unusable) == 1
+    assert "kg" in unusable[0][1] and "krw" in unusable[0][1], "무엇이 어긋났는지가 없다"
+
+
+def test_an_adjustment_without_a_target_scenario_is_not_applied() -> None:
+    """어느 안인지 모르는 조정안은 **안 쓴다.**
+
+    계약이 *"안 채운 것과 해당 없는 것을 여기서 가르지 않는다"* 라 빈 값이 두 뜻이다.
+    모르는 채로 전 안을 조이면 **근거 없이 조이는 것**이다 (규칙 3).
+    """
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.draft_plan import split_adjustments
+
+    usable, unusable = split_adjustments(
+        [{**FINANCE_AMOUNT, "scenario_labels": []}], load_constraints()
+    )
+    assert usable == []
+    assert "어느 안에" in unusable[0][1]
+
+
+def test_a_matching_adjustment_survives_the_filter() -> None:
+    """거르는 층이 **다 거르면** 거르는 게 아니라 막는 것이다 — 통과하는 길을 잠근다."""
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.draft_plan import split_adjustments
+
+    usable, unusable = split_adjustments([FINANCE_AMOUNT], load_constraints())
+    assert usable == [FINANCE_AMOUNT]
+    assert unusable == []
+
+
+def test_the_declaration_decides_which_unit_is_right() -> None:
+    """🔴 **선언을 바꾸면 판정이 따라 바뀌는가** (규칙 8).
+
+    지금 선언(`amount`→`krw`)과 코드가 값이 같아, *"krw 가 통과한다"* 를 확인하는
+    검사만으로는 코드가 그 값을 박아 뒀는지 갈리지 않는다. 선언을 실제로 뒤집어
+    **통과·차단이 자리를 바꾸는지** 본다.
+    """
+    from copy import deepcopy
+
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.draft_plan import split_adjustments
+
+    flipped = deepcopy(load_constraints())
+    flipped["feedback"]["applicable_axis_units"] = [{"axis": "amount", "unit": "kg"}]
+
+    usable, _ = split_adjustments([WRONG_UNIT], flipped)
+    assert usable == [WRONG_UNIT], "선언을 바꿨는데 판정이 안 따라왔다 — 코드가 단위를 박고 있다"
+
+    usable, unusable = split_adjustments([FINANCE_AMOUNT], flipped)
+    assert usable == [] and "krw" in unusable[0][1], "반대 방향도 따라와야 한다"
+
+
+def test_unusable_notice_reaches_the_scenario_risks() -> None:
+    """🔴 **배선 검사다.** 헬퍼만 갈라 놓고 ⑥이 안 부르면 화면은 그대로다."""
+    proposal = _proposal(adjustments=[WRONG_UNIT])
+    assert proposal["scenarios"], "이 앵커는 안이 서야 검사가 성립한다"
+    for scenario in proposal["scenarios"]:
+        notice = [r for r in scenario["risks"] if "조정안" in r]
+        assert notice, f"{scenario['label']} 안에 고지가 없다"
+        assert any("kg" in line and "krw" in line for line in notice), (
+            f"어긋난 단위를 말하지 않는다: {notice}"
+        )
+
+
+def test_one_line_per_reason_not_per_adjustment() -> None:
+    """같은 사유가 여러 건이면 **줄은 하나**다 — 사유가 정보이지 건수가 아니다."""
+    proposal = _proposal(adjustments=[WRONG_UNIT, WRONG_UNIT, WRONG_UNIT])
+    for scenario in proposal["scenarios"]:
+        notice = [r for r in scenario["risks"] if "조정안" in r]
+        assert len(notice) == 1, f"사유가 하나인데 줄이 여럿이다: {notice}"
+        assert "3건" in notice[0], "묶었으면 건수는 남아야 한다"
 
 
 def test_no_notice_when_nothing_arrived() -> None:

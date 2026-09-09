@@ -105,6 +105,61 @@ def cash_cap_kg(budget_krw: float, unit_price: int) -> int:
     return int(budget // require_positive(unit_price, "unit_price"))
 
 
+#: 못 쓰는 조정안의 사유. **화면과 Critic 이 읽는다** — 내부 이름을 쓰지 않는다.
+_UNUSABLE_UNKNOWN_AXIS = "매입이 반영할 수 있는 조정 항목이 아니다"
+_UNUSABLE_WRONG_UNIT = "{axis} 조정은 {expected} 단위로 와야 하는데 {unit} 로 왔다"
+_UNUSABLE_NO_TARGET_SCENARIO = "어느 안에 적용할지가 적혀 있지 않다"
+
+
+def split_adjustments(
+    adjustments: list[dict] | None, constraints: dict
+) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """조정안을 **쓸 수 있는 것 / 못 쓰는 것(사유)** 으로 가른다.
+
+    🔴 **왜 거르는 층이 따로 있나.** 계약(``contracts.core.SuggestedAdjustment``)의
+      ``unit`` 은 자유 문자열이라 **축과 안 맞아도 봉투가 안 막는다.** 마스터 IO
+      Contract 가 *"받는 쪽이 risks 로 걸러야 합니다"* 로 넘긴 자리다.
+
+      실측(2026-09-09 · ``master_agent_runs``)에 ``axis=amount`` 인데 ``unit=kg`` ·
+      ``target_value=900`` 인 조정안이 6건 있다. 그것을 원으로 알고 환산하면
+      ``900 ÷ 단가 = 0kg`` 이고, ③이 ``min()`` 으로 클립하므로 **매입량이 0 으로
+      눌린다. 아무도 안 운다.**
+
+    ★ **버리지 않는다.** 못 쓰는 것도 사유와 함께 돌려주고 ⑥이 고지한다 — 값을 받고
+      조용히 버리면 보내는 쪽은 자기 제안이 반영된 줄 안다 (``#165`` · ``#166`` 에서
+      우리가 남에게 지적한 것과 같은 자리다).
+
+    ★ **항목·단위 짝은 선언이 소유한다** (``constraints.feedback``). 여기 박으면
+      선언을 바꿔도 판정이 안 따라오고, 그러면 "설정에서 읽는다" 를 증명할 수 없다
+      (규칙 7·8).
+
+    ⚠️ ``scenario_labels`` 가 빈 것도 못 쓰는 쪽이다. 계약이 *"안 채운 것과 해당 없는
+      것을 여기서 가르지 않는다"* 라 **어느 안인지 모른다** — 모르는 채로 전 안을
+      조이면 근거 없이 조이는 것이다 (규칙 3).
+    """
+    units = {
+        row["axis"]: row["unit"] for row in constraints["feedback"]["applicable_axis_units"]
+    }
+    usable: list[dict] = []
+    unusable: list[tuple[dict, str]] = []
+    for item in adjustments or []:
+        axis = item.get("axis")
+        expected = units.get(axis)
+        if expected is None:
+            unusable.append((item, _UNUSABLE_UNKNOWN_AXIS))
+            continue
+        unit = item.get("unit")
+        if unit != expected:
+            reason = _UNUSABLE_WRONG_UNIT.format(axis=axis, expected=expected, unit=unit)
+            unusable.append((item, reason))
+            continue
+        if not item.get("scenario_labels"):
+            unusable.append((item, _UNUSABLE_NO_TARGET_SCENARIO))
+            continue
+        usable.append(item)
+    return usable, unusable
+
+
 def _freshness_cap_kg(
     state: PurchaseAgentState, daily_demand: float, constraints: dict
 ) -> int | None:
