@@ -173,7 +173,7 @@ def persist_sale(conn: Any, plan: SaleWritePlan) -> SaleWriteResult:
 
 
 def mark_sale_delivered(conn: Any, *, sale_id: str) -> bool:
-    """Caller-owned completion hook after Logistics has shipped the sale."""
+    """Caller-owned completion hook after Logistics has shipped all sale_items."""
 
     if not isinstance(sale_id, str) or not sale_id.strip():
         raise SalesPersistenceConflict("sale_id must not be blank")

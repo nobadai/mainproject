@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 
 from app.finance.collection import CollectionEvent
-from app.finance.collection_fixture import DeterministicCollectionFixtureSource
-from app.finance.collection_source import FinanceCollectionSource
+from app.finance.collection import DeterministicCollectionFixtureSource
+from app.finance.collection_adapter import FinanceCollectionSource
 from app.finance.state_identity import daily_finance_state_id
 from app.master.collection import CollectionPartOut
 
@@ -264,7 +264,7 @@ def test_corrupt_source_axis_mismatch_blocks_without_mutation():
     out = source.collect(conn, as_of=AS_OF)
 
     assert out.status == "BLOCKED"
-    assert "axis" in (out.reason or "")
+    assert "실행 기준" in (out.reason or "")
     assert conn.receivable_updates == 0
     assert conn.finance_state_updates == 0
 

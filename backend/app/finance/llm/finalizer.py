@@ -3,7 +3,7 @@
 문장을 쓰지 않는다. `_FINAL_EXPLANATIONS` 의 키 중 하나를 고를 뿐이라, 새 숫자나
 새 주장이 설명을 통해 들어올 자리가 없다.
 
-★ 사용자에게 나가는 문장 자체는 `app.finance.messages` 소유다. 여기서는 **어느 문장을
+★ 사용자에게 나가는 문장 자체는 `app.finance.user_messages` 소유다. 여기서는 **어느 문장을
   고를지**만 정한다 — 문장을 여기 두면 Provider 코드마다 조금씩 다른 말투가 생긴다.
 """
 
@@ -15,10 +15,10 @@ import urllib.request
 
 from app.contracts.core import Evidence
 from app.finance.llm.client import _finance_model, _gemini_generate
-from app.finance.messages import FINANCE_EXPLANATIONS, explanation_keys
+from app.finance.user_messages import FINANCE_EXPLANATIONS, explanation_keys
 from app.finance.schemas import FinanceMode
 
-#: 사용자에게 그대로 보이는 확정 설명. **정본은 `app.finance.messages`** 다.
+#: 사용자에게 그대로 보이는 확정 설명. **정본은 `app.finance.user_messages`** 다.
 #:
 #: ★ **키는 기계 계약이고 값만 표시 문장이다.** Finalizer 는 이 키 중 하나를 고를 뿐이라,
 #:   설명을 어떻게 고쳐 써도 LLM 이 숫자를 새로 만들 자리는 여전히 없다.

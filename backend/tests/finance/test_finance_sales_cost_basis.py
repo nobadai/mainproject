@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.finance.sales_models import InventoryCostBasis, VerifiedDirectCost
+from app.finance.sales_validation import InventoryCostBasis, VerifiedDirectCost
 from app.finance.tools import build_sales_calculation_facts, compose_sales_cost_basis
 
 

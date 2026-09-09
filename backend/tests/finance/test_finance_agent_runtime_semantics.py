@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.db import FinanceDataNotReady
 from app.finance.llm.client import finance_llm_enabled

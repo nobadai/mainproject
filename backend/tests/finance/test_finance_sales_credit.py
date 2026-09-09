@@ -16,7 +16,7 @@ from app.finance.rules import (
     evaluate_collection_risk_rule,
     evaluate_receivable_capacity_rule,
 )
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 from app.finance.tools import (
     calculate_available_credit,
     calculate_projected_partner_ar,

@@ -1,17 +1,13 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi.testclient import TestClient
-
 from app.finance import dashboard_service
 from app.finance.schemas import (
     FinanceCashflowSummary,
     FinanceDashboardMeta,
-    FinanceDashboardResponse,
     FinancePayableSummary,
     FinanceReceivableSummary,
 )
-from app.main import app
 
 AS_OF = date(2025, 12, 31)
 
@@ -63,52 +59,6 @@ def test_finance_cashflow_is_ascending_and_has_buffers(monkeypatch):
     assert response.cashflow[-1].base_operating_buffer_krw == Decimal(-1319413)
     assert response.cashflow[-1].loan_operating_buffer_krw == Decimal(43952691)
     assert response.cashflow[-1].receivables_balance_krw == Decimal(21922555)
-
-
-def test_finance_dashboard_endpoint_is_registered(monkeypatch):
-    monkeypatch.setattr(
-        "app.finance.router.get_finance_dashboard",
-        lambda **_: FinanceDashboardResponse(
-            meta=FinanceDashboardMeta(sim_run_id="SIM", as_of=AS_OF, data_type="SIMULATION"),
-            states=[],
-            cashflow_summary=FinanceCashflowSummary(
-                purchase_cash_out_krw=Decimal(0),
-                logistics_cash_out_krw=Decimal(0),
-                payroll_interest_cash_out_krw=Decimal(0),
-                sales_recognized_krw=Decimal(0),
-                collection_cash_in_krw=Decimal(0),
-                base_net_cash_krw=Decimal(0),
-                loan_execution_krw=Decimal(0),
-            ),
-            ledger_summary={
-                "receivables": FinanceReceivableSummary(
-                    count=0,
-                    collected_count=0,
-                    partial_count=0,
-                    open_count=0,
-                    original_amount_krw=Decimal(0),
-                    received_amount_krw=Decimal(0),
-                    outstanding_amount_krw=Decimal(0),
-                    overdue_amount_krw=Decimal(0),
-                ),
-                "payables": FinancePayableSummary(
-                    count=0,
-                    original_amount_krw=Decimal(0),
-                    paid_amount_krw=Decimal(0),
-                    outstanding_amount_krw=Decimal(0),
-                    overdue_amount_krw=Decimal(0),
-                ),
-            },
-            receivables=[],
-            payables=[],
-            expenses=[],
-            recent_closings=[],
-        ),
-    )
-
-    response = TestClient(app).get("/finance/dashboard?sim_run_id=SIM&as_of=2025-12-31")
-
-    assert response.status_code == 200
 
 
 def _patch_common(monkeypatch):

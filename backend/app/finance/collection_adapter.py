@@ -1,4 +1,4 @@
-"""Finance implementation of Master's collection source contract."""
+"""Master 수금 source 계약에 연결되는 Finance adapter."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from typing import Any
 
 from app.finance.collection import (
     CollectionEvent,
+    DeterministicCollectionFixtureSource,
     FinanceCollectionConflict,
     apply_explicit_collection,
 )
-from app.finance.collection_fixture import DeterministicCollectionFixtureSource
 from app.finance.db import FinanceDataNotReady
 from app.master.collection import CollectionPartOut
 
@@ -48,7 +48,7 @@ class FinanceCollectionSource:
                 return CollectionPartOut(
                     part="finance",
                     status="BLOCKED",
-                    reason="collection event axis does not match this Finance adapter",
+                    reason="수금 event의 실행 기준이 현재 Finance adapter와 일치하지 않습니다.",
                     collected=collected,
                 )
             try:

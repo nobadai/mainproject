@@ -34,7 +34,6 @@ from app.contracts.core import (
     CheckResult,
     ClipResult,
     CriticFinding,
-    CriticVerdict,
     Dept,
     ItemCode,
     T0Snapshot,
@@ -399,59 +398,3 @@ def run_l4(
     if ok:
         return [], note
     return [CriticFinding("L4_rationale", "rationale_consistency", note)], note
-
-
-# ---------------------------------------------------------------------------
-# 러너
-# ---------------------------------------------------------------------------
-
-
-def run_critic(
-    *,
-    as_of,
-    run_seq: int,
-    clip: ClipResult,
-    band: Band,
-    replies: Mapping[Dept, T2Reply],
-    unit_price: Mapping[ItemCode, float],
-    verify_ctx: Mapping[str, Any],
-    check_fns: Mapping[str, CheckFn],
-    resolve_evidence: EvidenceResolver,
-    rationale: str = "",
-    judge: RationaleJudge | None = None,
-    governed_axis_refs: Mapping[str, set[str]] | None = None,
-    allow_assumed_hard: bool = True,
-    snapshot: T0Snapshot | None = None,
-    scenario_price_basis: str | None = None,
-) -> CriticVerdict:
-    """
-    계층 순서대로 돌린다. **앞 계층이 FAIL 이면 뒤는 돌리지 않는다** —
-    L1 이 깨졌는데 L4 LLM 을 호출하는 것은 비용 낭비다.
-    """
-    findings: list[CriticFinding] = []
-
-    findings += check_identity_on_clipped(clip)  # v0.2 — B1
-    findings += run_l1(clip.clipped_qty_kg, verify_ctx, check_fns)
-    if not findings:
-        findings += run_l2(replies, resolve_evidence)
-    if not findings:
-        findings += run_l3(clip, band, replies, unit_price)
-    if not findings:
-        findings += check_evidence_grade(replies, allow_assumed_hard)
-        findings += check_constraint_independence(replies, governed_axis_refs or {})
-        if snapshot is not None and scenario_price_basis is not None:
-            findings += check_price_basis_consistency(snapshot, scenario_price_basis)
-
-    note = ""
-    if not findings:
-        l4, note = run_l4(clip, band, replies, rationale, judge)
-        findings += l4
-
-    return CriticVerdict(
-        as_of=as_of,
-        run_seq=run_seq,
-        scenario_id=clip.scenario_id,
-        passed=not findings,
-        findings=tuple(findings),
-        llm_note=note,
-    )

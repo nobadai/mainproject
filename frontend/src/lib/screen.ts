@@ -253,7 +253,6 @@ export interface StateOption {
 export interface FlowCell {
   label: string;
   value: string;
-  term: string;
   tone: string;
 }
 export interface FinanceTab {
@@ -267,7 +266,6 @@ export interface FinanceTab {
   balances: Stat[];
   balances_note: Note;
   closings: Table;
-  tables_read: string[];
   source: Source;
 }
 

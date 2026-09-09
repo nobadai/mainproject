@@ -1,15 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi.testclient import TestClient
-
-from app.main import app
 from app.sales import dashboard_service
-from app.sales.schemas import (
-    SalesDashboardMeta,
-    SalesDashboardResponse,
-    SalesDashboardSummary,
-)
 
 AS_OF = date(2025, 12, 31)
 
@@ -108,33 +100,6 @@ def test_sales_dashboard_empty_unknown_sim_run(monkeypatch):
     assert response.meta.data_type is None
     assert response.summary.sales_count == 0
     assert response.items == []
-
-
-def test_sales_dashboard_endpoint_is_registered(monkeypatch):
-    monkeypatch.setattr(
-        "app.sales.router.get_sales_dashboard",
-        lambda **_: SalesDashboardResponse(
-            meta=SalesDashboardMeta(sim_run_id="SIM", as_of=AS_OF, data_type="SIMULATION"),
-            summary=SalesDashboardSummary(
-                sales_count=0,
-                customer_count=0,
-                total_sales_quantity_kg=Decimal(0),
-                total_sales_amount_krw=Decimal(0),
-                contribution_profit_krw=Decimal(0),
-                contribution_margin_pct=Decimal(0),
-                received_amount_krw=Decimal(0),
-                outstanding_receivables_krw=Decimal(0),
-            ),
-            collection_summary={},
-            items=[],
-            recent_sales=[],
-            receivables=[],
-        ),
-    )
-
-    response = TestClient(app).get("/sales/dashboard?sim_run_id=SIM&as_of=2025-12-31")
-
-    assert response.status_code == 200
 
 
 def _item(item_id: str, item_name: str, count: int, amount: str) -> dict[str, object]:

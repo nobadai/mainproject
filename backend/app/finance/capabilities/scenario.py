@@ -20,7 +20,7 @@ from datetime import date, timedelta
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.capabilities.procurement import load_context
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import _branch_ref, _evidence, _tool_ref

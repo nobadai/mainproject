@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.sales.llm.schemas import CandidateInterpretationInput, LlmInterpretationOutput
 from app.sales.schemas import SalesCandidate, SalesRecommendation
 
 _NUMBER = re.compile(r"\d")
@@ -23,6 +23,29 @@ _ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",
     Path(__file__).resolve().parents[4] / ".env",
 )
+
+
+class CandidateInterpretationInput(BaseModel):
+    """LLM은 식별자와 의미 라벨만 받아 숫자를 바꿀 수 없다."""
+
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str
+    strategy_label: str | None = None
+    adjustment_axis: str
+    conditional: bool
+    risk_labels: list[str] = Field(default_factory=list)
+    uncertainty_labels: list[str] = Field(default_factory=list)
+
+
+class LlmInterpretationOutput(BaseModel):
+    """숫자 필드가 없는 LLM 해석 결과."""
+
+    model_config = ConfigDict(extra="forbid")
+    recommended_candidate_id: str
+    summary: str
+    recommendation_reason: str
+    risk_explanation: str
+    user_message: str
 
 
 @dataclass(frozen=True)

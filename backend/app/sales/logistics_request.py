@@ -1,4 +1,4 @@
-"""Sales-owned projection of confirmed sales for Logistics outbound."""
+"""확정 판매 결과를 Logistics 예약 요청 계약으로 옮기는 Sales 소유 projection."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def outbound_reservation_for_sale(
     sim_run_id: str,
     as_of: date,
 ) -> SalesOutboundReservationRequest:
-    """Build a reservation request without selecting FEFO Lots or shipping."""
+    """FEFO Lot 선택이나 출고 실행 없이 예약 요청만 만든다."""
 
     if not isinstance(sim_run_id, str) or not sim_run_id.strip():
         raise ValueError("sim_run_id must not be blank")
