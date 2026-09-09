@@ -460,9 +460,11 @@ def test_게이트_행이_같은_날_판단_행과_같은_축을_싣는다(적�
     _run(inbound="BLOCKED")
 
     assert len(적재.calls) == 1, "관문이 막았는데 행을 안 남겼다"
-    assert 적재.calls[0]["sim_run_id"] == 판단축, (
-        f"게이트 행의 축이 판단 행과 다르다: {적재.calls[0].get('sim_run_id')!r} != {판단축!r}"
-    )
+
+    # ★ `[...]` 가 아니라 `.get` 이다 — 아예 안 넘긴 날에 `KeyError` 대신 *"안 실렸다"*
+    #   가 그대로 보여야 한다. 그것이 이 검사가 잡으려는 바로 그 모양이다.
+    게이트축 = 적재.calls[0].get("sim_run_id")
+    assert 게이트축 == 판단축, f"게이트 행의 축이 판단 행과 다르다: {게이트축!r} != {판단축!r}"
 
 
 def test_실행_축을_새로_짓지_않는다(적재):
@@ -475,7 +477,7 @@ def test_실행_축을_새로_짓지_않는다(적재):
 
     _run(collection="BLOCKED")
 
-    assert 적재.calls[0]["sim_run_id"] == BURN_IN_SIM_RUN_ID
+    assert 적재.calls[0].get("sim_run_id") == BURN_IN_SIM_RUN_ID
 
 
 def test_이력을_끄면_읽지도_않는다(monkeypatch):
