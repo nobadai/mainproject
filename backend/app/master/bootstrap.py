@@ -14,7 +14,7 @@ app/master/backtest_runner.py   main() 이 걷기 전에 부른다 (CLI 범위 �
    ★ **러너가 틀린 것이 아니었다.** 러너는 미등록을 이름까지 정확히 말했다.
      틀린 것은 조립 자리였다.
 
-★ **몇 번을 불러도 같다.** 여섯 등록이 전부 키 덮어쓰기라 재등록이 거부되지 않는다.
+★ **몇 번을 불러도 같다.** 일곱 등록이 전부 키 덮어쓰기라 재등록이 거부되지 않는다.
   *"이미 했다"* 깃발을 두지 않는 이유가 그것이다 — 깃발을 두면 `wiring.reset()` 으로
   비운 뒤 이 함수로 다시 채우는 경로가 막히고, `importlib.reload(app.main)` 로
   배선을 다시 세우는 검사(`tests/logistics/test_logistics_day_open.py` ⑩)도 막힌다.
@@ -41,8 +41,10 @@ from app.master.collection import register_collection
 from app.master.day_open import register_day_opening
 from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.finance_collection import FinanceCollectionAdapter
+from app.master.finance_receivable import FinanceReceivableAdapter
 from app.master.inbound import register_inbound
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.receivable import register_receivable
 from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
 from app.purchase_agent.adapter import purchase_port
@@ -53,7 +55,7 @@ __all__ = ["wire_registries"]
 
 
 def wire_registries() -> None:
-    """에이전트 레지스트리와 등록소 다섯을 채운다. **두 진입점이 이것을 부른다.**"""
+    """에이전트 레지스트리와 등록소 여섯을 채운다. **두 진입점이 이것을 부른다.**"""
     # 마스터가 부를 수 있는 대상은 **런타임에 등록된 것뿐**이다 (wiring).
     #
     # ★ 미등록은 오류가 아니라 "오늘 그 부서가 돌지 않는다"와 같은 상태다 —
@@ -290,4 +292,37 @@ def wire_registries() -> None:
     register_collection(
         "finance",
         FinanceCollectionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID),
+    )
+
+
+    # -- 채권 발행 (issue_receivables) --------------------------------------
+    #
+    # 여섯 번째 등록소다. 전이는 "승인이 장부를 바꾸는 방법", 하루 넘김은 "하루가
+    # 넘어가는 방법", 취소는 "승인을 물리는 방법", 입고는 "도착분을 받는 방법",
+    # 수금은 "채권이 돈으로 들어오는 방법", 여기는 "판매 확정이 채권을 만드는
+    # 방법" 이다.
+    #
+    # 앞의 다섯 중 아무 데도 합치지 않는다. 합치면 "수금은 되는데 채권은 안 서는"
+    # 상태를 표현할 수 없고, 어제까지가 정확히 그 상태였다.
+    #
+    #   haetdeul.sales   2026-01-05 / 01-07 / 01-09  CONFIRMED -> DELIVERED
+    #   haetdeul.receivables 에 그 셋의 채권   0행    <- 배선이 없어서 (2026-09-09 실측)
+    #
+    # register_inbound 가 #337 까지, register_collection 이 #427 까지 0건이던 것과
+    # 같은 모양이다. 경계(app/master/receivable.py)와 재무 구현
+    # (app/finance/receivables.py confirm_receivable)이 다 서 있는데 부르는 자리가
+    # 없었다. 배선은 마스터 몫이고 그 자리가 여기다.
+    #
+    # sim_run_id 는 마스터가 정하고 financing_mode 는 마스터가 안 고른다.
+    # 위 다섯 등록소가 쓰는 그 상수 하나를 그대로 넘기고, financing_mode 는 어댑터가
+    # issue() 안에서 get_finance_runtime_axis() 로 재무께 묻는다. 실측으로
+    # finance_states 에 LOAN_BASELINE 과 BASE_NO_LOAN 이 공존하므로, 여기에 하나를
+    # 상수로 박으면 무차입 상태가 대출 baseline 자리에 조용히 들어온다.
+    #
+    # 판매 목록도 이 줄이 아니라 호출 시점에 sales 에서 읽는다 -- 배선 시점에
+    # 고정하면 판매가 한 줄 들어와도 앱을 다시 띄우기 전까지 아무 일도 안 일어난다.
+    # 수금 사건을 master_collection_events 에서 읽게 바꾼 것과 같은 이유다.
+    register_receivable(
+        "finance",
+        FinanceReceivableAdapter(sim_run_id=BURN_IN_SIM_RUN_ID),
     )
