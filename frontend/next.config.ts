@@ -18,6 +18,10 @@ const nextConfig: NextConfig = isDev
           // `/api` 를 떼어 버리므로 **여기서 다시 붙여** 준다. 순서가 중요하다 —
           // 먼저 걸리는 규칙이 이긴다.
           { source: "/api/screen/:path*", destination: `${backendOrigin}/api/:path*` },
+          //  ML 운영 콘솔 — 이 서버가 다시 ML 백엔드로 넘긴다
+          //  (`app/ml/console_proxy.py`). 브라우저가 직접 부르면 출처가 달라
+          //  CORS 를 만나고 주소가 화면 코드에 박힌다.
+          { source: "/api/ml/:path*", destination: `${backendOrigin}/ml/console/:path*` },
           // 에이전트 API. 백엔드는 `/master`·`/finance` 처럼 `/api` 없이 받는다.
           { source: "/api/:path*", destination: `${backendOrigin}/:path*` },
         ];

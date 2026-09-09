@@ -26,11 +26,11 @@ def forecast_tab(
     if item not in ITEMS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            detail=f"지원하지 않는 품목입니다: {item}. 가능: {', '.join(ITEMS)}",
+            detail=f"지원하지 않는 품목입니다: {item}. 선택 가능: {', '.join(ITEMS)}",
         )
     if kind not in KINDS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            detail=f"없는 가격 종류입니다: {kind}. 가능: {', '.join(KINDS)}",
+            detail=f"없는 가격 종류입니다: {kind}. 선택 가능: {', '.join(KINDS)}",
         )
     return build(as_of, item, kind, base_dt)

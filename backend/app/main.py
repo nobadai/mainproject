@@ -14,6 +14,7 @@ from app.logistics.router import router as logistics_router
 from app.master.bootstrap import wire_registries
 from app.master.critic.router import router as critic_router
 from app.master.router import router as master_router
+from app.ml.console_proxy import router as ml_console_router
 from app.ml.router import router as ml_router
 from app.sales.router import router as sales_router
 
@@ -24,6 +25,9 @@ app.include_router(screen_router)
 # ML 예측 API. **여태 안 붙어 있어서 `/ml/forecast` 가 404 였다** (2026-09-08 발견).
 # 매입은 `app.ml.service` 를 파이썬으로 직접 불러 써서 아무도 모르고 있었다.
 app.include_router(ml_router)
+# ML 운영 콘솔(`/ml/console/…`). **우리 ML 백엔드로 넘기는 프록시다** —
+# 재학습·에이전트는 학습 꾸러미가 있는 곳에서만 돌 수 있다.
+app.include_router(ml_console_router)
 app.include_router(finance_router)
 app.include_router(logistics_router)
 app.include_router(master_router)
