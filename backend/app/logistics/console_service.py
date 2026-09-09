@@ -79,6 +79,7 @@ from app.logistics.console_schemas import (
 )
 from app.logistics.db import get_connection, get_db_schema
 from app.logistics.historical_repository import HistoricalLot
+from app.logistics.inbound_schedules import receivable_at
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
@@ -530,9 +531,20 @@ def _inbound_receipts(conn: Any, *, sim_run_id: str, as_of: date) -> list[Consol
 def get_inbound_console(*, sim_run_id: str, as_of: date) -> ConsoleInboundResponse:
     """운송 중 일정 · Receipt · 도착 자격 요약.
 
-    ★ 운송 중은 아직 **그날 fixture 를 직접 읽는다** — `in_transit_status` 가 필요하고
-      그 칸은 스냅샷 계약에 없다. `None`(미확인)과 `[]`(0건 확인)을 가르는 값이다.
-      이 축이 `inbound_schedules` 로 옮겨 가는 것은 WP-2 다.
+    ★ **운송 중 목록의 정본은 `inbound_schedules` 다 (W3-2).** fixture 는
+      `in_transit_status`(`None` 미확인 / `[]` 0건 확인을 가르는 값)만 준다 —
+      그 칸은 스냅샷 계약에 없어서 여기서 직접 읽는다.
+
+    🔴 **두 목록의 종료조건이 다르다. 같은 목록을 두 번 쓰지 않는다.**
+
+    ```text
+    in_transit        Receipt 가 생기면 빠진다        "아직 창고에 안 온 것"
+    arrival_summary   Lot + 원장 IN 이 서면 빠진다     "아직 받을 것이 남았나"
+    ```
+
+       ⚠️ 종전에는 둘 다 `fixture.in_transit` 하나를 봤다. 그대로 두면 **검수에서
+          막힌 건(Receipt 만 있고 Lot 없음)이 도착 요약에서 사라져** 화면이
+          *"오늘 받을 것이 없다"* 고 말한다 — 실제로는 이어받아야 할 건이다.
 
     🔴 **fixture 가 없는 날도 답한다.** 종전에는 `LookupError` 가 그대로 올라가
        화면 전체가 예시값으로 떨어졌다. 운송 중을 모르는 것과 Receipt 를 모르는
@@ -540,9 +552,16 @@ def get_inbound_console(*, sim_run_id: str, as_of: date) -> ConsoleInboundRespon
     """
     fixture = _runtime_fixture_or_none(sim_run_id=sim_run_id, as_of=as_of)
     in_transit = None if fixture is None else fixture.in_transit
-    selection = arrival.select_due_inbound(in_transit, as_of=as_of)
 
     with _read_connection() as conn:
+        # ★ 도착 요약은 **받을 것이 남았나** 를 센다 — 운송 중 목록이 아니다.
+        #   fixture 가 없는 날(미확인)에는 그 판정도 세울 수 없어 `None` 을 넘긴다.
+        due_source = (
+            None
+            if fixture is None
+            else receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+        )
+        selection = arrival.select_due_inbound(due_source, as_of=as_of)
         receipts = _inbound_receipts(conn, sim_run_id=sim_run_id, as_of=as_of)
 
     return ConsoleInboundResponse(

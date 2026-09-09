@@ -18,7 +18,8 @@ from typing import NamedTuple
 
 from psycopg import sql
 
-from app.logistics.db import fetch_all, get_db_schema
+from app.logistics.db import fetch_all, get_connection, get_db_schema
+from app.logistics.inbound_schedules import in_transit_at, pending_inbound_at
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
@@ -26,12 +27,14 @@ from app.logistics.outbound import (
 )
 from app.logistics.schemas import (
     POLICY_VERSION,
+    InTransitItem,
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
     ItemStoragePolicyFact,
     LogisticsPolicy,
     LogisticsRuntimeFixture,
     OutboundCommitment,
+    ScheduledQuantity,
 )
 
 #: 계약(Literal)과 같은 값을 쓴다 — schemas 가 단일 소유다 (#121 ⑤).
@@ -229,9 +232,56 @@ def get_active_logistics_runtime_fixture(
     )
 
 
+def _schedule_lists(
+    *, sim_run_id: str, as_of: date
+) -> tuple[list[InTransitItem], list[ScheduledQuantity]]:
+    """입고 예정 두 목록을 **`inbound_schedules` 에서** 읽는다 (W3-2).
+
+    ```text
+    in_transit           Receipt 가 생기면 빠진다        운송 중
+    confirmed_inbound    Lot + 원장 IN 이 서면 빠진다     미래 점유(Capacity)
+    ```
+
+    🔴 **둘이 같은 목록이 아니다.** Legacy JSON 에서 같았던 것은 발주 확정 단계가 비어
+       승인을 두 칸에 겹쳐 적었기 때문이고(`transition.py` 의 *"임시 조치"*), 신규
+       구조에서는 종료조건이 다르다. `in_transit ⊆ confirmed_inbound` 라 B-1
+       (`tools.find_in_transit_schedule_gap`)은 그대로 통과한다.
+
+    ⚠️ **자기 커넥션을 연다.** 이 모듈은 `fetch_all` 로 호출마다 커넥션을 여는 기존
+       구현이고(`get_current_logistics_read` docstring 이 그 사실을 이미 적어 뒀다),
+       여기서 그 규약을 바꾸지 않는다.
+    """
+    with get_connection() as conn:
+        return (
+            in_transit_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+            pending_inbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+        )
+
+
 def _build_logistics_runtime_fixture(
     row: dict[str, object], *, expected_as_of: date, expected_sim_run_id: str | None = None
 ) -> LogisticsRuntimeFixture:
+    """fixture 행 하나를 계약 타입으로. **입고 예정 두 목록만 신규 표에서 온다 (W3-2).**
+
+    ```text
+    신규 표에서   in_transit · confirmed_inbound_schedule      ← 업무 사실
+    fixture 에서  세 status · confirmed_outbound · 나머지 칸    ← Header · 아직 Legacy
+    ```
+
+    🔴 **status 어휘를 안 바꾼다** (`08 §8`). fixture 가 `UNRESOLVED` 라고 적은 축은
+       그대로 `UNRESOLVED`(목록 `None`)이고, 그 외에는 신규 표 결과가 0건이면
+       `CONFIRMED_ZERO`, 있으면 `CONFIRMED` 다.
+
+    ```text
+    fixture status == UNRESOLVED   →  UNRESOLVED · None    ★ 아는 척으로 안 바꾼다
+    그 외 · 신규 표 0건             →  CONFIRMED_ZERO · []
+    그 외 · 신규 표 1건 이상        →  CONFIRMED · [...]
+    ```
+
+       ⚠️ **status 가 업무 사실의 두 번째 정본이 되면 안 된다.** 업무 사실은
+          `inbound_schedules` 이고, status 는 Header 의 가용성·Legacy 호환 표시다.
+          그래서 `CONFIRMED`/`CONFIRMED_ZERO` 를 **저장된 값이 아니라 목록에서** 낸다.
+    """
     if row.get("as_of") != expected_as_of:
         raise ValueError("Logistics runtime fixture as_of mismatch")
     if row.get("usage_scope") != LOGISTICS_POLICY_USAGE_SCOPE:
@@ -242,14 +292,24 @@ def _build_logistics_runtime_fixture(
     #    여기서 안 잡으면 **한 스냅샷 안에 두 실행의 사실이 섞인다.**
     if expected_sim_run_id is not None and row.get("sim_run_id") != expected_sim_run_id:
         raise ValueError("Logistics runtime fixture sim_run_id mismatch")
+
+    # ── W3-2: 입고 예정 두 목록의 정본이 신규 표로 옮겨 왔다 ────────────
+    run_id = str(row.get("sim_run_id"))
+    in_transit, confirmed_inbound = _schedule_lists(sim_run_id=run_id, as_of=expected_as_of)
+    in_transit_status, in_transit_list = _schedule_source(
+        row.get("in_transit_status"), in_transit
+    )
+    confirmed_status, confirmed_list = _schedule_source(
+        row.get("confirmed_inbound_status"), confirmed_inbound
+    )
     return LogisticsRuntimeFixture(
         fixture_id=row.get("fixture_id"),
         sim_run_id=row.get("sim_run_id"),
         as_of=row.get("as_of"),
-        in_transit_status=row.get("in_transit_status"),
-        in_transit=row.get("in_transit_json"),
-        confirmed_inbound_status=row.get("confirmed_inbound_status"),
-        confirmed_inbound_schedule=row.get("confirmed_inbound_json"),
+        in_transit_status=in_transit_status,
+        in_transit=in_transit_list,
+        confirmed_inbound_status=confirmed_status,
+        confirmed_inbound_schedule=confirmed_list,
         confirmed_outbound_status=row.get("confirmed_outbound_status"),
         confirmed_outbound_schedule=row.get("confirmed_outbound_json"),
         usage_scope=row.get("usage_scope"),
@@ -257,6 +317,23 @@ def _build_logistics_runtime_fixture(
         source_ref=row.get("source_ref"),
         approved_by=row.get("approved_by"),
     )
+
+
+def _schedule_source[Schedule: (InTransitItem, ScheduledQuantity)](
+    stored_status: object, rows: list[Schedule]
+) -> tuple[object, list[Schedule] | None]:
+    """저장된 status 와 신규 표 결과를 하나로 맞춘다. **어휘를 안 바꾼다.**
+
+    🔴 **`UNRESOLVED` 는 그대로 둔다.** 그 값은 *"그 축을 확인한 적이 없다"* 이고,
+       신규 표가 0건이라고 **확인했다고 바꾸지 않는다** — 하지 않은 확인을 장부에
+       적는 것이 된다 (`transition._merge_schedule` 이 지키는 그 규율이다).
+
+    ★ 그 밖에는 **목록이 status 를 정한다.** 저장된 `CONFIRMED`/`CONFIRMED_ZERO` 를
+      읽어 쓰면 그 칸이 업무 사실의 두 번째 정본이 된다.
+    """
+    if stored_status == "UNRESOLVED":
+        return "UNRESOLVED", None
+    return ("CONFIRMED" if rows else "CONFIRMED_ZERO"), rows
 
 
 def get_item_storage_policies() -> list[ItemStoragePolicyFact]:

@@ -79,6 +79,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
+from app.logistics.inbound_schedules import receivable_at
 from app.logistics.inspections import InspectionOutcome, find_inspection
 from app.logistics.ledger import record_inventory_move
 from app.logistics.purchase_detail import PurchaseDetail
@@ -557,9 +558,15 @@ def load_in_transit_for_receiving(
 
     ```text
     ① 도착 쓰기 전역 advisory lock       receipts.lock_arrival_writes
-    ② 그날 fixture 행 SELECT … FOR UPDATE
-    ③ in_transit_json → InTransitItem 목록
+    ② 그날 fixture 행 SELECT … FOR UPDATE   (뒤의 `_clear_schedule` 이 고칠 그 행)
+    ③ inbound_schedules → InTransitItem 목록   ← W3-2 부터 정본이 여기다
     ```
+
+    🔴 **목록의 정본이 `inbound_schedules` 로 옮겨 왔다 (W3-2).** 종전에는 그날
+       fixture 행의 `in_transit_json` 을 읽었고, 그래서 **미래 날짜 행이 먼저 열려
+       있으면 그 행이 나중에 난 승인을 몰라** 도착일에 볼 것이 없었다
+       (실측 `INB-H1-REQ-FIRSTINB-20260113-1-1`). 신규 표는 날짜에 안 묶여 있어
+       그 사고가 재현되지 않는다.
 
     🔴 **`repository.get_active_logistics_runtime_fixture` 를 쓸 수 없어서 있다.**
        그쪽은 `db.fetch_all` 로 **자기 커넥션을 연다** — 마스터가 쥔 트랜잭션 밖에서
@@ -626,15 +633,24 @@ def load_in_transit_for_receiving(
     with conn.cursor() as cursor:
         lock_arrival_writes(cursor)
 
-    # ── ② 그날 행을 잠그고 읽는다 ─────────────────────────────────────
+    # ── ② 그날 행을 잠근다 (읽는 것은 status 뿐이다) ──────────────────
+    #    🔴 **행 잠금은 여전히 필요하다.** 뒤이어 `_clear_schedule` 이 **그 행의**
+    #       두 JSON 칸을 고친다 — W3-1 Writer 가 아직 살아 있어서다. 목록의 정본만
+    #       신규 표로 옮겼고 잠금 순서는 그대로다.
     in_transit, _ = _fixture_row(
         conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
     )
     if in_transit is None:
         # 🔴 `[]` 로 바꾸지 않는다. 모르는 것을 0 건으로 적으면 그 순간 아는 척이 된다.
+        #    `UNRESOLVED` 판정은 아직 Header 가 소유한다 (W3-2 §8 — 어휘를 안 바꾼다).
         return None
-    # ★ 계약 밖 모양은 여기서 터진다 — 조용히 걸러 내면 그 행이 사라진 줄 아무도 모른다.
-    return [InTransitItem.model_validate(row) for row in in_transit]
+
+    # ── ③ 목록은 신규 표에서 온다 (W3-2) ─────────────────────────────
+    #    🔴 **`Receipt 존재` 로 빼지 않는다.** 검수에서 막힌 건(Receipt=ARRIVED ·
+    #       Lot 없음)은 다음 실행이 이어받아야 하고, `_receive_one` 이
+    #       `check_receipt_state` 로 마지막 성공 단계 다음부터 잇는 구조라 여기서
+    #       빼면 그 입고가 **영구 고착**된다. 종료조건은 `Lot + 원장 IN` 이다.
+    return receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
 
 
 def _찾는다(목록: Sequence[Any] | None, inbound_id: str) -> list[dict[str, Any]]:

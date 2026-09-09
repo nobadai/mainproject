@@ -66,9 +66,11 @@ from typing import Any
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
+from app.logistics.schemas import InTransitItem, ScheduledQuantity
 
 __all__ = [
     "InboundSchedule",
+    "InboundScheduleView",
     "ScheduleAlreadyCancelled",
     "ScheduleCancelConflict",
     "ScheduleConflict",
@@ -78,7 +80,11 @@ __all__ = [
     "assert_cancellable",
     "assert_schedules_exist",
     "cancel_schedule",
+    "in_transit_at",
     "load_inbound_schedules",
+    "load_schedule_views",
+    "pending_inbound_at",
+    "receivable_at",
     "record_schedule",
 ]
 
@@ -495,3 +501,199 @@ def assert_cancellable(
             f" {sorted(도착함)}. 물건이 도착했으면 취소가 아니라 반품·폐기·실사이고,"
             " 그 판단은 여기서 대신 내리지 않는다."
         )
+
+
+# ── W3-2 Reader — 소비자마다 종료조건이 다르다 ──────────────────────────
+#
+# 🔴 **Entity 하나 ≠ Reader 종료조건 하나.** 이것이 이 절의 전부다.
+#
+# ```text
+# 상태                        운송 중   도착 처리   Capacity
+# ETA 전 · Receipt 없음          O        X          O
+# ETA 도달 · Receipt 없음        O        O          O
+# Receipt 있음 · Lot 없음        X        O          O    ← 여기가 갈리는 자리다
+# Lot + IN Move 완료             X        X          X    (그때부터 on_hand 가 센다)
+# 취소됨                        X        X          X
+# ```
+#
+#   ⚠️ **Receipt 가 생겼다고 모든 Reader 에서 빼지 않는다.** 검수가 막히면 Receipt 만
+#      선 채 며칠 간다(`inbound_execution._receive_one` 의 `INSPECTION_FACT_UNAVAILABLE`).
+#      그 물건은 창고에 와 있고(→ Capacity 계상), 다음 실행이 이어받아야 하며(→ 도착
+#      처리 대상), 다만 *"운송 중"* 은 아니다.
+#
+# 🔴 **`in_transit` 과 `confirmed_inbound` 이 같아야 한다는 불변조건을 만들지 않는다.**
+#    Legacy 에서 둘이 같았던 것은 발주 확정 단계가 비어 승인을 두 칸에 겹쳐 적었기
+#    때문이다(`transition.py` 의 *"임시 조치"*). 신규 구조에서는 종료조건이 달라
+#    `in_transit ⊆ confirmed_inbound` 다 — B-1 은 그 방향만 보므로 여전히 통과한다.
+
+
+@dataclass(frozen=True)
+class InboundScheduleView:
+    """일정 한 건 + **그날까지의 입고 계보.** 종료조건 판정은 소비자가 한다.
+
+    ★ **`purchase_id` · `item_id` · `item_name` 을 표에 저장하지 않고 JOIN 으로 얻는다**
+      (`purchase_items` · `items` 가 그 값의 주인이다). 복사해 두면 매입이 값을 고치는
+      날 일정만 옛 값을 들고 남는다.
+    """
+
+    inbound_id: str
+    sim_run_id: str
+    purchase_item_id: str
+    purchase_id: str
+    item_id: str
+    item_name: str
+    quantity_kg: Decimal
+    expected_arrival_date: date
+    created_as_of: date
+    #: 그날까지 도착 Receipt 가 있었나 (`arrived_at <= as_of`).
+    has_receipt: bool
+    #: 그날까지 **재고가 실제로 섰나** — Lot 과 원장 IN 이 **둘 다** 있어야 참이다.
+    #: 🔴 Receipt 존재로 대신하지 않는다. 그 둘은 다른 사건이다.
+    stock_applied: bool
+
+    def as_in_transit(self) -> InTransitItem:
+        """Legacy 계약 그대로의 운송 중 한 줄. **DTO 를 새로 만들지 않는다.**"""
+        return InTransitItem(
+            inbound_id=self.inbound_id,
+            purchase_id=self.purchase_id,
+            item=self.item_name,
+            quantity_kg=self.quantity_kg,
+            expected_arrival_date=self.expected_arrival_date,
+        )
+
+    def as_scheduled_quantity(self) -> ScheduledQuantity:
+        """Capacity 가 읽는 일정 한 줄. 🔴 **필드 이름이 다르다** (`date`)."""
+        return ScheduledQuantity(
+            inbound_id=self.inbound_id,
+            item=self.item_name,
+            quantity_kg=self.quantity_kg,
+            date=self.expected_arrival_date,
+        )
+
+
+def load_schedule_views(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[InboundScheduleView, ...]:
+    """`as_of` 시점에 살아 있던 일정 + 그날까지의 계보. **한 질의다.**
+
+    ```text
+    created_as_of <= as_of                              그날 이미 장부에 서 있었다
+    cancelled_as_of IS NULL OR cancelled_as_of > as_of   그날 아직 취소 전이었다
+    ```
+
+    🔴 **계보도 `as_of` 로 자른다.** Receipt 는 `arrived_at <= as_of`, Lot 은
+       `received_at <= as_of`, 원장 IN 은 `moved_at <= as_of` 다 — 오늘 상태를
+       과거 날짜 답에 섞으면 Historical 조회가 거짓말을 한다.
+
+    🔴 **`purchase_items` 를 `JOIN` 한다 (LEFT 아니다).** 그 줄이 없으면 등급·단가의
+       주인이 없다는 뜻이고, 일정만 남아 도착 처리로 갈 수 없다. 조용히 빼면
+       *"승인은 났는데 아무 데도 안 잡히는 입고"* 가 되므로 **행이 아예 안 나온다** —
+       그 상태는 W3-1 Writer 가 `fetch_purchase_detail` 로 이미 막고 있다.
+    """
+    schema = _schema()
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT s.inbound_id, s.sim_run_id, s.purchase_item_id,
+                   pi.purchase_id, pi.item_id, i.item_name,
+                   s.quantity_kg, s.expected_arrival_date, s.created_as_of,
+                   (r.receipt_id IS NOT NULL) AS has_receipt,
+                   (l.lot_id IS NOT NULL AND mv.move_id IS NOT NULL) AS stock_applied
+            FROM {schema}.inbound_schedules s
+            JOIN {schema}.purchase_items pi ON pi.purchase_item_id = s.purchase_item_id
+            JOIN {schema}.items i ON i.item_id = pi.item_id
+            LEFT JOIN {schema}.inbound_receipts r
+                   ON r.sim_run_id = s.sim_run_id
+                  AND r.inbound_id = s.inbound_id
+                  AND r.arrived_at <= %(as_of)s
+            LEFT JOIN {schema}.inventory_lots l
+                   ON l.inbound_receipt_id = r.receipt_id
+                  AND l.sim_run_id = s.sim_run_id
+                  AND l.received_at <= %(as_of)s
+            LEFT JOIN {schema}.inventory_moves mv
+                   ON mv.lot_id = l.lot_id
+                  AND mv.sim_run_id = s.sim_run_id
+                  AND mv.move_type = 'IN'
+                  AND mv.moved_at <= %(as_of)s
+            WHERE s.sim_run_id = %(sim)s
+              AND s.created_as_of <= %(as_of)s
+              AND (s.cancelled_as_of IS NULL OR s.cancelled_as_of > %(as_of)s)
+            ORDER BY s.expected_arrival_date, s.inbound_id
+            """
+        ).format(schema=schema),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    return tuple(
+        InboundScheduleView(
+            inbound_id=row["inbound_id"],
+            sim_run_id=row["sim_run_id"],
+            purchase_item_id=row["purchase_item_id"],
+            purchase_id=row["purchase_id"],
+            item_id=row["item_id"],
+            item_name=row["item_name"],
+            quantity_kg=row["quantity_kg"],
+            expected_arrival_date=row["expected_arrival_date"],
+            created_as_of=row["created_as_of"],
+            has_receipt=bool(row["has_receipt"]),
+            stock_applied=bool(row["stock_applied"]),
+        )
+        for row in rows
+    )
+
+
+def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
+    """**운송 중** — 아직 창고에 도착하지 않은 입고.
+
+    ```text
+    종료조건   Receipt 가 생기면 빠진다
+    ```
+
+    🔴 **ETA 가 지났다고 빼지 않는다.** ETA 01-15 · 오늘 01-17 · Receipt 없음이면
+       그것은 사라진 입고가 아니라 **연체된 미도착**이다
+       (`arrival.select_due_inbound` 이 `overdue_count` 로 세는 그 상태다).
+    """
+    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+    return [view.as_in_transit() for view in views if not view.has_receipt]
+
+
+def receivable_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
+    """**도착 처리 대상** — 아직 재고가 서지 않은 입고.
+
+    ```text
+    종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다
+    ```
+
+    🔴 **Receipt 존재로 빼지 않는다.** 검수에서 막힌 건(`Receipt=ARRIVED` · Lot 없음)은
+       **다음 실행이 이어받아야 한다** — `inbound_execution._receive_one` 이
+       `check_receipt_state` 로 마지막 성공 단계 다음부터 잇는 구조라, 여기서 빼면
+       그 입고가 영구 고착된다.
+
+    ★ 날짜(`eta <= as_of`)로 자르지 않는다 — 그 판정은 `arrival.select_due_inbound` 이
+      네 갈래(`due` · `blocked` · `not_due` · `unresolved`)로 나누며 소유한다.
+      여기서 미리 자르면 *"아직 안 온 것"* 과 *"못 받은 것"* 이 구별되지 않는다.
+    """
+    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+    return [view.as_in_transit() for view in views if not view.stock_applied]
+
+
+def pending_inbound_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[ScheduledQuantity]:
+    """**미래 점유로 셀 입고** — Capacity 가 읽는 일정.
+
+    ```text
+    종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다 (그때부터 on_hand 가 센다)
+    ```
+
+    🔴 **한 번만 계상하기 위한 경계다.**
+
+    ```text
+    재고 반영 전   여기가 센다              on_hand 에는 없다
+    재고 반영 후   여기서 빠진다            on_hand 가 센다
+    ```
+
+       Receipt 만 있고 Lot 이 없는 1,000kg 을 여기서 빼면 **창고에 와 있는 물건이
+       점유에서 사라져** 없는 여유가 생긴다. 반대로 Lot 이 선 뒤에도 남기면
+       같은 수량을 두 번 센다.
+    """
+    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+    return [view.as_scheduled_quantity() for view in views if not view.stock_applied]
