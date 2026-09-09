@@ -80,10 +80,21 @@ class PurchaseAgentState(TypedDict):
     #   가서** 계약이 아니라 관례가 됐다. 마스터가 두 칸으로 나눠 보내므로
     #   (``flow.py`` ``_purchase_input``) 받는 쪽도 두 칸으로 받는다.
     #
-    # ⚠️ **지금은 받기만 한다.** 어느 노드도 이 값을 읽어 수량을 바꾸지 않는다 —
-    #   ``target_value`` 가 *"이 값으로 바꿔라"* 인지 *"이 값을 넘지 마라"* 인지가
-    #   미확정이라 반영 규칙을 만들 수 없다. **받았는데 안 쓴다는 사실은 ⑥이 risks 에,
-    #   건수는 ⑦이 meta 에 적는다** — 값을 받고 조용히 버리면 보내는 쪽은 알 수 없다.
+    # 🟢 **반영한다** (2026-09-09 · E3-6). ~~"지금은 받기만 한다 — target_value 가
+    #   «이 값으로 바꿔라» 인지 «이 값을 넘지 마라» 인지 미확정이라 반영 규칙을 만들 수
+    #   없다"~~ 는 **낡았다.** 마스터 IO Contract §4.4 가 *"넘지 말아야 할 값입니다 —
+    #   목표가 아닙니다"* 로 확정했다 (`quantity`·`amount` 는 그 값 이하).
+    #
+    #   ```text
+    #   거른다   ③ draft_plan.split_adjustments   항목·단위·대상 안
+    #   반영한다 ③ _draft_one 의 caps 에 «조정안» 칸 (라벨별 상한)
+    #   말한다   ⑥ risks (못 쓴 사유 · 안 물린 사실) · ⑦ meta.applied_adjustments
+    #   ```
+    #
+    # ⚠️ **전부 반영하는 것이 아니다.** 지금 반영할 수 있다고 선언한 항목은 재무
+    #   ``amount`` 하나다 (`constraints.feedback.applicable_axis_units`). 물류
+    #   ``quantity``·``timing`` 은 관통에서 조정안이 0건이라 어느 단위로 오는지 모른다 —
+    #   못 쓰는 것도 버리지 않고 사유와 함께 고지한다.
     #
     # ``adjustments``: 부서 조정안 표준형(``SuggestedAdjustment``)을 편 dict 목록.
     adjustments: NotRequired[list[dict] | None]
