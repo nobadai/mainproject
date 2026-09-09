@@ -348,6 +348,17 @@ def test_안을_지어내지_않는다(표):
     assert "scenarios" not in 표["response_payload"]
 
 
+def test_표에_실린_실행_축이_받은_값_그대로다(표):
+    """★ 적재 함수가 받은 축을 **손대지 않고** 표로 넘긴다.
+
+    ⚠️ 이 검사는 *"넘기는가"* 만 잰다. **누가 값을 주는가**는 아래 ⑥ 이 잰다 —
+      두 사실이 다르고, 넘기는 쪽만 초록인 채 축이 비어 있을 수 있다.
+    """
+    _적재(sim_run_id="SIM-TEST-0001")
+
+    assert 표["sim_run_id"] == "SIM-TEST-0001"
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  ⑤ 같은 날을 두 번 걸어도 행은 한 벌이다
 # ══════════════════════════════════════════════════════════════════════
@@ -390,6 +401,83 @@ def test_중복_확인이_터져도_행을_남긴다(monkeypatch):
     _적재()
 
     assert len(적힌것) == 1, "중복 확인이 터졌다고 행을 통째로 잃었다"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑥ 실행 축 — 게이트 행이 같은 날 판단 행과 **같은 값**을 싣는다
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **인자만 있고 값을 안 주면 늘 NULL 이다.** `record_ledger_gap` 이 `sim_run_id` 를
+#    받을 줄 알아도 진입점이 안 주면 게이트 행의 축이 비고, 그러면 **모두가 쓰는 축으로
+#    훑을 때 막힌 날이 도로 안 보인다** — 이 판이 존재하는 이유가 그것이다.
+#
+# ⚠️ **`None` 이 아니다** 로 재지 않는다. 값이 갈려도 초록이 되기 때문이다. 같은 날
+#    판단 행이 실제로 싣는 값을 **진짜 진입점을 돌려서** 꺼내 놓고 그것과 비교한다.
+
+
+def _판단_행의_축(monkeypatch) -> object:
+    """같은 날 **판단 행**이 싣는 축을 진짜 진입점(`run_procurement`)에서 꺼낸다.
+
+    ★ 상수를 여기 다시 적으면 비교가 *"내가 적은 값과 같은가"* 가 되어 아무것도 안
+      잰다. 개장 관문을 막아 부서를 한 번도 안 부르고 적재 인자만 받아낸다.
+    """
+    from app.master.day_gate import DayGate
+    from app.master.schemas import ProcurementRunRequest
+    from app.master.service import run_procurement
+
+    막힘 = DayGate(
+        as_of=AS_OF,
+        gate="BLOCKED",
+        result="NOT_OPENED",
+        reason="재무가 안 열렸다",
+        next_action="RETRY_OPEN_DAY",
+    )
+    받은것: dict[str, object] = {}
+    monkeypatch.setattr("app.master.service.check_day_gate", lambda as_of, **kw: 막힘)
+    monkeypatch.setattr(
+        "app.master.service.persistence.record",
+        lambda *a, **k: 받은것.update(k) or "RUN-1",
+    )
+
+    run_procurement(
+        ProcurementRunRequest(
+            as_of=AS_OF, policy_version="v1.3", item="배추", request_id="REQ-AXIS-1"
+        ),
+        verifier=None,
+    )
+    return 받은것.get("sim_run_id")
+
+
+def test_게이트_행이_같은_날_판단_행과_같은_축을_싣는다(적재, monkeypatch):
+    """🔴 **두 행이 같은 축에 앉아야 한 실행으로 묶인다.**
+
+    ★ **자기 생존.** 판단 행의 축이 비면 먼저 실패한다 — 둘 다 `None` 이라 통과하는
+      비교를 만들지 않는다.
+    """
+    판단축 = _판단_행의_축(monkeypatch)
+    assert isinstance(판단축, str) and 판단축, f"판단 행의 축을 못 꺼냈다: {판단축!r}"
+
+    _run(inbound="BLOCKED")
+
+    assert len(적재.calls) == 1, "관문이 막았는데 행을 안 남겼다"
+
+    # ★ `[...]` 가 아니라 `.get` 이다 — 아예 안 넘긴 날에 `KeyError` 대신 *"안 실렸다"*
+    #   가 그대로 보여야 한다. 그것이 이 검사가 잡으려는 바로 그 모양이다.
+    게이트축 = 적재.calls[0].get("sim_run_id")
+    assert 게이트축 == 판단축, f"게이트 행의 축이 판단 행과 다르다: {게이트축!r} != {판단축!r}"
+
+
+def test_실행_축을_새로_짓지_않는다(적재):
+    """🔴 **값의 주인은 하나다** (`bootstrap.py` 가 못 박아 둔 것).
+
+    스케줄러가 문자열을 다시 적거나 자기 상수를 만들면 실행이 둘이 되는 날 그 자리만
+    안 바뀐다.
+    """
+    from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+
+    _run(collection="BLOCKED")
+
+    assert 적재.calls[0].get("sim_run_id") == BURN_IN_SIM_RUN_ID
 
 
 def test_이력을_끄면_읽지도_않는다(monkeypatch):

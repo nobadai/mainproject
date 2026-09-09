@@ -158,6 +158,10 @@ NOT_ATTEMPTED          단계를 안 탔다 — 앞 단계에서 이미 멈춘 �
 
   ⚠️ **세는 것은 아직 안 된다.** `end_code='E4_NOT_STARTED'` 한 값에 예측 미도착 ·
     어댑터 미등록 · 장부 관문이 같이 앉는다. 그것은 `Master 상세 19.0` 이 풀 자리다.
+
+  🔴 **그 행에 실행 축(`sim_run_id`)을 같이 싣는다.** 값의 주인은
+    `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 같은 날 판단 행이 싣는 값과 같다.
+    안 실으면 축으로 훑는 모든 조회에서 게이트 행만 빠져 **막힌 날이 도로 안 보인다.**
 """
 
 from __future__ import annotations
@@ -176,6 +180,7 @@ from app.master.day_open import open_day
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.receivable import issue_receivables
@@ -630,6 +635,15 @@ def run_scheduled_day(
         #   두 벌이 되면 한쪽만 고치는 날 화면과 이력이 갈린다.
         #
         # 🔴 **여기서도 `procure_fn` 은 안 부른다.** 남기는 것은 행이지 판단이 아니다.
+        #
+        # 🔴 **실행 축을 같이 싣는다** (2026-09-09). 인자만 있고 값을 안 주면 이 행의
+        #    `sim_run_id` 가 늘 NULL 로 앉는다. 그러면 같은 날 판단 행은 축이 있고 게이트
+        #    행만 없어서, **모두가 쓰는 축으로 훑을 때 막힌 날이 도로 안 보인다** — 이
+        #    판이 존재하는 이유가 바로 그것이라 그 자리에서 무너진다.
+        #
+        # ★ **값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다.** 여기서 문자열을
+        #   다시 적거나 새 상수를 만들지 않는다 — `service.run_procurement` 가 같은 날
+        #   판단 행에 싣는 값도 그 상수이고, 두 벌이 되면 한쪽만 고치는 날 두 행이 갈린다.
         try:
             persistence.record_ledger_gap(
                 request_id=ledger_gap_request_id(as_of),
@@ -639,6 +653,7 @@ def run_scheduled_day(
                 inbound_status=inbound_status,
                 receivable_status=receivable_status,
                 collection_status=collection_status,
+                sim_run_id=BURN_IN_SIM_RUN_ID,
             )
         except Exception:  # 이력 때문에 걷기가 멈추면 안 된다.
             # ★ `try_save_run` 이 이미 삼키지만 여기서 한 번 더 잡는다 — 그날 결과가
