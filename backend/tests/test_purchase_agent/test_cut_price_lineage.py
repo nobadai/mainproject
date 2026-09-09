@@ -4,7 +4,8 @@
 
     max_price       재무 STRESS 로 나간다 (amount_max_krw = qty × 이것)
                     🔴 재무·마스터가 그 등식을 검사한다
-                       finance/capabilities/scenario.py:180 · master/verifier.py:711
+                       finance/capabilities/scenario.py  amount_max_krw 등식
+                       master/verifier.py                검사 이름 L-PAYSCHED-MAX
     cut_unit_price  우리 컷 기준 (self_check.check_max_price)
 
 🔴 **왜 갈랐나** — 하나였을 때 밴드가 좁아지면 컷이 엄격해지고 재무 STRESS 는
@@ -192,8 +193,9 @@ def test_the_payment_schedule_is_fed_the_stress_ceiling() -> None:
 def test_the_stress_identity_still_holds() -> None:
     """``amount_max_krw == qty × max_price``.
 
-    🔴 **우리만의 규칙이 아니다.** 재무(``capabilities/scenario.py:180``)와
-    마스터(``verifier.py:711``)가 같은 등식을 검사한다 — 이 판이 그 등식을 건드리지
+    🔴 **우리만의 규칙이 아니다.** 재무(``capabilities/scenario.py`` 의 ``amount_max_krw``
+    등식)와 마스터(``verifier.py`` 의 ``L-PAYSCHED-MAX``)가 같은 등식을 검사한다 —
+    이 판이 그 등식을 건드리지
     않는 것이 *"남의 코드 0줄"* 의 근거다.
     """
     max_price = 1_800

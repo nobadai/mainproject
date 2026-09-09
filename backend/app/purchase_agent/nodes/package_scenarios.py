@@ -367,8 +367,8 @@ def compute_cut_unit_price(forecast: dict, coverage_days: int) -> int:
 
         max_price       재무 STRESS 로 나간다 (amount_max_krw = qty × 이것)
                         🔴 재무·마스터가 그 등식을 검사한다
-                           finance/capabilities/scenario.py:180
-                           master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+                           finance/capabilities/scenario.py  amount_max_krw 등식
+                           master/verifier.py                검사 이름 L-PAYSCHED-MAX
         cut_unit_price  우리 컷 기준 (self_check.check_max_price)
 
     🔴 **왜 갈랐나** — 하나였을 때 밴드가 좁아지면 컷이 엄격해지고 재무 STRESS 는

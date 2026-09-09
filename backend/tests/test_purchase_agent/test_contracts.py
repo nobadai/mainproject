@@ -147,9 +147,17 @@ def test_split_amount_is_all_rounds_or_none() -> None:
 def test_a_payload_without_any_round_amount_still_validates() -> None:
     """재무·물류가 보내는 payload 는 회차 금액을 안 싣는다 — **거부하지 않는다.**
 
-    ``finance/schemas.py:332`` 가 ``PurchaseAgentOutput = PurchaseProposal`` 로 이 모델을
-    자기 API 요청 모델로 쓴다. 여기서 필수로 만들면 **그 두 부서 엔드포인트가 이 필드
-    없는 요청을 422 로 거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다.
+    재무·물류가 이 모델을 자기 API 요청 모델로 쓴다. 여기서 필수로 만들면 **그 두 부서
+    엔드포인트가 이 필드 없는 요청을 422 로 거부한다** — 우리 필드 하나가 남의 런타임
+    계약을 좁힌다.
+
+    🔴 **재수출 자리가 하나 없어졌다** (2026-09-09 · ``#450``)::
+
+        물류   ``logistics/schemas.py``  ``PurchaseAgentOutput = PurchaseProposal``  🟢
+        재무   ~~``finance/schemas.py``  ``PurchaseAgentOutput``~~  🔴 삭제됨
+               지금은 ``finance/adapter.py`` 가 ``PurchaseProposal`` 을 직접 import 한다
+
+    ★ **이 검사가 재는 것은 그대로다** — 별칭이 없어졌을 뿐 재무가 여전히 이 모델로 받는다.
     """
     data = _proposal()
     del data["scenarios"][0]["split_plan"][0]["amount_krw"]
