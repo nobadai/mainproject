@@ -30,6 +30,8 @@ from app.purchase_agent.nodes.collect_context import (
 )
 from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import (
+    _UNREAD_ALL,
+    _UNREAD_REST,
     _context_rationale,
     _context_risks,
     package_scenarios,
@@ -352,7 +354,10 @@ def test_document_rationale_carries_ref_id_and_excerpt(proposals: dict) -> None:
             doc = loaded[int(item["ref_id"].removeprefix("DOC-"))]
             assert doc["excerpt"] in item["evidence_detail"]
             assert doc["published_at"] in item["evidence_detail"]
-            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다
+            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다.
+            # ⚠️ 값 비교라 «선언에서 읽는가» 는 증명하지 못한다 (규칙 8) — 그건
+            #   test_mocks.test_declared_grade_travels_to_every_document 와 아래
+            #   test_rationale_grade_comes_from_the_document_not_the_code 가 잰다.
             assert item["evidence_grade"] == "SIM_FIXED"
 
 
@@ -804,6 +809,39 @@ def test_document_rationale_is_empty_without_documents() -> None:
     assert _context_rationale([]) == []
 
 
+def test_rationale_grade_comes_from_the_document_not_the_code() -> None:
+    """🔴 **⑥이 등급을 다시 정하지 않는다** (2026-09-09 · E3-5).
+
+    전에는 ``"SIM_FIXED"`` 리터럴이었다. 코퍼스 선언과 값이 같아 *"등급이 SIM_FIXED
+    다"* 를 확인하는 검사로는 어느 쪽에서 왔는지 갈리지 않았다 — 문서가 다른 등급을
+    들고 오면 그것이 실려야 한다.
+    """
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+        "evidence_grade": "OFFICIAL",
+    }
+    assert _context_rationale([doc])[0]["evidence_grade"] == "OFFICIAL"
+
+
+def test_a_document_without_a_grade_is_not_quietly_graded() -> None:
+    """등급 없는 문서를 받으면 **멈춘다** — 기본값을 두면 선언한 적 없는 등급이 실린다."""
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+    }
+    with pytest.raises(KeyError, match="evidence_grade"):
+        _context_rationale([doc])
+
+
 # ── 문서 없으면 없이 진행 (2026-09-04 · 마스터 결정) ────────────────────────
 
 
@@ -850,6 +888,90 @@ def test_문서를_읽었으면_고지가_안_붙는다() -> None:
 
     assert same == scenarios
     assert _CONTEXT_NOTE not in same[0]["risks"]
+
+
+# ── 「읽을 게 없었다」와 「못 읽었다」는 다르다 (E3-5 · 2026-09-09) ────────────
+#
+# ② 는 두 상태를 갈라 들고 있었는데 ⑥ 문면이 하나였다. 운영 기록 158건이 그 문장이고,
+# 읽는 사람에게는 *"그날 그 문서가 세상에 없었다"* 로 읽혔다 — 규칙 3(0 ≠ NULL)이
+# 값이 아니라 **문장에서** 깨진 자리다.
+
+
+def test_unread_documents_are_not_reported_as_zero_publications() -> None:
+    """넷째 상태다 — 안 찾아봄 / 찾았는데 없음 / **찾다가 못 읽음** / 찾아서 있음.
+
+    둘째와 셋째는 ``context_docs`` 가 똑같이 비어 있다. 갈라 주는 것은
+    ``context_unavailable`` 뿐이고, 그 값이 없으면 ⑥은 두 상태를 구분할 수단이 없다.
+    """
+    none_found = _context_risks(3, [], "2026-09-04")[0]
+    unread = _context_risks(3, [], "2026-09-04", "실 소스 없음")[0]
+
+    assert none_found != unread, "두 상태가 같은 문장을 낸다"
+    assert "참조 가능한 발간물 0건" not in unread, (
+        "못 읽은 것을 «발간물이 0건» 이라고 단정한다 — 미결을 0으로 적는 것과 같다"
+    )
+    assert unread == _UNREAD_ALL.format(kinds=3)
+
+
+def test_unread_note_names_how_many_kinds_were_asked_for() -> None:
+    """몇 종을 요청했는지가 남아야 *"한 번도 안 찾아봤다"* 와 구분된다."""
+    assert "1종" in _context_risks(1, [], "2026-09-04", "실 소스 없음")[0]
+    assert "3종" in _context_risks(3, [], "2026-09-04", "실 소스 없음")[0]
+
+
+def test_partial_read_says_the_rest_was_unread() -> None:
+    """일부만 읽힌 날 — "N건 참조" 만 적으면 **다 읽은 것처럼** 읽힌다.
+
+    🔴 지금 운영에서는 안 밟힌다 (첫 회차부터 막혀 0건이다). 실 소스가 붙는 날
+      열리는 가지라 미리 잠근다.
+    """
+    docs = [{"doc_id": 3, "published_at": "2026-08-05"}]
+    notes = _context_risks(3, docs, "2026-09-04", "실 소스 없음")
+
+    assert len(notes) == 2, "읽은 것과 못 읽은 것을 둘 다 말해야 한다"
+    assert "1건 참조" in notes[0]
+    assert notes[1] == _UNREAD_REST
+
+
+def test_reading_everything_adds_no_unread_note() -> None:
+    """다 읽은 날 못 읽었다고 적지 않는다 — 없는 위험을 만들지 않는다."""
+    docs = [{"doc_id": 3, "published_at": "2026-08-05"}]
+    notes = _context_risks(3, docs, "2026-09-04")
+
+    assert len(notes) == 1
+    assert _UNREAD_REST not in notes[0]
+
+
+def test_unavailable_reaches_the_scenario_risks_through_the_node(monkeypatch) -> None:
+    """🔴 **배선 검사다.** 함수만 갈라 놓고 ⑥이 안 넘기면 화면은 그대로다.
+
+    ``_context_risks`` 단위 검사가 전부 초록불이어도, 조립부가
+    ``context_unavailable`` 을 안 읽으면 운영 문면이 안 바뀐다 — E3-8 에서 *"자리는
+    있는데 일이 없다"* 를 잰 것의 반대 방향이다.
+    """
+    from app.purchase_agent import ports
+    from app.purchase_agent.ports import MockNotAllowed
+
+    def blocked(*a, **k):
+        raise MockNotAllowed("문서 컨텍스트 는 mock 뿐이라 운영에서 쓸 수 없다")
+
+    monkeypatch.setattr(ports, "get_context_docs", blocked)
+
+    state = _classified()
+    state.update(collect_context(state))
+    assert state["context_unavailable"], "전제가 안 섰다 — 못 읽은 상태가 아니다"
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+
+    risks = [risk for scenario in state["scenarios_final"] for risk in scenario["risks"]]
+    assert any(_UNREAD_ALL.format(kinds=1) == risk for risk in risks), (
+        "못 읽은 날의 고지가 안 실렸다 — ⑥ 조립부가 context_unavailable 을 안 넘긴다"
+    )
+    assert all("참조 가능한 발간물 0건" not in risk for risk in risks), (
+        "못 읽었는데 «발간물 0건» 문장이 아직 나간다"
+    )
 
 
 # ── E3-8 「규칙으로 간다」 판단이 아직 유효한가 ───────────────────────────────
