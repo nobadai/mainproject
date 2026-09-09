@@ -69,10 +69,14 @@ from app.logistics.db import get_db_schema
 
 __all__ = [
     "InboundSchedule",
+    "ScheduleAlreadyCancelled",
     "ScheduleCancelConflict",
     "ScheduleConflict",
+    "ScheduleMissing",
     "ScheduleReceiptExists",
     "ScheduleReferenceMissing",
+    "assert_cancellable",
+    "assert_schedules_exist",
     "cancel_schedule",
     "load_inbound_schedules",
     "record_schedule",
@@ -85,6 +89,47 @@ class ScheduleConflict(ValueError):
     🔴 **기존 행을 UPDATE 해서 맞추지 않는다.** 어느 쪽이 진짜인지 여기서 고를 근거가
        없고, 고치면 그 순간 과거 사실이 조용히 바뀐다
        (`transition.InboundScheduleConflict` 와 같은 규율).
+    """
+
+
+class ScheduleAlreadyCancelled(ValueError):
+    """**취소된** 일정을 같은 승인으로 다시 적으려 한다.
+
+    🔴 **조용히 되살리지 않는다.** 종전에는 대조 넷(`purchase_item_id` ·
+       `quantity_kg` · `expected_arrival_date` · `created_as_of`)만 보고 no-op 을
+       돌려줘, Legacy JSON 은 부활하는데(`_merge_schedule` 이 없는 항목을 더한다)
+       schedule 은 취소된 채로 남았다.
+
+    ```text
+    승인 → 취소 → 같은 승인 재실행
+      Legacy JSON        A 있음      ← 되살아난다
+      inbound_schedules  A 취소됨    ← 그대로다      🔴 두 정본 후보가 갈린다
+    ```
+
+    ★ **취소 이력을 지워 `cancelled_as_of = NULL` 로 되돌리지 않는다.** 그것이
+      옳으려면 *"취소를 무를 수 있다"* 는 업무 계약이 있어야 하는데, 저장소 어디에도
+      그 계약이 없다 — 마스터 `undo_approval` 은 취소만 있고 되돌리기가 없다.
+      근거 없이 과거 취소 이력을 지우는 쪽이 조용히 되살리는 것보다 더 위험하다.
+
+    ⚠️ 예외라서 **바깥 트랜잭션이 통째로 롤백된다** — JSON 도 안 되살아난다.
+       그것이 이 예외가 지키는 것이다.
+    """
+
+
+class ScheduleMissing(LookupError):
+    """Legacy JSON 에는 있는데 `inbound_schedules` 에 그 행이 없다. Dual Write 누락이다.
+
+    🔴 **조용히 성공시키지 않는다.** 그대로 두면 취소가 JSON 만 고치고 끝나, 두
+       저장소가 갈린 사실이 **아무 데도 안 남는다.** W3-2 에서 Reader 가 schedule 로
+       옮겨 가면 그 입고는 처음부터 없었던 것이 된다.
+
+    ```text
+    JSON 없음 · schedule 없음   정상 재시도다 — 오류가 아니다 (no-op)
+    JSON 있음 · schedule 없음   🔴 여기. 누락을 지금 잡는다
+    ```
+
+    ★ **쓰기 전에 판정한다.** JSON 을 고친 뒤에 알면 그 트랜잭션은 롤백되더라도
+      *"무엇이 왜 막혔나"* 가 흐려진다.
     """
 
 
@@ -184,10 +229,15 @@ def record_schedule(
     """입고 예정 한 건을 적는다. **같은 사실이면 no-op, 다른 사실이면 멈춘다.**
 
     ```text
-    없음            INSERT                 → True
-    같은 사실       아무것도 안 한다        → False   ★ 같은 승인 재반영이 여기다
-    다른 사실       ScheduleConflict       ★ 덮지 않는다
+    없음                 INSERT                     → True
+    같은 사실 · 살아있음   아무것도 안 한다            → False   ★ 같은 승인 재반영이 여기다
+    취소된 일정           ScheduleAlreadyCancelled   ★ 되살리지 않는다
+    다른 사실            ScheduleConflict           ★ 덮지 않는다
     ```
+
+    🔴 **취소 여부를 대조 넷보다 **먼저** 본다.** 값이 같아도 그 행은 이미 *"그날부터
+       없다"* 고 적힌 행이다. 값이 같다는 이유로 no-op 을 돌려주면 Legacy JSON 만
+       되살아나 두 저장소가 갈린다 (`ScheduleAlreadyCancelled` 참조).
 
     🔴 **대조 대상 넷이 계약이다** — `purchase_item_id` · `quantity_kg` ·
        `expected_arrival_date` · `created_as_of`. `source_ref` · `note` 는 근거
@@ -198,10 +248,21 @@ def record_schedule(
        같은 것은 지금 분할 회차가 없어서지 계약이 아니다. 없는 규칙을 만들지 않는다.
 
     :returns: 이번 호출이 실제로 행을 만들었나.
+    :raises ScheduleAlreadyCancelled: 그 일정이 이미 취소돼 있을 때.
     :raises ScheduleConflict: 같은 열쇠가 다른 사실로 이미 있을 때.
     """
     기존 = _existing(conn, sim_run_id=sim_run_id, inbound_id=inbound_id)
     if 기존 is not None:
+        # 🔴 **취소가 먼저다.** 값이 같아도 되살리는 것은 별개의 결정이고,
+        #    그 결정을 여기서 조용히 내리지 않는다.
+        if 기존["cancelled_as_of"] is not None:
+            raise ScheduleAlreadyCancelled(
+                f"이미 취소된 입고 일정을 다시 적으려 한다 (sim_run_id={sim_run_id!r},"
+                f" inbound_id={inbound_id!r}, cancelled_as_of={기존['cancelled_as_of']})."
+                " 같은 승인을 다시 반영해도 취소를 무르지 않는다 —"
+                " 취소를 되돌리는 업무 계약이 저장소에 없다."
+                " 되살려야 한다면 그 근거를 먼저 정하고 이 자리를 고친다."
+            )
         같음 = (
             기존["purchase_item_id"] == purchase_item_id
             and Decimal(str(기존["quantity_kg"])) == Decimal(str(quantity_kg))
@@ -376,6 +437,40 @@ def load_inbound_schedules(
         )
         for row in rows
     )
+
+
+def assert_schedules_exist(
+    conn: Any, *, sim_run_id: str, inbound_ids: Sequence[str]
+) -> None:
+    """이 입고들의 일정 행이 다 있나. **Legacy 를 고치기 전에 묻는다.**
+
+    🔴 **호출부는 «Legacy JSON 에 실제로 들어 있는» 것만 넘긴다.** 안 그러면 이미
+       걷힌 뒤의 정상 재시도(JSON 없음 · schedule 없음)까지 오류가 된다 —
+       그 상태는 기존 계약상 no-op 이고 그 계약을 바꾸지 않는다.
+
+    :raises ScheduleMissing: 하나라도 일정 행이 없을 때. **어느 것인지 적는다.**
+    """
+    대상 = [inbound_id for inbound_id in inbound_ids if inbound_id]
+    if not 대상:
+        return
+    있는것 = {
+        row["inbound_id"]
+        for row in _rows(
+            conn,
+            sql.SQL(
+                "SELECT inbound_id FROM {}.inbound_schedules"
+                " WHERE sim_run_id = %s AND inbound_id = ANY(%s)"
+            ).format(_schema()),
+            (sim_run_id, 대상),
+        )
+    }
+    빠진것 = sorted(set(대상) - 있는것)
+    if 빠진것:
+        raise ScheduleMissing(
+            f"Legacy 일정에는 있는데 inbound_schedules 에 행이 없다"
+            f" (sim_run_id={sim_run_id!r}): {빠진것}."
+            " Dual Write 가 갈린 상태다 — 한쪽만 고치고 끝내지 않는다."
+        )
 
 
 def assert_cancellable(

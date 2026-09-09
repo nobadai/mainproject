@@ -89,6 +89,7 @@ from typing import Any
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
+from app.logistics.inbound_schedules import cancel_schedule
 
 # 🔴 **B-1 규율을 다시 적지 않고 가져다 쓴다.** 밑줄 이름을 건너 가져오는 것은 이
 #    패키지의 기존 방식이다 (`console_service` 가 `outbound._ASSIGNED_ALLOCATION` 을
@@ -384,7 +385,20 @@ def reconcile_orphan_inbound_schedule(
     ④ fixture 행 FOR UPDATE · 지울 항목 사본 확보 (판정은 안 한다)
     ⑤ B-1 재검증 + 양쪽 제거          inbound_stock._clear_schedule
     ⑥ 걷었으면 그 행의 source_ref 를 이번 정리로 바꿔 적는다
+    ⑦ 같은 일정을 inbound_schedules 에서도 그날부터 닫는다   (W3-1 Dual Write)
     ```
+
+    🔴 **⑦ 이 없으면 두 저장소가 갈린다** (2026-09-09 보정). ⑤ 는 Legacy JSON 두 칸만
+       걷고 신규 표를 안 건드렸다 — 그러면 정리한 뒤에도
+
+    ```text
+    Legacy JSON        없음        걷었다
+    inbound_schedules  살아있음     ← 그대로다
+    ```
+
+       가 되어, W3-2 에서 Reader 가 신규 표로 옮겨 가는 순간 **방금 치운 orphan 이
+       되살아난다.** 이 함수가 하는 일이 «그 일정을 그날부터 없앤다» 이므로 신규 표의
+       `cancelled_as_of` 가 그 사실의 자리다.
 
     🔴 **나이로 지우지 않는다.** `expected_arrival_date` 가 얼마나 지났는지, 발주 참조가
        비었는지, `ARRIVAL_PURCHASE_REFERENCE_MISSING` 인지를 **조건으로 쓰지 않는다** —
@@ -474,6 +488,15 @@ def reconcile_orphan_inbound_schedule(
         #   계약 모델이 터질 자리가 없다 — 앞에서 파싱하면 `_clear_schedule` 이 낼
         #   `ScheduleIntegrityError` 가 pydantic 오류로 바뀌어 나간다.
         사실 = InTransitItem.model_validate(지울것) if 지울것 is not None else None
+
+        # ── ⑦ 신규 표도 같은 트랜잭션에서 닫는다 (W3-1 Dual Write) ────
+        #    ★ `applied` 일 때만 부른다 — 멱등 재호출(이미 걷힘)에서는 ⑤ 가
+        #      아무것도 안 했으므로 여기서도 손댈 것이 없다.
+        #    ⚠️ 이미 같은 날짜로 닫혀 있으면 `cancel_schedule` 이 no-op 이고,
+        #       다른 날짜로 닫혀 있으면 `ScheduleCancelConflict` 로 멈춘다.
+        cancel_schedule(
+            conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
+        )
 
     return InboundReconciliationResult(
         applied=applied,

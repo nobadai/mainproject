@@ -55,7 +55,11 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.finance.db import get_db_schema
-from app.logistics.inbound_schedules import assert_cancellable, cancel_schedule
+from app.logistics.inbound_schedules import (
+    assert_cancellable,
+    assert_schedules_exist,
+    cancel_schedule,
+)
 from app.logistics.transition import (
     USAGE_SCOPE,
     LogisticsFixtureMissing,
@@ -185,6 +189,23 @@ def withdraw_inventory(
             len(confirmed_before) - len(confirmed)
         )
 
+        # 🔴 **Legacy 를 고치기 전에 일정 행이 다 있는지 본다** (2026-09-09 · W3-1 보정).
+        #    묻는 대상은 **이번에 실제로 빠지는 것**뿐이다 — 이미 걷힌 뒤의 정상
+        #    재시도(JSON 없음 · schedule 없음)까지 오류로 만들면 기존 계약이 깨진다.
+        #
+        #    ```text
+        #    JSON 없음 · schedule 없음   정상 재시도    → 여기서 안 묻는다 (no-op)
+        #    JSON 있음 · schedule 없음   Dual Write 누락 → ScheduleMissing
+        #    ```
+        빠지는것 = sorted(
+            {
+                행.get("inbound_id")
+                for 행 in (*in_transit_before, *confirmed_before)
+                if isinstance(행, Mapping) and 행.get("inbound_id") in drop
+            }
+        )
+        assert_schedules_exist(conn, sim_run_id=sim_run_id, inbound_ids=빠지는것)
+
         cursor.execute(
             update_query,
             (
@@ -205,6 +226,12 @@ def withdraw_inventory(
     # 🔴 `as_of` 를 그대로 넘긴다. 이 값은 이미 `cancelled_on + 1`(목표 상태일)이고
     #    (`LogisticsCancellationAdapter.cancel` 참조), 취소일 자체를 적으면
     #    **이미 지나간 하루의 사실이 바뀐다.**
+    #
+    # ★ **요청받은 전부를 대상으로 한다** — `빠지는것` 으로 좁히지 않는다.
+    #   Legacy 는 **그날 행 하나**만 보지만 일정은 날짜에 안 묶여 있다. 승인이 실린
+    #   행과 취소가 겨냥한 행이 다를 수 있고(실측: 승인 as_of+1 · 취소 cancelled_on+1),
+    #   그때 JSON 에서 빠진 것이 0건이어도 **그 일정은 취소된 것이 맞다.**
+    #   이것이 날짜별 복제를 벗어나는 이 표의 값이다.
     for inbound_id in sorted(drop):
         cancel_schedule(
             conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
