@@ -20,6 +20,7 @@ from app.master.day_open import DayOpenOut
 from app.master.day_open import open_day as run_open_day
 from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
 from app.master.decision_service import current_commitment, get_decisions, record_decision
+from app.master.holiday_calendar import get_calendar
 from app.master.inbound import InboundOut
 from app.master.inbound import receive_arrivals as run_receive_arrivals
 from app.master.receivable import ReceivableOut
@@ -41,6 +42,8 @@ from app.master.service import (
     run_procurement,
     run_sales,
 )
+from app.master.walk_report import WalkReport
+from app.master.walk_report import walk_report as build_walk_report
 
 router = APIRouter(prefix="/master", tags=["master"])
 
@@ -253,6 +256,61 @@ def master_burn_in() -> BurnInOut:
     except LookupError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+
+
+@router.get(
+    "/walks/{sim_run_id}/report",
+    response_model=WalkReport,
+    summary="걷기 성적표 — 안 돈 날을 처음으로 셀 수 있다",
+)
+def master_walk_report(sim_run_id: str, start: date, end: date) -> WalkReport:
+    """한 걷기가 범위 안에서 어떻게 갔나. **날마다 한 줄이고 빈 날도 한 줄이다.**
+
+    🔴 **「행이 없다」를 두 가지로 가른다.** 표는 없는 것을 말할 수 없어서, 범위를
+       받아 빈 날을 계산하고 실행일 여부로 그 뜻을 가른다.
+
+    | 판정 | 뜻 |
+    |---|---|
+    | `WALKED` | 🟢 돌았다 |
+    | `SKIPPED_OFF_DAY` | 🟢 안 도는 날이다 — 주말·공휴일 |
+    | `NO_ROW_ON_EXECUTION_DAY` | 🔴 **실행일인데 행이 없다** |
+    | `ROW_ON_OFF_DAY` | 🟡 안 도는 날인데 행이 있다 — 사고가 아니다 |
+    | `UNKNOWN_CALENDAR` | ⚠️ 달력이 그 날을 안 덮어 모른다 |
+
+    ★ **판정을 `end_code` 와 섞지 않았다.** `end_code` 는 *"그 판단이 어떻게
+      끝났나"* 이고 판정은 *"그 날이 어떻게 됐나"* 다 — 축이 다르다.
+
+    🔴 **`start` · `end` 가 필수다.** 기본값으로 "전체" 를 만들지 않는다 — 범위가
+       없으면 빈 날을 계산할 수 없고, 그러면 `NO_ROW_ON_EXECUTION_DAY` 가 성립하지
+       않는다.
+
+    ★ **공휴일 달력을 여기서 붙인다.** 안 붙이면 설·추석이 실행일로 읽혀
+      `NO_ROW_ON_EXECUTION_DAY` 가 되고, **없는 공백**이 화면에 뜬다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 걷기가 있었다 · **행이 하나도 없었다** — 둘 다 사실이다 |
+    | 400 | `end` 가 `start` 보다 앞이다 |
+
+    🔴 **행이 0건이어도 404 가 아니다.** 404 로 내면 *"안 걸었다"* 와 *"그런 걷기가
+       없다"* 가 같아진다 — 이 성적표가 가르려는 것이 정확히 그런 종류의 접힘이다.
+
+    ⚠️ **한계 — 축이 NULL 인 행은 어느 성적표에도 안 나온다.** 실측(2026-09-09)으로
+      이 표 1,322행 중 1,206행이 그것이고, 손으로 부른 것과 옛 실험이다. 감추는
+      것이 아니라 **어느 걷기 것인지 표가 모른다.**
+    """
+    try:
+        return build_walk_report(
+            sim_run_id=sim_run_id,
+            start=start,
+            end=end,
+            calendar=get_calendar(),
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(error),
         ) from error
 
