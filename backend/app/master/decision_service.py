@@ -53,7 +53,7 @@ def _end_code_of(response_payload: dict[str, Any]) -> str:
     return end_code
 
 
-def record_decision(request_id: str, payload: DecisionIn, *, as_of: date) -> DecisionOut:
+def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     """결정 1건을 받아 적재하고 돌려준다.
 
     순서가 중요하다 — **읽고 → 검사하고 → 🔴 재검증하고 → 적재한다.** 적재 후
@@ -100,7 +100,7 @@ def record_decision(request_id: str, payload: DecisionIn, *, as_of: date) -> Dec
     _reject_repeat_approval(existing, payload)
 
     seq = next_seq(existing)
-    revalidation = _revalidation_for(row, response_payload, payload, seq, as_of)
+    revalidation = _revalidation_for(row, response_payload, payload, seq)
     saved = save_decision(
         request_id=request_id,
         decision_seq=seq,
@@ -125,7 +125,6 @@ def _revalidation_for(
     response_payload: Mapping[str, Any],
     payload: DecisionIn,
     decision_seq: int,
-    as_of: date,
 ) -> Revalidation | None:
     """승인이면 **선택된 1안을 `as_of` 로 다시 검증한다** (설계 2026-09-07 · M-4).
 
@@ -153,6 +152,20 @@ def _revalidation_for(
         return Revalidation(
             outcome="ERROR",
             reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
+        )
+
+    # 🔴 **재검증이 설 날은 그 실행의 날이다** (2026-09-09 · 마스터 판단).
+    #    부르는 쪽에서 받지 않는다 — 받으면 화면이든 걷기든 아무 날이나 넣을 수 있고,
+    #    그 순간 재검증이 자기가 언제 도는지를 남에게 맡기게 된다. 실행 행이 정한다.
+    #
+    #    ⚠️ 벽시계를 읽던 것을 진입점으로 올렸다가(#452) 여기까지 내렸다. 이유는
+    #      실측이다 — 2026-01-20 안을 오늘 승인하면 재검증이 **오늘** 로 개장을 묻고,
+    #      오늘은 안 열린 날이라 `ERROR` 가 나 승인이 막혔다.
+    as_of = _as_of_of(response_payload)
+    if as_of is None:
+        return Revalidation(
+            outcome="ERROR",
+            reason="원 실행의 기준일을 못 읽어 재검증할 날을 정할 수 없다.",
         )
 
     policy_version = _policy_version_of(row)
