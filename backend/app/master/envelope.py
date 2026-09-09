@@ -278,16 +278,39 @@ CAPABILITY_ROUTING: dict[Capability, tuple[AgentName, Mode] | None] = {
     "DELIVERY_FEASIBILITY_CONTEXT": ("inventory", "PRE_SALES"),
     # 🔴 **`None` 은 "아직 값을 안 정했다" 가 아니라 "부를 대상이 없다" 다.**
     #
-    #   매입은 호출 단위(batch / ONE_BY_ONE)를 아직 회신하지 않았고, 그래서 매입에
-    #   판매용 mode 를 만들지 않았다. 만들면 마스터가 매입 대신 호출 단위를 정하는
-    #   것이 된다.
-    #
     #   여기를 **비워 두면 `KeyError` 로 죽고**(마스터 배선 실수처럼 보인다),
     #   표에서 **빼면 조용히 건너뛴다**(사람이 *"검증됐다"* 로 읽는다). 둘 다 틀렸다.
     #   `None` 으로 적어 두면 `SalesFlow` 가 `unroutable_capabilities` 에 담아
     #   결과에 싣고, 화면에서 **"안 왔다"** 로 보인다 (§1.2-10 과 같은 태도).
     #
-    #   매입이 호출 단위를 회신하면 여기에 `(agent, mode)` 를 채운다.
+    # ⚠️ **호출 단위 회신은 왔다** (2026-09-09 · `batch` · `SUPPLY_CAPACITY_QUERY`).
+    #   여기 적혀 있던 조건은 *"매입이 호출 단위를 회신하면 채운다"* 였고 **그 조건은
+    #   오늘 충족됐다.** 그대로 두면 다음 사람이 조건이 찼다고 보고 채운다. 그래서
+    #   조건을 새로 적는다 — **아직 채우면 안 된다.**
+    #
+    # 🔴 **매입 어댑터가 아직 그 mode 를 모른다** (실측 2026-09-09).
+    #
+    #   ```text
+    #   purchase_agent/adapter.py  purchase_port
+    #       if request.mode == "STATUS_QUERY": return _status_query(request)
+    #       return _generate_scenarios(request, quotes=quotes)   ← 나머지 전부 여기로
+    #
+    #   같은 파일 _status_query
+    #       "supported_modes": ["GENERATE_SCENARIOS", "STATUS_QUERY"]
+    #                          ← SUPPLY_CAPACITY_QUERY 가 없다
+    #   ```
+    #
+    #   지금 채우면 판매 사이클이 매입을 부르고, 매입은 그 mode 를 모른 채 **7노드
+    #   그래프를 다 돌아 매입안을 만든다** (평균 11.2초 · 최대 136.6초 · 매입 실측).
+    #   그것이 **설계가 금지한 바로 그것**이다 — *"판매 사이클 안에서 매입안을 만들지
+    #   않는다."* 그리고 **오류도 안 난다. 조용히 된다.**
+    #
+    # ★ **채워도 되는 시점.** 매입 `_status_query` 의 `supported_modes` 에
+    #   `"SUPPLY_CAPACITY_QUERY"` 가 들어간 날. 그때 여기 한 줄이면 된다.
+    #
+    # ★ **경계 재료는 그날을 기다리지 않는다.** 매입이 낼 「가능량」의 재료가 물류·재무
+    #   봉투이고, 그 값은 이미 실행 이력에 있다 —
+    #   `app/master/procurement_boundary.py` 가 그것을 읽는다 (호출 0회).
     "ADDITIONAL_SUPPLY_CONTEXT": None,
 }
 """capability → 부를 대상. **`None` 은 못 부른다는 사실 자체다.**"""
