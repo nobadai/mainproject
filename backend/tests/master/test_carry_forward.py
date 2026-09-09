@@ -352,7 +352,9 @@ def test_carried_forward_는_열린_날이_아니라_실제로_쓴_날이다(
     out = transition.apply_approval(_commitment(도착=2), connect=_가짜커넥션)
     assert out.status == "APPLIED", out.reason
 
-    assert out.carried_forward == [도착일], f"안 쓴 날이 따라잡은 날로 나갔다: {out.carried_forward}"
+    assert out.carried_forward == [도착일], (
+        f"안 쓴 날이 따라잡은 날로 나갔다: {out.carried_forward}"
+    )
     assert out.carried_forward_status == "OK"
 
 

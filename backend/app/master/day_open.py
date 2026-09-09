@@ -49,10 +49,10 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
+from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.collection_seed import CollectionSeedOutcome, SeedStatus, seed_day
 from app.master.day_opening_repository import record_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
-from app.master.calendar_walk import MAX_WALK_DAYS
 
 __all__ = [
     "MAX_CARRY_DAYS",
@@ -570,7 +570,9 @@ def _aggregate(
         # 🔴 **파트 사유를 전체 사유에 싣는다** (계약 §6 — 화면까지 나간다).
         #    파트 이름만 적으면 *"logistics 가 막혔다"* 로 끝나고, **무엇이 막았는지**를
         #    화면이 못 말한다.
-        말 = "; ".join(f"{part.part}: {part.reason}" if part.reason else part.part for part in failed)
+        말 = "; ".join(
+            f"{part.part}: {part.reason}" if part.reason else part.part for part in failed
+        )
         return DayOpenOut(
             as_of=as_of,
             status="NOT_OPENED",

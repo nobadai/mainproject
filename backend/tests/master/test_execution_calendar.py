@@ -105,7 +105,9 @@ def test_공휴일이_아니어도_장이_안_서면_민다():
     `is_open=f` 다. 첫 판이 놓친 3일이 이것이다.
     """
     평일_휴장 = date(2026, 1, 2)
-    envelope = build_execution_calendar(date(2025, 12, 29), market=_닫는_날을_지정하는_시장(평일_휴장))
+    envelope = build_execution_calendar(
+        date(2025, 12, 29), market=_닫는_날을_지정하는_시장(평일_휴장)
+    )
 
     assert 평일_휴장 in envelope.non_execution_days
     assert 평일_휴장.weekday() < 5, "평일인 것이 요점이다"

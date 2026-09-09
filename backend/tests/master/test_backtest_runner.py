@@ -365,7 +365,9 @@ def test_now_를_인자로_받는다():
     now_param = inspect.signature(walk).parameters["now"]
 
     assert now_param.kind is inspect.Parameter.KEYWORD_ONLY
-    assert now_param.default is inspect.Parameter.empty, "now 에 기본값이 있다 — 안 주면 막아야 한다"
+    assert now_param.default is inspect.Parameter.empty, (
+        "now 에 기본값이 있다 — 안 주면 막아야 한다"
+    )
 
 
 def test_모듈이_시계를_안_읽는다():
@@ -382,14 +384,21 @@ def test_모듈이_시계를_안_읽는다():
     }
 
     assert not called & {"now", "today", "utcnow", "seoul_now", "today_in_seoul"}, (
-        f"걷기가 시계를 읽는다: {sorted(called & {'now', 'today', 'utcnow', 'seoul_now', 'today_in_seoul'})}"
+        "걷기가 시계를 읽는다: "
+        f"{sorted(called & {'now', 'today', 'utcnow', 'seoul_now', 'today_in_seoul'})}"
     )
 
 
 def test_시간대_없는_시각은_막는다():
     """★ **조용히 서울로 바꾸지 않는다.** 어느 지역의 10:30 인지가 없으면 못 잰다."""
     with pytest.raises(ValueError, match="시간대"):
-        _walk(start=date(2026, 2, 7), end=date(2026, 2, 7), now=datetime(2026, 2, 7, 10, 35))
+        # ⚠️ **tzinfo 를 일부러 안 준다** — 시간대 없는 시각을 막는지가 이 검사다.
+        #   DTZ001 은 여기서만 끈다. 검사 대상이 곧 린터가 막으려는 그 모양이다.
+        _walk(
+            start=date(2026, 2, 7),
+            end=date(2026, 2, 7),
+            now=datetime(2026, 2, 7, 10, 35),  # noqa: DTZ001
+        )
 
 
 def test_그날의_마감과_비교한다():
