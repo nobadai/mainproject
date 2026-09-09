@@ -108,12 +108,18 @@ def source_table(cfg: Mapping[str, Any]) -> tuple[str, str]:
 def spec_for_item(item: str, constraints: Mapping[str, Any]) -> dict[str, Any] | None:
     """그 품목의 조회 규격. **미확정이면 None 이다 — 임의 규격으로 채우지 않는다** (규칙 3).
 
-    피마늘이 그 경우다. ML 에 피마늘 AUC 예측이 없고, 원천 테이블의 품목명은 "마늘"이며
-    품종 목록에 "피마늘"이 없다. 어느 이름·규격으로 조회할지가 미결이라 조회하지 않는다.
+    ⚠️ **키가 없는 것과 값이 null 인 것을 구분한다.** 셋을 갈라야 한다::
 
-    ⚠️ **키가 없는 것과 값이 null 인 것을 구분한다.** null 은 "미결이라 안 읽는다"는
-      **결정**이고, 키 부재는 그냥 빠뜨린 것이다. 둘을 같이 처리하면 실수로 지운 품목이
-      피마늘과 똑같이 조용히 넘어간다 — 그 품목은 그날부터 영원히 시세 없이 돈다.
+        키가 있고 값이 spec    조회한다
+        키가 있고 값이 null    **미결이라 안 읽는다** — 결정이다 (규칙 3)
+        키가 없다              🔴 **계약 밖이거나 빠뜨린 것** — 여기서 멈춘다
+
+    셋째를 조용히 넘기면 실수로 지운 품목이 «미결» 과 똑같이 보이고, 그 품목은
+    그날부터 영원히 시세 없이 돈다.
+
+    🔴 **지금 둘째(값이 null)에 해당하는 품목이 없다** (2026-09-09). 피마늘이
+      그 자리였는데 계약에서 빠져(`#216` · `contracts/core.py ITEMS`) 선언에서도
+      걷었다. **분기는 남긴다** — 규격 미결 품목이 다시 생기면 그날 이 길로 온다.
 
     규격이 반쯤 적힌 상태도 여기서 막는다. ``packages`` 만 있고 ``unit_weight_kg`` 이 없으면
     조회 시점에 ``KeyError`` 로 죽는데, 그때는 사유를 낼 자리가 이미 지나갔다.
@@ -121,8 +127,10 @@ def spec_for_item(item: str, constraints: Mapping[str, Any]) -> dict[str, Any] |
     spec_by_item = constraints["market_quotes"]["spec_by_item"]
     if item not in spec_by_item:
         raise KeyError(
-            f"market_quotes.spec_by_item 에 {item!r} 항목이 없다 — 규격 미결이면 "
-            f"키를 지우지 말고 값을 null 로 둔다 (규칙 3: 빠뜨린 것과 미결은 다르다)"
+            f"market_quotes.spec_by_item 에 {item!r} 항목이 없다 — "
+            f"계약 품목이면 규격을 선언하고, 미결이면 키를 지우지 말고 값을 null 로 둔다. "
+            f"계약 밖 품목이면 여기까지 오면 안 된다 (문 앞 게이트 #223) "
+            f"(규칙 3: 빠뜨린 것과 미결은 다르다)"
         )
     spec = spec_by_item[item]
     if spec is None:
@@ -368,8 +376,10 @@ def auction_quote_source(*, fetch: Fetch | None = None) -> QuoteSource:
         validate_coordinates(cfg)
         spec = spec_for_item(item, constraints)
         if spec is None:
-            # 규격 미확정 품목(피마늘)은 **조회하지 않는다**. 아무 규격으로나 물어보면
-            # 값이 오고, 그 값은 우리가 뜻한 시리즈가 아니다 (규칙 3).
+            # 규격이 ``null`` 로 선언된 품목은 **조회하지 않는다**. 아무 규격으로나
+            # 물어보면 값이 오고, 그 값은 우리가 뜻한 시리즈가 아니다 (규칙 3).
+            # 🔴 지금 그런 품목은 없다 (2026-09-09) — 분기는 남긴다. ``spec_for_item``
+            #    docstring 의 셋 중 둘째 자리다.
             return []
         params: dict[str, Any] = {
             "as_of": as_of,

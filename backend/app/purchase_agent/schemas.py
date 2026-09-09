@@ -68,7 +68,7 @@ from app.purchase_agent.config import load_constraints
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 # --- 고정 어휘 (IO명세 §2 필드 규약) ---
-ItemName = Literal["배추", "무", "피마늘", "양파"]
+ItemName = Literal["배추", "무", "양파"]
 ScenarioLabel = Literal["보수", "기본", "공격"]
 StrategyType = Literal["quantity", "timing", "mix"]
 RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금", "문서ID"]

@@ -44,6 +44,35 @@ from app.purchase_agent.tracing import ToolRecorder
 
 AGENT_NAME = "purchase"
 
+#: 이 어댑터가 **실제로 처리하는** mode. ``_status_query`` 가 답하는 목록이자 문 앞
+#: 검사의 기준이다 — **두 곳에 따로 적지 않는다.**
+#:
+#: 🔴 **왜 목록이 하나여야 하나** (2026-09-09 · 마스터 지적). 전에는 답하는 목록만
+#:   있고 문 앞 검사가 없었다. 그래서 모르는 mode 가 ``_generate_scenarios`` 로
+#:   떨어졌다 — **오류 없이 안이 만들어진다.** 실측::
+#:
+#:       GENERATE_SCENARIOS      → _generate_scenarios   정상
+#:       STATUS_QUERY            → _status_query         정상
+#:       SUPPLY_CAPACITY_QUERY   → _generate_scenarios   🔴
+#:       "아무거나"               → _generate_scenarios   🔴
+#:
+#:   ⚠️ 지금은 봉투(``_AGENT_MODES``)가 앞에서 막아 실제로는 안 일어난다. 다만
+#:   마스터가 라우팅을 채우는 날 그 방어가 사라지고, **그때 조용히 안이 만들어진다.**
+#:   막는 쪽이 우리 밖에만 있으면 그 문이 열리는 날을 우리가 못 본다.
+SUPPORTED_MODES: tuple[str, ...] = ("GENERATE_SCENARIOS", "STATUS_QUERY")
+
+
+class UnsupportedMode(RuntimeError):
+    """🔴 매입이 받지 않는 mode 로 불렸다.
+
+    ★ **조용히 «안 만들었다» 로 답하지 않는다.** 그 답은 *"오늘은 낼 안이 없다"* 로
+      읽히는데, 실제로 일어난 일은 *"배선이 우리가 안 만든 길을 열었다"* 이다.
+      완전히 다른 사실이고, 다음에 할 일도 다르다 (``MockNotAllowed`` 와 같은 이유).
+
+    ⚠️ 봉투가 앞에서 막으므로 정상 경로에서는 안 난다. 이 예외가 실제로 나면
+      **라우팅과 이 목록이 어긋났다**는 뜻이다.
+    """
+
 #: 표기와 무관하게 근거를 요구할 판정 필드 (M-1 §7.2 · 전달_2차 §1).
 #: 봉투의 라벨 휴리스틱은 **대문자만** 보므로 재무의 ``MEDIUM``은 걸리지만 매입의
 #: ``stable``·``["quantity","timing"]``은 빠진다. 선언하면 표기와 무관하게 걸린다.
@@ -970,8 +999,9 @@ def purchase_port(
 ) -> tuple[AgentReply, ExecutionMetadata]:
     """마스터가 부르는 유일한 진입점.
 
-    ``mode``는 둘뿐이다 — ``GENERATE_SCENARIOS``·``STATUS_QUERY``. 다른 mode는 봉투가
-    **보내기 전에** 막으므로 여기서 다시 검사하지 않는다 (``_AGENT_MODES``).
+    ``mode``는 둘뿐이다 — ``SUPPORTED_MODES``. 봉투(``_AGENT_MODES``)가 앞에서 막지만
+    **여기서도 검사한다** (2026-09-09). 막는 쪽이 우리 밖에만 있으면, 마스터가 라우팅을
+    넓히는 날 모르는 mode 가 ``_generate_scenarios`` 로 떨어져 **조용히 안이 만들어진다.**
 
     ``quotes``는 등급별 시세 공급자다 (#70). 이 인자의 기본값은 여전히 mock 이지만
     **실운영 등록은 실 경락가를 꽂는다** — ``app/main.py`` 가
@@ -1001,6 +1031,12 @@ def purchase_port(
     """
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
+    if request.mode not in SUPPORTED_MODES:
+        raise UnsupportedMode(
+            f"매입은 mode={request.mode!r} 를 받지 않는다. "
+            f"받는 것: {sorted(SUPPORTED_MODES)}. "
+            f"라우팅이 열렸다면 이 목록도 같이 열려야 한다"
+        )
     return _generate_scenarios(request, quotes=quotes)
 
 
@@ -1018,7 +1054,9 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         payload={
             "capabilities": {
                 "agent_version": AGENT_VERSION,
-                "supported_modes": ["GENERATE_SCENARIOS", "STATUS_QUERY"],
+                # ★ 목록을 여기 적지 않는다 — ``SUPPORTED_MODES`` 가 정본이고
+                #   문 앞 검사(``purchase_port``)가 같은 것을 본다.
+                "supported_modes": list(SUPPORTED_MODES),
                 "items": list(mocks.ITEMS),
             }
         },
