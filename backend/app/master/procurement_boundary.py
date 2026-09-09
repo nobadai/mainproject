@@ -261,6 +261,22 @@ def _is_ledger_gap_row(row: MasterAgentRun) -> bool:
     ★ **코드 문자열을 다시 적지 않는다.** 주인은 `run_repository.LEDGER_GAP_END_CODE`
       하나이고, `count_runs_by_day` 의 `gate_blocked` 도 같은 값으로 그 행을 되찾는다.
       두 벌로 적으면 한쪽만 바뀌는 날 이 사유가 조용히 늘 안 나온다.
+
+    ⚠️ **이 모양은 관문 행만의 모양이 아니다** (실측 2026-09-09).
+
+      ```text
+      PROCUREMENT           1,315행
+        E4_NOT_STARTED        404행
+          item IS NULL          14행   ← 품목을 정하기 전에 죽은 옛 매입 실행이다
+      ```
+
+      오늘 이것이 안 새는 이유는 **그 14행 전부 `sim_run_id` 가 `NULL`** 이라
+      축을 좁히는 이 함수에 한 행도 안 걸리기 때문이다. 축이 막고 있는 것이지
+      모양이 스스로를 증명하는 것이 아니다.
+
+      더 단단한 키는 `scheduler.ledger_gap_request_id(as_of)` 다. 다만 그것으로
+      바꾸면 `count_runs_by_day.gate_blocked` 와 정의가 갈리므로, **두 곳을 같이**
+      바꿔야 한다 — 여기서 혼자 바꾸지 않는다.
     """
     return row.get("item") is None and row.get("end_code") == LEDGER_GAP_END_CODE
 
