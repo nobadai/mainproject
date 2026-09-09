@@ -9,10 +9,12 @@ import pytest
 
 os.environ.setdefault("DB_SCHEMA", "haetdeul")
 
+from app.finance.db import FinanceDataNotReady
 from app.finance.receivables import (
     ReceivablePersistenceConflict,
     build_receivable_write_plan,
     confirm_receivable,
+    load_sale_date_finance_state_id,
     receivable_id_for,
 )
 from app.finance.sales_validation import ReceivableCreateInput
@@ -194,22 +196,77 @@ def _request(**overrides) -> ReceivableCreateInput:
     return ReceivableCreateInput.model_validate(data)
 
 
-def test_build_receivable_write_plan_is_exact_and_deterministic():
-    plan = build_receivable_write_plan(_request(), sale_row=_sale_row())
-    assert plan.receivable_id == receivable_id_for(SALE_ID)
-    assert plan.finance_state_id == daily_finance_state_id(
-        sim_run_id=SIM_RUN_ID, financing_mode=MODE, state_date=SALE_DATE
+def test_build_receivable_write_plan_uses_loaded_finance_state_id():
+    plan = build_receivable_write_plan(
+        _request(),
+        sale_row=_sale_row(),
+        finance_state_id="FIN-PROOF-20260910-LOAN",
     )
+    assert plan.receivable_id == receivable_id_for(SALE_ID)
+    assert plan.finance_state_id == "FIN-PROOF-20260910-LOAN"
     assert plan.original_amount_krw == Decimal(19550000)
     assert plan.due_date == DUEDATE
 
 
+def test_sale_date_finance_state_lookup_does_not_depend_on_id_naming():
+    conn = _Connection()
+    custom = _state()
+    custom["finance_state_id"] = "FIN-PROOF-20260105-LOAN"
+    conn.states_by_id = {custom["finance_state_id"]: custom}
+
+    state_id = load_sale_date_finance_state_id(
+        conn,
+        sim_run_id=SIM_RUN_ID,
+        financing_mode=MODE,
+        state_date=SALE_DATE,
+    )
+
+    assert state_id == "FIN-PROOF-20260105-LOAN"
+
+
+def test_sale_date_finance_state_lookup_fails_closed_when_missing():
+    conn = _Connection()
+    conn.states_by_id = {}
+
+    with pytest.raises(FinanceDataNotReady, match="finance_state_for_receivable"):
+        load_sale_date_finance_state_id(
+            conn,
+            sim_run_id=SIM_RUN_ID,
+            financing_mode=MODE,
+            state_date=SALE_DATE,
+        )
+
+
+def test_sale_date_finance_state_lookup_fails_closed_when_ambiguous():
+    conn = _Connection()
+    first = _state()
+    second = _state()
+    first["finance_state_id"] = "FIN-PROOF-20260105-LOAN"
+    second["finance_state_id"] = "FIN-H1-THRU-20260105-BAECHU-1"
+    conn.states_by_id = {
+        first["finance_state_id"]: first,
+        second["finance_state_id"]: second,
+    }
+
+    with pytest.raises(FinanceDataNotReady, match="finance_state_ambiguous"):
+        load_sale_date_finance_state_id(
+            conn,
+            sim_run_id=SIM_RUN_ID,
+            financing_mode=MODE,
+            state_date=SALE_DATE,
+        )
+
+
 def test_confirm_receivable_persists_receivable_and_updates_exact_state():
     conn = _Connection()
+    custom = _state()
+    custom["finance_state_id"] = "FIN-PROOF-20260910-LOAN"
+    conn.states_by_id = {custom["finance_state_id"]: custom}
     result = confirm_receivable(conn, _request())
 
     assert result.receivables_written == 1
     assert result.finance_state_updates == 1
+    assert result.finance_state_id == "FIN-PROOF-20260910-LOAN"
     assert conn.receivables[result.receivable_id]["status"] == "OPEN"
     assert conn.states_by_id[result.finance_state_id]["receivables_krw"] == Decimal(
         29550000

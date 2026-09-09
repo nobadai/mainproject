@@ -10,10 +10,8 @@ from typing import Any
 
 from psycopg import sql
 
-from app.finance.db import decimal_value, row_value
-from app.finance.db import get_db_schema
+from app.finance.db import FinanceDataNotReady, decimal_value, get_db_schema, row_value
 from app.finance.sales_validation import ReceivableCreateInput
-from app.finance.state_identity import daily_finance_state_id
 
 
 class ReceivablePersistenceConflict(RuntimeError):
@@ -47,7 +45,17 @@ def confirm_receivable(conn: Any, request: ReceivableCreateInput) -> ReceivableW
     """확정된 Sale 을 읽어 receivable 과 Finance State 를 멱등 저장한다."""
 
     sale_row = load_sale_row(conn, request.sale_id)
-    plan = build_receivable_write_plan(request, sale_row=sale_row)
+    finance_state_id = load_sale_date_finance_state_id(
+        conn,
+        sim_run_id=request.sim_run_id,
+        financing_mode=request.financing_mode,
+        state_date=request.sale_date,
+    )
+    plan = build_receivable_write_plan(
+        request,
+        sale_row=sale_row,
+        finance_state_id=finance_state_id,
+    )
     return persist_receivable(conn, plan)
 
 
@@ -76,7 +84,7 @@ def load_sale_row(conn: Any, sale_id: str) -> dict[str, Any]:
 
 
 def build_receivable_write_plan(
-    request: ReceivableCreateInput, *, sale_row: Mapping[str, Any]
+    request: ReceivableCreateInput, *, sale_row: Mapping[str, Any], finance_state_id: str
 ) -> ReceivableWritePlan:
     """Sales header 1건을 Finance receivable 1건으로 옮기는 계획을 만든다."""
 
@@ -100,11 +108,6 @@ def build_receivable_write_plan(
     issued_date = request.sale_date
     if due_date is None or issued_date is None:
         raise ReceivablePersistenceConflict("sale row is missing receivable dates")
-    finance_state_id = daily_finance_state_id(
-        sim_run_id=request.sim_run_id,
-        financing_mode=request.financing_mode,
-        state_date=issued_date,
-    )
     return ReceivableWritePlan(
         receivable_id=receivable_id_for(sale_id),
         sale_id=sale_id,
@@ -118,6 +121,39 @@ def build_receivable_write_plan(
         outstanding_amount_krw=request.original_amount_krw,
         status="OPEN",
     )
+
+
+def load_sale_date_finance_state_id(
+    conn: Any, *, sim_run_id: str, financing_mode: str, state_date: date
+) -> str:
+    """기존 Finance state는 ID 조립이 아니라 실행 축으로 찾는다.
+
+    ``daily_finance_state_id``는 새 일별 상태를 만들 때 쓰는 결정론 ID 규칙이다.
+    이미 존재하는 상태 조회의 정본 키는 ``(sim_run_id, financing_mode, state_date)``이며,
+    조회된 실제 ``finance_state_id``를 receivable lineage에 연결한다.
+    """
+
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT finance_state_id
+                FROM {}.finance_states
+                WHERE sim_run_id = %s
+                  AND financing_mode = %s
+                  AND state_date = %s
+                FOR UPDATE
+                """
+            ).format(schema),
+            [sim_run_id, financing_mode, state_date],
+        )
+        rows = cursor.fetchall()
+    if not rows:
+        raise FinanceDataNotReady("finance_state_for_receivable")
+    if len(rows) != 1:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    return str(row_value(rows[0], "finance_state_id", 0))
 
 
 def persist_receivable(conn: Any, plan: ReceivableWritePlan) -> ReceivableWriteResult:
