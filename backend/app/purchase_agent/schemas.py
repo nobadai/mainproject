@@ -19,10 +19,15 @@ read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모�
 회귀는 ``tests/finance/test_finance_schemas.py``
 ``test_purchase_agent_contract_rejects_legacy_ton_fields`` 가 막는다.
 
-🔴 **그 검사가 지금 안 돈다** (2026-09-09 · `#450`). 그 파일이 `app.finance.schemas`
-에서 ``FinanceSalesRequest`` · ``PurchaseAgentOutput`` 를 import 하는데 **둘 다 재무에서
-사라져** 수집 단계에서 ``ImportError`` 가 난다. 계약이 깨진 게 아니라 **재는 쪽이 꺼진
-것**이고, 우리 쪽 검사는 그대로 돈다.
+🟢 **그 검사는 돈다** (2026-09-09 16:58 실측 · `dev@c288c1b` · 8 passed).
+
+  🔴 반나절 동안은 안 돌았다 — `#450` 이 재무에서 ``FinanceSalesRequest`` ·
+  ``PurchaseAgentOutput`` 을 지웠는데 그 파일이 여전히 import 해서 **수집 단계에서
+  ``ImportError``** 가 났다. `#462`·`#463` 이 고쳤다. 계약이 깨진 적은 없다 —
+  **재는 쪽이 꺼져 있었을 뿐**이고 우리 검사는 그 동안에도 그대로 돌았다.
+
+  ★ 지금은 재무 별칭을 안 거치고 **``PurchaseProposal`` 을 직접 import** 한다.
+  검사 이름은 그대로다.
 
 ⚠️ **그 검사가 잠그는 것은 이 파일 쪽이다** — 이름이 *"부서가 ton 을 거부한다"* 로
 읽히지만, ``PurchaseAgentOutput`` 은 재무 DTO 가 아니라 아래 ``PurchaseProposal`` 이다.
