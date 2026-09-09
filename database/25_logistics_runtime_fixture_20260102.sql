@@ -52,7 +52,7 @@
 --     그리고 HARD_ALLOWED_GRADES = {OFFICIAL, VENDOR, SIM_FIXED} 에서 빠지면
 --     LOG-H01·LOG-H02 가 하드 제약으로 서지 못한다.
 --
---   confirmed_inbound = CONFIRMED_ZERO (status 뿐) / confirmed_outbound = CONFIRMED_ZERO · []
+--   confirmed_inbound · confirmed_outbound = CONFIRMED_ZERO (둘 다 status 뿐)
 --     🔴 회피가 아니라 사실이다 — 01-02 도착 예정인 확정 입·출고가 실제로 없다.
 --     ⚠️ UNRESOLVED 로 두면 `is_inbound_schedule_complete()` 가 거짓이 되어
 --        `calculate_cap_by_date()` 가 IN_TRANSIT_SCHEDULE_UNRESOLVED 로 서고,
@@ -112,7 +112,7 @@ INSERT INTO haetdeul.logistics_runtime_fixture (
     fixture_id, sim_run_id, as_of,
     in_transit_status,
     confirmed_inbound_status,
-    confirmed_outbound_status, confirmed_outbound_json,
+    confirmed_outbound_status,
     lot_priority_status,       lot_priority_json,
     zone_capacity_status,      guaranteed_capacity_by_zone_json,
     usage_scope, evidence_grade, approved_by, source_ref, is_active, note
@@ -123,7 +123,7 @@ SELECT
     DATE '2026-01-02',
     'CONFIRMED_ZERO',                      -- 🔴 확인했고 0 건 — 목록은 inbound_schedules 다
     'CONFIRMED_ZERO',
-    'CONFIRMED_ZERO', '[]'::JSONB,
+    'CONFIRMED_ZERO',
     'CONFIRMED_ZERO', '[]'::JSONB,
     'UNRESOLVED',     NULL,
     base.usage_scope,                      -- 물려받는다

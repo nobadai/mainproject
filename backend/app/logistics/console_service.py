@@ -94,7 +94,7 @@ from app.logistics.repository import (
     get_current_logistics_read,
 )
 from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsRuntimeFixture
-from app.logistics.tools import build_inventory_by_item, has_unattributed_confirmed_outbound
+from app.logistics.tools import build_inventory_by_item
 from app.logistics.warehouse import _OCCUPYING_PALLET
 
 __all__ = [
@@ -256,14 +256,14 @@ def _reservation_totals_by_item(conn: Any, *, sim_run_id: str) -> dict[str, dict
 
 
 def _available_unresolved_reason(snapshot: InventoryLogisticsSnapshot) -> str | None:
-    """`build_inventory_by_item` 이 `None` 을 내는 세 경로와 **같은 순서로** 본다.
+    """`build_inventory_by_item` 이 `None` 을 내는 경로와 **같은 순서로** 본다.
 
     순서가 계약이다 — 저쪽 guard 와 어긋나면 이유가 사실과 달라진다.
+
+    🔴 **확정 출고 축 두 이유가 없어졌다 (WP-3).** 판매가능량이 그 축을 더 이상 안
+       빼므로(`tools.build_inventory_by_item` 의 «차감 축은 한 벌») 그것을 못 읽었다는
+       이유로 이 값을 못 낸다고 답할 수 없다.
     """
-    if snapshot.confirmed_outbound_schedule is None:
-        return "CONFIRMED_OUTBOUND_UNRESOLVED"
-    if has_unattributed_confirmed_outbound(snapshot):
-        return "CONFIRMED_OUTBOUND_ITEM_MISSING"
     if snapshot.outbound_commitments is None:
         return "OUTBOUND_COMMITMENTS_UNRESOLVED"
     return None
@@ -1109,11 +1109,18 @@ def ship_reservation(
 
 
 def release_reservation_console(
-    *, reservation_id: str, status: ReservationStatus
+    *, reservation_id: str, released_as_of: date, status: ReservationStatus
 ) -> ConsoleReleaseResponse:
-    """예약을 놓아준다. 이미 `SHIPPED` 인 할당이 있으면 도메인이 막는다."""
+    """예약을 **그날부터** 놓아준다. 이미 `SHIPPED` 인 할당이 있으면 도메인이 막는다.
+
+    🔴 **`released_as_of` 를 여기서 만들지 않는다** (WP-3 M3). 사람이 콘솔에서 어느
+       날짜의 사실로 놓아주는지 말해야 한다 — 서버 시계로 채우면 그 값이 시뮬레이션
+       날짜 행세를 하고 Historical 이 그것을 그대로 믿는다.
+    """
     with _write_connection() as conn:
-        result = outbound.release_reservation(conn, reservation_id=reservation_id, status=status)
+        result = outbound.release_reservation(
+            conn, reservation_id=reservation_id, released_as_of=released_as_of, status=status
+        )
     return ConsoleReleaseResponse(
         applied=result.applied,
         reservation_id=result.reservation_id,

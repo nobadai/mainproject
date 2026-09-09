@@ -722,6 +722,9 @@ CREATE TABLE IF NOT EXISTS haetdeul.inventory_reservations (
     reserved_qty_kg NUMERIC(18,6) NOT NULL DEFAULT 0,
     due_date        DATE,
     status          TEXT NOT NULL,
+    -- 놓아준 시뮬레이션 날짜 (WP-3 · M3). NULL 이면 아직 살아 있다.
+    -- 🔴 `updated_at` 은 벽시각이라 과거 재현에 못 쓴다 — 그래서 이 칸이 있다.
+    released_as_of  DATE,
     note            TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -741,6 +744,8 @@ CREATE TABLE IF NOT EXISTS haetdeul.inventory_reservations (
 
 COMMENT ON TABLE haetdeul.inventory_reservations IS
     '주문 CONFIRMED 시 품목 총량 확보 (02 §11). Lot/Pallet 지정은 Allocation 쪽이다.';
+COMMENT ON COLUMN haetdeul.inventory_reservations.released_as_of IS
+    '이 예약을 놓아준 시뮬레이션 날짜 (WP-3). NULL = 아직 살아 있다. 🔴 as_of < 이 값인 날에는 여전히 살아 있던 예약이다 — Historical 이 이 칸으로 그날 상태를 유도한다. status 는 지금 값이라 과거 정본이 아니고, updated_at 은 벽시각이라 시뮬레이션 날짜가 아니다.';
 
 
 CREATE TABLE IF NOT EXISTS haetdeul.inventory_allocations (

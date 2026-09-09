@@ -42,10 +42,11 @@ from app.logistics.schemas import RuntimeSourceStatus
 from app.logistics.turnover import TurnoverStatus
 
 #: `available_qty_kg` 를 못 낸 이유. `tools.build_inventory_by_item` 이 `None` 을
-#: 돌려주는 세 경로와 1:1 이다 — 어느 축을 못 읽었는지 화면이 알아야 한다.
+#: 돌려주는 경로와 1:1 이다 — 어느 축을 못 읽었는지 화면이 알아야 한다.
+#:
+#: 🔴 **`CONFIRMED_OUTBOUND_*` 두 값이 WP-3 에서 빠졌다.** 판매가능량의 차감 축이
+#:    예약·할당 한 벌로 좁혀져(이중 차감 제거) 확정 출고 축은 이 판정에 안 들어온다.
 AvailableQtyUnresolvedReason = Literal[
-    "CONFIRMED_OUTBOUND_UNRESOLVED",
-    "CONFIRMED_OUTBOUND_ITEM_MISSING",
     "OUTBOUND_COMMITMENTS_UNRESOLVED",
     #: 그날의 Agent Runtime Snapshot(`logistics_runtime_fixture`)이 없다. 재고 수량은
     #: 원장으로 되살아나지만 판매가능량은 그 스냅샷의 확정 출고 축이 있어야 선다.
@@ -557,6 +558,10 @@ class ConsoleShipResponse(ConsoleModel):
 class ConsoleReleaseRequest(ConsoleModel):
     #: 놓아주는 상태만 받는다.
     status: Literal["RELEASED", "CANCELLED"]
+    #: 🔴 **기본값이 없다** (`ConsoleAllocateRequest.as_of` 와 같은 규율). 놓아준
+    #:    시뮬레이션 날짜를 서버가 시계에서 만들면 그 값이 **DB 를 손본 시각**이 되고,
+    #:    같은 데이터가 내일 다른 과거를 낸다 (WP-3 M3).
+    released_as_of: date
 
 
 class ConsoleReleaseResponse(ConsoleModel):

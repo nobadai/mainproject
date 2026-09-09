@@ -427,10 +427,27 @@ def build_inventory_by_item(
 ) -> list[InventoryByItem] | None:
     """가용재고 정의를 적용한 품목별 자유재고를 집계한다.
 
-    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0), 확정 출고 예약분,
+    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0),
     **출고가 이미 잡아 둔 몫(예약·할당)**. 예상 판매·계획 출고는 차감하지 않는다.
-    확정 출고 행에 item이 없으면 임의 배분하지 않고 None을 돌려준다 — 호출부는 필드를
-    생략해야 하며 `[]`(0건 확인)로 대체하면 안 된다.
+
+    🔴 **차감 축은 한 벌이다 — 예약·할당뿐이다 (WP-3).** 종전에는 여기서
+       `confirmed_outbound_schedule` 도 함께 뺐다. 그런데 확정 판매는 그날 마스터
+       출고 흐름이 **예약으로 내려보내는 바로 그 사실**이라, 둘을 다 빼면 같은 판매가
+       두 번 차감된다.
+
+    ```text
+    ~WP-2   on_hand − 예약·할당 − confirmed_outbound   🔴 같은 판매를 두 번 뺀다
+    WP-3~   on_hand − 예약·할당                        ✅ 한 벌
+    ```
+
+       ⚠️ 실측(2026-09-05~09-09)에서 fixture 쪽이 전부 `CONFIRMED_ZERO`·`[]` 라
+          겹치지 않았을 뿐이다. 이 파일의 종전 주석이 *"실제 값이 들어오는 날 한 축으로
+          합쳐야 한다"* 고 예고했고(`schemas.InventoryLogisticsSnapshot`), WP-3 이 출고
+          정본을 판매로 옮기면서 그날이 왔다.
+
+    ★ **미래 Capacity 와는 다른 셈이다.** `_replay_occupancy_by_item` 은 여전히
+      `confirmed_outbound_schedule` 을 쓴다 — 저쪽은 *"미래 어느 날 창고가 얼마나
+      비는가"* 이고 이쪽은 *"지금 더 팔 수 있는가"* 다. 둘을 한 축으로 합치지 않는다.
 
     🔴 **`outbound.item_free_stock_qty` 와 같은 답을 내야 한다.** 매입에 나가는 이 값이
        예약이 실제로 잡을 수 있는 양보다 크면, 매입은 팔 수 있다고 보고 판매는 못 잡는
@@ -454,10 +471,9 @@ def build_inventory_by_item(
       재고 축과 제안 축은 다르다: `E-UNKNOWN-ITEM`(`critic_v0_4.py`)이 거르는 것은
       `scenario.qty_kg` 의 제안 품목이고 재고 집계가 아니다.
     """
-    if snapshot.confirmed_outbound_schedule is None or has_unattributed_confirmed_outbound(
-        snapshot
-    ):
-        return None
+    # 🔴 **`confirmed_outbound_schedule` 로 막지 않는다 (WP-3).** 이 셈이 그 축을 더
+    #    이상 안 쓰므로, 그것을 못 읽었다는 이유로 판매가능량을 못 낸다고 답하면
+    #    **상관없는 축 때문에 화면이 비는** 것이 된다.
     if snapshot.outbound_commitments is None:
         return None
 
@@ -487,10 +503,6 @@ def build_inventory_by_item(
     for item, reserved in unallocated_by_item.items():
         if item in totals:
             totals[item] = max(Decimal(0), totals[item] - reserved)
-    for outbound in snapshot.confirmed_outbound_schedule:
-        assert outbound.item is not None
-        if outbound.item in totals:
-            totals[outbound.item] = max(Decimal(0), totals[outbound.item] - outbound.quantity_kg)
     return [
         InventoryByItem(item=item, available_qty_kg=quantity)
         for item, quantity in sorted(totals.items())

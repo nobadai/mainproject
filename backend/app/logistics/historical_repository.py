@@ -39,10 +39,14 @@ TIMESTAMPTZ 컬럼 col <  (as_of + 1일) 00:00 KST     inspected_at · occurred_
    로 갈리기 전까지 부호 계약이 없다. 방향을 넘겨짚어 그린 선은 틀렸다는 것도
    알려 주지 않는다 — 그래서 `AdjustMoveNotSupported` 로 명시적으로 실패한다.
 
-⚠️ **미래 대비 함수를 미리 만들지 않는다.** `inbound_schedule_at`(WP-2) ·
-   `reservation_state_at` · `outbound_schedule_at`(WP-3) 은 그 축의 정본 컬럼
-   (`inbound_schedules` · `inventory_reservations.released_as_of`)이 아직 없어
-   **지금 만들면 지어낸 값이 된다.** 그 WP 에서 만든다.
+⚠️ **미래 대비 함수를 미리 만들지 않는다.** 그 축의 정본이 서기 전에 만들면
+   지어낸 값이 된다 — 그래서 각 WP 가 정본을 세운 뒤에 함수를 만들었다.
+
+```text
+inbound_schedule_at    W3-2   inbound_schedules 가 섰다      → inbound_schedules.py 소유
+reservation_state_at   WP-3   released_as_of 가 섰다         → 이 파일
+outbound_schedule_at   WP-3   sales · sale_items 가 정본이다  → 이 파일
+```
 """
 
 from __future__ import annotations
@@ -56,7 +60,9 @@ from zoneinfo import ZoneInfo
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
+from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.repository import LOGISTICS_POLICY_USAGE_SCOPE, _normalize_grade
+from app.logistics.schemas import ScheduledQuantity
 from app.logistics.turnover import LotTurnover, _lot_turnover_from_row
 
 __all__ = [
@@ -68,13 +74,17 @@ __all__ = [
     "HistoricalPalletPosition",
     "HistoricalReceipt",
     "HistoricalReceiptState",
+    "HistoricalReservation",
+    "HistoricalReservationState",
     "ReceiptLineageAmbiguous",
     "RuntimeSnapshotCoverage",
     "lot_state_at",
     "onhand_by_lot_at",
     "onhand_total_by_day",
+    "outbound_schedule_at",
     "pallet_position_at",
     "receipt_state_at",
+    "reservation_state_at",
     "runtime_coverage_at",
     "snapshot_days_between",
     "timestamp_cutoff",
@@ -91,6 +101,12 @@ CAPACITY_BASIS_CURRENT_ACTIVE_POLICY = "CURRENT_ACTIVE_POLICY"
 #: (`ledger.py` 도 잔량 0 에 `DEPLETED` 를 안 적는다) 되살릴 사건이 없다.
 #: 없는 것을 만들지 않는다 — `inventory_lot_events` 는 이번 MVP 에서 만들지 않는다.
 HistoricalLotState = Literal["ACTIVE", "DEPLETED", "DISPOSED"]
+
+#: 유도되는 예약 상태. 🔴 **어휘가 둘뿐이다** — 그날 잡고 있었나 아닌가.
+#: `RESERVED` · `PARTIALLY_ALLOCATED` · `ALLOCATED` 세 값은 **할당 진행도**라
+#: 예약 축의 사건이 아니고, 되살릴 사건 기록(`inventory_reservation_events`)이 없다.
+#: 그 진행도를 과거로 알고 싶으면 할당 축(`decided_at` · OUT Move)을 본다.
+HistoricalReservationState = Literal["HOLDING", "RELEASED"]
 
 #: 유도되는 Receipt 상태. 🔴 **`INSPECTING` · `CLOSED` 가 없다** — 그 둘은 사건이
 #: 아니라 진행 표시라 되살릴 사실이 없다. Current 화면 어휘로 남는다.
@@ -184,6 +200,34 @@ class HistoricalCapacity:
     burst_capacity_kg: Decimal | None
     #: `CURRENT_ACTIVE_POLICY` — 지금 활성 정책을 그대로 썼다는 표시.
     capacity_basis: str = CAPACITY_BASIS_CURRENT_ACTIVE_POLICY
+
+
+@dataclass(frozen=True)
+class HistoricalReservation:
+    """`as_of` 시점의 예약 하나. **살아 있었나를 `released_as_of` 하나로 가른다.**
+
+    🔴 **`inventory_reservations.status` 를 과거 정본으로 안 쓴다.** 그 칸은 **지금**
+       값이라, 오늘 놓아준 예약이 과거 화면에서도 놓아준 것으로 보인다 —
+       `remaining_qty_kg` 를 과거 잔량으로 쓰면 안 되는 것과 정확히 같은 잘못이다.
+
+    ⚠️ **`created_at` · `updated_at` 도 안 쓴다.** 벽시각이라 DB 를 손본 시각이지
+       시뮬레이션 사실일이 아니다 (`released_as_of` 를 만든 이유가 그것이다).
+    """
+
+    reservation_id: str
+    sim_run_id: str
+    item_id: str
+    item_name: str | None
+    sale_id: str | None
+    required_qty_kg: Decimal
+    reserved_qty_kg: Decimal
+    #: 🔴 유도값이다. 저장된 `status` 가 아니다.
+    state: HistoricalReservationState
+    released_as_of: date | None
+    #: 그날까지 이 예약이 Lot 에 붙여 둔 몫 (`decided_at < cutoff` · 취소 안 된 것).
+    allocated_qty_kg: Decimal
+    #: 그날까지 원장 OUT 으로 실제 나간 몫 (`MOVE-OUT-{allocation_id}` · `moved_at <= as_of`).
+    shipped_qty_kg: Decimal
 
 
 class ReceiptLineageAmbiguous(RuntimeError):
@@ -759,3 +803,140 @@ def snapshot_days_between(
         },
     )
     return frozenset(row["as_of"] for row in rows)
+
+
+# ── 출고 축 (WP-3) ──────────────────────────────────────────────────────
+
+
+def reservation_state_at(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[HistoricalReservation, ...]:
+    """`as_of` 시점의 예약 — **살아 있었나를 `released_as_of` 로 유도한다.**
+
+    ```text
+    released_as_of IS NULL       HOLDING     아직 놓아준 적이 없다
+    released_as_of >  as_of      HOLDING     그날에는 아직 살아 있었다
+    released_as_of <= as_of      RELEASED    그날에는 이미 놓아준 뒤다
+    ```
+
+    🔴 **`status` 컬럼을 읽지 않는다.** 실측(2026-09-09) 8행이 전부 `ALLOCATED`
+       인데, 그 값을 과거 화면에 실으면 **아직 예약도 안 한 날에도 «할당 완료»** 로
+       보인다. `receipt_state_at` 이 `receipt_status` 를 안 읽는 것과 같은 규율이다.
+
+    ⚠️ **`created_at` 으로 «그날 예약이 있었나» 를 자르지 않는다.** 그것은 벽시각이라
+       DB 를 손본 시각이다. 예약의 **생성 시뮬레이션 날짜 칸은 아직 없고**, 지어내지
+       않는다 — 대신 그 예약이 실제로 만든 사실(할당 · OUT Move)의 시간축으로
+       진행도를 유도한다. 그래서 이 함수는 **그 실행의 예약 전부**를 돌려주고
+       `state` 로 그날 잡고 있었는지를 가른다.
+
+       ★ 이것이 «없는 사실을 지어내지 않는다» 의 실제 모습이다. 놓아준 날은 알 수
+         있게 됐고(M3), 잡은 날은 아직 모른다 — 아는 것만 답한다.
+
+    ```text
+    allocated_qty_kg   decided_at < cutoff 인 살아있는 할당의 합
+    shipped_qty_kg     그 할당의 원장 OUT 중 moved_at <= as_of 인 것의 합
+    ```
+
+       🔴 **할당도 `status` 로 안 센다.** `decided_at`(시뮬레이션 시간축)과 원장 OUT
+          두 사건으로 유도한다 — `inventory_allocations.status` 역시 지금 값이다.
+          다만 **취소된 할당은 뺀다**: 취소 시점 칸이 없어 «그날 취소돼 있었나» 를
+          알 수 없고, WP-3 이 되살리기를 **같은 날 안으로 묶었으므로**(
+          `outbound._되살려도_되는_날인지_본다`) 날짜를 넘긴 취소는 뒤집히지 않는다.
+
+    ★ **축은 `(sim_run_id, as_of)` 다.** 실행을 안 좁히면 남의 실행 예약이 섞인다.
+    """
+    schema = _schema()
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT r.reservation_id,
+                   r.sim_run_id,
+                   r.item_id,
+                   i.item_name,
+                   r.sale_id,
+                   r.required_qty_kg,
+                   r.reserved_qty_kg,
+                   r.released_as_of,
+                   COALESCE(a.allocated_qty_kg, 0) AS allocated_qty_kg,
+                   COALESCE(a.shipped_qty_kg, 0)   AS shipped_qty_kg
+            FROM {schema}.inventory_reservations r
+            LEFT JOIN {schema}.items i ON i.item_id = r.item_id
+            LEFT JOIN (
+                SELECT al.reservation_id,
+                       SUM(al.allocated_qty_kg) AS allocated_qty_kg,
+                       SUM(COALESCE(mv.quantity_kg, 0)) AS shipped_qty_kg
+                FROM {schema}.inventory_allocations al
+                LEFT JOIN {schema}.inventory_moves mv
+                       ON mv.move_id = 'MOVE-OUT-' || al.allocation_id
+                      AND mv.move_type = 'OUT'
+                      AND mv.moved_at <= %(as_of)s
+                WHERE al.decided_at < %(cutoff)s
+                  AND al.status <> 'CANCELLED'
+                GROUP BY al.reservation_id
+            ) a ON a.reservation_id = r.reservation_id
+            WHERE r.sim_run_id = %(sim)s
+            ORDER BY r.reservation_id
+            """
+        ).format(schema=schema),
+        {"sim": sim_run_id, "as_of": as_of, "cutoff": timestamp_cutoff(as_of)},
+    )
+    return tuple(
+        HistoricalReservation(
+            reservation_id=row["reservation_id"],
+            sim_run_id=row["sim_run_id"],
+            item_id=row["item_id"],
+            item_name=row["item_name"],
+            sale_id=row["sale_id"],
+            required_qty_kg=_decimal(row["required_qty_kg"]),
+            reserved_qty_kg=_decimal(row["reserved_qty_kg"]),
+            state=_reservation_state(row["released_as_of"], as_of=as_of),
+            released_as_of=row["released_as_of"],
+            allocated_qty_kg=_decimal(row["allocated_qty_kg"]),
+            shipped_qty_kg=_decimal(row["shipped_qty_kg"]),
+        )
+        for row in rows
+    )
+
+
+def _reservation_state(
+    released_as_of: date | None, *, as_of: date
+) -> HistoricalReservationState:
+    """`released_as_of` 한 칸으로 그날 상태를 가른다. **벽시각을 안 본다.**
+
+    ★ `released_as_of == as_of` 는 **RELEASED** 다 — 그날부터 놓아준 것이다
+      (`inbound_schedules.cancelled_as_of` 와 같은 경계다).
+    """
+    if released_as_of is None or released_as_of > as_of:
+        return "HOLDING"
+    return "RELEASED"
+
+
+def outbound_schedule_at(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[ScheduledQuantity, ...]:
+    """`as_of` 에서 보였어야 하는 **미래 확정 출고**를 판매 정본에서 되살린다.
+
+    🔴 **`confirmed_outbound_json` 을 안 읽는다 (WP-3).** 그 칸은 판매 확정이 채우는
+       경로가 하나도 없어 실측 254행 전부 `[]` 였다 — 비어 있는 옛 정본을 과거 화면에
+       실으면 *"그날 미래 출고가 없었다"* 가 **확인된 사실처럼** 나간다.
+
+    ```text
+    원천   sales · sale_items                    ← Current 축과 같은 정본
+    축     sim_run_id · sale_date > as_of
+    상태   order_status IN (CONFIRMED, READY)
+    ```
+
+    ⚠️ **`sales.order_status` 는 지금 값이다.** 그래서 이 함수는 *"그날 그 판매가
+       확정 상태였나"* 를 정확히는 못 답한다 — 판매 상태의 시뮬레이션 날짜 칸이
+       없어서다. **그 한계를 숨기지 않는다**: 지금 취소된 판매는 과거 화면에서도
+       안 보이고, 지금 배송된 판매는 그 납품일 이전 화면에서 미래 출고로 안 선다.
+
+       ★ 그럼에도 fixture JSON 보다 낫다. 저쪽은 **아무도 안 쓰는 빈 칸**이라 늘
+         «0 건» 이고, 이쪽은 적어도 실재하는 판매 사실을 축으로 삼는다. 판매 상태
+         이력 표는 판매 소유라 물류가 만들지 않는다 (파트 경계).
+
+    ★ **Current 경로와 같은 함수를 쓴다** (`outbound_schedules.confirmed_outbound_at`).
+      두 벌로 적으면 화면과 Runtime 이 다른 미래를 그린다.
+    """
+    return tuple(confirmed_outbound_at(conn, sim_run_id=sim_run_id, as_of=as_of))

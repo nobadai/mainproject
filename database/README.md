@@ -59,6 +59,10 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 logistics_drop_inbound_json  ← 맨 뒤. 10_domain 이 만든 두 칸을 걷는다
 ```
 
+⚠️ **`logistics_reservation_released_as_of.sql` 도 신규 구축에서 안 돌립니다.**
+칸 자체는 `30_logistics_wms_schema.sql` §6 이 `inventory_reservations` 를 만들 때
+함께 만듭니다. 이 파일은 **이미 그 표가 서 있는 DB** 를 위한 ALTER 판입니다.
+
 ⚠️ **`logistics_inbound_schedules.sql` 은 신규 구축에서 안 돌립니다.** 그 파일은
 `inbound_schedules` 표 + **기존 `in_transit_json` 에서 꺼내는 Backfill** 이고, 신규 DB
 에는 옮길 데이터가 한 줄도 없습니다. 표 자체는 `30_logistics_wms_schema.sql` §3-0 이
@@ -106,6 +110,7 @@ no-op 입니다. 다만 신규 구축 순서에 둘 이유가 없습니다.)
 | `master_collection_events.sql` | 수금 사건 표 `master_collection_events` 신설. **새 표 하나뿐이라 기존 표를 안 건드린다** — 적용 전후 `receivables` 15행 그대로. 표는 **비어서** 나간다 | 2026-09-08 · **실 DB 적용됨** |
 | `logistics_allocation_basis_fefo_auto.sql` | `inventory_allocations.allocation_basis` 에 `FEFO_AUTO_SELECTED` 추가 (시뮬레이션 자동 FEFO 할당). **어휘를 넓히기만 한다** — 기존 `FEFO_TOOL_CONFIRMED` · `HUMAN_OVERRIDE` 행은 그대로 유효하고 행 변경이 없다. CHECK 를 넓히려면 `DROP` 이 불가피해 한 트랜잭션 안에서 지웠다 다시 건다 | 2026-09-08 · **실 DB 적용됨**(2026-09-08 실측 확인) |
 | `logistics_drop_inbound_json.sql` | `logistics_runtime_fixture` 에서 `in_transit_json` · `confirmed_inbound_json` 두 칸 DROP. 입고 예정의 정본이 `inbound_schedules` 로 옮겨 가(W3-2 Reader · W3-3 Writer) **두 칸을 읽는 곳도 쓰는 곳도 0** 이 된 뒤의 정리다. 🔴 **status 두 칸은 안 걷는다** — 두 Reader 가 `UNRESOLVED` 를 실제로 읽는다. `confirmed_outbound_*` 도 안 건드린다(WP-3). 적용 전 확인 넷이 파일 머리말에 있다 | 2026-09-09 · **실 DB 적용 대기** |
+| `logistics_reservation_released_as_of.sql` | `inventory_reservations` 에 `released_as_of DATE` 한 칸 추가 (WP-3 M3). **additive 다** — 기존 칸을 안 바꾸고 안 지운다. Backfill 없음(놓아준 날짜를 되살릴 근거가 없다 · 실측 8행 전부 `ALLOCATED` 라 `NULL` 이 사실이다). CHECK · INDEX 도 안 건다 — 규율은 `outbound.release_reservation` 의 필수 인자가 지킨다. 🔴 이 칸이 없으면 예약 조회 SQL 이 `column does not exist` 로 깨진다 (배포 선행조건) | 2026-09-09 · **실 DB 적용 대기** |
 | `logistics_inbound_schedules.sql` | 입고 예정 표 `inbound_schedules` 신설 + 살아 있는 `in_transit_json` 5건 Backfill. **기존 표를 안 건드린다** — `logistics_runtime_fixture` 에 UPDATE 도 DELETE 도 없고 적용 전후 254행·in_transit 5건 그대로. `purchase_item_id` FK 는 `purchases` CASCADE 삭제 정책이 정해질 때까지 보류. 두 번 돌려도 5건 (`WHERE NOT EXISTS`) | 2026-09-09 · **실 DB 적용됨**(2026-09-09 실측 확인) |
 
 ### ⚠️ `30_logistics_wms_schema.sql` 은 판을 나누지 않았습니다
@@ -155,6 +160,7 @@ inbound_receipts (신규)                    →  inventory_lots FK (기존 표 
 | `logistics_inventory_lots_nullable.sql` | **물류** | 재고·물류 동작을 바꾸는 변경이라 물류가 낸다. 대상 표(`inventory_lots`)의 본 DDL 은 `10_domain_schema.sql` 안에 있고 그 파일은 여전히 주인이 없다(§5) |
 | `logistics_allocation_basis_fefo_auto.sql` | **물류** | 위 `30_` 의 ALTER 판. 값 이름은 Master ↔ Logistics 합의 어휘이고, 표와 제약의 주인은 물류다 |
 | `logistics_drop_inbound_json.sql` | **물류** | 죽은 입고 JSON 두 칸 정리 (W3-4). `10_domain_schema.sql` 이 만든 칸을 걷는 판이라 그 파일을 안 고친다(§5) — `30_` 이 같은 자리에서 ALTER 로 더하는 것과 같은 규율. `30_` 에 안 넣은 이유는 그 파일이 *"DROP 이 한 줄도 없다"* 를 계약으로 적었기 때문이다 |
+| `logistics_reservation_released_as_of.sql` | **물류** | `30_` §6 의 이관 판. *"이 예약을 언제 놓아줬나"* 를 적을 칸 하나 — 종전에는 `updated_at`(벽시각)으로 과거 예약 상태를 추정할 수밖에 없었고, 그러면 같은 데이터가 내일 다른 과거를 낸다 (WP-3 M3) |
 | `logistics_inbound_schedules.sql` | **물류** | `30_` §3-0 의 이관 판 + Backfill. 입고 예정을 날짜별 fixture JSON 에서 꺼내 **날짜에 안 묶인 업무 Entity** 로 세운다 (W3-1). 🔴 적용 당시(W3-1)에는 **정본을 안 바꿨다** — Reader 는 JSON, Writer 만 양쪽. 그 뒤 W3-2 가 Reader 를, W3-3 이 Writer 를 옮겼다. **신규 구축에서는 안 돌린다**(§1) |
 | `25_logistics_runtime_fixture_20260102.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행. 다른 파트는 읽기만 |
 | `27_logistics_runtime_fixture_20260105_20260106.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행 · 관통 실행일 쌍. 다른 파트는 읽기만 |

@@ -109,7 +109,7 @@ INSERT INTO haetdeul.logistics_runtime_fixture (
     fixture_id, sim_run_id, as_of,
     in_transit_status,
     confirmed_inbound_status,
-    confirmed_outbound_status, confirmed_outbound_json,
+    confirmed_outbound_status,
     lot_priority_status,       lot_priority_json,
     zone_capacity_status,      guaranteed_capacity_by_zone_json,
     usage_scope, evidence_grade, approved_by, source_ref, is_active, note
@@ -122,7 +122,7 @@ SELECT
     --    전까지, 01-05 는 확인된 0 이고 01-06 은 아직 확인한 적이 없다.
     target.in_transit_status,
     base.confirmed_inbound_status,
-    base.confirmed_outbound_status, base.confirmed_outbound_json,
+    base.confirmed_outbound_status,
     -- lot_priority 는 판단이라 물려받지 않는다 (마스터 회신 §2).
     'CONFIRMED_ZERO', '[]'::JSONB,
     base.zone_capacity_status,      base.guaranteed_capacity_by_zone_json,

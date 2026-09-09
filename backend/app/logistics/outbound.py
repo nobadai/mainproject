@@ -105,6 +105,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, get_args
+from zoneinfo import ZoneInfo
 
 from psycopg import sql
 
@@ -179,6 +180,11 @@ _ALLOCATION_BASES: frozenset[str] = frozenset(get_args(AllocationBasis))
 
 #: 🔴 **아직 재고를 잡고 있는** 예약 상태. `RELEASED` · `CANCELLED` 는 놓아준 것이다.
 _HOLDING_RESERVATION: frozenset[str] = frozenset({"RESERVED", "PARTIALLY_ALLOCATED", "ALLOCATED"})
+
+#: 🔴 **이미 놓아준** 예약 상태. `released_as_of` 가 적혀 있어야 하는 것이 이것이다
+#: (WP-3 M3). 위 집합의 여집합이지만 **손으로 적는다** — 어휘가 늘 때 어느 쪽에
+#: 들어가는지 자동으로 정해지면 안 되는 자리다.
+_RELEASED_RESERVATION: frozenset[str] = frozenset({"RELEASED", "CANCELLED"})
 
 #: 🔴 **아직 창고에서 안 나간** 할당 상태. 가용량에서 빼야 하는 것이 이것이다.
 #:
@@ -550,6 +556,8 @@ _RESERVATION_COLUMNS = (
     "reserved_qty_kg",
     "status",
     "due_date",
+    #: 놓아준 시뮬레이션 날짜 (WP-3 M3). `NULL` 이면 아직 살아 있다.
+    "released_as_of",
 )
 
 
@@ -559,7 +567,8 @@ def _reservation(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> d
         sql.SQL(
             """
             SELECT reservation_id, sim_run_id, item_id, sale_id,
-                   required_qty_kg, reserved_qty_kg, status, due_date
+                   required_qty_kg, reserved_qty_kg, status, due_date,
+                   released_as_of
             FROM {}.inventory_reservations
             WHERE reservation_id = %s
             """
@@ -892,17 +901,52 @@ def _사실이_같은지(
 
 
 def release_reservation(
-    conn: Any, *, reservation_id: str, status: ReservationStatus = "RELEASED"
+    conn: Any,
+    *,
+    reservation_id: str,
+    released_as_of: date,
+    status: ReservationStatus = "RELEASED",
 ) -> ReservationResult:
-    """잡아 둔 몫을 **놓아준다.** 원장 Move 가 없다.
+    """잡아 둔 몫을 **그날부터 놓아준다.** 원장 Move 가 없다.
 
     🔴 **이미 나간 수량을 되돌리지 않는다.** `SHIPPED` 할당이 하나라도 있으면 멈춘다 —
        환입은 이 판의 범위가 아니고, `ADJUST_IN` 을 쓰지도 않는다.
 
     ★ 아직 안 나간 할당은 함께 `CANCELLED` 로 내린다. 그래야 그 Lot 의 가용량이
       실제로 돌아온다 (`_HOLDING_ALLOCATION` 에서 빠진다).
+
+    🔴 **`released_as_of` 가 필수다 (WP-3 M3).** *"언제 놓아줬나"* 를 물류가 지어내지
+       않는다 — 시뮬레이션 날짜의 주인은 호출자(마스터 · 콘솔)다.
+
+    ```text
+    now() · created_at · updated_at   벽시각      🔴 시뮬레이션 사실일이 아니다
+    released_as_of                    그날 날짜    ✅ Historical 이 이것으로 유도한다
+    ```
+
+       ⚠️ 벽시각으로 과거를 자르면 **같은 데이터가 내일 다른 과거를 낸다.**
+          `historical_repository.reservation_state_at` 이 이 칸 하나만 본다.
+
+    🔴 **멱등이되 날짜는 안 덮는다.**
+
+    ```text
+    같은 상태 · 같은 날짜   applied=False           재실행의 정상 경로다
+    같은 상태 · 다른 날짜   ReservationConflict     «언제» 가 둘일 수 없다
+    다른 놓아준 상태        같은 날짜면 바꾼다       RELEASED → CANCELLED 는 승격이다
+    ```
+
+       ⚠️ **이미 놓아준 예약의 날짜를 다시 적으면 과거가 바뀐다.** 그날 살아 있던
+          예약이 소급해 사라지거나 그 반대가 된다 — 그래서 덮지 않고 멈춘다
+          (`inbound_schedules.ScheduleCancelConflict` 와 같은 규율이다).
+
+    :param released_as_of: 놓아준 시뮬레이션 날짜. **호출자가 준다.**
+    :raises ReservationConflict: 이미 놓아준 예약을 **다른 날짜로** 다시 놓아줄 때.
     """
     _require_text(reservation_id, 칸="reservation_id")
+    if not isinstance(released_as_of, date) or isinstance(released_as_of, datetime):
+        raise InvalidOutboundRequest(
+            f"놓아준 날짜가 date 가 아니다: {released_as_of!r}."
+            " 벽시각(datetime)으로 시뮬레이션 날짜를 만들지 않는다."
+        )
     if status not in {"RELEASED", "CANCELLED"}:
         raise InvalidOutboundRequest(
             f"놓아주는 상태가 아니다: {status!r}. 허용: RELEASED · CANCELLED."
@@ -915,6 +959,17 @@ def release_reservation(
     기존 = _reservation(conn, schema, reservation_id=reservation_id)
     if 기존 is None:
         raise OutboundIntegrityError(f"놓아줄 예약이 없다: {reservation_id!r}")
+
+    # ★ 이미 놓아준 예약이면 **날짜가 먼저다.** 상태가 같든 다르든, 적힌 날짜와
+    #   다른 날짜로 다시 놓아주는 것은 과거를 고치는 일이다.
+    적힌날짜 = 기존.get("released_as_of")
+    if 기존["status"] in _RELEASED_RESERVATION and 적힌날짜 != released_as_of:
+        raise ReservationConflict(
+            f"이미 놓아준 예약을 다른 날짜로 다시 놓아줄 수 없다 ({reservation_id!r}):"
+            f" 적힌 날짜 {적힌날짜!r} · 이번 {released_as_of!r}"
+            f" (status={기존['status']!r})."
+            " 그날 무엇이 살아 있었나를 뒤에서 바꾸지 않는다."
+        )
     if 기존["status"] == status:
         return ReservationResult(
             applied=False,
@@ -947,15 +1002,18 @@ def release_reservation(
             ).format(schema),
             (reservation_id, sorted(_HOLDING_ALLOCATION)),
         )
+        # 🔴 **`released_as_of` 를 같은 UPDATE 에 적는다.** 상태와 날짜가 다른
+        #    문으로 가면 한쪽만 선 행이 남고, 그 행은 *"놓아줬는데 언제인지 모른다"* 다.
         cursor.execute(
             sql.SQL(
                 """
                 UPDATE {}.inventory_reservations
-                SET status = %s, reserved_qty_kg = 0, updated_at = now()
+                SET status = %s, reserved_qty_kg = 0,
+                    released_as_of = %s, updated_at = now()
                 WHERE reservation_id = %s
                 """
             ).format(schema),
-            (status, reservation_id),
+            (status, released_as_of, reservation_id),
         )
     return ReservationResult(
         applied=True,
@@ -1038,7 +1096,73 @@ _ALLOCATION_COLUMNS = (
     "allocated_qty_kg",
     "status",
     "allocation_basis",
+    #: 이 결정이 선 시각. 🔴 **되살리기 날짜 경계가 이 값으로 선다** (WP-3).
+    #: `created_at`(벽시각)이 아니다 — 호출자가 시뮬레이션 시간축으로 넣은 값이다.
+    "decided_at",
 )
+
+
+#: 시뮬레이션 달력의 시간대. `historical_repository._KST` · `master.sim_time` 과 같다.
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def _sim_day(moment: datetime) -> date:
+    """시각 하나를 **시뮬레이션 달력의 하루**로 옮긴다.
+
+    🔴 **`::date` 도 `.date()` 도 그냥 쓰지 않는다.** 서버 timezone 에 따라 하루가
+       밀린다 — `historical_repository.timestamp_cutoff` 가 같은 이유로 KST 를 박는다.
+
+    ⚠️ tz 없는 값은 안 받는다. `allocate_stock` 이 이미 naive `decided_at` 을 거부하고,
+       DB 컬럼도 `TIMESTAMPTZ` 라 여기 오는 값에는 늘 시간대가 있다.
+    """
+    if moment.tzinfo is None:
+        raise InvalidOutboundRequest(
+            f"시간대 없는 시각으로 시뮬레이션 날짜를 만들 수 없다: {moment!r}."
+        )
+    return moment.astimezone(_KST).date()
+
+
+def _되살려도_되는_날인지_본다(
+    되살릴것: Mapping[str, Any], *, allocation_id: str, decided_at: datetime
+) -> None:
+    """취소된 할당을 **같은 시뮬레이션 날짜 안에서만** 다시 세운다 (WP-3).
+
+    ```text
+    같은 날      🟢 되살린다      그날 안의 재적합이다 (FEFO 가 내리고 다시 세운다)
+    날짜를 넘김  🔴 막는다        그날 취소였던 사실이 소급해 사라진다
+    ```
+
+    🔴 **왜 날짜를 넘기면 안 되나.** 되살리기는 같은 행의 `decided_at` 을 새 값으로
+       덮는다. D 에 취소하고 D+1 에 되살리면 그 행은 *"D+1 에 결정된 살아 있는 할당"*
+       이 되고, **D 시점 조회가 그 할당을 못 본다** — 그날 실제로 취소 상태였다는
+       사실이 아무 기록 없이 사라진다. 새 정체성으로 세우는 것도 아니라
+       `MOVE-OUT-{allocation_id}` 까지 같은 이름을 쓴다.
+
+    ⚠️ **`created_at` 으로 재지 않는다.** 그것은 벽시각이라 DB 를 손본 시각이지
+       시뮬레이션 날짜가 아니다 (`released_as_of` 를 만든 것과 같은 이유다).
+
+    ★ 되살릴 자리가 아니면(취소된 행이 아니면) 아무 말도 안 한다 — 이 함수를 부르는
+      자리가 이미 `CANCELLED` 만 통과시킨다.
+
+    :raises OutboundIntegrityError: 취소된 날과 다른 날에 되살리려 할 때.
+    """
+    이전 = 되살릴것.get("decided_at")
+    if not isinstance(이전, datetime):
+        # 🔴 잴 근거가 없으면 통과시키지 않는다. 날짜를 모르는 채 되살리는 것은
+        #    경계가 없는 것과 같다.
+        raise OutboundIntegrityError(
+            f"되살릴 할당의 decided_at 을 읽을 수 없다 ({allocation_id!r}): {이전!r}."
+            " 언제 정해진 할당인지 모르면 같은 날인지 가릴 수 없다."
+        )
+    이전날 = _sim_day(이전)
+    이번날 = _sim_day(decided_at)
+    if 이전날 != 이번날:
+        raise OutboundIntegrityError(
+            f"취소된 할당을 다른 날에 되살릴 수 없다 ({allocation_id!r}):"
+            f" 취소된 날 {이전날} · 이번 {이번날}."
+            " 되살리면 그날 취소였다는 사실이 소급해 사라진다 —"
+            " 다른 날 몫은 새 예약으로 낸다."
+        )
 
 
 def _allocations(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> list[dict[str, Any]]:
@@ -1047,7 +1171,7 @@ def _allocations(conn: Any, schema: sql.Identifier, *, reservation_id: str) -> l
         sql.SQL(
             """
             SELECT allocation_id, reservation_id, lot_id, allocated_qty_kg, status,
-                   allocation_basis
+                   allocation_basis, decided_at
             FROM {}.inventory_allocations
             WHERE reservation_id = %s
             ORDER BY allocation_id
@@ -1390,6 +1514,9 @@ def allocate_stock(
                     )
                 else:
                     # ★ 취소됐던 할당을 같은 정체성으로 다시 세운다.
+                    _되살려도_되는_날인지_본다(
+                        되살릴것, allocation_id=allocation_id, decided_at=decided_at
+                    )
                     cursor.execute(
                         sql.SQL(
                             """

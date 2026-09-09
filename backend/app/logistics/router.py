@@ -490,4 +490,8 @@ def release_logistics_reservation(
        되돌리지 않는다 (환입은 이 판의 범위가 아니다).
     """
     with _domain_errors():
-        return release_reservation_console(reservation_id=reservation_id, status=request.status)
+        return release_reservation_console(
+            reservation_id=reservation_id,
+            released_as_of=request.released_as_of,
+            status=request.status,
+        )

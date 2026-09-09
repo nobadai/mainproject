@@ -285,9 +285,18 @@ class LogisticsDayOpening:
                        confirmed_inbound     status 만 CONFIRMED_ZERO   ← W3-3/4
         ```
 
-        ★ **두 JSON 칸을 아예 안 쓴다 (W3-4).** 그 칸은 이제 production 어디에서도
+        ★ **입고 두 JSON 칸을 아예 안 쓴다 (W3-4).** 그 칸은 이제 production 어디에서도
           업무 사실로 안 읽히고 DROP 대상이라(`database/logistics_drop_inbound_json.sql`),
           여기서 값을 넣으면 그 migration 뒤에 이 INSERT 가 깨진다.
+
+        🔴 **`confirmed_outbound_json` 도 안 쓴다 (WP-3).** 미래 확정 출고의 정본이
+           `sales` · `sale_items` 로 옮겨 갔다 — 그 칸을 물려받으면 **아무도 안 읽는
+           값을 날마다 복제**하는 것이 되고, 입고 축에서 사고를 냈던 바로 그 모양이다
+           (`outbound_schedules.confirmed_outbound_at`).
+
+           ⚠️ **`confirmed_outbound_status` 도 물려받지 않고 `CONFIRMED_ZERO` 로 새로
+              둔다.** 입고 두 축과 같은 이유다 — 물려받은 `UNRESOLVED` 를 이으면 그날
+              이후가 전부 `UNRESOLVED` 로 굳어 Reader 가 목록을 통째로 숨긴다.
 
         🔴 **입고 예정을 다음 날로 복제하지 않는다 (W3-3).** 그 복제가 사고의 원인이었다
            — 미래 날짜 행이 **먼저 열려 있으면** 그 행은 나중에 난 승인을 모른 채 굳는다.
@@ -320,7 +329,7 @@ class LogisticsDayOpening:
                 fixture_id, sim_run_id, as_of,
                 in_transit_status,
                 confirmed_inbound_status,
-                confirmed_outbound_status, confirmed_outbound_json,
+                confirmed_outbound_status,
                 lot_priority_status,       lot_priority_json,
                 zone_capacity_status,      guaranteed_capacity_by_zone_json,
                 usage_scope, evidence_grade, approved_by, source_ref, is_active, note
@@ -331,7 +340,7 @@ class LogisticsDayOpening:
                 %(as_of)s::date,
                 'CONFIRMED_ZERO',
                 'CONFIRMED_ZERO',
-                base.confirmed_outbound_status, base.confirmed_outbound_json,
+                'CONFIRMED_ZERO',
                 'CONFIRMED_ZERO',               '[]'::JSONB,
                 base.zone_capacity_status,      base.guaranteed_capacity_by_zone_json,
                 base.usage_scope,

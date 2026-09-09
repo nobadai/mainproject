@@ -25,6 +25,7 @@ from app.logistics.outbound import (
     _HOLDING_ALLOCATION,
     _HOLDING_RESERVATION,
 )
+from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.schemas import (
     POLICY_VERSION,
     UNRESOLVED_SOURCE,
@@ -189,7 +190,6 @@ def get_active_logistics_runtime_fixture(
                 in_transit_status,
                 confirmed_inbound_status,
                 confirmed_outbound_status,
-                confirmed_outbound_json,
                 usage_scope,
                 evidence_grade,
                 source_ref,
@@ -233,13 +233,19 @@ def get_active_logistics_runtime_fixture(
 
 def _schedule_lists(
     *, sim_run_id: str, as_of: date
-) -> tuple[list[InTransitItem], list[ScheduledQuantity]]:
-    """입고 예정 두 목록을 **`inbound_schedules` 에서** 읽는다 (W3-2).
+) -> tuple[list[InTransitItem], list[ScheduledQuantity], list[ScheduledQuantity]]:
+    """세 예정 목록을 **각자의 업무 정본에서** 읽는다 (W3-2 · WP-3).
 
     ```text
-    in_transit           Receipt 가 생기면 빠진다        운송 중
-    confirmed_inbound    Lot + 원장 IN 이 서면 빠진다     미래 점유(Capacity)
+    in_transit           inbound_schedules   Receipt 가 생기면 빠진다     운송 중
+    confirmed_inbound    inbound_schedules   Lot + 원장 IN 이 서면 빠진다  미래 점유
+    confirmed_outbound   sales · sale_items  sale_date > as_of 인 확정 판매 미래 점유
     ```
+
+    🔴 **출고 축이 fixture JSON 을 떠났다 (WP-3).** `confirmed_outbound_json` 은
+       판매 확정이 채우는 경로가 하나도 없어 실측 254행 전부 `[]` 였다 — 비어 있는
+       옛 정본이 «미래 출고가 없다» 는 사실처럼 읽히던 자리다
+       (`outbound_schedules.confirmed_outbound_at` 이 그 자리를 대신한다).
 
     🔴 **둘이 같은 목록이 아니다.** Legacy JSON 에서 같았던 것은 발주 확정 단계가 비어
        승인을 두 칸에 겹쳐 적었기 때문이고(`transition.py` 의 *"임시 조치"*), 신규
@@ -254,6 +260,7 @@ def _schedule_lists(
         return (
             in_transit_at(conn, sim_run_id=sim_run_id, as_of=as_of),
             pending_inbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+            confirmed_outbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
         )
 
 
@@ -263,8 +270,8 @@ def _build_logistics_runtime_fixture(
     """fixture 행 하나를 계약 타입으로. **입고 예정 두 목록만 신규 표에서 온다 (W3-2).**
 
     ```text
-    신규 표에서   in_transit · confirmed_inbound_schedule      ← 업무 사실
-    fixture 에서  세 status · confirmed_outbound · 나머지 칸    ← Header · 아직 Legacy
+    업무 정본에서  in_transit · confirmed_inbound · confirmed_outbound
+    fixture 에서   세 status · 나머지 칸                          ← Header 뿐이다
     ```
 
     🔴 **status 어휘를 안 바꾼다** (`08 §8`). fixture 가 `UNRESOLVED` 라고 적은 축은
@@ -292,14 +299,19 @@ def _build_logistics_runtime_fixture(
     if expected_sim_run_id is not None and row.get("sim_run_id") != expected_sim_run_id:
         raise ValueError("Logistics runtime fixture sim_run_id mismatch")
 
-    # ── W3-2: 입고 예정 두 목록의 정본이 신규 표로 옮겨 왔다 ────────────
+    # ── W3-2 · WP-3: 세 목록의 정본이 전부 fixture JSON 밖으로 옮겨 왔다 ──
     run_id = str(row.get("sim_run_id"))
-    in_transit, confirmed_inbound = _schedule_lists(sim_run_id=run_id, as_of=expected_as_of)
+    in_transit, confirmed_inbound, confirmed_outbound = _schedule_lists(
+        sim_run_id=run_id, as_of=expected_as_of
+    )
     in_transit_status, in_transit_list = _schedule_source(
         row.get("in_transit_status"), in_transit
     )
     confirmed_status, confirmed_list = _schedule_source(
         row.get("confirmed_inbound_status"), confirmed_inbound
+    )
+    outbound_status, outbound_list = _schedule_source(
+        row.get("confirmed_outbound_status"), confirmed_outbound
     )
     return LogisticsRuntimeFixture(
         fixture_id=row.get("fixture_id"),
@@ -309,8 +321,8 @@ def _build_logistics_runtime_fixture(
         in_transit=in_transit_list,
         confirmed_inbound_status=confirmed_status,
         confirmed_inbound_schedule=confirmed_list,
-        confirmed_outbound_status=row.get("confirmed_outbound_status"),
-        confirmed_outbound_schedule=row.get("confirmed_outbound_json"),
+        confirmed_outbound_status=outbound_status,
+        confirmed_outbound_schedule=outbound_list,
         usage_scope=row.get("usage_scope"),
         evidence_grade=row.get("evidence_grade"),
         source_ref=row.get("source_ref"),
