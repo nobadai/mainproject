@@ -283,15 +283,6 @@ function ForecastPane() {
           onClose={() => setPicked(null)}
         />
       )}
-
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(380px,1fr))]">
-        <Panel title="우리 예측이 얼마나 틀리나" subtitle="평가용으로 빼둔 데이터로 실측 (2026-09-01 공개)">
-          <DataTable table={data.accuracy} />
-        </Panel>
-        <Panel title="어떤 조합을 써도 안전한가" subtitle="모델이 «어제 가격 그대로 쓴 것»보다 나은가">
-          <DataTable table={data.quality} />
-        </Panel>
-      </div>
     </>
   );
 }

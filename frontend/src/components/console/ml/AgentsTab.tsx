@@ -22,7 +22,6 @@ import {
   agentHistory,
   agentReport,
   MlError,
-  newsAgent,
   qualityAgent,
   type AgentReport,
   type HistoryDay,
@@ -336,12 +335,6 @@ export function AgentsTab() {
         subtitle="기본적으로 꼭 맞아떨어져야 하는 항목만 검사합니다 — 등급 간 가격 순서, 같은 날 가격 차이, 어제와 오늘의 가격 연결성"
         label="지금 검사"
         run={() => qualityAgent(180)}
-      />
-      <OnDemand
-        title="오늘 관련 뉴스"
-        subtitle="예측 모델은 뉴스를 읽지 못합니다 · 뉴스 기사 제목을 있는 그대로 가져와 보여드립니다"
-        label="뉴스 가져오기"
-        run={() => newsAgent()}
       />
       <History days={days} err={err} skip={claude?.file ?? null} />
     </div>
