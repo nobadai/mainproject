@@ -46,7 +46,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 
@@ -58,7 +58,6 @@ from app.logistics.interpretation import (
     uncalled_interpretation,
 )
 from app.logistics.llm.schemas import InterpretationResult
-from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     derive_procurement_verdict,
@@ -1428,21 +1427,39 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     #    없으면 그 축의 판정을 안 한다 (`_query_scope` 와 같은 규율).
     asked = _sales_ask(request)
 
-    # ── 미래 확정 출고 · 납기 ────────────────────────────────────
+    # ── 미래 확정 출고 ───────────────────────────────────────────
     #
-    # ★ **WP-3 이 세운 정본을 그대로 쓴다** (`outbound_schedules.confirmed_outbound_at`).
-    #   `confirmed_outbound_json` 을 다시 읽지 않고, 판매 표 SQL 을 여기 새로 쓰지도
-    #   않는다 — 어댑터는 번역만 한다.
-    delivery_inputs = _delivery_inputs(sim_run_id=request.context.sim_run_id, as_of=as_of)
-    if delivery_inputs is None:
+    # 🔴 **스냅샷이 이미 들고 있는 한 벌을 쓴다. 다시 읽지 않는다 (WP-4B).**
+    #
+    #    `snapshot.confirmed_outbound_schedule` 은 Repository 가
+    #    `outbound_schedules.confirmed_outbound_at` 으로 채운 **WP-3 정본**이고
+    #    (`confirmed_outbound_json` 은 죽은 칸이다), Capacity 축이 이미 그 값을 쓴다.
+    #
+    #    ⚠️ **종전에는 어댑터가 같은 질의를 자기 커넥션으로 한 번 더 돌렸다.** 두 읽기
+    #       사이에 판매가 확정·취소되면 **같은 회신 안에서** Capacity 와 납기 판정이
+    #       서로 다른 «미래 출고» 를 보고 답한다 — `as_of` 가 같아도 DB 행은 그 사이에
+    #       바뀔 수 있다. 한 벌만 읽으면 그 갈림이 구조적으로 없다.
+    #
+    # ★ **`None` 은 0 이 아니다.** fixture 가 그 축을 `UNRESOLVED` 로 적었다는 뜻이라
+    #   (`repository._schedule_source`) 확인 못 한 것을 «출고 0kg» 으로 놓으면 하루
+    #   여력을 통째로 비어 있다고 답하게 된다. 그때는 납기도 날짜별 공급량도 안 낸다.
+    outbound_rows = snapshot.confirmed_outbound_schedule
+    outbound_by_date: dict[date, Decimal] = {}
+    for row in outbound_rows or ():
+        outbound_by_date[row.date] = outbound_by_date.get(row.date, Decimal(0)) + row.quantity_kg
+
+    # ── 운송 계약 ────────────────────────────────────────────────
+    route_or_error = _delivery_route()
+    if route_or_error is _ROUTE_ERROR:
         return _delivery_input_error(request, run_id, tools)
-    outbound_by_date, route = delivery_inputs
+    route = cast("str | None", route_or_error)
 
     delivery = evaluate_delivery_feasibility(
         as_of=as_of,
         daily_outbound_capacity_kg=outbound_capacity,
         outbound_prep_lead_days=read.policy.outbound_prep_lead_days,
         delivery_route=route,
+        confirmed_outbound_known=outbound_rows is not None,
         requested_quantity_kg=asked.quantity_kg,
         preferred_delivery_date=asked.delivery_date,
         confirmed_outbound_on_preferred_kg=(
@@ -1458,7 +1475,15 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     #
     # ★ **빈 목록은 «못 냈다» 가 아니다.** 그래서 `SUPPLY_CAPACITY_BY_DATE_UNRESOLVED`
     #   를 안 단다 — 계산에 실패한 것과 물어본 날짜가 없는 것은 다른 사실이다 (§1.2-10).
-    supply_dates = [asked.delivery_date] if asked.delivery_date is not None else []
+    #
+    # 🔴 **미래 확정 출고를 못 읽었으면 날짜별 공급량도 안 낸다.** 그 값의 상한 절반이
+    #    그 축이라(§확정 판매가능량 = min(재고, 남은 출고 여력)) 모르는 채로 내면
+    #    **재고 축만 본 수치**가 확정 공급량 행세를 한다.
+    supply_dates = (
+        [asked.delivery_date]
+        if asked.delivery_date is not None and outbound_rows is not None
+        else []
+    )
     supply_rows = supply_capacity_by_date(
         snapshot,
         dates=supply_dates,
@@ -1523,7 +1548,13 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             "supply_capacity_by_date": [
                 {
                     "date": row.date.isoformat(),
-                    "confirmed_sellable_quantity_kg": _num(row.confirmed_sellable_quantity_kg),
+                    # 🔴 **`None` 이 정상값인 자리다.** 그날 이미 확정된 출고가 하루
+                    #    여력을 넘으면(`OUTBOUND_CAPACITY_OVERCOMMITTED`) 확정 공급량을
+                    #    낼 수 없다 — 0 으로 접으면 정책·데이터 이상이 «오늘은 더 못
+                    #    판다» 는 정상 사실로 보인다.
+                    "confirmed_sellable_quantity_kg": _num_or_none(
+                        row.confirmed_sellable_quantity_kg
+                    ),
                     "freshness_unresolved_inbound_quantity_kg": _num(
                         row.freshness_unresolved_inbound_quantity_kg
                     ),
@@ -1542,7 +1573,13 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             #   (`transport.resolve_fixed_route`).
             "delivery_route": delivery.delivery_route,
             # 🔴 **준비일과 다른 값이다.** 합치지 않는다 (`tools.TRANSPORT_LEAD_DAYS`).
-            "transport_lead_time_days": delivery.transport_lead_time_days,
+            #
+            # ★ **이름에 단위를 안 붙인다 (WP-4B).** 판매 계약의 정본 이름이
+            #   `transport_lead_time` 이다. 단위를 이름에 붙인 종전 표기는 물류가
+            #   지은 것이었고, 호환 alias 를 같이 내면 **같은 사실이 두 주소**로
+            #   다니게 된다 — 받는 쪽이 어느 것을 볼지 갈린다. 단위는 Evidence 의
+            #   `unit="days"` 가 나른다.
+            "transport_lead_time": delivery.transport_lead_time,
             "earliest_delivery_date": (
                 None
                 if delivery.earliest_delivery_date is None
@@ -1650,11 +1687,11 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             grade="SIM_FIXED",
         )
     )
-    if delivery.transport_lead_time_days is not None:
+    if delivery.transport_lead_time is not None:
         evidences.append(
             _ev(
-                "delivery_feasibility.transport_lead_time_days",
-                delivery.transport_lead_time_days,
+                "delivery_feasibility.transport_lead_time",
+                delivery.transport_lead_time,
                 "days",
                 ref,
                 "MVP 확정 가정 — 운송 소요시간의 정본 칸이 스키마에 없어 측정값이 아니다",
@@ -1808,39 +1845,34 @@ def _delivery_input_error(
     return reply, _meta(request, run_id, tools, reply)
 
 
-def _delivery_inputs(
-    *, sim_run_id: str, as_of: date
-) -> tuple[dict[date, Decimal], str | None] | None:
-    """납기 판정이 읽어야 하는 **DB 사실 둘**을 한 커넥션으로 가져온다.
+#: 운송 계약 조회가 **실행 오류**로 끝났다는 표시. 🔴 `None` 을 안 쓴다 —
+#: `None` 은 *"계약 행이 없다"* 라는 정상 사실이고 이것은 *"못 읽었다"* 다.
+_ROUTE_ERROR = object()
+
+
+def _delivery_route() -> object:
+    """운송 계약 하나를 읽는다. **문자열을 코드에 안 박는다.**
+
+    ★ **정본은 `logistics_contracts` 표이고 Reader 는 `transport.resolve_fixed_route`
+      하나다.** `LOGI-BASE-5PL` 을 상수로 복제하면 계약 행이 바뀌는 날 코드만 옛 값을
+      들고 남는다 — 저쪽이 0 / 1 / 2+ 를 이미 셋 다 다르게 다룬다.
 
     ```text
-    미래 확정 출고   outbound_schedules.confirmed_outbound_at   ← WP-3 정본
-    운송 계약        transport.resolve_fixed_route              ← logistics_contracts
+    계약 0건    RouteNotFound   → None          회사 상태다. 납기는 UNRESOLVED 로 간다
+    계약 1건    그 계약          → contract_id
+    계약 2건+   AmbiguousRoute  → _ROUTE_ERROR  무결성 위반이라 실행 오류로 올린다
     ```
 
-    🔴 **`confirmed_outbound_json` 을 다시 읽지 않는다** (WP-3 에서 죽은 칸이다).
-       판매 표 SQL 을 여기 새로 쓰지도 않는다 — 어댑터에 SQL 을 두지 않는 규율이다.
-
-    ★ **Route 부재는 오류가 아니다.** 계약 표가 비어 있는 것은 회사 상태이지 실행
-      실패가 아니라 `None` 을 돌려주고, 납기는 `UNRESOLVED` 로 간다. 반대로 계약이
-      둘이면(`AmbiguousRoute`) 그것은 무결성 위반이라 실행 오류로 올린다.
-
-    :returns: `(날짜별 확정 출고, route)` — 실행 오류면 `None`.
+    :returns: `contract_id` · `None`(계약 없음) · `_ROUTE_ERROR`(실행 오류).
     """
     try:
         with get_connection() as conn:
-            rows = confirmed_outbound_at(conn, sim_run_id=sim_run_id, as_of=as_of)
-            by_date: dict[date, Decimal] = {}
-            for row in rows:
-                by_date[row.date] = by_date.get(row.date, Decimal(0)) + row.quantity_kg
-            try:
-                route: str | None = resolve_fixed_route(conn).logistics_contract_id
-            except RouteNotFound:
-                route = None
-    except (AmbiguousRoute, psycopg.Error, RuntimeError, TypeError, ValueError):
-        logger.exception("PRE_SALES 납기 입력 조회 실패")
+            return resolve_fixed_route(conn).logistics_contract_id
+    except RouteNotFound:
         return None
-    return by_date, route
+    except (AmbiguousRoute, psycopg.Error, RuntimeError, TypeError, ValueError):
+        logger.exception("PRE_SALES 운송 계약 조회 실패")
+        return _ROUTE_ERROR
 
 
 def _query_scope(request: AgentRequest, as_of: date) -> dict[str, Any]:
@@ -2400,6 +2432,16 @@ def _policy_ref(policy: LogisticsPolicy, key: str, fallback: str) -> str:
 
 def _num(value: Decimal | float) -> float:
     return float(value)
+
+
+def _num_or_none(value: Decimal | float | None) -> float | None:
+    """`None` 은 `None` 으로 둔다. 🔴 **0 으로 바꾸지 않는다** (§1.2-10).
+
+    ★ `_num` 과 나눠 두는 이유는 «있어야 하는 값» 과 «없을 수 있는 값» 을 호출부에서
+      구분하기 위해서다 — `_num(None)` 이 `TypeError` 로 죽는 것이 옳고, null 이
+      정상인 자리만 이 함수를 쓴다.
+    """
+    return None if value is None else float(value)
 
 
 def _ev(

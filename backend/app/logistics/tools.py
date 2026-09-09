@@ -554,6 +554,11 @@ DeliveryReasonCode = Literal[
 #: 정책·데이터 이상이 «여력 0» 이라는 정상 사실로 보인다.
 OUTBOUND_CAPACITY_OVERCOMMITTED = "OUTBOUND_CAPACITY_OVERCOMMITTED"
 
+#: 미래 확정 출고 축을 **확인한 적이 없다** (fixture status 가 `UNRESOLVED`).
+#: 🔴 *"확인했고 0 건"* 과 다른 사실이라 0 으로 놓지 않는다 — 놓으면 하루 출고
+#: 여력이 통째로 비어 있다고 답하게 된다.
+CONFIRMED_OUTBOUND_UNRESOLVED = "CONFIRMED_OUTBOUND_UNRESOLVED"
+
 
 @dataclass(frozen=True)
 class SupplyByDate:
@@ -584,7 +589,13 @@ class DeliveryFeasibility:
     status: Literal["READY", "FAIL", "UNRESOLVED"]
     daily_outbound_capacity_kg: Decimal | None
     delivery_route: str | None
-    transport_lead_time_days: int | None
+    #: 운송 소요 **달력일**. 🔴 **이름에 단위를 안 붙인다** — 판매 계약의 정본 이름이
+    #: `transport_lead_time` 이고, 물류가 `_days` 를 붙이면 같은 사실이 두 이름으로
+    #: 다닌다 (WP-4B). 단위는 이 주석과 Evidence 의 `unit` 이 나른다.
+    #:
+    #: ⚠️ **`outbound_prep_lead_days` 와 다른 값이다.** 저쪽은 창고가 내보낼 준비를
+    #:    하는 날이고 이쪽은 실려서 닿는 날이다 — 합쳐서 한 정책으로 만들지 않는다.
+    transport_lead_time: int | None
     earliest_delivery_date: date | None
     reason_codes: tuple[DeliveryReasonCode, ...] = ()
     uncertainties: tuple[str, ...] = ()
@@ -700,6 +711,7 @@ def evaluate_delivery_feasibility(
     daily_outbound_capacity_kg: Decimal,
     outbound_prep_lead_days: int | None,
     delivery_route: str | None,
+    confirmed_outbound_known: bool,
     requested_quantity_kg: Decimal | None,
     preferred_delivery_date: date | None,
     confirmed_outbound_on_preferred_kg: Decimal | None,
@@ -708,11 +720,17 @@ def evaluate_delivery_feasibility(
     """납기가 되나. **사용자가 물은 것만 판정한다.**
 
     ```text
-    준비일 정책이 없다 · Route 를 못 읽었다   UNRESOLVED   ← 답을 안 낸다
-    희망일 < 가장 이른 납기일                  FAIL         DELIVERY_BEFORE_PREP_LEAD
-    요청량 + 그날 확정 출고 > 하루 여력        FAIL         DAILY_OUTBOUND_CAPACITY_EXCEEDED
-    그 밖                                      READY
+    준비일 정책이 없다 · Route 를 못 읽었다     UNRESOLVED   ← 답을 안 낸다
+    미래 확정 출고 축을 확인한 적이 없다        UNRESOLVED   ← 0 으로 놓지 않는다
+    희망일 < 가장 이른 납기일                    FAIL         DELIVERY_BEFORE_PREP_LEAD
+    요청량 + 그날 확정 출고 > 하루 여력          FAIL         DAILY_OUTBOUND_CAPACITY_EXCEEDED
+    그 밖                                        READY
     ```
+
+    :param confirmed_outbound_known: 미래 확정 출고 축을 **읽었나**.
+        🔴 `False` 를 «출고 0kg» 으로 접으면 하루 여력이 통째로 비어 있다고 답한다 —
+        fixture 가 그 축을 `UNRESOLVED` 로 적었다는 것은 *"확인한 적 없다"* 이지
+        *"확인했고 0 건"* 이 아니다 (`repository._schedule_source`).
 
     🔴 **정책이 없으면 코드 상수로 메우지 않는다.** `outbound_prep_lead_days` 가
        `None` 이면 가장 이른 납기일을 못 내고, 못 내는 것을 `READY` 로 답하면
@@ -726,12 +744,14 @@ def evaluate_delivery_feasibility(
         uncertainties.append("OUTBOUND_PREP_LEAD_DAYS_UNRESOLVED")
     if delivery_route is None:
         uncertainties.append("DELIVERY_ROUTE_UNRESOLVED")
+    if not confirmed_outbound_known:
+        uncertainties.append(CONFIRMED_OUTBOUND_UNRESOLVED)
     if uncertainties:
         return DeliveryFeasibility(
             status="UNRESOLVED",
             daily_outbound_capacity_kg=daily_outbound_capacity_kg,
             delivery_route=delivery_route,
-            transport_lead_time_days=transport_lead_days,
+            transport_lead_time=transport_lead_days,
             earliest_delivery_date=None,
             uncertainties=tuple(uncertainties),
         )
@@ -752,7 +772,7 @@ def evaluate_delivery_feasibility(
         status="FAIL" if reasons else "READY",
         daily_outbound_capacity_kg=daily_outbound_capacity_kg,
         delivery_route=delivery_route,
-        transport_lead_time_days=transport_lead_days,
+        transport_lead_time=transport_lead_days,
         earliest_delivery_date=earliest,
         reason_codes=tuple(reasons),
     )
