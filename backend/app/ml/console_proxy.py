@@ -47,6 +47,8 @@ READ = frozenset({
     "accuracy",
     "accuracy/leadtime",
     "quality",
+    #   ★ 아침에 저장된 점검 결과. 다시 안 돌리고 그대로 읽습니다.
+    "quality/saved",
     "quality-table",
     "delivery",
     "batch/recent",

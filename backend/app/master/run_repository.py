@@ -41,6 +41,13 @@ RunCycle = str  # PROCUREMENT | SALES | STATUS | DAY - CHECK 는 DB 가 강제�
 
 _TABLE = "master_agent_runs"
 
+#: 장부 관문이 막아 **판단을 한 번도 안 돌린 날**이 다는 종료 코드 (`#465`).
+#:
+#: ★ **주인이 여기다.** `persistence.record_ledger_gap` 이 이 값을 적고
+#:   `count_runs_by_day` 가 이 값으로 그 행을 되찾는다. 두 벌로 적어 두면 한쪽만
+#:   바뀌는 날 성적표의 `gate_blocked` 가 조용히 늘 거짓이 된다.
+LEDGER_GAP_END_CODE = "E4_NOT_STARTED"
+
 _COLUMNS = (
     "run_id",
     "request_id",
@@ -78,6 +85,29 @@ class MasterAgentRun(TypedDict):
     response_payload: dict[str, object]
     sim_run_id: str | None
     created_at: datetime
+
+
+class DayRunCount(TypedDict):
+    """**행이 있는 날** 하나의 집계. 행이 없는 날은 여기 없다.
+
+    🔴 **표는 없는 것을 말할 수 없다.** 안 돈 날은 이 목록에서 그냥 빠져 있고, 그
+       빈 자리가 *"안 도는 날이라 없다"* 인지 *"실행일인데 없다"* 인지는 여기서
+       답하지 않는다 — 범위를 아는 `app/master/walk_report.py` 가 답한다.
+
+    ★ **행 수와 뜻을 따로 낸다.** `runs` 는 몇 행인가이고 `end_codes` 는 그 행들이
+      어떻게 끝났나다. 둘을 섞으면 *"행이 4건이니 개장일이다"* 같은 오독이 나온다 —
+      그 4행이 전부 *"실행일이 아니다"* 를 사유로 달고 있어도 행 수는 4다.
+    """
+
+    as_of: date
+    #: 그날 행 수.
+    runs: int
+    #: 그날 나온 종료코드와 건수. `end_code` 가 NULL 인 행은 세지 않는다.
+    end_codes: dict[str, int]
+    #: 그날 나온 품목. 품목 칸이 빈 행(관문·조회)은 빼고 모은다.
+    items: tuple[str, ...]
+    #: 장부 관문 행(`#465`)이 있었나 — 품목이 없고 `E4_NOT_STARTED` 인 행.
+    gate_blocked: bool
 
 
 def _null_if_blank(value: str | None) -> str | None:
@@ -304,6 +334,14 @@ def list_runs(
 
       ⚠️ 이 인자로 검증 상태와 장기 상태가 **갈리지는 않는다.** 축이 붙은 행만
         갈리고, 축이 NULL 인 옛 행은 어느 값으로도 안 걸린다 - 그것이 사실이다.
+
+    🔴 **바로 아래 `count_runs_by_day` 는 태도가 반대다.** 거기는 `sim_run_id` 가
+       필수이고 없으면 거부한다. 물음이 다르기 때문이다.
+
+       ```text
+       list_runs           "무슨 행이 있나"     → 안 좁히는 것이 정직하다
+       count_runs_by_day   "이 걷기가 어땠나"   → 어느 걷기인지 없으면 물음이 안 선다
+       ```
     """
     clauses: list[sql.Composable] = []
     params: list[Any] = []
@@ -328,3 +366,112 @@ def list_runs(
     params.append(limit)
 
     return [row for row in fetch_all(query, tuple(params))]  # type: ignore[misc]
+
+
+def check_walk_scope(*, sim_run_id: str, start: date, end: date) -> str:
+    """성적표가 설 수 있는 물음인지 보고, **정규화한 축**을 돌려준다.
+
+    ★ **집계와 성적표가 같은 문장을 쓴다.** 둘 다 이 규칙이 필요하고(하나는 WHERE
+      절을 만들고 하나는 날을 만든다), 두 벌로 적으면 한쪽만 고치는 날 진입점이
+      400 을 안 내면서 빈 성적표를 내보낸다.
+
+    :raises ValueError: 축이 비었거나 범위가 뒤집혔을 때.
+    """
+    axis = _null_if_blank(sim_run_id)
+    if axis is None:
+        raise ValueError(
+            "sim_run_id 없이 성적표를 셀 수 없다 — 어느 걷기인지 없으면 물음이 성립하지 않는다"
+        )
+    if end < start:
+        raise ValueError(f"범위가 뒤집혔다: {start.isoformat()} ~ {end.isoformat()}")
+    return axis
+
+
+def count_runs_by_day(
+    *,
+    sim_run_id: str,
+    start: date,
+    end: date,
+) -> list[DayRunCount]:
+    """한 걷기의 **날짜별 집계.** 행이 있는 날만, 오래된 날부터.
+
+    🔴 **`sim_run_id` 가 필수다 — `list_runs` 와 반대다** (`Master 19.0` §3.3).
+
+      성적표는 *"이 걷기가 어땠나"* 를 묻는다. 안 좁히면 사람이 손으로 부른 행과 옛
+      실험이 같이 세어지고, **행 수가 걷기의 성적으로 읽힌다.** 실측(2026-09-09)으로
+      이 표 1,322행 중 걷기는 116행이고 나머지 1,206행은 축이 안 실린 행이다.
+
+      🔴 빈 값을 조용히 전체로 바꾸지 않는다. `""` 도 `None` 도 거부한다 — 기본값을
+        주면 새 호출자가 무엇을 세는지 모른 채 쓰게 된다.
+
+      ⚠️ **축이 NULL 인 행은 어느 걷기에도 안 걸린다.** `sim_run_id = %s` 는 NULL 을
+        안 집는다. 그것이 사실이고, 감추는 것이 아니라 못 답하는 것이다.
+
+    ⚠️ **`limit` 이 없다.** `list_runs` 의 기본 50 으로는 200일 걷기를 못 읽는다.
+      여기는 집계라 결과가 **날 수만큼**이고 행 수를 따라 늘지 않는다.
+
+    ⚠️ **파이썬에서 세지 않는다.** 600행을 끌어와 세면 *"몇 행을 읽었나"* 와 *"몇
+      행이 있나"* 가 갈릴 자리가 생기고, 걷기가 길어질수록 그 자리가 커진다.
+
+    :raises ValueError: `sim_run_id` 가 비었거나 `end` 가 `start` 보다 앞일 때
+        (`check_walk_scope`).
+    """
+    axis = check_walk_scope(sim_run_id=sim_run_id, start=start, end=end)
+
+    query = sql.SQL(
+        """
+        WITH filtered AS (
+            SELECT as_of, end_code, item
+            FROM {schema}.{table}
+            WHERE sim_run_id = %s AND as_of >= %s AND as_of <= %s
+        ),
+        per_code AS (
+            SELECT as_of, end_code, COUNT(*)::int AS n
+            FROM filtered
+            WHERE end_code IS NOT NULL
+            GROUP BY as_of, end_code
+        ),
+        per_day AS (
+            SELECT
+                as_of,
+                COUNT(*)::int AS runs,
+                COALESCE(
+                    ARRAY_AGG(DISTINCT item) FILTER (WHERE item IS NOT NULL),
+                    ARRAY[]::text[]
+                ) AS items,
+                BOOL_OR(item IS NULL AND end_code = %s) AS gate_blocked
+            FROM filtered
+            GROUP BY as_of
+        )
+        SELECT
+            d.as_of,
+            d.runs,
+            d.items,
+            d.gate_blocked,
+            COALESCE(
+                (
+                    SELECT jsonb_object_agg(p.end_code, p.n)
+                    FROM per_code p
+                    WHERE p.as_of = d.as_of
+                ),
+                '{{}}'::jsonb
+            ) AS end_codes
+        FROM per_day d
+        ORDER BY d.as_of
+        """
+    ).format(
+        schema=sql.Identifier(get_db_schema()),
+        table=sql.Identifier(_TABLE),
+    )
+    rows = fetch_all(query, (axis, start, end, LEDGER_GAP_END_CODE))
+    return [
+        DayRunCount(
+            as_of=row["as_of"],
+            runs=row["runs"],
+            end_codes=dict(row["end_codes"]),
+            # ★ 모양만 바꾼다 — 세는 것은 위 SQL 이 이미 다 했다.
+            items=tuple(row["items"]),
+            gate_blocked=bool(row["gate_blocked"]),
+        )
+        for row in rows
+    ]

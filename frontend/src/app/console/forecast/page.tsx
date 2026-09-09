@@ -48,7 +48,6 @@ import { forecast, type ForecastTab } from "@/lib/screen";
 function ForecastPane() {
   const [item, setItem] = useState("배추");
   const [kind, setKind] = useState("auc");
-  const [baseDt, setBaseDt] = useState<string | undefined>(undefined);
   //  ★ **기본은 꺼 둡니다.** 예측 시점에는 정답이 없습니다 — 켜 두면
   //    «맞았네/틀렸네» 를 먼저 보게 되고, 그건 그날 알 수 있던 것이 아닙니다.
   //    되짚어 볼 때만 켭니다.
@@ -59,134 +58,39 @@ function ForecastPane() {
 
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   const { data, error } = useTab<ForecastTab>(
-    `${asOf}|${kind}|${item}|${baseDt ?? ""}`,
-    () => forecast(asOf, item, kind, baseDt),
+    `${asOf}|${kind}|${item}`,
+    //  ★ 기준일은 **화면 오른쪽 위 것 하나**를 씁니다. 여기서 또 고르게
+    //    두면 두 곳에서 다른 날을 가리킬 수 있습니다.
+    () => forecast(asOf, item, kind),
   );
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="가격 예측" />;
 
-  const role = data.kinds.find((k) => k.kind === data.selected_kind)?.role;
-  const latest = data.base_dates[0]?.base_dt;
   const unit = data.cards[0]?.unit ?? "원/kg";
-  const rows = showActual
-    ? data.rows
-    : {
-        ...data.rows,
-        columns: data.rows.columns.filter((c) => c.key !== "actual" && c.key !== "err"),
-      };
+  //  ★ 화면에서 뺄 열. **서버는 그대로 보냅니다** — 다시 붙이려면 여기서
+  //    빼기만 하면 됩니다.
+  //      lead  «며칠 뒤» — 대상일이 바로 옆에 있어 겹칩니다
+  //      src   «값 출처» — 게이트를 끈 뒤로는 전부 «모델» 입니다
+  const HIDE = new Set(["lead", "src"]);
+  const rows = {
+    ...data.rows,
+    columns: data.rows.columns.filter(
+      (c) =>
+        !HIDE.has(c.key) &&
+        //  실제값을 숨길 때는 정답과 오차도 같이 숨깁니다 — 예측을 만든
+        //  날에는 알 수 없던 것입니다.
+        (showActual || (c.key !== "actual" && c.key !== "err")),
+    ),
+  };
 
   return (
     <>
-      {/* ── 고르는 줄 ─────────────────────────────────────────────── */}
-      <div
-        className="flex flex-wrap items-end gap-4 rounded-xl border bg-panel px-4 py-3.5"
-        style={{ borderColor: "var(--color-hair)" }}
-      >
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            기준일 (이 예측을 만든 날)
-          </span>
-          <select
-            value={data.selected_base_dt}
-            onChange={(e) => setBaseDt(e.target.value)}
-            className="tabular rounded-lg border px-2.5 py-1.5 font-mono text-[13px]"
-            style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
-          >
-            {data.base_dates.map((d) => (
-              <option key={d.base_dt} value={d.base_dt}>
-                {d.base_dt}
-                {/*  「채점」 은 예측 몇 개가 실제 가격과 맞춰졌나다.
-                    기준일이 오래될수록 대상일이 지나 늘어난다. */}
-                {d.scored > 0 ? ` · ${d.scored}/${d.total}건 확인됨` : " · 아직 결과 안 남"}
-                {d.pre_fix && "  ⚠ 예전 방식"}
-              </option>
-            ))}
-          </select>
-          <span className="text-[10.5px]" style={{ color: "var(--color-mut2)" }}>
-            지나간 날짜는 다시보기와 시연용입니다
-            {latest && data.selected_base_dt !== latest && (
-              <button
-                type="button"
-                onClick={() => setBaseDt(latest)}
-                className="ml-1.5 rounded px-1.5 py-0.5 text-[10.5px]"
-                style={{ background: "var(--color-t-good-bg)", color: "var(--color-t-good)" }}
-              >
-                최신 날짜로
-              </button>
-            )}
-          </span>
-        </label>
-
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            가격 종류
-          </span>
-          <TabButtons
-            items={data.kinds.map((k) => ({ key: k.kind, label: k.label }))}
-            value={data.selected_kind}
-            onChange={(k) => setKind(k)}
-          />
-        </label>
-
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            품목
-          </span>
-          <TabButtons
-            items={data.items.map((i) => ({ key: i, label: i }))}
-            value={data.selected}
-            onChange={setItem}
-          />
-        </label>
-
-        <label className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            실제 가격
-          </span>
-          <button
-            type="button"
-            onClick={() => setShowActual((v) => !v)}
-            title={
-              showActual
-                ? "끄면 실제 업무 화면처럼 보입니다 — 예측을 만든 날에는 진짜 정답을 알 수 없습니다"
-                : "켜면 지난 날짜의 진짜 가격도 함께 그립니다 (시연할 때 씁니다)"
-            }
-            className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium"
-            style={
-              showActual
-                ? { background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }
-                : { background: "var(--color-sunk)", color: "var(--color-mut)" }
-            }
-          >
-            {showActual ? "보이기 (시연용)" : "숨기기 (실무용)"}
-          </button>
-        </label>
-
-        {role && (
-          <p
-            className="m-0 ml-auto max-w-[280px] text-[11.5px] leading-snug"
-            style={{ color: "var(--color-mut)" }}
-          >
-            {role}
-          </p>
-        )}
-      </div>
-
       <SourceTag sources={[data.source]} />
 
       {/* ★ 옛 기준으로 만든 예측이면 왜 다른지 알려준다. 안 알려주면 다른
              날과 나란히 놓고 「예측이 들쭉날쭉하다」 로 읽는다. */}
       <Note note={data.notice} />
-
-      {data.base_dates_truncated && (
-        <Note
-          note={{
-            tone: "info",
-            text: `기준일 목록이 ${data.base_dates.length}개까지만 나옵니다 — 더 오래된 날짜도 있습니다.`,
-          }}
-        />
-      )}
 
       {/* ── 세 품목 카드 ──────────────────────────────────────────── */}
       <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
@@ -233,14 +137,36 @@ function ForecastPane() {
 
       {/* ── 18일 그래프 ───────────────────────────────────────────── */}
       <Panel
-        title={data.chart.label}
-        subtitle={
-          //  ★ 리드타임 게이트는 2026-09-09 에 껐습니다. 그 전에는 여기에
-          //    「리드 3 미만은 모델을 안 씁니다」 가 떴습니다.
-          data.gate_lead > 0
-            ? `기준일 ${data.selected_base_dt} · ${data.gate_lead}일 뒤 미만은 모델 예측을 쓰지 않습니다`
-            : `기준일 ${data.selected_base_dt} · 가장 왼쪽 시점은 그날 밤 경매입니다`
+        //  ★ 고르는 것을 **그래프 머리 안**에 넣습니다. 밖에 따로 줄을
+        //    두면 그래프에서 눈을 떼고 위로 올라갔다 와야 합니다.
+        right={
+          <>
+            <TabButtons
+              items={data.kinds.map((k) => ({ key: k.kind, label: k.label }))}
+              value={data.selected_kind}
+              onChange={(k) => setKind(k)}
+            />
+            <button
+              type="button"
+              onClick={() => setShowActual((v) => !v)}
+              title={
+                showActual
+                  ? "끄면 실제 업무 화면처럼 보입니다 — 예측을 만든 날에는 진짜 정답을 알 수 없습니다"
+                  : "켜면 지난 날짜의 진짜 가격도 함께 그립니다 (시연할 때 씁니다)"
+              }
+              className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium"
+              style={
+                showActual
+                  ? { background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }
+                  : { background: "var(--color-sunk)", color: "var(--color-mut)" }
+              }
+            >
+              {showActual ? "실제 가격 보이기 (시연용)" : "실제 가격 숨기기 (실무용)"}
+            </button>
+          </>
         }
+        title={data.chart.label}
+        subtitle="그래프의 점을 클릭하면 상세 근거를 확인할 수 있습니다"
       >
         <ForecastChart
           rows={data.points}
@@ -250,21 +176,11 @@ function ForecastPane() {
           picked={picked?.lead ?? null}
           onPick={(row) => setPicked((cur) => (cur?.lead === row.lead ? null : row))}
         />
-        {data.quality_note && (
-          <p
-            className="m-0 border-t pt-2.5 text-[11.5px] leading-relaxed"
-            style={{ borderColor: "var(--color-hair-soft)", color: "var(--color-mut)" }}
-          >
-            <b className="font-semibold">이렇게 진단한 이유 </b>
-            {data.quality_note}
-          </p>
-        )}
       </Panel>
 
       {/* ── 리드타임별 표 ─────────────────────────────────────────── */}
       <Panel
-        title="하루씩 나눠보기"
-        subtitle="0일 뒤는 기준일 당일입니다 · 어떤 값이 모델 출력이고 어떤 값이 차단되었는지 보여줍니다"
+        title="전체표"
       >
         <DataTable table={rows} />
       </Panel>
@@ -283,15 +199,6 @@ function ForecastPane() {
           onClose={() => setPicked(null)}
         />
       )}
-
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(380px,1fr))]">
-        <Panel title="우리 예측이 얼마나 틀리나" subtitle="평가용으로 빼둔 데이터로 실측 (2026-09-01 공개)">
-          <DataTable table={data.accuracy} />
-        </Panel>
-        <Panel title="어떤 조합을 써도 안전한가" subtitle="모델이 «어제 가격 그대로 쓴 것»보다 나은가">
-          <DataTable table={data.quality} />
-        </Panel>
-      </div>
     </>
   );
 }

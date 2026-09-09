@@ -40,7 +40,6 @@ from dataclasses import replace
 from datetime import date
 
 from app.master import persistence, wiring
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.answer import (
     AnswerFacts,
     Fact,
@@ -61,6 +60,7 @@ from app.master.decision import DecisionIn, DecisionRejected
 from app.master.decision_repository import link_follow_up
 from app.master.decision_service import record_decision
 from app.master.envelope import ExecutionContext
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import Intent, IntentResult

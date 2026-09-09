@@ -16,14 +16,14 @@
  *   사흘 동안 실패 알림을 아무도 안 열어본 일이 그래서 생겼습니다.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   agentHistory,
   agentReport,
   MlError,
-  newsAgent,
   qualityAgent,
+  qualitySaved,
   type AgentReport,
   type HistoryDay,
   type HistoryItem,
@@ -88,35 +88,74 @@ function RunButton({
   );
 }
 
-/** 누를 때만 부르는 보고서 하나. */
-function OnDemand({
-  title,
-  subtitle,
-  label,
-  run,
-}: {
-  title: string;
-  subtitle: string;
-  label: string;
-  run: () => Promise<AgentReport>;
-}) {
+/**
+ * 데이터 이상 점검 — **오늘 아침 결과를 바로 보입니다.**
+ *
+ * ★ 전에는 누를 때만 돌았습니다. 그런데 이 검사는 **매일 아침 자동으로
+ *   돕니다.** 결과가 있는데 사람에게 또 누르라고 하면, 안 누른 날은
+ *   못 본 것이 됩니다.
+ *
+ * ★ **저장된 것과 방금 돌린 것을 같은 그림으로 그립니다.** 같은 내용인데
+ *   두 가지 모양으로 보이면 사람이 헷갈립니다. 그래서 서버가 둘을 같은
+ *   모양으로 냅니다 (`/quality/saved` · `/quality`).
+ *
+ * ★ 버튼은 남깁니다 — **지금 이 순간을 다시 재고 싶을 때**가 있습니다.
+ *   DB 를 훑어 10초쯤 걸립니다.
+ */
+function QualityCard({ onDone }: { onDone: () => void }) {
   const [rep, setRep] = useState<AgentReport | null>(null);
+  const [when, setWhen] = useState<"저장" | "방금" | "없음" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    qualitySaved()
+      .then((r) => {
+        if (!alive) return;
+        //  ★ «없다» 와 «정상이다» 를 가릅니다. 아침 점검이 실패한 날에
+        //    «정상» 으로 보이면 안 됩니다.
+        if (r.found) {
+          setRep(r);
+          setWhen("저장");
+        } else {
+          setWhen("없음");
+        }
+      })
+      .catch((e: unknown) => {
+        if (alive) setErr(say(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const go = () => {
     setBusy(true);
     setErr(null);
-    run()
-      .then(setRep)
-      .catch((e: unknown) =>
-        setErr(e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e)),
-      )
+    qualityAgent(180)
+      .then((r) => {
+        setRep(r);
+        setWhen("방금");
+        //  ★ 다시 잰 결과도 파일로 남습니다. **아래 「지난 진단 보고서」
+        //    목록도 새로 읽어야** 방금 것이 거기 보입니다. 안 그러면
+        //    같은 화면에 새 결과와 낡은 목록이 같이 있게 됩니다.
+        onDone();
+      })
+      .catch((e: unknown) => setErr(say(e)))
       .finally(() => setBusy(false));
   };
 
   return (
-    <Card title={title} subtitle={subtitle} right={<RunButton onClick={go} busy={busy}>{label}</RunButton>}>
+    <Card
+      title="데이터 이상 점검"
+      subtitle="자동 작업한 데이터의 품질 검사 항목입니다."
+      right={
+        <RunButton onClick={go} busy={busy}>
+          새로고침
+        </RunButton>
+      }
+    >
       {err && (
         <p
           className="m-0 rounded-lg px-3.5 py-2.5 text-[12px]"
@@ -125,10 +164,21 @@ function OnDemand({
           {err}
         </p>
       )}
-      {!rep && !err && !busy && (
+      {when && when !== "없음" && (
+        <p className="m-0 text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+          {when === "방금"
+            ? "방금 다시 잰 결과입니다"
+            : "매일 아침 자동으로 점검한 결과입니다"}
+        </p>
+      )}
+      {when === "없음" && !err && (
         <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
-          &laquo;{label}&raquo; 버튼을 누르면 검사를 시작합니다. 시간이 조금 걸리므로 탭을 열
-          때 자동으로 실행하지 않습니다.
+          점검 결과가 아직 없습니다 — 아침 자동 점검 뒤에 채워집니다.
+        </p>
+      )}
+      {!when && !err && (
+        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+          읽는 중…
         </p>
       )}
       {rep && <ReportBody report={rep} />}
@@ -160,7 +210,7 @@ function TodayClaude({ day, pick }: { day: HistoryDay | null; pick: HistoryItem 
 
   if (!day || !pick)
     return (
-      <Card title="오늘 AI 진단" subtitle="아침 자동 작업이 끝난 뒤 한번 실행되는 점검입니다">
+      <Card title="오늘 AI 진단" subtitle="자동 작업에 대한 AI 보고서입니다.">
         <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
           오늘 진단 결과가 아직 없습니다 — 아침 작업이 끝난 뒤 실행됩니다.
         </p>
@@ -170,7 +220,7 @@ function TodayClaude({ day, pick }: { day: HistoryDay | null; pick: HistoryItem 
   return (
     <Card
       title="오늘 AI 진단"
-      subtitle={`${day.date} · 아침 자동 작업이 끝난 뒤 한번 실행되는 점검입니다`}
+      subtitle={`${day.date} · 자동 작업에 대한 AI 보고서입니다.`}
       right={
         <span
           className="rounded px-2 py-0.5 text-[11px] font-semibold"
@@ -314,6 +364,12 @@ export function AgentsTab() {
   const [days, setDays] = useState<HistoryDay[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const reload = useCallback(() => {
+    agentHistory()
+      .then((r) => setDays(r.dates))
+      .catch((e: unknown) => setErr(say(e)));
+  }, []);
+
   useEffect(() => {
     let alive = true;
     agentHistory()
@@ -331,18 +387,7 @@ export function AgentsTab() {
   return (
     <div className="flex flex-col gap-4">
       <TodayClaude day={today} pick={claude} />
-      <OnDemand
-        title="데이터 이상 점검"
-        subtitle="기본적으로 꼭 맞아떨어져야 하는 항목만 검사합니다 — 등급 간 가격 순서, 같은 날 가격 차이, 어제와 오늘의 가격 연결성"
-        label="지금 검사"
-        run={() => qualityAgent(180)}
-      />
-      <OnDemand
-        title="오늘 관련 뉴스"
-        subtitle="예측 모델은 뉴스를 읽지 못합니다 · 뉴스 기사 제목을 있는 그대로 가져와 보여드립니다"
-        label="뉴스 가져오기"
-        run={() => newsAgent()}
-      />
+      <QualityCard onDone={reload} />
       <History days={days} err={err} skip={claude?.file ?? null} />
     </div>
   );

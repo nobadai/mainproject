@@ -235,7 +235,9 @@ def test_두_Protocol_이_같은_인자를_요구한다() -> None:
     재무 = inspect.signature(transition.FinanceTransition.build).parameters
     물류 = inspect.signature(transition.LogisticsTransition.build).parameters
 
-    assert set(재무) == set(물류), f"두 Protocol 의 인자가 갈렸다 — 재무 {set(재무)} · 물류 {set(물류)}"
+    assert set(재무) == set(물류), (
+        f"두 Protocol 의 인자가 갈렸다 — 재무 {set(재무)} · 물류 {set(물류)}"
+    )
     for 이름 in ("target_state_date", "purchase_ids"):
         assert 이름 in 물류, f"물류 규약에 {이름} 가 없다"
         assert 물류[이름].kind is inspect.Parameter.KEYWORD_ONLY, f"{이름} 는 키워드여야 한다"

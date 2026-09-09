@@ -60,7 +60,9 @@ def test_마스터가_봉투를_만드는_자리를_실제로_찾는다() -> Non
     """
     calls = _execution_context_calls()
     files = {path.name for path, _ in calls}
-    assert calls, "app/master/ 안에서 ExecutionContext 생성 지점을 하나도 못 찾았다 — 스캐너가 고장 났다"
+    assert calls, (
+        "app/master/ 안에서 ExecutionContext 생성 지점을 하나도 못 찾았다 — 스캐너가 고장 났다"
+    )
     assert {"service.py", "ask_service.py"} <= files, (
         f"판단·조회 두 경로가 다 잡혀야 한다. 잡힌 파일: {sorted(files)}"
     )

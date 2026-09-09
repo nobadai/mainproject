@@ -90,7 +90,6 @@ from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
     DayRunOutcome,
-    ScheduledAction,
     plan_next_action,
     run_scheduled_day,
 )

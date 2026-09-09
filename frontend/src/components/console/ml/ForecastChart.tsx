@@ -333,9 +333,6 @@ export function ForecastChart({
             모델 안 씀 ({gateLead}일 뒤 미만)
           </span>
         )}
-        <span className="ml-auto" style={{ color: "var(--color-mut2)" }}>
-          점을 누르면 이유가 나옵니다
-        </span>
       </figcaption>
     </figure>
   );
