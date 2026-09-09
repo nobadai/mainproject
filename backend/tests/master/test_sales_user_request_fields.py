@@ -8,9 +8,19 @@
 답한 그 자리다.
 
 ```text
-넓혔다     requested_quantity_kg    판매가 실제로 요구했다
-안 넓혔다  preferred_* 다섯 · source_ref    요구한 caller 가 아직 없다
+넓혔다     requested_quantity_kg          판매가 실제로 요구했다
+넓혔다     preferred_delivery_date         🔴 승인 경로가 요구했다 (2026-09-08)
+           preferred_payment_days
+안 넓혔다  preferred_* 셋 · source_ref     요구한 caller 가 아직 없다
 ```
+
+🔴 **두 칸이 "안 나르는 쪽" 에서 "나르는 쪽" 으로 옮겨 왔다** (2026-09-08).
+
+후보 판정이 `delivery_date` · `payment_days` 를 **승인 가능한 후보의 필수조건**으로
+잡았고 (`sales_flow.CandidateVerdict.missing_terms`), 판매는 그 둘을
+`preferred_*` 에서만 만든다 (`app/sales/proposal.py` `_baseline`). 즉 **마스터가 안
+실어 보내서** 실측의 후보 3안이 전부 `delivery_date=None` 이었다 — 판매가 값을 못
+만든 것이 아니다. 요구한 caller 가 생겼으므로 자리를 만든다.
 
 ★ **없는 필요를 API 표면에 미리 만들지 않는다.** 칸을 다 열면 화면이 안 쓰는 칸을
   채우기 시작하고, 그 값이 어디서 왔는지 아무도 모른 채 제안에 실린다.
@@ -43,8 +53,6 @@ from app.sales.schemas import SalesUserRequest
 
 안_나르는_칸: dict[str, str] = {
     "preferred_unit_price_krw": "요구한 caller 가 없다 — 화면이 희망단가를 받는 자리가 아직 없다",
-    "preferred_delivery_date": "요구한 caller 가 없다",
-    "preferred_payment_days": "요구한 caller 가 없다",
     "preferred_payment_terms_type": "요구한 caller 가 없다",
     "preferred_contract_term_days": "요구한 caller 가 없다",
     "allow_additional_sourcing": (
@@ -107,6 +115,8 @@ def _나르는_칸() -> set[str]:
             partner_id="P-1",
             user_request="배추 2톤 다음 주에",
             requested_quantity_kg=Decimal(2000),
+            preferred_delivery_date=date(2026, 9, 17),
+            preferred_payment_days=30,
         )
     )
 
@@ -151,6 +161,19 @@ def test_마스터가_판매에_없는_칸을_지어내지_않는다():
     나르는 = _나르는_칸()
 
     assert 나르는 <= 판매_칸, f"판매 모델에 없는 칸을 실었다: {sorted(나르는 - 판매_칸)}"
+
+
+def test_상업조건_둘은_나르는_쪽이다():
+    """🔴 **승인 경로가 요구한 칸이다** (2026-09-08 계약).
+
+    후보 판정이 `delivery_date` · `payment_days` 를 필수로 잡았는데 마스터가 그 둘을
+    안 실으면, 판매는 값을 만들 출처가 없어 전 후보가 *"납품일이 없다"* 로 떨어진다 —
+    **제시가 통째로 막힌다.**
+    """
+    나르는 = _나르는_칸()
+
+    assert "preferred_delivery_date" in 나르는
+    assert "preferred_payment_days" in 나르는
 
 
 def test_수량은_나르는_쪽이다():

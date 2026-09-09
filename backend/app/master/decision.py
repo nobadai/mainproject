@@ -23,6 +23,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from app.master.commitment import ApprovedCommitment
+from app.master.sales_approval import SaleConfirmationOut
 from app.master.transition import TransitionOut
 
 Decision = Literal["APPROVE", "REJECT_ALL", "REQUEST_CHANGE", "CANCEL"]
@@ -81,6 +82,47 @@ _DECIDABLE_END_CODES: frozenset[str] = frozenset(
     {"E1_APPROVED", "E2_HELD", "E3_REJECTED", "E5_NO_FEASIBLE_PLAN"}
 )
 
+SALES_CYCLE = "SALES"
+"""판매 사이클 실행 행의 `master_agent_runs.cycle` 값 (`persistence._SALES_CYCLE`).
+
+🔴 **어느 어휘로 검사할지는 이 값이 정한다 — 요청 본문이 아니다** (2026-09-08 계약).
+   본문으로 받으면 매입 실행에 `cycle="SALES"` 를 실어 보내 `SL1_PRESENTED` 어휘로
+   검사받을 수 있고, 그 순간 승인 게이트가 **부르는 쪽 손에** 들어간다.
+"""
+
+#: 판매 승인이 성립하는 종료 코드. 🔴 **`_APPROVE_END_CODES` 와 섞지 않는다.**
+#:
+#: `sales_flow.SalesEndCode` 가 적어 둔 D-3 합의가 그대로 여기에도 걸린다 —
+#:
+#:   > 매입 `EndCode`(E1~E5) 에 값을 더하지 않는다. 층이 다르다. 한 어휘에 두
+#:   > 사이클을 담으면 `E2_HELD` 가 *"매입 보류"* 와 *"판매 보류"* 를 동시에 뜻하게 된다.
+#:
+#: ⚠️ 두 집합을 한 `frozenset` 으로 합치면 **매입 실행에 `SL1_PRESENTED` 를 우겨도
+#:   통과한다.** 코드가 어느 층의 것인지를 집합이 더 이상 구분하지 못하기 때문이다.
+_SALES_APPROVE_END_CODES: frozenset[str] = frozenset({"SL1_PRESENTED"})
+
+#: 판매에서 사람이 결정할 것이 있는 종료 코드.
+#:
+#: `SL4_NOT_STARTED` 는 뺀다 — `E4_NOT_STARTED` 와 같은 이유다. 시작조차 못 한 날은
+#: 회사의 판단이 아니라 실행 환경 문제라 사람이 고를 것이 없다.
+_SALES_DECIDABLE_END_CODES: frozenset[str] = frozenset(
+    {"SL1_PRESENTED", "SL2_NO_CANDIDATE", "SL3_ALL_REJECTED", "SL5_BUDGET_EXHAUSTED"}
+)
+
+
+def approve_end_codes(cycle: str) -> frozenset[str]:
+    """그 사이클에서 **승인이 성립하는** 종료 코드.
+
+    🔴 **`cycle` 이 정한다.** 두 어휘를 따로 두는 이상, 어느 것을 볼지도 실행 행이
+      정해야 한다 — 부르는 쪽이 정하면 어휘를 나눈 뜻이 없어진다.
+    """
+    return _SALES_APPROVE_END_CODES if cycle == SALES_CYCLE else _APPROVE_END_CODES
+
+
+def decidable_end_codes(cycle: str) -> frozenset[str]:
+    """그 사이클에서 **사람이 결정할 것이 있는** 종료 코드."""
+    return _SALES_DECIDABLE_END_CODES if cycle == SALES_CYCLE else _DECIDABLE_END_CODES
+
 
 class DecisionRejected(ValueError):
     """결정을 받을 수 없다. 라우터가 409/422 로 접는다.
@@ -95,14 +137,28 @@ class DecisionRejected(ValueError):
 
 
 class DecisionIn(BaseModel):
-    """`POST /master/runs/{request_id}/decision` 요청 본문."""
+    """`POST /master/runs/{request_id}/decision` 요청 본문.
+
+    🔴 **사이클 칸이 없다 — 일부러 없다** (2026-09-08 계약). 매입 어휘로 볼지 판매
+      어휘로 볼지는 **실행 이력 행의 `cycle`** 이 정한다. 본문에 그 칸을 두면 매입
+      실행에 `SALES` 를 실어 보내 `SL1_PRESENTED` 어휘로 검사받을 수 있고, 그러면
+      승인 게이트가 부르는 쪽 손에 들어간다.
+
+    ⚠️ **`scenario_label` 은 칸 이름과 값이 어긋나는 자리다.** 판매 후보에는 label 이
+      없어 그 칸에 `scenario_id` 를 싣기로 했다 (판매 확정). 새 칸을 만들지 않은 이유는
+      하나다 — **같은 안을 가리키는 이름이 둘이 되면 갈린다.**
+    """
 
     model_config = {"extra": "forbid"}
 
     decision: Decision
     scenario_label: str | None = Field(
         default=None,
-        description="APPROVE 일 때 필수. 그 실행이 실제로 내놓은 안의 label 이어야 한다.",
+        description=(
+            "APPROVE 일 때 필수. 그 실행이 실제로 내놓은 안을 가리킨다. "
+            "🔴 매입은 `scenarios[].label`, 판매는 `candidates[].scenario.scenario_id` 다 "
+            "— 판매 후보에는 label 이 없어 이 칸에 scenario_id 를 싣는다 (판매 확정 2026-09-08)."
+        ),
     )
     condition_text: str | None = Field(
         default=None,
@@ -250,6 +306,18 @@ class DecisionOut(BaseModel):
     #: 이것도 적재 대상이 아니라 응답 전용이라 이력 조회에는 안 실린다.
     transition: TransitionOut | None = None
 
+    #: 판매 승인이 판매 원장에 남긴 결과 (`sales` · `sale_items` · `CONFIRMED`).
+    #:
+    #: 🔴 **`commitment` · `transition` 과 섞지 않는다.** 저 둘은 **매입** 승인의
+    #:   효력이고 이것은 **판매** 승인의 효력이다 — 한 칸에 담으면 어느 사이클의
+    #:   승인이었는지가 값의 모양으로만 읽힌다.
+    #:
+    #: ★ 승인이 아니거나 매입 실행이면 `None` 이고, 승인인데 확정 못 했으면
+    #:   `BLOCKED` 와 사유가 실린다 — 둘을 섞지 않는다 (§1.2-10).
+    #:
+    #: ★ 응답 전용이라 이력 조회에는 안 실린다.
+    sale: SaleConfirmationOut | None = None
+
 
 # ── 판단 ────────────────────────────────────────────────────────────────
 
@@ -271,29 +339,82 @@ def scenario_labels_of(response_payload: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def check_decidable(end_code: str, decision: Decision) -> None:
+def scenario_ids_of(response_payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """판매 실행이 실제로 내놓은 후보의 `scenario_id` 목록.
+
+    ```text
+    매입 응답   scenarios[].label              "보수" · "기본"
+    판매 응답   candidates[].scenario.scenario_id   "SALES-001-A-R1"  ← 여기
+    ```
+
+    ★ **`scenario_labels_of` 와 합치지 않는다.** 한 함수가 두 칸을 다 훑으면 매입
+      실행에 판매 모양의 후보가 섞여 들어와도 그대로 통과한다 — 어느 층의 안을
+      승인했는지가 응답 모양에 따라 갈린다.
+
+    🔴 **탈락 후보도 목록에 든다.** 판매 응답은 `passed=False` 인 후보를 사유와 함께
+      같이 내보내므로 (`SalesOutcome.rejected`), 여기서 거르면 *"제시되지 않은 안"*
+      과 *"제시했으나 탈락한 안"* 이 같은 422 로 접힌다. 탈락안 승인을 막는 것은
+      후보 판정(`CandidateVerdict.passed`)과 재검증이지 이 목록이 아니다.
+    """
+    out: list[str] = []
+    for candidate in response_payload.get("candidates") or ():
+        if not isinstance(candidate, Mapping):
+            continue
+        scenario = candidate.get("scenario")
+        if not isinstance(scenario, Mapping):
+            continue
+        scenario_id = scenario.get("scenario_id")
+        if isinstance(scenario_id, str) and scenario_id:
+            out.append(scenario_id)
+    return tuple(out)
+
+
+def available_scenario_names(
+    response_payload: Mapping[str, Any], cycle: str
+) -> tuple[str, ...]:
+    """그 실행이 내놓은 안을 **가리키는 이름** 전부.
+
+    🔴 **어느 칸을 읽을지도 `cycle` 이 정한다.** 승인 검사와 승인 어휘가 같은 것을
+      보고 있어야 *"승인은 되는데 안을 못 찾는다"* 가 안 생긴다.
+    """
+    if cycle == SALES_CYCLE:
+        return scenario_ids_of(response_payload)
+    return scenario_labels_of(response_payload)
+
+
+def check_decidable(end_code: str, decision: Decision, *, cycle: str) -> None:
     """지금 상태에서 이 결정을 받을 수 있나.
 
     ★ `E4` 에는 아무 결정도 받지 않는다. 부서가 못 돈 날을 사람이 "승인" 하면
       **아무도 판단하지 않은 계획이 승인된 것으로 남는다.**
+
+    🔴 **`cycle` 에 기본값을 두지 않는다.** 안 주면 터져야 한다 — 기본값은 곧
+      업무 규칙이고, 여기서는 *"안 밝히면 매입으로 본다"* 가 조용한 규칙이 된다.
+      부르는 쪽은 실행 행에서 읽은 값을 그대로 넘긴다.
+
+    :param cycle: 그 **실행 이력 행**의 `cycle`. 🔴 요청 본문에서 오지 않는다.
     """
-    if end_code not in _DECIDABLE_END_CODES:
+    decidable = decidable_end_codes(cycle)
+    approvable = approve_end_codes(cycle)
+    if end_code not in decidable:
         raise DecisionRejected(
             f"{end_code} 인 실행에는 결정을 받지 않는다 — "
             "부서가 못 돈 날은 사람이 고를 것이 없다. 재시도는 새 요청이다.",
             conflict=True,
         )
-    if decision == "APPROVE" and end_code not in _APPROVE_END_CODES:
+    if decision == "APPROVE" and end_code not in approvable:
         raise DecisionRejected(
-            f"{end_code} 에는 승인할 안이 없다 (통과안은 E1_APPROVED 에만 있다).",
+            f"{end_code} 에는 승인할 안이 없다 "
+            f"(통과안은 {', '.join(sorted(approvable))} 에만 있다).",
             conflict=True,
         )
-    if decision == "CANCEL" and end_code not in _APPROVE_END_CODES:
+    if decision == "CANCEL" and end_code not in approvable:
         # ★ **물릴 승인이 있으려면 그날 통과안이 있었어야 한다.** 없는 승인을 취소하면
         #   이력에는 취소가 남고 장부에는 아무 일도 안 일어난다 — 그 둘이 갈리면
         #   나중에 *"왜 취소했는데 그대로지"* 를 아무도 못 푼다.
         raise DecisionRejected(
-            f"{end_code} 에는 물릴 승인이 없다 (승인은 E1_APPROVED 에만 선다).",
+            f"{end_code} 에는 물릴 승인이 없다 "
+            f"(승인은 {', '.join(sorted(approvable))} 에만 선다).",
             conflict=True,
         )
 

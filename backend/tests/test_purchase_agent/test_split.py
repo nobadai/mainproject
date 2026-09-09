@@ -532,7 +532,7 @@ def test_capacity_is_floored_not_rounded() -> None:
 
 
 def test_iso_string_keys_are_what_logistics_sends() -> None:
-    """물류는 ``d.isoformat()``으로 직렬화해 보낸다 (`logistics/adapter.py:364`).
+    """물류는 ``d.isoformat()``으로 직렬화해 보낸다 (`logistics/adapter.py` 의 `cap_by_date` 조립).
 
     ``date`` 객체를 키로 조회하면 **전부 미스**가 되어, 수용량이 와 있는데도
     "창 밖"으로 빠진다.

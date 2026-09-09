@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from app.finance.day_open import DAY_OPEN_STATE_TYPE, FinanceDayOpening
-from app.finance.db import FinanceDataNotReady
+from app.finance.db import FinanceDataNotReady, InventorySnapshot
 
 CARRY_FROM = date(2026, 1, 5)
 AS_OF = date(2026, 1, 6)
@@ -83,6 +83,10 @@ class _Cursor:
                     finance_state_id=params["finance_state_id"],
                     state_date=params["as_of"],
                     state_type=params["state_type"],
+                    inventory_book_value_krw=params["inventory_book_value_krw"],
+                    operational_inventory_value_krw=params[
+                        "operational_inventory_value_krw"
+                    ],
                     note=params["note"],
                 )
                 self.conn.states.append(carried)
@@ -117,7 +121,13 @@ class _Conn:
 
 @pytest.fixture(autouse=True)
 def _schema():
-    with patch("app.finance.day_open.get_db_schema", return_value="haetdeul"):
+    with (
+        patch("app.finance.day_open.get_db_schema", return_value="haetdeul"),
+        patch(
+            "app.finance.day_open.load_inventory_snapshot_as_of",
+            return_value=InventorySnapshot(Decimal("123"), Decimal("456"), Decimal("456")),
+        ),
+    ):
         yield
 
 
@@ -159,12 +169,12 @@ def test_first_open_carries_state_and_second_open_is_idempotent():
         "committed_outflows_krw",
         "unsettled_purchase_payables_krw",
         "receivables_krw",
-        "inventory_book_value_krw",
-        "operational_inventory_value_krw",
         "current_debt_krw",
         "recommended_loan_amount_krw",
     ):
         assert row[field] == SOURCE[field]
+    assert row["inventory_book_value_krw"] == Decimal("456")
+    assert row["operational_inventory_value_krw"] == Decimal("456")
     assert opening.is_open(conn, as_of=AS_OF) is True
     assert conn.calls == []
 

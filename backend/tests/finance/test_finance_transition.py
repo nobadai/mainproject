@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance.db import FinanceDataNotReady
+from app.finance.db import FinanceDataNotReady, InventorySnapshot
 from app.finance.transition import (
     H1_STATE_TYPE,
     FinanceTransitionAdapter,
@@ -144,7 +144,13 @@ class _Conn:
 
 def _persist(transition, *, rowcount=1):
     conn = _Conn(rowcount)
-    with patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"):
+    with (
+        patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"),
+        patch(
+            f"{_MODULE}.load_inventory_snapshot_as_of",
+            return_value=InventorySnapshot(Decimal(1), Decimal(2), Decimal(3)),
+        ),
+    ):
         written = persist_finance_transition(conn, transition)
     return conn, written
 
@@ -183,12 +189,18 @@ class _LedgerCursor:
                     "finance_state_id": state_id,
                     "current_cash_krw": _STATE["current_cash_krw"],
                     "receivables_krw": _STATE["receivables_krw"],
+                    "inventory_book_value_krw": Decimal(str(params[4])),
+                    "operational_inventory_value_krw": Decimal(str(params[5])),
                     "unsettled_purchase_payables_krw": (
                         _STATE["unsettled_purchase_payables_krw"] + delta
                     ),
                 }
             else:
                 self.conn.states[key]["unsettled_purchase_payables_krw"] += delta
+                self.conn.states[key]["inventory_book_value_krw"] = Decimal(str(params[4]))
+                self.conn.states[key]["operational_inventory_value_krw"] = Decimal(
+                    str(params[5])
+                )
             self.rowcount = 1
 
 
@@ -213,7 +225,13 @@ class _LedgerConn:
 
 
 def _persist_to_ledger(conn, transition):
-    with patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"):
+    with (
+        patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"),
+        patch(
+            f"{_MODULE}.load_inventory_snapshot_as_of",
+            return_value=InventorySnapshot(Decimal(1), Decimal(2), Decimal(3)),
+        ),
+    ):
         return persist_finance_transition(conn, transition)
 
 
@@ -688,6 +706,10 @@ def test_adapter_persist_forwards_the_supplied_connection_and_opens_none():
 
     with (
         patch(f"{_MODULE}.get_db_schema", return_value="haetdeul"),
+        patch(
+            f"{_MODULE}.load_inventory_snapshot_as_of",
+            return_value=InventorySnapshot(Decimal(1), Decimal(2), Decimal(3)),
+        ),
         patch("app.finance.db.get_connection") as opened,
     ):
         written = FinanceTransitionAdapter().persist(conn, transition)

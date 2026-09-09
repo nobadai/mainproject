@@ -144,18 +144,35 @@ NOT_ATTEMPTED          단계를 안 탔다 — 앞 단계에서 이미 멈춘 �
 ⚠️ **개장은 그대로다.** 개장이 실패하면 그 뒤를 안 하고, 판단이 실패해도 개장을
   되돌리지 않는다. 이 관문은 **개장과 판단 사이**에만 선다.
 
-⚠️ **아직 DB 에 안 남는다.** 스케줄러 결과는 값으로만 돌아간다 — 막힌 날을 나중에
-  세려면 기록이 필요하고, 그건 다음 판이다.
+🔴 **관문이 막은 날에는 행 하나를 남긴다** (2026-09-09). 나머지는 여전히 값뿐이다.
+
+```text
+관문이 막았다        🟢 master_agent_runs 에 행이 있다 (persistence.record_ledger_gap)
+그날을 안 돌렸다      🔴 여전히 행이 없다
+돌렸는데 적재가 실패   🔴 여전히 행이 없다
+```
+
+  ★ **왜 관문만 먼저인가.** 매입 화면이 셋을 *"사유를 남긴 실행이 없습니다"* 한
+    문구로 그린다. 관문이 막은 것은 **정상 동작**이고 나머지 둘은 아니라, 정상을
+    먼저 갈라내야 남은 둘이 눈에 띈다.
+
+  ⚠️ **세는 것은 아직 안 된다.** `end_code='E4_NOT_STARTED'` 한 값에 예측 미도착 ·
+    어댑터 미등록 · 장부 관문이 같이 앉는다. 그것은 `Master 상세 19.0` 이 풀 자리다.
+
+  🔴 **그 행에 실행 축(`sim_run_id`)을 같이 싣는다.** 값의 주인은
+    `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 같은 날 판단 행이 싣는 값과 같다.
+    안 실으면 축으로 훑는 모든 조회에서 게이트 행만 빠져 **막힌 날이 도로 안 보인다.**
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from app.master import clock
+from app.master import clock, persistence
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
 from app.master.collection import collect_receipts
 from app.master.commitment import ITEM_CODES
@@ -163,6 +180,7 @@ from app.master.day_open import open_day
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.receivable import issue_receivables
@@ -180,11 +198,14 @@ __all__ = [
     "SchedulerAction",
     "daily_request_id",
     "deadline_at",
+    "ledger_gap_request_id",
     "plan_next_action",
     "run_scheduled_day",
     "scheduled_items",
     "wake_up",
 ]
+
+logger = logging.getLogger(__name__)
 
 # ── 시각 상수 ───────────────────────────────────────────────────────────
 #
@@ -223,6 +244,13 @@ _LEDGER_GAP_STATUSES: frozenset[str] = frozenset({"BLOCKED", "FAILED"})
 #: 이유다 — 손으로 다시 쓰면 철자가 갈리고 그러면 막힌 날을 나중에 못 센다).
 _LEDGER_GAP = "장부가 안 서서 판단을 안 돌린다"
 
+#: 장부 관문 행의 업무 키 꼬리. **품목 자리에 들어간다.**
+#:
+#: 🔴 **품목 이름과 겹치면 안 된다.** 겹치는 순간 그날 그 품목의 판단 행과 게이트
+#:   행이 같은 업무 키를 갖고, `get_run_by_request_id` 가 둘을 못 가른다.
+#:   계약 품목은 한글 이름이라 이 꼬리와 같아질 수 없고, 그것을 검사가 잠근다.
+_LEDGER_GAP_REQUEST_SUFFIX = "LEDGER-GAP"
+
 #: 스케줄러가 답할 수 있는 **전부**. 여섯 번째를 만들지 않는다.
 SchedulerAction = Literal[
     "RUN_NOW",
@@ -260,6 +288,19 @@ def daily_request_id(as_of: date, item: str) -> str:
       인덱스가 아니라 *"두 번 안 깨우기"* 에 걸리게 된다.
     """
     return f"REQ-DAILY-{as_of:%Y%m%d}-{item}"
+
+
+def ledger_gap_request_id(as_of: date) -> str:
+    """`REQ-DAILY-20260908-LEDGER-GAP`. **하루 단위 키다 — 품목이 없다.**
+
+    🔴 **`daily_request_id` 를 못 쓴다.** 저쪽은 품목별인데 장부 관문은 하루를
+      통째로 돌려세운다. 품목을 하나 골라 넣으면 *"배추 때문에 막혔다"* 라는 없는
+      사실이 생기고, 전부에 넣으면 같은 사실이 품목 수만큼 쌓인다.
+
+    🔴 **시각을 안 넣는다** (`daily_request_id` 와 같은 이유). 넣으면 같은 날 두 번
+      깨어날 때 키가 갈리고, 그러면 *"그날 게이트 행이 이미 있나"* 를 물을 수가 없다.
+    """
+    return f"REQ-DAILY-{as_of:%Y%m%d}-{_LEDGER_GAP_REQUEST_SUFFIX}"
 
 
 # ── ① 결정 — 순수 함수 ─────────────────────────────────────────────────
@@ -582,7 +623,42 @@ def run_scheduled_day(
     # 🔴 여기서 돌아서면 `procure_fn` 을 **한 번도 안 부른다.** 개장은 그대로 둔다 —
     #    하루가 열린 것은 사실이고, 판단을 안 돌린 것은 별개 사실이다.
     if _ledger_gap(inbound_status, receivable_status, collection_status):
-        notes.append(_ledger_gap_note(inbound_status, receivable_status, collection_status))
+        gap_reason = _ledger_gap_note(inbound_status, receivable_status, collection_status)
+        notes.append(gap_reason)
+        # ── 🔴 **행 하나를 남긴다. 판단은 여전히 안 돌린다** (2026-09-09) ──
+        #
+        # ★ **왜 남기나.** 안 남기면 이 날이 화면에서 *"사유를 남긴 실행이
+        #   없습니다"* 로 보이고, 그 문구는 **안 돌린 날**과 **적재가 실패한 날**도
+        #   똑같이 낸다. 관문이 막은 것은 정상 동작이고 나머지 둘은 아니다.
+        #
+        # ★ **문장을 다시 짓지 않는다.** 위에서 만든 `gap_reason` 을 그대로 넘긴다 —
+        #   두 벌이 되면 한쪽만 고치는 날 화면과 이력이 갈린다.
+        #
+        # 🔴 **여기서도 `procure_fn` 은 안 부른다.** 남기는 것은 행이지 판단이 아니다.
+        #
+        # 🔴 **실행 축을 같이 싣는다** (2026-09-09). 인자만 있고 값을 안 주면 이 행의
+        #    `sim_run_id` 가 늘 NULL 로 앉는다. 그러면 같은 날 판단 행은 축이 있고 게이트
+        #    행만 없어서, **모두가 쓰는 축으로 훑을 때 막힌 날이 도로 안 보인다** — 이
+        #    판이 존재하는 이유가 바로 그것이라 그 자리에서 무너진다.
+        #
+        # ★ **값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다.** 여기서 문자열을
+        #   다시 적거나 새 상수를 만들지 않는다 — `service.run_procurement` 가 같은 날
+        #   판단 행에 싣는 값도 그 상수이고, 두 벌이 되면 한쪽만 고치는 날 두 행이 갈린다.
+        try:
+            persistence.record_ledger_gap(
+                request_id=ledger_gap_request_id(as_of),
+                as_of=as_of,
+                policy_version=policy_version,
+                reason=gap_reason,
+                inbound_status=inbound_status,
+                receivable_status=receivable_status,
+                collection_status=collection_status,
+                sim_run_id=BURN_IN_SIM_RUN_ID,
+            )
+        except Exception:  # 이력 때문에 걷기가 멈추면 안 된다.
+            # ★ `try_save_run` 이 이미 삼키지만 여기서 한 번 더 잡는다 — 그날 결과가
+            #   적재의 약속에 걸리면 안 된다 (`_stage` 와 같은 태도).
+            logger.exception("장부 관문 행 적재가 터졌다 - 그날 결과는 그대로 나간다")
         return DayRunOutcome(
             as_of=as_of,
             action=action.action,

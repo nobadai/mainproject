@@ -14,11 +14,24 @@ from app.finance.cancellation import (
     FinanceCancellationConflict,
     cancel_finance_payables,
 )
-from app.finance.db import FinanceDataNotReady, _fetch_open_payable_events
+from app.finance.db import (
+    FinanceDataNotReady,
+    InventorySnapshot,
+    _fetch_open_payable_events,
+)
 
 AS_OF = date(2026, 1, 5)
 TARGET = date(2026, 1, 6)
 FINANCING_MODE = "NONE"
+
+
+@pytest.fixture(autouse=True)
+def _inventory_snapshot():
+    with patch(
+        "app.finance.cancellation.load_inventory_snapshot_as_of",
+        return_value=InventorySnapshot(Decimal(1), Decimal(401), Decimal(351)),
+    ):
+        yield
 
 
 def _payable(
@@ -167,6 +180,10 @@ class _Cursor:
                 )
                 self.conn.states[matching["finance_state_id"]] = matching
             matching["unsettled_purchase_payables_krw"] -= amount
+            matching["inventory_book_value_krw"] = params["inventory_book_value_krw"]
+            matching["operational_inventory_value_krw"] = params[
+                "operational_inventory_value_krw"
+            ]
             self.rows = [{"finance_state_id": matching["finance_state_id"]}]
             return
 
@@ -178,6 +195,10 @@ class _Cursor:
                 self.rows = []
                 return
             row["unsettled_purchase_payables_krw"] -= amount
+            row["inventory_book_value_krw"] = params["inventory_book_value_krw"]
+            row["operational_inventory_value_krw"] = params[
+                "operational_inventory_value_krw"
+            ]
             self.rows = [{"finance_state_id": row["finance_state_id"]}]
             return
 
@@ -274,12 +295,12 @@ def test_existing_target_state_reverses_only_newly_cancelled_amount_and_keeps_ca
         "minimum_operating_cash_krw",
         "committed_outflows_krw",
         "receivables_krw",
-        "inventory_book_value_krw",
-        "operational_inventory_value_krw",
         "current_debt_krw",
         "recommended_loan_amount_krw",
     ):
         assert after[field] == before[field]
+    assert after["inventory_book_value_krw"] == Decimal(401)
+    assert after["operational_inventory_value_krw"] == Decimal(351)
 
 
 def test_same_date_multiple_modes_updates_only_authoritative_axis():

@@ -340,3 +340,4 @@ def test_confirm_sale_retry_after_delivery_is_still_idempotent():
 
     assert retry.sales_written == 0
     assert retry.sale_items_written == 0
+

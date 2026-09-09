@@ -91,6 +91,23 @@ class 가짜커서:
     def fetchone(self) -> dict[str, Any] | None:
         return self._row
 
+    def fetchall(self) -> list[dict[str, Any]]:
+        """재고 원장 조회의 답. **빈 목록이 사실이다.**
+
+        🔴 **`#458` 로 재무 전이가 재고 장부가를 원장에서 파생하기 시작했다**
+          (`finance/db.load_inventory_snapshot_as_of`). 그 전에는 `finance_state` 에
+          실린 값을 그대로 옮겼다 — *"수량 정본은 이동 원장이고 현재 잔량은 과거
+          계산에 쓰지 않는다"* 가 그 함수의 규율이다.
+
+        ★ **여기서 로트를 지어내지 않는다.** 이 검사가 재는 것은 *"세 장부가 한
+          커넥션으로 한 번에 쓰이는가"* 이지 재고 평가가 아니다. 로트를 넣으면
+          이 검사가 재고 계산까지 떠안게 되고, 그 계산이 바뀌는 날 여기가 빨개진다.
+
+        ⚠️ 빈 목록은 *"그날까지 입고된 로트가 없다"* 는 **확인된 사실**이다 —
+          `fetchone` 이 `confirmed_inbound_json: []` 를 주는 것과 같은 이유다.
+        """
+        return []
+
 
 class 가짜커넥션:
     def __init__(self) -> None:

@@ -71,6 +71,7 @@ from app.master.envelope import (
 from app.master.plan import ExecutionPlan
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
+from app.master.sales_approval import missing_term_origins, missing_terms_reason
 
 SalesEndCode = Literal[
     "SL1_PRESENTED",
@@ -221,6 +222,18 @@ class CandidateVerdict:
     #: 이 칸이 비어 있지 않으면 그 후보는 **통과로 치지 않는다** — 미해결로 둔다.
     unroutable: tuple[str, ...] = ()
 
+    #: 사용자가 말한 조건 그대로 (`SalesFlow.user_request`). **누락의 위치를 가르는 데만
+    #: 쓴다** — 후보를 고르거나 값을 채우는 데 쓰지 않는다 (§3.2.2).
+    #:
+    #: 🔴 **`SalesFlow` 를 통째로 들지 않는다.** 판정 하나가 실행기를 참조하면 이
+    #:   판정을 재는 검사가 실행기를 세워야 한다 — 그래서 필요한 두 값만 들고 온다.
+    user_request: Mapping[str, Any] | None = None
+
+    #: 무슨 판매인가 (`SalesProposalInput.business_mode`). **`CONTRACT_FULFILLMENT` 을
+    #: 가르는 데 쓴다** — 그 경로는 계약값을 쓰므로 `preferred_*` 가 안 실리는 것이
+    #: 정상이고, 거기서 `REQUEST_MISSING` 을 내면 거짓말이 된다.
+    business_mode: str | None = None
+
     @property
     def scenario_id(self) -> str:
         return str(self.scenario.get("scenario_id") or "")
@@ -237,13 +250,50 @@ class CandidateVerdict:
         return not self.validations and not self.unroutable
 
     @property
+    def missing_terms(self) -> tuple[str, ...]:
+        """🔴 **확정에 필요한데 비어 있는 상업조건 — 어디서 끊겼는지까지.** 없으면 빈 튜플이다.
+
+        ```text
+        REQUEST_MISSING_<FIELD>     부르는 쪽이 안 보냈다   → 고칠 사람: 화면 · 걷기 · API 호출자
+        TERMS_UNRESOLVED_<FIELD>    정말 조건이 없다        → 고칠 사람: 판매 · 계약
+        ```
+
+        ★ **이 구분의 값은 "누가 고쳐야 하나" 가 이름에서 보이는 것이다.** 전에는
+          `delivery_date` 하나만 말해서, 화면에 채울 칸이 있는데 안 채운 것인지 판매가
+          못 만든 것인지 사람이 코드를 읽어야 알았다.
+
+        ★ **부서 판정과 다른 칸이다.** `validations` 에 가짜 항목을 밀어 넣지 않는다 —
+          탈락 사유가 *"재무가 반려"* 처럼 보이면 사람이 재무를 본다. *"납품일이
+          없다"* 로 보여야 판매를 본다.
+
+        ★ **목록의 주인은 `sales_approval.REQUIRED_COMMERCIAL_TERMS` 다.** 승인 뒤
+          `confirm_sale` 이 막는 것과 **같은 목록**을 여기서 미리 읽는다 — 베껴 두면
+          *"올려도 되는 안"* 과 *"확정할 수 있는 안"* 이 갈린다.
+        """
+        return missing_term_origins(
+            self.scenario,
+            user_request=self.user_request,
+            business_mode=self.business_mode,
+        )
+
+    @property
     def passed(self) -> bool:
         """사용자에게 올려도 되는가.
 
         ★ **허용목록으로 정한다** (`PASSING_VERDICTS`). *"reject 가 아니면 통과"* 로
           정하면 봉투 어휘가 늘 때마다 새 값이 통과 쪽으로 샌다 (#173).
+
+        🔴 **상업조건 필수값도 여기서 본다** (2026-09-08 계약). `delivery_date` 나
+          `payment_days` 가 없는 안은 사용자가 골라도 확정할 수 없다 — 값이 없는
+          안을 고른 **뒤에야** 막는 것보다 **승인 가능한 후보의 필수조건**으로 두는
+          편이 계약상 명확하다.
+
+          ⚠️ 이 줄을 지우면 값 없는 안이 화면에 오르고, 사용자가 그것을 고른 뒤에야
+            `sales_approval` 이 `BLOCKED` 를 낸다.
         """
         if self.unroutable:
+            return False
+        if self.missing_terms:
             return False
         return all(
             str(v.get("business_status") or "") in PASSING_VERDICTS
@@ -260,6 +310,10 @@ class CandidateVerdict:
         parts: list[str] = []
         if self.unroutable:
             parts.append(f"부를 대상이 없는 요구: {', '.join(self.unroutable)}")
+        # 🔴 **부서 판정 줄과 섞이지 않게 따로 적는다.** 아래 줄은
+        #   `capability(runtime/business)` 모양이고 이 줄은 칸 이름을 부른다.
+        if self.missing_terms:
+            parts.append(missing_terms_reason(self.missing_terms))
         for capability, verdict in self.validations.items():
             business = str(verdict.get("business_status") or "?")
             if business in PASSING_VERDICTS:
@@ -723,6 +777,10 @@ class SalesFlow:
             scenario=dict(scenario),
             validations=validations,
             unroutable=tuple(unroutable),
+            # 🔴 **누락의 위치를 가르는 데만 쓴다** (`missing_terms`). 이 둘이 안 실리면
+            #   계약 이행 경로까지 *"호출에서 안 실렸다"* 로 읽힌다 — 거짓말이 된다.
+            user_request=self.user_request,
+            business_mode=self.business_mode,
         )
 
     def _feedback(self, candidates: Sequence[CandidateVerdict]) -> dict[str, Any]:

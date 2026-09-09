@@ -58,7 +58,14 @@ def make_mix_selector(service: MixSelectionService | None = None) -> MixSelector
     """``(context, default_candidate_id) -> MixDecision`` 콜러블을 만든다.
 
     LLM이 꺼져 있거나 실패해도 **결정론 기본안을 돌려준다** — 그래프가 LLM 때문에
-    멈추지 않는다 (orchestrator ``make_selector``와 같은 계약).
+    멈추지 않는다.
+
+    🔴 **베낀 자리가 없어졌다** (2026-09-09). 원래 *"orchestrator ``make_selector`` 와
+    같은 계약"* 이라고 적었는데, ``#418``(2026-09-08)이 죽은 오케스트레이터 LLM selector
+    를 걷어내면서 ``app/master/cycle_llm/{runtime,selector}.py`` 가 지워졌고 그 이름이
+    저장소에 **0곳**이다. 마스터가 미리 알려 줬다 (쪽지 2026-09-08).
+
+    ★ **계약 자체는 그대로다** — 베낀 대상이 없어졌을 뿐이고, 위 두 줄이 그 계약이다.
     """
     selection_service = service or get_mix_selection_service()
 

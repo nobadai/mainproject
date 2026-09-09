@@ -33,8 +33,8 @@ class Plan(BaseModel):
     .. code-block:: text
 
         max_price       재무 STRESS 로 나간다 — 남이 등식을 검사한다
-                        finance/capabilities/scenario.py:180
-                        master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+                        finance/capabilities/scenario.py  amount_max_krw 등식
+                        master/verifier.py                검사 이름 L-PAYSCHED-MAX
         cut_unit_price  우리 컷 (self_check.check_max_price)
 
     ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 `09-17` 뒤로

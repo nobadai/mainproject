@@ -71,7 +71,15 @@ def _port(payload: dict[str, Any] | None = None, capture: list | None = None, **
 
 
 _제안 = {
-    "scenarios": [{"scenario_id": "SCN-1", "required_validations": ["FINANCIAL_VALIDATION"]}],
+    # 🔴 상업조건 둘이 없으면 후보가 presented 에 안 오른다 (2026-09-08 계약).
+    "scenarios": [
+        {
+            "scenario_id": "SCN-1",
+            "required_validations": ["FINANCIAL_VALIDATION"],
+            "delivery_date": "2026-01-20",
+            "payment_days": 30,
+        }
+    ],
     "situation": "물량이 있다",
 }
 

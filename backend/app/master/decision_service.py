@@ -18,14 +18,15 @@ from app.master.commitment import (
     build_commitment,
 )
 from app.master.decision import (
+    SALES_CYCLE,
     CommitmentOut,
     DecisionIn,
     DecisionOut,
     DecisionRejected,
+    available_scenario_names,
     check_decidable,
     check_scenario_exists,
     next_seq,
-    scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
 from app.master.revalidation import (
@@ -35,6 +36,7 @@ from app.master.revalidation import (
     revalidate_scenario,
 )
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
+from app.master.sales_approval import SaleConfirmationOut, confirm_approved_sale
 from app.master.transition import TransitionOut, apply_approval
 
 
@@ -92,9 +94,16 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     row = _run_for(request_id, payload.history_run_id)  # 없으면 LookupError
     response_payload = dict(row.get("response_payload") or {})
 
+    # 🔴 **어느 어휘로 검사할지는 실행 행이 정한다** (2026-09-08 계약). `payload` 에서
+    #    읽지 않는다 — 읽으면 매입 실행을 판매라고 우겨 `SL1_PRESENTED` 어휘로
+    #    검사받을 수 있고, 그 순간 승인 게이트가 부르는 쪽 손에 들어간다.
+    cycle = _cycle_of(row)
+
     end_code = _end_code_of(response_payload)
-    check_decidable(end_code, payload.decision)
-    check_scenario_exists(payload.scenario_label, scenario_labels_of(response_payload))
+    check_decidable(end_code, payload.decision, cycle=cycle)
+    check_scenario_exists(
+        payload.scenario_label, available_scenario_names(response_payload, cycle)
+    )
 
     existing = list_decisions(request_id)
     _reject_repeat_approval(existing, payload)
@@ -114,9 +123,64 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         revalidation_outcome=None if revalidation is None else revalidation.outcome,
         note=payload.note,
     )
+    if cycle == SALES_CYCLE:
+        # 🔴 **매입 약정을 만들지 않는다.** `_commitment_parts` 는
+        #    `response_payload["scenarios"]` 만 보므로 판매 응답에서는 늘
+        #    `buildable=False` 를 낸다 — *"판매를 확정했다"* 자리에 *"매입 약정을 못
+        #    만들었다"* 가 실린다.
+        return saved.model_copy(
+            update={"sale": _sale_for(request_id, row, response_payload, payload, revalidation)}
+        )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
         update={"commitment": out, "transition": _transition_for(commitment)}
+    )
+
+
+def _cycle_of(row: Mapping[str, Any]) -> str:
+    """그 실행이 무슨 사이클이었나. **실행 이력 행이 정본이다.**
+
+    ★ **응답 payload 의 모양으로 짐작하지 않는다.** `candidates` 가 있으면 판매라고
+      읽으면, 매입 응답에 그 키가 섞이는 날 어휘가 조용히 갈린다. `cycle` 은 표의
+      컬럼이고 CHECK 이 어휘를 잠근다 (`master_agent_runs.sql`).
+    """
+    cycle = row.get("cycle")
+    return cycle if isinstance(cycle, str) else ""
+
+
+def _sale_for(
+    request_id: str,
+    row: Mapping[str, Any],
+    response_payload: Mapping[str, Any],
+    payload: DecisionIn,
+    revalidation: Revalidation | None,
+) -> SaleConfirmationOut | None:
+    """승인이면 **판매를 확정한다** (`confirm_sale`).
+
+    ★ **승인이 아니면 `None`** 이다 — 거절·조건부 재요청·취소에는 확정할 것이 없고,
+      그때의 `None` 은 *"확정에 실패했다"* 가 아니다 (`_transition_for` 와 같은 태도).
+
+    🔴 **재검증 결과를 여기서 다시 재지 않는다.** `_revalidation_for` 가 낸 것을
+      그대로 넘긴다 — 두 곳에서 판정하면 *"재검증은 막혔는데 확정은 됐다"* 가 가능해진다.
+
+    ★ **`as_of` 는 그 실행의 날이다** (`_as_of_of`). 벽시계를 읽지 않는다 —
+      `order_date` 가 되고, 그것이 곧 수금 곡선의 시점이다.
+    """
+    if payload.decision != "APPROVE" or payload.scenario_label is None:
+        return None
+    scenario = find_scenario(response_payload, payload.scenario_label)
+    if scenario is None:
+        return SaleConfirmationOut(
+            status="BLOCKED",
+            reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
+        )
+    return confirm_approved_sale(
+        request_id=request_id,
+        run_id=str(row["run_id"]),
+        as_of=_as_of_of(response_payload),
+        policy_version=_policy_version_of(row),
+        scenario=scenario,
+        revalidation_outcome=None if revalidation is None else revalidation.outcome,
     )
 
 

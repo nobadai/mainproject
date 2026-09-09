@@ -52,6 +52,7 @@ from app.finance.db import (
     FinanceDataNotReady,
     get_active_finance_policy,
     get_db_schema,
+    load_inventory_snapshot_as_of,
     load_finance_state_row,
 )
 from app.finance.state_identity import daily_finance_state_id
@@ -301,6 +302,11 @@ def persist_finance_transition(
                 newly_persisted_payables += payable.amount_krw
 
         if newly_persisted_payables:
+            inventory = load_inventory_snapshot_as_of(
+                conn,
+                sim_run_id=transition.sim_run_id,
+                as_of=transition.next_state_date,
+            )
             # 첫 승인은 원천 상태를 carry하고, 같은 target 축/날짜의 다음 승인은 기존
             # 일별 상태에 **새 Payable 금액만** 원자적으로 더한다. composite UNIQUE가
             # 동시 승인도 한 행으로 직렬화한다. 기존 target의 cash/AR 등은 보존한다.
@@ -318,7 +324,7 @@ def persist_finance_transition(
                         %s, sim_run_id, %s, %s, financing_mode,
                         current_cash_krw, minimum_operating_cash_krw, committed_outflows_krw,
                         unsettled_purchase_payables_krw + %s, receivables_krw,
-                        inventory_book_value_krw, operational_inventory_value_krw,
+                        %s, %s,
                         current_debt_krw, recommended_loan_amount_krw, %s
                     FROM {schema}.finance_states
                     WHERE finance_state_id = %s
@@ -326,6 +332,9 @@ def persist_finance_transition(
                         state_type = EXCLUDED.state_type,
                         unsettled_purchase_payables_krw =
                             current_state.unsettled_purchase_payables_krw + %s,
+                        inventory_book_value_krw = EXCLUDED.inventory_book_value_krw,
+                        operational_inventory_value_krw =
+                            EXCLUDED.operational_inventory_value_krw,
                         note = EXCLUDED.note
                     """
                 ).format(schema=schema),
@@ -334,6 +343,8 @@ def persist_finance_transition(
                     transition.next_state_date,
                     H1_STATE_TYPE,
                     newly_persisted_payables,
+                    inventory.inventory_book_value_krw,
+                    inventory.operational_inventory_value_krw,
                     "H1 승인 매입채무 반영",
                     transition.source_finance_state_id,
                     newly_persisted_payables,

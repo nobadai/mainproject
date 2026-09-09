@@ -53,11 +53,16 @@ def load_finance_states(*, sim_run_id: str, as_of: date) -> list[dict[str, objec
             note
         FROM {}.finance_states
         WHERE sim_run_id = %s
-          AND state_date = %s
+          AND state_date = (
+              SELECT MAX(state_date)
+              FROM {}.finance_states
+              WHERE sim_run_id = %s
+                AND state_date <= %s
+          )
         ORDER BY financing_mode
         """
-    ).format(sql.Identifier(get_db_schema()))
-    return fetch_all(query, [sim_run_id, as_of])
+    ).format(sql.Identifier(get_db_schema()), sql.Identifier(get_db_schema()))
+    return fetch_all(query, [sim_run_id, sim_run_id, as_of])
 
 
 def load_cashflow_summary(*, sim_run_id: str, as_of: date) -> dict[str, object] | None:
