@@ -13,7 +13,6 @@ import {
   CardBlock,
   ErrorBox,
   Loading,
-  Note,
   SourceTag,
   StatRow,
 } from "@/components/console/Blocks";
@@ -33,7 +32,9 @@ export default function SalesPage() {
   return (
     <>
       <SourceTag sources={[data.source]} />
-      <Note note={data.read_only} />
+      <p className="m-0 text-[12px] leading-relaxed text-ink2">
+        {data.read_only.text}
+      </p>
       <StatRow items={data.stats} />
       {data.cards.map((c) => (
         <CardBlock key={c.key} card={c} />

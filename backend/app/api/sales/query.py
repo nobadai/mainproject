@@ -129,7 +129,7 @@ def _action_card(dash) -> Card:
 def _items_card(dash) -> Card:
     return Card(
         key="items",
-        title="품목별 매출",
+        title="품목별 판매",
         subtitle="판매 항목 기준",
         source_ref="품목별 판매 내역",
         table=Table(

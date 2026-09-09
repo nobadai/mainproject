@@ -139,6 +139,15 @@ def test_판매_화면은_dashboard_값을_쓴다(client):
     assert actions["title"] == "지금 확인할 판매"
     assert actions["stats"][0]["label"] == "출고 대기"
     assert actions["stats"][1]["value"] == "1건"
+    assert [card["title"] for card in body["cards"]] == [
+        "지금 확인할 판매",
+        "최근 판매 내역",
+        "남은 수금 일정",
+        "품목별 판매",
+    ]
+    assert body["read_only"]["text"] == (
+        f"조회 기준일 {FIN_AS_OF} · 근거 · 판매 확정 내역 / 수금 장부 · 조회 전용"
+    )
     recent = next(card for card in body["cards"] if card["key"] == "recent")
     assert [row["no"] for row in recent["table"]["rows"]] == ["SALE-002", "SALE-001"]
     assert {row["outbound"] for row in recent["table"]["rows"]} == {"출고 상태 확인 필요"}
