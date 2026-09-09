@@ -17,7 +17,7 @@ from typing import Any
 
 from psycopg import sql
 
-from app.finance.db import FinanceDataNotReady, get_db_schema
+from app.finance.db import FinanceDataNotReady, get_db_schema, load_inventory_snapshot_as_of
 from app.finance.state_identity import daily_finance_state_id
 
 __all__ = [
@@ -126,6 +126,11 @@ def cancel_finance_payables(
                 raise FinanceDataNotReady("historical_finance_position")
 
         expected_amount = sum((row.outstanding_amount_krw for row in eligible), start=Decimal(0))
+        inventory = load_inventory_snapshot_as_of(
+            conn,
+            sim_run_id=sim_run_id,
+            as_of=target_state_date,
+        )
         base_state = target_state or source_state
         assert base_state is not None
         if base_state.unsettled_purchase_payables_krw < expected_amount:
@@ -162,6 +167,8 @@ def cancel_finance_payables(
                 schema=schema,
                 state=target_state,
                 cancelled_amount=newly_cancelled_amount,
+                inventory_book_value_krw=inventory.inventory_book_value_krw,
+                operational_inventory_value_krw=inventory.operational_inventory_value_krw,
             )
         else:
             assert source_state is not None
@@ -174,6 +181,8 @@ def cancel_finance_payables(
                 as_of=as_of,
                 target_state_date=target_state_date,
                 cancelled_amount=newly_cancelled_amount,
+                inventory_book_value_krw=inventory.inventory_book_value_krw,
+                operational_inventory_value_krw=inventory.operational_inventory_value_krw,
             )
 
     return FinanceCancellationResult(
@@ -290,13 +299,17 @@ def _subtract_existing_state(
     schema: sql.Identifier,
     state: _StateFact,
     cancelled_amount: Decimal,
+    inventory_book_value_krw: Decimal,
+    operational_inventory_value_krw: Decimal,
 ) -> str:
     cursor.execute(
         sql.SQL(
             """
             UPDATE {}.finance_states
             SET unsettled_purchase_payables_krw =
-                unsettled_purchase_payables_krw - %(cancelled_amount)s
+                    unsettled_purchase_payables_krw - %(cancelled_amount)s,
+                inventory_book_value_krw = %(inventory_book_value_krw)s,
+                operational_inventory_value_krw = %(operational_inventory_value_krw)s
             WHERE finance_state_id = %(finance_state_id)s
               AND unsettled_purchase_payables_krw >= %(cancelled_amount)s
             RETURNING finance_state_id
@@ -305,6 +318,8 @@ def _subtract_existing_state(
         {
             "finance_state_id": state.finance_state_id,
             "cancelled_amount": cancelled_amount,
+            "inventory_book_value_krw": inventory_book_value_krw,
+            "operational_inventory_value_krw": operational_inventory_value_krw,
         },
     )
     return _one_returned_state_id(cursor)
@@ -320,6 +335,8 @@ def _carry_and_subtract_state(
     as_of: date,
     target_state_date: date,
     cancelled_amount: Decimal,
+    inventory_book_value_krw: Decimal,
+    operational_inventory_value_krw: Decimal,
 ) -> str:
     if source.financing_mode != financing_mode:
         raise FinanceCancellationConflict("finance_runtime_axis_mismatch")
@@ -344,8 +361,8 @@ def _carry_and_subtract_state(
                 source.current_cash_krw, source.minimum_operating_cash_krw,
                 source.committed_outflows_krw,
                 source.unsettled_purchase_payables_krw - %(cancelled_amount)s,
-                source.receivables_krw, source.inventory_book_value_krw,
-                source.operational_inventory_value_krw, source.current_debt_krw,
+                source.receivables_krw, %(inventory_book_value_krw)s,
+                %(operational_inventory_value_krw)s, source.current_debt_krw,
                 source.recommended_loan_amount_krw, %(note)s
             FROM {schema}.finance_states source
             WHERE source.finance_state_id = %(source_finance_state_id)s
@@ -355,7 +372,9 @@ def _carry_and_subtract_state(
               AND source.unsettled_purchase_payables_krw >= %(cancelled_amount)s
             ON CONFLICT (sim_run_id, financing_mode, state_date) DO UPDATE SET
                 unsettled_purchase_payables_krw =
-                    current_state.unsettled_purchase_payables_krw - %(cancelled_amount)s
+                    current_state.unsettled_purchase_payables_krw - %(cancelled_amount)s,
+                inventory_book_value_krw = %(inventory_book_value_krw)s,
+                operational_inventory_value_krw = %(operational_inventory_value_krw)s
             WHERE current_state.unsettled_purchase_payables_krw >= %(cancelled_amount)s
             RETURNING finance_state_id
             """
@@ -367,6 +386,8 @@ def _carry_and_subtract_state(
             "target_state_date": target_state_date,
             "state_type": CANCELLATION_STATE_TYPE,
             "cancelled_amount": cancelled_amount,
+            "inventory_book_value_krw": inventory_book_value_krw,
+            "operational_inventory_value_krw": operational_inventory_value_krw,
             "note": f"{as_of} 미지급 매입채무 취소 반영",
             "source_finance_state_id": source.finance_state_id,
             "as_of": as_of,
