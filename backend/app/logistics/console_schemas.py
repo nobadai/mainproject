@@ -412,8 +412,17 @@ class ConsoleReservation(ConsoleModel):
     item_name: str | None
     sale_id: str | None
     required_qty_kg: Decimal
-    #: ⚠️ **예약 행에 적힌 DB 값 그대로다.** `ConsoleInventoryItem.reserved_qty_kg`
-    #:    (지금 잡고 있는 양)와 뜻이 다르다 — 전량 출고 뒤에도 이 값은 안 줄어든다.
+    #: ⚠️ **«이 예약이 확보했던 양» 이다 — 그날 잡고 있던 양이 아니다.**
+    #:    `ConsoleInventoryItem.reserved_qty_kg`(지금 잡고 있는 양)와 뜻이 다르다.
+    #:
+    #:    ```text
+    #:    전량 출고 뒤    안 줄어든다     나간 것은 «확보했던» 사실을 안 지운다
+    #:    놓아준 뒤        안 줄어든다     WP-3 보정 2 — 과거 확보량을 지우지 않는다
+    #:    ```
+    #:
+    #:    🔴 그래서 이 값으로 *"지금/그날 몇 kg 잡고 있나"* 를 읽으면 안 된다.
+    #:       그 물음의 답은 `status`(그날 유도값) · `allocated_qty_kg` ·
+    #:       `unallocated_qty_kg` 다 — 놓아준 날부터 뒤의 둘은 0 이 된다.
     reserved_qty_kg: Decimal
     allocated_qty_kg: Decimal
     unallocated_qty_kg: Decimal

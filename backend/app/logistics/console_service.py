@@ -903,14 +903,22 @@ def get_outbound_console(
 
 
 def _reservation_axis(conn: Any, *, reservation_id: str) -> dict[str, Any]:
-    """예약 하나의 실행 축과 잔여량. 🔴 **호출자가 sim_run_id 를 지어내지 않게 한다.**"""
+    """예약 하나의 실행 축과 잔여량. 🔴 **호출자가 sim_run_id 를 지어내지 않게 한다.**
+
+    🔴 **놓아준 예약의 남은 확보량은 0 이다 (WP-3 보정 2).** `release_reservation` 이
+       `reserved_qty_kg` 를 보존하게 되면서(과거 확보량을 안 지우려고) 그 값이 놓아준
+       뒤에도 남는다 — 여기서 그대로 빼면 FEFO 화면이 *"아직 60kg 붙일 수 있다"* 고
+       답한다. **잡고 있나는 `status` 가 답한다** (`_HOLDING_RESERVATION`).
+    """
     schema = _schema()
     found = _rows(
         conn,
         sql.SQL(
             """
             SELECT r.reservation_id, r.sim_run_id, r.item_id, r.reserved_qty_kg,
-                   GREATEST(r.reserved_qty_kg - COALESCE(a.qty, 0), 0)
+                   CASE WHEN r.status = ANY(%(holding_resv)s)
+                        THEN GREATEST(r.reserved_qty_kg - COALESCE(a.qty, 0), 0)
+                        ELSE 0 END
                        AS remaining_reservation_qty_kg
             FROM {schema}.inventory_reservations r
             LEFT JOIN (
@@ -922,7 +930,11 @@ def _reservation_axis(conn: Any, *, reservation_id: str) -> dict[str, Any]:
             WHERE r.reservation_id = %(reservation_id)s
             """
         ).format(schema=schema),
-        {"reservation_id": reservation_id, "assigned_alloc": sorted(_ASSIGNED_ALLOCATION)},
+        {
+            "reservation_id": reservation_id,
+            "assigned_alloc": sorted(_ASSIGNED_ALLOCATION),
+            "holding_resv": sorted(_HOLDING_RESERVATION),
+        },
     )
     if not found:
         raise LookupError(f"없는 예약이다: {reservation_id!r}")

@@ -270,12 +270,24 @@ class HistoricalReservation:
     ⚠️ **`created_at` · `updated_at` 도 안 쓴다.** 벽시각이라 DB 를 손본 시각이지
        시뮬레이션 사실일이 아니다 (`released_as_of` 를 만든 이유가 그것이다).
 
-    ⚠️ **`reserved_qty_kg` 는 지금 값이다.** top-up 이 날짜를 넘겨 일어나면 과거
-       확보량을 재현할 수 없다 — 그런데 production 에서 그 일이 안 난다:
-       예약을 만드는 유일한 경로가 마스터 `outbound_flow` 이고 그것은
-       `_due_today`(`sale_date == as_of`)로 **그 판매의 납품일 하루에만** 돌며,
-       콘솔·라우터에는 예약 생성 문이 아예 없다. 그래서 `sale_date <= as_of` 인
-       모든 날에 이 값이 맞다. 그 전제가 깨지면(예약 API 신설 등) 이 칸부터 다시 본다.
+    ⚠️ **`reserved_qty_kg` 는 «확보했던 양» 이지 «그날 잡고 있던 양» 이 아니다.**
+
+    ```text
+    확보했던 양   reserved_qty_kg      놓아준 뒤에도 보존된다 (WP-3 보정 2)
+    그날 잡고 있었나  state             HOLDING / RELEASED
+    그날 안 고른 몫   unallocated_qty_kg  놓아준 날부터 0 이다
+    ```
+
+       🔴 **`release_reservation` 이 이 값을 0 으로 덮지 않는다.** 덮으면
+          놓아주기 **전** 날짜의 확보량이 함께 사라진다 — 01-10 에 60kg 을 잡고
+          01-20 에 놓아준 예약을 01-15 로 조회하면 0kg 이 나오던 자리다.
+
+       ⚠️ **날짜를 넘긴 top-up 은 여전히 재현할 수 없다.** 확보량 변경 이력 표가 없어서다.
+          그런데 production 에서 그 일이 안 난다: 예약을 만드는 유일한 경로가 마스터
+          `outbound_flow` 이고 그것은 `_due_today`(`sale_date == as_of`)로 **그 판매의
+          납품일 하루에만** 돌며, 콘솔·라우터에는 예약 생성 문이 아예 없다. 그래서
+          `sale_date <= as_of` 인 모든 날에 이 값이 맞다. 그 전제가 깨지면
+          (예약 API 신설 · 마스터가 여러 날에 걸쳐 top-up) **이 칸부터 다시 본다.**
     """
 
     reservation_id: str
@@ -298,6 +310,8 @@ class HistoricalReservation:
     #: 그날 원장 OUT 으로 나간 몫 (`state == "SHIPPED"`).
     shipped_qty_kg: Decimal
     #: 그날 아직 Lot 을 안 고른 몫 = `reserved − (ALLOCATED + SHIPPED)`.
+    #: 🔴 **놓아준 날부터 0 이다.** 확보량은 보존되지만 그날 이후로 «아직 붙일 것이
+    #:    남았다» 는 사실은 없다 (`state == "RELEASED"`).
     unallocated_qty_kg: Decimal
     #: 그날 존재한 할당들. `decided_at < cutoff` 로 걸러진 것만 들어온다.
     allocations: tuple[HistoricalAllocation, ...]
@@ -978,6 +992,12 @@ def reservation_state_at(
             (a.allocated_qty_kg for a in 할당 if a.state == "ALLOCATED"), start=Decimal(0)
         )
         확보 = _decimal(row["reserved_qty_kg"])
+        # 🔴 **놓아준 날부터 «아직 안 고른 몫» 은 0 이다 (WP-3 보정 2).** 확보량은
+        #    보존되므로 그대로 빼면 놓아준 예약이 *"아직 60kg 남았다"* 로 보인다.
+        미할당 = (
+            Decimal(0) if 상태 == "RELEASED"
+            else max(Decimal(0), 확보 - (잡은것 + 나간것))
+        )
         지은것.append(
             HistoricalReservation(
                 reservation_id=row["reservation_id"],
@@ -996,7 +1016,7 @@ def reservation_state_at(
                 released_as_of=released,
                 allocated_qty_kg=잡은것,
                 shipped_qty_kg=나간것,
-                unallocated_qty_kg=max(Decimal(0), 확보 - (잡은것 + 나간것)),
+                unallocated_qty_kg=미할당,
                 allocations=할당,
             )
         )

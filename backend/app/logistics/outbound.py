@@ -248,8 +248,12 @@ class ReservationResult:
     status: ReservationStatus
     #: Sales 가 확정한 **원 요구량.** 물류가 이 값을 바꾸지 않는다.
     required_qty_kg: Decimal
-    #: 물류가 **실제로 확보한 양.** `reserve_stock` 은 둘이 늘 같고,
-    #: `reserve_available_stock` 은 모자란 날 이 값만 작아진다.
+    #: 물류가 **실제로 확보한 양** (= DB 행의 `reserved_qty_kg`). `reserve_stock` 은
+    #: 둘이 늘 같고, `reserve_available_stock` 은 모자란 날 이 값만 작아진다.
+    #:
+    #: 🔴 **«지금 잡고 있는 양» 이 아니다.** 놓아준 예약(`RELEASED` · `CANCELLED`)도
+    #:    이 값을 그대로 들고 있다 — 그 예약이 **확보했던 사실**은 놓아줬다고 사라지지
+    #:    않기 때문이다 (WP-3 보정 2). 잡고 있나는 같은 결과의 `status` 가 답한다.
     #:
     #: 🔴 **기본값을 두지 않는다.** 두면 부분 확보를 부르는 쪽이 *"얼마나 잡혔나"* 를
     #:    묻지 않고도 통과하고, 그러면 못 잡은 몫이 조용히 사라진다.
@@ -1004,12 +1008,24 @@ def release_reservation(
         )
         # 🔴 **`released_as_of` 를 같은 UPDATE 에 적는다.** 상태와 날짜가 다른
         #    문으로 가면 한쪽만 선 행이 남고, 그 행은 *"놓아줬는데 언제인지 모른다"* 다.
+        #
+        # 🔴 **`reserved_qty_kg` 를 0 으로 덮지 않는다 (WP-3 보정 2).** 종전에는 여기서
+        #    0 을 썼는데, 그 한 줄이 **놓아주기 전의 과거를 지웠다.**
+        #
+        #    ```text
+        #    01-10  60kg 확보
+        #    01-20  release → reserved_qty_kg = 0
+        #    as_of 01-15 조회 → 0kg   🔴 그날 실제로는 60kg 이었다
+        #    ```
+        #
+        #    이 칸의 뜻은 *"이 예약이 실제로 확보했던 양"* 이지 *"지금 잡고 있는 양"*
+        #    이 아니다. 잡고 있나는 `status` 가 답하고 언제부터 아닌가는
+        #    `released_as_of` 가 답한다 — 세 칸이 각자 다른 질문에 답한다.
         cursor.execute(
             sql.SQL(
                 """
                 UPDATE {}.inventory_reservations
-                SET status = %s, reserved_qty_kg = 0,
-                    released_as_of = %s, updated_at = now()
+                SET status = %s, released_as_of = %s, updated_at = now()
                 WHERE reservation_id = %s
                 """
             ).format(schema),
@@ -1020,8 +1036,10 @@ def release_reservation(
         reservation_id=reservation_id,
         status=status,
         required_qty_kg=기존["required_qty_kg"],
-        # ★ 위 UPDATE 가 `reserved_qty_kg = 0` 으로 놓아준 그 값이다.
-        reserved_qty_kg=Decimal(0),
+        # ★ **보존된 확보량이다 — 0 이 아니다.** `ReservationResult.reserved_qty_kg` 의
+        #   뜻이 *"물류가 실제로 확보한 양"*(= DB 행 값)이라, 놓아줬다고 그 사실이
+        #   0 이 되는 것이 아니다. *"지금 잡고 있나"* 는 같은 결과의 `status` 가 답한다.
+        reserved_qty_kg=Decimal(기존["reserved_qty_kg"]),
     )
 
 
@@ -1243,7 +1261,20 @@ class ReservationAllocationState:
 
     @property
     def unassigned_qty_kg(self) -> Decimal:
-        """확보했는데 **아직 Lot 을 안 고른** 몫. 음수는 0 으로 본다."""
+        """확보했는데 **아직 Lot 을 안 고른** 몫. 음수는 0 으로 본다.
+
+        🔴 **놓아준 예약은 0 이다 (WP-3 보정 2).** `release_reservation` 이
+           `reserved_qty_kg` 를 **보존**하게 되면서(과거 확보량을 지우지 않으려고)
+           그 값이 놓아준 뒤에도 남는다. 여기서 그대로 빼면 *"이 예약이 아직 60kg
+           붙일 게 남았다"* 가 되어 FEFO 가 놓아준 예약에 Lot 을 붙이러 간다.
+
+        ```text
+        확보한 양   reserved_qty_kg     보존된 과거 사실
+        잡고 있나   status              ← 이 값이 답한다
+        ```
+        """
+        if self.status not in _HOLDING_RESERVATION:
+            return Decimal(0)
         남은것 = self.reserved_qty_kg - self.assigned_qty_kg
         return 남은것 if 남은것 > 0 else Decimal(0)
 
