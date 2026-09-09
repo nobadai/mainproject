@@ -21,8 +21,8 @@ from app.sales.simulation_fixture import (
     CAPACITY_RELIEF_SALES,
     FIXTURE_SALES,
     SIM_RUN_ID,
-    apply_confirmed_sales_fixture,
-    confirmed_sales_fixture_requests,
+    apply_sales_simulation_seed,
+    build_sales_simulation_requests,
 )
 from app.sales.schemas import SalesConfirmationInput, SalesScenario
 
@@ -351,7 +351,7 @@ def test_confirm_sale_retry_after_delivery_is_still_idempotent():
 
 
 def test_2026_confirmed_sales_fixture_uses_confirmation_contract():
-    requests = confirmed_sales_fixture_requests()
+    requests = build_sales_simulation_requests()
     first_fixture_requests = requests[: len(FIXTURE_SALES)]
 
     assert [request.sale_date for request in first_fixture_requests] == [
@@ -369,21 +369,21 @@ def test_2026_confirmed_sales_fixture_uses_confirmation_contract():
 
 
 def test_2026_capacity_relief_fixture_is_stable_and_conservative():
-    requests = confirmed_sales_fixture_requests()
+    requests = build_sales_simulation_requests()
     relief_requests = requests[len(FIXTURE_SALES) :]
 
     assert len(relief_requests) == len(CAPACITY_RELIEF_SALES)
-    assert sum(row.quantity_kg for row in CAPACITY_RELIEF_SALES) == Decimal("3200")
+    assert sum(row.quantity_kg for row in CAPACITY_RELIEF_SALES) == Decimal("4600")
     assert {request.sale_date for request in relief_requests} <= {
-        date(2026, 1, 5),
-        date(2026, 1, 6),
         date(2026, 1, 7),
         date(2026, 1, 8),
         date(2026, 1, 9),
+        date(2026, 1, 22),
+        date(2026, 1, 23),
     }
     assert all(request.selected_scenario.item == "배추" for request in relief_requests)
     assert all(
-        request.selected_scenario.quantity_kg <= Decimal("700")
+        request.selected_scenario.quantity_kg <= Decimal("1000")
         for request in relief_requests
     )
     assert all(
@@ -396,8 +396,8 @@ def test_2026_capacity_relief_fixture_is_stable_and_conservative():
 def test_2026_confirmed_sales_fixture_is_idempotent():
     conn = _Connection()
 
-    first = apply_confirmed_sales_fixture(conn)
-    second = apply_confirmed_sales_fixture(conn)
+    first = apply_sales_simulation_seed(conn)
+    second = apply_sales_simulation_seed(conn)
 
     assert sum(result.sales_written for result in first) == len(ALL_CONFIRMED_SALES_FIXTURES)
     assert sum(result.sale_items_written for result in first) == len(ALL_CONFIRMED_SALES_FIXTURES)

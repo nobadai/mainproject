@@ -32,11 +32,11 @@ FIXTURE_SALES: tuple[ConfirmedSaleFixture, ...] = (
 )
 
 CAPACITY_RELIEF_SALES: tuple[ConfirmedSaleFixture, ...] = (
-    ConfirmedSaleFixture(date(2026, 1, 5), Decimal("700"), "CAPACITY-01"),
-    ConfirmedSaleFixture(date(2026, 1, 6), Decimal("650"), "CAPACITY-02"),
-    ConfirmedSaleFixture(date(2026, 1, 7), Decimal("650"), "CAPACITY-03"),
-    ConfirmedSaleFixture(date(2026, 1, 8), Decimal("600"), "CAPACITY-04"),
-    ConfirmedSaleFixture(date(2026, 1, 9), Decimal("600"), "CAPACITY-05"),
+    ConfirmedSaleFixture(date(2026, 1, 7), Decimal("1000"), "CAPACITY-01"),
+    ConfirmedSaleFixture(date(2026, 1, 8), Decimal("1000"), "CAPACITY-02"),
+    ConfirmedSaleFixture(date(2026, 1, 9), Decimal("1000"), "CAPACITY-03"),
+    ConfirmedSaleFixture(date(2026, 1, 22), Decimal("800"), "CAPACITY-04"),
+    ConfirmedSaleFixture(date(2026, 1, 23), Decimal("800"), "CAPACITY-05"),
 )
 
 ALL_CONFIRMED_SALES_FIXTURES: tuple[ConfirmedSaleFixture, ...] = (
@@ -45,17 +45,17 @@ ALL_CONFIRMED_SALES_FIXTURES: tuple[ConfirmedSaleFixture, ...] = (
 )
 
 
-def confirmed_sales_fixture_requests() -> list[SalesConfirmationInput]:
+def build_sales_simulation_requests() -> list[SalesConfirmationInput]:
     return [_request_for(row) for row in ALL_CONFIRMED_SALES_FIXTURES]
 
 
-def apply_confirmed_sales_fixture(conn: Any) -> list[SaleWriteResult]:
-    return [confirm_sale(conn, request) for request in confirmed_sales_fixture_requests()]
+def apply_sales_simulation_seed(conn: Any) -> list[SaleWriteResult]:
+    return [confirm_sale(conn, request) for request in build_sales_simulation_requests()]
 
 
-def main() -> None:
+def seed_confirmed_sales_simulation() -> None:
     with get_connection() as conn:
-        results = apply_confirmed_sales_fixture(conn)
+        results = apply_sales_simulation_seed(conn)
     written = sum(result.sales_written for result in results)
     print(f"confirmed sales fixture applied: {written}/{len(results)} new sales")
 
@@ -134,4 +134,4 @@ def _request_for(row: ConfirmedSaleFixture) -> SalesConfirmationInput:
 
 
 if __name__ == "__main__":
-    main()
+    seed_confirmed_sales_simulation()
