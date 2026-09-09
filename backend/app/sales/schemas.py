@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.ml.schemas import Forecast
 
@@ -336,8 +336,8 @@ class PurchaseAdditionalSupplyResult(BaseModel):
 
     ★ **모르는 칸은 무시한다 (`extra="ignore"`).** 이 모델은 Purchase 가 소유한 전체
       공급가능성 DTO 의 정본이 아니라 Sales 가 쓰는 부분집합 계약이다. 매입이 나중에
-      도착예정일·제약축·원가 같은 칸을 더 실어 보낼 때 Sales 가 안 쓰는 칸 때문에
-      회신 전체를 무효로 만들면 안 된다 — 그건 남의 계약을 Sales 가 소유하는 셈이다.
+      Sales 가 아직 쓰지 않는 칸을 더 실어 보낼 때 그 칸 때문에 회신 전체를 무효로
+      만들면 안 된다 — 그건 남의 계약을 Sales 가 소유하는 셈이다.
       원본 payload 는 `SalesDomainReply.payload` 에 그대로 남으므로 잃는 것도 없다.
     """
 
@@ -346,9 +346,18 @@ class PurchaseAdditionalSupplyResult(BaseModel):
     #: > 0 확보 가능량 확인 / 0 확보 가능량 0kg 확인 / None 미실행·확인 불가
     procurable_quantity_kg: Decimal | None
     risks: list[str]
-    available_date: date | None = None
+    expected_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    available_by: date | None = Field(
+        default=None,
+        validation_alias=AliasChoices("available_by", "available_date"),
+    )
+    basis: Literal["warehouse", "finance", "unknown"] | None = None
+    supply_context_absent: Literal[
+        "NOT_EXECUTION_DAY", "LEDGER_GAP", "NO_PROCUREMENT_RUN"
+    ] | None = None
+    source_ref: str | None = None
 
-    @field_validator("procurable_quantity_kg", mode="before")
+    @field_validator("procurable_quantity_kg", "expected_unit_price_krw", mode="before")
     @classmethod
     def reject_boolean_quantity(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -477,8 +486,17 @@ class ScenarioSupply(BaseModel):
     conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     #: 위 조건부 수량을 만든 원본 Purchase 회신 ref. 수량과 근거가 같이 다닌다.
     dependency_ref: str | None = None
+    #: Purchase 공급 판단이 보존한 조달 원가·가용일·제약 근거와 부재 사유.
+    expected_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    available_by: date | None = None
+    basis: Literal["warehouse", "finance", "unknown"] | None = None
+    supply_context_absent: Literal[
+        "NOT_EXECUTION_DAY", "LEDGER_GAP", "NO_PROCUREMENT_RUN"
+    ] | None = None
+    #: Purchase 공급 경계의 source lineage. Sales 상업조건 source_ref와 다르다.
+    purchase_source_ref: str | None = None
 
-    @field_validator("conditional_quantity_kg", mode="before")
+    @field_validator("conditional_quantity_kg", "expected_unit_price_krw", mode="before")
     @classmethod
     def reject_boolean_conditional(cls, value: object) -> object:
         return _reject_boolean(value)

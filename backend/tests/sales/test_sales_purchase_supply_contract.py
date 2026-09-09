@@ -55,7 +55,7 @@ def _reply(
     }
 
 
-def _request(replies, scenario_id="SALES-001-C"):
+def _request(replies, scenario_id="SALES-001-C", sales_source_ref=None):
     return SalesProposalInput.model_validate(
         {
             "business_mode": "SPOT_SALES",
@@ -67,6 +67,7 @@ def _request(replies, scenario_id="SALES-001-C"):
                 "preferred_unit_price_krw": 2000,
                 "preferred_delivery_date": "2026-09-10",
                 "allow_additional_sourcing": True,
+                **({"source_ref": sales_source_ref} if sales_source_ref else {}),
             },
             "logistics_context": _LOGISTICS,
             "feedback": {
@@ -156,6 +157,134 @@ def test_positive_quantity_becomes_conditional_supply_with_lineage():
     assert scenario.supply.dependency_ref == "PUR-1"
     assert scenario.conditional_purchase is True
     assert "R1" in scenario.risks
+
+
+def test_purchase_supply_facts_are_preserved_without_overwriting_sales_terms():
+    reply = run_proposal(
+        _request(
+            [
+                _reply(
+                    payload={
+                        "procurable_quantity_kg": 1500,
+                        "expected_unit_price_krw": 1800,
+                        "available_by": "2026-09-12",
+                        "basis": "warehouse",
+                        "source_ref": "PROCUREMENT-RUN-1",
+                        "risks": ["R1"],
+                    }
+                ),
+                {
+                    "source_agent": "finance",
+                    "capability": "FINANCIAL_VALIDATION",
+                    "reply_ref": "FIN-1",
+                    "runtime_status": "READY",
+                    "business_status": "ok",
+                    "payload": {"finance_verdict": "PASS"},
+                },
+            ],
+            sales_source_ref="SALES-TERMS-1",
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.required_additional_quantity_kg == Decimal(2000)
+    assert scenario.supply.conditional_quantity_kg == Decimal(1500)
+    assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.supply.expected_unit_price_krw == Decimal(1800)
+    assert scenario.supply.available_by.isoformat() == "2026-09-12"
+    assert scenario.supply.basis == "warehouse"
+    assert scenario.supply.purchase_source_ref == "PROCUREMENT-RUN-1"
+    assert scenario.source_ref == "SALES-TERMS-1"
+    assert scenario.unit_price_krw == Decimal(2000)
+    assert scenario.quantity_kg == Decimal(4500)
+    assert scenario.unmet_quantity_kg == Decimal(500)
+    assert scenario.status == "CONDITIONAL"
+
+
+@pytest.mark.parametrize("basis", ["warehouse", "finance", "unknown"])
+def test_purchase_basis_is_preserved(basis):
+    scenario = _aggressive(
+        run_proposal(
+            _request([_reply(payload={"procurable_quantity_kg": 25, "basis": basis, "risks": []})])
+        )
+    )
+
+    assert scenario.supply.basis == basis
+
+
+def test_invalid_purchase_basis_is_rejected():
+    with pytest.raises(ValidationError):
+        PurchaseAdditionalSupplyResult.model_validate(
+            {"procurable_quantity_kg": 25, "basis": "mixed", "risks": []}
+        )
+
+
+@pytest.mark.parametrize(
+    "absent_reason",
+    ["NOT_EXECUTION_DAY", "LEDGER_GAP", "NO_PROCUREMENT_RUN"],
+)
+def test_unknown_purchase_supply_preserves_context_absence(absent_reason):
+    scenario = _aggressive(
+        run_proposal(
+            _request(
+                [
+                    _reply(
+                        payload={
+                            "procurable_quantity_kg": None,
+                            "basis": "unknown",
+                            "supply_context_absent": absent_reason,
+                            "risks": [],
+                        }
+                    )
+                ]
+            )
+        )
+    )
+
+    assert scenario.supply.conditional_quantity_kg is None
+    assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.supply.basis == "unknown"
+    assert scenario.supply.supply_context_absent == absent_reason
+    assert scenario.status == "UNRESOLVED"
+
+
+def test_available_date_is_accepted_only_as_the_available_by_input_alias():
+    parsed = PurchaseAdditionalSupplyResult.model_validate(
+        {"procurable_quantity_kg": 25, "available_date": "2026-09-12", "risks": []}
+    )
+
+    assert parsed.available_by.isoformat() == "2026-09-12"
+
+
+@pytest.mark.parametrize(
+    ("available_by", "requires_revalidation"),
+    [
+        ("2026-09-12", True),
+        ("2026-09-10", False),
+        ("2026-09-09", False),
+        (None, False),
+    ],
+)
+def test_purchase_availability_revalidates_only_when_later(
+    available_by, requires_revalidation
+):
+    scenario = _aggressive(
+        run_proposal(
+            _request(
+                [
+                    _reply(
+                        payload={
+                            "procurable_quantity_kg": 25,
+                            "available_by": available_by,
+                            "risks": [],
+                        }
+                    )
+                ]
+            )
+        )
+    )
+
+    assert ("DELIVERY_REVALIDATION_REQUIRED" in scenario.execution_dependencies) is requires_revalidation
 
 
 def test_zero_quantity_is_preserved_and_not_conditional():
