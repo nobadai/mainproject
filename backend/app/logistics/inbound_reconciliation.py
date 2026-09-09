@@ -80,9 +80,10 @@ usage_scope
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from psycopg import sql
@@ -92,11 +93,18 @@ from app.logistics.db import get_db_schema
 # 🔴 **B-1 규율을 다시 적지 않고 가져다 쓴다.** 밑줄 이름을 건너 가져오는 것은 이
 #    패키지의 기존 방식이다 (`console_service` 가 `outbound._ASSIGNED_ALLOCATION` 을
 #    그대로 쓰는 것과 같다 — *"여기에 문자열로 다시 적지 않는다"*).
-from app.logistics.inbound_stock import ScheduleIntegrityError, _clear_schedule
+from app.logistics.inbound_stock import (
+    ScheduleIntegrityError,
+    _clear_schedule,
+    _fixture_row,
+    _찾는다,
+)
 from app.logistics.receipts import lock_arrival_writes
+from app.logistics.schemas import InTransitItem
 from app.logistics.transition import USAGE_SCOPE
 
 __all__ = [
+    "InboundLineageAmbiguous",
     "InboundReconciliationError",
     "InboundReconciliationResult",
     "InvalidReconciliationRequest",
@@ -114,6 +122,10 @@ _IN_MOVE_TYPE = "IN"
 
 #: 계보 조회에서 **읽기만 하는** 칸들. 이 함수는 이 표들에 한 줄도 안 쓴다.
 _LINEAGE_COLUMNS = ("receipt_id", "receipt_status", "lot_id", "move_id")
+
+#: 🔴 **둘까지만 읽는다.** 0 · 1 · 2+ 를 가르는 데 그 이상이 필요 없다
+#: (`inbound_stock._AMBIGUITY_PROBE_LIMIT` 과 같은 태도).
+_AMBIGUITY_PROBE_LIMIT = 2
 
 
 class InboundReconciliationError(RuntimeError):
@@ -147,6 +159,19 @@ class ScheduleAlreadyMaterialized(InboundReconciliationError, ValueError):
     """
 
 
+class InboundLineageAmbiguous(InboundReconciliationError, ValueError):
+    """같은 `inbound_id` 에 Receipt 가 **둘 이상**이다. 어느 것도 고르지 않는다.
+
+    🔴 **첫 행을 임의로 집지 않는다.** 둘 중 무엇이 진짜인지는 데이터가 말해 주지
+       않고, 골라 버리면 나머지 하나가 조용히 없는 것이 된다.
+
+    ⚠️ **정상 경로로는 설 수 없는 상태다** — `uq_inbound_receipts_inbound_id`
+       (`sim_run_id` + `inbound_id`) 가 막는다. 그래도 여기서 세는 이유는 이 함수가
+       *"지워도 되나"* 를 묻는 자리이기 때문이다. 제약이 빠진 판이나 손으로 넣은
+       행에서 이 상태가 서면, 모르는 채 지우는 것보다 멈추는 것이 맞다.
+    """
+
+
 @dataclass(frozen=True)
 class MaterializedInbound:
     """거부 근거로 함께 싣는 **계보 한 줄.** 값이고 아무것도 안 쓴다."""
@@ -172,9 +197,17 @@ class InboundReconciliationResult:
        건씩 함께 빠지므로 0 아니면 1 이다 — 중복은 `_clear_schedule` 이 무결성
        오류로 막는다.
 
-    ⚠️ **`reason` · `source_ref` 는 되돌려만 주고 DB 에 안 적는다.** 지금 fixture 행에
-       이 사실을 담을 칸이 없고(`note` 는 하루 넘김이 쓰는 남의 칸이다), 칸을 만드는
-       것은 `database/` 의 일이다. 호출자가 자기 감사 기록에 남긴다.
+    ★ **`source_ref` 는 fixture 행에 실제로 적힌다** (`logistics_runtime_fixture.
+      source_ref`). 걷어낸 뒤 그 행의 근거는 *"누가 왜 이 목록을 이렇게 만들었나"* 이고,
+      그것이 바로 이번 정리이기 때문이다.
+
+    ⚠️ **`reason` 은 DB 에 안 적는다.** 담을 칸이 없고(`note` 는 하루 넘김이 쓰는 남의
+       칸이다), 칸을 만드는 것은 `database/` 의 일이다 — 없는 자리에 억지로 끼워 넣지
+       않는다. 호출자가 자기 감사 기록에 남긴다.
+
+    ★ **걷어낸 사실 셋을 함께 싣는다.** 지운 뒤에는 fixture 어디에도 안 남으므로,
+      *"무엇을 지웠나"* 를 답할 수 있는 곳이 이 결과뿐이다. 재실행 no-op 이면 지운 것이
+      없어 셋 다 `None` 이다.
     """
 
     applied: bool
@@ -183,10 +216,16 @@ class InboundReconciliationResult:
     as_of: date
     usage_scope: str
     removed: int
-    #: 사람이 적은 정리 사유. 빈 값은 애초에 못 들어온다.
+    #: 사람이 적은 정리 사유. 빈 값은 애초에 못 들어온다. **DB 에는 안 적힌다.**
     reason: str
     #: 그 판단의 근거 참조 (티켓 · 감사 문서 등). 역시 빈 값을 안 받는다.
     source_ref: str
+    #: 걷어낸 일정의 품목. 재실행 no-op 이면 `None`.
+    item: str | None = None
+    #: 걷어낸 일정의 수량. 재실행 no-op 이면 `None`.
+    quantity_kg: Decimal | None = None
+    #: 걷어낸 일정의 도착 예정일. 재실행 no-op 이면 `None`.
+    expected_arrival_date: date | None = None
 
 
 def _require_text(value: Any, *, 칸: str) -> str:
@@ -217,6 +256,19 @@ def _materialized_lineage(
 
     ★ **`LEFT JOIN` 이다.** Receipt 만 있고 Lot 이 없는 상태(도착·검수 중)도 계보가
       **있는** 것이다 — 그 건도 일정만 걷어서 될 일이 아니다.
+
+    ```text
+    Receipt 0건    계보 없음      → 걷기 후보
+    Receipt 1건    도착 처리 시작  → ScheduleAlreadyMaterialized (Lot·IN 여부는 사유에)
+    Receipt 2건+   모호           → InboundLineageAmbiguous  🔴 첫 행을 안 고른다
+    ```
+
+       ★ Lot 도 같은 태도다. 한 Receipt 에 Lot 이 여럿이면 그 행들이 **전부** 사유에
+         실린다 — 하나만 보여 주고 나머지를 감추지 않는다.
+
+    🔴 **Receipt 가 0건이면 Lot 도 0건이다.** `inventory_lots.inbound_receipt_id` 가
+       Receipt 를 FK 로 가리키므로, 붙을 Receipt 가 없으면 붙은 Lot 도 없다 — 그래서
+       Receipt 축 하나로 세는 것으로 충분하다.
     """
     with conn.cursor() as cursor:
         cursor.execute(
@@ -235,7 +287,16 @@ def _materialized_lineage(
             (_IN_MOVE_TYPE, sim_run_id, inbound_id),
         )
         rows = cursor.fetchall()
-    return [MaterializedInbound(*_row_values(row)) for row in rows]
+    계보 = [MaterializedInbound(*_row_values(row)) for row in rows]
+    # ★ 행 수가 아니라 **Receipt 수**로 센다 — Lot 이 여럿이면 한 Receipt 도 여러 행이다.
+    receipt_ids = {한줄.receipt_id for 한줄 in 계보}
+    if len(receipt_ids) >= _AMBIGUITY_PROBE_LIMIT:
+        raise InboundLineageAmbiguous(
+            f"같은 inbound_id 에 Receipt 가 둘 이상이다 (inbound_id={inbound_id!r},"
+            f" sim_run_id={sim_run_id!r}): {sorted(receipt_ids)!r}."
+            " 어느 것도 고르지 않는다 — 골라 버리면 나머지가 조용히 없는 것이 된다."
+        )
+    return 계보
 
 
 def _row_values(row: Any) -> tuple[Any, ...]:
@@ -249,6 +310,59 @@ def _row_values(row: Any) -> tuple[Any, ...]:
     if isinstance(row, Sequence):
         return tuple(row[i] for i in range(len(_LINEAGE_COLUMNS)))
     raise InboundReconciliationError(f"입고 계보 행을 못 읽는다: {row!r}")
+
+
+def _stamp_source_ref(
+    conn: Any,
+    schema: sql.Identifier,
+    *,
+    sim_run_id: str,
+    as_of: date,
+    usage_scope: str,
+    source_ref: str,
+) -> None:
+    """걷어낸 fixture 행의 `source_ref` 를 이번 정리의 근거로 바꿔 적는다.
+
+    🔴 **`_clear_schedule` 이 방금 `FOR UPDATE` 로 잡은 그 행이다.** 행 잠금은
+       트랜잭션 수명이라 아직 우리 것이고, 그래서 읽고-고치는 사이가 비어 있지 않다.
+
+    ★ **`_clear_schedule` 을 안 고쳤다.** 그쪽에 `source_ref` 인자를 더하면 입고 실행
+      경로(`materialize_inspected_inbound`)의 서명까지 함께 넓어진다 — 이 한 줄을
+      여기서 쓰는 편이 기존 코드 변경이 더 작다.
+
+    ⚠️ **재실행 no-op 에는 안 부른다.** 아무것도 안 걷은 호출이 그 행의 근거를 자기
+       것으로 덮으면, 실제로 걷은 사람의 근거가 사라진다.
+
+    ⚠️ **덮어쓰기다.** 이 칸은 하나뿐이라 이전 값(씨앗·하루 넘김이 적어 둔 것)은
+       남지 않는다 — 그 값을 함께 보관할 자리가 지금 스키마에 없다.
+
+    ★ `updated_at` 은 `_clear_schedule` 이 이미 찍었다. 여기서 다시 안 만진다.
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {}.logistics_runtime_fixture
+                SET source_ref = %s
+                WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
+                """
+            ).format(schema),
+            (source_ref, sim_run_id, as_of, usage_scope),
+        )
+
+
+def _removed_facts(in_transit: Any, inbound_id: str) -> Mapping[str, Any] | None:
+    """걷어낼 항목의 **원본 dict** 를 집어 둔다. 판정하지 않는다.
+
+    🔴 **여기서 검증하지 않는다.** 짝·중복·B-1 은 `_clear_schedule` 이 판정하고, 이
+       함수는 *"지운 것이 무엇이었나"* 를 결과에 싣기 위해 사본을 쥐고 있을 뿐이다.
+       두 곳이 판정하면 두 번째 정본이 생긴다.
+
+    ★ 정확히 1건일 때만 집는다. 0건이면 걷을 것이 없고, 2건 이상이면 어느 것인지
+      고르지 않는다 — 둘 다 뒤이어 `_clear_schedule` 이 제 규율로 답한다.
+    """
+    찾은것 = _찾는다(in_transit, inbound_id)
+    return 찾은것[0] if len(찾은것) == 1 else None
 
 
 def reconcile_orphan_inbound_schedule(
@@ -265,10 +379,17 @@ def reconcile_orphan_inbound_schedule(
 
     ```text
     ① 도착 전역 잠금
-    ② inbound_id 의 입고 계보 조회   Receipt·Lot·IN Move
-    ③ 계보가 있으면 거부              ScheduleAlreadyMaterialized
-    ④ fixture 행 FOR UPDATE + B-1 재검증 + 양쪽 제거   inbound_stock._clear_schedule
+    ② inbound_id 의 입고 계보 조회   Receipt 0 / 1 / 2+ 를 가른다
+    ③ 계보가 있으면 거부              ScheduleAlreadyMaterialized · InboundLineageAmbiguous
+    ④ fixture 행 FOR UPDATE · 지울 항목 사본 확보 (판정은 안 한다)
+    ⑤ B-1 재검증 + 양쪽 제거          inbound_stock._clear_schedule
+    ⑥ 걷었으면 그 행의 source_ref 를 이번 정리로 바꿔 적는다
     ```
+
+    🔴 **나이로 지우지 않는다.** `expected_arrival_date` 가 얼마나 지났는지, 발주 참조가
+       비었는지, `ARRIVAL_PURCHASE_REFERENCE_MISSING` 인지를 **조건으로 쓰지 않는다** —
+       참조 전달이 늦은 정상 입고와 구별되지 않기 때문이다. 이 함수가 보는 것은 사람이
+       지목한 `inbound_id` 하나의 정합성뿐이다.
 
     🔴 **`inbound_id` 를 이 함수가 고르지 않는다.** 무엇이 잘못된 일정인지는 사람이
        판단하고, 이 함수는 그 판단을 **정확히 한 건만** 실행한다. 그래서 조건 검색도
@@ -292,6 +413,7 @@ def reconcile_orphan_inbound_schedule(
     :param source_ref: 그 판단의 근거 참조. 빈 문자열을 안 받는다.
     :raises InvalidReconciliationRequest: 축이나 근거가 비었을 때. **DML 전에 막는다.**
     :raises ScheduleAlreadyMaterialized: 그 `inbound_id` 에 Receipt·Lot·IN 이 있을 때.
+    :raises InboundLineageAmbiguous: 같은 `inbound_id` 에 Receipt 가 둘 이상일 때.
     :raises ScheduleIntegrityError: 그날 fixture 행이 없거나, 두 칸이 짝이 안 맞거나,
         중복이거나, 두 칸의 사실(B-1)이 다를 때. **아무것도 안 지운다.**
     """
@@ -319,7 +441,15 @@ def reconcile_orphan_inbound_schedule(
             " 출처를 되짚을 자리가 없어진다."
         )
 
-    # ── ④ 걷는 규율은 입고 경로의 것을 그대로 쓴다 ────────────────────
+    # ── ④ 지울 것의 사본을 먼저 쥔다 (판정은 안 한다) ─────────────────
+    #    ★ `_fixture_row` 가 그 행을 `FOR UPDATE` 로 잡는다 — ⑤ 가 같은 잠금 아래
+    #      이어서 돌므로 읽기와 쓰기 사이가 비지 않는다.
+    in_transit, _ = _fixture_row(
+        conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
+    )
+    지울것 = _removed_facts(in_transit, inbound_id)
+
+    # ── ⑤ 걷는 규율은 입고 경로의 것을 그대로 쓴다 ────────────────────
     applied = _clear_schedule(
         conn,
         schema,
@@ -328,6 +458,23 @@ def reconcile_orphan_inbound_schedule(
         usage_scope=usage_scope,
         inbound_id=inbound_id,
     )
+
+    # ── ⑥ 걷었을 때만 그 행의 근거를 이번 정리로 바꿔 적는다 ──────────
+    사실 = None
+    if applied:
+        _stamp_source_ref(
+            conn,
+            schema,
+            sim_run_id=sim_run_id,
+            as_of=as_of,
+            usage_scope=usage_scope,
+            source_ref=source_ref,
+        )
+        # ★ 여기서 파싱한다. ⑤ 를 지났다는 것이 곧 **B-1 을 통과한 항목**이라는 뜻이라,
+        #   계약 모델이 터질 자리가 없다 — 앞에서 파싱하면 `_clear_schedule` 이 낼
+        #   `ScheduleIntegrityError` 가 pydantic 오류로 바뀌어 나간다.
+        사실 = InTransitItem.model_validate(지울것) if 지울것 is not None else None
+
     return InboundReconciliationResult(
         applied=applied,
         inbound_id=inbound_id,
@@ -338,4 +485,7 @@ def reconcile_orphan_inbound_schedule(
         removed=1 if applied else 0,
         reason=reason,
         source_ref=source_ref,
+        item=None if 사실 is None else 사실.item,
+        quantity_kg=None if 사실 is None else 사실.quantity_kg,
+        expected_arrival_date=None if 사실 is None else 사실.expected_arrival_date,
     )
