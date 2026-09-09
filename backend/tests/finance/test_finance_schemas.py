@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 import pytest
 from pydantic import ValidationError
 
@@ -7,11 +5,14 @@ from app.finance.schemas import ChannelTerm
 from app.purchase_agent.schemas import PurchaseProposal
 
 
-def test_purchase_agent_v04_contract_keeps_decimal(purchase_payload):
+def test_purchase_agent_v04_contract_uses_int_kg_contract(purchase_payload):
     request = PurchaseProposal.model_validate(purchase_payload)
+    scenario = request.scenarios[0]
 
-    assert request.scenarios[0].total_amount_krw == Decimal(7125000)
-    assert request.scenarios[0].sourcing_plan[0].qty_kg == 3000
+    assert scenario.total_amount_krw == 7_125_000
+    assert type(scenario.total_amount_krw) is int
+    assert scenario.sourcing_plan[0].qty_kg == 3000
+    assert type(scenario.sourcing_plan[0].qty_kg) is int
 
 
 def test_purchase_agent_contract_rejects_legacy_ton_fields(purchase_payload):
