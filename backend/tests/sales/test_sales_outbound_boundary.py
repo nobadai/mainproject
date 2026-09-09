@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+import app.sales.outbound as outbound_module
 from app.sales.outbound import outbound_reservation_for_sale
 from app.sales.persistence import SaleWriteResult
 
@@ -46,3 +48,11 @@ def test_sales_outbound_boundary_rejects_missing_execution_axis():
 
     with pytest.raises(ValueError, match="sim_run_id"):
         outbound_reservation_for_sale(result, sim_run_id="", as_of=date(2026, 9, 10))
+
+
+def test_sales_outbound_boundary_does_not_call_logistics():
+    source = Path(outbound_module.__file__).read_text(encoding="utf-8")
+
+    assert "app.logistics" not in source
+    for forbidden in ("reserve_confirmed_sale(", "reserve_confirmed_sale_available("):
+        assert forbidden not in source

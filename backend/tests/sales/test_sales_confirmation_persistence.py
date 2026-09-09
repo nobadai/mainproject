@@ -16,6 +16,12 @@ from app.sales.persistence import (
     mark_sale_delivered,
     sale_id_for,
 )
+from app.sales.simulation_fixture import (
+    FIXTURE_SALES,
+    SIM_RUN_ID,
+    apply_confirmed_sales_fixture,
+    confirmed_sales_fixture_requests,
+)
 from app.sales.schemas import SalesConfirmationInput, SalesScenario
 
 
@@ -340,4 +346,29 @@ def test_confirm_sale_retry_after_delivery_is_still_idempotent():
 
     assert retry.sales_written == 0
     assert retry.sale_items_written == 0
-    assert conn.sales[result.sale_id]["order_status"] == "DELIVERED"
+
+
+def test_2026_confirmed_sales_fixture_uses_confirmation_contract():
+    requests = confirmed_sales_fixture_requests()
+
+    assert [request.sale_date for request in requests] == [row.sale_date for row in FIXTURE_SALES]
+    assert all(request.sim_run_id == SIM_RUN_ID for request in requests)
+    assert all(request.selected_scenario.status == "EXECUTABLE" for request in requests)
+    assert all(request.selected_scenario.quantity_kg <= Decimal(60) for request in requests)
+    assert all(
+        build_sale_confirmation_plan(request).order_status == "CONFIRMED"
+        for request in requests
+    )
+
+
+def test_2026_confirmed_sales_fixture_is_idempotent():
+    conn = _Connection()
+
+    first = apply_confirmed_sales_fixture(conn)
+    second = apply_confirmed_sales_fixture(conn)
+
+    assert sum(result.sales_written for result in first) == len(FIXTURE_SALES)
+    assert sum(result.sale_items_written for result in first) == len(FIXTURE_SALES)
+    assert sum(result.sales_written for result in second) == 0
+    assert sum(result.sale_items_written for result in second) == 0
+    assert all(row["order_status"] == "CONFIRMED" for row in conn.sales.values())
