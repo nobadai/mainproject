@@ -248,7 +248,22 @@ def load_documents(item: str, as_of: date, doc_types: list[str]) -> list[dict[st
       없어 판정하지 않고, ⑥이 나이를 사실로 적는다** (``_context_risks``).
     """
     _require_item(item)
-    corpus = _pick(_read("documents.json"), "documents", "documents.json")
+    raw = _read("documents.json")
+    corpus = _pick(raw, "documents", "documents.json")
+    # 🔴 **등급은 코퍼스가 선언한다** (2026-09-09 · E3-5). 전에는 ⑥
+    #   ``package_scenarios._context_rationale`` 이 ``"SIM_FIXED"`` 를 리터럴로 들고
+    #   있었고, *"실문서로 갈아끼우면 여기가 OFFICIAL 이 된다"* 는 설명만 docstring 에
+    #   있었다. 선언과 코드가 **같은 값**이라 값 비교로는 «선언에서 읽는가» 를 증명할 수
+    #   없었다 (규칙 8). 실물이 오는 날 고칠 자리를 코드 안에 숨기지 않는다.
+    #
+    # ⚠️ **없으면 거부한다.** 기본값으로 ``SIM_FIXED`` 를 떨어뜨리면 *"아무도 선언한 적
+    #   없는 등급"* 이 근거에 실린다 — ``published_at`` 을 0 으로 안 채우는 것과 같은
+    #   자리다 (규칙 3).
+    #
+    # ★ **값이 사다리 안인지는 여기서 안 본다.** ``schemas.RationaleItem`` 의
+    #   ``EvidenceGrade`` 가 출력 경계에서 이미 검사한다 — 사다리를 두 곳에 적으면
+    #   한쪽만 늙는다 (규칙 7).
+    evidence_grade = _pick(raw, "_evidence_grade", "documents.json")
 
     known = sorted({record["doc_type"] for record in corpus})
     if not doc_types:
@@ -269,6 +284,7 @@ def load_documents(item: str, as_of: date, doc_types: list[str]) -> list[dict[st
             "title": record["title"],
             "published_at": record["published_at"],
             "content": record["content"],
+            "evidence_grade": evidence_grade,
         }
         for record in filter_by_published_at(matched, as_of)
     ]

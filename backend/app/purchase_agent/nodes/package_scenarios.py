@@ -746,10 +746,19 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ``context_docs_used``와 같은 변환을 써야 두 필드가 대조 가능하다 — ⑦의
     ``check_document_refs``가 그 대조를 한다.
 
-    ``evidence_grade``가 ``SIM_FIXED``인 이유: IO명세 §2 예시는 ``OFFICIAL``이지만 그건
-    **실제 KREI 발간물** 기준이다. 우리 코퍼스는 형식만 빌린 가상 문서라
-    (``documents.json._전부_시뮬레이션``), 등급은 문서의 격이 아니라 **실제 데이터
-    출처**를 따라 붙인다. 실문서로 갈아끼우면 여기가 ``OFFICIAL``이 된다.
+    ``evidence_grade``는 **코퍼스가 선언한 것을 그대로 싣는다.** IO명세 §2 예시는
+    ``OFFICIAL``이지만 그건 **실제 KREI 발간물** 기준이고, 우리 코퍼스는 형식만 빌린
+    가상 문서다 — 등급은 문서의 격이 아니라 **실제 데이터 출처**를 따른다.
+
+    🔴 **전에는 여기에 ``"SIM_FIXED"`` 가 리터럴로 박혀 있었다** (2026-09-09 · E3-5).
+      *"실문서로 갈아끼우면 여기가 ``OFFICIAL`` 이 된다"* 는 설명이 이 docstring 에만
+      있었고, 선언(``documents.json._전부_시뮬레이션``)은 **사람만 읽는 문장**이었다.
+      선언과 코드가 같은 값이라 값 비교로는 «선언에서 읽는가» 를 증명할 수 없다
+      (규칙 8). 이제 ``documents.json._evidence_grade`` 가 정하고, 없으면 로더가
+      적재를 거부한다.
+
+    ⚠️ ``doc["evidence_grade"]`` 를 ``get`` 으로 읽지 않는다. 기본값을 두면 손으로 만든
+      문서 dict 가 조용히 통과해 **아무도 선언한 적 없는 등급**이 근거에 실린다.
 
     ``claim``이 주장 요약이 아닌 이유: 규칙은 본문을 요약할 수 없다. 문서 식별로 두고 실제
     주장은 ``evidence_detail``의 발췌가 **원문 그대로** 싣는다 — 규칙이 요약한 척하지 않는다.
@@ -760,7 +769,7 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
             "source": DOCUMENT_SOURCE,
             "claim": f"{doc['source']} {doc['doc_type']} — {doc['title']}",
             "ref_id": document_ref(doc["doc_id"]),
-            "evidence_grade": "SIM_FIXED",
+            "evidence_grade": doc["evidence_grade"],
             "evidence_detail": f"{doc['published_at']} 발행 · 발췌: \"{doc['excerpt']}\"",
         }
         for doc in context_docs
@@ -881,7 +890,27 @@ def _judgment_day_risks(forecast: dict) -> list[str]:
     ]
 
 
-def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> list[str]:
+#: 읽으려다 못 읽은 날의 고지. **"발간물이 0건"과 같은 문장을 쓰지 않는다.**
+#:
+#: 🔴 **규칙 3(``0`` ≠ ``NULL``)이 문면에서 깨져 있던 자리다** (2026-09-09 · E3-5).
+#:   ``collect_context`` 는 두 상태를 이미 갈라 뒀다 — *"그날 그 유형이 없다"* 는 빈
+#:   ``context_docs``, *"읽으려다 못 읽었다"* 는 ``context_unavailable``. 그런데 ⑥은
+#:   **둘 다 «참조 가능한 발간물 0건»으로 적고 있었다.** 운영 기록 158건이 그 문장이고,
+#:   읽는 사람에게는 *"그날 그 문서가 세상에 없었다"* 로 읽힌다.
+#:
+#: ⚠️ **못 읽은 사유를 여기에 옮기지 않는다.** ``context_unavailable`` 문자열은 내부
+#:   함수 이름이 든 개발자용 문장이다. 이 필드를 읽는 쪽은 H1 승인 화면과 Critic이라
+#:   (계약서 §0), **있었다는 사실만** 쓴다.
+_UNREAD_ALL = "문서 {kinds}종을 요청했으나 읽지 못했다 — 그날 발간물이 0건이었다는 뜻이 아니다"
+_UNREAD_REST = "요청한 유형 중 읽지 못한 것이 남았다 — 그 유형의 발간물이 0건이었다는 뜻이 아니다"
+
+
+def _context_risks(
+    loop_count: int,
+    context_docs: list[dict],
+    as_of: str,
+    unavailable: str | None = None,
+) -> list[str]:
     """문서 수집에서 나온 유의사항. **②가 안 돈 날은 아무 줄도 안 붙는다.**
 
     판정 기준이 ``situation`` 문자열이 아니라 **``context_loop_count``**인 이유: 알고 싶은
@@ -910,17 +939,27 @@ def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> lis
     문구에 내부 단계 이름을 쓰지 않고, **하지 않은 일을 한 것처럼 적지도 않는다** — 발췌는
     문장 경계 파서가 아니라 서두 잘라내기라 "첫 문장"이라고 주장하지 않는다. 이 필드를
     읽는 쪽은 코드가 아니라 H1 승인 화면과 Critic이다 (계약서 §0).
+
+    🔴 **``unavailable`` 이 넷째 상태를 연다** (2026-09-09 · E3-5). 전에는 셋이었다 —
+      안 찾아봄 / 찾았는데 없음 / 찾아서 있음. **"찾다가 못 읽음"이 둘째와 같은 문장을
+      쓰고 있었다.** 근거·경위는 ``_UNREAD_ALL`` 주석에 있다.
+
+    ⚠️ ⑦ ``self_check._CONTEXT_NOTE`` 도 못 읽은 사실을 적는다. **층이 다르다** —
+      여기는 *"문서 수집이 무엇을 했나"*, 저기는 *"그래서 이 안이 어떻게 나왔나"* 다.
+      둘이 한 안의 ``risks`` 에 나란히 뜨므로 **같은 말을 두 번 쓰지 않는다.**
     """
     if loop_count <= 0:
         return []  # ② 미실행 — "찾아보지 않았다"는 고지할 유의사항이 아니라 경로의 사실이다
     if not context_docs:
+        if unavailable:
+            return [_UNREAD_ALL.format(kinds=loop_count)]
         return [
             (
                 f"문서 {loop_count}종을 찾았으나 참조 가능한 발간물 0건 — "
                 "문서 근거 없이 구성된 안이다"
             )
         ]
-    return [
+    notes = [
         (
             f"문서 {len(context_docs)}건 참조 — 정해진 우선순위 순서대로 읽었고 "
             "어느 문서가 더 맞는지도, 이만하면 충분한지도 판정하지 않는다. "
@@ -928,6 +967,12 @@ def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> lis
             f"{_document_age(context_docs, as_of)}"
         )
     ]
+    if unavailable:
+        # 🔴 **운영에서는 안 밟힌다** — 지금 ``get_context_docs`` 는 첫 회차부터 막혀
+        #   읽은 문서가 0건이다. 실 소스가 붙어 일부만 읽히는 날 열리는 가지이고,
+        #   그때 이 줄이 없으면 "N건 참조" 가 **다 읽은 것처럼** 읽힌다.
+        notes.append(_UNREAD_REST)
+    return notes
 
 
 def _sourcing_decision(ratios: list[dict]) -> dict:
@@ -1544,7 +1589,12 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
                     *_adjustment_risks(state.get("adjustments")),
                     *_context_risks(
-                        state["context_loop_count"], state["context_docs"], state["date"]
+                        state["context_loop_count"],
+                        state["context_docs"],
+                        state["date"],
+                        # 🔴 **빈 문서가 두 뜻이라 넘긴다** — "그날 없었다"와 "못 읽었다".
+                        #   State 는 갈라 들고 있는데 ⑥이 안 읽어서 문면이 하나였다.
+                        state.get("context_unavailable"),
                     ),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
