@@ -20,6 +20,7 @@ from app.purchase_agent.nodes.classify_situation import (
     judgment_row,
 )
 from app.purchase_agent.nodes.draft_plan import (
+    ADJUSTMENT_CAP_NAME,
     pending_value,
     purchase_budget_krw,
     split_adjustments,
@@ -780,7 +781,9 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ]
 
 
-def _adjustment_risks(adjustments: list[dict] | None, constraints: dict) -> list[str]:
+def _adjustment_risks(
+    adjustments: list[dict] | None, constraints: dict, label: str, *, clipped: bool
+) -> list[str]:
     """받았지만 **반영하지 않은** 조정안을 고지한다. 안 왔으면 아무 줄도 안 붙는다.
 
     🔴 **이 줄이 없으면 "값을 실어 주고 안 쓰는" 자리가 된다.** 마스터가 2회차에
@@ -802,6 +805,14 @@ def _adjustment_risks(adjustments: list[dict] | None, constraints: dict) -> list
     ⚠️ 반영이 붙어도 **이 함수는 안 지운다** — 못 쓰는 조정안이 남으므로 고지할 대상이
       사라지지 않는다. (``#177`` 이 *"반영이 붙는 날 지운다"* 라고 적었는데, 그때는
       «못 쓰는 것» 이라는 갈래를 안 보고 있었다.)
+
+    🔴 **«반영했다» 는 여기서 안 적는다** — ``_risks`` 가 이미
+      *"조정안 제약으로 원안 N kg 에서 M kg 으로 축소"* 를 낸다. 두 곳이 같은 사실을
+      적으면 한쪽만 고치는 날 화면이 두 말을 한다. 실제로 이 판을 붙이자마자 그 상태가
+      났다 — 같은 안에 *"축소"* 와 *"반영하지 않았다"* 가 나란히 떴다.
+
+      여기 남는 것은 그 문장이 **못 내는 사실 하나**다: 걸었는데 안 물린 경우.
+      ``clipped`` 가 그것을 가른다.
     """
     if not adjustments:
         return []
@@ -810,10 +821,13 @@ def _adjustment_risks(adjustments: list[dict] | None, constraints: dict) -> list
         f"조정안 {len(item)}건은 반영하지 않았다 — {reason}"
         for reason, item in _grouped_by_reason(unusable).items()
     ]
-    if usable:
+    mine = [item for item in usable if label in (item.get("scenario_labels") or ())]
+    if mine and not clipped:
+        # 반영했는데 **아무 일도 안 일어난** 경우다. 아무 줄도 안 붙이면 읽는 사람은
+        # "이 안은 조정안과 무관하다" 로 읽는데, 사실은 **걸었고 안 물린 것**이다.
         notes.append(
-            f"조정안 {len(usable)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
-            "반영 규칙이 아직 정해지지 않았다"
+            f"조정안 {len(mine)}건을 이 안에 반영했으나 원안이 이미 그 상한 아래라 "
+            "수량이 그대로다"
         )
     return notes
 
@@ -1617,7 +1631,16 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
-                    *_adjustment_risks(state.get("adjustments"), constraints),
+                    *_adjustment_risks(
+                        state.get("adjustments"),
+                        constraints,
+                        draft["label"],
+                        # 물렸으면 ``_risks`` 가 이미 축소 문장을 냈다 — 겹쳐 적지 않는다.
+                        clipped=any(
+                            clip["constraint"] == ADJUSTMENT_CAP_NAME
+                            for clip in draft["clipped_by"]
+                        ),
+                    ),
                     *_context_risks(
                         state["context_loop_count"],
                         state["context_docs"],

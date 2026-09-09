@@ -309,7 +309,12 @@ def test_received_count_reaches_meta(count: int) -> None:
     """건수가 ⑦ meta 까지 간다. **건수만** 간다 — 반영 여부는 안 적는다."""
     proposal = _proposal(adjustments=[ADJUSTMENT] * count)
     assert proposal["meta"]["received_adjustments"] == count
-    assert "applied_adjustments" not in proposal["meta"], "반영 안 했으므로 이름도 없어야 한다"
+    # 🔴 **기대를 뜻에 맞췄다** (2026-09-09 · E3-6). 전에는 *"반영 안 했으므로 이름도
+    #   없어야 한다"* 였는데 반영이 붙어 칸이 생겼다. 잡으려던 사실은 그대로다 —
+    #   **닿은 수와 쓴 수를 뭉치지 않는다.** 이 픽스처는 물류 ``quantity`` 축이라
+    #   지금 선언(``amount`` 하나)에 없어 한 건도 안 쓰인다.
+    assert proposal["meta"]["applied_adjustments"] == 0, "못 쓰는 조정안을 썼다고 적었다"
+    assert proposal["meta"]["applied_adjustments"] <= proposal["meta"]["received_adjustments"]
 
 
 def test_every_scenario_says_it_did_not_apply_them() -> None:
@@ -462,6 +467,103 @@ def test_one_line_per_reason_not_per_adjustment() -> None:
         notice = [r for r in scenario["risks"] if "조정안" in r]
         assert len(notice) == 1, f"사유가 하나인데 줄이 여럿이다: {notice}"
         assert "3건" in notice[0], "묶었으면 건수는 남아야 한다"
+
+
+# ── 반영 (E3-6 · 2026-09-09) ──────────────────────────────────────────────
+#
+# `target_value` 는 **넘지 말아야 할 값**이다 — 마스터 IO Contract §4.4 확정.
+# 지시값이 아니라 상한이라 ③은 `min([raw_qty, *caps])` 에 칸 하나가 늘 뿐이다.
+
+
+def test_the_adjustment_only_shrinks_the_scenarios_it_names() -> None:
+    """🔴 **이 판의 본체다.** 조정안이 겨냥한 안만 줄고 나머지는 그대로여야 한다.
+
+    재무가 상한 2,000만에 보수 1,500만 · 기본 2,100만 · 공격 2,800만을 봤으면
+    **기본·공격만 재조정 대상**이다 (``scenario_labels`` 가 신설된 이유 그대로).
+    전 안을 조이면 근거 없이 조이는 것이고, 아무 안도 안 조이면 반영이 아니다.
+    """
+    before = {s["label"]: s["total_qty_kg"] for s in _proposal()["scenarios"]}
+    after = {
+        s["label"]: s["total_qty_kg"]
+        for s in _proposal(adjustments=[FINANCE_AMOUNT])["scenarios"]
+    }
+
+    assert before and set(before) == set(after), "안 구성이 바뀌면 이 비교가 성립하지 않는다"
+    assert after["기본"] < before["기본"], "겨냥한 안이 안 줄었다 — 반영이 안 됐다"
+    for label in set(before) - {"기본"}:
+        assert after[label] == before[label], f"{label} 은 대상이 아닌데 줄었다"
+
+
+def test_the_shrunk_scenario_still_balances() -> None:
+    """줄인 뒤에도 **사중 일치**가 선다 (규칙 4). 수량만 줄이고 나머지를 안 맞추면 컷된다."""
+    proposal = _proposal(adjustments=[FINANCE_AMOUNT])
+    target = next(s for s in proposal["scenarios"] if s["label"] == "기본")
+
+    assert target["total_qty_kg"] == pytest.approx(
+        sum(item["qty_kg"] for item in target["sourcing_plan"])
+    )
+    assert target["total_qty_kg"] == pytest.approx(
+        sum(item["qty_kg"] for item in target["split_plan"])
+    )
+
+
+def test_the_reason_for_the_smaller_number_is_on_the_scenario() -> None:
+    """줄인 이유가 그 안에 남는다 — 숫자만 바뀌고 왜가 없으면 사람이 못 따라간다."""
+    proposal = _proposal(adjustments=[FINANCE_AMOUNT])
+    target = next(s for s in proposal["scenarios"] if s["label"] == "기본")
+
+    shrunk = [r for r in target["risks"] if "조정안 제약으로" in r]
+    assert shrunk, f"축소 사유가 없다: {target['risks']}"
+    assert "kg으로 축소" in shrunk[0]
+
+
+def test_a_scenario_does_not_say_applied_and_not_applied_at_once() -> None:
+    """🔴 **화면이 두 말을 하지 않는다.**
+
+    이 판을 붙이자마자 그 상태가 났다 — 같은 안에 *"조정안 제약으로 … 축소"* 와
+    *"조정안 1건을 받았으나 … 반영하지 않았다"* 가 나란히 떴다. 한 사실을 두 곳이
+    적으면 한쪽만 고치는 날 갈린다.
+    """
+    proposal = _proposal(adjustments=[FINANCE_AMOUNT])
+    for scenario in proposal["scenarios"]:
+        lines = [r for r in scenario["risks"] if "조정안" in r]
+        applied = [r for r in lines if "축소" in r or "반영했으나" in r]
+        refused = [r for r in lines if "반영하지 않았다" in r]
+        assert not (applied and refused), f"{scenario['label']} 이 두 말을 한다: {lines}"
+
+
+def test_an_adjustment_that_does_not_bind_says_so() -> None:
+    """걸었는데 **안 물린** 경우도 말한다 — 아무 줄도 없으면 «무관» 으로 읽힌다."""
+    loose = {**FINANCE_AMOUNT, "target_value": 900_000_000.0}
+    proposal = _proposal(adjustments=[loose])
+    target = next(s for s in proposal["scenarios"] if s["label"] == "기본")
+
+    notice = [r for r in target["risks"] if "상한 아래라" in r]
+    assert notice, f"걸었는데 안 물린 사실이 없다: {target['risks']}"
+    assert not [r for r in target["risks"] if "조정안 제약으로" in r], "안 물렸는데 축소했다"
+
+
+def test_applied_count_is_not_the_received_count() -> None:
+    """🔴 **닿은 수와 쓴 수는 다른 사실이다.** 마스터가 기다리던 칸이다."""
+    proposal = _proposal(adjustments=[FINANCE_AMOUNT, WRONG_UNIT])
+
+    assert proposal["meta"]["received_adjustments"] == 2
+    assert proposal["meta"]["applied_adjustments"] == 1, (
+        "단위가 어긋난 것까지 «반영했다» 로 세면 마스터 대조가 거짓을 통과한다"
+    )
+
+
+def test_the_lowest_cap_wins_when_several_target_one_scenario() -> None:
+    """상한이 여럿이면 **전부 지켜야 한다** — 그건 min 이다."""
+    from app.purchase_agent.config import load_constraints
+    from app.purchase_agent.nodes.draft_plan import adjustment_cap_kg, split_adjustments
+
+    low = {**FINANCE_AMOUNT, "target_value": 1_000_000.0}
+    usable, _ = split_adjustments([FINANCE_AMOUNT, low], load_constraints())
+    assert len(usable) == 2
+
+    assert adjustment_cap_kg(usable, "기본", 1_000) == 1_000
+    assert adjustment_cap_kg(usable, "보수", 1_000) is None, "대상이 아닌 안에 상한이 걸렸다"
 
 
 def test_no_notice_when_nothing_arrived() -> None:

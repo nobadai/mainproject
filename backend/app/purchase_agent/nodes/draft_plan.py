@@ -175,6 +175,36 @@ def _freshness_cap_kg(
     return int(daily_demand * shelf_life_days)
 
 
+#: 조정안 상한이 클립했을 때 ``clipped_by`` 에 남는 이름. **화면이 그대로 읽는다.**
+ADJUSTMENT_CAP_NAME = "조정안"
+
+
+def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | None:
+    """이 안에 걸리는 조정안 상한을 **kg 으로**. 걸리는 것이 없으면 ``None``.
+
+    ``target_value`` 는 **넘지 말아야 할 값**이다 — 목표가 아니다 (마스터 IO Contract
+    §4.4 확정 · *"quantity·amount 는 그 값 이하"*). 그래서 지시값이 아니라 상한이고,
+    ③은 이미 ``min([raw_qty, *caps])`` 구조라 **칸 하나가 늘 뿐**이다.
+
+    ⚠️ **원 → kg 환산에 새 산식을 만들지 않는다.** ``cash_cap_kg`` 와 같은 나눗셈이라
+      따로 쓰면 두 곳이 갈린다 — 재무 상한과 조정안 상한이 다른 단가로 환산되면
+      *"왜 이만큼밖에 못 사나"* 가 두 답을 갖는다.
+
+    ⚠️ **여럿이면 가장 낮은 것을 쓴다.** 상한이 여러 개면 전부 지켜야 하고, 그건
+      ``min`` 이다. 실측상 한 회차에 같은 안을 겨냥한 조정안이 여러 건 온다.
+
+    ★ ``label`` 에 안 걸린 조정안은 여기서 조용히 빠진다 — 어느 안에 거는지는
+      ``scenario_labels`` 가 말하고, 비어 있는 것은 ``split_adjustments`` 가 이미
+      «못 씀» 으로 걸러 여기 오지 않는다.
+    """
+    caps = [
+        cash_cap_kg(float(item["target_value"]), unit_price)
+        for item in usable
+        if label in (item.get("scenario_labels") or ())
+    ]
+    return min(caps) if caps else None
+
+
 def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     """안별 수량 초안을 만든다.
 
@@ -198,13 +228,22 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     warehouse_cap = warehouse_cap_kg(state["inventory"])
     cash_cap = cash_cap_kg(purchase_budget_krw(state, constraints), unit_price)
     freshness_cap = _freshness_cap_kg(state, daily_demand, constraints)
+    # 🔴 **조정안 상한은 안마다 다르다** (2026-09-09 · E3-6). 위 셋은 그날 하나인데
+    #   조정안은 ``scenario_labels`` 로 «이 안» 을 겨냥한다 — 재무가 상한 2,000만에
+    #   기본·공격만 넘겼으면 보수는 안 건드려야 한다.
+    usable, _ = split_adjustments(state.get("adjustments"), constraints)
 
     drafts = [
         _draft_one(
             label=label,
             days=coverage["by_label"][label],
             daily_demand=daily_demand,
-            caps={"창고": warehouse_cap, "현금": cash_cap, "신선도": freshness_cap},
+            caps={
+                "창고": warehouse_cap,
+                "현금": cash_cap,
+                "신선도": freshness_cap,
+                ADJUSTMENT_CAP_NAME: adjustment_cap_kg(usable, label, unit_price),
+            },
             coverage=coverage,
         )
         for label in labels

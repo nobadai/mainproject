@@ -17,6 +17,7 @@ from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
 from app.purchase_agent.nodes.draft_plan import (
     pending_value,
     purchase_budget_krw,
+    split_adjustments,
     warehouse_cap_kg,
 )
 from app.purchase_agent.schemas import (
@@ -812,10 +813,23 @@ def _assemble(
             #   가 된다.
             "is_refeed": bool(feedback) or bool(refeed),
             "feedback_attempt": refeed.get("attempt", 0),
-            # **받은 사실을 산출물에 남긴다.** 반영은 안 하지만(⑥이 risks 에 고지),
-            # 몇 건이 도착했는지는 보내는 쪽이 대조할 수 있어야 한다 — 0 으로만
-            # 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가 같아진다.
+            # **받은 사실을 산출물에 남긴다.** 몇 건이 도착했는지는 보내는 쪽이 대조할
+            # 수 있어야 한다 — 0 으로만 보이면 "안 보냈다" 와 "보냈는데 못 받았다" 가
+            # 같아진다. 마스터 ``flow._adjustment_delivery`` 가 이 값을 읽어 대조한다.
             "received_adjustments": len(state.get("adjustments") or []),
+            # 🔴 **닿았나와 반영했나는 다른 사실이다** (2026-09-09 · E3-6).
+            #
+            #   마스터가 그 구분을 먼저 적어 뒀다 — ``_adjustment_delivery`` docstring:
+            #   *"이것은 «반영됐나» 가 아니라 «닿았나» 다. 반영은 매입이
+            #   ``applied_adjustments`` 를 회신해야 알 수 있고 그 칸은 아직 없다."*
+            #   **그 칸이 여기다.**
+            #
+            #   ⚠️ ``received`` 와 같은 수가 아니다. 항목·단위·대상 안으로 걸러진 것이
+            #     빠지고(③ ``split_adjustments``), 그 차이가 곧 *"보냈는데 못 썼다"* 의
+            #     건수다. 둘을 한 칸으로 뭉치면 그 사실이 사라진다.
+            "applied_adjustments": len(
+                split_adjustments(state.get("adjustments"), load_constraints())[0]
+            ),
         },
         "scenarios": _with_context_note(survivors, state.get("context_unavailable")),
         "confidence": state["confidence"],
