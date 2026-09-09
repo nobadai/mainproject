@@ -83,7 +83,7 @@ from app.logistics.inspections import InspectionOutcome, find_inspection
 from app.logistics.ledger import record_inventory_move
 from app.logistics.purchase_detail import PurchaseDetail
 from app.logistics.receipts import ReceiptStatus, lock_arrival_writes
-from app.logistics.schemas import InTransitItem
+from app.logistics.schemas import UNRESOLVED_SOURCE, InTransitItem
 from app.logistics.transition import USAGE_SCOPE
 
 __all__ = [
@@ -518,18 +518,34 @@ def _mark_putaway_done(conn: Any, schema: sql.Identifier, *, receipt_id: str) ->
 
 def _fixture_row(
     conn: Any, schema: sql.Identifier, *, sim_run_id: str, as_of: date, usage_scope: str
-) -> tuple[Any, Any]:
-    """그날 fixture 행을 **잠그고** 두 목록을 읽는다.
+) -> str:
+    """그날 fixture 행을 **잠그고 `in_transit_status` 하나만** 읽는다.
 
-    🔴 **`FOR UPDATE` 가 일정 정리의 동시성 방어다.** 읽고-고치고-쓰는 사이에 승인
-       전이(`transition.persist_inventory`)가 끼어들면 이번에 걷어낸 행이 되살아나거나
-       그쪽 승인분이 사라진다 — 같은 행을 같은 방식으로 잠근다.
+    🔴 **JSON 두 칸을 읽지 않는다 (W3-3).** 업무 일정의 정본은 `inbound_schedules`
+       이고, 이 행에서 필요한 것은 *"그 축을 확인했나"* 하나뿐이다.
+
+       ⚠️ **종전에는 `in_transit_json IS NULL` 을 `UNRESOLVED` 로 읽었다.** 승인
+          Writer 가 더 이상 그 칸을 안 쓰게 되면서(W3-3) 다음 상태가 성립한다.
+
+       ```text
+       in_transit_status  CONFIRMED     승인이 세운 값
+       in_transit_json    NULL          아무도 안 고친 옛 값
+       inbound_schedules  일정 있음
+       ```
+
+          그때 Console · Capacity 는 status 를 보고 일정을 내는데 도착 처리만 JSON 을
+          보고 `None` 을 내, **같은 날 같은 입고가 화면에는 있고 도착 처리에는 없는**
+          상태가 된다. 판정 근거를 `status` 하나로 모아 그 갈림을 없앤다.
+
+    🔴 **`FOR UPDATE` 는 남긴다.** 도착 처리는 이 행을 잠근 채 Receipt · 검수 · Lot ·
+       원장 IN 까지 가고, 같은 행을 승인 전이(`transition.persist_inventory`)가
+       status 로 건드린다. 잠금 순서(도착 전역 → 이 행 → 원장 전역)를 바꾸지 않는다.
     """
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                SELECT in_transit_json, confirmed_inbound_json
+                SELECT in_transit_status
                 FROM {}.logistics_runtime_fixture
                 WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
                 FOR UPDATE
@@ -540,10 +556,10 @@ def _fixture_row(
         row = _one_row(cursor, "그날 runtime fixture 행")
     if row is None:
         raise ScheduleIntegrityError(
-            f"정리할 물류 runtime fixture 행이 없다"
+            f"도착 처리를 걸 물류 runtime fixture 행이 없다"
             f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={usage_scope})."
         )
-    return _cell(row, 0, "in_transit_json"), _cell(row, 1, "confirmed_inbound_json")
+    return str(_cell(row, 0, "in_transit_status"))
 
 
 def load_in_transit_for_receiving(
@@ -589,12 +605,16 @@ def load_in_transit_for_receiving(
       `persist_inventory`(승인 전이)가 끼어들면 이번에 못 본 승인분이 생기거나
       정리 대상이 어긋난다 — 시작부터 끝까지 한 행 잠금 아래 둔다.
 
-    🔴 **`None` 과 `[]` 를 가른다.**
+    🔴 **`None` 과 `[]` 를 가른다. 판정 근거는 `in_transit_status` 다 (W3-3).**
 
     ```text
-    in_transit_json IS NULL   None   확인한 적 없다 (UNRESOLVED)
-    in_transit_json = '[]'    []     확인했고 0 건이다 (CONFIRMED_ZERO)
+    in_transit_status = UNRESOLVED   None   확인한 적 없다
+    그 외                            [...]  inbound_schedules 가 답한다
     ```
+
+       ⚠️ **종전에는 `in_transit_json IS NULL` 을 봤다.** 승인 Writer 가 그 칸을 더
+          이상 안 쓰게 되면서(W3-3) `status=CONFIRMED · json=NULL · 일정 있음` 이
+          성립하고, 그때 이 경로만 `None` 을 내 화면과 갈렸다.
 
        ⚠️ 둘을 뭉치면 *"오늘 도착할 게 없다"* 와 *"오늘 뭐가 도착할지 모른다"* 가 같은
           값으로 나간다 (`arrival.ArrivalSelection.source_status` 가 그 둘을 가른다).
@@ -632,16 +652,18 @@ def load_in_transit_for_receiving(
     with conn.cursor() as cursor:
         lock_arrival_writes(cursor)
 
-    # ── ② 그날 행을 잠근다 (읽는 것은 status 뿐이다) ──────────────────
-    #    🔴 **행 잠금은 여전히 필요하다.** 뒤이어 `_clear_schedule` 이 **그 행의**
-    #       두 JSON 칸을 고친다 — W3-1 Writer 가 아직 살아 있어서다. 목록의 정본만
-    #       신규 표로 옮겼고 잠금 순서는 그대로다.
-    in_transit, _ = _fixture_row(
+    # ── ② 그날 행을 잠그고 status 를 읽는다 ──────────────────────────
+    #    🔴 **행 잠금은 도착 처리 전체가 쓰는 자원이다.** 이 행을 잡은 채 Receipt ·
+    #       검수 · Lot · 원장 IN 까지 가고, 승인 전이가 같은 행의 status 를 건드린다.
+    #       잠금 순서(도착 전역 → 이 행 → 원장 전역)를 바꾸지 않는다.
+    status = _fixture_row(
         conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
     )
-    if in_transit is None:
+    if status == UNRESOLVED_SOURCE:
         # 🔴 `[]` 로 바꾸지 않는다. 모르는 것을 0 건으로 적으면 그 순간 아는 척이 된다.
-        #    `UNRESOLVED` 판정은 아직 Header 가 소유한다 (W3-2 §8 — 어휘를 안 바꾼다).
+        #    ★ **판정 근거는 `status` 하나다** — JSON 의 NULL 여부가 아니다 (W3-3).
+        #      Console · Capacity(`repository._schedule_source`)와 같은 눈이어야
+        #      같은 날 같은 입고를 두 경로가 다르게 읽지 않는다.
         return None
 
     # ── ③ 목록은 신규 표에서 온다 (W3-2) ─────────────────────────────

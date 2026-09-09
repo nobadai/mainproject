@@ -27,6 +27,7 @@ from app.logistics.outbound import (
 )
 from app.logistics.schemas import (
     POLICY_VERSION,
+    UNRESOLVED_SOURCE,
     InTransitItem,
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
@@ -329,8 +330,8 @@ def _schedule_source[Schedule: (InTransitItem, ScheduledQuantity)](
     ★ 그 밖에는 **목록이 status 를 정한다.** 저장된 `CONFIRMED`/`CONFIRMED_ZERO` 를
       읽어 쓰면 그 칸이 업무 사실의 두 번째 정본이 된다.
     """
-    if stored_status == "UNRESOLVED":
-        return "UNRESOLVED", None
+    if stored_status == UNRESOLVED_SOURCE:
+        return UNRESOLVED_SOURCE, None
     return ("CONFIRMED" if rows else "CONFIRMED_ZERO"), rows
 
 

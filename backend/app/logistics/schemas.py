@@ -32,6 +32,12 @@ FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
 RuleStatus = Literal["PASS", "UNRESOLVED", "FAIL"]
 LogisticsCycle = Literal["PROCUREMENT", "SALES"]
 RuntimeSourceStatus = Literal["CONFIRMED", "CONFIRMED_ZERO", "UNRESOLVED"]
+
+#: *"그 축을 확인한 적이 없다"* 를 뜻하는 값. 🔴 **이 문자열을 여기 말고 어디에도
+#: 다시 적지 않는다** — 판정하는 자리가 둘(`repository._schedule_source` 화면 축 ·
+#: `inbound_stock.load_in_transit_for_receiving` 도착 축)이라, 한쪽만 고쳐지는 날
+#: 같은 날 같은 입고를 두 경로가 다르게 읽는다.
+UNRESOLVED_SOURCE: RuntimeSourceStatus = "UNRESOLVED"
 ConstraintCode = Literal[
     "LOG-H01",
     "LOG-H02",
