@@ -47,12 +47,10 @@ from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
-from app.master.day_opening_repository import opened_days_after
 from app.master.ledger import (
     build_purchase_rows,
     ledger_block_reason,
     persist_purchases,
-    sim_run_id_for,
 )
 
 __all__ = [
@@ -571,64 +569,35 @@ def apply_approval(
         # ★ **`persist_purchases` 가 먼저 돈다** (아래). 물류가 저장하는 `purchase_id` 가
         #   가리키는 부모 행은 **같은 트랜잭션 안에서 이미 서 있다.**
         #
-        # 🔴 **이미 열린 다음 날들에도 같은 사실을 싣는다** (물류 물음 2026-09-07).
+        # 🔴 **이미 열린 다음 날들로 전파하지 않는다** (물류 W3-3 · 2026-09-09).
         #
-        #    `in_transit` 은 **승인 ~ 도착 ~ 검수까지 여러 날에 걸쳐 유지되는 상태**다
-        #    (물류 `day_open.py` 가 그렇게 적었다). 물류는 그것을 **하루 넘김의
-        #    carry-forward** 로 유지하는데, 그러면 전날에서 물려받는 것이라
-        #    **다음 날이 이미 열려 있으면 그 행은 이 승인을 모른 채 굳는다.**
+        #    이 전파는 **물류가 입고 예정을 날짜별 fixture JSON 에 복제해 두던 구조**
+        #    하나 때문에 있었다. 그 구조에서는 다음 날이 이미 열려 있으면 그 행이
+        #    승인을 모른 채 굳었고, 그래서 승인분을 열린 날마다 다시 실어야 했다.
         #
         #    ```text
-        #    2026-01-14   in_transit 2건   ← 전이가 여기 들어간다
-        #    2026-01-15   in_transit 1건   ← **도착일인데 새 것이 없다** (실측 2026-09-07)
+        #    ~W3-2   in_transit_json 을 날마다 복제       → 전파가 필요했다
+        #    W3-3~   inbound_schedules 1행 · 날짜로 질의  → 전파할 것이 없다
         #    ```
         #
-        # ★ **정방향에서는 안 생긴다** — 내일은 아직 없으니까. 다만 *"내일을 미리 열어
-        #   두고 오늘 승인"* 은 있을 수 있는 순서이고, 아티팩트로 보고 덮으면 그 순서가
-        #   실제로 오는 날 **도착분이 조용히 사라진다.**
+        # 🔴 **이제는 전파가 오히려 승인을 깨뜨린다.** 물류가 같은 `inbound_id` 를
+        #    다른 `created_as_of` 로 두 번 받으면 `ScheduleConflict` 로 멈춘다 —
+        #    일정 한 건이 «언제 장부에 섰나» 를 둘 가질 수 없기 때문이다.
+        #    (실측 2026-09-09: 같은 회차를 02-09 · 02-10 에 실으면 그 승인이 FAILED.)
         #
-        # ⚠️ **물류 코드를 안 고친다.** `InventoryTransition` 이 날짜를 행마다 들고 있고
-        #    어댑터 `persist` 가 행마다 `persist_inventory` 를 부른다 — **묶음을 여러 개
-        #    주면 되는 계약**이다. 그리고 `in_transit` 은 덮어쓰기가 아니라 **병합**이라
-        #    (`_merge_in_transit`) 같은 `inbound_id` 를 여러 날에 실어도 안전하다.
+        # ★ **`opened_days_after` 함수는 남긴다.** 이 호출 하나만 걷는다 — 그 함수는
+        #   마스터 소유이고, 다른 사실에 쓸 자리가 생길 수 있다.
         #
-        # 🔴 **어느 날이 열렸는지는 마스터 사실이다.** `master_day_openings` 를 읽는다 —
-        #    물류 표를 읽지 않는다 (정의서 §3.2.5).
-        #
-        #    ⚠️ **정본에 없는 날은 안 보인다.** 이 표가 생기기(2026-09-07) 전에 열린
-        #      날은 마스터도 모르고, 그것은 근사가 아니라 **모르는 것**이다.
-        읽힌_날들 = opened_days_after(
-            after=target_state_date,
-            sim_run_id=sim_run_id_for(commitment),
-            connect=connect,
-        )
-        # 🔴 **`None`(못 읽음)과 `()`(없음)을 여기서 가른다** (물류 지적 2026-09-07).
-        #    접으면 낡은 미래 행이 남아 있는데도 화면이 *"따라잡을 것이 없었다"* 로
-        #    읽는다 — **없는 것과 못 읽은 것은 다르다.**
-        carry_status = "OK" if 읽힌_날들 is not None else "UNREADABLE"
-        열린_날들 = 읽힌_날들 or ()
-        # 🔴 **날마다 그 날에 유효한 회차만 싣는다** (`#381` · `_still_incoming_on`).
-        #    도착일이 지난 날에 같은 회차를 또 실으면 아무도 안 걷는 **유령 확정입고**가
-        #    남는다 — 물류 `_clear_schedule` 은 그날 한 행만 걷는다.
-        #
-        # ★ 실을 회차가 없는 날은 **`build` 를 아예 안 부른다.** 빈 묶음을 넘겨 물류가
-        #   *"오늘 도착 예정 0"* 을 새로 쓰게 하는 것과 다르다 — 그 날은 이 승인과
-        #   상관이 없다.
-        logistics_rows: tuple[Any, ...] = ()
-        실제로_쓴_날들: list[date] = []
-        for state_date in (target_state_date, *열린_날들):
-            그날_약정 = _still_incoming_on(commitment, state_date)
-            if 그날_약정 is None:
-                continue
-            logistics_rows += tuple(
-                logistics.build(
-                    그날_약정,
-                    target_state_date=state_date,
-                    purchase_ids=purchase_ids,
-                )
+        # ⚠️ `carried_forward` 는 이제 늘 비어 있고 `carried_forward_status` 는 `OK` 다.
+        #    회신 모양을 바꾸지 않는다 — 읽는 쪽이 있고, 이번 판의 일이 아니다.
+        logistics_rows = tuple(
+            logistics.build(
+                commitment,
+                target_state_date=target_state_date,
+                purchase_ids=purchase_ids,
             )
-            if state_date != target_state_date:
-                실제로_쓴_날들.append(state_date)
+        )
+        carry_status = "OK"
     except Exception as exc:  # noqa: BLE001 - 전이 실패가 적재된 결정을 지우면 안 된다.
         return TransitionOut(status="FAILED", reason=f"전이 계산 실패: {exc}")
 
@@ -650,6 +619,7 @@ def apply_approval(
         status="APPLIED",
         parts=list(PARTS),
         # 🔴 **열린 날이 아니라 실제로 쓴 날이다** (`#381`).
-        carried_forward=list(실제로_쓴_날들),
+        # ⚠️ 늘 비어 있다 — 전방 전파가 없어졌다 (W3-3). 회신 칸은 남긴다.
+        carried_forward=[],
         carried_forward_status=carry_status,
     )

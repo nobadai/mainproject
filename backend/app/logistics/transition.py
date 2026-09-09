@@ -23,9 +23,10 @@
      막고, 막지 않게 스키마를 열면 *"아직 안 온 물건"* 이 실재 로트와 같은 칸에 앉는다.
      `unit_cost` 를 추정으로 채우면 그 추정이 원가가 되어 재무로 흘러간다.
 
-🟢 **대신 `logistics_runtime_fixture.in_transit_json` 은 이미 그 자리다.**
-   계약은 `schemas.py` 의 `InTransitItem` 이고, `in_transit_status` 는
-   `CONFIRMED · CONFIRMED_ZERO · UNRESOLVED` 셋 중 하나다. 스키마를 바꾸지 않는다.
+🟢 **입고 예정의 정본은 `inbound_schedules` 다 (W3-3 · 2026-09-09).**
+   승인이 그 표에 한 행을 적고, Reader 가 날짜로 질의한다 — 날짜별 fixture JSON 에
+   복제하지 않는다. 계약은 `schemas.py` 의 `InTransitItem` 그대로이고,
+   `in_transit_status` 는 이제 **Header 표시**(그 축을 확인했나)로만 남는다.
 
 🟡 **매입 참조(`purchase_id`)를 받을 자리는 뚫려 있고, 마스터는 그것을 넘기지 않는다.**
    운송 중인 물건이 도착하면 물류는 그 매입 줄에서 `purchase_item_id` · `item_id` ·
@@ -94,12 +95,11 @@ from decimal import Decimal
 from typing import Any
 
 from psycopg import sql
-from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
 from app.logistics.inbound_schedules import ScheduleReferenceMissing, record_schedule
 from app.logistics.purchase_detail import fetch_purchase_detail
-from app.logistics.schemas import InTransitItem, ScheduledQuantity
+from app.logistics.schemas import InTransitItem
 from app.master.commitment import ApprovedCommitment
 
 __all__ = [
@@ -266,229 +266,6 @@ def build_next_inventory(
     return rows
 
 
-def _stored_json(found: Any, index: int, name: str) -> Sequence[Any] | None:
-    """`fetchone()` 결과에서 JSON 칸 하나를 꺼낸다.
-
-    ★ row_factory 가 무엇이냐에 따라 튜플로도 매핑으로도 온다. 커넥션을 만드는 곳은
-      배선 자리(`app/main.py`)이고 이 모듈은 받아 쓸 뿐이라, 여기서 한쪽 모양을
-      강요하지 않는다.
-
-    ★ 순번과 이름을 **둘 다** 받는다 — SELECT 의 칸 순서와 이름이 짝이라 한쪽만
-      고치면 매핑 커넥션과 튜플 커넥션이 다른 값을 읽는다.
-    """
-    if isinstance(found, dict):
-        return found.get(name)
-    return found[index]
-
-
-def _confirmed_inbound_item(item: InTransitItem) -> ScheduledQuantity:
-    """`InTransitItem` 하나를 `confirmed_inbound_schedule` 의 한 행으로 옮긴다.
-
-    🔴 **B-1 이 세 값을 `!=` 로 대조한다** (`tools.py` `find_in_transit_schedule_gap`).
-
-    ```text
-    date         ← expected_arrival_date   🔴 필드 이름이 다르다
-    quantity_kg  ← 그대로
-    item         ← 그대로
-    inbound_id   ← 그대로 (대조의 열쇠)
-    ```
-
-    🔴 **`purchase_id` 를 옮기지 않는다. 일부러다.** `confirmed_inbound_schedule` 은
-       *"그날 몇 kg 이 확정으로 들어온다"* 는 **일정·수량 사실**이고, 그 모델
-       (`ScheduledQuantity`)은 outbound 등 다른 일정에도 재사용된다. 어느 매입에서
-       왔는지는 **운송 중인 물건의 속성**이지 일정의 속성이 아니다.
-
-    ★ B-1 이 대조하는 값은 그대로 넷이다 — 한쪽에만 필드가 늘어도 대조는 성립한다.
-
-    ★ **직렬화 방식을 `in_transit_json` 과 같게 둔다** (`model_dump(mode="json")`).
-      한쪽만 다른 방식으로 뭉개면 `quantity_kg` 가 왕복 뒤 다른 `Decimal` 로 돌아와
-      값은 같은데 `IN_TRANSIT_CONFIRMED_SCHEDULE_MISMATCH` 가 난다. 직렬화는
-      `_merge_schedule` 이 두 칸에 똑같이 걸어 준다 — 여기서는 모델까지만 만든다.
-    """
-    return ScheduledQuantity(
-        inbound_id=item.inbound_id,
-        item=item.item,
-        quantity_kg=item.quantity_kg,
-        date=item.expected_arrival_date,
-    )
-
-
-def _index_by_inbound_id(existing: Sequence[Any], *, 칸이름: str) -> dict[str, dict[str, Any]]:
-    """기존 목록을 `inbound_id` 로 색인한다. **같은 id 가 둘이면 멈춘다.**
-
-    🔴 **깨진 상태 위에 병합하지 않는다.** 이미 중복이 있는 목록에 더하면 그 중복이
-       그대로 남은 채 새 행까지 얹혀, 무엇이 잘못됐는지 더 알기 어려워진다.
-       B-1(`tools.find_in_transit_schedule_gap`)이 읽는 쪽에서 같은 상태를
-       `CONFIRMED_INBOUND_ID_DUPLICATED` 로 잡지만, **쓰는 쪽에서 안 만드는 것이
-       먼저다** — 그것이 이 단계가 고치는 자리(생산자)다.
-
-    ★ `inbound_id` 가 없는 기존 행은 **색인하지 않고 그대로 둔다.** 손으로 심은
-      행일 수 있고, 열쇠가 없는 것을 우리가 지어내지 않는다. 그런 행은 이번 승인분과
-      대조되지 않으므로 병합에서 건드려지지도 않는다.
-    """
-    색인: dict[str, dict[str, Any]] = {}
-    for row in existing:
-        if not isinstance(row, dict):
-            continue
-        inbound_id = row.get("inbound_id")
-        if inbound_id is None:
-            continue
-        if inbound_id in 색인:
-            raise InboundScheduleConflict(
-                f"기존 {칸이름} 에 같은 inbound_id 가 둘 이상 있다: {inbound_id!r}."
-                " 깨진 목록 위에 병합하지 않는다 — 어느 행이 진짜인지 여기서 고를"
-                " 근거가 없다."
-            )
-        색인[inbound_id] = row
-    return 색인
-
-
-def _merge_schedule(
-    existing: Sequence[Any] | None,
-    incoming: Sequence[Any],
-    *,
-    칸이름: str,
-    모델: type,
-) -> tuple[list[Any] | None, str]:
-    """기존 목록에 이번 승인분을 **더한다. 덮지 않는다.** 두 칸이 같이 쓰는 알맹이다.
-
-    🔴 **덮으면 이전에 확정된 입고가 사라진다.** 그날 이미 다른 승인이 반영돼 있으면
-       그 건이 에러 없이 없어지고, 사라진 뒤에는 없었던 것과 구별되지 않는다.
-
-    ```text
-    기존   이번 승인분   결과              status
-    None   []           None              UNRESOLVED   ★ 아는 척으로 바꾸지 않는다
-    None   [A]          [A]               CONFIRMED
-    []     []           []                CONFIRMED_ZERO
-    []     [A]          [A]               CONFIRMED
-    [A]    []           [A]               CONFIRMED    ★ 기존을 지우지 않는다
-    [A]    [B]          [A, B]            CONFIRMED    ★ 이 단계가 고치는 자리
-    [A]    [A 동일]      [A]               CONFIRMED    멱등 재반영
-    [A]    [A 다름]      InboundScheduleConflict
-    ```
-
-    ★ **같은 `inbound_id` 는 사실을 대조한다.** 같으면 더하지 않고(멱등), 다르면 멈춘다.
-      갈아 끼우지 않는 이유는 어느 쪽이 진짜인지 이 자리에서 고를 근거가 없어서다.
-
-    ⚠️ **아직 모른다(`None`)를 아는 척으로 바꾸지 않는다.** 더할 것이 없는데 기존이
-       `None` 이면 `None` 그대로 둔다 — `[]` 로 적으면 *"확인했고 0 건"* 이라는, 우리가
-       하지 않은 확인이 장부에 남는다.
-
-    :param 모델: 기존 행을 대조용으로 되읽을 계약 타입(`InTransitItem` ·
-        `ScheduledQuantity`). **저장된 dict 를 문자열로 비교하지 않으려고 받는다** —
-        `Decimal("10")` 과 `Decimal("10.0")` 은 같은 수량인데 직렬화 문자열은 다르다.
-    :returns: `(쓸 목록, 그에 맞는 status)`.
-    """
-    merged = list(existing) if existing is not None else []
-    색인 = _index_by_inbound_id(merged, 칸이름=칸이름)
-    additions: list[dict[str, Any]] = []
-
-    for item in incoming:
-        직렬화 = item.model_dump(mode="json")
-        inbound_id = item.inbound_id
-        if inbound_id is None:
-            # ★ 열쇠가 없으면 대조할 방법이 없다. 지어내지 않고 그대로 더한다 —
-            #   현재 `build_next_inventory` 는 늘 id 를 붙이므로 실제로는 안 온다.
-            additions.append(직렬화)
-            continue
-        기존행 = 색인.get(inbound_id)
-        if 기존행 is None:
-            색인[inbound_id] = 직렬화
-            additions.append(직렬화)
-            continue
-        if not _같은_사실(기존행, item, 모델=모델, 칸이름=칸이름):
-            raise InboundScheduleConflict(
-                f"같은 inbound_id 가 다른 사실로 {칸이름} 에 이미 있다:"
-                f" {inbound_id!r}. 기존={기존행!r} 이번={직렬화!r}."
-                " 덮지도 버리지도 않는다 — 어느 쪽이 진짜인지 여기서 고를 근거가 없다."
-            )
-        # ★ 같은 건이다. 더하지 않는다 — 같은 승인을 두 번 반영해도 목록이 안 부푼다.
-
-    if existing is None and not additions:
-        return None, "UNRESOLVED"
-    merged.extend(additions)
-    # ★ 두 칸이 같은 뜻의 상태값을 쓴다 (`CONFIRMED · CONFIRMED_ZERO · UNRESOLVED`).
-    return merged, ("CONFIRMED" if merged else "CONFIRMED_ZERO")
-
-
-def _같은_사실(기존행: dict[str, Any], item: Any, *, 모델: type, 칸이름: str) -> bool:
-    """저장된 행과 이번 승인분이 같은 사실인가.
-
-    🔴 **직렬화 문자열로 비교하지 않는다.** `quantity_kg` 는 `numeric` 이라
-       `"10"` 과 `"10.0"` 이 같은 수량인데 문자열은 다르다 — 그대로 비교하면
-       **정상 재반영이 Conflict 로 뒤집힌다.** 계약 타입으로 되읽어 값으로 비교한다.
-
-    ⚠️ **되읽기는 대조가 필요한 행에만 한다.** 손대지 않는 기존 행까지 검증하면,
-       손으로 심은 행 하나가 승인 전이를 통째로 막는다 — 이번 단계가 늘리려는
-       실패 자리가 아니다.
-    """
-    try:
-        return 모델.model_validate(기존행) == item
-    except Exception as error:
-        raise InboundScheduleConflict(
-            f"{칸이름} 의 기존 행이 계약 모양이 아니라 이번 승인분과 대조할 수 없다:"
-            f" {기존행!r} ({error})."
-        ) from error
-
-
-def _merge_confirmed_inbound(
-    existing: Sequence[Any] | None,
-    rows: Sequence[InTransitItem],
-) -> tuple[list[Any] | None, str]:
-    """기존 `confirmed_inbound` 목록에 이번 승인분을 더한다.
-
-    ★ **`in_transit` 과 같은 알맹이(`_merge_schedule`)를 쓴다.** 다른 것은 행 모양뿐이라
-      (`expected_arrival_date` ↔ `date`) 여기서 옮겨 주고 병합 규칙은 하나로 둔다 —
-      두 곳이 따로 자라면 B-1 이 대조할 두 목록이 서로 다른 규칙으로 만들어진다.
-    """
-    return _merge_schedule(
-        existing,
-        [_confirmed_inbound_item(item) for item in rows],
-        칸이름="confirmed_inbound_schedule",
-        모델=ScheduledQuantity,
-    )
-
-
-def _merge_in_transit(
-    existing: Sequence[Any] | None,
-    rows: Sequence[InTransitItem],
-) -> tuple[list[Any] | None, str]:
-    """기존 `in_transit` 목록에 이번 승인분을 **더한다. 덮지 않는다.**
-
-    🔴 **종전에는 덮어썼다.** *"승인이 유일한 주인"* 이라고 적었는데, 같은 fixture 행을
-       겨냥한 승인이 둘이면 뒤엣것이 앞엣것을 **에러 없이 지웠다.**
-
-    ```text
-    승인 A   in_transit=[A]  confirmed=[A]
-    승인 B   in_transit=[B]  confirmed=[A, B]     ← A 의 운송 중 물량이 사라진다
-    ```
-
-       B-1 은 *"in_transit 의 행마다 confirmed 에 짝이 있나"* 를 보므로 이 손실을
-       **못 잡는다** — 없어진 쪽이 in_transit 이라 검사할 대상 자체가 사라진다.
-       그래서 읽는 쪽(B-1)이 아니라 **쓰는 쪽**을 고쳤다.
-
-    ★ 그 결과 `confirmed_inbound` 와 규칙이 같아졌다. 두 칸이 같은 승인분을 같은
-      방식으로 받으므로 **B-1 이 대조하는 두 목록이 어긋날 자리가 줄어든다.**
-
-    🔴 **`purchase_id` 도 사실 대조에 들어간다.** `_같은_사실` 이 모델 전체 값을
-       비교하므로 필드가 늘면 자동으로 포함된다 — **일부러 그대로 둔다.**
-       같은 `inbound_id` 인데 매입 출처가 다르면 그것은 같은 건이 아니고, 조용히
-       한쪽을 남기면 도착 뒤 **틀린 매입 줄에서 등급·단가를 읽는다.**
-       `purchase_id` 만 대조에서 빼는 예외를 두지 않는다.
-
-    ⚠️ **참조 계약이 켜지는 날 한 번은 부딪힌다.** 이미 적힌 행은 `purchase_id` 가
-       없어 `None` 으로 읽히므로, 같은 `inbound_id` 가 값을 달고 다시 오면
-       `InboundScheduleConflict` 가 난다. **그것이 맞다** — 조용한 되메우기는
-       *"언제 무엇이 채워졌나"* 를 아무 데도 안 남긴다.
-    """
-    return _merge_schedule(
-        existing,
-        list(rows),
-        칸이름="in_transit",
-        모델=InTransitItem,
-    )
-
-
 def persist_inventory(
     conn: Any,
     *,
@@ -515,10 +292,13 @@ def persist_inventory(
     ★ 건드리는 칸은 여섯이다.
 
       ```text
-      in_transit_json · in_transit_status                🔴 병합한다 (2026-09-05 부터)
-      confirmed_inbound_json · confirmed_inbound_status   🔴 병합한다 (남의 칸을 겸한다)
-      source_ref · updated_at                             덮어쓴다
+      in_transit_status · confirmed_inbound_status   CONFIRMED 로 세운다 (Header 표시)
+      source_ref · updated_at                        덮어쓴다
       ```
+
+      🔴 **두 JSON 칸을 안 쓴다 (W3-3).** 업무 사실은 `inbound_schedules` 에만 적는다.
+         status 만 세우는 이유는 Reader 가 `UNRESOLVED` 인 축의 목록을 숨기기 때문이다
+         (`repository._schedule_source`) — 안 세우면 방금 적은 일정이 안 보인다.
 
       🔴 **`in_transit` 도 병합으로 바뀌었다.** 종전에는 덮어썼고, 같은 fixture 행을
          겨냥한 승인이 둘이면 뒤엣것이 앞엣것을 **에러 없이 지웠다**
@@ -601,9 +381,11 @@ def persist_inventory(
     #    앞엣것을 통째로 덮는다 (`persist_inventory` docstring 의 lost-update 표).
     #    병합을 파이썬에서 하는 이상 읽기와 쓰기 사이가 비어 있고, 그 틈을 닫는 것은
     #    행 잠금뿐이다.
+    # ★ **행이 있는지 보고 잠그기만 한다.** 목록은 더 이상 여기서 안 읽는다 —
+    #   업무 사실의 정본이 `inbound_schedules` 다 (W3-3).
     select_query = sql.SQL(
         """
-        SELECT in_transit_json, confirmed_inbound_json
+        SELECT fixture_id
         FROM {}.logistics_runtime_fixture
         WHERE sim_run_id = %s
           AND as_of = %s
@@ -611,12 +393,14 @@ def persist_inventory(
         FOR UPDATE
         """
     ).format(schema)
+    # 🔴 **두 JSON 칸을 안 쓴다 (W3-3).** 남는 것은 Header 표시 둘뿐이다 —
+    #    `*_status` 는 Reader 가 «그 축을 확인했나» 를 가르는 데 여전히 쓴다
+    #    (`repository._schedule_source`: `UNRESOLVED` 면 목록을 숨긴다).
+    #    안 갱신하면 `UNRESOLVED` 인 날에 승인이 나도 그 일정이 영영 안 보인다.
     query = sql.SQL(
         """
         UPDATE {}.logistics_runtime_fixture
-        SET in_transit_json = %s,
-            in_transit_status = %s,
-            confirmed_inbound_json = %s,
+        SET in_transit_status = %s,
             confirmed_inbound_status = %s,
             source_ref = %s,
             updated_at = NOW()
@@ -637,36 +421,21 @@ def persist_inventory(
 
     with conn.cursor() as cursor:
         cursor.execute(select_query, (sim_run_id, as_of, USAGE_SCOPE))
-        found = cursor.fetchone()
-        if found is None:
-            # ★ 읽을 행이 없으면 병합할 것도 없다 — UPDATE 를 보내기 전에 멈춘다.
+        if cursor.fetchone() is None:
+            # ★ 그날 행이 없으면 승인이 앉을 자리가 없다 — UPDATE 전에 멈춘다.
             raise missing
-        # ★ 두 칸을 **같은 규칙으로** 병합한다. 순서도 의미도 같아야 B-1 이 대조할 두
-        #   목록이 어긋나지 않는다.
-        in_transit_json, in_transit_status = _merge_in_transit(
-            _stored_json(found, 0, "in_transit_json"), rows
-        )
-        confirmed_json, confirmed_status = _merge_confirmed_inbound(
-            _stored_json(found, 1, "confirmed_inbound_json"), rows
-        )
 
+        # 🔴 **`CONFIRMED` 로 세운다.** 이 승인으로 그 축을 확인했기 때문이다.
+        #    `UNRESOLVED` 인 날을 그대로 두면 Reader 가 방금 적은 일정을 숨긴다.
+        #    목록의 길이를 여기서 세지 않는다 — 길이는 Reader 가 신규 표에서 낸다.
         cursor.execute(
             query,
-            (
-                None if in_transit_json is None else Jsonb(in_transit_json),
-                in_transit_status,
-                None if confirmed_json is None else Jsonb(confirmed_json),
-                confirmed_status,
-                source_ref,
-                sim_run_id,
-                as_of,
-                USAGE_SCOPE,
-            ),
+            ("CONFIRMED", "CONFIRMED", source_ref, sim_run_id, as_of, USAGE_SCOPE),
         )
         if cursor.rowcount != 1:
             raise missing
 
-    # ── Dual Write — 같은 트랜잭션 · 같은 커넥션 (W3-1) ──────────────────
+    # ── 업무 사실은 여기 하나에만 적는다 (W3-3) ─────────────────────────
     _record_schedules(conn, sim_run_id=sim_run_id, as_of=as_of, rows=rows, source_ref=source_ref)
 
 

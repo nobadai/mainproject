@@ -51,19 +51,9 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
-from psycopg import sql
-from psycopg.types.json import Jsonb
-
-from app.finance.db import get_db_schema
 from app.logistics.inbound_schedules import (
     assert_cancellable,
-    assert_schedules_exist,
     cancel_schedule,
-)
-from app.logistics.transition import (
-    USAGE_SCOPE,
-    LogisticsFixtureMissing,
-    _stored_json,
 )
 from app.master.commitment import ApprovedCommitment
 
@@ -83,21 +73,6 @@ def inbound_ids_of(commitment: ApprovedCommitment) -> tuple[str, ...]:
     return tuple(f"INB-{commitment.approval_id}-{leg.seq}" for leg in commitment.arrival_schedule)
 
 
-def _without(stored: Sequence[Any] | None, drop: frozenset[str]) -> tuple[list[Any], str]:
-    """목록에서 `drop` 에 든 `inbound_id` 만 뺀다. **남의 승인분은 그대로 둔다.**
-
-    ★ `inbound_id` 가 없는 항목은 **안 건드린다.** 물류가 다른 경로로 넣은 것일 수
-      있고, 마스터가 만들지 않은 것을 마스터가 지울 수 없다.
-    """
-    kept = [
-        row
-        for row in (stored or [])
-        if not (isinstance(row, Mapping) and row.get("inbound_id") in drop)
-    ]
-    # ★ 두 칸이 같은 뜻의 상태값을 쓴다 (`transition._merge_schedule` 과 같은 어휘).
-    return kept, ("CONFIRMED" if kept else "CONFIRMED_ZERO")
-
-
 def withdraw_inventory(
     conn: Any,
     *,
@@ -106,137 +81,57 @@ def withdraw_inventory(
     inbound_ids: Sequence[str],
     source_ref: str,
 ) -> int:
-    """`as_of` 행의 두 목록에서 이 입고 건들을 걷는다.
+    """이 입고 건들을 **`as_of` 그날부터** 취소한다.
+
+    🔴 **정본은 `inbound_schedules.cancelled_as_of` 하나다 (W3-3).** 종전에는 그날
+       fixture 행의 두 JSON 칸에서도 항목을 빼야 했는데, Reader 가 더 이상 그 칸을
+       읽지 않으므로 걷을 이유가 없어졌다.
+
+    ```text
+    as_of <  cancelled_as_of   그날 이 일정은 여전히 존재한다
+    as_of >= cancelled_as_of   그날부터 취소다
+    ```
+
+       ⚠️ 받는 `as_of` 는 이미 `cancelled_on + 1`(목표 상태일)이다
+          (`LogisticsCancellationAdapter.cancel`). 취소일 자체를 적으면 **이미
+          지나간 하루의 사실이 바뀐다.**
 
     🔴 **commit 하지 않는다.** 커밋은 재무 취소·매입 원장과 함께 마스터가 한 번 한다.
 
     🔴 **자기 커넥션을 새로 열지 않는다.** `persist_inventory` 와 같은 이유다.
 
-    ★ **없는 것을 걷어도 오류가 아니다** — 이미 걷힌 뒤의 재시도가 그렇다. 그때
+    🔴 **도착 Receipt 가 있으면 거절한다.** 물건이 도착했으면 취소가 아니라
+       반품·폐기·실사이고, 그 판단을 물류가 대신 내리지 않는다
+       (`inbound_reconciliation` 이 긋는 그 선과 같다).
+
+      ⚠️ **판정을 쓰기보다 먼저 한다.** 하나씩 취소하다 중간에 막히면 앞의 것은 이미
+         닫힌 뒤다 — 같은 트랜잭션이라 롤백은 되지만, 판정이 쓰기와 섞이면
+         *"무엇이 왜 막혔나"* 가 흐려진다.
+
+    ★ **없는 것을 걷어도 오류가 아니다** — 이미 취소된 뒤의 재시도가 그렇다. 그때
       돌려주는 값이 `0` 이라 마스터가 *"이번에 실제로 걷은 것"* 을 말할 수 있다
       (재무 `#302` 의 *"retry no-op"* 과 같은 모양).
 
-    🔴 **도착 Receipt 가 있으면 거절한다 (2026-09-09 · W3-1).**
-
-      ```text
-      Receipt 없음   취소한다        JSON 에서 빼고 schedule 에 cancelled_as_of
-      Receipt 있음   ScheduleReceiptExists   ★ 마스터가 전이 전체를 롤백한다
-      ```
-
-      물건이 도착했으면 취소가 아니라 반품·폐기·실사이고, 그 판단을 물류가 대신
-      내리지 않는다 (`inbound_reconciliation` 이 긋는 그 선과 같다). 종전에는 이
-      경우가 **조용히 통과**해 Lot 은 남고 일정만 사라졌다.
-
-      ⚠️ **판정을 쓰기보다 먼저 한다.** 하나씩 지우면서 중간에 막히면 앞의 것은
-         이미 JSON 에서 빠진 뒤다 — 같은 트랜잭션이라 롤백은 되지만, 판정이 쓰기와
-         섞이면 *"무엇이 왜 막혔나"* 가 흐려진다.
-
-    ★ **`inbound_schedules` 에도 같이 적는다 (Dual Write · W3-1).** 같은 커넥션 ·
-      같은 바깥 트랜잭션이라 한쪽만 커밋되는 일이 없다.
-
-    :returns: 이번 호출로 두 목록에서 **실제로 빠진 항목 수의 합.**
-    :raises LogisticsFixtureMissing: 그날 fixture 행이 없을 때. **만들지 않는다.**
+    :returns: 이번 호출로 **실제로 취소된 일정 수.**
     :raises ScheduleReceiptExists: 도착 Receipt 가 있는 입고를 취소하려 할 때.
-    :raises ScheduleCancelConflict: 이미 다른 날짜로 취소된 일정일 때.
+    :raises ScheduleCancelConflict: 이미 **다른 날짜로** 취소된 일정일 때.
     """
-    drop = frozenset(i for i in inbound_ids if i)
+    drop = sorted({i for i in inbound_ids if i})
     if not drop:
         # ★ 회차 일정이 없던 약정도 승인은 살아 있다 — 걷을 입고가 **없다**는 것은
         #   정상 상태다 (마스터 `cancel_purchases` 와 같은 태도).
         return 0
 
     # ── 판정이 먼저다. 하나라도 도착했으면 아무것도 안 걷는다 ──────────
-    assert_cancellable(conn, sim_run_id=sim_run_id, inbound_ids=sorted(drop))
+    assert_cancellable(conn, sim_run_id=sim_run_id, inbound_ids=drop)
 
-    schema = sql.Identifier(get_db_schema())
-    missing = LogisticsFixtureMissing(
-        "취소를 적을 물류 runtime fixture 행이 없다"
-        f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={USAGE_SCOPE})."
-        " 새 행을 만들지 않는다 — 없는 날의 상태를 취소가 지어내면 안 된다."
-    )
-    select_query = sql.SQL(
-        """
-        SELECT in_transit_json, confirmed_inbound_json
-        FROM {}.logistics_runtime_fixture
-        WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
-        FOR UPDATE
-        """
-    ).format(schema)
-    update_query = sql.SQL(
-        """
-        UPDATE {}.logistics_runtime_fixture
-        SET in_transit_json = %s,
-            in_transit_status = %s,
-            confirmed_inbound_json = %s,
-            confirmed_inbound_status = %s,
-            source_ref = %s,
-            updated_at = NOW()
-        WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
-        """
-    ).format(schema)
-
-    with conn.cursor() as cursor:
-        cursor.execute(select_query, (sim_run_id, as_of, USAGE_SCOPE))
-        found = cursor.fetchone()
-        if found is None:
-            raise missing
-
-        in_transit_before = _stored_json(found, 0, "in_transit_json") or []
-        confirmed_before = _stored_json(found, 1, "confirmed_inbound_json") or []
-        in_transit, in_transit_status = _without(in_transit_before, drop)
-        confirmed, confirmed_status = _without(confirmed_before, drop)
-        removed = (len(in_transit_before) - len(in_transit)) + (
-            len(confirmed_before) - len(confirmed)
-        )
-
-        # 🔴 **Legacy 를 고치기 전에 일정 행이 다 있는지 본다** (2026-09-09 · W3-1 보정).
-        #    묻는 대상은 **이번에 실제로 빠지는 것**뿐이다 — 이미 걷힌 뒤의 정상
-        #    재시도(JSON 없음 · schedule 없음)까지 오류로 만들면 기존 계약이 깨진다.
-        #
-        #    ```text
-        #    JSON 없음 · schedule 없음   정상 재시도    → 여기서 안 묻는다 (no-op)
-        #    JSON 있음 · schedule 없음   Dual Write 누락 → ScheduleMissing
-        #    ```
-        빠지는것 = sorted(
-            {
-                행.get("inbound_id")
-                for 행 in (*in_transit_before, *confirmed_before)
-                if isinstance(행, Mapping) and 행.get("inbound_id") in drop
-            }
-        )
-        assert_schedules_exist(conn, sim_run_id=sim_run_id, inbound_ids=빠지는것)
-
-        cursor.execute(
-            update_query,
-            (
-                Jsonb(in_transit),
-                in_transit_status,
-                Jsonb(confirmed),
-                confirmed_status,
-                source_ref,
-                sim_run_id,
-                as_of,
-                USAGE_SCOPE,
-            ),
-        )
-        if cursor.rowcount != 1:
-            raise missing
-
-    # ── Dual Write — 같은 트랜잭션 (W3-1) ─────────────────────────────
-    # 🔴 `as_of` 를 그대로 넘긴다. 이 값은 이미 `cancelled_on + 1`(목표 상태일)이고
-    #    (`LogisticsCancellationAdapter.cancel` 참조), 취소일 자체를 적으면
-    #    **이미 지나간 하루의 사실이 바뀐다.**
-    #
-    # ★ **요청받은 전부를 대상으로 한다** — `빠지는것` 으로 좁히지 않는다.
-    #   Legacy 는 **그날 행 하나**만 보지만 일정은 날짜에 안 묶여 있다. 승인이 실린
-    #   행과 취소가 겨냥한 행이 다를 수 있고(실측: 승인 as_of+1 · 취소 cancelled_on+1),
-    #   그때 JSON 에서 빠진 것이 0건이어도 **그 일정은 취소된 것이 맞다.**
-    #   이것이 날짜별 복제를 벗어나는 이 표의 값이다.
-    for inbound_id in sorted(drop):
-        cancel_schedule(
+    return sum(
+        1
+        for inbound_id in drop
+        if cancel_schedule(
             conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
         )
-    return removed
+    )
 
 
 class LogisticsCancellationAdapter:

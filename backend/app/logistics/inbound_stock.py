@@ -69,14 +69,13 @@ INSPECTED Receipt
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from psycopg import sql
-from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
 from app.logistics.inbound_schedules import receivable_at
@@ -84,7 +83,7 @@ from app.logistics.inspections import InspectionOutcome, find_inspection
 from app.logistics.ledger import record_inventory_move
 from app.logistics.purchase_detail import PurchaseDetail
 from app.logistics.receipts import ReceiptStatus, lock_arrival_writes
-from app.logistics.schemas import InTransitItem, ScheduledQuantity
+from app.logistics.schemas import InTransitItem
 from app.logistics.transition import USAGE_SCOPE
 
 __all__ = [
@@ -653,92 +652,6 @@ def load_in_transit_for_receiving(
     return receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
 
 
-def _찾는다(목록: Sequence[Any] | None, inbound_id: str) -> list[dict[str, Any]]:
-    return [
-        행 for 행 in (목록 or []) if isinstance(행, dict) and 행.get("inbound_id") == inbound_id
-    ]
-
-
-def _clear_schedule(
-    conn: Any,
-    schema: sql.Identifier,
-    *,
-    sim_run_id: str,
-    as_of: date,
-    usage_scope: str,
-    inbound_id: str,
-) -> bool:
-    """두 칸에서 그 `inbound_id` 를 **함께** 뺀다. 이미 없으면 아무것도 안 한다.
-
-    🔴 **B-1 을 지우기 전에 다시 검증한다.** 두 칸의 `item` · 수량 · 날짜가 어긋난
-       상태를 조용히 지우면, 어긋나 있었다는 사실조차 안 남는다.
-
-    🔴 **한쪽에만 있으면 멈춘다.** 그 상태가 이미 B-1 위반이고, 남은 쪽을 마저 지우면
-       위반을 덮는 것이 된다.
-
-    ⚠️ **`None`(UNRESOLVED)을 `[]` 로 바꾸지 않는다.** 그 세 상태는 다른 사실이다.
-    """
-    in_transit, confirmed = _fixture_row(
-        conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
-    )
-    운송중 = _찾는다(in_transit, inbound_id)
-    확정 = _찾는다(confirmed, inbound_id)
-
-    if not 운송중 and not 확정:
-        return False  # ★ 이미 걷혔다. 재실행의 정상 경로다.
-    if len(운송중) != 1 or len(확정) != 1:
-        raise ScheduleIntegrityError(
-            f"일정 두 칸이 짝을 이루지 않아 걷어낼 수 없다 (inbound_id={inbound_id!r}):"
-            f" in_transit {len(운송중)}건 · confirmed_inbound {len(확정)}건."
-            " 한쪽만 지우면 그 불일치를 덮는 것이 된다."
-        )
-
-    # ★ B-1 이 대조하는 그 네 값을 여기서 다시 본다.
-    운송 = InTransitItem.model_validate(운송중[0])
-    일정 = ScheduledQuantity.model_validate(확정[0])
-    if (
-        일정.item != 운송.item
-        or 일정.quantity_kg != 운송.quantity_kg
-        or 일정.date != 운송.expected_arrival_date
-    ):
-        raise ScheduleIntegrityError(
-            f"일정 두 칸의 사실이 다르다 (inbound_id={inbound_id!r}):"
-            f" in_transit={운송!r} confirmed_inbound={일정!r}. 조용히 지우지 않는다."
-        )
-
-    남은_운송 = [행 for 행 in (in_transit or []) if 행 not in 운송중]
-    남은_확정 = [행 for 행 in (confirmed or []) if 행 not in 확정]
-
-    with conn.cursor() as cursor:
-        cursor.execute(
-            sql.SQL(
-                """
-                UPDATE {}.logistics_runtime_fixture
-                SET in_transit_json = %s,
-                    in_transit_status = %s,
-                    confirmed_inbound_json = %s,
-                    confirmed_inbound_status = %s,
-                    updated_at = NOW()
-                WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
-                """
-            ).format(schema),
-            (
-                Jsonb(남은_운송),
-                # ★ 마지막 행을 걷어내면 *"확인했고 0 건"* 이다 — `None` 이 아니다.
-                "CONFIRMED" if 남은_운송 else "CONFIRMED_ZERO",
-                Jsonb(남은_확정),
-                "CONFIRMED" if 남은_확정 else "CONFIRMED_ZERO",
-                sim_run_id,
-                as_of,
-                usage_scope,
-            ),
-        )
-    return True
-
-
-# ── 본체 ────────────────────────────────────────────────────────────────
-
-
 def materialize_inspected_inbound(
     conn: Any,
     *,
@@ -751,11 +664,14 @@ def materialize_inspected_inbound(
 
     ```text
     ① 잠금 · 상태 확인
-    ② fixture 행 FOR UPDATE       ← 원장 잠금보다 **먼저**
+    ② fixture 행 FOR UPDATE       ← 원장 잠금보다 **먼저** (도착 경로 직렬화)
     ③ accepted > 0 이면 Lot (remaining 0) → record_inventory_move(IN)
     ④ Receipt PUTAWAY_DONE
-    ⑤ 일정 두 칸에서 inbound_id 제거
     ```
+
+    🔴 **일정을 걷는 단계가 없어졌다 (W3-3).** 완료는 `inbound_schedules` 의 칸이
+       아니라 **Lot + 원장 IN** 으로 유도한다 — Reader 가 그 둘을 보고 도착 대상과
+       Capacity 에서 뺀다. 일정 행은 과거 재현을 위해 그대로 남는다.
 
     🔴 **상태가 생성 권한을 가른다.**
 
@@ -896,26 +812,28 @@ def materialize_inspected_inbound(
             )
             applied = applied or move.applied
 
-    # ── ⑤⑥ Receipt 와 일정 ───────────────────────────────────────────
+    # ── ⑤ Receipt 마감 ───────────────────────────────────────────────
     if 상태 in _READY_TO_MATERIALIZE:
         _mark_putaway_done(conn, schema, receipt_id=receipt_id)
         상태 = "PUTAWAY_DONE"
-    schedule_cleared = _clear_schedule(
-        conn,
-        schema,
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        usage_scope=usage_scope,
-        inbound_id=inbound_id,
-    )
 
+    # 🔴 **일정을 걷지 않는다 (W3-3).** 완료는 `inbound_schedules` 의 칸이 아니라
+    #    **downstream 사실**로 유도한다 — Lot 과 원장 IN 이 둘 다 서면 Reader 가
+    #    도착 대상에서도 Capacity 에서도 뺀다
+    #    (`inbound_schedules.receivable_at` · `pending_inbound_at`).
+    #
+    #    ⚠️ **일정 행을 지우거나 취소로 바꾸지 않는다.** 지우면 *"그날 무엇이
+    #       떠 있었나"* 를 되짚을 자리가 없어지고, 취소로 적으면 **들어온 물건이
+    #       취소된 것으로** 둔갑한다. 둘은 다른 사실이다.
     return InboundStockResult(
         applied=applied,
         receipt_status=상태,
         lot_id=lot_id,
         move_id=move_id,
         accepted_qty_kg=accepted,
-        schedule_cleared=schedule_cleared,
+        # ★ 걷을 일정이 없으므로 언제나 거짓이다. 칸은 남긴다 — 마스터 회신 모양을
+        #   이번 판에서 바꾸지 않는다 (Legacy 호환).
+        schedule_cleared=False,
     )
 
 

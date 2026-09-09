@@ -80,7 +80,7 @@ usage_scope
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -89,19 +89,15 @@ from typing import Any
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
-from app.logistics.inbound_schedules import assert_schedules_exist, cancel_schedule
+from app.logistics.inbound_schedules import cancel_schedule, load_schedule_views
 
 # 🔴 **B-1 규율을 다시 적지 않고 가져다 쓴다.** 밑줄 이름을 건너 가져오는 것은 이
 #    패키지의 기존 방식이다 (`console_service` 가 `outbound._ASSIGNED_ALLOCATION` 을
 #    그대로 쓰는 것과 같다 — *"여기에 문자열로 다시 적지 않는다"*).
 from app.logistics.inbound_stock import (
     ScheduleIntegrityError,
-    _clear_schedule,
-    _fixture_row,
-    _찾는다,
 )
 from app.logistics.receipts import lock_arrival_writes
-from app.logistics.schemas import InTransitItem
 from app.logistics.transition import USAGE_SCOPE
 
 __all__ = [
@@ -313,59 +309,6 @@ def _row_values(row: Any) -> tuple[Any, ...]:
     raise InboundReconciliationError(f"입고 계보 행을 못 읽는다: {row!r}")
 
 
-def _stamp_source_ref(
-    conn: Any,
-    schema: sql.Identifier,
-    *,
-    sim_run_id: str,
-    as_of: date,
-    usage_scope: str,
-    source_ref: str,
-) -> None:
-    """걷어낸 fixture 행의 `source_ref` 를 이번 정리의 근거로 바꿔 적는다.
-
-    🔴 **`_clear_schedule` 이 방금 `FOR UPDATE` 로 잡은 그 행이다.** 행 잠금은
-       트랜잭션 수명이라 아직 우리 것이고, 그래서 읽고-고치는 사이가 비어 있지 않다.
-
-    ★ **`_clear_schedule` 을 안 고쳤다.** 그쪽에 `source_ref` 인자를 더하면 입고 실행
-      경로(`materialize_inspected_inbound`)의 서명까지 함께 넓어진다 — 이 한 줄을
-      여기서 쓰는 편이 기존 코드 변경이 더 작다.
-
-    ⚠️ **재실행 no-op 에는 안 부른다.** 아무것도 안 걷은 호출이 그 행의 근거를 자기
-       것으로 덮으면, 실제로 걷은 사람의 근거가 사라진다.
-
-    ⚠️ **덮어쓰기다.** 이 칸은 하나뿐이라 이전 값(씨앗·하루 넘김이 적어 둔 것)은
-       남지 않는다 — 그 값을 함께 보관할 자리가 지금 스키마에 없다.
-
-    ★ `updated_at` 은 `_clear_schedule` 이 이미 찍었다. 여기서 다시 안 만진다.
-    """
-    with conn.cursor() as cursor:
-        cursor.execute(
-            sql.SQL(
-                """
-                UPDATE {}.logistics_runtime_fixture
-                SET source_ref = %s
-                WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
-                """
-            ).format(schema),
-            (source_ref, sim_run_id, as_of, usage_scope),
-        )
-
-
-def _removed_facts(in_transit: Any, inbound_id: str) -> Mapping[str, Any] | None:
-    """걷어낼 항목의 **원본 dict** 를 집어 둔다. 판정하지 않는다.
-
-    🔴 **여기서 검증하지 않는다.** 짝·중복·B-1 은 `_clear_schedule` 이 판정하고, 이
-       함수는 *"지운 것이 무엇이었나"* 를 결과에 싣기 위해 사본을 쥐고 있을 뿐이다.
-       두 곳이 판정하면 두 번째 정본이 생긴다.
-
-    ★ 정확히 1건일 때만 집는다. 0건이면 걷을 것이 없고, 2건 이상이면 어느 것인지
-      고르지 않는다 — 둘 다 뒤이어 `_clear_schedule` 이 제 규율로 답한다.
-    """
-    찾은것 = _찾는다(in_transit, inbound_id)
-    return 찾은것[0] if len(찾은것) == 1 else None
-
-
 def reconcile_orphan_inbound_schedule(
     conn: Any,
     *,
@@ -382,12 +325,12 @@ def reconcile_orphan_inbound_schedule(
     ① 도착 전역 잠금
     ② inbound_id 의 입고 계보 조회   Receipt 0 / 1 / 2+ 를 가른다
     ③ 계보가 있으면 거부              ScheduleAlreadyMaterialized · InboundLineageAmbiguous
-    ④ fixture 행 FOR UPDATE · 지울 항목 사본 확보 (판정은 안 한다)
-    ④-b 지울 것이 있으면 신규 표에도 그 행이 있는지  assert_schedules_exist
-    ⑤ B-1 재검증 + 양쪽 제거          inbound_stock._clear_schedule
-    ⑥ 걷었으면 그 행의 source_ref 를 이번 정리로 바꿔 적는다
-    ⑦ 같은 일정을 inbound_schedules 에서도 그날부터 닫는다   (W3-1 Dual Write)
+    ④ 그 일정 한 건을 신규 표에서 읽는다 (돌려줄 사실 확보)
+    ⑤ inbound_schedules 를 그날부터 닫는다   cancelled_as_of
     ```
+
+    🔴 **Legacy JSON 을 더 이상 안 걷는다 (W3-3).** Reader 가 그 칸을 읽지 않으므로
+       걷을 이유가 없다. 정리의 정본은 `cancelled_as_of` 한 칸이다.
 
     🔴 **⑦ 이 없으면 두 저장소가 갈린다** (2026-09-09 보정). ⑤ 는 Legacy JSON 두 칸만
        걷고 신규 표를 안 건드렸다 — 그러면 정리한 뒤에도
@@ -464,65 +407,28 @@ def reconcile_orphan_inbound_schedule(
             " 출처를 되짚을 자리가 없어진다."
         )
 
-    # ── ④ 지울 것의 사본을 먼저 쥔다 (판정은 안 한다) ─────────────────
-    #    ★ `_fixture_row` 가 그 행을 `FOR UPDATE` 로 잡는다 — ⑤ 가 같은 잠금 아래
-    #      이어서 돌므로 읽기와 쓰기 사이가 비지 않는다.
-    in_transit, _ = _fixture_row(
-        conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
-    )
-    지울것 = _removed_facts(in_transit, inbound_id)
-
-    # ── ④-b Legacy 에 지울 것이 있으면 신규 표에도 그 행이 있어야 한다 ──
-    #
-    # 🔴 **쓰기 전에 묻는다.** ⑤ 가 Legacy 를 걷은 뒤에 알면 두 저장소가 갈린 사실이
-    #    아무 데도 안 남는다 — `withdraw_inventory` 가 UPDATE 앞에서 같은 검사를
-    #    하는 것과 같은 자리이고, 같은 함수(`assert_schedules_exist`)를 쓴다.
-    #
-    # ```text
-    # 지울것 없음   이미 걷힌 뒤의 멱등 재호출  → 안 묻는다 (⑤ 가 no-op 을 낸다)
-    # 지울것 있음   신규 표에 행이 없으면       → ScheduleMissing (아무것도 안 고친다)
-    # ```
-    #
-    # ⚠️ **`지울것` 이 판정 기준인 이유.** 이 값이 `in_transit` 에 그 항목이 있다는
-    #    뜻이고, 그때 ⑤ 는 반드시 무언가를 걷는다(한쪽에만 있으면 ⑤ 가 B-1 위반으로
-    #    멈춘다). 없는 것을 걷어도 오류가 아니라는 기존 계약은 그대로 산다.
-    if 지울것 is not None:
-        assert_schedules_exist(conn, sim_run_id=sim_run_id, inbound_ids=[inbound_id])
-
-    # ── ⑤ 걷는 규율은 입고 경로의 것을 그대로 쓴다 ────────────────────
-    applied = _clear_schedule(
-        conn,
-        schema,
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        usage_scope=usage_scope,
-        inbound_id=inbound_id,
+    # ── ④ 돌려줄 사실을 신규 표에서 쥔다 ──────────────────────────────
+    #    ★ 아직 살아 있는 일정만 나온다 (`load_schedule_views` 가 취소분을 뺀다) —
+    #      그래서 이미 닫힌 건에 다시 부르면 아래가 자연히 no-op 이 된다.
+    #    ⚠️ `as_of` 시점 목록이라 그날 이후에 선 일정은 안 보인다. 정리는 **그날부터**
+    #       닫는 일이므로 그 눈이 맞다.
+    사실 = next(
+        (
+            보기
+            for 보기 in load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+            if 보기.inbound_id == inbound_id
+        ),
+        None,
     )
 
-    # ── ⑥ 걷었을 때만 그 행의 근거를 이번 정리로 바꿔 적는다 ──────────
-    사실 = None
-    if applied:
-        _stamp_source_ref(
-            conn,
-            schema,
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            usage_scope=usage_scope,
-            source_ref=source_ref,
-        )
-        # ★ 여기서 파싱한다. ⑤ 를 지났다는 것이 곧 **B-1 을 통과한 항목**이라는 뜻이라,
-        #   계약 모델이 터질 자리가 없다 — 앞에서 파싱하면 `_clear_schedule` 이 낼
-        #   `ScheduleIntegrityError` 가 pydantic 오류로 바뀌어 나간다.
-        사실 = InTransitItem.model_validate(지울것) if 지울것 is not None else None
-
-        # ── ⑦ 신규 표도 같은 트랜잭션에서 닫는다 (W3-1 Dual Write) ────
-        #    ★ `applied` 일 때만 부른다 — 멱등 재호출(이미 걷힘)에서는 ⑤ 가
-        #      아무것도 안 했으므로 여기서도 손댈 것이 없다.
-        #    ⚠️ 이미 같은 날짜로 닫혀 있으면 `cancel_schedule` 이 no-op 이고,
-        #       다른 날짜로 닫혀 있으면 `ScheduleCancelConflict` 로 멈춘다.
-        cancel_schedule(
-            conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
-        )
+    # ── ⑤ 그날부터 닫는다 ─────────────────────────────────────────────
+    #    🔴 **Legacy JSON 을 안 건드린다 (W3-3).** Reader 가 안 읽는 칸을 고치면
+    #       *"정리했다"* 는 사실이 두 곳에 생기고, 그중 하나는 아무도 안 본다.
+    #    ⚠️ 이미 같은 날짜로 닫혀 있으면 `cancel_schedule` 이 `False`(멱등)이고,
+    #       다른 날짜로 닫혀 있으면 `ScheduleCancelConflict` 로 멈춘다.
+    applied = cancel_schedule(
+        conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
+    )
 
     return InboundReconciliationResult(
         applied=applied,
@@ -534,7 +440,7 @@ def reconcile_orphan_inbound_schedule(
         removed=1 if applied else 0,
         reason=reason,
         source_ref=source_ref,
-        item=None if 사실 is None else 사실.item,
+        item=None if 사실 is None else 사실.item_name,
         quantity_kg=None if 사실 is None else 사실.quantity_kg,
         expected_arrival_date=None if 사실 is None else 사실.expected_arrival_date,
     )
