@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -69,8 +70,22 @@ def _gate(as_of: date) -> DayForecastReadiness:
     )
 
 
-def _ran(as_of: date, *, end_code: str = "E1_OK") -> DayRunOutcome:
-    """정상적으로 끝까지 돈 하루."""
+#: 출고가 터진 날의 사유. **`ship_due_sales` 가 실제로 내는 문장이다.**
+OUTBOUND_FAILED_REASON = "나갈 것을 못 읽었다: connection refused"
+
+
+def _ran(
+    as_of: date,
+    *,
+    end_code: str = "E1_OK",
+    outbound: str = "NOTHING_DUE",
+) -> DayRunOutcome:
+    """정상적으로 끝까지 돈 하루.
+
+    ⚠️ **출고 기본이 `NOTHING_DUE` 다.** 판단이 돈 날은 출고 단계까지 갔다는 뜻이고
+      (`run_scheduled_day` 의 순서), 그런 날에 `NOT_ATTEMPTED` 를 두면 실제로는 못
+      나오는 짝을 대역이 만들어 낸다.
+    """
     return DayRunOutcome(
         as_of=as_of,
         action="RUN_NOW",
@@ -79,15 +94,24 @@ def _ran(as_of: date, *, end_code: str = "E1_OK") -> DayRunOutcome:
         inbound_status="NOTHING_DUE",
         collection_status="NOTHING_DUE",
         procurement_status="RAN",
+        outbound_status=outbound,
         items=tuple(
             ItemRunOutcome(item=i, request_id=f"REQ-{i}", status="RAN", end_code=end_code)
             for i in ITEMS
         ),
+        # ★ `_stage` 가 `OutboundOut.reason` 을 실어 note 로 넘기는 그 모양 그대로.
+        notes=(f"출고: {outbound} {OUTBOUND_FAILED_REASON}".strip(),)
+        if outbound == "FAILED"
+        else (f"출고: {outbound}",),
     )
 
 
 def _ledger_gap(as_of: date) -> DayRunOutcome:
-    """장부 관문이 돌아선 하루. **판단 단계를 안 탔다.**"""
+    """장부 관문이 돌아선 하루. **판단 단계를 안 탔다.**
+
+    ★ 그날은 출고 단계에 **오지도 않는다** — `outbound_status` 는 기본값
+      `NOT_ATTEMPTED` 그대로다.
+    """
     return DayRunOutcome(
         as_of=as_of,
         action="RUN_NOW",
@@ -107,9 +131,11 @@ class _RunDay:
         *,
         boom_on: frozenset[date] = frozenset(),
         gap_on: frozenset[date] = frozenset(),
+        outbound_on: Mapping[date, str] | None = None,
     ) -> None:
         self.boom_on = boom_on
         self.gap_on = gap_on
+        self.outbound_on = {} if outbound_on is None else dict(outbound_on)
         self.calls: list[date] = []
 
     def __call__(self, action, **kwargs) -> DayRunOutcome:
@@ -118,6 +144,8 @@ class _RunDay:
             raise RuntimeError("장부가 깨졌다")
         if action.as_of in self.gap_on:
             return _ledger_gap(action.as_of)
+        if action.as_of in self.outbound_on:
+            return _ran(action.as_of, outbound=self.outbound_on[action.as_of])
         return _ran(action.as_of)
 
 
@@ -530,3 +558,165 @@ def test_하루_경계를_안_넘긴다():
 
     assert runner.calls == [date(2026, 2, 7)]
     assert result.end + timedelta(days=1) not in runner.calls
+
+
+# ── ⑦ 출고 — **넷이 다 다른 사실이다** ──────────────────────────────────
+#
+# ```text
+# RAN            나갔다
+# NOTHING_DUE    나갈 것이 없었다        ← "없다"
+# FAILED         나가려다 못 나갔다      ← "못 했다"
+# NOT_ATTEMPTED  거기까지 못 갔다        ← "안 했다"
+# ```
+#
+# 🔴 **성적표가 이 넷을 못 가르면 손익 곡선이 왜 평평한지 아무도 답할 수 없다.**
+
+
+def _네_가지_출고() -> WalkResult:
+    """네 값이 하루씩 나오는 걷기. **네 날이 다 다른 사실이다.**
+
+    ★ `NOT_ATTEMPTED` 는 장부 관문이 돌아선 날로 만든다 — 지어낸 짝이 아니라
+      `run_scheduled_day` 가 실제로 그렇게 내는 유일한 길이다.
+    """
+    result, _ = _walk(
+        start=date(2026, 2, 7),
+        end=date(2026, 2, 10),
+        run_day=_RunDay(
+            outbound_on={
+                date(2026, 2, 7): "RAN",
+                date(2026, 2, 8): "NOTHING_DUE",
+                date(2026, 2, 9): "FAILED",
+            },
+            gap_on=frozenset({date(2026, 2, 10)}),
+        ),
+    )
+    return result
+
+
+def test_출고_네_값을_따로_센다():
+    """🔴 **`RAN` 만 세고 나머지를 묶으면 안 된다.**
+
+    ⚠️ 묶는 순간 *"나갈 것이 없어서 안 나갔다"* 와 *"나가려다 못 나갔다"* 가 같은
+      칸에 들어가고, 성적표가 그 둘을 영영 구별 못 한다.
+    """
+    result = _네_가지_출고()
+
+    assert dict(result.outbound_statuses) == {
+        "RAN": 1,
+        "NOTHING_DUE": 1,
+        "FAILED": 1,
+        "NOT_ATTEMPTED": 1,
+    }, f"넷이 안 갈렸다: {dict(result.outbound_statuses)}"
+
+
+def test_요약에_출고_집계가_찍힌다():
+    """🔴 **화면에 안 나오는 값은 없는 값과 같다.** 넷이 성적표에서 다 달라야 한다."""
+    summary = format_summary(_네_가지_출고())
+
+    assert "출고      " in summary, f"요약에 출고 줄이 없다:\n{summary}"
+    출고줄 = next(line for line in summary.splitlines() if line.startswith("출고"))
+    for 값 in ("RAN", "NOTHING_DUE", "FAILED", "NOT_ATTEMPTED"):
+        assert f"'{값}': 1" in 출고줄, f"{값} 가 출고 줄에 없다: {출고줄}"
+
+
+def test_집계를_비우면_요약이_빈다():
+    """★ **자기 생존.** 위 검사가 집계를 실제로 읽는지부터 잰다.
+
+    ⚠️ 요약이 집계를 안 읽고 어딘가에서 네 글자를 주워 오면 위 검사는 **고쳐서가
+      아니라 우연히** 초록이 된다. 걸은 날이 없으면 출고 줄도 비어야 한다.
+    """
+    빈걷기 = WalkResult(start=date(2026, 2, 7), end=date(2026, 2, 7))
+
+    assert dict(빈걷기.outbound_statuses) == {}
+    assert "출고      {}" in format_summary(빈걷기)
+
+
+def test_출고_집계를_format_summary_가_안_만든다():
+    """🔴 **집계는 `WalkResult` 가 나르고 요약은 찍기만 한다** (그 함수 독스트링).
+
+    ⚠️ 요약이 `days` 를 다시 훑으면 같은 사실의 주인이 둘이 되고, `end_codes` 처럼
+      결과 객체만 보는 쪽에서는 그 집계를 못 읽는다.
+    """
+    source = inspect.getsource(format_summary)
+
+    assert "outbound_statuses" in source, "요약이 출고 집계를 안 읽는다"
+    assert "Counter" not in source, f"요약이 값을 새로 만든다:\n{source}"
+
+
+def test_출고가_못_나간_날은_사고다():
+    """🔴 **출고 실패가 조용하면 안 된다.**
+
+    ⚠️ 출고는 판단 뒤 단계라, 판단이 돌면 그날은 `procurement_status == "RAN"` 이고
+      품목도 안 터진다 — 출고를 안 보면 **그날이 사고 없음으로 지나간다.**
+    """
+    못나간날 = date(2026, 2, 9)
+    result, _ = _walk(
+        start=date(2026, 2, 7),
+        end=date(2026, 2, 10),
+        run_day=_RunDay(outbound_on={못나간날: "FAILED"}),
+    )
+
+    assert [one.as_of for one in result.incidents] == [못나간날], (
+        f"출고 실패가 사고로 안 잡혔다: {[(i.as_of, i.reason) for i in result.incidents]}"
+    )
+    assert result.completed
+
+
+def test_출고_사고_사유가_무엇이_못_나갔는지를_나른다():
+    """⚠️ **사유를 지어내지 않는다.** `OutboundOut.reason` 이 `_stage` 의 note 로
+    실려 오고, 걷기는 그 값을 그대로 옮긴다.
+
+    ★ *"출고가 터졌다"* 만 적으면 사람이 연결을 볼지 조회를 볼지 모른 채 두 곳을
+      다 뒤진다 — `_ledger_gap_note` 가 입고·수금을 둘 다 적는 것과 같은 이유다.
+    """
+    못나간날 = date(2026, 2, 9)
+    result, _ = _walk(
+        start=date(2026, 2, 7),
+        end=date(2026, 2, 10),
+        run_day=_RunDay(outbound_on={못나간날: "FAILED"}),
+    )
+
+    사유 = result.incidents[0].reason
+
+    assert "출고" in 사유, 사유
+    assert OUTBOUND_FAILED_REASON in 사유, f"못 나간 이유가 안 실렸다: {사유}"
+
+
+def test_나갈_것이_없는_날은_사고가_아니다():
+    """🟢 **`NOTHING_DUE` 는 정상이다.** *"없다"* 는 *"못 했다"* 가 아니다.
+
+    🔴 예약이 아직 0행인 지금 이것을 사고로 세면 **매일이 사고**가 되고, 사고
+      목록이 아무것도 안 가리킨다 (`OutboundOut` 이 `NOTHING_DUE` 를 따로 둔 이유).
+    """
+    result, _ = _walk(
+        start=date(2026, 2, 7),
+        end=date(2026, 2, 10),
+        run_day=_RunDay(
+            outbound_on={date(2026, 2, d): "NOTHING_DUE" for d in (7, 8, 9, 10)},
+        ),
+    )
+
+    assert result.incidents == (), f"나갈 것이 없는 날을 사고로 셌다: {result.incidents}"
+    assert dict(result.outbound_statuses) == {"NOTHING_DUE": 4}
+    assert result.completed
+
+
+def test_판단을_못_탄_날에_사고를_두_번_안_센다():
+    """🔴 **한 사실에 사고가 둘이면 안 된다.**
+
+    ⚠️ 장부 관문이 돌아선 날은 출고까지 못 간다 (`outbound_status` 가
+      `NOT_ATTEMPTED`). 그 날을 출고로도 세면 사고 한 건이 두 건으로 부풀고, 연속
+      사고 상한이 실제보다 빨리 닿아 걷기가 일찍 멈춘다.
+    """
+    막힌날 = date(2026, 2, 9)
+    result, _ = _walk(
+        start=date(2026, 2, 7),
+        end=date(2026, 2, 10),
+        run_day=_RunDay(gap_on=frozenset({막힌날})),
+    )
+
+    assert [one.as_of for one in result.incidents] == [막힌날], (
+        f"사고가 두 번 세졌다: {[(i.as_of, i.reason) for i in result.incidents]}"
+    )
+    assert result.days[2].outbound_status == "NOT_ATTEMPTED", "대역이 그 짝을 안 만들었다"
+    assert "판단 단계" in result.incidents[0].reason, result.incidents[0].reason
