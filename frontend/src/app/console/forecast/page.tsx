@@ -355,8 +355,8 @@ function Tab({
 
 export default function ForecastPage() {
   const [pane, setPane] = useState<Pane>("forecast");
-  //  ★ 사람이 눌러야 할 재학습 결정 수. **0 이면 탭 자체를 안 그립니다.**
-  //    후보가 현행보다 나을 때만 여기 셉니다 — 못하면 배치가 후보를 지우고
+  //  ★ 사람이 눌러야 할 재학습 결정 수. **탭에 빨간 뱃지로만** 씁니다.
+  //    후보가 현행보다 나을 때만 셉니다 — 못하면 배치가 후보를 지우고
   //    아무것도 안 남깁니다.
   const [waiting, setWaiting] = useState(0);
 
@@ -364,23 +364,23 @@ export default function ForecastPage() {
     let alive = true;
     retrainPending()
       .then((r) => alive && setWaiting(r.pending.length))
-      //  ★ 못 물어봤다고 탭을 띄우지 않습니다. 없는 결정을 있다고 하면
-      //    사람이 들어갔다가 빈 화면을 봅니다.
+      //  ★ 못 물어봤으면 뱃지를 안 답니다. 탭은 그대로 있으니 사람이
+      //    들어가서 직접 볼 수 있습니다.
       .catch(() => undefined);
     return () => {
       alive = false;
     };
   }, []);
 
-  const panes = PANES.filter((p) => p.key !== "retrain" || waiting > 0);
-  //  재학습 탭을 보다가 결정이 사라지면 (다른 사람이 눌렀거나 취소했거나)
-  //  빈 화면에 남지 않게 가격 예측으로 돌려놓습니다.
-  const here = panes.some((p) => p.key === pane) ? pane : "forecast";
+  //  ★ 탭은 **늘 있습니다** (2026-09-09 다시 바꿈). 없다가 생기니 사람이
+  //    「어디로 들어가야 하나」 를 몰랐습니다. 갈리는 것은 탭 안입니다 —
+  //    바꿀 것이 있으면 비교표와 버튼, 없으면 «필요 없습니다» 한 줄.
+  const here = pane;
 
   return (
     <>
       <div className="flex flex-wrap gap-1.5">
-        {panes.map((p) => (
+        {PANES.map((p) => (
           <Tab
             key={p.key}
             label={p.label}
