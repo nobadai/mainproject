@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.application import harness as harness_module
 from app.finance.application.harness import (
     CAPABILITY_OWNER,

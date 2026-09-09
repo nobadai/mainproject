@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TypedDict
 
-from app.finance.sales_models import (
+from app.finance.sales_validation import (
     OPEN_RECEIVABLE_STATUSES,
     ConditionalSupplyCostBasis,
     InventoryCostBasis,

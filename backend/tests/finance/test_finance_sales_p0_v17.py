@@ -10,7 +10,7 @@ from app.finance.collection import (
     apply_cumulative_collection,
     build_collection_transition,
 )
-from app.finance.sales_models import (
+from app.finance.sales_validation import (
     ConditionalSupplyCostBasis,
     InventoryCostBasis,
     VerifiedDirectCost,

@@ -137,7 +137,7 @@ def test_proposal_module_does_not_import_any_repository():
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
 
-    for forbidden in ("app.sales.db", "app.sales.run_repository", "app.sales.service"):
+    for forbidden in ("app.sales.db", "app.sales.runs", "app.sales.runs"):
         assert forbidden not in imported, forbidden
 
 

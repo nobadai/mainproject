@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.finance.collection import CollectionEvent
-from app.finance.collection_fixture import DeterministicCollectionFixtureSource
+from app.finance.collection import DeterministicCollectionFixtureSource
 
 
 def _event(

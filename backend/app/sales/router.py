@@ -14,7 +14,7 @@ from app.sales.schemas import (
     SalesProposalInput,
     SalesProposalReply,
 )
-from app.sales.service import get_sales_run, list_sales_runs
+from app.sales.runs import get_sales_run, list_sales_runs
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 

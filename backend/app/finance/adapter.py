@@ -31,7 +31,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.contracts.core import Evidence
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.capabilities.sales import (
     SALES_VERDICT_TO_BUSINESS_STATUS,
@@ -50,7 +50,7 @@ from app.finance.execution import (
     save_finance_execution,
 )
 from app.finance.llm.client import finance_llm_enabled
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 from app.finance.schemas import CashflowProjection, FinancePolicy, FinanceRuntimeContext
 from app.finance.tools import (
     build_payroll_schedule,

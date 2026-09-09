@@ -1,7 +1,7 @@
 """Sales LLM Runtime은 실제 호출 경로를 대체해 안전성만 단위 검증한다."""
 
 from app.sales.llm.runtime import interpret_candidates, load_settings
-from app.sales.llm.schemas import LlmInterpretationOutput
+from app.sales.llm.runtime import LlmInterpretationOutput
 from app.sales.schemas import AllocationLeg, SalesCandidate
 
 

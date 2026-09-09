@@ -26,7 +26,8 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from app.contracts.core import Evidence, SuggestedAdjustment
-from app.finance import execution, messages
+from app.finance import execution
+from app.finance import user_messages as messages
 from app.finance.application.harness import (
     DUPLICATE_UNRESOLVED_TOOL_CALL,
     TOOL_BUDGET_EXHAUSTED,
@@ -67,7 +68,7 @@ from app.finance.llm.planner import (
     ToolAction,
     _configured_finance_llms,
 )
-from app.finance.messages import explanation_for
+from app.finance.user_messages import explanation_for
 from app.finance.state import FinanceAgentState
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 

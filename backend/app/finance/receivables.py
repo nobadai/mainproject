@@ -10,9 +10,9 @@ from typing import Any
 
 from psycopg import sql
 
-from app.finance.common import decimal_value, row_value
+from app.finance.db import decimal_value, row_value
 from app.finance.db import get_db_schema
-from app.finance.sales_models import ReceivableCreateInput
+from app.finance.sales_validation import ReceivableCreateInput
 from app.finance.state_identity import daily_finance_state_id
 
 

@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from app.sales.llm.runtime import interpret_candidates
-from app.sales.llm.schemas import LlmInterpretationOutput
+from app.sales.llm.runtime import LlmInterpretationOutput
 from app.sales.proposal import run_proposal
 from app.sales.ranking import rank_scenarios, remove_dominated_scenarios
 from app.sales.schemas import LogisticsLotConstraint, SalesCandidate, SalesProposalInput

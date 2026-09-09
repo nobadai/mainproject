@@ -1,8 +1,7 @@
 """Sales AgentRequest adapter.
 
-Master owns routing and cross-domain orchestration. This adapter only translates
-the Master envelope into the Sales-owned proposal core, then carries the typed
-Sales result back in an AgentReply.
+Master가 라우팅과 도메인 간 orchestration을 소유한다. 이 adapter는 Master envelope을
+Sales proposal core로 옮기고, typed Sales 결과를 AgentReply로 되돌리는 경계다.
 """
 
 from __future__ import annotations
@@ -17,15 +16,15 @@ from pydantic import ValidationError
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.sales.llm.runtime import load_settings
 from app.sales.proposal import run_proposal
-from app.sales.run_repository import save_sales_agent_run
+from app.sales.runs import save_sales_agent_run
 from app.sales.schemas import SalesProposalInput, SalesProposalReply
-from app.sales.service import list_sales_runs
+from app.sales.runs import list_sales_runs
 
 AGENT_NAME = "sales"
 
 
 def sales_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
-    """Master-facing Sales port."""
+    """Master가 호출하는 Sales port."""
     if request.mode == "GENERATE_SALES_PROPOSAL":
         return _generate(request)
     if request.mode == "STATUS_QUERY":

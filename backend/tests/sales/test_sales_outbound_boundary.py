@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import app.sales.outbound as outbound_module
-from app.sales.outbound import outbound_reservation_for_sale
+import app.sales.logistics_request as outbound_module
+from app.sales.logistics_request import outbound_reservation_for_sale
 from app.sales.persistence import SaleWriteResult
 
 

@@ -46,12 +46,11 @@ export default function FinancePage() {
         subtitle="저장된 상태의 현금 · 운영자금 · 받을 돈 · 부채"
         right={
           <TabButtons
-            items={data.states.map((s) => ({ key: s.key, label: s.label.split(" · ")[0] }))}
+            items={data.states.map((s) => ({ key: s.key, label: s.label }))}
             value={data.selected}
             onChange={setState}
           />
         }
-        footer={`조회 표: ${data.tables_read.join(" · ")}`}
       >
         <Note note={data.explain} />
       </Panel>
@@ -64,7 +63,7 @@ export default function FinancePage() {
         <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
           {data.flows.map((f) => (
             <div
-              key={f.term}
+              key={f.label}
               className="flex min-w-0 flex-col gap-1 rounded-xl border px-3.5 py-3"
               style={{ borderColor: "var(--color-hair)" }}
             >
@@ -84,9 +83,6 @@ export default function FinancePage() {
               >
                 {f.value}
               </strong>
-              <small className="font-mono text-[10px]" style={{ color: "var(--color-mut2)" }}>
-                {f.term}
-              </small>
             </div>
           ))}
         </div>

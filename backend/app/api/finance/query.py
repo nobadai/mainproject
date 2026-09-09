@@ -1,4 +1,4 @@
-"""재무 탭 — Finance Dashboard Service 값을 화면 부품으로 옮긴다."""
+"""재무 탭 — 저장된 재무 화면 값을 화면 부품으로 옮긴다."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ from decimal import Decimal
 
 from app.api.finance.schema import FinanceTab, FlowCell, StateOption
 from app.api.primitives import Chart, Column, Marker, Note, Series, Source, Stat, Table
-from app.finance.dashboard_service import get_finance_cashflow, get_finance_dashboard
+from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 from app.finance.schemas import FinanceClosingItem, FinanceDashboardResponse, FinanceStateView
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 STATES = ("base", "loan")
 _STATE_TO_MODE = {"base": "BASE_NO_LOAN", "loan": "LOAN_BASELINE"}
 _STATE_LABELS = {
-    "base": "대출 없이 운영 · BASE_NO_LOAN",
-    "loan": "대출 반영 · LOAN_BASELINE",
+    "base": "대출 없이 운영",
+    "loan": "대출 반영",
 }
 
 # 통합 대시보드에 얹을 현금 잔고 (백만원). 이 함수는 별도 화면에서 아직 사용한다.
@@ -50,7 +50,7 @@ def build(as_of: date, state: str) -> FinanceTab:
                 label="현금 잔액",
                 value=_manwon(selected.current_cash_krw),
                 unit="만원",
-                detail=f"{as_of.isoformat()} {selected.financing_mode} 기준",
+                detail=f"{as_of.isoformat()} 기준 현재 사용 가능한 현금",
                 tone="good" if selected.current_cash_krw >= 0 else "bad",
                 raw=_raw(selected.current_cash_krw),
             ),
@@ -58,7 +58,7 @@ def build(as_of: date, state: str) -> FinanceTab:
                 label="최소 운영자금",
                 value=_manwon(selected.minimum_operating_cash_krw),
                 unit="만원",
-                detail="finance_states.minimum_operating_cash_krw",
+                detail="현재 운영에 남겨둘 최소 현금",
                 raw=_raw(selected.minimum_operating_cash_krw),
             ),
             Stat(
@@ -73,7 +73,7 @@ def build(as_of: date, state: str) -> FinanceTab:
                 label="부채",
                 value=_manwon(selected.current_debt_krw),
                 unit="만원",
-                detail=f"{selected.financing_mode} current_debt_krw",
+                detail="대출을 반영한 현재 차입 잔액",
                 tone="warn" if selected.current_debt_krw > 0 else "good",
                 raw=_raw(selected.current_debt_krw),
             ),
@@ -105,14 +105,14 @@ def build(as_of: date, state: str) -> FinanceTab:
                 label="이미 받은 돈",
                 value=_manwon(receivables.received_amount_krw),
                 unit="만원",
-                detail="receivables.received_amount_krw",
+                detail="현재까지 받은 판매대금",
                 raw=_raw(receivables.received_amount_krw),
             ),
             Stat(
                 label="남은 매입대금",
                 value=_manwon(payables.outstanding_amount_krw),
                 unit="만원",
-                detail=f"payables {payables.count}건",
+                detail=f"아직 지급하지 않은 매입대금 {payables.count}건",
                 tone="warn" if payables.outstanding_amount_krw > 0 else "good",
                 raw=_raw(payables.outstanding_amount_krw),
             ),
@@ -120,28 +120,23 @@ def build(as_of: date, state: str) -> FinanceTab:
                 label="장부 재고가치",
                 value=_manwon(selected.inventory_book_value_krw),
                 unit="만원",
-                detail="finance_states.inventory_book_value_krw",
+                detail="현재 재고의 장부상 가치",
                 raw=_raw(selected.inventory_book_value_krw),
             ),
         ],
         balances_note=Note(
             tone="good" if payables.outstanding_amount_krw == 0 else "warn",
             text=(
-                "**현재 미지급 매입대금은 없습니다.** payables outstanding_amount 가 0원입니다."
+                "**현재 미지급 매입대금은 없습니다.** 정산할 매입대금이 남아 있지 않습니다."
                 if payables.outstanding_amount_krw == 0
                 else f"남은 매입대금은 {_won(payables.outstanding_amount_krw)}입니다."
             ),
         ),
         closings=_closings_table(dash.recent_closings),
-        tables_read=["finance_states", "daily_closings", "receivables", "payables", "expenses"],
         source=Source(
             filled=True,
             owner="재무",
-            note=(
-                "Finance Dashboard · finance_states · daily_closings · receivables · "
-                f"payables · expenses · {dash.meta.sim_run_id} · {dash.meta.as_of} · "
-                f"{dash.meta.data_type}"
-            ),
+            note=f"저장된 재무 마감과 수금·지급 장부 기준 · {dash.meta.as_of}",
         ),
     )
 
@@ -209,11 +204,12 @@ def _state_by_mode(
 
 def _state_explain(state: FinanceStateView | None) -> str:
     if state is None:
-        return "해당 재무 기준 상태가 DB에 없습니다."
+        return "해당 재무 기준 상태가 아직 준비되지 않았습니다."
     note = "" if state.note is None else f" {state.note}"
+    mode_label = "대출 반영" if state.financing_mode == "LOAN_BASELINE" else "대출 없이 운영"
     return (
-        f"DB에 저장된 {state.financing_mode} 상태입니다. 현금 잔액은 "
-        f"{_won(state.current_cash_krw)}이고 최소 운영자금 기준 buffer는 "
+        f"{mode_label} 기준의 현재 자금 상태입니다. 현금 잔액은 "
+        f"{_won(state.current_cash_krw)}이고 최소 운영자금 대비 여유는 "
         f"{_won(state.operating_cash_buffer_krw)}입니다.{note}"
     )
 
@@ -235,7 +231,7 @@ def _cash_chart(rows: list[FinanceClosingItem]) -> Chart:
             Series(name="대출 반영", data=loan, tone="good", width=2.2),
             Series(name="최소 운영자금", data=minimum, tone="bad", width=1.3, dashed=True),
         ],
-        note=Note(tone="neutral", text="daily_closings 기준 일별 마감 현금 잔액"),
+        note=Note(tone="neutral", text="일별 마감 기준 현금 잔액입니다."),
         x_labels=_spread_labels([f"{row.close_date.month}/{row.close_date.day}" for row in rows]),
     )
 
@@ -245,28 +241,23 @@ def _flows(summary) -> list[FlowCell]:
         FlowCell(
             label="상품 매입으로 나간 돈",
             value=_manwon_with_unit(summary.purchase_cash_out_krw),
-            term="purchase cash out",
         ),
         FlowCell(
             label="물류로 나간 돈",
             value=_manwon_with_unit(summary.logistics_cash_out_krw),
-            term="logistics cash out",
         ),
         FlowCell(
             label="급여 · 이자로 나간 돈",
             value=_manwon_with_unit(summary.payroll_interest_cash_out_krw),
-            term="payroll + interest",
         ),
         FlowCell(
             label="판매로 잡힌 금액",
             value=_manwon_with_unit(summary.sales_recognized_krw),
-            term="sales recognized",
             tone="good",
         ),
         FlowCell(
             label="실제로 들어온 수금",
             value=_manwon_with_unit(summary.collection_cash_in_krw),
-            term="collection cash in",
             tone="good" if summary.collection_cash_in_krw > 0 else "warn",
         ),
     ]
@@ -281,7 +272,7 @@ def _closings_table(rows: list[FinanceClosingItem]) -> Table:
             Column(key="pay", label="급여 · 이자", align="right", mono=True),
             Column(key="sale", label="판매 인식", align="right", mono=True),
             Column(key="col", label="수금", align="right", mono=True),
-            Column(key="base", label="BASE 현금", align="right", mono=True),
+            Column(key="base", label="대출 없음 현금", align="right", mono=True),
             Column(key="loan", label="대출 반영 현금", align="right", mono=True),
         ],
         rows=[

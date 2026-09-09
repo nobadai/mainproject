@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.adapter import finance_port
 from app.finance.execution import get_finance_execution, get_finance_run, list_finance_runs
 from app.finance.schemas import (

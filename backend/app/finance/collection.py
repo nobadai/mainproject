@@ -4,15 +4,18 @@
 누적 target과 현재 누적액의 차이만 같은 트랜잭션 안에서 반영한다.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 from psycopg import Connection, sql
 
-from app.finance.common import row_value
+from app.finance.db import row_value
 from app.finance.db import FinanceDataNotReady, get_db_schema
+
+FixtureEvidenceGrade = Literal["SIM_FIXED"]
 
 
 class FinanceCollectionConflict(ValueError):
@@ -33,13 +36,47 @@ class CollectionTransitionPlan:
 
 @dataclass(frozen=True)
 class CollectionEvent:
-    """Caller-authored collection fact for one cumulative Receivable target."""
+    """호출자가 명시한 매출채권별 누적 수금 사실."""
 
     sim_run_id: str
     financing_mode: str
     collection_date: date
     receivable_id: str
     target_received_total_krw: object
+
+
+@dataclass(frozen=True)
+class DeterministicCollectionFixtureSource:
+    """시뮬레이션 fixture가 명시한 수금 event source."""
+
+    events: tuple[CollectionEvent, ...] = ()
+    evidence_grade: FixtureEvidenceGrade = "SIM_FIXED"
+    source_ref: str = "finance_collection_fixture"
+
+    @classmethod
+    def from_events(
+        cls,
+        events: Iterable[CollectionEvent],
+        *,
+        source_ref: str = "finance_collection_fixture",
+    ) -> "DeterministicCollectionFixtureSource":
+        return cls(events=tuple(events), source_ref=source_ref)
+
+    def events_for_date(
+        self,
+        *,
+        sim_run_id: str,
+        financing_mode: str,
+        as_of: date,
+    ) -> tuple[CollectionEvent, ...]:
+        """실행 축과 날짜가 정확히 일치하는 명시 event만 반환한다."""
+        return tuple(
+            event
+            for event in self.events
+            if event.sim_run_id == sim_run_id
+            and event.financing_mode == financing_mode
+            and event.collection_date == as_of
+        )
 
 
 def build_collection_transition(
@@ -166,10 +203,10 @@ def apply_collection_event(
     receivable_id: str,
     target_received_total_krw: object,
 ) -> CollectionTransitionPlan:
-    """Apply an explicit collection fact to the exact already-open Finance day.
+    """명시된 수금 사실을 이미 열린 해당 Finance 일자에만 반영한다.
 
-    This boundary does not infer an event from ``due_date``, choose a latest state, or carry a
-    prior state forward. The caller owns the transaction and supplies every execution axis.
+    이 경계는 ``due_date`` 로 event를 추론하거나 최신 상태를 임의 선택하지 않는다.
+    transaction과 실행 축은 호출자가 소유한다.
     """
     for field, value in (
         ("sim_run_id", sim_run_id),
@@ -196,7 +233,7 @@ def apply_collection_event(
 def apply_explicit_collection(
     conn: Connection[dict[str, object]], event: CollectionEvent
 ) -> CollectionTransitionPlan:
-    """Command-friendly adapter for deterministic fixture-authored collection events."""
+    """명시 fixture event를 누적 수금 전이에 연결한다."""
     return apply_collection_event(
         conn,
         sim_run_id=event.sim_run_id,

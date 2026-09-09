@@ -40,7 +40,7 @@ def test_list_runs_applies_filter(monkeypatch):
         captured.update(kwargs)
         return [_fake_run()]
 
-    monkeypatch.setattr("app.sales.service.list_sales_agent_runs", fake_list)
+    monkeypatch.setattr("app.sales.runs.list_sales_agent_runs", fake_list)
 
     response = client.get("/sales/runs", params={"cycle": "PROCUREMENT", "limit": 10})
 
@@ -54,7 +54,7 @@ def test_list_runs_applies_filter(monkeypatch):
 
 def test_get_run_single(monkeypatch):
     run = _fake_run()
-    monkeypatch.setattr("app.sales.service.get_sales_agent_run", lambda run_id: run)
+    monkeypatch.setattr("app.sales.runs.get_sales_agent_run", lambda run_id: run)
 
     response = client.get(f"/sales/runs/{run['run_id']}")
 
@@ -66,7 +66,7 @@ def test_get_run_missing_is_404(monkeypatch):
     def fake_get(run_id):
         raise LookupError("not found")
 
-    monkeypatch.setattr("app.sales.service.get_sales_agent_run", fake_get)
+    monkeypatch.setattr("app.sales.runs.get_sales_agent_run", fake_get)
 
     response = client.get(f"/sales/runs/{uuid4()}")
     assert response.status_code == 404

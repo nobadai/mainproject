@@ -15,7 +15,7 @@ from app.finance.receivables import (
     confirm_receivable,
     receivable_id_for,
 )
-from app.finance.sales_models import ReceivableCreateInput
+from app.finance.sales_validation import ReceivableCreateInput
 from app.finance.state_identity import daily_finance_state_id
 
 SALE_ID = "SALE-RUN-1-SCN-1"

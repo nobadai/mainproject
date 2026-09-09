@@ -151,7 +151,7 @@ def test_sales_does_not_build_its_own_forecast_fallback():
 
 def test_sales_db_access_is_limited_to_its_own_run_history():
     """Sales 가 여는 DB 경로는 자기 실행이력뿐이다."""
-    source = pathlib.Path("app/sales/run_repository.py").read_text(encoding="utf-8")
+    source = pathlib.Path("app/sales/runs.py").read_text(encoding="utf-8")
 
     tables = set()
     for line in source.splitlines():

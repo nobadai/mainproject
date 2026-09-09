@@ -20,7 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance import adapter, messages
+from app.finance import adapter
+from app.finance import user_messages as messages
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.db import FinanceDataNotReady
 from app.finance.llm.finalizer import _FINAL_EXPLANATIONS
