@@ -19,18 +19,27 @@
 ```text
 app/orchestrator/band.py            →  app/master/band.py
 app/orchestrator/outbound.py        →  app/master/outbound.py
-app/orchestrator/cycle.py           →  app/master/cycle.py
 app/orchestrator/schemas.py         →  app/master/cycle_schemas.py
 app/orchestrator/persistence.py     →  app/master/cycle_persistence.py
 app/orchestrator/run_repository.py  →  app/master/cycle_run_repository.py
-app/orchestrator/graph.py           →  app/master/cycle_graph.py
-app/orchestrator/graph_b.py         →  app/master/cycle_graph_b.py
 app/orchestrator/llm/               →  app/master/cycle_llm/
 
 app/orchestrator/graph_langgraph.py  지웠다 — 앱 참조 0건
 app/orchestrator/interpretation.py   지웠다 — 앱 참조 0건
 app/orchestrator/contracts_core.py   지웠다 — 재수출 shim ④ 완료
 ```
+
+★ **2026-09-08 에 셋이 더 없어졌다.** 옮겨는 왔지만 앱 진입점에서 도달이 0이었다.
+
+```text
+app/orchestrator/cycle.py    →  (경유) app/master/cycle.py          지웠다
+app/orchestrator/graph.py    →  (경유) app/master/cycle_graph.py    지웠다
+app/orchestrator/graph_b.py  →  (경유) app/master/cycle_graph_b.py  지웠다
+```
+
+Critic 테스트가 받침대로 쓰던 부분만 `tests/master/critic/cycle_harness.py` 로
+옮겼다 — 그 일은 프로덕션이 아니라 **픽스처**였다.
+`test_master_legacy_cycle_is_gone.py` 가 셋이 다시 생기는 것을 막는다.
 
 🔴 **셋에 `cycle_` 을 붙인 이유는 이름이 겹쳐서다.** `app/master/` 에 이미
   `schemas.py`·`persistence.py`·`run_repository.py` 가 있다. 그대로 옮기면 덮어쓴다.
@@ -203,13 +212,14 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
     # ★ 2026-09-08 에 forecast_gate.py 가 들어왔다 — 날 단위 예측 게이트가 물어볼
     #   품목의 기본값으로 `ITEMS` 를 읽는다. 🔴 **품목 목록을 게이트가 다시 적지
     #   않는다** — commitment.py 가 피마늘로 어긋나던 것과 같은 자리다.
+    # ★ 2026-09-08 에 셋이 빠졌다 — `cycle.py`·`cycle_graph.py`·`cycle_graph_b.py`.
+    #   **앱에서 도달 0 이라 지웠다** (`test_master_legacy_cycle_is_gone.py`).
+    #   Critic 테스트가 받침대로 쓰던 부분만 `tests/master/critic/cycle_harness.py`
+    #   로 옮겼다 — 옮긴 것은 픽스처이지 앱 코드가 아니므로 여기서 빠지는 것이 맞다.
     assert users == {
         "band.py": ["app.contracts.core"],
         "commitment.py": ["app.contracts.core"],
         "critic_bridge.py": ["app.contracts.core"],
-        "cycle.py": ["app.contracts.core"],
-        "cycle_graph.py": ["app.contracts.core"],
-        "cycle_graph_b.py": ["app.contracts.core"],
         "envelope.py": ["app.contracts.core"],
         "flow.py": ["app.contracts.core"],
         "forecast_gate.py": ["app.contracts.core"],

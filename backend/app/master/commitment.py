@@ -9,9 +9,11 @@ commitment.py — 승인된 매입안 → **확정 입고 약정** (H1)
 ```
 
 ★ **오케스트레이터를 거치지 않는다** (지시 2026-09-01).
-  같은 변환이 `master/cycle.py` 에도 있지만 그 경로는 M-1 관통에서 안 돈다.
-  거기 것을 부르지 않고 여기서 만든다 — `tests/master/test_orchestrator_is_gone.py`
-  가 그 방향을 잠근다.
+  같은 변환이 옛 `master/cycle.py` 에도 있었지만 그 경로는 M-1 관통에서 안 돌았고,
+  **2026-09-08 에 그 파일을 지웠다.** 남은 것은 Critic 테스트가 시나리오를 짓는
+  받침대(`tests/master/critic/cycle_harness.py`)뿐이고, 승인 약정의 주인은 여기다 —
+  `tests/master/test_orchestrator_is_gone.py` 와
+  `tests/master/test_master_legacy_cycle_is_gone.py` 가 그 방향을 잠근다.
 
 ★ **품목을 잃지 않는다.** 오케 쪽 변환은 회차 수량을 `sum(leg.qty_kg.values())` 로
   합쳐 품목을 없앴고, 그래서 물류 H1 이 총 kg 으로만 계산했다. *"배추 출고가 양파

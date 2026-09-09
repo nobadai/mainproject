@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.application.harness import _ADJUSTMENT_REQUIRED_VERDICTS
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.llm.planner import ToolAction

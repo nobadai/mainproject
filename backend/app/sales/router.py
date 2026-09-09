@@ -6,62 +6,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.sales.dashboard_service import get_sales_dashboard
 from app.sales.proposal import run_proposal
 from app.sales.schemas import (
     RuntimeStatus,
     SalesAgentRunResponse,
-    SalesAllocationInput,
-    SalesAllocationReply,
     SalesCycle,
-    SalesDashboardResponse,
-    SalesFloorInput,
-    SalesFloorReply,
     SalesProposalInput,
     SalesProposalReply,
 )
-from app.sales.service import (
-    get_sales_run,
-    list_sales_runs,
-    run_allocation,
-    run_floor_reply,
-)
+from app.sales.runs import get_sales_run, list_sales_runs
 
 router = APIRouter(prefix="/sales", tags=["sales"])
-
-
-@router.get(
-    "/dashboard",
-    response_model=SalesDashboardResponse,
-    summary="영업 Dashboard 조회",
-)
-def read_sales_dashboard(
-    sim_run_id: Annotated[str, Query(min_length=1)],
-    as_of: date,
-    limit: Annotated[int, Query(ge=1, le=100)] = 10,
-) -> SalesDashboardResponse:
-    """저장된 판매·수금 원장 사실만 집계해 반환한다."""
-    return get_sales_dashboard(sim_run_id=sim_run_id, as_of=as_of, recent_limit=limit)
-
-
-@router.post(
-    "/procurement",
-    response_model=SalesFloorReply,
-    summary="영업 A 매입 하한 계산",
-)
-def review_sales_procurement(request: SalesFloorInput) -> SalesFloorReply:
-    """동결 스냅샷으로 품목별 매입 하한을 계산하고 실행이력을 저장한다."""
-    return run_floor_reply(request)
-
-
-@router.post(
-    "/allocation",
-    response_model=SalesAllocationReply,
-    summary="영업 B 날짜별 전략 판매 가능 재고 계산",
-)
-def review_sales_allocation(request: SalesAllocationInput) -> SalesAllocationReply:
-    """동결 스냅샷으로 날짜별 전략 판매 가능 재고를 계산하고 실행이력을 저장한다."""
-    return run_allocation(request)
 
 
 @router.post(

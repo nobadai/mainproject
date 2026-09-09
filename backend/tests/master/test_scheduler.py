@@ -147,8 +147,12 @@ def _run(
     defaults = {
         "open_day_fn": _Spy(_Out("OPENED")),
         "receive_fn": _Spy(_Out("RECEIVED")),
+        # ⚠️ **대역을 안 주면 진짜 `issue_receivables` 가 DB 를 찾으러 간다.**
+        "issue_fn": _Spy(_Out("ISSUED")),
         "collect_fn": _Spy(_Out("COLLECTED")),
         "procure_fn": procure_fn,
+        # ⚠️ **대역을 안 주면 진짜 `ship_due_sales` 가 DB 를 찾으러 간다.**
+        "outbound_fn": _Spy(_Out("NOTHING_DUE")),
         "items": ITEMS,
     }
     defaults.update(kwargs)
@@ -288,6 +292,7 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
     received = _Spy(_Out("RECEIVED"))
     collected = _Spy(_Out("COLLECTED"))
     procure = _Procure()
+    shipped = _Spy(_Out("NOTHING_DUE"))
 
     out = run_scheduled_day(
         plans[action_name],
@@ -295,13 +300,16 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
         receive_fn=received,
         collect_fn=collected,
         procure_fn=procure,
+        outbound_fn=shipped,
         items=ITEMS,
     )
 
     assert out.action == action_name
     assert procure.requests == [], "판단을 돌렸다 — E4 가 쌓인다"
     assert opened.calls == [] and received.calls == [] and collected.calls == []
+    assert shipped.calls == [], "안 도는 날에 물건이 나갔다"
     assert out.day_open_status == "NOT_ATTEMPTED"
+    assert out.outbound_status == "NOT_ATTEMPTED"
 
 
 def test_열두_번_WAIT_해도_판단은_0회다():
@@ -322,7 +330,7 @@ def test_열두_번_WAIT_해도_판단은_0회다():
 # ── 실행 순서와 실패 규율 ───────────────────────────────────────────────
 
 
-def test_순서는_개장_입고_수금_판단이다():
+def test_순서는_개장_입고_수금_판단_출고다():
     order: list[str] = []
 
     def note(name, out):
@@ -342,12 +350,15 @@ def test_순서는_개장_입고_수금_판단이다():
         _plan(now=_at(9, 30), gate=ALL_READY),
         open_day_fn=note("개장", _Out("OPENED")),
         receive_fn=note("입고", _Out("RECEIVED")),
+        issue_fn=note("채권", _Out("ISSUED")),
         collect_fn=note("수금", _Out("COLLECTED")),
         procure_fn=procure_noted,
+        outbound_fn=note("출고", _Out("NOTHING_DUE")),
         items=ITEMS,
     )
 
-    assert order == ["개장", "입고", "수금", "판단:무", "판단:배추", "판단:양파"]
+    # 🔴 **출고가 맨 뒤다.** 오늘 산 것은 오늘 안 나간다 — 도착이 며칠 뒤다.
+    assert order == ["개장", "입고", "채권", "수금", "판단:무", "판단:배추", "판단:양파", "출고"]
 
 
 def test_개장이_실패하면_그_뒤를_안_한다():
@@ -599,8 +610,10 @@ def test_wake_up_은_시계를_한_번만_읽는다():
         readiness=lambda as_of: ALL_READY,
         open_day_fn=_Spy(_Out("OPENED")),
         receive_fn=_Spy(_Out("RECEIVED")),
+        issue_fn=_Spy(_Out("ISSUED")),
         collect_fn=_Spy(_Out("COLLECTED")),
         procure_fn=procure,
+        outbound_fn=_Spy(_Out("NOTHING_DUE")),
     )
 
     assert len(reads) == 1
@@ -616,6 +629,81 @@ def test_wake_up_은_안_잔다():
         calendar=lambda: _Calendar(True),
         readiness=lambda as_of: NONE_READY,
         procure_fn=_Procure(),
+        outbound_fn=_Spy(_Out("NOTHING_DUE")),
     )
 
     assert datetime.now(SEOUL) - started < timedelta(seconds=2)
+
+
+# ── 🔴 출고는 장부 관문 뒤 · 판단 뒤다 ─────────────────────────────────
+#
+# ★ **왜 관문 뒤인가.** 장부가 안 선 날에 출고까지 하면 재고가 두 번 틀린다 —
+#   안 들어온 물건 위에서 물건이 나가고, 그 위에 다음 날 판단이 선다.
+
+
+@pytest.mark.parametrize("막힌상태", ["BLOCKED", "FAILED"])
+def test_입고가_막히면_출고도_안_돌린다(막힌상태):
+    shipped = _Spy(_Out("NOTHING_DUE"))
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out(막힌상태)),
+        outbound_fn=shipped,
+    )
+
+    assert procure.requests == []
+    assert shipped.calls == [], "장부가 안 섰는데 물건이 나갔다 — 재고가 두 번 틀린다"
+    assert out.outbound_status == "NOT_ATTEMPTED"
+
+
+@pytest.mark.parametrize("막힌상태", ["BLOCKED", "FAILED"])
+def test_수금이_막히면_출고도_안_돌린다(막힌상태):
+    shipped = _Spy(_Out("NOTHING_DUE"))
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        collect_fn=_Spy(_Out(막힌상태)),
+        outbound_fn=shipped,
+    )
+
+    assert shipped.calls == []
+    assert out.outbound_status == "NOT_ATTEMPTED"
+
+
+def test_개장이_실패하면_출고도_안_돌린다():
+    shipped = _Spy(_Out("NOTHING_DUE"))
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        open_day_fn=_Spy(_Out("BLOCKED")),
+        outbound_fn=shipped,
+    )
+
+    assert shipped.calls == []
+    assert out.outbound_status == "NOT_ATTEMPTED"
+
+
+def test_출고_상태가_그대로_결과에_실린다():
+    """★ `procurement_status` 옆에 같은 모양으로 선다. 어휘를 새로 안 만든다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), outbound_fn=_Spy(_Out("RAN")))
+
+    assert out.procurement_status == "RAN"
+    assert out.outbound_status == "RAN"
+
+
+def test_나갈_것이_없는_날도_판단은_RAN_이다():
+    """🔴 `NOTHING_DUE` 는 정상이다. 예약이 0행인 지금이 매일 그 날이다."""
+    out, procure = _run(_plan(now=_at(9, 30), gate=ALL_READY))
+
+    assert out.outbound_status == "NOTHING_DUE"
+    assert len(procure.requests) == len(ITEMS)
+
+
+def test_출고가_터져도_판단_결과를_안_지운다():
+    """⚠️ 판단이 돈 것과 출고가 터진 것은 다른 사실이다."""
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        outbound_fn=_Spy(boom=RuntimeError("출고가 터졌다")),
+    )
+
+    assert out.procurement_status == "RAN"
+    assert len(procure.requests) == len(ITEMS)
+    assert out.outbound_status == "FAILED"
+    assert any("출고" in note for note in out.notes)

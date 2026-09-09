@@ -19,49 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.master.cycle_llm.schemas import LLMResponseFields
 
 RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
-Dept = Literal["sales", "inventory", "finance"]
 StrategyType = Literal["quantity", "timing", "mix"]
-Verdict = Literal["ok", "conditional", "reject", "skipped"]
-CheckKind = Literal["hard", "soft"]
-Severity = Literal["LOW", "MEDIUM", "HIGH"]
-EndCode = Literal["E1_APPROVED", "E2_HELD", "E3_REJECTED", "E4_NOT_STARTED", "E5_NO_FEASIBLE_PLAN"]
-
-
-# ---------------------------------------------------------------------------
-# 공통 입력 — 부서 회신 (밴드 기여)
-# ---------------------------------------------------------------------------
-class BandCheckIn(BaseModel):
-    """부서 self-check 1건. 밴드 기여 방향은 dept 로 정해진다 (§3.4.5-④).
-
-    영업 → floor_kg / 재고 → cap_kg·cap_total_kg·cap_by_date_kg / 재무 → cap_amount_krw.
-    허용되지 않은 필드를 채우면 계약이 막고 API 는 422 를 낸다.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    check_id: str = Field(min_length=1)
-    kind: CheckKind = "hard"
-    verdict: Verdict = "ok"
-    reason: str = ""
-    floor_kg: dict[str, float] | None = None
-    cap_kg: dict[str, float] | None = None
-    cap_total_kg: float | None = None
-    cap_amount_krw: float | None = None
-    cap_by_date_kg: dict[date, float] | None = None
-    allow_loose_cap: bool = False
-    severity: Severity = "MEDIUM"
-
-
-class DeptReplyIn(BaseModel):
-    """부서당 1회 회신 (§3.6.1). 품목별이면 item 을 채운다 (영업)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    dept: Dept
-    runtime_status: RuntimeStatus = "READY"
-    item: str | None = None
-    reasoning: str = ""
-    checks: list[BandCheckIn] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -110,20 +68,6 @@ class ScenarioIn(BaseModel):
     """3값 자문 표시 - true 경고 / false 정상 / null 미계산. 컷 아님, 검증에 영향 없음."""
 
 
-class ProcurementRequest(BaseModel):
-    """T3 — 매입 시나리오 밴드 결합·클리핑 요청."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    as_of: date
-    run_seq: int = Field(default=1, ge=1)
-    snapshot_id: str | None = None
-    items: list[str] | None = None
-    spot_price_krw_per_kg: dict[str, float] | None = None
-    replies: list[DeptReplyIn] = Field(min_length=1)
-    scenarios: list[ScenarioIn] = Field(min_length=1)
-
-
 # ---------------------------------------------------------------------------
 # 판매(S3) 입력 — 배분 후보
 # ---------------------------------------------------------------------------
@@ -156,31 +100,6 @@ class AllocationIn(BaseModel):
     estimation_confidence: str = ""
 
 
-class SalesRequest(BaseModel):
-    """S3 — 판매 배분 후보 공용 출고 결합·클리핑 요청.
-
-    replies 는 재고(cap 밴드) + 재무(soft 신호). 재무는 밴드를 움직이지 않는다 (§3.1).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    as_of: date
-    run_seq: int = Field(default=1, ge=1)
-    snapshot_id: str | None = None
-    items: list[str] | None = None
-    replies: list[DeptReplyIn] = Field(min_length=1)
-    allocations: list[AllocationIn] = Field(min_length=1)
-
-
-class DayRequest(BaseModel):
-    """하루 전체 — 매입(T3) → 판매(S3) 코어를 순차로 돌린다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    procurement: ProcurementRequest
-    sales: SalesRequest | None = None
-
-
 # ---------------------------------------------------------------------------
 # 응답
 # ---------------------------------------------------------------------------
@@ -195,16 +114,6 @@ class BandOut(BaseModel):
     contributors: dict[str, str]
     not_ready: list[str]
     usable: bool
-
-
-class OutboundBandOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    cap_kg: dict[str, float | None]
-    cap_total_kg: float | None
-    cap_total_effective_kg: float | None
-    contributors: dict[str, str]
-    soft_notes: list[str]
 
 
 class DeadlockOut(BaseModel):
@@ -250,35 +159,3 @@ class ProcurementResponse(LLMResponseFields):
     ranked_ids: list[str]
     recommended_id: str | None
     soft_warnings: list[str]
-
-
-class SalesResponse(LLMResponseFields):
-    """S3 결과 — 공용 출고 밴드 + 후보별 클리핑 + 순위 (+ LLM 선정)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent: Literal["orchestrator"] = "orchestrator"
-    cycle: Literal["SALES"] = "SALES"
-    as_of: date
-    snapshot_id: str | None
-    runtime_status: RuntimeStatus
-    outbound_band: OutboundBandOut
-    clip_results: list[ClipResultOut]
-    ranked_ids: list[str]
-    recommended_id: str | None
-    variant_collapsed: bool
-    soft_warnings: list[str]
-
-
-class DayResponse(BaseModel):
-    """하루 전체 결과. end_code 는 코어 기준의 간이 판정이다 —
-    파산선·미충족 의무 판정은 전체 T0Snapshot 이 필요해 후속 작업이다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent: Literal["orchestrator"] = "orchestrator"
-    as_of: date
-    end_code: EndCode
-    reason: str = ""
-    procurement: ProcurementResponse
-    sales: SalesResponse | None

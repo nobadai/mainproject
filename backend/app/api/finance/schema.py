@@ -30,7 +30,6 @@ class FlowCell(BaseModel):
 
     label: str = Field(description="원장 용어 말고 사람 말로")
     value: str = Field(description="금액. 자릿점까지 넣어서")
-    term: str = Field(description="원래 회계 용어. 작게 같이 보인다")
     tone: str = Field(default="neutral", description="neutral · good · warn · bad")
 
 
@@ -45,5 +44,4 @@ class FinanceTab(BaseModel):
     balances: list[Stat] = Field(description="받을 돈 · 줄 돈")
     balances_note: Note = Field(description="미지급이 없으면 경고 대신 «정산 완료» 로")
     closings: Table = Field(description="최근 일별 마감")
-    tables_read: list[str] = Field(description="어느 표를 읽었나. 화면 아래에 적는다")
     source: Source = Field(description="예시값인지 실제 값인지")

@@ -59,7 +59,11 @@ _ALLOWED = "clock.py"
 #:
 #: ⚠️ **줄 번호는 안 적는다** — 편집마다 흔들린다
 #:   (`test_external_use_of_master_internals.py` 와 같은 규율).
-_TIMESTAMP_ONLY: dict[str, set[str]] = {"cycle_graph.py": {"datetime.utcnow"}}
+#:
+#: 🟢 **2026-09-08 에 비었다.** 유일한 자리였던 `cycle_graph.py` 의 `node_t4_commit`
+#:   이 파일과 함께 지워졌다 (`test_master_legacy_cycle_is_gone.py`). 목록이 빈 것은
+#:   *"예외가 없다"* 이고, 새 자리가 생기면 아래 검사가 그날 운다.
+_TIMESTAMP_ONLY: dict[str, set[str]] = {}
 
 
 def _clock_nodes(path: Path) -> list[tuple[ast.Call, str]]:
@@ -115,7 +119,16 @@ def test_스캐너가_예외_자리도_실제로_찾는다():
 
     ★ 예외 목록이 **없어진 자리**를 가리키면, 그 목록은 아무것도 안 봐 주면서
       *"봐 주고 있다"* 는 인상만 남긴다. 아래 검사는 그때도 통과한다.
+
+    🟢 목록이 비어 있으면 **봐 줄 자리가 없다는 주장**이다. 그때는 빈 반복으로
+      공짜 초록이 되지 않게, 스캐너가 실제로 예외 없는 상태를 보고 있는지 잰다.
     """
+    if not _TIMESTAMP_ONLY:
+        assert set(_scan()) <= {_ALLOWED}, (
+            f"예외 목록이 비었는데 {_ALLOWED} 밖에서 벽시계를 읽는다: {_scan()}"
+        )
+        return
+
     for name, expected in _TIMESTAMP_ONLY.items():
         assert _wall_clock_calls(_MASTER / name) >= expected, (
             f"{name} 에 {expected} 가 없다 — 예외 목록이 유령을 가리킨다."

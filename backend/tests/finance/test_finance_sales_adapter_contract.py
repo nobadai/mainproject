@@ -18,7 +18,7 @@ from app.finance.adapter import (
     build_sales_validation_payload,
     map_sales_finance_verdict,
 )
-from app.finance.sales_models import (
+from app.finance.sales_validation import (
     SalesFinancialSummary,
     SalesValidationResult,
 )

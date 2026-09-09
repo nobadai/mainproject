@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from psycopg import sql
 from psycopg.rows import dict_row
 
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 from app.finance.schemas import (
     CashEvent,
     FinanceDebtPolicy,
@@ -103,6 +103,24 @@ def execute_returning_one(query: Query, params: Params = None) -> dict[str, Any]
         if row is None:
             raise RuntimeError("Database write did not return a row")
         return row
+
+
+def decimal_value(value: Any) -> Decimal:
+    """Finance 숫자 입력을 Decimal로 정규화한다."""
+    if isinstance(value, bool):
+        raise TypeError("boolean values are not valid numeric inputs")
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        raise TypeError("float is not an accepted business numeric input")
+    return Decimal(str(value))
+
+
+def row_value(row: Any, name: str, index: int = 0) -> Any:
+    """dict row와 tuple row를 같은 방식으로 읽는다."""
+    if isinstance(row, Mapping):
+        return row[name]
+    return row[index]
 
 
 # ---------------------------------------------------------------------------

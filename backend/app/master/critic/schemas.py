@@ -49,7 +49,11 @@ class EvidenceIn(BaseModel):
 
 
 class CheckIn(BaseModel):
-    """부서 self-check 1건 (밴드 기여 + 근거). 오케 BandCheckIn 에 evidences 를 더한 형태다."""
+    """부서 self-check 1건 (밴드 기여 + 근거).
+
+    ★ 옛 `cycle_schemas.BandCheckIn` 에 evidences 를 더한 형태였다. 그쪽은 부르는
+      곳이 없어져 지웠고(2026-09-08), 이제 이 클래스가 그 모양의 유일한 주인이다.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

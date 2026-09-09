@@ -29,8 +29,8 @@ import inspect
 from functools import partial
 from pathlib import Path
 
-import app.main
-from app.master import wiring
+import app.main  # noqa: F401  — import 시점에 조립 뿌리를 부른다. 이 검사의 전제다
+from app.master import bootstrap, wiring
 from app.purchase_agent.adapter import purchase_port
 
 
@@ -79,9 +79,13 @@ def test_등록_한_줄이_mock_으로_되돌아가지_않았다():
 
     ⚠️ 위 검사들은 **import 된 결과**를 보므로, 누가 다른 자리에서 다시 등록하면
       그 자리가 이겨도 여기는 통과할 수 있다. 등록 문장 자체를 못 박는다.
+
+    ★ **읽는 파일이 바뀌었다** (`#442` · 2026-09-09). 등록 줄이 `app/main.py` 에서
+      `app/master/bootstrap.py` 로 옮겨졌다 — 진입점이 둘(FastAPI · CLI)이라 마스터가
+      조립 뿌리를 함수로 뺐다. **재는 것도 등록 내용도 그대로다** — 주소만 옮겼다.
     """
-    main_py = Path(app.main.__file__)
-    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    wiring_py = Path(bootstrap.__file__)
+    tree = ast.parse(wiring_py.read_text(encoding="utf-8"))
 
     calls = [
         node

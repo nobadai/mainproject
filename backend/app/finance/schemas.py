@@ -23,8 +23,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.finance.llm.schemas import LLMResponseFields
-from app.purchase_agent.schemas import PurchaseProposal
 
 # ---------------------------------------------------------------------------
 # 공통 닫힌 어휘
@@ -321,57 +319,6 @@ class PurchaseScenario(BaseModel):
         return self
 
 
-class SuggestedAdjustment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    axis: Literal["amount"]
-    description: str = Field(min_length=1)
-    evidences: list[Evidence]
-
-
-PurchaseAgentOutput = PurchaseProposal
-
-
-# ---------------------------------------------------------------------------
-# 매입 Cycle 응답
-# ---------------------------------------------------------------------------
-
-class FinanceBand(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    max_feasible_amount_krw: Decimal | None = Field(ge=0)
-    scope: Literal["ALL_ITEMS_TOTAL"] = "ALL_ITEMS_TOTAL"
-
-
-class ProcurementSuggestedAdjustment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    axis: Literal["amount"] = "amount"
-    action: Literal["cap"] = "cap"
-    max_amount_krw: Decimal = Field(ge=0)
-
-
-class FinanceProcurementResponse(LLMResponseFields):
-    """Finance A의 전사 매입 가능 금액 Band 응답."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent: Literal["finance"] = "finance"
-    cycle: Literal["PROCUREMENT"] = "PROCUREMENT"
-    as_of: date
-    snapshot_id: str | None
-    policy_version: Literal["v1.3-PROVISIONAL"] = "v1.3-PROVISIONAL"
-    runtime_status: RuntimeStatus
-    verdict: FinalVerdict | None
-    band: FinanceBand
-    base_projected_cash_min: Decimal | None
-    base_cash_priority: CashPriority | None
-    hard_constraints: list[str]
-    soft_warnings: list[str]
-    suggested_adjustment: ProcurementSuggestedAdjustment | None
-    evidences: list[Evidence]
-
-
 class ApprovedPurchaseCommitment(BaseModel):
     """H1에서 승인된 매입 지급 의무."""
 
@@ -404,17 +351,6 @@ class ChannelTerm(BaseModel):
         return _reject_boolean(value)
 
 
-class FinanceSalesRequest(BaseModel):
-    """Finance B가 받는 승인 매입 Overlay와 판매 채널 조건."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    cycle: Literal["SALES"]
-    as_of: date
-    approved_purchase: ApprovedPurchaseCommitment
-    channel_terms: list[ChannelTerm] = Field(min_length=1)
-
-
 class CollectionPreference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -422,24 +358,6 @@ class CollectionPreference(BaseModel):
     partner_id: str
     settlement_days: int = Field(ge=0)
     liquidity_rank: int = Field(ge=1)
-
-
-class FinanceSalesResponse(LLMResponseFields):
-    """Finance B의 공통 회수 우선도 및 정산 조건 응답."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    agent: Literal["finance"] = "finance"
-    cycle: Literal["SALES"] = "SALES"
-    snapshot_id: str | None
-    approval_id: str
-    runtime_status: RuntimeStatus
-    verdict: FinalVerdict | None
-    base_cash_priority: CashPriority | None
-    sales_cash_priority: CashPriority | None
-    collection_preferences: list[CollectionPreference]
-    hard_constraints: list[str]
-    soft_warnings: list[str]
 
 
 # ---------------------------------------------------------------------------

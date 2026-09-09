@@ -11,6 +11,7 @@ run_day_stub.py — 하루 전체(T0 → 사이클 A → H1 → 사이클 B → 
 
 from __future__ import annotations
 
+from cycle_harness import CycleHooks, build_cycle_b_hooks, run_day
 from fixtures import _std_replies, make_scenarios, make_snapshot
 from fixtures_cycle_b import (
     CASES_B,
@@ -20,8 +21,6 @@ from fixtures_cycle_b import (
 )
 
 from app.master.band import clip_all, combine_band, detect_deadlock
-from app.master.cycle import CycleHooks, run_day
-from app.master.cycle_graph_b import build_cycle_b_hooks
 
 BAR = "=" * 78
 

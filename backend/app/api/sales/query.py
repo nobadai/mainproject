@@ -1,4 +1,4 @@
-"""판매 탭 — Sales Dashboard Service 값을 화면 부품으로 옮긴다."""
+"""판매 탭 — 저장된 판매 화면 값을 화면 부품으로 옮긴다."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from decimal import Decimal
 from app.api.primitives import Card, Chart, Column, Note, Series, Source, Stat, Table
 from app.api.sales.schema import SalesTab
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
-from app.sales.dashboard_service import get_sales_dashboard
+from app.sales.dashboard import get_sales_dashboard
+
+_ORDER_STATUS_LABELS = {
+    "CONFIRMED": "판매 확정",
+    "READY": "출고 준비",
+    "DELIVERED": "출고 완료",
+}
 
 
 def build(as_of: date) -> SalesTab:
@@ -73,10 +79,7 @@ def build(as_of: date) -> SalesTab:
         source=Source(
             filled=True,
             owner="판매",
-            note=(
-                "Sales Dashboard · sales · sale_items · receivables · "
-                f"{dash.meta.sim_run_id} · {dash.meta.as_of} · {dash.meta.data_type}"
-            ),
+            note=f"판매 확정 내역과 수금 장부 기준 · {dash.meta.as_of}",
         ),
     )
 
@@ -89,8 +92,8 @@ def _summary_card(dash) -> Card:
     return Card(
         key="summary",
         title="이번 달 판매를 한눈에",
-        subtitle="저장된 판매 Header와 수금 원장 집계",
-        source_ref="sales · receivables",
+        subtitle="확정 판매와 수금 현황",
+        source_ref="판매 확정 내역 · 수금 장부",
         stats=[
             Stat(label="판매 처리", value=f"{dash.summary.sales_count}건", detail="sale_date 기준"),
             Stat(
@@ -107,7 +110,7 @@ def _summary_card(dash) -> Card:
                 label="공헌이익률",
                 value=str(dash.summary.contribution_margin_pct),
                 unit="%",
-                detail="Dashboard Service 집계값",
+                detail="확정 판매 기준 집계",
                 tone="good",
                 raw=_raw(dash.summary.contribution_margin_pct),
             ),
@@ -119,12 +122,12 @@ def _items_card(dash) -> Card:
     return Card(
         key="items",
         title="품목별 매출",
-        subtitle="실제 판매 line 기준",
-        source_ref="sale_items · items",
+        subtitle="판매 항목 기준",
+        source_ref="품목별 판매 내역",
         table=Table(
             columns=[
                 Column(key="item", label="품목"),
-                Column(key="lines", label="판매 line", align="right", mono=True),
+                Column(key="lines", label="판매 항목 수", align="right", mono=True),
                 Column(key="qty", label="판매량", align="right", mono=True),
                 Column(key="amount", label="판매금액", align="right", mono=True),
                 Column(key="profit", label="공헌이익", align="right", mono=True),
@@ -152,7 +155,7 @@ def _recent_sales_card(dash) -> Card:
     return Card(
         key="recent",
         title="최근 판매 내역",
-        source_ref="sales · partners · receivables",
+        source_ref="판매·수금 내역",
         table=Table(
             columns=[
                 Column(key="d", label="판매일", mono=True),
@@ -175,7 +178,7 @@ def _recent_sales_card(dash) -> Card:
                     "margin": _won(sale.contribution_profit_krw),
                     "due": sale.collection_due_date.isoformat(),
                     "state": sale.collection_status_label,
-                    "outbound": sale.order_status,
+                    "outbound": _ORDER_STATUS_LABELS.get(sale.order_status, sale.order_status),
                 }
                 for sale in dash.recent_sales
             ],
@@ -195,8 +198,8 @@ def _receivables_card(dash) -> Card:
     return Card(
         key="ar",
         title="남은 수금 일정",
-        subtitle="수금 완료분을 제외한 outstanding 기준",
-        source_ref="receivables",
+        subtitle="수금 완료분을 제외한 남은 금액 기준",
+        source_ref="매출채권 장부",
         chart=Chart(
             label="남은 수금 일정",
             y_min=0,

@@ -79,6 +79,7 @@ BLOCKED            달력이나 게이트를 **못 읽었다** → 재시도로 
 ```text
 open_day(as_of)           day_open.py
 receive_arrivals(as_of)   inbound.py
+issue_receivables(as_of)  receivable.py  ← 🔴 수금보다 앞이다
 collect_receipts(as_of)   collection.py
 run_procurement(...)      service.py     ← 품목마다
 ```
@@ -111,8 +112,22 @@ run_procurement(...)      service.py     ← 품목마다
 
 ```text
 입고(InboundOut.status) 또는 수금(CollectionOut.status) 이
-  BLOCKED · FAILED   →  🔴 그날 판단을 안 돌린다
+  BLOCKED · FAILED   →  🔴 그날 판단을 안 돌린다 · **출고도 안 돌린다**
 ```
+
+🔴 **출고는 장부 관문 뒤, 판단 뒤다.**
+
+```text
+개장 → 입고 → 수금 → [장부 관문] → 판단 → **출고**
+```
+
+  ★ **왜 판단 뒤인가.** 오늘 산 것이 오늘 나가지 않는다 — 도착이 며칠 뒤다. 그래서
+    출고가 보는 재고는 판단이 만든 매입과 무관하고, 순서를 바꿔도 결과가 같아야
+    하는데 **같지 않게 보이는 날**이 생긴다. 판단 뒤에 두면 그 물음이 없다.
+
+  ★★ **왜 관문 뒤인가.** 장부가 안 선 날에 출고까지 하면 **재고가 두 번 틀린다** —
+    입고가 안 들어온 채로 물건이 나가고, 그 위에서 다음 날 판단이 선다. 판단을
+    막는 이유가 그대로 출고를 막는 이유다.
 
 🔴 **무엇을 안 막는지가 더 중요하다.**
 
@@ -149,6 +164,8 @@ from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.outbound_flow import ship_due_sales
+from app.master.receivable import issue_receivables
 from app.master.schemas import ProcurementRunRequest
 from app.master.service import run_procurement
 
@@ -432,6 +449,11 @@ class DayRunOutcome:
     reason: str
     day_open_status: str = "NOT_ATTEMPTED"
     inbound_status: str = "NOT_ATTEMPTED"
+    #: 채권 발행 단계. 🔴 **수금보다 앞이다** — 채권이 서야 수금할 것이 있다.
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `ReceivableOut.status` 의 다섯 값을 그대로
+    #:   싣고, 단계를 안 탄 날은 이 클래스가 이미 쓰는 `NOT_ATTEMPTED` 다.
+    receivable_status: str = "NOT_ATTEMPTED"
     collection_status: str = "NOT_ATTEMPTED"
     #: 판단 단계를 **탔는가**. 🔴 좋은 답이 나왔다는 뜻이 아니다 — 품목별 결과는
     #: `items` 가 나른다 (`ItemRunOutcome.status` 와 같은 어휘를 쓴다).
@@ -440,6 +462,13 @@ class DayRunOutcome:
     #:   쓰는 말이고 `RAN` 은 `ItemRunOutcome` 이 이미 쓰는 말이다. 단계를 안 탄
     #:   사실을 `items == ()` 으로만 두면 *"품목 목록이 비었다"* 와 구별이 안 된다.
     procurement_status: str = "NOT_ATTEMPTED"
+    #: 출고 단계를 **탔는가**. 🔴 `procurement_status` 와 **같은 모양·같은 어휘**다
+    #: (`RAN` · `NOTHING_DUE` · `FAILED` · `NOT_ATTEMPTED`).
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `NOTHING_DUE` 는 입고·수금이 이미 쓰는 말이고
+    #:   나머지 셋은 이 클래스가 이미 쓴다. 판매 품목별 결과는 `OutboundOut.items` 가
+    #:   나르고, 여기 다시 담지 않는다 — 같은 사실의 주인은 하나다.
+    outbound_status: str = "NOT_ATTEMPTED"
     items: tuple[ItemRunOutcome, ...] = ()
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -456,15 +485,24 @@ def run_scheduled_day(
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
     receive_fn: Callable[..., Any] = receive_arrivals,
+    issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    outbound_fn: Callable[..., Any] = ship_due_sales,
     items: Sequence[str] | None = None,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 수금 → 판단(품목마다)
+    개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단(품목마다) → 출고
     ```
+
+    🔴 **채권이 수금보다 앞이다.** 채권이 서야 수금할 것이 있다. 지금 데이터는
+      결제조건이 30일이라 같은 날 수금될 일이 없지만, **순서가 계약**이다.
+
+    🔴 **출고가 판단 뒤이고 관문 뒤다.** 오늘 산 것은 오늘 안 나가고(도착이 며칠
+      뒤다), 장부가 안 선 날에 물건을 내보내면 재고가 두 번 틀린다. 관문에서
+      돌아서면 `outbound_status` 는 `NOT_ATTEMPTED` 로 남는다.
 
     🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
@@ -480,7 +518,7 @@ def run_scheduled_day(
     🔴 **한 품목이 터져도 나머지는 계속 돈다.** 배추가 터졌다고 무와 양파를 안 돌면
       하루가 통째로 빈다. 터진 것은 `items` 에 `FAILED` 로 남는다.
 
-    🔴 **입고 · 수금이 `BLOCKED` · `FAILED` 면 판단을 안 돌린다.** `inbound.py` 가
+    🔴 **입고 · 채권 · 수금이 `BLOCKED` · `FAILED` 면 판단을 안 돌린다.** `inbound.py` 가
       *"부르는 쪽이 정한다"* 로 넘겨 둔 답을 이 파일이 낸다 (모듈 docstring 에 원문을
       인용해 뒀다). 장부가 실제보다 적은 채로 판단하면 **과매입이 나는데 에러는 안
       난다** — 재고가 적게 보이면 더 사고, 현금이 적게 보이면 `projected_cash_min`
@@ -528,6 +566,13 @@ def run_scheduled_day(
     inbound_status, note = _stage("입고", lambda: receive_fn(as_of))
     notes.append(note)
 
+    # ── 채권 — 🔴 **수금보다 앞이다** ───────────────────────────────
+    #
+    # ★ 채권이 서야 수금할 것이 있다. 순서를 뒤집으면 같은 날 발생·수금되는 계약이
+    #   생기는 순간 **수금할 채권이 아직 없는 상태**에서 수금이 돈다.
+    receivable_status, note = _stage("채권", lambda: issue_fn(as_of))
+    notes.append(note)
+
     # ── 수금 ────────────────────────────────────────────────────────
     collection_status, note = _stage("수금", lambda: collect_fn(as_of))
     notes.append(note)
@@ -536,14 +581,15 @@ def run_scheduled_day(
     #
     # 🔴 여기서 돌아서면 `procure_fn` 을 **한 번도 안 부른다.** 개장은 그대로 둔다 —
     #    하루가 열린 것은 사실이고, 판단을 안 돌린 것은 별개 사실이다.
-    if _ledger_gap(inbound_status, collection_status):
-        notes.append(_ledger_gap_note(inbound_status, collection_status))
+    if _ledger_gap(inbound_status, receivable_status, collection_status):
+        notes.append(_ledger_gap_note(inbound_status, receivable_status, collection_status))
         return DayRunOutcome(
             as_of=as_of,
             action=action.action,
             reason=action.reason,
             day_open_status=day_open_status,
             inbound_status=inbound_status,
+            receivable_status=receivable_status,
             collection_status=collection_status,
             notes=tuple(notes),
         )
@@ -580,40 +626,56 @@ def run_scheduled_day(
             )
         )
 
+    # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
+    #
+    # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
+    #   그것이 *"장부가 안 선 날에는 출고도 안 한다"* 이다.
+    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of))
+    notes.append(note)
+
     return DayRunOutcome(
         as_of=as_of,
         action=action.action,
         reason=action.reason,
         day_open_status=day_open_status,
         inbound_status=inbound_status,
+        receivable_status=receivable_status,
         collection_status=collection_status,
         procurement_status="RAN",
+        outbound_status=outbound_status,
         items=tuple(results),
         notes=tuple(notes),
     )
 
 
-def _ledger_gap(inbound_status: str, collection_status: str) -> bool:
-    """장부가 안 섰는가. **입고와 수금을 둘 다 본다.**
+def _ledger_gap(inbound_status: str, receivable_status: str, collection_status: str) -> bool:
+    """장부가 안 섰는가. **입고 · 채권 · 수금을 다 본다.**
 
     🔴 **한쪽만 보면 다른 쪽 구멍이 그대로 열려 있다.** 입고가 막히면 재고와 capacity
-      가 적게 반영되고, 수금이 막히면 현금이 적게 반영된다 — 둘 다 매입 판단이 보는
-      값이고, 어느 쪽이 틀려도 에러 없이 틀린 답이 나온다.
+      가 적게 반영되고, 수금이 막히면 현금이 적게 반영되고, **채권이 안 서면
+      `receivables_krw` 가 적게 잡힌다** — 셋 다 매입 판단이 보는 값이고, 어느 쪽이
+      틀려도 에러 없이 틀린 답이 나온다.
     """
-    return inbound_status in _LEDGER_GAP_STATUSES or collection_status in _LEDGER_GAP_STATUSES
+    return any(
+        status in _LEDGER_GAP_STATUSES
+        for status in (inbound_status, receivable_status, collection_status)
+    )
 
 
-def _ledger_gap_note(inbound_status: str, collection_status: str) -> str:
-    """막은 이유. 🔴 **입고·수금 상태를 둘 다 적는다 — 어느 쪽이 막았는지 보이게.**
+def _ledger_gap_note(inbound_status: str, receivable_status: str, collection_status: str) -> str:
+    """막은 이유. 🔴 **입고·채권·수금 상태를 다 적는다 — 어느 쪽이 막았는지 보이게.**
 
-    ⚠️ 한쪽만 적으면 화면이 *"장부가 안 섰다"* 까지만 말하고, 사람이 물류를 볼지
-      재무를 볼지 모른 채 두 곳을 다 뒤진다.
+    ⚠️ 하나만 적으면 화면이 *"장부가 안 섰다"* 까지만 말하고, 사람이 물류를 볼지
+      판매를 볼지 재무를 볼지 모른 채 세 곳을 다 뒤진다.
     """
-    return f"{_LEDGER_GAP} (입고: {inbound_status} · 수금: {collection_status})"
+    return (
+        f"{_LEDGER_GAP} (입고: {inbound_status} · 채권: {receivable_status}"
+        f" · 수금: {collection_status})"
+    )
 
 
 def _stage(name: str, call: Callable[[], Any]) -> tuple[str, str]:
-    """입고 · 수금 한 단계. **예외를 값으로 옮긴다.**
+    """입고 · 채권 · 수금 한 단계. **예외를 값으로 옮긴다.**
 
     ★ 두 함수 다 예외를 안 내보낸다고 적어 뒀지만 여기서 한 번 더 잡는다 —
       판단의 진행 여부가 그 약속에 걸리면 안 된다 (`_seed_collection` 과 같은 태도).
@@ -639,8 +701,10 @@ def wake_up(
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
     receive_fn: Callable[..., Any] = receive_arrivals,
+    issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    outbound_fn: Callable[..., Any] = ship_due_sales,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
 
@@ -666,6 +730,8 @@ def wake_up(
         policy_version=policy_version,
         open_day_fn=open_day_fn,
         receive_fn=receive_fn,
+        issue_fn=issue_fn,
         collect_fn=collect_fn,
         procure_fn=procure_fn,
+        outbound_fn=outbound_fn,
     )
