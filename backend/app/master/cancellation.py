@@ -82,9 +82,9 @@ __all__ = [
     "ApprovalCancellation",
     "CancellationOut",
     "cancellation_missing",
+    "financing_mode_of",
     "register_cancellation",
     "registered_cancellations",
-    "financing_mode_of",
     "undo_approval",
 ]
 

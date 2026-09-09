@@ -16,10 +16,10 @@ from typing import Any
 from app.master import persistence, wiring
 from app.master.answer import facts_from_procurement, render_answer
 from app.master.budget import CallBudget
+from app.master.day_gate import check_day_gate
 from app.master.decision import CommitmentOut
 from app.master.decision_service import commitments_before, get_decisions
 from app.master.envelope import ExecutionContext
-from app.master.day_gate import check_day_gate
 from app.master.execution_calendar import build_execution_calendar
 from app.master.execution_day import (
     CalendarNotCovered,
@@ -30,7 +30,6 @@ from app.master.execution_day import (
 )
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
-from app.master.market_calendar import get_market_calendar
 from app.master.inputs import (
     REQUEST_GRADE,
     MasterInputs,
@@ -39,6 +38,7 @@ from app.master.inputs import (
     load_forecast,
 )
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID, get_burn_in
+from app.master.market_calendar import get_market_calendar
 from app.master.plan import ExecutionPlan
 from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
@@ -604,8 +604,10 @@ def _execution_calendar_payload(as_of: date) -> tuple[dict[str, Any] | None, tup
         envelope = build_execution_calendar(as_of, market=get_market_calendar())
     except CalendarNotCovered as exc:
         return None, (
-            f"실행일 봉투: {as_of.isoformat()} 부터의 지평을 달력이 다 안 덮는다 — {exc}."
-            " 매입에 비영업일 목록을 안 실었다 (매입은 회차일을 밀지 않는다)",
+            (
+                f"실행일 봉투: {as_of.isoformat()} 부터의 지평을 달력이 다 안 덮는다 — {exc}."
+                " 매입에 비영업일 목록을 안 실었다 (매입은 회차일을 밀지 않는다)"
+            ),
         )
     return envelope.as_payload(), ()
 

@@ -89,8 +89,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from app.finance.collection import CollectionEvent
-from app.finance.collection import DeterministicCollectionFixtureSource
+from app.finance.collection import CollectionEvent, DeterministicCollectionFixtureSource
 from app.finance.collection_adapter import FinanceCollectionSource
 from app.finance.db import FinanceDataNotReady, FinanceRuntimeAxis, get_finance_runtime_axis
 from app.master.collection import CollectionPartOut

@@ -95,7 +95,7 @@ def test_정본_키가_as_of_와_sim_run_id_다():
 
     record_day_opening(as_of=AS_OF, sim_run_id=SIM, result="OPENED", connect=lambda: conn)
 
-    query, params = conn.cur.executed[0]
+    query, _params = conn.cur.executed[0]  # 이 검사는 SQL 문장만 본다
     assert "ON CONFLICT (as_of, sim_run_id)" in query
     assert "financing_mode" not in query
     assert "usage_scope" not in query
