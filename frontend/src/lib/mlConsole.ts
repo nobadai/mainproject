@@ -198,7 +198,29 @@ export const agentReport = (file: string) =>
     `agent/report?file=${encodeURIComponent(file)}`,
   );
 
-/* 재학습 — 사람이 **두 번** 누른다. 그 사이는 자동이다. */
+/** 사람이 눌러야 할 재학습 결정 하나. */
+export interface PendingRetrain {
+  kind: string;
+  state: string;
+  candidate?: string;
+  items?: VerifyItem[];
+  verify?: string;
+}
+
+/**
+ * **지금 사람이 눌러야 할 결정이 있나.**
+ *
+ * ★ 화면이 「모델 재학습」 탭을 띄울지 정하는 데 씁니다. 후보가 현행보다
+ *   **나을 때만** 여기 뜹니다 — 못하면 배치가 후보를 지우고 아무것도
+ *   안 남깁니다. 사람이 볼 것이 없기 때문입니다.
+ *
+ * ★ `ran` 은 «판정이 한 번이라도 돌았나» 입니다. **«아직 안 돌았다» 와
+ *   «돌았는데 없다» 는 다릅니다** — 앞은 고장일 수 있고 뒤는 정상입니다.
+ */
+export const retrainPending = () =>
+  call<{ at: string | null; pending: PendingRetrain[]; ran: boolean }>("retrain/pending");
+
+/* 재학습 — 이제 사람은 **한 번만** 누른다. 「바꾸기」 하나다. */
 export const retrainStatus = (kind: TargetKind = "auc") =>
   call<RetrainStatus>(`retrain/status?kind=${kind}`);
 export const graphStatus = (kind: TargetKind = "auc") =>
