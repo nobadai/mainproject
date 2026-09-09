@@ -37,62 +37,93 @@ export default function FinancePage() {
   return (
     <>
       <SourceTag sources={[data.source]} />
-      <Note note={data.read_only} />
-      <StatRow items={data.stats} />
+      <p className="m-0 text-[12px] leading-relaxed text-ink2">
+        {data.read_only.text} · 근거 · 재무 마감 / 수금·지급 장부
+      </p>
 
-      <Panel
-        title="저장된 재무 상태"
-        subtitle="실제로 저장된 상태만 비교합니다"
-      >
-        <Note note={data.explain} />
-        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-          {data.state_cards.map((card) => (
-            <CardBlock key={card.key} card={card} />
-          ))}
+      {!data.has_data ? (
+        <div className="rounded-lg border border-hair bg-panel px-4 py-5">
+          <p className="m-0 text-sm font-semibold">이 날짜에는 아직 재무 기록이 없습니다.</p>
+          <p className="mb-0 mt-1 text-[12px] text-ink2">
+            재무 데이터가 저장된 이후 날짜를 선택해 주세요.
+          </p>
         </div>
-      </Panel>
+      ) : (
+        <>
+          <Panel title="현재 자금 상태">
+            <Note note={data.explain} />
+            {data.state_indicator && (
+              <p className="mb-0 mt-2 text-[12px] text-ink2">{data.state_indicator}</p>
+            )}
+          </Panel>
 
-      <Panel title="최근 30일 현금 흐름" subtitle="일별 마감값을 그대로 이은 것">
-        <LineChart chart={data.cash_chart} height={280} />
-      </Panel>
+          <StatRow items={data.stats} />
 
-      <Panel title="기준일까지 누적 자금 흐름" subtitle="원장 용어 대신 사람 말로">
-        <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
-          {data.flows.map((f) => (
-            <div
-              key={f.label}
-              className="flex min-w-0 flex-col gap-1 rounded-xl border px-3.5 py-3"
-              style={{ borderColor: "var(--color-hair)" }}
-            >
-              <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
-                {f.label}
-              </span>
-              <strong
-                className="tabular font-mono text-[17px]"
-                style={{
-                  color:
-                    f.tone === "good"
-                      ? "var(--color-t-good)"
-                      : f.tone === "warn"
-                        ? "var(--color-t-warn)"
-                        : undefined,
-                }}
-              >
-                {f.value}
-              </strong>
-            </div>
-          ))}
-        </div>
-      </Panel>
+          {data.action_card && <CardBlock card={data.action_card} />}
 
-      <Panel title="받을 돈과 줄 돈" subtitle="지금 남아 있는 것만">
-        <StatRow items={data.balances} />
-        <Note note={data.balances_note} />
-      </Panel>
+          {data.state_cards.length > 1 && (
+            <Panel title="자금 상태 비교" subtitle="저장된 재무 기준의 차이를 비교합니다">
+              <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                {data.state_cards.map((card) => (
+                  <CardBlock key={card.key} card={card} />
+                ))}
+              </div>
+            </Panel>
+          )}
 
-      <Panel title="최근 일별 마감" subtitle="상세 숫자가 필요할 때">
-        <DataTable table={data.closings} />
-      </Panel>
+          {data.cash_chart && (
+            <Panel title="최근 30일 현금 흐름" subtitle="일별 마감값을 그대로 이은 것">
+              <LineChart chart={data.cash_chart} height={280} />
+            </Panel>
+          )}
+
+          {data.flows.length > 0 && (
+            <Panel title="기준일까지 누적 자금 흐름">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <FlowGroup title="들어온 돈" flows={data.flows.filter((flow) => flow.group === "in")} />
+                <FlowGroup title="나간 돈" flows={data.flows.filter((flow) => flow.group === "out")} />
+              </div>
+              <p className="mb-0 mt-3 text-[12px] text-ink2">
+                판매로 잡힌 금액과 실제로 입금된 수금액은 서로 다른 값입니다.
+              </p>
+            </Panel>
+          )}
+
+          {data.balances.length > 0 && (
+            <Panel title="정산 현황">
+              <StatRow items={data.balances} />
+              <Note note={data.balances_note} />
+            </Panel>
+          )}
+
+          {data.closings && (
+            <Panel title="최근 일별 마감" subtitle="상세 숫자가 필요할 때">
+              <details>
+                <summary className="cursor-pointer text-[13px] font-semibold">상세 보기</summary>
+                <div className="mt-3">
+                  <DataTable table={data.closings} />
+                </div>
+              </details>
+            </Panel>
+          )}
+        </>
+      )}
     </>
+  );
+}
+
+function FlowGroup({ title, flows }: { title: string; flows: FinanceTab["flows"] }) {
+  return (
+    <div>
+      <h3 className="mb-2 mt-0 text-sm">{title}</h3>
+      <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+        {flows.map((flow) => (
+          <div key={flow.label} className="flex min-w-0 flex-col gap-1 rounded-lg border border-hair px-3.5 py-3">
+            <span className="text-[11.5px] text-ink2">{flow.label}</span>
+            <strong className="tabular font-mono text-[17px]">{flow.value}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

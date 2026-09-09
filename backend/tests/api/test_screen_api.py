@@ -109,10 +109,19 @@ def test_재무_state가_없는_날짜도_사용자_문장으로_열린다(monke
 
     assert response.status_code == 200
     body = response.json()
+    assert body["has_data"] is False
     assert body["states"] == []
     assert body["state_cards"] == []
     assert body["stats"] == []
-    assert body["explain"]["text"] == "이 기준일까지 확인할 수 있는 재무 상태가 없습니다."
+    assert body["action_card"] is None
+    assert body["cash_chart"] is None
+    assert body["flows"] == []
+    assert body["balances"] == []
+    assert body["closings"] is None
+    assert body["explain"]["text"] == (
+        "이 날짜에는 아직 재무 기록이 없습니다. "
+        "재무 데이터가 저장된 이후 날짜를 선택해 주세요."
+    )
 
 
 def test_예시값인지_아닌지를_반드시_밝힌다(client):
@@ -187,16 +196,19 @@ def test_재무_화면은_저장된_state를_비교_카드로_보여준다(clien
     assert base["requested_as_of"] == FIN_AS_OF
     assert base["state_as_of"] == FIN_AS_OF
     assert base["latest_closing_as_of"] == FIN_AS_OF
-    assert base["stats"][0]["label"] == "운영자금 여유"
+    assert base["stats"][0]["label"] == "운영 여유"
     assert base["stats"][0]["raw"] == -50_000
+    assert base["stats"][0]["tone"] == "bad"
+    assert base["stats"][0]["detail"] == "최소 운영자금보다 부족"
     assert base["stats"][3]["raw"] == 0
-    assert "대출 없이 운영" in base["explain"]["text"]
+    assert base["explain"]["text"] == "최소 운영자금보다 5만원 부족합니다."
     assert "BASE_NO_LOAN" not in base["explain"]["text"]
     assert [card["title"] for card in base["state_cards"]] == ["대출 반영", "대출 없이 운영"]
     assert loan["stats"][0]["raw"] == 350_000
     assert loan["stats"][3]["raw"] == 300_000
-    assert "대출 반영" in loan["explain"]["text"]
+    assert loan["explain"]["text"] == "최소 운영자금보다 35만원 여유가 있습니다."
     assert "LOAN_BASELINE" not in loan["explain"]["text"]
+    assert base["action_card"]["title"] == "지금 확인할 자금"
 
 
 def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeypatch):
@@ -212,6 +224,8 @@ def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeyp
     body = response.json()
     assert body["selected"] == "loan"
     assert [state["key"] for state in body["states"]] == ["loan"]
+    assert body["state_cards"] == []
+    assert body["state_indicator"] == "현재 재무 기준 · 대출 반영"
     assert body["stats"][1]["detail"] == "조회 기준일 2026-01-06"
 
 
@@ -229,7 +243,7 @@ def test_재무_요청일과_실제_state_날짜를_구분한다(monkeypatch):
     assert body["requested_as_of"] == "2026-01-20"
     assert body["state_as_of"] == "2026-01-18"
     assert body["latest_closing_as_of"] == "2026-01-15"
-    assert "재무 상태 기준일 2026-01-18" in body["read_only"]["text"]
+    assert "선택한 날짜의 재무 상태가 없어 2026-01-18 최신 재무 상태를 표시합니다" in body["read_only"]["text"]
     assert "최근 일마감 2026-01-15" in body["read_only"]["text"]
 
 
@@ -258,11 +272,20 @@ def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeyp
 def test_재무_화면은_cashflow와_ledger를_쓴다(client):
     body = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "base"}).json()
 
-    assert body["cash_chart"]["series"][0]["data"] == [0.09, 0.1]
-    assert body["cash_chart"]["series"][1]["data"] == [0.49, 0.5]
+    assert body["cash_chart"]["series"][0]["data"] == [9.0, 10.0]
+    assert body["cash_chart"]["series"][1]["data"] == [49.0, 50.0]
+    assert body["cash_chart"]["y_unit"] == "만원"
+    assert [series["name"] for series in body["cash_chart"]["series"]] == [
+        "현재 자금만 사용",
+        "대출 포함",
+        "최소 유지해야 할 현금",
+    ]
     assert body["flows"][4]["value"] == "12만원"
-    assert body["balances"][0]["raw"] == 1_000
+    assert [flow["group"] for flow in body["flows"]] == ["out", "out", "out", "in", "in"]
+    assert body["balances"][0]["label"] == "아직 받을 돈"
+    assert body["balances"][0]["raw"] == 650
     assert body["balances"][2]["raw"] == 0
+    assert body["balances"][3]["label"] == "판매대금 총액"
     assert [row["d"] for row in body["closings"]["rows"]] == ["2025-12-31", "2025-12-30"]
     assert "이번 달" not in body["cash_chart"]["note"]["text"]
 

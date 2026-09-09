@@ -254,22 +254,26 @@ export interface FlowCell {
   label: string;
   value: string;
   tone: string;
+  group: "in" | "out";
 }
 export interface FinanceTab {
+  has_data: boolean;
   states: StateOption[];
   selected: string;
   requested_as_of: string;
   state_as_of: string | null;
   latest_closing_as_of: string | null;
   stats: Stat[];
+  action_card: Card | null;
+  state_indicator: string | null;
   state_cards: Card[];
   explain: Note;
   read_only: Note;
-  cash_chart: Chart;
+  cash_chart: Chart | null;
   flows: FlowCell[];
   balances: Stat[];
-  balances_note: Note;
-  closings: Table;
+  balances_note: Note | null;
+  closings: Table | null;
   source: Source;
 }
 
