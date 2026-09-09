@@ -58,7 +58,17 @@ _REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
 _OPTIONAL_NUMERIC_POLICY_KEYS = {
     "capacity_tight_ratio",
     "freshness_pressure_ratio",
+    # 🔴 **납기 준비일 (WP-4 M4).** 여기 둔 것은 «없어도 된다» 가 아니라 «없으면 그
+    #    값을 쓰는 판정만 멈춘다» 는 뜻이다 — `LogisticsPolicy.outbound_prep_lead_days`
+    #    주석이 그 fail-closed 를 어디서 거는지 적고 있다. 필수로 올리면 납기와 무관한
+    #    입고·Capacity 경로까지 통째로 멈춘다.
+    "outbound_prep_lead_days",
 }
+
+#: 🔴 **정수여야 하는 NUMERIC 정책.** DB 는 `NUMERIC` 이라 `1.5` 도 담기는데, 날 수는
+#:   반쪽이 없다. `inbound_lead_days` 가 원래 혼자 하던 검사를 이름 있는 집합으로
+#:   옮겼다 — 두 번째 날짜 정책(`outbound_prep_lead_days`)이 생겼기 때문이다.
+_INTEGER_POLICY_KEYS = {"inbound_lead_days", "outbound_prep_lead_days"}
 
 
 def get_active_logistics_policy() -> LogisticsPolicy:
@@ -131,11 +141,14 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
     for optional_key in _OPTIONAL_NUMERIC_POLICY_KEYS:
         values.setdefault(optional_key, None)
 
-    inbound_lead_days = values["inbound_lead_days"]
-    assert isinstance(inbound_lead_days, Decimal)
-    if inbound_lead_days != inbound_lead_days.to_integral_value():
-        raise ValueError("Logistics policy must be an integer: inbound_lead_days")
-    values["inbound_lead_days"] = int(inbound_lead_days)
+    for key in _INTEGER_POLICY_KEYS:
+        raw = values.get(key)
+        if raw is None:
+            continue  # 선택 정책이 안 실렸다 — 쓰는 자리에서 막는다
+        assert isinstance(raw, Decimal)
+        if raw != raw.to_integral_value():
+            raise ValueError(f"Logistics policy must be an integer: {key}")
+        values[key] = int(raw)
     return LogisticsPolicy(
         **values,
         policy_version=LOGISTICS_POLICY_VERSION,

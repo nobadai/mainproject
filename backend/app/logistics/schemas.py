@@ -291,6 +291,17 @@ class LogisticsPolicy(BaseModel):
     inbound_transport_capacity_kg: Decimal = Field(gt=0)
     shared_daily_outbound_capacity_kg: Decimal = Field(gt=0)
     cap_by_date_policy: Literal["CONFIRMED_ONLY"]
+    #: 출고 준비에 걸리는 날 수 (WP-4 M4). `as_of + 이 값` 이 가장 이른 납기일이다.
+    #:
+    #: 🔴 **선택 정책이지만 «없으면 1» 이 아니다.** 행이 없으면 `None` 이고, PRE_SALES
+    #:    는 그때 `delivery_feasibility.status = "UNRESOLVED"` 로 **답을 안 낸다** —
+    #:    코드 상수 `1` 로 메우면 DB 에 정책이 없는데도 납기가 확정된 것처럼 나간다.
+    #:
+    #: ⚠️ **필수로 올리지 않았다.** 올리면 행이 없는 순간 물류가 통째로
+    #:    `RUNTIME_NOT_READY` 가 되어 입고·Capacity 처럼 납기와 **무관한 경로까지**
+    #:    멈춘다 (`_OPTIONAL_NUMERIC_POLICY_KEYS` 주석이 같은 이유를 적고 있다).
+    #:    fail-closed 는 그 값을 실제로 쓰는 자리에서 건다.
+    outbound_prep_lead_days: int | None = Field(default=None, ge=0)
     #: 선택 정책 — DB에 행이 없으면 None 이며 해당 signal 판정만 꺼진다.
     #: 값의 성격은 실업계 기준이 아니라 시뮬레이션 검증용 PROVISIONAL 이다.
     capacity_tight_ratio: Decimal | None = Field(default=None, gt=0, le=1)
@@ -306,6 +317,7 @@ class LogisticsPolicy(BaseModel):
         "daily_inbound_capacity_kg",
         "inbound_transport_capacity_kg",
         "shared_daily_outbound_capacity_kg",
+        "outbound_prep_lead_days",
         "capacity_tight_ratio",
         "freshness_pressure_ratio",
         mode="before",

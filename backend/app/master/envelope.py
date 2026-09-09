@@ -754,7 +754,11 @@ class EnvelopeFinding:
 _BIG_NUMBER = re.compile(r"\d[\d,]{2,}")
 _SENTENCE_SPLIT = re.compile(r"[.!?。]\s*|\n+")
 _LABEL = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_CLAIM_PATH = re.compile(r"^(?P<key>[^\[\].]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$")
+#: 🔴 **`key` 에 점을 허용한다 (WP-4).** 종전 `[^\[\].]+` 는 한 겹만 팠다 —
+#: `sellable_supply.inventory_by_item[배추].available_qty_kg` 가 어디도 못 가리켜
+#: `E-EVIDENCE-ORPHAN` 이 됐고, 그래서 물류는 숫자를 실은 키를 payload 최상위로
+#: **끌어올려야만** 근거를 달 수 있었다. 그 우회가 중복 키를 만들었다.
+_CLAIM_PATH = re.compile(r"^(?P<key>[^\[\]]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$")
 
 _MAX_REASONING_SENTENCES = 3
 
@@ -871,8 +875,49 @@ def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] =
             out.add(key)
         elif _is_number_map(value):
             out.add(key)  # 숫자 매핑 — 한 규칙이 만든 한 벌이라 통째로 하나의 근거
+        elif isinstance(value, Mapping):
+            out |= _nested_claims(key, value)
         elif not isinstance(value, (str, bytes, Mapping)) and isinstance(value, Sequence) and value:
             out.add(key)  # 스칼라 배열 — 통째로 하나의 근거
+    return out
+
+
+def _nested_claims(prefix: str, block: Mapping[str, Any]) -> set[str]:
+    """중첩 블록 안의 **숫자**에만 근거를 요구한다 (WP-4).
+
+    🔴 **여기 있던 구멍이 `_is_number_map` 과 같은 종류다.** Mapping 값은 위 가지
+       어디에도 안 걸려 **통째로 근거 요구에서 빠졌다.** 물류가 판매 계약 모양
+       (`sellable_supply` · `delivery_feasibility`)을 그대로 내려면 중첩이 필수인데,
+       중첩하는 순간 그 안의 kg·일수에 근거가 하나도 요구되지 않았다.
+
+    ★ **숫자만 넓힌다. 판정 라벨은 안 넓힌다.**
+
+    ```text
+    중첩 숫자 leaf              요구한다     sellable_supply.inventory_by_item[0].available_qty_kg
+    중첩 배열 항목의 숫자        요구한다
+    중첩 문자열 라벨 (READY 등)  요구 안 한다  ← 넓히면 다른 파트의 요구량이 갑자기 는다
+    중첩 스칼라 배열             요구 안 한다  ← 같은 이유
+    ```
+
+       ⚠️ 최상위 라벨은 종전대로 요구한다 — *"홀로 서서 남의 행동을 바꾸는 판단"* 은
+          거기 있다. 블록 안의 `status: "READY"` 는 그 블록이 무엇을 냈는지의 표시라
+          같은 무게가 아니고, 여기서 요구로 바꾸면 **이번 변경 때문에** 재무·매입의
+          기존 회신이 갑자기 `E-EVIDENCE-MISSING` 을 낸다.
+
+    ★ **깊이를 제한하지 않는다.** 대신 넓히는 대상이 숫자 하나뿐이라 폭발하지 않는다.
+    """
+    out: set[str] = set()
+    for key, value in block.items():
+        path = f"{prefix}.{key}"
+        if _is_item_list(value):
+            for index, item in enumerate(value):
+                for sub, sub_value in item.items():
+                    if _is_number(sub_value):
+                        out.add(f"{path}[{index}].{sub}")
+        elif _is_number(value) or _is_number_map(value):
+            out.add(path)
+        elif isinstance(value, Mapping):
+            out |= _nested_claims(path, value)
     return out
 
 
@@ -887,17 +932,40 @@ def canonical_claim(payload: Mapping[str, Any], claim: str) -> str | None:
     """
     match = _CLAIM_PATH.fullmatch(claim)
     if match is None:
-        return claim if claim in payload else None
+        if claim in payload:
+            return claim
+        # ★ 점 경로도 본다 (WP-4) — `delivery_feasibility.daily_outbound_capacity_kg`.
+        return claim if _resolve_path(payload, claim) is not _MISSING else None
 
     key, selector, sub = match.group("key"), match.group("sel"), match.group("sub")
-    items = payload.get(key)
-    if not _is_item_list(items):
+    items = payload.get(key) if key in payload else _resolve_path(payload, key)
+    if items is _MISSING or not _is_item_list(items):
         return None
 
     index = _select_index(items, selector)
     if index is None or sub not in items[index]:
         return None
     return f"{key}[{index}].{sub}"
+
+
+#: 🔴 **`None` 을 «없다» 로 쓰지 않는다.** payload 에 `None` 값이 실린 칸이 실제로 있고
+#:    (`item: None` 을 안 싣는 규율이 있는 만큼 실릴 수도 있다), 그것과 *"경로가 없다"*
+#:    를 같은 값으로 뭉개면 고아 근거가 조용히 통과한다.
+_MISSING = object()
+
+
+def _resolve_path(payload: Mapping[str, Any], dotted: str) -> Any:
+    """`a.b.c` 를 중첩 Mapping 으로 걷는다. 없으면 `_MISSING` (WP-4).
+
+    ★ **Mapping 만 판다.** 배열 인덱싱은 `_CLAIM_PATH` 의 대괄호 문법이 맡는다 —
+      한 문법으로 두 가지를 하면 `scenarios.0.total` 같은 두 번째 표기가 생긴다.
+    """
+    current: Any = payload
+    for part in dotted.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
 
 
 def _select_index(items: Sequence[Mapping[str, Any]], selector: str) -> int | None:
