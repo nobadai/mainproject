@@ -97,6 +97,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
+from app.logistics.inbound_schedules import ScheduleReferenceMissing, record_schedule
+from app.logistics.purchase_detail import fetch_purchase_detail
 from app.logistics.schemas import InTransitItem, ScheduledQuantity
 from app.master.commitment import ApprovedCommitment
 
@@ -564,10 +566,29 @@ def persist_inventory(
       ⚠️ **직렬화되는 것은 같은 fixture 행뿐이다.** 다른 `as_of` · 다른 `sim_run_id` 를
          겨냥한 승인은 서로 기다리지 않는다.
 
+    ★ **`inbound_schedules` 에도 같이 쓴다 (Dual Write · W3-1 · 2026-09-09).**
+
+      ```text
+      Reader   아직 Legacy JSON        ← 이번 판은 정본을 안 바꾼다
+      Writer   Legacy JSON + 신규 표    ← 여기
+      ```
+
+      🔴 **같은 커넥션 · 같은 바깥 트랜잭션이다.** 한쪽만 커밋되면 두 정본 후보가
+         갈린 채 남고, 그 상태를 아무도 안 알려 준다. 이 함수가 커밋을 안 하는 것이
+         그 보장의 전부다.
+
+      🔴 **날짜별 복제를 안 한다.** JSON 쪽은 여전히 `as_of` 행 하나에만 쓰지만
+         (그래서 미래 날짜가 먼저 열리면 FIRSTINB 사고가 난다), 신규 표는 한 행을
+         적고 조회가 날짜로 자른다 — W3-2 에서 Reader 가 그쪽으로 옮겨 간다.
+
     :raises LogisticsFixtureMissing: 그날의 fixture 행이 없을 때. **만들지 않는다.**
     :raises InboundScheduleConflict: 같은 `inbound_id` 가 다른 사실로 이미 있거나,
         기존 목록에 같은 id 가 둘 이상일 때. **DML 전에 오른다** — 마스터가 승인 전이
         전체를 롤백할 수 있다.
+    :raises ScheduleReferenceMissing: 행에 `purchase_id` 가 없어 신규 표의
+        `purchase_item_id` 를 세울 수 없을 때.
+    :raises PurchaseDetailMissing: 그 `purchase_id` 의 매입 줄이 없을 때.
+    :raises PurchaseDetailAmbiguous: 매입 줄이 둘 이상일 때. **고르지 않는다.**
     """
     schema = sql.Identifier(get_db_schema())
     # ★ 세 조건이 UPDATE 의 WHERE 와 **같아야 한다.** 다르면 읽은 행과 쓴 행이
@@ -644,6 +665,67 @@ def persist_inventory(
         )
         if cursor.rowcount != 1:
             raise missing
+
+    # ── Dual Write — 같은 트랜잭션 · 같은 커넥션 (W3-1) ──────────────────
+    _record_schedules(conn, sim_run_id=sim_run_id, as_of=as_of, rows=rows, source_ref=source_ref)
+
+
+def _record_schedules(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    as_of: date,
+    rows: Sequence[InTransitItem],
+    source_ref: str,
+) -> None:
+    """같은 승인분을 신규 `inbound_schedules` 에도 적는다.
+
+    🔴 **`purchase_item_id` 를 새 조회로 얻지 않는다.** 기존
+       `purchase_detail.fetch_purchase_detail` 을 그대로 부른다 — 그 함수가 이미
+       `0행 Missing · 1행 정상 · 2행 이상 Ambiguous` 를 가르고, 같은 판정을 두 곳에
+       두면 한쪽만 고쳐지는 날이 온다.
+
+    ★ **부모 행은 같은 트랜잭션 안에 이미 서 있다.** 마스터 `apply_approval` 이
+      `persist_purchases` → `finance.persist` → `logistics.persist` 순으로 부르므로
+      (`app/master/transition.py` 주석), 여기서 `purchase_items` 를 읽을 수 있다.
+
+    🔴 **`purchase_id` 가 없으면 멈춘다. 비워 두고 넘어가지 않는다.**
+       이 표는 W3-2 에서 정본이 되고, 그때 빠진 행은 *"승인은 났는데 도착 조회에
+       안 잡히는 입고"* 가 된다 — FIRSTINB 사고와 같은 모양이다.
+
+    ⚠️ **수량을 매입 줄과 대조하지 않는다.** `quantity_kg` 는 회차 수량이고 매입 줄은
+       회차들의 합일 수 있다. 실측 5/5 가 같은 것은 지금 분할 회차가 없어서지
+       계약이 아니다 — 없는 규칙을 여기서 만들지 않는다.
+    """
+    for item in rows:
+        if not item.purchase_id:
+            raise ScheduleReferenceMissing(
+                f"입고 일정에 매입 참조가 없다 (sim_run_id={sim_run_id!r},"
+                f" inbound_id={item.inbound_id!r}, as_of={as_of})."
+                " purchase_item_id 를 세울 수 없어 신규 표에 적을 수 없다 —"
+                " 비워 두면 W3-2 에서 그 입고가 도착 조회에서 사라진다."
+                " 이 값은 마스터가 만든다 (app/master/transition.py purchase_id_for)."
+            )
+        if item.inbound_id is None or item.expected_arrival_date is None:
+            raise ScheduleReferenceMissing(
+                f"입고 일정에 열쇠나 도착일이 없다 (sim_run_id={sim_run_id!r},"
+                f" inbound_id={item.inbound_id!r},"
+                f" expected_arrival_date={item.expected_arrival_date})."
+                " 도착 조회 축이 서지 않는다 — 지어내지 않는다."
+            )
+        # ★ 0 / 1 / 2행 이상 판정은 저쪽이 한다. 여기서 다시 세지 않는다.
+        detail = fetch_purchase_detail(conn, purchase_id=item.purchase_id)
+        record_schedule(
+            conn,
+            sim_run_id=sim_run_id,
+            inbound_id=item.inbound_id,
+            purchase_item_id=detail.purchase_item_id,
+            quantity_kg=item.quantity_kg,
+            expected_arrival_date=item.expected_arrival_date,
+            # 🔴 승인 전이가 겨냥한 그날이 곧 이 일정이 장부에 선 날이다.
+            created_as_of=as_of,
+            source_ref=source_ref,
+        )
 
 
 # ── 마스터 전이 Protocol 어댑터 ─────────────────────────────────────────

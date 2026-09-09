@@ -55,6 +55,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.finance.db import get_db_schema
+from app.logistics.inbound_schedules import assert_cancellable, cancel_schedule
 from app.logistics.transition import (
     USAGE_SCOPE,
     LogisticsFixtureMissing,
@@ -111,14 +112,37 @@ def withdraw_inventory(
       돌려주는 값이 `0` 이라 마스터가 *"이번에 실제로 걷은 것"* 을 말할 수 있다
       (재무 `#302` 의 *"retry no-op"* 과 같은 모양).
 
+    🔴 **도착 Receipt 가 있으면 거절한다 (2026-09-09 · W3-1).**
+
+      ```text
+      Receipt 없음   취소한다        JSON 에서 빼고 schedule 에 cancelled_as_of
+      Receipt 있음   ScheduleReceiptExists   ★ 마스터가 전이 전체를 롤백한다
+      ```
+
+      물건이 도착했으면 취소가 아니라 반품·폐기·실사이고, 그 판단을 물류가 대신
+      내리지 않는다 (`inbound_reconciliation` 이 긋는 그 선과 같다). 종전에는 이
+      경우가 **조용히 통과**해 Lot 은 남고 일정만 사라졌다.
+
+      ⚠️ **판정을 쓰기보다 먼저 한다.** 하나씩 지우면서 중간에 막히면 앞의 것은
+         이미 JSON 에서 빠진 뒤다 — 같은 트랜잭션이라 롤백은 되지만, 판정이 쓰기와
+         섞이면 *"무엇이 왜 막혔나"* 가 흐려진다.
+
+    ★ **`inbound_schedules` 에도 같이 적는다 (Dual Write · W3-1).** 같은 커넥션 ·
+      같은 바깥 트랜잭션이라 한쪽만 커밋되는 일이 없다.
+
     :returns: 이번 호출로 두 목록에서 **실제로 빠진 항목 수의 합.**
     :raises LogisticsFixtureMissing: 그날 fixture 행이 없을 때. **만들지 않는다.**
+    :raises ScheduleReceiptExists: 도착 Receipt 가 있는 입고를 취소하려 할 때.
+    :raises ScheduleCancelConflict: 이미 다른 날짜로 취소된 일정일 때.
     """
     drop = frozenset(i for i in inbound_ids if i)
     if not drop:
         # ★ 회차 일정이 없던 약정도 승인은 살아 있다 — 걷을 입고가 **없다**는 것은
         #   정상 상태다 (마스터 `cancel_purchases` 와 같은 태도).
         return 0
+
+    # ── 판정이 먼저다. 하나라도 도착했으면 아무것도 안 걷는다 ──────────
+    assert_cancellable(conn, sim_run_id=sim_run_id, inbound_ids=sorted(drop))
 
     schema = sql.Identifier(get_db_schema())
     missing = LogisticsFixtureMissing(
@@ -176,6 +200,15 @@ def withdraw_inventory(
         )
         if cursor.rowcount != 1:
             raise missing
+
+    # ── Dual Write — 같은 트랜잭션 (W3-1) ─────────────────────────────
+    # 🔴 `as_of` 를 그대로 넘긴다. 이 값은 이미 `cancelled_on + 1`(목표 상태일)이고
+    #    (`LogisticsCancellationAdapter.cancel` 참조), 취소일 자체를 적으면
+    #    **이미 지나간 하루의 사실이 바뀐다.**
+    for inbound_id in sorted(drop):
+        cancel_schedule(
+            conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
+        )
     return removed
 
 
