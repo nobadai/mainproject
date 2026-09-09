@@ -2,7 +2,8 @@ from datetime import date
 from decimal import Decimal
 
 from app.finance.rules import evaluate_finance_runtime_rules, evaluate_finance_sales_rules
-from app.finance.schemas import ChannelTerm, PurchaseAgentOutput
+from app.finance.schemas import ChannelTerm
+from app.purchase_agent.schemas import PurchaseProposal
 from app.finance.tools import (
     calculate_purchase_scenario_amount,
     compare_reported_amount,
@@ -11,7 +12,7 @@ from app.finance.tools import (
 
 
 def test_purchase_total_recalculation_matches_kg_contract_fixture(purchase_payload):
-    scenario = PurchaseAgentOutput.model_validate(purchase_payload).scenarios[0]
+    scenario = PurchaseProposal.model_validate(purchase_payload).scenarios[0]
 
     amount = calculate_purchase_scenario_amount(scenario.sourcing_plan)
     comparison = compare_reported_amount(scenario.total_amount_krw, amount)

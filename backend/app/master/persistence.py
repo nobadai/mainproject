@@ -36,6 +36,7 @@ persistence.py — 마스터 실행 계획 적재 (정의서 §1.2-11)
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import date
@@ -43,7 +44,12 @@ from typing import Any
 
 from app.master.envelope import ExecutionContext
 from app.master.plan import ExecutionPlan
-from app.master.run_repository import try_save_run
+from app.master.run_repository import (
+    LEDGER_GAP_END_CODE,
+    history_enabled,
+    list_runs,
+    try_save_run,
+)
 from app.master.schemas import (
     ProcurementRunRequest,
     ProcurementRunResponse,
@@ -52,6 +58,8 @@ from app.master.schemas import (
     StepOut,
 )
 from app.master.status_flow import StatusOutcome
+
+logger = logging.getLogger(__name__)
 
 # 마스터의 1차 Flow 는 매입 의사결정이다. 판매(2차)가 붙으면 cycle 이 갈린다.
 _CYCLE = "PROCUREMENT"
@@ -82,6 +90,15 @@ _SALES_RUNTIME_BY_END_CODE = {
 _REVALIDATION_RUNTIME_BY_OUTCOME = {
     "ERROR": "RUNTIME_NOT_READY",
 }
+
+# 🔴 **장부 관문이 막은 날의 종료 코드. 새 낱말이 아니다** (2026-09-09).
+#    `E4_NOT_STARTED` 는 *"시작 못 했다"* 이고 관문에서 돌아선 날이 정확히 그것이다.
+#    새 코드를 지으면 *"왜 못 했나"* 의 주인이 둘이 된다 — 그 답은 `reason` 이 든다.
+#
+# ★ **값의 주인은 `run_repository` 다** (2026-09-09 · `Master 19.0`). 성적표가 이
+#   값으로 관문 행을 되찾으므로, 여기에 문자열을 다시 적으면 한쪽만 바뀌는 날
+#   `gate_blocked` 가 조용히 늘 거짓이 된다.
+_LEDGER_GAP_END_CODE = LEDGER_GAP_END_CODE
 
 
 def runtime_status_of(end_code: str) -> str:
@@ -351,6 +368,124 @@ def record_status(
             "unavailable": list(outcome.unavailable),
             "missing_data": {k: list(v) for k, v in outcome.missing_data.items()},
             "errors": dict(outcome.errors),
+        },
+    )
+    return None if run_id is None else str(run_id)
+
+
+# ── 장부 관문이 막은 날 ─────────────────────────────────────────────────────
+
+
+def _ledger_gap_already_recorded(request_id: str) -> bool:
+    """그날 게이트 행이 **이미 있는가.** 넣기 전에 본다.
+
+    🔴 **인덱스가 두 번째를 못 막는다** (2026-09-09 실측). 표의 유일 제약은
+      `UNIQUE (run_id, request_id)` 인데 `run_id` 가 매번 새 UUID 라 같은
+      `request_id` 를 두 번 넣어도 안 걸린다 — `REQ-DAILY-20260106-배추` 가 실제로
+      7행 쌓여 있다. 판단 행은 시도마다 사실이 달라 여럿일 이유가 있지만, 게이트
+      행은 **같은 날 같은 사실**이라 두 벌일 이유가 없다.
+
+    ⚠️ **읽고 쓰는 사이에 경쟁이 있다.** 지금은 걷기가 한 프로세스라 안전하고,
+      **그것이 전제다.** 걷기를 여럿으로 나누는 날 이 함수로는 못 막는다 — 그때는
+      표에 `request_id` 유일 제약을 세울 자리다.
+
+    ★ **읽기가 터지면 `False` 다 — 그래서 적재로 간다.** 행이 두 벌인 것보다 행이
+      아예 없는 것이 나쁘다. 행이 없으면 화면이 다시 *"사유를 남긴 실행이
+      없습니다"* 로 돌아가고, 그것이 이 판이 고치려는 바로 그 문구다.
+    """
+    try:
+        return bool(list_runs(request_id=request_id, cycle=_CYCLE, limit=1))
+    except Exception:
+        logger.exception("장부 관문 행 중복 확인 실패 - 그래도 적재는 시도한다")
+        return False
+
+
+def record_ledger_gap(
+    *,
+    request_id: str,
+    as_of: date,
+    policy_version: str,
+    reason: str,
+    inbound_status: str,
+    receivable_status: str,
+    collection_status: str,
+    elapsed_ms: int | None = None,
+    sim_run_id: str | None = None,
+) -> str | None:
+    """장부 관문이 막아 **판단을 한 번도 안 돌린 날** 1건을 적재한다 (2026-09-09 신설).
+
+    🔴 **왜 다섯 번째를 만드는가.** 매입 화면이 세 가지를 한 문구로 보여준다.
+
+    ```text
+    ① 장부 게이트가 막았다        →  "사유를 남긴 실행이 없습니다"
+    ② 스케줄러가 그날을 안 돌렸다  →  "사유를 남긴 실행이 없습니다"
+    ③ 돌렸는데 적재가 실패했다     →  "사유를 남긴 실행이 없습니다"
+    ```
+
+      `①` 은 정상 동작이고 `②` 는 운영 공백이고 `③` 은 사고다. 셋이 같아 보이면
+      사람이 무엇을 볼지 모른다. **이 함수는 `①` 만 가른다** — `②` `③` 은 여전히
+      행이 없고, 그것을 세는 것은 `Master 상세 19.0` 이 풀 자리다.
+
+    🔴 **기존 넷 중 아무거나에 끼워 넣지 않는다.** `record` · `record_sales` 는
+      요청·응답 타입이 박혀 있는데 여기는 **응답이 없다**(부서를 한 번도 안 불렀다).
+      `record_status` 는 `StatusOutcome` 이 필요하고 런타임 상태 매핑이 다르다 —
+      그쪽 독스트링이 이미 그 이유를 적어 뒀다.
+
+    ★ **`end_code` 를 새로 만들지 않는다.** `E4_NOT_STARTED` 는 *"시작 못 했다"* 이고
+      그것이 정확히 일어난 일이다. *"왜 못 했나"* 는 종료 코드가 아니라 `reason` 이
+      답할 자리다 — 같은 사실의 주인은 하나다.
+
+    ★ **런타임 상태를 손으로 안 적는다.** `runtime_status_of` 가 그 매핑의 주인이고,
+      여기서 `"RUNTIME_NOT_READY"` 를 다시 쓰면 매핑이 바뀌는 날 한쪽만 바뀐다.
+
+    ★ **품목이 없다.** 관문은 하루를 통째로 돌려세운다. 품목 칸을 채우면
+      *"배추 때문에 막혔다"* 라는 없는 사실이 생긴다 (`record_status` 와 같은 태도).
+
+    🔴 **`plan` 은 빈 목록이다 — 이것이 화면 안전의 조건이다.** 매입 화면은
+      `response_payload.scenarios` 가 있는 행만 안으로 고른다
+      (`app/api/purchase/query.py` `_pick`). 지어낸 안을 한 줄이라도 실으면 그
+      순간 **품목 미상 행**이 안 목록에 뜬다. 안 낸 날이니 안이 없는 것이 사실이다.
+
+    🔴 **`reason` 을 여기서 다시 짓지 않는다.** 문장은 `scheduler._ledger_gap_note`
+      가 만들고 그 값을 그대로 받는다. 두 벌이 되면 한쪽만 고치는 날 화면과 이력이
+      갈린다.
+
+    🟢 **`ledger_gate` 를 같이 넣는다.** 문자열을 파싱하지 않고도 *"어느 쪽이
+      막았나"* 를 꺼낼 수 있다 — 문구가 바뀌어도 이 세 칸은 안 흔들린다.
+
+    ★ 적재 실패는 `None` 이다 — 이력이 없어도 그날 결과는 그대로 나간다
+      (`record` 와 같은 태도).
+    """
+    if not history_enabled():
+        # ★ **읽지도 않는다.** 아래 중복 확인이 표를 찾아가므로, 이 줄이 없으면
+        #   이력을 안 남기는 판(pytest)에서도 SELECT 가 팀 공용 DB 로 나간다.
+        return None
+    if _ledger_gap_already_recorded(request_id):
+        # ★ 같은 날을 두 번 걸어도 게이트 행은 한 벌이다.
+        return None
+    run_id = try_save_run(
+        # ★ **매입과 같은 사이클이다.** 화면이 `cycle = 'PROCUREMENT'` 축으로 그날을
+        #   훑는다 — 새 사이클을 만들면 이 행이 화면에 안 닿는다.
+        cycle=_CYCLE,
+        as_of=as_of,
+        request_id=request_id,
+        end_code=_LEDGER_GAP_END_CODE,
+        runtime_status=runtime_status_of(_LEDGER_GAP_END_CODE),
+        elapsed_ms=elapsed_ms,
+        sim_run_id=sim_run_id,
+        plan=[],
+        request_payload={
+            "as_of": as_of.isoformat(),
+            "policy_version": policy_version,
+        },
+        response_payload={
+            # 🔴 **화면이 읽는 칸이 이것 하나다** (`_no_plan_note`).
+            "reason": reason,
+            "ledger_gate": {
+                "inbound": inbound_status,
+                "receivable": receivable_status,
+                "collection": collection_status,
+            },
         },
     )
     return None if run_id is None else str(run_id)
