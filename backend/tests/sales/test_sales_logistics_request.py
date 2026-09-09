@@ -56,3 +56,4 @@ def test_sales_outbound_boundary_does_not_call_logistics():
     assert "app.logistics" not in source
     for forbidden in ("reserve_confirmed_sale(", "reserve_confirmed_sale_available("):
         assert forbidden not in source
+

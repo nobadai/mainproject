@@ -8,20 +8,18 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
-from app.api.primitives import Chart, Note, Source, Stat, Table
+from app.api.primitives import Card, Chart, Note, Source, Stat, Table
 
 
 class StateOption(BaseModel):
-    """저장된 재무 기준 상태 하나.
-
-    ★ **이건 "대출 승인 결과" 가 아닙니다.** DB 에 저장된 기준 상태입니다.
-      데모에도 그렇게 적혀 있습니다 — 헷갈리면 안 됩니다.
-    """
+    """저장된 재무 기준 상태 하나."""
 
     key: str = Field(description="base · loan 처럼 주소에 실리는 값")
-    label: str = Field(description="고르는 목록에 보일 이름")
+    label: str = Field(description="화면에 보일 이름")
     explain: str = Field(description="이 상태가 무엇인지 한 문단")
 
 
@@ -31,17 +29,25 @@ class FlowCell(BaseModel):
     label: str = Field(description="원장 용어 말고 사람 말로")
     value: str = Field(description="금액. 자릿점까지 넣어서")
     tone: str = Field(default="neutral", description="neutral · good · warn · bad")
+    group: Literal["in", "out"] = Field(description="들어온 돈과 나간 돈 구분")
 
 
 class FinanceTab(BaseModel):
-    states: list[StateOption] = Field(description="고를 수 있는 저장 상태")
-    selected: str = Field(description="지금 고른 상태")
+    has_data: bool = Field(description="요청일까지 표시할 재무 상태가 있는지")
+    states: list[StateOption] = Field(description="실제로 저장된 재무 상태")
+    selected: str = Field(description="대표로 요약한 상태")
+    requested_as_of: str = Field(description="사용자가 요청한 기준일")
+    state_as_of: str | None = Field(description="실제로 조회된 재무 상태 기준일")
+    latest_closing_as_of: str | None = Field(description="최근 일마감 기준일")
     stats: list[Stat] = Field(description="현금 · 최소 운영자금 · 받을 돈 · 부채")
+    action_card: Card | None = Field(description="지금 확인할 자금")
+    state_indicator: str | None = Field(description="비교할 상태가 하나뿐일 때의 짧은 안내")
+    state_cards: list[Card] = Field(description="저장된 재무 상태 비교 카드")
     explain: Note = Field(description="고른 상태가 지금 어떤 뜻인가")
     read_only: Note = Field(description="이 화면이 조회 전용이라는 안내")
-    cash_chart: Chart = Field(description="한 달 일별 현금")
-    flows: list[FlowCell] = Field(description="이번 달 돈의 흐름")
+    cash_chart: Chart | None = Field(description="최근 일별 현금")
+    flows: list[FlowCell] = Field(description="기준일까지 누적 자금 흐름")
     balances: list[Stat] = Field(description="받을 돈 · 줄 돈")
-    balances_note: Note = Field(description="미지급이 없으면 경고 대신 «정산 완료» 로")
-    closings: Table = Field(description="최근 일별 마감")
+    balances_note: Note | None = Field(description="미지급이 없으면 경고 대신 «정산 완료» 로")
+    closings: Table | None = Field(description="최근 일별 마감")
     source: Source = Field(description="예시값인지 실제 값인지")

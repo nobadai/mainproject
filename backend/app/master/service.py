@@ -459,6 +459,14 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
         #   것과 같은 자리이고, 판매 쪽 `Decimal` 파싱은 `str(float)` 을 거쳐
         #   값이 그대로다.
         payload["requested_quantity_kg"] = float(request.requested_quantity_kg)
+    if request.preferred_delivery_date is not None:
+        # 🔴 **없으면 안 싣는다.** 오늘이나 `as_of + N` 으로 대신 채우지 않는다 —
+        #    그 값은 승인되면 `sales.sale_date` 가 되고 수금 기일의 출발점이 된다.
+        payload["preferred_delivery_date"] = request.preferred_delivery_date.isoformat()
+    if request.preferred_payment_days is not None:
+        # ★ **0 도 사실이다** (`requested_quantity_kg` 과 같은 자리). `payment_days=0`
+        #   은 *"당일 수금"* 이라는 정해진 조건이지 *"말하지 않았다"* 가 아니다.
+        payload["preferred_payment_days"] = request.preferred_payment_days
     return payload or None
 
 
@@ -947,6 +955,7 @@ def _sales_candidates_out(outcome: SalesOutcome) -> list[SalesCandidateOut]:
             scenario=dict(c.scenario),
             validations={k: dict(v) for k, v in c.validations.items()},
             unroutable=list(c.unroutable),
+            missing_terms=list(c.missing_terms),
             passed=c.passed,
             unvalidated=c.unvalidated,
             detail=c.detail,

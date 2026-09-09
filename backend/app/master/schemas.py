@@ -585,8 +585,7 @@ class SalesRunRequest(BaseModel):
     #:   **판매가 실제로 요구한 칸**이라 여기에 자리를 만든다.
     #:
     #: 🔴 **나머지 구조화된 칸은 지금 안 넣는다.** `SalesUserRequest` 에는
-    #:   `preferred_unit_price_krw` · `preferred_delivery_date` ·
-    #:   `preferred_payment_days` · `preferred_payment_terms_type` ·
+    #:   `preferred_unit_price_krw` · `preferred_payment_terms_type` ·
     #:   `preferred_contract_term_days` 가 더 있지만 **요구한 caller 가 아직 없다.**
     #:   없는 필요를 API 표면에 미리 만들면 화면이 안 쓰는 칸을 채우기 시작하고,
     #:   그 값이 어디서 왔는지 아무도 모른 채 제안에 실린다.
@@ -601,6 +600,41 @@ class SalesRunRequest(BaseModel):
         description=(
             "사용자가 말한 요청 수량 (kg). 판매 `SalesUserRequest.requested_quantity_kg` "
             "로 그대로 나간다 — 마스터는 단위도 값도 고치지 않는다."
+        ),
+    )
+
+    #: 🔴 **상업조건 둘이 여기로 온다** (2026-09-08 계약 · 실측).
+    #:
+    #:   `delivery_date` · `payment_days` 가 없는 후보는 **승인해도 확정할 수 없다**
+    #:   (`sales_approval.REQUIRED_COMMERCIAL_TERMS`). 그래서 후보 판정이 그 둘을
+    #:   필수로 잡았고, 그 순간 *"요구한 caller 가 없다"* 가 깨졌다 — **요구한 caller
+    #:   가 승인 경로다.**
+    #:
+    #:   ```text
+    #:   판매 proposal.py `_baseline`   delivery = user.preferred_delivery_date
+    #:                                  payment  = user.preferred_payment_days
+    #:   ```
+    #:
+    #:   실측(2026-09-08)에서 판매 후보 3안이 전부 `delivery_date=None` ·
+    #:   `payment_days=None` 이었던 이유가 이것이다 — **마스터가 안 실어 보냈다.**
+    #:   판매가 값을 안 만든 것이 아니라 출처가 비어 있었다.
+    #:
+    #: ★ **마스터가 값을 지어내지 않는다.** 안 주면 안 싣고, 그러면 후보가 제시되지
+    #:   않으며 그 사유는 *"납품일이 없다"* 로 화면에 나간다. `as_of + N` 같은
+    #:   기본값을 두면 그 `N` 이 곧 업무 규칙이 된다.
+    preferred_delivery_date: date | None = Field(
+        default=None,
+        description=(
+            "사용자가 말한 납품 희망일. 판매 `SalesUserRequest.preferred_delivery_date` "
+            "로 그대로 나가고, 승인되면 `sales.sale_date` 의 출처가 된다."
+        ),
+    )
+    preferred_payment_days: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "사용자가 말한 수금 유예일. 판매 `SalesUserRequest.preferred_payment_days` "
+            "로 그대로 나가고, 승인되면 수금 기일(`sale_date + payment_days`)의 출처가 된다."
         ),
     )
 
@@ -637,6 +671,24 @@ class SalesCandidateOut(BaseModel):
 
     #: 🔴 **부를 대상이 없어 못 물어본 요구.** 비어 있지 않으면 통과로 치지 않는다.
     unroutable: list[str] = []
+
+    #: 🔴 **비어 있는 상업조건이 어디서 끊겼나.** 비어 있지 않으면 통과로 치지 않는다 —
+    #: 값이 없는 안은 사용자가 골라도 확정할 수 없다 (2026-09-08 계약).
+    #:
+    #: ```text
+    #: REQUEST_MISSING_<FIELD>    부르는 쪽이 안 보냈다  → 고칠 사람: 화면 · 걷기 · API 호출자
+    #: TERMS_UNRESOLVED_<FIELD>   정말 조건이 없다       → 고칠 사람: 판매 · 계약
+    #: ```
+    #:
+    #: ★ **칸 이름은 접두를 벗기면 나온다** (`sales_approval.term_of_origin`). 화면이
+    #:   문자열을 직접 자르지 않는다 — 접두를 바꾸는 날 조용히 틀린 이름이 뜬다.
+    #:
+    #: ★ **주인은 `CandidateVerdict.missing_terms` 다.** 여기서 원인을 다시 세지 않는다 —
+    #:   `user_request` 도 `business_mode` 도 이 응답에는 없다.
+    #:
+    #: ⚠️ **`validations` 와 다른 칸이다.** 부서 판정에 섞으면 화면이 *"재무가 반려"*
+    #:   로 읽고 사람이 재무를 보러 간다 — 봐야 할 곳은 판매다.
+    missing_terms: list[str] = []
 
     passed: bool
     #: 요구한 검증이 하나도 없었다 — **통과로 나가지만 아무도 안 본 안이다.**

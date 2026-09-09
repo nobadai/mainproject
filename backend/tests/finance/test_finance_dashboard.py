@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from app.finance import dashboard_service
+from app.finance import dashboard
 from app.finance.schemas import (
     FinanceCashflowSummary,
     FinanceDashboardMeta,
@@ -15,7 +15,7 @@ AS_OF = date(2025, 12, 31)
 def test_finance_dashboard_keeps_base_and_loan_states_separate(monkeypatch):
     _patch_common(monkeypatch)
 
-    response = dashboard_service.get_finance_dashboard(
+    response = dashboard.get_finance_dashboard(
         sim_run_id="SIM-BURNIN-202512", as_of=AS_OF
     )
 
@@ -40,12 +40,12 @@ def test_finance_dashboard_keeps_base_and_loan_states_separate(monkeypatch):
 def test_finance_cashflow_is_ascending_and_has_buffers(monkeypatch):
     _patch_common(monkeypatch)
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_cashflow",
         lambda **_: [_closing(date(2025, 12, 30), 29), _closing(date(2025, 12, 31), 30)],
     )
 
-    response = dashboard_service.get_finance_cashflow(
+    response = dashboard.get_finance_cashflow(
         sim_run_id="SIM-BURNIN-202512", as_of=AS_OF, days=30
     )
 
@@ -63,13 +63,13 @@ def test_finance_cashflow_is_ascending_and_has_buffers(monkeypatch):
 
 def _patch_common(monkeypatch):
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_finance_dashboard_meta",
         lambda **_: {"sim_run_id": "SIM-BURNIN-202512", "as_of": AS_OF, "data_type": "SIMULATION"},
     )
-    monkeypatch.setattr(dashboard_service.repository, "load_finance_states", lambda **_: _states())
+    monkeypatch.setattr(dashboard, "load_finance_states", lambda **_: _states())
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_cashflow_summary",
         lambda **_: {
             "purchase_cash_out_krw": Decimal(1),
@@ -82,7 +82,7 @@ def _patch_common(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_receivable_summary",
         lambda **_: {
             "count": 15,
@@ -96,7 +96,7 @@ def _patch_common(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_payable_summary",
         lambda **_: {
             "count": 16,
@@ -106,10 +106,10 @@ def _patch_common(monkeypatch):
             "overdue_amount_krw": Decimal(0),
         },
     )
-    monkeypatch.setattr(dashboard_service.repository, "load_receivables", lambda **_: [])
-    monkeypatch.setattr(dashboard_service.repository, "load_payables", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_receivables", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_payables", lambda **_: [])
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_expense_summary",
         lambda **_: [
             {
@@ -123,7 +123,7 @@ def _patch_common(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_recent_closings",
         lambda **_: [_closing(date(2025, 12, 31), 30), _closing(date(2025, 12, 30), 29)],
     )
