@@ -631,7 +631,13 @@ snap = get_inventory_console(sim_run_id=..., as_of=as_of)
 저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Card`)에 담습니다.
 
 원래 표를 직접 봐야 하면: `inventory_lots` · `inventory_reservations` ·
-`inventory_allocations` · `arrival_schedule` · `zone_capacity`.
+`inventory_allocations` · `inbound_receipts` · `inbound_inspections` ·
+`warehouse_zones` · `storage_locations`.
+
+🔴 예전에 여기 적혀 있던 `arrival_schedule` · `zone_capacity` 는 **표가 아닙니다.**
+스키마에 없고 SQL 어디에도 안 나옵니다 — 각각 계약 필드명
+(`ApprovedPurchaseCommitment.arrival_schedule`)과 `day_open` 의
+`zone_capacity_status` 였습니다 (2026-09-08 카탈로그 전수 대조).
 
 **`panes` 는 넷 다 채워서 보냅니다** (`stock` `inbound` `warehouse`
 `outbound`). `selected` 가 지금 보고 있는 것이고, 화면이 나머지를
