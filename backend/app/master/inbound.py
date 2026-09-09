@@ -156,7 +156,7 @@ class InboundPartOut(BaseModel):
     #:
     #: ```text
     #: 01-28   received=[A]   재고 +3,587kg   신규 재고화 완료
-    #: 01-29   received=[A]   재고 불변       기존 재고화 검증 + 남은 일정 정리 완료
+    #: 01-29   received=[A]   재고 불변       기존 재고화를 다시 확인만 한다
     #: ```
     #:
     #: ⚠️ **`received` 포함 여부만으로 이번 호출에서 새 Lot·Move 가 생겼다고 읽지

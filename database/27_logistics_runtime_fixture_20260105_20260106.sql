@@ -37,8 +37,8 @@
 -- 🔴 **두 행의 `in_transit` 이 다르다** (마스터 통보 2026-09-04 §2)
 --
 --   ```text
---   01-05   CONFIRMED_ZERO · []      Day1 이 읽을 T0. 확인했고 입고 예정이 없다
---   01-06   UNRESOLVED     · NULL    전이가 UPDATE 할 그릇. 아직 아무도 확인하지 않았다
+--   01-05   CONFIRMED_ZERO   Day1 이 읽을 T0. 확인했고 입고 예정이 없다
+--   01-06   UNRESOLVED       전이가 UPDATE 할 그릇. 아직 아무도 확인하지 않았다
 --   ```
 --
 --   `CONFIRMED_ZERO` 는 *"없다"* 가 아니라 *"확인했고 없다"* 다. `01-06` 을 그렇게

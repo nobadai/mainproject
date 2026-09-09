@@ -16,7 +16,7 @@
 -- ★ 왜 만드는가 — **입고 예정이 날짜별 Snapshot 안에 살고 있어서다.**
 --
 --   종전 입고 예정의 정본은 `logistics_runtime_fixture` 의 두 JSON 칸이었다.
---   그 칸은 하루가 넘어갈 때 carry-forward 로 **다음 날 행에 복제**되어 유지된다.
+--   그 칸은 하루가 넘어갈 때 carry-forward 로 **다음 날 행에 복제**되어 유지됐다.
 --   그래서 *"미래 날짜 행이 먼저 열려 있으면"* 그 행은 나중에 난 승인을 모른 채 굳는다.
 --
 --     2026-01-15 fixture 생성 (in_transit = [])      ← 먼저 열렸다
@@ -35,13 +35,16 @@
 --   ⇒ 이 표는 **한 번 INSERT 하고 날짜로 질의한다.** 미래 날짜 행으로 복제하지
 --     않으므로 같은 사고가 구조적으로 재현되지 않는다.
 --
--- 🔴 **이번 판은 정본을 바꾸지 않는다 (W3-1).**
+-- 🔴 **이번 판은 정본을 바꾸지 않았다 (W3-1 · 이 파일을 적용하던 시점).**
 --
 --     Reader  아직 Legacy JSON
 --     Writer  Legacy JSON + inbound_schedules  (Dual Write)
 --
---   정본 전환은 W3-2 다. 그래서 이 파일은 **기존 칸을 하나도 안 건드린다** —
---   `logistics_runtime_fixture` 에 UPDATE 도 DELETE 도 없다.
+--   그래서 이 파일은 **기존 칸을 하나도 안 건드린다** —
+--   `logistics_runtime_fixture` 에 UPDATE 도 DELETE 도 없다. 이 성질은 지금도 같다.
+--
+--   ★ **그 뒤 정본이 옮겨 갔다.** W3-2 가 Reader 를, W3-3 이 Writer 와 carry-forward
+--     복제를 옮겼다 — 지금은 두 JSON 칸을 아무도 읽지도 쓰지도 않는다.
 --
 -- 🔴 **DROP 이 한 줄도 없다.** 기존 표를 다시 만들지 않고, 기존 데이터를 지우지
 --    않으며, 기존 값을 바꾸지 않는다.
@@ -49,7 +52,10 @@
 -- 🔴 **`logistics_drop_inbound_json.sql` 보다 반드시 먼저 돌린다.**
 --    아래 §2 Backfill 이 `in_transit_json` 을 읽는다 — 그 칸이 걷힌 뒤에는 이 파일이
 --    **재실행되지 않는다**(`column does not exist`). 이미 적용된 DB 에서는 다시 돌릴
---    이유가 없고(§3 검증으로 확인), 신규 구축은 README §1 순서가 이 둘을 그 순서로 둔다.
+--    이유가 없다(§3 검증으로 확인).
+--
+--    ★ **신규 구축에서는 이 파일을 안 돌린다** (README §1). 옮길 JSON 이 한 줄도 없고
+--      표는 `30_logistics_wms_schema.sql` §3-0 이 만든다 — 순서 문제 자체가 없다.
 --
 -- ★ **두 번 돌려도 안전하다.** `CREATE TABLE IF NOT EXISTS` ·
 --   `CREATE INDEX IF NOT EXISTS` · Backfill 은 `WHERE NOT EXISTS` 다.

@@ -48,11 +48,11 @@ Header   logistics_runtime_fixture.*_status      «그 축을 확인했나» 만
    Receipt 생성과 재고 반영 완료는 **다른 사건**이다 — `inbound_execution._receive_one`
    은 검수 사실이 없으면 `INSPECTION_FACT_UNAVAILABLE` 로 돌아서고, 그때 Receipt 만
    선 채 커밋된다. 그 상태가 며칠 이어질 수 있어 하나를 골라 `COMPLETED` 로 적으면
-   나머지 소비자가 틀린다 (소비자별 종료조건은 W3-2 에서 구현한다).
+   나머지 소비자가 틀린다. 소비자별 종료조건은 이 파일 아래쪽 Reader 절에 있다.
 
-🔴 **커밋도 롤백도 하지 않고 커넥션을 새로 열지 않는다.** Legacy JSON 쓰기와
-   **같은 `conn` · 같은 바깥 트랜잭션**이어야 한다 — 한쪽만 커밋되면 두 정본 후보가
-   갈린 채 남는다 (`transition.persist_inventory` 와 같은 규율).
+🔴 **커밋도 롤백도 하지 않고 커넥션을 새로 열지 않는다.** 승인·취소가 같은 트랜잭션에서
+   쓰는 다른 사실(매입 원장 · 재무 · Header status)과 **한 덩어리로 서거나 함께
+   물러나야** 한다 (`transition.persist_inventory` 와 같은 규율).
 """
 
 from __future__ import annotations
@@ -100,16 +100,18 @@ class ScheduleConflict(ValueError):
 class ScheduleAlreadyCancelled(ValueError):
     """**취소된** 일정을 같은 승인으로 다시 적으려 한다.
 
-    🔴 **조용히 되살리지 않는다.** 종전에는 대조 넷(`purchase_item_id` ·
-       `quantity_kg` · `expected_arrival_date` · `created_as_of`)만 보고 no-op 을
-       돌려줘, Legacy JSON 은 부활하는데(`_merge_schedule` 이 없는 항목을 더한다)
-       schedule 은 취소된 채로 남았다.
+    🔴 **조용히 되살리지 않는다.** 대조 넷(`purchase_item_id` · `quantity_kg` ·
+       `expected_arrival_date` · `created_as_of`)이 같아도, 이미 *"그날부터 없다"* 고
+       적힌 행을 no-op 으로 넘기면 **되살리는 결정을 아무도 내리지 않은 채** 그 일정이
+       다시 사는 것처럼 읽힌다.
 
     ```text
-    승인 → 취소 → 같은 승인 재실행
-      Legacy JSON        A 있음      ← 되살아난다
-      inbound_schedules  A 취소됨    ← 그대로다      🔴 두 정본 후보가 갈린다
+    승인 → 취소 → 같은 승인 재실행 → 여기서 멈춘다
     ```
+
+    ⚠️ **과거에는 이것이 두 저장소를 갈랐다** (W3-1 Dual Write 시절). 그때는 Legacy
+       JSON 이 되살아나고 일정만 취소로 남았다. 지금은 정본이 하나라 갈릴 곳이 없지만,
+       **되살림 자체를 결정 없이 하지 않는다**는 규율은 그대로다.
 
     ★ **취소 이력을 지워 `cancelled_as_of = NULL` 로 되돌리지 않는다.** 그것이
       옳으려면 *"취소를 무를 수 있다"* 는 업무 계약이 있어야 하는데, 저장소 어디에도
@@ -243,8 +245,7 @@ def record_schedule(
     ```
 
     🔴 **취소 여부를 대조 넷보다 **먼저** 본다.** 값이 같아도 그 행은 이미 *"그날부터
-       없다"* 고 적힌 행이다. 값이 같다는 이유로 no-op 을 돌려주면 Legacy JSON 만
-       되살아나 두 저장소가 갈린다 (`ScheduleAlreadyCancelled` 참조).
+       없다"* 고 적힌 행이다 (`ScheduleAlreadyCancelled` 참조).
 
     🔴 **대조 대상 넷이 계약이다** — `purchase_item_id` · `quantity_kg` ·
        `expected_arrival_date` · `created_as_of`. `source_ref` · `note` 는 근거

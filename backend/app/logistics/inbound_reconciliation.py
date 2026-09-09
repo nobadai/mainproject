@@ -33,7 +33,7 @@
 ## 정상 입고 경로를 대체하지 않는다
 
 ```text
-검수 끝난 입고   inbound_stock.materialize_inspected_inbound   Lot·IN·Receipt·일정 정리
+검수 끝난 입고   inbound_stock.materialize_inspected_inbound   Receipt·검수·Lot·원장 IN
 고착 orphan     여기                                          일정만, 사람이 지목해서
 ```
 
@@ -54,9 +54,10 @@ usage_scope
     → transition.USAGE_SCOPE
 ```
 
-🔴 **비교 규칙을 여기에 다시 적지 않는다.** 두 곳이 각자 B-1 을 적으면 한쪽만
-   고쳐지는 날이 오고, 그날 일정 두 칸이 조용히 갈린다 (`console_service` 가
-   `outbound` 의 상태 어휘를 문자열로 다시 적지 않는 것과 같은 이유다).
+🔴 **취소 규칙을 여기에 다시 적지 않는다.** 멱등·다른 날짜 충돌 판정은
+   `inbound_schedules.cancel_schedule` 하나가 소유한다 — 두 곳이 각자 적으면 한쪽만
+   고쳐지는 날이 온다 (`console_service` 가 `outbound` 의 상태 어휘를 문자열로 다시
+   적지 않는 것과 같은 이유다).
 
 ⚠️ **`cancellation.py` 를 import 하지 않는다.** 그쪽은 마스터가 임시로 얹은 모듈이라
    `app.master.commitment` · `app.finance.db` 를 끌고 온다. 여기서 부르면 그 의존성이
@@ -90,13 +91,6 @@ from psycopg import sql
 
 from app.logistics.db import get_db_schema
 from app.logistics.inbound_schedules import cancel_schedule, load_schedule_views
-
-# 🔴 **B-1 규율을 다시 적지 않고 가져다 쓴다.** 밑줄 이름을 건너 가져오는 것은 이
-#    패키지의 기존 방식이다 (`console_service` 가 `outbound._ASSIGNED_ALLOCATION` 을
-#    그대로 쓰는 것과 같다 — *"여기에 문자열로 다시 적지 않는다"*).
-from app.logistics.inbound_stock import (
-    ScheduleIntegrityError,
-)
 from app.logistics.receipts import lock_arrival_writes
 from app.logistics.transition import USAGE_SCOPE
 
@@ -109,7 +103,6 @@ __all__ = [
     "ScheduleAlreadyMaterialized",
     # 🔴 **다시 정의하지 않고 그대로 내보낸다.** 호출자가 `except` 로 잡을 때 두 이름 중
     #    어느 것인지 헷갈리면 한쪽만 잡는 날이 온다 — 이름은 하나여야 한다.
-    "ScheduleIntegrityError",
     "reconcile_orphan_inbound_schedule",
 ]
 
@@ -186,13 +179,12 @@ class InboundReconciliationResult:
     """정리 1회의 결과. **터진 것은 예외로 나가고, 여기 오는 것은 다 정상이다.**
 
     ```text
-    applied=True  · removed=1   두 칸에서 함께 걷었다
-    applied=False · removed=0   이미 걷혀 있었다 — 재실행의 정상 경로다
+    applied=True  · removed=1   이번 호출이 그 일정을 닫았다
+    applied=False · removed=0   이미 닫혀 있었다 — 재실행의 정상 경로다
     ```
 
-    🔴 **`removed` 는 걷어낸 *일정 건수* 이지 목록 항목 수가 아니다.** 두 칸에서 한
-       건씩 닫히므로 0 아니면 1 이다 — 중복은 `inbound_schedules` PK 가 무결성
-       오류로 막는다.
+    🔴 **`removed` 는 닫은 *일정 건수* 다.** 한 번에 한 건만 지목하므로 0 아니면 1 이고,
+       같은 열쇠가 둘일 수 없는 것은 `inbound_schedules` PK 가 보장한다.
 
     ★ **`source_ref` 는 fixture 행에 실제로 적힌다** (`logistics_runtime_fixture.
       source_ref`). 걷어낸 뒤 그 행의 근거는 *"누가 왜 이 목록을 이렇게 만들었나"* 이고,
@@ -319,7 +311,7 @@ def reconcile_orphan_inbound_schedule(
     source_ref: str,
     usage_scope: str = USAGE_SCOPE,
 ) -> InboundReconciliationResult:
-    """사람이 확인한 고착 입고 일정 **한 건**을 두 칸에서 함께 걷는다.
+    """사람이 확인한 고착 입고 일정 **한 건**을 그날부터 닫는다.
 
     ```text
     ① 도착 전역 잠금
@@ -329,20 +321,11 @@ def reconcile_orphan_inbound_schedule(
     ⑤ inbound_schedules 를 그날부터 닫는다   cancelled_as_of
     ```
 
-    🔴 **Legacy JSON 을 더 이상 안 걷는다 (W3-3).** Reader 가 그 칸을 읽지 않으므로
-       걷을 이유가 없다. 정리의 정본은 `cancelled_as_of` 한 칸이다.
+    🔴 **정리의 정본은 `cancelled_as_of` 한 칸이다.** 이 함수가 하는 일이 «그 일정을
+       그날부터 없앤다» 이므로 그 칸이 그 사실의 자리다.
 
-    🔴 **⑦ 이 없으면 두 저장소가 갈린다** (2026-09-09 보정). ⑤ 는 Legacy JSON 두 칸만
-       걷고 신규 표를 안 건드렸다 — 그러면 정리한 뒤에도
-
-    ```text
-    Legacy JSON        없음        걷었다
-    inbound_schedules  살아있음     ← 그대로다
-    ```
-
-       가 되어, W3-2 에서 Reader 가 신규 표로 옮겨 가는 순간 **방금 치운 orphan 이
-       되살아난다.** 이 함수가 하는 일이 «그 일정을 그날부터 없앤다» 이므로 신규 표의
-       `cancelled_as_of` 가 그 사실의 자리다.
+    ⚠️ **일정 행을 지우지 않는다.** 지우면 *"그날 무엇이 떠 있었나"* 를 되짚을 자리가
+       없어진다 — 사람이 치웠다는 사실도 함께 사라진다.
 
     🔴 **나이로 지우지 않는다.** `expected_arrival_date` 가 얼마나 지났는지, 발주 참조가
        비었는지, `ARRIVAL_PURCHASE_REFERENCE_MISSING` 인지를 **조건으로 쓰지 않는다** —
@@ -356,8 +339,8 @@ def reconcile_orphan_inbound_schedule(
     ★ **멱등이다.** 이미 걷힌 건을 같은 요청으로 다시 불러도 예외가 아니라
       `applied=False · removed=0` 이다.
 
-      ⚠️ **한쪽에만 남은 상태는 멱등이 아니다.** 그것은 이미 B-1 위반이라
-         `ScheduleIntegrityError` 로 멈춘다 — no-op 으로 접으면 위반을 덮는 것이 된다.
+      ⚠️ **다른 날짜로 이미 닫힌 건은 멱등이 아니다.** *"언제 정리했나"* 가 둘이 될 수
+         없어 `ScheduleCancelConflict` 로 멈춘다 — no-op 으로 접으면 그 갈림을 덮는다.
 
     🔴 **커밋도 롤백도 하지 않는다.** advisory 잠금도 행 잠금도 트랜잭션 수명이라
        호출자의 커밋/롤백과 함께 풀린다 (`materialize_inspected_inbound` 과 같은 규율).
@@ -413,8 +396,6 @@ def reconcile_orphan_inbound_schedule(
     )
 
     # ── ⑤ 그날부터 닫는다 ─────────────────────────────────────────────
-    #    🔴 **Legacy JSON 을 안 건드린다 (W3-3).** Reader 가 안 읽는 칸을 고치면
-    #       *"정리했다"* 는 사실이 두 곳에 생기고, 그중 하나는 아무도 안 본다.
     #    ⚠️ 이미 같은 날짜로 닫혀 있으면 `cancel_schedule` 이 `False`(멱등)이고,
     #       다른 날짜로 닫혀 있으면 `ScheduleCancelConflict` 로 멈춘다.
     applied = cancel_schedule(

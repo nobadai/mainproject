@@ -39,7 +39,6 @@ psql "$DSN" -v ON_ERROR_STOP=1 \
   -f database/logistics_agent_runs.sql \
   -f database/sales_agent_runs.sql \
   -f database/master_decisions.sql \
-  -f database/logistics_inbound_schedules.sql \
   -f database/logistics_drop_inbound_json.sql
 ```
 
@@ -57,17 +56,31 @@ master_decisions            run_id 가 orchestrator_agent_runs 를 참조한다 
 `*_agent_runs` 끼리는 서로를 참조하지 않아 순서가 상관없습니다.
 
 ```text
-logistics_inbound_schedules  ← 30_ 뒤. purchase_items · sim_runs 를 참조한다
 logistics_drop_inbound_json  ← 맨 뒤. 10_domain 이 만든 두 칸을 걷는다
 ```
 
-⚠️ **뒤의 둘은 물류 입고 정본 이동판입니다** (`inbound_schedules` 신설 → 죽은 JSON 칸
-정리). 신규 구축도 이 두 파일을 지나야 운영 DB 와 같은 모양이 됩니다.
-`10_domain_schema.sql` 은 주인이 없어(§5) 고치지 않고 뒤에서 ALTER 로 맞춥니다.
+⚠️ **`logistics_inbound_schedules.sql` 은 신규 구축에서 안 돌립니다.** 그 파일은
+`inbound_schedules` 표 + **기존 `in_transit_json` 에서 꺼내는 Backfill** 이고, 신규 DB
+에는 옮길 데이터가 한 줄도 없습니다. 표 자체는 `30_logistics_wms_schema.sql` §3-0 이
+같은 정의로 만듭니다 — 그 파일 머리말도 *"이미 데이터가 있는 DB 를 옮길 때만 쓴다"* 고
+적혀 있습니다. (돌려도 깨지지 않습니다 — `IF NOT EXISTS` · `WHERE NOT EXISTS` 라 전부
+no-op 입니다. 다만 신규 구축 순서에 둘 이유가 없습니다.)
+
+⚠️ **`logistics_drop_inbound_json.sql` 은 신규 구축에도 필요합니다.** 두 JSON 칸을
+만드는 것은 `10_domain_schema.sql` 이라, 이 파일을 지나야 운영 DB 와 같은 모양이
+됩니다. `10_domain_schema.sql` 은 주인이 없어(§5) 고치지 않고 뒤에서 ALTER 로 맞춥니다.
+
+```text
+신규 DB      10_domain (칸 생김) → 30_ §3-0 (표 생김) → drop_inbound_json (칸 걷힘)
+운영 중 DB   logistics_inbound_schedules (표 + Backfill) → 검증 → drop_inbound_json
+```
+
+🔴 운영 중 DB 에서 **순서를 뒤집으면 이관이 영영 못 돕니다** — Backfill 이
+`in_transit_json` 을 읽기 때문입니다.
 
 > **시드 데이터는 여기 없습니다.** 이 파일들은 스키마만 만듭니다.
 
-> ⚠️ **이 목록이 공유 DB 전체를 만들지는 않습니다.** 위 9개로 세우면 59표 · 10뷰이고
+> ⚠️ **이 목록이 공유 DB 전체를 만들지는 않습니다.** 위 10개로 세우면 59표 · 10뷰이고
 > 공유 DB 는 62표 · 11뷰입니다(2026-09-05 실측). 차이 4개는 **저장소에 파일은 있으나
 > §1 목록에 없는** 것들입니다 — `master_agent_runs` · `ml_calendar_days` ·
 > `ml_batch_day_status` · `v_ml_batch_days`(`master_agent_runs.sql` ·
@@ -142,7 +155,7 @@ inbound_receipts (신규)                    →  inventory_lots FK (기존 표 
 | `logistics_inventory_lots_nullable.sql` | **물류** | 재고·물류 동작을 바꾸는 변경이라 물류가 낸다. 대상 표(`inventory_lots`)의 본 DDL 은 `10_domain_schema.sql` 안에 있고 그 파일은 여전히 주인이 없다(§5) |
 | `logistics_allocation_basis_fefo_auto.sql` | **물류** | 위 `30_` 의 ALTER 판. 값 이름은 Master ↔ Logistics 합의 어휘이고, 표와 제약의 주인은 물류다 |
 | `logistics_drop_inbound_json.sql` | **물류** | 죽은 입고 JSON 두 칸 정리 (W3-4). `10_domain_schema.sql` 이 만든 칸을 걷는 판이라 그 파일을 안 고친다(§5) — `30_` 이 같은 자리에서 ALTER 로 더하는 것과 같은 규율. `30_` 에 안 넣은 이유는 그 파일이 *"DROP 이 한 줄도 없다"* 를 계약으로 적었기 때문이다 |
-| `logistics_inbound_schedules.sql` | **물류** | `30_` §3-0 의 이관 판 + Backfill. 입고 예정을 날짜별 fixture JSON 에서 꺼내 **날짜에 안 묶인 업무 Entity** 로 세운다 (W3-1). 🔴 이번 판은 **정본을 안 바꾼다** — Reader 는 아직 JSON 이고 Writer 만 양쪽에 쓴다(W3-2 에서 전환) |
+| `logistics_inbound_schedules.sql` | **물류** | `30_` §3-0 의 이관 판 + Backfill. 입고 예정을 날짜별 fixture JSON 에서 꺼내 **날짜에 안 묶인 업무 Entity** 로 세운다 (W3-1). 🔴 적용 당시(W3-1)에는 **정본을 안 바꿨다** — Reader 는 JSON, Writer 만 양쪽. 그 뒤 W3-2 가 Reader 를, W3-3 이 Writer 를 옮겼다. **신규 구축에서는 안 돌린다**(§1) |
 | `25_logistics_runtime_fixture_20260102.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행. 다른 파트는 읽기만 |
 | `27_logistics_runtime_fixture_20260105_20260106.sql` | **물류** | 물류가 만들고 물류가 채운다. 런타임 fixture 씨앗 행 · 관통 실행일 쌍. 다른 파트는 읽기만 |
 | `sales_agent_runs.sql` | 판매 | |

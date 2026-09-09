@@ -3,7 +3,7 @@
 -- ══════════════════════════════════════════════════════════════════════════
 -- 🔴 **이 파일은 아직 실 DB 에 적용하지 않았다.** 적용 시점은 따로 정한다.
 --
---     신규 구축  →  README §1 순서에서 `30_logistics_wms_schema.sql` **뒤**에 둔다.
+--     신규 구축  →  README §1 순서의 **맨 뒤**에 둔다 (이미 그렇게 적혀 있다).
 --                   `10_domain_schema.sql` 이 두 칸을 만들고 이 파일이 걷는다.
 --     운영 중 DB →  이 파일 그대로.
 --
@@ -95,9 +95,12 @@
 --         ADD COLUMN IF NOT EXISTS in_transit_json        JSONB,
 --         ADD COLUMN IF NOT EXISTS confirmed_inbound_json JSONB;
 --
--- 🔴 **`logistics_inbound_schedules.sql` 보다 반드시 뒤에 돌린다.** 그 파일의
---    Backfill 이 `in_transit_json` 을 읽어 일정을 만든다 — 먼저 걷으면 그 이관이
---    영영 못 돈다. README §1 순서가 그 둘을 이 순서로 둔다.
+-- 🔴 **운영 중 DB 에서는 `logistics_inbound_schedules.sql` 보다 반드시 뒤에 돌린다.**
+--    그 파일의 Backfill 이 `in_transit_json` 을 읽어 일정을 만든다 — 먼저 걷으면 그
+--    이관이 영영 못 돈다.
+--
+--    ★ **신규 구축에는 그 선행이 없다.** 옮길 JSON 이 애초에 없어 그 파일을 안 돌리고
+--      (README §1), 표는 `30_logistics_wms_schema.sql` §3-0 이 만든다.
 --
 -- ★ **두 번 돌려도 안전하다** (`IF EXISTS`).
 

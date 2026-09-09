@@ -52,7 +52,7 @@
 --     그리고 HARD_ALLOWED_GRADES = {OFFICIAL, VENDOR, SIM_FIXED} 에서 빠지면
 --     LOG-H01·LOG-H02 가 하드 제약으로 서지 못한다.
 --
---   confirmed_inbound / outbound = CONFIRMED_ZERO · []
+--   confirmed_inbound = CONFIRMED_ZERO (status 뿐) / confirmed_outbound = CONFIRMED_ZERO · []
 --     🔴 회피가 아니라 사실이다 — 01-02 도착 예정인 확정 입·출고가 실제로 없다.
 --     ⚠️ UNRESOLVED 로 두면 `is_inbound_schedule_complete()` 가 거짓이 되어
 --        `calculate_cap_by_date()` 가 IN_TRANSIT_SCHEDULE_UNRESOLVED 로 서고,

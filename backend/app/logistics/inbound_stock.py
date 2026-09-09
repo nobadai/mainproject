@@ -48,13 +48,16 @@ INSPECTED Receipt
 
   ```text
   ① 도착 전역 advisory  (20260905, 2)   receipts.lock_arrival_writes
-  ② fixture 행 FOR UPDATE               일정 정리 대상 · ③④ 보다 **먼저**
+  ② fixture 행 FOR UPDATE               status 를 읽고 도착 경로를 직렬화한다 · ③④ 보다 **먼저**
   ③ Lot 조회 / INSERT
   ④ record_inventory_move  → 원장 전역 advisory (20260905, 1) → Lot 행 FOR UPDATE
   ⑤ Receipt UPDATE
-  ⑥ 일정 정리 UPDATE (② 의 잠금 아래)
-  ⑦ 커밋은 호출자가 한 번
+  ⑥ 커밋은 호출자가 한 번
   ```
+
+  ★ **② 는 이제 쓰기 대상이 아니다.** 종전에는 그 행의 두 JSON 칸에서 일정을 걷어야
+    해서 잡았고, 지금은 같은 행의 `in_transit_status` 를 승인 전이가 건드리는 것과
+    도착 경로 자체의 직렬화 때문에 잡는다 (`load_in_transit_for_receiving`).
 
   ⚠️ **원장 전역을 fixture 행보다 먼저 잡는 경로를 만들면 안 된다** — ② 를 ④ 앞에
      둔 이유가 그것이고, 그 규칙이 이 전순서를 성립시킨다.
@@ -167,11 +170,20 @@ class InvalidReceivingAxis(InboundStockError, ValueError):
 
 
 class ScheduleIntegrityError(InboundStockError, ValueError):
-    """일정 두 칸이 B-1 을 어기고 있어 걷어낼 수 없다.
+    """도착 처리를 걸 자리가 없거나, 그 Receipt 가 일정으로 되짚어지지 않는다.
 
-    🔴 **한쪽만 지우지 않는다.** `in_transit` 에서만 빼면 `confirmed_inbound` 에 유령
-       일정이 남아 점유가 계속 계산되고, 반대면 B-1 이
-       `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 로 다음 날을 세운다.
+    ```text
+    그날 fixture 행이 없다            _fixture_row          도착 처리를 걸 Header 가 없다
+    Receipt 에 inbound_id 가 없다     materialize…          일정으로 되짚을 열쇠가 없다
+    ```
+
+    🔴 **`inbound_id` 없는 Receipt 를 그냥 넘기지 않는다.** 그 값이 `inbound_schedules`
+       와 잇는 유일한 열쇠라(`load_schedule_views` 의 계보 조인), 없으면 그 일정이
+       **영원히 «아직 안 들어온 것»** 으로 남아 도착 대상과 Capacity 에 계속 선다.
+
+    ⚠️ **이름의 «일정»은 이제 `inbound_schedules` 를 가리킨다.** 종전에는 fixture 의
+       두 JSON 칸을 뜻했고 B-1(두 칸 대조) 위반이 이 예외의 자리였다 — 그 칸은
+       Runtime 에서 죽었다(W3-3).
     """
 
 
@@ -589,11 +601,13 @@ def load_in_transit_for_receiving(
 
     ```text
     ① 도착 전역 (20260905, 2)   ← 여기서 먼저 잡는다
-    ② fixture 행 FOR UPDATE      ← 그다음
+    ② fixture 행 FOR UPDATE      ← 그다음 (status 읽기 · 직렬화)
     ③ Receipt · 검수
     ④ Lot · 원장 IN (원장 전역 → Lot 행)
-    ⑤ 일정 정리
     ```
+
+       ★ **끝에 «일정 정리» 단계가 없다.** 완료는 `inbound_schedules` 의 칸이 아니라
+         Lot + 원장 IN 으로 유도한다 — 일정 행은 과거 재현을 위해 그대로 남는다.
 
        ⚠️ **② 를 ① 앞에 두면 안 된다.** 그러면 두 트랜잭션이 요청하는 잠금 집합에
           전순서가 없어져 교착이 생긴다 (`ledger._lock_ledger_writes` 가 겪은 자리).
@@ -745,7 +759,10 @@ def materialize_inspected_inbound(
     inbound_id = receipt["inbound_id"]
     if not inbound_id:
         raise ScheduleIntegrityError(
-            f"Receipt 에 inbound_id 가 없어 일정을 걷을 수 없다: receipt_id={receipt_id!r}"
+            f"Receipt 에 inbound_id 가 없어 입고 일정으로 되짚을 수 없다:"
+            f" receipt_id={receipt_id!r}."
+            " 그 값이 inbound_schedules 와 잇는 유일한 열쇠라, 없으면 그 일정이"
+            " 영원히 «아직 안 들어온 것» 으로 남는다."
         )
     _fixture_row(conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope)
 

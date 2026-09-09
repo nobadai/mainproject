@@ -251,7 +251,8 @@ class LogisticsDayOpening:
                     note=(
                         f"하루 넘김이 {carry_from} 행에서 물려받아 세운 행이다."
                         " 승인이 만든 행이 아니다 - 그날 승인이 나면"
-                        " persist_inventory 가 in_transit 두 칸을 덮는다."
+                        " persist_inventory 가 status 두 칸을 CONFIRMED 로 세운다."
+                        " 입고 예정 목록은 inbound_schedules 가 들고 있다."
                     ),
                 ),
             )
