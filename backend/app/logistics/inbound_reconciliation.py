@@ -89,7 +89,7 @@ from typing import Any
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
-from app.logistics.inbound_schedules import cancel_schedule
+from app.logistics.inbound_schedules import assert_schedules_exist, cancel_schedule
 
 # 🔴 **B-1 규율을 다시 적지 않고 가져다 쓴다.** 밑줄 이름을 건너 가져오는 것은 이
 #    패키지의 기존 방식이다 (`console_service` 가 `outbound._ASSIGNED_ALLOCATION` 을
@@ -383,6 +383,7 @@ def reconcile_orphan_inbound_schedule(
     ② inbound_id 의 입고 계보 조회   Receipt 0 / 1 / 2+ 를 가른다
     ③ 계보가 있으면 거부              ScheduleAlreadyMaterialized · InboundLineageAmbiguous
     ④ fixture 행 FOR UPDATE · 지울 항목 사본 확보 (판정은 안 한다)
+    ④-b 지울 것이 있으면 신규 표에도 그 행이 있는지  assert_schedules_exist
     ⑤ B-1 재검증 + 양쪽 제거          inbound_stock._clear_schedule
     ⑥ 걷었으면 그 행의 source_ref 를 이번 정리로 바꿔 적는다
     ⑦ 같은 일정을 inbound_schedules 에서도 그날부터 닫는다   (W3-1 Dual Write)
@@ -399,6 +400,11 @@ def reconcile_orphan_inbound_schedule(
        가 되어, W3-2 에서 Reader 가 신규 표로 옮겨 가는 순간 **방금 치운 orphan 이
        되살아난다.** 이 함수가 하는 일이 «그 일정을 그날부터 없앤다» 이므로 신규 표의
        `cancelled_as_of` 가 그 사실의 자리다.
+
+    🔴 **④-b 가 그 짝이다.** ⑦ 만 두면 *"Legacy 에는 있는데 신규 표에는 행이 없는"*
+       상태에서 ⑤ 가 Legacy 만 걷고 ⑦ 이 `cancel_schedule` no-op 으로 조용히 끝난다.
+       그러면 Dual Write 가 갈려 있었다는 사실이 아무 데도 안 남는다 — 쓰기 전에
+       묻는 것이 그 사실을 남기는 유일한 자리다.
 
     🔴 **나이로 지우지 않는다.** `expected_arrival_date` 가 얼마나 지났는지, 발주 참조가
        비었는지, `ARRIVAL_PURCHASE_REFERENCE_MISSING` 인지를 **조건으로 쓰지 않는다** —
@@ -430,6 +436,9 @@ def reconcile_orphan_inbound_schedule(
     :raises InboundLineageAmbiguous: 같은 `inbound_id` 에 Receipt 가 둘 이상일 때.
     :raises ScheduleIntegrityError: 그날 fixture 행이 없거나, 두 칸이 짝이 안 맞거나,
         중복이거나, 두 칸의 사실(B-1)이 다를 때. **아무것도 안 지운다.**
+    :raises ScheduleMissing: Legacy 에 지울 것이 있는데 `inbound_schedules` 에 그 행이
+        없을 때 (Dual Write 누락). **④-b 에서 막으므로 아무것도 안 지운다.**
+    :raises ScheduleCancelConflict: 그 일정이 이미 **다른 날짜로** 닫혀 있을 때.
     """
     _require_text(sim_run_id, 칸="sim_run_id")
     _require_text(inbound_id, 칸="inbound_id")
@@ -462,6 +471,23 @@ def reconcile_orphan_inbound_schedule(
         conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
     )
     지울것 = _removed_facts(in_transit, inbound_id)
+
+    # ── ④-b Legacy 에 지울 것이 있으면 신규 표에도 그 행이 있어야 한다 ──
+    #
+    # 🔴 **쓰기 전에 묻는다.** ⑤ 가 Legacy 를 걷은 뒤에 알면 두 저장소가 갈린 사실이
+    #    아무 데도 안 남는다 — `withdraw_inventory` 가 UPDATE 앞에서 같은 검사를
+    #    하는 것과 같은 자리이고, 같은 함수(`assert_schedules_exist`)를 쓴다.
+    #
+    # ```text
+    # 지울것 없음   이미 걷힌 뒤의 멱등 재호출  → 안 묻는다 (⑤ 가 no-op 을 낸다)
+    # 지울것 있음   신규 표에 행이 없으면       → ScheduleMissing (아무것도 안 고친다)
+    # ```
+    #
+    # ⚠️ **`지울것` 이 판정 기준인 이유.** 이 값이 `in_transit` 에 그 항목이 있다는
+    #    뜻이고, 그때 ⑤ 는 반드시 무언가를 걷는다(한쪽에만 있으면 ⑤ 가 B-1 위반으로
+    #    멈춘다). 없는 것을 걷어도 오류가 아니라는 기존 계약은 그대로 산다.
+    if 지울것 is not None:
+        assert_schedules_exist(conn, sim_run_id=sim_run_id, inbound_ids=[inbound_id])
 
     # ── ⑤ 걷는 규율은 입고 경로의 것을 그대로 쓴다 ────────────────────
     applied = _clear_schedule(
