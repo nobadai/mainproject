@@ -123,6 +123,9 @@ _배분_있는_후보 = {
     "scenario_id": "ALLOC-1",
     "item": 품목,
     "required_validations": [],
+    # 🔴 상업조건 둘이 없으면 후보가 presented 에 안 오른다 (2026-09-08 계약).
+    "delivery_date": "2026-09-15",
+    "payment_days": 30,
     "allocation": [
         {
             "channel": "KIMCHI_FACTORY",
@@ -139,6 +142,8 @@ _배분_없는_후보 = {
     "scenario_id": "ALLOC-1",
     "item": 품목,
     "required_validations": [],
+    "delivery_date": "2026-09-15",
+    "payment_days": 30,
 }
 
 

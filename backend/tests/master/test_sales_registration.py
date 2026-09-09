@@ -306,7 +306,17 @@ def test_수량을_실으면_재무_최종검증까지_간다(client: TestClient
       고친다. `SL3` 으로 바뀌었다면 재무 대역이 후보를 떨어뜨린 것이고,
       `SL4` 라면 `app/main.py` 의 등록이 사라진 것이다.
     """
-    본문 = _본문(client, requested_quantity_kg=2000)
+    본문 = _본문(
+        client,
+        requested_quantity_kg=2000,
+        # 🔴 **상업조건 둘도 실어야 제시까지 간다** (2026-09-08 계약).
+        #    후보 판정이 `delivery_date` · `payment_days` 를 필수로 잡았고,
+        #    판매는 그 둘을 `preferred_*` 에서만 만든다
+        #    (`app/sales/proposal.py` `_baseline`). 안 실으면 후보가 전부
+        #    *"납품일이 없다"* 로 떨어져 `SL3_ALL_REJECTED` 가 된다.
+        preferred_delivery_date="2026-09-17",
+        preferred_payment_days=30,
+    )
 
     후보 = 본문["candidates"]
     assert 본문["end_code"] == "SL1_PRESENTED", (
