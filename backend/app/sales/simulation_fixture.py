@@ -22,6 +22,7 @@ MARGIN_RATE = Decimal("0.20")
 class ConfirmedSaleFixture:
     sale_date: date
     quantity_kg: Decimal
+    identity_suffix: str | None = None
 
 
 FIXTURE_SALES: tuple[ConfirmedSaleFixture, ...] = (
@@ -30,9 +31,22 @@ FIXTURE_SALES: tuple[ConfirmedSaleFixture, ...] = (
     ConfirmedSaleFixture(date(2026, 1, 9), Decimal("30")),
 )
 
+CAPACITY_RELIEF_SALES: tuple[ConfirmedSaleFixture, ...] = (
+    ConfirmedSaleFixture(date(2026, 1, 5), Decimal("700"), "CAPACITY-01"),
+    ConfirmedSaleFixture(date(2026, 1, 6), Decimal("650"), "CAPACITY-02"),
+    ConfirmedSaleFixture(date(2026, 1, 7), Decimal("650"), "CAPACITY-03"),
+    ConfirmedSaleFixture(date(2026, 1, 8), Decimal("600"), "CAPACITY-04"),
+    ConfirmedSaleFixture(date(2026, 1, 9), Decimal("600"), "CAPACITY-05"),
+)
+
+ALL_CONFIRMED_SALES_FIXTURES: tuple[ConfirmedSaleFixture, ...] = (
+    *FIXTURE_SALES,
+    *CAPACITY_RELIEF_SALES,
+)
+
 
 def confirmed_sales_fixture_requests() -> list[SalesConfirmationInput]:
-    return [_request_for(row) for row in FIXTURE_SALES]
+    return [_request_for(row) for row in ALL_CONFIRMED_SALES_FIXTURES]
 
 
 def apply_confirmed_sales_fixture(conn: Any) -> list[SaleWriteResult]:
@@ -47,8 +61,11 @@ def main() -> None:
 
 
 def _request_for(row: ConfirmedSaleFixture) -> SalesConfirmationInput:
-    scenario_id = f"SIM-SALES-{row.sale_date.isoformat()}"
-    run_id = f"SALES-FIXTURE-{row.sale_date.isoformat()}"
+    identity = row.sale_date.isoformat()
+    if row.identity_suffix is not None:
+        identity = f"{row.identity_suffix}-{identity}"
+    scenario_id = f"SIM-SALES-{identity}"
+    run_id = f"SALES-FIXTURE-{identity}"
     amount = row.quantity_kg * UNIT_PRICE_KRW
     profit = amount * MARGIN_RATE
     return SalesConfirmationInput.model_validate(
@@ -102,7 +119,7 @@ def _request_for(row: ConfirmedSaleFixture) -> SalesConfirmationInput:
             "sim_run_id": SIM_RUN_ID,
             "sale_date": row.sale_date.isoformat(),
             "order_date": row.sale_date.isoformat(),
-            "source_order_id": f"SIM-ORDER-{row.sale_date.isoformat()}",
+            "source_order_id": f"SIM-ORDER-{identity}",
             "note": "2026 confirmed sales simulation fixture",
             "line": {
                 "item_name": ITEM_NAME,

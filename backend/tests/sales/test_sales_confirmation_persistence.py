@@ -17,6 +17,8 @@ from app.sales.persistence import (
     sale_id_for,
 )
 from app.sales.simulation_fixture import (
+    ALL_CONFIRMED_SALES_FIXTURES,
+    CAPACITY_RELIEF_SALES,
     FIXTURE_SALES,
     SIM_RUN_ID,
     apply_confirmed_sales_fixture,
@@ -350,15 +352,45 @@ def test_confirm_sale_retry_after_delivery_is_still_idempotent():
 
 def test_2026_confirmed_sales_fixture_uses_confirmation_contract():
     requests = confirmed_sales_fixture_requests()
+    first_fixture_requests = requests[: len(FIXTURE_SALES)]
 
-    assert [request.sale_date for request in requests] == [row.sale_date for row in FIXTURE_SALES]
+    assert [request.sale_date for request in first_fixture_requests] == [
+        row.sale_date for row in FIXTURE_SALES
+    ]
+    assert [request.selected_scenario.quantity_kg for request in first_fixture_requests] == [
+        row.quantity_kg for row in FIXTURE_SALES
+    ]
     assert all(request.sim_run_id == SIM_RUN_ID for request in requests)
     assert all(request.selected_scenario.status == "EXECUTABLE" for request in requests)
-    assert all(request.selected_scenario.quantity_kg <= Decimal(60) for request in requests)
     assert all(
         build_sale_confirmation_plan(request).order_status == "CONFIRMED"
         for request in requests
     )
+
+
+def test_2026_capacity_relief_fixture_is_stable_and_conservative():
+    requests = confirmed_sales_fixture_requests()
+    relief_requests = requests[len(FIXTURE_SALES) :]
+
+    assert len(relief_requests) == len(CAPACITY_RELIEF_SALES)
+    assert sum(row.quantity_kg for row in CAPACITY_RELIEF_SALES) == Decimal("3200")
+    assert {request.sale_date for request in relief_requests} <= {
+        date(2026, 1, 5),
+        date(2026, 1, 6),
+        date(2026, 1, 7),
+        date(2026, 1, 8),
+        date(2026, 1, 9),
+    }
+    assert all(request.selected_scenario.item == "배추" for request in relief_requests)
+    assert all(
+        request.selected_scenario.quantity_kg <= Decimal("700")
+        for request in relief_requests
+    )
+    assert all(
+        request.execution_identity.run_id.startswith("SALES-FIXTURE-CAPACITY-")
+        for request in relief_requests
+    )
+    assert len({request.selected_scenario_id for request in requests}) == len(requests)
 
 
 def test_2026_confirmed_sales_fixture_is_idempotent():
@@ -367,8 +399,8 @@ def test_2026_confirmed_sales_fixture_is_idempotent():
     first = apply_confirmed_sales_fixture(conn)
     second = apply_confirmed_sales_fixture(conn)
 
-    assert sum(result.sales_written for result in first) == len(FIXTURE_SALES)
-    assert sum(result.sale_items_written for result in first) == len(FIXTURE_SALES)
+    assert sum(result.sales_written for result in first) == len(ALL_CONFIRMED_SALES_FIXTURES)
+    assert sum(result.sale_items_written for result in first) == len(ALL_CONFIRMED_SALES_FIXTURES)
     assert sum(result.sales_written for result in second) == 0
     assert sum(result.sale_items_written for result in second) == 0
     assert all(row["order_status"] == "CONFIRMED" for row in conn.sales.values())
