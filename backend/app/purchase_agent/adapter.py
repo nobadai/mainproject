@@ -845,7 +845,10 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
                 unit="count",
                 evidence_grade="SIM_FIXED",
                 evidence_detail=(
-                    "우선순위 목록을 소진할 때까지 읽었다 — 문서 선별·충분성 판단은 적용되지 않았다"
+                    # ★ ⑥ ``_context_risks`` 와 **같은 사실**이다. 한쪽만 고치면 화면과
+                    #   봉투가 다른 말을 한다 — 문면을 바꿀 때 둘을 같이 본다.
+                    "정해진 우선순위 순서대로 읽었다 — 어느 문서가 더 맞는지도, "
+                    "이만하면 충분한지도 판정하지 않았다"
                 ),
             )
         )

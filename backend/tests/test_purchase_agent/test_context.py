@@ -372,10 +372,19 @@ def test_uncertain_day_discloses_that_no_sufficiency_judgment_was_made(proposals
 
     고지가 없으면 소비자는 "검토를 거친 근거"로 읽는다 — E3-3의 일괄 fallback 고지와 같은
     라벨/행동 불일치다. 문구에 내부 단계 이름을 쓰지 않는다(H1 화면·Critic이 읽는다).
+
+    🔴 **기대값을 뜻에 맞춰 바꿨다 (2026-09-09 · E3-8).** 전에는 ``"충분성" in risk`` 로
+      봤는데, 그 낱말 자체가 내부 용어에 가까워 문면을 *"이만하면 충분한지도 판정하지
+      않는다"* 로 풀었다. **검사를 지우지 않고 방향만 돌린다** — 잡으려던 사실(충분성을
+      판정하지 않았다는 고지가 정확히 한 줄 나간다)은 그대로다.
     """
     for scenario in proposals["uncertain"][UNCERTAIN]["scenarios"]:
-        notes = [risk for risk in scenario["risks"] if "충분성" in risk]
-        assert len(notes) == 1
+        notes = [risk for risk in scenario["risks"] if "충분한지" in risk]
+        assert len(notes) == 1, (
+            "충분성을 판정하지 않았다는 고지가 한 줄이어야 한다 — 문면을 바꿨다면 "
+            "이 기대도 같이 바꿔라 (사실이 사라진 것인지 낱말만 바뀐 것인지 먼저 갈라라)"
+        )
+        assert "판정하지 않" in notes[0], "«안 했다» 가 문장에 남아 있어야 한다"
         assert "rule_only" not in notes[0]
 
 
@@ -841,3 +850,55 @@ def test_문서를_읽었으면_고지가_안_붙는다() -> None:
 
     assert same == scenarios
     assert _CONTEXT_NOTE not in same[0]["risks"]
+
+
+# ── E3-8 「규칙으로 간다」 판단이 아직 유효한가 ───────────────────────────────
+#
+# 2026-09-09 에 ② 의 LLM 자리 둘을 «규칙으로 간다» 로 닫았다. 그 결정의 근거는
+# **고를 일이 없다**는 것이고, 그건 지금 선언이 우연히 그렇기 때문이다
+# (``constraints.yaml`` 이 그 우연을 주석으로 적어 두었다 · 이 파일 머리도 같다).
+#
+# 🔴 **우연이 깨지면 근거가 조용히 사라진다.** 아래 둘이 그 자리를 지킨다.
+
+
+def test_ordering_is_moot_while_the_list_fits_the_loop_budget() -> None:
+    """유형 수가 ``loop_max`` 이하인 동안은 **읽는 순서가 결과를 못 바꾼다.**
+
+    ★ 그것이 E3-8 을 「규칙으로 간다」로 닫은 근거다 — 순서를 고를 LLM 을 꽂아도
+      집합이 같아서 ``rationale`` 나열 순서만 바뀐다.
+
+    🔴 이 검사가 울면 **판단을 다시 해야 한다.** 유형이 예산보다 많아지는 순간
+      «무엇을 읽고 무엇을 버릴까» 가 처음 실재하고, 그때는 순서가 곧 선택이다.
+    """
+    context = load_constraints()["context"]
+
+    assert len(context["doc_type_priority"]) <= context["loop_max"], (
+        "doc_type 이 loop_max 보다 많아졌다 — 이제 «무엇을 읽을까» 가 실재한다. "
+        "collect_context.select_doc_types 의 «규칙으로 간다» 판단을 다시 하라 (E3-8)"
+    )
+
+
+def test_every_declared_doc_type_is_consumed_in_one_pass(monkeypatch) -> None:
+    """선언한 유형이 **한 번의 ② 실행에서 전부 소비된다** — 위 검사의 행동 쪽 짝이다.
+
+    앞의 검사는 선언(``constraints.yaml``)만 보고, 이건 실제로 돌려서 본다. 둘이
+    갈리면(예: 루프가 상한 전에 조기 종료하게 바뀌면) 여기가 먼저 운다.
+
+    ⚠️ ``is_enough`` 가 ``True`` 를 돌려주기 시작하면 이 검사가 깨진다. **그게 의도다** —
+      조기 종료는 안 읽은 문서를 만들고, 그 순간 「순서가 결과를 못 바꾼다」가 거짓이 된다
+      (``collect_context.is_enough`` docstring · 9/4 DOC-4·5).
+    """
+    called: list[str] = []
+    original = ports.get_context_docs
+
+    def recording(item, as_of, doc_types):
+        called.extend(doc_types)
+        return original(item, as_of, doc_types)
+
+    monkeypatch.setattr(ports, "get_context_docs", recording)
+
+    declared = load_constraints()["context"]["doc_type_priority"]
+    result = collect_context(_classified())
+
+    assert called == declared, "선언한 유형을 선언한 순서대로 한 번씩 소비해야 한다"
+    assert result["context_loop_count"] == len(declared)
