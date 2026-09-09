@@ -477,7 +477,6 @@ class ScenarioSupply(BaseModel):
     conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     #: 위 조건부 수량을 만든 원본 Purchase 회신 ref. 수량과 근거가 같이 다닌다.
     dependency_ref: str | None = None
-
     @field_validator("conditional_quantity_kg", mode="before")
     @classmethod
     def reject_boolean_conditional(cls, value: object) -> object:

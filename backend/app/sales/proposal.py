@@ -117,7 +117,6 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 supported = confirmed + min(max(quantity - confirmed, Decimal(0)), procurable)
                 scenario_quantity = min(quantity, supported)
                 unmet_quantity = quantity - scenario_quantity
-                supply = _supply(scenario_quantity, confirmed, replies)
                 if scenario_quantity != quantity:
                     axes.append("QUANTITY")
         validations = _required_validations(request, supply, parent or scenario_id, delivery)
@@ -373,7 +372,7 @@ def _purchase_conditional_supply(
         if reply.runtime_status != "READY":
             continue
         parsed = _parse_additional_supply(reply)
-        if parsed is None or parsed.procurable_quantity_kg is None:
+        if parsed is None:
             continue
         return parsed.procurable_quantity_kg, reply.reply_ref
     return None, None
@@ -539,7 +538,11 @@ def _dependencies(request, supply, purchase, delivery_date, replies):
         and purchase.procurable_quantity_kg > 0
     ):
         dependencies.append("PURCHASE_COMMITMENT_REQUIRED")
-        if purchase.available_date is not None and purchase.available_date != delivery_date:
+        if (
+            purchase.available_date is not None
+            and delivery_date is not None
+            and purchase.available_date > delivery_date
+        ):
             dependencies.append("DELIVERY_REVALIDATION_REQUIRED")
     if _logistics_revalidation_required(replies):
         dependencies.append("DELIVERY_REVALIDATION_REQUIRED")

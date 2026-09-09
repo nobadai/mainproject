@@ -55,6 +55,17 @@ def _reply(
     }
 
 
+def _finance_reply():
+    return {
+        "source_agent": "finance",
+        "capability": "FINANCIAL_VALIDATION",
+        "reply_ref": "FIN-1",
+        "runtime_status": "READY",
+        "business_status": "ok",
+        "payload": {"finance_verdict": "PASS"},
+    }
+
+
 def _request(replies, scenario_id="SALES-001-C"):
     return SalesProposalInput.model_validate(
         {
@@ -148,12 +159,22 @@ def test_extra_purchase_fields_are_tolerated():
 
 def test_positive_quantity_becomes_conditional_supply_with_lineage():
     reply = run_proposal(
-        _request([_reply(payload={"procurable_quantity_kg": 25, "risks": ["R1"]})])
+        _request(
+            [
+                _reply(payload={"procurable_quantity_kg": 25, "risks": ["R1"]}),
+                _finance_reply(),
+            ]
+        )
     )
     scenario = _aggressive(reply)
 
+    assert scenario.supply.confirmed_quantity_kg == Decimal(3000)
+    assert scenario.supply.required_additional_quantity_kg == Decimal(2000)
     assert scenario.supply.conditional_quantity_kg == Decimal(25)
     assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.quantity_kg == Decimal(3025)
+    assert scenario.unmet_quantity_kg == Decimal(1975)
+    assert scenario.status == "CONDITIONAL"
     assert scenario.conditional_purchase is True
     assert "R1" in scenario.risks
 
@@ -164,6 +185,18 @@ def test_zero_quantity_is_preserved_and_not_conditional():
 
     assert scenario.supply.conditional_quantity_kg == Decimal(0)
     assert scenario.conditional_purchase is False
+
+
+def test_zero_quantity_is_infeasible_when_additional_supply_is_required():
+    reply = run_proposal(
+        _request([_reply(payload={"procurable_quantity_kg": 0, "risks": []}), _finance_reply()])
+    )
+
+    aggressive_trace = next(
+        trace for trace in reply.decision_trace if trace.candidate_id.endswith("SALES-001-C-R1")
+    )
+
+    assert aggressive_trace.status == "INFEASIBLE"
 
 
 def test_skipped_with_zero_is_a_normal_answer_not_a_leak():
@@ -206,9 +239,48 @@ def test_runtime_not_ready_keeps_the_quantity_unknown():
 
 
 def test_explicit_null_quantity_stays_unknown():
-    reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": None, "risks": []})]))
+    reply = run_proposal(
+        _request([_reply(payload={"procurable_quantity_kg": None, "risks": []}), _finance_reply()])
+    )
+    scenario = _aggressive(reply)
 
-    assert _aggressive(reply).supply.conditional_quantity_kg is None
+    assert scenario.supply.conditional_quantity_kg is None
+    assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.status == "UNRESOLVED"
+
+
+@pytest.mark.parametrize(
+    ("available_date", "requires_revalidation"),
+    [
+        ("2026-09-12", True),
+        ("2026-09-10", False),
+        ("2026-09-09", False),
+        (None, False),
+    ],
+)
+def test_purchase_availability_revalidates_only_when_later(
+    available_date, requires_revalidation
+):
+    scenario = _aggressive(
+        run_proposal(
+            _request(
+                [
+                    _reply(
+                        payload={
+                            "procurable_quantity_kg": 25,
+                            "available_date": available_date,
+                            "risks": [],
+                        }
+                    ),
+                    _finance_reply(),
+                ]
+            )
+        )
+    )
+
+    assert (
+        "DELIVERY_REVALIDATION_REQUIRED" in scenario.execution_dependencies
+    ) is requires_revalidation
 
 
 # ---------------------------------------------------------------------------
