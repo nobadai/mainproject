@@ -34,8 +34,8 @@ function Checked({ at, ran }: { at: string | null; ran: boolean }) {
     <p className="m-0 text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
       {ran && at ? (
         <>
-          마지막 확인 <span className="tabular font-mono">{at}</span> · 매일 아침 배치가 끝난 뒤
-          자동으로 봅니다
+          마지막 확인 <span className="tabular font-mono">{at}</span> · 매일 아침 자동으로
+          모델을 점검합니다
         </>
       ) : (
         //  ★ 「아직 안 돌았다」 와 「돌았는데 없다」 는 다릅니다.
@@ -148,16 +148,6 @@ export function RetrainTab() {
         >
           <p className="m-0 text-[14px] font-semibold">
             현재는 모델을 업데이트할 필요가 없습니다.
-          </p>
-          <p
-            className="m-0 max-w-[520px] text-[12px] leading-relaxed"
-            style={{ color: "var(--color-mut)" }}
-          >
-            지금 쓰는 모델이 새로 학습한 모델보다 낫거나, 다시 배울 만큼 성적이 밀리지
-            않았습니다.{" "}
-            <b style={{ color: "var(--color-ink)" }}>
-              바꿀 것이 생기면 이 화면에 비교표와 버튼이 나타납니다.
-            </b>
           </p>
           <Checked at={at} ran={ran} />
         </section>
