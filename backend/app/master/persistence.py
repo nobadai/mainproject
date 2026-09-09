@@ -44,7 +44,12 @@ from typing import Any
 
 from app.master.envelope import ExecutionContext
 from app.master.plan import ExecutionPlan
-from app.master.run_repository import history_enabled, list_runs, try_save_run
+from app.master.run_repository import (
+    LEDGER_GAP_END_CODE,
+    history_enabled,
+    list_runs,
+    try_save_run,
+)
 from app.master.schemas import (
     ProcurementRunRequest,
     ProcurementRunResponse,
@@ -89,7 +94,11 @@ _REVALIDATION_RUNTIME_BY_OUTCOME = {
 # 🔴 **장부 관문이 막은 날의 종료 코드. 새 낱말이 아니다** (2026-09-09).
 #    `E4_NOT_STARTED` 는 *"시작 못 했다"* 이고 관문에서 돌아선 날이 정확히 그것이다.
 #    새 코드를 지으면 *"왜 못 했나"* 의 주인이 둘이 된다 — 그 답은 `reason` 이 든다.
-_LEDGER_GAP_END_CODE = "E4_NOT_STARTED"
+#
+# ★ **값의 주인은 `run_repository` 다** (2026-09-09 · `Master 19.0`). 성적표가 이
+#   값으로 관문 행을 되찾으므로, 여기에 문자열을 다시 적으면 한쪽만 바뀌는 날
+#   `gate_blocked` 가 조용히 늘 거짓이 된다.
+_LEDGER_GAP_END_CODE = LEDGER_GAP_END_CODE
 
 
 def runtime_status_of(end_code: str) -> str:
