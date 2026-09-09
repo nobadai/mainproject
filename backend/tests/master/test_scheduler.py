@@ -147,6 +147,8 @@ def _run(
     defaults = {
         "open_day_fn": _Spy(_Out("OPENED")),
         "receive_fn": _Spy(_Out("RECEIVED")),
+        # ⚠️ **대역을 안 주면 진짜 `issue_receivables` 가 DB 를 찾으러 간다.**
+        "issue_fn": _Spy(_Out("ISSUED")),
         "collect_fn": _Spy(_Out("COLLECTED")),
         "procure_fn": procure_fn,
         # ⚠️ **대역을 안 주면 진짜 `ship_due_sales` 가 DB 를 찾으러 간다.**
@@ -348,6 +350,7 @@ def test_순서는_개장_입고_수금_판단_출고다():
         _plan(now=_at(9, 30), gate=ALL_READY),
         open_day_fn=note("개장", _Out("OPENED")),
         receive_fn=note("입고", _Out("RECEIVED")),
+        issue_fn=note("채권", _Out("ISSUED")),
         collect_fn=note("수금", _Out("COLLECTED")),
         procure_fn=procure_noted,
         outbound_fn=note("출고", _Out("NOTHING_DUE")),
@@ -355,7 +358,7 @@ def test_순서는_개장_입고_수금_판단_출고다():
     )
 
     # 🔴 **출고가 맨 뒤다.** 오늘 산 것은 오늘 안 나간다 — 도착이 며칠 뒤다.
-    assert order == ["개장", "입고", "수금", "판단:무", "판단:배추", "판단:양파", "출고"]
+    assert order == ["개장", "입고", "채권", "수금", "판단:무", "판단:배추", "판단:양파", "출고"]
 
 
 def test_개장이_실패하면_그_뒤를_안_한다():
@@ -607,6 +610,7 @@ def test_wake_up_은_시계를_한_번만_읽는다():
         readiness=lambda as_of: ALL_READY,
         open_day_fn=_Spy(_Out("OPENED")),
         receive_fn=_Spy(_Out("RECEIVED")),
+        issue_fn=_Spy(_Out("ISSUED")),
         collect_fn=_Spy(_Out("COLLECTED")),
         procure_fn=procure,
         outbound_fn=_Spy(_Out("NOTHING_DUE")),

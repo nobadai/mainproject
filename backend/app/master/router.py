@@ -22,6 +22,8 @@ from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, Decision
 from app.master.decision_service import current_commitment, get_decisions, record_decision
 from app.master.inbound import InboundOut
 from app.master.inbound import receive_arrivals as run_receive_arrivals
+from app.master.receivable import ReceivableOut
+from app.master.receivable import issue_receivables as run_issue_receivables
 from app.master.schemas import (
     BurnInOut,
     ProcurementRunRequest,
@@ -465,3 +467,55 @@ def master_collect_receipts(as_of: date) -> CollectionOut:
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
     return run_collect_receipts(as_of)
+
+
+@router.post(
+    "/days/{as_of}/issue-receivables",
+    response_model=ReceivableOut,
+    summary="그날 확정된 판매를 채권으로 세운다 — 수금보다 앞이고 판단과는 별개다",
+)
+def master_issue_receivables(as_of: date) -> ReceivableOut:
+    """`as_of` 가 `sale_date` 인 확정 판매를 파트마다 채권으로 세운다.
+
+    🔴 **왜 자기 엔드포인트인가.**
+
+      바로 위 세 형제가 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의 부작용이
+      아니다. 사건에는 자기 자리가 있다."* **채권 발행도 사건이다.** 판매가 확정되면
+      `receivables` 가 한 줄 늘고 `finance_states.receivables_krw` 가 올라가며,
+      그것은 장부가 바뀌는 것이다.
+
+    ★ **`run_procurement` 안으로 넣지 않는다.** 넣으면 판단 한 번이 채권 잔액을
+      움직이고 *"같은 `as_of` 로 백번 돌려도 같은 답"* 이 깨진다. `receivables_krw` 는
+      매입 cap 이 보는 값이라 더 그렇다.
+
+    🔴 **`run_scheduled_day` 가 부르는 함수와 사람이 부르는 함수가 같다.** 둘이
+      갈리면 손으로 부른 결과와 걷기 결과가 다른 코드를 지난다.
+
+    🔴 **마스터가 채권 금액도 기일도 스스로 정하지 않는다** (판매·재무 결정 2026-09-09).
+
+      ```text
+      Sales     확정된 판매의 정본 — sale_date · collection_due_date · total_amount_krw
+      Finance   채권 원장의 정본 — receivable_id · (sim_run_id, financing_mode) 축
+      Master    그날 확정분을 **운반하고 호출**한다
+      ```
+
+      ⚠️ **`collection_due_date` 가 비어 있으면 지어내지 않고 막는다.** 기일을 마스터가
+        발명하면 그 값으로 수금 판정이 돌고, 틀려도 에러가 안 난다.
+
+    ★ **멱등이다.** 같은 날을 두 번 걸어도 채권은 하나다 — 두 번째는 `ISSUED` 인데
+      새로 만든 건수가 0 이고, 그것이 정상이다.
+
+    ★ **순서는 문장이 아니라 Gate 가 지킨다.** 안 열린 날 부르면 `NOT_OPENED` 로
+      돌아서고 `next_action` 이 `OPEN_DAY_REQUIRED` 를 준다 — `/days/{as_of}/collect`
+      와 같은 모양이다.
+
+    ⚠️ **달력일이다.** `sales.sale_date` 가 정본이고 실행일 달력으로 밀지 않는다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 세웠다 · 세울 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/collect` 와 같은 태도). `FAILED` 는 롤백되어
+      아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
+    """
+    return run_issue_receivables(as_of)

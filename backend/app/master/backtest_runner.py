@@ -6,7 +6,7 @@ walk(start=..., end=..., now=...)   start..end 를 하루씩 걷는다
                                     개장일마다 run_scheduled_day 를 부른다
 ```
 
-🔴 **여기에 판단이 없다. 개장도 입고도 수금도 출고도 여기서 다시 짜지 않는다.**
+🔴 **여기에 판단이 없다. 개장도 입고도 채권도 수금도 출고도 여기서 다시 짜지 않는다.**
 
   그 순서는 `scheduler.run_scheduled_day` 가 이미 안다. 이 파일은 **날짜 축**만
   진다 — 어느 날을 걷고 어느 날을 건너뛰고 어디서 멈추는가.
@@ -16,11 +16,11 @@ walk(start=..., end=..., now=...)   start..end 를 하루씩 걷는다
   **그 성적을 낸 걸음이 안 남는 것**이 문제다.
 
 ⚠️ **그 임시 스크립트는 `run_procurement` 을 직접 불렀다.** 그래서 개장 · 입고 ·
-  수금 · 장부 관문이 한 번도 안 돌았고, *"사고 0건"* 은 **그 네 단계를 안 탄 채로**
-  나온 숫자였다. 이 파일이 고치는 것이 정확히 그것이다.
+  채권 · 수금 · 장부 관문이 한 번도 안 돌았고, *"사고 0건"* 은 **그 다섯 단계를 안 탄
+  채로** 나온 숫자였다. 이 파일이 고치는 것이 정확히 그것이다.
 
 ```text
-❌ run_procurement(ProcurementRunRequest(as_of=d, ...))   개장·입고·수금·장부게이트를 건너뛴다
+❌ run_procurement(ProcurementRunRequest(as_of=d, ...))   개장·입고·채권·수금·장부게이트를 건너뛴다
 🟢 run_scheduled_day(action, ...)                          오늘 선 순서 전부를 안다
 ```
 
@@ -174,6 +174,24 @@ class WalkResult:
         )
 
     @property
+    def receivable_statuses(self) -> Mapping[str, int]:
+        """채권 발행 단계 분포. 🔴 **다섯 값을 접지 않고 그대로 센다.**
+
+        ```text
+        ISSUED         대상이 있었고 채권이 서 있다
+        NOTHING_DUE    그날 확정된 판매가 없었다     ← "없다"
+        BLOCKED        대상은 있는데 못 세웠다        ← "못 했다"
+        NOT_OPENED     하루가 안 열려서 안 했다       ← "안 했다"
+        FAILED         세워 보다 터졌다
+        ```
+
+        ⚠️ **값이 있는데 성적표가 안 읽으면 없는 것과 같다.** `outbound_status` 를
+          성적표에 태울 때(`#446`) 배운 것이 그것이다 — 단계는 도는데 화면이 그
+          단계를 말하지 않으면 아무도 그 단계가 막힌 것을 모른다.
+        """
+        return Counter(one.receivable_status for one in self.days)
+
+    @property
     def outbound_statuses(self) -> Mapping[str, int]:
         """출고 단계 분포. 🔴 **네 값을 접지 않고 그대로 센다.**
 
@@ -210,7 +228,7 @@ def walk(
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
     🔴 **`run_scheduled_day` 를 부른다.** `run_procurement` 을 직접 부르지 않는다 —
-      그러면 개장 · 입고 · 수금 · 장부 관문을 통째로 건너뛰고, 그 위에서 나온
+      그러면 개장 · 입고 · 채권 · 수금 · 장부 관문을 통째로 건너뛰고, 그 위에서 나온
       *"사고 0건"* 은 아무것도 증명하지 않는다.
 
     :param now: 걷는 동안 쓸 시각. 🔴 **인자다 — 이 파일은 시계를 안 읽는다.**
@@ -358,7 +376,8 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
         # ★ 개장 실패와 장부 관문을 한 값이 이미 가른다 — 둘 다 판단 단계를 안 탄다.
         return (
             f"판단 단계를 안 탔다 (개장: {outcome.day_open_status} ·"
-            f" 입고: {outcome.inbound_status} · 수금: {outcome.collection_status})"
+            f" 입고: {outcome.inbound_status} · 채권: {outcome.receivable_status}"
+            f" · 수금: {outcome.collection_status})"
             + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
         )
     if outcome.failed_items:
@@ -413,6 +432,7 @@ def format_summary(result: WalkResult) -> str:
         f"돈 날     {len(result.days)}일 · 휴장 {len(result.skipped_days)}일",
         f"판단      {dict(sorted(result.actions.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
+        f"채권      {dict(sorted(result.receivable_statuses.items()))}",
         f"출고      {dict(sorted(result.outbound_statuses.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
