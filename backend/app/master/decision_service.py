@@ -18,14 +18,15 @@ from app.master.commitment import (
     build_commitment,
 )
 from app.master.decision import (
+    SALES_CYCLE,
     CommitmentOut,
     DecisionIn,
     DecisionOut,
     DecisionRejected,
+    available_scenario_names,
     check_decidable,
     check_scenario_exists,
     next_seq,
-    scenario_labels_of,
 )
 from app.master.decision_repository import list_decisions, save_decision
 from app.master.revalidation import (
@@ -35,6 +36,7 @@ from app.master.revalidation import (
     revalidate_scenario,
 )
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
+from app.master.sales_approval import SaleConfirmationOut, confirm_approved_sale
 from app.master.transition import TransitionOut, apply_approval
 
 
@@ -74,15 +76,34 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
     ⚠️ **`PASSED` 여도 아직 아무 일도 안 일어난다.** 승인 후 도메인 Write 는 M-5 이고
       그 앞에 실행 원장(saga) 문제가 있다 (설계 §5).
 
+    🔴 **`as_of` 는 여기서 안 만든다** (2026-09-09 · `#452`). 재검증이 설 날이고,
+      **진입점이 정해서 넘긴다** — 운영은 `router.master_decide` 가 `clock` 을 읽고,
+      발화문 경로는 `ask_service` 가 그 요청의 `as_of` 를 넘긴다. 이 함수가 시계를
+      읽으면 걷기가 승인 경로를 타는 날 곡선에 벽시계가 섞인다.
+
+      ⚠️ **기본값을 두지 않는다.** 안 넘기면 터져야 한다 — 기본값은 곧 업무 규칙이다.
+
+    ⚠️ **승인이 아니어도 받는다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은
+      재검증을 안 돌리므로 이 값을 안 쓰지만, 넘기고 안 넘기고가 결정 종류에 따라
+      갈리면 **부르는 쪽이 종류를 먼저 알아야 한다.** 받는 것은 항상 같다.
+
+    :param as_of: 이 결정이 서는 날. 승인이면 재검증이 그날로 돈다.
     :raises LookupError: 그 업무 키의 실행이 없다 (라우터가 404).
     :raises DecisionRejected: 지금 상태에서 받을 수 없다 (라우터가 409/422).
     """
     row = _run_for(request_id, payload.history_run_id)  # 없으면 LookupError
     response_payload = dict(row.get("response_payload") or {})
 
+    # 🔴 **어느 어휘로 검사할지는 실행 행이 정한다** (2026-09-08 계약). `payload` 에서
+    #    읽지 않는다 — 읽으면 매입 실행을 판매라고 우겨 `SL1_PRESENTED` 어휘로
+    #    검사받을 수 있고, 그 순간 승인 게이트가 부르는 쪽 손에 들어간다.
+    cycle = _cycle_of(row)
+
     end_code = _end_code_of(response_payload)
-    check_decidable(end_code, payload.decision)
-    check_scenario_exists(payload.scenario_label, scenario_labels_of(response_payload))
+    check_decidable(end_code, payload.decision, cycle=cycle)
+    check_scenario_exists(
+        payload.scenario_label, available_scenario_names(response_payload, cycle)
+    )
 
     existing = list_decisions(request_id)
     _reject_repeat_approval(existing, payload)
@@ -102,9 +123,64 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         revalidation_outcome=None if revalidation is None else revalidation.outcome,
         note=payload.note,
     )
+    if cycle == SALES_CYCLE:
+        # 🔴 **매입 약정을 만들지 않는다.** `_commitment_parts` 는
+        #    `response_payload["scenarios"]` 만 보므로 판매 응답에서는 늘
+        #    `buildable=False` 를 낸다 — *"판매를 확정했다"* 자리에 *"매입 약정을 못
+        #    만들었다"* 가 실린다.
+        return saved.model_copy(
+            update={"sale": _sale_for(request_id, row, response_payload, payload, revalidation)}
+        )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
         update={"commitment": out, "transition": _transition_for(commitment)}
+    )
+
+
+def _cycle_of(row: Mapping[str, Any]) -> str:
+    """그 실행이 무슨 사이클이었나. **실행 이력 행이 정본이다.**
+
+    ★ **응답 payload 의 모양으로 짐작하지 않는다.** `candidates` 가 있으면 판매라고
+      읽으면, 매입 응답에 그 키가 섞이는 날 어휘가 조용히 갈린다. `cycle` 은 표의
+      컬럼이고 CHECK 이 어휘를 잠근다 (`master_agent_runs.sql`).
+    """
+    cycle = row.get("cycle")
+    return cycle if isinstance(cycle, str) else ""
+
+
+def _sale_for(
+    request_id: str,
+    row: Mapping[str, Any],
+    response_payload: Mapping[str, Any],
+    payload: DecisionIn,
+    revalidation: Revalidation | None,
+) -> SaleConfirmationOut | None:
+    """승인이면 **판매를 확정한다** (`confirm_sale`).
+
+    ★ **승인이 아니면 `None`** 이다 — 거절·조건부 재요청·취소에는 확정할 것이 없고,
+      그때의 `None` 은 *"확정에 실패했다"* 가 아니다 (`_transition_for` 와 같은 태도).
+
+    🔴 **재검증 결과를 여기서 다시 재지 않는다.** `_revalidation_for` 가 낸 것을
+      그대로 넘긴다 — 두 곳에서 판정하면 *"재검증은 막혔는데 확정은 됐다"* 가 가능해진다.
+
+    ★ **`as_of` 는 그 실행의 날이다** (`_as_of_of`). 벽시계를 읽지 않는다 —
+      `order_date` 가 되고, 그것이 곧 수금 곡선의 시점이다.
+    """
+    if payload.decision != "APPROVE" or payload.scenario_label is None:
+        return None
+    scenario = find_scenario(response_payload, payload.scenario_label)
+    if scenario is None:
+        return SaleConfirmationOut(
+            status="BLOCKED",
+            reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
+        )
+    return confirm_approved_sale(
+        request_id=request_id,
+        run_id=str(row["run_id"]),
+        as_of=_as_of_of(response_payload),
+        policy_version=_policy_version_of(row),
+        scenario=scenario,
+        revalidation_outcome=None if revalidation is None else revalidation.outcome,
     )
 
 
@@ -114,7 +190,10 @@ def _revalidation_for(
     payload: DecisionIn,
     decision_seq: int,
 ) -> Revalidation | None:
-    """승인이면 **선택된 1안을 오늘 다시 검증한다** (설계 2026-09-07 · M-4).
+    """승인이면 **선택된 1안을 `as_of` 로 다시 검증한다** (설계 2026-09-07 · M-4).
+
+    ★ **`as_of` 를 만들지 않고 흘린다.** 받은 날을 그대로 `revalidate_scenario` 에
+      넘긴다 — 중간에서 손대면 진입점이 정한 날과 부서가 받은 날이 갈린다.
 
     🔴 **`APPROVE` 일 때만이다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은 승인이
       아니라 재검증할 대상이 없다 — 그때 두 칸은 `None` 이고, 그 `None` 은 *"재검증에
@@ -139,6 +218,20 @@ def _revalidation_for(
             reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
         )
 
+    # 🔴 **재검증이 설 날은 그 실행의 날이다** (2026-09-09 · 마스터 판단).
+    #    부르는 쪽에서 받지 않는다 — 받으면 화면이든 걷기든 아무 날이나 넣을 수 있고,
+    #    그 순간 재검증이 자기가 언제 도는지를 남에게 맡기게 된다. 실행 행이 정한다.
+    #
+    #    ⚠️ 벽시계를 읽던 것을 진입점으로 올렸다가(#452) 여기까지 내렸다. 이유는
+    #      실측이다 — 2026-01-20 안을 오늘 승인하면 재검증이 **오늘** 로 개장을 묻고,
+    #      오늘은 안 열린 날이라 `ERROR` 가 나 승인이 막혔다.
+    as_of = _as_of_of(response_payload)
+    if as_of is None:
+        return Revalidation(
+            outcome="ERROR",
+            reason="원 실행의 기준일을 못 읽어 재검증할 날을 정할 수 없다.",
+        )
+
     policy_version = _policy_version_of(row)
     if policy_version is None:
         # 🔴 **정책판 없이 봉투를 만들 수 없다** (`ExecutionContext` 가 막는다). 아무
@@ -153,6 +246,7 @@ def _revalidation_for(
         original_conditions=conditions_of_original(response_payload, payload.scenario_label),
         decision_seq=decision_seq,
         policy_version=policy_version,
+        as_of=as_of,
         item=row.get("item") if isinstance(row.get("item"), str) else None,
     )
 
@@ -160,7 +254,7 @@ def _revalidation_for(
 def _policy_version_of(row: Mapping[str, Any]) -> str | None:
     """원 실행이 돈 정책판. **실행 이력 행의 요청 원문에서 읽는다.**
 
-    ★ **재검증이 새 정책판을 고르지 않는다.** `as_of` 는 오늘로 옮기지만 정책판까지
+    ★ **재검증이 새 정책판을 고르지 않는다.** `as_of` 는 고르는 날로 옮기지만 정책판까지
       바뀌면 *"그 사이 무엇이 바뀌었나"* 에 축이 둘 섞인다 — 재검증이 재는 것은
       **시장과 장부**이지 회사가 규칙을 바꿨는지가 아니다.
     """

@@ -202,10 +202,21 @@ export interface ForecastTab {
   base_dates_truncated: boolean;
   notice: Note | null;
   cards: ItemCard[];
-  headline: Stat[];
   axis: CalendarAxis;
   chart: Chart;
   rows: Table;
+  /** 그래프가 쓰는 원시 수치. 표와 같은 줄인데 글자가 아니라 수다. */
+  points: {
+    lead: number;
+    target_dt: string;
+    pred: number | null;
+    lo: number | null;
+    hi: number | null;
+    actual: number | null;
+    err_pct: number | null;
+    anchor: number | null;
+    gated: boolean;
+  }[];
   gate_lead: number;
   quality_note: string | null;
   accuracy: Table;

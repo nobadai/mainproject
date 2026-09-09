@@ -93,9 +93,28 @@ def adjustment(dept: str = "finance") -> SuggestedAdjustment:
     )
 
 
-def scenario(scenario_id: str, *capabilities: str) -> dict:
-    """판매 후보 하나 — `required_validations` 는 **후보 단위**다 (설계 정정 ①)."""
-    return {"scenario_id": scenario_id, "required_validations": list(capabilities)}
+def scenario(
+    scenario_id: str,
+    *capabilities: str,
+    delivery_date: str | None = "2026-01-20",
+    payment_days: int | None = 30,
+) -> dict:
+    """판매 후보 하나 — `required_validations` 는 **후보 단위**다 (설계 정정 ①).
+
+    🔴 **상업조건 둘이 기본으로 실린다** (2026-09-08 계약). `delivery_date` ·
+      `payment_days` 가 없는 안은 사용자가 골라도 확정할 수 없어 `presented` 에
+      오르지 않는다 (`CandidateVerdict.missing_terms`). 전에는 이 helper 가 둘을
+      안 넣었고, 그때는 통과 판정이 부서 회신만 봤으므로 초록이었다.
+
+    ★ **값이 없는 경우를 재는 검사는 `None` 을 명시해서 부른다** — 기본값으로
+      숨기면 그 검사가 무엇을 재는지 호출부에서 안 보인다.
+    """
+    out: dict = {"scenario_id": scenario_id, "required_validations": list(capabilities)}
+    if delivery_date is not None:
+        out["delivery_date"] = delivery_date
+    if payment_days is not None:
+        out["payment_days"] = payment_days
+    return out
 
 
 # ── 가짜 포트 ────────────────────────────────────────────────────────────────

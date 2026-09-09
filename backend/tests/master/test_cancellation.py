@@ -395,9 +395,9 @@ def test_통과안이_없던_날은_취소도_못_받는다():
     """
     from app.master.decision import DecisionRejected, check_decidable
 
-    check_decidable("E1_APPROVED", "CANCEL")  # 여기서는 안 터져야 한다
+    check_decidable("E1_APPROVED", "CANCEL", cycle="PROCUREMENT")  # 여기서는 안 터져야 한다
     with pytest.raises(DecisionRejected, match="물릴 승인이 없다"):
-        check_decidable("E2_HELD", "CANCEL")
+        check_decidable("E2_HELD", "CANCEL", cycle="PROCUREMENT")
 
 
 def test_거절은_여전히_통과안이_없어도_받는다():
@@ -405,8 +405,8 @@ def test_거절은_여전히_통과안이_없어도_받는다():
     아니다."""
     from app.master.decision import check_decidable
 
-    check_decidable("E2_HELD", "REJECT_ALL")
-    check_decidable("E3_REJECTED", "REQUEST_CHANGE")
+    check_decidable("E2_HELD", "REJECT_ALL", cycle="PROCUREMENT")
+    check_decidable("E3_REJECTED", "REQUEST_CHANGE", cycle="PROCUREMENT")
 
 
 # ── ⑧ 재무 축 — 마스터가 싣는다 (재무 요청 2026-09-06) ────────────────────

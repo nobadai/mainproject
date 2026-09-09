@@ -41,8 +41,13 @@ REQ = "REQ-20260901-0001"
 RUN_UUID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 LABEL = "기본"
 
-#: 원 실행이 돈 날. **오늘이 아니다** — ② 를 재려면 둘이 달라야 한다.
+#: 원 실행이 돈 날. **결정하는 날이 아니다** — ② 를 재려면 둘이 달라야 한다.
 원_실행일 = date(2026, 9, 1)
+
+#: 사람이 결정을 누른 날. 🔴 **진입점이 정해서 넘기는 값**이라 검사가 그냥 고른다
+#: (2026-09-09 · `#452`). 전에는 `revalidation.today()` 로 벽시계를 읽었고, 그래서
+#: 이 검사들이 **도는 날마다 다른 값**을 재고 있었다.
+오늘 = date(2026, 9, 7)
 
 #: 재검증 필수 둘의 라우팅 (`CAPABILITY_ROUTING`). 손으로 적은 것이 아니라 기대값이다.
 필수_호출 = [("inventory", "PRE_SALES"), ("finance", "SALES_VALIDATION")]
@@ -267,19 +272,31 @@ def test_후보가_요구한_것도_같이_부르되_두_번_부르지_않는다
 # ---------------------------------------------------------------------------
 
 
-def test_재검증은_오늘로_돈다(monkeypatch, 이력, 부서들):
-    """🔴 **원 실행의 날로 돌면 아무것도 안 잰다.**
+def test_재검증은_그_실행의_날로_돈다(monkeypatch, 이력, 부서들):
+    """🔴 **재검증이 서는 날은 그 실행의 날이다** (2026-09-09 · 마스터 판단).
 
-    *"그 사이 바뀌었는가"* 를 묻는데 그 사이를 안 보는 것이다 — 이 검사가 빨개지는
-    변이가 정확히 `as_of` 를 원 실행 날로 되돌리는 것이다.
+    ⚠️ **이 검사는 뜻이 뒤집혔다.** 전에는 *"원 실행의 날로 돌면 아무것도 안 잰다"* 를
+      지켰다. 그 걱정은 근거가 있었지만 **우리 시스템에서는 성립하지 않는다.**
+
+      ```text
+      전제였던 것   제안한 날과 고른 날 사이에 세상이 바뀐다 (실제 운영)
+      실제           우리는 시뮬레이션이고, "그 사이" 는 **그날 안**에서 일어난다
+                     — 그날의 입고·수금·출고가 이미 지나간 뒤 승인이 선다
+      ```
+
+    🔴 **그리고 벽시계로 돌면 승인이 막힌다** (실측 2026-09-09). 재검증의 첫 관문이
+      개장이고, 화면이 오늘 누르면 **오늘은 안 열린 날**이라 `ERROR` 가 난다.
+
+    ★ 그래서 그 날은 **부르는 쪽이 정하지 않는다.** 실행 이력 행이 정한다 — 화면이든
+      걷기든 아무 날이나 넣을 수 없다.
     """
     _실행을_세운다(monkeypatch, _run_row())
 
     decision_service.record_decision(REQ, _승인())
 
     잰_날 = {as_of for 부 in 부서들.values() for (_a, _m, as_of, _r) in 부.호출}
-    assert 잰_날 == {revalidation.today()}
-    assert 원_실행일 not in 잰_날, "원 실행의 날로 재검증을 돌렸다"
+    assert 잰_날 == {원_실행일}, f"그 실행의 날로 안 돌았다: {잰_날}"
+    assert 오늘 not in 잰_날, "벽시계로 재검증을 돌렸다"
 
 
 def test_새_업무_키로_돌고_그_키가_결정_행에_실린다(monkeypatch, 이력, 부서들):
@@ -296,9 +313,7 @@ def test_새_업무_키로_돌고_그_키가_결정_행에_실린다(monkeypatch
     assert saved.revalidation_request_id is not None
     assert saved.revalidation_request_id != REQ
     assert 쓴_키 == {saved.revalidation_request_id}
-    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(
-        revalidation.today(), 1
-    )
+    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(원_실행일, 1)
 
 
 def test_번복마다_다른_키를_받는다():
@@ -582,7 +597,7 @@ def test_재검증도_이력에_남는다(monkeypatch, 이력, 부서들):
     assert len(잡힌) == 1
     assert 잡힌[0]["cycle"] == "SALES"
     assert 잡힌[0]["request_id"] == saved.revalidation_request_id
-    assert 잡힌[0]["as_of"] == revalidation.today()
+    assert 잡힌[0]["as_of"] == 원_실행일
     assert 잡힌[0]["end_code"] == "PASSED"
     assert 잡힌[0]["runtime_status"] == "READY"
 

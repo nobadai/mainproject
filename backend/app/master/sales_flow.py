@@ -71,6 +71,7 @@ from app.master.envelope import (
 from app.master.plan import ExecutionPlan
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
+from app.master.sales_approval import missing_commercial_terms, missing_terms_reason
 
 SalesEndCode = Literal[
     "SL1_PRESENTED",
@@ -237,13 +238,37 @@ class CandidateVerdict:
         return not self.validations and not self.unroutable
 
     @property
+    def missing_terms(self) -> tuple[str, ...]:
+        """🔴 **확정에 필요한데 비어 있는 상업조건.** 없으면 빈 튜플이다.
+
+        ★ **부서 판정과 다른 칸이다.** `validations` 에 가짜 항목을 밀어 넣지 않는다 —
+          탈락 사유가 *"재무가 반려"* 처럼 보이면 사람이 재무를 본다. *"납품일이
+          없다"* 로 보여야 판매를 본다.
+
+        ★ **목록의 주인은 `sales_approval.REQUIRED_COMMERCIAL_TERMS` 다.** 승인 뒤
+          `confirm_sale` 이 막는 것과 **같은 목록**을 여기서 미리 읽는다 — 베껴 두면
+          *"올려도 되는 안"* 과 *"확정할 수 있는 안"* 이 갈린다.
+        """
+        return missing_commercial_terms(self.scenario)
+
+    @property
     def passed(self) -> bool:
         """사용자에게 올려도 되는가.
 
         ★ **허용목록으로 정한다** (`PASSING_VERDICTS`). *"reject 가 아니면 통과"* 로
           정하면 봉투 어휘가 늘 때마다 새 값이 통과 쪽으로 샌다 (#173).
+
+        🔴 **상업조건 필수값도 여기서 본다** (2026-09-08 계약). `delivery_date` 나
+          `payment_days` 가 없는 안은 사용자가 골라도 확정할 수 없다 — 값이 없는
+          안을 고른 **뒤에야** 막는 것보다 **승인 가능한 후보의 필수조건**으로 두는
+          편이 계약상 명확하다.
+
+          ⚠️ 이 줄을 지우면 값 없는 안이 화면에 오르고, 사용자가 그것을 고른 뒤에야
+            `sales_approval` 이 `BLOCKED` 를 낸다.
         """
         if self.unroutable:
+            return False
+        if self.missing_terms:
             return False
         return all(
             str(v.get("business_status") or "") in PASSING_VERDICTS
@@ -260,6 +285,10 @@ class CandidateVerdict:
         parts: list[str] = []
         if self.unroutable:
             parts.append(f"부를 대상이 없는 요구: {', '.join(self.unroutable)}")
+        # 🔴 **부서 판정 줄과 섞이지 않게 따로 적는다.** 아래 줄은
+        #   `capability(runtime/business)` 모양이고 이 줄은 칸 이름을 부른다.
+        if self.missing_terms:
+            parts.append(missing_terms_reason(self.missing_terms))
         for capability, verdict in self.validations.items():
             business = str(verdict.get("business_status") or "?")
             if business in PASSING_VERDICTS:
