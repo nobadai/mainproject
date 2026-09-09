@@ -177,17 +177,40 @@ class CalendarAxis(BaseModel):
     days: list[Day]
 
 
+#: 이 값을 **읽어 본 결과**가 무엇인가. 🔴 **`filled` 로는 못 가르는 셋이 있습니다.**
+#:
+#: ```text
+#: OK              읽었고 값이 있다
+#: NO_DATA         읽었는데 그 축에 사실이 없다        ★ 0 도 오류도 아니다
+#: DATA_NOT_READY  아직 만들어지지 않은 값이다
+#: ERROR           읽다가 실패했다                     ★ 숫자를 지어내지 않는다
+#: DEMO            일부러 켠 예시값                    ★ 실패해서 떨어진 것이 아니다
+#: ```
+#:
+#: ⚠️ **실패를 `DEMO` 로 적지 않습니다.** 그것이 이 칸을 만든 이유입니다 — 종전
+#:    물류 탭은 어떤 예외든 잡아 예시 숫자(14,600kg)를 실적처럼 내려보냈습니다.
+SourceStatus = Literal["OK", "NO_DATA", "DATA_NOT_READY", "ERROR", "DEMO"]
+
+
 class Source(BaseModel):
     """이 값이 어디서 왔나.
 
     ★ **`filled` 가 이 화면에서 제일 중요한 칸입니다.** 아직 부서가
       `query.py` 를 안 채웠으면 `False` 이고, 화면이 「예시값」 딱지를 붙입니다.
       딱지가 없으면 보는 사람이 데모 숫자를 실적으로 읽습니다.
+
+    ★ **`status` 는 그 위에 얹는 칸입니다** (선택). `filled` 만으로는 *"읽었는데
+      없다"* 와 *"읽다가 실패했다"* 와 *"예시값이다"* 가 한 값에 뭉개집니다.
+      아직 안 채운 탭은 `None` 이고, 화면 계약은 그대로입니다 —
+      다섯 값의 화면 처리와 나머지 탭 적용은 WP-5 입니다.
     """
 
     filled: bool = Field(description="부서가 실제 값으로 채웠나. False 면 예시값")
     owner: str = Field(description="이 값을 채울 파트")
     note: str | None = Field(default=None, description="어디서 읽어온 값인지 한 줄")
+    status: SourceStatus | None = Field(
+        default=None, description="읽어 본 결과. 안 채운 탭은 None"
+    )
 
 
 class Card(BaseModel):

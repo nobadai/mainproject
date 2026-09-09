@@ -337,6 +337,21 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
       `get_outbound_commitments` 는 이미 `fixture.sim_run_id` 로 묻고 있었다 — 즉 실행을
       가르는 자리는 처음부터 **fixture 조회 하나**였고, 그래서 이번 변경이 그 한 곳만
       넓히면 스냅샷 전체가 같은 실행 위에 선다.
+
+    🔴 **이것은 Current 읽기다. 과거 조회에 쓰지 않는다.**
+
+    ```text
+    Current     이 함수                        Agent Runtime · 그 순간의 잔량
+    Historical  historical_repository          화면 조회 · as_of 시점 원장/사건
+    ```
+
+       아래 `inventory_lots` 조회는 `remaining_qty_kg`(**Derived Current Cache**)로
+       Lot 을 고른다. `as_of` 를 받지만 그것은 `received_at` 상한일 뿐이고 **잔량은
+       언제나 지금 값**이다 — 과거 화면이 이 함수를 쓰면 오늘 소진된 재고가
+       그날에도 없었던 것으로 보인다 (실측: 네 기준일 전부 0 kg).
+
+       ⚠️ 이 함수에 `historical=True` 같은 분기를 넣지 않는다. 두 축이 한 함수
+          안에 섞이는 순간 어느 호출이 어느 시점을 읽는지 아무도 말할 수 없다.
     """
     fixture = get_active_logistics_runtime_fixture(as_of=as_of, sim_run_id=sim_run_id)
     policy = get_active_logistics_policy()
@@ -346,6 +361,11 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
     # status로 거르지 않는다 — 검수·격리·사용불가·신선도 만료 재고도 반출/폐기 전이면
     # 공간을 점유한다. 소진/반출 완료 Lot은 remaining_qty_kg = 0으로 자연히 빠진다
     # (현행 DB의 DEPLETED가 그 예). 가용 여부 판정은 tools.build_inventory_by_item 몫이다.
+    #
+    # 🔴 **`remaining_qty_kg` 는 DERIVED CURRENT CACHE 다.** 정본은 `inventory_moves`
+    #    이고 이 컬럼은 그 누계를 들고 있는 지금 값이다 (실측 불일치 0건 — 캐시가
+    #    틀린 것이 아니라 **과거에 쓰면 안 되는 값**이다). 과거 잔량은
+    #    `historical_repository.onhand_by_lot_at` 이 원장에서 되살린다.
     inventory_rows = fetch_all(
         sql.SQL(
             """
