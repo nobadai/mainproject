@@ -477,7 +477,8 @@ def test_delivery_date_가_없으면_BLOCKED_이고_이름을_부른다():
     결과 = _확정(_scenario(delivery_date=None), 대역)
 
     assert 결과.status == "BLOCKED"
-    assert 결과.missing_terms == ["delivery_date"]
+    # ★ 이 경로는 `user_request` 를 안 들고 온다 — 호출에 안 실린 것이 사실이다.
+    assert 결과.missing_terms == ["REQUEST_MISSING_delivery_date"]
     assert "납품일" in 결과.reason and "delivery_date" in 결과.reason, (
         f"무엇이 없는지 이름을 안 부른다: {결과.reason}"
     )
@@ -489,7 +490,7 @@ def test_payment_days_가_없으면_BLOCKED():
     결과 = _확정(_scenario(payment_days=None), 대역)
 
     assert 결과.status == "BLOCKED"
-    assert 결과.missing_terms == ["payment_days"]
+    assert 결과.missing_terms == ["REQUEST_MISSING_payment_days"]
     assert "수금 유예일" in 결과.reason and "payment_days" in 결과.reason
     assert 대역.호출 == []
 
@@ -499,7 +500,10 @@ def test_칸이_아예_없어도_같다():
     결과 = _확정(_scenario(delivery_date=_없음, payment_days=_없음))
 
     assert 결과.status == "BLOCKED"
-    assert 결과.missing_terms == ["delivery_date", "payment_days"]
+    assert 결과.missing_terms == [
+        "REQUEST_MISSING_delivery_date",
+        "REQUEST_MISSING_payment_days",
+    ]
 
 
 def test_payment_days_0_은_없는_값이_아니다():
@@ -617,14 +621,14 @@ def test_delivery_date_없는_후보는_제시되지_않는다():
     후보 = _판정(delivery_date=None)
 
     assert 후보.passed is False
-    assert 후보.missing_terms == ("delivery_date",)
+    assert 후보.missing_terms == ("REQUEST_MISSING_delivery_date",)
 
 
 def test_payment_days_없는_후보는_제시되지_않는다():
     후보 = _판정(payment_days=None)
 
     assert 후보.passed is False
-    assert 후보.missing_terms == ("payment_days",)
+    assert 후보.missing_terms == ("REQUEST_MISSING_payment_days",)
 
 
 def test_탈락_사유가_부서_판정과_구별된다():
@@ -667,10 +671,10 @@ def test_후보_판정의_필수값_목록은_확정_쪽과_같은_것이다():
     """🔴 **주인이 하나다.** 두 곳에 베껴 두면 *"올려도 되는 안"* 과 *"확정할 수 있는
     안"* 이 갈리는 날이 온다."""
     assert sales_approval.REQUIRED_COMMERCIAL_TERMS == ("delivery_date", "payment_days")
-    assert (
-        CandidateVerdict(scenario=_scenario(delivery_date=None)).missing_terms
-        == sales_approval.missing_commercial_terms(_scenario(delivery_date=None))
-    )
+    assert tuple(
+        sales_approval.term_of_origin(o)
+        for o in CandidateVerdict(scenario=_scenario(delivery_date=None)).missing_terms
+    ) == sales_approval.missing_commercial_terms(_scenario(delivery_date=None))
 
 
 # ---------------------------------------------------------------------------

@@ -53,11 +53,18 @@ from app.sales.schemas import (
 )
 
 __all__ = [
+    "CONTRACT_FULFILLMENT_MODE",
+    "REQUEST_MISSING_PREFIX",
     "REQUIRED_COMMERCIAL_TERMS",
+    "TERMS_UNRESOLVED_PREFIX",
     "SaleConfirmationOut",
     "confirm_approved_sale",
     "missing_commercial_terms",
+    "missing_term_origin_vocabulary",
+    "missing_term_origins",
     "missing_terms_reason",
+    "preferred_request_field",
+    "term_of_origin",
 ]
 
 
@@ -92,15 +99,146 @@ def missing_commercial_terms(scenario: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def missing_terms_reason(missing: tuple[str, ...]) -> str:
-    """왜 확정할 수 없나 — **무엇이 없는지 이름을 부른다.**
+#: 🔴 **호출에서 안 실렸다.** 부르는 쪽이 `preferred_<FIELD>` 를 안 보냈다 —
+#: **고칠 사람은 화면 · 걷기 · API 호출자**다. 판매에 물어봐야 소용이 없다.
+REQUEST_MISSING_PREFIX = "REQUEST_MISSING_"
+
+#: 🔴 **정말 조건이 없다.** 보냈는데 결과에 안 실렸거나, 계약 이행 경로라 계약값에서
+#: 나와야 하는데 안 나왔다 — **고칠 사람은 판매 · 계약**이다.
+TERMS_UNRESOLVED_PREFIX = "TERMS_UNRESOLVED_"
+
+#: 🔴 **계약 이행 경로.** 이 모드는 계약에 적힌 값을 쓰므로 마스터가 `preferred_*` 를
+#: **안 보내는 것이 정상**이다. 여기서 `REQUEST_MISSING` 을 내면 없는 잘못을 화면에
+#: 씌우는 것이 된다 — 호출자는 보낼 것이 없었다.
+#:
+#: ⚠️ **어휘의 주인은 판매다** (`SalesBusinessMode`). 그런데 `app.master.schemas` 를
+#:   import 할 수 없다 — 저쪽이 이 모듈이 사는 `sales_flow` 를 import 하므로 고리가
+#:   된다. 값이 갈리면 `test_missing_term_origin.py` 가 잡는다.
+CONTRACT_FULFILLMENT_MODE = "CONTRACT_FULFILLMENT"
+
+
+def preferred_request_field(field: str) -> str:
+    """상업조건 칸 이름 → **사용자 요청에서 그 값을 싣는 칸 이름.**
+
+    ```text
+    delivery_date  ↔  user_request["preferred_delivery_date"]
+    payment_days   ↔  user_request["preferred_payment_days"]
+    ```
+
+    ★ **대응이 여기 한 자리다.** 두 곳에 적으면 판매가 칸 이름을 바꾼 날 한쪽만
+      고쳐지고, 그러면 *"보냈는데 안 실렸다"* 가 조용히 *"안 보냈다"* 로 뒤집힌다.
+    """
+    return f"preferred_{field}"
+
+
+def missing_term_origin_vocabulary() -> tuple[str, ...]:
+    """이 판이 낼 수 있는 어휘 전부. **`REQUIRED_COMMERCIAL_TERMS` 에서 나온다.**
+
+    ★ **손으로 나열하지 않는다.** 상수가 늘면 어휘도 같이 늘어야 한다 — 베껴 두면
+      새 칸이 하나 늘 때 그 칸만 원인 없이 나가는 날이 온다.
+    """
+    return tuple(
+        f"{prefix}{field}"
+        for field in REQUIRED_COMMERCIAL_TERMS
+        for prefix in (REQUEST_MISSING_PREFIX, TERMS_UNRESOLVED_PREFIX)
+    )
+
+
+def term_of_origin(origin: str) -> str:
+    """어휘에서 **칸 이름을 되꺼낸다.** 화면이 필드 이름만 필요할 때 쓴다.
+
+    ★ 접두를 몰라도 되게 여기서 벗긴다 — 화면이 문자열을 직접 자르기 시작하면
+      접두를 바꾸는 날 화면이 조용히 틀린 이름을 보여 준다.
+    """
+    for prefix in (REQUEST_MISSING_PREFIX, TERMS_UNRESOLVED_PREFIX):
+        if origin.startswith(prefix):
+            return origin[len(prefix) :]
+    return origin
+
+
+def missing_term_origins(
+    scenario: Mapping[str, Any],
+    *,
+    user_request: Mapping[str, Any] | None = None,
+    business_mode: str | None = None,
+) -> tuple[str, ...]:
+    """비어 있는 상업조건이 **어디서 끊겼는지.** 다 있으면 빈 튜플이다.
+
+    ★ **더하는 것은 "어디서" 하나다.** *"무엇이 없나"* 는 `missing_commercial_terms`
+      가 답하고 여기서 다시 세지 않는다 — 두 곳에서 세면 갈린다.
+
+    ```text
+    business_mode 가 CONTRACT_FULFILLMENT 가 **아니고**
+      · user_request 에 preferred_<FIELD> 가 없음   → REQUEST_MISSING_<FIELD>
+    그 밖 (계약 이행 경로거나 · 보냈는데 결과에 없음) → TERMS_UNRESOLVED_<FIELD>
+    ```
+
+    🔴 **`CONTRACT_FULFILLMENT` 를 가른다.** 그 경로는 계약값을 쓰므로 마스터가
+      `preferred_*` 를 안 보내는 것이 정상이다 — 거기서 `REQUEST_MISSING` 을 내면
+      **거짓말이 된다.**
+
+    ⚠️ **`user_request` 를 안 주면 `REQUEST_MISSING` 이다.** 그것도 사실이다 —
+      호출에 그 값이 실리지 않았다. 부를 때 들고 있으면 반드시 넘긴다.
+    """
+    return tuple(
+        _origin_of(field, user_request=user_request, business_mode=business_mode)
+        for field in missing_commercial_terms(scenario)
+    )
+
+
+def _origin_of(
+    field: str,
+    *,
+    user_request: Mapping[str, Any] | None,
+    business_mode: str | None,
+) -> str:
+    """칸 하나의 원인. **가르는 규칙은 여기 한 줄이다.**"""
+    if business_mode != CONTRACT_FULFILLMENT_MODE and not _was_requested(field, user_request):
+        return f"{REQUEST_MISSING_PREFIX}{field}"
+    return f"{TERMS_UNRESOLVED_PREFIX}{field}"
+
+
+def _was_requested(field: str, user_request: Mapping[str, Any] | None) -> bool:
+    """부르는 쪽이 그 값을 **실었는가.**
+
+    ★ **`missing_commercial_terms` 와 같은 셈법이다.** `0` 은 실린 값이다 —
+      `preferred_payment_days=0` 은 *"당일 수금을 원한다"* 는 **정해진 요청**이고,
+      `falsy` 로 세면 그 요청이 조용히 *"안 보냈다"* 가 되어 판매의 잘못이 화면
+      잘못으로 뒤집힌다.
+    """
+    if user_request is None:
+        return False
+    value = user_request.get(preferred_request_field(field))
+    return value is not None and value != ""
+
+
+def missing_terms_reason(origins: tuple[str, ...]) -> str:
+    """왜 확정할 수 없나 — **무엇이 없는지 이름을 부르고 어디서 끊겼는지 붙인다.**
 
     ★ 부서 판정 문장(`capability(runtime/business)`)과 **모양이 다르다.** 탈락 사유가
       *"재무가 반려"* 처럼 보이면 사람이 재무를 본다. *"납품일이 없다"* 로 보여야
       판매를 본다.
+
+    ★ **한 함수가 두 경우를 다 낸다.** 문장을 두 벌로 두면 한쪽만 고치는 날이 온다.
+
+    :param origins: `missing_term_origins` 가 낸 어휘. 접두 없는 칸 이름을 넣어도
+        읽히지만 그때는 원인 절이 안 붙는다 — 원인을 아는 자리에서 부른다.
     """
-    names = ", ".join(_TERM_NAMES.get(field, field) for field in missing)
-    return f"{names} 이(가) 없어 판매를 확정할 수 없다 — 없는 값을 지어내지 않는다."
+    names = ", ".join(_TERM_NAMES.get(term_of_origin(o), term_of_origin(o)) for o in origins)
+    parts = [f"{names} 이(가) 없어 판매를 확정할 수 없다 — 없는 값을 지어내지 않는다."]
+    requested = _names_with(origins, REQUEST_MISSING_PREFIX)
+    unresolved = _names_with(origins, TERMS_UNRESOLVED_PREFIX)
+    if requested:
+        parts.append(f"요청에 안 실렸다: {requested} — 화면·호출자가 채운다.")
+    if unresolved:
+        parts.append(f"조건이 정해지지 않았다: {unresolved} — 판매·계약이 정한다.")
+    return " ".join(parts)
+
+
+def _names_with(origins: tuple[str, ...], prefix: str) -> str:
+    """그 원인에 해당하는 칸들의 사람 이름. 없으면 빈 문자열이다."""
+    fields = [term_of_origin(o) for o in origins if o.startswith(prefix)]
+    return ", ".join(_TERM_NAMES.get(field, field) for field in fields)
 
 
 class SaleConfirmationOut(BaseModel):
@@ -123,6 +261,11 @@ class SaleConfirmationOut(BaseModel):
 
     #: 🔴 **비어 있지 않으면 그것이 막은 이유다.** 부서 판정과 다른 칸에 둔다 —
     #: `validations` 에 가짜 항목을 밀어 넣으면 화면이 부서를 보러 간다.
+    #:
+    #: ★ **담는 것은 원인 어휘다** (`missing_term_origins`) — 칸 이름이 아니다.
+    #:   `REQUEST_MISSING_<FIELD>` · `TERMS_UNRESOLVED_<FIELD>` 이고, 칸 이름은
+    #:   `term_of_origin` 으로 되꺼낸다. 이름만 담으면 화면이 *"누가 고쳐야 하나"*
+    #:   를 다시 추측하게 된다.
     missing_terms: list[str] = Field(default_factory=list)
 
     sale_id: str | None = None
@@ -178,7 +321,7 @@ def confirm_approved_sale(
             reason=f"재검증이 통과하지 않아 판매를 확정하지 않았다 (재검증 결과: {shown}).",
         )
 
-    missing = missing_commercial_terms(scenario)
+    missing = missing_term_origins(scenario)
     if missing:
         return SaleConfirmationOut(
             status="BLOCKED",
