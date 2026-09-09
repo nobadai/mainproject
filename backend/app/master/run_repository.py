@@ -43,10 +43,66 @@ _TABLE = "master_agent_runs"
 
 #: 장부 관문이 막아 **판단을 한 번도 안 돌린 날**이 다는 종료 코드 (`#465`).
 #:
-#: ★ **주인이 여기다.** `persistence.record_ledger_gap` 이 이 값을 적고
-#:   `count_runs_by_day` 가 이 값으로 그 행을 되찾는다. 두 벌로 적어 두면 한쪽만
-#:   바뀌는 날 성적표의 `gate_blocked` 가 조용히 늘 거짓이 된다.
+#: ★ **주인이 여기다.** `persistence.record_ledger_gap` 이 이 값을 적는다.
+#:
+#: 🔴 **이 값으로 관문 행을 되찾지 않는다** (2026-09-09 에 판정에서 뺐다). *"시작
+#:   못 했다"* 는 관문 행만의 사실이 아니다 — 실측으로 `PROCUREMENT · E4_NOT_STARTED
+#:   · item IS NULL` 이 14행이고 전부 품목을 정하기 전에 죽은 옛 매입 실행이다
+#:   (*"경계를 내지 못한 에이전트: finance"*). 그 14행이 오늘 안 새는 이유는 `sim_run_id`
+#:   가 전부 NULL 이라 축이 막고 있기 때문이지, 모양이 스스로를 증명해서가 아니다.
+#:   축이 실린 채로 품목 전에 죽는 실행이 한 번만 나오면 그날이 *"관문이 막았다"* 로
+#:   잘못 읽힌다. **되찾는 것은 아래 업무 키다.**
 LEDGER_GAP_END_CODE = "E4_NOT_STARTED"
+
+#: 장부 관문 행의 업무 키 꼬리. **업무 키의 품목 자리에 들어간다.**
+#:
+#: 🔴 **품목 이름과 겹치면 안 된다.** 겹치는 순간 그날 그 품목의 판단 행과 게이트
+#:   행이 같은 업무 키를 갖고, `get_run_by_request_id` 가 둘을 못 가른다.
+#:   계약 품목은 한글 이름이라 이 꼬리와 같아질 수 없고, 그것을 검사가 잠근다.
+#:
+#: ★ **주인이 `scheduler` 가 아니라 여기다** (2026-09-09 에 옮겼다). 되찾는 쪽
+#:   (`count_runs_by_day` · `procurement_boundary`)이 이 값을 봐야 하는데,
+#:   `run_repository → scheduler` 는 `scheduler → persistence → run_repository`
+#:   와 고리를 만든다. *"행의 정체는 저장소가 소유한다"* 가 맞다 — `scheduler` 는
+#:   여기서 가져다 쓰고 이름만 다시 내보낸다.
+_LEDGER_GAP_REQUEST_SUFFIX = "LEDGER-GAP"
+
+#: 업무 키가 그 꼬리로 끝나는가를 보는 문자열. **한 상수에서 나온다.**
+_LEDGER_GAP_REQUEST_TAIL = f"-{_LEDGER_GAP_REQUEST_SUFFIX}"
+
+#: SQL 이 같은 꼬리를 찾을 때 쓰는 `LIKE` 패턴.
+#:
+#: 🔴 **날짜 형식(`REQ-DAILY-YYYYMMDD-`)을 SQL 에 다시 적지 않는다.** 두 벌이 되면
+#:   `ledger_gap_request_id` 만 바뀌는 날 성적표가 조용히 갈린다. 꼬리 하나만
+#:   맞춘다 — 그 꼬리는 `is_ledger_gap_request_id` 가 보는 것과 같은 값이다.
+LEDGER_GAP_REQUEST_LIKE = f"%{_LEDGER_GAP_REQUEST_TAIL}"
+
+
+def ledger_gap_request_id(as_of: date) -> str:
+    """`REQ-DAILY-20260908-LEDGER-GAP`. **하루 단위 키다 — 품목이 없다.**
+
+    🔴 **`scheduler.daily_request_id` 를 못 쓴다.** 저쪽은 품목별인데 장부 관문은
+      하루를 통째로 돌려세운다. 품목을 하나 골라 넣으면 *"배추 때문에 막혔다"* 라는
+      없는 사실이 생기고, 전부에 넣으면 같은 사실이 품목 수만큼 쌓인다.
+
+    🔴 **시각을 안 넣는다** (`daily_request_id` 와 같은 이유). 넣으면 같은 날 두 번
+      깨어날 때 키가 갈리고, 그러면 *"그날 게이트 행이 이미 있나"* 를 물을 수가 없다.
+
+    ★ **적는 쪽과 되찾는 쪽이 이 함수 하나를 본다.** `persistence.record_ledger_gap`
+      이 이 값을 `request_id` 로 적고, `is_ledger_gap_request_id` 가 같은 꼬리로
+      그 행을 알아본다.
+    """
+    return f"REQ-DAILY-{as_of:%Y%m%d}-{_LEDGER_GAP_REQUEST_SUFFIX}"
+
+
+def is_ledger_gap_request_id(request_id: str | None) -> bool:
+    """그 업무 키가 **장부 관문 행의 것인가.**
+
+    ★ 날짜를 안 본다 — 어느 날 것인지는 `as_of` 칸이 이미 말한다. 여기서 날짜까지
+      맞추면 형식이 두 벌이 되고, 그것이 이 판이 없앤 자리다.
+    """
+    return bool(request_id) and request_id.endswith(_LEDGER_GAP_REQUEST_TAIL)  # type: ignore[union-attr]
+
 
 _COLUMNS = (
     "run_id",
@@ -421,7 +477,7 @@ def count_runs_by_day(
     query = sql.SQL(
         """
         WITH filtered AS (
-            SELECT as_of, end_code, item
+            SELECT as_of, end_code, item, request_id
             FROM {schema}.{table}
             WHERE sim_run_id = %s AND as_of >= %s AND as_of <= %s
         ),
@@ -439,7 +495,17 @@ def count_runs_by_day(
                     ARRAY_AGG(DISTINCT item) FILTER (WHERE item IS NOT NULL),
                     ARRAY[]::text[]
                 ) AS items,
-                BOOL_OR(item IS NULL AND end_code = %s) AS gate_blocked
+                -- 🔴 **업무 키로 관문 행을 알아본다** (2026-09-09). 옛 판정은
+                --    품목이 비고 종료코드가 `E4_NOT_STARTED` 인 **모양**이었는데,
+                --    그 모양은 관문 행만의 것이 아니다 — 품목을 정하기 전에 죽은
+                --    옛 매입 실행 14행이 실측으로 같은 모양이다. 축이 막고 있었을
+                --    뿐이고, 축이 실린 채로 하나만 나오면 그날이 *"관문이 막았다"*
+                --    로 잘못 읽힌다.
+                --
+                -- ★ 파이썬 쪽 판정(`is_ledger_gap_request_id`)과 **같은 꼬리**를
+                --   본다. 패턴은 `LEDGER_GAP_REQUEST_LIKE` 가 만든다 — 날짜 형식은
+                --   여기 없다.
+                BOOL_OR(request_id LIKE %s) AS gate_blocked
             FROM filtered
             GROUP BY as_of
         )
@@ -463,7 +529,7 @@ def count_runs_by_day(
         schema=sql.Identifier(get_db_schema()),
         table=sql.Identifier(_TABLE),
     )
-    rows = fetch_all(query, (axis, start, end, LEDGER_GAP_END_CODE))
+    rows = fetch_all(query, (axis, start, end, LEDGER_GAP_REQUEST_LIKE))
     return [
         DayRunCount(
             as_of=row["as_of"],

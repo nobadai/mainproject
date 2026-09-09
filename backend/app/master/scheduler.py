@@ -184,6 +184,7 @@ from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.receivable import issue_receivables
+from app.master.run_repository import ledger_gap_request_id
 from app.master.schemas import ProcurementRunRequest
 from app.master.service import run_procurement
 
@@ -244,12 +245,6 @@ _LEDGER_GAP_STATUSES: frozenset[str] = frozenset({"BLOCKED", "FAILED"})
 #: 이유다 — 손으로 다시 쓰면 철자가 갈리고 그러면 막힌 날을 나중에 못 센다).
 _LEDGER_GAP = "장부가 안 서서 판단을 안 돌린다"
 
-#: 장부 관문 행의 업무 키 꼬리. **품목 자리에 들어간다.**
-#:
-#: 🔴 **품목 이름과 겹치면 안 된다.** 겹치는 순간 그날 그 품목의 판단 행과 게이트
-#:   행이 같은 업무 키를 갖고, `get_run_by_request_id` 가 둘을 못 가른다.
-#:   계약 품목은 한글 이름이라 이 꼬리와 같아질 수 없고, 그것을 검사가 잠근다.
-_LEDGER_GAP_REQUEST_SUFFIX = "LEDGER-GAP"
 
 #: 스케줄러가 답할 수 있는 **전부**. 여섯 번째를 만들지 않는다.
 SchedulerAction = Literal[
@@ -290,17 +285,10 @@ def daily_request_id(as_of: date, item: str) -> str:
     return f"REQ-DAILY-{as_of:%Y%m%d}-{item}"
 
 
-def ledger_gap_request_id(as_of: date) -> str:
-    """`REQ-DAILY-20260908-LEDGER-GAP`. **하루 단위 키다 — 품목이 없다.**
-
-    🔴 **`daily_request_id` 를 못 쓴다.** 저쪽은 품목별인데 장부 관문은 하루를
-      통째로 돌려세운다. 품목을 하나 골라 넣으면 *"배추 때문에 막혔다"* 라는 없는
-      사실이 생기고, 전부에 넣으면 같은 사실이 품목 수만큼 쌓인다.
-
-    🔴 **시각을 안 넣는다** (`daily_request_id` 와 같은 이유). 넣으면 같은 날 두 번
-      깨어날 때 키가 갈리고, 그러면 *"그날 게이트 행이 이미 있나"* 를 물을 수가 없다.
-    """
-    return f"REQ-DAILY-{as_of:%Y%m%d}-{_LEDGER_GAP_REQUEST_SUFFIX}"
+# ★ `ledger_gap_request_id` 는 여기서 안 짓는다 — **주인이 `run_repository` 다**
+#   (2026-09-09 에 옮겼다). 그 키로 관문 행을 **되찾는** 쪽이 저장소이고, 저장소가
+#   여기를 import 하면 `scheduler → persistence → run_repository` 와 고리가 된다.
+#   이름은 그대로 살려 둔다 — 위 `__all__` 이 내보내고 검사가 이 이름으로 부른다.
 
 
 # ── ① 결정 — 순수 함수 ─────────────────────────────────────────────────

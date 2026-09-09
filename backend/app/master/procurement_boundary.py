@@ -56,7 +56,7 @@ from datetime import date
 from typing import Any, Literal, get_args
 
 from app.master.execution_day import HolidayCalendar, is_execution_day
-from app.master.run_repository import LEDGER_GAP_END_CODE, MasterAgentRun, list_runs
+from app.master.run_repository import MasterAgentRun, is_ledger_gap_request_id, list_runs
 
 __all__ = [
     "ABSENT_REASONS",
@@ -222,11 +222,12 @@ def read_procurement_boundary(
         if constraints:
             return _boundary_from(row, constraints)
 
-    # ② 관문 행이 있나 — **종료코드만으로 잡지 않는다.**
+    # ② 관문 행이 있나 — **모양이 아니라 업무 키로 잡는다.**
     #
-    # 🔴 `01-24` · `01-31` 의 `E4_NOT_STARTED` 여섯 행은 품목이 실린 **매입 행**이다
-    #   (실측). 종료코드만 보면 그 여섯이 관문으로 읽혀 토요일이 *"장부가 막았다"* 가
-    #   된다. 관문은 하루를 통째로 돌려세우므로 **품목이 없다** — 그것이 가르는 칸이다.
+    # 🔴 `01-24` · `01-31` 의 `E4_NOT_STARTED` 여섯 행은 품목이 실린 **매입 행**이고
+    #   (실측), 품목이 없는 채로 죽은 옛 매입 행도 14행 있다. 모양으로 잡으면 그것들이
+    #   관문으로 읽혀 없는 *"장부가 막았다"* 가 생긴다. 관문 행에는 그 행만의 업무 키가
+    #   있고 (`run_repository.ledger_gap_request_id`), 적는 쪽이 그 키를 적는다.
     if any(_is_ledger_gap_row(row) for row in 최신부터):
         return ProcurementBoundary(present=False, absent_reason="LEDGER_GAP")
 
@@ -256,29 +257,37 @@ def _constraints_of(row: MasterAgentRun) -> Mapping[str, Any]:
 
 
 def _is_ledger_gap_row(row: MasterAgentRun) -> bool:
-    """장부 관문 행인가 — **품목이 없고** 종료코드가 관문 코드인 행 (`#465`).
+    """장부 관문 행인가 — **업무 키로 알아본다** (`#465` · 2026-09-09 에 키로 바꿨다).
 
-    ★ **코드 문자열을 다시 적지 않는다.** 주인은 `run_repository.LEDGER_GAP_END_CODE`
-      하나이고, `count_runs_by_day` 의 `gate_blocked` 도 같은 값으로 그 행을 되찾는다.
-      두 벌로 적으면 한쪽만 바뀌는 날 이 사유가 조용히 늘 안 나온다.
-
-    ⚠️ **이 모양은 관문 행만의 모양이 아니다** (실측 2026-09-09).
+    ⚠️ **옛 판정은 모양이었다** — `item IS NULL AND end_code == 'E4_NOT_STARTED'`.
+      그런데 **그 모양은 관문 행만의 것이 아니다** (실측 2026-09-09).
 
       ```text
       PROCUREMENT           1,315행
         E4_NOT_STARTED        404행
           item IS NULL          14행   ← 품목을 정하기 전에 죽은 옛 매입 실행이다
+                                        (*"경계를 내지 못한 에이전트: finance"*)
       ```
 
-      오늘 이것이 안 새는 이유는 **그 14행 전부 `sim_run_id` 가 `NULL`** 이라
-      축을 좁히는 이 함수에 한 행도 안 걸리기 때문이다. 축이 막고 있는 것이지
-      모양이 스스로를 증명하는 것이 아니다.
+      그 14행이 안 샜던 이유는 **전부 `sim_run_id` 가 `NULL`** 이라 축을 좁히는 이
+      함수에 한 행도 안 걸렸기 때문이다. **축이 막고 있었던 것이지 모양이 스스로를
+      증명한 것이 아니다.** 축이 실린 채로 품목 전에 죽는 실행이 한 번만 나오면
+      그날이 *"장부가 막았다"* 로 잘못 읽힌다.
 
-      더 단단한 키는 `scheduler.ledger_gap_request_id(as_of)` 다. 다만 그것으로
-      바꾸면 `count_runs_by_day.gate_blocked` 와 정의가 갈리므로, **두 곳을 같이**
-      바꿔야 한다 — 여기서 혼자 바꾸지 않는다.
+    🟢 **그래서 업무 키로 바꿨다.** 관문 행에는 그 행만의 키가 있다 —
+      `run_repository.ledger_gap_request_id(as_of)` 가 짓고
+      `persistence.record_ledger_gap` 이 `request_id` 로 적는다. **적는 쪽과
+      되찾는 쪽이 같은 함수를 본다.**
+
+    ★ **꼬리 문자열을 여기 다시 적지 않는다.** 주인은 `run_repository` 하나이고,
+      `count_runs_by_day` 의 `gate_blocked` 도 같은 꼬리로 그 행을 되찾는다 —
+      두 벌로 적으면 한쪽만 바뀌는 날 화면과 성적표가 조용히 갈린다.
+
+    ★ **`end_code` 를 같이 보지 않는다.** 종료 코드는 *"시작 못 했다"* 이고 그것은
+      관문 행만의 사실이 아니다. 같은 사실을 두 칸으로 물으면 한 칸이 바뀌는 날
+      판정이 이유 없이 조용해진다.
     """
-    return row.get("item") is None and row.get("end_code") == LEDGER_GAP_END_CODE
+    return is_ledger_gap_request_id(row.get("request_id"))
 
 
 def _boundary_from(row: MasterAgentRun, constraints: Mapping[str, Any]) -> ProcurementBoundary:
