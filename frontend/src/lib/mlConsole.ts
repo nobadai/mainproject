@@ -185,8 +185,24 @@ export const explain = (
 export const batchAgent = () => call<AgentReport>("agent/batch");
 /** 최근 배치 실행 목록. **배열이 그대로 옵니다** — 감싼 껍데기가 없습니다. */
 export const batchRecent = () => call<BatchRun[]>("batch/recent");
+/**
+ * **아침에 저장된** 점검 결과를 그대로 읽는다. 다시 안 돌린다 — 즉시 온다.
+ *
+ * ★ `/quality` 와 같은 모양이라 화면이 **같은 그림**으로 그린다.
+ * ★ `found: false` 는 «아직 없다» 이지 «정상이다» 가 아니다.
+ */
+export const qualitySaved = () =>
+  call<AgentReport & { found: boolean; file?: string }>("quality/saved");
+
 /** 데이터 품질 — DB 를 훑어 10초쯤 걸린다 (서버가 10분 캐시). */
-export const qualityAgent = (days = 180) => call<AgentReport>(`quality?days=${days}`);
+/**
+ * 지금 다시 잰다. **기억해 둔 것을 안 씁니다** (`fresh`).
+ *
+ * ★ 사람이 버튼을 누른 것은 «지금 이 순간을 재 달라» 는 뜻입니다.
+ *   10분 전 답을 주면 눌러도 시각이 안 바뀌어 «안 먹혔다» 로 보입니다.
+ */
+export const qualityAgent = (days = 180) =>
+  call<AgentReport>(`quality?days=${days}&fresh=1`);
 /** 오늘 기사에서 우리 품목 이야기를 골라 온다 (서버가 30분 캐시). */
 export const newsAgent = (date?: string) =>
   call<AgentReport>("agent/news" + (date ? `?date=${encodeURIComponent(date)}` : ""));
