@@ -56,6 +56,8 @@ READ = frozenset({
     "agent/report",
     "agent/explain",
     "retrain/status",
+    #   ★ 사람이 눌러야 할 결정이 있나. 화면이 탭을 띄울지 정하는 데 씁니다.
+    "retrain/pending",
     "retrain/job",
     "retrain/graph/status",
 })

@@ -21,7 +21,7 @@
  *   가격 예측을 보러 온 사람을 기다리게 하면 안 됩니다.
  */
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { AgentsTab } from "@/components/console/ml/AgentsTab";
 import { BatchTab } from "@/components/console/ml/BatchTab";
@@ -42,6 +42,7 @@ import { useTab } from "@/components/console/useTab";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { retrainPending } from "@/lib/mlConsole";
 import { forecast, type ForecastTab } from "@/lib/screen";
 
 function ForecastPane() {
@@ -306,23 +307,96 @@ const PANES = [
 
 type Pane = (typeof PANES)[number]["key"];
 
+/**
+ * 탭 하나. **오른쪽 위에 빨간 뱃지**를 달 수 있습니다.
+ *
+ * ★ 공용 `TabButtons` 를 안 쓰고 여기서 따로 그립니다. 뱃지를 붙이려면
+ *   공용 부품을 고쳐야 하는데, 그건 다른 파트도 같이 쓰는 것입니다.
+ */
+function Tab({
+  label,
+  on,
+  badge,
+  onClick,
+}: {
+  label: string;
+  on: boolean;
+  badge?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className="relative rounded-lg border px-3 py-1.5 text-[12px] font-medium transition"
+      style={{
+        borderColor: on ? "var(--color-nav)" : "var(--color-hair)",
+        background: on ? "var(--color-nav)" : "var(--color-panel)",
+        color: on ? "#f4f3ee" : "var(--color-ink2)",
+      }}
+    >
+      {label}
+      {badge ? (
+        //  ★ 눈에 띄어야 합니다. 이 탭은 **평소에 아예 없다가** 사람이
+        //    결정할 것이 생겼을 때만 나타납니다. 나타난 것을 못 보면
+        //    지금과 똑같아집니다.
+        <span
+          aria-label={`결정할 것 ${badge}건`}
+          className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold leading-none"
+          style={{ background: "var(--color-t-bad)", color: "#fff" }}
+        >
+          {badge}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
 export default function ForecastPage() {
   const [pane, setPane] = useState<Pane>("forecast");
+  //  ★ 사람이 눌러야 할 재학습 결정 수. **0 이면 탭 자체를 안 그립니다.**
+  //    후보가 현행보다 나을 때만 여기 셉니다 — 못하면 배치가 후보를 지우고
+  //    아무것도 안 남깁니다.
+  const [waiting, setWaiting] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    retrainPending()
+      .then((r) => alive && setWaiting(r.pending.length))
+      //  ★ 못 물어봤다고 탭을 띄우지 않습니다. 없는 결정을 있다고 하면
+      //    사람이 들어갔다가 빈 화면을 봅니다.
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const panes = PANES.filter((p) => p.key !== "retrain" || waiting > 0);
+  //  재학습 탭을 보다가 결정이 사라지면 (다른 사람이 눌렀거나 취소했거나)
+  //  빈 화면에 남지 않게 가격 예측으로 돌려놓습니다.
+  const here = panes.some((p) => p.key === pane) ? pane : "forecast";
 
   return (
     <>
-      <TabButtons
-        items={PANES.map((p) => ({ key: p.key, label: p.label }))}
-        value={pane}
-        onChange={setPane}
-      />
+      <div className="flex flex-wrap gap-1.5">
+        {panes.map((p) => (
+          <Tab
+            key={p.key}
+            label={p.label}
+            on={p.key === here}
+            badge={p.key === "retrain" ? waiting : undefined}
+            onClick={() => setPane(p.key)}
+          />
+        ))}
+      </div>
 
       {/*  ★ 고른 판만 그립니다. 넷을 다 그려 두고 숨기면 배치·데이터 이상·뉴스를
              매번 같이 불러 가격 예측이 느려집니다. */}
-      {pane === "forecast" && <ForecastPane />}
-      {pane === "batch" && <BatchTab />}
-      {pane === "agents" && <AgentsTab />}
-      {pane === "retrain" && <RetrainTab />}
+      {here === "forecast" && <ForecastPane />}
+      {here === "batch" && <BatchTab />}
+      {here === "agents" && <AgentsTab />}
+      {here === "retrain" && <RetrainTab />}
     </>
   );
 }

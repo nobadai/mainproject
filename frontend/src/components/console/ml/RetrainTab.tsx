@@ -1,10 +1,13 @@
 "use client";
 
 /**
- * ML 모델 재학습 — 상태 기계로 돌고, 사람이 **두 번** 누른다.
+ * ML 모델 재학습 — 사람은 **한 번**만 누른다 (2026-09-09 바꿈).
  *
- *     판정 → 「후보를 만들까요」 → 만들기 → 견주기 → 「바꿀까요」 → 바꾸기
- *                  ↑ 사람                          ↑ 사람
+ *     판정 → 만들기 → 견주기 → 「모델 업데이트」 → 바꾸기
+ *      (배치가 밤새 여기까지 해 둔다)      ↑ 사람
+ *
+ * ★ **후보가 현행보다 나을 때만 이 탭이 보입니다.** 못하면 배치가 후보를
+ *   지우고 아무것도 안 남깁니다 — 사람이 볼 것이 없습니다.
  *
  * ★ **검증을 통과 못 하면 두 번째 물음이 아예 안 나옵니다.** 버튼을 띄워 두고
  *   막는 것보다, 물음을 안 내는 편이 낫습니다.
@@ -22,7 +25,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   graphAct,
-  graphReset,
   graphStatus,
   MlError,
   type GraphStatus,
@@ -199,30 +201,24 @@ export function RetrainTab({ canApprove = true }: { canApprove?: boolean }) {
         </header>
 
         <p className="m-0 text-[11.5px] leading-relaxed" style={{ color: "var(--color-mut)" }}>
-          사람이 <b style={{ color: "var(--color-ink)" }}>두 번</b> 직접 버튼을 눌러야 합니다 —
-          &laquo;후보 모델 만들기&raquo;와 &laquo;새 모델로 교체&raquo;. 그 사이에 있는 과정은
-          모두 자동으로 진행됩니다.
+          <b style={{ color: "var(--color-ink)" }}>새 모델을 만들고 지금 모델과 견주는 것까지</b>{" "}
+          자동으로 끝나 있습니다. 아래 표가 그 결과입니다.
           <br />★{" "}
           <b style={{ color: "var(--color-ink)" }}>
-            검증 결과를 통과하지 못하면 &laquo;새 모델로 교체&raquo; 버튼이 아예 나타나지 않습니다.
+            이 화면은 새 모델이 지금 모델보다 나을 때만 보입니다.
           </b>{" "}
-          진행 상태가 파일로 저장되므로 서버를 다시 시작해도 그대로 유지됩니다.
+          못하면 새 모델을 지우고 아무것도 알리지 않습니다. 사람이 누를 자리는{" "}
+          <b style={{ color: "var(--color-ink)" }}>&laquo;모델 업데이트&raquo; 하나</b>뿐입니다.
         </p>
 
         {/*  ★ 지금은 모두에게 보입니다 — 승인권자가 아직 없습니다. */}
         {canApprove ? (
           <div className="flex flex-wrap gap-2">
-            {!running && !asking && (
-              <Button onClick={() => void act()} disabled={busy} tone="primary">
-                지금 판단하기
-              </Button>
-            )}
-            {/*  ★ 대조는 백엔드가 보내는 **한글** 로 한다. 영어로 바꾸면 안 걸린다. */}
-            {asking?.ask?.includes("후보") && (
-              <Button onClick={() => void act("build")} disabled={busy} tone="primary">
-                후보 모델 만들기
-              </Button>
-            )}
+            {/*  ★ 「판단하기」 와 「후보 만들기」 버튼을 없앴습니다 (2026-09-09).
+                   둘 다 배치가 밤새 해 둡니다. 사람이 누를 자리는 하나입니다.
+
+                   ★ 대조는 백엔드가 보내는 **한글** 로 합니다. 영어로 바꾸면
+                     안 걸립니다. */}
             {asking?.ask?.includes("바꿀까요") && (
               <Button
                 onClick={() =>
@@ -236,7 +232,7 @@ export function RetrainTab({ canApprove = true }: { canApprove?: boolean }) {
                 disabled={busy}
                 tone="primary"
               >
-                새 모델로 교체
+                모델 업데이트
               </Button>
             )}
             {asking && (
@@ -244,17 +240,7 @@ export function RetrainTab({ canApprove = true }: { canApprove?: boolean }) {
                 중단하기
               </Button>
             )}
-            {done && Object.keys(values).length > 0 && (
-              <Button
-                onClick={() => {
-                  void graphReset(kind).then(load);
-                }}
-                disabled={busy}
-                tone="warn"
-              >
-                처음부터 다시
-              </Button>
-            )}
+
           </div>
         ) : (
           <p
