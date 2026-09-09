@@ -5,7 +5,7 @@
  *
  * ★ **우리가 쓰던 화면(`localhost:3100`)의 예측 탭을 옮겨 왔습니다.**
  *   가격종류 셋 · 기준일 고르기 · 채점 상태 · 옛 기준 경고 · 18일 전체 ·
- *   실제값 겹치기 · 게이트 구간 · 리드타임별 표.
+ *   실제값 겹치기 · 기준일 그날(리드 0)부터 · 리드타임별 표.
  *
  * ★ **오차를 같이 보입니다.** 숫자 하나만 크게 띄우면 틀린 줄 모르고 씁니다.
  *   1,000원짜리를 배추는 197원 틀립니다.
@@ -22,7 +22,6 @@ import {
   Panel,
   Pill,
   SourceTag,
-  StatRow,
   TabButtons,
 } from "@/components/console/Blocks";
 import { useTab } from "@/components/console/useTab";
@@ -35,9 +34,10 @@ export default function ForecastPage() {
   const [item, setItem] = useState("배추");
   const [kind, setKind] = useState("auc");
   const [baseDt, setBaseDt] = useState<string | undefined>(undefined);
-  //  ★ 켜면 지난 날짜의 실제 가격을 함께 그립니다 (시연용).
-  //    끄면 운영에서 보이는 모습이 됩니다 — 예측 시점에는 정답이 없습니다.
-  const [showActual, setShowActual] = useState(true);
+  //  ★ **기본은 꺼 둡니다.** 예측 시점에는 정답이 없습니다 — 켜 두면
+  //    «맞았네/틀렸네» 를 먼저 보게 되고, 그건 그날 알 수 있던 것이 아닙니다.
+  //    되짚어 볼 때만 켭니다.
+  const [showActual, setShowActual] = useState(false);
 
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   const { data, error } = useTab<ForecastTab>(
@@ -172,8 +172,6 @@ export default function ForecastPage() {
         />
       )}
 
-      <Note note={data.caveat} />
-
       {/* ── 세 품목 카드 ──────────────────────────────────────────── */}
       <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
         {data.cards.map((c) => (
@@ -217,12 +215,16 @@ export default function ForecastPage() {
         ))}
       </div>
 
-      <StatRow items={data.headline} />
-
       {/* ── 18일 그래프 ───────────────────────────────────────────── */}
       <Panel
         title={data.chart.label}
-        subtitle={`기준일 ${data.selected_base_dt} · 리드타임 ${data.gate_lead} 미만은 모델을 안 씁니다`}
+        subtitle={
+          //  ★ 리드타임 게이트는 2026-09-09 에 껐습니다. 그 전에는 여기에
+          //    「리드 3 미만은 모델을 안 씁니다」 가 떴습니다.
+          data.gate_lead > 0
+            ? `기준일 ${data.selected_base_dt} · 리드타임 ${data.gate_lead} 미만은 모델을 안 씁니다`
+            : `기준일 ${data.selected_base_dt} · 맨 왼쪽 칸이 그날 밤 경매입니다`
+        }
       >
         <LineChart chart={chart} days={data.axis.days} asOfIndex={0} height={320} />
         {data.quality_note && (
@@ -237,7 +239,10 @@ export default function ForecastPage() {
       </Panel>
 
       {/* ── 리드타임별 표 ─────────────────────────────────────────── */}
-      <Panel title="하루씩 뜯어보기" subtitle="어느 값이 모델이고 어느 값이 어제값인가">
+      <Panel
+        title="하루씩 뜯어보기"
+        subtitle="리드 0 이 기준일 그날 · 어느 값이 모델이고 어느 값이 차단된 값인가"
+      >
         <DataTable table={rows} />
       </Panel>
 

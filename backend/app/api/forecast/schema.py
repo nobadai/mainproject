@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.api.primitives import CalendarAxis, Chart, Note, Source, Stat, Table
+from app.api.primitives import CalendarAxis, Chart, Note, Source, Table
 
 
 class KindOption(BaseModel):
@@ -87,7 +87,6 @@ class ForecastTab(BaseModel):
 
     #  값
     cards: list[ItemCard] = Field(description="세 품목 요약. 대시보드가 같이 쓴다")
-    headline: list[Stat] = Field(description="결과 확인 건수 · 평균 오차 · 구간 적중")
     axis: CalendarAxis = Field(
         description="기준일 + 대상일 18개. **회색 칸은 게이트 구간**이다"
     )

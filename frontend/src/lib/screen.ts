@@ -202,7 +202,6 @@ export interface ForecastTab {
   base_dates_truncated: boolean;
   notice: Note | null;
   cards: ItemCard[];
-  headline: Stat[];
   axis: CalendarAxis;
   chart: Chart;
   rows: Table;

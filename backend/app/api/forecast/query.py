@@ -40,7 +40,6 @@ from app.api.primitives import (
     Note,
     Series,
     Source,
-    Stat,
     Table,
 )
 
@@ -52,8 +51,17 @@ KINDS = ("auc", "whsl", "rtl")
 #: 운영 모델만. **붙임표(`ops-…`)는 실험이라 섞으면 안 된다.**
 OPS = ("ops_auc", "ops_whsl", "ops_rtl")
 
-#: 리드타임 3 미만은 모델을 안 쓴다 — 어제 가격이 이미 정답에 가깝다 (§5.9).
-GATE_LEAD = 3
+#: 리드타임 게이트. **2026-09-09 에 껐습니다** — 0 이면 게이트 없음.
+#:
+#: ★ 그 전에는 `LT<3` 이면 모델 대신 앵커를 그대로 내보냈습니다. 매입이
+#:   오늘 밤 경매를 두고 판단해야 하는데 «어제값» 을 받으면 쓸 값이 없어
+#:   껐습니다. 화면도 그때 만든 자리(회색 칸 · 「어제값(게이트)」)가 남아
+#:   있었는데 같이 걷었습니다.
+GATE_LEAD = 0
+
+#: 리드 0 = **기준일 그날**. 가락 경매는 그날 밤에 열리고 배치는 아침에
+#: 도니, 당일 경매도 아직 안 일어난 일이라 예측 대상입니다.
+TODAY_LEAD = 0
 
 #: 이 날 이전 예측은 경락가에 포장 규격이 섞여 있었다 (2026-08-27 발견).
 SPEC_FIX_AT = "2026-08-28"
@@ -107,11 +115,14 @@ _SQL_ROWS = """
      ORDER BY lead_biz_d
 """
 
-#: 세 품목의 «첫 쓸 만한 값».
+#: 세 품목의 **기준일 그날 값** (리드 0).
 #:
-#: ★ **게이트를 지난 첫 리드타임을 씁니다.** 리드타임 1~2 는 모델이 아니라
-#:   어제값이 그대로 나갑니다 (§5.9). 그걸 카드에 크게 «예측» 이라고 띄우면
-#:   **모델이 낸 값으로 읽힙니다.** 대시보드도 이 카드를 그대로 씁니다.
+#: ★ 전에는 «게이트를 지난 첫 리드» 를 썼습니다. 게이트가 리드 1~2 를
+#:   어제값으로 덮던 때라 그게 첫 모델값이었습니다. 게이트를 끄고 리드 0 을
+#:   만든 지금은 **기준일 그날**이 맞습니다 — 오늘 9월 9일인데 카드에
+#:   9월 14일 값이 뜨고 있었습니다.
+#:
+#: ★ 그날 값이 없으면 가장 가까운 리드로 떨어집니다 (`ORDER BY lead_biz_d`).
 _SQL_CARDS = """
     SELECT DISTINCT ON (item_nm)
            item_nm, lead_biz_d, target_dt, pred_prc, pred_lo, pred_hi, gated
@@ -191,7 +202,7 @@ def _demo_tab(as_of: date, kind: str, item: str) -> ForecastTab:
         base_dates=[BaseDateOption(base_dt=as_of.isoformat(), total=0, scored=0,
                                    pre_fix=False)],
         selected_base_dt=as_of.isoformat(), base_dates_truncated=False,
-        cards=cards, headline=[],
+        cards=cards,
         axis=CalendarAxis(as_of=as_of.isoformat(), as_of_index=0, days=days),
         chart=Chart(
             label=f"{item} {_KIND_LABEL[kind]}", y_min=y_min, y_max=y_max, y_ticks=ticks,
@@ -220,14 +231,6 @@ def _accuracy_table() -> Table:
             Column(key="band", label="구간"),
         ],
         rows=list(_ACCURACY),
-        note=Note(
-            tone="warn",
-            text=(
-                "★ 1,000원짜리를 배추는 197원, 무는 186원 틀립니다. "
-                "먼 날짜일수록 더 틀립니다 — D+5 13.0% · D+14 17.8% · D+18 19.8%. "
-                "홀드아웃 2024~2025 · 486 기준일 실측입니다."
-            ),
-        ),
     )
 
 
@@ -263,13 +266,6 @@ def _quality_table(live: bool) -> Table:
         ],
         rows=rows,
         empty_text="품질 판정 기록이 없습니다",
-        note=Note(
-            tone="neutral",
-            text=(
-                "「아니오」인 조합은 어제 가격을 그대로 쓰는 편이 낫습니다. "
-                "막힌 조합은 예측 대신 **어제값이 그대로 나갑니다.**"
-            ),
-        ),
     )
 
 
@@ -316,7 +312,7 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
     #    서비스 창고(`ml_price_forecasts`)는 대문자라 헷갈리기 쉽다 —
     #    대문자로 물으면 오류 없이 **0행**이 와서 조용히 예시값으로 떨어진다.
     rows = _fetch(_SQL_ROWS, (list(OPS), chosen_dt, kind, item))
-    card_rows = _fetch(_SQL_CARDS, (list(OPS), chosen_dt, kind, list(ITEMS), GATE_LEAD))
+    card_rows = _fetch(_SQL_CARDS, (list(OPS), chosen_dt, kind, list(ITEMS), TODAY_LEAD))
     if not rows or not card_rows:
         return _demo_tab(as_of, kind, item)
 
@@ -334,87 +330,54 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
             gated=bool(r["gated"]),
         ))
 
-    # ── 축: 기준일 + 대상일 18개 ───────────────────────────────────────
-    #  ★ 기준일 그 자체를 맨 앞에 둔다. 값은 출발점(앵커)이고 예측이 아니다 —
-    #    기준일이 12-31 인데 선이 1-2 에서 시작하면 «12-31 은 어디 갔나» 가 된다.
+    # ── 축: 대상일 그대로 ─────────────────────────────────────────────
+    #
+    #  ★ **기준일을 따로 앞에 붙이지 않습니다.** 리드 0 의 대상일이 곧
+    #    기준일이라, 붙이면 같은 날이 두 칸이 됩니다. 전에는 리드가 1 부터
+    #    시작해 «기준일이 어디 갔나» 가 됐고 그래서 앵커를 맨 앞에 놓았는데,
+    #    이제 그 자리에 진짜 예측이 들어갑니다.
+    #
+    #  ★ 회색 칸은 **모델을 안 쓴 칸**입니다. 지금은 품질 차단(`gated`)뿐이고
+    #    리드타임 게이트는 껐습니다.
     _DOW = ("월", "화", "수", "목", "금", "토", "일")
-    base = date.fromisoformat(chosen_dt)
-    days = [Day(date=chosen_dt, dow=_DOW[base.weekday()], market_open=True, survey=True)]
+    days = []
     for r in rows:
         d = r["target_dt"]
         days.append(Day(
             date=d.isoformat(), dow=_DOW[d.weekday()],
-            #  ★ 회색 칸 = 게이트 구간. 여기는 모델이 아니라 어제값이 나간다.
-            market_open=not (r["gated"] or r["lead_biz_d"] < GATE_LEAD),
-            survey=True,
+            market_open=not r["gated"], survey=True,
         ))
+
     anchor = _num(rows[0]["anchor_prc"])
-    pred: list[float | None] = [anchor]
-    lo_s: list[float | None] = [None]
-    hi_s: list[float | None] = [None]
-    actual: list[float | None] = [anchor]
+    pred: list[float | None] = []
+    lo_s: list[float | None] = []
+    hi_s: list[float | None] = []
+    actual: list[float | None] = []
     for r in rows:
         pred.append(_num(r["pred_prc"]))
         lo_s.append(_num(r["pred_lo"]))
         hi_s.append(_num(r["pred_hi"]))
         actual.append(_num(r["actual_prc"]))
 
-    scored = [r for r in rows if r["actual_prc"] is not None]
     seen = [v for v in pred + actual + lo_s + hi_s if v is not None]
     y_min, y_max, ticks = _scale(seen)
 
     chart = Chart(
-        label=f"{item} {_KIND_LABEL[kind]} · 18일",
+        label=f"{item} {_KIND_LABEL[kind]} · 기준일부터 18영업일",
         y_min=y_min, y_max=y_max, y_ticks=ticks,
-        shade_label=f"게이트 구간 (리드타임 {GATE_LEAD} 미만) — 모델 대신 어제값",
+        shade_label="모델을 안 쓴 칸 — 품질 차단으로 어제값이 나감",
         series=[
             Series(name="예측", data=pred, tone="info", end_dot=True),
             Series(name="실제", data=actual, tone="warn", width=1.6, dashed=True),
+            #  ★ 출발점을 가로선으로 깐다. 모델이 여기서 위로 갔나 아래로
+            #    갔나가 한눈에 보인다 — 매입은 그 방향으로 판단한다.
+            Series(name="출발점 (어제값·7일평균 섞음)",
+                   data=[anchor] * len(pred) if anchor else [],
+                   tone="neutral", dashed=True, width=1, opacity=0.6),
         ],
         bands=[Band(name="예측 구간", hi=hi_s, lo=lo_s, tone="info")],
         x_labels=[d.date[5:] for d in days],
-        note=Note(
-            tone="neutral",
-            text=(
-                "맨 왼쪽 점은 **출발점(어제 가격)**이지 예측이 아닙니다. "
-                "실제선은 대상일이 지난 칸에만 그려집니다 — 빈 칸은 0 이 아니라 "
-                "**아직 안 지난 날**입니다."
-            ),
-        ),
     )
-
-    # ── 요약 ─────────────────────────────────────────────────────────
-    headline: list[Stat] = [
-        Stat(label="예측 건수", value=str(len(rows)), unit="건",
-             detail=f"리드타임 1~{rows[-1]['lead_biz_d']} 영업일", raw=len(rows)),
-    ]
-    if scored:
-        errs = [float(r["abs_pct_err"]) for r in scored if r["abs_pct_err"] is not None]
-        mape = sum(errs) / len(errs) if errs else None
-        hit = sum(1 for r in scored if r["pred_lo"] <= r["actual_prc"] <= r["pred_hi"])
-        headline += [
-            Stat(label="결과 확인", value=f"{len(scored)}/{len(rows)}", unit="건",
-                 detail="대상일이 지나 실제 가격과 맞춰진 것", raw=len(scored)),
-            Stat(label="평균 오차", value=f"{mape:.1f}" if mape is not None else "—",
-                 unit="%" if mape is not None else None,
-                 detail="이 기준일 · 이 품목만", tone="warn",
-                 raw=round(mape, 2) if mape is not None else None),
-            Stat(label="구간 적중", value=f"{hit}/{len(scored)}", unit="건",
-                 detail="실제가가 예측 구간 안에 들어온 횟수",
-                 tone="good" if hit * 10 >= len(scored) * 8 else "warn", raw=hit),
-        ]
-    else:
-        headline.append(Stat(
-            label="결과 확인", value="아직", detail="대상일이 아직 안 지났습니다"
-        ))
-
-    gated_n = sum(1 for r in rows if r["gated"] or r["lead_biz_d"] < GATE_LEAD)
-    if gated_n:
-        headline.append(Stat(
-            label="모델 안 쓴 칸", value=str(gated_n), unit="건",
-            detail=f"리드타임 {GATE_LEAD} 미만 — 어제값이 그대로 나갑니다",
-            tone="info", raw=gated_n,
-        ))
 
     # ── 리드타임별 표 ─────────────────────────────────────────────────
     table = Table(
@@ -435,16 +398,11 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
                 "band": f"{int(r['pred_lo']):,}–{int(r['pred_hi']):,}",
                 "actual": None if r["actual_prc"] is None else f"{int(r['actual_prc']):,}",
                 "err": None if r["abs_pct_err"] is None else f"{float(r['abs_pct_err']):.1f}",
-                "src": ("어제값 (게이트)"
-                        if r["gated"] or r["lead_biz_d"] < GATE_LEAD else "모델"),
+                "src": "어제값 (차단)" if r["gated"] else "모델",
             }
             for r in rows
         ],
         empty_text="이 조건에 예측이 없습니다",
-        note=Note(
-            tone="neutral",
-            text="**실제 칸이 빈 줄은 아직 대상일이 안 지난 것**입니다. 0 이 아닙니다.",
-        ),
     )
 
     #  ★ 「판정 근거」 는 이 조합을 써도 되는지에 대한 말이다.
@@ -473,7 +431,7 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
         kinds=list(_KIND_META), selected_kind=kind,
         items=list(ITEMS), selected=item,
         base_dates=dates, selected_base_dt=chosen_dt, base_dates_truncated=truncated,
-        notice=notice, cards=cards, headline=headline,
+        notice=notice, cards=cards,
         axis=CalendarAxis(as_of=chosen_dt, as_of_index=0, days=days),
         chart=chart, rows=table, gate_lead=GATE_LEAD,
         quality_note=quality_note,
