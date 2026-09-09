@@ -134,8 +134,15 @@ class ConfirmedSale:
     total_amount_krw: Decimal
 
 
-def read_confirmed_sales(conn: Any, *, as_of: date) -> tuple[ConfirmedSale, ...]:
-    """`as_of` 가 `sale_date` 인 확정 판매. **`DELIVERED` 도 대상이다.**
+def read_confirmed_sales(
+    conn: Any, *, as_of: date, sim_run_id: str
+) -> tuple[ConfirmedSale, ...]:
+    """`as_of` 가 `sale_date` 인 **이 실행의** 확정 판매. **`DELIVERED` 도 대상이다.**
+
+    🔴 **`sim_run_id` 로 거른다** (마스터 판단 2026-09-09). 안 거르면 남의 실행 판매가
+      같은 `sale_date` 에 들어왔을 때 `confirm_receivable` 이 conflict 를 내고 **그날
+      전체가 `BLOCKED`** 가 된다. 남의 축 판매는 *"못 만든 것"* 이 아니라 **애초에 내
+      대상이 아니다** — 그 둘을 한 값으로 접으면 막힌 날을 나중에 설명할 수 없다.
 
     ★ **마스터 커넥션으로 읽는다.** 채권을 쓰는 트랜잭션과 같은 커넥션이라야, 읽은
       판매와 쓴 채권이 같은 스냅샷 위에 선다 (`outbound_flow.due_sale_items` 와 같은
@@ -157,11 +164,12 @@ def read_confirmed_sales(conn: Any, *, as_of: date) -> tuple[ConfirmedSale, ...]
                        total_amount_krw
                   FROM {}.sales
                  WHERE sale_date = %s
+                   AND sim_run_id = %s
                    AND order_status = ANY(%s)
                  ORDER BY sale_id
                 """
             ).format(schema),
-            [as_of, list(ISSUABLE_ORDER_STATUSES)],
+            [as_of, sim_run_id, list(ISSUABLE_ORDER_STATUSES)],
         )
         rows = cursor.fetchall()
     return tuple(
@@ -225,7 +233,7 @@ class FinanceReceivableAdapter:
             )
 
         try:
-            sales = self.load_sales(conn, as_of=as_of)
+            sales = self.load_sales(conn, as_of=as_of, sim_run_id=self.sim_run_id)
         except Exception as exc:  # noqa: BLE001 - 조회 실패를 `()` 로 접지 않는다.
             # 🔴 **없는 것과 못 읽은 것은 다르다.** `()` 로 접으면 표를 못 읽은 날이
             #   *"오늘은 판 게 없었다"* 로 읽힌다.

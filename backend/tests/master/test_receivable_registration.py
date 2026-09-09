@@ -80,10 +80,15 @@ class _판매조회기록:
 
     def __init__(self, *sales: ConfirmedSale) -> None:
         self.calls: list[date] = []
+        #: 어댑터가 **어느 축으로** 물었는가. 축을 안 넘기면 남의 실행 판매가 섞인다.
+        self.axes: list[str] = []
         self.sales = sales
 
-    def __call__(self, conn: Any, *, as_of: date) -> tuple[ConfirmedSale, ...]:
+    def __call__(
+        self, conn: Any, *, as_of: date, sim_run_id: str
+    ) -> tuple[ConfirmedSale, ...]:
         self.calls.append(as_of)
+        self.axes.append(sim_run_id)
         return self.sales
 
 
@@ -231,6 +236,44 @@ def test_축_조회를_임포트_시점에_하지_않는다() -> None:
     assert len(호출) == 2, "호출마다 축을 다시 읽어야 한다 — 축은 마스터가 캐시할 값이 아니다"
 
 
+def test_판매를_마스터_축으로_읽는다() -> None:
+    """🔴 **남의 실행 판매를 읽으면 안 된다** (마스터 판단 2026-09-09).
+
+    ⚠️ 안 거르면 남의 축 판매가 같은 `sale_date` 에 들어왔을 때 `confirm_receivable`
+      이 conflict 를 내고 **그날 전체가 `BLOCKED`** 가 된다. 남의 축 판매는 *"못 만든
+      것"* 이 아니라 **애초에 내 대상이 아니다** — 그 둘을 접으면 막힌 날을 나중에
+      설명할 수 없다.
+    """
+    조회 = _판매조회기록()
+    adapter = FinanceReceivableAdapter(
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        read_axis=_축(financing_mode="LOAN_BASELINE"),
+        load_sales=조회,
+        confirm=_가짜원장(),
+    )
+
+    adapter.issue(conn=None, as_of=AS_OF)
+
+    assert 조회.axes == [BURN_IN_SIM_RUN_ID], (
+        f"판매를 마스터 축으로 안 읽었다: {조회.axes}"
+    )
+
+
+def test_판매조회_대역이_축을_실제로_받는다() -> None:
+    """🔴 **자기 생존 검사.** 정본 조회가 `sim_run_id` 를 안 받으면 위 검사가 공짜다."""
+    import inspect
+
+    from app.master.finance_receivable import read_confirmed_sales
+
+    파라미터 = inspect.signature(read_confirmed_sales).parameters
+    assert "sim_run_id" in 파라미터, (
+        "정본 조회가 sim_run_id 를 안 받는다 — 대역만 받으면 배선을 안 재는 것이다"
+    )
+    assert 파라미터["sim_run_id"].kind is inspect.Parameter.KEYWORD_ONLY, (
+        "sim_run_id 가 위치 인자면 as_of 와 자리를 바꿔 부를 수 있다"
+    )
+
+
 def test_판매도_호출마다_다시_읽는다() -> None:
     """★ 배선 시점에 고정하면 표에 한 줄 넣어도 앱을 다시 띄우기 전까지 아무 일도 없다."""
     조회 = _판매조회기록()
@@ -296,7 +339,7 @@ def test_축이_모호하면_사유에_그대로_남는다() -> None:
 def test_판매를_못_읽으면_NOTHING_DUE_가_아니라_BLOCKED_다() -> None:
     """🔴 **없는 것과 못 읽은 것은 다르다.** `()` 로 접으면 DB 가 끊긴 날이 정상으로 보인다."""
 
-    def 터진다(conn: Any, *, as_of: date):
+    def 터진다(conn: Any, *, as_of: date, sim_run_id: str):
         raise RuntimeError("relation \"sales\" does not exist")
 
     adapter = FinanceReceivableAdapter(
@@ -481,14 +524,19 @@ def test_조회가_그_상태들을_실제로_묻는다() -> None:
         def cursor(self):
             return _커서()
 
-    rows = read_confirmed_sales(_커넥션(), as_of=AS_OF)
+    rows = read_confirmed_sales(_커넥션(), as_of=AS_OF, sim_run_id=BURN_IN_SIM_RUN_ID)
 
     assert rows == ()
     assert 잡은["params"][0] == AS_OF, "sale_date 로 안 걸렀다"
-    assert "DELIVERED" in 잡은["params"][1], (
-        f"조회가 DELIVERED 를 안 묻는다: {잡은['params'][1]}"
+    #: 🔴 **축을 SQL 이 실제로 싣는가** (마스터 판단 2026-09-09). 어댑터가 넘겨도
+    #:   조회가 안 쓰면 남의 실행 판매가 그대로 딸려 온다.
+    assert 잡은["params"][1] == BURN_IN_SIM_RUN_ID, (
+        f"조회가 sim_run_id 를 안 싣는다: {잡은['params']}"
     )
-    assert list(잡은["params"][1]) == list(ISSUABLE_ORDER_STATUSES), (
+    assert "DELIVERED" in 잡은["params"][2], (
+        f"조회가 DELIVERED 를 안 묻는다: {잡은['params'][2]}"
+    )
+    assert list(잡은["params"][2]) == list(ISSUABLE_ORDER_STATUSES), (
         "상수와 실제 조회 목록이 갈렸다 — 상수만 고치면 조용히 안 먹는다"
     )
 
