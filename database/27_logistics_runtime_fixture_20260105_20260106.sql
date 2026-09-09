@@ -46,11 +46,13 @@
 --   시끄러운데(INSERT) 물류만 조용해진다(씨앗 + UPDATE). Day2 가 *"입고 예정 없음"*
 --   을 사실로 받아 판단을 계속한다.
 --
---   ⚠️ **`in_transit_json` 도 함께 `NULL` 이어야 한다.** `schemas.py` 의
---      `LogisticsRuntimeFixture` 가 `UNRESOLVED` 에 `[]` 를 붙이면 거부하고
---      (`in_transit UNRESOLVED must preserve None`), 그 행은 읽히지 않아 어댑터가
---      `RUNTIME_NOT_READY` 가 아니라 **`ERROR`** 로 선다. 그리고 판정을 만드는 것은
---      상태 문자열이 아니라 `in_transit is None` 쪽이다 - 규칙 두 곳 모두 그것만 본다.
+--   ★ **판정 근거는 이제 status 하나다** (W3-3/4 · 2026-09-09). 종전에는 이 행에
+--      `in_transit_json = NULL` 도 함께 심어야 했다 - `LogisticsRuntimeFixture` 가
+--      `UNRESOLVED` 에 `[]` 를 붙이면 거부했고, 규칙이 보는 것도 `in_transit is None`
+--      쪽이었다. 지금은 Reader 가 `status == UNRESOLVED` 를 보고 목록을 `None` 으로
+--      세우므로(`repository._schedule_source` · `inbound_stock._fixture_row`),
+--      status 만 심으면 같은 결과가 선다. 두 JSON 칸은 DROP 대상이다
+--      (`database/logistics_drop_inbound_json.sql`).
 --
 --   ★ 전이가 성공하면 `persist_inventory` 가 두 칸을 함께 덮어써 짝이 맞는다.
 --
@@ -105,8 +107,8 @@ $$;
 
 INSERT INTO haetdeul.logistics_runtime_fixture (
     fixture_id, sim_run_id, as_of,
-    in_transit_status,         in_transit_json,
-    confirmed_inbound_status,  confirmed_inbound_json,
+    in_transit_status,
+    confirmed_inbound_status,
     confirmed_outbound_status, confirmed_outbound_json,
     lot_priority_status,       lot_priority_json,
     zone_capacity_status,      guaranteed_capacity_by_zone_json,
@@ -118,8 +120,8 @@ SELECT
     target.as_of,
     -- 🔴 두 행이 다르다 - 위 머리말 참조. 승인의 `persist_inventory` 가 채우기
     --    전까지, 01-05 는 확인된 0 이고 01-06 은 아직 확인한 적이 없다.
-    target.in_transit_status, target.in_transit_json,
-    base.confirmed_inbound_status,  base.confirmed_inbound_json,
+    target.in_transit_status,
+    base.confirmed_inbound_status,
     base.confirmed_outbound_status, base.confirmed_outbound_json,
     -- lot_priority 는 판단이라 물려받지 않는다 (마스터 회신 §2).
     'CONFIRMED_ZERO', '[]'::JSONB,
@@ -135,7 +137,7 @@ CROSS JOIN (
         (
             DATE '2026-01-05',
             -- Day1 이 읽을 T0. 확인했고 입고 예정이 없다 - 참말이다.
-            'CONFIRMED_ZERO', '[]'::JSONB,
+            'CONFIRMED_ZERO',
             'MASTER-DECISION-20260904:THROUGHPUT-D1',
             '관통 Day1. 마스터가 관통 날짜를 12-31→01-05 로 옮겼다 (회신 §1.2). '
             '이 날 승인이 01-06 행의 in_transit 을 채운다.'
@@ -143,7 +145,7 @@ CROSS JOIN (
         (
             DATE '2026-01-06',
             -- 🔴 전이가 UPDATE 할 그릇. 아직 아무도 확인하지 않았다.
-            'UNRESOLVED', NULL::JSONB,
+            'UNRESOLVED',
             'MASTER-DECISION-20260904:THROUGHPUT-D2',
             '관통 Day2. 01-05 승인의 target_state_date 가 이 날이다. in_transit 은 '
             'UNRESOLVED 로 둔다 - 전이가 실패하면 그대로 남아 missing_data 로 나가고, '
@@ -151,7 +153,7 @@ CROSS JOIN (
             'register_transition 이 붙고 open_day 가 생기면 이런 행은 전이가 스스로 '
             '만든다 - 이 행은 그때까지의 임시방편이다.'
         )
-) AS target(as_of, in_transit_status, in_transit_json, source_ref, note)
+) AS target(as_of, in_transit_status, source_ref, note)
 WHERE base.as_of = DATE '2025-12-31'
   AND base.usage_scope = 'AGENT_MVP_DEMO'
   AND base.is_active
@@ -174,7 +176,7 @@ COMMIT;
 --   as_of=2026-01-05  PRE_PURCHASE → READY
 --   as_of=2026-01-06  PRE_PURCHASE → RUNTIME_NOT_READY
 --                     missing_data 에 logistics_rule/IN_TRANSIT_SCHEDULE_UNRESOLVED
---   ⚠️ 01-06 이 ERROR 로 서면 in_transit_json 이 NULL 이 아니다.
+--   ⚠️ 01-06 이 RUNTIME_NOT_READY 가 아니면 in_transit_status 가 UNRESOLVED 가 아니다.
 --
 --
 -- ── 되돌리기 ──────────────────────────────────────────────────────────────

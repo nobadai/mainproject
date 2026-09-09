@@ -346,20 +346,20 @@ def persist_inventory(
       ⚠️ **직렬화되는 것은 같은 fixture 행뿐이다.** 다른 `as_of` · 다른 `sim_run_id` 를
          겨냥한 승인은 서로 기다리지 않는다.
 
-    ★ **`inbound_schedules` 에도 같이 쓴다 (Dual Write · W3-1 · 2026-09-09).**
+    ★ **업무 사실은 `inbound_schedules` 에만 적는다 (W3-3).**
 
       ```text
-      Reader   아직 Legacy JSON        ← 이번 판은 정본을 안 바꾼다
-      Writer   Legacy JSON + 신규 표    ← 여기
+      Header   in_transit_status · confirmed_inbound_status   여기서 CONFIRMED 로
+      업무 사실 inbound_schedules 1행                          _record_schedules
       ```
 
-      🔴 **같은 커넥션 · 같은 바깥 트랜잭션이다.** 한쪽만 커밋되면 두 정본 후보가
-         갈린 채 남고, 그 상태를 아무도 안 알려 준다. 이 함수가 커밋을 안 하는 것이
-         그 보장의 전부다.
+      🔴 **날짜별 복제를 안 한다.** 일정 한 행이 날짜에 안 묶여 있고 Reader 가
+         날짜로 질의한다 — 미래 날짜 행이 먼저 열려도 그 승인을 못 보는 일이 없다
+         (FIRSTINB 사고가 구조적으로 재현되지 않는 이유).
 
-      🔴 **날짜별 복제를 안 한다.** JSON 쪽은 여전히 `as_of` 행 하나에만 쓰지만
-         (그래서 미래 날짜가 먼저 열리면 FIRSTINB 사고가 난다), 신규 표는 한 행을
-         적고 조회가 날짜로 자른다 — W3-2 에서 Reader 가 그쪽으로 옮겨 간다.
+      🔴 **같은 커넥션 · 같은 바깥 트랜잭션이다.** status 와 일정이 한쪽만 커밋되면
+         *"확인했다는데 볼 것이 없는 날"* 이 남는다. 이 함수가 커밋을 안 하는 것이
+         그 보장의 전부다.
 
     :raises LogisticsFixtureMissing: 그날의 fixture 행이 없을 때. **만들지 않는다.**
     :raises InboundScheduleConflict: 같은 `inbound_id` 가 다른 사실로 이미 있거나,

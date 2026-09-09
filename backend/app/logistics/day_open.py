@@ -280,9 +280,13 @@ class LogisticsDayOpening:
                        usage_scope · evidence_grade · approved_by · sim_run_id
         새로 둔다      as_of · fixture_id · source_ref · note · is_active
         안 물려받는다  lot_priority          (CONFIRMED_ZERO · [])
-                       in_transit            (CONFIRMED_ZERO · [])   ← W3-3
-                       confirmed_inbound     (CONFIRMED_ZERO · [])   ← W3-3
+                       in_transit            status 만 CONFIRMED_ZERO   ← W3-3/4
+                       confirmed_inbound     status 만 CONFIRMED_ZERO   ← W3-3/4
         ```
+
+        ★ **두 JSON 칸을 아예 안 쓴다 (W3-4).** 그 칸은 이제 production 어디에서도
+          업무 사실로 안 읽히고 DROP 대상이라(`database/logistics_drop_inbound_json.sql`),
+          여기서 값을 넣으면 그 migration 뒤에 이 INSERT 가 깨진다.
 
         🔴 **입고 예정을 다음 날로 복제하지 않는다 (W3-3).** 그 복제가 사고의 원인이었다
            — 미래 날짜 행이 **먼저 열려 있으면** 그 행은 나중에 난 승인을 모른 채 굳는다.
@@ -313,8 +317,8 @@ class LogisticsDayOpening:
             """
             INSERT INTO {}.logistics_runtime_fixture (
                 fixture_id, sim_run_id, as_of,
-                in_transit_status,         in_transit_json,
-                confirmed_inbound_status,  confirmed_inbound_json,
+                in_transit_status,
+                confirmed_inbound_status,
                 confirmed_outbound_status, confirmed_outbound_json,
                 lot_priority_status,       lot_priority_json,
                 zone_capacity_status,      guaranteed_capacity_by_zone_json,
@@ -324,8 +328,8 @@ class LogisticsDayOpening:
                 'LOG-RUNTIME-' || base.sim_run_id || '-' || to_char(%(as_of)s::date, 'YYYYMMDD'),
                 base.sim_run_id,
                 %(as_of)s::date,
-                'CONFIRMED_ZERO',               '[]'::JSONB,
-                'CONFIRMED_ZERO',               '[]'::JSONB,
+                'CONFIRMED_ZERO',
+                'CONFIRMED_ZERO',
                 base.confirmed_outbound_status, base.confirmed_outbound_json,
                 'CONFIRMED_ZERO',               '[]'::JSONB,
                 base.zone_capacity_status,      base.guaranteed_capacity_by_zone_json,

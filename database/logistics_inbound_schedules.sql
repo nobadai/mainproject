@@ -46,6 +46,11 @@
 -- 🔴 **DROP 이 한 줄도 없다.** 기존 표를 다시 만들지 않고, 기존 데이터를 지우지
 --    않으며, 기존 값을 바꾸지 않는다.
 --
+-- 🔴 **`logistics_drop_inbound_json.sql` 보다 반드시 먼저 돌린다.**
+--    아래 §2 Backfill 이 `in_transit_json` 을 읽는다 — 그 칸이 걷힌 뒤에는 이 파일이
+--    **재실행되지 않는다**(`column does not exist`). 이미 적용된 DB 에서는 다시 돌릴
+--    이유가 없고(§3 검증으로 확인), 신규 구축은 README §1 순서가 이 둘을 그 순서로 둔다.
+--
 -- ★ **두 번 돌려도 안전하다.** `CREATE TABLE IF NOT EXISTS` ·
 --   `CREATE INDEX IF NOT EXISTS` · Backfill 은 `WHERE NOT EXISTS` 다.
 --   🔴 `ON CONFLICT DO UPDATE` 를 쓰지 않는다 — 재실행이 **과거 사실을 덮으면**

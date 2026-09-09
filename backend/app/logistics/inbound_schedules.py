@@ -6,16 +6,16 @@
 조회   load_inbound_schedules  created_as_of <= as_of    (W3-2 Reader 가 재사용)
 ```
 
-🔴 **이번 판(W3-1)은 정본을 바꾸지 않는다.**
+🔴 **입고 예정의 정본은 이 표 하나다 (W3-3 완료).**
 
 ```text
-Reader   아직 Legacy JSON (logistics_runtime_fixture 두 칸)
-Writer   Legacy JSON + 이 표          ← Dual Write
+Reader   inbound_schedules                       운송 중 · 도착 처리 · Capacity
+Writer   inbound_schedules                       승인 · 취소 · orphan 정리
+Header   logistics_runtime_fixture.*_status      «그 축을 확인했나» 만
 ```
 
-   정본 전환은 W3-2 다. 그래서 이 모듈은 **읽는 쪽을 하나도 안 건드린다** —
-   `load_inbound_schedules` 는 대조·검증용으로 먼저 서지만, 그 함수 자체가
-   W3-2 Reader 가 쓸 그 함수다 (검증 전용 임시 함수를 만들지 않는다).
+   `logistics_runtime_fixture` 의 두 JSON 칸은 더 이상 읽히지도 쓰이지도 않는다 —
+   DROP 대상이다 (`database/logistics_drop_inbound_json.sql`).
 
 🔴 **왜 표를 따로 만드는가 — 날짜별 복제가 사고를 냈다.**
 
@@ -74,12 +74,10 @@ __all__ = [
     "ScheduleAlreadyCancelled",
     "ScheduleCancelConflict",
     "ScheduleConflict",
-    "ScheduleMissing",
     "ScheduleReceiptExists",
     "ScheduleReferenceBroken",
     "ScheduleReferenceMissing",
     "assert_cancellable",
-    "assert_schedules_exist",
     "cancel_schedule",
     "in_transit_at",
     "load_inbound_schedules",
@@ -139,23 +137,6 @@ class ScheduleReferenceBroken(RuntimeError):
       (`purchase_items → purchases` 가 `ON DELETE CASCADE` 라, FK 를 걸면 매입 삭제가
       과거 재현용 일정까지 지운다 — 그 정책이 미정이다). DB 가 못 막는 동안
       **Reader 가 막는다.**
-    """
-
-
-class ScheduleMissing(LookupError):
-    """Legacy JSON 에는 있는데 `inbound_schedules` 에 그 행이 없다. Dual Write 누락이다.
-
-    🔴 **조용히 성공시키지 않는다.** 그대로 두면 취소가 JSON 만 고치고 끝나, 두
-       저장소가 갈린 사실이 **아무 데도 안 남는다.** W3-2 에서 Reader 가 schedule 로
-       옮겨 가면 그 입고는 처음부터 없었던 것이 된다.
-
-    ```text
-    JSON 없음 · schedule 없음   정상 재시도다 — 오류가 아니다 (no-op)
-    JSON 있음 · schedule 없음   🔴 여기. 누락을 지금 잡는다
-    ```
-
-    ★ **쓰기 전에 판정한다.** JSON 을 고친 뒤에 알면 그 트랜잭션은 롤백되더라도
-      *"무엇이 왜 막혔나"* 가 흐려진다.
     """
 
 
@@ -463,40 +444,6 @@ def load_inbound_schedules(
         )
         for row in rows
     )
-
-
-def assert_schedules_exist(
-    conn: Any, *, sim_run_id: str, inbound_ids: Sequence[str]
-) -> None:
-    """이 입고들의 일정 행이 다 있나. **Legacy 를 고치기 전에 묻는다.**
-
-    🔴 **호출부는 «Legacy JSON 에 실제로 들어 있는» 것만 넘긴다.** 안 그러면 이미
-       걷힌 뒤의 정상 재시도(JSON 없음 · schedule 없음)까지 오류가 된다 —
-       그 상태는 기존 계약상 no-op 이고 그 계약을 바꾸지 않는다.
-
-    :raises ScheduleMissing: 하나라도 일정 행이 없을 때. **어느 것인지 적는다.**
-    """
-    대상 = [inbound_id for inbound_id in inbound_ids if inbound_id]
-    if not 대상:
-        return
-    있는것 = {
-        row["inbound_id"]
-        for row in _rows(
-            conn,
-            sql.SQL(
-                "SELECT inbound_id FROM {}.inbound_schedules"
-                " WHERE sim_run_id = %s AND inbound_id = ANY(%s)"
-            ).format(_schema()),
-            (sim_run_id, 대상),
-        )
-    }
-    빠진것 = sorted(set(대상) - 있는것)
-    if 빠진것:
-        raise ScheduleMissing(
-            f"Legacy 일정에는 있는데 inbound_schedules 에 행이 없다"
-            f" (sim_run_id={sim_run_id!r}): {빠진것}."
-            " Dual Write 가 갈린 상태다 — 한쪽만 고치고 끝내지 않는다."
-        )
 
 
 def assert_cancellable(

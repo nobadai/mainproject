@@ -47,7 +47,7 @@
 
 ```text
 B-1 대조 · 양쪽 제거 · 중복 거부 · CONFIRMED/CONFIRMED_ZERO · 멱등
-    → inbound_stock._clear_schedule 을 **그대로** 부른다
+    → inbound_schedules.cancel_schedule 로 그날부터 닫는다
 도착 전역 advisory 잠금
     → receipts.lock_arrival_writes
 usage_scope
@@ -69,7 +69,7 @@ usage_scope
 ```text
 ① 도착 전역 advisory (20260905, 2)   receipts.lock_arrival_writes
 ② 입고 계보 조회 (SELECT)            ①이 잡혀 있어 그 사이 Receipt 가 못 생긴다
-③ fixture 행 FOR UPDATE              _clear_schedule 안에서
+③ 일정 행 FOR UPDATE                 cancel_schedule 안에서
 ④ 일정 UPDATE                        〃 같은 잠금 아래
 ⑤ 커밋은 호출자가 한 번               🔴 이 파일은 commit 도 rollback 도 안 한다
 ```
@@ -191,7 +191,7 @@ class InboundReconciliationResult:
     ```
 
     🔴 **`removed` 는 걷어낸 *일정 건수* 이지 목록 항목 수가 아니다.** 두 칸에서 한
-       건씩 함께 빠지므로 0 아니면 1 이다 — 중복은 `_clear_schedule` 이 무결성
+       건씩 닫히므로 0 아니면 1 이다 — 중복은 `inbound_schedules` PK 가 무결성
        오류로 막는다.
 
     ★ **`source_ref` 는 fixture 행에 실제로 적힌다** (`logistics_runtime_fixture.
@@ -344,11 +344,6 @@ def reconcile_orphan_inbound_schedule(
        되살아난다.** 이 함수가 하는 일이 «그 일정을 그날부터 없앤다» 이므로 신규 표의
        `cancelled_as_of` 가 그 사실의 자리다.
 
-    🔴 **④-b 가 그 짝이다.** ⑦ 만 두면 *"Legacy 에는 있는데 신규 표에는 행이 없는"*
-       상태에서 ⑤ 가 Legacy 만 걷고 ⑦ 이 `cancel_schedule` no-op 으로 조용히 끝난다.
-       그러면 Dual Write 가 갈려 있었다는 사실이 아무 데도 안 남는다 — 쓰기 전에
-       묻는 것이 그 사실을 남기는 유일한 자리다.
-
     🔴 **나이로 지우지 않는다.** `expected_arrival_date` 가 얼마나 지났는지, 발주 참조가
        비었는지, `ARRIVAL_PURCHASE_REFERENCE_MISSING` 인지를 **조건으로 쓰지 않는다** —
        참조 전달이 늦은 정상 입고와 구별되지 않기 때문이다. 이 함수가 보는 것은 사람이
@@ -377,10 +372,6 @@ def reconcile_orphan_inbound_schedule(
     :raises InvalidReconciliationRequest: 축이나 근거가 비었을 때. **DML 전에 막는다.**
     :raises ScheduleAlreadyMaterialized: 그 `inbound_id` 에 Receipt·Lot·IN 이 있을 때.
     :raises InboundLineageAmbiguous: 같은 `inbound_id` 에 Receipt 가 둘 이상일 때.
-    :raises ScheduleIntegrityError: 그날 fixture 행이 없거나, 두 칸이 짝이 안 맞거나,
-        중복이거나, 두 칸의 사실(B-1)이 다를 때. **아무것도 안 지운다.**
-    :raises ScheduleMissing: Legacy 에 지울 것이 있는데 `inbound_schedules` 에 그 행이
-        없을 때 (Dual Write 누락). **④-b 에서 막으므로 아무것도 안 지운다.**
     :raises ScheduleCancelConflict: 그 일정이 이미 **다른 날짜로** 닫혀 있을 때.
     """
     _require_text(sim_run_id, 칸="sim_run_id")

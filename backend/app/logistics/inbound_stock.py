@@ -190,8 +190,6 @@ class InboundStockResult:
     lot_id: str | None
     move_id: str | None
     accepted_qty_kg: Decimal
-    #: 이번 호출이 일정에서 그 `inbound_id` 를 실제로 걷어냈나.
-    schedule_cleared: bool
 
 
 def lot_id_for(*, receipt_id: str) -> str:
@@ -512,7 +510,7 @@ def _mark_putaway_done(conn: Any, schema: sql.Identifier, *, receipt_id: str) ->
 # ── 일정 읽기·정리 ──────────────────────────────────────────────────────
 #
 # ★ **같은 fixture 행을 읽는 쪽과 걷는 쪽이 한 파일에 있다.** 도착 처리는 그 행을
-#   시작에서 잠그고(`load_in_transit_for_receiving`) 끝에서 고친다(`_clear_schedule`)
+#   시작에서 잠그고(`load_in_transit_for_receiving`) 그 잠금 아래 끝까지 간다
 #   — 잠금 순서와 `None`/`[]` 구분이 두 곳에서 갈리면 안 되므로 나누지 않았다.
 
 
@@ -573,7 +571,7 @@ def load_in_transit_for_receiving(
 
     ```text
     ① 도착 쓰기 전역 advisory lock       receipts.lock_arrival_writes
-    ② 그날 fixture 행 SELECT … FOR UPDATE   (뒤의 `_clear_schedule` 이 고칠 그 행)
+    ② 그날 fixture 행 SELECT … FOR UPDATE   (status 를 읽고, 도착 경로를 직렬화한다)
     ③ inbound_schedules → InTransitItem 목록   ← W3-2 부터 정본이 여기다
     ```
 
@@ -601,9 +599,9 @@ def load_in_transit_for_receiving(
           전순서가 없어져 교착이 생긴다 (`ledger._lock_ledger_writes` 가 겪은 자리).
 
     ★ **읽기인데 `FOR UPDATE` 를 쓴다.** 여기서 읽은 목록이 곧 이번 실행이 처리할
-      대상이고, 마지막에 `_clear_schedule` 이 **같은 행**을 고친다. 그 사이에
-      `persist_inventory`(승인 전이)가 끼어들면 이번에 못 본 승인분이 생기거나
-      정리 대상이 어긋난다 — 시작부터 끝까지 한 행 잠금 아래 둔다.
+      대상이고, 같은 행의 status 를 `persist_inventory`(승인 전이)가 건드린다.
+      그 사이가 열려 있으면 이번에 못 본 승인분이 생긴다 — 시작부터 끝까지 한 행
+      잠금 아래 둔다.
 
     🔴 **`None` 과 `[]` 를 가른다. 판정 근거는 `in_transit_status` 다 (W3-3).**
 
@@ -853,9 +851,6 @@ def materialize_inspected_inbound(
         lot_id=lot_id,
         move_id=move_id,
         accepted_qty_kg=accepted,
-        # ★ 걷을 일정이 없으므로 언제나 거짓이다. 칸은 남긴다 — 마스터 회신 모양을
-        #   이번 판에서 바꾸지 않는다 (Legacy 호환).
-        schedule_cleared=False,
     )
 
 
