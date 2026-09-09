@@ -98,7 +98,7 @@ def test_없는_값은_400_이지_500_이_아니다(client):
         assert "가능:" in response.json()["detail"]
 
 
-def test_재무_state가_없는_날짜도_400이다(monkeypatch):
+def test_재무_state가_없는_날짜도_사용자_문장으로_열린다(monkeypatch):
     monkeypatch.setattr(finance_query, "get_finance_dashboard", _empty_finance_dashboard_stub)
     monkeypatch.setattr(finance_query, "get_finance_cashflow", _finance_cashflow_stub)
     app = FastAPI()
@@ -107,8 +107,12 @@ def test_재무_state가_없는_날짜도_400이다(monkeypatch):
 
     response = local_client.get("/api/finance", params={"as_of": AS_OF, "state": "base"})
 
-    assert response.status_code == 400
-    assert "Finance state was not found: BASE_NO_LOAN" == response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["states"] == []
+    assert body["state_cards"] == []
+    assert body["stats"] == []
+    assert body["explain"]["text"] == "이 기준일까지 확인할 수 있는 재무 상태가 없습니다."
 
 
 def test_예시값인지_아닌지를_반드시_밝힌다(client):
@@ -125,16 +129,20 @@ def test_예시값인지_아닌지를_반드시_밝힌다(client):
             assert source["owner"], path
 
 
-def test_판매_화면은_dashboard_service_값을_쓴다(client):
+def test_판매_화면은_dashboard_값을_쓴다(client):
     body = client.get("/api/sales", params={"as_of": FIN_AS_OF}).json()
 
     assert body["source"]["filled"] is True
     assert body["stats"][0]["raw"] == 1_234_567
     assert body["stats"][3]["raw"] == 650_000
-    summary = next(card for card in body["cards"] if card["key"] == "summary")
-    assert summary["stats"][1]["value"] == "완료 1 · 일부 1 · 예정 1"
+    actions = next(card for card in body["cards"] if card["key"] == "actions")
+    assert actions["title"] == "지금 확인할 판매"
+    assert actions["stats"][0]["label"] == "출고 대기"
+    assert actions["stats"][1]["value"] == "1건"
     recent = next(card for card in body["cards"] if card["key"] == "recent")
     assert [row["no"] for row in recent["table"]["rows"]] == ["SALE-002", "SALE-001"]
+    assert {row["outbound"] for row in recent["table"]["rows"]} == {"출고 상태 확인 필요"}
+    assert "기준일까지" in body["cards"][0]["subtitle"]
 
 
 def test_판매_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):
@@ -157,21 +165,26 @@ def test_판매_수금_차트는_남은_금액만_쓴다(client):
 
     assert receivables["chart"]["series"][0]["data"] == [0.65]
     rows = receivables["table"]["rows"]
-    assert next(row for row in rows if row["status"] == "수금 완료")["d_day"] is None
-    assert next(row for row in rows if row["status"] == "일부 수금")["d_day"] == 3
-    assert next(row for row in rows if row["status"] == "수금 예정")["d_day"] == 4
+    assert next(row for row in rows if row["status"] == "수금 완료")["d_day"] == "-"
+    assert next(row for row in rows if row["status"] == "일부 수금")["d_day"] == "D-3"
+    assert next(row for row in rows if row["status"] == "수금 예정")["d_day"] == "D-4"
 
 
-def test_재무_화면은_financing_mode로_state를_고른다(client):
+def test_재무_화면은_저장된_state를_비교_카드로_보여준다(client):
     base = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "base"}).json()
     loan = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "loan"}).json()
 
     assert base["source"]["filled"] is True
-    assert base["stats"][0]["raw"] == 100_000
+    assert base["requested_as_of"] == FIN_AS_OF
+    assert base["state_as_of"] == FIN_AS_OF
+    assert base["latest_closing_as_of"] == FIN_AS_OF
+    assert base["stats"][0]["label"] == "운영자금 여유"
+    assert base["stats"][0]["raw"] == -50_000
     assert base["stats"][3]["raw"] == 0
     assert "대출 없이 운영" in base["explain"]["text"]
     assert "BASE_NO_LOAN" not in base["explain"]["text"]
-    assert loan["stats"][0]["raw"] == 500_000
+    assert [card["title"] for card in base["state_cards"]] == ["대출 반영", "대출 없이 운영"]
+    assert loan["stats"][0]["raw"] == 350_000
     assert loan["stats"][3]["raw"] == 300_000
     assert "대출 반영" in loan["explain"]["text"]
     assert "LOAN_BASELINE" not in loan["explain"]["text"]
@@ -189,8 +202,26 @@ def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeyp
     assert response.status_code == 200
     body = response.json()
     assert body["selected"] == "loan"
-    assert [state["key"] for state in body["states"]] == ["base", "loan"]
-    assert body["stats"][0]["detail"] == "2026-01-06 기준 현재 사용 가능한 현금"
+    assert [state["key"] for state in body["states"]] == ["loan"]
+    assert body["stats"][1]["detail"] == "조회 기준일 2026-01-06"
+
+
+def test_재무_요청일과_실제_state_날짜를_구분한다(monkeypatch):
+    monkeypatch.setattr(finance_query, "get_finance_dashboard", _prior_finance_dashboard_stub)
+    monkeypatch.setattr(finance_query, "get_finance_cashflow", _prior_finance_cashflow_stub)
+    app = FastAPI()
+    app.include_router(router)
+    local_client = TestClient(app)
+
+    response = local_client.get("/api/finance", params={"as_of": "2026-01-20", "state": "base"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested_as_of"] == "2026-01-20"
+    assert body["state_as_of"] == "2026-01-18"
+    assert body["latest_closing_as_of"] == "2026-01-15"
+    assert "재무 상태 기준일 2026-01-18" in body["read_only"]["text"]
+    assert "최근 일마감 2026-01-15" in body["read_only"]["text"]
 
 
 def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):
@@ -224,6 +255,7 @@ def test_재무_화면은_cashflow와_ledger를_쓴다(client):
     assert body["balances"][0]["raw"] == 1_000
     assert body["balances"][2]["raw"] == 0
     assert [row["d"] for row in body["closings"]["rows"]] == ["2025-12-31", "2025-12-30"]
+    assert "이번 달" not in body["cash_chart"]["note"]["text"]
 
 
 def test_그래프_계열은_날짜축과_길이가_같다(client):
@@ -499,6 +531,24 @@ def _loan_only_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDa
     )
 
 
+def _prior_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
+    dashboard = _finance_dashboard_stub(sim_run_id, as_of)
+    return dashboard.model_copy(
+        update={
+            "states": [
+                _finance_state(
+                    "FS-BASE-PRIOR",
+                    date(2026, 1, 18),
+                    "BASE_NO_LOAN",
+                    Decimal(200000),
+                    Decimal(0),
+                )
+            ],
+            "recent_closings": [_closing(date(2026, 1, 15), 15, Decimal(180000), Decimal(0))],
+        }
+    )
+
+
 def _finance_cashflow_stub(
     sim_run_id: str,
     as_of: date,
@@ -511,6 +561,19 @@ def _finance_cashflow_stub(
             _closing(date(2025, 12, 30), 1, Decimal(90000), Decimal(490000)),
             _closing(date(2025, 12, 31), 2, Decimal(100000), Decimal(500000)),
         ][:days],
+    )
+
+
+def _prior_finance_cashflow_stub(
+    sim_run_id: str,
+    as_of: date,
+    days: int,
+) -> FinanceCashflowResponse:
+    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert as_of == date(2026, 1, 20)
+    return FinanceCashflowResponse(
+        meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
+        cashflow=[_closing(date(2026, 1, 15), 15, Decimal(180000), Decimal(0))][:days],
     )
 
 

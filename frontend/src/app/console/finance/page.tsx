@@ -4,13 +4,14 @@
  * 재무 탭. 소유: **재무 파트.** 조회 전용입니다.
  *
  * ★ 그래프의 가로축이 여기만 다릅니다 — 다른 탭은 12칸 날짜축인데
- *   이 그래프는 12월 한 달(30칸)입니다. 그래서 공용 날짜축을 안 쓰고
+ *   이 그래프는 최근 30일 일마감을 봅니다. 그래서 공용 날짜축을 안 쓰고
  *   백엔드가 같이 준 눈금(`chart.x_labels`)으로 그립니다.
  */
 
-import { useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 import {
+  CardBlock,
   DataTable,
   ErrorBox,
   LineChart,
@@ -19,7 +20,6 @@ import {
   Panel,
   SourceTag,
   StatRow,
-  TabButtons,
 } from "@/components/console/Blocks";
 import { useTab } from "@/components/console/useTab";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
@@ -28,9 +28,8 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { finance, type FinanceTab } from "@/lib/screen";
 
 export default function FinancePage() {
-  const [state, setState] = useState("base");
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const { data, error } = useTab<FinanceTab>(`${asOf}|${state}`, () => finance(asOf, state));
+  const { data, error } = useTab<FinanceTab>(asOf, () => finance(asOf));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="재무" />;
@@ -42,24 +41,22 @@ export default function FinancePage() {
       <StatRow items={data.stats} />
 
       <Panel
-        title="지금 자금 상태"
-        subtitle="저장된 상태의 현금 · 운영자금 · 받을 돈 · 부채"
-        right={
-          <TabButtons
-            items={data.states.map((s) => ({ key: s.key, label: s.label }))}
-            value={data.selected}
-            onChange={setState}
-          />
-        }
+        title="저장된 재무 상태"
+        subtitle="실제로 저장된 상태만 비교합니다"
       >
         <Note note={data.explain} />
+        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+          {data.state_cards.map((card) => (
+            <CardBlock key={card.key} card={card} />
+          ))}
+        </div>
       </Panel>
 
-      <Panel title="한 달 동안 현금이 어떻게 움직였나" subtitle="일별 마감값을 그대로 이은 것">
+      <Panel title="최근 30일 현금 흐름" subtitle="일별 마감값을 그대로 이은 것">
         <LineChart chart={data.cash_chart} height={280} />
       </Panel>
 
-      <Panel title="이번 달 돈의 흐름" subtitle="원장 용어 대신 사람 말로">
+      <Panel title="기준일까지 누적 자금 흐름" subtitle="원장 용어 대신 사람 말로">
         <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
           {data.flows.map((f) => (
             <div

@@ -1,19 +1,19 @@
 from datetime import date
 from decimal import Decimal
 
-from app.sales import dashboard_service
+from app.sales import dashboard
 
 AS_OF = date(2025, 12, 31)
 
 
 def test_sales_dashboard_aggregates_db_facts(monkeypatch):
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_sales_dashboard_meta",
         lambda **_: {"sim_run_id": "SIM-BURNIN-202512", "as_of": AS_OF, "data_type": "SIMULATION"},
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_sales_summary",
         lambda **_: {
             "sales_count": 15,
@@ -26,7 +26,7 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_collection_summary",
         lambda **_: [
             {"collection_status": "COLLECTED", "count": 6, "sales_amount_krw": Decimal(100)},
@@ -35,7 +35,7 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_item_summaries",
         lambda **_: [
             _item("ITEM-BAECHU", "배추", 10, "10000000"),
@@ -44,7 +44,7 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_recent_sales",
         lambda **_: [
             _sale("SALE-002", date(2025, 12, 31)),
@@ -52,7 +52,7 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        dashboard_service.repository,
+        dashboard,
         "load_sales_receivables",
         lambda **_: [
             _receivable("AR-1", date(2025, 12, 20), Decimal(10), "OPEN"),
@@ -61,7 +61,7 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
         ],
     )
 
-    response = dashboard_service.get_sales_dashboard(
+    response = dashboard.get_sales_dashboard(
         sim_run_id="SIM-BURNIN-202512", as_of=AS_OF
     )
 
@@ -87,14 +87,14 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
 
 
 def test_sales_dashboard_empty_unknown_sim_run(monkeypatch):
-    monkeypatch.setattr(dashboard_service.repository, "load_sales_dashboard_meta", lambda **_: None)
-    monkeypatch.setattr(dashboard_service.repository, "load_sales_summary", lambda **_: None)
-    monkeypatch.setattr(dashboard_service.repository, "load_collection_summary", lambda **_: [])
-    monkeypatch.setattr(dashboard_service.repository, "load_item_summaries", lambda **_: [])
-    monkeypatch.setattr(dashboard_service.repository, "load_recent_sales", lambda **_: [])
-    monkeypatch.setattr(dashboard_service.repository, "load_sales_receivables", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_sales_dashboard_meta", lambda **_: None)
+    monkeypatch.setattr(dashboard, "load_sales_summary", lambda **_: None)
+    monkeypatch.setattr(dashboard, "load_collection_summary", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_item_summaries", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_recent_sales", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_sales_receivables", lambda **_: [])
 
-    response = dashboard_service.get_sales_dashboard(sim_run_id="NO-SUCH-RUN", as_of=AS_OF)
+    response = dashboard.get_sales_dashboard(sim_run_id="NO-SUCH-RUN", as_of=AS_OF)
 
     assert response.meta.sim_run_id == "NO-SUCH-RUN"
     assert response.meta.data_type is None

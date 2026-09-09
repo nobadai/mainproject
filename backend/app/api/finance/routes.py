@@ -21,9 +21,12 @@ def finance_tab(
     if state not in STATES:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            detail=f"없는 상태입니다: {state}. 가능: {', '.join(STATES)}",
+            detail=f"없는 재무 보기입니다: {state}. 가능: {', '.join(STATES)}",
         )
     try:
         return build(as_of, state)
     except LookupError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="이 기준일까지 확인할 수 있는 재무 상태가 없습니다.",
+        ) from exc

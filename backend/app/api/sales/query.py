@@ -33,7 +33,7 @@ def build(as_of: date) -> SalesTab:
                 label="총 판매금액",
                 value=_manwon(summary.total_sales_amount_krw),
                 unit="만원",
-                detail=f"{as_of.isoformat()} 기준 판매 {summary.sales_count}건",
+                detail=f"기준일까지 판매 {summary.sales_count}건",
                 tone="info",
                 raw=_raw(summary.total_sales_amount_krw),
             ),
@@ -64,17 +64,13 @@ def build(as_of: date) -> SalesTab:
         ],
         read_only=Note(
             tone="info",
-            text=(
-                "**이 화면은 조회 전용입니다.** 시나리오 실행 없이 저장된 판매 · 수금 "
-                "결과만 봅니다 — «얼마 팔았는지, 언제 돈을 받는지»를 바로 확인하는 데 "
-                "집중합니다."
-            ),
+            text=f"조회 기준일 {as_of.isoformat()} · 근거 · 판매 확정 내역 / 수금 장부 · 조회 전용",
         ),
         cards=[
-            _summary_card(dash),
-            _items_card(dash),
+            _action_card(dash),
             _recent_sales_card(dash),
             _receivables_card(dash),
+            _items_card(dash),
         ],
         source=Source(
             filled=True,
@@ -84,35 +80,47 @@ def build(as_of: date) -> SalesTab:
     )
 
 
-def _summary_card(dash) -> Card:
+def _action_card(dash) -> Card:
     collection = dash.collection_summary
-    collected = collection.get("COLLECTED")
     partial = collection.get("PARTIAL")
     open_ = collection.get("OPEN")
+    outbound_pending = sum(
+        1 for sale in dash.recent_sales if sale.order_status != "DELIVERED"
+    )
+    overdue = sum(
+        1
+        for receivable in dash.receivables
+        if receivable.display_status == "연체" and receivable.outstanding_amount_krw > 0
+    )
     return Card(
-        key="summary",
-        title="이번 달 판매를 한눈에",
-        subtitle="확정 판매와 수금 현황",
+        key="actions",
+        title="지금 확인할 판매",
+        subtitle="기준일까지 판매·수금 현황",
         source_ref="판매 확정 내역 · 수금 장부",
         stats=[
-            Stat(label="판매 처리", value=f"{dash.summary.sales_count}건", detail="sale_date 기준"),
             Stat(
-                label="수금 상태",
-                value=(
-                    f"완료 {0 if collected is None else collected.count} · "
-                    f"일부 {0 if partial is None else partial.count} · "
-                    f"예정 {0 if open_ is None else open_.count}"
-                ),
-                detail=f"받은 돈 {_won(dash.summary.received_amount_krw)}",
+                label="출고 대기",
+                value=f"{outbound_pending}건",
+                detail="저장된 판매 출고 상태 기준",
+                tone="warn" if outbound_pending > 0 else "good",
+            ),
+            Stat(
+                label="수금 예정",
+                value=f"{0 if open_ is None else open_.count}건",
+                detail="아직 받을 돈이 남은 판매",
                 tone="info",
             ),
             Stat(
-                label="공헌이익률",
-                value=str(dash.summary.contribution_margin_pct),
-                unit="%",
-                detail="확정 판매 기준 집계",
-                tone="good",
-                raw=_raw(dash.summary.contribution_margin_pct),
+                label="일부 수금",
+                value=f"{0 if partial is None else partial.count}건",
+                detail="일부만 받은 판매",
+                tone="warn" if partial is not None and partial.count > 0 else "good",
+            ),
+            Stat(
+                label="연체",
+                value=f"{overdue}건",
+                detail="수금 예정일이 지난 미수금",
+                tone="bad" if overdue > 0 else "good",
             ),
         ],
     )
@@ -146,7 +154,7 @@ def _items_card(dash) -> Card:
                 }
                 for item in dash.items
             ],
-            empty_text="이 기간에 판매 품목이 없습니다",
+            empty_text="기준일까지 판매 품목이 없습니다",
         ),
     )
 
@@ -178,11 +186,11 @@ def _recent_sales_card(dash) -> Card:
                     "margin": _won(sale.contribution_profit_krw),
                     "due": sale.collection_due_date.isoformat(),
                     "state": sale.collection_status_label,
-                    "outbound": _ORDER_STATUS_LABELS.get(sale.order_status, sale.order_status),
+                    "outbound": _ORDER_STATUS_LABELS.get(sale.order_status, "출고 상태 확인 필요"),
                 }
                 for sale in dash.recent_sales
             ],
-            empty_text="이 기간에 판매가 없습니다",
+            empty_text="기준일까지 판매가 없습니다",
         ),
     )
 
@@ -236,11 +244,11 @@ def _receivables_card(dash) -> Card:
                     "received": _won(receivable.received_amount_krw),
                     "outstanding": _won(receivable.outstanding_amount_krw),
                     "status": receivable.display_status,
-                    "d_day": None if receivable.d_day is None else receivable.d_day,
+                    "d_day": _d_day(receivable.d_day),
                 }
                 for receivable in dash.receivables
             ],
-            empty_text="이 기간에 매출채권이 없습니다",
+            empty_text="기준일까지 매출채권이 없습니다",
         ),
     )
 
@@ -267,6 +275,16 @@ def _number(value: Decimal) -> str:
 
 def _raw(value: Decimal) -> float:
     return float(value)
+
+
+def _d_day(value: int | None) -> str:
+    if value is None:
+        return "-"
+    if value > 0:
+        return f"D-{value}"
+    if value == 0:
+        return "오늘"
+    return f"{abs(value)}일 지남"
 
 
 def _to_million(value: Decimal) -> float:

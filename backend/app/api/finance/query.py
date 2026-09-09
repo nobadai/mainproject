@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.api.finance.schema import FinanceTab, FlowCell, StateOption
-from app.api.primitives import Chart, Column, Marker, Note, Series, Source, Stat, Table
+from app.api.primitives import Card, Chart, Column, Marker, Note, Series, Source, Stat, Table
 from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 from app.finance.schemas import FinanceClosingItem, FinanceDashboardResponse, FinanceStateView
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
@@ -28,41 +28,42 @@ def build(as_of: date, state: str) -> FinanceTab:
     dash = get_finance_dashboard(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
     flow = get_finance_cashflow(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of, days=30)
     selected_key, selected = _select_state(dash, state)
+    state_as_of = None if selected is None else selected.state_date
+    latest_closing_as_of = max((row.close_date for row in dash.recent_closings), default=None)
     receivables = dash.ledger_summary["receivables"]
     payables = dash.ledger_summary["payables"]
     receivable_detail = (
-        f"매출채권 {receivables.count}건 · "
-        f"받은 돈 {_won(receivables.received_amount_krw)}"
+        f"남은 받을 돈 {receivables.count}건 · "
+        f"이미 받은 돈 {_won(receivables.received_amount_krw)}"
     )
 
     return FinanceTab(
-        states=[
-            StateOption(
-                key=key,
-                label=_STATE_LABELS[key],
-                explain=_state_explain(_state_by_mode(dash, mode)),
-            )
-            for key, mode in _STATE_TO_MODE.items()
-        ],
+        states=_state_options(dash),
         selected=selected_key,
-        stats=[
+        requested_as_of=as_of.isoformat(),
+        state_as_of=None if state_as_of is None else state_as_of.isoformat(),
+        latest_closing_as_of=None
+        if latest_closing_as_of is None
+        else latest_closing_as_of.isoformat(),
+        stats=[] if selected is None else [
+            Stat(
+                label="운영자금 여유",
+                value=_manwon(selected.operating_cash_buffer_krw),
+                unit="만원",
+                detail="현금 잔액에서 최소 운영자금을 뺀 금액",
+                tone=_buffer_tone(selected.operating_cash_buffer_krw),
+                raw=_raw(selected.operating_cash_buffer_krw),
+            ),
             Stat(
                 label="현금 잔액",
                 value=_manwon(selected.current_cash_krw),
                 unit="만원",
-                detail=f"{as_of.isoformat()} 기준 현재 사용 가능한 현금",
+                detail=_date_detail(as_of, state_as_of),
                 tone="good" if selected.current_cash_krw >= 0 else "bad",
                 raw=_raw(selected.current_cash_krw),
             ),
             Stat(
-                label="최소 운영자금",
-                value=_manwon(selected.minimum_operating_cash_krw),
-                unit="만원",
-                detail="현재 운영에 남겨둘 최소 현금",
-                raw=_raw(selected.minimum_operating_cash_krw),
-            ),
-            Stat(
-                label="받을 돈",
+                label="남은 받을 돈",
                 value=_manwon(receivables.outstanding_amount_krw),
                 unit="만원",
                 detail=receivable_detail,
@@ -70,26 +71,23 @@ def build(as_of: date, state: str) -> FinanceTab:
                 raw=_raw(receivables.outstanding_amount_krw),
             ),
             Stat(
-                label="부채",
+                label="현재 차입 잔액",
                 value=_manwon(selected.current_debt_krw),
                 unit="만원",
-                detail="대출을 반영한 현재 차입 잔액",
+                detail="현재 남아 있는 차입금",
                 tone="warn" if selected.current_debt_krw > 0 else "good",
                 raw=_raw(selected.current_debt_krw),
             ),
         ],
+        state_cards=_state_cards(dash.states),
         explain=Note(tone="neutral", text=_state_explain(selected)),
         read_only=Note(
             tone="info",
-            text=(
-                "**이 화면은 조회 전용입니다.** 에이전트 추천이나 시나리오 결과를 "
-                "보여주지 않습니다. 저장된 값에서 «현금이 얼마 남았는지, 언제 나가고 "
-                "언제 들어오는지»를 바로 확인하는 데 집중합니다."
-            ),
+            text=_freshness_note(as_of, state_as_of, latest_closing_as_of),
         ),
         cash_chart=_cash_chart(flow.cashflow),
         flows=_flows(dash.cashflow_summary),
-        balances=[
+        balances=[] if selected is None else [
             Stat(
                 label="받을 돈 총액",
                 value=_manwon(receivables.original_amount_krw),
@@ -136,7 +134,7 @@ def build(as_of: date, state: str) -> FinanceTab:
         source=Source(
             filled=True,
             owner="재무",
-            note=f"저장된 재무 마감과 수금·지급 장부 기준 · {dash.meta.as_of}",
+            note="근거 · 재무 마감 / 수금·지급 장부",
         ),
     )
 
@@ -175,7 +173,7 @@ def dashboard_cash(n: int, at: int) -> Chart:
     )
 
 
-def _select_state(dash: FinanceDashboardResponse, state: str) -> tuple[str, FinanceStateView]:
+def _select_state(dash: FinanceDashboardResponse, state: str) -> tuple[str, FinanceStateView | None]:
     selected = _state_by_mode(dash, _STATE_TO_MODE[state])
     if selected is not None:
         return state, selected
@@ -183,14 +181,21 @@ def _select_state(dash: FinanceDashboardResponse, state: str) -> tuple[str, Fina
         fallback = _state_by_mode(dash, _STATE_TO_MODE[fallback_key])
         if fallback is not None:
             return fallback_key, fallback
-    raise LookupError(f"Finance state was not found: {_STATE_TO_MODE[state]}")
+    if dash.states:
+        first = dash.states[0]
+        return _key_for_mode(first.financing_mode), first
+    return "", None
 
 
-def _state_by_key(dash: FinanceDashboardResponse, state: str) -> FinanceStateView:
-    selected = _state_by_mode(dash, _STATE_TO_MODE[state])
-    if selected is None:
-        raise LookupError(f"Finance state was not found: {_STATE_TO_MODE[state]}")
-    return selected
+def _state_options(dash: FinanceDashboardResponse) -> list[StateOption]:
+    return [
+        StateOption(
+            key=_key_for_mode(state.financing_mode),
+            label=_label_for_mode(state.financing_mode),
+            explain=_state_explain(state),
+        )
+        for state in dash.states
+    ]
 
 
 def _state_by_mode(
@@ -204,7 +209,7 @@ def _state_by_mode(
 
 def _state_explain(state: FinanceStateView | None) -> str:
     if state is None:
-        return "해당 재무 기준 상태가 아직 준비되지 않았습니다."
+        return "이 기준일까지 확인할 수 있는 재무 상태가 없습니다."
     note = "" if state.note is None else f" {state.note}"
     mode_label = "대출 반영" if state.financing_mode == "LOAN_BASELINE" else "대출 없이 운영"
     return (
@@ -212,6 +217,90 @@ def _state_explain(state: FinanceStateView | None) -> str:
         f"{_won(state.current_cash_krw)}이고 최소 운영자금 대비 여유는 "
         f"{_won(state.operating_cash_buffer_krw)}입니다.{note}"
     )
+
+
+def _state_cards(states: list[FinanceStateView]) -> list[Card]:
+    return [
+        Card(
+            key=_key_for_mode(state.financing_mode),
+            title=_label_for_mode(state.financing_mode),
+            subtitle=f"재무 상태 기준일 {state.state_date.isoformat()}",
+            source_ref="재무 마감",
+            lead=Note(tone="neutral", text=_state_explain(state)),
+            stats=[
+                Stat(
+                    label="현금 잔액",
+                    value=_manwon(state.current_cash_krw),
+                    unit="만원",
+                    raw=_raw(state.current_cash_krw),
+                ),
+                Stat(
+                    label="최소 운영자금",
+                    value=_manwon(state.minimum_operating_cash_krw),
+                    unit="만원",
+                    raw=_raw(state.minimum_operating_cash_krw),
+                ),
+                Stat(
+                    label="운영자금 여유",
+                    value=_manwon(state.operating_cash_buffer_krw),
+                    unit="만원",
+                    tone=_buffer_tone(state.operating_cash_buffer_krw),
+                    raw=_raw(state.operating_cash_buffer_krw),
+                ),
+                Stat(
+                    label="현재 차입 잔액",
+                    value=_manwon(state.current_debt_krw),
+                    unit="만원",
+                    tone="warn" if state.current_debt_krw > 0 else "good",
+                    raw=_raw(state.current_debt_krw),
+                ),
+            ],
+        )
+        for state in states
+    ]
+
+
+def _key_for_mode(financing_mode: str) -> str:
+    for key, mode in _STATE_TO_MODE.items():
+        if mode == financing_mode:
+            return key
+    return financing_mode
+
+
+def _label_for_mode(financing_mode: str) -> str:
+    if financing_mode == "LOAN_BASELINE":
+        return "대출 반영"
+    if financing_mode == "BASE_NO_LOAN":
+        return "대출 없이 운영"
+    return "저장된 재무 상태"
+
+
+def _buffer_tone(value: Decimal) -> str:
+    if value > 0:
+        return "good"
+    if value == 0:
+        return "warn"
+    return "bad"
+
+
+def _date_detail(requested: date, actual: date | None) -> str:
+    if actual is None:
+        return f"조회 기준일 {requested.isoformat()}"
+    if requested == actual:
+        return f"조회 기준일 {requested.isoformat()}"
+    return f"조회 기준일 {requested.isoformat()} · 재무 상태 기준일 {actual.isoformat()}"
+
+
+def _freshness_note(
+    requested: date, state_as_of: date | None, closing_as_of: date | None
+) -> str:
+    parts = [f"조회 기준일 {requested.isoformat()}"]
+    if state_as_of is not None and state_as_of != requested:
+        parts.append(f"재무 상태 기준일 {state_as_of.isoformat()}")
+    if closing_as_of is not None and closing_as_of not in {requested, state_as_of}:
+        parts.append(f"최근 일마감 {closing_as_of.isoformat()}")
+    parts.append("조회 전용")
+    return " · ".join(parts)
 
 
 def _cash_chart(rows: list[FinanceClosingItem]) -> Chart:
@@ -231,7 +320,7 @@ def _cash_chart(rows: list[FinanceClosingItem]) -> Chart:
             Series(name="대출 반영", data=loan, tone="good", width=2.2),
             Series(name="최소 운영자금", data=minimum, tone="bad", width=1.3, dashed=True),
         ],
-        note=Note(tone="neutral", text="일별 마감 기준 현금 잔액입니다."),
+        note=Note(tone="neutral", text="최근 30일 현금 흐름입니다."),
         x_labels=_spread_labels([f"{row.close_date.month}/{row.close_date.day}" for row in rows]),
     )
 
