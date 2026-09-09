@@ -68,6 +68,29 @@ class ItemCard(BaseModel):
     )
 
 
+class ChartPoint(BaseModel):
+    """그래프가 쓰는 **원시 수치** 한 점.
+
+    ★ 표(`rows`)와 같은 줄인데 **글자가 아니라 수**다. 표는 사람이 읽으려고
+      「600–855」처럼 글자로 만들어 두는데, 그래프는 좌표를 계산해야 하므로
+      숫자가 필요하다. 화면이 글자를 다시 숫자로 되돌리게 하면 자릿점(`,`)과
+      단위 때문에 조용히 틀린다.
+
+    ★ **`null` 은 0 이 아니라 「없음」이다.** 채점 안 된 날은 `actual` 이 없다.
+      그걸 0 으로 내리면 그래프가 «값이 폭락했다» 로 보인다.
+    """
+
+    lead: int = Field(description="리드타임. 0 이 기준일 그날")
+    target_dt: str = Field(description="대상일 YYYY-MM-DD")
+    pred: float | None = Field(description="예측 가운데 값")
+    lo: float | None = Field(description="구간 아래끝")
+    hi: float | None = Field(description="구간 위끝")
+    actual: float | None = Field(description="실제값. 아직 안 지난 날이면 None")
+    err_pct: float | None = Field(default=None, description="오차율 %")
+    anchor: float | None = Field(description="출발점 (어제값·7일평균 섞음)")
+    gated: bool = Field(default=False, description="모델을 안 쓰고 출발점을 그대로 낸 칸")
+
+
 class ForecastTab(BaseModel):
     #  고르는 것
     kinds: list[KindOption] = Field(description="가격 종류 셋")
@@ -92,6 +115,10 @@ class ForecastTab(BaseModel):
     )
     chart: Chart = Field(description="18일 예측 · 구간 · 실제값")
     rows: Table = Field(description="리드타임별 한 줄씩 — 예측 · 구간 · 실제 · 오차")
+    points: list[ChartPoint] = Field(
+        default_factory=list,
+        description="그래프가 쓰는 원시 수치. 표와 같은 줄인데 글자가 아니라 수다",
+    )
     gate_lead: int = Field(description="이 리드타임 미만은 모델을 안 쓴다")
     quality_note: str | None = Field(default=None, description="이 조합의 판정 근거")
 
