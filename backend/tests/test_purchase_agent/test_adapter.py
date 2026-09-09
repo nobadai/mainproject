@@ -21,6 +21,8 @@ from app.master.envelope import (
 )
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import (
+    SUPPORTED_MODES,
+    UnsupportedMode,
     absorb_inventory,
     build_reasoning,
     purchase_port,
@@ -1641,3 +1643,80 @@ def test_our_vocabulary_is_the_envelope_vocabulary() -> None:
     from app.purchase_agent.llm.schemas import LLMStatus as OurStatus
 
     assert set(get_args(OurStatus)) == set(get_args(EnvelopeStatus))
+
+
+# ---------------------------------------------------------------------------
+# 문 앞에서 mode 를 막는다 (2026-09-09 · 마스터 지적)
+# ---------------------------------------------------------------------------
+
+
+def _request_with_mode(mode: str, monkeypatch: pytest.MonkeyPatch) -> AgentRequest:
+    """봉투를 통과한 상태를 만든다 — **마스터가 라우팅을 넓힌 날**의 재현이다.
+
+    봉투(``_AGENT_MODES``)가 지금은 앞에서 막지만, 그것이 우리 어댑터가 안전하다는
+    뜻은 아니다. 그 방어가 사라지는 날을 여기서 미리 살아 본다.
+    """
+    from app.master import envelope
+
+    monkeypatch.setitem(
+        envelope._AGENT_MODES, "purchase", envelope._AGENT_MODES["purchase"] | {mode}
+    )
+    return AgentRequest(
+        context=ExecutionContext("R", "2026-01-30", "ML_COMPLETE", "v2.3"),
+        agent="purchase",
+        mode=mode,
+        payload={"item": "배추", "as_of": "2026-01-30"},
+    )
+
+
+@pytest.mark.parametrize("mode", ["SUPPLY_CAPACITY_QUERY", "GENERATE_SALES_PROPOSAL", "아무거나"])
+def test_받지_않는_mode_는_조용히_안을_만들지_않는다(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **전에는 전부 ``_generate_scenarios`` 로 떨어졌다** (실측 2026-09-09).
+
+    오류도 안 났다. 판매 사이클이 매입을 부르는 배선이 열리는 날, *"안을 만들지
+    않는다"* 는 셋의 합의가 **아무 소리 없이** 깨지는 자리였다.
+
+    ⚠️ 빈 결과로 답하지 않는 이유는 ``MockNotAllowed`` 와 같다 — «오늘은 낼 안이
+      없다» 와 «우리가 안 만든 길로 불렸다» 는 다음에 할 일이 다르다.
+    """
+    request = _request_with_mode(mode, monkeypatch)
+
+    with pytest.raises(UnsupportedMode, match=mode):
+        purchase_port(request)
+
+
+def test_받는_mode_는_그대로_돈다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """문을 잠그면서 열려 있어야 할 것까지 잠그지 않았는지 본다."""
+    request = _request_with_mode("STATUS_QUERY", monkeypatch)
+
+    reply, _ = purchase_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.payload["capabilities"]["supported_modes"] == list(SUPPORTED_MODES)
+
+
+def test_답하는_목록과_문_앞_검사가_같은_선언을_본다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **값을 비교하지 않는다** (규칙 8). 선언을 실제로 바꿔 **둘 다** 따라오는지 본다.
+
+    목록이 두 곳에 있으면 한쪽만 늘어난다. 그러면 ``STATUS_QUERY`` 는 *"그 mode 도
+    받는다"* 고 답하는데 실제로 부르면 막히거나, 반대로 **답에는 없는 mode 가 조용히
+    안을 만든다.** 어느 쪽이든 마스터는 우리 답을 믿고 배선한다.
+
+    ★ 여기서 ``SUPPLY_CAPACITY_QUERY`` 를 쓰는 것은 예고이기도 하다 — 그 mode 를
+      실제로 구현하는 날 이 검사가 **양쪽을 같이 고치도록** 잡아 준다.
+    """
+    from app.purchase_agent import adapter
+
+    widened = (*SUPPORTED_MODES, "SUPPLY_CAPACITY_QUERY")
+    monkeypatch.setattr(adapter, "SUPPORTED_MODES", widened)
+
+    # ① 답하는 목록이 따라온다
+    status = purchase_port(_request_with_mode("STATUS_QUERY", monkeypatch))[0]
+    assert status.payload["capabilities"]["supported_modes"] == list(widened)
+
+    # ② 문 앞 검사도 따라온다 — 이제 막지 않고 안 만드는 길로 간다
+    request = _request_with_mode("SUPPLY_CAPACITY_QUERY", monkeypatch)
+    reply, _ = purchase_port(request)
+    assert reply.runtime_status == "RUNTIME_NOT_READY"  # 입력이 없어서다. 막힌 게 아니다
