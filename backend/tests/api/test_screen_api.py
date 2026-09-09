@@ -169,10 +169,12 @@ def test_재무_화면은_financing_mode로_state를_고른다(client):
     assert base["source"]["filled"] is True
     assert base["stats"][0]["raw"] == 100_000
     assert base["stats"][3]["raw"] == 0
-    assert "BASE_NO_LOAN" in base["explain"]["text"]
+    assert "대출 없이 운영" in base["explain"]["text"]
+    assert "BASE_NO_LOAN" not in base["explain"]["text"]
     assert loan["stats"][0]["raw"] == 500_000
     assert loan["stats"][3]["raw"] == 300_000
-    assert "LOAN_BASELINE" in loan["explain"]["text"]
+    assert "대출 반영" in loan["explain"]["text"]
+    assert "LOAN_BASELINE" not in loan["explain"]["text"]
 
 
 def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeypatch):
@@ -188,7 +190,7 @@ def test_재무_base가_없으면_존재하는_state로_화면을_연다(monkeyp
     body = response.json()
     assert body["selected"] == "loan"
     assert [state["key"] for state in body["states"]] == ["base", "loan"]
-    assert body["stats"][0]["detail"] == "2026-01-06 LOAN_BASELINE 기준"
+    assert body["stats"][0]["detail"] == "2026-01-06 기준 현재 사용 가능한 현금"
 
 
 def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeypatch):

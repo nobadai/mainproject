@@ -1,9 +1,4 @@
-"""재무 패키지 구조 — **책임 분리는 유지하고 기존 진입점은 깨지 않는다.**
-
-★ 이 파일이 지키는 것은 디렉터리 모양이 아니라 두 가지다.
-    · 업무 로직이 두 곳에 살지 않는다
-    · 밖에서 쓰던 import 경로가 그대로 산다 (재무 밖 코드는 고치지 않는다)
-"""
+"""재무 패키지 구조 검증."""
 
 from __future__ import annotations
 
@@ -38,10 +33,7 @@ def _modules() -> list[str]:
         "app.finance.db",            # master · orchestrator
         "app.finance.adapter",       # main.py (finance_port)
         "app.finance.router",        # main.py
-        "app.finance.schemas",       # tests/llm
-        "app.finance.interpretation",  # tests/llm
-        "app.finance.llm.runtime",   # tests/llm
-        "app.finance.llm.schemas",   # tests/llm
+        "app.finance.schemas",
     ],
 )
 def test_externally_imported_modules_still_resolve(module):
@@ -60,7 +52,8 @@ def test_router_exposes_the_same_endpoints():
     from app.finance.router import router
 
     paths = {route.path for route in router.routes}
-    assert {"/finance/agent", "/finance/sales", "/finance/runs"} <= paths
+    assert {"/finance/agent", "/finance/runs"} <= paths
+    assert "/finance/sales" not in paths
 
 
 def test_tool_registry_keeps_its_public_names():
@@ -168,11 +161,7 @@ def test_no_duplicate_business_definitions_were_introduced():
                 seen[node.name].append(str(path))
 
     duplicates = {name: paths for name, paths in seen.items() if len(paths) > 1}
-    # ★ 아래 둘은 **업무 로직 중복이 아니다.**
-    #   · project_cashflow : 계산(tools) 과 capability 이름이 같다 — Tool 이름은
-    #     Planner 계약이라 바꿀 수 없다. capability 는 계산을 부를 뿐이다.
-    #   · _read_bool       : 레거시 해석 런타임이 예전부터 자기 것을 갖고 있다.
-    assert set(duplicates) <= {"project_cashflow", "_read_bool"}, duplicates
+    assert set(duplicates) <= {"project_cashflow"}, duplicates
 
 
 def test_deterministic_calculations_stay_in_tools():

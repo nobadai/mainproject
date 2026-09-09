@@ -573,7 +573,7 @@ cut_unit_price  우리 컷 (self_check.check_max_price)
 **★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요.**
 
 ```python
-from app.finance.dashboard_service import get_finance_dashboard, get_finance_cashflow
+from app.finance.dashboard import get_finance_dashboard, get_finance_cashflow
 dash = get_finance_dashboard(sim_run_id=..., as_of=as_of)
 flow = get_finance_cashflow(sim_run_id=..., as_of=as_of)
 ```
@@ -676,7 +676,7 @@ snap = get_inventory_console(sim_run_id=..., as_of=as_of)
 **★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요.**
 
 ```python
-from app.sales.dashboard_service import get_sales_dashboard
+from app.sales.dashboard import get_sales_dashboard
 dash = get_sales_dashboard(sim_run_id=..., as_of=as_of)
 ```
 

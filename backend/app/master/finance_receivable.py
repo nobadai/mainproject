@@ -100,7 +100,7 @@ from app.finance.db import (
     get_finance_runtime_axis,
 )
 from app.finance.receivables import ReceivablePersistenceConflict, confirm_receivable
-from app.finance.sales_models import ReceivableCreateInput
+from app.finance.sales_validation import ReceivableCreateInput
 from app.master.receivable import ReceivablePartOut
 
 __all__ = [

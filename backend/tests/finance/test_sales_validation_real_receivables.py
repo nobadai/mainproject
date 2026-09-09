@@ -19,7 +19,7 @@ import pytest
 
 from app.finance.capabilities.sales import run_sales_validation
 from app.finance.db import FinanceDataNotReady
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 
 AS_OF = date(2025, 12, 31)
 

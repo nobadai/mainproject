@@ -8,7 +8,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.sales.db import execute_returning_one, fetch_all, fetch_one, get_db_schema
-from app.sales.schemas import RuntimeStatus, SalesCycle
+from app.sales.schemas import RuntimeStatus, SalesAgentRunResponse, SalesCycle
 
 
 class SalesAgentRun(TypedDict):
@@ -126,3 +126,25 @@ def list_sales_agent_runs(
     query += sql.SQL(" ORDER BY created_at DESC, run_id DESC LIMIT %s")
     params.append(limit)
     return cast(list[SalesAgentRun], fetch_all(query, params))
+
+
+def get_sales_run(run_id: UUID) -> SalesAgentRunResponse:
+    return SalesAgentRunResponse.model_validate(get_sales_agent_run(run_id))
+
+
+def list_sales_runs(
+    *,
+    cycle: SalesCycle | None = None,
+    as_of: date | None = None,
+    snapshot_id: str | None = None,
+    runtime_status: RuntimeStatus | None = None,
+    limit: int = 100,
+) -> list[SalesAgentRunResponse]:
+    rows = list_sales_agent_runs(
+        cycle=cycle,
+        as_of=as_of,
+        snapshot_id=snapshot_id,
+        runtime_status=runtime_status,
+        limit=limit,
+    )
+    return [SalesAgentRunResponse.model_validate(row) for row in rows]

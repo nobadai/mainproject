@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from app.finance import messages
+from app.finance import user_messages as messages
 from app.finance.application.harness import (
     PRE_PURCHASE_TOOLS,
     SCENARIO_VALIDATION_TOOLS,

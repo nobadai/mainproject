@@ -20,7 +20,7 @@ import pytest
 
 from app.finance import db
 from app.finance.db import FinanceDataNotReady, load_partner_receivables
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 from app.finance.tools import summarize_partner_receivables
 
 AS_OF = date(2025, 12, 31)

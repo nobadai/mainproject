@@ -334,7 +334,9 @@ def test_feedback_distribution_uses_reply_refs_and_rejects_unknown_ref(monkeypat
         }
     )
     reply = run_proposal(valid)
-    assert "FINANCE_FAIL" in reply.scenarios[0].risks
+    trace = next(item for item in reply.decision_trace if item.candidate_id == "SALES-001-A")
+    assert trace.finance_verdict == "FAIL"
+    assert trace.recommended is False
     assert "FINANCE_FAIL" not in reply.scenarios[1].risks
 
     invalid = _request(

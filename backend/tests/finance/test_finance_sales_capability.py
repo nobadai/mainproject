@@ -15,7 +15,7 @@ from app.finance.capabilities.sales import (
     evaluate_sales_scenario,
     parse_sales_validation_input,
 )
-from app.finance.sales_models import PartnerReceivable
+from app.finance.sales_validation import PartnerReceivable
 from app.finance.tools import (
     build_proposed_sales_collection_event,
     project_sales_scenario_cashflow,
