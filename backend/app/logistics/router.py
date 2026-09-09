@@ -343,10 +343,15 @@ def read_logistics_outbound(
     as_of: date,
     status_filter: Annotated[ReservationStatus | None, Query(alias="status")] = None,
 ) -> ConsoleOutboundResponse:
-    """예약과 그 아래 할당을 반환한다. 0건이면 `reservations: []` 가 정상이다.
+    """`as_of` 시점의 예약과 그 아래 할당. 0건이면 `reservations: []` 가 정상이다.
 
-    ⚠️ 예약·할당 축은 아직 `as_of` 로 자르지 않는다 — 자를 날짜 컬럼이 없다
-       (`reservation_time_basis = CURRENT_ROW`). WP-3 에서 같은 축이 된다.
+    ★ **예약·할당 축을 `as_of` 로 되살린다** (WP-3 ·
+      `reservation_time_basis = HISTORICAL_AS_OF`). 저장된 두 `status` 칸은 지금
+      값이라 안 읽고, 판매 납품일 · `released_as_of` · `decided_at` · 원장 OUT 으로
+      유도한다.
+
+    ⚠️ **`status` 필터도 유도된 상태에 걸린다.** 지금 DB 값으로 거르면 그날 살아
+       있던 예약이 «오늘 놓아줬다» 는 이유로 과거 화면에서 사라진다.
     """
     with _domain_errors():
         return get_outbound_console(

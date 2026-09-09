@@ -72,7 +72,7 @@ Placement = Literal["PLACED", "UNPLACED", "UNRECORDED"]
 #:
 #: ```text
 #: HISTORICAL_AS_OF  요청한 as_of 시점 사실 (원장 · 사건 재생)
-#: CURRENT_ROW       지금 행 값 — 그 축을 과거로 되살릴 정본이 아직 없다
+#: CURRENT_ROW       지금 행 값 — 되살릴 정본이 없거나, 그 값이 Runtime 축이다
 #: ```
 #:
 #: 🔴 **둘을 한 숫자 안에 섞지 않는다.** 섞이면 «과거인 척하는 현재» 가 되고,
@@ -186,11 +186,14 @@ class ConsoleInventoryResponse(ConsoleModel):
     #: `available_qty_kg` 가 전부 `None` 일 때만 채워진다. 그 외에는 `None`.
     available_qty_unresolved_reason: AvailableQtyUnresolvedReason | None = None
     #: 🔴 **`on_hand_qty_kg` 와 시간축이 다르다.** 현재고·Lot·`used_capacity_kg` 는
-    #:    `as_of` 원장에서 되살아나지만, 판매가능량이 빼는 예약·할당 축
-    #:    (`inventory_reservations`)에는 아직 시뮬레이션 날짜 컬럼이 없다
-    #:    (`released_as_of` 는 WP-3). 그래서 그 값은 **지금 행 기준**이다.
+    #:    `as_of` 원장에서 되살아나지만, 판매가능량은 **지금** 예약·할당을 뺀 값이다
+    #:    (`tools.build_inventory_by_item` ← `repository.get_outbound_commitments`).
     #:
-    #:    ⚠️ 되살릴 수 없는 축을 되살린 척하지 않는다 — WP-3 에서 같은 축이 된다.
+    #:    ⚠️ **이제는 «못 되살려서» 가 아니다.** WP-3 이 예약 축의 시간 정본을 세워
+    #:       (`historical_repository.reservation_state_at`) 되살릴 수는 있게 됐다.
+    #:       그런데 이 값이 답하는 물음은 *"지금 더 팔 수 있나"* 이고 그 쪽은 Agent
+    #:       Runtime 과 같은 축이어야 한다 — **어느 화면 값을 과거로 옮길지는 별도
+    #:       결정**이라 WP-3 에서 정하지 않았다. 축이 다르다는 사실만 여기 적는다.
     available_qty_time_basis: TimeBasis = "CURRENT_ROW"
     #: 현재고 · Lot 상태 · 신선도 · 회전 · `used_capacity_kg` 의 시간축.
     on_hand_time_basis: TimeBasis = "HISTORICAL_AS_OF"
@@ -381,6 +384,9 @@ class ConsoleAllocation(ConsoleModel):
     allocation_basis: AllocationBasis
     decided_by: str
     decided_at: datetime
+    #: 🔴 **`as_of` 시점으로 유도한 값이다** — 저장된 `status` 컬럼이 아니다.
+    #:    원장 OUT 이면 `SHIPPED`, 그 예약이 놓아준 뒤면 `CANCELLED`, 그 밖은
+    #:    `ALLOCATED` 다 (`historical_repository.HistoricalAllocationState`).
     status: AllocationStatus
     note: str | None
 
@@ -412,6 +418,10 @@ class ConsoleReservation(ConsoleModel):
     allocated_qty_kg: Decimal
     unallocated_qty_kg: Decimal
     due_date: date | None
+    #: 🔴 **`as_of` 시점으로 유도한 값이다** — 저장된 `status` 컬럼이 아니다.
+    #:    놓아준 뒤(`released_as_of <= as_of`)에만 저장된 `RELEASED`/`CANCELLED` 를
+    #:    쓰고, 그 전 날짜에는 할당 진행도로 다시 센다
+    #:    (`historical_repository._reservation_status_at`).
     status: ReservationStatus
     allocations: list[ConsoleAllocation]
 
@@ -421,18 +431,24 @@ class ConsoleOutboundResponse(ConsoleModel):
     as_of: date
     #: 0건이면 `[]` 다. **더미를 만들지 않는다.**
     reservations: list[ConsoleReservation]
-    #: 🔴 **예약·할당 축은 아직 `as_of` 로 되살리지 않는다.**
+    #: 🔴 **예약·할당 축을 `as_of` 로 되살린다 (WP-3).**
     #:
     #:    ```text
-    #:    예약 생성 시점   컬럼 없음 (created_at 은 벽시각이라 못 쓴다)
-    #:    예약 해제 시점   released_as_of 가 아직 없다        ← WP-3 M3
-    #:    할당 상태 이력   ALLOCATED → SHIPPED 전이 시각 없음
+    #:    예약 존재   sales.sale_date <= as_of
+    #:    예약 소멸   released_as_of <= as_of              ← M3 가 세운 칸
+    #:    할당 존재   decided_at < timestamp_cutoff(as_of)
+    #:    출고        MOVE-OUT-{allocation_id} · moved_at <= as_of
     #:    ```
     #:
-    #:    되살릴 정본이 없는 축을 «과거인 척» 자르면 안 나간 예약이 사라지거나
-    #:    이미 놓아준 예약이 살아 있는 것으로 보인다. 그래서 지금 행을 그대로
-    #:    내고 그 사실을 여기 적는다 — `as_of` 는 FEFO 후보 축에만 쓰인다.
-    reservation_time_basis: TimeBasis = "CURRENT_ROW"
+    #:    유도의 주인은 `historical_repository.reservation_state_at` 하나다.
+    #:    저장된 `inventory_reservations.status` · `inventory_allocations.status`
+    #:    는 **지금** 값이라 과거 정본으로 쓰지 않는다.
+    #:
+    #:    ⚠️ **`reserved_qty_kg` 만 지금 값이다.** 확보량 변경 이력이 없어서인데,
+    #:       예약을 세우는 유일한 경로(마스터 `outbound_flow`)가 그 판매의 납품일
+    #:       하루에만 돌아 날짜를 넘긴 top-up 이 production 에 없다. 그 전제가
+    #:       깨지면 이 칸부터 다시 본다.
+    reservation_time_basis: TimeBasis = "HISTORICAL_AS_OF"
 
 
 class ConsoleFefoCandidate(ConsoleModel):

@@ -60,6 +60,7 @@ from zoneinfo import ZoneInfo
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
+from app.logistics.outbound import _reservation_status_for
 from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.repository import LOGISTICS_POLICY_USAGE_SCOPE, _normalize_grade
 from app.logistics.schemas import ScheduledQuantity
@@ -68,6 +69,8 @@ from app.logistics.turnover import LotTurnover, _lot_turnover_from_row
 __all__ = [
     "CAPACITY_BASIS_CURRENT_ACTIVE_POLICY",
     "AdjustMoveNotSupported",
+    "HistoricalAllocation",
+    "HistoricalAllocationState",
     "HistoricalCapacity",
     "HistoricalLot",
     "HistoricalLotState",
@@ -103,10 +106,28 @@ CAPACITY_BASIS_CURRENT_ACTIVE_POLICY = "CURRENT_ACTIVE_POLICY"
 HistoricalLotState = Literal["ACTIVE", "DEPLETED", "DISPOSED"]
 
 #: 유도되는 예약 상태. 🔴 **어휘가 둘뿐이다** — 그날 잡고 있었나 아닌가.
-#: `RESERVED` · `PARTIALLY_ALLOCATED` · `ALLOCATED` 세 값은 **할당 진행도**라
-#: 예약 축의 사건이 아니고, 되살릴 사건 기록(`inventory_reservation_events`)이 없다.
-#: 그 진행도를 과거로 알고 싶으면 할당 축(`decided_at` · OUT Move)을 본다.
+#: 할당 진행도(`RESERVED` · `PARTIALLY_ALLOCATED` · `ALLOCATED`)는 별개 축이라
+#: `HistoricalReservation.status` 가 `_reservation_status_for` 로 따로 유도한다.
 HistoricalReservationState = Literal["HOLDING", "RELEASED"]
+
+#: 유도되는 할당 상태. 🔴 **`inventory_allocations.status` 를 안 읽는다** — 그 칸은
+#: 지금 값이라, 오늘 놓아준 예약의 할당이 **그 예약이 살아 있던 과거 날짜에도**
+#: `CANCELLED` 로 보인다.
+#:
+#: ```text
+#: SHIPPED    MOVE-OUT-{allocation_id} 의 moved_at <= as_of
+#: RELEASED   그 예약의 released_as_of <= as_of        ← 놓아주면 할당도 함께 내려간다
+#: ALLOCATED  그 밖 (decided_at < cutoff 로 이미 걸러졌다)
+#: ```
+#:
+#: ⚠️ **`PICKED` 가 없다.** 그 상태로 쓰는 production writer 가 없어 되살릴 사건이
+#:    없다 (`HistoricalLotState` 에 `HOLD` 가 없는 것과 같은 이유다).
+#:
+#: 🔴 **`CANCELLED` 를 따로 두지 않는다.** production 에서 할당이 취소되는 길은 둘뿐이고
+#:    (`release_reservation` · FEFO 의 같은 판 안 재적합) 앞엣것은 `RELEASED` 로
+#:    유도되며 뒤엣것은 **같은 날 안의 임시 상태**다 (WP-3 되살리기 날짜 경계가 그것을
+#:    하루 안으로 묶는다 — `outbound._되살려도_되는_날인지_본다`).
+HistoricalAllocationState = Literal["ALLOCATED", "SHIPPED", "RELEASED"]
 
 #: 유도되는 Receipt 상태. 🔴 **`INSPECTING` · `CLOSED` 가 없다** — 그 둘은 사건이
 #: 아니라 진행 표시라 되살릴 사실이 없다. Current 화면 어휘로 남는다.
@@ -203,15 +224,58 @@ class HistoricalCapacity:
 
 
 @dataclass(frozen=True)
+class HistoricalAllocation:
+    """`as_of` 시점의 할당 한 줄. **상태를 두 사건과 예약 해제일로 유도한다.**
+
+    🔴 **`inventory_allocations.status` 를 읽지 않는다** (`HistoricalAllocationState`
+       참조). 실측 9건이 전부 `SHIPPED` 인데, 그 값을 과거 화면에 실으면
+       **할당만 서 있던 날에도 «출고 완료»** 로 보인다.
+    """
+
+    allocation_id: str
+    reservation_id: str
+    lot_id: str
+    pallet_id: str | None
+    allocated_qty_kg: Decimal
+    allocation_basis: str
+    decided_by: str
+    decided_at: datetime
+    #: 🔴 유도값이다. 저장된 `status` 가 아니다.
+    state: HistoricalAllocationState
+    #: 원장 OUT 이 나간 날. `state != "SHIPPED"` 면 `None` 이다.
+    shipped_at: date | None
+    note: str | None
+
+
+@dataclass(frozen=True)
 class HistoricalReservation:
-    """`as_of` 시점의 예약 하나. **살아 있었나를 `released_as_of` 하나로 가른다.**
+    """`as_of` 시점의 예약 하나. **존재는 판매 납품일, 소멸은 `released_as_of` 다.**
+
+    ```text
+    존재    sales.sale_date <= as_of      ← 그 판매가 아직 안 선 날에는 예약도 없다
+    소멸    released_as_of <= as_of
+    진행도  할당(decided_at · OUT Move)에서 유도
+    ```
 
     🔴 **`inventory_reservations.status` 를 과거 정본으로 안 쓴다.** 그 칸은 **지금**
        값이라, 오늘 놓아준 예약이 과거 화면에서도 놓아준 것으로 보인다 —
        `remaining_qty_kg` 를 과거 잔량으로 쓰면 안 되는 것과 정확히 같은 잘못이다.
 
+       ★ **딱 한 자리에서만 저장된 값을 쓴다** — `released_as_of <= as_of` 인 날의
+         `RELEASED` / `CANCELLED` 구분이다. 놓아준 뒤에는 그 칸을 바꾸는 경로가 없어
+         (`reserve_available_stock` · `allocate_stock` 둘 다 놓아준 예약을 거부한다)
+         저장된 값이 곧 **놓아주던 날의 값**이다. 놓아주기 **전** 날짜로는 절대
+         역류시키지 않는다.
+
     ⚠️ **`created_at` · `updated_at` 도 안 쓴다.** 벽시각이라 DB 를 손본 시각이지
        시뮬레이션 사실일이 아니다 (`released_as_of` 를 만든 이유가 그것이다).
+
+    ⚠️ **`reserved_qty_kg` 는 지금 값이다.** top-up 이 날짜를 넘겨 일어나면 과거
+       확보량을 재현할 수 없다 — 그런데 production 에서 그 일이 안 난다:
+       예약을 만드는 유일한 경로가 마스터 `outbound_flow` 이고 그것은
+       `_due_today`(`sale_date == as_of`)로 **그 판매의 납품일 하루에만** 돌며,
+       콘솔·라우터에는 예약 생성 문이 아예 없다. 그래서 `sale_date <= as_of` 인
+       모든 날에 이 값이 맞다. 그 전제가 깨지면(예약 API 신설 등) 이 칸부터 다시 본다.
     """
 
     reservation_id: str
@@ -219,15 +283,24 @@ class HistoricalReservation:
     item_id: str
     item_name: str | None
     sale_id: str | None
+    #: 이 예약이 장부에 선 날 = 그 판매의 납품 기준일 (`sales.sale_date`).
+    sale_date: date
     required_qty_kg: Decimal
     reserved_qty_kg: Decimal
-    #: 🔴 유도값이다. 저장된 `status` 가 아니다.
+    due_date: date | None
+    #: 🔴 유도값이다. 저장된 `status` 가 아니다 — 그날 잡고 있었나 하나만 본다.
     state: HistoricalReservationState
+    #: 🔴 유도값이다. DB 어휘(`ReservationStatus`)를 그대로 쓰되 그날 사실로 다시 센다.
+    status: str
     released_as_of: date | None
-    #: 그날까지 이 예약이 Lot 에 붙여 둔 몫 (`decided_at < cutoff` · 취소 안 된 것).
+    #: 그날 아직 창고에서 안 나간 할당의 합 (`state == "ALLOCATED"`).
     allocated_qty_kg: Decimal
-    #: 그날까지 원장 OUT 으로 실제 나간 몫 (`MOVE-OUT-{allocation_id}` · `moved_at <= as_of`).
+    #: 그날 원장 OUT 으로 나간 몫 (`state == "SHIPPED"`).
     shipped_qty_kg: Decimal
+    #: 그날 아직 Lot 을 안 고른 몫 = `reserved − (ALLOCATED + SHIPPED)`.
+    unallocated_qty_kg: Decimal
+    #: 그날 존재한 할당들. `decided_at < cutoff` 로 걸러진 것만 들어온다.
+    allocations: tuple[HistoricalAllocation, ...]
 
 
 class ReceiptLineageAmbiguous(RuntimeError):
@@ -811,41 +884,52 @@ def snapshot_days_between(
 def reservation_state_at(
     conn: Any, *, sim_run_id: str, as_of: date
 ) -> tuple[HistoricalReservation, ...]:
-    """`as_of` 시점의 예약 — **살아 있었나를 `released_as_of` 로 유도한다.**
+    """`as_of` 시점의 예약과 그 아래 할당 — **저장된 `status` 를 안 읽는다.**
 
     ```text
-    released_as_of IS NULL       HOLDING     아직 놓아준 적이 없다
-    released_as_of >  as_of      HOLDING     그날에는 아직 살아 있었다
-    released_as_of <= as_of      RELEASED    그날에는 이미 놓아준 뒤다
+    존재    sales.sale_date <= as_of      ← 판매가 아직 안 선 날에는 예약도 없다
+    소멸    released_as_of <= as_of        그날부터 놓아준 것이다
+    진행도  할당(decided_at) · 원장 OUT(moved_at) 에서 유도
     ```
 
-    🔴 **`status` 컬럼을 읽지 않는다.** 실측(2026-09-09) 8행이 전부 `ALLOCATED`
-       인데, 그 값을 과거 화면에 실으면 **아직 예약도 안 한 날에도 «할당 완료»** 로
-       보인다. `receipt_state_at` 이 `receipt_status` 를 안 읽는 것과 같은 규율이다.
+    🔴 **`sales.sale_date` 로 존재를 자른다.** 종전에는 `sim_run_id` 로만 골라
+       **미래 납품 예약이 과거 조회에 그대로 나왔다** (2026-01-20 납품 예약이
+       2026-01-10 화면에 있었다). 예약을 만드는 유일한 경로가 마스터
+       `outbound_flow` 이고 그것은 `_due_today`(`sale_date == as_of`)로 **그 판매의
+       납품일에만** 예약을 세우므로, 납품일이 곧 예약이 장부에 선 날이다.
 
-    ⚠️ **`created_at` 으로 «그날 예약이 있었나» 를 자르지 않는다.** 그것은 벽시각이라
-       DB 를 손본 시각이다. 예약의 **생성 시뮬레이션 날짜 칸은 아직 없고**, 지어내지
-       않는다 — 대신 그 예약이 실제로 만든 사실(할당 · OUT Move)의 시간축으로
-       진행도를 유도한다. 그래서 이 함수는 **그 실행의 예약 전부**를 돌려주고
-       `state` 로 그날 잡고 있었는지를 가른다.
+       ⚠️ **`sale_id` 가 `NULL` 인 예약은 안 낸다.** 그 행에는 존재일을 댈 근거가
+          하나도 없다 — `created_at` 은 벽시각이라 못 쓰고, 없는 날짜를 지어내면
+          그 예약이 아무 날에나 나타난다. 실측(2026-09-09) 8행 전부 `sale_id` 가
+          있어 지금 빠지는 행은 **0건**이고, production 에서 그 값을 비우는 경로도
+          없다(예약을 세우는 유일한 문이 판매 봉투를 받는다). 스키마상 가능한
+          상태라 규칙만 적어 둔다.
 
-       ★ 이것이 «없는 사실을 지어내지 않는다» 의 실제 모습이다. 놓아준 날은 알 수
-         있게 됐고(M3), 잡은 날은 아직 모른다 — 아는 것만 답한다.
+    🔴 **`inventory_reservations.status` 도 `inventory_allocations.status` 도
+       과거 정본이 아니다.** 둘 다 **지금** 값이라, 오늘 놓아준 예약이 그 예약이
+       살아 있던 과거 날짜에도 `RELEASED` · `CANCELLED` 로 보인다.
+
+       ★ **딱 한 자리 예외** — `released_as_of <= as_of` 인 날의 `RELEASED` /
+         `CANCELLED` 구분이다. 놓아준 뒤에는 그 칸을 바꾸는 경로가 없어 저장된 값이
+         곧 놓아주던 날의 값이다. 그 **전** 날짜로는 역류시키지 않는다.
 
     ```text
-    allocated_qty_kg   decided_at < cutoff 인 살아있는 할당의 합
-    shipped_qty_kg     그 할당의 원장 OUT 중 moved_at <= as_of 인 것의 합
+    할당 존재    decided_at < timestamp_cutoff(as_of)
+    SHIPPED      MOVE-OUT-{allocation_id} · move_type='OUT' · moved_at <= as_of
+    RELEASED     그 예약의 released_as_of <= as_of   ← 놓아주면 할당도 함께 내려간다
+    ALLOCATED    그 밖
     ```
 
-       🔴 **할당도 `status` 로 안 센다.** `decided_at`(시뮬레이션 시간축)과 원장 OUT
-          두 사건으로 유도한다 — `inventory_allocations.status` 역시 지금 값이다.
-          다만 **취소된 할당은 뺀다**: 취소 시점 칸이 없어 «그날 취소돼 있었나» 를
-          알 수 없고, WP-3 이 되살리기를 **같은 날 안으로 묶었으므로**(
-          `outbound._되살려도_되는_날인지_본다`) 날짜를 넘긴 취소는 뒤집히지 않는다.
+       ★ **같은 판 안의 취소는 신경 쓰지 않는다.** production 에서 할당이 취소되는
+         길은 둘뿐이고(`release_reservation` · FEFO 재적합) 앞엣것은
+         `released_as_of` 로 유도되며 뒤엣것은 **같은 날 안**이다 — WP-3 의 되살리기
+         날짜 경계(`outbound._되살려도_되는_날인지_본다`)가 그것을 하루로 묶는다.
+         그래서 `allocation_cancelled_as_of` 같은 칸을 새로 만들지 않는다.
 
     ★ **축은 `(sim_run_id, as_of)` 다.** 실행을 안 좁히면 남의 실행 예약이 섞인다.
     """
     schema = _schema()
+    cutoff = timestamp_cutoff(as_of)
     rows = _rows(
         conn,
         sql.SQL(
@@ -855,48 +939,175 @@ def reservation_state_at(
                    r.item_id,
                    i.item_name,
                    r.sale_id,
+                   s.sale_date,
                    r.required_qty_kg,
                    r.reserved_qty_kg,
+                   r.due_date,
                    r.released_as_of,
-                   COALESCE(a.allocated_qty_kg, 0) AS allocated_qty_kg,
-                   COALESCE(a.shipped_qty_kg, 0)   AS shipped_qty_kg
+                   r.status AS stored_status
             FROM {schema}.inventory_reservations r
+            JOIN {schema}.sales s ON s.sale_id = r.sale_id
             LEFT JOIN {schema}.items i ON i.item_id = r.item_id
-            LEFT JOIN (
-                SELECT al.reservation_id,
-                       SUM(al.allocated_qty_kg) AS allocated_qty_kg,
-                       SUM(COALESCE(mv.quantity_kg, 0)) AS shipped_qty_kg
-                FROM {schema}.inventory_allocations al
-                LEFT JOIN {schema}.inventory_moves mv
-                       ON mv.move_id = 'MOVE-OUT-' || al.allocation_id
-                      AND mv.move_type = 'OUT'
-                      AND mv.moved_at <= %(as_of)s
-                WHERE al.decided_at < %(cutoff)s
-                  AND al.status <> 'CANCELLED'
-                GROUP BY al.reservation_id
-            ) a ON a.reservation_id = r.reservation_id
             WHERE r.sim_run_id = %(sim)s
-            ORDER BY r.reservation_id
+              AND s.sale_date <= %(as_of)s
+            ORDER BY s.sale_date, r.reservation_id
             """
         ).format(schema=schema),
-        {"sim": sim_run_id, "as_of": as_of, "cutoff": timestamp_cutoff(as_of)},
+        {"sim": sim_run_id, "as_of": as_of},
     )
-    return tuple(
-        HistoricalReservation(
-            reservation_id=row["reservation_id"],
-            sim_run_id=row["sim_run_id"],
-            item_id=row["item_id"],
-            item_name=row["item_name"],
-            sale_id=row["sale_id"],
-            required_qty_kg=_decimal(row["required_qty_kg"]),
-            reserved_qty_kg=_decimal(row["reserved_qty_kg"]),
-            state=_reservation_state(row["released_as_of"], as_of=as_of),
-            released_as_of=row["released_as_of"],
-            allocated_qty_kg=_decimal(row["allocated_qty_kg"]),
-            shipped_qty_kg=_decimal(row["shipped_qty_kg"]),
+    if not rows:
+        return ()
+
+    할당들 = _allocation_rows_at(
+        conn, schema, reservation_ids=[row["reservation_id"] for row in rows],
+        as_of=as_of, cutoff=cutoff,
+    )
+
+    지은것: list[HistoricalReservation] = []
+    for row in rows:
+        released = row["released_as_of"]
+        상태 = _reservation_state(released, as_of=as_of)
+        할당 = tuple(
+            _historical_allocation(할당행, reservation_state=상태)
+            for 할당행 in 할당들.get(row["reservation_id"], ())
         )
-        for row in rows
+        나간것 = sum(
+            (a.allocated_qty_kg for a in 할당 if a.state == "SHIPPED"), start=Decimal(0)
+        )
+        잡은것 = sum(
+            (a.allocated_qty_kg for a in 할당 if a.state == "ALLOCATED"), start=Decimal(0)
+        )
+        확보 = _decimal(row["reserved_qty_kg"])
+        지은것.append(
+            HistoricalReservation(
+                reservation_id=row["reservation_id"],
+                sim_run_id=row["sim_run_id"],
+                item_id=row["item_id"],
+                item_name=row["item_name"],
+                sale_id=row["sale_id"],
+                sale_date=row["sale_date"],
+                required_qty_kg=_decimal(row["required_qty_kg"]),
+                reserved_qty_kg=확보,
+                due_date=row["due_date"],
+                state=상태,
+                status=_reservation_status_at(
+                    row, state=상태, assigned=잡은것 + 나간것
+                ),
+                released_as_of=released,
+                allocated_qty_kg=잡은것,
+                shipped_qty_kg=나간것,
+                unallocated_qty_kg=max(Decimal(0), 확보 - (잡은것 + 나간것)),
+                allocations=할당,
+            )
+        )
+    return tuple(지은것)
+
+
+def _allocation_rows_at(
+    conn: Any,
+    schema: sql.Identifier,
+    *,
+    reservation_ids: list[str],
+    as_of: date,
+    cutoff: datetime,
+) -> dict[str, tuple[dict[str, Any], ...]]:
+    """그날 존재한 할당 행들을 예약별로 모은다. **`status` 를 안 읽는다.**
+
+    ★ **원장 OUT 을 `LEFT JOIN` 으로 한 번에 붙인다.** `move_id` 가
+      `MOVE-OUT-{allocation_id}` 로 결정적이라 1:1 이고, 그래서 행이 불어나지 않는다
+      (`receipt_state_at` 이 1:N 가능성 때문에 곱을 막는 것과 다른 자리다).
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT al.allocation_id,
+                   al.reservation_id,
+                   al.lot_id,
+                   al.pallet_id,
+                   al.allocated_qty_kg,
+                   al.allocation_basis,
+                   al.decided_by,
+                   al.decided_at,
+                   al.note,
+                   mv.moved_at AS shipped_at
+            FROM {schema}.inventory_allocations al
+            LEFT JOIN {schema}.inventory_moves mv
+                   ON mv.move_id = 'MOVE-OUT-' || al.allocation_id
+                  AND mv.move_type = 'OUT'
+                  AND mv.moved_at <= %(as_of)s
+            WHERE al.reservation_id = ANY(%(ids)s)
+              AND al.decided_at < %(cutoff)s
+            ORDER BY al.reservation_id, al.allocation_id
+            """
+        ).format(schema=schema),
+        {"ids": reservation_ids, "as_of": as_of, "cutoff": cutoff},
     )
+    모음: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        모음.setdefault(row["reservation_id"], []).append(row)
+    return {키: tuple(값) for 키, 값 in 모음.items()}
+
+
+def _historical_allocation(
+    row: dict[str, Any], *, reservation_state: HistoricalReservationState
+) -> HistoricalAllocation:
+    """할당 한 줄의 그날 상태를 유도한다. **순서가 계약이다.**
+
+    ```text
+    ① 원장 OUT 이 있으면        SHIPPED    나간 것은 되돌릴 수 없다
+    ② 예약이 놓아준 뒤면        RELEASED   놓아주면 아직 안 나간 할당도 함께 내려간다
+    ③ 그 밖                     ALLOCATED
+    ```
+
+    🔴 **①이 ②보다 먼저다.** `release_reservation` 은 `SHIPPED` 할당이 하나라도 있으면
+       멈추므로 둘이 함께 참일 수 없지만, 순서를 뒤집으면 그 불변식이 깨지는 날
+       **이미 나간 재고가 «놓아줬다» 로 보인다.**
+    """
+    shipped_at = row["shipped_at"]
+    if shipped_at is not None:
+        state: HistoricalAllocationState = "SHIPPED"
+    elif reservation_state == "RELEASED":
+        state = "RELEASED"
+    else:
+        state = "ALLOCATED"
+    return HistoricalAllocation(
+        allocation_id=row["allocation_id"],
+        reservation_id=row["reservation_id"],
+        lot_id=row["lot_id"],
+        pallet_id=row["pallet_id"],
+        allocated_qty_kg=_decimal(row["allocated_qty_kg"]),
+        allocation_basis=row["allocation_basis"],
+        decided_by=row["decided_by"],
+        decided_at=row["decided_at"],
+        state=state,
+        shipped_at=shipped_at if state == "SHIPPED" else None,
+        note=row["note"],
+    )
+
+
+def _reservation_status_at(
+    row: dict[str, Any], *, state: HistoricalReservationState, assigned: Decimal
+) -> str:
+    """그날의 `ReservationStatus` 를 유도한다. **DB 어휘를 그대로 쓴다.**
+
+    ```text
+    RELEASED    저장된 status (RELEASED / CANCELLED)   ← 놓아준 날부터만
+    HOLDING     _reservation_status_for(할당 진행도)    ← 새 어휘를 안 만든다
+    ```
+
+    🔴 **살아 있던 날에는 저장된 값을 안 본다.** 오늘 `RELEASED` 인 예약도 놓아주기
+       전날에는 `RESERVED` · `PARTIALLY_ALLOCATED` · `ALLOCATED` 중 하나였다.
+
+    ★ **진행도 식을 여기서 다시 적지 않는다.** `outbound._reservation_status_for` 가
+      그 규칙의 주인이고(`required_qty_kg` 기준 · 확보량 기준 아님), 두 벌로 적으면
+      한쪽만 고쳐지는 날이 온다.
+    """
+    if state == "RELEASED":
+        # ★ 놓아준 뒤에는 그 칸을 바꾸는 경로가 없어, 저장된 값이 놓아주던 날의 값이다.
+        저장 = row["stored_status"]
+        return 저장 if 저장 in ("RELEASED", "CANCELLED") else "RELEASED"
+    return _reservation_status_for(row, allocated=assigned)
 
 
 def _reservation_state(

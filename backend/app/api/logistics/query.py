@@ -178,7 +178,7 @@ def _stock_pane(
         avail_detail = f"못 읽은 축이 있습니다 — {inv.available_qty_unresolved_reason}"
     else:
         #  ★ **«기준일 값» 이라고 적지 않는다.** 이 숫자가 빼는 예약·할당 축은
-        #    아직 지금 행이다 (`available_qty_time_basis`). WP-3 에서 같은 축이 된다.
+        #    Runtime 축의 지금 값이다 (`available_qty_time_basis`).
         avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (예약 축은 «지금» 기준)"
 
     return Pane(

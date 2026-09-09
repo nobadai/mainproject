@@ -24,7 +24,7 @@
 ```text
 되살린다 (HISTORICAL_AS_OF)   Lot 잔량 · Lot 상태 · 신선도 · 회전 · used_capacity_kg
                               Receipt 상태 · 검수 · 재고반영 · Pallet 자리
-아직 못 되살린다 (CURRENT_ROW) 판매가능량이 빼는 예약·할당 축 · 예약 목록 · Zone 정원
+지금 행 그대로 (CURRENT_ROW) 판매가능량(Runtime 축) · Zone 정원(되살릴 정본 없음)
 ```
 
    ⚠️ 뒤엣것들은 **되살릴 정본 컬럼이 아직 없다** (`inventory_reservations` 에
@@ -43,7 +43,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from psycopg import sql
 
@@ -78,12 +78,13 @@ from app.logistics.console_schemas import (
     ConsoleZone,
 )
 from app.logistics.db import get_connection, get_db_schema
-from app.logistics.historical_repository import HistoricalLot
+from app.logistics.historical_repository import HistoricalAllocation, HistoricalLot
 from app.logistics.inbound_schedules import receivable_at
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
     _HOLDING_RESERVATION,
+    AllocationStatus,
     HumanAllocationBasis,
     ReservationStatus,
 )
@@ -341,8 +342,10 @@ def get_inventory_console(
        빠진다.** 판매불가는 창고에서 사라진 것이 아니다.
 
     ⚠️ **`available_qty_kg` 는 아직 다른 시간축이다** (`available_qty_time_basis`).
-       그 값이 빼는 예약·할당 축에 시뮬레이션 날짜 컬럼이 없어서다 — WP-3 에서
-       같은 축이 된다. 지금 억지로 자르면 없는 사실을 지어내게 된다.
+       그 값은 **지금** 예약·할당을 뺀 Runtime 축이다. WP-3 이 예약 축의 시간
+       정본을 세웠으니 되살릴 수는 있지만, 어느 화면 값을 과거로 옮길지는 별도
+       결정이라 여기서 바꾸지 않았다 (예약 목록은 `get_outbound_console` 이
+       `as_of` 로 낸다).
 
     ★ **보관정책이 없는 품목의 Lot 도 싣는다.** 종전 스냅샷 경로는
       `item_storage_policies` 를 `INNER JOIN` 해서 그런 Lot 을 통째로 떨어뜨렸다 —
@@ -819,100 +822,82 @@ def get_placement_options_console(
 # ── GET /logistics/outbound ─────────────────────────────────────────────
 
 
-def _allocations_by_reservation(
-    conn: Any, *, sim_run_id: str
-) -> dict[str, list[ConsoleAllocation]]:
-    schema = _schema()
-    rows = _rows(
-        conn,
-        sql.SQL(
-            """
-            SELECT a.allocation_id, a.reservation_id, a.lot_id, a.pallet_id,
-                   a.allocated_qty_kg, a.allocation_basis,
-                   a.decided_by, a.decided_at, a.status, a.note
-            FROM {schema}.inventory_allocations a
-            JOIN {schema}.inventory_reservations r
-              ON r.reservation_id = a.reservation_id
-            WHERE r.sim_run_id = %(sim)s
-            ORDER BY a.reservation_id, a.allocation_id
-            """
-        ).format(schema=schema),
-        {"sim": sim_run_id},
+#: 유도된 할당 상태를 화면 어휘로 옮긴다. 🔴 **새 어휘를 만들지 않는다** —
+#: `AllocationStatus` 는 DB `ck_inventory_allocations_status` 그대로이고, 놓아준
+#: 예약의 할당은 DB 에서도 실제로 `CANCELLED` 로 내려간다
+#: (`outbound.release_reservation`).
+_ALLOCATION_STATE_TO_CONSOLE: dict[str, AllocationStatus] = {
+    "ALLOCATED": "ALLOCATED",
+    "SHIPPED": "SHIPPED",
+    "RELEASED": "CANCELLED",
+}
+
+
+def _console_allocation(allocation: HistoricalAllocation) -> ConsoleAllocation:
+    """`as_of` 시점 할당 하나를 화면 계약으로. **상태는 유도값이다.**"""
+    return ConsoleAllocation(
+        allocation_id=allocation.allocation_id,
+        lot_id=allocation.lot_id,
+        pallet_id=allocation.pallet_id,
+        allocated_qty_kg=allocation.allocated_qty_kg,
+        allocation_basis=allocation.allocation_basis,
+        decided_by=allocation.decided_by,
+        decided_at=allocation.decided_at,
+        status=_ALLOCATION_STATE_TO_CONSOLE[allocation.state],
+        note=allocation.note,
     )
-    grouped: dict[str, list[ConsoleAllocation]] = {}
-    for row in rows:
-        reservation_id = row.pop("reservation_id")
-        grouped.setdefault(reservation_id, []).append(ConsoleAllocation(**row))
-    return grouped
 
 
 def get_outbound_console(
     *, sim_run_id: str, as_of: date, status: ReservationStatus | None = None
 ) -> ConsoleOutboundResponse:
-    """예약 목록과 그 아래 할당들. **네 조회와 같은 `(sim_run_id, as_of)` 축을 받는다.**
-
-    🔴 **예약·할당 축은 아직 `as_of` 로 자르지 않는다 — 자를 정본이 없다.**
+    """`as_of` 시점의 예약 목록과 그 아래 할당들. **네 조회와 같은 축이다.**
 
     ```text
-    예약 생성 시점   컬럼 없음 (created_at 은 벽시각이라 시뮬레이션 사실일이 아니다)
-    예약 해제 시점   released_as_of 가 아직 없다               ← WP-3 M3
-    할당 상태 전이   ALLOCATED → SHIPPED 시각 컬럼이 없다
+    예약 존재    sales.sale_date <= as_of
+    예약 소멸    released_as_of <= as_of
+    할당 존재    decided_at < timestamp_cutoff(as_of)
+    출고         MOVE-OUT-{allocation_id} · moved_at <= as_of
     ```
 
-       없는 날짜를 넘겨짚어 자르면 **안 나간 예약이 사라지거나 이미 놓아준 예약이
-       살아 있는 것으로** 보인다. 그래서 지금 행을 그대로 내고 응답의
-       `reservation_time_basis` 로 그 사실을 말한다 (WP-3 에서 같은 축이 된다).
+    🔴 **저장된 `status` 두 칸을 안 읽는다** — `historical_repository.reservation_state_at`
+       하나가 정본이고 이 파일은 받아 적는다. 종전에는 `inventory_reservations` ·
+       `inventory_allocations` 의 지금 행을 그대로 내고 `reservation_time_basis` 로
+       *"과거가 아니다"* 라고만 말했다 (WP-3 이전에는 자를 정본이 없었다).
+
+    ★ **`status` 필터도 유도된 상태에 건다.** 지금 DB 값으로 거르면 **그날 살아 있던
+      예약이 오늘 놓아줬다는 이유로 과거 화면에서 사라진다.** DB 에 거는 `WHERE` 를
+      쓰지 않고 유도 뒤에 파이썬에서 거른다 — 유도식의 주인이 하나여야 하기 때문이다.
 
     ★ `status` 를 안 주면 **거르지 않는다** — 놓아준 예약(RELEASED · CANCELLED)을
       기본으로 숨기는 정책을 여기서 새로 만들지 않는다. 화면이 골라 쓴다.
 
     ★ 0건이면 `reservations: []` 가 정상이다. 더미를 만들지 않는다.
     """
-    schema = _schema()
     with _read_connection() as conn:
-        rows = _rows(
-            conn,
-            sql.SQL(
-                """
-                SELECT r.reservation_id, r.item_id, i.item_name, r.sale_id,
-                       r.required_qty_kg, r.reserved_qty_kg, r.due_date, r.status,
-                       COALESCE(h.qty, 0) AS allocated_qty_kg,
-                       GREATEST(r.reserved_qty_kg - COALESCE(a.qty, 0), 0)
-                           AS unallocated_qty_kg
-                FROM {schema}.inventory_reservations r
-                LEFT JOIN {schema}.items i ON i.item_id = r.item_id
-                LEFT JOIN (
-                    SELECT reservation_id, SUM(allocated_qty_kg) AS qty
-                    FROM {schema}.inventory_allocations
-                    WHERE status = ANY(%(holding_alloc)s)
-                    GROUP BY reservation_id
-                ) h ON h.reservation_id = r.reservation_id
-                LEFT JOIN (
-                    SELECT reservation_id, SUM(allocated_qty_kg) AS qty
-                    FROM {schema}.inventory_allocations
-                    WHERE status = ANY(%(assigned_alloc)s)
-                    GROUP BY reservation_id
-                ) a ON a.reservation_id = r.reservation_id
-                WHERE r.sim_run_id = %(sim)s
-                  AND (%(status)s::text IS NULL OR r.status = %(status)s)
-                ORDER BY r.due_date NULLS LAST, r.reservation_id
-                """
-            ).format(schema=schema),
-            {
-                "sim": sim_run_id,
-                "status": status,
-                "holding_alloc": sorted(_HOLDING_ALLOCATION),
-                "assigned_alloc": sorted(_ASSIGNED_ALLOCATION),
-            },
+        reservations = historical_repository.reservation_state_at(
+            conn, sim_run_id=sim_run_id, as_of=as_of
         )
-        allocations = _allocations_by_reservation(conn, sim_run_id=sim_run_id)
 
     return ConsoleOutboundResponse(
         sim_run_id=sim_run_id,
         as_of=as_of,
         reservations=[
-            ConsoleReservation(**row, allocations=allocations.get(row["reservation_id"], []))
-            for row in rows
+            ConsoleReservation(
+                reservation_id=row.reservation_id,
+                item_id=row.item_id,
+                item_name=row.item_name,
+                sale_id=row.sale_id,
+                required_qty_kg=row.required_qty_kg,
+                reserved_qty_kg=row.reserved_qty_kg,
+                allocated_qty_kg=row.allocated_qty_kg,
+                unallocated_qty_kg=row.unallocated_qty_kg,
+                due_date=row.due_date,
+                status=cast(ReservationStatus, row.status),
+                allocations=[_console_allocation(a) for a in row.allocations],
+            )
+            for row in reservations
+            if status is None or row.status == status
         ],
     )
 

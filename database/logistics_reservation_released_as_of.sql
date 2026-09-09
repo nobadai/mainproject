@@ -52,6 +52,17 @@
 -- ★ **두 번 돌려도 안전하다** (`IF NOT EXISTS`).
 --
 -- ★ **additive 다.** 기존 칸을 바꾸지도 지우지도 않는다.
+--
+-- 🔴 **배포 순서 — migration 이 먼저, 코드가 나중이다.**
+--
+--   이 칸을 읽는 production 경로가 셋이다.
+--
+--     outbound._reservation                     예약 조회 (예약·할당·출고·해제 전부)
+--     historical_repository.reservation_state_at  Historical 예약·할당
+--     console_service.get_outbound_console       위를 그대로 쓴다 · /api/logistics/outbound
+--
+--   칸이 없는 DB 에 새 코드를 먼저 올리면 그 셋이 `column does not exist` 로 깨진다.
+--   반대 순서(칸 먼저)는 안전하다 — 옛 코드는 이 칸을 안 읽으므로 아무 영향이 없다.
 
 BEGIN;
 
