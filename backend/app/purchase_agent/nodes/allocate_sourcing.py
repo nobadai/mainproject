@@ -107,7 +107,7 @@ def is_spread_widened(spread: float | None, baseline: float | None, widening_rat
 #: 🔴 **이 필터는 실제로 하는 일이 있다. 지우려다 되돌렸다.**
 #:
 #:   물류가 ``item_storage_policies`` 를 **필터 없이 전부** 보낸다
-#:   (``logistics/repository.py:213`` · 실측 5행)::
+#:   (``logistics/repository.py`` ``get_item_storage_policies`` · 실측 5행)::
 #:
 #:       무 14 · 배추 10 · 양파 30 · 건고추 90 · 피마늘 30
 #:
@@ -121,7 +121,7 @@ def is_spread_widened(spread: float | None, baseline: float | None, widening_rat
 #:       물류   재고 축을 안 좁힌다 — 건고추 정책을 그대로 보낸다
 #:       매입   제안 축이라 좁힌다 — 우리 것이 아니면 안 읽는다
 #:
-#:   ``contracts/core.py:112`` 가 그 원칙을 적었다 — *"뺀다고 창고의 실물이 없어지지는
+#:   ``contracts/core.py`` 의 ``ITEMS`` 각주가 그 원칙을 적었다 — *"뺀다고 창고의 실물이 없어지지는
 #:   않는다. 재고가 있으면 그 사실은 나가야 한다 — 예측이 없다는 이유로 재고를 숨기지
 #:   않는다."*
 #:
@@ -144,7 +144,8 @@ def item_storage_policy(inventory: dict, item: str) -> dict | None:
     배추를 돌리며 ``policies[0]`` 을 읽으면 무의 보관한계로 중품 소진 창을 계산한다 —
     에러가 나지 않아 아무도 모른다. 실제로 이 함정을 밟은 사례가 보고됐다(#79).
 
-    ★ **이 순서는 ``repository.py:213`` 의 ``ORDER BY i.item_name`` 결과다.**
+    ★ **이 순서는 ``logistics/repository.py`` ``get_item_storage_policies`` 의
+      ``ORDER BY i.item_name`` 결과다.**
       첫 항목이 무인 것이 우연이 아니다 — ``policies[0]`` 을 쓰면 품목과 무관하게
       **무가 나온다** (``#79`` 의 뿌리).
 

@@ -16,8 +16,13 @@ read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모�
 * 근거 환각 대조 → 원문 문서 필요
 
 ★ **단위는 kg 다.** ton 대조표가 있었는데 전환이 끝나 걷었다 (2026-09-05).
-회귀는 ``tests/finance/test_finance_schemas.py:16``
+회귀는 ``tests/finance/test_finance_schemas.py``
 ``test_purchase_agent_contract_rejects_legacy_ton_fields`` 가 막는다.
+
+🔴 **그 검사가 지금 안 돈다** (2026-09-09 · `#450`). 그 파일이 `app.finance.schemas`
+에서 ``FinanceSalesRequest`` · ``PurchaseAgentOutput`` 를 import 하는데 **둘 다 재무에서
+사라져** 수집 단계에서 ``ImportError`` 가 난다. 계약이 깨진 게 아니라 **재는 쪽이 꺼진
+것**이고, 우리 쪽 검사는 그대로 돈다.
 
 ⚠️ **그 검사가 잠그는 것은 이 파일 쪽이다** — 이름이 *"부서가 ton 을 거부한다"* 로
 읽히지만, ``PurchaseAgentOutput`` 은 재무 DTO 가 아니라 아래 ``PurchaseProposal`` 이다.
@@ -209,9 +214,16 @@ class SplitPlanItem(BaseModel):
     #:
     #: 🔴 **우리 산출물에는 항상 찬다. 그런데 스키마에서는 선택 필드다** — 이유가 있다.
     #:
-    #:   이 모델은 **우리만 쓰는 것이 아니다.** 재무·물류가
-    #:   ``PurchaseAgentOutput = PurchaseProposal`` 로 **그대로 import 해서 자기 API 의
-    #:   요청 모델로 쓴다** (``finance/schemas.py:332`` · ``logistics/router.py``).
+    #:   이 모델은 **우리만 쓰는 것이 아니다.** 재무·물류가 이 모델을 **그대로 import
+    #:   해서 자기 API 의 요청 모델로 쓴다.**
+    #:
+    #:   🔴 **재수출 자리가 하나 없어졌다** (2026-09-09 · `#450`)::
+    #:
+    #:       물류   ``logistics/schemas.py``  ``PurchaseAgentOutput = PurchaseProposal``  🟢 그대로
+    #:       재무   ~~``finance/schemas.py``  ``PurchaseAgentOutput``~~  🔴 삭제됨
+    #:              지금은 ``finance/adapter.py`` 가 ``PurchaseProposal`` 을 직접 import 한다
+    #:
+    #:   ★ **계약은 그대로다** — 별칭이 없어졌을 뿐 재무가 여전히 이 모델로 받는다.
     #:   여기서 필수로 만들면 **그 두 부서의 엔드포인트가 이 필드 없는 요청을 422 로
     #:   거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다. 통보 없이 할 일이 아니다.
     #:
@@ -344,8 +356,8 @@ class Scenario(BaseModel):
     #: 예측 상단 기반 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
     #:
     #: 🔴 **재무 STRESS 전용이다** (2026-09-08 · `#394` 기준). ``amount_max_krw = qty ×
-    #: max_price`` 를 **재무와 마스터가 검사한다** (``finance/capabilities/scenario.py:180``
-    #: · ``master/verifier.py:734`` — 검사 이름 ``L-PAYSCHED-MAX``). 컷은 이 값이 아니라
+    #: max_price`` 를 **재무와 마스터가 검사한다** (``finance/capabilities/scenario.py`` 의
+    #: ``amount_max_krw`` 등식 · ``master/verifier.py`` 의 ``L-PAYSCHED-MAX``). 컷은 이 값이 아니라
     #: ``cut_unit_price`` 가 한다.
     max_price: int = Field(ge=0)
     #: 매입 **컷 기준**. ``sourcing_plan`` 단가가 이걸 넘으면 ⑦이 컷한다.
@@ -356,8 +368,9 @@ class Scenario(BaseModel):
     #: 하나였다.
     #:
     #: ★ **``None`` 을 허용하는 이유는 남의 픽스처다.** 재무가 우리 스키마로 검증하는데
-    #: (``finance/adapter.py:469``) 그쪽 픽스처는 이 필드를 모른다. 우리 산출물은 항상
-    #: 채우고, 없으면 ⑦이 **컷 사유를 남긴다** — 조용히 통과시키지 않는다 (규칙 3).
+    #: (``finance/adapter.py`` 의 ``_purchase_proposal``) 그쪽 픽스처는 이 필드를 모른다.
+    #: 우리 산출물은 항상 채우고, 없으면 ⑦이 **컷 사유를 남긴다** — 조용히 통과시키지
+    #: 않는다 (규칙 3).
     cut_unit_price: int | None = Field(default=None, ge=0)
     #: 매입단가가 contract_price 방어선을 넘었다는 **표시**. 컷이 아니다(영업이 T2에서 판정).
     #:

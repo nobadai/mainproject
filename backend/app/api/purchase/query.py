@@ -156,7 +156,7 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     (`e63f990` *"고쳐 쓰면 기록이 거짓이 된다"*). 기록을 고칠 자리가 아니라
     **보일 때 거를 자리**다. 계약이 그렇게 적어 두었다::
 
-        contracts/core.py:118
+        contracts/core.py  ITEMS 각주
         제안 축   "사자고 제안한 품목"   ITEMS 로 거른다
         재고 축   "창고에 있는 품목"     자유 문자열 — 좁히지 않는다
 
