@@ -41,7 +41,7 @@ from typing import Any
 
 import pytest
 
-from app.master import ask_service, clock, decision_service, revalidation, router, wiring
+from app.master import ask_service, revalidation, router, wiring
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 
 #: 이 검사가 고르는 "고른 날". 🔴 **오늘일 리 없는 값으로 둔다** — 벽시계가 어딘가에
@@ -116,8 +116,10 @@ def test_as_of_없이_부르면_터진다(부서들):
 
 @pytest.mark.parametrize(
     "함수",
-    [revalidation.revalidate_scenario, decision_service.record_decision],
-    ids=["revalidate_scenario", "record_decision"],
+    #: 🔴 **`record_decision` 은 여기 없다** (2026-09-09). 그 함수는 as_of 를 **안 받고**
+    #: 실행 이력 행에서 읽는다 — 받으면 부르는 쪽이 아무 날이나 넣을 수 있다.
+    [revalidation.revalidate_scenario],
+    ids=["revalidate_scenario"],
 )
 def test_as_of_는_기본값_없는_키워드다(함수):
     """★ 위 검사의 짝 — **왜 터지는지**까지 못 박는다.
@@ -173,36 +175,35 @@ def test_넘긴_날이_재검증_업무_키를_만든다(부서들):
 # ---------------------------------------------------------------------------
 
 
-def test_승인_라우터가_clock_을_읽어_넘긴다(monkeypatch):
-    """🔴 **화면이 누른 승인에는 `as_of` 가 안 실려 온다.** 그래서 여기가 정한다.
+def test_승인_라우터는_날짜를_안_정한다(monkeypatch):
+    """🔴 **진입점이 재검증할 날을 고르지 않는다** (2026-09-09).
 
-    ★ 두 가지를 같이 본다 — 라우터가 들고 있는 이름이 **진짜 시계**인가, 그리고
-      그 시계가 준 값을 **그대로** 넘기는가. 앞만 보면 이름만 두고 딴 값을 넘길 수
-      있고, 뒤만 보면 시계 대신 고정 날짜를 박아도 대역이 가려 준다.
+    ⚠️ **이 검사는 뜻이 뒤집혔다.** 전에는 *"라우터가 clock 을 읽어 넘긴다"* 를 지켰다.
+      그런데 실측에서 그 구조가 **승인을 막았다** — 재검증의 첫 관문이 개장이고,
+      화면이 오늘 누르면 **오늘은 안 열린 날**이라 `ERROR` 가 난다.
+
+    ★ 그래서 그 날은 **실행 이력 행**이 정한다. 라우터는 시계를 아예 안 든다.
     """
-    assert router.today_in_seoul is clock.today_in_seoul, (
-        "라우터가 clock 이 아닌 다른 시계를 들고 있다"
+    assert not hasattr(router, "today_in_seoul"), (
+        "라우터가 다시 시계를 들었다 — 재검증할 날은 실행 이력 행이 정한다"
     )
 
     받은: list[Any] = []
-    monkeypatch.setattr(router, "today_in_seoul", lambda: 고른_날)
     monkeypatch.setattr(
         router, "record_decision", lambda request_id, body, **kw: 받은.append(kw) or "OK"
     )
 
     router.master_decide("REQ-20260901-0001", object())  # type: ignore[arg-type]
 
-    assert 받은 == [{"as_of": 고른_날}], (
-        f"승인 라우터가 시계가 준 날을 그대로 안 넘겼다: {받은}"
-    )
+    assert 받은 == [{}], f"진입점이 날짜를 넘겼다: {받은}"
 
 
-def test_발화문_승인은_그_요청의_as_of_로_돈다(monkeypatch):
+def test_발화문_승인도_날짜를_안_넘긴다(monkeypatch):
     """🔴 **말로 한 승인과 화면에서 누른 승인이 다른 날로 돌면 안 된다.**
 
-    ★ 다만 발화문 요청에는 `as_of` 가 **이미 실려 있다.** 그것이 이 실행이 서 있는
-      날이므로 여기서 시계를 한 번 더 읽지 않는다 — 읽으면 요청이 말한 날과
-      재검증이 도는 날이 갈린다.
+    ★ 발화문 요청에는 `as_of` 가 실려 있지만 **그것도 안 넘긴다.** 재검증이 설 날의
+      주인은 실행 이력 행 하나다 — 요청이 말한 날과 실행 행의 날이 갈릴 수 있고,
+      그때 어느 쪽이 맞는지를 부르는 쪽이 정하게 되기 때문이다.
     """
     from datetime import UTC, datetime
     from uuid import uuid4
@@ -239,4 +240,4 @@ def test_발화문_승인은_그_요청의_as_of_로_돈다(monkeypatch):
         )
     )
 
-    assert 받은 == [{"as_of": 고른_날}], f"발화문 경로가 요청의 as_of 를 안 넘겼다: {받은}"
+    assert 받은 == [{}], f"발화문 경로가 날짜를 넘겼다: {받은}"

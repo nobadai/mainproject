@@ -300,10 +300,6 @@ def _record_selection(request: AskExecuteRequest) -> AskResponse:
             history_run_id=request.target_history_run_id,
             note="발화문 경로에서 선택",
         ),
-        # 🔴 **여기서 시계를 읽지 않는다** (2026-09-09 · `#452`). 이 요청에는 이미
-        #    `as_of` 가 실려 있고, 그것이 **이 실행이 서 있는 날**이다. 시계를 한 번
-        #    더 읽으면 요청이 말한 날과 재검증이 도는 날이 갈린다.
-        as_of=request.as_of,
     )
     return AskResponse(
         request_id=decision.request_id,
@@ -355,10 +351,6 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
             history_run_id=request.target_history_run_id,
             note="발화문 경로에서 조건부 재요청",
         ),
-        # ★ `REQUEST_CHANGE` 는 재검증을 안 돌리므로 이 값을 안 쓴다. 그래도 넘긴다 —
-        #   넘기고 안 넘기고가 결정 종류에 따라 갈리면 부르는 쪽이 종류를 먼저 알아야
-        #   한다 (`record_decision` 의 ⚠️).
-        as_of=request.as_of,
     )
 
     follow_up_id = make_request_id(request.as_of.isoformat(), seq=decision.decision_seq + 1)
