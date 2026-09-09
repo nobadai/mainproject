@@ -278,7 +278,9 @@ def test_purchase_availability_revalidates_only_when_later(
         )
     )
 
-    assert ("DELIVERY_REVALIDATION_REQUIRED" in scenario.execution_dependencies) is requires_revalidation
+    assert (
+        "DELIVERY_REVALIDATION_REQUIRED" in scenario.execution_dependencies
+    ) is requires_revalidation
 
 
 # ---------------------------------------------------------------------------
