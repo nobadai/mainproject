@@ -76,6 +76,7 @@ __all__ = [
     "ScheduleConflict",
     "ScheduleMissing",
     "ScheduleReceiptExists",
+    "ScheduleReferenceBroken",
     "ScheduleReferenceMissing",
     "assert_cancellable",
     "assert_schedules_exist",
@@ -119,6 +120,25 @@ class ScheduleAlreadyCancelled(ValueError):
 
     ⚠️ 예외라서 **바깥 트랜잭션이 통째로 롤백된다** — JSON 도 안 되살아난다.
        그것이 이 예외가 지키는 것이다.
+    """
+
+
+class ScheduleReferenceBroken(RuntimeError):
+    """일정은 있는데 그 `purchase_item_id` 가 가리키는 매입 줄(또는 품목)이 없다.
+
+    🔴 **«입고 없음» 으로 읽지 않는다.** 종전 Reader 는 `purchase_items` 를 `JOIN`
+       해서 그 일정이 **결과에서 통째로 사라졌다** — 승인은 났는데 도착 조회에 안
+       잡히는 상태이고, 그것이 정확히 FIRSTINB 사고의 모양이다.
+
+    ```text
+    참조 정상   일정이 나온다
+    참조 깨짐   🔴 종전: 0건 (조용히 사라짐)   지금: 여기서 멈춘다
+    ```
+
+    ★ **`purchase_item_id` 에 FK 를 아직 안 걸었기 때문에 생기는 자리다**
+      (`purchase_items → purchases` 가 `ON DELETE CASCADE` 라, FK 를 걸면 매입 삭제가
+      과거 재현용 일정까지 지운다 — 그 정책이 미정이다). DB 가 못 막는 동안
+      **Reader 가 막는다.**
     """
 
 
@@ -585,10 +605,25 @@ def load_schedule_views(
        `received_at <= as_of`, 원장 IN 은 `moved_at <= as_of` 다 — 오늘 상태를
        과거 날짜 답에 섞으면 Historical 조회가 거짓말을 한다.
 
-    🔴 **`purchase_items` 를 `JOIN` 한다 (LEFT 아니다).** 그 줄이 없으면 등급·단가의
-       주인이 없다는 뜻이고, 일정만 남아 도착 처리로 갈 수 없다. 조용히 빼면
-       *"승인은 났는데 아무 데도 안 잡히는 입고"* 가 되므로 **행이 아예 안 나온다** —
-       그 상태는 W3-1 Writer 가 `fetch_purchase_detail` 로 이미 막고 있다.
+    🔴 **계보는 `EXISTS` 로 묻는다. `LEFT JOIN` 으로 끌어오지 않는다.**
+
+    ```text
+    Receipt 1 → Lot 2      LEFT JOIN 이면 일정 한 건이 2줄이 된다
+    Lot 1 → IN Move 2      〃
+    ```
+
+       DDL 이 그 둘을 막지 않는다 — `inventory_lots.inbound_receipt_id` 에도
+       `inventory_moves` 의 `(lot_id, move_type)` 에도 UNIQUE 가 없다. JOIN 곱으로
+       늘어나면 `pending_inbound_at` 이 **같은 수량을 두 번 세어** Capacity 가
+       틀린다. `EXISTS` 는 있고 없음만 묻고 행을 늘리지 않는다 —
+       *"일정 1건 → Reader 1건"* 이 구조적으로 성립한다.
+
+    🔴 **`purchase_items` 는 `LEFT JOIN` 하고 없으면 멈춘다.** 종전에는 `JOIN` 이라
+       참조가 깨진 일정이 **결과에서 조용히 사라졌다**(실측 재현). 깨진 참조를
+       *"입고 없음"* 으로 읽으면 그것이 곧 FIRSTINB 사고의 모양이다 —
+       `ScheduleReferenceBroken` 으로 드러낸다.
+
+    :raises ScheduleReferenceBroken: 일정의 매입 줄·품목 참조가 깨졌을 때.
     """
     schema = _schema()
     rows = _rows(
@@ -598,24 +633,32 @@ def load_schedule_views(
             SELECT s.inbound_id, s.sim_run_id, s.purchase_item_id,
                    pi.purchase_id, pi.item_id, i.item_name,
                    s.quantity_kg, s.expected_arrival_date, s.created_as_of,
-                   (r.receipt_id IS NOT NULL) AS has_receipt,
-                   (l.lot_id IS NOT NULL AND mv.move_id IS NOT NULL) AS stock_applied
+                   EXISTS (
+                       SELECT 1 FROM {schema}.inbound_receipts r
+                        WHERE r.sim_run_id = s.sim_run_id
+                          AND r.inbound_id = s.inbound_id
+                          AND r.arrived_at <= %(as_of)s
+                   ) AS has_receipt,
+                   EXISTS (
+                       SELECT 1
+                         FROM {schema}.inbound_receipts r
+                         JOIN {schema}.inventory_lots l
+                           ON l.inbound_receipt_id = r.receipt_id
+                          AND l.sim_run_id = s.sim_run_id
+                          AND l.received_at <= %(as_of)s
+                         JOIN {schema}.inventory_moves mv
+                           ON mv.lot_id = l.lot_id
+                          AND mv.sim_run_id = s.sim_run_id
+                          AND mv.move_type = 'IN'
+                          AND mv.moved_at <= %(as_of)s
+                        WHERE r.sim_run_id = s.sim_run_id
+                          AND r.inbound_id = s.inbound_id
+                          AND r.arrived_at <= %(as_of)s
+                   ) AS stock_applied
             FROM {schema}.inbound_schedules s
-            JOIN {schema}.purchase_items pi ON pi.purchase_item_id = s.purchase_item_id
-            JOIN {schema}.items i ON i.item_id = pi.item_id
-            LEFT JOIN {schema}.inbound_receipts r
-                   ON r.sim_run_id = s.sim_run_id
-                  AND r.inbound_id = s.inbound_id
-                  AND r.arrived_at <= %(as_of)s
-            LEFT JOIN {schema}.inventory_lots l
-                   ON l.inbound_receipt_id = r.receipt_id
-                  AND l.sim_run_id = s.sim_run_id
-                  AND l.received_at <= %(as_of)s
-            LEFT JOIN {schema}.inventory_moves mv
-                   ON mv.lot_id = l.lot_id
-                  AND mv.sim_run_id = s.sim_run_id
-                  AND mv.move_type = 'IN'
-                  AND mv.moved_at <= %(as_of)s
+            LEFT JOIN {schema}.purchase_items pi
+                   ON pi.purchase_item_id = s.purchase_item_id
+            LEFT JOIN {schema}.items i ON i.item_id = pi.item_id
             WHERE s.sim_run_id = %(sim)s
               AND s.created_as_of <= %(as_of)s
               AND (s.cancelled_as_of IS NULL OR s.cancelled_as_of > %(as_of)s)
@@ -624,6 +667,7 @@ def load_schedule_views(
         ).format(schema=schema),
         {"sim": sim_run_id, "as_of": as_of},
     )
+    _reject_broken_reference(rows, sim_run_id=sim_run_id, as_of=as_of)
     return tuple(
         InboundScheduleView(
             inbound_id=row["inbound_id"],
@@ -640,6 +684,28 @@ def load_schedule_views(
         )
         for row in rows
     )
+
+
+def _reject_broken_reference(
+    rows: list[dict[str, Any]], *, sim_run_id: str, as_of: date
+) -> None:
+    """매입 줄·품목 참조가 깨진 일정이 있으면 멈춘다. **0건으로 답하지 않는다.**
+
+    ★ 어느 일정이 어느 참조를 잃었는지 적는다 — `purchase_item_id` 까지 보여야
+      고칠 사람이 매입 쪽을 찾아갈 수 있다.
+    """
+    깨진것 = [
+        f"{row['inbound_id']}→{row['purchase_item_id']}"
+        for row in rows
+        if row["purchase_id"] is None or row["item_id"] is None or row["item_name"] is None
+    ]
+    if 깨진것:
+        raise ScheduleReferenceBroken(
+            f"입고 일정이 가리키는 매입 줄·품목이 없다 (sim_run_id={sim_run_id!r},"
+            f" as_of={as_of}): {sorted(깨진것)}."
+            " 이 상태를 «입고 없음» 으로 읽지 않는다 —"
+            " 승인은 났는데 도착 조회에 안 잡히는 입고가 되기 때문이다."
+        )
 
 
 def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
