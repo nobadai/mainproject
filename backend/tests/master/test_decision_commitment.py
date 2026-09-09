@@ -70,7 +70,7 @@ def wired(monkeypatch):
         saved["response"] = response
         body = {"decision": "APPROVE", "scenario_label": "보수", "decided_by": "lhs"}
         body.update(payload)
-        return svc.record_decision("REQ-1", DecisionIn(**body))
+        return svc.record_decision("REQ-1", DecisionIn(**body), as_of=date(2026, 9, 7))
 
     return _record
 

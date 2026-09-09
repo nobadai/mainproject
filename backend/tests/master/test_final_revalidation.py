@@ -41,8 +41,13 @@ REQ = "REQ-20260901-0001"
 RUN_UUID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 LABEL = "기본"
 
-#: 원 실행이 돈 날. **오늘이 아니다** — ② 를 재려면 둘이 달라야 한다.
+#: 원 실행이 돈 날. **결정하는 날이 아니다** — ② 를 재려면 둘이 달라야 한다.
 원_실행일 = date(2026, 9, 1)
+
+#: 사람이 결정을 누른 날. 🔴 **진입점이 정해서 넘기는 값**이라 검사가 그냥 고른다
+#: (2026-09-09 · `#452`). 전에는 `revalidation.today()` 로 벽시계를 읽었고, 그래서
+#: 이 검사들이 **도는 날마다 다른 값**을 재고 있었다.
+오늘 = date(2026, 9, 7)
 
 #: 재검증 필수 둘의 라우팅 (`CAPABILITY_ROUTING`). 손으로 적은 것이 아니라 기대값이다.
 필수_호출 = [("inventory", "PRE_SALES"), ("finance", "SALES_VALIDATION")]
@@ -213,7 +218,7 @@ def test_승인은_부서를_다시_부른다(monkeypatch, 이력, 부서들):
     """
     _실행을_세운다(monkeypatch, _run_row())
 
-    decision_service.record_decision(REQ, _승인())
+    decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     불린_것 = [(a, m) for 부 in 부서들.values() for (a, m, _as_of, _rid) in 부.호출]
     assert 불린_것 == 필수_호출, (
@@ -230,7 +235,7 @@ def test_원_실행이_ok_였어도_오늘_reject_면_FAILED(monkeypatch, 이력
     부서들["finance"].business_status = "reject"
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "FAILED"
 
@@ -241,7 +246,7 @@ def test_필수_둘은_후보가_요구하지_않아도_부른다(monkeypatch, �
     """
     _실행을_세운다(monkeypatch, _run_row(required=()))
 
-    decision_service.record_decision(REQ, _승인())
+    decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert [(a, m) for 부 in 부서들.values() for (a, m, _d, _r) in 부.호출] == 필수_호출
 
@@ -254,7 +259,7 @@ def test_후보가_요구한_것도_같이_부르되_두_번_부르지_않는다
         _run_row(required=("FINANCIAL_VALIDATION", "DELIVERY_FEASIBILITY_CONTEXT")),
     )
 
-    decision_service.record_decision(REQ, _승인())
+    decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     불린_것 = [(a, m) for 부 in 부서들.values() for (a, m, _d, _r) in 부.호출]
     assert 불린_것.count(("finance", "SALES_VALIDATION")) == 1
@@ -267,18 +272,21 @@ def test_후보가_요구한_것도_같이_부르되_두_번_부르지_않는다
 # ---------------------------------------------------------------------------
 
 
-def test_재검증은_오늘로_돈다(monkeypatch, 이력, 부서들):
+def test_재검증은_넘겨받은_날로_돈다(monkeypatch, 이력, 부서들):
     """🔴 **원 실행의 날로 돌면 아무것도 안 잰다.**
 
     *"그 사이 바뀌었는가"* 를 묻는데 그 사이를 안 보는 것이다 — 이 검사가 빨개지는
     변이가 정확히 `as_of` 를 원 실행 날로 되돌리는 것이다.
+
+    🔴 **그 날을 재검증이 만들지 않는다** (2026-09-09 · `#452`). 진입점이 넘긴 값이
+      부서까지 그대로 가는지를 잰다 — 중간 어디서 시계를 읽으면 여기가 빨개진다.
     """
     _실행을_세운다(monkeypatch, _run_row())
 
-    decision_service.record_decision(REQ, _승인())
+    decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     잰_날 = {as_of for 부 in 부서들.values() for (_a, _m, as_of, _r) in 부.호출}
-    assert 잰_날 == {revalidation.today()}
+    assert 잰_날 == {오늘}
     assert 원_실행일 not in 잰_날, "원 실행의 날로 재검증을 돌렸다"
 
 
@@ -290,15 +298,13 @@ def test_새_업무_키로_돌고_그_키가_결정_행에_실린다(monkeypatch
     """
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     쓴_키 = {rid for 부 in 부서들.values() for (_a, _m, _d, rid) in 부.호출}
     assert saved.revalidation_request_id is not None
     assert saved.revalidation_request_id != REQ
     assert 쓴_키 == {saved.revalidation_request_id}
-    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(
-        revalidation.today(), 1
-    )
+    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(오늘, 1)
 
 
 def test_번복마다_다른_키를_받는다():
@@ -318,7 +324,7 @@ def test_번복마다_다른_키를_받는다():
 def test_조건이_없으면_PASSED(monkeypatch, 이력, 부서들):
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "PASSED"
 
@@ -337,7 +343,7 @@ def test_원래도_조건부였고_같은_조건이면_PASSED(monkeypatch, 이�
         _run_row(adjustments=(조정(),), candidates=(_후보_판정("conditional"),)),
     )
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "PASSED", 이력.인자[-1]
 
@@ -351,7 +357,7 @@ def test_조건이_늘면_CONDITIONAL(monkeypatch, 이력, 부서들):
         _run_row(adjustments=(조정(),), candidates=(_후보_판정("conditional"),)),
     )
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "CONDITIONAL"
 
@@ -368,7 +374,7 @@ def test_조건이_줄면_PASSED(monkeypatch, 이력, 부서들):
         ),
     )
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "PASSED"
 
@@ -377,7 +383,7 @@ def test_필수가_reject_면_FAILED_이고_CONDITIONAL_이_아니다(monkeypatc
     부서들["inventory"].business_status = "reject"
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "FAILED"
 
@@ -388,7 +394,7 @@ def test_판정을_안_낸_것도_통과가_아니다(monkeypatch, 이력, 부�
     부서들["finance"].business_status = "skipped"
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "FAILED"
 
@@ -421,7 +427,7 @@ def test_안_열린_날은_ERROR_이고_FAILED_가_아니다(monkeypatch, 이력
     )
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "ERROR"
     assert [부.호출 for 부 in 부서들.values()] == [[], []], "안 열린 날인데 부서를 불렀다"
@@ -437,7 +443,7 @@ def test_못_돌린_재검증에는_가짜_업무_키를_안_넣는다(monkeypat
     )
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_request_id is None
 
@@ -447,7 +453,7 @@ def test_필수_어댑터가_없으면_ERROR(monkeypatch, 이력):
     wiring.reset()
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "ERROR"
 
@@ -458,7 +464,7 @@ def test_예산이_소진되면_ERROR(monkeypatch, 이력, 부서들):
     monkeypatch.setattr(revalidation, "REVALIDATION_BUDGET", 1)
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "ERROR"
 
@@ -467,7 +473,7 @@ def test_정책판을_못_읽으면_ERROR(monkeypatch, 이력, 부서들):
     """★ 아무 값이나 채워 봉투를 만들면 재현 4종의 하나가 거짓이 된다 (§3.2.4)."""
     _실행을_세운다(monkeypatch, _run_row(policy_version=None))
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "ERROR"
     assert [부.호출 for 부 in 부서들.values()] == [[], []]
@@ -477,7 +483,7 @@ def test_라벨이_겹치면_ERROR(monkeypatch, 이력, 부서들):
     """🔴 첫 것을 조용히 고르면 **어느 안을 재검증했는지가 운에 걸린다.**"""
     _실행을_세운다(monkeypatch, _run_row(labels=(LABEL, LABEL)))
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "ERROR"
 
@@ -502,7 +508,7 @@ def test_재검증_결과와_무관하게_결정_행이_남는다(monkeypatch, �
     부서들["finance"].business_status = business_status
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert len(이력.rows) == 1
     assert saved.decision == "APPROVE", "재검증 결과가 decision 칸으로 샜다"
@@ -518,7 +524,7 @@ def test_못_돌린_날에도_결정_행이_남는다(monkeypatch, 이력, 부�
     )
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert len(이력.rows) == 1
     assert saved.decision == "APPROVE"
@@ -543,7 +549,7 @@ def test_승인이_아니면_재검증하지_않는다(monkeypatch, 이력, 부�
     않았다"** 이다 — 재검증할 대상이 없다."""
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, DecisionIn(**payload))
+    saved = decision_service.record_decision(REQ, DecisionIn(**payload), as_of=오늘)
 
     assert saved.revalidation_outcome is None
     assert saved.revalidation_request_id is None
@@ -561,7 +567,7 @@ def test_라우팅이_없는_조건부는_통과를_막지_않는다(monkeypatch
     남지만 `FAILED` 로 접지 않는다."""
     _실행을_세운다(monkeypatch, _run_row(required=("ADDITIONAL_SUPPLY_CONTEXT",)))
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert saved.revalidation_outcome == "PASSED"
 
@@ -577,12 +583,12 @@ def test_재검증도_이력에_남는다(monkeypatch, 이력, 부서들):
     monkeypatch.setattr(persistence, "try_save_run", lambda **kw: 잡힌.append(kw))
     _실행을_세운다(monkeypatch, _run_row())
 
-    saved = decision_service.record_decision(REQ, _승인())
+    saved = decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert len(잡힌) == 1
     assert 잡힌[0]["cycle"] == "SALES"
     assert 잡힌[0]["request_id"] == saved.revalidation_request_id
-    assert 잡힌[0]["as_of"] == revalidation.today()
+    assert 잡힌[0]["as_of"] == 오늘
     assert 잡힌[0]["end_code"] == "PASSED"
     assert 잡힌[0]["runtime_status"] == "READY"
 
@@ -599,7 +605,7 @@ def test_못_돌린_재검증은_이력_행도_안_만든다(monkeypatch, 이력
     )
     _실행을_세운다(monkeypatch, _run_row())
 
-    decision_service.record_decision(REQ, _승인())
+    decision_service.record_decision(REQ, _승인(), as_of=오늘)
 
     assert 잡힌 == []
 

@@ -25,8 +25,13 @@ revalidation.py — **최종 승인 시점 재검증** (설계 2026-09-07 · M-4
     *"무엇을 검증받아야 하는가"* 와 *"그때 조건이 무엇이었나"* 둘뿐이고, **판정은
     전부 이번 호출에서 나온다.**
 
-🔴 **`as_of` 는 오늘이다.** 원 실행의 날이 아니다 — 그것이 *"그 사이 바뀌었는가"* 의
-  뜻이다. 그래서 **개장 Gate 를 또 지난다**: 오늘이 안 열렸으면 재검증을 못 한다.
+🔴 **`as_of` 는 원 실행의 날이 아니라 지금 고르는 날이다.** 그것이 *"그 사이
+  바뀌었는가"* 의 뜻이다. 그래서 **개장 Gate 를 또 지난다**: 그날이 안 열렸으면
+  재검증을 못 한다.
+
+  ★ **그 날짜를 이 파일이 만들지 않는다** (2026-09-09 · `#452`). 진입점이 정해서
+    넘기고 여기는 받은 것을 흘린다 — 아래 `revalidate_scenario` 가 왜 그렇게
+    바뀌었는지를 적어 둔다.
 
 ★ **`PASSED` 가 나와도 아무 일도 안 일어난다.** 승인의 효력을 도메인 Write 로 흘리는
   것은 M-5 이고, 그 앞에 실행 원장(saga) 문제가 있다 (설계 §5).
@@ -42,7 +47,6 @@ from typing import Any
 
 from app.master import wiring
 from app.master.budget import BudgetExhausted, CallBudget
-from app.master.clock import today_in_seoul
 from app.master.day_gate import check_day_gate
 from app.master.decision import RevalidationOutcome
 from app.master.envelope import (
@@ -69,7 +73,6 @@ __all__ = [
     "find_scenario",
     "make_revalidation_request_id",
     "revalidate_scenario",
-    "today",
 ]
 
 
@@ -111,28 +114,6 @@ REVALIDATION_BUDGET = 4
 ★ **소진은 `ERROR` 다.** *"다 봤는데 안 된다"* 가 아니라 *"다 못 봤다"* 이므로
   `FAILED` 와 갈라 둔다 (판매가 `SL5` 를 `SL3` 으로 안 접는 것과 같은 판단).
 """
-
-
-def today() -> date:
-    """재검증이 도는 날. **`as_of` 의 단일 출처다.**
-
-    ★ **함수로 둔다.** 값으로 박으면 프로세스가 자정을 넘겨도 어제로 남고, 부르는
-      곳마다 각자 계산하면 한 재검증 안에서 날이 갈릴 수 있다.
-
-    🟢 **시간대를 여기서 안 만든다** (2026-09-08 · 스케줄러 경계).
-
-      전에는 `_KST = timezone(timedelta(hours=9))` 를 이 파일이 직접 들고
-      `datetime.now(_KST)` 를 읽었다. 이유는 그대로 옳다 — 🔴 **서버 타임존에 답이
-      끌려가면 안 된다.** UTC 로 도는 서버에서는 한국 시간 아침 9시 전까지 어제로
-      재검증하고, 개장 · 실행일 · 도착일이 전부 달력일로 도는 표에서 하루가 밀리면
-      *"안 열린 날"* 이 되어 승인이 통째로 `ERROR` 가 된다.
-
-    ★ **다만 그 사실의 주인이 둘일 이유는 없다.** 스케줄러도 같은 물음을 물어야
-      해서 `clock.py` 가 섰고, 시간대가 두 파일에 있으면 조용히 갈린다. 여기서는
-      가리키기만 한다 — 벽시계를 읽는 곳은 `clock.py` 하나이고,
-      `tests/master/test_clock_is_the_only_wall_clock.py` 가 그것을 지킨다.
-    """
-    return today_in_seoul()
 
 
 _REVALIDATION_KEY_PREFIX = "REV"
@@ -195,9 +176,10 @@ def revalidate_scenario(
     original_conditions: frozenset[str],
     decision_seq: int,
     policy_version: str,
+    as_of: date,
     item: str | None = None,
 ) -> Revalidation:
-    """선택된 **1안만** 오늘 다시 검증한다.
+    """선택된 **1안만** 고르는 그날로 다시 검증한다.
 
     ```text
     ① 개장 Gate      오늘이 안 열렸으면 못 돈다        → ERROR
@@ -214,14 +196,41 @@ def revalidate_scenario(
       안 열린 날 판단이 서면 **막힌 것이 아니라 안 막힌 것**이라 아무 오류도 안 난다.
       `tests/master/test_entrypoint_day_gate.py` 의 스캐너가 이 모듈까지 훑는다.
 
-    ⚠️ **`as_of` 를 인자로 받지 않는다.** 재검증은 *"오늘 어떤가"* 를 묻는 사건이라
-      날짜가 인자가 되면 부르는 쪽이 원 실행의 날을 넣을 수 있고, 그 순간 재검증이
-      아무것도 안 재게 된다.
+    🔴 **`as_of` 를 필수 인자로 받는다** (2026-09-09 · `#452`). 전에는 이 자리에서
+      `today()` 로 벽시계를 읽었고, 옛 주석이 그 이유를 이렇게 적어 두었다.
 
+      ```text
+      ⚠️ `as_of` 를 인자로 받지 않는다. 재검증은 "오늘 어떤가" 를 묻는 사건이라
+         날짜가 인자가 되면 부르는 쪽이 원 실행의 날을 넣을 수 있고, 그 순간
+         재검증이 아무것도 안 재게 된다.
+      ```
+
+      ★ **그 걱정은 옳았다.** 없앤 것이 아니라 **막는 자리를 옮겼다** — 벽시계를
+        진입점 하나로 올렸으므로, 이 깊은 자리에서는 아무도 날짜를 지어내지 못하고
+        받은 것을 그대로 쓴다.
+
+      ```text
+      운영     사람이 고르는 날 = 오늘        router.master_decide 가 clock 을 읽어 넘긴다
+               말로 고르는 날                 ask_service 가 그 요청의 as_of 를 넘긴다
+      백테스트  정책이 고르는 날 = 걷는 그날    walk 가 그날을 넘긴다
+      ```
+
+      🔴 **여기서 시계를 읽으면 백테스트가 무효가 된다.** `2026-03-10` 을 걷는 실행이
+        승인 경로를 타는 순간 재검증만 오늘로 답하고, 곡선에 벽시계가 섞인다.
+        `tests/master/test_clock_is_the_only_wall_clock.py` 가 이 파일이 `clock` 을
+        다시 임포트하지 않는지 지킨다.
+
+      ⚠️ **기본값을 두지 않는다.** 기본값은 곧 업무 규칙이 되고, 안 넘긴 자리가
+        조용히 오늘로 답한다. 안 넘기면 터져야 한다.
+
+    ⚠️ **백테스트에서는 제안한 날과 고른 날이 같다.** 그래도 재검증은 돈다 — 그날
+      안에 입고 · 수금 · 출고가 지나갔을 수 있고, 재검증이 재는 것은 *"그 사이"* 이지
+      *"며칠 지났는가"* 가 아니다.
+
+    :param as_of: 이 재검증이 서는 날. 🔴 **원 실행의 날이 아니라 지금 고르는 날이다.**
     :param original_conditions: 원 실행에서 그 후보에 붙어 있던 **조건 표지 집합**
         (`conditions_of` 가 만든다). 이번 결과가 이보다 늘면 `CONDITIONAL` 이다.
     """
-    as_of = today()
     request_id = make_revalidation_request_id(as_of, decision_seq)
     context = ExecutionContext(
         request_id=request_id,
@@ -238,7 +247,7 @@ def revalidate_scenario(
     if day_gate.gate == "BLOCKED":
         return Revalidation(
             outcome="ERROR",
-            reason=f"오늘({as_of.isoformat()})이 안 열려 재검증을 못 돌렸다: "
+            reason=f"재검증할 날({as_of.isoformat()})이 안 열려 재검증을 못 돌렸다: "
             f"{day_gate.reason or day_gate.result}",
         )
 
