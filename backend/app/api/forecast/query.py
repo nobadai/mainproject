@@ -319,9 +319,24 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
         return _demo_tab(as_of, kind, item)
 
     # ── 카드 세 장 ────────────────────────────────────────────────────
+    #   ★ **배추 · 무 · 양파 차례로** 놓는다 (`ITEMS`). DB 가 주는 차례는
+    #     이름순이라 «무» 가 앞에 왔다. 배추가 물량도 제일 많고 우리
+    #     성적도 제일 좋은 품목이라 먼저 보이는 게 맞다.
+    order = {name: i for i, name in enumerate(ITEMS)}
+    card_rows = sorted(card_rows, key=lambda r: order.get(r["item_nm"], 99))
+
     cards = []
     for r in card_rows:
-        p, lo, hi = int(r["pred_prc"]), int(r["pred_lo"]), int(r["pred_hi"])
+        #   ★ **자르지 말고 반올림한다** (2026-09-09 고침).
+        #
+        #     전에는 `int()` 였다. 그런데 그래프는 화면에서 `Math.round` 로
+        #     그린다. 같은 값(422.535)을 서버는 **422**, 그래프는 **423** 으로
+        #     보여 «카드와 그래프가 다르다» 는 말이 나왔다.
+        #
+        #     ★ 자르는 쪽은 방향까지 틀리다. 매입가는 **늘 조금씩 싸게**
+        #       보이게 되어, 사는 사람이 실제보다 싸다고 믿는다.
+        p, lo, hi = (round(float(r["pred_prc"])), round(float(r["pred_lo"])),
+                     round(float(r["pred_hi"])))
         ci = round((hi - lo) / p, 3) if p else 0.0
         cards.append(ItemCard(
             item=r["item_nm"], grade="특급",
@@ -415,9 +430,12 @@ def build(as_of: date, item: str, kind: str = "auc", base_dt: str | None = None)
             {
                 "lead": r["lead_biz_d"],
                 "target": r["target_dt"].isoformat()[5:],
-                "pred": f"{int(r['pred_prc']):,}",
-                "band": f"{int(r['pred_lo']):,}–{int(r['pred_hi']):,}",
-                "actual": None if r["actual_prc"] is None else f"{int(r['actual_prc']):,}",
+                #   ★ 카드·그래프와 **같은 방식으로** 다듬는다. 한 화면 안에서
+                #     같은 값이 다르게 보이면 안 된다.
+                "pred": f"{round(float(r['pred_prc'])):,}",
+                "band": f"{round(float(r['pred_lo'])):,}–{round(float(r['pred_hi'])):,}",
+                "actual": (None if r["actual_prc"] is None
+                           else f"{round(float(r['actual_prc'])):,}"),
                 "err": None if r["abs_pct_err"] is None else f"{float(r['abs_pct_err']):.1f}",
                 "src": "어제 가격 (차단됨)" if r["gated"] else "모델",
             }
