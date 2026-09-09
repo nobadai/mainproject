@@ -69,6 +69,9 @@ def test_policy_is_picked_by_item_not_by_position() -> None:
 def test_items_outside_our_scope_are_ignored(item: str, days: int) -> None:
     """목록에 있어도 매입 품목이 아니면 정책을 읽지 않는다.
 
+    ★ **여기도 「피마늘」을 남긴다** (2026-09-09). 선언에서는 걷었지만 물류가 보내는
+      목록에는 그대로 있고, 그것을 **우리가 무시하는지**가 이 검사의 전부다.
+
     🔴 **피마늘이 없으면 이 검사가 목록의 폭을 안 잰다** (2026-09-05).
       ``PURCHASE_ITEMS`` 를 4품목(피마늘 포함)으로 되돌려도 **한 건도 울지 않았다**
       (실측 · ``dev@974fcba`` · ``pytest tests/test_purchase_agent`` · 변이 전후 모두

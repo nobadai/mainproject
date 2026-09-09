@@ -220,7 +220,7 @@ def test_concentration_gate_evidence_is_present_when_mix_opens_too() -> None:
     # 편중을 임계 아래로 낮춘 합성 입력 — mock에서는 배추가 늘 0.812라 이 경로가 안 밟힌다
     payload["policy_values"] = {
         **payload["policy_values"],
-        "item_mix_ratio": {"배추": 0.30, "무": 0.25, "양파": 0.25, "피마늘": 0.20},
+        "item_mix_ratio": {"배추": 0.30, "무": 0.30, "양파": 0.30},
     }
     reply, _ = purchase_port(
         AgentRequest(
@@ -284,7 +284,7 @@ def test_concentration_detail_matches_the_gate_condition_at_the_boundary() -> No
     payload = _payload("배추", as_of)
     payload["policy_values"] = {
         **payload["policy_values"],
-        "item_mix_ratio": {"배추": threshold, "무": 0.1, "양파": 0.1, "피마늘": 0.1},
+        "item_mix_ratio": {"배추": threshold, "무": 0.1, "양파": 0.1},
     }
     reply, _ = purchase_port(
         AgentRequest(
@@ -370,12 +370,15 @@ def test_concentration_gate_survives_a_max_that_is_neither_first_nor_called() ->
 
     앞선 테스트들은 배추가 늘 첫 항목이자 최대비라 ``next(iter(ratios))`` 변이를
     잡지 못했다. 최대비를 **마지막 항목의 다른 품목**에 두고, 호출은 배추로 한다.
+
+    🔴 전에는 그 자리가 피마늘이었다. 계약에서 빠져(`#216`) 양파로 옮겼다 —
+      **재는 것은 품목이 아니라 "첫 항목도 호출 품목도 아닌 최대"** 라 그대로 선다.
     """
     as_of = SPREAD_WIDE
     payload = _payload("배추", as_of)
     payload["policy_values"] = {
         **payload["policy_values"],
-        "item_mix_ratio": {"배추": 0.10, "무": 0.15, "양파": 0.20, "피마늘": 0.55},
+        "item_mix_ratio": {"배추": 0.10, "무": 0.15, "양파": 0.55},
     }
     reply, _ = purchase_port(
         AgentRequest(
