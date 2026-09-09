@@ -746,10 +746,19 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ``context_docs_used``와 같은 변환을 써야 두 필드가 대조 가능하다 — ⑦의
     ``check_document_refs``가 그 대조를 한다.
 
-    ``evidence_grade``가 ``SIM_FIXED``인 이유: IO명세 §2 예시는 ``OFFICIAL``이지만 그건
-    **실제 KREI 발간물** 기준이다. 우리 코퍼스는 형식만 빌린 가상 문서라
-    (``documents.json._전부_시뮬레이션``), 등급은 문서의 격이 아니라 **실제 데이터
-    출처**를 따라 붙인다. 실문서로 갈아끼우면 여기가 ``OFFICIAL``이 된다.
+    ``evidence_grade``는 **코퍼스가 선언한 것을 그대로 싣는다.** IO명세 §2 예시는
+    ``OFFICIAL``이지만 그건 **실제 KREI 발간물** 기준이고, 우리 코퍼스는 형식만 빌린
+    가상 문서다 — 등급은 문서의 격이 아니라 **실제 데이터 출처**를 따른다.
+
+    🔴 **전에는 여기에 ``"SIM_FIXED"`` 가 리터럴로 박혀 있었다** (2026-09-09 · E3-5).
+      *"실문서로 갈아끼우면 여기가 ``OFFICIAL`` 이 된다"* 는 설명이 이 docstring 에만
+      있었고, 선언(``documents.json._전부_시뮬레이션``)은 **사람만 읽는 문장**이었다.
+      선언과 코드가 같은 값이라 값 비교로는 «선언에서 읽는가» 를 증명할 수 없다
+      (규칙 8). 이제 ``documents.json._evidence_grade`` 가 정하고, 없으면 로더가
+      적재를 거부한다.
+
+    ⚠️ ``doc["evidence_grade"]`` 를 ``get`` 으로 읽지 않는다. 기본값을 두면 손으로 만든
+      문서 dict 가 조용히 통과해 **아무도 선언한 적 없는 등급**이 근거에 실린다.
 
     ``claim``이 주장 요약이 아닌 이유: 규칙은 본문을 요약할 수 없다. 문서 식별로 두고 실제
     주장은 ``evidence_detail``의 발췌가 **원문 그대로** 싣는다 — 규칙이 요약한 척하지 않는다.
@@ -760,7 +769,7 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
             "source": DOCUMENT_SOURCE,
             "claim": f"{doc['source']} {doc['doc_type']} — {doc['title']}",
             "ref_id": document_ref(doc["doc_id"]),
-            "evidence_grade": "SIM_FIXED",
+            "evidence_grade": doc["evidence_grade"],
             "evidence_detail": f"{doc['published_at']} 발행 · 발췌: \"{doc['excerpt']}\"",
         }
         for doc in context_docs

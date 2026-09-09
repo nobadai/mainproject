@@ -354,7 +354,10 @@ def test_document_rationale_carries_ref_id_and_excerpt(proposals: dict) -> None:
             doc = loaded[int(item["ref_id"].removeprefix("DOC-"))]
             assert doc["excerpt"] in item["evidence_detail"]
             assert doc["published_at"] in item["evidence_detail"]
-            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다
+            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다.
+            # ⚠️ 값 비교라 «선언에서 읽는가» 는 증명하지 못한다 (규칙 8) — 그건
+            #   test_mocks.test_declared_grade_travels_to_every_document 와 아래
+            #   test_rationale_grade_comes_from_the_document_not_the_code 가 잰다.
             assert item["evidence_grade"] == "SIM_FIXED"
 
 
@@ -804,6 +807,39 @@ def test_rule_stage_never_declares_the_context_sufficient() -> None:
 def test_document_rationale_is_empty_without_documents() -> None:
     """안 읽었으면 아무것도 안 붙는다 — 없는 근거를 적지 않는다."""
     assert _context_rationale([]) == []
+
+
+def test_rationale_grade_comes_from_the_document_not_the_code() -> None:
+    """🔴 **⑥이 등급을 다시 정하지 않는다** (2026-09-09 · E3-5).
+
+    전에는 ``"SIM_FIXED"`` 리터럴이었다. 코퍼스 선언과 값이 같아 *"등급이 SIM_FIXED
+    다"* 를 확인하는 검사로는 어느 쪽에서 왔는지 갈리지 않았다 — 문서가 다른 등급을
+    들고 오면 그것이 실려야 한다.
+    """
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+        "evidence_grade": "OFFICIAL",
+    }
+    assert _context_rationale([doc])[0]["evidence_grade"] == "OFFICIAL"
+
+
+def test_a_document_without_a_grade_is_not_quietly_graded() -> None:
+    """등급 없는 문서를 받으면 **멈춘다** — 기본값을 두면 선언한 적 없는 등급이 실린다."""
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+    }
+    with pytest.raises(KeyError, match="evidence_grade"):
+        _context_rationale([doc])
 
 
 # ── 문서 없으면 없이 진행 (2026-09-04 · 마스터 결정) ────────────────────────
