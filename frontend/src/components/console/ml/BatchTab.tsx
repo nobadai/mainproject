@@ -43,12 +43,15 @@ function when(iso: string | null): string {
   );
 }
 
+//  ★ **열쇠(`ok` · `fail` …)는 서버가 보내는 값 그대로 두고, 글자만 우리말로
+//    답니다.** 열쇠를 우리말로 바꾸면 어느 것도 안 걸려서 성공도 실패도
+//    똑같은 회색이 됩니다.
 const STATE: Record<string, { label: string; fg: string; bg: string }> = {
-  ok: { label: "Success", fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
-  success: { label: "Success", fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
-  fail: { label: "Failed", fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
-  failed: { label: "Failed", fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
-  running: { label: "Running", fg: "var(--color-t-info)", bg: "var(--color-t-info-bg)" },
+  ok: { label: "성공", fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
+  success: { label: "성공", fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
+  fail: { label: "실패", fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
+  failed: { label: "실패", fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
+  running: { label: "진행 중", fg: "var(--color-t-info)", bg: "var(--color-t-info-bg)" },
 };
 
 export function BatchTab() {

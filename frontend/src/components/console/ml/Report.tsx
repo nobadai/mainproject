@@ -18,11 +18,13 @@ import type { AgentReport, Finding } from "@/lib/mlConsole";
 
 import { en, VERDICT } from "./labels";
 
-//  키는 백엔드가 보내는 한글 그대로 둡니다 — 영어로 바꾸는 것은 보이는 글자뿐.
+//  ★ **열쇠는 백엔드가 보내는 한글 그대로여야 합니다.** 여기를 영어로
+//    바꾸면 어느 것도 안 걸려서 «정상» 도 «이상» 도 똑같은 회색이 됩니다.
+//    실제로 그렇게 됐었습니다 (2026-09-09). 보이는 글자는 `VERDICT` 가 답니다.
 const TONE: Record<string, { fg: string; bg: string }> = {
-  OK: { fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
-  Caution: { fg: "var(--color-t-warn)", bg: "var(--color-t-warn-bg)" },
-  Problem: { fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
+  정상: { fg: "var(--color-t-good)", bg: "var(--color-t-good-bg)" },
+  주의: { fg: "var(--color-t-warn)", bg: "var(--color-t-warn-bg)" },
+  이상: { fg: "var(--color-t-bad)", bg: "var(--color-t-bad-bg)" },
 };
 
 export function Verdict({ level }: { level: string }) {
