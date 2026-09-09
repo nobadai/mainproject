@@ -134,8 +134,12 @@ def run_procurement(
     execution_day = _execution_day_verdict(request.as_of)
     if not execution_day.runs:
         # 주말·공휴일은 오류가 아니라 **안 도는 날**이다 — 어댑터 미등록과 같은 태도다 (§5.3).
-        # 그날에는 시장이 안 서서 ML 예측이 없다. 없는 값을 복사본으로 채워 판단하면
+        # 그날에는 ML 예측이 없다. 없는 값을 복사본으로 채워 판단하면
         # 그건 시장을 본 것이 아니라 금요일을 두 번 본 것이다.
+        #
+        # 🔴 **「시장이 안 선다」로 적지 않는다** (2026-09-09 · 매입이 짚었다).
+        #   토요일은 `ml_calendar_days.is_open` 이 참이다 — 실측 34일 참 / 3일 거짓.
+        #   시장은 서는데 **예측이 없는** 것이고, 우리가 안 도는 이유는 뒤쪽이다.
         response = _empty_response(
             context,
             reason=_not_execution_day_reason(request.as_of, execution_day.following),
@@ -618,7 +622,7 @@ def _not_execution_day_reason(as_of: date, following: date | None) -> str:
     label = "주말" if as_of.weekday() >= _SATURDAY else "공휴일"
     head = (
         f"실행일이 아니다: {as_of.isoformat()}"
-        f"({_WEEKDAY_NAMES[as_of.weekday()]})은 {label}이라 시장이 안 서고 ML 예측이 없다. "
+        f"({_WEEKDAY_NAMES[as_of.weekday()]})은 {label}이라 ML 예측이 없다. "
     )
     if following is None:
         # ⚠️ 못 찾은 것을 지어내지 않는다. 사유에 날짜가 없는 것이 **사실**이다.
