@@ -56,25 +56,27 @@ from zoneinfo import ZoneInfo
 from psycopg import sql
 
 from app.logistics.db import get_db_schema
-from app.logistics.repository import _normalize_grade
+from app.logistics.repository import LOGISTICS_POLICY_USAGE_SCOPE, _normalize_grade
 from app.logistics.turnover import LotTurnover, _lot_turnover_from_row
 
 __all__ = [
     "CAPACITY_BASIS_CURRENT_ACTIVE_POLICY",
     "AdjustMoveNotSupported",
-    "FactCoverage",
     "HistoricalCapacity",
     "HistoricalLot",
     "HistoricalLotState",
     "HistoricalPalletPosition",
     "HistoricalReceipt",
     "HistoricalReceiptState",
-    "fact_coverage",
+    "ReceiptLineageAmbiguous",
+    "RuntimeSnapshotCoverage",
     "lot_state_at",
     "onhand_by_lot_at",
     "onhand_total_by_day",
     "pallet_position_at",
     "receipt_state_at",
+    "runtime_coverage_at",
+    "snapshot_days_between",
     "timestamp_cutoff",
 ]
 
@@ -184,29 +186,53 @@ class HistoricalCapacity:
     capacity_basis: str = CAPACITY_BASIS_CURRENT_ACTIVE_POLICY
 
 
-@dataclass(frozen=True)
-class FactCoverage:
-    """이 실행이 **기록으로 덮고 있는 날짜 구간.** 새 컬럼을 만들지 않고 사실에서 센다.
+class ReceiptLineageAmbiguous(RuntimeError):
+    """한 Receipt 에 검수·Lot·원장 IN 이 **둘 이상** 붙어 있다. 무결성 위반이다.
 
-    ★ `sim_runs.last_completed_as_of` 같은 컬럼을 만들지 않는다 — 마지막 완료일은
-      Master 소유(#19)이고 물류가 그 값을 가질 이유가 없다. 여기서 재는 것은
-      *"이 실행에 기록된 사실이 언제부터 언제까지 있나"* 하나다.
+    🔴 **하나를 고르지 않는다.** `inbound_inspections.receipt_id` 에도
+       `inventory_lots.inbound_receipt_id` 에도 UNIQUE 가 없어 스키마상 둘이 설 수
+       있고, `inspections.find_inspection` 은 그때 이미 멈춘다
+       (`InspectionIntegrityError`). Historical Reader 만 JOIN 곱을 그대로 흘려
+       **같은 Receipt 를 여러 줄로** 내보내면 깨진 계보가 정상 화면으로 그려진다.
+
+    ⚠️ 앞 행이 뒤 행을 덮게 두는 것도 고르는 것이다 — 그래서 값이 아니라 예외다.
     """
 
-    first_fact_on: date | None
-    last_fact_on: date | None
 
-    def covers(self, as_of: date) -> bool:
-        """`as_of` 가 기록 구간 안인가.
+@dataclass(frozen=True)
+class RuntimeSnapshotCoverage:
+    """그날 이 실행의 **Agent Runtime Snapshot 행이 있나** (`logistics_runtime_fixture`).
 
-        🔴 **밖이면 «0 kg» 이 아니라 «모른다» 다.** 마지막 사실 뒤의 날은 원장을
-           더해도 마지막 잔고가 나오지만, 그것은 *"그날 창고가 그랬다"* 가 아니라
-           *"그 뒤로 아무것도 기록되지 않았다"* 는 뜻이다. 시뮬레이션이 그날까지
-           걸어가지 않았을 뿐이므로 사실로 내밀지 않는다.
-        """
-        if self.first_fact_on is None or self.last_fact_on is None:
-            return False
-        return self.first_fact_on <= as_of <= self.last_fact_on
+    🔴 **물리 사실(Lot · Move · Receipt)의 최소~최대 날짜로 대신 판정하지 않는다.**
+       그 판정은 **양쪽으로** 틀린다 (실측 `SIM-BURNIN-202512` · 2026-09-09).
+
+    ```text
+    물리 사실 구간   2025-12-02 ~ 2026-09-12   285 일
+    사실이 있는 날                              24 일   ← 구간의 8%
+    스냅샷 행                                  254 일
+
+    구간 안인데 스냅샷이 없는 날                31 일   ① 안 연 날을 «열렸다» 고 한다
+      2025-12-02 ~ 2025-12-30  씨앗 구간 (원장 이동 215 건)
+      2026-01-03 · 2026-01-04  스냅샷이 실제로 비어 있는 이틀
+    스냅샷은 있는데 물리 사실이 없는 날         245 일   ② 열린 날을 «모른다» 고 한다
+    ```
+
+       ★ ② 가 특히 중요하다 — **입·출고가 0 건인 정상 하루는 Lot 도 Move 도
+         Receipt 도 안 남긴다.** 물리 사실로는 그런 날을 증명할 방법이 **아예 없다.**
+
+    ★ **축은 `(sim_run_id, as_of, usage_scope, is_active)` 다** —
+      `uq_log_runtime_fixture` · `repository.get_active_logistics_runtime_fixture` 와
+      같은 축이라 *"열렸다고 본 행"* 과 *"읽은 행"* 이 갈리지 않는다.
+
+    ⚠️ `first_as_of` · `last_as_of` 는 **사람에게 보여 줄 맥락**일 뿐 판정 근거가
+       아니다. 판정은 `has_snapshot` 하나가 하고, 그 값은 하루를 정확히 본다.
+    """
+
+    as_of: date
+    #: 🔴 이 값 하나가 `NO_DATA` 판정이다. 구간 비교를 하지 않는다.
+    has_snapshot: bool
+    first_as_of: date | None
+    last_as_of: date | None
 
 
 def timestamp_cutoff(as_of: date) -> datetime:
@@ -239,6 +265,10 @@ def _decimal(value: Any) -> Decimal:
 
 #: 원장 누계 한 조각. **`ADJUST` 는 더하지 않고 세기만 한다** — 세어 둔 것을 보고
 #: 호출부가 멈춘다.
+#:
+#: 🔴 **잔량을 0 으로 만든 날(= 마지막 이동일)의 종류를 함께 센다.** `_lot_state` 가
+#:    «폐기로 비었나» 를 가르는 데 그 하루가 필요하다 — 총 폐기량만 보면 **부분 폐기
+#:    뒤 판매로 소진된 Lot** 을 폐기된 Lot 과 구별할 수 없다 (실측 2건).
 _LEDGER_AGGREGATE = sql.SQL(
     """
     SELECT m.lot_id,
@@ -246,10 +276,20 @@ _LEDGER_AGGREGATE = sql.SQL(
              - COALESCE(SUM(m.quantity_kg) FILTER (WHERE m.move_type IN ('OUT', 'DISPOSE')), 0)
                AS balance_kg,
            COALESCE(SUM(m.quantity_kg) FILTER (WHERE m.move_type = 'DISPOSE'), 0) AS disposed_kg,
-           count(*) FILTER (WHERE m.move_type = 'ADJUST')::int AS adjust_count
-    FROM {schema}.inventory_moves m
-    WHERE m.sim_run_id = %(sim)s
-      AND m.moved_at <= %(as_of)s
+           count(*) FILTER (WHERE m.move_type = 'ADJUST')::int AS adjust_count,
+           count(*) FILTER (
+               WHERE m.move_type = 'DISPOSE' AND m.moved_at = m.last_moved_on
+           )::int AS dispose_on_last_day,
+           count(*) FILTER (
+               WHERE m.move_type = 'OUT' AND m.moved_at = m.last_moved_on
+           )::int AS out_on_last_day
+    FROM (
+        SELECT mv.lot_id, mv.move_type, mv.quantity_kg, mv.moved_at,
+               max(mv.moved_at) OVER (PARTITION BY mv.lot_id) AS last_moved_on
+        FROM {schema}.inventory_moves mv
+        WHERE mv.sim_run_id = %(sim)s
+          AND mv.moved_at <= %(as_of)s
+    ) m
     GROUP BY m.lot_id
     """
 )
@@ -318,7 +358,9 @@ def lot_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Historical
                    tp.sell_priority_remaining_days,
                    COALESCE(mv.balance_kg, 0) AS balance_kg,
                    COALESCE(mv.disposed_kg, 0) AS disposed_kg,
-                   COALESCE(mv.adjust_count, 0) AS adjust_count
+                   COALESCE(mv.adjust_count, 0) AS adjust_count,
+                   COALESCE(mv.dispose_on_last_day, 0) AS dispose_on_last_day,
+                   COALESCE(mv.out_on_last_day, 0) AS out_on_last_day
             FROM {schema}.inventory_lots l
             JOIN {schema}.items i ON i.item_id = l.item_id
             LEFT JOIN {schema}.item_storage_policies sp ON sp.item_id = l.item_id
@@ -345,7 +387,11 @@ def lot_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Historical
                 storage_zone=row["storage_zone"],
                 received_at=row["received_at"],
                 remaining_qty_kg=balance,
-                state=_lot_state(balance=balance, disposed_kg=_decimal(row["disposed_kg"])),
+                state=_lot_state(
+                    balance=balance,
+                    dispose_on_last_day=int(row["dispose_on_last_day"] or 0),
+                    out_on_last_day=int(row["out_on_last_day"] or 0),
+                ),
                 # ★ `turnover` 가 쓰는 그 함수에 **그 시점 잔량**만 바꿔 넣는다.
                 #   신선도·회전 공식을 여기서 다시 적으면 두 답이 갈린다.
                 turnover=_lot_turnover_from_row({**row, "remaining_qty_kg": balance}, as_of=as_of),
@@ -354,12 +400,42 @@ def lot_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Historical
     return tuple(lots)
 
 
-def _lot_state(*, balance: Decimal, disposed_kg: Decimal) -> HistoricalLotState:
-    if disposed_kg > 0 and balance <= 0:
+def _lot_state(
+    *, balance: Decimal, dispose_on_last_day: int, out_on_last_day: int
+) -> HistoricalLotState:
+    """Lot 상태를 **쓰는 쪽 규칙 그대로** 되살린다.
+
+    ```text
+    잔량 > 0                                 ACTIVE
+    잔량 0 · 비운 날에 DISPOSE 있고 OUT 없음   DISPOSED
+    그 외 (잔량 0)                            DEPLETED
+    ```
+
+    🔴 **«폐기 이동이 있었나» 로 갈라서는 안 된다.** `disposal._mark_disposed` 는
+       **그 DISPOSE 가 잔량을 0 으로 만들었을 때만** `DISPOSED` 를 적는다 —
+       *"부분 폐기에는 붙이지 않는다"* 가 그 함수 첫 줄이고, `WHERE … AND
+       remaining_qty_kg = 0` 이 SQL 로도 그것을 막는다. 총 폐기량이 0 보다 크다는
+       것만 보면 **30kg 만 버리고 70kg 는 정상 출고한 Lot** 이 «전량 폐기» 로 둔갑한다.
+
+    ```text
+    실측 (SIM-BURNIN-202512 · 2026-09-09)
+      DISPOSE 이동이 있는 Lot        8
+        DB status = DISPOSED         6
+        DB status = DEPLETED         2   ← 부분 폐기 뒤 OUT 으로 소진됐다
+    ```
+
+       종전 판정은 그 2건을 `DISPOSED` 로 냈다. 위 규칙은 8/8 을 DB 와 같게 낸다.
+
+    ⚠️ **같은 날 OUT 과 DISPOSE 가 함께 있으면 `DISPOSED` 라고 하지 않는다.**
+       `inventory_moves.moved_at` 은 DATE 라 하루 안의 순서가 없어(실측: 그런 Lot 2건)
+       어느 쪽이 잔량을 0 으로 만들었는지 증명할 수 없다. 증명 안 되는 «폐기» 를
+       적기보다 *"비었다"* 까지만 말한다 — 모르는 것을 아는 척하지 않는 그 규율이다.
+    """
+    if balance > 0:
+        return "ACTIVE"
+    if dispose_on_last_day > 0 and out_on_last_day == 0:
         return "DISPOSED"
-    if balance <= 0:
-        return "DEPLETED"
-    return "ACTIVE"
+    return "DEPLETED"
 
 
 def receipt_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[HistoricalReceipt, ...]:
@@ -375,6 +451,19 @@ def receipt_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Histor
        그 값을 과거 화면에 실으면 도착만 한 날에도 «입고 완료» 로 보인다.
        `inbound_receipt_events` 표를 만들지 않는 근거가 바로 사건 셋으로 4/4 가
        유도된다는 실측이다.
+
+    🔴 **한 Receipt 가 두 줄로 나오면 멈춘다.** 아래 세 `LEFT JOIN` 은 전부 1:N 이
+       **가능한** 관계다 — `inbound_inspections.receipt_id` 에도
+       `inventory_lots.inbound_receipt_id` 에도 UNIQUE 가 없다(DDL 실측).
+       깨지면 JOIN 곱으로 같은 Receipt 가 여러 `HistoricalReceipt` 가 되어
+       화면이 도착 건수를 **부풀린 채 정상으로** 그린다.
+
+       ★ `inspections.find_inspection` 이 같은 상황을 이미 `0 / 1 / 2행 이상` 으로
+         갈라 2행 이상에서 멈춘다(`InspectionIntegrityError` · *"어느 것이 진짜인지
+         여기서 고르지 않는다"*). Historical Reader 도 같은 규율을 지킨다 —
+         **읽기라고 무결성 방어를 빼지 않는다.**
+
+    :raises ReceiptLineageAmbiguous: 한 `receipt_id` 가 두 줄 이상으로 돌아올 때.
     """
     schema = _schema()
     rows = _rows(
@@ -407,6 +496,7 @@ def receipt_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Histor
         ).format(schema=schema),
         {"sim": sim_run_id, "as_of": as_of, "cutoff": timestamp_cutoff(as_of)},
     )
+    _reject_ambiguous_receipts(rows, sim_run_id=sim_run_id, as_of=as_of)
     return tuple(
         HistoricalReceipt(
             receipt_id=row["receipt_id"],
@@ -427,6 +517,36 @@ def receipt_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Histor
             in_move_id=row["in_move_id"],
         )
         for row in rows
+    )
+
+
+def _reject_ambiguous_receipts(
+    rows: list[dict[str, Any]], *, sim_run_id: str, as_of: date
+) -> None:
+    """한 `receipt_id` 가 두 줄 이상이면 멈춘다. **하나를 고르지 않는다.**
+
+    ★ 세 JOIN(검수 · Lot · 원장 IN) 중 **어디서** 늘었는지까지 적는다 — 그래야
+      고칠 사람이 어느 표를 볼지 안다.
+    """
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        seen.setdefault(row["receipt_id"], []).append(row)
+    겹친것 = {receipt_id: found for receipt_id, found in seen.items() if len(found) > 1}
+    if not 겹친것:
+        return
+    상세 = []
+    for receipt_id, found in sorted(겹친것.items()):
+        상세.append(
+            f"{receipt_id}: {len(found)}줄"
+            f" (inspection {sorted({r['inspection_id'] for r in found})!r}"
+            f" · lot {sorted({r['lot_id'] for r in found})!r}"
+            f" · in_move {sorted({r['in_move_id'] for r in found})!r})"
+        )
+    raise ReceiptLineageAmbiguous(
+        "한 Receipt 에 검수·Lot·원장 IN 이 둘 이상 붙어 있다"
+        f" (sim_run_id={sim_run_id!r} · as_of={as_of}): {' / '.join(상세)}."
+        " 어느 것이 진짜인지 여기서 고르지 않는다 —"
+        " 앞 행이 뒤 행을 덮게 두는 것도 고르는 것이다."
     )
 
 
@@ -570,31 +690,72 @@ def onhand_total_by_day(
     return series
 
 
-def fact_coverage(conn: Any, *, sim_run_id: str) -> FactCoverage:
-    """이 실행에 기록된 사실의 **처음과 끝 날짜.** 컬럼이 아니라 사실에서 센다.
+def runtime_coverage_at(conn: Any, *, sim_run_id: str, as_of: date) -> RuntimeSnapshotCoverage:
+    """그날 이 실행의 Runtime Snapshot 행이 있나 — **하루를 정확히 본다.**
 
-    ★ 세는 대상은 물류가 소유한 날짜 사실 셋이다 — Lot 입고일 · 원장 이동일 ·
-      Receipt 도착일. 다른 도메인 표를 물류 조회 범위 판정에 끌어오지 않는다.
+    🔴 **구간(MIN~MAX)으로 판정하지 않는다.** 근거는 `RuntimeSnapshotCoverage`
+       docstring 의 실측 세 줄이다 (구간 안 미개장 31일 · 사실 없는 정상일 245일).
+
+    ★ 함께 돌려주는 `first_as_of` · `last_as_of` 는 화면 문구용 맥락이다 —
+      *"2028-01-17 은 이 실행에 없다"* 만 적으면 어디를 물어야 할지 알 수 없다.
     """
     schema = _schema()
     rows = _rows(
         conn,
         sql.SQL(
             """
-            SELECT min(fact_on) AS first_fact_on, max(fact_on) AS last_fact_on
-            FROM (
-                SELECT received_at AS fact_on FROM {schema}.inventory_lots
-                 WHERE sim_run_id = %(sim)s
-                UNION ALL
-                SELECT moved_at FROM {schema}.inventory_moves WHERE sim_run_id = %(sim)s
-                UNION ALL
-                SELECT arrived_at FROM {schema}.inbound_receipts WHERE sim_run_id = %(sim)s
-            ) facts
+            SELECT
+                bool_or(f.as_of = %(as_of)s) AS has_snapshot,
+                min(f.as_of) AS first_as_of,
+                max(f.as_of) AS last_as_of
+            FROM {schema}.logistics_runtime_fixture f
+            WHERE f.sim_run_id = %(sim)s
+              AND f.usage_scope = %(scope)s
+              AND f.is_active
             """
         ).format(schema=schema),
-        {"sim": sim_run_id},
+        {"sim": sim_run_id, "as_of": as_of, "scope": LOGISTICS_POLICY_USAGE_SCOPE},
     )
     row = rows[0] if rows else {}
-    return FactCoverage(
-        first_fact_on=row.get("first_fact_on"), last_fact_on=row.get("last_fact_on")
+    return RuntimeSnapshotCoverage(
+        as_of=as_of,
+        # 🔴 행이 하나도 없으면 `bool_or` 가 NULL 이다 — `None` 을 참으로 읽지 않는다.
+        has_snapshot=bool(row.get("has_snapshot")),
+        first_as_of=row.get("first_as_of"),
+        last_as_of=row.get("last_as_of"),
     )
+
+
+def snapshot_days_between(
+    conn: Any, *, sim_run_id: str, start: date, end: date
+) -> frozenset[date]:
+    """`start`~`end` 중 **Runtime Snapshot 이 실제로 있는 날들.**
+
+    🔴 **그래프의 칸마다 그날을 따로 물어야 한다.** 원장 누계는 어떤 날짜에도 숫자를
+       내고, 첫 사실 이전 구간에서는 그 숫자가 **0** 이다. 그 0 은
+       *"확인했고 재고가 없다"* 가 아니라 *"그날을 모른다"* 인데, 화면 계약에서 그
+       둘은 다른 값이다 — 안 가르면 **안 연 날이 «재고 0kg» 선으로 그려진다.**
+
+    ★ 창이 12칸이라 한 질의로 집합을 받아 온다 — 칸마다 묻지 않는다.
+    """
+    schema = _schema()
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT f.as_of
+            FROM {schema}.logistics_runtime_fixture f
+            WHERE f.sim_run_id = %(sim)s
+              AND f.usage_scope = %(scope)s
+              AND f.is_active
+              AND f.as_of BETWEEN %(start)s AND %(end)s
+            """
+        ).format(schema=schema),
+        {
+            "sim": sim_run_id,
+            "scope": LOGISTICS_POLICY_USAGE_SCOPE,
+            "start": start,
+            "end": end,
+        },
+    )
+    return frozenset(row["as_of"] for row in rows)

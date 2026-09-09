@@ -45,8 +45,12 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from http import HTTPStatus
+
+import psycopg
 
 from app.api.logistics.schema import LogisticsTab
 from app.api.primitives import (
@@ -76,7 +80,11 @@ from app.logistics.console_service import (
     get_warehouse_console,
 )
 from app.logistics.db import get_connection
-from app.logistics.historical_repository import fact_coverage, onhand_total_by_day
+from app.logistics.historical_repository import (
+    onhand_total_by_day,
+    runtime_coverage_at,
+    snapshot_days_between,
+)
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 log = logging.getLogger(__name__)
@@ -568,32 +576,77 @@ def _empty_tab(*, status: SourceStatus, note: Note, source_note: str) -> Logisti
     )
 
 
-def build(as_of: date, pane: str) -> LogisticsTab:
-    """재고·물류 탭 한 판. **네 조회가 같은 `(sim_run_id, as_of)` 축에 선다.**
+@dataclass(frozen=True)
+class LogisticsTabResult:
+    """탭 한 판과 **그 판이 나가야 할 HTTP 코드.**
+
+    🔴 **읽기 실패를 `200 OK` 로 내보내지 않는다.** 본문에 `status="ERROR"` 를 적어도
+       HTTP 가 200 이면 그 응답은 **성공으로 캐시되고 성공으로 집계되고 성공으로
+       재시도되지 않는다.** 계약은 그 반대다.
+
+    ```text
+    OK · NO_DATA        200   읽었다. 값이 있거나, 그날이 없다
+    ERROR · DB 접속 실패 503   지금은 못 읽는다 — 다시 오면 될 수 있다
+    ERROR · 그 밖        500   이 요청은 여기서 깨졌다
+    ```
+
+    ★ **본문은 그대로 `LogisticsTab` 이다.** 오류라고 `{"detail": …}` 로 바꾸지
+      않는다 — 화면은 `Source.status` 와 pane 문구를 읽어 «왜» 를 보여 줘야 한다.
+    """
+
+    tab: LogisticsTab
+    http_status: int
+
+
+#: DB 에 **닿지 못한** 실패. 값이 틀린 것이 아니라 지금 못 읽는 상태라 503 이다.
+#:
+#: 🔴 `psycopg.OperationalError` 하나만 여기 둔다. 그 밑에 `ProgrammingError`(SQL 잘못) ·
+#:    `IntegrityError` 는 **우리 코드가 깨진 것**이라 503 으로 재시도를 권하면 안 된다.
+_DB_UNAVAILABLE: tuple[type[BaseException], ...] = (psycopg.OperationalError,)
+
+
+def _http_status_for_error(error: BaseException) -> int:
+    return (
+        HTTPStatus.SERVICE_UNAVAILABLE
+        if isinstance(error, _DB_UNAVAILABLE)
+        else HTTPStatus.INTERNAL_SERVER_ERROR
+    )
+
+
+def build_result(as_of: date, pane: str) -> LogisticsTabResult:
+    """재고·물류 탭 한 판 + HTTP 코드. **네 조회가 같은 `(sim_run_id, as_of)` 축에 선다.**
 
     🔴 **실패를 예시값으로 바꾸지 않는다.** 예외를 통째로 잡는 것은 그대로다 —
        무슨 일이 나든 화면은 떠야 하기 때문이다. 바뀐 것은 **그때 무엇을 내려
-       보내는가**다: 예시 숫자가 아니라 빈 화면과 `status="ERROR"` 다.
+       보내는가**다: 예시 숫자가 아니라 빈 화면 · `status="ERROR"` · 503/500 이다.
 
-    ★ **기록 구간 밖은 `NO_DATA` 다.** 마지막 사실 뒤의 날은 원장을 더해도 마지막
-      잔고가 나오지만, 그것은 *"그날 창고가 그랬다"* 가 아니라 *"그 뒤로 아무것도
-      기록되지 않았다"* 는 뜻이다. 시뮬레이션이 그날까지 걸어가지 않았을 뿐이므로
-      사실로 내밀지 않는다.
+    🔴 **`NO_DATA` 는 그날 Runtime Snapshot 이 없다는 뜻이다.**
+       물리 사실(Lot · Move · Receipt)의 최소~최대 구간으로 판정하지 않는다 —
+       그 판정은 **안 연 날을 열렸다고 하고(실측 31일) 열린 날을 모른다고 한다
+       (실측 245일).** 입·출고가 0 건인 정상 하루는 물리 사실을 아예 안 남긴다.
     """
     run = BURN_IN_SIM_RUN_ID
     try:
         with get_connection() as conn:
-            coverage = fact_coverage(conn, sim_run_id=run)
-        if not coverage.covers(as_of):
-            return _empty_tab(
-                status="NO_DATA",
-                note=Note(
-                    tone="warn",
-                    text=(f"**{as_of} 은 이 실행의 기록 구간 밖입니다** "
-                          f"({coverage.first_fact_on} ~ {coverage.last_fact_on}). "
-                          "0 이 아니라 **아직 모르는 날**입니다."),
+            coverage = runtime_coverage_at(conn, sim_run_id=run, as_of=as_of)
+        if not coverage.has_snapshot:
+            return LogisticsTabResult(
+                tab=_empty_tab(
+                    status="NO_DATA",
+                    note=Note(
+                        tone="warn",
+                        text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** — 그날 "
+                              "Runtime Snapshot 이 없습니다. 0 이 아니라 "
+                              "**아직 모르는 날**입니다. "
+                              f"이 실행이 연 날: {coverage.first_as_of} ~ "
+                              f"{coverage.last_as_of}."),
+                    ),
+                    source_note=(
+                        f"logistics_runtime_fixture 없음 · {run} · {as_of}"
+                        f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
+                    ),
                 ),
-                source_note=f"{run} · 기록 구간 {coverage.first_fact_on}~{coverage.last_fact_on}",
+                http_status=HTTPStatus.OK,
             )
         inv = get_inventory_console(sim_run_id=run, as_of=as_of)
         inb = get_inbound_console(sim_run_id=run, as_of=as_of)
@@ -605,33 +658,51 @@ def build(as_of: date, pane: str) -> LogisticsTab:
             _warehouse_pane(wh, inv),
             _outbound_pane(ob, as_of),
         ]
-    except Exception as error:  #  DB 미연결 · 표 없음 · 원장 이상 다 잡는다
+    except Exception as error:  #  DB 미연결 · 표 없음 · 원장/계보 무결성 다 잡는다
         log.exception("물류 값을 못 읽었습니다")
-        return _empty_tab(
-            status="ERROR",
-            note=Note(
-                tone="bad",
-                text=(f"**값을 못 읽었습니다** (`{type(error).__name__}`). "
-                      "예시 숫자로 대신하지 않습니다 — 이 화면에는 지금 사실이 없습니다."),
+        http_status = _http_status_for_error(error)
+        다시 = http_status == HTTPStatus.SERVICE_UNAVAILABLE
+        재시도 = "잠시 뒤 다시 열어 보세요." if 다시 else ""
+        return LogisticsTabResult(
+            tab=_empty_tab(
+                status="ERROR",
+                note=Note(
+                    tone="bad",
+                    text=(f"**값을 못 읽었습니다** (`{type(error).__name__}`). "
+                          f"예시 숫자로 대신하지 않습니다 — 이 화면에는 지금 사실이 "
+                          f"없습니다. {재시도}").strip(),
+                ),
+                source_note=f"읽기 실패 ({type(error).__name__}) · {run} · {as_of}",
             ),
-            source_note=f"읽기 실패 ({type(error).__name__}) · {run} · {as_of}",
+            http_status=http_status,
         )
 
-    return LogisticsTab(
-        panes=panes,
-        selected=pane,
-        principle=_PRINCIPLE,
-        source=Source(
-            filled=True,
-            owner="물류",
-            status="OK",
-            note=(
-                "inventory_moves · inventory_lots · inbound_receipts · "
-                "inbound_inspections · pallet_events · inventory_reservations · "
-                f"warehouse_zones · storage_locations · {run} · {as_of}"
+    return LogisticsTabResult(
+        tab=LogisticsTab(
+            panes=panes,
+            selected=pane,
+            principle=_PRINCIPLE,
+            source=Source(
+                filled=True,
+                owner="물류",
+                status="OK",
+                note=(
+                    "inventory_moves · inventory_lots · inbound_receipts · "
+                    "inbound_inspections · pallet_events · inventory_reservations · "
+                    f"warehouse_zones · storage_locations · {run} · {as_of}"
+                ),
             ),
         ),
+        http_status=HTTPStatus.OK,
     )
+
+
+def build(as_of: date, pane: str) -> LogisticsTab:
+    """탭 본문만. **대시보드가 쓰는 진입점이다** (HTTP 코드가 필요 없다).
+
+    ★ 계산은 `build_result` 하나가 한다 — 같은 판을 두 벌 만들지 않는다.
+    """
+    return build_result(as_of, pane).tab
 
 
 def _ceiling(value: float) -> float:
@@ -646,7 +717,7 @@ def _ceiling(value: float) -> float:
 
 
 def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
-    """날짜축 칸마다의 창고 보유량. **원장 누계다.**
+    """날짜축 칸마다의 창고 보유량. **원장 누계이고, 안 연 날은 공란이다.**
 
     ```text
     opening(start−1)  =  Σ(moved_at <  start)
@@ -655,11 +726,21 @@ def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
 
     🔴 **현재 잔량을 앵커로 잡고 거슬러 올라가지 않는다.** 종전에는
        `Σ inventory_lots.remaining_qty_kg` 를 오늘 칸에 놓고 역산했는데, 그 앵커가
-       **Current Cache** 라 모든 과거 칸이 같이 틀렸다. 실측에서 그 선은 네 기준일
-       전부 0 kg 이었다 (원장 복원값 294.4 · 806.4 · 806.4 · 6,452.4 kg).
+       **Current Cache** 라 모든 과거 칸이 같이 틀렸다 (네 기준일 전부 0 kg).
 
     🔴 **`limit` 으로 원장을 자르지 않는다.** 종전 `limit=1000` 은 잘린 줄이 하나만
        생겨도 선 전체를 조용히 틀어 놓는다. 이제 합은 DB 가 낸다.
+
+    🔴 **Runtime Snapshot 이 없는 날은 `None` 이다 — 0 이 아니다.** 원장 누계는 첫
+       사실 이전 날짜에도 숫자를 내고 그 값이 **0** 인데, 화면 계약에서
+
+    ```text
+    0      확인했고 재고가 없다
+    공란   그날을 모른다
+    ```
+
+       는 다른 값이다. 안 가르면 **이 실행이 열지도 않은 날이 «재고 0kg» 선**으로
+       그려진다 (실측: 창 시작이 씨앗 구간이면 실제로 그렇게 나왔다).
 
     ★ **앞날은 그리지 않는다** — `as_of` 뒤 칸은 `None` 이다. 확정된 도착만
       `markers` 로 얹는다.
@@ -672,10 +753,14 @@ def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
         series = onhand_total_by_day(
             conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
         )
+        열린_날 = snapshot_days_between(
+            conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
+        )
     data: list[float | None] = [None] * n
     for index in range(at + 1):
         day = start + timedelta(days=index)
-        if day in series:
+        # 🔴 열린 날에만 숫자를 적는다. 안 연 날의 0 은 «없다» 가 아니라 «모른다» 다.
+        if day in 열린_날 and day in series:
             data[index] = float(series[day])
     return data
 
@@ -685,21 +770,26 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
 
     ★ **대시보드가 아니라 여기서 만듭니다.** 요약 숫자와 같은 곳에서 나와야
       둘이 안 갈라집니다. 실제로 갈라졌던 적이 있습니다 — 요약은 4,550kg 인데
-      그래프 끝은 14,600kg 이었습니다. `tests/api/test_screen_api.py` 가 지킵니다.
+      그래프 끝은 14,600kg 이었습니다.
 
     🔴 **못 읽으면 빈 그래프에 「오류」 라고 적습니다.** 종전에는 예시 선
        (`_ONHAND` · `_PROJ`)으로 되돌아갔고, 그 선은 실적처럼 보였습니다.
+
+    🔴 **칸마다 그날이 열렸는지 따로 봅니다.** 선택한 `as_of` 하나만 보면 창 앞쪽의
+       안 연 날들이 0kg 으로 그려집니다 (`_onhand_series` 참조).
     """
     try:
         with get_connection() as conn:
-            coverage = fact_coverage(conn, sim_run_id=BURN_IN_SIM_RUN_ID)
-        if not coverage.covers(as_of):
+            coverage = runtime_coverage_at(
+                conn, sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of
+            )
+        if not coverage.has_snapshot:
             return _empty_stock_chart(
                 n,
                 Note(
                     tone="warn",
-                    text=(f"**{as_of} 은 이 실행의 기록 구간 밖입니다** "
-                          f"({coverage.first_fact_on} ~ {coverage.last_fact_on})."),
+                    text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** "
+                          f"(열린 구간 {coverage.first_as_of} ~ {coverage.last_as_of})."),
                 ),
             )
         data = _onhand_series(as_of, n, at)
@@ -738,8 +828,8 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
         markers=markers,
         note=Note(
             tone="neutral",
-            text=("원장(`inventory_moves`)을 날마다 더해 편 값입니다. **앞날은 공란**입니다 — "
-                  "확정된 도착만 점으로 얹습니다."),
+            text=("원장(`inventory_moves`)을 날마다 더해 편 값입니다. **앞날과 이 실행이 "
+                  "열지 않은 날은 공란**입니다 — 확정된 도착만 점으로 얹습니다."),
         ),
     )
 
