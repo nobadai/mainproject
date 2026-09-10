@@ -10,12 +10,22 @@
  *   있는데, 접었다고 지우면 되묻는 중이던 확인이 사라집니다. 그래서
  *   **없애지 않고 숨깁니다** — `hidden` 이 아니라 높이 0 으로.
  *
- * ★ **크기는 사람이 정합니다.** 예전에는 너비 820px · 높이 `min(58vh, 520px)` 가
- *   박혀 있었습니다. 이제 위 모서리 손잡이를 끌어 높이를 정하고, 넓게 보기로 너비
- *   상한을 풉니다. 정한 값은 브라우저가 기억합니다 (`lib/dock_size.ts`).
+ * ★ **높이는 사람이 정합니다.** 예전에는 높이 `min(58vh, 520px)` 가 박혀 있었습니다.
+ *   이제 위 모서리 손잡이를 끌어 정하고, 그 값을 브라우저가 기억합니다
+ *   (`lib/dock_size.ts`).
  *
  *   🔴 리사이즈를 넣으면서 **위의 "지우지 않고 숨긴다" 구조는 그대로 둡니다.**
  *      손잡이는 판 *바깥*(위)에 붙는 남매 요소라 판 안의 대화를 건드리지 않습니다.
+ *
+ * ★ **너비는 늘 꽉 찹니다 — 사람이 고르는 것이 아닙니다.**
+ *   하루 동안 너비 상한 820px 과 그것을 푸는 「넓게」 버튼이 있었습니다. 화면 주인이
+ *   그것을 보고 **"그게 아니라 네비 오른쪽을 다 채워라"** 고 해서 상한과 버튼을 함께
+ *   걷었습니다. **다시 넣지 마십시오.**
+ *
+ *   ★ 채우는 일은 두 줄이 나눠 합니다. 바깥 `aside` 가 `md:left-[238px]` 로 왼쪽
+ *     네비를 피하고, 안쪽 판은 `w-full` 로 그 나머지를 다 씁니다. 둘 다 CSS 라
+ *     **창을 줄이는 동안 JS 없이 따라 줄어듭니다.** 좌우 `px-3` 만 남겨 둡니다 —
+ *     글이 화면 끝에 딱 붙으면 읽기 나쁩니다.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -23,8 +33,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MasterConsole } from "@/components/console/MasterConsole";
 import {
   clampHeight,
-  defaultHeight,
-  maxHeight,
   readDockSize,
   writeDockSize,
   DEFAULT_HEIGHT_CSS,
@@ -47,9 +55,7 @@ export function MasterDock({ session }: { session: Session }) {
    */
   const [size, setSize] = useState<DockSize | null>(null);
   const [dragging, setDragging] = useState(false);
-  const drag = useRef<{ startY: number; startHeight: number; height: number; wide: boolean } | null>(
-    null,
-  );
+  const drag = useRef<{ startY: number; startHeight: number; height: number } | null>(null);
 
   /** 지금 값. 손잡이·버튼은 열린 뒤에만 도니까 저장소를 다시 볼 일은 거의 없다. */
   const current = useCallback((): DockSize => size ?? readDockSize(window.innerHeight), [size]);
@@ -73,12 +79,7 @@ export function MasterDock({ session }: { session: Session }) {
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const start = current();
-      drag.current = {
-        startY: e.clientY,
-        startHeight: start.height,
-        height: start.height,
-        wide: start.wide,
-      };
+      drag.current = { startY: e.clientY, startHeight: start.height, height: start.height };
       // 끄는 동안 글자가 딸려 잡히지 않게
       e.preventDefault();
       setDragging(true);
@@ -108,7 +109,7 @@ export function MasterDock({ session }: { session: Session }) {
       drag.current = null;
       setDragging(false);
       // 🔴 저장은 **손을 뗄 때 한 번**이다. 끄는 동안 매 프레임 쓰면 저장소가 쉴 새 없이 돈다.
-      if (d) writeDockSize({ height: d.height, wide: d.wide });
+      if (d) writeDockSize({ height: d.height });
     };
 
     window.addEventListener("pointermove", onMove);
@@ -132,17 +133,6 @@ export function MasterDock({ session }: { session: Session }) {
     [commit, current],
   );
 
-  /** 넓게 보기 — 켜면 너비 상한을 풀고 높이를 상한까지, 끄면 처음 크기로. */
-  const toggleWide = useCallback(() => {
-    const viewport = window.innerHeight;
-    const now = current();
-    commit(
-      now.wide
-        ? { height: defaultHeight(viewport), wide: false }
-        : { height: maxHeight(viewport), wide: true },
-    );
-  }, [commit, current]);
-
   /**
    * ★ 대화 화면을 **한 번만 만든다.** 손잡이를 끄는 동안 이 서랍은 프레임마다 다시
    *   그려지는데, 그때마다 대화까지 같이 그리면 끌리는 것이 뚝뚝 끊긴다. 같은 요소를
@@ -150,7 +140,6 @@ export function MasterDock({ session }: { session: Session }) {
    */
   const consoleEl = useMemo(() => <MasterConsole session={session} />, [session]);
 
-  const wide = size?.wide === true;
   const height = !open ? 0 : size ? `min(${size.height}px, ${MAX_HEIGHT_CSS})` : DEFAULT_HEIGHT_CSS;
 
   return (
@@ -158,11 +147,12 @@ export function MasterDock({ session }: { session: Session }) {
       className="fixed inset-x-0 bottom-0 z-40 flex flex-col md:left-[238px]"
       aria-label="마스터 에이전트"
     >
-      <div className={`mx-auto flex w-full flex-col px-3 ${wide ? "" : "max-w-[820px]"}`}>
+      {/* 너비 상한을 걸지 않는다 — 네비 오른쪽을 끝까지 채운다 (머리말 참고) */}
+      <div className="flex w-full flex-col px-3">
         {/* 손잡이 — 펼쳤을 때만. 접히면 잡을 판 자체가 없다 */}
         {open && size ? (
           <div
-            className="flex items-center gap-2 rounded-t-2xl border border-b-0 px-3 pt-1.5 pb-1"
+            className="flex items-center rounded-t-2xl border border-b-0 px-3 pt-1.5 pb-1"
             style={{
               borderColor: "var(--color-hair)",
               background: "rgba(255,255,255,.97)",
@@ -187,16 +177,6 @@ export function MasterDock({ session }: { session: Session }) {
                 className="h-[3px] w-11 rounded-full bg-hair transition-colors group-hover:bg-mut2 group-focus-visible:bg-accent"
               />
             </div>
-            <button
-              type="button"
-              onClick={toggleWide}
-              onPointerDown={(e) => e.stopPropagation()}
-              aria-pressed={wide}
-              className="hover:bg-hair-soft shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={{ color: "var(--color-mut2)" }}
-            >
-              {wide ? "원래대로" : "넓게"}
-            </button>
           </div>
         ) : null}
 
