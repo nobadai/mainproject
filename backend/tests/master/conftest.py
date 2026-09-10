@@ -172,3 +172,37 @@ def 공휴일_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> Non
     """
     monkeypatch.setattr("app.master.service.get_calendar", lambda: _공휴일이_없는_달력())
     monkeypatch.setattr("app.master.service.get_market_calendar", lambda: _주말만_쉬는_시장())
+
+
+#: 미적용 전이를 찾는 두 조회가 **DB 로 나가는 문**. 🔴 **여기 하나만 막으면 된다.**
+#:
+#: ★ **`approved_decisions` 를 갈아 끼우지 않는 이유.** 그 이름은
+#:   `retry_pending_transitions` 의 **기본 인자로 이미 묶여 있어** 모듈 속성을 바꿔도
+#:   안 바뀐다 (기본값이 `None` 이 아니라 함수 자체인 규율의 대가다). 진짜 함수가
+#:   호출 때 찾아가는 이름은 `fetch_all` 이고, 그것이 실제 문이다.
+미적용_조회_문 = "app.master.pending_transition_repository.fetch_all"
+
+
+@pytest.fixture(autouse=True)
+def 미적용_전이_조회를_막는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """미적용 전이를 찾는 조회를 **DB 대신 빈 목록으로** 받는다 (2026-09-11).
+
+    🔴 **여기가 안 막히면 검사가 실 DB 에 「쓴다」.** 하루 순서의 재시도 단계는 찾은
+       미적용마다 `apply_approval` 을 부르고, 그 함수는 `purchases` · 재무 · 물류에
+       **행을 쓰고 커밋한다.** 다른 fixture 들이 막는 것은 조회인데 이 자리는
+       **쓰기까지** 가므로, 새면 팀 공용 DB 에 검사가 만든 행이 남는다.
+
+    ★ **빈 목록이면 재시도 단계는 `NOTHING_DUE` 로 돌아선다** — 진짜 코드가 돌되
+      `apply_approval` 은 이름조차 안 불린다. 입력 적재를 빈 값으로 주는 것과 같은
+      태도다.
+
+    ★ **재시도 자체를 재는 검사는 `retry_fn` 을 직접 꽂거나
+      `retry_pending_transitions` 에 대역을 넘긴다** (`test_pending_transition.py`) —
+      여기서는 *"재시도 때문에 다른 검사가 실 DB 를 치지 않는다"* 만 보장한다.
+
+    🔴 **격리가 실제로 섰는지는 `test_db_isolation.py` 가 잰다.**
+    """
+    def 아무것도_없다(*args: object, **kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(미적용_조회_문, 아무것도_없다)

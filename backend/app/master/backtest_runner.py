@@ -85,7 +85,7 @@ CalendarNotCovered             → 🔴 멈추고 사유를 낸다
 ⚠️ **어휘를 새로 만들지 않았다.** 세는 값은 전부 `scheduler` 가 낸 것 그대로다
   (`DayRunOutcome.action` · `ItemRunOutcome.end_code` · `procurement_status` 의
   `NOT_ATTEMPTED` · `sales_status` 의 세 값 · `outbound_status` 의 네 값 ·
-  `failed_items`). 그 네 값은 **접지
+  `RetryOut.outcomes` 의 네 값 · `failed_items`). 그 네 값은 **접지
   않고 그대로 센다** — `NOTHING_DUE`(없다)와 `FAILED`(못 했다)와
   `NOT_ATTEMPTED`(안 했다)를 묶으면 손익 곡선이 왜 평평한지를 성적표가 못 답한다.
   이 파일이 새로 만든 말은 걷기 자체에 관한 것
@@ -285,6 +285,34 @@ class WalkResult:
             for day in self.days
             for status in (day.procurement_approval_status, day.sales_approval_status)
         )
+
+    @property
+    def transition_outcomes(self) -> Mapping[str, int]:
+        """미적용 전이 재시도의 **승인별** 결과 분포 (2026-09-11). 🔴 **넷을 접지 않는다.**
+
+        ```text
+        APPLIED         원장에 닿았다
+        NOT_APPLIED     아직 쓸 것이 없다      ← "없다"
+        FAILED          쓰려다 터졌다          ← "못 했다"
+        NOT_BUILDABLE   약정을 못 만들었다     ← 전이 앞에서 끝났다
+        ```
+
+        ★★ **이 줄이 없어서 「승인 15건 RECORDED」 를 보고 원장에 닿은 줄 알았다**
+          (실측 2026-09-11). `approval_outcomes` 는 *"승인을 적었나"* 까지만 답한다 —
+          그 승인이 **장부에 닿았나**는 축이 하나 더 뒤다.
+
+        🔴 **`approval_outcomes` 와 한 칸에 담지 않는다.** 어휘가 다르고 축이 다르다 —
+          담으면 *"적었다"* 와 *"닿았다"* 가 한 표에 섞여 어느 쪽 수가 는 것인지를
+          못 읽는다 (`end_codes` 와 `sales_end_codes` 를 가른 것과 같은 이유).
+
+        ★ **이름의 주인은 `pending_transition.py` 다.** 여기서 새 이름을 안 붙이고
+          세기만 한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            if day.pending_transition is not None:
+                total.update(day.pending_transition.outcomes)
+        return total
 
     @property
     def approval_outcomes(self) -> Mapping[str, int]:
@@ -610,6 +638,10 @@ def format_summary(result: WalkResult) -> str:
         #    두 줄이다 — 한 줄로 묶으면 *"안 켰다"* 와 *"켰는데 0건"* 이 같아 보인다.
         f"승인      {dict(sorted(result.approval_statuses.items()))}",
         f"승인어휘  {dict(sorted(result.approval_outcomes.items()))}",
+        # 🔴 **전이 줄을 접지 않는다** (2026-09-11). *"승인을 적었다"* 와 *"그 승인이
+        #    원장에 닿았다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 15` 를 보고
+        #    원장에 닿은 줄 알았고, `purchases` 는 0행이었다.
+        f"전이      {dict(sorted(result.transition_outcomes.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]

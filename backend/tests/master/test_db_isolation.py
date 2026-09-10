@@ -87,3 +87,39 @@ def test_관문_이름을_가져간_모듈이_실제로_잡힌다() -> None:
     assert "app.master.revalidation" in 잡힌_모듈, (
         "재검증 모듈이 안 잡힌다 — 승인 한 번이 실 DB 로 개장을 물으러 나간다"
     )
+
+
+# ── 미적용 전이 재시도 — 🔴 **여기는 조회가 아니라 「쓰기」로 이어진다** ────────
+
+
+def test_미적용_전이_조회가_막혀_있다() -> None:
+    """🔴 **안 막히면 검사가 팀 공용 DB 에 행을 쓴다** (2026-09-11).
+
+    하루 순서의 재시도 단계는 찾은 미적용마다 `apply_approval` 을 부르고, 그 함수는
+    `purchases` · 재무 · 물류에 **쓰고 커밋한다.** 다른 격리는 조회를 막는 것이지만
+    이 자리는 쓰기까지 가므로, 새면 흔적이 **남는다.**
+
+    ★ 문이 하나라 한 줄로 잰다 — `approved_decisions` 도 `ledger_purchase_ids` 도
+      같은 `fetch_all` 을 지난다.
+    """
+    from app.finance.db import fetch_all as 진짜
+    from app.master import pending_transition_repository as 저장소
+
+    assert 저장소.fetch_all is not 진짜, (
+        "미적용 전이 조회가 안 막혔다 — 재시도가 실 DB 를 읽고 apply_approval 이 쓴다"
+    )
+
+
+def test_미적용_조회가_막힌_채로_빈_답을_준다() -> None:
+    """🔴 **위 검사가 「막히기만 하고 엉뚱한 값을 주는」 것을 막는다.**
+
+    ★ 빈 목록이어야 재시도가 `NOTHING_DUE` 로 돌아서고 `apply_approval` 이 이름조차
+      안 불린다.
+    """
+    from app.master.pending_transition_repository import (
+        approved_decisions,
+        ledger_purchase_ids,
+    )
+
+    assert approved_decisions(sim_run_id="SIM-ANY") == []
+    assert ledger_purchase_ids(sim_run_id="SIM-ANY") == []
