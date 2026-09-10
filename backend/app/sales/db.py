@@ -18,6 +18,7 @@ Params = Sequence[object] | Mapping[str, object] | None
 
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+CONNECT_TIMEOUT_SECONDS = 5
 
 
 def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
@@ -43,6 +44,7 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
         dbname=config["DB_NAME"],
         user=config["DB_USER"],
         password=config["DB_PASSWORD"],
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
         row_factory=dict_row,
     )
 
