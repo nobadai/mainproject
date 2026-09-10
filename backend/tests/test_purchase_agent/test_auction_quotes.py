@@ -29,6 +29,7 @@ from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
 from app.purchase_agent.quotes import (
     auction_quote_source,
     krw_per_kg,
+    min_trade_volume_kg,
     missing_quote_reason,
     observed_date,
     observed_spec,
@@ -765,13 +766,28 @@ def test_unusable_rows_are_excluded_before_aggregation(token: str) -> None:
 
 
 def test_the_row_filter_sits_in_where_not_having() -> None:
-    """같은 뜻의 검사를 WHERE·HAVING 두 곳에 두면 한쪽만 바뀐다."""
+    """행 단위 필터는 **WHERE** 에 있어야 한다 — 집계 뒤로 가면 분모가 무너진다.
+
+    🔄 전에는 이 검사가 ``"HAVING" not in query`` 로 **HAVING 자체를 금지**했다. 그 근거는
+    *"같은 뜻의 검사를 두 곳에 두면 한쪽만 바뀐다"* 였고 **그 근거는 지금도 맞다.**
+    `#559` 가 더한 ``HAVING`` 은 **같은 뜻이 아니다**::
+
+        WHERE  trade_volume_kg > 0        물량가중의 **분모**를 지킨다 (NULL·0중량 행)
+        HAVING sum(...) >= 하한           *"이 값을 시세라고 부를 수 있나"*
+
+    ★ 그래서 금지를 **자리 잠금**으로 바꾼다 — 행 단위 토큰이 ``GROUP BY`` **앞**에 있고,
+      하한은 뒤에 있다. 행 단위 필터가 ``HAVING`` 으로 내려가면 여기서 걸린다.
+    """
     captured: dict = {}
     _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
     query = captured["query"]
 
-    assert "HAVING" not in query
-    assert query.index("trade_volume_kg > 0") < query.index("GROUP BY")
+    group_by = query.index("GROUP BY")
+    assert query.index("trade_volume_kg > 0") < group_by
+    assert query.index("trade_amount_krw IS NOT NULL") < group_by
+    # 하한은 집계 뒤다 — 이것만 GROUP BY 뒤에 있어야 한다.
+    assert group_by < query.index("HAVING")
+    assert "min_trade_volume_kg" in query[query.index("HAVING"):]
 
 
 # --------------------------------------------------------------------- 🔴3 좌표 잠금
@@ -1514,3 +1530,85 @@ def test_a_half_written_weight_switch_is_refused_early(broken: dict) -> None:
 
     with pytest.raises((ValueError, TypeError)):
         spec_for_item("무", constraints)
+
+
+# --------------------------------------------------------------------- 🔴 거래량 하한 (#559)
+
+
+def test_the_declared_floor_reaches_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **선언을 바꾸면 쿼리가 따라 바뀐다** (규칙 8).
+
+    ``assert params[...] == constraints[...]`` 로 재면 코드가 같은 값을 하드코딩해도
+    통과한다. 그래서 **선언을 실제로 바꾸고** 넘어간 값이 따라 오는지 본다.
+    """
+    for declared in (1000, 7777, 0):
+        constraints = load_constraints()
+        constraints["market_quotes"]["min_trade_volume_kg"] = declared
+        monkeypatch.setattr(
+            "app.purchase_agent.quotes.load_constraints", lambda c=constraints: c
+        )
+        captured: dict = {}
+        _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
+        assert captured["params"]["min_trade_volume_kg"] == float(declared)
+
+
+def test_the_floor_is_applied_after_aggregation_not_per_row() -> None:
+    """★ 하한은 **등급 합계**에 걸린다 — 행 하나가 아니라.
+
+    행마다 걸면 그물망 300kg + 파렛트 900kg 이 **둘 다 떨어져** 1,200kg 짜리 등급이
+    사라진다. 우리 좌표는 포장을 둘 이상 합치므로 (배추 그물망·파렛트) 실제로 나는 일이다.
+    """
+    captured: dict = {}
+    _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
+    query = captured["query"]
+
+    having = query.index("HAVING")
+    assert query.index("GROUP BY") < having
+    assert "sum(usable.trade_volume_kg) >= %(min_trade_volume_kg)s" in query[having:]
+
+
+def test_the_floor_is_not_applied_to_the_observed_day_choice() -> None:
+    """🔴 하한을 ``usable`` 에 걸면 **관측일 선택까지** 바뀐다.
+
+    거르는 것은 **등급**이지 날짜가 아니다 — 그날 얇은 등급만 있었어도 그날은 그날이고,
+    ``trading_days_behind`` 는 *"이 규격이 안 팔렸다"* 를 세는 다른 축이다.
+    """
+    captured: dict = {}
+    _source(BAECHU_1231_ROWS, captured)("배추", INTEGRATION)
+    query = captured["query"]
+
+    usable_block = query[query.index("WITH usable"): query.index("picked AS")]
+    assert "min_trade_volume_kg" not in usable_block
+
+
+@pytest.mark.parametrize(
+    ("declared", "error"),
+    [(_ABSENT, KeyError), (None, KeyError), ("1000", KeyError), (True, KeyError), (-1, ValueError)],
+)
+def test_a_missing_or_impossible_floor_stops_the_query(
+    declared: Any, error: type[Exception], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """선언이 없거나 뜻이 없으면 **조회하지 않는다.**
+
+    ⚠️ 기본값을 코드에 두지 않는 이유 — 선언을 지웠는데 그대로 돌면 *"바꾼 줄 알고 쓰는"*
+    상태가 된다. ``_IMPLEMENTED`` 가 막으려는 것과 같은 종류다.
+
+    ★ ``True`` 를 따로 세는 것은 ``bool`` 이 ``int`` 의 하위형이라서다 — 안 막으면
+      ``True`` 가 하한 1kg 으로 조용히 통과한다.
+    """
+    constraints = load_constraints()
+    if declared is _ABSENT:
+        del constraints["market_quotes"]["min_trade_volume_kg"]
+    else:
+        constraints["market_quotes"]["min_trade_volume_kg"] = declared
+    monkeypatch.setattr("app.purchase_agent.quotes.load_constraints", lambda: constraints)
+
+    with pytest.raises(error):
+        _source(BAECHU_1231_ROWS)("배추", INTEGRATION)
+
+
+def test_zero_is_a_confirmed_no_floor_not_a_missing_declaration() -> None:
+    """``0`` 은 「하한 없음」이라는 **확정된 값**이다 (규칙 3). ``None`` 과 다르다."""
+    assert min_trade_volume_kg({"min_trade_volume_kg": 0}) == 0.0
+    with pytest.raises(KeyError):
+        min_trade_volume_kg({"min_trade_volume_kg": None})
