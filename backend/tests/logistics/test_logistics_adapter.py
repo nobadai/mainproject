@@ -2445,47 +2445,27 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     마스터가 `Capability` 어휘를 베껴 두고 테스트로만 대조하는 것과 **같은 자리**다
     (`master/envelope.py` `Capability` docstring · `tests/master/test_sales_flow.py`).
 
-    ★ **받는 쪽이 옮길 것이 없다 (WP-4B).** payload 가 판매 계약 모양 **그대로**다 —
+    ★ **받는 쪽이 옮길 것이 없다 (WP-4B).** payload 를 **손대지 않고 그대로** 넘긴다 —
       종전에는 숫자 셋을 최상위로 끌어올려 두고 받는 쪽이 제자리로 옮겨야 했다.
 
-    🔴 **아직 한 자리가 열려 있다 — 판매 HANDOFF.**
+    🟢 **납기 세 칸이 닫혔다** (`#509` · 2026-09-10). 한동안 이 검사는
+      *"어긋난 칸이 정확히 그 셋인지"* 를 잠그고 있었다 — 물류가 값을 실제로
+      계산하는데 `LogisticsDeliveryFeasibility(extra="forbid")` 가 아직 안 받던
+      기간이다. 판매가 칸을 열면서 그 대기가 끝났고, 검사가 XPASS 로 그것을 알렸다.
 
       ```text
       delivery_route · transport_lead_time · earliest_delivery_date
-      → LogisticsDeliveryFeasibility(extra="forbid") 가 아직 이 셋을 안 받는다
       ```
 
-      물류가 이 셋을 빼서 맞추지 않는다 — 값은 실제로 계산한 사실이고, 계약을
-      좁히면 판매가 납기를 못 읽는다. 그래서 **어긋난 칸이 정확히 그 셋인지**를
-      여기서 잠근다. 판매가 칸을 열면 아래 `대기중` 이 비고 이 검사가 알려 준다.
+      🔴 **물류가 셋을 빼서 맞추지 않는다.** 값은 실제로 계산한 사실이고, 계약을
+         좁히면 판매가 납기를 못 읽는다. 그래서 대기 표식이 아니라 **통과**로
+         되돌린다 — 앞으로 어느 칸이든 갈리면 여기가 곧바로 빨간불이다.
     """
-    from pydantic import ValidationError
-
     from app.sales.schemas import SalesLogisticsContext
 
     payload = _pre_sales_reply({"user_request": {"item": "배추"}})[1].payload
 
-    대기중 = {"delivery_route", "transport_lead_time", "earliest_delivery_date"}
-    try:
-        SalesLogisticsContext.model_validate(payload)
-        어긋난칸: set[str] = set()
-    except ValidationError as 오류:
-        어긋난칸 = {str(e["loc"][-1]) for e in 오류.errors()}
-    assert 어긋난칸 == 대기중, (
-        f"판매 계약과 어긋난 칸이 달라졌다: {sorted(어긋난칸)}"
-        " — 셋 말고 다른 것이 갈렸으면 물류가 계약을 깬 것이다"
-    )
-
-    context = SalesLogisticsContext.model_validate(
-        {
-            **payload,
-            "delivery_feasibility": {
-                칸: 값
-                for 칸, 값 in payload["delivery_feasibility"].items()
-                if 칸 not in 대기중
-            },
-        }
-    )
+    context = SalesLogisticsContext.model_validate(payload)
 
     # 수량은 물류가 낸 그대로다 — 판매가 다시 합산하지 않는다
     assert {
@@ -2502,6 +2482,11 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     ]
     assert context.sellable_supply.supply_capacity_by_date == []
     assert context.delivery_feasibility.status == "UNRESOLVED"
+    # 🟢 **`#509` 가 연 세 칸이 실제로 건너온다.** 「검증을 통과했다」 만 재면
+    #    셋이 전부 `None` 이어도 초록이다 — 값이 실렸는지까지 본다.
+    assert context.delivery_feasibility.delivery_route == _ROUTE
+    assert context.delivery_feasibility.transport_lead_time == 0
+    assert context.delivery_feasibility.earliest_delivery_date is None
     # 키만 옮겼고 값은 정책 원값 그대로다 — mapper 가 계산하지 않는다
     assert context.delivery_feasibility.daily_outbound_capacity_kg == Decimal("5000.0")
     assert context.missing_data == list(payload["missing_data"])
