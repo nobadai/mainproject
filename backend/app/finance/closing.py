@@ -29,6 +29,23 @@ _ZERO = Decimal(0)
 _BASE_MODE = "BASE_NO_LOAN"
 _LOAN_MODE = "LOAN_BASELINE"
 
+#: `payroll_interest_cash_out_krw` 에 들어가는 **원장의 실제 비용 분류**.
+#:
+#: 🔴 `LOAN_INTEREST` 가 빠져 있었다. 원장이 쓰는 이름은 `INTEREST` 가 아니라
+#:    `LOAN_INTEREST` 이고(실측 `expenses.expense_category`), 그래서 이자 지급이 있는
+#:    날은 마감이 통째로 `daily_closing_expense_category` 로 막혔다 — 2025-12-31 이
+#:    실제로 그 날이다. 이미 적힌 그날 마감값(13,035,596.88 = 급여 + 대출이자)이
+#:    **두 비용을 함께 세는 것이 정본 계약임을 증명한다.**
+#:
+#: ★ `INTEREST` 도 남긴다. 원장 이름이 바뀐 것이 아니라 **모르는 이름을 하나 더 아는
+#:   것**이고, 아는 이름을 지우면 예전 데이터가 다시 막힌다.
+#:
+#: ★ 목록 밖은 여전히 `FinanceDataNotReady` 다. 모르는 분류를 조용히 어느 칸에
+#:   넣으면 그 순간 마감이 **틀린 값을 확정한다** — 막히는 편이 낫다.
+_PAYROLL_INTEREST_CATEGORIES: frozenset[str] = frozenset(
+    {"PAYROLL", "INTEREST", "LOAN_INTEREST"}
+)
+
 
 @dataclass(frozen=True)
 class FinanceDayClosingResult:
@@ -221,7 +238,8 @@ def _load_prior_state(
         cursor.execute(
             sql.SQL(
                 """
-                SELECT financing_mode, current_cash_krw, receivables_krw, current_debt_krw
+                SELECT state_date, financing_mode, current_cash_krw, receivables_krw,
+                       current_debt_krw
                 FROM {}.finance_states
                 WHERE sim_run_id = %s
                   AND financing_mode = %s
@@ -233,16 +251,24 @@ def _load_prior_state(
             [sim_run_id, financing_mode, as_of],
         )
         rows = cursor.fetchall()
-    if len(rows) > 1:
-        raise FinanceDataNotReady("finance_state_ambiguous")
     if not rows:
         return None
+    # 🔴 **행이 둘이라는 것은 모호하다는 뜻이 아니다.** 예전에는 `len(rows) > 1` 만
+    #    보고 세웠는데, 그 조건은 *"이 축에 이전 상태가 둘 이상 있다"* 이고 그것은
+    #    **일별 상태가 쌓인 정상 실행의 모습**이다. 실측 축(`LOAN_BASELINE`, 252행)에서
+    #    셋째 날부터 모든 마감이 `finance_state_ambiguous` 로 막혔다.
+    #
+    # ★ 모호한 것은 **가장 늦은 날짜가 둘일 때**뿐이다 — 그때만 어느 행이 직전 상태인지
+    #   고를 수 없다. `load_finance_state_row` 가 이미 같은 규율을 적어 두었다.
+    latest_date = _row_value(rows[0], "state_date", 0)
+    if len(rows) > 1 and _row_value(rows[1], "state_date", 0) == latest_date:
+        raise FinanceDataNotReady("finance_state_ambiguous")
     row = rows[0]
     return _FinanceState(
-        financing_mode=str(_row_value(row, "financing_mode", 0)),
-        current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 1)),
-        receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 2)),
-        current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 3)),
+        financing_mode=str(_row_value(row, "financing_mode", 1)),
+        current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 2)),
+        receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 3)),
+        current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 4)),
     )
 
 
@@ -321,7 +347,7 @@ def _expense_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Decim
         amount = _daily_closing_amount(_row_value(row, "amount_krw", 2))
         if delivery_id is not None:
             logistics += amount
-        elif category in {"PAYROLL", "INTEREST"}:
+        elif category in _PAYROLL_INTEREST_CATEGORIES:
             payroll_interest += amount
         else:
             raise FinanceDataNotReady("daily_closing_expense_category")

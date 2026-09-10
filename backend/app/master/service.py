@@ -528,6 +528,9 @@ def _sales_fold_note(end_code: str, reason: str) -> str:
     말 = {
         "SL2_NO_CANDIDATE": "판매가 후보를 내지 못해 접혔다",
         "SL3_ALL_REJECTED": "후보가 전부 탈락해 접혔다",
+        # ★ **탈락이라고 쓰지 않는다.** 후보는 살아 있고 판정만 안 끝났다 —
+        #   여기서 "탈락" 이라고 적으면 종료 코드를 나눈 뜻이 문장에서 사라진다.
+        "SL6_VALIDATION_UNRESOLVED": "후보는 있으나 검증이 끝나지 않아 접혔다",
         "SL4_NOT_STARTED": "시작하지 못했다",
         "SL5_BUDGET_EXHAUSTED": "호출 예산이 다해 판단이 끝나지 않았다",
     }.get(end_code)

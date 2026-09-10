@@ -379,6 +379,20 @@ def test_sales_explanations_do_not_borrow_purchase_wording():
         _assert_user_facing(text, f"SALES/{status}")
 
 
+def test_sales_pass_does_not_read_as_a_final_sale_approval():
+    """재무가 답한 것은 **재무상 걸리는 것이 없다** 까지다.
+
+    ★ 판매 확정은 사람이 고르고 최종 재검증을 통과해야 난다 — 재무 판정 하나로
+      열리지 않는다. 문장이 "그대로 진행하실 수 있습니다" 라고 말하면 기계 계약보다
+      넓게 말하는 것이고, 읽는 사람은 이미 확정된 것으로 읽는다.
+    """
+    text = messages.explanation_for("SALES_VALIDATION", "ok")
+
+    assert "진행하실 수 있습니다" not in text
+    assert "재무" in text
+    _assert_user_facing(text, "SALES_ACCEPT")
+
+
 def test_sales_and_purchase_do_not_share_a_sentence():
     """같은 문장을 두 업무가 나눠 쓰면 한쪽을 고칠 때 다른 쪽이 조용히 따라 바뀐다."""
     for status in ("ok", "conditional", "reject"):
