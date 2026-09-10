@@ -133,7 +133,11 @@ def build(as_of: date, state: str) -> FinanceTab:
                 else f"남은 매입대금은 {_won(payables.outstanding_amount_krw)}입니다."
             ),
         ),
-        closings=None if selected is None or not dash.recent_closings else _closings_table(dash.recent_closings),
+        closings=(
+            None
+            if selected is None or not dash.recent_closings
+            else _closings_table(dash.recent_closings)
+        ),
         source=Source(
             filled=True,
             owner="재무",
@@ -176,7 +180,9 @@ def dashboard_cash(n: int, at: int) -> Chart:
     )
 
 
-def _select_state(dash: FinanceDashboardResponse, state: str) -> tuple[str, FinanceStateView | None]:
+def _select_state(
+    dash: FinanceDashboardResponse, state: str
+) -> tuple[str, FinanceStateView | None]:
     selected = _state_by_mode(dash, _STATE_TO_MODE[state])
     if selected is not None:
         return state, selected
@@ -212,7 +218,10 @@ def _state_by_mode(
 
 def _state_explain(state: FinanceStateView | None) -> str:
     if state is None:
-        return "이 날짜에는 아직 재무 기록이 없습니다. 재무 데이터가 저장된 이후 날짜를 선택해 주세요."
+        return (
+            "이 날짜에는 아직 재무 기록이 없습니다."
+            " 재무 데이터가 저장된 이후 날짜를 선택해 주세요."
+        )
     return _buffer_summary(state.operating_cash_buffer_krw)
 
 
