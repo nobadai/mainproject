@@ -131,6 +131,34 @@ class _Procure:
         return _Out(status="RAN")
 
 
+@dataclass
+class _SalesOut:
+    """`SalesRunResponse` 의 최소 모양. 🔴 **`end_code` 만 본다** — 판매 어휘 그대로다."""
+
+    end_code: str
+
+
+class _Sales:
+    """`run_sales` 대역. **`request_id` 로 행을 센다** — 매입 대역과 같은 모양이다.
+
+    ⚠️ **대역을 안 주면 진짜 `run_sales` 가 DB 와 부서 어댑터를 찾으러 간다.**
+      `_Procure` 와 같은 이유로 여기 둔다.
+    """
+
+    def __init__(self, boom_on: str | None = None, end_code: str = "SL1_PRESENTED") -> None:
+        self.rows: dict[str, int] = {}
+        self.requests: list[object] = []
+        self.boom_on = boom_on
+        self.end_code = end_code
+
+    def __call__(self, request, verifier=None):
+        self.requests.append(request)
+        if self.boom_on is not None and request.item == self.boom_on:
+            raise RuntimeError(f"{request.item} 판매 판단이 터졌다")
+        self.rows[request.request_id] = self.rows.get(request.request_id, 0) + 1
+        return _SalesOut(end_code=self.end_code)
+
+
 def _procure_response(end_code: str = "E1_APPROVED"):
     class _R:
         pass
@@ -151,6 +179,8 @@ def _run(
         "issue_fn": _Spy(_Out("ISSUED")),
         "collect_fn": _Spy(_Out("COLLECTED")),
         "procure_fn": procure_fn,
+        # ⚠️ **대역을 안 주면 진짜 `run_sales` 가 DB 와 부서 어댑터를 찾으러 간다.**
+        "sales_fn": _Sales(),
         # ⚠️ **대역을 안 주면 진짜 `ship_due_sales` 가 DB 를 찾으러 간다.**
         "outbound_fn": _Spy(_Out("NOTHING_DUE")),
         "items": ITEMS,
@@ -292,6 +322,7 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
     received = _Spy(_Out("RECEIVED"))
     collected = _Spy(_Out("COLLECTED"))
     procure = _Procure()
+    sales = _Sales()
     shipped = _Spy(_Out("NOTHING_DUE"))
 
     out = run_scheduled_day(
@@ -300,37 +331,52 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
         receive_fn=received,
         collect_fn=collected,
         procure_fn=procure,
+        sales_fn=sales,
         outbound_fn=shipped,
         items=ITEMS,
     )
 
     assert out.action == action_name
     assert procure.requests == [], "판단을 돌렸다 — E4 가 쌓인다"
+    # 🔴 **판매도 게이트 안이다.** `WAIT` 중에 부르면 매입이 피한 문제를 판매가
+    #    그대로 다시 짓는다 — 열두 번 깨어나며 미완 실행이 열두 건 쌓인다.
+    assert sales.requests == [], "판매 판단을 돌렸다 — 미완 실행이 쌓인다"
     assert opened.calls == [] and received.calls == [] and collected.calls == []
     assert shipped.calls == [], "안 도는 날에 물건이 나갔다"
     assert out.day_open_status == "NOT_ATTEMPTED"
+    assert out.sales_status == "NOT_ATTEMPTED"
     assert out.outbound_status == "NOT_ATTEMPTED"
 
 
 def test_열두_번_WAIT_해도_판단은_0회다():
-    """★ 09:30 부터 5분 간격으로 마감 직전까지 — 실제로 깨어나는 만큼 돌려 본다."""
+    """★ 09:30 부터 5분 간격으로 마감 직전까지 — 실제로 깨어나는 만큼 돌려 본다.
+
+    🔴 **매입과 판매를 같이 센다.** 게이트가 둘을 한 줄로 막는지가 여기서 갈린다.
+    """
     procure = _Procure()
+    sales = _Sales()
     moment = _at(9, 30)
     waits = 0
     while moment < scheduler.deadline_at(AS_OF):
         action = _plan(now=moment, gate=NONE_READY)
-        run_scheduled_day(action, procure_fn=procure, items=ITEMS)
+        run_scheduled_day(action, procure_fn=procure, sales_fn=sales, items=ITEMS)
         waits += action.action == "WAIT"
         moment += scheduler.SCHEDULE_INTERVAL
 
     assert waits == 12
     assert procure.requests == []
+    assert sales.requests == [], "WAIT 열두 번에 판매 판단이 돌았다"
 
 
 # ── 실행 순서와 실패 규율 ───────────────────────────────────────────────
 
 
-def test_순서는_개장_입고_수금_판단_출고다():
+def _order_of_a_day(**kwargs) -> list[str]:
+    """하루가 실제로 부른 순서. **부른 자리마다 이름을 적는다.**
+
+    ★ 순서를 재는 검사가 여럿이라 대역 조립을 여기 한 번만 둔다 — 두 벌이 되면
+      한쪽만 고치는 날 두 검사가 다른 순서를 본다.
+    """
     order: list[str] = []
 
     def note(name, out):
@@ -341,24 +387,74 @@ def test_순서는_개장_입고_수금_판단_출고다():
         return _call
 
     procure = _Procure()
+    sales = _Sales()
 
     def procure_noted(request, verifier=None):
-        order.append(f"판단:{request.item}")
+        order.append(f"매입:{request.item}")
         return procure(request)
 
-    run_scheduled_day(
-        _plan(now=_at(9, 30), gate=ALL_READY),
-        open_day_fn=note("개장", _Out("OPENED")),
-        receive_fn=note("입고", _Out("RECEIVED")),
-        issue_fn=note("채권", _Out("ISSUED")),
-        collect_fn=note("수금", _Out("COLLECTED")),
-        procure_fn=procure_noted,
-        outbound_fn=note("출고", _Out("NOTHING_DUE")),
-        items=ITEMS,
-    )
+    def sales_noted(request, verifier=None):
+        order.append(f"판매:{request.item}")
+        return sales(request)
 
-    # 🔴 **출고가 맨 뒤다.** 오늘 산 것은 오늘 안 나간다 — 도착이 며칠 뒤다.
-    assert order == ["개장", "입고", "채권", "수금", "판단:무", "판단:배추", "판단:양파", "출고"]
+    defaults = {
+        "open_day_fn": note("개장", _Out("OPENED")),
+        "receive_fn": note("입고", _Out("RECEIVED")),
+        "issue_fn": note("채권", _Out("ISSUED")),
+        "collect_fn": note("수금", _Out("COLLECTED")),
+        "procure_fn": procure_noted,
+        "sales_fn": sales_noted,
+        "outbound_fn": note("출고", _Out("NOTHING_DUE")),
+        "close_fn": note("마감", _Out("CLOSED")),
+        "items": ITEMS,
+    }
+    defaults.update(kwargs)
+    run_scheduled_day(_plan(now=_at(9, 30), gate=ALL_READY), **defaults)  # type: ignore[arg-type]
+    return order
+
+
+def test_순서는_개장_입고_채권_수금_매입_판매_출고_마감이다():
+    """🔴 **판매가 매입 뒤 · 출고 앞이다** (2026-09-10).
+
+    ★★ 판매를 출고 뒤로 옮기면 그날 확정된 안이 **다음 날에야** 나갈 자리가 생긴다.
+      `ship_due_sales` 는 이미 확정된 판매를 내보내는 단계지 판매 안을 내는 자리가
+      아니다 — 이름 때문에 판매가 서 있는 것처럼 보였고, 그래서 걷기 179일에 판매
+      판단이 0건이었다.
+    """
+    order = _order_of_a_day()
+
+    # 🔴 **출고가 판단 둘 뒤다.** 오늘 산 것은 오늘 안 나간다 — 도착이 며칠 뒤다.
+    assert order == [
+        "개장",
+        "입고",
+        "채권",
+        "수금",
+        "매입:무",
+        "매입:배추",
+        "매입:양파",
+        "판매:무",
+        "판매:배추",
+        "판매:양파",
+        "출고",
+        "마감",
+    ]
+
+
+def test_판매는_매입_뒤이고_출고_앞이다():
+    """★ 위 검사의 전체 순서에서 **세 자리의 관계만** 떼어 다시 잰다.
+
+    ⚠️ 전체 비교 하나만 두면 어느 항목이 왜 거기 있는지가 안 남는다.
+    """
+    order = _order_of_a_day()
+
+    마지막매입 = max(i for i, name in enumerate(order) if name.startswith("매입:"))
+    첫판매 = min(i for i, name in enumerate(order) if name.startswith("판매:"))
+    마지막판매 = max(i for i, name in enumerate(order) if name.startswith("판매:"))
+
+    assert 마지막매입 < 첫판매, "판매가 매입보다 앞에 섰다"
+    assert 마지막판매 < order.index("출고"), (
+        "판매 판단이 출고 뒤에 섰다 — 그날 확정된 안이 다음 날에야 나갈 자리가 생긴다"
+    )
 
 
 def test_개장이_실패하면_그_뒤를_안_한다():
@@ -613,6 +709,7 @@ def test_wake_up_은_시계를_한_번만_읽는다():
         issue_fn=_Spy(_Out("ISSUED")),
         collect_fn=_Spy(_Out("COLLECTED")),
         procure_fn=procure,
+        sales_fn=_Sales(),
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
     )
 
@@ -629,6 +726,7 @@ def test_wake_up_은_안_잔다():
         calendar=lambda: _Calendar(True),
         readiness=lambda as_of: NONE_READY,
         procure_fn=_Procure(),
+        sales_fn=_Sales(),
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
     )
 
@@ -707,3 +805,284 @@ def test_출고가_터져도_판단_결과를_안_지운다():
     assert len(procure.requests) == len(ITEMS)
     assert out.outbound_status == "FAILED"
     assert any("출고" in note for note in out.notes)
+
+
+# ── 🔴 판매 판단 — 매입 뒤 · 출고 앞 (2026-09-10) ──────────────────────
+#
+# ★★ **없던 것은 로직이 아니라 부르는 자리 하나였다.** `service.run_sales` 는
+#    이미 있었고 부르면 돌았다. 하루 순서에 그 자리가 없어서 걷기 179일에
+#    판매 판단이 **0건**이었다.
+
+
+def test_판매를_품목마다_한_번씩_부른다():
+    """🔴 **매입과 같은 품목 축이다.** 판매만 하루 한 번으로 두면 두 축이 갈린다."""
+    sales = _Sales()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+
+    assert [r.item for r in sales.requests] == list(ITEMS)
+
+
+def test_판매_request_id_가_매입_것과_다르다():
+    """🔴 같으면 `master_agent_runs_run_request_unique` 가 두 번째 사이클을 막는다.
+
+    ★ 막지 않더라도 `get_run_by_request_id` 가 어느 사이클의 실행인지 못 가른다.
+    """
+    procure, sales = _Procure(), _Sales()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), procure=procure, sales_fn=sales)
+
+    매입키 = {r.request_id for r in procure.requests}
+    판매키 = {r.request_id for r in sales.requests}
+
+    assert 매입키 & 판매키 == set(), "매입과 판매가 같은 키를 썼다 — 유일 인덱스가 막는다"
+    assert 판매키 == {
+        "REQ-DAILY-SALES-20260908-무",
+        "REQ-DAILY-SALES-20260908-배추",
+        "REQ-DAILY-SALES-20260908-양파",
+    }
+
+
+def test_판매_request_id_에_시각이_안_들어간다():
+    """★ 시각이 들어가면 같은 날 두 번째 깨어남이 새 행이 된다 — 매입과 같은 이유다."""
+    첫번째 = scheduler.daily_sales_request_id(AS_OF, "배추")
+    두번째 = scheduler.daily_sales_request_id(AS_OF, "배추")
+
+    assert 첫번째 == 두번째 == "REQ-DAILY-SALES-20260908-배추"
+
+
+def test_같은_날_두_번_돌아도_판매_행이_안_는다():
+    """🔴 날짜와 품목만으로 정해져서 유일 인덱스가 두 번째를 잡는다."""
+    sales = _Sales()
+
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+    _run(_plan(now=_at(9, 35), gate=ALL_READY), sales_fn=sales)
+
+    assert len(sales.requests) == 6, "두 번 부르긴 했다"
+    assert len(sales.rows) == 3, "행이 늘었다 — request_id 가 실행마다 갈렸다"
+
+
+def test_판매_요청이_SPOT_SALES_를_싣는다():
+    """🔴 나머지 셋은 **거래처가 있어야** 성립한다.
+
+    ★★ 하루 순서가 거래처를 고르면 **그것이 곧 영업 정책**이 되고, 정책의 주인이
+      판매에서 스케줄러로 조용히 옮겨 온다.
+    """
+    sales = _Sales()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+
+    assert {r.business_mode for r in sales.requests} == {"SPOT_SALES"}
+    assert scheduler.WALK_BUSINESS_MODE == "SPOT_SALES"
+
+
+def test_한_곳에서_영업_모드를_바꾼다(monkeypatch):
+    """★ **판매가 어휘를 정하면 여기 한 줄만 바꾼다.** 값이 두 벌이면 한쪽만 고쳐진다."""
+    monkeypatch.setattr(scheduler, "WALK_BUSINESS_MODE", "CONTRACT_PROPOSAL_NEW")
+    sales = _Sales()
+
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+
+    assert {r.business_mode for r in sales.requests} == {"CONTRACT_PROPOSAL_NEW"}
+
+
+def test_마스터가_거래처를_안_고른다():
+    """⚠️ `partner_id` 도 `user_request` 도 안 싣는다 — 무엇이 필요한지는 판매가 정한다."""
+    sales = _Sales()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+
+    assert [r.partner_id for r in sales.requests] == [None] * len(ITEMS)
+    assert [r.user_request for r in sales.requests] == [None] * len(ITEMS)
+
+
+def test_판매_예산을_매입_값으로_안_덮는다():
+    """🔴 매입 12 를 복사하면 요청이 골격의 `SALES_BUDGET` 을 이긴다 (스키마 §3)."""
+    sales = _Sales()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales)
+
+    assert {r.budget for r in sales.requests} == {25}
+
+
+def test_판매_요청이_그날_정책_판을_싣는다():
+    """★ 매입에 넘기는 그 값이다 — 같은 하루가 두 정책 판으로 갈리면 안 된다."""
+    procure, sales = _Procure(), _Sales()
+    _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        procure=procure,
+        sales_fn=sales,
+        policy_version="v9-검사",
+    )
+
+    assert {r.policy_version for r in sales.requests} == {"v9-검사"}
+    assert {r.policy_version for r in procure.requests} == {"v9-검사"}
+
+
+def test_판매_검증자를_안_준다():
+    """★ 안 주면 기본 검증 Tool 이 붙는다 — 매입과 같은 규율이다 (`run_sales` docstring)."""
+    받은것: list[object] = []
+
+    def sales_fn(request, verifier=None):
+        받은것.append(verifier)
+        return _SalesOut(end_code="SL1_PRESENTED")
+
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=sales_fn)
+
+    assert 받은것 == [None] * len(ITEMS), "검증자를 지정해서 넘겼다 — 기본 Tool 이 안 붙는다"
+
+
+def test_판매_종료코드를_접지_않고_그대로_싣는다():
+    """🔴 `SL1_PRESENTED` 를 *"돌았다"* 로 묶으면 후보가 나온 날을 나중에 못 센다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=_Sales(end_code="SL1_PRESENTED"))
+
+    assert out.sales_status == "RAN"
+    assert [one.end_code for one in out.sales_items] == ["SL1_PRESENTED"] * len(ITEMS)
+
+
+def test_판매_결과를_매입_결과와_한_칸에_안_담는다():
+    """🔴 섞으면 `failed_items` 가 어느 사이클이 터졌는지를 못 말한다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=_Sales(boom_on="배추"))
+
+    assert out.failed_items == (), "판매가 터진 것이 매입 칸에 들어갔다"
+    assert out.failed_sales_items == ("배추",)
+    assert len(out.items) == len(ITEMS)
+    assert len(out.sales_items) == len(ITEMS)
+
+
+def test_판매_한_품목이_터져도_나머지_품목이_돈다():
+    """★ 매입 루프와 같은 모양이다 — 배추가 터졌다고 무와 양파를 안 돌면 하루가 빈다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=_Sales(boom_on="배추"))
+
+    assert sorted(one.item for one in out.sales_items if one.status == "RAN") == ["무", "양파"]
+    터진것 = next(one for one in out.sales_items if one.item == "배추")
+    assert 터진것.status == "FAILED"
+    assert 터진것.end_code is None, "못 돈 실행에 종료 코드를 지어내면 안 된다"
+
+
+def test_판매가_터져도_출고와_마감이_계속_돈다():
+    """🔴 **판매 예외를 밖으로 내면 하루의 뒤가 통째로 안 돈다.**"""
+    shipped = _Spy(_Out("RAN"))
+    closed = _Spy(_Out("CLOSED"))
+
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        sales_fn=_Sales(boom_on="배추"),
+        outbound_fn=shipped,
+        close_fn=closed,
+    )
+
+    assert len(shipped.calls) == 1, "판매가 터져서 출고가 안 돌았다"
+    assert len(closed.calls) == 1, "판매가 터져서 마감이 안 돌았다"
+    assert out.outbound_status == "RAN"
+    assert out.closing_status == "CLOSED"
+    assert out.procurement_status == "RAN", "판매 실패가 매입 결과를 덮었다"
+    assert len(procure.requests) == len(ITEMS)
+
+
+def test_판매가_전부_터진_날은_FAILED_다():
+    """★ *"해 보고 터졌다"* 다 — 한 품목만 터진 날(`RAN`)과 가른다."""
+
+    class _전부터짐:
+        def __call__(self, request, verifier=None):
+            raise RuntimeError("판매가 통째로 터졌다")
+
+    shipped = _Spy(_Out("NOTHING_DUE"))
+    터진날, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY), sales_fn=_전부터짐(), outbound_fn=shipped
+    )
+
+    assert 터진날.sales_status == "FAILED"
+    assert len(shipped.calls) == 1, "판매가 다 터져서 출고가 안 돌았다"
+
+
+def test_한_품목만_터진_날은_RAN_이다():
+    """🔴 `FAILED` 는 *"돈 품목이 하나도 없다"* 다. 하나라도 돌면 `RAN` 이다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), sales_fn=_Sales(boom_on="배추"))
+
+    assert out.sales_status == "RAN"
+
+
+def test_품목이_없으면_판매는_NOT_ATTEMPTED_다():
+    """⚠️ 빈 목록을 `RAN` 으로 접으면 *"품목이 없었다"* 와 *"셋 다 돌았다"* 가 같아진다."""
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), items=())
+
+    assert out.sales_status == "NOT_ATTEMPTED"
+    assert out.sales_items == ()
+
+
+@pytest.mark.parametrize("막힌상태", ["BLOCKED", "FAILED"])
+def test_장부가_안_서면_판매도_안_돌린다(막힌상태):
+    """🔴 매입을 막는 이유가 그대로 판매를 막는 이유다 — 재고가 실제보다 적게 보인다."""
+    sales = _Sales()
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        receive_fn=_Spy(_Out(막힌상태)),
+        sales_fn=sales,
+    )
+
+    assert procure.requests == []
+    assert sales.requests == [], "장부가 안 섰는데 판매 판단이 돌았다"
+    assert out.sales_status == "NOT_ATTEMPTED"
+
+
+def test_개장이_실패하면_판매도_안_돌린다():
+    sales = _Sales()
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        open_day_fn=_Spy(_Out("NOT_OPENED")),
+        sales_fn=sales,
+    )
+
+    assert sales.requests == []
+    assert out.sales_status == "NOT_ATTEMPTED"
+
+
+def test_판매_판단이_승인을_안_한다():
+    """🔴 **이 판은 안이 나오게 하는 것까지다.** 자동 승인은 별도 판이다.
+
+    ★ **AST 로 잰다.** 대역으로는 *"이번엔 안 불렀다"* 까지만 재고, 나중에 누가
+      승인 한 줄을 다른 가지에 끼워 넣으면 그 대역이 그대로 통과한다.
+    """
+    import ast
+    import inspect
+
+    부른이름 = {
+        node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for node in ast.walk(ast.parse(inspect.getsource(scheduler)))
+        if isinstance(node, ast.Call)
+    }
+
+    assert "record_decision" not in 부른이름, "하루 순서가 판매 후보를 자동 승인한다"
+    assert "approve" not in 부른이름
+
+
+def test_wake_up_이_판매를_흘려_준다():
+    """★ 기본값이 실제 `run_sales` 자체다 — `None` 을 안 받는다 (`clock.py` 와 같은 규율)."""
+    import inspect
+
+    from app.master.service import run_sales
+
+    assert inspect.signature(wake_up).parameters["sales_fn"].default is run_sales
+
+    sales = _Sales()
+    out = wake_up(
+        now=lambda: _at(9, 30),
+        calendar=lambda: _Calendar(True),
+        readiness=lambda as_of: ALL_READY,
+        open_day_fn=_Spy(_Out("OPENED")),
+        receive_fn=_Spy(_Out("RECEIVED")),
+        issue_fn=_Spy(_Out("ISSUED")),
+        collect_fn=_Spy(_Out("COLLECTED")),
+        procure_fn=_Procure(),
+        sales_fn=sales,
+        outbound_fn=_Spy(_Out("NOTHING_DUE")),
+        close_fn=_Spy(_Out("CLOSED")),
+    )
+
+    assert len(sales.requests) == len(scheduler.scheduled_items())
+    assert out.sales_status == "RAN"
+
+
+def test_run_scheduled_day_기본값이_run_sales_자체다():
+    """🔴 기본값이 대역이면 운영이 조용히 아무것도 안 부른다."""
+    import inspect
+
+    from app.master.service import run_sales
+
+    assert inspect.signature(run_scheduled_day).parameters["sales_fn"].default is run_sales
