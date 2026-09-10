@@ -95,6 +95,14 @@ class _FinanceState:
         🔴 **누적 대출 실행액이 아니라 잔액을 뺀다.** 누적 실행액을 빼면 원금을 갚아도
           그만큼이 영원히 빠진 채로 남아, 상환할수록 이 값이 낮아진다. 갚은 돈은 이미
           `current_cash_krw` 에서 나갔으므로 두 번 빼는 것이 된다.
+
+        ★ **음수는 자료 미준비가 아니라 사실이다.** 남은 원금이 보유 현금보다 크면
+          이 값은 음수이고, 그것은 *"대출을 빼고 보면 이만큼 모자란다"* 는 재무
+          사실이다. 막으면 **가장 위험한 날의 마감이 통째로 사라진다** — 위험을
+          기록하지 않는 것과 위험이 없는 것은 다르다.
+
+          ⚠️ 여기서 *"현금은 0 이상"* 정책을 새로 만들지 않는다. 원장 값 자체의
+            음수 방어는 `_daily_closing_amount` 가 이미 따로 들고 있다.
         """
         return self.current_cash_krw - self.current_debt_krw
 
@@ -184,12 +192,6 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
     if receivables_balance != state.receivables_krw:
         raise FinanceDataNotReady("receivables_balance_mismatch")
 
-    cash_without_debt = state.cash_without_debt_krw
-    if cash_without_debt < _ZERO:
-        # 남은 원금이 보유 현금보다 크다. 재무 숫자 계약상 음수 잔액은 쓰지 않는다 —
-        # 새 허용 정책을 만들지 않고 막는다.
-        raise FinanceDataNotReady("daily_closing_cash_without_debt")
-
     inventory = load_inventory_snapshot_as_of(conn, sim_run_id=sim_run_id, as_of=as_of)
     purchase_cash_out = _purchase_cash_out(conn, sim_run_id=sim_run_id, as_of=as_of)
     logistics_cash_out, payroll_interest_cash_out = _expense_cash_out(
@@ -203,7 +205,7 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
         sales_recognized_krw=_sales_recognized(conn, sim_run_id=sim_run_id, as_of=as_of),
         collection_cash_in_krw=collection_cash_in,
         # 대출 제외 곡선 — 실행축 현금에서 **남은 원금**을 뺀 값.
-        base_cash_balance_krw=cash_without_debt,
+        base_cash_balance_krw=state.cash_without_debt_krw,
         # 당일 **신규 차입 flow**. stock(잔액)이 아니다.
         loan_execution_krw=_loan_execution(state, prior),
         # 대출 포함 곡선 — 실행축 현금 그대로.

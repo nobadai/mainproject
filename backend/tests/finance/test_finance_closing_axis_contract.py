@@ -494,18 +494,59 @@ def test_two_states_on_the_execution_axis_are_ambiguous():
     assert raised.value.key == "finance_state_ambiguous"
 
 
-def test_debt_larger_than_cash_blocks_instead_of_writing_a_negative_curve():
-    """★ 새 음수 허용 정책을 만들지 않는다 — 기존 규율대로 막는다."""
+def test_debt_larger_than_cash_is_a_fact_not_a_blocked_close():
+    """🔴 **음수 대출제외 현금은 자료 미준비가 아니다.**
+
+    남은 원금이 보유 현금보다 크면 대출 제외 곡선은 음수다 — *"대출을 빼고 보면
+    이만큼 모자란다"* 는 재무 사실이다. 막으면 **가장 위험한 날의 마감이 통째로
+    사라진다**: 위험을 기록하지 않는 것과 위험이 없는 것은 다르다.
+
+    ★ 여기서 *"현금은 0 이상"* 정책을 새로 만들지 않는다.
+    """
     conn = _Conn(
-        [_state(AS_OF, LOAN_MODE, cash=Decimal(1_000), debt=Decimal(3_000))],
+        [_state(AS_OF, LOAN_MODE, cash=Decimal(10_000), debt=Decimal(12_000))],
+        issued_receivables=Decimal(700),
+    )
+
+    result = closing.FinanceDayClosing().close(conn, as_of=AS_OF, sim_run_id=SIM_RUN_ID)
+
+    assert result.status == "CLOSED"
+    row = _row(conn)
+    assert row["loan_cash_balance_krw"] == Decimal(10_000)
+    assert row["base_cash_balance_krw"] == Decimal(-2_000)
+
+
+def test_negative_debt_free_cash_does_not_raise_not_ready():
+    """제거된 가드가 되살아나면 여기서 걸린다."""
+    conn = _Conn(
+        [_state(AS_OF, LOAN_MODE, cash=Decimal(10_000), debt=Decimal(12_000))],
+        issued_receivables=Decimal(700),
+    )
+
+    try:
+        closing.FinanceDayClosing().close(conn, as_of=AS_OF, sim_run_id=SIM_RUN_ID)
+    except FinanceDataNotReady as exc:  # pragma: no cover - 회귀 시에만 도달한다
+        raise AssertionError(f"음수 대출제외 현금이 막혔다: {exc.key}") from exc
+
+    assert _row(conn)["base_cash_balance_krw"] < Decimal(0)
+
+
+def test_a_negative_ledger_amount_still_blocks_on_the_existing_guard():
+    """★ 원장 값 자체의 음수 방어는 **따로 있고, 이번 작업에서 손대지 않았다.**
+
+    `current_cash_krw` 가 음수인 상태는 `_daily_closing_amount` 가 `daily_closing_ledger`
+    로 막는다 — 이 계약은 이번 브랜치 이전부터 있었고(현재 `dev` 에도 있다) 여기서
+    풀지 않는다. 대출제외 현금의 음수와는 **다른 칸의 이야기**다.
+    """
+    conn = _Conn(
+        [_state(AS_OF, LOAN_MODE, cash=Decimal(-1_000), debt=Decimal(0))],
         issued_receivables=Decimal(700),
     )
 
     with pytest.raises(FinanceDataNotReady) as raised:
         closing.FinanceDayClosing().close(conn, as_of=AS_OF, sim_run_id=SIM_RUN_ID)
 
-    assert raised.value.key == "daily_closing_cash_without_debt"
-    assert not conn.closings
+    assert raised.value.key == "daily_closing_ledger"
 
 
 def test_a_run_without_a_financing_mode_blocks():
