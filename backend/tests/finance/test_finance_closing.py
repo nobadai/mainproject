@@ -338,7 +338,10 @@ def test_base_and_loan_axes_do_not_bleed_into_each_other():
 def test_missing_base_state_blocks_the_close():
     """BASE 축이 없으면 **닫지 않는다** — 대출 잔액을 무차입 칸에 넣지 않는다."""
     conn = _Connection(
-        payables=[], states=[row for row in _default_states() if row["financing_mode"] != "BASE_NO_LOAN"]
+        payables=[],
+        states=[
+            row for row in _default_states() if row["financing_mode"] != "BASE_NO_LOAN"
+        ],
     )
 
     with pytest.raises(FinanceDataNotReady):

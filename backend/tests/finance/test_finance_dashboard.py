@@ -2,12 +2,6 @@ from datetime import date
 from decimal import Decimal
 
 from app.finance import dashboard
-from app.finance.schemas import (
-    FinanceCashflowSummary,
-    FinanceDashboardMeta,
-    FinancePayableSummary,
-    FinanceReceivableSummary,
-)
 
 AS_OF = date(2025, 12, 31)
 

@@ -68,8 +68,8 @@ from app.finance.llm.planner import (
     ToolAction,
     _configured_finance_llms,
 )
-from app.finance.user_messages import explanation_for
 from app.finance.state import FinanceAgentState
+from app.finance.user_messages import explanation_for
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 
 # ---------------------------------------------------------------------------

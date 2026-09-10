@@ -104,7 +104,6 @@ def test_payable_cancellation_migration_does_not_rewrite_existing_rows():
 """
 
 import pathlib
-import re
 
 DATABASE = pathlib.Path(__file__).resolve().parents[3] / "database"
 FRESH_DDL = DATABASE / "finance_agent_runs_v22.sql"

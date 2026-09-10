@@ -46,11 +46,11 @@ def _snapshot(rows):
 
 def test_t0_replay_uses_ledger_quantity_and_immutable_lot_cost():
     rows = [
-        ("LOT-KIMCHI-015-BAECHU", Decimal("1060"), "IN", Decimal("286.92")),
-        ("LOT-KIMCHI-015-MU", Decimal("880"), "IN", Decimal("61.76")),
+        ("LOT-KIMCHI-015-BAECHU", Decimal(1060), "IN", Decimal("286.92")),
+        ("LOT-KIMCHI-015-MU", Decimal(880), "IN", Decimal("61.76")),
         ("LOT-KIMCHI-015-YANGPA", Decimal("1166.666667"), "IN", Decimal("5.72")),
-        ("PUR-SAFETY-001-A", Decimal("1000"), "IN", Decimal("100")),
-        ("PUR-SAFETY-001-A", Decimal("1000"), "OUT", Decimal("100")),
+        ("PUR-SAFETY-001-A", Decimal(1000), "IN", Decimal(100)),
+        ("PUR-SAFETY-001-A", Decimal(1000), "OUT", Decimal(100)),
     ]
 
     snapshot, (query, params) = _snapshot(rows)
@@ -64,29 +64,29 @@ def test_t0_replay_uses_ledger_quantity_and_immutable_lot_cost():
 
 
 def test_in_out_and_dispose_change_snapshot_and_no_move_is_stable():
-    d0, _ = _snapshot([("LOT-A", Decimal("10"), "IN", Decimal("20"))])
+    d0, _ = _snapshot([("LOT-A", Decimal(10), "IN", Decimal(20))])
     d1, _ = _snapshot(
         [
-            ("LOT-A", Decimal("10"), "IN", Decimal("20")),
-            ("LOT-A", Decimal("10"), "OUT", Decimal("3")),
-            ("LOT-A", Decimal("10"), "DISPOSE", Decimal("2")),
+            ("LOT-A", Decimal(10), "IN", Decimal(20)),
+            ("LOT-A", Decimal(10), "OUT", Decimal(3)),
+            ("LOT-A", Decimal(10), "DISPOSE", Decimal(2)),
         ]
     )
-    unchanged, _ = _snapshot([("LOT-A", Decimal("10"), "IN", Decimal("20"))])
+    unchanged, _ = _snapshot([("LOT-A", Decimal(10), "IN", Decimal(20))])
 
-    assert d0.inventory_book_value_krw == Decimal("200")
-    assert d1.inventory_book_value_krw == Decimal("150")
+    assert d0.inventory_book_value_krw == Decimal(200)
+    assert d1.inventory_book_value_krw == Decimal(150)
     assert unchanged == d0
 
 
 @pytest.mark.parametrize(
     ("rows", "key"),
     [
-        ([("LOT-A", Decimal("10"), "ADJUST", Decimal("1"))], "unsupported_inventory_move_type:ADJUST"),
+        ([("LOT-A", Decimal(10), "ADJUST", Decimal(1))], "unsupported_inventory_move_type:ADJUST"),
         (
             [
-                ("LOT-A", Decimal("10"), "IN", Decimal("1")),
-                ("LOT-A", Decimal("10"), "OUT", Decimal("2")),
+                ("LOT-A", Decimal(10), "IN", Decimal(1)),
+                ("LOT-A", Decimal(10), "OUT", Decimal(2)),
             ],
             "negative_inventory_lot_balance:LOT-A",
         ),

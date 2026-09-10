@@ -23,7 +23,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 # ---------------------------------------------------------------------------
 # 공통 닫힌 어휘
 # ---------------------------------------------------------------------------
