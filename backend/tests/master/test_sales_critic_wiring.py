@@ -102,21 +102,36 @@ def _port(payload: dict[str, Any]):
     return port
 
 
-#: 물류 sellable 컨텍스트 payload — 이름은 물류 것이다 (`app/logistics/adapter.py`).
+#: 물류 `PRE_SALES` 정본 payload — 주소도 이름도 물류 것이다
+#: (`app/logistics/adapter.py` · PR #484).
+#:
+#: 🔴 **최상위 `inventory_by_item` · `lots` 가 없다.** 정본이 그렇다 —
+#:   `sellable_supply` 한 겹 안이고 로트 칸 이름은 `lot_constraints` 다.
 _공급 = {
-    "warehouse_free_kg": 5000.0,
-    "inventory_by_item": [{"item": 품목, "available_qty_kg": 3000.0}],
-    "lots": [
-        {
-            "lot_id": "LOT-1",
-            "item": 품목,
-            "available_qty_kg": 3000.0,
-            "remaining_freshness_days": 9,
-            "grade": None,
-            "status": "AVAILABLE",
-        }
-    ],
+    "sellable_supply": {
+        "status": "READY",
+        "inventory_by_item": [{"item": 품목, "available_qty_kg": 3000.0}],
+        "lot_constraints": [
+            {
+                "lot_id": "LOT-1",
+                "item": 품목,
+                "available_qty_kg": 3000.0,
+                "remaining_freshness_days": 9,
+                "grade": None,
+                "status": "AVAILABLE",
+            }
+        ],
+    },
+    "delivery_feasibility": {"daily_outbound_capacity_kg": 7636.72},
 }
+
+
+def _로트없는_공급() -> dict:
+    """로트만 빈 정본. 🔴 **`sellable_supply` 를 통째로 지우지 않는다** — 그러면
+    재고 축까지 같이 사라져 다른 이유로 서게 되고 검사가 무엇을 재는지 흐려진다."""
+    supply = {**_공급["sellable_supply"], "lot_constraints": []}
+    return {**_공급, "sellable_supply": supply}
+
 
 #: 판매 후보 — 채널 배분이 실린 모양 (`app/sales/schemas.py` `SalesCandidate.allocation`).
 _배분_있는_후보 = {
@@ -236,10 +251,76 @@ def test_로트가_없으면_빈_목록으로_넘기지_않는다() -> None:
             as_of=평일,
             item=품목,
             candidates=[_배분_있는_후보],
-            supply_context={"payload": {**_공급, "lots": []}},
+            supply_context={"payload": _로트없는_공급()},
         )
 
     assert "로트 제약을 Critic 입력으로 옮기지 못했다" in str(caught.value)
+
+
+def test_정본_중첩_경로에서_재고와_로트를_읽는다() -> None:
+    """🔴 **`payload.sellable_supply.*` 를 읽는다** (물류 PR #484 수신요청 §4).
+
+    ```text
+    inventory_by_item   → payload.sellable_supply.inventory_by_item   모양 같음
+    lots                → payload.sellable_supply.lot_constraints     **이름도 다르다**
+    ```
+
+    전에는 payload **최상위**에서 저 둘을 읽었는데 정본에는 최상위에 그 둘이 없다 —
+    그래서 판매 Critic 이 **조용히 빈손**이었다 (오류도 안 났다).
+    """
+    request = build_sales_request(
+        as_of=평일, item=품목, candidates=[_배분_있는_후보], supply_context={"payload": _공급}
+    )
+
+    assert [lot.lot_id for lot in request.lot_constraints] == ["LOT-1"]
+    assert request.replies[0].checks[0].cap_kg == {품목: 3000.0}
+
+
+def test_구_평면_경로는_더_이상_안_읽는다() -> None:
+    """🔴 **구·신 경로를 둘 다 읽지 않는다** (물류 §3 dual mapper 금지).
+
+    둘 다 읽으면 물류가 주소를 바꾼 사실이 마스터 안에서 덮이고, 한 사실에 주소가
+    둘이 된다. 구 평면 payload 는 **재료 없음으로 서야** 한다.
+    """
+    구_평면 = {
+        "warehouse_free_kg": 5000.0,
+        "inventory_by_item": [{"item": 품목, "available_qty_kg": 3000.0}],
+        "lots": [
+            {
+                "lot_id": "LOT-1",
+                "item": 품목,
+                "available_qty_kg": 3000.0,
+                "remaining_freshness_days": 9,
+                "status": "AVAILABLE",
+            }
+        ],
+    }
+
+    with pytest.raises(CriticSkipped) as caught:
+        build_sales_request(
+            as_of=평일, item=품목, candidates=[_배분_있는_후보], supply_context={"payload": 구_평면}
+        )
+
+    assert "로트 제약을 Critic 입력으로 옮기지 못했다" in str(caught.value)
+
+
+def test_창고_여유는_출고_여력으로_메우지_않는다() -> None:
+    """★★ **없으면 없는 대로 둔다** (물류 §4).
+
+    `PRE_SALES` 정본에 `warehouse_free_kg` 가 **없다.**
+    `delivery_feasibility.daily_outbound_capacity_kg` 는 **출고 여력**이지 창고
+    여유가 아니다 — 다른 사실을 같은 칸에 넣는 것이 물류가 금지한 「재조립」이다.
+
+    ⚠️ 계약이 `float` 이라 *"모름"* 을 담을 칸이 없어 `0.0` 이 간다. 그 사실은
+      `replies` 가 `cap_total_kg` 없이 만들어진 것으로 드러난다.
+    """
+    request = build_sales_request(
+        as_of=평일, item=품목, candidates=[_배분_있는_후보], supply_context={"payload": _공급}
+    )
+
+    assert _공급["delivery_feasibility"]["daily_outbound_capacity_kg"] == 7636.72
+    assert request.warehouse_free_kg == 0.0, "출고 여력을 창고 여유 칸에 넣지 않는다"
+    assert request.replies[0].checks[0].cap_total_kg is None
 
 
 def test_품목이_없으면_매입과_같은_낱말로_선다() -> None:

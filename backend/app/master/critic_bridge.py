@@ -494,9 +494,29 @@ def _cap_by_date(raw: Any) -> dict[str, float]:
 #: `SalesCandidate.allocation`). 마스터가 여기서 다시 정하지 않는다.
 _ALLOCATION = "allocation"
 
-#: 물류 sellable 컨텍스트가 로트를 싣는 칸 (`app/logistics/adapter.py` payload["lots"]).
-_LOTS = "lots"
+#: 🔴 **물류 `PRE_SALES` 정본의 중첩 주소다** (PR #484 · 수신요청 §4 · 2026-09-10).
+#:
+#: ```text
+#: payload.sellable_supply.inventory_by_item
+#: payload.sellable_supply.lot_constraints      ← 예전 최상위 `lots` 와 **이름도 다르다**
+#: ```
+#:
+#: 그 전에는 최상위에서 `inventory_by_item` · `lots` 를 읽었는데 정본에는 최상위에
+#: 그 둘이 **없다** — 그래서 판매 Critic 이 **조용히 빈손**이었다.
+#:
+#: ⚠️ **Critic 편의로 다시 평면화하지 않는다.** `PRE_PURCHASE` 와 하나의 공용 평면
+#:   계약으로 합치지도 않는다 (물류 §4).
+_SELLABLE_SUPPLY = "sellable_supply"
+_LOTS = "lot_constraints"
 _INVENTORY_BY_ITEM = "inventory_by_item"
+
+#: 🔴 **`PRE_SALES` 정본에 이 칸이 없다.** 그래서 여기 읽기는 늘 결측이 된다.
+#:
+#: ★ **`delivery_feasibility.daily_outbound_capacity_kg` 를 대신 넣지 않는다.**
+#:   그것은 **출고 여력**(3PL 이 하루에 내보낼 수 있는 총량)이지 **창고 여유**가
+#:   아니다 — 다른 사실을 같은 칸에 넣는 것이 물류가 금지한 「재조립」이다.
+#:   없으면 없는 대로 두고, 그 사실은 `replies` 가 `cap_total` 없이 만들어진 것으로
+#:   드러난다.
 _WAREHOUSE_FREE = "warehouse_free_kg"
 
 #: `LotConstraintIn.status` 가 받는 값. 밖의 값은 **고쳐서 넣지 않고 버린다** —
@@ -608,13 +628,24 @@ def _sales_replies_in(supply: Mapping[str, Any], item: str) -> list[dict[str, An
     return [{"dept": _INVENTORY, "runtime_status": "READY", "checks": [check]}]
 
 
+def _sellable_block(supply: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`payload.sellable_supply` 한 겹. 없으면 빈 매핑이다.
+
+    🔴 **최상위로 되돌아가서 다시 찾지 않는다.** 구 평면 경로를 같이 읽으면 물류가
+      주소를 바꾼 사실이 마스터 안에서 덮이고, 그러면 한 사실에 주소가 둘이 된다
+      (물류 §3 「old_path OR new_path dual mapper」 금지와 같은 규율).
+    """
+    block = supply.get(_SELLABLE_SUPPLY)
+    return block if isinstance(block, Mapping) else {}
+
+
 def _sellable_cap(supply: Mapping[str, Any], item: str) -> float | None:
-    """`inventory_by_item` 에서 그 품목의 가용재고. 없으면 `None` 이다.
+    """`sellable_supply.inventory_by_item` 에서 그 품목의 가용재고. 없으면 `None` 이다.
 
     ★ **로트를 다시 합산하지 않는다** (물류 #111 A1). 가용재고 정의(비-ACTIVE 제외 ·
       신선도 만료 제외 · 확정 출고 예약분 차감)는 물류 Tool 이 소유한다.
     """
-    rows = supply.get(_INVENTORY_BY_ITEM)
+    rows = _sellable_block(supply).get(_INVENTORY_BY_ITEM)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         return None
     for row in rows:
@@ -624,13 +655,18 @@ def _sellable_cap(supply: Mapping[str, Any], item: str) -> float | None:
 
 
 def _lot_constraints_in(supply: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """물류 `lots[]` → `LotConstraintIn[]`. **읽을 수 없는 로트는 버린다.**
+    """물류 `sellable_supply.lot_constraints[]` → `LotConstraintIn[]`.
+    **읽을 수 없는 로트는 버린다.**
 
     ⚠️ `remaining_freshness_days` 는 **없을 수 있다** — 물류가 일부러 `None` 으로
       낸다(§1.2-10). 0 으로 채우면 *"오늘 만료"* 라는 없는 사실이 생기고 신선도
       검사가 그 위에서 돈다. 그런 로트는 안 넘긴다.
+
+    ★ **거르는 규칙은 한 글자도 안 바꿨다.** 바뀐 것은 이 목록을 **어디서 읽는가**
+      뿐이다 — 읽는 칸(`lot_id` · `item` · `available_qty_kg` ·
+      `remaining_freshness_days` · `status`)은 정본에서도 같다.
     """
-    rows = supply.get(_LOTS)
+    rows = _sellable_block(supply).get(_LOTS)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         return []
     out: list[dict[str, Any]] = []

@@ -3,7 +3,7 @@
 ⚠️ **DB 를 안 탄다.** 연결 · 조회 · 물류 세 함수 · 판매 lifecycle 훅을 전부 대역으로
 준다. 실물 예약이 아직 0행이라 DB 를 타 봐야 매일 `NOTHING_DUE` 밖에 못 본다.
 
-🔴 **여기서 잠그는 것 일곱.**
+🔴 **여기서 잠그는 것 여덟.**
 
 ```text
 ① 그날 sale_date 인 것만 나간다
@@ -11,8 +11,10 @@
 ③ 한 판매가 터져도 나머지가 돈다
 ④ 나갈 것이 없으면 NOTHING_DUE 다 — BLOCKED 도 FAILED 도 아니다
 ⑤ 한 판매의 **일부 품목만** 나갔으면 mark_sale_delivered 를 안 부른다
+   그리고 **한 품목이 요구량보다 적게** 나가도 안 부른다 (PR #484 §5.2)
 ⑥ 장부 관문이 막은 날은 출고도 안 돈다
 ⑦ ship 이 터져도 allocate 를 안 되돌린다
+⑧ 확보 0kg 은 SHORT 다 — FAILED 도 NOTHING_DUE 도 아니다 (PR #484 §5.1)
 ```
 """
 
@@ -58,6 +60,10 @@ class _Conn:
         self.closed = True
 
 
+#: 판매 한 줄이 요구하는 양. `_row` 가 이 값으로 판매 품목을 만든다.
+REQUIRED = Decimal(100)
+
+
 @dataclass
 class _Shipped:
     """`ShipmentResult` 의 최소 모양. 이 파일이 보는 칸만 있다."""
@@ -65,13 +71,27 @@ class _Shipped:
     shipped_qty_kg: Decimal = Decimal(0)
 
 
+@dataclass
+class _Reserved:
+    """`ReservationResult` 의 최소 모양. 이 파일이 보는 칸만 있다.
+
+    🔴 **`reserved_qty_kg` 를 대역이 실제로 낸다.** 전에는 예약 대역도 `_Shipped` 를
+      돌려줘서 이 칸이 아예 없었다 — 그러면 *"확보가 0이었다"* 를 검사할 수가 없다.
+    """
+
+    reserved_qty_kg: Decimal = REQUIRED
+
+
 class _Spy:
     """물류·판매 함수 대역. 부른 인자를 그대로 모으고, 지정한 건에서만 터진다."""
 
-    def __init__(self, name: str, conn: _Conn, *, boom_on: str | None = None) -> None:
+    def __init__(
+        self, name: str, conn: _Conn, *, boom_on: str | None = None, result: Any = None
+    ) -> None:
         self.name = name
         self.conn = conn
         self.boom_on = boom_on
+        self.result = result
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, conn: Any, *args: Any, **kwargs: Any) -> Any:
@@ -83,7 +103,7 @@ class _Spy:
         target = _target_of(payload)
         if self.boom_on is not None and self.boom_on in (target or ""):
             raise RuntimeError(f"{self.name} 이 터졌다: {target}")
-        return _Shipped(Decimal(10))
+        return self.result
 
 
 def _target_of(payload: dict[str, Any]) -> str | None:
@@ -104,7 +124,7 @@ def _row(
         sale_item_id=f"SI-{sale_id}-{seq}",
         item_id=item_id,
         sim_run_id="SIM-1",
-        quantity_kg=Decimal(100),
+        quantity_kg=REQUIRED,
         sale_date=sale_date,
     )
 
@@ -117,12 +137,14 @@ def _run(
     allocate_boom: str | None = None,
     ship_boom: str | None = None,
     deliver_boom: str | None = None,
+    reserved: Decimal = REQUIRED,
+    shipped: Decimal = REQUIRED,
 ) -> tuple[Any, dict[str, _Spy], _Conn]:
     conn = _Conn() if conn is None else conn
     spies = {
-        "reserve": _Spy("reserve", conn, boom_on=reserve_boom),
+        "reserve": _Spy("reserve", conn, boom_on=reserve_boom, result=_Reserved(reserved)),
         "allocate": _Spy("allocate", conn, boom_on=allocate_boom),
-        "ship": _Spy("ship", conn, boom_on=ship_boom),
+        "ship": _Spy("ship", conn, boom_on=ship_boom, result=_Shipped(shipped)),
         "deliver": _Spy("deliver", conn, boom_on=deliver_boom),
     }
     out = ship_due_sales(
@@ -274,6 +296,8 @@ def test_품목이_하나뿐인_판매는_그것만_나가면_DELIVERED():
         (("RAN", "FAILED"), ()),
         (("FAILED", "RAN"), ()),
         (("FAILED", "FAILED"), ()),
+        (("RAN", "SHORT"), ()),
+        (("SHORT", "SHORT"), ()),
     ],
 )
 def test_모두_RAN_일_때만_완주다(statuses: tuple[str, ...], expected: tuple[str, ...]):
@@ -283,11 +307,130 @@ def test_모두_RAN_일_때만_완주다(statuses: tuple[str, ...], expected: tu
             sale_item_id=f"SI-SALE-A-{i}",
             reservation_id=f"RSV-SI-SALE-A-{i}",
             status=status,  # type: ignore[arg-type]
+            shipped_qty_kg=REQUIRED,
+            required_qty_kg=REQUIRED,
         )
         for i, status in enumerate(statuses, start=1)
     ]
 
     assert fully_shipped_sales(results) == expected
+
+
+def test_부분_출고는_DELIVERED_가_아니다():
+    """🔴 **`RAN` 은 「단계를 탔다」이지 「완납했다」가 아니다** (물류 PR #484 §5.2).
+
+    100kg 주문에 60kg 이 나가도 예약 → 할당 → 출고는 끝까지 돈다. 그것을 `DELIVERED`
+    로 닫으면 나머지 40kg 이 영원히 안 나간다 — 다음 날 `order_status` 필터가 그
+    판매를 아예 안 집기 때문이다.
+    """
+    out, spies, _ = _run([_row("SALE-A", 1)], reserved=Decimal(60), shipped=Decimal(60))
+
+    assert out.items[0].status == "RAN", "단계는 탔다 — 상태까지 바꾸지 않는다"
+    assert out.items[0].shipped_qty_kg == Decimal(60)
+    assert out.items[0].required_qty_kg == REQUIRED
+    assert out.delivered_sales == ()
+    assert spies["deliver"].calls == []
+
+
+def test_요구량만큼_나가면_DELIVERED_다():
+    """★ 위 검사의 짝. 조건이 *"항상 거짓"* 이 아니라 **양을 본다**는 것을 잠근다."""
+    out, spies, _ = _run([_row("SALE-A", 1)], shipped=REQUIRED)
+
+    assert out.delivered_sales == ("SALE-A",)
+    assert [call["sale_id"] for call in spies["deliver"].calls] == ["SALE-A"]
+
+
+def test_요구량을_넘겨_나가도_완납이다():
+    """⚠️ `>` 가 아니라 `>=` 다 — 딱 맞게 나간 날이 완납에서 빠지면 안 된다."""
+    out, _, _ = _run([_row("SALE-A", 1)], shipped=Decimal(120))
+
+    assert out.delivered_sales == ("SALE-A",)
+
+
+# ── ⑧ 확보 0kg 은 shortage 다 — FAILED 가 아니다 ───────────────────────
+
+
+def test_확보가_0kg_이면_할당을_안_부른다():
+    """🔴 **없는 예약을 할당하지 않는다** (물류 PR #484 §5.1).
+
+    예전에는 결과를 안 보고 그대로 `allocate` 로 갔고, 예약 행이 없어
+    `OutboundIntegrityError` 가 났다 — **정상 사업 결과가 장애로 기록됐다.**
+    """
+    out, spies, _ = _run([_row("SALE-A", 1)], reserved=Decimal(0))
+
+    assert spies["allocate"].calls == []
+    assert spies["ship"].calls == []
+    assert out.items[0].status == "SHORT"
+
+
+def test_확보_0kg_은_FAILED_가_아니다():
+    """`required=100, reserved=0` 은 **정상 사업 결과인 shortage** 다."""
+    out, _, _ = _run([_row("SALE-A", 1)], reserved=Decimal(0))
+
+    assert out.status == "RAN"
+    assert out.failed_items == (), "터진 것이 아니다"
+    assert out.short_items == ("SI-SALE-A-1",), "그렇다고 아무 일도 없던 것도 아니다"
+    assert "확보 0kg" in out.reason
+
+
+def test_확보_0kg_은_완납이_아니다():
+    """★ 나간 것이 없으므로 `DELIVERED` 로 닫히면 안 된다."""
+    out, spies, _ = _run([_row("SALE-A", 1)], reserved=Decimal(0))
+
+    assert out.delivered_sales == ()
+    assert spies["deliver"].calls == []
+
+
+def test_확보_0kg_은_NOTHING_DUE_와_다른_사실이다():
+    """🔴 **없는 것과 해 봤는데 0인 것은 다르다.**
+
+    `NOTHING_DUE` 는 *"그날 나갈 판매가 없다"* 이고 `SHORT` 는 *"나갈 판매가
+    있었는데 확보가 0이었다"* 다. 접으면 재고가 모자란 날과 주문이 없는 날이
+    장부에서 같아 보인다.
+    """
+    부족, _, _ = _run([_row("SALE-A", 1)], reserved=Decimal(0))
+    없는날, _, _ = _run([_row("SALE-A", 1, sale_date=OTHER_DAY)])
+
+    assert 부족.status == "RAN"
+    assert 없는날.status == "NOTHING_DUE"
+    assert 부족.items[0].status not in ("NOTHING_DUE", "FAILED")
+
+
+def test_한_품목이_부족해도_나머지는_나간다():
+    """★ shortage 가 그날을 세우지 않는다 — 실패 규율과 같은 자리다."""
+    out, spies, _ = _run([_row("SALE-A", 1), _row("SALE-B", 1)], reserved=Decimal(0))
+
+    assert len(spies["reserve"].calls) == 2
+    assert [one.status for one in out.items] == ["SHORT", "SHORT"]
+
+
+def test_확보량을_못_읽으면_예전대로_할당까지_간다():
+    """🔴 **칸이 없는 것은 0이 아니다.**
+
+    *"확보가 0이었다"* 와 *"얼마나 확보됐는지 못 읽었다"* 는 다른 사실이다. 못 읽은
+    것을 0으로 접으면 물류가 칸 이름을 바꾼 날 **모든 출고가 조용히 shortage** 가
+    되고, 그러면 아무 소리 없이 아무것도 안 나간다.
+    """
+    conn = _Conn()
+    spies = {
+        "reserve": _Spy("reserve", conn, result=object()),
+        "allocate": _Spy("allocate", conn),
+        "ship": _Spy("ship", conn, result=_Shipped(REQUIRED)),
+        "deliver": _Spy("deliver", conn),
+    }
+    out = ship_due_sales(
+        AS_OF,
+        connect=lambda: conn,
+        due_fn=lambda _conn, *, as_of: (_row("SALE-A", 1),),
+        reserve_fn=spies["reserve"],
+        allocate_fn=spies["allocate"],
+        ship_fn=spies["ship"],
+        deliver_fn=spies["deliver"],
+    )
+
+    assert len(spies["allocate"].calls) == 1
+    assert out.items[0].status == "RAN"
+    assert out.short_items == ()
 
 
 def test_DELIVERED_가_터져도_출고를_안_되돌린다():

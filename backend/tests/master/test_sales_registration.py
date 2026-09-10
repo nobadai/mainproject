@@ -62,6 +62,7 @@ import app.main  # import 시점에 판매 어댑터를 등록한다. 이 검사
 from app.master import persistence, wiring
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.sales.adapter import sales_port
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 평일 = date(2026, 9, 10)
 """개장 관문이 열려 있고 실행일 관문이 없는 날 — 판매는 주말에도 돌지만 굳이 안 섞는다."""
@@ -142,7 +143,7 @@ def 부른_부서(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """
     부른_것: list[tuple[str, str]] = []
     monkeypatch.setattr("app.sales.adapter.save_sales_agent_run", lambda **kw: None)
-    wiring.register("inventory", _대역({"sellable": "yes"}, 부른_것))
+    wiring.register("inventory", _대역(PRE_SALES_PAYLOAD, 부른_것))
     wiring.register("finance", _대역({"verdict": "ok"}, 부른_것))
     return 부른_것
 

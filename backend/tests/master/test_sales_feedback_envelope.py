@@ -62,6 +62,7 @@ from app.master.ports import AgentRegistry
 from app.master.runner import MasterRunner
 from app.master.sales_flow import MAX_FEEDBACK_ATTEMPTS, SalesFlow
 from app.sales.schemas import SalesFeedback, SalesProposalInput, SalesProposalReply
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 오늘 = date(2026, 9, 10)
 
@@ -113,7 +114,7 @@ def _adjustment() -> SuggestedAdjustment:
 
 def _물류(payload: dict[str, Any] | None = None):
     def port(request: AgentRequest):
-        reply = _reply(request, payload=payload or {"sellable": "yes"})
+        reply = _reply(request, payload=payload or PRE_SALES_PAYLOAD)
         return reply, _meta(request, reply)
 
     return port
@@ -439,7 +440,7 @@ def 판매가_받은_것(
 
     monkeypatch.setattr(sales_adapter, "run_proposal", 감시)
     monkeypatch.setattr(sales_adapter, "save_sales_agent_run", lambda **kw: None)
-    wiring.register("inventory", _대역({"sellable": "yes"}))
+    wiring.register("inventory", _대역(PRE_SALES_PAYLOAD))
     wiring.register(
         "finance",
         _대역(

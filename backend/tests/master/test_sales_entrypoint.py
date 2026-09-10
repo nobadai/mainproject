@@ -32,6 +32,7 @@ from app.master.router import router
 from app.master.sales_flow import SALES_BUDGET
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
 from app.master.service import run_sales
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 #: 🔴 **토요일이다.** 매입은 이 날 실행일 관문에서 서고 판매는 그대로 간다.
 토요일 = date(2026, 9, 12)
@@ -75,7 +76,7 @@ def _wire(capture: list | None = None) -> list:
     """
     called = capture if capture is not None else []
     wiring.reset()
-    wiring.register("inventory", _port({"sellable": "yes"}, called))
+    wiring.register("inventory", _port(PRE_SALES_PAYLOAD, called))
     wiring.register(
         "sales",
         _port(

@@ -752,28 +752,30 @@ class SalesFlow:
         if self.user_request is not None:
             payload["user_request"] = dict(self.user_request)
         if self.context_failure is None and self.supply_context is not None:
-            # 🔴 **이 칸은 지금 판매에 안 닿는다** (실측 2026-09-07 · 계약 미결).
+            # 🔴 **칸 이름은 `logistics_context` 다** (`sales.schemas.SalesProposalInput`).
             #
-            #   판매 칸 이름은 `logistics_context` 이고 어댑터가 모르는 키를 걸러내므로
-            #   이 값은 **조용히 사라진다.** 그런데 이름만 맞춰서는 안 된다 — 두 겹으로
-            #   모양이 안 맞고, 둘 다 마스터 혼자 못 정한다.
+            #   막고 있던 둘이 다 풀렸다 (2026-09-10 · 물류 PR #484 수신요청 §3).
             #
             #   ```text
-            #   ① 마스터가 싣는 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼다
-            #      (agent · mode · business_status · runtime_status · payload · reasoning)
-            #      → 마스터 소유. 고칠 수 있다
-            #   ② 래퍼를 벗겨도 SalesLogisticsContext(extra="forbid") 가 다섯을 거부한다
-            #      as_of · policy_version_used · inventory_by_item · lot_constraints
-            #      · shared_daily_outbound_capacity_kg
-            #      → 물류가 근거 주소지정(_CLAIM_PATH) 때문에 일부러 최상위로 올린 셋이다.
-            #        누가 제자리로 옮기는지는 물류·판매 계약이다
+            #   ① 마스터가 싣던 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼였다
+            #      → 마스터 소유. 여기서 payload 만 벗겨 낸다
+            #   ② SalesLogisticsContext(extra="forbid") 가 다섯 키를 거부했다
+            #      → #509 로 해소. 지금은 받는 칸 일곱과 물류 PRE_SALES 최상위 일곱이
+            #        정확히 같다 (query_scope · sellable_supply · delivery_feasibility
+            #        · hard_constraints · soft_warnings · missing_data · evidence_refs)
             #   ```
             #
-            # ⚠️ **이름만 맞추면 침묵이 하드 ERROR 로 바뀌어 경로가 도로 막힌다** —
-            #   실측으로 후보 3안·재무 3회까지 가던 것이 `extra_forbidden` 6건으로 섰다.
-            #   ②가 정해질 때까지 마스터 이름을 그대로 두고, 못 닿는다는 사실을
-            #   `test_sales_flow.py` 가 적어 둔다.
-            payload["supply_context"] = dict(self.supply_context)
+            # 🔴 **payload 안을 재조립하지 않는다** (물류 §3 금지 목록).
+            #   `sellable_supply` 를 풀어 최상위 `inventory_by_item` 을 다시 만들거나,
+            #   구·신 경로를 둘 다 채우거나, 호환용 중복키를 만들지 않는다 — 그러면
+            #   같은 사실의 주인이 둘이 되고 물류가 주소를 바꾸는 날 둘이 갈린다.
+            #
+            # ★ **래퍼에 payload 매핑이 없으면 칸을 안 만든다.** 빈 칸을 실으면 판매가
+            #   *"물류가 팔 수 있는 게 없다고 했다"* 로 읽는다 (§1.2-10) — 위 두 가드와
+            #   같은 규율이다.
+            context_payload = self.supply_context.get("payload")
+            if isinstance(context_payload, Mapping):
+                payload["logistics_context"] = dict(context_payload)
         if self.ml_context is not None:
             # ★ **칸 이름은 판매 것이다** (`app/sales/schemas.py` `SalesProposalInput`).
             #   매입은 같은 값을 `forecast` 로 받는다 — 받는 쪽 낱말에 맞춘다

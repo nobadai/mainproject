@@ -42,6 +42,7 @@ from app.master.inputs import SourcedInput
 from app.master.sales_flow import SalesFlow
 from app.master.schemas import SalesRunRequest
 from app.master.service import run_sales
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 AS_OF = date(2026, 9, 6)
 
@@ -115,7 +116,7 @@ _후보 = {
 
 def _flow(capture: list, **kw) -> SalesFlow:
     registry = AgentRegistry()
-    registry.register("inventory", _port({"sellable": "yes"}, capture))
+    registry.register("inventory", _port(PRE_SALES_PAYLOAD, capture))
     registry.register("sales", _port(dict(_후보), capture))
     registry.register("finance", _port({"verdict": "ok"}, capture))
     runner = MasterRunner(ctx(), registry, CallBudget(limit=16))
@@ -248,7 +249,7 @@ def test_되먹임_회차에도_같은_규칙이다():
     """
     capture: list = []
     registry = AgentRegistry()
-    registry.register("inventory", _port({"sellable": "yes"}, capture))
+    registry.register("inventory", _port(PRE_SALES_PAYLOAD, capture))
     registry.register("sales", _port(dict(_후보), capture))
     # 재무가 전부 거절하고 대안을 내면 되먹임이 돈다.
     registry.register(
@@ -347,7 +348,7 @@ def test_ML_은_호출_대상_어휘에_없다():
 def _판매_배선(monkeypatch: pytest.MonkeyPatch) -> list:
     capture: list = []
     wiring.reset()
-    wiring.register("inventory", _port({"sellable": "yes"}, capture))
+    wiring.register("inventory", _port(PRE_SALES_PAYLOAD, capture))
     wiring.register("sales", _port(dict(_후보), capture))
     wiring.register("finance", _port({"verdict": "ok"}, capture))
     monkeypatch.setattr(persistence, "record_sales", lambda *a, **k: None)
