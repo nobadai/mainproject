@@ -7,7 +7,7 @@ import pytest
 
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.llm.runtime import LlmInterpretationOutput
-from app.sales.proposal import run_proposal
+from app.sales.proposal import _generate_scenarios, run_proposal
 from app.sales.ranking import rank_scenarios, remove_dominated_scenarios
 from app.sales.schemas import LogisticsLotConstraint, SalesCandidate, SalesProposalInput
 
@@ -123,8 +123,8 @@ def test_s02_partial_purchase_caps_supported_candidate():
 
 
 def test_s03_zero_and_s04_null_are_not_conflated():
-    zero = run_proposal(_request(replies=[_purchase(0), _finance()])).scenarios[-1]
-    unknown = run_proposal(_request(replies=[_purchase(None), _finance()])).scenarios[-1]
+    zero = _generate_scenarios(_request(replies=[_purchase(0), _finance()]))[-1]
+    unknown = _generate_scenarios(_request(replies=[_purchase(None), _finance()]))[-1]
     assert zero.supply.conditional_quantity_kg == Decimal(0)
     assert zero.status == "INFEASIBLE"
     assert unknown.supply.conditional_quantity_kg is None
@@ -157,7 +157,7 @@ def test_s08_user_price_survives_finance_pass_and_extra_fields():
 
 
 def test_s09_fail_does_not_invent_price_or_payment_and_s10_authority_can_adjust_payment():
-    failed = run_proposal(_request(quantity=7000, replies=[_finance("FAIL")])).scenarios[-1]
+    failed = _generate_scenarios(_request(quantity=7000, replies=[_finance("FAIL")]))[-1]
     assert failed.unit_price_krw == Decimal(2300)
     assert failed.payment_days == 30
 
