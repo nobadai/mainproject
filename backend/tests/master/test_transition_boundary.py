@@ -207,20 +207,25 @@ def test_둘_다_등록되면_한_커넥션으로_한_번_커밋한다() -> None
 
     assert out.status == "APPLIED"
     assert out.parts == ["finance", "logistics"]
-    # 🔴 **커넥션이 둘이다 — write 하나, 개장 정본 읽기 하나.**
+    # 🔴 **커넥션이 하나다.**
     #
-    #   `apply_approval` 은 트랜잭션을 열기 **전에** 앞질러 열린 날을 읽는다
-    #   (`opened_days_after`). 취소가 `financing_mode` 를 커넥션 밖에서 읽는 것과
-    #   같은 규율이다 — 못 읽으면 트랜잭션을 시작조차 안 한다.
+    #   ② **뜻이 바뀌었다** (물류 `#484` · 2026-09-10).
+    #
+    #   ```text
+    #   ① 2026-09-07  둘   write 하나 + 개장 정본 읽기 하나
+    #                      `apply_approval` 이 트랜잭션을 열기 전에 앞질러 열린 날을
+    #                      읽었다 (`opened_days_after`) — 그 날들에 승인을 전파하려고.
+    #   ② 2026-09-10  하나 전파가 없어져 읽을 것이 없다. 커넥션은 write 하나뿐이다.
+    #   ```
     #
     # ★ **여기서 지키려는 것은 "write 가 한 트랜잭션"** 이지 "커넥션이 하나" 가
-    #   아니다. 아래 두 줄이 그것을 잰다.
-    assert len(calls) == 2, "write 하나 + 정본 읽기 하나"
+    #   아니다. 아래 두 줄이 그것을 잰다. 다만 **여는 커넥션이 늘면 여기가 먼저 운다** —
+    #   전파가 되살아나는 첫 신호다.
+    assert len(calls) == 1, "write 하나뿐이어야 한다"
     assert conn.commits == 1, "커밋은 한 번뿐이다"
     assert conn.commits == 1, "커밋은 두 파트가 끝난 뒤 한 번이다"
     assert conn.rollbacks == 0
-    # ⚠️ 정본 읽기가 같은 대역을 한 번 더 닫는다 (실제로는 새 커넥션이다).
-    assert conn.closed == 2
+    assert conn.closed == 1
 
     persisted = [(name, got) for name, got in log if name.endswith(".persist")]
     assert [name for name, _ in persisted] == ["finance.persist", "logistics.persist"]
@@ -261,8 +266,8 @@ def test_물류_적재가_터지면_전부_되돌린다() -> None:
     assert "로트 표가 없다" in out.reason, "사유를 남기지 않으면 무엇이 터졌는지 모른다"
     assert conn.commits == 0
     assert conn.rollbacks == 1
-    # ⚠️ 정본 읽기가 같은 대역을 한 번 더 닫는다 (실제로는 새 커넥션이다).
-    assert conn.closed == 2
+    # ② 하나로 바뀌었다 (물류 `#484`) — 개장 정본 읽기가 없어져 대역을 한 번만 닫는다.
+    assert conn.closed == 1
 
 
 def test_적재_실패가_예외로_올라가지_않는다() -> None:

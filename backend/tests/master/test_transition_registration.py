@@ -56,20 +56,41 @@ def _commitment() -> ApprovedCommitment:
     )
 
 
-class 가짜커서:
-    """읽기 둘만 답하고 나머지 SQL 은 **파라미터째로 기록한다.**
+#: 물류가 `_record_schedules` 에서 읽는 매입 줄 하나. **승인이 방금 만든 그 줄이다.**
+#
+# 🔴 **여기서 매입 줄을 지어내는 것이 아니다.** 같은 트랜잭션 안에서
+#    `persist_purchases` 가 이미 `purchase_items` 를 썼고, 물류는 그것을
+#    `purchase_id` 로 되읽는다 (`app/master/transition.py` 의 호출 순서 주석).
+#    가짜 커넥션은 방금 쓴 것을 기억하지 않으므로, 그 한 줄을 여기서 답한다.
+매입줄 = {
+    "purchase_item_id": "PI-BURNIN-1",
+    "item_id": "ITEM-BAECHU",
+    "grade": None,
+    "quantity_kg": Decimal("44.0"),
+    "unit_price_krw_per_kg": Decimal(5200),
+}
 
-    ★ **물류 fixture 읽기가 둘째다.** `logistics/transition.py` 의 `persist_inventory`
-      는 `confirmed_inbound` 를 덮지 않고 **더하려고** 기존 목록을 먼저 읽는다 —
-      여기서 빈손을 주면 그 행이 없다는 뜻이 되어 전이가 `FAILED` 로 선다.
-      **그 병합은 임시 조치다** (물류 모듈 docstring 참조) — 걷어낼 때 이 가지도
-      같이 걷는다.
+
+class 가짜커서:
+    """읽기 넷만 답하고 나머지 SQL 은 **파라미터째로 기록한다.**
+
+    ★ **답하는 자리가 바뀌었다** (물류 `#484` · W3-3 · 2026-09-10).
+
+    ```text
+    ① ~2026-09-09   confirmed_inbound_json 을 SELECT 로 읽어 병합했다 (임시 조치)
+    ② 2026-09-10~   fixture 행은 **잠그기만** 하고(SELECT fixture_id … FOR UPDATE),
+                    업무 사실은 신규 inbound_schedules 에 적는다
+    ```
+
+    ⚠️ **재는 것은 그대로다** — *"세 장부가 한 커넥션으로 한 번에 쓰이는가"*. 여기서
+      바뀐 것은 대역이 답해야 하는 **질문의 목록**뿐이다.
     """
 
     def __init__(self, executed: list[tuple[str, Any]]) -> None:
         self.rowcount = 1
         self._executed = executed
         self._row: dict[str, Any] | None = None
+        self._rows: list[Any] = []
 
     def __enter__(self) -> Self:
         return self
@@ -80,19 +101,27 @@ class 가짜커서:
     def execute(self, query: Any, params: Any = None) -> None:
         text = str(query)
         self._executed.append((text, params))
-        if "confirmed_inbound_json" in text and "SELECT" in text:
-            # ★ 이미 확정된 입고가 없는 그날 행이다 — 확인했고 0 건.
-            self._row = {"confirmed_inbound_json": []}
+        self._row = None
+        self._rows = []
+        if "logistics_runtime_fixture" in text and "SELECT" in text:
+            # ★ 그날 fixture 행은 **있다.** 물류는 그 행을 잠그기만 하고, 없으면
+            #   `LogisticsFixtureMissing` 으로 멈춘다 — 만들지 않는 것이 계약이다.
+            self._row = {"fixture_id": "FX-BURNIN-1"}
+        elif "purchase_items" in text and "SELECT" in text:
+            # ★ 승인이 같은 트랜잭션에서 방금 쓴 매입 줄이다. **한 줄이다** —
+            #   둘을 주면 물류가 `PurchaseDetailAmbiguous` 로 멈춘다.
+            self._rows = [매입줄]
+        elif "inbound_schedules" in text and "SELECT" in text:
+            # ★ 아직 그 입고 일정이 없다 — 이번 승인이 처음 적는다. 빈 목록이 사실이다.
+            self._rows = []
         elif "FROM" in text and "items" in text:
             self._row = {"item_id": "ITEM-BAECHU"}
-        else:
-            self._row = None
 
     def fetchone(self) -> dict[str, Any] | None:
         return self._row
 
-    def fetchall(self) -> list[dict[str, Any]]:
-        """재고 원장 조회의 답. **빈 목록이 사실이다.**
+    def fetchall(self) -> list[Any]:
+        """목록으로 답하는 조회들. **빈 목록도 확인된 사실이다.**
 
         🔴 **`#458` 로 재무 전이가 재고 장부가를 원장에서 파생하기 시작했다**
           (`finance/db.load_inventory_snapshot_as_of`). 그 전에는 `finance_state` 에
@@ -103,10 +132,9 @@ class 가짜커서:
           커넥션으로 한 번에 쓰이는가"* 이지 재고 평가가 아니다. 로트를 넣으면
           이 검사가 재고 계산까지 떠안게 되고, 그 계산이 바뀌는 날 여기가 빨개진다.
 
-        ⚠️ 빈 목록은 *"그날까지 입고된 로트가 없다"* 는 **확인된 사실**이다 —
-          `fetchone` 이 `confirmed_inbound_json: []` 를 주는 것과 같은 이유다.
+        ⚠️ 빈 목록은 *"그날까지 입고된 로트가 없다"* 는 **확인된 사실**이다.
         """
-        return []
+        return self._rows
 
 
 class 가짜커넥션:
@@ -220,9 +248,11 @@ def test_승인이_두_파트를_다_거쳐_한_번_커밋한다(재무_읽기�
     assert out.parts == ["finance", "logistics"]
     assert conn.commits == 1, "커밋은 세 write 가 끝난 뒤 한 번이다"
     assert conn.rollbacks == 0
-    # ⚠️ 정본 읽기가 같은 대역을 한 번 더 닫는다 — 실제로는 새 커넥션이다.
+    # ② **하나로 바뀌었다** (물류 `#484` · 2026-09-10). 전에는 `apply_approval` 이
+    #    트랜잭션 밖에서 개장 정본을 한 번 더 읽어(`opened_days_after`) 같은 대역이
+    #    두 번 닫혔다. 전파가 없어져 그 읽기가 사라졌다.
     #    지키는 것은 **write 가 한 트랜잭션**이고, 위 두 줄이 그것을 잰다.
-    assert conn.closed == 2
+    assert conn.closed == 1
 
 
 def test_세_장부가_한_커넥션으로_다_쓰인다(재무_읽기를_대역으로) -> None:
@@ -234,7 +264,13 @@ def test_세_장부가_한_커넥션으로_다_쓰인다(재무_읽기를_대역
     문장 = [text for text, _ in conn.executed]
     assert any("INSERT INTO" in t and "purchases" in t for t in 문장), "매입 원장이 안 나갔다"
     assert any("INSERT INTO" in t and "payables" in t for t in 문장), "재무 채무가 안 나갔다"
-    assert any("logistics_runtime_fixture" in t for t in 문장), "물류 입고 예정이 안 나갔다"
+    assert any("logistics_runtime_fixture" in t for t in 문장), "물류 fixture 머리말이 안 섰다"
+    # 🔴 **입고 예정의 정본은 이제 여기다** (물류 `#484` · W3-3 · 2026-09-10).
+    #    fixture 행에는 표시 둘만 남았다 — 그것만 보면 *"업무 사실이 나갔다"* 를
+    #    머리말로 재는 셈이 된다.
+    assert any("INSERT INTO" in t and "inbound_schedules" in t for t in 문장), (
+        "물류 입고 예정이 안 나갔다"
+    )
 
 
 def test_물류_write_가_상태가_설_날의_행을_고른다(재무_읽기를_대역으로) -> None:
@@ -248,8 +284,9 @@ def test_물류_write_가_상태가_설_날의_행을_고른다(재무_읽기를
     transition.apply_approval(_commitment(), connect=lambda: conn)
 
     물류 = [params for text, params in conn.executed if "logistics_runtime_fixture" in text]
-    # ★ 읽기 하나 · 쓰기 하나다 — 물류가 `confirmed_inbound` 를 덮지 않고 더하려고
-    #   기존 목록을 먼저 읽는다. **둘이 같은 날 행을 가리켜야 한다.**
+    # ★ 읽기 하나 · 쓰기 하나다 — 물류가 그 행을 **잠그고**(FOR UPDATE) 고친다.
+    #   ① 재는 것은 그대로다. 전에는 `confirmed_inbound` 목록을 병합하려고 읽었고
+    #   (임시 조치), `#484` 뒤로는 잠그기만 한다. **둘이 같은 날 행을 가리켜야 한다.**
     assert len(물류) == 2
     for params in 물류:
         assert BURN_IN_SIM_RUN_ID in params

@@ -20,6 +20,7 @@ approval_id  → inbound_id   한 글자만 달라도 아무것도 못 걷는데
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -81,11 +82,29 @@ def test_걷는_id_가_넣는_id_와_같다():
 # ── ② 물류 — 걷는다. 남의 것은 안 건드린다 ────────────────────────────────
 
 
+# 🔴 **취소가 고치는 곳이 바뀌었다** (물류 `#484` · W3-3 · 2026-09-10).
+#
+# ```text
+# ① ~2026-09-09  그날 fixture 행의 두 JSON 목록에서 항목을 빼고
+#                in_transit_status · confirmed_inbound_status 를 다시 세웠다
+# ② 2026-09-10~  inbound_schedules 한 행의 cancelled_as_of 에 날짜를 적는다
+#                (Reader 가 더 이상 그 JSON 칸을 안 읽는다)
+# ```
+#
+# ★ **재는 사실들은 대부분 그대로다** — 내 것만 걷는다 · 재시도는 0 이다 · 없는 것을
+#   만들지 않는다 · 잠그고 읽는다 · 상태일을 적는다. 바뀐 것은 **재는 문**이다.
+#   무엇을 잃었는지는 `test_취소_흔적에_source_ref_가_남는다` 에 적었다.
+
+
 class _가짜커서:
-    def __init__(self, row: tuple[Any, Any] | None) -> None:
-        self._row = row
+    """`inbound_schedules` · `inbound_receipts` 두 조회에 답한다."""
+
+    def __init__(self, 일정: dict[str, dict[str, Any]], 도착함: set[str]) -> None:
+        self._일정 = 일정
+        self._도착함 = 도착함
         self.executed: list[tuple[str, Any]] = []
         self.rowcount = 1
+        self._rows: list[Any] = []
 
     def __enter__(self) -> Any:
         return self
@@ -94,94 +113,152 @@ class _가짜커서:
         return None
 
     def execute(self, query: Any, params: Any = None) -> None:
-        self.executed.append((str(query), params))
+        text = str(query)
+        self.executed.append((text, params))
+        self._rows = []
+        if "inbound_receipts" in text:
+            # params = (sim_run_id, inbound_id)
+            self._rows = [{"있음": 1}] if params[1] in self._도착함 else []
+        elif "inbound_schedules" in text and "SELECT" in text:
+            찾은것 = self._일정.get(params[1])
+            self._rows = [dict(찾은것)] if 찾은것 is not None else []
 
-    def fetchone(self) -> Any:
-        return self._row
+    def fetchall(self) -> list[Any]:
+        return self._rows
 
 
 class _가짜커넥션:
-    def __init__(self, row: tuple[Any, Any] | None) -> None:
-        self.cur = _가짜커서(row)
+    def __init__(
+        self, *일정들: dict[str, Any], 도착함: set[str] | None = None
+    ) -> None:
+        self.cur = _가짜커서(
+            {행["inbound_id"]: 행 for 행 in 일정들}, 도착함 or set()
+        )
 
     def cursor(self) -> Any:
         return self.cur
 
 
-def _row(in_transit: list[dict], confirmed: list[dict]) -> tuple[Any, Any]:
-    return (in_transit, confirmed)
+def _일정(inbound_id: str, *, cancelled_as_of: date | None = None) -> dict[str, Any]:
+    """`inbound_schedules` 한 행. **취소 판정이 보는 칸만 채운다.**"""
+    return {
+        "inbound_id": inbound_id,
+        "sim_run_id": "SIM-1",
+        "purchase_item_id": "PI-1",
+        "quantity_kg": Decimal("1000.0"),
+        "expected_arrival_date": date(2026, 1, 7),
+        "created_as_of": APPROVED_ON,
+        "cancelled_as_of": cancelled_as_of,
+        "source_ref": "MASTER-APPROVAL",
+        "note": None,
+    }
 
 
-def _쓴값(conn: _가짜커넥션) -> tuple[Any, str, Any, str]:
-    """UPDATE 에 실린 두 목록과 두 상태."""
-    _, params = conn.cur.executed[-1]
-    return params[0].obj, params[1], params[2].obj, params[3]
+def _취소된것(conn: _가짜커넥션) -> list[tuple[Any, str]]:
+    """실제로 나간 취소 UPDATE 들 — `(cancelled_as_of, inbound_id)`.
+
+    ⚠️ `"UPDATE" in text` 로 거르지 않는다 — 잠그는 SELECT 의 `FOR UPDATE` 가 걸린다.
+    """
+    return [
+        (params[0], params[2])
+        for text, params in conn.cur.executed
+        if "SET cancelled_as_of" in text
+    ]
 
 
-MINE = {"inbound_id": "INB-H1-REQ-20260105-0001-1-1", "item": "배추", "quantity_kg": "1000.0"}
-OTHER = {"inbound_id": "INB-H1-OTHER-9", "item": "무", "quantity_kg": "500.0"}
+def _물은열쇠(conn: _가짜커넥션) -> set[Any]:
+    """조회가 실제로 짚은 `inbound_id` 들. **두 조회 다 둘째 자리가 열쇠다.**"""
+    return {
+        params[1]
+        for text, params in conn.cur.executed
+        if "SELECT" in text and "SET cancelled_as_of" not in text
+    }
+
+
+MINE = "INB-H1-REQ-20260105-0001-1-1"
+OTHER = "INB-H1-OTHER-9"
 
 
 def test_내_승인분만_걷는다():
-    """🔴 **목록을 통째로 새로 쓰지 않는다** — 남의 승인분이 사라진다."""
-    conn = _가짜커넥션(_row([MINE, OTHER], [MINE, OTHER]))
+    """🔴 **남의 승인분이 사라지면 안 된다.**
+
+    ★ ① 재는 사실이 그대로다. 문만 바뀌었다 — 전에는 *"JSON 목록을 통째로 새로
+      쓰지 않는가"* 였고, 지금은 *"내 `inbound_id` 행만 UPDATE 하는가"* 다.
+
+    ⚠️ **셈이 2 에서 1 로 바뀌었다** (②). 전에는 두 JSON 목록에서 하나씩 빠져 2 였다.
+      지금은 일정 한 건의 정본이 **한 행**이라 1 이다 — 같은 사실을 한 번만 센다.
+    """
+    conn = _가짜커넥션(_일정(MINE), _일정(OTHER))
 
     removed = withdraw_inventory(
-        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE["inbound_id"]], source_ref="X"
+        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE], source_ref="X"
     )
 
-    in_transit, in_status, confirmed, conf_status = _쓴값(conn)
-    assert in_transit == [OTHER]
-    assert confirmed == [OTHER]
-    assert in_status == "CONFIRMED"
-    assert conf_status == "CONFIRMED"
-    assert removed == 2, "두 목록에서 하나씩 빠져야 한다"
+    assert _취소된것(conn) == [(TARGET, MINE)], "남의 일정 행을 건드렸다"
+    assert removed == 1, "일정 한 건은 한 번 걷힌다"
 
 
-def test_다_걷히면_CONFIRMED_ZERO_다():
-    """🔴 **`UNRESOLVED` 가 아니다.** 취소는 *"확인했고 이제 없다"* 이지
-    *"모른다"* 가 아니다."""
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+def test_다_걷히면_그날부터_없음으로_선다():
+    """🔴 **`UNRESOLVED` 가 아니다.** 취소는 *"확인했고 그날부터 없다"* 이지
+    *"모른다"* 가 아니다.
+
+    ★ ① 재는 사실이 그대로다. 전에는 `CONFIRMED_ZERO` 라는 **상태 이름**이 그 뜻을
+      들었고, 지금은 `cancelled_as_of` 에 **날짜가 적힌다**는 것이 그 뜻이다 —
+      `NULL` 이 곧 *"아직 안 취소"* 이므로 날짜가 들어가야 확인된 사실이 된다.
+    """
+    conn = _가짜커넥션(_일정(MINE))
 
     withdraw_inventory(
-        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE["inbound_id"]], source_ref="X"
+        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE], source_ref="X"
     )
 
-    _, in_status, confirmed, conf_status = _쓴값(conn)
-    assert confirmed == []
-    assert in_status == "CONFIRMED_ZERO"
-    assert conf_status == "CONFIRMED_ZERO"
+    적힌날, _ = _취소된것(conn)[0]
+    assert 적힌날 == TARGET
+    assert 적힌날 is not None, "취소인데 '모른다'(NULL) 로 남겼다"
 
 
 def test_이미_걷힌_뒤_재시도는_0이다():
-    """★ 재무 `#302` 의 *"retry no-op"* 과 같은 모양이다."""
-    conn = _가짜커넥션(_row([OTHER], [OTHER]))
+    """★ 재무 `#302` 의 *"retry no-op"* 과 같은 모양이다.
+
+    ★ ① 재는 사실이 그대로다. 전에는 *"목록에 내 것이 없다"* 로 재시도를 만들었고,
+      지금은 **같은 날짜로 이미 취소된 행**이 그 자리다.
+    """
+    conn = _가짜커넥션(_일정(MINE, cancelled_as_of=TARGET))
 
     removed = withdraw_inventory(
-        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE["inbound_id"]], source_ref="X"
+        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE], source_ref="X"
     )
 
     assert removed == 0
+    assert _취소된것(conn) == [], "이미 취소된 행을 또 고쳤다"
 
 
-def test_inbound_id_가_없는_항목은_안_건드린다():
-    """★ 물류가 다른 경로로 넣은 것일 수 있다 — **마스터가 만들지 않은 것을 지우지
-    않는다.**"""
-    익명 = {"item": "양파", "quantity_kg": "100.0"}
-    conn = _가짜커넥션(_row([MINE, 익명], [익명]))
+def test_열쇠가_빈_항목은_묻지도_않는다():
+    """★ **없는 열쇠로 DB 에 묻지 않는다.** 빈 열쇠는 아무 행에도 안 맞고, 그 0행은
+    *"그 일정이 없다"* 로 읽힌다 — 두 사실이 뭉개진다.
 
-    withdraw_inventory(
-        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE["inbound_id"]], source_ref="X"
+    ⚠️ **뜻이 좁아졌다** (②). 전에는 *"물류가 다른 경로로 넣은, `inbound_id` 없는
+      항목"* 을 안 건드린다는 검사였다. 그 JSON 목록이 없어져 그런 항목이 존재할 수
+      없다 — 남의 행을 안 건드린다는 쪽은 `test_내_승인분만_걷는다` 가 잰다.
+      여기 남은 것은 **빈 열쇠를 걸러내는가** 다.
+    """
+    conn = _가짜커넥션(_일정(MINE))
+
+    removed = withdraw_inventory(
+        conn,
+        sim_run_id="SIM-1",
+        as_of=TARGET,
+        inbound_ids=[MINE, "", None],  # type: ignore[list-item]
+        source_ref="X",
     )
 
-    in_transit, _, confirmed, _ = _쓴값(conn)
-    assert in_transit == [익명]
-    assert confirmed == [익명]
+    assert _물은열쇠(conn) == {MINE}, f"빈 열쇠로 DB 에 물었다: {_물은열쇠(conn)}"
+    assert removed == 1
 
 
 def test_걷을_것이_없으면_DB_를_안_친다():
     """★ 회차 일정이 없던 약정도 승인은 살아 있다."""
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+    conn = _가짜커넥션(_일정(MINE))
 
     removed = withdraw_inventory(
         conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[], source_ref="X"
@@ -191,37 +268,58 @@ def test_걷을_것이_없으면_DB_를_안_친다():
     assert not conn.cur.executed
 
 
-def test_그날_행이_없으면_만들지_않는다():
-    from app.logistics.transition import LogisticsFixtureMissing
+def test_그날_행이_없으면_만들지도_터지지도_않는다():
+    """🔴 **② 뒤집힌 검사다** (물류 `#484` · 2026-09-10).
 
-    conn = _가짜커넥션(None)
+    ```text
+    ① ~2026-09-09  그날 fixture 행이 없으면 LogisticsFixtureMissing 으로 터졌다
+                   — 그 행은 물류 판단이라 마스터 취소가 만들면 안 됐다
+    ② 2026-09-10~  일정 행이 없으면 아무것도 안 하고 0 이다
+                   — Backfill 이전에 사라진 일정도 있을 수 있고,
+                     없는 것을 걷는 것은 오류가 아니다
+    ```
 
-    with pytest.raises(LogisticsFixtureMissing):
-        withdraw_inventory(
-            conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=["INB-X"], source_ref="X"
-        )
+    ★ **안 만든다는 쪽은 그대로다.** INSERT 가 한 줄도 안 나가야 한다 — 그것이
+      원래 이 검사의 이름이 지키던 것이다.
+    """
+    conn = _가짜커넥션()
+
+    removed = withdraw_inventory(
+        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=["INB-X"], source_ref="X"
+    )
+
+    assert removed == 0
+    assert not any("INSERT" in text for text, _ in conn.cur.executed), "없는 일정을 만들었다"
 
 
 def test_행을_잠그고_읽는다():
-    """🔴 `FOR UPDATE` 가 없으면 두 취소가 같은 옛 목록을 읽고 마지막이 이긴다."""
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+    """🔴 `FOR UPDATE` 가 없으면 두 취소가 같은 옛 행을 읽고 마지막이 이긴다."""
+    conn = _가짜커넥션(_일정(MINE))
 
     withdraw_inventory(
-        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE["inbound_id"]], source_ref="X"
+        conn, sim_run_id="SIM-1", as_of=TARGET, inbound_ids=[MINE], source_ref="X"
     )
 
-    select_sql, _ = conn.cur.executed[0]
-    assert "FOR UPDATE" in select_sql
+    잠근것 = [
+        text
+        for text, _ in conn.cur.executed
+        if "inbound_schedules" in text and "SELECT" in text
+    ]
+    assert 잠근것, "일정 행을 읽지도 않고 고쳤다"
+    assert all("FOR UPDATE" in text for text in 잠근것)
 
 
-# ── ③ 물류 어댑터 — 취소일이 아니라 상태일 행에서 걷는다 ──────────────────
+# ── ③ 물류 어댑터 — 취소일이 아니라 상태일을 적는다 ────────────────────────
 
 
-def test_물류가_target_state_date_행에서_걷는다():
-    """🔴 **승인이 쓴 행이 아니다.** 승인 01-05 → 01-06 행에 적었고, 취소 01-07 →
-    01-08 행에서 걷는다. 그 사이 날들은 **그대로 둔다** — 그때는 실제로 오는 중이었다.
+def test_물류가_target_state_date_를_적는다():
+    """🔴 **승인이 쓴 날이 아니다.** 승인 01-05 → 01-06 부터 서 있고, 취소 01-07 →
+    01-08 부터 없다. 그 사이 날들은 **그대로 둔다** — 그때는 실제로 오는 중이었다.
+
+    ★ ① 재는 사실이 그대로다. 전에는 그 날짜가 *"어느 fixture 행을 잠그나"* 로
+      드러났고, 지금은 *"`cancelled_as_of` 에 무엇을 적나"* 로 드러난다.
     """
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+    conn = _가짜커넥션(_일정(MINE))
 
     LogisticsCancellationAdapter(sim_run_id="SIM-1").cancel(
         conn,
@@ -232,13 +330,32 @@ def test_물류가_target_state_date_행에서_걷는다():
         financing_mode="LOAN_BASELINE",
     )
 
-    _, params = conn.cur.executed[0]
-    assert params[1] == TARGET, f"상태일 행이 아니라 {params[1]} 을 잠갔다"
-    assert params[1] != APPROVED_ON
+    적힌날, _ = _취소된것(conn)[0]
+    assert 적힌날 == TARGET, f"상태일이 아니라 {적힌날} 을 적었다"
+    assert 적힌날 != CANCELLED_ON, "취소일 자체를 적으면 이미 지나간 하루의 사실이 바뀐다"
+    assert 적힌날 != APPROVED_ON
 
 
-def test_물류_source_ref_가_취소임을_말한다():
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "물류 #484 로 잃은 것이다. withdraw_inventory 는 source_ref 를 받고도"
+        " cancel_schedule 에 안 넘기고, cancel_schedule 은 cancelled_as_of 만"
+        " UPDATE 한다 — 취소 흔적에 '누가 왜 언제' 가 안 남는다."
+        " 마스터 어댑터는 MASTER-CANCEL-<취소일> 을 여전히 만들어 넘긴다."
+        " 적을지 말지는 물류 표의 계약이라 마스터가 대신 정하지 않는다."
+        " 🔴 이 검사가 XPASS 로 빨개지면 물류가 적기 시작했다는 뜻이다 —"
+        " 그때 이 마크를 걷어라."
+    ),
+)
+def test_취소_흔적에_source_ref_가_남는다():
+    """🔴 **취소가 왜 났는지 DB 에 안 남는다.** ③ 잴 대상이 사라진 자리다.
+
+    ⚠️ **다른 데서도 안 지켜진다.** `withdraw_inventory` · `cancel_schedule` ·
+      `assert_cancellable` 을 잰 검사는 이 파일뿐이다 (2026-09-10 기준 저장소 전체).
+      그래서 지우지 않고 `xfail(strict)` 로 **살려 둔다** — 지우면 잃은 줄도 모른다.
+    """
+    conn = _가짜커넥션(_일정(MINE))
 
     LogisticsCancellationAdapter(sim_run_id="SIM-1").cancel(
         conn,
@@ -249,9 +366,9 @@ def test_물류_source_ref_가_취소임을_말한다():
         financing_mode="LOAN_BASELINE",
     )
 
-    _, params = conn.cur.executed[-1]
-    assert "MASTER-CANCEL" in params[4]
-    assert CANCELLED_ON.isoformat() in params[4]
+    나간값 = [str(값) for _, params in conn.cur.executed for 값 in (params or ())]
+    assert any("MASTER-CANCEL" in 값 for 값 in 나간값)
+    assert any(CANCELLED_ON.isoformat() in 값 for 값 in 나간값)
 
 
 # ── ④ 재무 어댑터 — 이름 하나를 옮긴다 ────────────────────────────────────
@@ -374,7 +491,7 @@ def test_재무_어댑터가_financing_mode_를_받는다(monkeypatch: pytest.Mo
 def test_물류_어댑터도_financing_mode_를_받는다():
     """⚠️ **안 쓰더라도 받는다.** 두 파트가 같은 모양이어야 호출부가 하나로 선다 —
     `purchase_ids` 를 재무에만 줬다가 물류 Arrival 이 막힌 자리가 그 교훈이다."""
-    conn = _가짜커넥션(_row([MINE], [MINE]))
+    conn = _가짜커넥션(_일정(MINE))
 
     LogisticsCancellationAdapter(sim_run_id="SIM-1").cancel(
         conn,
