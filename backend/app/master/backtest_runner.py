@@ -30,6 +30,21 @@ walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷
 
 ---
 
+🔴 **승인은 명시로만 켠다** (2026-09-11).
+
+```text
+--auto-approve 를 **안 주면**   승인 함수가 이름조차 안 불린다 · 한 건도 안 선다
+--auto-approve 를 주면          각 판단 **바로 뒤**에 규칙대로 승인이 선다
+```
+
+★★ **설정에 규칙이 있다고 켜지지 않는다.** *"있으니까 한다"* 는 암묵 스위치이고,
+  그러면 설정을 실험하려고 넣은 사람이 **승인까지 하게 된다.**
+
+⚠️ **반대로, 켰는데 규칙이 없으면 걷기 전에 막는다.** 조용히 걸으면 179일 뒤에
+  0건이 나오고 사람은 그것을 *"돌았는데 해당이 없었구나"* 로 읽는다.
+
+---
+
 🔴 **`now` 를 인자로 받는다. 시계를 안 읽는다.**
 
   `plan_next_action` 이 마감(10:30)과 비교하는 값이 `now` 다. 이 파일이 시계를
@@ -88,6 +103,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+from app.master.backfill import BackfillRuleMissing, BackfillRules, read_run_rules
 from app.master.bootstrap import wire_registries
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
@@ -247,6 +263,51 @@ class WalkResult:
         """
         return Counter(one.outbound_status for one in self.days)
 
+    @property
+    def approval_statuses(self) -> Mapping[str, int]:
+        """자동 승인 **단계** 분포 (2026-09-11). 🔴 **네 값을 접지 않고 그대로 센다.**
+
+        ```text
+        NOT_ATTEMPTED  안 켰다 — --auto-approve 를 안 줬다        ← "안 했다"
+        RAN            승인 문까지 돌았다
+        NO_RULE        켰는데 그 실행이 규칙을 안 들었다           ← "못 했다"
+        FAILED         돌리다 터졌다
+        ```
+
+        ⚠️ **매입과 판매를 한 통에 센다.** 어느 사이클이 안 섰는지는 `days` 의 두
+          칸이 그대로 들고 있고, 여기서 묻는 것은 *"며칠에 승인 단계가 돌았나"* 다.
+
+        ⚠️ **값이 있는데 성적표가 안 읽으면 없는 것과 같다** — `outbound_status` 를
+          성적표에 태울 때(`#446`) 배운 그것이다.
+        """
+        return Counter(
+            status
+            for day in self.days
+            for status in (day.procurement_approval_status, day.sales_approval_status)
+        )
+
+    @property
+    def approval_outcomes(self) -> Mapping[str, int]:
+        """승인 **행별** 어휘 분포 (2026-09-11). 🔴 **여덟을 접지 않는다.**
+
+        ```text
+        RECORDED · ALREADY_DECIDED · NOT_APPROVABLE · NO_RULE_FOR_CYCLE
+        LABEL_NOT_OFFERED · AMBIGUOUS_TYPE · BLOCKED_BY_BOUNDARY · FAILED
+        ```
+
+        ★ **이름의 주인은 `backfill.py` 다.** 여기서 새 이름을 안 붙이고 세기만
+          한다 — `end_codes` 가 `scheduler` 의 값을 그대로 세는 것과 같은 모양이다.
+
+        🔴 **`approval_statuses` 와 축이 다르다.** 저쪽은 하루의 단계이고 이쪽은
+          실행 이력 한 행이다 — 묶으면 *"승인이 왜 0건인가"* 를 성적표가 못 답한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is not None:
+                    total.update(approval.outcomes)
+        return total
+
 
 def walk(
     *,
@@ -262,6 +323,8 @@ def walk(
     policy_version: str = DAILY_POLICY_VERSION,
     max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
     ticks: Callable[[], float] = time.monotonic,
+    auto_approve: bool = False,
+    rules_of: Callable[[str], BackfillRules] = read_run_rules,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -286,8 +349,20 @@ def walk(
         `None` 을 안 받는다 (`clock.py` · `verifier.py` 와 같은 규율).
     :param ticks: 소요 시간을 재는 단조 시계. 🔴 **벽시계가 아니다** — 날짜도
         시간대도 안 만들고 *"얼마나 걸렸나"* 만 답한다. 검사가 고정값을 꽂는다.
+    :param auto_approve: 🔴 **기본이 거짓이다. 안 주면 승인 함수가 이름조차 안
+        불린다** (2026-09-11). 켜면 각 판단 **바로 뒤**에 승인이 선다.
+
+        ★★ **설정에 규칙이 있다고 켜지지 않는다.** *"있으니까 한다"* 는 암묵
+          스위치이고, 그러면 설정을 실험하려고 넣은 사람이 **승인까지 하게 된다.**
+          켜는 것은 명시로만이고, 그 명시가 이 인자 하나다.
+    :param rules_of: 그 실행이 정한 규칙을 읽는 자리. 🔴 **`auto_approve` 가
+        거짓이면 한 번도 안 불린다** — 안 켠 걷기가 규칙을 물을 이유가 없다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
+
+        🔴 **`auto_approve` 인데 그 실행이 규칙을 안 들었을 때도 막는다.** 조용히
+          걸으면 179일 뒤에 승인 0건이 나오고, 사람은 그것을 *"승인이 돌았는데
+          해당이 없었구나"* 로 읽는다 — 그때는 하루도 되돌릴 수 없다.
     """
     if not sim_run_id.strip():
         # 🔴 **상수로 메우지 않는다.** 조용히 번인으로 떨어지면 재무 채무와 매입
@@ -310,6 +385,23 @@ def walk(
         raise ValueError(
             f"연속 사고 상한이 {max_consecutive_failures} 다 — 1 보다 작으면 한 날도 못 걷는다"
         )
+
+    # ── 🔴 **켰으면 걷기 전에 규칙을 확인한다** (2026-09-11) ────────────
+    #
+    # ⚠️ **조용히 아무것도 안 하면 사람이 「승인이 돌았는데 0건이구나」 로 읽는다.**
+    #    그래서 첫날을 걷기도 전에 막는다 — 179일을 다 걷고 나서 알면 늦다.
+    #
+    # 🔴 **여기서 규칙을 지어내지 않는다.** 기본 규칙은 곧 업무 규칙이고, 그러면
+    #    아무도 안 정한 규칙으로 곡선이 선다 (`backfill.py` 의 그 규율 그대로).
+    if auto_approve:
+        try:
+            rules_of(sim_run_id)
+        except BackfillRuleMissing as exc:
+            raise ValueError(
+                f"--auto-approve 인데 실행 {sim_run_id!r} 이 백필 규칙을 안 들었다: {exc}"
+                " — 규칙을 실은 실행을 먼저 열어라(`sim_run_runner --backfill-rules`)."
+                " 조용히 0건으로 걷지 않는다"
+            ) from exc
 
     market = calendar()
     started_ticks = ticks()
@@ -347,7 +439,14 @@ def walk(
             # 🔴 **받은 축을 그대로 넘긴다.** 여기서 상수를 다시 읽거나 이름을
             #    고쳐 짓지 않는다 — 그러면 걷기가 부른 하루와 걷기가 말한 실행이
             #    갈리고, 성적표가 자기가 무엇을 쟀는지 모르게 된다.
-            outcome = run_day_fn(action, policy_version=policy_version, sim_run_id=sim_run_id)
+            outcome = run_day_fn(
+                action,
+                policy_version=policy_version,
+                sim_run_id=sim_run_id,
+                # 🔴 **받은 스위치를 그대로 넘긴다.** 여기서 규칙의 유무를 보고
+                #    다시 정하지 않는다 — 그러면 스위치가 둘이 된다.
+                auto_approve=auto_approve,
+            )
         except Exception as exc:  # noqa: BLE001 - 하루가 터져도 다음 날은 걷는다.
             # ★ **터진 날도 사고로 남고 걷기는 이어진다.** 여기서 raise 하면 나머지
             #   날을 통째로 못 본다.
@@ -484,6 +583,15 @@ def _parser() -> argparse.ArgumentParser:
         default=MAX_CONSECUTIVE_FAILURES,
         help=f"연속 사고 상한 (기본 {MAX_CONSECUTIVE_FAILURES})",
     )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        default=False,
+        help=(
+            "🔴 각 판단 바로 뒤에 규칙대로 승인한다 · master_decisions 에 행이 쓰인다"
+            " · 안 주면 한 건도 승인하지 않는다"
+        ),
+    )
     return parser
 
 
@@ -498,6 +606,10 @@ def format_summary(result: WalkResult) -> str:
         f"판매      {dict(sorted(result.sales_statuses.items()))}",
         f"판매코드  {dict(sorted(result.sales_end_codes.items()))}",
         f"출고      {dict(sorted(result.outbound_statuses.items()))}",
+        # 🔴 **승인 줄을 접지 않는다** (2026-09-11). 단계와 어휘가 축이 다르므로
+        #    두 줄이다 — 한 줄로 묶으면 *"안 켰다"* 와 *"켰는데 0건"* 이 같아 보인다.
+        f"승인      {dict(sorted(result.approval_statuses.items()))}",
+        f"승인어휘  {dict(sorted(result.approval_outcomes.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]
@@ -562,6 +674,7 @@ def main(argv: Sequence[str]) -> int:
         end=date.fromisoformat(args.end),
         now=datetime.fromisoformat(args.now),
         max_consecutive_failures=args.max_consecutive_failures,
+        auto_approve=args.auto_approve,
     )
     print(format_summary(result))
     return 0 if result.completed and not result.incidents else 1

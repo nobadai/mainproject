@@ -26,6 +26,7 @@ from typing import Any, Self
 
 import pytest
 
+from app.master.backfill import BackfillRuleMissing
 from app.master.sim_run_open import BaselineLineage, LedgerReset
 from app.master.sim_run_runner import (
     SimRunOpened,
@@ -230,7 +231,7 @@ def test_넷_중_하나라도_없으면_터진다(빠진것: str) -> None:
 
 
 def test_인자에_기본값이_없다() -> None:
-    """🔴 **`--reset` 과 `--note` 말고는 기본값이 하나도 없다.**
+    """🔴 **`--reset` · `--note` · `--backfill-rules` 말고는 기본값이 하나도 없다.**
 
     ⚠️ 기본값을 두면 **그 값이 곧 업무 규칙이 된다** — 아무도 정한 적이 없는데
       실행마다 그 출발점이 찍히고, 나중에 *"왜 저 baseline 인가"* 에 답할 사람이 없다.
@@ -248,6 +249,15 @@ def test_인자에_기본값이_없다() -> None:
             continue
         if 이름 == "--note":
             assert action.default is None
+            continue
+        if 이름 == "--backfill-rules":
+            # 🔴 **기본이 「안 싣는다」다** (2026-09-11). 여기에 기본 규칙 파일을 두면
+            #    아무도 안 정한 규칙으로 곡선이 서고, 승인까지 그 규칙으로 돈다.
+            #
+            # ⚠️ **필수로 안 만든다.** 승인 없이 여는 실행이 여전히 정상이고, 필수로
+            #   만들면 규칙을 쓸 일 없는 실행까지 규칙을 지어내야 한다.
+            assert action.default is None, "🔴 백필 규칙에 기본값이 있다"
+            assert not action.required, "--backfill-rules 는 안 줘도 열려야 한다"
             continue
         assert action.required is True, f"{이름} 이 필수가 아니다"
         assert action.default is None, f"{이름} 에 기본값이 있다: {action.default!r}"
@@ -628,3 +638,158 @@ def test_요약이_안_지웠다는_사실을_적는다() -> None:
     )
     assert _NFC("안 지웠다") in _NFC(안지움)
     assert _NFC("지웠다 (--reset)") in _NFC(지움)
+
+
+# ── 🔴 백필 규칙을 문에서 받아 그대로 싣는다 (2026-09-11) ───────────────
+#
+# 🔴 **어휘의 주인은 부서다.** 규칙 이름도 라벨도 축 이름도 이 문은 모른다 —
+#    `--opening-usage-scope` 를 문에 안 박은 것과 **같은 이유·같은 모양**이다.
+#
+# ⚠️ 검사는 값을 들되 문은 안 든다. 아래 잠금이 그것을 잰다.
+
+#: 검사용 규칙 한 벌. **이 값이 문 코드에 있으면 안 된다.**
+규칙 = {
+    "procurement": {"rule": "ALWAYS_BASE", "scenario_label": "기본"},
+    "sales": {"rule": "ALWAYS_FIXED_TYPE", "scenario_type": "CONSERVATIVE"},
+}
+
+
+def test_안_주면_backfill_칸이_아예_안_선다() -> None:
+    """★ *"규칙을 안 정했다"* 와 *"규칙을 비워 뒀다"* 를 같은 값으로 안 적는다.
+
+    🔴 빈 칸을 만들어 두면 걷기가 그 둘을 못 가르고, `--auto-approve` 가 **막지
+      못한 채** 0건으로 걷는다.
+    """
+    _, 기록, 열림 = _연다()
+
+    assert "backfill" not in 기록.create인자["config_json"]
+    assert 열림.backfill_rules is None
+
+
+def test_주면_받은_것을_그대로_config_json_에_싣는다() -> None:
+    """🔴 **한 글자도 고쳐 적지 않는다.** 고치면 부서의 계약이 이 문에서 갈린다."""
+    _, 기록, 열림 = _연다(backfill_rules=규칙)
+
+    설정 = 기록.create인자["config_json"]
+    assert 설정["backfill"] == 규칙
+    assert 설정["baseline"] == {"from_sim_run_id": 출발실행, "finance_state_id": 출발상태}
+    assert 열림.backfill_rules == 규칙
+
+
+def test_규칙을_실어도_계보를_덮지_않는다() -> None:
+    """🔴 **두 칸이 한 설정에 나란히 앉는다.** 한쪽이 다른 쪽을 밀어내면 안 된다."""
+    _, 기록, _ = _연다(backfill_rules=규칙)
+
+    assert sorted(기록.create인자["config_json"]) == ["backfill", "baseline"]
+
+
+def test_모르는_규칙이면_여는_자리에서_터진다() -> None:
+    """⚠️ 179일을 걷고 나서 *"모르는 규칙이었다"* 를 알면 늦다.
+
+    🔴 **판정을 여기서 베끼지 않는다.** `backfill.read_rules` 를 불러서 막는다 —
+      두 곳에서 막으면 언젠가 한쪽만 고쳐진다.
+    """
+    with pytest.raises(BackfillRuleMissing):
+        _연다(backfill_rules={"procurement": {"rule": "아무거나", "scenario_label": "기본"}})
+
+
+def test_모르는_규칙이면_한_행도_안_세운다() -> None:
+    """🔴 **막았으면 아무것도 안 선다.** 반쪽 실행을 남기지 않는다."""
+    conn = _대역커넥션()
+    기록 = _순서기록()
+    with pytest.raises(BackfillRuleMissing):
+        open_sim_run(
+            conn,
+            sim_run_id=새실행,
+            company_persona_id="PERSONA-HAETDEUL",
+            run_type="WALK",
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 6, 29),
+            as_of=date(2026, 1, 1),
+            status="RUNNING",
+            financing_mode=새조달,
+            baseline=계보,
+            opening_finance_state_id=시작상태,
+            opening_state_date=date(2026, 1, 1),
+            opening_state_type="OPENING",
+            opening_fixture_id=물류씨앗,
+            opening_usage_scope=쓰임,
+            backfill_rules={"모르는칸": {}},
+            reset_fn=기록.reset,
+            create_fn=기록.create,
+            seed_fn=기록.seed,
+            logistics_seed_fn=기록.물류,
+        )
+
+    assert 기록.부른것 == []
+    assert conn.commits == 0
+
+
+@pytest.mark.parametrize(
+    "어휘",
+    ["ALWAYS_BASE", "ALWAYS_FIXED_TYPE", "기본", "보수", "공격", "CONSERVATIVE", "AGGRESSIVE"],
+)
+def test_규칙_어휘를_문에_안_박는다(어휘: str) -> None:
+    """🔴 **규칙 이름도 라벨도 축 이름도 이 문의 것이 아니다.**
+
+    ★ `test_usage_scope_를_문에_안_박는다` 와 같은 모양이다 — 어휘의 주인이
+      밖에 있으면 잠금도 그 자리에 선다.
+
+    🔴 **글자 조각이 아니라 문자열 값을 잰다.** 이 문의 도움말에 *"기본값 없음"* 이
+      여러 번 나오는데, 조각으로 재면 그 문장이 라벨 `기본` 으로 읽혀 **잠금이 코드가
+      아니라 도움말 문장을 재게 된다.**
+    """
+    값들 = {
+        _NFC(node.value)
+        for node in ast.walk(_벗긴_트리())
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert _NFC(어휘) not in 값들, f"문 코드에 규칙 어휘 '{어휘}' 가 박혀 있다"
+
+
+def test_어휘_잠금이_실제로_잡는다() -> None:
+    """🟢 **위 검사가 아무것도 안 재고 초록이 되는 것을 막는다.**
+
+    ★ 라벨이 **문자열 값**이면 잡고, 긴 문장의 **조각**이면 안 잡는다.
+    """
+    박은것 = {
+        _NFC(node.value)
+        for node in ast.walk(ast.parse('label = "기본"\nhelp = "🔴 기본값 없음"'))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    설명만 = {
+        _NFC(node.value)
+        for node in ast.walk(ast.parse('help = "🔴 기본값 없음"'))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert _NFC("기본") in 박은것
+    assert _NFC("기본") not in 설명만
+
+
+def test_요약이_규칙을_실었는지_말한다() -> None:
+    """🔴 **안 실은 실행은 `--auto-approve` 로 못 걷는다.** 그 사실이 눈에 보여야 한다."""
+    공통: dict[str, Any] = {
+        "sim_run_id": 새실행,
+        "financing_mode": 새조달,
+        "baseline": 계보,
+        "opening_finance_state_id": 시작상태,
+        "opening_logistics_fixture_id": 물류씨앗,
+        "period_start": date(2026, 1, 1),
+        "period_end": date(2026, 6, 29),
+        "ledger_reset": None,
+    }
+    안실음 = _NFC(format_summary(SimRunOpened(**공통)))
+    실음 = _NFC(format_summary(SimRunOpened(**공통, backfill_rules=규칙)))
+
+    assert _NFC("안 실었다") in 안실음
+    assert _NFC("실었다") in 실음
+    # ★ **다음 명령 줄만 본다.** 사실을 말하는 줄에도 인자 이름이 나오므로,
+    #   사람이 실제로 붙여 넣는 마지막 줄에서 재야 뜻이 맞는다.
+    assert "--auto-approve" not in 안실음.splitlines()[-1], (
+        "규칙도 없는데 승인 인자를 적어 주면 사람이 그대로 붙여 넣고 걷기 첫 줄에서 막힌다"
+    )
+    assert "--auto-approve" in 실음.splitlines()[-1], (
+        "규칙을 실었으면 걷는 명령에 그 인자가 보여야 한다"
+    )

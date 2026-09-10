@@ -412,16 +412,25 @@ def test_경계를_다시_검사하지_않는다() -> None:
     assert "date(2026" not in 코드, "진입점에 경계 날짜가 박혀 있다"
 
 
-def test_걷다가_저절로_승인이_나지_않는다() -> None:
-    """🔴 **불러야 돈다.** `bootstrap` 에도 `scheduler` 에도 안 끼운다.
+def test_조립_뿌리가_저절로_승인을_켜지_않는다() -> None:
+    """🔴 **불러야 돈다.** `bootstrap` 에 안 끼운다.
 
-    ⚠️ 끼우면 자동 승인을 금지한 규율이 **걷기 한 번으로** 뚫린다.
+    ⚠️ 끼우면 자동 승인을 명시로만 켠다는 규율이 **프로세스 시작 한 번으로** 뚫린다.
+
+    ★★ **`scheduler` 는 이 잠금에서 빠졌다** (2026-09-11). 걷기 안에 승인 자리가
+      섰기 때문이다 — 그 자리가 없으면 **다음 날이 어제 산 것을 못 보고** 179일을
+      걸어도 재고가 안 쌓인다.
+
+      🔴 **규율은 그대로다. 잠금이 옮겨 갔을 뿐이다.** 거기도 기본이 꺼짐이고
+        `--auto-approve` 를 명시로 줘야 서며, 그 사실은
+        `tests/master/test_walk_auto_approve.py` 가 잠근다 — 기본값 셋 · 안 주면
+        이름조차 안 불림 · 설정에 규칙이 있어도 안 켜짐.
     """
-    from app.master import bootstrap, scheduler
+    from app.master import bootstrap
 
-    for 모듈 in (bootstrap, scheduler):
-        원문 = Path(모듈.__file__).read_text(encoding="utf-8")
-        assert "backfill" not in _코드만(원문), f"{모듈.__name__} 이 백필을 부른다"
+    원문 = Path(bootstrap.__file__).read_text(encoding="utf-8")
+
+    assert "backfill" not in _코드만(원문), "조립 뿌리가 백필을 부른다"
 
 
 def test_세어_보기가_승인_문을_들여오지_않는다() -> None:
