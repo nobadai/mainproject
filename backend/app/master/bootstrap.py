@@ -28,6 +28,7 @@ from __future__ import annotations
 from functools import partial
 
 from app.finance.adapter import finance_port
+from app.finance.closing_adapter import FinanceClosingAdapter
 from app.finance.day_open import FinanceDayOpening
 from app.finance.transition import FinanceTransitionAdapter
 from app.logistics.adapter import logistics_port
@@ -37,6 +38,7 @@ from app.logistics.inbound_execution import LogisticsInboundExecution
 from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.logistics.transition import LogisticsTransitionAdapter
 from app.master.cancellation import register_cancellation
+from app.master.closing import register_closing
 from app.master.collection import register_collection
 from app.master.day_open import register_day_opening
 from app.master.finance_cancellation import FinanceCancellationAdapter
@@ -149,6 +151,7 @@ def wire_registries() -> None:
     #    켰다 — **마이그레이션과 이 두 줄은 짝이다.**
     register_day_opening("logistics", LogisticsDayOpening(sim_run_id=BURN_IN_SIM_RUN_ID))
     register_day_opening("finance", FinanceDayOpening())
+    register_closing("finance", FinanceClosingAdapter())
 
 
     # ── 승인 취소 (undo_approval) ───────────────────────────────────────────

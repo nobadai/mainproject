@@ -42,6 +42,7 @@ import pytest
 from app.master import (
     backtest_runner,
     cancellation,
+    closing,
     collection,
     day_open,
     inbound,
@@ -66,6 +67,7 @@ def _등록_현황() -> dict[str, tuple[str, ...]]:
         "cancellation": tuple(sorted(cancellation.registered_cancellations())),
         "inbound": tuple(sorted(inbound.registered())),
         "collection": tuple(sorted(collection.registered())),
+        "closing": tuple(sorted(closing.registered())),
     }
 
 
@@ -82,6 +84,7 @@ def _모두_비운다() -> None:
     cancellation.reset()
     inbound.reset()
     collection.reset()
+    closing.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +106,7 @@ def _등록소를_되돌린다() -> Iterator[None]:
         "cancellation": dict(cancellation.registered_cancellations()),
         "inbound": dict(inbound.registered()),
         "collection": dict(collection.registered()),
+        "closing": dict(closing.registered()),
     }
     try:
         yield
@@ -123,6 +127,9 @@ def _등록소를_되돌린다() -> Iterator[None]:
         collection.reset()
         for part, impl in 저장["collection"].items():
             collection.register_collection(part, impl)
+        closing.reset()
+        for part, impl in 저장["closing"].items():
+            closing.register_closing(part, impl)
 
 
 # ── ① 자기 생존 — 안 부르면 빨간불이어야 한다 ───────────────────────────
@@ -145,6 +152,7 @@ def test_안_부르면_여섯이_다_비어_있다():
         "cancellation",
         "inbound",
         "collection",
+        "closing",
     )
 
 
@@ -186,6 +194,15 @@ def test_두_번_불러도_안전하다():
     wire_registries()
 
     assert _등록_현황() == 처음
+
+
+def test_조립_뿌리가_재무_마감을_등록한다():
+    _모두_비운다()
+
+    wire_registries()
+
+    assert closing.missing() == ()
+    assert tuple(closing.registered()) == ("finance",)
 
 
 # ── ③ 두 진입점이 같은 것을 등록한다 ────────────────────────────────────
@@ -239,7 +256,7 @@ def test_러너가_걷기_전에_안_채우면_빈_채로_걷는다(monkeypatch:
     """🔴 **위 검사의 자기 생존.** 조립 호출을 지운 세상을 만들어 빨간불을 확인한다.
 
     ⚠️ 대역이 아무것도 안 보고 있으면 위 단언은 지우고도 통과한다. 같은 대역으로
-      **안 채운 경로**를 태워 `_빈_등록소` 가 여섯을 다 세는지 본다.
+      **안 채운 경로**를 태워 `_빈_등록소` 가 일곱을 다 세는지 본다.
     """
     본것: dict[str, tuple[str, ...]] = {}
 
@@ -255,7 +272,7 @@ def test_러너가_걷기_전에_안_채우면_빈_채로_걷는다(monkeypatch:
         ["--start", "2026-01-05", "--end", "2026-01-09", "--now", "2026-09-09T10:00+09:00"]
     )
 
-    assert len(_빈_등록소(본것)) == 6
+    assert len(_빈_등록소(본것)) == 7
 
 
 # ── ⑤ 요약 출력이 콘솔 인코딩에서 안 죽는다 ─────────────────────────────

@@ -94,11 +94,17 @@ class FinanceDayClosing:
         )
 
 
-def close_day(*, as_of: date, sim_run_id: str) -> FinanceDayClosingResult:
-    """Close a Finance day outside Master orchestration using one local transaction."""
+def close_day(
+    *, as_of: date, sim_run_id: str, conn: Any | None = None
+) -> FinanceDayClosingResult:
+    """Close a Finance day using the supplied transaction when one exists."""
 
-    with get_connection() as conn:
+    if conn is not None:
         return FinanceDayClosing().close(conn, as_of=as_of, sim_run_id=sim_run_id)
+    with get_connection() as owned_connection:
+        return FinanceDayClosing().close(
+            owned_connection, as_of=as_of, sim_run_id=sim_run_id
+        )
 
 
 def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingFacts:
