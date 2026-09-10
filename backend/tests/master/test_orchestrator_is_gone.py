@@ -216,11 +216,16 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
     #   **앱에서 도달 0 이라 지웠다** (`test_master_legacy_cycle_is_gone.py`).
     #   Critic 테스트가 받침대로 쓰던 부분만 `tests/master/critic/cycle_harness.py`
     #   로 옮겼다 — 옮긴 것은 픽스처이지 앱 코드가 아니므로 여기서 빠지는 것이 맞다.
+    # ★ 2026-09-10 에 inputs.py 가 들어왔다 (`#286`) — 품목 비중의 **분모**를 계약
+    #   품목으로 좁히면서 `ITEMS` 를 계약에서 읽는다. 🔴 세 이름을 적재층이 다시
+    #   적으면 계약이 늘거나 줄 때 한쪽만 바뀐다 — commitment.py·forecast_gate.py 와
+    #   같은 자리다.
     assert users == {
         "band.py": ["app.contracts.core"],
         "commitment.py": ["app.contracts.core"],
         "critic_bridge.py": ["app.contracts.core"],
         "envelope.py": ["app.contracts.core"],
+        "inputs.py": ["app.contracts.core"],
         "flow.py": ["app.contracts.core"],
         "forecast_gate.py": ["app.contracts.core"],
         "outbound.py": ["app.contracts.core"],

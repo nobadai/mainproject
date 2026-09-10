@@ -144,10 +144,20 @@ def test_forecast_만_주입하면_그_키만_REQUEST(매입이_받은_payload):
 
 
 def test_주입이_없으면_종전과_같다(매입이_받은_payload):
-    """★ 이 판이 **안 건드려야 하는 것**이다. 주입 0건이면 표가 전과 한 글자도 다르지 않다."""
+    """★ 이 판이 **안 건드려야 하는 것**이다. 주입 0건이면 적재층이 읽은 셋이 그대로다.
+
+    ⚠️ `execution_calendar` 는 주입 축이 아니라 **달력 축**이라 여기서 빼고 본다
+      (`#300` · `test_execution_calendar_in_sources.py` 가 그쪽을 잰다). 표 전체를
+      통째로 대조하면 이 검사가 달력 판마다 같이 깨진다.
+    """
     response = _run("REQ-INJ-3")
 
-    assert response.input_sources == _loaded().sources()
+    적재층이_읽은_셋 = {
+        key: value
+        for key, value in response.input_sources.items()
+        if key in ("forecast", "confirmed_orders", "policy_values")
+    }
+    assert 적재층이_읽은_셋 == _loaded().sources()
     assert not any(v.startswith("REQUEST:") for v in response.input_sources.values())
 
 

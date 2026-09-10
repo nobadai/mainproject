@@ -46,6 +46,7 @@ from typing import Any, Literal
 
 from psycopg import sql
 
+from app.contracts.core import ITEMS
 from app.finance.db import fetch_all, fetch_one, get_db_schema
 
 #: 값 하나의 출처 등급. **리포트에 그대로 나간다.**
@@ -437,13 +438,26 @@ def load_policy_values(item: str, as_of: date) -> SourcedInput:
 
 
 def _mix_ratio_from_demand() -> dict[str, float]:
+    """품목 비중 — **분모는 계약 품목만이다** (`#286`).
+
+    🔴 계약 밖 품목이 분모에 들면 비중이 눌린다 (매입 실측 2026-09-10 · 배추 0.7643 vs 0.8096).
+
+    ★ **「보일 때 거르기」로는 안 된다** — 비중은 이미 눌린 값이라 받는 쪽에서 되돌릴 수 없다.
+      되돌릴 수 없는 것은 원천에서 막는다.
+
+    ⚠️ DB 행은 안 고친다. 지난 기록을 고쳐 쓰면 기록이 거짓이 된다 — 읽을 때만 거른다.
+
+    ★ **품목 이름을 여기 다시 적지 않는다.** 정본은 `app.contracts.core.ITEMS` 하나다 —
+      두 벌을 두면 계약이 늘거나 줄 때 한쪽만 바뀐다.
+    """
     rows = fetch_all(
         sql.SQL("""
             SELECT i.item_name, d.daily_demand_kg
               FROM {sch}.partner_item_demands d
               JOIN {sch}.items i ON i.item_id = d.item_id
+             WHERE i.item_name = ANY(%s)
         """).format(sch=sql.Identifier(get_db_schema())),
-        (),
+        (list(ITEMS),),
     )
     total = sum(_plain(r["daily_demand_kg"]) for r in rows)
     if not total:
