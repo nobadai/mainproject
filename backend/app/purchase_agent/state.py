@@ -51,7 +51,21 @@ class PurchaseAgentState(TypedDict):
     # ``cash.max_purchase_ratio``를 곱하지 않는다 — 같은 목적으로 두 번 조이면
     # "왜 이만큼밖에 못 사나"의 근거가 흐려진다 (재무 회신 v2.2.1 · B6).
     finance_cap_amount_krw: NotRequired[int | None]
-    # ``purchase_payment_days``: N5. 7 확정 (8/27 재무 · calendar day · 영업일 보정 없음).
+    # ``purchase_payment_days``: N5. 🔴 ~~7 확정 (8/27 재무)~~ — **낡았다** (2026-09-10 실측).
+    # **지금 오는 값은 ``0``(매입 당일 지급)이다.** calendar day · 영업일 보정 없음은 그대로다.
+    #
+    #     매입 실행 200건 · 재무 실행 300건        전부 0 (`.constraints.finance` 자리)
+    #     agent_policy_config                     0 · v1.3-PROVISIONAL · 09-04 note 갱신
+    #                                             "매입일 기준 D+0 calendar days — 당일 지급"
+    #     FINANCE-DECISION-20260827:N5 = 7        **8월 실행 기록에만** 남아 있다
+    #
+    # ⚠️ **그 0 은 「미결」이 아니라 「확정된 0」이다.** ``pending_value`` 가 ``is None`` 으로
+    # 가르므로 폴백 없이 그대로 쓰인다 (규칙 3) — 0 을 falsy 로 읽으면 미결로 뒤집힌다.
+    #
+    # 🟡 **7 이 왜 0 이 됐는지는 아직 못 들었다.** 재무에 물어야 한다 — 마스터 마감
+    # 등록소(`#502`)에 재무 어댑터가 붙으면 `daily_closings.purchase_cash_out_krw` 를
+    # 그 값으로 세고, 그때 현금 곡선이 매입일에 떨어지느냐 이레 뒤냐가 갈린다.
+    #
     # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
     purchase_payment_days: NotRequired[int | None]
     # ``inbound_lead_days``: N4. 입고 리드타임(일). **도착일 = 회차일 + N4**이고, 도착일이
