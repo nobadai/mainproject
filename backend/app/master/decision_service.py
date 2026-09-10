@@ -133,7 +133,12 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
-        update={"commitment": out, "transition": _transition_for(commitment)}
+        update={
+            "commitment": out,
+            # 🔴 **축은 실행 행에서 온다.** 여기서 상수를 읽지 않는다 —
+            #    `_sim_run_id_of` 가 왜인지를 적었다.
+            "transition": _transition_for(commitment, sim_run_id=_sim_run_id_of(row)),
+        }
     )
 
 
@@ -265,7 +270,26 @@ def _policy_version_of(row: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _transition_for(commitment: ApprovedCommitment | None) -> TransitionOut | None:
+def _sim_run_id_of(row: Mapping[str, Any]) -> str | None:
+    """이 결정이 걸린 실행의 축. **실행 이력 행이 정본이다.**
+
+    ★★ **`ledger.sim_run_id_for` 가 요구한 계약이 이것이다.** 그 함수는 *"마스터
+      실행 이력이 `sim_run_id` 를 싣도록 계약을 세우고 이 함수가 그것을 읽어야
+      한다"* 고 적어 두었고, `master_agent_runs.sim_run_id` 가 그 칸이다
+      (`Refs #150` · 2026-09-08 · `run_repository._COLUMNS`).
+
+    🔴 **없으면 메우지 않는다.** `BURN_IN_SIM_RUN_ID` 로 채우면 축이 안 실린 옛
+       실행의 승인이 조용히 번인 장부에 앉고, 재무는 자기 축을 읽으므로 **채무와
+       매입 원장이 서로 다른 실행에 앉는다.** `None` 을 그대로 흘리면 원장 계산이
+       터지고 그 사실이 `TransitionOut.reason` 에 남는다.
+    """
+    value = row.get("sim_run_id")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _transition_for(
+    commitment: ApprovedCommitment | None, *, sim_run_id: str | None
+) -> TransitionOut | None:
     """약정이 섰으면 그것을 재무·물류 장부에 반영한다 (C 형태 ⑦).
 
     ★ **약정이 없으면 부르지 않는다.** 승인이 아니거나 약정을 못 만든 날에는 반영할
@@ -274,10 +298,12 @@ def _transition_for(commitment: ApprovedCommitment | None) -> TransitionOut | No
     ★ **여기서도 결정을 죽이지 않는다.** `apply_approval` 은 예외를 밖으로 내지
       않고 `FAILED` 를 값으로 돌려준다. 적재된 결정이 전이 실패로 지워지면,
       사람이 승인한 사실이 사라진다.
+
+    :param sim_run_id: 실행 이력 행이 실은 축. 🔴 **여기서 짓지 않는다.**
     """
     if commitment is None:
         return None
-    return apply_approval(commitment)
+    return apply_approval(commitment, sim_run_id=sim_run_id)
 
 
 def _commitment_for(
@@ -320,9 +346,7 @@ def _commitment_parts(
 
     matches = _scenarios_of(response_payload, payload.scenario_label)
     if not matches:
-        return CommitmentOut(
-            buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다."
-        ), None
+        return CommitmentOut(buildable=False, reason="승인한 안을 실행 응답에서 찾지 못했다."), None
     if len(matches) > 1:
         # 🔴 첫 것을 조용히 고르면 **어느 안을 약정했는지가 운에 걸린다** (자기 리뷰).
         return CommitmentOut(

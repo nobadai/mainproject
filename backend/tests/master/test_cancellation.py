@@ -32,6 +32,10 @@ from app.master.cancellation import CancellationOut, undo_approval
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
 
 APPROVED_ON = date(2026, 1, 5)
+
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
 CANCELLED_ON = date(2026, 1, 7)
 
 
@@ -142,7 +146,9 @@ def _재무_축을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ⚠️ **못 읽는 경로는 따로 잰다** (`test_축을_못_읽으면_막는다`).
     """
-    monkeypatch.setattr("app.master.cancellation.financing_mode_of", lambda commitment: MODE)
+    monkeypatch.setattr(
+        "app.master.cancellation.financing_mode_of", lambda commitment, *, sim_run_id: MODE
+    )
 
 
 def _등록한다(*, logistics_raises: Exception | None = None) -> tuple[_파트, _파트]:
@@ -159,7 +165,9 @@ def test_어댑터가_하나도_없으면_안_돈다():
     """🔴 **반쪽 취소가 더 나쁘다.** 마스터 원장만 물리면 *"매입은 취소인데 채무는
     살아 있는"* 장부가 남는다."""
     conn = _가짜커넥션()
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "NOT_APPLIED"
     assert out.missing == ["finance", "logistics"]
@@ -171,7 +179,9 @@ def test_한_파트만_등록돼도_안_돈다():
     cancellation.register_cancellation("finance", _파트())
     conn = _가짜커넥션()
 
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "NOT_APPLIED"
     assert out.missing == ["logistics"]
@@ -188,7 +198,9 @@ def test_취소일을_그대로_싣는다_승인일이_아니다():
     """
     finance, logistics = _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     assert finance.calls[0]["cancelled_on"] == CANCELLED_ON
     assert finance.calls[0]["cancelled_on"] != APPROVED_ON
@@ -199,7 +211,9 @@ def test_상태가_설_날은_취소_다음_달력일이다():
     """★ 승인과 **같은 규칙**이다 — *"사건이 일어난 날 + 1일"*."""
     finance, _ = _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     assert finance.calls[0]["target_state_date"] == date(2026, 1, 8)
 
@@ -210,7 +224,9 @@ def test_금요일_취소면_토요일이다():
     assert 금요일.weekday() == 4
     finance, _ = _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=금요일, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(), cancelled_on=금요일, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     토요일 = date(2026, 1, 10)
     assert finance.calls[0]["target_state_date"] == 토요일
@@ -220,7 +236,9 @@ def test_당일_취소면_승인과_같은_상태일에_닿는다():
     """★ 가장 흔한 경우다. 더한 값을 같은 줄에서 빼서 0 이 된다."""
     finance, _ = _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=APPROVED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(), cancelled_on=APPROVED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     assert finance.calls[0]["target_state_date"] == date(2026, 1, 6)
 
@@ -230,7 +248,9 @@ def test_취소일이_승인일보다_앞서면_막는다():
     finance, _ = _등록한다()
     conn = _가짜커넥션()
 
-    out = undo_approval(_commitment(), cancelled_on=date(2026, 1, 4), connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=date(2026, 1, 4), connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "FAILED"
     assert "앞선다" in out.reason
@@ -245,7 +265,12 @@ def test_두_파트가_같은_purchase_ids_를_받는다():
     """★ 재무가 요구한 계약이다 (`#302 §3`) — 파싱도 추론도 임의 선택도 안 한다."""
     finance, logistics = _등록한다()
 
-    undo_approval(_commitment(legs=2), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(legs=2),
+        cancelled_on=CANCELLED_ON,
+        connect=lambda: _가짜커넥션(),
+        sim_run_id=실행축,
+    )
 
     assert finance.calls[0]["purchase_ids"] == logistics.calls[0]["purchase_ids"]
     assert set(finance.calls[0]["purchase_ids"]) == {1, 2}
@@ -258,7 +283,9 @@ def test_승인이_만든_ID_와_같은_값이다():
     commitment = _commitment(legs=2)
     finance, _ = _등록한다()
 
-    undo_approval(commitment, cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        commitment, cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     기대 = {leg.seq: purchase_id_for(commitment, leg.seq) for leg in commitment.arrival_schedule}
     assert finance.calls[0]["purchase_ids"] == 기대
@@ -271,7 +298,9 @@ def test_다_성공하면_한_번_커밋한다():
     conn = _가짜커넥션()
     _등록한다()
 
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "CANCELLED"
     assert out.parts == ["finance", "logistics"]
@@ -285,7 +314,9 @@ def test_한_파트가_터지면_통째로_롤백한다():
     conn = _가짜커넥션()
     _등록한다(logistics_raises=RuntimeError("입고된 뒤라 못 물린다"))
 
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "FAILED"
     assert "입고된 뒤라 못 물린다" in out.reason
@@ -298,7 +329,9 @@ def test_실패해도_예외를_밖으로_내지_않는다():
     """★ `apply_approval` 과 같다 — 취소 실패가 **적재된 결정을 지우면 안 된다.**"""
     _등록한다(logistics_raises=RuntimeError("boom"))
 
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     assert isinstance(out, CancellationOut)
     assert out.status == "FAILED"
@@ -312,7 +345,7 @@ def test_원장을_DELETE_하지_않는다():
     conn = _가짜커넥션()
     _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축)
 
     원문 = " ".join(q for q, _ in conn.updated).upper()
     assert "DELETE" not in 원문, f"원장을 지웠다 — {원문}"
@@ -325,7 +358,7 @@ def test_이미_취소된_것은_안_센다():
     conn = _가짜커넥션()
     _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축)
 
     원문 = " ".join(q for q, _ in conn.updated)
     assert "settlement_status <> 'CANCELLED'" in 원문
@@ -336,7 +369,9 @@ def test_회차가_없으면_원장을_안_건드린다():
     conn = _가짜커넥션()
     finance, _ = _등록한다()
 
-    out = undo_approval(_commitment(legs=0), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(legs=0), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "CANCELLED"
     assert out.cancelled_purchases == 0
@@ -420,7 +455,9 @@ def test_두_파트가_같은_financing_mode_를_받는다():
     """
     finance, logistics = _등록한다()
 
-    undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션())
+    undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: _가짜커넥션(), sim_run_id=실행축
+    )
 
     assert finance.calls[0]["financing_mode"] == MODE
     assert logistics.calls[0]["financing_mode"] == MODE
@@ -433,14 +470,16 @@ def test_축을_못_읽으면_막는다(monkeypatch: pytest.MonkeyPatch):
       실패하면 **DB 를 열지도 않은 채** 멈춘다.
     """
 
-    def 터진다(commitment: Any) -> str:
+    def 터진다(commitment: Any, *, sim_run_id: str | None) -> str:
         raise LookupError("sim_runs 를 못 읽었다")
 
     monkeypatch.setattr("app.master.cancellation.financing_mode_of", 터진다)
     finance, _ = _등록한다()
     conn = _가짜커넥션()
 
-    out = undo_approval(_commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn)
+    out = undo_approval(
+        _commitment(), cancelled_on=CANCELLED_ON, connect=lambda: conn, sim_run_id=실행축
+    )
 
     assert out.status == "FAILED"
     assert "재무 축을 못 읽었다" in out.reason
