@@ -27,6 +27,10 @@ from app.master.scheduler import DayRunOutcome, ItemRunOutcome
 
 ITEMS = ("무", "배추", "양파")
 
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 걷기가
+#:   축을 상수에서 다시 읽어도 검사가 못 알아채면 이 판이 아무것도 안 잰 것이 된다.
+실행축 = "SIM-TEST-WALK"
+
 #: 걷기가 쓸 시각. **마감(10:30) 뒤로 둔다** — 예측이 안 온 날을 `RUN_AND_RECORD`
 #: 로 만들어, 걷기가 `WAIT` 에 걸려 아무것도 안 도는 상태를 피한다.
 AFTER_DEADLINE = datetime(2026, 2, 7, 10, 35, tzinfo=SEOUL)
@@ -157,9 +161,11 @@ def _walk(
     run_day: _RunDay | None = None,
     now: datetime = AFTER_DEADLINE,
     max_consecutive_failures: int = 5,
+    sim_run_id: str = 실행축,
 ) -> tuple[WalkResult, _RunDay]:
     runner = _RunDay() if run_day is None else run_day
     result = walk(
+        sim_run_id=sim_run_id,
         start=start,
         end=end,
         now=now,
@@ -488,7 +494,16 @@ def test_진입점이_walk_에_그대로_넘긴다():
     backtest_runner.walk = _fake  # type: ignore[assignment]
     try:
         code = backtest_runner.main(
-            ["--start", "2026-02-07", "--end", "2026-09-07", "--now", "2026-09-07T10:35+09:00"]
+            [
+                "--sim-run-id",
+                실행축,
+                "--start",
+                "2026-02-07",
+                "--end",
+                "2026-09-07",
+                "--now",
+                "2026-09-07T10:35+09:00",
+            ]
         )
     finally:
         backtest_runner.walk = original  # type: ignore[assignment]
@@ -513,7 +528,16 @@ def test_사고가_있으면_0_이_아니다():
     backtest_runner.walk = _fake  # type: ignore[assignment]
     try:
         code = backtest_runner.main(
-            ["--start", "2026-02-07", "--end", "2026-02-07", "--now", "2026-02-07T10:35+09:00"]
+            [
+                "--sim-run-id",
+                실행축,
+                "--start",
+                "2026-02-07",
+                "--end",
+                "2026-02-07",
+                "--now",
+                "2026-02-07T10:35+09:00",
+            ]
         )
     finally:
         backtest_runner.walk = original  # type: ignore[assignment]

@@ -117,8 +117,13 @@ def wire_registries() -> None:
     # 🔴 **`sim_run_id` 는 마스터가 정한다.** `persist_inventory` 의 WHERE 가 그 값을
     #    쓰지만 *"어느 실행의 장부인가"* 는 물류 사실이 아니다. 물류 모듈에 상수로
     #    박으면 실행이 둘이 되는 날 물류 코드를 고쳐야 하므로 여기서 눈에 보이게 준다.
-    #    값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 매입 원장
-    #    (`ledger.sim_run_id_for`)도 같은 상수를 가리킨다 — 새로 만들지 않는다.
+    #    값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다 — 새로 만들지 않는다.
+    #
+    # ⚠️ **매입 원장은 2026-09-10 부터 이 상수를 안 쓴다.** `ledger.sim_run_id_for` 는
+    #    부르는 쪽이 준 축을 돌려주고, 그 값은 결정이 걸린 실행 행에서 온다
+    #    (`decision_service._sim_run_id_of`). 여기 등록소는 **프로세스 시작 때 한 번**
+    #    묶이므로 아직 그 축을 못 받는다 — 걷기가 번인 아닌 실행을 타는 날 이 줄이
+    #    매입 원장과 갈린다. 그 자리를 옮기는 것은 별도 판이다 (등록소에 축을 흘리는 일).
     register_transition("finance", FinanceTransitionAdapter())
     register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
 

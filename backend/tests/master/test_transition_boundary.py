@@ -26,6 +26,10 @@ from app.master.decision import DecisionIn, DecisionOut
 
 AS_OF = date(2025, 12, 31)
 
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
+
 
 @pytest.fixture(autouse=True)
 def 전이_등록소를_비운다() -> Iterator[None]:
@@ -168,7 +172,7 @@ def test_둘_다_미등록이면_커넥션을_열지_않는다() -> None:
     """🔴 열고 나서 아무 일도 안 하면 **빈 트랜잭션**이 승인마다 열렸다 닫힌다."""
     calls: list[int] = []
     out = transition.apply_approval(
-        _commitment(), connect=_connect_spy(가짜커넥션(), calls)
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
     )
 
     assert out.status == "NOT_APPLIED"
@@ -184,7 +188,7 @@ def test_한쪽만_등록되면_반쪽으로_반영하지_않는다() -> None:
     calls: list[int] = []
 
     out = transition.apply_approval(
-        _commitment(), connect=_connect_spy(가짜커넥션(), calls)
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
     )
 
     assert out.status == "NOT_APPLIED"
@@ -203,7 +207,9 @@ def test_둘_다_등록되면_한_커넥션으로_한_번_커밋한다() -> None
     conn = 가짜커넥션()
     calls: list[int] = []
 
-    out = transition.apply_approval(_commitment(), connect=_connect_spy(conn, calls))
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(conn, calls), sim_run_id=실행축
+    )
 
     assert out.status == "APPLIED"
     assert out.parts == ["finance", "logistics"]
@@ -242,7 +248,9 @@ def test_재무_build_는_상태가_설_날을_받는다() -> None:
     transition.register_transition("finance", 가짜전이("finance", log))
     transition.register_transition("logistics", 가짜전이("logistics", log))
 
-    transition.apply_approval(_commitment(), connect=_connect_spy(가짜커넥션(), []))
+    transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), []), sim_run_id=실행축
+    )
 
     assert ("finance.build", AS_OF + timedelta(days=1)) in log
 
@@ -260,7 +268,9 @@ def test_물류_적재가_터지면_전부_되돌린다() -> None:
     )
     conn = 가짜커넥션()
 
-    out = transition.apply_approval(_commitment(), connect=_connect_spy(conn, []))
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(conn, []), sim_run_id=실행축
+    )
 
     assert out.status == "FAILED"
     assert "로트 표가 없다" in out.reason, "사유를 남기지 않으면 무엇이 터졌는지 모른다"
@@ -278,7 +288,9 @@ def test_적재_실패가_예외로_올라가지_않는다() -> None:
         "logistics", 가짜전이("logistics", log, persist_raises=RuntimeError("끊겼다"))
     )
 
-    out = transition.apply_approval(_commitment(), connect=_connect_spy(가짜커넥션(), []))
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), []), sim_run_id=실행축
+    )
 
     assert out.status == "FAILED"
 
@@ -295,7 +307,7 @@ def test_build_가_터지면_커넥션을_열지_않는다() -> None:
     calls: list[int] = []
 
     out = transition.apply_approval(
-        _commitment(), connect=_connect_spy(가짜커넥션(), calls)
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
     )
 
     assert out.status == "FAILED"
@@ -327,7 +339,14 @@ def wired(monkeypatch):
     saved: dict[str, Any] = {}
 
     def _run_for(request_id, history_run_id):
-        return {"run_id": uuid4(), "request_id": request_id, "response_payload": saved["response"]}
+        # 🔴 **축이 실행 행에 실려 있다** (2026-09-10 · `master_agent_runs.sim_run_id`).
+        #    안 실으면 승인이 원장을 못 쓴다 — 그것도 `test_sim_run_axis.py` 가 잰다.
+        return {
+            "run_id": uuid4(),
+            "request_id": request_id,
+            "response_payload": saved["response"],
+            "sim_run_id": 실행축,
+        }
 
     def _save(**kw):
         return DecisionOut(
@@ -407,7 +426,11 @@ def test_등록되어_있으면_승인_경로가_커밋까지_간다(wired, monk
     monkeypatch.setattr(
         svc,
         "apply_approval",
-        lambda commitment, **_: real_apply(commitment, connect=lambda: conn),
+        # ★ **축은 그대로 흘린다.** 여기서 `**_` 로 삼키면 결정 경로가 축을 넘기는지가
+        #   이 검사에서 안 보인다.
+        lambda commitment, *, sim_run_id, **_: real_apply(
+            commitment, sim_run_id=sim_run_id, connect=lambda: conn
+        ),
     )
 
     out = wired(_response())
