@@ -1,7 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# STATUS: TOOL 후보 — 유지 (2026-08-26)
-#   6레이어 56검사. 정의서 §3.7.1 — **마스터가 직접 가진 검증 Tool** 이 된다.
-#   → `app/master/flow.py` 의 `VerifierPort` 에 주입될 구현. 파일은 그대로 둔다.
+# STATUS: 마스터의 검증 Tool — 이미 주입돼 돈다 (2026-09-10 실측)
+#   6레이어 56검사. 정의서 §3.7.1 — **마스터가 직접 가진 검증 Tool** 이다.
+#   → "주입될 구현" 이 아니라 **주입돼 있다.** 기본값 자리에 있어 안 주면 이것이 붙는다.
+#         verifier.py:280            critic: CriticPort | None = run_critic_procurement
+#         critic/service.py:34       run_critic_procurement 이 이 파일을 부른다
+#         master/service.py:103      verifier = MasterVerifier() if verifier is None else ...
+#     그 뒤로 `app/master/flow.py` 의 `VerifierPort` 로 들어간다.
 #   ⚠️ 삭제 대상이 아니다. 마스터 구조에서 오히려 호출 지점이 늘어난다(④ 실행 계획 온전성).
 # ─────────────────────────────────────────────────────────────────────────────
 """★ **`app/critic/` 에서 옮겼다** (2026-09-07 · Critic 은 마스터의 툴이다).
