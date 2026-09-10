@@ -828,8 +828,16 @@ def _is_number_map(value: Any) -> bool:
 #: ⚠️ **이름으로만 뺀다.** 모양으로 빼려다 재무 `critical_payment_dates`
 #: (날짜 배열) 의 근거 요구까지 지웠다 — `test_비어있지_않은_리스트는_근거가_
 #: 필요하다` 가 잡았다. 날짜 배열과 코드 배열은 둘 다 문자열 배열이라 못 가른다.
+#: `risks` 가 들어온 경위 (매입 청함 · 2026-09-10):
+#: `SUPPLY_CAPACITY_QUERY` 회신이 `risks` 를 **최상위 필수**로 싣는다 — 판매 계약
+#: (`sales.schemas.PurchaseAdditionalSupplyResult`)이 그 칸을 필수로 두어 안 낼 수가
+#: 없다. 그런데 그것도 **위험 문장의 배열**이라 `soft_warnings` 와 성질이 같다 —
+#: 붙일 수 있는 근거가 *"위험 2건"* 같은 **개수뿐**이고 그건 세어 본 것이다.
+#:
+#: 🟢 재무·매입·판매가 셋 다 `list[str]` 로 같은 뜻에 쓴다 (실측 2026-09-10 ·
+#:   `finance/schemas.py:298` · `purchase_agent/schemas.py:407` · `sales/schemas.py:348`).
 ENVELOPE_META_KEYS: frozenset[str] = frozenset(
-    {"policy_version_used", "as_of", "state_date", "soft_warnings"}
+    {"policy_version_used", "as_of", "state_date", "soft_warnings", "risks"}
 )
 
 
