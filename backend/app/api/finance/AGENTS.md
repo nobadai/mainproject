@@ -60,7 +60,7 @@ def build(as_of: date, state: str) -> FinanceTab:
 **★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요.**
 
 ```python
-from app.finance.dashboard_service import get_finance_dashboard, get_finance_cashflow
+from app.finance.dashboard import get_finance_dashboard, get_finance_cashflow
 dash = get_finance_dashboard(sim_run_id=..., as_of=as_of)
 flow = get_finance_cashflow(sim_run_id=..., as_of=as_of)
 ```
@@ -137,17 +137,23 @@ rows = fetch_all(f'SELECT * FROM {schema}.finance_states WHERE as_of = %s', (as_
 
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
-| `states` | `list[StateOption]` | 필수 | 고를 수 있는 저장 상태 |
-| `selected` | `str` | 필수 | 지금 고른 상태 |
+| `has_data` | `bool` | 필수 | 요청일까지 표시할 재무 상태가 있는지 |
+| `states` | `list[StateOption]` | 필수 | 실제로 저장된 재무 상태 |
+| `selected` | `str` | 필수 | 대표로 요약한 상태 |
+| `requested_as_of` | `str` | 필수 | 사용자가 요청한 기준일 |
+| `state_as_of` | `str &#124; None` | 필수 | 실제로 조회된 재무 상태 기준일 |
+| `latest_closing_as_of` | `str &#124; None` | 필수 | 최근 일마감 기준일 |
 | `stats` | `list[Stat]` | 필수 | 현금 · 최소 운영자금 · 받을 돈 · 부채 |
+| `action_card` | `Card &#124; None` | 필수 | 지금 확인할 자금 |
+| `state_indicator` | `str &#124; None` | 필수 | 비교할 상태가 하나뿐일 때의 짧은 안내 |
+| `state_cards` | `list[Card]` | 필수 | 저장된 재무 상태 비교 카드 |
 | `explain` | `Note` | 필수 | 고른 상태가 지금 어떤 뜻인가 |
 | `read_only` | `Note` | 필수 | 이 화면이 조회 전용이라는 안내 |
-| `cash_chart` | `Chart` | 필수 | 한 달 일별 현금 |
-| `flows` | `list[FlowCell]` | 필수 | 이번 달 돈의 흐름 |
+| `cash_chart` | `Chart &#124; None` | 필수 | 최근 일별 현금 |
+| `flows` | `list[FlowCell]` | 필수 | 기준일까지 누적 자금 흐름 |
 | `balances` | `list[Stat]` | 필수 | 받을 돈 · 줄 돈 |
-| `balances_note` | `Note` | 필수 | 미지급이 없으면 경고 대신 «정산 완료» 로 |
-| `closings` | `Table` | 필수 | 최근 일별 마감 |
-| `tables_read` | `list[str]` | 필수 | 어느 표를 읽었나. 화면 아래에 적는다 |
+| `balances_note` | `Note &#124; None` | 필수 | 미지급이 없으면 경고 대신 «정산 완료» 로 |
+| `closings` | `Table &#124; None` | 필수 | 최근 일별 마감 |
 | `source` | `Source` | 필수 | 예시값인지 실제 값인지 |
 
 ### `StateOption` — 저장된 재무 기준 상태 하나.
@@ -155,7 +161,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.finance_states WHERE as_of = %s', (as_
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
 | `key` | `str` | 필수 | base · loan 처럼 주소에 실리는 값 |
-| `label` | `str` | 필수 | 고르는 목록에 보일 이름 |
+| `label` | `str` | 필수 | 화면에 보일 이름 |
 | `explain` | `str` | 필수 | 이 상태가 무엇인지 한 문단 |
 
 ### `FlowCell` — 돈이 어디로 나가고 들어왔나 — 한 칸.
@@ -164,8 +170,8 @@ rows = fetch_all(f'SELECT * FROM {schema}.finance_states WHERE as_of = %s', (as_
 |---|---|---|---|
 | `label` | `str` | 필수 | 원장 용어 말고 사람 말로 |
 | `value` | `str` | 필수 | 금액. 자릿점까지 넣어서 |
-| `term` | `str` | 필수 | 원래 회계 용어. 작게 같이 보인다 |
 | `tone` | `str` | 선택 | neutral · good · warn · bad |
+| `group` | `Literal['in', 'out']` | 필수 | 들어온 돈과 나간 돈 구분 |
 
 ---
 

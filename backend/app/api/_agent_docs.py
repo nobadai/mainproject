@@ -508,10 +508,10 @@ fc = get_forecast(item, as_of, "AUC")   # LookupError · RuntimeError 를 낸다
     ),
     Part(
         key="purchase", owner="매입", title="매입",
-        route="/api/purchase?as_of=2026-01-06", screen="/console/purchase",
+        route="/api/purchase?as_of=2026-01-22", screen="/console/purchase",
         db_module="app.finance.db", table="purchases",
         model=PurchaseTab,
-        signature="def build(as_of: date) -> PurchaseTab:",
+        signature="def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:",
         tables="""\
 읽을 곳: `master_agent_runs`(저장된 실행) · `master_decisions`(사람의 결정) ·
 `purchases` + `purchase_items`(확정 매입 원장) · `items`(품목 이름).
@@ -561,6 +561,39 @@ cut_unit_price  우리 컷 (self_check.check_max_price)
 **확정 매입이 없으면 빈 표**로 두고 `empty_text` 로 이유를 적습니다 —
 "아직 확정된 매입이 없습니다 — 위에서 안을 고르면 여기에 생깁니다".
 0건과 «아직 안 골랐다» 는 다릅니다.
+
+## ★ `sim_run_id` — 매입은 **㉮ 로 정했습니다** (2026-09-10)
+
+⚠️ 위 「아직 안 정한 것」은 공용 안내입니다. **매입은 정했습니다.**
+
+```
+GET /api/purchase?as_of=2026-01-22&sim_run_id=SIM-BURNIN-202512
+```
+
+마스터가 축 이름 규칙(`SIM-{RUN_TYPE}-{YYYYMM}[-{구분}]`)을 통보하며
+*"상수로 박지 말고 **받아서 그대로 흘려** 달라"* 고 했습니다. 그래서
+주소 파라미터로 받습니다.
+
+🔴 **안 주면 안 거릅니다.** 축이 붙기 전 실행이 1,202건 있어서(실측)
+무조건 걸러 버리면 스무 날이 통째로 빕니다.
+
+⚠️ 다른 탭 셋은 아직 상수(`ledger_repository.BURN_IN_SIM_RUN_ID`)를 씁니다.
+그 상수 주석이 *"여러 개가 되면 요청 파라미터로 올린다"* 이므로 매입이
+**먼저 그 자리에 간 것**입니다.
+
+**🔴 거르는 자리는 SQL 이 아니라 파이썬입니다.** `_read` 는 전부 읽고
+`_pick` · `_committed` 가 고릅니다. 이유 둘입니다.
+
+```
+① 화면이 «전체 몇 건 중 이 걷기 몇 건» 을 말하려면 전체를 봐야 합니다.
+   WHERE 로 걸러 오면 뺀 수를 셀 수 없고, 그러면 조용히 없애는 것이 됩니다
+② 검사가 `_read` 를 대신 세워 상황을 주입합니다. WHERE 에 두면 그 주입이
+   필터를 건너뛰어 축이 도는지를 못 잽니다
+```
+
+**🔴 이름을 쪼개 뜻을 읽지 마세요.** `SIM-WALK-202601-BASE` 의 `BASE` 는
+사람이 목록에서 고를 때 쓰는 꼬리표이고, 뜻은 `sim_runs` 행
+(`financing_mode` · `config_json`)이 답합니다. 여기서는 **같은지만** 봅니다.
 """,
     ),
     Part(
