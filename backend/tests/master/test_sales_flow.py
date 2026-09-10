@@ -44,6 +44,7 @@ from app.master.sales_flow import (
     SalesFlow,
     sales_call_budget,
 )
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 AS_OF = date(2026, 9, 6)
 
@@ -120,7 +121,7 @@ def scenario(
 # ── 가짜 포트 ────────────────────────────────────────────────────────────────
 
 
-def logistics(runtime: str = "READY", adjustments: tuple = ()):
+def logistics(runtime: str = "READY", adjustments: tuple = (), payload: dict | None = None):
     """물류 — `PRE_SALES` 초기 컨텍스트."""
 
     def port(request: AgentRequest):
@@ -135,7 +136,7 @@ def logistics(runtime: str = "READY", adjustments: tuple = ()):
         else:
             reply = _reply(
                 request,
-                payload={"sellable": "yes"},
+                payload=PRE_SALES_PAYLOAD if payload is None else payload,
                 suggested_adjustments=adjustments,
             )
         return reply, _meta(request, reply)
@@ -396,34 +397,28 @@ def test_물류가_못_답하면_컨텍스트_칸을_안_만든다():
 
 
 def test_물류가_답하면_컨텍스트를_실어_보낸다():
+    """🔴 **봉투 래퍼가 아니라 물류 payload 가 그대로 간다** (물류 PR #484 §3)."""
     보낸것: list[dict] = []
     happy(sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
 
-    assert 보낸것[0]["supply_context"]["payload"] == {"sellable": "yes"}
+    assert 보낸것[0]["logistics_context"] == PRE_SALES_PAYLOAD
 
 
-def test_물류_컨텍스트가_아직_판매에_안_닿는다():
-    """🔴 **지금은 못 닿는다. 그 사실을 적어 둔다** (실측 2026-09-07 · 계약 미결).
+def test_물류_컨텍스트가_판매_칸_이름으로_간다():
+    """🔴 **이제 닿는다** (2026-09-10 · 물류 PR #484 수신요청 §3 · 판매 `#509`).
 
-    판매 칸 이름은 `logistics_context` 인데 마스터는 `supply_context` 로 싣고, 어댑터가
-    모르는 키를 걸러내므로(`app/sales/adapter.py` 가 `model_fields` 로 거른다) 이 값은
-    **아무 소리 없이 사라진다.**
-
-    ⚠️ **그렇다고 이름만 맞추면 더 나빠진다.** 실측으로 확인했다 — 이름을 바꾸면
-      후보 3안·재무 3회까지 가던 경로가 `extra_forbidden` 6건으로 **선다.** 두 겹으로
-      모양이 안 맞기 때문이다.
+    전에는 못 닿았고 이 자리가 그 사실을 적어 뒀다. 막고 있던 둘이 다 풀렸다.
 
     ```text
-    ① 마스터가 싣는 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼다  ← 마스터 소유
-    ② 래퍼를 벗겨도 SalesLogisticsContext(extra="forbid") 가 다섯을 거부한다
-       as_of · policy_version_used · inventory_by_item · lot_constraints
-       · shared_daily_outbound_capacity_kg
-       물류가 근거 주소지정 때문에 일부러 최상위로 올린 셋이 그중 셋이다  ← 물류·판매 계약
+    ① 마스터가 싣던 것이 물류 payload 가 아니라 `_verdict_of` 봉투 래퍼였다
+       → 마스터 소유. `sales_flow._proposal_input` 이 payload 만 벗겨 낸다
+    ② SalesLogisticsContext(extra="forbid") 가 다섯 키를 거부했다
+       → #509 로 해소. 받는 칸 일곱과 물류 PRE_SALES 최상위 일곱이 지금 같다
     ```
 
-    ★ **이 검사는 현재 상태를 잠그는 것이 아니라 미결을 드러내는 것이다.**
-      ②가 정해져 마스터가 이름을 맞추는 날 **빨개진다** — 그때 고치는 사람이 이 문서를
-      읽고 무엇이 정해졌는지 같이 적게 된다.
+    ⚠️ **`extra="forbid"` 는 그대로 둔다.** 모르는 칸이 들어오면 판매가 문 앞에서
+      세우는 것이 맞다 — 여기서 재는 것은 *"칸 이름이 맞는가"* 이지
+      *"아무거나 받아 주는가"* 가 아니다.
     """
     from app.sales.schemas import SalesLogisticsContext, SalesProposalInput
 
@@ -432,10 +427,43 @@ def test_물류_컨텍스트가_아직_판매에_안_닿는다():
 
     assert "logistics_context" in SalesProposalInput.model_fields
     assert "supply_context" not in SalesProposalInput.model_fields
-    assert "supply_context" in 보낸것[0], "마스터가 드는 이름 그대로다 — 미결이라 안 바꿨다"
-    assert SalesLogisticsContext.model_config.get("extra") == "forbid", (
-        "extra 가 열리면 이름만 맞춰도 되는 날이다 — 이 검사를 다시 봐라"
-    )
+    assert "supply_context" not in 보낸것[0], "판매가 모르는 이름은 더 이상 안 싣는다"
+    assert SalesLogisticsContext.model_config.get("extra") == "forbid"
+
+
+def test_봉투_래퍼를_통째로_싣지_않는다():
+    """🔴 **`verdict.payload` 만 벗겨 낸다** (물류 §3).
+
+    래퍼(`agent` · `mode` · `run_id` · `runtime_status` · `reasoning` · `missing_data`)
+    는 마스터 이력의 어휘다. 그것이 판매 칸에 그대로 들어가면
+    `SalesLogisticsContext(extra="forbid")` 가 문 앞에서 회신 전체를 거부한다.
+    """
+    보낸것: list[dict] = []
+    happy(sales=seller([[scenario("SCN-1")]], capture=보낸것)).run()
+
+    실린것 = 보낸것[0]["logistics_context"]
+    for 래퍼칸 in ("agent", "mode", "run_id", "runtime_status", "reasoning", "missing_data"):
+        assert 래퍼칸 not in 실린것, f"{래퍼칸} 은 봉투 래퍼의 칸이지 물류 payload 가 아니다"
+
+
+def test_물류_payload_를_재조립하지_않는다():
+    """🔴 **마스터가 `sellable_supply` 를 풀어 최상위 칸을 다시 만들지 않는다** (물류 §3).
+
+    호환용 중복키를 만들면 같은 사실의 주인이 둘이 되고, 물류가 주소를 바꾸는 날
+    둘이 갈린다. 실린 것은 물류가 낸 그 매핑 **그대로**다.
+    """
+    중첩 = {
+        "sellable_supply": {"inventory_by_item": [{"item": "배추", "available_qty_kg": 3000.0}]},
+        "delivery_feasibility": {"daily_outbound_capacity_kg": 7636.72},
+    }
+    보낸것: list[dict] = []
+    happy(
+        inventory=logistics(payload=중첩),
+        sales=seller([[scenario("SCN-1")]], capture=보낸것),
+    ).run()
+
+    assert 보낸것[0]["logistics_context"] == 중첩
+    assert "inventory_by_item" not in 보낸것[0]["logistics_context"]
 
 
 def test_business_mode_는_최상위로_나간다():

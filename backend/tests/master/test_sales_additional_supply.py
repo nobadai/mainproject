@@ -44,6 +44,7 @@ from app.master.sales_flow import (
     SALES_BUDGET,
     SalesFlow,
 )
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 AS_OF = date(2026, 9, 6)
 매입경로 = ("purchase", "SUPPLY_CAPACITY_QUERY")
@@ -115,7 +116,7 @@ def 후보(
 
 def 물류():
     def port(request: AgentRequest):
-        reply = _reply(request, payload={"sellable": "yes"})
+        reply = _reply(request, payload=PRE_SALES_PAYLOAD)
         return reply, _meta(request, reply)
 
     return port

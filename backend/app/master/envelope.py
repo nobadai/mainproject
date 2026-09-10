@@ -752,7 +752,18 @@ class EnvelopeFinding:
 _BIG_NUMBER = re.compile(r"\d[\d,]{2,}")
 _SENTENCE_SPLIT = re.compile(r"[.!?。]\s*|\n+")
 _LABEL = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_CLAIM_PATH = re.compile(r"^(?P<key>[^\[\].]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$")
+#: 🔴 **`key` 가 점을 받는다** (물류 PR #484 수신요청 §2).
+#:
+#: 물류 `PRE_SALES` 는 근거 주소를 **값이 실제로 앉은 자리**로 낸다.
+#:
+#: ```text
+#: sellable_supply.inventory_by_item[배추].available_qty_kg
+#: sellable_supply.lot_constraints[LOT-001].remaining_freshness_days
+#: ```
+#:
+#: 점을 안 받던 동안 이 다섯 갈래 중 넷이 `canonical_claim` 에서 `None` 이 되어
+#: **값이 payload 에 있는데도 `E-EVIDENCE-ORPHAN`** 이 떴다 (물류 실측 · 6건 중 4건).
+_CLAIM_PATH = re.compile(r"^(?P<key>[^\[\]]+)\[(?P<sel>[^\]]+)\]\.(?P<sub>.+)$")
 
 _MAX_REASONING_SENTENCES = 3
 
@@ -882,6 +893,26 @@ def required_claims(payload: Mapping[str, Any], judgment_fields: Sequence[str] =
     return out
 
 
+_MISSING = object()
+"""`_walk` 가 *"그 자리가 없다"* 를 돌려주는 표. `None` 을 쓰면 **물류가 일부러 낸
+`None`**(§1.2-10 — "모른다") 과 구별이 안 된다."""
+
+
+def _walk(payload: Mapping[str, Any], path: str) -> Any:
+    """`a.b.c` 를 **Mapping 만 따라** 내려간다. 중간이 Mapping 이 아니면 `_MISSING`.
+
+    🔴 **배열을 안 뚫는다.** 배열 항목을 가리키는 것은 셀렉터(`[...]`) 의 일이고,
+      점으로도 뚫게 두면 `lots.0.qty` 와 `lots[0].qty` 두 표기가 같은 자리를 가리켜
+      **한 사실에 주소가 둘**이 된다.
+    """
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
 def canonical_claim(payload: Mapping[str, Any], claim: str) -> str | None:
     """`scenarios[공격].total_amount_krw` → `scenarios[1].total_amount_krw`.
 
@@ -889,14 +920,32 @@ def canonical_claim(payload: Mapping[str, Any], claim: str) -> str | None:
     아무거나와 맞으면 된다(`label` · `scenario_id` 등) — 도메인마다 식별 필드가 달라서
     하나로 못 박지 않는다.
 
-    가리키는 곳이 없으면 `None` — 고아 근거다.
+    ★ **점이 있는 중첩 주소도 읽는다** (물류 PR #484 수신요청 §2 · 2026-09-10).
+
+      ```text
+      sellable_supply.inventory_by_item[배추].available_qty_kg   점 + 셀렉터
+      delivery_feasibility.daily_outbound_capacity_kg            점만
+      total_amount_krw                                           예전 그대로
+      ```
+
+      돌려주는 canonical 은 **점 접두사를 유지한다** —
+      `sellable_supply.inventory_by_item[0].available_qty_kg`. 접두사를 떼면 두 블록에
+      같은 이름의 배열이 있는 날 서로 다른 사실이 한 주소로 접힌다.
+
+    🔴 **읽는 기능만 넓힌다. `required_claims` 는 한 글자도 안 바꾼다** (물류 §2.3).
+      중첩 Mapping 안의 숫자를 자동으로 필수 근거로 만들면 매입 `required` 2→4,
+      판매 8→10 의 공용 회귀가 그대로 되살아난다. 그래서 dotted canonical 은
+      `covered` 에는 들어가도 `required` 에는 **영원히 안 들어간다** — 그 비대칭이
+      의도다.
+
+    가리키는 곳이 없으면 `None` — 고아 근거다. **fail-closed 는 그대로다.**
     """
     match = _CLAIM_PATH.fullmatch(claim)
     if match is None:
-        return claim if claim in payload else None
+        return claim if _walk(payload, claim) is not _MISSING else None
 
     key, selector, sub = match.group("key"), match.group("sel"), match.group("sub")
-    items = payload.get(key)
+    items = _walk(payload, key)
     if not _is_item_list(items):
         return None
 

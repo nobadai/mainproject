@@ -36,6 +36,7 @@ from app.master.day_gate import DayGate
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.master.schemas import SalesRunRequest
 from app.master.service import run_sales
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 평일 = date(2026, 9, 10)
 
@@ -92,7 +93,7 @@ def _wire(*agents: str, capture: list | None = None, 물류_회신: dict | None 
     called = capture if capture is not None else []
     wiring.reset()
     if "inventory" in agents:
-        wiring.register("inventory", _port({"sellable": "yes"}, called, **(물류_회신 or {})))
+        wiring.register("inventory", _port(PRE_SALES_PAYLOAD, called, **(물류_회신 or {})))
     if "sales" in agents:
         wiring.register("sales", _port(_제안, called))
     if "finance" in agents:

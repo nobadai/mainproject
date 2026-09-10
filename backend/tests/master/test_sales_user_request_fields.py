@@ -48,6 +48,7 @@ from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.master.schemas import SalesRunRequest
 from app.master.service import run_sales
 from app.sales.schemas import SalesUserRequest
+from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 평일 = date(2026, 9, 10)
 
@@ -102,7 +103,7 @@ def _나르는_칸() -> set[str]:
     """
     잡은_것: list[tuple[str, dict[str, Any]]] = []
     wiring.reset()
-    wiring.register("inventory", _port({"sellable": "yes"}, 잡은_것))
+    wiring.register("inventory", _port(PRE_SALES_PAYLOAD, 잡은_것))
     wiring.register("sales", _port({"scenarios": []}, 잡은_것))
     wiring.register("finance", _port({"verdict": "ok"}, 잡은_것))
 

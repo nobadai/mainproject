@@ -82,8 +82,19 @@ database/10_domain_schema.sql
 ```text
 RAN           출고 단계를 **탔다**       `ItemRunOutcome.status` · `procurement_status`
 FAILED        해 보고 터졌다             같은 곳
-NOTHING_DUE   확인했고 나갈 것이 없다     `InboundOut` · `CollectionOut`
+NOTHING_DUE   확인했고 나갈 것이 없다     `InboundOut` · `CollectionOut` — **날 단위**
+SHORT         확보가 0kg 이라 나간 것이 없다   ← 여기서 새로 둔다 (품목 단위)
 ```
+
+🔴 **`SHORT` 를 `NOTHING_DUE` 로 접지 않는다** (물류 PR #484 수신요청 §5.1).
+
+```text
+NOTHING_DUE   그날 나갈 판매가 **없다**
+SHORT         나갈 판매가 **있었는데** 확보가 0이었다
+```
+
+  **없는 것과 해 봤는데 0인 것은 다른 사실이다.** 접으면 재고가 모자란 날과 주문이
+  없는 날이 장부에서 같아 보인다.
 
 ★ **`SHIPPED` 를 상태 어휘로 만들지 않았다.** 그것은 물류가 이미
   `inventory_allocations.status` 에 쓰는 말이라, 단계 결과에 같은 낱말을 쓰면
@@ -214,15 +225,26 @@ class SaleItemOutcome:
 
     ★ `RAN` 은 예약 → 할당 → 출고가 끝까지 돌았다는 뜻이다. **전량이 나갔다는 뜻이
       아니다** — 부분 예약이면 확보된 만큼만 나가고 그것이 정상이다. 실제로 얼마가
-      나갔는지는 `shipped_qty_kg` 가 나른다.
+      나갔는지는 `shipped_qty_kg` 가, 얼마가 필요했는지는 `required_qty_kg` 가 나른다.
+
+    🔴 **`SHORT` 는 `FAILED` 가 아니다** (물류 PR #484 수신요청 §5.1).
+       `required=100, reserved=0` 은 **정상 사업 결과인 shortage** 다 — 해 봤는데
+       확보가 0kg 이라 나간 것이 없다는 사실이지, 터진 것이 아니다.
+
+    🔴 **`NOTHING_DUE` 를 재사용하지 않는다.** 그것은 날 단위 낱말이고
+       *"그날 나갈 판매가 없다"* 는 뜻이다. `SHORT` 는 *"나갈 판매가 있었는데 확보가
+       0이었다"* 다 — **없는 것과 해 봤는데 0인 것은 다른 사실이다.**
     """
 
     sale_id: str
     sale_item_id: str
     reservation_id: str
-    status: Literal["RAN", "FAILED"]
+    status: Literal["RAN", "FAILED", "SHORT"]
     reason: str = ""
     shipped_qty_kg: Decimal = Decimal(0)
+    #: 판매가 요구한 양 (`sale_items.quantity_kg`). **저장이 아니라 비교용 사본이다** —
+    #: 완납 판정(`fully_shipped_sales`)이 이 값과 `shipped_qty_kg` 를 맞대 본다.
+    required_qty_kg: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)
@@ -249,16 +271,43 @@ class OutboundOut:
 
     @property
     def failed_items(self) -> tuple[str, ...]:
-        """터진 판매 품목. **나머지는 계속 돌았다.**"""
+        """터진 판매 품목. **나머지는 계속 돌았다.**
+
+        🔴 **`SHORT` 는 여기 안 들어온다.** 확보 0kg 은 터진 것이 아니라 사업 결과다.
+        """
         return tuple(one.sale_item_id for one in self.items if one.status == "FAILED")
+
+    @property
+    def short_items(self) -> tuple[str, ...]:
+        """확보가 0kg 이라 나간 것이 없는 판매 품목.
+
+        ★ **결과에 보인다.** 안 보이면 *"그날은 아무 일도 없었다"* 와 구별되지 않고,
+          다음 날 왜 같은 판매가 또 잡히는지 읽는 사람이 모른다.
+        """
+        return tuple(one.sale_item_id for one in self.items if one.status == "SHORT")
 
 
 def fully_shipped_sales(results: Sequence[SaleItemOutcome]) -> tuple[str, ...]:
-    """**모든 품목이 나간** 판매만. 🔴 일부만 나갔으면 여기 안 들어온다.
+    """**모든 품목이 요구량만큼 나간** 판매만. 🔴 일부만 나갔으면 여기 안 들어온다.
 
     ⚠️ 한 판매에 품목이 셋인데 둘만 나간 날 `DELIVERED` 로 적으면, 그 판매는 영원히
       나머지 하나를 못 받는다 — 다음 날 `order_status` 필터가 그 판매를 아예 안
       집기 때문이다.
+
+    🔴 **`status == "RAN"` 만으로는 완납이 아니다** (물류 PR #484 수신요청 §5.2).
+
+      ```text
+      RAN     출고 단계를 **탔다**
+      완납    shipped_qty_kg >= required_qty_kg
+      ```
+
+      100kg 주문에 60kg 이 나가도 단계는 끝까지 돈다. 그것을 `DELIVERED` 로 닫으면
+      나머지 40kg 이 영원히 안 나간다. **상태는 `RAN` 그대로 둔다** — 단계를 탄 것은
+      사실이고, 부족한 것은 완납이 아니라는 사실뿐이다.
+
+    ★ 부분 출고된 판매는 `DELIVERED` 가 안 되고 다음 날
+      `order_status IN ('CONFIRMED','READY')` 필터에 **다시 잡혀** 나머지를 시도한다.
+      의도한 동작이다 (`reserve_available_stock` 의 top-up 이 그것을 받는다).
 
     ★ 순서를 지킨다. 먼저 나온 판매가 먼저다 — 같은 날을 두 번 돌려도 목록이 같다.
     """
@@ -268,8 +317,13 @@ def fully_shipped_sales(results: Sequence[SaleItemOutcome]) -> tuple[str, ...]:
         if one.sale_id not in ok:
             order.append(one.sale_id)
             ok[one.sale_id] = True
-        ok[one.sale_id] = ok[one.sale_id] and one.status == "RAN"
+        ok[one.sale_id] = ok[one.sale_id] and _is_complete(one)
     return tuple(sale_id for sale_id in order if ok[sale_id])
+
+
+def _is_complete(one: SaleItemOutcome) -> bool:
+    """이 품목이 **요구량만큼 나갔는가.**"""
+    return one.status == "RAN" and one.shipped_qty_kg >= one.required_qty_kg
 
 
 # ── ③ 조립 ──────────────────────────────────────────────────────────────
@@ -339,7 +393,13 @@ def ship_due_sales(
         notes: list[str] = []
         delivered = _mark_delivered(conn, results, deliver_fn=deliver_fn, notes=notes)
         failed = tuple(one.sale_item_id for one in results if one.status == "FAILED")
-        reason = f"{len(results)}건 중 {len(failed)}건이 터졌다" if failed else ""
+        short = tuple(one.sale_item_id for one in results if one.status == "SHORT")
+        # 🔴 **두 사실을 한 문장에 합치지 않는다.** 터진 것과 확보 0kg 은 다른 일이라
+        #    수를 더하면 읽는 사람이 왜 그랬는지 되짚을 수 없다.
+        parts = [f"{len(failed)}건이 터졌다"] if failed else []
+        if short:
+            parts.append(f"{len(short)}건이 확보 0kg 이라 못 나갔다")
+        reason = f"{len(results)}건 중 " + " · ".join(parts) if parts else ""
         return OutboundOut(
             as_of=as_of,
             status="RAN",
@@ -373,7 +433,7 @@ def _ship_one(
     """
     reservation_id = reservation_id_for_sale_item(row.sale_item_id)
     try:
-        reserve_fn(
+        reserved = reserve_fn(
             conn,
             SalesOutboundReservationRequest(
                 reservation_id=reservation_id,
@@ -388,6 +448,19 @@ def _ship_one(
             ),
         )
         conn.commit()
+
+        if _reserved_qty_of(reserved) == 0:
+            # 🔴 **없는 예약을 할당하지 않는다** (물류 §5.1). 예전에는 그대로
+            #    `allocate` 로 가서 `OutboundIntegrityError` 가 났고, 그것이 `FAILED`
+            #    로 적혔다 — **정상 사업 결과가 장애로 기록됐다.**
+            return SaleItemOutcome(
+                sale_id=row.sale_id,
+                sale_item_id=row.sale_item_id,
+                reservation_id=reservation_id,
+                status="SHORT",
+                reason=f"확보 0kg — 요구 {row.quantity_kg}kg",
+                required_qty_kg=row.quantity_kg,
+            )
 
         allocate_fn(
             conn,
@@ -414,6 +487,7 @@ def _ship_one(
             reservation_id=reservation_id,
             status="FAILED",
             reason=f"{type(exc).__name__}: {exc}",
+            required_qty_kg=row.quantity_kg,
         )
 
     return SaleItemOutcome(
@@ -422,7 +496,25 @@ def _ship_one(
         reservation_id=reservation_id,
         status="RAN",
         shipped_qty_kg=Decimal(getattr(shipped, "shipped_qty_kg", 0) or 0),
+        required_qty_kg=row.quantity_kg,
     )
+
+
+def _reserved_qty_of(reserved: Any) -> Decimal | None:
+    """`ReservationResult.reserved_qty_kg` — **물류가 실제로 확보한 양.**
+
+    🔴 **칸이 없으면 `None` 이다. 0 이 아니다.** *"확보가 0이었다"* 와 *"얼마나
+       확보됐는지 못 읽었다"* 는 다른 사실이라, 못 읽은 것을 0으로 접으면 물류가 칸
+       이름을 바꾼 날 **모든 출고가 조용히 shortage 가 된다.** 못 읽었으면 예전대로
+       할당까지 가고, 예약이 없으면 물류가 터뜨려 `FAILED` 로 **보이게** 남는다.
+    """
+    raw = getattr(reserved, "reserved_qty_kg", None)
+    if raw is None:
+        return None
+    try:
+        return Decimal(raw)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
 
 
 def _mark_delivered(
