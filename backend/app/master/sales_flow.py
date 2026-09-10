@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Any, Literal
 
 from app.contracts.core import SuggestedAdjustment
@@ -70,6 +71,7 @@ from app.master.envelope import (
 )
 from app.master.plan import ExecutionPlan
 from app.master.ports import AgentNotRegistered
+from app.master.procurement_boundary import ProcurementBoundary
 from app.master.runner import MasterRunner
 from app.master.sales_approval import missing_term_origins, missing_terms_reason
 
@@ -121,7 +123,7 @@ MAX_FEEDBACK_ATTEMPTS = 2
   요청한다 (C-2).
 """
 
-SALES_BUDGET = 16
+SALES_BUDGET = 25
 """판매 사이클 기본 호출 예산.
 
 ```text
@@ -129,13 +131,27 @@ SALES_BUDGET = 16
   inventory PRE_SALES              1
   sales GENERATE_SALES_PROPOSAL    3   (최초 1 + 되먹임 2)
   finance SALES_VALIDATION         9   (후보 3 × 회차 3)
+  purchase SUPPLY_CAPACITY_QUERY   9   (품목 3 × 회차 3)
   ────────────────────────────────────
-                                  13
+                                  22
 +2  후보 범위·날짜가 바뀌어 물류를 다시 부르는 경우 (판매 v1.7 §5)
 +1  S-2 (ERROR 1회 재시도) 여유
 ────
-                                  16
+                                  25
 ```
+
+🔴 **매입 줄이 「후보 3」이 아니라 「품목 3」인 이유** (2026-09-10 · 라우팅 개방).
+
+  매입 호출은 **품목으로 묶는다** (`_additional_supply_requests`). 후보가 셋이어도
+  품목이 하나면 호출은 1이다. 그래서 **회차당 상한은 「서로 다른 품목 수」**이고,
+  후보가 셋이면 품목도 최대 셋이라 회차당 3이 상한이다.
+
+  ```text
+  후보 셋이 다 배추            회차당 1   →  3회차 3
+  후보 셋이 배추·무·양파       회차당 3   →  3회차 9   ← 이 값을 쓴다
+  ```
+
+  ⚠️ **후보 수를 늘리면 이 줄이 두 번 늘어난다** — 재무 줄과 매입 줄이 같이 는다.
 
 🔴 **매입 기본값 12 (`schemas.py` `ProcurementRunRequest.budget`) 를 건드리지
   않는다.** 사이클이 다르면 예산도 다르다. 매입 값을 16 으로 올리면 매입이 안 쓰는
@@ -173,6 +189,39 @@ S-1(기여 호출 재사용)은 *"판매가 요구한 capability 의 라우팅�
 그 회신을 다시 쓴다"* 로 판정한다. capability 이름 목록을 따로 두면
 `CAPABILITY_ROUTING` 이 바뀐 날 한쪽만 바뀐다 — 여기는 **경로 하나**만 안다.
 """
+
+ADDITIONAL_SUPPLY_CAPABILITY = "ADDITIONAL_SUPPLY_CONTEXT"
+"""🔴 **후보를 그대로 보내지 않는 유일한 capability** (2026-09-10 · 라우팅 개방).
+
+나머지 요구는 후보 전체를 payload 로 싣는다 — 재무 `parse_sales_validation_input` 이
+`scenario_id`·`quantity_kg`·`supply` 를 후보 최상위에서 읽으므로 그 모양이 맞다.
+매입이 읽는 것은 **다른 모양**이다.
+
+```text
+매입이 payload 에서 읽는 것 (`purchase_agent/adapter.py` `_supply_capacity_query`)
+    item                             어느 품목을 묻나
+    required_additional_quantity_kg  얼마가 모자라나
+    warehouse_free_kg                창고 여유    ← 마스터가 실어 주는 물류 값
+    finance_cap_amount_krw           매입 가능액  ← 마스터가 실어 주는 재무 값
+```
+
+⚠️ **후보를 통째로 보내면 조용히 반쪽이 된다.** 후보에 `item` 은 최상위에 있지만
+  부족량은 `supply.required_additional_quantity_kg` 라 한 겹 안이고, 경계 재료는
+  아예 없다. 매입은 오류를 내지 않고 `procurable_quantity_kg=null` ·
+  `basis=unknown` 으로 답한다 — **물어본 값이 안 실렸다는 사실이 안 보인다.**
+"""
+
+#: 매입에 실어 보내는 경계 재료 칸. **`ProcurementBoundary` 의 필드 이름 그대로다** —
+#: 옮겨 적으면 그쪽이 칸을 바꾸는 날 한쪽만 바뀐다.
+#:
+#: 🔴 **넷을 늘 싣는다. 못 읽었으면 `None` 으로 싣는다** (매입 계약 · 규칙 3).
+#:   칸을 빼면 *"안 물어봤다"* 와 *"물어봤는데 못 읽었다"* 가 같아진다.
+BOUNDARY_FIELDS: tuple[str, ...] = (
+    "warehouse_free_kg",
+    "rental_cap_kg",
+    "finance_cap_amount_krw",
+    "inbound_lead_days",
+)
 
 FEEDBACK_SOURCE_AGENT: dict[AgentName, str] = {"inventory": "logistics"}
 """마스터 `AgentName` → 판매 `SalesDomainReply.source_agent`.
@@ -407,6 +456,7 @@ class SalesFlow:
         max_feedback_attempts: int = MAX_FEEDBACK_ATTEMPTS,
         forecast: Mapping[str, Any] | None = None,
         forecast_note: str = "",
+        procurement_boundary: ProcurementBoundary | None = None,
     ) -> None:
         self.runner = runner
         #: 사용자가 말한 조건 그대로. **숫자로 바꿔 제약에 꽂지 않는다** — 해석은
@@ -448,10 +498,31 @@ class SalesFlow:
             forecast, forecast_note, runner.context.as_of
         )
 
+        #: 🔴 **매입에 실어 줄 경계 재료 — 마스터가 읽어 나른다** (`ml_context` 와 같은
+        #:   자리). 매입이 낼 「가능량」의 재료가 물류·재무 봉투인데 그 값은 이미 실행
+        #:   이력에 있으므로 **부서 호출이 0회**다.
+        #:
+        #: ★ **Flow 가 직접 조회하지 않는다.** 진입점(`service.run_sales`)이
+        #:   `read_procurement_boundary` 로 읽어 넘긴다 — Flow 가 DB 를 읽으면 조립기가
+        #:   적재층을 겸하게 되고, 백테스트가 그날 값을 꽂아 넣을 자리도 사라진다
+        #:   (`forecast` 를 그렇게 나르는 것과 같은 이유).
+        #:
+        #: ★ **`None` 은 못 읽은 것이 아니라 「읽어 보지도 않았다」이다.** 못 읽은 것은
+        #:   `ProcurementBoundary(present=False, absent_reason=...)` 로 온다 — 그쪽은
+        #:   사유가 매입 봉투에 실린다.
+        self.procurement_boundary = procurement_boundary
+
         #: ②의 회신을 담아 둔다. **S-1 재사용의 원본이다** — 같은 회신을 두 번 부르지
         #: 않는다는 것을 이 한 칸이 보증한다.
         self.supply_context: Mapping[str, Any] | None = None
         self.context_failure: AgentFailure | None = None
+
+        #: 🔴 **품목 → 그 회차의 매입 회신.** 회차마다 비운다.
+        #:
+        #:   `_judge` 는 후보 단위인데 매입 호출은 **품목 단위**라, 후보를 돌기 전에
+        #:   품목으로 묶어 부르고 그 답을 여기서 나눠 쓴다. 후보마다 부르면 같은 품목에
+        #:   **같은 답이 여러 번** 오고 예산만 탄다.
+        self.supply_capacity_replies: dict[str, AgentReply] = {}
 
         #: 🔴 **최초 판매 제안을 만든 run.** 되먹임이 여러 번 돌아도 계보를 잃지 않게
         #:   `SalesFeedback.original_run_id` 로 나간다 (판매 회신 2026-09-07).
@@ -549,6 +620,9 @@ class SalesFlow:
 
             # ④ 후보마다 라우팅해 판정을 받는다.
             before = len(self.suggested_adjustments)
+            # 🔴 **매입만 후보 앞에서 부른다 — 호출 단위가 품목이기 때문이다.**
+            #   `_judge` 안에서 부르면 배추 후보가 셋일 때 배추를 세 번 묻는다.
+            self._ask_supply_capacity(scenarios)
             candidates = tuple(self._judge(scenario) for scenario in scenarios)
             fresh_adjustments = len(self.suggested_adjustments) - before
 
@@ -731,6 +805,96 @@ class SalesFlow:
         payload["feedback_attempt"] = attempt
         return payload
 
+    def _ask_supply_capacity(self, scenarios: Sequence[Mapping[str, Any]]) -> None:
+        """④ 앞 — 부족 품목마다 **한 번씩** 매입에 경계를 묻는다.
+
+        ```text
+        후보 셋이 다 배추 400·700·550   →  배추 1회 · 요청량 700
+        후보 셋이 배추·무·양파          →  3회
+        부족량이 없는 후보              →  안 부른다
+        ```
+
+        🔴 **같은 품목을 여러 번 묻지 않는다.** 매입은 품목 하나를 받아 하나를 답하므로
+          (`sales.schemas.PurchaseAdditionalSupplyResult` 가 최상위 단수) 같은 품목을
+          두 번 물으면 **같은 답이 두 번** 온다 — 예산만 타고 사실은 안 는다.
+
+        🔴 **요청량은 그 품목 후보 중 가장 큰 것이다.** 묻는 것이 *"얼마까지 되나"* 라
+          작은 쪽으로 물으면 답이 그만큼 잘린다. 700 이 되는지 물어야 400 후보도 같이
+          판정할 수 있고, 400 으로 물으면 700 후보는 다시 물어야 한다.
+
+        🔴 **경계를 못 읽어도 부른다** (매입 `#485` §1.2). 재료가 없으면 매입이
+          `procurable_quantity_kg=null` · `basis=unknown` · `risks` 에 사유로 답하는
+          것이 계약이다. 여기서 건너뛰면 그 계약이 쓰이지 않고, 화면에는 *"안 왔다"* 만
+          남아 **매입에 물어봤는지조차** 안 보인다.
+
+        ★ **회차마다 다시 묻는다.** 되먹임으로 후보가 바뀌면 부족량도 바뀐다 — 앞
+          회차 답을 재사용하면 새 부족량에 옛 경계를 붙이게 된다 (S-1 재사용이
+          ②에만 걸리는 것과 같은 이유).
+
+        ⚠️ **미등록은 이 사이클을 세우지 않는다.** 매입은 부족량이 있는 후보에만
+          필요한 **조건부**라 `wiring.REQUIRED_FOR_SALES` 에 없다 (그 docstring).
+          여기서 `AgentNotRegistered` 를 올리면 `run()` 이 `SL4_NOT_STARTED` 로 받아
+          *"시작하지 못했다"* 가 되는데, 실제로는 **후보까지 다 받은 뒤**다.
+          못 물어봤다는 사실은 `unroutable` 로 후보에 남는다.
+        """
+        self.supply_capacity_replies = {}
+        # 🔴 **경로를 손으로 적지 않는다** (`INITIAL_CONTEXT_ROUTE` 와 같은 규율).
+        #   `("purchase", "SUPPLY_CAPACITY_QUERY")` 를 여기 박으면 **라우팅표가 이
+        #   호출의 주인이 아니게 된다** — 표를 `None` 으로 되돌려도 여기서는 그대로
+        #   부르고, `_judge` 만 *"부를 대상이 없다"* 로 답한다. 한 capability 에 대해
+        #   **부르는 쪽과 판정하는 쪽이 서로 다른 답**을 갖는 상태다.
+        route = route_capability(ADDITIONAL_SUPPLY_CAPABILITY)
+        if route is None:
+            return
+        agent, mode = route
+        for item, requested in _additional_supply_requests(scenarios).items():
+            try:
+                reply = self.runner.call(
+                    agent, mode, self._supply_capacity_input(item, requested)
+                )
+            except AgentNotRegistered:
+                continue
+            self.replies_by_ref[reply.run_id] = reply
+            self.supply_capacity_replies[item] = reply
+            self.sourced_evidences.extend(
+                SourcedEvidence(agent, mode, ev) for ev in reply.evidences
+            )
+            self.suggested_adjustments.extend(reply.suggested_adjustments)
+
+    def _supply_capacity_input(self, item: str, requested: float) -> dict[str, Any]:
+        """매입에 나가는 봉투 하나 — **부족량과 경계 재료.**
+
+        🔴 **`procurable_quantity_kg` 를 여기서 계산하지 않는다.** 그 나눗셈에 쓰는
+          단가가 매입 것이라, 마스터가 계산하면 단가가 바뀌는 날 두 값이 갈리고
+          **그때 어느 쪽이 참인지 아무도 말해 주지 않는다.** 재료만 준다.
+
+        🔴 **못 읽은 값을 `0` 으로 채우지 않는다.** `None` 이 *"못 읽었다"* 이고
+          `0.0` 은 *"자리가 없다"* 다 — `rental_cap_kg` 는 실측이 실제로 `0.0` 인데
+          **그건 읽은 값이다.** 둘을 뭉개면 매입이 자리가 없다고 답한다.
+
+        ★ **`source_ref` 를 같이 싣는다.** 그 경계는 「그날 매입 판단 시점」의 값이라
+          판단 뒤 출고가 나가면 창고가 바뀐다 — 어느 실행의 언제 값인지를 숨기지
+          않는다 (§3.2).
+        """
+        payload: dict[str, Any] = {
+            "item": item,
+            # ★ **매입이 읽는 칸 이름 그대로다** (`_supply_capacity_query`). 매입은 이
+            #   값을 회신에 `requested_quantity_kg` 로 되싣는데, **읽는 이름과 되싣는
+            #   이름이 다르다** — 되싣는 쪽 이름으로 보내면 조용히 안 실린다.
+            "required_additional_quantity_kg": requested,
+        }
+        boundary = self.procurement_boundary
+        for field_name in BOUNDARY_FIELDS:
+            payload[field_name] = getattr(boundary, field_name, None)
+        if boundary is not None and boundary.source_ref:
+            payload["source_ref"] = boundary.source_ref
+        if boundary is not None and boundary.absent_reason is not None:
+            # ★★ **매입 `basis="unknown"` 을 푸는 값이다.** 그 값만으로는 *"마스터가
+            #   안 실었다"* 와 *"실렸는데 계산이 안 됐다"* 가 뭉개진다. 사유가 옆에
+            #   있으면 화면이 **"토요일이라 못 물어봤다"** 까지 말한다.
+            payload["supply_context_absent"] = boundary.absent_reason
+        return payload
+
     def _judge(self, scenario: Mapping[str, Any]) -> CandidateVerdict:
         """④ 후보 하나의 `required_validations` 를 라우팅해 판정을 모은다.
 
@@ -760,6 +924,21 @@ class SalesFlow:
                 continue
             if route == INITIAL_CONTEXT_ROUTE and self.supply_context is not None:
                 validations[capability] = self.supply_context
+                continue
+            if capability == ADDITIONAL_SUPPLY_CAPABILITY:
+                # ★ **이미 물었다.** 호출 단위가 품목이라 `_ask_supply_capacity` 가
+                #   후보를 돌기 전에 부르고, 여기서는 그 답을 나눠 쓴다.
+                reply = self.supply_capacity_replies.get(_item_of(scenario))
+                if reply is None:
+                    # 🔴 **조용히 건너뛰지 않는다** — 건너뛰면 *"검증됐다"* 로 읽힌다.
+                    #   여기 오는 길은 둘이고 **둘 다 "못 물어봤다"** 이다.
+                    #     ① 매입 어댑터가 등록돼 있지 않다
+                    #     ② 후보가 이 검증을 요구했는데 부족량이 안 실렸다
+                    #   ②는 판매 계약상 안 나온다 (`additional_supply_required` 가
+                    #   부족량 > 0 과 한 몸이다). 그래도 조용히 통과시키지 않는다.
+                    unroutable.append(capability)
+                    continue
+                validations[capability] = _verdict_of(reply)
                 continue
             agent, mode = route
             # ★ 후보를 **그대로** 보낸다. 재무 `parse_sales_validation_input` 이 읽는
@@ -982,6 +1161,58 @@ def _required_validations(scenario: Mapping[str, Any]) -> tuple[str, ...]:
     if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, Sequence):
         return ()
     return tuple(item for item in raw if isinstance(item, str))
+
+
+def _item_of(scenario: Mapping[str, Any]) -> str:
+    """후보의 품목. **단수다** (`sales.schemas.SalesScenario.item` — 실측 `:496`)."""
+    item = scenario.get("item")
+    return item if isinstance(item, str) else ""
+
+
+def _shortage_of(scenario: Mapping[str, Any]) -> float | None:
+    """그 후보의 부족량. 없거나 숫자가 아니면 `None`.
+
+    🔴 **`supply` 한 겹 안이다** (`sales.schemas.ScenarioSupply`). 최상위에서 찾으면
+      늘 `None` 이 나오고, 그러면 **아무 후보도 매입에 안 물어보는데 오류는 안 난다.**
+
+    ⚠️ **`confirmed_quantity_kg` 도 `conditional_quantity_kg` 도 아니다.** 셋은 서로
+      다른 사실이고 그 파일이 *"섞거나 합산하지 않는다"* 로 못 박았다 — 확보 가능량을
+      부족량 자리에 넣으면 이미 확보된 만큼을 다시 사 달라고 묻게 된다.
+    """
+    supply = scenario.get("supply")
+    if not isinstance(supply, Mapping):
+        return None
+    value = supply.get("required_additional_quantity_kg")
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return None
+    return float(value)
+
+
+def _additional_supply_requests(
+    scenarios: Sequence[Mapping[str, Any]],
+) -> dict[str, float]:
+    """품목 → 그 품목에 물을 요청량. **묶는 자리가 여기 하나다.**
+
+    ```text
+    요구 안 함            건너뛴다 — 마스터가 요구를 지어내지 않는다 (§3.2.2)
+    부족량 없음 · 0 이하   건너뛴다 — 모자라지 않은데 더 대 달라고 묻지 않는다
+    같은 품목 여럿        가장 큰 부족량 하나로 묶는다
+    ```
+
+    ★ **입력 순서를 지킨다.** 판매가 낸 후보 차례대로 묻는다 — `dict` 가 삽입 순서를
+      지키므로 같은 후보 목록에 늘 같은 호출 순서가 나온다 (§3.4 재현성).
+    """
+    wanted: dict[str, float] = {}
+    for scenario in scenarios:
+        if ADDITIONAL_SUPPLY_CAPABILITY not in _required_validations(scenario):
+            continue
+        item = _item_of(scenario)
+        shortage = _shortage_of(scenario)
+        if not item or shortage is None or shortage <= 0:
+            continue
+        if shortage > wanted.get(item, 0.0):
+            wanted[item] = shortage
+    return wanted
 
 
 def _scenarios_of(reply: AgentReply) -> tuple[Mapping[str, Any], ...]:

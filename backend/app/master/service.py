@@ -40,6 +40,7 @@ from app.master.inputs import (
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID, get_burn_in
 from app.master.market_calendar import get_market_calendar
 from app.master.plan import ExecutionPlan
+from app.master.procurement_boundary import ProcurementBoundary, read_procurement_boundary
 from app.master.report import render_report, report_filename
 from app.master.run_repository import get_run_by_request_id
 from app.master.runner import MasterRunner
@@ -336,6 +337,13 @@ def run_sales(
     runner = MasterRunner(context, wiring.registry(), sales_call_budget(request.budget))
     outcome = SalesFlow(
         runner,
+        # 🔴 **매입에 실어 줄 경계 재료를 여기서 읽는다** (2026-09-10 · 라우팅 개방).
+        #    `forecast` 와 같은 자리다 — 진입점이 읽고 Flow 에 넘긴다. Flow 가 직접
+        #    조회하면 조립기가 적재층을 겸하게 된다.
+        #
+        # ★ **부서 호출이 0회다.** 값은 그날 매입 판단이 `PRE_PURCHASE` 로 받아 실행
+        #   이력에 적어 둔 것이라, 물류·재무를 다시 부르지 않는다.
+        procurement_boundary=_procurement_boundary(context),
         user_request=_sales_user_request(request),
         # 🔴 **최상위 필수 칸이라 따로 나른다** (`SalesProposalInput.business_mode`).
         #   `_sales_user_request` 안에 넣으면 판매 `SalesUserRequest` 가
@@ -373,6 +381,35 @@ def run_sales(
         request, response, elapsed_ms=_elapsed(started), sim_run_id=context.sim_run_id
     )
     return response
+
+
+def _procurement_boundary(context: ExecutionContext) -> ProcurementBoundary | None:
+    """그날 매입 판단이 받아 둔 경계. **못 읽어도 사이클을 세우지 않는다.**
+
+    🔴 **못 읽은 것과 안 읽은 것은 다르다.**
+
+    ```text
+    ProcurementBoundary(present=False, absent_reason=…)   물어봤는데 없다  → 사유가 봉투에 실린다
+    None                                                  읽어 보지도 못했다
+    ```
+
+    ⚠️ **달력이 그날을 안 덮으면 주말 축만으로 다시 읽는다** (`_execution_day_axes` 와
+      같은 처리). 잡지 않으면 공휴일 달력이 끊긴 날 **판매 사이클 전체가 선다** —
+      경계는 조건부 재료이지 판매를 돌릴 수 있는지의 조건이 아니다.
+
+    ⚠️ **`sim_run_id` 가 비면 읽지 않는다.** `read_procurement_boundary` 가 빈 축을
+      `ValueError` 로 막는데(*"빈 축을 조용히 전체로 바꾸지 않는다"*), 그것을 여기서
+      터뜨리면 봉투 `sim_run_id` 를 아직 안 채운 경로가 판매를 못 돌린다. 그 값은
+      `ExecutionContext` 가 아직 필수로 안 만든 칸이다 (그 docstring 의 ①②③).
+    """
+    if not context.sim_run_id.strip():
+        return None
+    try:
+        return read_procurement_boundary(
+            as_of=context.as_of, sim_run_id=context.sim_run_id, calendar=get_calendar()
+        )
+    except CalendarNotCovered:
+        return read_procurement_boundary(as_of=context.as_of, sim_run_id=context.sim_run_id)
 
 
 def _sales_forecast(request: SalesRunRequest) -> SourcedInput:

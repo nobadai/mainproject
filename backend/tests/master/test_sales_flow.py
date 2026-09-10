@@ -237,12 +237,18 @@ def test_라우팅표가_capability_를_하나도_빠뜨리지_않는다():
     assert set(CAPABILITY_ROUTING) == set(get_args(Capability))
 
 
-def test_매입_추가공급은_부를_대상이_없다():
-    """🔴 매입 호출 단위(batch / ONE_BY_ONE) 미회신 — **`None` 이 그 사실이다.**
+def test_매입_추가공급은_경계만_묻는_mode_로_간다():
+    """★★ **기대값이 뒤집힌 자리다** (2026-09-10). 전에는 `None` 을 단언했고, 그 근거는
+    *"매입이 호출 단위를 회신하지 않았다"* 였다. 매입이 `#485` 에서 `batch` 로 회신하고
+    `SUPPLY_CAPACITY_QUERY` 를 **구현까지 같은 커밋에** 넣으면서 그 근거가 사라졌다.
 
-    값을 채우면 마스터가 매입 대신 호출 단위를 정하는 것이 된다.
+    🔴 **`GENERATE_SCENARIOS` 가 아니어야 한다.** 그쪽으로 가면 판매 사이클 안에서
+      매입안이 만들어진다 — 설계가 금지한 바로 그것이고, 오류도 안 난다.
     """
-    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] is None
+    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] == (
+        "purchase",
+        "SUPPLY_CAPACITY_QUERY",
+    )
 
 
 def test_라우팅_대상이_그_모드를_실제로_받는다():
@@ -669,7 +675,7 @@ def test_판매_예산은_매입_기본값과_다르다():
     """🔴 매입 12 를 건드리지 않는다. 올리면 매입이 안 쓰는 상한이 매입 쪽에서 풀린다."""
     from app.master.schemas import ProcurementRunRequest
 
-    assert SALES_BUDGET == 16
+    assert SALES_BUDGET == 25
     assert ProcurementRunRequest.model_fields["budget"].default == 12
 
 
@@ -677,9 +683,13 @@ def test_최악_경우_호출수가_기본_예산_안에_든다():
     """산식을 주석이 아니라 **식으로** 잠근다 — 상한을 바꾸면 여기서 먼저 걸린다."""
     회차 = MAX_FEEDBACK_ATTEMPTS + 1
     후보 = 3
-    최악 = 1 + 회차 + 후보 * 회차  # 물류 1 + 판매 회차 + 재무(후보 × 회차)
+    # 🔴 **매입 줄은 「품목 수」다** (2026-09-10 · 라우팅 개방). 호출을 품목으로 묶으므로
+    #   회차당 상한이 후보 수가 아니라 **서로 다른 품목 수**이고, 후보가 셋이면 품목도
+    #   최대 셋이라 같은 수가 상한이 된다.
+    품목 = 후보
+    최악 = 1 + 회차 + 후보 * 회차 + 품목 * 회차
 
-    assert 최악 == 13
+    assert 최악 == 22
     assert 최악 <= SALES_BUDGET
 
 

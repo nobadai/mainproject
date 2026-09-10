@@ -571,10 +571,17 @@ def test_승인이_아니면_재검증하지_않는다(monkeypatch, 이력, 부�
 
 
 def test_라우팅이_없는_조건부는_통과를_막지_않는다(monkeypatch, 이력, 부서들):
-    """★ `ADDITIONAL_SUPPLY_CONTEXT` 는 라우팅이 `None` 이라 **원 실행에서도 똑같이 못
-    불렀다** — 그 사이 나빠진 것이 아니다 (설계 §5). 못 물어봤다는 사실은 결과에
-    남지만 `FAILED` 로 접지 않는다."""
-    _실행을_세운다(monkeypatch, _run_row(required=("ADDITIONAL_SUPPLY_CONTEXT",)))
+    """★ 라우팅이 없는 조건부는 **원 실행에서도 똑같이 못 불렀다** — 그 사이 나빠진
+    것이 아니다 (설계 §5). 못 물어봤다는 사실은 결과에 남지만 `FAILED` 로 접지 않는다.
+
+    ★★ **예로 쓰던 capability 를 바꿨다** (2026-09-10). 전에는
+      `ADDITIONAL_SUPPLY_CONTEXT` 가 라우팅 `None` 의 유일한 자리라 그것을 썼는데,
+      매입 `#485` 로 그 자리가 열리면서 **표 안에 `None` 이 하나도 안 남았다.**
+      남은 «라우팅이 없다» 는 **표 밖 어휘**이고 (`route_capability` 가 표에 없는 값도
+      `None` 으로 받는다), 이 검사가 재는 것은 그 capability 가 무엇이냐가 아니라
+      *"못 부른 조건부가 `FAILED` 를 만들지 않는가"* 다.
+    """
+    _실행을_세운다(monkeypatch, _run_row(required=("어휘_밖_조건부_검증",)))
 
     saved = decision_service.record_decision(REQ, _승인())
 
