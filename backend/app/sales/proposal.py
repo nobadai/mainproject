@@ -108,9 +108,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
         if scenario_type != "AGGRESSIVE":
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
         # 조건부 수량은 회신에서 나오므로 회신을 먼저 고른 뒤 공급을 세운다.
-        supply = _supply(scenario_quantity, confirmed, replies)
-        unmet_quantity = None
         purchase = _purchase_result(replies)
+        supply = _supply(scenario_quantity, confirmed, replies, purchase)
+        unmet_quantity = None
         if scenario_type == "AGGRESSIVE" and confirmed is not None and purchase is not None:
             procurable = purchase.procurable_quantity_kg
             if procurable is not None:
@@ -308,6 +308,7 @@ def _supply(
     quantity: Decimal,
     confirmed: Decimal | None,
     replies: list[SalesDomainReply] | None = None,
+    purchase: PurchaseAdditionalSupplyResult | None = None,
 ) -> ScenarioSupply:
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
@@ -319,6 +320,10 @@ def _supply(
         # ★ 확정 공급에 더하지 않는다. 조건부는 조건부 자리에만 산다.
         conditional_quantity_kg=conditional,
         dependency_ref=dependency_ref,
+        basis=purchase.basis if purchase else None,
+        expected_unit_price_krw=purchase.expected_unit_price_krw if purchase else None,
+        unit_price_grade=purchase.unit_price_grade if purchase else None,
+        available_date=purchase.available_date if purchase else None,
     )
 
 

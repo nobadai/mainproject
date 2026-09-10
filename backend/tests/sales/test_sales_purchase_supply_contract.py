@@ -179,6 +179,35 @@ def test_positive_quantity_becomes_conditional_supply_with_lineage():
     assert "R1" in scenario.risks
 
 
+def test_purchase_supply_facts_are_preserved_without_changing_sales_price():
+    request = _request(
+        [
+            _reply(
+                payload={
+                    "procurable_quantity_kg": 25,
+                    "basis": "warehouse",
+                    "risks": ["R1"],
+                    "available_date": "2026-09-10",
+                    "expected_unit_price_krw": 1600,
+                    "unit_price_grade": "중",
+                }
+            ),
+            _finance_reply(),
+        ]
+    )
+    request.user_request.source_ref = "SALES-REQUEST-1"
+
+    scenario = _aggressive(run_proposal(request))
+
+    assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.supply.basis == "warehouse"
+    assert scenario.supply.available_date.isoformat() == "2026-09-10"
+    assert scenario.supply.expected_unit_price_krw == Decimal(1600)
+    assert scenario.supply.unit_price_grade == "중"
+    assert scenario.source_ref == "SALES-REQUEST-1"
+    assert scenario.unit_price_krw == Decimal(2000)
+
+
 def test_zero_quantity_is_preserved_and_not_conditional():
     reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 0, "risks": []})]))
     scenario = _aggressive(reply)
