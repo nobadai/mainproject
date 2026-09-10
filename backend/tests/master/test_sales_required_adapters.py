@@ -170,13 +170,18 @@ def test_물류는_필수가_아니다():
 
 
 def test_매입은_필수가_아니다():
-    """★ 부족량이 있는 후보에만 필요한 **조건부**이고, 지금은 라우팅이 `None` 이라
-    아예 안 불린다 — 안 부르는 대상을 문 앞 필수로 올리면 매일 선다.
+    """★ 부족량이 있는 후보에만 필요한 **조건부**다 — 문 앞 필수로 올리면 부족량이
+    없는 날에도 판매가 선다.
+
+    ★★ **전제가 바뀌었지만 답은 그대로다** (2026-09-10). 전에는 *"라우팅이 `None`
+      이라 아예 안 불린다"* 가 근거였고, 라우팅이 열리면서 그 근거는 사라졌다.
+      남은 근거가 **조건부라는 사실 하나**이고 그것이 원래 이 검사의 뜻이다 —
+      부족량이 있는 후보에만 걸리므로 없는 날은 매입 없이도 판매가 돌아야 한다.
     """
     from app.master.envelope import CAPABILITY_ROUTING
 
-    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] is None, (
-        "매입 라우팅이 채워졌다면 이 검사의 전제가 바뀐 것이다"
+    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] is not None, (
+        "라우팅이 다시 None 이 됐다면 이 검사의 전제가 또 바뀐 것이다"
     )
     assert "purchase" not in wiring.REQUIRED_FOR_SALES
 

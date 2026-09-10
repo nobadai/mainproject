@@ -571,14 +571,53 @@ def test_승인이_아니면_재검증하지_않는다(monkeypatch, 이력, 부�
 
 
 def test_라우팅이_없는_조건부는_통과를_막지_않는다(monkeypatch, 이력, 부서들):
-    """★ `ADDITIONAL_SUPPLY_CONTEXT` 는 라우팅이 `None` 이라 **원 실행에서도 똑같이 못
-    불렀다** — 그 사이 나빠진 것이 아니다 (설계 §5). 못 물어봤다는 사실은 결과에
-    남지만 `FAILED` 로 접지 않는다."""
-    _실행을_세운다(monkeypatch, _run_row(required=("ADDITIONAL_SUPPLY_CONTEXT",)))
+    """★ 라우팅이 없는 조건부는 **원 실행에서도 똑같이 못 불렀다** — 그 사이 나빠진
+    것이 아니다 (설계 §5). 못 물어봤다는 사실은 결과에 남지만 `FAILED` 로 접지 않는다.
+
+    ★★ **예로 쓰던 capability 를 바꿨다** (2026-09-10). 전에는
+      `ADDITIONAL_SUPPLY_CONTEXT` 가 라우팅 `None` 의 유일한 자리라 그것을 썼는데,
+      매입 `#485` 로 그 자리가 열리면서 **표 안에 `None` 이 하나도 안 남았다.**
+      남은 «라우팅이 없다» 는 **표 밖 어휘**이고 (`route_capability` 가 표에 없는 값도
+      `None` 으로 받는다), 이 검사가 재는 것은 그 capability 가 무엇이냐가 아니라
+      *"못 부른 조건부가 `FAILED` 를 만들지 않는가"* 다.
+    """
+    _실행을_세운다(monkeypatch, _run_row(required=("어휘_밖_조건부_검증",)))
 
     saved = decision_service.record_decision(REQ, _승인())
 
     assert saved.revalidation_outcome == "PASSED"
+
+
+def test_추가매입은_라우팅이_열려도_재검증에서_안_부른다(monkeypatch, 이력, 부서들):
+    """🔴 **라우팅이 열렸다고 여기서 부르면 «잘못 물어본» 답이 온다.**
+
+    판매 Flow 는 부족량과 매입용 경계를 골라 담아 보낸다
+    (`sales_flow._supply_capacity_input`). 재검증은 **후보를 그대로** 보내므로
+    매입이 둘 다 못 읽어 `basis=unknown` 으로 답한다.
+
+    ⚠️ 그 답은 화면에서 *"못 물어봤다"* 로 보이는데 실제로는 *"잘못 물어봤다"* 다.
+      예산을 한 번 쓰고 어휘가 거짓말을 한다.
+
+    ★ 그래서 `_NOT_REVALIDATED` 로 막고 `unroutable` 로 남긴다 — 라우팅이 열리기
+      전과 화면이 같고, *"이 검증은 안 왔다"* 는 사실 그대로다.
+    """
+    from app.master.envelope import CAPABILITY_ROUTING
+
+    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] is not None, (
+        "라우팅이 닫혀 있으면 이 검사가 아무것도 안 잰다 — 열린 채로 막는 것이 요점이다"
+    )
+
+    _실행을_세운다(monkeypatch, _run_row(required=("ADDITIONAL_SUPPLY_CONTEXT",)))
+
+    saved = decision_service.record_decision(REQ, _승인())
+
+    # ★ 이 픽스처에는 **물류·재무만** 등록돼 있다. 막는 것을 지우면 재검증이 매입을
+    #   부르러 가고 `AgentNotRegistered` 로 재검증 전체가 ERROR 가 된다 — 그것이
+    #   이 단언이 잡는 모양이다.
+    assert saved.revalidation_outcome == "PASSED", (
+        "재검증이 추가매입을 부르러 갔다 — 후보를 그대로 보내면 basis=unknown 이 오고, "
+        "여기서는 매입이 등록돼 있지도 않다"
+    )
 
 
 def test_재검증도_이력에_남는다(monkeypatch, 이력, 부서들):
