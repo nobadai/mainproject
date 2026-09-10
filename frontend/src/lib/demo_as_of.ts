@@ -20,14 +20,24 @@ const KEY = "haetdeul.demo_as_of";
 /**
  * 기본 기준일.
  *
- * ★ **`2026-01-20`.** 실측으로 그날 `E1_APPROVED` 가 나고 승인 → 원장 → 입고 →
- *   실물재고 사슬이 이미 이어져 있다. 시연은 그 사슬이 보이는 날에서 시작한다.
+ * ★ **`2026-01-30`.** 발표는 2026-09-21 에 하지만, 화면이 여는 날은 **데이터가 있는
+ *   날**이어야 한다. 실측(2026-09-10):
+ *
+ *   ```text
+ *   2026-09-21   master_agent_runs 0건 · daily_closings 0건 · sales 0건 · 예측 0건
+ *   2026-01-30   매입 여섯 안이 서고, 걷기의 **마지막 실행일**이다
+ *   ```
+ *
+ *   발표일을 그대로 쓰면 여섯 탭이 전부 빈 칸이다. 걷기가 실제로 닿은 마지막 날로 연다.
  *
  * 🔴 예전에는 이 값이 **두 곳에서 갈려 있었다** — `lib/api.ts` 는 `2025-12-31`,
  *    `components/console/useTab.ts` 는 `2026-01-06`. 같은 화면에서 마스터는 한 날로
  *    판단하고 탭 여섯은 다른 날을 보여 주고 있었다. **여기 하나로 모은다.**
+ *
+ * ★ `NEXT_PUBLIC_AS_OF` 갈래는 그대로 둔다 — 환경으로 덮을 수 있는 것이 맞다. 다만
+ *   `frontend/` 에 `.env` 가 하나도 없어서(실측 2026-09-10) 지금 쓰이는 것은 이 코드값이다.
  */
-export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-01-20";
+export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-01-30";
 
 const listeners = new Set<() => void>();
 
