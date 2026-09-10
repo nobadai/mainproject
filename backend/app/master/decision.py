@@ -356,17 +356,58 @@ def scenario_ids_of(response_payload: Mapping[str, Any]) -> tuple[str, ...]:
       과 *"제시했으나 탈락한 안"* 이 같은 422 로 접힌다. 탈락안 승인을 막는 것은
       후보 판정(`CandidateVerdict.passed`)과 재검증이지 이 목록이 아니다.
     """
-    out: list[str] = []
+    return tuple(
+        scenario_id
+        for scenario in _sales_scenarios(response_payload)
+        if isinstance(scenario_id := scenario.get("scenario_id"), str) and scenario_id
+    )
+
+
+def _sales_scenarios(response_payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """판매 응답이 실은 후보의 `scenario` 칸들.
+
+    ★ **`candidates[].scenario` 를 훑는 자리를 하나로 둔다.** 판매가 그 칸의 모양을
+      바꾸는 날 고칠 곳이 하나여야 한다.
+    """
+    out: list[Mapping[str, Any]] = []
     for candidate in response_payload.get("candidates") or ():
         if not isinstance(candidate, Mapping):
             continue
         scenario = candidate.get("scenario")
-        if not isinstance(scenario, Mapping):
-            continue
-        scenario_id = scenario.get("scenario_id")
-        if isinstance(scenario_id, str) and scenario_id:
-            out.append(scenario_id)
+        if isinstance(scenario, Mapping):
+            out.append(scenario)
     return tuple(out)
+
+
+def scenario_ids_of_type(
+    response_payload: Mapping[str, Any], scenario_type: str
+) -> tuple[str, ...]:
+    """그 `scenario_type` 인 판매 후보의 `scenario_id` **전부.**
+
+    ```text
+    scenario_id     후보 Identity        "SALES-001-A-R1"
+    scenario_type   후보의 의미          축 이름 하나            ← 이것으로 찾는다
+    ```
+
+    ★ **판매가 정한 계약이다** (2026-09-10). 판매 후보에는 `label` 이 없고, 같은
+      뜻을 두 칸에 복제하지 않기로 했다 — 그래서 후보를 **의미로 찾고** 가리킬 때는
+      **Identity 로 가리킨다.**
+
+    🔴 **축 이름을 코드에 열거하지 않는다.** `scenario_labels_of` 가 적어 둔 규율
+      그대로다 — 어느 축인지는 부르는 쪽이 말한다. 여기가 축 이름을 알면 판매가
+      축을 바꾸는 날 조용히 어긋난다.
+
+    🔴 **하나로 좁히지 않는다.** 몇 개인지가 부르는 쪽의 판단 재료다 — 여기서 첫
+      번째를 돌려주면 **배열 순서가 선택 규칙**이 되고, 판매가 *"배열 순서 기반
+      선택은 쓰지 않는다"* 고 명시한 것을 이 함수가 혼자 뒤집는다.
+    """
+    return tuple(
+        scenario_id
+        for scenario in _sales_scenarios(response_payload)
+        if scenario.get("scenario_type") == scenario_type
+        and isinstance(scenario_id := scenario.get("scenario_id"), str)
+        and scenario_id
+    )
 
 
 def available_scenario_names(

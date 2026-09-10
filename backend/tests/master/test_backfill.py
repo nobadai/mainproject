@@ -18,22 +18,33 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.master import backfill
+from app.master import backfill, decision
 from app.master.backfill import (
     ALWAYS_BASE,
+    ALWAYS_FIXED_TYPE,
     AUTO_BACKFILL,
     BACKFILL_BOUNDARY_AS_OF,
     BackfillRule,
     BackfillRuleMissing,
+    SalesBackfillRule,
     backfill_decisions,
-    read_rule,
+    read_rules,
 )
-from app.master.decision import DecisionIn, DecisionOut, DecisionRejected
+from app.master.decision import SALES_CYCLE, DecisionIn, DecisionOut, DecisionRejected
 
 기본 = "기본"
 공격 = "공격"
 
-규칙설정 = {"backfill": {"rule": ALWAYS_BASE, "scenario_label": 기본}}
+#: 판매 축 이름. 🔴 **판매의 계약이라 대역이 그대로 적는다** — 백필 코드에는 없다.
+보수축 = "CONSERVATIVE"
+균형축 = "BALANCED"
+공격축 = "AGGRESSIVE"
+
+매입규칙 = {"rule": ALWAYS_BASE, "scenario_label": 기본}
+판매규칙 = {"rule": ALWAYS_FIXED_TYPE, "scenario_type": 보수축}
+
+규칙설정 = {"backfill": {"procurement": 매입규칙, "sales": 판매규칙}}
+매입만설정 = {"backfill": {"procurement": 매입규칙}}
 
 
 # ── 대역 ────────────────────────────────────────────────────────────────
@@ -48,7 +59,7 @@ def 실행행(
     request_id: str | None = "REQ-1",
     run_id: UUID | None = None,
 ) -> dict[str, object]:
-    """`master_agent_runs` 한 행의 대역. **읽는 칸만 채운다.**"""
+    """`master_agent_runs` **매입** 한 행의 대역. **읽는 칸만 채운다.**"""
     return {
         "run_id": run_id or uuid4(),
         "request_id": request_id,
@@ -59,6 +70,34 @@ def 실행행(
             "end_code": end_code,
             "scenarios": [{"label": label} for label in labels],
             "candidates": [{"scenario": {"scenario_id": label}} for label in labels],
+        },
+    }
+
+
+def 판매행(
+    as_of: date,
+    *,
+    후보: tuple[tuple[str, str], ...] = (("SALES-001-A-R1", 보수축), ("SALES-001-B-R1", 공격축)),
+    end_code: str | None = "SL1_PRESENTED",
+    request_id: str | None = "REQ-S1",
+    run_id: UUID | None = None,
+) -> dict[str, object]:
+    """`master_agent_runs` **판매** 한 행의 대역.
+
+    ★ 후보는 `(scenario_id, scenario_type)` 이다 — **Identity 와 의미가 다른 칸**이라
+      대역에서도 안 합친다.
+    """
+    return {
+        "run_id": run_id or uuid4(),
+        "request_id": request_id,
+        "as_of": as_of,
+        "cycle": SALES_CYCLE,
+        "end_code": end_code,
+        "response_payload": {
+            "end_code": end_code,
+            "candidates": [
+                {"scenario": {"scenario_id": 아이디, "scenario_type": 축}} for 아이디, 축 in 후보
+            ],
         },
     }
 
@@ -181,9 +220,7 @@ def test_경계는_설정이_아니라_코드에_있다() -> None:
     """🔴 **가드는 `config_json` 으로 안 내린다** — 옮기려면 diff 에 보여야 한다."""
     assert BACKFILL_BOUNDARY_AS_OF == date(2026, 9, 9)
 
-    설정 = {
-        "backfill": {"rule": ALWAYS_BASE, "scenario_label": 기본, "boundary_as_of": "2999-12-31"}
-    }
+    설정 = {"backfill": {"procurement": 매입규칙 | {"boundary_as_of": "2999-12-31"}}}
     넘은날 = date(2026, 9, 10)
     문 = _승인문()
 
@@ -204,7 +241,7 @@ def test_규칙이_없으면_승인_문을_한_번도_안_부른다() -> None:
     결과 = 백필({날: [실행행(날)]}, 문, start=날, end=날, 설정={})
 
     assert 결과.status == "NO_RULE"
-    assert 결과.rule is None
+    assert 결과.rules is None
     assert 결과.runs == ()
     assert 문.calls == [], "규칙이 없는데 승인 문을 불렀다"
 
@@ -212,7 +249,7 @@ def test_규칙이_없으면_승인_문을_한_번도_안_부른다() -> None:
 def test_모르는_규칙_이름도_아는_규칙으로_접지_않는다() -> None:
     날 = date(2026, 9, 1)
     문 = _승인문()
-    설정 = {"backfill": {"rule": "ALWAYS_WHATEVER", "scenario_label": 기본}}
+    설정 = {"backfill": {"procurement": {"rule": "ALWAYS_WHATEVER", "scenario_label": 기본}}}
 
     결과 = 백필({날: [실행행(날)]}, 문, start=날, end=날, 설정=설정)
 
@@ -223,14 +260,17 @@ def test_모르는_규칙_이름도_아는_규칙으로_접지_않는다() -> No
 def test_고를_안이_비면_규칙이_선_것이_아니다() -> None:
     """★ 규칙 이름만 있고 라벨이 없으면 **코드가 라벨을 채울 자리**가 생긴다."""
     with pytest.raises(BackfillRuleMissing):
-        read_rule({"backfill": {"rule": ALWAYS_BASE, "scenario_label": "  "}})
+        read_rules({"backfill": {"procurement": {"rule": ALWAYS_BASE, "scenario_label": "  "}}})
 
 
 def test_규칙이_가리키는_라벨은_설정이_말한다() -> None:
     """🟢 **자기 생존 검사.** 설정이 다른 라벨을 말하면 그 라벨이 승인된다."""
-    assert read_rule(규칙설정) == BackfillRule(name=ALWAYS_BASE, scenario_label=기본)
-    다른설정 = {"backfill": {"rule": ALWAYS_BASE, "scenario_label": 공격}}
-    assert read_rule(다른설정).scenario_label == 공격
+    assert read_rules(규칙설정).procurement == BackfillRule(
+        name=ALWAYS_BASE, scenario_label=기본
+    )
+    다른설정 = {"backfill": {"procurement": {"rule": ALWAYS_BASE, "scenario_label": 공격}}}
+    assert read_rules(다른설정).procurement is not None
+    assert read_rules(다른설정).procurement.scenario_label == 공격
 
 
 def test_규칙_라벨이_그날_안에_없으면_다른_안으로_대체하지_않는다() -> None:
@@ -354,18 +394,7 @@ def test_승인할_안이_없는_실행은_NOT_APPROVABLE_이다(종료코드: s
     assert 문.calls == []
 
 
-def test_판매_실행은_백필_대상이_아니다() -> None:
-    """🔴 이 판이 재현하는 것은 **매입 승인 구간**이다."""
-    날 = date(2026, 9, 1)
-    문 = _승인문()
-
-    결과 = 백필({날: [실행행(날, cycle="SALES", end_code="SL1_PRESENTED")]}, 문, start=날, end=날)
-
-    assert [one.outcome for one in 결과.runs] == ["NOT_APPROVABLE"]
-    assert 문.calls == []
-
-
-def test_여섯_결과를_한_통에_넣지_않는다() -> None:
+def test_결과를_한_통에_넣지_않는다() -> None:
     """★ *"없다"* 와 *"안 했다"* 와 *"못 했다"* 가 한 걷기 안에서 갈려 보인다."""
     문 = _승인문()
     행들 = {
@@ -388,6 +417,197 @@ def test_여섯_결과를_한_통에_넣지_않는다() -> None:
 def test_범위가_거꾸로면_막고_사유를_낸다() -> None:
     with pytest.raises(ValueError, match="거꾸로"):
         백필({}, _승인문(), start=date(2026, 9, 5), end=date(2026, 9, 1))
+
+
+# ── 판매 축 ─────────────────────────────────────────────────────────────
+
+
+def test_판매_실행도_백필_대상이_된다() -> None:
+    """🔴 **판매 어휘로 승인이 선다** (2026-09-10 · 판매 합의).
+
+    ⚠️ 어느 종료 코드에 승인이 서는지는 `approve_end_codes` 가 사이클별로 답한다 —
+      백필이 그 앞에 사이클 조건을 하나 더 놓으면 주인이 둘이 된다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+
+    결과 = 백필({날: [판매행(날)]}, 문, start=날, end=날)
+
+    assert [one.outcome for one in 결과.runs] == ["RECORDED"]
+    assert len(문.calls) == 1
+
+
+def test_판매는_scenario_type_으로_찾고_그_후보의_scenario_id_를_싣는다() -> None:
+    """🔴 **찾는 것은 의미(`scenario_type`)이고 가리키는 것은 Identity(`scenario_id`)다.**
+
+    ★ 판매 후보에는 `label` 이 없어 `DecisionIn.scenario_label` 칸에 `scenario_id` 를
+      싣기로 판매가 정했다. 여기서 새로 만드는 계약이 아니다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    후보 = (("SALES-9-AGG", 공격축), ("SALES-9-CON", 보수축))
+
+    백필({날: [판매행(날, 후보=후보)]}, 문, start=날, end=날)
+
+    (업무키, 본문) = 문.calls[0]
+    assert 업무키 == "REQ-S1"
+    assert 본문.decision == "APPROVE"
+    assert 본문.scenario_label == "SALES-9-CON", "축으로 찾은 후보의 scenario_id 가 아니다"
+    assert 본문.decided_by == AUTO_BACKFILL
+
+
+def test_판매가_고르는_축은_설정이_말한다() -> None:
+    """🟢 **자기 생존 검사.** 설정이 다른 축을 말하면 그 축의 후보가 승인된다.
+
+    ★ 이것이 없으면 *"보수를 고른다"* 가 **한 축을 코드에 박은 구현**으로도 통과한다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    설정 = {"backfill": {"sales": {"rule": ALWAYS_FIXED_TYPE, "scenario_type": 공격축}}}
+    후보 = (("SALES-9-AGG", 공격축), ("SALES-9-CON", 보수축))
+
+    백필({날: [판매행(날, 후보=후보)]}, 문, start=날, end=날, 설정=설정)
+
+    (_, 본문) = 문.calls[0]
+    assert 본문.scenario_label == "SALES-9-AGG"
+
+
+def test_배열_순서로_고르지_않는다() -> None:
+    """🔴 판매가 *"배열 순서 기반 선택은 쓰지 않겠다"* 고 명시했다.
+
+    ★ 규칙이 가리키는 축이 **맨 뒤에** 있어도 그것이 골라진다 — 첫 번째를 고르는
+      구현이면 여기서 다른 값이 실린다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    후보 = (("SALES-9-AGG", 공격축), ("SALES-9-BAL", 균형축), ("SALES-9-CON", 보수축))
+
+    백필({날: [판매행(날, 후보=후보)]}, 문, start=날, end=날)
+
+    (_, 본문) = 문.calls[0]
+    assert 본문.scenario_label == "SALES-9-CON"
+
+
+def test_그_축이_그날_없으면_다른_후보로_대체하지_않는다() -> None:
+    """🔴 대체하면 곡선이 규칙과 다른 것을 재현한다.
+
+    ⚠️ 그날 후보가 하나뿐이어도 그것을 고르지 않는다 — *"하나밖에 없으니 그것"* 은
+      **어느 안이 나은지 판단하는 코드**다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+
+    결과 = 백필({날: [판매행(날, 후보=(("SALES-9-AGG", 공격축),))]}, 문, start=날, end=날)
+
+    assert [one.outcome for one in 결과.runs] == ["LABEL_NOT_OFFERED"]
+    assert 문.calls == [], "그날 없는 축을 다른 후보로 대체해 승인했다"
+
+
+def test_그_축이_둘이면_안_고르고_AMBIGUOUS_TYPE_로_남는다() -> None:
+    """🔴 **첫 번째를 고르지 않는다.** 규칙이 어느 것인지 안 말했으면 안 고른다.
+
+    ⚠️ *"그날 없다"* 로 접지 않는다 — 고칠 곳이 다르다. 앞엣것은 그날의 사실이고
+      이것은 **규칙이 덜 정해졌다**는 뜻이다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    후보 = (("SALES-9-CON-A", 보수축), ("SALES-9-CON-B", 보수축))
+
+    결과 = 백필({날: [판매행(날, 후보=후보)]}, 문, start=날, end=날)
+
+    assert [one.outcome for one in 결과.runs] == ["AMBIGUOUS_TYPE"]
+    assert 문.calls == [], "축이 둘인데 하나를 골라 승인했다"
+
+
+def test_판매도_승인이_안_서는_종료_코드는_NOT_APPROVABLE_이다() -> None:
+    """🟢 **자기 생존 검사.** 판매를 열었다고 판매 어휘 전부가 열린 것이 아니다."""
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+
+    결과 = 백필({날: [판매행(날, end_code="SL2_NO_CANDIDATE")]}, 문, start=날, end=날)
+
+    assert [one.outcome for one in 결과.runs] == ["NOT_APPROVABLE"]
+    assert 문.calls == []
+
+
+def test_판매_실행도_경계_밖이면_한_행도_안_쓴다() -> None:
+    """🟢 경계는 사이클과 무관하다."""
+    넘은날 = date(2026, 9, 10)
+    문 = _승인문()
+
+    결과 = 백필({넘은날: [판매행(넘은날)]}, 문, start=넘은날, end=넘은날)
+
+    assert [one.outcome for one in 결과.runs] == ["BLOCKED_BY_BOUNDARY"]
+    assert 문.calls == []
+
+
+# ── 사이클별로 가른 설정 ────────────────────────────────────────────────
+
+
+def test_판매_규칙만_없으면_NO_RULE_이_아니라_행_결과로_남는다() -> None:
+    """🔴 *"아무것도 안 정했다"* 와 *"매입만 정했다"* 는 다른 사실이다.
+
+    ★ 뒤엣것은 **의도일 수 있다** — 실행 전체를 `NO_RULE` 로 접으면 매입 행까지
+      같이 멈추고, 왜 멈췄는지가 결과에서 사라진다.
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    행들 = {날: [실행행(날), 판매행(날)]}
+
+    결과 = 백필(행들, 문, start=날, end=날, 설정=매입만설정)
+
+    assert 결과.status == "RAN"
+    assert [one.outcome for one in 결과.runs] == ["RECORDED", "NO_RULE_FOR_CYCLE"]
+    assert len(문.calls) == 1, "판매 규칙이 없는데 판매 행에 승인 문을 불렀다"
+
+
+def test_매입_규칙만_없어도_같은_어휘로_남는다() -> None:
+    """🟢 **자기 생존 검사.** 사이클 이름을 한쪽에 박은 구현이면 여기서 갈린다."""
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    설정 = {"backfill": {"sales": 판매규칙}}
+
+    결과 = 백필({날: [실행행(날), 판매행(날)]}, 문, start=날, end=날, 설정=설정)
+
+    assert [one.outcome for one in 결과.runs] == ["NO_RULE_FOR_CYCLE", "RECORDED"]
+    assert len(문.calls) == 1
+
+
+def test_옛_평면_설정은_조용히_매입으로_안_보고_터진다() -> None:
+    """🔴 **호환을 만들면 둘 중 어느 규칙으로 돌았는지가 갈린다.**
+
+    ★ 지금 이 모양을 쓴 실행이 하나도 없어 호환을 만들 이유도 없다 (2026-09-10 확인).
+    """
+    날 = date(2026, 9, 1)
+    문 = _승인문()
+    옛모양 = {"backfill": {"rule": ALWAYS_BASE, "scenario_label": 기본}}
+
+    결과 = 백필({날: [실행행(날)]}, 문, start=날, end=날, 설정=옛모양)
+
+    assert 결과.status == "NO_RULE", "옛 평면 모양을 매입 규칙으로 접었다"
+    assert 결과.reason is not None and "사이클별로 가른 모양이어야 한다" in 결과.reason
+    assert 문.calls == []
+
+
+def test_적어_둔_사이클_칸이_틀리면_그_사이클_행이_없어도_터진다() -> None:
+    """★ 설정이 틀렸다는 사실이 **행의 유무에 따라** 보였다 안 보였다 하면 안 된다."""
+    with pytest.raises(BackfillRuleMissing):
+        read_rules({"backfill": {"procurement": 매입규칙, "sales": {"rule": "ALWAYS_WHATEVER"}}})
+
+
+def test_판매_규칙도_고를_것이_비면_규칙이_선_것이_아니다() -> None:
+    with pytest.raises(BackfillRuleMissing):
+        read_rules({"backfill": {"sales": {"rule": ALWAYS_FIXED_TYPE, "scenario_type": "  "}}})
+
+
+def test_사이클별_규칙을_설정이_말한다() -> None:
+    """🟢 **자기 생존 검사.** 두 칸이 각자 자기 규칙을 낸다."""
+    읽은것 = read_rules(규칙설정)
+
+    assert 읽은것.procurement == BackfillRule(name=ALWAYS_BASE, scenario_label=기본)
+    assert 읽은것.sales == SalesBackfillRule(name=ALWAYS_FIXED_TYPE, scenario_type=보수축)
+    assert 읽은것.for_cycle(SALES_CYCLE) is 읽은것.sales
+    assert 읽은것.for_cycle("PROCUREMENT") is 읽은것.procurement
 
 
 # ── 원문을 읽어 잠근다 ──────────────────────────────────────────────────
@@ -416,13 +636,31 @@ def _백필_코드() -> str:
     return _코드만(Path(backfill.__file__).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("라벨", ["기본", "공격", "보수"])
-def test_코드에_시나리오_라벨이_박혀_있지_않다(라벨: str) -> None:
-    """🔴 **'보수·기본·공격' 은 매입의 계약이다.**
+@pytest.mark.parametrize(
+    "안이름", ["기본", "공격", "보수", "CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
+)
+def test_코드에_시나리오_안_이름이_박혀_있지_않다(안이름: str) -> None:
+    """🔴 **매입 라벨도 판매 축 이름도 그 부서의 계약이다.**
 
-    복제하면 매입이 라벨을 바꿀 때 조용히 어긋난다 — 어느 라벨인지는 **설정이 말한다.**
+    복제하면 그 부서가 이름을 바꿀 때 조용히 어긋난다 — 어느 이름인지는 **설정이
+    말한다.** 코드가 아는 것은 「고정 라벨 규칙」·「고정 축 규칙」이라는 **모양**뿐이다.
+
+    ⚠️ 규칙 이름에도 안 박는다. `ALWAYS_FIXED_TYPE` 이 `ALWAYS_CONSERVATIVE` 가
+      아닌 이유가 이것이다 — 규칙 이름은 코드에 있고, 축 이름은 설정에 있어야 한다.
     """
-    assert 라벨 not in _백필_코드(), f"백필 코드에 시나리오 라벨 '{라벨}' 이 박혀 있다"
+    assert 안이름 not in _백필_코드(), f"백필 코드에 안 이름 '{안이름}' 이 박혀 있다"
+
+
+@pytest.mark.parametrize("축이름", ["CONSERVATIVE", "BALANCED", "AGGRESSIVE"])
+def test_축을_읽는_함수에도_축_이름이_박혀_있지_않다(축이름: str) -> None:
+    """🔴 `scenario_ids_of_type` 이 축 이름을 알면 백필만 안 박은 것이 뜻이 없다.
+
+    ★ 그 함수의 주인은 `decision` 이다 — *"응답에서 무엇을 읽는가"* 의 주인을 둘로
+      만들지 않으려고 거기 뒀고, 그러면 잠금도 거기까지 따라가야 한다.
+    """
+    코드 = _코드만(Path(decision.__file__).read_text(encoding="utf-8"))
+
+    assert 축이름 not in 코드, f"decision 코드에 판매 축 이름 '{축이름}' 이 박혀 있다"
 
 
 def test_라벨_잠금이_실제로_잡는다() -> None:
