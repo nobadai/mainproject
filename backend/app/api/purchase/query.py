@@ -341,7 +341,7 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
         grade=grade,
         max_price=_money(scenario.get("max_price")) or 0,
         #  🔴 없으면 None 이다. max_price 로 대신 채우지 않는다 — 그 순간
-        #     09-17 에 갈라질 두 값이 화면에서 다시 하나가 된다.
+        #     갈라 둔 두 값이 화면에서 다시 하나가 된다.
         cut_unit_price=_money(scenario.get("cut_unit_price")),
         legs=_legs(scenario),
         payments=_payments(scenario),

@@ -27,8 +27,8 @@ class Reason(BaseModel):
 class Plan(BaseModel):
     """매입안 하나.
 
-    🔴 **상한이 둘이다. 09-08 에 갈렸다** (`#398` · `dev@a615aa6`). 지금은 같은
-    값이지만 `09-17` 에 밴드가 바뀌면 갈라진다.
+    🔴 **상한이 둘이다. 09-08 에 갈렸다** (`#398` · `dev@a615aa6`). 지금은 같은 값이고,
+    **컷 산식을 바꾸는 날** 갈라진다.
 
     .. code-block:: text
 
@@ -37,8 +37,12 @@ class Plan(BaseModel):
                         master/verifier.py                검사 이름 L-PAYSCHED-MAX
         cut_unit_price  우리 컷 (self_check.check_max_price)
 
-    ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 `09-17` 뒤로
-    조용히 틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
+    🔴 ~~`09-17` 에 밴드가 바뀌면 갈라진다~~ — **낡았다** (ML 회신 2026-09-10). 밴드
+    교체는 `09-03` 에 끝났고 `09-17` 은 «그림자 기록 2주가 차는 날» 이다. 계기는 날짜가
+    아니라 **우리가 산식을 바꾸는 것**이다.
+
+    ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 그날부터 조용히
+    틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
     """
 
     key: str = Field(description="보수 · 기본 · 공격")
