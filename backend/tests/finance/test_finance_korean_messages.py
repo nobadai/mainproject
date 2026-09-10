@@ -84,6 +84,13 @@ def test_explanation_keys_stay_machine_contract():
         "SCENARIO_CONDITIONAL_ADJUSTABLE",
         "SCENARIO_REJECT",
         "SCENARIO_REJECT_ADJUSTABLE",
+        "SCENARIO_NOT_CONCLUDED",
+        # 판매는 문장이 따로다 — 매입 문구를 빌려 쓰면 판매를 묻고 매입 답을 받는다.
+        # 조정 짝이 없는 것도 사실이다: 재무가 판매 제안에 조정을 만들지 않는다.
+        "SALES_ACCEPT",
+        "SALES_CONDITIONAL",
+        "SALES_REJECT",
+        "SALES_NOT_CONCLUDED",
     }
 
 
@@ -323,6 +330,70 @@ def test_business_status_gets_its_own_user_sentence():
         _assert_user_facing(text, status)
     # 열거값 자체는 그대로다 — 번역 대상이 아니다.
     assert messages.explanation_keys("SCENARIO_VALIDATION", "reject") == ["SCENARIO_REJECT"]
+
+
+# ---------------------------------------------------------------------------
+# 판정하지 못한 결과에 승인성 문장을 쓰지 않는다
+# ---------------------------------------------------------------------------
+
+#: "그대로 진행해도 된다" 는 뜻을 만드는 표현. **판정이 없을 때 나오면 안 된다.**
+_APPROVAL_PHRASES = (
+    "진행하실 수 있습니다",
+    "진행할 수 있습니다",
+    "승인",
+    "문제 없습니다",
+    "문제없습니다",
+    "그대로 진행",
+)
+
+
+def _assert_not_approval(text: str, label: str) -> None:
+    for phrase in _APPROVAL_PHRASES:
+        assert phrase not in text, f"{label}: 승인성 표현 {phrase!r} 가 보인다 -> {text!r}"
+
+
+@pytest.mark.parametrize("mode", ["SALES_VALIDATION", "SCENARIO_VALIDATION"])
+def test_skipped_never_selects_the_accept_explanation(mode):
+    """🔴 이번 결함의 자리.
+
+    예전 `explanation_keys` 의 마지막 줄은 `return ["SCENARIO_ACCEPT"]` 였다.
+    `ok` 가 fallback 자리에 있으면 **아는 상태가 아닌 무엇이 와도 승인 문장**이
+    나간다. 실제로 `skipped` — 재무가 판정하지 **못한** 결과 — 가 그리로 떨어졌다.
+    """
+    keys = messages.explanation_keys(mode, "skipped")
+
+    assert keys != ["SCENARIO_ACCEPT"]
+    assert "ACCEPT" not in keys[0]
+    _assert_not_approval(messages.explanation_for(mode, "skipped"), f"{mode}/skipped")
+
+
+def test_sales_explanations_do_not_borrow_purchase_wording():
+    """판매 제안을 묻고 매입 답을 받으면 안 된다.
+
+    ★ `SCENARIO_*` 는 "매입 조건" 을 말하는 매입 문장이다. 판매 검증이 그 키를
+      고르면 사용자는 자기가 물은 것과 **다른 업무의 답**을 받는다.
+    """
+    for status in ("ok", "conditional", "reject", "skipped"):
+        text = messages.explanation_for("SALES_VALIDATION", status)
+        assert "매입" not in text, f"SALES/{status}: 매입 문구 -> {text!r}"
+        _assert_user_facing(text, f"SALES/{status}")
+
+
+def test_sales_and_purchase_do_not_share_a_sentence():
+    """같은 문장을 두 업무가 나눠 쓰면 한쪽을 고칠 때 다른 쪽이 조용히 따라 바뀐다."""
+    for status in ("ok", "conditional", "reject"):
+        assert messages.explanation_for("SALES_VALIDATION", status) != messages.explanation_for(
+            "SCENARIO_VALIDATION", status
+        )
+
+
+def test_sales_business_status_gets_its_own_user_sentence():
+    """`ok` · `conditional` · `reject` · `skipped` 는 사용자가 할 일이 전부 다르다."""
+    sentences = {
+        status: messages.explanation_for("SALES_VALIDATION", status)
+        for status in ("ok", "conditional", "reject", "skipped")
+    }
+    assert len(set(sentences.values())) == 4
 
 
 def test_llm_and_deterministic_paths_say_the_same_thing():

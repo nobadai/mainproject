@@ -426,6 +426,38 @@ def _sales_branches(request: AgentRequest) -> list[AgentRequest]:
     return branches
 
 
+def _branch_id(request: AgentRequest, branch_request: AgentRequest, index: int) -> str:
+    """이 분기를 가리키는 **관측 식별자**. 다른 Mode 이름을 빌려 쓰지 않는다.
+
+    ★ 🔴 예전에는 `payload.get("scenario_id", "PRE_PURCHASE")` 였다. 판매 검증은
+      `scenario_id` 가 없어도 **분기를 만든다** — 없는 식별자를 재무가 발명하지 않고
+      안에서 `INPUT_INCOMPLETE` 로 드러내는 것이 계약이기 때문이다(`_sales_branches`).
+      그래서 식별자 없는 판매 분기가 전부 `PRE_PURCHASE` 라는 **다른 Mode 이름**으로
+      Trace 에 찍혔다. 관측 정보가 거짓인 것만으로도 고칠 이유가 되지만, 진짜 손해는
+      그다음이다.
+
+    ★ Harness 의 중복 호출 차단은 `(branch_id, tool, arguments)` 를 키로 쓴다
+      (`_signature`). 판매 Tool 은 **인자를 받지 않으므로** 두 축이 이미 같고, 남은
+      한 축인 branch_id 마저 겹치면 2안의 **첫 호출**이 1안의 재호출과 구별되지
+      않는다. 그 결과 정상 실행이 `DUPLICATE_UNRESOLVED_TOOL_CALL` 로 막히고, 이는
+      terminal denial 이라 `RuntimeError` → `ERROR/INTERNAL` 이 된다 — 자료가 부족한
+      제안이 **실행 장애**로 승격되는 경로가 여기였다.
+
+    ★ 그래서 fallback 은 **이 Mode 자신의 이름 + 분기 순번**이다. 순번을 쓰는 이유는
+      분기끼리 겹치지 않아야 하기 때문이고, Mode 이름을 쓰는 이유는 어느 실행의
+      분기인지 읽을 수 있어야 하기 때문이다.
+
+    ★ `scenario_id` 가 있으면 **그대로 쓴다.** 기존 분기 identity 는 바뀌지 않는다.
+    """
+    scenario_id = branch_request.payload.get("scenario_id")
+    if scenario_id is not None and str(scenario_id).strip():
+        return str(scenario_id).strip()
+    if request.mode == "PRE_PURCHASE":
+        # 단일 분기다. 순번을 붙이면 기존 Trace/이력의 branch_id 가 달라진다.
+        return "PRE_PURCHASE"
+    return f"{request.mode}:{index}"
+
+
 def execute_loop(
     state: FinanceAgentState,
     *,
@@ -803,8 +835,8 @@ class FinanceAgentController:
             outcome.error_reason = str(exc)
             return outcome
         try:
-            for branch_request in branch_requests(request):
-                branch_id = str(branch_request.payload.get("scenario_id", "PRE_PURCHASE"))
+            for index, branch_request in enumerate(branch_requests(request)):
+                branch_id = _branch_id(request, branch_request, index)
                 state = FinanceAgentState(
                     branch_request,
                     branch_id=branch_id,
