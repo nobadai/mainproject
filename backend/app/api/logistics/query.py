@@ -12,20 +12,29 @@
 ║  **화면은 안 고쳐도 됩니다** — 표의 칸은 백엔드가 내려줍니다.              ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
-★ **읽기에 실패해도 화면은 뜹니다.** 그때는 예시값으로 되돌아가고 「예시값」
-  딱지가 붙습니다 (매입·ML 과 같은 판단). 예외 종류를 골라 잡지 않습니다 —
-  안 골라낸 하나 때문에 화면이 통째로 죽습니다.
+🔴 **읽기에 실패하면 «오류» 라고 적습니다. 예시 숫자로 바꾸지 않습니다.**
 
-🔴 **부르는 함수 넷의 시그니처가 서로 다릅니다.**
+  종전에는 어떤 예외든 잡아 예시값(현재고 14,600kg)으로 되돌아갔습니다. 그래서
+  DB 가 죽은 날도, 시뮬레이션이 아직 안 걸어간 2028년을 물어본 날도 화면에는
+  **그럴듯한 실적 숫자**가 떴습니다. `Source.status` 가 셋을 가릅니다.
+
+  ```text
+  OK       읽었고 값이 있다
+  NO_DATA  읽었는데 그 실행의 기록 구간 밖이다   ★ 0 이 아니라 «모른다»
+  ERROR    읽다가 실패했다                       ★ 숫자를 지어내지 않는다
+  ```
+
+🔴 **부르는 함수 넷이 같은 `(sim_run_id, as_of)` 축에 섭니다.**
 
     get_inventory_console(sim_run_id, as_of)    items · lots · capacity
     get_inbound_console  (sim_run_id, as_of)    in_transit · receipts · arrival_summary
-    get_warehouse_console(sim_run_id)           zones · lot_locations      ← as_of 없음
-    get_outbound_console (sim_run_id, status)   reservations               ← as_of 없음
+    get_warehouse_console(sim_run_id, as_of)    zones · lot_locations
+    get_outbound_console (sim_run_id, as_of)    reservations
 
-  뒤의 둘은 **기준일을 안 받습니다.** 날짜를 바꿔도 창고·출고는 안 변합니다.
-  그 사실을 각 pane 의 `Note` 에 적습니다 — 안 적으면 "날짜가 안 먹네" 라는
-  의심을 그대로 받습니다.
+  ⚠️ 그래도 **모든 칸이 그날 값인 것은 아닙니다.** 되살릴 정본이 아직 없는 축이
+     셋 남아 있고(판매가능량이 빼는 예약 축 · 예약 목록 · Zone 자리 정원),
+     응답의 `*_time_basis` 가 그것을 말합니다. 그 사실을 pane 의 `Note` 에
+     적습니다 — 안 적으면 "날짜가 안 먹네" 라는 의심을 그대로 받습니다.
 
 🔴 **`None` 은 0 이 아닙니다.** `available_qty_kg` 는 못 읽은 축이 있으면
   `None` 입니다. 0 으로 바꾸면 «팔 게 없다» 는 거짓말이 됩니다 — 이 탭이 맨 위에
@@ -36,8 +45,12 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from http import HTTPStatus
+
+import psycopg
 
 from app.api.logistics.schema import LogisticsTab
 from app.api.primitives import (
@@ -49,6 +62,7 @@ from app.api.primitives import (
     Pane,
     Series,
     Source,
+    SourceStatus,
     Stat,
     Table,
 )
@@ -61,10 +75,15 @@ from app.logistics.console_schemas import (
 from app.logistics.console_service import (
     get_inbound_console,
     get_inventory_console,
-    get_inventory_moves_console,
     get_outbound_console,
     get_reservation_fefo_console,
     get_warehouse_console,
+)
+from app.logistics.db import get_connection
+from app.logistics.historical_repository import (
+    onhand_total_by_day,
+    runtime_coverage_at,
+    snapshot_days_between,
 )
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
@@ -72,17 +91,9 @@ log = logging.getLogger(__name__)
 
 PANES = ("stock", "inbound", "warehouse", "outbound")
 
-#: 예시 재고 (kg). **읽기에 실패했을 때만** 쓴다 — 그때는 요약도 같이 예시값이라
-#: 둘이 안 갈라진다. 1번 칸이 공란인 것은 «안 보고한 날» 이지 0 이 아니다.
-_ONHAND = [21400, None, 19800, 19800, 17200, 17200, 16900, 15100, 14600]
-_PROJ = [14600, 26200, 25700, 25100]
-_IN_TRANSIT = [None, None, None, None, None, None, None, 12000, 12000]
-#: 예시값 화면의 요약 숫자. **실측 경로에서는 안 쓴다.**
-ONHAND_NOW = 14600
-
 #: 화면에 적는 Zone 종류. DB 어휘를 사람 말로만 바꾼다 — 뜻을 더하지 않는다.
 _ZONE_KIND = {"STORAGE_RACK": "보관 랙", "WORK_FLOOR": "작업 Floor"}
-_PLACEMENT = {"PLACED": "배치됨", "UNPLACED": "미배치"}
+_PLACEMENT = {"PLACED": "배치됨", "UNPLACED": "미배치", "UNRECORDED": "미기록"}
 
 
 def _t(cols: list[tuple[str, str, str]], rows: list[dict], **kw) -> Table:
@@ -166,7 +177,9 @@ def _stock_pane(
     if available is None:
         avail_detail = f"못 읽은 축이 있습니다 — {inv.available_qty_unresolved_reason}"
     else:
-        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값"
+        #  ★ **«기준일 값» 이라고 적지 않는다.** 이 숫자가 빼는 예약·할당 축은
+        #    Runtime 축의 지금 값이다 (`available_qty_time_basis`).
+        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (예약 축은 «지금» 기준)"
 
     return Pane(
         key="stock",
@@ -230,8 +243,9 @@ def _stock_pane(
                 ),
             ),
             Card(
-                key="lots", title="Lot 상태", subtitle="Snapshot + turnover 계산 결과",
-                source_ref="inventory_lots · item_turnover_policies",
+                key="lots", title="Lot 상태",
+                subtitle="기준일 원장 잔량 + turnover 계산 결과",
+                source_ref="inventory_moves · inventory_lots · item_turnover_policies",
                 table=_t(
                     [("lot", "Lot", "left"), ("item", "품목", "left"), ("grade", "등급", "left"),
                      ("qty", "잔량", "right"), ("fresh", "신선도 잔여", "right"),
@@ -257,10 +271,13 @@ def _stock_pane(
             ),
             Card(
                 key="principle", title="재고 처리 원칙",
+                lead=_MIXED_AXIS_NOTE,
                 bullets=[
                     "예약과 할당은 재고를 줄이지 않습니다 — 실출고 때 줄어듭니다",
                     "판매가능량은 화면이 계산하지 않습니다. 서버 값을 그대로 씁니다",
                     "등급 미확정 Lot 은 «미확정» 으로 적습니다 — 특으로 넘겨짚지 않습니다",
+                    "현재고 · Lot 잔량은 원장(inventory_moves)을 기준일까지 더한 값입니다",
+                    "Lot 상태는 저장된 값이 아니라 그날 사실에서 유도합니다",
                 ],
             ),
         ],
@@ -369,12 +386,14 @@ def _warehouse_pane(wh: ConsoleWarehouseResponse, inv: ConsoleInventoryResponse)
         label="창고 배치",
         stats=[
             Stat(label="사용 중", value=_kg(cap.used_capacity_kg, 1), unit="kg",
-                 detail="창고 전체 합계", tone="neutral", raw=_raw(cap.used_capacity_kg)),
+                 detail="창고 전체 합계 · 기준일 원장", tone="neutral",
+                 raw=_raw(cap.used_capacity_kg)),
             Stat(label="보장 용량", value=_kg(cap.guaranteed_capacity_kg), unit="kg",
-                 detail="계약 baseline", tone="neutral",
+                 detail="계약 baseline · 지금 활성 정책", tone="neutral",
                  raw=_raw(cap.guaranteed_capacity_kg)),
             Stat(label="최대 용량", value=_kg(cap.burst_capacity_kg), unit="kg",
-                 detail="일시 초과 허용치", tone="neutral", raw=_raw(cap.burst_capacity_kg)),
+                 detail="일시 초과 허용치 · 지금 활성 정책", tone="neutral",
+                 raw=_raw(cap.burst_capacity_kg)),
             Stat(label="자리 못 잡은 Lot", value=f"{len(unplaced):,}", unit="Lot",
                  detail="입고됐지만 Pallet 자리가 없습니다",
                  tone="warn" if unplaced else "good", raw=float(len(unplaced))),
@@ -389,7 +408,9 @@ def _warehouse_pane(wh: ConsoleWarehouseResponse, inv: ConsoleInventoryResponse)
                     tone="info",
                     text=("**자리(Position)와 kg 를 섞지 않습니다.** 아래 표는 자리 수이고, "
                           "kg 한도는 Zone 별로 없이 **창고 전체 하나**뿐이라 "
-                          "위 요약에 적었습니다."),
+                          "위 요약에 적었습니다. 🔴 **이 표의 자리 수는 «지금» 창고입니다** — "
+                          "자리 정원에는 유효일이 없어 기준일로 되살릴 수 없습니다. "
+                          "아래 «Lot 배치» 는 기준일 값입니다."),
                 ),
                 table=_t(
                     [("zone", "Zone", "left"), ("kind", "종류", "left"),
@@ -410,7 +431,13 @@ def _warehouse_pane(wh: ConsoleWarehouseResponse, inv: ConsoleInventoryResponse)
             ),
             Card(
                 key="placement", title="Lot 배치",
-                source_ref="pallets · storage_locations",
+                subtitle="기준일까지의 Pallet 사건을 재생한 자리입니다",
+                source_ref="pallet_events · pallets · storage_locations",
+                lead=Note(
+                    tone="info",
+                    text=("«미기록» 은 «자리 없음» 이 아닙니다 — 그날까지 그 Lot 의 "
+                          "Pallet 사건이 하나도 없다는 뜻입니다. 없는 자리를 지어내지 않습니다."),
+                ),
                 table=_t(
                     [("lot", "Lot", "left"), ("item", "품목", "left"),
                      ("qty", "잔량", "right"), ("zone", "Zone", "left"),
@@ -472,7 +499,11 @@ def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
                 lead=Note(
                     tone="info",
                     text=("후보는 **고르는 것이 아닙니다** — 자동 Allocation 이 아닙니다. "
-                          "예약이 없으면 후보도 없습니다."),
+                          "예약이 없으면 후보도 없습니다. **예약 · 할당 목록은 기준일 "
+                          "값입니다** — 예약 해제일(released_as_of) · 할당 결정 시각 · "
+                          "출고 Move 로 그날 상태를 되살립니다. 🔴 **후보의 «가용» 은 "
+                          "«지금» 재고입니다** — Lot 잔량에서 살아 있는 할당을 뺀 값이라 "
+                          "기준일로 되살리지 않습니다."),
                 ),
                 table=_t(
                     [("resv", "Reservation", "left"), ("lot", "Lot", "left"),
@@ -486,52 +517,10 @@ def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
     )
 
 
-#  ── 예시값 (읽기 실패 시) ────────────────────────────────────────────────
+#  ── 읽기 결과 ────────────────────────────────────────────────────────────
 #
-#  ★ 실측 경로가 죽어도 **화면은 떠야** 한다. 대신 「예시값」 딱지가 붙는다.
-
-
-def _demo_stock_pane() -> Pane:
-    return Pane(
-        key="stock", label="재고 · 예약",
-        stats=[
-            Stat(label="현재고 합계", value=f"{ONHAND_NOW:,}", unit="kg",
-                 detail="운송 중 12,000 · 01-07 도착", tone="good", raw=ONHAND_NOW),
-            Stat(label="판매가능량", value="2,950", unit="kg",
-                 detail="예약 · 할당 · 신선도 반영 서버 계산값", tone="good", raw=2950),
-            Stat(label="예약 총량", value="700", unit="kg",
-                 detail="Lot 할당 500kg 포함", tone="warn", raw=700),
-            Stat(label="폐기 검토", value="1", unit="Lot",
-                 detail="양파 LOT-Y-OLD · 신선도 잔여 -1일", tone="bad", raw=1),
-        ],
-        cards=[
-            Card(
-                key="reservation", title="재고 확보 · Reservation 현황",
-                subtitle="예약 총량 안에 Lot 할당량이 포함됩니다",
-                source_ref="inventory_reservations · inventory_allocations",
-                flow=["현재고", "Reservation 으로 수량 확보", "Lot Allocation",
-                      "실출고 SHIPPED", "원장 OUT · 현재고 감소"],
-                table=_t(
-                    [("id", "Reservation", "left"), ("item", "품목", "left"),
-                     ("resv", "예약량", "right"), ("state", "상태", "left")],
-                    [
-                        {"id": "RSV-001", "item": "배추", "resv": "500 kg",
-                         "state": "PARTIALLY_ALLOCATED"},
-                        {"id": "RSV-002", "item": "무", "resv": "200 kg",
-                         "state": "ALLOCATED"},
-                    ],
-                    empty_text="확보된 재고가 없습니다",
-                ),
-            ),
-        ],
-    )
-
-
-def _demo_pane(key: str, label: str) -> Pane:
-    return Pane(key=key, label=label, cards=[
-        Card(key="demo", title=label,
-             lead=Note(tone="warn", text="**예시값입니다.** 실제 값을 못 읽었습니다.")),
-    ])
+#  🔴 **실패해도 화면은 뜨지만, 숫자를 지어내지 않는다.** 종전에는 이 자리에
+#     예시 재고(14,600kg)가 있었고 그것이 실적처럼 나갔다.
 
 
 _PRINCIPLE = Note(
@@ -540,55 +529,184 @@ _PRINCIPLE = Note(
           "0 이 아니라 **공란**입니다 — 둘은 다릅니다."),
 )
 
+#: **그날 값이 아닌** 칸들. 이유가 둘로 갈린다 — 되살릴 정본이 없거나(Zone 자리
+#: 정원), 축을 일부러 «지금» 에 둔 것이거나(판매가능량 · `console_schemas`
+#: `available_qty_time_basis` 주석). 화면이 그 사실을 읽고 적는다.
+_MIXED_AXIS_NOTE = Note(
+    tone="warn",
+    text=("**판매가능량 · Zone 자리 수는 «지금» 값입니다.** 판매가능량은 «지금 더 팔 "
+          "수 있나» 를 답하는 값이라 예약·할당의 지금 상태를 빼고, Zone 자리 정원에는 "
+          "유효일이 없어 기준일로 되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · "
+          "Receipt · Lot 자리 · 예약·할당 목록은 기준일 값입니다."),
+)
 
-def _demo(reason: str) -> LogisticsTab:
-    return LogisticsTab(
-        panes=[
-            _demo_stock_pane(),
-            _demo_pane("inbound", "입고 처리"),
-            _demo_pane("warehouse", "창고 배치"),
-            _demo_pane("outbound", "출고 · 운송"),
-        ],
-        selected="stock",
-        principle=_PRINCIPLE,
-        source=Source(filled=False, owner="물류", note=reason),
+
+def _empty_pane(key: str, label: str, note: Note, stats: list[Stat] | None = None) -> Pane:
+    """값이 없거나 못 읽은 pane. 🔴 **표를 예시 행으로 채우지 않는다.**"""
+    return Pane(
+        key=key,
+        label=label,
+        stats=stats or [],
+        cards=[Card(key="state", title=label, lead=note)],
     )
 
 
-def build(as_of: date, pane: str) -> LogisticsTab:
-    #  ★ 통째로 잡는 것이 맞다 — 여기서 무슨 일이 나든 **화면은 떠야** 하고
-    #    대신 「예시값」 딱지가 붙는다. 예외 종류를 골라 잡으면 안 골라낸
-    #    하나 때문에 화면이 통째로 죽는다 (매입·ML 이 같은 판단).
+def _empty_tab(*, status: SourceStatus, note: Note, source_note: str) -> LogisticsTab:
+    """네 pane 을 비운 탭. `status` 가 «없음» 과 «실패» 를 가른다.
+
+    ★ **재고 요약 칸은 남기되 값을 «—» 로 둔다.** 대시보드가 이 칸을 그대로 실어
+      가는데(`lg.panes[0].stats[0]`), 칸을 없애면 대시보드가 통째로 죽는다.
+      🔴 `raw=None` 이라 계산에도 안 섞인다 — 0 으로 메우지 않는 그 규율이다.
+
+    ★ `filled=True` 다. 「예시값」 띠는 *"이 파트가 아직 실제 값에 안 붙었다"* 는
+      뜻이고, 지금은 붙어 있는데 **그날 사실이 없거나 읽기가 실패한** 것이다.
+      그 구분은 `status` 가 한다.
+    """
+    return LogisticsTab(
+        panes=[
+            _empty_pane(
+                "stock",
+                "재고 · 예약",
+                note,
+                [Stat(label="현재고 합계", value="—", detail=note.text, tone="warn", raw=None)],
+            ),
+            _empty_pane("inbound", "입고 처리", note),
+            _empty_pane("warehouse", "창고 배치", note),
+            _empty_pane("outbound", "출고 · 운송", note),
+        ],
+        selected="stock",
+        principle=_PRINCIPLE,
+        source=Source(filled=True, owner="물류", note=source_note, status=status),
+    )
+
+
+@dataclass(frozen=True)
+class LogisticsTabResult:
+    """탭 한 판과 **그 판이 나가야 할 HTTP 코드.**
+
+    🔴 **읽기 실패를 `200 OK` 로 내보내지 않는다.** 본문에 `status="ERROR"` 를 적어도
+       HTTP 가 200 이면 그 응답은 **성공으로 캐시되고 성공으로 집계되고 성공으로
+       재시도되지 않는다.** 계약은 그 반대다.
+
+    ```text
+    OK · NO_DATA        200   읽었다. 값이 있거나, 그날이 없다
+    ERROR · DB 접속 실패 503   지금은 못 읽는다 — 다시 오면 될 수 있다
+    ERROR · 그 밖        500   이 요청은 여기서 깨졌다
+    ```
+
+    ★ **본문은 그대로 `LogisticsTab` 이다.** 오류라고 `{"detail": …}` 로 바꾸지
+      않는다 — 화면은 `Source.status` 와 pane 문구를 읽어 «왜» 를 보여 줘야 한다.
+    """
+
+    tab: LogisticsTab
+    http_status: int
+
+
+#: DB 에 **닿지 못한** 실패. 값이 틀린 것이 아니라 지금 못 읽는 상태라 503 이다.
+#:
+#: 🔴 `psycopg.OperationalError` 하나만 여기 둔다. 그 밑에 `ProgrammingError`(SQL 잘못) ·
+#:    `IntegrityError` 는 **우리 코드가 깨진 것**이라 503 으로 재시도를 권하면 안 된다.
+_DB_UNAVAILABLE: tuple[type[BaseException], ...] = (psycopg.OperationalError,)
+
+
+def _http_status_for_error(error: BaseException) -> int:
+    return (
+        HTTPStatus.SERVICE_UNAVAILABLE
+        if isinstance(error, _DB_UNAVAILABLE)
+        else HTTPStatus.INTERNAL_SERVER_ERROR
+    )
+
+
+def build_result(as_of: date, pane: str) -> LogisticsTabResult:
+    """재고·물류 탭 한 판 + HTTP 코드. **네 조회가 같은 `(sim_run_id, as_of)` 축에 선다.**
+
+    🔴 **실패를 예시값으로 바꾸지 않는다.** 예외를 통째로 잡는 것은 그대로다 —
+       무슨 일이 나든 화면은 떠야 하기 때문이다. 바뀐 것은 **그때 무엇을 내려
+       보내는가**다: 예시 숫자가 아니라 빈 화면 · `status="ERROR"` · 503/500 이다.
+
+    🔴 **`NO_DATA` 는 그날 Runtime Snapshot 이 없다는 뜻이다.**
+       물리 사실(Lot · Move · Receipt)의 최소~최대 구간으로 판정하지 않는다 —
+       그 판정은 **안 연 날을 열렸다고 하고(실측 31일) 열린 날을 모른다고 한다
+       (실측 245일).** 입·출고가 0 건인 정상 하루는 물리 사실을 아예 안 남긴다.
+    """
     run = BURN_IN_SIM_RUN_ID
     try:
+        with get_connection() as conn:
+            coverage = runtime_coverage_at(conn, sim_run_id=run, as_of=as_of)
+        if not coverage.has_snapshot:
+            return LogisticsTabResult(
+                tab=_empty_tab(
+                    status="NO_DATA",
+                    note=Note(
+                        tone="warn",
+                        text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** — 그날 "
+                              "Runtime Snapshot 이 없습니다. 0 이 아니라 "
+                              "**아직 모르는 날**입니다. "
+                              f"이 실행이 연 날: {coverage.first_as_of} ~ "
+                              f"{coverage.last_as_of}."),
+                    ),
+                    source_note=(
+                        f"logistics_runtime_fixture 없음 · {run} · {as_of}"
+                        f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
+                    ),
+                ),
+                http_status=HTTPStatus.OK,
+            )
         inv = get_inventory_console(sim_run_id=run, as_of=as_of)
         inb = get_inbound_console(sim_run_id=run, as_of=as_of)
-        wh = get_warehouse_console(sim_run_id=run)
-        ob = get_outbound_console(sim_run_id=run)
+        wh = get_warehouse_console(sim_run_id=run, as_of=as_of)
+        ob = get_outbound_console(sim_run_id=run, as_of=as_of)
         panes = [
             _stock_pane(inv, inb, ob),
             _inbound_pane(inb),
             _warehouse_pane(wh, inv),
             _outbound_pane(ob, as_of),
         ]
-    except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
-        log.info("물류 값을 못 읽어 예시값을 씁니다: %s", error)
-        return _demo(f"DB 를 못 읽었습니다 ({type(error).__name__})")
+    except Exception as error:  #  DB 미연결 · 표 없음 · 원장/계보 무결성 다 잡는다
+        log.exception("물류 값을 못 읽었습니다")
+        http_status = _http_status_for_error(error)
+        다시 = http_status == HTTPStatus.SERVICE_UNAVAILABLE
+        재시도 = "잠시 뒤 다시 열어 보세요." if 다시 else ""
+        return LogisticsTabResult(
+            tab=_empty_tab(
+                status="ERROR",
+                note=Note(
+                    tone="bad",
+                    text=(f"**값을 못 읽었습니다** (`{type(error).__name__}`). "
+                          f"예시 숫자로 대신하지 않습니다 — 이 화면에는 지금 사실이 "
+                          f"없습니다. {재시도}").strip(),
+                ),
+                source_note=f"읽기 실패 ({type(error).__name__}) · {run} · {as_of}",
+            ),
+            http_status=http_status,
+        )
 
-    return LogisticsTab(
-        panes=panes,
-        selected=pane,
-        principle=_PRINCIPLE,
-        source=Source(
-            filled=True,
-            owner="물류",
-            note=(
-                "inventory_lots · inventory_moves · inventory_reservations · "
-                "inbound_receipts · warehouse_zones · storage_locations · "
-                f"{run} · {as_of}"
+    return LogisticsTabResult(
+        tab=LogisticsTab(
+            panes=panes,
+            selected=pane,
+            principle=_PRINCIPLE,
+            source=Source(
+                filled=True,
+                owner="물류",
+                status="OK",
+                note=(
+                    "inventory_moves · inventory_lots · inbound_receipts · "
+                    "inbound_inspections · pallet_events · inventory_reservations · "
+                    f"warehouse_zones · storage_locations · {run} · {as_of}"
+                ),
             ),
         ),
+        http_status=HTTPStatus.OK,
     )
+
+
+def build(as_of: date, pane: str) -> LogisticsTab:
+    """탭 본문만. **대시보드가 쓰는 진입점이다** (HTTP 코드가 필요 없다).
+
+    ★ 계산은 `build_result` 하나가 한다 — 같은 판을 두 벌 만들지 않는다.
+    """
+    return build_result(as_of, pane).tab
 
 
 def _ceiling(value: float) -> float:
@@ -602,44 +720,53 @@ def _ceiling(value: float) -> float:
     return 10 * base
 
 
-def _onhand_series(as_of: date, n: int, at: int) -> tuple[list[float | None], bool]:
-    """원장을 거슬러 올라가 하루치 보유량을 편다.
+def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
+    """날짜축 칸마다의 창고 보유량. **원장 누계이고, 안 연 날은 공란이다.**
 
-    ★ **정본은 원장이다** (`inventory_lots.remaining_qty_kg` 컬럼 주석).
+    ```text
+    opening(start−1)  =  Σ(moved_at <  start)
+    on_hand(D)        =  on_hand(D−1) + IN(D) − OUT(D) − DISPOSE(D)
+    ```
 
-          on_hand(D-1) = on_hand(D) - IN(D) + OUT(D) + DISPOSE(D)
+    🔴 **현재 잔량을 앵커로 잡고 거슬러 올라가지 않는다.** 종전에는
+       `Σ inventory_lots.remaining_qty_kg` 를 오늘 칸에 놓고 역산했는데, 그 앵커가
+       **Current Cache** 라 모든 과거 칸이 같이 틀렸다 (네 기준일 전부 0 kg).
 
-    🔴 `ADJUST` 는 **방향을 모른다.** `ADJUST_IN` · `ADJUST_OUT` 로 갈리기 전까지
-      (`23_inventory_move_type_split.sql`) 부호를 넘겨짚을 수 없다. 창 안에 하나라도
-      있으면 **거슬러 올라가기를 포기하고 오늘 칸만 남긴다** — 틀린 선을 그리느니
-      공란이 낫다. 두 번째 반환값이 그 사실을 알린다.
+    🔴 **`limit` 으로 원장을 자르지 않는다.** 종전 `limit=1000` 은 잘린 줄이 하나만
+       생겨도 선 전체를 조용히 틀어 놓는다. 이제 합은 DB 가 낸다.
+
+    🔴 **Runtime Snapshot 이 없는 날은 `None` 이다 — 0 이 아니다.** 원장 누계는 첫
+       사실 이전 날짜에도 숫자를 내고 그 값이 **0** 인데, 화면 계약에서
+
+    ```text
+    0      확인했고 재고가 없다
+    공란   그날을 모른다
+    ```
+
+       는 다른 값이다. 안 가르면 **이 실행이 열지도 않은 날이 «재고 0kg» 선**으로
+       그려진다 (실측: 창 시작이 씨앗 구간이면 실제로 그렇게 나왔다).
+
+    ★ **앞날은 그리지 않는다** — `as_of` 뒤 칸은 `None` 이다. 확정된 도착만
+      `markers` 로 얹는다.
+
+    ⚠️ `ADJUST` 는 `historical_repository` 가 예외로 막는다. 방향을 모르는 이동을
+       0 이나 `IN` 으로 넘겨짚어 그린 선은 틀렸다는 것조차 알려 주지 않는다.
     """
-    run = BURN_IN_SIM_RUN_ID
-    inv = get_inventory_console(sim_run_id=run, as_of=as_of)
-    today = sum((it.on_hand_qty_kg for it in inv.items), Decimal(0))
-
+    start = as_of - timedelta(days=at)
+    with get_connection() as conn:
+        series = onhand_total_by_day(
+            conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
+        )
+        열린_날 = snapshot_days_between(
+            conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
+        )
     data: list[float | None] = [None] * n
-    data[at] = float(today)
-
-    moves = get_inventory_moves_console(
-        sim_run_id=run,
-        moved_from=as_of - timedelta(days=at),
-        moved_to=as_of,
-        limit=1000,
-    )
-    if any(m.move_type == "ADJUST" for m in moves.moves):
-        return data, False
-
-    net: dict[date, Decimal] = {}
-    for m in moves.moves:
-        sign = Decimal(1) if m.move_type == "IN" else Decimal(-1)
-        net[m.moved_at] = net.get(m.moved_at, Decimal(0)) + sign * m.quantity_kg
-
-    cursor = today
-    for i in range(at - 1, -1, -1):
-        cursor -= net.get(as_of - timedelta(days=at - i - 1), Decimal(0))
-        data[i] = float(cursor)
-    return data, True
+    for index in range(at + 1):
+        day = start + timedelta(days=index)
+        # 🔴 열린 날에만 숫자를 적는다. 안 연 날의 0 은 «없다» 가 아니라 «모른다» 다.
+        if day in 열린_날 and day in series:
+            data[index] = float(series[day])
+    return data
 
 
 def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
@@ -647,18 +774,40 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
 
     ★ **대시보드가 아니라 여기서 만듭니다.** 요약 숫자와 같은 곳에서 나와야
       둘이 안 갈라집니다. 실제로 갈라졌던 적이 있습니다 — 요약은 4,550kg 인데
-      그래프 끝은 14,600kg 이었습니다. `tests/api/test_screen_api.py` 가 지킵니다.
+      그래프 끝은 14,600kg 이었습니다.
 
-    ★ **앞날은 그리지 않습니다.** 예전에는 `_PROJ` 로 «추정 보유» 점선을 그렸는데,
-      그 값의 출처가 없었습니다. 없는 예측을 지어내지 않고 **공란**으로 둡니다.
-      확정된 도착만 `markers` 로 얹습니다.
+    🔴 **못 읽으면 빈 그래프에 「오류」 라고 적습니다.** 종전에는 예시 선
+       (`_ONHAND` · `_PROJ`)으로 되돌아갔고, 그 선은 실적처럼 보였습니다.
+
+    🔴 **칸마다 그날이 열렸는지 따로 봅니다.** 선택한 `as_of` 하나만 보면 창 앞쪽의
+       안 연 날들이 0kg 으로 그려집니다 (`_onhand_series` 참조).
     """
     try:
-        data, walked = _onhand_series(as_of, n, at)
+        with get_connection() as conn:
+            coverage = runtime_coverage_at(
+                conn, sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of
+            )
+        if not coverage.has_snapshot:
+            return _empty_stock_chart(
+                n,
+                Note(
+                    tone="warn",
+                    text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** "
+                          f"(열린 구간 {coverage.first_as_of} ~ {coverage.last_as_of})."),
+                ),
+            )
+        data = _onhand_series(as_of, n, at)
         inb = get_inbound_console(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
-    except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
-        log.info("재고 그래프를 못 읽어 예시값을 씁니다: %s", error)
-        return _demo_stock_chart(n, at)
+    except Exception as error:  #  DB 미연결 · 표 없음 · 원장 이상 다 잡는다
+        log.exception("재고 그래프를 못 읽었습니다")
+        return _empty_stock_chart(
+            n,
+            Note(
+                tone="bad",
+                text=(f"**재고 추이를 못 읽었습니다** (`{type(error).__name__}`). "
+                      "예시 선으로 대신하지 않습니다."),
+            ),
+        )
 
     #  창 안에 도착이 잡힌 것만 표시한다. 밖의 것을 가장자리로 끌어오지 않는다.
     markers: list[Marker] = []
@@ -682,34 +831,19 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
         series=[Series(name="보유", data=data, tone="good", end_dot=True)],
         markers=markers,
         note=Note(
-            tone="neutral" if walked else "warn",
-            text=(
-                "원장(`inventory_moves`)을 거슬러 올라가 편 값입니다. **앞날은 공란**입니다 — "
-                "확정된 도착만 점으로 얹습니다."
-                if walked else
-                "🔴 창 안에 방향을 모르는 `ADJUST` 가 있어 **과거를 거슬러 올라가지 "
-                "않았습니다.** 오늘 칸만 실측입니다."
-            ),
+            tone="neutral",
+            text=("원장(`inventory_moves`)을 날마다 더해 편 값입니다. **앞날과 이 실행이 "
+                  "열지 않은 날은 공란**입니다 — 확정된 도착만 점으로 얹습니다."),
         ),
     )
 
 
-def _demo_stock_chart(n: int, at: int) -> Chart:
-    """읽기 실패용 예시 그래프. **요약도 같이 예시값으로 떨어지므로 둘은 여전히 맞는다.**"""
-    def pad(head: list) -> list:
-        return list(head) + [None] * (n - len(head))
-
-    tail = [None] * at + list(_PROJ) + [None] * max(0, n - at - len(_PROJ))
+def _empty_stock_chart(n: int, note: Note) -> Chart:
+    """값이 없거나 못 읽은 그래프. 🔴 **선을 지어내지 않는다 — 전부 공란이다.**"""
     return Chart(
-        label="창고 재고", y_min=0, y_max=40000,
-        y_ticks=[10000, 20000, 30000, 40000],
-        y_labels=["10t", "20t", "30t", "40t"],
-        series=[
-            Series(name="보유", data=pad(_ONHAND), tone="good", end_dot=True),
-            Series(name="추정 보유", data=tail[:n], tone="good", dashed=True),
-            Series(name="운송 중", data=pad(_IN_TRANSIT), tone="good",
-                   dashed=True, opacity=0.5),
-        ],
-        markers=[Marker(index=6, value=16900, label="폐기 300", tone="bad")],
-        note=Note(tone="warn", text="**예시값입니다.** 실제 값을 못 읽었습니다."),
+        label="창고 재고", y_min=0, y_max=100,
+        y_ticks=[25, 50, 75, 100],
+        y_labels=["25kg", "50kg", "75kg", "100kg"],
+        series=[Series(name="보유", data=[None] * n, tone="good")],
+        note=note,
     )

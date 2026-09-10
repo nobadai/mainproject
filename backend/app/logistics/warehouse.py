@@ -80,15 +80,21 @@ warehouse_zones.zone_id      ← item_zone_assignments.zone_id
   ★ **원장 키 `(…,1)` 을 잡지 않는다.** 이 파일은 Move 를 안 만들어서 잡을 일이 없고,
     그래서 다른 경로와 교착할 자원이 아예 없다.
 
-🔴 **재고가 0 이 돼도 자리는 저절로 안 비운다.**
+🔴 **재고가 0 이 돼도 같은 함수 안에서 자리가 비지 않는다.**
 
 ```text
 OUT · DISPOSE   →  remaining_qty_kg 를 0 으로 만든다      (원장이 하는 일)
-empty_pallet    →  자리를 돌려준다                        (사람이 부르는 일)
+empty_pallet    →  자리를 돌려준다                        (별도 단계가 부르는 일)
 ```
 
   ⚠️ `confirm_disposal` 도 `ship_allocated_stock` 도 `empty_pallet` 을 부르지 않는다.
      한 Lot 이 여러 장에 나뉘어 있으면 **어느 장을 실제로 치웠는지** 원장이 알지 못한다.
+     🔴 **수량 함수가 자리까지 건드리는 길은 여전히 없다.**
+
+  ★ **비우는 쪽은 사람이거나 `auto_maintenance` 다** (2026-09-09). 뒤엣것은 수량을 안
+    움직이는 조립 계층이라, `Lot.remaining_qty_kg == 0` 을 **먼저 확인한 뒤** 그 Lot 의
+    `ACTIVE` · `HOLD` Pallet 을 이 함수로 넘긴다 — 그래도 아래 ④ 근거를 다시 통과해야
+    하므로 *"어느 장에 남았는지 모른다"* 는 상황에서는 아무것도 안 비운다.
 
 ⚠️ **기존 입고·출고를 강제하지 않는다.** 입고는 지금도 Pallet 없이
    `Receipt → Inspection → Lot → Ledger IN → PUTAWAY_DONE` 로 끝나고, 할당의
@@ -1040,15 +1046,20 @@ def empty_pallet(
        pallet_events EMPTIED (from=옛 자리 · to=NULL)
     ```
 
-    🔴 **자동으로 불리지 않는다.** `confirm_disposal` 도 `ship_allocated_stock` 도 이
-       함수를 부르지 않는다. *"재고가 0 이 됐다"* 와 *"사람이 Pallet 을 치웠다"* 는
-       다른 사실이고, 한 Lot 이 여러 Pallet 에 나뉘어 있으면 **어느 장을 치웠는지**
-       원장이 알지 못한다.
+    🔴 **수량을 움직인 함수가 이 함수를 부르지 않는다.** `confirm_disposal` 도
+       `ship_allocated_stock` 도 여기를 부르지 않는다. *"재고가 0 이 됐다"* 와
+       *"Pallet 을 치웠다"* 는 다른 사실이고, 한 Lot 이 여러 Pallet 에 나뉘어 있으면
+       **어느 장을 치웠는지** 원장이 알지 못한다.
 
     ```text
-    재고 0        ≠  자동으로 자리 비움
-    empty_pallet  →  물리 자리 비움
+    재고 0            ≠  같은 함수 안에서 자동 자리 비움
+    DISPOSE/OUT       →  empty_pallet 직접 호출   🔴 여전히 금지
+    auto_maintenance  →  잔량 0 확인 → empty_pallet   ★ 별도 단계로만 허용
     ```
+
+       ★ `auto_maintenance` 는 수량을 안 만지는 조립 계층이다. 잔량이 0 임을 먼저
+         확인한 Lot 의 `ACTIVE` · `HOLD` Pallet 만 넘기고, 그래도 아래 ④ 근거를 다시
+         통과해야 한다 — 판정의 주인은 끝까지 이 함수다.
 
     🔴 **수량 근거는 Lot 전체 잔량이다 — 추측하지 않는다.**
 

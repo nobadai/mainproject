@@ -236,8 +236,15 @@ def measure_freshness_facts(
       둘 다 signal 판정이 쓰는 그 함수다. 여기서 하는 일은 **골라 담는 것**뿐이다.
 
     🔴 **`freshness_expired_lot_count` 를 폐기 판정으로 읽지 않는다.** 잔여가 0 이하로
-      확인된 ACTIVE Lot 의 수일 뿐이고, 폐기대기 판정과 실행은 `turnover` · `disposal`
-      소유이며 사람 확정을 거친다 (`disposal.confirm_disposal`).
+      확인된 ACTIVE Lot 의 **측정값일 뿐이고, 이 건수가 폐기를 실행하지 않는다.**
+
+    ```text
+    expired count       측정값 — 여기(rules)
+    disposal_candidate  폐기대기 판단 — turnover
+    실제 폐기           confirm_disposal — disposal
+    자동 실행 가능 여부   auto_maintenance 의 엄격한 안전조건
+                        (폐기대기 · 살아있는 할당 없음 · 잔량 전량)
+    ```
 
     ★ **`snapshot` 은 필수다.** `evaluate_*_business_signals` 가 `None` 을 받는 것은
       독립 Service 가 스냅샷 부재에도 회신을 조립해야 해서인데, 이 함수의 호출자는

@@ -42,15 +42,42 @@ from app.logistics.schemas import RuntimeSourceStatus
 from app.logistics.turnover import TurnoverStatus
 
 #: `available_qty_kg` 를 못 낸 이유. `tools.build_inventory_by_item` 이 `None` 을
-#: 돌려주는 세 경로와 1:1 이다 — 어느 축을 못 읽었는지 화면이 알아야 한다.
+#: 돌려주는 경로와 1:1 이다 — 어느 축을 못 읽었는지 화면이 알아야 한다.
+#:
+#: 🔴 **`CONFIRMED_OUTBOUND_*` 두 값이 WP-3 에서 빠졌다.** 판매가능량의 차감 축이
+#:    예약·할당 한 벌로 좁혀져(이중 차감 제거) 확정 출고 축은 이 판정에 안 들어온다.
 AvailableQtyUnresolvedReason = Literal[
-    "CONFIRMED_OUTBOUND_UNRESOLVED",
-    "CONFIRMED_OUTBOUND_ITEM_MISSING",
     "OUTBOUND_COMMITMENTS_UNRESOLVED",
+    #: 그날의 Agent Runtime Snapshot(`logistics_runtime_fixture`)이 없다. 재고 수량은
+    #: 원장으로 되살아나지만 판매가능량은 그 스냅샷의 확정 출고 축이 있어야 선다.
+    #: 🔴 없는 축을 0 으로 메우고 «다 팔 수 있다» 고 답하지 않는다.
+    "RUNTIME_SNAPSHOT_UNAVAILABLE",
 ]
 
-#: Lot 이 지금 자리에 앉아 있나. `pallets` 에 살아있는(ACTIVE·HOLD) 행이 있으면 PLACED.
-Placement = Literal["PLACED", "UNPLACED"]
+#: Lot 이 그날 자리에 앉아 있었나. 🔴 **`pallet_events` 재생 결과다** —
+#: `pallets.current_location_id`(지금 자리)가 아니다.
+#:
+#: ```text
+#: PLACED      그날 마지막 사건이 자리를 가리켰다
+#: UNPLACED    Pallet 기록은 있는데 그날 자리를 안 잡고 있었다 (EMPTIED 뒤)
+#: UNRECORDED  그날까지 이 Lot 의 Pallet 사건이 하나도 없다  ★ «자리 없음» 이 아니다
+#: ```
+#:
+#: ⚠️ `UNRECORDED` 를 `UNPLACED` 로 뭉개지 않는다. 앞은 *"모른다"* 이고 뒤는
+#:    *"확인했고 자리에 없다"* 다 — WMS Pallet 층이 나중에 생긴 날짜를 조회하면
+#:    앞이 정상이다.
+Placement = Literal["PLACED", "UNPLACED", "UNRECORDED"]
+
+#: 이 칸의 값이 **어느 시간축**에서 나왔나. 전환기 표시다.
+#:
+#: ```text
+#: HISTORICAL_AS_OF  요청한 as_of 시점 사실 (원장 · 사건 재생)
+#: CURRENT_ROW       지금 행 값 — 되살릴 정본이 없거나, 그 값이 Runtime 축이다
+#: ```
+#:
+#: 🔴 **둘을 한 숫자 안에 섞지 않는다.** 섞이면 «과거인 척하는 현재» 가 되고,
+#:    그것이 이번 재설계가 없애려는 결함이다. 못 되살리는 축은 그렇다고 말한다.
+TimeBasis = Literal["HISTORICAL_AS_OF", "CURRENT_ROW"]
 
 #: 이 품목의 Zone 정책을 아는가. **정책 없음(UNRESOLVED)과 전부 금지는 다르다**
 #: (`warehouse._zone_allowed` 의 세 상태와 같은 규율).
@@ -115,8 +142,13 @@ class ConsoleInventoryLot(ConsoleModel):
     #: 🔴 `repository._normalize_grade` 를 지난 값이다. 정규화표에 없는 raw 등급은
     #:    `None` 이 된다 — 임의 치환(`상품 → 상`)을 하지 않는다.
     grade: str | None
+    #: 🔴 **`inventory_lots.remaining_qty_kg` 가 아니다.** `as_of` 까지의 원장
+    #:    (`IN − OUT − DISPOSE`) 누계다. 그 컬럼은 Current Cache 라 과거를 못 말한다.
     remaining_qty_kg: Decimal
     received_at: date
+    #: 🔴 **`inventory_lots.status` 컬럼이 아니라 유도값이다** (`ACTIVE` · `DEPLETED` ·
+    #:    `DISPOSED`). `HOLD` 는 writer 가 없어 되살릴 사건이 없다 —
+    #:    `historical_repository.HistoricalLotState` 가 그 어휘의 주인이다.
     status: str | None
     #: 🔴 **`ConsoleZone.zone_id` 와 다른 어휘다. 조인하지 않는다.**
     #:    이 칸의 주인은 `item_storage_policies.storage_zone` 이고(실측 `COLD_HUMID_0_3`
@@ -135,9 +167,14 @@ class ConsoleCapacity(ConsoleModel):
     """창고 kg Capacity. **Pallet Position 축과 다른 단위다.**"""
 
     #: 🔴 만료 Lot 도 잔량이 남아 있으면 여기 포함된다 — 판매불가 != 창고에서 사라짐.
+    #: ★ `as_of` 시점 원장 합이다 — `remaining_qty_kg` 합이 아니다.
     used_capacity_kg: Decimal
     guaranteed_capacity_kg: Decimal | None
     burst_capacity_kg: Decimal | None
+    #: 🔴 **한도 두 값은 과거로 되살린 것이 아니다.** `agent_policy_config` 에 유효일
+    #:    컬럼이 없어 «그날 그 정책이었나» 를 알 수 없다. 유효일 컬럼을 새로 만들지
+    #:    않기로 했으므로(`07 §15`) 지금 활성 정책을 쓰되 그 사실을 여기 적는다.
+    capacity_basis: Literal["CURRENT_ACTIVE_POLICY"] = "CURRENT_ACTIVE_POLICY"
 
 
 class ConsoleInventoryResponse(ConsoleModel):
@@ -148,6 +185,18 @@ class ConsoleInventoryResponse(ConsoleModel):
     capacity: ConsoleCapacity
     #: `available_qty_kg` 가 전부 `None` 일 때만 채워진다. 그 외에는 `None`.
     available_qty_unresolved_reason: AvailableQtyUnresolvedReason | None = None
+    #: 🔴 **`on_hand_qty_kg` 와 시간축이 다르다.** 현재고·Lot·`used_capacity_kg` 는
+    #:    `as_of` 원장에서 되살아나지만, 판매가능량은 **지금** 예약·할당을 뺀 값이다
+    #:    (`tools.build_inventory_by_item` ← `repository.get_outbound_commitments`).
+    #:
+    #:    ⚠️ **이제는 «못 되살려서» 가 아니다.** WP-3 이 예약 축의 시간 정본을 세워
+    #:       (`historical_repository.reservation_state_at`) 되살릴 수는 있게 됐다.
+    #:       그런데 이 값이 답하는 물음은 *"지금 더 팔 수 있나"* 이고 그 쪽은 Agent
+    #:       Runtime 과 같은 축이어야 한다 — **어느 화면 값을 과거로 옮길지는 별도
+    #:       결정**이라 WP-3 에서 정하지 않았다. 축이 다르다는 사실만 여기 적는다.
+    available_qty_time_basis: TimeBasis = "CURRENT_ROW"
+    #: 현재고 · Lot 상태 · 신선도 · 회전 · `used_capacity_kg` 의 시간축.
+    on_hand_time_basis: TimeBasis = "HISTORICAL_AS_OF"
 
 
 # ── 재고 이동 ───────────────────────────────────────────────────────────
@@ -199,6 +248,10 @@ class ConsoleInboundReceipt(ConsoleModel):
     accepted_qty_kg: Decimal | None
     hold_qty_kg: Decimal | None
     rejected_qty_kg: Decimal | None
+    #: 🔴 **`inbound_receipts.receipt_status` 컬럼이 아니라 유도값이다** (`ARRIVED` ·
+    #:    `INSPECTED` · `PUTAWAY_DONE`). 근거는 사건 셋 — `arrived_at` ·
+    #:    검수 `inspected_at` · 그 Receipt 의 Lot 과 원장 `IN`.
+    #:    `INSPECTING` · `CLOSED` 는 사건이 아니라 진행 표시라 되살리지 않는다.
     receipt_status: str
     fact_source: str
     inspection_id: str | None
@@ -228,6 +281,8 @@ class ConsoleArrivalSummary(ConsoleModel):
 class ConsoleInboundResponse(ConsoleModel):
     sim_run_id: str
     as_of: date
+    #: Receipt · 검수 · 재고반영의 시간축. 세 사건에서 되살린 값이다.
+    receipt_time_basis: TimeBasis = "HISTORICAL_AS_OF"
     in_transit_status: RuntimeSourceStatus
     #: 🔴 `None`(미확인) 과 `[]`(0건 확인)은 다른 사실이다. `in_transit_status` 가 가른다.
     in_transit: list[ConsoleInTransitItem] | None
@@ -254,11 +309,18 @@ class ConsoleZone(ConsoleModel):
 
 
 class ConsoleLotLocation(ConsoleModel):
+    """Lot 하나의 그날 자리. **자리는 `pallet_events` 재생 결과다.**"""
+
     lot_id: str
     item_id: str
     item_name: str | None
+    #: `as_of` 원장 누계. `remaining_qty_kg` 컬럼이 아니다.
     remaining_qty_kg: Decimal
     pallet_id: str | None
+    #: 🔴 **유도하지 않는다 (항상 `None`).** 사건 어휘(`CREATED` · `RELOCATED` ·
+    #:    `HOLD_MOVED` · `EMPTIED`)와 상태 어휘(`ACTIVE` · `HOLD` · `EMPTIED` ·
+    #:    `DISPOSED`)가 1:1 이 아니다 — `move_pallet` 은 상태를 그대로 두고 사건만
+    #:    적는다. 사건이 증명하는 것은 **자리**뿐이라 없는 상태를 지어내지 않는다.
     pallet_status: str | None
     zone_id: str | None
     location_id: str | None
@@ -267,8 +329,15 @@ class ConsoleLotLocation(ConsoleModel):
 
 class ConsoleWarehouseResponse(ConsoleModel):
     sim_run_id: str
+    as_of: date
     zones: list[ConsoleZone]
     lot_locations: list[ConsoleLotLocation]
+    #: Lot 자리(`lot_locations`)의 시간축 — `pallet_events` 재생.
+    lot_location_time_basis: TimeBasis = "HISTORICAL_AS_OF"
+    #: 🔴 **Zone 자리 수(`zones`)는 지금 창고다.** `storage_locations` 에도
+    #:    `warehouse_zones` 에도 유효일이 없고, 자리 정원 이력 표를 만들지 않는다.
+    #:    그 셈의 주인은 `warehouse.get_zone_capacity` 하나이며 여기서 복제하지 않는다.
+    zone_time_basis: TimeBasis = "CURRENT_ROW"
 
 
 class ConsolePlacementZone(ConsoleModel):
@@ -315,6 +384,9 @@ class ConsoleAllocation(ConsoleModel):
     allocation_basis: AllocationBasis
     decided_by: str
     decided_at: datetime
+    #: 🔴 **`as_of` 시점으로 유도한 값이다** — 저장된 `status` 컬럼이 아니다.
+    #:    원장 OUT 이면 `SHIPPED`, 그 예약이 놓아준 뒤면 `CANCELLED`, 그 밖은
+    #:    `ALLOCATED` 다 (`historical_repository.HistoricalAllocationState`).
     status: AllocationStatus
     note: str | None
 
@@ -340,20 +412,52 @@ class ConsoleReservation(ConsoleModel):
     item_name: str | None
     sale_id: str | None
     required_qty_kg: Decimal
-    #: ⚠️ **예약 행에 적힌 DB 값 그대로다.** `ConsoleInventoryItem.reserved_qty_kg`
-    #:    (지금 잡고 있는 양)와 뜻이 다르다 — 전량 출고 뒤에도 이 값은 안 줄어든다.
+    #: ⚠️ **«이 예약이 확보했던 양» 이다 — 그날 잡고 있던 양이 아니다.**
+    #:    `ConsoleInventoryItem.reserved_qty_kg`(지금 잡고 있는 양)와 뜻이 다르다.
+    #:
+    #:    ```text
+    #:    전량 출고 뒤    안 줄어든다     나간 것은 «확보했던» 사실을 안 지운다
+    #:    놓아준 뒤        안 줄어든다     WP-3 보정 2 — 과거 확보량을 지우지 않는다
+    #:    ```
+    #:
+    #:    🔴 그래서 이 값으로 *"지금/그날 몇 kg 잡고 있나"* 를 읽으면 안 된다.
+    #:       그 물음의 답은 `status`(그날 유도값) · `allocated_qty_kg` ·
+    #:       `unallocated_qty_kg` 다 — 놓아준 날부터 뒤의 둘은 0 이 된다.
     reserved_qty_kg: Decimal
     allocated_qty_kg: Decimal
     unallocated_qty_kg: Decimal
     due_date: date | None
+    #: 🔴 **`as_of` 시점으로 유도한 값이다** — 저장된 `status` 컬럼이 아니다.
+    #:    놓아준 뒤(`released_as_of <= as_of`)에만 저장된 `RELEASED`/`CANCELLED` 를
+    #:    쓰고, 그 전 날짜에는 할당 진행도로 다시 센다
+    #:    (`historical_repository._reservation_status_at`).
     status: ReservationStatus
     allocations: list[ConsoleAllocation]
 
 
 class ConsoleOutboundResponse(ConsoleModel):
     sim_run_id: str
+    as_of: date
     #: 0건이면 `[]` 다. **더미를 만들지 않는다.**
     reservations: list[ConsoleReservation]
+    #: 🔴 **예약·할당 축을 `as_of` 로 되살린다 (WP-3).**
+    #:
+    #:    ```text
+    #:    예약 존재   sales.sale_date <= as_of
+    #:    예약 소멸   released_as_of <= as_of              ← M3 가 세운 칸
+    #:    할당 존재   decided_at < timestamp_cutoff(as_of)
+    #:    출고        MOVE-OUT-{allocation_id} · moved_at <= as_of
+    #:    ```
+    #:
+    #:    유도의 주인은 `historical_repository.reservation_state_at` 하나다.
+    #:    저장된 `inventory_reservations.status` · `inventory_allocations.status`
+    #:    는 **지금** 값이라 과거 정본으로 쓰지 않는다.
+    #:
+    #:    ⚠️ **`reserved_qty_kg` 만 지금 값이다.** 확보량 변경 이력이 없어서인데,
+    #:       예약을 세우는 유일한 경로(마스터 `outbound_flow`)가 그 판매의 납품일
+    #:       하루에만 돌아 날짜를 넘긴 top-up 이 production 에 없다. 그 전제가
+    #:       깨지면 이 칸부터 다시 본다.
+    reservation_time_basis: TimeBasis = "HISTORICAL_AS_OF"
 
 
 class ConsoleFefoCandidate(ConsoleModel):
@@ -479,6 +583,10 @@ class ConsoleShipResponse(ConsoleModel):
 class ConsoleReleaseRequest(ConsoleModel):
     #: 놓아주는 상태만 받는다.
     status: Literal["RELEASED", "CANCELLED"]
+    #: 🔴 **기본값이 없다** (`ConsoleAllocateRequest.as_of` 와 같은 규율). 놓아준
+    #:    시뮬레이션 날짜를 서버가 시계에서 만들면 그 값이 **DB 를 손본 시각**이 되고,
+    #:    같은 데이터가 내일 다른 과거를 낸다 (WP-3 M3).
+    released_as_of: date
 
 
 class ConsoleReleaseResponse(ConsoleModel):

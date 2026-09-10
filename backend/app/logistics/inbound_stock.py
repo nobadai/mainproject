@@ -48,13 +48,16 @@ INSPECTED Receipt
 
   ```text
   ① 도착 전역 advisory  (20260905, 2)   receipts.lock_arrival_writes
-  ② fixture 행 FOR UPDATE               일정 정리 대상 · ③④ 보다 **먼저**
+  ② fixture 행 FOR UPDATE               status 를 읽고 도착 경로를 직렬화한다 · ③④ 보다 **먼저**
   ③ Lot 조회 / INSERT
   ④ record_inventory_move  → 원장 전역 advisory (20260905, 1) → Lot 행 FOR UPDATE
   ⑤ Receipt UPDATE
-  ⑥ 일정 정리 UPDATE (② 의 잠금 아래)
-  ⑦ 커밋은 호출자가 한 번
+  ⑥ 커밋은 호출자가 한 번
   ```
+
+  ★ **② 는 이제 쓰기 대상이 아니다.** 종전에는 그 행의 두 JSON 칸에서 일정을 걷어야
+    해서 잡았고, 지금은 같은 행의 `in_transit_status` 를 승인 전이가 건드리는 것과
+    도착 경로 자체의 직렬화 때문에 잡는다 (`load_in_transit_for_receiving`).
 
   ⚠️ **원장 전역을 fixture 행보다 먼저 잡는 경로를 만들면 안 된다** — ② 를 ④ 앞에
      둔 이유가 그것이고, 그 규칙이 이 전순서를 성립시킨다.
@@ -69,21 +72,21 @@ INSPECTED Receipt
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from psycopg import sql
-from psycopg.types.json import Jsonb
 
 from app.logistics.db import get_db_schema
+from app.logistics.inbound_schedules import receivable_at
 from app.logistics.inspections import InspectionOutcome, find_inspection
 from app.logistics.ledger import record_inventory_move
 from app.logistics.purchase_detail import PurchaseDetail
 from app.logistics.receipts import ReceiptStatus, lock_arrival_writes
-from app.logistics.schemas import InTransitItem, ScheduledQuantity
+from app.logistics.schemas import UNRESOLVED_SOURCE, InTransitItem
 from app.logistics.transition import USAGE_SCOPE
 
 __all__ = [
@@ -167,11 +170,20 @@ class InvalidReceivingAxis(InboundStockError, ValueError):
 
 
 class ScheduleIntegrityError(InboundStockError, ValueError):
-    """일정 두 칸이 B-1 을 어기고 있어 걷어낼 수 없다.
+    """도착 처리를 걸 자리가 없거나, 그 Receipt 가 일정으로 되짚어지지 않는다.
 
-    🔴 **한쪽만 지우지 않는다.** `in_transit` 에서만 빼면 `confirmed_inbound` 에 유령
-       일정이 남아 점유가 계속 계산되고, 반대면 B-1 이
-       `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 로 다음 날을 세운다.
+    ```text
+    그날 fixture 행이 없다            _fixture_row          도착 처리를 걸 Header 가 없다
+    Receipt 에 inbound_id 가 없다     materialize…          일정으로 되짚을 열쇠가 없다
+    ```
+
+    🔴 **`inbound_id` 없는 Receipt 를 그냥 넘기지 않는다.** 그 값이 `inbound_schedules`
+       와 잇는 유일한 열쇠라(`load_schedule_views` 의 계보 조인), 없으면 그 일정이
+       **영원히 «아직 안 들어온 것»** 으로 남아 도착 대상과 Capacity 에 계속 선다.
+
+    ⚠️ **이름의 «일정»은 이제 `inbound_schedules` 를 가리킨다.** 종전에는 fixture 의
+       두 JSON 칸을 뜻했고 B-1(두 칸 대조) 위반이 이 예외의 자리였다 — 그 칸은
+       Runtime 에서 죽었다(W3-3).
     """
 
 
@@ -190,8 +202,6 @@ class InboundStockResult:
     lot_id: str | None
     move_id: str | None
     accepted_qty_kg: Decimal
-    #: 이번 호출이 일정에서 그 `inbound_id` 를 실제로 걷어냈나.
-    schedule_cleared: bool
 
 
 def lot_id_for(*, receipt_id: str) -> str:
@@ -512,24 +522,40 @@ def _mark_putaway_done(conn: Any, schema: sql.Identifier, *, receipt_id: str) ->
 # ── 일정 읽기·정리 ──────────────────────────────────────────────────────
 #
 # ★ **같은 fixture 행을 읽는 쪽과 걷는 쪽이 한 파일에 있다.** 도착 처리는 그 행을
-#   시작에서 잠그고(`load_in_transit_for_receiving`) 끝에서 고친다(`_clear_schedule`)
+#   시작에서 잠그고(`load_in_transit_for_receiving`) 그 잠금 아래 끝까지 간다
 #   — 잠금 순서와 `None`/`[]` 구분이 두 곳에서 갈리면 안 되므로 나누지 않았다.
 
 
 def _fixture_row(
     conn: Any, schema: sql.Identifier, *, sim_run_id: str, as_of: date, usage_scope: str
-) -> tuple[Any, Any]:
-    """그날 fixture 행을 **잠그고** 두 목록을 읽는다.
+) -> str:
+    """그날 fixture 행을 **잠그고 `in_transit_status` 하나만** 읽는다.
 
-    🔴 **`FOR UPDATE` 가 일정 정리의 동시성 방어다.** 읽고-고치고-쓰는 사이에 승인
-       전이(`transition.persist_inventory`)가 끼어들면 이번에 걷어낸 행이 되살아나거나
-       그쪽 승인분이 사라진다 — 같은 행을 같은 방식으로 잠근다.
+    🔴 **JSON 두 칸을 읽지 않는다 (W3-3).** 업무 일정의 정본은 `inbound_schedules`
+       이고, 이 행에서 필요한 것은 *"그 축을 확인했나"* 하나뿐이다.
+
+       ⚠️ **종전에는 `in_transit_json IS NULL` 을 `UNRESOLVED` 로 읽었다.** 승인
+          Writer 가 더 이상 그 칸을 안 쓰게 되면서(W3-3) 다음 상태가 성립한다.
+
+       ```text
+       in_transit_status  CONFIRMED     승인이 세운 값
+       in_transit_json    NULL          아무도 안 고친 옛 값
+       inbound_schedules  일정 있음
+       ```
+
+          그때 Console · Capacity 는 status 를 보고 일정을 내는데 도착 처리만 JSON 을
+          보고 `None` 을 내, **같은 날 같은 입고가 화면에는 있고 도착 처리에는 없는**
+          상태가 된다. 판정 근거를 `status` 하나로 모아 그 갈림을 없앤다.
+
+    🔴 **`FOR UPDATE` 는 남긴다.** 도착 처리는 이 행을 잠근 채 Receipt · 검수 · Lot ·
+       원장 IN 까지 가고, 같은 행을 승인 전이(`transition.persist_inventory`)가
+       status 로 건드린다. 잠금 순서(도착 전역 → 이 행 → 원장 전역)를 바꾸지 않는다.
     """
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                SELECT in_transit_json, confirmed_inbound_json
+                SELECT in_transit_status
                 FROM {}.logistics_runtime_fixture
                 WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
                 FOR UPDATE
@@ -540,10 +566,10 @@ def _fixture_row(
         row = _one_row(cursor, "그날 runtime fixture 행")
     if row is None:
         raise ScheduleIntegrityError(
-            f"정리할 물류 runtime fixture 행이 없다"
+            f"도착 처리를 걸 물류 runtime fixture 행이 없다"
             f" (sim_run_id={sim_run_id}, as_of={as_of}, usage_scope={usage_scope})."
         )
-    return _cell(row, 0, "in_transit_json"), _cell(row, 1, "confirmed_inbound_json")
+    return str(_cell(row, 0, "in_transit_status"))
 
 
 def load_in_transit_for_receiving(
@@ -557,9 +583,15 @@ def load_in_transit_for_receiving(
 
     ```text
     ① 도착 쓰기 전역 advisory lock       receipts.lock_arrival_writes
-    ② 그날 fixture 행 SELECT … FOR UPDATE
-    ③ in_transit_json → InTransitItem 목록
+    ② 그날 fixture 행 SELECT … FOR UPDATE   (status 를 읽고, 도착 경로를 직렬화한다)
+    ③ inbound_schedules → InTransitItem 목록   ← W3-2 부터 정본이 여기다
     ```
+
+    🔴 **목록의 정본이 `inbound_schedules` 로 옮겨 왔다 (W3-2).** 종전에는 그날
+       fixture 행의 `in_transit_json` 을 읽었고, 그래서 **미래 날짜 행이 먼저 열려
+       있으면 그 행이 나중에 난 승인을 몰라** 도착일에 볼 것이 없었다
+       (실측 `INB-H1-REQ-FIRSTINB-20260113-1-1`). 신규 표는 날짜에 안 묶여 있어
+       그 사고가 재현되지 않는다.
 
     🔴 **`repository.get_active_logistics_runtime_fixture` 를 쓸 수 없어서 있다.**
        그쪽은 `db.fetch_all` 로 **자기 커넥션을 연다** — 마스터가 쥔 트랜잭션 밖에서
@@ -569,26 +601,32 @@ def load_in_transit_for_receiving(
 
     ```text
     ① 도착 전역 (20260905, 2)   ← 여기서 먼저 잡는다
-    ② fixture 행 FOR UPDATE      ← 그다음
+    ② fixture 행 FOR UPDATE      ← 그다음 (status 읽기 · 직렬화)
     ③ Receipt · 검수
     ④ Lot · 원장 IN (원장 전역 → Lot 행)
-    ⑤ 일정 정리
     ```
+
+       ★ **끝에 «일정 정리» 단계가 없다.** 완료는 `inbound_schedules` 의 칸이 아니라
+         Lot + 원장 IN 으로 유도한다 — 일정 행은 과거 재현을 위해 그대로 남는다.
 
        ⚠️ **② 를 ① 앞에 두면 안 된다.** 그러면 두 트랜잭션이 요청하는 잠금 집합에
           전순서가 없어져 교착이 생긴다 (`ledger._lock_ledger_writes` 가 겪은 자리).
 
     ★ **읽기인데 `FOR UPDATE` 를 쓴다.** 여기서 읽은 목록이 곧 이번 실행이 처리할
-      대상이고, 마지막에 `_clear_schedule` 이 **같은 행**을 고친다. 그 사이에
-      `persist_inventory`(승인 전이)가 끼어들면 이번에 못 본 승인분이 생기거나
-      정리 대상이 어긋난다 — 시작부터 끝까지 한 행 잠금 아래 둔다.
+      대상이고, 같은 행의 status 를 `persist_inventory`(승인 전이)가 건드린다.
+      그 사이가 열려 있으면 이번에 못 본 승인분이 생긴다 — 시작부터 끝까지 한 행
+      잠금 아래 둔다.
 
-    🔴 **`None` 과 `[]` 를 가른다.**
+    🔴 **`None` 과 `[]` 를 가른다. 판정 근거는 `in_transit_status` 다 (W3-3).**
 
     ```text
-    in_transit_json IS NULL   None   확인한 적 없다 (UNRESOLVED)
-    in_transit_json = '[]'    []     확인했고 0 건이다 (CONFIRMED_ZERO)
+    in_transit_status = UNRESOLVED   None   확인한 적 없다
+    그 외                            [...]  inbound_schedules 가 답한다
     ```
+
+       ⚠️ **종전에는 `in_transit_json IS NULL` 을 봤다.** 승인 Writer 가 그 칸을 더
+          이상 안 쓰게 되면서(W3-3) `status=CONFIRMED · json=NULL · 일정 있음` 이
+          성립하고, 그때 이 경로만 `None` 을 내 화면과 갈렸다.
 
        ⚠️ 둘을 뭉치면 *"오늘 도착할 게 없다"* 와 *"오늘 뭐가 도착할지 모른다"* 가 같은
           값으로 나간다 (`arrival.ArrivalSelection.source_status` 가 그 둘을 가른다).
@@ -626,101 +664,26 @@ def load_in_transit_for_receiving(
     with conn.cursor() as cursor:
         lock_arrival_writes(cursor)
 
-    # ── ② 그날 행을 잠그고 읽는다 ─────────────────────────────────────
-    in_transit, _ = _fixture_row(
+    # ── ② 그날 행을 잠그고 status 를 읽는다 ──────────────────────────
+    #    🔴 **행 잠금은 도착 처리 전체가 쓰는 자원이다.** 이 행을 잡은 채 Receipt ·
+    #       검수 · Lot · 원장 IN 까지 가고, 승인 전이가 같은 행의 status 를 건드린다.
+    #       잠금 순서(도착 전역 → 이 행 → 원장 전역)를 바꾸지 않는다.
+    status = _fixture_row(
         conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
     )
-    if in_transit is None:
+    if status == UNRESOLVED_SOURCE:
         # 🔴 `[]` 로 바꾸지 않는다. 모르는 것을 0 건으로 적으면 그 순간 아는 척이 된다.
+        #    ★ **판정 근거는 `status` 하나다** — JSON 의 NULL 여부가 아니다 (W3-3).
+        #      Console · Capacity(`repository._schedule_source`)와 같은 눈이어야
+        #      같은 날 같은 입고를 두 경로가 다르게 읽지 않는다.
         return None
-    # ★ 계약 밖 모양은 여기서 터진다 — 조용히 걸러 내면 그 행이 사라진 줄 아무도 모른다.
-    return [InTransitItem.model_validate(row) for row in in_transit]
 
-
-def _찾는다(목록: Sequence[Any] | None, inbound_id: str) -> list[dict[str, Any]]:
-    return [
-        행 for 행 in (목록 or []) if isinstance(행, dict) and 행.get("inbound_id") == inbound_id
-    ]
-
-
-def _clear_schedule(
-    conn: Any,
-    schema: sql.Identifier,
-    *,
-    sim_run_id: str,
-    as_of: date,
-    usage_scope: str,
-    inbound_id: str,
-) -> bool:
-    """두 칸에서 그 `inbound_id` 를 **함께** 뺀다. 이미 없으면 아무것도 안 한다.
-
-    🔴 **B-1 을 지우기 전에 다시 검증한다.** 두 칸의 `item` · 수량 · 날짜가 어긋난
-       상태를 조용히 지우면, 어긋나 있었다는 사실조차 안 남는다.
-
-    🔴 **한쪽에만 있으면 멈춘다.** 그 상태가 이미 B-1 위반이고, 남은 쪽을 마저 지우면
-       위반을 덮는 것이 된다.
-
-    ⚠️ **`None`(UNRESOLVED)을 `[]` 로 바꾸지 않는다.** 그 세 상태는 다른 사실이다.
-    """
-    in_transit, confirmed = _fixture_row(
-        conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope
-    )
-    운송중 = _찾는다(in_transit, inbound_id)
-    확정 = _찾는다(confirmed, inbound_id)
-
-    if not 운송중 and not 확정:
-        return False  # ★ 이미 걷혔다. 재실행의 정상 경로다.
-    if len(운송중) != 1 or len(확정) != 1:
-        raise ScheduleIntegrityError(
-            f"일정 두 칸이 짝을 이루지 않아 걷어낼 수 없다 (inbound_id={inbound_id!r}):"
-            f" in_transit {len(운송중)}건 · confirmed_inbound {len(확정)}건."
-            " 한쪽만 지우면 그 불일치를 덮는 것이 된다."
-        )
-
-    # ★ B-1 이 대조하는 그 네 값을 여기서 다시 본다.
-    운송 = InTransitItem.model_validate(운송중[0])
-    일정 = ScheduledQuantity.model_validate(확정[0])
-    if (
-        일정.item != 운송.item
-        or 일정.quantity_kg != 운송.quantity_kg
-        or 일정.date != 운송.expected_arrival_date
-    ):
-        raise ScheduleIntegrityError(
-            f"일정 두 칸의 사실이 다르다 (inbound_id={inbound_id!r}):"
-            f" in_transit={운송!r} confirmed_inbound={일정!r}. 조용히 지우지 않는다."
-        )
-
-    남은_운송 = [행 for 행 in (in_transit or []) if 행 not in 운송중]
-    남은_확정 = [행 for 행 in (confirmed or []) if 행 not in 확정]
-
-    with conn.cursor() as cursor:
-        cursor.execute(
-            sql.SQL(
-                """
-                UPDATE {}.logistics_runtime_fixture
-                SET in_transit_json = %s,
-                    in_transit_status = %s,
-                    confirmed_inbound_json = %s,
-                    confirmed_inbound_status = %s,
-                    updated_at = NOW()
-                WHERE sim_run_id = %s AND as_of = %s AND usage_scope = %s
-                """
-            ).format(schema),
-            (
-                Jsonb(남은_운송),
-                # ★ 마지막 행을 걷어내면 *"확인했고 0 건"* 이다 — `None` 이 아니다.
-                "CONFIRMED" if 남은_운송 else "CONFIRMED_ZERO",
-                Jsonb(남은_확정),
-                "CONFIRMED" if 남은_확정 else "CONFIRMED_ZERO",
-                sim_run_id,
-                as_of,
-                usage_scope,
-            ),
-        )
-    return True
-
-
-# ── 본체 ────────────────────────────────────────────────────────────────
+    # ── ③ 목록은 신규 표에서 온다 (W3-2) ─────────────────────────────
+    #    🔴 **`Receipt 존재` 로 빼지 않는다.** 검수에서 막힌 건(Receipt=ARRIVED ·
+    #       Lot 없음)은 다음 실행이 이어받아야 하고, `_receive_one` 이
+    #       `check_receipt_state` 로 마지막 성공 단계 다음부터 잇는 구조라 여기서
+    #       빼면 그 입고가 **영구 고착**된다. 종료조건은 `Lot + 원장 IN` 이다.
+    return receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
 
 
 def materialize_inspected_inbound(
@@ -735,11 +698,14 @@ def materialize_inspected_inbound(
 
     ```text
     ① 잠금 · 상태 확인
-    ② fixture 행 FOR UPDATE       ← 원장 잠금보다 **먼저**
+    ② fixture 행 FOR UPDATE       ← 원장 잠금보다 **먼저** (도착 경로 직렬화)
     ③ accepted > 0 이면 Lot (remaining 0) → record_inventory_move(IN)
     ④ Receipt PUTAWAY_DONE
-    ⑤ 일정 두 칸에서 inbound_id 제거
     ```
+
+    🔴 **일정을 걷는 단계가 없어졌다 (W3-3).** 완료는 `inbound_schedules` 의 칸이
+       아니라 **Lot + 원장 IN** 으로 유도한다 — Reader 가 그 둘을 보고 도착 대상과
+       Capacity 에서 뺀다. 일정 행은 과거 재현을 위해 그대로 남는다.
 
     🔴 **상태가 생성 권한을 가른다.**
 
@@ -793,7 +759,10 @@ def materialize_inspected_inbound(
     inbound_id = receipt["inbound_id"]
     if not inbound_id:
         raise ScheduleIntegrityError(
-            f"Receipt 에 inbound_id 가 없어 일정을 걷을 수 없다: receipt_id={receipt_id!r}"
+            f"Receipt 에 inbound_id 가 없어 입고 일정으로 되짚을 수 없다:"
+            f" receipt_id={receipt_id!r}."
+            " 그 값이 inbound_schedules 와 잇는 유일한 열쇠라, 없으면 그 일정이"
+            " 영원히 «아직 안 들어온 것» 으로 남는다."
         )
     _fixture_row(conn, schema, sim_run_id=sim_run_id, as_of=as_of, usage_scope=usage_scope)
 
@@ -880,26 +849,25 @@ def materialize_inspected_inbound(
             )
             applied = applied or move.applied
 
-    # ── ⑤⑥ Receipt 와 일정 ───────────────────────────────────────────
+    # ── ⑤ Receipt 마감 ───────────────────────────────────────────────
     if 상태 in _READY_TO_MATERIALIZE:
         _mark_putaway_done(conn, schema, receipt_id=receipt_id)
         상태 = "PUTAWAY_DONE"
-    schedule_cleared = _clear_schedule(
-        conn,
-        schema,
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        usage_scope=usage_scope,
-        inbound_id=inbound_id,
-    )
 
+    # 🔴 **일정을 걷지 않는다 (W3-3).** 완료는 `inbound_schedules` 의 칸이 아니라
+    #    **downstream 사실**로 유도한다 — Lot 과 원장 IN 이 둘 다 서면 Reader 가
+    #    도착 대상에서도 Capacity 에서도 뺀다
+    #    (`inbound_schedules.receivable_at` · `pending_inbound_at`).
+    #
+    #    ⚠️ **일정 행을 지우거나 취소로 바꾸지 않는다.** 지우면 *"그날 무엇이
+    #       떠 있었나"* 를 되짚을 자리가 없어지고, 취소로 적으면 **들어온 물건이
+    #       취소된 것으로** 둔갑한다. 둘은 다른 사실이다.
     return InboundStockResult(
         applied=applied,
         receipt_status=상태,
         lot_id=lot_id,
         move_id=move_id,
         accepted_qty_kg=accepted,
-        schedule_cleared=schedule_cleared,
     )
 
 

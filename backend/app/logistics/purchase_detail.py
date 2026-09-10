@@ -214,7 +214,7 @@ def fetch_purchase_detail(conn: Any, *, purchase_id: str) -> PurchaseDetail:
 
     🔴 **커밋도 롤백도 하지 않고 커넥션을 새로 열지 않는다.** 받은 `conn` 만 쓴다 —
        도착 → Receipt 존재 → 매입 상세 → Receipt → 검수 → Lot → 원장 IN →
-       일정 정리가 **한 바깥 트랜잭션**으로 묶여야 하고, 그 커밋은 호출자가 한 번 한다.
+       재고화가 **한 바깥 트랜잭션**으로 묶여야 하고, 그 커밋은 호출자가 한 번 한다.
 
     :param conn: 호출자가 소유한 커넥션. 이 함수는 수명을 관리하지 않는다.
     :param purchase_id: 마스터가 만든 매입 참조. 비어 있으면 안 된다.

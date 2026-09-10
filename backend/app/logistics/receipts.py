@@ -358,7 +358,7 @@ def lock_arrival_writes(cursor: Any) -> None:
 
     ```text
     ① 도착 전역 (20260905, 2)   ← 이 잠금. 가장 먼저
-    ② fixture 행 FOR UPDATE      일정 정리 단계에서 (아직 이 판에 없다)
+    ② fixture 행 FOR UPDATE      도착 경로 직렬화 · status 읽기 (아직 이 판에 없다)
     ③ 원장 전역 (20260905, 1)    record_inventory_move 안에서
     ④ Lot 행 FOR UPDATE          〃
     ```
@@ -429,7 +429,7 @@ def check_receipt_state(
        건드리지 않는다. 이 함수는 아무것도 쓰지 않는다.
 
     🔴 **커밋도 롤백도 하지 않고 커넥션을 새로 열지 않는다.** 받은 `conn` 만 쓴다 —
-       나중에 Receipt·검수·Lot·원장 IN·일정 정리가 **한 바깥 트랜잭션**으로 묶여야
+       나중에 Receipt·검수·Lot·원장 IN 이 **한 바깥 트랜잭션**으로 묶여야
        하고, 그 커밋은 호출자가 한 번 한다.
 
     :param conn: 호출자가 소유한 커넥션. 이 함수는 수명을 관리하지 않는다.

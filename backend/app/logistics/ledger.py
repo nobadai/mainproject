@@ -218,7 +218,7 @@ def _cell(row: Any, index: int, name: str) -> Any:
 
     ★ row_factory 가 무엇이냐에 따라 튜플로도 매핑으로도 온다. 커넥션을 만드는 곳은
       배선 자리(`app/main.py` · 마스터)이고 이 모듈은 받아 쓸 뿐이라, 여기서 한쪽
-      모양을 강요하지 않는다 (`transition._confirmed_inbound_json` 과 같은 이유다).
+      모양을 강요하지 않는다 (`inbound_stock._cell` 과 같은 이유다).
     """
     if isinstance(row, Mapping):
         return row[name]

@@ -303,13 +303,17 @@ def read_logistics_inbound(
 )
 def read_logistics_warehouse(
     sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
 ) -> ConsoleWarehouseResponse:
     """Zone 자리 사정과 Lot 물리 위치를 반환한다.
 
     🔴 Zone Capacity 단위는 **Pallet Position** 이다. kg Capacity 와 섞지 않는다.
+
+    ⚠️ `lot_locations` 는 `pallet_events` 를 `as_of` 까지 재생한 결과이고,
+       `zones` 는 지금 창고의 자리 정원이다 — 응답의 `*_time_basis` 가 가른다.
     """
     with _domain_errors():
-        return get_warehouse_console(sim_run_id=sim_run_id)
+        return get_warehouse_console(sim_run_id=sim_run_id, as_of=as_of)
 
 
 @router.get(
@@ -336,11 +340,23 @@ def read_logistics_placement_options(
 )
 def read_logistics_outbound(
     sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
     status_filter: Annotated[ReservationStatus | None, Query(alias="status")] = None,
 ) -> ConsoleOutboundResponse:
-    """예약과 그 아래 할당을 반환한다. 0건이면 `reservations: []` 가 정상이다."""
+    """`as_of` 시점의 예약과 그 아래 할당. 0건이면 `reservations: []` 가 정상이다.
+
+    ★ **예약·할당 축을 `as_of` 로 되살린다** (WP-3 ·
+      `reservation_time_basis = HISTORICAL_AS_OF`). 저장된 두 `status` 칸은 지금
+      값이라 안 읽고, 판매 납품일 · `released_as_of` · `decided_at` · 원장 OUT 으로
+      유도한다.
+
+    ⚠️ **`status` 필터도 유도된 상태에 걸린다.** 지금 DB 값으로 거르면 그날 살아
+       있던 예약이 «오늘 놓아줬다» 는 이유로 과거 화면에서 사라진다.
+    """
     with _domain_errors():
-        return get_outbound_console(sim_run_id=sim_run_id, status=status_filter)
+        return get_outbound_console(
+            sim_run_id=sim_run_id, as_of=as_of, status=status_filter
+        )
 
 
 @router.get(
@@ -479,4 +495,8 @@ def release_logistics_reservation(
        되돌리지 않는다 (환입은 이 판의 범위가 아니다).
     """
     with _domain_errors():
-        return release_reservation_console(reservation_id=reservation_id, status=request.status)
+        return release_reservation_console(
+            reservation_id=reservation_id,
+            released_as_of=request.released_as_of,
+            status=request.status,
+        )
