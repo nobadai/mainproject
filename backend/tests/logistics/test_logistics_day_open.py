@@ -25,6 +25,7 @@ import inspect
 import json
 from collections.abc import Iterator
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Self
 
@@ -450,8 +451,6 @@ def test_open_day_carries_the_sim_run_id_from_the_base_row():
 @pytest.mark.parametrize(
     "칸",
     [
-        "confirmed_outbound_status",
-        "confirmed_outbound_json",
         "zone_capacity_status",
         "guaranteed_capacity_by_zone_json",
         "usage_scope",
@@ -460,7 +459,12 @@ def test_open_day_carries_the_sim_run_id_from_the_base_row():
     ],
 )
 def test_open_day_carries_the_settled_columns(칸):
-    """② 어제 정해져 있던 설정값은 그대로 온다 — 창고 구조도 근거 등급도 안 바뀌었다."""
+    """② 어제 정해져 있던 설정값은 그대로 온다 — 창고 구조도 근거 등급도 안 바뀌었다.
+
+    ⚠️ **`confirmed_outbound` 둘이 이 목록에서 빠졌다 (WP-3).** 미래 확정 출고의
+       정본이 `sales` · `sale_items` 로 옮겨 가면서 그 JSON 칸은 아무도 안 읽는
+       값이 됐다 — 날마다 복제하면 입고 축에서 사고를 냈던 그 모양이 된다.
+    """
     assert _칸과_식()[칸] == f"base.{칸}"
 
 
@@ -469,70 +473,101 @@ def test_open_day_carries_the_settled_columns(칸):
 
 @pytest.mark.parametrize(
     "칸",
-    [
-        "in_transit_status",
-        "in_transit_json",
-        "confirmed_inbound_status",
-        "confirmed_inbound_json",
-    ],
+    ["in_transit_status", "confirmed_inbound_status", "confirmed_outbound_status"],
 )
-def test_open_day_carries_in_transit_and_confirmed_inbound_together(칸):
-    """③ 🔴 **네 칸 모두 물려받는다.**
+def test_open_day_reseeds_the_schedule_axes_instead_of_carrying_them(칸):
+    """③ 🔴 **세 축 다 물려받지 않고 `CONFIRMED_ZERO` 로 새로 둔다 (W3-3/4 · WP-3).**
 
-    `in_transit` 은 매입 승인 ~ 창고 도착 ~ 검수 완료까지 여러 날에 걸쳐 유지되는
-    상태다. 하루가 넘어갔다고 어제 떠 있던 물건이 사라지지 않는다.
+    ```text
+    ~W3-2   in_transit_json 을 날마다 복제       → 미래 날짜 행이 승인을 모른 채 굳었다
+    W3-3~   inbound_schedules 1행 · 날짜로 질의  → 복제할 것이 없다
+    ```
 
-    🔴 그리고 `confirmed_inbound` 는 그 짝이다. 한쪽만 물려받으면 B-1 이 다음 날을
-       세운다 (아래 ④).
+    ⚠️ **물려받은 `UNRESOLVED` 를 이으면 안 된다.** 이으면 그날 이후가 전부
+       `UNRESOLVED` 로 굳어 Reader 가 일정을 **통째로 숨긴다**
+       (`repository._schedule_source`).
+
+    ★ **JSON 세 칸은 INSERT 에 아예 없다.** 그 칸들은 DROP 대상이라
+      (`database/logistics_drop_inbound_json.sql`) 값을 넣으면 migration 뒤에
+      이 INSERT 가 깨진다.
     """
-    assert _칸과_식()[칸] == f"base.{칸}"
+    칸과_식 = _칸과_식()
+
+    assert 칸과_식[칸] == "'CONFIRMED_ZERO'"
+    for json칸 in ("in_transit_json", "confirmed_inbound_json", "confirmed_outbound_json"):
+        assert json칸 not in 칸과_식, f"{json칸} 을 아직 쓰고 있다"
 
 
-def test_open_day_does_not_seed_in_transit_like_the_fixture_sql():
-    """③ 씨앗 SQL 과 다른 자리는 여기 하나다.
+def test_open_day_does_not_copy_the_schedule_json():
+    """③ 🔴 **입고 예정을 다음 날로 복제하지 않는다 (W3-3).**
 
-    `database/27_logistics_runtime_fixture_20260105_20260106.sql` 은 `in_transit` 을
-    리터럴로 새로 뒀다. 그것은 관통 Day1/Day2 를 세우려던 파일이라 그랬고, 하루
-    넘김은 물려받는다.
-    """
-    행 = _물려받은_행(_insert_파라미터(_연다()))
-
-    assert 행["in_transit_json"] == 기준행["in_transit_json"]
-    assert 행["in_transit_status"] == "CONFIRMED"
-    assert 행["confirmed_inbound_json"] == 기준행["confirmed_inbound_json"]
-
-
-# ── ④ 물려받은 행이 B-1 을 통과한다 ────────────────────────────────────
-
-
-def test_carried_row_passes_the_b1_gap_rule(complete_logistics_snapshot):
-    """④ 🔴 **이 PR 의 핵심이다.** 물려받은 행을 B-1 에 실제로 넣는다.
-
-    ★ **값 비교를 재구현하지 않는다.** `find_in_transit_schedule_gap` 을 그대로 불러
-      `None` 이 나오는지 본다.
-
-    ★ 실측으로 겪은 자리다 (2026-09-04). 승인 전이가 `in_transit` 만 채웠더니 다음 날
-      물류가 `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 로 경계를 못 냈다 (`#275`).
+    그 복제가 사고의 원인이었다 — 미래 날짜 행이 **먼저 열려 있으면** 그 행은
+    나중에 난 승인을 모른 채 굳는다 (실측 `INB-H1-REQ-FIRSTINB-20260113-1-1`).
+    지금은 일정 한 행이 날짜에 안 묶여 있고 Reader 가 날짜로 질의한다.
     """
     행 = _물려받은_행(_insert_파라미터(_연다()))
 
-    스냅샷 = _스냅샷(행, complete_logistics_snapshot)
+    assert "in_transit_json" not in 행
+    assert "confirmed_inbound_json" not in 행
+    assert "confirmed_outbound_json" not in 행
+    assert 행["in_transit_status"] == "CONFIRMED_ZERO"
+    assert 행["confirmed_inbound_status"] == "CONFIRMED_ZERO"
 
-    assert 스냅샷.in_transit, "전날에 떠 있던 입고가 실제로 실려 있어야 재는 뜻이 있다"
+
+# ── ④ 하루 넘김이 두 축을 어긋나게 만들 수 없다 ────────────────────────
+
+
+def test_carried_row_cannot_break_the_b1_gap_rule(complete_logistics_snapshot):
+    """④ 🔴 **B-1 이 재던 어긋남의 원인이 사라졌다 (W3-3).**
+
+    ```text
+    ~W3-2   하루 넘김이 두 JSON 칸을 각자 복제  → 한쪽만 실리면 다음 날이 섰다 (#275)
+    W3-3~   두 칸을 아예 안 복제                → 어긋날 값이 행에 없다
+    ```
+
+    ★ **실측으로 겪은 자리다 (2026-09-04).** 승인 전이가 `in_transit` 만 채웠더니
+      다음 날 물류가 `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 로 경계를 못 냈다.
+      그 사고는 이제 **하루 넘김 쪽에서는 구조적으로 재현되지 않는다** — 두 축이
+      `inbound_schedules` 한 행에서 함께 나온다.
+    """
+    행 = _물려받은_행(_insert_파라미터(_연다()))
+
+    # 하루 넘김이 만든 행에는 일정 목록이 아예 없다 — 그래서 어긋날 짝이 없다.
+    assert "in_transit_json" not in 행
+    assert "confirmed_inbound_json" not in 행
+
+    스냅샷 = complete_logistics_snapshot.model_copy(
+        update={"in_transit": [], "confirmed_inbound_schedule": []}
+    )
     assert find_in_transit_schedule_gap(스냅샷) is None
 
 
-def test_carrying_only_in_transit_would_break_the_b1_gap_rule(complete_logistics_snapshot):
-    """④-보강: **한쪽만 물려받으면 실제로 다음 날이 선다.**
+def test_b1_still_catches_a_broken_pair_from_any_other_source(complete_logistics_snapshot):
+    """④-보강: **B-1 규칙 자체는 그대로 살아 있다.**
 
-    ⚠️ 이 검사는 구현을 재지 않는다 — 짝을 깨면 무슨 일이 나는지를 B-1 에게 직접 물어
-       위 검사가 무엇을 막고 있는지 눈에 보이게 남긴다.
+    ⚠️ 이 검사는 구현을 재지 않는다 — 짝이 깨지면 무슨 일이 나는지를 B-1 에게 직접
+       물어, 위 검사가 무엇을 막고 있는지 눈에 보이게 남긴다.
+
+    ★ **하루 넘김은 이제 이 상태를 만들 수 없다** (위 ④). 그래도 규칙을 걷지 않는다 —
+      두 축을 싣는 경로가 하루 넘김 하나가 아니고, 규칙이 없어지면 다른 경로가
+      같은 사고를 낼 때 아무도 못 잡는다.
     """
-    한쪽만 = dict(기준행, confirmed_inbound_status="CONFIRMED_ZERO", confirmed_inbound_json=[])
-    행 = _물려받은_행(_insert_파라미터(_연다()), base=한쪽만)
+    스냅샷 = complete_logistics_snapshot.model_copy(
+        update={
+            "in_transit": [
+                InTransitItem(
+                    inbound_id="INB-ONLY-1",
+                    purchase_id="PUR-ONLY-1",
+                    item="배추",
+                    quantity_kg=Decimal(100),
+                    expected_arrival_date=date(2026, 8, 22),
+                )
+            ],
+            "confirmed_inbound_schedule": [],
+        }
+    )
 
-    스냅샷 = _스냅샷(행, complete_logistics_snapshot)
-
+    assert 스냅샷.in_transit, "운송 중이 비면 이 검사가 아무것도 안 잰다"
     assert find_in_transit_schedule_gap(스냅샷) == "IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE"
 
 

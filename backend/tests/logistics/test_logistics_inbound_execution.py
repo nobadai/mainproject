@@ -33,6 +33,7 @@ from app.logistics.inbound_execution import (
     LogisticsInboundExecution,
     UnknownReceiptStage,
 )
+from app.logistics.inbound_schedules import ScheduleReferenceBroken
 from app.logistics.inbound_stock import (
     InboundStockResult,
     InvalidReceivingAxis,
@@ -155,9 +156,17 @@ class FakeInspectionProvider:
 
 
 class FakeCursor:
-    def __init__(self, log: list[tuple[str, Any]], rows: list[Any]) -> None:
+    """🔴 **질의마다 다른 표를 낸다 (W3-3).** 도착 처리는 이제 두 표를 읽는다 —
+    그날 fixture 행에서 `in_transit_status` 하나, 목록은 `inbound_schedules` 에서.
+    한 벌만 돌려주면 뒤엣것이 앞엣것의 행 모양을 받아 엉뚱한 데서 죽는다.
+    """
+
+    def __init__(
+        self, log: list[tuple[str, Any]], rows: list[Any], schedules: list[Any]
+    ) -> None:
         self.log = log
         self._rows = rows
+        self._schedules = schedules
         self._out: list[Any] = []
 
     def __enter__(self) -> Self:
@@ -169,7 +178,12 @@ class FakeCursor:
     def execute(self, query: object, params: object = None) -> None:
         text = str(query)
         self.log.append((text, params))
-        self._out = [] if "pg_advisory" in text else list(self._rows)
+        if "pg_advisory" in text:
+            self._out = []
+        elif "inbound_schedules" in text:
+            self._out = list(self._schedules)
+        else:
+            self._out = list(self._rows)
 
     def fetchall(self) -> list[Any]:
         return list(self._out)
@@ -181,15 +195,18 @@ class FakeCursor:
 class FakeConnection:
     """경계만 센다 — 이 조립층은 커넥션으로 아무것도 하지 않아야 한다."""
 
-    def __init__(self, rows: list[Any] | None = None) -> None:
+    def __init__(
+        self, rows: list[Any] | None = None, schedules: list[Any] | None = None
+    ) -> None:
         self.commits = 0
         self.rollbacks = 0
         self.closed = 0
         self.log: list[tuple[str, Any]] = []
         self._rows = rows if rows is not None else []
+        self._schedules = schedules if schedules is not None else []
 
     def cursor(self) -> FakeCursor:
-        return FakeCursor(self.log, self._rows)
+        return FakeCursor(self.log, self._rows, self._schedules)
 
     def commit(self) -> None:
         self.commits += 1
@@ -285,7 +302,6 @@ class Wiring:
             lot_id="LOT-" + kwargs["receipt_id"],
             move_id="MOVE-IN-LOT-" + kwargs["receipt_id"],
             accepted_qty_kg=QTY,
-            schedule_cleared=True,
         )
 
     # ── 읽기 편의 ──────────────────────────────────────────────────────
@@ -1013,14 +1029,43 @@ def pin_schema_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inbound_stock, "get_db_schema", lambda: "haetdeul")
 
 
-def _fixture_rows(in_transit: Any, confirmed: Any = None) -> list[Any]:
-    return [(in_transit, confirmed if confirmed is not None else [])]
+def _fixture_rows(status: str = "CONFIRMED") -> list[Any]:
+    """그날 fixture 행. 🔴 **도착 처리가 읽는 칸은 `in_transit_status` 하나다 (W3-3).**
+
+    종전에는 `in_transit_json` 을 여기 실었는데, 승인 Writer 가 그 칸을 더 이상 안
+    쓰게 되면서 판정 근거가 status 하나로 모였다 (`inbound_stock._fixture_row`).
+    """
+    return [(status,)]
+
+
+def _schedule_rows(*items: InTransitItem) -> list[dict[str, Any]]:
+    """`inbound_schedules` 조회가 내는 행. **목록의 정본이 여기로 옮겨 왔다 (W3-2).**
+
+    ★ 계보 두 칸(`has_receipt` · `stock_applied`)이 종료조건을 가른다 —
+      `receivable_at` 은 `stock_applied` 가 거짓인 것만 낸다.
+    """
+    return [
+        {
+            "inbound_id": item.inbound_id,
+            "sim_run_id": SIM_RUN_ID,
+            "purchase_item_id": f"PI-{item.inbound_id}",
+            "purchase_id": item.purchase_id,
+            "item_id": f"ITEM-{item.item}",
+            "item_name": item.item,
+            "quantity_kg": item.quantity_kg,
+            "expected_arrival_date": item.expected_arrival_date,
+            "created_as_of": AS_OF,
+            "has_receipt": False,
+            "stock_applied": False,
+        }
+        for item in items
+    ]
 
 
 def test_L1_도착_잠금이_fixture_잠금보다_먼저다(pin_schema_name: None):
     """🔴 순서가 뒤집히면 두 트랜잭션이 요청하는 잠금 집합에 **전순서가 없어져** 교착이
     생긴다 (`ledger._lock_ledger_writes` 가 겪은 자리)."""
-    conn = FakeConnection(_fixture_rows([]))
+    conn = FakeConnection(_fixture_rows())
 
     load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
@@ -1032,7 +1077,7 @@ def test_L1_도착_잠금이_fixture_잠금보다_먼저다(pin_schema_name: Non
 
 def test_L2_도착_쓰기와_같은_전역_키를_쓴다(pin_schema_name: None):
     """★ 세 번째 잠금을 만들지 않는다 — `receipts` 의 그 키를 그대로 쓴다."""
-    conn = FakeConnection(_fixture_rows([]))
+    conn = FakeConnection(_fixture_rows())
 
     load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
@@ -1041,7 +1086,7 @@ def test_L2_도착_쓰기와_같은_전역_키를_쓴다(pin_schema_name: None):
 
 
 def test_L3_조회_축이_유일성_축과_같다(pin_schema_name: None):
-    conn = FakeConnection(_fixture_rows([]))
+    conn = FakeConnection(_fixture_rows())
 
     load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
@@ -1051,10 +1096,10 @@ def test_L3_조회_축이_유일성_축과_같다(pin_schema_name: None):
 
 def test_L4_None_과_빈목록을_가른다(pin_schema_name: None):
     unknown = load_in_transit_for_receiving(
-        FakeConnection(_fixture_rows(None)), sim_run_id=SIM_RUN_ID, as_of=AS_OF
+        FakeConnection(_fixture_rows("UNRESOLVED")), sim_run_id=SIM_RUN_ID, as_of=AS_OF
     )
     zero = load_in_transit_for_receiving(
-        FakeConnection(_fixture_rows([])), sim_run_id=SIM_RUN_ID, as_of=AS_OF
+        FakeConnection(_fixture_rows()), sim_run_id=SIM_RUN_ID, as_of=AS_OF
     )
 
     assert unknown is None, "확인한 적 없다 — 0 건으로 바꾸지 않는다"
@@ -1062,8 +1107,7 @@ def test_L4_None_과_빈목록을_가른다(pin_schema_name: None):
 
 
 def test_L5_행을_InTransitItem_으로_좁힌다(pin_schema_name: None):
-    stored = _in_transit_row().model_dump(mode="json")
-    conn = FakeConnection(_fixture_rows([stored]))
+    conn = FakeConnection(_fixture_rows(), _schedule_rows(_in_transit_row()))
 
     loaded = load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
@@ -1071,10 +1115,19 @@ def test_L5_행을_InTransitItem_으로_좁힌다(pin_schema_name: None):
 
 
 def test_L6_계약_밖_행은_조용히_걸러지지_않는다(pin_schema_name: None):
-    """★ 걸러 내면 그 행이 사라진 줄 아무도 모른다 — `in_transit` 은 도착 대상 목록이다."""
-    conn = FakeConnection(_fixture_rows([{"inbound_id": "INB-X", "모르는칸": 1}]))
+    """★ 걸러 내면 그 행이 사라진 줄 아무도 모른다 — `in_transit` 은 도착 대상 목록이다.
 
-    with pytest.raises(Exception, match="(?i)valid"):
+    🔴 **조용히 사라질 수 있는 자리가 옮겨 왔다 (W3-2).** 종전에는 fixture JSON 의
+      계약 밖 칸이었고, 지금은 **매입 줄·품목 참조가 깨진 일정**이다. 그 행을
+      «입고 없음» 으로 읽으면 그것이 곧 FIRSTINB 사고의 모양이라
+      `load_schedule_views` 가 `ScheduleReferenceBroken` 으로 드러낸다.
+    """
+    깨진행 = _schedule_rows(_in_transit_row())
+    깨진행[0]["purchase_id"] = None
+
+    conn = FakeConnection(_fixture_rows(), 깨진행)
+
+    with pytest.raises(ScheduleReferenceBroken):
         load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
 
@@ -1088,7 +1141,7 @@ def test_L7_그날_행이_없으면_부재로_접지_않는다(pin_schema_name: 
 def test_L8_빈_실행축으로는_묻지_않는다(pin_schema_name: None):
     """🔴 없는 열쇠로 물으면 0건이 돌아오고 그것은 *"그날 행이 없다"* 로 읽힌다."""
     for blank in ("", "   "):
-        conn = FakeConnection(_fixture_rows([]))
+        conn = FakeConnection(_fixture_rows())
         with pytest.raises(InvalidReceivingAxis):
             load_in_transit_for_receiving(conn, sim_run_id=blank, as_of=AS_OF)
         assert conn.log == [], "DB 에 묻기도 전에 막는다"
@@ -1101,7 +1154,7 @@ def test_L8b_빈_usage_scope_도_묻기_전에_막힌다(pin_schema_name: None):
       안 쓰는 호출자가 언제든 생긴다.
     """
     for blank in ("", "   "):
-        conn = FakeConnection(_fixture_rows([]))
+        conn = FakeConnection(_fixture_rows())
         with pytest.raises(InvalidReceivingAxis, match="usage_scope"):
             load_in_transit_for_receiving(
                 conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF, usage_scope=blank
@@ -1110,7 +1163,7 @@ def test_L8b_빈_usage_scope_도_묻기_전에_막힌다(pin_schema_name: None):
 
 
 def test_L9_커밋도_롤백도_새_커넥션도_없다(pin_schema_name: None):
-    conn = FakeConnection(_fixture_rows([]))
+    conn = FakeConnection(_fixture_rows())
 
     load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
@@ -1118,7 +1171,7 @@ def test_L9_커밋도_롤백도_새_커넥션도_없다(pin_schema_name: None):
 
 
 def test_L10_두_건_이상이면_첫_행을_고르지_않는다(pin_schema_name: None):
-    conn = FakeConnection([([], []), ([], [])])
+    conn = FakeConnection(_fixture_rows() * 2)
 
     with pytest.raises(LotIntegrityError):
         load_in_transit_for_receiving(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)

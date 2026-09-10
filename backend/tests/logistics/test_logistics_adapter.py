@@ -158,9 +158,23 @@ def _snapshot(**overrides) -> InventoryLogisticsSnapshot:
 _LOTS = [_Lot("LOT-A", "300.5", 10), _Lot("LOT-B", "200", None)]
 
 
-def _read(snapshot=None, policy=None):
-    """어댑터의 단일 읽기 seam — Snapshot 과 그것을 만든 Policy 를 함께 준다 (#121 ⑤)."""
-    return LogisticsRead(snapshot=snapshot or _snapshot(), policy=policy or _policy())
+#: 대역이 내는 고정 운송 계약. **문자열을 여기서 짓지 않는다** — `logistics_contracts`
+#: 표의 실제 값과 같은 모양이고, 정본 Reader 는 `transport.resolve_fixed_route` 다.
+_ROUTE = "LOGI-BASE-5PL"
+
+
+def _read(snapshot=None, policy=None, *, route=_ROUTE, route_error=False):
+    """어댑터의 단일 읽기 seam — Snapshot · Policy · 운송 계약을 함께 준다 (#121 ⑤).
+
+    🔴 **운송 계약도 이 한 벌에 들어온다.** 어댑터가 자기 커넥션을 열어 따로 읽으면
+       한 회신 안에서 읽기가 두 시점으로 갈리고, 검사도 실 DB 에 매인다.
+    """
+    return LogisticsRead(
+        snapshot=snapshot or _snapshot(),
+        policy=policy or _policy(),
+        delivery_route=route,
+        delivery_route_error=route_error,
+    )
 
 
 @pytest.fixture
@@ -729,8 +743,11 @@ def test_grade_가_없으면_None_으로_드러낸다(wired):
 def _stocked_snapshot(**overrides) -> InventoryLogisticsSnapshot:
     """가용재고 집계가 실제로 도는 스냅샷.
 
-    배추 300(가용) + 배추 100(신선도 만료 — 제외) + 무 50, 확정 출고 배추 120 차감.
-    기대: 무 50 · 배추 180.
+    배추 300(가용) + 배추 100(신선도 만료 — 제외) + 무 50.
+    기대: 무 50 · 배추 300.
+
+    🔴 **확정 출고는 안 뺀다 (WP-3).** 그 축은 예약·할당으로 이미 한 번 빠진다 —
+       둘을 다 빼면 같은 판매를 두 번 차감한다.
     """
     lots = [
         InventoryLotSnapshot(
@@ -779,11 +796,17 @@ def stocked(wired, monkeypatch):
 
 def test_품목별_가용재고를_PRE_payload_에_싣는다(stocked):
     """Lot 목록과 별개의 **집계값**이다 — 매입/마스터가 Lot 을 재합산하면 가용재고
-    정의(비-ACTIVE·만료 제외, 확정 출고 차감)를 남의 도메인에서 재구현하게 된다."""
+    정의(비-ACTIVE·만료 제외, 예약·할당 차감)를 남의 도메인에서 재구현하게 된다.
+
+    🔴 **차감 축이 한 벌이다 (WP-3).** 종전에는 예약·할당에 더해
+       `confirmed_outbound_schedule` 도 뺐고 배추가 180 이었다. 확정 판매는 그날
+       마스터 출고 흐름이 **예약으로 내려보내는 바로 그 사실**이라, 둘을 다 빼면
+       같은 판매를 두 번 차감한다.
+    """
     reply, _ = adapter.logistics_port(req())
     assert reply.payload["inventory_by_item"] == [
         {"item": "무", "available_qty_kg": 50.0},
-        {"item": "배추", "available_qty_kg": 180.0},
+        {"item": "배추", "available_qty_kg": 300.0},
     ]
 
 
@@ -792,7 +815,7 @@ def test_가용재고_근거는_번호가_아니라_품목명으로_가리킨다
     근거가 다른 품목을 가리킨다."""
     reply, _ = adapter.logistics_port(req())
     claims = {evidence.claim: evidence.value for evidence in reply.evidences}
-    assert claims["inventory_by_item[배추].available_qty_kg"] == 180.0
+    assert claims["inventory_by_item[배추].available_qty_kg"] == 300.0
     assert claims["inventory_by_item[무].available_qty_kg"] == 50.0
 
 
@@ -815,13 +838,10 @@ def test_출고_귀속_불명이면_가용재고를_지어내지_않는다(stock
     임의 배분 대신 키를 생략하고 이름을 남긴다 — `[]`(품목 0건 확인)로 위장하면
     *"재고가 없다"* 로 읽힌다 (§1.2-10).
     """
-    unattributed = [ScheduledQuantity(date=AS_OF, quantity_kg=Decimal(120), item=None)]
     monkeypatch.setattr(
         adapter,
         "_load_read",
-        lambda *, as_of, sim_run_id: _read(
-            _stocked_snapshot(confirmed_outbound_schedule=unattributed)
-        ),
+        lambda *, as_of, sim_run_id: _read(_stocked_snapshot(outbound_commitments=None)),
     )
     reply, _ = adapter.logistics_port(req())
     assert "inventory_by_item" not in reply.payload
@@ -1022,7 +1042,7 @@ def test_시나리오_판정에도_품목별_가용재고를_싣는다(stocked):
     reply, meta = adapter.logistics_port(request)
     assert reply.payload["inventory_by_item"] == [
         {"item": "무", "available_qty_kg": 50.0},
-        {"item": "배추", "available_qty_kg": 180.0},
+        {"item": "배추", "available_qty_kg": 300.0},
     ]
     assert validate_reply(request, reply, meta) == ()
 
@@ -1854,7 +1874,7 @@ def test_판매가능량은_예약과_할당을_차감한_값이다(wired_sales)
     # 🔴 **배열 그대로 잰다.** `{item: qty}` 로 접으면 같은 품목의 여러 행이 뒤엣것
     #    하나로 뭉개져, Lot 을 차감 없이 그대로 실은 회신도 통과한다 (뮤턴트 실측).
     #    품목당 한 행이라는 것도 이 계약의 일부다 — 합계는 물류가 이미 냈다.
-    assert reply.payload["inventory_by_item"] == [
+    assert reply.payload["sellable_supply"]["inventory_by_item"] == [
         {"item": "무", "available_qty_kg": 300.0},
         {"item": "배추", "available_qty_kg": 500.0},
     ]
@@ -1868,11 +1888,12 @@ def test_Lot_수량을_합산해도_판매가능량이_되지_않는다(wired_sa
     """
     payload = _pre_sales_reply()[1].payload
 
+    supply = payload["sellable_supply"]
     lot_total = sum(
-        row["available_qty_kg"] for row in payload["lot_constraints"] if row["item"] == "배추"
+        row["available_qty_kg"] for row in supply["lot_constraints"] if row["item"] == "배추"
     )
     confirmed = next(
-        row["available_qty_kg"] for row in payload["inventory_by_item"] if row["item"] == "배추"
+        row["available_qty_kg"] for row in supply["inventory_by_item"] if row["item"] == "배추"
     )
     assert lot_total == 1700.0  # 1,000 + 700(만료분 포함)
     assert confirmed == 500.0
@@ -1883,7 +1904,7 @@ def test_신선도가_만료된_Lot_은_판매가능량에서_빠지되_근거�
     """만료 Lot 을 **숨기지 않는다.** 가용에서 빠지는 것과 없던 일이 되는 것은 다르다."""
     payload = _pre_sales_reply()[1].payload
 
-    assert "LOT-B" in {row["lot_id"] for row in payload["lot_constraints"]}
+    assert "LOT-B" in {row["lot_id"] for row in payload["sellable_supply"]["lot_constraints"]}
 
 
 # ── F. freshness ────────────────────────────────────────────────
@@ -1896,7 +1917,10 @@ def test_음수_신선도를_그대로_나른다(wired_sales):
     당일**과 **사흘 지난 Lot** 이 같은 값이 되고, 받는 쪽은 그 차이를 영영 못 본다.
     """
     payload = _pre_sales_reply()[1].payload
-    by_lot = {row["lot_id"]: row["remaining_freshness_days"] for row in payload["lot_constraints"]}
+    by_lot = {
+        row["lot_id"]: row["remaining_freshness_days"]
+        for row in payload["sellable_supply"]["lot_constraints"]
+    }
 
     assert by_lot["LOT-B"] == -3
     assert by_lot["LOT-A"] == 10  # 다른 Lot 도 손대지 않았다
@@ -1910,7 +1934,9 @@ def test_신선도_분모를_다시_계산하지_않고_그대로_나른다(wire
     """
     payload = _pre_sales_reply()[1].payload
 
-    lot_a = next(row for row in payload["lot_constraints"] if row["lot_id"] == "LOT-A")
+    lot_a = next(
+        row for row in payload["sellable_supply"]["lot_constraints"] if row["lot_id"] == "LOT-A"
+    )
     assert lot_a["effective_freshness_limit_days"] == 15
 
 
@@ -1926,7 +1952,7 @@ def test_신선도_한계를_모르면_지어내지_않는다(monkeypatch):
     )
     payload = _pre_sales_reply()[1].payload
 
-    lot = payload["lot_constraints"][0]
+    lot = payload["sellable_supply"]["lot_constraints"][0]
     assert lot["remaining_freshness_days"] is None
     assert lot["effective_freshness_limit_days"] is None
 
@@ -1945,13 +1971,18 @@ def test_날짜별_공급량을_지어내지_않는다(wired_sales):
     future_occupancy_by_date(점유량) → 공급량            ❌
     ```
 
-    ★ **빈 배열이 "0건 확인" 으로 읽히지 않게** 그 사실을 이름으로 함께 낸다.
+    ★ **창을 물류가 만들지 않는다 (WP-4).** 사용자가 물은 납기일 하나가 답할 날짜이고,
+      안 물었으면 답할 날짜가 없다. 여기서 임의 창을 만들면 **묻지도 않은 날짜의
+      공급량**이 판매 근거로 나간다.
+
+    🔴 **빈 목록에 «못 냈다» 이름을 안 단다.** 계산에 실패한 것과 물어본 날짜가 없는
+       것은 다른 사실이다 (§1.2-10) — 종전에는 둘을 한 이름으로 뭉갰다.
     """
     payload = _pre_sales_reply()[1].payload
 
     assert payload["sellable_supply"]["supply_capacity_by_date"] == []
-    assert payload["sellable_supply"]["uncertainties"] == ["SUPPLY_CAPACITY_BY_DATE_UNRESOLVED"]
-    assert "supply_capacity_by_date" in payload["missing_data"]
+    assert payload["sellable_supply"]["uncertainties"] == []
+    assert "supply_capacity_by_date" not in payload["missing_data"]
 
 
 def test_못_낸_날짜_공급의_이름에는_숫자가_없다(wired_sales):
@@ -1975,42 +2006,57 @@ def test_출고_여력_숫자가_있어도_납기_가능성은_UNRESOLVED_다(wi
 
     숫자가 있다고 `READY` 로 올리면 **답하지 않은 질문에 답한 것**이 된다.
     """
-    payload = _pre_sales_reply()[1].payload
-    delivery = payload["delivery_feasibility"]
+    delivery = _pre_sales_reply()[1].payload["delivery_feasibility"]
 
-    # 숫자는 정책 이름 그대로 최상위에 있다 — 근거를 정확히 붙일 수 있는 자리다
-    assert payload["shared_daily_outbound_capacity_kg"] == 5000.0
-
-    # 판정 블록에는 판정만 남는다
+    # ★ **숫자와 판정이 한 블록에 산다 (WP-4B).** 판매 계약
+    #   (`sales.schemas.LogisticsDeliveryFeasibility`)의 모양 그대로다.
     assert delivery == {
         "status": "UNRESOLVED",
+        "daily_outbound_capacity_kg": 5000.0,
+        "delivery_route": "LOGI-BASE-5PL",
+        "transport_lead_time": 0,
+        "earliest_delivery_date": None,
         "reason_codes": [],
-        "uncertainties": [
-            "DELIVERY_ROUTE_UNRESOLVED",
-            "TRANSPORT_LEAD_TIME_UNRESOLVED",
-            "EARLIEST_DELIVERY_DATE_UNRESOLVED",
-        ],
+        "uncertainties": ["OUTBOUND_PREP_LEAD_DAYS_UNRESOLVED"],
     }
 
 
-def test_납기_판정_블록에는_숫자를_두지_않는다(wired_sales):
+def test_같은_숫자를_두_자리에_두지_않는다(wired_sales):
     """🔴 **한 값이 두 자리에 있으면 받는 쪽이 어느 것을 볼지 갈린다.**
 
-    그리고 중첩 안의 숫자는 봉투가 주소지정을 못 해(`envelope._CLAIM_PATH`) 근거를
-    조상 블록에 달 수밖에 없는데, 그러면 *"`delivery_feasibility` 라는 판정의 값이
-    5,000kg"* 으로 읽힌다 — 그 판정은 `UNRESOLVED` 라 **근거와 대상의 뜻이 어긋난다.**
+    ⚠️ 종전에는 반대였다 — 숫자 셋을 payload **최상위로 끌어올려** 중복시켰다.
+       봉투가 중첩 안의 숫자를 주소지정하지 못해서였는데(`envelope._CLAIM_PATH`),
+       그 회피가 판매 계약 모양을 깨뜨렸다. WP-4B 가 중첩 한 벌로 되돌렸고,
+       주소지정은 봉투 쪽에서 풀 일로 남겼다 (Master HANDOFF).
     """
-    delivery = _pre_sales_reply()[1].payload["delivery_feasibility"]
-
-    assert not [value for value in delivery.values() if isinstance(value, (int, float))]
-    assert "daily_outbound_capacity_kg" not in delivery
-
-
-def test_납기일이나_배송_가능_여부를_만들지_않는다(wired_sales):
-    """없는 Route·운송시간에서 날짜를 역산하지 않는다."""
     payload = _pre_sales_reply()[1].payload
 
-    금지 = {"earliest_delivery_date", "delivery_feasible", "delivery_date", "transport_lead_days"}
+    for 올라오면_안_되는_키 in (
+        "inventory_by_item",
+        "lot_constraints",
+        "shared_daily_outbound_capacity_kg",
+        "daily_outbound_capacity_kg",
+        "as_of",
+        "policy_version_used",
+    ):
+        assert 올라오면_안_되는_키 not in payload
+    assert payload["delivery_feasibility"]["daily_outbound_capacity_kg"] == 5000.0
+
+
+def test_준비일_정책이_없으면_납기일을_지어내지_않는다(wired_sales):
+    """🔴 **정책이 없으면 코드 상수로 메우지 않는다 (WP-4 M4).**
+
+    `outbound_prep_lead_days` 가 없으면 가장 이른 납기일을 못 내고, 못 내는 것을
+    `READY` 로 답하면 **DB 에 정책이 없는데도 납기가 확정된 것처럼** 나간다.
+    """
+    payload = _pre_sales_reply()[1].payload
+    delivery = payload["delivery_feasibility"]
+
+    assert delivery["status"] == "UNRESOLVED"
+    assert delivery["earliest_delivery_date"] is None
+    assert "OUTBOUND_PREP_LEAD_DAYS_UNRESOLVED" in delivery["uncertainties"]
+    # ★ 물류가 짓지 않는 이름들 — 있는 이름을 다른 이름으로 또 내지 않는다.
+    금지 = {"delivery_feasible", "delivery_date", "transport_lead_days"}
     assert 금지 & _all_keys(payload) == set()
 
 
@@ -2154,16 +2200,29 @@ def test_LLM_을_안_썼다는_말이_사실이다(wired_sales):
 
 
 def test_PRE_SALES_회신이_봉투_검증을_통과한다(wired_sales):
-    """L — 어댑터가 findings 를 내면 남 탓할 자리가 없다 — 우리가 만든 것이다.
+    """L — 남는 finding 은 **중첩 주소 해석 하나뿐**이어야 한다.
 
-    ★ 특히 `E-PLAN-EMPTY`(정상 회신인데 돌린 Tool 이 없다)와
-      `E-EVIDENCE-MISSING`·`E-EVIDENCE-ORPHAN` 을 본다. 뒤 둘이 이 mode 의 payload 모양을
-      정했다 — 봉투는 중첩 안의 숫자를 주소지정하지 못해(`_CLAIM_PATH`) 근거를 붙일 수
-      있는 두 배열만 최상위에 있다.
+    ⚠️ **이것이 지금 열려 있는 유일한 어긋남이다 (Master HANDOFF).**
+       `envelope._CLAIM_PATH` 의 `key` 가 점을 안 받아
+       `sellable_supply.inventory_by_item[배추].available_qty_kg` 가 매치에 실패하고
+       `E-EVIDENCE-ORPHAN` 이 된다. 흐름은 안 막는다 —
+       `verifier` 가 `M16-ENVELOPE` 로 보고할 뿐이다.
+
+    🔴 **여기를 초록으로 만들려고 payload 를 다시 평탄화하지 않는다.** 업무 계약을
+       검증기 모양에 맞추는 것이 아니라 검증기가 업무 계약의 실제 주소를 읽게 만든다.
+       그래서 이 검사는 *"ORPHAN 말고 다른 finding 은 없다"* 를 잠근다 —
+       `E-PLAN-EMPTY` 나 `E-EVIDENCE-MISSING` 이 새로 생기면 여기서 걸린다.
     """
     request, reply, meta = _pre_sales_reply()
 
-    assert validate_reply(request, reply, meta) == ()
+    findings = validate_reply(request, reply, meta)
+    코드 = {finding.code for finding in findings}
+
+    assert 코드 <= {"E-EVIDENCE-ORPHAN"}, f"중첩 주소 말고 다른 finding 이 있다: {findings}"
+    고아 = {finding.where for finding in findings}
+    assert all("sellable_supply." in 곳 or "delivery_feasibility." in 곳 for 곳 in 고아), (
+        "중첩 주소가 아닌 근거가 고아가 됐다"
+    )
 
 
 def test_돌린_Tool_만_기록한다(wired_sales):
@@ -2194,20 +2253,21 @@ def test_숫자마다_근거가_붙는다(wired_sales):
     """근거 없는 숫자를 내보내지 않는다 — 어느 DB 행에서 왔는지가 이름에 남는다."""
     claims = {evidence.claim for evidence in _pre_sales_reply()[1].evidences}
 
-    assert "inventory_by_item[배추].available_qty_kg" in claims
-    assert "lot_constraints[LOT-A].available_qty_kg" in claims
-    assert "lot_constraints[LOT-B].remaining_freshness_days" in claims
-    assert "lot_constraints[LOT-A].effective_freshness_limit_days" in claims
+    assert "sellable_supply.inventory_by_item[배추].available_qty_kg" in claims
+    assert "sellable_supply.lot_constraints[LOT-A].available_qty_kg" in claims
+    assert "sellable_supply.lot_constraints[LOT-B].remaining_freshness_days" in claims
+    assert "sellable_supply.lot_constraints[LOT-A].effective_freshness_limit_days" in claims
     # 🔴 **정확히 그 숫자를 가리킨다.** 조상 블록(`delivery_feasibility`)에 달면 판정
     #    이름에 kg 값이 붙어 근거와 대상의 뜻이 어긋난다.
-    assert "shared_daily_outbound_capacity_kg" in claims
+    assert "delivery_feasibility.daily_outbound_capacity_kg" in claims
     assert "delivery_feasibility" not in claims
 
 
 def test_정책값_근거는_정책_출처를_가리킨다(wired_sales):
     """출고 여력은 물류가 계산한 값이 아니라 **정책 원값을 옮긴 것**이다."""
     _, reply, _ = _pre_sales_reply()
-    evidence = next(e for e in reply.evidences if e.claim == "shared_daily_outbound_capacity_kg")
+    주소 = "delivery_feasibility.daily_outbound_capacity_kg"
+    evidence = next(e for e in reply.evidences if e.claim == 주소)
 
     assert evidence.value == 5000.0
     assert evidence.unit == "kg"
@@ -2331,12 +2391,10 @@ def test_구조적으로_못_내는_것을_READY_안에서도_밝힌다(wired_sa
     """
     _, reply, _ = _pre_sales_reply()
 
-    assert reply.missing_data == (
-        "supply_capacity_by_date",
-        "delivery_route",
-        "transport_lead_time",
-        "earliest_delivery_date",
-    )
+    # ★ **낸 것은 여기서 뺀다 (WP-4).** `supply_capacity_by_date` ·`delivery_route` ·
+    #   `transport_lead_time` 은 이제 실제로 계산한다 — 값을 냈는데 *"모른다"* 로도
+    #   적으면 계약이 스스로 모순된다.
+    assert reply.missing_data == ("earliest_delivery_date",)
     assert list(reply.missing_data) == reply.payload["missing_data"]
     assert reply.runtime_status == "READY"
 
@@ -2367,20 +2425,13 @@ def test_못_낸_납기_축_이름이_uncertainties_와_같은_사실을_가리�
     """
     _, reply, _ = _pre_sales_reply()
 
-    축 = {
-        "delivery_route": "DELIVERY_ROUTE_UNRESOLVED",
-        "transport_lead_time": "TRANSPORT_LEAD_TIME_UNRESOLVED",
-        "earliest_delivery_date": "EARLIEST_DELIVERY_DATE_UNRESOLVED",
-    }
+    축 = {"earliest_delivery_date": "OUTBOUND_PREP_LEAD_DAYS_UNRESOLVED"}
     uncertainties = reply.payload["delivery_feasibility"]["uncertainties"]
 
     assert set(축.values()) == set(uncertainties)
-    assert set(축) <= set(reply.missing_data)
-    # 날짜별 공급도 같은 짝을 이룬다
-    assert reply.payload["sellable_supply"]["uncertainties"] == [
-        "SUPPLY_CAPACITY_BY_DATE_UNRESOLVED"
-    ]
-    assert "supply_capacity_by_date" in reply.missing_data
+    assert set(축) == set(reply.missing_data)
+    # ★ 낸 축은 어느 쪽에도 안 적힌다 — 값을 내고 «모른다» 로도 적지 않는다.
+    assert reply.payload["sellable_supply"]["uncertainties"] == []
 
 
 # ── 판매 계약 호환 ──────────────────────────────────────────────
@@ -2394,38 +2445,45 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     마스터가 `Capability` 어휘를 베껴 두고 테스트로만 대조하는 것과 **같은 자리**다
     (`master/envelope.py` `Capability` docstring · `tests/master/test_sales_flow.py`).
 
-    ★ **받는 쪽이 하는 일이 무엇인지도 함께 고정한다.** 아래 매핑이 전부다 —
-      최상위 셋을 제자리로 옮기는 **키 이동뿐이고 재계산이 없다.**
+    ★ **받는 쪽이 옮길 것이 없다 (WP-4B).** payload 가 판매 계약 모양 **그대로**다 —
+      종전에는 숫자 셋을 최상위로 끌어올려 두고 받는 쪽이 제자리로 옮겨야 했다.
+
+    🔴 **아직 한 자리가 열려 있다 — 판매 HANDOFF.**
 
       ```text
-      inventory_by_item                  → sellable_supply.inventory_by_item
-      lot_constraints                    → sellable_supply.lot_constraints
-      shared_daily_outbound_capacity_kg  → delivery_feasibility.daily_outbound_capacity_kg
+      delivery_route · transport_lead_time · earliest_delivery_date
+      → LogisticsDeliveryFeasibility(extra="forbid") 가 아직 이 셋을 안 받는다
       ```
 
-      셋이 최상위에 있는 이유는 봉투가 중첩 안의 숫자에 근거를 못 달기
-      때문이지(`envelope._CLAIM_PATH`) 판매 계약과 달라서가 아니다.
+      물류가 이 셋을 빼서 맞추지 않는다 — 값은 실제로 계산한 사실이고, 계약을
+      좁히면 판매가 납기를 못 읽는다. 그래서 **어긋난 칸이 정확히 그 셋인지**를
+      여기서 잠근다. 판매가 칸을 열면 아래 `대기중` 이 비고 이 검사가 알려 준다.
     """
+    from pydantic import ValidationError
+
     from app.sales.schemas import SalesLogisticsContext
 
     payload = _pre_sales_reply({"user_request": {"item": "배추"}})[1].payload
 
+    대기중 = {"delivery_route", "transport_lead_time", "earliest_delivery_date"}
+    try:
+        SalesLogisticsContext.model_validate(payload)
+        어긋난칸: set[str] = set()
+    except ValidationError as 오류:
+        어긋난칸 = {str(e["loc"][-1]) for e in 오류.errors()}
+    assert 어긋난칸 == 대기중, (
+        f"판매 계약과 어긋난 칸이 달라졌다: {sorted(어긋난칸)}"
+        " — 셋 말고 다른 것이 갈렸으면 물류가 계약을 깬 것이다"
+    )
+
     context = SalesLogisticsContext.model_validate(
         {
-            "query_scope": payload["query_scope"],
-            "sellable_supply": {
-                **payload["sellable_supply"],
-                "inventory_by_item": payload["inventory_by_item"],
-                "lot_constraints": payload["lot_constraints"],
-            },
+            **payload,
             "delivery_feasibility": {
-                **payload["delivery_feasibility"],
-                "daily_outbound_capacity_kg": payload["shared_daily_outbound_capacity_kg"],
+                칸: 값
+                for 칸, 값 in payload["delivery_feasibility"].items()
+                if 칸 not in 대기중
             },
-            "hard_constraints": payload["hard_constraints"],
-            "soft_warnings": payload["soft_warnings"],
-            "missing_data": payload["missing_data"],
-            "evidence_refs": payload["evidence_refs"],
         }
     )
 
@@ -2474,7 +2532,7 @@ def test_보관한계가_없는_Lot_은_신선도를_지어내지_않는다(monk
 
     _, reply, _ = _pre_sales_reply()
     payload = reply.payload
-    row = next(r for r in payload["lot_constraints"] if r["lot_id"] == "LOT-N")
+    row = next(r for r in payload["sellable_supply"]["lot_constraints"] if r["lot_id"] == "LOT-N")
 
     # 🔴 키는 있고 값은 None 이다 — `is None` 으로 재야 0 치환 뮤턴트가 잡힌다
     assert "remaining_freshness_days" in row
@@ -2489,7 +2547,7 @@ def test_보관한계가_없는_Lot_은_신선도를_지어내지_않는다(monk
     assert row["grade"] is None
 
     # 정상 Lot 두 개는 값이 그대로다 (회귀 방어)
-    others = {r["lot_id"]: r for r in payload["lot_constraints"]}
+    others = {r["lot_id"]: r for r in payload["sellable_supply"]["lot_constraints"]}
     assert others["LOT-A"]["remaining_freshness_days"] == 10
     assert others["LOT-A"]["effective_freshness_limit_days"] == 15
     assert others["LOT-C"]["remaining_freshness_days"] == 7
@@ -2521,7 +2579,10 @@ def test_보관한계가_없는_Lot_도_판매가능량에서_빠지지_않는�
 
     assert reply.runtime_status == "READY"
     assert reply.business_status == "ok"
-    qty = {row["item"]: row["available_qty_kg"] for row in reply.payload["inventory_by_item"]}
+    qty = {
+        row["item"]: row["available_qty_kg"]
+        for row in reply.payload["sellable_supply"]["inventory_by_item"]
+    }
     # 🔴 700 이 빠지면 500 이 된다 — 그 뮤턴트를 이 숫자가 잡는다
     assert qty == {"배추": 1200.0, "무": 300.0}
 
@@ -2545,13 +2606,13 @@ def test_보관한계_부재는_신선도_근거를_만들지_않는다(monkeypa
     _, reply, _ = _pre_sales_reply()
     claims = {ev.claim for ev in reply.evidences}
 
-    assert "lot_constraints[LOT-N].remaining_freshness_days" not in claims
-    assert "lot_constraints[LOT-N].effective_freshness_limit_days" not in claims
+    assert "sellable_supply.lot_constraints[LOT-N].remaining_freshness_days" not in claims
+    assert "sellable_supply.lot_constraints[LOT-N].effective_freshness_limit_days" not in claims
     # 물리 잔량은 여전히 근거가 붙는다 — 그 값은 실제로 냈다
-    assert "lot_constraints[LOT-N].available_qty_kg" in claims
+    assert "sellable_supply.lot_constraints[LOT-N].available_qty_kg" in claims
     # 정상 Lot 은 셋 다 그대로 (회귀 방어)
-    assert "lot_constraints[LOT-A].remaining_freshness_days" in claims
-    assert "lot_constraints[LOT-A].effective_freshness_limit_days" in claims
+    assert "sellable_supply.lot_constraints[LOT-A].remaining_freshness_days" in claims
+    assert "sellable_supply.lot_constraints[LOT-A].effective_freshness_limit_days" in claims
 
 
 def test_보관한계_부재_Lot_이_판매_계약으로도_읽힌다(monkeypatch):
@@ -2572,8 +2633,8 @@ def test_보관한계_부재_Lot_이_판매_계약으로도_읽힌다(monkeypatc
         {
             "sellable_supply": {
                 **payload["sellable_supply"],
-                "inventory_by_item": payload["inventory_by_item"],
-                "lot_constraints": payload["lot_constraints"],
+                "inventory_by_item": payload["sellable_supply"]["inventory_by_item"],
+                "lot_constraints": payload["sellable_supply"]["lot_constraints"],
             },
         }
     )

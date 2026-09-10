@@ -21,10 +21,14 @@ from typing import Any, Self
 import pytest
 
 from app.logistics import transition
+from app.logistics.inbound_schedules import (
+    InboundScheduleView,
+    ScheduleAlreadyCancelled,
+    ScheduleConflict,
+    ScheduleReferenceMissing,
+)
 from app.logistics.schemas import (
     InTransitItem,
-    InventoryLogisticsSnapshot,
-    ScheduledQuantity,
 )
 from app.logistics.tools import find_in_transit_schedule_gap
 from app.logistics.transition import (
@@ -52,19 +56,34 @@ TARGET_STATE_DATE = AS_OF + timedelta(days=1)
 
 
 class 가짜커서:
-    """실행된 SQL 과 파라미터를 기록한다. `rowcount` · 읽어 줄 값은 밖에서 정한다.
+    """실행된 SQL 과 파라미터를 기록한다. **질의마다 다른 표를 낸다.**
 
-    ★ `persist_inventory` 는 **읽고 나서 쓴다** — `fetchone` 이 그 읽기다.
-      `rowcount=0` 은 그날 fixture 행이 없다는 뜻이라 읽기도 빈손이어야 한다.
+    🔴 **승인 전이가 만지는 표가 셋이 됐다 (W3-3).** 업무 사실의 정본이
+       `logistics_runtime_fixture` 의 JSON 두 칸에서 `inbound_schedules` 로 옮겨
+       가면서, 한 벌만 돌려주는 대역은 뒤엣것이 앞엣것의 행 모양을 받아 엉뚱한
+       데서 죽는다.
+
+    ```text
+    logistics_runtime_fixture   그날 행을 잠그고(SELECT fixture_id … FOR UPDATE)
+                                status 둘과 source_ref 를 세운다
+    purchase_items              purchase_item_id 를 얻는다 (fetch_purchase_detail)
+    inbound_schedules           업무 사실이 여기 적힌다 (record_schedule)
+    ```
+
+    ★ `rowcount=0` 은 그날 fixture 행이 없다는 뜻이라 읽기도 빈손이어야 한다.
     """
 
-    def __init__(self, rowcount: int, in_transit: object, confirmed_inbound: object) -> None:
+    def __init__(self, rowcount: int, 일정: list[dict[str, Any]], 매입줄: Any) -> None:
         self.rowcount = rowcount
         self.queries: list[object] = []
         self.params: list[object] = []
-        # ★ 칸 순서가 `persist_inventory` 의 SELECT 와 짝이다 —
-        #   `SELECT in_transit_json, confirmed_inbound_json`.
-        self._행 = None if rowcount == 0 else (in_transit, confirmed_inbound)
+        self._fixture행 = None if rowcount == 0 else ("LOG-FIXTURE-1",)
+        #: `inbound_schedules` 에 **이미 있는** 행 (앞선 승인이 적어 둔 것).
+        self._일정 = {행["inbound_id"]: 행 for 행 in 일정}
+        self._매입줄 = 매입줄
+        self._out: list[Any] = []
+        #: 이번 실행이 **실제로 INSERT 한** 일정.
+        self.적힌_일정: list[dict[str, Any]] = []
 
     def __enter__(self) -> Self:
         return self
@@ -73,16 +92,46 @@ class 가짜커서:
         return False
 
     def execute(self, query: object, params: object = None) -> None:
+        text = str(query)
         self.queries.append(query)
         self.params.append(params)
+        if "inbound_schedules" in text and "INSERT" in text:
+            칸 = (
+                "inbound_id",
+                "sim_run_id",
+                "purchase_item_id",
+                "quantity_kg",
+                "expected_arrival_date",
+                "created_as_of",
+                "source_ref",
+                "note",
+            )
+            행 = dict(zip(칸, params, strict=True))
+            행["cancelled_as_of"] = None
+            self.적힌_일정.append(행)
+            self._일정[행["inbound_id"]] = 행
+            self._out = []
+        elif "inbound_schedules" in text:
+            찾은것 = self._일정.get(params[1])
+            self._out = [찾은것] if 찾은것 is not None else []
+        elif "purchase_items" in text:
+            self._out = list(self._매입줄)
+        else:
+            self._out = [] if self._fixture행 is None else [self._fixture행]
 
     def fetchone(self) -> object:
-        return self._행
+        return self._out[0] if self._out else None
+
+    def fetchall(self) -> list[Any]:
+        return list(self._out)
 
 
 #: 기본값과 **명시적 `None`** 을 가르는 표식. `None` 은 *"아직 확인한 적 없다"*
 #: (`UNRESOLVED`) 라는 사실이라 기본값으로 뭉개면 안 된다.
 _기본 = object()
+
+#: 대역이 내는 매입 줄 한 행. 칸 순서가 `purchase_detail._DETAIL_COLUMNS` 와 짝이다.
+매입줄_한행 = ("PI-REQ-1-D1-S1", "ITEM-BAECHU", "특", Decimal(500), Decimal(1200))
 
 
 class 가짜커넥션:
@@ -91,25 +140,52 @@ class 가짜커넥션:
     def __init__(
         self,
         rowcount: int = 1,
-        confirmed_inbound: object = _기본,
-        in_transit: object = _기본,
+        일정: list[dict[str, Any]] | None = None,
+        매입줄: Any = _기본,
     ) -> None:
         self.commits = 0
         self.rollbacks = 0
         self.커서 = 가짜커서(
             rowcount,
-            [] if in_transit is _기본 else in_transit,
-            [] if confirmed_inbound is _기본 else confirmed_inbound,
+            [] if 일정 is None else 일정,
+            [매입줄_한행] if 매입줄 is _기본 else 매입줄,
         )
 
     def cursor(self) -> 가짜커서:
         return self.커서
+
+    @property
+    def 적힌_일정(self) -> list[dict[str, Any]]:
+        return self.커서.적힌_일정
 
     def commit(self) -> None:
         self.commits += 1
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+
+def _일정행(
+    inbound_id: str,
+    *,
+    purchase_item_id: str = "PI-REQ-1-D1-S1",
+    quantity_kg: str = "300",
+    eta: date = date(2026, 1, 2),
+    created_as_of: date | None = None,
+    cancelled_as_of: date | None = None,
+) -> dict[str, Any]:
+    """`inbound_schedules` 에 **이미 있는** 행 하나."""
+    return {
+        "inbound_id": inbound_id,
+        "sim_run_id": SIM_RUN_ID,
+        "purchase_item_id": purchase_item_id,
+        "quantity_kg": Decimal(quantity_kg),
+        "expected_arrival_date": eta,
+        "created_as_of": AS_OF if created_as_of is None else created_as_of,
+        "cancelled_as_of": cancelled_as_of,
+        "source_ref": "APPROVAL:OTHER",
+        "note": None,
+    }
 
 
 def _is_write(query: str) -> bool:
@@ -121,30 +197,46 @@ def _is_write(query: str) -> bool:
     return "INSERT" in query or "UPDATE" in query.replace("FOR UPDATE", "")
 
 
+def _fixture_질의(conn: 가짜커넥션) -> list[str]:
+    """fixture 행을 만진 질의만. **일정 표 질의가 그 뒤에 따라온다.**"""
+    return [str(q) for q in conn.커서.queries if "logistics_runtime_fixture" in str(q)]
+
+
 def _update_params(conn: 가짜커넥션) -> tuple[Any, ...]:
-    """UPDATE 로 넘어간 파라미터. **SELECT 가 앞에 하나 더 있다.**"""
-    assert len(conn.커서.params) == 2, "읽기 한 번 · 쓰기 한 번이다"
-    params = conn.커서.params[-1]
+    """fixture 행 UPDATE 로 넘어간 파라미터.
+
+    🔴 **`params[-1]` 로 집지 않는다 (W3-3).** UPDATE 뒤에 `inbound_schedules`
+       질의가 더 붙어서, 마지막 것을 집으면 일정 INSERT 를 보게 된다.
+    """
+    쓰기 = [
+        params
+        for query, params in zip(conn.커서.queries, conn.커서.params, strict=True)
+        if "logistics_runtime_fixture" in str(query) and _is_write(str(query))
+    ]
+    assert len(쓰기) == 1, "그날 행 UPDATE 는 한 번이다"
+    params = 쓰기[0]
     assert isinstance(params, tuple)
     return params
 
 
-def _written_in_transit(conn: 가짜커넥션) -> list[dict[str, Any]] | None:
-    written = _update_params(conn)[0]
-    return None if written is None else written.obj
-
-
 def _written_in_transit_status(conn: 가짜커넥션) -> str:
-    return _update_params(conn)[1]
-
-
-def _written_confirmed_inbound(conn: 가짜커넥션) -> list[dict[str, Any]] | None:
-    written = _update_params(conn)[2]
-    return None if written is None else written.obj
+    """🔴 **칸 순서가 바뀌었다 (W3-3).** JSON 두 칸이 빠져 status 가 맨 앞이다."""
+    return _update_params(conn)[0]
 
 
 def _written_confirmed_status(conn: 가짜커넥션) -> str:
-    return _update_params(conn)[3]
+    return _update_params(conn)[1]
+
+
+def _적힌_일정(conn: 가짜커넥션) -> list[dict[str, Any]]:
+    """이번 승인이 `inbound_schedules` 에 실제로 **새로 적은** 행.
+
+    🔴 **업무 사실의 정본이 여기다 (W3-3).** 종전에는 fixture 행의 JSON 두 칸을
+       파이썬에서 병합해 되돌려 적었고, 이 헬퍼가 그 병합 결과를 읽었다. 지금은
+       날짜에 안 묶인 표에 한 행씩 적히고 **덮지도 병합하지도 않는다** —
+       같은 사실이면 no-op, 다른 사실이면 `ScheduleConflict` 다.
+    """
+    return conn.적힌_일정
 
 
 def _commitment(
@@ -303,11 +395,16 @@ def _코드만(source: str) -> str:
     return chr(10).join(line.split("#", 1)[0] for line in 코드.splitlines())
 
 
-# ── build_next_inventory · 매입 참조 (아직 안 켜진 계약) ────────────────
+# ── build_next_inventory · 매입 참조 ────────────────────────────────────
 #
-# 🟡 **마스터는 아직 `purchase_ids` 를 안 넘긴다.** 그 규약은 마스터 소유 파일에
-#    있어 물류가 고칠 자리가 아니다 — 여기서 재는 것은 **물류 쪽 준비가 끝났는가**와
-#    **현행 마스터가 그대로 도는가** 둘이다.
+# 🟢 **마스터가 넘긴다** (`#311` · 2026-09-06 · `master/transition.py` 의
+#    `purchase_ids = {leg.seq: purchase_id_for(...)}`). 종전 이 자리에는
+#    *"마스터는 아직 안 넘긴다"* 고 적혀 있었고, 그 전제로 아래 픽스처들이
+#    `purchase_ids` 없이 승인분을 만들었다.
+#
+#    ⚠️ W3-2 가 `purchase_item_id` 를 필수로 만들면서 그 낡은 전제가 검사 20건을
+#       세웠다 (마스터 실측 2026-09-10). **여기서 재는 것은 여전히 둘이다** —
+#       기본값 없이도 현행 호출이 도는가, 그리고 받은 매핑을 그대로 흘리는가.
 
 #: 마스터가 계약을 켜는 날 넘겨 줄 매핑의 모양. 🔴 **물류가 만드는 값이 아니라서**
 #: 여기서도 `purchase_id_for()` 를 부르지 않고 마스터가 준 모양 그대로 적는다 —
@@ -413,9 +510,22 @@ def test_build_does_not_call_the_master_id_factory():
     ⚠️ 주석·docstring 은 걷어내고 본다 — *"부르지 않는다"* 고 **설명하는 문장**이
        호출로 잡히면 안 된다.
     """
-    코드 = _코드만(Path(transition.__file__).read_text(encoding="utf-8"))
+    원문 = Path(transition.__file__).read_text(encoding="utf-8")
+    코드 = _코드만(원문)
 
-    assert "purchase_id_for" not in 코드, "물류가 마스터 ID 함수를 부르고 있다"
+    # 🔴 **호출 형태로 잰다 — 이름 언급이 아니다.** W3-2 가 `ScheduleReferenceMissing`
+    #    의 오류 문구에 *"이 값은 마스터가 만든다 (… purchase_id_for)"* 를 적었는데,
+    #    그것은 고칠 사람을 매입·마스터 쪽으로 보내는 안내지 규칙 복사가 아니다.
+    #    문자열까지 금지하면 **도움말을 지워야 검사가 통과**하게 된다.
+    assert "purchase_id_for(" not in 코드, "물류가 마스터 ID 함수를 부르고 있다"
+    # ★ 이름을 들여오는 것도 막는다 — 위 괄호 검사만으로는 import 가 빠진다.
+    가져온것 = {
+        별칭.name
+        for node in ast.walk(ast.parse(원문))
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for 별칭 in node.names
+    }
+    assert "purchase_id_for" not in 가져온것, "물류가 마스터 ID 함수를 들여오고 있다"
     assert "PUR-" not in 코드, "물류가 매입 ID 문자열을 조립하고 있다"
 
 
@@ -426,7 +536,7 @@ def test_persist_does_not_commit():
     """🔴 커밋은 재무 write 와 함께 마스터가 한 번 한다."""
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
     assert conn.commits == 0
     assert conn.rollbacks == 0
@@ -444,25 +554,32 @@ def test_persist_raises_when_the_fixture_row_is_missing():
     conn = 가짜커넥션(rowcount=0)
 
     with pytest.raises(LogisticsFixtureMissing) as excinfo:
-        persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+        persist_inventory(
+            conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조))
+        )
 
     message = str(excinfo.value)
     assert SIM_RUN_ID in message
     assert str(AS_OF) in message
 
 
-@pytest.mark.parametrize(
-    ("legs가_있나", "기대_status"),
-    [(False, "CONFIRMED_ZERO"), (True, "CONFIRMED")],
-)
-def test_persist_status_follows_whether_rows_exist(legs가_있나, 기대_status):
-    """비면 `CONFIRMED_ZERO`, 있으면 `CONFIRMED` 다."""
+@pytest.mark.parametrize("legs가_있나", [False, True])
+def test_persist_status_marks_the_axis_as_checked(legs가_있나):
+    """🔴 **길이를 여기서 세지 않는다 (W3-3).** 두 status 는 *"이 승인으로 그 축을
+       확인했다"* 하나만 말하고, 몇 건인가는 Reader 가 `inbound_schedules` 에서 낸다.
+
+    ⚠️ 종전에는 여기서 `CONFIRMED_ZERO` 를 적었다 — fixture JSON 이 목록의 정본이던
+       시절엔 쓰는 쪽이 길이를 알고 있었기 때문이다. 지금 그 값을 적으면 **일정 표를
+       안 보고 0 건이라고 단정**하는 셈이 된다 (`CONFIRMED_ZERO` 어휘 자체는
+       `day_open` · `arrival` 에 그대로 살아 있다).
+    """
     conn = 가짜커넥션()
-    rows = build_next_inventory(_두회차()) if legs가_있나 else []
+    rows = build_next_inventory(_두회차(), purchase_ids=매입참조) if legs가_있나 else []
 
     persist_inventory(conn, **_fixture_인자(rows))
 
-    assert 기대_status in _update_params(conn)
+    assert _written_in_transit_status(conn) == "CONFIRMED"
+    assert _written_confirmed_status(conn) == "CONFIRMED"
 
 
 def test_persist_update_does_not_touch_other_status_columns():
@@ -474,15 +591,18 @@ def test_persist_update_does_not_touch_other_status_columns():
     """
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    statement = str(conn.커서.queries[-1])
+    statement = _fixture_질의(conn)[-1]
     assert "confirmed_outbound_status" not in statement
     assert "confirmed_outbound_json" not in statement
     assert "evidence_grade" not in statement
     assert "approved_by" not in statement
     assert "lot_priority" not in statement
     assert "zone_capacity" not in statement
+    # 🔴 **JSON 두 칸도 더 이상 안 쓴다 (W3-3).** 업무 사실의 정본이 옮겨 갔다.
+    assert "in_transit_json" not in statement
+    assert "confirmed_inbound_json" not in statement
 
 
 # ── persist_inventory · confirmed_inbound 병합 (임시 조치) ───────────────
@@ -494,24 +614,24 @@ def test_persist_update_does_not_touch_other_status_columns():
 # 🔴 걷어내기 전까지 지켜야 하는 것은 하나다 — **덮지 않고 더한다.**
 
 
-def test_persist_merges_into_the_existing_confirmed_inbound_instead_of_overwriting():
-    """① 기존 확정 입고가 남고 이번 승인분이 **더해진다.**
+def test_persist_does_not_touch_someone_elses_schedule():
+    """① 앞선 승인이 적어 둔 일정을 **건드리지 않는다.**
 
-    🔴 덮어쓰면 그날 이미 확정돼 있던 남의 입고가 에러 없이 사라진다. 사라진 뒤에는
-       처음부터 없었던 것과 구별되지 않는다.
+    🔴 종전에는 목록 하나를 통째로 읽어 병합해 되돌려 적었고, 그 병합이 틀리면 남의
+       입고가 에러 없이 사라졌다. 지금은 **자기 `inbound_id` 한 행씩만** 적는다 —
+       남의 행을 읽지도 쓰지도 않으므로 사라질 자리가 구조적으로 없다.
     """
-    conn = 가짜커넥션(confirmed_inbound=[남의_확정입고])
+    남의것 = _일정행("INB-OTHER-9")
+    conn = 가짜커넥션(일정=[남의것])
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    written = _written_confirmed_inbound(conn)
-    assert written is not None
-    assert written[0] == 남의_확정입고, "남의 확정 입고를 그대로 둔다 (모양도 안 바꾼다)"
-    assert [row["inbound_id"] for row in written] == [
-        "INB-OTHER-9",
+    적힌것 = _적힌_일정(conn)
+    assert [행["inbound_id"] for 행 in 적힌것] == [
         "INB-H1-REQ-1-1-1",
         "INB-H1-REQ-1-1-2",
     ]
+    assert conn.커서._일정["INB-OTHER-9"] == 남의것, "남의 일정을 그대로 둔다"
     assert _written_confirmed_status(conn) == "CONFIRMED"
 
 
@@ -524,14 +644,15 @@ def test_persist_is_idempotent_for_the_same_approval():
     ⚠️ 중복이 생기면 B-1 이 `CONFIRMED_INBOUND_ID_DUPLICATED` 로 잡지만, **여기서 안
        만드는 것이 먼저다.**
     """
-    rows = build_next_inventory(_두회차())
+    rows = build_next_inventory(_두회차(), purchase_ids=매입참조)
     첫번 = 가짜커넥션()
     persist_inventory(첫번, **_fixture_인자(rows))
 
-    두번 = 가짜커넥션(confirmed_inbound=_written_confirmed_inbound(첫번))
+    두번 = 가짜커넥션(일정=_적힌_일정(첫번))
     persist_inventory(두번, **_fixture_인자(rows))
 
-    assert _written_confirmed_inbound(두번) == _written_confirmed_inbound(첫번)
+    assert len(_적힌_일정(첫번)) == 2
+    assert _적힌_일정(두번) == [], "같은 사실이라 새로 적을 것이 없다"
 
 
 def test_persist_writes_values_that_pass_the_b1_gap_rule(complete_logistics_snapshot):
@@ -545,17 +666,9 @@ def test_persist_writes_values_that_pass_the_b1_gap_rule(complete_logistics_snap
     """
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    snapshot = complete_logistics_snapshot.model_copy(
-        update={
-            "in_transit": [InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
-            "confirmed_inbound_schedule": [
-                ScheduledQuantity.model_validate(row)
-                for row in _written_confirmed_inbound(conn) or []
-            ],
-        }
-    )
+    snapshot = complete_logistics_snapshot.model_copy(update=_두_축(conn))
 
     assert find_in_transit_schedule_gap(snapshot) is None
 
@@ -580,46 +693,30 @@ def test_persist_quantity_survives_the_json_round_trip(complete_logistics_snapsh
     )
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(commitment)))
+    persist_inventory(
+        conn, **_fixture_인자(build_next_inventory(commitment, purchase_ids=매입참조))
+    )
 
-    확정 = ScheduledQuantity.model_validate((_written_confirmed_inbound(conn) or [])[0])
-    전이 = InTransitItem.model_validate(_written_in_transit(conn)[0])
-    assert 확정.quantity_kg == Decimal("0.1")
-    assert 확정.quantity_kg == 전이.quantity_kg
-    assert 확정.date == 전이.expected_arrival_date == date(2026, 1, 2)
-    assert 확정.item == 전이.item
+    적힌것 = _적힌_일정(conn)[0]
+    assert 적힌것["quantity_kg"] == Decimal("0.1"), "float 을 거치면 값이 흔들린다"
+    assert isinstance(적힌것["quantity_kg"], Decimal)
+    assert 적힌것["expected_arrival_date"] == date(2026, 1, 2)
 
 
-def test_persist_empty_approval_keeps_the_existing_confirmed_inbound():
-    """④ 빈 승인은 `confirmed_inbound` 를 **비우지 않는다.**
+def test_persist_empty_approval_writes_no_schedule():
+    """④ 빈 승인은 일정 표에 **아무것도 안 적는다** — 지우지도 않는다.
 
-    ★ *"더할 것이 없다"* 와 *"기존 것을 지워라"* 는 다르다. 두 칸 모두 기존 목록을
-      지키고, 더할 것이 없으면 그대로 둔다 — 여기 기존 `in_transit` 이 비어 있어
-      결과가 `CONFIRMED_ZERO` 인 것이지 승인이 덮은 것이 아니다
-      (기존 행이 남는 경우는 `test_G_승인분이_없으면_기존_운송중을_지키다`).
+    ★ *"더할 것이 없다"* 와 *"기존 것을 지워라"* 는 다르다. 앞선 승인이 적어 둔 행은
+      그대로 남고, 이번 승인은 자기 몫이 없으므로 INSERT 도 없다.
     """
-    conn = 가짜커넥션(confirmed_inbound=[남의_확정입고])
+    남의것 = _일정행("INB-OTHER-9")
+    conn = 가짜커넥션(일정=[남의것])
 
     persist_inventory(conn, **_fixture_인자([]))
 
-    assert _written_in_transit(conn) == [], "in_transit 은 승인분이 없다고 적는다"
-    assert "CONFIRMED_ZERO" in _update_params(conn)
-    assert _written_confirmed_inbound(conn) == [남의_확정입고]
+    assert _적힌_일정(conn) == [], "적을 것이 없다"
+    assert conn.커서._일정["INB-OTHER-9"] == 남의것, "남의 일정을 안 지운다"
     assert _written_confirmed_status(conn) == "CONFIRMED"
-
-
-def test_persist_empty_approval_does_not_turn_unresolved_into_confirmed_zero():
-    """④-보강: 더할 것이 없는데 기존이 `None` 이면 `None` 그대로 둔다.
-
-    🔴 `[]` 로 적으면 *"확인했고 0 건"* 이라는, **우리가 하지 않은 확인**이 장부에
-       남는다. 0 과 null 은 다르다.
-    """
-    conn = 가짜커넥션(confirmed_inbound=None)
-
-    persist_inventory(conn, **_fixture_인자([]))
-
-    assert _written_confirmed_inbound(conn) is None
-    assert _written_confirmed_status(conn) == "UNRESOLVED"
 
 
 def test_persist_reads_before_writing_on_the_given_connection():
@@ -630,12 +727,13 @@ def test_persist_reads_before_writing_on_the_given_connection():
     """
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    읽기, 쓰기 = (str(q) for q in conn.커서.queries)
-    # ★ **두 칸을 함께 읽는다.** 둘 다 병합 대상이 됐다 (2026-09-05) — 한 칸만 읽으면
-    #   나머지 한 칸은 병합할 기존값을 모른 채 덮게 된다.
-    assert "SELECT in_transit_json, confirmed_inbound_json" in 읽기
+    읽기, 쓰기 = _fixture_질의(conn)
+    # ★ **목록을 더 이상 여기서 안 읽는다 (W3-3).** 행이 있는지 보고 잠그기만 한다 —
+    #   업무 사실의 정본이 `inbound_schedules` 로 옮겨 갔기 때문이다.
+    assert "in_transit_json" not in 읽기
+    assert "confirmed_inbound_json" not in 읽기
     assert not _is_write(읽기)
     assert _is_write(쓰기) and "SELECT" not in 쓰기
     # ★ 읽은 행과 쓴 행이 갈리면 남의 목록에 이번 승인분을 얹는다.
@@ -660,10 +758,10 @@ def test_persist_locks_the_fixture_row_before_merging():
     """
     conn = 가짜커넥션()
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    읽기, 쓰기 = (str(q) for q in conn.커서.queries)
-    assert "FOR UPDATE" in 읽기, "병합 전에 그 fixture 행을 잠근다"
+    읽기, 쓰기 = _fixture_질의(conn)
+    assert "FOR UPDATE" in 읽기, "쓰기 전에 그 fixture 행을 잠근다"
     assert "FOR UPDATE" not in 쓰기
     # ★ 잠근 행과 쓰는 행이 같아야 한다 — 갈리면 잠금이 아무것도 안 지킨다.
     assert conn.커서.params[0] == _update_params(conn)[-3:]
@@ -685,10 +783,13 @@ def test_persist_does_not_send_an_update_when_the_row_is_missing():
     conn = 가짜커넥션(rowcount=0)
 
     with pytest.raises(LogisticsFixtureMissing):
-        persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차())))
+        persist_inventory(
+            conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조))
+        )
 
     assert len(conn.커서.queries) == 1
     assert not _is_write(str(conn.커서.queries[0]))
+    assert _적힌_일정(conn) == [], "일정도 안 적는다"
 
 
 def test_transition_module_does_not_write_inventory_lots():
@@ -743,8 +844,8 @@ def test_adapter_source_ref_names_the_master_approval():
     assert bundle.source_ref == "MASTER-APPROVAL:H1-REQ-1-1"
 
 
-def test_adapter_empty_commitment_still_writes_confirmed_zero():
-    """③ 빈 약정도 **그날 행을 `CONFIRMED_ZERO` 로 적는다.**
+def test_adapter_empty_commitment_still_marks_the_day():
+    """③ 빈 약정도 **그날 행에 «확인했다» 를 적는다.**
 
     ★ *"쓸 것이 없다"* 와 *"어느 행인지 모른다"* 는 다른 사실이다. 묶음이 회차 낱개면
       빈 약정에서 시퀀스가 비어 `persist` 가 아무 일도 안 하고, 그러면 승인분이
@@ -759,7 +860,8 @@ def test_adapter_empty_commitment_still_writes_confirmed_zero():
     adapter.persist(conn, bundles)
 
     assert len(bundles) == 1 and bundles[0].items == ()
-    assert "CONFIRMED_ZERO" in _update_params(conn)
+    assert _written_in_transit_status(conn) == "CONFIRMED"
+    assert _적힌_일정(conn) == [], "적을 회차가 없다"
 
 
 def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
@@ -772,7 +874,9 @@ def test_adapter_persist_passes_sim_run_id_and_the_target_state_date():
     adapter = _adapter()
     conn = 가짜커넥션()
 
-    adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
+    adapter.persist(conn, adapter.build(
+            _두회차(), target_state_date=TARGET_STATE_DATE, purchase_ids=매입참조
+        ))
 
     params = _update_params(conn)
     assert SIM_RUN_ID in params, "sim_run_id 를 그대로 넘겨야 WHERE 가 그 행을 찾는다"
@@ -785,7 +889,9 @@ def test_adapter_persist_does_not_commit_or_rollback():
     adapter = _adapter()
     conn = 가짜커넥션()
 
-    adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
+    adapter.persist(conn, adapter.build(
+            _두회차(), target_state_date=TARGET_STATE_DATE, purchase_ids=매입참조
+        ))
 
     assert conn.commits == 0
     assert conn.rollbacks == 0
@@ -797,7 +903,9 @@ def test_adapter_passes_the_missing_fixture_error_through():
     conn = 가짜커넥션(rowcount=0)
 
     with pytest.raises(LogisticsFixtureMissing):
-        adapter.persist(conn, adapter.build(_두회차(), target_state_date=TARGET_STATE_DATE))
+        adapter.persist(conn, adapter.build(
+            _두회차(), target_state_date=TARGET_STATE_DATE, purchase_ids=매입참조
+        ))
 
 
 # ── persist_inventory · in_transit 누적 (3-B1) ──────────────────────────
@@ -840,264 +948,221 @@ def _한회차(*, approval_id: str = "H1-REQ-1-1", qty_kg: float = 300.0) -> Any
     )
 
 
-def test_A_기존이_None_이고_승인분이_없으면_None_을_지킨다():
-    """★ *"아직 확인한 적 없다"* 를 *"확인했고 0 건"* 으로 바꾸지 않는다."""
-    conn = 가짜커넥션(in_transit=None, confirmed_inbound=None)
-
-    persist_inventory(conn, **_fixture_인자([]))
-
-    assert _written_in_transit(conn) is None
-    assert _written_in_transit_status(conn) == "UNRESOLVED"
-
-
-def test_B_기존이_빈목록이고_승인분이_없으면_CONFIRMED_ZERO_다():
-    conn = 가짜커넥션(in_transit=[])
-
-    persist_inventory(conn, **_fixture_인자([]))
-
-    assert _written_in_transit(conn) == []
-    assert _written_in_transit_status(conn) == "CONFIRMED_ZERO"
+def _뷰(행: dict[str, Any]) -> InboundScheduleView:
+    """적힌 일정 한 행을 Reader 가 내는 모양으로. **두 축이 여기서 갈라진다.**"""
+    return InboundScheduleView(
+        inbound_id=행["inbound_id"],
+        sim_run_id=행["sim_run_id"],
+        purchase_item_id=행["purchase_item_id"],
+        purchase_id="PUR-REQ-1-D1-S1",
+        item_id="ITEM-BAECHU",
+        item_name="배추",
+        quantity_kg=행["quantity_kg"],
+        expected_arrival_date=행["expected_arrival_date"],
+        created_as_of=행["created_as_of"],
+        has_receipt=False,
+        stock_applied=False,
+    )
 
 
-def test_C_기존이_빈목록이고_승인분이_있으면_CONFIRMED_다():
-    conn = 가짜커넥션(in_transit=[])
-    rows = build_next_inventory(_한회차())
+def _두_축(conn: 가짜커넥션) -> dict[str, Any]:
+    """적힌 일정 한 벌에서 **두 축을 함께** 낸다.
 
-    persist_inventory(conn, **_fixture_인자(rows))
-
-    assert len(_written_in_transit(conn)) == 1
-    assert _written_in_transit_status(conn) == "CONFIRMED"
-
-
-def test_D_다른_승인은_기존_운송중에_더해진다():
-    """🔴 이 단계가 고치는 자리다. 종전에는 `[B]` 만 남았다."""
-    conn = 가짜커넥션(in_transit=[남의_운송중])
-
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
-
-    적힌것 = _written_in_transit(conn)
-    assert len(적힌것) == 2, "앞선 승인분이 사라지면 안 된다"
-    assert 남의_운송중 in 적힌것
-    assert {row["inbound_id"] for row in 적힌것} == {"INB-OTHER-9", "INB-H1-REQ-1-1-1"}
+    🔴 **B-1 이 재던 어긋남이 구조적으로 없어졌다 (W3-2).** 종전에는 fixture 행의
+       JSON 두 칸이 각자 자라서 한쪽만 빠지는 일이 있었고, `find_in_transit_schedule_gap`
+       이 그것을 잡았다. 지금은 **같은 표 같은 행**에서 두 축이 나온다
+       (`InboundScheduleView.as_in_transit` · `as_scheduled_quantity`) —
+       이 검사는 그 사실을 잠근다.
+    """
+    뷰들 = [_뷰(행) for 행 in _적힌_일정(conn)]
+    return {
+        "in_transit": [v.as_in_transit() for v in 뷰들],
+        "confirmed_inbound_schedule": [v.as_scheduled_quantity() for v in 뷰들],
+    }
 
 
-def test_E_같은_승인을_두_번_반영해도_목록이_안_부푼다():
-    """멱등 재반영 — 같은 `inbound_id` · 같은 사실이면 더하지 않는다."""
-    rows = build_next_inventory(_한회차())
-    첫번 = 가짜커넥션(in_transit=[])
-    persist_inventory(첫번, **_fixture_인자(rows))
+def test_A_일정이_없으면_새로_적는다():
+    """★ 승인분마다 `inbound_schedules` 에 한 행씩 선다."""
+    conn = 가짜커넥션()
 
-    두번 = 가짜커넥션(in_transit=_written_in_transit(첫번))
-    persist_inventory(두번, **_fixture_인자(rows))
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조)))
 
-    assert _written_in_transit(두번) == _written_in_transit(첫번)
+    적힌것 = _적힌_일정(conn)
+    assert [행["inbound_id"] for 행 in 적힌것] == ["INB-H1-REQ-1-1-1"]
+    assert 적힌것[0]["purchase_item_id"] == "PI-REQ-1-D1-S1"
+    assert 적힌것[0]["created_as_of"] == AS_OF, "그날이 곧 이 일정이 장부에 선 날이다"
+    assert 적힌것[0]["source_ref"] == "APPROVAL:H1-REQ-1-1"
 
 
-def test_E2_직렬화_자릿수가_달라도_같은_수량이면_멱등이다():
-    """🔴 문자열로 비교하면 `"300.0"` 과 `"300.00"` 이 갈려 정상 재반영이 터진다."""
-    rows = build_next_inventory(_한회차())
-    자릿수만_다른_기존 = [
-        {**rows[0].model_dump(mode="json"), "quantity_kg": "300.00"},
-    ]
-    conn = 가짜커넥션(in_transit=자릿수만_다른_기존)
+def test_B_같은_사실이면_다시_안_적는다():
+    """멱등 재반영 — 같은 `inbound_id` · 같은 사실이면 no-op 다.
+
+    ⚠️ 종전에는 목록을 병합해 되돌려 적었고 «안 부푼다» 가 그 결과였다. 지금은
+       **INSERT 자체가 안 일어난다** — `record_schedule` 이 `False` 를 낸다.
+    """
+    rows = build_next_inventory(_한회차(), purchase_ids=매입참조)
+    이미있음 = _일정행("INB-H1-REQ-1-1-1")
+    conn = 가짜커넥션(일정=[이미있음])
 
     persist_inventory(conn, **_fixture_인자(rows))
 
-    assert _written_in_transit(conn) == 자릿수만_다른_기존, "더하지도 갈아 끼우지도 않는다"
+    assert _적힌_일정(conn) == []
+    assert conn.커서._일정["INB-H1-REQ-1-1-1"] == 이미있음, "갈아 끼우지도 않는다"
 
 
-def test_F_같은_id_에_다른_수량이면_멈춘다():
+def test_C_직렬화_자릿수가_달라도_같은_수량이면_멱등이다():
+    """🔴 문자열로 비교하면 `"300"` 과 `"300.00"` 이 갈려 정상 재반영이 터진다.
+
+    ★ `record_schedule` 이 `Decimal(str(...))` 로 되돌려 비교한다.
+    """
+    rows = build_next_inventory(_한회차(qty_kg=300.0), purchase_ids=매입참조)
+    conn = 가짜커넥션(일정=[_일정행("INB-H1-REQ-1-1-1", quantity_kg="300.00")])
+
+    persist_inventory(conn, **_fixture_인자(rows))
+
+    assert _적힌_일정(conn) == [], "자릿수만 다른 것은 같은 사실이다"
+
+
+def test_D_다른_승인은_각자_자기_행에_선다():
+    """🔴 이 단계가 고치는 자리다. 종전에는 목록을 덮어 `[B]` 만 남았다."""
+    남의것 = _일정행("INB-OTHER-9")
+    conn = 가짜커넥션(일정=[남의것])
+
+    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조)))
+
+    assert [행["inbound_id"] for 행 in _적힌_일정(conn)] == ["INB-H1-REQ-1-1-1"]
+    assert set(conn.커서._일정) == {"INB-OTHER-9", "INB-H1-REQ-1-1-1"}
+    assert conn.커서._일정["INB-OTHER-9"] == 남의것
+
+
+def test_E_같은_id_에_다른_수량이면_멈춘다():
     """★ 어느 쪽이 진짜인지 여기서 고르지 않는다 — 덮지도 버리지도 않는다."""
-    기존 = build_next_inventory(_한회차(qty_kg=300.0))[0].model_dump(mode="json")
-    conn = 가짜커넥션(in_transit=[기존])
+    conn = 가짜커넥션(일정=[_일정행("INB-H1-REQ-1-1-1", quantity_kg="300")])
 
-    with pytest.raises(transition.InboundScheduleConflict) as 오류:
-        persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(qty_kg=999.0))))
+    with pytest.raises(ScheduleConflict) as 오류:
+        persist_inventory(
+            conn,
+            **_fixture_인자(
+                build_next_inventory(_한회차(qty_kg=999.0), purchase_ids=매입참조)
+            ),
+        )
 
     assert "INB-H1-REQ-1-1-1" in str(오류.value)
-    assert len(conn.커서.queries) == 1, "읽기만 하고 UPDATE 를 보내지 않는다"
+    assert _적힌_일정(conn) == [], "충돌하면 아무것도 안 적는다"
 
 
-def test_G_승인분이_없으면_기존_운송중을_지키다():
-    conn = 가짜커넥션(in_transit=[남의_운송중])
+def test_F_취소된_일정은_되살리지_않는다():
+    """🔴 **취소 여부를 대조 넷보다 먼저 본다.** 값이 같아도 그 행은 이미
+       *"그날부터 없다"* 고 적힌 행이다 — 취소를 무르는 업무 계약이 저장소에 없다.
 
-    persist_inventory(conn, **_fixture_인자([]))
+    ⚠️ 종전 이 자리는 *"기존 목록에 중복 id 가 있으면 멈춘다"* 였다. 그 상태는
+       **표에서는 성립하지 않는다** — `(sim_run_id, inbound_id)` 가 PK 다. 대신
+       표가 새로 만든 위험이 이것이다.
+    """
+    conn = 가짜커넥션(일정=[_일정행("INB-H1-REQ-1-1-1", cancelled_as_of=date(2026, 1, 6))])
 
-    assert _written_in_transit(conn) == [남의_운송중]
-    assert _written_in_transit_status(conn) == "CONFIRMED"
+    with pytest.raises(ScheduleAlreadyCancelled) as 오류:
+        persist_inventory(
+            conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조))
+        )
 
-
-def test_H_기존에_중복된_id_가_있으면_멈춘다():
-    """🔴 깨진 목록 위에 병합하지 않는다."""
-    conn = 가짜커넥션(in_transit=[남의_운송중, dict(남의_운송중)])
-
-    with pytest.raises(transition.InboundScheduleConflict) as 오류:
-        persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
-
-    assert "INB-OTHER-9" in str(오류.value)
-    assert len(conn.커서.queries) == 1
+    assert "INB-H1-REQ-1-1-1" in str(오류.value)
+    assert _적힌_일정(conn) == []
 
 
-def test_I_승인분_안에_충돌하는_중복_id_가_있으면_멈춘다():
-    conn = 가짜커넥션(in_transit=[])
+def test_G_승인분_안에_충돌하는_중복_id_가_있으면_멈춘다():
+    conn = 가짜커넥션()
     같은_id_다른_수량 = [
         InTransitItem(
             inbound_id="INB-DUP-1",
+            purchase_id="PUR-REQ-1-D1-S1",
             item="배추",
             quantity_kg=Decimal(10),
             expected_arrival_date=date(2026, 1, 2),
         ),
         InTransitItem(
             inbound_id="INB-DUP-1",
+            purchase_id="PUR-REQ-1-D1-S1",
             item="배추",
             quantity_kg=Decimal(20),
             expected_arrival_date=date(2026, 1, 2),
         ),
     ]
 
-    with pytest.raises(transition.InboundScheduleConflict):
+    with pytest.raises(ScheduleConflict):
         persist_inventory(conn, **_fixture_인자(같은_id_다른_수량))
 
 
-def test_I2_승인분_안의_동일한_중복은_한_행만_남는다():
-    conn = 가짜커넥션(in_transit=[])
-    똑같은_두_행 = build_next_inventory(_한회차()) * 2
+def test_H_승인분_안의_동일한_중복은_한_행만_남는다():
+    conn = 가짜커넥션()
+    똑같은_두_행 = build_next_inventory(_한회차(), purchase_ids=매입참조) * 2
 
     persist_inventory(conn, **_fixture_인자(똑같은_두_행))
 
-    assert len(_written_in_transit(conn)) == 1
+    assert len(_적힌_일정(conn)) == 1
 
 
-def test_J_누적_뒤에도_B1_이_선다():
-    """★ 두 칸이 같은 규칙으로 자라므로 in_transit 의 행마다 confirmed 에 짝이 있다."""
-    conn = 가짜커넥션(
-        in_transit=[남의_운송중],
-        confirmed_inbound=[남의_확정입고],
-    )
+def test_I_매입_참조가_없으면_적기_전에_멈춘다():
+    """🔴 **비워 두고 넘어가지 않는다.** 이 표가 정본이라 빠진 행은
+       *"승인은 났는데 도착 조회에 안 잡히는 입고"* 가 된다 — FIRSTINB 사고의 모양이다.
 
-    persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
+    ⚠️ 종전 이 자리는 *"참조 없던 행에 참조가 붙는 것도 다른 사실이다"* 였다.
+       참조 없는 행 자체가 이제 못 서므로 그 상태가 성립하지 않는다.
+    """
+    conn = 가짜커넥션()
 
-    스냅샷 = InventoryLogisticsSnapshot(
-        snapshot_id=None,
-        as_of=AS_OF,
-        on_hand_by_lot=[],
-        in_transit=[InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
-        confirmed_inbound_schedule=[
-            ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
-        ],
-        confirmed_outbound_schedule=[],
-        outbound_commitments=[],
-        used_capacity_kg=Decimal(0),
-        guaranteed_capacity_by_zone_kg=None,
-        evidence_refs=[],
-    )
+    with pytest.raises(ScheduleReferenceMissing) as 오류:
+        persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차())))
 
-    assert find_in_transit_schedule_gap(스냅샷) is None
-    assert len(_written_in_transit(conn)) == 2
-    assert len(_written_confirmed_inbound(conn)) == 2
+    assert "INB-H1-REQ-1-1-1" in str(오류.value)
+    assert _적힌_일정(conn) == []
 
 
-# ── persist_inventory · 매입 참조의 멱등과 충돌 ────────────────────────
-#
-# ★ 여기서 재는 것은 **참조가 실린 뒤에도 3-B1 의 병합 규율이 그대로인가**다.
-#   `_merge_schedule()` 을 약하게 만들지 않았는지 확인하는 자리다.
-
-
-def test_K_같은_매입_참조로_재반영하면_목록이_안_부푼다():
-    """★ `purchase_id` 가 실려도 **멱등 재반영은 그대로다.**"""
-    rows = build_next_inventory(_한회차(), purchase_ids=매입참조)
-    첫번 = 가짜커넥션(in_transit=[])
-    persist_inventory(첫번, **_fixture_인자(rows))
-
-    두번 = 가짜커넥션(in_transit=_written_in_transit(첫번))
-    persist_inventory(두번, **_fixture_인자(rows))
-
-    적힌것 = _written_in_transit(두번)
-    assert 적힌것 == _written_in_transit(첫번)
-    assert len(적힌것) == 1
-    assert 적힌것[0]["purchase_id"] == "PUR-REQ-1-D1-S1"
-
-
-def test_L_같은_inbound_id_에_다른_매입_참조면_멈춘다():
-    """🔴 **`purchase_id` 만 대조에서 빼는 예외를 두지 않는다.**
+def test_J_같은_id_에_다른_매입_참조면_멈춘다():
+    """🔴 **`purchase_item_id` 만 대조에서 빼는 예외를 두지 않는다.**
 
     같은 `inbound_id` 인데 매입 출처가 다르면 같은 건이 아니다. 조용히 한쪽을
     남기면 도착 뒤 **틀린 매입 줄에서 등급·단가를 읽는다.**
-
-    ★ UPDATE 전에 오른다 — 마스터가 승인 전이 전체를 롤백할 수 있다.
     """
-    기존 = build_next_inventory(_한회차(), purchase_ids={1: "PUR-REQ-1-D1-S1"})[0]
-    conn = 가짜커넥션(in_transit=[기존.model_dump(mode="json")])
-    다른_매입 = build_next_inventory(_한회차(), purchase_ids={1: "PUR-OTHER-D1-S1"})
+    conn = 가짜커넥션(일정=[_일정행("INB-H1-REQ-1-1-1", purchase_item_id="PI-OTHER")])
 
-    with pytest.raises(transition.InboundScheduleConflict) as 오류:
-        persist_inventory(conn, **_fixture_인자(다른_매입))
-
-    assert "INB-H1-REQ-1-1-1" in str(오류.value)
-    assert len(conn.커서.queries) == 1, "읽기만 하고 UPDATE 를 보내지 않는다"
-
-
-def test_M_참조_없던_행에_참조가_붙는_것도_다른_사실이다():
-    """⚠️ 계약이 켜지는 날 한 번은 여기서 부딪힌다. **그것이 맞다.**
-
-    ★ 조용한 되메우기(backfill)를 이 자리에서 하지 않는다 — 그것은 별도 결정이고,
-      여기서 하면 *"언제 무엇이 채워졌나"* 가 아무 데도 안 남는다.
-    """
-    참조없는_옛_행 = build_next_inventory(_한회차())[0].model_dump(mode="json")
-    conn = 가짜커넥션(in_transit=[참조없는_옛_행])
-
-    assert 참조없는_옛_행["purchase_id"] is None
-    with pytest.raises(transition.InboundScheduleConflict):
+    with pytest.raises(ScheduleConflict) as 오류:
         persist_inventory(
             conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조))
         )
 
+    assert "INB-H1-REQ-1-1-1" in str(오류.value)
 
-def test_N_confirmed_inbound_모양은_그대로다():
+
+def test_K_confirmed_inbound_모양은_그대로다():
     """🔴 **일정·수량 사실에는 출처를 얹지 않는다.**
 
     `ScheduledQuantity` 는 outbound 등 다른 일정에도 재사용된다. 어느 매입에서
     왔는지는 **운송 중인 물건의 속성**이지 일정의 속성이 아니다.
     """
-    conn = 가짜커넥션(in_transit=[], confirmed_inbound=[])
+    conn = 가짜커넥션()
 
     persist_inventory(conn, **_fixture_인자(build_next_inventory(_두회차(), purchase_ids=매입참조)))
 
-    적힌_일정 = _written_confirmed_inbound(conn)
+    두축 = _두_축(conn)
+    적힌_일정 = [row.model_dump(mode="json") for row in 두축["confirmed_inbound_schedule"]]
     assert 적힌_일정, "확정 일정이 비면 이 검사가 아무것도 안 잰다"
     assert all(set(row) == {"date", "quantity_kg", "item", "inbound_id"} for row in 적힌_일정)
-    assert all("purchase_id" in row for row in _written_in_transit(conn)), (
+    assert all(row.purchase_id for row in 두축["in_transit"]), (
         "운송 중 쪽에는 반대로 반드시 있어야 한다"
     )
 
 
-def test_O_매입_참조가_실려도_B1_이_그대로_선다():
-    """★ B-1 이 대조하는 값은 여전히 넷이다 — 한쪽에만 필드가 늘어도 짝이 맞는다.
-
-    ★ 참조가 **있는 행**과 **없는 옛 행**이 한 목록에 섞여도 성립한다.
-    """
-    conn = 가짜커넥션(in_transit=[남의_운송중], confirmed_inbound=[남의_확정입고])
+def test_L_두_축이_한_표에서_나와_B1_이_선다(complete_logistics_snapshot):
+    """★ 두 축이 같은 행에서 갈라지므로 짝이 안 맞을 자리가 없다."""
+    conn = 가짜커넥션(일정=[_일정행("INB-OTHER-9")])
 
     persist_inventory(conn, **_fixture_인자(build_next_inventory(_한회차(), purchase_ids=매입참조)))
 
-    스냅샷 = InventoryLogisticsSnapshot(
-        snapshot_id=None,
-        as_of=AS_OF,
-        on_hand_by_lot=[],
-        in_transit=[InTransitItem.model_validate(row) for row in _written_in_transit(conn)],
-        confirmed_inbound_schedule=[
-            ScheduledQuantity.model_validate(row) for row in _written_confirmed_inbound(conn)
-        ],
-        confirmed_outbound_schedule=[],
-        outbound_commitments=[],
-        used_capacity_kg=Decimal(0),
-        guaranteed_capacity_by_zone_kg=None,
-        evidence_refs=[],
-    )
+    스냅샷 = complete_logistics_snapshot.model_copy(update=_두_축(conn))
 
     assert find_in_transit_schedule_gap(스냅샷) is None
-    참조 = {row["inbound_id"]: row.get("purchase_id") for row in _written_in_transit(conn)}
-    assert 참조 == {"INB-OTHER-9": None, "INB-H1-REQ-1-1-1": "PUR-REQ-1-D1-S1"}
+
 
 
 # ── LogisticsTransitionAdapter · 매입 참조 통과 ────────────────────────
