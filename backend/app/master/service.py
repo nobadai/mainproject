@@ -178,10 +178,12 @@ def run_procurement(
         return response
 
     inputs = _inputs_for(request)
-    # 🔴 **주입한 키는 주입이라고 적는다** (매입 실측 2026-09-07 · `_input_sources`).
-    sources = _input_sources(request, inputs)
     commitments = _approved_commitments(request)
+    # ⚠️ **달력이 출처표보다 먼저다** (`#300`). 출처표가 봉투를 실었는지도 적기 때문에,
+    #   순서가 뒤집히면 아직 없는 것을 보고 매번 `MISSING` 이라고 적는다.
     calendar_envelope, calendar_skipped = _execution_calendar_payload(request.as_of)
+    # 🔴 **주입한 키는 주입이라고 적는다** (매입 실측 2026-09-07 · `_input_sources`).
+    sources = _input_sources(request, inputs, execution_calendar=calendar_envelope)
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=request.budget))
     outcome = ProcurementFlow(
         runner,
@@ -762,8 +764,18 @@ def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
 #: 이름이 갈리면 출처표가 값과 어긋나므로 **한 자리에서만 적는다.**
 _INJECTABLE_INPUTS: tuple[str, ...] = ("forecast", "confirmed_orders", "policy_values")
 
+#: 실행일 봉투가 출처표에서 쓰는 이름과 소스. `AgentRequest.payload` 의 키와 같은
+#: 이름을 쓴다 — 받는 쪽이 표와 봉투를 **한 이름으로** 맞춰 읽는다.
+_CALENDAR_KEY = "execution_calendar"
+_CALENDAR_SOURCE = "market_calendar"
 
-def _input_sources(request: ProcurementRunRequest, inputs: MasterInputs | None) -> dict[str, str]:
+
+def _input_sources(
+    request: ProcurementRunRequest,
+    inputs: MasterInputs | None,
+    *,
+    execution_calendar: dict[str, Any] | None = None,
+) -> dict[str, str]:
     """이번 실행이 **실제로 쓴 값**의 출처표.
 
     🔴 **주입은 mock 이 아니고 측정도 아니다** (매입 실측 2026-09-07).
@@ -789,11 +801,30 @@ def _input_sources(request: ProcurementRunRequest, inputs: MasterInputs | None) 
     DERIVED:<source>   DB 값에서 규칙으로 파생
     MISSING:- · MOCK:  (`inputs.py` 그대로)
     ```
+
+    🔴 **실행일 봉투도 여기 적는다** (`#300` · 매입 보고 2026-09-10).
+
+      봉투는 `AgentRequest.payload` 에만 실리고 `master_agent_runs` 는 그것을 안 담는다.
+      그런데 *"주입한 키는 주입이라고 적는다"* 고 해 놓고 **봉투는 안 적었다.** 그래서
+      받는 쪽은 확인할 표가 없어 **없는 표를 뒤졌고, 665건 전수 0건으로 읽었다** —
+      실제로는 655건 중 `CalendarNotCovered` 0건, 즉 매번 실렸다.
+
+      .. code-block:: text
+
+          실었다      execution_calendar: "DERIVED:market_calendar"
+          못 실었다   execution_calendar: "MISSING:-"
+
+    ★ **어휘를 새로 만들지 않는다.** 봉투는 DB 시장달력에서 규칙으로 파생하므로
+      위 다섯 중 `DERIVED` 다.
+
+    ★ **못 실었을 때도 키를 적는다.** 키를 통째로 빼면 *"안 실렸다"* 가 *"모른다"* 와
+      섞여 예전과 같아진다 — 없는 표를 다시 뒤지게 된다.
     """
     sources = dict(inputs.sources()) if inputs else {}
     for key in _INJECTABLE_INPUTS:
         if getattr(request, key, None):
             sources[key] = f"{REQUEST_GRADE}:{key}"
+    sources[_CALENDAR_KEY] = f"DERIVED:{_CALENDAR_SOURCE}" if execution_calendar else "MISSING:-"
     return sources
 
 
