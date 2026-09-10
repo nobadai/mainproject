@@ -4,11 +4,12 @@
 ① 지운다 (다시 열 때만)   reset_sim_run_ledger        ← --reset 을 줬을 때만
 ② 실행 한 행              create_sim_run
 ③ 시작 재무 상태          seed_opening_finance_state
+④ 시작 물류 fixture       seed_opening_logistics_fixture   ← #551
                           ⋮
-🔴 셋이 **한 트랜잭션** — 커밋은 이 문이 한 번
+🔴 넷이 **한 트랜잭션** — 커밋은 이 문이 한 번
 ```
 
-🔴 **DB 를 안 탄다.** 커넥션도 셋도 전부 대역이다 — 이 판은 문을 세우는 것까지고,
+🔴 **DB 를 안 탄다.** 커넥션도 넷도 전부 대역이다 — 이 판은 문을 세우는 것까지고,
    실제로 열거나 걷거나 행을 쓰거나 지우는 것은 이 판이 하지 않는다.
 
 ⚠️ **한글 문장을 잴 때는 `NFC` 로 맞춘다.** 조합형/분해형이 섞이면 같은 글자가
@@ -40,6 +41,10 @@ _문 = Path(__file__).resolve().parents[2] / "app" / "master" / "sim_run_runner.
 출발실행 = "SIM-BURNIN-202512"
 출발상태 = "FIN-DAY30-LOAN"
 시작상태 = "FIN-WALK-202601-OPEN"
+물류씨앗 = "LOG-WALK-202601-OPEN"
+#: 🔴 **어휘의 주인은 물류다** — 검사가 값을 들되 이 문은 안 든다
+#:   (`test_usage_scope_를_문에_안_박는다` 가 그것을 잰다).
+쓰임 = "AGENT_MVP_DEMO"
 계보 = BaselineLineage(from_sim_run_id=출발실행, finance_state_id=출발상태)
 
 #: `--reset` 을 안 줄 때만 쓰는 인자 넷. 🔴 **하나라도 없으면 터져야 한다.**
@@ -115,12 +120,13 @@ class _대역커넥션:
 
 
 class _순서기록:
-    """셋이 **언제 어떤 인자로** 불렸는지를 한 목록에 모은다."""
+    """넷이 **언제 어떤 인자로** 불렸는지를 한 목록에 모은다."""
 
     def __init__(self) -> None:
         self.부른것: list[str] = []
         self.create인자: dict[str, Any] = {}
         self.seed인자: dict[str, Any] = {}
+        self.물류인자: dict[str, Any] = {}
         self.reset인자: dict[str, Any] = {}
         self.터뜨릴것: str | None = None
 
@@ -146,6 +152,12 @@ class _순서기록:
         self._터질까("seed")
         return str(kw["finance_state_id"])
 
+    def 물류(self, conn: Any, **kw: Any) -> str:
+        self.부른것.append("물류")
+        self.물류인자 = kw
+        self._터질까("물류")
+        return str(kw["fixture_id"])
+
 
 def _연다(**over: Any) -> tuple[_대역커넥션, _순서기록, Any]:
     """문을 한 번 부른다. 터지면 예외를 그대로 올린다."""
@@ -165,9 +177,12 @@ def _연다(**over: Any) -> tuple[_대역커넥션, _순서기록, Any]:
         "opening_finance_state_id": 시작상태,
         "opening_state_date": date(2026, 1, 1),
         "opening_state_type": "OPENING",
+        "opening_fixture_id": 물류씨앗,
+        "opening_usage_scope": 쓰임,
         "reset_fn": 기록.reset,
         "create_fn": 기록.create,
         "seed_fn": 기록.seed,
+        "logistics_seed_fn": 기록.물류,
     }
     인자.update(over)
     return conn, 기록, open_sim_run(conn, **인자)
@@ -189,6 +204,8 @@ def _인자줄(빼기: str | None = None) -> list[str]:
         ("--opening-state-id", 시작상태),
         ("--opening-state-date", "2026-01-01"),
         ("--opening-state-type", "OPENING"),
+        ("--opening-fixture-id", 물류씨앗),
+        ("--opening-usage-scope", 쓰임),
     ]
     줄: list[str] = []
     for 이름, 값 in 쌍:
@@ -264,9 +281,12 @@ def test_이미_있는데_reset_이_없으면_셋을_하나도_안_부른다() -
             opening_finance_state_id=시작상태,
             opening_state_date=date(2026, 1, 1),
             opening_state_type="OPENING",
+            opening_fixture_id=물류씨앗,
+            opening_usage_scope=쓰임,
             reset_fn=기록.reset,
             create_fn=기록.create,
             seed_fn=기록.seed,
+            logistics_seed_fn=기록.물류,
         )
     assert 기록.부른것 == []
     assert conn.commits == 0
@@ -294,22 +314,111 @@ def test_안_지웠을_때와_0행_지웠을_때가_다른_값이다() -> None:
     assert 안지움.ledger_reset is None
 
 
-# ── 🔴 셋을 이 순서로 부른다 ────────────────────────────────────────────
+# ── 🔴 넷을 이 순서로 부른다 ────────────────────────────────────────────
 
 
-def test_셋을_이_순서로_부른다() -> None:
-    """🔴 **지우기 → 실행 행 → 시작 상태.**
+def test_넷을_이_순서로_부른다() -> None:
+    """🔴 **지우기 → 실행 행 → 시작 재무 상태 → 시작 물류 fixture.**
 
     ⚠️ 실행 행이 서야 시작 상태가 그 축을 가리킬 수 있다 —
       `finance_states.sim_run_id` 가 `sim_runs` 를 참조하는 FK 다.
     """
     _, 기록, _ = _연다(reset=True, 이미있다=True)
-    assert 기록.부른것 == ["reset", "create", "seed"]
+    assert 기록.부른것 == ["reset", "create", "seed", "물류"]
 
 
 def test_reset_없이도_실행_행이_시작_상태보다_먼저다() -> None:
     _, 기록, _ = _연다()
-    assert 기록.부른것 == ["create", "seed"]
+    assert 기록.부른것 == ["create", "seed", "물류"]
+
+
+def test_문이_물류_씨앗을_부른다() -> None:
+    """🔴 **재무만 놓으면 새 실행에 물류 행이 한 행도 없다.**
+
+    ★★ 물류는 자기 개장 여부를 `logistics_runtime_fixture` 에서 읽는다 — 한 행도
+      없으면 마스터가 상한만큼 거슬러도 anchor 를 못 찾고 `REJECTED_GAP` 으로
+      거절한다. 이 한 줄이 그 거절을 안 나게 하는 유일한 자리다.
+    """
+    _, 기록, _ = _연다()
+
+    assert "물류" in 기록.부른것, "🔴 문이 물류 씨앗을 안 부른다"
+    assert 기록.물류인자 != {}
+
+
+def test_물류_씨앗에_새_실행과_baseline_을_함께_넘긴다() -> None:
+    """🔴 **행이 앉는 곳은 새 실행, 사실을 가져오는 곳은 baseline 이다.**
+
+    ⚠️ 둘을 같은 값으로 넘기면 새 실행에서 source 를 찾게 되고, 거기엔 한 행도
+      없으니 늘 못 찾는다.
+    """
+    _, 기록, _ = _연다()
+
+    assert 기록.물류인자["sim_run_id"] == 새실행
+    assert 기록.물류인자["baseline_run_id"] == 출발실행
+    assert 기록.물류인자["baseline_run_id"] == 계보.from_sim_run_id
+
+
+def test_물류_씨앗의_이름을_새로_준다() -> None:
+    """🔴 **identity 는 새로** — `--opening-state-id` 와 대칭이다."""
+    _, 기록, opened = _연다()
+
+    assert 기록.물류인자["fixture_id"] == 물류씨앗
+    assert 기록.물류인자["fixture_id"] != 시작상태
+    assert opened.opening_logistics_fixture_id == 물류씨앗
+
+
+def test_재무_씨앗과_물류_씨앗이_같은_날짜를_쓴다() -> None:
+    """★★ **갈릴 자리를 안 만든다.**
+
+    ⚠️ 둘이 갈리면 두 파트의 anchor 가 갈리고, 그러면 이유 없이 한 파트만 며칠 더
+      걷는다. 물류용 날짜 인자를 따로 만들지 않는 것이 그 결정이다.
+    """
+    _, 기록, _ = _연다(opening_state_date=date(2025, 12, 31))
+
+    assert 기록.seed인자["state_date"] == date(2025, 12, 31)
+    assert 기록.물류인자["as_of"] == 기록.seed인자["state_date"]
+
+
+def test_물류용_날짜_인자를_따로_안_만든다() -> None:
+    """★★ **날짜는 `--opening-state-date` 하나다.**
+
+    ⚠️ 물류용 날짜를 따로 받으면 사람이 둘을 다르게 줄 수 있고, 그 순간 두 파트가
+      다른 날에서 출발한다.
+    """
+    날짜인자 = [
+        action.option_strings[0]
+        for action in _parser()._actions
+        if action.option_strings and "date" in action.option_strings[0]
+    ]
+
+    assert 날짜인자 == ["--opening-state-date"], f"날짜 인자가 여럿이다: {날짜인자}"
+
+
+def test_usage_scope_를_문에_안_박는다() -> None:
+    """🔴 **어휘의 주인은 물류다.**
+
+    ★★ 마스터가 제 코드에 박으면 물류가 값을 바꾸는 날 말없이 갈린다 — 그때
+      마스터가 놓은 씨앗을 물류가 못 읽고, 개장은 다시 거절한다. 물류 상수를
+      import 해 오는 것도 같은 이유로 안 된다. **문에서 눈에 보이게 받는다.**
+    """
+    원문 = _NFC(ast.unparse(_벗긴_트리()))
+
+    for 금지 in (쓰임, "USAGE_SCOPE", "LOGISTICS_POLICY_USAGE_SCOPE", "app.logistics"):
+        assert 금지 not in 원문, f"물류 어휘를 문에 박았다: {금지}"
+
+    받는인자 = [
+        action.option_strings[0]
+        for action in _parser()._actions
+        if action.option_strings and action.option_strings[0] == "--opening-usage-scope"
+    ]
+    assert 받는인자 == ["--opening-usage-scope"], "🔴 눈에 보이게 안 받는다"
+
+
+def test_문이_넘긴_usage_scope_가_받은_그_값이다() -> None:
+    """🔴 **문이 받은 값을 그대로 넘긴다** — 중간에 제 값으로 바꾸지 않는다."""
+    _, 기록, _ = _연다(opening_usage_scope="물류가_내일_바꿀_scope")
+
+    assert 기록.물류인자["usage_scope"] == "물류가_내일_바꿀_scope"
 
 
 # ── 🔴 한 트랜잭션 ──────────────────────────────────────────────────────
@@ -322,7 +431,7 @@ def test_다_되면_커밋을_한_번_부른다() -> None:
     assert conn.rollbacks == 0
 
 
-@pytest.mark.parametrize("터진곳", ["reset", "create", "seed"])
+@pytest.mark.parametrize("터진곳", ["reset", "create", "seed", "물류"])
 def test_중간에_터지면_롤백하고_커밋을_안_부른다(터진곳: str) -> None:
     """🔴 **반쪽 실행을 남기지 않는다.**
 
@@ -347,10 +456,13 @@ def test_중간에_터지면_롤백하고_커밋을_안_부른다(터진곳: str
             opening_finance_state_id=시작상태,
             opening_state_date=date(2026, 1, 1),
             opening_state_type="OPENING",
+            opening_fixture_id=물류씨앗,
+            opening_usage_scope=쓰임,
             reset=True,
             reset_fn=기록.reset,
             create_fn=기록.create,
             seed_fn=기록.seed,
+            logistics_seed_fn=기록.물류,
         )
     assert conn.commits == 0, "🔴 터졌는데 커밋했다 — 반쪽 실행이 남는다"
     assert conn.rollbacks == 1
@@ -456,6 +568,7 @@ def test_대역을_운영_경로에_안_심는다() -> None:
         ("reset_fn", "reset_sim_run_ledger"),
         ("create_fn", "create_sim_run"),
         ("seed_fn", "seed_opening_finance_state"),
+        ("logistics_seed_fn", "seed_opening_logistics_fixture"),
     ):
         기본 = 기본값[자리]
         assert isinstance(기본, ast.Name) and 기본.id == 본체, f"{자리} 의 기본이 {본체} 가 아니다"
@@ -473,6 +586,7 @@ def test_요약이_다음에_부를_명령을_적어_준다() -> None:
                 financing_mode=새조달,
                 baseline=계보,
                 opening_finance_state_id=시작상태,
+                opening_logistics_fixture_id=물류씨앗,
                 period_start=date(2026, 1, 1),
                 period_end=date(2026, 6, 29),
                 ledger_reset=None,
@@ -494,6 +608,7 @@ def test_요약이_안_지웠다는_사실을_적는다() -> None:
             financing_mode=새조달,
             baseline=계보,
             opening_finance_state_id=시작상태,
+            opening_logistics_fixture_id=물류씨앗,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 6, 29),
             ledger_reset=None,
@@ -505,6 +620,7 @@ def test_요약이_안_지웠다는_사실을_적는다() -> None:
             financing_mode=새조달,
             baseline=계보,
             opening_finance_state_id=시작상태,
+            opening_logistics_fixture_id=물류씨앗,
             period_start=date(2026, 1, 1),
             period_end=date(2026, 6, 29),
             ledger_reset=LedgerReset(sim_run_id=새실행, order=("sales",), deleted={"sales": 9}),

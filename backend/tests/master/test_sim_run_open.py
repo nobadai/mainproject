@@ -28,9 +28,11 @@ import pytest
 from app.finance.db import get_db_schema
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sim_run_open import (
+    LOGISTICS_FIXTURE_TABLE,
     BaselineLineage,
     reset_sim_run_ledger,
     seed_opening_finance_state,
+    seed_opening_logistics_fixture,
 )
 
 _MASTER = Path(__file__).resolve().parents[2] / "app" / "master"
@@ -129,6 +131,87 @@ _출발행: dict[str, Any] = {
     "note": "번인 30일 끝",
 }
 
+#: 이 검사가 이관해 올 물류 사실의 `usage_scope`.
+#:   🔴 **어휘의 주인은 물류다** — 검사가 값을 들되 운영 코드는 안 든다
+#:   (`test_usage_scope_를_원문이_안_든다` 가 그것을 잰다).
+쓰임 = "AGENT_MVP_DEMO"
+물류씨앗 = "LOG-WALK-202601-OPEN"
+
+#: `logistics_runtime_fixture` 의 칸 — 실제 DDL 을 그대로 본뜬다.
+_물류칸목록: tuple[tuple[str, str], ...] = (
+    ("fixture_id", "NEVER"),
+    ("sim_run_id", "NEVER"),
+    ("as_of", "NEVER"),
+    ("in_transit_status", "NEVER"),
+    ("in_transit_json", "NEVER"),
+    ("confirmed_inbound_status", "NEVER"),
+    ("confirmed_inbound_json", "NEVER"),
+    ("confirmed_outbound_status", "NEVER"),
+    ("confirmed_outbound_json", "NEVER"),
+    ("usage_scope", "NEVER"),
+    ("evidence_grade", "NEVER"),
+    ("source_ref", "NEVER"),
+    ("approved_by", "NEVER"),
+    ("is_active", "NEVER"),
+    ("note", "NEVER"),
+    ("created_at", "NEVER"),
+    ("updated_at", "NEVER"),
+    ("lot_priority_status", "NEVER"),
+    ("lot_priority_json", "NEVER"),
+    ("zone_capacity_status", "NEVER"),
+    ("guaranteed_capacity_by_zone_json", "NEVER"),
+)
+
+#: `NOT NULL` 인 칸. 일부만 나르면 나머지를 어디서 채울지가 또 생긴다.
+_물류_NOT_NULL_칸 = (
+    "fixture_id",
+    "sim_run_id",
+    "as_of",
+    "in_transit_status",
+    "confirmed_inbound_status",
+    "confirmed_outbound_status",
+    "usage_scope",
+    "evidence_grade",
+    "source_ref",
+    "approved_by",
+    "is_active",
+)
+
+#: 🔴 **이관하지 않는 칸.** `NOT NULL` 이지만 DB 기본값(`now()`)이 채운다.
+#:
+#: ★★ 축이 다르다 — `evidence_grade` 는 *"이 사실이 어디서 왔나"* 라 따라가는 것이
+#:   맞고, 이 둘은 *"이 행이 언제 쓰였나"* 다. 이관본은 **지금** 쓰인 새 행이라
+#:   source 시각을 나르면 두 달 전에 만들어졌다고 말하게 된다.
+_행이_쓰인_시각_칸 = ("created_at", "updated_at")
+
+#: 🔴 **물류 소유의 근거 셋**. 마스터가 새로 쓰지 않고 그대로 따라간다.
+_근거셋 = ("evidence_grade", "source_ref", "approved_by")
+
+#: 이관해 올 물류 fixture 한 행. 번인 2025-12-31 행을 그대로 본뜬다.
+_물류출발행: dict[str, Any] = {
+    "fixture_id": "LOG-BURNIN-DAY30",
+    "sim_run_id": 출발실행,
+    "as_of": date(2025, 12, 31),
+    "in_transit_status": "CONFIRMED_ZERO",
+    "in_transit_json": None,
+    "confirmed_inbound_status": "CONFIRMED_ZERO",
+    "confirmed_inbound_json": None,
+    "confirmed_outbound_status": "CONFIRMED_ZERO",
+    "confirmed_outbound_json": None,
+    "usage_scope": 쓰임,
+    "evidence_grade": "SIM_FIXED",
+    "source_ref": "MVP-DECISION-20260825:LOG-RUNTIME-DAY30",
+    "approved_by": "HUMAN",
+    "is_active": True,
+    "note": "번인 30일 물류 고정",
+    "created_at": "2026-08-25T00:00:00+09:00",
+    "updated_at": "2026-08-25T00:00:00+09:00",
+    "lot_priority_status": "CONFIRMED_ZERO",
+    "lot_priority_json": None,
+    "zone_capacity_status": "UNRESOLVED",
+    "guaranteed_capacity_by_zone_json": None,
+}
+
 #: 대역 스키마의 표 — 축(`sim_run_id`)을 가진 것만.
 _표들 = (
     "deliveries",
@@ -187,9 +270,16 @@ class _대역커서:
         if "pg_constraint" in 문장:
             self._rows = [{"child_table": c, "parent_table": p} for c, p in self.대장.fk]
         elif "is_generated" in 문장:
+            # ★ 칸 목록은 **표마다 다르다** — 질의가 어느 표를 물었는지로 고른다.
+            물은표 = (list(params or []) + [None, None])[1]
+            목록 = (
+                self.대장.물류칸목록
+                if 물은표 == LOGISTICS_FIXTURE_TABLE
+                else self.대장.칸목록
+            )
             self._rows = [
                 {"column_name": name, "is_generated": gen, "identity_generation": None}
-                for name, gen in self.대장.칸목록
+                for name, gen in 목록
             ]
         elif "col.table_name" in 문장:
             self._rows = [{"table_name": one} for one in self.대장.표들]
@@ -197,6 +287,18 @@ class _대역커서:
             self.rowcount = self.대장.행수.get(_표이름(문장), 0)
         elif "finance_state_id = %s" in 문장 and "SELECT" in 문장:
             self._one = self.대장.출발행
+        elif "usage_scope = %s" in 문장 and "SELECT" in 문장:
+            # ★ 대역이 **셋을 다 확인하고** 답한다 — 하나라도 안 좁히면 이 대역이
+            #   *"못 찾았다"* 를 내고, 그래야 좁히기를 거른 뮤턴트가 안 산다.
+            찾는것 = list(params or [])
+            있는것 = self.대장.물류출발행
+            self._one = (
+                있는것
+                if 있는것 is not None
+                and 찾는것
+                == [있는것["sim_run_id"], 있는것["as_of"], 있는것["usage_scope"]]
+                else None
+            )
 
     def fetchall(self) -> list[dict[str, Any]]:
         return self._rows
@@ -210,11 +312,14 @@ class _대역커넥션:
         self.log: list[tuple[str, list[Any]]] = []
         self.commits = 0
         self.칸목록 = over.pop("칸목록", _칸목록)
+        self.물류칸목록 = over.pop("물류칸목록", _물류칸목록)
         self.표들 = over.pop("표들", _표들)
         self.fk = over.pop("fk", _FK)
         self.행수 = over.pop("행수", _행수)
         출발행 = over.pop("출발행", _출발행)
         self.출발행 = dict(출발행) if 출발행 is not None else None
+        물류출발행 = over.pop("물류출발행", _물류출발행)
+        self.물류출발행 = dict(물류출발행) if 물류출발행 is not None else None
         assert not over, f"안 쓰는 인자: {sorted(over)}"
 
     def cursor(self) -> _대역커서:
@@ -262,13 +367,14 @@ def _심는다(**over: Any) -> tuple[_대역커넥션, str]:
     return conn, seed_opening_finance_state(conn, **인자)
 
 
-def _실린다(conn: _대역커넥션) -> dict[str, Any]:
+def _실린다(conn: _대역커넥션, 표: str = "finance_states") -> dict[str, Any]:
     """INSERT 한 문장에서 `칸 이름 → 실린 값` 을 되짚는다."""
     실은것 = _문장들(conn, "INSERT INTO")
     assert len(실은것) == 1, f"한 행이 아니다: {실은것}"
     문장, params = 실은것[0]
+    assert f'"{_스키마}"."{표}"' in 문장, f"{표} 에 안 실었다: {문장}"
     칸들 = re.findall(r'"([^"]+)"', 문장.split("VALUES")[0])
-    칸들 = [one for one in 칸들 if one not in (_스키마, "finance_states")]
+    칸들 = [one for one in 칸들 if one not in (_스키마, 표)]
     assert len(칸들) == len(params), f"칸 수와 값 수가 다르다: {칸들} / {params}"
     return dict(zip(칸들, params, strict=True))
 
@@ -436,6 +542,271 @@ def test_시작_상태를_심는_자리가_커밋하지_않는다() -> None:
     conn, _ = _심는다()
 
     assert conn.commits == 0
+
+
+# ── ②' 시작 물류 fixture ───────────────────────────────────────────────
+
+
+def _물류를_심는다(**over: Any) -> tuple[_대역커넥션, str]:
+    conn = _대역커넥션(
+        **{k: over.pop(k) for k in ("물류출발행", "물류칸목록") if k in over}
+    )
+    인자: dict[str, Any] = {
+        "sim_run_id": 새실행,
+        "baseline_run_id": 출발실행,
+        "fixture_id": 물류씨앗,
+        "as_of": date(2025, 12, 31),
+        "usage_scope": 쓰임,
+    }
+    인자.update(over)
+    return conn, seed_opening_logistics_fixture(conn, **인자)
+
+
+def _물류조회(conn: _대역커넥션) -> tuple[str, list[Any]]:
+    조회 = [
+        (문장, params)
+        for 문장, params in conn.log
+        if "SELECT" in 문장 and "usage_scope = %s" in 문장
+    ]
+    assert len(조회) == 1, f"물류 source 를 한 번만 찾아야 한다: {조회}"
+    return 조회[0]
+
+
+def test_물류_source_를_셋으로_찾는다() -> None:
+    """🔴 **`(baseline_run_id, as_of, usage_scope)` 셋이다.**
+
+    ★★ 그 셋이 정확히 `uq_log_runtime_fixture` 이고, 물류 `is_open` 이 묻는 열쇠와
+      **같다** — 그래서 최대 한 행이고, 그래서 여기서 놓은 행을 물류가 읽는다.
+      하나라도 빼면 남의 실행/남의 날/남의 scope 행을 이관해 올 수 있다.
+    """
+    conn, _ = _물류를_심는다()
+
+    문장, params = _물류조회(conn)
+    assert '"sim_run_id" = %s' in 문장, f"실행으로 안 좁혔다: {문장}"
+    assert "as_of = %s" in 문장, f"날짜로 안 좁혔다: {문장}"
+    assert "usage_scope = %s" in 문장, f"scope 로 안 좁혔다: {문장}"
+    assert params == [출발실행, date(2025, 12, 31), 쓰임]
+
+
+def test_물류_source_를_새_실행이_아니라_baseline_에서_찾는다() -> None:
+    """🔴 **새 실행에는 물류 행이 없다** — 그것이 이 씨앗이 서는 이유다.
+
+    ⚠️ 좁히는 축에 새 실행 id 를 넣으면 늘 0건이 나오고, 그때 이 절차는 영원히
+      *"이관할 것이 없다"* 만 답한다.
+    """
+    conn, _ = _물류를_심는다()
+
+    _, params = _물류조회(conn)
+    assert params[0] == 출발실행
+    assert params[0] != 새실행, "새 실행에서 source 를 찾는다 — 거기엔 한 행도 없다"
+
+
+def test_물류_씨앗의_identity_가_새것이다() -> None:
+    """🔴 **fixture_id 와 sim_run_id 는 새로 정한다.**
+
+    ★★ 안 덮으면 새 실행의 첫 물류 행에 **남의 실행 id 가 실리고**, 그러면 물류가
+      제 실행에서 그 행을 못 읽는다 (`is_open` 이 `sim_run_id` 로 좁힌다).
+    """
+    conn, 이름 = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    assert 이름 == 물류씨앗
+    assert 실린것["fixture_id"] == 물류씨앗
+    assert 실린것["fixture_id"] != _물류출발행["fixture_id"]
+    assert 실린것["sim_run_id"] == 새실행
+    assert 실린것["sim_run_id"] != _물류출발행["sim_run_id"]
+
+
+def test_물류_값은_source_에서_그대로_이관된다() -> None:
+    """🔴 **지어내지 않는다.** `note` 와 identity 둘 말고는 전부 따라간다."""
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    for 칸, 값 in _물류출발행.items():
+        if 칸 in ("fixture_id", "sim_run_id", "note", *_행이_쓰인_시각_칸):
+            continue
+        assert 실린것[칸] == 값, f"{칸} 이 source 에서 안 왔다: {실린것[칸]!r} != {값!r}"
+
+
+def test_행이_쓰인_시각을_이관하지_않는다() -> None:
+    """🔴 **`created_at` · `updated_at` 은 이관 대상이 아니다.**
+
+    ★★ 그 둘은 사실이 언제 생겼나가 아니라 **이 행이 언제 쓰였나**이고, 이관본은
+      **지금** 쓰인 새 행이다. source 값을 나르면 새 행이 두 달 전에 만들어졌다고
+      말하게 된다 — 없는 사실이고, **에러 없이 틀린 값**이다.
+
+    ★ 안 실으면 DB 기본값(`now()`)이 선다. 마스터가 시각을 지어내지도 않는다.
+    """
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    실린칸 = set(실린것)
+    따라온것 = [칸 for 칸 in _행이_쓰인_시각_칸 if 칸 in 실린칸]
+    assert not 따라온것, f"이관본이 source 의 시각을 들고 왔다: {따라온것}"
+
+
+def test_is_active_는_따라간다() -> None:
+    """🔴 **`is_active` 는 기본값이 있어도 이관한다.**
+
+    ★★ *"이 사실이 살아 있나"* 는 **물류의 판정**이다. source 가 죽어 있는데
+      마스터가 살려 놓으면 물류가 내린 판정을 뒤집는 것이 된다 — 기본값이 있다는
+      것만으로 `created_at` 과 같이 묶으면 그 뒤집기가 조용히 일어난다.
+    """
+    죽은행 = {**_물류출발행, "is_active": False}
+    conn, _ = _물류를_심는다(물류출발행=죽은행)
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    assert 실린것["is_active"] is False, "마스터가 물류의 판정을 뒤집었다"
+
+
+def test_근거_셋을_마스터가_새로_쓰지_않는다() -> None:
+    """🔴 **`evidence_grade` · `source_ref` · `approved_by` 는 물류 소유다.**
+
+    ★★ 그 셋은 *"이 사실이 어디서 왔고 누가 승인했나"* 다. 마스터가 새로 쓰면
+      물류가 승인한 적 없는 근거가 물류 표에 앉는다 — 같은 사실이니 그대로 따라가고,
+      **되짚을 수 있게** `note` 가 출처를 단다.
+    """
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    for 칸 in _근거셋:
+        assert 실린것[칸] == _물류출발행[칸], f"마스터가 {칸} 을 새로 썼다"
+
+
+def test_as_of_를_새로_정하지_않는다() -> None:
+    """★★ **source 를 찾은 그 날짜 그대로다.** 같은 날의 같은 사실을 다른 실행 축에
+    앉히는 것이라 날짜가 바뀔 이유가 없다.
+    """
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    assert 실린것["as_of"] == date(2025, 12, 31)
+    assert 실린것["as_of"] == _물류출발행["as_of"]
+
+
+def test_note_에_source_의_fixture_id_가_남는다() -> None:
+    """🔴 **되짚을 수 있어야 한다.** 근거 셋을 그대로 따라가므로, *"어느 행에서
+    왔나"* 를 여기 안 적으면 출처가 어디에도 안 남는다.
+    """
+    conn, _ = _물류를_심는다()
+
+    적힌것 = _NFC(str(_실린다(conn, LOGISTICS_FIXTURE_TABLE)["note"]))
+    assert _NFC(_물류출발행["fixture_id"]) in 적힌것, f"출처를 안 적었다: {적힌것}"
+    assert _NFC(출발실행) in 적힌것
+    assert 적힌것 != _NFC(str(_물류출발행["note"])), "source 의 메모를 그대로 이었다"
+
+
+def test_물류_source_가_없으면_터진다() -> None:
+    """🔴 **막는다.** 다른 날짜로 물러서지도 다른 scope 를 뒤지지도 않는다."""
+    with pytest.raises(LookupError) as err:
+        _물류를_심는다(물류출발행=None)
+
+    말 = _NFC(str(err.value))
+    assert _NFC(출발실행) in 말 and _NFC(쓰임) in 말 and "2025-12-31" in 말
+
+
+def test_물류_source_가_없으면_빈_행을_안_지어낸다() -> None:
+    """🔴 **지어내면 그 하루가 「물류가 확인한 날」로 둔갑한다.**
+
+    ★★ 물류는 이 표를 보고 *"내가 그날을 열었다"* 를 판정한다 — 빈 행을 놓으면
+      물류가 확인한 적 없는 날이 열린 것으로 읽히고, 그 위로 179일이 걸린다.
+    """
+    conn = _대역커넥션(물류출발행=None)
+    with pytest.raises(LookupError):
+        seed_opening_logistics_fixture(
+            conn,
+            sim_run_id=새실행,
+            baseline_run_id=출발실행,
+            fixture_id=물류씨앗,
+            as_of=date(2025, 12, 31),
+            usage_scope=쓰임,
+        )
+
+    assert not _문장들(conn, "INSERT INTO"), "source 가 없는데 행을 실었다"
+
+
+def test_다른_날짜로_물러서지_않는다() -> None:
+    """🔴 **한 번만 찾고 만다.** 못 찾았다고 다른 날을 뒤지면, 이관해 온 사실이
+    우리가 말한 그날의 사실이 아니게 된다.
+    """
+    conn = _대역커넥션(물류출발행=None)
+    with pytest.raises(LookupError):
+        seed_opening_logistics_fixture(
+            conn,
+            sim_run_id=새실행,
+            baseline_run_id=출발실행,
+            fixture_id=물류씨앗,
+            as_of=date(2025, 12, 31),
+            usage_scope=쓰임,
+        )
+
+    조회 = [문장 for 문장, _ in conn.log if "SELECT" in 문장 and "usage_scope = %s" in 문장]
+    assert len(조회) == 1, f"source 를 {len(조회)} 번 찾았다 — 물러섰다"
+
+
+def test_물류_NOT_NULL_칸을_하나도_안_빠뜨린다() -> None:
+    """★ 일부만 고르면 나머지를 어디서 채울지가 또 생긴다."""
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    빠진것 = [칸 for 칸 in _물류_NOT_NULL_칸 if 칸 not in 실린것]
+    assert not 빠진것, f"NOT NULL 칸을 빠뜨렸다: {빠진것}"
+
+
+def test_물류_칸_목록이_information_schema_에서_온다() -> None:
+    """⚠️ **손으로 적지 않는다.** 물류가 칸을 더하는 날 손으로 적은 목록은 조용히
+    뒤처지고, 그때 새 칸은 `NOT NULL` 이면 INSERT 를 막고 아니면 말없이 빈다.
+    """
+    늘어난칸 = (*_물류칸목록, ("물류가_내일_더할_칸", "NEVER"))
+    늘어난행 = {**_물류출발행, "물류가_내일_더할_칸": "따라와야 한다"}
+    conn, _ = _물류를_심는다(물류칸목록=늘어난칸, 물류출발행=늘어난행)
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    assert 실린것["물류가_내일_더할_칸"] == "따라와야 한다"
+
+
+def test_물류_칸을_information_schema_에_물을_때_그_표를_묻는다() -> None:
+    """★ 재무 표의 칸으로 물류 행을 실으면 칸이 통째로 어긋난다."""
+    conn, _ = _물류를_심는다()
+
+    칸질의 = [params for 문장, params in conn.log if "is_generated" in 문장]
+    assert len(칸질의) == 1
+    assert 칸질의[0] == [_스키마, LOGISTICS_FIXTURE_TABLE]
+
+
+@pytest.mark.parametrize("빈값", ["", "   "])
+@pytest.mark.parametrize(
+    "칸", ["sim_run_id", "baseline_run_id", "fixture_id", "usage_scope"]
+)
+def test_빈_값으로_물류_씨앗을_못_만든다(칸: str, 빈값: str) -> None:
+    """🔴 **없는 값을 메우지 않는다.**"""
+    with pytest.raises(ValueError) as err:
+        _물류를_심는다(**{칸: 빈값})
+
+    assert _NFC(칸) in _NFC(str(err.value))
+
+
+def test_물류_씨앗을_심는_자리가_커밋하지_않는다() -> None:
+    """🔴 **커밋은 부르는 쪽이 한다** — `seed_opening_finance_state` 와 같다.
+
+    ⚠️ 여기서 커밋하면 물류 씨앗만 먼저 앉고, 뒤이어 무엇이 터져도 그 행은 남는다.
+    """
+    conn, _ = _물류를_심는다()
+
+    assert conn.commits == 0
+
+
+def test_usage_scope_를_원문이_안_든다() -> None:
+    """🔴 **어휘의 주인은 물류다.**
+
+    ★★ 마스터가 제 코드에 박으면 물류가 값을 바꾸는 날 말없이 갈린다 — 그때
+      마스터가 놓은 씨앗을 물류가 못 읽고, 개장은 다시 거절한다. 물류 상수를
+      import 해 오는 것도 같은 이유로 안 된다.
+    """
+    원문 = _벗긴_원문(_MASTER / "sim_run_open.py")
+
+    for 금지 in (쓰임, "USAGE_SCOPE", "LOGISTICS_POLICY_USAGE_SCOPE", "app.logistics"):
+        assert 금지 not in 원문, f"물류 어휘를 마스터에 박았다: {금지}"
 
 
 # ── ③ 장부를 지운다 ────────────────────────────────────────────────────

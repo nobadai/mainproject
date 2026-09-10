@@ -2,9 +2,10 @@
 sim_run_open.py — **새 실행을 여는 절차.**
 
 ```text
-BaselineLineage             어느 실행의 어느 상태에서 출발하나  (가리키기만 한다)
-seed_opening_finance_state  새 실행의 **시작 재무 상태**를 만든다
-reset_sim_run_ledger        다시 열 때 그 실행의 **장부를 지운다**
+BaselineLineage                    어느 실행의 어느 상태에서 출발하나  (가리키기만 한다)
+seed_opening_finance_state         새 실행의 **시작 재무 상태**를 만든다
+seed_opening_logistics_fixture     새 실행의 **시작 물류 fixture** 를 만든다
+reset_sim_run_ledger               다시 열 때 그 실행의 **장부를 지운다**
 ```
 
 ★ 실행 행 자체를 만드는 것은 `sim_run.create_sim_run` 이다 (`#531`). 이 파일은
@@ -68,6 +69,42 @@ finance_state_id · sim_run_id · state_date · state_type   **새로 정한다*
 
 ---
 
+## 🔴 물류 씨앗도 **같은 규율**이다
+
+★★ 재무 시작 상태만 놓고 물류를 안 놓으면, 새 실행에 물류 행이 **한 행도 없다.**
+  물류는 자기 개장 여부를 `logistics_runtime_fixture` 에서 읽으므로
+  (`app/logistics/day_open.py` `is_open`), 마스터가 상한만큼 거슬러도 anchor 를
+  못 찾고 **행을 만들지 않고 거절**한다.
+
+```text
+source 를 찾는 열쇠   (baseline_run_id, as_of, usage_scope)
+```
+
+★ 그 셋이 정확히 `uq_log_runtime_fixture` 이고, `is_open` 이 묻는 열쇠와 **같다.**
+  최대 한 행이다.
+
+🔴 **없으면 막는다.** 다른 날짜로 물러서지도, 다른 `usage_scope` 를 뒤지지도 않는다 —
+  재무 씨앗이 baseline 을 못 찾을 때와 같은 태도다.
+
+```text
+새로 정한다   fixture_id · sim_run_id
+그대로 이관    나머지 값 전부
+note          이관 사실과 **source 의 fixture_id** 를 적는다
+```
+
+★★ **`as_of` 는 새로 정하지 않는다** — source 를 찾은 그 날짜 그대로다. 같은 날의
+  같은 사실을 다른 실행 축에 앉히는 것이라 날짜가 바뀔 이유가 없다.
+
+🔴 **`evidence_grade` · `source_ref` · `approved_by` 를 마스터가 새로 쓰지 않는다.**
+  그 셋은 *"이 사실이 어디서 왔고 누가 승인했나"* 이고 **물류 소유**다. 같은 사실이니
+  그대로 따라가고, **되짚을 수 있게** `note` 가 출처를 단다.
+
+🔴 **`usage_scope` 를 여기 박지 않는다** (물류 상수를 import 하는 것도 아니다) —
+  그 어휘의 주인은 물류이고, 마스터가 제 코드에 박으면 물류가 값을 바꾸는 날
+  말없이 갈린다. **부르는 쪽이 눈에 보이게 준다.**
+
+---
+
 ## 🔴 지우는 절차 — 표 목록도 순서도 **DB 가 주인이다**
 
 ```text
@@ -114,11 +151,13 @@ __all__ = [
     "AXIS_COLUMN",
     "BASELINE_CONFIG_KEY",
     "FINANCE_STATE_TABLE",
+    "LOGISTICS_FIXTURE_TABLE",
     "RUN_TABLE",
     "BaselineLineage",
     "LedgerReset",
     "reset_sim_run_ledger",
     "seed_opening_finance_state",
+    "seed_opening_logistics_fixture",
 ]
 
 #: 실행 축이 실리는 칸 이름. 이 칸을 가진 표가 곧 **지울 대상**이다.
@@ -129,6 +168,20 @@ RUN_TABLE = "sim_runs"
 
 #: 시작 재무 상태가 사는 표.
 FINANCE_STATE_TABLE = "finance_states"
+
+#: 시작 물류 fixture 가 사는 표. 🔴 **물류가 자기 개장 여부를 읽는 그 표다.**
+LOGISTICS_FIXTURE_TABLE = "logistics_runtime_fixture"
+
+#: 🔴 **이관 대상이 아닌 칸.** 이 행이 **언제 쓰였나** 이지 사실이 언제 생겼나가 아니다.
+#:
+#: ★★ 축이 다르다. `evidence_grade` · `source_ref` · `approved_by` 는 *"이 사실이 어디서
+#:   왔나"* 라 같은 사실이면 그대로 따라가는 것이 맞다. 그런데 이 둘은 **행에 대한 기록**
+#:   이고, 이관본은 **지금** 쓰인 새 행이다. source 값을 나르면 새 행이 두 달 전에
+#:   만들어졌다고 말하게 된다 — 없는 사실이고, 에러 없이 틀린 값이다.
+#:
+#: 🔴 **`is_active` 는 여기 없다.** 그것도 기본값이 있지만 *"이 사실이 살아 있나"* 라
+#:   물류의 판정이다. 마스터가 살려 놓으면 물류가 내린 판정을 뒤집는 것이 된다.
+ROW_WRITTEN_COLUMNS = ("created_at", "updated_at")
 
 #: `config_json` 안에서 lineage 가 앉는 자리.
 BASELINE_CONFIG_KEY = "baseline"
@@ -288,6 +341,9 @@ def _insertable_columns(cursor: Any, *, schema: str, table: str) -> tuple[str, .
 
     ★ **손으로 안 고른다** (모듈 docstring). 생성 칸(`financial_limit_krw` 같은
       `GENERATED ALWAYS`)은 실으면 DB 가 막으므로 뺀다.
+
+    🔴 **`ROW_WRITTEN_COLUMNS` 도 뺀다** — 안 실으면 DB 기본값(`now()`)이 선다.
+       그 둘은 이관할 사실이 아니라 이 행이 언제 쓰였나이고, 이관본은 지금 쓰인다.
     """
     cursor.execute(
         """
@@ -301,11 +357,125 @@ def _insertable_columns(cursor: Any, *, schema: str, table: str) -> tuple[str, .
     칸들 = tuple(
         row["column_name"]
         for row in cursor.fetchall()
-        if row["is_generated"] != "ALWAYS" and row["identity_generation"] != "ALWAYS"
+        if row["is_generated"] != "ALWAYS"
+        and row["identity_generation"] != "ALWAYS"
+        and row["column_name"] not in ROW_WRITTEN_COLUMNS
     )
     if not 칸들:
         raise LookupError(f"{schema}.{table} 의 칸을 못 읽었다 — 빈 목록으로 행을 만들지 않는다")
     return 칸들
+
+
+# ── ②' 시작 물류 fixture ───────────────────────────────────────────────
+
+
+def seed_opening_logistics_fixture(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    baseline_run_id: str,
+    fixture_id: str,
+    as_of: date,
+    usage_scope: str,
+) -> str:
+    """새 실행의 **시작 물류 fixture 한 행**을 만든다. 만든 행의 이름을 돌려준다.
+
+    ★★ 재무 씨앗만 놓으면 새 실행에 물류 행이 한 행도 없고, 그때 마스터 개장은
+      anchor 를 못 찾아 `REJECTED_GAP` 으로 거절한다. **그 거절이 옳다** — 여기서
+      막을 일은 물류 없는 하루가 열리는 것이지 거절 자체가 아니다.
+
+    :param baseline_run_id: 어느 실행의 물류 사실을 이관하나. 🔴 **호출자가 준다.**
+    :param fixture_id: 새 행의 이름. 🔴 **source 것을 물려받지 않는다.**
+    :param as_of: source 를 찾는 날짜이자 **새 행이 앉는 날짜**다 — 같은 날의 같은
+        사실을 다른 실행 축에 앉히는 것이라 날짜를 새로 정하지 않는다.
+    :param usage_scope: 🔴 **어휘의 주인은 물류다.** 여기 박지 않고 눈에 보이게 받는다.
+    :raises LookupError: `(baseline_run_id, as_of, usage_scope)` 로 찾은 행이 없을 때.
+        **다른 날짜로 물러서지도 다른 scope 를 뒤지지도 않는다.**
+    """
+    for 이름, 값 in (
+        (AXIS_COLUMN, sim_run_id),
+        ("baseline_run_id", baseline_run_id),
+        ("fixture_id", fixture_id),
+        ("usage_scope", usage_scope),
+    ):
+        if not 값 or not 값.strip():
+            raise ValueError(f"{이름} 없이 시작 물류 fixture 를 만들 수 없다 — 지어내지 않는다")
+
+    schema = get_db_schema()
+    with conn.cursor() as cursor:
+        # ⚠️ **칸 목록을 손으로 안 적는다** — 물류가 칸을 더하는 날 손으로 적은
+        #   목록은 조용히 뒤처진다. 목록의 주인은 `information_schema` 다.
+        칸들 = _insertable_columns(cursor, schema=schema, table=LOGISTICS_FIXTURE_TABLE)
+        source = _read_logistics_fixture(
+            cursor,
+            schema=schema,
+            columns=칸들,
+            baseline_run_id=baseline_run_id,
+            as_of=as_of,
+            usage_scope=usage_scope,
+        )
+        if source is None:
+            raise LookupError(
+                f"이관할 물류 fixture 가 없다:"
+                f" 실행 {baseline_run_id!r} · as_of {as_of.isoformat()}"
+                f" · usage_scope {usage_scope!r}"
+                " — 다른 날짜로 물러서지도 다른 scope 를 뒤지지도 않는다"
+            )
+
+        # 🔴 **identity 는 새로, 값만 이관.** `evidence_grade` · `source_ref` ·
+        #    `approved_by` 는 **물류 소유**라 마스터가 새로 쓰지 않는다.
+        #
+        # ★ `as_of` 는 여기 없다 — source 를 찾은 그 날짜가 그대로 실린다.
+        새로정한다: dict[str, Any] = {
+            "fixture_id": fixture_id,
+            AXIS_COLUMN: sim_run_id,
+        }
+        실을것 = {**dict(source), **새로정한다}
+        # 🔴 **되짚을 수 있게 출처를 단다.** 근거 셋을 그대로 따라가는 대신
+        #    *"어느 행에서 왔나"* 를 적는 것이 마스터가 남길 몫이다.
+        실을것["note"] = (
+            f"{baseline_run_id} 의 {source['fixture_id']} 에서 이관"
+            f" (as_of={as_of.isoformat()}, usage_scope={usage_scope})"
+        )
+
+        cursor.execute(
+            sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                sql.Identifier(schema),
+                sql.Identifier(LOGISTICS_FIXTURE_TABLE),
+                sql.SQL(", ").join(sql.Identifier(one) for one in 칸들),
+                sql.SQL(", ").join(sql.Placeholder() for _ in 칸들),
+            ),
+            [실을것[one] for one in 칸들],
+        )
+    return fixture_id
+
+
+def _read_logistics_fixture(
+    cursor: Any,
+    *,
+    schema: str,
+    columns: Sequence[str],
+    baseline_run_id: str,
+    as_of: date,
+    usage_scope: str,
+) -> Mapping[str, Any] | None:
+    """이관할 물류 fixture 한 행을 **읽은 칸 그대로** 가져온다.
+
+    ★ 좁히는 셋이 곧 `uq_log_runtime_fixture` 다 — 물류 `is_open` 이 묻는 열쇠와
+      **같은 셋**이고, 그래서 최대 한 행이다.
+    """
+    cursor.execute(
+        sql.SQL(
+            "SELECT {} FROM {}.{} WHERE {} = %s AND as_of = %s AND usage_scope = %s"
+        ).format(
+            sql.SQL(", ").join(sql.Identifier(one) for one in columns),
+            sql.Identifier(schema),
+            sql.Identifier(LOGISTICS_FIXTURE_TABLE),
+            sql.Identifier(AXIS_COLUMN),
+        ),
+        [baseline_run_id, as_of, usage_scope],
+    )
+    return cursor.fetchone()
 
 
 def _read_finance_state(
