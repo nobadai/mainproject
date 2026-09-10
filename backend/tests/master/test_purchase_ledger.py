@@ -37,6 +37,10 @@ from app.master.commitment import ApprovedCommitment, ArrivalLeg, build_commitme
 
 AS_OF = date(2025, 12, 31)
 
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
+
 
 @pytest.fixture(autouse=True)
 def 전이_등록소를_비운다() -> Iterator[None]:
@@ -190,7 +194,7 @@ def _rows_of(commitment: ApprovedCommitment) -> tuple[ledger.PurchaseWrite, ...]
         leg.seq: transition.purchase_id_for(commitment, leg.seq)
         for leg in commitment.arrival_schedule
     }
-    return ledger.build_purchase_rows(commitment, purchase_ids=purchase_ids)
+    return ledger.build_purchase_rows(commitment, purchase_ids=purchase_ids, sim_run_id=실행축)
 
 
 # ── ① 회차 하나면 header 한 행 · 품목 한 줄 ─────────────────────────────
@@ -216,7 +220,9 @@ def test_채우는_값이_설계대로다() -> None:
     assert row.payment_due_date == AS_OF
     assert row.proposal_id == "PROP-REQ-1"
     assert row.scenario_id == "SCN-REQ-1-보수"
-    assert row.sim_run_id == ledger.BURN_IN_SIM_RUN_ID
+    # 🔴 **운영 상수가 아니라 이 검사가 준 축이다** (2026-09-10). 같은 값을 쓰면
+    #    `sim_run_id_for` 가 상수를 다시 읽어도 이 줄이 그대로 통과한다.
+    assert row.sim_run_id == 실행축
     # 🟢 3,587kg × 854원 = 3,063,298원 — 실측 예가 정확히 떨어진다.
     assert row.unit_price_krw_per_kg == Decimal("854.000000")
     assert row.line_amount_krw == Decimal("3063298.000000")
@@ -254,12 +260,11 @@ def test_원장이_재무_persist_보다_먼저_불린다() -> None:
         conn.log = log  # 원장 SQL 과 부서 persist 를 **한 줄에** 세운다
         return conn
 
-    out = transition.apply_approval(_commitment(), connect=_connect)
+    out = transition.apply_approval(_commitment(), connect=_connect, sim_run_id=실행축)
 
     assert out.status == "APPLIED"
     순서 = [
-        "ledger" if isinstance(name, str) and "INSERT INTO" in name else name
-        for name, _ in log
+        "ledger" if isinstance(name, str) and "INSERT INTO" in name else name for name, _ in log
     ]
     assert 순서.index("ledger") < 순서.index("finance.persist"), (
         "매입 원장이 재무보다 뒤에 가면 payables 가 FK 에서 터진다"
@@ -288,7 +293,7 @@ def test_회차가_둘인데_금액이_비면_NOT_APPLIED_이고_커넥션을_�
         calls.append(1)
         return 가짜커넥션()
 
-    out = transition.apply_approval(두회차, connect=_connect)
+    out = transition.apply_approval(두회차, connect=_connect, sim_run_id=실행축)
 
     assert out.status == "NOT_APPLIED"
     assert "1, 2회차 금액이 없어" in out.reason, "비어 있는 seq 를 이름으로 대야 한다"
@@ -306,6 +311,7 @@ def test_비어_있는_회차만_사유에_이름이_오른다() -> None:
     out = transition.apply_approval(
         _commitment(legs=_두회차(amounts=(1708000.0, None))),
         connect=lambda: 가짜커넥션(),
+        sim_run_id=실행축,
     )
 
     assert out.status == "NOT_APPLIED"
@@ -355,7 +361,9 @@ def test_다회차가_전이를_지나_purchases_두_행으로_나간다() -> No
         conn.log = log
         return conn
 
-    out = transition.apply_approval(_commitment(legs=_두회차()), connect=_connect)
+    out = transition.apply_approval(
+        _commitment(legs=_두회차()), connect=_connect, sim_run_id=실행축
+    )
 
     assert out.status == "APPLIED"
     나간_SQL = [text for text, _ in conn.log]
@@ -377,7 +385,9 @@ def test_다회차_지급일이_하나라도_없으면_NOT_APPLIED_다() -> None
         return 가짜커넥션()
 
     out = transition.apply_approval(
-        _commitment(legs=_두회차(payment_due_dates=(AS_OF, None))), connect=_connect
+        _commitment(legs=_두회차(payment_due_dates=(AS_OF, None))),
+        connect=_connect,
+        sim_run_id=실행축,
     )
 
     assert out.status == "NOT_APPLIED"
@@ -412,7 +422,7 @@ def test_지급일이_없으면_NOT_APPLIED_다() -> None:
         return 가짜커넥션()
 
     out = transition.apply_approval(
-        _commitment(legs=(_leg(payment_due_date=None),)), connect=_connect
+        _commitment(legs=(_leg(payment_due_date=None),)), connect=_connect, sim_run_id=실행축
     )
 
     assert out.status == "NOT_APPLIED"
@@ -435,9 +445,7 @@ def test_item_id_를_items_표에서_조회한다() -> None:
 
     ledger.persist_purchases(conn, _rows_of(_commitment()))
 
-    조회 = [
-        (text, params) for text, params in conn.log if "FROM" in text and "items" in text
-    ]
+    조회 = [(text, params) for text, params in conn.log if "FROM" in text and "items" in text]
     assert len(조회) == 1, "품목마다 items 표를 한 번 읽어야 한다"
     assert "item_name" in 조회[0][0], "한글 품목명으로 찾는다"
     assert 조회[0][1] == ["배추"]

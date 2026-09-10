@@ -51,7 +51,6 @@ from psycopg import sql
 
 from app.finance.db import get_db_schema
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 # ⚠️ **`transition` 을 모듈 맨 위에서 부르지 않는다.** 전이 경계가 이 파일을 부르고
 #    (`apply_approval`), 이 파일은 그쪽이 소유한 ID 짓는 함수를 쓴다 — 양쪽 다 위에서
@@ -145,24 +144,39 @@ def ledger_block_reason(commitment: ApprovedCommitment) -> str:
     return ""
 
 
-def sim_run_id_for(commitment: ApprovedCommitment) -> str:
-    """이 승인이 속한 시뮬레이션 실행.
+def sim_run_id_for(commitment: ApprovedCommitment, *, sim_run_id: str | None) -> str:
+    """이 승인이 속한 시뮬레이션 실행. **받은 축을 돌려준다.**
 
     🔴 **마스터가 지어내지 않는다.** `purchases.sim_run_id` 는 NOT NULL 이고
        `sim_runs` 를 참조하는 FK 다 — 없는 키를 넣으면 FK 가 막는다.
 
-    ⚠️ **오늘 마스터가 승인마다 들고 다니는 `sim_run_id` 는 없다.** 재무는
-       `load_finance_state_row(as_of)["sim_run_id"]` 로, 물류는 runtime fixture 의
-       행으로 각자 자기 것을 찾는다. 마스터가 그 둘 중 하나를 다시 읽으면 남의 조회를
-       베끼는 것이 되므로, **마스터가 이미 소유한 하나뿐인 포인터**를 쓴다 —
-       `ledger_repository.BURN_IN_SIM_RUN_ID` 이고 그 모듈이 *"지금은 하나뿐이라
-       상수로 둔다 — 여러 개가 되면 요청 파라미터로 올린다"* 고 적어 둔 자리다.
+    ★★ **그 날이 왔다** (2026-09-10). 이 함수는 *"실행이 둘이 되는 날 여기가 갈린다 —
+      그때는 마스터 실행 이력이 `sim_run_id` 를 싣도록 계약을 세우고 이 함수가 그것을
+      읽어야 한다"* 고 적어 두었었다. `master_agent_runs.sim_run_id` 가 그 계약이고
+      (`Refs #150` · 2026-09-08), `decision_service.record_decision` 이 결정이 걸린
+      실행 행에서 그 값을 읽어 여기까지 흘린다.
 
-    🔴 **실행이 둘이 되는 날 여기가 갈린다.** 그때는 마스터 실행 이력이
-       `sim_run_id` 를 싣도록 계약을 세우고 이 함수가 그것을 읽어야 한다.
-       상수를 늘리는 것으로 때우면 재무 채무와 매입 원장이 서로 다른 실행에 앉는다.
+    ```text
+    ~2026-09-09   BURN_IN_SIM_RUN_ID 를 돌려준다        실행이 하나뿐이었다
+    2026-09-10~   받은 축을 돌려준다                     안 받으면 터진다
+    ```
+
+    🔴 **상수로 메우지 않는다.** 축을 못 받았을 때 조용히 번인으로 떨어지면 **재무
+       채무와 매입 원장이 서로 다른 실행에 앉는다** — 재무는 자기 축(`finance_states`)
+       을 읽고 여기만 번인을 쓰기 때문이고, 그 어긋남은 아무 오류도 안 낸다.
+
+    ⚠️ **`commitment` 을 여전히 받는다.** 지금은 안 읽지만 *"이 승인의 축"* 이라는
+      물음이 그대로이고, 부르는 쪽이 승인마다 축을 짚는다는 사실이 인자에 남아야 한다.
+
+    :param sim_run_id: 이 결정이 걸린 실행. 🔴 **기본값이 없다.**
+    :raises ValueError: 축이 비었을 때. **막고 사유를 낸다.**
     """
-    return BURN_IN_SIM_RUN_ID
+    if not sim_run_id or not sim_run_id.strip():
+        raise ValueError(
+            "sim_run_id 없이 매입 원장을 쓸 수 없다 — 어느 실행의 장부인지가 없으면"
+            " 재무 채무와 다른 실행에 앉는다. 상수로 메우지 않는다"
+        )
+    return sim_run_id
 
 
 @dataclass(frozen=True)
@@ -193,7 +207,7 @@ class PurchaseWrite:
 
 
 def build_purchase_rows(
-    commitment: ApprovedCommitment, *, purchase_ids: Mapping[int, str]
+    commitment: ApprovedCommitment, *, purchase_ids: Mapping[int, str], sim_run_id: str | None
 ) -> tuple[PurchaseWrite, ...]:
     """승인 약정을 매입 원장 행으로 옮긴다. **계산만 한다 — DB 를 부르지 않는다.**
 
@@ -203,8 +217,11 @@ def build_purchase_rows(
     :param purchase_ids: 회차(`seq`) → `purchase_id` 매핑. 재무에 넘기는 것과 **같은
         매핑**이다 — 여기서 따로 지으면 `payables.purchase_id` 가 가리키는 부모 행과
         이름이 갈린다.
+    :param sim_run_id: 어느 실행의 장부인가. 🔴 **받아서 흘린다** — 여기서 상수를
+        읽지 않는다 (`sim_run_id_for` 의 근거).
     :raises PurchaseLedgerNotWritable: 회차 금액이나 지급일이 없거나, 단가가
         DB CHECK 를 못 지킬 때.
+    :raises ValueError: 축을 못 받았을 때.
     """
     legs = tuple(commitment.arrival_schedule)
     if not legs:
@@ -220,10 +237,9 @@ def build_purchase_rows(
     if blocked:
         raise PurchaseLedgerNotWritable(blocked)
 
-    sim_run_id = sim_run_id_for(commitment)
+    축 = sim_run_id_for(commitment, sim_run_id=sim_run_id)
     return tuple(
-        _row_for_leg(commitment, leg, purchase_ids=purchase_ids, sim_run_id=sim_run_id)
-        for leg in legs
+        _row_for_leg(commitment, leg, purchase_ids=purchase_ids, sim_run_id=축) for leg in legs
     )
 
 

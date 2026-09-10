@@ -204,28 +204,29 @@ def purchase_ids_of(commitment: ApprovedCommitment) -> dict[int, str]:
     return {leg.seq: purchase_id_for(commitment, leg.seq) for leg in commitment.arrival_schedule}
 
 
-def financing_mode_of(commitment: ApprovedCommitment) -> str:
+def financing_mode_of(commitment: ApprovedCommitment, *, sim_run_id: str | None) -> str:
     """이 승인이 속한 실행의 재무 축.
 
     ★ **마스터가 이미 읽고 나르는 값이다.** `sim_runs.financing_mode` 를
       `ledger_repository` 가 읽고 `service.py` 가 응답에 싣는다 — 지어내는 값이
       아니라서 재무가 요청한 *"호출자가 축을 명시"* 가 성립한다.
 
-    ⚠️ `sim_run_id_for` 와 같은 자리에서 온다. 그 함수가 *"마스터가 이미 소유한
-      하나뿐인 포인터"* 를 쓰므로 여기도 같은 실행을 가리킨다.
+    ⚠️ `sim_run_id_for` 와 같은 자리에서 온다. 그 함수가 **받은 축**을 돌려주므로
+      (2026-09-10) 여기도 부르는 쪽이 지정한 같은 실행을 가리킨다.
 
+    :param sim_run_id: 물릴 승인이 앉은 실행. 🔴 **기본값이 없다** — 취소가 승인과
+        다른 실행의 행을 물리면 장부가 양쪽 다 틀린다.
+    :raises ValueError: 축을 못 받았을 때.
     :raises LookupError: 그 실행을 못 찾을 때. **지어내지 않는다.**
     """
     from app.master.ledger import sim_run_id_for
     from app.master.ledger_repository import get_burn_in
 
-    run = get_burn_in(sim_run_id_for(commitment))
+    축 = sim_run_id_for(commitment, sim_run_id=sim_run_id)
+    run = get_burn_in(축)
     mode = run.get("financing_mode")
     if not isinstance(mode, str) or not mode.strip():
-        raise LookupError(
-            f"sim_runs.financing_mode 를 읽을 수 없다 ({sim_run_id_for(commitment)}) —"
-            " 축을 지어내지 않는다"
-        )
+        raise LookupError(f"sim_runs.financing_mode 를 읽을 수 없다 ({축}) — 축을 지어내지 않는다")
     return mode
 
 
@@ -233,6 +234,7 @@ def undo_approval(
     commitment: ApprovedCommitment,
     *,
     cancelled_on: date,
+    sim_run_id: str | None,
     connect: Any = None,
 ) -> CancellationOut:
     """승인 하나를 다섯 자리에서 **한 트랜잭션으로** 물린다.
@@ -244,6 +246,8 @@ def undo_approval(
       취소했다"* 가 장부에 남는다 — 그건 날짜를 잘못 넘긴 것이지 사건이 아니다.
 
     :param cancelled_on: **취소 사건일.** `commitment.as_of`(승인일)와 다를 수 있다.
+    :param sim_run_id: 물릴 승인이 앉은 실행. 🔴 **기본값이 없다 · 상수로 안 메운다** —
+        `apply_approval` 과 대칭이다. 못 받으면 `FAILED` 가 사유를 싣는다.
     """
     if cancelled_on < commitment.as_of:
         return CancellationOut(
@@ -268,7 +272,7 @@ def undo_approval(
     try:
         # ★ **커넥션을 열기 전에 읽는다.** 축을 못 읽으면 트랜잭션을 시작하지도 않는다 —
         #   `apply_approval` 이 build 를 커넥션 밖에서 부르는 것과 같은 규율이다.
-        financing_mode = financing_mode_of(commitment)
+        financing_mode = financing_mode_of(commitment, sim_run_id=sim_run_id)
     except Exception as exc:  # noqa: BLE001 - 축을 못 읽은 것도 값으로 돌려준다.
         return CancellationOut(status="FAILED", reason=f"재무 축을 못 읽었다: {exc}")
     # 🔴 **취소일 + 1일이다.** 승인과 **같은 규칙**이고, 부서가 다시 계산하지 않게

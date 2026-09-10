@@ -28,6 +28,10 @@ from app.master.commitment import ApprovedCommitment, ArrivalLeg
 #:   이 하나가 두 규칙을 갈라 준다.
 FRIDAY = date(2026, 1, 2)
 
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
+
 
 @pytest.fixture(autouse=True)
 def 전이_등록소를_비운다() -> Iterator[None]:
@@ -203,7 +207,7 @@ def test_재무_build_는_두_값을_키워드로_받는다() -> None:
     """★ `target_state_date` 와 `purchase_ids` 둘 다 **키워드**다."""
     finance, _ = _등록한다()
 
-    out = transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
+    out = transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션(), sim_run_id=실행축)
 
     assert out.status == "APPLIED"
     assert len(finance.calls) == 1
@@ -217,7 +221,7 @@ def test_물류_build_는_날짜를_키워드로_받는다() -> None:
     받았고, 그 자리에서 규약이 실제와 갈렸다."""
     _, logistics = _등록한다()
 
-    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
+    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션(), sim_run_id=실행축)
 
     assert len(logistics.calls) == 1
     assert isinstance(logistics.calls[0][0], date)
@@ -254,7 +258,7 @@ def test_두_파트가_같은_purchase_ids_를_받는다() -> None:
     """
     finance, logistics = _등록한다()
 
-    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
+    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션(), sim_run_id=실행축)
 
     assert logistics.calls[0][1], "물류가 빈 매핑을 받았다 — 참조가 안 실렸다"
     assert finance.calls[0][1] == logistics.calls[0][1], (
@@ -268,7 +272,7 @@ def test_물류가_받는_purchase_id_가_원장_키와_같다() -> None:
     commitment = _commitment()
     _, logistics = _등록한다()
 
-    transition.apply_approval(commitment, connect=lambda: 가짜커넥션())
+    transition.apply_approval(commitment, connect=lambda: 가짜커넥션(), sim_run_id=실행축)
 
     받은것 = logistics.calls[0][1]
     기대 = {
@@ -283,7 +287,9 @@ def test_회차가_없으면_물류도_빈_매핑이다() -> None:
     **없다**는 것은 정상 상태다."""
     _, logistics = _등록한다()
 
-    out = transition.apply_approval(_commitment(legs=()), connect=lambda: 가짜커넥션())
+    out = transition.apply_approval(
+        _commitment(legs=()), connect=lambda: 가짜커넥션(), sim_run_id=실행축
+    )
 
     assert out.status == "APPLIED"
     assert logistics.calls[0][1] == {}
@@ -293,7 +299,7 @@ def test_두_파트가_같은_날짜를_받는다() -> None:
     """★ 같은 승인분인데 재무와 물류가 다른 날을 딛으면 두 장부가 갈린다."""
     finance, logistics = _등록한다()
 
-    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션())
+    transition.apply_approval(_commitment(), connect=lambda: 가짜커넥션(), sim_run_id=실행축)
 
     assert finance.calls[0][0] == logistics.calls[0][0]
 
@@ -310,7 +316,9 @@ def test_상태가_설_날은_승인_다음_달력일이다() -> None:
     finance, logistics = _등록한다()
     assert FRIDAY.weekday() == 4, "고정값이 금요일이 아니면 이 검사가 아무것도 안 잰다"
 
-    transition.apply_approval(_commitment(as_of=FRIDAY), connect=lambda: 가짜커넥션())
+    transition.apply_approval(
+        _commitment(as_of=FRIDAY), connect=lambda: 가짜커넥션(), sim_run_id=실행축
+    )
 
     토요일 = date(2026, 1, 3)
     assert 토요일.weekday() == 5
@@ -323,7 +331,9 @@ def test_평일_승인도_그냥_다음_날이다() -> None:
     finance, _ = _등록한다()
     수요일 = date(2025, 12, 31)
 
-    transition.apply_approval(_commitment(as_of=수요일), connect=lambda: 가짜커넥션())
+    transition.apply_approval(
+        _commitment(as_of=수요일), connect=lambda: 가짜커넥션(), sim_run_id=실행축
+    )
 
     assert finance.calls[0][0] == date(2026, 1, 1)
 
@@ -424,7 +434,9 @@ def test_회차가_없으면_빈_매핑이고_예외가_아니다() -> None:
     """
     finance, _ = _등록한다()
 
-    out = transition.apply_approval(_commitment(legs=()), connect=lambda: 가짜커넥션())
+    out = transition.apply_approval(
+        _commitment(legs=()), connect=lambda: 가짜커넥션(), sim_run_id=실행축
+    )
 
     assert out.status == "APPLIED"
     assert finance.calls[0][1] == {}
@@ -441,7 +453,7 @@ def test_미등록이면_여전히_NOT_APPLIED_이고_커넥션을_안_연다() 
         calls.append(1)
         return 가짜커넥션()
 
-    out = transition.apply_approval(_commitment(), connect=_connect)
+    out = transition.apply_approval(_commitment(), connect=_connect, sim_run_id=실행축)
 
     assert out.status == "NOT_APPLIED"
     assert out.missing == ["finance", "logistics"]

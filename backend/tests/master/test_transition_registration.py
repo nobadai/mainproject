@@ -30,6 +30,10 @@ from app.master.commitment import ApprovedCommitment, ArrivalLeg
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 AS_OF = date(2025, 12, 31)
+
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
 TARGET_STATE_DATE = AS_OF + timedelta(days=1)
 
 
@@ -220,16 +224,22 @@ def test_물류_어댑터가_마스터가_소유한_sim_run_id_를_받았다() -
     """🔴 실행 정체성은 **마스터가 정한다.** 물류 모듈에 상수로 박으면 실행이 둘이
     되는 날 물류 코드를 고쳐야 한다.
 
-    ★ 값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다 — 매입 원장
-      (`ledger.sim_run_id_for`)이 가리키는 것과 같은 값이어야 재무 채무·매입 원장·
-      재고 예정이 한 실행에 앉는다.
+    ★ 조립 뿌리가 그 값을 **눈에 보이게** 넣는다 — 값의 주인은
+      `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다.
+
+    ⚠️ **매입 원장은 2026-09-10 부터 이 상수를 안 쓴다.** `ledger.sim_run_id_for` 는
+      부르는 쪽이 준 축을 돌려주고, 등록소는 프로세스 시작 때 한 번 묶이므로 아직
+      그 축을 못 받는다. 그 어긋남은 `bootstrap` 의 주석이 적어 두었고 **여기서
+      덮지 않는다** — 아래 줄이 그 사실을 그대로 잰다.
     """
     from app.master import ledger
 
     adapter = transition.registered()["logistics"]
 
     assert adapter._sim_run_id == BURN_IN_SIM_RUN_ID
-    assert adapter._sim_run_id == ledger.sim_run_id_for(_commitment())
+    # 🔴 원장은 **받은 축**을 돌려준다 — 등록소가 든 상수를 되읽지 않는다.
+    assert ledger.sim_run_id_for(_commitment(), sim_run_id=실행축) == 실행축
+    assert ledger.sim_run_id_for(_commitment(), sim_run_id=실행축) != BURN_IN_SIM_RUN_ID
 
 
 # ── ⑦ 등록된 실제 구현으로 승인 한 건이 통과한다 ────────────────────────
@@ -242,7 +252,7 @@ def test_승인이_두_파트를_다_거쳐_한_번_커밋한다(재무_읽기�
     """
     conn = 가짜커넥션()
 
-    out = transition.apply_approval(_commitment(), connect=lambda: conn)
+    out = transition.apply_approval(_commitment(), connect=lambda: conn, sim_run_id=실행축)
 
     assert out.status == "APPLIED", out.reason
     assert out.parts == ["finance", "logistics"]
@@ -259,7 +269,7 @@ def test_세_장부가_한_커넥션으로_다_쓰인다(재무_읽기를_대역
     """★ 매입 원장 · 재무 채무 · 물류 입고 예정 셋이 다 나가야 한다."""
     conn = 가짜커넥션()
 
-    transition.apply_approval(_commitment(), connect=lambda: conn)
+    transition.apply_approval(_commitment(), connect=lambda: conn, sim_run_id=실행축)
 
     문장 = [text for text, _ in conn.executed]
     assert any("INSERT INTO" in t and "purchases" in t for t in 문장), "매입 원장이 안 나갔다"
@@ -281,7 +291,7 @@ def test_물류_write_가_상태가_설_날의_행을_고른다(재무_읽기를
     """
     conn = 가짜커넥션()
 
-    transition.apply_approval(_commitment(), connect=lambda: conn)
+    transition.apply_approval(_commitment(), connect=lambda: conn, sim_run_id=실행축)
 
     물류 = [params for text, params in conn.executed if "logistics_runtime_fixture" in text]
     # ★ 읽기 하나 · 쓰기 하나다 — 물류가 그 행을 **잠그고**(FOR UPDATE) 고친다.

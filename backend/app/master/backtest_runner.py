@@ -2,9 +2,13 @@
 backtest_runner.py — **범위를 하루씩 걸으며 하루 실행을 부른다.**
 
 ```text
-walk(start=..., end=..., now=...)   start..end 를 하루씩 걷는다
-                                    개장일마다 run_scheduled_day 를 부른다
+walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷는다
+                                                    개장일마다 run_scheduled_day 를 부른다
 ```
+
+🔴 **실행 축이 인자다. 기본값이 없다** (2026-09-10). 179일을 **어느 실행에 쌓는지**가
+   곧 그 곡선의 정체다 — 기본값을 두면 말 안 하고 번인(`SIM-BURNIN-202512`)에 쌓을 수
+   있고, 사람이 심어 둔 30일 위에 179일이 겹쳐 앉는다.
 
 🔴 **여기에 판단이 없다. 개장도 입고도 채권도 수금도 출고도 여기서 다시 짜지 않는다.**
 
@@ -246,6 +250,7 @@ class WalkResult:
 
 def walk(
     *,
+    sim_run_id: str,
     start: date,
     end: date,
     now: datetime,
@@ -264,6 +269,15 @@ def walk(
       그러면 개장 · 입고 · 채권 · 수금 · 장부 관문을 통째로 건너뛰고, 그 위에서 나온
       *"사고 0건"* 은 아무것도 증명하지 않는다.
 
+    :param sim_run_id: 어느 실행에 이 걸음을 쌓는가. 🔴 **기본값이 없다 — 안 주면
+        터진다.** 179일을 어느 실행에 쌓는지가 곧 그 곡선의 정체이고, 기본값을 두면
+        **말 안 하고 번인에 쌓을 수 있다.** 그러면 사람이 심어 둔 30일 위에 179일이
+        겹쳐 앉고, 어느 행이 번인이고 어느 행이 걷기인지 되가를 방법이 없다.
+
+        ★ **여기서 실행을 만들지 않는다.** 행을 세우는 것은 `sim_run.create_sim_run`
+          이고, 이 파일은 **받은 축을 나르기만** 한다 — 걷기가 실행을 만들면 같은
+          범위를 두 번 걸을 때마다 실행이 하나씩 늘어난다.
+
     :param now: 걷는 동안 쓸 시각. 🔴 **인자다 — 이 파일은 시계를 안 읽는다.**
         날짜는 안 쓰고 **시각만** 떼어 걷는 날마다 붙인다 (모듈 docstring).
     :param calendar: 개장 축. `is_market_open` 하나만 부른다.
@@ -272,9 +286,16 @@ def walk(
         `None` 을 안 받는다 (`clock.py` · `verifier.py` 와 같은 규율).
     :param ticks: 소요 시간을 재는 단조 시계. 🔴 **벽시계가 아니다** — 날짜도
         시간대도 안 만들고 *"얼마나 걸렸나"* 만 답한다. 검사가 고정값을 꽂는다.
-    :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없을 때.
-        **막고 사유를 낸다** — 조용히 바로잡지 않는다.
+    :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
+        빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
     """
+    if not sim_run_id.strip():
+        # 🔴 **상수로 메우지 않는다.** 조용히 번인으로 떨어지면 재무 채무와 매입
+        #    원장이 서로 다른 실행에 앉고, 그때는 아무 오류도 안 난다.
+        raise ValueError(
+            "sim_run_id 없이는 걸을 수 없다 — 어느 실행에 쌓는지가 곡선의 정체다."
+            " 실행을 먼저 만들고(`sim_run.create_sim_run`) 그 이름을 넘겨라"
+        )
     if start > end:
         raise ValueError(
             f"걷기 범위가 거꾸로다: {start.isoformat()} ~ {end.isoformat()}"
@@ -323,7 +344,10 @@ def walk(
             gate_result=readiness(day),
         )
         try:
-            outcome = run_day_fn(action, policy_version=policy_version)
+            # 🔴 **받은 축을 그대로 넘긴다.** 여기서 상수를 다시 읽거나 이름을
+            #    고쳐 짓지 않는다 — 그러면 걷기가 부른 하루와 걷기가 말한 실행이
+            #    갈리고, 성적표가 자기가 무엇을 쟀는지 모르게 된다.
+            outcome = run_day_fn(action, policy_version=policy_version, sim_run_id=sim_run_id)
         except Exception as exc:  # noqa: BLE001 - 하루가 터져도 다음 날은 걷는다.
             # ★ **터진 날도 사고로 남고 걷기는 이어진다.** 여기서 raise 하면 나머지
             #   날을 통째로 못 본다.
@@ -442,6 +466,11 @@ def _parser() -> argparse.ArgumentParser:
         prog="python -m app.master.backtest_runner",
         description="범위를 하루씩 걸으며 개장일마다 하루 실행(run_scheduled_day)을 부른다",
     )
+    parser.add_argument(
+        "--sim-run-id",
+        required=True,
+        help="어느 실행에 쌓는가 (예: SIM-WALK-202601) · 🔴 기본값 없음 — 안 주면 막는다",
+    )
     parser.add_argument("--start", required=True, help="걷기 시작일 (YYYY-MM-DD)")
     parser.add_argument("--end", required=True, help="걷기 종료일 (YYYY-MM-DD · 포함)")
     parser.add_argument(
@@ -528,6 +557,7 @@ def main(argv: Sequence[str]) -> int:
     #   거기서 전역 등록소를 채우면 검사가 만든 세상을 조립 뿌리가 덮어쓴다.
     wire_registries()
     result = walk(
+        sim_run_id=args.sim_run_id,
         start=date.fromisoformat(args.start),
         end=date.fromisoformat(args.end),
         now=datetime.fromisoformat(args.now),

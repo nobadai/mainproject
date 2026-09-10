@@ -485,6 +485,7 @@ def _arrival_blocked(commitment: ApprovedCommitment, target_state_date: date) ->
 def apply_approval(
     commitment: ApprovedCommitment,
     *,
+    sim_run_id: str | None,
     connect: Callable[[], Any] | None = None,
 ) -> TransitionOut:
     """승인분을 재무·물류 장부에 **한 트랜잭션으로** 반영한다.
@@ -515,6 +516,10 @@ def apply_approval(
     ★ **다만 삼키되 사유는 반드시 남긴다.** 조용히 `FAILED` 만 돌려주면 무엇이
       터졌는지 아무 데도 안 남는다.
 
+    :param sim_run_id: 어느 실행의 장부에 반영하는가. 🔴 **기본값이 없다** — 이
+                    함수는 축을 **나르기만** 하고 상수를 읽지 않는다
+                    (`ledger.sim_run_id_for`). 축이 없으면 원장 계산이 터지고
+                    `FAILED` 가 사유를 싣는다 — 조용히 번인에 앉지 않는다.
     :param connect: 커넥션 팩토리. 안 주면 `app.finance.db.get_connection` 을 쓴다 —
                     재무·물류가 같은 DB(같은 `DB_*`)를 쓰므로 커넥션도 하나면 된다.
     """
@@ -558,7 +563,11 @@ def apply_approval(
         }
         # ★ 매입 원장도 **커넥션 밖에서** 계산한다 — 재무·물류와 같은 규율이다.
         #   `items` 조회만 커넥션이 필요하고 그것은 `persist_purchases` 안에 있다.
-        ledger_rows = build_purchase_rows(commitment, purchase_ids=purchase_ids)
+        # 🔴 **받은 축을 그대로 넘긴다.** 여기서 상수를 읽으면 이 함수가 축의
+        #    주인이 되고, 부르는 쪽이 무엇을 지정하든 소용이 없어진다.
+        ledger_rows = build_purchase_rows(
+            commitment, purchase_ids=purchase_ids, sim_run_id=sim_run_id
+        )
         finance_row = finance.build(
             commitment,
             target_state_date=target_state_date,
