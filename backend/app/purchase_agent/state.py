@@ -90,6 +90,31 @@ class PurchaseAgentState(TypedDict):
     #
     # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
     purchase_payment_days: NotRequired[int | None]
+    # ``execution_calendar``: 마스터가 싣는 **실행일 봉투** (`#300`/`#303`).
+    #
+    #     {"non_execution_days": ["2026-02-17", …], "horizon_end": "2026-03-02"}
+    #
+    # 🔴 **축이 「살 수 있는 날」이다** — `is_open` 이고, 문 앞 게이트의 「예측이 있어 도는
+    # 날」과 **다르다**. 마스터 `service._execution_calendar_payload` 가 그 둘을 갈라 적어
+    # 두었다: 2026년 토요일 45일에 가락이 서므로, 문 앞 축으로 밀면 **살 수 있는 날에 못
+    # 산다고 계획한다.**
+    #
+    # ★ **인용으로는 안 풀린다.** `is_execution_day` 를 import 해도 `calendar` 를 못 줘서
+    # 주말만 피하게 된다 — 값으로 받아야 한다. N4·N5 와 같은 모양이다: **값은 아는 쪽이,
+    # 계산은 쓰는 쪽이.**
+    #
+    # 🔴 **``None`` 과 ``[]`` 가 다른 사실이다** (규칙 3). ``None`` 은 «봉투가 안 왔다» 이고
+    # 빈 목록은 «그 지평에 안 서는 날이 없다» 는 확정이다. 마스터는 지평을 다 못 덮으면
+    # **통째로 안 싣는다** — 반쪽 달력보다 없는 달력이 낫다는 판단이고, 받는 쪽에서
+    # ``or []`` 로 접으면 그 구분이 여기서 사라진다.
+    #
+    # ★ 읽는 자리는 ⑦ ``self_check.market_open_days`` 하나다. 없으면 컷하지 않고
+    # **미검사로 고지**한다.
+    #
+    # ⚠️ **지금은 이 검사가 한 번도 안 걸린다** (2026-09-10 실측). 회차가 155건 전부
+    # 하나뿐이고 그 하나가 `as_of` 이며, `as_of` 는 마스터 문 앞 게이트가 실행일만
+    # 통과시킨다. **분할이 서는 날**(`#308`) 2·3회차가 `as_of + k` 로 가면서 처음 걸린다.
+    execution_calendar: NotRequired[dict | None]
     # ``inbound_lead_days``: N4. 입고 리드타임(일). **도착일 = 회차일 + N4**이고, 도착일이
     # 없으면 ⑥의 회차별 ``cap_by_date`` 검사가 성립하지 않는다 (#58).
     #
@@ -239,6 +264,7 @@ def build_initial_state(
     *,
     feedback: dict | None = None,
     quotes: QuoteSource | None = None,
+    execution_calendar: dict | None = None,
 ) -> PurchaseAgentState:
     """T0 스냅샷을 만든다 — **포트 ①~⑤를 한 번씩 호출한다 (T0 only)**.
 
@@ -289,6 +315,11 @@ def build_initial_state(
         "margin_defense_floor_rate": extras["margin_defense_floor_rate"],
         "projected_cash_min": ports.get_projected_cash_min(as_of, cash_horizon_days),
         "feedback": feedback,
+        # ★ **포트로 안 받는다.** 실행일 봉투는 부서가 낸 값이 아니라 마스터가 자기 달력에서
+        #   만든 것이라 ``approved_commitments`` 와 같은 자리다 — 운영은 어댑터가 봉투에서
+        #   읽고, 검사는 여기로 넣는다. 🔴 **기본값이 ``None``** 이고 그것은 «안 왔다» 다
+        #   (규칙 3) — 빈 목록으로 채우면 «안 서는 날이 없다» 는 없는 사실이 생긴다.
+        "execution_calendar": execution_calendar,
         "context_docs": [],
         "context_loop_count": 0,
         "rejected_reasons": [],
