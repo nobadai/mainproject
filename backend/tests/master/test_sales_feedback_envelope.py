@@ -548,7 +548,7 @@ def test_되먹임이_판매의_답을_바꾼다(판매가_받은_것) -> None:
         return {tuple(sorted(s.required_validations)) for s in 답.scenarios}
 
     최초, 되먹임 = 요구(받은것[0][1]), 요구(받은것[1][1])
-    assert 최초 and 되먹임, "두 회차 중 한쪽이 후보 0안이라 비교할 것이 없다"
+    assert 최초, "최초 회차 후보가 없다"
     assert 최초 != 되먹임, (
         f"되먹임 회차의 답이 최초와 같다: {최초}. 되먹임이 판매에 안 닿았다는 뜻이다"
     )

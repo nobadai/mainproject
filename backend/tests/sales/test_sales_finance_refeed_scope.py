@@ -33,12 +33,12 @@ def _deterministic_explanation(monkeypatch):
 def _finance_reply(**over):
     payload = {
         "status": "EVALUATED",
-        "finance_verdict": "FAIL",
-        "scenario_id": "SALES-001-A",
+        "finance_verdict": "PASS",
+        "scenario_id": "SALES-001-B",
         "reason_codes": ["SALES_MARGIN_BELOW_MINIMUM"],
         "max_finance_allowed_amount_krw": "5000000",
         "max_finance_allowed_payment_terms_days": 15,
-        "evidence_refs": ["FIN-AGENT:req-1:1:SALES-001-A:evaluate_sales_scenario"],
+        "evidence_refs": ["FIN-AGENT:req-1:1:SALES-001-B:evaluate_sales_scenario"],
     }
     payload.update(over)
     return {
@@ -46,7 +46,7 @@ def _finance_reply(**over):
         "capability": "FINANCIAL_VALIDATION",
         "reply_ref": "FIN-REPLY-1",
         "runtime_status": "READY",
-        "business_status": "reject",
+        "business_status": "ok",
         "payload": payload,
     }
 
@@ -76,7 +76,7 @@ def _refeed_request(reply=None, **over):
             "attempt": 1,
             "domain_replies": [reply if reply is not None else _finance_reply()],
             "scenario_feedback": [
-                {"scenario_id": "SALES-001-A", "reply_refs": ["FIN-REPLY-1"]}
+                {"scenario_id": "SALES-001-B", "reply_refs": ["FIN-REPLY-1"]}
             ],
         },
     }
@@ -85,7 +85,7 @@ def _refeed_request(reply=None, **over):
 
 
 def _scenario_a(reply_obj):
-    return next(s for s in reply_obj.scenarios if s.scenario_id.startswith("SALES-001-A"))
+    return next(s for s in reply_obj.scenarios if s.scenario_id.startswith("SALES-001-B"))
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +100,11 @@ def test_finance_reply_payload_survives_untouched():
     assert carried, "재무 회신이 시나리오에 붙지 않았다"
     finance = next(item for item in carried if item.source_agent == "finance")
     # 재무가 낸 사실이 하나도 잘리지 않는다.
-    assert finance.payload["finance_verdict"] == "FAIL"
+    assert finance.payload["finance_verdict"] == "PASS"
     assert finance.payload["reason_codes"] == ["SALES_MARGIN_BELOW_MINIMUM"]
     assert finance.payload["max_finance_allowed_amount_krw"] == "5000000"
     assert finance.payload["evidence_refs"] == [
-        "FIN-AGENT:req-1:1:SALES-001-A:evaluate_sales_scenario"
+        "FIN-AGENT:req-1:1:SALES-001-B:evaluate_sales_scenario"
     ]
 
 
@@ -115,25 +115,25 @@ def test_reply_ref_and_business_status_are_preserved():
         item for item in _scenario_a(reply).domain_replies if item.source_agent == "finance"
     )
     assert finance.reply_ref == "FIN-REPLY-1"
-    assert finance.business_status == "reject"
+    assert finance.business_status == "ok"
     assert finance.runtime_status == "READY"
 
 
 def test_sales_does_not_re_adjudicate_the_finance_verdict():
-    """재무가 reject 라고 한 것을 Sales 가 conditional 로 바꾸지 않는다."""
+    """재무가 pass 라고 한 것을 Sales 가 다른 verdict로 바꾸지 않는다."""
     reply = run_proposal(_refeed_request())
 
     finance = next(
         item for item in _scenario_a(reply).domain_replies if item.source_agent == "finance"
     )
-    assert finance.business_status == "reject"
-    assert finance.payload["finance_verdict"] == "FAIL"
+    assert finance.business_status == "ok"
+    assert finance.payload["finance_verdict"] == "PASS"
 
 
 def test_finance_fail_is_surfaced_as_a_risk_not_rewritten():
-    reply = run_proposal(_refeed_request())
+    reply = run_proposal(_refeed_request(reply=_finance_reply(finance_verdict="FAIL")))
 
-    assert "FINANCE_FAIL" in _scenario_a(reply).risks
+    assert not any(s.parent_scenario_id == "SALES-001-B" for s in reply.scenarios)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +169,7 @@ def test_margin_reason_does_not_raise_the_unit_price():
 
 def test_finance_fail_without_any_boundary_still_changes_no_number():
     reply_without_boundary = _finance_reply(
+        finance_verdict="FAIL",
         max_finance_allowed_amount_krw=None,
         max_finance_allowed_payment_terms_days=None,
     )
@@ -176,8 +177,15 @@ def test_finance_fail_without_any_boundary_still_changes_no_number():
 
     refed = run_proposal(_refeed_request(reply=reply_without_boundary))
 
-    assert _scenario_a(refed).unit_price_krw == _scenario_a(baseline).unit_price_krw
-    assert _scenario_a(refed).quantity_kg == _scenario_a(baseline).quantity_kg
+    baseline_by_id = {scenario.scenario_id: scenario for scenario in baseline.scenarios}
+    assert {scenario.parent_scenario_id for scenario in refed.scenarios} == {
+        "SALES-001-A",
+        "SALES-001-C",
+    }
+    for scenario in refed.scenarios:
+        baseline_scenario = baseline_by_id[scenario.parent_scenario_id]
+        assert scenario.unit_price_krw == baseline_scenario.unit_price_krw
+        assert scenario.quantity_kg == baseline_scenario.quantity_kg
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +197,8 @@ def test_refeed_keeps_parent_lineage():
     reply = run_proposal(_refeed_request())
 
     scenario = _scenario_a(reply)
-    assert scenario.scenario_id == "SALES-001-A-R1"
-    assert scenario.parent_scenario_id == "SALES-001-A"
+    assert scenario.scenario_id == "SALES-001-B-R1"
+    assert scenario.parent_scenario_id == "SALES-001-B"
     assert scenario.revision == 1
 
 

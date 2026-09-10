@@ -218,10 +218,13 @@ class LogisticsDeliveryFeasibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["READY", "UNRESOLVED", "FAIL"] = "UNRESOLVED"
     daily_outbound_capacity_kg: Decimal | None = Field(default=None, ge=0)
+    delivery_route: str | None = None
+    transport_lead_time: int | None = Field(default=None, ge=0)
+    earliest_delivery_date: date | None = None
     reason_codes: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
 
-    @field_validator("daily_outbound_capacity_kg", mode="before")
+    @field_validator("daily_outbound_capacity_kg", "transport_lead_time", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -347,6 +350,9 @@ class PurchaseAdditionalSupplyResult(BaseModel):
     procurable_quantity_kg: Decimal | None
     risks: list[str]
     available_date: date | None = None
+    basis: Literal["warehouse", "finance", "unknown"] | None = None
+    expected_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    unit_price_grade: str | None = None
 
     @field_validator("procurable_quantity_kg", mode="before")
     @classmethod
@@ -477,6 +483,11 @@ class ScenarioSupply(BaseModel):
     conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
     #: 위 조건부 수량을 만든 원본 Purchase 회신 ref. 수량과 근거가 같이 다닌다.
     dependency_ref: str | None = None
+    #: Purchase가 확보 가능량을 계산할 때 사용한 사실이다. 판매가격이 아니다.
+    basis: Literal["warehouse", "finance", "unknown"] | None = None
+    expected_unit_price_krw: Decimal | None = Field(default=None, ge=0)
+    unit_price_grade: str | None = None
+    available_date: date | None = None
     @field_validator("conditional_quantity_kg", mode="before")
     @classmethod
     def reject_boolean_conditional(cls, value: object) -> object:

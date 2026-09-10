@@ -44,6 +44,9 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from app.finance import closing_adapter as finance_closing_adapter
+from app.finance.closing import FinanceDayClosingResult
+from app.finance.closing_adapter import FinanceClosingAdapter
 from app.master import closing
 from app.master.clock import SEOUL
 from app.master.closing import ClosingPartOut, close_day
@@ -115,6 +118,47 @@ def _닫음(*keys: str, created: int | None = None) -> ClosingPartOut:
         closed=list(keys),
         created=len(keys) if created is None else created,
     )
+
+
+def test_finance_closing_adapter_passes_the_exact_master_axis(monkeypatch: pytest.MonkeyPatch):
+    seen: dict[str, object] = {}
+
+    def _finance_close_day(*, as_of: date, sim_run_id: str, conn: Any) -> FinanceDayClosingResult:
+        seen.update(as_of=as_of, sim_run_id=sim_run_id, conn=conn)
+        return FinanceDayClosingResult(
+            part="finance",
+            status="CLOSED",
+            closed=[f"{sim_run_id}:{as_of.isoformat()}"],
+            created=1,
+        )
+
+    monkeypatch.setattr(finance_closing_adapter, "close_day", _finance_close_day)
+    conn = _가짜커넥션()
+
+    out = FinanceClosingAdapter().close(conn, as_of=AS_OF, sim_run_id=축)
+
+    assert seen == {"as_of": AS_OF, "sim_run_id": 축, "conn": conn}
+    assert out == ClosingPartOut(
+        part="finance", status="CLOSED", closed=[f"{축}:{AS_OF.isoformat()}"], created=1
+    )
+
+
+def test_master_closing_registry_calls_finance_adapter(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[date, str]] = []
+
+    def _finance_close_day(*, as_of: date, sim_run_id: str, conn: Any) -> FinanceDayClosingResult:
+        calls.append((as_of, sim_run_id))
+        return FinanceDayClosingResult(part="finance", status="CLOSED", closed=["row"], created=1)
+
+    monkeypatch.setattr(finance_closing_adapter, "close_day", _finance_close_day)
+    closing.register_closing("finance", FinanceClosingAdapter())
+    conn = _가짜커넥션()
+
+    out = close_day(AS_OF, sim_run_id=축, connect=lambda: conn)
+
+    assert out.status == "CLOSED"
+    assert calls == [(AS_OF, 축)]
+    assert (conn.committed, conn.rolled_back, conn.closed) == (1, 0, 1)
 
 
 def _코드만() -> str:

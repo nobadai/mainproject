@@ -108,9 +108,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
         if scenario_type != "AGGRESSIVE":
             replies = [reply for reply in replies if reply.source_agent != "purchase"]
         # 조건부 수량은 회신에서 나오므로 회신을 먼저 고른 뒤 공급을 세운다.
-        supply = _supply(scenario_quantity, confirmed, replies)
-        unmet_quantity = None
         purchase = _purchase_result(replies)
+        supply = _supply(scenario_quantity, confirmed, replies, purchase)
+        unmet_quantity = None
         if scenario_type == "AGGRESSIVE" and confirmed is not None and purchase is not None:
             procurable = purchase.procurable_quantity_kg
             if procurable is not None:
@@ -308,6 +308,7 @@ def _supply(
     quantity: Decimal,
     confirmed: Decimal | None,
     replies: list[SalesDomainReply] | None = None,
+    purchase: PurchaseAdditionalSupplyResult | None = None,
 ) -> ScenarioSupply:
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
@@ -319,6 +320,10 @@ def _supply(
         # ★ 확정 공급에 더하지 않는다. 조건부는 조건부 자리에만 산다.
         conditional_quantity_kg=conditional,
         dependency_ref=dependency_ref,
+        basis=purchase.basis if purchase else None,
+        expected_unit_price_krw=purchase.expected_unit_price_krw if purchase else None,
+        unit_price_grade=purchase.unit_price_grade if purchase else None,
+        available_date=purchase.available_date if purchase else None,
     )
 
 
@@ -350,6 +355,23 @@ def _parse_additional_supply(
         return None
 
 
+def _valid_additional_supply_replies(
+    replies: list[SalesDomainReply],
+) -> list[tuple[SalesDomainReply, PurchaseAdditionalSupplyResult]]:
+    valid: list[tuple[SalesDomainReply, PurchaseAdditionalSupplyResult]] = []
+    for reply in replies:
+        if not _is_additional_supply_reply(reply) or reply.runtime_status != "READY":
+            continue
+        parsed = _parse_additional_supply(reply)
+        if parsed is not None:
+            valid.append((reply, parsed))
+    return valid
+
+
+def _has_ambiguous_additional_supply(replies: list[SalesDomainReply]) -> bool:
+    return len({reply.reply_ref for reply, _ in _valid_additional_supply_replies(replies)}) > 1
+
+
 def _purchase_conditional_supply(
     replies: list[SalesDomainReply],
 ) -> tuple[Decimal | None, str | None]:
@@ -366,26 +388,18 @@ def _purchase_conditional_supply(
     ★ 수량과 근거를 같이 나른다. 수량만 남고 어느 회신에서 왔는지 사라지면 나중에
       되짚을 수 없다.
     """
-    for reply in replies:
-        if not _is_additional_supply_reply(reply):
-            continue
-        if reply.runtime_status != "READY":
-            continue
-        parsed = _parse_additional_supply(reply)
-        if parsed is None:
-            continue
+    valid = _valid_additional_supply_replies(replies)
+    if _has_ambiguous_additional_supply(replies):
+        return None, None
+    if valid:
+        reply, parsed = valid[0]
         return parsed.procurable_quantity_kg, reply.reply_ref
     return None, None
 
 
 def _purchase_result(replies: list[SalesDomainReply]) -> PurchaseAdditionalSupplyResult | None:
-    for reply in replies:
-        if not _is_additional_supply_reply(reply) or reply.runtime_status != "READY":
-            continue
-        parsed = _parse_additional_supply(reply)
-        if parsed is not None:
-            return parsed
-    return None
+    valid = _valid_additional_supply_replies(replies)
+    return valid[0][1] if len({reply.reply_ref for reply, _ in valid}) == 1 and valid else None
 
 
 def _required_validations(
@@ -480,6 +494,7 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
     risks: list[str] = []
     uncertainties: list[str] = []
     conditional = False
+    purchase_ambiguous = _has_ambiguous_additional_supply(replies)
     for reply in replies:
         if reply.source_agent == "finance" and (reply.business_status or "").lower() in {
             "fail",
@@ -490,7 +505,7 @@ def _feedback_effects(replies: list[SalesDomainReply]) -> tuple[list[str], list[
             purchase_risks, depends_on_purchase = _purchase_effects(reply)
             # Purchase가 전달한 위험 문구는 Sales가 새 코드로 재해석하지 않는다.
             risks.extend(purchase_risks)
-            if depends_on_purchase:
+            if depends_on_purchase and not purchase_ambiguous:
                 conditional = True
                 uncertainties.append("PURCHASE_SUPPLY_CONDITIONAL")
     return risks, uncertainties, conditional
@@ -600,8 +615,13 @@ def _candidate_status(
     replies,
     unmet_quantity,
 ):
+    if _has_ambiguous_additional_supply(replies):
+        return "UNRESOLVED"
     if _logistics_revalidation_required(replies):
         return "REVIEW_REQUIRED"
+    delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
+    if delivery and delivery.status == "FAIL":
+        return "INFEASIBLE"
     if finance and finance.finance_verdict == "FAIL":
         return (
             "REVIEW_REQUIRED" if request.business_mode == "CONTRACT_FULFILLMENT" else "INFEASIBLE"
@@ -734,6 +754,8 @@ def _purchase_reference_issues(scenario: SalesScenario) -> list[str]:
         elif _parse_additional_supply(reply) is None:
             # C — 추가공급이라고 왔는데 약속한 칸이 없다.
             issues.append("PURCHASE_SUPPLY_PAYLOAD_INVALID")
+    if _has_ambiguous_additional_supply(purchase_replies):
+        issues.append("PURCHASE_SUPPLY_REPLY_AMBIGUOUS")
     if not scenario.supply.additional_supply_required and any(
         reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY for reply in purchase_replies
     ):
@@ -756,12 +778,7 @@ def _answered_additional_supply(scenario: SalesScenario) -> bool:
        회신이나 칸이 빠진 회신이 검증을 끝낸 것으로 읽힌다. 물어본 것에 대한 답이
        아직 없는데 "확인했다" 가 되는 것이라, 오탐을 고치려다 미검증을 통과시킨다.
     """
-    return any(
-        reply.source_agent == "purchase"
-        and reply.capability == _ADDITIONAL_SUPPLY_CAPABILITY
-        and _parse_additional_supply(reply) is not None
-        for reply in scenario.domain_replies
-    )
+    return bool(_valid_additional_supply_replies(scenario.domain_replies))
 
 
 def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
@@ -804,8 +821,7 @@ def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
             and not (scenario.business_mode == "SPOT_SALES" and scenario.status == "INFEASIBLE")
         ):
             issues.append("ADDITIONAL_SUPPLY_VALIDATION_MISSING")
-        if not (scenario.unmet_quantity_kg is not None and scenario.unmet_quantity_kg > 0):
-            issues.extend(_purchase_reference_issues(scenario))
+        issues.extend(_purchase_reference_issues(scenario))
     issues = list(dict.fromkeys(issues))
     return ProposalSelfCheck(
         passed=not issues,

@@ -179,6 +179,35 @@ def test_positive_quantity_becomes_conditional_supply_with_lineage():
     assert "R1" in scenario.risks
 
 
+def test_purchase_supply_facts_are_preserved_without_changing_sales_price():
+    request = _request(
+        [
+            _reply(
+                payload={
+                    "procurable_quantity_kg": 25,
+                    "basis": "warehouse",
+                    "risks": ["R1"],
+                    "available_date": "2026-09-10",
+                    "expected_unit_price_krw": 1600,
+                    "unit_price_grade": "중",
+                }
+            ),
+            _finance_reply(),
+        ]
+    )
+    request.user_request.source_ref = "SALES-REQUEST-1"
+
+    scenario = _aggressive(run_proposal(request))
+
+    assert scenario.supply.dependency_ref == "PUR-1"
+    assert scenario.supply.basis == "warehouse"
+    assert scenario.supply.available_date.isoformat() == "2026-09-10"
+    assert scenario.supply.expected_unit_price_krw == Decimal(1600)
+    assert scenario.supply.unit_price_grade == "중"
+    assert scenario.source_ref == "SALES-REQUEST-1"
+    assert scenario.unit_price_krw == Decimal(2000)
+
+
 def test_zero_quantity_is_preserved_and_not_conditional():
     reply = run_proposal(_request([_reply(payload={"procurable_quantity_kg": 0, "risks": []})]))
     scenario = _aggressive(reply)
@@ -324,6 +353,79 @@ def test_payload_without_risks_is_not_read_as_no_risk():
 
     assert scenario.supply.conditional_quantity_kg is None
     assert "PURCHASE_SUPPLY_PAYLOAD_INVALID" in reply.self_check.issue_codes
+
+
+def test_unmet_supply_still_checks_wrong_purchase_capability():
+    reply = run_proposal(
+        _request(
+            [
+                _reply(payload={"procurable_quantity_kg": 1500, "risks": []}),
+                _reply(capability="FINANCIAL_VALIDATION", ref="PUR-WRONG"),
+                _finance_reply(),
+            ]
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.unmet_quantity_kg == Decimal(500)
+    assert "PURCHASE_CAPABILITY_MISMATCH" in reply.self_check.issue_codes
+    assert "PURCHASE_REFERENCE_LEAK" not in reply.self_check.issue_codes
+
+
+def test_unmet_supply_still_checks_invalid_purchase_payload():
+    reply = run_proposal(
+        _request(
+            [
+                _reply(payload={"procurable_quantity_kg": 1500, "risks": []}),
+                _reply(ref="PUR-INVALID", payload={"procurable_quantity_kg": 1}),
+                _finance_reply(),
+            ]
+        )
+    )
+    scenario = _aggressive(reply)
+
+    assert scenario.unmet_quantity_kg == Decimal(500)
+    assert "PURCHASE_SUPPLY_PAYLOAD_INVALID" in reply.self_check.issue_codes
+    assert "PURCHASE_REFERENCE_LEAK" not in reply.self_check.issue_codes
+
+
+def _ambiguous_purchase_replies():
+    return [
+        _reply(ref="PUR-1", payload={"procurable_quantity_kg": 1500, "risks": ["R1"]}),
+        _reply(ref="PUR-2", payload={"procurable_quantity_kg": 1000, "risks": ["R2"]}),
+        _finance_reply(),
+    ]
+
+
+def test_multiple_valid_purchase_replies_fail_closed_and_do_not_bleed():
+    reply = run_proposal(_request(_ambiguous_purchase_replies()))
+    scenario = _aggressive(reply)
+
+    assert scenario.supply.conditional_quantity_kg is None
+    assert scenario.supply.dependency_ref is None
+    assert scenario.status == "UNRESOLVED"
+    assert "PURCHASE_SUPPLY_REPLY_AMBIGUOUS" in reply.self_check.issue_codes
+    for other in reply.scenarios[:2]:
+        assert not [item for item in other.domain_replies if item.source_agent == "purchase"]
+
+
+def test_ambiguous_purchase_reply_order_does_not_change_the_result():
+    forward = run_proposal(_request(_ambiguous_purchase_replies()))
+    reversed_reply = run_proposal(_request(list(reversed(_ambiguous_purchase_replies()))))
+    forward_scenario = _aggressive(forward)
+    reversed_scenario = _aggressive(reversed_reply)
+
+    assert (
+        forward_scenario.supply.conditional_quantity_kg,
+        forward_scenario.supply.dependency_ref,
+        forward_scenario.status,
+        forward.self_check.issue_codes,
+    ) == (
+        reversed_scenario.supply.conditional_quantity_kg,
+        reversed_scenario.supply.dependency_ref,
+        reversed_scenario.status,
+        reversed_reply.self_check.issue_codes,
+    )
 
 
 # ---------------------------------------------------------------------------
