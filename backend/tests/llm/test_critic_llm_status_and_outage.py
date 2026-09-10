@@ -96,7 +96,7 @@ def _procurement_response() -> ProcurementResponse:
     )
 
 
-# --- 오케스트레이터 -----------------------------------------------------------
+# --- 사이클 응답 봉투 (app/master/cycle_schemas.py) ----------------------------
 def test_response_carries_llm_fields():
     assert _LLM_FIELDS <= set(ProcurementResponse.model_fields)
 
