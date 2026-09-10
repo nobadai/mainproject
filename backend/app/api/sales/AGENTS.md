@@ -60,7 +60,7 @@ def build(as_of: date) -> SalesTab:
 **★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요.**
 
 ```python
-from app.sales.dashboard_service import get_sales_dashboard
+from app.sales.dashboard import get_sales_dashboard
 dash = get_sales_dashboard(sim_run_id=..., as_of=as_of)
 ```
 
