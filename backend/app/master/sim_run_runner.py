@@ -110,6 +110,31 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
 
 ---
 
+## 🔴 백필 규칙은 **파일로 받아 그대로 싣는다** (2026-09-11)
+
+```text
+--backfill-rules rules.json   →  config_json 의 backfill 칸에 그대로 앉는다
+안 주면                        →  그 칸이 아예 안 선다 · --auto-approve 로 못 걷는다
+```
+
+```json
+{"procurement": {"rule": "...", "scenario_label": "..."},
+ "sales":       {"rule": "...", "scenario_type":  "..."}}
+```
+
+★★ **이 문은 파일 내용을 모른다.** 규칙 이름도 라벨도 축 이름도 안 읽는다 —
+  그 어휘의 주인은 매입과 판매이고, `--opening-usage-scope` 를 여기 안 박은 것과
+  **같은 이유·같은 모양**이다.
+
+🔴 **인자로 쪼개 받지 않는다.** 쪼개면 이 문이 *"매입은 라벨을, 판매는 축을 든다"*
+  는 **모양까지** 알게 되고, 그 모양은 부서가 규칙을 늘리는 날 갈린다. 파일은
+  그대로 지나가고, 무엇을 실었는지는 **파일 하나로 리뷰에 남는다.**
+
+⚠️ **아는 모양인지는 여는 자리에서 검사한다** (`read_rules` 를 부른다 — 판정을
+  베끼지 않는다). 179일을 걷고 나서 *"모르는 규칙이었다"* 를 알면 늦다.
+
+---
+
 ## 🟡 걷기는 이 문이 안 한다
 
 ```text
@@ -125,16 +150,19 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
 from __future__ import annotations
 
 import argparse
+import json
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from psycopg import sql
 
 from app.finance.db import get_connection, get_db_schema
+from app.master.backfill import BACKFILL_CONFIG_KEY, read_rules
 from app.master.backtest_runner import _use_utf8_output
 from app.master.sim_run import create_sim_run
 from app.master.sim_run_open import (
@@ -174,6 +202,11 @@ class SimRunOpened:
     #: 지운 결과. 🔴 **`None` 은 「안 지웠다」** — `--reset` 을 안 줬다는 뜻이다.
     #: 0 행을 지운 것과 아예 안 지운 것을 같은 값으로 적지 않는다.
     ledger_reset: LedgerReset | None
+    #: 실행 행에 실은 백필 규칙. 🔴 **`None` 은 「안 실었다」** — 그 실행은
+    #: `--auto-approve` 로 걸을 수 없다 (걷기가 걷기 전에 막는다).
+    #:
+    #: ⚠️ **받은 것을 그대로 든다.** 이 문은 규칙 이름도 라벨도 축 이름도 모른다.
+    backfill_rules: Mapping[str, Any] | None = None
 
 
 def open_sim_run(
@@ -193,6 +226,7 @@ def open_sim_run(
     opening_state_type: str,
     opening_fixture_id: str,
     opening_usage_scope: str,
+    backfill_rules: Mapping[str, Any] | None = None,
     reset: bool = False,
     note: str | None = None,
     reset_fn: Callable[..., LedgerReset] = reset_sim_run_ledger,
@@ -207,10 +241,16 @@ def open_sim_run(
     :param opening_state_date: 🔴 **재무 씨앗과 물류 씨앗이 둘 다 쓴다.** 물류용
         날짜를 따로 두면 두 파트의 anchor 가 갈린다.
     :param opening_usage_scope: 🔴 **어휘의 주인은 물류다** — 여기 박지 않고 받는다.
+    :param backfill_rules: 그 실행이 쓸 백필 규칙 (2026-09-11). 🔴 **어휘의 주인은
+        부서다** — 이 문은 규칙 이름도 라벨도 축 이름도 모르고, 받은 것을 그대로
+        `config_json` 에 싣는다. 안 주면 그 칸이 아예 안 선다.
     :param reset: 🔴 **기본이 거짓이다.** 거짓이면 지우는 함수를 **한 번도 안 부른다.**
     :raises ValueError: 실행이 이미 있는데 `reset` 을 안 줬을 때. **조용히 덮지 않는다.**
+    :raises BackfillRuleMissing: `backfill_rules` 가 아는 모양이 아닐 때.
+        🔴 **여는 자리에서 터진다** — 179일을 걷고 나서 알면 늦다.
     """
     _assert_openable(conn, sim_run_id=sim_run_id, reset=reset)
+    config_json = _config_json(baseline, backfill_rules)
 
     try:
         # 🔴 **순서가 여기다.** 지우는 것이 맨 앞이고, 실행 행이 서야 시작 상태가
@@ -231,9 +271,9 @@ def open_sim_run(
             as_of=as_of,
             status=status,
             financing_mode=financing_mode,
-            # 🟢 **lineage 만 싣는다.** 잔액도 한도도 안 싣는다 — 값은 늘
-            #    `finance_state_id` 가 가리키는 행에서 읽는다 (`sim_run_open`).
-            config_json=baseline.as_config(),
+            # 🟢 **lineage 와 백필 규칙만 싣는다.** 잔액도 한도도 안 싣는다 —
+            #    값은 늘 `finance_state_id` 가 가리키는 행에서 읽는다 (`sim_run_open`).
+            config_json=config_json,
             note=note,
         )
 
@@ -277,7 +317,32 @@ def open_sim_run(
         period_start=period_start,
         period_end=period_end,
         ledger_reset=ledger_reset,
+        backfill_rules=backfill_rules,
     )
+
+
+def _config_json(
+    baseline: BaselineLineage, backfill_rules: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """실행 행에 실을 설정. **계보 옆에 규칙 칸을 붙인다** (2026-09-11).
+
+    🔴 **칸 이름을 여기서 다시 적지 않는다.** `BACKFILL_CONFIG_KEY` 를 가져다 쓴다 —
+      읽는 쪽(`backfill.read_rules`)과 쓰는 쪽이 문자열을 두 벌로 들면, 한쪽만
+      고치는 날 **규칙을 실은 실행이 규칙 없는 실행으로 읽힌다.**
+
+    🔴 **여기서 규칙을 검사하지도 지어내지도 않는다.** 아는 모양인지는
+      `read_rules` 가 판정한다 — 판정을 두 곳에 두면 언젠가 한쪽만 고쳐지고,
+      그때 어느 쪽이 진짜 규칙인지 아무도 못 답한다 (`--commit` · 경계와 같은 규율).
+
+    ★ **안 주면 칸이 아예 안 선다.** 빈 칸을 만들어 두면 *"규칙을 안 정했다"* 와
+      *"규칙을 비워 뒀다"* 가 같아지고, 걷기가 그 둘을 못 가른다.
+    """
+    if backfill_rules is None:
+        return dict(baseline.as_config())
+    # 🔴 **여는 자리에서 검사한다.** 179일을 걷고 나서 *"모르는 규칙이었다"* 를
+    #    알면 늦다 — 그 사이 승인은 한 건도 안 서 있다.
+    read_rules({BACKFILL_CONFIG_KEY: backfill_rules})
+    return {**baseline.as_config(), BACKFILL_CONFIG_KEY: dict(backfill_rules)}
 
 
 def _assert_openable(conn: Any, *, sim_run_id: str, reset: bool) -> None:
@@ -361,6 +426,15 @@ def _parser() -> argparse.ArgumentParser:
         help="어느 usage_scope 를 이관하나 · 🔴 기본값 없음 — 어휘의 주인은 물류다",
     )
     parser.add_argument(
+        "--backfill-rules",
+        default=None,
+        help=(
+            "백필 규칙 JSON 파일 경로 (선택) · 🔴 규칙 이름과 라벨의 주인은 부서다"
+            " — 이 문은 파일 내용을 읽지 않고 그대로 실행 행에 싣는다"
+            " · 안 주면 그 실행은 --auto-approve 로 못 걷는다"
+        ),
+    )
+    parser.add_argument(
         "--reset",
         action="store_true",
         default=False,
@@ -384,6 +458,16 @@ def format_summary(opened: SimRunOpened) -> str:
             f" · {dict(sorted(opened.ledger_reset.deleted.items()))}"
         )
     )
+    # 🔴 **「규칙을 실었나」를 요약이 말한다.** 안 실은 실행은 `--auto-approve` 로
+    #    못 걷고, 그 사실을 여기서 안 보이면 사람이 두 번째 명령에서야 알게 된다.
+    규칙 = (
+        "🟡 안 실었다 — 이 실행은 --auto-approve 로 못 걷는다"
+        if opened.backfill_rules is None
+        else f"🔴 실었다 — {dict(sorted(opened.backfill_rules.items()))}"
+    )
+    # ★ **켜는 것은 명시로만이라 명령줄에도 명시로 붙는다.** 규칙을 안 실은 실행에
+    #   이 인자를 적어 주면 사람이 그대로 붙여 넣고 걷기 첫 줄에서 막힌다.
+    승인인자 = "" if opened.backfill_rules is None else " --auto-approve"
     return "\n".join(
         [
             f"실행      {opened.sim_run_id}",
@@ -393,15 +477,35 @@ def format_summary(opened: SimRunOpened) -> str:
             f"시작상태  {opened.opening_finance_state_id}",
             f"물류씨앗  {opened.opening_logistics_fixture_id}",
             f"장부      {지움}",
+            f"백필규칙  {규칙}",
             "",
             "🟡 열었다. 걷지는 않았다 — 걸으려면 다음을 부른다:",
             (
                 f"   {WALK_ENTRYPOINT} --sim-run-id {opened.sim_run_id}"
                 f" --start {opened.period_start.isoformat()}"
                 f" --end {opened.period_end.isoformat()} --now <ISO 8601 · 시간대 필수>"
+                f"{승인인자}"
             ),
         ]
     )
+
+
+def _load_backfill_rules(path: str | None) -> Mapping[str, Any] | None:
+    """`--backfill-rules` 가 가리키는 파일을 읽는다. **읽기만 한다.**
+
+    🔴 **내용을 한 글자도 해석하지 않는다.** 객체인지조차 여기서 안 본다 —
+      아는 모양인지의 주인은 `backfill.read_rules` 하나이고, 그것이
+      `_config_json` 에서 그대로 판정한다. 여기서 한 번 더 보면 판정이 두 곳에
+      생기고, 부서가 규칙을 늘리는 날 **문이 먼저 거절한다.**
+
+    ★ **왜 파일인가.** 규칙에 부서의 어휘(라벨·축 이름)가 들어간다. 인자로 쪼개
+      받으면 이 문이 *"매입은 라벨을, 판매는 축을 든다"* 는 **모양까지** 알게 되고,
+      그 모양은 규칙 이름이 늘어나는 날 갈린다. 파일은 그대로 지나가고, 무엇을
+      실었는지는 **파일 하나로 리뷰에 남는다.**
+    """
+    if path is None:
+        return None
+    return json.loads(Path(path).read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
 def main(argv: Sequence[str]) -> int:
@@ -432,6 +536,7 @@ def main(argv: Sequence[str]) -> int:
             opening_state_type=args.opening_state_type,
             opening_fixture_id=args.opening_fixture_id,
             opening_usage_scope=args.opening_usage_scope,
+            backfill_rules=_load_backfill_rules(args.backfill_rules),
             reset=args.reset,
             note=args.note,
         )

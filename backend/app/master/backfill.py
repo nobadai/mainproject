@@ -116,6 +116,16 @@ ALWAYS_FIXED_TYPE = "ALWAYS_FIXED_TYPE"
   낡고, 「코드에 축 이름을 안 박는다」는 잠금도 그 자리에서 뚫린다.
 """
 
+BACKFILL_CONFIG_KEY = "backfill"
+"""`sim_runs.config_json` 안에서 규칙이 앉는 칸 이름.
+
+🔴 **읽는 쪽과 쓰는 쪽이 같은 이름을 두 벌로 들지 않게 상수로 둔다** (2026-09-11).
+  `read_rules` 가 읽고 `sim_run_runner` 가 쓴다 — 문자열을 양쪽에 적으면 한쪽만
+  고치는 날 **규칙을 실은 실행이 규칙이 없는 실행으로 읽힌다.**
+
+⚠️ **칸 이름이지 규칙 이름이 아니다.** `ALWAYS_BASE` 같은 규칙 이름과 축이 다르다.
+"""
+
 PROCUREMENT_RULES_KEY = "procurement"
 """매입 규칙이 앉는 칸 이름."""
 
@@ -277,7 +287,7 @@ def read_rules(config_json: Mapping[str, Any]) -> BackfillRules:
     :raises BackfillRuleMissing: `backfill` 칸이 없거나, 사이클별로 가르지 않은
         모양이거나, 적어 둔 사이클 칸이 아는 규칙이 아닐 때.
     """
-    section = config_json.get("backfill")
+    section = config_json.get(BACKFILL_CONFIG_KEY)
     if section is None:
         # ⚠️ 사유 문장에 안 이름을 쓰지 않는다 — `test_backfill` 이 원문을 읽어
         #   잠그므로, 안 이름과 겹치는 낱말은 설명에서도 피한다.
@@ -360,6 +370,29 @@ def _config_of(sim_run_id: str) -> Mapping[str, Any]:
         return {}
     config = run.get("config_json")
     return config if isinstance(config, Mapping) else {}
+
+
+def read_run_rules(
+    sim_run_id: str,
+    *,
+    load_config: Callable[[str], Mapping[str, Any]] = _config_of,
+) -> BackfillRules:
+    """그 실행이 정한 규칙을 **행을 하나도 안 보고** 읽는다 (2026-09-11).
+
+    ★ **왜 있나.** 걷기가 `--auto-approve` 를 받으면 **걷기 전에** 규칙이 있는지
+      물어야 한다 — 없는 채로 179일을 걸으면 사람이 *"승인이 돌았는데 0건이구나"*
+      로 읽고, 그때는 이미 하루도 되돌릴 수 없다.
+
+    🔴 **읽는 방법의 주인을 둘로 만들지 않으려고 여기 둔다.** 부르는 쪽이
+      `get_burn_in(...)["run"]["config_json"]` 을 제 손으로 파면 컬럼이 바뀌는 날
+      백필과 걷기가 서로 다른 자리를 보게 된다.
+
+    :raises BackfillRuleMissing: 규칙 칸이 없거나 아는 모양이 아닐 때.
+        🔴 **여기서는 값으로 안 접는다** — `backfill_decisions` 는 이것을 잡아
+        `NO_RULE` 로 담지만, 그쪽은 *"걸었는데 할 것이 없었다"* 를 말해야 하고
+        이쪽은 *"걷기 전에 막는다"* 를 말해야 한다.
+    """
+    return read_rules(load_config(sim_run_id))
 
 
 def backfill_decisions(

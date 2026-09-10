@@ -145,8 +145,22 @@ close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
   🔴 **예측 게이트 안이다.** `WAIT` 인 날은 판매도 안 돈다 — 그 한 줄을 안 지키면
     매입이 피한 문제(열두 번 깨어나며 미완 실행이 열두 건)를 판매가 다시 짓는다.
 
-  🔴 **판단만 한다.** 후보를 자동으로 승인하지 않고 `record_decision` 도 안 부른다 —
-    자동 승인은 별도 판이다.
+🔴 **승인은 각 판단 바로 뒤다** (2026-09-11).
+
+```text
+개장 → 입고 → 채권 → 수금 → [장부 관문]
+     → 매입 판단 → **매입 승인** → 판매 판단 → **판매 승인** → 출고 → 마감
+```
+
+  ★★ **끝에 몰지 않는다.** 몰면 판매 판단이 그날의 매입 결과를 못 보고, 다음 날이
+    어제 산 것을 못 본다 — 그러면 179일을 걸어도 재고가 영영 안 쌓인다.
+
+  🔴 **기본이 꺼짐이다.** `auto_approve` 를 명시로 켤 때만 선다. 설정에 규칙이
+    있다고 켜지지 않는다 — *"있으니까 한다"* 는 암묵 스위치다.
+
+  🔴 **승인 문을 우회하지 않는다.** `backfill.backfill_decisions` 를 그대로 부르고,
+    `record_decision` 은 그쪽이 부른다. 여기서 직접 부르면 경계 가드도 규칙도 이
+    자리만 안 지난다.
 
   ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 출고 앞에서 닫으면 그날 재고가
     **마감 뒤에 바뀌고**, `daily_closings.inventory_qty_kg` 가 그날 장부와 안 맞는다.
@@ -213,6 +227,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from app.master import clock, persistence
+from app.master.backfill import BackfillOut, backfill_decisions
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
 from app.master.closing import close_day
 from app.master.collection import collect_receipts
@@ -225,7 +240,7 @@ from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.receivable import issue_receivables
-from app.master.run_repository import ledger_gap_request_id
+from app.master.run_repository import ledger_gap_request_id, list_runs
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
 from app.master.service import run_procurement, run_sales
 
@@ -604,6 +619,31 @@ class DayRunOutcome:
     #: ★ `end_code` 는 판매 어휘 그대로다 (`SL1_PRESENTED` 등). 🔴 **매입 어휘로
     #:   접지 않는다** — `backtest_runner` 가 `end_codes` 를 세는 자리와 같은 규율이다.
     sales_items: tuple[ItemRunOutcome, ...] = ()
+    #: 매입 판단 **바로 뒤** 자동 승인 단계를 **탔는가** (2026-09-11).
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `NOT_ATTEMPTED` · `FAILED` 는 이 클래스가
+    #:   이미 쓰는 말이고, `RAN` · `NO_RULE` 은 `BackfillOut.status` 의 두 값
+    #:   그대로다 (`closing_status` 가 `ClosingOut.status` 를 그대로 싣는 것과 같다).
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   안 켰다 — auto_approve 가 거짓이었다 · 거기까지 못 갔다
+    #: RAN             승인 문까지 돌았다 — 몇 건이 적혔는지는 outcomes 가 말한다
+    #: NO_RULE         켰는데 그 실행이 규칙을 안 들었다
+    #: FAILED          돌리다 터졌다 — 🔴 **그래도 하루는 계속 간다**
+    #: ```
+    #:
+    #: 🔴 **`NOT_ATTEMPTED` 와 `NO_RULE` 을 접지 않는다.** 앞은 *"안 켰다"* 이고
+    #:   뒤는 *"켰는데 규칙이 없었다"* 다 — 승인 0건의 이유가 그 둘로 갈린다.
+    procurement_approval_status: str = "NOT_ATTEMPTED"
+    #: 판매 판단 바로 뒤 자동 승인 단계. 🔴 **매입과 같은 모양·같은 어휘다.**
+    sales_approval_status: str = "NOT_ATTEMPTED"
+    #: 매입 승인이 낸 값 그대로. 🔴 **여기서 다시 세지 않는다** — 어휘 여덟의
+    #: 주인은 `BackfillOut.outcomes` 하나다. 안 켠 날은 `None`.
+    procurement_approval: BackfillOut | None = None
+    #: 판매 승인이 낸 값 그대로. ⚠️ **매입 것과 한 칸에 안 담는다** — 섞으면
+    #: 어느 사이클의 승인이 안 섰는지를 요약이 못 말한다 (`items` 와 `sales_items`
+    #: 를 가른 것과 같은 이유).
+    sales_approval: BackfillOut | None = None
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -636,11 +676,14 @@ def run_scheduled_day(
     close_fn: Callable[..., Any] = close_day,
     sim_run_id: str = BURN_IN_SIM_RUN_ID,
     items: Sequence[str] | None = None,
+    auto_approve: bool = False,
+    approve_fn: Callable[..., BackfillOut] = backfill_decisions,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 채권 → 수금 → [장부 관문] → 매입 판단 → 판매 판단 → 출고 → 마감
+    개장 → 입고 → 채권 → 수금 → [장부 관문]
+         → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
     ```
 
     🔴 **채권이 수금보다 앞이다.** 채권이 서야 수금할 것이 있다. 지금 데이터는
@@ -665,11 +708,33 @@ def run_scheduled_day(
         한 줄이 매입과 판매를 같이 막는다. `WAIT` 중에 판매를 부르면 매입이 피한
         그 문제(열두 번 깨어나며 미완 실행이 열두 건 쌓인다)를 판매가 그대로 다시 짓는다.
 
-      🔴 **판단만 한다. 승인은 안 한다.** `record_decision` 을 부르지 않는다 — 이 판은
-        **안이 나오게 하는 것**까지이고, 자동 승인은 별도 판(자동 백필)이다.
-
       ⚠️ **거래처를 안 고른다.** `partner_id` 도 `user_request` 도 안 싣는다.
         영업 모드는 `WALK_BUSINESS_MODE` 하나이고, 그 값의 뜻은 거기 적혀 있다.
+
+    🔴 **승인은 각 판단 「바로 뒤」다. 끝에 몰지 않는다** (2026-09-11).
+
+      ```text
+      매입 판단 → **매입 승인** → 판매 판단 → **판매 승인**
+      ```
+
+      ★★ **판매가 그날의 매입 결과를 봐야 한다.** 둘을 끝에 몰면 판매 판단이 도는
+        시점에 그날 매입은 아직 승인 전이고, 그러면 다음 날이 **어제 산 것을 못
+        본다** — 179일을 걸어도 재고가 영영 안 쌓인다.
+
+      🔴 **기본이 꺼짐이다** (`auto_approve` 참고). 설정에 규칙이 있다고 켜지지
+        않는다 — *"있으니까 한다"* 는 암묵 스위치이고, 그러면 설정을 실험하려고
+        넣은 사람이 승인까지 하게 된다.
+
+      🔴 **새 승인 경로를 만들지 않는다.** `backfill.backfill_decisions` 를 그대로
+        부르고 그것이 `record_decision` 을 부른다 — 여기서 `record_decision` 을
+        직접 부르면 그 순간 **「승인」이 두 종류**가 되고, 경계 가드
+        (`BACKFILL_BOUNDARY_AS_OF`)도 규칙도 이 자리만 안 지나게 된다.
+
+    :param auto_approve: 🔴 **기본이 거짓이다. 거짓이면 승인 함수가 이름조차 안
+        불린다.** 켜는 것은 **명시로만** — `--auto-approve` 를 준 걷기 하나다.
+    :param approve_fn: 🔴 **승인 문.** 기본이 `backfill_decisions` 자체다 —
+        `None` 을 안 받는다 (`run_day_fn` · `verifier` 와 같은 규율).
+        `auto_approve` 가 거짓이면 이 값은 **한 번도 안 쓰인다.**
 
     🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
@@ -880,6 +945,26 @@ def run_scheduled_day(
             )
         )
 
+    # ── 매입 승인 — 🔴 **매입 판단 바로 뒤. 판매 판단 앞** (2026-09-11) ──
+    #
+    # ★★ **여기가 없어서 걷기 206일에 승인이 0건이었다.** 승인 로직은 `backfill.py`
+    #   에 이미 있었고, **부르는 자리 하나**가 없었다 (판매 판단 때와 같은 모양이다).
+    #
+    # 🔴 **끝으로 밀지 않는다.** 여기서 승인이 서야 판매 판단이 그날 매입을 보고,
+    #    다음 날이 어제 산 것 위에 선다.
+    #
+    # 🔴 **`auto_approve` 가 거짓이면 이 블록이 통째로 안 돈다.**
+    procurement_approval_status, procurement_approval, note = _approve(
+        "매입 승인",
+        as_of=as_of,
+        sim_run_id=sim_run_id,
+        request_ids=[one.request_id for one in results],
+        approve_fn=approve_fn,
+        enabled=auto_approve,
+    )
+    if note is not None:
+        notes.append(note)
+
     # ── 판매 판단 — 🔴 **매입 뒤 · 출고 앞** (2026-09-10) ───────────
     #
     # ★★ **여기가 없어서 걷기 179일에 판매 판단이 0건이었다.** 판매 판단 로직은
@@ -936,6 +1021,21 @@ def run_scheduled_day(
     sales_status = _fold_item_statuses(sales_results)
     notes.append(f"판매: {sales_status} ({len(sales_results)}품목)")
 
+    # ── 판매 승인 — 🔴 **판매 판단 바로 뒤. 출고 앞** (2026-09-11) ──
+    #
+    # ★ **매입 승인과 같은 자리·같은 모양이다.** 제 사이클이 낸 행만 본다 —
+    #   그래서 매입 행이 여기서 `ALREADY_DECIDED` 로 다시 세지지 않는다.
+    sales_approval_status, sales_approval, note = _approve(
+        "판매 승인",
+        as_of=as_of,
+        sim_run_id=sim_run_id,
+        request_ids=[one.request_id for one in sales_results],
+        approve_fn=approve_fn,
+        enabled=auto_approve,
+    )
+    if note is not None:
+        notes.append(note)
+
     # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
     #
     # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
@@ -971,8 +1071,81 @@ def run_scheduled_day(
         closing_status=closing_status,
         items=tuple(results),
         sales_items=tuple(sales_results),
+        procurement_approval_status=procurement_approval_status,
+        sales_approval_status=sales_approval_status,
+        procurement_approval=procurement_approval,
+        sales_approval=sales_approval,
         notes=tuple(notes),
     )
+
+
+def _approve(
+    name: str,
+    *,
+    as_of: date,
+    sim_run_id: str,
+    request_ids: Sequence[str],
+    approve_fn: Callable[..., BackfillOut],
+    enabled: bool,
+) -> tuple[str, BackfillOut | None, str | None]:
+    """판단 하나가 낸 행을 **그 자리에서** 승인한다 (2026-09-11).
+
+    🔴 **`enabled` 가 거짓이면 `approve_fn` 이 이름조차 안 불린다.** 이 한 줄이
+      「승인한다 / 안 한다」가 갈리는 **유일한 자리**다 — `backfill_runner` 의
+      `--commit` 과 같은 모양이고, 같은 이유다. `master_decisions` 는 append-only 라
+      한 번 들어간 승인은 못 지운다.
+
+    🔴 **설정에 규칙이 있다고 켜지지 않는다.** 이 함수는 `enabled` 만 본다 —
+      규칙의 유무를 스위치로 읽으면 설정을 실험하려고 넣은 사람이 승인까지 한다.
+
+    🔴 **제 사이클이 방금 낸 행만 본다.** `request_ids` 로 좁힌다 — 안 좁히면
+      판매 승인이 그날 매입 행을 다시 훑어 `ALREADY_DECIDED` 를 품목 수만큼 더
+      쌓고, 그 어휘가 뜻하던 *"사람이 이미 정했다"* 가 성적표에서 안 읽힌다.
+
+      ★ **사이클 이름으로 안 좁힌다.** `'PROCUREMENT'` 를 여기 적으면 그 어휘가
+        두 곳에 살게 된다 — 업무 키는 이 파일이 방금 지은 것이라 주인이 여기다.
+
+    🔴 **터져도 하루는 계속 간다.** `_stage` 와 같은 태도다 — 승인은 그날 판단·출고·
+      마감의 앞을 막지 않는다 (`open_day` 가 수금 씨앗에 대해 정해 둔 그것).
+
+    :returns: `(단계 상태, 백필이 낸 값, 사유 한 줄)`. 안 켠 날은
+        `("NOT_ATTEMPTED", None, None)` — 🔴 **note 도 안 남긴다.** 안 켠 것은
+        사건이 아니라 기본값이고, 매일 한 줄씩 남기면 진짜 사유가 안 읽힌다.
+    """
+    if not enabled:
+        return "NOT_ATTEMPTED", None, None
+    try:
+        out = approve_fn(
+            sim_run_id=sim_run_id,
+            start=as_of,
+            end=as_of,
+            # 🔴 **축을 그대로 넘긴다.** 승인도 이번 실행의 축으로 앉아야 한다 —
+            #    여기서 상수를 다시 읽으면 판단은 걷기 축에, 승인은 번인에 앉는다.
+            runs_on=_runs_of(request_ids),
+        )
+    except Exception as exc:  # noqa: BLE001 - 승인이 터져도 하루는 계속 간다.
+        return "FAILED", None, f"{name}이 터졌다: {type(exc).__name__}: {exc}"
+    status = str(getattr(out, "status", "FAILED"))
+    # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇이 왜 안 채워졌는지가 이 줄이다.
+    return status, out, f"{name}: {status} {dict(sorted(out.outcomes.items()))}"
+
+
+def _runs_of(request_ids: Sequence[str]) -> Callable[..., list[Any]]:
+    """백필이 하루치 행을 묻는 자리. **방금 그 판단이 낸 업무 키만 답한다.**
+
+    ★ **조회를 새로 짜지 않는다.** `list_runs` 를 그대로 부르고 걸러 내기만 한다 —
+      `backfill_decisions` 가 `runs_on` 을 *"`list_runs` 와 같은 키워드로 부른다"*
+      고 적어 뒀고, 받은 키워드를 그대로 흘려보내는 것이 그 계약을 지키는 길이다.
+
+    ⚠️ **조회 함수를 인자로 안 받는다.** 갈아 끼울 자리는 `approve_fn` 하나로
+      족하고, 여기에 하나 더 두면 *"어느 조회로 걸렀나"* 가 두 곳에서 갈린다.
+    """
+    wanted = frozenset(request_ids)
+
+    def runs_on(**kwargs: Any) -> list[Any]:
+        return [row for row in list_runs(**kwargs) if row.get("request_id") in wanted]
+
+    return runs_on
 
 
 def _fold_item_statuses(results: Sequence[ItemRunOutcome]) -> str:
@@ -1061,8 +1234,13 @@ def wake_up(
     outbound_fn: Callable[..., Any] = ship_due_sales,
     close_fn: Callable[..., Any] = close_day,
     sim_run_id: str = BURN_IN_SIM_RUN_ID,
+    auto_approve: bool = False,
+    approve_fn: Callable[..., BackfillOut] = backfill_decisions,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
+
+    🔴 **`auto_approve` 는 여기서도 기본이 거짓이다.** 깨어난 것만으로 승인이
+      서면 자동 승인을 명시로만 켠다는 규율이 **깨어남 한 번으로 뚫린다.**
 
     🔴 **이 함수는 안 잔다.** 5분 뒤 다시 부르는 것은 밖의 일이고 (`retry_after` 가
       그 간격을 말해 준다), 여기에 `sleep` 이 들어오면 검사가 못 지난다.
@@ -1093,4 +1271,6 @@ def wake_up(
         outbound_fn=outbound_fn,
         close_fn=close_fn,
         sim_run_id=sim_run_id,
+        auto_approve=auto_approve,
+        approve_fn=approve_fn,
     )
