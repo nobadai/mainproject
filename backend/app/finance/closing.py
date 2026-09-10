@@ -7,6 +7,7 @@ not import Master models.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -26,8 +27,7 @@ from app.finance.tools import effective_cash_date
 __all__ = ["FinanceDayClosing", "FinanceDayClosingResult", "close_day"]
 
 _ZERO = Decimal(0)
-_BASE_MODE = "BASE_NO_LOAN"
-_LOAN_MODE = "LOAN_BASELINE"
+
 
 #: `payroll_interest_cash_out_krw` 에 들어가는 **원장의 실제 비용 분류**.
 #:
@@ -63,11 +63,72 @@ class FinanceDayClosingResult:
 
 
 @dataclass(frozen=True)
+class _BaselineRef:
+    """새 실행이 **어느 재무 상태 한 행에서** 시작을 물려받았는가.
+
+    ★ **정본 포인터는 `finance_state_id` 다.** `finance_states` 의 PK 라 정확히 한
+      행을 가리킨다.
+
+    🔴 `state_type` 이나 날짜로 다시 찾지 않는다. `DAY30` 은 그 행을 **고른 이유**이지
+      조회 키가 아니다 — 실측으로 `DAY30` 행은 `FIN-DAY30-BASE` · `FIN-DAY30-LOAN`
+      둘이라 그것만으로는 한 행이 정해지지 않는다. *"가장 최근 상태"* 도 안 된다:
+      `SIM-BURNIN-202512` 안에는 2026-09-12 까지의 Walk 산물이 섞여 있다.
+
+    ★ `from_sim_run_id` 는 **계보**다. 조회는 `finance_state_id` 가 하고, 이 값은
+      *"우리가 가리킨 그 행이 정말 그 실행의 것인가"* 를 대조하는 데 쓴다.
+    """
+
+    finance_state_id: str
+    from_sim_run_id: str
+
+
+@dataclass(frozen=True)
+class _RunAxis:
+    """이 마감이 서 있는 실행축. **부르는 쪽이 준 `sim_run_id` 가 정한다.**
+
+    🔴 `v_current_finance_state` 를 쓰지 않는다. 그 View 는 *"지금"* 을 가리키므로,
+      과거 실행을 다시 닫으면 **남의 실행 축 위에서 닫게 된다.** 마감은 자기에게
+      건네진 실행의 축을 닫아야 한다.
+
+    ★ `sim_run_id` 문자열을 해석하지도, 축 이름을 상수로 박지도 않는다 —
+      `sim_runs.financing_mode` 가 그 실행의 정본이다.
+    """
+
+    financing_mode: str
+    period_start: date
+    #: 선언된 baseline. **선언이 없으면 `None`** 이고, 선언이 깨져 있으면 여기까지
+    #: 오지 않는다 (`_load_run_axis` 가 세운다).
+    baseline: _BaselineRef | None = None
+
+
+@dataclass(frozen=True)
 class _FinanceState:
     financing_mode: str
     current_cash_krw: Decimal
     receivables_krw: Decimal
     current_debt_krw: Decimal
+
+    @property
+    def cash_without_debt_krw(self) -> Decimal:
+        """현재 현금에서 **아직 남아 있는 대출 원금 효과**를 뺀 값.
+
+        ★ **반사실 시뮬레이션이 아니다.** *"대출이 없었다면 있었을 현금"* 이 아니라
+          *"지금 현금에서 남은 원금만큼을 뺀 값"* 이다. 진짜 A/B 비교는 별도
+          `sim_run` 을 하나 더 걸어서 한다 (마스터 결정 ㄷ).
+
+        🔴 **누적 대출 실행액이 아니라 잔액을 뺀다.** 누적 실행액을 빼면 원금을 갚아도
+          그만큼이 영원히 빠진 채로 남아, 상환할수록 이 값이 낮아진다. 갚은 돈은 이미
+          `current_cash_krw` 에서 나갔으므로 두 번 빼는 것이 된다.
+
+        ★ **음수는 자료 미준비가 아니라 사실이다.** 남은 원금이 보유 현금보다 크면
+          이 값은 음수이고, 그것은 *"대출을 빼고 보면 이만큼 모자란다"* 는 재무
+          사실이다. 막으면 **가장 위험한 날의 마감이 통째로 사라진다** — 위험을
+          기록하지 않는 것과 위험이 없는 것은 다르다.
+
+          ⚠️ 여기서 *"현금은 0 이상"* 정책을 새로 만들지 않는다. 원장 값 자체의
+            음수 방어는 `_daily_closing_amount` 가 이미 따로 들고 있다.
+        """
+        return self.current_cash_krw - self.current_debt_krw
 
 
 @dataclass(frozen=True)
@@ -126,31 +187,31 @@ def close_day(
 
 
 def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingFacts:
-    period_start = _load_period_start(conn, sim_run_id=sim_run_id, as_of=as_of)
-    states = _load_exact_states(conn, sim_run_id=sim_run_id, as_of=as_of)
-    base = states.get(_BASE_MODE)
-    if base is None:
-        raise FinanceDataNotReady("base_finance_state")
+    """이 하루의 마감 사실. **실행축에서 실제로 일어난 것만 읽는다.**
 
-    prior_base = _load_prior_state(
-        conn, sim_run_id=sim_run_id, financing_mode=_BASE_MODE, as_of=as_of
+    ★ 마스터 결정 ㄷ (확정) — 마감은 실행축의 사실만 기록하고, 무차입/차입 A/B 비교는
+      `sim_run` 을 하나 더 실제로 걸어서 한다. 그래서 여기서 축을 둘 읽지 않는다.
+
+    🔴 예전에는 같은 날짜의 `BASE_NO_LOAN` 을 **따로 요구**했다. 하루 넘김
+      (`FinanceDayOpening`)은 실행축 하나만 전진시키므로 그 행은 생기지 않았고,
+      정상적으로 연 하루가 `base_finance_state` 로 막혔다.
+    """
+    axis = _load_run_axis(conn, sim_run_id=sim_run_id, as_of=as_of)
+    state = _load_exact_state(
+        conn, sim_run_id=sim_run_id, financing_mode=axis.financing_mode, as_of=as_of
     )
-    loan = states.get(_LOAN_MODE)
-    prior_loan = (
-        _load_prior_state(conn, sim_run_id=sim_run_id, financing_mode=_LOAN_MODE, as_of=as_of)
-        if loan is not None
-        else None
-    )
+    prior = _prior_state(conn, sim_run_id=sim_run_id, axis=axis, as_of=as_of)
+
     issued_receivables = _sum_receivables_issued(conn, sim_run_id=sim_run_id, as_of=as_of)
     collection_cash_in = _collection_delta(
-        prior_receivables=prior_base.receivables_krw if prior_base is not None else _ZERO,
+        prior_receivables=prior.receivables_krw if prior is not None else _ZERO,
         issued_receivables=issued_receivables,
-        current_receivables=base.receivables_krw,
+        current_receivables=state.receivables_krw,
     )
     receivables_balance = _sum_receivables_outstanding(
         conn, sim_run_id=sim_run_id, as_of=as_of
     )
-    if receivables_balance != base.receivables_krw:
+    if receivables_balance != state.receivables_krw:
         raise FinanceDataNotReady("receivables_balance_mismatch")
 
     inventory = load_inventory_snapshot_as_of(conn, sim_run_id=sim_run_id, as_of=as_of)
@@ -159,30 +220,36 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
         conn, sim_run_id=sim_run_id, as_of=as_of
     )
     return _ClosingFacts(
-        day_no=(as_of - period_start).days + 1,
+        day_no=(as_of - axis.period_start).days + 1,
         purchase_cash_out_krw=purchase_cash_out,
         logistics_cash_out_krw=logistics_cash_out,
         payroll_interest_cash_out_krw=payroll_interest_cash_out,
         sales_recognized_krw=_sales_recognized(conn, sim_run_id=sim_run_id, as_of=as_of),
         collection_cash_in_krw=collection_cash_in,
-        base_cash_balance_krw=base.current_cash_krw,
-        loan_execution_krw=(
-            _loan_execution(loan, prior_loan) if loan is not None else _ZERO
-        ),
-        loan_cash_balance_krw=loan.current_cash_krw if loan is not None else base.current_cash_krw,
+        # 대출 제외 곡선 — 실행축 현금에서 **남은 원금**을 뺀 값.
+        base_cash_balance_krw=state.cash_without_debt_krw,
+        # 당일 **신규 차입 flow**. stock(잔액)이 아니다.
+        loan_execution_krw=_loan_execution(state, prior),
+        # 대출 포함 곡선 — 실행축 현금 그대로.
+        loan_cash_balance_krw=state.current_cash_krw,
         receivables_balance_krw=receivables_balance,
         inventory_qty_kg=inventory.quantity_kg,
         accounting_inventory_cost_krw=inventory.inventory_book_value_krw,
     )
 
 
-def _load_period_start(conn: Any, *, sim_run_id: str, as_of: date) -> date:
+def _load_run_axis(conn: Any, *, sim_run_id: str, as_of: date) -> _RunAxis:
+    """이 실행의 기간과 **조달 축**을 한 행에서 읽는다.
+
+    ★ 기간 검사와 축 조회가 같은 행에서 나온다 — `sim_runs` 한 행이 *"이 실행은 언제
+      부터 언제까지, 어느 축 위에서 도는가"* 를 통째로 소유하기 때문이다.
+    """
     schema = sql.Identifier(get_db_schema())
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                SELECT period_start, period_end
+                SELECT period_start, period_end, financing_mode, config_json
                 FROM {}.sim_runs
                 WHERE sim_run_id = %s
                 """
@@ -193,15 +260,136 @@ def _load_period_start(conn: Any, *, sim_run_id: str, as_of: date) -> date:
     if len(rows) != 1:
         raise FinanceDataNotReady("sim_run")
     row = rows[0]
-    period_start, period_end = _row_value(row, "period_start", 0), _row_value(row, "period_end", 1)
+    period_start = _row_value(row, "period_start", 0)
+    period_end = _row_value(row, "period_end", 1)
+    financing_mode = _row_value(row, "financing_mode", 2)
     if not isinstance(period_start, date) or not isinstance(period_end, date):
         raise FinanceDataNotReady("sim_run")
+    if not isinstance(financing_mode, str) or not financing_mode.strip():
+        raise FinanceDataNotReady("sim_run_financing_mode")
     if not period_start <= as_of <= period_end:
         raise FinanceDataNotReady("sim_run_date_out_of_range")
-    return period_start
+    return _RunAxis(
+        financing_mode=financing_mode.strip(),
+        period_start=period_start,
+        baseline=_baseline_ref(_row_value(row, "config_json", 3)),
+    )
 
 
-def _load_exact_states(conn: Any, *, sim_run_id: str, as_of: date) -> dict[str, _FinanceState]:
+def _baseline_ref(config_json: object) -> _BaselineRef | None:
+    """`config_json.baseline` 이 가리키는 시작 상태. **선언이 없으면 `None`.**
+
+    ```text
+    {}                                          선언 없음        → None
+    {"baseline": {"finance_state_id": "...",    선언 있음        → _BaselineRef
+                  "from_sim_run_id": "..."}}
+    {"baseline": {}}                            선언이 깨졌다    → NOT_READY
+    {"baseline": {"finance_state_id": ""}}      선언이 깨졌다    → NOT_READY
+    ```
+
+    🔴 **선언이 깨진 것을 '선언 없음' 으로 읽지 않는다.** 그러면 시작 상태를 물려받아야
+      할 실행이 조용히 0 에서 시작하고, 물려받은 부채가 **첫날 신규 차입**으로 기록된다.
+
+    ⚠️ 이미 있는 `config_json.financing_baseline` 과 **다른 칸이다.** 저쪽은 대출 조건
+      (이율·기간·거치)이고 여기는 *"어느 상태 행에서 이어받았나"* 다. 이름이 닮았다고
+      섞으면 대출 정책이 시작 상태 자리에 들어온다.
+    """
+    if not isinstance(config_json, Mapping):
+        return None
+    if "baseline" not in config_json:
+        return None
+    section = config_json["baseline"]
+    if not isinstance(section, Mapping):
+        raise FinanceDataNotReady("baseline_finance_state_invalid")
+    finance_state_id = section.get("finance_state_id")
+    from_sim_run_id = section.get("from_sim_run_id")
+    if not isinstance(finance_state_id, str) or not finance_state_id.strip():
+        raise FinanceDataNotReady("baseline_finance_state_invalid")
+    if not isinstance(from_sim_run_id, str) or not from_sim_run_id.strip():
+        # 계보가 없으면 가리킨 행이 정말 그 실행의 것인지 대조할 길이 없다.
+        raise FinanceDataNotReady("baseline_finance_state_invalid")
+    return _BaselineRef(
+        finance_state_id=finance_state_id.strip(),
+        from_sim_run_id=from_sim_run_id.strip(),
+    )
+
+
+def _prior_state(
+    conn: Any, *, sim_run_id: str, axis: _RunAxis, as_of: date
+) -> _FinanceState | None:
+    """이 하루의 **직전 상태**. 세 갈래를 이 순서로 고른다.
+
+    ```text
+    1. 같은 실행에 이전 상태가 있다        → 그것이 직전이다
+    2. 없고, baseline 이 선언돼 있다        → 물려받은 시작 상태가 직전이다
+    3. 없고, baseline 선언도 없다           → 직전이 없다 (`None`)
+    ```
+
+    🔴 **1번이 2번보다 먼저다.** 실행이 하루라도 진행됐으면 그 실행의 어제가 직전이지
+      물려받은 시작점이 아니다. 순서를 뒤집으면 둘째 날부터 계속 시작점과 비교하게 되고,
+      매일이 첫날처럼 보인다.
+
+    🔴 **`전날 행이 없다` 와 `전날 값이 0이다` 는 다르다.** 부채를 물려받은 새 실행에서
+      직전을 0 으로 접으면 `max(D - 0, 0)` 이 되어 **있지도 않은 첫날 신규 차입**이
+      기록된다 (실측 45,272,104원). 그래서 선언된 baseline 은 반드시 풀려야 하고,
+      풀리지 않으면 `_load_baseline_state` 가 세운다.
+
+    ⚠️ **3번을 `모든 실행은 baseline 이 있어야 한다` 로 일반화하지 않는다.** 이 실행이
+      시작을 물려받아야 하는지 아닌지를 가를 정본은 `config_json.baseline` 선언뿐이고,
+      `run_type` 으로 추측하는 규칙을 여기서 새로 만들지 않는다. 선언이 **깨진** 경우는
+      2번에서 이미 막힌다 — 조용히 3번으로 흘러가지 않는다.
+    """
+    same_run = _load_prior_state(
+        conn, sim_run_id=sim_run_id, financing_mode=axis.financing_mode, as_of=as_of
+    )
+    if same_run is not None:
+        return same_run
+    if axis.baseline is None:
+        return None
+    return _load_baseline_state(conn, axis.baseline)
+
+
+def _load_baseline_state(conn: Any, baseline: _BaselineRef) -> _FinanceState:
+    """물려받은 시작 상태 **한 행**. `finance_state_id` 로만 찾는다.
+
+    ★ 계보를 함께 대조한다 — 가리킨 행이 선언한 실행의 것이 아니면 **닫지 않는다.**
+      포인터가 남의 실행을 가리키는 날, 그 사고는 에러 없이 숫자만 바꾼다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT sim_run_id, financing_mode, current_cash_krw, receivables_krw,
+                       current_debt_krw
+                FROM {}.finance_states
+                WHERE finance_state_id = %s
+                """
+            ).format(schema),
+            [baseline.finance_state_id],
+        )
+        rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise FinanceDataNotReady("baseline_finance_state")
+    row = rows[0]
+    if str(_row_value(row, "sim_run_id", 0)) != baseline.from_sim_run_id:
+        raise FinanceDataNotReady("baseline_finance_state_invalid")
+    return _FinanceState(
+        financing_mode=str(_row_value(row, "financing_mode", 1)),
+        current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 2)),
+        receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 3)),
+        current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 4)),
+    )
+
+
+def _load_exact_state(
+    conn: Any, *, sim_run_id: str, financing_mode: str, as_of: date
+) -> _FinanceState:
+    """마감일 그날의 **실행축 상태 한 행.**
+
+    ★ 없으면 닫지 않고, 같은 날 같은 축에 두 행이면 고르지 않는다. 둘 다 값을
+      지어내지 않기 위한 것이다.
+    """
     schema = sql.Identifier(get_db_schema())
     with conn.cursor() as cursor:
         cursor.execute(
@@ -210,24 +398,25 @@ def _load_exact_states(conn: Any, *, sim_run_id: str, as_of: date) -> dict[str, 
                 SELECT financing_mode, current_cash_krw, receivables_krw, current_debt_krw
                 FROM {}.finance_states
                 WHERE sim_run_id = %s
+                  AND financing_mode = %s
                   AND state_date = %s
+                LIMIT 2
                 """
             ).format(schema),
-            [sim_run_id, as_of],
+            [sim_run_id, financing_mode, as_of],
         )
         rows = cursor.fetchall()
-    states: dict[str, _FinanceState] = {}
-    for row in rows:
-        mode = _row_value(row, "financing_mode", 0)
-        if not isinstance(mode, str) or mode in states:
-            raise FinanceDataNotReady("finance_state_ambiguous")
-        states[mode] = _FinanceState(
-            financing_mode=mode,
-            current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 1)),
-            receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 2)),
-            current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 3)),
-        )
-    return states
+    if len(rows) > 1:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    if not rows:
+        raise FinanceDataNotReady("finance_state")
+    row = rows[0]
+    return _FinanceState(
+        financing_mode=str(_row_value(row, "financing_mode", 0)),
+        current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 1)),
+        receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 2)),
+        current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 3)),
+    )
 
 
 def _load_prior_state(
@@ -387,6 +576,14 @@ def _collection_delta(
 
 
 def _loan_execution(current: _FinanceState, prior: _FinanceState | None) -> Decimal:
+    """당일 **신규 차입액(flow)**. 잔액(stock)이 아니다.
+
+    ★ 원금 상환은 음수 차입이 아니다 — 그날 새로 빌린 돈이 없을 뿐이라 0 이다.
+      상환은 `current_cash_krw` 와 `current_debt_krw` 가 이미 말하고 있다.
+
+    ⚠️ 이 값을 누적해서 `base_cash_balance_krw` 를 만들지 않는다. 그쪽은 **남은 원금
+      잔액**(`current_debt_krw`)을 쓴다 — `_FinanceState.cash_without_debt_krw` 참조.
+    """
     prior_debt = prior.current_debt_krw if prior is not None else _ZERO
     return max(current.current_debt_krw - prior_debt, _ZERO)
 

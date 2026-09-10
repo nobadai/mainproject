@@ -101,9 +101,20 @@ class _Cursor:
         self.row = None
         self.rowcount = 0
         if "sim_runs" in text:
-            self.rows = [(self.conn.period_start, self.conn.period_end)]
+            self.rows = [
+                (
+                    self.conn.period_start,
+                    self.conn.period_end,
+                    self.conn.run_mode,
+                    self.conn.config_json,
+                )
+            ]
         elif ".finance_states" in text and "state_date =" in text:
-            self.rows = list(self.conn.states)
+            # ★ 마감은 **실행축 하나**를 묻는다 — 그 축의 행만 돌려준다.
+            mode = params[1]
+            self.rows = [
+                row for row in self.conn.states if row["financing_mode"] == mode
+            ][:2]
         elif ".finance_states" in text and "state_date <" in text:
             # ★ 실 질의의 뜻대로 자른다 — 같은 mode, as_of 이전, 최신순 두 건.
             mode, as_of = params[1], params[2]
@@ -154,6 +165,8 @@ class _Connection:
         issued_receivables=Decimal(500),
         outstanding_receivables=Decimal(700),
         sales_recognized=Decimal(1_000),
+        run_mode="LOAN_BASELINE",
+        config_json=None,
         period_start=date(2026, 1, 1),
         period_end=date(2026, 1, 31),
     ):
@@ -164,6 +177,9 @@ class _Connection:
         self.issued_receivables = issued_receivables
         self.outstanding_receivables = outstanding_receivables
         self.sales_recognized = sales_recognized
+        self.run_mode = run_mode
+        # baseline 선언이 없는 실행 — 기존 실행 계약 그대로다.
+        self.config_json = {} if config_json is None else config_json
         self.period_start = period_start
         self.period_end = period_end
         self.closings = {}
@@ -288,7 +304,9 @@ def test_many_prior_days_are_history_not_ambiguity():
 def test_two_states_on_the_same_latest_date_are_still_ambiguous():
     """★ 진짜 모호함은 **가장 늦은 날짜가 둘일 때**다 — 그때는 고르지 않는다."""
     prior = _default_prior_states()
-    prior.append(_state(date(2026, 1, 4), "BASE_NO_LOAN", cash=Decimal(8_888)))
+    prior.append(
+        _state(date(2026, 1, 4), "LOAN_BASELINE", cash=Decimal(8_888), debt=Decimal(7))
+    )
     conn = _Connection(payables=[], prior_states=prior)
 
     with pytest.raises(FinanceDataNotReady):
@@ -325,18 +343,27 @@ def test_first_day_without_any_prior_state_still_closes():
 # ---------------------------------------------------------------------------
 
 
-def test_base_and_loan_axes_do_not_bleed_into_each_other():
+def test_two_cash_columns_come_from_one_execution_state():
+    """실행축 현금 `C` 와 남은 원금 `D` 하나에서 두 칸이 갈린다.
+
+    ★ 마스터 결정 ㄷ — 마감은 축을 둘 읽지 않는다. `C = 12,000` · `D = 3,000` 이면
+      대출 포함 곡선은 12,000, 대출 제외 곡선은 9,000 이다.
+    """
     conn = _Connection(payables=[])
 
     _close(conn)
 
     row = _row(conn)
-    assert row["base_cash_balance_krw"] == Decimal(9_000)
     assert row["loan_cash_balance_krw"] == Decimal(12_000)
+    assert row["base_cash_balance_krw"] == Decimal(9_000)
 
 
-def test_missing_base_state_blocks_the_close():
-    """BASE 축이 없으면 **닫지 않는다** — 대출 잔액을 무차입 칸에 넣지 않는다."""
+def test_a_missing_comparison_axis_no_longer_blocks_the_close():
+    """🔴 예전에는 같은 날 `BASE_NO_LOAN` 이 없으면 막혔다.
+
+    하루 넘김은 실행축 하나만 전진시키므로 그 행은 생기지 않았고, 정상적으로 연
+    하루가 통째로 막혔다. 이제 그 축은 읽지 않는다.
+    """
     conn = _Connection(
         payables=[],
         states=[
@@ -344,29 +371,46 @@ def test_missing_base_state_blocks_the_close():
         ],
     )
 
-    with pytest.raises(FinanceDataNotReady):
-        _close(conn)
+    _close(conn)
+
+    assert _row(conn)["loan_cash_balance_krw"] == Decimal(12_000)
 
 
-def test_duplicate_state_for_one_mode_on_the_close_date_blocks():
-    conn = _Connection(payables=[], states=[*_default_states(), _default_states()[0]])
-
-    with pytest.raises(FinanceDataNotReady):
-        _close(conn)
-
-
-def test_without_loan_axis_the_base_balance_carries_the_loan_column():
-    """대출 축이 없는 실행은 차입이 없다 — 실행액 0, 잔액은 무차입 잔액이다."""
+def test_missing_execution_state_still_blocks_the_close():
+    """실행축 상태가 없으면 **닫지 않는다** — 없는 잔액을 지어내지 않는다."""
     conn = _Connection(
         payables=[],
-        states=[row for row in _default_states() if row["financing_mode"] != "LOAN_BASELINE"],
+        states=[
+            row for row in _default_states() if row["financing_mode"] != "LOAN_BASELINE"
+        ],
+    )
+
+    with pytest.raises(FinanceDataNotReady):
+        _close(conn)
+
+
+def test_duplicate_state_for_the_execution_axis_blocks():
+    conn = _Connection(payables=[], states=[*_default_states(), _default_states()[1]])
+
+    with pytest.raises(FinanceDataNotReady):
+        _close(conn)
+
+
+def test_a_debt_free_run_reports_the_same_number_in_both_columns():
+    """부채가 0 인 실행은 두 곡선이 같다 — 뺄 원금이 없다."""
+    conn = _Connection(
+        payables=[],
+        states=[dict(_default_states()[1], current_debt_krw=Decimal(0))],
+        prior_states=[
+            row for row in _default_prior_states() if row["financing_mode"] == "LOAN_BASELINE"
+        ],
     )
 
     _close(conn)
 
     row = _row(conn)
+    assert row["loan_cash_balance_krw"] == row["base_cash_balance_krw"] == Decimal(12_000)
     assert row["loan_execution_krw"] == Decimal(0)
-    assert row["loan_cash_balance_krw"] == row["base_cash_balance_krw"] == Decimal(9_000)
 
 
 # ---------------------------------------------------------------------------
