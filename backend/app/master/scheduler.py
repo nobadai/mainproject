@@ -725,8 +725,13 @@ def run_scheduled_day(
     notes: list[str] = []
 
     # ── 개장 ────────────────────────────────────────────────────────
+    #
+    # 🔴 **네 단계에 축을 실어 준다** (`#531` 후속 · 2026-09-10). 등록소가 프로세스
+    #    시작 때 든 상수를 쓰면 **매입 원장만 새 실행에 앉고 물류 장부·재무 수금은
+    #    번인에 남는다** — 아무 오류도 안 나는 갈림이라 `ledger.py` 가 경고해 둔
+    #    그 모양 그대로다. 마감이 이미 `sim_run_id` 를 받는 것과 같은 자리다.
     try:
-        opened = open_day_fn(as_of)
+        opened = open_day_fn(as_of, sim_run_id=sim_run_id)
     except Exception as exc:  # noqa: BLE001 - 개장 실패가 500 으로 올라가면 안 된다.
         return DayRunOutcome(
             as_of=as_of,
@@ -748,18 +753,18 @@ def run_scheduled_day(
         )
 
     # ── 입고 ────────────────────────────────────────────────────────
-    inbound_status, note = _stage("입고", lambda: receive_fn(as_of))
+    inbound_status, note = _stage("입고", lambda: receive_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
 
     # ── 채권 — 🔴 **수금보다 앞이다** ───────────────────────────────
     #
     # ★ 채권이 서야 수금할 것이 있다. 순서를 뒤집으면 같은 날 발생·수금되는 계약이
     #   생기는 순간 **수금할 채권이 아직 없는 상태**에서 수금이 돈다.
-    receivable_status, note = _stage("채권", lambda: issue_fn(as_of))
+    receivable_status, note = _stage("채권", lambda: issue_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
 
     # ── 수금 ────────────────────────────────────────────────────────
-    collection_status, note = _stage("수금", lambda: collect_fn(as_of))
+    collection_status, note = _stage("수금", lambda: collect_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
 
     # ── 장부 관문 — 개장과 판단 **사이** ────────────────────────────
@@ -848,6 +853,12 @@ def run_scheduled_day(
                     policy_version=policy_version,
                     request_id=request_id,
                     item=item,
+                    # 🔴 **걷기가 받은 축을 봉투까지 잇는다** (`#531` 후속 · 2026-09-10).
+                    #    안 실으면 `run_procurement` 이 번인 상수로 떨어지고, 그 판단
+                    #    행을 승인이 읽으니 **원장까지 번인으로 돌아온다.** 마감은
+                    #    `sim_run_id` 를 받는데 판단만 안 받아서, 같은 날 두 행이 서로
+                    #    다른 실행에 앉았다.
+                    sim_run_id=sim_run_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 한 품목이 하루를 세우면 안 된다.
@@ -896,6 +907,10 @@ def run_scheduled_day(
                     request_id=sales_request_id,
                     item=item,
                     business_mode=WALK_BUSINESS_MODE,
+                    # 🔴 **매입과 같은 축이다.** 여기만 빠지면 같은 날 매입 판단은
+                    #    걷기 축에, 판매 판단은 번인에 앉는다 — 그러면 판매가 읽는
+                    #    매입 경계(`_procurement_boundary`)가 **남의 실행 것**이 된다.
+                    sim_run_id=sim_run_id,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 한 품목이 하루를 세우면 안 된다.

@@ -52,6 +52,7 @@ from app.master.ledger import (
     ledger_block_reason,
     persist_purchases,
 )
+from app.master.sim_run_binding import bind_sim_run
 
 __all__ = [
     "PARTS",
@@ -547,10 +548,16 @@ def apply_approval(
     if arrival_blocked:
         return TransitionOut(status="NOT_APPLIED", reason=arrival_blocked)
 
-    finance = _TRANSITIONS["finance"]
-    logistics = _TRANSITIONS["logistics"]
-
     try:
+        # 🔴 **등록소가 든 축이 아니라 이 승인의 축으로 묶는다** (`#531` 후속).
+        #    전에는 물류 어댑터가 프로세스 시작 때 받은 상수를 들고 있어서, 매입
+        #    원장이 새 실행에 앉는 날 **물류 장부만 번인에 남았다.**
+        #
+        # ★ **`try` 안이다.** 축이 비면 `bind_sim_run` 이 막는데, 그 실패는 예외로
+        #   올라가지 않고 아래 `except` 가 `FAILED` + 사유로 옮긴다 —
+        #   `build_purchase_rows` 가 같은 이유로 터지는 것과 한 자리에서 걸린다.
+        finance = bind_sim_run(_TRANSITIONS["finance"], sim_run_id)
+        logistics = bind_sim_run(_TRANSITIONS["logistics"], sim_run_id)
         # 🔴 **커넥션 밖에서 계산한다.** 순수 계산이 터지는 것은 흔한 일인데
         #   (약정 모양이 예상과 다르다 등), 커넥션을 연 뒤에 터지면 열린 트랜잭션이
         #   남는다. 계산 실패는 DB 를 만나기 전에 끝나야 한다.
