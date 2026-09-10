@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import dataclasses
 import typing
-from datetime import date
 
 from app.contracts.sales_logistics import (
     SalesOutboundReservationRequest,
