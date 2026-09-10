@@ -1,19 +1,20 @@
-"""새 실행을 여는 문 — **셋을 한 트랜잭션으로 부른다.**
+"""새 실행을 여는 문 — **넷을 한 트랜잭션으로 부른다.**
 
 ```text
 python -m app.master.sim_run_runner
     --sim-run-id SIM-WALK-202601 --financing-mode LOAN_BASELINE
     --baseline-run-id SIM-BURNIN-202512 --baseline-state-id FIN-DAY30-LOAN
     ...
-        → 실행 행 · 시작 재무 상태가 선다 · 🔴 커밋은 여기서 한 번
+        → 실행 행 · 시작 재무 상태 · 시작 물류 fixture 가 선다 · 🔴 커밋은 여기서 한 번
 ```
 
 ★ **조각은 다 서 있었고 묶는 문이 없었다.**
 
 ```text
-sim_run.create_sim_run              실행 한 행          (#531)
-sim_run_open.seed_opening_finance_state   시작 재무 상태  (#545)
-sim_run_open.reset_sim_run_ledger         다시 열 때 장부 비우기  (#545)
+sim_run.create_sim_run                        실행 한 행              (#531)
+sim_run_open.seed_opening_finance_state       시작 재무 상태          (#545)
+sim_run_open.seed_opening_logistics_fixture   시작 물류 fixture       (#551)
+sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (#545)
 ```
 
 `#545` 는 **일부러** 진입점을 안 만들었다 — *"돌리는 문은 별도 판이다."* 이 파일이
@@ -23,7 +24,7 @@ sim_run_open.reset_sim_run_ledger         다시 열 때 장부 비우기  (#545
 
 ## 🔴 판단을 여기서 새로 만들지 않는다
 
-이 문이 하는 일은 **셋을 순서대로 부르는 것**뿐이다.
+이 문이 하는 일은 **넷을 순서대로 부르는 것**뿐이다.
 
 ```text
 정합성 셋 (출발점이 있는가 · 실행 축이 맞는가 · 조달 방식이 같은가)
@@ -79,12 +80,33 @@ sim_run_open.reset_sim_run_ledger         다시 열 때 장부 비우기  (#545
   적어 뒀다). **부르는 쪽이 하는 것**이고, 지금까지 부르는 쪽이 없었다.
 
 ```text
-🔴 셋이 **한 트랜잭션**이다
+🔴 넷이 **한 트랜잭션**이다
    실행 행만 서고 시작 상태가 없으면 첫날 마감이 baseline 을 못 찾는다
    장부만 지워지고 시작 상태 적재가 터지면 **출발점 없는 빈 실행**이 남는다
 ```
 
 ⚠️ 중간에 터지면 **롤백한다.** 반쪽 실행을 남기지 않는다.
+
+---
+
+## 🔴 물류 씨앗도 **같은 트랜잭션**이다
+
+★★ 재무만 놓고 물류를 안 놓으면 새 실행에 물류 행이 **한 행도 없고**, 그때 개장은
+  상한만큼 거슬러도 anchor 를 못 찾아 `REJECTED_GAP` 으로 거절한다 (`#551`).
+
+```text
+--opening-fixture-id      새로 만들 물류 씨앗 행의 이름  (--opening-state-id 와 대칭)
+--opening-usage-scope     어느 usage_scope 를 이관하나
+--baseline-run-id         어느 실행에서 이관하나          ← **이미 있는 것을 쓴다**
+```
+
+🔴 **`usage_scope` 를 이 문에 박지 않는다** (물류 상수를 import 하는 것도 아니다) —
+  그 어휘의 주인은 물류이고, 마스터가 제 코드에 박으면 물류가 값을 바꾸는 날
+  말없이 갈린다.
+
+★★ **물류용 날짜 인자를 새로 만들지 않는다.** `--opening-state-date` 하나를 재무
+  씨앗과 물류 씨앗이 **둘 다** 쓴다 — 둘이 갈리면 두 파트의 anchor 가 갈리고,
+  그러면 이유 없이 한 파트만 며칠 더 걷는다. **갈릴 자리를 안 만드는 것**이다.
 
 ---
 
@@ -121,6 +143,7 @@ from app.master.sim_run_open import (
     LedgerReset,
     reset_sim_run_ledger,
     seed_opening_finance_state,
+    seed_opening_logistics_fixture,
 )
 
 __all__ = [
@@ -144,6 +167,8 @@ class SimRunOpened:
     baseline: BaselineLineage
     #: 새로 선 시작 재무 상태의 이름.
     opening_finance_state_id: str
+    #: 새로 선 시작 물류 fixture 의 이름. 🔴 이것이 없으면 개장이 anchor 를 못 찾는다.
+    opening_logistics_fixture_id: str
     period_start: date
     period_end: date
     #: 지운 결과. 🔴 **`None` 은 「안 지웠다」** — `--reset` 을 안 줬다는 뜻이다.
@@ -166,16 +191,22 @@ def open_sim_run(
     opening_finance_state_id: str,
     opening_state_date: date,
     opening_state_type: str,
+    opening_fixture_id: str,
+    opening_usage_scope: str,
     reset: bool = False,
     note: str | None = None,
     reset_fn: Callable[..., LedgerReset] = reset_sim_run_ledger,
     create_fn: Callable[..., str] = create_sim_run,
     seed_fn: Callable[..., str] = seed_opening_finance_state,
+    logistics_seed_fn: Callable[..., str] = seed_opening_logistics_fixture,
 ) -> SimRunOpened:
-    """실행을 연다. **셋을 순서대로 부르고 한 번 커밋한다.**
+    """실행을 연다. **넷을 순서대로 부르고 한 번 커밋한다.**
 
     :param baseline: 🔴 **호출자가 `financing_mode` 와 함께 명시한다** — 한쪽을 보고
         다른 쪽을 고르지 않는다 (모듈 docstring · 재무 청함).
+    :param opening_state_date: 🔴 **재무 씨앗과 물류 씨앗이 둘 다 쓴다.** 물류용
+        날짜를 따로 두면 두 파트의 anchor 가 갈린다.
+    :param opening_usage_scope: 🔴 **어휘의 주인은 물류다** — 여기 박지 않고 받는다.
     :param reset: 🔴 **기본이 거짓이다.** 거짓이면 지우는 함수를 **한 번도 안 부른다.**
     :raises ValueError: 실행이 이미 있는데 `reset` 을 안 줬을 때. **조용히 덮지 않는다.**
     """
@@ -215,6 +246,19 @@ def open_sim_run(
             state_date=opening_state_date,
             state_type=opening_state_type,
         )
+
+        # 🔴 **재무만 놓고 물류를 안 놓으면 새 실행에 물류 행이 한 행도 없다.**
+        #    그때 개장은 상한만큼 거슬러도 anchor 를 못 찾고 거절한다 (`#551`).
+        #
+        # ★ **날짜가 재무 씨앗과 같은 값이다** — 갈릴 자리를 안 만든다.
+        logistics_seed_fn(
+            conn,
+            sim_run_id=sim_run_id,
+            baseline_run_id=baseline.from_sim_run_id,
+            fixture_id=opening_fixture_id,
+            as_of=opening_state_date,
+            usage_scope=opening_usage_scope,
+        )
     except Exception:
         # ⚠️ **반쪽 실행을 남기지 않는다.** 되돌리기가 또 터져도 원래 사유를 덮지
         #   않는다 — 무엇이 터졌는지가 먼저다.
@@ -222,13 +266,14 @@ def open_sim_run(
             conn.rollback()
         raise
 
-    # 🔴 **여기가 유일한 커밋이다.** 셋 중 하나라도 터졌으면 위에서 이미 나갔다.
+    # 🔴 **여기가 유일한 커밋이다.** 넷 중 하나라도 터졌으면 위에서 이미 나갔다.
     conn.commit()
     return SimRunOpened(
         sim_run_id=sim_run_id,
         financing_mode=financing_mode,
         baseline=baseline,
         opening_finance_state_id=opening_finance_state_id,
+        opening_logistics_fixture_id=opening_fixture_id,
         period_start=period_start,
         period_end=period_end,
         ledger_reset=ledger_reset,
@@ -270,7 +315,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.master.sim_run_runner",
         description=(
-            "새 실행을 연다 — 실행 행 · 시작 재무 상태를 한 트랜잭션으로 세운다. 🟡 걷지는 않는다"
+            "새 실행을 연다 — 실행 행 · 시작 재무 상태 · 시작 물류 fixture 를"
+            " 한 트랜잭션으로 세운다. 🟡 걷지는 않는다"
         ),
     )
     parser.add_argument("--sim-run-id", required=True, help="새 실행의 이름 · 🔴 기본값 없음")
@@ -305,6 +351,16 @@ def _parser() -> argparse.ArgumentParser:
         "--opening-state-type", required=True, help="시작 재무 상태의 종류 (예: OPENING)"
     )
     parser.add_argument(
+        "--opening-fixture-id",
+        required=True,
+        help="새로 만들 시작 물류 fixture 의 이름 · 🔴 기본값 없음",
+    )
+    parser.add_argument(
+        "--opening-usage-scope",
+        required=True,
+        help="어느 usage_scope 를 이관하나 · 🔴 기본값 없음 — 어휘의 주인은 물류다",
+    )
+    parser.add_argument(
         "--reset",
         action="store_true",
         default=False,
@@ -335,6 +391,7 @@ def format_summary(opened: SimRunOpened) -> str:
             f"조달      {opened.financing_mode}",
             f"출발      {opened.baseline.from_sim_run_id} / {opened.baseline.finance_state_id}",
             f"시작상태  {opened.opening_finance_state_id}",
+            f"물류씨앗  {opened.opening_logistics_fixture_id}",
             f"장부      {지움}",
             "",
             "🟡 열었다. 걷지는 않았다 — 걸으려면 다음을 부른다:",
@@ -373,6 +430,8 @@ def main(argv: Sequence[str]) -> int:
             opening_finance_state_id=args.opening_state_id,
             opening_state_date=date.fromisoformat(args.opening_state_date),
             opening_state_type=args.opening_state_type,
+            opening_fixture_id=args.opening_fixture_id,
+            opening_usage_scope=args.opening_usage_scope,
             reset=args.reset,
             note=args.note,
         )
