@@ -18,6 +18,7 @@ from app.master import scheduler
 from app.master.clock import SEOUL
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, ItemForecastGate
+from app.master.pending_transition import RetriedTransition, RetryOut
 from app.master.scheduler import (
     DayRunOutcome,
     ScheduledAction,
@@ -159,6 +160,25 @@ class _Sales:
         return _SalesOut(end_code=self.end_code)
 
 
+class _Retry:
+    """`retry_pending_transitions` 대역. **부른 날과 축을 센다.**
+
+    ⚠️ **`RetryOut` 을 그대로 쓴다** — 모양을 흉내 내면 `outcomes` 가 없어 하루가
+      note 를 만들다 터진다.
+    """
+
+    def __init__(self, out: RetryOut | None = None, boom: Exception | None = None) -> None:
+        self.out = out or RetryOut(status="NOTHING_DUE", reason="미적용 전이가 없다")
+        self.boom = boom
+        self.calls: list[tuple[date, str]] = []
+
+    def __call__(self, as_of: date, *, sim_run_id: str, **kwargs) -> RetryOut:
+        self.calls.append((as_of, sim_run_id))
+        if self.boom is not None:
+            raise self.boom
+        return self.out
+
+
 def _procure_response(end_code: str = "E1_APPROVED"):
     class _R:
         pass
@@ -174,6 +194,10 @@ def _run(
     procure_fn = _Procure() if procure is None else procure
     defaults = {
         "open_day_fn": _Spy(_Out("OPENED")),
+        # ⚠️ **대역을 안 주면 진짜 재시도가 DB 를 읽고 `apply_approval` 이 쓴다.**
+        #   conftest 가 조회를 막아 두었지만 여기서도 값을 정해 둔다 — 이 파일의
+        #   검사는 *"단계가 어떤 값을 냈나"* 를 재기 때문이다.
+        "retry_fn": _Retry(),
         "receive_fn": _Spy(_Out("RECEIVED")),
         # ⚠️ **대역을 안 주면 진짜 `issue_receivables` 가 DB 를 찾으러 간다.**
         "issue_fn": _Spy(_Out("ISSUED")),
@@ -397,8 +421,13 @@ def _order_of_a_day(**kwargs) -> list[str]:
         order.append(f"판매:{request.item}")
         return sales(request)
 
+    def retry_noted(as_of, *, sim_run_id, **k):
+        order.append("재시도")
+        return RetryOut(status="NOTHING_DUE", reason="미적용 전이가 없다")
+
     defaults = {
         "open_day_fn": note("개장", _Out("OPENED")),
+        "retry_fn": retry_noted,
         "receive_fn": note("입고", _Out("RECEIVED")),
         "issue_fn": note("채권", _Out("ISSUED")),
         "collect_fn": note("수금", _Out("COLLECTED")),
@@ -413,19 +442,22 @@ def _order_of_a_day(**kwargs) -> list[str]:
     return order
 
 
-def test_순서는_개장_입고_채권_수금_매입_판매_출고_마감이다():
+def test_순서는_개장_재시도_입고_채권_수금_매입_판매_출고_마감이다():
     """🔴 **판매가 매입 뒤 · 출고 앞이다** (2026-09-10).
 
     ★★ 판매를 출고 뒤로 옮기면 그날 확정된 안이 **다음 날에야** 나갈 자리가 생긴다.
       `ship_due_sales` 는 이미 확정된 판매를 내보내는 단계지 판매 안을 내는 자리가
       아니다 — 이름 때문에 판매가 서 있는 것처럼 보였고, 그래서 걷기 179일에 판매
       판단이 0건이었다.
+
+    🔴 **미적용 전이 재시도가 개장 뒤 · 입고 앞이다** (2026-09-11 · `#563`).
     """
     order = _order_of_a_day()
 
     # 🔴 **출고가 판단 둘 뒤다.** 오늘 산 것은 오늘 안 나간다 — 도착이 며칠 뒤다.
     assert order == [
         "개장",
+        "재시도",
         "입고",
         "채권",
         "수금",
@@ -455,6 +487,116 @@ def test_판매는_매입_뒤이고_출고_앞이다():
     assert 마지막판매 < order.index("출고"), (
         "판매 판단이 출고 뒤에 섰다 — 그날 확정된 안이 다음 날에야 나갈 자리가 생긴다"
     )
+
+
+def test_미적용_전이_재시도는_개장_뒤이고_입고_앞이다():
+    """🔴 **자리 하나가 이 판의 전부다** (`#563` · 2026-09-11).
+
+    ★★ **왜 개장 뒤인가.** 그날 도착 행을 세우는 것이 개장이다 — 앞에 두면 재시도가
+      어제와 똑같이 *"갱신할 물류 runtime fixture 행이 없다"* 로 터진다.
+
+    ★★ **왜 입고 앞인가.** 방금 선 도착 예정을 **그날 입고가 잡아야** 한다. 뒤로
+      밀면 그날 도착이 하루 더 밀리고, 그 하루가 날마다 쌓인다.
+
+    ⚠️ 위 전체 비교와 겹치지만 **관계만 떼어 다시 잰다** — 전체 비교 하나만 두면
+      어느 항목이 왜 거기 있는지가 안 남는다 (판매 자리와 같은 규율).
+    """
+    order = _order_of_a_day()
+
+    assert order.index("개장") < order.index("재시도"), (
+        "재시도가 개장보다 앞에 섰다 — 그날 도착 행이 아직 없어 어제와 똑같이 터진다"
+    )
+    assert order.index("재시도") < order.index("입고"), (
+        "재시도가 입고 뒤에 섰다 — 방금 선 도착 예정을 그날 입고가 못 잡고 하루가 밀린다"
+    )
+
+
+def test_재시도가_그날과_실행_축을_받는다():
+    """🔴 **축을 지어내지 않는다.** 안 실으면 걷기가 번인 장부를 고치려 든다."""
+    재시도 = _Retry()
+    _run(_plan(now=_at(9, 30), gate=ALL_READY), retry_fn=재시도, sim_run_id="SIM-WALK-202601")
+
+    assert 재시도.calls == [(AS_OF, "SIM-WALK-202601")]
+
+
+def test_재시도가_낸_값을_하루가_그대로_싣는다():
+    """🔴 **여기서 다시 세지 않는다** — 어휘 넷의 주인은 `RetryOut.outcomes` 하나다.
+
+    ★★ **이 값이 없어서 「승인 15건 RECORDED」 를 보고 원장에 닿은 줄 알았다.**
+    """
+    낸값 = RetryOut(
+        status="RAN",
+        reason="미적용 1건을 다시 세웠다",
+        retried=(
+            RetriedTransition(
+                request_id="REQ-A", decision_seq=1, as_of=AS_OF, outcome="APPLIED"
+            ),
+        ),
+    )
+    out, _ = _run(_plan(now=_at(9, 30), gate=ALL_READY), retry_fn=_Retry(낸값))
+
+    assert out.pending_transition_status == "RAN"
+    assert out.pending_transition is 낸값
+    assert dict(out.pending_transition.outcomes) == {"APPLIED": 1}
+
+
+def test_재시도가_터져도_하루는_계속_간다():
+    """🔴 **승인한 사실이 전이 실패로 지워지면 안 된다** — `apply_approval` 의 그 태도.
+
+    ★ 하루가 여기서 멈추면 입고도 판단도 마감도 안 돈다.
+    """
+    shipped, closed = _Spy(_Out("NOTHING_DUE")), _Spy(_Out("CLOSED"))
+    out, procure = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        retry_fn=_Retry(boom=RuntimeError("커넥션이 끊겼다")),
+        outbound_fn=shipped,
+        close_fn=closed,
+    )
+
+    assert out.pending_transition_status == "FAILED"
+    assert out.pending_transition is None
+    assert out.procurement_status == "RAN", "재시도가 터져서 판단이 안 돌았다"
+    assert len(procure.requests) == len(ITEMS)
+    assert len(shipped.calls) == 1, "재시도가 터져서 출고가 안 돌았다"
+    assert len(closed.calls) == 1, "재시도가 터져서 마감이 안 돌았다"
+
+
+def test_안_도는_날에는_재시도도_안_한다():
+    """🔴 `WAIT` · 휴장 · `BLOCKED` — **서비스 함수를 하나도 안 부른다.**"""
+    재시도 = _Retry()
+    out, _ = _run(_plan(now=_at(9, 30), gate=NONE_READY), retry_fn=재시도)
+
+    assert out.action == "WAIT"
+    assert 재시도.calls == []
+    assert out.pending_transition_status == "NOT_ATTEMPTED"
+
+
+def test_개장이_실패하면_재시도도_안_한다():
+    """🔴 그날 도착 행이 안 섰으므로 재시도가 어제와 똑같이 터진다."""
+    재시도 = _Retry()
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        open_day_fn=_Spy(_Out("NOT_OPENED", "하루 넘김 미등록")),
+        retry_fn=재시도,
+    )
+
+    assert 재시도.calls == []
+    assert out.pending_transition_status == "NOT_ATTEMPTED"
+
+
+def test_장부_관문이_막아도_재시도는_이미_돌았다():
+    """🔴 **그 사실을 지우지 않는다** — 지우면 *"안 했다"* 와 *"했다"* 가 같아진다."""
+    낸값 = RetryOut(status="NOTHING_DUE", reason="미적용 전이가 없다")
+    out, _ = _run(
+        _plan(now=_at(9, 30), gate=ALL_READY),
+        retry_fn=_Retry(낸값),
+        receive_fn=_Spy(_Out("BLOCKED", "받을 것이 있는데 못 받았다")),
+        close_fn=_Spy(_Out("BLOCKED")),
+    )
+
+    assert out.procurement_status == "NOT_ATTEMPTED", "관문이 안 막았다 — 검사 전제가 틀렸다"
+    assert out.pending_transition_status == "NOTHING_DUE"
+    assert out.pending_transition is 낸값
 
 
 def test_개장이_실패하면_그_뒤를_안_한다():

@@ -63,6 +63,7 @@ __all__ = [
     "apply_approval",
     "missing",
     "purchase_id_for",
+    "purchase_id_prefix_for",
     "purchase_item_id_for",
     "register_transition",
     "registered",
@@ -309,6 +310,27 @@ def _decision_seq_of(commitment: ApprovedCommitment) -> int:
     return int(tail)
 
 
+def purchase_id_prefix_for(request_id: str, decision_seq: int) -> str:
+    """승인 하나가 만드는 매입 Header ID 들의 **공통 앞머리** (2026-09-11).
+
+    ```text
+    PUR-{request_id}-D{decision_seq}-S      ← 여기까지가 승인 하나를 가리킨다
+    PUR-{request_id}-D{decision_seq}-S1     ← 회차가 붙으면 행 하나다
+    ```
+
+    ★★ **왜 앞머리를 따로 내주나.** *"이 승인이 원장에 닿았나"* 를 묻는 자리
+      (`pending_transition`)가 생겼는데, 그 물음은 **회차 번호를 모른다** — 회차는
+      약정을 조립해야 나오고, 조립하기 전에 먼저 걸러야 하기 때문이다.
+
+    🔴 **그 자리가 문자열을 다시 짓게 두지 않는다.** `f"PUR-{request_id}-D{seq}-S"` 를
+       거기 한 줄 복사하면 ID 규칙의 주인이 둘이 되고, 한쪽만 바뀌는 날 **미적용을
+       찾는 식이 조용히 늘 0건**을 돌려준다 (에러는 안 난다).
+
+    ★ **`purchase_id_for` 가 이 함수를 쓴다.** 그래서 둘이 갈릴 수가 없다.
+    """
+    return f"PUR-{request_id}-D{decision_seq}-S"
+
+
 def purchase_id_for(commitment: ApprovedCommitment, seq: int) -> str:
     """이 승인의 **회차 하나**가 만드는 매입 Header ID.
 
@@ -319,8 +341,10 @@ def purchase_id_for(commitment: ApprovedCommitment, seq: int) -> str:
     ★ 회차마다 하나인 이유는 `purchases.purchase_date` 가 header 에 **하나뿐**이기
       때문이다. 회차마다 매입일이 다른 분할 매입을 한 header 에 담으면 그중 하나의
       날짜만 남는다.
+
+    ★ **앞머리를 여기서 다시 짓지 않는다** — 주인은 `purchase_id_prefix_for` 다.
     """
-    return f"PUR-{commitment.request_id}-D{_decision_seq_of(commitment)}-S{seq}"
+    return f"{purchase_id_prefix_for(commitment.request_id, _decision_seq_of(commitment))}{seq}"
 
 
 def purchase_item_id_for(purchase_id: str, item_code: str) -> str:

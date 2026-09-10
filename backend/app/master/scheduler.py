@@ -78,6 +78,8 @@ BLOCKED            달력이나 게이트를 **못 읽었다** → 재시도로 
 
 ```text
 open_day(as_of)           day_open.py
+retry_pending_transitions(as_of)
+                          pending_transition.py  ← 🔴 개장 뒤 · 입고 앞이다
 receive_arrivals(as_of)   inbound.py
 issue_receivables(as_of)  receivable.py  ← 🔴 수금보다 앞이다
 collect_receipts(as_of)   collection.py
@@ -151,6 +153,28 @@ close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
 개장 → 입고 → 채권 → 수금 → [장부 관문]
      → 매입 판단 → **매입 승인** → 판매 판단 → **판매 승인** → 출고 → 마감
 ```
+
+🔴 **미적용 전이 재시도는 개장 바로 뒤, 입고 앞이다** (2026-09-11).
+
+```text
+개장 → **미적용 전이 재시도** → 입고 → 채권 → 수금 → [장부 관문]
+     → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
+```
+
+  ★★ **승인 15건이 원장에 한 건도 안 닿던 자리다** (실측 2026-09-11 ·
+    `SIM-WALK-2026-APPROVED`). 승인일이 `D` 면 상태가 설 날은 `D+1` 인데
+    (`transition._target_state_date`), 걷기는 날짜 순으로 돌아 그 행은 **다음
+    차례에** 열린다 — 전이는 **언제나 하루 앞을 본다.** 왜 그런지와 왜 물류가
+    그 행을 미리 안 만드는 것이 옳은지는 `pending_transition.py` 가 적는다.
+
+  ★ **왜 개장 바로 뒤인가.** 그날 도착 행이 방금 열렸고, **입고가 그 도착을
+    잡아야** 한다. 뒤로 가면 그날 도착이 하루 더 밀린다.
+
+  🔴 **재시도가 하루를 죽이지 않는다.** 또 실패하면 세어서 요약에 올리고 하루는
+    계속 간다 — `apply_approval` 이 예외 대신 값을 돌려주는 그 태도 그대로다.
+
+  🔴 **미적용 목록을 새 표에 안 들고 있다.** 승인은 `master_decisions` 에 있고
+    원장은 `purchases` 에 있으니 **둘을 맞대면 답이 나온다.**
 
   ★★ **끝에 몰지 않는다.** 몰면 판매 판단이 그날의 매입 결과를 못 보고, 다음 날이
     어제 산 것을 못 본다 — 그러면 179일을 걸어도 재고가 영영 안 쌓인다.
@@ -239,6 +263,7 @@ from app.master.inbound import receive_arrivals
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
+from app.master.pending_transition import RetryOut, retry_pending_transitions
 from app.master.receivable import issue_receivables
 from app.master.run_repository import ledger_gap_request_id, list_runs
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
@@ -564,6 +589,19 @@ class DayRunOutcome:
     action: SchedulerAction
     reason: str
     day_open_status: str = "NOT_ATTEMPTED"
+    #: 미적용 전이 재시도 단계 (2026-09-11). 🔴 **개장 뒤 · 입고 앞이다.**
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `RAN` · `NOTHING_DUE` · `FAILED` 는
+    #:   `RetryStatus` 그대로이고 (`closing_status` 가 `ClosingOut.status` 를 그대로
+    #:   싣는 것과 같다), 단계를 안 탄 날은 이 클래스가 이미 쓰는 `NOT_ATTEMPTED` 다.
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   거기까지 못 갔다 — WAIT · 휴장 · 개장 실패
+    #: RAN             미적용을 찾아 다시 세웠다 — 전부 닿았다는 뜻이 아니다
+    #: NOTHING_DUE     확인했고 미적용이 없었다 — 🟢 정상이다
+    #: FAILED          찾다가 터졌다 — 🔴 **그래도 하루는 계속 간다**
+    #: ```
+    pending_transition_status: str = "NOT_ATTEMPTED"
     inbound_status: str = "NOT_ATTEMPTED"
     #: 채권 발행 단계. 🔴 **수금보다 앞이다** — 채권이 서야 수금할 것이 있다.
     #:
@@ -639,6 +677,9 @@ class DayRunOutcome:
     sales_approval_status: str = "NOT_ATTEMPTED"
     #: 매입 승인이 낸 값 그대로. 🔴 **여기서 다시 세지 않는다** — 어휘 여덟의
     #: 주인은 `BackfillOut.outcomes` 하나다. 안 켠 날은 `None`.
+    #: 미적용 전이 재시도가 낸 값 그대로 (2026-09-11). 🔴 **여기서 다시 세지 않는다** —
+    #: 어휘 넷의 주인은 `RetryOut.outcomes` 하나다. 단계를 안 탄 날은 `None`.
+    pending_transition: RetryOut | None = None
     procurement_approval: BackfillOut | None = None
     #: 판매 승인이 낸 값 그대로. ⚠️ **매입 것과 한 칸에 안 담는다** — 섞으면
     #: 어느 사이클의 승인이 안 섰는지를 요약이 못 말한다 (`items` 와 `sales_items`
@@ -667,6 +708,7 @@ def run_scheduled_day(
     *,
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
+    retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
@@ -682,9 +724,20 @@ def run_scheduled_day(
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 채권 → 수금 → [장부 관문]
+    개장 → 미적용 전이 재시도 → 입고 → 채권 → 수금 → [장부 관문]
          → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
     ```
+
+    🔴 **미적용 전이 재시도가 개장 뒤 · 입고 앞이다** (2026-09-11).
+
+      ★★ **승인 15건이 원장에 한 건도 안 닿던 자리다.** 승인일이 `D` 면 상태가 설
+        날은 `D+1` 이고 그 행은 다음 차례에 열린다 — 전이는 늘 하루 앞을 본다.
+        도착일이 열린 날 다시 세우면 닿는다 (`pending_transition.py`).
+
+      ★ **왜 입고 앞인가.** 그날 도착 행이 방금 열렸고 **입고가 그 도착을 잡아야**
+        한다. 뒤로 가면 그날 도착이 하루 더 밀린다.
+
+      🔴 **또 실패해도 하루는 계속 간다.** 세어서 요약에 올리는 것이 전부다.
 
     🔴 **채권이 수금보다 앞이다.** 채권이 서야 수금할 것이 있다. 지금 데이터는
       결제조건이 30일이라 같은 날 수금될 일이 없지만, **순서가 계약**이다.
@@ -817,6 +870,24 @@ def run_scheduled_day(
             notes=(f"하루가 안 열려서 뒤를 안 한다: {getattr(opened, 'reason', '')}",),
         )
 
+    # ── 미적용 전이 재시도 — 🔴 **개장 뒤 · 입고 앞** (2026-09-11) ──
+    #
+    # ★★ **여기가 없어서 걷기 아흐레에 승인 15건이 원장에 0건이었다.** 전이 로직은
+    #   `transition.apply_approval` 에 이미 있었고, **다시 부르는 자리 하나**가
+    #   없었다 (판매 판단·매입 승인 때와 같은 모양이다).
+    #
+    # 🔴 **개장 뒤여야 한다.** 그날 도착 행을 세우는 것이 개장이다 — 앞에 두면
+    #    재시도가 어제와 똑같이 *"갱신할 물류 runtime fixture 행이 없다"* 로 터진다.
+    #
+    # 🔴 **입고 앞이어야 한다.** 방금 선 도착 예정을 **그날 입고가 잡아야** 한다 —
+    #    뒤로 밀면 그날 도착이 하루 더 밀리고, 그 하루가 날마다 쌓인다.
+    #
+    # 🔴 **터져도 하루는 계속 간다.** `_stage` 와 같은 태도다.
+    pending_transition_status, pending_transition, note = _retry_pending(
+        as_of=as_of, sim_run_id=sim_run_id, retry_fn=retry_fn
+    )
+    notes.append(note)
+
     # ── 입고 ────────────────────────────────────────────────────────
     inbound_status, note = _stage("입고", lambda: receive_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
@@ -894,6 +965,10 @@ def run_scheduled_day(
             action=action.action,
             reason=action.reason,
             day_open_status=day_open_status,
+            # 🔴 **관문이 막아도 재시도는 이미 돌았다.** 그 사실을 여기서 지우지
+            #    않는다 — 지우면 *"안 했다"* 와 *"했는데 관문에서 돌아섰다"* 가 같아진다.
+            pending_transition_status=pending_transition_status,
+            pending_transition=pending_transition,
             inbound_status=inbound_status,
             receivable_status=receivable_status,
             collection_status=collection_status,
@@ -1062,6 +1137,8 @@ def run_scheduled_day(
         action=action.action,
         reason=action.reason,
         day_open_status=day_open_status,
+        pending_transition_status=pending_transition_status,
+        pending_transition=pending_transition,
         inbound_status=inbound_status,
         receivable_status=receivable_status,
         collection_status=collection_status,
@@ -1077,6 +1154,35 @@ def run_scheduled_day(
         sales_approval=sales_approval,
         notes=tuple(notes),
     )
+
+
+def _retry_pending(
+    *,
+    as_of: date,
+    sim_run_id: str,
+    retry_fn: Callable[..., RetryOut],
+) -> tuple[str, RetryOut | None, str]:
+    """미적용 전이를 다시 세우는 단계 하나 (2026-09-11). **예외를 값으로 옮긴다.**
+
+    🔴 **`_stage` 를 그대로 못 쓴다.** 저쪽은 `(상태, 사유)` 만 돌려주는데, 요약이
+       *"어느 승인이 원장에 안 닿았나"* 를 세려면 **낸 값 자체**가 하루 결과에 실려야
+       한다 — 여기서 다시 세면 어휘 넷의 주인이 둘이 된다 (`_approve` 와 같은 모양).
+
+    🔴 **터져도 하루는 계속 간다.** `retry_pending_transitions` 가 예외를 안 내겠다고
+       적어 뒀지만 여기서 한 번 더 잡는다 — 하루의 진행이 그 약속에 걸리면 안 된다.
+
+    ★ **스위치가 없다.** `auto_approve` 와 다르다 — 이 단계는 **이미 난 승인**을
+      장부에 잇는 것뿐이라, 켜고 끄는 것이 곧 *"승인을 장부에 안 옮긴다"* 가 된다.
+
+    :returns: `(단계 상태, 낸 값, 사유 한 줄)`.
+    """
+    try:
+        out = retry_fn(as_of, sim_run_id=sim_run_id)
+    except Exception as exc:  # noqa: BLE001 - 재시도가 터져도 하루는 계속 간다.
+        return "FAILED", None, f"미적용 전이 재시도가 터졌다: {type(exc).__name__}: {exc}"
+    status = str(getattr(out, "status", "FAILED"))
+    # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇이 왜 안 닿았는지가 이 줄이다.
+    return status, out, f"미적용 전이 재시도: {status} {dict(sorted(out.outcomes.items()))}"
 
 
 def _approve(
@@ -1226,6 +1332,7 @@ def wake_up(
     ),
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
+    retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
@@ -1263,6 +1370,7 @@ def wake_up(
         action,
         policy_version=policy_version,
         open_day_fn=open_day_fn,
+        retry_fn=retry_fn,
         receive_fn=receive_fn,
         issue_fn=issue_fn,
         collect_fn=collect_fn,

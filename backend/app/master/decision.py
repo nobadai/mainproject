@@ -90,6 +90,18 @@ SALES_CYCLE = "SALES"
    검사받을 수 있고, 그 순간 승인 게이트가 **부르는 쪽 손에** 들어간다.
 """
 
+PROCUREMENT_CYCLE = "PROCUREMENT"
+"""매입 사이클 실행 행의 `master_agent_runs.cycle` 값 (`persistence._CYCLE`).
+
+★ **`SALES_CYCLE` 옆이 이 값의 자리다.** 같은 칸의 같은 종류의 사실이라, 한쪽만
+  이름을 갖고 다른 쪽은 호출부마다 문자열로 적혀 있던 것이 갈림의 씨앗이었다.
+
+🔴 **매입 원장에 닿을 수 있는 승인은 이 사이클의 것뿐이다.** 판매 승인은
+  `sales_approval` 이 `sales` 표로 흘리므로, *"승인됐는데 `purchases` 에 없다"* 가
+  판매 행에는 **늘 참**이다 — 축을 안 가르면 미적용을 찾는 식이 판매 승인을
+  영영 재시도한다.
+"""
+
 #: 판매 승인이 성립하는 종료 코드. 🔴 **`_APPROVE_END_CODES` 와 섞지 않는다.**
 #:
 #: `sales_flow.SalesEndCode` 가 적어 둔 D-3 합의가 그대로 여기에도 걸린다 —

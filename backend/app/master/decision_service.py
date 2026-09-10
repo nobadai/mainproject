@@ -18,6 +18,7 @@ from app.master.commitment import (
     build_commitment,
 )
 from app.master.decision import (
+    PROCUREMENT_CYCLE,
     SALES_CYCLE,
     CommitmentOut,
     DecisionIn,
@@ -306,18 +307,9 @@ def _transition_for(
     return apply_approval(commitment, sim_run_id=sim_run_id)
 
 
-def _commitment_for(
-    request_id: str,
-    decision_seq: int,
-    payload: DecisionIn,
-    response_payload: Mapping[str, Any],
-) -> CommitmentOut | None:
-    """승인이 만든 약정의 **응답 모양**만 낸다.
-
-    ★ `_commitment_parts` 의 앞쪽만 돌려주는 얇은 겉면이다. 재조립 경로
-      (`current_commitment`)는 약정 객체가 필요 없고, 응답 모양만 쓴다.
-    """
-    return _commitment_parts(request_id, decision_seq, payload, response_payload)[0]
+# ★ `_commitment_for` 는 없앴다 (2026-09-11). 재조립 경로가 **객체도** 쓰게 되면서
+#   (`current_approved_commitment`) 응답 모양만 떼어 주던 겉면이 할 일이 없어졌고,
+#   `_current_approval_parts` 가 둘을 한 번에 낸다.
 
 
 def _commitment_parts(
@@ -395,7 +387,8 @@ def _run_for(request_id: str, history_run_id: str | None) -> dict[str, Any]:
     """
     if history_run_id is None:
         # ★ 승인 대상은 매입 실행이다. 조회는 승인할 수 없다 (2026-09-02).
-        return dict(get_run_by_request_id(request_id, cycle="PROCUREMENT"))
+        # ★ **어휘를 여기서 다시 적지 않는다** — 주인은 `decision.PROCUREMENT_CYCLE` 이다.
+        return dict(get_run_by_request_id(request_id, cycle=PROCUREMENT_CYCLE))
     try:
         run = dict(get_run(UUID(history_run_id)))
     except ValueError as exc:  # UUID 파싱 실패
@@ -468,9 +461,38 @@ def current_commitment(request_id: str) -> CommitmentOut | None:
     :returns: 승인이 없으면 `None` — 라우터가 404 로 접는다. 승인인데 못 만들면
               `buildable=False` 와 사유가 실린다. 둘을 섞지 않는다 (§1.2-10).
     """
+    return _current_approval_parts(request_id)[0]
+
+
+def current_approved_commitment(request_id: str) -> ApprovedCommitment | None:
+    """현재 유효한 승인이 만든 **약정 객체**. 승인이 없거나 못 만들면 `None` (2026-09-11).
+
+    🔴 **`current_commitment` 과 같은 재조립을 쓴다.** 미적용 전이를 다시 세우는
+      자리(`pending_transition`)는 응답 모양이 아니라 **객체**가 있어야
+      `apply_approval` 을 부를 수 있는데, 응답 모양에서 되만드는 것은 같은 사실을
+      두 번 만드는 것이라 둘이 갈리는 날이 온다 (`_commitment_parts` 의 그 규율).
+
+    ⚠️ **`None` 이 두 가지 뜻이다** — *"승인이 없다"* 와 *"승인인데 약정을 못
+      만들었다"*. 둘을 갈라야 하는 자리는 `current_commitment` 을 같이 읽는다
+      (`buildable` · `reason` 이 거기 실린다).
+    """
+    return _current_approval_parts(request_id)[1]
+
+
+def _current_approval_parts(
+    request_id: str,
+) -> tuple[CommitmentOut | None, ApprovedCommitment | None]:
+    """현재 유효한 승인을 **그 실행으로 재조립**한다. 응답 모양과 객체를 함께 낸다.
+
+    ★ **재조립이 두 벌이 되지 않게 한 자리에 둔다** (2026-09-11). `current_commitment`
+      과 `current_approved_commitment` 이 같은 사실을 서로 다른 코드로 만들면,
+      화면이 본 약정과 원장에 실린 약정이 갈리는 날이 온다.
+
+    ★ 번복은 여기서 저절로 반영된다 — `is_current` 인 결정 하나만 본다.
+    """
     current = next((row for row in list_decisions(request_id) if row.is_current), None)
     if current is None or current.decision != "APPROVE":
-        return None
+        return None, None
 
     row = _run_for(request_id, current.history_run_id)
     replay = DecisionIn(
@@ -479,7 +501,7 @@ def current_commitment(request_id: str) -> CommitmentOut | None:
         decided_by=current.decided_by,
         history_run_id=current.history_run_id,
     )
-    return _commitment_for(
+    return _commitment_parts(
         request_id, current.decision_seq, replay, dict(row.get("response_payload") or {})
     )
 
