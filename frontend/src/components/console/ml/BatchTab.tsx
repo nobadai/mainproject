@@ -14,7 +14,7 @@
  *   15줄짜리 표를 먼저 지나가야 오늘을 볼 수 있으면 안 봅니다.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   batchAgent,
@@ -25,6 +25,7 @@ import {
 } from "@/lib/mlConsole";
 
 import { ReportBody } from "./Report";
+import { RerunButton } from "./RerunButton";
 
 /**
  * DB 가 시각을 **UTC 로** 담습니다 (`+00:00`). 그대로 보이면 아침 9시 배치가
@@ -59,25 +60,27 @@ export function BatchTab() {
   const [report, setReport] = useState<AgentReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  //  ★ 다시 돌린 뒤에도 씁니다. 안 그러면 방금 돌린 결과가 안 보이고
+  //    실패한 옛 기록이 그대로 남아 «또 실패했나» 로 읽힙니다.
+  const load = useCallback(() => {
     const fail = (e: unknown) =>
-      alive && setErr(e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e));
+      setErr(e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e));
     batchRecent()
       //  ★ 배열이 그대로 옵니다. `r.runs` 로 읽으면 `undefined` 가 되어
       //    **오류 없이 「읽는 중…」 에서 멈춥니다.** 실제로 그랬습니다.
-      .then((r) => alive && setRuns(r))
+      .then((r) => setRuns(r))
       .catch(fail);
     //  조사는 실패했을 때만 내용이 있다. 없다고 오류가 아니다.
     batchAgent()
-      .then((r) => alive && setReport(r))
+      .then((r) => setReport(r))
       .catch(() => {
         /* 조사가 안 돌아도 실행 목록은 보여야 한다 */
       });
-    return () => {
-      alive = false;
-    };
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (err)
     return (
@@ -97,18 +100,55 @@ export function BatchTab() {
 
   const failed = runs.filter((r) => (r.status ?? "").toLowerCase().startsWith("fail")).length;
 
+  //  ★ 「오늘 것이 실패했나」 — 목록 전체가 아니라 **가장 최근 실행 하나**를
+  //    봅니다. 지난주에 한 번 실패한 것 때문에 버튼이 계속 떠 있으면 안 됩니다.
+  //    그리고 오늘 것이어야 합니다 — 어제 실패는 오늘 다시 돌릴 일이 아닙니다
+  //    (오늘 아침 배치가 이미 그 뒤에 돌았습니다).
+  const today = new Date();
+  const isToday = (iso: string | null) => {
+    if (!iso) return false;
+    const d = new Date(iso);
+    return (
+      d.getFullYear() === today.getFullYear() &&
+      d.getMonth() === today.getMonth() &&
+      d.getDate() === today.getDate()
+    );
+  };
+  const last = runs[0] ?? null;
+  const todayFailed =
+    !!last && isToday(last.started_at) && (last.status ?? "").toLowerCase().startsWith("fail");
+
   return (
     <div className="flex flex-col gap-4">
       <section
         className="flex flex-col gap-3.5 rounded-xl border bg-panel p-4"
         style={{ borderColor: "var(--color-hair)" }}
       >
-        <header className="flex flex-wrap items-center gap-x-3">
+        <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <h2 className="m-0 text-[13.5px] font-semibold">오늘 자동 작업 상태</h2>
           <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
             오늘 아침 작업이 잘 끝났는지 보여줍니다 · 실패했을 때만 자세한 내용이 나옵니다
           </span>
+          {/*  ★ **실패했을 때만 버튼을 보입니다.** 잘 돌았는데 버튼이 있으면
+                 누르고 싶어집니다 — 자동 작업은 학습표를 비우고 다시 채우는
+                 것이라 이유 없이 돌릴 일이 아닙니다. */}
+          {todayFailed && (
+            <div className="ml-auto">
+              <RerunButton what="batch" label="다시 돌리기" onDone={load} />
+            </div>
+          )}
         </header>
+        {todayFailed && (
+          <p
+            className="m-0 rounded-lg px-3.5 py-2.5 text-[12px] leading-relaxed"
+            style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
+          >
+            ★ <b>오늘 아침 작업이 실패했습니다.</b> 매입 파트 전달표에 오늘 것이 안 갔을 수
+            있습니다. 원인을 고친 뒤 <b>다시 돌리기</b>를 누르세요 — 아침에 도는 것과{" "}
+            <b>똑같은 것</b>을 돌립니다. 같은 날짜를 다시 쓰는 것이라 있던 날이 사라지지
+            않습니다.
+          </p>
+        )}
         {report ? (
           <ReportBody report={report} />
         ) : (

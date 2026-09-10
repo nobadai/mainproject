@@ -29,7 +29,7 @@ class PurchaseAgentState(TypedDict):
 
     # ── 입력 (T0 스냅샷에서 주입) ───────────────────────────────────────────
     date: str  # as_of. 노드는 이 값만 보고, 벽시계를 읽지 않는다 (규칙 1)
-    item: Literal["배추", "무", "피마늘", "양파"]
+    item: Literal["배추", "무", "양파"]
     forecast: dict  # 경락가 예측 (daily는 D+1 ~ D+18)
     market_quotes: list[dict]  # 가락 등급별 당일 경락가
     inventory: dict
@@ -51,7 +51,21 @@ class PurchaseAgentState(TypedDict):
     # ``cash.max_purchase_ratio``를 곱하지 않는다 — 같은 목적으로 두 번 조이면
     # "왜 이만큼밖에 못 사나"의 근거가 흐려진다 (재무 회신 v2.2.1 · B6).
     finance_cap_amount_krw: NotRequired[int | None]
-    # ``purchase_payment_days``: N5. 7 확정 (8/27 재무 · calendar day · 영업일 보정 없음).
+    # ``purchase_payment_days``: N5. 🔴 ~~7 확정 (8/27 재무)~~ — **낡았다** (2026-09-10 실측).
+    # **지금 오는 값은 ``0``(매입 당일 지급)이다.** calendar day · 영업일 보정 없음은 그대로다.
+    #
+    #     매입 실행 200건 · 재무 실행 300건        전부 0 (`.constraints.finance` 자리)
+    #     agent_policy_config                     0 · v1.3-PROVISIONAL · 09-04 note 갱신
+    #                                             "매입일 기준 D+0 calendar days — 당일 지급"
+    #     FINANCE-DECISION-20260827:N5 = 7        **8월 실행 기록에만** 남아 있다
+    #
+    # ⚠️ **그 0 은 「미결」이 아니라 「확정된 0」이다.** ``pending_value`` 가 ``is None`` 으로
+    # 가르므로 폴백 없이 그대로 쓰인다 (규칙 3) — 0 을 falsy 로 읽으면 미결로 뒤집힌다.
+    #
+    # 🟡 **7 이 왜 0 이 됐는지는 아직 못 들었다.** 재무에 물어야 한다 — 마스터 마감
+    # 등록소(`#502`)에 재무 어댑터가 붙으면 `daily_closings.purchase_cash_out_krw` 를
+    # 그 값으로 세고, 그때 현금 곡선이 매입일에 떨어지느냐 이레 뒤냐가 갈린다.
+    #
     # mock 경로는 여전히 None이라 지급일 계산이 보류된다 (규칙 3).
     purchase_payment_days: NotRequired[int | None]
     # ``inbound_lead_days``: N4. 입고 리드타임(일). **도착일 = 회차일 + N4**이고, 도착일이
@@ -80,10 +94,21 @@ class PurchaseAgentState(TypedDict):
     #   가서** 계약이 아니라 관례가 됐다. 마스터가 두 칸으로 나눠 보내므로
     #   (``flow.py`` ``_purchase_input``) 받는 쪽도 두 칸으로 받는다.
     #
-    # ⚠️ **지금은 받기만 한다.** 어느 노드도 이 값을 읽어 수량을 바꾸지 않는다 —
-    #   ``target_value`` 가 *"이 값으로 바꿔라"* 인지 *"이 값을 넘지 마라"* 인지가
-    #   미확정이라 반영 규칙을 만들 수 없다. **받았는데 안 쓴다는 사실은 ⑥이 risks 에,
-    #   건수는 ⑦이 meta 에 적는다** — 값을 받고 조용히 버리면 보내는 쪽은 알 수 없다.
+    # 🟢 **반영한다** (2026-09-09 · E3-6). ~~"지금은 받기만 한다 — target_value 가
+    #   «이 값으로 바꿔라» 인지 «이 값을 넘지 마라» 인지 미확정이라 반영 규칙을 만들 수
+    #   없다"~~ 는 **낡았다.** 마스터 IO Contract §4.4 가 *"넘지 말아야 할 값입니다 —
+    #   목표가 아닙니다"* 로 확정했다 (`quantity`·`amount` 는 그 값 이하).
+    #
+    #   ```text
+    #   거른다   ③ draft_plan.split_adjustments   항목·단위·대상 안
+    #   반영한다 ③ _draft_one 의 caps 에 «조정안» 칸 (라벨별 상한)
+    #   말한다   ⑥ risks (못 쓴 사유 · 안 물린 사실) · ⑦ meta.applied_adjustments
+    #   ```
+    #
+    # ⚠️ **전부 반영하는 것이 아니다.** 지금 반영할 수 있다고 선언한 항목은 재무
+    #   ``amount`` 하나다 (`constraints.feedback.applicable_axis_units`). 물류
+    #   ``quantity``·``timing`` 은 관통에서 조정안이 0건이라 어느 단위로 오는지 모른다 —
+    #   못 쓰는 것도 버리지 않고 사유와 함께 고지한다.
     #
     # ``adjustments``: 부서 조정안 표준형(``SuggestedAdjustment``)을 편 dict 목록.
     adjustments: NotRequired[list[dict] | None]

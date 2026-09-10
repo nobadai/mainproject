@@ -68,7 +68,7 @@ from app.purchase_agent.config import load_constraints
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 # --- 고정 어휘 (IO명세 §2 필드 규약) ---
-ItemName = Literal["배추", "무", "피마늘", "양파"]
+ItemName = Literal["배추", "무", "양파"]
 ScenarioLabel = Literal["보수", "기본", "공격"]
 StrategyType = Literal["quantity", "timing", "mix"]
 RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금", "문서ID"]
@@ -160,16 +160,27 @@ class ProposalMeta(BaseModel):
     feedback_attempt: int = Field(default=0, ge=0)
     #: 🆕 마스터가 이번 회차에 실어 보낸 **부서 조정안 건수** (되먹임 계약 v0.2).
     #:
-    #: 🔴 **``applied_`` 가 아니라 ``received_`` 다.** 지금은 받기만 하고 반영하지
-    #:   않는다 — ``target_value`` 의 뜻(지시값이냐 상한이냐)이 미확정이라 반영 규칙을
-    #:   만들 수 없다. 반영한 척하는 이름을 먼저 두면, 나중에 실제로 반영했을 때
-    #:   **그 전후를 구분할 수 없다.** 반영이 붙는 날 ``applied_adjustments`` 를 따로 만든다.
+    #: ~~🔴 ``applied_`` 가 아니라 ``received_`` 다 — ``target_value`` 의 뜻이 미확정이라
+    #: 반영 규칙을 만들 수 없다.~~ 🟢 **2026-09-09 에 둘 다 생겼다** (E3-6). 뜻은
+    #: 마스터 IO Contract §4.4 가 *"넘지 말아야 할 값"* 으로 확정했다.
     #:
     #: ★ 0 은 "안 왔다" 다 — 1회차는 항상 0이다. "받았는데 0건" 과 구분할 필요가
     #:   아직 없다(마스터가 빈 배열을 보내지 않는다). 생기면 그때 나눈다.
     received_adjustments: int = Field(default=0, ge=0)
+    #: 🆕 그중 **실제로 반영한** 건수 (2026-09-09 · E3-6).
+    #:
+    #: 🔴 **``received_`` 와 같은 수가 아니다.** 항목·단위·대상 안으로 걸러진 것이
+    #:   빠진다(③ ``split_adjustments``). 두 수의 차가 곧 *"보냈는데 못 썼다"* 이고,
+    #:   한 칸으로 뭉치면 그 사실이 사라진다 — 사유는 안별 ``risks`` 에 있다.
+    #:
+    #: ★ 마스터 ``flow._adjustment_delivery`` 가 기다리던 칸이다 —
+    #:   *"이것은 «반영됐나» 가 아니라 «닿았나» 다. 반영은 매입이
+    #:   ``applied_adjustments`` 를 회신해야 알 수 있고 그 칸은 아직 없다."*
+    applied_adjustments: int = Field(default=0, ge=0)
 
-    @field_validator("feedback_attempt", "received_adjustments", mode="before")
+    @field_validator(
+        "feedback_attempt", "received_adjustments", "applied_adjustments", mode="before"
+    )
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)

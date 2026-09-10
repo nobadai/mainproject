@@ -82,6 +82,12 @@ def compute_rise_rate_2w(forecast: dict, ci_judgment_day: int) -> float:
 
     §4-①이 D+14를 고른 근거가 "상황 분류와 상승률이 하나의 질문이 된다"이므로, 두 값이
     다른 날을 보면 그 근거가 깨진다.
+
+    🔴 **분모 ``current_price`` 는 오늘 시세가 아니다 — 모델의 출발점(앵커)이다**
+      (0.4×어제 + 0.6×최근 7 거래일 평균 · ML 회신 2026-09-10). **시세로 바꾸지 마라.**
+      ``predicted`` 가 그 앵커에서 출발하므로 **같은 기준선끼리 비교하는 것**이고, 당일
+      시세를 넣으면 출처가 다른 두 시리즈가 섞여 배추 기준 12.2%p 갈린다. 산식과 재현값은
+      ``quotes.py`` 머리말에 있다.
     """
     current = require_positive(forecast["current_price"], "current_price")
     return judgment_row(forecast, ci_judgment_day)["predicted"] / current - 1

@@ -30,6 +30,8 @@ from app.purchase_agent.nodes.collect_context import (
 )
 from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import (
+    _UNREAD_ALL,
+    _UNREAD_REST,
     _context_rationale,
     _context_risks,
     package_scenarios,
@@ -352,7 +354,10 @@ def test_document_rationale_carries_ref_id_and_excerpt(proposals: dict) -> None:
             doc = loaded[int(item["ref_id"].removeprefix("DOC-"))]
             assert doc["excerpt"] in item["evidence_detail"]
             assert doc["published_at"] in item["evidence_detail"]
-            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다
+            # mock은 형식만 빌린 가상 문서다 — 실제 KREI 발간물이 아니므로 OFFICIAL이 아니다.
+            # ⚠️ 값 비교라 «선언에서 읽는가» 는 증명하지 못한다 (규칙 8) — 그건
+            #   test_mocks.test_declared_grade_travels_to_every_document 와 아래
+            #   test_rationale_grade_comes_from_the_document_not_the_code 가 잰다.
             assert item["evidence_grade"] == "SIM_FIXED"
 
 
@@ -372,10 +377,19 @@ def test_uncertain_day_discloses_that_no_sufficiency_judgment_was_made(proposals
 
     고지가 없으면 소비자는 "검토를 거친 근거"로 읽는다 — E3-3의 일괄 fallback 고지와 같은
     라벨/행동 불일치다. 문구에 내부 단계 이름을 쓰지 않는다(H1 화면·Critic이 읽는다).
+
+    🔴 **기대값을 뜻에 맞춰 바꿨다 (2026-09-09 · E3-8).** 전에는 ``"충분성" in risk`` 로
+      봤는데, 그 낱말 자체가 내부 용어에 가까워 문면을 *"이만하면 충분한지도 판정하지
+      않는다"* 로 풀었다. **검사를 지우지 않고 방향만 돌린다** — 잡으려던 사실(충분성을
+      판정하지 않았다는 고지가 정확히 한 줄 나간다)은 그대로다.
     """
     for scenario in proposals["uncertain"][UNCERTAIN]["scenarios"]:
-        notes = [risk for risk in scenario["risks"] if "충분성" in risk]
-        assert len(notes) == 1
+        notes = [risk for risk in scenario["risks"] if "충분한지" in risk]
+        assert len(notes) == 1, (
+            "충분성을 판정하지 않았다는 고지가 한 줄이어야 한다 — 문면을 바꿨다면 "
+            "이 기대도 같이 바꿔라 (사실이 사라진 것인지 낱말만 바뀐 것인지 먼저 갈라라)"
+        )
+        assert "판정하지 않" in notes[0], "«안 했다» 가 문장에 남아 있어야 한다"
         assert "rule_only" not in notes[0]
 
 
@@ -795,6 +809,39 @@ def test_document_rationale_is_empty_without_documents() -> None:
     assert _context_rationale([]) == []
 
 
+def test_rationale_grade_comes_from_the_document_not_the_code() -> None:
+    """🔴 **⑥이 등급을 다시 정하지 않는다** (2026-09-09 · E3-5).
+
+    전에는 ``"SIM_FIXED"`` 리터럴이었다. 코퍼스 선언과 값이 같아 *"등급이 SIM_FIXED
+    다"* 를 확인하는 검사로는 어느 쪽에서 왔는지 갈리지 않았다 — 문서가 다른 등급을
+    들고 오면 그것이 실려야 한다.
+    """
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+        "evidence_grade": "OFFICIAL",
+    }
+    assert _context_rationale([doc])[0]["evidence_grade"] == "OFFICIAL"
+
+
+def test_a_document_without_a_grade_is_not_quietly_graded() -> None:
+    """등급 없는 문서를 받으면 **멈춘다** — 기본값을 두면 선언한 적 없는 등급이 실린다."""
+    doc = {
+        "doc_id": 3,
+        "source": "KREI",
+        "doc_type": "관측월보",
+        "title": "농업관측 8월호 — 배추",
+        "published_at": "2026-08-05",
+        "excerpt": "고랭지 배추 정식면적은",
+    }
+    with pytest.raises(KeyError, match="evidence_grade"):
+        _context_rationale([doc])
+
+
 # ── 문서 없으면 없이 진행 (2026-09-04 · 마스터 결정) ────────────────────────
 
 
@@ -841,3 +888,139 @@ def test_문서를_읽었으면_고지가_안_붙는다() -> None:
 
     assert same == scenarios
     assert _CONTEXT_NOTE not in same[0]["risks"]
+
+
+# ── 「읽을 게 없었다」와 「못 읽었다」는 다르다 (E3-5 · 2026-09-09) ────────────
+#
+# ② 는 두 상태를 갈라 들고 있었는데 ⑥ 문면이 하나였다. 운영 기록 158건이 그 문장이고,
+# 읽는 사람에게는 *"그날 그 문서가 세상에 없었다"* 로 읽혔다 — 규칙 3(0 ≠ NULL)이
+# 값이 아니라 **문장에서** 깨진 자리다.
+
+
+def test_unread_documents_are_not_reported_as_zero_publications() -> None:
+    """넷째 상태다 — 안 찾아봄 / 찾았는데 없음 / **찾다가 못 읽음** / 찾아서 있음.
+
+    둘째와 셋째는 ``context_docs`` 가 똑같이 비어 있다. 갈라 주는 것은
+    ``context_unavailable`` 뿐이고, 그 값이 없으면 ⑥은 두 상태를 구분할 수단이 없다.
+    """
+    none_found = _context_risks(3, [], "2026-09-04")[0]
+    unread = _context_risks(3, [], "2026-09-04", "실 소스 없음")[0]
+
+    assert none_found != unread, "두 상태가 같은 문장을 낸다"
+    assert "참조 가능한 발간물 0건" not in unread, (
+        "못 읽은 것을 «발간물이 0건» 이라고 단정한다 — 미결을 0으로 적는 것과 같다"
+    )
+    assert unread == _UNREAD_ALL.format(kinds=3)
+
+
+def test_unread_note_names_how_many_kinds_were_asked_for() -> None:
+    """몇 종을 요청했는지가 남아야 *"한 번도 안 찾아봤다"* 와 구분된다."""
+    assert "1종" in _context_risks(1, [], "2026-09-04", "실 소스 없음")[0]
+    assert "3종" in _context_risks(3, [], "2026-09-04", "실 소스 없음")[0]
+
+
+def test_partial_read_says_the_rest_was_unread() -> None:
+    """일부만 읽힌 날 — "N건 참조" 만 적으면 **다 읽은 것처럼** 읽힌다.
+
+    🔴 지금 운영에서는 안 밟힌다 (첫 회차부터 막혀 0건이다). 실 소스가 붙는 날
+      열리는 가지라 미리 잠근다.
+    """
+    docs = [{"doc_id": 3, "published_at": "2026-08-05"}]
+    notes = _context_risks(3, docs, "2026-09-04", "실 소스 없음")
+
+    assert len(notes) == 2, "읽은 것과 못 읽은 것을 둘 다 말해야 한다"
+    assert "1건 참조" in notes[0]
+    assert notes[1] == _UNREAD_REST
+
+
+def test_reading_everything_adds_no_unread_note() -> None:
+    """다 읽은 날 못 읽었다고 적지 않는다 — 없는 위험을 만들지 않는다."""
+    docs = [{"doc_id": 3, "published_at": "2026-08-05"}]
+    notes = _context_risks(3, docs, "2026-09-04")
+
+    assert len(notes) == 1
+    assert _UNREAD_REST not in notes[0]
+
+
+def test_unavailable_reaches_the_scenario_risks_through_the_node(monkeypatch) -> None:
+    """🔴 **배선 검사다.** 함수만 갈라 놓고 ⑥이 안 넘기면 화면은 그대로다.
+
+    ``_context_risks`` 단위 검사가 전부 초록불이어도, 조립부가
+    ``context_unavailable`` 을 안 읽으면 운영 문면이 안 바뀐다 — E3-8 에서 *"자리는
+    있는데 일이 없다"* 를 잰 것의 반대 방향이다.
+    """
+    from app.purchase_agent import ports
+    from app.purchase_agent.ports import MockNotAllowed
+
+    def blocked(*a, **k):
+        raise MockNotAllowed("문서 컨텍스트 는 mock 뿐이라 운영에서 쓸 수 없다")
+
+    monkeypatch.setattr(ports, "get_context_docs", blocked)
+
+    state = _classified()
+    state.update(collect_context(state))
+    assert state["context_unavailable"], "전제가 안 섰다 — 못 읽은 상태가 아니다"
+    state.update(draft_plan(state))
+    state.update(split_plan(state))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+
+    risks = [risk for scenario in state["scenarios_final"] for risk in scenario["risks"]]
+    assert any(_UNREAD_ALL.format(kinds=1) == risk for risk in risks), (
+        "못 읽은 날의 고지가 안 실렸다 — ⑥ 조립부가 context_unavailable 을 안 넘긴다"
+    )
+    assert all("참조 가능한 발간물 0건" not in risk for risk in risks), (
+        "못 읽었는데 «발간물 0건» 문장이 아직 나간다"
+    )
+
+
+# ── E3-8 「규칙으로 간다」 판단이 아직 유효한가 ───────────────────────────────
+#
+# 2026-09-09 에 ② 의 LLM 자리 둘을 «규칙으로 간다» 로 닫았다. 그 결정의 근거는
+# **고를 일이 없다**는 것이고, 그건 지금 선언이 우연히 그렇기 때문이다
+# (``constraints.yaml`` 이 그 우연을 주석으로 적어 두었다 · 이 파일 머리도 같다).
+#
+# 🔴 **우연이 깨지면 근거가 조용히 사라진다.** 아래 둘이 그 자리를 지킨다.
+
+
+def test_ordering_is_moot_while_the_list_fits_the_loop_budget() -> None:
+    """유형 수가 ``loop_max`` 이하인 동안은 **읽는 순서가 결과를 못 바꾼다.**
+
+    ★ 그것이 E3-8 을 「규칙으로 간다」로 닫은 근거다 — 순서를 고를 LLM 을 꽂아도
+      집합이 같아서 ``rationale`` 나열 순서만 바뀐다.
+
+    🔴 이 검사가 울면 **판단을 다시 해야 한다.** 유형이 예산보다 많아지는 순간
+      «무엇을 읽고 무엇을 버릴까» 가 처음 실재하고, 그때는 순서가 곧 선택이다.
+    """
+    context = load_constraints()["context"]
+
+    assert len(context["doc_type_priority"]) <= context["loop_max"], (
+        "doc_type 이 loop_max 보다 많아졌다 — 이제 «무엇을 읽을까» 가 실재한다. "
+        "collect_context.select_doc_types 의 «규칙으로 간다» 판단을 다시 하라 (E3-8)"
+    )
+
+
+def test_every_declared_doc_type_is_consumed_in_one_pass(monkeypatch) -> None:
+    """선언한 유형이 **한 번의 ② 실행에서 전부 소비된다** — 위 검사의 행동 쪽 짝이다.
+
+    앞의 검사는 선언(``constraints.yaml``)만 보고, 이건 실제로 돌려서 본다. 둘이
+    갈리면(예: 루프가 상한 전에 조기 종료하게 바뀌면) 여기가 먼저 운다.
+
+    ⚠️ ``is_enough`` 가 ``True`` 를 돌려주기 시작하면 이 검사가 깨진다. **그게 의도다** —
+      조기 종료는 안 읽은 문서를 만들고, 그 순간 「순서가 결과를 못 바꾼다」가 거짓이 된다
+      (``collect_context.is_enough`` docstring · 9/4 DOC-4·5).
+    """
+    called: list[str] = []
+    original = ports.get_context_docs
+
+    def recording(item, as_of, doc_types):
+        called.extend(doc_types)
+        return original(item, as_of, doc_types)
+
+    monkeypatch.setattr(ports, "get_context_docs", recording)
+
+    declared = load_constraints()["context"]["doc_type_priority"]
+    result = collect_context(_classified())
+
+    assert called == declared, "선언한 유형을 선언한 순서대로 한 번씩 소비해야 한다"
+    assert result["context_loop_count"] == len(declared)

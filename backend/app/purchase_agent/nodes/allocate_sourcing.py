@@ -773,7 +773,7 @@ def allocate_sourcing(
 
     min_share = constraints["grade"]["min_share"]
     mid_ok = mid_ratio >= min_share and _yields_positive_kg(state, mid_ratio)
-    # 잔여분도 같은 검사를 받아야 한다. 근접 납품이 확정주문 전부인 날(양파·피마늘)은
+    # 잔여분도 같은 검사를 받아야 한다. 근접 납품이 확정주문 전부인 날(양파)은
     # 상한이 1.0이 되어 기준등급 줄이 **0이 된다** — 그건 오류가 아니라 "전량 중품"이다.
     base_ok = _yields_positive_kg(state, 1.0 - mid_ratio)
 

@@ -19,7 +19,12 @@ from app.purchase_agent.nodes.classify_situation import (
     is_gate_excluded,
     judgment_row,
 )
-from app.purchase_agent.nodes.draft_plan import pending_value, purchase_budget_krw
+from app.purchase_agent.nodes.draft_plan import (
+    ADJUSTMENT_CAP_NAME,
+    pending_value,
+    purchase_budget_krw,
+    split_adjustments,
+)
 from app.purchase_agent.quotes import observed_date, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
@@ -374,8 +379,11 @@ def compute_cut_unit_price(forecast: dict, coverage_days: int) -> int:
     🔴 **왜 갈랐나** — 하나였을 때 밴드가 좁아지면 컷이 엄격해지고 재무 STRESS 는
     느슨해졌다. **방향이 반대인데 값이 하나였다.**
 
-    ★ 이 판은 **"고정"이 아니라 "갈라놓기"** 다. `09-17` 에 밴드가 바뀌면 STRESS 는
-    여전히 따라간다.
+    ★ 이 판은 **"고정"이 아니라 "갈라놓기"** 다. 밴드가 바뀌면 STRESS 는 여전히 따라간다.
+
+    🔴 ~~`09-17` 에 밴드가 바뀐다~~ — **낡았다** (ML 회신 2026-09-10). 밴드 교체는
+    `09-03` 에 이미 끝났고, `09-17` 은 «그림자 기록 2주가 차는 날» 이다. 그래서 **둘이
+    갈라지는 계기는 날짜가 아니라 이 함수의 몸통을 바꾸는 것**이다.
 
     🟢 **재무가 답했다** (2026-09-08) — *"별도 새 기준이 오기 전까지는 **현재값을
     고정해서 진행하셔도 됩니다**"*.
@@ -386,12 +394,64 @@ def compute_cut_unit_price(forecast: dict, coverage_days: int) -> int:
 
         값을 박는다   품목 3 × 커버 2/5/12 = 여섯~아홉 개를 손으로 적어야 하고,
                       실측상 매일 최대 11% 움직인다
-        산식을 둔다   지금 상태 — 09-17 에 밴드가 바뀌면 따라간다
+        산식을 둔다   지금 상태 — 밴드가 바뀌면 따라간다
 
-    ⚠️ **이 판은 산식을 둔 쪽이다. 되물었다.**
+    ⚠️ **이 판은 산식을 둔 쪽이다. 되물었고 답이 왔다.**
 
-    ⚠️ ML 여유율 표가 오면 **여기 산식만** ``predicted × (1 + 여유율)`` 로 바꾼다.
-    ``max_price`` 는 안 건드린다.
+    🟢 **여유율 값이 정해졌다** (ML 회신 2026-09-10 · q80 · 초과분 분위). 커버 2일은
+    `LT2` 자리이고, 그 값은 배추 `9.6%` · 무 `15.0%` · 양파 `8.8%` 다.
+
+    .. code-block:: text
+
+        지금   max(upper)                     밴드 상단 — 모델이 낸 «넓이»
+        바꿈   max(predicted) × (1 + 여유율)   가운데 값에서 실측 초과분만큼 올림
+
+    🔴 **둘을 더하면 안 된다** — ``upper`` 에 여유율을 또 곱하면 이중으로 실린다.
+    ``upper`` 를 읽는 자리를 ``predicted`` 로 바꾸는 것이다. ``max_price`` 는 안 건드린다.
+
+    ⚠️ **아직 안 바꿨다.** 🔴 ~~관통으로 «안 0개» 가 얼마나 느는지 먼저 재고 넣는다~~
+    — **쟀다. 그리고 안 넣기로 했다** (2026-09-10).
+
+    .. code-block:: text
+
+        실 DB 관통 46일   «안 0개» 0건 → 2건
+        시연 구간         2026-01-26 배추 2안 → 0안
+        컷 이동           커버 12일 배추 -23.4%
+
+    🔴 **그리고 위 여유율 셋을 이 자리에 그냥 쓰면 안 된다** (2026-09-10 발견). ML 이 준
+    분위는 **하루짜리**다 — ``LT2`` 는 「이틀 뒤 **그 하루**」의 초과분 분포다. 그런데 컷이
+    막는 것은 **커버 창 전체**이고, 창 안 **어느 하루라도** 넘으면 그 안이 죽는다.
+
+    .. code-block:: text
+
+        같은 자료를 창 기준으로 다시 뽑으면 (q80)
+            초과분 = max(actual[:D]) / max(predicted[:D]) - 1
+
+                     D=2     D=5     D=12
+            배추    14.0%   27.8%   50.2%    ← 하루짜리 LT 기준으로는 9.5~10.4%
+            무      18.8%   24.7%   32.9%
+            양파    10.9%   20.7%   28.4%
+
+    ★ **배추 12일치는 다섯 배 차이다.** 둘 다 맞는 값이고 **쓰는 자리가 다르다.**
+
+    ⚠️ **mock 으로 컷 변경 영향을 재지 마라.**
+
+    ★ 2026-09-10 에 실제로 그 일이 났다. 새 컷 산식 영향을 mock 5앵커로 재니 「+6~18%
+    느슨해진다」였는데, 실 DB 관통으로 재니 「-6.8% 조여지고 시연 구간에 빈 화면이
+    생긴다」였다. **원인은 밴드 폭이다.**
+
+    .. code-block:: text
+
+        mock   upper/predicted   1.030 ~ 1.060   ← 임계 0.08 을 만들려고 좁힌 값
+        실제                     1.209 ~ 1.635   품목 × LT 중앙값 · 최대 2.464
+
+        밴드 폭 (upper/predicted - 1) 으로 보면
+            mock 5앵커 평균   0.036
+            사본 평균         0.332    →  9.2배
+            재측정 CSV 평균   0.420    → 11.7배
+
+    🔴 **9~12배라 방향이 뒤집힌다.** 왜 mock 을 안 넓히는지는 ``mocks/README.md`` 의
+    「실측 밴드」 절에 있다.
 
     ★ **지금은 위임한다 — 복제하지 않는다.** 같은 산식을 두 벌 적으면 한쪽만 고쳐지는
     날이 오고, 그때 갈리는 것이 판정이다 (규칙 8 · `#388` 이 그 병이다). 갈라야 할 때
@@ -746,10 +806,19 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
     ``context_docs_used``와 같은 변환을 써야 두 필드가 대조 가능하다 — ⑦의
     ``check_document_refs``가 그 대조를 한다.
 
-    ``evidence_grade``가 ``SIM_FIXED``인 이유: IO명세 §2 예시는 ``OFFICIAL``이지만 그건
-    **실제 KREI 발간물** 기준이다. 우리 코퍼스는 형식만 빌린 가상 문서라
-    (``documents.json._전부_시뮬레이션``), 등급은 문서의 격이 아니라 **실제 데이터
-    출처**를 따라 붙인다. 실문서로 갈아끼우면 여기가 ``OFFICIAL``이 된다.
+    ``evidence_grade``는 **코퍼스가 선언한 것을 그대로 싣는다.** IO명세 §2 예시는
+    ``OFFICIAL``이지만 그건 **실제 KREI 발간물** 기준이고, 우리 코퍼스는 형식만 빌린
+    가상 문서다 — 등급은 문서의 격이 아니라 **실제 데이터 출처**를 따른다.
+
+    🔴 **전에는 여기에 ``"SIM_FIXED"`` 가 리터럴로 박혀 있었다** (2026-09-09 · E3-5).
+      *"실문서로 갈아끼우면 여기가 ``OFFICIAL`` 이 된다"* 는 설명이 이 docstring 에만
+      있었고, 선언(``documents.json._전부_시뮬레이션``)은 **사람만 읽는 문장**이었다.
+      선언과 코드가 같은 값이라 값 비교로는 «선언에서 읽는가» 를 증명할 수 없다
+      (규칙 8). 이제 ``documents.json._evidence_grade`` 가 정하고, 없으면 로더가
+      적재를 거부한다.
+
+    ⚠️ ``doc["evidence_grade"]`` 를 ``get`` 으로 읽지 않는다. 기본값을 두면 손으로 만든
+      문서 dict 가 조용히 통과해 **아무도 선언한 적 없는 등급**이 근거에 실린다.
 
     ``claim``이 주장 요약이 아닌 이유: 규칙은 본문을 요약할 수 없다. 문서 식별로 두고 실제
     주장은 ``evidence_detail``의 발췌가 **원문 그대로** 싣는다 — 규칙이 요약한 척하지 않는다.
@@ -760,14 +829,16 @@ def _context_rationale(context_docs: list[dict]) -> list[dict]:
             "source": DOCUMENT_SOURCE,
             "claim": f"{doc['source']} {doc['doc_type']} — {doc['title']}",
             "ref_id": document_ref(doc["doc_id"]),
-            "evidence_grade": "SIM_FIXED",
+            "evidence_grade": doc["evidence_grade"],
             "evidence_detail": f"{doc['published_at']} 발행 · 발췌: \"{doc['excerpt']}\"",
         }
         for doc in context_docs
     ]
 
 
-def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
+def _adjustment_risks(
+    adjustments: list[dict] | None, constraints: dict, label: str, *, clipped: bool
+) -> list[str]:
     """받았지만 **반영하지 않은** 조정안을 고지한다. 안 왔으면 아무 줄도 안 붙는다.
 
     🔴 **이 줄이 없으면 "값을 실어 주고 안 쓰는" 자리가 된다.** 마스터가 2회차에
@@ -778,17 +849,54 @@ def _adjustment_risks(adjustments: list[dict] | None) -> list[str]:
     ``_context_risks`` 가 *"충분성을 아무도 묻지 않았다"* 를 고지하는 것과 같은 자리다:
     **하지 않은 일을 한 것처럼 보이게 두지 않는다.**
 
-    ⚠️ 반영이 붙는 날 이 함수는 지운다 — 그때는 ``applied_adjustments`` 가 사실을
-      말하므로, 이 줄이 남아 있으면 거짓이 된다.
+    🔴 **두 갈래다** (2026-09-09 · E3-6). 전에는 *"받았으나 반영하지 않았다"* 한 줄이
+      전부였는데, **왜 못 쓰는지가 갈린다.**
+
+      ``draft_plan.split_adjustments`` 가 항목·단위·대상 안으로 거른 것은 사유를
+      같이 적는다 — 보내는 쪽이 **고쳐서 다시 보낼 수 있는** 종류이기 때문이다.
+      *"반영 규칙이 없다"* 는 우리 사정이고, *"단위가 안 맞는다"* 는 그쪽 사정이다.
+      한 문장으로 뭉치면 보내는 쪽이 무엇을 고쳐야 할지 모른다.
+
+    ⚠️ 반영이 붙어도 **이 함수는 안 지운다** — 못 쓰는 조정안이 남으므로 고지할 대상이
+      사라지지 않는다. (``#177`` 이 *"반영이 붙는 날 지운다"* 라고 적었는데, 그때는
+      «못 쓰는 것» 이라는 갈래를 안 보고 있었다.)
+
+    🔴 **«반영했다» 는 여기서 안 적는다** — ``_risks`` 가 이미
+      *"조정안 제약으로 원안 N kg 에서 M kg 으로 축소"* 를 낸다. 두 곳이 같은 사실을
+      적으면 한쪽만 고치는 날 화면이 두 말을 한다. 실제로 이 판을 붙이자마자 그 상태가
+      났다 — 같은 안에 *"축소"* 와 *"반영하지 않았다"* 가 나란히 떴다.
+
+      여기 남는 것은 그 문장이 **못 내는 사실 하나**다: 걸었는데 안 물린 경우.
+      ``clipped`` 가 그것을 가른다.
     """
     if not adjustments:
         return []
-    return [
-        (
-            f"조정안 {len(adjustments)}건을 받았으나 이번 실행에서 반영하지 않았다 — "
-            "반영 규칙이 아직 정해지지 않았다"
-        )
+    usable, unusable = split_adjustments(adjustments, constraints)
+    notes = [
+        f"조정안 {len(item)}건은 반영하지 않았다 — {reason}"
+        for reason, item in _grouped_by_reason(unusable).items()
     ]
+    mine = [item for item in usable if label in (item.get("scenario_labels") or ())]
+    if mine and not clipped:
+        # 반영했는데 **아무 일도 안 일어난** 경우다. 아무 줄도 안 붙이면 읽는 사람은
+        # "이 안은 조정안과 무관하다" 로 읽는데, 사실은 **걸었고 안 물린 것**이다.
+        notes.append(
+            f"조정안 {len(mine)}건을 이 안에 반영했으나 원안이 이미 그 상한 아래라 "
+            "수량이 그대로다"
+        )
+    return notes
+
+
+def _grouped_by_reason(unusable: list[tuple[dict, str]]) -> dict[str, list[dict]]:
+    """같은 사유끼리 묶는다. **사유가 하나면 줄도 하나다.**
+
+    ⚠️ 조정안마다 한 줄씩 내면 같은 말이 여러 번 화면에 뜬다 — 실측상 한 회차에 같은
+      항목이 여러 건 온다. 사유가 정보이지 건수가 정보가 아니다.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for item, reason in unusable:
+        grouped.setdefault(reason, []).append(item)
+    return grouped
 
 
 def _document_age(context_docs: list[dict], as_of: str) -> str:
@@ -881,7 +989,27 @@ def _judgment_day_risks(forecast: dict) -> list[str]:
     ]
 
 
-def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> list[str]:
+#: 읽으려다 못 읽은 날의 고지. **"발간물이 0건"과 같은 문장을 쓰지 않는다.**
+#:
+#: 🔴 **규칙 3(``0`` ≠ ``NULL``)이 문면에서 깨져 있던 자리다** (2026-09-09 · E3-5).
+#:   ``collect_context`` 는 두 상태를 이미 갈라 뒀다 — *"그날 그 유형이 없다"* 는 빈
+#:   ``context_docs``, *"읽으려다 못 읽었다"* 는 ``context_unavailable``. 그런데 ⑥은
+#:   **둘 다 «참조 가능한 발간물 0건»으로 적고 있었다.** 운영 기록 158건이 그 문장이고,
+#:   읽는 사람에게는 *"그날 그 문서가 세상에 없었다"* 로 읽힌다.
+#:
+#: ⚠️ **못 읽은 사유를 여기에 옮기지 않는다.** ``context_unavailable`` 문자열은 내부
+#:   함수 이름이 든 개발자용 문장이다. 이 필드를 읽는 쪽은 H1 승인 화면과 Critic이라
+#:   (계약서 §0), **있었다는 사실만** 쓴다.
+_UNREAD_ALL = "문서 {kinds}종을 요청했으나 읽지 못했다 — 그날 발간물이 0건이었다는 뜻이 아니다"
+_UNREAD_REST = "요청한 유형 중 읽지 못한 것이 남았다 — 그 유형의 발간물이 0건이었다는 뜻이 아니다"
+
+
+def _context_risks(
+    loop_count: int,
+    context_docs: list[dict],
+    as_of: str,
+    unavailable: str | None = None,
+) -> list[str]:
     """문서 수집에서 나온 유의사항. **②가 안 돈 날은 아무 줄도 안 붙는다.**
 
     판정 기준이 ``situation`` 문자열이 아니라 **``context_loop_count``**인 이유: 알고 싶은
@@ -893,27 +1021,57 @@ def _context_risks(loop_count: int, context_docs: list[dict], as_of: str) -> lis
     목록을 순서대로 소진했을 뿐이고, **"이만하면 충분한가"를 아무도 묻지 않았다.**
     E3-3에서 일괄 fallback을 고지하기로 한 것과 같은 라벨/행동 불일치다.
 
+    ⚠️ **"고를 여지가 없어서"라고 적지 않는다.** 지금은 참이지만(``loop_max`` == 유형 수)
+    유형이 늘면 거짓이 된다 — 근거는 ``collect_context.select_doc_types`` docstring 과
+    ``test_ordering_is_moot_while_the_list_fits_the_loop_budget`` 가 들고 있고, 이 문장은
+    **한 일과 안 한 일**만 적는다. 그래야 전제가 바뀌어도 문장이 거짓이 되지 않는다.
+
+    ★ 같은 사실을 ``adapter.build_evidences`` 도 ``context_docs_used`` 근거에 적는다.
+    두 자리가 갈리면 화면과 봉투가 다른 말을 하므로, 문면을 고칠 때 **둘을 같이** 본다.
+
+    🔴 **전에 ``adapter._evidence`` 로 적었다 — 그런 이름은 없다** (2026-09-09 정정).
+      `#480` 이 새로 넣은 줄인데 **그때 이름을 안 쟀다.** 자리는 grep 으로 맞게 찾아
+      놓고 **함수 이름만 기억으로** 적었고, 반대쪽 주석이 ``_context_risks`` 로 정확해서
+      한쪽만 틀린 것도 안 보였다. `#454` 가 걷어낸 유형이 하루 만에 다시 났다 —
+      **가리키는 이름은 적기 전에 정의를 확인한다** (줄 번호는 밀리므로 안 적는다).
+
     문구에 내부 단계 이름을 쓰지 않고, **하지 않은 일을 한 것처럼 적지도 않는다** — 발췌는
     문장 경계 파서가 아니라 서두 잘라내기라 "첫 문장"이라고 주장하지 않는다. 이 필드를
     읽는 쪽은 코드가 아니라 H1 승인 화면과 Critic이다 (계약서 §0).
+
+    🔴 **``unavailable`` 이 넷째 상태를 연다** (2026-09-09 · E3-5). 전에는 셋이었다 —
+      안 찾아봄 / 찾았는데 없음 / 찾아서 있음. **"찾다가 못 읽음"이 둘째와 같은 문장을
+      쓰고 있었다.** 근거·경위는 ``_UNREAD_ALL`` 주석에 있다.
+
+    ⚠️ ⑦ ``self_check._CONTEXT_NOTE`` 도 못 읽은 사실을 적는다. **층이 다르다** —
+      여기는 *"문서 수집이 무엇을 했나"*, 저기는 *"그래서 이 안이 어떻게 나왔나"* 다.
+      둘이 한 안의 ``risks`` 에 나란히 뜨므로 **같은 말을 두 번 쓰지 않는다.**
     """
     if loop_count <= 0:
         return []  # ② 미실행 — "찾아보지 않았다"는 고지할 유의사항이 아니라 경로의 사실이다
     if not context_docs:
+        if unavailable:
+            return [_UNREAD_ALL.format(kinds=loop_count)]
         return [
             (
                 f"문서 {loop_count}종을 찾았으나 참조 가능한 발간물 0건 — "
                 "문서 근거 없이 구성된 안이다"
             )
         ]
-    return [
+    notes = [
         (
-            f"문서 {len(context_docs)}건 참조 — 규칙 기반 수집이라 "
-            "문서 선별·충분성 판단은 미적용(우선순위 순서대로 로드). "
+            f"문서 {len(context_docs)}건 참조 — 정해진 우선순위 순서대로 읽었고 "
+            "어느 문서가 더 맞는지도, 이만하면 충분한지도 판정하지 않는다. "
             "발췌는 관련 구절 선별 없이 각 문서 서두에서 기계적으로 뜬 것이다. "
             f"{_document_age(context_docs, as_of)}"
         )
     ]
+    if unavailable:
+        # 🔴 **운영에서는 안 밟힌다** — 지금 ``get_context_docs`` 는 첫 회차부터 막혀
+        #   읽은 문서가 0건이다. 실 소스가 붙어 일부만 읽히는 날 열리는 가지이고,
+        #   그때 이 줄이 없으면 "N건 참조" 가 **다 읽은 것처럼** 읽힌다.
+        notes.append(_UNREAD_REST)
+    return notes
 
 
 def _sourcing_decision(ratios: list[dict]) -> dict:
@@ -1528,9 +1686,23 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
-                    *_adjustment_risks(state.get("adjustments")),
+                    *_adjustment_risks(
+                        state.get("adjustments"),
+                        constraints,
+                        draft["label"],
+                        # 물렸으면 ``_risks`` 가 이미 축소 문장을 냈다 — 겹쳐 적지 않는다.
+                        clipped=any(
+                            clip["constraint"] == ADJUSTMENT_CAP_NAME
+                            for clip in draft["clipped_by"]
+                        ),
+                    ),
                     *_context_risks(
-                        state["context_loop_count"], state["context_docs"], state["date"]
+                        state["context_loop_count"],
+                        state["context_docs"],
+                        state["date"],
+                        # 🔴 **빈 문서가 두 뜻이라 넘긴다** — "그날 없었다"와 "못 읽었다".
+                        #   State 는 갈라 들고 있는데 ⑥이 안 읽어서 문면이 하나였다.
+                        state.get("context_unavailable"),
                     ),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(

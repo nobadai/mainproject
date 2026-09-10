@@ -105,6 +105,61 @@ def cash_cap_kg(budget_krw: float, unit_price: int) -> int:
     return int(budget // require_positive(unit_price, "unit_price"))
 
 
+#: 못 쓰는 조정안의 사유. **화면과 Critic 이 읽는다** — 내부 이름을 쓰지 않는다.
+_UNUSABLE_UNKNOWN_AXIS = "매입이 반영할 수 있는 조정 항목이 아니다"
+_UNUSABLE_WRONG_UNIT = "{axis} 조정은 {expected} 단위로 와야 하는데 {unit} 로 왔다"
+_UNUSABLE_NO_TARGET_SCENARIO = "어느 안에 적용할지가 적혀 있지 않다"
+
+
+def split_adjustments(
+    adjustments: list[dict] | None, constraints: dict
+) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """조정안을 **쓸 수 있는 것 / 못 쓰는 것(사유)** 으로 가른다.
+
+    🔴 **왜 거르는 층이 따로 있나.** 계약(``contracts.core.SuggestedAdjustment``)의
+      ``unit`` 은 자유 문자열이라 **축과 안 맞아도 봉투가 안 막는다.** 마스터 IO
+      Contract 가 *"받는 쪽이 risks 로 걸러야 합니다"* 로 넘긴 자리다.
+
+      실측(2026-09-09 · ``master_agent_runs``)에 ``axis=amount`` 인데 ``unit=kg`` ·
+      ``target_value=900`` 인 조정안이 6건 있다. 그것을 원으로 알고 환산하면
+      ``900 ÷ 단가 = 0kg`` 이고, ③이 ``min()`` 으로 클립하므로 **매입량이 0 으로
+      눌린다. 아무도 안 운다.**
+
+    ★ **버리지 않는다.** 못 쓰는 것도 사유와 함께 돌려주고 ⑥이 고지한다 — 값을 받고
+      조용히 버리면 보내는 쪽은 자기 제안이 반영된 줄 안다 (``#165`` · ``#166`` 에서
+      우리가 남에게 지적한 것과 같은 자리다).
+
+    ★ **항목·단위 짝은 선언이 소유한다** (``constraints.feedback``). 여기 박으면
+      선언을 바꿔도 판정이 안 따라오고, 그러면 "설정에서 읽는다" 를 증명할 수 없다
+      (규칙 7·8).
+
+    ⚠️ ``scenario_labels`` 가 빈 것도 못 쓰는 쪽이다. 계약이 *"안 채운 것과 해당 없는
+      것을 여기서 가르지 않는다"* 라 **어느 안인지 모른다** — 모르는 채로 전 안을
+      조이면 근거 없이 조이는 것이다 (규칙 3).
+    """
+    units = {
+        row["axis"]: row["unit"] for row in constraints["feedback"]["applicable_axis_units"]
+    }
+    usable: list[dict] = []
+    unusable: list[tuple[dict, str]] = []
+    for item in adjustments or []:
+        axis = item.get("axis")
+        expected = units.get(axis)
+        if expected is None:
+            unusable.append((item, _UNUSABLE_UNKNOWN_AXIS))
+            continue
+        unit = item.get("unit")
+        if unit != expected:
+            reason = _UNUSABLE_WRONG_UNIT.format(axis=axis, expected=expected, unit=unit)
+            unusable.append((item, reason))
+            continue
+        if not item.get("scenario_labels"):
+            unusable.append((item, _UNUSABLE_NO_TARGET_SCENARIO))
+            continue
+        usable.append(item)
+    return usable, unusable
+
+
 def _freshness_cap_kg(
     state: PurchaseAgentState, daily_demand: float, constraints: dict
 ) -> int | None:
@@ -118,6 +173,36 @@ def _freshness_cap_kg(
     if shelf_life_days is None:
         return None
     return int(daily_demand * shelf_life_days)
+
+
+#: 조정안 상한이 클립했을 때 ``clipped_by`` 에 남는 이름. **화면이 그대로 읽는다.**
+ADJUSTMENT_CAP_NAME = "조정안"
+
+
+def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | None:
+    """이 안에 걸리는 조정안 상한을 **kg 으로**. 걸리는 것이 없으면 ``None``.
+
+    ``target_value`` 는 **넘지 말아야 할 값**이다 — 목표가 아니다 (마스터 IO Contract
+    §4.4 확정 · *"quantity·amount 는 그 값 이하"*). 그래서 지시값이 아니라 상한이고,
+    ③은 이미 ``min([raw_qty, *caps])`` 구조라 **칸 하나가 늘 뿐**이다.
+
+    ⚠️ **원 → kg 환산에 새 산식을 만들지 않는다.** ``cash_cap_kg`` 와 같은 나눗셈이라
+      따로 쓰면 두 곳이 갈린다 — 재무 상한과 조정안 상한이 다른 단가로 환산되면
+      *"왜 이만큼밖에 못 사나"* 가 두 답을 갖는다.
+
+    ⚠️ **여럿이면 가장 낮은 것을 쓴다.** 상한이 여러 개면 전부 지켜야 하고, 그건
+      ``min`` 이다. 실측상 한 회차에 같은 안을 겨냥한 조정안이 여러 건 온다.
+
+    ★ ``label`` 에 안 걸린 조정안은 여기서 조용히 빠진다 — 어느 안에 거는지는
+      ``scenario_labels`` 가 말하고, 비어 있는 것은 ``split_adjustments`` 가 이미
+      «못 씀» 으로 걸러 여기 오지 않는다.
+    """
+    caps = [
+        cash_cap_kg(float(item["target_value"]), unit_price)
+        for item in usable
+        if label in (item.get("scenario_labels") or ())
+    ]
+    return min(caps) if caps else None
 
 
 def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
@@ -143,13 +228,22 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     warehouse_cap = warehouse_cap_kg(state["inventory"])
     cash_cap = cash_cap_kg(purchase_budget_krw(state, constraints), unit_price)
     freshness_cap = _freshness_cap_kg(state, daily_demand, constraints)
+    # 🔴 **조정안 상한은 안마다 다르다** (2026-09-09 · E3-6). 위 셋은 그날 하나인데
+    #   조정안은 ``scenario_labels`` 로 «이 안» 을 겨냥한다 — 재무가 상한 2,000만에
+    #   기본·공격만 넘겼으면 보수는 안 건드려야 한다.
+    usable, _ = split_adjustments(state.get("adjustments"), constraints)
 
     drafts = [
         _draft_one(
             label=label,
             days=coverage["by_label"][label],
             daily_demand=daily_demand,
-            caps={"창고": warehouse_cap, "현금": cash_cap, "신선도": freshness_cap},
+            caps={
+                "창고": warehouse_cap,
+                "현금": cash_cap,
+                "신선도": freshness_cap,
+                ADJUSTMENT_CAP_NAME: adjustment_cap_kg(usable, label, unit_price),
+            },
             coverage=coverage,
         )
         for label in labels

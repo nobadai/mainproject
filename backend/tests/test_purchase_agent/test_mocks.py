@@ -486,6 +486,11 @@ def test_the_two_mock_bands_never_overlap(item: str) -> None:
 
     ⚠️ 밴드 값 자체는 **안 건드린다** (현서님 ④). ``upper`` 는 ``ci_width`` 말고
       ``compute_max_price`` 도 먹이므로 넓히면 ⑦ 컷 기준이 함께 풀린다.
+
+      🔴 **그리고 선언 임계(0.08)로는 실제 폭이 전부 ``uncertain`` 이다** (2026-09-10
+      실측). **가장 좁은 한 줄**을 봐도 양파 ``ci_width`` 0.220 — 임계의 2.7배라, 넣으면
+      ``stable`` 이 한 줄도 안 남는다 — **이 검사가 딛고 선 「두 층위」가 한 층이 된다.**
+      표와 「언제 맞출 수 있나」는 ``mocks/README.md`` 의 「실측 밴드」 절.
     """
     stable = [
         width
@@ -563,7 +568,20 @@ LOT_KEYS = {
 }
 ORDERS_KEYS = {"as_of", "item", "orders", "total_kg"}
 ORDER_KEYS = {"sale_id", "qty_kg", "due_date"}
-DOCUMENT_KEYS = {"doc_id", "source", "doc_type", "item", "title", "published_at", "content"}
+#: 🔴 ``evidence_grade`` 는 **IO명세 §1-⑥ 에 없던 칸**이다 (2026-09-09 · E3-5).
+#:   코퍼스가 ``_evidence_grade`` 로 선언하고 로더가 문서마다 싣는다 — 전에는 ⑥이
+#:   ``"SIM_FIXED"`` 를 리터럴로 들고 있어서 «선언에서 읽는가» 를 증명할 수 없었다.
+#:   이 집합이 정확 비교라 칸을 늘리면 여기서 잡힌다 — 그게 이 검사의 값이다.
+DOCUMENT_KEYS = {
+    "doc_id",
+    "source",
+    "doc_type",
+    "item",
+    "title",
+    "published_at",
+    "content",
+    "evidence_grade",
+}
 
 
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
@@ -698,6 +716,47 @@ def test_fixture_sourcing_prices_exist_in_the_same_day_quotes() -> None:
 
 
 # ── look-ahead 방어 (문서) ──────────────────────────────────────────────────
+
+
+def test_corpus_without_a_declared_grade_refuses_to_load(monkeypatch) -> None:
+    """🔴 **선언이 없으면 적재를 거부한다.** 기본값으로 떨어뜨리지 않는다.
+
+    ``SIM_FIXED`` 를 기본값으로 두면 *"아무도 선언한 적 없는 등급"* 이 근거에 실린다 —
+    ``published_at`` 없는 문서를 0 으로 안 채우고 거부하는 것과 같은 자리다 (규칙 3).
+
+    ⚠️ 이 검사가 없으면 코퍼스에서 ``_evidence_grade`` 한 줄을 지워도 아무도 안 운다.
+    """
+    from app.purchase_agent.mocks import _load
+
+    stripped = json.loads((Path(_load.__file__).parent / "documents.json").read_text("utf-8"))
+    stripped.pop("_evidence_grade")
+    monkeypatch.setattr(_load, "_read", lambda name: stripped)
+
+    with pytest.raises(KeyError, match="_evidence_grade"):
+        _load.load_documents("배추", date(2026, 9, 4), ["관측월보"])
+
+
+def test_declared_grade_travels_to_every_document(monkeypatch) -> None:
+    """🔴 **선언을 바꾸면 실린 등급이 따라 바뀐다** — 값 비교가 아니라 변이로 잰다 (규칙 8).
+
+    지금 선언과 코드가 **같은 값**(``SIM_FIXED``)이라, *"등급이 SIM_FIXED 다"* 를
+    확인하는 검사는 ⑥이 리터럴을 들고 있어도 통과한다. 선언을 실제로 바꿔서
+    **판정이 따라오는지**를 본다.
+
+    ★ 코퍼스를 진짜로 고치지 않는다 — 사본을 만들어 로더가 그것을 읽게 한다.
+    """
+    from app.purchase_agent.mocks import _load
+
+    swapped = json.loads((Path(_load.__file__).parent / "documents.json").read_text("utf-8"))
+    swapped["_evidence_grade"] = "OFFICIAL"
+    monkeypatch.setattr(_load, "_read", lambda name: swapped)
+
+    documents = _load.load_documents("배추", date(2026, 9, 4), ["관측월보", "기상", "작년동기"])
+
+    assert documents, "전제가 안 섰다 — 읽을 문서가 없다"
+    assert {doc["evidence_grade"] for doc in documents} == {"OFFICIAL"}, (
+        "선언을 바꿨는데 실린 등급이 안 따라왔다 — 어딘가 값이 박혀 있다"
+    )
 
 
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())

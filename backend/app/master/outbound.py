@@ -1,7 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# STATUS: TOOL 후보 — 유지 (2026-08-26)
-#   사이클 B(판매) 결합·클리핑. 판매가 2차 MVP 로 밀려 1차 Flow 에서는 호출되지 않지만,
-#   `app/master/critic/service.py` 의 `/critic/sales` 가 아직 쓴다. 2차에서 Tool 로 전환.
+# STATUS: 판매 검증 Tool 의 산술 — 판단 안에서도 돈다 (2026-09-10 실측)
+#   사이클 B(판매) 결합·클리핑.
+#   ⚠️ "1차 Flow 에서는 호출되지 않는다" 는 2026-09-08 에 끝났다. 판매 판단이 검증을 지나간다.
+#         master/service.py:276  SalesVerifier() 가 기본값으로 붙는다
+#           → verifier.py:1001   critic: SalesCriticPort | None = run_critic_sales
+#           → critic/service.py:50  combine_outbound_band · clip_allocations
+#   HTTP 경로(`/critic/sales` · critic/router.py:54)도 그대로다 — 두 자리가 같은 함수를 부른다.
+#   ★ 매입 `band.py` 와 모양이 다른 이유는 아래 머리말에 있다. 합치지 않는다.
 # ─────────────────────────────────────────────────────────────────────────────
 """★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
 

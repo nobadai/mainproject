@@ -140,7 +140,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.daily_closings WHERE as_of = %s', (as_
 | `stock_chart` | `Chart` | 필수 | 물류의 dashboard_stock() 가 만든 것. 여기서 만들지 말 것 |
 | `sources` | `list[Source]` | 필수 | 탭마다 채워졌나 — 하나라도 예시면 화면이 알린다 |
 
-### `ItemCard` — 품목 하나의 내일 예측 — 대시보드 위쪽 카드에도 같은 값을 쓴다.
+### `ItemCard` — 품목 하나의 다음 값 — 대시보드 위쪽 카드에도 같은 값을 쓴다.
 
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
@@ -155,6 +155,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.daily_closings WHERE as_of = %s', (as_
 | `ci_width` | `float` | 필수 | 구간 폭 ÷ 가운데 값. 클수록 덜 확실하다 |
 | `review` | `bool` | 필수 | 폭이 넓어 사람이 한 번 볼 것을 권하나 |
 | `use_recommended` | `bool` | 필수 | False 면 이 조합은 '어제 가격 그대로' 가 우리 모델보다 낫다 |
+| `gated` | `bool` | 선택 | 이 값이 **모델이 아니라 어제값 그대로**인가. 리드타임 3 미만이면 모델을 안 쓴다 — 어제 가격이 이미 정답에 가까워 모델이 낄 자리가 없다 |
 
 ---
 
