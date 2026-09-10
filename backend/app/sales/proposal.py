@@ -619,6 +619,9 @@ def _candidate_status(
         return "UNRESOLVED"
     if _logistics_revalidation_required(replies):
         return "REVIEW_REQUIRED"
+    delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
+    if delivery and delivery.status == "FAIL":
+        return "INFEASIBLE"
     if finance and finance.finance_verdict == "FAIL":
         return (
             "REVIEW_REQUIRED" if request.business_mode == "CONTRACT_FULFILLMENT" else "INFEASIBLE"

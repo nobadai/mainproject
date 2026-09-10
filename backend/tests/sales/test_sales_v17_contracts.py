@@ -42,7 +42,16 @@ def _reply(source, capability, ref, *, business="ok", payload=None):
     }
 
 
-def _request(*, mode="SPOT_SALES", allow=True, quantity=10000, replies=(), target="C"):
+def _request(
+    *,
+    mode="SPOT_SALES",
+    allow=True,
+    quantity=10000,
+    replies=(),
+    target="C",
+    delivery_date="2026-09-10",
+    logistics=None,
+):
     return SalesProposalInput.model_validate(
         {
             "business_mode": mode,
@@ -51,13 +60,13 @@ def _request(*, mode="SPOT_SALES", allow=True, quantity=10000, replies=(), targe
                 "partner_id": "P-1",
                 "requested_quantity_kg": quantity,
                 "preferred_unit_price_krw": 2300,
-                "preferred_delivery_date": "2026-09-10",
+                "preferred_delivery_date": delivery_date,
                 "preferred_payment_days": 30,
                 "preferred_payment_terms_type": "SINGLE",
                 "source_ref": "TEST:USER-1",
                 "allow_additional_sourcing": allow,
             },
-            "logistics_context": _logistics(),
+            "logistics_context": _logistics() if logistics is None else logistics,
             "feedback": {
                 "domain_replies": list(replies),
                 "scenario_feedback": [
@@ -172,6 +181,83 @@ def test_s09_fail_does_not_invent_price_or_payment_and_s10_authority_can_adjust_
     assert balanced.payment_days == 20
     assert "USER_PAYMENT_TERM_ACCEPTANCE_REQUIRED" in balanced.execution_dependencies
     assert "FINANCE_REVALIDATION_REQUIRED" in balanced.execution_dependencies
+
+
+def _pre_sales_logistics(*, status, confirmed, earliest, capacity_by_date=True):
+    return {
+        "query_scope": {"item": "배추", "as_of": "2026-09-09"},
+        "sellable_supply": {
+            "status": "READY",
+            "inventory_by_item": [{"item": "배추", "available_qty_kg": confirmed}],
+            "lot_constraints": [],
+            "supply_capacity_by_date": (
+                [{"date": "2026-09-10", "confirmed_sellable_quantity_kg": confirmed}]
+                if capacity_by_date
+                else []
+            ),
+        },
+        "delivery_feasibility": {
+            "status": status,
+            "daily_outbound_capacity_kg": 5000,
+            "delivery_route": "FIXED_ROUTE",
+            "transport_lead_time": 0,
+            "earliest_delivery_date": earliest,
+            "reason_codes": ["DELIVERY_BEFORE_PREP_LEAD"] if status == "FAIL" else [],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("delivery_date", "quantity", "confirmed", "status", "expected_confirmed", "expected_status"),
+    [
+        ("2026-09-09", 3500, 3500, "FAIL", None, "INFEASIBLE"),
+        ("2026-09-10", 3500, 3500, "READY", 3500, "EXECUTABLE"),
+        ("2026-09-10", 5001, 5001, "FAIL", 5001, "INFEASIBLE"),
+        ("2026-09-10", 3500, 3500, "READY", 3500, "EXECUTABLE"),
+        ("2026-09-10", 3501, 3501, "FAIL", 3501, "INFEASIBLE"),
+    ],
+    ids=["as-of-fails", "as-of-plus-one-ready", "5001-exceeds", "1500-plus-3500", "1500-plus-3501"],
+)
+def test_pre_sales_delivery_facts_are_consumed_without_sales_recalculation(
+    delivery_date, quantity, confirmed, status, expected_confirmed, expected_status
+):
+    logistics = _pre_sales_logistics(
+        status=status, confirmed=confirmed, earliest="2026-09-10"
+    )
+    request = _request(
+        quantity=quantity,
+        delivery_date=delivery_date,
+        logistics=logistics,
+        replies=[_finance()],
+    )
+
+    scenario = _generate_scenarios(request)[-1]
+
+    delivery = request.logistics_context.delivery_feasibility
+    assert delivery.delivery_route == "FIXED_ROUTE"
+    assert delivery.transport_lead_time == 0
+    assert delivery.earliest_delivery_date == date(2026, 9, 10)
+    assert scenario.supply.confirmed_quantity_kg == (
+        None if expected_confirmed is None else Decimal(expected_confirmed)
+    )
+    assert scenario.status == expected_status
+
+
+def test_pre_sales_without_delivery_date_accepts_an_empty_date_capacity_vector():
+    request = _request(
+        quantity=3500,
+        delivery_date=None,
+        logistics=_pre_sales_logistics(
+            status="READY", confirmed=3500, earliest="2026-09-10", capacity_by_date=False
+        ),
+        replies=[_finance()],
+    )
+
+    scenario = _generate_scenarios(request)[-1]
+
+    assert scenario.delivery_date is None
+    assert scenario.supply.confirmed_quantity_kg == Decimal(3500)
+    assert scenario.status == "EXECUTABLE"
 
 
 def test_s11_missing_profit_stays_none_and_all_unresolved_has_no_recommendation():

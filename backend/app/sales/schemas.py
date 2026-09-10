@@ -218,10 +218,13 @@ class LogisticsDeliveryFeasibility(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["READY", "UNRESOLVED", "FAIL"] = "UNRESOLVED"
     daily_outbound_capacity_kg: Decimal | None = Field(default=None, ge=0)
+    delivery_route: str | None = None
+    transport_lead_time: int | None = Field(default=None, ge=0)
+    earliest_delivery_date: date | None = None
     reason_codes: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
 
-    @field_validator("daily_outbound_capacity_kg", mode="before")
+    @field_validator("daily_outbound_capacity_kg", "transport_lead_time", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
