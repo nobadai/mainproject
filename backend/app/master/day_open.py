@@ -53,6 +53,7 @@ from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.collection_seed import CollectionSeedOutcome, SeedStatus, seed_day
 from app.master.day_opening_repository import record_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 __all__ = [
     "MAX_CARRY_DAYS",
@@ -357,6 +358,7 @@ def open_day(
     connect: Callable[[], Any] | None = None,
     force: bool = False,
     seed_collection: Callable[..., CollectionSeedOutcome] = seed_day,
+    sim_run_id: str = BURN_IN_SIM_RUN_ID,
 ) -> DayOpenOut:
     """`as_of` 날 상태 행을 **파트마다** 보장한다. 한 트랜잭션이다.
 
@@ -410,6 +412,14 @@ def open_day(
     :param force: 관리자 강제 개장. **상한만 푼다.**
     :param seed_collection: 수금 사건을 만드는 방법. 기본값이 `collection_seed.seed_day`
                     이고, 검사가 대역을 끼울 자리다. **파트 트랜잭션 밖에서** 돈다.
+    :param sim_run_id: 어느 실행의 장부를 넘기는가 (`#531` 후속). 🔴 **여기는 기본값이
+                    있다** — `apply_approval` 과 다르다. 라우터
+                    (`POST /master/day/open`)가 이 칸을 안 주고 이번 판은 운영 동작을
+                    안 바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
+
+                    ★ **새 행에 적는 값이 아니다.** carry-forward 는 전날 행의
+                      `sim_run_id` 를 그대로 옮긴다 — 이 값이 정하는 것은 *"어느 전날
+                      행을 물려받는가"* 다 (`#324` 가 `bootstrap.py` 에 적어 둔 그것).
     """
     absent = missing()
     present = [part for part in PARTS if part in _OPENINGS]
@@ -424,16 +434,23 @@ def open_day(
         )
         # ★ **미등록도 남긴다.** *"안 열렸다"* 는 사실이고, 화면이 그 날을 지나가지
         #   않으려면 정본에 있어야 한다.
-        out = _seed_collection(out, seed_collection)
-        _record(out)
+        out = _seed_collection(out, seed_collection, sim_run_id=sim_run_id)
+        _record(out, sim_run_id=sim_run_id)
         return out
 
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
     try:
         limit = MAX_FORCE_CARRY_DAYS if force else MAX_CARRY_DAYS
+        # 🔴 **등록소가 든 축이 아니라 이번 하루의 축으로 묶는다** (`#531` 후속).
+        #    물류 `LogisticsDayOpening` 은 그 축으로 전날 행을 좁혀 읽는다 —
+        #    `uq_log_runtime_fixture` 가 `(sim_run_id, as_of, usage_scope)` 라
+        #    안 좁히면 **남의 실행 행을 보고 "열렸다"** 고 답한다 (`#324`).
         parts = [
-            _walk_part(part, _OPENINGS[part], conn, as_of=as_of, limit=limit) for part in present
+            _walk_part(
+                part, bind_sim_run(_OPENINGS[part], sim_run_id), conn, as_of=as_of, limit=limit
+            )
+            for part in present
         ]
         if any(part.status == "PART_FAILED" and part.gap_days is None for part in parts):
             # 🔴 **파트가 터지면 전체를 되돌린다.** 다른 파트가 만든 행도 되돌린다 —
@@ -461,8 +478,8 @@ def open_day(
             reason=f"하루 넘김 실패: {exc}",
             missing=list(absent),
         )
-        out = _seed_collection(out, seed_collection)
-        _record(out)
+        out = _seed_collection(out, seed_collection, sim_run_id=sim_run_id)
+        _record(out, sim_run_id=sim_run_id)
         return out
     finally:
         conn.close()
@@ -473,13 +490,16 @@ def open_day(
     #    조건 `⑥` 이 *"개장 시 대상 채권을 확인해 아직 event 가 없는 건만 생성"* 이라고
     #    못 박았다. **15건만 손으로 채우는 방식은 받기 어렵다** — 새 Receivable 이
     #    생기면 그날 개장이 그것을 집어 온다.
-    out = _seed_collection(out, seed_collection)
-    _record(out)
+    out = _seed_collection(out, seed_collection, sim_run_id=sim_run_id)
+    _record(out, sim_run_id=sim_run_id)
     return out
 
 
 def _seed_collection(
-    out: DayOpenOut, seed_collection: Callable[..., CollectionSeedOutcome]
+    out: DayOpenOut,
+    seed_collection: Callable[..., CollectionSeedOutcome],
+    *,
+    sim_run_id: str,
 ) -> DayOpenOut:
     """열린 날의 수금 사건을 만든다. **개장을 실패시키지 않는다.**
 
@@ -501,7 +521,9 @@ def _seed_collection(
             }
         )
     try:
-        결과 = seed_collection(out.as_of, sim_run_id=BURN_IN_SIM_RUN_ID)
+        # 🔴 **개장이 받은 축을 그대로 쓴다** (`#531` 후속). 여기만 상수로 남기면
+        #    하루는 걷기 실행에 열리는데 그날 수금 사건은 번인에 앉는다.
+        결과 = seed_collection(out.as_of, sim_run_id=sim_run_id)
     except Exception as exc:  # noqa: BLE001 - 개장이 이 줄 때문에 죽으면 안 된다.
         결과 = CollectionSeedOutcome(
             status="UNREADABLE",
@@ -517,7 +539,7 @@ def _seed_collection(
     )
 
 
-def _record(out: DayOpenOut) -> None:
+def _record(out: DayOpenOut, *, sim_run_id: str) -> None:
     """개장 정본에 남긴다. **파트 트랜잭션 밖이다.**
 
     🔴 **실패도 남아야 시도 횟수를 셀 수 있다.** 파트 트랜잭션 안에 넣으면 롤백될 때
@@ -528,7 +550,9 @@ def _record(out: DayOpenOut) -> None:
     """
     record_day_opening(
         as_of=out.as_of,
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        # 🔴 **개장이 받은 축이다** (`#531` 후속). 정본 행이 번인에 앉으면
+        #    `day_gate` 가 걷기 실행의 그날을 **안 열린 날**로 읽는다.
+        sim_run_id=sim_run_id,
         result=out.status,
         reason=out.reason,
         parts=out.parts,

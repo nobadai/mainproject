@@ -62,6 +62,8 @@ from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
 from app.master.day_gate import check_day_gate
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 __all__ = [
     "PARTS",
@@ -259,7 +261,9 @@ def reset() -> None:
 # ── 경계 ────────────────────────────────────────────────────────────────
 
 
-def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
+def receive_arrivals(
+    as_of: date, *, connect: Any = None, sim_run_id: str = BURN_IN_SIM_RUN_ID
+) -> InboundOut:
     """`as_of` 에 도착 예정인 것을 **한 트랜잭션으로** 받는다.
 
     ★ **`open_day` 다음이다.** 상태 행이 있어야 입고를 적을 자리가 있다. 다만 **함수는
@@ -303,6 +307,10 @@ def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
 
       ⚠️ **미등록은 PASS 다** (`day_gate` 계약). 정본 표가 없는 환경에서 이 Gate 가
         입고를 막지 않는다 — 없는 것과 안 열린 것은 다르다.
+
+    :param sim_run_id: 어느 실행의 장부인가 (`#531` 후속). 🔴 **여기는 기본값이
+                    있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
+                    바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
     """
     gate = check_day_gate(as_of, connect=connect)
     if gate.gate == "BLOCKED":
@@ -326,10 +334,20 @@ def receive_arrivals(as_of: date, *, connect: Any = None) -> InboundOut:
             missing=list(absent),
         )
 
-    adapters = registered()
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
     try:
+        # 🔴 **등록소가 든 축이 아니라 이번 호출의 축으로 묶는다** (`#531` 후속).
+        #    물류 `LogisticsInboundExecution` 은 그 축의 로트·이동을 쓴다 —
+        #    등록소가 프로세스 시작 때 든 상수로 쓰면 **매입 원장만 새 실행에
+        #    앉고 이쪽은 번인에 남는다.**
+        #
+        # ★ **`try` 안이다.** 축이 비면 `bind_sim_run` 이 막는데, 그 실패도 예외로
+        #   올라가지 않고 아래 `except` 가 `FAILED` + 사유로 옮긴다 — 입고이
+        #   그날을 통째로 세우면 안 된다는 이 함수의 계약 그대로다.
+        adapters = {
+            part: bind_sim_run(impl, sim_run_id) for part, impl in registered().items()
+        }
         results = [adapters[part].receive(conn, as_of=as_of) for part in PARTS]
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - 입고 실패가 그날을 통째로 세우면 안 된다.

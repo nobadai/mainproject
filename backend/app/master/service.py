@@ -31,6 +31,7 @@ from app.master.execution_day import (
 from app.master.flow import ProcurementFlow, ProcurementOutcome, VerifierPort
 from app.master.holiday_calendar import get_calendar
 from app.master.inputs import (
+    DEFAULT_GRADE,
     REQUEST_GRADE,
     MasterInputs,
     SourcedInput,
@@ -111,7 +112,15 @@ def run_procurement(
         # 🔴 **어느 실행의 장부인가는 마스터가 정한다** (물류 `#325` · 2026-09-06).
         #   물류 조회 경로에는 생성자가 없어 봉투 말고 줄 자리가 없다 —
         #   `ExecutionContext` docstring 의 ①.
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        #
+        # 🔴 **요청이 주면 그 값이 이긴다** (`#531` 후속 · 2026-09-10). 전에는 여기서
+        #    상수를 다시 적어 **걷기가 축을 줘도 축이 봉투 앞에서 끊겼다** — 판단 행이
+        #    번인으로 앉고, 승인 경로가 그 행을 읽으니 원장까지 번인으로 돌아왔다.
+        #
+        # ★ **기본값을 없애지 않는다.** 라우터·화면은 이 칸을 안 준다. 대신 기본값으로
+        #   떨어진 사실을 `_input_sources` 가 `DEFAULT:burn_in` 으로 적는다 —
+        #   조용히 번인에 쌓지 않는다.
+        sim_run_id=_sim_run_id_of(request),
     )
 
     # 🔴 **첫 관문은 개장이다** (계약 · 2026-09-06). 실행일 판정보다 **먼저**다 —
@@ -285,7 +294,11 @@ def run_sales(
         policy_version=request.policy_version,
         # ★ 어느 실행의 장부인가는 마스터가 정한다 (물류 `#325`) — 매입과 같은 값이다.
         #   판매도 물류를 부르므로(`PRE_SALES`) 같은 이유가 그대로 걸린다.
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        #
+        # 🔴 **요청이 주면 그 값이 이긴다 — 매입과 같은 자리다** (`#531` 후속).
+        #    여기만 상수로 남기면 같은 날 매입 행과 판매 행이 서로 다른 실행에 앉고,
+        #    `_procurement_boundary` 가 **남의 실행의 경계**를 읽는다.
+        sim_run_id=_sim_run_id_of(request),
     )
 
     # 🔴 **첫 관문은 개장이다** — 매입과 **같은 판정 함수**를 부른다.
@@ -769,6 +782,44 @@ _INJECTABLE_INPUTS: tuple[str, ...] = ("forecast", "confirmed_orders", "policy_v
 _CALENDAR_KEY = "execution_calendar"
 _CALENDAR_SOURCE = "market_calendar"
 
+#: 실행 축이 출처표에서 쓰는 이름과 **기본값 소스**. `_CALENDAR_KEY` 와 같은 모양이다 —
+#: 요청 칸 이름(`ProcurementRunRequest.sim_run_id`)을 그대로 쓴다.
+_SIM_RUN_KEY = "sim_run_id"
+_SIM_RUN_DEFAULT_SOURCE = "burn_in"
+
+
+def _sim_run_id_of(request: ProcurementRunRequest | SalesRunRequest) -> str:
+    """이번 실행의 축. **요청이 주면 그 값, 없으면 번인 상수.**
+
+    🔴 **상수를 새로 만들지 않는다.** 값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID`
+       하나다 — 여기서 문자열을 다시 적으면 두 벌이 되고, 한쪽만 고치는 날 판단 행과
+       원장이 갈린다.
+
+    🔴 **떨어졌다는 사실은 출처표가 적는다.** 이 함수는 값만 고르고, *"요청이 줬나
+       기본값인가"* 는 `_input_sources` 가 `REQUEST:` · `DEFAULT:` 로 나눠 적는다 —
+       같은 사실을 두 자리에서 판정하지 않게 **판정 규칙은 `_sim_run_source` 하나**다.
+
+    ★ **빈 문자열도 안 준 것으로 본다.** 공백만 든 축을 그대로 봉투에 실으면
+      `ledger.sim_run_id_for` 가 뒤에서 터지고, 그 실패는 *"요청이 이상했다"* 가
+      아니라 *"원장이 터졌다"* 로 읽힌다.
+    """
+    given = (request.sim_run_id or "").strip()
+    return given or BURN_IN_SIM_RUN_ID
+
+
+def _sim_run_source(request: ProcurementRunRequest | SalesRunRequest) -> str:
+    """실행 축의 출처 한 줄. **값과 같은 판정을 쓴다** (`_sim_run_id_of`).
+
+    ```text
+    REQUEST:sim_run_id   요청이 줬다
+    DEFAULT:burn_in      요청이 안 줘서 마스터 기본값으로 떨어졌다
+    ```
+    """
+    given = (request.sim_run_id or "").strip()
+    if given:
+        return f"{REQUEST_GRADE}:{_SIM_RUN_KEY}"
+    return f"{DEFAULT_GRADE}:{_SIM_RUN_DEFAULT_SOURCE}"
+
 
 def _input_sources(
     request: ProcurementRunRequest,
@@ -819,12 +870,31 @@ def _input_sources(
 
     ★ **못 실었을 때도 키를 적는다.** 키를 통째로 빼면 *"안 실렸다"* 가 *"모른다"* 와
       섞여 예전과 같아진다 — 없는 표를 다시 뒤지게 된다.
+
+    🔴 **실행 축도 여기 적는다** (`#531` 후속 · 2026-09-10).
+
+      요청이 `sim_run_id` 를 안 주면 마스터가 번인 상수로 떨어뜨린다. 그 자체는
+      이번 판의 계약이지만, **떨어졌다는 사실이 아무 데도 안 적히면** *"말 안 하고
+      번인에 쌓는"* 길이 그대로 남는다 — 나중에 읽는 사람이 그 판단 행이 **누가 고른
+      실행에 앉았는지** 알 수 없다.
+
+      .. code-block:: text
+
+          요청이 줬다     sim_run_id: "REQUEST:sim_run_id"
+          기본값이다      sim_run_id: "DEFAULT:burn_in"
+
+    ★ **여기서도 키를 안 뺀다.** 봉투와 같은 이유다 — 「기본값이었다」와 「모른다」가
+      섞이면 다시 코드를 뒤지게 된다.
+
+    ★ **어휘 하나만 는다.** `REQUEST` 는 이미 있고 `DEFAULT` 를 `inputs.py` 에 뒀다 —
+      값의 주인이 한 자리여야 화면과 부서 payload 가 한 표를 읽는다.
     """
     sources = dict(inputs.sources()) if inputs else {}
     for key in _INJECTABLE_INPUTS:
         if getattr(request, key, None):
             sources[key] = f"{REQUEST_GRADE}:{key}"
     sources[_CALENDAR_KEY] = f"DERIVED:{_CALENDAR_SOURCE}" if execution_calendar else "MISSING:-"
+    sources[_SIM_RUN_KEY] = _sim_run_source(request)
     return sources
 
 

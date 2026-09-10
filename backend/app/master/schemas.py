@@ -111,6 +111,34 @@ class ProcurementRunRequest(BaseModel):
         ),
     )
 
+    #: 🔴 **어느 실행의 판단인가** (`#531` 후속 · 2026-09-10).
+    #:
+    #:   `walk` 은 `#531` 로 축을 받는데 그 값이 **봉투 앞에서 끊겼다.** 진입점이
+    #:   `ExecutionContext(sim_run_id=BURN_IN_SIM_RUN_ID)` 로 상수를 다시 적었고, 그
+    #:   아래는 전부 봉투를 읽으므로 **걷기가 축을 줘도 판단 행이 번인으로 앉았다.**
+    #:   승인 경로가 그 행에서 축을 읽으니(`decision_service._sim_run_id_of`)
+    #:   원장까지 번인으로 돌아왔다.
+    #:
+    #:   ```text
+    #:   요청 sim_run_id → ExecutionContext.sim_run_id → master_agent_runs.sim_run_id
+    #:                   → 승인이 그 행에서 읽는다 → purchases.sim_run_id
+    #:   ```
+    #:
+    #: 🔴 **기본값을 없애지 않는다.** 라우터도 화면도 이 칸을 안 주고, 이번 판은
+    #:   운영 동작을 안 바꾼다. 대신 **기본값으로 떨어진 사실을 출처표에 적는다** —
+    #:   `service._input_sources` 의 `sim_run_id: "DEFAULT:burn_in"` 이 그것이고,
+    #:   그 줄이 없으면 *"말 안 하고 번인에 쌓는"* 길이 그대로 남는다.
+    #:
+    #: ★ **축 이름을 해석하지 않는다.** 마스터는 받은 문자열을 나르기만 한다
+    #:   (`sim_run.py` 의 *"이름을 짓되 되읽지 않는다"*).
+    sim_run_id: str | None = Field(
+        default=None,
+        description=(
+            "어느 시뮬레이션 실행의 판단인가. 주지 않으면 마스터가 번인 상수를 쓰고 "
+            "출처표에 'DEFAULT:burn_in' 으로 적는다 — 값과 출처를 같이 낸다."
+        ),
+    )
+
 
 class EvidenceOut(BaseModel):
     """부서가 낸 근거 하나. **숫자가 어디서 왔는가.**
@@ -640,6 +668,22 @@ class SalesRunRequest(BaseModel):
         description=(
             "사용자가 말한 수금 유예일. 판매 `SalesUserRequest.preferred_payment_days` "
             "로 그대로 나가고, 승인되면 수금 기일(`sale_date + payment_days`)의 출처가 된다."
+        ),
+    )
+
+    #: 🔴 **매입과 같은 칸이다** (`ProcurementRunRequest.sim_run_id` · `#531` 후속).
+    #:
+    #:   판매도 `ExecutionContext` 에 축을 실어야 한다 — `_procurement_boundary` 가
+    #:   그 값으로 그날 매입 경계를 읽고, `persistence.record_sales` 가 그 값을
+    #:   판단 행에 적는다. 여기만 상수로 남기면 같은 날 매입 행과 판매 행이 **서로
+    #:   다른 실행에 앉는다.**
+    #:
+    #: ★ **기본값이 있는 이유도 매입과 같다** — 라우터·화면은 이 칸을 안 준다.
+    sim_run_id: str | None = Field(
+        default=None,
+        description=(
+            "어느 시뮬레이션 실행의 판단인가. 주지 않으면 마스터가 번인 상수를 쓴다 — "
+            "매입 `ProcurementRunRequest.sim_run_id` 와 같은 칸이다."
         ),
     )
 

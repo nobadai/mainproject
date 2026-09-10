@@ -28,6 +28,7 @@ from app.logistics.transition import LogisticsTransitionAdapter
 from app.master import day_open, transition
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 AS_OF = date(2025, 12, 31)
 
@@ -205,10 +206,15 @@ def test_두_하루넘김이_다_등록되어_있다() -> None:
 
 
 def test_하루넘김_자리에_각_파트_구현이_앉아_있다() -> None:
-    """★ 이름만 채운 것이 아니라 **그 파트가 소유한 구현**이 앉아야 한다."""
+    """★ 이름만 채운 것이 아니라 **그 파트가 소유한 구현**이 앉아야 한다.
+
+    🔴 **축이 올 때 선다** (`#531` 후속). 물류 자리에는 축을 기다리는 `SimRunBound` 가
+       앉아 있고, 구현은 `bind_sim_run` 이 축을 줄 때 만들어진다 — 재무는 축을 안
+       받으므로 그대로다.
+    """
     registered = day_open.registered()
 
-    assert isinstance(registered["logistics"], LogisticsDayOpening)
+    assert isinstance(bind_sim_run(registered["logistics"], 실행축), LogisticsDayOpening)
     assert isinstance(registered["finance"], FinanceDayOpening)
 
 
@@ -216,30 +222,40 @@ def test_물류_자리에_물류_어댑터가_앉아_있다() -> None:
     """★ 이름만 채운 것이 아니라 **물류가 소유한 구현**이 앉아야 한다."""
     registered = transition.registered()
 
-    assert isinstance(registered["logistics"], LogisticsTransitionAdapter)
+    assert isinstance(bind_sim_run(registered["logistics"], 실행축), LogisticsTransitionAdapter)
     assert isinstance(registered["finance"], finance_transition.FinanceTransitionAdapter)
 
 
-def test_물류_어댑터가_마스터가_소유한_sim_run_id_를_받았다() -> None:
+def test_물류_어댑터가_승인이_준_축을_받는다() -> None:
     """🔴 실행 정체성은 **마스터가 정한다.** 물류 모듈에 상수로 박으면 실행이 둘이
     되는 날 물류 코드를 고쳐야 한다.
 
-    ★ 조립 뿌리가 그 값을 **눈에 보이게** 넣는다 — 값의 주인은
-      `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다.
+    ★★ **그 축이 이제 호출 때 온다** (`#531` 후속 · 2026-09-10).
 
-    ⚠️ **매입 원장은 2026-09-10 부터 이 상수를 안 쓴다.** `ledger.sim_run_id_for` 는
-      부르는 쪽이 준 축을 돌려주고, 등록소는 프로세스 시작 때 한 번 묶이므로 아직
-      그 축을 못 받는다. 그 어긋남은 `bootstrap` 의 주석이 적어 두었고 **여기서
-      덮지 않는다** — 아래 줄이 그 사실을 그대로 잰다.
+      전에 이 검사는 등록소가 **생성 때** 든 상수를 쟀고, 그 자리 주석은 이렇게
+      적혀 있었다 —
+
+      > 등록소는 프로세스 시작 때 한 번 묶이므로 아직 그 축을 못 받는다. 그 어긋남은
+      > `bootstrap` 의 주석이 적어 두었고 **여기서 덮지 않는다**.
+
+      ```text
+      전   adapter._sim_run_id == BURN_IN_SIM_RUN_ID   앱이 뜰 때 굳은 값
+      후   bind_sim_run(등록, 실행축)._sim_run_id == 실행축   승인이 준 값
+      ```
+
+    🔴 **원장과 같은 축이어야 한다.** 물류 장부만 번인에 남으면 매입 원장과 갈리는데
+       **아무 오류도 안 난다** — `ledger.py` 가 경고한 그 모양이다.
     """
     from app.master import ledger
 
-    adapter = transition.registered()["logistics"]
+    adapter = bind_sim_run(transition.registered()["logistics"], 실행축)
 
-    assert adapter._sim_run_id == BURN_IN_SIM_RUN_ID
+    assert adapter._sim_run_id == 실행축
+    assert adapter._sim_run_id != BURN_IN_SIM_RUN_ID
     # 🔴 원장은 **받은 축**을 돌려준다 — 등록소가 든 상수를 되읽지 않는다.
     assert ledger.sim_run_id_for(_commitment(), sim_run_id=실행축) == 실행축
-    assert ledger.sim_run_id_for(_commitment(), sim_run_id=실행축) != BURN_IN_SIM_RUN_ID
+    # ★★ **둘이 같은 축이다.** 이 한 줄이 「조용한 갈림」을 잰다.
+    assert adapter._sim_run_id == ledger.sim_run_id_for(_commitment(), sim_run_id=실행축)
 
 
 # ── ⑦ 등록된 실제 구현으로 승인 한 건이 통과한다 ────────────────────────
@@ -299,6 +315,9 @@ def test_물류_write_가_상태가_설_날의_행을_고른다(재무_읽기를
     #   (임시 조치), `#484` 뒤로는 잠그기만 한다. **둘이 같은 날 행을 가리켜야 한다.**
     assert len(물류) == 2
     for params in 물류:
-        assert BURN_IN_SIM_RUN_ID in params
+        # 🔴 **승인이 준 축이다** (`#531` 후속). 전에는 배선이 든 번인 상수가 여기
+        #    실렸다 — 그러면 매입 원장은 새 실행에, 물류 장부는 번인에 앉는다.
+        assert 실행축 in params
+        assert BURN_IN_SIM_RUN_ID not in params
         assert TARGET_STATE_DATE in params
         assert AS_OF not in params, "승인일 행을 짚었다 — 재무 상태와 하루 어긋난다"

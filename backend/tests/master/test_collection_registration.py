@@ -62,6 +62,7 @@ from app.master import collection
 from app.master.collection_events import read_collection_events
 from app.master.finance_collection import FinanceCollectionAdapter
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 AS_OF = date(2026, 1, 10)
 """토요일이다. **입금은 토요일에도 찍힌다** — 수금은 달력일이다."""
@@ -96,6 +97,25 @@ def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str) -> Any:
 # 1. 배선
 # ---------------------------------------------------------------------------
 
+#: 이 검사가 등록소에 주는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)과 다르다** —
+#:   같으면 등록소가 축을 상수에서 다시 읽는 뮤턴트가 전부 살아남는다.
+등록축 = "SIM-REG-COLLECTION"
+
+
+def _등록된() -> Any:
+    """등록소가 **호출 때** 축을 받아 세운 어댑터 (`#531` 후속 · 2026-09-10).
+
+    ```text
+    전   registered()["finance"] 가 곧 어댑터였다 — 축이 프로세스 시작 때 굳었다
+    후   그 자리에 축을 기다리는 SimRunBound 가 앉고, 어댑터는 축이 올 때 선다
+    ```
+
+    ★ **재는 것은 그대로다** — *"등록된 것이 마스터 어댑터이고 마스터가 정한 장부에
+      앉히는가"*. 바뀐 것은 **언제 서는가** 하나다.
+    """
+    return bind_sim_run(collection.registered()["finance"], 등록축)
+
+
 
 def test_수금_실행이_등록된다() -> None:
     """★ **미등록과 「들어올 것 없음」은 다른 사실이다.** 이 줄이 없으면 앞으로 나간다."""
@@ -111,21 +131,25 @@ def test_등록된_것이_마스터_어댑터다() -> None:
 
     재무가 축 둘을 직접 들고 오는 구현을 올리면 이 검사가 그 교체를 알려 준다.
     """
-    impl = collection.registered()["finance"]
+    impl = _등록된()
     assert isinstance(impl, FinanceCollectionAdapter), (
         f"등록된 것이 마스터 수금 어댑터가 아니다: {type(impl).__name__}"
     )
 
 
 def test_마스터가_정한_장부에_앉힌다() -> None:
-    """★ `sim_run_id` 는 마스터 값이다 — 재무 모듈 상수로 새면 실행이 둘이 되는 날 깨진다."""
-    impl = collection.registered()["finance"]
-    assert impl.sim_run_id == BURN_IN_SIM_RUN_ID
+    """★ `sim_run_id` 는 마스터 값이다 — 재무 모듈 상수로 새면 실행이 둘이 되는 날 깨진다.
+
+    🔴 **부른 쪽이 준 축이 그대로 앉는다** (`#531` 후속). 전에는 배선이 든 상수를
+       쟀는데, 그러면 걷기가 번인 아닌 실행을 타는 날 **이 어댑터만 번인에 남는다.**
+    """
+    assert _등록된().sim_run_id == 등록축
+    assert _등록된().sim_run_id != BURN_IN_SIM_RUN_ID
 
 
 def test_배선이_financing_mode_를_들고_있지_않다() -> None:
     """🔴 **마스터가 고르지 않는다.** 배선 자리에 그 값이 있으면 그것이 고른 것이다."""
-    impl = collection.registered()["finance"]
+    impl = _등록된()
     assert not hasattr(impl, "financing_mode"), (
         "마스터 어댑터가 financing_mode 를 들고 있다 — 재무 축의 값이지 마스터 것이 아니다"
     )
@@ -138,7 +162,7 @@ def test_배선이_사건_목록을_들고_있지_않다() -> None:
       표에 한 줄 넣어도 다시 띄우기 전까지 아무 일도 안 일어나고, 그것은 에러 없이
       *"오늘은 들어올 게 없었다"* 로 보인다.
     """
-    impl = collection.registered()["finance"]
+    impl = _등록된()
     assert not hasattr(impl, "source"), (
         "배선 자리의 어댑터가 사건 원천을 들고 있다 — 사건은 호출 시점에 표에서 읽는다"
     )
@@ -149,7 +173,7 @@ def test_사건을_정본_표에서_읽는다() -> None:
 
     ⚠️ 여기에 다른 함수가 오면 **사건을 어디서 얻는지가 두 곳이 된다.**
     """
-    impl = collection.registered()["finance"]
+    impl = _등록된()
     assert impl.load_events is read_collection_events, (
         f"배선이 정본 표 조회가 아닌 것을 쓴다: {impl.load_events!r}"
     )

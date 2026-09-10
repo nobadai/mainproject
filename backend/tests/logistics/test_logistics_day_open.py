@@ -42,6 +42,7 @@ from app.master import cancellation as master_cancellation
 from app.master import day_open as master_day_open
 from app.master import transition as master_transition
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 CARRY_FROM = date(2026, 1, 6)
 AS_OF = CARRY_FROM + timedelta(days=1)
@@ -872,12 +873,25 @@ def test_production_wiring_pins_the_day_opening_to_the_master_owned_run(실제_�
       (`tests/master/test_transition_registration.py` 가 전이 어댑터에 같은 검사를
       두고 있는 이유와 같다).
 
-    ⚠️ **값을 물류가 정하지 않는다.** `BURN_IN_SIM_RUN_ID` 는 마스터 소유이고, 승인
+    ⚠️ **값을 물류가 정하지 않는다.** 축은 마스터 소유이고, 승인
        전이(`LogisticsTransitionAdapter`)와 승인 취소(`LogisticsCancellationAdapter`)가
        **이미 같은 값**을 받고 있다. 셋이 갈리면 승인이 갱신하는 행과 하루 넘김이
        세우는 행이 서로 다른 실행에 앉는다.
+
+    ★★ **축이 오는 시점이 바뀌었다** (마스터 `#531` 후속 · 2026-09-10).
+
+      ```text
+      전   등록소가 **생성 때** 축을 든다 — 앱이 뜰 때 한 번 굳는다
+      후   등록소가 **호출 때** 축을 받는다 — `bind_sim_run` 이 그 축으로 만든다
+      ```
+
+      🔴 **물류 구현은 한 줄도 안 바뀌었다.** `LogisticsDayOpening(sim_run_id=…)` 은
+         그대로이고, 바뀐 것은 마스터 등록소 계약뿐이다.
+
+      ★ **재는 것은 오히려 세졌다.** 전에는 배선이 든 상수를 쟀는데, 그러면 걷기가
+        번인 아닌 실행을 타는 날 **하루 넘김만 번인에 남는 것**을 못 잡았다.
     """
-    등록된 = master_day_open.registered()["logistics"]
+    등록된 = bind_sim_run(master_day_open.registered()["logistics"], BURN_IN_SIM_RUN_ID)
     assert isinstance(등록된, LogisticsDayOpening)
 
     # ★ **행동으로 잰다.** 같은 날에 실행이 둘 보이는 커넥션을 준다 — 주입이 빠진
@@ -896,10 +910,19 @@ def test_production_wiring_reuses_the_run_the_other_two_adapters_already_use(실
 
     🔴 **세 등록소 중 `cancellation` 만 `tests/conftest.py` 의 복원 밖이다.** 그래서
        이 검사가 앞 검사의 잔재를 보지 않도록 `실제_배선` 이 배선을 다시 세운다.
-    """
-    하루넘김 = master_day_open.registered()["logistics"]
-    전이 = master_transition.registered()["logistics"]
-    취소 = master_cancellation.registered_cancellations()["logistics"]
 
-    assert 하루넘김._sim_run_id == BURN_IN_SIM_RUN_ID
+    ★★ **같은 축 하나를 주고 셋이 다 그것을 받는지 잰다** (마스터 `#531` 후속).
+      전에는 셋이 배선에서 **같은 상수를 들었나**를 쟀다. 이제 축은 호출 때 오므로,
+      *"부르는 쪽이 준 축이 셋에 똑같이 앉는가"* 가 같은 물음의 지금 모양이다 —
+      그리고 그것이 **막으려는 갈림 그 자체**다.
+    """
+    축 = "SIM-WIRING-ONE"
+    하루넘김 = bind_sim_run(master_day_open.registered()["logistics"], 축)
+    전이 = bind_sim_run(master_transition.registered()["logistics"], 축)
+    취소 = bind_sim_run(master_cancellation.registered_cancellations()["logistics"], 축)
+
+    assert 하루넘김._sim_run_id == 축
+    assert 하루넘김._sim_run_id != BURN_IN_SIM_RUN_ID, (
+        "배선이 축을 상수에서 다시 읽는다 — 걷기 축이 등록소까지 안 간다"
+    )
     assert 하루넘김._sim_run_id == 전이._sim_run_id == 취소._sim_run_id
