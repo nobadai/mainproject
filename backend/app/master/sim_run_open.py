@@ -133,11 +133,6 @@ FINANCE_STATE_TABLE = "finance_states"
 #: `config_json` 안에서 lineage 가 앉는 자리.
 BASELINE_CONFIG_KEY = "baseline"
 
-#: 새 실행의 시작 행에서 **새로 정하는 칸**. 나머지는 source 행에서 이관한다.
-#: ★ `financing_mode` 는 여기 없다 — 그것은 새로 정하는 것이 아니라 **source 와
-#:   같아야 하는 것**이고, 그 사실은 정합성 셋 ③ 이 잰다.
-OPENING_IDENTITY_COLUMNS = ("finance_state_id", AXIS_COLUMN, "state_date", "state_type")
-
 
 @dataclass(frozen=True)
 class BaselineLineage:
@@ -231,6 +226,13 @@ def seed_opening_finance_state(
 
         # 🔴 **identity 는 새로, 값만 이관.** source 를 통째로 깐 위에 새로 정하는
         #    칸만 덮는다 — 덮는 칸 하나를 빠뜨리면 남의 실행 id 가 그대로 들어온다.
+        #
+        # ★ **덮는 칸의 주인은 이 dict 하나다.** 같은 목록을 상수로 한 벌 더 두면
+        #   한쪽만 고치는 날 둘이 갈리고, 그때 어느 쪽이 실제로 실리는지가 흐려진다.
+        #
+        # ★ `financing_mode` 는 identity 가 아니다 — 정합성 셋 ③ 이 이미 *같음* 을
+        #   쟀다. 그래도 **새 실행의 것을 적는다**: 출발점에서 나르면 이 칸의 주인이
+        #   출발점이 되고, 셋 ③ 을 걷는 날 말없이 갈린다.
         새로정한다: dict[str, Any] = {
             "finance_state_id": finance_state_id,
             AXIS_COLUMN: sim_run_id,
