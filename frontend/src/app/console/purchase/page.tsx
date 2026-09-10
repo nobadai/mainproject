@@ -151,7 +151,17 @@ export default function PurchasePage() {
       </div>
       <Note note={data.plans_note} />
 
-      <Panel title="확정된 매입" subtitle="사람이 고른 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
+      {/*
+        🔴 subtitle 에 «사람이» 라고 쓰지 않는다 (2026-09-10 · 마스터 통보 「백필 승인은
+        사람 승인이 아닙니다」). 걷기 구간을 decided_by="AUTO-BACKFILL" 로 채우기로
+        정해졌고, 그날부터 이 표에는 사람이 누른 것과 자동으로 채운 것이 같이 실린다.
+
+        ⚠️ «승인을 거친» 은 지금도 참이고 백필 뒤에도 참이다 — 주체를 단정한 쪽만 깨진다.
+
+        🟡 «누가 승인했나» 를 표에 칸으로 더하는 것은 다음 판이다. 원장에 그 값이 없고,
+        마스터가 purchases.decision_id(FK)를 세운 뒤 조인해 읽기로 했다.
+      */}
+      <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
         <DataTable table={data.committed} />
         <Note note={data.committed_note} />
       </Panel>

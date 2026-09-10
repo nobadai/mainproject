@@ -77,6 +77,17 @@ class PurchaseTab(BaseModel):
     stats: list[Stat] = Field(description="오늘 제안 · 승인 대기 · 확정 매입액 · 입고 예정")
     plans: list[Plan] = Field(description="오늘 낸 안들. 비면 화면이 «안이 없다» 고 적는다")
     plans_note: Note = Field(description="안이 왜 이 개수인가")
-    committed: Table = Field(description="사람이 고른 뒤에 생기는 확정 매입")
+    #  🔴 **«사람이» 라고 쓰지 않는다** (2026-09-10 · 마스터 통보 「백필 승인은 사람 승인이
+    #     아닙니다」). 걷기 구간을 `decided_by="AUTO-BACKFILL"` 로 채우기로 정해졌다.
+    #     그날부터 이 표에는 **사람이 누른 것과 자동으로 채운 것이 같이 실린다** —
+    #     «사람이 고른 뒤에» 는 그때 화면에서 거짓말이 된다.
+    #
+    #  ⚠️ 지금 고치는 이유는 «미리 맞춰 두려고» 가 아니다. **둘 다 참인 문장이 있어서**다 —
+    #     승인을 거친다는 것은 지금도 참이고 백필 뒤에도 참이다. 주체를 단정한 쪽만 깨진다.
+    #
+    #  🟡 «누가 승인했나» 를 이 표에 칸으로 더하는 것은 **다음 판**이다. 원장에 그 값이
+    #     없고(`purchases` 에 승인자 칸 없음), 마스터가 `purchases.decision_id`(FK)로
+    #     `master_decisions` 를 가리키게 하기로 정했다. 칸이 선 뒤에 조인해 읽는다.
+    committed: Table = Field(description="승인을 거친 뒤에 생기는 확정 매입")
     committed_note: Note = Field(description="승인 전에는 표가 빈다는 안내")
     source: Source = Field(description="예시값인지 실제 값인지")
