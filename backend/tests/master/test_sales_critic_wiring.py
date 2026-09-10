@@ -27,7 +27,7 @@ import pytest
 from app.master import wiring
 from app.master.critic.schemas import CriticSalesRequest, CriticVerdictOut
 from app.master.critic.service import run_critic_procurement, run_critic_sales
-from app.master.critic_bridge import CriticSkipped, build_sales_request
+from app.master.critic_bridge import CriticSkipped, _sales_replies_in, build_sales_request
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.master.schemas import SalesRunRequest
 from app.master.service import run_sales
@@ -321,6 +321,34 @@ def test_창고_여유는_출고_여력으로_메우지_않는다() -> None:
     assert _공급["delivery_feasibility"]["daily_outbound_capacity_kg"] == 7636.72
     assert request.warehouse_free_kg == 0.0, "출고 여력을 창고 여유 칸에 넣지 않는다"
     assert request.replies[0].checks[0].cap_total_kg is None
+
+
+def test_창고_여유_0은_꽉_찼다는_뜻이_아니다() -> None:
+    """🔴 **결측을 `0kg` 이라는 사실로 접지 않는다** (2026-09-10 물류 회신 · ㉡).
+
+    ```text
+    0kg          창고가 **실제로 꽉 찼다**
+    PRE_SALES    그 사실을 **안 낸다** — 창고는 매입·입고 쪽 질문이다
+    ```
+
+    ★ 물류가 청한 *"PRE_SALES 경로에서는 창고 여유 검사를 미적용으로"* 는
+      **`cap_total_kg` 칸이 아예 안 실리는 것**으로 선다.
+
+    🔴 **키의 부재를 잰다. `== 0.0` 을 재면 안 된다** — 누가
+      `check["cap_total_kg"] = cap_total or 0.0` 을 넣어도 그 단언은 초록이라
+      **막으려던 바로 그것을 통과시킨다.**
+
+    ⚠️ 위 `test_창고_여유는_출고_여력으로_메우지_않는다` 와 겹쳐 보이지만 **재는 층이
+      다르다.** 저쪽은 계약 모델을 통과한 뒤의 값이고, 여기는 `_sales_replies_in` 이
+      **만드는 dict 자체**다. 모델이 기본값을 채우기 시작하면 저쪽만으로는 못 잡는다.
+    """
+    replies = _sales_replies_in(_공급, 품목)
+
+    check = replies[0]["checks"][0]
+    assert "cap_kg" in check, "품목 가용재고는 실린다 — 이 검사가 빈손을 재는 것이 아니다"
+    assert "cap_total_kg" not in check, (
+        "PRE_SALES 에는 warehouse_free_kg 가 없다 — 칸을 만들면 «안 낸 것» 이 «꽉 찼다» 로 선다"
+    )
 
 
 def test_품목이_없으면_매입과_같은_낱말로_선다() -> None:

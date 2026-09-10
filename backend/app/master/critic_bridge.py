@@ -517,6 +517,15 @@ _INVENTORY_BY_ITEM = "inventory_by_item"
 #:   아니다 — 다른 사실을 같은 칸에 넣는 것이 물류가 금지한 「재조립」이다.
 #:   없으면 없는 대로 두고, 그 사실은 `replies` 가 `cap_total` 없이 만들어진 것으로
 #:   드러난다.
+#:
+#: 🔴 **그리고 그 결측을 `0kg` 이라는 사실로 읽지 않는다** (2026-09-10 물류 회신 · ㉡).
+#:
+#: ```text
+#: 0kg          창고가 **실제로 꽉 찼다**
+#: PRE_SALES    그 사실을 **안 낸다** — 창고는 매입·입고 쪽 질문이다
+#: ```
+#:
+#:   둘을 섞으면 *"안 낸 것"* 이 *"꽉 찼다"* 로 서고, 판매가 없는 제약에 막힌다.
 _WAREHOUSE_FREE = "warehouse_free_kg"
 
 #: `LotConstraintIn.status` 가 받는 값. 밖의 값은 **고쳐서 넣지 않고 버린다** —
@@ -582,6 +591,22 @@ def build_sales_request(
         lot_constraints=lots,
         # ⚠️ 계약이 `float` 이라 *"모름"* 을 담을 칸이 없다. 못 읽었으면 0.0 이 가고,
         #   그 사실은 위 `replies` 가 cap_total 없이 만들어진 것으로 드러난다.
+        #
+        # 🔴 **이 `0.0` 은 「창고가 꽉 찼다」가 아니라 「PRE_SALES 가 이 사실을 안 낸다」다.**
+        #
+        # ★ 그래서 판정이 서지 않는다 — 창고 검사(L4-7)가 이렇게 빠진다.
+        #
+        #   ```python
+        #   # app/master/critic/critic_v0_4.py  check_overlay_cap_by_date
+        #   if not occ or snapshot.warehouse_free_kg <= 0:
+        #       return [], ["L4-7 overlay cap_by_date: N15/N2 미결 — 미검사"]
+        #   ```
+        #
+        #   `0.0` 이 초과 판정을 만들지 않고 **미검사**로 남는다 — 물류가 청한
+        #   *"PRE_SALES 경로에서는 창고 여유 검사를 미적용으로"* 가 그것이다.
+        #
+        # ⚠️ **다만 그 미검사 사유 문구가 이 경우의 참 사유와 다르다** (「N15/N2 미결」).
+        #   판정기 안쪽이라 이 판에서 안 고친다 — 사실만 여기 남긴다.
         warehouse_free_kg=free if (free := _float_of(supply.get(_WAREHOUSE_FREE))) else 0.0,
         # ★ 매입과 같은 이유로 비운다 — L5 가 검사할 selector 문장이 1차 Flow 에 없다.
         rationale="",
