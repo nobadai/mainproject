@@ -95,6 +95,27 @@ def validate_coordinates(cfg: Mapping[str, Any]) -> None:
         )
 
 
+def min_trade_volume_kg(cfg: Mapping[str, Any]) -> float:
+    """등급 하나가 그날 **시세로 실리기 위한 최소 거래중량** (`#559`).
+
+    선언에서 읽는다 (규칙 7). 없으면 조회하지 않는다 — 기본값을 코드에 두면 *"선언을
+    지웠는데 왜 그대로지"* 가 되고, 그 상태는 이 모듈이 ``_IMPLEMENTED`` 로 막으려는
+    것과 같은 종류다.
+
+    ⚠️ ``0`` 은 **받는다** — 「하한 없음」이라는 확정된 값이다 (규칙 3). 미결이면 키를
+    두지 않고, 그때는 여기서 멈춘다. 음수는 뜻이 없으므로 막는다.
+    """
+    value = cfg.get("min_trade_volume_kg")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise KeyError(
+            "market_quotes.min_trade_volume_kg 가 없거나 수가 아니다 — 얇은 거래를 "
+            f"시세로 실을지는 선언이 정한다 (규칙 7). 받은 값: {value!r}"
+        )
+    if value < 0:
+        raise ValueError(f"min_trade_volume_kg 는 음수일 수 없다: {value!r}")
+    return float(value)
+
+
 def source_table(cfg: Mapping[str, Any]) -> tuple[str, str]:
     """읽을 ``(schema, table)``. **환경변수가 아니라 선언에서 온다** (규칙 7).
 
@@ -315,8 +336,27 @@ def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Com
       ``trade_volume_kg > 0`` 은 NULL 도 함께 떨어뜨린다(NULL 비교는 참이 아니다).
       금액만 ``IS NOT NULL`` 을 따로 적는다 — 0원 낙찰은 있을 수 있어 ``> 0`` 이 아니다.
 
-    ``HAVING`` 을 따로 두지 않는다. 남은 행이 전부 양수 중량이라 그룹 합계도 양수이고,
-    같은 뜻의 검사를 두 곳에 두면 한쪽만 바뀐다.
+    🔄 ``HAVING`` 이 **생겼다** (`#559` · 2026-09-11). 전에는 *"남은 행이 전부 양수
+    중량이라 그룹 합계도 양수이고, 같은 뜻의 검사를 두 곳에 두면 한쪽만 바뀐다"* 로
+    두지 않았다. **그 문장은 여전히 맞고, 지금 것은 같은 뜻이 아니다.**
+
+    .. code-block:: text
+
+        행 단위 trade_volume_kg > 0    물량가중의 **분모를 지킨다** (위 두 줄의 예시)
+        HAVING  sum >= 하한            *"이 값을 시세라고 부를 수 있나"*
+
+    🔴 **없으면 한두 망이 그날 등급 단가가 된다.** 실측 (2025-09-19 배추)::
+
+        상 그물망        10 kg   3,750 원/kg   ← 이것이 「그날 상 시세」였다
+        특 그물망   382,960 kg   1,026 원/kg
+
+    그 단가가 ``grade_unit_price`` 로 안에 실리고, 그건 사중 일치 금액 축이다 (규칙 4).
+    그리고 배추 ``특/상`` 스프레드 12개월 중앙이 ``-2.466`` 이 되어 ⑤ 진입 게이트가
+    뒤집힌다 — 값이 아니라 **부호**가 틀린다.
+
+    ★ **``picked`` 에는 안 건다.** 하한을 ``usable`` 에 걸면 관측일 선택까지 바뀐다 —
+      그날 얇은 등급만 있었어도 **그날은 그날**이고, 거르는 것은 등급이지 날짜가 아니다.
+      (실측으로 이 하한에 **등급이 0개가 되는 날은 12개월·세 품목 전부 0일**이다.)
 
     🔴 ``market`` CTE 에는 **품목 필터가 없다 — 없는 것이 맞다.**
       이 CTE 가 답하는 질문은 *"시장이 언제 열렸나"* 이지 *"우리 품목이 언제 팔렸나"* 가
@@ -369,6 +409,7 @@ def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Com
           FROM usable
          WHERE usable.auction_date = (SELECT day FROM picked)
          GROUP BY usable.auction_date, usable.grade_name
+        HAVING sum(usable.trade_volume_kg) >= %(min_trade_volume_kg)s
     """).format(
         schema=sql.Identifier(schema), table=sql.Identifier(table), weight=weight_condition
     )
@@ -407,6 +448,7 @@ def auction_quote_source(*, fetch: Fetch | None = None) -> QuoteSource:
             "packages": list(spec["packages"]),
             "unit_weight_kg": spec["unit_weight_kg"],
             "market_window_days": cfg["market_open_window_days"],
+            "min_trade_volume_kg": min_trade_volume_kg(cfg),
         }
         before = spec.get("before")
         if before is not None:
