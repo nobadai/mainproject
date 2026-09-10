@@ -110,6 +110,7 @@ def _finance_request(payload):
             as_of=date(2025, 12, 31),
             trigger="USER_REQUEST",
             policy_version="v1.3-PROVISIONAL",
+            sim_run_id="SIM-TEST-RUN",
         ),
         agent="finance",
         mode="SALES_VALIDATION",

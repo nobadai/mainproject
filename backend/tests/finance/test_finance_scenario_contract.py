@@ -37,6 +37,7 @@ def _req(payload: dict, mode: str = "SCENARIO_VALIDATION") -> AgentRequest:
             as_of=AS_OF,
             trigger="USER_REQUEST",
             policy_version="POLICY-V1",
+            sim_run_id="SIM-TEST-RUN",
         ),
         agent="finance",
         mode=mode,
@@ -52,7 +53,7 @@ def _wired(monkeypatch):
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
     monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _Context())
 
 
 def _non_split(**over) -> dict:

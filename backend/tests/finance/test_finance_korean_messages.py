@@ -41,6 +41,7 @@ def _req(mode: str = "PRE_PURCHASE", payload: dict | None = None) -> AgentReques
             as_of=AS_OF,
             trigger="USER_REQUEST",
             policy_version="POLICY-V1",
+            sim_run_id="SIM-TEST-RUN",
         ),
         agent="finance",
         mode=mode,
@@ -56,7 +57,7 @@ def _wired(monkeypatch):
         lambda port: FinanceAgentController(port, _AdapterPlanner()),
     )
     monkeypatch.setattr("app.finance.execution.save_finance_execution", lambda **_kwargs: None)
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _Context())
 
 
 def _assert_korean(text: str, label: str) -> None:
@@ -134,7 +135,7 @@ def test_invalid_scenario_input_message_is_korean_but_field_paths_are_not():
 
 
 def test_boundary_not_ready_message_is_korean(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: None)
     with patch("app.finance.adapter.save_finance_execution"):
         reply, _meta = adapter.finance_port(_req())
 
