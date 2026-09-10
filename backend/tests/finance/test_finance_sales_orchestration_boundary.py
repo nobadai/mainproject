@@ -70,6 +70,7 @@ def test_finance_touches_master_only_through_shared_contract_modules():
     }
 
     assert master_modules == {
+        "app.master.closing",
         "app.master.collection",
         "app.master.critic_bridge",
         "app.master.envelope",
