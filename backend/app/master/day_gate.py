@@ -59,6 +59,7 @@ from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.day_open import PARTS, registered
 from app.master.day_opening_repository import read_day_opening
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 __all__ = ["DayGate", "FailedPart", "check_day_gate"]
 
@@ -121,7 +122,12 @@ def _passed(as_of: date) -> DayGate:
     return DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED", last_opened_date=as_of)
 
 
-def check_day_gate(as_of: date, *, connect: Callable[[], Any] | None = None) -> DayGate:
+def check_day_gate(
+    as_of: date,
+    *,
+    connect: Callable[[], Any] | None = None,
+    sim_run_id: str = BURN_IN_SIM_RUN_ID,
+) -> DayGate:
     """그날이 열렸는지 **물어보기만** 한다. 열지 않는다.
 
     ★ **등록된 파트 전부가 열려 있어야 통과다.** 하나라도 안 열렸으면 그 날 장부는
@@ -129,16 +135,31 @@ def check_day_gate(as_of: date, *, connect: Callable[[], Any] | None = None) -> 
 
     ⚠️ **예외를 밖으로 내지 않는다.** 관문이 500 을 내면 판단이 아예 안 도는데, 못 물어본
       것과 안 열린 것은 다르다 — 못 물어보면 `BLOCKED` + `CONTACT_OPERATOR` 다.
+
+    :param sim_run_id: 어느 실행의 장부를 묻는가 (`#531` 후속). 🔴 **여기는 기본값이
+                    있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
+                    바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
     """
     present = [part for part in PARTS if part in registered()]
     if not present:
         # ⚠️ 물어볼 데가 없다. **없는 구현에 대고 "안 열렸다" 고 말하지 않는다.**
         return _passed(as_of)
 
-    adapters = registered()
     open_connection = get_connection if connect is None else connect
     conn = open_connection()
     try:
+        # 🔴 **등록소가 든 표시가 아니라 이번 물음의 축으로 묶는다** (`#539` 후속).
+        #    `registered()` 에 앉아 있는 것은 `SimRunBound` — 공장을 든 **표시**이고
+        #    어댑터가 아니다. 안 묶고 `is_open` 을 부르면 `AttributeError` 가 나고,
+        #    이 함수는 예외를 값으로 바꾸므로 **에러 없이 사유 문자열로만** 나타난다.
+        #    실제로 그랬다: 걷기 `SIM-WALK-2026-FULL` 이 아흐레 내내
+        #    *"개장 여부를 못 읽었다: AttributeError"* 로 한 건도 판단을 못 세웠다.
+        #
+        # ★ **`_last_opened` 도 이 사전을 받는다.** 묶는 자리가 둘이면 한쪽만 고치는
+        #   날이 오고, 그 날 뒤로 걷는 쪽만 다시 표시 객체에 묻는다.
+        adapters = {
+            part: bind_sim_run(impl, sim_run_id) for part, impl in registered().items()
+        }
         closed = [part for part in present if not adapters[part].is_open(conn, as_of=as_of)]
         if not closed:
             return _passed(as_of)
@@ -166,6 +187,10 @@ def _last_opened(
 
     ⚠️ `SEARCH_LIMIT_DAYS` 까지만 걷는다. 못 찾으면 `(None, None)` 이고 그것이
       `NEVER_OPENED` 다 — 그 너머는 이 Protocol 로 못 가른다.
+
+    🔴 **`adapters` 는 이미 축으로 묶인 것이다.** 여기서 `registered()` 를 다시 부르면
+       표시 객체(`SimRunBound`)에 `is_open` 을 묻게 되고, 막힌 날에만 도는 경로라
+       **통과하는 날에는 아무 티도 안 난다.**
     """
     from datetime import timedelta
 

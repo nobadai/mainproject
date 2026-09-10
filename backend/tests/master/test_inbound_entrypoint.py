@@ -69,7 +69,7 @@ def _빈_등록소() -> Any:
         inbound.register_inbound(part, impl)
 
 
-def _막힌_Gate(as_of: date, *, connect: Any = None) -> DayGate:
+def _막힌_Gate(as_of: date, *, connect: Any = None, sim_run_id: str = "") -> DayGate:
     return DayGate(
         as_of=as_of,
         gate="BLOCKED",
@@ -171,7 +171,9 @@ def test_열린_날은_평소대로_받는다(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         inbound,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="ALREADY_OPENED"
+        ),
     )
     물류 = _물류(InboundPartOut(part="logistics", status="RECEIVED", received=["INB-A-1"]))
     inbound.register_inbound("logistics", 물류)
@@ -217,7 +219,9 @@ def test_토요일에도_받는다(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         inbound,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="OPENED"
+        ),
     )
     물류 = _물류(InboundPartOut(part="logistics", status="RECEIVED", received=["INB-SAT-1"]))
     inbound.register_inbound("logistics", 물류)
