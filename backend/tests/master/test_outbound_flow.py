@@ -393,7 +393,8 @@ def test_확보_0kg_은_NOTHING_DUE_와_다른_사실이다():
 
     assert 부족.status == "RAN"
     assert 없는날.status == "NOTHING_DUE"
-    assert 부족.items[0].status not in ("NOTHING_DUE", "FAILED")
+    assert 없는날.items == ()
+    assert 부족.items[0].status == "SHORT"
 
 
 def test_한_품목이_부족해도_나머지는_나간다():
