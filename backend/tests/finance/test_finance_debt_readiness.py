@@ -163,10 +163,14 @@ def _raw_state_row(debt: Decimal) -> dict[str, object]:
 
 
 def test_negative_debt_is_rejected_at_the_raw_row_boundary():
-    """⑤ 음수 부채는 원천 행에서 막힌다 — 두 런타임 경로의 공통 입구다."""
+    """⑤ 음수 부채는 원천 행에서 막힌다 — 두 런타임 경로의 공통 입구다.
+
+    ★ 현재 행 조회는 이제 `fetch_all` 이다. `fetch_one` 이면 실행이 여럿일 때
+      **아무 행이나** 집혔다.
+    """
     with (
         patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
-        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal(-1))),
+        patch(f"{_STATE_REPO}.fetch_all", return_value=[_raw_state_row(Decimal(-1))]),
         pytest.raises(FinanceDataNotReady) as raised,
     ):
         _get_current_finance_state_row()
@@ -178,8 +182,10 @@ def test_negative_debt_cannot_reach_the_runtime_context():
     """⑤ 컨텍스트 경로: 음수 부채가 `unresolved 없음` 으로 통과하지 않는다."""
     with (
         patch(f"{_STATE_REPO}.get_db_schema", return_value="configured_schema"),
-        patch(f"{_STATE_REPO}.fetch_one", return_value=_raw_state_row(Decimal("-0.01"))),
-        patch(f"{_STATE_REPO}.fetch_all", return_value=[]),
+        patch(
+            f"{_STATE_REPO}.fetch_all",
+            return_value=[_raw_state_row(Decimal("-0.01"))],
+        ),
         pytest.raises(FinanceDataNotReady),
     ):
         get_current_finance_runtime_context()

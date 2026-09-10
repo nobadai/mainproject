@@ -751,7 +751,10 @@ def test_30_day_walk_changes_ledgers_only_on_explicit_event_days(monkeypatch):
     monkeypatch.setattr(
         finance_db,
         "get_finance_runtime_axis",
-        lambda: {"sim_run_id": execution_SIM_RUN_ID, "financing_mode": execution_MODE},
+        lambda **_kwargs: {
+            "sim_run_id": execution_SIM_RUN_ID,
+            "financing_mode": execution_MODE,
+        },
     )
     monkeypatch.setattr(finance_db, "fetch_all", lambda *_args, **_kwargs: [final_state])
     runtime_position = PostgresFinanceAsOfDataPort().load_finance_position(execution_END)

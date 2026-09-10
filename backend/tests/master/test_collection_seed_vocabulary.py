@@ -60,7 +60,7 @@ class _센다:
 
 
 def _못_읽는_축(센다: _센다):
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         센다.호출 += 1
         raise FinanceDataNotReady(모호_사유)
 
@@ -68,7 +68,7 @@ def _못_읽는_축(센다: _센다):
 
 
 def _남의_축(센다: _센다):
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         센다.호출 += 1
         return FinanceRuntimeAxis(sim_run_id=남의_실행, financing_mode=축_모드)
 
