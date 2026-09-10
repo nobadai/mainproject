@@ -447,6 +447,85 @@ def check_split_dates(scenario: dict, as_of: str) -> str | None:
     return None
 
 
+class MarketOpenDays(NamedTuple):
+    """회차일 개장 판정. ``ArrivalCapacity`` 와 **같은 이유로** 둘을 나눠 든다.
+
+    컷과 미검사는 둘 다 "통과가 아님"이지만 하나는 안을 죽이고 하나는 안 죽인다. 한
+    문자열로 돌려주면 호출부가 문면으로 판단하게 되고, 문구를 다듬는 날 컷이 조용히 멈춘다.
+    """
+
+    violation: str | None = None
+    """컷 사유. 채워지면 그 안은 죽는다."""
+
+    skipped: str | None = None
+    """미검사 고지. 채워지면 안은 살고 risks 에 한 줄이 붙는다."""
+
+
+#: 미검사 사유. **왜 못 했는지를 갈라 적는다** — 「봉투가 없다」와 「지평 밖이다」는 다른
+#: 사실이고, 고쳐야 할 자리도 다르다 (마스터 배선 / 지평 길이).
+MARKET_SKIP_REASONS = {
+    "no_envelope": (
+        "회차일 개장 검사 보류 — 시장 개장 달력을 받지 못해 회차일이 장이 서는 날인지 "
+        "확인하지 않았다"
+    ),
+}
+
+
+def _beyond_horizon_reason(days: list[str], horizon_end: str) -> str:
+    """지평 밖 회차일. **날짜를 이름으로 부른다** — 몇 건인지만 적으면 어느 회차인지 모른다."""
+    return (
+        f"회차일 개장 검사 일부 보류 — {', '.join(days)}이(가) 받은 달력의 마지막 날"
+        f"({horizon_end})을 넘어 장이 서는지 확인하지 않았다"
+    )
+
+
+def market_open_days(scenario: dict, state: PurchaseAgentState) -> MarketOpenDays:
+    """회차일이 **장이 서는 날인가** (`#300` · `#303`).
+
+    ★ **축이 「살 수 있는 날」이다.** 마스터가 싣는 ``execution_calendar`` 는 ``is_open``
+      으로 만든 것이고, 문 앞 게이트의 「예측이 있어 도는 날」과 **다르다**. 2026년 토요일
+      45일에 가락이 서므로, 문 앞 축으로 밀면 살 수 있는 날에 못 산다고 계획한다.
+
+    🔴 **도착일은 안 본다.** 도착일 축은 ``arrival_capacity`` 가 ``cap_by_date`` 로 보고,
+      물류는 주말 칸에도 여유를 준다 (실측: 주말 칸 3,050건 중 **0 이 아닌 것 1,774건**).
+      즉 **「주말엔 못 받는다」가 아니다** — 여기서 도착일을 막으면 없는 제약을 만든다.
+
+    ⚠️ **지금은 한 번도 안 걸린다** (2026-09-10 실측 · 2026년 실행 전수).
+
+    .. code-block:: text
+
+        회차 155건   전부 1회차뿐 · 그 하나가 **as_of**
+        as_of        마스터 문 앞 게이트가 실행일만 통과시킨다
+        요일 분포    매입일 월 26 · 화 55 · 수 22 · 목 23 · 금 29  → **주말 0건**
+
+    ★★ **그래서 이 검사는 「지금 막는 것」이 아니라 「분할이 서는 날 알려 주는 것」이다.**
+      `#308`(분할 임계 20,000kg)이 풀려 2·3회차가 ``as_of + k`` 로 가면 처음 걸린다.
+      `check_split_dates` 가 *"회차가 하나뿐이던 동안에는 순서를 어길 방법이 없었다"* 로
+      같은 모양을 적어 둔 자리와 짝이다.
+
+    🔴 **못 하면 통과로 읽지 않는다.** 달력이 없으면 ``skipped`` 로 고지하고 안은 살린다 —
+      ``None`` 을 빈 목록으로 접으면 «안 서는 날이 없다» 가 되어 검사가 조용히 멈춘다.
+    """
+    calendar = state.get("execution_calendar")
+    if not calendar:
+        return MarketOpenDays(skipped=MARKET_SKIP_REASONS["no_envelope"])
+    closed = set(calendar.get("non_execution_days") or ())
+    horizon_end = calendar.get("horizon_end")
+    dates = [item["date"] for item in scenario["split_plan"]]
+    hit = [day for day in dates if day in closed]
+    if hit:
+        return MarketOpenDays(
+            violation=f"회차일이 장이 안 서는 날: {', '.join(hit)} (받은 개장 달력 기준)"
+        )
+    # ★ **지평 밖을 위반으로 읽지 않는다.** 달력이 답할 수 없는 날이고, 그건 «안 선다» 가
+    #   아니라 «모른다» 다. 마스터가 지평을 못 덮으면 봉투를 통째로 안 싣는 것과 같은 태도다.
+    if horizon_end:
+        unknown = [day for day in dates if day > horizon_end]
+        if unknown:
+            return MarketOpenDays(skipped=_beyond_horizon_reason(unknown, horizon_end))
+    return MarketOpenDays()
+
+
 def check_document_refs(scenario: dict, context_docs: list[dict]) -> str | None:
     """인용한 문서가 **실제로 읽은 것인가** (§4-⑦ 근거 환각 대조 중 계산으로 되는 부분).
 
@@ -684,6 +763,7 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         # **한 번만 계산한다.** 컷 사유와 미검사 고지가 배타적인 두 결과라 같은 판정에서
         # 나와야 한다 — 따로 부르면 체인이 컷한 안에 "검사 안 했다"가 붙을 수 있다.
         arrival = arrival_capacity(scenario, state)
+        market = market_open_days(scenario, state)
         reason = (
             check_quadruple_match(scenario)
             or check_axis_allowed(scenario, state["allowed_axes"])
@@ -695,6 +775,9 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or arrival.violation
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
+            # 날짜 두 축도 붙여 둔다 — **순서·연속이 먼저다.** 회차 자체가 어긋나 있으면
+            # 「그날 장이 서나」는 부차적이고, 컷 사유는 한 안에 하나만 나간다.
+            or market.violation
             or check_split_amounts(scenario)
             or check_document_refs(scenario, state["context_docs"])
             # 문서 검사 3종은 순서가 있다: 인용이 로드분인가(refs) → 발행일이 as_of 이전인가
@@ -706,10 +789,15 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         )
         if reason:
             rejected.append({"label": scenario["label"], "reason": reason})
-        elif arrival.skipped:
+            continue
+        # 🔴 **미검사 고지를 하나만 싣지 않는다.** 전에는 도착일 축만 실었는데, 축이 둘이
+        #   되면서 «둘 다 못 했는데 한 줄만 보이는» 상태가 생긴다 — 안 실린 쪽은 검사한
+        #   것처럼 읽힌다.
+        notes = [note for note in (arrival.skipped, market.skipped) if note]
+        if notes:
             # **새 dict 를 만든다.** ``state["scenarios_final"]`` 을 제자리에서 고치면
             # ⑥이 만든 값과 ⑦이 내보내는 값이 같은 객체가 되어, 나중에 둘을 대조할 수 없다.
-            survivors.append({**scenario, "risks": [*scenario["risks"], arrival.skipped]})
+            survivors.append({**scenario, "risks": [*scenario["risks"], *notes]})
         else:
             survivors.append(scenario)
 

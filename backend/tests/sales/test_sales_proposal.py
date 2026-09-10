@@ -469,12 +469,8 @@ Master 연동 전에도 독립 실행 가능하다는 설계를 실제로 못 �
 
 import ast
 import pathlib
-from decimal import Decimal
 
 import pytest
-
-from app.sales.proposal import run_proposal
-from app.sales.schemas import SalesProposalInput
 
 independence_LOGISTICS = {
     "query_scope": {"item": "배추", "max_confirmed_sellable_quantity_kg": 3000},
@@ -646,7 +642,9 @@ def test_same_input_produces_identical_business_facts():
     first = run_proposal(request)
     second = run_proposal(request)
 
-    assert [independence_facts(s) for s in first.scenarios] == [independence_facts(s) for s in second.scenarios]
+    assert [independence_facts(s) for s in first.scenarios] == [
+        independence_facts(s) for s in second.scenarios
+    ]
     assert first.self_check.issue_codes == second.self_check.issue_codes
     assert first.missing_data == second.missing_data
     assert first.missing_capabilities == second.missing_capabilities
@@ -678,7 +676,9 @@ def test_determinism_holds_for_a_refeed_run():
     first = run_proposal(request)
     second = run_proposal(request)
 
-    assert [independence_facts(s) for s in first.scenarios] == [independence_facts(s) for s in second.scenarios]
+    assert [independence_facts(s) for s in first.scenarios] == [
+        independence_facts(s) for s in second.scenarios
+    ]
 
 
 def test_business_facts_do_not_depend_on_the_llm(monkeypatch):
@@ -776,7 +776,9 @@ def test_spot_without_a_contract_does_not_invent_contract_terms():
 
 
 def test_spot_without_quantity_is_input_incomplete():
-    reply = run_proposal(independence_request("SPOT_SALES", user={"preferred_unit_price_krw": 2000}))
+    reply = run_proposal(
+        independence_request("SPOT_SALES", user={"preferred_unit_price_krw": 2000})
+    )
 
     assert reply.status == "INPUT_INCOMPLETE"
     assert "PROPOSAL_QUANTITY_REQUIRED" in reply.missing_data
@@ -827,7 +829,11 @@ def test_ml_forecast_never_becomes_the_selling_price():
 
 def test_ml_forecast_does_not_change_a_user_given_price():
     reply = run_proposal(
-        independence_request("SPOT_SALES", user=independence_user(), ml_context=independence_forecast(predicted=9999))
+        independence_request(
+            "SPOT_SALES",
+            user=independence_user(),
+            ml_context=independence_forecast(predicted=9999),
+        )
     )
 
     assert reply.scenarios[1].unit_price_krw == Decimal(2000)
@@ -846,12 +852,8 @@ def test_ml_forecast_does_not_change_a_user_given_price():
 들어오면 여기서 걸린다.
 """
 
-from decimal import Decimal
 
 import pytest
-
-from app.sales.proposal import run_proposal
-from app.sales.schemas import SalesProposalInput
 
 
 @pytest.fixture(autouse=True)

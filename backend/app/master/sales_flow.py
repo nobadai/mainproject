@@ -81,16 +81,35 @@ SalesEndCode = Literal[
     "SL3_ALL_REJECTED",
     "SL4_NOT_STARTED",
     "SL5_BUDGET_EXHAUSTED",
+    "SL6_VALIDATION_UNRESOLVED",
 ]
 """판매 사이클 종료 코드.
 
 ```text
-SL1_PRESENTED         통과 후보 ≥ 1 — 사용자에게 제시한다 (탈락안 사유 동봉)
-SL2_NO_CANDIDATE      판매가 안을 만들지 못했다 (missing_data / missing_capability)
-SL3_ALL_REJECTED      안은 있었으나 전부 탈락 — 되먹임까지 끝났다
-SL4_NOT_STARTED       시작하지 못했다 (어댑터 미등록 · mock 입력)
-SL5_BUDGET_EXHAUSTED  예산 소진 — 판단이 끝나지 않았다
+SL1_PRESENTED             통과 후보 ≥ 1 — 사용자에게 제시한다 (탈락안 사유 동봉)
+SL2_NO_CANDIDATE          판매가 안을 만들지 못했다 (missing_data / missing_capability)
+SL3_ALL_REJECTED          안은 있었으나 전부 탈락 — 되먹임까지 끝났다
+SL4_NOT_STARTED           시작하지 못했다 (어댑터 미등록 · mock 입력)
+SL5_BUDGET_EXHAUSTED      예산 소진 — 판단이 끝나지 않았다
+SL6_VALIDATION_UNRESOLVED 안은 있는데 **판정이 끝나지 않았다** — 탈락이 아니다
 ```
+
+🔴 **`SL6` 은 `SL3` 의 거짓말을 걷어내려고 생겼다.** 부서가 자료·정책이 없어 판정을
+  못 낸 날(`RUNTIME_NOT_READY` · `INPUT_INCOMPLETE` → `skipped`)에도 종료 코드는
+  *"전부 탈락"* 이었다. 아무도 탈락시키지 않았는데 탈락이라고 적은 것이라, 읽는
+  사람은 **후보를 다시 만들어야 한다**고 읽는다 — 실제로 할 일은 재무 자료를 채우는
+  것이고, 후보를 다시 만들어 봐야 같은 자리에서 또 막힌다.
+
+  ```text
+  SL3   판정이 났고 그 판정이 "안 된다" 다      → 조건을 바꿔야 한다
+  SL6   판정 자체가 안 났다                     → 없는 자료를 채워야 한다
+  ```
+
+★ **`SL6` 도 승인 코드가 아니다.** `decision.approve_end_codes` 는 `SL1` 하나만
+  승인으로 받는다 — 후보가 살아 있는 것과 승인 가능한 것은 다른 문제다.
+
+★ **`SL5` 와 다르다.** 저쪽은 *"예산이 다해서 더 못 물었다"* 이고 여기는 **물어봤고
+  답도 받았는데 그 답이 판정이 아니었다** 이다. 다음에 할 일이 다르다.
 
 🔴 **매입 `EndCode`(E1~E5) 에 값을 더하지 않는다** (D-3 합의). 층이 다르다. 한 어휘에
   두 사이클을 담으면 `E2_HELD` 가 *"매입 보류"* 와 *"판매 보류"* 를 동시에 뜻하게 되고,
@@ -106,6 +125,32 @@ SL5_BUDGET_EXHAUSTED  예산 소진 — 판단이 끝나지 않았다
   화면이 거짓말을 한다 — 사용자는 *"이 조건으로는 안 된다"* 로 읽고 조건을 바꾸는데,
   실제로는 **판단이 끝나지 않은 것**이라 같은 조건으로 다시 돌리는 것이 맞다.
 """
+
+#: 부서가 **실제로 판정을 낸** 업무 상태. 통과 여부는 묻지 않는다.
+#:
+#: 🔴 **`PASSING_VERDICTS` 의 반대가 아니다.** *"통과가 아니다"* 안에는 두 가지가
+#:   섞여 있다 — **판정이 났는데 안 된다**(`reject`)와 **판정 자체가 안 났다**
+#:   (`skipped`). 둘을 한 덩어리로 다루면 자료가 없어 못 본 안이 거절당한 안과
+#:   같은 자리에 놓이고, 사용자는 고칠 수 없는 것을 고치러 간다.
+#:
+#: ★ 매입 `flow._JUDGED_VERDICTS` 와 같은 뜻이다. 두 Flow 가 각자 들고 있는 이유는
+#:   `PASSING_VERDICTS` 를 봉투로 올릴 때와 같다 — 판매가 매입 모듈에 매이지 않는다.
+_CONCLUDED_VERDICTS: frozenset[str] = PASSING_VERDICTS | {"reject"}
+
+
+def _validation_concluded(verdict: Mapping[str, Any]) -> bool:
+    """이 검증이 **판정까지 갔는가.**
+
+    두 축을 같이 본다. `runtime_status` 가 `READY` 가 아니면 부서가 실행을 끝내지
+    못한 것이고(`RUNTIME_NOT_READY` · `ERROR`), `READY` 라도 업무 상태가 판정 어휘
+    밖이면(`skipped`) 부서가 **판정을 안 낸 것**이다 — 재무 `INPUT_INCOMPLETE` 가
+    그 자리다.
+    """
+    return (
+        str(verdict.get("runtime_status") or "") == "READY"
+        and str(verdict.get("business_status") or "") in _CONCLUDED_VERDICTS
+    )
+
 
 MAX_FEEDBACK_ATTEMPTS = 2
 """되먹임 상한. **이 값의 소유자는 마스터다** (매입 `MAX_PURCHASE_ATTEMPTS` 와 같은 이유).
@@ -350,6 +395,37 @@ class CandidateVerdict:
         )
 
     @property
+    def unresolved_validations(self) -> tuple[str, ...]:
+        """판정이 **나지 않은** 검증의 이름. 탈락과 다른 칸이다.
+
+        🔴 **후보를 살려 두는 근거가 이 칸이다.** `passed` 는 여전히 거짓이고
+          그래야 한다 — 판정 못 낸 안을 통과시키면 보지 않은 것을 통과시킨 것이다.
+          하지만 *"통과가 아니다"* 와 *"거절당했다"* 는 다르고, 그 차이를 담을 자리가
+          없어서 지금까지 둘이 같은 모양으로 나갔다.
+
+        ★ **`skipped` 를 통과로 만들지 않는다.** 이 칸은 통과 여부를 바꾸지 않고
+          *"왜 통과가 아닌가"* 만 가른다 — `PASSING_VERDICTS` 는 그대로다.
+
+        ★ `unroutable`(아예 못 물어본 요구)은 **여기 넣지 않는다.** 그것은 이미 자기
+          칸이 있고, 재검증도 그것으로는 실패를 내지 않는다 (`revalidation._verdict`).
+        """
+        return tuple(
+            capability
+            for capability, verdict in self.validations.items()
+            if not _validation_concluded(verdict)
+        )
+
+    @property
+    def rejected_validations(self) -> tuple[str, ...]:
+        """부서가 **판정해서 막은** 검증. 자료가 없어 못 본 것과 섞지 않는다."""
+        return tuple(
+            capability
+            for capability, verdict in self.validations.items()
+            if _validation_concluded(verdict)
+            and str(verdict.get("business_status") or "") not in PASSING_VERDICTS
+        )
+
+    @property
     def detail(self) -> str:
         """왜 탈락했나 — **사람이 읽는 한 줄. 여기서만 만든다.**
 
@@ -428,8 +504,23 @@ class SalesOutcome:
 
     @property
     def rejected(self) -> tuple[CandidateVerdict, ...]:
-        """탈락 후보. **SL1 에서도 비어 있지 않을 수 있다** — 사유를 동봉해 함께 낸다."""
+        """탈락 후보. **SL1 에서도 비어 있지 않을 수 있다** — 사유를 동봉해 함께 낸다.
+
+        ⚠️ **이 칸에는 판정이 안 난 후보도 들어 있다** — `passed` 의 여집합이기
+          때문이다. 둘을 갈라 보려면 `unresolved` 를 쓴다. 이름을 바꾸지 않는 이유는
+          화면·이력이 이 칸을 쓰고 있어서다.
+        """
         return tuple(c for c in self.candidates if not c.passed)
+
+    @property
+    def unresolved(self) -> tuple[CandidateVerdict, ...]:
+        """**판정이 끝나지 않은** 후보. 후보는 살아 있고 승인만 못 한다.
+
+        ★ `rejected` 의 부분집합이다 — 통과가 아니라는 점은 같고, **왜** 통과가
+          아닌지가 다르다. 화면이 둘을 같은 줄로 보여 주면 사용자는 자료를 채워야
+          할 날에 조건을 바꾼다.
+        """
+        return tuple(c for c in self.candidates if not c.passed and c.unresolved_validations)
 
     @property
     def unroutable_capabilities(self) -> tuple[str, ...]:
@@ -641,9 +732,12 @@ class SalesFlow:
                 )
 
             if attempt >= self.max_feedback_attempts:
+                end_code, reason = _unpassed_outcome(
+                    candidates, f"되먹임 {attempt} 회에도 통과 후보 없음"
+                )
                 return self._outcome(
-                    "SL3_ALL_REJECTED",
-                    f"되먹임 {attempt} 회에도 통과 후보 없음",
+                    end_code,
+                    reason,
                     candidates=candidates,
                     judgment=judgment,
                     feedback_attempts=attempt,
@@ -653,9 +747,17 @@ class SalesFlow:
                 # 🔴 **권위 있는 대안이 없으면 다시 물어도 같다** (C-2).
                 #   되먹임에 실을 것이 없는데 부르면 호출 예산과 LLM 만 태운다
                 #   (§1.2-12 · 매입 `_dept_blocked` 와 같은 판단).
+                #
+                # ★ 판정을 못 낸 후보에는 이 판단이 **더 강하게** 맞는다. 재무가
+                #   여신한도를 못 읽은 것은 같은 후보를 다시 만들어서 풀리는 문제가
+                #   아니다 — 그래서 여기서 접는 것은 그대로 두고, 접힌 결과에
+                #   **무엇이 끝나지 않았는지**만 정확히 적는다.
+                end_code, reason = _unpassed_outcome(
+                    candidates, "통과 후보가 없고 부서가 낸 대안도 없다 — 다시 물어도 같다"
+                )
                 return self._outcome(
-                    "SL3_ALL_REJECTED",
-                    "통과 후보가 없고 부서가 낸 대안도 없다 — 다시 물어도 같다",
+                    end_code,
+                    reason,
                     candidates=candidates,
                     judgment=judgment,
                     feedback_attempts=attempt,
@@ -1124,6 +1226,38 @@ def _domain_reply(capability: str, reply: AgentReply) -> dict[str, Any]:
         "business_status": reply.business_status,
         "payload": payload,
     }
+
+
+def _unpassed_outcome(
+    candidates: Sequence[CandidateVerdict], rejected_reason: str
+) -> tuple[SalesEndCode, str]:
+    """통과 후보가 하나도 없을 때 **무엇이라고 적을 것인가.**
+
+    ```text
+    판정이 안 난 후보가 하나라도 있다  → SL6_VALIDATION_UNRESOLVED
+    전부 판정이 났고 전부 안 된다      → SL3_ALL_REJECTED
+    ```
+
+    🔴 **하나라도 미판정이면 `SL6` 다.** 섞여 있을 때 `SL3` 으로 적으면 *"전부
+      탈락"* 이 되는데, 판정을 안 받은 안은 탈락한 적이 없다. 반대로 전부 탈락한
+      날까지 `SL6` 으로 적으면 이번에는 **끝난 판단을 안 끝났다**고 적는 것이라,
+      사용자가 오지 않을 답을 기다린다.
+
+    ★ **사유에 부서 이름을 새로 쓰지 않는다.** 무엇이 왜 끝나지 않았는지는 이미
+      후보의 `detail` 과 `validations` 에 부서가 쓴 문장 그대로 있다 — 여기서는
+      **어느 후보의 어느 검증**이 안 끝났는지 이름만 부른다.
+    """
+    unresolved = {
+        capability
+        for candidate in candidates
+        for capability in candidate.unresolved_validations
+    }
+    if not unresolved:
+        return "SL3_ALL_REJECTED", rejected_reason
+    return "SL6_VALIDATION_UNRESOLVED", (
+        f"통과 후보가 없지만 탈락도 아니다 — 판정이 끝나지 않은 검증: "
+        f"{', '.join(sorted(unresolved))}"
+    )
 
 
 def _verdict_of(reply: AgentReply) -> dict[str, Any]:

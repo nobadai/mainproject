@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
@@ -6,7 +6,12 @@ from uuid import UUID
 import pytest
 
 from app.finance.adapter import finance_port
-from app.finance.schemas import FinanceDebtPolicy, FinancePolicy, FinanceRuntimeContext, FinanceSnapshot
+from app.finance.schemas import (
+    FinanceDebtPolicy,
+    FinancePolicy,
+    FinanceRuntimeContext,
+    FinanceSnapshot,
+)
 from app.master.envelope import AgentRequest, ExecutionContext
 from app.sales.proposal import run_proposal
 from app.sales.schemas import SalesProposalInput
@@ -229,7 +234,10 @@ def test_finance_sales_validation_port_preserves_identity_and_missing_states(fin
     del incomplete["unit_price_krw"]
 
     with (
-        patch("app.finance.adapter.get_current_finance_runtime_context", return_value=finance_context),
+        patch(
+            "app.finance.adapter.get_current_finance_runtime_context",
+            return_value=finance_context,
+        ),
         patch("app.finance.adapter.load_partner_receivables", return_value=[]),
         patch("app.finance.llm.planner.finance_llm_enabled", return_value=False),
         patch("app.finance.adapter.finance_llm_enabled", return_value=False),
@@ -271,7 +279,9 @@ def test_finance_fail_feedback_excludes_candidate_and_keeps_lineage(monkeypatch)
     reply = run_proposal(request)
 
     assert reply.recommended_scenario_id != "SALES-001-A-R1"
-    rejected = next(trace for trace in reply.decision_trace if trace.candidate_id == "SALES-001-A-R1")
+    rejected = next(
+        trace for trace in reply.decision_trace if trace.candidate_id == "SALES-001-A-R1"
+    )
     kept = next(trace for trace in reply.decision_trace if trace.candidate_id == "SALES-001-B-R1")
     assert rejected.finance_verdict == "FAIL"
     assert rejected.recommended is False
@@ -286,13 +296,19 @@ def test_purchase_feedback_conditions_candidate_without_rewriting_delivery(monke
         feedback_attempt=1,
         feedback={
             "attempt": 1,
-            "domain_replies": [_purchase_reply("PUR-C", quantity=2000, available_date="2026-09-12")],
+            "domain_replies": [
+                _purchase_reply("PUR-C", quantity=2000, available_date="2026-09-12")
+            ],
             "scenario_feedback": [{"scenario_id": "SALES-001-C", "reply_refs": ["PUR-C"]}],
         },
     )
 
     reply = run_proposal(request)
-    aggressive = next(scenario for scenario in reply.scenarios if scenario.parent_scenario_id == "SALES-001-C")
+    aggressive = next(
+        scenario
+        for scenario in reply.scenarios
+        if scenario.parent_scenario_id == "SALES-001-C"
+    )
 
     assert aggressive.scenario_id == "SALES-001-C-R1"
     assert aggressive.conditional_purchase is True

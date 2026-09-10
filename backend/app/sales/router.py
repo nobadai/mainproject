@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 
 from app.sales.proposal import run_proposal
+from app.sales.runs import get_sales_run, list_sales_runs
 from app.sales.schemas import (
     RuntimeStatus,
     SalesAgentRunResponse,
@@ -14,7 +15,6 @@ from app.sales.schemas import (
     SalesProposalInput,
     SalesProposalReply,
 )
-from app.sales.runs import get_sales_run, list_sales_runs
 
 router = APIRouter(prefix="/sales", tags=["sales"])
 

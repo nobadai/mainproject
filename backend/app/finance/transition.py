@@ -52,8 +52,8 @@ from app.finance.db import (
     FinanceDataNotReady,
     get_active_finance_policy,
     get_db_schema,
-    load_inventory_snapshot_as_of,
     load_finance_state_row,
+    load_inventory_snapshot_as_of,
 )
 from app.finance.state_identity import daily_finance_state_id
 

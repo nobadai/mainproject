@@ -125,7 +125,7 @@ def _schema():
         patch("app.finance.day_open.get_db_schema", return_value="haetdeul"),
         patch(
             "app.finance.day_open.load_inventory_snapshot_as_of",
-            return_value=InventorySnapshot(Decimal("123"), Decimal("456"), Decimal("456")),
+            return_value=InventorySnapshot(Decimal(123), Decimal(456), Decimal(456)),
         ),
     ):
         yield
@@ -173,8 +173,8 @@ def test_first_open_carries_state_and_second_open_is_idempotent():
         "recommended_loan_amount_krw",
     ):
         assert row[field] == SOURCE[field]
-    assert row["inventory_book_value_krw"] == Decimal("456")
-    assert row["operational_inventory_value_krw"] == Decimal("456")
+    assert row["inventory_book_value_krw"] == Decimal(456)
+    assert row["operational_inventory_value_krw"] == Decimal(456)
     assert opening.is_open(conn, as_of=AS_OF) is True
     assert conn.calls == []
 
