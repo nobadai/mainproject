@@ -220,9 +220,7 @@ def seed_opening_finance_state(
         source = _read_finance_state(
             cursor, schema=schema, columns=칸들, finance_state_id=baseline.finance_state_id
         )
-        _assert_baseline_matches(
-            source, baseline=baseline, sim_run_id=sim_run_id, financing_mode=financing_mode
-        )
+        _assert_baseline_matches(source, baseline=baseline, financing_mode=financing_mode)
 
         # 🔴 **identity 는 새로, 값만 이관.** source 를 통째로 깐 위에 새로 정하는
         #    칸만 덮는다 — 덮는 칸 하나를 빠뜨리면 남의 실행 id 가 그대로 들어온다.
@@ -260,7 +258,6 @@ def _assert_baseline_matches(
     source: Mapping[str, Any] | None,
     *,
     baseline: BaselineLineage,
-    sim_run_id: str,
     financing_mode: str,
 ) -> None:
     """🔴 **정합성 셋.** 하나라도 안 맞으면 터진다 (재무 청함 · 재무가 마감에서 다시 잰다)."""
