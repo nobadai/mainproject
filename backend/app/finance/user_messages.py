@@ -66,6 +66,39 @@ FINANCE_EXPLANATIONS: dict[str, str] = {
         "현재 자금 상태에서는 제안하신 조건 그대로 매입을 진행하기 어렵습니다. "
         "확인된 매입 금액 조정 범위를 함께 안내해 드렸습니다."
     ),
+    # ── 판매 제안 ────────────────────────────────────────────────
+    #
+    # 🔴 위 `SCENARIO_*` 는 **매입 문장**이다 ("매입 조건", "매입을 진행"). 예전에는
+    #    판매 검증도 같은 키를 골랐다 — 판매 제안을 검토하고 *"매입 조건은 그대로
+    #    진행하실 수 있습니다"* 라고 답한 것이라, 사용자는 자기가 무엇을 물었는지와
+    #    다른 답을 받았다. 업무 도메인이 다르면 문장도 다르다.
+    #
+    # ★ 판매에는 `*_ADJUSTABLE` 짝이 없다. 재무가 판매 제안에 낼 권위 있는 금액
+    #   대안의 근거(마진·여신 정책)가 아직 없어 조정을 **아예 만들지 않기** 때문이다
+    #   (`_sales_business_result`). 없는 선택지를 키로 두면 고를 수 있는 것처럼 보인다.
+    "SALES_ACCEPT": (
+        "현재 자금 상태와 예상 현금흐름을 기준으로 보면 "
+        "제안하신 판매 조건은 그대로 진행하실 수 있습니다."
+    ),
+    "SALES_CONDITIONAL": (
+        "평소 흐름이라면 감당할 수 있지만, 판매 대금 회수가 늦어지는 상황까지 "
+        "가정하면 운영에 필요한 자금이 빠듯해집니다. "
+        "현재 판매 조건은 추가 검토가 필요합니다."
+    ),
+    "SALES_REJECT": (
+        "현재 자금 상태에서는 제안하신 판매 조건 그대로 진행하기 어렵습니다."
+    ),
+    # ★ **승인성 문장이 아니다.** 재무가 판정을 내리지 못한 결과이므로 "진행하실 수
+    #   있습니다" 와 같은 뜻이 되면 안 된다 — 보지 않은 제안을 통과시킨 것이 된다.
+    #   무엇이 없었는지는 `missing_fields`/`missing_data` 가 이름으로 나른다.
+    "SALES_NOT_CONCLUDED": (
+        "판매 제안의 재무 검토에 필요한 정보가 충분하지 않아 "
+        "현재 조건에 대한 재무 판단을 확정하지 못했습니다."
+    ),
+    "SCENARIO_NOT_CONCLUDED": (
+        "매입 제안의 재무 검토에 필요한 정보가 충분하지 않아 "
+        "현재 조건에 대한 재무 판단을 확정하지 못했습니다."
+    ),
 }
 
 #: 필요한 재무 정보가 없어 답을 내지 못한 경우.
@@ -181,9 +214,27 @@ def explanation_keys(
       대안이 결과에 실렸을 때만 조정 범위를 언급하는 문장을 후보에 넣는다. 모델이
       스스로 "금액을 낮추세요" 같은 행동을 만들 자리는 없다 — 고를 수 있는 키가
       애초에 없기 때문이다.
+
+    ★ **판매와 매입은 문장이 다르다.** `SCENARIO_*` 는 "매입 조건"을 말하는 매입
+      문장이라, 판매 검증이 그 키를 고르면 판매 제안을 묻고 매입 답을 받는다.
+
+    ★ **`ok` 를 fallback 자리에 두지 않는다.** 예전 마지막 줄은 `return
+      ["SCENARIO_ACCEPT"]` 였다 — `ok` 가 아닌 무엇이 와도 *"그대로 진행하실 수
+      있습니다"* 가 나가는 구조다. 실제로 `skipped`(재무가 **판정하지 못한** 결과)가
+      그 자리로 떨어져, 보지도 않은 제안에 승인성 문장이 나갔다. 그래서 아는 상태는
+      전부 이름을 대고, 모르는 상태는 승인이 아니라 **판단 못 함**으로 닫는다.
     """
     if mode == "PRE_PURCHASE":
         return ["PRE_BOUNDARY"]
+    if mode == "SALES_VALIDATION":
+        # 판매에는 조정 짝이 없다 — 재무가 판매 제안에 조정을 만들지 않는다.
+        if business_status == "ok":
+            return ["SALES_ACCEPT"]
+        if business_status == "conditional":
+            return ["SALES_CONDITIONAL"]
+        if business_status == "reject":
+            return ["SALES_REJECT"]
+        return ["SALES_NOT_CONCLUDED"]
     if business_status == "reject":
         return ["SCENARIO_REJECT_ADJUSTABLE" if has_verified_adjustment else "SCENARIO_REJECT"]
     if business_status == "conditional":
@@ -192,7 +243,9 @@ def explanation_keys(
             if has_verified_adjustment
             else "SCENARIO_CONDITIONAL"
         ]
-    return ["SCENARIO_ACCEPT"]
+    if business_status == "ok":
+        return ["SCENARIO_ACCEPT"]
+    return ["SCENARIO_NOT_CONCLUDED"]
 
 
 def explanation_for(

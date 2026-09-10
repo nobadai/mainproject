@@ -18,12 +18,14 @@
 """
 
 import json
+from contextlib import nullcontext
 from datetime import date
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 
+from app.finance import user_messages as messages
 from app.finance.adapter import finance_port
 from app.master.envelope import AgentRequest, ExecutionContext
 
@@ -62,7 +64,9 @@ def _sales_payload(**overrides):
     return {key: value for key, value in payload.items() if value is not None}
 
 
-def _run(request, finance_context, *, receivables=(), receivables_error=None):
+def _run(
+    request, finance_context, *, receivables=(), receivables_error=None, sales_result=None
+):
     """실제 DB·LLM 없이 Controller 를 돌린다.
 
     ★ LLM 을 끄는 이유는 속도가 아니라 **무엇을 시험하는지** 때문이다. Runtime 분류는
@@ -83,12 +87,25 @@ def _run(request, finance_context, *, receivables=(), receivables_error=None):
             "app.finance.adapter.load_partner_receivables", return_value=list(receivables)
         )
     )
+    # ★ 판정이 실제로 난 결과는 오늘 저장소로는 만들 수 없다 — 여신한도가 없어서
+    #   판정이 닫힌다. 그래서 **Tool 결과만** 정본 모양으로 갈아 끼운다. 정책을
+    #   지어내 초록불을 만드는 것과 다르다: 여기서 보는 것은 확정된 판정이 어떤
+    #   **문장**으로 나가는가이지, 그 판정이 어떻게 나왔는가가 아니다.
+    capability_patch = (
+        patch.dict(
+            "app.finance.application.harness._CAPABILITIES",
+            {"evaluate_sales_scenario": lambda port, args, state: dict(sales_result)},
+        )
+        if sales_result is not None
+        else nullcontext()
+    )
     with (
         patch(
             "app.finance.adapter.get_current_finance_runtime_context",
             return_value=finance_context,
         ),
         receivable_patch,
+        capability_patch,
         patch("app.finance.llm.planner.finance_llm_enabled", return_value=False),
         patch("app.finance.adapter.finance_llm_enabled", return_value=False),
         patch(f"{_EXECUTION}.get_db_schema", return_value="haetdeul"),
@@ -332,3 +349,88 @@ def test_sales_branches_without_scenario_id_do_not_collide(finance_context):
     assert trace["executed_tools"] == ["evaluate_sales_scenario"] * 2
     assert reply.runtime_status != "ERROR"
     assert len(reply.payload["scenario_results"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# G. 사용자 설명 — 판정하지 못한 결과를 승인처럼 말하지 않는다
+# ---------------------------------------------------------------------------
+
+#: "그대로 진행해도 된다" 는 뜻을 만드는 표현. 판정이 없을 때 나오면 안 된다.
+_APPROVAL_PHRASES = (
+    "진행하실 수 있습니다",
+    "진행할 수 있습니다",
+    "승인",
+    "문제 없습니다",
+    "문제없습니다",
+    "그대로 진행",
+)
+
+
+def _assert_not_approval(reply, label: str) -> None:
+    for phrase in _APPROVAL_PHRASES:
+        assert phrase not in reply.reasoning, (
+            f"{label}: 승인성 표현 {phrase!r} -> {reply.reasoning!r}"
+        )
+
+
+def test_input_incomplete_reply_never_reads_as_approval(finance_context):
+    """🔴 `INPUT_INCOMPLETE` 은 `READY`/`skipped` 다 — **기계 계약은 옳았다.**
+
+    그런데 설명만 승인 문장으로 나갔다. 재무가 보지도 못한 제안을 사용자는
+    "진행해도 된다" 로 읽는다 — 기계 계약이 맞을수록 더 위험하다.
+    """
+    reply, _metadata = _run(
+        _request(_sales_payload(unit_price_krw=None)), finance_context
+    )
+
+    # 기계 계약은 그대로다.
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "skipped"
+    assert reply.payload["status"] == "INPUT_INCOMPLETE"
+    # 설명만 고쳤다.
+    _assert_not_approval(reply, "INPUT_INCOMPLETE")
+    assert "매입" not in reply.reasoning
+    assert reply.reasoning != messages.FINANCE_EXPLANATIONS["SCENARIO_ACCEPT"]
+    assert reply.reasoning == messages.FINANCE_EXPLANATIONS["SALES_NOT_CONCLUDED"]
+
+
+def test_runtime_not_ready_keeps_its_own_explanation(finance_context):
+    """`RUNTIME_NOT_READY` 설명 계약은 이번 수정에 영향받지 않는다.
+
+    이쪽은 `_explain` 이 Finalizer 를 부르기 **전에** 접히는 경로라 설명 표가 다르다.
+    두 경로가 섞이면 자료 부족과 판정 불가가 같은 문장으로 나간다.
+    """
+    reply, _metadata = _run(_request(_sales_payload()), finance_context)
+
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert reply.business_status == "skipped"
+    assert reply.reasoning == messages.NOT_READY
+    _assert_not_approval(reply, "RUNTIME_NOT_READY")
+
+
+def test_sales_pass_speaks_about_selling_not_buying(finance_context):
+    """판정이 실제로 난 판매 제안은 **판매 문장**으로 답한다."""
+    reply, _metadata = _run(
+        _request(_sales_payload()),
+        finance_context,
+        sales_result={
+            "status": "EVALUATED",
+            "finance_verdict": "PASS",
+            "scenario_id": "SC-001",
+            "financial_summary": None,
+            "rule_results": [],
+            "reason_codes": [],
+            "missing_fields": [],
+            "missing_data": [],
+            "data_quality": "COMPLETE",
+            "max_finance_allowed_amount_krw": None,
+            "max_finance_allowed_payment_terms_days": None,
+            "evidence_refs": [],
+        },
+    )
+
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "ok"
+    assert reply.payload["finance_verdict"] == "PASS"
+    assert "매입" not in reply.reasoning, reply.reasoning
+    assert reply.reasoning == messages.FINANCE_EXPLANATIONS["SALES_ACCEPT"]
