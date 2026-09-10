@@ -27,8 +27,8 @@ class Reason(BaseModel):
 class Plan(BaseModel):
     """매입안 하나.
 
-    🔴 **상한이 둘이다. 09-08 에 갈렸다** (`#398` · `dev@a615aa6`). 지금은 같은
-    값이지만 `09-17` 에 밴드가 바뀌면 갈라진다.
+    🔴 **상한이 둘이다. 09-08 에 갈렸다** (`#398` · `dev@a615aa6`). 지금은 같은 값이고,
+    **컷 산식을 바꾸는 날** 갈라진다.
 
     .. code-block:: text
 
@@ -37,8 +37,12 @@ class Plan(BaseModel):
                         master/verifier.py                검사 이름 L-PAYSCHED-MAX
         cut_unit_price  우리 컷 (self_check.check_max_price)
 
-    ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 `09-17` 뒤로
-    조용히 틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
+    🔴 ~~`09-17` 에 밴드가 바뀌면 갈라진다~~ — **낡았다** (ML 회신 2026-09-10). 밴드
+    교체는 `09-03` 에 끝났고 `09-17` 은 «그림자 기록 2주가 차는 날» 이다. 계기는 날짜가
+    아니라 **우리가 산식을 바꾸는 것**이다.
+
+    ⚠️ 화면이 「이보다 비싸면 안 산다」 자리에 ``max_price`` 를 보이면 그날부터 조용히
+    틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
     """
 
     key: str = Field(description="보수 · 기본 · 공격")
@@ -59,6 +63,14 @@ class Plan(BaseModel):
     risks: list[str] = Field(description="걸리는 것. 비어 있으면 안 적는다")
     pending: bool = Field(description="아직 사람이 안 고른 안인가")
     approved: bool = Field(default=False, description="이미 승인된 안인가")
+    #  🔴 **`None` 은 «못 읽었다» 가 아니라 «걷기 밖» 이다.** 축이 붙기 전에 만든
+    #     실행이거나 손으로 돌린 것이고, 그 사실이 화면에 보여야 한다 (마스터 청구
+    #     2026-09-10). 걷기와 손 실행이 **같아 보이면** 보는 사람이 둘을 한 세상으로
+    #     읽는다 — 마스터가 실제로 그 오독을 했다.
+    sim_run_id: str | None = Field(
+        default=None,
+        description="어느 걷기의 실행인가. None 이면 걷기 밖(손 실행·축이 생기기 전)이다",
+    )
 
 
 class PurchaseTab(BaseModel):

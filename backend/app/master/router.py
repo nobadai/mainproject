@@ -14,6 +14,8 @@ from app.contracts.core import ContractViolation
 from app.master.ask_schemas import AskExecuteRequest, AskRequest, AskResponse
 from app.master.ask_service import ask as run_ask
 from app.master.ask_service import execute as run_ask_execute
+from app.master.closing import ClosingOut
+from app.master.closing import close_day as run_close_day
 from app.master.collection import CollectionOut
 from app.master.collection import collect_receipts as run_collect_receipts
 from app.master.day_open import DayOpenOut
@@ -23,6 +25,7 @@ from app.master.decision_service import current_commitment, get_decisions, recor
 from app.master.holiday_calendar import get_calendar
 from app.master.inbound import InboundOut
 from app.master.inbound import receive_arrivals as run_receive_arrivals
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.receivable import ReceivableOut
 from app.master.receivable import issue_receivables as run_issue_receivables
 from app.master.schemas import (
@@ -580,3 +583,57 @@ def master_issue_receivables(as_of: date) -> ReceivableOut:
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
     return run_issue_receivables(as_of)
+
+
+@router.post(
+    "/days/{as_of}/close",
+    response_model=ClosingOut,
+    summary="그날을 닫는다 — 하루의 맨 끝이다. 숫자는 재무가 낸다",
+)
+def master_close_day(as_of: date) -> ClosingOut:
+    """`as_of` 를 파트마다 닫는다. **출고 뒤이고 하루의 맨 끝이다.**
+
+    🔴 **왜 자기 엔드포인트인가.**
+
+      바로 위 네 형제가 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의 부작용이
+      아니다. 사건에는 자기 자리가 있다."* **마감도 사건이다.** 그날이 닫히면
+      `daily_closings` 에 한 줄이 서고, 그것이 손익 곡선의 한 점이 된다.
+
+    🔴 **마스터가 숫자를 계산하지 않는다.**
+
+      ```text
+      마스터   "그날을 닫아 달라" 고 부르고, 답을 어휘로 받아 적는다
+      재무     그날 숫자와 daily_closings 적재
+      ```
+
+      ⚠️ **마감은 재무 원장 계산이다.** 마스터가 계산하면 조정자가 부서를 겸한다 —
+        등록소를 일곱 개나 나눈 이유가 그것이다.
+
+    🔴 **오늘은 이 경로가 매일 `NOTHING_DUE` + `missing=["finance"]` 를 낸다.**
+      재무 마감 어댑터가 아직 없어서다. **그것이 맞는 상태다** — *"오늘 마감이 안
+      돈다"* 를 정직하게 보이게 한다. 붙는 날 `bootstrap` 한 줄이면 된다.
+
+    🔴 **`run_scheduled_day` 가 부르는 함수와 사람이 부르는 함수가 같다.** 둘이
+      갈리면 손으로 부른 결과와 걷기 결과가 다른 코드를 지난다.
+
+    ★ **`sim_run_id` 는 마스터가 정한다.** `daily_closings` 의 PK 가
+      `(sim_run_id, close_date)` 라 **어느 실행의 장부인가**가 없으면 행이 어디에
+      앉을지 정해지지 않는다. 값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID`
+      하나이고, 같은 날 판단 행·관문 행이 싣는 값과 같다.
+
+    ★ **순서는 문장이 아니라 Gate 가 지킨다.** 안 열린 날 부르면 `NOT_OPENED` 로
+      돌아서고 `next_action` 이 `OPEN_DAY_REQUIRED` 를 준다 —
+      `/days/{as_of}/issue-receivables` 와 같은 모양이다.
+
+    ⚠️ **장부 관문은 이 경로에 없다.** 손으로 부르는 이 자리는 관문 사유를 안 받고,
+      막힌 날 `BLOCKED` 를 내는 것은 걷기(`run_scheduled_day`)가 하는 일이다 —
+      관문의 답을 아는 쪽이 거기이기 때문이다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 닫았다 · 닫을 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/issue-receivables` 와 같은 태도). `FAILED` 는
+      롤백되어 아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
+    """
+    return run_close_day(as_of, sim_run_id=BURN_IN_SIM_RUN_ID)

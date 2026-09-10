@@ -76,6 +76,23 @@ __all__ = [
 ]
 
 
+#: 🔴 **라우팅은 열렸지만 재검증에서는 안 부르는 capability.**
+#:
+#: `ADDITIONAL_SUPPLY_CONTEXT` 가 그 자리다. 판매 Flow 는 부족량과 매입용 경계를
+#: 골라 담아 보내는데(`sales_flow._supply_capacity_input`), 여기는 **후보를 그대로**
+#: 보낸다(`:280`). 그대로 보내면 매입이 부족량도 경계도 못 읽어 `basis=unknown` 으로
+#: 답한다.
+#:
+#: ⚠️ **그 답은 화면에서 *"못 물어봤다"* 로 보이는데 실제로는 *"잘못 물어봤다"* 다.**
+#:   호출 예산을 한 번 쓰고 어휘가 거짓말을 한다 — 둘 다 손해다.
+#:
+#: 🟢 그래서 **안 부르고 `unroutable` 로 남긴다.** 라우팅이 열리기 전과 화면이 같고,
+#:   *"이 검증은 안 왔다"* 는 사실 그대로다.
+#:
+#: 🔴 **이것을 지우려면 같은 배선을 여기에도 옮겨야 한다** — 부족량과 경계를 골라
+#:   담는 자리를 만들고 나서다. 지금 지우면 위 문단의 거짓말이 그대로 돌아온다.
+_NOT_REVALIDATED: frozenset[str] = frozenset({"ADDITIONAL_SUPPLY_CONTEXT"})
+
 REQUIRED_CAPABILITIES: tuple[Capability, ...] = (
     "SELLABLE_SUPPLY_CONTEXT",
     "FINANCIAL_VALIDATION",
@@ -106,7 +123,7 @@ REVALIDATION_BUDGET = 4
                                                           4
 ```
 
-🔴 **`SALES_BUDGET`(16) 을 그대로 쓰지 않는다.** 저쪽은 *"후보 3 · 되먹임 2회"* 를
+🔴 **`SALES_BUDGET`(25) 을 그대로 쓰지 않는다.** 저쪽은 *"후보 3 · 되먹임 2회"* 를
   전제로 센 값이고, 재검증은 **후보 하나에 되먹임이 없다.** 남의 예산을 빌려 쓰면
   여기서 몇 번을 부르는지가 아무 데도 안 적히고, 그 사이 판매 예산이 바뀌면 재검증의
   상한이 이유 없이 따라 움직인다.
@@ -269,9 +286,8 @@ def revalidate_scenario(
 
     try:
         for capability, route in routes.items():
-            if route is None:
+            if route is None or capability in _NOT_REVALIDATED:
                 # 🔴 **조용히 건너뛰지 않는다.** 건너뛰면 *"검증됐다"* 로 읽힌다.
-                #    `ADDITIONAL_SUPPLY_CONTEXT` 가 지금 그 자리다 (설계 §5).
                 unroutable.append(capability)
                 continue
             agent, mode = route

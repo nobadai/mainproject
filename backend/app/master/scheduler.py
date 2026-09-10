@@ -82,6 +82,8 @@ receive_arrivals(as_of)   inbound.py
 issue_receivables(as_of)  receivable.py  ← 🔴 수금보다 앞이다
 collect_receipts(as_of)   collection.py
 run_procurement(...)      service.py     ← 품목마다
+ship_due_sales(as_of)     outbound_flow.py
+close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
 ```
 
   ★ 179 영업일 걷기가 `run_procurement` 을 직접 부른다. 스케줄러도 **같은 자리**를
@@ -120,6 +122,25 @@ run_procurement(...)      service.py     ← 품목마다
 ```text
 개장 → 입고 → 수금 → [장부 관문] → 판단 → **출고**
 ```
+
+🔴 **마감은 그 뒤, 하루의 맨 끝이다** (2026-09-10).
+
+```text
+개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단 → 출고 → **마감**
+```
+
+  ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 출고 앞에서 닫으면 그날 재고가
+    **마감 뒤에 바뀌고**, `daily_closings.inventory_qty_kg` 가 그날 장부와 안 맞는다.
+    에러는 안 난다.
+
+  ★★ **왜 관문이 막은 날에도 부르나.** 그 날은 **닫지 않는다** — 그런데
+    `NOT_ATTEMPTED` 로 두면 *«마감이 없다»* 와 *«마감이 막혔다»* 가 같아 보인다.
+    그래서 `close_day` 에 관문 사유를 넘겨 `BLOCKED` 를 받아 적는다. 어댑터는
+    부르지 않는다 — 판정만 어휘로 남는다.
+
+  🔴 **마감이 터져도 그날 걷기 결과를 안 바꾼다.** `_stage` 가 예외를 값으로
+    옮기고, 판단·출고 결과는 그대로 나간다 — `try_save_run` 이 `try_` 인 이유와
+    같다.
 
   ★ **왜 판단 뒤인가.** 오늘 산 것이 오늘 나가지 않는다 — 도착이 며칠 뒤다. 그래서
     출고가 보는 재고는 판단이 만든 매입과 무관하고, 순서를 바꿔도 결과가 같아야
@@ -174,6 +195,7 @@ from typing import Any, Literal
 
 from app.master import clock, persistence
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
+from app.master.closing import close_day
 from app.master.collection import collect_receipts
 from app.master.commitment import ITEM_CODES
 from app.master.day_open import open_day
@@ -498,6 +520,17 @@ class DayRunOutcome:
     #:   나머지 셋은 이 클래스가 이미 쓴다. 판매 품목별 결과는 `OutboundOut.items` 가
     #:   나르고, 여기 다시 담지 않는다 — 같은 사실의 주인은 하나다.
     outbound_status: str = "NOT_ATTEMPTED"
+    #: 마감 단계. 🔴 **하루의 맨 끝이다 — 출고 뒤다.**
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `ClosingOut.status` 의 다섯 값
+    #: (`CLOSED` · `NOTHING_DUE` · `BLOCKED` · `NOT_OPENED` · `FAILED`)을 그대로
+    #: 싣고, 단계를 안 탄 날은 이 클래스가 이미 쓰는 `NOT_ATTEMPTED` 다.
+    #:
+    #: 🔴 **`NOT_ATTEMPTED` 와 `BLOCKED` 를 접지 않는다.** 앞은 *"그날을 아예 안
+    #: 돌았다"* (휴장·`WAIT`·개장 실패)이고 뒤는 *"돌았는데 장부가 안 서서 못
+    #: 닫았다"* 이다. 손익 곡선에는 둘 다 빈 칸으로 보이므로, **이 값이 아니면
+    #: 둘을 가를 데가 없다.**
+    closing_status: str = "NOT_ATTEMPTED"
     items: tuple[ItemRunOutcome, ...] = ()
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -518,12 +551,14 @@ def run_scheduled_day(
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
     outbound_fn: Callable[..., Any] = ship_due_sales,
+    close_fn: Callable[..., Any] = close_day,
+    sim_run_id: str = BURN_IN_SIM_RUN_ID,
     items: Sequence[str] | None = None,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단(품목마다) → 출고
+    개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단(품목마다) → 출고 → 마감
     ```
 
     🔴 **채권이 수금보다 앞이다.** 채권이 서야 수금할 것이 있다. 지금 데이터는
@@ -559,7 +594,25 @@ def run_scheduled_day(
       🔴 **`NOTHING_DUE` 는 막지 않는다.** *"확인했고 낼 것이 없다"* 는 정상이고,
         막으면 대부분의 날이 멈춘다.
 
+    🔴 **마감이 맨 끝이다. 마감이 터져도 그날 결과를 안 바꾼다.**
+
+      ```text
+      관문이 통과한 날   출고 뒤에 닫는다                → CLOSED · NOTHING_DUE · FAILED
+      관문이 막은 날     닫지 않고 **BLOCKED 로 적는다**  → 어댑터를 부르지 않는다
+      단계를 안 탄 날    NOT_ATTEMPTED                   → 휴장 · WAIT · 개장 실패
+      ```
+
+      ★ **관문이 막은 날에 `NOT_ATTEMPTED` 로 두면** *«마감이 없다»* 와 *«마감이
+        막혔다»* 가 같아 보인다. 손익 곡선에는 둘 다 빈 칸이라, 이 값이 아니면
+        가를 데가 없다.
+
+      🔴 **마감 결과를 보고 무엇을 되돌리지 않는다.** 판단도 출고도 이미 끝났고,
+        그것은 사실이다 — `try_save_run` 이 `try_` 인 이유와 같다.
+
     :param items: 돌 품목. 안 주면 `scheduled_items()` — **목록을 다시 세지 않는다.**
+    :param sim_run_id: 어느 실행의 장부인가. 🔴 **인자로 받아 흘린다** — 마감이
+        `daily_closings` 의 PK 절반으로 쓴다. 기본값의 주인은
+        `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 관문 행이 싣는 값과 같다.
     """
     if not action.should_run:
         # 🔴 여기서 돌아선다. **서비스 함수를 하나도 안 부른다.**
@@ -641,12 +694,28 @@ def run_scheduled_day(
                 inbound_status=inbound_status,
                 receivable_status=receivable_status,
                 collection_status=collection_status,
-                sim_run_id=BURN_IN_SIM_RUN_ID,
+                sim_run_id=sim_run_id,
             )
         except Exception:  # 이력 때문에 걷기가 멈추면 안 된다.
             # ★ `try_save_run` 이 이미 삼키지만 여기서 한 번 더 잡는다 — 그날 결과가
             #   적재의 약속에 걸리면 안 된다 (`_stage` 와 같은 태도).
             logger.exception("장부 관문 행 적재가 터졌다 - 그날 결과는 그대로 나간다")
+        # ── 마감 — 🔴 **닫지 않는다. 막혔다고 적는다** (2026-09-10) ──────
+        #
+        # ★ **왜 그래도 부르나.** 안 부르면 이 날의 `closing_status` 가
+        #   `NOT_ATTEMPTED` 로 남고, 그것은 **휴장일·`WAIT`·개장 실패와 같은 값**이다.
+        #   손익 곡선에는 넷 다 빈 칸이라 이 값이 아니면 가를 데가 없다.
+        #
+        # 🔴 **어댑터는 안 불린다.** `close_day` 가 `ledger_gap` 을 받으면 그 자리에서
+        #    `BLOCKED` 로 돌아선다 — 장부가 실제보다 적은 채로 그날을 닫으면
+        #    **그 틀린 숫자가 손익 곡선의 확정값으로 앉는다.**
+        #
+        # ★ **사유를 다시 짓지 않는다.** 위에서 만든 `gap_reason` 을 그대로 넘긴다 —
+        #   관문 행에 적은 문장과 같아야 화면과 이력이 안 갈린다.
+        closing_status, note = _stage(
+            "마감", lambda: close_fn(as_of, sim_run_id=sim_run_id, ledger_gap=gap_reason)
+        )
+        notes.append(note)
         return DayRunOutcome(
             as_of=as_of,
             action=action.action,
@@ -655,6 +724,7 @@ def run_scheduled_day(
             inbound_status=inbound_status,
             receivable_status=receivable_status,
             collection_status=collection_status,
+            closing_status=closing_status,
             notes=tuple(notes),
         )
 
@@ -697,6 +767,20 @@ def run_scheduled_day(
     outbound_status, note = _stage("출고", lambda: outbound_fn(as_of))
     notes.append(note)
 
+    # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
+    #
+    # ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 앞에서 닫으면 그날 재고가
+    #   마감 뒤에 바뀌고 `inventory_qty_kg` 가 그날 장부와 안 맞는다 — 에러는 안 난다.
+    #
+    # 🔴 **마감이 터져도 위 결과를 안 바꾼다.** `_stage` 가 예외를 값으로 옮기고,
+    #    `procurement_status` 도 `items` 도 `outbound_status` 도 그대로 나간다.
+    #    이력 때문에 그날 걷기 결과가 달라지면 안 된다.
+    #
+    # 🔴 **`sim_run_id` 를 흘려 준다.** 마감이 그 값을 `daily_closings` 의 PK 절반
+    #    (`(sim_run_id, close_date)`)으로 쓴다 — 여기서 상수를 다시 적지 않는다.
+    closing_status, note = _stage("마감", lambda: close_fn(as_of, sim_run_id=sim_run_id))
+    notes.append(note)
+
     return DayRunOutcome(
         as_of=as_of,
         action=action.action,
@@ -707,6 +791,7 @@ def run_scheduled_day(
         collection_status=collection_status,
         procurement_status="RAN",
         outbound_status=outbound_status,
+        closing_status=closing_status,
         items=tuple(results),
         notes=tuple(notes),
     )
@@ -739,10 +824,14 @@ def _ledger_gap_note(inbound_status: str, receivable_status: str, collection_sta
 
 
 def _stage(name: str, call: Callable[[], Any]) -> tuple[str, str]:
-    """입고 · 채권 · 수금 한 단계. **예외를 값으로 옮긴다.**
+    """입고 · 채권 · 수금 · 출고 · 마감 한 단계. **예외를 값으로 옮긴다.**
 
-    ★ 두 함수 다 예외를 안 내보낸다고 적어 뒀지만 여기서 한 번 더 잡는다 —
+    ★ 다섯 함수 다 예외를 안 내보낸다고 적어 뒀지만 여기서 한 번 더 잡는다 —
       판단의 진행 여부가 그 약속에 걸리면 안 된다 (`_seed_collection` 과 같은 태도).
+
+    🔴 **마감에는 이유가 하나 더 있다.** `close_day` 는 `sim_run_id` 가 비면 일부러
+      예외를 낸다 (빈 축을 조용히 전체로 바꾸지 않으려고). 그 배선 사고가 여기서
+      `FAILED` 로 옮겨져 **그날 걷기 결과는 그대로 나간다.**
     """
     try:
         out = call()
@@ -769,6 +858,8 @@ def wake_up(
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
     outbound_fn: Callable[..., Any] = ship_due_sales,
+    close_fn: Callable[..., Any] = close_day,
+    sim_run_id: str = BURN_IN_SIM_RUN_ID,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
 
@@ -798,4 +889,6 @@ def wake_up(
         collect_fn=collect_fn,
         procure_fn=procure_fn,
         outbound_fn=outbound_fn,
+        close_fn=close_fn,
+        sim_run_id=sim_run_id,
     )

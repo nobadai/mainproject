@@ -129,17 +129,44 @@ rows = fetch_all(f'SELECT * FROM {schema}.ml_price_forecasts WHERE as_of = %s', 
 
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
-| `axis` | `CalendarAxis` | 필수 | 공용 날짜축 |
+| `kinds` | `list[KindOption]` | 필수 | 가격 종류 셋 |
+| `selected_kind` | `str` | 필수 | 지금 고른 종류 |
 | `items` | `list[str]` | 필수 | 고를 수 있는 품목 |
 | `selected` | `str` | 필수 | 지금 고른 품목 |
+| `base_dates` | `list[BaseDateOption]` | 필수 | 예측을 만든 날 목록 (최신순) |
+| `selected_base_dt` | `str` | 필수 | 지금 고른 기준일 |
+| `base_dates_truncated` | `bool` | 필수 | 목록이 상한에 닿아 잘렸나. **잘린 것을 안 알리면 «지워졌나» 로 보인다** |
+| `notice` | `Note &#124; None` | 선택 | 옛 기준으로 만든 예측을 골랐을 때의 경고 |
 | `cards` | `list[ItemCard]` | 필수 | 세 품목 요약. 대시보드가 같이 쓴다 |
-| `chart` | `Chart` | 필수 | 고른 품목의 실측 · 전일예측 · 내일예측 |
-| `accuracy` | `Table` | 필수 | 최근 성적 — 우리 오차를 숨기지 않는다 |
+| `axis` | `CalendarAxis` | 필수 | 기준일 + 대상일 18개. **회색 칸은 게이트 구간**이다 |
+| `chart` | `Chart` | 필수 | 18일 예측 · 구간 · 실제값 |
+| `rows` | `Table` | 필수 | 리드타임별 한 줄씩 — 예측 · 구간 · 실제 · 오차 |
+| `points` | `list[ChartPoint]` | 선택 | 그래프가 쓰는 원시 수치. 표와 같은 줄인데 글자가 아니라 수다 |
+| `gate_lead` | `int` | 필수 | 이 리드타임 미만은 모델을 안 쓴다 |
+| `quality_note` | `str &#124; None` | 선택 | 이 조합의 판정 근거 |
+| `accuracy` | `Table` | 필수 | 봉인 개봉 실측 — 우리 오차를 숨기지 않는다 |
 | `quality` | `Table` | 필수 | 조합별로 써도 되는지 |
 | `caveat` | `Note` | 필수 | ★ 이 값을 어디까지 믿어야 하나 |
 | `source` | `Source` | 필수 | 예시값인지 실제 값인지 |
 
-### `ItemCard` — 품목 하나의 내일 예측 — 대시보드 위쪽 카드에도 같은 값을 쓴다.
+### `KindOption` — 가격 종류 하나. 셋이 서로 다른 단계의 값이라 섞으면 안 된다.
+
+| 칸 | 타입 | 필수 | 무엇 |
+|---|---|---|---|
+| `kind` | `str` | 필수 | auc · whsl · rtl |
+| `label` | `str` | 필수 | 경락가 · 중도매가 · 소매가 |
+| `role` | `str` | 필수 | 이 값이 누구에게 무엇인가 |
+
+### `BaseDateOption` — 예측을 만든 날 하나.
+
+| 칸 | 타입 | 필수 | 무엇 |
+|---|---|---|---|
+| `base_dt` | `str` | 필수 |  |
+| `total` | `int` | 필수 | 그날 낸 예측 건수 |
+| `scored` | `int` | 필수 | 그중 실제 가격과 맞춰진 건수 |
+| `pre_fix` | `bool` | 필수 | 2026-08-28 이전에 만든 예측인가. **다른 날과 나란히 놓고 비교하면 안 된다** — 그때는 경락가에 포장 규격이 섞여 있었다 |
+
+### `ItemCard` — 품목 하나의 다음 값 — 대시보드 위쪽 카드에도 같은 값을 쓴다.
 
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
@@ -154,6 +181,21 @@ rows = fetch_all(f'SELECT * FROM {schema}.ml_price_forecasts WHERE as_of = %s', 
 | `ci_width` | `float` | 필수 | 구간 폭 ÷ 가운데 값. 클수록 덜 확실하다 |
 | `review` | `bool` | 필수 | 폭이 넓어 사람이 한 번 볼 것을 권하나 |
 | `use_recommended` | `bool` | 필수 | False 면 이 조합은 '어제 가격 그대로' 가 우리 모델보다 낫다 |
+| `gated` | `bool` | 선택 | 이 값이 **모델이 아니라 어제값 그대로**인가. 리드타임 3 미만이면 모델을 안 쓴다 — 어제 가격이 이미 정답에 가까워 모델이 낄 자리가 없다 |
+
+### `ChartPoint` — 그래프가 쓰는 **원시 수치** 한 점.
+
+| 칸 | 타입 | 필수 | 무엇 |
+|---|---|---|---|
+| `lead` | `int` | 필수 | 리드타임. 0 이 기준일 그날 |
+| `target_dt` | `str` | 필수 | 대상일 YYYY-MM-DD |
+| `pred` | `float &#124; None` | 필수 | 예측 가운데 값 |
+| `lo` | `float &#124; None` | 필수 | 구간 아래끝 |
+| `hi` | `float &#124; None` | 필수 | 구간 위끝 |
+| `actual` | `float &#124; None` | 필수 | 실제값. 아직 안 지난 날이면 None |
+| `err_pct` | `float &#124; None` | 선택 | 오차율 % |
+| `anchor` | `float &#124; None` | 필수 | 출발점 (어제값·7일평균 섞음) |
+| `gated` | `bool` | 선택 | 모델을 안 쓰고 출발점을 그대로 낸 칸 |
 
 ---
 

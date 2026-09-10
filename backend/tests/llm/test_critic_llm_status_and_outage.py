@@ -1,7 +1,14 @@
-"""오케 / Critic 응답에 LLM 상태 필드가 실리는지 + Ollama 장애 시 Core 생존 검증.
+"""Critic 응답에 LLM 상태 필드가 실리는지 + Ollama 장애 시 Core 생존 검증.
 
 Finance / Logistics 통합테스트와 같은 방식이다 — Provider 를 실패시켜 놓고
 결정론 결과가 그대로 남는지 본다. 네트워크에 나가지 않는다.
+
+★ **이름이 바뀌었다** (2026-09-10). 전에는
+  `test_orchestrator_critic_integration.py` 였는데 `app/orchestrator/` 는
+  2026-09-07 에 없어졌고, 그 뒤로 이 파일이 재는 여섯은 **전부 critic·LLM** 이다.
+  없는 폴더 이름을 단 검사는 다음 사람에게 *"아직 오케가 있다"* 고 말한다.
+  형제 파일(`test_critic_gemini_provider.py` · `test_critic_judge_runtime.py`)의
+  결에 맞춰 무엇을 재는지로 이름을 다시 지었다. 재는 것은 한 건도 안 바뀌었다.
 
 ★ **2026-09-07 에 사이클 쪽 셋이 빠졌다** (`test_context_carries_no_quantities` ·
   `test_core_survives_when_ollama_is_down` · `test_disabled_llm_keeps_deterministic_ranking`).
@@ -89,7 +96,7 @@ def _procurement_response() -> ProcurementResponse:
     )
 
 
-# --- 오케스트레이터 -----------------------------------------------------------
+# --- 사이클 응답 봉투 (app/master/cycle_schemas.py) ----------------------------
 def test_response_carries_llm_fields():
     assert _LLM_FIELDS <= set(ProcurementResponse.model_fields)
 

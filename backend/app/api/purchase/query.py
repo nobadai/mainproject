@@ -75,7 +75,16 @@ _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 위에서 안을
 # ══════════════════════════════════════════════════════════════════════════
 
 def _read(as_of: date) -> dict[str, Any]:
-    """저장된 실행과 확정 매입을 읽는다. **SELECT 뿐이다.**"""
+    """저장된 실행과 확정 매입을 읽는다. **SELECT 뿐이다.**
+
+    🔴 **축(`sim_run_id`)으로 여기서 거르지 않는다.** 칸을 읽어 오기만 하고 고르는 것은
+    ``_pick`` · ``_committed`` 가 한다. 이유 둘::
+
+        ① 화면이 «전체 몇 건 중 이 걷기 몇 건» 을 말하려면 전체를 봐야 한다.
+           WHERE 로 걸러 오면 뺀 수를 셀 수 없고, 그러면 조용히 없애는 것이 된다
+        ② 검사가 이 함수를 대신 세워 상황을 주입한다. WHERE 에 두면 그 주입이
+           필터를 건너뛰어 **축이 도는지를 못 잰다** (규칙 8)
+    """
     from psycopg import sql
 
     from app.finance.db import fetch_all, get_db_schema
@@ -87,7 +96,7 @@ def _read(as_of: date) -> dict[str, Any]:
 
     runs = fetch_all(
         sql.SQL(
-            "SELECT request_id, item, end_code, runtime_status, created_at,"
+            "SELECT request_id, item, end_code, runtime_status, created_at, sim_run_id,"
             " response_payload AS payload"
             " FROM {} WHERE as_of = %(as_of)s AND cycle = 'PROCUREMENT'"
             " ORDER BY created_at DESC"
@@ -100,7 +109,7 @@ def _read(as_of: date) -> dict[str, Any]:
     buys = fetch_all(
         sql.SQL(
             "SELECT p.purchase_id, p.purchase_date, p.payment_due_date,"
-            " p.settlement_status, i.item_id, i.grade, i.quantity_kg,"
+            " p.settlement_status, p.sim_run_id, i.item_id, i.grade, i.quantity_kg,"
             " i.unit_price_krw_per_kg, i.line_amount_krw"
             " FROM {} p JOIN {} i USING (purchase_id)"
             " WHERE p.purchase_type = 'MASTER_APPROVAL' AND p.purchase_date <= %(as_of)s"
@@ -119,7 +128,7 @@ def _read(as_of: date) -> dict[str, Any]:
     dates = sorted({row["purchase_date"] for row in buys})
     arrivals = fetch_all(
         sql.SQL(
-            "SELECT as_of, item, response_payload->'scenarios' AS scenarios"
+            "SELECT as_of, item, sim_run_id, response_payload->'scenarios' AS scenarios"
             " FROM {} WHERE as_of = ANY(%(dates)s) AND cycle = 'PROCUREMENT'"
         ).format(table("master_agent_runs")),
         {"dates": dates},
@@ -137,7 +146,9 @@ def _read(as_of: date) -> dict[str, Any]:
 #  실행 고르기 — 🔴 레슨 ①
 # ══════════════════════════════════════════════════════════════════════════
 
-def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+def _pick(
+    runs: list[dict[str, Any]], sim_run_id: str | None = None
+) -> tuple[list[dict[str, Any]], str]:
     """품목마다 **하나씩** 고르고, 몇 개 중 무엇을 골랐는지 같이 돌려준다.
 
     🔴 **같은 날 실행이 여럿이다.** `2026-01-06` 배추는 아홉이고 그중 넷이
@@ -149,7 +160,18 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
         ① runtime_status = 'READY'   — 미가동(E4)은 안을 못 낸 날이다
         ② scenarios 가 비지 않은 것
         ③ 🔴 item 이 계약 품목일 것 (contracts.core.ITEMS)
-        ④ 품목별 created_at 최신 하나
+        ④ 🔴 sim_run_id 가 그 축일 것 — **안 주면 안 거른다**
+        ⑤ 품목별 created_at 최신 하나
+
+    🔴 **④ 가 ⑤ 앞이어야 한다.** 뒤로 가면 «최신 하나» 가 먼저 다른 걷기의 행을 집고
+    그 뒤에 축으로 떨어뜨려, 같은 축에 있던 조금 오래된 행이 **같이 사라진다.**
+
+    ⚠️ 지금 DB 에서는 축 있는 행이 언제나 더 새것이라(축이 `2026-09-08` 에 생겼다)
+    순서를 바꿔도 값이 안 갈린다 — 그래서 **검사가 상황을 주입한다** (규칙 8).
+
+    🔴 **축 이름을 쪼개 뜻을 읽지 않는다.** `SIM-WALK-202601-BASE` 의 `BASE` 는 사람이
+    목록에서 고를 때 쓰는 꼬리표이고, 뜻은 `sim_runs` 행이 답한다 (마스터 통보
+    2026-09-10). 여기서는 **같은지만** 본다.
 
     🔴 **③ 이 없으면 화면에 계약 밖 품목이 뜬다.** 저장된 실행에 피마늘 행이
     **194건** 남아 있다 (2026-09-09 실측 · 종전 주석의 143건은 그 뒤 늘었다)
@@ -170,8 +192,13 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     ours = [r for r in with_plans if r["item"] in ITEMS]
     dropped = sorted({str(r["item"]) for r in with_plans if r["item"] not in ITEMS})
 
+    #  ④ 축. `is None` 이라야 한다 — 빈 문자열은 «안 줬다» 가 아니라 **잘못 준 것**이고,
+    #     그것을 «전부» 로 읽으면 오타가 조용히 전체 조회가 된다.
+    mine = ours if sim_run_id is None else [r for r in ours if r["sim_run_id"] == sim_run_id]
+    off_axis = len(ours) - len(mine)
+
     picked: dict[str, dict[str, Any]] = {}
-    for run in ours:  # 이미 created_at DESC 라 처음 만난 것이 최신이다
+    for run in mine:  # 이미 created_at DESC 라 처음 만난 것이 최신이다
         picked.setdefault(str(run["item"]), run)
     chosen = list(picked.values())
 
@@ -179,6 +206,20 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     if dropped:
         names = " · ".join(x if x != "None" else "품목 미상" for x in dropped)
         aside = f". 계약 밖 품목({names})은 뺐습니다 — 지금 사는 것은 {'·'.join(ITEMS)} 입니다"
+    #  🔴 거른 것을 조용히 없애지 않는다 — 계약 밖 품목과 같은 규율이다.
+    if off_axis:
+        aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다 — 지금 보는 것은 {sim_run_id} 입니다"
+    #  🔴 **안 거를 때도 말한다** (마스터 청구 2026-09-10). 축이 없는 실행은 손으로
+    #     돌린 것이거나 축이 생기기 전 기록인데, 걷기와 **같아 보이면** 보는 사람이
+    #     둘을 한 세상으로 읽는다. 마스터가 실제로 그 오독을 했다 —
+    #     *"같은 토요일인데 하나는 0건이고 하나는 4건이니 걷는 경로가 둘이다"* 로
+    #     진단했다가 물렀고, 실은 표에 손 실행이 섞여 있었을 뿐이었다.
+    outside = sum(1 for r in chosen if r["sim_run_id"] is None)
+    if outside:
+        aside += (
+            f". 보이는 것 중 {outside}건은 **걷기 밖 실행**입니다 —"
+            " 손으로 돌렸거나 걷기 축이 생기기 전 기록입니다"
+        )
     if not chosen:
         return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 계약 품목 실행 0건{aside}"
     names = " · ".join(f"{r['item']} {r['request_id']}" for r in chosen)
@@ -188,12 +229,27 @@ def _pick(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     )
 
 
-def _no_plan_note(runs: list[dict[str, Any]], picked_text: str) -> Note:
+def _no_plan_note(
+    runs: list[dict[str, Any]], picked_text: str, sim_run_id: str | None = None
+) -> Note:
     """안이 왜 없나. 🔴 레슨 ② — ``no_proposal_reason`` 이라는 칸은 **없다.**
 
     ``reason`` 은 한 줄 요약이라 *"어느 안이 왜 죽었나"* 를 못 말한다. 안별 컷
     사유는 ``judgment.rejected_reasons[]`` 에 있다.
+
+    🔴 **사유도 같은 축에서만 가져온다** (2026-09-10). 안 그러면 «축으로 걸러 0건» 인데
+    화면이 **다른 걷기의 컷 사유**를 붙여 *"단가가 상한을 넘어 죽었다"* 고 말한다 —
+    실제로는 그 걷기에 실행이 아예 없었던 것이다. 「안 돌았다」와 「돌았는데 죽었다」는
+    다른 사실이고, 섞으면 읽는 사람이 없는 원인을 고치려 든다.
     """
+    if sim_run_id is not None:
+        runs = [r for r in runs if r["sim_run_id"] == sim_run_id]
+        if not runs:
+            return Note(
+                tone="warn",
+                text=f"{picked_text}. 이 걷기({sim_run_id})의 실행이 그날 없습니다 —"
+                " 안이 죽은 것이 아니라 돌지 않았습니다.",
+            )
     for run in runs:
         payload = run["payload"] or {}
         rejected = (payload.get("judgment") or {}).get("rejected_reasons") or []
@@ -276,7 +332,7 @@ def _payments(scenario: dict[str, Any]) -> Table:
 
 
 def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], str],
-          request_id: str) -> Plan | None:
+          request_id: str, sim_run_id: str | None = None) -> Plan | None:
     label = str(scenario.get("label") or "")
     sourcing = _sourcing(scenario.get("sourcing_plan") or [])
     if sourcing is None:
@@ -296,7 +352,7 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
         grade=grade,
         max_price=_money(scenario.get("max_price")) or 0,
         #  🔴 없으면 None 이다. max_price 로 대신 채우지 않는다 — 그 순간
-        #     09-17 에 갈라질 두 값이 화면에서 다시 하나가 된다.
+        #     갈라 둔 두 값이 화면에서 다시 하나가 된다.
         cut_unit_price=_money(scenario.get("cut_unit_price")),
         legs=_legs(scenario),
         payments=_payments(scenario),
@@ -311,6 +367,9 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
         risks=[str(x) for x in scenario.get("risks") or []],
         pending=decision is None,
         approved=decision == "APPROVE",
+        #  🔴 없으면 None 그대로 싣는다. «걷기 밖» 이라는 사실이고, 화면이 그것을
+        #     보일 수 있어야 한다 (schema.Plan.sim_run_id 주석).
+        sim_run_id=sim_run_id,
     )
 
 
@@ -318,10 +377,28 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
 #  확정 매입
 # ══════════════════════════════════════════════════════════════════════════
 
-def _arrival_index(arrivals: list[dict[str, Any]]) -> dict[tuple[date, str, int], str]:
-    """(매입일, 품목, 줄금액) → 도착일. **금액으로 맞춘다.**"""
+def _arrival_index(
+    arrivals: list[dict[str, Any]], sim_run_id: str | None = None
+) -> dict[tuple[date, str, int], str]:
+    """(매입일, 품목, 줄금액) → 도착일. **금액으로 맞춘다.**
+
+    🔴 축을 주면 그 걷기의 실행에서만 맞춘다. 안 그러면 다른 걷기가 우연히 같은 금액을
+    낸 날에 **엉뚱한 도착일**이 붙고, 그건 틀린 줄도 모르는 오류다.
+
+    ⚠️ **축을 걸면 지금 맞던 줄이 공란이 된다** (2026-09-10 실측). `01-22` 까지 원장
+    네 줄 중 **둘**이 축 없는 실행에서 도착일을 받아 오고 있었다::
+
+        2026-01-05 배추   원장축 SIM-BURNIN-202512 ← 도착일 출처축 없음
+        2026-01-13 배추   원장축 SIM-BURNIN-202512 ← 도착일 출처축 없음
+
+    ★ **공란이 맞다.** 금액으로 맞추는 것은 원래 추정이고, 축이 다르면 그 추정을 받칠
+    근거가 없다. 화면은 «도착일을 못 맞춘 줄 N개는 공란» 이라고 이미 적는다 — 없는
+    값을 지어내는 것보다 못 맞췄다고 말하는 편이 낫다.
+    """
     index: dict[tuple[date, str, int], str] = {}
     for row in arrivals:
+        if sim_run_id is not None and row["sim_run_id"] != sim_run_id:
+            continue
         for scenario in row["scenarios"] or []:
             amount = _money(scenario.get("total_amount_krw"))
             if amount is None:
@@ -333,15 +410,24 @@ def _arrival_index(arrivals: list[dict[str, Any]]) -> dict[tuple[date, str, int]
     return index
 
 
-def _committed(data: dict[str, Any], as_of: date) -> tuple[Table, int, list[float]]:
-    """확정 매입 표 · 이번 주 금액 · 아직 안 온 물량."""
-    index = _arrival_index(data["arrivals"])
+def _committed(
+    data: dict[str, Any], as_of: date, sim_run_id: str | None = None
+) -> tuple[Table, int, list[float], int]:
+    """확정 매입 표 · 이번 주 금액 · 아직 안 온 물량 · **다른 걷기라 뺀 줄 수.**
+
+    🔴 원장도 축을 따른다. 안 그러면 이번 주 매입액이 **두 세상의 합**이 된다.
+    """
+    index = _arrival_index(data["arrivals"], sim_run_id)
     names = data["items"]
     week_start = as_of - timedelta(days=as_of.weekday())
     rows: list[dict[str, Any]] = []
     week_amount = 0
     inbound: list[float] = []
+    off_axis = 0
     for buy in data["buys"]:
+        if sim_run_id is not None and buy["sim_run_id"] != sim_run_id:
+            off_axis += 1
+            continue
         item = names.get(buy["item_id"], buy["item_id"])
         #  🔴 레슨 ③ — 줄 금액은 line_amount_krw 다. total 을 쓰면 여러 줄인
         #     매입에서 같은 금액이 줄마다 반복된다.
@@ -367,6 +453,7 @@ def _committed(data: dict[str, Any], as_of: date) -> tuple[Table, int, list[floa
         Table(columns=_COMMITTED_COLS, rows=rows, empty_text=_EMPTY_COMMITTED),
         week_amount,
         inbound,
+        off_axis,
     )
 
 
@@ -437,7 +524,15 @@ def _demo(note: str) -> PurchaseTab:
 #  본체
 # ══════════════════════════════════════════════════════════════════════════
 
-def build(as_of: date) -> PurchaseTab:
+def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
+    """매입 탭. ``sim_run_id`` 는 **어느 걷기를 보는가**다.
+
+    🔴 **안 주면 안 거른다.** 지금 DB 에는 축이 붙기 전 실행이 1,202건 있고, 그것을
+    무조건 걸러 버리면 스무 날이 통째로 빈다 (2026-09-10 실측). 축이 갈리는 날 화면이
+    두 세상을 섞지 않도록 **자리를 먼저 만들어 두는 것**이 이 인자다.
+
+    ⚠️ 값을 여기서 짓지 않는다 — 받아서 그대로 흘린다 (마스터 당부 2026-09-10).
+    """
     #  ★ 통째로 잡는 것이 맞습니다 — 여기서 무슨 일이 나든 **화면은 떠야** 하고
     #    대신 「예시값」 딱지가 붙습니다. 예외 종류를 골라 잡으면 안 골라낸
     #    하나 때문에 화면이 통째로 죽습니다 (ML 이 forecast 에서 같은 판단).
@@ -453,20 +548,22 @@ def build(as_of: date) -> PurchaseTab:
         for row in data["decisions"]
         if row["scenario_label"]
     }
-    chosen, picked_text = _pick(runs)
+    chosen, picked_text = _pick(runs, sim_run_id)
 
     plans: list[Plan] = []
     skipped = 0
     for run in chosen:
         for scenario in (run["payload"] or {}).get("scenarios") or []:
             #  _pick 이 ITEMS 로 걸렀으므로 여기서 item 은 언제나 계약 품목이다
-            plan = _plan(str(run["item"]), scenario, decided, run["request_id"])
+            plan = _plan(
+                str(run["item"]), scenario, decided, run["request_id"], run["sim_run_id"]
+            )
             if plan is None:
                 skipped += 1
             else:
                 plans.append(plan)
 
-    committed, week_amount, inbound = _committed(data, as_of)
+    committed, week_amount, inbound, committed_off_axis = _committed(data, as_of, sim_run_id)
     week_start = as_of - timedelta(days=as_of.weekday())
     pending = sum(1 for p in plans if p.pending)
     no_cut = [p.key for p in plans if p.cut_unit_price is None]
@@ -484,7 +581,7 @@ def build(as_of: date) -> PurchaseTab:
             )
         plans_note = Note(tone="neutral", text=text)
     else:
-        plans_note = _no_plan_note(runs, picked_text)
+        plans_note = _no_plan_note(runs, picked_text, sim_run_id)
 
     arrived_unknown = sum(1 for row in committed.rows if row["arrive"] is None)
     committed_text = (
@@ -493,6 +590,12 @@ def build(as_of: date) -> PurchaseTab:
     )
     if arrived_unknown:
         committed_text += f" 도착일을 못 맞춘 줄 {arrived_unknown}개는 **공란**입니다."
+    #  🔴 뺀 것을 조용히 없애지 않는다 — 이번 주 매입액이 왜 작은지가 여기 있다.
+    if committed_off_axis:
+        committed_text += (
+            f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다 —"
+            f" 지금 보는 것은 {sim_run_id} 입니다."
+        )
     if committed.rows:
         committed_text += (
             " ⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다."

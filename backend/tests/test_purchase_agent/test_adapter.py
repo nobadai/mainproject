@@ -1403,9 +1403,12 @@ def test_status_query_answers_without_building_scenarios() -> None:
     reply, metadata = purchase_port(request)
     assert reply.runtime_status == "READY"
     assert "scenarios" not in reply.payload
+    # 🔴 2026-09-10 에 셋이 됐다 — `SUPPLY_CAPACITY_QUERY` 를 구현하며 같이 열었다
+    #   (E4-7). 목록을 여는 것이 마스터에게 보내는 신호라 **구현과 같은 커밋**이다.
     assert reply.payload["capabilities"]["supported_modes"] == [
         "GENERATE_SCENARIOS",
         "STATUS_QUERY",
+        "SUPPLY_CAPACITY_QUERY",
     ]
     # **``used_tools``는 비어 있다.** 봉투가 STATUS_QUERY를 ``E-PLAN-EMPTY`` 예외로
     # 뺐으므로(``_PLAN_EXEMPT_MODES``) 가짜 Tool 이름을 넣을 이유가 없다 — 검사를
@@ -1662,14 +1665,22 @@ def _request_with_mode(mode: str, monkeypatch: pytest.MonkeyPatch) -> AgentReque
         envelope._AGENT_MODES, "purchase", envelope._AGENT_MODES["purchase"] | {mode}
     )
     return AgentRequest(
-        context=ExecutionContext("R", "2026-01-30", "ML_COMPLETE", "v2.3"),
+        # 🔴 `as_of` 는 계약상 `date` 다 (`envelope.ExecutionContext`). 전에는 문자열을
+        #   넣어도 통과했는데, `_generate_scenarios` 가 payload 검사에서 먼저 빠져나가
+        #   그 값을 안 썼기 때문이다. `SUPPLY_CAPACITY_QUERY` 는 시세를 바로 부르므로
+        #   드러났다 — 픽스처가 계약을 어기고 있었다 (2026-09-10).
+        context=ExecutionContext("R", date(2026, 1, 30), "ML_COMPLETE", "v2.3"),
         agent="purchase",
         mode=mode,
         payload={"item": "배추", "as_of": "2026-01-30"},
     )
 
 
-@pytest.mark.parametrize("mode", ["SUPPLY_CAPACITY_QUERY", "GENERATE_SALES_PROPOSAL", "아무거나"])
+# 🔴 `SUPPLY_CAPACITY_QUERY` 를 뺐다 (2026-09-10) — **이제 받는다** (E4-7).
+#   검사를 지우지 않고 목록만 뜻에 맞췄다. 「받지 않는 mode 를 막는다」는 그대로다.
+@pytest.mark.parametrize(
+    "mode", ["PRE_PURCHASE", "GENERATE_SALES_PROPOSAL", "SALES_VALIDATION", "아무거나"]
+)
 def test_받지_않는_mode_는_조용히_안을_만들지_않는다(
     mode: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1704,12 +1715,14 @@ def test_답하는_목록과_문_앞_검사가_같은_선언을_본다(monkeypat
     받는다"* 고 답하는데 실제로 부르면 막히거나, 반대로 **답에는 없는 mode 가 조용히
     안을 만든다.** 어느 쪽이든 마스터는 우리 답을 믿고 배선한다.
 
-    ★ 여기서 ``SUPPLY_CAPACITY_QUERY`` 를 쓰는 것은 예고이기도 하다 — 그 mode 를
-      실제로 구현하는 날 이 검사가 **양쪽을 같이 고치도록** 잡아 준다.
+    ★ **예고가 맞았다** (2026-09-10). 전에는 여기서 ``SUPPLY_CAPACITY_QUERY`` 를
+      썼고 *"그 mode 를 실제로 구현하는 날 이 검사가 양쪽을 같이 고치도록 잡아
+      준다"* 고 적어 뒀는데, E4-7 에서 정확히 그렇게 됐다. 이제 그 mode 는 실제로
+      열려 있으므로 **아직 안 여는 이름**으로 바꿔 같은 것을 계속 잰다.
     """
     from app.purchase_agent import adapter
 
-    widened = (*SUPPORTED_MODES, "SUPPLY_CAPACITY_QUERY")
+    widened = (*SUPPORTED_MODES, "AS_YET_UNOPENED_MODE")
     monkeypatch.setattr(adapter, "SUPPORTED_MODES", widened)
 
     # ① 답하는 목록이 따라온다
@@ -1717,6 +1730,6 @@ def test_답하는_목록과_문_앞_검사가_같은_선언을_본다(monkeypat
     assert status.payload["capabilities"]["supported_modes"] == list(widened)
 
     # ② 문 앞 검사도 따라온다 — 이제 막지 않고 안 만드는 길로 간다
-    request = _request_with_mode("SUPPLY_CAPACITY_QUERY", monkeypatch)
+    request = _request_with_mode("AS_YET_UNOPENED_MODE", monkeypatch)
     reply, _ = purchase_port(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"  # 입력이 없어서다. 막힌 게 아니다

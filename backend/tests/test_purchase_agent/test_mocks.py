@@ -486,6 +486,11 @@ def test_the_two_mock_bands_never_overlap(item: str) -> None:
 
     ⚠️ 밴드 값 자체는 **안 건드린다** (현서님 ④). ``upper`` 는 ``ci_width`` 말고
       ``compute_max_price`` 도 먹이므로 넓히면 ⑦ 컷 기준이 함께 풀린다.
+
+      🔴 **그리고 선언 임계(0.08)로는 실제 폭이 전부 ``uncertain`` 이다** (2026-09-10
+      실측). **가장 좁은 한 줄**을 봐도 양파 ``ci_width`` 0.220 — 임계의 2.7배라, 넣으면
+      ``stable`` 이 한 줄도 안 남는다 — **이 검사가 딛고 선 「두 층위」가 한 층이 된다.**
+      표와 「언제 맞출 수 있나」는 ``mocks/README.md`` 의 「실측 밴드」 절.
     """
     stable = [
         width

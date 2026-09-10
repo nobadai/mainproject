@@ -40,6 +40,7 @@ from app.purchase_agent.nodes.classify_situation import (
 )
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
+from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_capacity
 from app.purchase_agent.tracing import ToolRecorder
 
 AGENT_NAME = "purchase"
@@ -59,7 +60,18 @@ AGENT_NAME = "purchase"
 #:   ⚠️ 지금은 봉투(``_AGENT_MODES``)가 앞에서 막아 실제로는 안 일어난다. 다만
 #:   마스터가 라우팅을 채우는 날 그 방어가 사라지고, **그때 조용히 안이 만들어진다.**
 #:   막는 쪽이 우리 밖에만 있으면 그 문이 열리는 날을 우리가 못 본다.
-SUPPORTED_MODES: tuple[str, ...] = ("GENERATE_SCENARIOS", "STATUS_QUERY")
+#: 🔴 **`SUPPLY_CAPACITY_QUERY` 를 여는 것이 마스터에게 보내는 신호다** (2026-09-10).
+#:   `envelope.CAPABILITY_ROUTING` 주석이 *"매입 `_status_query` 의 `supported_modes`
+#:   에 그 mode 가 들어간 날, 여기 한 줄이면 된다"* 로 조건을 걸어 뒀다.
+#:
+#:   ⚠️ **구현과 같은 커밋에서만 연다.** 목록만 먼저 열면 마스터가 라우팅을 채우고,
+#:   그때 봉투와 문 앞이 **같이 열린 채 구현이 없다.** 현서님이 그것을 경고했다 —
+#:   *"그 목록만 먼저 열지 마십시오. 제가 신호로 읽습니다."*
+SUPPORTED_MODES: tuple[str, ...] = (
+    "GENERATE_SCENARIOS",
+    "STATUS_QUERY",
+    "SUPPLY_CAPACITY_QUERY",
+)
 
 
 class UnsupportedMode(RuntimeError):
@@ -1025,12 +1037,18 @@ def purchase_port(
       mock 포트를 부르면 ``MockNotAllowed`` 로 막히므로, 등록에서 실 공급자를
       빠뜨려도 조용히 mock 으로 도는 일은 이제 없다 — **터진다.**
 
-    ⚠️ ML ``current_price`` 와 매입 물량가중 시리즈가 일치하지 않는 것은 여전히 미결이다
-      (2026-08-31 실측 · 배추 812 vs 933). 그것은 **두 값을 어떻게 병기해 보여줄지**의
-      문제이지 매입단가로 무엇을 쓸지가 아니다.
+    ⚠️ ~~ML ``current_price`` 와 매입 물량가중 시리즈가 일치하지 않는 것은 여전히
+      미결이다 (2026-08-31 실측 · 배추 812 vs 933)~~ — **닫혔다** (ML 회신 2026-09-10).
+      그 칸은 시세가 아니라 **앵커**(0.4×어제 + 0.6×최근 7 거래일 평균)라 애초에 다른
+      값이고, 실 DB 로 재현된다 (``quotes.py`` 머리말에 산식과 재현값). **안 맞는 게 맞다.**
+
+      🟡 남은 것은 **두 값을 어떻게 병기해 보여줄지**이고, 매입단가로 무엇을 쓸지는
+      여전히 별개다.
     """
     if request.mode == "STATUS_QUERY":
         return _status_query(request)
+    if request.mode == "SUPPLY_CAPACITY_QUERY":
+        return _supply_capacity_query(request, quotes=quotes)
     if request.mode not in SUPPORTED_MODES:
         raise UnsupportedMode(
             f"매입은 mode={request.mode!r} 를 받지 않는다. "
@@ -1066,6 +1084,199 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     # 뺐으므로(``_PLAN_EXEMPT_MODES``) 가짜 Tool 이름을 넣을 이유가 사라졌다.
     # 검사를 피하려고 넣은 이름은 **M-16이 읽는 실행 계획을 그대로 오염시킨다.**
     return reply, _metadata(request, None)
+
+
+#: `available_date` 를 못 내는 사유. **null 일 때 사유 한 줄** — 계약이다
+#: (현서님 2026-09-09 §4.2 · 우리가 동의). 값 칸만 null 로 정직하고 위험 칸이
+#: 비면 *"확인 안 함"* 이 *"위험 없음"* 이 된다.
+_NO_LEAD_TIME = "입고 소요일이 아직 확정되지 않아 언제 댈 수 있는지는 답하지 못한다"
+
+#: 판매가 **한 품목분**을 읽는다 (`sales.schemas.PurchaseAdditionalSupplyResult` 는
+#: 최상위 하나다). 여러 품목이 오면 어느 것을 최상위에 둘지 우리가 못 정한다.
+_MULTI_ITEM = "한 번에 한 품목만 답한다 — 품목별로 나눠 물어야 한다"
+
+#: 이 경로가 실제로 하는 일. **7노드를 안 도니 노드 이름이 아니다** — 시세를 읽고
+#: 남의 값 둘과 함께 최솟값을 잡는 것이 전부다.
+_SUPPLY_CAPACITY_TOOLS: tuple[str, ...] = ("get_market_quotes", "compute_supply_capacity")
+
+
+def _supply_capacity_query(
+    request: AgentRequest, *, quotes: QuoteSource | None = None
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """판매 부족분에 **경계만** 답한다 — 7노드를 안 돈다 (E4-7).
+
+    ★ 우리가 그렇게 하겠다고 답했다 (`260909_…가능량이_남의_값입니다.md` §1.4).
+      완주는 평균 11.2초 · 최대 136.6초인데 두 분이 청한 것은 안이 아니라 경계다.
+
+    🔴 **품목 하나를 받아 하나를 답한다.** 우리는 호출 단위를 `batch` 로 답했지만,
+      **회신 모양은 그때 안 정했다.** 실재하는 유일한 계약
+      (`sales.schemas.PurchaseAdditionalSupplyResult`)은 `procurable_quantity_kg` ·
+      `risks` 를 **최상위**에 두므로 한 품목분이다. 여러 품목을 배열로 싣는 모양을
+      지금 지어내면 **아무도 안 읽는 배관**이 된다 — 마스터가 봉투 배선을 아직 안
+      했다. 배선하는 날 같이 정한다.
+
+    🔴 **재료가 아직 안 온다.** `warehouse_free_kg` · `finance_cap_amount_krw` 는
+      마스터가 실어 줄 남의 값인데(`master/procurement_boundary.py`), 그쪽이
+      *"라우팅이 열리는 날 같이 한다"* 로 미뤘다. 그동안은 못 읽었다고 답한다 —
+      `0` 으로 채우지 않는다 (규칙 3).
+    """
+    # ``build_state`` 와 같은 자리에서 늦게 들여온다 — 모듈 최상단으로 올리면
+    # ``ports`` ↔ ``adapter`` 가 서로를 import 한다.
+    from app.purchase_agent import ports
+
+    payload = request.payload
+    items = payload.get("items")
+    item = payload.get("item")
+    extra_risks: list[str] = []
+    if isinstance(items, (list, tuple)) and items:
+        # 하나면 받아 준다 — 부르는 쪽 모양이 아직 안 정해졌고, 하나는 뜻이 같다.
+        if len(items) == 1 and item is None:
+            item = items[0]
+        elif item is None:
+            extra_risks.append(_MULTI_ITEM)
+    if not isinstance(item, str) or not item:
+        reply = _reply(
+            request,
+            runtime_status="RUNTIME_NOT_READY",
+            business_status="skipped",
+            reasoning="어느 품목을 묻는지가 요청에 없어 경계를 낼 수 없다.",
+            missing_data=("item",),
+        )
+        return reply, _metadata(request, None)
+
+    constraints = load_constraints()
+    capacity = compute_supply_capacity(
+        quotes=ports.get_market_quotes(item, request.context.as_of, source=quotes),
+        warehouse_free_kg=_read_optional_number(payload, "warehouse_free_kg"),
+        finance_cap_amount_krw=_read_optional_number(payload, "finance_cap_amount_krw"),
+        constraints=constraints,
+    )
+
+    #  🔴 **묻는 이름과 답하는 이름이 다르다. 일부러 그렇다.**
+    #
+    #      받을 때  required_additional_quantity_kg   판매 어휘 — "원래 얼마가 모자랐나"
+    #      낼 때    requested_quantity_kg             회신 어휘 — "그 물음에 답한다"
+    #
+    #  ⚠️ 그 둘을 맞추려 하지 마라. 판매가 부족량을 그 이름으로 쥐고 있고
+    #  (`sales/schemas.py` 의 `required_additional_quantity_kg`), 회신 계약은
+    #  `requested_quantity_kg` 로 정해져 있다.
+    #
+    #  🔴 **틀리면 조용히 사라진다.** `_read_optional_number` 는 없는 키에 `None` 을
+    #  주고, 판매 모델은 `extra="ignore"` 다 — 양쪽 다 오류를 안 낸다. 마스터가
+    #  스펙에 `requested_quantity_kg` 로 보내라고 적었다가 구현이 이 줄을 읽고
+    #  잡았다 (2026-09-10). 안 잡았으면 그 칸이 계속 비어 왔을 것이다.
+    requested = _read_optional_number(payload, "required_additional_quantity_kg")
+    risks = [*capacity.risks, *extra_risks, _NO_LEAD_TIME]
+    body: dict[str, Any] = {
+        "item": item,
+        "procurable_quantity_kg": capacity.procurable_quantity_kg,
+        "risks": risks,
+        # 🔴 물류 N4(`pending.inbound_lead_days`)가 NULL 이라 계산 자체를 안 한다
+        #   (규칙 3). 사유는 `risks` 에 있다.
+        "available_date": None,
+        "expected_unit_price_krw": capacity.expected_unit_price_krw,
+        "unit_price_grade": capacity.unit_price_grade,
+        "basis": capacity.basis,
+    }
+    if requested is not None:
+        body["requested_quantity_kg"] = requested
+
+    reply = _reply(
+        request,
+        runtime_status="READY",
+        business_status="ok",
+        payload=body,
+        evidences=_supply_capacity_evidences(body, capacity),
+        reasoning=_supply_capacity_reasoning(item, capacity),
+    )
+    # ⚠️ ``STATUS_QUERY`` 와 달리 **비워 두면 안 된다.** 그쪽은 봉투가
+    #   ``_PLAN_EXEMPT_MODES`` 로 뺐지만 이 경로는 실제로 시세를 읽고 계산한다 —
+    #   비면 `E-PLAN-EMPTY` 다. 그래프를 안 도니 ``ToolRecorder`` 대신 직접 적는다.
+    return reply, _metadata(request, None, tools=_SUPPLY_CAPACITY_TOOLS)
+
+
+def _read_optional_number(payload: Mapping[str, Any], key: str) -> float | None:
+    """숫자면 그대로, 없거나 숫자가 아니면 ``None``.
+
+    ⚠️ **`0` 을 `None` 으로 바꾸지 않는다.** `0` 은 *"자리가 없다"* 라는 읽은 값이고
+      `None` 은 *"못 읽었다"* 다 (규칙 3).
+    """
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _supply_capacity_reasoning(item: str, capacity: SupplyCapacity) -> str:
+    """⚠️ **수량·단가를 문장에 안 적는다.** 봉투가 설명문의 숫자를 막는다
+    (`E-REASONING-NUMERIC` — *"숫자가 필요하면 Evidence 를 추가한다"*). 값은
+    payload 와 Evidence 에 있고, 여기서는 **무엇이 상한을 정했는지**만 말한다.
+    """
+    if capacity.procurable_quantity_kg is None:
+        return f"{item} 은 지금 받은 것만으로는 댈 수 있는 양을 정할 수 없다."
+    what = {"warehouse": "창고 여유", "finance": "매입 가능액", "unknown": "알 수 없음"}
+    return f"{item} 은 {what[capacity.basis]}이 정하는 양까지 댈 수 있다."
+
+
+def _supply_capacity_evidences(
+    body: Mapping[str, Any], capacity: SupplyCapacity
+) -> tuple[Evidence, ...]:
+    """봉투가 근거를 요구하는 최상위 값에 하나씩 단다.
+
+    🔴 **`risks` 는 셀 수밖에 없다.** 봉투는 *비어 있지 않은 스칼라 배열*에 근거를
+      요구하는데(`envelope.required_claims`), `Evidence.value` 가 `float` 라 문장에
+      붙일 수 있는 것이 **개수뿐**이다. 그것은 근거가 아니라 세어 본 것이다.
+
+      ⚠️ 마스터가 물류 `soft_warnings` 를 **정확히 그 이유로** 규칙에서 뺐다 —
+      *"만족시킬 수 없는 검사는 기준이 아니라 결함이다."* `risks` 도 같은 성질이라
+      `ENVELOPE_META_KEYS` 에 넣어 달라고 청했다. 답이 오기 전까지는 개수를 단다.
+    """
+    out = [
+        Evidence(
+            claim="risks",
+            source="tool_calc",
+            ref_ids=("SUPPLY-CAP-RISKS",),
+            value=float(len(body["risks"])),
+            unit="건",
+            evidence_grade="MEASURED",
+        )
+    ]
+    if capacity.expected_unit_price_krw is not None:
+        out.append(
+            Evidence(
+                claim="expected_unit_price_krw",
+                source="tool_calc",
+                ref_ids=("AUCTION-QUOTE",),
+                value=float(capacity.expected_unit_price_krw),
+                unit="원/kg",
+                evidence_grade="MEASURED",
+                evidence_detail=f"그날 최고가 등급 「{capacity.unit_price_grade}」",
+            )
+        )
+    if capacity.procurable_quantity_kg is not None:
+        out.append(
+            Evidence(
+                claim="procurable_quantity_kg",
+                source="tool_calc",
+                ref_ids=("SUPPLY-CAP-MIN",),
+                value=float(capacity.procurable_quantity_kg),
+                unit="kg",
+                evidence_grade="MEASURED",
+                evidence_detail=f"{capacity.basis} 가 상한을 정했다",
+            )
+        )
+    if "requested_quantity_kg" in body:
+        out.append(
+            Evidence(
+                claim="requested_quantity_kg",
+                source="sales",
+                ref_ids=("SALES-SHORTFALL",),
+                value=float(body["requested_quantity_kg"]),
+                unit="kg",
+                evidence_grade="MEASURED",
+            )
+        )
+    return tuple(out)
 
 
 def _not_ready_reason(missing: list[str], item: Any) -> str:

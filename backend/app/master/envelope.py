@@ -82,6 +82,7 @@ Mode = Literal[
     "SALES_VALIDATION",
     "GENERATE_SCENARIOS",
     "GENERATE_SALES_PROPOSAL",
+    "SUPPLY_CAPACITY_QUERY",
     "STATUS_QUERY",
 ]
 """호출 목적 (정의서 §3.2.3).
@@ -197,7 +198,11 @@ _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     ),
     # 물류는 두 사이클의 경계를 다 낸다 — `PRE_SALES` 가 판매 쪽 경계다.
     "inventory": frozenset({"PRE_PURCHASE", "PRE_SALES", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
-    "purchase": frozenset({"GENERATE_SCENARIOS", "STATUS_QUERY"}),
+    # ★ **`SUPPLY_CAPACITY_QUERY` 는 매입안이 아니라 경계다** (매입 `#485`).
+    #   `GENERATE_SCENARIOS` 와 나눠 두는 이유는 `SALES_VALIDATION` 과 같다 — 합치면
+    #   `(agent, mode, call_seq)` 로 **7노드를 돈 실행**과 **시세만 읽은 실행**을
+    #   구분할 수 없다. 두 실행은 걸리는 시간부터 다르다 (11.2초 vs 순수 계산).
+    "purchase": frozenset({"GENERATE_SCENARIOS", "SUPPLY_CAPACITY_QUERY", "STATUS_QUERY"}),
     # 판매는 제안만 만든다. 판매 제안의 재무 검증(`SALES_VALIDATION`)은 재무가 받는다 —
     # 제안자가 자기 제안을 검증하면 검증이 아니다.
     "sales": frozenset({"GENERATE_SALES_PROPOSAL", "STATUS_QUERY"}),
@@ -276,42 +281,35 @@ CAPABILITY_ROUTING: dict[Capability, tuple[AgentName, Mode] | None] = {
     #   부르는 것은 자유다 — 바깥이 봉투여야 한다.
     "SELLABLE_SUPPLY_CONTEXT": ("inventory", "PRE_SALES"),
     "DELIVERY_FEASIBILITY_CONTEXT": ("inventory", "PRE_SALES"),
-    # 🔴 **`None` 은 "아직 값을 안 정했다" 가 아니라 "부를 대상이 없다" 다.**
-    #
-    #   여기를 **비워 두면 `KeyError` 로 죽고**(마스터 배선 실수처럼 보인다),
-    #   표에서 **빼면 조용히 건너뛴다**(사람이 *"검증됐다"* 로 읽는다). 둘 다 틀렸다.
-    #   `None` 으로 적어 두면 `SalesFlow` 가 `unroutable_capabilities` 에 담아
-    #   결과에 싣고, 화면에서 **"안 왔다"** 로 보인다 (§1.2-10 과 같은 태도).
-    #
-    # ⚠️ **호출 단위 회신은 왔다** (2026-09-09 · `batch` · `SUPPLY_CAPACITY_QUERY`).
-    #   여기 적혀 있던 조건은 *"매입이 호출 단위를 회신하면 채운다"* 였고 **그 조건은
-    #   오늘 충족됐다.** 그대로 두면 다음 사람이 조건이 찼다고 보고 채운다. 그래서
-    #   조건을 새로 적는다 — **아직 채우면 안 된다.**
-    #
-    # 🔴 **매입 어댑터가 아직 그 mode 를 모른다** (실측 2026-09-09).
+    # ★★ **열렸다** (2026-09-10). 여기 적혀 있던 조건이 *"매입 `_status_query` 의
+    #   `supported_modes` 에 `SUPPLY_CAPACITY_QUERY` 가 들어간 날"* 이었고, 매입이
+    #   `#485` 에서 그 목록을 열면서 **구현까지 같은 커밋에 넣었다.**
     #
     #   ```text
-    #   purchase_agent/adapter.py  purchase_port
-    #       if request.mode == "STATUS_QUERY": return _status_query(request)
-    #       return _generate_scenarios(request, quotes=quotes)   ← 나머지 전부 여기로
-    #
-    #   같은 파일 _status_query
-    #       "supported_modes": ["GENERATE_SCENARIOS", "STATUS_QUERY"]
-    #                          ← SUPPLY_CAPACITY_QUERY 가 없다
+    #   purchase_agent/adapter.py  SUPPORTED_MODES
+    #       ("GENERATE_SCENARIOS", "STATUS_QUERY", "SUPPLY_CAPACITY_QUERY")
+    #   같은 파일  purchase_port
+    #       if request.mode == "SUPPLY_CAPACITY_QUERY": return _supply_capacity_query(...)
+    #       if request.mode not in SUPPORTED_MODES:    raise UnsupportedMode
     #   ```
     #
-    #   지금 채우면 판매 사이클이 매입을 부르고, 매입은 그 mode 를 모른 채 **7노드
-    #   그래프를 다 돌아 매입안을 만든다** (평균 11.2초 · 최대 136.6초 · 매입 실측).
-    #   그것이 **설계가 금지한 바로 그것**이다 — *"판매 사이클 안에서 매입안을 만들지
-    #   않는다."* 그리고 **오류도 안 난다. 조용히 된다.**
+    #   ⚠️ 전에 여기 적어 둔 위험은 *"매입이 그 mode 를 모른 채 7노드를 다 돌아
+    #     매입안을 만든다"* 였다. 그 길은 이제 **`UnsupportedMode` 로 막혀 있다** —
+    #     모르는 mode 가 `_generate_scenarios` 로 떨어지지 않는다.
     #
-    # ★ **채워도 되는 시점.** 매입 `_status_query` 의 `supported_modes` 에
-    #   `"SUPPLY_CAPACITY_QUERY"` 가 들어간 날. 그때 여기 한 줄이면 된다.
+    # 🔴 **후보를 그대로 보내지 않는다.** `sales_flow._judge` 의 기본 경로는 후보
+    #   전체를 payload 로 싣는데(재무가 그 모양을 읽으므로 옳다), 매입이 읽는 것은
+    #   **부족량 하나와 경계 재료**다. 그래서 판매 Flow 가 이 capability 만 다른
+    #   자리에서 만든다 — `sales_flow.ADDITIONAL_SUPPLY_CAPABILITY` 참조.
     #
-    # ★ **경계 재료는 그날을 기다리지 않는다.** 매입이 낼 「가능량」의 재료가 물류·재무
-    #   봉투이고, 그 값은 이미 실행 이력에 있다 —
-    #   `app/master/procurement_boundary.py` 가 그것을 읽는다 (호출 0회).
-    "ADDITIONAL_SUPPLY_CONTEXT": None,
+    # 🔴 **품목으로 묶어 한 품목씩 부른다.** 매입 회신 계약
+    #   (`sales.schemas.PurchaseAdditionalSupplyResult`)이 최상위 단수라 한 번에 한
+    #   품목이고, 같은 품목 후보가 여럿이면 같은 답이 여러 번 온다.
+    #
+    # ★ **경계 재료는 호출 0회다.** 매입이 낼 「가능량」의 재료가 물류·재무 봉투이고,
+    #   그 값은 이미 실행 이력에 있다 — `app/master/procurement_boundary.py` 가
+    #   그것을 읽는다.
+    "ADDITIONAL_SUPPLY_CONTEXT": ("purchase", "SUPPLY_CAPACITY_QUERY"),
 }
 """capability → 부를 대상. **`None` 은 못 부른다는 사실 자체다.**"""
 
@@ -828,8 +826,16 @@ def _is_number_map(value: Any) -> bool:
 #: ⚠️ **이름으로만 뺀다.** 모양으로 빼려다 재무 `critical_payment_dates`
 #: (날짜 배열) 의 근거 요구까지 지웠다 — `test_비어있지_않은_리스트는_근거가_
 #: 필요하다` 가 잡았다. 날짜 배열과 코드 배열은 둘 다 문자열 배열이라 못 가른다.
+#: `risks` 가 들어온 경위 (매입 청함 · 2026-09-10):
+#: `SUPPLY_CAPACITY_QUERY` 회신이 `risks` 를 **최상위 필수**로 싣는다 — 판매 계약
+#: (`sales.schemas.PurchaseAdditionalSupplyResult`)이 그 칸을 필수로 두어 안 낼 수가
+#: 없다. 그런데 그것도 **위험 문장의 배열**이라 `soft_warnings` 와 성질이 같다 —
+#: 붙일 수 있는 근거가 *"위험 2건"* 같은 **개수뿐**이고 그건 세어 본 것이다.
+#:
+#: 🟢 재무·매입·판매가 셋 다 `list[str]` 로 같은 뜻에 쓴다 (실측 2026-09-10 ·
+#:   `finance/schemas.py:298` · `purchase_agent/schemas.py:407` · `sales/schemas.py:348`).
 ENVELOPE_META_KEYS: frozenset[str] = frozenset(
-    {"policy_version_used", "as_of", "state_date", "soft_warnings"}
+    {"policy_version_used", "as_of", "state_date", "soft_warnings", "risks"}
 )
 
 

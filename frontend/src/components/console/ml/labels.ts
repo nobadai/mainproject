@@ -70,6 +70,7 @@ export const RUN_STATE: Record<string, string> = {
 /** Report kind, as it appears in the saved-report history. */
 export const REPORT_KIND: Record<string, string> = {
   claude_check: "일일 점검",
+  claude_check_en: "일일 점검 (영어 원문)",
   데이터품질: "데이터 이상",
   배치장애조사: "자동작업 실패",
   드리프트감지: "예측 밀림",

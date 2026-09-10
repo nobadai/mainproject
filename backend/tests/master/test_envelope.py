@@ -245,6 +245,27 @@ def test_비어있지_않은_리스트는_근거가_필요하다():
     assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
 
 
+def test_risks_는_근거를_요구하지_않는다():
+    """🔴 **위험 문장에 붙일 수 있는 근거가 개수뿐이다** (`soft_warnings` 와 같은 성질).
+
+    `Evidence.value` 가 숫자라 *"위험 2건"* 밖에 못 단다 — 그건 근거가 아니라 세어 본
+    것이고, **만족시킬 수 없는 검사는 기준이 아니라 결함이다** (2026-08-30 · `713e515`).
+
+    ⚠️ 그리고 판매 계약이 `risks` 를 **필수**로 두어 매입이 그 칸을 안 낼 수가 없다
+      (`sales.schemas.PurchaseAdditionalSupplyResult`). 낼 수밖에 없는 칸에 못 채울
+      근거를 요구하면 매 실행 `E-EVIDENCE-MISSING` 이 뜬다.
+    """
+    assert check_evidence_coverage(reply(payload={"risks": ["창고 여유가 먼저 막는다"]})) == []
+
+
+def test_날짜_배열은_여전히_근거가_필요하다():
+    """★ **이름으로만 뺀다.** 모양으로 빼면 이것까지 지워진다 — 둘 다 문자열 배열이라
+    못 가른다. 그 함정을 한 번 밟은 자리다 (`ENVELOPE_META_KEYS` 주석).
+    """
+    f = check_evidence_coverage(reply(payload={"critical_payment_dates": ["2026-09-05"]}))
+    assert [x.code for x in f] == ["E-EVIDENCE-MISSING"]
+
+
 # ── 배열 payload — 매입 파트 요청으로 v0.3 에서 확대 ──────────────────
 
 

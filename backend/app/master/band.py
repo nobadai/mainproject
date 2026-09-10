@@ -1,8 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# STATUS: TOOL 후보 — 유지 (2026-08-26)
+# STATUS: 검증 Tool 의 산술 — 두 자리가 직접 부른다 (2026-09-10 실측)
 #   밴드 결합·클리핑·교착 판정. 회의 4.1-2 "기존 함수는 폐기하지 않고 Tool 로 전환".
-#   → 마스터의 `combine_and_clip` Tool 이 된다. 파일은 그대로 두고 어댑터가 감싼다.
-#   현재 `app/master/critic/service.py` 도 직접 쓴다.
+#   ⚠️ "어댑터가 감싼다" 는 안 일어났다. `combine_and_clip` 이라는 이름은 저장소에 0곳이다.
+#     전환은 이 파일을 감싸는 쪽이 아니라 **부르는 쪽이 Tool 이 되는** 모양으로 났다.
+#         app/master/critic/service.py:33      clip_all · combine_band
+#         app/master/critic/critic_v0_4.py:69  check_occupancy_detailed · detect_collapse_type
+#   둘 다 산 경로다. 부르는 자리가 둘이라 여기 산술이 갈리면 API 와 판단이 같이 갈린다.
+#         HTTP    main.py:56 → critic/router.py:44 → critic/service.py
+#         판단    master/service.py:103 MasterVerifier() → verifier.py:280 → 같은 함수
 # ─────────────────────────────────────────────────────────────────────────────
 """★ **`app/orchestrator/` 에서 옮겼다** (2026-09-07 · 지시). 옛 경로는 없다.
 

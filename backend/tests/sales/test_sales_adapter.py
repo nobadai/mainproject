@@ -374,10 +374,21 @@ def test_sales_adapter_does_not_import_other_domain_agents():
     assert not {name for name in imported if name.startswith("app.purchase_agent")}
 
 
-def test_additional_supply_context_remains_unroutable():
+def test_additional_supply_context_routes_to_purchase_boundary_query():
+    """Master opened this route on 2026-09-10 after Purchase shipped the mode in #485.
+
+    The expectation flipped, not the meaning: Sales still owns the capability name and
+    still does not call Purchase itself. What is asserted here is that the name Sales
+    emits reaches Purchase as a *boundary* question (``SUPPLY_CAPACITY_QUERY``) and not
+    as ``GENERATE_SCENARIOS`` -- the latter would build a procurement plan inside the
+    sales cycle, silently and without error.
+    """
     from app.master.envelope import CAPABILITY_ROUTING
 
-    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] is None
+    assert CAPABILITY_ROUTING["ADDITIONAL_SUPPLY_CONTEXT"] == (
+        "purchase",
+        "SUPPLY_CAPACITY_QUERY",
+    )
 
 
 def _reply(
