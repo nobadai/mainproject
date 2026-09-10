@@ -209,6 +209,17 @@ def _pick(
     #  🔴 거른 것을 조용히 없애지 않는다 — 계약 밖 품목과 같은 규율이다.
     if off_axis:
         aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다 — 지금 보는 것은 {sim_run_id} 입니다"
+    #  🔴 **안 거를 때도 말한다** (마스터 청구 2026-09-10). 축이 없는 실행은 손으로
+    #     돌린 것이거나 축이 생기기 전 기록인데, 걷기와 **같아 보이면** 보는 사람이
+    #     둘을 한 세상으로 읽는다. 마스터가 실제로 그 오독을 했다 —
+    #     *"같은 토요일인데 하나는 0건이고 하나는 4건이니 걷는 경로가 둘이다"* 로
+    #     진단했다가 물렀고, 실은 표에 손 실행이 섞여 있었을 뿐이었다.
+    outside = sum(1 for r in chosen if r["sim_run_id"] is None)
+    if outside:
+        aside += (
+            f". 보이는 것 중 {outside}건은 **걷기 밖 실행**입니다 —"
+            " 손으로 돌렸거나 걷기 축이 생기기 전 기록입니다"
+        )
     if not chosen:
         return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 계약 품목 실행 0건{aside}"
     names = " · ".join(f"{r['item']} {r['request_id']}" for r in chosen)
@@ -321,7 +332,7 @@ def _payments(scenario: dict[str, Any]) -> Table:
 
 
 def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], str],
-          request_id: str) -> Plan | None:
+          request_id: str, sim_run_id: str | None = None) -> Plan | None:
     label = str(scenario.get("label") or "")
     sourcing = _sourcing(scenario.get("sourcing_plan") or [])
     if sourcing is None:
@@ -356,6 +367,9 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
         risks=[str(x) for x in scenario.get("risks") or []],
         pending=decision is None,
         approved=decision == "APPROVE",
+        #  🔴 없으면 None 그대로 싣는다. «걷기 밖» 이라는 사실이고, 화면이 그것을
+        #     보일 수 있어야 한다 (schema.Plan.sim_run_id 주석).
+        sim_run_id=sim_run_id,
     )
 
 
@@ -541,7 +555,9 @@ def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
     for run in chosen:
         for scenario in (run["payload"] or {}).get("scenarios") or []:
             #  _pick 이 ITEMS 로 걸렀으므로 여기서 item 은 언제나 계약 품목이다
-            plan = _plan(str(run["item"]), scenario, decided, run["request_id"])
+            plan = _plan(
+                str(run["item"]), scenario, decided, run["request_id"], run["sim_run_id"]
+            )
             if plan is None:
                 skipped += 1
             else:

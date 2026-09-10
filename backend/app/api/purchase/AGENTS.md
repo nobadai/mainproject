@@ -160,6 +160,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `risks` | `list[str]` | 필수 | 걸리는 것. 비어 있으면 안 적는다 |
 | `pending` | `bool` | 필수 | 아직 사람이 안 고른 안인가 |
 | `approved` | `bool` | 선택 | 이미 승인된 안인가 |
+| `sim_run_id` | `str &#124; None` | 선택 | 어느 걷기의 실행인가. None 이면 걷기 밖(손 실행·축이 생기기 전)이다 |
 
 ### `Reason` — 이 안을 왜 냈나 — 한 줄.
 

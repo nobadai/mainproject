@@ -63,6 +63,14 @@ class Plan(BaseModel):
     risks: list[str] = Field(description="걸리는 것. 비어 있으면 안 적는다")
     pending: bool = Field(description="아직 사람이 안 고른 안인가")
     approved: bool = Field(default=False, description="이미 승인된 안인가")
+    #  🔴 **`None` 은 «못 읽었다» 가 아니라 «걷기 밖» 이다.** 축이 붙기 전에 만든
+    #     실행이거나 손으로 돌린 것이고, 그 사실이 화면에 보여야 한다 (마스터 청구
+    #     2026-09-10). 걷기와 손 실행이 **같아 보이면** 보는 사람이 둘을 한 세상으로
+    #     읽는다 — 마스터가 실제로 그 오독을 했다.
+    sim_run_id: str | None = Field(
+        default=None,
+        description="어느 걷기의 실행인가. None 이면 걷기 밖(손 실행·축이 생기기 전)이다",
+    )
 
 
 class PurchaseTab(BaseModel):

@@ -1148,6 +1148,19 @@ def _supply_capacity_query(
         constraints=constraints,
     )
 
+    #  🔴 **묻는 이름과 답하는 이름이 다르다. 일부러 그렇다.**
+    #
+    #      받을 때  required_additional_quantity_kg   판매 어휘 — "원래 얼마가 모자랐나"
+    #      낼 때    requested_quantity_kg             회신 어휘 — "그 물음에 답한다"
+    #
+    #  ⚠️ 그 둘을 맞추려 하지 마라. 판매가 부족량을 그 이름으로 쥐고 있고
+    #  (`sales/schemas.py` 의 `required_additional_quantity_kg`), 회신 계약은
+    #  `requested_quantity_kg` 로 정해져 있다.
+    #
+    #  🔴 **틀리면 조용히 사라진다.** `_read_optional_number` 는 없는 키에 `None` 을
+    #  주고, 판매 모델은 `extra="ignore"` 다 — 양쪽 다 오류를 안 낸다. 마스터가
+    #  스펙에 `requested_quantity_kg` 로 보내라고 적었다가 구현이 이 줄을 읽고
+    #  잡았다 (2026-09-10). 안 잡았으면 그 칸이 계속 비어 왔을 것이다.
     requested = _read_optional_number(payload, "required_additional_quantity_kg")
     risks = [*capacity.risks, *extra_risks, _NO_LEAD_TIME]
     body: dict[str, Any] = {
