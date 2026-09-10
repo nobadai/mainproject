@@ -12,31 +12,30 @@
    이 이미 정확히 이 carry-forward INSERT 이고, 여기서는 그 모양과 그 값을 그대로
    옮겼다. 어느 칸을 물려받고 어느 칸을 새로 두는지는 **그 파일이 정한 그대로다.**
 
-⚠️ **씨앗 SQL 과 다른 자리가 딱 하나 있다 — `in_transit` 이다.**
+🔴 **입고 예정 두 칸을 이제 물려받지 않는다 (W3-3 · 2026-09-09).**
 
    ```text
-   씨앗 SQL    리터럴로 새로 뒀다      관통 Day1/Day2 를 세우려던 파일이라 그랬다
-   open_day    물려받는다              in_transit 은 여러 날에 걸쳐 유지되는 상태다
+   ~W3-2   물려받는다              in_transit 이 여러 날에 걸쳐 유지되는 상태였다
+   W3-3~   CONFIRMED_ZERO · []     그 상태의 정본이 inbound_schedules 로 옮겨 갔다
    ```
 
-   `in_transit` 은 매입 승인 ~ 창고 도착 ~ 검수 완료까지 여러 날에 걸쳐 유지된다.
-   하루가 넘어갔다고 어제 떠 있던 물건이 사라지지 않는다. 여기서 `CONFIRMED_ZERO`
-   로 새로 두면 **어제 승인된 입고 예정이 다음 날 조용히 없어진다.**
+   종전에는 물려받아야 했다 — 안 그러면 *"어제 승인된 입고 예정이 다음 날 조용히
+   없어졌다"*. 그런데 **그 복제가 정확히 FIRSTINB 사고의 원인**이었다: 미래 날짜 행이
+   먼저 열려 있으면 그 행은 나중에 난 승인을 모른 채 굳는다 (실측
+   `INB-H1-REQ-FIRSTINB-20260113-1-1` — 01-15 행이 먼저 서서 01-14 승인을 못 받았다).
 
-🔴 **`in_transit` 과 `confirmed_inbound` 는 짝이다. 한쪽만 물려받으면 안 된다.**
+   지금은 일정 한 행이 날짜에 안 묶여 있고 Reader 가 날짜로 질의한다
+   (`inbound_schedules.load_schedule_views`). 하루가 넘어가도 그 행은 그대로이므로
+   **복제가 필요 없고, 복제하지 않으므로 사고도 재현되지 않는다.**
 
-   한쪽만 물려받으면 B-1(`tools.py` `find_in_transit_schedule_gap`)이
-   `IN_TRANSIT_NOT_IN_CONFIRMED_SCHEDULE` 로 다음 날을 세운다.
-
-   ★ **실측으로 겪은 자리다 (2026-09-04).** 승인 전이가 `in_transit` 만 채웠더니 다음
-     날 물류가 경계를 못 냈고 `#275` 로 `confirmed_inbound` 를 병합해 풀었다.
-     `app/master/day_open.DayOpening` docstring 이 물류 구현자에게 남긴 한 줄이 이것이다.
+   ★ B-1(`tools.find_in_transit_schedule_gap`)도 여전히 통과한다 — 두 목록을 같은
+     신규 표에서 만들고 `in_transit ⊆ confirmed_inbound` 라서다.
 
 🔴 **`transition.py` 를 손대지 않았다.** `build_next_inventory` · `persist_inventory`
    는 승인이 부르는 경로이고 이 파일은 하루 넘김이 부르는 경로다. 두 경로가 같은 표의
    같은 행을 건드리지만 **쓰는 칸도 시점도 다르다** — 하루 넘김이 행을 세우고, 그날
-   승인이 나면 `persist_inventory` 가 그 행의 `in_transit` 두 칸에 승인분을 **더한다**
-   (2026-09-05 부터 덮어쓰기가 아니라 `inbound_id` 기준 누적이다).
+   승인이 나면 `persist_inventory` 가 그 행의 **status 두 칸**만 세운다 (W3-3 부터
+   업무 목록은 `inbound_schedules` 에만 적는다).
 
 ⚠️ **물류가 자기 판단으로 바꿀 수 있는 자리다.** 팀 리드 지시로 마스터 파트가 옮겨
    적었을 뿐, 어느 칸을 물려받을지는 물류 소유다. 바꿀 때 `in_transit` 과
@@ -252,7 +251,8 @@ class LogisticsDayOpening:
                     note=(
                         f"하루 넘김이 {carry_from} 행에서 물려받아 세운 행이다."
                         " 승인이 만든 행이 아니다 - 그날 승인이 나면"
-                        " persist_inventory 가 in_transit 두 칸을 덮는다."
+                        " persist_inventory 가 status 두 칸을 CONFIRMED 로 세운다."
+                        " 입고 예정 목록은 inbound_schedules 가 들고 있다."
                     ),
                 ),
             )
@@ -277,12 +277,35 @@ class LogisticsDayOpening:
         """전날 행에서 물려받는 INSERT.
 
         ```text
-        물려받는다     in_transit · confirmed_inbound · confirmed_outbound
-                       zone_capacity · usage_scope · evidence_grade · approved_by
-                       sim_run_id
+        물려받는다     confirmed_outbound · zone_capacity
+                       usage_scope · evidence_grade · approved_by · sim_run_id
         새로 둔다      as_of · fixture_id · source_ref · note · is_active
-        안 물려받는다  lot_priority (CONFIRMED_ZERO · [])
+        안 물려받는다  lot_priority          (CONFIRMED_ZERO · [])
+                       in_transit            status 만 CONFIRMED_ZERO   ← W3-3/4
+                       confirmed_inbound     status 만 CONFIRMED_ZERO   ← W3-3/4
         ```
+
+        ★ **입고 두 JSON 칸을 아예 안 쓴다 (W3-4).** 그 칸은 이제 production 어디에서도
+          업무 사실로 안 읽히고 DROP 대상이라(`database/logistics_drop_inbound_json.sql`),
+          여기서 값을 넣으면 그 migration 뒤에 이 INSERT 가 깨진다.
+
+        🔴 **`confirmed_outbound_json` 도 안 쓴다 (WP-3).** 미래 확정 출고의 정본이
+           `sales` · `sale_items` 로 옮겨 갔다 — 그 칸을 물려받으면 **아무도 안 읽는
+           값을 날마다 복제**하는 것이 되고, 입고 축에서 사고를 냈던 바로 그 모양이다
+           (`outbound_schedules.confirmed_outbound_at`).
+
+           ⚠️ **`confirmed_outbound_status` 도 물려받지 않고 `CONFIRMED_ZERO` 로 새로
+              둔다.** 입고 두 축과 같은 이유다 — 물려받은 `UNRESOLVED` 를 이으면 그날
+              이후가 전부 `UNRESOLVED` 로 굳어 Reader 가 목록을 통째로 숨긴다.
+
+        🔴 **입고 예정을 다음 날로 복제하지 않는다 (W3-3).** 그 복제가 사고의 원인이었다
+           — 미래 날짜 행이 **먼저 열려 있으면** 그 행은 나중에 난 승인을 모른 채 굳는다.
+           지금은 `inbound_schedules` 한 행이 날짜에 안 묶여 있고 Reader 가 날짜로
+           질의하므로 **복제할 것이 없다.**
+
+           ⚠️ **`CONFIRMED_ZERO` 로 새로 둔다 — 물려받은 `UNRESOLVED` 를 잇지 않는다.**
+              이으면 그날 이후가 전부 `UNRESOLVED` 로 굳어 **Reader 가 일정을 통째로
+              숨긴다** (`repository._schedule_source`).
 
         🔴 **`lot_priority` 는 판단이라 물려받지 않는다.** 씨앗 SQL 이 그렇게 적었고
            (`database/27_...sql` 124행) 그대로 옮긴다. 어제 어느 로트를 먼저 내보내기로
@@ -304,9 +327,9 @@ class LogisticsDayOpening:
             """
             INSERT INTO {}.logistics_runtime_fixture (
                 fixture_id, sim_run_id, as_of,
-                in_transit_status,         in_transit_json,
-                confirmed_inbound_status,  confirmed_inbound_json,
-                confirmed_outbound_status, confirmed_outbound_json,
+                in_transit_status,
+                confirmed_inbound_status,
+                confirmed_outbound_status,
                 lot_priority_status,       lot_priority_json,
                 zone_capacity_status,      guaranteed_capacity_by_zone_json,
                 usage_scope, evidence_grade, approved_by, source_ref, is_active, note
@@ -315,9 +338,9 @@ class LogisticsDayOpening:
                 'LOG-RUNTIME-' || base.sim_run_id || '-' || to_char(%(as_of)s::date, 'YYYYMMDD'),
                 base.sim_run_id,
                 %(as_of)s::date,
-                base.in_transit_status,         base.in_transit_json,
-                base.confirmed_inbound_status,  base.confirmed_inbound_json,
-                base.confirmed_outbound_status, base.confirmed_outbound_json,
+                'CONFIRMED_ZERO',
+                'CONFIRMED_ZERO',
+                'CONFIRMED_ZERO',
                 'CONFIRMED_ZERO',               '[]'::JSONB,
                 base.zone_capacity_status,      base.guaranteed_capacity_by_zone_json,
                 base.usage_scope,

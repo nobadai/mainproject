@@ -18,20 +18,25 @@ from typing import NamedTuple
 
 from psycopg import sql
 
-from app.logistics.db import fetch_all, get_db_schema
+from app.logistics.db import fetch_all, get_connection, get_db_schema
+from app.logistics.inbound_schedules import in_transit_at, pending_inbound_at
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
     _HOLDING_RESERVATION,
 )
+from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.schemas import (
     POLICY_VERSION,
+    UNRESOLVED_SOURCE,
+    InTransitItem,
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
     ItemStoragePolicyFact,
     LogisticsPolicy,
     LogisticsRuntimeFixture,
     OutboundCommitment,
+    ScheduledQuantity,
 )
 
 #: 계약(Literal)과 같은 값을 쓴다 — schemas 가 단일 소유다 (#121 ⑤).
@@ -53,7 +58,17 @@ _REQUIRED_POLICY_KEYS = _NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS
 _OPTIONAL_NUMERIC_POLICY_KEYS = {
     "capacity_tight_ratio",
     "freshness_pressure_ratio",
+    # 🔴 **납기 준비일 (WP-4 M4).** 여기 둔 것은 «없어도 된다» 가 아니라 «없으면 그
+    #    값을 쓰는 판정만 멈춘다» 는 뜻이다 — `LogisticsPolicy.outbound_prep_lead_days`
+    #    주석이 그 fail-closed 를 어디서 거는지 적고 있다. 필수로 올리면 납기와 무관한
+    #    입고·Capacity 경로까지 통째로 멈춘다.
+    "outbound_prep_lead_days",
 }
+
+#: 🔴 **정수여야 하는 NUMERIC 정책.** DB 는 `NUMERIC` 이라 `1.5` 도 담기는데, 날 수는
+#:   반쪽이 없다. `inbound_lead_days` 가 원래 혼자 하던 검사를 이름 있는 집합으로
+#:   옮겼다 — 두 번째 날짜 정책(`outbound_prep_lead_days`)이 생겼기 때문이다.
+_INTEGER_POLICY_KEYS = {"inbound_lead_days", "outbound_prep_lead_days"}
 
 
 def get_active_logistics_policy() -> LogisticsPolicy:
@@ -126,11 +141,14 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
     for optional_key in _OPTIONAL_NUMERIC_POLICY_KEYS:
         values.setdefault(optional_key, None)
 
-    inbound_lead_days = values["inbound_lead_days"]
-    assert isinstance(inbound_lead_days, Decimal)
-    if inbound_lead_days != inbound_lead_days.to_integral_value():
-        raise ValueError("Logistics policy must be an integer: inbound_lead_days")
-    values["inbound_lead_days"] = int(inbound_lead_days)
+    for key in _INTEGER_POLICY_KEYS:
+        raw = values.get(key)
+        if raw is None:
+            continue  # 선택 정책이 안 실렸다 — 쓰는 자리에서 막는다
+        assert isinstance(raw, Decimal)
+        if raw != raw.to_integral_value():
+            raise ValueError(f"Logistics policy must be an integer: {key}")
+        values[key] = int(raw)
     return LogisticsPolicy(
         **values,
         policy_version=LOGISTICS_POLICY_VERSION,
@@ -183,11 +201,8 @@ def get_active_logistics_runtime_fixture(
                 sim_run_id,
                 as_of,
                 in_transit_status,
-                in_transit_json,
                 confirmed_inbound_status,
-                confirmed_inbound_json,
                 confirmed_outbound_status,
-                confirmed_outbound_json,
                 usage_scope,
                 evidence_grade,
                 source_ref,
@@ -229,9 +244,63 @@ def get_active_logistics_runtime_fixture(
     )
 
 
+def _schedule_lists(
+    *, sim_run_id: str, as_of: date
+) -> tuple[list[InTransitItem], list[ScheduledQuantity], list[ScheduledQuantity]]:
+    """세 예정 목록을 **각자의 업무 정본에서** 읽는다 (W3-2 · WP-3).
+
+    ```text
+    in_transit           inbound_schedules   Receipt 가 생기면 빠진다     운송 중
+    confirmed_inbound    inbound_schedules   Lot + 원장 IN 이 서면 빠진다  미래 점유
+    confirmed_outbound   sales · sale_items  sale_date > as_of 인 확정 판매 미래 점유
+    ```
+
+    🔴 **출고 축이 fixture JSON 을 떠났다 (WP-3).** `confirmed_outbound_json` 은
+       판매 확정이 채우는 경로가 하나도 없어 실측 254행 전부 `[]` 였다 — 비어 있는
+       옛 정본이 «미래 출고가 없다» 는 사실처럼 읽히던 자리다
+       (`outbound_schedules.confirmed_outbound_at` 이 그 자리를 대신한다).
+
+    🔴 **둘이 같은 목록이 아니다.** Legacy JSON 에서 같았던 것은 발주 확정 단계가 비어
+       승인을 두 칸에 겹쳐 적었기 때문이고(`transition.py` 의 *"임시 조치"*), 신규
+       구조에서는 종료조건이 다르다. `in_transit ⊆ confirmed_inbound` 라 B-1
+       (`tools.find_in_transit_schedule_gap`)은 그대로 통과한다.
+
+    ⚠️ **자기 커넥션을 연다.** 이 모듈은 `fetch_all` 로 호출마다 커넥션을 여는 기존
+       구현이고(`get_current_logistics_read` docstring 이 그 사실을 이미 적어 뒀다),
+       여기서 그 규약을 바꾸지 않는다.
+    """
+    with get_connection() as conn:
+        return (
+            in_transit_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+            pending_inbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+            confirmed_outbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+        )
+
+
 def _build_logistics_runtime_fixture(
     row: dict[str, object], *, expected_as_of: date, expected_sim_run_id: str | None = None
 ) -> LogisticsRuntimeFixture:
+    """fixture 행 하나를 계약 타입으로. **입고 예정 두 목록만 신규 표에서 온다 (W3-2).**
+
+    ```text
+    업무 정본에서  in_transit · confirmed_inbound · confirmed_outbound
+    fixture 에서   세 status · 나머지 칸                          ← Header 뿐이다
+    ```
+
+    🔴 **status 어휘를 안 바꾼다** (`08 §8`). fixture 가 `UNRESOLVED` 라고 적은 축은
+       그대로 `UNRESOLVED`(목록 `None`)이고, 그 외에는 신규 표 결과가 0건이면
+       `CONFIRMED_ZERO`, 있으면 `CONFIRMED` 다.
+
+    ```text
+    fixture status == UNRESOLVED   →  UNRESOLVED · None    ★ 아는 척으로 안 바꾼다
+    그 외 · 신규 표 0건             →  CONFIRMED_ZERO · []
+    그 외 · 신규 표 1건 이상        →  CONFIRMED · [...]
+    ```
+
+       ⚠️ **status 가 업무 사실의 두 번째 정본이 되면 안 된다.** 업무 사실은
+          `inbound_schedules` 이고, status 는 Header 의 가용성·Legacy 호환 표시다.
+          그래서 `CONFIRMED`/`CONFIRMED_ZERO` 를 **저장된 값이 아니라 목록에서** 낸다.
+    """
     if row.get("as_of") != expected_as_of:
         raise ValueError("Logistics runtime fixture as_of mismatch")
     if row.get("usage_scope") != LOGISTICS_POLICY_USAGE_SCOPE:
@@ -242,21 +311,53 @@ def _build_logistics_runtime_fixture(
     #    여기서 안 잡으면 **한 스냅샷 안에 두 실행의 사실이 섞인다.**
     if expected_sim_run_id is not None and row.get("sim_run_id") != expected_sim_run_id:
         raise ValueError("Logistics runtime fixture sim_run_id mismatch")
+
+    # ── W3-2 · WP-3: 세 목록의 정본이 전부 fixture JSON 밖으로 옮겨 왔다 ──
+    run_id = str(row.get("sim_run_id"))
+    in_transit, confirmed_inbound, confirmed_outbound = _schedule_lists(
+        sim_run_id=run_id, as_of=expected_as_of
+    )
+    in_transit_status, in_transit_list = _schedule_source(
+        row.get("in_transit_status"), in_transit
+    )
+    confirmed_status, confirmed_list = _schedule_source(
+        row.get("confirmed_inbound_status"), confirmed_inbound
+    )
+    outbound_status, outbound_list = _schedule_source(
+        row.get("confirmed_outbound_status"), confirmed_outbound
+    )
     return LogisticsRuntimeFixture(
         fixture_id=row.get("fixture_id"),
         sim_run_id=row.get("sim_run_id"),
         as_of=row.get("as_of"),
-        in_transit_status=row.get("in_transit_status"),
-        in_transit=row.get("in_transit_json"),
-        confirmed_inbound_status=row.get("confirmed_inbound_status"),
-        confirmed_inbound_schedule=row.get("confirmed_inbound_json"),
-        confirmed_outbound_status=row.get("confirmed_outbound_status"),
-        confirmed_outbound_schedule=row.get("confirmed_outbound_json"),
+        in_transit_status=in_transit_status,
+        in_transit=in_transit_list,
+        confirmed_inbound_status=confirmed_status,
+        confirmed_inbound_schedule=confirmed_list,
+        confirmed_outbound_status=outbound_status,
+        confirmed_outbound_schedule=outbound_list,
         usage_scope=row.get("usage_scope"),
         evidence_grade=row.get("evidence_grade"),
         source_ref=row.get("source_ref"),
         approved_by=row.get("approved_by"),
     )
+
+
+def _schedule_source[Schedule: (InTransitItem, ScheduledQuantity)](
+    stored_status: object, rows: list[Schedule]
+) -> tuple[object, list[Schedule] | None]:
+    """저장된 status 와 신규 표 결과를 하나로 맞춘다. **어휘를 안 바꾼다.**
+
+    🔴 **`UNRESOLVED` 는 그대로 둔다.** 그 값은 *"그 축을 확인한 적이 없다"* 이고,
+       신규 표가 0건이라고 **확인했다고 바꾸지 않는다** — 하지 않은 확인을 장부에
+       적는 것이 된다 (`transition._merge_schedule` 이 지키는 그 규율이다).
+
+    ★ 그 밖에는 **목록이 status 를 정한다.** 저장된 `CONFIRMED`/`CONFIRMED_ZERO` 를
+      읽어 쓰면 그 칸이 업무 사실의 두 번째 정본이 된다.
+    """
+    if stored_status == UNRESOLVED_SOURCE:
+        return UNRESOLVED_SOURCE, None
+    return ("CONFIRMED" if rows else "CONFIRMED_ZERO"), rows
 
 
 def get_item_storage_policies() -> list[ItemStoragePolicyFact]:
@@ -337,6 +438,21 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
       `get_outbound_commitments` 는 이미 `fixture.sim_run_id` 로 묻고 있었다 — 즉 실행을
       가르는 자리는 처음부터 **fixture 조회 하나**였고, 그래서 이번 변경이 그 한 곳만
       넓히면 스냅샷 전체가 같은 실행 위에 선다.
+
+    🔴 **이것은 Current 읽기다. 과거 조회에 쓰지 않는다.**
+
+    ```text
+    Current     이 함수                        Agent Runtime · 그 순간의 잔량
+    Historical  historical_repository          화면 조회 · as_of 시점 원장/사건
+    ```
+
+       아래 `inventory_lots` 조회는 `remaining_qty_kg`(**Derived Current Cache**)로
+       Lot 을 고른다. `as_of` 를 받지만 그것은 `received_at` 상한일 뿐이고 **잔량은
+       언제나 지금 값**이다 — 과거 화면이 이 함수를 쓰면 오늘 소진된 재고가
+       그날에도 없었던 것으로 보인다 (실측: 네 기준일 전부 0 kg).
+
+       ⚠️ 이 함수에 `historical=True` 같은 분기를 넣지 않는다. 두 축이 한 함수
+          안에 섞이는 순간 어느 호출이 어느 시점을 읽는지 아무도 말할 수 없다.
     """
     fixture = get_active_logistics_runtime_fixture(as_of=as_of, sim_run_id=sim_run_id)
     policy = get_active_logistics_policy()
@@ -346,6 +462,11 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
     # status로 거르지 않는다 — 검수·격리·사용불가·신선도 만료 재고도 반출/폐기 전이면
     # 공간을 점유한다. 소진/반출 완료 Lot은 remaining_qty_kg = 0으로 자연히 빠진다
     # (현행 DB의 DEPLETED가 그 예). 가용 여부 판정은 tools.build_inventory_by_item 몫이다.
+    #
+    # 🔴 **`remaining_qty_kg` 는 DERIVED CURRENT CACHE 다.** 정본은 `inventory_moves`
+    #    이고 이 컬럼은 그 누계를 들고 있는 지금 값이다 (실측 불일치 0건 — 캐시가
+    #    틀린 것이 아니라 **과거에 쓰면 안 되는 값**이다). 과거 잔량은
+    #    `historical_repository.onhand_by_lot_at` 이 원장에서 되살린다.
     inventory_rows = fetch_all(
         sql.SQL(
             """
@@ -519,7 +640,7 @@ def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
         sql.SQL(
             """
             SELECT i.item_name,
-                   SUM(GREATEST(r.required_qty_kg - COALESCE(a.assigned_qty_kg, 0), 0))
+                   SUM(GREATEST(r.reserved_qty_kg - COALESCE(a.assigned_qty_kg, 0), 0))
                        AS quantity_kg
             FROM {}.inventory_reservations r
             JOIN {}.items i ON i.item_id = r.item_id

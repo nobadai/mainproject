@@ -7,7 +7,7 @@ runtime in_transit
   → check_receipt_state            **어디서부터 이어갈지**를 여는 열쇠
   → create_arrived_receipt         (없을 때만) ARRIVED
   → record_inspection              (검수 전일 때만) → INSPECTED
-  → materialize_inspected_inbound  Lot · 원장 IN · PUTAWAY_DONE · 일정 정리
+  → materialize_inspected_inbound  Lot · 원장 IN · PUTAWAY_DONE
   → RECEIVED · NOTHING_DUE · BLOCKED
 ```
 
@@ -22,7 +22,7 @@ runtime in_transit
   매입 참조 해석               purchase_detail.fetch_purchase_detail
   Receipt 정체성 · 멱등        receipts (receipt_id 결정론 + advisory lock)
   검수 항등식 · 상태 마감      inspections.record_inspection
-  Lot · 원장 IN · 일정 정리    inbound_stock.materialize_inspected_inbound
+  Lot · 원장 IN · PUTAWAY_DONE inbound_stock.materialize_inspected_inbound
   ```
 
   ⚠️ 여기에 SQL 이 한 줄도 없는 것이 그 규율의 증거다.
@@ -123,7 +123,7 @@ _PART = "logistics"
 InboundBlockReason = Literal[
     ArrivalBlockReason,
     ArrivalUnresolvedReason,
-    #: 그날 운송 중 목록 자체를 **확인한 적이 없다** (`in_transit_json IS NULL`).
+    #: 그날 운송 중 목록 자체를 **확인한 적이 없다** (`in_transit_status = UNRESOLVED`).
     #: 🔴 *"오늘 받을 것이 없다"* 가 아니다 — 뭉치면 모르는 것을 아는 것처럼 다룬다.
     "IN_TRANSIT_UNRESOLVED",
     #: 매입 참조는 있는데 그 줄이 없다 (`PurchaseDetailMissing`).
@@ -451,9 +451,9 @@ class LogisticsInboundExecution:
                 f" 검수 전: {sorted(_NEEDS_INSPECTION)} · 검수 후: {sorted(_INSPECTION_SETTLED)}."
             )
 
-        # ── 재고화 · 일정 정리 ────────────────────────────────────────
-        # ★ Lot · 원장 IN · PUTAWAY_DONE · 일정 두 칸 정리가 **저 함수 안에 다 있다.**
-        #   여기서 다시 조립하지 않는다.
+        # ── 재고화 ────────────────────────────────────────────────────
+        # ★ Lot · 원장 IN · PUTAWAY_DONE 이 **저 함수 안에 다 있다.** 여기서 다시
+        #   조립하지 않는다. 일정은 걷지 않는다 — 완료는 Lot + 원장 IN 으로 유도한다.
         materialize_inspected_inbound(
             conn,
             as_of=as_of,

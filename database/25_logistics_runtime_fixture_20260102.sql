@@ -52,7 +52,7 @@
 --     그리고 HARD_ALLOWED_GRADES = {OFFICIAL, VENDOR, SIM_FIXED} 에서 빠지면
 --     LOG-H01·LOG-H02 가 하드 제약으로 서지 못한다.
 --
---   confirmed_inbound / outbound = CONFIRMED_ZERO · []
+--   confirmed_inbound · confirmed_outbound = CONFIRMED_ZERO (둘 다 status 뿐)
 --     🔴 회피가 아니라 사실이다 — 01-02 도착 예정인 확정 입·출고가 실제로 없다.
 --     ⚠️ UNRESOLVED 로 두면 `is_inbound_schedule_complete()` 가 거짓이 되어
 --        `calculate_cap_by_date()` 가 IN_TRANSIT_SCHEDULE_UNRESOLVED 로 서고,
@@ -110,9 +110,9 @@ $$;
 
 INSERT INTO haetdeul.logistics_runtime_fixture (
     fixture_id, sim_run_id, as_of,
-    in_transit_status,         in_transit_json,
-    confirmed_inbound_status,  confirmed_inbound_json,
-    confirmed_outbound_status, confirmed_outbound_json,
+    in_transit_status,
+    confirmed_inbound_status,
+    confirmed_outbound_status,
     lot_priority_status,       lot_priority_json,
     zone_capacity_status,      guaranteed_capacity_by_zone_json,
     usage_scope, evidence_grade, approved_by, source_ref, is_active, note
@@ -121,9 +121,9 @@ SELECT
     'LOG-RUNTIME-SIM-BURNIN-202512-20260102',
     base.sim_run_id,                       -- 물려받는다
     DATE '2026-01-02',
-    'CONFIRMED_ZERO', '[]'::JSONB,         -- 🔴 비워 둔다 — 승인이 채운다
-    'CONFIRMED_ZERO', '[]'::JSONB,
-    'CONFIRMED_ZERO', '[]'::JSONB,
+    'CONFIRMED_ZERO',                      -- 🔴 확인했고 0 건 — 목록은 inbound_schedules 다
+    'CONFIRMED_ZERO',
+    'CONFIRMED_ZERO',
     'CONFIRMED_ZERO', '[]'::JSONB,
     'UNRESOLVED',     NULL,
     base.usage_scope,                      -- 물려받는다
@@ -131,7 +131,7 @@ SELECT
     'MVP-DECISION-20260825:LOG-RUNTIME-CYCLE-DAY2',
     TRUE,
     '이틀 관통 Day2 행. 2025-12-31 행을 기준으로 만들었고 2026-01-01(시연 전용) 행은 '
-    '본뜨지 않았다. in_transit 은 비어 있고 Day1 승인의 persist_inventory 가 채운다. '
+    '본뜨지 않았다. 입고 예정 목록은 inbound_schedules 가 들고, 여기는 status 만 세운다. '
     'register_transition 이 붙으면 이런 행은 persist 가 스스로 만든다 — 이 행은 그때까지의 '
     '임시방편이다.'
 FROM haetdeul.logistics_runtime_fixture base

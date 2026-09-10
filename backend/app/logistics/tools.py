@@ -1,12 +1,15 @@
 """재고·물류 Agent의 결정론적 계산 도구."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Literal
 
 from app.logistics.schemas import (
     InventoryByItem,
     InventoryLogisticsSnapshot,
+    InventoryLotSnapshot,
     LogisticsApprovedPurchaseCommitment,
     LotConstraint,
     PurchaseAgentOutput,
@@ -427,10 +430,27 @@ def build_inventory_by_item(
 ) -> list[InventoryByItem] | None:
     """가용재고 정의를 적용한 품목별 자유재고를 집계한다.
 
-    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0), 확정 출고 예약분,
+    가용 제외: 비-ACTIVE 상태(검수/격리/사용불가), 신선도 만료(<= 0),
     **출고가 이미 잡아 둔 몫(예약·할당)**. 예상 판매·계획 출고는 차감하지 않는다.
-    확정 출고 행에 item이 없으면 임의 배분하지 않고 None을 돌려준다 — 호출부는 필드를
-    생략해야 하며 `[]`(0건 확인)로 대체하면 안 된다.
+
+    🔴 **차감 축은 한 벌이다 — 예약·할당뿐이다 (WP-3).** 종전에는 여기서
+       `confirmed_outbound_schedule` 도 함께 뺐다. 그런데 확정 판매는 그날 마스터
+       출고 흐름이 **예약으로 내려보내는 바로 그 사실**이라, 둘을 다 빼면 같은 판매가
+       두 번 차감된다.
+
+    ```text
+    ~WP-2   on_hand − 예약·할당 − confirmed_outbound   🔴 같은 판매를 두 번 뺀다
+    WP-3~   on_hand − 예약·할당                        ✅ 한 벌
+    ```
+
+       ⚠️ 실측(2026-09-05~09-09)에서 fixture 쪽이 전부 `CONFIRMED_ZERO`·`[]` 라
+          겹치지 않았을 뿐이다. 이 파일의 종전 주석이 *"실제 값이 들어오는 날 한 축으로
+          합쳐야 한다"* 고 예고했고(`schemas.InventoryLogisticsSnapshot`), WP-3 이 출고
+          정본을 판매로 옮기면서 그날이 왔다.
+
+    ★ **미래 Capacity 와는 다른 셈이다.** `_replay_occupancy_by_item` 은 여전히
+      `confirmed_outbound_schedule` 을 쓴다 — 저쪽은 *"미래 어느 날 창고가 얼마나
+      비는가"* 이고 이쪽은 *"지금 더 팔 수 있는가"* 다. 둘을 한 축으로 합치지 않는다.
 
     🔴 **`outbound.item_free_stock_qty` 와 같은 답을 내야 한다.** 매입에 나가는 이 값이
        예약이 실제로 잡을 수 있는 양보다 크면, 매입은 팔 수 있다고 보고 판매는 못 잡는
@@ -454,10 +474,9 @@ def build_inventory_by_item(
       재고 축과 제안 축은 다르다: `E-UNKNOWN-ITEM`(`critic_v0_4.py`)이 거르는 것은
       `scenario.qty_kg` 의 제안 품목이고 재고 집계가 아니다.
     """
-    if snapshot.confirmed_outbound_schedule is None or has_unattributed_confirmed_outbound(
-        snapshot
-    ):
-        return None
+    # 🔴 **`confirmed_outbound_schedule` 로 막지 않는다 (WP-3).** 이 셈이 그 축을 더
+    #    이상 안 쓰므로, 그것을 못 읽었다는 이유로 판매가능량을 못 낸다고 답하면
+    #    **상관없는 축 때문에 화면이 비는** 것이 된다.
     if snapshot.outbound_commitments is None:
         return None
 
@@ -487,10 +506,6 @@ def build_inventory_by_item(
     for item, reserved in unallocated_by_item.items():
         if item in totals:
             totals[item] = max(Decimal(0), totals[item] - reserved)
-    for outbound in snapshot.confirmed_outbound_schedule:
-        assert outbound.item is not None
-        if outbound.item in totals:
-            totals[outbound.item] = max(Decimal(0), totals[outbound.item] - outbound.quantity_kg)
     return [
         InventoryByItem(item=item, available_qty_kg=quantity)
         for item, quantity in sorted(totals.items())
@@ -512,3 +527,252 @@ def build_lot_constraints(snapshot: InventoryLogisticsSnapshot) -> list[LotConst
         )
         for lot in snapshot.on_hand_by_lot
     ]
+
+
+# ── WP-4 · 날짜별 공급량과 납기 ─────────────────────────────────────────
+
+#: 🔴 **운송 소요시간의 정본이 스키마에 없다.** `transport.TransportPlan.standard_minutes`
+#:   가 늘 `None` 인 그 자리다 — 지도 API·평균속도·거리÷속도로 분을 지어내지 않기로
+#:   한 결정이 저쪽 모듈 주석에 있고, 여기서 그것을 뒤집지 않는다.
+#:
+#: ★ **그래서 MVP 확정값 0 일을 상수로 든다.** `agent_policy_config` 행으로 만들면
+#:   *"정본이 있다"* 로 읽히는데 실제로는 없다. 0 은 «당일 출고분이 당일 닿는다» 는
+#:   MVP 가정이지 측정값이 아니다.
+#:
+#: 🔴 **`outbound_prep_lead_days` 와 합치지 않는다.** 준비(1일)와 운송(0일)은 다른
+#:   사실이고, 합쳐 두면 운송 정본이 생기는 날 무엇을 고쳐야 하는지 알 수 없다.
+TRANSPORT_LEAD_DAYS = 0
+
+#: 납기를 못 낸 이유. 🔴 **`LogisticsReasonCode`(창고 축)와 섞지 않는다** —
+#: 저쪽 `CAPACITY_EXCEEDED` 는 **창고 보관** 용량이고 이쪽은 **하루 출고** 여력이다.
+DeliveryReasonCode = Literal[
+    "DELIVERY_BEFORE_PREP_LEAD",
+    "DAILY_OUTBOUND_CAPACITY_EXCEEDED",
+]
+
+#: 그날 이미 확정된 출고가 하루 여력을 넘었다. 🔴 **0 으로 접지 않는다** — 접으면
+#: 정책·데이터 이상이 «여력 0» 이라는 정상 사실로 보인다.
+OUTBOUND_CAPACITY_OVERCOMMITTED = "OUTBOUND_CAPACITY_OVERCOMMITTED"
+
+#: 미래 확정 출고 축을 **확인한 적이 없다** (fixture status 가 `UNRESOLVED`).
+#: 🔴 *"확인했고 0 건"* 과 다른 사실이라 0 으로 놓지 않는다 — 놓으면 하루 출고
+#: 여력이 통째로 비어 있다고 답하게 된다.
+CONFIRMED_OUTBOUND_UNRESOLVED = "CONFIRMED_OUTBOUND_UNRESOLVED"
+
+
+@dataclass(frozen=True)
+class SupplyByDate:
+    """어느 하루의 공급 사실. **두 수량의 뜻이 다르다.**
+
+    ```text
+    confirmed_sellable_quantity_kg            그날 판매 근거로 쓸 수 있는 양
+    freshness_unresolved_inbound_quantity_kg  그날까지 들어오지만 신선도가 안 정해진 양
+    ```
+
+    🔴 **뒤엣것을 앞엣것에 더하지 않는다.** 입고 예정은 Lot 이 아직 없어 신선도가
+       확정되지 않았고, 확정 안 된 재고를 판매 근거로 쓰면 **팔고 나서 못 내보내는
+       상태**가 된다.
+
+    ★ `None` 은 «모른다» 이고 `0` 은 «0kg 확인» 이다 (§1.2-10).
+    """
+
+    date: date
+    confirmed_sellable_quantity_kg: Decimal | None
+    freshness_unresolved_inbound_quantity_kg: Decimal
+    uncertainties: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeliveryFeasibility:
+    """납기 판정 한 벌. **숫자는 전부 이미 있던 사실이다.**"""
+
+    status: Literal["READY", "FAIL", "UNRESOLVED"]
+    daily_outbound_capacity_kg: Decimal | None
+    delivery_route: str | None
+    #: 운송 소요 **달력일**. 🔴 **이름에 단위를 안 붙인다** — 판매 계약의 정본 이름이
+    #: `transport_lead_time` 이고, 물류가 `_days` 를 붙이면 같은 사실이 두 이름으로
+    #: 다닌다 (WP-4B). 단위는 이 주석과 Evidence 의 `unit` 이 나른다.
+    #:
+    #: ⚠️ **`outbound_prep_lead_days` 와 다른 값이다.** 저쪽은 창고가 내보낼 준비를
+    #:    하는 날이고 이쪽은 실려서 닿는 날이다 — 합쳐서 한 정책으로 만들지 않는다.
+    transport_lead_time: int | None
+    earliest_delivery_date: date | None
+    reason_codes: tuple[DeliveryReasonCode, ...] = ()
+    uncertainties: tuple[str, ...] = ()
+
+
+def earliest_delivery_date_for(
+    as_of: date, *, outbound_prep_lead_days: int, transport_lead_days: int = TRANSPORT_LEAD_DAYS
+) -> date:
+    """가장 이른 납기일. **`as_of` 만 읽는다 — 벽시계를 안 본다.**
+
+    ```text
+    as_of + 준비 1일 + 운송 0일 = as_of + 1
+    ```
+
+    ★ 달력일이다. 영업일 달력을 여기서 만들지 않는다 — 그 정본은 마스터가 들고 있고
+      (`master/market_calendar.py`) 물류가 두 번째 달력을 만들면 둘이 갈린다.
+    """
+    if outbound_prep_lead_days < 0 or transport_lead_days < 0:
+        raise ValueError(
+            f"납기 리드는 음수일 수 없다 (prep={outbound_prep_lead_days},"
+            f" transport={transport_lead_days})."
+        )
+    return as_of + timedelta(days=outbound_prep_lead_days + transport_lead_days)
+
+
+def _fresh_until(snapshot: InventoryLogisticsSnapshot, lot: InventoryLotSnapshot) -> date | None:
+    """그 Lot 이 **언제까지** 팔 수 있나. 신선도를 모르면 `None`."""
+    if lot.remaining_freshness_days is None:
+        return None
+    return snapshot.as_of + timedelta(days=int(lot.remaining_freshness_days))
+
+
+def supply_capacity_by_date(
+    snapshot: InventoryLogisticsSnapshot,
+    *,
+    dates: Sequence[date],
+    inventory_by_item: Sequence[InventoryByItem],
+    confirmed_outbound_by_date: Mapping[date, Decimal],
+    daily_outbound_capacity_kg: Decimal,
+    item: str | None = None,
+) -> list[SupplyByDate]:
+    """날짜마다 **판매 근거로 쓸 수 있는 양**을 낸다 (WP-4).
+
+    ```text
+    confirmed_sellable(d) = min( 그날까지 신선한 판매가능 재고 ,
+                                 하루 출고 여력 − 그날 이미 확정된 출고 )
+    ```
+
+    🔴 **새 판매가능량 엔진이 아니다.** 재고 축의 출발점은 `build_inventory_by_item`
+       이 낸 값 그대로다 — 그것이 예약·할당을 이미 뺀 정본이고, 여기서 다시 세면
+       `outbound.item_free_stock_qty` 와 갈린다.
+
+    🔴 **입고 예정을 confirmed 에 더하지 않는다.** 아직 Lot 이 없어 신선도가 확정되지
+       않았다 — 그 몫은 `freshness_unresolved_inbound_quantity_kg` 에만 담는다.
+
+    ★ **신선도 차감은 보수적으로 한다.** 그날 이전에 신선도가 끝나는 Lot 의 **물리
+      잔량 전부**를 뺀다. 그 Lot 몫 중 일부가 이미 예약에 잡혀 있으면 두 번 빼는
+      셈이지만, 방향이 «적게 판다» 라 안전하다 — 반대로 접으면 못 내보낼 재고를
+      팔게 된다. 신선도를 **모르는** Lot 은 빼지 않는다
+      (`build_inventory_by_item` 이 `None` 을 만료로 안 보는 것과 같은 규율).
+
+    🔴 **이미 확정된 출고가 여력을 넘으면 `None` 이다.** 0 으로 접으면 정책·데이터
+       이상이 «오늘은 더 못 나간다» 는 정상 사실로 보인다. 그 날 행에
+       `OUTBOUND_CAPACITY_OVERCOMMITTED` 를 남긴다.
+
+    :param dates: 답할 날짜들. **물류가 만들지 않는다** — 사용자가 물은 날이다.
+    :param item: 품목을 좁힐지. `None` 이면 전 품목 합이다.
+    """
+    if daily_outbound_capacity_kg < 0:
+        raise ValueError(f"하루 출고 여력이 음수다: {daily_outbound_capacity_kg}")
+
+    기준 = sum(
+        (row.available_qty_kg for row in inventory_by_item if item is None or row.item == item),
+        start=Decimal(0),
+    )
+    만료: list[tuple[date, Decimal]] = []
+    for lot in snapshot.on_hand_by_lot:
+        if item is not None and lot.item != item:
+            continue
+        끝나는날 = _fresh_until(snapshot, lot)
+        if 끝나는날 is not None:
+            만료.append((끝나는날, lot.available_qty_kg))
+    입고 = [
+        row
+        for row in (snapshot.confirmed_inbound_schedule or ())
+        if item is None or row.item == item
+    ]
+
+    out: list[SupplyByDate] = []
+    for day in dates:
+        확정출고 = confirmed_outbound_by_date.get(day, Decimal(0))
+        여력 = daily_outbound_capacity_kg - 확정출고
+        넘었다 = 여력 < 0
+        시든것 = sum((수량 for 끝, 수량 in 만료 if 끝 < day), start=Decimal(0))
+        재고 = max(Decimal(0), 기준 - 시든것)
+        out.append(
+            SupplyByDate(
+                date=day,
+                confirmed_sellable_quantity_kg=None if 넘었다 else min(재고, 여력),
+                freshness_unresolved_inbound_quantity_kg=sum(
+                    (row.quantity_kg for row in 입고 if snapshot.as_of < row.date <= day),
+                    start=Decimal(0),
+                ),
+                uncertainties=(OUTBOUND_CAPACITY_OVERCOMMITTED,) if 넘었다 else (),
+            )
+        )
+    return out
+
+
+def evaluate_delivery_feasibility(
+    *,
+    as_of: date,
+    daily_outbound_capacity_kg: Decimal,
+    outbound_prep_lead_days: int | None,
+    delivery_route: str | None,
+    confirmed_outbound_known: bool,
+    requested_quantity_kg: Decimal | None,
+    preferred_delivery_date: date | None,
+    confirmed_outbound_on_preferred_kg: Decimal | None,
+    transport_lead_days: int = TRANSPORT_LEAD_DAYS,
+) -> DeliveryFeasibility:
+    """납기가 되나. **사용자가 물은 것만 판정한다.**
+
+    ```text
+    준비일 정책이 없다 · Route 를 못 읽었다     UNRESOLVED   ← 답을 안 낸다
+    미래 확정 출고 축을 확인한 적이 없다        UNRESOLVED   ← 0 으로 놓지 않는다
+    희망일 < 가장 이른 납기일                    FAIL         DELIVERY_BEFORE_PREP_LEAD
+    요청량 + 그날 확정 출고 > 하루 여력          FAIL         DAILY_OUTBOUND_CAPACITY_EXCEEDED
+    그 밖                                        READY
+    ```
+
+    :param confirmed_outbound_known: 미래 확정 출고 축을 **읽었나**.
+        🔴 `False` 를 «출고 0kg» 으로 접으면 하루 여력이 통째로 비어 있다고 답한다 —
+        fixture 가 그 축을 `UNRESOLVED` 로 적었다는 것은 *"확인한 적 없다"* 이지
+        *"확인했고 0 건"* 이 아니다 (`repository._schedule_source`).
+
+    🔴 **정책이 없으면 코드 상수로 메우지 않는다.** `outbound_prep_lead_days` 가
+       `None` 이면 가장 이른 납기일을 못 내고, 못 내는 것을 `READY` 로 답하면
+       **DB 에 정책이 없는데도 납기가 확정된 것처럼** 나간다 (WP-4 M4).
+
+    ★ **희망일이 없어도 `READY` 다.** 그때 이 블록이 답하는 것은 *"가장 이른 납기일이
+      언제인가"* 이고 그 답은 냈다 — 판정할 희망일이 없는 것과 판정에 실패한 것은 다르다.
+    """
+    uncertainties: list[str] = []
+    if outbound_prep_lead_days is None:
+        uncertainties.append("OUTBOUND_PREP_LEAD_DAYS_UNRESOLVED")
+    if delivery_route is None:
+        uncertainties.append("DELIVERY_ROUTE_UNRESOLVED")
+    if not confirmed_outbound_known:
+        uncertainties.append(CONFIRMED_OUTBOUND_UNRESOLVED)
+    if uncertainties:
+        return DeliveryFeasibility(
+            status="UNRESOLVED",
+            daily_outbound_capacity_kg=daily_outbound_capacity_kg,
+            delivery_route=delivery_route,
+            transport_lead_time=transport_lead_days,
+            earliest_delivery_date=None,
+            uncertainties=tuple(uncertainties),
+        )
+
+    earliest = earliest_delivery_date_for(
+        as_of,
+        outbound_prep_lead_days=outbound_prep_lead_days,
+        transport_lead_days=transport_lead_days,
+    )
+    reasons: list[DeliveryReasonCode] = []
+    if preferred_delivery_date is not None and preferred_delivery_date < earliest:
+        reasons.append("DELIVERY_BEFORE_PREP_LEAD")
+    if requested_quantity_kg is not None and preferred_delivery_date is not None:
+        이미 = confirmed_outbound_on_preferred_kg or Decimal(0)
+        if 이미 + requested_quantity_kg > daily_outbound_capacity_kg:
+            reasons.append("DAILY_OUTBOUND_CAPACITY_EXCEEDED")
+    return DeliveryFeasibility(
+        status="FAIL" if reasons else "READY",
+        daily_outbound_capacity_kg=daily_outbound_capacity_kg,
+        delivery_route=delivery_route,
+        transport_lead_time=transport_lead_days,
+        earliest_delivery_date=earliest,
+        reason_codes=tuple(reasons),
+    )
