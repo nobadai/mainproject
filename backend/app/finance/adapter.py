@@ -255,7 +255,10 @@ def _controller_boundary(
 ) -> tuple[FinanceRuntimeContext | None, tuple[AgentReply, ExecutionMetadata] | None]:
     """Controller 위임 전에 Adapter 수준의 준비 상태 의미를 보존한다."""
     run_id = _run_id(request)
-    context = _load_context(request.context.as_of)
+    sim_run_id = request.context.sim_run_id
+    if not sim_run_id.strip():
+        return None, _axis_not_ready(request, run_id)
+    context = _load_context(request.context.as_of, sim_run_id=sim_run_id)
     if context is None:
         return None, _not_ready(
             request, run_id, [_T_POSITION],
@@ -318,7 +321,11 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     run_id = _run_id(request)
     tools: list[str] = [_T_POSITION]
 
-    context = _load_context(as_of)
+    sim_run_id = request.context.sim_run_id
+    if not sim_run_id.strip():
+        return _axis_not_ready(request, run_id)
+
+    context = _load_context(as_of, sim_run_id=sim_run_id)
     if context is None:
         return _not_ready(
             request,
@@ -546,10 +553,29 @@ def _not_implemented(request: AgentRequest) -> tuple[AgentReply, ExecutionMetada
 # ---------------------------------------------------------------------------
 
 
-def _load_context(as_of: date) -> FinanceRuntimeContext | None:
-    """요청의 ``as_of`` 로 상태를 고른다. **고정된 한 행을 되돌려 주지 않는다.**"""
+def _load_context(as_of: date, *, sim_run_id: str) -> FinanceRuntimeContext | None:
+    """봉투의 ``sim_run_id`` · ``as_of`` 로 상태를 고른다.
+
+    ★ **축은 받는 것이지 고르는 것이 아니다** (재무 기준 ①②③ · 2026-09-11).
+      어느 실행의 잔액인가는 재무 사실이 아니라 마스터가 정한 실행 축이다. 재무가
+      스스로 추측하거나 전역 Current State 에서 하나를 집으면, 번인과 걷기가 함께
+      서 있는 날 **남의 실행 잔액**으로 매입을 판단하게 된다.
+
+    🔴 **`sim_run_id` 는 기본값이 없다.** 부르는 자리가 빠뜨리면 조용히 전역으로
+       떨어지는 대신 그 자리에서 `TypeError` 로 선다 — 축을 안 넘기는 호출이
+       새로 생기는 것을 **문법이 막는다.**
+
+    🔴 **빈 축으로는 DB 에 묻지 않는다.** 축이 비었다는 것은 *"물어볼 수 없다"* 이지
+       *"자료가 없다"* 가 아니다. 물어보면 그 결과가 `LookupError` 로 돌아오고,
+       아래 `except` 가 그것을 "없음" 으로 바꿔 **묻지 못한 것이 자료 없음으로**
+       기록된다. 여기서 끊고, 사유는 부르는 자리가 축 누락으로 적는다.
+
+    ★ 예외를 삼키는 태도는 그대로다 — 없는 것은 예외가 아니라 상태다.
+    """
+    if not sim_run_id.strip():
+        return None
     try:
-        return get_current_finance_runtime_context(as_of)
+        return get_current_finance_runtime_context(as_of, sim_run_id=sim_run_id)
     except Exception:  # noqa: BLE001 — 없는 것은 예외가 아니라 상태다
         return None
 
@@ -712,6 +738,37 @@ def _not_ready(
         reasoning=reason,
     )
     return _recorded(request, reply, _meta(request, run_id, tools))
+
+
+#: 봉투에 실행 축이 없어 못 낸 답의 `missing_data`.
+#:
+#: 🔴 **`finance_state` · `finance_policy` 를 적으면 안 된다.** 그 이름들은 *"그 자료를
+#:    찾아 오라"* 는 뜻이라, 읽는 사람은 멀쩡히 있는 재무 자료를 찾으러 간다. 없는
+#:    것은 자료가 아니라 **봉투의 `sim_run_id`** 다 — 고칠 자리가 완전히 다르다.
+#:
+#: ★ 그래서 이름을 그대로 적는다. `missing_data` 는 사람이 읽는 문장이 아니라 기계와
+#:   개발자가 읽는 **주소**이고, 이 경우 주소는 봉투의 그 필드다.
+_MISSING_EXECUTION_AXIS: tuple[str, ...] = ("sim_run_id",)
+
+
+def _axis_not_ready(
+    request: AgentRequest, run_id: str
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """봉투에 실행 축이 없다. **번인으로 대신하지 않는다** (재무 기준 ④⑥).
+
+    ★ 빈 축일 때 아무 실행이나 집으면 오류는 안 나고 **숫자만 남의 것**이 된다.
+      그래서 답을 내지 않고, 무엇이 없었는지를 이름으로 남긴다.
+
+    ★ `RUNTIME_NOT_READY` / `skipped` 다 — `ERROR` 가 아니다. 같은 봉투로 다시 불러도
+      같으므로 재시도 가치가 없고, 축을 채워 다시 보내야 하는 일이다.
+    """
+    return _not_ready(
+        request,
+        run_id,
+        [_T_POSITION],
+        missing=_MISSING_EXECUTION_AXIS,
+        reason=messages.EXECUTION_AXIS_MISSING,
+    )
 
 
 #: 매입 실행 정책(`purchase_payment_days`)을 **실행 전에** 요구하는 mode.

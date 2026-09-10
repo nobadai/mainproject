@@ -41,6 +41,7 @@ def req(mode="PRE_PURCHASE", as_of: date = AS_OF, payload=None) -> AgentRequest:
             as_of=as_of,
             trigger="USER_REQUEST",
             policy_version="POLICY-V1",
+            sim_run_id="SIM-TEST-RUN",
         ),
         agent="finance",
         mode=mode,
@@ -95,7 +96,7 @@ def controller_wired(monkeypatch):
 
 @pytest.fixture
 def wired(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _Context())
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +125,7 @@ def test_same_request_executed_twice_writes_two_history_rows(monkeypatch):
     봉투를 두 번 보내는 것은 막을 수 없고, 막을 일도 아니다 — 재실행은 **지워야 할
     중복이 아니라 남아야 할 두 번째 실행**이다.
     """
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: None)
     with patch("app.finance.adapter.save_finance_execution") as saved:
         first_reply, _ = adapter.finance_port(req())
         second_reply, _ = adapter.finance_port(req())
@@ -153,7 +154,7 @@ def test_controller_run_ids_are_also_per_execution(wired):
 
 def test_boundary_not_ready_is_recorded_once(monkeypatch):
     """재무 상태를 못 읽어 Controller 에 닿지 못한 실행도 이력에 남는다."""
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: None)
     with patch("app.finance.adapter.save_finance_execution") as saved:
         reply, metadata = adapter.finance_port(req())
 
@@ -166,7 +167,7 @@ def test_boundary_not_ready_is_recorded_once(monkeypatch):
 
 
 def test_as_of_mismatch_boundary_is_recorded(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _Context())
     with patch("app.finance.adapter.save_finance_execution") as saved:
         reply, _ = adapter.finance_port(req(as_of=date(2026, 1, 1)))
 
@@ -179,7 +180,7 @@ def test_missing_payroll_source_boundary_is_recorded(monkeypatch):
         class policy(_Policy):
             source_refs: ClassVar[dict[str, str]] = {}
 
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _NoPayrollRef())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _NoPayrollRef())
     with patch("app.finance.adapter.save_finance_execution") as saved:
         reply, _ = adapter.finance_port(req())
 
@@ -188,7 +189,7 @@ def test_missing_payroll_source_boundary_is_recorded(monkeypatch):
 
 
 def test_invalid_scenario_input_is_recorded(monkeypatch):
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _Context())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _Context())
     with patch("app.finance.adapter.save_finance_execution") as saved:
         reply, _ = adapter.finance_port(req("SCENARIO_VALIDATION", payload={"nope": 1}))
 
@@ -215,7 +216,7 @@ def test_history_failure_does_not_change_the_business_answer(monkeypatch):
 
     다만 감추지는 않는다 — 실패 자체가 observations 에 남아 마스터가 볼 수 있다.
     """
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: None)
     with patch(
         "app.finance.adapter.save_finance_execution",
         side_effect=RuntimeError("no database here"),
@@ -274,7 +275,7 @@ def test_status_query_never_labels_a_policy_value_with_the_state_row(monkeypatch
                 "payroll_date": "SRC-FIN-N6",
             }
 
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: _NoPolicyRefs())
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: _NoPolicyRefs())
     reply, _ = adapter.finance_port(req("STATUS_QUERY"))
 
     assert reply.runtime_status == "READY"
@@ -421,7 +422,7 @@ def test_dept_meta_produced_fields_match_the_reply_payload(wired):
 
 def test_dept_meta_is_absent_when_the_run_is_not_ready(monkeypatch):
     """못 낸 실행에 사용 입력을 적으면, 하지 않은 일을 했다고 적는 것이다."""
-    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None: None)
+    monkeypatch.setattr(adapter, "_load_context", lambda _as_of=None, **_axis: None)
     with patch("app.finance.adapter.save_finance_execution"):
         reply, metadata = adapter.finance_port(req())
 
@@ -482,6 +483,7 @@ def test_finance_dept_meta_reaches_critic_and_runs_both_checks(wired):
         as_of=AS_OF,
         trigger="USER_REQUEST",
         policy_version="POLICY-V1",
+        sim_run_id="SIM-TEST-RUN",
     )
     try:
         runner = MasterRunner(context, wiring.registry(), CallBudget())
