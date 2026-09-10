@@ -591,10 +591,19 @@ def test_채권_NOTHING_DUE_는_판단을_안_막는다() -> None:
 
 
 def test_관문_사유가_셋을_다_적는다() -> None:
-    """⚠️ 하나만 적으면 사람이 물류를 볼지 판매를 볼지 재무를 볼지 모른다."""
+    """⚠️ 하나만 적으면 사람이 물류를 볼지 판매를 볼지 재무를 볼지 모른다.
+
+    🔴 **관문 사유는 한 번만 지어진다** — 그것이 `len(관문) == 1` 이 재는 것이다.
+
+      ⚠️ **`in` 이 아니라 `startswith` 다** (2026-09-10). 마감이 붙으면서 그 사유가
+        `마감: BLOCKED …` 단계 줄에도 **그대로** 실린다 — 두 벌이 지어진 것이 아니라
+        `close_day` 가 여기서 만든 문장을 **다시 짓지 않고 받아 나른** 결과다.
+        `in` 으로 세면 그 인용까지 세어져서, **문장을 한 벌로 유지한 것이 도리어
+        빨개진다.**
+    """
     out, _ = _하루(issue_fn=_Spy(_Out("BLOCKED", "기일이 없다")))
 
-    관문 = [note for note in out.notes if "장부가 안 서서" in note]
+    관문 = [note for note in out.notes if note.startswith("장부가 안 서서")]
     assert len(관문) == 1, f"관문 사유가 없다: {out.notes}"
     assert "입고: RECEIVED" in 관문[0]
     assert "채권: BLOCKED" in 관문[0], f"채권 상태가 사유에 없다: {관문[0]}"
