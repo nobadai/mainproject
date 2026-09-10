@@ -134,6 +134,7 @@ def build_finance_transition(
     *,
     target_state_date: date,
     purchase_ids: Mapping[int, str],
+    sim_run_id: str | None = None,
 ) -> FinanceTransitionPlan:
     """승인 약정을 재무 변경으로 옮긴다. **계산만 한다 — DB 를 바꾸지 않는다.**
 
@@ -151,7 +152,7 @@ def build_finance_transition(
         # 날에 두 상태가 서고, 그다음부터 어느 쪽이 그날의 사실인지 말할 수 없다.
         raise ValueError("target_state_date must be after the approval as_of")
 
-    state = load_finance_state_row(commitment.as_of)
+    state = load_finance_state_row(commitment.as_of, sim_run_id=sim_run_id)
     if state["state_date"] != commitment.as_of:
         # 승인일 잔액을 다른 날 잔액으로 대신 계산하지 않는다.
         raise FinanceDataNotReady("historical_finance_position")
@@ -370,7 +371,14 @@ class FinanceTransitionAdapter:
       없고, 재무가 닿아도 되는 마스터 표면은 공유 계약뿐이다.
 
     🔴 연결을 열지 않고 commit·rollback 도 하지 않는다. 승인 트랜잭션은 마스터 것이다.
+
+    ★ **실행축은 생성 때 받는다.** `ApprovedCommitmentFacts` 에는 `sim_run_id` 가 없다 —
+      그것은 승인의 사실이 아니라 실행의 사실이고, 마스터가 이미 들고 있다
+      (`sim_run_binding.SimRunBound`). 안 주면 예전처럼 "지금 축" 을 묻는다.
     """
+
+    def __init__(self, *, sim_run_id: str | None = None) -> None:
+        self.sim_run_id = sim_run_id
 
     def build(
         self,
@@ -383,6 +391,7 @@ class FinanceTransitionAdapter:
             commitment,
             target_state_date=target_state_date,
             purchase_ids=purchase_ids,
+            sim_run_id=self.sim_run_id,
         )
 
     def persist(

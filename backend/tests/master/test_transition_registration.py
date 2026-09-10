@@ -172,7 +172,7 @@ def 재무_읽기를_대역으로(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         finance_transition,
         "load_finance_state_row",
-        lambda as_of: {
+        lambda as_of, **_kwargs: {
             "state_date": AS_OF,
             "sim_run_id": BURN_IN_SIM_RUN_ID,
             "financing_mode": "LOAN_BASELINE",
@@ -208,14 +208,17 @@ def test_두_하루넘김이_다_등록되어_있다() -> None:
 def test_하루넘김_자리에_각_파트_구현이_앉아_있다() -> None:
     """★ 이름만 채운 것이 아니라 **그 파트가 소유한 구현**이 앉아야 한다.
 
-    🔴 **축이 올 때 선다** (`#531` 후속). 물류 자리에는 축을 기다리는 `SimRunBound` 가
-       앉아 있고, 구현은 `bind_sim_run` 이 축을 줄 때 만들어진다 — 재무는 축을 안
-       받으므로 그대로다.
+    🔴 **축이 올 때 선다** (`#531` 후속). 두 자리 모두 축을 기다리는 `SimRunBound` 가
+       앉아 있고, 구현은 `bind_sim_run` 이 축을 줄 때 만들어진다.
+
+    ★ 재무도 이제 축을 받는다. 예전에는 재무가 `v_current_finance_state` 전체에 대고
+      *"지금 축이 하나뿐인가"* 를 물어 스스로 골랐는데, 실행이 둘이 되는 순간 그
+      질문은 늘 *"둘"* 이라고 답해 새 걷기의 첫 개장이 막혔다.
     """
     registered = day_open.registered()
 
     assert isinstance(bind_sim_run(registered["logistics"], 실행축), LogisticsDayOpening)
-    assert isinstance(registered["finance"], FinanceDayOpening)
+    assert isinstance(bind_sim_run(registered["finance"], 실행축), FinanceDayOpening)
 
 
 def test_물류_자리에_물류_어댑터가_앉아_있다() -> None:
@@ -223,7 +226,9 @@ def test_물류_자리에_물류_어댑터가_앉아_있다() -> None:
     registered = transition.registered()
 
     assert isinstance(bind_sim_run(registered["logistics"], 실행축), LogisticsTransitionAdapter)
-    assert isinstance(registered["finance"], finance_transition.FinanceTransitionAdapter)
+    assert isinstance(
+        bind_sim_run(registered["finance"], 실행축), finance_transition.FinanceTransitionAdapter
+    )
 
 
 def test_물류_어댑터가_승인이_준_축을_받는다() -> None:

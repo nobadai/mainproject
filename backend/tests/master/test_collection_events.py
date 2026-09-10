@@ -111,7 +111,7 @@ def _행(
 
 
 def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str = 축_모드) -> Any:
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         return FinanceRuntimeAxis(sim_run_id=sim_run_id, financing_mode=financing_mode)
 
     return read_axis

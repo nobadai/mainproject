@@ -54,7 +54,7 @@ AS_OF = date(2026, 1, 5)
 
 
 def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str) -> Any:
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         return FinanceRuntimeAxis(sim_run_id=sim_run_id, financing_mode=financing_mode)
 
     return read_axis
@@ -237,7 +237,7 @@ def test_축_조회를_임포트_시점에_하지_않는다() -> None:
     """🔴 **배선이 DB 를 요구하기 시작하면 앱이 뜨는 조건이 조용히 늘어난다.**"""
     호출: list[int] = []
 
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         호출.append(1)
         return FinanceRuntimeAxis(sim_run_id=BURN_IN_SIM_RUN_ID, financing_mode="LOAN_BASELINE")
 
@@ -338,7 +338,7 @@ def test_축이_모호하면_사유에_그대로_남는다() -> None:
     """⚠️ **삼키지 않는다.** 접기만 하고 사유를 버리면 고칠 곳이 사라진다."""
     조회 = _판매조회기록(_판매())
 
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
 
     adapter = FinanceReceivableAdapter(

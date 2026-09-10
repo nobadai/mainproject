@@ -176,7 +176,7 @@ class _가짜커서:
 
 
 def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str = 축_모드) -> Any:
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         return FinanceRuntimeAxis(sim_run_id=sim_run_id, financing_mode=financing_mode)
 
     return read_axis
@@ -471,7 +471,7 @@ def test_축을_못_읽으면_UNREADABLE_이고_사유를_남긴다() -> None:
     ⚠️ 접기만 하고 사유를 버리면 *"못 했다"* 만 남고 고칠 곳이 사라진다.
     """
 
-    def 모호하다() -> FinanceRuntimeAxis:
+    def 모호하다(**_kwargs: object) -> FinanceRuntimeAxis:
         raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
 
     결과 = seed_day(AS_OF, sim_run_id=BURN_IN_SIM_RUN_ID, read_axis=모호하다)

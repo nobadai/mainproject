@@ -87,7 +87,7 @@ class _사건조회기록:
 
 
 def _축(*, sim_run_id: str = BURN_IN_SIM_RUN_ID, financing_mode: str) -> Any:
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         return FinanceRuntimeAxis(sim_run_id=sim_run_id, financing_mode=financing_mode)
 
     return read_axis
@@ -216,7 +216,7 @@ def test_축_조회를_임포트_시점에_하지_않는다() -> None:
     """
     호출 = []
 
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         호출.append(1)
         return FinanceRuntimeAxis(sim_run_id=BURN_IN_SIM_RUN_ID, financing_mode="LOAN_BASELINE")
 
@@ -263,7 +263,7 @@ def test_축이_모호하면_사유에_그대로_남는다() -> None:
     """⚠️ **삼키지 않는다.** 접기만 하고 사유를 버리면 *"막혔다"* 만 남고 고칠 곳이 사라진다."""
     원천 = _사건조회기록()
 
-    def read_axis() -> FinanceRuntimeAxis:
+    def read_axis(**_kwargs: object) -> FinanceRuntimeAxis:
         raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
 
     adapter = FinanceCollectionAdapter(
@@ -295,7 +295,7 @@ def test_축이_없으면_사유에_그대로_남는다() -> None:
     assert "Current Finance State was not found" in out.reason
 
 
-def _없는_축() -> FinanceRuntimeAxis:
+def _없는_축(**_kwargs: object) -> FinanceRuntimeAxis:
     raise LookupError("Current Finance State was not found")
 
 

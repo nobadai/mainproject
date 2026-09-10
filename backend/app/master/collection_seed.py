@@ -257,7 +257,7 @@ def seed_day(
     *,
     sim_run_id: str,
     connect: Callable[[], Any] | None = None,
-    read_axis: Callable[[], FinanceRuntimeAxis] = get_finance_runtime_axis,
+    read_axis: Callable[..., FinanceRuntimeAxis] = get_finance_runtime_axis,
     seed: Callable[..., CollectionSeedResult] = seed_collection_events,
 ) -> CollectionSeedOutcome:
     """개장 뒤에 부르는 자리. **어떤 예외도 밖으로 내보내지 않는다.**
@@ -276,7 +276,7 @@ def seed_day(
       그것은 `day_open` 이 여기 오기 전에 판단한다.
     """
     try:
-        axis = read_axis()
+        axis = read_axis(sim_run_id=sim_run_id)
     except (FinanceDataNotReady, LookupError, ValueError) as exc:
         # ★ **조회 실패는 `UNREADABLE` 이다.** 재무 축 조회도 조회다 — *"시도할 이유가
         #   없었다"* 가 아니라 *"못 했다"* 다.

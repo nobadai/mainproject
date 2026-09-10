@@ -137,7 +137,10 @@ def wire_registries() -> None:
     #   그 값은 결정이 걸린 실행 행에서 온다 (`decision_service._sim_run_id_of`).
     #   기본값을 든 자리는 `open_day` · `receive_arrivals` · `collect_receipts` ·
     #   `issue_receivables` 넷이고, 그 이유는 각자 docstring 에 적혀 있다.
-    register_transition("finance", FinanceTransitionAdapter())
+    register_transition(
+        "finance",
+        SimRunBound(lambda axis: FinanceTransitionAdapter(sim_run_id=axis)),
+    )
     register_transition(
         "logistics",
         SimRunBound(lambda axis: LogisticsTransitionAdapter(sim_run_id=axis)),
@@ -174,7 +177,10 @@ def wire_registries() -> None:
         "logistics",
         SimRunBound(lambda axis: LogisticsDayOpening(sim_run_id=axis)),
     )
-    register_day_opening("finance", FinanceDayOpening())
+    register_day_opening(
+        "finance",
+        SimRunBound(lambda axis: FinanceDayOpening(sim_run_id=axis)),
+    )
     register_closing("finance", FinanceClosingAdapter())
 
 

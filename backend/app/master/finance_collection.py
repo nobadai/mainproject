@@ -114,13 +114,13 @@ class FinanceCollectionAdapter:
     """
 
     sim_run_id: str
-    read_axis: Callable[[], FinanceRuntimeAxis] = field(default=get_finance_runtime_axis)
+    read_axis: Callable[..., FinanceRuntimeAxis] = field(default=get_finance_runtime_axis)
     load_events: LoadEvents = field(default=read_collection_events)
 
     def collect(self, conn: Any, *, as_of: date) -> CollectionPartOut:
         """재무 축을 읽어 `FinanceCollectionSource` 를 세우고 위임한다."""
         try:
-            axis = self.read_axis()
+            axis = self.read_axis(sim_run_id=self.sim_run_id)
         except (FinanceDataNotReady, LookupError, ValueError) as exc:
             # ★ **사유를 그대로 옮긴다.** `finance_runtime_axis_ambiguous` 가 여기서
             #   사라지면 *"막혔다"* 만 남고 무엇이 모호했는지가 없어진다.
