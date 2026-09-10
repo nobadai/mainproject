@@ -631,6 +631,11 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         "inbound_lead_days": inventory.get("inbound_lead_days"),
         "critical_payment_dates": list(finance.get("critical_payment_dates") or []),
         "feedback": dict(payload.get("prior_feedback") or {}) or None,
+        # 🔴 **``or {}`` 로 접지 않는다.** 마스터는 지평을 다 못 덮으면 봉투를 **통째로
+        #   안 싣고** 그 사유를 자기 ``skipped_checks`` 에 남긴다. 여기서 빈 dict 로
+        #   메우면 «안 서는 날이 없다» 는 없는 사실이 되고, ⑦ 이 «검사했다» 로 지난다.
+        #   ``None`` 이면 ⑦ 이 미검사로 고지한다 (규칙 3 · `#300`).
+        "execution_calendar": payload.get("execution_calendar"),
         # 🔴 **``feedback`` 과 다른 슬롯이다** (되먹임 계약 v0.2 §2 · state.py 주석 참조).
         #   저쪽은 사람이 준 조건이고 이쪽은 조언자가 준 조정안이다 — 수명·모양·권위가
         #   달라 한 칸에 담으면 받는 쪽이 타입으로 갈라야 한다.
