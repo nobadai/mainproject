@@ -16,6 +16,7 @@ from psycopg import sql
 
 from app.finance.db import (
     FinanceDataNotReady,
+    decimal_value,
     get_connection,
     get_db_schema,
     load_inventory_snapshot_as_of,
@@ -205,9 +206,9 @@ def _load_exact_states(conn: Any, *, sim_run_id: str, as_of: date) -> dict[str, 
             raise FinanceDataNotReady("finance_state_ambiguous")
         states[mode] = _FinanceState(
             financing_mode=mode,
-            current_cash_krw=_money(_row_value(row, "current_cash_krw", 1)),
-            receivables_krw=_money(_row_value(row, "receivables_krw", 2)),
-            current_debt_krw=_money(_row_value(row, "current_debt_krw", 3)),
+            current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 1)),
+            receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 2)),
+            current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 3)),
         )
     return states
 
@@ -239,9 +240,9 @@ def _load_prior_state(
     row = rows[0]
     return _FinanceState(
         financing_mode=str(_row_value(row, "financing_mode", 0)),
-        current_cash_krw=_money(_row_value(row, "current_cash_krw", 1)),
-        receivables_krw=_money(_row_value(row, "receivables_krw", 2)),
-        current_debt_krw=_money(_row_value(row, "current_debt_krw", 3)),
+        current_cash_krw=_daily_closing_amount(_row_value(row, "current_cash_krw", 1)),
+        receivables_krw=_daily_closing_amount(_row_value(row, "receivables_krw", 2)),
+        current_debt_krw=_daily_closing_amount(_row_value(row, "current_debt_krw", 3)),
     )
 
 
@@ -292,7 +293,7 @@ def _purchase_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
         if not isinstance(due_date, date):
             raise FinanceDataNotReady("payable_due_date")
         if effective_cash_date(due_date) == as_of:
-            total += _money(_row_value(row, "outstanding_amount_krw", 1))
+            total += _daily_closing_amount(_row_value(row, "outstanding_amount_krw", 1))
     return total
 
 
@@ -317,7 +318,7 @@ def _expense_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Decim
     for row in rows:
         category = _row_value(row, "expense_category", 0)
         delivery_id = _row_value(row, "related_delivery_id", 1)
-        amount = _money(_row_value(row, "amount_krw", 2))
+        amount = _daily_closing_amount(_row_value(row, "amount_krw", 2))
         if delivery_id is not None:
             logistics += amount
         elif category in {"PAYROLL", "INTEREST"}:
@@ -347,7 +348,7 @@ def _sum_query(conn: Any, query: str, params: list[object]) -> Decimal:
         row = cursor.fetchone()
     if row is None:
         raise FinanceDataNotReady("daily_closing_ledger")
-    return _money(_row_value(row, "amount", 0))
+    return _daily_closing_amount(_row_value(row, "amount", 0))
 
 
 def _collection_delta(
@@ -445,11 +446,9 @@ def _row_value(row: object, name: str, index: int) -> object:
     return row[index]  # type: ignore[index]
 
 
-def _money(value: object) -> Decimal:
-    if isinstance(value, bool):
-        raise FinanceDataNotReady("daily_closing_ledger")
+def _daily_closing_amount(value: object) -> Decimal:
     try:
-        money = value if isinstance(value, Decimal) else Decimal(str(value))
+        money = decimal_value(value)
     except Exception as exc:  # pragma: no cover - exact exception depends on DB adapter.
         raise FinanceDataNotReady("daily_closing_ledger") from exc
     if not money.is_finite() or money < 0:

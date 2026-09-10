@@ -12,10 +12,12 @@
   IO Contract 가 그 이름으로 계약을 적고 있어 문서와 함께 움직여야 한다.
 """
 
+import logging
 from datetime import date
 from decimal import Decimal
 from typing import NamedTuple
 
+import psycopg
 from psycopg import sql
 
 from app.logistics.db import fetch_all, get_connection, get_db_schema
@@ -26,6 +28,9 @@ from app.logistics.outbound import (
     _HOLDING_RESERVATION,
 )
 from app.logistics.outbound_schedules import confirmed_outbound_at
+
+logger = logging.getLogger(__name__)
+
 from app.logistics.schemas import (
     POLICY_VERSION,
     UNRESOLVED_SOURCE,
@@ -38,6 +43,7 @@ from app.logistics.schemas import (
     OutboundCommitment,
     ScheduledQuantity,
 )
+from app.logistics.transport import AmbiguousRoute, RouteNotFound, resolve_fixed_route
 
 #: 계약(Literal)과 같은 값을 쓴다 — schemas 가 단일 소유다 (#121 ⑤).
 LOGISTICS_POLICY_VERSION = POLICY_VERSION
@@ -419,6 +425,13 @@ class LogisticsRead(NamedTuple):
 
     snapshot: InventoryLogisticsSnapshot
     policy: LogisticsPolicy
+    #: 고정 운송 계약 하나 (`logistics_contracts`). `None` 은 **계약 0건**이다 —
+    #: 회사 상태이지 오류가 아니다 (`transport.RouteNotFound`).
+    delivery_route: str | None = None
+    #: 🔴 **계약을 읽다가 실패했다.** `None`(계약 없음)과 가르는 칸이다 —
+    #: 앞엣것은 `UNRESOLVED` 로 답할 사실이고 뒤엣것은 다시 부르면 될 수 있는
+    #: 실행 오류다 (`transport.AmbiguousRoute` 는 무결성 위반이라 여기 들어온다).
+    delivery_route_error: bool = False
 
 
 def get_current_inventory_logistics_snapshot(
@@ -524,7 +537,40 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
             *policy.source_refs.values(),
         ],
     )
-    return LogisticsRead(snapshot=snapshot, policy=policy)
+    노선, 노선오류 = _delivery_route()
+    return LogisticsRead(
+        snapshot=snapshot,
+        policy=policy,
+        delivery_route=노선,
+        delivery_route_error=노선오류,
+    )
+
+
+def _delivery_route() -> tuple[str | None, bool]:
+    """운송 계약 하나를 읽는다. **문자열을 코드에 안 박는다.**
+
+    ★ **정본은 `logistics_contracts` 표이고 Reader 는 `transport.resolve_fixed_route`
+      하나다.** 상수로 복제하면 계약 행이 바뀌는 날 코드만 옛 값을 들고 남는다 —
+      저쪽이 0 / 1 / 2+ 를 이미 셋 다 다르게 다룬다.
+
+    ```text
+    계약 0건    RouteNotFound   → (None, False)    회사 상태다. 납기는 UNRESOLVED 로 간다
+    계약 1건    그 계약          → (contract_id, False)
+    계약 2건+   AmbiguousRoute  → (None, True)     무결성 위반이라 실행 오류로 올린다
+    ```
+
+    🔴 **어댑터가 아니라 여기서 읽는다.** 어댑터가 자기 커넥션을 열면 한 회신 안에서
+       읽기가 두 시점으로 갈리고(`LogisticsRead` 가 닫으려는 바로 그 구멍), 어댑터의
+       «DB 를 직접 안 만진다» 경계도 함께 깨진다.
+    """
+    try:
+        with get_connection() as conn:
+            return resolve_fixed_route(conn).logistics_contract_id, False
+    except RouteNotFound:
+        return None, False
+    except (AmbiguousRoute, psycopg.Error, RuntimeError, TypeError, ValueError):
+        logger.exception("운송 계약 조회 실패")
+        return None, True
 
 
 #: Purchase 등급 어휘. 원천이 이미 이 어휘면 변환이 아니므로 그대로 통과시킨다.

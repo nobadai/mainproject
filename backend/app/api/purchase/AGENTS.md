@@ -137,7 +137,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `stats` | `list[Stat]` | 필수 | 오늘 제안 · 승인 대기 · 확정 매입액 · 입고 예정 |
 | `plans` | `list[Plan]` | 필수 | 오늘 낸 안들. 비면 화면이 «안이 없다» 고 적는다 |
 | `plans_note` | `Note` | 필수 | 안이 왜 이 개수인가 |
-| `committed` | `Table` | 필수 | 사람이 고른 뒤에 생기는 확정 매입 |
+| `committed` | `Table` | 필수 | 승인을 거친 뒤에 생기는 확정 매입 |
 | `committed_note` | `Note` | 필수 | 승인 전에는 표가 빈다는 안내 |
 | `source` | `Source` | 필수 | 예시값인지 실제 값인지 |
 

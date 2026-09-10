@@ -419,7 +419,6 @@ class Wiring:
             lot_id="LOT-" + kwargs["receipt_id"],
             move_id="MOVE-IN-LOT-" + kwargs["receipt_id"],
             accepted_qty_kg=QTY,
-            schedule_cleared=True,
         )
 
     @property

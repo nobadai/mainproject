@@ -12,7 +12,12 @@ from app.logistics.repository import (
     get_current_inventory_logistics_snapshot,
 )
 from app.logistics.rules import evaluate_procurement_rules
-from app.logistics.schemas import LogisticsSalesRequest, PurchaseAgentOutput
+from app.logistics.schemas import (
+    InTransitItem,
+    LogisticsSalesRequest,
+    PurchaseAgentOutput,
+    ScheduledQuantity,
+)
 from app.logistics.service import run_logistics_procurement, run_logistics_sales
 
 
@@ -60,12 +65,12 @@ def _fixture_row(**updates) -> dict[str, object]:
         "fixture_id": "LOG-RUNTIME-SIM-BURNIN-202512-DAY30",
         "sim_run_id": "SIM-BURNIN-202512",
         "as_of": date(2025, 12, 31),
+        # 🔴 **세 status 만 남았다 (W3-2 · WP-3).** 목록의 정본이
+        #    `inbound_schedules` · `sales` 로 옮겨 가면서 JSON 세 칸은 Reader 가
+        #    안 읽는다 — 여기 실으면 «읽는다» 는 거짓 전제를 검사가 갖게 된다.
         "in_transit_status": "CONFIRMED_ZERO",
-        "in_transit_json": [],
         "confirmed_inbound_status": "CONFIRMED_ZERO",
-        "confirmed_inbound_json": [],
         "confirmed_outbound_status": "CONFIRMED_ZERO",
-        "confirmed_outbound_json": [],
         "usage_scope": "AGENT_MVP_DEMO",
         "evidence_grade": "SIM_FIXED",
         "source_ref": "MVP-DECISION-20260825:LOG-RUNTIME-DAY30",
@@ -392,29 +397,27 @@ def test_runtime_fixture_rejects_a_row_from_a_run_it_did_not_ask_for():
     [
         ({"usage_scope": "wrong"}, "usage_scope mismatch"),
         ({"as_of": date(2025, 12, 30)}, "as_of mismatch"),
-        (
-            {
-                "in_transit_json": [
-                    {
-                        "item": "배추",
-                        "quantity_kg": 1,
-                        "expected_arrival_date": "2026-01-02",
-                    }
-                ]
-            },
-            "CONFIRMED_ZERO",
-        ),
-        ({"confirmed_inbound_json": {}}, "list"),
-        ({"in_transit_status": "INVALID"}, "Input should be"),
+        ({"sim_run_id": "SIM-OTHER"}, "sim_run_id mismatch"),
     ],
 )
 def test_invalid_runtime_fixture_fails_closed(updates, message):
+    """🔴 **JSON 두 칸의 판정이 여기서 사라졌다 (W3-2).**
+
+    종전에는 `in_transit_json` 이 status 와 어긋나거나 모양이 틀리면 여기서 멈췄다.
+    지금 그 목록은 `inbound_schedules` 가 내고, status 는 **목록에서 유도된다**
+    (`repository._schedule_source`) — fixture 가 적은 `CONFIRMED`/`CONFIRMED_ZERO`
+    를 읽어 쓰지 않으므로 어긋날 두 값 자체가 없다. 남은 fail-closed 는 *"물어본
+    행이 맞나"* 셋이다.
+    """
     with (
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch("app.logistics.repository.fetch_all", return_value=[_fixture_row(**updates)]),
+        patch("app.logistics.repository._schedule_lists", return_value=([], [], [])),
         pytest.raises((ValueError, ValidationError), match=message),
     ):
-        get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
+        get_active_logistics_runtime_fixture(
+            as_of=date(2025, 12, 31), sim_run_id="SIM-BURNIN-202512"
+        )
 
 
 def test_unresolved_runtime_source_preserves_none():
@@ -429,30 +432,34 @@ def test_unresolved_runtime_source_preserves_none():
 
 
 def test_runtime_fixture_carries_inbound_id_for_b1_validation():
-    """B-1: Fixture의 동일 입고 건은 명시적 inbound_id로 연결된다 (자동 생성 금지)."""
-    row = _fixture_row(
-        in_transit_status="CONFIRMED",
-        in_transit_json=[
-            {
-                "inbound_id": "INB-001",
-                "item": "배추",
-                "quantity_kg": 500,
-                "expected_arrival_date": "2026-01-02",
-            }
-        ],
-        confirmed_inbound_status="CONFIRMED",
-        confirmed_inbound_json=[
-            {
-                "inbound_id": "INB-001",
-                "item": "배추",
-                "quantity_kg": 500,
-                "date": "2026-01-02",
-            }
-        ],
+    """B-1: 두 축의 같은 입고 건이 **명시적 `inbound_id`** 로 연결된다 (자동 생성 금지).
+
+    🔴 **두 목록이 한 표에서 나온다 (W3-2).** `in_transit_at` · `pending_inbound_at`
+       은 같은 `inbound_schedules` 행을 각자의 종료조건으로 걸러 낸 것이라,
+       `inbound_id` 가 두 축에서 어긋날 자리가 구조적으로 없다.
+
+    ★ status 는 **목록에서 유도된다** — fixture 가 적어 둔 값을 읽어 쓰지 않는다.
+    """
+    운송중 = InTransitItem(
+        inbound_id="INB-001",
+        purchase_id="PUR-001",
+        item="배추",
+        quantity_kg=Decimal(500),
+        expected_arrival_date=date(2026, 1, 2),
+    )
+    미래점유 = ScheduledQuantity(
+        inbound_id="INB-001",
+        item="배추",
+        quantity_kg=Decimal(500),
+        date=date(2026, 1, 2),
     )
     with (
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
-        patch("app.logistics.repository.fetch_all", return_value=[row]),
+        patch("app.logistics.repository.fetch_all", return_value=[_fixture_row()]),
+        patch(
+            "app.logistics.repository._schedule_lists",
+            return_value=([운송중], [미래점유], []),
+        ),
     ):
         fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
 
@@ -460,6 +467,9 @@ def test_runtime_fixture_carries_inbound_id_for_b1_validation():
     assert fixture.in_transit[0].inbound_id == "INB-001"
     assert fixture.confirmed_inbound_schedule is not None
     assert fixture.confirmed_inbound_schedule[0].inbound_id == "INB-001"
+    # ★ 저장된 CONFIRMED_ZERO 를 읽어 쓰지 않는다 — 목록이 status 를 정한다.
+    assert fixture.in_transit_status == "CONFIRMED"
+    assert fixture.confirmed_inbound_status == "CONFIRMED"
 
 
 def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():

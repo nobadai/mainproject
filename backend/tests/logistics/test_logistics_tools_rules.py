@@ -10,6 +10,7 @@ from app.logistics.rules import (
 )
 from app.logistics.schemas import (
     InTransitItem,
+    InventoryByItem,
     InventoryLotSnapshot,
     LogisticsSalesRequest,
     PurchaseAgentOutput,
@@ -417,9 +418,21 @@ def test_expired_lot_leaves_available_but_keeps_occupying_space(complete_logisti
     assert calculate_cap_by_date(snapshot, [ARRIVAL]) == {ARRIVAL: Decimal(7600)}
 
 
-def test_confirmed_outbound_reservation_reduces_available_inventory(
-    complete_logistics_snapshot,
-):
+def test_confirmed_outbound_is_not_deducted_twice(complete_logistics_snapshot):
+    """🔴 **차감 축은 한 벌이다 — 예약·할당뿐이다 (WP-3).**
+
+    확정 판매는 그날 마스터 출고 흐름이 **예약으로 내려보내는 바로 그 사실**이라,
+    `confirmed_outbound_schedule` 까지 함께 빼면 같은 판매가 두 번 차감된다.
+
+    ```text
+    ~WP-2   on_hand − 예약·할당 − confirmed_outbound   🔴 같은 판매를 두 번 뺀다
+    WP-3~   on_hand − 예약·할당                        ✅ 한 벌
+    ```
+
+    ★ **미래 Capacity 와는 다른 셈이다.** `_replay_occupancy_by_item` 은 여전히
+      그 축을 쓴다 — 저쪽은 *"미래 어느 날 창고가 얼마나 비는가"* 이고 이쪽은
+      *"지금 더 팔 수 있는가"* 다.
+    """
     snapshot = complete_logistics_snapshot.model_copy(
         update={
             "confirmed_outbound_schedule": [
@@ -431,7 +444,7 @@ def test_confirmed_outbound_reservation_reduces_available_inventory(
     inventory = build_inventory_by_item(snapshot)
 
     assert inventory is not None
-    assert [(row.item, row.available_qty_kg) for row in inventory] == [("배추", Decimal(800))]
+    assert [(row.item, row.available_qty_kg) for row in inventory] == [("배추", Decimal(1000))]
 
 
 def test_empty_confirmed_outbound_is_normal(complete_logistics_snapshot):
@@ -444,10 +457,17 @@ def test_empty_confirmed_outbound_is_normal(complete_logistics_snapshot):
     assert result["runtime_status"] == "READY"
 
 
-def test_outbound_row_without_item_omits_inventory_but_keeps_pre_ready(
+def test_outbound_row_without_item_still_reports_the_unresolved_axis(
     complete_logistics_snapshot,
 ):
-    """TC-05: 품목 임의 추정 금지 — inventory_by_item만 생략, PRE는 READY 유지."""
+    """TC-05: 품목 임의 추정 금지 — 그 사실은 hard constraint 로 남는다.
+
+    ⚠️ **판매가능량은 더 이상 이 축 때문에 생략되지 않는다 (WP-3).**
+       `build_inventory_by_item` 이 `confirmed_outbound_schedule` 을 안 쓰므로
+       품목을 못 붙인 확정 출고가 있어도 예약·할당 축으로 답할 수 있다.
+       못 붙였다는 사실 자체는 `CONFIRMED_OUTBOUND_ITEM_UNRESOLVED` 가 나른다 —
+       조용히 사라지지 않는다.
+    """
     snapshot = complete_logistics_snapshot.model_copy(
         update={
             "confirmed_outbound_schedule": [
@@ -457,8 +477,9 @@ def test_outbound_row_without_item_omits_inventory_but_keeps_pre_ready(
     )
 
     assert has_unattributed_confirmed_outbound(snapshot) is True
-    assert build_inventory_by_item(snapshot) is None
-    assert build_inventory_by_item(snapshot) != []
+    assert build_inventory_by_item(snapshot) == [
+        InventoryByItem(item="배추", available_qty_kg=Decimal(1000))
+    ]
 
     result = evaluate_procurement_rules(as_of=AS_OF, snapshot=snapshot)
     assert result["runtime_status"] == "READY"

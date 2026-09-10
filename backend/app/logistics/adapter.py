@@ -46,12 +46,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, cast
-
-import psycopg
+from typing import Any
 
 from app.contracts.core import Evidence, SuggestedAdjustment
-from app.logistics.db import get_connection
 from app.logistics.interpretation import (
     build_sanitized_context,
     master_interpretation_service,
@@ -82,7 +79,6 @@ from app.logistics.tools import (
     evaluate_delivery_feasibility,
     supply_capacity_by_date,
 )
-from app.logistics.transport import AmbiguousRoute, RouteNotFound, resolve_fixed_route
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata, Verdict
 from app.purchase_agent.schemas import PurchaseProposal
@@ -1449,10 +1445,12 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         outbound_by_date[row.date] = outbound_by_date.get(row.date, Decimal(0)) + row.quantity_kg
 
     # ── 운송 계약 ────────────────────────────────────────────────
-    route_or_error = _delivery_route()
-    if route_or_error is _ROUTE_ERROR:
+    #
+    # 🔴 **여기서 DB 를 열지 않는다.** 계약은 `_load_read` 가 같은 읽기 한 벌에 담아
+    #    왔다 (`repository.LogisticsRead.delivery_route`) — 어댑터는 번역만 한다.
+    if read.delivery_route_error:
         return _delivery_input_error(request, run_id, tools)
-    route = cast("str | None", route_or_error)
+    route = read.delivery_route
 
     delivery = evaluate_delivery_feasibility(
         as_of=as_of,
@@ -1847,34 +1845,6 @@ def _delivery_input_error(
 
 #: 운송 계약 조회가 **실행 오류**로 끝났다는 표시. 🔴 `None` 을 안 쓴다 —
 #: `None` 은 *"계약 행이 없다"* 라는 정상 사실이고 이것은 *"못 읽었다"* 다.
-_ROUTE_ERROR = object()
-
-
-def _delivery_route() -> object:
-    """운송 계약 하나를 읽는다. **문자열을 코드에 안 박는다.**
-
-    ★ **정본은 `logistics_contracts` 표이고 Reader 는 `transport.resolve_fixed_route`
-      하나다.** `LOGI-BASE-5PL` 을 상수로 복제하면 계약 행이 바뀌는 날 코드만 옛 값을
-      들고 남는다 — 저쪽이 0 / 1 / 2+ 를 이미 셋 다 다르게 다룬다.
-
-    ```text
-    계약 0건    RouteNotFound   → None          회사 상태다. 납기는 UNRESOLVED 로 간다
-    계약 1건    그 계약          → contract_id
-    계약 2건+   AmbiguousRoute  → _ROUTE_ERROR  무결성 위반이라 실행 오류로 올린다
-    ```
-
-    :returns: `contract_id` · `None`(계약 없음) · `_ROUTE_ERROR`(실행 오류).
-    """
-    try:
-        with get_connection() as conn:
-            return resolve_fixed_route(conn).logistics_contract_id
-    except RouteNotFound:
-        return None
-    except (AmbiguousRoute, psycopg.Error, RuntimeError, TypeError, ValueError):
-        logger.exception("PRE_SALES 운송 계약 조회 실패")
-        return _ROUTE_ERROR
-
-
 def _query_scope(request: AgentRequest, as_of: date) -> dict[str, Any]:
     """이 회신이 **무엇을 기준으로 답했나.** 마스터가 보낸 것만 읽는다.
 
