@@ -32,6 +32,7 @@ commitment.py — 승인된 매입안 → **확정 입고 약정** (H1)
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -44,6 +45,7 @@ __all__ = [
     "ApprovedCommitment",
     "ArrivalLeg",
     "CommitmentNotBuildable",
+    "SourcingLine",
     "build_commitment",
 ]
 
@@ -66,8 +68,37 @@ class CommitmentNotBuildable(ValueError):
 
 
 @dataclass(frozen=True)
+class SourcingLine:
+    """등급 조달 1줄. **매입이 보낸 모양 그대로다** (`sourcing_plan[]`).
+
+    ★ 이름도 값도 안 바꾼다. `grade_unit_price` 를 `unit_price_krw_per_kg` 로 고쳐
+      부르지 않고, 수량을 다시 세지도 않는다 — `amount_krw` 를 마스터가 안 만드는
+      것과 같은 규율이다 (§3.2.2). 여기는 **옮기는 자리**다.
+
+    ⚠️ `contracts/core.py` 의 `SourcingLot` 을 쓰지 않는다. 그쪽은 단가 이름이
+      `unit_price_krw_per_kg` 라 매입이 보낸 `grade_unit_price` 를 옮기려면 이름을
+      바꿔야 하고, 그 순간 **한 사실이 두 이름**이 된다.
+
+    🔴 **회차(`ArrivalLeg`)와 다른 축이다.** 한 회차가 여러 등급을 담을 수 있고 한
+       등급이 여러 회차에 걸칠 수 있다. 오늘은 둘 다 하나뿐이지만(#308 이 분할을
+       못 세우고 있다) 그것이 계약이 아니다 — 그래서 등급을 회차에 붙이지 않고
+       **목록으로 따로 나른다.** 분할이 서는 날 축이 갈려도 재료가 이미 여기 있다.
+    """
+
+    grade: str
+    market: str | None = None
+    qty_kg: float | None = None
+    grade_unit_price: float | None = None
+
+
+@dataclass(frozen=True)
 class ArrivalLeg:
-    """입고 1회분. **품목이 붙어 있다.**"""
+    """입고 1회분. **품목이 붙어 있다.**
+
+    🔴 **`grade` 가 여기 없다.** 넣으면 *"회차 하나 = 등급 하나"* 가 계약으로 굳고,
+       `#308` 이 풀려 2·3회차가 서는 날 **말없이 틀린다.** 등급은
+       `ApprovedCommitment.sourcing_plan` 이 목록으로 나른다.
+    """
 
     item: str
     qty_kg: float
@@ -118,6 +149,16 @@ class ApprovedCommitment:
     total_qty_kg: float
     total_amount_krw: float
     arrival_schedule: tuple[ArrivalLeg, ...] = ()
+    sourcing_plan: tuple[SourcingLine, ...] = ()
+    """매입이 짠 **등급별 조달**. 안이 적은 목록 그대로다.
+
+    ★ **회차와 다른 축이라 목록이다.** 한 줄뿐인 오늘도 목록이고, 여럿이 되는 날
+      모양이 안 바뀐다 — 스칼라로 접었다가 나중에 펴면 그 사이 쓰인 코드가 전부
+      *"등급은 하나"* 를 가정하고 있다.
+
+    ★ **비어 있을 수 있다.** 매입이 안 실어 보내면 빈 목록이고, 그러면 원장
+      `purchase_items.grade` 도 `NULL` 로 남는다 — 지어내지 않는다 (§1.2-10).
+    """
     inbound_lead_days: float | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -149,6 +190,29 @@ class ApprovedCommitment:
     @property
     def first_arrival(self) -> date | None:
         return min((leg.arrival_date for leg in self.arrival_schedule), default=None)
+
+    @property
+    def grades(self) -> tuple[str, ...]:
+        """실려 온 등급. **중복 없이 · 온 순서대로 · 값은 그대로.**
+
+        ★ **같은 등급이 두 줄이면 등급은 하나다.** 시장이 달라 줄이 갈린 것뿐이고
+          등급 칸에 담길 값은 여전히 하나다 — 그때까지 막으면 담을 수 있는 것을
+          못 담는다.
+
+        🔴 **겹침 판정만 NFC 로 하고, 돌려주는 값은 받은 그대로다.** 조합형 `특` 과
+           분해형 `특` 을 다른 등급으로 세면 등급이 하나인 안이 *"둘"* 로 읽혀 원장이
+           엉뚱하게 멈춘다. 값 자체를 정규화해 내보내면 그건 매입이 보낸 문자열을
+           마스터가 고쳐 쓴 것이다 — **비교만 접고 값은 안 만진다.**
+        """
+        seen: set[str] = set()
+        표: list[str] = []
+        for line in self.sourcing_plan:
+            열쇠 = unicodedata.normalize("NFC", line.grade)
+            if 열쇠 in seen:
+                continue
+            seen.add(열쇠)
+            표.append(line.grade)
+        return tuple(표)
 
 
 def build_commitment(
@@ -196,9 +260,48 @@ def build_commitment(
         total_qty_kg=total_qty,
         total_amount_krw=total_amount,
         arrival_schedule=legs,
+        sourcing_plan=_sourcing(scenario.get("sourcing_plan")),
         inbound_lead_days=lead,
         notes=notes,
     )
+
+
+def _sourcing(raw: Any) -> tuple[SourcingLine, ...]:
+    """안의 `sourcing_plan` 을 **줄 수 그대로** 옮긴다.
+
+    🔴 **접지 않는다.** 등급별 수량을 합치거나 대표 등급 하나로 줄이면, 그 순간
+       *"등급이 여럿이었다"* 는 사실이 사라져 원장이 막아야 할 자리를 통과한다.
+       줄이 셋이면 셋을 그대로 들고 온다.
+
+    ★ **검사하지 않는다.** 수량 합이 총량과 맞는지, 단가가 양수인지는 매입
+      `SourcingPlanItem` 이 이미 본다. 여기서 다시 세면 허용 오차가 갈리는 날
+      같은 안을 한 곳은 통과시키고 한 곳은 막는다.
+
+    ★ **없으면 빈 목록이다.** `sourcing_plan` 이 아예 없는 안(조회·옛 응답)이 있고,
+      그때 등급이 없다는 것은 정상 상태다 — 못 만든 것이 아니라 안 온 것이다.
+    """
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    lines: list[SourcingLine] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        grade = entry.get("grade")
+        if not isinstance(grade, str) or not grade.strip():
+            # ★ 매입 `SourcingPlanItem.grade` 는 `NonEmptyStr` 라 여기 오는 빈 등급은
+            #   계약 밖 값이다. 지어내지 않고 **등급을 안 싣는다** — 이 줄이 빠지면
+            #   등급이 하나도 안 남아 원장이 `NULL` 로 가고, 그것이 정직한 결과다.
+            continue
+        market = entry.get("market")
+        lines.append(
+            SourcingLine(
+                grade=grade,
+                market=market if isinstance(market, str) else None,
+                qty_kg=_number(entry.get("qty_kg")),
+                grade_unit_price=_number(entry.get("grade_unit_price")),
+            )
+        )
+    return tuple(lines)
 
 
 def _legs(
