@@ -5,8 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.sales.llm.runtime import interpret_candidates
-from app.sales.llm.runtime import LlmInterpretationOutput
+from app.sales.llm.runtime import LlmInterpretationOutput, interpret_candidates
 from app.sales.proposal import _generate_scenarios, run_proposal
 from app.sales.ranking import rank_scenarios, remove_dominated_scenarios
 from app.sales.schemas import LogisticsLotConstraint, SalesCandidate, SalesProposalInput
@@ -183,7 +182,9 @@ def test_s09_fail_does_not_invent_price_or_payment_and_s10_authority_can_adjust_
     assert "FINANCE_REVALIDATION_REQUIRED" in balanced.execution_dependencies
 
 
-def _pre_sales_logistics(*, status, confirmed, earliest, capacity_by_date=True):
+def _pre_sales_logistics(
+    *, status, confirmed, earliest, daily_capacity=5000, capacity_by_date=True
+):
     return {
         "query_scope": {"item": "배추", "as_of": "2026-09-09"},
         "sellable_supply": {
@@ -198,7 +199,7 @@ def _pre_sales_logistics(*, status, confirmed, earliest, capacity_by_date=True):
         },
         "delivery_feasibility": {
             "status": status,
-            "daily_outbound_capacity_kg": 5000,
+            "daily_outbound_capacity_kg": daily_capacity,
             "delivery_route": "FIXED_ROUTE",
             "transport_lead_time": 0,
             "earliest_delivery_date": earliest,
@@ -208,21 +209,32 @@ def _pre_sales_logistics(*, status, confirmed, earliest, capacity_by_date=True):
 
 
 @pytest.mark.parametrize(
-    ("delivery_date", "quantity", "confirmed", "status", "expected_confirmed", "expected_status"),
+    (
+        "delivery_date",
+        "quantity",
+        "confirmed",
+        "status",
+        "daily_capacity",
+        "expected_confirmed",
+        "expected_status",
+    ),
     [
-        ("2026-09-09", 3500, 3500, "FAIL", None, "INFEASIBLE"),
-        ("2026-09-10", 3500, 3500, "READY", 3500, "EXECUTABLE"),
-        ("2026-09-10", 5001, 5001, "FAIL", 5001, "INFEASIBLE"),
-        ("2026-09-10", 3500, 3500, "READY", 3500, "EXECUTABLE"),
-        ("2026-09-10", 3501, 3501, "FAIL", 3501, "INFEASIBLE"),
+        ("2026-09-09", 3500, 3500, "FAIL", 5000, None, "INFEASIBLE"),
+        ("2026-09-10", 3500, 3500, "READY", 6000, 3500, "EXECUTABLE"),
+        ("2026-09-10", 5001, 5001, "FAIL", 5000, 5001, "INFEASIBLE"),
+        ("2026-09-10", 3500, 3500, "READY", 5000, 3500, "EXECUTABLE"),
+        ("2026-09-10", 3501, 3501, "FAIL", 5000, 3501, "INFEASIBLE"),
     ],
     ids=["as-of-fails", "as-of-plus-one-ready", "5001-exceeds", "1500-plus-3500", "1500-plus-3501"],
 )
 def test_pre_sales_delivery_facts_are_consumed_without_sales_recalculation(
-    delivery_date, quantity, confirmed, status, expected_confirmed, expected_status
+    delivery_date, quantity, confirmed, status, daily_capacity, expected_confirmed, expected_status
 ):
     logistics = _pre_sales_logistics(
-        status=status, confirmed=confirmed, earliest="2026-09-10"
+        status=status,
+        confirmed=confirmed,
+        earliest="2026-09-10",
+        daily_capacity=daily_capacity,
     )
     request = _request(
         quantity=quantity,
