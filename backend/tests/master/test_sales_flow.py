@@ -352,10 +352,15 @@ def test_조건부_판정은_통과에_남는다():
 
 
 def test_판정을_안_낸_것은_통과가_아니다():
-    """`skipped` 는 *"조건부로 괜찮다"* 가 아니라 **판정을 안 낸 것**이다 (#173)."""
+    """`skipped` 는 *"조건부로 괜찮다"* 가 아니라 **판정을 안 낸 것**이다 (#173).
+
+    ★ 종료 코드는 `SL3` 이 아니라 `SL6` 이다 — **판정을 안 낸 것은 탈락이 아니다.**
+      통과가 아니라는 사실(#173)은 그대로이고, 그 이유가 갈렸을 뿐이다.
+    """
     out = happy(finance=financier({"SCN-1": "skipped"})).run()
 
-    assert out.end_code == "SL3_ALL_REJECTED"
+    assert not out.presented
+    assert out.end_code == "SL6_VALIDATION_UNRESOLVED"
 
 
 # ---------------------------------------------------------------------------

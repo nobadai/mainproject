@@ -105,8 +105,17 @@ _SALES_APPROVE_END_CODES: frozenset[str] = frozenset({"SL1_PRESENTED"})
 #:
 #: `SL4_NOT_STARTED` 는 뺀다 — `E4_NOT_STARTED` 와 같은 이유다. 시작조차 못 한 날은
 #: 회사의 판단이 아니라 실행 환경 문제라 사람이 고를 것이 없다.
+#: ★ `SL6_VALIDATION_UNRESOLVED` 는 `SL3` 이 쪼개져 나온 자리라 **여기 있어야 한다** —
+#:   빼면 예전에 결정을 받던 실행이 조용히 결정 불가가 된다. 승인은 여전히 막힌다:
+#:   승인 어휘(`_SALES_APPROVE_END_CODES`)는 `SL1` 하나뿐이다.
 _SALES_DECIDABLE_END_CODES: frozenset[str] = frozenset(
-    {"SL1_PRESENTED", "SL2_NO_CANDIDATE", "SL3_ALL_REJECTED", "SL5_BUDGET_EXHAUSTED"}
+    {
+        "SL1_PRESENTED",
+        "SL2_NO_CANDIDATE",
+        "SL3_ALL_REJECTED",
+        "SL5_BUDGET_EXHAUSTED",
+        "SL6_VALIDATION_UNRESOLVED",
+    }
 )
 
 
