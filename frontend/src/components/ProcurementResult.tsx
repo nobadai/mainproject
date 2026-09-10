@@ -2,8 +2,9 @@
 
 import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
+import { ConcernsFold } from "@/components/ConcernsFold";
 import { EvidencePanel } from "@/components/EvidencePanel";
-import { Panel, SourceBadges } from "@/components/Badges";
+import { SourceBadges } from "@/components/Badges";
 import { AGENT_LABEL } from "@/components/LlmTrace";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
 import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
@@ -166,25 +167,13 @@ export function ProcurementResult({
       {/* 판정 바로 아래에 둔다 — "왜 그 판정인가" 를 물은 다음에 보는 것이다 */}
       <EvidencePanel evidences={run.evidences} />
 
-      <Panel
-        tone="attn"
-        title="확인해 주세요"
-        items={[
-          ...run.mocked_inputs.map(
-            (k) => `🔴 ${k} 는 mock 에서 왔습니다 — 이 결론을 실측으로 읽지 마십시오`,
-          ),
-          ...run.findings.map((f) => `지적: ${f}`),
-          ...run.concerns,
-        ]}
-      />
-
-      <Panel
-        title="검증"
-        items={[
-          `지적 ${run.findings.length}건 · 판정하지 못한 검사 ${run.skipped_checks.length}건`,
-          ...run.skipped_checks,
-        ]}
-      />
+      {/*
+        🔴 **접는 것이지 빼는 것이 아니다** (화면 주인 2026-09-10). 두 판이 펼쳐진 채
+        안 하나에 글 600자를 먹어 결론 카드를 밀어냈다. 접히되 **배지 한 줄이 남아**
+        무엇이 몇 건 접혀 있는지 — 특히 mock 이 섞였는지 — 를 첫 화면에서 말한다.
+        문장은 하나도 안 줄었다. 펼치면 그대로 온다.
+      */}
+      <ConcernsFold run={run} />
     </div>
   );
 }
