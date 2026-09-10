@@ -15,6 +15,13 @@
   이며, `as_of` 는 문 앞 게이트가 실행일만 통과시킨다. 그래서 이 파일의 절반은 **분할이
   서는 날**(`#308`) 걸릴 것을 미리 시험하는 합성 입력이고, 나머지 절반은 **지금 안 걸리는
   이유를 구조로 잠근다** (`test_single_leg_is_always_as_of`).
+
+★ **이름이 `execution_calendar` 가 아닌 이유** — `tests/master/test_execution_calendar.py`
+  가 먼저 있었고(`90858cd`), 같은 basename 을 쓰면 pytest 가 **수집 단계에서 터진다**
+  (`tests/` 에 `__init__.py` 가 없어 모듈 이름이 basename 하나로 정해진다). 실제로 그렇게
+  터뜨렸다 — 🔴 **`tests/test_purchase_agent` 만 돌리면 안 보이고 전체를 돌려야 보인다.**
+  ★ 그래서 검사 대상 함수 이름(`market_open_days`)을 따랐다. `test_arrival_capacity.py`
+  가 `ArrivalCapacity` 를 따르는 것과 같은 규칙이다.
 """
 
 from datetime import date
