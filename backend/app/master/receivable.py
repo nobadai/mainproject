@@ -298,7 +298,7 @@ def issue_receivables(
                     있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
                     바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
     """
-    gate = check_day_gate(as_of, connect=connect)
+    gate = check_day_gate(as_of, connect=connect, sim_run_id=sim_run_id)
     if gate.gate == "BLOCKED":
         return ReceivableOut(
             as_of=as_of,

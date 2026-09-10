@@ -80,7 +80,9 @@ def _열린_날로_둔다(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         inbound,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="ALREADY_OPENED"
+        ),
     )
 
 

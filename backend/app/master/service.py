@@ -127,7 +127,7 @@ def run_procurement(
     #    그 날 장부가 안 열렸으면 실행일이어도 읽을 상태가 없다.
     #
     # ★ **두 관문은 다른 물음이다.** 토요일은 여기를 통과하고 아래에서 막힌다.
-    day_gate = check_day_gate(request.as_of)
+    day_gate = check_day_gate(request.as_of, sim_run_id=context.sim_run_id)
     if day_gate.gate == "BLOCKED":
         response = _empty_response(
             context,
@@ -305,7 +305,7 @@ def run_sales(
     #    잊으면 *"안 열린 날 판매가 돈다"* 인데, 막힌 게 아니라 안 막힌 것이라
     #    아무 오류도 안 난다. 그 조용한 실수를
     #    `tests/master/test_entrypoint_day_gate.py` 가 먼저 잡는다.
-    day_gate = check_day_gate(request.as_of)
+    day_gate = check_day_gate(request.as_of, sim_run_id=context.sim_run_id)
     if day_gate.gate == "BLOCKED":
         response = _empty_sales_response(
             context,

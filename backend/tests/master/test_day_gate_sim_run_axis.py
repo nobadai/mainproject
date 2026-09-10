@@ -375,3 +375,48 @@ def test_등록이_0건이면_축이_없어도_통과한다() -> None:
     gate = check_day_gate(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id="")
 
     assert gate.gate == "PASS"
+
+
+# ── 부르는 자리가 축을 넘기는가 ─────────────────────────────────────────
+
+
+#: 🔴 **축을 안 넘기는 것이 알려진 자리.** 여기 이름이 있다는 것은
+#:   *"기본값으로 떨어지는 것을 안다"* 는 뜻이지 *"괜찮다"* 는 뜻이 아니다.
+#:
+#: ★ `revalidation.revalidate_scenario` 는 그 위(`:258`)에서도 축을
+#:   `BURN_IN_SIM_RUN_ID` 로 박는다. 이 파일에서 관문만 고치면 **한 함수 안에서
+#:   두 축이 갈린다** — 그 자리는 따로 정할 판이다.
+_축을_안_넘기는_알려진_자리 = {("revalidation.py", "check_day_gate")}
+
+
+def test_관문을_부르는_자리가_전부_축을_넘긴다() -> None:
+    """★★ **`grep | head` 로 세었다가 다섯을 놓친 자리다.**
+
+    🔴 오늘 관문 호출부를 눈으로 세어 *"둘"* 이라고 적었는데 실제로는 **일곱**이었다.
+       잘린 출력을 전부로 읽은 것이고, 그 다섯 중 둘(`service.py` 의 매입·판매)이
+       **판단을 막고 있던 바로 그 자리**였다.
+
+    ★ 그래서 사람이 세지 않는다. `app/master/` 전체를 AST 로 읽어
+      `check_day_gate(...)` 를 전부 모으고, `sim_run_id` 를 안 넘기는 것이 있으면
+      빨개진다 — 새 호출부가 생기는 날 **그 자리에서** 걸린다.
+    """
+    뿌리 = pathlib.Path(관문모듈.__file__).parent
+    샌것: list[tuple[str, int]] = []
+    센_것 = 0
+    for 파일 in sorted(뿌리.glob("*.py")):
+        나무 = ast.parse(파일.read_text(encoding="utf-8"))
+        for 마디 in ast.walk(나무):
+            if not isinstance(마디, ast.Call):
+                continue
+            이름 = 마디.func.id if isinstance(마디.func, ast.Name) else None
+            if 이름 != "check_day_gate":
+                continue
+            센_것 += 1
+            if (파일.name, 이름) in _축을_안_넘기는_알려진_자리:
+                continue
+            if not any(kw.arg == "sim_run_id" for kw in 마디.keywords):
+                샌것.append((파일.name, 마디.lineno))
+
+    # 🔴 **호출부가 하나도 안 잡히면 이 검사는 아무것도 안 잰다.**
+    assert 센_것 >= 6, f"관문 호출부를 {센_것}건밖에 못 찾았다 — 검사가 헛돌고 있다"
+    assert not 샌것, f"관문을 부르면서 축을 안 넘기는 자리가 있다: {샌것}"
