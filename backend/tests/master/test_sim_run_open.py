@@ -175,9 +175,14 @@ _물류_NOT_NULL_칸 = (
     "source_ref",
     "approved_by",
     "is_active",
-    "created_at",
-    "updated_at",
 )
+
+#: 🔴 **이관하지 않는 칸.** `NOT NULL` 이지만 DB 기본값(`now()`)이 채운다.
+#:
+#: ★★ 축이 다르다 — `evidence_grade` 는 *"이 사실이 어디서 왔나"* 라 따라가는 것이
+#:   맞고, 이 둘은 *"이 행이 언제 쓰였나"* 다. 이관본은 **지금** 쓰인 새 행이라
+#:   source 시각을 나르면 두 달 전에 만들어졌다고 말하게 된다.
+_행이_쓰인_시각_칸 = ("created_at", "updated_at")
 
 #: 🔴 **물류 소유의 근거 셋**. 마스터가 새로 쓰지 않고 그대로 따라간다.
 _근거셋 = ("evidence_grade", "source_ref", "approved_by")
@@ -618,9 +623,40 @@ def test_물류_값은_source_에서_그대로_이관된다() -> None:
 
     실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
     for 칸, 값 in _물류출발행.items():
-        if 칸 in ("fixture_id", "sim_run_id", "note"):
+        if 칸 in ("fixture_id", "sim_run_id", "note", *_행이_쓰인_시각_칸):
             continue
         assert 실린것[칸] == 값, f"{칸} 이 source 에서 안 왔다: {실린것[칸]!r} != {값!r}"
+
+
+def test_행이_쓰인_시각을_이관하지_않는다() -> None:
+    """🔴 **`created_at` · `updated_at` 은 이관 대상이 아니다.**
+
+    ★★ 그 둘은 사실이 언제 생겼나가 아니라 **이 행이 언제 쓰였나**이고, 이관본은
+      **지금** 쓰인 새 행이다. source 값을 나르면 새 행이 두 달 전에 만들어졌다고
+      말하게 된다 — 없는 사실이고, **에러 없이 틀린 값**이다.
+
+    ★ 안 실으면 DB 기본값(`now()`)이 선다. 마스터가 시각을 지어내지도 않는다.
+    """
+    conn, _ = _물류를_심는다()
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    실린칸 = set(실린것)
+    따라온것 = [칸 for 칸 in _행이_쓰인_시각_칸 if 칸 in 실린칸]
+    assert not 따라온것, f"이관본이 source 의 시각을 들고 왔다: {따라온것}"
+
+
+def test_is_active_는_따라간다() -> None:
+    """🔴 **`is_active` 는 기본값이 있어도 이관한다.**
+
+    ★★ *"이 사실이 살아 있나"* 는 **물류의 판정**이다. source 가 죽어 있는데
+      마스터가 살려 놓으면 물류가 내린 판정을 뒤집는 것이 된다 — 기본값이 있다는
+      것만으로 `created_at` 과 같이 묶으면 그 뒤집기가 조용히 일어난다.
+    """
+    죽은행 = {**_물류출발행, "is_active": False}
+    conn, _ = _물류를_심는다(물류출발행=죽은행)
+
+    실린것 = _실린다(conn, LOGISTICS_FIXTURE_TABLE)
+    assert 실린것["is_active"] is False, "마스터가 물류의 판정을 뒤집었다"
 
 
 def test_근거_셋을_마스터가_새로_쓰지_않는다() -> None:

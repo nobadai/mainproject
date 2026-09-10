@@ -172,6 +172,17 @@ FINANCE_STATE_TABLE = "finance_states"
 #: 시작 물류 fixture 가 사는 표. 🔴 **물류가 자기 개장 여부를 읽는 그 표다.**
 LOGISTICS_FIXTURE_TABLE = "logistics_runtime_fixture"
 
+#: 🔴 **이관 대상이 아닌 칸.** 이 행이 **언제 쓰였나** 이지 사실이 언제 생겼나가 아니다.
+#:
+#: ★★ 축이 다르다. `evidence_grade` · `source_ref` · `approved_by` 는 *"이 사실이 어디서
+#:   왔나"* 라 같은 사실이면 그대로 따라가는 것이 맞다. 그런데 이 둘은 **행에 대한 기록**
+#:   이고, 이관본은 **지금** 쓰인 새 행이다. source 값을 나르면 새 행이 두 달 전에
+#:   만들어졌다고 말하게 된다 — 없는 사실이고, 에러 없이 틀린 값이다.
+#:
+#: 🔴 **`is_active` 는 여기 없다.** 그것도 기본값이 있지만 *"이 사실이 살아 있나"* 라
+#:   물류의 판정이다. 마스터가 살려 놓으면 물류가 내린 판정을 뒤집는 것이 된다.
+ROW_WRITTEN_COLUMNS = ("created_at", "updated_at")
+
 #: `config_json` 안에서 lineage 가 앉는 자리.
 BASELINE_CONFIG_KEY = "baseline"
 
@@ -330,6 +341,9 @@ def _insertable_columns(cursor: Any, *, schema: str, table: str) -> tuple[str, .
 
     ★ **손으로 안 고른다** (모듈 docstring). 생성 칸(`financial_limit_krw` 같은
       `GENERATED ALWAYS`)은 실으면 DB 가 막으므로 뺀다.
+
+    🔴 **`ROW_WRITTEN_COLUMNS` 도 뺀다** — 안 실으면 DB 기본값(`now()`)이 선다.
+       그 둘은 이관할 사실이 아니라 이 행이 언제 쓰였나이고, 이관본은 지금 쓰인다.
     """
     cursor.execute(
         """
@@ -343,7 +357,9 @@ def _insertable_columns(cursor: Any, *, schema: str, table: str) -> tuple[str, .
     칸들 = tuple(
         row["column_name"]
         for row in cursor.fetchall()
-        if row["is_generated"] != "ALWAYS" and row["identity_generation"] != "ALWAYS"
+        if row["is_generated"] != "ALWAYS"
+        and row["identity_generation"] != "ALWAYS"
+        and row["column_name"] not in ROW_WRITTEN_COLUMNS
     )
     if not 칸들:
         raise LookupError(f"{schema}.{table} 의 칸을 못 읽었다 — 빈 목록으로 행을 만들지 않는다")
