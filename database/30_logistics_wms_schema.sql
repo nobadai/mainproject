@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS haetdeul.inbound_schedules (
     created_as_of         DATE NOT NULL,
     cancelled_as_of       DATE,
     source_ref            TEXT NOT NULL,
+    cancel_source_ref     TEXT,
     note                  TEXT,
     recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT inbound_schedules_pkey PRIMARY KEY (sim_run_id, inbound_id),
@@ -369,9 +370,9 @@ CREATE TABLE IF NOT EXISTS haetdeul.inbound_schedules (
         FOREIGN KEY (sim_run_id) REFERENCES haetdeul.sim_runs(sim_run_id),
     CONSTRAINT ck_inbound_schedules_qty CHECK (quantity_kg > 0),
     -- 취소가 생성보다 앞설 수 없다. 🔴 리드타임 하한 CHECK 는 **안 건다** —
-    --    `inbound_lead_days` 최소값이 아직 정해진 적이 없다
-    --    (`app/logistics/schemas.py` 가 `ge=0` 이고, 마스터 `_arrival_blocked` 주석이
-    --     *"정할 자리는 물류·매입"* 이라고 적었다).
+    --    MVP `inbound_lead_days` 정책값(1 calendar day)은 `agent_policy_config` 가
+    --    들고 있고, 이 표는 그것으로 **이미 계산된** `expected_arrival_date` 를 적을
+    --    뿐이라 리드타임 정책을 여기서 다시 검사하지 않는다.
     CONSTRAINT ck_inbound_schedules_cancelled_after_created
         CHECK (cancelled_as_of IS NULL OR cancelled_as_of >= created_as_of)
 );
@@ -392,6 +393,8 @@ COMMENT ON COLUMN haetdeul.inbound_schedules.created_as_of IS
     '이 일정이 장부에 선 시뮬레이션 날짜 (승인 전이의 target_state_date). 🔴 벽시각이 아니다 — 과거 재현이 이 값으로 선다.';
 COMMENT ON COLUMN haetdeul.inbound_schedules.cancelled_as_of IS
     'NULL 이면 살아 있다. 값이 있으면 그날부터 취소다 (as_of < cancelled_as_of 인 날에는 여전히 존재). status 컬럼을 따로 두지 않는 이유가 이 한 칸이다.';
+COMMENT ON COLUMN haetdeul.inbound_schedules.cancel_source_ref IS
+    '입고 일정 취소 근거 (MASTER-CANCEL:{approval_id}@{취소일}). source_ref 는 생성 근거로 그대로 두고 덮지 않는다. 감사용이라 Historical 판정에는 쓰지 않는다 — 그날 살아 있었나는 cancelled_as_of 가 답한다.';
 COMMENT ON COLUMN haetdeul.inbound_schedules.recorded_at IS
     '감사용 벽시각. 🔴 Historical 판정에 쓰지 않는다 — 시뮬레이션 날짜는 created_as_of · cancelled_as_of 다.';
 

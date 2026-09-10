@@ -158,9 +158,11 @@ def _취소된것(conn: _가짜커넥션) -> list[tuple[Any, str]]:
     """실제로 나간 취소 UPDATE 들 — `(cancelled_as_of, inbound_id)`.
 
     ⚠️ `"UPDATE" in text` 로 거르지 않는다 — 잠그는 SELECT 의 `FOR UPDATE` 가 걸린다.
+
+    ⚠️ 열쇠는 **끝에서** 센다 — `SET` 절이 늘면 앞자리가 밀린다.
     """
     return [
-        (params[0], params[2])
+        (params[0], params[-1])
         for text, params in conn.cur.executed
         if "SET cancelled_as_of" in text
     ]
@@ -336,24 +338,14 @@ def test_물류가_target_state_date_를_적는다():
     assert 적힌날 != APPROVED_ON
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "물류 #484 로 잃은 것이다. withdraw_inventory 는 source_ref 를 받고도"
-        " cancel_schedule 에 안 넘기고, cancel_schedule 은 cancelled_as_of 만"
-        " UPDATE 한다 — 취소 흔적에 '누가 왜 언제' 가 안 남는다."
-        " 마스터 어댑터는 MASTER-CANCEL-<취소일> 을 여전히 만들어 넘긴다."
-        " 적을지 말지는 물류 표의 계약이라 마스터가 대신 정하지 않는다."
-        " 🔴 이 검사가 XPASS 로 빨개지면 물류가 적기 시작했다는 뜻이다 —"
-        " 그때 이 마크를 걷어라."
-    ),
-)
 def test_취소_흔적에_source_ref_가_남는다():
-    """🔴 **취소가 왜 났는지 DB 에 안 남는다.** ③ 잴 대상이 사라진 자리다.
+    """🔴 **취소가 왜 났는지 DB 에 남는다** — 물류가 `cancel_source_ref` 에 적는다.
 
-    ⚠️ **다른 데서도 안 지켜진다.** `withdraw_inventory` · `cancel_schedule` ·
-      `assert_cancellable` 을 잰 검사는 이 파일뿐이다 (2026-09-10 기준 저장소 전체).
-      그래서 지우지 않고 `xfail(strict)` 로 **살려 둔다** — 지우면 잃은 줄도 모른다.
+    ★ **`xfail(strict)` 를 걷은 자리다.** 그 마크의 reason 이 *"XPASS 로 빨개지면
+      물류가 적기 시작했다는 뜻이다 — 그때 이 마크를 걷어라"* 라고 적어 둔 그대로다.
+
+    ⚠️ **여전히 이 파일뿐이다.** `withdraw_inventory` · `cancel_schedule` ·
+      `assert_cancellable` 을 잰 검사는 저장소 전체에서 여기밖에 없다.
     """
     conn = _가짜커넥션(_일정(MINE))
 
