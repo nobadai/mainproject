@@ -62,13 +62,24 @@ function PlanCard({ plan }: { plan: Plan }) {
               <dd className={`tabular m-0 font-mono ${hero ? "text-[19px]" : "text-[13px]"}`}>{v}</dd>
             </div>
           ))}
+          {/*
+            🔴 이 자리는 `cut_unit_price` 다 — `max_price` 가 아니다.
+               `max_price` 는 재무 STRESS 로 나가는 수이고, 실제로 안을 죽이는 것은 컷이다.
+               둘은 방향이 반대라(밴드가 좁아지면 컷은 엄격해지고 STRESS 는 느슨해진다)
+               한 수가 둘을 대신할 수 없다. 지금은 값이 같아 안 틀리지만 컷 산식을 바꾸는
+               날 갈라지고, 그때 이 라벨이 틀린 수 위에 붙는다.
+            ⚠️ `null` 일 때 `max_price` 로 안 메운다 — 없는 값을 그럴듯한 값으로 채우면
+               없었다는 사실이 지워진다.
+          */}
           <div
             className="mt-1 flex items-baseline justify-between gap-3 rounded-lg px-3 py-2"
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             <dt className="m-0 font-semibold">이보다 비싸면 안 산다</dt>
             <dd className="tabular m-0 font-mono text-[14px] font-semibold">
-              {plan.max_price.toLocaleString("ko-KR")} 원/kg
+              {plan.cut_unit_price === null
+                ? "이 실행에는 기준이 없습니다"
+                : `${plan.cut_unit_price.toLocaleString("ko-KR")} 원/kg`}
             </dd>
           </div>
         </dl>
