@@ -82,6 +82,7 @@ receive_arrivals(as_of)   inbound.py
 issue_receivables(as_of)  receivable.py  ← 🔴 수금보다 앞이다
 collect_receipts(as_of)   collection.py
 run_procurement(...)      service.py     ← 품목마다
+run_sales(...)            service.py     ← 🔴 품목마다 · 매입 뒤 · 출고 앞
 ship_due_sales(as_of)     outbound_flow.py
 close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
 ```
@@ -128,6 +129,24 @@ close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
 ```text
 개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단 → 출고 → **마감**
 ```
+
+🔴 **판매 판단은 매입 뒤, 출고 앞이다** (2026-09-10).
+
+```text
+개장 → 입고 → 채권 → 수금 → [장부 관문] → 매입 → **판매** → 출고 → 마감
+```
+
+  ★★ **`ship_due_sales` 는 판매 판단이 아니다.** 이미 확정된 판매를 내보내는
+    단계다 — 이름 때문에 판매가 서 있는 것처럼 보였고, 그래서 걷기 179일에
+    판매 판단이 **0건**이었다. 없던 것은 로직이 아니라 **부르는 자리 하나**다.
+
+  ★ **왜 출고 앞인가.** 뒤에 두면 그날 확정된 안이 다음 날에야 나갈 자리가 생긴다.
+
+  🔴 **예측 게이트 안이다.** `WAIT` 인 날은 판매도 안 돈다 — 그 한 줄을 안 지키면
+    매입이 피한 문제(열두 번 깨어나며 미완 실행이 열두 건)를 판매가 다시 짓는다.
+
+  🔴 **판단만 한다.** 후보를 자동으로 승인하지 않고 `record_decision` 도 안 부른다 —
+    자동 승인은 별도 판이다.
 
   ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 출고 앞에서 닫으면 그날 재고가
     **마감 뒤에 바뀌고**, `daily_closings.inventory_qty_kg` 가 그날 장부와 안 맞는다.
@@ -207,19 +226,21 @@ from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.receivable import issue_receivables
 from app.master.run_repository import ledger_gap_request_id
-from app.master.schemas import ProcurementRunRequest
-from app.master.service import run_procurement
+from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
+from app.master.service import run_procurement, run_sales
 
 __all__ = [
     "DAILY_POLICY_VERSION",
     "SCHEDULE_DEADLINE",
     "SCHEDULE_INTERVAL",
     "SCHEDULE_START",
+    "WALK_BUSINESS_MODE",
     "DayRunOutcome",
     "ItemRunOutcome",
     "ScheduledAction",
     "SchedulerAction",
     "daily_request_id",
+    "daily_sales_request_id",
     "deadline_at",
     "ledger_gap_request_id",
     "plan_next_action",
@@ -247,6 +268,20 @@ DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
 #: ★ 문자열을 상수로 둔 이유는 검사가 이 문장을 찾기 때문이다. 사유를 손으로 다시
 #:   쓰면 철자가 갈리고, 그러면 그 여섯 날을 나중에 못 센다.
 _NO_ML_BATCH = "달력은 열렸는데 ML 배치가 없었다"
+
+#: 🔴 **하루 순서가 판매에 싣는 영업 모드. 한 곳에서만 바꾼다** (2026-09-10).
+#:
+#: ★ **마스터가 임시로 정한 값이다. 어휘의 주인은 판매이고, 판매가 정하면 여기를
+#:   바꾼다 (2026-09-10).**
+#:
+#: 🔴 **왜 `SPOT_SALES` 인가.** 나머지 셋(`CONTRACT_FULFILLMENT` ·
+#:   `CONTRACT_PROPOSAL_NEW` · `CONTRACT_PROPOSAL_RENEWAL`)은 **거래처가 있어야**
+#:   성립한다. 하루 순서가 거래처를 고르면 **그것이 곧 영업 정책**이 되고, 정책의
+#:   주인이 판매에서 스케줄러로 조용히 옮겨 온다.
+#:
+#: ⚠️ **`partner_id` 는 같이 싣지 않는다.** 마스터는 거래처를 고르지 않는다 —
+#:   무엇이 필요한지는 판매가 정한다 (`SalesRunRequest.partner_id` 의 설명).
+WALK_BUSINESS_MODE: SalesBusinessMode = "SPOT_SALES"
 
 #: 🔴 **이 상태면 그날 판단을 안 돌린다.** 입고·수금 둘 다 같은 표를 쓴다.
 #:
@@ -305,6 +340,21 @@ def daily_request_id(as_of: date, item: str) -> str:
       인덱스가 아니라 *"두 번 안 깨우기"* 에 걸리게 된다.
     """
     return f"REQ-DAILY-{as_of:%Y%m%d}-{item}"
+
+
+def daily_sales_request_id(as_of: date, item: str) -> str:
+    """`REQ-DAILY-SALES-20260908-배추`. 🔴 **매입 키와 갈라야 한다** (2026-09-10).
+
+    🔴 **판매가 `daily_request_id` 를 그대로 쓰면 안 된다.** 같은 날 같은 품목이면
+      문자열이 같아지고, `master_agent_runs_run_request_unique` 가 **두 번째 사이클을
+      막는다** — 매입이 먼저 돌았으면 판매 행이 아예 안 남는다. 남더라도
+      `get_run_by_request_id` 가 어느 사이클의 실행인지 못 가른다.
+
+    🔴 **시각을 넣지 않는다.** 이유는 `daily_request_id` 가 적어 둔 그대로다 —
+      넣으면 같은 날 두 번 깨어날 때 id 가 갈리고, 멱등이 인덱스가 아니라
+      *"두 번 안 깨우기"* 에 걸리게 된다.
+    """
+    return f"REQ-DAILY-SALES-{as_of:%Y%m%d}-{item}"
 
 
 # ★ `ledger_gap_request_id` 는 여기서 안 짓는다 — **주인이 `run_repository` 다**
@@ -513,6 +563,19 @@ class DayRunOutcome:
     #:   쓰는 말이고 `RAN` 은 `ItemRunOutcome` 이 이미 쓰는 말이다. 단계를 안 탄
     #:   사실을 `items == ()` 으로만 두면 *"품목 목록이 비었다"* 와 구별이 안 된다.
     procurement_status: str = "NOT_ATTEMPTED"
+    #: 판매 판단 단계를 **탔는가** (2026-09-10). 🔴 **매입 뒤 · 출고 앞이다.**
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** 셋 다 이 클래스가 이미 쓰는 말이다.
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   안 했다 — 게이트가 WAIT 였다 · 관문이 막았다 · 품목이 없었다
+    #: RAN             돌았다 — 좋은 답이었다는 뜻이 아니다
+    #: FAILED          해 보고 터졌다 — 돈 품목이 **하나도** 없다
+    #: ```
+    #:
+    #: 🔴 **`FAILED` 는 「전부 터졌다」다.** 한 품목이 터진 날은 `RAN` 이고, 터진
+    #:   품목은 `sales_items` 에 `FAILED` 로 남는다 — 매입 루프와 같은 규율이다.
+    sales_status: str = "NOT_ATTEMPTED"
     #: 출고 단계를 **탔는가**. 🔴 `procurement_status` 와 **같은 모양·같은 어휘**다
     #: (`RAN` · `NOTHING_DUE` · `FAILED` · `NOT_ATTEMPTED`).
     #:
@@ -532,13 +595,31 @@ class DayRunOutcome:
     #: 둘을 가를 데가 없다.**
     closing_status: str = "NOT_ATTEMPTED"
     items: tuple[ItemRunOutcome, ...] = ()
+    #: 판매 판단의 품목별 결과 (2026-09-10). 🔴 **`items` 와 섞지 않는다.**
+    #:
+    #: ★ **모양은 같고 축이 다르다.** `ItemRunOutcome` 을 그대로 쓰되 한 칸에 담지
+    #:   않는다 — 섞으면 `failed_items` 가 *"어느 사이클이 터졌나"* 를 못 말하고,
+    #:   같은 품목이 두 번 앉아 품목 수를 세는 모든 자리가 두 배로 읽힌다.
+    #:
+    #: ★ `end_code` 는 판매 어휘 그대로다 (`SL1_PRESENTED` 등). 🔴 **매입 어휘로
+    #:   접지 않는다** — `backtest_runner` 가 `end_codes` 를 세는 자리와 같은 규율이다.
+    sales_items: tuple[ItemRunOutcome, ...] = ()
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def failed_items(self) -> tuple[str, ...]:
-        """터진 품목. **나머지는 계속 돌았다.**"""
+        """터진 품목. **나머지는 계속 돌았다.**
+
+        ⚠️ **매입 축이다.** 판매가 터진 품목은 `failed_sales_items` 가 나른다 —
+          한 property 로 합치면 어느 사이클이 터졌는지가 사라진다.
+        """
         return tuple(one.item for one in self.items if one.status == "FAILED")
+
+    @property
+    def failed_sales_items(self) -> tuple[str, ...]:
+        """판매 판단이 터진 품목. **나머지는 계속 돌았다.**"""
+        return tuple(one.item for one in self.sales_items if one.status == "FAILED")
 
 
 def run_scheduled_day(
@@ -550,6 +631,7 @@ def run_scheduled_day(
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    sales_fn: Callable[..., Any] = run_sales,
     outbound_fn: Callable[..., Any] = ship_due_sales,
     close_fn: Callable[..., Any] = close_day,
     sim_run_id: str = BURN_IN_SIM_RUN_ID,
@@ -558,7 +640,7 @@ def run_scheduled_day(
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 입고 → 채권 → 수금 → [장부 관문] → 판단(품목마다) → 출고 → 마감
+    개장 → 입고 → 채권 → 수금 → [장부 관문] → 매입 판단 → 판매 판단 → 출고 → 마감
     ```
 
     🔴 **채권이 수금보다 앞이다.** 채권이 서야 수금할 것이 있다. 지금 데이터는
@@ -567,6 +649,27 @@ def run_scheduled_day(
     🔴 **출고가 판단 뒤이고 관문 뒤다.** 오늘 산 것은 오늘 안 나가고(도착이 며칠
       뒤다), 장부가 안 선 날에 물건을 내보내면 재고가 두 번 틀린다. 관문에서
       돌아서면 `outbound_status` 는 `NOT_ATTEMPTED` 로 남는다.
+
+    🔴 **판매 판단은 매입 뒤 · 출고 앞이다** (2026-09-10).
+
+      ★ **왜 출고 앞인가.** `ship_due_sales` 는 **이미 확정된 판매를 내보내는 것**이지
+        판매 안을 내는 것이 아니다. 판매 판단을 출고 뒤에 두면 그날 확정된 안이
+        **다음 날에야** 나갈 자리가 생기고, 순서를 읽는 사람이 *"판매가 왜 출고 뒤에
+        서나"* 를 매번 물어야 한다.
+
+      ★ **왜 매입 뒤인가.** 판매가 재고를 보고 안을 낸다. 매입은 오늘 사도 며칠 뒤
+        도착이라 오늘 재고를 안 움직이지만, 둘의 순서를 매입-판매로 두면 *"하루의
+        판단"* 이 한 덩어리로 읽히고 그 사이에 아무 단계도 안 끼어든다.
+
+      🔴 **예측 게이트 **안**이다.** `WAIT` 인 날은 판매도 안 돈다 — `should_run`
+        한 줄이 매입과 판매를 같이 막는다. `WAIT` 중에 판매를 부르면 매입이 피한
+        그 문제(열두 번 깨어나며 미완 실행이 열두 건 쌓인다)를 판매가 그대로 다시 짓는다.
+
+      🔴 **판단만 한다. 승인은 안 한다.** `record_decision` 을 부르지 않는다 — 이 판은
+        **안이 나오게 하는 것**까지이고, 자동 승인은 별도 판(자동 백필)이다.
+
+      ⚠️ **거래처를 안 고른다.** `partner_id` 도 `user_request` 도 안 싣는다.
+        영업 모드는 `WALK_BUSINESS_MODE` 하나이고, 그 값의 뜻은 거기 적혀 있다.
 
     🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
@@ -729,8 +832,14 @@ def run_scheduled_day(
         )
 
     # ── 판단 ────────────────────────────────────────────────────────
+    #
+    # ★ **품목 축을 한 번만 정한다.** 매입과 판매가 같은 튜플을 돈다 — 각자 세면
+    #   두 사이클의 품목 축이 갈리고, 그 날 무엇을 팔 수 있었나가 무엇을 샀나와
+    #   다른 목록 위에 서게 된다.
+    day_items = scheduled_items() if items is None else tuple(items)
+
     results: list[ItemRunOutcome] = []
-    for item in scheduled_items() if items is None else tuple(items):
+    for item in day_items:
         request_id = daily_request_id(as_of, item)
         try:
             response = procure_fn(
@@ -759,6 +868,58 @@ def run_scheduled_day(
                 end_code=str(getattr(response, "end_code", "")) or None,
             )
         )
+
+    # ── 판매 판단 — 🔴 **매입 뒤 · 출고 앞** (2026-09-10) ───────────
+    #
+    # ★★ **여기가 없어서 걷기 179일에 판매 판단이 0건이었다.** 판매 판단 로직은
+    #   `service.run_sales` 에 이미 있었고, **부르는 자리 하나**가 없었다.
+    #
+    # 🔴 **`ship_due_sales` 가 이 자리를 대신하지 못한다.** 그것은 이미 확정된 판매를
+    #    내보내는 단계다 — 이름 때문에 판매가 서 있는 것처럼 보였을 뿐이다.
+    #
+    # 🔴 **request_id 가 매입 것과 다르다.** 같으면 유일 인덱스가 두 번째 사이클을
+    #    막는다 (`daily_sales_request_id` 가 그 이유를 적는다).
+    #
+    # 🔴 **한 품목이 터져도 하루를 안 세운다.** 매입 루프와 같은 모양이다 — 터진
+    #    것은 `sales_items` 에 `FAILED` 로 남고 출고·마감은 그대로 돈다.
+    sales_results: list[ItemRunOutcome] = []
+    for item in day_items:
+        sales_request_id = daily_sales_request_id(as_of, item)
+        try:
+            # ★ `budget` 과 `verifier` 를 안 준다. 판매 기본값 25 가 계약이고
+            #   (매입 12 를 복사하면 요청이 골격의 `SALES_BUDGET` 을 이긴다),
+            #   `verifier` 를 안 주면 기본 검증 Tool 이 붙는다 — 매입과 같은 규율이다.
+            sales_response = sales_fn(
+                SalesRunRequest(
+                    as_of=as_of,
+                    policy_version=policy_version,
+                    request_id=sales_request_id,
+                    item=item,
+                    business_mode=WALK_BUSINESS_MODE,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - 한 품목이 하루를 세우면 안 된다.
+            sales_results.append(
+                ItemRunOutcome(
+                    item=item,
+                    request_id=sales_request_id,
+                    status="FAILED",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        sales_results.append(
+            ItemRunOutcome(
+                item=item,
+                request_id=sales_request_id,
+                status="RAN",
+                # 🔴 **판매 어휘 그대로 싣는다.** `SL1_PRESENTED` 를 매입 어휘로
+                #    접으면 그 날 무슨 답이 났는지를 세는 자리가 통째로 거짓이 된다.
+                end_code=str(getattr(sales_response, "end_code", "")) or None,
+            )
+        )
+    sales_status = _fold_item_statuses(sales_results)
+    notes.append(f"판매: {sales_status} ({len(sales_results)}품목)")
 
     # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
     #
@@ -790,11 +951,35 @@ def run_scheduled_day(
         receivable_status=receivable_status,
         collection_status=collection_status,
         procurement_status="RAN",
+        sales_status=sales_status,
         outbound_status=outbound_status,
         closing_status=closing_status,
         items=tuple(results),
+        sales_items=tuple(sales_results),
         notes=tuple(notes),
     )
+
+
+def _fold_item_statuses(results: Sequence[ItemRunOutcome]) -> str:
+    """품목별 결과를 단계 하나의 어휘로 접는다. **세 값뿐이다.**
+
+    ```text
+    품목이 없었다        NOT_ATTEMPTED   — 부를 것이 없었으면 단계를 안 탄 것이다
+    전부 터졌다          FAILED          — 해 보고 터졌다
+    하나라도 돌았다      RAN             — 좋은 답이었다는 뜻이 아니다
+    ```
+
+    🔴 **`RAN` 은 「끝까지 돌았다」다.** `SL4_NOT_STARTED` 도 `RAN` 이다 — 못 돈
+      것만 `FAILED` 다 (`ItemRunOutcome.status` 와 같은 어휘).
+
+    ⚠️ **빈 목록을 `RAN` 으로 접지 않는다.** 접으면 *"품목이 없었다"* 와 *"세 품목이
+      다 돌았다"* 가 같은 값이 되고, 화면이 둘을 못 가른다.
+    """
+    if not results:
+        return "NOT_ATTEMPTED"
+    if all(one.status == "FAILED" for one in results):
+        return "FAILED"
+    return "RAN"
 
 
 def _ledger_gap(inbound_status: str, receivable_status: str, collection_status: str) -> bool:
@@ -857,6 +1042,7 @@ def wake_up(
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
+    sales_fn: Callable[..., Any] = run_sales,
     outbound_fn: Callable[..., Any] = ship_due_sales,
     close_fn: Callable[..., Any] = close_day,
     sim_run_id: str = BURN_IN_SIM_RUN_ID,
@@ -888,6 +1074,7 @@ def wake_up(
         issue_fn=issue_fn,
         collect_fn=collect_fn,
         procure_fn=procure_fn,
+        sales_fn=sales_fn,
         outbound_fn=outbound_fn,
         close_fn=close_fn,
         sim_run_id=sim_run_id,

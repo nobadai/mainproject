@@ -65,7 +65,8 @@ CalendarNotCovered             → 🔴 멈추고 사유를 낸다
 
 ⚠️ **어휘를 새로 만들지 않았다.** 세는 값은 전부 `scheduler` 가 낸 것 그대로다
   (`DayRunOutcome.action` · `ItemRunOutcome.end_code` · `procurement_status` 의
-  `NOT_ATTEMPTED` · `outbound_status` 의 네 값 · `failed_items`). 그 네 값은 **접지
+  `NOT_ATTEMPTED` · `sales_status` 의 세 값 · `outbound_status` 의 네 값 ·
+  `failed_items`). 그 네 값은 **접지
   않고 그대로 센다** — `NOTHING_DUE`(없다)와 `FAILED`(못 했다)와
   `NOT_ATTEMPTED`(안 했다)를 묶으면 손익 곡선이 왜 평평한지를 성적표가 못 답한다.
   이 파일이 새로 만든 말은 걷기 자체에 관한 것
@@ -171,6 +172,39 @@ class WalkResult:
             for day in self.days
             for one in day.items
         )
+
+    @property
+    def sales_end_codes(self) -> Mapping[str, int]:
+        """판매 판단의 품목 종료 코드 분포 (2026-09-10). 🔴 **매입과 한 칸에 안 담는다.**
+
+        ★ **왜 `end_codes` 와 가르나.** 어휘가 다르다 — 매입은 `E1`·`E4`, 판매는
+          `SL1`·`SL4` 다. 한 Counter 에 담으면 *"오늘 어느 사이클이 어떻게 끝났나"*
+          가 두 어휘가 섞인 한 표가 되고, 어느 쪽 수가 는 것인지를 못 읽는다.
+
+        🔴 **접지 않는다.** `SL1_PRESENTED` 를 *"돌았다"* 로 묶으면 걷기 179일에
+          **후보가 실제로 나온 날이 며칠인지**를 성적표가 못 답한다 — 이 판이
+          존재하는 이유가 그 숫자다.
+        """
+        return Counter(
+            one.end_code if one.end_code is not None else one.status
+            for day in self.days
+            for one in day.sales_items
+        )
+
+    @property
+    def sales_statuses(self) -> Mapping[str, int]:
+        """판매 판단 단계 분포. 🔴 **세 값을 접지 않고 그대로 센다.**
+
+        ```text
+        RAN            돌았다
+        FAILED         해 보고 터졌다 — 돈 품목이 하나도 없다   ← "못 했다"
+        NOT_ATTEMPTED  거기까지 못 갔다                        ← "안 했다"
+        ```
+
+        ⚠️ **값이 있는데 성적표가 안 읽으면 없는 것과 같다** — `outbound_status` 를
+          성적표에 태울 때(`#446`) 배운 그것이다.
+        """
+        return Counter(one.sales_status for one in self.days)
 
     @property
     def receivable_statuses(self) -> Mapping[str, int]:
@@ -432,6 +466,8 @@ def format_summary(result: WalkResult) -> str:
         f"판단      {dict(sorted(result.actions.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
         f"채권      {dict(sorted(result.receivable_statuses.items()))}",
+        f"판매      {dict(sorted(result.sales_statuses.items()))}",
+        f"판매코드  {dict(sorted(result.sales_end_codes.items()))}",
         f"출고      {dict(sorted(result.outbound_statuses.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
