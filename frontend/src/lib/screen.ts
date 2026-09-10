@@ -239,7 +239,19 @@ export interface Plan {
   amount_krw: number;
   unit_price: number;
   grade: string;
+  /** 재무 STRESS 로 나가는 수 (amount_max_krw = qty × 이것). **컷이 아니다.** */
   max_price: number;
+  /**
+   * 🔴 컷 기준 — 이보다 비싼 안은 실제로 죽는다.
+   *
+   * `max_price` 와 방향이 반대라 한 수가 둘을 대신할 수 없다 — 밴드가 좁아지면 컷은
+   * 엄격해지고 재무 STRESS 는 느슨해진다. 지금은 두 값이 같아 화면이 안 틀리지만
+   * 컷 산식을 바꾸는 날 갈라진다.
+   *
+   * ⚠️ `null` 이면 **그 실행에 칸이 없던 것**이다. `max_price` 로 메우지 않는다 —
+   * 없는 값을 그럴듯한 값으로 채우면 없었다는 사실이 지워진다.
+   */
+  cut_unit_price: number | null;
   legs: Table;
   payments: Table;
   reasons: Reason[];
