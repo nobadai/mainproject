@@ -126,7 +126,22 @@ def ledger_block_reason(commitment: ApprovedCommitment) -> str:
     ★ 회차가 **하나도 없는** 경우는 여기서 가르지 않는다 — 그건 원장 이전에 재무가
       `commitment_arrival_schedule` 로 먼저 막는 상태이고, 그 사유를 여기서 다시
       쓰면 같은 사실이 두 문장으로 나간다.
+
+    🔴 **등급이 둘 이상이면 막는다.** `purchase_items` 는 품목당 한 줄이고 `grade` 는
+       그 한 줄에 한 칸이다 — 등급이 둘이면 담을 자리가 없다. 그때 아무 등급이나
+       고르면 어느 등급이 원장에 남는지가 **줄 순서에 걸리고**, 합치면 없는 등급을
+       마스터가 지어낸 것이 된다. 둘 다 에러 없이 틀린 원장을 만든다.
+
+    ⚠️ **줄을 등급별로 가르는 것은 여기가 아니다.** `purchase_item_id` 규칙이 바뀌고
+      `inventory_lots` · `inbound_schedules` 두 FK 가 걸린다 — 매입·물류와 함께
+      정해야 하는 자리다. 마스터는 **막는 데까지** 한다.
     """
+    grades = commitment.grades
+    if len(grades) > 1:
+        return (
+            f"등급이 {len(grades)}개인데 매입 줄이 하나다 ({' · '.join(grades)})"
+            " — 아무 등급이나 고르거나 합치지 않는다"
+        )
     legs = tuple(commitment.arrival_schedule)
     if len(legs) > 1:
         빈금액 = [leg.seq for leg in legs if leg.amount_krw is None]
@@ -204,6 +219,16 @@ class PurchaseWrite:
     quantity_kg: Decimal
     unit_price_krw_per_kg: Decimal
     line_amount_krw: Decimal
+
+    #: 등급(`특·상·중·하`). **약정이 실어 온 값 그대로**이고, 안 오면 `None` 이다.
+    #:
+    #: ★ 등급이 둘 이상인 약정은 여기까지 오지 않는다 — `ledger_block_reason` 이
+    #:   앞에서 막는다. 그래서 여기 담기는 등급은 늘 **하나이거나 없다.**
+    #:
+    #: 🔴 **번인의 `상품` 과 새 `특/상/중/하` 가 한 칸에 섞이는 것을 아는 채로 둔다.**
+    #:   매입이 *"매핑표를 만들 수 없다"* 고 했고 그 판단이 맞다 — 여기서 어휘를
+    #:   변환하면 근거 없는 대응표가 원장의 사실이 된다.
+    grade: str | None = None
 
 
 def build_purchase_rows(
@@ -311,6 +336,10 @@ def _row_for_leg(
         quantity_kg=quantity,
         unit_price_krw_per_kg=unit_price,
         line_amount_krw=line_amount,
+        # ★ **등급은 회차 축이 아니라 약정 축에서 집는다.** 등급이 둘 이상인 약정은
+        #   `ledger_block_reason` 이 이미 막았으므로 남은 것은 하나이거나 없다.
+        #   `leg` 에서 읽지 않는 이유가 그것이다 — 회차에 등급이 붙어 있지 않다.
+        grade=commitment.grades[0] if commitment.grades else None,
     )
 
 
@@ -373,7 +402,7 @@ def persist_purchases(conn: Any, rows: Sequence[PurchaseWrite]) -> dict[str, int
                         purchase_item_id, purchase_id, item_id, grade, market_name,
                         quantity_kg, unit_price_krw_per_kg, line_amount_krw, source_quote_id
                     )
-                    VALUES (%s, %s, %s, NULL, NULL, %s, %s, %s, NULL)
+                    VALUES (%s, %s, %s, %s, NULL, %s, %s, %s, NULL)
                     ON CONFLICT (purchase_item_id) DO NOTHING
                     """
                 ).format(schema),
@@ -383,9 +412,15 @@ def persist_purchases(conn: Any, rows: Sequence[PurchaseWrite]) -> dict[str, int
                     purchase_item_id_for(row.purchase_id, _item_code_of(item_id)),
                     row.purchase_id,
                     item_id,
-                    # 🔴 `grade` 는 NULL 이다. 약정이 등급을 안 싣는다 (`sourcing_plan`
-                    #    은 매입 안에만 있고 약정으로 안 온다). **지어내지 않는다** —
-                    #    등급 사다리(#69) 뒤의 자리다.
+                    # ★ **약정이 실어 온 등급이다** (#69 · 2026-09-10). 전에는 여기가
+                    #   `NULL` 고정이었고 사유는 *"약정이 등급을 안 싣는다"* 였다 —
+                    #   이제 `sourcing_plan` 이 목록으로 실려 와 그 사유가 없어졌다.
+                    #
+                    # 🔴 **안 오면 여전히 `None` 이다.** 빈 문자열로 채우지 않는다 —
+                    #    `''` 는 *"등급이 비어 있다"* 라는 없는 사실을 만든다.
+                    #    `market_name` 과 `source_quote_id` 는 승인이 여전히 모르는
+                    #    사실이라 `NULL` 그대로다.
+                    row.grade,
                     row.quantity_kg,
                     row.unit_price_krw_per_kg,
                     row.line_amount_krw,
