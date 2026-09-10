@@ -631,13 +631,21 @@ def _first_day_conn(
     *,
     current_debt: Decimal,
     baseline_debt: Decimal,
-    current_receivables: Decimal = Decimal(700),
+    in_run_outstanding: Decimal = Decimal(700),
     baseline_receivables: Decimal = Decimal(10_000),
     issued: Decimal = Decimal(0),
     config=None,
     baseline_states=None,
 ):
-    """같은 실행에 이전 상태가 **하나도 없는** 첫날."""
+    """같은 실행에 이전 상태가 **하나도 없는** 첫날.
+
+    ★ 상태의 채권은 **물려받은 출발분 + 이 실행에서 발행되어 남은 분**이다 (재무 확정
+      기준 ④). 그래서 `receivables` 표에는 뒷항만 있고, 앞항은 baseline 행에만 있다.
+
+    🔴 예전 이 대역은 `outstanding_receivables=current_receivables` 로, 표 하나가
+      **잔액 전체**를 들고 있다고 세웠다. 시작을 물려받은 실행에서는 그런 표가 없다 —
+      실측으로 `receivables` 는 0행이고 물려받은 잔액은 상태에만 있다.
+    """
     return _Conn(
         [
             _state(
@@ -645,7 +653,7 @@ def _first_day_conn(
                 LOAN_MODE,
                 cash=Decimal(60_000),
                 debt=current_debt,
-                receivables=current_receivables,
+                receivables=baseline_receivables + in_run_outstanding,
             )
         ],
         config_json=_baseline_config() if config is None else config,
@@ -655,7 +663,7 @@ def _first_day_conn(
             else baseline_states
         ),
         issued_receivables=issued,
-        outstanding_receivables=current_receivables,
+        outstanding_receivables=in_run_outstanding,
     )
 
 
@@ -706,24 +714,28 @@ def test_repaying_below_the_baseline_is_not_negative_borrowing():
 
 # D ─ 첫날 수금도 물려받은 채권을 직전으로 쓴다
 def test_first_day_collection_uses_the_inherited_receivables():
-    """`10,000 + 2,000 - 9,000 = 3,000`.
+    """`10,000 + 2,000 - 11,500 = 500`.
 
-    직전을 0 으로 접으면 `0 + 2,000 - 9,000` 이 음수가 되어 마감이 통째로 막힌다 —
+    직전을 0 으로 접으면 `0 + 2,000 - 11,500` 이 음수가 되어 마감이 통째로 막힌다 —
     수금이 있었던 날이 사라진다.
+
+    ★ 수금은 **이 실행에서 발행한 2,000 중 500** 이다. 물려받은 10,000 은 개별 수금
+      가능한 채권으로 풀리지 않으므로(재무 확정 기준 ⑥) 그대로 남고, 상태의 채권은
+      `10,000 + 1,500 = 11,500` 이다.
     """
     conn = _first_day_conn(
         current_debt=Decimal(45_000),
         baseline_debt=Decimal(45_000),
         baseline_receivables=Decimal(10_000),
-        current_receivables=Decimal(9_000),
+        in_run_outstanding=Decimal(1_500),
         issued=Decimal(2_000),
     )
 
     _close_new_run(conn)
 
     row = _row(conn)
-    assert row["collection_cash_in_krw"] == Decimal(3_000)
-    assert row["receivables_balance_krw"] == Decimal(9_000)
+    assert row["collection_cash_in_krw"] == Decimal(500)
+    assert row["receivables_balance_krw"] == Decimal(11_500)
 
 
 # E ─ 선언이 깨졌으면 0 으로 접지 않는다
@@ -785,8 +797,20 @@ def test_same_run_prior_takes_precedence_over_the_baseline():
     day2 = date(2026, 1, 7)
     conn = _Conn(
         [
-            _state(AS_OF, LOAN_MODE, cash=Decimal(60_000), debt=Decimal(45_000)),
-            _state(day2, LOAN_MODE, cash=Decimal(70_000), debt=Decimal(46_000)),
+            _state(
+                AS_OF,
+                LOAN_MODE,
+                cash=Decimal(60_000),
+                debt=Decimal(45_000),
+                receivables=Decimal(10_700),
+            ),
+            _state(
+                day2,
+                LOAN_MODE,
+                cash=Decimal(70_000),
+                debt=Decimal(46_000),
+                receivables=Decimal(10_700),
+            ),
         ],
         config_json=_baseline_config(),
         baseline_states=[_baseline_row(debt=Decimal(10))],
@@ -798,22 +822,43 @@ def test_same_run_prior_takes_precedence_over_the_baseline():
     assert _row(conn, as_of=day2)["loan_execution_krw"] == Decimal(1_000)
 
 
-def test_baseline_is_not_read_when_the_same_run_has_a_prior_day():
+def test_baseline_is_not_used_as_the_prior_when_the_same_run_has_a_prior_day():
+    """★ baseline 행은 **Opening AR Carry 때문에 매일 읽는다.** 읽는 것과 직전으로
+      쓰는 것은 다르다 — 여기서 잠그는 것은 *"직전으로 쓰지 않는다"* 쪽이다.
+
+    🔴 예전 이 검사는 *"조회 자체가 나가지 않는다"* 를 잠갔다. 그 기계적 잠금은 이제
+      너무 세다 — 출발 채권을 분리해 대조하려면(재무 확정 기준 ④) 둘째 날에도 그 행이
+      필요하다. 그래서 **조회 유무가 아니라 숫자로** 잠근다.
+    """
     day2 = date(2026, 1, 7)
     conn = _Conn(
         [
-            _state(AS_OF, LOAN_MODE, cash=Decimal(60_000), debt=Decimal(45_000)),
-            _state(day2, LOAN_MODE, cash=Decimal(70_000), debt=Decimal(46_000)),
+            _state(
+                AS_OF,
+                LOAN_MODE,
+                cash=Decimal(60_000),
+                debt=Decimal(45_000),
+                receivables=Decimal(10_700),
+            ),
+            _state(
+                day2,
+                LOAN_MODE,
+                cash=Decimal(70_000),
+                debt=Decimal(46_000),
+                receivables=Decimal(10_700),
+            ),
         ],
         config_json=_baseline_config(),
-        baseline_states=[_baseline_row(debt=Decimal(10))],
+        baseline_states=[_baseline_row(debt=Decimal(10), receivables=Decimal(10_000))],
     )
 
     closing.FinanceDayClosing().close(conn, as_of=day2, sim_run_id=SIM_RUN_ID)
 
-    assert not any(
-        "finance_state_id = %s" in text for text, _ in conn.executed
-    ), "같은 실행의 어제가 있는데 baseline 을 읽었다"
+    row = _row(conn, as_of=day2)
+    # 직전이 baseline(부채 10) 이었다면 45,990 이 된다. 어제(45,000)를 썼으므로 1,000.
+    assert row["loan_execution_krw"] == Decimal(1_000)
+    # 직전이 baseline(채권 10,000) 이었다면 수금이 0 이 아니라 -700 이 되어 막혔다.
+    assert row["collection_cash_in_krw"] == Decimal(0)
 
 
 # ─ 선언이 아예 없는 실행은 기존 계약 그대로다
@@ -858,4 +903,5 @@ def test_baseline_numbers_are_never_read_from_config_json():
 
     row = _row(conn)
     assert row["loan_execution_krw"] == Decimal(0)
-    assert row["receivables_balance_krw"] == Decimal(700)
+    # 물려받은 10,000 + 이 실행에서 남은 700. config_json 의 888,888,888 이 아니다.
+    assert row["receivables_balance_krw"] == Decimal(10_700)

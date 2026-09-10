@@ -195,12 +195,35 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
     🔴 예전에는 같은 날짜의 `BASE_NO_LOAN` 을 **따로 요구**했다. 하루 넘김
       (`FinanceDayOpening`)은 실행축 하나만 전진시키므로 그 행은 생기지 않았고,
       정상적으로 연 하루가 `base_finance_state` 로 막혔다.
+
+    ★ **채권 대조는 출발분과 실행 중 발생분을 나눠서 한다** (재무 확정 기준 ④).
+
+      ```text
+      Opening AR Carry  +  그 Walk 에서 발행되어 남아 있는 receivables
+                        ==  finance_states.receivables_krw
+      ```
+
+    🔴 예전에는 왼쪽이 `receivables` 합 하나였다. 시작을 물려받은 실행은 그 표에 행이
+      **0행**인데 상태에는 물려받은 잔액이 들어 있어(실측 21,922,555원 대 0원), 걷기
+      206일이 **전부** `receivables_balance_mismatch` 로 막혔다 — 마감 0건.
+
+    ⚠️ **대조를 없앤 것이 아니다.** 왼쪽을 나눴을 뿐이고, 어긋나면 종전대로 막는다
+      (재무 확정 기준 ⑤).
     """
     axis = _load_run_axis(conn, sim_run_id=sim_run_id, as_of=as_of)
     state = _load_exact_state(
         conn, sim_run_id=sim_run_id, financing_mode=axis.financing_mode, as_of=as_of
     )
-    prior = _prior_state(conn, sim_run_id=sim_run_id, axis=axis, as_of=as_of)
+    baseline_state = (
+        None if axis.baseline is None else _load_baseline_state(conn, axis.baseline)
+    )
+    prior = _prior_state(
+        conn,
+        sim_run_id=sim_run_id,
+        axis=axis,
+        as_of=as_of,
+        baseline_state=baseline_state,
+    )
 
     issued_receivables = _sum_receivables_issued(conn, sim_run_id=sim_run_id, as_of=as_of)
     collection_cash_in = _collection_delta(
@@ -208,7 +231,8 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
         issued_receivables=issued_receivables,
         current_receivables=state.receivables_krw,
     )
-    receivables_balance = _sum_receivables_outstanding(
+    opening_ar_carry = _opening_ar_carry(baseline_state)
+    receivables_balance = opening_ar_carry + _sum_receivables_outstanding(
         conn, sim_run_id=sim_run_id, as_of=as_of
     )
     if receivables_balance != state.receivables_krw:
@@ -314,8 +338,38 @@ def _baseline_ref(config_json: object) -> _BaselineRef | None:
     )
 
 
+def _opening_ar_carry(baseline_state: _FinanceState | None) -> Decimal:
+    """이 실행이 **출발점에서 물려받은 채권 잔액** (Opening AR Carry).
+
+    ★ 재무 확정 기준 ① — 물려받은 `finance_states.receivables_krw` 를 그 실행의
+      Opening AR Carry 로 **유지**한다. 채권 행을 이관하지도, 지어내지도 않는다.
+
+    ```text
+    baseline 선언이 있다   → 그 행의 receivables_krw
+    baseline 선언이 없다   → 0
+    ```
+
+    🔴 **선언이 없으면 0 이고, 그때 대조식은 종전과 글자 그대로 같다.** 번인
+      (`SIM-BURNIN-202512`)은 `config_json.baseline` 이 없어 이 갈래로 간다 —
+      이미 통과해 있는 30행이 이 변경으로 흔들리면 안 된다.
+
+    ⚠️ **이 값은 개별 수금 가능한 채권이 아니다** (재무 확정 기준 ⑥). 근거가 되는
+      채권별 12/31 잔액이 남아 있지 않으므로 수금 대상 행으로 풀지 않고, 실행 내내
+      한 덩어리로 남는다. 그래서 이 실행에서 도는 수금은 전부 **그 Walk 에서 발행된**
+      채권에서만 나온다.
+    """
+    if baseline_state is None:
+        return _ZERO
+    return baseline_state.receivables_krw
+
+
 def _prior_state(
-    conn: Any, *, sim_run_id: str, axis: _RunAxis, as_of: date
+    conn: Any,
+    *,
+    sim_run_id: str,
+    axis: _RunAxis,
+    as_of: date,
+    baseline_state: _FinanceState | None,
 ) -> _FinanceState | None:
     """이 하루의 **직전 상태**. 세 갈래를 이 순서로 고른다.
 
@@ -338,15 +392,17 @@ def _prior_state(
       시작을 물려받아야 하는지 아닌지를 가를 정본은 `config_json.baseline` 선언뿐이고,
       `run_type` 으로 추측하는 규칙을 여기서 새로 만들지 않는다. 선언이 **깨진** 경우는
       2번에서 이미 막힌다 — 조용히 3번으로 흘러가지 않는다.
+
+    ⚠️ `baseline_state` 는 **호출자가 이미 읽어서 건네준 그 한 행이다.** 여기서 다시
+      조회하지 않는다 — 같은 사실을 두 번 읽으면 둘이 갈리는 날이 온다. Opening AR
+      Carry 도 같은 행에서 나오므로, 그 행의 주인은 `_load_closing_facts` 하나다.
     """
     same_run = _load_prior_state(
         conn, sim_run_id=sim_run_id, financing_mode=axis.financing_mode, as_of=as_of
     )
     if same_run is not None:
         return same_run
-    if axis.baseline is None:
-        return None
-    return _load_baseline_state(conn, axis.baseline)
+    return baseline_state
 
 
 def _load_baseline_state(conn: Any, baseline: _BaselineRef) -> _FinanceState:
