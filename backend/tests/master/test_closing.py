@@ -184,7 +184,7 @@ def _코드만() -> str:
     return ast.unparse(ast.fix_missing_locations(tree))
 
 
-def _막힌_Gate(as_of: date, *, connect: Any = None) -> DayGate:
+def _막힌_Gate(as_of: date, *, connect: Any = None, sim_run_id: str = "") -> DayGate:
     return DayGate(
         as_of=as_of,
         gate="BLOCKED",
@@ -207,7 +207,9 @@ def _열린_날로_둔다(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         closing,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="ALREADY_OPENED"
+        ),
     )
 
 
@@ -549,7 +551,9 @@ def test_다섯_어휘가_각각_나오는_길이_있다(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         closing,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="OPENED"
+        ),
     )
     # ② NOTHING_DUE — 그날 닫을 움직임이 없다
     closing.register_closing(

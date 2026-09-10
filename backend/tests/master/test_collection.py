@@ -88,7 +88,7 @@ def _수금(*ids: str) -> CollectionPartOut:
     return CollectionPartOut(part="finance", status="COLLECTED", collected=list(ids))
 
 
-def _막힌_Gate(as_of: date, *, connect: Any = None) -> DayGate:
+def _막힌_Gate(as_of: date, *, connect: Any = None, sim_run_id: str = "") -> DayGate:
     return DayGate(
         as_of=as_of,
         gate="BLOCKED",
@@ -115,7 +115,9 @@ def _열린_날로_둔다(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         collection,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="ALREADY_OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="ALREADY_OPENED"
+        ),
     )
 
 
@@ -291,7 +293,9 @@ def test_열린_날은_평소대로_수금한다(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         collection,
         "check_day_gate",
-        lambda as_of, connect=None: DayGate(as_of=as_of, gate="PASS", result="OPENED"),
+        lambda as_of, connect=None, sim_run_id="": DayGate(
+            as_of=as_of, gate="PASS", result="OPENED"
+        ),
     )
     재무 = _재무(out=_수금("RCV-A-1"))
     collection.register_collection("finance", 재무)

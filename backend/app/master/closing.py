@@ -378,7 +378,9 @@ def close_day(
             " 마감 행이 어디에 앉을지가 정해지지 않는다"
         )
 
-    gate = check_day_gate(as_of, connect=connect)
+    # 🔴 **관문에도 이번 마감의 축을 넘긴다** (`#539` 후속). 안 넘기면 관문이 번인
+    #    축으로 어댑터를 묶고, 걷기 실행에서 열린 날을 **안 열린 날**로 읽는다.
+    gate = check_day_gate(as_of, connect=connect, sim_run_id=sim_run_id)
     if gate.gate == "BLOCKED":
         return ClosingOut(
             as_of=as_of,

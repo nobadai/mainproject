@@ -288,7 +288,9 @@ def collect_receipts(
                     있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
                     바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
     """
-    gate = check_day_gate(as_of, connect=connect)
+    # 🔴 **관문에도 이번 호출의 축을 넘긴다** (`#539` 후속). 안 넘기면 관문이 번인
+    #    축으로 어댑터를 묶고, 걷기 실행에서 열린 날을 **안 열린 날**로 읽는다.
+    gate = check_day_gate(as_of, connect=connect, sim_run_id=sim_run_id)
     if gate.gate == "BLOCKED":
         return CollectionOut(
             as_of=as_of,
