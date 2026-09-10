@@ -2448,44 +2448,48 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     ★ **받는 쪽이 옮길 것이 없다 (WP-4B).** payload 가 판매 계약 모양 **그대로**다 —
       종전에는 숫자 셋을 최상위로 끌어올려 두고 받는 쪽이 제자리로 옮겨야 했다.
 
-    🔴 **아직 한 자리가 열려 있다 — 판매 HANDOFF.**
+    ★ **대기 칸이 0 개다 — 판매 HANDOFF 가 닫혔다.**
 
       ```text
       delivery_route · transport_lead_time · earliest_delivery_date
-      → LogisticsDeliveryFeasibility(extra="forbid") 가 아직 이 셋을 안 받는다
+      → LogisticsDeliveryFeasibility(extra="forbid") 가 이제 이 셋을 받는다
       ```
 
-      물류가 이 셋을 빼서 맞추지 않는다 — 값은 실제로 계산한 사실이고, 계약을
-      좁히면 판매가 납기를 못 읽는다. 그래서 **어긋난 칸이 정확히 그 셋인지**를
-      여기서 잠근다. 판매가 칸을 열면 아래 `대기중` 이 비고 이 검사가 알려 준다.
+      ⚠️ 종전에는 판매가 이 셋을 아직 안 받아서, 여기서 **어긋난 칸이 정확히 그
+         셋인지**를 잠그고 셋을 덜어낸 뒤에야 판매 DTO 에 넣었다. 계약이 열렸으므로
+         이제 **손질하지 않은 payload 가 통째로** 판매 계약을 통과해야 한다 — 물류가
+         셋을 도로 빼도, 판매가 계약을 도로 좁혀도 여기가 빨간불이다.
+
+    🔴 **통과만으로는 반쪽이다.** `extra="forbid"` 는 *"판매가 모르는 칸"* 만 잡고,
+       물류가 약속한 칸을 **빼는** 쪽은 기본값 `None` 이 메워 조용히 통과한다.
+       그래서 양쪽 이름표를 맞대 값까지 건너오는지 아래에서 같이 잠근다.
     """
     from pydantic import ValidationError
 
-    from app.sales.schemas import SalesLogisticsContext
+    from app.sales.schemas import (
+        LogisticsDeliveryFeasibility,
+        LogisticsSellableSupply,
+        SalesLogisticsContext,
+    )
 
     payload = _pre_sales_reply({"user_request": {"item": "배추"}})[1].payload
 
-    대기중 = {"delivery_route", "transport_lead_time", "earliest_delivery_date"}
+    # ★ **손질 없이 그대로 넣는다.** 칸을 덜어내 주면 *"받는 쪽이 옮길 것이 없다"* 가
+    #   아니라 **검사가 대신 옮겨 준 것**을 시험하게 된다.
     try:
-        SalesLogisticsContext.model_validate(payload)
-        어긋난칸: set[str] = set()
+        context = SalesLogisticsContext.model_validate(payload)
     except ValidationError as 오류:
-        어긋난칸 = {str(e["loc"][-1]) for e in 오류.errors()}
-    assert 어긋난칸 == 대기중, (
-        f"판매 계약과 어긋난 칸이 달라졌다: {sorted(어긋난칸)}"
-        " — 셋 말고 다른 것이 갈렸으면 물류가 계약을 깬 것이다"
-    )
+        어긋난칸 = sorted({str(e["loc"][-1]) for e in 오류.errors()})
+        raise AssertionError(
+            f"판매 계약과 어긋난 칸이 생겼다: {어긋난칸}"
+            " — 대기 칸은 0 개여야 한다 (물류가 계약을 깼거나 판매가 계약을 좁혔다)"
+        ) from 오류
 
-    context = SalesLogisticsContext.model_validate(
-        {
-            **payload,
-            "delivery_feasibility": {
-                칸: 값
-                for 칸, 값 in payload["delivery_feasibility"].items()
-                if 칸 not in 대기중
-            },
-        }
-    )
+    # 🔴 **이름표를 양방향으로 맞댄다.** 위 통과는 *"판매가 모르는 칸이 없다"* 까지다.
+    #    반대편 — *"판매가 기다리는 칸을 물류가 다 냈다"* — 은 여기서 잠근다.
+    assert set(payload) == set(SalesLogisticsContext.model_fields)
+    assert set(payload["sellable_supply"]) == set(LogisticsSellableSupply.model_fields)
+    assert set(payload["delivery_feasibility"]) == set(LogisticsDeliveryFeasibility.model_fields)
 
     # 수량은 물류가 낸 그대로다 — 판매가 다시 합산하지 않는다
     assert {
@@ -2504,7 +2508,14 @@ def test_payload_가_판매_계약으로_그대로_읽힌다(wired_sales):
     assert context.delivery_feasibility.status == "UNRESOLVED"
     # 키만 옮겼고 값은 정책 원값 그대로다 — mapper 가 계산하지 않는다
     assert context.delivery_feasibility.daily_outbound_capacity_kg == Decimal("5000.0")
-    assert context.missing_data == list(payload["missing_data"])
+    # ★ **종전의 대기 셋이 값까지 건넌다.** 칸이 열린 것과 값이 도착한 것은 다르다 —
+    #   물류가 셋을 도로 빼면 판매 DTO 는 `None` 으로 조용히 통과하므로 여기서 잰다.
+    assert context.delivery_feasibility.delivery_route == _ROUTE
+    assert context.delivery_feasibility.transport_lead_time == 0
+    # 🔴 **`None` 은 «못 냈다» 라는 사실이다** — 준비일 정책이 없어 못 낸 축이고,
+    #    같은 사실이 `missing_data` 에도 이름으로 적혀 있다 (§1.2-10).
+    assert context.delivery_feasibility.earliest_delivery_date is None
+    assert context.missing_data == list(payload["missing_data"]) == ["earliest_delivery_date"]
 
 
 # ── 보관한계 부재 Lot (#366) ────────────────────────────────────
