@@ -14,6 +14,15 @@
  *
  * ★ 여기는 **수를 정하는 곳**이다. 화면을 그리는 일은 `MasterDock` 이 한다. 화면이
  *   쓰는 CSS 식도 여기서 만들어 내보낸다 — 같은 수가 두 파일에 적히지 않게.
+ *
+ * ★ **너비는 여기서 정하지 않는다.** 하루 동안 `wide` 라는 칸이 있었다 — 켜면 너비
+ *   상한(820px)을 푸는 스위치였다. 화면 주인이 그것을 보고 **"그게 아니라 늘 꽉
+ *   채워라"** 고 해서 상한 자체를 없앴고, 상한이 없으니 스위치도 할 일이 없어졌다.
+ *   그래서 걷었다. 너비는 이제 화면이 CSS 로만 정한다 (`MasterDock`).
+ *
+ *   🔴 예전에 저장된 값에는 `{"height":617,"wide":true}` 처럼 그 칸이 남아 있다.
+ *      **모르는 칸은 무시하고 높이만 살린다** — 모양이 안 맞는다고 통째로 버리면
+ *      사람이 정해 둔 높이가 사라진다.
  */
 
 const KEY = "haetdeul.dock_size";
@@ -43,15 +52,8 @@ export const DEFAULT_HEIGHT_CSS = `min(${Math.round(DEFAULT_RATIO * 100)}vh, ${D
 export const MAX_HEIGHT_CSS = `${Math.round(MAX_HEIGHT_RATIO * 100)}vh`;
 
 export interface DockSize {
-  /** 펼친 판의 높이(px). */
+  /** 펼친 판의 높이(px). **사람이 정하는 것은 이것 하나다.** */
   height: number;
-  /**
-   * 넓게 보기. **너비 상한(820px)만** 푼다.
-   *
-   * ★ 높이는 `height` 가 혼자 쥔다 — 켤 때 상한까지 올려 주지만, 그 뒤로 손잡이를
-   *   끌면 높이만 바뀌고 너비는 그대로다. 미세 조정하다 판이 갑자기 좁아지지 않게.
-   */
-  wide: boolean;
 }
 
 /** 아무것도 저장돼 있지 않을 때의 높이. 예전에 박혀 있던 식 그대로다. */
@@ -87,7 +89,7 @@ export function readDockSize(viewport: number): DockSize {
     raw = window.localStorage.getItem(KEY);
   } catch {
     // 저장소를 못 읽는 환경(사생활 보호 모드 등)에서도 기본값으로 돈다
-    return { height: defaultHeight(viewport), wide: false };
+    return { height: defaultHeight(viewport) };
   }
   let parsed: unknown = null;
   try {
@@ -95,11 +97,10 @@ export function readDockSize(viewport: number): DockSize {
   } catch {
     parsed = null;
   }
+  // 🔴 **칸을 하나씩 집어 온다.** 예전 `wide` 처럼 지금 모르는 칸이 섞여 있어도
+  //    높이는 그대로 살아난다 (모듈 머리말 참고).
   const record = (parsed ?? {}) as Partial<DockSize>;
-  return {
-    height: sanitizeHeight(record.height, viewport),
-    wide: record.wide === true,
-  };
+  return { height: sanitizeHeight(record.height, viewport) };
 }
 
 export function writeDockSize(size: DockSize): void {
