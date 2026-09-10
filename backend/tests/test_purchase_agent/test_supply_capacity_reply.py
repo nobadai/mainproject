@@ -78,6 +78,20 @@ def test_재료가_다_있는_회신도_봉투를_통과한다(opened):
 
 
 def test_부족량까지_실린_회신도_봉투를_통과한다(opened):
+    """🔴 **묻는 이름과 답하는 이름이 다르다. 이 검사가 그것을 잠근다.**
+
+    ::
+
+        받을 때  required_additional_quantity_kg   판매 어휘
+        낼 때    requested_quantity_kg             회신 어휘
+
+    ⚠️ 어느 한쪽으로 맞추면 여기가 운다. 그러라고 둔 것이다 — 틀리면 **조용히
+    사라지기** 때문이다. 읽는 쪽은 없는 키에 ``None`` 을 주고 판매 모델은
+    ``extra="ignore"`` 라, 양쪽 다 오류를 안 낸다.
+
+    ★ 마스터가 스펙에 ``requested_quantity_kg`` 로 보내라고 적었다가 구현이 매입
+    코드를 읽고 잡았다 (2026-09-10). 안 잡았으면 그 칸이 계속 비어 왔을 것이다.
+    """
     request = _request(
         warehouse_free_kg=5000,
         finance_cap_amount_krw=3_000_000,

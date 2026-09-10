@@ -250,3 +250,64 @@ def test_같은_축이면_도착일을_맞춘다(inject):
     tab = purchase_query.build(AS_OF, AXIS)
 
     assert tab.committed.rows[0]["arrive"] == "2026-01-24"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑤ 🔴 안 거를 때도 «걷기 밖» 인 것은 말한다
+#
+#  마스터가 청한 것이다 (2026-09-10) — *"안 거르시되 그 행이 어느 쪽인지 한 글자라도
+#  보이게 해 주십시오."* 근거는 자기 오독이었다::
+#
+#      "같은 토요일인데 01-03 은 0건이고 01-31 은 4건이니 걷는 경로가 둘이다"
+#      → 틀렸다. 걷기는 일관됐고 표에 **손 실행이 섞여** 있었을 뿐이다
+#
+#  ★ 화면이 안 말하면 보는 사람이 그 오독을 그대로 한다.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_축_없는_행을_고르면_걷기_밖이라고_적는다(inject):
+    """거르는 것과 **말하는 것은 다른 일**이다. 안 걸러도 말은 한다."""
+    inject(_data([_run("REQ-손실행", "배추", None, minute=50)]))
+
+    tab = purchase_query.build(AS_OF)
+
+    assert tab.plans, "안 거르므로 안은 나와야 한다"
+    assert "걷기 밖" in tab.plans_note.text
+    assert "1건" in tab.plans_note.text
+
+
+def test_축_있는_행만이면_걷기_밖이라고_안_적는다(inject):
+    """없는 사실을 적지 않는다."""
+    inject(_data([_run("REQ-축있음", "배추", AXIS, minute=50)]))
+
+    tab = purchase_query.build(AS_OF)
+
+    assert "걷기 밖" not in tab.plans_note.text
+
+
+def test_섞여_있으면_걷기_밖인_것만_센다(inject):
+    """★ 고른 것 기준이다 — 안 고른 행까지 세면 화면 숫자가 안 맞는다."""
+    inject(_data([
+        _run("REQ-축있음", "배추", AXIS, minute=50),
+        _run("REQ-손실행-무", "무", None, minute=40),
+        _run("REQ-손실행-양파", "양파", None, minute=30),
+        #  ↓ 배추는 이미 위에서 골랐으므로 이 행은 안 골라진다. 세면 안 된다
+        _run("REQ-안골라짐", "배추", None, minute=10),
+    ]))
+
+    tab = purchase_query.build(AS_OF)
+
+    assert "2건은 **걷기 밖 실행**" in tab.plans_note.text, tab.plans_note.text
+
+
+def test_안별로_어느_걷기인지_싣는다(inject):
+    """🔴 글만으로는 **어느 안이** 걷기 밖인지 못 가른다. 안마다 칸이 있어야 한다."""
+    inject(_data([
+        _run("REQ-축있음", "배추", AXIS, minute=50),
+        _run("REQ-손실행", "무", None, minute=40),
+    ]))
+
+    tab = purchase_query.build(AS_OF)
+
+    axes = {p.key: p.sim_run_id for p in tab.plans}
+    assert axes["배추 · 보수"] == AXIS
+    assert axes["무 · 보수"] is None, "걷기 밖은 None 그대로다 — 빈 문자열로 채우지 않는다"

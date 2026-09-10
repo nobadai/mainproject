@@ -57,6 +57,10 @@ def _run(request_id: str, *scenarios: dict, **over: object) -> dict:
         "end_code": "E1_APPROVED",
         "runtime_status": "READY",
         "created_at": f"2026-09-05 10:0{len(request_id) % 10}",
+        #  🔴 조회가 이 칸을 늘 실어 온다 (`query._read`). 픽스처가 빼면 «걷기 밖»
+        #     으로 읽히는데, 그건 **안 읽어 온 것**과 다른 사실이다. 기본값은 걷기
+        #     안으로 두고, 걷기 밖을 재는 검사만 `sim_run_id=None` 을 넘긴다.
+        "sim_run_id": "SIM-BURNIN-202512",
         "payload": {"scenarios": list(scenarios), "judgment": {"rejected_reasons": []}},
     }
     run.update(over)
@@ -109,7 +113,7 @@ def test_컷_기준이_오면_재무_기준과_따로_실린다(read):
     """변이 ② — 컷 자리에 ``max_price`` 를 넣으면 여기서 운다.
 
     ★ 둘이 **다른 값인 시나리오**를 넣는다. 같은 값으로 검사하면 자리를 바꿔도
-      통과한다 — `09-17` 에 밴드가 바뀌면 실제로 갈라질 상황을 미리 만든다.
+      통과한다 — 컷 산식을 바꾸는 날 실제로 갈라질 상황을 미리 만든다.
     """
     read(_data(runs=[_run("REQ-A", _scenario("보수", max_price=1095, cut_unit_price=980))]))
     plan = tab.build(AS_OF).plans[0]

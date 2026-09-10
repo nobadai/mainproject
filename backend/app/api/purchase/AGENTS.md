@@ -160,6 +160,7 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `risks` | `list[str]` | 필수 | 걸리는 것. 비어 있으면 안 적는다 |
 | `pending` | `bool` | 필수 | 아직 사람이 안 고른 안인가 |
 | `approved` | `bool` | 선택 | 이미 승인된 안인가 |
+| `sim_run_id` | `str &#124; None` | 선택 | 어느 걷기의 실행인가. None 이면 걷기 밖(손 실행·축이 생기기 전)이다 |
 
 ### `Reason` — 이 안을 왜 냈나 — 한 줄.
 
@@ -275,14 +276,20 @@ Card(
 
 ```text
 max_price       재무 STRESS 로 나간다 — 남이 등식을 검사한다
-                finance/capabilities/scenario.py:180
-                master/verifier.py:734  (검사 이름 L-PAYSCHED-MAX)
+                finance/capabilities/scenario.py   amount_max_krw 등식
+                master/verifier.py                 검사 이름 L-PAYSCHED-MAX
 cut_unit_price  우리 컷 (self_check.check_max_price)
 ```
 
-지금은 **같은 값**이지만 `09-17` 에 밴드가 바뀌면 갈라집니다. 화면이
+⚠️ **줄 번호를 안 적습니다** — 이름으로 가리킵니다. 2026-09-08 에 `:711` 이
+`:734` 로 밀렸고 그 뒤로 또 움직였습니다.
+
+지금은 **같은 값**이고 **컷 산식을 바꾸는 날** 갈라집니다. 화면이
 「이보다 비싸면 안 산다」 자리에 `max_price` 를 보이면 그 뒤로 **조용히 틀린
 값**이 뜹니다 — 그 자리는 `cut_unit_price` 입니다.
+
+🔴 ~~`09-17` 에 밴드가 바뀌면~~ 은 **낡았습니다** (ML 회신 2026-09-10).
+밴드 교체는 `09-03` 에 끝났고 `09-17` 은 «그림자 기록 2주가 차는 날» 입니다.
 
 ⚠️ `cut_unit_price` 가 `None` 이면 **`max_price` 로 메우지 마세요.** 그 칸이
 생기기 전에 저장된 실행이라는 뜻이고, 메우는 순간 갈라 둔 둘이 화면에서
