@@ -102,7 +102,12 @@ class _Cursor:
         self.rowcount = 0
         if "sim_runs" in text:
             self.rows = [
-                (self.conn.period_start, self.conn.period_end, self.conn.run_mode)
+                (
+                    self.conn.period_start,
+                    self.conn.period_end,
+                    self.conn.run_mode,
+                    self.conn.config_json,
+                )
             ]
         elif ".finance_states" in text and "state_date =" in text:
             # ★ 마감은 **실행축 하나**를 묻는다 — 그 축의 행만 돌려준다.
@@ -161,6 +166,7 @@ class _Connection:
         outstanding_receivables=Decimal(700),
         sales_recognized=Decimal(1_000),
         run_mode="LOAN_BASELINE",
+        config_json=None,
         period_start=date(2026, 1, 1),
         period_end=date(2026, 1, 31),
     ):
@@ -172,6 +178,8 @@ class _Connection:
         self.outstanding_receivables = outstanding_receivables
         self.sales_recognized = sales_recognized
         self.run_mode = run_mode
+        # baseline 선언이 없는 실행 — 기존 실행 계약 그대로다.
+        self.config_json = {} if config_json is None else config_json
         self.period_start = period_start
         self.period_end = period_end
         self.closings = {}

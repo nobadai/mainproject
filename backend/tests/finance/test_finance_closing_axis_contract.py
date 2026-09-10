@@ -105,7 +105,23 @@ class _Cursor:
         if "v_current_finance_state" in text:
             self.rows = list(self.conn.axes)
         elif "sim_runs" in text:
-            self.rows = [(PERIOD_START, PERIOD_END, self.conn.run_mode)]
+            self.rows = [
+                (PERIOD_START, PERIOD_END, self.conn.run_mode, self.conn.config_json)
+            ]
+        elif ".finance_states" in text and "finance_state_id = %s" in text:
+            # baseline 은 **PK 한 개**로만 찾는다 — 날짜도 state_type 도 쓰지 않는다.
+            wanted = params[0]
+            self.rows = [
+                {
+                    "sim_run_id": row["sim_run_id"],
+                    "financing_mode": row["financing_mode"],
+                    "current_cash_krw": row["current_cash_krw"],
+                    "receivables_krw": row["receivables_krw"],
+                    "current_debt_krw": row["current_debt_krw"],
+                }
+                for row in self.conn.baseline_states
+                if row["finance_state_id"] == wanted
+            ]
         elif stripped.startswith("SELECT finance_state_id"):
             # 하루 넘김의 존재 확인.
             self.rows = [
@@ -215,6 +231,8 @@ class _Conn:
         *,
         run_mode=LOAN_MODE,
         axes=None,
+        config_json=None,
+        baseline_states=(),
         payables=(),
         expenses=(),
         issued_receivables=Decimal(0),
@@ -223,6 +241,8 @@ class _Conn:
     ):
         self.states = [deepcopy(row) for row in states]
         self.run_mode = run_mode
+        self.config_json = {} if config_json is None else config_json
+        self.baseline_states = [deepcopy(row) for row in baseline_states]
         self.axes = list(axes if axes is not None else [(SIM_RUN_ID, run_mode)])
         self.payables = payables
         self.expenses = expenses
@@ -559,3 +579,283 @@ def test_a_run_without_a_financing_mode_blocks():
         closing.FinanceDayClosing().close(conn, as_of=AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert raised.value.key == "sim_run_financing_mode"
+
+
+# ---------------------------------------------------------------------------
+# 새 실행 첫날 — **전날 행이 없다 ≠ 전날 값이 0이다**
+#
+# 🔴 부채를 물려받은 새 실행에서 직전을 0 으로 접으면 `max(D - 0, 0)` 이 되어
+#    **있지도 않은 첫날 신규 차입**이 기록된다. 실측 baseline 부채가 45,272,104원이라
+#    그 하루가 통째로 거짓 차입 사건이 된다.
+#
+# ★ 정본 포인터는 `finance_state_id` 하나다. `state_type` 은 그 행을 고른 이유이지
+#   조회 키가 아니다 — 실측으로 `DAY30` 행은 둘(`FIN-DAY30-BASE`·`FIN-DAY30-LOAN`)이다.
+# ---------------------------------------------------------------------------
+
+BASELINE_STATE_ID = "FIN-DAY30-LOAN"
+BASELINE_RUN_ID = "SIM-BURNIN-202512"
+
+
+def _baseline_config(
+    *,
+    finance_state_id: str | None = BASELINE_STATE_ID,
+    from_sim_run_id: str | None = BASELINE_RUN_ID,
+):
+    section: dict = {}
+    if finance_state_id is not None:
+        section["finance_state_id"] = finance_state_id
+    if from_sim_run_id is not None:
+        section["from_sim_run_id"] = from_sim_run_id
+    return {"baseline": section}
+
+
+def _baseline_row(
+    *,
+    debt: Decimal,
+    receivables: Decimal = Decimal(10_000),
+    cash: Decimal = Decimal(50_000),
+    sim_run_id: str = BASELINE_RUN_ID,
+    finance_state_id: str = BASELINE_STATE_ID,
+):
+    return {
+        "finance_state_id": finance_state_id,
+        "sim_run_id": sim_run_id,
+        "financing_mode": LOAN_MODE,
+        "current_cash_krw": cash,
+        "receivables_krw": receivables,
+        "current_debt_krw": debt,
+    }
+
+
+def _first_day_conn(
+    *,
+    current_debt: Decimal,
+    baseline_debt: Decimal,
+    current_receivables: Decimal = Decimal(700),
+    baseline_receivables: Decimal = Decimal(10_000),
+    issued: Decimal = Decimal(0),
+    config=None,
+    baseline_states=None,
+):
+    """같은 실행에 이전 상태가 **하나도 없는** 첫날."""
+    return _Conn(
+        [
+            _state(
+                AS_OF,
+                LOAN_MODE,
+                cash=Decimal(60_000),
+                debt=current_debt,
+                receivables=current_receivables,
+            )
+        ],
+        config_json=_baseline_config() if config is None else config,
+        baseline_states=(
+            [_baseline_row(debt=baseline_debt, receivables=baseline_receivables)]
+            if baseline_states is None
+            else baseline_states
+        ),
+        issued_receivables=issued,
+        outstanding_receivables=current_receivables,
+    )
+
+
+def _close_new_run(conn, *, as_of=AS_OF):
+    return closing.FinanceDayClosing().close(conn, as_of=as_of, sim_run_id=SIM_RUN_ID)
+
+
+# A ─ 물려받은 부채가 그대로면 첫날 신규 차입은 없다
+def test_inherited_debt_unchanged_reports_no_first_day_borrowing():
+    """🔴 **이 파일에서 가장 중요한 검사.**
+
+    물려받은 부채 45,272,104 를 그대로 들고 시작한 첫날은 새로 빌린 돈이 0 이다.
+    직전을 0 으로 접는 구현이면 여기서 45,272,104 가 나온다.
+    """
+    inherited = Decimal("45272104.184486")
+    conn = _first_day_conn(
+        current_debt=inherited, baseline_debt=inherited, issued=Decimal(700)
+    )
+
+    _close_new_run(conn)
+
+    row = _row(conn)
+    assert row["loan_execution_krw"] == Decimal(0)
+    assert row["loan_execution_krw"] != inherited
+
+
+# B ─ 물려받은 뒤 실제로 더 빌렸으면 증가분만
+def test_borrowing_on_top_of_the_baseline_is_only_the_increase():
+    conn = _first_day_conn(
+        current_debt=Decimal(50_000), baseline_debt=Decimal(45_000), issued=Decimal(700)
+    )
+
+    _close_new_run(conn)
+
+    assert _row(conn)["loan_execution_krw"] == Decimal(5_000)
+
+
+# C ─ 물려받은 뒤 갚았으면 0 (음수 차입이 아니다)
+def test_repaying_below_the_baseline_is_not_negative_borrowing():
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000), baseline_debt=Decimal(50_000), issued=Decimal(700)
+    )
+
+    _close_new_run(conn)
+
+    assert _row(conn)["loan_execution_krw"] == Decimal(0)
+
+
+# D ─ 첫날 수금도 물려받은 채권을 직전으로 쓴다
+def test_first_day_collection_uses_the_inherited_receivables():
+    """`10,000 + 2,000 - 9,000 = 3,000`.
+
+    직전을 0 으로 접으면 `0 + 2,000 - 9,000` 이 음수가 되어 마감이 통째로 막힌다 —
+    수금이 있었던 날이 사라진다.
+    """
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000),
+        baseline_debt=Decimal(45_000),
+        baseline_receivables=Decimal(10_000),
+        current_receivables=Decimal(9_000),
+        issued=Decimal(2_000),
+    )
+
+    _close_new_run(conn)
+
+    row = _row(conn)
+    assert row["collection_cash_in_krw"] == Decimal(3_000)
+    assert row["receivables_balance_krw"] == Decimal(9_000)
+
+
+# E ─ 선언이 깨졌으면 0 으로 접지 않는다
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param({"baseline": {}}, id="empty-section"),
+        pytest.param({"baseline": {"finance_state_id": ""}}, id="blank-id"),
+        pytest.param({"baseline": {"from_sim_run_id": BASELINE_RUN_ID}}, id="no-id"),
+        pytest.param(
+            {"baseline": {"finance_state_id": BASELINE_STATE_ID}}, id="no-lineage"
+        ),
+        pytest.param({"baseline": "FIN-DAY30-LOAN"}, id="not-a-mapping"),
+    ],
+)
+def test_a_broken_baseline_declaration_blocks_instead_of_starting_from_zero(config):
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000), baseline_debt=Decimal(45_000), config=config
+    )
+
+    with pytest.raises(FinanceDataNotReady) as raised:
+        _close_new_run(conn)
+
+    assert raised.value.key == "baseline_finance_state_invalid"
+    assert not conn.closings
+
+
+def test_a_baseline_pointer_to_a_missing_row_blocks():
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000), baseline_debt=Decimal(45_000), baseline_states=[]
+    )
+
+    with pytest.raises(FinanceDataNotReady) as raised:
+        _close_new_run(conn)
+
+    assert raised.value.key == "baseline_finance_state"
+
+
+# F ─ 계보가 어긋나면 막는다
+def test_a_baseline_pointing_at_another_run_blocks():
+    """포인터가 남의 실행을 가리키면 **에러 없이 숫자만 바뀐다** — 그래서 대조한다."""
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000),
+        baseline_debt=Decimal(45_000),
+        baseline_states=[
+            _baseline_row(debt=Decimal(45_000), sim_run_id="SIM-SOMEONE-ELSE")
+        ],
+    )
+
+    with pytest.raises(FinanceDataNotReady) as raised:
+        _close_new_run(conn)
+
+    assert raised.value.key == "baseline_finance_state_invalid"
+
+
+# G ─ 같은 실행의 어제가 baseline 보다 먼저다
+def test_same_run_prior_takes_precedence_over_the_baseline():
+    """★ 순서를 뒤집으면 **둘째 날부터 매일이 첫날처럼** 보인다."""
+    day2 = date(2026, 1, 7)
+    conn = _Conn(
+        [
+            _state(AS_OF, LOAN_MODE, cash=Decimal(60_000), debt=Decimal(45_000)),
+            _state(day2, LOAN_MODE, cash=Decimal(70_000), debt=Decimal(46_000)),
+        ],
+        config_json=_baseline_config(),
+        baseline_states=[_baseline_row(debt=Decimal(10))],
+    )
+
+    closing.FinanceDayClosing().close(conn, as_of=day2, sim_run_id=SIM_RUN_ID)
+
+    # 어제 부채 45,000 대비 1,000 만 신규 차입이다. baseline(10) 을 썼다면 45,990 이 된다.
+    assert _row(conn, as_of=day2)["loan_execution_krw"] == Decimal(1_000)
+
+
+def test_baseline_is_not_read_when_the_same_run_has_a_prior_day():
+    day2 = date(2026, 1, 7)
+    conn = _Conn(
+        [
+            _state(AS_OF, LOAN_MODE, cash=Decimal(60_000), debt=Decimal(45_000)),
+            _state(day2, LOAN_MODE, cash=Decimal(70_000), debt=Decimal(46_000)),
+        ],
+        config_json=_baseline_config(),
+        baseline_states=[_baseline_row(debt=Decimal(10))],
+    )
+
+    closing.FinanceDayClosing().close(conn, as_of=day2, sim_run_id=SIM_RUN_ID)
+
+    assert not any(
+        "finance_state_id = %s" in text for text, _ in conn.executed
+    ), "같은 실행의 어제가 있는데 baseline 을 읽었다"
+
+
+# ─ 선언이 아예 없는 실행은 기존 계약 그대로다
+def test_a_run_without_a_baseline_declaration_keeps_the_existing_first_day_contract():
+    """⚠️ 모든 실행이 baseline 을 가져야 한다고 일반화하지 않는다.
+
+    시작을 물려받아야 하는 실행인지 아닌지를 가를 정본은 `config_json.baseline`
+    선언뿐이고, `run_type` 으로 추측하는 규칙을 여기서 새로 만들지 않는다.
+    """
+    conn = _Conn(
+        [_state(AS_OF, LOAN_MODE, cash=Decimal(12_000), debt=Decimal(3_000))],
+        issued_receivables=Decimal(700),
+    )
+
+    closing.FinanceDayClosing().close(conn, as_of=AS_OF, sim_run_id=SIM_RUN_ID)
+
+    assert _row(conn)["loan_execution_krw"] == Decimal(3_000)
+
+
+def test_baseline_numbers_are_never_read_from_config_json():
+    """★ 숫자의 Source of Truth 는 언제나 `finance_states` 원본 행이다.
+
+    `config_json` 에 숫자가 섞여 있어도 마감은 그것을 쓰지 않는다 — 복제된 숫자는
+    원본이 바뀌는 날 조용히 갈린다.
+    """
+    conn = _first_day_conn(
+        current_debt=Decimal(45_000),
+        baseline_debt=Decimal(45_000),
+        issued=Decimal(700),
+        config={
+            "baseline": {
+                "finance_state_id": BASELINE_STATE_ID,
+                "from_sim_run_id": BASELINE_RUN_ID,
+                # 있어도 쓰지 않는다.
+                "current_debt_krw": 999_999_999,
+                "receivables_krw": 888_888_888,
+            }
+        },
+    )
+
+    _close_new_run(conn)
+
+    row = _row(conn)
+    assert row["loan_execution_krw"] == Decimal(0)
+    assert row["receivables_balance_krw"] == Decimal(700)
