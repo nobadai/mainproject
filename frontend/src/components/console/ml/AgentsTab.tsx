@@ -32,6 +32,7 @@ import {
 import { en, REPORT_KIND } from "./labels";
 import { Markdownish } from "./Markdownish";
 import { ReportBody, Verdict } from "./Report";
+import { RerunButton } from "./RerunButton";
 
 const say = (e: unknown) =>
   e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e);
@@ -192,7 +193,15 @@ function QualityCard({ onDone }: { onDone: () => void }) {
  * ★ **판정 배지가 없습니다.** 규칙 에이전트만 정상/주의/이상을 냅니다.
  *   Claude 보고서에 화면이 임의로 배지를 달면, 안 읽고 색만 보게 됩니다.
  */
-function TodayClaude({ day, pick }: { day: HistoryDay | null; pick: HistoryItem | null }) {
+function TodayClaude({
+  day,
+  pick,
+  onDone,
+}: {
+  day: HistoryDay | null;
+  pick: HistoryItem | null;
+  onDone: () => void;
+}) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const file = pick?.file ?? null;
@@ -210,7 +219,14 @@ function TodayClaude({ day, pick }: { day: HistoryDay | null; pick: HistoryItem 
 
   if (!day || !pick)
     return (
-      <Card title="오늘 AI 진단" subtitle="자동 작업에 대한 AI 보고서입니다.">
+      <Card
+        title="오늘 AI 진단"
+        subtitle="자동 작업에 대한 AI 보고서입니다."
+        //  ★ **없을 때야말로 버튼이 필요합니다.** 아침에 이게 실패하는 일이
+        //    실제로 있었습니다 (로그인 만료 · 인코딩 사고). 그러면 그날은
+        //    진단이 통째로 빕니다.
+        right={<RerunButton what="claude" label="지금 만들기" onDone={onDone} />}
+      >
         <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
           오늘 진단 결과가 아직 없습니다 — 아침 작업이 끝난 뒤 실행됩니다.
         </p>
@@ -222,12 +238,17 @@ function TodayClaude({ day, pick }: { day: HistoryDay | null; pick: HistoryItem 
       title="오늘 AI 진단"
       subtitle={`${day.date} · 자동 작업에 대한 AI 보고서입니다.`}
       right={
-        <span
-          className="rounded px-2 py-0.5 text-[11px] font-semibold"
-          style={{ background: "var(--color-t-info-bg)", color: "var(--color-t-info)" }}
-        >
-          AI
-        </span>
+        <div className="flex items-start gap-2.5">
+          <span
+            className="rounded px-2 py-0.5 text-[11px] font-semibold"
+            style={{ background: "var(--color-t-info-bg)", color: "var(--color-t-info)" }}
+          >
+            AI
+          </span>
+          {/*  ★ 배치를 다시 돌린 뒤에는 진단도 다시 받아야 합니다 — 아침 것은
+                 실패한 배치를 보고 쓴 글이라 이미 틀린 이야기입니다. */}
+          <RerunButton what="claude" label="갱신" onDone={onDone} />
+        </div>
       }
     >
       {err && (
@@ -386,7 +407,7 @@ export function AgentsTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      <TodayClaude day={today} pick={claude} />
+      <TodayClaude day={today} pick={claude} onDone={reload} />
       <QualityCard onDone={reload} />
       <History days={days} err={err} skip={claude?.file ?? null} />
     </div>

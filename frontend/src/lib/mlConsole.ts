@@ -94,7 +94,16 @@ export interface HistoryItem {
   time?: string | null;
   /** 규칙 에이전트만 판정을 갖습니다. Claude 보고서는 null */
   verdict?: string | null;
+  /** 맨 위에 펼칠 «오늘 AI 진단». 한국어 본문 하나만 참입니다. */
   is_claude?: boolean;
+  /**
+   * Claude 가 쓴 **영어 초안**. 번역이 이상할 때 대 보는 원본입니다.
+   *
+   * ★ 하루에 `.md` 가 둘 남습니다 — `_en.md`(영어) 와 `.md`(한국어).
+   *   전에는 둘 다 `is_claude` 라 이름 역순에서 **영어가 먼저 잡혀**
+   *   번역을 해 놓고도 화면에 영어가 떴습니다 (2026-09-10 고침).
+   */
+  is_draft?: boolean;
   bytes?: number;
 }
 export interface HistoryDay {
@@ -247,3 +256,31 @@ export const graphAct = (kind: TargetKind, answer?: "build" | "apply" | "stop") 
   );
 export const graphReset = (kind: TargetKind) =>
   post<{ ok: boolean }>(`retrain/graph/reset?kind=${kind}`);
+
+/* ── 다시 돌리기 ──────────────────────────────────────────────────── */
+
+/**
+ * 아침에 실패한 것을 지금 한 번 더 돌립니다.
+ *
+ * ★ **누르면 바로 돌아옵니다.** 자동 작업은 10~15분 걸립니다 — 붙들고
+ *   기다리면 중간에 끊깁니다. 진행은 `opsJob()` 으로 따로 묻습니다.
+ *
+ * ★ **한 번에 하나만 돕니다.** 다른 것이 돌고 있으면 409 가 옵니다.
+ */
+export interface OpsJob {
+  what: "batch" | "claude" | null;
+  /** idle · running · done · failed */
+  state: string;
+  label: string | null;
+  started: string | null;
+  ended: string | null;
+  code: number | null;
+  log: string[];
+}
+
+export const opsRerun = (what: "batch" | "claude") =>
+  post<{ started: boolean; what: string; label: string; minutes: number }>(
+    `ops/rerun?what=${what}`,
+  );
+
+export const opsJob = () => call<OpsJob>("ops/job?tail=12");

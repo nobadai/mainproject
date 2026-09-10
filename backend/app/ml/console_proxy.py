@@ -62,6 +62,8 @@ READ = frozenset({
     "retrain/pending",
     "retrain/job",
     "retrain/graph/status",
+    #   ★ 다시 돌리기가 어디까지 갔나. 누른 뒤 진행을 묻는 자리입니다.
+    "ops/job",
 })
 
 #: 쓰기. **재학습 셋뿐이다.** 사람이 눌러야 도는 것들이고,
@@ -72,6 +74,10 @@ WRITE = frozenset({
     "retrain/rollback",
     "retrain/graph/act",
     "retrain/graph/reset",
+    #   ★ 아침에 실패한 것을 다시 돌립니다 (자동 작업 · AI 점검).
+    #     같은 기준일을 다시 쓰는 것이라 UPSERT 로 덮입니다 — 없던 날이
+    #     생기거나 있던 날이 사라지지 않습니다.
+    "ops/rerun",
 })
 
 
