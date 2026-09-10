@@ -16,9 +16,8 @@ from pydantic import ValidationError
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.sales.llm.runtime import load_settings
 from app.sales.proposal import run_proposal
-from app.sales.runs import save_sales_agent_run
+from app.sales.runs import list_sales_runs, save_sales_agent_run
 from app.sales.schemas import SalesProposalInput, SalesProposalReply
-from app.sales.runs import list_sales_runs
 
 AGENT_NAME = "sales"
 

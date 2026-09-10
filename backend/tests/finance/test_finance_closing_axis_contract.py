@@ -155,7 +155,7 @@ class _Conn:
 
 @pytest.fixture(autouse=True)
 def _schema():
-    snapshot = InventorySnapshot(Decimal("123"), Decimal("456"), Decimal("456"))
+    snapshot = InventorySnapshot(Decimal(123), Decimal(456), Decimal(456))
     with (
         patch("app.finance.day_open.get_db_schema", return_value="haetdeul"),
         patch("app.finance.closing.get_db_schema", return_value="haetdeul"),

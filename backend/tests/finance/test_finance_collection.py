@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.finance.collection import CollectionEvent
-from app.finance.collection import DeterministicCollectionFixtureSource
+from app.finance.collection import CollectionEvent, DeterministicCollectionFixtureSource
 from app.finance.collection_adapter import FinanceCollectionSource
 from app.finance.state_identity import daily_finance_state_id
 from app.master.collection import CollectionPartOut
@@ -21,7 +20,9 @@ source_RECEIVABLE_ID = "AR-COLLECTION-SOURCE-1"
 source_ORIGINAL = Decimal(1000)
 
 
-def source_state(*, cash: Decimal = Decimal(5000), receivables: Decimal = source_ORIGINAL) -> dict[str, Any]:
+def source_state(
+    *, cash: Decimal = Decimal(5000), receivables: Decimal = source_ORIGINAL
+) -> dict[str, Any]:
     return {
         "finance_state_id": daily_finance_state_id(
             sim_run_id=source_SIM_RUN_ID,
@@ -204,7 +205,9 @@ def test_empty_source_returns_nothing_due_without_mutation():
 def test_event_on_the_day_is_collected_through_finance_transition():
     conn = source_Connection()
 
-    out = source_source((source_event(source_AS_OF, Decimal(250)),)).collect(conn, as_of=source_AS_OF)
+    out = source_source((source_event(source_AS_OF, Decimal(250)),)).collect(
+        conn, as_of=source_AS_OF
+    )
 
     state = next(iter(conn.states.values()))
     receivable = conn.receivables[source_RECEIVABLE_ID]
@@ -272,7 +275,9 @@ def test_corrupt_source_axis_mismatch_blocks_without_mutation():
 def test_invalid_event_fails_closed_without_mutation():
     conn = source_Connection()
 
-    out = source_source((source_event(source_AS_OF, Decimal(1001)),)).collect(conn, as_of=source_AS_OF)
+    out = source_source((source_event(source_AS_OF, Decimal(1001)),)).collect(
+        conn, as_of=source_AS_OF
+    )
 
     assert out.status == "BLOCKED"
     assert conn.receivables[source_RECEIVABLE_ID]["status"] == "OPEN"
@@ -282,9 +287,6 @@ def test_invalid_event_fails_closed_without_mutation():
 
 from datetime import date
 from decimal import Decimal
-
-from app.finance.collection import CollectionEvent
-from app.finance.collection import DeterministicCollectionFixtureSource
 
 
 def fixture_event(
@@ -410,23 +412,19 @@ def test_source_marks_sim_fixed_fixture_evidence():
 
 """Explicit Collection fixture to Finance ledger execution regressions."""
 
-from copy import deepcopy
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import patch
 
 import pytest
 
 from app.finance import db as finance_db
 from app.finance.collection import (
-    CollectionEvent,
     FinanceCollectionConflict,
     apply_collection_event,
     apply_explicit_collection,
 )
 from app.finance.day_open import FinanceDayOpening
 from app.finance.db import FinanceDataNotReady, InventorySnapshot, PostgresFinanceAsOfDataPort
-from app.finance.state_identity import daily_finance_state_id
 
 execution_SIM_RUN_ID = "SIM-COLLECTION-30D"
 execution_MODE = "LOAN_BASELINE"
@@ -670,7 +668,9 @@ def execution_select_receivable(conn: execution_Connection) -> dict[str, object]
     return row
 
 
-def execution_event(collection_date: date, target: object, *, mode: str = execution_MODE) -> CollectionEvent:
+def execution_event(
+    collection_date: date, target: object, *, mode: str = execution_MODE
+) -> CollectionEvent:
     return CollectionEvent(
         sim_run_id=execution_SIM_RUN_ID,
         financing_mode=mode,
@@ -856,7 +856,10 @@ def test_duplicate_exact_collection_state_fails_closed():
 
 
 def test_receivable_and_state_sim_runs_must_match():
-    conn = execution_connection(states=[execution_state(execution_START)], receivable=execution_receivable(sim_run_id="SIM-OTHER"))
+    conn = execution_connection(
+        states=[execution_state(execution_START)],
+        receivable=execution_receivable(sim_run_id="SIM-OTHER"),
+    )
 
     with pytest.raises(FinanceCollectionConflict, match="axes do not match"):
         apply_explicit_collection(conn, execution_event(execution_START, Decimal(4_000_000)))
@@ -865,7 +868,9 @@ def test_receivable_and_state_sim_runs_must_match():
 
 
 def test_finance_receivables_underflow_fails_before_either_update():
-    conn = execution_connection(states=[execution_state(execution_START, receivables=Decimal(3_000_000))])
+    conn = execution_connection(
+        states=[execution_state(execution_START, receivables=Decimal(3_000_000))]
+    )
 
     with pytest.raises(FinanceCollectionConflict, match="cannot cover"):
         apply_explicit_collection(conn, execution_event(execution_START, Decimal(4_000_000)))

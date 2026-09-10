@@ -12,8 +12,7 @@ from typing import Literal
 
 from psycopg import Connection, sql
 
-from app.finance.db import row_value
-from app.finance.db import FinanceDataNotReady, get_db_schema
+from app.finance.db import FinanceDataNotReady, get_db_schema, row_value
 
 FixtureEvidenceGrade = Literal["SIM_FIXED"]
 

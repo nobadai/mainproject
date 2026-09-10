@@ -29,8 +29,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.finance.capabilities.procurement import load_context
-from app.finance.db import decimal_value
-from app.finance.db import FinanceAsOfDataPort
+from app.finance.db import FinanceAsOfDataPort, decimal_value
 from app.finance.rules import (
     SalesRuleResult,
     aggregate_sales_finance_rules,
@@ -41,6 +40,7 @@ from app.finance.rules import (
     evaluate_sales_margin_rule,
     evaluate_sales_payment_term_rule,
 )
+from app.finance.sales_policy import load_finance_sales_mvp_policy
 from app.finance.sales_validation import (
     ConditionalSupplyCostBasis,
     InventoryCostBasis,
@@ -52,7 +52,6 @@ from app.finance.sales_validation import (
     SalesValidationResult,
     VerifiedDirectCost,
 )
-from app.finance.sales_policy import load_finance_sales_mvp_policy
 from app.finance.tools import (
     build_proposed_sales_collection_event,
     calculate_available_credit,
