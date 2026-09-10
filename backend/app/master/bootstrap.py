@@ -45,8 +45,8 @@ from app.master.finance_cancellation import FinanceCancellationAdapter
 from app.master.finance_collection import FinanceCollectionAdapter
 from app.master.finance_receivable import FinanceReceivableAdapter
 from app.master.inbound import register_inbound
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.receivable import register_receivable
+from app.master.sim_run_binding import SimRunBound
 from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
 from app.purchase_agent.adapter import purchase_port
@@ -117,15 +117,31 @@ def wire_registries() -> None:
     # 🔴 **`sim_run_id` 는 마스터가 정한다.** `persist_inventory` 의 WHERE 가 그 값을
     #    쓰지만 *"어느 실행의 장부인가"* 는 물류 사실이 아니다. 물류 모듈에 상수로
     #    박으면 실행이 둘이 되는 날 물류 코드를 고쳐야 하므로 여기서 눈에 보이게 준다.
-    #    값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다 — 새로 만들지 않는다.
     #
-    # ⚠️ **매입 원장은 2026-09-10 부터 이 상수를 안 쓴다.** `ledger.sim_run_id_for` 는
-    #    부르는 쪽이 준 축을 돌려주고, 그 값은 결정이 걸린 실행 행에서 온다
-    #    (`decision_service._sim_run_id_of`). 여기 등록소는 **프로세스 시작 때 한 번**
-    #    묶이므로 아직 그 축을 못 받는다 — 걷기가 번인 아닌 실행을 타는 날 이 줄이
-    #    매입 원장과 갈린다. 그 자리를 옮기는 것은 별도 판이다 (등록소에 축을 흘리는 일).
+    # ★★ **그 자리를 옮겼다** (2026-09-10 · `#531` 후속). 전에 여기 이렇게 적혀 있었다 —
+    #
+    #    > 여기 등록소는 **프로세스 시작 때 한 번** 묶이므로 아직 그 축을 못 받는다 —
+    #    > 걷기가 번인 아닌 실행을 타는 날 이 줄이 매입 원장과 갈린다. 그 자리를
+    #    > 옮기는 것은 별도 판이다 (등록소에 축을 흘리는 일).
+    #
+    #    ```text
+    #    전   LogisticsTransitionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID)  생성 때 굳는다
+    #    후   SimRunBound(lambda axis: LogisticsTransitionAdapter(...))   부를 때 묶인다
+    #    ```
+    #
+    # 🔴 **부서 어댑터의 서명을 안 바꿨다.** 물류·재무 어댑터는 여전히
+    #    `sim_run_id=` 를 생성자로 받는다 — 바뀐 것은 **언제 만드느냐** 하나다.
+    #    `app/logistics/*` 도 `app/finance/*` 도 한 줄 안 고쳤다.
+    #
+    # ★ **여기에 상수를 안 적는다.** 축은 `apply_approval(sim_run_id=…)` 이 나르고,
+    #   그 값은 결정이 걸린 실행 행에서 온다 (`decision_service._sim_run_id_of`).
+    #   기본값을 든 자리는 `open_day` · `receive_arrivals` · `collect_receipts` ·
+    #   `issue_receivables` 넷이고, 그 이유는 각자 docstring 에 적혀 있다.
     register_transition("finance", FinanceTransitionAdapter())
-    register_transition("logistics", LogisticsTransitionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
+    register_transition(
+        "logistics",
+        SimRunBound(lambda axis: LogisticsTransitionAdapter(sim_run_id=axis)),
+    )
 
     # ── 하루 넘김 (day_open) ────────────────────────────────────────────────
     #
@@ -154,7 +170,10 @@ def wire_registries() -> None:
     #    *"there is no unique or exclusion constraint matching the ON CONFLICT
     #    specification"*). `database/finance/finance_state_daily_unique.sql` 을 적용한 뒤
     #    켰다 — **마이그레이션과 이 두 줄은 짝이다.**
-    register_day_opening("logistics", LogisticsDayOpening(sim_run_id=BURN_IN_SIM_RUN_ID))
+    register_day_opening(
+        "logistics",
+        SimRunBound(lambda axis: LogisticsDayOpening(sim_run_id=axis)),
+    )
     register_day_opening("finance", FinanceDayOpening())
     register_closing("finance", FinanceClosingAdapter())
 
@@ -182,7 +201,10 @@ def wire_registries() -> None:
     #    등록을 먼저 해 두는 이유는 `apply_approval` 때와 같다: 배선이 없는 것과 어휘가
     #    없는 것은 다른 사실이고, 둘을 같은 문장으로 접으면 무엇을 고칠지가 사라진다.
     register_cancellation("finance", FinanceCancellationAdapter())
-    register_cancellation("logistics", LogisticsCancellationAdapter(sim_run_id=BURN_IN_SIM_RUN_ID))
+    register_cancellation(
+        "logistics",
+        SimRunBound(lambda axis: LogisticsCancellationAdapter(sim_run_id=axis)),
+    )
 
 
     # ── 입고 실행 (receive_arrivals) ────────────────────────────────────────
@@ -226,9 +248,11 @@ def wire_registries() -> None:
     #   ```
     register_inbound(
         "logistics",
-        LogisticsInboundExecution(
-            sim_run_id=BURN_IN_SIM_RUN_ID,
-            inspection_provider=ScenarioSimulatedInspectionProvider(),
+        SimRunBound(
+            lambda axis: LogisticsInboundExecution(
+                sim_run_id=axis,
+                inspection_provider=ScenarioSimulatedInspectionProvider(),
+            )
         ),
     )
 
@@ -303,7 +327,7 @@ def wire_registries() -> None:
     #      한 줄 INSERT 로 시연이 되고, `NOTHING_DUE` 와 「등록 안 됨」이 갈린다.
     register_collection(
         "finance",
-        FinanceCollectionAdapter(sim_run_id=BURN_IN_SIM_RUN_ID),
+        SimRunBound(lambda axis: FinanceCollectionAdapter(sim_run_id=axis)),
     )
 
 
@@ -336,5 +360,5 @@ def wire_registries() -> None:
     # 수금 사건을 master_collection_events 에서 읽게 바꾼 것과 같은 이유다.
     register_receivable(
         "finance",
-        FinanceReceivableAdapter(sim_run_id=BURN_IN_SIM_RUN_ID),
+        SimRunBound(lambda axis: FinanceReceivableAdapter(sim_run_id=axis)),
     )

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 import pytest
 
@@ -38,9 +39,24 @@ from app.logistics.inbound_execution import LogisticsInboundExecution
 from app.logistics.simulated_inspection import ScenarioSimulatedInspectionProvider
 from app.master import inbound
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 AS_OF = date(2026, 1, 7)
 """도착 예정이 실제로 걸려 있는 날 — 250일째 `in_transit` 에 묻혀 있는 그 건이다."""
+
+#: 이 검사가 등록소에 주는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)과 다르다** —
+#:   같으면 등록소가 축을 상수에서 다시 읽는 뮤턴트가 전부 살아남는다.
+등록축 = "SIM-REG-INBOUND"
+
+
+def _등록된() -> Any:
+    """등록소가 **호출 때** 축을 받아 세운 물류 구현 (`#531` 후속 · 2026-09-10).
+
+    ★ **재는 것은 그대로다** — 바뀐 것은 구현이 **언제 서는가** 하나다.
+      전에는 `registered()["logistics"]` 가 곧 구현이라 축이 프로세스 시작 때 굳었다.
+    """
+    return bind_sim_run(inbound.registered()["logistics"], 등록축)
+
 
 
 # ---------------------------------------------------------------------------
@@ -58,16 +74,20 @@ def test_입고_실행이_등록된다() -> None:
 
 def test_등록된_것이_물류의_실제_구현이다() -> None:
     """🔴 **대역이 등록돼 있으면 배선이 있는 것처럼 보이지만 아무것도 안 받는다.**"""
-    impl = inbound.registered()["logistics"]
+    impl = _등록된()
     assert isinstance(impl, LogisticsInboundExecution), (
         f"등록된 것이 물류 구현이 아니다: {type(impl).__name__}"
     )
 
 
 def test_마스터가_정한_장부에_앉힌다() -> None:
-    """★ `sim_run_id` 는 마스터 값이다 — 물류 모듈 상수로 새면 실행이 둘이 되는 날 깨진다."""
-    impl = inbound.registered()["logistics"]
-    assert impl._sim_run_id == BURN_IN_SIM_RUN_ID
+    """★ `sim_run_id` 는 마스터 값이다 — 물류 모듈 상수로 새면 실행이 둘이 되는 날 깨진다.
+
+    🔴 **부른 쪽이 준 축이 그대로 앉는다** (`#531` 후속). 배선이 든 상수를 재면
+       걷기가 번인 아닌 실행을 타는 날 **입고만 번인에 남는 것**을 못 잡는다.
+    """
+    assert _등록된()._sim_run_id == 등록축
+    assert _등록된()._sim_run_id != BURN_IN_SIM_RUN_ID
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +101,7 @@ def test_검수_provider_는_물류의_것이다() -> None:
     `app/master/` 안의 클래스가 여기 오면 그것이 곧 마스터가 검수 규칙을 정한
     것이다 — `NoInspectionSource` 를 지운 이유가 그것이다.
     """
-    impl = inbound.registered()["logistics"]
+    impl = _등록된()
     provider = impl._provider
     assert isinstance(provider, ScenarioSimulatedInspectionProvider), (
         f"검수 provider 가 물류 것이 아니다: {type(provider).__name__}"
@@ -109,7 +129,7 @@ def test_마스터가_합격률을_손대지_않는다() -> None:
     없는 비율"* 이 업무 사실이 된다 — 물류가 `#336` 에서 `random` · `seed` ·
     품목별 손실률을 다 거절한 이유가 그것이다.
     """
-    impl = inbound.registered()["logistics"]
+    impl = _등록된()
     assert type(impl._provider) is ScenarioSimulatedInspectionProvider, (
         "provider 가 감싸여 있다 — 마스터가 판정에 손댄 자리가 있는지 본다"
     )

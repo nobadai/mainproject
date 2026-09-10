@@ -1,48 +1,37 @@
 """
-cancellation.py — **취소된 승인의 입고 예정을 걷는다.** 물류 fixture 쪽 취소 자리.
-
-⚠️ **마스터가 임시로 얹은 모듈이다** (`day_open.py` 와 같은 방식 · `#280` 전례).
-  물류가 자기 구현을 올리면 **이 파일을 통째로 지우면 되고**, 기존 코드는 한 줄도
-  안 건드렸다.
-
-★ **셋을 마스터가 정해 통보했다** (2026-09-05 · 물류 이견 없음).
+cancellation.py — **취소된 승인의 입고 예정을 걷는다.**
 
 ```text
-① confirmed_inbound   취소된 승인의 inbound_id 를 목록에서 **제거**한다
-                      항목마다 상태 칸을 두지 않는다 (ScheduledQuantity 를 안 넓힌다)
-                      목록을 통째로 새로 쓰지 않는다 (남의 승인분이 사라진다)
-② in_transit          같은 규칙으로 걷는다. 남으면 CONFIRMED · 비면 CONFIRMED_ZERO
-③ 넣는 쪽과 빼는 쪽    같은 모듈에 둔다 — 두 규칙이 갈리면 한쪽만 고쳐지는 날이 온다
+승인 취소  →  그 승인의 inbound_id 들을 조립          (inbound_ids_of)
+          →  Receipt 가 하나라도 있으면 아무것도 안 걷는다 (assert_cancellable)
+          →  inbound_schedules.cancelled_as_of 에 목표 상태일을 적는다
+          →  마스터 취소 근거를 cancel_source_ref 에 함께 적는다
+             (생성 근거 source_ref 는 그대로 둔다)
 ```
 
-🔴 **`UNRESOLVED` 가 아니라 `CONFIRMED_ZERO` 다.**
+★ **마스터 승인 취소를 물류 입고 일정 취소 경로에 잇는 자리다** (`day_open.py` 와
+  같은 모양).
 
-  취소는 *"확인했고 이제 없다"* 이지 *"모른다"* 가 아니다. `01-06` 씨앗에 마스터가
-  요구한 기준과 같다.
+🔴 **정본은 `inbound_schedules` 한 표다 (W3-3).** 종전에는 그날 fixture 행의
+  `in_transit` · `confirmed_inbound` JSON 목록에서 항목을 뺐지만, Reader 가 더 이상
+  그 칸을 읽지 않는다.
 
 🔴 **과거 행을 안 고친다.**
 
 ```text
-승인 01-05  →  target_state_date 01-06 행에 in_transit 을 적었다
-취소 01-07  →  target_state_date 01-08 행에서 걷는다
+승인 01-05  →  01-06 부터 서 있다
+취소 01-07  →  cancelled_as_of = 01-08 (목표 상태일)
 
 01-06 · 01-07 은 그대로 둔다 — **그때는 실제로 오는 중이었다.**
 ```
 
   ★ 재무 역분개와 **같은 규율**이다 (`#302` — *"과거 state rewrite 금지"*).
 
-🔴 **`FOR UPDATE` 로 그 행 하나를 잠그고 읽고-고치고-쓴다.**
-
-  `persist_inventory` 와 같은 이유다 — 병합(여기서는 제거)을 파이썬에서 하는 이상
-  읽기와 쓰기 사이가 비어 있고, 그 틈을 닫는 것은 행 잠금뿐이다.
+🔴 **`FOR UPDATE` 로 그 행 하나를 잠그고 읽고-고치고-쓴다** (`cancel_schedule`) —
+  읽기와 쓰기 사이의 틈을 닫는 것은 행 잠금뿐이다.
 
 ⚠️ **입고된 뒤에는 이 함수로 못 물린다.** 물건이 창고에 있으면 취소가 아니라
-  반품이다. 다만 지금은 입고 실행 진입점 자체가 없어(`Arrival → … → IN`) 그 판정을
-  할 자리도 없다 — **입고 실행이 서면 여기에 그 방어를 더해야 한다.**
-
-⚠️ **`confirmed_inbound` 를 건드리는 것은 `#275` 와 같은 임시 자리다.** 승인과 발주
-  확정은 다른 사실이고, 물류가 발주 확정 단계를 만들면 넣는 쪽과 함께 이쪽도 그
-  단계로 옮겨야 한다.
+  반품·폐기·실사이고, `assert_cancellable` 이 Receipt 를 먼저 보고 거절한다.
 """
 
 from __future__ import annotations
@@ -87,6 +76,9 @@ def withdraw_inventory(
        fixture 행의 두 JSON 칸에서도 항목을 빼야 했는데, Reader 가 더 이상 그 칸을
        읽지 않으므로 걷을 이유가 없어졌다.
 
+    ★ 받은 `source_ref` 는 `cancel_source_ref` 칸에 적는다 — 일정의
+      `source_ref`(생성 근거)는 덮지 않는다.
+
     ```text
     as_of <  cancelled_as_of   그날 이 일정은 여전히 존재한다
     as_of >= cancelled_as_of   그날부터 취소다
@@ -129,7 +121,11 @@ def withdraw_inventory(
         1
         for inbound_id in drop
         if cancel_schedule(
-            conn, sim_run_id=sim_run_id, inbound_id=inbound_id, cancelled_as_of=as_of
+            conn,
+            sim_run_id=sim_run_id,
+            inbound_id=inbound_id,
+            cancelled_as_of=as_of,
+            cancel_source_ref=source_ref,
         )
     )
 
@@ -141,7 +137,7 @@ class LogisticsCancellationAdapter:
 
     🔴 **`sim_run_id` 는 생성 인자다.** *"어느 실행의 장부인가"* 는 실행 정체성이라
       물류가 아니라 마스터가 정한다 — `LogisticsTransitionAdapter` 와 같은 판단이고,
-      배선 자리(`app/main.py`)에서 눈에 보이게 주입한다.
+      배선 자리(`app/master/bootstrap.py`)에서 눈에 보이게 주입한다.
     """
 
     def __init__(self, *, sim_run_id: str) -> None:

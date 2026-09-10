@@ -75,6 +75,7 @@ from pydantic import BaseModel, Field
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
 from app.master.ledger import cancel_purchases
+from app.master.sim_run_binding import bind_sim_run
 from app.master.transition import PARTS, TransitionPart, purchase_id_for
 
 __all__ = [
@@ -268,8 +269,17 @@ def undo_approval(
             missing=list(absent),
         )
 
-    adapters = registered_cancellations()
     try:
+        # 🔴 **등록소가 든 축이 아니라 이 취소의 축으로 묶는다** (`#531` 후속).
+        #    취소는 승인이 앉은 실행을 물리는 일이다 — 등록소가 프로세스 시작 때 든
+        #    상수로 물리면 **남의 실행 장부를 물린다.**
+        #
+        # ★ **커넥션을 열기 전이다.** 축을 못 받으면 트랜잭션을 시작하지도 않는다 —
+        #   아래 `financing_mode_of` 와 같은 자리, 같은 규율이다.
+        adapters = {
+            part: bind_sim_run(impl, sim_run_id)
+            for part, impl in registered_cancellations().items()
+        }
         # ★ **커넥션을 열기 전에 읽는다.** 축을 못 읽으면 트랜잭션을 시작하지도 않는다 —
         #   `apply_approval` 이 build 를 커넥션 밖에서 부르는 것과 같은 규율이다.
         financing_mode = financing_mode_of(commitment, sim_run_id=sim_run_id)

@@ -47,6 +47,7 @@ from app.master.finance_receivable import (
     read_confirmed_sales,
 )
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_binding import bind_sim_run
 
 AS_OF = date(2026, 1, 5)
 남의_실행 = "SIM-SOMEONE-ELSE"
@@ -130,6 +131,20 @@ class _가짜원장:
 # ① 배선
 # ---------------------------------------------------------------------------
 
+#: 이 검사가 등록소에 주는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)과 다르다** —
+#:   같으면 등록소가 축을 상수에서 다시 읽는 뮤턴트가 전부 살아남는다.
+등록축 = "SIM-REG-RECEIVABLE"
+
+
+def _등록된() -> Any:
+    """등록소가 **호출 때** 축을 받아 세운 어댑터 (`#531` 후속 · 2026-09-10).
+
+    ★ **재는 것은 그대로다** — 바뀐 것은 어댑터가 **언제 서는가** 하나다.
+      전에는 `registered()["finance"]` 가 곧 어댑터라 축이 프로세스 시작 때 굳었다.
+    """
+    return bind_sim_run(receivable.registered()["finance"], 등록축)
+
+
 
 def test_채권_발행이_등록된다() -> None:
     """★ **미등록과 「확정 판매 없음」은 다른 사실이다.** 이 줄이 없으면 앞으로 나간다."""
@@ -142,21 +157,25 @@ def test_채권_발행이_등록된다() -> None:
 
 def test_등록된_것이_마스터_어댑터다() -> None:
     """⚠️ **어댑터는 마스터가 얹은 얇은 배선이다** (`#280` 전례)."""
-    impl = receivable.registered()["finance"]
+    impl = _등록된()
     assert isinstance(impl, FinanceReceivableAdapter), (
         f"등록된 것이 마스터 채권 어댑터가 아니다: {type(impl).__name__}"
     )
 
 
 def test_마스터가_정한_장부에_앉힌다() -> None:
-    """★ `sim_run_id` 는 마스터 값이다 — 앞의 다섯 등록소가 쓰는 그 상수 하나다."""
-    impl = receivable.registered()["finance"]
-    assert impl.sim_run_id == BURN_IN_SIM_RUN_ID
+    """★ `sim_run_id` 는 마스터 값이다 — 앞의 다섯 등록소가 쓰는 그 축 하나다.
+
+    🔴 **부른 쪽이 준 축이 그대로 앉는다** (`#531` 후속). 배선이 든 상수를 재면
+       걷기가 번인 아닌 실행을 타는 날 **채권만 번인에 남는 것**을 못 잡는다.
+    """
+    assert _등록된().sim_run_id == 등록축
+    assert _등록된().sim_run_id != BURN_IN_SIM_RUN_ID
 
 
 def test_배선이_financing_mode_를_들고_있지_않다() -> None:
     """🔴 **마스터가 고르지 않는다.** 배선 자리에 그 값이 있으면 그것이 고른 것이다."""
-    impl = receivable.registered()["finance"]
+    impl = _등록된()
     assert not hasattr(impl, "financing_mode"), (
         "마스터 어댑터가 financing_mode 를 들고 있다 — 재무 축의 값이지 마스터 것이 아니다"
     )
@@ -168,7 +187,7 @@ def test_배선이_판매_목록을_들고_있지_않다() -> None:
     ⚠️ 배선 시점에 고정하면 판매가 한 줄 들어와도 앱을 다시 띄우기 전까지 아무 일도
       안 일어나고, 그것은 에러 없이 *"오늘은 판 게 없었다"* 로 보인다.
     """
-    impl = receivable.registered()["finance"]
+    impl = _등록된()
     assert impl.load_sales is read_confirmed_sales, (
         f"배선이 정본 조회가 아닌 것을 쓴다: {impl.load_sales!r}"
     )
@@ -178,7 +197,7 @@ def test_원장에_직접_쓰지_않고_재무_경계를_부른다() -> None:
     """🔴 **마스터가 `receivables` 에 직접 INSERT 하지 않는다.**"""
     from app.finance.receivables import confirm_receivable
 
-    impl = receivable.registered()["finance"]
+    impl = _등록된()
     assert impl.confirm is confirm_receivable, (
         f"채권 원장을 재무 경계 밖에서 건드린다: {impl.confirm!r}"
     )

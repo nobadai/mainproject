@@ -16,6 +16,10 @@ Params = Sequence[object] | Mapping[str, object] | None
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 
+#: 접속이 안 되면 이만큼 기다리고 포기한다 (초). libpq 기본은 0 = 무제한이다.
+#: 재무·매입·영업·ML 과 같은 값으로 맞춘다.
+CONNECT_TIMEOUT_SECONDS = 5
+
 
 def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
     load_dotenv(_ENV_FILE)
@@ -41,6 +45,7 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
         user=config["DB_USER"],
         password=config["DB_PASSWORD"],
         row_factory=dict_row,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
     )
 
 

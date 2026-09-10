@@ -335,7 +335,12 @@ def has_receipt(conn: Any, *, sim_run_id: str, inbound_id: str) -> bool:
 
 
 def cancel_schedule(
-    conn: Any, *, sim_run_id: str, inbound_id: str, cancelled_as_of: date
+    conn: Any,
+    *,
+    sim_run_id: str,
+    inbound_id: str,
+    cancelled_as_of: date,
+    cancel_source_ref: str | None = None,
 ) -> bool:
     """입고 예정을 **그날부터** 취소한다. 과거는 고치지 않는다.
 
@@ -343,6 +348,10 @@ def cancel_schedule(
     as_of <  cancelled_as_of   그날 이 일정은 여전히 존재한다
     as_of >= cancelled_as_of   그날부터 취소다
     ```
+
+    🔴 **`cancel_source_ref` 는 취소 근거다. `source_ref`(생성 근거)를 덮지 않는다.**
+       안 주면 `NULL` 로 남고 취소 자체는 그대로 된다 — 그날 살아 있었나는 계속
+       `cancelled_as_of` 하나가 답한다.
 
     🔴 **`cancelled_on` 이 아니라 `target_state_date` 를 받는다.** 현재 계약이
        *"01-07 취소 → 01-08 상태에서 제거"* 이고, 취소일 자체를 적으면 **이미 지나간
@@ -382,11 +391,11 @@ def cancel_schedule(
             sql.SQL(
                 """
                 UPDATE {}.inbound_schedules
-                SET cancelled_as_of = %s
+                SET cancelled_as_of = %s, cancel_source_ref = %s
                 WHERE sim_run_id = %s AND inbound_id = %s AND cancelled_as_of IS NULL
                 """
             ).format(_schema()),
-            (cancelled_as_of, sim_run_id, inbound_id),
+            (cancelled_as_of, cancel_source_ref, sim_run_id, inbound_id),
         )
     return True
 
@@ -450,11 +459,11 @@ def load_inbound_schedules(
 def assert_cancellable(
     conn: Any, *, sim_run_id: str, inbound_ids: Sequence[str]
 ) -> None:
-    """취소해도 되는 입고들인가. **Legacy JSON 을 고치기 전에 먼저 묻는다.**
+    """취소해도 되는 입고들인가. **취소 UPDATE 를 쓰기 전에 먼저 묻는다.**
 
-    🔴 **한쪽만 바뀌는 상태를 만들지 않으려고 앞에서 전부 본다.** 하나씩 지우면서
-       중간에 막히면 앞의 것은 이미 JSON 에서 빠진 뒤다 — 같은 트랜잭션이라 롤백은
-       되지만, 판정이 쓰기와 섞이면 *"무엇이 왜 막혔나"* 가 흐려진다.
+    🔴 **한쪽만 바뀌는 상태를 만들지 않으려고 앞에서 전부 본다.** 하나씩 걷다가
+       중간에 막히면 앞의 것은 이미 닫힌 뒤다 — 같은 트랜잭션이라 롤백은 되지만,
+       판정이 쓰기와 섞이면 *"무엇이 왜 막혔나"* 가 흐려진다.
 
     :raises ScheduleReceiptExists: 하나라도 Receipt 가 있을 때. **어느 것인지 적는다.**
     """

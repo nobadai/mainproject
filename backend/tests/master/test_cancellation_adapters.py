@@ -158,9 +158,11 @@ def _취소된것(conn: _가짜커넥션) -> list[tuple[Any, str]]:
     """실제로 나간 취소 UPDATE 들 — `(cancelled_as_of, inbound_id)`.
 
     ⚠️ `"UPDATE" in text` 로 거르지 않는다 — 잠그는 SELECT 의 `FOR UPDATE` 가 걸린다.
+
+    ⚠️ 열쇠는 **끝에서** 센다 — `SET` 절이 늘면 앞자리가 밀린다.
     """
     return [
-        (params[0], params[2])
+        (params[0], params[-1])
         for text, params in conn.cur.executed
         if "SET cancelled_as_of" in text
     ]
@@ -336,24 +338,14 @@ def test_물류가_target_state_date_를_적는다():
     assert 적힌날 != APPROVED_ON
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "물류 #484 로 잃은 것이다. withdraw_inventory 는 source_ref 를 받고도"
-        " cancel_schedule 에 안 넘기고, cancel_schedule 은 cancelled_as_of 만"
-        " UPDATE 한다 — 취소 흔적에 '누가 왜 언제' 가 안 남는다."
-        " 마스터 어댑터는 MASTER-CANCEL-<취소일> 을 여전히 만들어 넘긴다."
-        " 적을지 말지는 물류 표의 계약이라 마스터가 대신 정하지 않는다."
-        " 🔴 이 검사가 XPASS 로 빨개지면 물류가 적기 시작했다는 뜻이다 —"
-        " 그때 이 마크를 걷어라."
-    ),
-)
 def test_취소_흔적에_source_ref_가_남는다():
-    """🔴 **취소가 왜 났는지 DB 에 안 남는다.** ③ 잴 대상이 사라진 자리다.
+    """🔴 **취소가 왜 났는지 DB 에 남는다** — 물류가 `cancel_source_ref` 에 적는다.
 
-    ⚠️ **다른 데서도 안 지켜진다.** `withdraw_inventory` · `cancel_schedule` ·
-      `assert_cancellable` 을 잰 검사는 이 파일뿐이다 (2026-09-10 기준 저장소 전체).
-      그래서 지우지 않고 `xfail(strict)` 로 **살려 둔다** — 지우면 잃은 줄도 모른다.
+    ★ **`xfail(strict)` 를 걷은 자리다.** 그 마크의 reason 이 *"XPASS 로 빨개지면
+      물류가 적기 시작했다는 뜻이다 — 그때 이 마크를 걷어라"* 라고 적어 둔 그대로다.
+
+    ⚠️ **여전히 이 파일뿐이다.** `withdraw_inventory` · `cancel_schedule` ·
+      `assert_cancellable` 을 잰 검사는 저장소 전체에서 여기밖에 없다.
     """
     conn = _가짜커넥션(_일정(MINE))
 
@@ -461,8 +453,24 @@ def test_main_이_두_파트를_다_등록한다():
     원문 = pathlib.Path(bootstrap.__file__).read_text(encoding="utf-8")
 
     assert 'register_cancellation("finance"' in 원문
-    assert 'register_cancellation("logistics"' in 원문
-    assert "BURN_IN_SIM_RUN_ID" in 원문.split("register_cancellation(\"logistics\"")[1][:120]
+    assert '"logistics",\n        SimRunBound(lambda axis: LogisticsCancellationAdapter' in 원문, (
+        "물류 취소 등록 줄이 없거나 축을 호출 때 안 받는다"
+    )
+    # 🔴 **축이 배선에 상수로 박혀 있으면 안 된다** (`#531` 후속 · 2026-09-10).
+    #
+    #    전에는 이 자리가 `"BURN_IN_SIM_RUN_ID" in ...` 이었다 — *"마스터가 축을 눈에
+    #    보이게 준다"* 를 재려던 것인데, 그 모양이 곧 **프로세스 시작 때 축이 굳는
+    #    것**이었다. 이제 배선은 `SimRunBound` 로 감싸고 축은 `undo_approval` 이 나른다.
+    #
+    # ★ **주석을 걷어내고 잰다.** 이 파일은 근거를 길게 적고 위 `전 / 후` 표에도 그
+    #   상수가 나온다 — 안 걷으면 코드가 아니라 문장을 재게 된다
+    #   (`test_sim_run_axis.py` 의 `_벗긴_원문` 과 같은 이유).
+    코드 = "\n".join(
+        줄 for 줄 in 원문.splitlines() if not 줄.lstrip().startswith("#")
+    )
+    assert "BURN_IN_SIM_RUN_ID" not in 코드, (
+        "배선이 축을 상수로 든다 — 걷기가 번인 아닌 실행을 타는 날 등록소만 번인에 남는다"
+    )
 
 
 # ── ⑥ financing_mode — 권위 축을 그대로 넘긴다 ────────────────────────────
