@@ -213,7 +213,9 @@ def test_timing_axis_gates_both_triggers() -> None:
 def test_rounds_come_from_the_fixed_list_and_are_clamped() -> None:
     """``clamp(ceil(총량 / 도착일 여유), 목록 경계)``. 진입 시 하한 2는 **목록에서 유도**한다."""
     constraints = load_constraints()
-    cap = 20_000
+    # 🔴 **옛 임계(20,000)와 일부러 다른 수를 쓴다.** 같은 값이면 분모를 상수로 되돌리는
+    #   변이가 안 문다 — 판정이 우연히 같은 답을 내고 검사는 초록으로 지나간다.
+    cap = 9_000
     types = sorted(constraints["split"]["types"])
     smallest_split, largest_split = min(t for t in types if t > 1), max(types)
 
