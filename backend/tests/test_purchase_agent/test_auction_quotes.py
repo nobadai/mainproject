@@ -989,8 +989,11 @@ def test_a_zero_quote_day_does_not_blame_self_check() -> None:
     assert "self_check" not in proposal["no_proposal_reason"]
 
 
-def test_a_real_self_check_cut_still_says_self_check() -> None:
+def test_a_real_self_check_cut_still_says_self_check(no_holdings: None) -> None:
     """반대 방향 — ⑦이 실제로 컷한 날은 그대로 self_check 이라고 말해야 한다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 보유를 켜 두면 ⑥이 먼저 «필요 없다» 로
+      떨어뜨려 ⑦까지 가는 안이 줄고, 사유가 self_check 이 아닌 것으로 섞인다.
 
     시세는 받았고 초안도 만들어졌는데 단가가 예측 상한을 넘은 날이다 — 12-31 관통에서
     mock 시세(1,650)가 실 예측 상한(992)에 부딪혔던 그 모양이다.

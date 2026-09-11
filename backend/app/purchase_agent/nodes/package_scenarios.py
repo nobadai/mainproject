@@ -1728,6 +1728,39 @@ def _risks(draft: dict, deferred: list[str], lots: list[dict] | None, as_of: str
     return risks
 
 
+def _no_quantity_reason(draft: dict) -> dict[str, Any]:
+    """수량이 0인 안의 사유. **「막혔다」와 「필요 없다」를 가른다** (상세설계 §4-③-3).
+
+    ```text
+    raw_qty_kg <= 0    보유가 커버 D일 수요를 이미 덮었다        not_needed
+    그 밖              하드 제약이 수요를 0까지 깎았다           blocked
+    ```
+
+    🔴 **``kind`` 만 붙이면 사람 눈에는 안 갈린다.** 마스터 리포트도 화면도 ``label`` 과
+      ``reason`` 만 그린다. 그래서 **문장 자체를 다르게 쓴다** — 기계가 세는 축과 사람이
+      읽는 축을 둘 다 가르는 것이다.
+
+    ⚠️ ``not_needed`` 같은 **내부 이름을 문장에 흘리지 않는다.** 이 문장은 H1 화면과
+      Critic 이 그대로 읽으므로 그 자체로 말이 되어야 한다.
+    """
+    if draft.get("raw_qty_kg", 0) <= 0 and draft.get("deducted_holdings_kg", 0) > 0:
+        return {
+            "label": draft["label"],
+            "reason": (
+                f"보유 재고 {draft['deducted_holdings_kg']:,}kg이 "
+                f"커버 {draft['coverage_days']}일 수요 {draft['demand_qty_kg']:,}kg을 "
+                "이미 덮어 이날은 매입이 필요 없다"
+            ),
+            "kind": "not_needed",
+        }
+    binding = ", ".join(clip["constraint"] for clip in draft["clipped_by"]) or "미상"
+    return {
+        "label": draft["label"],
+        "reason": f"하드 제약({binding})으로 수량이 0까지 축소되어 제안 불가",
+        "kind": "blocked",
+    }
+
+
 def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     """안별로 split·sourcing을 묶고 근거를 붙여 시나리오를 완성한다."""
     constraints = load_constraints()
@@ -1760,16 +1793,9 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     for draft in drafts:
         total = draft["total_qty_kg"]
         if total <= 0:
-            # 하드 제약이 전량을 깎아낸 안. 스키마가 total_qty_kg > 0을 요구하므로 제안이
-            # 될 수 없다. 조용히 사라지지 않게 사유를 남긴다 — 안이 왜 줄었는지가 소비자에게
-            # 보여야 한다.
-            binding = ", ".join(clip["constraint"] for clip in draft["clipped_by"]) or "미상"
-            dropped.append(
-                {
-                    "label": draft["label"],
-                    "reason": f"하드 제약({binding})으로 수량이 0까지 축소되어 제안 불가",
-                }
-            )
+            # 수량이 0이라 안이 될 수 없다 (스키마가 total_qty_kg > 0을 요구한다). 조용히
+            # 사라지지 않게 사유를 남긴다 — 안이 왜 없는지가 소비자에게 보여야 한다.
+            dropped.append(_no_quantity_reason(draft))
             continue
         sourcing = materialize_sourcing(total, state["sourcing_plan"])
         # 분할은 **timing 축을 받은 안에만** 붙는다 (§4-④ E3-3 확정 1). 전 안에 걸면
