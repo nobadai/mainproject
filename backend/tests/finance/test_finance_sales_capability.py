@@ -623,3 +623,43 @@ def test_a_two_lot_cost_basis_unblocks_the_verdict():
     # 🔴 **두 Lot 이 모두 근거에 남는다.** 대표 하나로 줄면 이 줄이 빨간불이다.
     assert "LOT-A" in result.evidence_refs
     assert "LOT-B" in result.evidence_refs
+
+
+# ---------------------------------------------------------------------------
+# payload 는 그대로 이력에 실린다 — JSON 으로 못 쓰는 값이 있으면 안 된다
+# ---------------------------------------------------------------------------
+
+
+def test_the_payload_carries_the_collection_date_as_text():
+    """🔴 **이것이 2026-09-11 걷기를 멈춰 세운 자리다.**
+
+    `financial_summary.collection_date` 가 `date` 객체로 남아 있어 실행 이력 저장이
+    `TypeError: Object of type date is not JSON serializable` 로 터졌고, 그 예외가
+    *"재무 검토 기록을 저장하지 못했다"* (ERROR/skipped)로 바뀌어 **판정이 실제로
+    났는데도** 판매 후보가 미결로 닫혔다.
+
+    ⚠️ 원가가 늘 없던 동안에는 회수일을 셈할 일이 없어 이 칸이 `None` 이었다 —
+      그래서 이 자리가 한 번도 안 터졌다.
+    """
+    import json
+
+    from app.finance.capabilities.sales import build_sales_validation_payload
+
+    result = _evaluate(_payload(collection_reference_date=date(2026, 1, 10)))
+    payload = build_sales_validation_payload(result)
+    collection = payload["financial_summary"]["collection_date"]
+
+    # 회수일이 실제로 섰는지 먼저 본다 — None 이면 이 검사가 아무것도 안 지킨다.
+    assert collection == "2026-02-09"
+    # 🔴 psycopg 가 JSONB 로 넣을 때 하는 일과 같다.
+    json.dumps(collection)
+
+
+def test_an_unresolved_collection_date_stays_null():
+    """회수일을 못 셈한 것은 **빈 문자열이 아니라 `None`** 이다."""
+    from app.finance.capabilities.sales import build_sales_validation_payload
+
+    result = _evaluate(_payload(payment_days=None))
+    payload = build_sales_validation_payload(result)
+
+    assert payload["financial_summary"]["collection_date"] is None

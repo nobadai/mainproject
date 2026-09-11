@@ -634,6 +634,28 @@ def sales_business_status(payload: Mapping[str, Any]) -> str:
     return SALES_VERDICT_TO_BUSINESS_STATUS[str(verdict)]
 
 
+def _summary_payload(summary: SalesFinancialSummary) -> dict[str, Any]:
+    """요약을 payload 모양으로 옮긴다. **날짜는 문자열로 나간다.**
+
+    🔴 **payload 는 그대로 JSONB 이력에 실린다.** `date` 객체가 한 칸이라도 남아 있으면
+       실행 이력 저장이 `TypeError: Object of type date is not JSON serializable` 로
+       터지고, 그 예외는 *"재무 검토 기록을 저장하지 못했다"* (ERROR/skipped)로 바뀌어
+       **판정이 실제로 났는데도 판매 후보가 미결로 닫힌다.**
+
+    ⚠️ 2026-09-11 걷기에서 실제로 그렇게 됐다. 재고원가가 늘 없던 동안에는 회수일을
+      셈할 일이 없어 이 칸이 `None` 이었고, 그래서 이 자리가 한 번도 안 터졌다 —
+      원가가 오자 처음으로 회수일이 서면서 드러났다.
+
+    ★ **날짜만 손댄다.** 다른 칸은 이미 그대로 실려 왔고, 여기서 모양을 바꾸면
+      받는 쪽(판매 · 마스터)이 읽던 값의 타입이 조용히 달라진다.
+    """
+    dumped = summary.model_dump()
+    collection = dumped.get("collection_date")
+    if collection is not None:
+        dumped["collection_date"] = collection.isoformat()
+    return dumped
+
+
 def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
     """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
 
@@ -649,7 +671,7 @@ def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, A
         # 봉투 상태와 나란히 원본 판정을 남긴다.
         "finance_verdict": result.finance_verdict,
         "scenario_id": result.scenario_id,
-        "financial_summary": (None if summary is None else summary.model_dump()),
+        "financial_summary": (None if summary is None else _summary_payload(summary)),
         "rule_results": [dict(rule) for rule in result.rule_results],
         "reason_codes": list(result.reason_codes),
         "missing_fields": list(result.missing_fields),
