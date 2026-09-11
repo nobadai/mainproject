@@ -4,7 +4,12 @@
 ① 새 실행 한 행          create_sim_run           이미 있다 (#531)
 ② 시작 재무 상태          seed_opening_finance_state   ← 이 판
 ③ 다시 열 때 장부 비우기   reset_sim_run_ledger         ← 이 판
+③' 다시 열 때 실행 행 삭제 delete_sim_run_row           ← 이 판
 ```
+
+★★ **③ 과 ③' 은 다른 일이다.** ③ 은 *"다시 여는 것이지 없애는 것이 아니다"* 라
+  실행 행에 손대지 않는다. ③' 은 `--reset` 이 정하는 일이고, `create_sim_run` 에
+  `ON CONFLICT` 를 붙이지 않고 같은 이름으로 다시 열 수 있게 하는 유일한 길이다.
 
 🔴 **DB 를 안 탄다.** 커넥션도 카탈로그도 전부 대역이다 — 이 판은 절차를 세우는
    것까지고, 실제로 걷거나 행을 쓰거나 지우는 것은 이 판이 하지 않는다.
@@ -21,15 +26,19 @@ import unicodedata
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Self
 
 import pytest
+from psycopg.errors import ForeignKeyViolation
 
 from app.finance.db import get_db_schema
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sim_run_open import (
     LOGISTICS_FIXTURE_TABLE,
+    RUN_TABLE,
     BaselineLineage,
+    delete_sim_run_row,
     reset_sim_run_ledger,
     seed_opening_finance_state,
     seed_opening_logistics_fixture,
@@ -248,6 +257,24 @@ _행수 = {
 }
 
 
+#: 🔴 **예외 문장에 표 이름을 안 담는다.** 담으면 `diag` 를 안 읽고 예외 문장만
+#:   베껴 붙인 뮤턴트가 살아남는다 — 진짜 psycopg 는 둘 다 들고 오지만, 여기서
+#:   재는 것은 *"제약이 들고 온 것을 읽어서 적는가"* 다.
+_FK사유 = "실행 행을 지울 수 없다"
+
+
+class _FK위반(ForeignKeyViolation):
+    """FK 가 막는 그 예외. **제약 이름과 남은 표를 `diag` 로 들고 온다.**"""
+
+    def __init__(self, msg: str, *, table: str, constraint: str) -> None:
+        super().__init__(msg)
+        self._진단 = SimpleNamespace(table_name=table, constraint_name=constraint)
+
+    @property
+    def diag(self) -> SimpleNamespace:  # type: ignore[override]
+        return self._진단
+
+
 class _대역커서:
     """카탈로그 질의에만 답하고, 던진 문장을 전부 모은다."""
 
@@ -284,7 +311,13 @@ class _대역커서:
         elif "col.table_name" in 문장:
             self._rows = [{"table_name": one} for one in self.대장.표들]
         elif "DELETE FROM" in 문장:
-            self.rowcount = self.대장.행수.get(_표이름(문장), 0)
+            표 = _표이름(문장)
+            # 🔴 **DB 가 막는 자리를 대역도 막는다.** 실행 행을 지우려는데 장부가
+            #    남아 있으면 FK 가 터뜨린다 — 그 막힘이 자기 검사다.
+            if 표 == RUN_TABLE and self.대장.FK막힘 is not None:
+                남은표, 제약 = self.대장.FK막힘
+                raise _FK위반(_FK사유, table=남은표, constraint=제약)
+            self.rowcount = self.대장.행수.get(표, 0)
         elif "finance_state_id = %s" in 문장 and "SELECT" in 문장:
             self._one = self.대장.출발행
         elif "usage_scope = %s" in 문장 and "SELECT" in 문장:
@@ -316,6 +349,8 @@ class _대역커넥션:
         self.표들 = over.pop("표들", _표들)
         self.fk = over.pop("fk", _FK)
         self.행수 = over.pop("행수", _행수)
+        #: `(남은 표, 제약 이름)` 이면 실행 행 삭제가 FK 로 막힌다. 🟢 자기 검사.
+        self.FK막힘: tuple[str, str] | None = over.pop("FK막힘", None)
         출발행 = over.pop("출발행", _출발행)
         self.출발행 = dict(출발행) if 출발행 is not None else None
         물류출발행 = over.pop("물류출발행", _물류출발행)
@@ -944,6 +979,132 @@ def test_지우는_자리가_커밋하지_않는다() -> None:
     reset_sim_run_ledger(conn, sim_run_id=새실행)
 
     assert conn.commits == 0
+
+
+# ── ③' 실행 행을 지운다 ────────────────────────────────────────────────
+#
+# ★★ **③ 과 다른 일이다.** 장부 비우기는 실행 행에 손대지 않고, 그 규율은 지금도
+#    맞다. 실행 행을 지우는 것은 `--reset` 이 정한다.
+
+#: 실행 행 한 행이 지워지는 대역. 장부 표들은 그대로 두고 `sim_runs` 만 더한다.
+_실행행있음 = {**_행수, RUN_TABLE: 1}
+
+
+def test_실행_행을_축으로_좁혀_지운다() -> None:
+    """🔴 **그 실행 하나만 지운다.** 조건 없이 지우면 남의 실행까지 날아간다."""
+    conn = _대역커넥션(행수=_실행행있음)
+    지운수 = delete_sim_run_row(conn, sim_run_id=새실행)
+
+    던진것 = _문장들(conn, "DELETE FROM")
+    assert len(던진것) == 1, f"한 문장이 아니다: {던진것}"
+    문장, params = 던진것[0]
+    assert _표이름(문장) == RUN_TABLE, f"실행 행이 사는 표에 안 던졌다: {문장}"
+    assert '"sim_run_id" = %s' in 문장, f"축으로 안 좁혔다: {문장}"
+    assert params == [새실행]
+    assert 지운수 == 1
+
+
+def test_지울_실행_행이_없어도_막지_않는다() -> None:
+    """★ **0 행도 정상이다.** 같은 이름으로 처음 여는 자리에는 지울 행이 없고,
+    그때 터뜨리면 여는 것 자체가 막힌다. 몇 행이었는지는 돌려준다.
+    """
+    assert delete_sim_run_row(_대역커넥션(), sim_run_id=새실행) == 0
+
+
+@pytest.mark.parametrize("빈값", ["", "   "])
+def test_축이_비면_실행_행을_못_지운다(빈값: str) -> None:
+    """★ 어느 실행인지를 여기서 지어내지 않는다."""
+    conn = _대역커넥션(행수=_실행행있음)
+    with pytest.raises(ValueError):
+        delete_sim_run_row(conn, sim_run_id=빈값)
+
+    assert not _문장들(conn, "DELETE FROM")
+
+
+def test_장부가_남아_있으면_FK_가_막는다() -> None:
+    """🟢 **그 막힘이 자기 검사다.**
+
+    ★★ 지우기를 빠뜨린 표가 있으면 **시끄럽게** 드러난다 — 조용히 반쪽 실행이
+      서는 것보다 낫다.
+    """
+    conn = _대역커넥션(행수=_실행행있음, FK막힘=("sales", "fk_sales_sim_run"))
+    with pytest.raises(RuntimeError) as err:
+        delete_sim_run_row(conn, sim_run_id=새실행)
+
+    assert isinstance(err.value.__cause__, ForeignKeyViolation), "FK 가 막은 사실이 안 남았다"
+
+
+def test_FK_에_막히면_어느_표가_남았는지_사유에_적는다() -> None:
+    """⚠️ **제약이 들고 온 것을 읽어서 적는다.**
+
+    🔴 버리고 *"못 지웠다"* 만 남기면 사람이 어느 표가 남았는지를 다시 찾아 헤맨다.
+    """
+    conn = _대역커넥션(행수=_실행행있음, FK막힘=("sales", "fk_sales_sim_run"))
+    with pytest.raises(RuntimeError) as err:
+        delete_sim_run_row(conn, sim_run_id=새실행)
+
+    사유 = _NFC(str(err.value))
+    assert "sales" in 사유, f"어느 표가 남았는지가 없다: {사유}"
+    assert "fk_sales_sim_run" in 사유, f"제약 이름이 없다: {사유}"
+    assert _NFC(새실행) in 사유
+
+
+def test_실행_행_삭제가_커밋하지_않는다() -> None:
+    """🔴 커밋은 부르는 쪽이 한다 — 여기서 커밋하면 실행 행만 먼저 사라지고,
+    뒤이어 만들기가 터졌을 때 **설정도 기간도 없는 자리**가 남는다.
+    """
+    conn = _대역커넥션(행수=_실행행있음)
+    delete_sim_run_row(conn, sim_run_id=새실행)
+
+    assert conn.commits == 0
+
+
+def test_장부_비우기는_실행_행에_손대지_않는다() -> None:
+    """🟡 **③ 의 규율은 지금도 맞다.** 장부만 비우려는 자리에서 실행 행까지
+    날아가면 *"다시 여는 것이지 없애는 것이 아니다"* 가 거짓이 된다.
+    """
+    conn = _대역커넥션(행수=_실행행있음)
+    결과 = reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    assert RUN_TABLE not in 결과.order
+    assert RUN_TABLE not in [_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM")]
+
+
+def test_번인이면_장부_비우기에서_먼저_터진다() -> None:
+    """🔴 **번인 가드를 실행 행 삭제가 다시 만들지 않는다.**
+
+    ★★ `--reset` 은 ① 장부 비우기를 먼저 부르고 거기서 터진다 — 두 곳에서 막으면
+      언젠가 한쪽만 고쳐지고, 그때 어느 쪽이 진짜 규칙인지 아무도 못 답한다.
+      그 순서는 문(`sim_run_runner`)이 잰다.
+    """
+    conn = _대역커넥션(행수=_실행행있음)
+    with pytest.raises(ValueError) as err:
+        reset_sim_run_ledger(conn, sim_run_id=BURN_IN_SIM_RUN_ID)
+
+    assert _NFC(BURN_IN_SIM_RUN_ID) in _NFC(str(err.value))
+    assert not _문장들(conn, "DELETE FROM"), "번인에 DELETE 를 던졌다"
+
+
+def test_CASCADE_로_풀지_않는다() -> None:
+    """🔴 **`ON DELETE CASCADE` 를 달거나 FK 를 끄면 자기 검사가 사라진다.**
+
+    ⚠️ 그러면 지우기를 빠뜨린 표가 있어도 아무 소리 없이 다 지워지고, 다시 연
+      실행이 정말 빈 장부에서 출발했는지 아무도 못 답한다.
+
+    ★ **DDL 로 가는 길을 잰다.** 사유 문장에 *"CASCADE 를 달지 않는다"* 라고 적는
+      것은 막을 일이 아니다 — 조각으로 재면 그 문장이 잡혀 검사가 코드가 아니라
+      설명을 재게 된다.
+    """
+    원문 = _NFC(_벗긴_원문(_MASTER / "sim_run_open.py"))
+
+    for 금지 in (
+        "ON DELETE CASCADE",
+        "DROP CONSTRAINT",
+        "ALTER TABLE",
+        "DISABLE TRIGGER",
+        "session_replication_role",
+    ):
+        assert 금지 not in 원문, f"자기 검사를 끄는 길로 갔다: {금지}"
 
 
 # ── config_json 은 lineage 만 ──────────────────────────────────────────

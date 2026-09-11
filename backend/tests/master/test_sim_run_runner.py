@@ -1,13 +1,19 @@
 """**새 실행을 여는 문** (2026-09-10 · `#531` · `#539` · `#545` 의 후속).
 
 ```text
-① 지운다 (다시 열 때만)   reset_sim_run_ledger        ← --reset 을 줬을 때만
-② 실행 한 행              create_sim_run
-③ 시작 재무 상태          seed_opening_finance_state
-④ 시작 물류 fixture       seed_opening_logistics_fixture   ← #551
+① 장부를 지운다           reset_sim_run_ledger        ← --reset 을 줬을 때만
+② 실행 행을 지운다        delete_sim_run_row          ← --reset 을 줬을 때만
+③ 실행 한 행              create_sim_run
+④ 시작 재무 상태          seed_opening_finance_state
+⑤ 시작 물류 fixture       seed_opening_logistics_fixture   ← #551
                           ⋮
-🔴 넷이 **한 트랜잭션** — 커밋은 이 문이 한 번
+🔴 다섯이 **한 트랜잭션** — 커밋은 이 문이 한 번
 ```
+
+★★ **② 가 없으면 `--reset` 이 한 번도 안 된다.** 장부만 비우고 실행 행을 남기면
+  ③ 이 같은 이름으로 INSERT 하다 PK 에 걸린다. 🔴 그렇다고 `create_sim_run` 에
+  `ON CONFLICT` 를 붙이면 **다른 설정으로 만들려던 실행이 옛 행 위에 앉는다** —
+  그 함수가 막으려던 바로 그 사고다.
 
 🔴 **DB 를 안 탄다.** 커넥션도 넷도 전부 대역이다 — 이 판은 문을 세우는 것까지고,
    실제로 열거나 걷거나 행을 쓰거나 지우는 것은 이 판이 하지 않는다.
@@ -27,7 +33,8 @@ from typing import Any, Self
 import pytest
 
 from app.master.backfill import BackfillRuleMissing
-from app.master.sim_run_open import BaselineLineage, LedgerReset
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.sim_run_open import BaselineLineage, LedgerReset, reset_sim_run_ledger
 from app.master.sim_run_runner import (
     SimRunOpened,
     _parser,
@@ -36,6 +43,10 @@ from app.master.sim_run_runner import (
 )
 
 _문 = Path(__file__).resolve().parents[2] / "app" / "master" / "sim_run_runner.py"
+#: 실행 행을 **만드는** 파일. 🔴 `ON CONFLICT` 로 푸는 길을 여기서도 잠근다.
+_만드는파일 = Path(__file__).resolve().parents[2] / "app" / "master" / "sim_run.py"
+#: 실행 행을 **지우는** 파일. ★ 지우는 것의 주인이 한 파일이다.
+_지우는파일 = Path(__file__).resolve().parents[2] / "app" / "master" / "sim_run_open.py"
 
 새실행 = "SIM-WALK-202601"
 새조달 = "LOAN_BASELINE"
@@ -56,13 +67,13 @@ def _NFC(text: str) -> str:
     return unicodedata.normalize("NFC", text)
 
 
-def _벗긴_트리() -> ast.Module:
+def _벗긴_트리(path: Path = _문) -> ast.Module:
     """주석과 docstring 을 걷어낸 트리.
 
     🔴 **왜 걷어내나.** 이 문은 근거를 길게 적는다 — 금지어가 **설명 문장 안에**
       있어서 원문 잠금이 늘 실패하면, 그 검사는 코드가 아니라 문장을 재는 것이 된다.
     """
-    tree = ast.parse(_문.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             body = node.body
@@ -74,6 +85,10 @@ def _벗긴_트리() -> ast.Module:
             ):
                 body.pop(0)
     return tree
+
+
+def _벗긴_원문(path: Path = _문) -> str:
+    return _NFC(ast.unparse(_벗긴_트리(path)))
 
 
 # ── 대역 ───────────────────────────────────────────────────────────────
@@ -121,7 +136,7 @@ class _대역커넥션:
 
 
 class _순서기록:
-    """넷이 **언제 어떤 인자로** 불렸는지를 한 목록에 모은다."""
+    """다섯이 **언제 어떤 인자로** 불렸는지를 한 목록에 모은다."""
 
     def __init__(self) -> None:
         self.부른것: list[str] = []
@@ -129,6 +144,7 @@ class _순서기록:
         self.seed인자: dict[str, Any] = {}
         self.물류인자: dict[str, Any] = {}
         self.reset인자: dict[str, Any] = {}
+        self.실행행인자: dict[str, Any] = {}
         self.터뜨릴것: str | None = None
 
     def _터질까(self, 이름: str) -> None:
@@ -140,6 +156,12 @@ class _순서기록:
         self.reset인자 = kw
         self._터질까("reset")
         return LedgerReset(sim_run_id=kw["sim_run_id"], order=("sales",), deleted={"sales": 9})
+
+    def 실행행삭제(self, conn: Any, **kw: Any) -> int:
+        self.부른것.append("실행행삭제")
+        self.실행행인자 = kw
+        self._터질까("실행행삭제")
+        return 1
 
     def create(self, conn: Any, **kw: Any) -> str:
         self.부른것.append("create")
@@ -181,6 +203,7 @@ def _연다(**over: Any) -> tuple[_대역커넥션, _순서기록, Any]:
         "opening_fixture_id": 물류씨앗,
         "opening_usage_scope": 쓰임,
         "reset_fn": 기록.reset,
+        "delete_run_fn": 기록.실행행삭제,
         "create_fn": 기록.create,
         "seed_fn": 기록.seed,
         "logistics_seed_fn": 기록.물류,
@@ -294,6 +317,7 @@ def test_이미_있는데_reset_이_없으면_셋을_하나도_안_부른다() -
             opening_fixture_id=물류씨앗,
             opening_usage_scope=쓰임,
             reset_fn=기록.reset,
+            delete_run_fn=기록.실행행삭제,
             create_fn=기록.create,
             seed_fn=기록.seed,
             logistics_seed_fn=기록.물류,
@@ -324,17 +348,158 @@ def test_안_지웠을_때와_0행_지웠을_때가_다른_값이다() -> None:
     assert 안지움.ledger_reset is None
 
 
-# ── 🔴 넷을 이 순서로 부른다 ────────────────────────────────────────────
+# ── 🔴 --reset 이면 실행 행을 지우고 다시 넣는다 ────────────────────────
+#
+# ★★ 이것이 없어서 `--reset` 이 한 번도 성공한 적이 없다 — 장부만 비워지고 실행
+#    행이 남은 채 `create_sim_run` 이 같은 이름으로 INSERT 해 PK 에 걸린다.
 
 
-def test_넷을_이_순서로_부른다() -> None:
-    """🔴 **지우기 → 실행 행 → 시작 재무 상태 → 시작 물류 fixture.**
+def test_reset_이면_실행_행을_지운다() -> None:
+    """🔴 **장부만이 아니라 실행 행도 지운다.**
+
+    ⚠️ 안 지우면 바로 다음 INSERT 가 같은 이름의 PK 에 걸리고, 그때 `--reset` 은
+      **한 번도 성공하지 못한다.**
+    """
+    _, 기록, opened = _연다(reset=True, 이미있다=True)
+
+    assert "실행행삭제" in 기록.부른것, "🔴 --reset 인데 실행 행을 안 지운다"
+    assert 기록.실행행인자 == {"sim_run_id": 새실행}
+    assert opened.deleted_run_rows == 1
+
+
+def test_reset_이_아니면_실행_행을_안_지운다() -> None:
+    """🔴 **지우는 것은 `--reset` 이 정한다.**
+
+    ⚠️ 기본으로 지우면 *"열려고 했다가 이름이 겹쳤다"* 가 **남의 실행을 없앤 일**이
+      되고, 되돌릴 곳이 없다. 기본은 「이미 있다」로 막는 것이다.
+    """
+    _, 기록, opened = _연다()
+
+    assert "실행행삭제" not in 기록.부른것, "🔴 --reset 도 없이 실행 행을 지운다"
+    assert 기록.실행행인자 == {}
+    assert opened.deleted_run_rows is None
+
+
+def test_실행_행을_지우는_것이_만들기보다_먼저다() -> None:
+    """🔴 **순서가 「지우기 → 실행 행 삭제 → 만들기」다.**
+
+    ⚠️ 만들기 뒤로 옮기면 INSERT 가 먼저 PK 에 걸리고, 설사 걸리지 않더라도
+      **방금 만든 행을 다시 지우는 것**이 된다.
+    """
+    _, 기록, _ = _연다(reset=True, 이미있다=True)
+
+    assert 기록.부른것.index("실행행삭제") < 기록.부른것.index("create")
+    assert 기록.부른것.index("reset") < 기록.부른것.index("실행행삭제")
+
+
+def test_create_에_ON_CONFLICT_로_풀지_않는다() -> None:
+    """🔴 **그 길로 가면 안 된다.**
+
+    ★★ 조용히 넘기면 **다른 설정으로 만들려던 실행**이 옛 행 위에 앉고, 그 뒤의
+      179일이 어느 설정으로 걸린 것인지 아무도 못 답한다 — `create_sim_run` 이
+      `ON CONFLICT` 를 안 붙인 이유가 그것이다. 문도 같은 길로 안 간다.
+
+    ⚠️ **`create_sim_run` 원문까지 잰다.** 문만 재면 그 함수에 한 줄 붙여 푸는
+      뮤턴트가 살아남는다.
+    """
+    for 파일, 어디 in ((_문, "문"), (_만드는파일, "create_sim_run")):
+        원문 = _벗긴_원문(파일)
+        for 금지 in ("ON CONFLICT", "DO NOTHING", "DO UPDATE", "ON DUPLICATE"):
+            assert 금지 not in 원문, f"{어디} 가 겹친 이름을 조용히 덮는다: {금지}"
+
+
+def test_실행_행_삭제가_지우는_파일의_것이다() -> None:
+    """🔴 **지우는 것의 주인이 한 파일이다.**
+
+    ★ 문이 제 손으로 `DELETE` 를 던지면 지우는 규율이 두 곳으로 갈린다 — 표 목록도
+      순서도 FK 자기 검사도 `sim_run_open` 이 든다.
+    """
+    문원문 = _벗긴_원문()
+
+    assert "delete_sim_run_row" in 문원문, "🔴 문이 지우는 함수를 안 부른다"
+    assert "DELETE FROM" not in 문원문, "문이 제 손으로 지운다"
+
+
+def test_번인이면_실행_행_삭제까지_안_간다() -> None:
+    """🔴 **번인은 여전히 막힌다.**
+
+    ★★ **진짜 가드를 쓴다** — 대역으로 막으면 *"문이 번인을 막는다"* 가 아니라
+      *"대역이 막는다"* 를 재게 된다. `reset_sim_run_ledger` 의 번인 거부는 커서를
+      열기 전에 서므로 이 판이 DB 를 안 타고도 진짜 가드를 부를 수 있다.
+
+    🔴 번인에 **기초 상태가 있다** — 실행 행까지 지우면 모든 실행의 출발점이
+      사라지고, 그것을 되살릴 곳이 저장소에 없다.
+    """
+    conn = _대역커넥션(이미있다=True)
+    기록 = _순서기록()
+    with pytest.raises(ValueError) as err:
+        open_sim_run(
+            conn,
+            sim_run_id=BURN_IN_SIM_RUN_ID,
+            company_persona_id="PERSONA-HAETDEUL",
+            run_type="WALK",
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 6, 29),
+            as_of=date(2026, 1, 1),
+            status="RUNNING",
+            financing_mode=새조달,
+            baseline=계보,
+            opening_finance_state_id=시작상태,
+            opening_state_date=date(2026, 1, 1),
+            opening_state_type="OPENING",
+            opening_fixture_id=물류씨앗,
+            opening_usage_scope=쓰임,
+            reset=True,
+            # 🔴 **진짜 번인 가드다.** 대역이 아니다.
+            reset_fn=reset_sim_run_ledger,
+            delete_run_fn=기록.실행행삭제,
+            create_fn=기록.create,
+            seed_fn=기록.seed,
+            logistics_seed_fn=기록.물류,
+        )
+
+    assert _NFC(BURN_IN_SIM_RUN_ID) in _NFC(str(err.value))
+    assert 기록.부른것 == [], "🔴 번인인데 실행 행 삭제까지 갔다"
+    assert conn.commits == 0
+
+
+def test_실행_행_삭제가_장부_비우기_안에_안_들어간다() -> None:
+    """🟡 **`reset_sim_run_ledger` 안에 넣지 않는다.**
+
+    ★★ 그 함수의 규율은 *"다시 여는 것이지 없애는 것이 아니다"* 이고, **장부
+      비우기에 대해서는 지금도 맞다** — 장부만 비우려는 자리에서 실행 행까지
+      날아가면 그 말이 거짓이 된다. 실행 행을 지우는 것은 `--reset` 이 정한다.
+    """
+    지우는트리 = _벗긴_트리(_지우는파일)
+    장부비우기 = next(
+        node
+        for node in ast.walk(지우는트리)
+        if isinstance(node, ast.FunctionDef) and node.name == "reset_sim_run_ledger"
+    )
+    맨위함수 = [node.name for node in 지우는트리.body if isinstance(node, ast.FunctionDef)]
+
+    assert "delete_sim_run_row" in 맨위함수, "🔴 실행 행을 지우는 함수가 지우는 파일에 없다"
+    본체 = ast.unparse(장부비우기)
+    for 금지 in ("delete_sim_run_row", "RUN_TABLE"):
+        assert 금지 not in 본체, (
+            f"🔴 장부 비우기가 실행 행까지 건드린다 ({금지})"
+            " — 그 함수는 다시 여는 것이지 없애는 것이 아니다"
+        )
+
+
+# ── 🔴 다섯을 이 순서로 부른다 ──────────────────────────────────────────
+
+
+def test_다섯을_이_순서로_부른다() -> None:
+    """🔴 **장부 지우기 → 실행 행 삭제 → 실행 행 → 시작 재무 상태 → 시작 물류 fixture.**
 
     ⚠️ 실행 행이 서야 시작 상태가 그 축을 가리킬 수 있다 —
       `finance_states.sim_run_id` 가 `sim_runs` 를 참조하는 FK 다.
+
+    ⚠️ 실행 행 삭제가 만들기 뒤로 가면 INSERT 가 먼저 PK 에 걸린다.
     """
     _, 기록, _ = _연다(reset=True, 이미있다=True)
-    assert 기록.부른것 == ["reset", "create", "seed", "물류"]
+    assert 기록.부른것 == ["reset", "실행행삭제", "create", "seed", "물류"]
 
 
 def test_reset_없이도_실행_행이_시작_상태보다_먼저다() -> None:
@@ -441,12 +606,15 @@ def test_다_되면_커밋을_한_번_부른다() -> None:
     assert conn.rollbacks == 0
 
 
-@pytest.mark.parametrize("터진곳", ["reset", "create", "seed", "물류"])
+@pytest.mark.parametrize("터진곳", ["reset", "실행행삭제", "create", "seed", "물류"])
 def test_중간에_터지면_롤백하고_커밋을_안_부른다(터진곳: str) -> None:
     """🔴 **반쪽 실행을 남기지 않는다.**
 
     ⚠️ 실행 행만 서고 시작 상태가 없으면 첫날 마감이 baseline 을 못 찾는다.
       장부만 지워지고 시작 상태 적재가 터지면 **출발점 없는 빈 실행**이 남는다.
+
+    ★★ **실행 행 삭제가 FK 에 막히는 자리도 여기다** — 장부를 다 안 지웠으면 그
+      삭제가 터지고, 그때 지워진 장부가 그대로 남으면 안 된다.
     """
     conn = _대역커넥션(이미있다=True)
     기록 = _순서기록()
@@ -470,6 +638,7 @@ def test_중간에_터지면_롤백하고_커밋을_안_부른다(터진곳: str
             opening_usage_scope=쓰임,
             reset=True,
             reset_fn=기록.reset,
+            delete_run_fn=기록.실행행삭제,
             create_fn=기록.create,
             seed_fn=기록.seed,
             logistics_seed_fn=기록.물류,
@@ -576,6 +745,7 @@ def test_대역을_운영_경로에_안_심는다() -> None:
     기본값 = dict(zip(이름들, 문.args.kw_defaults, strict=True))
     for 자리, 본체 in (
         ("reset_fn", "reset_sim_run_ledger"),
+        ("delete_run_fn", "delete_sim_run_row"),
         ("create_fn", "create_sim_run"),
         ("seed_fn", "seed_opening_finance_state"),
         ("logistics_seed_fn", "seed_opening_logistics_fixture"),
@@ -638,6 +808,31 @@ def test_요약이_안_지웠다는_사실을_적는다() -> None:
     )
     assert _NFC("안 지웠다") in _NFC(안지움)
     assert _NFC("지웠다 (--reset)") in _NFC(지움)
+
+
+def test_요약이_실행_행을_지웠다는_사실을_적는다() -> None:
+    """🔴 **장부와 같은 결로 실행 행도 적는다.**
+
+    ★★ 안 적으면 사람이 *"다시 열었다"* 와 *"처음 열었다"* 를 요약에서 못 가른다 —
+      같은 이름의 실행이 여섯 개 쌓인 뒤에 그것을 되짚을 방법이 없다.
+    """
+    공통: dict[str, Any] = {
+        "sim_run_id": 새실행,
+        "financing_mode": 새조달,
+        "baseline": 계보,
+        "opening_finance_state_id": 시작상태,
+        "opening_logistics_fixture_id": 물류씨앗,
+        "period_start": date(2026, 1, 1),
+        "period_end": date(2026, 6, 29),
+        "ledger_reset": None,
+    }
+    안지움 = _NFC(format_summary(SimRunOpened(**공통)))
+    지움 = _NFC(format_summary(SimRunOpened(**공통, deleted_run_rows=1)))
+
+    assert _NFC("실행행") in 지움, "🔴 실행 행 줄이 요약에 없다"
+    assert _NFC("지우고 다시 넣었다 (--reset) — 1행") in 지움
+    assert _NFC("실행 행에 손대지 않았다") in 안지움
+    assert _NFC("지우고 다시 넣었다") not in 안지움
 
 
 # ── 🔴 백필 규칙을 문에서 받아 그대로 싣는다 (2026-09-11) ───────────────
@@ -716,6 +911,7 @@ def test_모르는_규칙이면_한_행도_안_세운다() -> None:
             opening_usage_scope=쓰임,
             backfill_rules={"모르는칸": {}},
             reset_fn=기록.reset,
+            delete_run_fn=기록.실행행삭제,
             create_fn=기록.create,
             seed_fn=기록.seed,
             logistics_seed_fn=기록.물류,

@@ -6,6 +6,7 @@ BaselineLineage                    어느 실행의 어느 상태에서 출발�
 seed_opening_finance_state         새 실행의 **시작 재무 상태**를 만든다
 seed_opening_logistics_fixture     새 실행의 **시작 물류 fixture** 를 만든다
 reset_sim_run_ledger               다시 열 때 그 실행의 **장부를 지운다**
+delete_sim_run_row                 다시 열 때 그 실행의 **행 자체를 지운다**
 ```
 
 ★ 실행 행 자체를 만드는 것은 `sim_run.create_sim_run` 이다 (`#531`). 이 파일은
@@ -130,6 +131,45 @@ DELETE FROM <축을 가진 표> WHERE sim_run_id = <그 실행>
 
 ---
 
+## 🔴 실행 행을 지우는 것은 **`reset_sim_run_ledger` 밖의 별개 일**이다
+
+```text
+--reset 일 때   ① 장부를 지운다   reset_sim_run_ledger
+                ② 실행 행을 지운다 delete_sim_run_row     ← 이 파일의 새 자리
+                ③ 실행 행을 넣는다 create_sim_run         (ON CONFLICT 없이 그대로)
+```
+
+★★ **왜 `reset_sim_run_ledger` 안이 아닌가.** 그 함수의 규율은 *"다시 여는 것이지
+  없애는 것이 아니다"* 이고, **장부 비우기에 대해서는 지금도 맞다** — 장부만 비우고
+  싶은 자리에서 실행 행까지 날아가면 그 말이 거짓이 된다. 실행 행을 지우는 것은
+  `--reset` 이 정하는 일이지 장부 비우기가 정하는 일이 아니다.
+
+★ **그런데도 같은 파일이다.** 지우는 것의 주인이 한 파일에 모여야 *"무엇을 지우면
+  무엇이 사라지나"* 를 한 자리에서 읽는다.
+
+🔴 **`create_sim_run` 에 `ON CONFLICT` 를 붙여 푸는 길로 가지 않는다.** 그러면
+   **다른 설정으로 만들려던 실행**이 옛 행 위에 조용히 앉고, 그 뒤의 179일이 어느
+   설정으로 걸린 것인지 아무도 못 답한다 — `create_sim_run` 이 막으려던 바로 그
+   사고다. 지우고 다시 넣으면 새 설정이 **새 행으로** 선다.
+
+### ★★ 이 삭제가 **자기 검사**다
+
+`sim_runs.sim_run_id` 를 가리키는 FK 가 여럿이다. 장부를 다 안 지웠으면 이 삭제가
+**FK 로 막힌다** — 그것이 좋은 성질이다. 지우기를 빠뜨린 표가 있으면 **시끄럽게**
+드러나고, 조용히 반쪽 실행이 서는 것보다 낫다.
+
+🔴 **`ON DELETE CASCADE` 로 풀지 않는다** (FK 를 끄는 것도 아니다) — 그러면 이
+   자기 검사가 사라지고, 빠뜨린 표가 있어도 아무 소리 없이 다 지워진다.
+
+⚠️ **막히면 「어느 표가 남았나」를 사유에 적는다.** 예외가 제약 이름과 남은 표를
+  들고 오므로, 그것을 버리고 *"못 지웠다"* 만 남기면 사람이 다시 찾아 헤맨다.
+
+🔴 **번인 가드를 여기서 다시 만들지 않는다.** `--reset` 은 ① 을 먼저 부르고,
+   `reset_sim_run_ledger` 가 번인이면 거기서 이미 터진다 — 두 곳에서 막으면
+   언젠가 한쪽만 고쳐지고, 그때 어느 쪽이 진짜 규칙인지 아무도 못 답한다.
+
+---
+
 🔴 **commit 하지 않는다.** 커밋은 부르는 쪽이 한다 — `create_sim_run` 과 같다.
    여기서 커밋하면 장부만 먼저 지워지고, 뒤이어 시작 상태 적재가 터졌을 때
    **출발점 없는 빈 실행**이 남는다.
@@ -143,6 +183,7 @@ from datetime import date
 from typing import Any
 
 from psycopg import sql
+from psycopg.errors import ForeignKeyViolation
 
 from app.finance.db import get_db_schema
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
@@ -155,6 +196,7 @@ __all__ = [
     "RUN_TABLE",
     "BaselineLineage",
     "LedgerReset",
+    "delete_sim_run_row",
     "reset_sim_run_ledger",
     "seed_opening_finance_state",
     "seed_opening_logistics_fixture",
@@ -163,7 +205,13 @@ __all__ = [
 #: 실행 축이 실리는 칸 이름. 이 칸을 가진 표가 곧 **지울 대상**이다.
 AXIS_COLUMN = "sim_run_id"
 
-#: 실행 자체가 사는 표. 🔴 **지우는 대상이 아니다** — 다시 여는 것이지 없애는 것이 아니다.
+#: 실행 자체가 사는 표.
+#:
+#: 🔴 **장부를 지울 때는 대상이 아니다** — 다시 여는 것이지 없애는 것이 아니다.
+#:   `reset_sim_run_ledger` 가 이 표를 목록에서 뺀다.
+#:
+#: ★ 다시 열 때 이 행을 지우고 새로 넣는 것은 `delete_sim_run_row` 가 따로 한다
+#:   (모듈 docstring) — `--reset` 이 정하는 일이지 장부 비우기가 정하는 일이 아니다.
 RUN_TABLE = "sim_runs"
 
 #: 시작 재무 상태가 사는 표.
@@ -530,6 +578,61 @@ def reset_sim_run_ledger(conn: Any, *, sim_run_id: str) -> LedgerReset:
             #    *"지울 것이 없었다"* 가 같아진다.
             지운수[표] = cursor.rowcount
     return LedgerReset(sim_run_id=sim_run_id, order=순서, deleted=지운수)
+
+
+# ── ③' 실행 행을 지운다 ────────────────────────────────────────────────
+
+
+def delete_sim_run_row(conn: Any, *, sim_run_id: str) -> int:
+    """다시 열 때 그 실행의 **행 자체를 지운다**. 지운 행 수를 돌려준다.
+
+    ★★ **`reset_sim_run_ledger` 와 별개다.** 그 함수는 장부만 비우고 이 표에는
+      손대지 않는다 — 실행 행을 지우는 것은 `--reset` 이 정하는 일이다
+      (모듈 docstring).
+
+    🔴 **`create_sim_run` 에 `ON CONFLICT` 를 붙이는 대신 이것을 쓴다.** 조용히
+       덮으면 다른 설정으로 만들려던 실행이 옛 행 위에 앉는다.
+
+    ★ **0 행도 정상이다.** 같은 이름으로 처음 여는 자리에서는 지울 행이 없고,
+      그때 *"못 지웠다"* 고 말하면 여는 것이 막힌다. 몇 행이었는지는 돌려준다.
+
+    ★ **번인을 여기서 다시 막지 않는다** — `--reset` 이 부르는 ① 이
+      `reset_sim_run_ledger` 이고 거기서 이미 터진다.
+
+    :raises ValueError: 축이 비었을 때. **어느 실행인지를 지어내지 않는다.**
+    :raises RuntimeError: 장부가 남아 FK 가 막을 때. 🟢 **그 막힘이 자기 검사다** —
+        사유에 **어느 표가 남았는지**와 제약 이름을 적는다.
+    """
+    if not sim_run_id or not sim_run_id.strip():
+        raise ValueError("sim_run_id 없이 실행 행을 지울 수 없다 — 어느 실행인지를 지어내지 않는다")
+
+    schema = get_db_schema()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("DELETE FROM {}.{} WHERE {} = %s").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(RUN_TABLE),
+                    sql.Identifier(AXIS_COLUMN),
+                ),
+                [sim_run_id],
+            )
+            지운수 = cursor.rowcount
+    except ForeignKeyViolation as exc:
+        # 🟢 **여기서 막히는 것이 옳다.** 장부를 다 안 지웠다는 뜻이고, 그것을
+        #    `ON DELETE CASCADE` 로 풀면 이 자기 검사가 사라진다.
+        #
+        # 🔴 **남은 표를 사유에 적는다.** 버리고 *"못 지웠다"* 만 남기면 사람이
+        #    어느 표가 남았는지를 다시 찾아 헤맨다.
+        진단 = getattr(exc, "diag", None)
+        raise RuntimeError(
+            f"실행 {sim_run_id!r} 의 행을 못 지웠다 — 그 실행의 장부가 남아 있다:"
+            f" 표 {getattr(진단, 'table_name', None)!r}"
+            f" · 제약 {getattr(진단, 'constraint_name', None)!r}"
+            f" ({exc})"
+            " — 남은 표를 지우는 것이 먼저다. FK 를 끄거나 CASCADE 를 달지 않는다"
+        ) from exc
+    return int(지운수)
 
 
 def _axis_tables(cursor: Any, *, schema: str) -> tuple[str, ...]:

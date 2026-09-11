@@ -1,4 +1,4 @@
-"""새 실행을 여는 문 — **넷을 한 트랜잭션으로 부른다.**
+"""새 실행을 여는 문 — **다섯을 한 트랜잭션으로 부른다.**
 
 ```text
 python -m app.master.sim_run_runner
@@ -15,6 +15,7 @@ sim_run.create_sim_run                        실행 한 행              (#531)
 sim_run_open.seed_opening_finance_state       시작 재무 상태          (#545)
 sim_run_open.seed_opening_logistics_fixture   시작 물류 fixture       (#551)
 sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (#545)
+sim_run_open.delete_sim_run_row               다시 열 때 실행 행 삭제
 ```
 
 `#545` 는 **일부러** 진입점을 안 만들었다 — *"돌리는 문은 별도 판이다."* 이 파일이
@@ -24,13 +25,14 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
 
 ## 🔴 판단을 여기서 새로 만들지 않는다
 
-이 문이 하는 일은 **넷을 순서대로 부르는 것**뿐이다.
+이 문이 하는 일은 **다섯을 순서대로 부르는 것**뿐이다.
 
 ```text
 정합성 셋 (출발점이 있는가 · 실행 축이 맞는가 · 조달 방식이 같은가)
                                     → seed_opening_finance_state 안에 있다
 번인 실행 거부                        → reset_sim_run_ledger 안에 있다
 지울 표 목록 · 지우는 순서             → reset_sim_run_ledger 안에 있다
+장부가 남았는지 (FK 자기 검사)          → delete_sim_run_row 안에 있다
 ```
 
 ⚠️ **두 곳에서 막으면 언젠가 한쪽만 고쳐진다.** 그때 어느 쪽이 진짜 규칙인지
@@ -63,7 +65,7 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
 
 ```text
 기본        실행이 이미 있으면 **터진다** · 아무것도 안 지운다
---reset     그때만 장부를 지우고 다시 연다
+--reset     그때만 ① 장부를 지우고 ② 실행 행을 지우고 ③ 다시 넣는다
 ```
 
 ⚠️ **지우는 것은 되돌릴 수 없다.** `backfill_runner` 의 `--commit` 과 같은 규율이다 —
@@ -71,6 +73,21 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
 
 🔴 `--reset` 이어도 **번인 실행이면 거부된다** — `reset_sim_run_ledger` 가 이미 막는다.
    여기서 다시 검사하지 않는다.
+
+### 🔴 **실행 행을 지우고 다시 넣는다** — `ON CONFLICT` 로 풀지 않는다
+
+★★ 장부만 지우고 실행 행을 남기면 `create_sim_run` 이 같은 이름으로 INSERT 하다
+  **PK 에 걸린다.** 그래서 `--reset` 이 한 번도 성공한 적이 없었다.
+
+```text
+❌ create_sim_run 에 ON CONFLICT 를 붙인다
+   → **다른 설정으로 만들려던 실행**이 옛 행 위에 조용히 앉고,
+     그 뒤의 179일이 어느 설정으로 걸린 것인지 아무도 못 답한다
+🟢 실행 행을 지우고 새로 넣는다 → 새 설정이 **새 행으로** 선다
+```
+
+⚠️ 그 삭제는 **장부를 다 지웠는지에 대한 자기 검사**이기도 하다 — 남은 표가 있으면
+  FK 가 막고, 사유에 어느 표가 남았는지가 적힌다 (`delete_sim_run_row`).
 
 ---
 
@@ -80,9 +97,10 @@ sim_run_open.reset_sim_run_ledger             다시 열 때 장부 비우기  (
   적어 뒀다). **부르는 쪽이 하는 것**이고, 지금까지 부르는 쪽이 없었다.
 
 ```text
-🔴 넷이 **한 트랜잭션**이다
+🔴 다섯이 **한 트랜잭션**이다
    실행 행만 서고 시작 상태가 없으면 첫날 마감이 baseline 을 못 찾는다
    장부만 지워지고 시작 상태 적재가 터지면 **출발점 없는 빈 실행**이 남는다
+   실행 행만 지워지고 다시 안 서면 **설정도 기간도 없는 자리**가 남는다
 ```
 
 ⚠️ 중간에 터지면 **롤백한다.** 반쪽 실행을 남기지 않는다.
@@ -169,6 +187,7 @@ from app.master.sim_run_open import (
     RUN_TABLE,
     BaselineLineage,
     LedgerReset,
+    delete_sim_run_row,
     reset_sim_run_ledger,
     seed_opening_finance_state,
     seed_opening_logistics_fixture,
@@ -202,6 +221,12 @@ class SimRunOpened:
     #: 지운 결과. 🔴 **`None` 은 「안 지웠다」** — `--reset` 을 안 줬다는 뜻이다.
     #: 0 행을 지운 것과 아예 안 지운 것을 같은 값으로 적지 않는다.
     ledger_reset: LedgerReset | None
+    #: 실행 행을 몇 행 지웠나. 🔴 **`None` 은 「안 지웠다」** — `--reset` 을 안 줬다는
+    #: 뜻이고, `0` 은 *"지우려 했는데 그 이름의 행이 없었다"* 다.
+    #:
+    #: ★ **장부와 따로 든다.** 장부는 비웠는데 실행 행이 안 지워졌으면 다음 INSERT 가
+    #:   PK 에 걸리고, 그 둘을 한 값에 뭉치면 어느 쪽이 안 된 것인지 못 가른다.
+    deleted_run_rows: int | None = None
     #: 실행 행에 실은 백필 규칙. 🔴 **`None` 은 「안 실었다」** — 그 실행은
     #: `--auto-approve` 로 걸을 수 없다 (걷기가 걷기 전에 막는다).
     #:
@@ -230,11 +255,12 @@ def open_sim_run(
     reset: bool = False,
     note: str | None = None,
     reset_fn: Callable[..., LedgerReset] = reset_sim_run_ledger,
+    delete_run_fn: Callable[..., int] = delete_sim_run_row,
     create_fn: Callable[..., str] = create_sim_run,
     seed_fn: Callable[..., str] = seed_opening_finance_state,
     logistics_seed_fn: Callable[..., str] = seed_opening_logistics_fixture,
 ) -> SimRunOpened:
-    """실행을 연다. **넷을 순서대로 부르고 한 번 커밋한다.**
+    """실행을 연다. **다섯을 순서대로 부르고 한 번 커밋한다.**
 
     :param baseline: 🔴 **호출자가 `financing_mode` 와 함께 명시한다** — 한쪽을 보고
         다른 쪽을 고르지 않는다 (모듈 docstring · 재무 청함).
@@ -244,8 +270,11 @@ def open_sim_run(
     :param backfill_rules: 그 실행이 쓸 백필 규칙 (2026-09-11). 🔴 **어휘의 주인은
         부서다** — 이 문은 규칙 이름도 라벨도 축 이름도 모르고, 받은 것을 그대로
         `config_json` 에 싣는다. 안 주면 그 칸이 아예 안 선다.
-    :param reset: 🔴 **기본이 거짓이다.** 거짓이면 지우는 함수를 **한 번도 안 부른다.**
+    :param reset: 🔴 **기본이 거짓이다.** 거짓이면 지우는 함수 **둘 다 한 번도 안
+        부른다** — 장부도 실행 행도 그대로 둔다.
     :raises ValueError: 실행이 이미 있는데 `reset` 을 안 줬을 때. **조용히 덮지 않는다.**
+    :raises RuntimeError: `reset` 인데 장부가 남아 실행 행 삭제가 FK 에 막힐 때
+        (`delete_sim_run_row`). 🟢 **그 막힘이 자기 검사다.**
     :raises BackfillRuleMissing: `backfill_rules` 가 아는 모양이 아닐 때.
         🔴 **여는 자리에서 터진다** — 179일을 걷고 나서 알면 늦다.
     """
@@ -257,9 +286,21 @@ def open_sim_run(
         #    그 축을 가리킬 수 있다 (`finance_states.sim_run_id` 가 `sim_runs` 를
         #    참조하는 FK 다 — 뒤집으면 FK 가 막는다).
         #
-        # 🔴 **이 한 줄이 「지운다 / 안 지운다」가 갈리는 유일한 자리다.**
+        # 🔴 **이 한 자리가 「지운다 / 안 지운다」가 갈리는 유일한 곳이다.**
         #    거짓 쪽으로 서 있는 한 지우는 함수는 이름조차 안 불린다.
-        ledger_reset = reset_fn(conn, sim_run_id=sim_run_id) if reset else None
+        ledger_reset: LedgerReset | None = None
+        deleted_run_rows: int | None = None
+        if reset:
+            ledger_reset = reset_fn(conn, sim_run_id=sim_run_id)
+            # 🔴 **장부를 지운 다음, 만들기 전이다.** 실행 행이 남아 있으면 바로
+            #    아래 INSERT 가 같은 이름의 PK 에 걸린다 — `--reset` 이 한 번도
+            #    성공한 적이 없던 이유가 그것이다.
+            #
+            # ⚠️ **`ON CONFLICT` 로 풀지 않는다** (모듈 docstring) — 조용히 덮으면
+            #   다른 설정으로 만들려던 실행이 옛 행 위에 앉는다.
+            #
+            # 🟢 장부를 다 안 지웠으면 **이 줄이 FK 에 막힌다.** 그것이 자기 검사다.
+            deleted_run_rows = delete_run_fn(conn, sim_run_id=sim_run_id)
 
         create_fn(
             conn,
@@ -317,6 +358,7 @@ def open_sim_run(
         period_start=period_start,
         period_end=period_end,
         ledger_reset=ledger_reset,
+        deleted_run_rows=deleted_run_rows,
         backfill_rules=backfill_rules,
     )
 
@@ -438,7 +480,10 @@ def _parser() -> argparse.ArgumentParser:
         "--reset",
         action="store_true",
         default=False,
-        help="🔴 그 실행의 장부를 지우고 다시 연다 · 되돌릴 수 없다 · 안 주면 한 행도 안 지운다",
+        help=(
+            "🔴 그 실행의 장부를 지우고 **실행 행도 지운 뒤** 같은 이름으로 다시 연다"
+            " · 되돌릴 수 없다 · 안 주면 한 행도 안 지운다"
+        ),
     )
     parser.add_argument("--note", default=None, help="실행 행에 남길 메모 (선택)")
     return parser
@@ -457,6 +502,16 @@ def format_summary(opened: SimRunOpened) -> str:
             f"🔴 지웠다 (--reset) — {opened.ledger_reset.total_deleted}행"
             f" · {dict(sorted(opened.ledger_reset.deleted.items()))}"
         )
+    )
+    # 🔴 **실행 행을 지웠다는 사실도 장부와 같은 결로 적는다.** 안 적으면 사람이
+    #    *"다시 열었다"* 와 *"처음 열었다"* 를 요약에서 못 가른다.
+    #
+    # ★ **장부 줄에 뭉치지 않는다.** 장부는 비웠는데 실행 행이 안 지워진 상태가
+    #   따로 있고, 한 줄로 합치면 그때 무엇이 안 됐는지가 안 보인다.
+    실행행 = (
+        "🟢 안 지웠다 — 실행 행에 손대지 않았다"
+        if opened.deleted_run_rows is None
+        else f"🔴 지우고 다시 넣었다 (--reset) — {opened.deleted_run_rows}행"
     )
     # 🔴 **「규칙을 실었나」를 요약이 말한다.** 안 실은 실행은 `--auto-approve` 로
     #    못 걷고, 그 사실을 여기서 안 보이면 사람이 두 번째 명령에서야 알게 된다.
@@ -477,6 +532,7 @@ def format_summary(opened: SimRunOpened) -> str:
             f"시작상태  {opened.opening_finance_state_id}",
             f"물류씨앗  {opened.opening_logistics_fixture_id}",
             f"장부      {지움}",
+            f"실행행    {실행행}",
             f"백필규칙  {규칙}",
             "",
             "🟡 열었다. 걷지는 않았다 — 걸으려면 다음을 부른다:",
