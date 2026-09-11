@@ -41,7 +41,7 @@ export function RunPicker({ asOf }: { asOf: string }) {
           onKeyDown={(event) => {
             if (event.key === "Enter") setSimRun(draft);
           }}
-          placeholder="예: SIM-WALK-2026-V4"
+          placeholder="실행 ID 를 입력하세요"
           spellCheck={false}
           className="w-[260px] rounded-md border px-2 py-1 font-mono text-[11px]"
           style={{ borderColor: "var(--color-hair)" }}
