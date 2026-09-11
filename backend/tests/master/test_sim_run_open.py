@@ -1111,6 +1111,13 @@ def test_FK_모양을_pg_constraint_에서_읽는다() -> None:
     for 조각 in ("conkey", "confkey", "pg_attribute", "WITH ORDINALITY"):
         assert 조각 in 관계질의[0], f"FK 모양을 안 읽는다: {조각}"
 
+    # 🔴 **짝 순서로 풀어야 한다.** `conkey` 와 `confkey` 는 서로 짝이 맞는 순서로
+    #   들어 있다. 이름순 같은 다른 순서로 풀면 두 칸이 **뒤바뀐 채** 짝지어지고,
+    #   그러면 `(run_id, request_id)` 가 `(request_id, run_id)` 를 가리키게 된다 —
+    #   대역은 SQL 을 안 돌리니 여기서 문장으로 잠근다.
+    for 순서절 in ("ORDER BY child_key.ord", "ORDER BY parent_key.ord"):
+        assert 순서절 in 관계질의[0], f"FK 칸을 짝 순서로 안 푼다: {순서절}"
+
 
 def test_결과에_축_없는_자식의_행수가_남는다() -> None:
     """🟢 **무엇이 얼마나 지워졌는지가 성적표에 남아야 한다.**"""
