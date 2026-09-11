@@ -50,7 +50,7 @@ from typing import Any
 
 import pytest
 
-from app.master import revalidation, wiring
+from app.master import revalidation, sales_approval, wiring
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 
 #: 재검증이 서는 날. 두 실행이 **같은 날 같은 회차**로 돌아야 ② 가 축만 잰다.
@@ -146,13 +146,25 @@ def test_두_다른_실행이_각각_자기_축으로_돈다(부서들):
     )
 
 
-def test_축은_기본값_없는_키워드다():
+@pytest.mark.parametrize(
+    "함수",
+    #: ★ **재검증만이 아니다.** 확정 쪽 둘을 같이 잠근다 — `sales_approval` 이
+    #:   축을 `sales` INSERT 에 그대로 싣는 자리라, 거기 기본값이 생기면 일어난 적
+    #:   없는 판매가 번인 장부에 쌓인다.
+    [
+        revalidation.revalidate_scenario,
+        sales_approval.confirm_approved_sale,
+        sales_approval._confirmation_input,
+    ],
+    ids=["revalidate_scenario", "confirm_approved_sale", "_confirmation_input"],
+)
+def test_축은_기본값_없는_키워드다(함수):
     """★ `as_of` 와 **같은 규율이다** — 기본값은 곧 업무 규칙이 된다.
 
     🔴 기본값이 생기면 안 넘긴 자리가 조용히 그 값(번인)으로 돌고, 아무 데도 안
       적힌다. 안 넘기면 **터져야** 그 자리를 그날 안다.
     """
-    param = inspect.signature(revalidation.revalidate_scenario).parameters["sim_run_id"]
+    param = inspect.signature(함수).parameters["sim_run_id"]
 
     assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
         f"sim_run_id 가 키워드 전용이 아니다: {param}"
