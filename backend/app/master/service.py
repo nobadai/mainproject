@@ -33,6 +33,7 @@ from app.master.holiday_calendar import get_calendar
 from app.master.inputs import (
     DEFAULT_GRADE,
     REQUEST_GRADE,
+    SALES_TARGET_KIND,
     MasterInputs,
     SourcedInput,
     collect_inputs,
@@ -450,7 +451,11 @@ def _sales_forecast(request: SalesRunRequest) -> SourcedInput:
             note="품목이 없어 ML 예측을 읽지 않았다",
         )
     try:
-        return load_forecast(request.item, request.as_of)
+        # 🔴 **중도매 계열이다. 경매가 아니다** (2026-09-11 · 걷기 실측).
+        #   전 판은 매입과 같은 경매가를 읽어 **경매가로 사서 경매가로 팔았다** —
+        #   `SIM-CHAIN-V3` 1~3월에서 `SALES_MARGIN_BELOW_MINIMUM` 이 511건 중 483건.
+        #   왜 중도매인지는 `inputs.SALES_TARGET_KIND` 한 자리에 적혀 있다.
+        return load_forecast(request.item, request.as_of, target_kind=SALES_TARGET_KIND)
     except Exception as exc:
         # ★ 조회 실패가 판매 실행을 막지 않는다. 다만 조용히 넘어가지도 않는다 —
         #   `_approved_commitments` 와 같은 자리다.
