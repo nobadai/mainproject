@@ -53,6 +53,7 @@ source_order_id  REQ-DAILY-SALES-{실행}-{날짜}-{품목}   ← 업무 축 (�
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -85,8 +86,31 @@ class 확정_대역:
         class _결과:
             sale_id = "SALE-1"
             sale_item_id = "SI-SALE-1-1"
+            #: 🔴 확정 뒤 예약이 읽는 두 칸 (2026-09-12).
+            item_id = "ITEM-BAECHU"
+            quantity_kg = Decimal(309)
 
         return _결과()
+
+
+class 예약_대역:
+    """`reserve_confirmed_sale_available` 대역. **요구량만큼 잡았다고 답한다.**"""
+
+    def __init__(self) -> None:
+        self.호출: list[Any] = []
+
+    def __call__(self, conn: Any, request: Any) -> Any:
+        self.호출.append(request)
+        요구 = Decimal(str(request.quantity_kg))
+
+        class _예약:
+            applied = True
+            reservation_id = request.reservation_id
+            status = "ACTIVE"
+            required_qty_kg = 요구
+            reserved_qty_kg = 요구
+
+        return _예약()
 
 
 class 커넥션_대역:
@@ -135,6 +159,7 @@ def _확정(대역: 확정_대역, *, request_id: str = 업무키):
         financial_summary=재무요약,
         sim_run_id=실행축,
         confirm=대역,
+        reserve=예약_대역(),
         connect=커넥션_대역,
     )
 

@@ -432,6 +432,29 @@ class WalkResult:
         return total
 
     @property
+    def reservation_outcomes(self) -> Mapping[str, int]:
+        """확정분 예약 어휘 분포 (2026-09-12). 🔴 **둘을 접지 않는다.**
+
+        ```text
+        RESERVED  요구량만큼 잡았다
+        SHORT     모자랐다 — 확정은 CONFIRMED 인데 재고는 그만큼 없었다
+        ```
+
+        ★★ **이 줄이 없어서 「확정 34건」 을 보고 재고가 잡힌 줄 알았다**
+          (`SIM-CHAIN-V4` 실측). 확정 뒤 예약이 안 걸려 물류가 다음 날 같은 재고를
+          다시 가용으로 보고했고, 14건 15,474kg 이 미출고로 남았다.
+
+        ★ **이름의 주인은 `sales_approval.SaleConfirmationOut` 이다.** 여기서 새
+          이름을 안 붙이고 세기만 한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is not None:
+                    total.update(approval.reservation_outcomes)
+        return total
+
+    @property
     def confirmation_reasons(self) -> tuple[str, ...]:
         """확정이 못 선 이유들. **`CONFIRMED` 가 아닌 것만.**
 
@@ -828,6 +851,10 @@ def format_summary(result: WalkResult) -> str:
         #    섰다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 7 · 재검증 PASSED 7` 을
         #    보고 판매가 선 줄 알았고, `sales` 는 0행이었다.
         f"확정어휘  {dict(sorted(result.confirmation_outcomes.items()))}",
+        # 🔴 **예약 줄을 확정 줄에 접지 않는다** (2026-09-12). *"판매가 섰다"* 와
+        #    *"그만큼 재고를 잡았다"* 는 축이 다르다 — 이 줄이 없어서 확정 34건을
+        #    보고 재고가 잡힌 줄 알았고, 같은 재고가 다음 날 또 팔렸다.
+        f"예약어휘  {dict(sorted(result.reservation_outcomes.items()))}",
         # 🔴 **라벨 줄을 접지 않는다** (2026-09-11). 규칙이 순서를 갖게 되면서
         #    *"규칙이 무엇을 적었나"* 와 *"그날 무엇이 섰나"* 가 갈릴 수 있다 —
         #    이 줄이 그 둘을 잇는 유일한 자리다.
