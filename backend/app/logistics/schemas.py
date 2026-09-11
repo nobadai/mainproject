@@ -397,18 +397,26 @@ class ConstraintResult(BaseModel):
 
 
 class InventoryCostBasisSnapshot(BaseModel):
-    """확정 판매 물량에 FIFO 로 배부된 **실제 취득원가**.
+    """확정 판매 물량에 FEFO 로 배부된 **예상 재고 취득원가**.
 
     ★ **물류가 소유하는 모양이다.** 재무 `InventoryCostBasis` 를 import 하지 않는다 —
       실행 계층에서 두 Agent 를 붙이면 마스터가 중개할 자리가 사라지고, 재무가 판정
       필드를 하나 바꾸는 날 물류 계산이 조용히 따라 바뀐다. 칸 이름만 같게 둔다.
 
+    🔴 **PRE_SALES 시점의 예상이지 출고 사실이 아니다.** 이 값이 서는 자리는 판매 제안
+       **전**이고, 그 판매의 예약도 할당도 아직 없다 (승인 → 예약 →
+       `fefo_allocation` → 출고 순서다). 그래서 여기 담긴 Lot 은 *"지금 출고한다면
+       FEFO 가 집을 Lot"* 이다.
+
+       ★ **그래서 순서만이라도 실제와 같아야 한다.** 정렬 키는 실제 자동 출고와
+         같은 `turnover.fefo_sort_key` 하나다.
+
     🔴 **`allocation_method` 와 `cost_method` 는 다른 축이다.** 앞은 *"어느 Lot 을 어떤
-       순서로 헐었나"*(FIFO)이고 뒤는 *"그 Lot 의 단가가 무엇이었나"*(ACTUAL)다. 하나로
-       합치면 «FIFO 로 골랐으니 원가도 FIFO 다» 같은, 장부에 없는 원가가 생긴다.
+       순서로 고르나"*(FEFO)이고 뒤는 *"그 Lot 의 단가가 무엇이었나"*(ACTUAL)다. 하나로
+       합치면 «FEFO 로 골랐으니 원가도 FEFO 다» 같은, 장부에 없는 원가가 생긴다.
 
     🔴 **`source_refs` 가 정본이다.** `source_ref` 는 하위 호환용 대표 하나일 뿐이라
-       두 Lot 을 헌 판매의 계보를 그것만으로는 따라갈 수 없다.
+       두 Lot 에 걸친 배부 근거를 그것만으로는 따라갈 수 없다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -417,18 +425,22 @@ class InventoryCostBasisSnapshot(BaseModel):
     #: 이 원가가 덮는 양. 확정 물량과 **정확히 같을 때만** 기준이 선다.
     quantity_kg: Decimal = Field(ge=0)
     amount_krw: Decimal = Field(ge=0)
-    #: Lot 선택 순서. 지금은 FIFO 한 가지다 — 없는 방식을 이름으로 만들지 않는다.
-    allocation_method: Literal["FIFO"] = "FIFO"
+    #: Lot 선택 순서. 실제 자동 출고와 같은 FEFO 한 가지다 —
+    #: 없는 방식을 이름으로 만들지 않는다.
+    allocation_method: Literal["FEFO"] = "FEFO"
     #: 단가의 성격. 장부 실단가를 그대로 썼다는 사실이다.
     cost_method: Literal["ACTUAL"] = "ACTUAL"
     included_components: tuple[str, ...] = ("inventory_acquisition_cost",)
-    #: 헐어 쓴 Lot 의 전체 계보 (FIFO 순서). 대표 하나로 줄이지 않는다.
+    #: 이 금액을 배부하는 데 **쓴 Lot 근거**, FEFO 배부 순서 그대로.
+    #:
+    #: ⚠️ **«출고된 Lot» 도 «헐어 쓴 Lot» 도 아니다.** PRE_SALES 는 할당 전이라
+    #:    출고 사실이 아직 없다. 대표 하나로 줄이지 않는다.
     source_refs: tuple[str, ...] = Field(min_length=1)
     evidence_grade: str = Field(min_length=1)
 
     @property
     def source_ref(self) -> str:
-        """하위 호환용 대표 ref. **계보가 아니다** — 계보는 `source_refs` 다."""
+        """하위 호환용 대표 ref. **배부 근거 전체가 아니다** — 전체는 `source_refs` 다."""
         return self.source_refs[0]
 
     @field_validator("quantity_kg", "amount_krw", mode="before")

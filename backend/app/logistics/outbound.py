@@ -111,7 +111,7 @@ from psycopg import sql
 
 from app.logistics.db import get_db_schema
 from app.logistics.ledger import record_inventory_move
-from app.logistics.turnover import freshness_days_of, is_disposal_candidate
+from app.logistics.turnover import fefo_sort_key, freshness_days_of, is_disposal_candidate
 
 __all__ = [
     "AllocationRequest",
@@ -1057,7 +1057,8 @@ def recommend_fefo_candidates(
        사람이 `allocate_stock` 에 `lot_id` 와 수량을 명시해야 확정된다.
 
     ```text
-    정렬  remaining_freshness_days ASC → received_at ASC → lot_id ASC
+    정렬  turnover.fefo_sort_key — 신선도 UNKNOWN 후행 → remaining_freshness_days ASC
+                                  → received_at ASC → lot_id ASC
     제외  available <= 0
     ```
 
@@ -1094,12 +1095,14 @@ def recommend_fefo_candidates(
                 grade=행["grade"],
             )
         )
+    # 🔴 **정렬 규칙을 여기 적지 않는다.** 키의 주인은 `turnover.fefo_sort_key` 하나이고
+    #    PRE_SALES 예상 원가 배부(`tools.fefo_inventory_cost_basis`)도 같은 것을 쓴다 —
+    #    두 벌로 적으면 «나갈 Lot» 과 «원가를 배부한 Lot» 이 갈린다.
     후보.sort(
-        key=lambda c: (
-            c.remaining_freshness_days is None,
-            c.remaining_freshness_days if c.remaining_freshness_days is not None else 0,
-            c.received_at,
-            c.lot_id,
+        key=lambda c: fefo_sort_key(
+            remaining_freshness_days=c.remaining_freshness_days,
+            received_at=c.received_at,
+            lot_id=c.lot_id,
         )
     )
     return tuple(후보)

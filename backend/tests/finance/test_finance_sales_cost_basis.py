@@ -354,7 +354,7 @@ def test_multiple_lot_lineage_survives_into_the_final_basis():
 
     assert basis is not None
     assert basis.amount_krw == Decimal(45472)
-    # Logistics가 확정한 FEFO 배부 순서가 곧 읽는 순서다 — Finance는 정렬하지 않는다.
+    # Logistics 가 확정한 FEFO 배부 순서가 곧 읽는 순서다 — Finance 는 정렬하지 않는다.
     assert basis.source_refs == ("LOT-A", "LOT-B")
     assert basis.inventory_source_ref == "LOT-A"
 
