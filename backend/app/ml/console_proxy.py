@@ -79,17 +79,19 @@ def _origin() -> tuple[str, str]:
 TIMEOUT = httpx.Timeout(connect=3.0, read=30.0, write=10.0, pool=3.0)
 
 #: 넘길 수 있는 것. **여기 없는 경로는 404 다.**
+#: ★ 2026-09-11 — 화면이 안 부르는 경로는 **주석 처리**했습니다 (`# "…"`).
+#:   대부분 옛 3100 화면이 쓰던 것입니다. 되살리려면 `# ` 만 지우면 됩니다.
 READ = frozenset({
-    "meta",
-    "forecast",
-    "forecast/base-dates",
-    "accuracy",
-    "accuracy/leadtime",
+    # "meta",
+    # "forecast",
+    # "forecast/base-dates",
+    # "accuracy",
+    # "accuracy/leadtime",
     "quality",
     #   ★ 아침에 저장된 점검 결과. 다시 안 돌리고 그대로 읽습니다.
     "quality/saved",
-    "quality-table",
-    "delivery",
+    # "quality-table",
+    # "delivery",
     "batch/recent",
     "agent/batch",
     "agent/news",
@@ -99,7 +101,7 @@ READ = frozenset({
     "retrain/status",
     #   ★ 사람이 눌러야 할 결정이 있나. 화면이 탭을 띄울지 정하는 데 씁니다.
     "retrain/pending",
-    "retrain/job",
+    # "retrain/job",
     "retrain/graph/status",
     #   ★ 다시 돌리기가 어디까지 갔나. 누른 뒤 진행을 묻는 자리입니다.
     "ops/job",
@@ -107,10 +109,13 @@ READ = frozenset({
 
 #: 쓰기. **재학습 셋뿐이다.** 사람이 눌러야 도는 것들이고,
 #: 화면은 승인권자에게만 버튼을 보인다.
+#: ★ 2026-09-11 — `retrain/build` · `apply` · `rollback` 을 주석 처리했습니다.
+#:   화면은 승인 단계를 밟는 `retrain/graph/*` 로 바뀌었는데, 옛 문이 열려 있어
+#:   `/docs` 에서 직접 누르면 **승인 없이 모델 교체·되돌리기**가 돌 수 있었습니다.
 WRITE = frozenset({
-    "retrain/build",
-    "retrain/apply",
-    "retrain/rollback",
+    # "retrain/build",
+    # "retrain/apply",
+    # "retrain/rollback",
     "retrain/graph/act",
     "retrain/graph/reset",
     #   ★ 아침에 실패한 것을 다시 돌립니다 (자동 작업 · AI 점검).
