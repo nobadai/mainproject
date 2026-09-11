@@ -33,12 +33,22 @@ sales      0행               🔴
 from __future__ import annotations
 
 import unicodedata
-from datetime import date
+from datetime import UTC, date, datetime
+from functools import partial
+from typing import Any
+from uuid import uuid4
 
 import pytest
 
-from app.master.backfill import BackfilledRun, BackfillOut
+from app.master.backfill import (
+    ALWAYS_FIXED_TYPE,
+    BackfilledRun,
+    BackfillOut,
+    backfill_decisions,
+)
 from app.master.backtest_runner import WalkResult, format_summary
+from app.master.decision import DecisionIn, DecisionOut
+from app.master.sales_approval import SaleConfirmationOut
 from app.master.scheduler import DayRunOutcome
 
 오늘 = date(2026, 1, 6)
@@ -85,6 +95,106 @@ def _백필(*행들: BackfilledRun) -> BackfillOut:
 
 def _하루(승인: BackfillOut | None) -> DayRunOutcome:
     return DayRunOutcome(as_of=오늘, action="RUN_NOW", reason="", sales_approval=승인)
+
+
+# ---------------------------------------------------------------------------
+# ⓪ 🔴 **백필이 그 결과를 실제로 읽어 싣는가** — 손으로 세운 행으로는 못 재는 자리
+# ---------------------------------------------------------------------------
+
+
+_축 = "BALANCED"
+_후보 = "SALES-001-A-R1"
+_설정 = {"backfill": {"sales": {"rule": ALWAYS_FIXED_TYPE, "scenario_type": _축}}}
+
+
+def _판매행() -> dict[str, Any]:
+    """`master_agent_runs` 판매 한 행의 대역. **백필이 읽는 칸만 채운다.**"""
+    return {
+        "run_id": uuid4(),
+        "request_id": "REQ-1",
+        "as_of": 오늘,
+        "cycle": "SALES",
+        "end_code": "SL1_PRESENTED",
+        "response_payload": {
+            "end_code": "SL1_PRESENTED",
+            "candidates": [{"scenario": {"scenario_id": _후보, "scenario_type": _축}}],
+        },
+    }
+
+
+def _승인문(sale: SaleConfirmationOut | None):
+    """`record_decision` 대역. **확정 결과만 들려 보낸다.**
+
+    🔴 **적재를 흉내 내지 않는다.** 여기서 재는 것은 *"백필이 `saved.sale` 을 읽어
+      행에 싣는가"* 하나다.
+    """
+
+    def door(request_id: str, payload: DecisionIn) -> DecisionOut:
+        return DecisionOut(
+            decision_id=uuid4(),
+            request_id=request_id,
+            decision_seq=1,
+            decision=payload.decision,
+            scenario_label=payload.scenario_label,
+            decided_by=payload.decided_by,
+            end_code_at_decision="SL1_PRESENTED",
+            history_run_id=payload.history_run_id,
+            revalidation_outcome="PASSED",
+            note=payload.note,
+            created_at=datetime(2026, 1, 6, 10, 0, tzinfo=UTC),
+            sale=sale,
+        )
+
+    return door
+
+
+def _진짜_백필(sale: SaleConfirmationOut | None) -> BackfillOut:
+    """**진짜 `backfill_decisions`** 에 DB 대신 대역만 물린 것.
+
+    ★★ **손으로 세운 `BackfilledRun` 으로는 이 자리를 못 잰다.** 아래 ① 은 행이
+      값을 들 수 있는지를 재고, 여기는 **백필이 그 값을 실제로 읽어 싣는지**를
+      잰다 — 배선을 떼는 변이는 이 검사만 잡는다.
+    """
+    return partial(
+        backfill_decisions,
+        load_config=lambda _: _설정,
+        runs_on=lambda *, sim_run_id, as_of, limit: [_판매행()] if as_of == 오늘 else [],
+        decisions_of=lambda request_id: [],
+        decide=_승인문(sale),
+    )(sim_run_id="SIM-SALESCHAIN-20260911", start=오늘, end=오늘)
+
+
+def test_백필이_승인_문이_낸_확정_결과를_행에_싣는다() -> None:
+    """🔴 **`saved.sale` 을 안 읽으면 성적표가 셀 것이 없다.**
+
+    그날 성적표에 `RECORDED` 만 남고 `sales` 0행의 이유가 아무 데도 없던 자리다.
+    """
+    나온것 = _진짜_백필(
+        SaleConfirmationOut(status="BLOCKED", reason=실측사유),
+    )
+
+    assert len(나온것.runs) == 1, f"판매 행 하나를 못 봤다 — 전제가 깨졌다: {나온것}"
+    행 = 나온것.runs[0]
+
+    assert 행.outcome == "RECORDED"
+    assert 행.confirmation_status == "BLOCKED", (
+        f"백필이 확정 결과를 안 실었다: {행.confirmation_status!r}"
+    )
+    assert _NFC(행.confirmation_reason or "") == _NFC(실측사유), (
+        f"백필이 확정 사유를 안 실었다: {행.confirmation_reason!r}"
+    )
+    assert dict(나온것.confirmation_outcomes) == {"BLOCKED": 1}
+
+
+def test_확정을_안_돌린_승인은_행에도_None_이다() -> None:
+    """★ 매입처럼 확정이 도는 자리가 아니면 `sale` 이 `None` 이다.
+
+    ⚠️ 그 `None` 을 `FAILED` 로 접으면 **매입 행마다 확정 실패가 하나씩 는다.**
+    """
+    나온것 = _진짜_백필(None)
+
+    assert 나온것.runs[0].confirmation_status is None
+    assert dict(나온것.confirmation_outcomes) == {}
 
 
 # ---------------------------------------------------------------------------
