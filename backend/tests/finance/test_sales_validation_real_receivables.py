@@ -20,6 +20,7 @@ import pytest
 from app.finance.capabilities.sales import run_sales_validation
 from app.finance.db import FinanceDataNotReady
 from app.finance.sales_validation import PartnerReceivable
+from app.finance.schemas import FinancePolicy
 
 AS_OF = date(2025, 12, 31)
 
@@ -34,22 +35,65 @@ def _receivable(receivable_id, *, due, status="OPEN", outstanding="100000"):
     )
 
 
+#: 최소현금 정책은 **제안에 무엇이 빠졌든 읽히는** 재무 자료다. 대역이 이것을 안 주면
+#: 실물보다 인색해져서 정책 누락이 거짓으로 만들어진다.
+POLICY_VERSION = "v1.3-PROVISIONAL"
+
+
+def _finance_policy() -> FinancePolicy:
+    return FinancePolicy(
+        purchase_payment_days=7,
+        payroll_date=25,
+        monthly_labor_cost_krw=Decimal(12_941_280),
+        minimum_cash_balance_krw=Decimal(12_941_280),
+        cashflow_projection_days=30,
+        cash_priority_reference="minimum_cash_balance_krw",
+        cash_priority_high_ratio=Decimal("1.0"),
+        cash_priority_medium_ratio=Decimal("1.5"),
+        policy_version=POLICY_VERSION,
+        usage_scope="AGENT_MVP_DEMO",
+        source_refs={
+            "payroll_date": "policy:payroll_date",
+            "monthly_labor_cost_krw": "policy:monthly_labor_cost_krw",
+        },
+    )
+
+
 class _LedgerPort:
     """실 조회 자리에 원장 행을 놓는 최소 Port."""
 
-    def __init__(self, *receivables):
+    def __init__(self, *receivables, credit_limit=None):
         self.receivables = list(receivables)
+        self.credit_limit = credit_limit
         self.asked: list[tuple[date, str]] = []
 
     def load_partner_receivables(self, as_of, partner_id):
         self.asked.append((as_of, partner_id))
         return list(self.receivables)
 
+    def load_policy(self, as_of, policy_version):
+        del as_of, policy_version
+        return _finance_policy()
+
+    def load_partner_credit_limit(self, as_of, partner_id):
+        del as_of, partner_id
+        return self.credit_limit
+
+
 
 class _BrokenPort:
     def load_partner_receivables(self, as_of, partner_id):
         del as_of, partner_id
         raise FinanceDataNotReady("partner_receivables")
+
+    def load_policy(self, as_of, policy_version):
+        del as_of, policy_version
+        return _finance_policy()
+
+    def load_partner_credit_limit(self, as_of, partner_id):
+        del as_of, partner_id
+        return self.credit_limit
+
 
 
 def _state(**over):
@@ -68,7 +112,11 @@ def _state(**over):
     }
     payload.update(over)
     return SimpleNamespace(
-        request=SimpleNamespace(payload=payload, context=SimpleNamespace(as_of=AS_OF))
+        request=SimpleNamespace(
+            payload=payload,
+            context=SimpleNamespace(as_of=AS_OF, policy_version=POLICY_VERSION),
+        ),
+        context_cache=None,
     )
 
 

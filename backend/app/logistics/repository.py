@@ -488,6 +488,7 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
                 i.item_name,
                 l.grade,
                 l.received_at,
+                l.unit_cost_krw_per_kg,
                 l.remaining_qty_kg,
                 l.status,
                 l.storage_zone,
@@ -626,6 +627,8 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         item=row.get("item_name"),
         grade=normalized_grade,
         available_qty_kg=quantity,
+        received_at=received_at,
+        unit_cost_krw_per_kg=_lot_unit_cost(row),
         # ★ 한계를 모르면 **잔여도 모른다.** 경과일만으로는 셈이 서지 않는다.
         remaining_freshness_days=(
             None if freshness_limit is None else freshness_limit - (as_of - received_at).days
@@ -638,6 +641,24 @@ def _inventory_lot_from_row(row: dict[str, object], *, as_of: date) -> Inventory
         status=row.get("status"),
         storage_zone=row.get("storage_zone"),
     )
+
+
+def _lot_unit_cost(row: object) -> Decimal | None:
+    """Lot 의 실제 취득단가. **없으면 `None` 이다 — 0 으로 메우지 않는다.**
+
+    🔴 매입 평균단가나 최근 단가로 추정하지 않는다. 장부에 없는 원가가 판정에
+       들어가면 그 사고는 에러 없이 **마진만** 바꾼다.
+
+    ★ 못 읽은 것을 예외로 올리지 않는다. 단가는 원가 기준에만 쓰이고 판매가능 판정에는
+      안 쓰이므로, 한 Lot 의 단가가 없다고 물류 조회 전체를 세우면 상관없는 축이
+      화면을 비운다. 없는 채로 두면 그 Lot 을 쓰는 원가 배부가 fail-closed 된다.
+    """
+    value = row.get("unit_cost_krw_per_kg") if hasattr(row, "get") else None
+    if isinstance(value, bool) or not isinstance(value, Decimal):
+        return None
+    if not value.is_finite() or value < 0:
+        return None
+    return value
 
 
 def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:

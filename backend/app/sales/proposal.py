@@ -1,5 +1,6 @@
 """Sales Proposal Core."""
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.schemas import (
     AllocationLeg,
+    LogisticsInventoryCostBasis,
     ProposalSelfCheck,
     PurchaseAdditionalSupplyResult,
     SalesCandidate,
@@ -83,16 +85,24 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
 
 
 def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
-    quantity, price, delivery, payment, terms_type, term, source_ref, refs = _baseline(request)
+    quantity, price, requested_delivery, payment, terms_type, term, source_ref, refs = _baseline(
+        request
+    )
     if quantity is None:
         return []
+    # ★ 상업조건의 납품일과 **공급 조회의 기준일**을 가른다. 앞은 물류가 확정한
+    #   최초 납품일까지 받아들이고, 뒤는 **요청된 날짜**만 쓴다 — `_delivery_date` 가
+    #   왜 그래야 하는지를 적었다.
+    delivery = _delivery_date(request, requested_delivery)
     result: list[SalesScenario] = []
     for suffix, scenario_type, objective in _TYPES:
         scenario_quantity = quantity
         axes: list[str] = []
         collapsed = False
         collapse_reason = None
-        confirmed, supply_uncertainties = resolve_applicable_confirmed_supply(request, delivery)
+        confirmed, supply_uncertainties = resolve_applicable_confirmed_supply(
+            request, requested_delivery
+        )
         if scenario_type == "CONSERVATIVE" and confirmed is not None and confirmed < quantity:
             scenario_quantity = confirmed
             axes.append("QUANTITY")
@@ -170,11 +180,23 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 unit_price_krw=price,
                 sales_amount_krw=scenario_quantity * price if price is not None else None,
                 delivery_date=delivery,
+                # MVP 계약 — 회수는 납품일부터 센다. 판매가 정한 의미를 재무 wire 에
+                # 명시한다 (마스터가 번역하지 않는다).
+                collection_reference_date=delivery,
                 payment_days=payment,
                 payment_terms_type=terms_type,
                 contract_term_days=term,
                 source_ref=source_ref,
                 supply=supply,
+                # ★ **이 안의 확정 물량**에 붙은 원가만 싣는다. 조건부로 더 채운 몫은
+                #   재고가 아니라 매입에서 오므로 여기 금액에 섞이지 않는다.
+                inventory_cost_basis=_inventory_cost_basis(
+                    request,
+                    item=request.user_request.item,
+                    covered_quantity_kg=(
+                        None if confirmed is None else min(scenario_quantity, confirmed)
+                    ),
+                ),
                 sales_decision_axes=axes,
                 required_validations=validations,
                 evidence_refs=_unique_refs(
@@ -265,6 +287,33 @@ def _confirmed_sellable_qty(request: SalesProposalInput) -> Decimal | None:
     return None
 
 
+def _inventory_cost_basis(
+    request: SalesProposalInput, *, item: str, covered_quantity_kg: Decimal | None
+) -> LogisticsInventoryCostBasis | None:
+    """Logistics 가 낸 재고 취득원가를 **그대로** 싣는다 — 맞을 때만.
+
+    ```text
+    덮는 양 == 이 안의 확정 물량   →  그대로 싣는다
+    품목이 다르거나 양이 다르다     →  싣지 않는다 (None)
+    ```
+
+    🔴 **판매가 금액을 손대지 않는다.** 수량이 달라졌다고 비례 배분하면 그 순간
+       장부에 없는 원가가 생긴다. 안 맞으면 버리고, 재무는 원가를 못 받았다는 사실로
+       `RUNTIME_NOT_READY` 에서 멈춘다 — 틀린 원가로 승인되는 것보다 낫다.
+
+    ★ 대조는 `quantity_kg` 로 한다. Logistics 가 그 칸을 같이 실어 주는 이유가 이것이다 —
+      금액만 오면 받는 쪽은 그것이 **몇 kg 의 원가인지** 알 수 없다.
+    """
+    context = request.logistics_context
+    supply = context.sellable_supply if context else None
+    basis = supply.inventory_cost_basis if supply else None
+    if basis is None or covered_quantity_kg is None:
+        return None
+    if basis.item != item or basis.quantity_kg != covered_quantity_kg:
+        return None
+    return basis
+
+
 def _baseline(request: SalesProposalInput):
     contract = request.contract_context
     user = request.user_request
@@ -307,6 +356,34 @@ def _baseline(request: SalesProposalInput):
     return quantity, price, delivery, payment, terms_type, term, source_ref, refs
 
 
+def _delivery_date(request: SalesProposalInput, requested: date | None) -> date | None:
+    """이 제안의 **납품일**. 사람이 말한 날짜가 먼저다.
+
+    ★ 사람도 계약도 날짜를 안 준 자동 실행에서만 **물류가 확정한 최초 납품일**을
+      채택한다. `earliest_delivery_date` 는 *"실려서 닿는 가장 이른 날"* 이고
+      (`logistics.tools.earliest_delivery_date_for` — 준비 리드 + 운송 리드) 참고값이
+      아니라 실제 가능일이라 상업조건의 출발점으로 쓸 수 있다.
+
+    🔴 **`READY` 일 때만 쓴다.** 물류가 못 정한 날짜를 판매가 대신 정하지 않는다 —
+      `as_of` 나 오늘 날짜로 메우면 그 순간 없는 사실이 납기가 되고, 회수일이 거기서
+      파생되어 현금흐름까지 거짓이 된다. 못 정했으면 없는 채로 둔다.
+
+    ⚠️ **이 값으로 확정 공급을 다시 고르지 않는다.** 물류는 *"물어본 날짜"* 에만
+      `supply_capacity_by_date` 를 낸다 (`adapter.supply_dates`). 아무도 안 물어본
+      자동 실행에서 그 벡터는 비어 있으므로, 여기서 채택한 날짜로 공급을 조회하면
+      **있던 확정 수량이 `SUPPLY_DATE_CONTEXT_REQUIRED` 로 사라진다** — 판매가 스스로
+      만든 날짜로 물류에게 견적을 요구하는 셈이라 순환이다. 공급 조회는 **요청된
+      날짜**(`requested`)로만 한다.
+    """
+    if requested is not None:
+        return requested
+    context = request.logistics_context
+    delivery = context.delivery_feasibility if context else None
+    if delivery is None or delivery.status != "READY":
+        return None
+    return delivery.earliest_delivery_date
+
+
 def resolve_applicable_confirmed_supply(
     request: SalesProposalInput, delivery_date
 ) -> tuple[Decimal | None, list[str]]:
@@ -345,6 +422,17 @@ def _supply(
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
     conditional, dependency_ref = _purchase_conditional_supply(replies or [])
+    if required is not None and required == 0:
+        # 🔴 **확정된 0 은 모름이 아니다.** 확정 공급이 요청 수량을 다 덮으면 추가
+        #    공급은 **필요 없다는 것이 확인된 것**이고, 그때 조건부 확보량은 0 이다.
+        #    여기서 `None` 을 남기면 재무는 *"조건부 물량을 모른다"* 로 읽어
+        #    (`sales_supply_conditional_quantity`) 원가 기준을 fail-closed 로 닫는다 —
+        #    아무것도 모자라지 않은 제안이 자료 미비로 막힌다.
+        #
+        # ★ `x or 0` 같은 일반 falsy fallback 이 아니다. 위 조건은 **upstream 이
+        #   명시적으로 "추가 공급 없음" 을 확정했을 때만** 참이다. 확정 공급을 모르면
+        #   (`confirmed is None`) `required` 도 `None` 이라 이 갈래에 오지 않는다.
+        conditional = Decimal(0)
     return ScenarioSupply(
         confirmed_quantity_kg=confirmed,
         required_additional_quantity_kg=required,

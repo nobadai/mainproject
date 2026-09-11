@@ -176,6 +176,9 @@ def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),
         source_ref=str(value["source_ref"]),
+        # ★ 전체 재고 계보. 안 오면 DTO 가 `source_ref` 하나로 채운다 — 예전 단일
+        #   Lot payload 가 그대로 돈다.
+        source_refs=tuple(str(item) for item in value.get("source_refs", ())),
         evidence_grade=str(value["evidence_grade"]),
     )
 
@@ -631,6 +634,28 @@ def sales_business_status(payload: Mapping[str, Any]) -> str:
     return SALES_VERDICT_TO_BUSINESS_STATUS[str(verdict)]
 
 
+def _summary_payload(summary: SalesFinancialSummary) -> dict[str, Any]:
+    """요약을 payload 모양으로 옮긴다. **날짜는 문자열로 나간다.**
+
+    🔴 **payload 는 그대로 JSONB 이력에 실린다.** `date` 객체가 한 칸이라도 남아 있으면
+       실행 이력 저장이 `TypeError: Object of type date is not JSON serializable` 로
+       터지고, 그 예외는 *"재무 검토 기록을 저장하지 못했다"* (ERROR/skipped)로 바뀌어
+       **판정이 실제로 났는데도 판매 후보가 미결로 닫힌다.**
+
+    ⚠️ 2026-09-11 걷기에서 실제로 그렇게 됐다. 재고원가가 늘 없던 동안에는 회수일을
+      셈할 일이 없어 이 칸이 `None` 이었고, 그래서 이 자리가 한 번도 안 터졌다 —
+      원가가 오자 처음으로 회수일이 서면서 드러났다.
+
+    ★ **날짜만 손댄다.** 다른 칸은 이미 그대로 실려 왔고, 여기서 모양을 바꾸면
+      받는 쪽(판매 · 마스터)이 읽던 값의 타입이 조용히 달라진다.
+    """
+    dumped = summary.model_dump()
+    collection = dumped.get("collection_date")
+    if collection is not None:
+        dumped["collection_date"] = collection.isoformat()
+    return dumped
+
+
 def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
     """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
 
@@ -646,7 +671,7 @@ def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, A
         # 봉투 상태와 나란히 원본 판정을 남긴다.
         "finance_verdict": result.finance_verdict,
         "scenario_id": result.scenario_id,
-        "financial_summary": (None if summary is None else summary.model_dump()),
+        "financial_summary": (None if summary is None else _summary_payload(summary)),
         "rule_results": [dict(rule) for rule in result.rule_results],
         "reason_codes": list(result.reason_codes),
         "missing_fields": list(result.missing_fields),
@@ -689,11 +714,15 @@ def run_sales_validation(
     minimum_cash: Decimal | None = None
     scenario_cashflow: SalesScenarioCashflow | None = None
     receivable_facts: PartnerReceivableFacts | None = None
+    credit_limit: Decimal | None = None
     if sales_input is not None:
         minimum_cash, scenario_cashflow = _load_sales_cashflow_context(
             data_port, state, sales_input
         )
         receivable_facts = _load_partner_receivable_facts(data_port, state, sales_input)
+        credit_limit = data_port.load_partner_credit_limit(
+            state.request.context.as_of, sales_input.partner_id
+        )
 
     return build_sales_validation_payload(
         evaluate_sales_scenario(
@@ -702,10 +731,13 @@ def run_sales_validation(
             finance_warning_margin_rate=policy.finance_warning_margin_rate,
             max_finance_allowed_payment_terms_days=(policy.max_finance_allowed_payment_terms_days),
             collection_risk_mode=policy.collection_risk_mode,
-            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 권위 있는
-            #    저장 위치가 아직 없어서 여기 기본값을 두면 없는 한도를 재무가
-            #    발명하게 된다 — 없는 채로 두고 여신 판정을 닫는다.
-            credit_limit_krw=None,
+            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 이제
+            #    `partner_credit_limits` 가 그 정본이고, 재무는 **읽기만** 한다 —
+            #    여기 기본값을 두면 없는 한도를 재무가 발명하게 된다.
+            #
+            # ★ 행이 없으면 `None` 이고, 그때 여신 판정은 닫힌다. `0` 은 **한도 0원
+            #   이라는 사실**이라 판정한다 — 둘을 같은 값으로 만들지 않는다.
+            credit_limit_krw=credit_limit,
             # 채권은 실 원장에 있다. 그래서 이쪽만 실제 사실로 채운다 —
             # 여신이 안 열렸다고 회수위험까지 눈을 감을 이유는 없다.
             receivable_facts=receivable_facts,
@@ -745,16 +777,35 @@ def _load_sales_cashflow_context(
     state: Any,
     sales_input: SalesValidationInput,
 ) -> tuple[Decimal | None, SalesScenarioCashflow | None]:
-    """확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영을 만든다.
+    """**재무 최소현금 정책**과, 확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영.
 
-    회수일을 못 구하면(기준일이나 결제일수가 없으면) 투영을 만들지 않는다 —
-    날짜를 지어내면 그 순간 없는 사실이 현금흐름에 들어간다.
+    ```text
+    최소현금 정책   실행마다 있는 재무 자료      제안과 무관하게 항상 읽는다
+    SCENARIO 투영   제안의 회수일이 있어야 선다  없으면 만들지 않는다
+    ```
+
+    ★ 둘은 없는 이유가 다르므로 한 `return` 에 묶지 않는다. 묶으면 제안에 날짜가
+      빠진 것이 *"최소현금 정책이 없다"* 로 보고된다.
     """
+    ctx = state.request.context
+    # 🔴 **정책 조회를 날짜에 묶지 않는다.** 예전에는 회수 기준일이 없으면 여기서
+    #    곧장 `(None, None)` 으로 돌아섰고, 그래서 **판매 제안에 날짜가 빠진 것만으로
+    #    최소현금 정책까지 "없는 값"** 이 됐다. 정책은 실행마다 있는 재무 자료이고
+    #    제안에 무엇이 빠졌는지와 무관하다 — 둘을 한 `return` 에 묶으면 없는 이유가
+    #    서로를 가린다.
+    #
+    # ★ **정책만 읽는다.** `load_context` 는 급여·의무·채권까지 함께 읽고 급여 출처가
+    #   없으면 세운다 — 투영을 만들 때는 필요한 준비이지만, 최소현금 한 값을 읽으려고
+    #   그 문턱을 넘게 하면 **투영이 필요 없는 실행이 급여 출처 때문에 막힌다.**
+    minimum_cash = data_port.load_policy(ctx.as_of, ctx.policy_version).minimum_cash_balance_krw
+
     if sales_input.collection_reference_date is None or sales_input.payment_days is None:
-        return None, None
+        # 회수일을 못 구하면 투영만 만들지 않는다. 날짜를 지어내면 그 순간 없는
+        # 사실이 현금흐름에 들어간다 — 정책은 그대로 돌려준다.
+        return minimum_cash, None
 
     position, policy, base_events = load_context(data_port, state)
-    horizon = state.request.context.as_of + timedelta(days=policy.cashflow_projection_days)
+    horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
     sales_amount = calculate_sales_amount(
         quantity_kg=sales_input.quantity_kg, unit_price_krw=sales_input.unit_price_krw
     )
@@ -774,4 +825,4 @@ def _load_sales_cashflow_context(
         base_cash_events=base_events,
         proposed_collection=proposed,
     )
-    return policy.minimum_cash_balance_krw, scenario_cashflow
+    return minimum_cash, scenario_cashflow

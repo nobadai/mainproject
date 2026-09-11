@@ -83,6 +83,10 @@ class Port:
         del as_of, partner_id
         return []
 
+    def load_partner_credit_limit(self, as_of, partner_id):
+        """여신한도 미확정. **`None` 은 «모름» 이지 «0원» 이 아니다.**"""
+        del as_of, partner_id
+
 
 class NoRefPort(Port):
     """Evidence 를 받칠 정책 출처가 없는 그날의 사실."""

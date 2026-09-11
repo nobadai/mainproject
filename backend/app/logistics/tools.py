@@ -8,6 +8,7 @@ from typing import Literal
 
 from app.logistics.schemas import (
     InventoryByItem,
+    InventoryCostBasisSnapshot,
     InventoryLogisticsSnapshot,
     InventoryLotSnapshot,
     LogisticsApprovedPurchaseCommitment,
@@ -477,9 +478,60 @@ def build_inventory_by_item(
     # 🔴 **`confirmed_outbound_schedule` 로 막지 않는다 (WP-3).** 이 셈이 그 축을 더
     #    이상 안 쓰므로, 그것을 못 읽었다는 이유로 판매가능량을 못 낸다고 답하면
     #    **상관없는 축 때문에 화면이 비는** 것이 된다.
+    axes = _commitment_axes(snapshot)
+    if axes is None:
+        return None
+    allocated_by_lot, unallocated_by_item = axes
+
+    totals: dict[str, Decimal] = {}
+    for lot, 기여 in _sellable_lot_contributions(snapshot, allocated_by_lot):
+        totals[lot.item] = totals.get(lot.item, Decimal(0)) + 기여
+    for item, reserved in unallocated_by_item.items():
+        if item in totals:
+            totals[item] = max(Decimal(0), totals[item] - reserved)
+    return [
+        InventoryByItem(item=item, available_qty_kg=quantity)
+        for item, quantity in sorted(totals.items())
+    ]
+
+
+def _sellable_lot_contributions(
+    snapshot: InventoryLogisticsSnapshot, allocated_by_lot: Mapping[str, Decimal]
+) -> list[tuple[InventoryLotSnapshot, Decimal]]:
+    """**판매가능 판정의 주인은 여기 하나다.** Lot 별로 더 팔 수 있는 양을 낸다.
+
+    ★ 품목 합계(`build_inventory_by_item`)와 FIFO 원가 배부(`fifo_inventory_cost_basis`)가
+      **같은 함수**를 부른다. 같은 규칙을 두 벌 적어 두면 한쪽만 고치는 날
+      *"팔 수 있다고 센 재고"* 와 *"원가를 배부한 재고"* 가 갈리고, 그때 나오는 것은
+      오류가 아니라 **맞지 않는 원가**다.
+
+    ⚠️ 품목 단위 미할당 예약은 여기서 빼지 않는다 — Lot 에 붙지 않은 차감이라
+      Lot 축에 나눌 근거가 없다. 부르는 쪽이 자기 축에서 뺀다.
+    """
+    out: list[tuple[InventoryLotSnapshot, Decimal]] = []
+    for lot in snapshot.on_hand_by_lot:
+        if lot.status != _AVAILABLE_LOT_STATUS:
+            continue
+        # 신선도 만료 확인(<= 0)만 제외한다. None은 만료가 확인된 상태가 아니므로
+        # 가용에서 숨기지 않는다 (0 != null).
+        if lot.remaining_freshness_days is not None and lot.remaining_freshness_days <= 0:
+            continue
+        # 이 Lot 에 이미 붙은 할당분은 남에게 팔 수 없다. 음수로 내려가지 않게 0에서 멈춘다.
+        기여 = max(Decimal(0), lot.available_qty_kg - allocated_by_lot.get(lot.lot_id, Decimal(0)))
+        out.append((lot, 기여))
+    return out
+
+
+def _commitment_axes(
+    snapshot: InventoryLogisticsSnapshot,
+) -> tuple[dict[str, Decimal], dict[str, Decimal]] | None:
+    """출고가 이미 잡아 둔 몫을 (Lot 축, 품목 축) 두 벌로 모은다.
+
+    ⚠️ `outbound_commitments` 가 `None`(미조회)이면 `None` 이다. 못 읽은 축을 0 으로
+      놓으면 **이미 팔린 재고를 다시 팔 수 있다**고 답하게 된다.
+    """
     if snapshot.outbound_commitments is None:
         return None
-
     allocated_by_lot: dict[str, Decimal] = {}
     unallocated_by_item: dict[str, Decimal] = {}
     for commitment in snapshot.outbound_commitments:
@@ -491,25 +543,92 @@ def build_inventory_by_item(
             allocated_by_lot[commitment.lot_id] = (
                 allocated_by_lot.get(commitment.lot_id, Decimal(0)) + commitment.quantity_kg
             )
+    return allocated_by_lot, unallocated_by_item
 
-    totals: dict[str, Decimal] = {}
-    for lot in snapshot.on_hand_by_lot:
-        if lot.status != _AVAILABLE_LOT_STATUS:
-            continue
-        # 신선도 만료 확인(<= 0)만 제외한다. None은 만료가 확인된 상태가 아니므로
-        # 가용에서 숨기지 않는다 (0 != null).
-        if lot.remaining_freshness_days is not None and lot.remaining_freshness_days <= 0:
-            continue
-        # 이 Lot 에 이미 붙은 할당분은 남에게 팔 수 없다. 음수로 내려가지 않게 0에서 멈춘다.
-        기여 = max(Decimal(0), lot.available_qty_kg - allocated_by_lot.get(lot.lot_id, Decimal(0)))
-        totals[lot.item] = totals.get(lot.item, Decimal(0)) + 기여
-    for item, reserved in unallocated_by_item.items():
-        if item in totals:
-            totals[item] = max(Decimal(0), totals[item] - reserved)
-    return [
-        InventoryByItem(item=item, available_qty_kg=quantity)
-        for item, quantity in sorted(totals.items())
+
+def fifo_inventory_cost_basis(
+    snapshot: InventoryLogisticsSnapshot,
+    *,
+    item: str,
+    quantity_kg: Decimal,
+) -> InventoryCostBasisSnapshot | None:
+    """확정 판매 물량에 창고 Lot 의 **실제 취득단가**를 FIFO 로 배부한다.
+
+    ```text
+    정렬      received_at ASC → lot_id ASC   (같은 날 입고는 안정적인 Lot ID 순)
+    배부      남은 물량이 0 이 될 때까지 앞 Lot 부터 헌다
+    완료 조건  remaining == 0 일 때만 기준이 선다
+    ```
+
+    🔴 **모자라면 기준을 세우지 않는다 (`None`).** 0원이나 평균단가로 남은 물량을
+       메우면 재무는 *"원가를 안다"* 고 읽고 마진을 판정한다 — 없는 것을 채운 수치로
+       승인이 난다. `None` 이면 재무는 `RUNTIME_NOT_READY` 로 멈춘다.
+
+    🔴 **판매가능 판정을 여기서 다시 만들지 않는다.** ACTIVE · 신선도 · 예약/할당
+       규칙은 `_sellable_lot_contributions` 한 곳이 주인이고, 이 함수는 그 결과를
+       **소비만** 한다. 두 벌로 적으면 «팔 수 있다고 센 재고» 와 «원가를 배부한 재고»
+       가 갈리고, 그때 나오는 것은 오류가 아니라 맞지 않는 원가다.
+
+    ★ **품목 축 미할당 예약도 FIFO 로 먼저 먹는다.** Lot 에 안 붙은 예약이라 어느
+      Lot 에서 나갈지는 아직 모르지만, 실제 출고가 FIFO 로 집히므로 앞 Lot 부터
+      선점된 것으로 본다. 이렇게 해야 여기 배부 가능한 총량이
+      `build_inventory_by_item` 의 품목 합계와 **정확히 같다.**
+
+    ⚠️ `received_at` 이나 `unit_cost_krw_per_kg` 를 못 읽은 Lot 이 배부 대상에 걸리면
+      기준을 세우지 않는다 — 순서를 모르는 Lot 을 아무 데나 끼우거나 단가를 추정하는
+      대신 멈춘다.
+    """
+    if quantity_kg <= 0:
+        return None
+    axes = _commitment_axes(snapshot)
+    if axes is None:
+        return None
+    allocated_by_lot, unallocated_by_item = axes
+
+    사용가능: list[tuple[InventoryLotSnapshot, Decimal]] = [
+        (lot, 기여)
+        for lot, 기여 in _sellable_lot_contributions(snapshot, allocated_by_lot)
+        if lot.item == item and 기여 > 0
     ]
+    # 순서를 모르는 Lot 이 하나라도 배부 후보에 있으면 FIFO 자체가 성립하지 않는다.
+    if any(lot.received_at is None for lot, _ in 사용가능):
+        return None
+    사용가능.sort(key=lambda 쌍: (쌍[0].received_at, 쌍[0].lot_id))
+
+    선점 = unallocated_by_item.get(item, Decimal(0))
+    remaining = quantity_kg
+    amount = Decimal(0)
+    refs: list[str] = []
+    for lot, 기여 in 사용가능:
+        가용 = 기여
+        if 선점 > 0:
+            먹은양 = min(선점, 가용)
+            선점 -= 먹은양
+            가용 -= 먹은양
+        if 가용 <= 0:
+            continue
+        쓸양 = min(가용, remaining)
+        if lot.unit_cost_krw_per_kg is None:
+            # 단가를 모르는 Lot 을 헐어야 한다면 이 판매의 원가는 알 수 없다.
+            return None
+        amount += 쓸양 * lot.unit_cost_krw_per_kg
+        refs.append(lot.lot_id)
+        remaining -= 쓸양
+        if remaining == 0:
+            break
+
+    if remaining != 0:
+        return None
+    return InventoryCostBasisSnapshot(
+        item=item,
+        quantity_kg=quantity_kg,
+        amount_krw=amount,
+        allocation_method="FIFO",
+        cost_method="ACTUAL",
+        included_components=("inventory_acquisition_cost",),
+        source_refs=tuple(refs),
+        evidence_grade="SIM_FIXED",
+    )
 
 
 def build_lot_constraints(snapshot: InventoryLogisticsSnapshot) -> list[LotConstraint]:

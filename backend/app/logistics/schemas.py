@@ -95,6 +95,17 @@ class InventoryLotSnapshot(BaseModel):
     #: raw `상품`을 근거 없이 `상`으로 바꾸지 않는다.
     grade: str | None = None
     available_qty_kg: Decimal = Field(ge=0)
+    #: 이 Lot 이 창고에 들어온 날. **FIFO 배부 순서의 축**이다.
+    #:
+    #: ★ 신선도 계산에 이미 쓰던 사실이라 새로 만드는 값이 아니다 — 그동안 스냅샷에
+    #:   싣지 않았을 뿐이다.
+    received_at: date | None = None
+    #: 이 Lot 의 **실제 취득단가**(원/kg). `inventory_lots.unit_cost_krw_per_kg` 그대로다.
+    #:
+    #: 🔴 **재계산하지 않는다.** 매입 평균단가나 최근 단가로 추정하면 그 순간 장부에
+    #:    없는 원가가 판정에 들어간다. 못 읽으면 `None` 이고, 그때 원가 기준은 서지
+    #:    않는다 — 0원으로 메우지 않는다.
+    unit_cost_krw_per_kg: Decimal | None = Field(default=None, ge=0)
     remaining_freshness_days: int | None = None
     #: remaining_freshness_days 계산에 실제 사용된 유효 보관한계.
     #: `중` 등급은 operational_limit × medium_grade_factor 가 유효 한계이므로,
@@ -383,6 +394,47 @@ class ConstraintResult(BaseModel):
     code: ConstraintCode
     status: RuleStatus
     skip_reason: str | None = None
+
+
+class InventoryCostBasisSnapshot(BaseModel):
+    """확정 판매 물량에 FIFO 로 배부된 **실제 취득원가**.
+
+    ★ **물류가 소유하는 모양이다.** 재무 `InventoryCostBasis` 를 import 하지 않는다 —
+      실행 계층에서 두 Agent 를 붙이면 마스터가 중개할 자리가 사라지고, 재무가 판정
+      필드를 하나 바꾸는 날 물류 계산이 조용히 따라 바뀐다. 칸 이름만 같게 둔다.
+
+    🔴 **`allocation_method` 와 `cost_method` 는 다른 축이다.** 앞은 *"어느 Lot 을 어떤
+       순서로 헐었나"*(FIFO)이고 뒤는 *"그 Lot 의 단가가 무엇이었나"*(ACTUAL)다. 하나로
+       합치면 «FIFO 로 골랐으니 원가도 FIFO 다» 같은, 장부에 없는 원가가 생긴다.
+
+    🔴 **`source_refs` 가 정본이다.** `source_ref` 는 하위 호환용 대표 하나일 뿐이라
+       두 Lot 을 헌 판매의 계보를 그것만으로는 따라갈 수 없다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1)
+    #: 이 원가가 덮는 양. 확정 물량과 **정확히 같을 때만** 기준이 선다.
+    quantity_kg: Decimal = Field(ge=0)
+    amount_krw: Decimal = Field(ge=0)
+    #: Lot 선택 순서. 지금은 FIFO 한 가지다 — 없는 방식을 이름으로 만들지 않는다.
+    allocation_method: Literal["FIFO"] = "FIFO"
+    #: 단가의 성격. 장부 실단가를 그대로 썼다는 사실이다.
+    cost_method: Literal["ACTUAL"] = "ACTUAL"
+    included_components: tuple[str, ...] = ("inventory_acquisition_cost",)
+    #: 헐어 쓴 Lot 의 전체 계보 (FIFO 순서). 대표 하나로 줄이지 않는다.
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    evidence_grade: str = Field(min_length=1)
+
+    @property
+    def source_ref(self) -> str:
+        """하위 호환용 대표 ref. **계보가 아니다** — 계보는 `source_refs` 다."""
+        return self.source_refs[0]
+
+    @field_validator("quantity_kg", "amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
 class InventoryByItem(BaseModel):

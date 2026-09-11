@@ -480,6 +480,18 @@ def build_sales_calculation_facts(
 # ---------------------------------------------------------------------------
 
 
+def _unique_source_refs(refs: Sequence[str]) -> tuple[str, ...]:
+    """근거 ref 를 **순서를 지키며** 한 번씩만 남긴다.
+
+    ★ `set` 을 쓰지 않는다. 순서가 곧 FIFO 배부 순서라, 정렬이 흐트러지면 어느 Lot 이
+      먼저 쓰였는지가 사라진다.
+    """
+    seen: dict[str, None] = {}
+    for ref in refs:
+        seen.setdefault(ref, None)
+    return tuple(seen)
+
+
 def compose_sales_cost_basis(
     *,
     inventory_cost_basis: InventoryCostBasis | None,
@@ -564,14 +576,22 @@ def compose_sales_cost_basis(
             ),
             *(cost.component for cost in added),
         ),
-        source_refs=(
-            inventory_cost_basis.source_ref,
-            *(
-                (conditional_supply_cost_basis.source_ref,)
-                if conditional_supply_cost_basis is not None
-                else ()
-            ),
-            *(cost.source_ref for cost in added),
+        # 🔴 **`source_ref` 하나만 싣지 않는다.** 재고원가가 여러 Lot 에서 배부돼
+        #    왔으면 그 칸은 첫 Lot 하나만 가리키고, 여기에 그것만 실으면 **나머지
+        #    Lot 이 최종 근거에서 사라진다** — 나중에 *"이 원가가 어느 재고에서
+        #    왔나"* 를 되짚을 수 없다. 정본은 `source_refs` 다.
+        #
+        # ★ 순서를 지키고 중복만 지운다. FIFO 배부 순서가 곧 읽는 순서다.
+        source_refs=_unique_source_refs(
+            (
+                *inventory_cost_basis.source_refs,
+                *(
+                    (conditional_supply_cost_basis.source_ref,)
+                    if conditional_supply_cost_basis is not None
+                    else ()
+                ),
+                *(cost.source_ref for cost in added),
+            )
         ),
     )
 

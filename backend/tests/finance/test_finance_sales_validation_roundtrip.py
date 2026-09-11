@@ -185,7 +185,10 @@ def test_deterministic_facts_are_produced_even_while_the_verdict_is_closed(finan
     # 최소 현금과 현금흐름은 실재하는 재무 자료라 실제로 계산된다.
     assert summary["base_projected_cash_min"] is not None
     assert summary["scenario_projected_cash_min"] is not None
-    assert summary["collection_date"] == date(2026, 2, 4)
+    # 🔴 **payload 의 날짜는 문자열이다.** `date` 객체로 두면 실행 이력 JSONB 저장이
+    #    터지고, 그 예외가 «기록을 저장하지 못했다» 로 바뀌어 **판정이 났는데도**
+    #    판매 후보가 미결로 닫힌다 (2026-09-11 걷기 실측).
+    assert summary["collection_date"] == date(2026, 2, 4).isoformat()
 
 
 def test_amount_mismatch_is_recorded_through_the_whole_path(finance_context):

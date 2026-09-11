@@ -237,6 +237,10 @@ class FinanceAsOfDataPort(Protocol):
     def load_partner_receivables(
         self, as_of: date, partner_id: str
     ) -> list[PartnerReceivable]: ...
+    #: 그날 유효한 거래처 여신한도. **`None` 은 미확정이고 `0` 은 0원이다.**
+    def load_partner_credit_limit(
+        self, as_of: date, partner_id: str
+    ) -> Decimal | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +808,63 @@ def load_partner_receivables(
     return receivables
 
 
+def load_partner_credit_limit(*, as_of: date, partner_id: str) -> Decimal | None:
+    """그날 유효한 **거래처 여신한도**. 없으면 `None`.
+
+    ★ **한도는 정책이 아니라 거래처가 소유한 사실**이다. 그래서 Finance Policy 가
+      아니라 `partner_credit_limits` 에서 읽는다 — 실행마다 같은 값이 아니고 계약마다
+      다르다.
+
+    🔴 **`0` 과 `None` 은 다르다.**
+
+      ```text
+      Decimal(0)  여신한도가 0원이라는 사실   → 판정한다 (어떤 제안도 한도를 넘는다)
+      None        한도가 아직 확정되지 않음   → 판정하지 않는다 (RUNTIME_NOT_READY)
+      ```
+
+      그래서 행이 없을 때만 `None` 이다. 금액 컬럼은 `NOT NULL` 이라 "0 인지 모르는
+      지" 가 한 칸에 섞이지 않는다.
+
+    🔴 **겹치는 활성 구간이 있으면 고르지 않는다.** 어느 한도로 판정했는지 되짚을 수
+      없는 상태에서 하나를 집으면, 그 사고는 에러 없이 숫자만 바꾼다. 기간 겹침을
+      DB 제약으로 막지 않았으므로(`btree_gist` 를 공유 스키마에 더하지 않았다)
+      여기서 fail-closed 한다.
+
+    ★ **미래 구간을 읽지 않는다.** `effective_from <= as_of` 이고, 끝이 있으면
+      `as_of <= effective_to` 인 행만 그날의 사실이다.
+    """
+    if not partner_id.strip():
+        raise ValueError("partner_id must not be blank")
+    query = sql.SQL(
+        """
+        SELECT partner_credit_limit_id, credit_limit_krw
+        FROM {}.partner_credit_limits
+        WHERE partner_id = %s
+          AND is_active
+          AND effective_from <= %s
+          AND (effective_to IS NULL OR effective_to >= %s)
+        ORDER BY effective_from DESC
+        LIMIT 2
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    try:
+        rows = fetch_all(query, [partner_id, as_of, as_of])
+    except Exception as exc:  # 조회 실패는 "한도 없음" 이 아니다 — 세운다.
+        raise FinanceDataNotReady("partner_credit_limit") from exc
+    if not rows:
+        # ★ 없는 것은 없는 것이다. 0 으로도 무한대로도 바꾸지 않는다.
+        return None
+    if len(rows) > 1:
+        raise FinanceDataNotReady("partner_credit_limit_ambiguous")
+    amount = rows[0].get("credit_limit_krw")
+    if isinstance(amount, bool) or not isinstance(amount, Decimal):
+        # 🔴 float 로 바꾸지 않는다. 못 읽은 금액은 못 읽은 것이다.
+        raise FinanceDataNotReady("partner_credit_limit")
+    if not amount.is_finite() or amount < 0:
+        raise FinanceDataNotReady("partner_credit_limit")
+    return amount
+
+
 _FINANCE_STATE_COLUMNS = (
     "finance_state_id",
     "sim_run_id",
@@ -1043,6 +1104,15 @@ class PostgresFinanceAsOfDataPort:
         return load_partner_receivables(
             sim_run_id=str(position["sim_run_id"]), as_of=as_of, partner_id=partner_id
         )
+
+    def load_partner_credit_limit(self, as_of: date, partner_id: str) -> Decimal | None:
+        """그날 유효한 거래처 여신한도.
+
+        ★ **실행 축을 걸지 않는다.** 여신한도는 거래처와 계약이 소유한 사실이고 어느
+          시뮬레이션에서 보든 같다 — `sim_run_id` 로 좁히면 실행마다 다른 한도가
+          있는 것처럼 읽힌다. 시점만 `as_of` 로 자른다.
+        """
+        return load_partner_credit_limit(as_of=as_of, partner_id=partner_id)
 
     def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
         position = self.load_finance_position(as_of)

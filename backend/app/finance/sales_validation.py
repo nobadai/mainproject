@@ -13,12 +13,13 @@
   Master AgentRequest/AgentReply 에도 실리지 않는다. 밖으로 낼 것이 생기면 그때
   `schemas.py` 에 외부 계약을 따로 세운다.
 """
+from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.contracts.core import EvidenceGrade
 from app.finance.rules import SalesRuleResult
@@ -63,13 +64,34 @@ class InventoryCostBasis(BaseModel):
     cost_method: SalesCostMethod
     #: 이 금액이 이미 품고 있는 원가 구성요소 이름. 직접비 중복 계상 차단에 쓴다.
     included_components: tuple[str, ...] = ()
+    #: 🔴 **하위 호환용 단일 ref 다. 전체 계보가 아니다.**
+    #:
+    #:   금액이 여러 Lot 에서 배부돼 왔으면 이 칸은 그중 **첫 Lot 하나**만 가리킨다.
+    #:   이것을 provenance 로 읽으면 나머지 Lot 이 조용히 사라진다 — 나중에 *"이
+    #:   원가가 어느 재고에서 왔나"* 를 물었을 때 답이 틀린다.
     source_ref: str = Field(min_length=1)
+    #: ★ **실제 재고 계보의 정본.** FIFO 로 배부에 쓰인 모든 Lot 을 **사용 순서대로**
+    #:   담는다. 새 코드는 이쪽을 읽는다.
+    #:
+    #: ★ 안 주면 `source_ref` 하나로 채운다 — 예전 단일 Lot 입력이 그대로 돈다.
+    source_refs: tuple[str, ...] = ()
     evidence_grade: EvidenceGrade
 
     @field_validator("amount_krw", mode="before")
     @classmethod
     def reject_boolean_amount(cls, value: object) -> object:
         return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def carry_the_single_ref_into_the_lineage(self) -> InventoryCostBasis:
+        """계보를 안 주면 단일 ref 가 곧 계보다. **비워 두지 않는다.**
+
+        ★ 빈 `source_refs` 를 그대로 두면 읽는 쪽이 *"계보가 없다"* 와 *"Lot 이
+          하나다"* 를 구분하지 못하고, 그때 `source_ref` 로 되돌아가는 코드가 생긴다.
+        """
+        if not self.source_refs:
+            object.__setattr__(self, "source_refs", (self.source_ref,))
+        return self
 
     @field_validator("included_components")
     @classmethod
