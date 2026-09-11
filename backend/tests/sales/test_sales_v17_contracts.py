@@ -452,11 +452,11 @@ def _cost_basis(quantity="7000", amount="4547200"):
         "item": "배추",
         "quantity_kg": quantity,
         "amount_krw": amount,
-        "allocation_method": "FIFO",
+        "allocation_method": "FEFO",
         "cost_method": "ACTUAL",
         "included_components": ["inventory_acquisition_cost"],
-        "source_ref": "LOT-A",
-        "source_refs": ["LOT-A", "LOT-B"],
+        "source_ref": "LOT-B",
+        "source_refs": ["LOT-B", "LOT-A"],
         "evidence_grade": "SIM_FIXED",
     }
 
@@ -478,9 +478,9 @@ def test_물류가_낸_재고원가가_후보에_그대로_실린다():
     assert 보수.quantity_kg == Decimal(7000)
     assert 보수.inventory_cost_basis is not None
     assert 보수.inventory_cost_basis.amount_krw == Decimal(4547200)
-    assert 보수.inventory_cost_basis.source_refs == ["LOT-A", "LOT-B"]
+    assert 보수.inventory_cost_basis.source_refs == ["LOT-B", "LOT-A"]
     assert 보수.inventory_cost_basis.cost_method == "ACTUAL"
-    assert 보수.inventory_cost_basis.allocation_method == "FIFO"
+    assert 보수.inventory_cost_basis.allocation_method == "FEFO"
 
 
 def test_덮는_양이_확정_물량과_다르면_싣지_않는다():
@@ -519,5 +519,31 @@ def test_재고원가는_재무_전선_이름_그대로_직렬화된다():
 
     wire = 보수.model_dump(by_alias=True, mode="json")
 
-    assert wire["inventory_cost_basis"]["source_refs"] == ["LOT-A", "LOT-B"]
+    assert wire["inventory_cost_basis"]["source_refs"] == ["LOT-B", "LOT-A"]
     assert wire["inventory_cost_basis"]["cost_method"] == "ACTUAL"
+    assert wire["inventory_cost_basis"]["allocation_method"] == "FEFO"
+
+
+@pytest.mark.parametrize(
+    ("confirmed", "requested", "quantity", "collapsed", "reason"),
+    [
+        (None, "7000", "7000", True, "CONFIRMED_SUPPLY_LIMIT_NOT_PROVIDED"),
+        ("5000", "7000", "5000", False, None),
+        ("7000", "7000", "7000", True, "CONFIRMED_SUPPLY_COVERS_REQUEST"),
+        ("9000", "7000", "7000", True, "CONFIRMED_SUPPLY_COVERS_REQUEST"),
+        ("0", "7000", "0", False, None),
+        ("0", "0", "0", True, "CONFIRMED_SUPPLY_COVERS_REQUEST"),
+    ],
+)
+def test_conservative_collapse_distinguishes_missing_from_covered_supply(
+    confirmed, requested, quantity, collapsed, reason
+):
+    context = _logistics(confirmed) if confirmed is not None else _logistics(None)
+    request = _request(quantity=requested, logistics=context)
+    scenario = next(
+        item for item in _generate_scenarios(request) if item.scenario_type == "CONSERVATIVE"
+    )
+
+    assert scenario.quantity_kg == Decimal(quantity)
+    assert scenario.variant_collapsed is collapsed
+    assert scenario.variant_collapsed_reason == reason
