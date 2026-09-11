@@ -48,6 +48,10 @@ from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 #: 남아 있으면 그 자리에서 값이 갈린다.
 고른_날 = date(2026, 3, 10)
 
+#: 이 검사가 쓰는 실행 축. 🔴 **번인이 아닌 값으로 둔다** — 번인으로 떨어지는 길이
+#: 남아 있으면 그 자리에서 값이 갈린다.
+실행축 = "SIM-ASOF-2026-V1"
+
 
 class 부서:
     """등록된 어댑터 대역. **어떤 as_of 와 업무 키로 물었는지만 남긴다.**"""
@@ -92,6 +96,9 @@ def _재검증(**kw: Any) -> revalidation.Revalidation:
         "original_conditions": frozenset(),
         "decision_seq": 1,
         "policy_version": "v1.3-PROVISIONAL",
+        # ★ 축도 필수 인자다 (2026-09-11). 이 파일이 재는 것은 **날짜**이므로 축은
+        #   고정해 두고, 축 자체는 `test_revalidation_carries_run_axis.py` 가 잰다.
+        "sim_run_id": 실행축,
     }
     base.update(kw)
     return revalidation.revalidate_scenario(**base)
@@ -163,8 +170,8 @@ def test_넘긴_날이_재검증_업무_키를_만든다(부서들):
     """
     결과 = _재검증(as_of=고른_날)
 
-    assert 결과.request_id == "REV-20260310-0001"
-    assert 결과.request_id == revalidation.make_revalidation_request_id(고른_날, 1)
+    assert 결과.request_id == f"REV-{실행축}-20260310-0001"
+    assert 결과.request_id == revalidation.make_revalidation_request_id(실행축, 고른_날, 1)
 
     쓴_키 = {rid for 부 in 부서들.values() for (_as_of, rid) in 부.호출}
     assert 쓴_키 == {결과.request_id}, "부서가 받은 업무 키가 결과의 키와 다르다"

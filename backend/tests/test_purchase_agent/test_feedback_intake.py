@@ -475,12 +475,16 @@ def test_one_line_per_reason_not_per_adjustment() -> None:
 # 지시값이 아니라 상한이라 ③은 `min([raw_qty, *caps])` 에 칸 하나가 늘 뿐이다.
 
 
-def test_the_adjustment_only_shrinks_the_scenarios_it_names() -> None:
+def test_the_adjustment_only_shrinks_the_scenarios_it_names(no_holdings: None) -> None:
     """🔴 **이 판의 본체다.** 조정안이 겨냥한 안만 줄고 나머지는 그대로여야 한다.
 
     재무가 상한 2,000만에 보수 1,500만 · 기본 2,100만 · 공격 2,800만을 봤으면
     **기본·공격만 재조정 대상**이다 (``scenario_labels`` 가 신설된 이유 그대로).
     전 안을 조이면 근거 없이 조이는 것이고, 아무 안도 안 조이면 반영이 아니다.
+    
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 재무 조정안이 겨냥한 안만
+      조이는가이고, 겨냥된 안이 서 있어야 성립한다.
     """
     before = {s["label"]: s["total_qty_kg"] for s in _proposal()["scenarios"]}
     after = {
@@ -494,8 +498,12 @@ def test_the_adjustment_only_shrinks_the_scenarios_it_names() -> None:
         assert after[label] == before[label], f"{label} 은 대상이 아닌데 줄었다"
 
 
-def test_the_shrunk_scenario_still_balances() -> None:
-    """줄인 뒤에도 **사중 일치**가 선다 (규칙 4). 수량만 줄이고 나머지를 안 맞추면 컷된다."""
+def test_the_shrunk_scenario_still_balances(no_holdings: None) -> None:
+    """줄인 뒤에도 **사중 일치**가 선다 (규칙 4). 수량만 줄이고 나머지를 안 맞추면 컷된다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 재무 조정안이 겨냥한 안만
+      조이는가이고, 겨냥된 안이 서 있어야 성립한다.
+    """
     proposal = _proposal(adjustments=[FINANCE_AMOUNT])
     target = next(s for s in proposal["scenarios"] if s["label"] == "기본")
 
@@ -507,8 +515,12 @@ def test_the_shrunk_scenario_still_balances() -> None:
     )
 
 
-def test_the_reason_for_the_smaller_number_is_on_the_scenario() -> None:
-    """줄인 이유가 그 안에 남는다 — 숫자만 바뀌고 왜가 없으면 사람이 못 따라간다."""
+def test_the_reason_for_the_smaller_number_is_on_the_scenario(no_holdings: None) -> None:
+    """줄인 이유가 그 안에 남는다 — 숫자만 바뀌고 왜가 없으면 사람이 못 따라간다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 재무 조정안이 겨냥한 안만
+      조이는가이고, 겨냥된 안이 서 있어야 성립한다.
+    """
     proposal = _proposal(adjustments=[FINANCE_AMOUNT])
     target = next(s for s in proposal["scenarios"] if s["label"] == "기본")
 
@@ -532,8 +544,12 @@ def test_a_scenario_does_not_say_applied_and_not_applied_at_once() -> None:
         assert not (applied and refused), f"{scenario['label']} 이 두 말을 한다: {lines}"
 
 
-def test_an_adjustment_that_does_not_bind_says_so() -> None:
-    """걸었는데 **안 물린** 경우도 말한다 — 아무 줄도 없으면 «무관» 으로 읽힌다."""
+def test_an_adjustment_that_does_not_bind_says_so(no_holdings: None) -> None:
+    """걸었는데 **안 물린** 경우도 말한다 — 아무 줄도 없으면 «무관» 으로 읽힌다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 재무 조정안이 겨냥한 안만
+      조이는가이고, 겨냥된 안이 서 있어야 성립한다.
+    """
     loose = {**FINANCE_AMOUNT, "target_value": 900_000_000.0}
     proposal = _proposal(adjustments=[loose])
     target = next(s for s in proposal["scenarios"] if s["label"] == "기본")

@@ -200,6 +200,44 @@ def _freshness_cap_kg(
 ADJUSTMENT_CAP_NAME = "조정안"
 
 
+def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) -> float:
+    """커버 창 ``days`` 안에서 **실제로 쓸 수 있는 보유**. 상세설계 §4-③.
+
+    ```text
+    usable = Σ_lot  min( available_qty_kg, 일평균 × min(remaining_freshness_days, days) )
+    차감보유 = min(usable, 일평균 × days)
+    ```
+
+    🔴 **이 값은 ``caps`` 가 아니다.** 창고·현금·신선도·조정안은 밖에서 씌운 천장이고,
+      보유는 **필요가 줄어든 것**이다. ``caps`` 에 넣으면 ``clipped_by`` 에 「보유」가 실리고
+      ⑥이 *"하드 제약(보유)으로 수량이 0까지 축소"* 를 낸다 — 거짓 문장이다. 그래서
+      호출자는 이 값을 **원수요에서 뺀다**.
+
+    ★ **로트마다 잔여신선도를 본다.** 남은 신선도가 ``days`` 보다 짧은 로트는 그 창을
+      **끝까지 못 덮는데** 단순 합계는 덮는다고 센다. 실측(완주 걷기 162안)에서 단순
+      합계와 이 식의 차감액이 142안에서 다르다 — 판정은 아직 한 건도 안 갈렸지만,
+      데이터가 안 가르면 **규칙의 뜻으로** 정한다 (`#574` 와 같은 자리).
+
+    🟢 **이미 팔린 몫을 두 번 세지 않는다** — 물류가 만드는 ``available_qty_kg`` 는 기존
+      할당을 **뺀** 값이다 (``logistics/fefo_allocation``). 판매도 같은 칸에 서 있어
+      (`#567`), 물류가 그 뜻을 바꾸면 두 파트가 같이 틀린다 — 우리 detail 이 아니다.
+
+    ⚠️ **두 칸 중 하나라도 ``None`` 인 로트는 건너뛴다** (규칙 3). 0으로 채우면
+      *"쓸 수 있는 게 없다"* 가 되어 안 깎이고, 큰 수로 채우면 없는 재고를 뺀다. 모르는
+      것은 세지 않는다 — 차감을 **적게 잡는 쪽**으로만 어긋난다.
+    """
+    if not lots:
+        return 0.0
+    usable = 0.0
+    for lot in lots:
+        available = lot.get("available_qty_kg")
+        freshness = lot.get("remaining_freshness_days")
+        if available is None or freshness is None:
+            continue
+        usable += min(float(available), daily_demand * min(int(freshness), days))
+    return min(usable, daily_demand * days)
+
+
 def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | None:
     """이 안에 걸리는 조정안 상한을 **kg 으로**. 걸리는 것이 없으면 ``None``.
 
@@ -266,6 +304,9 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
                 ADJUSTMENT_CAP_NAME: adjustment_cap_kg(usable, label, unit_price),
             },
             coverage=coverage,
+            # 🔴 **품목이 걸러진 로트다.** ``absorb_inventory`` 가 다른 품목을 이미 뺐다 —
+            #   안 거르면 배추 보유로 무 수요를 깎는다.
+            lots=state["inventory"].get("lots"),
         )
         for label in labels
     ]
@@ -276,7 +317,15 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             "daily_demand_kg": daily_demand,
             "reference_unit_price": unit_price,
             "drafts": drafts,
-            "deferred_checks": _deferred_checks(state, constraints, freshness_cap, state["item"]),
+            "deferred_checks": _deferred_checks(
+                state,
+                constraints,
+                freshness_cap,
+                state["item"],
+                # 차감이 **실제로 걸린 날**에만 리드타임 고지를 얹는다. 안 깎인 날에
+                # 그 문장을 내면 "없는 일에 사과하는" 고지가 된다.
+                deducted=any(draft["deducted_holdings_kg"] > 0 for draft in drafts),
+            ),
         },
     }
 
@@ -311,7 +360,10 @@ def _no_quote_plan(
             "daily_demand_kg": daily_demand,
             "reference_unit_price": None,
             "drafts": [],
-            "deferred_checks": _deferred_checks(state, constraints, None, state["item"]),
+            # 시세를 모르는 날은 안이 0개라 차감 자체가 없다 — 고지할 것도 없다.
+            "deferred_checks": _deferred_checks(
+                state, constraints, None, state["item"], deducted=False
+            ),
         },
         # 라벨마다 한 줄씩 남긴다 — 소비자가 "보수는 왜 없나"를 안별로 묻기 때문이고,
         # ⑦의 no_proposal_reason도 이 목록을 이어 붙여 만든다.
@@ -328,19 +380,47 @@ def _no_quote_plan(
 
 
 def _draft_one(
-    *, label: str, days: int, daily_demand: float, caps: dict, coverage: dict
+    *,
+    label: str,
+    days: int,
+    daily_demand: float,
+    caps: dict,
+    coverage: dict,
+    lots: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """안 하나. 클립이 걸리면 어느 제약이 몇 kg으로 눌렀는지 남긴다."""
+    """안 하나. 클립이 걸리면 어느 제약이 몇 kg으로 눌렀는지 남긴다.
+
+    수량이 나는 순서가 **뜻이다** (상세설계 §4-③).
+
+    ```text
+    demand_qty_kg          round(일평균 × D)               원수요
+    deducted_holdings_kg   커버 창 안에서 쓸 수 있는 보유    ← 수요에서 뺀다
+    raw_qty_kg             max(0, 원수요 − 차감)           **여기까지가 필요량**
+    total_qty_kg           min([raw_qty_kg, *caps])        창고·현금·신선도·조정안 클립
+    ```
+
+    🔴 **``raw_qty_kg`` 는 차감 뒤 값이다.** ``clipped_by`` 와 ⑥의 축소 문장이
+      *"그 상한이 실제로 깎은 양"* 을 말해야 하기 때문이다 — 원수요를 대면 창고가
+      255kg 깎은 날에 「창고가 2,787kg 깎았다」가 된다. 원수요를 보려면
+      ``demand_qty_kg`` 를 읽는다.
+
+    ★ 보유가 원수요를 다 덮어 ``raw_qty_kg`` 가 0이 되는 것은 **막힌 것이 아니라 필요
+      없는 것**이다. ⑥이 그 둘을 ``kind`` 로 가른다 — 여기서는 값만 낸다.
+    """
     if not coverage["min"] <= days <= coverage["max"]:
         span = f"[{coverage['min']}, {coverage['max']}]"
         raise ValueError(f"coverage_days {days} for {label!r} is outside {span}")
 
-    raw_qty = round(daily_demand * days)
+    demand_qty = round(daily_demand * days)
+    deducted = usable_holdings_kg(lots, daily_demand, days)
+    raw_qty = max(0, demand_qty - round(deducted))
     binding = [(name, cap) for name, cap in caps.items() if cap is not None and cap < raw_qty]
     total_qty = min([raw_qty, *(cap for _, cap in binding)])
     return {
         "label": label,
         "coverage_days": days,
+        "demand_qty_kg": demand_qty,
+        "deducted_holdings_kg": round(deducted),
         "raw_qty_kg": raw_qty,
         "total_qty_kg": total_qty,
         "clipped_by": [
@@ -364,12 +444,21 @@ def pending_value(state: PurchaseAgentState, constraints: dict, name: str) -> in
 
 
 def _deferred_checks(
-    state: PurchaseAgentState, constraints: dict, freshness_cap: int | None, item: str
+    state: PurchaseAgentState,
+    constraints: dict,
+    freshness_cap: int | None,
+    item: str,
+    *,
+    deducted: bool = False,
 ) -> list[str]:
     """미결값 때문에 **계산하지 않은** 검사들. ⑥이 안별 risks에 싣는다.
 
     ``rejected_reasons``가 아니라 risks로 가는 이유: 소비자는 rejected_reasons를 "컷된 안의
     이력"으로 읽는다. "검사를 건너뛰었다"는 다른 의미라 그 필드에 섞으면 계약이 오염된다.
+
+    ``deducted``는 그날 보유 차감이 실제로 걸렸는지다 (상세설계 §4-③-4). 걸렸는데 입고
+    소요일이 미결이면 **보유가 덮는 창과 매입이 덮는 창이 같은지 못 맞춘다** — 차감은
+    하고 그 사실을 남긴다 (규칙 3 · 0으로 채우지 않는다).
     """
     deferred = []
     if pending_value(state, constraints, "inbound_lead_days") is None:
@@ -377,6 +466,11 @@ def _deferred_checks(
             "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정이라 "
             "회차별 도착일을 계산하지 않는다"
         )
+        if deducted:
+            deferred.append(
+                "보유 재고를 뺀 창과 매입이 덮는 창이 맞는지 확인 보류 — 물류 입고 "
+                "소요일이 미확정이라 매입분 도착일을 놓지 못한다"
+            )
     if pending_value(state, constraints, "purchase_payment_days") is None:
         deferred.append(
             "지급일 기준 현금 검사 보류 — 재무 대금 지급 소요일이 미확정이라 "

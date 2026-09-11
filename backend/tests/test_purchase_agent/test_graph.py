@@ -9,7 +9,7 @@
 from datetime import date
 
 import pytest
-from _injection import INJECTED_THRESHOLD, forced_proposals, swap_threshold
+from _injection import INJECTED_THRESHOLD, drop_holdings, forced_proposals, swap_threshold
 from pydantic import ValidationError
 
 from app.purchase_agent import ports
@@ -63,8 +63,14 @@ def proposals() -> dict[date, dict]:
 
     **실제 분류 경로를 그대로 돈다** — 상황이 단언에 안 들어가는 검사(사중 일치·시세
     실재·컷 없음 …)를 먹인다. 상황 자체가 단언인 검사는 아래 ``forced`` 를 쓴다.
+
+    🔴 **보유는 뗀다** — 이 픽스처를 먹는 검사 중 보유를 재는 것이 없다. 켜 두면 mock
+      앵커의 보수안이 «필요 없다» 로 사라져(§4-③) 사중 일치·컷 없음 단언이 **보유 때문에**
+      무너진다. 보유 자체는 ``test_holdings_deduction`` 이 잰다.
     """
-    return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+    with pytest.MonkeyPatch.context() as mp:
+        drop_holdings(mp)
+        return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
 
 
 @pytest.fixture(scope="module")
@@ -306,11 +312,14 @@ def test_item_without_shelf_life_defers_the_freshness_check() -> None:
 # ── 축 검사 이관 (정의서 §3.5.1-3 — self_check 소유) ────────────────────────
 
 
-def test_schema_no_longer_judges_axis_diversity() -> None:
+def test_schema_no_longer_judges_axis_diversity(no_holdings: None) -> None:
     """스키마는 그날 allowed_axes를 모르므로 이 판정을 내릴 자격이 없다.
 
     Epic 1에서 스키마에 두었다가, mock_falling(허용 축 quantity 하나)에서 3안이 통째로
     거부되어 제안 자체를 만들지 못하는 것으로 반증됐다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 «스키마가 축으로 막느냐» 이고,
+      3안이 서 있어야 그 단언이 성립한다.
     """
     single_axis = run_purchase_agent(ITEM, FALLING)
     assert {s["strategy_type"] for s in single_axis["scenarios"]} == {"quantity"}

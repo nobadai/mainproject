@@ -40,7 +40,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.sales.persistence import (
     SalesPersistenceConflict,
     confirm_sale,
@@ -284,6 +283,7 @@ def confirm_approved_sale(
     policy_version: str | None,
     scenario: Mapping[str, Any],
     revalidation_outcome: str | None,
+    sim_run_id: str,
     confirm: Callable[[Any, SalesConfirmationInput], Any] | None = None,
     connect: Callable[[], Any] | None = None,
 ) -> SaleConfirmationOut:
@@ -310,6 +310,10 @@ def confirm_approved_sale(
 
     :param as_of: 🔴 **그 실행의 기준일.** `order_date` 가 되고, 벽시계가 아니다
         (판매·재무 확정 ③). 못 읽으면 `None` 이고 그때는 `BLOCKED` 다.
+    :param sim_run_id: 🔴 **그 실행의 축.** `sales` 행이 어느 장부에 앉는지를 정한다
+        (`app/sales/persistence.py` 의 INSERT). **기본값이 없다** — 안 넘기면
+        터져야 한다. 부르는 쪽이 재검증에 넘긴 것과 **같은 한 값**이어야 한다:
+        `decision_service.record_decision` 이 행에서 한 번 읽어 둘에 흘린다.
     :param confirm: 확정 함수. 안 주면 `app.sales.persistence.confirm_sale` 이다.
     :param connect: 커넥션 팩토리. 안 주면 `app.sales.db.get_connection` 이다.
     """
@@ -346,13 +350,12 @@ def confirm_approved_sale(
             as_of=as_of,
             policy_version=policy_version,
             scenario=scenario,
+            sim_run_id=sim_run_id,
         )
     except (ValidationError, SalesPersistenceConflict, ValueError) as exc:
         # ★ **`FAILED` 가 아니다.** 계약이 안 맞아 쓸 수 없는 것은 우리가 아는
         #   사실이지 실패가 아니다.
-        return SaleConfirmationOut(
-            status="BLOCKED", reason=f"판매 확정 입력을 만들 수 없다: {exc}"
-        )
+        return SaleConfirmationOut(status="BLOCKED", reason=f"판매 확정 입력을 만들 수 없다: {exc}")
 
     do_confirm = confirm_sale if confirm is None else confirm
     conn = _open(connect)
@@ -394,14 +397,25 @@ def _confirmation_input(
     as_of: date,
     policy_version: str | None,
     scenario: Mapping[str, Any],
+    sim_run_id: str,
 ) -> SalesConfirmationInput:
     """`SalesConfirmationInput` 을 짓는다. **판매가 발표한 계약 그대로다.**
 
     ```text
-    sale_date   scenario 의 delivery_date        납품일 정본은 sales.sale_date (판매 확정)
-    order_date  그 실행의 as_of                   판매·재무 확정 ③ — 벽시계가 아니다
-    sim_run_id  ledger_repository.BURN_IN_SIM_RUN_ID   어느 실행의 장부인가는 마스터가 정한다
+    sale_date   scenario 의 delivery_date   납품일 정본은 sales.sale_date (판매 확정)
+    order_date  그 실행의 as_of              판매·재무 확정 ③ — 벽시계가 아니다
+    sim_run_id  원 실행 이력 행의 축          어느 실행의 장부인가는 마스터가 정한다
     ```
+
+    🔴 **`sim_run_id` 는 상수가 아니다** (2026-09-11). 전에는 `BURN_IN_SIM_RUN_ID` 를
+      박았는데, 이 값이 `app/sales/persistence.py` 의 `sales` INSERT 에 그대로
+      실린다 — **일어난 적 없는 판매가 번인 장부에 쌓인다.** 번인은 모든 실행이
+      `--baseline-run-id` 로 출발점 삼는 장부라 그 오염이 뒤따르는 실행 전부에 번진다.
+
+      ⚠️ **터지지 않는다. 숫자만 틀린다.** 그래서 상수를 지우고 기본값도 안 둔다 —
+        안 넘기면 그 자리에서 터져야 한다 (`revalidate_scenario` 와 같은 규율).
+
+    :param sim_run_id: 원 실행 이력 행이 실은 축. 🔴 **여기서 짓지 않는다.**
 
     ★ **기여이익을 마스터가 다시 적지 않는다.** `line.contribution_profit_krw` 와
       `contribution_margin_rate` 를 비워 두면 판매가 scenario 값을 쓴다
@@ -426,7 +440,7 @@ def _confirmation_input(
         ),
         selected_scenario=selected,
         selected_scenario_id=selected.scenario_id,
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        sim_run_id=sim_run_id,
         sale_date=selected.delivery_date,
         order_date=as_of,
         line=SalesApprovalLine(
