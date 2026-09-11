@@ -31,7 +31,7 @@ from app.finance.application.harness import (
     required_capabilities,
 )
 from app.finance.db import FinanceDataNotReady
-from app.finance.schemas import FinanceMode
+from app.finance.schemas import FinanceMode, FinancePolicy
 
 # ---------------------------------------------------------------------------
 # 판매 Capability 를 직접 부를 때 쓰는 최소 도구
@@ -56,17 +56,53 @@ def _sales_state(**over):
     }
     payload.update(over)
     return SimpleNamespace(
-        request=SimpleNamespace(payload=payload, context=SimpleNamespace(as_of=_AS_OF))
+        request=SimpleNamespace(
+            payload=payload,
+            context=SimpleNamespace(as_of=_AS_OF, policy_version=_POLICY_VERSION),
+        ),
+        context_cache=None,
+    )
+
+
+#: 검사가 쓰는 최소현금 정책값. **실행마다 있는 재무 자료**이고 제안과 무관하다.
+_MINIMUM_CASH = Decimal(12_941_280)
+_POLICY_VERSION = "v1.3-PROVISIONAL"
+
+
+def _finance_policy() -> FinancePolicy:
+    return FinancePolicy(
+        purchase_payment_days=7,
+        payroll_date=25,
+        monthly_labor_cost_krw=Decimal(12_941_280),
+        minimum_cash_balance_krw=_MINIMUM_CASH,
+        cashflow_projection_days=30,
+        cash_priority_reference="minimum_cash_balance_krw",
+        cash_priority_high_ratio=Decimal("1.0"),
+        cash_priority_medium_ratio=Decimal("1.5"),
+        policy_version=_POLICY_VERSION,
+        usage_scope="AGENT_MVP_DEMO",
+        source_refs={
+            "payroll_date": "policy:payroll_date",
+            "monthly_labor_cost_krw": "policy:monthly_labor_cost_krw",
+        },
     )
 
 
 def _receivable_port(*receivables):
-    """실 조회를 대신하는 최소 Port. **행을 주는 일만 한다.**"""
+    """실 조회를 대신하는 최소 Port. **행을 주는 일만 한다.**
+
+    ★ `load_policy` 도 답한다. 최소현금 정책은 **제안에 무엇이 빠졌든 읽히는** 재무
+      자료라, 이것을 안 주는 대역은 실물보다 인색해서 정책 누락을 거짓으로 만든다.
+    """
 
     class _Port:
         def load_partner_receivables(self, as_of, partner_id):
             del as_of, partner_id
             return list(receivables)
+
+        def load_policy(self, as_of, policy_version):
+            del as_of, policy_version
+            return _finance_policy()
 
     return _Port()
 
@@ -266,6 +302,10 @@ def test_a_failed_lookup_is_not_an_empty_ledger():
         def load_partner_receivables(self, as_of, partner_id):
             raise FinanceDataNotReady("partner_receivables")
 
+        def load_policy(self, as_of, policy_version):
+            del as_of, policy_version
+            return _finance_policy()
+
     with pytest.raises(FinanceDataNotReady):
         run_sales_validation(_BrokenPort(), {}, _sales_state())  # type: ignore[arg-type]
 
@@ -326,3 +366,66 @@ def test_sales_controller_does_not_reuse_the_purchase_scenario_path():
     assert "PurchaseProposal" not in called
     # 경계 확인과 Controller 실행만 한다.
     assert {"_controller_boundary", "_controller_run"} <= called
+
+
+# ---------------------------------------------------------------------------
+# 최소현금 정책은 **제안의 날짜와 묶여 있지 않다**
+#
+# 🔴 예전에는 회수 기준일이 없으면 `_load_sales_cashflow_context` 가 곧장
+#    `(None, None)` 으로 돌아섰다. 그래서 **제안에 날짜가 빠진 것만으로 최소현금
+#    정책까지 "없는 값"** 이 되어, 없는 이유 둘이 서로를 가렸다.
+#
+#    ```text
+#    최소현금 정책   실행마다 있는 재무 자료      제안과 무관하다
+#    SCENARIO 투영   제안의 회수일이 있어야 선다  없으면 안 만든다
+#    ```
+# ---------------------------------------------------------------------------
+
+
+def test_minimum_cash_policy_loads_without_a_collection_reference_date():
+    """🔴 이 결함의 자리 — 날짜가 없어도 정책은 읽힌다."""
+    from app.finance.capabilities.sales import run_sales_validation
+
+    result = run_sales_validation(_receivable_port(), {}, _sales_state())
+
+    assert "minimum_cash_balance_krw" not in result["missing_data"]
+
+
+def test_only_the_scenario_projection_is_missing_without_a_date():
+    """★ 없는 것은 투영 하나다 — 날짜를 지어내 투영을 만들지 않는다."""
+    from app.finance.capabilities.sales import run_sales_validation
+
+    result = run_sales_validation(_receivable_port(), {}, _sales_state())
+
+    assert "sales_scenario_cashflow" in result["missing_data"]
+    assert "minimum_cash_balance_krw" not in result["missing_data"]
+
+
+def test_the_cashflow_rule_names_only_what_is_actually_missing():
+    """두 이름이 함께 실리면 **고칠 사람이 둘로 갈린다** — 정책 담당과 영업."""
+    from app.finance.capabilities.sales import run_sales_validation
+
+    result = run_sales_validation(_receivable_port(), {}, _sales_state())
+    cashflow = next(
+        rule for rule in result["rule_results"] if rule["rule_id"] == "FIN-SALES-CASHFLOW"
+    )
+
+    assert "minimum_cash_balance_krw" not in cashflow["missing_policy"]
+    assert "sales_scenario_cashflow" in cashflow["missing_policy"]
+
+
+def test_reading_the_policy_does_not_require_the_payroll_source():
+    """★ 정책 한 값을 읽으려고 급여 출처 문턱을 넘게 하지 않는다.
+
+    `load_context` 는 급여·의무·채권까지 읽고 급여 출처가 없으면 세운다 — 투영을
+    만들 때는 필요한 준비이지만, **투영이 필요 없는 실행**이 그 때문에 막히면 안 된다.
+    """
+    import inspect
+
+    from app.finance.capabilities import sales as sales_capability
+
+    source = inspect.getsource(sales_capability._load_sales_cashflow_context)
+    before_projection = source.split("load_context(")[0]
+
+    # 정책은 `load_context` 보다 **먼저** 읽힌다.
+    assert "load_policy(" in before_projection

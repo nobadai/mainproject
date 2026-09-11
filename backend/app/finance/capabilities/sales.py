@@ -745,16 +745,35 @@ def _load_sales_cashflow_context(
     state: Any,
     sales_input: SalesValidationInput,
 ) -> tuple[Decimal | None, SalesScenarioCashflow | None]:
-    """확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영을 만든다.
+    """**재무 최소현금 정책**과, 확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영.
 
-    회수일을 못 구하면(기준일이나 결제일수가 없으면) 투영을 만들지 않는다 —
-    날짜를 지어내면 그 순간 없는 사실이 현금흐름에 들어간다.
+    ```text
+    최소현금 정책   실행마다 있는 재무 자료      제안과 무관하게 항상 읽는다
+    SCENARIO 투영   제안의 회수일이 있어야 선다  없으면 만들지 않는다
+    ```
+
+    ★ 둘은 없는 이유가 다르므로 한 `return` 에 묶지 않는다. 묶으면 제안에 날짜가
+      빠진 것이 *"최소현금 정책이 없다"* 로 보고된다.
     """
+    ctx = state.request.context
+    # 🔴 **정책 조회를 날짜에 묶지 않는다.** 예전에는 회수 기준일이 없으면 여기서
+    #    곧장 `(None, None)` 으로 돌아섰고, 그래서 **판매 제안에 날짜가 빠진 것만으로
+    #    최소현금 정책까지 "없는 값"** 이 됐다. 정책은 실행마다 있는 재무 자료이고
+    #    제안에 무엇이 빠졌는지와 무관하다 — 둘을 한 `return` 에 묶으면 없는 이유가
+    #    서로를 가린다.
+    #
+    # ★ **정책만 읽는다.** `load_context` 는 급여·의무·채권까지 함께 읽고 급여 출처가
+    #   없으면 세운다 — 투영을 만들 때는 필요한 준비이지만, 최소현금 한 값을 읽으려고
+    #   그 문턱을 넘게 하면 **투영이 필요 없는 실행이 급여 출처 때문에 막힌다.**
+    minimum_cash = data_port.load_policy(ctx.as_of, ctx.policy_version).minimum_cash_balance_krw
+
     if sales_input.collection_reference_date is None or sales_input.payment_days is None:
-        return None, None
+        # 회수일을 못 구하면 투영만 만들지 않는다. 날짜를 지어내면 그 순간 없는
+        # 사실이 현금흐름에 들어간다 — 정책은 그대로 돌려준다.
+        return minimum_cash, None
 
     position, policy, base_events = load_context(data_port, state)
-    horizon = state.request.context.as_of + timedelta(days=policy.cashflow_projection_days)
+    horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
     sales_amount = calculate_sales_amount(
         quantity_kg=sales_input.quantity_kg, unit_price_krw=sales_input.unit_price_krw
     )
@@ -774,4 +793,4 @@ def _load_sales_cashflow_context(
         base_cash_events=base_events,
         proposed_collection=proposed,
     )
-    return policy.minimum_cash_balance_krw, scenario_cashflow
+    return minimum_cash, scenario_cashflow
