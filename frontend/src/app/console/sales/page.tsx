@@ -16,7 +16,6 @@ import { useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/console/Blocks";
 import {
-  Blocked,
   EmptyRows,
   Failed,
   Metric,
@@ -39,6 +38,9 @@ import {
   type PartnerDetail,
   type PartnersResponse,
   type SalesRunsResponse,
+  type SaleLifecycle,
+  LIFECYCLE_LABELS,
+  STAGE_LABELS,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
@@ -386,6 +388,7 @@ function Collections({ simRun, asOf }: { simRun: string; asOf: string }) {
 /* ── 주문 · 판매 ──────────────────────────────────────────────────────── */
 
 function Orders({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [selected, setSelected] = useState<string | null>(null);
   const state = useConsoleData<CollectionsResponse>(
     `collections:${simRun}:${asOf}`,
     () => salesConsole.collections(simRun, asOf),
@@ -434,12 +437,90 @@ function Orders({ simRun, asOf }: { simRun: string; asOf: string }) {
             ]}
           />
         )}
+        {state.data && state.data.rows.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {[...new Set(state.data.rows.map((row) => row.sale_id))].map(
+              (saleId) => (
+                <button
+                  key={saleId}
+                  onClick={() => setSelected(saleId)}
+                  className="rounded-lg border px-3 py-1.5 font-mono text-[11px]"
+                  style={{ borderColor: "var(--color-hair)" }}
+                >
+                  {saleId} 흐름
+                </button>
+              ),
+            )}
+          </div>
+        )}
       </Panel>
-      <Blocked
-        what="전체 Agent Lifecycle"
-        why="candidate → finance → logistics → master → sale → outbound 를 잇는 authoritative cross-domain read 계약이 없습니다. 같은 날짜·같은 품목·가장 최근 행으로 이어 붙이면 그럴듯하지만 틀릴 수 있고, 틀렸다는 사실이 화면에 남지 않습니다."
-      />
+      {selected && <Lifecycle simRun={simRun} asOf={asOf} saleId={selected} />}
     </>
+  );
+}
+
+/**
+ * 판매 한 건의 흐름.
+ *
+ * 🔴 **상태는 전부 백엔드가 낸 값이다.** 화면은 «완료» 를 추론하지 않는다 — 어느
+ *    단계가 왜 그 상태인지는 저장된 행이 답한다.
+ */
+function Lifecycle({
+  simRun,
+  asOf,
+  saleId,
+}: {
+  simRun: string;
+  asOf: string;
+  saleId: string;
+}) {
+  const state = useConsoleData<SaleLifecycle>(
+    `lifecycle:${simRun}:${asOf}:${saleId}`,
+    () => salesConsole.lifecycle(simRun, asOf, saleId),
+    true,
+  );
+  if (state.loading) return <Skeleton what="판매 흐름" />;
+  if (state.error) return <Failed what="판매 흐름" message={state.error} />;
+  const data = state.data!;
+  return (
+    <Panel
+      title={`${data.sale_id} 흐름`}
+      subtitle={`확정 구간 ${data.confirmed_lineage} · 후보 구간 ${data.agent_lineage}`}
+    >
+      <Table
+        rows={data.stages}
+        columns={[
+          {
+            key: "stage",
+            label: "단계",
+            render: (row) => STAGE_LABELS[row.stage] ?? row.stage,
+          },
+          {
+            key: "status",
+            label: "상태",
+            render: (row) => `${LIFECYCLE_LABELS[row.status]} (${row.status})`,
+          },
+          {
+            key: "ref",
+            label: "참조",
+            mono: true,
+            //  ⚠️ 참조가 없으면 «없음» 이다. 다른 단계의 ID 를 빌려 오지 않는다.
+            render: (row) => row.reference ?? "—",
+          },
+          {
+            key: "when",
+            label: "시각",
+            mono: true,
+            render: (row) => row.occurred_at ?? "—",
+          },
+          { key: "detail", label: "사유", render: (row) => row.detail },
+        ]}
+      />
+      <p className="mb-0 mt-3 text-[11px] text-ink2">
+        후보 → 판매 구간은 `sales` 에 연결키가 저장되지 않아 잇지 못합니다.
+        날짜·품목으로 추정해 잇지 않습니다.
+      </p>
+    </Panel>
   );
 }
 

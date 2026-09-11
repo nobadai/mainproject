@@ -350,6 +350,8 @@ export const salesConsole = {
     get<CollectionsResponse>("/sales/collections", { sim_run_id, as_of }),
   runs: (sim_run_id: string, limit = 50) =>
     get<SalesRunsResponse>("/sales/runs", { sim_run_id, limit }),
+  lifecycle: (sim_run_id: string, as_of: string, sale_id: string) =>
+    get<SaleLifecycle>(`/sales/${encodeURIComponent(sale_id)}/lifecycle`, { sim_run_id, as_of }),
 };
 
 /**
@@ -412,4 +414,47 @@ export interface ConsoleRunsResponse {
 
 export const consoleRuns = {
   list: (limit = 100) => get<ConsoleRunsResponse>("/runs", { limit }),
+};
+
+/* ── 판매 흐름 ─────────────────────────────────────────────────────────── */
+
+export type LifecycleStatus = "DONE" | "OPEN" | "NOT_DUE" | "MISSING" | "BLOCKED";
+
+export interface LifecycleStage {
+  stage: string;
+  status: LifecycleStatus;
+  reference: string | null;
+  occurred_at: string | null;
+  detail: string;
+  evidence: string[];
+}
+
+export interface SaleLifecycle extends RunScope {
+  sale_id: string;
+  /** 확정 이후 구간이 저장된 연결키로 이어졌는가. */
+  confirmed_lineage: "LIVE" | "PARTIAL";
+  /** 후보 → 판매 구간. 저장된 연결키가 없어 늘 BLOCKED 다. */
+  agent_lineage: "BLOCKED";
+  stages: LifecycleStage[];
+}
+
+/** 단계 이름의 한글 표기. **상태는 백엔드 값이고 여기서는 이름만 붙인다.** */
+export const STAGE_LABELS: Record<string, string> = {
+  candidate: "후보",
+  finance_validation: "재무 검증",
+  logistics_validation: "물류 검증",
+  master_decision: "마스터 승인",
+  sale: "판매 확정",
+  reservation: "재고 예약",
+  outbound: "출고",
+  receivable: "매출채권",
+  collection: "수금",
+};
+
+export const LIFECYCLE_LABELS: Record<LifecycleStatus, string> = {
+  DONE: "완료",
+  OPEN: "진행 중",
+  NOT_DUE: "아직 아님",
+  MISSING: "기록 없음",
+  BLOCKED: "연결 불가",
 };
