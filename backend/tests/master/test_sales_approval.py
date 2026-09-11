@@ -74,6 +74,10 @@ SCN = "SALES-001-A-R1"
 #: 원 실행일보다 뒤여야 한다 — 같이 옮긴다.
 납품일 = date(2026, 2, 6)
 
+#: 실행 이력 행이 실은 축. 🔴 **재검증이 이 값을 읽는다** (2026-09-11) — 없으면
+#: `_revalidation_for` 가 `ERROR` 를 내고 확정까지 안 간다.
+실행축 = "SIM-SALESCHAIN-20260911"
+
 
 # ---------------------------------------------------------------------------
 # 대역 — 부서 · 저장소 · confirm_sale
@@ -221,6 +225,7 @@ def _판매_실행(
         "cycle": cycle,
         "item": "배추",
         "as_of": 원_실행일,
+        "sim_run_id": 실행축,
         "request_payload": {"policy_version": "v1.3", "item": "배추"},
         "response_payload": {
             "end_code": end_code,
@@ -238,6 +243,7 @@ def _매입_실행(*, end_code: str = "E1_APPROVED") -> dict[str, Any]:
         "cycle": "PROCUREMENT",
         "item": "배추",
         "as_of": 원_실행일,
+        "sim_run_id": 실행축,
         "request_payload": {"policy_version": "v1.3", "item": "배추"},
         "response_payload": {
             "end_code": end_code,

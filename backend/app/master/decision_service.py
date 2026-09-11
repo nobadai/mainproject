@@ -102,9 +102,7 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
 
     end_code = _end_code_of(response_payload)
     check_decidable(end_code, payload.decision, cycle=cycle)
-    check_scenario_exists(
-        payload.scenario_label, available_scenario_names(response_payload, cycle)
-    )
+    check_scenario_exists(payload.scenario_label, available_scenario_names(response_payload, cycle))
 
     existing = list_decisions(request_id)
     _reject_repeat_approval(existing, payload)
@@ -201,6 +199,9 @@ def _revalidation_for(
     ★ **`as_of` 를 만들지 않고 흘린다.** 받은 날을 그대로 `revalidate_scenario` 에
       넘긴다 — 중간에서 손대면 진입점이 정한 날과 부서가 받은 날이 갈린다.
 
+    ★ **`sim_run_id` 도 같다** (2026-09-11). 실행 이력 행에서 읽어 흘린다 —
+      `_transition_for` 가 이미 같은 자리에서 같은 값을 읽는다.
+
     🔴 **`APPROVE` 일 때만이다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은 승인이
       아니라 재검증할 대상이 없다 — 그때 두 칸은 `None` 이고, 그 `None` 은 *"재검증에
       실패했다"* 가 아니라 **"재검증을 하지 않았다"** 이다.
@@ -247,12 +248,24 @@ def _revalidation_for(
             reason="원 실행의 policy_version 을 못 읽어 재검증 봉투를 만들 수 없다.",
         )
 
+    sim_run_id = _sim_run_id_of(row)
+    if sim_run_id is None:
+        # 🔴 **여기서 메우지 않는다** (2026-09-11). 전에는 재검증이 축을
+        #   `BURN_IN_SIM_RUN_ID` 로 박아, 판매를 한 번도 안 한 실행의 승인이 번인
+        #   장부의 채권·현금에 걸려 통째로 `FAILED` 로 떨어졌다. 못 읽으면 못 읽었다고
+        #   적는 편이 남의 실행 장부로 판정하는 것보다 낫다.
+        return Revalidation(
+            outcome="ERROR",
+            reason="원 실행의 sim_run_id 를 못 읽어 재검증 봉투를 만들 수 없다.",
+        )
+
     return revalidate_scenario(
         scenario=scenario,
         original_conditions=conditions_of_original(response_payload, payload.scenario_label),
         decision_seq=decision_seq,
         policy_version=policy_version,
         as_of=as_of,
+        sim_run_id=sim_run_id,
         item=row.get("item") if isinstance(row.get("item"), str) else None,
     )
 

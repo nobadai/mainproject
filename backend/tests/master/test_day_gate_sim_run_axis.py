@@ -383,10 +383,11 @@ def test_등록이_0건이면_축이_없어도_통과한다() -> None:
 #: 🔴 **축을 안 넘기는 것이 알려진 자리.** 여기 이름이 있다는 것은
 #:   *"기본값으로 떨어지는 것을 안다"* 는 뜻이지 *"괜찮다"* 는 뜻이 아니다.
 #:
-#: ★ `revalidation.revalidate_scenario` 는 그 위(`:258`)에서도 축을
-#:   `BURN_IN_SIM_RUN_ID` 로 박는다. 이 파일에서 관문만 고치면 **한 함수 안에서
-#:   두 축이 갈린다** — 그 자리는 따로 정할 판이다.
-_축을_안_넘기는_알려진_자리 = {("revalidation.py", "check_day_gate")}
+#: 🟢 **이제 비었다** (2026-09-11). 마지막 한 자리였던
+#:   `revalidation.revalidate_scenario` 가 봉투와 관문에 같은 축을 넘긴다 — 축은 원
+#:   실행 행에서 온다. 그 자리를 따로 재는 잠금이
+#:   `test_revalidation_carries_run_axis.py` 에 있다.
+_축을_안_넘기는_알려진_자리: set[tuple[str, str]] = set()
 
 
 def test_관문을_부르는_자리가_전부_축을_넘긴다() -> None:
