@@ -195,6 +195,7 @@ __all__ = [
     "LOGISTICS_FIXTURE_TABLE",
     "RUN_TABLE",
     "BaselineLineage",
+    "ForeignKey",
     "LedgerReset",
     "delete_sim_run_row",
     "reset_sim_run_ledger",
@@ -268,11 +269,39 @@ class BaselineLineage:
 
 
 @dataclass(frozen=True)
+class ForeignKey:
+    """FK 하나의 **모양**. `pg_constraint` 에서 읽은 그대로다.
+
+    🔴 **칸이 여럿일 수 있다.** `master_decisions` 는 `(run_id, request_id)` 두 칸으로
+      `master_agent_runs` 에 매달린다. 한 칸만 맞춰 좁히면 **다른 실행의 같은 run_id**
+      까지 걸려 남의 장부가 날아간다.
+    """
+
+    child: str
+    child_columns: tuple[str, ...]
+    parent: str
+    parent_columns: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.child_columns) != len(self.parent_columns):
+            raise ValueError(
+                f"{self.child} → {self.parent} 의 칸 수가 안 맞는다:"
+                f" {self.child_columns} / {self.parent_columns}"
+                " — 짝이 안 맞는 열쇠로 지울 행을 좁히지 않는다"
+            )
+        if not self.child_columns:
+            raise ValueError(f"{self.child} → {self.parent} 에 칸이 하나도 없다")
+
+
+@dataclass(frozen=True)
 class LedgerReset:
     """지운 결과. **표마다 몇 행인지**를 값으로 낸다."""
 
     sim_run_id: str
     #: 실제로 DELETE 를 던진 순서. **자식 먼저**다.
+    #:
+    #: 🔴 **축 없는 자식도 여기 든다.** 지운 것이 성적표에 안 남으면 무엇이 얼마나
+    #:   지워졌는지를 되짚을 데가 없다.
     order: tuple[str, ...]
     #: 표 이름 → 지운 행 수. 🔴 **0 도 담는다** — 안 담으면 *"지웠다"* 와
     #: *"지울 것이 없었다"* 가 같아진다.
@@ -547,6 +576,13 @@ def _read_finance_state(
 def reset_sim_run_ledger(conn: Any, *, sim_run_id: str) -> LedgerReset:
     """그 실행의 **장부를 지운다**. 표마다 몇 행을 지웠는지 돌려준다.
 
+    🔴 **축 없는 자식까지 지운다.** 축을 가진 표만 비우면 그 표에 매달린 축 없는
+      자식이 남고, 부모를 지우는 순간 FK 가 막는다 — 실제로 `master_decisions` 가
+      `master_agent_runs` 를 붙잡아 `--reset` 이 거기서 섰다.
+
+    ★ 지우는 것은 *"이번에 지우는 부모에 매달린 행"* 이다. 자식 표를 통째로 비우지
+      않는다 — 비우면 다른 실행의 행까지 날아간다 (`_narrowing`).
+
     :raises ValueError: 축이 비었거나 **번인 실행**일 때. 🔴 번인에 기초 상태가
         있어서, 지우면 모든 실행의 출발점이 사라진다.
     :raises RuntimeError: 자식-부모 관계가 고리를 이뤄 순서를 못 세울 때.
@@ -562,17 +598,29 @@ def reset_sim_run_ledger(conn: Any, *, sim_run_id: str) -> LedgerReset:
 
     schema = get_db_schema()
     with conn.cursor() as cursor:
-        표들 = _axis_tables(cursor, schema=schema)
-        순서 = _child_first(표들, _foreign_keys(cursor, schema=schema))
+        축표들 = _axis_tables(cursor, schema=schema)
+        관계 = _foreign_keys(cursor, schema=schema)
+        # 🔴 **축 있는 표만으로는 부족하다.** 축이 없으면서 축 있는 표에 매달린
+        #    자식이 있고, 그 행이 남아 있으면 부모를 지울 때 FK 가 막는다.
+        대상들 = (*축표들, *_axisless_children(축표들, 관계))
+        순서 = _child_first(대상들, tuple((fk.child, fk.parent) for fk in 관계))
         지운수: dict[str, int] = {}
         for 표 in 순서:
+            조건, 값들 = _narrowing(
+                표,
+                schema=schema,
+                axis_tables=축표들,
+                foreign_keys=관계,
+                targets=대상들,
+                sim_run_id=sim_run_id,
+            )
             cursor.execute(
-                sql.SQL("DELETE FROM {}.{} WHERE {} = %s").format(
+                sql.SQL("DELETE FROM {}.{} WHERE {}").format(
                     sql.Identifier(schema),
                     sql.Identifier(표),
-                    sql.Identifier(AXIS_COLUMN),
+                    조건,
                 ),
-                [sim_run_id],
+                값들,
             )
             # 🔴 **세어서 담는다.** 0 도 담는다 — 안 담으면 *"지웠다"* 와
             #    *"지울 것이 없었다"* 가 같아진다.
@@ -663,11 +711,31 @@ def _axis_tables(cursor: Any, *, schema: str) -> tuple[str, ...]:
     return 표들
 
 
-def _foreign_keys(cursor: Any, *, schema: str) -> tuple[tuple[str, str], ...]:
-    """`(자식, 부모)` 쌍을 읽는다 — 관계의 주인은 `pg_constraint` 다."""
+def _foreign_keys(cursor: Any, *, schema: str) -> tuple[ForeignKey, ...]:
+    """FK 를 **모양째** 읽는다 — 관계의 주인은 `pg_constraint` 다.
+
+    🔴 **칸 목록까지 읽는다.** `(자식, 부모)` 이름만으로는 *"자식의 어느 칸이 부모의
+      어느 칸을 가리키나"* 를 모르고, 그것을 모르면 축 없는 자식에서 **지울 행을
+      못 좁힌다**. 그 자리에서 손으로 칸을 적으면 `master_decisions` 처럼 두 칸으로
+      매달린 복합 FK 에서 틀린다.
+
+    ★ `conkey` 와 `confkey` 는 **짝이 맞는 순서**로 들어 있다. `WITH ORDINALITY` 로
+      그 순서를 지켜서 풀지 않으면 두 칸이 뒤바뀐 채 짝지어진다.
+    """
     cursor.execute(
         """
-        SELECT child.relname AS child_table, parent.relname AS parent_table
+        SELECT child.relname AS child_table,
+               parent.relname AS parent_table,
+               (SELECT array_agg(att.attname ORDER BY child_key.ord)
+                  FROM unnest(fk.conkey) WITH ORDINALITY AS child_key(attnum, ord)
+                  JOIN pg_attribute AS att
+                    ON att.attrelid = fk.conrelid AND att.attnum = child_key.attnum
+               ) AS child_columns,
+               (SELECT array_agg(att.attname ORDER BY parent_key.ord)
+                  FROM unnest(fk.confkey) WITH ORDINALITY AS parent_key(attnum, ord)
+                  JOIN pg_attribute AS att
+                    ON att.attrelid = fk.confrelid AND att.attnum = parent_key.attnum
+               ) AS parent_columns
         FROM pg_constraint AS fk
         JOIN pg_class AS child ON child.oid = fk.conrelid
         JOIN pg_class AS parent ON parent.oid = fk.confrelid
@@ -679,7 +747,110 @@ def _foreign_keys(cursor: Any, *, schema: str) -> tuple[tuple[str, str], ...]:
         """,
         [schema, schema],
     )
-    return tuple((row["child_table"], row["parent_table"]) for row in cursor.fetchall())
+    return tuple(
+        ForeignKey(
+            child=row["child_table"],
+            child_columns=tuple(row["child_columns"]),
+            parent=row["parent_table"],
+            parent_columns=tuple(row["parent_columns"]),
+        )
+        for row in cursor.fetchall()
+    )
+
+
+def _axisless_children(
+    axis_tables: Iterable[str], foreign_keys: Iterable[ForeignKey]
+) -> tuple[str, ...]:
+    """지우는 표에 매달린 **축 없는 자식**을 훑어 모은다.
+
+    ★★ **손으로 안 적는다.** 축 없는 자식은 지금 열둘이지만, 열셋째가 생기는 날
+      손으로 적은 목록은 조용히 뒤처진다 — 그리고 그 실패는 `--reset` 을 돌리는
+      사람 앞에서 FK 위반으로 터진다.
+
+    🔴 **따라가는 기준은 *"그 부모를 이번에 지우는가"* 다.** *"그 부모에 축이
+      있는가"* 가 아니다. 지우지 않는 부모(품목·거래처 같은 기준 정보)로 따라가면
+      이번 실행과 아무 상관 없는 행을 지우게 된다.
+
+    ★ **한 번으로 안 끝난다.** 축 없는 자식이 또 축 없는 자식을 가질 수 있다
+      (`pallet_events → pallets → inventory_lots`). 더 안 늘 때까지 훑는다.
+    """
+    대상 = set(axis_tables)
+    관계 = tuple(foreign_keys)
+    while True:
+        더할것 = {
+            fk.child
+            for fk in 관계
+            if fk.parent in 대상 and fk.child not in 대상 and fk.child != fk.parent
+        }
+        if not 더할것:
+            return tuple(sorted(대상 - set(axis_tables)))
+        대상 |= 더할것
+
+
+def _narrowing(
+    table: str,
+    *,
+    schema: str,
+    axis_tables: Iterable[str],
+    foreign_keys: Iterable[ForeignKey],
+    targets: Iterable[str],
+    sim_run_id: str,
+) -> tuple[Any, list[str]]:
+    """그 표에서 **지울 행만** 고르는 조건과, 거기 들어갈 값을 만든다.
+
+    ```text
+    축이 있는 표      sim_run_id = %s
+    축이 없는 자식    (매다는 칸들) IN (SELECT 부모 칸들 FROM 부모 WHERE <부모의 조건>)
+    ```
+
+    🔴 **자식 표를 통째로 안 비운다.** `DELETE FROM purchase_items` 로 뭉뚱그리면
+      다른 실행의 품목까지 날아간다 — 지울 것은 *"이번에 지우는 부모에 매달린 행"*
+      이지 *"그 표의 모든 행"* 이 아니다.
+
+    ★ 부모가 여럿이면 **OR** 다. 어느 한 부모라도 지워지면 그 자식 행은 못 남는다.
+
+    ★ 조건이 부모의 조건을 다시 물고 들어간다 — 그래서 손자도 제 축 있는 조상까지
+      되짚어 좁혀진다. 자식을 부모보다 **먼저** 지우므로, 이 조건을 재는 시점에
+      부모 행은 아직 살아 있다.
+    """
+    if table in set(axis_tables):
+        return sql.SQL("{} = %s").format(sql.Identifier(AXIS_COLUMN)), [sim_run_id]
+
+    조각들: list[Any] = []
+    값들: list[str] = []
+    for fk in sorted(
+        (one for one in foreign_keys if one.child == table and one.parent in set(targets)),
+        key=lambda one: (one.parent, one.child_columns),
+    ):
+        if fk.parent == fk.child:
+            continue
+        부모조건, 부모값 = _narrowing(
+            fk.parent,
+            schema=schema,
+            axis_tables=axis_tables,
+            foreign_keys=foreign_keys,
+            targets=targets,
+            sim_run_id=sim_run_id,
+        )
+        조각들.append(
+            sql.SQL("({}) IN (SELECT {} FROM {}.{} WHERE {})").format(
+                sql.SQL(", ").join(sql.Identifier(one) for one in fk.child_columns),
+                sql.SQL(", ").join(sql.Identifier(one) for one in fk.parent_columns),
+                sql.Identifier(schema),
+                sql.Identifier(fk.parent),
+                부모조건,
+            )
+        )
+        값들.extend(부모값)
+
+    if not 조각들:
+        # 지우는 부모가 하나도 없는데 목록에 들었다면 위상 계산이 어긋난 것이다.
+        # 🔴 **조건 없이 DELETE 를 던지지 않는다** — 표 하나가 통째로 날아간다.
+        raise RuntimeError(
+            f"{table} 을 지울 근거가 없다 — 이번에 지우는 부모가 하나도 없다."
+            " 조건 없이 DELETE 를 던지지 않는다"
+        )
+    return sql.SQL(" OR ").join(조각들), 값들
 
 
 def _child_first(tables: Sequence[str], foreign_keys: Iterable[tuple[str, str]]) -> tuple[str, ...]:
