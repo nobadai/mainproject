@@ -1,4 +1,5 @@
 """Finance operations-console reads.  Every query carries its runtime axis."""
+# ruff: noqa: E501
 
 from datetime import date
 from typing import Annotated
