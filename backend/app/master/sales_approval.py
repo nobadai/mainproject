@@ -36,11 +36,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.envelope import Capability
 from app.sales.persistence import (
     SalesPersistenceConflict,
     confirm_sale,
@@ -56,10 +57,14 @@ __all__ = [
     "CONTRACT_FULFILLMENT_MODE",
     "REQUEST_MISSING_PREFIX",
     "REQUIRED_COMMERCIAL_TERMS",
+    "REQUIRED_FINANCIAL_SUMMARY_FIELDS",
     "TERMS_UNRESOLVED_PREFIX",
     "SaleConfirmationOut",
     "confirm_approved_sale",
+    "financial_summary_of",
     "missing_commercial_terms",
+    "missing_financial_summary_fields",
+    "missing_financial_summary_reason",
     "missing_term_origin_vocabulary",
     "missing_term_origins",
     "missing_terms_reason",
@@ -241,6 +246,139 @@ def _names_with(origins: tuple[str, ...], prefix: str) -> str:
     return ", ".join(_TERM_NAMES.get(field, field) for field in fields)
 
 
+# ---------------------------------------------------------------------------
+# 🔴 재무가 낸 기여이익 — **되먹임이 없는 안에는 이 길뿐이다** (2026-09-11)
+# ---------------------------------------------------------------------------
+
+
+#: 재검증에서 이 값을 낸 검증. 🔴 **어휘의 주인은 `envelope.Capability` 다** —
+#:   `Literal` 이라 오타가 타입 검사에서 걸린다.
+_FINANCIAL_VALIDATION: Capability = "FINANCIAL_VALIDATION"
+
+#: 확정에 필요한 재무 요약 칸.
+#:
+#: ★★ **왜 이 길이 유일한가** (실측 2026-09-11).
+#:
+#:   ```text
+#:   app/sales/persistence.py:380  _line_profit
+#:     ① line.contribution_profit_krw      ← 마스터가 넘긴다   ← 🟢 이 길
+#:     ② scenario.contribution_margin_krw  ← **비어 있다**
+#:     ③ 없으면 SalesPersistenceConflict("missing contribution profit")
+#:   ```
+#:
+#:   ②가 비는 이유는 사고가 아니라 **설계다.** 판매는 그 값을 되먹임 회신에서 받아
+#:   적는데(`proposal.py:216`), **통과한 후보는 되먹임을 안 받는다** (계약 `C-1` ·
+#:   `sales_flow:723`). 실측에서 `feedback_attempts` 전건 0 · 후보 `revision` 전건 0
+#:   이었다. 그래서 **통과한 안은 영원히 확정될 수 없었다.**
+#:
+#:   🔴 **`C-1` 은 옳아서 안 건드렸다.** 통과한 안에 되먹임을 걸면 사용자가 볼 수
+#:     있던 안이 바뀐다. 고리는 **마스터가 값을 날라서** 푼다.
+REQUIRED_FINANCIAL_SUMMARY_FIELDS: tuple[str, ...] = (
+    "contribution_margin_krw",
+    "contribution_margin_rate",
+)
+
+#: 사람이 읽는 이름. `_TERM_NAMES` 와 같은 자리다.
+_SUMMARY_NAMES: Mapping[str, str] = {
+    "contribution_margin_krw": "기여이익(contribution_margin_krw)",
+    "contribution_margin_rate": "기여이익률(contribution_margin_rate)",
+}
+
+
+def financial_summary_of(
+    validations: Mapping[str, Mapping[str, Any]] | None,
+) -> Mapping[str, Any] | None:
+    """재검증 판정에서 **재무가 낸 요약**을 꺼낸다. 없으면 `None`.
+
+    ```text
+    validations["FINANCIAL_VALIDATION"]["payload"]["financial_summary"]
+    ```
+
+    🔴 **재검증이 낸 것이다 — 첫 검증이 아니다.** 확정은 재검증 **뒤에** 서므로,
+      재검증이 그날 사실로 다시 센 값이 정본이다. 첫 검증 값
+      (`candidates[].validations…`)을 쓰면 **「제안 시점 사실」로 장부가 서고**, 그
+      사이 재고·원가가 움직인 것이 사라진다.
+
+    ★ **여기가 이 매핑의 주인이다.** 부르는 쪽(`decision_service._sale_for`)이 세
+      겹을 직접 파고들면 재무가 payload 모양을 바꾸는 날 그 자리가 조용히 `None` 이
+      된다 — 그리고 `None` 은 *"재무가 안 냈다"* 와 구별되지 않는다.
+
+    ⚠️ **`payload` 는 2026-09-11 에야 열렸다** (`revalidation._verdict_of`). 그전에는
+      재검증이 그 칸을 버려서 여기서 꺼낼 것이 아무것도 없었다.
+    """
+    if validations is None:
+        return None
+    verdict = validations.get(_FINANCIAL_VALIDATION)
+    if not isinstance(verdict, Mapping):
+        return None
+    payload = verdict.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    summary = payload.get("financial_summary")
+    return summary if isinstance(summary, Mapping) else None
+
+
+def missing_financial_summary_fields(
+    financial_summary: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """확정에 필요한 재무 칸 중 **비어 있는 칸 이름**. 다 있으면 빈 튜플이다.
+
+    ★ **`missing_commercial_terms` 와 같은 모양이다** — `None` 과 빈 문자열만 없는
+      것으로 센다. `0` 은 없는 값이 아니다: `contribution_margin_krw=0` 은
+      *"기여이익이 0 으로 확인됐다"* 는 **정해진 사실**이고, `falsy` 로 세면 그
+      사실이 조용히 *"재무가 안 냈다"* 가 된다.
+
+    🔴 **요약 자체가 없으면 두 칸 다 없는 것이다.** 통째로 `None` 인 것을 빈 튜플로
+      내면 *"다 있다"* 가 되어 그 다음 줄이 `None` 을 장부에 싣는다.
+    """
+    if financial_summary is None:
+        return REQUIRED_FINANCIAL_SUMMARY_FIELDS
+    return tuple(
+        field
+        for field in REQUIRED_FINANCIAL_SUMMARY_FIELDS
+        if financial_summary.get(field) is None or financial_summary.get(field) == ""
+    )
+
+
+def missing_financial_summary_reason(fields: tuple[str, ...]) -> str:
+    """왜 확정할 수 없나 — **무엇이 없는지 이름을 부르고 누가 채우는지 붙인다.**
+
+    ★ **`missing_terms_reason` 과 같은 모양이고 문장만 다르다.** 저쪽은 화면·판매가
+      채우는 칸이고 여기는 **재무가 내는 값**이다 — 사람이 다음에 볼 자리가 다르므로
+      문장이 그 자리를 가리켜야 한다.
+
+    🔴 **0 으로 채우고 통과시키지 않는다.** 기여이익 0 으로 장부가 서면 그날의
+      손익이 거짓이 되고, 그 거짓은 터지지 않는다 — 숫자만 틀린다.
+    """
+    names = ", ".join(_SUMMARY_NAMES.get(field, field) for field in fields)
+    return (
+        f"재무 판정에 {names} 이(가) 없어 판매를 확정할 수 없다"
+        " — 없는 값을 지어내지 않는다. 재검증의 FINANCIAL_VALIDATION 이 채운다."
+    )
+
+
+def _decimal_of(value: Any) -> Decimal | None:
+    """재무가 낸 수를 **그대로** `Decimal` 로 옮긴다. 못 옮기면 `None`.
+
+    🔴 **계산이 아니다.** 수량 × 단가 − 원가 를 여기서 세면 그 순간 마스터가 재무가
+      된다 (설계 ④). 이 함수는 **표현만** 바꾼다 — 값도 자릿수도 안 건드린다.
+
+    ⚠️ **경로마다 타입이 다르다.** in-process 에서는 재무가 낸 `Decimal` 이 그대로
+      오고, 이력을 한 번 왕복하면 `float` 나 문자열이 온다. `str` 을 거쳐 옮기는
+      것이 `Decimal(float)` 의 이진 꼬리를 안 들이는 유일한 길이다.
+
+    ⚠️ **`bool` 을 막는다.** 파이썬에서 `True` 는 `1` 이라 `Decimal(str(True))` 가
+      아니라 그 앞에서 거른다 — 판매 스키마도 `_reject_boolean` 으로 같은 자리를
+      막는다.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 class SaleConfirmationOut(BaseModel):
     """판매 승인 1건이 원장에 남긴 결과.
 
@@ -284,6 +422,8 @@ def confirm_approved_sale(
     policy_version: str | None,
     scenario: Mapping[str, Any],
     revalidation_outcome: str | None,
+    financial_summary: Mapping[str, Any] | None,
+    sim_run_id: str,
     confirm: Callable[[Any, SalesConfirmationInput], Any] | None = None,
     connect: Callable[[], Any] | None = None,
 ) -> SaleConfirmationOut:
@@ -294,9 +434,10 @@ def confirm_approved_sale(
     ```text
     1. 재검증 통과 확인   PASSED 가 아니면 여기서 끝난다 — confirm_sale 을 안 부른다
     2. 상업조건 확인      없는 값을 지어내지 않는다 → BLOCKED (이름을 부른다)
-    3. 기준일 확인        order_date 는 **그 실행의 as_of** 다 — 벽시계가 아니다
-    4. 입력 계약 조립     커넥션 밖에서 (실패해도 DB 를 안 건드린다)
-    5. confirm_sale       한 커넥션 · commit 한 번 · 실패하면 rollback
+    3. 기여이익 확인      재무가 안 냈으면 지어내지 않는다 → BLOCKED (이름을 부른다)
+    4. 기준일 확인        order_date 는 **그 실행의 as_of** 다 — 벽시계가 아니다
+    5. 입력 계약 조립     커넥션 밖에서 (실패해도 DB 를 안 건드린다)
+    6. confirm_sale       한 커넥션 · commit 한 번 · 실패하면 rollback
     ```
 
     🔴 **재검증이 막히면 부르지 않는다.** `CONDITIONAL` 도 통과가 아니다 — 사용자가
@@ -310,6 +451,14 @@ def confirm_approved_sale(
 
     :param as_of: 🔴 **그 실행의 기준일.** `order_date` 가 되고, 벽시계가 아니다
         (판매·재무 확정 ③). 못 읽으면 `None` 이고 그때는 `BLOCKED` 다.
+    :param financial_summary: 🔴 **재검증의 재무 판정이 낸 요약**
+        (`financial_summary_of` 가 꺼낸다). 기여이익과 기여이익률이 여기서 온다 —
+        되먹임을 안 받는 안에는 이 길뿐이다. **기본값이 없다**: 안 넘기면 터져야
+        한다. 없으면(`None`) 지어내지 않고 `BLOCKED` 다.
+    :param sim_run_id: 🔴 **그 실행의 축.** `sales` 행이 어느 장부에 앉는지를 정한다
+        (`app/sales/persistence.py` 의 INSERT). **기본값이 없다** — 안 넘기면
+        터져야 한다. 부르는 쪽이 재검증에 넘긴 것과 **같은 한 값**이어야 한다:
+        `decision_service.record_decision` 이 행에서 한 번 읽어 둘에 흘린다.
     :param confirm: 확정 함수. 안 주면 `app.sales.persistence.confirm_sale` 이다.
     :param connect: 커넥션 팩토리. 안 주면 `app.sales.db.get_connection` 이다.
     """
@@ -329,6 +478,20 @@ def confirm_approved_sale(
             missing_terms=list(missing),
         )
 
+    # 🔴 **기여이익을 지어내지 않는다** (2026-09-11). 0 으로 채우면 그날 손익이
+    #    거짓이 되고, 그 거짓은 터지지 않는다 — 숫자만 틀린다.
+    #
+    # ⚠️ **`missing_terms` 에 안 담는다.** 저 칸의 어휘는 `missing_term_origins` 가
+    #    내는 `REQUEST_MISSING_*` · `TERMS_UNRESOLVED_*` 이고 *"화면·판매·계약이
+    #    채운다"* 는 뜻이다. 재무가 안 낸 값을 그 어휘에 섞으면 사람이 엉뚱한 파트를
+    #    보러 간다 — 사유 문장이 재무를 가리킨다.
+    없는재무칸 = missing_financial_summary_fields(financial_summary)
+    if 없는재무칸:
+        return SaleConfirmationOut(
+            status="BLOCKED",
+            reason=missing_financial_summary_reason(없는재무칸),
+        )
+
     if as_of is None:
         # ⚠️ **오늘로 대신 채우지 않는다.** `order_date` 는 그 실행이 선 날이고,
         #   못 읽었으면 모르는 것이다 — 모르는 날짜를 지어내면 수금 곡선의 시점이 틀린다.
@@ -346,13 +509,13 @@ def confirm_approved_sale(
             as_of=as_of,
             policy_version=policy_version,
             scenario=scenario,
+            financial_summary=financial_summary,
+            sim_run_id=sim_run_id,
         )
     except (ValidationError, SalesPersistenceConflict, ValueError) as exc:
         # ★ **`FAILED` 가 아니다.** 계약이 안 맞아 쓸 수 없는 것은 우리가 아는
         #   사실이지 실패가 아니다.
-        return SaleConfirmationOut(
-            status="BLOCKED", reason=f"판매 확정 입력을 만들 수 없다: {exc}"
-        )
+        return SaleConfirmationOut(status="BLOCKED", reason=f"판매 확정 입력을 만들 수 없다: {exc}")
 
     do_confirm = confirm_sale if confirm is None else confirm
     conn = _open(connect)
@@ -394,21 +557,55 @@ def _confirmation_input(
     as_of: date,
     policy_version: str | None,
     scenario: Mapping[str, Any],
+    financial_summary: Mapping[str, Any],
+    sim_run_id: str,
 ) -> SalesConfirmationInput:
     """`SalesConfirmationInput` 을 짓는다. **판매가 발표한 계약 그대로다.**
 
     ```text
-    sale_date   scenario 의 delivery_date        납품일 정본은 sales.sale_date (판매 확정)
-    order_date  그 실행의 as_of                   판매·재무 확정 ③ — 벽시계가 아니다
-    sim_run_id  ledger_repository.BURN_IN_SIM_RUN_ID   어느 실행의 장부인가는 마스터가 정한다
+    sale_date   scenario 의 delivery_date   납품일 정본은 sales.sale_date (판매 확정)
+    order_date  그 실행의 as_of              판매·재무 확정 ③ — 벽시계가 아니다
+    sim_run_id  원 실행 이력 행의 축          어느 실행의 장부인가는 마스터가 정한다
+    line.기여이익  재검증의 재무 판정         🔴 되먹임 없는 안에는 이 길뿐이다
     ```
 
-    ★ **기여이익을 마스터가 다시 적지 않는다.** `line.contribution_profit_krw` 와
-      `contribution_margin_rate` 를 비워 두면 판매가 scenario 값을 쓴다
-      (`_line_profit`). 여기에 값을 베껴 넣으면 같은 사실이 두 곳에 남는다.
+    🔴 **`sim_run_id` 는 상수가 아니다** (2026-09-11). 전에는 `BURN_IN_SIM_RUN_ID` 를
+      박았는데, 이 값이 `app/sales/persistence.py` 의 `sales` INSERT 에 그대로
+      실린다 — **일어난 적 없는 판매가 번인 장부에 쌓인다.** 번인은 모든 실행이
+      `--baseline-run-id` 로 출발점 삼는 장부라 그 오염이 뒤따르는 실행 전부에 번진다.
+
+      ⚠️ **터지지 않는다. 숫자만 틀린다.** 그래서 상수를 지우고 기본값도 안 둔다 —
+        안 넘기면 그 자리에서 터져야 한다 (`revalidate_scenario` 와 같은 규율).
+
+    :param sim_run_id: 원 실행 이력 행이 실은 축. 🔴 **여기서 짓지 않는다.**
+
+    🔴 **옛 주석이 거짓이었다** (2026-09-11). 그 문장은 이랬다.
+
+      ```text
+      ★ 기여이익을 마스터가 다시 적지 않는다. line.contribution_profit_krw 와
+        contribution_margin_rate 를 비워 두면 판매가 scenario 값을 쓴다
+        (_line_profit). 여기에 값을 베껴 넣으면 같은 사실이 두 곳에 남는다.
+      ```
+
+      ★★ **통과 경로를 안 본 문장이다.** *"판매가 scenario 값을 쓴다"* 가 참이려면
+        `scenario.contribution_margin_krw` 에 값이 있어야 하는데, **통과한 안에는 그
+        값이 없다.** 판매는 그 값을 되먹임 회신에서 받아 적고(`proposal.py:216`),
+        **통과한 후보는 되먹임을 안 받는다** (계약 `C-1`). 고리가 닫혀 있었고,
+        그래서 통과한 안은 영원히 확정될 수 없었다 (실측: `sales` 0행).
+
+      🟢 **지금도 마스터가 값을 「짓지」는 않는다.** 재무가 낸 것을 **읽어서 나른다** —
+        수량 × 단가 − 원가 를 여기서 세지 않는다. 그 순간 마스터가 재무가 된다.
+        `tests/master/test_finance_margin_carried.py` 가 이 함수 안에 산술 연산이
+        없는지를 AST 로 지킨다.
+
+      ⚠️ **같은 사실이 두 곳에 남는 것**은 맞다. 주인은 **재무**이고 여기는 그것을
+        옮기는 자리다 — 그래서 값을 고르지도 고치지도 않고 두 칸을 그대로 옮긴다.
 
     ★ **`grade` 는 `None` 이다.** `SalesScenario` 에 등급 칸이 없다 — 없는 값을
       지어내지 않는다.
+
+    :param financial_summary: 재검증의 재무 판정이 낸 요약. 🔴 **비어 있지 않은
+        것은 부르는 쪽이 이미 확인했다** (`missing_financial_summary_fields`).
     """
     selected = SalesScenario.model_validate(dict(scenario))
     if selected.delivery_date is None:
@@ -426,7 +623,7 @@ def _confirmation_input(
         ),
         selected_scenario=selected,
         selected_scenario_id=selected.scenario_id,
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        sim_run_id=sim_run_id,
         sale_date=selected.delivery_date,
         order_date=as_of,
         line=SalesApprovalLine(
@@ -434,5 +631,14 @@ def _confirmation_input(
             quantity_kg=selected.quantity_kg,
             unit_price_krw_per_kg=selected.unit_price_krw,
             grade=None,
+            # 🔴 **재무가 낸 것을 그대로 옮긴다.** `_line_profit` 이 이 칸을 **먼저**
+            #    보고, 없으면 `scenario.contribution_margin_krw` 를 보는데 통과한
+            #    안에는 그 값이 없다 (계약 `C-1`).
+            contribution_profit_krw=_decimal_of(
+                financial_summary.get("contribution_margin_krw")
+            ),
+            contribution_margin_rate=_decimal_of(
+                financial_summary.get("contribution_margin_rate")
+            ),
         ),
     )

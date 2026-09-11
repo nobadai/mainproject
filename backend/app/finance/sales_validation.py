@@ -60,6 +60,11 @@ class InventoryCostBasis(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Logistics/Sales가 선택한 basis의 identity와 covered quantity도 보존한다.
+    # Finance는 이를 이용해 Lot을 조회하거나 allocation을 다시 계산하지 않는다.
+    item: str | None = None
+    quantity_kg: Decimal | None = Field(default=None, ge=0)
+    allocation_method: str | None = None
     amount_krw: Decimal = Field(ge=0)
     cost_method: SalesCostMethod
     #: 이 금액이 이미 품고 있는 원가 구성요소 이름. 직접비 중복 계상 차단에 쓴다.
@@ -70,18 +75,19 @@ class InventoryCostBasis(BaseModel):
     #:   이것을 provenance 로 읽으면 나머지 Lot 이 조용히 사라진다 — 나중에 *"이
     #:   원가가 어느 재고에서 왔나"* 를 물었을 때 답이 틀린다.
     source_ref: str = Field(min_length=1)
-    #: ★ **배부 근거의 정본.** 물류가 FEFO 로 원가를 배부하는 데 쓴 모든 Lot 을
-    #:   **배부 순서대로** 담는다. 새 코드는 이쪽을 읽는다.
+    #: ★ **배부 근거의 정본.** Logistics 가 배부에 쓴 모든 Lot 을 **받은 순서대로**
+    #:   담는다. 현재 allocation contract 는 FEFO 이며 **Finance 는 이 순서를
+    #:   바꾸지 않는다.**
     #:
-    #: ⚠️ **«출고된 Lot» 이 아니다.** 물류가 이 값을 내는 자리(PRE_SALES)는 그 판매의
-    #:    예약·할당이 서기 **전**이라, 담긴 것은 *"지금 출고한다면 FEFO 가 집을 Lot"*
-    #:    이다. 실제 출고 Lot 은 승인 뒤 `inventory_allocations` 가 말한다.
+    #: ⚠️ **«출고된 Lot» 이 아니다.** Logistics 가 이 값을 내는 자리(PRE_SALES)는
+    #:    그 판매의 예약·할당이 서기 **전**이라, 담긴 것은 *"지금 출고한다면 FEFO 가
+    #:    집을 Lot"* 이다. 실제 출고 Lot 은 승인 뒤 `inventory_allocations` 가 말한다.
     #:
     #: ★ 안 주면 `source_ref` 하나로 채운다 — 예전 단일 Lot 입력이 그대로 돈다.
     source_refs: tuple[str, ...] = ()
     evidence_grade: EvidenceGrade
 
-    @field_validator("amount_krw", mode="before")
+    @field_validator("amount_krw", "quantity_kg", mode="before")
     @classmethod
     def reject_boolean_amount(cls, value: object) -> object:
         return _reject_boolean(value)

@@ -52,6 +52,10 @@ LABEL = "기본"
 #: 재검증 필수 둘의 라우팅 (`CAPABILITY_ROUTING`). 손으로 적은 것이 아니라 기대값이다.
 필수_호출 = [("inventory", "PRE_SALES"), ("finance", "SALES_VALIDATION")]
 
+#: 원 실행이 걸린 실행 축. 🔴 **번인이 아니다** (2026-09-11) — 재검증은 실행 행이
+#: 실은 축을 그대로 읽는다.
+실행축 = "SIM-FINAL-REVAL-2026"
+
 
 # ---------------------------------------------------------------------------
 # 대역 — 부서 · 저장소
@@ -170,6 +174,7 @@ def _run_row(
         "request_id": REQ,
         "item": "배추",
         "as_of": 원_실행일,
+        "sim_run_id": 실행축,
         "request_payload": request_payload,
         "response_payload": {
             "end_code": "E1_APPROVED",
@@ -313,7 +318,9 @@ def test_새_업무_키로_돌고_그_키가_결정_행에_실린다(monkeypatch
     assert saved.revalidation_request_id is not None
     assert saved.revalidation_request_id != REQ
     assert 쓴_키 == {saved.revalidation_request_id}
-    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(원_실행일, 1)
+    assert saved.revalidation_request_id == revalidation.make_revalidation_request_id(
+        실행축, 원_실행일, 1
+    )
 
 
 def test_번복마다_다른_키를_받는다():
@@ -321,8 +328,8 @@ def test_번복마다_다른_키를_받는다():
     오늘 = date(2026, 9, 7)
 
     assert revalidation.make_revalidation_request_id(
-        오늘, 1
-    ) != revalidation.make_revalidation_request_id(오늘, 2)
+        실행축, 오늘, 1
+    ) != revalidation.make_revalidation_request_id(실행축, 오늘, 2)
 
 
 # ---------------------------------------------------------------------------

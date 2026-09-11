@@ -172,6 +172,13 @@ def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
     if not isinstance(value, Mapping):
         raise TypeError("inventory_cost_basis must be a mapping")
     return InventoryCostBasis(
+        item=None if value.get("item") is None else str(value["item"]),
+        quantity_kg=(
+            None if value.get("quantity_kg") is None else decimal_value(value["quantity_kg"])
+        ),
+        allocation_method=(
+            None if value.get("allocation_method") is None else str(value["allocation_method"])
+        ),
         amount_krw=decimal_value(value["amount_krw"]),
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),

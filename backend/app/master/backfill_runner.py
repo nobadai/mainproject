@@ -88,9 +88,17 @@ class NotWritten:
     ★ `revalidation_outcome` 이 `None` 인 것은 정직하다. **재검증을 안 돌렸기
       때문**이고, `DecisionOut` 도 그 칸의 `None` 을 *"재검증을 하지 않았다"* 로
       읽는다 — 같은 뜻을 같은 값으로 적는다.
+
+    ★ `sale` 도 같다 (2026-09-11). 세어 보기는 판매를 확정하지 않았으므로 `None` 이고,
+      `DecisionOut` 도 그 칸의 `None` 을 *"확정할 것이 없었다"* 로 읽는다.
+
+      🔴 **부르는 쪽을 `getattr` 로 무르게 고치지 않았다.** `backfill` 이
+        `getattr(saved, "sale", None)` 로 읽으면 칸이 통째로 사라지는 날에도 조용히
+        `None` 이 되고, *"확정을 안 했다"* 와 *"칸이 없어졌다"* 가 같은 값이 된다.
     """
 
     revalidation_outcome: None = None
+    sale: None = None
 
 
 class CountingDoor:

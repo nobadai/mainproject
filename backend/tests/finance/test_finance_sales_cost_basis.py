@@ -354,7 +354,7 @@ def test_multiple_lot_lineage_survives_into_the_final_basis():
 
     assert basis is not None
     assert basis.amount_krw == Decimal(45472)
-    # 물류의 FEFO 배부 순서가 곧 읽는 순서다 — 정렬이 흐트러지면 순서 정보가 사라진다.
+    # Logistics 가 확정한 FEFO 배부 순서가 곧 읽는 순서다 — Finance 는 정렬하지 않는다.
     assert basis.source_refs == ("LOT-A", "LOT-B")
     assert basis.inventory_source_ref == "LOT-A"
 
@@ -405,8 +405,8 @@ def test_the_wire_carries_every_lot_ref_into_the_parsed_input():
                 "allocation_method": "FEFO",
                 "cost_method": "ACTUAL",
                 "included_components": ["inventory_acquisition_cost"],
-                "source_ref": "LOT-A",
-                "source_refs": ["LOT-A", "LOT-B"],
+                "source_ref": "LOT-B",
+                "source_refs": ["LOT-B", "LOT-A"],
                 "evidence_grade": "SIM_FIXED",
             },
         }
@@ -416,5 +416,8 @@ def test_the_wire_carries_every_lot_ref_into_the_parsed_input():
     assert parsed is not None
     assert parsed.inventory_cost_basis is not None
     assert parsed.inventory_cost_basis.amount_krw == Decimal(45472)
-    assert parsed.inventory_cost_basis.source_refs == ("LOT-A", "LOT-B")
+    assert parsed.inventory_cost_basis.source_refs == ("LOT-B", "LOT-A")
     assert parsed.inventory_cost_basis.cost_method == "ACTUAL"
+    assert parsed.inventory_cost_basis.item == "배추"
+    assert parsed.inventory_cost_basis.quantity_kg == Decimal(58)
+    assert parsed.inventory_cost_basis.allocation_method == "FEFO"

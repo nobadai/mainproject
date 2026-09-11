@@ -58,8 +58,8 @@ from app.master.envelope import (
     Mode,
     route_capability,
     wire_adjustment,
+    wire_payload,
 )
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.persistence import record_revalidation
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
@@ -147,14 +147,31 @@ _REVALIDATION_KEY_PREFIX = "REV"
 """
 
 
-def make_revalidation_request_id(as_of: date, decision_seq: int) -> str:
-    """`REV-20260907-0001`. **시각이 아니라 날짜 + 결정 회차다.**
+def make_revalidation_request_id(sim_run_id: str, as_of: date, decision_seq: int) -> str:
+    """`REV-SIM-WALK-2026-V4-20260907-0001`. **실행 축 + 날짜 + 결정 회차다.**
 
     ★ `make_request_id` 와 같은 규율이다 (§1.2-11) — 같은 날 재검증을 구분하되
       **재현 가능해야 한다.** 순번을 결정 회차로 두면 번복(`decision_seq` 2, 3 …)이
       각자 다른 키를 받고, 같은 승인을 두 번 처리해도 같은 키가 나온다.
+
+    🔴 **축이 키에 실린다** (2026-09-11). 전에는 `REV-20260907-0001` 이라 **실행이
+      달라도 같은 날 같은 회차면 키가 겹쳤다.** 실측에서 업무 키
+      `REV-20260106-0001` 하나에 **여러 실행의 행 20건**이 쌓여 있었다 — 그 키로는
+      *"어느 실행의 재검증인가"* 를 아무도 못 푼다.
+
+    ★ **축을 첫 위치 인자로 둔다.** 인자가 하나 늘었으므로 옛 호출부가 조용히
+      통과하지 않고 그 자리에서 터진다.
+
+    ★ **자리는 머리 쪽(접두 바로 뒤)이다.** 고를 수 있었던 이유가 실측이다 —
+      저장소 전체에 `REV-` 키의 **접두 조회도 꼬리 조회도 한 곳도 없다**
+      (2026-09-11 전수 확인). 그래서 `run_repository.build_request_id` 의
+      `{머리}-{실행}-{날짜}-{꼬리}` 와 **같은 모양**으로 맞췄다. 🔴 다음 사람이
+      `REV-` 조회를 더한다면 이 자리가 이미 정해져 있다는 것을 먼저 보라.
+
+    ⚠️ `master_decisions.revalidation_request_id` 는 `text` 라 길이 제한이 없다
+      (2026-09-11 실 DB 확인) — 키가 길어져도 마이그레이션이 필요 없다.
     """
-    return f"{_REVALIDATION_KEY_PREFIX}-{as_of.strftime('%Y%m%d')}-{decision_seq:04d}"
+    return f"{_REVALIDATION_KEY_PREFIX}-{sim_run_id}-{as_of.strftime('%Y%m%d')}-{decision_seq:04d}"
 
 
 @dataclass(frozen=True)
@@ -194,6 +211,7 @@ def revalidate_scenario(
     decision_seq: int,
     policy_version: str,
     as_of: date,
+    sim_run_id: str,
     item: str | None = None,
 ) -> Revalidation:
     """선택된 **1안만** 고르는 그날로 다시 검증한다.
@@ -244,23 +262,42 @@ def revalidate_scenario(
       안에 입고 · 수금 · 출고가 지나갔을 수 있고, 재검증이 재는 것은 *"그 사이"* 이지
       *"며칠 지났는가"* 가 아니다.
 
+    🔴 **`sim_run_id` 도 필수 인자로 받는다** (2026-09-11). 전에는 이 자리에서
+      `BURN_IN_SIM_RUN_ID` 를 박았고, 그래서 **어느 실행을 재검증하든 늘 번인
+      장부**를 읽었다.
+
+      ★ **실측된 피해** (실행 `SIM-SALESCHAIN-20260911`): 재무가 채권·현금을 번인
+        장부에서 읽어, 판매를 한 번도 안 한 실행의 재검증이
+        `SALES_CREDIT_LIMIT_EXCEEDED` · `BASE_MINIMUM_CASH_VIOLATED` 로 떨어졌다.
+        승인 일곱 건이 전부 `FAILED` 이고 `sales` 는 0행인데, 번인 채권 합과
+        재검증이 본 AR 이 소수점까지 같았다 (15,752,100.13535).
+
+      ⚠️ **`as_of` 와 같은 규율이다 — 기본값을 두지 않는다.** 기본값은 곧 업무
+        규칙이 되고, 안 넘긴 자리가 조용히 번인으로 답한다. 안 넘기면 터져야 한다.
+
     :param as_of: 이 재검증이 서는 날. 🔴 **원 실행의 날이 아니라 지금 고르는 날이다.**
+    :param sim_run_id: 어느 실행의 장부를 읽는가. 🔴 **원 실행 행이 정본이고 여기서
+        짓지 않는다** (`decision_service._sim_run_id_of`).
     :param original_conditions: 원 실행에서 그 후보에 붙어 있던 **조건 표지 집합**
         (`conditions_of` 가 만든다). 이번 결과가 이보다 늘면 `CONDITIONAL` 이다.
     """
-    request_id = make_revalidation_request_id(as_of, decision_seq)
+    request_id = make_revalidation_request_id(sim_run_id, as_of, decision_seq)
     context = ExecutionContext(
         request_id=request_id,
         as_of=as_of,
         trigger="USER_REQUEST",
         policy_version=policy_version,
-        # ★ 어느 실행의 장부인가는 마스터가 정한다 (물류 `#325`) — 두 진입점과 같은 값.
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        # ★ 어느 실행의 장부인가는 마스터가 정한다 (물류 `#325`). 🔴 **다만 상수가
+        #   아니라 원 실행 행에서 온다** — 부르는 쪽이 읽어 넘긴 값을 그대로 흘린다.
+        sim_run_id=sim_run_id,
     )
 
     # ① 🔴 **첫 관문은 개장이다.** 막히면 재검증이 **실패한** 것이 아니라 **돌리지 못한**
     #    것이라 `FAILED` 와 갈라 `ERROR` 로 적는다.
-    day_gate = check_day_gate(as_of)
+    #
+    #    ★ **관문에도 같은 축을 넘긴다.** 봉투와 관문이 다른 실행을 보면 *"안 열린 날에
+    #      판단이 서는"* 자리가 한 함수 안에서 생긴다.
+    day_gate = check_day_gate(as_of, sim_run_id=sim_run_id)
     if day_gate.gate == "BLOCKED":
         return Revalidation(
             outcome="ERROR",
@@ -415,14 +452,55 @@ def _missing_for(routes: Mapping[str, tuple[AgentName, Mode] | None]) -> tuple[s
 def _verdict_of(reply: AgentReply) -> dict[str, Any]:
     """회신 하나를 판정 칸에 담는 모양으로.
 
-    ★ `sales_flow._verdict_of` 와 **같은 모양이다** — 화면과 이력이 두 경로에서 다른
-      모양을 받으면 읽는 쪽이 어느 경로에서 왔는지를 먼저 알아야 한다.
+    ★ `sales_flow._verdict_of` 와 **무엇이 같고 무엇이 왜 다른지** (2026-09-11).
+
+      ```text
+      같다   agent · mode · business_status · runtime_status · payload
+             · reasoning · missing_data
+      다르다 run_id — sales_flow 에만 있다
+      ```
+
+      🔴 **`run_id` 를 따라 넣지 않는다.** 저쪽의 `run_id` 는 되먹임에 실을 때
+        `SalesFlow.replies_by_ref` 에서 회신 원본을 찾는 **포인터**다. 재검증에는 그
+        등록소가 없다 — 없는 것을 가리키는 포인터를 만들면 다음 사람이 그것을
+        쓰려다 빈손이 된다.
+
+    🔴 **`payload` 는 2026-09-11 에 열었다. 그전에는 버렸다.**
+
+      ```text
+      전  agent · mode · business_status · runtime_status · reasoning · missing_data
+      후  + payload
+      ```
+
+      ★★ **두 파일이 서로를 가리키며 「같은 모양」이라고 적어 두었는데 두 칸이
+        달랐다.** 이 문단의 옛 문장이 *"`sales_flow._verdict_of` 와 같은 모양이다"*
+        였고, 저쪽은 *"`revalidation._verdict_of` 가 이미 목록으로 적고 있어 두
+        경로가 같아진다"* 였다 — **둘 다 상대를 근거로 대며 같다고 주장했다.**
+        매입이 `#588` 에서 고친 것과 같은 병이다: 우리가 소유하지 않은 파일의 사실을
+        베껴 와 근거로 삼았다.
+
+      🔴 **실측된 피해.** 재검증이 받은 재무 회신의 `financial_summary` 가 여기서
+        사라져, 확정이 기여이익을 못 찾아 `sales` 가 0행이었다. 통과한 안은 되먹임을
+        안 받으므로(계약 `C-1`) 후보에도 그 값이 없었고, **고리가 닫혀 있었다.**
+
+      ⚠️ `ExecutionPlan.record` 도 `reply.payload` 를 안 담는다. 그래서 이 칸을 열기
+        전에는 회신 내용이 **어디에도** 안 남았다.
+
+    ★ **`wire_payload` 로 편다** (#175 · `sales_flow` 와 같은 규율). payload 는
+      마스터가 모양을 모르는 중첩 dict 라, 튜플이 하나라도 있으면 JSON 왕복 전후로
+      같은 칸이 두 모양이 된다.
+
+    ★ **조건 비교는 안 바뀐다.** `conditions_of` 는 `business_status` 하나만 보고,
+      그 문서화 문자열이 *"판정은 닫힌 어휘 하나만 쓴다 — `reasoning` 은 설명이지
+      조건이 아니라 넣지 않는다"* 고 적어 두었다. `payload` 도 같은 쪽이다.
+      `tests/master/test_finance_margin_carried.py` 가 그것을 잠근다.
     """
     return {
         "agent": reply.agent,
         "mode": reply.mode,
         "business_status": reply.business_status,
         "runtime_status": reply.runtime_status,
+        "payload": wire_payload(dict(reply.payload)),
         "reasoning": reply.reasoning,
         "missing_data": list(reply.missing_data),
     }

@@ -403,6 +403,82 @@ class WalkResult:
                     total.update(approval.outcomes)
         return total
 
+    @property
+    def confirmation_outcomes(self) -> Mapping[str, int]:
+        """판매 확정 어휘 분포 (2026-09-11). 🔴 **셋을 접지 않는다.**
+
+        ```text
+        CONFIRMED  sales · sale_items 가 섰다
+        BLOCKED    확정할 수 없었다 — 아무것도 안 썼다
+        FAILED     쓰려다 실패했다 — 롤백했다
+        ```
+
+        ★★ **이 줄이 없어서 「승인 7건 RECORDED · 재검증 PASSED 7건」 을 보고 판매가
+          선 줄 알았다** (실측 2026-09-11). `sales` 는 0행이었고, 확정이 매번
+          `BLOCKED` 였는데 그 사실이 성적표 어디에도 안 남아 사람이 손으로 재현해서야
+          찾았다.
+
+        🔴 **`approval_outcomes` 와 한 칸에 담지 않는다.** 어휘가 다르고 축이 다르다 —
+          `RECORDED` 는 *"승인이 적혔다"* 일 뿐 *"판매가 섰다"* 가 아니다
+          (`transition_outcomes` 를 가른 것과 같은 이유).
+
+        ★ **이름의 주인은 `backfill.py` 다.** 여기서 새 이름을 안 붙이고 세기만 한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is not None:
+                    total.update(approval.confirmation_outcomes)
+        return total
+
+    @property
+    def confirmation_reasons(self) -> tuple[str, ...]:
+        """확정이 못 선 이유들. **`CONFIRMED` 가 아닌 것만.**
+
+        ⚠️ **코드만 나르면 오늘 밤이 반복된다.** `{BLOCKED: 7}` 만 보고는 무엇이
+          막았는지를 못 읽는다 — 그날의 이유는 `ValidationError:
+          reported_sales_amount_krw` 였고 그것은 문장을 봐야 보인다.
+
+        ★ **같은 문장을 한 번만 싣는다.** 이레 내내 같은 이유면 줄이 일곱이 아니라
+          하나여야 읽힌다. **본 순서는 지킨다** — 무엇이 먼저 막았는지가 순서다.
+        """
+        out: list[str] = []
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is None:
+                    continue
+                for one in approval.runs:
+                    사유 = one.confirmation_reason
+                    if (
+                        one.confirmation_status not in (None, "CONFIRMED")
+                        and 사유
+                        and 사유 not in out
+                    ):
+                        out.append(사유)
+        return tuple(out)
+
+    @property
+    def label_outcomes(self) -> Mapping[str, int]:
+        """**어느 라벨이 실제로 섰나** (2026-09-11). 🔴 **접지 않는다.**
+
+        ★★ **규칙에 순서가 생긴 순간 이 줄이 필요해졌다** (`backfill.FIRST_OFFERED`).
+          규칙 파일에 순서가 적혀 있어도 **그날 무엇이 섰는지**는 그날 제시된 안이
+          정한다 — 이 줄이 없으면 **곡선이 한 규칙의 것이 아니게 되고**, 사람이
+          날마다 결정 행을 되짚어야 한다.
+
+        🔴 **`approval_outcomes` 와 한 칸에 담지 않는다.** 어휘가 다르고 축이 다르다 —
+          저쪽은 *"승인을 적었나"* 이고 이쪽은 *"무엇을 골랐나"* 다
+          (`confirmation_outcomes` · `transition_outcomes` 와 같은 규율).
+
+        ★ **이름의 주인은 매입이다.** 여기서 새 이름을 안 붙이고 세기만 한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is not None:
+                    total.update(approval.label_outcomes)
+        return total
+
 
 def walk(
     *,
@@ -748,6 +824,14 @@ def format_summary(result: WalkResult) -> str:
         #    두 줄이다 — 한 줄로 묶으면 *"안 켰다"* 와 *"켰는데 0건"* 이 같아 보인다.
         f"승인      {dict(sorted(result.approval_statuses.items()))}",
         f"승인어휘  {dict(sorted(result.approval_outcomes.items()))}",
+        # 🔴 **확정 줄을 접지 않는다** (2026-09-11). *"승인을 적었다"* 와 *"판매가
+        #    섰다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 7 · 재검증 PASSED 7` 을
+        #    보고 판매가 선 줄 알았고, `sales` 는 0행이었다.
+        f"확정어휘  {dict(sorted(result.confirmation_outcomes.items()))}",
+        # 🔴 **라벨 줄을 접지 않는다** (2026-09-11). 규칙이 순서를 갖게 되면서
+        #    *"규칙이 무엇을 적었나"* 와 *"그날 무엇이 섰나"* 가 갈릴 수 있다 —
+        #    이 줄이 그 둘을 잇는 유일한 자리다.
+        f"라벨어휘  {dict(sorted(result.label_outcomes.items()))}",
         # 🔴 **전이 줄을 접지 않는다** (2026-09-11). *"승인을 적었다"* 와 *"그 승인이
         #    원장에 닿았다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 15` 를 보고
         #    원장에 닿은 줄 알았고, `purchases` 는 0행이었다.
@@ -760,6 +844,9 @@ def format_summary(result: WalkResult) -> str:
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]
+    # ⚠️ **사유를 코드 밑에 붙인다.** `{BLOCKED: 7}` 만으로는 무엇이 막았는지를
+    #    못 읽고, 그것이 오늘 밤 사람이 손으로 재현해야 했던 이유다.
+    lines += [f"  확정막힘  {사유}" for 사유 in result.confirmation_reasons]
     lines += [f"  사고 {one.as_of.isoformat()}  {one.reason}" for one in result.incidents]
     if result.stopped_reason is not None:
         lines.append(f"멈춤      {result.stopped_at} — {result.stopped_reason}")

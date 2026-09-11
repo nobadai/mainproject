@@ -110,9 +110,14 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             # 권위 있는 중간 수량 근거가 없으면 임의 수치를 만들지 않는다.
             collapsed = True
             collapse_reason = "AUTHORITATIVE_INTERMEDIATE_OPTION_UNAVAILABLE"
-        elif scenario_type == "CONSERVATIVE":
+        elif scenario_type == "CONSERVATIVE" and confirmed is None:
             collapsed = True
             collapse_reason = "CONFIRMED_SUPPLY_LIMIT_NOT_PROVIDED"
+        elif scenario_type == "CONSERVATIVE":
+            # 확정 상한은 받았지만 요청량을 이미 모두 덮는다. 없는 값과 같은
+            # 사유로 접으면 화면과 후속 재검증이 upstream 미응답으로 오인한다.
+            collapsed = True
+            collapse_reason = "CONFIRMED_SUPPLY_COVERS_REQUEST"
         scenario_id, parent, revision = _scenario_lineage(suffix, request)
         replies = _replies_for_scenario(request, parent or scenario_id)
         # 조건부 Purchase 회신은 확정 공급안을 오염시키지 않는다.
