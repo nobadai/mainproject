@@ -1,5 +1,4 @@
 """Finance operations-console receivable read model; strictly run-scoped."""
-# ruff: noqa: E501
 
 from datetime import date
 from decimal import Decimal
