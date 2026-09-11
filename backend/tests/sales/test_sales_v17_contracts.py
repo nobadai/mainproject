@@ -455,8 +455,8 @@ def _cost_basis(quantity="7000", amount="4547200"):
         "allocation_method": "FEFO",
         "cost_method": "ACTUAL",
         "included_components": ["inventory_acquisition_cost"],
-        "source_ref": "LOT-A",
-        "source_refs": ["LOT-A", "LOT-B"],
+        "source_ref": "LOT-B",
+        "source_refs": ["LOT-B", "LOT-A"],
         "evidence_grade": "SIM_FIXED",
     }
 
@@ -478,7 +478,7 @@ def test_물류가_낸_재고원가가_후보에_그대로_실린다():
     assert 보수.quantity_kg == Decimal(7000)
     assert 보수.inventory_cost_basis is not None
     assert 보수.inventory_cost_basis.amount_krw == Decimal(4547200)
-    assert 보수.inventory_cost_basis.source_refs == ["LOT-A", "LOT-B"]
+    assert 보수.inventory_cost_basis.source_refs == ["LOT-B", "LOT-A"]
     assert 보수.inventory_cost_basis.cost_method == "ACTUAL"
     assert 보수.inventory_cost_basis.allocation_method == "FEFO"
 
@@ -519,7 +519,7 @@ def test_재고원가는_재무_전선_이름_그대로_직렬화된다():
 
     wire = 보수.model_dump(by_alias=True, mode="json")
 
-    assert wire["inventory_cost_basis"]["source_refs"] == ["LOT-A", "LOT-B"]
+    assert wire["inventory_cost_basis"]["source_refs"] == ["LOT-B", "LOT-A"]
     assert wire["inventory_cost_basis"]["cost_method"] == "ACTUAL"
     assert wire["inventory_cost_basis"]["allocation_method"] == "FEFO"
 
