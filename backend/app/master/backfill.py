@@ -330,6 +330,24 @@ class BackfilledRun:
     #: 결정 행은 쓰이고 효력은 재검증이 정한다 (`record_decision` 의 규율 그대로).
     revalidation_outcome: RevalidationOutcome | None = None
 
+    #: 판매 확정 결과 (2026-09-11). `CONFIRMED` · `BLOCKED` · `FAILED` · `None`.
+    #:
+    #: 🔴 **`revalidation_outcome` 의 다음 축이다.** 재검증이 `PASSED` 여도 확정은
+    #:   막힐 수 있고, 그때 `sales` 에는 한 행도 안 선다 — 그 사실이 `RECORDED` 에
+    #:   가려 있었다 (실측 2026-09-11: 재검증 `PASSED` 7건인데 `sales` 0행).
+    #:
+    #: ★ **매입 행에서는 `None` 이다.** 판매 확정이 도는 것은 판매 사이클뿐이라,
+    #:   그 `None` 은 *"확정에 실패했다"* 가 아니라 **"확정할 것이 없었다"** 다.
+    confirmation_status: Literal["CONFIRMED", "BLOCKED", "FAILED"] | None = None
+
+    #: 확정이 막히거나 터진 이유 한 줄.
+    #:
+    #: ⚠️ **코드만 나르면 오늘 밤이 반복된다** (2026-09-11). `BLOCKED` 만 보고는
+    #:   *"상업조건이 없나"* 인지 *"입력 계약이 안 맞나"* 인지를 못 가른다 — 실제로
+    #:   그날의 이유는 `ValidationError: reported_sales_amount_krw` 였고, 그것은
+    #:   문장을 봐야 보인다.
+    confirmation_reason: str | None = None
+
 
 @dataclass(frozen=True)
 class BackfillOut:
@@ -355,6 +373,32 @@ class BackfillOut:
     def outcomes(self) -> Mapping[str, int]:
         """결과 분포. **여덟 값을 그대로 센다** — 새 이름을 안 붙인다."""
         return Counter(one.outcome for one in self.runs)
+
+    @property
+    def confirmation_outcomes(self) -> Mapping[str, int]:
+        """판매 확정 어휘 분포 (2026-09-11). 🔴 **셋을 접지 않는다.**
+
+        ```text
+        CONFIRMED  sales · sale_items 가 섰다
+        BLOCKED    확정할 수 없었다 — 아무것도 안 썼다
+        FAILED     쓰려다 실패했다 — 롤백했다
+        ```
+
+        ★★ **`outcomes` 와 한 칸에 담지 않는다.** 축이 다르다 — 저쪽은 *"승인을
+          적었나"* 이고 이쪽은 *"판매가 섰나"* 다. `RECORDED` 가 곧 판매가 선 것이
+          아니라는 사실이 이 줄로 보여야 한다 (`transition_outcomes` 와 같은 규율).
+
+        ★ **`None` 은 안 센다.** 매입 행에는 확정이라는 사건 자체가 없어, 세면
+          *"확정을 못 했다"* 가 매입 행 수만큼 부풀어 오른다.
+
+        ★ **이름의 주인은 `sales_approval.SaleConfirmationOut` 이다.** 여기서 새
+          이름을 안 붙이고 세기만 한다.
+        """
+        return Counter(
+            one.confirmation_status
+            for one in self.runs
+            if one.confirmation_status is not None
+        )
 
 
 def read_rules(config_json: Mapping[str, Any]) -> BackfillRules:
@@ -745,4 +789,9 @@ def _backfill_one(
         request_id=request_id,
         outcome="RECORDED",
         revalidation_outcome=saved.revalidation_outcome,
+        # 🔴 **확정 결과를 여기서 버리지 않는다** (2026-09-11). 전에는 `saved.sale`
+        #    을 안 읽어서, 확정이 `BLOCKED` 로 막혀도 성적표에는 `RECORDED` 하나만
+        #    남았다 — *"승인이 적혔다"* 가 *"판매가 섰다"* 로 읽혔다.
+        confirmation_status=None if saved.sale is None else saved.sale.status,
+        confirmation_reason=None if saved.sale is None else (saved.sale.reason or None),
     )
