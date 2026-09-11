@@ -49,6 +49,7 @@ def validate_context(request: SalesProposalInput) -> list[str]:
         request.business_mode != "CONTRACT_FULFILLMENT"
         and request.user_request.requested_quantity_kg is None
         and not (request.business_mode == "CONTRACT_PROPOSAL_RENEWAL" and contract)
+        and _confirmed_sellable_qty(request) is None
     ):
         issues.append("PROPOSAL_QUANTITY_REQUIRED")
     expected_item = request.user_request.item
@@ -237,6 +238,33 @@ def _user_overrides_contract(request: SalesProposalInput) -> bool:
     )
 
 
+def _confirmed_sellable_qty(request: SalesProposalInput) -> Decimal | None:
+    """물류가 **확정한** 그 품목의 판매 가능 수량. 없으면 `None`.
+
+    🔴 **사람이 수량을 말하지 않는 호출이 있다** (2026-09-11 · 걷기 실측). 자동 걷기는
+       날마다 판매를 부르는데 그 자리에 사람이 없다. 종전에는 그때마다
+       `PROPOSAL_QUANTITY_REQUIRED` 로 막혔고, 206일에 안이 **0건**이었다.
+
+    ★★ **`inventory_by_item` 만 읽는다.** 그 칸의 정의가 *"Logistics 가 확정한 현재
+      판매 가능 수량 뷰"* 다 — 물류가 비-ACTIVE·신선도 만료·예약분을 **이미 뺀** 값이다.
+
+    🔴 **`lot_constraints` 는 쓰지 않는다.** 그 모델이 *"Lot 은 근거 컨텍스트이며
+       Sales 가 이를 합산하거나 필터링하지 않는다"* 고 못박고 있다. 로트를 더하면
+       판매가 물류의 가용 판정을 다시 하는 것이 된다.
+
+    ⚠️ **0 이면 `None` 이 아니라 0 이다.** *"팔 것이 없다"* 는 사실이고, 그때는 수량이
+      0 인 안이 서서 **왜 0 인지가 결과에 남는다** — 「없다」와 「못 물어봤다」는 다르다.
+    """
+    context = request.logistics_context
+    supply = context.sellable_supply if context else None
+    if supply is None or supply.status != "READY":
+        return None
+    for entry in supply.inventory_by_item:
+        if entry.item == request.user_request.item and entry.available_qty_kg is not None:
+            return entry.available_qty_kg
+    return None
+
+
 def _baseline(request: SalesProposalInput):
     contract = request.contract_context
     user = request.user_request
@@ -251,6 +279,10 @@ def _baseline(request: SalesProposalInput):
         source_ref = contract.source_ref
     else:
         quantity = user.requested_quantity_kg
+        if quantity is None:
+            # ★ 사람이 말하지 않은 자리다. **물류가 확정한 값**을 쓴다 —
+            #   `_confirmed_sellable_qty` 가 왜 그 칸만 읽는지를 적었다.
+            quantity = _confirmed_sellable_qty(request)
         price = user.preferred_unit_price_krw
         delivery = user.preferred_delivery_date
         payment = user.preferred_payment_days

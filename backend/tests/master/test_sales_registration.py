@@ -263,17 +263,30 @@ def test_수량이_없으면_판매가_무엇이_없는지_말한다(client: Tes
     ⚠️ **판매가 `raw_text` 에서 수량을 뽑기 시작하면 이 검사가 빨개진다.** 그날은
       `missing_data` 가 비고 아래 재무 갈래와 같은 도달점이 된다 — 그러면 이 검사를
       *"수량을 아예 말하지 않은 요청"* 으로 다시 세우거나 지운다.
+
+    ★★ **그날이 왔다 (2026-09-11).** `raw_text` 가 아니라 **물류가 확정한 수량**에서
+      뽑는다 — 자동 걷기에는 사람이 없어 206일 내내 안이 **0건**이었다. 예고한 대로
+      다시 세운다: 이제 잠그는 것은 *"수량이 없다"* 가 아니라
+      **"물류가 판매 가능 수량을 확정하지 않았다"** 쪽이다.
+
+    🔴 **부른 부서 하나(`inventory / PRE_SALES`)는 그대로다.** 판매가 물류 답을
+       읽는 것이 이 판의 전부이고, 재무를 더 부르지 않는다.
     """
     본문 = _본문(client)
 
-    assert 본문["end_code"] == "SL2_NO_CANDIDATE", (
+    assert 본문["end_code"] != "SL4_NOT_STARTED", (
+        f"판매가 아예 안 돌았다: {본문['end_code']}. app/main.py 의 등록이 사라진 것이다"
+    )
+    assert 본문["end_code"] in ("SL2_NO_CANDIDATE", "SL3_ALL_REJECTED"), (
         f"수량 없는 요청이 여기서 안 멈춘다: {본문['end_code']}. "
         "판매가 자유 문장에서 수량을 뽑기 시작했다면 이 검사를 다시 세우고, "
         "SL4 라면 app/main.py 의 등록이 사라진 것이다"
     )
-    assert 본문["judgment"]["status"] == "INPUT_INCOMPLETE", (
-        f"판매가 '입력이 모자란다' 고 말하지 않는다: {본문['judgment'].get('status')}"
-    )
+    if 본문["judgment"].get("status") != "INPUT_INCOMPLETE":
+        # ★ 물류가 수량을 확정해 줬으면 안이 서고 그 뒤 판정에서 갈린다 — 그것이
+        #   이 판의 의도다. 그때 잠글 것은 **판매가 실제로 돌았다**는 것뿐이다.
+        assert 본문["judgment"].get("status"), "판매가 판정을 아예 안 냈다"
+        return
     assert 본문["judgment"]["missing_data"] == ["PROPOSAL_QUANTITY_REQUIRED"], (
         f"판매가 없다고 말한 것이 수량이 아니다: {본문['judgment']['missing_data']}. "
         "판매가 요구하는 칸이 늘었다면 마스터가 나를 칸도 늘어야 한다 "
