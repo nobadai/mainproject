@@ -170,13 +170,17 @@ def test_축_없이_부르면_터진다(부서들):
     assert not 부서들["finance"].호출, "축 없이도 부서를 불렀다"
 
 
-def test_못_읽은_축은_메우지_않고_ERROR_다():
+def test_못_읽은_축은_메우지_않고_ERROR_다(부서들):
     """🔴 **`or BURN_IN_SIM_RUN_ID` 로 메우는 길을 막는다.**
 
     원 실행 행이 축을 안 실었으면 *"모른다"* 다. 번인으로 메우면 축이 안 실린 옛
     실행의 승인이 조용히 남의 장부에 앉는다 — 그것이 지금 고치는 바로 그 병이다.
 
     ★ 어휘는 `as_of` · `policy_version` 과 **같은 모양**이다 (같은 함수 안 바로 위).
+
+    ★★ **부서를 등록해 두고 잰다.** 안 등록하면 메우는 변이를 넣어도 *"어댑터가
+      없다"* 로 `ERROR` 가 나서 `outcome` 만으로는 못 가른다 — 등록해 두면 메우는
+      순간 `PASSED` 가 되어 그 자리에서 빨개진다.
     """
     from app.master.decision import DecisionIn
     from app.master.decision_service import _revalidation_for
@@ -196,6 +200,9 @@ def test_못_읽은_축은_메우지_않고_ERROR_다():
 
     assert 결과 is not None
     assert 결과.outcome == "ERROR", f"축을 못 읽었는데 {결과.outcome} 로 돌았다"
+    assert not [부.호출 for 부 in 부서들.values() if 부.호출], (
+        "축을 못 읽었는데 부서를 불렀다 — 어느 실행의 장부로 물었는지 아무도 모른다"
+    )
     assert unicodedata.normalize("NFC", 결과.reason) == unicodedata.normalize(
         "NFC", "원 실행의 sim_run_id 를 못 읽어 재검증 봉투를 만들 수 없다."
     ), f"사유 문장이 다르다: {결과.reason}"
