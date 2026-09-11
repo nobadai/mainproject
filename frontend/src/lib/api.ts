@@ -31,18 +31,81 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * 읽기 넷(`runHistory` · `burnIn` · `runReport` · `health`)과 `ask` 의 상한.
+ *
+ * 2026-09-11 실측 (같은 LAN 의 DB · 걷기가 도는 중) — `/health` `0.12s` ·
+ * `/master/burn-in` `0.09s` · `/master/runs/{id}` `0.07s` · `…/report` `0.04s`.
+ * **20초는 그 최대의 160배**다.
+ */
+const READ_TIMEOUT_MS = 20_000;
+
+/**
+ * 실행은 상한이 다르다 — 하루치 판단을 통째로 돌린다.
+ *
+ * 처음에 `180초`(읽기 최대의 6배)로 잡았다가 **재고 물렀다.** `master_agent_runs.elapsed_ms`
+ * 를 `request_id` 로 묶어(5분 넘게 벌어지면 다른 실행으로 자름) 실행 한 번의 소요를 세면 —
+ *
+ *     LLM 이 산 실행   377회   중앙 12.6s · p90 45.1s · p99 243.0s · 최대 **731.0s**
+ *     LLM 이 꺼진 실행 5,102회 중앙  2.3s · p90  5.0s · p99  11.5s · 최대   67.2s
+ *
+ * 상한별로 **잘렸을 실행**이 이렇게 된다 (LLM 이 산 377회 기준) —
+ *
+ *      60s  32건 (8.5%)      180s  9건 (2.4%)      600s  1건 (0.3%)
+ *     120s  13건 (3.4%)      300s  2건 (0.5%)      900s  0건
+ *
+ * ★ `900초` 를 고른다. 이 상한이 하려는 일은 *"느린 실행을 빨리 자르는 것"* 이 아니라
+ *   *"영영 안 끝나는 실행을 끝내는 것"* 이다 — **관측된 정상 실행을 하나도 안 자르는**
+ *   가장 낮은 칸이다. 잘린 실행은 화면에서 안이 통째로 사라지므로, 시연에서는 그쪽이
+ *   더 나쁘다.
+ *
+ * ⚠️ 15분 스피너가 좋다는 뜻이 아니다. 그건 진행 표시로 풀 일이고 여기 상한과 다른 판이다.
+ * 🟡 위 표는 `2026-09-11` 기록이다. LLM·모델이 바뀌면 다시 재고 이 칸을 조인다.
+ */
+const EXECUTE_TIMEOUT_MS = 900_000;
+
+async function call<T>(path: string, init?: RequestInit, timeoutMs = READ_TIMEOUT_MS): Promise<T> {
+  // 🔴 **본문까지 같은 상한 안에 둔다.** 헤더만 먼저 오고 본문이 안 끝나는 경우가 있다.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await send<T>(path, controller, timeoutMs, init);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function send<T>(
+  path: string,
+  controller: AbortController,
+  timeoutMs: number,
+  init?: RequestInit,
+): Promise<T> {
+  // ⚠️ **끊은 것과 못 닿은 것은 다른 사고다.** 한 문장으로 뭉치면 보는 사람이
+  //    "서버를 켜라" 는 엉뚱한 조치를 한다 — 서버는 떠 있고 느린 것이다.
+  const tooSlow = () =>
+    new ApiError(0, `${timeoutMs / 1000}초 안에 응답이 오지 않아 끊었습니다 — 서버가 떠 있으나 느립니다.`);
+
   let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      // ``...init`` 뒤에 둔다 — 부르는 쪽이 signal 을 실어도 상한이 이긴다.
+      signal: controller.signal,
     });
   } catch {
+    if (controller.signal.aborted) throw tooSlow();
     throw new ApiError(0, "백엔드에 닿지 못했습니다 — 서버가 떠 있는지 확인해 주세요.");
   }
 
-  const body = await response.text();
+  let body: string;
+  try {
+    body = await response.text();
+  } catch {
+    if (controller.signal.aborted) throw tooSlow();
+    throw new ApiError(0, "응답 본문을 읽지 못했습니다.");
+  }
   if (!response.ok) {
     let detail = body;
     try {
@@ -96,19 +159,24 @@ export function execute(args: {
   targetHistoryRunId?: string;
   decidedBy?: string;
 }): Promise<ExecuteResponse> {
-  return call<ExecuteResponse>("/master/ask/execute", {
-    method: "POST",
-    body: JSON.stringify({
-      intent: args.intent,
-      as_of: asOfSnapshot(),
-      policy_version: POLICY_VERSION,
-      request_id: args.requestId ?? null,
-      // 발화문에 없어 화면이 실어야 하는 셋 (SELECT · RERUN 필수)
-      target_request_id: args.targetRequestId ?? null,
-      target_history_run_id: args.targetHistoryRunId ?? null,
-      decided_by: args.decidedBy ?? null,
-    }),
-  });
+  return call<ExecuteResponse>(
+    "/master/ask/execute",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        intent: args.intent,
+        as_of: asOfSnapshot(),
+        policy_version: POLICY_VERSION,
+        request_id: args.requestId ?? null,
+        // 발화문에 없어 화면이 실어야 하는 셋 (SELECT · RERUN 필수)
+        target_request_id: args.targetRequestId ?? null,
+        target_history_run_id: args.targetHistoryRunId ?? null,
+        decided_by: args.decidedBy ?? null,
+      }),
+    },
+    // 🔴 여기만 상한이 다르다 — 읽기가 아니라 **돌리는** 호출이다.
+    EXECUTE_TIMEOUT_MS,
+  );
 }
 
 export function runHistory(requestId: string): Promise<RunHistory> {
