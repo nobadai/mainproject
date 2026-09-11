@@ -210,7 +210,9 @@ situation:
     stable: high
     uncertain: medium
 
-# ③ draft_plan — 수량 = 확정수요 × 커버일수 D
+# ③ draft_plan — 수량 = round(확정수요 × 커버일수 D) − 차감보유  (`#584`)
+#   🔴 차감을 빼고 적지 않는다 — 이 줄을 읽고 `total_qty_kg ÷ D` 로 일수요를 되잡으면
+#     보유가 덮은 만큼 낮게 나온다. 일수요 정본은 `partner_item_demands.daily_demand_kg`
 coverage_days:
   min: 2                            # 하한 = JIT baseline
   max: 18                           # 상한 = D+18 지평
