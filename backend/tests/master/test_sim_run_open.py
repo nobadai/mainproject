@@ -222,28 +222,56 @@ _물류출발행: dict[str, Any] = {
 }
 
 #: 대역 스키마의 표 — 축(`sim_run_id`)을 가진 것만.
+#: 🔴 **축을 가진 표만** 든다 — `information_schema` 가 돌려주는 그 목록이다.
+#:   축 없는 자식은 여기 없고, FK 를 훑어서 따라 들어가야 나온다.
 _표들 = (
     "deliveries",
     "expenses",
     "finance_states",
+    "inventory_lots",
+    "master_agent_runs",
     "payables",
     "purchases",
     "sales",
     "sim_runs",
 )
 
-#: 대역 스키마의 `(자식, 부모)`.
+#: 축이 없으면서 축 있는 표에 매달린 자식. 🔴 **`_표들` 에 없다** — 이 목록을
+#:   운영 코드가 `pg_constraint` 를 훑어 제 손으로 세워야 한다.
+#:
+#: ★ `master_decisions` 는 **복합 FK** 이고 `pallet_events` 는 **손자**다
+#:   (`pallet_events → pallets → inventory_lots`). 실제 스키마에 둘 다 있다.
+_축없는자식 = ("master_decisions", "pallet_events", "pallets", "sale_items")
+
+#: 대역 스키마의 FK `(자식, 자식 칸들, 부모, 부모 칸들)`.
 _FK = (
-    ("expenses", "deliveries"),
-    ("deliveries", "sales"),
-    ("payables", "purchases"),
-    ("sales", "sim_runs"),
-    ("purchases", "sim_runs"),
-    ("finance_states", "sim_runs"),
+    ("expenses", ("delivery_id",), "deliveries", ("delivery_id",)),
+    ("deliveries", ("sale_id",), "sales", ("sale_id",)),
+    ("payables", ("purchase_id",), "purchases", ("purchase_id",)),
+    ("sales", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
+    ("purchases", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
+    ("finance_states", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
+    ("inventory_lots", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
+    ("master_agent_runs", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
     # 대상 밖의 부모 — 지우는 순서에 안 낀다.
-    ("sales", "items"),
+    ("sales", ("item_id",), "items", ("item_id",)),
     # 자기 참조 — 순서를 못 정하는 근거가 아니다.
-    ("purchases", "purchases"),
+    ("purchases", ("parent_purchase_id",), "purchases", ("purchase_id",)),
+    # ── 축 없는 자식 ──
+    # 🔴 **복합 FK** — 실제로 `--reset` 을 막은 그 자리다.
+    (
+        "master_decisions",
+        ("run_id", "request_id"),
+        "master_agent_runs",
+        ("run_id", "request_id"),
+    ),
+    ("sale_items", ("sale_id",), "sales", ("sale_id",)),
+    # ⚠️ **지우지 않는 부모** — 기준 정보다. 이쪽으로 따라가면 이번 실행과
+    #    아무 상관 없는 행을 지운다.
+    ("sale_items", ("item_id",), "items", ("item_id",)),
+    ("pallets", ("lot_id",), "inventory_lots", ("lot_id",)),
+    # ★ **손자** — 축 없는 부모에 매달렸다.
+    ("pallet_events", ("pallet_id",), "pallets", ("pallet_id",)),
 )
 
 #: 표마다 몇 행이 있는가. `expenses` 는 **0** 이다 — 0 도 세어서 나와야 한다.
@@ -251,8 +279,14 @@ _행수 = {
     "deliveries": 12,
     "expenses": 0,
     "finance_states": 1,
+    "inventory_lots": 4,
+    "master_agent_runs": 6,
+    "master_decisions": 11,
+    "pallet_events": 8,
+    "pallets": 3,
     "payables": 7,
     "purchases": 5,
+    "sale_items": 15,
     "sales": 9,
 }
 
@@ -295,7 +329,15 @@ class _대역커서:
         self.대장.log.append((문장, list(params or [])))
         self._rows, self._one = [], None
         if "pg_constraint" in 문장:
-            self._rows = [{"child_table": c, "parent_table": p} for c, p in self.대장.fk]
+            self._rows = [
+                {
+                    "child_table": c,
+                    "parent_table": p,
+                    "child_columns": list(cc),
+                    "parent_columns": list(pc),
+                }
+                for c, cc, p, pc in self.대장.fk
+            ]
         elif "is_generated" in 문장:
             # ★ 칸 목록은 **표마다 다르다** — 질의가 어느 표를 물었는지로 고른다.
             물은표 = (list(params or []) + [None, None])[1]
@@ -879,7 +921,7 @@ def test_지우는_순서가_자식_먼저다() -> None:
     던진순서 = [_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM")]
     assert 던진순서 == list(결과.order), "돌려준 순서와 실제로 던진 순서가 다르다"
     자리 = {표: i for i, 표 in enumerate(던진순서)}
-    for 자식, 부모 in _FK:
+    for 자식, _, 부모, _ in _FK:
         if 자식 == 부모 or 자식 not in 자리 or 부모 not in 자리:
             continue
         assert 자리[자식] < 자리[부모], f"부모({부모})를 자식({자식})보다 먼저 지운다"
@@ -917,16 +959,166 @@ def test_실행_행_자체는_안_지운다() -> None:
     assert "sim_runs" not in [_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM")]
 
 
-def test_모든_DELETE_가_축으로만_좁힌다() -> None:
-    """★ 조건 없이 지우면 **남의 실행까지** 날아간다."""
+def test_모든_DELETE_가_그_실행으로_좁힌다() -> None:
+    """★ 조건 없이 지우면 **남의 실행까지** 날아간다.
+
+    🔴 **축 있는 표는 축으로, 축 없는 자식은 부모를 통해** 좁힌다. 어느 쪽이든
+      값으로 실리는 것은 **그 실행 하나**여야 한다.
+    """
     conn = _대역커넥션()
     reset_sim_run_ledger(conn, sim_run_id=새실행)
 
     문장들 = _문장들(conn, "DELETE FROM")
     assert 문장들
     for 문장, params in 문장들:
-        assert '"sim_run_id" = %s' in 문장, f"축으로 안 좁혔다: {문장}"
-        assert params == [새실행]
+        assert " WHERE " in 문장, f"조건 없이 지운다: {문장}"
+        assert params, f"좁히는 값이 하나도 없다: {문장}"
+        assert set(params) == {새실행}, f"그 실행 말고 다른 값으로 좁혔다: {문장} / {params}"
+        if _표이름(문장) in _표들:
+            assert '"sim_run_id" = %s' in 문장, f"축을 가진 표를 축으로 안 좁혔다: {문장}"
+
+
+def _부모질의(문장: str) -> list[str]:
+    """한 DELETE 문이 **어느 표를 물어서 좁혔나**. 중첩된 것까지 다 집는다."""
+    return re.findall(r'IN \(SELECT .*? FROM "[^"]+"\."([^"]+)"', 문장)
+
+
+def _문장(conn: _대역커넥션, 표: str) -> str:
+    찾은 = [문장 for 문장, _ in _문장들(conn, "DELETE FROM") if _표이름(문장) == 표]
+    assert len(찾은) == 1, f"{표} 에 던진 DELETE 가 하나가 아니다: {찾은}"
+    return 찾은[0]
+
+
+def test_축_없는_자식도_지운다() -> None:
+    """🔴 **축 있는 표만 비우면 부모를 지울 때 FK 가 막는다.**
+
+    ★★ 실제로 `--reset` 이 여기서 섰다 — `master_decisions` 가 `master_agent_runs`
+      를 붙잡았다. 축이 없다고 안 지우면 부모가 못 지워진다.
+    """
+    conn = _대역커넥션()
+    결과 = reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    던진표 = [_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM")]
+    for 자식 in _축없는자식:
+        assert 자식 in 던진표, f"축 없는 자식({자식})에 DELETE 를 안 던졌다"
+        assert 자식 in 결과.order, f"축 없는 자식({자식})이 순서에 안 남았다"
+
+
+def test_축_없는_자식을_부모보다_먼저_지운다() -> None:
+    """🔴 **부모를 먼저 지우면 그 자리에서 FK 가 막는다** — 반쯤 지워진 장부가 남는다."""
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    자리 = {표: i for i, 표 in enumerate(_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM"))}
+    for 자식, _, 부모, _ in _FK:
+        if 자식 == 부모 or 자식 not in _축없는자식 or 부모 not in 자리:
+            continue
+        assert 자리[자식] < 자리[부모], f"부모({부모})를 축 없는 자식({자식})보다 먼저 지운다"
+
+
+def test_자식_표를_통째로_안_비운다() -> None:
+    """🔴 **지울 것은 이번에 지우는 부모에 매달린 행이다.**
+
+    ★★ *"그 표의 모든 행"* 을 지우면 **다른 실행·다른 사실의 행까지** 날아간다.
+      축 없는 자식에는 실행 축이 없으니, 좁히는 길은 **부모를 물어보는 것뿐**이다.
+    """
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    for 자식 in _축없는자식:
+        문장 = _문장(conn, 자식)
+        assert _부모질의(문장), f"{자식} 을 조건 없이 통째로 비운다: {문장}"
+
+
+def test_복합_FK_는_두_칸을_다_맞춘다() -> None:
+    """🔴 **한 칸만 맞추면 남의 장부가 날아간다.**
+
+    ★★ `master_decisions` 는 `(run_id, request_id)` 로 매달린다. `run_id` 하나만
+      맞추면 **같은 run_id 를 가진 다른 request** 의 결정까지 걸린다 — 그리고
+      FK 는 그것을 안 막는다. 에러 없이 틀린 삭제다.
+    """
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+    문장 = _문장(conn, "master_decisions")
+
+    assert '("run_id", "request_id") IN (SELECT "run_id", "request_id"' in 문장, (
+        f"복합 FK 의 두 칸을 다 안 맞췄다: {문장}"
+    )
+
+
+def test_지우지_않는_부모로는_안_따라간다() -> None:
+    """⚠️ **기준 정보는 이번에 지우는 대상이 아니다.**
+
+    ★★ `sale_items` 는 `sales` 에도 `items` 에도 매달린다. `items` 는 품목이고
+      실행과 무관한 사실이라 이번에 안 지운다 — 그런데도 그쪽으로 따라가면
+      **이번 실행과 아무 상관 없는 행**을 지운다.
+
+    🔴 판단 기준은 *"그 부모를 이번에 지우는가"* 이지 *"그 부모에 축이 있는가"*
+      가 아니다.
+    """
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    물은표 = _부모질의(_문장(conn, "sale_items"))
+    assert "sales" in 물은표, "지우는 부모를 안 물었다"
+    assert "items" not in 물은표, f"안 지우는 부모(items)까지 따라갔다: {물은표}"
+    assert "items" not in [_표이름(문장) for 문장, _ in _문장들(conn, "DELETE FROM")]
+
+
+def test_손자까지_따라간다() -> None:
+    """★ **한 번 훑고 끝나지 않는다.** 축 없는 자식이 또 축 없는 자식을 가진다
+    (`pallet_events → pallets → inventory_lots`). 한 겹만 보면 손자가 남고,
+    그러면 `pallets` 를 지울 때 FK 가 막는다.
+    """
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    물은표 = _부모질의(_문장(conn, "pallet_events"))
+    assert 물은표 == ["pallets", "inventory_lots"], (
+        f"손자가 제 축 있는 조상까지 안 되짚었다: {물은표}"
+    )
+
+
+def test_축_없는_자식_목록을_손으로_안_적는다() -> None:
+    """🔴 **열셋째가 생기는 날 조용히 뒤처진다.**
+
+    ★★ 목록의 주인은 `pg_constraint` 다. 손으로 적으면 마이그레이션이 자식을
+      하나 더 만든 날 그 표만 안 지워지고, 그 실패는 `--reset` 을 돌리는 사람
+      앞에서 FK 위반으로 터진다 — 그때 또 사람이 목록을 고쳐야 한다.
+
+    ★ 칸 이름도 마찬가지다. 복합 FK 의 칸을 손으로 적으면 짝이 하나 바뀌는 날 틀린다.
+    """
+    원문 = _벗긴_원문(_MASTER / "sim_run_open.py")
+
+    for 표 in (*_축없는자식, "market_quotes", "purchase_items", "inventory_move_lines"):
+        assert 표 not in 원문, f"축 없는 자식 이름을 원문에 박았다: {표}"
+    # ★ `run_id` 는 여기 없다 — 축 이름 `sim_run_id` 안에 들어 있어서, 금지하면
+    #   축을 제대로 쓴 코드가 걸린다. 복합 FK 의 나머지 한 칸인 `request_id` 가
+    #   그 자리를 대신 잰다.
+    for 칸 in ("request_id", "lot_id", "pallet_id", "sale_id", "purchase_id"):
+        assert 칸 not in 원문, f"FK 칸 이름을 원문에 박았다: {칸}"
+
+
+def test_FK_모양을_pg_constraint_에서_읽는다() -> None:
+    """🔴 **칸 목록까지 카탈로그에서 온다.** 이름만 읽으면 어느 칸이 어느 칸을
+    가리키는지를 모르고, 그러면 좁힐 방법이 없어 자식 표를 통째로 비우게 된다.
+    """
+    conn = _대역커넥션()
+    reset_sim_run_ledger(conn, sim_run_id=새실행)
+
+    관계질의 = [문장 for 문장, _ in conn.log if "pg_constraint" in 문장]
+    assert len(관계질의) == 1
+    for 조각 in ("conkey", "confkey", "pg_attribute", "WITH ORDINALITY"):
+        assert 조각 in 관계질의[0], f"FK 모양을 안 읽는다: {조각}"
+
+
+def test_결과에_축_없는_자식의_행수가_남는다() -> None:
+    """🟢 **무엇이 얼마나 지워졌는지가 성적표에 남아야 한다.**"""
+    결과 = reset_sim_run_ledger(_대역커넥션(), sim_run_id=새실행)
+
+    assert dict(결과.deleted) == _행수
+    for 자식 in _축없는자식:
+        assert 결과.deleted[자식] == _행수[자식], f"{자식} 의 행수가 결과에 안 남았다"
 
 
 def test_축을_가진_표를_읽어서_정한다() -> None:
@@ -935,7 +1127,10 @@ def test_축을_가진_표를_읽어서_정한다() -> None:
     """
     conn = _대역커넥션(
         표들=("sim_runs", "sales", "새로_생긴_표"),
-        fk=(("sales", "sim_runs"), ("새로_생긴_표", "sales")),
+        fk=(
+            ("sales", ("sim_run_id",), "sim_runs", ("sim_run_id",)),
+            ("새로_생긴_표", ("sale_id",), "sales", ("sale_id",)),
+        ),
         행수={"sales": 3, "새로_생긴_표": 2},
     )
     결과 = reset_sim_run_ledger(conn, sim_run_id=새실행)
@@ -964,7 +1159,10 @@ def test_고리가_있으면_아무_순서로나_안_던진다() -> None:
     """★ 순서를 못 세우면 터진다 — 반쯤 지워진 장부보다 낫다."""
     conn = _대역커넥션(
         표들=("sim_runs", "가", "나"),
-        fk=(("가", "나"), ("나", "가")),
+        fk=(
+            ("가", ("나_id",), "나", ("나_id",)),
+            ("나", ("가_id",), "가", ("가_id",)),
+        ),
         행수={"가": 1, "나": 1},
     )
     with pytest.raises(RuntimeError):
