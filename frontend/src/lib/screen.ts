@@ -20,15 +20,57 @@ export class ScreenError extends Error {
   }
 }
 
+/**
+ * 응답 상한. **이 파일은 읽기 전용**이라 걸리는 곳이 뻔하고, 그래서 값을 잴 수 있었다.
+ *
+ * 2026-09-11 실측 (걷기가 도는 중 · 같은 LAN 의 DB) —
+ *
+ *     /dashboard  2.14s   ← 여섯 중 제일 느리다
+ *     /logistics  0.73s
+ *     /purchase   0.97s
+ *     /sales      0.17s
+ *
+ * ★ 20초는 그 최대의 **약 10배**다. 넉넉한 쪽으로 골랐다 — 이 상한이 하려는 일은
+ *   *"느린 요청을 빨리 자르는 것"* 이 아니라 *"영영 안 끝나는 요청을 끝내는 것"* 이다
+ *   (`#81`). 백엔드는 **접속**이 5초에 끊기지만, **붙은 뒤 안 끝나는 것**은 안 막는다.
+ */
+const TIMEOUT_MS = 20_000;
+
 async function get<T>(path: string, params: Record<string, string>): Promise<T> {
   const qs = new URLSearchParams(params).toString();
+  // 🔴 **본문까지 같은 상한 안에 둔다.** 헤더만 먼저 오고 본문이 안 끝나는 경우가 있어
+  //    ``res.text()`` 를 마친 뒤에야 타이머를 끈다.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    return await read<T>(`${BASE}${path}?${qs}`, controller);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function read<T>(url: string, controller: AbortController): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}?${qs}`, { headers: { Accept: "application/json" } });
+    res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
   } catch {
-    throw new ScreenError(0, "백엔드에 닿지 못했습니다 — 서버가 떠 있는지 확인해 주세요.");
+    // ⚠️ **끊은 것과 못 닿은 것은 다른 사고다.** 한 문장으로 뭉치면 화면을 보는 사람이
+    //    "서버를 켜라" 는 엉뚱한 조치를 한다 — 서버는 떠 있고 느린 것이다.
+    throw controller.signal.aborted
+      ? new ScreenError(0, `${TIMEOUT_MS / 1000}초 안에 응답이 오지 않아 끊었습니다 — 서버가 떠 있으나 느립니다.`)
+      : new ScreenError(0, "백엔드에 닿지 못했습니다 — 서버가 떠 있는지 확인해 주세요.");
   }
-  const body = await res.text();
+  let body: string;
+  try {
+    body = await res.text();
+  } catch {
+    throw controller.signal.aborted
+      ? new ScreenError(0, `${TIMEOUT_MS / 1000}초 안에 본문이 다 오지 않아 끊었습니다 — 서버가 떠 있으나 느립니다.`)
+      : new ScreenError(0, "응답 본문을 읽지 못했습니다.");
+  }
   if (!res.ok) {
     let detail = body;
     try {
