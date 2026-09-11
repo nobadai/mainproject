@@ -103,6 +103,37 @@ def injected_keys(sources: Any) -> tuple[str, ...]:
 _ORDER_WINDOW_DAYS = 14
 
 
+# ── 시세 계열 ───────────────────────────────────────────────────────────
+#
+# 🔴 **매입과 판매가 같은 시세를 보고 있었다** (2026-09-11 · 걷기 실측).
+#
+#   `load_forecast` 하나를 두 경로가 같이 쓰는데 조회에 계열이 박혀 있어서
+#   **경매가로 사서 경매가로 팔았다.** 완주한 걷기 `SIM-CHAIN-V3`(1~3월)에서
+#   `SALES_MARGIN_BELOW_MINIMUM` 이 511건 중 483건이고, 팔린 일곱 건이 전부 무였다.
+#
+#   ```text
+#   품목    AUC(경매)   WHSL(중도매)   차이     단위
+#   배추      643        1,152        +79%    둘 다 원/kg
+#   무        558          854        +53%
+#   양파      834        1,022        +23%
+#   ```
+#
+# ★ **어휘의 주인은 ML 이다** (`app.ml.schemas.TargetKind` — `AUC` · `WHSL` · `RTL`).
+#   마스터는 **고르기만 하고 새로 만들지 않는다.**
+#
+# ⚠️ **`RTL`(소매)은 안 쓴다.** 단위가 `원/단위` 이고 `unit_weight_kg` 가 전부 비어
+#   있어 kg 로 못 바꾼다. 사람이 그 사실을 보고 중도매로 정했다.
+
+#: 매입이 읽는 계열. **경매에서 산다.**
+PROCUREMENT_TARGET_KIND = "AUC"
+
+#: 판매가 읽는 계열. **중도매로 판다 — 고객이 김치공장이다.**
+#:
+#: 🔴 같은 값을 여기 말고 다른 데 적지 않는다. 리터럴을 흩뿌리면 **왜 그 값인지**가
+#:   사라지고, 한 자리만 고친 날 매입과 판매가 다시 같은 시세를 본다.
+SALES_TARGET_KIND = "WHSL"
+
+
 @dataclass(frozen=True)
 class SourcedInput:
     """값 + 출처. **둘을 떼어 놓지 않는다.**"""
@@ -144,9 +175,14 @@ class MasterInputs:
 
 
 def collect_inputs(item: str, as_of: date) -> MasterInputs:
-    """세 입력을 모은다. **하나가 실패해도 나머지는 싣는다.**"""
+    """세 입력을 모은다. **하나가 실패해도 나머지는 싣는다.**
+
+    ★ **매입 전용이다.** 부르는 자리는 `service._inputs_for` 하나이고, 그래서
+      시세 계열도 매입 것(`PROCUREMENT_TARGET_KIND`)으로 정해서 넘긴다. 판매는
+      셋을 안 모으고 예측 하나만 따로 읽는다 (`service._sales_forecast`).
+    """
     return MasterInputs(
-        forecast=load_forecast(item, as_of),
+        forecast=load_forecast(item, as_of, target_kind=PROCUREMENT_TARGET_KIND),
         confirmed_orders=load_confirmed_orders(item, as_of),
         policy_values=load_policy_values(item, as_of),
     )
@@ -155,8 +191,24 @@ def collect_inputs(item: str, as_of: date) -> MasterInputs:
 # ── forecast ────────────────────────────────────────────────────────────
 
 
-def load_forecast(item: str, as_of: date) -> SourcedInput:
+def load_forecast(item: str, as_of: date, *, target_kind: str) -> SourcedInput:
     """ML 예측. **`as_of` 당일 배치만 쓴다.**
+
+    🔴 **`target_kind` 에 기본값을 두지 않는다** (2026-09-11).
+
+      기본값은 곧 업무 규칙이고, **안 넘긴 자리가 조용히 경매가로 답한다** — 전 판이
+      정확히 그 상태였다. 조회에 `'AUC'` 가 박혀 있어서 판매도 경매가를 읽었고,
+      그래서 **경매가로 사서 경매가로 팔았다.**
+
+      `revalidation.revalidate_scenario` 가 `as_of` 에 대해 같은 결론을 냈다 —
+      안 넘기면 터져야 한다.
+
+    ★ 부르는 자리가 **자기 계열을 골라서 넘긴다.**
+
+      .. code-block:: text
+
+          매입   PROCUREMENT_TARGET_KIND   경매에서 산다
+          판매   SALES_TARGET_KIND         중도매로 판다
 
     ★ 미래 배치를 집으면 백테스트 성적이 통째로 무효가 된다 (look-ahead).
       뷰가 `as_of` 컬럼을 갖고 있으므로 **그 이하만** 고른다 — 이 조건은 그대로다.
@@ -188,7 +240,7 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
       온다.
     """
     try:
-        row = _forecast_from_db(item, as_of)
+        row = _forecast_from_db(item, as_of, target_kind)
     except Exception as error:  # noqa: BLE001 — 적재 실패가 Flow 를 죽이면 안 된다
         return _forecast_missing(f"DB 조회 실패 ({error})")
     if row is None:
@@ -199,13 +251,21 @@ def load_forecast(item: str, as_of: date) -> SourcedInput:
         key="forecast",
         payload=_forecast_payload(row),
         grade="MEASURED",
+        # ★★ **이 한 줄이 계열을 나른다.** 나중에 *"이 단가가 경매였나 중도매였나"*
+        #   를 되짚을 수 있는 자리는 여기뿐이다.
+        #
+        #   🟢 모양은 그대로 두었다. 다만 **그 값이 이제 실제로 갈린다** — 지금까지는
+        #     매입도 판매도 늘 경매라 이 칸이 잠들어 있었다.
         source=f"v_ml_price_forecast(as_of={row['as_of']}, {row['target_kind']})",
         note=str(row.get("quality_note") or ""),
     )
 
 
-def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
+def _forecast_from_db(item: str, as_of: date, target_kind: str) -> dict[str, Any] | None:
     """`as_of` **이하** 최신 배치 한 행. **당일인지는 여기서 안 본다.**
+
+    🔴 **계열도 여기서 안 정한다** (2026-09-11). 전 판은 조회에 `'AUC'` 가 박혀
+      있어서 부르는 자리가 무엇이든 **경매가가 올라왔다.** 이제 받아서 넘기기만 한다.
 
     ★ `as_of <= %s` 를 걷으면 미래 배치를 집는다 (look-ahead). 그러면 백테스트
       성적이 통째로 무효가 되므로 이 조건은 남는다.
@@ -217,11 +277,11 @@ def _forecast_from_db(item: str, as_of: date) -> dict[str, Any] | None:
     """
     query = sql.SQL("""
         SELECT * FROM {}.v_ml_price_forecast
-         WHERE item = %s AND as_of <= %s AND target_kind = 'AUC'
+         WHERE item = %s AND as_of <= %s AND target_kind = %s
          ORDER BY as_of DESC
          LIMIT 1
     """).format(sql.Identifier(get_db_schema()))
-    row = fetch_one(query, (item, as_of))
+    row = fetch_one(query, (item, as_of, target_kind))
     return dict(row) if row else None
 
 

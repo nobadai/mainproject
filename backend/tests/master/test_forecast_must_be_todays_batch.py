@@ -60,7 +60,7 @@ def patch(monkeypatch, one):
 def test_당일_배치면_MEASURED_로_실린다(monkeypatch):
     """정상 경로가 안 막혔는지부터 본다 — 이게 없으면 아래 검사는 '전부 막기' 로도 통과한다."""
     patch(monkeypatch, lambda *a: _row(AS_OF))
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MEASURED"
     assert got.payload is not None
@@ -79,7 +79,7 @@ def test_어제_배치밖에_없으면_MISSING_이다(monkeypatch):
     """
     yesterday = date(2026, 8, 24)
     patch(monkeypatch, lambda *a: _row(yesterday))
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MISSING"
     assert got.payload is None, "당일 배치가 아닌데 값이 실렸다"
@@ -95,7 +95,7 @@ def test_210일_밀린_배치가_MEASURED_로_안_나간다(monkeypatch):
     이 검사가 빨개지면 210일 전 예측으로 오늘 매입안을 만드는 길이 다시 열린 것이다.
     """
     patch(monkeypatch, lambda *a: _row(STALE_BATCH))
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MISSING", "210일 전 예측이 실측으로 나갔다"
     assert got.payload is None
@@ -112,7 +112,7 @@ def test_사유에_요청일과_최신배치일과_지연일수가_다_있다(mo
     지연일수가 없으면 두 날짜를 눈으로 빼야 하고, 210일과 1일이 같은 문장으로 보인다.
     """
     patch(monkeypatch, lambda *a: _row(STALE_BATCH))
-    note = inputs.load_forecast("배추", AS_OF).note
+    note = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND).note
 
     assert "2026-08-25" in note, f"요청한 날이 없다: {note}"
     assert "2026-01-27" in note, f"실제로 있는 최신 배치일이 없다: {note}"
@@ -126,7 +126,7 @@ def test_사유가_원인을_단정하지_않는다(monkeypatch):
     사유가 원인을 단정하면 다음 사람이 엉뚱한 데를 판다 — 사실만 적는다.
     """
     patch(monkeypatch, lambda *a: _row(STALE_BATCH))
-    note = inputs.load_forecast("배추", AS_OF).note
+    note = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND).note
 
     for 단정 in ("공휴일", "휴장", "장애", "휴일", "미실행"):
         assert 단정 not in note, f"원인을 단정했다({단정}): {note}"
@@ -149,7 +149,7 @@ def test_조회가_여전히_미래_배치를_막는다(monkeypatch):
         return _row(AS_OF)
 
     patch(monkeypatch, watching)
-    inputs.load_forecast("배추", AS_OF)
+    inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert "as_of <= %s" in seen["sql"], f"look-ahead 방지가 걷혔다: {seen['sql']}"
     assert AS_OF in seen["params"], "as_of 를 조회에 안 넘긴다 — 상한이 무의미해진다"
@@ -161,7 +161,7 @@ def test_조회가_여전히_미래_배치를_막는다(monkeypatch):
 def test_배치가_아예_없으면_지금처럼_MISSING_이다(monkeypatch):
     """`#227` 이 만든 경로다. 당일 규칙이 이 갈래를 가리면 안 된다."""
     patch(monkeypatch, lambda *a: None)
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MISSING"
     assert got.payload is None
@@ -189,7 +189,7 @@ def test_당일_배치가_없으면_run_procurement_이_E4_로_선다(monkeypatc
     def 실제_적재(item: str, as_of: date) -> MasterInputs:
         """conftest 가 꺼 둔 적재를 이 검사에서만 되살린다 — forecast 만 실물로 태운다."""
         return MasterInputs(
-            forecast=inputs.load_forecast(item, as_of),
+            forecast=inputs.load_forecast(item, as_of, target_kind=inputs.PROCUREMENT_TARGET_KIND),
             confirmed_orders=SourcedInput("confirmed_orders", {"total_kg": 1.0}, "DERIVED", "뷰"),
             policy_values=SourcedInput("policy_values", {"item_mix_ratio": {}}, "DERIVED", "표"),
         )

@@ -50,7 +50,7 @@ def patch(monkeypatch, *, one=None, many=None):
 
 def test_실_DB_에서_읽으면_MEASURED_다(monkeypatch):
     patch(monkeypatch, one=lambda *a: FORECAST_ROW)
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MEASURED"
     assert got.payload["current_price"] == 645
@@ -68,7 +68,7 @@ def test_예측_배치가_없으면_비운다_mock_으로_안_메운다(monkeypa
     ★ 이제 비운다. 매입이 `missing_data: ["forecast"]` 로 답한다.
     """
     patch(monkeypatch)  # fetch_one → None
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     assert got.grade == "MISSING"
     assert got.payload is None, "못 읽었는데 값이 있다 — mock 다리가 다시 생겼다"
@@ -80,7 +80,7 @@ def test_DB_가_터져도_Flow_를_죽이지_않는다(monkeypatch):
         raise RuntimeError("커넥션 없음")
 
     patch(monkeypatch, one=boom)
-    got = inputs.load_forecast("배추", AS_OF)
+    got = inputs.load_forecast("배추", AS_OF, target_kind=inputs.PROCUREMENT_TARGET_KIND)
 
     # ⚠️ 전에는 {"MOCK", "MISSING"} 둘 다 받았다. 그 느슨함이 mock 다리를 가렸다.
     assert got.grade == "MISSING"

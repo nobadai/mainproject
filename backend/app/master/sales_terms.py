@@ -60,7 +60,7 @@ from app.master.backfill import (
     SalesTermsRule,
     read_run_rules,
 )
-from app.master.inputs import SourcedInput, load_forecast
+from app.master.inputs import SALES_TARGET_KIND, SourcedInput, load_forecast
 from app.master.schemas import SalesRunRequest
 
 __all__ = ["apply_sales_terms", "read_run_sales_terms", "rules_source_ref"]
@@ -69,6 +69,21 @@ logger = logging.getLogger(__name__)
 
 #: ML 예측 봉투에서 시세가 앉는 칸. ⚠️ **ML 의 칸 이름이다** — 마스터가 짓지 않았다.
 _CURRENT_PRICE_KEY = "current_price"
+
+
+def _sales_forecast(item: str, as_of: date) -> SourcedInput:
+    """**중도매 계열**로 물어보는 기본 적재 (2026-09-11).
+
+    ★★ **파는 단가가 실제로 서는 자리가 여기다.** `ML_CURRENT_PRICE` 규칙이 이
+      값을 `preferred_unit_price_krw` 에 그대로 얹는다.
+
+    🔴 전 판은 매입과 같은 경매 계열을 읽었다 — **경매가로 사서 경매가로 팔았다.**
+      완주한 걷기 `SIM-CHAIN-V3`(1~3월)에서 `SALES_MARGIN_BELOW_MINIMUM` 이
+      511건 중 483건이었다.
+
+    ★ 계열 이름을 여기 적지 않는다 — 주인은 `inputs.SALES_TARGET_KIND` 하나다.
+    """
+    return load_forecast(item, as_of, target_kind=SALES_TARGET_KIND)
 
 
 def read_run_sales_terms(
@@ -117,7 +132,7 @@ def apply_sales_terms(
     request: SalesRunRequest,
     rule: SalesTermsRule | None,
     *,
-    forecast_fn: Callable[[str, date], SourcedInput] = load_forecast,
+    forecast_fn: Callable[[str, date], SourcedInput] = _sales_forecast,
 ) -> SalesRunRequest:
     """규칙이 말한 상업 조건을 요청에 **얹는다.**
 
@@ -134,6 +149,7 @@ def apply_sales_terms(
     :param forecast_fn: ML 예측을 읽는 자리. 🔴 **기본이 `inputs.load_forecast` 다** —
         *"`as_of` 당일 배치만 쓴다"* 는 판정의 주인이 거기 하나이고, 여기서
         `generated_at` 을 다시 보면 판정이 두 곳에 생긴다.
+        ★ 계열은 **중도매**다 (`_sales_forecast`). 파는 자리이기 때문이다.
     """
     if rule is None:
         return request

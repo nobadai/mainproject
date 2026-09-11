@@ -65,7 +65,7 @@ from datetime import date
 from typing import Literal
 
 from app.contracts.core import ITEMS, ItemCode
-from app.master.inputs import SourcedInput, load_forecast
+from app.master.inputs import PROCUREMENT_TARGET_KIND, SourcedInput, load_forecast
 
 __all__ = [
     "DayForecastReadiness",
@@ -87,6 +87,21 @@ DayReadiness = Literal["ALL_READY", "SOME_READY", "NONE_READY", "UNREADABLE"]
 #: ⚠️ **기본값이 `load_forecast` 자체다.** `None` 으로 두면 *"안 물었다"* 와
 #:   *"기본 적재로 물었다"* 가 같은 값이 된다 (`clock.py` · `verifier.py` 와 같은 규율).
 Loader = Callable[[str, date], SourcedInput]
+
+
+def _procurement_forecast(item: str, as_of: date) -> SourcedInput:
+    """**매입 계열**로 물어보는 기본 적재 (2026-09-11).
+
+    🟢 **관문이 보던 값은 그대로다.** 판매가 중도매 계열로 갈라지면서
+      `load_forecast` 가 계열을 인자로 받게 됐고, 이 관문은 **매입 등급 사다리가
+      서는 자리**라 경매를 그대로 읽는다.
+
+    🔴 여기서 판매 계열을 읽으면 **매입이 조용히 다른 시세로 산다.** 그 사고는 값이
+      아니라 등급으로 나타나므로 화면에 아무 오류도 안 뜬다.
+
+    ★ 계열 이름을 여기 적지 않는다 — 주인은 `inputs.PROCUREMENT_TARGET_KIND` 하나다.
+    """
+    return load_forecast(item, as_of, target_kind=PROCUREMENT_TARGET_KIND)
 
 
 @dataclass(frozen=True)
@@ -145,7 +160,7 @@ def check_forecast_gate(
     item: str,
     as_of: date,
     *,
-    load: Loader = load_forecast,
+    load: Loader = _procurement_forecast,
 ) -> ItemForecastGate:
     """그 품목의 **그날 예측이 왔는지만** 묻는다. 판단을 돌리지 않는다.
 
@@ -184,7 +199,7 @@ def day_forecast_readiness(
     items: Iterable[ItemCode] = ITEMS,
     as_of: date | None = None,
     *,
-    load: Loader = load_forecast,
+    load: Loader = _procurement_forecast,
 ) -> DayForecastReadiness:
     """그날 전체가 준비됐는지. **품목별 답을 접되 내역을 버리지 않는다.**
 
