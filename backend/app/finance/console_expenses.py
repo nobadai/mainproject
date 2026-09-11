@@ -16,6 +16,8 @@ from app.finance.db import fetch_all, get_db_schema
 #: to the ledger shows up as itself instead of quietly joining someone else's total.
 _DISPLAY_NAMES: dict[str, str] = {
     "LABOR": "인건비",
+    "PAYROLL": "급여",
+    "LOGISTICS_SERVICE": "물류 용역비",
     "RENT": "임차료",
     "UTILITY": "수도광열비",
     "LOGISTICS": "물류비",
