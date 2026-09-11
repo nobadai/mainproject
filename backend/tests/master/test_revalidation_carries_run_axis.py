@@ -192,10 +192,12 @@ def test_못_읽은_축은_메우지_않고_ERROR_다(부서들):
         "adjustments": [],
     }
     결과 = _revalidation_for(
-        {"request_payload": {"policy_version": "v1.3"}},  # 🔴 sim_run_id 칸이 없다
+        {"request_payload": {"policy_version": "v1.3"}},
         응답,
         DecisionIn(decision="APPROVE", scenario_label="기본", decided_by="이현서"),
         1,
+        # 🔴 축을 못 읽은 것 — `record_decision` 의 `_sim_run_id_of(row)` 가 낸 `None` 이다.
+        sim_run_id=None,
     )
 
     assert 결과 is not None

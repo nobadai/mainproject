@@ -51,7 +51,6 @@ from app.master.decision import (
     scenario_ids_of,
 )
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sales_flow import CandidateVerdict
 
 REQ = "REQ-20260910-0001"
@@ -78,6 +77,10 @@ SCN = "SALES-001-A-R1"
 #: `_revalidation_for` 가 `ERROR` 를 내고 확정까지 안 간다.
 실행축 = "SIM-SALESCHAIN-20260911"
 
+#: 두 번째 실행. 🔴 **하나로는 "넘긴 값이 실렸다" 와 "상수가 마침 그 값이다" 를
+#:   못 가른다.**
+다른_실행축 = "SIM-WALK-2026-V4"
+
 
 # ---------------------------------------------------------------------------
 # 대역 — 부서 · 저장소 · confirm_sale
@@ -91,8 +94,13 @@ class 부서:
         self.business_status = business_status
         self.호출: list[tuple[str, str, date]] = []
 
+        #: 재검증 봉투가 들고 온 실행 축. 🔴 **`호출` 과 따로 둔다** — 저 튜플을
+        #: 넓히면 이미 셋으로 푸는 자리들이 같이 깨진다.
+        self.축: list[str] = []
+
     def __call__(self, request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         self.호출.append((request.agent, request.mode, request.context.as_of))
+        self.축.append(request.context.sim_run_id)
         reply = AgentReply(
             request_id=request.context.request_id,
             as_of=request.context.as_of,
@@ -217,6 +225,7 @@ def _판매_실행(
     end_code: str = "SL1_PRESENTED",
     cycle: str = "SALES",
     candidates: tuple[dict[str, Any], ...] | None = None,
+    sim_run_id: str = 실행축,
 ) -> dict[str, Any]:
     후보 = candidates if candidates is not None else ({"scenario": _scenario()},)
     return {
@@ -225,7 +234,7 @@ def _판매_실행(
         "cycle": cycle,
         "item": "배추",
         "as_of": 원_실행일,
-        "sim_run_id": 실행축,
+        "sim_run_id": sim_run_id,
         "request_payload": {"policy_version": "v1.3", "item": "배추"},
         "response_payload": {
             "end_code": end_code,
@@ -454,6 +463,7 @@ def test_CONDITIONAL_도_통과가_아니다(monkeypatch):
         policy_version="v1.3",
         scenario=_scenario(),
         revalidation_outcome="CONDITIONAL",
+        sim_run_id=실행축,
         confirm=대역,
         connect=커넥션_대역,
     )
@@ -475,6 +485,7 @@ def _확정(scenario: Mapping[str, Any], 대역: 확정_대역 | None = None):
         policy_version="v1.3",
         scenario=scenario,
         revalidation_outcome="PASSED",
+        sim_run_id=실행축,
         confirm=대역 or 확정_대역(),
         connect=커넥션_대역,
     )
@@ -565,13 +576,54 @@ def test_sale_date_는_scenario_의_납품일이다(monkeypatch, 이력, 부서�
     assert 확정.호출[0].sale_date == 납품일
 
 
-def test_sim_run_id_는_마스터가_정한다(monkeypatch, 이력, 부서들, 확정):
-    """★ 어느 실행의 장부인가는 마스터가 정한다 — 남의 조회를 베끼지 않는다."""
-    _실행을_세운다(monkeypatch, _판매_실행())
+def test_sim_run_id_는_마스터가_정한다(monkeypatch, 부서들, 확정):
+    """★ 어느 실행의 장부인가는 마스터가 정한다 — 남의 조회를 베끼지 않는다.
 
-    decision_service.record_decision(REQ, _승인())
+    🔴 **이 검사가 버그를 지키고 있었다** (2026-09-11). 문서화 문자열의 뜻은 맞았는데
+      단언이 `== BURN_IN_SIM_RUN_ID` 였다 — *"마스터가 정한다"* 가 *"상수다"* 로
+      굳어 있었다. 이름은 그대로 두고 단언을 바꾼다.
 
-    assert 확정.호출[0].sim_run_id == BURN_IN_SIM_RUN_ID
+    ★★ **값만 비교하면 아무것도 안 막는다** (`#579` 에서 덴 자리). 그래서 두 실행으로
+      각각 재고, 그 값이 **같은 승인의 재검증 봉투와 같은 값**인지까지 본다 —
+      둘이 갈리면 재검증은 이 실행을 보고 확정은 다른 실행의 `sales` 에 쓴다.
+    """
+    for 축 in (실행축, 다른_실행축):
+        # ⚠️ **결정 이력을 매번 새로 깐다.** 한 저장소로 두 번 승인하면
+        #   `_reject_repeat_approval` 이 막아 둘째 판이 아예 안 돈다 — 여기서 재는
+        #   것은 재승인 규칙이 아니라 축이다.
+        저장소 = 결정_저장소()
+        monkeypatch.setattr(decision_service, "list_decisions", 저장소.list_decisions)
+        monkeypatch.setattr(decision_service, "save_decision", 저장소.save_decision)
+        _실행을_세운다(monkeypatch, _판매_실행(sim_run_id=축))
+        decision_service.record_decision(REQ, _승인())
+
+    확정_축 = [보낸것.sim_run_id for 보낸것 in 확정.호출]
+    assert 확정_축 == [실행축, 다른_실행축], f"실행 행의 축이 확정에 안 실렸다: {확정_축}"
+
+    # 🔴 **이 단언이 핵심이다.** 확정 축만 따로 움직이는 변이를 잡는 유일한 자리다.
+    재검증_축 = [축 for 부 in 부서들.values() for 축 in 부.축]
+    assert set(재검증_축) == set(확정_축), (
+        f"같은 승인인데 재검증 봉투({sorted(set(재검증_축))})와 "
+        f"판매 확정({sorted(set(확정_축))})이 다른 실행을 보고 있다"
+    )
+    assert 재검증_축, "재검증이 부서를 한 번도 안 불러 이 검사가 아무것도 안 재고 있다"
+
+
+def test_축을_못_읽으면_확정하지_않는다(monkeypatch, 이력, 부서들, 확정):
+    """🔴 **`or BURN_IN_SIM_RUN_ID` 로 메우는 길을 `record_decision` 에서도 막는다.**
+
+    축이 안 실린 옛 실행 행으로 승인이 들어오면 번인 장부에 없던 판매가 쌓인다.
+    터지지 않고 숫자만 틀리므로, 못 읽으면 아무것도 안 쓰는 것이 맞다.
+    """
+    행 = _판매_실행()
+    행.pop("sim_run_id")
+    _실행을_세운다(monkeypatch, 행)
+
+    saved = decision_service.record_decision(REQ, _승인())
+
+    assert saved.revalidation_outcome == "ERROR"
+    assert 확정.호출 == [], "축을 못 읽었는데 판매를 확정했다"
+    assert saved.sale is not None and saved.sale.status == "BLOCKED"
 
 
 def test_고른_안을_그대로_넘긴다(monkeypatch, 이력, 부서들, 확정):
