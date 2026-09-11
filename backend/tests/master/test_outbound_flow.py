@@ -39,6 +39,11 @@ from app.master.sim_time import phase_instant
 AS_OF = date(2026, 9, 8)
 OTHER_DAY = date(2026, 9, 9)
 
+#: 이 파일이 내보내는 실행. 🔴 **`ship_due_sales` 가 축을 기본값 없이 받는다** —
+#:   어느 실행의 판매를 내보내는지는 부르는 쪽이 정한다
+#:   (`tests/master/test_outbound_carries_run_axis.py` 가 그 규율을 잠근다).
+축 = "SIM-1"
+
 
 # ── 대역 ────────────────────────────────────────────────────────────────
 
@@ -123,7 +128,7 @@ def _row(
         sale_id=sale_id,
         sale_item_id=f"SI-{sale_id}-{seq}",
         item_id=item_id,
-        sim_run_id="SIM-1",
+        sim_run_id=축,
         quantity_kg=REQUIRED,
         sale_date=sale_date,
     )
@@ -149,8 +154,9 @@ def _run(
     }
     out = ship_due_sales(
         AS_OF,
+        sim_run_id=축,
         connect=lambda: conn,
-        due_fn=lambda _conn, *, as_of: tuple(rows),
+        due_fn=lambda _conn, *, as_of, sim_run_id: tuple(rows),
         reserve_fn=spies["reserve"],
         allocate_fn=spies["allocate"],
         ship_fn=spies["ship"],
@@ -247,11 +253,11 @@ def test_나갈_것이_없으면_NOTHING_DUE_이고_BLOCKED_가_아니다():
 def test_조회가_터지면_FAILED_이고_NOTHING_DUE_가_아니다():
     """⚠️ 못 읽은 것을 *"없다"* 로 만들지 않는다."""
 
-    def _boom(_conn: Any, *, as_of: date) -> Any:
+    def _boom(_conn: Any, *, as_of: date, sim_run_id: str) -> Any:
         raise RuntimeError("DB 가 죽었다")
 
     conn = _Conn()
-    out = ship_due_sales(AS_OF, connect=lambda: conn, due_fn=_boom)
+    out = ship_due_sales(AS_OF, sim_run_id=축, connect=lambda: conn, due_fn=_boom)
 
     assert out.status == "FAILED"
     assert "DB 가 죽었다" in out.reason
@@ -421,8 +427,9 @@ def test_확보량을_못_읽으면_예전대로_할당까지_간다():
     }
     out = ship_due_sales(
         AS_OF,
+        sim_run_id=축,
         connect=lambda: conn,
-        due_fn=lambda _conn, *, as_of: (_row("SALE-A", 1),),
+        due_fn=lambda _conn, *, as_of, sim_run_id: (_row("SALE-A", 1),),
         reserve_fn=spies["reserve"],
         allocate_fn=spies["allocate"],
         ship_fn=spies["ship"],
