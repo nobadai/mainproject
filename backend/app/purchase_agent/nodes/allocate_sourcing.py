@@ -32,6 +32,57 @@ from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
 
+def base_grade_for(prices: Mapping[str, int], top_grade: str, constraints: dict) -> str:
+    """실제로 배정할 등급. 기준등급이 그날 시세에 없으면 **사다리를 안 내려가되 그중 싼 것**.
+
+    🔴 **전에는 ``max(prices)`` — 가장 비싼 등급이었다** (`#574` · 2026-09-11에 고침).
+      그 식과 *"보수적으로 간다"* 는 문장은 ``draft_plan.reference_unit_price`` 에서
+      왔다. 내력이 이렇다::
+
+          68fa68f  Epic 2 골격   ``reference_unit_price`` 가 먼저 생겼다. 그때 ⑤는
+                                **스텁**이었고(「전량 상품 1줄」) 그 함수가 하는 일은
+                                **금액 상한을 계산할 단가 하나를 고르는 것**이었다
+          a1a03c5  Epic 3 E3-1  여기 ``base_grade`` 가 생기면서 **문장과 식을 그대로
+                                가져왔다.** 그런데 이 자리가 정하는 것은 단가가 아니라
+                                **무엇을 살 것인가**다
+
+    ★★ **「비싼 걸 고르면 보수적」은 그 값이 상한을 계산하는 데만 쓰일 때 참이다.**
+      저쪽은 단가가 높을수록 ``cash_cap_kg`` 이 작아져 수량이 준다 — 보수적이 맞다.
+      이쪽에서 비싼 값은 **돈을 더 쓰는 것**이고, 사다리를 안 보면 **낮은 등급을 비싸게
+      사는 것**이 된다. 두 자리가 같은 식을 들고 뜻이 반대였다.
+
+    🔴 **실측이 그 모양을 냈다** (걷기 전수 · 2026-09-11)::
+
+        2026-01-22 양파   특 972.4원/296,385kg · 중 992.4원/6,450kg · 하 1,100원/1,050kg
+                          → 「하」가 최고가라 **「하」를 샀다** (1,050kg 거래가 29만kg을 이겼다)
+        범위               476줄 중 **44줄(9.2%)이 선언 기준등급보다 낮은 등급** (중 41 · 하 3)
+
+    ★ **대안 셋은 데이터로 안 갈렸다** — ㉠ 기준등급 이상 중 최저가 · ㉡ 바로 위 ·
+      ㉢ 거래량 최대. 폴백이 탄 **80일 중 기준등급 위에 등급이 둘 이상 있던 날이 0일**
+      이라 셋이 같은 답을 냈다. 그래서 **규칙의 뜻으로 ㉠을 골랐다** — *"사다리를 안
+      내려가되 그중 싼 것"* 이 한 문장으로 닫히고, ㉡은 「바로 위」가 빈 날 규칙이 하나
+      더 필요하며, ㉢은 *"거래량이 품질을 대신한다"* 는 전제가 우리 계약에 없다.
+
+    ⚠️ **사다리 순서는 ``market_quotes.grades`` 가 정한다** (규칙 7). 그 목록은 원래
+      *"무엇을 읽는가"* 만 뜻했는데 이제 **순서도 뜻을 갖는다** — 선언 쪽에 그렇게 적었고
+      ``test_contracts`` 가 순서를 잠근다.
+
+    🔴 **위쪽에 아무것도 없으면 ``None`` 이 아니라 사다리 아래 최고가로 간다.** 안을
+      못 만드는 것보다 *"기준등급 아래를 샀다"* 를 고지하고 내는 편이 낫다 —
+      ``reference_grade_fallback`` 이 어느 등급이었는지 그대로 싣는다.
+    """
+    if top_grade in prices:
+        return top_grade
+    ladder = list(constraints["market_quotes"]["grades"])
+    rank = {grade: index for index, grade in enumerate(ladder)}
+    # 선언 어휘 밖의 등급은 사다리에 자리가 없다. 순위를 지어내지 않는다 (규칙 3).
+    known = {grade: price for grade, price in prices.items() if grade in rank}
+    at_or_above = [grade for grade in known if rank[grade] <= rank[top_grade]]
+    if at_or_above:
+        return min(at_or_above, key=lambda grade: known[grade])
+    return max(known or prices, key=lambda grade: prices[grade])
+
+
 def grade_spread(quotes: list[dict], top_grade: str, mid_grade: str) -> float | None:
     """등급 스프레드 = ``(P상 − P중) / P상``. 두 등급이 다 있어야 성립한다.
 
@@ -743,10 +794,11 @@ def allocate_sourcing(
     prices = {quote["grade"]: quote["price"] for quote in quotes}
 
     top_grade = constraints["allocation"]["reference_grade"]
-    # 기준등급 시세가 없으면 가장 비싼 등급으로 보수적으로 간다. **기준등급이 아니므로**
-    # 실제로 배정한 등급을 facts에 남긴다 — ⑥의 risks가 "기준등급으로 배정"이라고 적으면
-    # 형식만 맞고 내용이 거짓인 근거가 나간다.
-    base_grade = top_grade if top_grade in prices else max(prices, key=prices.get)
+    # 기준등급 시세가 없으면 **사다리를 안 내려가되 그중 싼 것**으로 간다 (`#574` ·
+    # 근거와 내력은 ``base_grade_for`` docstring). **기준등급이 아니므로** 실제로 배정한
+    # 등급을 facts에 남긴다 — ⑥의 risks가 "기준등급으로 배정"이라고 적으면 형식만 맞고
+    # 내용이 거짓인 근거가 나간다.
+    base_grade = base_grade_for(prices, top_grade, constraints)
 
     decision = evaluate_mid_grade(state, constraints)
     decision["base_grade"] = base_grade
