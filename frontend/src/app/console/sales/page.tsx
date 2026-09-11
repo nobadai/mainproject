@@ -27,6 +27,7 @@ import {
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
 import { RunPicker, useSimRun } from "@/components/console/RunPicker";
+import { PartnerProfileForm } from "@/components/console/PartnerProfileForm";
 import { SalesCandidatePanel } from "@/components/console/SalesCandidatePanel";
 import {
   AGING_LABELS,
@@ -271,6 +272,7 @@ function PartnerDetailPanel({
           />
         )}
       </Panel>
+      <PartnerProfileForm partnerId={partnerId} />
       <Panel title="품목별 집계">
         {data.item_summary.length === 0 ? (
           <EmptyRows what="품목" />

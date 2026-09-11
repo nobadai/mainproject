@@ -266,3 +266,60 @@ export function salesRun(request: SalesRunRequest): Promise<SalesRunResponse> {
     EXECUTE_TIMEOUT_MS,
   );
 }
+
+/* ── 거래처 기본정보 ────────────────────────────────────────────────────── */
+
+/**
+ * 거래처 원장 행.
+ *
+ * 🔴 **여신 한도가 없다.** 그 정본은 재무의 `partner_credit_limits` 이고, 여기에 칸을
+ *    하나 더 두면 두 곳이 서로 다른 한도를 말하는 날이 온다. `credit_source` 가 어디에
+ *    물어야 하는지를 말한다.
+ */
+export interface PartnerProfile {
+  partner_id: string;
+  partner_name: string;
+  partner_type: string;
+  client_type: string | null;
+  factory_region: string | null;
+  factory_city: string | null;
+  factory_area: string | null;
+  sales_collection_days: number | null;
+  pricing_contract_type: string | null;
+  active: boolean;
+  provisional: boolean;
+  note: string | null;
+  credit_source: string;
+}
+
+/** 보낸 칸만 고친다. **안 보낸 칸은 그대로다.** */
+export type PartnerProfileUpdate = Partial<
+  Pick<
+    PartnerProfile,
+    | "partner_name"
+    | "partner_type"
+    | "client_type"
+    | "factory_region"
+    | "factory_city"
+    | "factory_area"
+    | "sales_collection_days"
+    | "pricing_contract_type"
+    | "active"
+    | "note"
+  >
+>;
+
+export function partnerProfile(partnerId: string): Promise<PartnerProfile> {
+  return call<PartnerProfile>(`/sales/partners/${encodeURIComponent(partnerId)}/profile`);
+}
+
+/** 고친 뒤 **저장된 행**을 돌려받는다 — 화면이 믿는 값이 아니라 장부의 값이다. */
+export function savePartnerProfile(
+  partnerId: string,
+  update: PartnerProfileUpdate,
+): Promise<PartnerProfile> {
+  return call<PartnerProfile>(`/sales/partners/${encodeURIComponent(partnerId)}/profile`, {
+    method: "PATCH",
+    body: JSON.stringify(update),
+  });
+}
