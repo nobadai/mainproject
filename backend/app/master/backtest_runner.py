@@ -45,6 +45,23 @@ walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷
 
 ---
 
+🔴 **물류 유지보수도 명시로만 켠다** (2026-09-11).
+
+```text
+--auto-maintain 를 **안 주면**   유지보수 함수가 이름조차 안 불린다 · 한 Lot 도 안 없앤다
+--auto-maintain 를 주면          **개장 바로 뒤**에 그날 자리를 비운다
+```
+
+★★ **승인보다 더 조심할 자리다.** 승인은 `master_decisions` 에 한 줄이 남는
+  것이지만 폐기는 **물건이 없어진다** — 물류가 *"되돌릴 경로가 없다(`ADJUST_IN`
+  없음 · 실사 제외)"* 고 못박았다.
+
+⚠️ **켰는데 버릴 것이 없어도 막지 않는다.** `--auto-approve` 와 축이 다르다 —
+  저쪽은 규칙 파일이 있어야 성립하고, 이쪽은 확인할 설정이 없다. 버릴 것이 없는
+  날은 사고가 아니라 정상이고, 그 사실은 `NOTHING_DUE` 가 말한다.
+
+---
+
 🔴 **`now` 를 인자로 받는다. 시계를 안 읽는다.**
 
   `plan_next_action` 이 마감(10:30)과 비교하는 값이 `now` 다. 이 파일이 시계를
@@ -85,7 +102,8 @@ CalendarNotCovered             → 🔴 멈추고 사유를 낸다
 ⚠️ **어휘를 새로 만들지 않았다.** 세는 값은 전부 `scheduler` 가 낸 것 그대로다
   (`DayRunOutcome.action` · `ItemRunOutcome.end_code` · `procurement_status` 의
   `NOT_ATTEMPTED` · `sales_status` 의 세 값 · `outbound_status` 의 네 값 ·
-  `RetryOut.outcomes` 의 네 값 · `failed_items`). 그 네 값은 **접지
+  `RetryOut.outcomes` 의 네 값 · `MaintenanceOut.outcomes` 가 나르는
+  `MaintenanceOutcome` 의 네 값 · `failed_items`). 그 네 값은 **접지
   않고 그대로 센다** — `NOTHING_DUE`(없다)와 `FAILED`(못 했다)와
   `NOT_ATTEMPTED`(안 했다)를 묶으면 손익 곡선이 왜 평평한지를 성적표가 못 답한다.
   이 파일이 새로 만든 말은 걷기 자체에 관한 것
@@ -321,6 +339,32 @@ class WalkResult:
         return total
 
     @property
+    def maintenance_outcomes(self) -> Mapping[str, int]:
+        """물류 유지보수의 **Lot 별** 결과 분포 (2026-09-11). 🔴 **넷을 접지 않는다.**
+
+        ```text
+        DISPOSED                 전량 폐기했다 · 자리도 돌려줬다
+        SKIPPED_HELD_ALLOCATION  살아있는 할당이 있어 **손대지 않았다** ← 사람 몫이다
+        PALLETS_EMPTIED          잔량이 이미 0 이라 자리만 돌려줬다
+        FAILED                   도메인이 거절했다                     ← "못 했다"
+        ```
+
+        ★★ **`SKIPPED_HELD_ALLOCATION` 이 안 보이면 자동화가 왜 덜 했는지를 성적표가
+          못 답한다.** 물류가 *"자동 부분 폐기를 하지 않는다 — 남은 판단은 사람
+          몫이다"* 로 일부러 남긴 줄이고, 창고가 안 비는 날 **거기부터 봐야** 한다.
+
+        ★ **이름의 주인은 `logistics/auto_maintenance.py` 다.** 여기서 새 이름을
+          안 붙이고 세기만 한다 (`transition_outcomes` 와 같은 모양).
+
+        🔴 **`approval_outcomes` 와 한 칸에 담지 않는다.** 어휘가 다르고 축이 다르다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            if day.maintenance is not None:
+                total.update(day.maintenance.outcomes)
+        return total
+
+    @property
     def approval_outcomes(self) -> Mapping[str, int]:
         """승인 **행별** 어휘 분포 (2026-09-11). 🔴 **여덟을 접지 않는다.**
 
@@ -360,6 +404,7 @@ def walk(
     auto_approve: bool = False,
     rules_of: Callable[[str], BackfillRules] = read_run_rules,
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
+    auto_maintain: bool = False,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -401,6 +446,14 @@ def walk(
           그 사실은 아무 데도 안 적혀 있다.
 
         ★ **실행당 한 번 부른다.** 규칙은 실행에 속하지 날에 속하지 않는다.
+    :param auto_maintain: 🔴 **기본이 거짓이다. 안 주면 유지보수 함수가 이름조차
+        안 불린다** (2026-09-11). 켜면 **개장 바로 뒤**에 그날 자리를 비운다.
+
+        ★★ **승인보다 더 조심할 자리다.** 폐기는 되돌릴 경로가 없다 —
+          `ADJUST_IN` 도 실사도 없다고 물류가 못박았다.
+
+        ⚠️ **`auto_approve` 처럼 걷기 전에 막는 관문이 없다.** 확인할 규칙 파일이
+          없기 때문이다 — 버릴 것이 없는 날은 사고가 아니라 `NOTHING_DUE` 다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
 
@@ -502,6 +555,9 @@ def walk(
                 #    않는다 — 그러면 같은 설정의 주인이 둘이 되고, 하루를 부르는
                 #    모든 검사가 조용히 실 DB 를 친다.
                 sales_terms=sales_terms,
+                # 🔴 **받은 스위치를 그대로 넘긴다.** 여기서 다시 정하지 않는다 —
+                #    그러면 폐기를 켜고 끄는 자리가 둘이 된다.
+                auto_maintain=auto_maintain,
             )
         except Exception as exc:  # noqa: BLE001 - 하루가 터져도 다음 날은 걷는다.
             # ★ **터진 날도 사고로 남고 걷기는 이어진다.** 여기서 raise 하면 나머지
@@ -648,6 +704,15 @@ def _parser() -> argparse.ArgumentParser:
             " · 안 주면 한 건도 승인하지 않는다"
         ),
     )
+    parser.add_argument(
+        "--auto-maintain",
+        action="store_true",
+        default=False,
+        help=(
+            "🔴 개장 바로 뒤에 그날 창고 자리를 비운다 · 폐기대기 Lot 이 없어진다"
+            " (되돌릴 경로 없음) · 안 주면 한 Lot 도 건드리지 않는다"
+        ),
+    )
     return parser
 
 
@@ -670,6 +735,10 @@ def format_summary(result: WalkResult) -> str:
         #    원장에 닿았다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 15` 를 보고
         #    원장에 닿은 줄 알았고, `purchases` 는 0행이었다.
         f"전이      {dict(sorted(result.transition_outcomes.items()))}",
+        # 🔴 **유지보수 줄을 접지 않는다** (2026-09-11). 몇 Lot 이 없어졌고 몇이
+        #    **사람 몫으로 남았는지**가 보여야 한다 — 창고가 안 비는 날 봐야 할
+        #    자리가 `SKIPPED_HELD_ALLOCATION` 이고, 접으면 그 줄이 사라진다.
+        f"유지보수  {dict(sorted(result.maintenance_outcomes.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]
@@ -735,6 +804,7 @@ def main(argv: Sequence[str]) -> int:
         now=datetime.fromisoformat(args.now),
         max_consecutive_failures=args.max_consecutive_failures,
         auto_approve=args.auto_approve,
+        auto_maintain=args.auto_maintain,
     )
     print(format_summary(result))
     return 0 if result.completed and not result.incidents else 1
