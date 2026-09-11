@@ -38,3 +38,9 @@ def _disable_llm_by_default(request, monkeypatch):
     for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.setenv(key, "")
     assert os.getenv("PURCHASE_LLM_ENABLED") == "false"
+
+
+# ``no_holdings`` 는 ``_injection.py`` 에 산다 — 주입 도구는 한 파일에 모아 둔다. 픽스처는
+# import 로 등록되므로 여기서 이름만 끌어온다 (다른 도구들은 함수라 각 검사가 직접 import
+# 한다). 🔴 **재export 를 지우면 21개 검사가 «픽스처를 못 찾는다» 로 한꺼번에 운다.**
+from _injection import no_holdings  # noqa: F401

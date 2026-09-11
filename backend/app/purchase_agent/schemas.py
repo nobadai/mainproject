@@ -304,6 +304,22 @@ class RationaleItem(BaseModel):
     evidence_detail: NonEmptyStr
 
 
+#: ``RejectedReason.kind`` — 이 안이 **왜** 안이 못 됐나. 상세설계 §4-③-3.
+#:
+#: ```text
+#: blocked       하드 제약(창고·현금·신선도·조정안)이 수량을 0까지 깎았다
+#: not_needed    보유 재고가 커버 D일 수요를 이미 덮어 살 필요가 없었다
+#: ```
+#:
+#: 🔴 **둘을 같은 「안 0개」로 읽으면 안 된다.** *"막혔다"* 와 *"필요 없다"* 는 조치가
+#: 다르다 — 앞은 창고를 비우거나 한도를 늘려야 하고, 뒤는 아무것도 안 해도 된다.
+#: 그래서 세는 축(이 필드)과 읽는 축(``reason`` 문장)을 **둘 다** 가른다.
+#:
+#: ⚠️ 바닥(최소 발주 단위)을 두면 *"너무 작아서 접었다"* 가 **세 번째 값**이 된다.
+#: 지금은 바닥을 안 두므로 둘이다 (근거는 상세설계 §4-③ 「열어 둔 것」).
+RejectionKind = Literal["blocked", "not_needed"]
+
+
 class RejectedReason(BaseModel):
     """self_check가 컷한 이력. 데모에서 "검증이 실제로 작동한다"를 보이는 증거다."""
 
@@ -311,6 +327,10 @@ class RejectedReason(BaseModel):
 
     label: NonEmptyStr
     reason: NonEmptyStr
+    #: 🟡 **선택 필드다.** ⑥이 떨어뜨린 안에만 붙는다 — ⑦ self_check 의 컷은 성격이
+    #: 달라(규칙 위반이지 수량 0이 아니다) 이 갈래에 안 들어간다. 소비자(마스터 리포트·
+    #: 화면)는 ``label``·``reason`` 만 그리므로 이 칸이 없어도 안 깨진다.
+    kind: RejectionKind | None = None
 
 
 #: ``payment_schedule[].basis`` — ``amount_krw``의 추정 근거.

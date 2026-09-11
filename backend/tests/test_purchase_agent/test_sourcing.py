@@ -18,6 +18,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from _injection import drop_holdings
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
@@ -69,7 +70,15 @@ def _mid_share(proposal: dict, label: str = "보수") -> float:
 
 @pytest.fixture(scope="module")
 def proposals() -> dict[date, dict]:
-    return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+    """앵커일별 제안.
+
+    🔴 **보유는 뗀다** (``drop_holdings``) — 이 파일의 검사 중 보유를 재는 것이 없다.
+      켜 두면 mock 앵커의 보수안이 «필요 없다» 로 사라져(§4-③) 등급·분할 단언이
+      **보유 때문에** 무너진다. 보유 자체는 ``test_holdings_deduction`` 이 잰다.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        drop_holdings(mp)
+        return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
 
 
 # ── E3-1 DoD ①: 스프레드가 넓은 날 중품 비중이 오른다 ──────────────────────
@@ -498,8 +507,15 @@ def test_decided_n4_shifts_the_window_and_removes_the_disclosure() -> None:
 
 @pytest.mark.parametrize("item", ["배추", "무", "양파"])
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
-def test_every_item_produces_a_valid_proposal_on_every_anchor(item: str, as_of: date) -> None:
-    """4품목 × 4앵커 전부 도는가. **품목 하나만 도는 테스트는 이 버그를 못 잡는다.**"""
+def test_every_item_produces_a_valid_proposal_on_every_anchor(
+    item: str, as_of: date, no_holdings: None
+) -> None:
+    """4품목 × 4앵커 전부 도는가. **품목 하나만 도는 테스트는 이 버그를 못 잡는다.**
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 «품목·앵커를 바꿔도 안이 서고
+      사중 일치가 성립하나» 다. 양파는 mock 보유가 5.8일치라 켜 두면 안이 통째로
+      «필요 없다» 가 되어 이 단언이 공허해진다.
+    """
     proposal = run_purchase_agent(item, as_of)
     PurchaseProposal.model_validate(proposal)
     assert proposal["scenarios"]
