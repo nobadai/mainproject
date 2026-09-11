@@ -494,9 +494,14 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
       로 되돌아온다. 그래서 `SalesRunRequest.requested_quantity_kg` 가 생겼고
       여기서 **이름만 바꿔** 옮긴다 — 값을 만들지도 반올림하지도 않는다.
 
-    ★ **나르지 않는 칸이 더 있다** (`preferred_*` 다섯). 요구한 caller 가 아직
-      없어서인데, 그 사실은 `tests/master/test_sales_user_request_fields.py` 가
-      판매 모델과 대조해 지킨다.
+    🔴 **상업조건 셋이 더 온다** (2026-09-11 · 걷기 실측). 재무가
+      `SALES_INPUT_INCOMPLETE` 로 판정을 못 낸 자리라 `preferred_unit_price_krw` ·
+      `preferred_payment_terms_type` · `source_ref` 를 나른다. **값은 여전히
+      부르는 쪽이 준다** — 자동 걷기는 실행 규칙에서, 화면은 사람에게서.
+
+    ★ **나르지 않는 칸이 더 있다** (`preferred_contract_term_days` ·
+      `allow_additional_sourcing`). 요구한 caller 가 아직 없어서인데, 그 사실은
+      `tests/master/test_sales_user_request_fields.py` 가 판매 모델과 대조해 지킨다.
     """
     payload: dict[str, Any] = {}
     if request.user_request:
@@ -523,6 +528,16 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
         # ★ **0 도 사실이다** (`requested_quantity_kg` 과 같은 자리). `payment_days=0`
         #   은 *"당일 수금"* 이라는 정해진 조건이지 *"말하지 않았다"* 가 아니다.
         payload["preferred_payment_days"] = request.preferred_payment_days
+    if request.preferred_unit_price_krw is not None:
+        # 🔴 **`Decimal` 을 전선에 그대로 싣지 않는다** (`requested_quantity_kg` 과
+        #   같은 자리 · `json.dumps` 가 `Decimal` 에서 죽는다).
+        payload["preferred_unit_price_krw"] = float(request.preferred_unit_price_krw)
+    if request.preferred_payment_terms_type:
+        payload["preferred_payment_terms_type"] = request.preferred_payment_terms_type
+    if request.source_ref:
+        # ★ **이 칸은 마스터가 짓지 않는다.** 되짚을 행이 있을 때만 부르는 쪽이
+        #   채워 보내고, 여기서는 이름만 맞춰 옮긴다.
+        payload["source_ref"] = request.source_ref
     return payload or None
 
 

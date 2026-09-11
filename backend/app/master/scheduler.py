@@ -251,7 +251,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from app.master import clock, persistence
-from app.master.backfill import BackfillOut, backfill_decisions
+from app.master.backfill import BackfillOut, SalesTermsRule, backfill_decisions
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
 from app.master.closing import close_day
 from app.master.collection import collect_receipts
@@ -271,6 +271,7 @@ from app.master.run_repository import (
     ledger_gap_request_id,
     list_runs,
 )
+from app.master.sales_terms import apply_sales_terms, read_run_sales_terms
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
 from app.master.service import run_procurement, run_sales
 
@@ -324,8 +325,9 @@ _NO_ML_BATCH = "달력은 열렸는데 ML 배치가 없었다"
 #:   성립한다. 하루 순서가 거래처를 고르면 **그것이 곧 영업 정책**이 되고, 정책의
 #:   주인이 판매에서 스케줄러로 조용히 옮겨 온다.
 #:
-#: ⚠️ **`partner_id` 는 같이 싣지 않는다.** 마스터는 거래처를 고르지 않는다 —
-#:   무엇이 필요한지는 판매가 정한다 (`SalesRunRequest.partner_id` 의 설명).
+#: ⚠️ **마스터는 거래처를 고르지 않는다.** 실행 규칙 파일이 `sales_terms.partner_id`
+#:   를 적으면 그 값이 실리고 (`sales_terms.apply_sales_terms`), 안 적으면 종전처럼
+#:   아무것도 안 실린다 — **고르는 것은 여전히 코드가 아니다** (2026-09-11).
 WALK_BUSINESS_MODE: SalesBusinessMode = "SPOT_SALES"
 
 #: 🔴 **이 상태면 그날 판단을 안 돌린다.** 입고·수금 둘 다 같은 표를 쓴다.
@@ -759,6 +761,7 @@ def run_scheduled_day(
     items: Sequence[str] | None = None,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
+    sales_terms: SalesTermsRule | None = None,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
@@ -827,6 +830,22 @@ def run_scheduled_day(
     :param approve_fn: 🔴 **승인 문.** 기본이 `backfill_decisions` 자체다 —
         `None` 을 안 받는다 (`run_day_fn` · `verifier` 와 같은 규율).
         `auto_approve` 가 거짓이면 이 값은 **한 번도 안 쓰인다.**
+    :param sales_terms: 판매 요청에 실을 상업 조건. 🔴 **읽지 않고 받는다** —
+        기본이 `None` 이고 그 뜻은 *"아무것도 안 싣는다"* 이다.
+
+    🔴 **판매 상업 조건은 규칙 파일이 말한다** (2026-09-11 · 걷기 실측).
+
+      ★★ **자동 걷기에는 사람이 없다.** 수량 하나만 물류에서 오고 거래처·지급조건·
+        단가는 아무도 안 정해서, 재무가 `SALES_INPUT_INCOMPLETE` 로 판정을 못 냈다.
+
+      🔴 **하루가 설정을 제 손으로 읽지 않는다.** 읽는 자리는 `wake_up` 과
+        `backtest_runner.walk` 이고 (`sales_terms.read_run_sales_terms`), 실행당
+        한 번이다. 하루가 읽으면 이 함수를 부르는 모든 검사가 조용히 실 DB 를
+        치고, 규칙은 날이 아니라 실행에 속하므로 179번 다시 읽을 이유도 없다.
+
+      🔴 **코드에 기본값을 두지 않는다.** 규칙 파일에 `sales_terms` 가 없으면
+        **종전 그대로 아무것도 안 싣는다** — 두면 규칙을 안 적은 사람도 모르는
+        거래처에 팔게 된다 (`sales_terms.apply_sales_terms`).
 
     🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
@@ -1099,17 +1118,24 @@ def run_scheduled_day(
             # ★ `budget` 과 `verifier` 를 안 준다. 판매 기본값 25 가 계약이고
             #   (매입 12 를 복사하면 요청이 골격의 `SALES_BUDGET` 을 이긴다),
             #   `verifier` 를 안 주면 기본 검증 Tool 이 붙는다 — 매입과 같은 규율이다.
+            #
+            # 🔴 **상업 조건을 여기서 적지 않는다.** 거래처도 지급조건도 단가도
+            #    `apply_sales_terms` 가 **규칙 파일이 말한 대로만** 얹는다 —
+            #    규칙이 없으면 요청이 그대로 지나가고 종전과 한 글자도 안 다르다.
             sales_response = sales_fn(
-                SalesRunRequest(
-                    as_of=as_of,
-                    policy_version=policy_version,
-                    request_id=sales_request_id,
-                    item=item,
-                    business_mode=WALK_BUSINESS_MODE,
-                    # 🔴 **매입과 같은 축이다.** 여기만 빠지면 같은 날 매입 판단은
-                    #    걷기 축에, 판매 판단은 번인에 앉는다 — 그러면 판매가 읽는
-                    #    매입 경계(`_procurement_boundary`)가 **남의 실행 것**이 된다.
-                    sim_run_id=sim_run_id,
+                apply_sales_terms(
+                    SalesRunRequest(
+                        as_of=as_of,
+                        policy_version=policy_version,
+                        request_id=sales_request_id,
+                        item=item,
+                        business_mode=WALK_BUSINESS_MODE,
+                        # 🔴 **매입과 같은 축이다.** 여기만 빠지면 같은 날 매입 판단은
+                        #    걷기 축에, 판매 판단은 번인에 앉는다 — 그러면 판매가 읽는
+                        #    매입 경계(`_procurement_boundary`)가 **남의 실행 것**이 된다.
+                        sim_run_id=sim_run_id,
+                    ),
+                    sales_terms,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 한 품목이 하루를 세우면 안 된다.
@@ -1382,8 +1408,19 @@ def wake_up(
     sim_run_id: str = BURN_IN_SIM_RUN_ID,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
+    terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
+
+    🔴 **판매 상업 조건은 여기서 읽어 하루에 넘긴다** (2026-09-11).
+
+      ★ **`auto_approve` 와 축이 다르다.** 승인은 명시로 켜야 돌지만 조건은
+        **규칙 파일에 있으면 실린다** — 조건을 승인 스위치 뒤에 두면 *"규칙은
+        적었는데 왜 또 재무가 판정을 못 내나"* 가 생기고, 그 답이 승인 스위치라는
+        것은 아무 데도 안 적혀 있다.
+
+      ⚠️ **하루가 제 손으로 안 읽는 이유**는 `run_scheduled_day` 의 `sales_terms`
+        에 적어 뒀다.
 
     🔴 **`auto_approve` 는 여기서도 기본이 거짓이다.** 깨어난 것만으로 승인이
       서면 자동 승인을 명시로만 켠다는 규율이 **깨어남 한 번으로 뚫린다.**
@@ -1420,4 +1457,5 @@ def wake_up(
         sim_run_id=sim_run_id,
         auto_approve=auto_approve,
         approve_fn=approve_fn,
+        sales_terms=terms_of(sim_run_id),
     )

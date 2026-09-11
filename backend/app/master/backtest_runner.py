@@ -103,11 +103,17 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from app.master.backfill import BackfillRuleMissing, BackfillRules, read_run_rules
+from app.master.backfill import (
+    BackfillRuleMissing,
+    BackfillRules,
+    SalesTermsRule,
+    read_run_rules,
+)
 from app.master.bootstrap import wire_registries
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
     DayRunOutcome,
@@ -353,6 +359,7 @@ def walk(
     ticks: Callable[[], float] = time.monotonic,
     auto_approve: bool = False,
     rules_of: Callable[[str], BackfillRules] = read_run_rules,
+    terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -383,8 +390,17 @@ def walk(
         ★★ **설정에 규칙이 있다고 켜지지 않는다.** *"있으니까 한다"* 는 암묵
           스위치이고, 그러면 설정을 실험하려고 넣은 사람이 **승인까지 하게 된다.**
           켜는 것은 명시로만이고, 그 명시가 이 인자 하나다.
-    :param rules_of: 그 실행이 정한 규칙을 읽는 자리. 🔴 **`auto_approve` 가
-        거짓이면 한 번도 안 불린다** — 안 켠 걷기가 규칙을 물을 이유가 없다.
+    :param rules_of: 그 실행이 정한 **승인** 규칙을 읽는 자리. 🔴 **`auto_approve` 가
+        거짓이면 한 번도 안 불린다** — 안 켠 걷기가 승인 규칙을 물을 이유가 없다.
+    :param terms_of: 그 실행이 정한 **판매 상업 조건**을 읽는 자리 (2026-09-11).
+
+        🔴 **`rules_of` 와 한 인자로 묶지 않는다.** 축이 다르다 — 저쪽을 부르는
+          것은 *"안 켜고 걸으면 막는다"* 는 관문이라 **안 켜면 안 부르는 것이
+          잠겨 있다.** 이쪽은 관문이 아니라 요청에 실릴 값이고, 승인을 안 켜도
+          조건은 실려야 한다. 하나로 묶으면 *"승인을 켜야 조건이 실린다"* 가 되고
+          그 사실은 아무 데도 안 적혀 있다.
+
+        ★ **실행당 한 번 부른다.** 규칙은 실행에 속하지 날에 속하지 않는다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
 
@@ -431,6 +447,14 @@ def walk(
                 " 조용히 0건으로 걷지 않는다"
             ) from exc
 
+    # 🔴 **상업 조건은 걷기 전에 한 번 읽는다** (2026-09-11). 규칙은 실행에 속하지
+    #    날에 속하지 않는다 — 날마다 읽으면 같은 설정을 179번 다시 읽고, 그러다
+    #    하루만 다른 조건으로 도는 날이 오면 **왜 그런지를 설정만 보고는 못 읽는다.**
+    #
+    # ⚠️ **여기서 막지 않는다.** 조건이 없는 것은 사고가 아니라 종전 동작이다 —
+    #    `auto_approve` 관문과 축이 다르다 (`terms_of` 설명).
+    sales_terms = terms_of(sim_run_id)
+
     market = calendar()
     started_ticks = ticks()
 
@@ -474,6 +498,10 @@ def walk(
                 # 🔴 **받은 스위치를 그대로 넘긴다.** 여기서 규칙의 유무를 보고
                 #    다시 정하지 않는다 — 그러면 스위치가 둘이 된다.
                 auto_approve=auto_approve,
+                # 🔴 **읽은 조건을 그대로 넘긴다.** 하루가 제 손으로 다시 읽지
+                #    않는다 — 그러면 같은 설정의 주인이 둘이 되고, 하루를 부르는
+                #    모든 검사가 조용히 실 DB 를 친다.
+                sales_terms=sales_terms,
             )
         except Exception as exc:  # noqa: BLE001 - 하루가 터져도 다음 날은 걷는다.
             # ★ **터진 날도 사고로 남고 걷기는 이어진다.** 여기서 raise 하면 나머지
