@@ -25,10 +25,14 @@ from app.master import persistence, scheduler
 from app.master.clock import SEOUL
 from app.master.commitment import ITEM_CODES
 from app.master.forecast_gate import DayForecastReadiness, ItemForecastGate
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.scheduler import daily_request_id, ledger_gap_request_id, run_scheduled_day
 
 AS_OF = date(2026, 9, 8)
 ITEMS = ("무", "배추", "양파")
+
+#: 걷기가 안 준 실행 축. **`run_scheduled_day` 의 기본값과 같은 상수를 본다.**
+축 = BURN_IN_SIM_RUN_ID
 
 
 # ── 대역 ────────────────────────────────────────────────────────────────
@@ -212,7 +216,7 @@ def test_업무_키가_하루_단위다(적재):
     """★ 관문은 하루를 통째로 돌려세운다 — 품목이 없다."""
     _run(inbound="BLOCKED")
 
-    assert 적재.calls[0]["request_id"] == ledger_gap_request_id(AS_OF)
+    assert 적재.calls[0]["request_id"] == ledger_gap_request_id(AS_OF, sim_run_id=축)
     assert "LEDGER-GAP" in 적재.calls[0]["request_id"]
 
 
@@ -224,8 +228,12 @@ def test_업무_키가_품목_키와_안_겹친다():
     """
     assert ITEM_CODES, "계약 품목을 하나도 못 찾았다 — 스캐너가 죽었다"
 
-    게이트키 = ledger_gap_request_id(AS_OF)
-    겹친것 = [item for item in sorted(ITEM_CODES) if daily_request_id(AS_OF, item) == 게이트키]
+    게이트키 = ledger_gap_request_id(AS_OF, sim_run_id=축)
+    겹친것 = [
+        item
+        for item in sorted(ITEM_CODES)
+        if daily_request_id(AS_OF, item, sim_run_id=축) == 게이트키
+    ]
     assert 겹친것 == [], f"품목 키와 겹친다: {겹친것}"
 
 
@@ -269,7 +277,7 @@ def 표(monkeypatch) -> dict[str, object]:
 
 def _적재(**kwargs) -> str | None:
     보낼것 = {
-        "request_id": ledger_gap_request_id(AS_OF),
+        "request_id": ledger_gap_request_id(AS_OF, sim_run_id=축),
         "as_of": AS_OF,
         "policy_version": "v1.3-PROVISIONAL",
         "reason": (

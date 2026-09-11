@@ -265,7 +265,12 @@ from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.pending_transition import RetryOut, retry_pending_transitions
 from app.master.receivable import issue_receivables
-from app.master.run_repository import ledger_gap_request_id, list_runs
+from app.master.run_repository import (
+    DAILY_REQUEST_HEAD,
+    build_request_id,
+    ledger_gap_request_id,
+    list_runs,
+)
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
 from app.master.service import run_procurement, run_sales
 
@@ -372,29 +377,63 @@ def scheduled_items() -> tuple[str, ...]:
     return tuple(sorted(ITEM_CODES))
 
 
-def daily_request_id(as_of: date, item: str) -> str:
-    """`REQ-DAILY-20260908-배추`. **날짜와 품목만으로 정해진다.**
+#: 판매 키의 머리. **매입 머리에서 갈라 나온다 — 문자열을 다시 적지 않는다.**
+_SALES_REQUEST_HEAD = f"{DAILY_REQUEST_HEAD}-SALES"
 
-    🔴 **시각을 넣지 않는다.** 넣으면 같은 날 두 번 깨어날 때 id 가 갈리고,
-      `master_agent_runs_run_request_unique` 가 두 번째를 못 막는다 — 멱등이
-      인덱스가 아니라 *"두 번 안 깨우기"* 에 걸리게 된다.
+
+def daily_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
+    """`REQ-DAILY-SIM-WALK-202601-20260908-배추`. **실행·날짜·품목으로 정해진다.**
+
+    🔴🔴 **실행 축이 필수다** (2026-09-11 · `#`). 없으면 **새 실행이 옛 실행의 승인을
+      물려받는다.**
+
+      ```text
+      실측  업무 키 `REQ-DAILY-20260105-무`  행 16건 · 실행 5개에 걸쳐 있음
+            그 업무 키의 master_decisions 행    1건
+      ```
+
+      `decision_repository.list_decisions` 는 `WHERE request_id = %s` 뿐이라 축을 안
+      본다. 그래서 A 실행에서 난 승인이 B 실행에서 `ALREADY_DECIDED` 로 읽히고,
+      **B 는 자기 원장을 영영 못 만든다** — 새 실행을 열고 2주를 걸었더니
+      `ALREADY_DECIDED 24 · RECORDED 0 · 전이 {}` 였다.
+
+    🔴 **기본값을 두지 않는다.** 기본값이 있으면 축을 빠뜨린 호출이 조용히 옛 모양으로
+      떨어지고, 그 실패는 `ALREADY_DECIDED` 로만 나타나 **에러가 안 난다.** 문법이
+      막게 한다.
+
+    🔴 **시각을 넣지 않는다. 축은 시각이 아니다.** 넣으면 같은 날 두 번 깨어날 때 id 가
+      갈리고, `master_agent_runs_run_request_unique` 가 두 번째를 못 막는다 — 멱등이
+      인덱스가 아니라 *"두 번 안 깨우기"* 에 걸리게 된다. 축은 같은 실행 안에서
+      안 변하므로 그 멱등을 안 건드린다.
+
+    ★ **자리 배치는 `run_repository.build_request_id` 가 정한다** — 축이 꼬리 앞에
+      붙는 이유가 거기 적혀 있다 (`LEDGER_GAP_REQUEST_LIKE` 가 꼬리를 문다).
     """
-    return f"REQ-DAILY-{as_of:%Y%m%d}-{item}"
+    return build_request_id(
+        head=DAILY_REQUEST_HEAD, as_of=as_of, sim_run_id=sim_run_id, tail=item
+    )
 
 
-def daily_sales_request_id(as_of: date, item: str) -> str:
-    """`REQ-DAILY-SALES-20260908-배추`. 🔴 **매입 키와 갈라야 한다** (2026-09-10).
+def daily_sales_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
+    """`REQ-DAILY-SALES-SIM-WALK-202601-20260908-배추`.
 
-    🔴 **판매가 `daily_request_id` 를 그대로 쓰면 안 된다.** 같은 날 같은 품목이면
+    🔴 **매입 키와 갈라야 한다** (2026-09-10).
+
+      **판매가 `daily_request_id` 를 그대로 쓰면 안 된다.** 같은 날 같은 품목이면
       문자열이 같아지고, `master_agent_runs_run_request_unique` 가 **두 번째 사이클을
       막는다** — 매입이 먼저 돌았으면 판매 행이 아예 안 남는다. 남더라도
       `get_run_by_request_id` 가 어느 사이클의 실행인지 못 가른다.
+
+    🔴 **실행 축이 필수다** (2026-09-11). 이유는 `daily_request_id` 가 적어 둔 그대로다 —
+      축이 없으면 판매 승인도 남의 실행 것을 물려받는다.
 
     🔴 **시각을 넣지 않는다.** 이유는 `daily_request_id` 가 적어 둔 그대로다 —
       넣으면 같은 날 두 번 깨어날 때 id 가 갈리고, 멱등이 인덱스가 아니라
       *"두 번 안 깨우기"* 에 걸리게 된다.
     """
-    return f"REQ-DAILY-SALES-{as_of:%Y%m%d}-{item}"
+    return build_request_id(
+        head=_SALES_REQUEST_HEAD, as_of=as_of, sim_run_id=sim_run_id, tail=item
+    )
 
 
 # ★ `ledger_gap_request_id` 는 여기서 안 짓는다 — **주인이 `run_repository` 다**
@@ -931,7 +970,7 @@ def run_scheduled_day(
         #   판단 행에 싣는 값도 그 상수이고, 두 벌이 되면 한쪽만 고치는 날 두 행이 갈린다.
         try:
             persistence.record_ledger_gap(
-                request_id=ledger_gap_request_id(as_of),
+                request_id=ledger_gap_request_id(as_of, sim_run_id=sim_run_id),
                 as_of=as_of,
                 policy_version=policy_version,
                 reason=gap_reason,
@@ -985,7 +1024,7 @@ def run_scheduled_day(
 
     results: list[ItemRunOutcome] = []
     for item in day_items:
-        request_id = daily_request_id(as_of, item)
+        request_id = daily_request_id(as_of, item, sim_run_id=sim_run_id)
         try:
             response = procure_fn(
                 ProcurementRunRequest(
@@ -1055,7 +1094,7 @@ def run_scheduled_day(
     #    것은 `sales_items` 에 `FAILED` 로 남고 출고·마감은 그대로 돈다.
     sales_results: list[ItemRunOutcome] = []
     for item in day_items:
-        sales_request_id = daily_sales_request_id(as_of, item)
+        sales_request_id = daily_sales_request_id(as_of, item, sim_run_id=sim_run_id)
         try:
             # ★ `budget` 과 `verifier` 를 안 준다. 판매 기본값 25 가 계약이고
             #   (매입 12 를 복사하면 요청이 골격의 `SALES_BUDGET` 을 이긴다),

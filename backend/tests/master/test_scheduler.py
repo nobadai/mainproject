@@ -18,6 +18,7 @@ from app.master import scheduler
 from app.master.clock import SEOUL
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, ItemForecastGate
+from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.pending_transition import RetriedTransition, RetryOut
 from app.master.scheduler import (
     DayRunOutcome,
@@ -29,6 +30,9 @@ from app.master.scheduler import (
 
 AS_OF = date(2026, 9, 8)
 ITEMS = ("무", "배추", "양파")
+
+#: 걷기가 축을 안 주면 `run_scheduled_day` 가 쓰는 값. **상수를 다시 적지 않는다.**
+축 = BURN_IN_SIM_RUN_ID
 
 
 def _at(hour: int, minute: int) -> datetime:
@@ -809,18 +813,18 @@ def test_같은_날_두_번_돌아도_행이_안_는다():
     assert len(procure.requests) == 6, "두 번 부르긴 했다"
     assert len(procure.rows) == 3, "행이 늘었다 — request_id 가 실행마다 갈렸다"
     assert sorted(procure.rows) == [
-        "REQ-DAILY-20260908-무",
-        "REQ-DAILY-20260908-배추",
-        "REQ-DAILY-20260908-양파",
+        f"REQ-DAILY-{축}-20260908-무",
+        f"REQ-DAILY-{축}-20260908-배추",
+        f"REQ-DAILY-{축}-20260908-양파",
     ]
 
 
 def test_request_id_에_시각이_안_들어간다():
     """★ 시각이 들어가면 같은 날 두 번째가 새 행이 된다."""
-    첫번째 = scheduler.daily_request_id(AS_OF, "배추")
-    두번째 = scheduler.daily_request_id(AS_OF, "배추")
+    첫번째 = scheduler.daily_request_id(AS_OF, "배추", sim_run_id=축)
+    두번째 = scheduler.daily_request_id(AS_OF, "배추", sim_run_id=축)
 
-    assert 첫번째 == 두번째 == "REQ-DAILY-20260908-배추"
+    assert 첫번째 == 두번째 == f"REQ-DAILY-{축}-20260908-배추"
 
 
 def test_품목_목록을_다시_안_센다():
@@ -977,18 +981,18 @@ def test_판매_request_id_가_매입_것과_다르다():
 
     assert 매입키 & 판매키 == set(), "매입과 판매가 같은 키를 썼다 — 유일 인덱스가 막는다"
     assert 판매키 == {
-        "REQ-DAILY-SALES-20260908-무",
-        "REQ-DAILY-SALES-20260908-배추",
-        "REQ-DAILY-SALES-20260908-양파",
+        f"REQ-DAILY-SALES-{축}-20260908-무",
+        f"REQ-DAILY-SALES-{축}-20260908-배추",
+        f"REQ-DAILY-SALES-{축}-20260908-양파",
     }
 
 
 def test_판매_request_id_에_시각이_안_들어간다():
     """★ 시각이 들어가면 같은 날 두 번째 깨어남이 새 행이 된다 — 매입과 같은 이유다."""
-    첫번째 = scheduler.daily_sales_request_id(AS_OF, "배추")
-    두번째 = scheduler.daily_sales_request_id(AS_OF, "배추")
+    첫번째 = scheduler.daily_sales_request_id(AS_OF, "배추", sim_run_id=축)
+    두번째 = scheduler.daily_sales_request_id(AS_OF, "배추", sim_run_id=축)
 
-    assert 첫번째 == 두번째 == "REQ-DAILY-SALES-20260908-배추"
+    assert 첫번째 == 두번째 == f"REQ-DAILY-SALES-{축}-20260908-배추"
 
 
 def test_같은_날_두_번_돌아도_판매_행이_안_는다():

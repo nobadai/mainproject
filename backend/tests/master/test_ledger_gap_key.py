@@ -97,7 +97,7 @@ def _관문행(**kwargs: Any) -> dict[str, Any]:
     """진짜 관문 행. **키를 손으로 안 적는다** — 적는 쪽과 같은 함수를 부른다."""
     as_of = kwargs.pop("as_of", 평일)
     return _row(
-        request_id=ledger_gap_request_id(as_of),
+        request_id=ledger_gap_request_id(as_of, sim_run_id=축),
         item=None,
         end_code=LEDGER_GAP_END_CODE,
         as_of=as_of,
@@ -151,9 +151,13 @@ def test_업무_키의_모양이_날짜를_품는다():
     (`_ledger_gap_already_recorded`). 형식에서 날짜가 흐려지면 다른 날이 같은 키를
     갖고, 그러면 둘째 날의 행이 *"이미 있다"* 로 조용히 사라진다.
     """
-    assert ledger_gap_request_id(date(2026, 9, 8)) == "REQ-DAILY-20260908-LEDGER-GAP"
-    assert ledger_gap_request_id(date(2026, 9, 18)) == "REQ-DAILY-20260918-LEDGER-GAP"
-    assert ledger_gap_request_id(date(2026, 9, 8)) != ledger_gap_request_id(date(2026, 9, 18))
+    지어진것 = ledger_gap_request_id(date(2026, 9, 8), sim_run_id=축)
+    assert 지어진것 == f"REQ-DAILY-{축}-20260908-LEDGER-GAP"
+    assert (
+        ledger_gap_request_id(date(2026, 9, 18), sim_run_id=축)
+        == f"REQ-DAILY-{축}-20260918-LEDGER-GAP"
+    )
+    assert 지어진것 != ledger_gap_request_id(date(2026, 9, 18), sim_run_id=축)
 
 
 def test_스케줄러가_저장소의_키를_그대로_쓴다():
@@ -172,7 +176,7 @@ def test_키를_알아보는_꼬리가_키와_같은_데서_나온다():
 
     ★ **자기 생존.** 아무 문자열이나 참이 되는 판정이면 먼저 실패한다.
     """
-    assert is_ledger_gap_request_id(ledger_gap_request_id(평일)) is True
+    assert is_ledger_gap_request_id(ledger_gap_request_id(평일, sim_run_id=축)) is True
     assert is_ledger_gap_request_id("REQ-DAILY-20260123-배추") is False
     assert is_ledger_gap_request_id(None) is False
     assert is_ledger_gap_request_id("") is False
@@ -367,8 +371,8 @@ def test_성적표와_화면이_같은_행에서_같은_답을_낸다(monkeypatc
     [패턴] = [값 for 값 in params if isinstance(값, str) and 값.startswith("%")]
 
     표본 = (
-        ledger_gap_request_id(평일),
-        ledger_gap_request_id(date(2026, 1, 30)),
+        ledger_gap_request_id(평일, sim_run_id=축),
+        ledger_gap_request_id(date(2026, 1, 30), sim_run_id=축),
         "REQ-DAILY-20260123-배추",
         "REQ-DAILY-20260123-무",
         "REQ-AXIS-1",
