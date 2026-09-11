@@ -78,8 +78,10 @@ BLOCKED            달력이나 게이트를 **못 읽었다** → 재시도로 
 
 ```text
 open_day(as_of)           day_open.py
+run_auto_maintenance(as_of)
+                          maintenance.py         ← 🔴 개장 바로 뒤다 · 기본이 꺼짐
 retry_pending_transitions(as_of)
-                          pending_transition.py  ← 🔴 개장 뒤 · 입고 앞이다
+                          pending_transition.py  ← 🔴 유지보수 뒤 · 입고 앞이다
 receive_arrivals(as_of)   inbound.py
 issue_receivables(as_of)  receivable.py  ← 🔴 수금보다 앞이다
 collect_receipts(as_of)   collection.py
@@ -176,6 +178,45 @@ close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
   🔴 **미적용 목록을 새 표에 안 들고 있다.** 승인은 `master_decisions` 에 있고
     원장은 `purchases` 에 있으니 **둘을 맞대면 답이 나온다.**
 
+🔴 **물류 유지보수는 개장 바로 뒤, 그 모든 것의 앞이다** (2026-09-11).
+
+```text
+개장 → **물류 유지보수** → 미적용 전이 재시도 → 입고 → 채권 → 수금 → [장부 관문]
+     → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
+```
+
+  ★★ **창고가 차서 매입이 1월 12일부터 멈추던 자리다** (실측 2026-09-11 · 보수안
+    71일 걷기). 매입 15건이 전부 01-05 ~ 01-09 닷새에 몰렸고 나머지 156건이
+    *"하드 제약(창고)으로 수량이 0까지 축소되어 제안 불가"* 로 보류였다. 그날
+    물류는 `warehouse_free_kg 0` · 이후 `cap_by_date` 전부 `0.0` 을 보냈다 —
+    **부서는 경계를 냈고**(`blocked_by` 는 비어 있었다) 재고가 나갈 길이 없었다.
+
+  ★★ **폐기 경로가 통째로 안 불렸다.** 자동 폐기도 자리 반환도
+    `logistics.auto_maintenance` 에 이미 있었고, `app/master/` 어디에도 **부르는
+    줄 하나**가 없었다 — 판매 판단 0건 · 매입 승인 0건 때와 같은 모양이다.
+
+  ★ **왜 개장 바로 뒤인가.** 그날 자리를 비워야 **그날 입고와 그날 매입 판단**이
+    들어갈 자리가 생긴다. 뒤로 가면 비운 자리를 그날이 못 쓰고 하루씩 밀린다.
+
+  ★ **왜 전이 재시도 앞인가 — 재서 정했다** (2026-09-11). 두 단계는 같은 날
+    안에서 서로의 결과를 안 본다: 전이(`logistics/transition.py`)는
+    `logistics_runtime_fixture` 한 행만 UPDATE 하고 `pallets` 도 `inventory_lots`
+    도 안 건드리며, 유지보수(`turnover.load_lot_turnover`)는 그 fixture 를 안
+    읽는다. 앞뒤로 갈리는 사실이 없으므로 **자리를 먼저 비운다** — 재고가
+    막힌 것이 이 판이 푸는 문제라 그 단계를 앞에 세우는 편이 읽기 쉽다.
+
+  🔴 **기본이 꺼짐이다.** `--auto-maintain` 을 명시로 줄 때만 선다. 승인보다 **더**
+    조심할 자리다 — 물류가 *"되돌릴 경로가 없다(`ADJUST_IN` 없음 · 실사 제외)"*
+    고 못박았다. 승인은 append-only 표에 한 줄이 남는 것이고, 폐기는 **물건이
+    없어진다.**
+
+  🔴 **유지보수가 하루를 죽이지 않는다.** 터지면 세어서 요약에 올리고 하루는
+    계속 간다 — 수금 씨앗 · 전이 재시도와 같은 태도다.
+
+  🔴 **사유 · 행위자 · 시각을 마스터가 정해 넘긴다.** 물류가 셋 다 기본값을 두지
+    않았고(*"물류가 지어내지 않는다"*), 그 빈칸을 채우는 것이 부르는 쪽의 일이다 —
+    어휘의 주인은 `maintenance.py` 다.
+
   ★★ **끝에 몰지 않는다.** 몰면 판매 판단이 그날의 매입 결과를 못 보고, 다음 날이
     어제 산 것을 못 본다 — 그러면 179일을 걸어도 재고가 영영 안 쌓인다.
 
@@ -261,6 +302,7 @@ from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.maintenance import MaintenanceOut, run_auto_maintenance
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.pending_transition import RetryOut, retry_pending_transitions
@@ -630,7 +672,24 @@ class DayRunOutcome:
     action: SchedulerAction
     reason: str
     day_open_status: str = "NOT_ATTEMPTED"
-    #: 미적용 전이 재시도 단계 (2026-09-11). 🔴 **개장 뒤 · 입고 앞이다.**
+    #: 물류 유지보수 단계 (2026-09-11). 🔴 **개장 바로 뒤다 — 그날 자리를 비운다.**
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `RAN` · `NOTHING_DUE` · `FAILED` 는
+    #:   `MaintenanceOut.status` 그대로이고 (`closing_status` 가 `ClosingOut.status`
+    #:   를 그대로 싣는 것과 같다), 단계를 안 탄 날은 이 클래스가 이미 쓰는
+    #:   `NOT_ATTEMPTED` 다.
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   안 켰다 — auto_maintain 이 거짓이었다 · 거기까지 못 갔다
+    #: RAN             손댔거나 일부러 건너뛴 Lot 이 있었다 — 전부 성공이 아니다
+    #: NOTHING_DUE     확인했고 할 것이 없었다 — 🟢 정상이다
+    #: FAILED          하려다 터졌다 — 🔴 **그래도 하루는 계속 간다**
+    #: ```
+    #:
+    #: 🔴 **`NOT_ATTEMPTED` 와 `NOTHING_DUE` 를 접지 않는다.** 앞은 *"안 켰다"* 이고
+    #:   뒤는 *"켰는데 버릴 것이 없었다"* 다 — 폐기 0건의 이유가 그 둘로 갈린다.
+    maintenance_status: str = "NOT_ATTEMPTED"
+    #: 미적용 전이 재시도 단계 (2026-09-11). 🔴 **유지보수 뒤 · 입고 앞이다.**
     #:
     #: ★ **어휘를 새로 만들지 않았다.** `RAN` · `NOTHING_DUE` · `FAILED` 는
     #:   `RetryStatus` 그대로이고 (`closing_status` 가 `ClosingOut.status` 를 그대로
@@ -721,6 +780,10 @@ class DayRunOutcome:
     #: 미적용 전이 재시도가 낸 값 그대로 (2026-09-11). 🔴 **여기서 다시 세지 않는다** —
     #: 어휘 넷의 주인은 `RetryOut.outcomes` 하나다. 단계를 안 탄 날은 `None`.
     pending_transition: RetryOut | None = None
+    #: 유지보수가 낸 값 그대로 (2026-09-11). 🔴 **접지 않는다** — 몇 Lot 을 봤고
+    #: 무엇을 버렸고 무엇을 사람에게 남겼는지의 주인은 `AutoMaintenanceResult` 다.
+    #: 안 켠 날은 `None`.
+    maintenance: MaintenanceOut | None = None
     procurement_approval: BackfillOut | None = None
     #: 판매 승인이 낸 값 그대로. ⚠️ **매입 것과 한 칸에 안 담는다** — 섞으면
     #: 어느 사이클의 승인이 안 섰는지를 요약이 못 말한다 (`items` 와 `sales_items`
@@ -749,6 +812,7 @@ def run_scheduled_day(
     *,
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
+    maintain_fn: Callable[..., MaintenanceOut] = run_auto_maintenance,
     retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
     issue_fn: Callable[..., Any] = issue_receivables,
@@ -762,15 +826,29 @@ def run_scheduled_day(
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
     sales_terms: SalesTermsRule | None = None,
+    auto_maintain: bool = False,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 미적용 전이 재시도 → 입고 → 채권 → 수금 → [장부 관문]
+    개장 → 물류 유지보수 → 미적용 전이 재시도 → 입고 → 채권 → 수금 → [장부 관문]
          → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
     ```
 
-    🔴 **미적용 전이 재시도가 개장 뒤 · 입고 앞이다** (2026-09-11).
+    🔴 **물류 유지보수가 개장 바로 뒤다** (2026-09-11).
+
+      ★★ **창고가 차서 매입이 1월 12일부터 멈추던 자리다.** 폐기도 자리 반환도
+        `logistics.auto_maintenance` 에 이미 있었고 **부르는 자리 하나**가 없었다.
+
+      ★ **왜 개장 바로 뒤인가.** 그날 자리를 비워야 **그날 입고와 그날 매입 판단**이
+        들어갈 자리가 생긴다. 뒤로 가면 하루씩 밀린다.
+
+      🔴 **기본이 꺼짐이다** (`auto_maintain` 참고). 승인보다 더 조심할 자리다 —
+        폐기는 되돌릴 경로가 없다.
+
+      🔴 **터져도 하루는 계속 간다.** `_stage` 와 같은 태도다.
+
+    🔴 **미적용 전이 재시도가 유지보수 뒤 · 입고 앞이다** (2026-09-11).
 
       ★★ **승인 15건이 원장에 한 건도 안 닿던 자리다.** 승인일이 `D` 면 상태가 설
         날은 `D+1` 이고 그 행은 다음 차례에 열린다 — 전이는 늘 하루 앞을 본다.
@@ -832,6 +910,14 @@ def run_scheduled_day(
         `auto_approve` 가 거짓이면 이 값은 **한 번도 안 쓰인다.**
     :param sales_terms: 판매 요청에 실을 상업 조건. 🔴 **읽지 않고 받는다** —
         기본이 `None` 이고 그 뜻은 *"아무것도 안 싣는다"* 이다.
+    :param auto_maintain: 🔴 **기본이 거짓이다. 거짓이면 유지보수 함수가 이름조차
+        안 불린다.** 켜는 것은 **명시로만** — `--auto-maintain` 을 준 걷기 하나다.
+
+        ★★ **승인보다 더 조심할 자리다.** 승인은 append-only 표에 한 줄이 남고,
+          폐기는 **물건이 없어진다** — 물류가 *"되돌릴 경로가 없다(`ADJUST_IN`
+          없음 · 실사 제외)"* 고 못박았다.
+    :param maintain_fn: 🔴 **물류 경계.** 기본이 `run_auto_maintenance` 자체다 —
+        `None` 을 안 받는다. `auto_maintain` 이 거짓이면 **한 번도 안 쓰인다.**
 
     🔴 **판매 상업 조건은 규칙 파일이 말한다** (2026-09-11 · 걷기 실측).
 
@@ -928,7 +1014,33 @@ def run_scheduled_day(
             notes=(f"하루가 안 열려서 뒤를 안 한다: {getattr(opened, 'reason', '')}",),
         )
 
-    # ── 미적용 전이 재시도 — 🔴 **개장 뒤 · 입고 앞** (2026-09-11) ──
+    # ── 물류 유지보수 — 🔴 **개장 바로 뒤** (2026-09-11) ─────────────
+    #
+    # ★★ **여기가 없어서 매입이 1월 12일부터 멈췄다.** 폐기 경로도 자리 반환도
+    #   `logistics.auto_maintenance` 에 이미 있었고, **부르는 자리 하나**가 없었다 —
+    #   걷기 실행 넷의 Lot 이 전부 `ACTIVE` 였다 (실측 2026-09-11).
+    #
+    # 🔴 **개장 바로 뒤여야 한다.** 그날 자리를 비워야 **그날 입고와 그날 매입
+    #    판단**이 들어갈 자리가 생긴다. 뒤로 가면 비운 자리를 그날이 못 쓴다.
+    #
+    # 🔴 **`auto_maintain` 이 거짓이면 이 블록이 통째로 안 돈다.**
+    #
+    # 🔴 **터져도 하루는 계속 간다.** `_stage` 와 같은 태도다.
+    maintenance_status, maintenance, note = _maintain(
+        as_of=as_of,
+        sim_run_id=sim_run_id,
+        # 🔴 **걷기의 시간축을 그대로 넘긴다. 벽시계를 여기서 안 읽는다.**
+        #    `action.now` 는 `backtest_runner --now` 가 그날에 붙여 준 값이고
+        #    (`_moment_on`), `wake_up` 에서는 진입점이 한 번 읽은 그 값이다 —
+        #    시계를 읽는 자리는 여전히 하나다.
+        occurred_at=action.now,
+        maintain_fn=maintain_fn,
+        enabled=auto_maintain,
+    )
+    if note is not None:
+        notes.append(note)
+
+    # ── 미적용 전이 재시도 — 🔴 **유지보수 뒤 · 입고 앞** (2026-09-11) ──
     #
     # ★★ **여기가 없어서 걷기 아흐레에 승인 15건이 원장에 0건이었다.** 전이 로직은
     #   `transition.apply_approval` 에 이미 있었고, **다시 부르는 자리 하나**가
@@ -1023,8 +1135,11 @@ def run_scheduled_day(
             action=action.action,
             reason=action.reason,
             day_open_status=day_open_status,
-            # 🔴 **관문이 막아도 재시도는 이미 돌았다.** 그 사실을 여기서 지우지
-            #    않는다 — 지우면 *"안 했다"* 와 *"했는데 관문에서 돌아섰다"* 가 같아진다.
+            # 🔴 **관문이 막아도 유지보수와 재시도는 이미 돌았다.** 그 사실을 여기서
+            #    지우지 않는다 — 지우면 *"안 했다"* 와 *"했는데 관문에서 돌아섰다"*
+            #    가 같아진다. 폐기는 되돌릴 경로가 없으므로 특히 그렇다.
+            maintenance_status=maintenance_status,
+            maintenance=maintenance,
             pending_transition_status=pending_transition_status,
             pending_transition=pending_transition,
             inbound_status=inbound_status,
@@ -1202,6 +1317,8 @@ def run_scheduled_day(
         action=action.action,
         reason=action.reason,
         day_open_status=day_open_status,
+        maintenance_status=maintenance_status,
+        maintenance=maintenance,
         pending_transition_status=pending_transition_status,
         pending_transition=pending_transition,
         inbound_status=inbound_status,
@@ -1219,6 +1336,53 @@ def run_scheduled_day(
         sales_approval=sales_approval,
         notes=tuple(notes),
     )
+
+
+def _maintain(
+    *,
+    as_of: date,
+    sim_run_id: str,
+    occurred_at: datetime,
+    maintain_fn: Callable[..., MaintenanceOut],
+    enabled: bool,
+) -> tuple[str, MaintenanceOut | None, str | None]:
+    """그날 창고 자리를 비우는 단계 하나 (2026-09-11). **예외를 값으로 옮긴다.**
+
+    🔴 **`enabled` 가 거짓이면 `maintain_fn` 이 이름조차 안 불린다.** 이 한 줄이
+      「비운다 / 안 비운다」가 갈리는 **유일한 자리**다 — `_approve` 와 같은 모양이고
+      **더 센 이유**가 있다. 승인은 append-only 표에 한 줄이 남는 것이지만 폐기는
+      **물건이 없어지고**, 물류가 *"되돌릴 경로가 없다(`ADJUST_IN` 없음 · 실사
+      제외)"* 고 못박았다.
+
+    🔴 **사유 · 행위자 · 시각을 여기서 짓지 않는다.** 어휘의 주인은
+      `maintenance.py` 이고 (`FRESHNESS_EXPIRED` · `AUTO_MAINTENANCE`), 시각은
+      **부르는 쪽이 나른 걷기의 시간축**이다 — 이 함수는 받은 값을 흘려보낸다.
+
+    🔴 **`_stage` 를 그대로 못 쓴다.** 저쪽은 `(상태, 사유)` 만 돌려주는데, 요약이
+      *"몇 Lot 을 버렸고 몇을 사람에게 남겼나"* 를 세려면 **낸 값 자체**가 하루
+      결과에 실려야 한다 (`_retry_pending` · `_approve` 와 같은 모양).
+
+    🔴 **터져도 하루는 계속 간다.** `run_auto_maintenance` 가 예외를 안 내겠다고
+      적어 뒀지만 여기서 한 번 더 잡는다 — 하루의 진행이 그 약속에 걸리면 안 된다.
+
+    :returns: `(단계 상태, 낸 값, 사유 한 줄)`. 안 켠 날은
+        `("NOT_ATTEMPTED", None, None)` — 🔴 **note 도 안 남긴다.** 안 켠 것은
+        사건이 아니라 기본값이고, 매일 한 줄씩 남기면 진짜 사유가 안 읽힌다
+        (`_approve` 와 같은 규율).
+    """
+    if not enabled:
+        return "NOT_ATTEMPTED", None, None
+    try:
+        out = maintain_fn(
+            as_of,
+            sim_run_id=sim_run_id,
+            occurred_at=occurred_at,
+        )
+    except Exception as exc:  # noqa: BLE001 - 유지보수가 터져도 하루는 계속 간다.
+        return "FAILED", None, f"물류 유지보수가 터졌다: {type(exc).__name__}: {exc}"
+    status = str(getattr(out, "status", "FAILED"))
+    # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇을 버렸고 무엇을 남겼는지가 이 줄이다.
+    return status, out, f"물류 유지보수: {status} {dict(sorted(out.outcomes.items()))}"
 
 
 def _retry_pending(
@@ -1397,6 +1561,7 @@ def wake_up(
     ),
     policy_version: str = DAILY_POLICY_VERSION,
     open_day_fn: Callable[..., Any] = open_day,
+    maintain_fn: Callable[..., MaintenanceOut] = run_auto_maintenance,
     retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
     issue_fn: Callable[..., Any] = issue_receivables,
@@ -1409,8 +1574,13 @@ def wake_up(
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
+    auto_maintain: bool = False,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**
+
+    🔴 **`auto_maintain` 도 여기서 기본이 거짓이다.** 깨어난 것만으로 창고가
+      비워지면 폐기를 명시로만 켠다는 규율이 **깨어남 한 번으로 뚫린다** —
+      `auto_approve` 와 같은 이유이고, 되돌릴 경로가 없어 더 센 이유다.
 
     🔴 **판매 상업 조건은 여기서 읽어 하루에 넘긴다** (2026-09-11).
 
@@ -1446,6 +1616,7 @@ def wake_up(
         action,
         policy_version=policy_version,
         open_day_fn=open_day_fn,
+        maintain_fn=maintain_fn,
         retry_fn=retry_fn,
         receive_fn=receive_fn,
         issue_fn=issue_fn,
@@ -1458,4 +1629,5 @@ def wake_up(
         auto_approve=auto_approve,
         approve_fn=approve_fn,
         sales_terms=terms_of(sim_run_id),
+        auto_maintain=auto_maintain,
     )
