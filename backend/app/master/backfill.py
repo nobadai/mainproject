@@ -20,12 +20,26 @@
 
 ```json
 {"backfill": {
-  "procurement": {"rule": "ALWAYS_BASE",       "scenario_label": "..."},
-  "sales":       {"rule": "ALWAYS_FIXED_TYPE", "scenario_type":  "..."},
+  "procurement": {"rule": "ALWAYS_BASE",       "scenario_label":  "..."},
+  "sales":       {"rule": "ALWAYS_FIXED_TYPE", "scenario_type":   "..."},
   "sales_terms": {"partner_id": "...", "payment_terms_type": "...",
                   "payment_days": 0,   "unit_price_source":  "..."}
 }}
 ```
+
+매입 규칙은 **둘 중 하나**다 (2026-09-11).
+
+```json
+{"procurement": {"rule": "ALWAYS_BASE",   "scenario_label":  "1순위"}}
+{"procurement": {"rule": "FIRST_OFFERED", "scenario_labels": ["1순위", "2순위"]}}
+```
+
+★★ **왜 순서가 생겼나.** 매입 `#584`(보유 차감)가 들어오면서 **한 라벨의 안이 자주
+  안 선다.** 실측에서 같은 열흘이 15건 → 3건으로 줄었고, 그 라벨 하나를 가리키던
+  걷기가 `LABEL_NOT_OFFERED` 를 51번 냈다 — 곡선에 승인이 거의 안 남았다.
+
+🟢 **대체가 아니다.** 사람이 *"이것 먼저, 없으면 저것"* 이라고 **정해서 파일에
+  적는다.** 코드는 그 순서를 읽기만 하고, 안 적힌 라벨은 여전히 안 고른다.
 
 `sim_runs.config_json` 이다. **한 실행 = 사이클마다 규칙 하나**이고, 규칙은 행이
 아니라 실행에 속한다.
@@ -113,6 +127,48 @@ ALWAYS_BASE = "ALWAYS_BASE"
 """**매입이 아는 규칙 이름.** 「그 실행이 정한 라벨 하나를 늘 고른다」는 모양.
 
 ⚠️ 이름이 가리키는 라벨은 여기 없다 — `scenario_label` 이 설정에 있다.
+
+🟢 **`FIRST_OFFERED` 가 생겨도 이 규칙은 그대로 산다** (2026-09-11). 한 라벨만 고르는
+  것은 여전히 옳은 규칙이고, **그것으로 돈 실행들이 이미 있다.** 새 규칙은 이것을
+  갈아끼우는 것이 아니라 **더하는 것**이다.
+"""
+
+FIRST_OFFERED = "FIRST_OFFERED"
+"""**매입이 아는 두 번째 규칙 이름.** 「적어 둔 순서대로 찾아 먼저 있는 것을 고른다」.
+
+```json
+{"procurement": {"rule": "FIRST_OFFERED", "scenario_labels": ["1순위", "2순위"]}}
+```
+
+⚠️ **여기 적힌 두 낱말은 자리 표시다.** 실제 라벨 이름은 이 파일 어디에도 없다 —
+  `ALWAYS_BASE` 가 자기 라벨을 안 들고 있는 것과 같은 규율이고,
+  `test_코드에_시나리오_안_이름이_박혀_있지_않다` 가 그것을 지킨다.
+
+★★ **왜 순서가 필요해졌나 — 실측 2026-09-11.** 매입 `#584`(보유 차감)가 들어오면서
+  같은 열흘·같은 규칙·같은 출발점에서 한 라벨의 안이 **15건에서 3건으로** 줄었다.
+  그 라벨 하나를 가리키던 걷기가 `LABEL_NOT_OFFERED` 를 **51번** 냈고, 곡선에 승인이
+  거의 안 남았다.
+
+🟢 **걷기가 대체하지 않은 것은 맞다.** *"없으면 다른 안으로 대체하지 않는다"* 는
+  규율이 일했고 그 규율은 지금도 그대로다 (`_approve_one` 의 🔴).
+
+🔴 **그래서 조용한 대체가 아니라 「순서를 밝힌 한 규칙」으로 만든다.** 사람이
+  *"이것 먼저, 없으면 저것"* 으로 정했고, 그 순서가 **설정 파일에 적혀 리뷰에
+  남는다.** 코드가 고르는 것이 아니다.
+
+🔴 **순서를 코드에 박지 않는다.** 배열 순서가 정본이다 — 배열을 뒤집어 쓰면 그대로
+  뒤집혀 돌아야 한다. 코드가 순서를 알면 **규칙의 주인이 설정이 아니게 되고**, 그
+  순간 «어느 안을 우선하나» 가 배포로 바뀐다.
+
+⚠️ **하나도 없으면 여전히 `LABEL_NOT_OFFERED` 다.** 순서는 *"찾아볼 곳"* 을 늘릴 뿐
+  *"없는 것을 만들어"* 주지 않는다.
+"""
+
+_PROCUREMENT_RULE_NAMES: tuple[str, ...] = (ALWAYS_BASE, FIRST_OFFERED)
+"""매입이 아는 규칙 이름 **전부.**
+
+🔴 **손으로 나열한 문장을 두 벌로 두지 않는다.** 사유 문장이 이 튜플에서 나오므로,
+  규칙을 더하면서 안내 문장만 옛 하나를 가리키는 날이 없다.
 """
 
 ALWAYS_FIXED_TYPE = "ALWAYS_FIXED_TYPE"
@@ -237,12 +293,50 @@ class BackfillRuleMissing(Exception):
 
 @dataclass(frozen=True)
 class BackfillRule:
-    """그 실행이 정한 **매입** 백필 규칙."""
+    """그 실행이 정한 **매입** 백필 규칙 — 「라벨 하나를 늘 고른다」."""
 
-    #: 규칙의 이름. 매입이 아는 것은 `ALWAYS_BASE` 하나다.
+    #: 규칙의 이름. `ALWAYS_BASE` 다.
     name: str
     #: 그 규칙이 늘 고르는 안의 라벨. 🔴 **설정에서 온다 — 코드에 없다.**
     scenario_label: str
+
+    @property
+    def labels_in_order(self) -> tuple[str, ...]:
+        """찾아볼 라벨을 **순서대로.** 이 규칙은 언제나 하나다.
+
+        ★ **`OrderedLabelRule` 과 이 이름을 공유한다.** 고르는 자리(`_approve_one`)가
+          규칙의 종류를 다시 가르지 않게 하려는 것이다 — 거기서 `isinstance` 로
+          갈래를 늘리면 규칙을 더할 때마다 그 함수가 같이 자란다.
+        """
+        return (self.scenario_label,)
+
+
+@dataclass(frozen=True)
+class OrderedLabelRule:
+    """그 실행이 정한 **매입** 백필 규칙 — 「적어 둔 순서대로 먼저 있는 것」.
+
+    🔴 **`BackfillRule` 과 한 모양으로 합치지 않는다.** 앞엣것은 라벨 하나를
+      **가리키고** 이쪽은 여럿을 **순서대로 찾는다** — 고르는 방법이 다른 둘을 한
+      칸에 담으면 어느 규칙으로 돌았는지가 값의 길이로만 읽힌다
+      (`SalesBackfillRule` 을 따로 둔 것과 **같은 이유**다).
+
+    ⚠️ **하나만 적어도 된다.** 그때 동작은 `ALWAYS_BASE` 와 같지만 **적힌 규칙 이름이
+      다르다** — 실행 이력에서 *"그때 무슨 규칙이었나"* 가 이름으로 남는다.
+    """
+
+    #: 규칙의 이름. `FIRST_OFFERED` 다.
+    name: str
+
+    #: 찾아볼 라벨을 **순서대로.** 🔴 **배열 순서가 정본이다 — 코드가 안 정한다.**
+    scenario_labels: tuple[str, ...]
+
+    @property
+    def labels_in_order(self) -> tuple[str, ...]:
+        """적힌 그대로. **여기서 정렬하지 않는다.**
+
+        🔴 정렬하면 설정이 말한 우선순위가 사라지고 **코드가 순서를 정한 것**이 된다.
+        """
+        return self.scenario_labels
 
 
 @dataclass(frozen=True)
@@ -259,6 +353,11 @@ class SalesBackfillRule:
     name: str
     #: 그 규칙이 늘 찾는 후보의 축. 🔴 **설정에서 온다 — 코드에 없다.**
     scenario_type: str
+
+
+#: 매입 규칙의 두 모양. ★ **이름이 하나 있어야 부르는 쪽이 「매입 규칙」을 한 낱말로
+#:   말할 수 있다** — 안 두면 `BackfillRule | OrderedLabelRule` 이 여섯 자리에 퍼진다.
+ProcurementRule = BackfillRule | OrderedLabelRule
 
 
 @dataclass(frozen=True)
@@ -303,11 +402,13 @@ class BackfillRules:
       승인할 안을 고르는 것과 요청에 조건을 싣는 것은 축이 다르다.
     """
 
-    procurement: BackfillRule | None = None
+    #: 🔴 **두 모양 중 하나다** — 라벨 하나를 가리키거나(`BackfillRule`) 순서대로
+    #: 찾거나(`OrderedLabelRule`). 고르는 자리는 `labels_in_order` 하나만 본다.
+    procurement: ProcurementRule | None = None
     sales: SalesBackfillRule | None = None
     sales_terms: SalesTermsRule | None = None
 
-    def for_cycle(self, cycle: str) -> BackfillRule | SalesBackfillRule | None:
+    def for_cycle(self, cycle: str) -> ProcurementRule | SalesBackfillRule | None:
         """그 실행 행의 `cycle` 에 걸리는 규칙.
 
         ★ **`approve_end_codes` 와 같은 모양이다** — 어느 어휘를 볼지는 실행 행의
@@ -347,6 +448,21 @@ class BackfilledRun:
     #:   그날의 이유는 `ValidationError: reported_sales_amount_krw` 였고, 그것은
     #:   문장을 봐야 보인다.
     confirmation_reason: str | None = None
+
+    #: 매입 규칙이 **순서에서 실제로 고른 라벨** (2026-09-11). 못 골랐으면 `None`.
+    #:
+    #: ★★ **`FIRST_OFFERED` 를 들이면서 같이 연 칸이다.** 순서가 생긴 순간 *"그날
+    #:   어느 라벨이 돌았나"* 가 더 이상 규칙 파일만 보고는 안 풀린다 — 이 칸이
+    #:   없으면 **곡선이 한 규칙의 것이 아니게 되고**, 사람이 날마다 되짚어야 한다.
+    #:
+    #: 🔴 **판매는 `None` 이다.** 저쪽은 라벨이 아니라 축으로 찾고 그 축은 실행마다
+    #:   하나라 셀 것이 없다. 후보 `scenario_id` 를 여기 담으면 날마다 다른 값이라
+    #:   요약 줄이 못 읽히는 목록이 된다.
+    #:
+    #: ⚠️ `master_decisions.scenario_label` 에도 같은 값이 적힌다 (승인 문이
+    #:   `DecisionIn.scenario_label` 로 받는다). **그쪽이 장부의 정본이고** 이 칸은
+    #:   걷기 한 번을 요약하려고 든 것이다 — 요약이 DB 를 다시 읽지 않게.
+    picked_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +514,28 @@ class BackfillOut:
             one.confirmation_status
             for one in self.runs
             if one.confirmation_status is not None
+        )
+
+    @property
+    def label_outcomes(self) -> Mapping[str, int]:
+        """**어느 라벨이 실제로 섰나** (2026-09-11). 🔴 **접지 않는다.**
+
+        ★★ **`FIRST_OFFERED` 가 순서를 갖는 순간 이 줄이 필요해졌다.** 규칙 파일이
+          `["보수", "기본"]` 이라고 적혀 있어도 **그날 무엇이 섰는지**는 그날
+          제시된 안이 정한다 — 이 줄이 없으면 곡선이 한 규칙의 것이 아니게 되고,
+          사람이 날마다 결정 행을 되짚어야 한다.
+
+        ★ **`outcomes` 와 한 칸에 담지 않는다.** 축이 다르다 — 저쪽은 *"승인을
+          적었나"* 이고 이쪽은 *"무엇을 골랐나"* 다 (`confirmation_outcomes` 를 가른
+          것과 같은 규율).
+
+        ★ **`None` 은 안 센다.** 못 고른 행과 판매 행에는 라벨이라는 사실 자체가
+          없어, 세면 *"아무것도 안 골랐다"* 가 그 수만큼 부풀어 오른다.
+
+        ★ **이름의 주인은 매입이다.** 여기서 새 이름을 안 붙이고 세기만 한다.
+        """
+        return Counter(
+            one.picked_label for one in self.runs if one.picked_label is not None
         )
 
 
@@ -475,12 +613,60 @@ def _fixed_pick(section: Mapping[str, Any], field: str, rule_name: str) -> str:
     return picked
 
 
-def _read_procurement_rule(raw: Any) -> BackfillRule:
+def _read_procurement_rule(raw: Any) -> ProcurementRule:
+    """매입 규칙 한 칸. **아는 이름이 둘이고, 이름이 모양을 정한다.**
+
+    ```text
+    ALWAYS_BASE     scenario_label  한 라벨을 늘 고른다
+    FIRST_OFFERED   scenario_labels 적어 둔 순서대로 먼저 있는 것
+    ```
+
+    🔴 **이름으로 가른다 — 칸의 유무로 짐작하지 않는다.** `scenario_labels` 가 있으면
+      새 규칙으로 읽는 식이면, 이름은 옛것인데 모양은 새것인 파일이 조용히 돌고
+      **실행 이력에 적히는 규칙 이름이 실제로 돈 규칙과 갈린다.**
+    """
     section = _cycle_section(raw, PROCUREMENT_RULES_KEY)
-    name = _fixed_name(section, PROCUREMENT_RULES_KEY, ALWAYS_BASE)
-    return BackfillRule(
-        name=name, scenario_label=_fixed_pick(section, "scenario_label", ALWAYS_BASE)
+    name = section.get("rule")
+    if name == ALWAYS_BASE:
+        return BackfillRule(
+            name=name, scenario_label=_fixed_pick(section, "scenario_label", ALWAYS_BASE)
+        )
+    if name == FIRST_OFFERED:
+        return OrderedLabelRule(
+            name=name, scenario_labels=_ordered_labels(section)
+        )
+    raise BackfillRuleMissing(
+        f"모르는 백필 규칙이다: {name!r} (backfill.{PROCUREMENT_RULES_KEY}) —"
+        f" 아는 규칙은 {', '.join(_PROCUREMENT_RULE_NAMES)} 다"
     )
+
+
+def _ordered_labels(section: Mapping[str, Any]) -> tuple[str, ...]:
+    """`FIRST_OFFERED` 가 찾아볼 라벨을 **적힌 순서 그대로.**
+
+    🔴 **여기서 정렬하지도 중복을 지우지도 않는다.** 순서의 주인은 설정 파일이고,
+      코드가 손대면 `["기본", "보수"]` 로 뒤집어 쓴 사람이 **안 뒤집힌 결과**를 받는다.
+
+    🔴 **비면 코드가 채울 자리가 생긴다** (`_fixed_pick` 과 같은 규율). 빈 배열은
+      *"아무 라벨이나"* 가 아니라 **규칙이 안 선 것**이다.
+
+    ⚠️ **문자열 하나를 배열로 안 접는다.** `"보수"` 를 적으면 파이썬이 글자 하나씩
+      도는 순회 가능 객체라 `("보", "수")` 가 되고, 그러면 **있지도 않은 라벨 둘**을
+      찾다가 `LABEL_NOT_OFFERED` 로 끝난다 — 터지는 편이 낫다.
+    """
+    raw = section.get("scenario_labels")
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, Sequence):
+        raise BackfillRuleMissing(
+            f"{FIRST_OFFERED} 은 찾을 순서를 배열로 말해야 한다 —"
+            f" scenario_labels 가 {type(raw).__name__} 다"
+        )
+    labels = tuple(one for one in raw if isinstance(one, str) and one.strip())
+    if len(labels) != len(raw) or not labels:
+        raise BackfillRuleMissing(
+            f"{FIRST_OFFERED} 은 고를 것을 설정이 말해야 한다 —"
+            f" scenario_labels 에 빈 값이 있거나 비었다: {raw!r}"
+        )
+    return labels
 
 
 def _read_sales_rule(raw: Any) -> SalesBackfillRule:
@@ -736,6 +922,13 @@ def _backfill_one(
 
     # ── ⑤ 규칙이 가리키는 안이 그날 있었나 ──────────────────────────
     response_payload = row.get("response_payload") or {}
+
+    # 🔴 **승인 문과 같은 눈으로 본다.** `check_scenario_exists` 가 이 목록으로
+    #   검사하므로, 여기서 안 맞추면 승인 문이 터져 `FAILED` 로 남고 *"그날 그 안이
+    #   없었다"* 는 사실이 사고로 뭉개진다.
+    available = available_scenario_names(response_payload, cycle)
+    찾은순서: tuple[str, ...] = ()
+
     if isinstance(rule, SalesBackfillRule):
         # 🔴 **축으로 찾되, 둘 이상이면 안 고른다.** 첫 번째를 고르면 배열 순서가
         #   선택 규칙이 되고, 판매가 그것을 쓰지 않기로 명시했다.
@@ -748,20 +941,30 @@ def _backfill_one(
             )
         picked = matched[0] if matched else None
     else:
-        picked = rule.scenario_label
+        # 🟢 **적힌 순서대로 찾아 먼저 있는 것** (2026-09-11 · `FIRST_OFFERED`).
+        #    `ALWAYS_BASE` 는 그 순서가 하나뿐이라 전과 똑같이 돈다.
+        #
+        # 🔴 **순서를 여기서 정하지 않는다.** `labels_in_order` 가 설정이 적은 그대로를
+        #    낸다 — 이 줄이 정렬하거나 뒤집으면 규칙의 주인이 코드가 된다.
+        #
+        # 🔴 **그래도 대체가 아니다.** 사람이 *"보수 우선, 없으면 기본"* 이라고 **적어
+        #    둔 것**을 따르는 것이고, 안 적힌 라벨은 여전히 안 고른다.
+        찾은순서 = rule.labels_in_order
+        picked = next((label for label in 찾은순서 if label in available), None)
 
-    # 🔴 **고른 뒤 승인 문과 같은 눈으로 대조한다.** `check_scenario_exists` 가
-    #   이 목록으로 검사하므로, 여기서 안 맞추면 승인 문이 터져 `FAILED` 로 남고
-    #   *"그날 그 안이 없었다"* 는 사실이 사고로 뭉개진다.
-    #
     # 🔴 **없으면 다른 안으로 대체하지 않는다.** 대체하면 곡선이 규칙과 다른 것을
     #   재현하고, *"규칙이 정한 안을 늘 고른 곡선"* 이라는 발표 문장이 거짓이 된다.
-    available = available_scenario_names(response_payload, cycle)
     if picked is None or picked not in available:
         shown = ", ".join(available) if available else "(없음)"
+        # ★ **「하나를 못 찾았다」와 「둘 다 못 찾았다」는 다른 사실이다.** 찾아본
+        #   순서를 사유에 적어 두면, 규칙을 늘렸는데도 안 섰다는 것이 그 줄로 보인다.
+        #
+        # ⚠️ **판매에는 이 절이 없다.** 저쪽은 라벨이 아니라 **축**으로 찾으므로
+        #   *"찾은 순서"* 라는 말 자체가 없다 — 없는 개념을 빈 값으로 적지 않는다.
+        순서절 = f"찾은 순서: {' → '.join(찾은순서)} · " if 찾은순서 else ""
         return 결과(
             "LABEL_NOT_OFFERED",
-            f"규칙이 가리키는 안이 그날 없다 (제시된 안: {shown})",
+            f"규칙이 가리키는 안이 그날 없다 ({순서절}제시된 안: {shown})",
         )
 
     # ── ⑥ 승인 문 ───────────────────────────────────────────────────
@@ -794,4 +997,10 @@ def _backfill_one(
         #    남았다 — *"승인이 적혔다"* 가 *"판매가 섰다"* 로 읽혔다.
         confirmation_status=None if saved.sale is None else saved.sale.status,
         confirmation_reason=None if saved.sale is None else (saved.sale.reason or None),
+        # 🔴 **순서에서 실제로 고른 것을 남긴다.** 규칙 파일에 적힌 순서와 그날 선
+        #    라벨은 다른 사실이다 — 규칙만 보고 곡선을 읽으면 틀린다.
+        #
+        # ★ **판매는 `None` 이다** (`찾은순서` 가 비어 있다). 저쪽 `picked` 는
+        #   라벨이 아니라 후보 `scenario_id` 라 라벨 어휘에 섞으면 안 된다.
+        picked_label=picked if 찾은순서 else None,
     )
