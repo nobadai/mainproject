@@ -112,7 +112,25 @@ def build_request_id(*, head: str, as_of: date, sim_run_id: str, tail: str) -> s
       막는다.
 
     ★ **시각을 안 넣는다.** 축은 시각이 아니다 — 같은 실행이 같은 날 두 번 깨어나면
-      키가 같아야 `master_agent_runs_run_request_unique` 가 두 번째를 막는다.
+      **키가 같아야** 사람이 그 둘을 같은 업무로 읽는다.
+
+    🔴 **그 키가 두 번째 행을 막지는 않는다** (2026-09-11 · 매입 지적 · 실측).
+
+      ```text
+      master_agent_runs_pkey                 UNIQUE (run_id)          ← run_id 가 PK 다
+      master_agent_runs_run_request_unique   UNIQUE (run_id, request_id)
+      ```
+
+      ★★ **PK 를 품은 복합 유니크는 아무것도 더 막지 않는다.** `run_id` 가 이미
+        유일하므로 그 인덱스는 **언제나 통과**한다. 종전 주석이 이것을 *"두 번째를
+        막는다"* 로 적었는데 **거짓이었다** — 적어 놓고 한 번도 안 쟀다.
+
+      🟢 **그래도 인덱스를 안 바꾼다.** 같은 업무 키에 행이 여럿 서는 것은 **의도**다 —
+        판단은 걸을 때마다 다시 서고, 그래야 부서가 고친 것을 다시 잴 수 있다.
+        실측: `SIM-WALK-2026-V4` 는 창을 두 번 걸어 행 854 · 업무 키 428 이다.
+
+      ⚠️ **그래서 세는 축을 밝혀야 한다.** 재실행이 있는 실행에서 **행으로 세면
+        부풀려진다.** `(as_of, item, cycle)` 로 세고 몇 번 걸었는지를 같이 적는다.
 
     :raises ValueError: `sim_run_id` 가 비었을 때.
     """
