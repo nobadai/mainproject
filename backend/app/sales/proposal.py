@@ -345,6 +345,17 @@ def _supply(
     # 0은 권위 있는 확정 공급량이며 null과 다르다.
     required = None if confirmed is None else max(Decimal(0), quantity - confirmed)
     conditional, dependency_ref = _purchase_conditional_supply(replies or [])
+    if required is not None and required == 0:
+        # 🔴 **확정된 0 은 모름이 아니다.** 확정 공급이 요청 수량을 다 덮으면 추가
+        #    공급은 **필요 없다는 것이 확인된 것**이고, 그때 조건부 확보량은 0 이다.
+        #    여기서 `None` 을 남기면 재무는 *"조건부 물량을 모른다"* 로 읽어
+        #    (`sales_supply_conditional_quantity`) 원가 기준을 fail-closed 로 닫는다 —
+        #    아무것도 모자라지 않은 제안이 자료 미비로 막힌다.
+        #
+        # ★ `x or 0` 같은 일반 falsy fallback 이 아니다. 위 조건은 **upstream 이
+        #   명시적으로 "추가 공급 없음" 을 확정했을 때만** 참이다. 확정 공급을 모르면
+        #   (`confirmed is None`) `required` 도 `None` 이라 이 갈래에 오지 않는다.
+        conditional = Decimal(0)
     return ScenarioSupply(
         confirmed_quantity_kg=confirmed,
         required_additional_quantity_kg=required,

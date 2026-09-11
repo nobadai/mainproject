@@ -256,16 +256,70 @@ def _aggressive(reply):
 
 
 def test_initial_scenario_has_no_conditional_quantity():
-    """Purchase 검증 전에는 조건부 확보량을 아무도 확인해 주지 않았다."""
+    """Purchase 검증 전에는 조건부 확보량을 아무도 확인해 주지 않았다.
+
+    ★ **부족한 안에 한한다.** 확정 공급이 요청 수량을 다 덮는 안은 추가 공급이
+      *"필요 없다는 것이 확인된"* 상태라 조건부 확보량이 `0` 이다 — 모르는 것이
+      아니다. 아래 검사가 그 둘을 가른다.
+    """
     reply = run_proposal(
         _request("SPOT_SALES", user={"requested_quantity_kg": 5000,
                                      "preferred_unit_price_krw": 2000,
                                      "preferred_delivery_date": "2026-09-10"})
     )
 
-    for scenario in reply.scenarios:
+    부족한_안 = [s for s in reply.scenarios if s.supply.additional_supply_required]
+    assert 부족한_안, "이 요청은 부족한 안이 있어야 한다"
+    for scenario in 부족한_안:
         assert scenario.supply.conditional_quantity_kg is None
         assert scenario.supply.dependency_ref is None
+
+
+def test_a_fully_covered_scenario_confirms_zero_conditional_supply():
+    """🔴 **확정된 0 은 모름이 아니다.**
+
+    확정 공급이 요청 수량을 다 덮으면 추가 공급은 필요 없다는 것이 확인된 것이고,
+    그때 조건부 확보량은 `0` 이다. 여기서 `None` 을 남기면 재무가 *"조건부 물량을
+    모른다"* 로 읽어(`sales_supply_conditional_quantity`) 원가 기준을 닫는다 —
+    아무것도 모자라지 않은 제안이 자료 미비로 막힌다.
+    """
+    reply = run_proposal(
+        _request("SPOT_SALES", user={"requested_quantity_kg": 5000,
+                                     "preferred_unit_price_krw": 2000,
+                                     "preferred_delivery_date": "2026-09-10"})
+    )
+
+    덮인_안 = [
+        s
+        for s in reply.scenarios
+        if s.supply.required_additional_quantity_kg == 0
+    ]
+    assert 덮인_안, "확정 공급이 다 덮는 안이 있어야 한다"
+    for scenario in 덮인_안:
+        assert scenario.supply.conditional_quantity_kg == 0
+        assert scenario.supply.additional_supply_required is False
+
+
+def test_unknown_confirmed_supply_keeps_conditional_unknown():
+    """★ 확정 공급을 모르면 조건부도 모른다 — 0 으로 메우지 않는다."""
+    reply = run_proposal(
+        _request(
+            "SPOT_SALES",
+            user={"requested_quantity_kg": 5000,
+                  "preferred_unit_price_krw": 2000,
+                  "preferred_delivery_date": "2026-09-10"},
+            logistics_context={
+                "query_scope": {"item": "배추"},
+                "sellable_supply": {"status": "UNRESOLVED", "inventory_by_item": []},
+                "delivery_feasibility": {"status": "READY", "reason_codes": []},
+            },
+        )
+    )
+
+    for scenario in reply.scenarios:
+        assert scenario.supply.confirmed_quantity_kg is None
+        assert scenario.supply.required_additional_quantity_kg is None
+        assert scenario.supply.conditional_quantity_kg is None
 
 
 def test_required_additional_is_not_copied_into_conditional():
