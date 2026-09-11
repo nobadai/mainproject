@@ -20,6 +20,7 @@
 
 from fastapi import APIRouter
 
+from app.api.console.routes import router as console_router
 from app.api.dashboard.routes import router as dashboard_router
 from app.api.finance.console_routes import router as finance_console_router
 from app.api.finance.routes import router as finance_router
@@ -40,5 +41,6 @@ for _child in (
     sales_router,
     finance_console_router,
     sales_console_router,
+    console_router,
 ):
     router.include_router(_child)

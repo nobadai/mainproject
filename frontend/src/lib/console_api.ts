@@ -382,3 +382,34 @@ export const AGING_LABELS: Record<AgingBucket, string> = {
   "30_PLUS": "30일 초과",
   PAID: "수금 완료",
 };
+
+/* ── 실행 목록 ─────────────────────────────────────────────────────────── */
+
+/**
+ * 고를 수 있는 실행.
+ *
+ * 🔴 **정책 버전 칸이 없다.** `sim_runs` 가 그 값을 들고 있지 않다 — 이름만 내면
+ *    받는 쪽이 «언젠가 올 값» 으로 읽고 자리를 비워 둔다.
+ */
+export interface ConsoleRun {
+  sim_run_id: string;
+  run_type: string | null;
+  as_of: string | null;
+  period_start: string | null;
+  period_end: string | null;
+  status: string | null;
+  financing_mode: string | null;
+  company_persona_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  /** 마지막으로 기록이 쌓인 시각. 기록이 없으면 `null` — 0 이나 생성 시각이 아니다. */
+  latest_activity_at: string | null;
+  note: string | null;
+}
+export interface ConsoleRunsResponse {
+  rows: ConsoleRun[];
+}
+
+export const consoleRuns = {
+  list: (limit = 100) => get<ConsoleRunsResponse>("/runs", { limit }),
+};
