@@ -446,9 +446,13 @@ def daily_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
       막게 한다.
 
     🔴 **시각을 넣지 않는다. 축은 시각이 아니다.** 넣으면 같은 날 두 번 깨어날 때 id 가
-      갈리고, `master_agent_runs_run_request_unique` 가 두 번째를 못 막는다 — 멱등이
-      인덱스가 아니라 *"두 번 안 깨우기"* 에 걸리게 된다. 축은 같은 실행 안에서
-      안 변하므로 그 멱등을 안 건드린다.
+      갈리고, **같은 업무가 두 업무로 읽힌다.** 축은 같은 실행 안에서 안 변하므로 그
+      읽기를 안 건드린다.
+
+      ⚠️ **인덱스가 그 둘째 행을 막아 주지는 않는다** — 이유는
+        `run_repository.build_request_id` 가 적는다 (`run_id` 가 PK 라 그 복합
+        유니크는 언제나 통과한다). 종전 이 자리의 *"멱등이 인덱스에 걸린다"* 는
+        **거짓이었다.**
 
     ★ **자리 배치는 `run_repository.build_request_id` 가 정한다** — 축이 꼬리 앞에
       붙는 이유가 거기 적혀 있다 (`LEDGER_GAP_REQUEST_LIKE` 가 꼬리를 문다).
@@ -464,9 +468,13 @@ def daily_sales_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
     🔴 **매입 키와 갈라야 한다** (2026-09-10).
 
       **판매가 `daily_request_id` 를 그대로 쓰면 안 된다.** 같은 날 같은 품목이면
-      문자열이 같아지고, `master_agent_runs_run_request_unique` 가 **두 번째 사이클을
-      막는다** — 매입이 먼저 돌았으면 판매 행이 아예 안 남는다. 남더라도
-      `get_run_by_request_id` 가 어느 사이클의 실행인지 못 가른다.
+      문자열이 같아지고, 그러면 `get_run_by_request_id` 가 **어느 사이클의 실행인지
+      못 가른다.**
+
+      ⚠️ 종전 이 자리는 *"인덱스가 두 번째 사이클을 막는다"* 고 적었는데 **거짓이었다**
+        (`run_repository.build_request_id` 참고). 막는 것이 아니라 **두 사이클이
+        한 업무 키에 뒤섞이는 것**이 문제다 — 막혀서 안 남는 것이 아니라 남는데
+        구별이 안 된다.
 
     🔴 **실행 축이 필수다** (2026-09-11). 이유는 `daily_request_id` 가 적어 둔 그대로다 —
       축이 없으면 판매 승인도 남의 실행 것을 물려받는다.
