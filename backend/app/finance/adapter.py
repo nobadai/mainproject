@@ -41,6 +41,7 @@ from app.finance.capabilities.sales import (
 from app.finance.db import (
     FinanceDataNotReady,
     get_current_finance_runtime_context,
+    load_partner_credit_limit,
     load_partner_receivables,
 )
 from app.finance.execution import (
@@ -175,6 +176,15 @@ class _RuntimeContextDataPort:
         return load_partner_receivables(
             sim_run_id=self.context.snapshot.sim_run_id, as_of=as_of, partner_id=partner_id
         )
+
+    def load_partner_credit_limit(self, as_of: date, partner_id: str) -> Decimal | None:
+        """거래처 여신한도도 고정 컨텍스트 밖에서 읽는다 — 어느 거래처인지는 payload 가 안다.
+
+        ★ 실행 축을 걸지 않는다. 한도는 거래처·계약이 소유한 사실이라 어느 시뮬레이션
+          에서 보든 같다. 시점만 `as_of` 로 자른다.
+        """
+        self._check_as_of(as_of)
+        return load_partner_credit_limit(as_of=as_of, partner_id=partner_id)
 
 
 def _controller_request(request: AgentRequest, context: FinanceRuntimeContext) -> AgentRequest:

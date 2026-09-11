@@ -88,7 +88,7 @@ def _finance_policy() -> FinancePolicy:
     )
 
 
-def _receivable_port(*receivables):
+def _receivable_port(*receivables, credit_limit=None):
     """실 조회를 대신하는 최소 Port. **행을 주는 일만 한다.**
 
     ★ `load_policy` 도 답한다. 최소현금 정책은 **제안에 무엇이 빠졌든 읽히는** 재무
@@ -103,6 +103,10 @@ def _receivable_port(*receivables):
         def load_policy(self, as_of, policy_version):
             del as_of, policy_version
             return _finance_policy()
+
+        def load_partner_credit_limit(self, as_of, partner_id):
+            del as_of, partner_id
+            return credit_limit
 
     return _Port()
 
@@ -305,6 +309,9 @@ def test_a_failed_lookup_is_not_an_empty_ledger():
         def load_policy(self, as_of, policy_version):
             del as_of, policy_version
             return _finance_policy()
+
+        def load_partner_credit_limit(self, as_of, partner_id):
+            del as_of, partner_id
 
     with pytest.raises(FinanceDataNotReady):
         run_sales_validation(_BrokenPort(), {}, _sales_state())  # type: ignore[arg-type]

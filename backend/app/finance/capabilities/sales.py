@@ -689,11 +689,15 @@ def run_sales_validation(
     minimum_cash: Decimal | None = None
     scenario_cashflow: SalesScenarioCashflow | None = None
     receivable_facts: PartnerReceivableFacts | None = None
+    credit_limit: Decimal | None = None
     if sales_input is not None:
         minimum_cash, scenario_cashflow = _load_sales_cashflow_context(
             data_port, state, sales_input
         )
         receivable_facts = _load_partner_receivable_facts(data_port, state, sales_input)
+        credit_limit = data_port.load_partner_credit_limit(
+            state.request.context.as_of, sales_input.partner_id
+        )
 
     return build_sales_validation_payload(
         evaluate_sales_scenario(
@@ -702,10 +706,13 @@ def run_sales_validation(
             finance_warning_margin_rate=policy.finance_warning_margin_rate,
             max_finance_allowed_payment_terms_days=(policy.max_finance_allowed_payment_terms_days),
             collection_risk_mode=policy.collection_risk_mode,
-            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 권위 있는
-            #    저장 위치가 아직 없어서 여기 기본값을 두면 없는 한도를 재무가
-            #    발명하게 된다 — 없는 채로 두고 여신 판정을 닫는다.
-            credit_limit_krw=None,
+            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 이제
+            #    `partner_credit_limits` 가 그 정본이고, 재무는 **읽기만** 한다 —
+            #    여기 기본값을 두면 없는 한도를 재무가 발명하게 된다.
+            #
+            # ★ 행이 없으면 `None` 이고, 그때 여신 판정은 닫힌다. `0` 은 **한도 0원
+            #   이라는 사실**이라 판정한다 — 둘을 같은 값으로 만들지 않는다.
+            credit_limit_krw=credit_limit,
             # 채권은 실 원장에 있다. 그래서 이쪽만 실제 사실로 채운다 —
             # 여신이 안 열렸다고 회수위험까지 눈을 감을 이유는 없다.
             receivable_facts=receivable_facts,

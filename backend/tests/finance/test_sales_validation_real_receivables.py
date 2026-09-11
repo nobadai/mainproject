@@ -19,8 +19,8 @@ import pytest
 
 from app.finance.capabilities.sales import run_sales_validation
 from app.finance.db import FinanceDataNotReady
-from app.finance.schemas import FinancePolicy
 from app.finance.sales_validation import PartnerReceivable
+from app.finance.schemas import FinancePolicy
 
 AS_OF = date(2025, 12, 31)
 
@@ -62,8 +62,9 @@ def _finance_policy() -> FinancePolicy:
 class _LedgerPort:
     """실 조회 자리에 원장 행을 놓는 최소 Port."""
 
-    def __init__(self, *receivables):
+    def __init__(self, *receivables, credit_limit=None):
         self.receivables = list(receivables)
+        self.credit_limit = credit_limit
         self.asked: list[tuple[date, str]] = []
 
     def load_partner_receivables(self, as_of, partner_id):
@@ -74,6 +75,11 @@ class _LedgerPort:
         del as_of, policy_version
         return _finance_policy()
 
+    def load_partner_credit_limit(self, as_of, partner_id):
+        del as_of, partner_id
+        return self.credit_limit
+
+
 
 class _BrokenPort:
     def load_partner_receivables(self, as_of, partner_id):
@@ -83,6 +89,11 @@ class _BrokenPort:
     def load_policy(self, as_of, policy_version):
         del as_of, policy_version
         return _finance_policy()
+
+    def load_partner_credit_limit(self, as_of, partner_id):
+        del as_of, partner_id
+        return self.credit_limit
+
 
 
 def _state(**over):
