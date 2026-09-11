@@ -58,6 +58,7 @@ from app.master.envelope import (
     Mode,
     route_capability,
     wire_adjustment,
+    wire_payload,
 )
 from app.master.persistence import record_revalidation
 from app.master.ports import AgentNotRegistered
@@ -451,14 +452,55 @@ def _missing_for(routes: Mapping[str, tuple[AgentName, Mode] | None]) -> tuple[s
 def _verdict_of(reply: AgentReply) -> dict[str, Any]:
     """회신 하나를 판정 칸에 담는 모양으로.
 
-    ★ `sales_flow._verdict_of` 와 **같은 모양이다** — 화면과 이력이 두 경로에서 다른
-      모양을 받으면 읽는 쪽이 어느 경로에서 왔는지를 먼저 알아야 한다.
+    ★ `sales_flow._verdict_of` 와 **무엇이 같고 무엇이 왜 다른지** (2026-09-11).
+
+      ```text
+      같다   agent · mode · business_status · runtime_status · payload
+             · reasoning · missing_data
+      다르다 run_id — sales_flow 에만 있다
+      ```
+
+      🔴 **`run_id` 를 따라 넣지 않는다.** 저쪽의 `run_id` 는 되먹임에 실을 때
+        `SalesFlow.replies_by_ref` 에서 회신 원본을 찾는 **포인터**다. 재검증에는 그
+        등록소가 없다 — 없는 것을 가리키는 포인터를 만들면 다음 사람이 그것을
+        쓰려다 빈손이 된다.
+
+    🔴 **`payload` 는 2026-09-11 에 열었다. 그전에는 버렸다.**
+
+      ```text
+      전  agent · mode · business_status · runtime_status · reasoning · missing_data
+      후  + payload
+      ```
+
+      ★★ **두 파일이 서로를 가리키며 「같은 모양」이라고 적어 두었는데 두 칸이
+        달랐다.** 이 문단의 옛 문장이 *"`sales_flow._verdict_of` 와 같은 모양이다"*
+        였고, 저쪽은 *"`revalidation._verdict_of` 가 이미 목록으로 적고 있어 두
+        경로가 같아진다"* 였다 — **둘 다 상대를 근거로 대며 같다고 주장했다.**
+        매입이 `#588` 에서 고친 것과 같은 병이다: 우리가 소유하지 않은 파일의 사실을
+        베껴 와 근거로 삼았다.
+
+      🔴 **실측된 피해.** 재검증이 받은 재무 회신의 `financial_summary` 가 여기서
+        사라져, 확정이 기여이익을 못 찾아 `sales` 가 0행이었다. 통과한 안은 되먹임을
+        안 받으므로(계약 `C-1`) 후보에도 그 값이 없었고, **고리가 닫혀 있었다.**
+
+      ⚠️ `ExecutionPlan.record` 도 `reply.payload` 를 안 담는다. 그래서 이 칸을 열기
+        전에는 회신 내용이 **어디에도** 안 남았다.
+
+    ★ **`wire_payload` 로 편다** (#175 · `sales_flow` 와 같은 규율). payload 는
+      마스터가 모양을 모르는 중첩 dict 라, 튜플이 하나라도 있으면 JSON 왕복 전후로
+      같은 칸이 두 모양이 된다.
+
+    ★ **조건 비교는 안 바뀐다.** `conditions_of` 는 `business_status` 하나만 보고,
+      그 문서화 문자열이 *"판정은 닫힌 어휘 하나만 쓴다 — `reasoning` 은 설명이지
+      조건이 아니라 넣지 않는다"* 고 적어 두었다. `payload` 도 같은 쪽이다.
+      `tests/master/test_finance_margin_carried.py` 가 그것을 잠근다.
     """
     return {
         "agent": reply.agent,
         "mode": reply.mode,
         "business_status": reply.business_status,
         "runtime_status": reply.runtime_status,
+        "payload": wire_payload(dict(reply.payload)),
         "reasoning": reply.reasoning,
         "missing_data": list(reply.missing_data),
     }

@@ -73,6 +73,10 @@ SCN = "SALES-001-A-R1"
 #: 원 실행일보다 뒤여야 한다 — 같이 옮긴다.
 납품일 = date(2026, 2, 6)
 
+#: 재무가 내는 기여이익. 🔴 **마스터가 세지 않고 받아 나른다** — 수량 × 단가 와
+#: 아무 관계 없는 값으로 둬야 *"마스터가 다시 셌다"* 를 가를 수 있다.
+재무요약 = {"contribution_margin_krw": "128235.00", "contribution_margin_rate": "0.664"}
+
 #: 실행 이력 행이 실은 축. 🔴 **재검증이 이 값을 읽는다** (2026-09-11) — 없으면
 #: `_revalidation_for` 가 `ERROR` 를 내고 확정까지 안 간다.
 실행축 = "SIM-SALESCHAIN-20260911"
@@ -94,6 +98,11 @@ class 부서:
         self.business_status = business_status
         self.호출: list[tuple[str, str, date]] = []
 
+        #: 🔴 **재무가 기여이익을 낸다** (2026-09-11). 되먹임을 안 받는 안에는 이
+        #: 길뿐이라(계약 `C-1`), 대역이 이 칸을 안 실으면 확정이 `BLOCKED` 로
+        #: 막혀 아래 검사가 전부 *"확정이 안 불렸다"* 를 재게 된다.
+        self.재무요약: dict[str, Any] | None = dict(재무요약)
+
         #: 재검증 봉투가 들고 온 실행 축. 🔴 **`호출` 과 따로 둔다** — 저 튜플을
         #: 넓히면 이미 셋으로 푸는 자리들이 같이 깨진다.
         self.축: list[str] = []
@@ -110,6 +119,11 @@ class 부서:
             runtime_status="READY",
             business_status=self.business_status,
             reasoning="대역",
+            payload=(
+                {}
+                if request.agent != "finance" or self.재무요약 is None
+                else {"financial_summary": dict(self.재무요약)}
+            ),
         )
         return reply, ExecutionMetadata(
             run_id=reply.run_id,
@@ -463,6 +477,7 @@ def test_CONDITIONAL_도_통과가_아니다(monkeypatch):
         policy_version="v1.3",
         scenario=_scenario(),
         revalidation_outcome="CONDITIONAL",
+        financial_summary=재무요약,
         sim_run_id=실행축,
         confirm=대역,
         connect=커넥션_대역,
@@ -485,6 +500,7 @@ def _확정(scenario: Mapping[str, Any], 대역: 확정_대역 | None = None):
         policy_version="v1.3",
         scenario=scenario,
         revalidation_outcome="PASSED",
+        financial_summary=재무요약,
         sim_run_id=실행축,
         confirm=대역 or 확정_대역(),
         connect=커넥션_대역,

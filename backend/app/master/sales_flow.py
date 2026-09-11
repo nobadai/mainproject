@@ -1273,7 +1273,25 @@ def _verdict_of(reply: AgentReply) -> dict[str, Any]:
 
     ★ **`missing_data` 를 목록으로 편다.** 이 dict 는 화면·이력까지 나가는데 튜플은
       JSON 을 한 번 왕복하면 목록이 된다 (#175 · `wire_payload` 와 같은 규율).
-      `revalidation._verdict_of` 가 이미 목록으로 적고 있어 **두 경로가 같아진다.**
+
+    ★ **`revalidation._verdict_of` 와 무엇이 같고 무엇이 왜 다른지** (2026-09-11).
+
+      ```text
+      같다   agent · mode · business_status · runtime_status · payload
+             · reasoning · missing_data
+      다르다 run_id — 여기에만 있다 (위의 ★ 가 이유를 적었다)
+      ```
+
+      🔴 **저쪽을 근거로 「두 경로가 같아진다」고 적어 두었는데 실제로는 달랐다**
+        (2026-09-11). 저쪽은 `payload` 를 버리고 있었고, 그 문단은 *"`sales_flow.
+        _verdict_of` 와 같은 모양이다"* 라고 **이쪽을 근거로 대고** 있었다 — 두
+        파일이 서로를 가리키며 같다고 주장하는 동안 두 칸이 비어 있었다.
+
+        ★ 그래서 이제 **모양을 상대에게서 읽지 않는다.** 무엇이 같고 무엇이 왜
+          다른지를 양쪽이 각자 적는다 (매입 `#588` 의 규율).
+
+      ⚠️ 저쪽이 `payload` 를 버리는 동안 확정이 기여이익을 못 찾아 `sales` 가
+        0행이었다. 통과한 안은 되먹임을 안 받으므로(`C-1`) 후보에도 그 값이 없었다.
     """
     return {
         "agent": reply.agent,
