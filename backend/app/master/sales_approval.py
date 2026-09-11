@@ -436,8 +436,9 @@ def confirm_approved_sale(
     2. 상업조건 확인      없는 값을 지어내지 않는다 → BLOCKED (이름을 부른다)
     3. 기여이익 확인      재무가 안 냈으면 지어내지 않는다 → BLOCKED (이름을 부른다)
     4. 기준일 확인        order_date 는 **그 실행의 as_of** 다 — 벽시계가 아니다
-    5. 입력 계약 조립     커넥션 밖에서 (실패해도 DB 를 안 건드린다)
-    6. confirm_sale       한 커넥션 · commit 한 번 · 실패하면 rollback
+    5. 업무 키 확인       source_order_id 가 될 값이다 — 없으면 지어내지 않는다
+    6. 입력 계약 조립     커넥션 밖에서 (실패해도 DB 를 안 건드린다)
+    7. confirm_sale       한 커넥션 · commit 한 번 · 실패하면 rollback
     ```
 
     🔴 **재검증이 막히면 부르지 않는다.** `CONDITIONAL` 도 통과가 아니다 — 사용자가
@@ -498,6 +499,23 @@ def confirm_approved_sale(
         return SaleConfirmationOut(
             status="BLOCKED",
             reason="원 실행의 기준일(as_of)을 못 읽어 주문일을 정할 수 없다.",
+        )
+
+    if not request_id:
+        # 🔴 **업무 키를 지어내지 않는다** (2026-09-11). `source_order_id` 가 될 값이고,
+        #   그 칸이 가리키는 것은 **이 판매를 낳은 마스터 판단**이다. 못 읽었으면
+        #   *"무엇에 대한 판단이었나"* 를 모르는 것이라, `or "UNKNOWN"` 으로 메우면
+        #   원장에 **아무도 안 내린 판단**이 원본 주문으로 선다.
+        #
+        # ⚠️ **계약의 `min_length=1` 에 기대지 않는다.** 거기까지 흘려 보내면 사유가
+        #   *"판매가 입력을 거부했다"* 가 되는데, 실제로는 **마스터가 값을 못 만든
+        #   것**이다. 둘은 다른 사실이라 여기서 먼저 돌아서고 이름을 부른다.
+        return SaleConfirmationOut(
+            status="BLOCKED",
+            reason=(
+                "이 판매를 낳은 마스터 업무 키(request_id)를 못 읽어 "
+                "원본 주문(source_order_id)을 정할 수 없다."
+            ),
         )
 
     try:
@@ -567,7 +585,34 @@ def _confirmation_input(
     order_date  그 실행의 as_of              판매·재무 확정 ③ — 벽시계가 아니다
     sim_run_id  원 실행 이력 행의 축          어느 실행의 장부인가는 마스터가 정한다
     line.기여이익  재검증의 재무 판정         🔴 되먹임 없는 안에는 이 길뿐이다
+    source_order_id  이 실행의 업무 키        🔴 이 판매를 낳은 판단의 이름이다
     ```
+
+    🔴 **`sale_id` 와 `source_order_id` 는 같은 것을 안 가리킨다** (2026-09-11).
+
+      ```text
+      sale_id          SALE-{run_id}-{scenario_id}          ← **실행 축**
+                       그날 어느 실행 행이 이 판매를 낳았나 (판매가 짓는다)
+      source_order_id  REQ-DAILY-SALES-{실행}-{날짜}-{품목}   ← **업무 축**
+                       무엇에 대한 판단이었나 — 어느 실행의 · 어느 날의 · 어느 품목
+      ```
+
+      ★★ **두 축이 다르다.** `run_id` 는 그 판단이 **몇 번째로 돈 것**인지이고, 업무
+        키는 **무엇을 판단한 것**인지다. 같은 업무 키가 여러 `run_id` 를 가질 수 있다
+        (재시도). 그래서 한 칸으로 접히지 않는다 — 접으면 *"같은 판단의 두 번째
+        실행"* 과 *"다른 판단"* 을 장부가 더 이상 못 가른다.
+
+      🔴 **둘 다 이 판매를 가리킨다는 이유로 하나를 지우지 마라.** 가리키는 방향이
+        다르다: 하나는 위로(실행 이력), 하나는 옆으로(업무 키) 간다.
+
+      ★ **지어낸 값이 아니다.** 이 시뮬레이션에서 판매를 낳은 것은 **승인된 마스터
+        판단**이고, 「원본 주문 ID」가 실제로 가리키는 것이 그것이다 — 없는 주문
+        번호를 만들어 넣는 자리가 아니다.
+
+      🟡 **판매 계약(`SalesConfirmationInput.source_order_id`)은 여전히 `str | None`
+        이다.** 표는 `NOT NULL` 이지만 계약을 필수로 바꿀지는 **판매가 정할 자리**라
+        건드리지 않는다. 마스터는 **늘 싣는 것**으로 제 쪽을 잠근다
+        (`tests/master/test_sale_carries_business_key.py`).
 
     🔴 **`sim_run_id` 는 상수가 아니다** (2026-09-11). 전에는 `BURN_IN_SIM_RUN_ID` 를
       박았는데, 이 값이 `app/sales/persistence.py` 의 `sales` INSERT 에 그대로
@@ -626,6 +671,9 @@ def _confirmation_input(
         sim_run_id=sim_run_id,
         sale_date=selected.delivery_date,
         order_date=as_of,
+        # 🔴 **업무 키를 그대로 싣는다.** 위 표의 두 축 설명이 이 한 줄의 이유다 —
+        #    `sale_id` 와 같은 값을 넣으면 그 순간 한 칸이 거짓말이 된다.
+        source_order_id=request_id,
         line=SalesApprovalLine(
             item_name=selected.item,
             quantity_kg=selected.quantity_kg,
