@@ -225,6 +225,30 @@ def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) 
     ⚠️ **두 칸 중 하나라도 ``None`` 인 로트는 건너뛴다** (규칙 3). 0으로 채우면
       *"쓸 수 있는 게 없다"* 가 되어 안 깎이고, 큰 수로 채우면 없는 재고를 뺀다. 모르는
       것은 세지 않는다 — 차감을 **적게 잡는 쪽**으로만 어긋난다.
+
+    🔴 **만료 로트(잔여신선도 음수)는 0일치로 센다** (2026-09-11 · `#584` 회귀 수정).
+
+      ``min(freshness, days)`` 만 쓰면 음수 신선도가 ``daily × 음수`` 로 들어가
+      **차감이 음수**가 되고, 호출자가 ``원수요 − 차감`` 을 하므로 **원수요보다 더 사게
+      된다.** 조항이 막으려던 것과 정확히 반대다::
+
+          만료 하나 섞인 로트 셋   차감 **−16,435kg**  →  사는 양 3,587 → **20,022kg**
+
+      ★ **이것은 규칙 3 위반이 아니다.** ``None`` 은 *"며칠 버티는지 모른다"* 라 건너뛰고,
+        음수는 *"이미 지났다"* 는 **확정된 답**이다 — 그 로트가 덮는 창은 **0일**이다.
+        값을 지어내는 것이 아니라 아는 값을 그대로 쓰는 것이다.
+
+      ⚠️ 바깥 ``max(0.0, ...)`` 도 같이 둔다. 안쪽만 막으면 ``available_qty_kg`` 가
+        음수로 오는 날 같은 부호 뒤집힘이 다시 난다 — 지금 원장엔 0건이지만, **한 번
+        뒤집히면 화면에 「창고 제약」으로 보이고 아무도 못 찾는다.**
+
+      🔴 **원장에 이미 있다** — 로트 26,967건 중 잔여신선도 음수 **18,944건**,
+        차감이 음수가 되는 셀 **1,390 / 1,701**.
+
+      ⚠️ **클램프가 생기면서 위 ``None`` 건너뛰기는 검사로 못 가른다** — 0으로 채워도
+        ``covered_days`` 가 0이라 결과가 같다(변이로 확인: 안 물린다). 가르는 변이는
+        *"큰 수로 채운다"* 쪽 하나다. **건너뛰기는 그대로 둔다** — 클램프를 걷는 날
+        다시 유일한 방어가 되고, 뜻이 다른 둘을 같은 줄로 합치지 않는다.
     """
     if not lots:
         return 0.0
@@ -234,8 +258,9 @@ def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) 
         freshness = lot.get("remaining_freshness_days")
         if available is None or freshness is None:
             continue
-        usable += min(float(available), daily_demand * min(int(freshness), days))
-    return min(usable, daily_demand * days)
+        covered_days = max(0, min(int(freshness), days))
+        usable += min(float(available), daily_demand * covered_days)
+    return max(0.0, min(usable, daily_demand * days))
 
 
 def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | None:

@@ -289,3 +289,95 @@ def test_no_deduction_means_no_such_disclosure(monkeypatch: pytest.MonkeyPatch) 
     scenario = run_purchase_agent(ITEM, AS_OF)["scenarios"][0]
 
     assert not any("보유 재고를 뺀 창" in risk for risk in scenario["risks"])
+
+
+# ── ④ 만료 로트 — 🔴 부호가 뒤집히지 않는다 (`#584` 회귀) ────────────────────
+#
+# ``min(잔여신선도, D)`` 만 쓰면 음수 신선도가 ``일평균 × 음수`` 로 들어가 **차감이
+# 음수**가 되고, ③이 ``원수요 − 차감`` 을 하므로 **원수요보다 더 사게 된다.**
+#
+# ⚠️ **원장에 이미 있다** — 로트 26,967건 중 잔여신선도 음수 18,944건, 차감이 음수가
+#   되는 셀 1,390 / 1,701 (2026-09-11 실 DB 전수).
+#
+# ★ **「0건이라 안전」이 아니라 「달력이 맞아떨어져 안 걸렸다」이다.** 폐기 임계가
+#   ``<= 0`` 이라 제때 돌면 0에 닿은 날 걷히는데, 그건 **방어로 설계된 것이 아니라
+#   가용재고 제외 기준을 재사용한 것**이다. 하루 밀리면 음수가 우리한테 온다.
+
+
+def test_an_expired_lot_adds_nothing_to_the_purchase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **이 회귀의 본체다** — 만료 로트가 섞여도 차감은 성한 로트 몫 그대로다.
+
+    고치기 전에는 이 조합이 차감 **−16,435kg** 을 내서 사는 양이 `3,587 → 20,022kg` 으로
+    부풀었다. 화면에는 「하드 제약(창고)으로 축소」로 보인다 — **아무도 못 찾는다.**
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots(monkeypatch, [_lot(1000, 30), _lot(200, -25)])
+    plan = next(s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본")
+
+    assert plan["total_qty_kg"] == demand - 1000, "만료 로트가 차감에 끼어들었다"
+    assert plan["total_qty_kg"] < demand, "차감이 부호가 뒤집혀 원수요보다 더 산다"
+
+
+def test_all_lots_expired_buys_the_plain_demand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """전부 만료면 차감 0 — **원수요 그대로**다. 「보유가 없다」와 같은 자리다."""
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots(monkeypatch, [_lot(800, -3), _lot(500, -40)])
+    plan = next(s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본")
+
+    assert plan["total_qty_kg"] == demand
+
+
+def test_the_deduction_is_never_negative(monkeypatch: pytest.MonkeyPatch) -> None:
+    """차감은 **절대 음수가 아니다.** 바깥 ``max(0.0, ...)`` 이 무는 자리다.
+
+    ⚠️ ``available_qty_kg`` 가 음수로 오는 날을 같이 막는다 — 지금 원장엔 0건이지만
+      안쪽 클램프만으로는 그 축이 안 막힌다.
+    """
+    daily = _daily_demand()
+    for lots in (
+        [_lot(200, -25)],
+        [_lot(10**6, -1)],
+        [_lot(-500, 30)],
+        [_lot(-500, -30), _lot(100, 2)],
+    ):
+        for days in (2, 5, 12):
+            assert usable_holdings_kg(lots, daily, days) >= 0.0, lots
+
+
+def test_a_lot_that_expired_while_the_walk_skipped_a_day_deducts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **지연 폐기** — 걷기가 안 걸은 날에 0에 닿은 로트는 다음 걸은 날 **음수**로 온다.
+
+    물류 폐기는 걷기가 그날을 걸을 때 돈다. 잔여신선도가 `0` 에 닿은 날을 걷기가 건너뛰면
+    그 로트는 걷히지 않고, **다음 걷는 날 `-1` 로 우리 봉투에 실린다.**
+
+    ```text
+    D-1  잔여 1     정상
+    D    잔여 0     🔴 걷기가 이날을 안 걸었다 → 폐기가 안 돈다
+    D+1  잔여 -1    ← 이 값이 차감식에 들어온다
+    ```
+
+    ★ **실측으로 갈렸다** — `SIM-CHAIN-V1` 폐기 4건은 **전부 걷은 날**(금·화·월·화)이라
+      한 번도 음수가 안 왔고, `SIM-WALK-2026-V4` 는 지연이 **16건**이었다. 같은 달력이면
+      발화한다. 🔴 V4 가 무해했던 것은 그때가 `#584` **이전이라 차감 자체가 없어서**다.
+
+    ⚠️ 잰 방법의 한계 — 보유 여부를 봉투가 아니라 `inventory_moves` 로 복원했다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    on_time = [_lot(1000, 30), _lot(900, 0)]  # 걷은 날 — 0 에서 폐기된다
+    delayed = [_lot(1000, 30), _lot(900, -1)]  # 하루 밀린 날 — 음수로 온다
+
+    assert usable_holdings_kg(on_time, daily, 5) == usable_holdings_kg(delayed, daily, 5), (
+        "폐기가 하루 밀렸다는 이유만으로 차감이 달라진다"
+    )
+
+    _with_lots(monkeypatch, delayed)
+    plan = next(s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본")
+    assert plan["total_qty_kg"] == demand - 1000
