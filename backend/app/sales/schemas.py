@@ -525,6 +525,16 @@ class SalesScenario(BaseModel):
         default=None, ge=0, serialization_alias="reported_sales_amount_krw"
     )
     delivery_date: date | None = None
+    #: 대금 회수를 **어느 날부터** 세는가. MVP 계약은 `delivery_date` 다.
+    #:
+    #: ★ **판매가 자기 계약 의미를 재무 wire 에 명시한다.** 재무가 물류 날짜를 직접
+    #:   읽지도, 마스터가 `delivery_date → collection_reference_date` 로 번역하지도
+    #:   않는다 — 번역이 조정자에 있으면 판매가 계약을 바꿀 때 두 곳을 같이 고쳐야
+    #:   하고, 어느 쪽이 정본인지 흐려진다. 마스터는 그대로 운반한다.
+    #:
+    #: ⚠️ 회수일 자체가 아니다. 회수일은 재무가 `+ payment_days` 로 만든다
+    #:   (`tools.calculate_collection_date`) — 여기는 그 **기준일**이다.
+    collection_reference_date: date | None = None
     payment_days: int | None = Field(default=None, ge=0)
     #: 결제방식. 사용자/계약이 말해 준 경우에만 값이 있고, 아니면 None 이다.
     payment_terms_type: SalesPaymentTermsType | None = None

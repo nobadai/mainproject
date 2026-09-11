@@ -256,6 +256,11 @@ def test_pre_sales_delivery_facts_are_consumed_without_sales_recalculation(
 
 
 def test_pre_sales_without_delivery_date_accepts_an_empty_date_capacity_vector():
+    """날짜별 여력 벡터가 비어 있어도 확정 수량은 그대로 쓴다.
+
+    ★ 사람이 납기를 안 준 자동 실행이므로 **물류가 확정한 최초 납품일**을 채택한다
+      (`delivery_feasibility.status == READY`). 그 값이 회수 기준일이 된다.
+    """
     request = _request(
         quantity=3500,
         delivery_date=None,
@@ -267,9 +272,48 @@ def test_pre_sales_without_delivery_date_accepts_an_empty_date_capacity_vector()
 
     scenario = _generate_scenarios(request)[-1]
 
-    assert scenario.delivery_date is None
+    assert scenario.delivery_date == date(2026, 9, 10)
+    assert scenario.collection_reference_date == scenario.delivery_date
     assert scenario.supply.confirmed_quantity_kg == Decimal(3500)
     assert scenario.status == "EXECUTABLE"
+
+
+def test_an_unresolved_delivery_never_invents_a_date():
+    """🔴 물류가 못 정한 날짜를 판매가 대신 정하지 않는다.
+
+    `as_of` 나 오늘 날짜로 메우면 그 순간 없는 사실이 납기가 되고, 회수일이 거기서
+    파생되어 현금흐름까지 거짓이 된다.
+    """
+    request = _request(
+        quantity=3500,
+        delivery_date=None,
+        logistics=_pre_sales_logistics(
+            status="UNRESOLVED", confirmed=3500, earliest="2026-09-10"
+        ),
+        replies=[_finance()],
+    )
+
+    scenario = _generate_scenarios(request)[-1]
+
+    assert scenario.delivery_date is None
+    assert scenario.collection_reference_date is None
+
+
+def test_a_user_delivery_date_is_not_overwritten_by_logistics():
+    """★ 사람이 말한 날짜가 먼저다."""
+    request = _request(
+        quantity=3500,
+        delivery_date="2026-09-20",
+        logistics=_pre_sales_logistics(
+            status="READY", confirmed=3500, earliest="2026-09-10"
+        ),
+        replies=[_finance()],
+    )
+
+    scenario = _generate_scenarios(request)[-1]
+
+    assert scenario.delivery_date == date(2026, 9, 20)
+    assert scenario.collection_reference_date == date(2026, 9, 20)
 
 
 def test_s11_missing_profit_stays_none_and_all_unresolved_has_no_recommendation():

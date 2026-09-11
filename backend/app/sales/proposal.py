@@ -1,5 +1,6 @@
 """Sales Proposal Core."""
 
+from datetime import date
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -83,16 +84,24 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
 
 
 def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
-    quantity, price, delivery, payment, terms_type, term, source_ref, refs = _baseline(request)
+    quantity, price, requested_delivery, payment, terms_type, term, source_ref, refs = _baseline(
+        request
+    )
     if quantity is None:
         return []
+    # ★ 상업조건의 납품일과 **공급 조회의 기준일**을 가른다. 앞은 물류가 확정한
+    #   최초 납품일까지 받아들이고, 뒤는 **요청된 날짜**만 쓴다 — `_delivery_date` 가
+    #   왜 그래야 하는지를 적었다.
+    delivery = _delivery_date(request, requested_delivery)
     result: list[SalesScenario] = []
     for suffix, scenario_type, objective in _TYPES:
         scenario_quantity = quantity
         axes: list[str] = []
         collapsed = False
         collapse_reason = None
-        confirmed, supply_uncertainties = resolve_applicable_confirmed_supply(request, delivery)
+        confirmed, supply_uncertainties = resolve_applicable_confirmed_supply(
+            request, requested_delivery
+        )
         if scenario_type == "CONSERVATIVE" and confirmed is not None and confirmed < quantity:
             scenario_quantity = confirmed
             axes.append("QUANTITY")
@@ -170,6 +179,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 unit_price_krw=price,
                 sales_amount_krw=scenario_quantity * price if price is not None else None,
                 delivery_date=delivery,
+                # MVP 계약 — 회수는 납품일부터 센다. 판매가 정한 의미를 재무 wire 에
+                # 명시한다 (마스터가 번역하지 않는다).
+                collection_reference_date=delivery,
                 payment_days=payment,
                 payment_terms_type=terms_type,
                 contract_term_days=term,
@@ -305,6 +317,34 @@ def _baseline(request: SalesProposalInput):
                 source_ref = contract.source_ref
     refs = [contract.source_ref] if contract and contract.source_ref else []
     return quantity, price, delivery, payment, terms_type, term, source_ref, refs
+
+
+def _delivery_date(request: SalesProposalInput, requested: date | None) -> date | None:
+    """이 제안의 **납품일**. 사람이 말한 날짜가 먼저다.
+
+    ★ 사람도 계약도 날짜를 안 준 자동 실행에서만 **물류가 확정한 최초 납품일**을
+      채택한다. `earliest_delivery_date` 는 *"실려서 닿는 가장 이른 날"* 이고
+      (`logistics.tools.earliest_delivery_date_for` — 준비 리드 + 운송 리드) 참고값이
+      아니라 실제 가능일이라 상업조건의 출발점으로 쓸 수 있다.
+
+    🔴 **`READY` 일 때만 쓴다.** 물류가 못 정한 날짜를 판매가 대신 정하지 않는다 —
+      `as_of` 나 오늘 날짜로 메우면 그 순간 없는 사실이 납기가 되고, 회수일이 거기서
+      파생되어 현금흐름까지 거짓이 된다. 못 정했으면 없는 채로 둔다.
+
+    ⚠️ **이 값으로 확정 공급을 다시 고르지 않는다.** 물류는 *"물어본 날짜"* 에만
+      `supply_capacity_by_date` 를 낸다 (`adapter.supply_dates`). 아무도 안 물어본
+      자동 실행에서 그 벡터는 비어 있으므로, 여기서 채택한 날짜로 공급을 조회하면
+      **있던 확정 수량이 `SUPPLY_DATE_CONTEXT_REQUIRED` 로 사라진다** — 판매가 스스로
+      만든 날짜로 물류에게 견적을 요구하는 셈이라 순환이다. 공급 조회는 **요청된
+      날짜**(`requested`)로만 한다.
+    """
+    if requested is not None:
+        return requested
+    context = request.logistics_context
+    delivery = context.delivery_feasibility if context else None
+    if delivery is None or delivery.status != "READY":
+        return None
+    return delivery.earliest_delivery_date
 
 
 def resolve_applicable_confirmed_supply(
