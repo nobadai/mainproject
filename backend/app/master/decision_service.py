@@ -106,15 +106,19 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
 
     end_code = _end_code_of(response_payload)
     check_decidable(end_code, payload.decision, cycle=cycle)
-    check_scenario_exists(
-        payload.scenario_label, available_scenario_names(response_payload, cycle)
-    )
+    check_scenario_exists(payload.scenario_label, available_scenario_names(response_payload, cycle))
 
     existing = list_decisions(request_id)
     _reject_repeat_approval(existing, payload)
 
     seq = next_seq(existing)
-    revalidation = _revalidation_for(row, response_payload, payload, seq)
+
+    # 🔴 **축을 여기서 한 번만 읽는다** (2026-09-11). 재검증 · 판매 확정 · 상태전이
+    #    셋이 각자 읽으면 언젠가 갈리고, 갈리는 날 **재검증은 이 실행을 보고 확정은
+    #    다른 실행에 쓴다.** 한 번 읽어 셋에 흘린다.
+    sim_run_id = _sim_run_id_of(row)
+
+    revalidation = _revalidation_for(row, response_payload, payload, seq, sim_run_id=sim_run_id)
     saved = save_decision(
         request_id=request_id,
         decision_seq=seq,
@@ -134,7 +138,16 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
         #    `buildable=False` 를 낸다 — *"판매를 확정했다"* 자리에 *"매입 약정을 못
         #    만들었다"* 가 실린다.
         return saved.model_copy(
-            update={"sale": _sale_for(request_id, row, response_payload, payload, revalidation)}
+            update={
+                "sale": _sale_for(
+                    request_id,
+                    row,
+                    response_payload,
+                    payload,
+                    revalidation,
+                    sim_run_id=sim_run_id,
+                )
+            }
         )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
     return saved.model_copy(
@@ -142,7 +155,7 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
             "commitment": out,
             # 🔴 **축은 실행 행에서 온다.** 여기서 상수를 읽지 않는다 —
             #    `_sim_run_id_of` 가 왜인지를 적었다.
-            "transition": _transition_for(commitment, sim_run_id=_sim_run_id_of(row)),
+            "transition": _transition_for(commitment, sim_run_id=sim_run_id),
         }
     )
 
@@ -164,6 +177,8 @@ def _sale_for(
     response_payload: Mapping[str, Any],
     payload: DecisionIn,
     revalidation: Revalidation | None,
+    *,
+    sim_run_id: str | None,
 ) -> SaleConfirmationOut | None:
     """승인이면 **판매를 확정한다** (`confirm_sale`).
 
@@ -185,6 +200,16 @@ def _sale_for(
 
     ★ **`as_of` 는 그 실행의 날이다** (`_as_of_of`). 벽시계를 읽지 않는다 —
       `order_date` 가 되고, 그것이 곧 수금 곡선의 시점이다.
+
+    🔴 **축도 여기서 읽지 않는다** (2026-09-11). 부르는 쪽이 **재검증에 넘긴 것과
+      같은 한 값**을 넘긴다. 각자 읽으면 갈리는 날이 오고, 그날 재검증은 이 실행을
+      보고 확정은 다른 실행의 `sales` 에 쓴다.
+
+      ⚠️ **못 읽었으면 확정을 안 한다.** 이 자리까지 오려면 재검증이 `PASSED` 여야
+        하는데, 축을 못 읽으면 재검증이 `ERROR` 라 애초에 못 온다. 그래도 막아 둔다 —
+        그 순서에 기대면 순서가 바뀌는 날 번인 장부에 없는 판매가 쌓인다.
+
+    :param sim_run_id: 원 실행 이력 행이 실은 축. 🔴 **여기서 짓지 않는다.**
     """
     if payload.decision != "APPROVE" or payload.scenario_label is None:
         return None
@@ -193,6 +218,11 @@ def _sale_for(
         return SaleConfirmationOut(
             status="BLOCKED",
             reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
+        )
+    if sim_run_id is None:
+        return SaleConfirmationOut(
+            status="BLOCKED",
+            reason="원 실행의 sim_run_id 를 못 읽어 어느 장부에 확정할지 정할 수 없다.",
         )
     return confirm_approved_sale(
         request_id=request_id,
@@ -204,6 +234,7 @@ def _sale_for(
         financial_summary=(
             None if revalidation is None else financial_summary_of(revalidation.validations)
         ),
+        sim_run_id=sim_run_id,
     )
 
 
@@ -212,11 +243,17 @@ def _revalidation_for(
     response_payload: Mapping[str, Any],
     payload: DecisionIn,
     decision_seq: int,
+    *,
+    sim_run_id: str | None,
 ) -> Revalidation | None:
     """승인이면 **선택된 1안을 `as_of` 로 다시 검증한다** (설계 2026-09-07 · M-4).
 
     ★ **`as_of` 를 만들지 않고 흘린다.** 받은 날을 그대로 `revalidate_scenario` 에
       넘긴다 — 중간에서 손대면 진입점이 정한 날과 부서가 받은 날이 갈린다.
+
+    ★ **`sim_run_id` 도 같다** (2026-09-11). 실행 이력 행에서 읽은 값을 흘린다.
+      🔴 **여기서 읽지 않는다** — `record_decision` 이 한 번 읽어 재검증 · 판매 확정 ·
+      상태전이 셋에 같은 값을 준다. 각자 읽으면 언젠가 갈린다.
 
     🔴 **`APPROVE` 일 때만이다.** `REJECT_ALL` · `REQUEST_CHANGE` · `CANCEL` 은 승인이
       아니라 재검증할 대상이 없다 — 그때 두 칸은 `None` 이고, 그 `None` 은 *"재검증에
@@ -264,12 +301,23 @@ def _revalidation_for(
             reason="원 실행의 policy_version 을 못 읽어 재검증 봉투를 만들 수 없다.",
         )
 
+    if sim_run_id is None:
+        # 🔴 **여기서 메우지 않는다** (2026-09-11). 전에는 재검증이 축을
+        #   `BURN_IN_SIM_RUN_ID` 로 박아, 판매를 한 번도 안 한 실행의 승인이 번인
+        #   장부의 채권·현금에 걸려 통째로 `FAILED` 로 떨어졌다. 못 읽으면 못 읽었다고
+        #   적는 편이 남의 실행 장부로 판정하는 것보다 낫다.
+        return Revalidation(
+            outcome="ERROR",
+            reason="원 실행의 sim_run_id 를 못 읽어 재검증 봉투를 만들 수 없다.",
+        )
+
     return revalidate_scenario(
         scenario=scenario,
         original_conditions=conditions_of_original(response_payload, payload.scenario_label),
         decision_seq=decision_seq,
         policy_version=policy_version,
         as_of=as_of,
+        sim_run_id=sim_run_id,
         item=row.get("item") if isinstance(row.get("item"), str) else None,
     )
 

@@ -76,6 +76,10 @@ SCN = "SALES-001-A-R1"
 첫검증_마진 = "999999.00"
 첫검증_마진율 = "0.111"
 
+#: 실행 이력 행이 실은 축. 🔴 **없으면 재검증이 `ERROR` 라 확정까지 안 간다** (`#586`) —
+#:   이 파일은 확정까지 가야 마진이 실렸는지를 재므로 실행 행에 축을 실어 둔다.
+실행축 = "SIM-SALESCHAIN-20260911"
+
 
 def _NFC(text: str) -> str:
     return unicodedata.normalize("NFC", text)
@@ -200,6 +204,7 @@ def _판매_실행() -> dict[str, Any]:
         "cycle": "SALES",
         "item": "배추",
         "as_of": 원_실행일,
+        "sim_run_id": 실행축,
         "request_payload": {"policy_version": "v1.3", "item": "배추"},
         "response_payload": {
             "end_code": "SL1_PRESENTED",

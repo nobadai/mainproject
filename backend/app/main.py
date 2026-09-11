@@ -22,8 +22,9 @@ app = FastAPI(title="mainproject")
 # 화면용 API (`/api/…`). **부서 라우터와 주소로 가른다** — `/finance/agent` 는
 # 에이전트를 돌리고, `/api/finance` 는 화면에 값을 준다. `/api` 아래는 GET 뿐이다.
 app.include_router(screen_router)
-# ML 예측 API. **여태 안 붙어 있어서 `/ml/forecast` 가 404 였다** (2026-09-08 발견).
-# 매입은 `app.ml.service` 를 파이썬으로 직접 불러 써서 아무도 모르고 있었다.
+# ML 예측 API. 2026-09-11 에 `/ml/forecast` · `/ml/forecast/push` 를 **주석 처리**했다 —
+# 부르는 곳이 없다. 마스터는 `ml_price_forecasts` 를 DB 에서 직접 읽고, 매입의
+# `get_forecast` 는 아직 mock 이다. 되살릴 때를 위해 라우터 연결은 남겨 둔다.
 app.include_router(ml_router)
 # ML 운영 콘솔(`/ml/console/…`). **우리 ML 백엔드로 넘기는 프록시다** —
 # 재학습·에이전트는 학습 꾸러미가 있는 곳에서만 돌 수 있다.

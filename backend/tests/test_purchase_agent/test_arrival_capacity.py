@@ -107,10 +107,14 @@ def _state(cap_by_date=None, *, lead: int | None = None, window: int | None = No
 # ── #93 재현: 컷이 실제로 난다 ────────────────────────────────────────────
 
 
-def test_over_capacity_split_scenario_is_cut() -> None:
+def test_over_capacity_split_scenario_is_cut(no_holdings: None) -> None:
     """🔴 여유 100kg 에 7,714kg — **전에는 통과했다.**
 
     이슈 본문의 재현 그대로다: 살아남은 안 3 · 컷 0 이었다.
+    
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
+      안이 서 있어야 그 컷이 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(100), lead=2)
     labels = [s["label"] for s in proposal.get("scenarios", [])]
@@ -122,12 +126,16 @@ def test_over_capacity_split_scenario_is_cut() -> None:
         assert "날짜별 창고 초과" in reason, f"{label}: {reason}"
 
 
-def test_bulk_scenario_is_cut_too() -> None:
+def test_bulk_scenario_is_cut_too(no_holdings: None) -> None:
     """🔴 **이번 작업의 핵심** — 일괄(1회차) 안도 컷된다.
 
     보수 2,571kg · 기본 6,429kg 은 회차가 하나라 ⑥의 재배분 경로를 안 탔고,
     그래서 risks 줄조차 없이 나갔다. 분할 안만 컷하면 **회차를 안 나눌수록 검사를
     안 받는** 구조가 된다.
+    
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
+      안이 서 있어야 그 컷이 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(100), lead=2)
     reasons = {r["label"]: r["reason"] for r in proposal["rejected_reasons"]}
@@ -148,11 +156,15 @@ def test_a_scenario_that_fits_survives() -> None:
     ]
 
 
-def test_total_passes_but_a_date_does_not() -> None:
+def test_total_passes_but_a_date_does_not(no_holdings: None) -> None:
     """🔴 **총량 축은 통과인데 날짜 축에서 걸린다** — 두 검사가 다른 것을 본다.
 
     창고 여유 총량(12,000 + 임차 3,600)에는 드는 안이, 하루치 여유에는 안 든다.
     총량만 보던 시절 이 안이 그대로 나갔다.
+    
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
+      안이 서 있어야 그 컷이 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(2_000), lead=2)
     reasons = {r["label"]: r["reason"] for r in proposal["rejected_reasons"]}

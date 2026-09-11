@@ -497,7 +497,7 @@ def test_fallback_is_disclosed_in_risks() -> None:
     ]
 
 
-def test_choice_survives_self_check() -> None:
+def test_choice_survives_self_check(no_holdings: None) -> None:
     """LLM이 고른 안이 ⑦의 검사를 통과하는가 — 근거가 늘어도 컷되면 안 된다."""
     state = _staged(ITEM, SPREAD_WIDE)
     state.update(allocate_sourcing(state, selector=_fixed_selector("MID_HALF")))

@@ -13,6 +13,7 @@ from copy import deepcopy
 from datetime import date, timedelta
 
 import pytest
+from _injection import drop_holdings
 
 from app.purchase_agent import mocks
 from app.purchase_agent.config import load_constraints
@@ -71,7 +72,15 @@ def _flatten_trend(state: dict) -> None:
 
 @pytest.fixture(scope="module")
 def proposals() -> dict[date, dict]:
-    return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
+    """앵커일별 제안.
+
+    🔴 **보유는 뗀다** (``drop_holdings``) — 이 파일의 검사 중 보유를 재는 것이 없다.
+      켜 두면 mock 앵커의 보수안이 «필요 없다» 로 사라져(§4-③) 등급·분할 단언이
+      **보유 때문에** 무너진다. 보유 자체는 ``test_holdings_deduction`` 이 잰다.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        drop_holdings(mp)
+        return {as_of: run_purchase_agent(ITEM, as_of) for as_of in ANCHORS}
 
 
 # ── E3-3 DoD: 진입 조건 ─────────────────────────────────────────────────────
@@ -239,11 +248,15 @@ def test_schema_backstops_the_date_order(proposals: dict) -> None:
 
 @pytest.mark.parametrize("item", mocks.ITEMS)
 @pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
-def test_every_item_and_anchor_stays_consistent(item: str, as_of: date) -> None:
+def test_every_item_and_anchor_stays_consistent(
+    item: str, as_of: date, no_holdings: None
+) -> None:
     """전 품목 × 4앵커 전횡단 — 품목 하나만 도는 테스트는 E3-1에서 크래시를 놓쳤다.
 
     🔴 **목록을 여기 적지 않고 ``mocks.ITEMS`` 를 읽는다.** 적어 두면 mock 이 좁아진
     날 이 줄만 남아 없는 품목을 돌린다 — 실제로 그렇게 깨졌다 (아래 ``ALL_ITEMS`` 주석).
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 안이 서 있어야 횡단이 성립한다.
     """
     proposal = run_purchase_agent(item, as_of)
     PurchaseProposal.model_validate(proposal)
@@ -705,11 +718,13 @@ ALL_ITEMS = mocks.ITEMS
 
 @pytest.mark.parametrize("as_of", ANCHORS)
 @pytest.mark.parametrize("item", ALL_ITEMS)
-def test_every_round_carries_an_amount(item: str, as_of: date) -> None:
+def test_every_round_carries_an_amount(item: str, as_of: date, no_holdings: None) -> None:
     """🔴 **전 회차에 실린다** — 일괄이든 분할이든, 전 품목·전 앵커에서.
 
     마스터 `_legs` 가 `amount_filled == len(amounts)` 일 때만 금액을 나른다.
     한 회차라도 비면 그 안은 금액 변 검증이 **통째로 건너뛰어진다** — 조용히.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 안이 서 있어야 회차를 셀 수 있다.
     """
     proposal = run_purchase_agent(item, as_of)
     assert proposal["scenarios"], f"{item}/{as_of} 에 안이 없어 검사가 공허해진다"

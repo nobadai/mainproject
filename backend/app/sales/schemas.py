@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from app.ml.schemas import Forecast
 
@@ -551,8 +551,31 @@ class SalesScenario(BaseModel):
     #:
     #: ⚠️ 이 별칭은 `model_dump(by_alias=True)` 여야 실린다 — `adapter._proposal_payload`
     #:   가 그 자리다. 거기서 `by_alias` 를 떼면 재무가 다시 못 읽는다.
+    #:
+    #: 🔴 **읽는 쪽이 두 이름을 다 안다** (2026-09-11). `serialization_alias` 만 달면
+    #:   **나가는 길만 열리고 돌아오는 길이 막힌다.**
+    #:
+    #:   ```text
+    #:   ① 판매가 by_alias=True 로 덤프한다      → reported_sales_amount_krw
+    #:   ② 마스터가 그 모양 그대로 이력에 적는다
+    #:   ③ 승인이 그 행을 SalesScenario.model_validate 로 되읽는다
+    #:      → extra="forbid" → ValidationError → 확정이 BLOCKED
+    #:   ```
+    #:
+    #:   그 전선은 재무만이 아니라 **판매 → 마스터**이기도 했고, 그래서 확정이
+    #:   통째로 못 섰다 (실측: 재검증 `PASSED` 7건인데 `sales` 0행).
+    #:
+    #: 🔴 **마스터가 이름을 되돌리는 길로 고치지 않았다.** 그러면 마스터가 두 파트
+    #:   사이의 **번역기**가 된다 — `interop.py` 를 2026-08-29 에 지운 이유다.
+    #:
+    #: ⚠️ **`extra="forbid"` 를 풀어서 고치지 않았다.** `validation_alias` 가 붙으면
+    #:   그 이름이 **아는 칸**이 되어 더 막지 않는다. 금지를 풀면 오타가 조용히
+    #:   통과하고, 그것은 다른 병을 들여오는 것이다.
     sales_amount_krw: Decimal | None = Field(
-        default=None, ge=0, serialization_alias="reported_sales_amount_krw"
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("sales_amount_krw", "reported_sales_amount_krw"),
+        serialization_alias="reported_sales_amount_krw",
     )
     delivery_date: date | None = None
     #: 대금 회수를 **어느 날부터** 세는가. MVP 계약은 `delivery_date` 다.

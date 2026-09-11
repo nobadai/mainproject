@@ -132,11 +132,17 @@ def forced_proposals(run: Callable[..., dict], item: str, anchors: tuple) -> dic
     ⚠️ 기존 ``proposals`` 픽스처를 **대체하지 않는다.** 그쪽은 실제 분류 경로를 그대로
       돌려 사중 일치·시세 실재 같은 상황 무관 검사를 먹인다. 여기 것은 상황이 **단언의
       일부인** 검사만 쓴다.
+
+    🔴 **보유도 같이 뗀다** (``drop_holdings``). 이 함수를 쓰는 검사는 전부 *"상황이 이러면
+      안이 몇 개인가 · 축이 무엇인가"* 를 재는데, 보유를 켜 두면 mock 앵커에서 보수안이
+      사라져 그 단언이 **보유 때문에** 무너진다. 재려는 축과 무관한 이유로 죽는 검사를
+      만들지 않는다 — 보유 자체는 ``test_holdings_deduction`` 이 잰다.
     """
     out: dict[str, dict] = {}
     for situation in ("stable", "uncertain"):
         with pytest.MonkeyPatch.context() as mp:
             force_situation(mp, situation)
+            drop_holdings(mp)
             out[situation] = {as_of: run(item, as_of) for as_of in anchors}
     return out
 
@@ -168,3 +174,70 @@ def declare_thresholds(
     for name in _THRESHOLD_READERS:
         monkeypatch.setattr(name, lambda path=target: load_constraints(path))
     return target
+
+
+#: ``no_holdings`` 가 보유를 떼는 두 자리. **경로가 둘이라 둘 다 적는다** —
+#: mock 은 포트로 받고 (``build_initial_state``), 운영·어댑터 검사는 봉투로 받는다
+#: (``build_state``). 한 곳만 막으면 다른 경로의 검사는 보유가 실린 채로 돈다.
+_HOLDINGS_SOURCES = (
+    "app.purchase_agent.ports.get_inventory",
+    "app.purchase_agent.adapter.absorb_inventory",
+)
+
+
+def _without_holdings(inventory: Any) -> Any:
+    """로트는 **남기고** ``available_qty_kg`` 만 0 으로 내린다.
+
+    🔴 **로트를 지우지 않는다.** 등급·잔여신선도는 ⑤ 등급 배분과 ⑥ 근거 문장이 쓰므로,
+      통째로 비우면 차감과 **상관없는** 문장이 같이 사라진다 — 그러면 이 도구가 재려던
+      것보다 넓게 끈 것이 된다.
+    """
+    if not isinstance(inventory, Mapping):
+        return inventory
+    lots = inventory.get("lots")
+    if not isinstance(lots, list):
+        return inventory
+    emptied = [
+        {**lot, "available_qty_kg": 0} if isinstance(lot, Mapping) else lot for lot in lots
+    ]
+    return {**inventory, "lots": emptied}
+
+
+def drop_holdings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """④ — 보유를 0 으로 주입한다. **이 검사는 보유를 재지 않는다**는 선언이다.
+
+    보유 차감(상세설계 §4-③)이 들어오면서 mock 앵커가 *"보유가 커버 창을 다 덮는 세계"*
+    가 됐다 — 배추 3,000kg ÷ 일평균 1,286 = 2.33일치라 보수(D=2)가 통째로 0이 된다.
+    그래서 **보유와 무관한 검사 21개**가 한꺼번에 무너졌다.
+
+    ```text
+    무너진 검사 21개 중   보유를 재는 것          0건
+                          수량을 절대값으로 단언   0건
+    ```
+
+    ★ ``swap_threshold`` 가 생긴 이유와 **같은 모양**이다 (이 파일 머리말) — 판정 입력이
+      데이터에 묻혀 있어서 생긴 결합이다. 답도 같다: 검사가 그 입력을 **직접 준다**.
+
+    🔴 **«주입으로 막았다» 로 끝내지 않는다.** 보유가 수요를 덮는 것은 진짜 동작 변화이고,
+      그것은 ``test_holdings_deduction`` 이 보유를 **크게** 주입해서 정면으로 잰다. 이
+      도구는 그 축을 **여기서 안 잰다**고 적는 것이지, 변화를 가리는 것이 아니다.
+
+    함수로 두고 픽스처(``no_holdings``)를 따로 감싸는 이유: 모듈 스코프 픽스처가 그래프를
+    미리 돌려 두는 검사들이 있는데(``proposals`` · ``forced``), 함수 스코프 픽스처는 그때
+    이미 늦다. 그런 자리는 ``MonkeyPatch.context()`` 를 직접 열고 이 함수를 부른다.
+    """
+    for name in _HOLDINGS_SOURCES:
+        module_path, _, attr = name.rpartition(".")
+        module = __import__(module_path, fromlist=[attr])
+        original = getattr(module, attr)
+
+        def patched(*args: Any, __original: Any = original, **kwargs: Any) -> Any:
+            return _without_holdings(__original(*args, **kwargs))
+
+        monkeypatch.setattr(name, patched)
+
+
+@pytest.fixture
+def no_holdings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``drop_holdings`` 의 함수 스코프 픽스처판. 뜻은 그쪽 docstring 에 있다."""
+    drop_holdings(monkeypatch)
