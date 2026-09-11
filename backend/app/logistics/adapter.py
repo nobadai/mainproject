@@ -83,7 +83,7 @@ from app.logistics.tools import (
     calculate_cap_by_date,
     calculate_window_capacity_usage,
     evaluate_delivery_feasibility,
-    fifo_inventory_cost_basis,
+    fefo_inventory_cost_basis,
     supply_capacity_by_date,
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
@@ -1508,6 +1508,12 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     #   아니라 재무 판정의 재료다. 없으면 재무가 `RUNTIME_NOT_READY` 로 멈추고,
     #   그 이름(`authoritative_inventory_cost_basis`)은 재무가 이미 부른다 — 여기서
     #   같은 사실에 두 번째 이름을 붙이지 않는다.
+    #
+    # 🔴 **Lot 선택 순서는 실제 자동 출고와 같은 FEFO 다** (`turnover.fefo_sort_key`).
+    #    이 시점에는 이 판매의 할당이 아직 없어서 «출고된 Lot» 을 못 적는다 —
+    #    적는 것은 *"지금 출고한다면 FEFO 가 집을 Lot"* 이고, 그래서 **순서만이라도**
+    #    실제와 같아야 한다. 규칙이 다르면 예상이 빗나가는 것이 아니라 처음부터
+    #    다른 것을 재는 것이 된다.
     cost_basis = _confirmed_inventory_cost_basis(
         snapshot,
         asked=asked,
@@ -1584,7 +1590,7 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
                 }
                 for row in supply_rows
             ],
-            # 🔴 **`None` 이 정상값인 자리다.** 물은 품목·수량이 없거나, 그 물량을 FIFO 로
+            # 🔴 **`None` 이 정상값인 자리다.** 물은 품목·수량이 없거나, 그 물량을 FEFO 로
             #    다 덮지 못하거나, 헐어야 할 Lot 의 입고일·단가를 못 읽었다는 사실이다.
             #    0원으로 메우면 «원가 0원짜리 판매» 가 마진 판정을 통과한다.
             "inventory_cost_basis": (
@@ -1867,7 +1873,7 @@ def _confirmed_inventory_cost_basis(
     inventory_by_item: Sequence[InventoryByItem],
     supply_rows: Sequence[SupplyByDate],
 ) -> InventoryCostBasisSnapshot | None:
-    """확정 물량에 FIFO 로 배부된 재고 취득원가. **없으면 `None` 이다.**
+    """확정 물량에 FEFO 로 배부된 **예상** 재고 취득원가. **없으면 `None` 이다.**
 
     ```text
     덮을 물량 = min(사용자가 물은 수량, 그 날짜(또는 현재)의 확정 판매가능량)
@@ -1892,7 +1898,7 @@ def _confirmed_inventory_cost_basis(
     if confirmed is None:
         return None
     quantity = confirmed if asked.quantity_kg is None else min(asked.quantity_kg, confirmed)
-    return fifo_inventory_cost_basis(snapshot, item=asked.item, quantity_kg=quantity)
+    return fefo_inventory_cost_basis(snapshot, item=asked.item, quantity_kg=quantity)
 
 
 def _delivery_input_error(

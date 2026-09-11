@@ -17,6 +17,11 @@ from app.logistics.schemas import (
     ScheduledQuantity,
 )
 
+# 🔴 **FEFO 정렬 규칙을 여기서 다시 적지 않는다.** 키의 주인은 `turnover.fefo_sort_key`
+#    하나이고 실제 자동 출고(`outbound.recommend_fefo_candidates`)도 같은 것을 쓴다 —
+#    두 벌로 적으면 «나갈 Lot» 과 «원가를 배부한 Lot» 이 갈린다.
+from app.logistics.turnover import fefo_sort_key
+
 #: cap_by_date 조회 창 길이 (`as_of + inbound_lead_days`부터, Policy 확정값 18).
 #: Window 밖은 0이 아니라 미조회 영역이다.
 #:
@@ -500,7 +505,7 @@ def _sellable_lot_contributions(
 ) -> list[tuple[InventoryLotSnapshot, Decimal]]:
     """**판매가능 판정의 주인은 여기 하나다.** Lot 별로 더 팔 수 있는 양을 낸다.
 
-    ★ 품목 합계(`build_inventory_by_item`)와 FIFO 원가 배부(`fifo_inventory_cost_basis`)가
+    ★ 품목 합계(`build_inventory_by_item`)와 FEFO 원가 배부(`fefo_inventory_cost_basis`)가
       **같은 함수**를 부른다. 같은 규칙을 두 벌 적어 두면 한쪽만 고치는 날
       *"팔 수 있다고 센 재고"* 와 *"원가를 배부한 재고"* 가 갈리고, 그때 나오는 것은
       오류가 아니라 **맞지 않는 원가**다.
@@ -546,19 +551,27 @@ def _commitment_axes(
     return allocated_by_lot, unallocated_by_item
 
 
-def fifo_inventory_cost_basis(
+def fefo_inventory_cost_basis(
     snapshot: InventoryLogisticsSnapshot,
     *,
     item: str,
     quantity_kg: Decimal,
 ) -> InventoryCostBasisSnapshot | None:
-    """확정 판매 물량에 창고 Lot 의 **실제 취득단가**를 FIFO 로 배부한다.
+    """확정 판매 물량에 창고 Lot 의 **실제 취득단가**를 FEFO 로 배부한다.
 
     ```text
-    정렬      received_at ASC → lot_id ASC   (같은 날 입고는 안정적인 Lot ID 순)
+    정렬      turnover.fefo_sort_key — 실제 자동 출고와 **같은 키**다
     배부      남은 물량이 0 이 될 때까지 앞 Lot 부터 헌다
     완료 조건  remaining == 0 일 때만 기준이 선다
     ```
+
+    🔴 **예상이지 사실이 아니다.** PRE_SALES 는 이 판매의 예약도 할당도 서기 **전**이라
+       (판매 승인 → 예약 → `fefo_allocation` → 출고 순서다), 여기서 고른 Lot 은
+       *"지금 출고한다면 FEFO 가 집을 Lot"* 이다. 실제 출고 Lot 이 아니다 —
+       납기가 미래면 그 사이 입고·만료·남의 예약으로 달라질 수 있다.
+
+       ★ 그래서 **순서만이라도 실제와 같아야 한다.** 규칙이 다르면 예상이 빗나가는
+         것이 아니라 **처음부터 다른 것을 재는** 것이 된다.
 
     🔴 **모자라면 기준을 세우지 않는다 (`None`).** 0원이나 평균단가로 남은 물량을
        메우면 재무는 *"원가를 안다"* 고 읽고 마진을 판정한다 — 없는 것을 채운 수치로
@@ -569,14 +582,20 @@ def fifo_inventory_cost_basis(
        **소비만** 한다. 두 벌로 적으면 «팔 수 있다고 센 재고» 와 «원가를 배부한 재고»
        가 갈리고, 그때 나오는 것은 오류가 아니라 맞지 않는 원가다.
 
-    ★ **품목 축 미할당 예약도 FIFO 로 먼저 먹는다.** Lot 에 안 붙은 예약이라 어느
-      Lot 에서 나갈지는 아직 모르지만, 실제 출고가 FIFO 로 집히므로 앞 Lot 부터
-      선점된 것으로 본다. 이렇게 해야 여기 배부 가능한 총량이
-      `build_inventory_by_item` 의 품목 합계와 **정확히 같다.**
+    ★ **품목 축 미할당 예약도 FEFO 앞 Lot 부터 먹는다.** Lot 에 안 붙은 예약이라 어느
+      Lot 에서 나갈지는 아직 모르지만, **실제 자동 할당이 FEFO 앞쪽부터 집으므로**
+      (`fefo_allocation.allocate_reserved_stock_fefo`) 그 순서로 선점된 것으로 본다.
+      선점을 순서대로 소비하므로 여기 배부 가능한 총량은
+      `max(0, Σ기여 − 선점)` 이고, `build_inventory_by_item` 의 품목 합계와
+      **정확히 같다** — 그 합계는 순서와 무관하다.
 
     ⚠️ `received_at` 이나 `unit_cost_krw_per_kg` 를 못 읽은 Lot 이 배부 대상에 걸리면
       기준을 세우지 않는다 — 순서를 모르는 Lot 을 아무 데나 끼우거나 단가를 추정하는
       대신 멈춘다.
+
+      ★ **신선도(`remaining_freshness_days`)가 `None` 인 것은 막지 않는다.** 그것은
+        *"모른다"* 이고 `fefo_sort_key` 가 **맨 뒤**로 보낸다 — 실제 출고와 같은
+        처리다 (`0 != null`).
     """
     if quantity_kg <= 0:
         return None
@@ -590,10 +609,16 @@ def fifo_inventory_cost_basis(
         for lot, 기여 in _sellable_lot_contributions(snapshot, allocated_by_lot)
         if lot.item == item and 기여 > 0
     ]
-    # 순서를 모르는 Lot 이 하나라도 배부 후보에 있으면 FIFO 자체가 성립하지 않는다.
+    # 순서를 모르는 Lot 이 하나라도 배부 후보에 있으면 FEFO 키를 세울 수 없다.
     if any(lot.received_at is None for lot, _ in 사용가능):
         return None
-    사용가능.sort(key=lambda 쌍: (쌍[0].received_at, 쌍[0].lot_id))
+    사용가능.sort(
+        key=lambda 쌍: fefo_sort_key(
+            remaining_freshness_days=쌍[0].remaining_freshness_days,
+            received_at=쌍[0].received_at,
+            lot_id=쌍[0].lot_id,
+        )
+    )
 
     선점 = unallocated_by_item.get(item, Decimal(0))
     remaining = quantity_kg
@@ -623,7 +648,7 @@ def fifo_inventory_cost_basis(
         item=item,
         quantity_kg=quantity_kg,
         amount_krw=amount,
-        allocation_method="FIFO",
+        allocation_method="FEFO",
         cost_method="ACTUAL",
         included_components=("inventory_acquisition_cost",),
         source_refs=tuple(refs),

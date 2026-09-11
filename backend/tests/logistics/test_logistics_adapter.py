@@ -3985,8 +3985,8 @@ def test_PRE_SALES_가_확정_물량의_재고원가를_싣는다(monkeypatch):
     assert basis["amount_krw"] == 45472.0
     assert basis["quantity_kg"] == 58.0
     assert basis["item"] == "배추"
-    # 🔴 **두 축을 따로 적는다** — 고른 순서(FIFO)와 단가의 성격(ACTUAL)은 다른 사실이다
-    assert basis["allocation_method"] == "FIFO"
+    # 🔴 **두 축을 따로 적는다** — 고른 순서(FEFO)와 단가의 성격(ACTUAL)은 다른 사실이다
+    assert basis["allocation_method"] == "FEFO"
     assert basis["cost_method"] == "ACTUAL"
     assert basis["included_components"] == ["inventory_acquisition_cost"]
     assert basis["evidence_grade"] == "SIM_FIXED"
@@ -4075,4 +4075,4 @@ def test_재고원가는_판매_DTO_를_그대로_통과한다(monkeypatch):
     assert basis.amount_krw == Decimal("45472.0")
     assert basis.source_refs == ["LOT-A", "LOT-B"]
     assert basis.cost_method == "ACTUAL"
-    assert basis.allocation_method == "FIFO"
+    assert basis.allocation_method == "FEFO"

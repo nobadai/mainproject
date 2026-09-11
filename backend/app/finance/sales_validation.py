@@ -70,8 +70,12 @@ class InventoryCostBasis(BaseModel):
     #:   이것을 provenance 로 읽으면 나머지 Lot 이 조용히 사라진다 — 나중에 *"이
     #:   원가가 어느 재고에서 왔나"* 를 물었을 때 답이 틀린다.
     source_ref: str = Field(min_length=1)
-    #: ★ **실제 재고 계보의 정본.** FIFO 로 배부에 쓰인 모든 Lot 을 **사용 순서대로**
-    #:   담는다. 새 코드는 이쪽을 읽는다.
+    #: ★ **배부 근거의 정본.** 물류가 FEFO 로 원가를 배부하는 데 쓴 모든 Lot 을
+    #:   **배부 순서대로** 담는다. 새 코드는 이쪽을 읽는다.
+    #:
+    #: ⚠️ **«출고된 Lot» 이 아니다.** 물류가 이 값을 내는 자리(PRE_SALES)는 그 판매의
+    #:    예약·할당이 서기 **전**이라, 담긴 것은 *"지금 출고한다면 FEFO 가 집을 Lot"*
+    #:    이다. 실제 출고 Lot 은 승인 뒤 `inventory_allocations` 가 말한다.
     #:
     #: ★ 안 주면 `source_ref` 하나로 채운다 — 예전 단일 Lot 입력이 그대로 돈다.
     source_refs: tuple[str, ...] = ()

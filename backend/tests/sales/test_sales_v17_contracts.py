@@ -452,7 +452,7 @@ def _cost_basis(quantity="7000", amount="4547200"):
         "item": "배추",
         "quantity_kg": quantity,
         "amount_krw": amount,
-        "allocation_method": "FIFO",
+        "allocation_method": "FEFO",
         "cost_method": "ACTUAL",
         "included_components": ["inventory_acquisition_cost"],
         "source_ref": "LOT-A",
@@ -480,7 +480,7 @@ def test_물류가_낸_재고원가가_후보에_그대로_실린다():
     assert 보수.inventory_cost_basis.amount_krw == Decimal(4547200)
     assert 보수.inventory_cost_basis.source_refs == ["LOT-A", "LOT-B"]
     assert 보수.inventory_cost_basis.cost_method == "ACTUAL"
-    assert 보수.inventory_cost_basis.allocation_method == "FIFO"
+    assert 보수.inventory_cost_basis.allocation_method == "FEFO"
 
 
 def test_덮는_양이_확정_물량과_다르면_싣지_않는다():

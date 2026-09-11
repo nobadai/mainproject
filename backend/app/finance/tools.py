@@ -483,7 +483,7 @@ def build_sales_calculation_facts(
 def _unique_source_refs(refs: Sequence[str]) -> tuple[str, ...]:
     """근거 ref 를 **순서를 지키며** 한 번씩만 남긴다.
 
-    ★ `set` 을 쓰지 않는다. 순서가 곧 FIFO 배부 순서라, 정렬이 흐트러지면 어느 Lot 이
+    ★ `set` 을 쓰지 않는다. 순서가 곧 물류의 FEFO 배부 순서라, 정렬이 흐트러지면 어느 Lot 이
       먼저 쓰였는지가 사라진다.
     """
     seen: dict[str, None] = {}
@@ -581,7 +581,7 @@ def compose_sales_cost_basis(
         #    Lot 이 최종 근거에서 사라진다** — 나중에 *"이 원가가 어느 재고에서
         #    왔나"* 를 되짚을 수 없다. 정본은 `source_refs` 다.
         #
-        # ★ 순서를 지키고 중복만 지운다. FIFO 배부 순서가 곧 읽는 순서다.
+        # ★ 순서를 지키고 중복만 지운다. FEFO 배부 순서가 곧 읽는 순서다.
         source_refs=_unique_source_refs(
             (
                 *inventory_cost_basis.source_refs,

@@ -354,7 +354,7 @@ def test_multiple_lot_lineage_survives_into_the_final_basis():
 
     assert basis is not None
     assert basis.amount_krw == Decimal(45472)
-    # FIFO 배부 순서가 곧 읽는 순서다 — 정렬이 흐트러지면 순서 정보가 사라진다.
+    # 물류의 FEFO 배부 순서가 곧 읽는 순서다 — 정렬이 흐트러지면 순서 정보가 사라진다.
     assert basis.source_refs == ("LOT-A", "LOT-B")
     assert basis.inventory_source_ref == "LOT-A"
 
@@ -402,7 +402,7 @@ def test_the_wire_carries_every_lot_ref_into_the_parsed_input():
                 "item": "배추",
                 "quantity_kg": "58",
                 "amount_krw": "45472",
-                "allocation_method": "FIFO",
+                "allocation_method": "FEFO",
                 "cost_method": "ACTUAL",
                 "included_components": ["inventory_acquisition_cost"],
                 "source_ref": "LOT-A",

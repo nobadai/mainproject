@@ -283,13 +283,17 @@ class LogisticsSupplyByDate(BaseModel):
 
 
 class LogisticsInventoryCostBasis(BaseModel):
-    """Logistics 가 확정 물량에 FIFO 로 배부한 재고 취득원가를 **그대로** 보관한다.
+    """Logistics 가 확정 물량에 FEFO 로 배부한 **예상** 재고 취득원가를 그대로 보관한다.
 
     🔴 **Sales 가 원가를 만들지 않는다.** 금액을 다시 셈하거나, 수량이 달라졌다고
-       비례 배분하거나, Lot 계보를 줄이지 않는다 — 어느 것을 해도 그 순간 장부에 없는
+       비례 배분하거나, Lot 근거를 줄이지 않는다 — 어느 것을 해도 그 순간 장부에 없는
        원가가 재무 판정에 들어간다. 안 맞으면 **버린다**(전달하지 않는다).
 
-    ★ `source_refs` 가 계보의 정본이다. `source_ref` 는 하위 호환용 대표 하나다.
+    🔴 **FEFO 를 여기서 다시 고르지 않는다.** Lot 선택 순서의 주인은 물류이고
+       (`turnover.fefo_sort_key`), 이 모델은 받은 것을 보관만 한다.
+
+    ★ `source_refs` 가 배부 근거의 정본이다. `source_ref` 는 하위 호환용 대표 하나다.
+      ⚠️ PRE_SALES 시점 값이라 **«출고된 Lot» 이 아니다** — 그 판매의 할당은 아직 없다.
     """
 
     model_config = ConfigDict(extra="forbid")

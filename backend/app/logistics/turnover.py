@@ -61,6 +61,7 @@ __all__ = [
     "TurnoverStatus",
     "derive_turnover_status",
     "elapsed_days",
+    "fefo_sort_key",
     "freshness_days_of",
     "is_disposal_candidate",
     "load_lot_turnover",
@@ -193,6 +194,38 @@ def is_disposal_candidate(*, remaining_freshness_days: int | None) -> bool:
     return remaining_freshness_days is not None and remaining_freshness_days <= 0
 
 
+def fefo_sort_key(
+    *, remaining_freshness_days: int | None, received_at: date, lot_id: str
+) -> tuple[bool, int, date, str]:
+    """FEFO 한 줄의 정렬 키. **순수 계산이고 결정론이다.**
+
+    ```text
+    ① 신선도 UNKNOWN 은 맨 뒤    모르는 것을 «가장 급하다» 로도 «가장 여유롭다» 로도 안 읽는다
+    ② remaining_freshness_days   ASC — 먼저 만료되는 것부터
+    ③ received_at                ASC — 만료가 같으면 오래된 것부터
+    ④ lot_id                     ASC — 안정 정렬 (목록 순서에 안 흔들린다)
+    ```
+
+    ★ **공개해 둔 이유가 `freshness_days_of` 와 같다.** 실제 자동 출고
+      (`outbound.recommend_fefo_candidates`)와 PRE_SALES 의 예상 원가 배부
+      (`tools.fefo_inventory_cost_basis`)가 **같은 순서**를 봐야 *"나갈 Lot"* 과
+      *"원가를 배부한 Lot"* 이 갈리지 않는다. 두 벌로 적으면 한쪽만 고쳐지는 날이 오고,
+      그때 나오는 것은 오류가 아니라 **맞지 않는 원가**다.
+
+    🔴 **정렬만 한다.** 어느 Lot 이 후보인가(상태·신선도 만료·예약/할당 차감)는 여기서
+       정하지 않는다 — 부르는 쪽이 이미 거른 것을 순서만 세운다.
+
+    ⚠️ `received_at` 은 `None` 을 받지 않는다. 순서를 모르는 Lot 을 아무 자리에나
+       끼우지 않으려고, 부르는 쪽이 **키를 만들기 전에** 막는다.
+    """
+    return (
+        remaining_freshness_days is None,
+        remaining_freshness_days if remaining_freshness_days is not None else 0,
+        received_at,
+        lot_id,
+    )
+
+
 def _cell(row: Any, index: int, name: str) -> Any:
     if isinstance(row, Mapping):
         return row[name]
@@ -210,8 +243,9 @@ def freshness_days_of(행: Mapping[str, Any], *, as_of: date) -> int | None:
         `received_at` 을 가진 매핑.
 
     🔴 **새 유통기한 공식을 만들지 않는다.** 등급 판단도 저쪽과 같이 정규화 결과
-       기준이고, 정규화표가 비어 있어 `상품` 계열은 `None` 이 된다 — 즉 `중` 계수는
-       지금 실제로 걸리지 않는다. 그 사실을 여기서 바꾸지 않는다.
+       기준이라, 정규화표가 비어 있는 `상품` 계열은 `None` 이 되어 계수가 안 걸린다.
+       ⚠️ **다만 raw `중` 은 정규화 어휘에 있어 그대로 통과하고, 그때 계수가 실제로
+       걸린다** — 같은 품목 안에서 유효 한계가 갈리므로 FEFO 순서가 입고순과 달라진다.
     """
     limit = 행["operational_limit_days"]
     if limit is None:

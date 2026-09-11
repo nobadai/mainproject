@@ -599,7 +599,7 @@ def test_a_two_lot_cost_basis_unblocks_the_verdict():
 
     ```text
     전    inventory_cost_basis 없음 → missing_data: authoritative_inventory_cost_basis
-    후    FIFO 로 배부된 두 Lot 원가 → 마진이 셈해지고 판정이 난다
+    후    FEFO 로 배부된 두 Lot 원가 → 마진이 셈해지고 판정이 난다
     ```
     """
     result = _evaluate(
