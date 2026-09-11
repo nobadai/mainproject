@@ -112,7 +112,16 @@ def _proposal_input(request: AgentRequest, run_id: str) -> SalesProposalInput:
 
 
 def _proposal_payload(proposal: SalesProposalReply) -> Mapping[str, Any]:
-    return proposal.model_dump(mode="json")
+    """봉투에 실을 모양. 🔴 **`by_alias=True` 다** (2026-09-11).
+
+    ★ `SalesScenario.sales_amount_krw` 가 전선에서 `reported_sales_amount_krw` 로
+      나가야 재무가 읽는다 (`REQUIRED_SALES_INPUT_FIELDS`). 그 이유는 그 칸 선언에
+      적혀 있다 — **재무가 이 값을 다시 세서 맞대 보기 때문**이다.
+
+    🔴 **마스터가 이름을 바꾸지 않는다.** 마스터는 안을 그대로 나르고, 이름의 주인은
+       내는 쪽이다. 여기서 안 실으면 마스터가 번역기가 되어야 한다.
+    """
+    return proposal.model_dump(mode="json", by_alias=True)
 
 
 def _reasoning(proposal: SalesProposalReply) -> str:
