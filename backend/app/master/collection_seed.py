@@ -1,5 +1,5 @@
 """
-collection_seed.py — 개장할 때 그날 결제기일인 채권을 **수금 사건으로 옮긴다**.
+collection_seed.py — 개장할 때 **결제기일이 지난 미수 채권을** 수금 사건으로 옮긴다.
 
 🔴 **`SIM_FIXED` 시뮬레이션 가정이다. 실제 입금 사실이 아니다.**
 
@@ -49,6 +49,43 @@ COLLECTED  target 300 · current 300  →  delta   0   (재수금 아님)
   `COLLECTED` 는 delta 가 0 이라 넣어도 아무 일이 안 일어나지만, **낼 것이 없는 사건을
   적지 않는다** — *"없는 것과 안 한 것은 다르다"* 는 규율의 다른 쪽이다. 행이 있으면
   사람은 *"그날 뭔가 들어왔다"* 로 읽는다.
+
+---
+
+## ★★ **걷기가 안 간 날의 만기는 다음에 여는 날 집는다**
+
+`SIM-CHAIN-V3` (2026-01~03 · 71영업일 · 휴장 19일) 실측이다.
+
+```text
+만기일          걷기가 그날 갔나    결과
+2026-02-06 금        True          COLLECTED
+2026-02-07 토        True          COLLECTED   ← 토요일도 갔고 걷혔다
+2026-02-08 일       False          OPEN        ← 유일하게 안 간 날
+2026-02-09 월        True          COLLECTED
+2026-02-12 목        True          COLLECTED
+2026-02-13 금        True          COLLECTED
+2026-02-28 토        True          COLLECTED
+```
+
+  ★★ **상관이 7/7 이다.** 요일이 아니라 **그날 걷기가 갔느냐**가 전부였다. 사건을
+    `due_date = as_of` 로 만들면 걷기가 안 가는 날의 만기는 **아무도 다시 안 본다.**
+
+  🔴 **283,819원 한 건이 두 달치 판매를 죽였다.** 그 한 건이 `OPEN` 으로 남아
+    2026-02-09 부터 재무가 `SALES_PARTNER_HAS_OVERDUE_AR` 를 냈고(511건 중 288건),
+    3월 31일까지 판매가 한 건도 안 섰다.
+
+  🟢 **그래서 `due_date <= as_of` 다.** `collection_date` 는 그대로 `as_of` 이므로
+    일요일 만기 채권은 **월요일에 회수 사건**을 받는다 — 현실에서도 일요일 만기는
+    월요일에 들어온다.
+
+  ★ **`collection.py:30` 의 「`due_date` 경과 ≠ 자동 수금」 규율을 안 어긴다.** 기일이
+    지났다고 걷힌 것으로 **읽는** 것이 아니라, 회수 사건을 **만드는 날**을 기일 뒤
+    처음 열린 날로 옮기는 것이다. 사건은 여전히 재무가 실행해야 돈이 된다.
+
+  ⚠️ **쓸어 담는 범위를 인위로 막지 않는다.** `sim_run_id` 로 이미 걸러서 그 실행의
+    채권만 본다. 실행의 채권은 실행 시작 뒤에만 생기니 과거를 쓸 수 없다. 부분 구간을
+    다시 걸으면 밀린 것이 그날 한꺼번에 들어오는데, **그것이 옳은 행동이다** —
+    들어왔어야 할 돈이 보는 날에 들어온다.
 
 ---
 
@@ -172,15 +209,31 @@ _COLUMNS = (
 )
 
 
-def _note(*, due_date: Any, original: Any, received: Any) -> str:
+def _note(*, due_date: Any, collection_date: Any, original: Any, received: Any) -> str:
     """*"이 사건을 왜 사실로 두었나"* 를 적는다. **파생식과 성격이 둘 다 들어간다.**
 
     🔴 **숫자를 넣는다.** 값만 넘기면 사람도 매입 판단도 확정으로 읽는다
       (`app/master/inputs.py` 가 파생분에 파생식을 실어 내보내는 것과 같은 규율).
+
+    🔴 **「당일」은 `collection_date == due_date` 인 날에만 참이다.** 기일 뒤에 집은
+      건에까지 「당일」이라 적으면 메모가 **거짓**이 된다 — 그래서 갈라 적는다.
+
+    ★★ **「휴장일이라」고 단정하지 않는다.** 마스터는 그날 왜 안 갔는지를 모른다 —
+      휴장일일 수도, 걷기 구간 밖일 수도, 중단됐을 수도 있다. *"기일이 지나 처음 열린
+      날"* 이 아는 만큼이고, 그 너머는 지어내는 것이다.
+
+    ⚠️ **두 날짜를 둘 다 적는다.** 하나만 적으면 읽는 사람이 나머지를 되짚어야 한다.
     """
     delta = original - received
+    if due_date == collection_date:
+        가정 = "계약 결제기일 당일 전액 회수 가정."
+    else:
+        가정 = (
+            "결제기일이 지나 처음 열린 날 전액 회수 가정"
+            f" (기일 {due_date} · 회수 {collection_date})."
+        )
     return (
-        f"{SIM_FIXED}: 계약 결제기일 당일 전액 회수 가정. 실제 입금 사실이 아니다."
+        f"{SIM_FIXED}: {가정} 실제 입금 사실이 아니다."
         f" 근거 due_date={due_date} (sales.collection_due_date = sale_date + payment_days)."
         f" 원금 {original} · 기왕수금 {received} → 이 사건의 delta {delta}."
     )
@@ -193,7 +246,19 @@ def seed_collection_events(
     financing_mode: str,
     as_of: date,
 ) -> CollectionSeedResult:
-    """`as_of` 가 결제기일인 미수 채권을 `master_collection_events` 에 옮긴다.
+    """결제기일이 `as_of` 까지 **지난** 미수 채권을 `master_collection_events` 에 옮긴다.
+
+    ★★ **`due_date <= as_of` 다. `= as_of` 가 아니다.** `SIM-CHAIN-V3` 실측에서 만기
+      7건의 회수 여부가 **그날 걷기가 갔느냐와 7/7 로 맞았다** — 요일이 아니라 그것이
+      전부였다. `= as_of` 면 걷기가 안 간 날의 만기는 아무도 다시 안 보고, 실제로
+      2026-02-08(일) 만기 283,819원 한 건이 `OPEN` 으로 남아 재무가
+      `SALES_PARTNER_HAS_OVERDUE_AR` 를 내기 시작했고 **3월 31일까지 판매가 한 건도
+      안 섰다.** 28만원 한 건이 두 달치 판매를 죽였다.
+
+    ★ **`collection_date` 는 그대로 `as_of` 다.** 그래서 일요일 만기는 월요일에 회수
+      사건을 받는다. 이것은 `collection.py:30` 의 「`due_date` 경과 ≠ 자동 수금」을
+      **어기는 것이 아니다** — 기일 경과를 수금으로 읽는 것이 아니라, 사건을 만드는
+      날을 기일 뒤 처음 열린 날로 옮기는 것이다.
 
     🔴 **커밋하지 않는다. 커넥션도 열지 않는다.** 트랜잭션 경계는 부르는 쪽 것이다
       (`DayOpening` Protocol 과 같은 분담).
@@ -211,7 +276,7 @@ def seed_collection_events(
     """
     query = sql.SQL(
         "SELECT receivable_id, due_date, original_amount_krw, received_amount_krw"
-        " FROM {} WHERE sim_run_id = %s AND due_date = %s AND outstanding_amount_krw > 0"
+        " FROM {} WHERE sim_run_id = %s AND due_date <= %s AND outstanding_amount_krw > 0"
         " ORDER BY receivable_id"
     ).format(_receivables())
 
@@ -240,7 +305,12 @@ def seed_collection_events(
                     as_of,
                     receivable_id,
                     original,
-                    _note(due_date=due_date, original=original, received=received),
+                    _note(
+                        due_date=due_date,
+                        collection_date=as_of,
+                        original=original,
+                        received=received,
+                    ),
                 ),
             )
             if cursor.rowcount == 1:

@@ -34,6 +34,7 @@ COLLECTED  target 300 · current 300  →  delta   0
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -57,6 +58,15 @@ AS_OF = date(2026, 1, 10)
 축_모드 = "LOAN_BASELINE"
 남의_모드 = "BASE_NO_LOAN"
 남의_실행 = "SIM-SOMEONE-ELSE"
+
+
+def _정규화(값: str) -> str:
+    """🔴 **한글은 NFC 로 맞춰 비교한다.**
+
+    같은 글자가 조합형(NFD)과 완성형(NFC)으로 갈리면 `in` 이 조용히 False 가 되고
+    잠금이 있는데도 안 잡는다.
+    """
+    return unicodedata.normalize("NFC", 값)
 
 
 class _중복행(Exception):
@@ -151,7 +161,11 @@ class _가짜커서:
         rows = list(self._db.receivables)
         if "sim_run_id = %s" in 문장:
             rows = [row for row in rows if row["sim_run_id"] == sim_run_id]
-        if "due_date = %s" in 문장:
+        if "due_date <= %s" in 문장:
+            rows = [row for row in rows if row["due_date"] <= as_of]
+        elif "due_date = %s" in 문장:
+            # ★ **되돌린 변이(`<=` → `=`)도 그대로 흉내낸다.** 조건을 안 알아보고
+            #   필터를 통째로 빠뜨리면 변이가 red 가 아니라 green 이 된다.
             rows = [row for row in rows if row["due_date"] == as_of]
         if "outstanding_amount_krw > 0" in 문장:
             rows = [row for row in rows if row["outstanding_amount_krw"] > 0]
@@ -236,8 +250,11 @@ def test_미수가_0_이면_조회에서부터_빠진다() -> None:
     assert "outstanding_amount_krw > 0" in 문장, f"미수 필터가 SQL 에 없다: {문장}"
 
 
-def test_그날_결제기일인_것만_고른다() -> None:
-    """★ `due_date` 는 지어낸 값이 아니다 — `sale_date + payment_days` 로 선 계약일이다."""
+def test_아직_기일이_안_된_채권은_안_고른다() -> None:
+    """★ `due_date` 는 지어낸 값이 아니다 — `sale_date + payment_days` 로 선 계약일이다.
+
+    ⚠️ **아직 안 온 기일을 당겨 걷지 않는다.** 지나간 기일은 집어도(`<=`) 미래는 아니다.
+    """
     다른날 = _채권(
         receivable_id="RCV-LATER",
         status="OPEN",
@@ -249,7 +266,7 @@ def test_그날_결제기일인_것만_고른다() -> None:
 
     _만든다(db)
 
-    assert {키[3] for 키 in db.events} == {"RCV-OPEN"}, "그날 것이 아닌 채권이 섞였다"
+    assert {키[3] for 키 in db.events} == {"RCV-OPEN"}, "기일이 아직 안 온 채권이 섞였다"
 
 
 def test_다른_실행의_채권은_안_고른다() -> None:
@@ -362,6 +379,125 @@ def test_note_의_delta_가_원금에서_기왕수금을_뺀_값이다() -> None
     db2 = _가짜DB(receivables=[열림])
     _만든다(db2)
     assert "delta 300" in db2.events[(BURN_IN_SIM_RUN_ID, 축_모드, AS_OF, "RCV-OPEN")][5]
+
+
+# ---------------------------------------------------------------------------
+# 3-2. ★★ 걷기가 안 간 날의 만기 — 다음에 여는 날 집는다
+# ---------------------------------------------------------------------------
+
+기일_일요일 = date(2026, 2, 8)
+"""`SIM-CHAIN-V3` 에서 **유일하게 걷기가 안 간 날**이다."""
+
+회수_월요일 = date(2026, 2, 9)
+"""기일이 지나 **처음 열린 날**이다. 여기서 사건이 나야 한다."""
+
+
+def _지난기일(
+    *,
+    receivable_id: str = "RCV-MISSED",
+    original: str = "283819",
+    received: str = "0",
+) -> dict[str, Any]:
+    """2026-02-08(일) 만기 채권. **283,819원 그 한 건이다.**"""
+    return _채권(
+        receivable_id=receivable_id,
+        status="OPEN",
+        original=original,
+        received=received,
+        due_date=기일_일요일,
+    )
+
+
+def test_걷기가_안_간_날의_만기는_다음에_여는_날_사건을_받는다() -> None:
+    """★★ **이 판의 핵심이다.** 요일이 아니라 **그날 걷기가 갔느냐**가 전부였다.
+
+    `SIM-CHAIN-V3` (1~3월 · 71영업일 · 휴장 19일) 실측에서 만기 7건 중 걷기가 간 6건은
+    전부 `COLLECTED` 였고, 걷기가 안 간 2026-02-08(일) 1건만 `OPEN` 으로 남았다 —
+    **상관 7/7 이다.** 토요일 만기도 걷기가 간 날은 걷혔다.
+
+    🔴 **그 한 건이 283,819원이었고 두 달치 판매를 죽였다.** 2026-02-09 부터 재무가
+      `SALES_PARTNER_HAS_OVERDUE_AR` 를 냈고(511건 중 288건) 3월 31일까지 판매가 한
+      건도 안 섰다.
+
+    ⚠️ **`due_date = as_of` 면 이 채권은 영영 안 걷힌다.** 사건을 만기일 당일에만
+      만들면, 걷기가 안 가는 날의 만기는 아무도 다시 안 본다.
+    """
+    db = _가짜DB(receivables=[_지난기일()])
+
+    # 🔴 일요일에는 걷기가 안 갔다 — 그날은 아무도 부르지 않았다.
+    결과 = _만든다(db, as_of=회수_월요일)
+
+    키 = (BURN_IN_SIM_RUN_ID, 축_모드, 회수_월요일, "RCV-MISSED")
+    assert 키 in db.events, (
+        f"지나간 기일을 다음 여는 날 안 집었다: {sorted(db.events)}"
+        " — 이 한 건이 OPEN 으로 남아 두 달치 판매를 죽였다"
+    )
+    assert 결과 == CollectionSeedResult(created=1, skipped=0)
+    assert db.events[키][4] == Decimal(283819), "target 이 원금이 아니다"
+
+
+def test_기일과_회수일이_같으면_메모가_당일이다() -> None:
+    """★ 같은 날이면 **지금 문장 그대로**다 — *"계약 결제기일 당일 전액 회수 가정"*.
+
+    ⚠️ 이 갈래를 잃으면 기일 당일에 걷힌 대부분의 건이 이유 없이 장황해진다.
+    """
+    db = _가짜DB(receivables=[열림])
+
+    _만든다(db)
+    note = _정규화(_사건(db, "RCV-OPEN")[5])
+
+    assert _정규화("계약 결제기일 당일 전액 회수 가정") in note, (
+        f"같은 날인데 「당일」이 아니다: {note!r}"
+    )
+
+
+def test_기일이_지나_집으면_메모가_당일이라_안_하고_두_날짜를_다_적는다() -> None:
+    """🔴 **`collection_date != due_date` 인 날 「당일」은 거짓이다.**
+
+    ⚠️ **두 날짜를 둘 다 적는다.** 하나만 적으면 읽는 사람이 나머지를 되짚어야 한다.
+
+    ★★ **「휴장일이라」고 단정하지 않는다.** 마스터는 그날 왜 안 갔는지를 모른다 —
+      휴장일일 수도, 걷기 구간 밖일 수도, 중단됐을 수도 있다. *"기일이 지나 처음 열린
+      날"* 이 아는 만큼이다.
+    """
+    db = _가짜DB(receivables=[_지난기일()])
+
+    _만든다(db, as_of=회수_월요일)
+    note = _정규화(db.events[(BURN_IN_SIM_RUN_ID, 축_모드, 회수_월요일, "RCV-MISSED")][5])
+
+    assert _정규화("당일") not in note, f"기일이 지나 집었는데 「당일」이라 적혔다: {note!r}"
+    assert _정규화("결제기일이 지나 처음 열린 날 전액 회수 가정") in note, (
+        f"기일 뒤에 집었다는 성격이 안 적혔다: {note!r}"
+    )
+    assert _정규화(f"기일 {기일_일요일}") in note, f"기일이 안 적혔다: {note!r}"
+    assert _정규화(f"회수 {회수_월요일}") in note, f"회수일이 안 적혔다: {note!r}"
+    for 단정 in ("휴장", "주말", "일요일", "공휴일"):
+        assert _정규화(단정) not in note, (
+            f"마스터가 모르는 것을 단정했다 ({단정}): {note!r}"
+        )
+    assert _정규화("SIM_FIXED") in note
+    assert _정규화("실제 입금 사실이 아니다") in note
+
+
+def test_이미_걷힌_채권은_기일이_지나도_사건을_안_받는다() -> None:
+    """🔴 **`outstanding_amount_krw > 0` 이 거른다.** 범위를 넓혀도 이것이 그대로 막는다.
+
+    ⚠️ 없으면 이미 다 걷힌 채권까지 매일 다시 사건을 받고, 사람은 *"그날 또 뭔가
+      들어왔다"* 로 읽는다.
+    """
+    걷힌것 = _채권(
+        receivable_id="RCV-DONE",
+        status="COLLECTED",
+        original="283819",
+        received="283819",
+        due_date=기일_일요일,
+    )
+    db = _가짜DB(receivables=[걷힌것])
+
+    결과 = _만든다(db, as_of=회수_월요일)
+
+    assert db.events == {}, f"이미 걷힌 채권에 사건이 생겼다: {sorted(db.events)}"
+    assert 결과 == CollectionSeedResult(created=0, skipped=0)
 
 
 # ---------------------------------------------------------------------------
