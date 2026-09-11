@@ -5,6 +5,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
+from app.finance.aging import AgingBucket
+from app.finance.console_receivables import ConsoleReceivablesResponse, get_console_receivables
 from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 from app.finance.schemas import FinanceCashflowResponse, FinanceDashboardResponse
 
@@ -27,3 +29,15 @@ def cashflow(
     days: Annotated[int, Query(ge=1, le=30)] = 30,
 ) -> FinanceCashflowResponse:
     return get_finance_cashflow(sim_run_id=sim_run_id, as_of=as_of, days=days)
+
+
+@router.get("/receivables", response_model=ConsoleReceivablesResponse)
+def receivables(
+    sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+    aging_bucket: AgingBucket | None = None,
+    partner_id: str | None = None,
+) -> ConsoleReceivablesResponse:
+    return get_console_receivables(
+        sim_run_id=sim_run_id, as_of=as_of, aging_bucket=aging_bucket, partner_id=partner_id
+    )
