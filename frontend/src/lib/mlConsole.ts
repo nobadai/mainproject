@@ -94,7 +94,7 @@ export interface HistoryItem {
   time?: string | null;
   /** 규칙 에이전트만 판정을 갖습니다. Claude 보고서는 null */
   verdict?: string | null;
-  /** 맨 위에 펼칠 «오늘 AI 진단». 한국어 본문 하나만 참입니다. */
+  /** 맨 위에 펼칠 «금일 AI 진단». 한국어 본문 하나만 참입니다. */
   is_claude?: boolean;
   /**
    * Claude 가 쓴 **영어 초안**. 번역이 이상할 때 대 보는 원본입니다.

@@ -34,6 +34,16 @@ import { Markdownish } from "./Markdownish";
 import { ReportBody, Verdict } from "./Report";
 import { RerunButton } from "./RerunButton";
 
+//  ★ 보고서 맨 위 «기계 번역» 안내(`>` 인용 칸)는 화면에서 뺍니다 (2026-09-11).
+//    **파일에는 그대로 남습니다** — 번역 숫자 대조도 계속 돕니다.
+//    맨 위 인용만 떼고, 본문 중간의 인용은 그대로 그립니다.
+function dropNotice(text: string): string {
+  return text
+    .replace(/^(?:[ \t]*>.*(?:\r?\n|$))+\s*/, "")
+    //  안내 칸 바로 밑의 가로줄(---)도 같이 뗍니다. 남으면 맨 위에 선만 하나 뜹니다.
+    .replace(/^---[ \t]*(?:\r?\n|$)\s*/, "");
+}
+
 const say = (e: unknown) =>
   e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e);
 
@@ -220,7 +230,7 @@ function TodayClaude({
   if (!day || !pick)
     return (
       <Card
-        title="오늘 AI 진단"
+        title="금일 AI 진단"
         subtitle="자동 작업에 대한 AI 보고서입니다."
         //  ★ **없을 때야말로 버튼이 필요합니다.** 아침에 이게 실패하는 일이
         //    실제로 있었습니다 (로그인 만료 · 인코딩 사고). 그러면 그날은
@@ -235,16 +245,10 @@ function TodayClaude({
 
   return (
     <Card
-      title="오늘 AI 진단"
+      title="금일 AI 진단"
       subtitle={`${day.date} · 자동 작업에 대한 AI 보고서입니다.`}
       right={
         <div className="flex items-start gap-2.5">
-          <span
-            className="rounded px-2 py-0.5 text-[11px] font-semibold"
-            style={{ background: "var(--color-t-info-bg)", color: "var(--color-t-info)" }}
-          >
-            AI
-          </span>
           {/*  ★ 배치를 다시 돌린 뒤에는 진단도 다시 받아야 합니다 — 아침 것은
                  실패한 배치를 보고 쓴 글이라 이미 틀린 이야기입니다. */}
           <RerunButton what="claude" label="갱신" onDone={onDone} />
@@ -269,7 +273,7 @@ function TodayClaude({
           className="thin-scroll max-h-[640px] overflow-auto rounded-lg border px-4 py-3"
           style={{ borderColor: "var(--color-hair)" }}
         >
-          <Markdownish text={text} />
+          <Markdownish text={dropNotice(text)} />
         </div>
       )}
     </Card>
@@ -361,7 +365,7 @@ function History({ days, err, skip }: { days: HistoryDay[] | null; err: string |
                   style={{ borderColor: "var(--color-hair)", background: "var(--color-sunk)" }}
                 >
                   {reports.find((f) => f.file === open)?.is_claude ? (
-                    <Markdownish text={text} />
+                    <Markdownish text={dropNotice(text)} />
                   ) : (
                     //  ★ `.txt` 는 수치가 세로로 줄 맞춰져 있습니다.
                     //    문서로 그리면 줄 맞춤이 깨집니다.

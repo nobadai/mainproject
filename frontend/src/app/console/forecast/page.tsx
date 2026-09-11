@@ -112,7 +112,10 @@ function ForecastPane() {
                 <Pill text={c.grade} tone="info" />
                 {c.gated && <Pill text="어제 가격" tone="neutral" />}
                 {!c.use_recommended && <Pill text="쓰지 마세요" tone="bad" />}
-                {c.review && <Pill text="확인 필요" tone="warn" />}
+                {/* ★ «확인 필요»(`review` · 폭 ≥ 15%)는 뺐습니다 (2026-09-11).
+                       경락가·중도매가는 구간이 원래 40~78% 라 32일 내내 켜져
+                       있었습니다 — 매일 뜨는 경고는 아무도 안 봅니다. 폭 숫자는
+                       아래 줄에 그대로 있습니다. 서버의 `review` 는 그대로 둡니다. */}
               </span>
             </span>
             <span className="tabular font-mono text-[22px] leading-none">
