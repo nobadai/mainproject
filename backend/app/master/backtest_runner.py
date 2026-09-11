@@ -339,6 +339,23 @@ class WalkResult:
         return total
 
     @property
+    def maintenance_statuses(self) -> Mapping[str, int]:
+        """물류 유지보수 **단계** 분포 (2026-09-11). `approval_statuses` 와 같은 자리다.
+
+        🔴 **Lot 축 한 줄로는 「안 켰다」와 「켰는데 0 Lot」이 안 갈린다.** 둘 다 `{}`
+           로 나오고, 그러면 성적표를 보는 사람이 *"폐기할 것이 없었구나"* 로 읽는다 —
+           실제로는 안 켠 것일 수 있다.
+
+        ★★ 구현이 이 구멍을 보고했고 값은 이미 `DayRunOutcome.maintenance_status` 에
+          안 접힌 채 있었다. **재는 줄만 없었다.** 승인이 `승인`·`승인어휘` 두 줄인
+          것과 같은 이유로 여기도 둘이다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            total[day.maintenance_status] += 1
+        return total
+
+    @property
     def maintenance_outcomes(self) -> Mapping[str, int]:
         """물류 유지보수의 **Lot 별** 결과 분포 (2026-09-11). 🔴 **넷을 접지 않는다.**
 
@@ -738,7 +755,8 @@ def format_summary(result: WalkResult) -> str:
         # 🔴 **유지보수 줄을 접지 않는다** (2026-09-11). 몇 Lot 이 없어졌고 몇이
         #    **사람 몫으로 남았는지**가 보여야 한다 — 창고가 안 비는 날 봐야 할
         #    자리가 `SKIPPED_HELD_ALLOCATION` 이고, 접으면 그 줄이 사라진다.
-        f"유지보수  {dict(sorted(result.maintenance_outcomes.items()))}",
+        f"유지보수  {dict(sorted(result.maintenance_statuses.items()))}",
+        f"유지어휘  {dict(sorted(result.maintenance_outcomes.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]

@@ -822,3 +822,42 @@ class _물류경계:
         if self.boom is not None:
             raise self.boom
         return self.result
+
+
+def test_요약이_안_켠_것과_0_Lot_을_가른다() -> None:
+    """🔴 **Lot 축 한 줄로는 둘이 안 갈린다.**
+
+    ```text
+    안 켰다          유지어휘 {}   ← --auto-maintain 을 안 줬다
+    켰는데 0 Lot     유지어휘 {}   ← 폐기할 것이 없었다
+    ```
+
+    ★★ 성적표를 보는 사람이 뒤엣것으로 읽는다. 실제로는 앞엣것일 수 있다 — 그 둘은
+      **다음 걸음이 다르다.** 승인이 `승인`·`승인어휘` 두 줄인 것과 같은 이유다.
+
+    ⚠️ 구현이 이 구멍을 보고했고 값은 이미 `DayRunOutcome.maintenance_status` 에
+      안 접힌 채 있었다. **재는 줄만 없었다.**
+    """
+    def _결과(*상태: str) -> WalkResult:
+        날들 = tuple(
+            DayRunOutcome(
+                as_of=AS_OF + timedelta(days=자리),
+                action="RUN_NOW",
+                reason="",
+                maintenance_status=하나,
+            )
+            for 자리, 하나 in enumerate(상태)
+        )
+        return WalkResult(start=AS_OF, end=날들[-1].as_of, days=날들)
+
+    안켠것 = _결과("NOT_ATTEMPTED", "NOT_ATTEMPTED")
+    켠것 = _결과("NOTHING_DUE", "NOTHING_DUE")
+
+    assert 안켠것.maintenance_outcomes == 켠것.maintenance_outcomes, (
+        "이 검사의 전제가 깨졌다 — Lot 축이 둘을 이미 가르면 이 줄은 필요 없다"
+    )
+    assert 안켠것.maintenance_statuses != 켠것.maintenance_statuses, (
+        "단계 축이 둘을 못 가른다 — 성적표가 '안 켠 것'을 '폐기할 것이 없었다'로 읽힌다"
+    )
+    assert 안켠것.maintenance_statuses["NOT_ATTEMPTED"] == 2
+    assert 켠것.maintenance_statuses["NOTHING_DUE"] == 2
