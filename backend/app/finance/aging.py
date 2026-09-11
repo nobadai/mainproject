@@ -1,25 +1,17 @@
-"""Deterministic receivable-aging vocabulary shared by Finance readers."""
+"""Deterministic receivable-aging vocabulary shared by Finance readers.
 
-from datetime import date
-from decimal import Decimal
-from typing import Literal
+★ **This stays the Finance-facing name.**  Finance code and Finance tests keep
+  importing `app.finance.aging` — that path is the canon they were written against.
 
-AgingBucket = Literal["CURRENT", "1_7", "8_30", "30_PLUS", "PAID"]
+🔴 **The implementation moved to `app/contracts/aging.py`.**  Sales needs the same
+   rule for the 수금 screen, and a Sales module importing `app.finance` would bolt
+   the two departments together at the execution layer (the boundary that
+   `tests/finance/test_finance_sales_orchestration_boundary.py` guards).  Copying
+   the rule into Sales was the other option and the worse one: two implementations
+   of the same buckets, each correct on its own terms, disagreeing about the same
+   receivable.  So the rule lives in the shared contract and Finance re-exports it.
+"""
 
+from app.contracts.aging import AgingBucket, classify_receivable_aging
 
-def classify_receivable_aging(
-    *, outstanding_amount_krw: Decimal | None, due_date: date, as_of: date
-) -> tuple[AgingBucket, int | None]:
-    """Classify a stored receivable without treating unknown money as zero."""
-    if outstanding_amount_krw is None:
-        raise ValueError("outstanding_amount_krw is required for aging")
-    if outstanding_amount_krw <= 0:
-        return "PAID", None
-    days_overdue = (as_of - due_date).days
-    if days_overdue <= 0:
-        return "CURRENT", 0
-    if days_overdue <= 7:
-        return "1_7", days_overdue
-    if days_overdue <= 30:
-        return "8_30", days_overdue
-    return "30_PLUS", days_overdue
+__all__ = ["AgingBucket", "classify_receivable_aging"]

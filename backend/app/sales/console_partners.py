@@ -12,7 +12,7 @@ from decimal import Decimal
 from psycopg import sql
 from pydantic import BaseModel
 
-from app.finance.aging import AgingBucket, classify_receivable_aging
+from app.contracts.aging import AgingBucket, classify_receivable_aging
 from app.sales.db import fetch_all, get_db_schema
 
 _ZERO = Decimal(0)

@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.finance.aging import AgingBucket
+from app.contracts.aging import AgingBucket
 from app.sales.console_collections import ConsoleCollectionsResponse, get_console_collections
 from app.sales.console_partners import (
     ConsolePartnerDetailResponse,

@@ -4,7 +4,7 @@
 collection *is* — money owed against a confirmed sale — is already recorded in
 `receivables`.  A second entity here would be a second truth about the same money.
 
-🔴 **Aging comes from Finance.**  `app.finance.aging.classify_receivable_aging` is
+🔴 **Aging comes from Finance.**  `app.contracts.aging.classify_receivable_aging` is
 the one rule; a Sales-local copy would let the 수금 screen and the 채권 screen put
 the same receivable in different buckets, and neither would be wrong on its own.
 """
@@ -15,7 +15,7 @@ from decimal import Decimal
 from psycopg import sql
 from pydantic import BaseModel
 
-from app.finance.aging import AgingBucket, classify_receivable_aging
+from app.contracts.aging import AgingBucket, classify_receivable_aging
 from app.sales.db import fetch_all, get_db_schema
 
 _ZERO = Decimal(0)
