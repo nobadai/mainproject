@@ -333,8 +333,11 @@ def test_승인은_제_사이클이_낸_행만_본다() -> None:
       더 쌓고, 그 어휘가 뜻하던 *"사람이 이미 정했다"* 가 성적표에서 안 읽힌다.
     """
     _, _, 문 = _하루(auto_approve=True)
-    매입행 = {"request_id": daily_request_id(AS_OF, "배추"), "as_of": AS_OF}
-    판매행 = {"request_id": daily_sales_request_id(AS_OF, "배추"), "as_of": AS_OF}
+    매입행 = {"request_id": daily_request_id(AS_OF, "배추", sim_run_id=실행), "as_of": AS_OF}
+    판매행 = {
+        "request_id": daily_sales_request_id(AS_OF, "배추", sim_run_id=실행),
+        "as_of": AS_OF,
+    }
 
     매입문 = 문.calls[0]["runs_on"]
     판매문 = 문.calls[1]["runs_on"]
@@ -476,7 +479,7 @@ def test_경계_뒤_날짜는_BLOCKED_BY_BOUNDARY_로_센다(monkeypatch: pytest
         {
             "as_of": 넘은날,
             "run_id": "run-1",
-            "request_id": daily_request_id(넘은날, item),
+            "request_id": daily_request_id(넘은날, item, sim_run_id=실행),
             "cycle": "PROCUREMENT",
             "end_code": "E1_DONE",
             "response_payload": {},

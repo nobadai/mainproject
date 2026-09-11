@@ -54,6 +54,13 @@ _TABLE = "master_agent_runs"
 #:   잘못 읽힌다. **되찾는 것은 아래 업무 키다.**
 LEDGER_GAP_END_CODE = "E4_NOT_STARTED"
 
+#: 하루 단위 업무 키의 **머리**. `scheduler` 의 매입·판매 키와 관문 키가 같이 쓴다.
+#:
+#: ★ **주인이 여기다** — 꼬리 상수(`_LEDGER_GAP_REQUEST_SUFFIX`)와 `LIKE` 패턴이
+#:   이 파일에 있으니 머리도 같이 둔다. 머리와 꼬리가 다른 파일에 흩어지면 축을
+#:   어디에 끼우는지가 두 벌이 된다.
+DAILY_REQUEST_HEAD = "REQ-DAILY"
+
 #: 장부 관문 행의 업무 키 꼬리. **업무 키의 품목 자리에 들어간다.**
 #:
 #: 🔴 **품목 이름과 겹치면 안 된다.** 겹치는 순간 그날 그 품목의 판단 행과 게이트
@@ -78,12 +85,56 @@ _LEDGER_GAP_REQUEST_TAIL = f"-{_LEDGER_GAP_REQUEST_SUFFIX}"
 LEDGER_GAP_REQUEST_LIKE = f"%{_LEDGER_GAP_REQUEST_TAIL}"
 
 
-def ledger_gap_request_id(as_of: date) -> str:
-    """`REQ-DAILY-20260908-LEDGER-GAP`. **하루 단위 키다 — 품목이 없다.**
+def build_request_id(*, head: str, as_of: date, sim_run_id: str, tail: str) -> str:
+    """업무 키 하나를 짓는다 — `{head}-{sim_run_id}-{YYYYMMDD}-{tail}` (2026-09-11).
+
+    ★★ **자리 배치의 주인이 하나다.** 업무 키를 짓는 자리가 셋이고
+      (`scheduler.daily_request_id` · `scheduler.daily_sales_request_id` ·
+      `ledger_gap_request_id`), 축이 어느 자리에 붙느냐는 **셋이 같아야 하는 사실**
+      이다. 세 곳이 각자 f-string 을 쓰면 한 곳만 축을 뒤로 옮기는 날
+      `LEDGER_GAP_REQUEST_LIKE` 가 조용히 그 행을 못 찾는다.
+
+    🔴 **축이 꼬리 앞에 붙는다. 꼬리 뒤가 아니다.**
+
+      되찾는 쪽이 실측으로 **꼬리**를 본다 — `LEDGER_GAP_REQUEST_LIKE` 가
+      `'%-LEDGER-GAP'` 이고 `is_ledger_gap_request_id` 가 `endswith` 다. 축을 뒤에
+      붙이면 그 둘이 한 행도 못 집고, 성적표의 `gate_blocked` 와
+      `procurement_boundary` 의 `LEDGER_GAP` 이 **에러 없이 늘 거짓**이 된다.
+      머리에 붙이면 꼬리가 그대로라 두 조회가 손대지 않고 산다.
+
+      ⚠️ `request_id` 를 **앞머리로 찾는 SQL 은 없다** (2026-09-11 전수 실측).
+        `transition.purchase_id_prefix_for` 가 `PUR-{request_id}-D{seq}-S` 로 앞머리를
+        만들지만 양쪽 다 같은 `request_id` 에서 나오므로 자리와 무관하다.
+
+    🔴 **축을 지어내지 않는다.** 빈 축은 `REQ-DAILY--20260105-무` 가 되고, 그 모양은
+      축을 안 실은 모든 호출자에게서 **같은 문자열**이라 실행이 달라도 키가 겹친다 —
+      이 판이 없애려는 바로 그 자리다. 필수 인자가 빠뜨림을 막고 이 검사가 빈 값을
+      막는다.
+
+    ★ **시각을 안 넣는다.** 축은 시각이 아니다 — 같은 실행이 같은 날 두 번 깨어나면
+      키가 같아야 `master_agent_runs_run_request_unique` 가 두 번째를 막는다.
+
+    :raises ValueError: `sim_run_id` 가 비었을 때.
+    """
+    axis = sim_run_id.strip() if sim_run_id else ""
+    if not axis:
+        raise ValueError(
+            "sim_run_id 없이 업무 키를 지을 수 없다"
+            " — 축이 없으면 다른 실행의 결정이 이 실행의 것으로 읽힌다"
+        )
+    return f"{head}-{axis}-{as_of:%Y%m%d}-{tail}"
+
+
+def ledger_gap_request_id(as_of: date, *, sim_run_id: str) -> str:
+    """`REQ-DAILY-SIM-WALK-202601-20260908-LEDGER-GAP`. **하루 단위 키다 — 품목이 없다.**
 
     🔴 **`scheduler.daily_request_id` 를 못 쓴다.** 저쪽은 품목별인데 장부 관문은
       하루를 통째로 돌려세운다. 품목을 하나 골라 넣으면 *"배추 때문에 막혔다"* 라는
       없는 사실이 생기고, 전부에 넣으면 같은 사실이 품목 수만큼 쌓인다.
+
+    🔴 **실행 축이 필수다** (2026-09-11). 축이 없으면 어제 걷던 실행이 남긴 관문 행의
+      키를 오늘 새 실행이 그대로 짓고, *"그날 게이트 행이 이미 있나"* 가 **남의
+      실행 행**에 참이 된다.
 
     🔴 **시각을 안 넣는다** (`daily_request_id` 와 같은 이유). 넣으면 같은 날 두 번
       깨어날 때 키가 갈리고, 그러면 *"그날 게이트 행이 이미 있나"* 를 물을 수가 없다.
@@ -91,8 +142,15 @@ def ledger_gap_request_id(as_of: date) -> str:
     ★ **적는 쪽과 되찾는 쪽이 이 함수 하나를 본다.** `persistence.record_ledger_gap`
       이 이 값을 `request_id` 로 적고, `is_ledger_gap_request_id` 가 같은 꼬리로
       그 행을 알아본다.
+
+    ★ **문자열을 여기서 다시 잇지 않는다** — 자리 배치의 주인은 `build_request_id` 다.
     """
-    return f"REQ-DAILY-{as_of:%Y%m%d}-{_LEDGER_GAP_REQUEST_SUFFIX}"
+    return build_request_id(
+        head=DAILY_REQUEST_HEAD,
+        as_of=as_of,
+        sim_run_id=sim_run_id,
+        tail=_LEDGER_GAP_REQUEST_SUFFIX,
+    )
 
 
 def is_ledger_gap_request_id(request_id: str | None) -> bool:

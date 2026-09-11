@@ -69,7 +69,9 @@ def _row(
             constraints["finance"] = finance
     return {
         "run_id": UUID(run_id),
-        "request_id": f"REQ-DAILY-{as_of:%Y%m%d}-{item}" if request_id is None else request_id,
+        "request_id": (
+            f"REQ-DAILY-{sim_run_id}-{as_of:%Y%m%d}-{item}" if request_id is None else request_id
+        ),
         "as_of": as_of,
         "cycle": "PROCUREMENT",
         "run_seq": 1,
@@ -109,7 +111,9 @@ def _관문행(*, as_of: date = 평일, **kwargs: Any) -> dict[str, Any]:
     ★ **키를 손으로 안 적는다.** `record_ledger_gap` 이 표에 적는 값과 같은 함수를
       부른다 — 여기서 문자열을 지어내면 되찾는 쪽만 초록인 검사가 된다.
     """
-    kwargs.setdefault("request_id", ledger_gap_request_id(as_of))
+    kwargs.setdefault(
+        "request_id", ledger_gap_request_id(as_of, sim_run_id=kwargs.get("sim_run_id", 축))
+    )
     return _row(
         as_of=as_of,
         item=None,
