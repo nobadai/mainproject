@@ -294,6 +294,10 @@ def test_use_recommended_가_예측_payload_에_실린다():
     from app.master.inputs import _forecast_payload
 
     row = {
+        # 🔴 **뷰가 주는 둘이다** (2026-09-11). 대역이 뷰보다 좁으면 *"버리고 있다"* 를
+        #    못 잡는다 — 실제로 판매 537건이 이 둘이 없어 죽었다.
+        "as_of": "2025-12-31",
+        "target_kind": "AUC",
         "generated_at": "2025-12-31T06:00:00+09:00",
         "item": "배추",
         "unit": "원/kg",
@@ -317,6 +321,7 @@ def test_행별_플래그는_daily_안에_그대로_있다():
     daily = [{"date": "2026-01-02", "predicted": 1700, "is_filled": True, "is_gated": True}]
     out = _forecast_payload(
         {
+            "as_of": "2025-12-31", "target_kind": "AUC",
             "generated_at": "x", "item": "배추", "unit": "원/kg", "current_price": 1,
             "horizon_days": 1, "daily": daily, "model_version": "v1",
             "use_recommended": True,
