@@ -125,10 +125,7 @@ export function BatchTab() {
         style={{ borderColor: "var(--color-hair)" }}
       >
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 className="m-0 text-[13.5px] font-semibold">오늘 자동 작업 상태</h2>
-          <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
-            오늘 아침 작업이 잘 끝났는지 보여줍니다 · 실패했을 때만 자세한 내용이 나옵니다
-          </span>
+          <h2 className="m-0 text-[13.5px] font-semibold">금일 자동 작업 결과</h2>
           {/*  ★ **실패했을 때만 버튼을 보입니다.** 잘 돌았는데 버튼이 있으면
                  누르고 싶어집니다 — 자동 작업은 학습표를 비우고 다시 채우는
                  것이라 이유 없이 돌릴 일이 아닙니다. */}
@@ -163,9 +160,6 @@ export function BatchTab() {
       >
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <h2 className="m-0 text-[13.5px] font-semibold">최근 자동 작업 기록</h2>
-          <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
-            매일 아침 09:00 · 데이터 수집 → 표 다시 만들기 → 가격 예측 → 저장 → 예측 채점
-          </span>
           {failed > 0 && (
             <span
               className="ml-auto rounded px-2 py-0.5 text-[11px] font-semibold"
