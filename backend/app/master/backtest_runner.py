@@ -403,6 +403,28 @@ class WalkResult:
                     total.update(approval.outcomes)
         return total
 
+    @property
+    def label_outcomes(self) -> Mapping[str, int]:
+        """**어느 라벨이 실제로 섰나** (2026-09-11). 🔴 **접지 않는다.**
+
+        ★★ **규칙에 순서가 생긴 순간 이 줄이 필요해졌다** (`backfill.FIRST_OFFERED`).
+          규칙 파일이 `["보수", "기본"]` 이라고 적혀 있어도 **그날 무엇이 섰는지**는
+          그날 제시된 안이 정한다 — 이 줄이 없으면 **곡선이 한 규칙의 것이 아니게
+          되고**, 사람이 날마다 결정 행을 되짚어야 한다.
+
+        🔴 **`approval_outcomes` 와 한 칸에 담지 않는다.** 어휘가 다르고 축이 다르다 —
+          저쪽은 *"승인을 적었나"* 이고 이쪽은 *"무엇을 골랐나"* 다
+          (`transition_outcomes` · `maintenance_outcomes` 와 같은 규율).
+
+        ★ **이름의 주인은 매입이다.** 여기서 새 이름을 안 붙이고 세기만 한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is not None:
+                    total.update(approval.label_outcomes)
+        return total
+
 
 def walk(
     *,
@@ -748,6 +770,10 @@ def format_summary(result: WalkResult) -> str:
         #    두 줄이다 — 한 줄로 묶으면 *"안 켰다"* 와 *"켰는데 0건"* 이 같아 보인다.
         f"승인      {dict(sorted(result.approval_statuses.items()))}",
         f"승인어휘  {dict(sorted(result.approval_outcomes.items()))}",
+        # 🔴 **라벨 줄을 접지 않는다** (2026-09-11). 규칙이 순서를 갖게 되면서
+        #    *"규칙이 무엇을 적었나"* 와 *"그날 무엇이 섰나"* 가 갈릴 수 있다 —
+        #    이 줄이 그 둘을 잇는 유일한 자리다.
+        f"라벨어휘  {dict(sorted(result.label_outcomes.items()))}",
         # 🔴 **전이 줄을 접지 않는다** (2026-09-11). *"승인을 적었다"* 와 *"그 승인이
         #    원장에 닿았다"* 는 축이 다르다 — 이 줄이 없어서 `RECORDED 15` 를 보고
         #    원장에 닿은 줄 알았고, `purchases` 는 0행이었다.
