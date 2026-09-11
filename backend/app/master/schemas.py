@@ -618,7 +618,6 @@ class SalesRunRequest(BaseModel):
     #:   **판매가 실제로 요구한 칸**이라 여기에 자리를 만든다.
     #:
     #: 🔴 **나머지 구조화된 칸은 지금 안 넣는다.** `SalesUserRequest` 에는
-    #:   `preferred_unit_price_krw` · `preferred_payment_terms_type` ·
     #:   `preferred_contract_term_days` 가 더 있지만 **요구한 caller 가 아직 없다.**
     #:   없는 필요를 API 표면에 미리 만들면 화면이 안 쓰는 칸을 채우기 시작하고,
     #:   그 값이 어디서 왔는지 아무도 모른 채 제안에 실린다.
@@ -668,6 +667,60 @@ class SalesRunRequest(BaseModel):
         description=(
             "사용자가 말한 수금 유예일. 판매 `SalesUserRequest.preferred_payment_days` "
             "로 그대로 나가고, 승인되면 수금 기일(`sale_date + payment_days`)의 출처가 된다."
+        ),
+    )
+
+    #: 🔴 **재무가 요구한 셋이 여기로 온다** (2026-09-11 · 걷기 실측).
+    #:
+    #:   ```text
+    #:   재무 SALES_VALIDATION  status "INPUT_INCOMPLETE"
+    #:   missing_fields  partner_id · unit_price_krw · reported_sales_amount_krw
+    #:                   payment_terms_type · source_ref
+    #:   ```
+    #:
+    #:   `partner_id` 는 이미 있었고 `reported_sales_amount_krw` 는 **판매가 수량 ×
+    #:   단가로 자기 안에서 세는 파생**이다. 마스터가 실을 수 있는 자리는 나머지
+    #:   셋이고, 자동 걷기가 그 셋을 안 실어서 재무가 판정을 못 냈다.
+    #:
+    #: ★ **마스터가 값을 지어내지 않는다** (`preferred_delivery_date` 와 같은 규율).
+    #:   자동 걷기의 값은 **실행 규칙 파일**에서 오고 (`backfill.SalesTermsRule`),
+    #:   규칙이 없으면 셋 다 `None` 이라 종전과 똑같이 안 실린다.
+    preferred_unit_price_krw: Decimal | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "희망 단가 (원/kg). 판매 `SalesUserRequest.preferred_unit_price_krw` 로 "
+            "그대로 나간다 — 마스터는 시세를 계산하지 않는다."
+        ),
+    )
+
+    #: ⚠️ **`SalesBusinessMode` 처럼 Literal 로 선언하지 않는다** (2026-09-11).
+    #:
+    #:   영업 모드는 **마스터가 고른다** (`scheduler.WALK_BUSINESS_MODE`) — 고르는
+    #:   쪽이 아는 이름을 제 어휘로 선언하는 것이 맞다. 지급조건 종류는 **마스터가
+    #:   고르지 않는다.** 규칙 파일이 말한 것을 나르기만 하므로, 여기에 Literal 을
+    #:   두면 **업무의 값이 코드에 박히고** 판매가 어휘를 늘리는 날 마스터가 문
+    #:   앞에서 먼저 거절한다. 아는 이름인지는 판매 문(`SalesUserRequest`)이 판정한다.
+    preferred_payment_terms_type: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "지급조건 종류. 판매 `SalesUserRequest.preferred_payment_terms_type` 로 "
+            "그대로 나가고, 어휘의 주인은 판매다 — 마스터는 값을 검사하지 않는다."
+        ),
+    )
+
+    #: 🔴 **이 조건을 누가 정했나.** 사람이 화면에 친 문장에는 되짚을 행이 없어
+    #:   종전에는 이 칸을 안 날랐다. **자동 걷기는 다르다** — 조건이 실행 규칙에서
+    #:   왔고 그 규칙은 `sim_runs.config_json` 이라는 되짚을 행에 있다.
+    #:
+    #: ⚠️ **사람이 말한 것처럼 보이면 안 된다.** 값은 `sales_terms.rules_source_ref`
+    #:   가 짓고, 실행 id 와 **단가를 어느 쪽에서 가져왔는지**를 같이 적는다.
+    source_ref: str | None = Field(
+        default=None,
+        description=(
+            "이 조건의 권위 있는 출처 ref. 판매 `SalesUserRequest.source_ref` 로 그대로 "
+            "나간다 — 되짚을 행이 있을 때만 채운다."
         ),
     )
 

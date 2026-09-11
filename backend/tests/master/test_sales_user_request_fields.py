@@ -11,8 +11,25 @@
 넓혔다     requested_quantity_kg          판매가 실제로 요구했다
 넓혔다     preferred_delivery_date         🔴 승인 경로가 요구했다 (2026-09-08)
            preferred_payment_days
-안 넓혔다  preferred_* 셋 · source_ref     요구한 caller 가 아직 없다
+넓혔다     preferred_unit_price_krw        🔴 재무 검증이 요구했다 (2026-09-11)
+           preferred_payment_terms_type
+           source_ref
+안 넓혔다  preferred_contract_term_days    요구한 caller 가 아직 없다
+           allow_additional_sourcing
 ```
+
+🔴 **셋이 더 옮겨 왔다** (2026-09-11 · 걷기 실측).
+
+자동 걷기가 판매 판정까지 갔는데 재무가 `SALES_INPUT_INCOMPLETE` 로 판정을 못 냈다 —
+`missing_fields` 가 `partner_id` · `unit_price_krw` · `reported_sales_amount_krw` ·
+`payment_terms_type` · `source_ref` 다섯이었다. 앞의 `partner_id` 는 이미 자리가
+있었고, `reported_sales_amount_krw` 는 **판매가 수량 × 단가로 자기 안에서 세는
+파생**이다. 마스터가 실을 수 있는 자리는 나머지 셋이고 **요구한 caller 가 생겼다.**
+
+★ **`source_ref` 의 이유가 뒤집힌 자리가 여기다.** 종전에는 *"마스터에게 채울
+  권위 있는 값이 없다"* 였다 — 사람이 화면에 친 문장에는 되짚을 행이 없기 때문이다.
+  **자동 걷기는 다르다.** 조건이 `sim_runs.config_json` 의 실행 규칙에서 왔고, 그것은
+  되짚을 수 있는 행이다. 그래서 **값이 있는 caller 만 채워 보낸다.**
 
 🔴 **두 칸이 "안 나르는 쪽" 에서 "나르는 쪽" 으로 옮겨 왔다** (2026-09-08).
 
@@ -53,18 +70,10 @@ from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 평일 = date(2026, 9, 10)
 
 안_나르는_칸: dict[str, str] = {
-    "preferred_unit_price_krw": "요구한 caller 가 없다 — 화면이 희망단가를 받는 자리가 아직 없다",
-    "preferred_payment_terms_type": "요구한 caller 가 없다",
     "preferred_contract_term_days": "요구한 caller 가 없다",
     "allow_additional_sourcing": (
         "매입 라우팅(`ADDITIONAL_SUPPLY_CONTEXT`)이 아직 안 열렸다 — "
         "허용해도 부를 대상이 없어 참을 실으면 안 여는 문을 연 것처럼 읽힌다"
-    ),
-    "source_ref": (
-        "🔴 **마스터에게 채울 권위 있는 값이 없다.** 그 칸은 "
-        '*"이 조건을 누가 정했나"* 인데, 사용자가 화면에 친 문장에는 되짚을 행이 없다. '
-        "`request_id` 를 넣으면 *이번 실행 번호가 조건을 정했다* 가 되어 순환이다 — "
-        "구조화된 요청이 이력 행에서 오는 날 그 행 id 로 채운다"
     ),
 }
 """**안 나르는 칸과 그 이유.** 이유 없이 이름만 늘리지 않는다 — 이유가 없으면
@@ -118,6 +127,9 @@ def _나르는_칸() -> set[str]:
             requested_quantity_kg=Decimal(2000),
             preferred_delivery_date=date(2026, 9, 17),
             preferred_payment_days=30,
+            preferred_unit_price_krw=Decimal(2000),
+            preferred_payment_terms_type="SINGLE",
+            source_ref="sim_runs/TEST#sales_terms/FIXED",
         )
     )
 
@@ -182,3 +194,29 @@ def test_수량은_나르는_쪽이다():
     되돌아온 그 자리다. 여기 없으면 후보가 0건이라 재무까지 못 간다.
     """
     assert "requested_quantity_kg" in _나르는_칸()
+
+
+def test_재무가_요구한_셋도_나르는_쪽이다():
+    """🔴 **재무 검증이 요구한 칸이다** (2026-09-11 실측).
+
+    재무가 `SALES_INPUT_INCOMPLETE` 로 판정을 못 낸 `missing_fields` 다섯 중,
+    마스터가 실을 수 있는 자리가 이 셋이다. 여기 없으면 후보가 서도
+    `SL6_VALIDATION_UNRESOLVED` 에서 멈춘다.
+    """
+    나르는 = _나르는_칸()
+
+    assert "preferred_unit_price_krw" in 나르는
+    assert "preferred_payment_terms_type" in 나르는
+    assert "source_ref" in 나르는
+
+
+def test_파생값은_마스터가_안_만든다():
+    """🔴 **`reported_sales_amount_krw` 는 판매가 자기 안에서 센다.**
+
+    재무가 요구한 다섯 중 그것만 **수량 × 단가**인 파생이다. 마스터가 같이 실으면
+    같은 사실의 주인이 둘이 되고, 판매가 반올림을 바꾸는 날 두 숫자가 조용히 갈린다.
+
+    ★ **판매 요청 모델에 그 칸이 아예 없다**는 것이 그 사실의 증거다.
+    """
+    assert "reported_sales_amount_krw" not in set(SalesUserRequest.model_fields)
+    assert "reported_sales_amount_krw" not in set(SalesRunRequest.model_fields)

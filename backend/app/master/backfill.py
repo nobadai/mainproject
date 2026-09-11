@@ -21,12 +21,19 @@
 ```json
 {"backfill": {
   "procurement": {"rule": "ALWAYS_BASE",       "scenario_label": "..."},
-  "sales":       {"rule": "ALWAYS_FIXED_TYPE", "scenario_type":  "..."}
+  "sales":       {"rule": "ALWAYS_FIXED_TYPE", "scenario_type":  "..."},
+  "sales_terms": {"partner_id": "...", "payment_terms_type": "...",
+                  "payment_days": 0,   "unit_price_source":  "..."}
 }}
 ```
 
 `sim_runs.config_json` 이다. **한 실행 = 사이클마다 규칙 하나**이고, 규칙은 행이
 아니라 실행에 속한다.
+
+🔴 **`sales_terms` 는 승인 규칙이 아니다** (2026-09-11). 승인할 안을 고르는 둘과
+  달리, 이 칸은 **판매에 물어볼 때 요청에 실리는 조건**이다 — 자동 걷기에 사람이
+  없어 거래처도 지급조건도 단가도 아무도 안 정하던 자리다. `SALES_TERMS_KEY` 가
+  왜 `sales` 안에 안 들어갔는지를 적어 뒀다.
 
 🔴 **사이클별로 가른 모양만 읽는다.** 옛 평면 모양(`{"backfill": {"rule": ...}}`)은
   터진다 — 조용히 매입으로 접으면 **어느 규칙으로 돌았는지가 갈린다.** 지금 그
@@ -61,6 +68,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from app.master.decision import (
@@ -132,7 +140,50 @@ PROCUREMENT_RULES_KEY = "procurement"
 SALES_RULES_KEY = "sales"
 """판매 규칙이 앉는 칸 이름."""
 
+SALES_TERMS_KEY = "sales_terms"
+"""**자동 걷기의 판매 요청이 실을 상업 조건**이 앉는 칸 이름 (2026-09-11).
+
+```text
+sales        그날 난 판매 안 중 **어느 것을 승인하나**   ← 승인 규칙
+sales_terms  판매를 **무슨 조건으로 물어보나**          ← 요청 조건   ← 이 칸
+```
+
+🔴 **`sales` 안에 넣지 않는다.** 두 칸은 축이 다르다 — 앞엣것은 이미 난 안을 고르고
+  뒤엣것은 안이 나기 전에 요청에 실린다. 한 칸에 담으면 *"승인 규칙을 안 적고
+  조건만 적는다"* 가 모양으로 표현이 안 되고, `for_cycle` 이 조건까지 들고 다닌다.
+
+🔴 **`BackfillOutcome` 여덟에 이 칸의 사유가 안 섞인다.** 조건이 없는 것은 승인
+  결과가 아니라 **요청에 아무것도 안 실린다**는 사실이다.
+"""
+
 _RULES_KEYS: tuple[str, ...] = (PROCUREMENT_RULES_KEY, SALES_RULES_KEY)
+
+_SECTION_KEYS: tuple[str, ...] = (*_RULES_KEYS, SALES_TERMS_KEY)
+"""`backfill` 칸이 **아는 칸 전부.** 하나라도 있으면 새 모양으로 본다.
+
+🔴 **`_RULES_KEYS` 와 따로 둔다.** 저쪽은 *"사이클 규칙이 사는 칸"* 이라
+  `for_cycle` 이 쓰고, 이쪽은 *"이 칸이 새 모양인가"* 를 가르는 데만 쓴다. 하나로
+  묶으면 `sales_terms` 가 사이클 규칙처럼 읽히고, 조건만 적은 규칙 파일이
+  **옛 평면 모양으로 오인돼 터진다.**
+"""
+
+ML_CURRENT_PRICE = "ML_CURRENT_PRICE"
+"""단가를 **ML 이 그날 예측과 같은 행에 동봉한 시세**에서 가져온다.
+
+🔴 **마스터가 시세를 계산하지 않는다.** `inputs.load_forecast` 가 실어 준
+  `current_price` 를 **그대로 옮긴다** — 곱하지도 반올림하지도 않는다.
+
+⚠️ 그날 예측이 없으면 단가가 **안 실린다.** 옛 배치로 메우지 않는다 —
+  `load_forecast` 가 이미 *"하루만 밀려도 안 쓴다"* 로 정해 뒀다.
+"""
+
+FIXED_UNIT_PRICE = "FIXED"
+"""단가를 **규칙 파일이 적은 고정값**에서 가져온다.
+
+⚠️ 그 숫자는 규칙 파일에 있다 — `unit_price_krw` 다. **코드에 없다.**
+"""
+
+_UNIT_PRICE_SOURCES: tuple[str, ...] = (ML_CURRENT_PRICE, FIXED_UNIT_PRICE)
 
 
 BackfillOutcome = Literal[
@@ -211,15 +262,50 @@ class SalesBackfillRule:
 
 
 @dataclass(frozen=True)
+class SalesTermsRule:
+    """그 실행의 **자동 걷기가 판매에 물어볼 상업 조건** (2026-09-11).
+
+    ★★ **왜 있나.** 자동 걷기에는 사람이 없다. 수량 하나만 물류에서 오고 거래처 ·
+      지급조건 · 단가는 아무도 안 정해서, 재무가 `SALES_INPUT_INCOMPLETE` 로
+      판정을 못 냈다 (실측: `missing_fields` 다섯).
+
+    🔴 **값이 여기 하나도 없다.** 거래처 id 도 지급조건 이름도 일수도 **규칙 파일이
+      말한다.** 코드에 박으면 조건을 바꾸는 날 diff 가 아니라 배포가 되고,
+      `--opening-usage-scope` 를 문에 안 박은 것과 같은 자리에서 무너진다.
+
+    🔴 **네 칸이 전부 필수다.** 재무가 요구하는 다섯 중 넷이 여기서 서고 나머지
+      하나(`reported_sales_amount_krw`)는 **판매가 수량 × 단가로 자기 안에서 센다.**
+      한 칸만 비워 둘 수 있게 하면 재무 판정이 **왜 또 안 났는지**를 규칙 파일만
+      보고는 못 읽는다.
+    """
+
+    #: 어느 거래처에 파는가. 🔴 **설정에서 온다 — 코드에 없다.**
+    partner_id: str
+    #: 지급조건 종류. ⚠️ **어휘의 주인은 판매다** — 마스터는 값을 검사하지 않고
+    #: 나르기만 한다. 아는 이름인지는 판매 문 앞(`SalesUserRequest`)이 판정한다.
+    payment_terms_type: str
+    #: 며칠 뒤에 받는가. ★ **0 도 값이다** — *"당일 수금"* 이라는 정해진 조건이다.
+    payment_days: int
+    #: 단가를 **어디서** 가져오나. `ML_CURRENT_PRICE` · `FIXED` 둘뿐이다.
+    unit_price_source: str
+    #: `FIXED` 일 때 그 고정값. `ML_CURRENT_PRICE` 면 `None` 이다.
+    unit_price_krw: Decimal | None = None
+
+
+@dataclass(frozen=True)
 class BackfillRules:
     """그 실행이 **사이클별로** 정한 규칙.
 
     ★ 한 칸이 비어 있는 것은 사고가 아니라 사실이다 — *"그 사이클은 안 정했다"* 를
       그대로 담고, 행에 닿을 때 `NO_RULE_FOR_CYCLE` 로 남긴다.
+
+    ⚠️ **`sales_terms` 는 사이클 규칙이 아니다.** `for_cycle` 이 안 돌려준다 —
+      승인할 안을 고르는 것과 요청에 조건을 싣는 것은 축이 다르다.
     """
 
     procurement: BackfillRule | None = None
     sales: SalesBackfillRule | None = None
+    sales_terms: SalesTermsRule | None = None
 
     def for_cycle(self, cycle: str) -> BackfillRule | SalesBackfillRule | None:
         """그 실행 행의 `cycle` 에 걸리는 규칙.
@@ -298,12 +384,12 @@ def read_rules(config_json: Mapping[str, Any]) -> BackfillRules:
         raise BackfillRuleMissing(
             f"backfill 칸이 객체가 아니다: {type(section).__name__} — 규칙을 읽을 수 없다"
         )
-    if not any(key in section for key in _RULES_KEYS):
+    if not any(key in section for key in _SECTION_KEYS):
         # 🔴 옛 평면 모양이 여기서 터진다. 조용히 매입으로 접으면 **둘 중 어느
         #   규칙으로 돌았는지가 갈린다.**
         raise BackfillRuleMissing(
             "backfill 칸이 사이클별로 가른 모양이어야 한다"
-            f" — 아는 칸은 {', '.join(_RULES_KEYS)} 이고 받은 칸은 {sorted(section)} 다"
+            f" — 아는 칸은 {', '.join(_SECTION_KEYS)} 이고 받은 칸은 {sorted(section)} 다"
         )
     return BackfillRules(
         procurement=_read_procurement_rule(section.get(PROCUREMENT_RULES_KEY))
@@ -311,6 +397,9 @@ def read_rules(config_json: Mapping[str, Any]) -> BackfillRules:
         else None,
         sales=_read_sales_rule(section.get(SALES_RULES_KEY))
         if SALES_RULES_KEY in section
+        else None,
+        sales_terms=_read_sales_terms(section.get(SALES_TERMS_KEY))
+        if SALES_TERMS_KEY in section
         else None,
     )
 
@@ -356,6 +445,87 @@ def _read_sales_rule(raw: Any) -> SalesBackfillRule:
     return SalesBackfillRule(
         name=name, scenario_type=_fixed_pick(section, "scenario_type", ALWAYS_FIXED_TYPE)
     )
+
+
+def _terms_text(section: Mapping[str, Any], field: str) -> str:
+    """조건 한 칸의 문자열. 🔴 **비면 코드가 채울 자리가 생긴다.**"""
+    value = section.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise BackfillRuleMissing(
+            f"{SALES_TERMS_KEY} 은 {field} 을(를) 설정이 말해야 한다 — 코드가 채우지 않는다"
+        )
+    return value
+
+
+def _terms_days(section: Mapping[str, Any], field: str) -> int:
+    """지급일수 한 칸. ★ **0 을 안 접는다** — *"당일 수금"* 은 정해진 조건이다.
+
+    🔴 **`bool` 을 숫자로 안 센다.** 파이썬에서 `True` 는 `int` 라 그냥 두면 1일이
+      되고, 규칙 파일에 `true` 를 적은 사람이 **하루 유예**를 받는다.
+    """
+    value = section.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BackfillRuleMissing(
+            f"{SALES_TERMS_KEY}.{field} 은 0 이상의 정수여야 한다: {value!r}"
+        )
+    return value
+
+
+def _read_sales_terms(raw: Any) -> SalesTermsRule:
+    """`backfill.sales_terms` 칸. **적어 뒀으면 네 칸이 전부 서야 한다.**
+
+    🔴 **여기서 기본값을 지어내지 않는다.** 거래처를 안 적었는데 코드가 하나
+      고르면, 규칙을 안 적은 사람이 **모르는 거래처에 판다.** 그래서 빈 칸은
+      기본값이 아니라 **오류**이고, 그 오류는 실행을 여는 자리에서 난다
+      (`sim_run_runner._config_json` 이 `read_rules` 를 부른다) — 179일을 걷고 나서
+      알면 늦다.
+
+    ⚠️ **칸을 아예 안 적은 것은 여기 안 온다.** 그것은 *"조건을 안 싣는다"* 이고
+      종전 동작 그대로다 (`read_rules` 가 `None` 으로 둔다).
+    """
+    section = _cycle_section(raw, SALES_TERMS_KEY)
+    source = _terms_text(section, "unit_price_source")
+    if source not in _UNIT_PRICE_SOURCES:
+        raise BackfillRuleMissing(
+            f"모르는 단가 출처다: {source!r}"
+            f" ({SALES_TERMS_KEY}) — 아는 것은 {', '.join(_UNIT_PRICE_SOURCES)} 둘이다"
+        )
+    if source != FIXED_UNIT_PRICE and "unit_price_krw" in section:
+        # 🔴 단가가 둘이면 어느 쪽을 썼는지가 `source_ref` 와 갈린다.
+        raise BackfillRuleMissing(
+            f"{source} 인데 unit_price_krw 도 적혀 있다 — 단가의 주인이 둘이 된다"
+        )
+    return SalesTermsRule(
+        partner_id=_terms_text(section, "partner_id"),
+        payment_terms_type=_terms_text(section, "payment_terms_type"),
+        payment_days=_terms_days(section, "payment_days"),
+        unit_price_source=source,
+        unit_price_krw=_fixed_unit_price(section) if source == FIXED_UNIT_PRICE else None,
+    )
+
+
+def _fixed_unit_price(section: Mapping[str, Any]) -> Decimal:
+    """`FIXED` 가 쓸 고정 단가.
+
+    🔴 **`ML_CURRENT_PRICE` 와 같이 적지 못하게 한다** — 단가가 둘이면 어느 쪽을
+      썼는지가 `source_ref` 와 갈린다.
+    """
+    raw = section.get("unit_price_krw")
+    if isinstance(raw, bool) or not isinstance(raw, int | float | str):
+        raise BackfillRuleMissing(
+            f"{FIXED_UNIT_PRICE} 은 unit_price_krw 를 설정이 말해야 한다: {raw!r}"
+        )
+    try:
+        price = Decimal(str(raw))
+    except InvalidOperation as exc:
+        raise BackfillRuleMissing(
+            f"{SALES_TERMS_KEY}.unit_price_krw 를 숫자로 못 읽는다: {raw!r}"
+        ) from exc
+    if price <= 0:
+        raise BackfillRuleMissing(
+            f"{SALES_TERMS_KEY}.unit_price_krw 는 0 보다 커야 한다: {raw!r}"
+        )
+    return price
 
 
 def _config_of(sim_run_id: str) -> Mapping[str, Any]:
