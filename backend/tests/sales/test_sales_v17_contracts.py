@@ -440,3 +440,84 @@ def test_s19_conditional_can_be_recommended_and_s20_unresolved_cannot():
     )
     assert chosen.status == "CONDITIONAL"
     assert unresolved.recommended_scenario_id is None
+
+
+# ---------------------------------------------------------------------------
+# 확정 물량의 재고 취득원가 — 판매는 **나르기만** 한다 (#1)
+# ---------------------------------------------------------------------------
+
+
+def _cost_basis(quantity="7000", amount="4547200"):
+    return {
+        "item": "배추",
+        "quantity_kg": quantity,
+        "amount_krw": amount,
+        "allocation_method": "FIFO",
+        "cost_method": "ACTUAL",
+        "included_components": ["inventory_acquisition_cost"],
+        "source_ref": "LOT-A",
+        "source_refs": ["LOT-A", "LOT-B"],
+        "evidence_grade": "SIM_FIXED",
+    }
+
+
+def _logistics_with_basis(basis, confirmed=7000):
+    context = _logistics(confirmed)
+    context["sellable_supply"]["inventory_cost_basis"] = basis
+    return context
+
+
+def test_물류가_낸_재고원가가_후보에_그대로_실린다():
+    """🔴 **판매가 금액을 손대지 않는다.** 계보도 줄이지 않는다."""
+    request = _request(logistics=_logistics_with_basis(_cost_basis()))
+
+    후보 = {s.scenario_type: s for s in _generate_scenarios(request)}
+    보수 = 후보["CONSERVATIVE"]
+
+    # 확정 7,000kg 이 이 안의 물량이다 (요청 10,000 중 확정분).
+    assert 보수.quantity_kg == Decimal(7000)
+    assert 보수.inventory_cost_basis is not None
+    assert 보수.inventory_cost_basis.amount_krw == Decimal(4547200)
+    assert 보수.inventory_cost_basis.source_refs == ["LOT-A", "LOT-B"]
+    assert 보수.inventory_cost_basis.cost_method == "ACTUAL"
+    assert 보수.inventory_cost_basis.allocation_method == "FIFO"
+
+
+def test_덮는_양이_확정_물량과_다르면_싣지_않는다():
+    """🔴 모자란 원가를 실으면 재무가 그것을 «이 판매의 원가» 로 읽는다.
+
+    ★ 비례 배분하지 않는다 — 없는 원가를 만드는 대신 **버린다.** 그러면 재무는
+      원가를 못 받았다는 사실로 `RUNTIME_NOT_READY` 에서 멈춘다.
+    """
+    request = _request(logistics=_logistics_with_basis(_cost_basis(quantity="6999")))
+
+    for scenario in _generate_scenarios(request):
+        assert scenario.inventory_cost_basis is None
+
+
+def test_품목이_다른_재고원가는_싣지_않는다():
+    basis = _cost_basis()
+    basis["item"] = "무"
+    request = _request(logistics=_logistics_with_basis(basis))
+
+    for scenario in _generate_scenarios(request):
+        assert scenario.inventory_cost_basis is None
+
+
+def test_물류가_원가를_안_내면_칸이_비어_있다():
+    """없는 것을 0원으로 채우지 않는다."""
+    request = _request(logistics=_logistics_with_basis(None))
+
+    for scenario in _generate_scenarios(request):
+        assert scenario.inventory_cost_basis is None
+
+
+def test_재고원가는_재무_전선_이름_그대로_직렬화된다():
+    """마스터는 후보를 통째로 나른다 — 재무 parser 가 읽는 이름이 그대로 있어야 한다."""
+    request = _request(logistics=_logistics_with_basis(_cost_basis()))
+    보수 = next(s for s in _generate_scenarios(request) if s.scenario_type == "CONSERVATIVE")
+
+    wire = 보수.model_dump(by_alias=True, mode="json")
+
+    assert wire["inventory_cost_basis"]["source_refs"] == ["LOT-A", "LOT-B"]
+    assert wire["inventory_cost_basis"]["cost_method"] == "ACTUAL"

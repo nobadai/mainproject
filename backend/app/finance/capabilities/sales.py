@@ -176,6 +176,9 @@ def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
         cost_method=str(value["cost_method"]),
         included_components=tuple(str(item) for item in value.get("included_components", ())),
         source_ref=str(value["source_ref"]),
+        # ★ 전체 재고 계보. 안 오면 DTO 가 `source_ref` 하나로 채운다 — 예전 단일
+        #   Lot payload 가 그대로 돈다.
+        source_refs=tuple(str(item) for item in value.get("source_refs", ())),
         evidence_grade=str(value["evidence_grade"]),
     )
 

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.schemas import (
     AllocationLeg,
+    LogisticsInventoryCostBasis,
     ProposalSelfCheck,
     PurchaseAdditionalSupplyResult,
     SalesCandidate,
@@ -187,6 +188,15 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 contract_term_days=term,
                 source_ref=source_ref,
                 supply=supply,
+                # ★ **이 안의 확정 물량**에 붙은 원가만 싣는다. 조건부로 더 채운 몫은
+                #   재고가 아니라 매입에서 오므로 여기 금액에 섞이지 않는다.
+                inventory_cost_basis=_inventory_cost_basis(
+                    request,
+                    item=request.user_request.item,
+                    covered_quantity_kg=(
+                        None if confirmed is None else min(scenario_quantity, confirmed)
+                    ),
+                ),
                 sales_decision_axes=axes,
                 required_validations=validations,
                 evidence_refs=_unique_refs(
@@ -275,6 +285,33 @@ def _confirmed_sellable_qty(request: SalesProposalInput) -> Decimal | None:
         if entry.item == request.user_request.item and entry.available_qty_kg is not None:
             return entry.available_qty_kg
     return None
+
+
+def _inventory_cost_basis(
+    request: SalesProposalInput, *, item: str, covered_quantity_kg: Decimal | None
+) -> LogisticsInventoryCostBasis | None:
+    """Logistics 가 낸 재고 취득원가를 **그대로** 싣는다 — 맞을 때만.
+
+    ```text
+    덮는 양 == 이 안의 확정 물량   →  그대로 싣는다
+    품목이 다르거나 양이 다르다     →  싣지 않는다 (None)
+    ```
+
+    🔴 **판매가 금액을 손대지 않는다.** 수량이 달라졌다고 비례 배분하면 그 순간
+       장부에 없는 원가가 생긴다. 안 맞으면 버리고, 재무는 원가를 못 받았다는 사실로
+       `RUNTIME_NOT_READY` 에서 멈춘다 — 틀린 원가로 승인되는 것보다 낫다.
+
+    ★ 대조는 `quantity_kg` 로 한다. Logistics 가 그 칸을 같이 실어 주는 이유가 이것이다 —
+      금액만 오면 받는 쪽은 그것이 **몇 kg 의 원가인지** 알 수 없다.
+    """
+    context = request.logistics_context
+    supply = context.sellable_supply if context else None
+    basis = supply.inventory_cost_basis if supply else None
+    if basis is None or covered_quantity_kg is None:
+        return None
+    if basis.item != item or basis.quantity_kg != covered_quantity_kg:
+        return None
+    return basis
 
 
 def _baseline(request: SalesProposalInput):

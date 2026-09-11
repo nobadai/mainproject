@@ -3930,3 +3930,149 @@ def test_usage_는_결정론_결과를_바꾸지_않는다(monkeypatch, stocked)
     # 그런데 관측에서는 갈린다 — 그것이 이 필드의 존재 이유다
     assert _llm_trace(보고_meta)["observed_input_tokens"] == 137
     assert _llm_trace(무보고_meta)["observed_input_tokens"] is None
+
+
+# ── 확정 물량의 재고 취득원가 (#1) ──────────────────────────────
+#
+# 🔴 **원가의 주인은 창고다.** 재무가 이 칸을 못 받으면 판정을 닫는다
+#    (`authoritative_inventory_cost_basis`) — 그래서 물류가 낸다.
+
+
+def _costed_lot(
+    lot_id: str,
+    item: str,
+    qty: str,
+    *,
+    received: date | None,
+    cost: str | None,
+    freshness: int | None = 10,
+) -> InventoryLotSnapshot:
+    return InventoryLotSnapshot(
+        lot_id=lot_id,
+        item=item,
+        available_qty_kg=Decimal(qty),
+        received_at=received,
+        unit_cost_krw_per_kg=None if cost is None else Decimal(cost),
+        remaining_freshness_days=freshness,
+        effective_freshness_limit_days=15,
+        status="ACTIVE",
+    )
+
+
+def _costed_sales_snapshot(**overrides):
+    """배추 58kg (29 + 29) 만 남긴 스냅샷 — 예약·할당 없음."""
+    base = {
+        "on_hand_by_lot": [
+            _costed_lot("LOT-B", "배추", "29", received=date(2026, 8, 20), cost="682"),
+            _costed_lot("LOT-A", "배추", "29", received=date(2026, 8, 18), cost="886"),
+        ],
+        "outbound_commitments": [],
+        "used_capacity_kg": Decimal(58),
+    }
+    return _sales_snapshot(**{**base, **overrides})
+
+
+def test_PRE_SALES_가_확정_물량의_재고원가를_싣는다(monkeypatch):
+    """58kg = 29×886 + 29×682 = 45,472 KRW — Lot ID 를 코드에 박지 않는다."""
+    _with_read(monkeypatch, _costed_sales_snapshot())
+
+    _, reply, _ = _pre_sales_reply(
+        {"user_request": {"item": "배추", "requested_quantity_kg": 58}}
+    )
+
+    basis = reply.payload["sellable_supply"]["inventory_cost_basis"]
+    assert basis is not None
+    assert basis["amount_krw"] == 45472.0
+    assert basis["quantity_kg"] == 58.0
+    assert basis["item"] == "배추"
+    # 🔴 **두 축을 따로 적는다** — 고른 순서(FIFO)와 단가의 성격(ACTUAL)은 다른 사실이다
+    assert basis["allocation_method"] == "FIFO"
+    assert basis["cost_method"] == "ACTUAL"
+    assert basis["included_components"] == ["inventory_acquisition_cost"]
+    assert basis["evidence_grade"] == "SIM_FIXED"
+    # 🔴 **계보가 전부 실린다.** 대표 하나로 줄이면 나머지 Lot 이 근거에서 사라진다
+    assert basis["source_refs"] == ["LOT-A", "LOT-B"]
+    assert basis["source_ref"] == "LOT-A"
+
+
+def test_물은_수량이_없으면_확정_판매가능량_전체의_원가를_낸다(monkeypatch):
+    """사람이 수량을 말하지 않는 자동 걷기 자리다 (`proposal._confirmed_sellable_qty`)."""
+    _with_read(monkeypatch, _costed_sales_snapshot())
+
+    _, reply, _ = _pre_sales_reply({"user_request": {"item": "배추"}})
+
+    supply = reply.payload["sellable_supply"]
+    가용 = {row["item"]: row["available_qty_kg"] for row in supply["inventory_by_item"]}
+    assert 가용["배추"] == 58.0
+    assert supply["inventory_cost_basis"]["quantity_kg"] == 58.0
+    assert supply["inventory_cost_basis"]["amount_krw"] == 45472.0
+
+
+def test_품목을_묻지_않으면_원가를_지어내지_않는다(monkeypatch):
+    _with_read(monkeypatch, _costed_sales_snapshot())
+
+    _, reply, _ = _pre_sales_reply()
+
+    assert reply.runtime_status == "READY"
+    assert reply.payload["sellable_supply"]["inventory_cost_basis"] is None
+
+
+def test_물은_수량이_재고보다_크면_확정분까지만_원가를_낸다(monkeypatch):
+    """🔴 **모자란 몫을 재고원가로 덮지 않는다.**
+
+    1,000kg 을 물었지만 창고에 확정된 것은 58kg 뿐이다. 나머지 942kg 은 재고가
+    아니라 조건부 매입에서 오므로 **이 금액에 섞이지 않는다** — 섞으면 있지도 않은
+    재고의 취득원가가 생긴다.
+    """
+    _with_read(monkeypatch, _costed_sales_snapshot())
+
+    _, reply, _ = _pre_sales_reply(
+        {"user_request": {"item": "배추", "requested_quantity_kg": 1000}}
+    )
+
+    supply = reply.payload["sellable_supply"]
+    assert supply["inventory_cost_basis"]["quantity_kg"] == 58.0
+    assert supply["inventory_cost_basis"]["amount_krw"] == 45472.0
+    # 판매가능량 자체는 그대로 나간다 — 확정분이 요청보다 적다는 사실이 남는다
+    assert supply["inventory_by_item"] == [{"item": "배추", "available_qty_kg": 58.0}]
+
+
+def test_단가를_못_읽은_Lot_을_헐어야_하면_원가가_서지_않는다(monkeypatch):
+    _with_read(
+        monkeypatch,
+        _costed_sales_snapshot(
+            on_hand_by_lot=[
+                _costed_lot("LOT-A", "배추", "29", received=date(2026, 8, 18), cost="886"),
+                _costed_lot("LOT-B", "배추", "29", received=date(2026, 8, 20), cost=None),
+            ]
+        ),
+    )
+
+    _, 부분, _ = _pre_sales_reply(
+        {"user_request": {"item": "배추", "requested_quantity_kg": 29}}
+    )
+    assert 부분.payload["sellable_supply"]["inventory_cost_basis"]["amount_krw"] == 25694.0
+
+    _, 전체, _ = _pre_sales_reply(
+        {"user_request": {"item": "배추", "requested_quantity_kg": 58}}
+    )
+    assert 전체.payload["sellable_supply"]["inventory_cost_basis"] is None
+
+
+def test_재고원가는_판매_DTO_를_그대로_통과한다(monkeypatch):
+    """물류가 낸 모양을 판매가 **손대지 않고** 받는지 — 경계 한 번을 실제로 건넌다."""
+    from app.sales.schemas import SalesLogisticsContext
+
+    _with_read(monkeypatch, _costed_sales_snapshot())
+    _, reply, _ = _pre_sales_reply(
+        {"user_request": {"item": "배추", "requested_quantity_kg": 58}}
+    )
+
+    context = SalesLogisticsContext.model_validate(reply.payload)
+
+    basis = context.sellable_supply.inventory_cost_basis
+    assert basis is not None
+    assert basis.amount_krw == Decimal("45472.0")
+    assert basis.source_refs == ["LOT-A", "LOT-B"]
+    assert basis.cost_method == "ACTUAL"
+    assert basis.allocation_method == "FIFO"

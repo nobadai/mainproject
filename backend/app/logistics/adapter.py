@@ -68,15 +68,22 @@ from app.logistics.scenario_engine import (
     derive_preferred_adjustment,
     run_logistics_procurement_scenario,
 )
-from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsPolicy
+from app.logistics.schemas import (
+    InventoryByItem,
+    InventoryCostBasisSnapshot,
+    InventoryLogisticsSnapshot,
+    LogisticsPolicy,
+)
 from app.logistics.tools import (
     CAP_BY_DATE_WINDOW_DAYS,
+    SupplyByDate,
     build_cap_window,
     build_inventory_by_item,
     build_lot_constraints,
     calculate_cap_by_date,
     calculate_window_capacity_usage,
     evaluate_delivery_feasibility,
+    fifo_inventory_cost_basis,
     supply_capacity_by_date,
 )
 from app.master.critic_bridge import DEPT_CAP_CHECK_ID
@@ -1491,6 +1498,23 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         item=asked.item,
     )
 
+    # ── 확정 물량의 재고 취득원가 ────────────────────────────────
+    #
+    # 🔴 **원가의 주인은 창고다.** 어느 Lot 이 얼마에 들어왔는지는 물류 장부의 사실이고,
+    #    판매도 재무도 그것을 다시 셈할 근거가 없다. 종전에는 아무도 내지 않아 재무가
+    #    매번 `authoritative_inventory_cost_basis` 없음으로 판정을 닫았다.
+    #
+    # ★ **못 내면 안 낸다 — READY 는 그대로다.** 재고원가는 판매 제안 자체의 전제가
+    #   아니라 재무 판정의 재료다. 없으면 재무가 `RUNTIME_NOT_READY` 로 멈추고,
+    #   그 이름(`authoritative_inventory_cost_basis`)은 재무가 이미 부른다 — 여기서
+    #   같은 사실에 두 번째 이름을 붙이지 않는다.
+    cost_basis = _confirmed_inventory_cost_basis(
+        snapshot,
+        asked=asked,
+        inventory_by_item=inventory_by_item,
+        supply_rows=supply_rows,
+    )
+
     # ── payload ──────────────────────────────────────────────────
     ref = _ref(snapshot)
     lots_ref = _lots_ref(snapshot)
@@ -1560,6 +1584,25 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
                 }
                 for row in supply_rows
             ],
+            # 🔴 **`None` 이 정상값인 자리다.** 물은 품목·수량이 없거나, 그 물량을 FIFO 로
+            #    다 덮지 못하거나, 헐어야 할 Lot 의 입고일·단가를 못 읽었다는 사실이다.
+            #    0원으로 메우면 «원가 0원짜리 판매» 가 마진 판정을 통과한다.
+            "inventory_cost_basis": (
+                None
+                if cost_basis is None
+                else {
+                    "item": cost_basis.item,
+                    "quantity_kg": _num(cost_basis.quantity_kg),
+                    "amount_krw": _num(cost_basis.amount_krw),
+                    "allocation_method": cost_basis.allocation_method,
+                    "cost_method": cost_basis.cost_method,
+                    "included_components": list(cost_basis.included_components),
+                    # ★ 하위 호환용 대표 하나. 계보는 아래 `source_refs` 다.
+                    "source_ref": cost_basis.source_ref,
+                    "source_refs": list(cost_basis.source_refs),
+                    "evidence_grade": cost_basis.evidence_grade,
+                }
+            ),
             "uncertainties": [],
         },
         "delivery_feasibility": {
@@ -1815,6 +1858,41 @@ def _ask_date(value: Any) -> date | None:
         except ValueError:
             return None
     return None
+
+
+def _confirmed_inventory_cost_basis(
+    snapshot: InventoryLogisticsSnapshot,
+    *,
+    asked: _SalesAsk,
+    inventory_by_item: Sequence[InventoryByItem],
+    supply_rows: Sequence[SupplyByDate],
+) -> InventoryCostBasisSnapshot | None:
+    """확정 물량에 FIFO 로 배부된 재고 취득원가. **없으면 `None` 이다.**
+
+    ```text
+    덮을 물량 = min(사용자가 물은 수량, 그 날짜(또는 현재)의 확정 판매가능량)
+    ```
+
+    🔴 **판매가능량을 여기서 다시 셈하지 않는다.** 위에서 이미 낸
+       `inventory_by_item` · `supply_capacity_by_date` 를 그대로 읽는다 — 같은 회신
+       안에서 *"팔 수 있다고 답한 양"* 과 *"원가를 배부한 양"* 이 갈리면 그 회신은
+       스스로 모순된다.
+
+    ★ 수량을 안 물었으면 확정 판매가능량 전체가 대상이다 — 판매가 사람 없는 자동
+      걷기에서 그 값을 그대로 제안 수량으로 쓴다 (`proposal._confirmed_sellable_qty`).
+    """
+    if asked.item is None:
+        return None
+    if asked.delivery_date is not None:
+        row = next((row for row in supply_rows if row.date == asked.delivery_date), None)
+        confirmed = None if row is None else row.confirmed_sellable_quantity_kg
+    else:
+        entry = next((entry for entry in inventory_by_item if entry.item == asked.item), None)
+        confirmed = None if entry is None else entry.available_qty_kg
+    if confirmed is None:
+        return None
+    quantity = confirmed if asked.quantity_kg is None else min(asked.quantity_kg, confirmed)
+    return fifo_inventory_cost_basis(snapshot, item=asked.item, quantity_kg=quantity)
 
 
 def _delivery_input_error(

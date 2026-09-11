@@ -587,3 +587,39 @@ def test_absent_supply_does_not_block_rules_that_do_not_need_it():
     # 금액 정합성은 공급과 무관하게 계산된다.
     assert summary.recalculated_sales_amount_krw == Decimal(1_000_000)
     assert summary.amount_match is True
+
+
+# ---------------------------------------------------------------------------
+# 복수 Lot 재고원가 (#1) — 물류가 낸 계보가 판정까지 살아 있다
+# ---------------------------------------------------------------------------
+
+
+def test_a_two_lot_cost_basis_unblocks_the_verdict():
+    """🔴 **이것이 #1 이 닫으려던 구멍이다.** 원가가 오면 판정이 선다.
+
+    ```text
+    전    inventory_cost_basis 없음 → missing_data: authoritative_inventory_cost_basis
+    후    FIFO 로 배부된 두 Lot 원가 → 마진이 셈해지고 판정이 난다
+    ```
+    """
+    result = _evaluate(
+        _payload(
+            inventory_cost_basis={
+                "amount_krw": Decimal(45_472),
+                "cost_method": "ACTUAL",
+                "included_components": ("inventory_acquisition_cost",),
+                "source_ref": "LOT-A",
+                "source_refs": ("LOT-A", "LOT-B"),
+                "evidence_grade": "SIM_FIXED",
+            }
+        )
+    )
+    summary = result.financial_summary
+
+    assert "authoritative_inventory_cost_basis" not in result.missing_data
+    assert summary is not None
+    assert summary.sales_cost_basis_krw == Decimal(45_472)
+    assert summary.contribution_margin_krw is not None
+    # 🔴 **두 Lot 이 모두 근거에 남는다.** 대표 하나로 줄면 이 줄이 빨간불이다.
+    assert "LOT-A" in result.evidence_refs
+    assert "LOT-B" in result.evidence_refs

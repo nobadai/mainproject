@@ -282,6 +282,34 @@ class LogisticsSupplyByDate(BaseModel):
         return _reject_boolean(value)
 
 
+class LogisticsInventoryCostBasis(BaseModel):
+    """Logistics 가 확정 물량에 FIFO 로 배부한 재고 취득원가를 **그대로** 보관한다.
+
+    🔴 **Sales 가 원가를 만들지 않는다.** 금액을 다시 셈하거나, 수량이 달라졌다고
+       비례 배분하거나, Lot 계보를 줄이지 않는다 — 어느 것을 해도 그 순간 장부에 없는
+       원가가 재무 판정에 들어간다. 안 맞으면 **버린다**(전달하지 않는다).
+
+    ★ `source_refs` 가 계보의 정본이다. `source_ref` 는 하위 호환용 대표 하나다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    item: str
+    #: 이 금액이 덮는 양. Sales 는 이것을 **대조에만** 쓴다.
+    quantity_kg: Decimal = Field(ge=0)
+    amount_krw: Decimal = Field(ge=0)
+    allocation_method: str
+    cost_method: str
+    included_components: list[str] = Field(default_factory=list)
+    source_ref: str
+    source_refs: list[str] = Field(default_factory=list)
+    evidence_grade: str
+
+    @field_validator("quantity_kg", "amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
 class LogisticsSellableSupply(BaseModel):
     """최종 Logistics PRE_SALES의 판매 가능 공급 블록을 그대로 소비한다."""
 
@@ -290,6 +318,8 @@ class LogisticsSellableSupply(BaseModel):
     inventory_by_item: list[LogisticsInventoryByItem] = Field(default_factory=list)
     lot_constraints: list[LogisticsLotConstraint] = Field(default_factory=list)
     supply_capacity_by_date: list[LogisticsSupplyByDate] = Field(default_factory=list)
+    #: 🔴 `None` 은 0원이 아니라 *"확정 물량의 재고원가를 내지 못했다"* 는 사실이다.
+    inventory_cost_basis: LogisticsInventoryCostBasis | None = None
     uncertainties: list[str] = Field(default_factory=list)
 
 
@@ -546,6 +576,15 @@ class SalesScenario(BaseModel):
     #:   그래서 `evidence_refs[0]` 같은 위치 기반 선택으로 만들지 않는다.
     source_ref: str | None = None
     supply: ScenarioSupply
+    #: 확정 물량의 재고 취득원가. **Logistics 가 낸 것을 그대로 나른다.**
+    #:
+    #: ★ 재무 `parse_sales_validation_input` 이 후보 최상위에서 `inventory_cost_basis`
+    #:   를 읽는다 — 마스터는 후보를 통째로 넘기므로 이 칸이 그대로 전선에 실린다.
+    #:
+    #: 🔴 **확정 물량과 덮는 양이 다르면 싣지 않는다.** 모자란 원가를 실으면 재무는
+    #:    그것을 «이 판매의 원가» 로 읽고 마진을 판정한다 — 없는 것을 채우는 대신
+    #:    `None` 으로 두면 재무가 `RUNTIME_NOT_READY` 로 멈춘다.
+    inventory_cost_basis: LogisticsInventoryCostBasis | None = None
     sales_decision_axes: list[str] = Field(default_factory=list)
     required_validations: list[SalesCapability] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)

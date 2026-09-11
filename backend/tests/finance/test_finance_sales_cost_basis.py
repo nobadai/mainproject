@@ -329,3 +329,92 @@ def test_absent_basis_leaves_margin_uncomputed_rather_than_zero_cost():
 
     assert facts["contribution_margin_krw"] is None
     assert facts["contribution_margin_rate"] is None
+
+
+# ---------------------------------------------------------------------------
+# 복수 Lot 계보 (#1) — 대표 하나로 줄이지 않는다
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_lot_lineage_survives_into_the_final_basis():
+    """🔴 두 Lot 에서 배부된 원가의 **두 ref 가 모두** 최종 근거에 남는다.
+
+    하나만 남기면 나중에 *"이 원가가 어느 재고에서 왔나"* 를 되짚을 수 없다.
+    """
+    inventory = InventoryCostBasis(
+        amount_krw=Decimal(45472),
+        cost_method="ACTUAL",
+        included_components=("inventory_acquisition_cost",),
+        source_ref="LOT-A",
+        source_refs=("LOT-A", "LOT-B"),
+        evidence_grade="SIM_FIXED",
+    )
+
+    basis = compose_sales_cost_basis(inventory_cost_basis=inventory)
+
+    assert basis is not None
+    assert basis.amount_krw == Decimal(45472)
+    # FIFO 배부 순서가 곧 읽는 순서다 — 정렬이 흐트러지면 순서 정보가 사라진다.
+    assert basis.source_refs == ("LOT-A", "LOT-B")
+    assert basis.inventory_source_ref == "LOT-A"
+
+
+def test_a_single_ref_payload_still_carries_its_lineage():
+    """예전 단일 Lot payload 는 그대로 돈다 — DTO 가 `source_ref` 하나로 채운다."""
+    assert _inventory(source_ref="INV-LOT:L-001").source_refs == ("INV-LOT:L-001",)
+
+
+def test_direct_cost_refs_never_displace_the_lot_lineage():
+    inventory = InventoryCostBasis(
+        amount_krw=Decimal(45472),
+        cost_method="ACTUAL",
+        included_components=("inventory_acquisition_cost",),
+        source_ref="LOT-A",
+        source_refs=("LOT-A", "LOT-B"),
+        evidence_grade="SIM_FIXED",
+    )
+
+    basis = compose_sales_cost_basis(
+        inventory_cost_basis=inventory,
+        direct_costs=(_direct("outbound_logistics", "1000"),),
+    )
+
+    assert basis is not None
+    assert basis.source_refs == ("LOT-A", "LOT-B", "COST:outbound_logistics")
+
+
+def test_the_wire_carries_every_lot_ref_into_the_parsed_input():
+    """물류 → 판매 → 재무 전선의 **이름 그대로** 읽히는지 (마스터는 운반만 한다)."""
+    from app.finance.capabilities.sales import parse_sales_validation_input
+
+    parsed, missing = parse_sales_validation_input(
+        {
+            "scenario_id": "SALES-001-A",
+            "partner_id": "P-1",
+            "item": "배추",
+            "quantity_kg": "58",
+            "unit_price_krw": "2300",
+            "reported_sales_amount_krw": "133400",
+            "payment_terms_type": "SINGLE",
+            "payment_days": 30,
+            "source_ref": "TEST:USER-1",
+            "inventory_cost_basis": {
+                "item": "배추",
+                "quantity_kg": "58",
+                "amount_krw": "45472",
+                "allocation_method": "FIFO",
+                "cost_method": "ACTUAL",
+                "included_components": ["inventory_acquisition_cost"],
+                "source_ref": "LOT-A",
+                "source_refs": ["LOT-A", "LOT-B"],
+                "evidence_grade": "SIM_FIXED",
+            },
+        }
+    )
+
+    assert missing == ()
+    assert parsed is not None
+    assert parsed.inventory_cost_basis is not None
+    assert parsed.inventory_cost_basis.amount_krw == Decimal(45472)
+    assert parsed.inventory_cost_basis.source_refs == ("LOT-A", "LOT-B")
+    assert parsed.inventory_cost_basis.cost_method == "ACTUAL"
