@@ -385,8 +385,32 @@ class Scenario(BaseModel):
 
     label: ScenarioLabel
     strategy_type: StrategyType
-    #: 커버일수 D. 수량 = 확정수요 × D. 범위 검사는 constraints.yaml을 읽는 self_check 몫.
+    #: 커버일수 D. 범위 검사는 constraints.yaml을 읽는 self_check 몫.
+    #:
+    #: 🔴 ~~수량 = 확정수요 × D~~ — **낡았다** (2026-09-11 · `#584`). 보유 재고를 뺀 뒤라
+    #:   그 등식은 **보유가 0인 날에만** 성립한다. 아래 ``total_qty_kg`` 를 볼 것.
     coverage_days: int = Field(gt=0)
+    #: 실제로 살 양. 🔴 **차감 뒤 값이다** (`#584` · 2026-09-11)::
+    #:
+    #:     total_qty_kg = round(일평균 × D) − 차감보유   그 뒤 창고·현금·신선도·조정안 클립
+    #:
+    #: 🔴 **여기서 거꾸로 수요를 뽑으면 안 된다.** ``total_qty_kg ÷ coverage_days`` 는
+    #:   일평균 확정수요가 **아니라** 「그날 보유가 안 덮은 나머지」다. 보유가 그날그날
+    #:   달라서 그 몫도 같이 흔들린다 — 실측(``SIM-CHAIN-V2`` 배추 보수안)::
+    #:
+    #:       0.5 · 358.5 · 359.0 · 717.5     중앙 358.8  vs 정본 717.3  →  **0.50배**
+    #:
+    #:   ★ ``717.5`` 는 그날 보유가 0이라 **우연히 맞은** 행이고, ``0.5`` 는 보유가 거의
+    #:     다 덮은 날이다. 「절반」이라는 규칙이 있는 것이 아니다.
+    #:
+    #: 🟢 **일수요의 정본은 따로 있다** — ``haetdeul.partner_item_demands.daily_demand_kg``
+    #:   (배추 717.300 · 무 154.400 · 양파 14.300 · 합 886.000).
+    #:   ⚠️ ``v_current_partner_demand.daily_total_demand_kg`` 는 **938.5** 인데 계약 밖
+    #:   품목(건고추 30.3 · 피마늘 22.2)이 들어 있다 — 우리 셋은 886.0 이다.
+    #:
+    #: ⚠️ **이 칸은 장부에 남고 남이 읽는다.** 마스터가 실제로 이 값으로 일수요를 되잡아
+    #:   배추를 359 로 봤다 (2026-09-12 회신). 「원안」이 필요하면 ③의
+    #:   ``demand_qty_kg`` 이고, 그 값은 이 스키마로 안 나간다.
     total_qty_kg: int = Field(gt=0)
     total_amount_krw: int = Field(ge=0)
     #: 예측 상단 기반 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.

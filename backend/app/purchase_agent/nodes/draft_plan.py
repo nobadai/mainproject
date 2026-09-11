@@ -292,8 +292,12 @@ def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | 
 def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     """안별 수량 초안을 만든다.
 
-    ``수량 = 일평균 확정수요 × 커버일수 D`` 를 계산하고 하드 제약으로 클립한다.
-    uncertain이면 공격(D=12)을 아예 만들지 않는다 (§4-③ · 규칙 4).
+    ``수량 = round(일평균 확정수요 × 커버일수 D) − 차감보유`` 를 계산하고 하드 제약으로
+    클립한다. uncertain이면 공격(D=12)을 아예 만들지 않는다 (§4-③ · 규칙 4).
+
+    🔴 **차감이 식 안에 있다** (`#584` · 2026-09-11). 전에 이 줄이 *"수량 = 확정수요 × D"*
+      였고, 그 문장이 ``adapter`` 의 필드 설명으로도 나가 **마스터가 일수요를 절반으로
+      되잡았다**. 원수요가 필요하면 ``demand_qty_kg`` 이고 ``total_qty_kg`` 가 아니다.
     """
     constraints = load_constraints()
     coverage = constraints["coverage_days"]

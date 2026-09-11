@@ -922,7 +922,14 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
 #: 해서 과하다. 숫자만 다르다: 어디서 왔는지 없으면 **LLM이 만든 값과 구분되지 않는다.**
 _SCENARIO_NUMERIC_SOURCES: dict[str, str] = {
     "coverage_days": "안별 커버일수 설정",
-    "total_qty_kg": "일평균 확정수요 × 커버일수, 하드 제약(창고·현금·신선도)의 상한에 맞춰 줄임",
+    # 🔴 **이 문장이 남에게 나간다.** 전에 *"일평균 확정수요 × 커버일수"* 라고만 적어
+    #    두었고, 마스터가 그대로 읽어 ``total_qty_kg ÷ coverage_days`` 로 일수요를
+    #    되잡았다 — 배추가 **359** 로 나왔다 (정본 717.3 · 2026-09-12 회신). 차감이
+    #    빠진 문장이 남의 계산을 반으로 만들었다.
+    "total_qty_kg": (
+        "일평균 확정수요 × 커버일수에서 **보유 재고를 뺀** 양, 그 뒤 하드 제약"
+        "(창고·현금·신선도)의 상한에 맞춰 줄임 — 이 값으로 일수요를 되잡지 말 것"
+    ),
     "total_amount_krw": "등급별 수량 × 단가의 합 — 등급 배분에서 파생",
     "max_price": "커버 구간 예측 상단의 최대값 — 재무 STRESS 로 나간다",
     "cut_unit_price": "커버 구간 예측 상단의 최대값 — 매입 컷 기준 (STRESS 상한과 지금은 같다)",
