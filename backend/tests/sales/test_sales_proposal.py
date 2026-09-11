@@ -741,8 +741,28 @@ def test_new_without_price_leaves_it_unknown_and_says_so():
 
 
 def test_new_without_quantity_is_input_incomplete():
+    """⚠️ **물류 확정 수량도 없을 때**만 막힌다 (2026-09-11).
+
+    ★★ 종전에는 *"사람이 수량을 안 주면 막는다"* 였다. 그런데 자동 걷기에는 사람이
+      없고, 206일 내내 안이 **0건**이었다. 이제 물류가
+      `sellable_supply.inventory_by_item` 으로 **확정한 수량**이 있으면 그것을 쓴다.
+
+    🔴 **막는 규율 자체는 그대로다** — 사람도 물류도 수량을 말하지 않으면 여전히
+       `PROPOSAL_QUANTITY_REQUIRED` 다. 지어내지 않는다.
+    """
+    물류_수량없음 = {
+        **independence_LOGISTICS,
+        "sellable_supply": {
+            **independence_LOGISTICS["sellable_supply"],
+            "inventory_by_item": [],
+        },
+    }
     reply = run_proposal(
-        independence_request("CONTRACT_PROPOSAL_NEW", user={"preferred_unit_price_krw": 2000})
+        independence_request(
+            "CONTRACT_PROPOSAL_NEW",
+            user={"preferred_unit_price_krw": 2000},
+            logistics_context=물류_수량없음,
+        )
     )
 
     assert reply.status == "INPUT_INCOMPLETE"
@@ -776,8 +796,28 @@ def test_spot_without_a_contract_does_not_invent_contract_terms():
 
 
 def test_spot_without_quantity_is_input_incomplete():
+    """⚠️ **물류 확정 수량도 없을 때**만 막힌다 (2026-09-11).
+
+    ★★ 종전에는 *"사람이 수량을 안 주면 막는다"* 였다. 그런데 자동 걷기에는 사람이
+      없고, 206일 내내 안이 **0건**이었다. 이제 물류가
+      `sellable_supply.inventory_by_item` 으로 **확정한 수량**이 있으면 그것을 쓴다.
+
+    🔴 **막는 규율 자체는 그대로다** — 사람도 물류도 수량을 말하지 않으면 여전히
+       `PROPOSAL_QUANTITY_REQUIRED` 다. 지어내지 않는다.
+    """
+    물류_수량없음 = {
+        **independence_LOGISTICS,
+        "sellable_supply": {
+            **independence_LOGISTICS["sellable_supply"],
+            "inventory_by_item": [],
+        },
+    }
     reply = run_proposal(
-        independence_request("SPOT_SALES", user={"preferred_unit_price_krw": 2000})
+        independence_request(
+            "SPOT_SALES",
+            user={"preferred_unit_price_krw": 2000},
+            logistics_context=물류_수량없음,
+        )
     )
 
     assert reply.status == "INPUT_INCOMPLETE"
