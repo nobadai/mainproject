@@ -37,7 +37,11 @@ from app.master.revalidation import (
     revalidate_scenario,
 )
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
-from app.master.sales_approval import SaleConfirmationOut, confirm_approved_sale
+from app.master.sales_approval import (
+    SaleConfirmationOut,
+    confirm_approved_sale,
+    financial_summary_of,
+)
 from app.master.transition import TransitionOut, apply_approval
 
 
@@ -169,6 +173,16 @@ def _sale_for(
     🔴 **재검증 결과를 여기서 다시 재지 않는다.** `_revalidation_for` 가 낸 것을
       그대로 넘긴다 — 두 곳에서 판정하면 *"재검증은 막혔는데 확정은 됐다"* 가 가능해진다.
 
+    🔴 **기여이익도 그 재검증에서 온다** (2026-09-11). `financial_summary_of` 가
+      `Revalidation.validations` 에서 꺼낸다.
+
+      ★★ **첫 검증(`response_payload["candidates"][].validations`) 에서 읽지
+        않는다.** 확정은 재검증 **뒤에** 서므로 재검증이 그날 사실로 다시 센 값이
+        정본이다 — 첫 검증 값을 쓰면 *"제안 시점 사실"* 로 장부가 서고, 그 사이
+        재고·원가가 움직인 것이 사라진다.
+
+      ★ **세 겹을 여기서 파고들지 않는다.** 그 매핑의 주인은 `sales_approval` 이다.
+
     ★ **`as_of` 는 그 실행의 날이다** (`_as_of_of`). 벽시계를 읽지 않는다 —
       `order_date` 가 되고, 그것이 곧 수금 곡선의 시점이다.
     """
@@ -187,6 +201,9 @@ def _sale_for(
         policy_version=_policy_version_of(row),
         scenario=scenario,
         revalidation_outcome=None if revalidation is None else revalidation.outcome,
+        financial_summary=(
+            None if revalidation is None else financial_summary_of(revalidation.validations)
+        ),
     )
 
 
