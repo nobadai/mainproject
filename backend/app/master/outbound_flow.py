@@ -163,8 +163,22 @@ class DueSaleItem:
     sale_date: date
 
 
-def due_sale_items(conn: Any, *, as_of: date) -> tuple[DueSaleItem, ...]:
-    """`as_of` 가 납품 기준일인 확정 판매의 품목들.
+def due_sale_items(conn: Any, *, as_of: date, sim_run_id: str) -> tuple[DueSaleItem, ...]:
+    """`as_of` 가 납품 기준일인 **이 실행의** 확정 판매 품목들.
+
+    🔴 **`sim_run_id` 로 거른다** (마스터 판단 2026-09-11). 축을 안 걸면 이 조회는
+       *"남의 실행"* 이 아니라 **모든 실행**의 그 날짜 판매를 본다. 같은 날짜에 두
+       실행이 서는 순간 남의 실행 판매가 내 창고에서 나가고, 나간 물건은 되돌릴
+       경로가 없어 **두 실행의 재고가 동시에** 틀린다.
+
+      ⚠️ **지금까지 안 걸린 것은 번인 판매가 전부 `DELIVERED` 였기 때문이다.** 아래
+        상태 필터가 `DELIVERED` 를 빼서 아무것도 안 잡혔을 뿐이고, **판매 확정이
+        서는 날부터** 곧바로 물린다.
+
+      ★ `finance_receivable.read_confirmed_sales` 가 `2026-09-09` 에 같은 판단을
+        받았다. 거기서는 남의 축 판매가 `confirm_receivable` 의 conflict 를 불러
+        그날 전체를 `BLOCKED` 로 만들었고, 여기서는 **물건이 나간다** — 뒤엣것이
+        더 나쁘다.
 
     🔴 **`order_status` 가 `CONFIRMED` · `READY` 인 것만 본다.** `DELIVERED` 는 이미
        나갔고 `CANCELLED` 는 나가면 안 된다 — `mark_sale_delivered` 가 받아 주는
@@ -172,6 +186,11 @@ def due_sale_items(conn: Any, *, as_of: date) -> tuple[DueSaleItem, ...]:
 
     ⚠️ **`WHERE s.sale_date = %s` 는 덜 읽으려는 것이다.** 나가고 안 나가고를 실제로
        가르는 자리는 `_due_today` 한 줄이고, 그래서 그 판정이 DB 없이도 검사된다.
+
+    🔴 **축은 다르다. `WHERE` 가 거르는 자리 그 자체다.** 파이썬에서 다시 거르지
+       않는다 — 파이썬에서 거르면 답은 맞아도 **DB 가 남의 실행 행을 전부 읽어
+       오고**, *"조회가 정본"* 이 아니게 된다. `DueSaleItem.sim_run_id` 는 그래서
+       거르는 칸이 아니라 **되짚기용 사본**이다.
     """
     schema = sql.Identifier(get_db_schema())
     with conn.cursor() as cursor:
@@ -186,12 +205,13 @@ def due_sale_items(conn: Any, *, as_of: date) -> tuple[DueSaleItem, ...]:
                        si.quantity_kg
                   FROM {}.sales AS s
                   JOIN {}.sale_items AS si ON si.sale_id = s.sale_id
-                 WHERE s.sale_date = %s
+                 WHERE s.sim_run_id = %s
+                   AND s.sale_date = %s
                    AND s.order_status IN ('CONFIRMED', 'READY')
                  ORDER BY s.sale_id, si.sale_item_id
                 """
             ).format(schema, schema),
-            [as_of],
+            [sim_run_id, as_of],
         )
         rows = cursor.fetchall()
     return tuple(
@@ -332,6 +352,7 @@ def _is_complete(one: SaleItemOutcome) -> bool:
 def ship_due_sales(
     as_of: date,
     *,
+    sim_run_id: str,
     connect: Any = None,
     due_fn: Callable[..., Sequence[DueSaleItem]] = due_sale_items,
     reserve_fn: Callable[..., Any] = reserve_confirmed_sale_available,
@@ -348,6 +369,11 @@ def ship_due_sales(
        잠금과 함께 돈다 (그 파일이 *"마스터가 밖에서 for 루프를 돌면 ②를 지킬 자리가
        없다"* 고 적어 뒀다). 이 함수가 정하는 것은 **어느 예약을 실행할지**뿐이다.
 
+    🔴 **`sim_run_id` 는 기본값 없는 키워드다.** 기본값을 두면 그 값이 곧 업무
+       규칙이 되고, 안 넘긴 자리가 조용히 번인 장부의 판매를 내보낸다. 안 넘기면
+       **`TypeError` 로 터져야** 그 자리를 그날 안다
+       (`revalidation.revalidate_scenario` 와 같은 모양이다).
+
     :param due_fn: 그날 나갈 것을 읽는 자리. **검사가 대역을 끼우는 곳**이다.
     """
     open_connection = get_connection if connect is None else connect
@@ -358,7 +384,7 @@ def ship_due_sales(
 
     try:
         try:
-            rows = due_fn(conn, as_of=as_of)
+            rows = due_fn(conn, as_of=as_of, sim_run_id=sim_run_id)
         except Exception as exc:  # noqa: BLE001
             conn.rollback()
             return OutboundOut(as_of=as_of, status="FAILED", reason=f"나갈 것을 못 읽었다: {exc}")

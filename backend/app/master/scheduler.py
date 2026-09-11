@@ -1303,7 +1303,11 @@ def run_scheduled_day(
     #
     # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
     #   그것이 *"장부가 안 선 날에는 출고도 안 한다"* 이다.
-    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of))
+    #
+    # 🔴 **`sim_run_id` 를 흘려 준다** (2026-09-11). 출고 조회가 그 값으로 그날
+    #    판매를 거른다 — 안 넘기면 조회가 **모든 실행**의 그 날짜 판매를 보고,
+    #    남의 실행 판매가 내 창고에서 나간다. 채권·수금 두 줄과 같은 모양이다.
+    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
 
     # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
