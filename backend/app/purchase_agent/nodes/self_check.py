@@ -746,7 +746,7 @@ def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str 
     🔴 **받는 것은 「열린 축」이 아니라 「실효 축」이다** (`#308` · 2026-09-12). ①이 축을
       열어도 ④가 안 나눈 날이 있고, 그날 ⑥은 ``timing`` 을 배정하지 않는다. 여기에
       ①의 목록을 그대로 넘기면 *"허용 축이 둘인데 전 안이 quantity"* 가 되어 **그날 안이
-      통째로 반려된다** — 실측 21셀 (안이 있는 672셀 기준). ⑥과 **같은 함수**
+      통째로 반려된다** — 실측 20셀 (안이 있는 672셀 기준). ⑥과 **같은 함수**
       (``effective_allowed_axes``)가 만든 목록을 봐야 둘이 갈리지 않는다.
     """
     if len(allowed_axes) < 2 or len(scenarios) < 2:
