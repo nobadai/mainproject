@@ -25,8 +25,8 @@ from typing import Any
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_context
 from app.purchase_agent.llm.schemas import MixCandidate
-from app.purchase_agent.nodes._guards import require_positive
-from app.purchase_agent.nodes.draft_plan import fixed_market_quotes, pending_value
+from app.purchase_agent.nodes._guards import pending_value, require_positive
+from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
 from app.purchase_agent.quotes import observed_date, observed_spec, quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState

@@ -1,19 +1,24 @@
 """E3-3 검사 — ④ split_plan 조건부 진입 + 유형 선택 (백로그 E3-3 · 상세설계 §4-④).
 
-백로그 E3-3 DoD: **"20,000kg↑ or 상승 궤적에서만 진입"**.
+백로그 E3-3 DoD: **"임계 초과 or 상승 궤적에서만 진입"**.
 
-⚠️ **수량 가지는 mock에서 한 번도 서지 않는다.** 최대안이 8,727kg이고 임계는 20,000kg이라
-두 앵커(8/21·9/11) 모두 궤적으로만 진입한다 — mock만 돌리면 `by_volume`을 지워도 초록불이
-뜬다. 그래서 수량 가지는 **합성 입력으로 따로** 시험한다.
+🔴 **임계가 선언에서 물류 값으로 바뀌었다** (`#308` · 2026-09-12). 수량 가지는 이제
+`cap_by_date[as_of + N4]` — **그날 창고에 들어갈 자리**와 견준다.
+
+⚠️ **수량 가지는 mock에서 한 번도 서지 않는다.** 전에는 «8,727kg < 임계 20,000kg» 이라
+안 섰고, 지금은 **mock 에 N4 도 `cap_by_date` 도 없어 판정 자체를 안 한다** (규칙 3 —
+미결을 0으로 채우면 모든 날 열린다). 두 시절 다 mock만 돌리면 `by_volume`을 지워도 초록불이
+뜬다. 그래서 수량 가지는 **`inject_arrival_cap` 으로 따로** 시험한다.
 
 3품목 × 4앵커 전횡단을 기본으로 깐다 — E3-1에서 배추만 돌려 양파 크래시를 놓친 교훈이다.
 """
 
 from copy import deepcopy
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
-from _injection import drop_holdings
+from _injection import drop_holdings, inject_arrival_cap
 
 from app.purchase_agent import mocks
 from app.purchase_agent.config import load_constraints
@@ -31,20 +36,25 @@ from app.purchase_agent.nodes.package_scenarios import (
     with_round_amounts,
 )
 from app.purchase_agent.nodes.self_check import (
+    check_axis_diversity,
     check_payment_schedule,
     check_quadruple_match,
     check_split_amounts,
     check_split_dates,
+    self_check,
 )
 from app.purchase_agent.nodes.split_plan import (
     choose_rounds,
+    effective_allowed_axes,
     equal_ratios,
     evaluate_split_entry,
     largest_total_kg,
+    split_decision,
     split_plan,
 )
 from app.purchase_agent.schemas import TIMING_AXIS, PurchaseProposal
 from app.purchase_agent.state import build_initial_state
+from tests.test_purchase_agent._ast_helpers import references
 
 RISING = date(2026, 8, 21)
 FALLING = date(2026, 8, 28)
@@ -53,6 +63,10 @@ SPREAD_WIDE = date(2026, 9, 11)
 ANCHORS = (RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
 
 ITEM = "배추"
+
+#: ㉣ 검사가 훑는 자리 — 옛 고정 임계가 코드로 되돌아오면 운다.
+_PACKAGE = Path(mocks.__file__).resolve().parent.parent
+_NODES = _PACKAGE / "nodes"
 
 
 def _staged(item: str = ITEM, as_of: date = RISING) -> dict:
@@ -110,41 +124,71 @@ def test_days_without_the_timing_axis_never_split(proposals: dict) -> None:
 def test_entry_is_driven_by_trend_not_volume_in_the_mocks() -> None:
     """**mock에서는 수량 가지가 한 번도 서지 않는다** — 이 사실 자체를 잠근다.
 
-    8,727kg < 20,000kg이라 두 앵커 모두 궤적으로만 진입한다. 이걸 못 박아 두지 않으면
-    아래 합성 테스트가 왜 필요한지 알 수 없다.
+    🔴 **이유가 바뀌었다** (`#308`). 전에는 «8,727kg < 임계 20,000kg» 이라 **미달**이었고,
+    지금은 mock 에 N4 도 ``cap_by_date`` 도 없어 **판정을 안 한다.** 둘은 다른 사실이라
+    ``cap_unknown_reason`` 까지 같이 잠근다 — 미달로 읽히면 규칙 3이 깨진 것을 못 본다.
     """
     constraints = load_constraints()
     for as_of in (RISING, SPREAD_WIDE):
         decision = evaluate_split_entry(_staged(as_of=as_of), constraints)
         assert decision["entered"] is True
         assert decision["by_volume"] is False  # ← 수량 가지는 죽어 있다
+        assert decision["cap_unknown_reason"]  # ← 미달이 아니라 **못 봤다**
+        assert decision["cap_kg"] is None
         assert decision["by_trend"] is True
 
 
 def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
-    """**합성 입력** — 궤적을 죽이고 총량만 임계로 올리면 수량 가지 단독으로 진입한다."""
-    constraints = load_constraints()
-    threshold = constraints["triggers"]["split_entry_qty_kg"]
+    """**합성 입력** — 궤적을 죽이고 총량을 도착일 여유까지 올리면 수량 단독으로 진입한다.
 
+    임계가 **검사가 주입한 물류 값**이라, 선언을 안 건드리고도 경계 양쪽을 잴 수 있다.
+    """
+    constraints = load_constraints()
     state = _staged()
     _flatten_trend(state)
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = threshold
+    cap = 9_000
+    inject_arrival_cap(state, cap)
+
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap
     decision = evaluate_split_entry(state, constraints)
     assert decision["by_trend"] is False
     assert decision["by_volume"] is True
+    assert decision["cap_kg"] == cap
     assert decision["entered"] is True
 
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = threshold - 1  # 경계 바로 아래
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap - 1  # 경계 바로 아래
     blocked = evaluate_split_entry(state, constraints)
     assert blocked["by_volume"] is False
     assert blocked["entered"] is False
 
 
-def test_trend_trigger_enters_on_its_own_below_the_volume_threshold() -> None:
+def test_the_volume_branch_never_opens_on_an_unknown_arrival_cap() -> None:
+    """🔴 **모르면 안 연다** (규칙 3 · `#308`). 여유를 0으로 채우면 **모든 날** 열린다.
+
+    ``cap_by_date`` 를 못 받은 날 ``0`` 으로 읽으면 ``총량 ≥ 0`` 이 늘 참이라 수량 가지가
+    매일 선다 — 미결이 판정을 막는 게 아니라 **판정을 만드는** 상태다. 그래서 총량을
+    아무리 키워도 안 열리는 것을 잠근다.
+    """
+    constraints = load_constraints()
+    state = _staged()
+    _flatten_trend(state)
+    inject_arrival_cap(state, None)  # N4 는 있고 그날 여유만 없다
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = 10**9
+
+    decision = evaluate_split_entry(state, constraints)
+    assert decision["by_volume"] is False
+    assert decision["entered"] is False
+    assert decision["arrival_date"]  # 도착일은 계산됐다 — 없는 것은 그날 여유뿐이다
+    assert "여유" in decision["cap_unknown_reason"]
+
+
+def test_trend_trigger_enters_on_its_own_below_the_arrival_cap() -> None:
     """궤적 가지 단독 진입 — mock의 실제 경로다. 궤적을 꺾으면 닫힌다."""
     constraints = load_constraints()
     state = _staged()
-    assert largest_total_kg(state["base_plan"]) < constraints["triggers"]["split_entry_qty_kg"]
+    roomy = largest_total_kg(state["base_plan"]) * 10  # 여유가 넉넉해 수량 가지는 안 선다
+    inject_arrival_cap(state, roomy)
+    assert evaluate_split_entry(state, constraints)["by_volume"] is False
     assert evaluate_split_entry(state, constraints)["entered"] is True
 
     _flatten_trend(state)
@@ -156,6 +200,7 @@ def test_timing_axis_gates_both_triggers() -> None:
     constraints = load_constraints()
     state = _staged()
     state["allowed_axes"] = ["quantity"]
+    inject_arrival_cap(state, 9_000)
     state["base_plan"]["drafts"][-1]["total_qty_kg"] = 50_000
     decision = evaluate_split_entry(state, constraints)
     assert decision["by_volume"] and decision["by_trend"]
@@ -166,16 +211,37 @@ def test_timing_axis_gates_both_triggers() -> None:
 
 
 def test_rounds_come_from_the_fixed_list_and_are_clamped() -> None:
-    """``clamp(ceil(총량 / 임계), 목록 경계)``. 진입 시 하한 2는 **목록에서 유도**한다."""
+    """``clamp(ceil(총량 / 도착일 여유), 목록 경계)``. 진입 시 하한 2는 **목록에서 유도**한다."""
     constraints = load_constraints()
-    threshold = constraints["triggers"]["split_entry_qty_kg"]
+    cap = 20_000
     types = sorted(constraints["split"]["types"])
     smallest_split, largest_split = min(t for t in types if t > 1), max(types)
 
-    assert choose_rounds(8_727, constraints) == smallest_split  # ceil(0.44)=1 → 하한
-    assert choose_rounds(threshold, constraints) == smallest_split
-    assert choose_rounds(threshold * 2 + 1, constraints) == 3
-    assert choose_rounds(threshold * 99, constraints) == largest_split  # 목록 상한을 넘지 않는다
+    assert choose_rounds(8_727, cap, constraints) == smallest_split  # ceil(0.44)=1 → 하한
+    assert choose_rounds(cap, cap, constraints) == smallest_split
+    assert choose_rounds(cap * 2 + 1, cap, constraints) == 3
+    assert choose_rounds(cap * 99, cap, constraints) == largest_split  # 목록 상한을 안 넘는다
+
+
+def test_a_zero_arrival_cap_means_the_largest_split_not_a_crash() -> None:
+    """🔴 여유 **0** 은 나눗셈이 아니라 «아무리 나눠도 그날엔 안 들어간다» 다 (`#308`).
+
+    ``ceil(총량 / 0)`` 은 ∞ 라 목록 최대로 클램프한다. 0으로 나누기를 피한 것이 아니라
+    뜻을 옮긴 것이고, 그 안은 뒤에서 ⑦ ``check_arrival_capacity`` 가 어차피 컷한다.
+
+    ⚠️ 관통에서 **도착일 여유 0 인 날이 1,620셀**이다 (2026-09-12 · 전부 보류일이라
+    실제로 열릴 안은 없다). 드문 값이 아니라 흔한 값이다.
+    """
+    constraints = load_constraints()
+    largest_split = max(constraints["split"]["types"])
+    assert choose_rounds(1_000, 0, constraints) == largest_split
+
+
+def test_rounds_fall_back_to_the_minimum_when_the_cap_was_never_seen() -> None:
+    """여유를 못 봤는데 궤적으로 진입한 날 — 수량으로는 회차를 못 정하니 **하한**이다."""
+    constraints = load_constraints()
+    smallest_split = min(t for t in sorted(constraints["split"]["types"]) if t > 1)
+    assert choose_rounds(10**9, None, constraints) == smallest_split
 
 
 def test_equal_ratios_sum_to_one_exactly_enough() -> None:
@@ -338,8 +404,16 @@ def test_round_level_arrival_check_is_disclosed_as_deferred(proposals: dict) -> 
     assert not any("cap_by_date" in risk for risk in conservative["risks"])
 
 
-def _forced(as_of: date, orders_kg: int, warehouse_kg: int, cash: int) -> dict:
-    """하드 제약을 직접 흔들어 만든 안 — mock으로는 안 나오는 조합을 시험할 때 쓴다."""
+def _forced_state(
+    as_of: date, orders_kg: int, warehouse_kg: int, cash: int, cap_kg: float | None = None
+) -> dict:
+    """하드 제약을 직접 흔들어 ⑥까지 돌린 **상태 전체**.
+
+    mock으로는 안 나오는 조합을 시험할 때 쓴다.
+
+    ``cap_kg`` 는 분할 진입이 보는 **도착일 여유**다 (`#308`). 안 주면 mock 그대로 미결이라
+    수량 가지가 판정되지 않는다 — 궤적으로만 진입하는 날을 재는 검사는 안 줘도 된다.
+    """
     state = build_initial_state(ITEM, as_of)
     state["confirmed_orders"] = {**state["confirmed_orders"], "total_kg": orders_kg}
     state["inventory"] = {
@@ -348,12 +422,22 @@ def _forced(as_of: date, orders_kg: int, warehouse_kg: int, cash: int) -> dict:
         "rental_cap_kg": 0,
     }
     state["projected_cash_min"] = cash
+    if cap_kg is not None:
+        inject_arrival_cap(state, cap_kg)
     state.update(classify_situation(state))
     state.update(draft_plan(state))
     state.update(split_plan(state))
     state.update(allocate_sourcing(state))
-    result = package_scenarios(state)
-    return next(s for s in result["scenarios_final"] if s["label"] == "공격")
+    state.update(package_scenarios(state))
+    return state
+
+
+def _forced(
+    as_of: date, orders_kg: int, warehouse_kg: int, cash: int, cap_kg: float | None = None
+) -> dict:
+    """위 상태에서 공격안 하나를 꺼낸다."""
+    state = _forced_state(as_of, orders_kg, warehouse_kg, cash, cap_kg)
+    return next(s for s in state["scenarios_final"] if s["label"] == "공격")
 
 
 def test_split_plan_is_never_none_so_the_decision_always_travels() -> None:
@@ -365,45 +449,141 @@ def test_split_plan_is_never_none_so_the_decision_always_travels() -> None:
         assert abs(sum(line["ratio"] for line in chosen) - 1.0) <= 1e-9
 
 
-def test_timing_label_without_a_split_is_disclosed() -> None:
-    """①이 **클립 전** 추정 총량으로 축을 열고 ④가 **클립 후** 총량으로 닫는 경우.
+def test_a_timing_axis_that_never_splits_is_withdrawn_not_labelled() -> None:
+    """①이 **클립 전** 추정으로 축을 열고 ④가 **클립 후** 총량으로 닫는 경우.
 
-    §4-④ E3-3 확정 2가 "정상"이라 한 상황인데, 그대로 두면 timing 라벨을 단 안이
-    quantity 안과 똑같이 행동하면서 아무 설명이 없다 (Codex 교차검증 P1).
-    처음엔 일괄 전환(fallback)만 고지하고 이 경로를 빠뜨렸다.
+    §4-④ E3-3 확정 2가 "정상"이라 한 상황이다. 🔴 **처방이 바뀌었다** (`#308`).
+
+    ```text
+    전   timing 라벨을 그대로 달고 회차 하나 → 불일치를 **고지**했다
+    후   그 안의 축에서 timing 을 **걷는다** → 불일치 자체가 없다
+    ```
+
+    ⚠️ **고지는 그대로 남는다.** 출력 ``allowed_axes`` 에는 여전히 분할 축이 들어 있어서,
+      아무 안도 그 축을 안 쓴 이유가 없으면 되물을 자리가 사라진다.
     """
-    # 확정주문 30,000kg → ①의 추정 총량 25,714kg이 임계를 넘어 timing이 열린다.
-    # 창고 5,000kg이 안별 총량을 깎아 ④의 판정에서는 임계 미달이 된다. 예측은 하락이라
-    # 궤적 가지도 서지 않는다.
-    aggressive = _forced(FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12)
-    assert aggressive["strategy_type"] == TIMING_AXIS
+    # 확정주문 30,000kg → ①의 추정 총량 25,714kg이 도착일 여유 10,000kg을 넘어 timing이
+    # 열린다. 창고 5,000kg이 안별 총량을 깎아 ④의 판정에서는 여유 미만이 된다.
+    # 예측은 하락이라 궤적 가지도 서지 않는다.
+    aggressive = _forced(
+        FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=10_000
+    )
+    assert aggressive["strategy_type"] != TIMING_AXIS  # ← 걷혔다
     assert len(aggressive["split_plan"]) == 1
-    note = next(risk for risk in aggressive["risks"] if "미진입" in risk)
-    assert "임계 20,000kg" in note
+    note = next(risk for risk in aggressive["risks"] if "분할 축이 열렸지만" in risk)
+    assert "도착 여유 10,000kg" in note
     assert "지속 상승 궤적 아님" in note
 
 
-def test_volume_only_entry_cites_orders_not_the_forecast() -> None:
-    """수량 단독 진입의 근거는 **주문**이다 — 예측 ref_id를 붙이면 근거가 주장을 못 받친다.
+def test_a_day_without_an_arrival_cap_says_so_instead_of_going_quiet() -> None:
+    """🟡 **「못 봤다」를 고지로 남긴다 — 「안 걸렸다」와 가른다** (`#308` · 규칙 3).
 
-    총량은 확정주문에서 파생해 하드 제약으로 클립한 값이라 ``ASSUMED``다
-    (IO명세 §5 "수요에서 파생된 것은 SIM_FIXED 자격을 잃는다"). Codex 교차검증 P2.
+    판정을 안 한 날은 축이 안 열리는데, 아무 말도 안 하면 화면에서는 «여유가 넉넉해서
+    안 열렸다» 와 구별이 안 된다. 둘은 고칠 것이 다르다 — 앞은 물류 배선이고 뒤는 정상이다.
+
+    ⚠️ **N4 미결은 여기서 안 센다.** 그쪽은 이미 제 문장이 있고, 한 원인을 두 줄로 내면
+      읽는 사람이 둘로 센다.
     """
-    aggressive = _forced(FALLING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12)
+    state = build_initial_state(ITEM, RISING)
+    state.update(classify_situation(state))
+    inject_arrival_cap(state, None)  # N4 는 있고 그날 여유만 없다
+    notes = draft_plan(state)["base_plan"]["deferred_checks"]
+
+    note = next(n for n in notes if "분할 진입" in n)
+    assert "여유를 0으로 가정하지 않았다" in note
+    assert "입고 소요일" not in note, "N4 는 제 문장이 따로 있다"
+
+
+def test_the_notice_is_absent_when_the_cap_was_actually_read() -> None:
+    """반대 방향 — **본 날은 아무 말도 안 한다.** 늘 붙으면 고지가 배경이 된다."""
+    state = build_initial_state(ITEM, RISING)
+    state.update(classify_situation(state))
+    inject_arrival_cap(state, 9_000)
+    notes = draft_plan(state)["base_plan"]["deferred_checks"]
+
+    assert not [n for n in notes if "분할 진입" in n]
+
+
+def test_the_old_fixed_threshold_is_gone_from_both_the_declaration_and_the_code() -> None:
+    """㉣ **선언과 코드 양쪽에서 걷혔다** (`#308`).
+
+    🔴 값을 남겨 두면 기준이 둘이 된다. `#379` 가 그 모양이었다 — 선언은 남고 읽는 코드가
+    0곳이라, 같은 사실이 두 곳에 적힌 채 한쪽만 바뀌기를 기다리는 상태였다.
+
+    ★ ``references`` 는 **코드가 쓰는 문자열만** 본다. `constraints.yaml` 의 묘비 주석과
+      이 파일의 설명은 안 세므로, *"왜 걷었나"* 를 적어 두는 것과 충돌하지 않는다.
+    """
+    assert "split_entry_qty_kg" not in load_constraints()["triggers"]
+    for name in ("classify_situation.py", "split_plan.py", "draft_plan.py", "package_scenarios.py"):
+        assert not references(_NODES / name, "split_entry_qty_kg"), name
+    assert not references(_PACKAGE / "adapter.py", "split_entry_qty_kg")
+
+
+def test_the_withdrawn_axis_does_not_make_self_check_reject_the_whole_day() -> None:
+    """🔴 **⑥만 고치면 ⑦이 그날 안을 통째로 죽인다** (`#308`). 그 짝을 잠근다.
+
+    ④가 안 나눠 ⑥이 timing 을 걷으면 전 안이 ``quantity`` 가 된다. ⑦
+    ``check_axis_diversity`` 는 *"허용 축이 둘 이상인데 전 안 동일 축"* 을 반려하므로,
+    ①이 연 목록을 그대로 넘기면 **살아 있던 안이 전부 사라진다** — 관통 실측 21셀
+    (2026-09-12 · 안이 있는 672셀 기준).
+
+    ★ 그래서 **아래 두 줄이 이 검사의 핵심**이다. 같은 안 목록에 두 축 목록을 각각
+      먹여, 안 걷은 쪽은 반려 문장이 나오고 걷은 쪽은 ``None`` 인 것을 나란히 본다 —
+      «⑦이 실효 축을 안 보면 죽는다» 를 값으로 보인다.
+    """
+    state = _forced_state(FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=10_000)
+    assert TIMING_AXIS in state["allowed_axes"], "전제 — ①이 총량으로 축을 열었다"
+    assert not split_decision(state["split_plan"])["entered"], "전제 — ④는 안 나눴다"
+
+    survivors = self_check(state)["scenarios_final"]
+    assert survivors, "실효 축을 안 보면 이 자리에서 그날 안이 전부 사라진다"
+    assert {s["strategy_type"] for s in survivors} == {"quantity"}
+
+    assert check_axis_diversity(survivors, state["allowed_axes"]), "①의 목록이면 반려된다"
+    effective = effective_allowed_axes(state["allowed_axes"], state["split_plan"])
+    assert check_axis_diversity(survivors, effective) is None, "실효 축이면 통과한다"
+
+
+def test_effective_axes_keep_timing_when_the_split_actually_happened() -> None:
+    """반대 방향 — **나눈 날은 안 걷는다.** 늘 걷으면 timing 축이 영영 안 선다."""
+    state = _forced_state(RISING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12, cap_kg=20_000)
+    assert split_decision(state["split_plan"])["entered"] is True
+    assert effective_allowed_axes(state["allowed_axes"], state["split_plan"]) == (
+        state["allowed_axes"]
+    )
+    assert TIMING_AXIS in {s["strategy_type"] for s in state["scenarios_final"]}
+
+
+def test_volume_only_entry_cites_the_arrival_cap_not_the_forecast() -> None:
+    """수량 단독 진입의 근거는 **판정을 가른 수**를 가리킨다 — 이제 물류 도착일 여유다.
+
+    🔴 **출처가 「주문」에서 「재고」로 옮겼다** (`#308`). 전에는 우리 선언(고정 임계)이
+    기준이라 총량 쪽 ref(``SO-``)가 맞았다. 지금 기준은 물류가 낸 값이라 그대로 두면
+    **결정한 수를 못 찾는 근거**가 된다 — Codex 교차검증 P2 와 같은 자리다.
+
+    등급은 **낮은 쪽**이다: 여유는 물류 정본이지만 비교 대상인 총량이 수요 파생값이라
+    ``ASSUMED`` (IO명세 §5 "수요에서 파생된 것은 SIM_FIXED 자격을 잃는다").
+    """
+    aggressive = _forced(
+        FALLING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12, cap_kg=20_000
+    )
     assert len(aggressive["split_plan"]) > 1
     items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]
     assert len(items) == 1
-    assert items[0]["source"] == "주문"
-    assert items[0]["ref_id"].startswith("SO-")
+    assert items[0]["source"] == "재고"
+    assert items[0]["ref_id"].startswith("CAP-")
     assert items[0]["evidence_grade"] == "ASSUMED"
+    assert "도착 여유 20,000kg" in items[0]["claim"]
     assert not any(r["ref_id"].startswith("FC-") for r in items)
 
 
 def test_both_triggers_produce_one_rationale_each() -> None:
     """수량·궤적이 둘 다 서면 근거도 둘이다 — 출처가 다르니 한 건으로 뭉치지 않는다."""
-    aggressive = _forced(RISING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12)
+    aggressive = _forced(
+        RISING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12, cap_kg=20_000
+    )
     items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]
-    assert {item["source"] for item in items} == {"주문", "예측"}
+    assert {item["source"] for item in items} == {"재고", "예측"}
 
 
 def test_split_carries_its_own_rationale(proposals: dict) -> None:

@@ -11,7 +11,7 @@ from itertools import pairwise
 from typing import Any
 
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.nodes._guards import require_positive
+from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
@@ -21,10 +21,10 @@ from app.purchase_agent.nodes.classify_situation import (
 )
 from app.purchase_agent.nodes.draft_plan import (
     ADJUSTMENT_CAP_NAME,
-    pending_value,
     purchase_budget_krw,
     split_adjustments,
 )
+from app.purchase_agent.nodes.split_plan import effective_allowed_axes, split_decision
 from app.purchase_agent.quotes import observed_date, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
@@ -1383,11 +1383,6 @@ def _mix_choice_risks(decision: dict) -> list[str]:
     ]
 
 
-def _split_decision(chosen: list[dict] | None) -> dict:
-    """④가 첫 줄에 실어 보낸 분할 판단 근거. ⑤의 ``_sourcing_decision``과 같은 방식이다."""
-    return chosen[0].get("decision", {}) if chosen else {}
-
-
 def _ratio_outcome(rounds: list[dict]) -> str:
     """비율은 균등이어도 **수량은 다를 수 있다** — ⑥이 날짜별 창고 여유로 옮기기 때문이다.
 
@@ -1417,15 +1412,23 @@ def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: 
     if decision.get("by_volume"):
         items.append(
             {
-                "source": "주문",
+                # 🔴 **출처가 「주문」에서 「재고」로 옮겼다** (`#308`). 판정을 가른 수가
+                #   바뀌었기 때문이다 — 전에는 우리 선언(고정 임계)이 기준이었고 지금은
+                #   물류가 낸 그날 여유가 기준이다. 옛 ref_id(``SO-``)를 그대로 두면
+                #   **결정한 수를 못 찾는 근거**가 된다 (Codex P2 와 같은 자리).
+                "source": "재고",
                 "claim": (
-                    f"안 총량 {decision['largest_total_kg']:,}kg ≥ 분할 임계 "
-                    f"{decision['threshold_kg']:,}kg → {len(rounds)}회 분할"
+                    f"안 총량 {decision['largest_total_kg']:,}kg ≥ "
+                    f"{decision['arrival_date']} 도착 여유 {decision['cap_kg']:,.0f}kg → "
+                    f"{len(rounds)}회 분할"
                 ),
-                "ref_id": f"SO-{as_of}",
+                "ref_id": f"CAP-{as_of}",
+                # ⚠️ 두 수의 등급이 다르면 **낮은 쪽**이다. 여유는 물류 정본(SIM_FIXED)이지만
+                #   총량은 확정주문에서 파생해 클립한 값이라 자격이 없다 (IO명세 §5).
                 "evidence_grade": "ASSUMED",
                 "evidence_detail": (
-                    "확정주문에서 파생해 하드 제약으로 클립한 안별 총량 — "
+                    "기준값은 물류 cap_by_date 의 도착일 칸이고, 비교 대상인 안별 총량은 "
+                    "확정주문에서 파생해 하드 제약으로 클립한 값이다 — "
                     "수요 파생값이라 SIM_FIXED 자격 없음"
                 ),
             }
@@ -1451,10 +1454,15 @@ def _entry_miss_reason(decision: dict) -> str:
     """④가 진입하지 않은 이유. 두 트리거 중 못 선 것을 그대로 적는다."""
     misses = []
     if not decision.get("by_volume"):
-        misses.append(
-            f"최대안 {decision.get('largest_total_kg', 0):,}kg < "
-            f"임계 {decision.get('threshold_kg', 0):,}kg"
-        )
+        # 🔴 **「못 봤다」와 「안 걸렸다」를 가른다** (`#308` · 규칙 3). 여유를 못 받은 날을
+        #   «미달» 로 적으면 판정하지 않은 것이 판정한 것으로 읽힌다.
+        if decision.get("cap_unknown_reason"):
+            misses.append("도착일 창고 여유를 못 봐 총량 조건을 판정하지 않았다")
+        else:
+            misses.append(
+                f"최대안 {decision.get('largest_total_kg', 0):,}kg < "
+                f"{decision.get('arrival_date')} 도착 여유 {decision.get('cap_kg') or 0:,.0f}kg"
+            )
     if not decision.get("by_trend"):
         misses.append("지속 상승 궤적 아님")
     return " · ".join(misses)
@@ -1645,6 +1653,7 @@ def _split_risks(
     lead_days: int | None,
     cap_by_date: Mapping[str, float] | None,
     calendar: Mapping[str, Any] | None = None,
+    timing_withdrawn: bool = False,
 ) -> list[str]:
     """분할에서 나온 유의사항. **timing 라벨과 실제 행동이 어긋나면 반드시 적는다** (규칙 3).
 
@@ -1656,6 +1665,15 @@ def _split_risks(
 
     둘 다 조용히 넘기면 소비자가 라벨(timing)과 행동(일괄)의 불일치를 추적할 수 없다.
     첫 번째 경로는 Codex 교차검증에서 P1으로 잡혔다 — 처음엔 두 번째만 고지했었다.
+
+    🔴 **첫 번째 경로의 고지가 자리를 옮겼다** (`#308` · 2026-09-12). 전에는 *"timing 라벨인데
+      회차가 하나"* 인 안에 붙였는데, 이제 그런 안이 서지 않는다 — ``effective_allowed_axes``
+      가 그 축을 걷기 때문이다. **불일치를 고지하는 대신 불일치를 없앤다.**
+
+      ⚠️ 그래도 **고지는 남긴다.** 출력의 ``allowed_axes`` 에는 여전히 분할 축이 들어 있어,
+        읽는 사람이 *"열린 축을 아무 안도 안 썼다"* 를 보게 된다. 그 사유가 없으면
+        되물을 자리가 없다. 그래서 축을 **걷힌 안**에 같은 문장을 붙인다 —
+        ``timing_withdrawn`` 이 그 안을 짚는다.
     """
     # 🔴 **민 사실은 축과 무관하게 적는다** (`#300`). 아래 조기 반환들이 timing 축 ·
     #   분할 진입 안에서만 돌아서, 여기 붙이면 일괄 안이 밀렸을 때 **고지가 통째로
@@ -1663,16 +1681,17 @@ def _split_risks(
     shift_note = shifted_rounds_note(as_of, coverage_days, len(rounds), calendar)
     moved = [shift_note] if shift_note else []
     if axis != TIMING_AXIS:
+        if timing_withdrawn:
+            return [
+                *moved,
+                (
+                    f"그날 분할 축이 열렸지만 분할에 진입하지 않아"
+                    f"({_entry_miss_reason(decision)}) 이 안은 수량 축으로 나간다 — "
+                    "허용 축은 하드 제약으로 깎기 전 추정 총량으로 열고, "
+                    "분할 진입은 깎은 뒤 실제 총량으로 판정한다"
+                ),
+            ]
         return moved  # quantity·mix 축 안은 애초에 분할 대상이 아니다
-    if not decision.get("entered"):
-        return [
-            *moved,
-            (
-                f"timing 축 안이지만 분할 미진입({_entry_miss_reason(decision)})으로 일괄 — "
-                "허용 축은 ①이 클립 전 추정 총량으로 열고, "
-                "분할은 ④가 클립 후 실제 총량으로 판정한다"
-            ),
-        ]
     reason = chosen and split_infeasible_reason(total_qty_kg, chosen, coverage_days)
     if reason:
         return [*moved, f"분할 불가({reason})로 일괄 전환 — timing 축 안이지만 회차는 하나다"]
@@ -1766,15 +1785,20 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     constraints = load_constraints()
     base = state["base_plan"]
     drafts = base["drafts"]
-    axes = assign_axes(
-        [d["label"] for d in drafts],
-        state["allowed_axes"],
-        constraints["allocation"]["aggressive_axis"],
-    )
+    split_choice = state["split_plan"]  # ④ 분할 유형·비율 (진입 안 했으면 1회차 목록)
+    # 🔴 **실효 축으로 배정한다** (`#308`). ①이 연 축 그대로 주면 ④가 안 나눈 날에도
+    #   timing 라벨이 서서 «회차 하나짜리 분할안» 이 된다 — ``effective_allowed_axes``
+    #   docstring 에 근거와 실측이 있다. ⑦ ``check_axis_diversity`` 도 **같은 목록**을 본다.
+    effective_axes = effective_allowed_axes(state["allowed_axes"], split_choice)
+    labels = [d["label"] for d in drafts]
+    aggressive_axis = constraints["allocation"]["aggressive_axis"]
+    axes = assign_axes(labels, effective_axes, aggressive_axis)
+    # ①이 연 축 그대로 배정했으면 어느 안이 timing 을 받았을지 — **고지를 붙일 자리**를
+    # 짚는 데만 쓴다. 판정에는 안 쓴다 (`_split_risks` 의 ``timing_withdrawn``).
+    declared_axes = assign_axes(labels, state["allowed_axes"], aggressive_axis)
     lots = state["inventory"].get("lots")
     contract_price = state["contract_price"]  # 미수령이면 None — 마진 두 값이 함께 null이 된다
     decision = _sourcing_decision(state["sourcing_plan"])  # ⑤ 등급 배분 판단 근거
-    split_choice = state["split_plan"]  # ④ 분할 유형·비율 (진입 안 했으면 None)
     # N4·수용량은 그날 하나뿐이라 안 루프 밖에서 한 번만 읽는다.
     # ``cap_by_date``는 **어댑터 경로에만** 있다 — mock 재고에는 없어서 None이고,
     # 그때 회차 조정은 일어나지 않는다 (부재가 정상 경로다).
@@ -1783,7 +1807,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     # 회차일을 장이 서는 날로 미는 데 쓴다 (`#300` · ``round_offsets``). 그날 하나뿐이라
     # 안 루프 밖에서 한 번 읽는다 — ``lead_days`` · ``cap_by_date`` 와 같은 이유다.
     calendar = state.get("execution_calendar")
-    split_decision = _split_decision(split_choice)
+    split_facts = split_decision(split_choice)
     # 시세 근거 좌표는 **관측일 기준**이고 그날 하나뿐이다. 안 루프 안에서 만들면 같은
     # 시세에서 나온 근거들이 서로 다른 좌표를 갖게 된다 (실제로 그랬다 — Codex 2차 지적).
     quote_ref = f"MQ-가락-{observed_date(state['market_quotes']) or state['date']}"
@@ -1854,7 +1878,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_rationale(state, rationale_input, constraints, quote_ref),
                     *_context_rationale(state["context_docs"]),
                     *_sourcing_rationale(decision, quote_ref),
-                    *_split_rationale(split_decision, rounds, state["forecast"], state["date"]),
+                    *_split_rationale(split_facts, rounds, state["forecast"], state["date"]),
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
@@ -1879,7 +1903,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     ),
                     *_sourcing_risks(sourcing, decision),
                     *_split_risks(
-                        split_decision,
+                        split_facts,
                         axis,
                         total,
                         coverage_days,
@@ -1889,6 +1913,11 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                         lead_days=lead_days,
                         cap_by_date=cap_by_date,
                         calendar=calendar,
+                        # 축이 걷힌 안 하나에만 붙는다 (`#308`) — 세 안에 다 붙이면
+                        # 같은 사실이 세 번 나가고, 안 붙이면 열린 축을 아무도 안 쓴
+                        # 이유가 사라진다.
+                        timing_withdrawn=declared_axes[draft["label"]] == TIMING_AXIS
+                        and axis != TIMING_AXIS,
                     ),
                     *_payment_risks(
                         rounds,

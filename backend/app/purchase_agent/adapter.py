@@ -34,9 +34,12 @@ from app.purchase_agent.config import (
 from app.purchase_agent.graph import build_graph
 from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.nodes.classify_situation import (
+    SplitEntryCap,
     compute_ci_width,
+    coverage_by_label,
     estimate_daily_demand,
     is_gate_excluded,
+    split_entry_cap,
 )
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
@@ -733,6 +736,27 @@ def _relation(value: float, threshold: float, comparison: str) -> str:
     return "<" if comparison == ">=" else "≤"
 
 
+def _volume_gate_sentence(estimated_total_kg: float, cap: SplitEntryCap) -> str:
+    """총량 게이트(``by_volume``)의 근거 한 문장. **세 갈래**다 (`#308`).
+
+    ★ 갈래가 셋인 이유는 ⑦ ``ARRIVAL_SKIP_REASONS`` 와 같다 — *"안 걸렸다"* 와
+      *"못 봤다"* 는 둘 다 «축이 안 열렸다» 이지만 **왜** 가 다르고, 하나로 적으면
+      물류가 값을 안 보낸 날과 여유가 넉넉한 날이 화면에서 같은 문장이 된다.
+
+    ⚠️ 판정과 **같은 함수**(``split_entry_cap``)가 낸 값만 인용한다. 여기서 다시 세면
+      근거가 실제 판정과 다른 수치를 주장하게 된다 — 이 파일이 방금 그 병을 앓았다.
+    """
+    total = f"추정 총량 {round(estimated_total_kg):,}kg"
+    if cap.cap_kg is None:
+        where = f"{cap.arrival_date} 도착" if cap.arrival_date else "도착일"
+        return f"{total} — {where} 창고 여유를 못 봐 총량 진입 조건을 판정하지 않았다"
+    holds = estimated_total_kg >= cap.cap_kg
+    return (
+        f"{total} {'≥' if holds else '<'} {cap.arrival_date} 도착 여유 "
+        f"{cap.cap_kg:,.0f}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
+    )
+
+
 def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tuple[Evidence, ...]:
     """payload의 **숫자·판정·비어 있지 않은 배열**에 근거를 붙인다 (정의서 §1.2-5).
 
@@ -774,10 +798,22 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     comparison = constraints["situation"]["ci_width_comparison"]
     # 총량 게이트가 보는 값 — ①과 **같은 계산**이다. 여기서 따로 세면 근거가 실제 판정과
     # 다른 수치를 주장하게 된다.
+    #
+    # 🔴 **말만 그랬고 실제로는 달랐다** (`#308` 에서 고침 · 2026-09-12). ①은 `#342` 로
+    #   ``coverage_by_label(situation, …)`` 를 쓰게 됐는데 — uncertain 인 날은 공격 라벨을
+    #   빼므로 최대 D 가 12 가 아니라 5다 — **이 줄만 옛 ``max(by_label)``(늘 12)에 남아
+    #   있었다.** 그래서 화면의 근거가 판정보다 **2.4배 큰 수**를 인용했다::
+    #
+    #       판정(①)   717.3 × 5  = 3,587kg
+    #       근거(여기) 717.3 × 12 = 8,608kg     ← 원장 2,747건 중 2,674건이 이 상태였다
+    #
+    #   ★ **규칙 8 이 못 잡는 방향이다** — 선언을 바꾸면 둘 다 따라 움직이므로 변이가
+    #     안 문다. `#342` 와 `#379` 가 같은 병의 양쪽이었고, 이것이 세 번째다.
     estimated_total_kg = estimate_daily_demand(state["confirmed_orders"], constraints) * max(
-        constraints["coverage_days"]["by_label"].values()
+        coverage_by_label(payload.get("situation"), constraints).values()
     )
-    volume_threshold = constraints["triggers"]["split_entry_qty_kg"]
+    # 기준값도 ①과 같은 함수로 뽑는다 — 고정 임계가 아니라 **도착일 창고 여유**다 (`#308`).
+    arrival_cap = split_entry_cap(state, constraints)
 
     def ref(kind: str) -> tuple[str, ...]:
         return (f"{item}-{kind}-{as_of}",)
@@ -835,12 +871,10 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             value=float(round(estimated_total_kg)),
             unit="kg",
             evidence_grade="SIM_FIXED",
-            evidence_detail=(
-                f"추정 총량 {round(estimated_total_kg):,}kg "
-                f"{'≥' if estimated_total_kg >= volume_threshold else '<'} "
-                f"임계 {volume_threshold:,}kg → 총량 진입 조건 "
-                f"{'충족' if estimated_total_kg >= volume_threshold else '미달'}"
-            ),
+            # 🔴 **세 갈래다 — 「못 봤다」를 「미달」로 적지 않는다** (규칙 3 · `#308`).
+            #   여유를 못 받은 날에 *"미달"* 이라고 쓰면 판정하지 않은 것이 판정한 것으로
+            #   읽히고, 읽는 사람은 그날 축이 왜 닫혔는지 되물을 수 없다.
+            evidence_detail=_volume_gate_sentence(estimated_total_kg, arrival_cap),
         ),
         Evidence(
             claim="allowed_axes",

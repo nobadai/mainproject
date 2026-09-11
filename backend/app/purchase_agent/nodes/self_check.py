@@ -13,13 +13,14 @@ from typing import Any, NamedTuple
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.nodes._guards import pending_value
 from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
 from app.purchase_agent.nodes.draft_plan import (
-    pending_value,
     purchase_budget_krw,
     split_adjustments,
     warehouse_cap_kg,
 )
+from app.purchase_agent.nodes.split_plan import effective_allowed_axes
 from app.purchase_agent.schemas import (
     DOCUMENT_SOURCE,
     FIXED_MARKET,
@@ -741,6 +742,12 @@ def check_axis_diversity(scenarios: list[dict], allowed_axes: list[str]) -> str 
 
     이 검사가 스키마가 아니라 여기 있는 이유: ``allowed_axes``는 ①이 그날 계산한 런타임
     값이라 출력 JSON만 보고는 알 수 없다.
+
+    🔴 **받는 것은 「열린 축」이 아니라 「실효 축」이다** (`#308` · 2026-09-12). ①이 축을
+      열어도 ④가 안 나눈 날이 있고, 그날 ⑥은 ``timing`` 을 배정하지 않는다. 여기에
+      ①의 목록을 그대로 넘기면 *"허용 축이 둘인데 전 안이 quantity"* 가 되어 **그날 안이
+      통째로 반려된다** — 실측 21셀 (안이 있는 672셀 기준). ⑥과 **같은 함수**
+      (``effective_allowed_axes``)가 만든 목록을 봐야 둘이 갈리지 않는다.
     """
     if len(allowed_axes) < 2 or len(scenarios) < 2:
         return None
@@ -801,7 +808,9 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
         else:
             survivors.append(scenario)
 
-    diversity = check_axis_diversity(survivors, state["allowed_axes"])
+    # ⑥과 **같은 목록**을 본다 — ④가 안 나눈 날의 timing 을 뺀 뒤 판정한다 (`#308`).
+    effective_axes = effective_allowed_axes(state["allowed_axes"], state["split_plan"])
+    diversity = check_axis_diversity(survivors, effective_axes)
     if diversity:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)
         survivors = []

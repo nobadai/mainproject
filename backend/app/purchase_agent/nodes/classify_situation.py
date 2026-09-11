@@ -2,11 +2,12 @@
 
 import operator
 from collections.abc import Callable, Mapping
+from datetime import date, timedelta
 from itertools import pairwise
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.purchase_agent.config import ci_width_threshold, load_constraints
-from app.purchase_agent.nodes._guards import require_positive
+from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.state import PurchaseAgentState
 
 #: ``ci_width_comparison`` 문자열 → 실제 연산. 임계와 비교 방향을 둘 다 파일에서 읽어야
@@ -128,6 +129,85 @@ def coverage_by_label(situation: str, constraints: dict) -> dict[str, int]:
     }
 
 
+#: 분할 진입을 **판정하지 못한** 사유. 문장을 상수로 두는 이유는 ⑦ ``ARRIVAL_SKIP_REASONS``
+#: 와 같다 — ①이 판정하고 ③이 고지하므로, 문면이 두 곳에 흩어지면 한쪽만 바뀐다.
+#:
+#: ⚠️ **「창 밖」 갈래를 두지 않는다.** ⑦ ``_unknown_reason`` 은 누락과 창 밖을 가르는데,
+#:   여기가 보는 날짜는 **창의 첫날**(물류 ``build_cap_window`` 의 ``start = as_of + N4``)
+#:   하나라 창 밖이 될 수 없다. 갈래를 만들면 **일어나지 않는 사유**가 문장으로 남는다.
+SPLIT_ENTRY_UNKNOWN = {
+    "no_lead": (
+        "그날 분할 진입 조건(도착일 창고 여유)을 판정하지 않았다 — 입고 소요일이 정해지지 "
+        "않아 도착일을 계산할 수 없다. 여유를 0으로 가정하지 않았다"
+    ),
+    "no_cap": (
+        "그날 분할 진입 조건(도착일 창고 여유)을 판정하지 않았다 — 물류에서 날짜별 입고 "
+        "여유를 받지 못했다. 여유를 0으로 가정하지 않았다"
+    ),
+    "missing": (
+        "그날 분할 진입 조건(도착일 창고 여유)을 판정하지 않았다 — 받은 날짜별 여유에 "
+        "도착일 {day} 칸이 없다. 여유를 0으로 가정하지 않았다"
+    ),
+}
+
+
+class SplitEntryCap(NamedTuple):
+    """분할 진입의 기준값 — **도착일 하루의 창고 여유**. 값과 "못 봤다"를 나눠 담는다.
+
+    ⑦ ``ArrivalCapacity`` 와 같은 모양이고 이유도 같다: 한 값으로 뭉치면 호출부가
+    *"이게 판정인가 미판정인가"* 를 문면으로 가르게 되고, 문구를 다듬는 날 판정이
+    조용히 뒤집힌다.
+    """
+
+    cap_kg: float | None = None
+    """그 도착일에 물류가 받아 줄 수 있는 양. ``None`` 이면 판정하지 않는다."""
+
+    arrival_date: str | None = None
+    """``as_of + N4``. N4 가 미결이면 ``None`` 이다."""
+
+    unknown_reason: str | None = None
+    """값을 못 본 사유. 채워지면 ③이 risks 에 싣는다 — 컷 사유가 아니다."""
+
+
+def split_entry_cap(state: PurchaseAgentState, constraints: dict) -> SplitEntryCap:
+    """분할 진입 임계 = ``cap_by_date[as_of + N4]`` (물류 회신 2026-09-11 · ``#308``).
+
+    ★ **왜 고정 수(``20,000kg``)가 아닌가.** 그 수는 *"이만큼 크면 나눠 사자"* 였는데,
+      나눠야 하는 진짜 이유는 크기가 아니라 **하루에 다 못 들어간다**는 것이다. 실측에서
+      그 임계는 **한 번도 안 섰다** — 품목별 최대가 배추 8,727 · 무 9,429 · 양파
+      10,286kg 이라 전부 미만이고, 관통 672셀 중 진입은 1건뿐이었다 (2026-09-12).
+      기준을 도착일 여유로 바꾸면 *"그날 들어갈 자리가 없으니 날짜를 나눈다"* 가 된다.
+
+    🟢 **물류가 동의한 형태다.** 다만 조건 셋이 붙었다 — ``cap_by_date`` 는 물류 정본으로만
+      두고, **회차 수·실행 계획은 매입이 정하며**, 나눈 뒤 각 회차 도착일을 다시
+      ``cap_by_date`` 로 검증한다. 셋째는 이미 서 있다 (⑥ ``cap_constrained_quantities`` ·
+      ⑦ ``check_arrival_capacity``).
+
+    🔴 **모르면 안 연다** (규칙 3). 여유를 못 받았거나 N4 가 미결이면 ``0`` 으로 채우지
+      않는다 — ``0`` 으로 채우면 «그날 한 톨도 안 들어간다» 가 되어 **모든 날 분할이
+      열린다.** 미결은 판정을 막아야지 판정을 만들면 안 된다.
+
+    ⚠️ **``0`` 은 채우는 값이 아니라 받은 값일 수 있다.** 관통 2,743셀 중 **1,620셀**이
+      도착일 여유 ``0`` 이고 (2026-09-12 실측), 그것은 확정된 0이라 판정 대상이다 —
+      그날은 어떤 양도 안 들어가므로 진입 조건이 선다. 다만 그 1,620셀은 **전부 안이
+      0개인 보류일**이라(``E2_HELD``) 실제로 열릴 안이 없다.
+    """
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    if lead_days is None:
+        return SplitEntryCap(unknown_reason=SPLIT_ENTRY_UNKNOWN["no_lead"])
+    arrival = (date.fromisoformat(state["date"]) + timedelta(days=int(lead_days))).isoformat()
+    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
+    if cap_by_date is None:
+        return SplitEntryCap(arrival_date=arrival, unknown_reason=SPLIT_ENTRY_UNKNOWN["no_cap"])
+    cap = cap_by_date.get(arrival)
+    if cap is None:
+        return SplitEntryCap(
+            arrival_date=arrival,
+            unknown_reason=SPLIT_ENTRY_UNKNOWN["missing"].format(day=arrival),
+        )
+    return SplitEntryCap(cap_kg=float(cap), arrival_date=arrival)
+
+
 def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints: dict) -> list[str]:
     """그날 허용되는 ``strategy_type`` 목록 (정의서 §3.5.1 · 상세설계 §4-①).
 
@@ -138,7 +218,12 @@ def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints:
     day = constraints["situation"]["ci_judgment_day"]
     axes = ["quantity"]  # 수량 축은 항상 허용된다
 
-    # timing: "총량 임계 초과 OR 지속 상승 궤적" 중 하나만 충족해도 열린다.
+    # timing: "도착일에 다 안 들어감 OR 지속 상승 궤적" 중 하나만 충족해도 열린다.
+    #
+    # 🔴 **앞 조건이 「총량 임계 초과」에서 바뀌었다** (`#308` · 2026-09-12). 나눠 사야 하는
+    #   이유는 «크다» 가 아니라 «하루에 다 못 들어간다» 라, 기준을 물류가 낸 도착일
+    #   여유로 옮겼다 — 근거·실측은 ``split_entry_cap`` docstring 에 있다.
+    #
     # 총량은 ③이 내기 전이라 아직 없으므로, **그날 실제로 만들 안들** 중 최대 D 로
     # 만든 추정 총량으로 판정한다.
     #
@@ -158,7 +243,11 @@ def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints:
     daily_demand = estimate_daily_demand(state["confirmed_orders"], constraints)
     max_coverage = max(coverage_by_label(situation, constraints).values())
     estimated_total_kg = daily_demand * max_coverage
-    by_volume = estimated_total_kg >= constraints["triggers"]["split_entry_qty_kg"]
+    # 🔴 **못 보면 안 연다** (규칙 3). 여유를 0으로 채우면 «그날 한 톨도 안 들어간다» 가
+    #   되어 **모든 날 축이 열린다** — 미결이 판정을 만드는 자리다. 못 본 사실은 ③이
+    #   risks 로 고지한다 (``_deferred_checks`` · ``SPLIT_ENTRY_UNKNOWN``).
+    arrival_cap = split_entry_cap(state, constraints)
+    by_volume = arrival_cap.cap_kg is not None and estimated_total_kg >= arrival_cap.cap_kg
     # 선매입 트리거는 상승률과 구간 폭을 함께 본다 (백로그 임계표) — 구간 폭 조건이 곧 stable이다.
     by_trend = (
         situation == "stable"

@@ -8,6 +8,7 @@ from typing import Any
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import (
+    pending_value,
     require_capacity_kg,
     require_non_empty,
     require_positive,
@@ -15,6 +16,7 @@ from app.purchase_agent.nodes._guards import (
 from app.purchase_agent.nodes.classify_situation import (
     coverage_by_label,
     estimate_daily_demand,
+    split_entry_cap,
 )
 from app.purchase_agent.quotes import quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
@@ -458,20 +460,6 @@ def _draft_one(
     }
 
 
-def pending_value(state: PurchaseAgentState, constraints: dict, name: str) -> int | None:
-    """미결 파라미터의 현재 값. **수신값이 설정값을 이긴다.**
-
-    ``constraints.yaml``의 ``pending``은 "아직 아무도 안 줬다"는 기본값이고, 어댑터가
-    재무 payload에서 받아 실으면 그 값이 정답이다. 두 곳을 각자 읽으면 한쪽만 바뀐다.
-
-    ``or``를 쓰지 않는다 — 0은 확정된 0이라 폴백 대상이 아니다 (규칙 3).
-    """
-    received = state.get(name)  # type: ignore[call-overload]  # NotRequired 키
-    if received is not None:
-        return received
-    return constraints["pending"][name]
-
-
 def _deferred_checks(
     state: PurchaseAgentState,
     constraints: dict,
@@ -488,8 +476,18 @@ def _deferred_checks(
     ``deducted``는 그날 보유 차감이 실제로 걸렸는지다 (상세설계 §4-③-4). 걸렸는데 입고
     소요일이 미결이면 **보유가 덮는 창과 매입이 덮는 창이 같은지 못 맞춘다** — 차감은
     하고 그 사실을 남긴다 (규칙 3 · 0으로 채우지 않는다).
+
+    🟡 **①이 판정하고 ③이 고지한다** (`#308`). 분할 진입 게이트는 ①에 있는데 ①에는
+      risks 로 나가는 길이 없다 — 돌려주는 것이 ``situation`` 과 ``allowed_axes`` 둘뿐이다.
+      같은 함수(``split_entry_cap``)를 여기서 한 번 더 불러 **못 본 사실만** 싣는다.
+      값을 다시 만드는 것이 아니라 같은 답을 두 번 묻는 것이라 둘이 갈릴 수 없다.
     """
     deferred = []
+    # 분할 진입 게이트를 판정하지 못한 날 (`#308`). N4 미결은 아래 가지가 이미 말하므로
+    # **여기서는 여유 쪽만** 적는다 — 한 원인을 두 문장으로 내면 읽는 사람이 둘로 센다.
+    arrival_cap = split_entry_cap(state, constraints)
+    if arrival_cap.arrival_date is not None and arrival_cap.unknown_reason is not None:
+        deferred.append(arrival_cap.unknown_reason)
     if pending_value(state, constraints, "inbound_lead_days") is None:
         deferred.append(
             "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정이라 "
