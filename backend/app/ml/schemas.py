@@ -63,6 +63,18 @@ class DailyPoint(BaseModel):
     lower: int = Field(gt=0)
     upper: int = Field(gt=0)
 
+    # 🔴 **뷰가 이미 싣고 있는 셋이다** (2026-09-11 · `v_ml_price_forecast.daily`).
+    #
+    #    ★★ 계약이 `extra="forbid"` 라 이 셋이 붙어 오면 **봉투가 통째로 거부된다.**
+    #      걷기 206일에서 판매 537건이 그렇게 죽었다 — 값이 틀린 것이 아니라
+    #      **계약에 칸이 없어서**였다.
+    #
+    #    ⚠️ **기본값을 `None` 으로 둔다.** 필수로 만들면 이 셋을 안 싣는 옛 경로가
+    #      거꾸로 막힌다 — *"안 온 것"* 과 *"거짓인 것"* 은 다른 사실이다.
+    is_filled: bool | None = None
+    is_gated: bool | None = None
+    gate_reason: str | None = None
+
     @model_validator(mode="after")
     def _ordered(self) -> "DailyPoint":
         if not self.lower <= self.predicted <= self.upper:

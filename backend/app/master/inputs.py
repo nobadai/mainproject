@@ -256,12 +256,26 @@ def _forecast_payload(row: dict[str, Any]) -> dict[str, Any]:
     ★ **`daily` 안의 둘은 손대지 않는다.** 뷰가 `jsonb_build_object` 로 넣은
       그대로 나른다 — 마스터가 풀어 다시 조립하면 ML 이 준 모양이 바뀐다.
 
+    🔴 **`as_of` · `target_kind` 를 더했다** (2026-09-11 · 걷기 실측).
+
+      ML 계약(`app/ml/schemas.py Forecast`)이 **필수**로 두는 칸인데 여기서 버리고
+      있었다. 매입은 안 읽어서 안 아팠고, 판매는 그 모델을 그대로 쓰므로 봉투가
+      통째로 거부됐다 — **206일에서 537건.** `use_recommended` 때와 같은 모양이다.
+
     ⚠️ 아직 안 나르는 것이 셋 있다 — `has_filled_rows` · `filled_count` ·
       `quality_note`. 앞 둘은 `daily` 에서 셀 수 있는 파생이고, `quality_note` 는
       사람이 읽는 문장이라 `SourcedInput.note` 로 이미 화면에 간다.
       **읽겠다는 파트가 생기면 그때 더한다.**
     """
     return {
+        # 🔴 **`as_of` 와 `target_kind` 는 ML 계약의 필수 칸이다** (2026-09-11).
+        #    뷰가 주는데 여기서 버리고 있었다 — `use_recommended` 때와 같은 모양이다.
+        #
+        #    ★★ 매입은 이 둘을 안 읽어서 안 아팠고, 판매는 ML 모델(`app.ml.schemas
+        #      .Forecast`)을 그대로 쓰므로 **없으면 봉투가 통째로 거부된다.**
+        #      걷기 206일에서 판매 537건이 이 자리에서 죽었다.
+        "as_of": row["as_of"],
+        "target_kind": row["target_kind"],
         "generated_at": row["generated_at"],
         "item": row["item"],
         "unit": row["unit"],
