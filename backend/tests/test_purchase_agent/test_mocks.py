@@ -362,12 +362,30 @@ def test_moving_one_item_leaves_the_others_where_they_were(
     assert got == {i: ("uncertain" if i == moved else "stable") for i in mocks.ITEMS}
 
 
+def _declared_thresholds() -> dict[str, float]:
+    """선언에 있는 임계를 **그대로 읽어 온다.**
+
+    🔴 **값을 베껴 적지 않는다** (규칙 8). 전에는 아래 둘이 ``0.08`` 을 손으로 들고
+      있었는데, 그것이 **그때의 선언값을 복사한 것**이었다. 그래서 2026-09-12 에 선언이
+      품목별로 갈리자(배추 0.55 · 무 0.65 · 양파 0.40) 두 검사가 같이 깨졌다 —
+      *"한 품목만 미결로 만든다"* 를 재려던 검사가 **다른 품목의 임계까지 몰래 바꾸고
+      있었던** 것이다.
+
+    ★ 읽는 대상이 ``mocks.ITEMS`` 가 아니라 **선언의 키**다. ``swap_threshold`` 가
+      같은 규율을 쓴다 — 선언에서 품목이 하나 빠져도 이 도구는 그대로 돈다.
+    """
+    return dict(load_constraints()["situation"]["ci_width_threshold"])
+
+
 def _without(item: str) -> dict[str, float]:
-    return {other: 0.08 for other in mocks.ITEMS if other != item}
+    return {other: value for other, value in _declared_thresholds().items() if other != item}
 
 
 def _nulled(item: str) -> dict[str, float | None]:
-    return {other: (None if other == item else 0.08) for other in mocks.ITEMS}
+    return {
+        other: (None if other == item else value)
+        for other, value in _declared_thresholds().items()
+    }
 
 
 @pytest.mark.parametrize("build", [_without, _nulled], ids=["없는_키", "null"])
@@ -429,6 +447,117 @@ def test_every_mock_item_has_a_declared_threshold() -> None:
     declared = load_constraints()["situation"]["ci_width_threshold"]
     missing = set(mocks.ITEMS) - set(declared)
     assert not missing, f"임계가 선언되지 않은 mock 품목: {sorted(missing)}"
+
+
+# ── 선언값 자체가 판정을 정하는가 (#67 실측값 · 2026-09-12) ──────────────────
+#
+# 🔴 **여기 둘만 실 선언값에 기댄다.** 위 검사들은 임계를 주입해서 선언과 무관하게
+#   돌지만(2026-09-04 스윕 뒤의 규율), 그러면 **선언에 무엇이 적혀 있든 아무도 안
+#   본다.** ``#67`` 이 값을 넣는 판에서 그 자리를 메운다.
+
+
+def _state_with_width(item: str, width: float) -> dict:
+    """판정 기준일 한 줄의 구간폭을 ``width`` 로 **합성한** State.
+
+    ⚠️ **입력이 합성이다 — mock 밴드가 아니다.** 그 사실과 이유를 적어 둔다::
+
+        mock 폭 (앵커 다섯 · 세 품목)   0.0594 ~ 0.1206
+        실 DB 폭 (2026-01~03 · AUC)    0.3180 ~ 0.8230
+        실 선언 (2026-09-12)            배추 0.55 · 무 0.65 · 양파 0.40
+
+    🔴 **mock 으로는 이 검사를 못 짠다.** mock 폭이 세 품목 다 0.12 언저리라 실 선언
+      어느 칸에도 안 걸리고, 그래서 **품목별 갈림이 한 건도 안 나온다.** 밴드를 새로
+      만들면 앵커를 타는 검사 수백 건의 지반이 흔들리므로(``#69`` 에서 겪은 자리),
+      밴드는 그대로 두고 **이 검사 안에서만** 한 줄을 합성한다.
+
+    ★ 합성하는 것은 ``upper``/``lower`` 뿐이다. ``predicted`` 와 ``date`` 는 mock 그대로라
+      ①이 실제로 읽는 경로(``judgment_row`` → 인덱스 ↔ 날짜)를 그대로 탄다.
+    """
+    state = build_initial_state(item, UNCERTAIN)
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    row = state["forecast"]["daily"][day - 1]
+    predicted = row["predicted"]
+    half = predicted * width / 2
+    row["upper"] = predicted + half
+    row["lower"] = predicted - half
+    return state
+
+
+def test_the_declared_threshold_itself_decides_not_some_older_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **선언을 옛 값(``0.08``)으로 되돌리면 판정이 따라 뒤집히는가.**
+
+    ``#67`` 전에는 셋이 다 ``0.08`` 이었고 실측 분포가 통째로 그 위라 **판정이 100%
+    ``uncertain``** 이었다. 그 값이 어딘가에 남아 다시 쓰이면 ``#67`` 은 조용히 없던
+    일이 된다 — 에러 없이 판정만 옛 자리로 돌아간다.
+
+    ⚠️ 합성 입력이다 — ``_state_with_width`` 의 ⚠️ 를 볼 것.
+
+    ★ **값을 대조하지 않는다** (규칙 8). 선언을 진짜 YAML 로 갈아 끼우고
+      **판정이 갈리는지**를 본다. ①이 ``0.08`` 을 박아 두면 실 선언 쪽이 ``uncertain``
+      으로 나와 여기서 운다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    # 실 선언 셋 모두보다 좁고, 옛 값 0.08 보다는 넓은 폭. 두 선언이 반대 판정을 낸다.
+    width = min(declared.values()) * 0.9
+    assert width > 0.08, "이 검사는 옛 값이 새 선언보다 좁다는 것에 기댄다"
+
+    with_declared = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(with_declared.values()) == {"stable"}, (
+        "실 선언에서는 이 폭이 셋 다 stable 이어야 한다 — 아니면 이 검사가 재는 갈림이 없다"
+    )
+
+    declare_thresholds(monkeypatch, tmp_path, dict.fromkeys(declared, 0.08))
+    with_old = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(with_old.values()) == {"uncertain"}, (
+        f"선언을 0.08 로 되돌렸는데 판정이 안 따라왔다 — 임계가 안 읽히고 있다: {with_old}"
+    )
+
+
+def test_flattening_the_three_thresholds_erases_the_per_item_split(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **품목마다 «자기» 값을 읽는가** — 셋을 같은 값으로 만들면 갈림이 사라져야 한다.
+
+    ``#283`` 이 구조를 품목별로 바꿨고 ``#67`` 이 값을 갈랐다. ①이 ``state["item"]`` 을
+    안 읽고 아무 칸이나 (예: 첫 칸을) 쓰면 **갈림이 그대로 나와서 아무도 모른다** —
+    그 경우를 잡으려고 **평탄화 쪽을 단언**한다.
+
+    ⚠️ 합성 입력이다 — ``_state_with_width`` 의 ⚠️ 를 볼 것.
+
+    ★ **실 선언이 셋 다 달라야 성립하는 검사다.** 선언이 다시 한 값으로 합쳐지면 여기가
+      먼저 운다(첫 단언) — 그것도 알려야 할 변화다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    assert len(set(declared.values())) > 1, (
+        "선언이 셋 다 같은 값이 됐다 — 품목별로 둔 이유가 사라졌으니 의식적으로 확인할 것"
+    )
+    # 가장 좁은 칸과 가장 넓은 칸 사이의 폭. 한 품목은 넘고 다른 품목은 못 넘는다.
+    width = (min(declared.values()) + max(declared.values())) / 2
+
+    split = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(split.values()) == {"stable", "uncertain"}, (
+        f"같은 폭인데 품목 판정이 안 갈렸다 — 품목별 임계를 안 읽고 있다: {split}"
+    )
+
+    declare_thresholds(monkeypatch, tmp_path, dict.fromkeys(declared, max(declared.values())))
+    flat = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert len(set(flat.values())) == 1, (
+        f"셋을 같은 값으로 폈는데 판정이 여전히 갈린다 — 임계 말고 다른 것이 갈랐다: {flat}"
+    )
 
 
 def _ci_widths(item: str, as_of: date) -> list[float]:
