@@ -508,7 +508,22 @@ class SalesScenario(BaseModel):
     partner_id: str | None = None
     quantity_kg: Decimal | None = Field(default=None, ge=0)
     unit_price_krw: Decimal | None = Field(default=None, ge=0)
-    sales_amount_krw: Decimal | None = Field(default=None, ge=0)
+    #: 🔴 **전선에서는 `reported_sales_amount_krw` 로 나간다** (2026-09-11).
+    #:
+    #: 재무가 이 값을 **믿지 않고 다시 세서 맞대 본다** — `compare_reported_sales_amount(
+    #: reported, recalculated)` 가 그 대조이고 허용 오차가 없다. 그래서 재무 쪽 이름에
+    #: 「보고된」이 붙어 있고, **그 말이 대조의 반쪽**이다. 두 항의 이름이 같아지면
+    #: 검사가 무슨 둘을 맞대는지 읽을 수 없다.
+    #:
+    #: ★★ **판매 안쪽 이름은 안 바꾼다.** 판매는 제안하는 것이지 보고하는 것이 아니고,
+    #:   자기 코드에서 `reported_` 는 틀린 말이다. 안쪽 이름과 전선 이름이 다른 것은
+    #:   **한 사실에 두 이름**이 아니라 **한 사실의 두 자리**다.
+    #:
+    #: ⚠️ 이 별칭은 `model_dump(by_alias=True)` 여야 실린다 — `adapter._proposal_payload`
+    #:   가 그 자리다. 거기서 `by_alias` 를 떼면 재무가 다시 못 읽는다.
+    sales_amount_krw: Decimal | None = Field(
+        default=None, ge=0, serialization_alias="reported_sales_amount_krw"
+    )
     delivery_date: date | None = None
     payment_days: int | None = Field(default=None, ge=0)
     #: 결제방식. 사용자/계약이 말해 준 경우에만 값이 있고, 아니면 None 이다.
