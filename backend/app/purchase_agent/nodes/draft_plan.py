@@ -214,6 +214,16 @@ _FREE_STOCK_CONTRADICTS_LOTS = (
     "이미 팔린 몫을 뺀 재고 확인 보류 — 이 품목 로트는 있는데 물류 가용재고 집계에는 "
     "품목이 없어 두 값이 어긋난다"
 )
+#: 🔴 **있을 수 없는 방향이다** (2026-09-12). 물류 가용재고는 창고에 실제로 있는 양에서
+#: 예약·만료·비-ACTIVE 를 **뺀** 값이라 로트 합을 넘을 수 없다. 넘으면 두 값 중 하나의
+#: 뜻이 바뀐 것이고, 그때 우리 차감은 **없는 재고를 쓸 수 있다고 세게 된다.**
+#:
+#: ⚠️ 이것은 「예약이 있다」를 고지하는 것이 **아니다.** 예약이 있으면 두 값이 당연히
+#:   다르고(V6 62셀 · V7 50셀) 그것은 정상이다. 여기서 보는 것은 **부등호의 방향**이다.
+_FREE_STOCK_EXCEEDS_LOTS = (
+    "이미 팔린 몫을 뺀 재고 확인 보류 — 물류 가용재고 집계가 이 품목 로트 합보다 커서 "
+    "두 값이 어긋난다"
+)
 
 
 class FreeStock(NamedTuple):
@@ -230,15 +240,50 @@ class FreeStock(NamedTuple):
     """값을 못 본 사유. 채워지면 ③이 risks 에 싣는다 — 컷 사유가 아니다."""
 
 
+def _own_lots(inventory: Mapping[str, Any], item: str) -> list[Mapping[str, Any]]:
+    """이 품목 로트만. ``absorb_inventory`` 가 쓰는 규칙 그대로다.
+
+    ★ ``item`` 키가 없는 로트는 **이 품목으로 센다** (``lot.get("item", item) == item``).
+      품목 축을 못 밝힌 것과 "다른 품목"은 다르고, 거기서 갈리면 두 곳이 같은 로트를
+      다르게 센다.
+
+    🔴 **봉투의 ``lots`` 는 전 품목이 섞여 있다.** 안 거르면 *"배추 집계가 없는데 무 로트가
+      있다"* 를 어긋남으로 읽어 **고지가 허위로 선다** — 실제로 그랬다 (V6 봉투 재현에서
+      3건이 났는데 셋 다 다른 품목 로트였다).
+    """
+    lots = inventory.get("lots")
+    if not isinstance(lots, list):
+        return []
+    return [
+        lot
+        for lot in lots
+        if isinstance(lot, Mapping) and lot.get("item", item) == item
+    ]
+
+
 def free_stock_for(inventory: Mapping[str, Any] | None, item: str) -> FreeStock:
-    """봉투의 ``inventory_by_item`` 에서 **이 품목** 가용재고를 고른다 (규칙 3 · 네 갈래).
+    """봉투의 ``inventory_by_item`` 에서 **이 품목** 가용재고를 고른다 (규칙 3 · 다섯 갈래).
 
     ```text
     칸 자체가 없다                   → 모름   클램프 안 건다 + 고지
+    🔴 로트 합보다 크다               → 모름   **있을 수 없는 방향** · 클램프 안 건다 + 고지
     이 품목이 실려 있다 (0 도 포함)    → 그 값   0 은 **확정된 0** 이다
     이 품목이 없고 로트도 없다         → 0.0    둘이 일치한다 — 재고가 없는 날이다
-    🔴 이 품목이 없는데 로트는 있다     → 모름   **모순이다** · 클램프 안 건다 + 고지
+    🔴 이 품목이 없는데 로트는 있다     → 모름   **어긋난다** · 클램프 안 건다 + 고지
     ```
+
+    ⚠️ **「두 값이 다르다」는 고지하지 않는다** — 그것이 정상이기 때문이다. 예약이 걸리면
+      로트 합(물리 잔량)과 집계(예약 뺀 값)가 **당연히** 다르고, 실측으로 V6 **62셀** ·
+      V7 **50셀** 이 그렇다(전체 171셀). 그 차이를 위험으로 적으면 셀 셋 중 하나에 매번
+      리스크 줄이 서서 «예약이 있다» 를 고장으로 읽게 만든다.
+
+      ★ 그리고 **문턱으로 줄지도 않는다** — 같은 실측에서 `>0` 이 62셀인데 `≥10kg` 도
+        **61셀**이다. 갈릴 때는 크게 갈린다(중앙값 무 309kg · 배추 846kg). 걸러낼 잡음이
+        없으니 문턱은 수만 깎고 뜻을 안 준다.
+
+    🔴 **그래서 보는 것은 크기가 아니라 부등호의 방향이다.** 집계는 로트 합에서 예약·만료·
+      비-ACTIVE 를 **뺀** 값이라 그 합을 넘을 수 없다. 넘으면 둘 중 하나의 뜻이 바뀐 것이고,
+      그때 우리 차감은 **없는 재고를 쓸 수 있다고 센다** — 클램프가 상한으로 안 듣는다.
 
     🔴 **``lots`` 로 대신 세지 않는다.** 그 합이 바로 이 함수가 막으려는 값이다 —
       ``usable_holdings_kg`` docstring 의 「이름이 같아서 못 봤다」 절 참조.
@@ -247,36 +292,37 @@ def free_stock_for(inventory: Mapping[str, Any] | None, item: str) -> FreeStock:
       ``inventory_by_item`` 은 **전 품목을 그대로 나른다** — 안 거르면 배추 가용재고로
       무 차감을 클램프한다.
 
-    🟡 **넷째 갈래는 아직 0건이다** (V6 봉투 171셀 실측 2026-09-12 · 이 품목 항목이 없는
-      6셀은 로트도 전부 0건). 그래도 두는 이유는 0 과 모름을 뭉개지 않기 위해서다 —
-      로트가 있는데 집계에 없으면 **둘 중 하나가 틀린 것**이고, 그때 조용히 0 으로 읽으면
-      차감이 0 이 되어 원수요를 통째로 산다.
+    🟡 **어긋남 두 갈래는 지금 둘 다 0건이다** (실행 `SIM-CHAIN-V1`~`V7` 봉투 **1,086셀**
+      전수 · 2026-09-12 16:3x 실측). 「집계에 품목이 없는데 로트는 있다」 0건 ·
+      「집계가 로트 합보다 크다」 **0건**.
+
+      ★★ **안 우는 것이 정상이고, 우는 날이 고장이다.** 그래서 이 둘은 *"있는데 안 무는
+        검사"* 가 아니다 — 셀 셋 중 하나에 매번 서는 「두 값이 다르다」와 달리, 이쪽은
+        한 번 울면 **그 자체가 남의 정의가 바뀐 증거**다.
     """
     if not isinstance(inventory, Mapping):
         return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
     rows = inventory.get("inventory_by_item")
     if not isinstance(rows, list):
         return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
+    lots = _own_lots(inventory, item)
     for row in rows:
         if not isinstance(row, Mapping) or row.get("item") != item:
             continue
         value = row.get("available_qty_kg")
         if isinstance(value, bool) or not isinstance(value, int | float):
             return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
+        # 🔴 **방향을 본다 — 크기를 안 본다.** 위 docstring 의 「부등호의 방향」 절.
+        #   ``None`` 인 로트는 합에서 빠지므로(규칙 3) 합이 과소평가될 수 있다. 그래서
+        #   **하나라도 ``None`` 이면 이 검사를 걸지 않는다** — 안 센 로트 때문에 「집계가
+        #   크다」가 서면, 있지도 않은 고장을 적는 것이 된다.
+        known = [lot.get("available_qty_kg") for lot in lots]
+        if all(qty is not None for qty in known) and float(value) > sum(
+            float(qty) for qty in known
+        ):
+            return FreeStock(unknown_reason=_FREE_STOCK_EXCEEDS_LOTS)
         return FreeStock(kg=float(value))
-    # 🔴 **로트도 품목으로 거른다.** 봉투의 ``lots`` 는 전 품목이 섞여 있고,
-    #   ``absorb_inventory`` 가 거른 뒤에만 이 품목 것이 된다. 안 거르면 *"배추 집계가
-    #   없는데 무 로트가 있다"* 를 모순으로 읽어 **고지가 허위로 선다** — 실제로 그랬다
-    #   (V6 봉투 재현에서 모순 3건이 났는데 셋 다 다른 품목 로트였다).
-    #
-    #   ★ ``item`` 키가 없는 로트는 **이 품목으로 센다** — ``absorb_inventory`` 가 쓰는
-    #     규칙(``lot.get("item", item) == item``) 그대로다. 품목 축을 못 밝힌 것과
-    #     "다른 품목"은 다르고, 거기서 갈리면 두 곳이 같은 로트를 다르게 센다.
-    lots = inventory.get("lots")
-    if isinstance(lots, list) and any(
-        isinstance(lot, Mapping) and lot.get("item", item) == item and lot.get("available_qty_kg")
-        for lot in lots
-    ):
+    if any(lot.get("available_qty_kg") for lot in lots):
         return FreeStock(unknown_reason=_FREE_STOCK_CONTRADICTS_LOTS)
     return FreeStock(kg=0.0)
 

@@ -25,7 +25,7 @@ from app.purchase_agent.nodes.draft_plan import (
     split_adjustments,
 )
 from app.purchase_agent.nodes.split_plan import effective_allowed_axes, split_decision
-from app.purchase_agent.quotes import observed_date, observed_spec
+from app.purchase_agent.quotes import observed_at, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -457,11 +457,15 @@ def usable_forecast_window(forecast: dict, coverage_days: int) -> list[dict]:
 
 
 def compute_max_price(forecast: dict, coverage_days: int) -> int:
-    """max_price = 커버 구간 안 예측 상단의 최대값 (규칙 5 · §4-⑦ "예측 q90 기반").
+    """max_price = 커버 구간 안 예측 상단의 최대값 (규칙 5).
 
     **마진 방어선과 무관하다** (규칙 5). 혼동하기 쉬운 두 값을 구분해둔다:
 
-    - ``max_price`` 초과 → ⑦이 **컷한다** (예측 q90 기반 하드 상한)
+    - ``max_price`` 는 **재무 STRESS 로 나간다** — ``amount_max_krw = qty × 이것`` 을
+      재무·마스터가 검사한다 (``finance/capabilities/scenario.py`` 의 등식 ·
+      ``master/verifier.py`` 의 ``L-PAYSCHED-MAX``). 🔴 **컷이 아니다** (`#394`).
+    - 컷은 ``cut_unit_price`` 가 한다 — ``self_check.check_max_price`` 가 그 값을 읽고,
+      ``grade_unit_price`` 가 넘는 안을 죽인다. ⚠️ 지금은 두 값이 같다. 갈라만 두었다
     - ``contract_price`` 초과 → 컷이 아니라 ``margin_warning=true`` 표시만
 
     커버 구간으로 자르는 이유: 그 안에서만 실제로 사기 때문이다.
@@ -646,7 +650,7 @@ def _quote_provenance(market_quotes: list[dict], as_of: str) -> dict[str, str]:
             "evidence_grade": "SIM_FIXED",
             "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
         }
-    observed = observed_date(market_quotes) or as_of
+    observed = observed_at(market_quotes) or as_of
     # 관측일이 as_of 와 다르면 **며칠 전 값인지**까지 적는다. "12-30 경락 실적"만 적으면
     # 읽는 사람이 오늘 값인지 아닌지를 스스로 계산해야 한다.
     gap = (date.fromisoformat(as_of) - date.fromisoformat(observed)).days
@@ -710,7 +714,7 @@ def _rationale(
             # ★ **관측일을 말한다.** 12-30 값을 "12-31 당일 경락가"라고 적으면 그것도
             #   거짓이다 — 우리는 아침에 돌아서 as_of 이전 최신 거래일을 읽는다.
             "claim": (
-                f"가락 {observed_date(state['market_quotes']) or as_of} 경락가 "
+                f"가락 {observed_at(state['market_quotes']) or as_of} 경락가 "
                 f"{state['market_quotes'][0]['price']:,}원/kg 등 "
                 f"{len(state['market_quotes'])}개 등급"
             ),
@@ -1065,7 +1069,8 @@ def _forecast_risks(forecast: dict, coverage_days: int) -> list[str]:
           창에 복사값이 섞인 조합    48 / 63   ← 76%. 매일 붙으면 신호가 죽는다
           최댓값 행이 복사값         6 / 63    ← 9.5%. 이때만 상한이 복사값에서 나온다
 
-      ``max_price`` 는 **최댓값 하나로 정해지는 컷 기준**이다 (규칙 5). 창 어딘가에
+      ``max_price`` 는 **최댓값 하나로 정해지는 재무 상한**이다 (규칙 5 · `#394`
+      로 컷과 갈라졌다 — 컷은 ``cut_unit_price`` 다). 창 어딘가에
       복사값이 있다는 사실은 그 기준을 안 움직이므로, 세어 봐야 *"오늘도 그렇다"* 가
       매일 붙을 뿐이다. 걸린 6건은 전부 **신정(2026-01-01)과 토요일(2026-08-29)** 이고
       전부 보수안(D=2)이다 — 창이 이틀뿐이라 휴장일 하나가 창의 절반이 된다.
@@ -1837,7 +1842,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     split_facts = split_decision(split_choice)
     # 시세 근거 좌표는 **관측일 기준**이고 그날 하나뿐이다. 안 루프 안에서 만들면 같은
     # 시세에서 나온 근거들이 서로 다른 좌표를 갖게 된다 (실제로 그랬다 — Codex 2차 지적).
-    quote_ref = f"MQ-가락-{observed_date(state['market_quotes']) or state['date']}"
+    quote_ref = f"MQ-가락-{observed_at(state['market_quotes']) or state['date']}"
 
     scenarios = []
     dropped = []

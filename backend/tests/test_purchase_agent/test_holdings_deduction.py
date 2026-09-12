@@ -637,3 +637,120 @@ def test_the_sentence_falls_back_to_one_number_when_the_aggregate_is_missing(
     assert "가용재고" not in reason, "못 본 값을 확인된 수처럼 적으면 안 된다"
     assert reason.count("kg") == 1, "수가 하나여야 한다"
     assert f"{demand:,}kg" in reason
+
+
+# ── ⑦ 대조 — 「있을 수 없는 방향」만 고지한다 ─────────────────────────────────
+#
+# 🔴 **「두 값이 다르다」는 고지하지 않는다.** 예약이 걸리면 로트 합(물리 잔량)과 집계(예약
+#   뺀 값)가 **당연히** 다르다 — 실측으로 V6 **62 / 171셀** · V7 **50 / 171셀** 이 그렇다.
+#   그 차이를 위험으로 적으면 셀 셋 중 하나에 매번 리스크 줄이 서고, 「예약이 있다」를
+#   고장으로 읽게 만든다.
+#
+#   ★ 그리고 **문턱으로 줄지도 않는다** — 같은 실측에서 `>0` 이 62셀인데 `≥10kg` 도 61셀,
+#     `≥100kg` 이 46셀이다. 갈릴 때는 크게 갈린다 (중앙값 무 309kg · 배추 846kg ·
+#     양파 15kg · 최소 비율 22.3%). 걸러낼 잡음이 없으니 문턱은 수만 깎고 뜻을 안 준다.
+#
+# 🟢 **그래서 보는 것은 부등호의 방향이다.** 집계는 로트 합에서 예약·만료·비-ACTIVE 를 뺀
+#   값이라 그 합을 넘을 수 없다. 실측 — 실행 `SIM-CHAIN-V1`~`V7` 봉투 **1,086셀 전수에서
+#   0건**이다 (2026-09-12 16:3x).
+#
+#   ★★ **안 우는 것이 정상이고, 우는 날이 고장이다.** 그것이 이 검사가 「있는데 안 무는
+#     검사」가 아니라는 근거다 — 한 번 울면 그 자체가 남의 정의가 바뀐 증거다.
+
+
+def test_an_aggregate_larger_than_the_lots_is_impossible_and_is_disclosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 집계가 로트 합보다 크면 **고지하고 클램프를 걸지 않는다.**
+
+    그 방향이면 클램프가 상한으로 안 듣는다 — 없는 재고를 쓸 수 있다고 세게 된다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots_and_free_stock(
+        monkeypatch,
+        [_lot(1000, 30)],
+        [{"item": ITEM, "available_qty_kg": 1500}],  # 🔴 로트 1,000 보다 크다
+    )
+    scenario = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )
+
+    assert scenario["total_qty_kg"] == demand - 1000, "클램프를 걸면 안 된다"
+    assert any("로트 합보다 커서" in risk for risk in scenario["risks"])
+
+
+def test_a_reserved_gap_is_normal_and_says_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🟢 짝 검사 — **예약이 있어 두 값이 다른 것은 고지하지 않는다.**
+
+    이쪽이 V6 62셀 · V7 50셀 에 해당하는 정상 상태다. 여기서 고지가 서면 그 셀 전부에
+    리스크 줄이 서고, 위 검사가 잡으려는 **진짜 고장이 그 사이에 묻힌다.**
+    """
+    _with_lots_and_free_stock(
+        monkeypatch,
+        [_lot(1000, 30)],
+        [{"item": ITEM, "available_qty_kg": 300}],  # 🟢 예약 700kg — 정상
+    )
+    scenario = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )
+
+    assert not any("어긋난다" in risk for risk in scenario["risks"]), (
+        "예약이 있는 날마다 고지가 서면 셀 셋 중 하나가 빨간불이 된다"
+    )
+    assert not any("커서" in risk for risk in scenario["risks"])
+
+
+def test_the_comparison_is_on_direction_not_size() -> None:
+    """🟡 같은 크기 차이인데 **방향만 반대**인 두 경우가 다르게 나온다.
+
+    ``3,587`` 과 ``1,000`` 의 차는 둘 다 ``2,587kg`` 인데, 한쪽만 있을 수 없는 방향이다.
+    크기를 보는 검사라면 둘이 같게 나온다.
+    """
+    lots = [_lot(3587, 30)]
+    envelope_ok = {"lots": lots, "inventory_by_item": [{"item": ITEM, "available_qty_kg": 1000}]}
+    envelope_bad = {
+        "lots": [_lot(1000, 30)],
+        "inventory_by_item": [{"item": ITEM, "available_qty_kg": 3587}],
+    }
+
+    assert free_stock_for(envelope_ok, ITEM) == FreeStock(kg=1000.0)
+    assert free_stock_for(envelope_bad, ITEM).unknown_reason is not None
+    assert free_stock_for(envelope_bad, ITEM).kg is None
+
+
+def test_an_unknown_lot_quantity_suspends_the_comparison() -> None:
+    """🔴 로트 수량이 ``None`` 이면 **대조를 걸지 않는다** (규칙 3).
+
+    ``None`` 은 합에서 빠지므로 합이 과소평가된다. 그 상태로 「집계가 크다」를 적으면
+    **안 센 로트 때문에 있지도 않은 고장을 적는 것**이 된다.
+    """
+    envelope = {
+        "lots": [_lot(100, 30), _lot(0, 30, available_qty_kg=None)],
+        "inventory_by_item": [{"item": ITEM, "available_qty_kg": 900}],
+    }
+    assert free_stock_for(envelope, ITEM) == FreeStock(kg=900.0), (
+        "모르는 로트가 섞이면 방향을 단정하지 않는다"
+    )
+
+
+def test_the_disclosure_says_nothing_about_internals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ 이 문장도 H1 화면과 Critic 이 읽는다 — 내부 이름을 흘리지 않는다."""
+    _with_lots_and_free_stock(
+        monkeypatch, [_lot(1000, 30)], [{"item": ITEM, "available_qty_kg": 1500}]
+    )
+    risks = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )["risks"]
+    disclosure = next(r for r in risks if "로트 합보다 커서" in r)
+
+    for internal in (
+        "inventory_by_item",
+        "free_stock",
+        "available_qty_kg",
+        "FreeStock",
+        "unknown_reason",
+        "lots[",
+    ):
+        assert internal not in disclosure, internal

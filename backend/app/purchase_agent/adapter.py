@@ -13,7 +13,7 @@
 from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
-from math import isfinite
+from math import ceil, floor, isfinite
 from typing import Any
 
 from app.contracts.core import Evidence
@@ -40,8 +40,9 @@ from app.purchase_agent.nodes.classify_situation import (
     estimate_daily_demand,
     is_gate_excluded,
     split_entry_cap,
+    volume_gate_holds,
 )
-from app.purchase_agent.quotes import QuoteSource, observed_date, quote_block_reason
+from app.purchase_agent.quotes import QuoteSource, observed_at, quote_block_reason
 from app.purchase_agent.state import PurchaseAgentState
 from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_capacity
 from app.purchase_agent.tracing import ToolRecorder
@@ -133,13 +134,13 @@ def _observed_at(
         ★ 마스터 통보(2026-09-12)가 그 이유를 적었다 — 이 칸은 *"안전을 재는 칸이 아니라
           **위험을 드러내는** 칸"* 이다. 미지를 빼고 최댓값을 내면 **모르는 것이 사라진다.**
 
-    🔴 **막힌 시세의 날짜는 싣지 않는다** (규칙 3). ``observed_date`` 는 ``max(dates)``
+    🔴 **막힌 시세의 날짜는 싣지 않는다** (규칙 3). ``observed_at`` 는 ``max(dates)``
       라 관측일이 여러 날 섞여도 **조용히 값을 낸다.** 그런데 그런 날 우리는 그 시세로
       판단하지 않는다 — ③이 ``_no_quote_plan`` 으로 0안을 낸다. 안 쓴 값의 관측일을
       실으면 *"우리가 이 시점 기준으로 판단했다"* 가 **거짓**이 된다. 「모른다」를
       날짜로 메우는 것이다.
 
-      ⚠️ **``allocate_sourcing`` 의 ``observed_date(quotes) or state["date"]`` 를
+      ⚠️ **``allocate_sourcing`` 의 ``observed_at(quotes) or state["date"]`` 를
         베끼지 않는다.** 그쪽은 사람이 읽는 **사유 문장**의 표시용 폴백이고, 이 칸은
         **계보**다 — 봉투가 ``as_of`` 로 메우는 것을 이름 걸고 금지한다.
 
@@ -151,7 +152,7 @@ def _observed_at(
         ``observed_at > as_of`` 게이트를 걸어도 우리는 한 건도 안 걸린다.
 
     🟡 **mock 은 전부 ``None`` 이다** — mock 시세에 관측일 표기가 0건이고
-      ``observed_date`` 가 그것을 *"표기가 없으면 None"* 으로 규정한다. 값이 나는 것은
+      ``observed_at`` 가 그것을 *"표기가 없으면 None"* 으로 규정한다. 값이 나는 것은
       실 DB 직독뿐이라 회귀 경로는 이 함수가 생겨도 그대로다.
 
     ⚠️ ``constraints`` 를 인자로 받는다 — ③·⑤와 **같은 판정**을 봐야 한다
@@ -159,7 +160,7 @@ def _observed_at(
     """
     if quote_block_reason(quotes, item, as_of.isoformat(), constraints):
         return None
-    text = observed_date(quotes)
+    text = observed_at(quotes)
     return None if text is None else date.fromisoformat(text)
 
 
@@ -355,7 +356,7 @@ def _unusable_forecast_names(forecast: Mapping[str, Any], daily: list[Any]) -> l
 
         use_recommended is False    ML: "FALSE 면 쓰지 마세요" — 조합 전체가 무효
         판정일 행이 quality 게이트   ci_width 를 그 행 하나로 재므로 판정이 성립 안 한다
-        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 컷 기준)
+        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 재무 상한)
           quality 게이트
 
     ★ **세 번째가 가장 짧은 창인 이유**: 큰 창은 짧은 창을 포함하므로, 짧은 창에 쓸
@@ -811,14 +812,29 @@ def _volume_gate_sentence(estimated_total_kg: float, cap: SplitEntryCap) -> str:
     ⚠️ 판정과 **같은 함수**(``split_entry_cap``)가 낸 값만 인용한다. 여기서 다시 세면
       근거가 실제 판정과 다른 수치를 주장하게 된다 — 이 파일이 방금 그 병을 앓았다.
     """
-    total = f"추정 총량 {round(estimated_total_kg):,}kg"
+    # 🔴 **게이트가 «실제로 비교하는» 수를 적는다** (2026-09-12). ① 은 ③ 이 만들 수 있는
+    #   최대치(``round`` 가 올림으로 떨어질 수 있어 ``ceil``)를 여유와 견주는데, 문장이
+    #   ``round`` 를 적으면 1kg 미만 경계에서 **「8,607kg > 여유 8,608kg → 충족」** 처럼
+    #   눈으로 거짓인 줄이 나간다 — ``_relation`` docstring 이 막는 그 병이다.
+    total = f"추정 총량 {ceil(estimated_total_kg):,}kg"
     if cap.cap_kg is None:
         where = f"{cap.arrival_date} 도착" if cap.arrival_date else "도착일"
         return f"{total} — {where} 창고 여유를 못 봐 총량 진입 조건을 판정하지 않았다"
-    holds = estimated_total_kg >= cap.cap_kg
+    # 🔴 **판정과 같은 술어를 부른다** (2026-09-12). 전에는 여기서 부등호를 다시 적었고,
+    #   ① 이 ``volume_gate_holds`` 로 옮겨 가면 근거 문장만 옛 방향에 남는다 — 이 함수의
+    #   docstring 이 경고한 바로 그 병이다.
+    holds = volume_gate_holds(estimated_total_kg, cap)
+    # 🔴 **여유는 내림해 적는다** (2026-09-12). 물류가 보내는 여유는 소수다 — 원장
+    #   실측에서 ``cap_by_date`` 값 79,291개 중 16,861개가 소수이고 대표값이 7,636.72 다.
+    #   ``:,.0f`` 는 **반올림**이라 7,637 로 적히고, 게이트가 성립한 날 화면이
+    #   *"7,637kg > 여유 7,637kg → 충족"* 이라는 **눈으로 거짓인 줄**을 내보낸다.
+    #
+    #   ★ 내림이 임의 선택이 아니다 — ⑦ ``check_arrival_capacity`` 가 ``int(cap)`` 으로
+    #     같은 값을 읽고, ``draft_plan.warehouse_cap_kg`` 도 *"이 값은 상한이라 올리면
+    #     못 넣는 양을 계획하게 된다"* 며 내린다. **쓰는 쪽과 적는 쪽이 같은 수를 본다.**
     return (
-        f"{total} {'≥' if holds else '<'} {cap.arrival_date} 도착 여유 "
-        f"{cap.cap_kg:,.0f}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
+        f"{total} {'>' if holds else '≤'} {cap.arrival_date} 도착 여유 "
+        f"{floor(cap.cap_kg):,}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
     )
 
 
@@ -933,7 +949,8 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             # 있다: timing은 ``by_volume OR by_trend``로 열리고 **by_volume은 situation과
             # 무관하다**. 이 근거가 없으면 uncertain인데 timing이 열린 날을 설명할 수 없다.
             ref_ids=ref("VOL"),
-            value=float(round(estimated_total_kg)),
+            # 문장과 **같은 수**여야 한다 — ``_volume_gate_sentence`` 참조.
+            value=float(ceil(estimated_total_kg)),
             unit="kg",
             evidence_grade="SIM_FIXED",
             # 🔴 **세 갈래다 — 「못 봤다」를 「미달」로 적지 않는다** (규칙 3 · `#308`).
@@ -1138,7 +1155,7 @@ def purchase_port(
           mock      배추 0안 · 무 0안   self_check 가 전부 컷
           실 경락가  배추 2안 · 무 2안   business=ok
 
-    ``max_price`` 는 실 ML 예측 q90 에서 오고 ``grade_unit_price`` 는 시세에서 온다.
+    ``max_price`` 는 실 ML 예측 밴드 상단에서 오고 ``grade_unit_price`` 는 시세에서 온다.
     한쪽만 mock 이면 **출처가 다른 두 값을 비교**하게 되고, 그 판정은 뜻이 없다.
 
     ★ 인자 기본값을 mock 으로 남겨 둔 이유는 테스트다 — 결정론 스위트가 DB 없이 돈다.

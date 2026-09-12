@@ -4,6 +4,7 @@ import operator
 from collections.abc import Callable, Mapping
 from datetime import date, timedelta
 from itertools import pairwise
+from math import ceil
 from typing import Any, NamedTuple
 
 from app.purchase_agent.config import ci_width_threshold, load_constraints
@@ -62,8 +63,9 @@ def is_gate_excluded(row: Mapping[str, Any]) -> bool:
           보수(D=2) 창 21개  →  전부 100% gated (AUC 는 offset 1~5 가 lead_time)
           gated 를 빼면      →  max_price 가 21조합에서 None
 
-      ``max_price`` 는 컷 기준이라(규칙 5) ``None`` 이면 **보수안이 통째로 판정
+      ``max_price`` 는 재무 상한이라(규칙 5) ``None`` 이면 **보수안이 통째로 판정
       불가**가 된다. 사유를 안 보고 표시만 봤을 때 생기는 일이다.
+      🔴 컷 기준이 아니다 — 컷은 ``cut_unit_price`` 가 한다 (`#394` 로 갈라졌다).
 
     ★ **값이 없으면 제외하지 않는다** (규칙 3). mock 예측에는 이 칸이 아예 없고,
       *"게이트 정보가 없다"* 와 *"게이트가 quality 다"* 는 다른 사실이다.
@@ -208,6 +210,38 @@ def split_entry_cap(state: PurchaseAgentState, constraints: dict) -> SplitEntryC
     return SplitEntryCap(cap_kg=float(cap), arrival_date=arrival)
 
 
+def volume_gate_holds(estimated_total_kg: float, cap: SplitEntryCap) -> bool:
+    """추정 총량이 **도착일 여유를 넘는가** — ①의 timing 축 총량 게이트 (`#308`).
+
+    🔴 **④ 가 같은 물음을 다른 수로 다시 묻는다.** ①은 클립 **전** 추정 총량
+       (일평균 × 최대 D)으로 축을 열고, ④ ``evaluate_split_entry`` 는 클립 **후**
+       안별 실제 총량으로 진입을 본다. 그런데 ④ 의 진입은 ``timing ∈ allowed_axes``
+       를 요구하므로, **① 이 안 열면 ④ 는 나눌 수 없다** — 창고가 못 받는 날인데도
+       1회차로 나가고 ⑦ ``check_arrival_capacity`` 에서 통째로 컷된다.
+
+    ★ **그래서 ① 이 ④ 보다 반드시 먼저 열려야 한다.** 그 함의가 성립하는 근거:
+
+       ```text
+       ④ 진입    largest_total_kg > cap
+       불변식    largest_total_kg ≤ round(일평균 × D_label) ≤ ceil(일평균 × D_max)
+                 (③ total_qty_kg = min(raw, caps) ≤ raw ≤ demand_qty = round(…))
+       따라서    largest > cap  ⇒  ceil(추정) ≥ largest > cap  ⇒  이 게이트가 참
+       ```
+
+       ``ceil`` 이 없으면 ``demand_qty`` 의 ``round`` 가 올림으로 떨어지는 1kg 미만
+       구간에서 함의가 깨진다 — ④ 는 «나눠야 한다» 는데 축이 안 열린 날이 된다.
+       방어가 아니라 **불변식을 성립시키는 항**이다.
+
+    ★ **비교 방향을 ④ 와 맞춘다** (``>``). ⑦ ``check_arrival_capacity`` 의 컷도
+      ``occupied > cap`` 이라, 총량이 여유와 **같은** 날은 1회차로 정확히 들어간다 —
+      그날 축을 열면 나눌 이유가 없는데 나뉜다.
+
+    🔴 **못 보면 안 연다** (규칙 3). ``cap_kg is None`` 은 «여유가 0» 이 아니라
+       «안 봤다» 다 — 0 으로 읽으면 총량 ≥ 0 이 늘 참이라 **매일** 열린다.
+    """
+    return cap.cap_kg is not None and ceil(estimated_total_kg) > cap.cap_kg
+
+
 def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints: dict) -> list[str]:
     """그날 허용되는 ``strategy_type`` 목록 (정의서 §3.5.1 · 상세설계 §4-①).
 
@@ -247,7 +281,7 @@ def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints:
     #   되어 **모든 날 축이 열린다** — 미결이 판정을 만드는 자리다. 못 본 사실은 ③이
     #   risks 로 고지한다 (``_deferred_checks`` · ``SPLIT_ENTRY_UNKNOWN``).
     arrival_cap = split_entry_cap(state, constraints)
-    by_volume = arrival_cap.cap_kg is not None and estimated_total_kg >= arrival_cap.cap_kg
+    by_volume = volume_gate_holds(estimated_total_kg, arrival_cap)
     # 선매입 트리거는 상승률과 구간 폭을 함께 본다 (백로그 임계표) — 구간 폭 조건이 곧 stable이다.
     by_trend = (
         situation == "stable"

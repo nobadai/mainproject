@@ -82,7 +82,7 @@ def choose_rounds(total_kg: int, cap_kg: float | None, constraints: dict) -> int
 def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[str, Any]:
     """진입 판정과 회차 수. 근거 전체를 dict 하나로 돌려준다.
 
-    ``timing ∈ allowed_axes AND (최대안 총량 ≥ 도착일 여유 OR 지속 상승 궤적)``
+    ``timing ∈ allowed_axes AND (최대안 총량 > 도착일 여유 OR 지속 상승 궤적)``
     (§4-④ v1.1 정정 — 구 "D ≥ 임계"는 낡은 표현이고 임계는 수량이다).
 
     🔴 **수량 가지의 기준이 고정 임계에서 도착일 여유로 바뀌었다** (`#308` · 2026-09-12).
@@ -108,7 +108,14 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
         "cap_kg": cap.cap_kg,
         "arrival_date": cap.arrival_date,
         "cap_unknown_reason": cap.unknown_reason,
-        "by_volume": cap.cap_kg is not None and total_kg >= cap.cap_kg,
+        # 🔴 **``>`` 다 — ``>=`` 가 아니다** (`#308` 후속 · 2026-09-12). ⑦
+        #   ``check_arrival_capacity`` 의 컷이 ``occupied > cap`` 이라, 총량이 여유와
+        #   **같은** 날은 1회차로 정확히 들어간다. 거기서 진입하면 나눌 이유가 없는데
+        #   나뉘고, ``timing`` 라벨이 timing 근거 없이 붙는다.
+        #
+        #   ★ ``cap_kg`` 는 소수일 수 있는데 ``total_kg`` 는 정수라, 이 비교는 ⑦ 이
+        #     ``int(cap)`` 으로 내림해 재는 것과 **모든 경우에 같은 답**을 낸다.
+        "by_volume": cap.cap_kg is not None and total_kg > cap.cap_kg,
         "by_trend": is_sustained_rise(state["forecast"], day),
         "rounds": 1,
     }
