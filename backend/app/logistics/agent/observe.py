@@ -133,8 +133,8 @@ def observe(
     #
     # 🔴 Lot 루프보다 **먼저** 읽는다. 잔량과 그 잔량의 날짜는 한 사실의 두 면이라
     #    따로 붙이면 서로 다른 순간을 읽게 된다.
-    원장, 원장사유 = _ledger_state(conn, sim_run_id=sim_run_id, as_of=as_of)
-    uncertainties.extend(원장사유)
+    ledger_state, ledger_uncertainties = _ledger_state(conn, sim_run_id=sim_run_id, as_of=as_of)
+    uncertainties.extend(ledger_uncertainties)
 
     # ── 예약·할당 축 — **`build_inventory_by_item` 과 같은 눈** ───────────
     #
@@ -144,12 +144,12 @@ def observe(
     axes = _commitment_axes(snapshot)
     if axes is None:
         uncertainties.append(OUTBOUND_COMMITMENTS_UNRESOLVED)
-        미확정: dict[str, Decimal] = {}
+        uncommitted_by_lot: dict[str, Decimal] = {}
     else:
         allocated_by_lot, _ = axes
-        미확정 = {
-            lot.lot_id: 기여
-            for lot, 기여 in _sellable_lot_contributions(snapshot, allocated_by_lot)
+        uncommitted_by_lot = {
+            lot.lot_id: contribution
+            for lot, contribution in _sellable_lot_contributions(snapshot, allocated_by_lot)
         }
 
     # ── 회전 축 — 품목 ID 와 판매우선 경계 ───────────────────────────────
@@ -157,38 +157,38 @@ def observe(
     # ★ 스냅샷은 품목 **이름**만 싣고(`InventoryLotSnapshot.item`), severity 가 쓰는
     #   `sell_priority_remaining_days` 도 없다. 같은 WHERE(`잔량 > 0` ·
     #   `received_at <= as_of`)를 쓰는 기존 조회를 그대로 빌린다.
-    회전 = {
+    turnover_by_lot = {
         one.lot_id: one for one in load_lot_turnover(conn, sim_run_id=sim_run_id, as_of=as_of)
     }
 
     lots: list[ObservedLot] = []
     for lot in snapshot.on_hand_by_lot:
-        회전행 = 회전.get(lot.lot_id)
-        if 회전행 is None:
+        turnover_row = turnover_by_lot.get(lot.lot_id)
+        if turnover_row is None:
             uncertainties.append(f"{TURNOVER_LOT_UNRESOLVED}:{lot.lot_id}")
-        마지막이동, 이동사유 = _quantity_observed_as_of(원장, lot=lot)
-        uncertainties.extend(이동사유)
+        last_moved_at, move_uncertainties = _quantity_observed_as_of(ledger_state, lot=lot)
+        uncertainties.extend(move_uncertainties)
         lots.append(
             ObservedLot(
                 lot_id=lot.lot_id,
                 item=lot.item,
-                item_id=None if 회전행 is None else 회전행.item_id,
+                item_id=None if turnover_row is None else turnover_row.item_id,
                 status=lot.status,
                 received_at=lot.received_at,
                 remaining_qty_kg=lot.available_qty_kg,
                 # 🔴 **판매 가용이 아닌 Lot 에는 이 값이 없다.** 비-ACTIVE·신선도
                 #    만료 Lot 은 애초에 팔 수 없어 «아직 안 잡힌 몫» 이 성립하지
                 #    않는다 — 0 으로 적으면 «다 잡혔다» 로 읽힌다.
-                uncommitted_kg=미확정.get(lot.lot_id),
+                uncommitted_kg=uncommitted_by_lot.get(lot.lot_id),
                 remaining_freshness_days=lot.remaining_freshness_days,
                 effective_freshness_limit_days=lot.effective_freshness_limit_days,
                 sell_priority_remaining_days=(
-                    None if 회전행 is None else 회전행.sell_priority_remaining_days
+                    None if turnover_row is None else turnover_row.sell_priority_remaining_days
                 ),
                 storage_zone=lot.storage_zone,
-                remaining_qty_observed_as_of=마지막이동,
+                remaining_qty_observed_as_of=last_moved_at,
                 status_observed_as_of=_status_observed_as_of(
-                    lot.status, received_at=lot.received_at, last_moved_at=마지막이동
+                    lot.status, received_at=lot.received_at, last_moved_at=last_moved_at
                 ),
             )
         )
@@ -244,7 +244,7 @@ def _ledger_state(
 
 
 def _quantity_observed_as_of(
-    원장: dict[str, LedgerLotState] | None, *, lot: InventoryLotSnapshot
+    ledger_state: dict[str, LedgerLotState] | None, *, lot: InventoryLotSnapshot
 ) -> tuple[date | None, list[str]]:
     """이 Lot 의 잔량을 **언제부터 알 수 있었나** = 마지막 원장 이동일.
 
@@ -262,14 +262,14 @@ def _quantity_observed_as_of(
     🔴 **탐지를 막지는 않는다.** 날짜가 없다고 문제를 안 여는 것이 아니다 — 문제는
        열되 *"이 근거의 관측일은 모른다"* 를 그대로 남긴다.
     """
-    if 원장 is None:
+    if ledger_state is None:
         return None, []
-    행 = 원장.get(lot.lot_id)
-    if 행 is None:
+    ledger_row = ledger_state.get(lot.lot_id)
+    if ledger_row is None:
         return None, [f"{LEDGER_MOVE_UNRESOLVED}:{lot.lot_id}"]
-    if 행.balance_kg != lot.available_qty_kg:
+    if ledger_row.balance_kg != lot.available_qty_kg:
         return None, [f"{OBSERVATION_INCONSISTENT}:{lot.lot_id}"]
-    return 행.last_moved_at, []
+    return ledger_row.last_moved_at, []
 
 
 def _status_observed_as_of(

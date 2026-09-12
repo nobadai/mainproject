@@ -1,7 +1,8 @@
 """`logistics_exceptions` 한 표만 읽고 쓴다. **업무 판단이 여기 없다.**
 
 ```text
-읽기   live_exceptions          살아 있는(OPEN·PROPOSED) 행
+읽기   live_exceptions          **지금** 살아 있는(OPEN·PROPOSED) 행
+       live_exceptions_at       **그날** 살아 있던 행 — 과거 조사용 (Commit 3 Tool)
        previous_exception_id_for 같은 축의 가장 최근 닫힌 행 — 재발을 잇는 고리
 쓰기   open_exception           INSERT (status=OPEN)
        touch_exception          UPDATE evidence · severity · last_detected · observed
@@ -32,9 +33,11 @@ from app.logistics.agent.schemas import (
 from app.logistics.db import get_db_schema
 
 __all__ = [
+    "EXCEPTION_CLOSE_DATE_UNRESOLVED",
     "EmptyEvidence",
     "exception_id_for",
     "live_exceptions",
+    "live_exceptions_at",
     "open_exception",
     "previous_exception_id_for",
     "resolve_exception",
@@ -81,9 +84,9 @@ def _rows(conn: Any, query: sql.Composed, params: Any) -> list[dict[str, Any]]:
 
 
 def _row(raw: dict[str, Any]) -> ExceptionRow:
-    근거 = raw["evidence_json"] or []
-    if isinstance(근거, str):  # jsonb 를 문자열로 돌려주는 드라이버 설정 대비
-        근거 = json.loads(근거)
+    evidence_rows = raw["evidence_json"] or []
+    if isinstance(evidence_rows, str):  # jsonb 를 문자열로 돌려주는 드라이버 설정 대비
+        evidence_rows = json.loads(evidence_rows)
     return ExceptionRow(
         exception_id=raw["exception_id"],
         sim_run_id=raw["sim_run_id"],
@@ -95,7 +98,7 @@ def _row(raw: dict[str, Any]) -> ExceptionRow:
         opened_as_of=raw["opened_as_of"],
         last_detected_as_of=raw["last_detected_as_of"],
         observed_as_of=raw["observed_as_of"],
-        evidence=tuple(ExceptionEvidence.from_json(one) for one in 근거),
+        evidence=tuple(ExceptionEvidence.from_json(one) for one in evidence_rows),
         detector_version=raw["detector_version"],
         resolved_as_of=raw["resolved_as_of"],
         resolved_by=raw["resolved_by"],
@@ -129,6 +132,71 @@ def live_exceptions(conn: Any, *, sim_run_id: str) -> tuple[ExceptionRow, ...]:
         {"sim": sim_run_id, "live": list(LIVE_STATUSES)},
     )
     return tuple(_row(raw) for raw in rows)
+
+
+#: 닫힌 행인데 **닫은 날이 없다.** 그날 살아 있었는지 증명할 수 없어 과거 조회에서
+#: 뺀다 — 넣으면 이미 끝난 문제를 조사하라고 올리는 것이 된다.
+#: 🔴 지금 production 에서는 안 난다 (`resolve_exception` 이 `resolved_as_of` 를 함께
+#:    적는다). 사람이 손으로 닫은 행을 대비해 규칙만 세워 둔다.
+EXCEPTION_CLOSE_DATE_UNRESOLVED = "EXCEPTION_CLOSE_DATE_UNRESOLVED"
+
+
+def live_exceptions_at(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[tuple[ExceptionRow, ...], tuple[str, ...]]:
+    """**그날** 살아 있던 Exception 과 못 가른 것들. 🔴 지금 값을 과거로 쓰지 않는다.
+
+    ```text
+    열렸다      opened_as_of <= as_of                    그날 이미 장부에 서 있었다
+    안 닫혔다   status 가 아직 살아 있다                  ← 상태는 앞으로만 간다
+             또는 resolved_as_of > as_of                 그날 뒤에 닫혔다
+    ```
+
+    🔴 **`live_exceptions` 만으로는 과거를 못 센다.** 저 함수는 *"지금"* 살아 있는 행을
+       내므로 두 가지로 틀린다 — ① `opened_as_of > as_of` 인 **미래 문제**가 섞이고
+       (look-ahead), ② 그날 열려 있다가 **그 뒤 닫힌** 문제가 통째로 빠진다.
+       ②는 조사에서 *"그날 아무 문제 없었다"* 로 읽혀 더 위험하다.
+
+    ★ **재오픈이 없어서 이 셈이 성립한다.** 재발은 새 행 + `previous_exception_id` 라
+      (§6.3) 한 행의 상태는 앞으로만 간다 — 지금 `OPEN` 인데 `opened_as_of <= as_of` 면
+      그날에도 `OPEN` 이었다.
+
+    ⚠️ **닫은 날을 모르는 닫힌 행은 뺀다.** 그날 살아 있었음을 증명할 수 없다 —
+       사유를 함께 돌려준다 (`EXCEPTION_CLOSE_DATE_UNRESOLVED:{exception_id}`).
+
+    :returns: `(그날 살아 있던 행들, 못 가른 사유들)`. 🔴 **아무것도 쓰지 않는다.**
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT {columns}
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND opened_as_of <= %(as_of)s
+            ORDER BY exception_id
+            """
+        ).format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _COLUMNS),
+            schema=_schema(),
+        ),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    live: list[ExceptionRow] = []
+    uncertainties: list[str] = []
+    for raw in rows:
+        if raw["status"] in LIVE_STATUSES:
+            # 상태는 앞으로만 간다 — 지금 살아 있고 그날 이미 열렸으면 그날에도 살아 있었다.
+            live.append(_row(raw))
+            continue
+        closed_as_of = raw["resolved_as_of"]
+        if closed_as_of is None:
+            # 닫힌 날을 모르면 그날 살아 있었음을 증명할 수 없다.
+            uncertainties.append(f"{EXCEPTION_CLOSE_DATE_UNRESOLVED}:{raw['exception_id']}")
+            continue
+        if closed_as_of > as_of:
+            live.append(_row(raw))
+    return tuple(live), tuple(uncertainties)
 
 
 def previous_exception_id_for(
@@ -177,13 +245,13 @@ def exception_id_for(
        — 그래도 **이름이 겹치면 조용히 덮는 대신 뒤에 번호를 붙인다.** PK 충돌로
        하루가 터지는 것보다 낫고, 번호가 붙었다는 것 자체가 그날의 이상 신호다.
     """
-    바탕 = f"EX-{sim_run_id}-{code}-{subject_id}-{opened_as_of:%Y%m%d}"
-    후보 = 바탕
-    번호 = 1
-    while _exists(conn, exception_id=후보):
-        번호 += 1
-        후보 = f"{바탕}-{번호}"
-    return 후보
+    base = f"EX-{sim_run_id}-{code}-{subject_id}-{opened_as_of:%Y%m%d}"
+    candidate = base
+    suffix = 1
+    while _exists(conn, exception_id=candidate):
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    return candidate
 
 
 def _exists(conn: Any, *, exception_id: str) -> bool:

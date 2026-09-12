@@ -157,6 +157,10 @@ class HistoricalLot:
     grade: str | None
     storage_zone: str | None
     received_at: date
+    #: 이 Lot 의 **실제 취득단가**(원/kg). 🔴 `grade` 와 같은 이유로 행에서 읽는다 —
+    #: 입고 때 정해지고 그 뒤 바뀌는 경로가 없는 정적 속성이다.
+    #: ★ 폐기 손실을 «지어내지 않고» 셈하는 유일한 근거다 (`agent.tools`).
+    unit_cost_krw_per_kg: Decimal | None
     #: 🔴 **`IN − OUT − DISPOSE` 누계다.** `remaining_qty_kg` 컬럼이 아니다.
     remaining_qty_kg: Decimal
     state: HistoricalLotState
@@ -540,6 +544,7 @@ def lot_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Historical
         sql.SQL(
             """
             SELECT l.lot_id, l.item_id, i.item_name, l.grade, l.storage_zone, l.received_at,
+                   l.unit_cost_krw_per_kg,
                    sp.operational_limit_days, sp.medium_grade_factor,
                    tp.operational_turnover_target_days AS turnover_target_days,
                    tp.sell_priority_remaining_days,
@@ -573,6 +578,7 @@ def lot_state_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Historical
                 grade=_normalize_grade(row["grade"]),
                 storage_zone=row["storage_zone"],
                 received_at=row["received_at"],
+                unit_cost_krw_per_kg=row["unit_cost_krw_per_kg"],
                 remaining_qty_kg=balance,
                 state=_lot_state(
                     balance=balance,

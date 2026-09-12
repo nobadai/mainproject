@@ -149,32 +149,34 @@ def detect_freshness_pressure(observation: WarehouseObservation) -> DetectorOutc
       중 등급이 즉시 임박으로 잡힌다 — `tools.collect_freshness_lot_census` 가 같은
       이유로 같은 분모를 쓴다.
     """
-    임계 = observation.policy.freshness_pressure_ratio
-    if 임계 is None:
+    threshold = observation.policy.freshness_pressure_ratio
+    if threshold is None:
         return DetectorOutcome(
             code=FRESHNESS_PRESSURE, ran=False, skipped=FRESHNESS_PRESSURE_POLICY_UNRESOLVED
         )
 
-    조건들: list[DetectedCondition] = []
+    conditions: list[DetectedCondition] = []
     for lot in observation.lots:
         if lot.status != _ACTIVE:
             continue
-        잔여 = lot.remaining_freshness_days
-        if 잔여 is None or 잔여 <= 0:
+        remaining = lot.remaining_freshness_days
+        if remaining is None or remaining <= 0:
             continue
-        비율 = lot.freshness_remaining_ratio
-        if 비율 is None:
+        ratio = lot.freshness_remaining_ratio
+        if ratio is None:
             continue
         # 🔴 **경계(`<=`)의 주인은 `count_freshness_risk_lots` 하나다.** 여기서
         #    `비율 <= 임계` 를 다시 적으면, 그 함수의 경계가 바뀌는 날 *"위험 Lot 3건"*
         #    이라고 답한 회신과 Exception 이 서로 다른 수를 세게 된다.
-        if count_freshness_risk_lots([비율], 임계) == 0:
+        if count_freshness_risk_lots([ratio], threshold) == 0:
             continue
-        미확정 = lot.uncommitted_kg
-        if 미확정 is None or 미확정 <= 0:
+        uncommitted = lot.uncommitted_kg
+        if uncommitted is None or uncommitted <= 0:
             continue
-        조건들.append(_freshness_condition(lot, ratio=비율, threshold=임계, remaining=잔여))
-    return DetectorOutcome(code=FRESHNESS_PRESSURE, ran=True, conditions=tuple(조건들))
+        conditions.append(
+            _freshness_condition(lot, ratio=ratio, threshold=threshold, remaining=remaining)
+        )
+    return DetectorOutcome(code=FRESHNESS_PRESSURE, ran=True, conditions=tuple(conditions))
 
 
 def _freshness_severity(*, remaining: int, sell_priority_remaining_days: int | None) -> Severity:
@@ -216,9 +218,9 @@ def _freshness_condition(
     sell_priority_remaining_days    회전정책            → None
     ```
     """
-    한계 = lot.effective_freshness_limit_days
-    assert 한계 is not None  # 비율이 섰다는 것이 곧 한계가 있다는 뜻이다
-    근거 = [
+    limit = lot.effective_freshness_limit_days
+    assert limit is not None  # 비율이 섰다는 것이 곧 한계가 있다는 뜻이다
+    evidence = [
         ExceptionEvidence(
             fact="remaining_freshness_days",
             value=Decimal(remaining),
@@ -231,7 +233,7 @@ def _freshness_condition(
         ),
         ExceptionEvidence(
             fact="effective_freshness_limit_days",
-            value=Decimal(한계),
+            value=Decimal(limit),
             unit="일",
             source="item_storage_policies",
             source_id=lot.item,
@@ -275,7 +277,7 @@ def _freshness_condition(
         ),
     ]
     if lot.sell_priority_remaining_days is not None:
-        근거.append(
+        evidence.append(
             ExceptionEvidence(
                 fact="sell_priority_remaining_days",
                 value=Decimal(lot.sell_priority_remaining_days),
@@ -293,8 +295,8 @@ def _freshness_condition(
             remaining=remaining, sell_priority_remaining_days=lot.sell_priority_remaining_days
         ),
         detector_version=FRESHNESS_DETECTOR_VERSION,
-        evidence=tuple(근거),
-        observed_as_of=derive_observed_as_of([one.observed_as_of for one in 근거]),
+        evidence=tuple(evidence),
+        observed_as_of=derive_observed_as_of([one.observed_as_of for one in evidence]),
         note=f"{lot.item} {lot.lot_id} 잔여 {remaining}일 · 미확정 {lot.uncommitted_kg}kg",
     )
 
@@ -316,23 +318,23 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
        (`1 − min(cap)/guaranteed`)도 `tools` 소유이고, 이 탐지기는 **그 값을 받아
        임계와 견주기만** 한다.
     """
-    사용률 = observation.capacity.window_usage_ratio
-    임계 = observation.policy.capacity_tight_ratio
-    if 임계 is None:
+    usage_ratio = observation.capacity.window_usage_ratio
+    threshold = observation.policy.capacity_tight_ratio
+    if threshold is None:
         return DetectorOutcome(
             code=CAPACITY_PRESSURE, ran=False, skipped=CAPACITY_TIGHT_POLICY_UNRESOLVED
         )
-    if 사용률 is None:
+    if usage_ratio is None:
         return DetectorOutcome(
             code=CAPACITY_PRESSURE, ran=False, skipped=CAPACITY_WINDOW_USAGE_UNRESOLVED
         )
-    if 사용률 < 임계:
+    if usage_ratio < threshold:
         return DetectorOutcome(code=CAPACITY_PRESSURE, ran=True)
 
-    근거 = [
+    evidence = [
         ExceptionEvidence(
             fact="capacity_window_usage_ratio",
-            value=사용률,
+            value=usage_ratio,
             unit="비율",
             source="tool_calc:calculate_window_capacity_usage",
             source_id=observation.sim_run_id,
@@ -344,7 +346,7 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
         ),
         ExceptionEvidence(
             fact="capacity_tight_ratio",
-            value=임계,
+            value=threshold,
             unit="비율",
             source="agent_policy_config",
             source_id="capacity_tight_ratio",
@@ -363,7 +365,7 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
         ),
     ]
     if observation.capacity.guaranteed_kg is not None:
-        근거.append(
+        evidence.append(
             ExceptionEvidence(
                 fact="guaranteed_capacity_kg",
                 value=observation.capacity.guaranteed_kg,
@@ -373,17 +375,17 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
                 observed_as_of=POLICY_OBSERVED_AS_OF,
             )
         )
-    조건 = DetectedCondition(
+    condition = DetectedCondition(
         code=CAPACITY_PRESSURE,
         subject_type="WAREHOUSE",
         subject_id=WAREHOUSE_SUBJECT_ID,
-        severity=_capacity_severity(사용률),
+        severity=_capacity_severity(usage_ratio),
         detector_version=CAPACITY_DETECTOR_VERSION,
-        evidence=tuple(근거),
-        observed_as_of=derive_observed_as_of([one.observed_as_of for one in 근거]),
-        note=f"창 사용률 {사용률} (임계 {임계})",
+        evidence=tuple(evidence),
+        observed_as_of=derive_observed_as_of([one.observed_as_of for one in evidence]),
+        note=f"창 사용률 {usage_ratio} (임계 {threshold})",
     )
-    return DetectorOutcome(code=CAPACITY_PRESSURE, ran=True, conditions=(조건,))
+    return DetectorOutcome(code=CAPACITY_PRESSURE, ran=True, conditions=(condition,))
 
 
 def _capacity_severity(usage: Decimal) -> Severity:
@@ -432,65 +434,65 @@ def detect_logistics_exceptions(
     observation = observe_fn(conn, sim_run_id=sim_run_id, as_of=as_of)
     outcomes = [detector(observation) for detector in DETECTORS]
 
-    조건들: dict[tuple[str, str, str], DetectedCondition] = {}
+    conditions: dict[tuple[str, str, str], DetectedCondition] = {}
     for outcome in outcomes:
-        for 조건 in outcome.conditions:
-            조건들[조건.dedupe_key] = 조건
-    돈코드 = {outcome.code for outcome in outcomes if outcome.ran}
+        for condition in outcome.conditions:
+            conditions[condition.dedupe_key] = condition
+    ran_codes = {outcome.code for outcome in outcomes if outcome.ran}
 
-    살아있는 = {row.dedupe_key: row for row in observation.open_exceptions}
-    연것: list[str] = []
-    갱신: list[str] = []
-    닫힌것: list[str] = []
+    live_rows = {row.dedupe_key: row for row in observation.open_exceptions}
+    opened: list[str] = []
+    updated: list[str] = []
+    resolved: list[str] = []
 
-    for key, 조건 in 조건들.items():
-        기존 = 살아있는.get(key)
-        if 기존 is not None:
+    for key, condition in conditions.items():
+        existing = live_rows.get(key)
+        if existing is not None:
             touch_exception(
                 conn,
-                exception_id=기존.exception_id,
-                severity=조건.severity,
-                evidence=조건.evidence,
+                exception_id=existing.exception_id,
+                severity=condition.severity,
+                evidence=condition.evidence,
                 last_detected_as_of=as_of,
-                observed_as_of=조건.observed_as_of,
+                observed_as_of=condition.observed_as_of,
             )
-            갱신.append(기존.exception_id)
+            updated.append(existing.exception_id)
             continue
-        연것.append(_open(conn, sim_run_id=sim_run_id, as_of=as_of, condition=조건))
+        opened.append(_open(conn, sim_run_id=sim_run_id, as_of=as_of, condition=condition))
 
     if phase == "AFTER_OUTBOUND":
-        for key, row in 살아있는.items():
-            if key in 조건들 or row.code not in 돈코드:
+        for key, row in live_rows.items():
+            if key in conditions or row.code not in ran_codes:
                 # 🔴 **못 잰 코드는 닫지 않는다.** 기준이 없어 안 본 것을
                 #    *"해결됐다"* 로 적으면 그 문제는 아무도 다시 못 찾는다.
                 continue
-            사유, 비고 = _resolution(row, observation)
+            reason, note = _resolution(row, observation)
             resolve_exception(
-                conn, exception_id=row.exception_id, as_of=as_of, resolved_by=사유, note=비고
+                conn, exception_id=row.exception_id, as_of=as_of, resolved_by=reason, note=note
             )
-            닫힌것.append(row.exception_id)
+            resolved.append(row.exception_id)
 
-    건너뛴 = tuple(f"{outcome.code}:{outcome.skipped}" for outcome in outcomes if not outcome.ran)
-    손댔나 = bool(연것 or 갱신 or 닫힌것)
+    skipped = tuple(f"{outcome.code}:{outcome.skipped}" for outcome in outcomes if not outcome.ran)
+    touched = bool(opened or updated or resolved)
     return DetectOut(
         as_of=as_of,
         phase=phase,
-        status="RAN" if 손댔나 else "NOTHING_DUE",
-        opened=tuple(연것),
-        updated=tuple(갱신),
-        resolved=tuple(닫힌것),
+        status="RAN" if touched else "NOTHING_DUE",
+        opened=tuple(opened),
+        updated=tuple(updated),
+        resolved=tuple(resolved),
         reason=(
-            f"연 것 {len(연것)} · 갱신 {len(갱신)} · 닫은 것 {len(닫힌것)}"
-            if 손댔나
+            f"연 것 {len(opened)} · 갱신 {len(updated)} · 닫은 것 {len(resolved)}"
+            if touched
             else f"확인했고 손댈 것이 없었다 (Lot {len(observation.lots)})"
         ),
-        uncertainties=tuple(dict.fromkeys([*observation.uncertainties, *건너뛴])),
+        uncertainties=tuple(dict.fromkeys([*observation.uncertainties, *skipped])),
     )
 
 
 def _open(conn: Any, *, sim_run_id: str, as_of: date, condition: DetectedCondition) -> str:
     """새 문제 한 줄. **재발이면 이전 행을 가리킨다** (재오픈하지 않는다)."""
-    이전 = previous_exception_id_for(
+    previous_id = previous_exception_id_for(
         conn,
         sim_run_id=sim_run_id,
         code=condition.code,
@@ -519,7 +521,7 @@ def _open(conn: Any, *, sim_run_id: str, as_of: date, condition: DetectedConditi
             observed_as_of=condition.observed_as_of,
             evidence=condition.evidence,
             detector_version=condition.detector_version,
-            previous_exception_id=이전,
+            previous_exception_id=previous_id,
             note=condition.note or None,
         ),
     )
@@ -545,9 +547,12 @@ def _resolution(row: ExceptionRow, observation: WarehouseObservation) -> tuple[s
     lot = next((one for one in observation.lots if one.lot_id == row.subject_id), None)
     if lot is None:
         return LOT_EMPTY, "관측에서 사라졌다 — 잔량 0"
-    잔여 = lot.remaining_freshness_days
-    if 잔여 is not None and 잔여 <= 0:
-        return ESCALATED_FRESHNESS_EXPIRED, f"잔여 {잔여}일 · 잔량 {lot.remaining_qty_kg}kg 남음"
+    remaining = lot.remaining_freshness_days
+    if remaining is not None and remaining <= 0:
+        return (
+            ESCALATED_FRESHNESS_EXPIRED,
+            f"잔여 {remaining}일 · 잔량 {lot.remaining_qty_kg}kg 남음",
+        )
     if lot.uncommitted_kg is not None and lot.uncommitted_kg <= 0:
         return COMMITTED, "살아 있는 할당이 잔량을 다 덮었다"
     return REDETECT, None

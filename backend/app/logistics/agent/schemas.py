@@ -245,14 +245,14 @@ class ExceptionEvidence:
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> ExceptionEvidence:
-        관측일 = raw.get("observed_as_of")
+        observed_raw = raw.get("observed_as_of")
         return cls(
             fact=str(raw["fact"]),
             value=Decimal(str(raw["value"])),
             unit=str(raw["unit"]),
             source=str(raw["source"]),
             source_id=str(raw["source_id"]),
-            observed_as_of=None if 관측일 is None else date.fromisoformat(str(관측일)),
+            observed_as_of=None if observed_raw is None else date.fromisoformat(str(observed_raw)),
         )
 
 

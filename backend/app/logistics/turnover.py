@@ -57,6 +57,7 @@ from psycopg import sql
 from app.logistics.db import get_db_schema
 
 __all__ = [
+    "ItemPolicy",
     "LotTurnover",
     "TurnoverStatus",
     "derive_turnover_status",
@@ -65,6 +66,7 @@ __all__ = [
     "fefo_sort_key",
     "freshness_days_of",
     "is_disposal_candidate",
+    "load_item_policy",
     "load_lot_turnover",
     "remaining_turnover_days",
     "sell_priority_of",
@@ -323,6 +325,84 @@ def _lot_turnover_from_row(행: Mapping[str, Any], *, as_of: date) -> LotTurnove
         effective_freshness_limit_days=effective_freshness_limit_days(행),
         sell_priority_remaining_days=None if priority_days is None else int(priority_days),
         disposal_candidate=is_disposal_candidate(remaining_freshness_days=freshness),
+    )
+
+
+@dataclass(frozen=True)
+class ItemPolicy:
+    """품목 하나의 보관·회전 정책 한 벌. **두 표를 한 번에 읽는다.**
+
+    ★ **`load_lot_turnover` 와 같은 두 표를 본다.** 다른 점은 축이다 — 저쪽은 Lot 이라
+      재고가 있는 품목만 나오고, 이쪽은 **품목**이라 재고 0kg 인 품목의 정책도 읽힌다
+      (`repository.get_item_storage_policies` 가 Lot 에서 역산하지 않는 것과 같은 이유).
+
+    🔴 **관측일이 없다.** 두 표에 유효일 칸이 없어 *"그날 그 정책이었나"* 를 알 수 없다
+       (`agent.schemas.POLICY_OBSERVED_AS_OF`). 그래서 `as_of` 를 받지 않는다 —
+       받으면 과거를 복원한 척이 된다.
+    """
+
+    item_id: str
+    item_name: str | None
+    #: 보관 (`item_storage_policies`). 정책이 없으면 `None` — 0 으로 채우지 않는다.
+    operational_limit_days: int | None
+    medium_grade_factor: Decimal | None
+    #: 회전 (`item_turnover_policies`). 실측 5 중 3 품목뿐이다.
+    operational_turnover_target_days: int | None
+    sell_priority_remaining_days: int | None
+
+    @property
+    def has_storage_policy(self) -> bool:
+        return self.operational_limit_days is not None
+
+    @property
+    def has_turnover_policy(self) -> bool:
+        return self.operational_turnover_target_days is not None
+
+
+def load_item_policy(conn: Any, *, item_id: str) -> ItemPolicy | None:
+    """품목 하나의 정책. **품목 자체가 없으면 `None`.**
+
+    🔴 **정책 두 표를 `LEFT JOIN` 한다.** `INNER JOIN` 하면 정책이 없는 품목이
+       *"그런 품목이 없다"* 로 보인다 — `load_lot_turnover` 가 같은 이유로 같은 조인을
+       쓴다. 없는 정책은 **없다고 답하는 것**이 이 함수의 일이다.
+
+    ⚠️ **읽기만 한다.** 커밋도 롤백도 안 하고, 없는 정책의 기본값을 지어내지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT i.item_id, i.item_name,
+                       sp.operational_limit_days, sp.medium_grade_factor,
+                       tp.operational_turnover_target_days, tp.sell_priority_remaining_days
+                FROM {schema}.items i
+                LEFT JOIN {schema}.item_storage_policies sp ON sp.item_id = i.item_id
+                LEFT JOIN {schema}.item_turnover_policies tp ON tp.item_id = i.item_id
+                WHERE i.item_id = %(item_id)s
+                """
+            ).format(schema=schema),
+            {"item_id": item_id},
+        )
+        rows = cursor.fetchall()
+    if not rows:
+        return None
+    columns = (
+        "item_id",
+        "item_name",
+        "operational_limit_days",
+        "medium_grade_factor",
+        "operational_turnover_target_days",
+        "sell_priority_remaining_days",
+    )
+    row = {name: _cell(rows[0], index, name) for index, name in enumerate(columns)}
+    return ItemPolicy(
+        item_id=row["item_id"],
+        item_name=row["item_name"],
+        operational_limit_days=row["operational_limit_days"],
+        medium_grade_factor=row["medium_grade_factor"],
+        operational_turnover_target_days=row["operational_turnover_target_days"],
+        sell_priority_remaining_days=row["sell_priority_remaining_days"],
     )
 
 
