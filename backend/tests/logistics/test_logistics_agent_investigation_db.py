@@ -36,8 +36,11 @@ from app.logistics.agent import exceptions as exception_repo
 from app.logistics.agent.exceptions import open_exception
 from app.logistics.agent.graph import run_investigation
 from app.logistics.agent.investigation import (
+    DUPLICATE_TOOL_CALL,
+    MAX_CANDIDATE_OPTIONS,
     PINNED_ARGUMENT_OVERRIDE,
     SUBJECT_OUT_OF_SCOPE,
+    TOOL_BUDGET_EXCEEDED,
     AgentLLMDisabled,
     FinishReason,
     InvestigationBudget,
@@ -593,6 +596,116 @@ class TestRoleBoundary:
 # ══════════════════════════════════════════════════════════════════════════
 #  예산 — 실제 Tool 로
 # ══════════════════════════════════════════════════════════════════════════
+
+
+class TestTotalExecutionOverRealTools:
+    """🔴 **계약이 «Tool 최대 8회» 면 실제 DB 왕복도 8회여야 한다** (v1.1).
+
+    가짜 Tool 로는 *"우리가 8번 셌다"* 까지만 확인된다. 진짜 커넥션에서 **몇 번 돌았는지**
+    는 표를 읽은 횟수로 재야 의미가 있다.
+    """
+
+    def test_the_ceiling_holds_against_a_real_database(
+        self, conn: psycopg.Connection
+    ) -> None:
+        _lot(conn)
+        _exception(conn)
+        budget = InvestigationBudget(max_tool_calls=6, max_replans=2, max_llm_calls=11)
+        result = _investigate(
+            conn,
+            budget=budget,
+            plan_fn=_plan(*[_call("get_inbound_schedule", days=day) for day in range(1, 9)]),
+            finalize_fn=_report(
+                summary="",
+                options=[
+                    InvestigationOption(
+                        action="ACCEPT_RISK", parameters={"lot_id": LOT}, rationale=""
+                    )
+                ],
+            ),
+        )
+        entered = [
+            record
+            for record in result.tool_calls
+            if record.status in {ToolCallStatus.SUCCESS, ToolCallStatus.FAILED}
+        ]
+        assert result.tool_call_count == 6
+        assert len(entered) == 6
+        # 선행 4 (목록 · 정책 · Lot · 약정) + 모델 2. 검증까지 갈 예산이 없다.
+        assert result.planned_tool_call_count == 2
+        assert [r.tool_name for r in entered] == [
+            "get_open_exceptions",
+            "get_policy",
+            "get_lot",
+            "get_sales_commitments",
+            "get_inbound_schedule",
+            "get_inbound_schedule",
+        ]
+
+    def test_the_opening_list_cannot_be_asked_twice(self, conn: psycopg.Connection) -> None:
+        """`load_exception` 이 연 목록을 모델이 다시 물으면 막힌다 — 실제 재조회 0."""
+        _lot(conn)
+        _exception(conn)
+        result = _investigate(conn, plan_fn=_plan(_call("get_open_exceptions")))
+        opened = [
+            record
+            for record in result.tool_calls
+            if record.tool_name == "get_open_exceptions"
+            and record.status is ToolCallStatus.SUCCESS
+        ]
+        assert len(opened) == 1
+        rejected = [r for r in result.tool_calls if r.status is ToolCallStatus.REJECTED]
+        assert rejected[0].detail == f"{DUPLICATE_TOOL_CALL}:get_open_exceptions"
+
+    def test_the_impact_validation_is_inside_the_ceiling(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """후보 검증도 실행량이다 — 예산이 남을 때만 돈다."""
+        _lot(conn)
+        _exception(conn)
+        result = _investigate(
+            conn,
+            budget=InvestigationBudget(max_tool_calls=5),
+            plan_fn=_plan(FINISH),
+            finalize_fn=_report(summary="", options=_four_options()),
+        )
+        impacts = [
+            r
+            for r in result.tool_calls
+            if r.tool_name == "estimate_action_impact"
+            and r.status is ToolCallStatus.SUCCESS
+        ]
+        # 선행 4 + 검증 1 = 5. 나머지 후보 3개는 예산이 없어 못 쟀다.
+        assert len(impacts) == 1
+        assert result.tool_call_count == 5
+        starved = result.options[1:]
+        assert all(option.impact is None for option in starved)
+        assert all(
+            str(option.rejected_reason).startswith(TOOL_BUDGET_EXCEEDED) for option in starved
+        )
+
+    def test_a_passed_deadline_touches_the_database_at_all(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 마감이 지났으면 **DB 를 한 번도 안 읽는다.**"""
+        _lot(conn)
+        _exception(conn)
+        before = _writes(conn)
+        result = _investigate(
+            conn, budget=InvestigationBudget(timeout_seconds=0.0), plan_fn=_plan(FINISH)
+        )
+        assert result.tool_call_count == 0
+        assert result.finish_reason is FinishReason.TIMEOUT
+        assert _writes(conn) == before
+
+
+def _four_options() -> list[InvestigationOption]:
+    return [
+        InvestigationOption(
+            action="ACCEPT_RISK", parameters={"lot_id": LOT}, rationale=str(index)
+        )
+        for index in range(MAX_CANDIDATE_OPTIONS)
+    ]
 
 
 class TestBudgetOverRealTools:

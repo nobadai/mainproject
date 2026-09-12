@@ -31,12 +31,14 @@ from app.logistics.llm.schemas import LLMErrorKind, LLMStatus
 __all__ = [
     "ACTION_DECISION_OWNERS",
     "ALLOWED_TOOL_NAMES",
+    "DEADLINE_EXCEEDED",
     "DEFAULT_BUDGET",
     "DUPLICATE_TOOL_CALL",
     "EXCEPTION_NOT_FOUND",
     "EXCEPTION_STATUS_UNRESOLVED",
     "INVALID_ARGUMENTS",
     "LLM_CONTRACT_VIOLATION",
+    "MAX_CANDIDATE_OPTIONS",
     "PINNED_ARGUMENT_OVERRIDE",
     "PINNED_TOOL_ARGUMENTS",
     "REPLAN_BUDGET_EXCEEDED",
@@ -114,8 +116,10 @@ PINNED_ARGUMENT_OVERRIDE = "PINNED_ARGUMENT_OVERRIDE"
 SUBJECT_OUT_OF_SCOPE = "SUBJECT_OUT_OF_SCOPE"
 #: 같은 Tool 을 같은 인자로 또 불렀다.
 DUPLICATE_TOOL_CALL = "DUPLICATE_TOOL_CALL"
-#: Tool 호출 예산을 다 썼다.
+#: Tool 실행 예산을 다 썼다. 🔴 **실제 실행 총량**이 기준이다 (§8.4).
 TOOL_BUDGET_EXCEEDED = "TOOL_BUDGET_EXCEEDED"
+#: 조사 마감을 넘겨 **새 실행을 시작하지 않았다.** 이미 도는 호출을 끊은 것이 아니다.
+DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 #: 재계획 예산을 다 썼다.
 REPLAN_BUDGET_EXCEEDED = "REPLAN_BUDGET_EXCEEDED"
 #: 모델이 계약을 깼다 — 호출 0건이거나 2건 이상이거나 스키마 위반이다.
@@ -147,10 +151,15 @@ class ToolCallStatus(str, Enum):
     """🔴 **Tool 실패를 정상 사실처럼 주지 않는다** (§23).
 
     ```text
-    TOOL_SUCCESS   Tool 이 답을 냈다 — uncertainties 가 있어도 성공이다
-    TOOL_REJECTED  guard 가 막았다   — Tool 까지 가지도 않았다
-    TOOL_FAILED    Tool 이 터졌다    — DB 예외 등. 숫자가 없다
+    TOOL_SUCCESS   Tool 이 답을 냈다 — uncertainties 가 있어도 성공이다      예산 −1
+    TOOL_FAILED    Tool 이 터졌다    — DB 예외 등. 숫자가 없다              예산 −1
+    TOOL_REJECTED  Tool 함수에 **들어가지도 않았다**                         예산 0
+                   (허용·인자·범위·중복 · 예산 소진 · 마감 초과)
     ```
+
+    🔴 **실패도 예산을 쓴다.** Tool 함수에 들어간 순간 DB 왕복이 일어났고, 그걸 안 세면
+       *"터지는 호출을 무한히 반복"* 하는 경로가 열린다. 예산이 막는 것은 **실행량**이지
+       성공 횟수가 아니다.
 
     ⚠️ `POLICY_NOT_HISTORICAL` 같은 `uncertainties` 는 **실패가 아니다.** Tool 이
        *"이건 못 잰다"* 를 정확히 말한 정상 답이다 — 그 구분을 지우면 모델이 *"조회가
@@ -215,11 +224,28 @@ class InvestigationBudget:
     """조사 한 번의 상한. 🔴 **하네스가 든다** — 모델에게 맡기지 않는다.
 
     ```text
-    max_tool_calls  8     성공한 Tool 호출 수
+    max_tool_calls  8     🔴 이번 조사에서 **실제로 실행된 Tool 총 횟수**
     max_replans     2     guard 가 거부한 뒤 다시 계획하는 횟수
-    max_llm_calls   11    plan/replan + finalize 를 **다 합쳐서**
-    timeout         120s  조사 1회 전체
+    max_llm_calls   11    plan/replan + finalize 의 **실제 공급자 전송** 수
+    timeout         120s  조사 1회 전체 (cooperative deadline · §8.5)
     ```
+
+    🔴 **`max_tool_calls` 는 «모델이 고른 호출» 이 아니라 실행 총량이다 (v1.1 정정).**
+       선행 조회도, 후보 검증도 전부 DB 를 왕복하는 실행이다. 모델 몫만 세면 계약이
+       «Tool 최대 8회» 인데 실제로는 14회가 도는 일이 생긴다.
+
+    ```text
+    load_exception      get_open_exceptions          1
+    load_context        get_policy                   1
+    preload_subject     get_lot · get_sales_…        2
+    plan/execute        모델이 고른 것                n
+    evaluate_options    estimate_action_impact       m
+                                                   ─────
+                                          합계 ≤ max_tool_calls
+    ```
+
+    ★ 모델 몫만 따로 보고 싶으면 `planned_tool_call_count` 를 본다 — **안전 상한의
+      주인은 언제나 총 실행량**이다.
 
     ★ `max_llm_calls` 가 따로 있는 이유: 거부가 반복되면 Tool 은 하나도 안 늘어나는데
       전송만 늘어난다. Tool 예산으로는 그 경로를 못 막는다.
@@ -270,6 +296,14 @@ class InvestigationStep(BaseModel):
     reason: str = ""
 
 
+#: 🔴 **한 조사가 낼 수 있는 대응 후보의 수.** 상한이 없으면 모델이 후보 100개를 내고
+#: `evaluate_options` 가 `estimate_action_impact` 를 100번 돌린다 — 예산이 아니라
+#: **모델의 수다스러움**이 DB 왕복 수를 정하게 된다.
+#: ★ 이것은 «검증할 가치가 있는 후보» 의 수이지 Tool 예산이 아니다. 둘 다 건다 —
+#:   남은 예산이 1이면 후보가 4개여도 1개만 검증한다.
+MAX_CANDIDATE_OPTIONS = 4
+
+
 class InvestigationOption(BaseModel):
     """LLM 이 제안한 대응 후보 하나. **실행이 아니라 후보다.**
 
@@ -305,7 +339,11 @@ class InvestigationReport(BaseModel):
     summary: str = ""
     findings: list[str] = Field(default_factory=list)
     missing_or_uncertain: list[str] = Field(default_factory=list)
-    options: list[InvestigationOption] = Field(default_factory=list)
+    #: 🔴 `MAX_CANDIDATE_OPTIONS` 로 잘린다 — 공급자 응답은 `_parse_report` 가 미리
+    #:    앞에서부터 자르므로, 수다스러운 모델 때문에 보고서 전체가 버려지지 않는다.
+    options: list[InvestigationOption] = Field(
+        default_factory=list, max_length=MAX_CANDIDATE_OPTIONS
+    )
     recommended_index: int | None = None
 
 
@@ -336,6 +374,9 @@ class InvestigationView:
     budget: Mapping[str, Any]
     #: 직전에 왜 거부됐나. 같은 실수를 반복하지 말라고 준다.
     last_rejection: str | None
+    #: 🔴 **조사 마감까지 남은 초.** 공급자 전송 timeout 을 이 값 이하로 조인다 —
+    #:    안 그러면 30초짜리 호출 하나가 120초 계약을 혼자 넘긴다 (§8.5).
+    remaining_seconds: float | None = None
     allowed_tools: tuple[str, ...] = ALLOWED_TOOL_NAMES
     action_catalog: tuple[str, ...] = SUPPORTED_ACTIONS
 
@@ -437,8 +478,13 @@ class InvestigationResult:
     tool_calls: tuple[ToolCallRecord, ...] = ()
     observed_as_of: date | None = None
     uncertainties: tuple[str, ...] = ()
+    #: 🔴 **실제로 실행된 Tool 총 횟수** — 선행 조회 · 모델 선택 · 후보 검증을 다 합친
+    #:    수다. `max_tool_calls` 가 막는 것이 이 수다.
     tool_call_count: int = 0
+    #: 그중 **모델이 스스로 고른** 몫. 통계일 뿐 안전 상한의 주인이 아니다.
+    planned_tool_call_count: int = 0
     replan_count: int = 0
+    #: 노드가 계획자/정리자를 부른 횟수. 실제 전송 수는 `llm_client` 가 따로 막는다.
     llm_call_count: int = 0
 
     @property
@@ -481,7 +527,10 @@ class InvestigationState(TypedDict, total=False):
     executed_keys: frozenset[str]
     step: InvestigationStep | None
     last_rejection: str | None
+    #: 🔴 실행 총량 (선행 · 모델 · 검증). `max_tool_calls` 의 기준이다.
     tool_call_count: int
+    #: 그중 모델이 고른 몫 — 통계.
+    planned_tool_call_count: int
     replan_count: int
     llm_call_count: int
     sequence: int

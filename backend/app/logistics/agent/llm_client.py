@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from app.logistics.agent.investigation import (
     ALLOWED_TOOL_NAMES,
     DEFAULT_BUDGET,
     LLM_CONTRACT_VIOLATION,
+    MAX_CANDIDATE_OPTIONS,
     AgentLLMBudgetExceeded,
     AgentLLMDisabled,
     InvestigationReport,
@@ -64,6 +66,10 @@ _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 #: 모델이 *"이제 됐다"* 를 말하는 유일한 방법. 🔴 **자유 문장으로 끝내게 두지 않는다** —
 #: `mode: ANY` 아래에서는 함수 호출만 나오므로 종료도 함수여야 한다.
 FINISH_DECLARATION_NAME = "finish_investigation"
+
+#: 전송 timeout 의 하한. 🔴 **0 이나 음수를 소켓에 주지 않는다** — `urllib` 이 그걸
+#: «무한 대기» 로 읽는 구현이 있어, 마감을 지키려던 값이 정반대로 동작한다.
+MIN_SEND_TIMEOUT_SECONDS = 0.1
 
 
 class PlannerContractError(ValueError):
@@ -478,11 +484,20 @@ class AgentLLMClient:
       돌려주고, 테스트는 거기에 가짜 함수를 꽂는다 (매입 `selector` 와 같은 규율).
     """
 
-    def __init__(self, settings: AgentLLMSettings, *, max_sends: int | None = None):
+    def __init__(
+        self,
+        settings: AgentLLMSettings,
+        *,
+        max_sends: int | None = None,
+        clock: Any = None,
+    ):
         self.settings = settings
         #: 🔴 **이 조사 한 번에 나갈 수 있는 전송 수.** 재시도도 교정도 여기서 센다.
         self.max_sends = DEFAULT_BUDGET.max_llm_calls if max_sends is None else max_sends
         self._sends = 0
+        self._clock = clock or time.monotonic
+        #: 이번 `plan`/`finalize` 한 번의 마감 (단조시계). 없으면 `None`.
+        self._deadline: float | None = None
 
     @property
     def sends(self) -> int:
@@ -498,10 +513,40 @@ class AgentLLMClient:
         self._sends += 1
         return send()
 
+    def _open(self, view: InvestigationView) -> None:
+        """이번 노드 호출의 마감을 연다.
+
+        ★ 뷰가 준 것은 *"그 순간 남은 초"* 다. 여기서 **마감 시각**으로 바꿔 두면 교정
+          재전송·전송 재시도가 각자 **그때 남은 시간**을 받는다 — 스냅샷을 그대로 돌려
+          쓰면 두 번째 전송이 이미 지난 시간을 다시 쓰게 된다.
+        """
+        self._deadline = (
+            None if view.remaining_seconds is None else self._clock() + view.remaining_seconds
+        )
+
+    def _timed(self) -> AgentLLMSettings:
+        """이번 전송에 쓸 설정 — timeout 을 **남은 시간 이하로** 조인다.
+
+        ```text
+        설정 30s · 남은 3s   →  3s     조사 마감이 이긴다
+        설정 30s · 남은 90s  →  30s    노드 상한이 이긴다
+        마감 없음            →  30s
+        ```
+
+        🔴 이것으로 막는 것은 *"남은 시간보다 긴 호출을 **시작**하는 것"* 이다. 이미 열린
+           소켓을 밖에서 끊는 장치가 아니다 (§8.5).
+        """
+        if self._deadline is None:
+            return self.settings
+        left = self._deadline - self._clock()
+        capped = max(MIN_SEND_TIMEOUT_SECONDS, min(self.settings.timeout_seconds, left))
+        return replace(self.settings, timeout_seconds=capped)
+
     def plan(self, view: InvestigationView) -> InvestigationStep:
         """다음 한 수. 🔴 **호출이 정확히 하나가 아니면 계약 위반이다.**"""
         if not self.settings.enabled:
             raise AgentLLMDisabled("Logistics agent LLM is turned off")
+        self._open(view)
         calls = self._send_tool_call(view)
         if len(calls) != 1:
             raise PlannerContractError(f"{LLM_CONTRACT_VIOLATION}:tool_calls={len(calls)}")
@@ -521,6 +566,7 @@ class AgentLLMClient:
         """조사 정리. 스키마 위반이면 **한 번** 교정을 요구하고, 그래도 안 되면 던진다."""
         if not self.settings.enabled:
             raise AgentLLMDisabled("Logistics agent LLM is turned off")
+        self._open(view)
         payload = _view_payload(view)
         guidance: str | None = None
         last: Exception | None = None
@@ -539,7 +585,7 @@ class AgentLLMClient:
         return _with_retry(
             lambda: self._spend(
                 lambda: transport(
-                    self.settings,
+                    self._timed(),
                     system_prompt=PLANNER_SYSTEM_PROMPT,
                     user_payload=_view_payload(view),
                     declarations=tool_declarations(),
@@ -553,7 +599,7 @@ class AgentLLMClient:
         return _with_retry(
             lambda: self._spend(
                 lambda: transport(
-                    self.settings, system_prompt=FINALIZER_SYSTEM_PROMPT, user_payload=payload
+                    self._timed(), system_prompt=FINALIZER_SYSTEM_PROMPT, user_payload=payload
                 )
             ),
             retries=self.settings.max_retries,
@@ -621,16 +667,27 @@ def _parse_report(raw: str) -> InvestigationReport:
         if not isinstance(parameters, Mapping):
             parameters = {}
         options.append({**option, "parameters": dict(parameters)})
-    return InvestigationReport.model_validate({**document, "options": options})
+    # ⚠️ **앞에서부터 자른다.** 스키마 상한(`MAX_CANDIDATE_OPTIONS`)에 그냥 걸리게 두면
+    #    후보를 많이 낸 것 하나로 **보고서 전체가 버려진다** — 문장도 사실도 같이 사라진다.
+    #    자르는 것은 «검증할 후보» 의 수일 뿐이고, 실제 검증 횟수는 남은 Tool 예산이
+    #    한 번 더 조인다 (`evaluate_options`).
+    return InvestigationReport.model_validate(
+        {**document, "options": options[:MAX_CANDIDATE_OPTIONS]}
+    )
 
 
 def build_agent_llm(
-    settings: AgentLLMSettings | None = None, *, max_sends: int | None = None
+    settings: AgentLLMSettings | None = None,
+    *,
+    max_sends: int | None = None,
+    clock: Any = None,
 ) -> tuple[Any, Any]:
     """`(plan_fn, finalize_fn)`. 그래프는 이 둘만 안다.
 
     ⚠️ **조사 한 번에 client 하나**다. 전송 예산이 인스턴스에 살기 때문에 재사용하면
        두 번째 조사가 첫 번째의 예산을 물려받는다.
     """
-    client = AgentLLMClient(settings or get_agent_llm_settings(), max_sends=max_sends)
+    client = AgentLLMClient(
+        settings or get_agent_llm_settings(), max_sends=max_sends, clock=clock
+    )
     return client.plan, client.finalize

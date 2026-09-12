@@ -193,11 +193,27 @@ class GuardVerdict:
 
 
 def call_key(tool_name: str, arguments: Mapping[str, Any]) -> str:
-    """`(Tool, 인자)` 의 정규형. 🔴 **키 순서가 달라도 같은 호출이다.**
+    """`(Tool, 인자)` 의 정규형. 🔴 **키 순서가 달라도, 생략했어도 같은 호출이다.**
+
+    ```text
+    get_policy {}                 ┐ 같은 질문이다 — 기본값을 생략했을 뿐이다
+    get_policy {"item_id": None}  ┘
+    ```
+
+    🔴 **인자 스키마를 한 번 태워서 정규화한다 (v1.1 정정).** 안 그러면 선행 조회는 «생략형»
+       으로, guard 는 «채워진 형» 으로 등록해 **같은 질문이 두 키로 갈린다** — 그러면
+       모델이 선행이 이미 연 질문을 그대로 다시 물어도 중복으로 안 잡힌다.
 
     ★ 인자를 `jsonable` 로 낮춰 비교한다 — `Decimal("1")` 과 `Decimal("1.0")` 은 다른
       문자열이 되지만, 그건 *실제로 다른 질문*이라 다른 호출로 세는 편이 맞다.
     """
+    model = TOOL_ARGUMENT_MODELS.get(tool_name)
+    if model is not None:
+        try:
+            arguments = model.model_validate(dict(arguments)).model_dump()
+        except ValidationError:
+            # 스키마를 못 지난 인자는 Tool 까지 못 간다 — 원형 그대로 적어 둔다.
+            pass
     return f"{tool_name}:{json.dumps(jsonable(arguments), sort_keys=True, ensure_ascii=False)}"
 
 

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -51,6 +51,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.logistics.agent.investigation import (
     ACTION_DECISION_OWNERS,
+    DEADLINE_EXCEEDED,
     DEFAULT_BUDGET,
     EXCEPTION_NOT_FOUND,
     EXCEPTION_STATUS_UNRESOLVED,
@@ -81,7 +82,7 @@ from app.logistics.agent.schemas import (
     derive_observed_as_of,
 )
 from app.logistics.agent.tool_dispatch import call_key, guard_step, run_tool
-from app.logistics.agent.tools import SUPPORTED_ACTIONS, ActionImpact, get_open_exceptions
+from app.logistics.agent.tools import SUPPORTED_ACTIONS, ActionImpact
 from app.logistics.llm.runtime import classify_llm_error
 from app.logistics.llm.schemas import LLMStatus
 
@@ -99,10 +100,174 @@ _SCOPE_ITEM_FIELDS = ("item_id",)
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _expired(state: InvestigationState) -> bool:
-    """조사 전체 상한(기본 120s)을 넘겼나. **단조시계**다 — 벽시계를 안 읽는다."""
+def _remaining(state: InvestigationState) -> float:
+    """마감까지 **남은 초**. 무한대면 마감이 없다는 뜻이다. **단조시계**를 쓴다.
+
+    🔴 이 값이 `0` 이하면 **새 실행을 시작하지 않는다.** 이미 도는 호출을 끊지는
+       못한다 — 그 한계는 §8.5 에 그대로 적어 뒀다. 숨기지 않는다.
+    """
     clock = state.get("clock") or time.monotonic
-    return clock() >= state.get("deadline_at", float("inf"))
+    deadline = state.get("deadline_at")
+    if deadline is None:
+        return float("inf")
+    return deadline - clock()
+
+
+def _expired(state: InvestigationState) -> bool:
+    """마감을 넘겼나."""
+    return _remaining(state) <= 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  저울 — Tool 이 실제로 도는 **유일한** 자리
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _Ledger:
+    """이번 조사의 **실제 Tool 실행량**을 드는 하나뿐인 저울 (v1.1 신설).
+
+    🔴 **노드마다 따로 세면 반드시 한 군데가 빠진다.** 실제로 그랬다 — 예산이 «모델이
+       고른 성공 호출» 만 세는 바람에 선행 조회 4회와 후보 검증 n회가 계약 밖에서
+       돌았고, *"Tool 최대 8회"* 가 실제로는 14회였다.
+
+    ```text
+    세는 것   Tool 함수에 **들어갔다**            SUCCESS · FAILED   예산 −1
+    안 세는 것 guard/예산/마감이 막아 못 들어갔다  REJECTED           예산 0
+    ```
+
+    ★ 실패도 센다. 들어간 순간 DB 왕복이 일어났고, 안 세면 터지는 호출을 무한히
+      반복하는 경로가 열린다.
+
+    ⚠️ 여기를 **우회해서** `run_tool` 을 직접 부르는 자리를 만들지 마라 — 그 순간
+       계약이 다시 거짓이 된다 (`test_logistics_agent_graph` 가 소스로 막는다).
+    """
+
+    state: InvestigationState
+    records: list[ToolCallRecord]
+    sequence: int
+    spent: int
+    planned: int
+    keys: set[str]
+    lots: set[str]
+    items: set[str]
+
+    @classmethod
+    def of(cls, state: InvestigationState) -> _Ledger:
+        return cls(
+            state=state,
+            records=list(state.get("observations") or ()),
+            sequence=int(state.get("sequence") or 0),
+            spent=int(state.get("tool_call_count") or 0),
+            planned=int(state.get("planned_tool_call_count") or 0),
+            keys=set(state.get("executed_keys") or ()),
+            lots=set(state.get("allowed_lot_ids") or ()),
+            items=set(state.get("allowed_item_ids") or ()),
+        )
+
+    @property
+    def budget_left(self) -> int:
+        """남은 실행 횟수."""
+        return self.state["request"].budget.max_tool_calls - self.spent
+
+    def blocked(self) -> str | None:
+        """지금 새 실행을 시작해도 되나. 안 되면 그 사유."""
+        budget = self.state["request"].budget
+        if self.spent >= budget.max_tool_calls:
+            return f"{TOOL_BUDGET_EXCEEDED}:{budget.max_tool_calls}"
+        if _remaining(self.state) <= 0:
+            return f"{DEADLINE_EXCEEDED}:{budget.timeout_seconds:g}s"
+        return None
+
+    def run(
+        self,
+        tool_name: str,
+        *,
+        arguments: Mapping[str, Any],
+        reason: str,
+        planned: bool = False,
+        key: str | None = None,
+    ) -> Any:
+        """Tool 하나를 돌린다 — **예산 · 마감 · 기록이 전부 여기 한 곳에 있다.**
+
+        :param planned: 모델이 스스로 고른 호출인가 (통계용). 예산은 똑같이 쓴다.
+        :returns: 성공하면 Tool 답, 막히거나 터지면 `None`.
+        """
+        request: InvestigationRequest = self.state["request"]
+        self.sequence += 1
+        stopped = self.blocked()
+        if stopped is not None:
+            # 🔴 Tool 함수에 **안 들어갔다** — 예산을 안 쓴다.
+            self.records.append(
+                ToolCallRecord(
+                    sequence=self.sequence,
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    status=ToolCallStatus.REJECTED,
+                    detail=stopped,
+                    reason=reason,
+                )
+            )
+            return None
+
+        # 🔴 **들어가기 전에 센다.** 터져도 실행량은 쓴 것이다.
+        self.spent += 1
+        if planned:
+            self.planned += 1
+        try:
+            answer = run_tool(
+                self.state["conn"],
+                tool_name=tool_name,
+                arguments=arguments,
+                sim_run_id=request.sim_run_id,
+                as_of=request.as_of,
+            )
+        except Exception as error:  # noqa: BLE001 - Tool 실패가 조사를 멈추면 안 된다
+            self.records.append(
+                ToolCallRecord(
+                    sequence=self.sequence,
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    status=ToolCallStatus.FAILED,
+                    detail=type(error).__name__,
+                    reason=reason,
+                )
+            )
+            return None
+
+        self.records.append(
+            ToolCallRecord(
+                sequence=self.sequence,
+                tool_name=tool_name,
+                arguments=dict(arguments),
+                status=ToolCallStatus.SUCCESS,
+                answer=answer,
+                observed_as_of=getattr(answer, "observed_as_of", None),
+                uncertainties=tuple(getattr(answer, "uncertainties", ()) or ()),
+                reason=reason,
+            )
+        )
+        # ★ 중복 판정 등록은 **성공한 실행만** — 실패한 호출은 다시 걸 수 있어야 한다.
+        self.keys.add(key or call_key(tool_name, arguments))
+        self.lots |= collect_ids(answer, field_names=_SCOPE_LOT_FIELDS)
+        self.items |= collect_ids(answer, field_names=_SCOPE_ITEM_FIELDS)
+        return answer
+
+    @property
+    def last(self) -> ToolCallRecord | None:
+        return self.records[-1] if self.records else None
+
+    def freeze(self) -> dict[str, Any]:
+        """상태로 되돌릴 칸들. 노드는 이걸 펴서 반환한다."""
+        return {
+            "observations": tuple(self.records),
+            "sequence": self.sequence,
+            "tool_call_count": self.spent,
+            "planned_tool_call_count": self.planned,
+            "executed_keys": frozenset(self.keys),
+            "allowed_lot_ids": frozenset(self.lots),
+            "allowed_item_ids": frozenset(self.items),
+        }
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -120,26 +285,43 @@ def load_exception(state: InvestigationState) -> dict[str, Any]:
       «질문·범위» 를 읽는 노드로 갈아 끼우면 된다 — 두 벌로 만들지 않는다.
     """
     request: InvestigationRequest = state["request"]
-    answer = get_open_exceptions(
-        state["conn"], sim_run_id=request.sim_run_id, as_of=request.as_of
-    )
-    record = ToolCallRecord(
-        sequence=1,
-        tool_name="get_open_exceptions",
+    ledger = _Ledger.of(state)
+    # 🔴 **이것도 Tool 실행이다.** 예산을 쓰고, 중복 판정에도 등록된다 (v1.1 정정) —
+    #    안 하면 모델이 곧바로 `get_open_exceptions {}` 를 다시 물어 한 번 더 돈다.
+    answer = ledger.run(
+        "get_open_exceptions",
         arguments={},
-        status=ToolCallStatus.SUCCESS,
-        answer=answer,
-        observed_as_of=answer.observed_as_of,
-        uncertainties=answer.uncertainties,
         reason="조사의 출발점 — 결정론으로 연다",
     )
+    if answer is None:
+        # 🔴 **«없다» 와 «못 봤다» 를 가른다.** 목록을 못 읽은 것을 `NOT_FOUND` 로 적으면
+        #    *"그날 그 Exception 이 없었다"* 는 **거짓 사실**이 결과에 남는다.
+        last = ledger.last
+        detail = (last.detail if last else "") or ""
+        if detail.startswith(DEADLINE_EXCEEDED):
+            stopped = FinishReason.TIMEOUT
+        elif detail.startswith(TOOL_BUDGET_EXCEEDED):
+            stopped = FinishReason.BUDGET_EXCEEDED
+        else:
+            # Tool 이 터졌다 — 목록을 못 봤으니 «없다» 고 말할 수 없다.
+            stopped = FinishReason.NOT_FOUND
+        return {
+            **ledger.freeze(),
+            "finish_reason": stopped,
+            "llm_status": "SKIPPED_TEMPLATE",
+            "uncertainties": (
+                (f"{EXCEPTION_NOT_FOUND}:{request.exception_id}",)
+                if stopped is FinishReason.NOT_FOUND
+                else (detail,)
+            ),
+        }
+
     found = next(
         (fact for fact in answer.exceptions if fact.exception_id == request.exception_id), None
     )
     if found is None:
         return {
-            "observations": (record,),
-            "sequence": 1,
+            **ledger.freeze(),
             "finish_reason": FinishReason.NOT_FOUND,
             # 해석할 것이 없었다 — 공급자를 부르지 않았다는 뜻이다.
             "llm_status": "SKIPPED_TEMPLATE",
@@ -152,15 +334,14 @@ def load_exception(state: InvestigationState) -> dict[str, Any]:
         # 조사는 계속하되 **모른다는 사실을 남긴다.**
         uncertainties = (f"{EXCEPTION_STATUS_UNRESOLVED}:{found.exception_id}",)
 
-    lots = frozenset({found.subject_id}) if found.subject_type == "LOT" else frozenset()
+    frozen = ledger.freeze()
+    if found.subject_type == "LOT":
+        frozen["allowed_lot_ids"] = frozenset({*frozen["allowed_lot_ids"], found.subject_id})
     return {
-        "observations": (record,),
-        "sequence": 1,
+        **frozen,
         "exception": found,
         "subject_type": found.subject_type,
         "subject_id": found.subject_id,
-        "allowed_lot_ids": lots,
-        "allowed_item_ids": frozenset(),
         "uncertainties": uncertainties,
     }
 
@@ -212,66 +393,18 @@ def _subject_item_id(records: Sequence[ToolCallRecord]) -> str | None:
 def _preload(
     state: InvestigationState, calls: Sequence[tuple[str, Mapping[str, Any]]]
 ) -> dict[str, Any]:
-    """결정론 선행 호출들. 🔴 **모델의 Tool 예산을 쓰지 않는다.**
+    """결정론 선행 호출들. 🔴 **이것도 예산을 쓴다** (v1.1 정정).
 
-    예산 8회는 *"모델이 스스로 고른 호출"* 을 세는 수다. 선행 조회가 그 칸을 먹으면
-    모델이 말도 꺼내기 전에 예산의 1/4 이 사라진다.
+    예산 8회는 *"이번 조사에서 실제로 돈 Tool"* 을 세는 수다. 선행 조회를 빼고 세면
+    계약이 «Tool 최대 8회» 인데 실제로는 12회가 도는 일이 생긴다.
 
     ⚠️ Tool 예외는 **조사를 멈추지 않는다** — 관찰에 실패로 적고 계속한다. 그 사실이
-       없어지는 것보다 «못 읽었다» 가 남는 편이 낫다.
+       없어지는 것보다 «못 읽었다» 가 남는 편이 낫다. 다만 실행량은 쓴 것으로 센다.
     """
-    request: InvestigationRequest = state["request"]
-    records = list(state.get("observations") or ())
-    sequence = int(state.get("sequence") or 0)
-    lots = set(state.get("allowed_lot_ids") or frozenset())
-    items = set(state.get("allowed_item_ids") or frozenset())
-    keys = set(state.get("executed_keys") or frozenset())
-
+    ledger = _Ledger.of(state)
     for name, arguments in calls:
-        sequence += 1
-        try:
-            answer = run_tool(
-                state["conn"],
-                tool_name=name,
-                arguments=arguments,
-                sim_run_id=request.sim_run_id,
-                as_of=request.as_of,
-            )
-        except Exception as error:  # noqa: BLE001 - Tool 실패가 조사를 멈추면 안 된다
-            records.append(
-                ToolCallRecord(
-                    sequence=sequence,
-                    tool_name=name,
-                    arguments=dict(arguments),
-                    status=ToolCallStatus.FAILED,
-                    detail=type(error).__name__,
-                    reason="선행 조회",
-                )
-            )
-            continue
-        records.append(
-            ToolCallRecord(
-                sequence=sequence,
-                tool_name=name,
-                arguments=dict(arguments),
-                status=ToolCallStatus.SUCCESS,
-                answer=answer,
-                observed_as_of=getattr(answer, "observed_as_of", None),
-                uncertainties=tuple(getattr(answer, "uncertainties", ()) or ()),
-                reason="선행 조회",
-            )
-        )
-        keys.add(call_key(name, arguments))
-        lots |= collect_ids(answer, field_names=_SCOPE_LOT_FIELDS)
-        items |= collect_ids(answer, field_names=_SCOPE_ITEM_FIELDS)
-
-    return {
-        "observations": tuple(records),
-        "sequence": sequence,
-        "executed_keys": frozenset(keys),
-        "allowed_lot_ids": frozenset(lots),
-        "allowed_item_ids": frozenset(items),
-    }
+        ledger.run(name, arguments=arguments, reason="선행 조회")
+    return ledger.freeze()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -348,13 +481,23 @@ def _view(state: InvestigationState) -> InvestigationView:
         },
         observations=tuple(jsonable(record) for record in observations),
         budget={
+            # 🔴 **실행 총량**이다 — 선행 조회와 후보 검증까지 포함한 수 (v1.1).
             "tool_calls_used": int(state.get("tool_call_count") or 0),
             "tool_calls_left": budget.max_tool_calls - int(state.get("tool_call_count") or 0),
+            "tool_calls_you_chose": int(state.get("planned_tool_call_count") or 0),
             "replans_used": int(state.get("replan_count") or 0),
             "replans_left": budget.max_replans - int(state.get("replan_count") or 0),
         },
         last_rejection=state.get("last_rejection"),
+        # 🔴 공급자 전송 timeout 을 여기에 맞춘다 — 30초짜리 호출 하나가 120초 계약을
+        #    혼자 넘기면 안 된다 (§8.5).
+        remaining_seconds=_finite(_remaining(state)),
     )
+
+
+def _finite(seconds: float) -> float | None:
+    """마감이 없으면 `None` — «남은 시간 0» 과 «마감 없음» 은 다른 사실이다."""
+    return None if seconds == float("inf") else seconds
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -451,58 +594,22 @@ def route_after_guard(state: InvestigationState) -> str:
 
 
 def execute_tool(state: InvestigationState) -> dict[str, Any]:
-    """승인된 한 수를 실행한다. 🔴 **`sim_run_id` · `as_of` 는 요청 값으로 못 박힌다.**"""
-    request: InvestigationRequest = state["request"]
+    """승인된 한 수를 실행한다. 🔴 **`sim_run_id` · `as_of` 는 요청 값으로 못 박힌다.**
+
+    ⚠️ 실패해도 **실행량은 쓴 것**이다 (v1.1 정정). 안 세면 터지는 Tool 을 무한히 다시
+       고르는 경로가 열린다 — 중복 키는 성공했을 때만 등록되므로 guard 도 못 막는다.
+    """
     verdict = state["verdict"]
-    name = str(verdict.tool_name)
-    arguments = dict(verdict.arguments or {})
-    sequence = int(state.get("sequence") or 0) + 1
     step: InvestigationStep | None = state.get("step")
-
-    try:
-        answer = run_tool(
-            state["conn"],
-            tool_name=name,
-            arguments=arguments,
-            sim_run_id=request.sim_run_id,
-            as_of=request.as_of,
-        )
-    except Exception as error:  # noqa: BLE001 - Tool 실패가 조사를 멈추면 안 된다
-        record = ToolCallRecord(
-            sequence=sequence,
-            tool_name=name,
-            arguments=arguments,
-            status=ToolCallStatus.FAILED,
-            detail=type(error).__name__,
-            reason=step.reason if step else "",
-        )
-        # ⚠️ 실패는 **예산도 중복 키도 안 먹는다** — 같은 호출을 다시 걸 수 있어야 한다.
-        return {
-            "observations": (*(state.get("observations") or ()), record),
-            "sequence": sequence,
-        }
-
-    record = ToolCallRecord(
-        sequence=sequence,
-        tool_name=name,
-        arguments=arguments,
-        status=ToolCallStatus.SUCCESS,
-        answer=answer,
-        observed_as_of=getattr(answer, "observed_as_of", None),
-        uncertainties=tuple(getattr(answer, "uncertainties", ()) or ()),
+    ledger = _Ledger.of(state)
+    ledger.run(
+        str(verdict.tool_name),
+        arguments=dict(verdict.arguments or {}),
         reason=step.reason if step else "",
+        planned=True,
+        key=str(verdict.key),
     )
-    return {
-        "observations": (*(state.get("observations") or ()), record),
-        "sequence": sequence,
-        "tool_call_count": int(state.get("tool_call_count") or 0) + 1,
-        "executed_keys": frozenset({*(state.get("executed_keys") or ()), str(verdict.key)}),
-        "allowed_lot_ids": frozenset(state.get("allowed_lot_ids") or ())
-        | collect_ids(answer, field_names=_SCOPE_LOT_FIELDS),
-        "allowed_item_ids": frozenset(state.get("allowed_item_ids") or ())
-        | collect_ids(answer, field_names=_SCOPE_ITEM_FIELDS),
-        "last_rejection": None,
-    }
+    return {**ledger.freeze(), "last_rejection": None}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -647,19 +754,26 @@ def evaluate_options(state: InvestigationState) -> dict[str, Any]:
     숫자           estimate_action_impact 로 **덮어쓴다**  모델이 적은 값은 검토값일 뿐
     ```
 
-    ⚠️ 여기서 부르는 `estimate_action_impact` 는 **모델의 Tool 예산을 쓰지 않는다.**
-       예산은 *"모델이 스스로 고른 탐색"* 을 세는 수이고, 이 호출은 모델이 끝난 뒤 결정론이
-       거는 검증이다.
+    🔴 **여기서 부르는 `estimate_action_impact` 도 Tool 실행이다** (v1.1 정정). 후보
+       수만큼 DB 를 왕복하므로 **남은 예산 안에서만** 검증한다.
+
+    ```text
+    남은 예산 2 · 후보 4개  →  앞의 2개만 검증
+                            →  나머지는 TOOL_BUDGET_EXCEEDED 사유로 남는다
+    ```
+
+    ★ 못 검증한 후보를 «아마 될 것» 으로 채우지 않는다. 숫자를 지어내 메우는 것보다
+      *"예산이 없어 못 쟀다"* 가 정직하다.
     """
     report: InvestigationReport | None = state.get("report")
     if report is None:
         return {"options": ()}
-    request: InvestigationRequest = state["request"]
     observations = state.get("observations") or ()
     known = {
         record.sequence for record in observations if record.status is ToolCallStatus.SUCCESS
     }
     allowed_lots = frozenset(state.get("allowed_lot_ids") or ())
+    ledger = _Ledger.of(state)
 
     evaluated: list[EvaluatedOption] = []
     for option in report.options:
@@ -677,8 +791,7 @@ def evaluate_options(state: InvestigationState) -> dict[str, Any]:
             evaluated.append(replace(base, rejected_reason=f"ACTION_UNSUPPORTED:{option.action}"))
             continue
         impact, rejection = _impact_for(
-            state["conn"],
-            request=request,
+            ledger,
             action=option.action,
             parameters=option.parameters,
             allowed_lot_ids=allowed_lots,
@@ -688,18 +801,23 @@ def evaluate_options(state: InvestigationState) -> dict[str, Any]:
     index = report.recommended_index
     if index is None or not 0 <= index < len(evaluated) or not evaluated[index].accepted:
         index = next((i for i, item in enumerate(evaluated) if item.accepted), None)
-    return {"options": tuple(evaluated), "recommended_index": index}
+    return {**ledger.freeze(), "options": tuple(evaluated), "recommended_index": index}
 
 
 def _impact_for(
-    conn: Any,
+    ledger: _Ledger,
     *,
-    request: InvestigationRequest,
     action: str,
     parameters: Mapping[str, Any],
     allowed_lot_ids: frozenset[str],
 ) -> tuple[ActionImpact | None, str | None]:
-    """후보 하나의 영향. 인자 검증은 `guard` 와 **같은 규칙**을 쓴다 — 두 벌로 두지 않는다."""
+    """후보 하나의 영향. 인자 검증은 `guard` 와 **같은 규칙**을 쓴다 — 두 벌로 두지 않는다.
+
+    🔴 실행은 저울을 지난다 — 예산이 없으면 **부르지 않고** 그 사유를 돌려준다.
+    """
+    stopped = ledger.blocked()
+    if stopped is not None:
+        return None, stopped
     probe = InvestigationStep(
         action="CALL_TOOL",
         tool_name="estimate_action_impact",
@@ -709,23 +827,22 @@ def _impact_for(
         probe,
         allowed_lot_ids=allowed_lot_ids,
         allowed_item_ids=frozenset(),
-        # ★ 중복·예산은 여기서 보지 않는다 — 모델의 탐색이 아니라 결정론 검증이다.
+        # ★ 중복은 여기서 보지 않는다 — 모델의 탐색이 아니라 결정론 검증이다. 같은 후보를
+        #   두 번 내면 두 번 재는 것이 맞고, 그 횟수는 **예산**이 막는다.
         executed_keys=frozenset(),
-        tool_call_count=0,
-        max_tool_calls=len(SUPPORTED_ACTIONS) + 1,
+        tool_call_count=ledger.spent,
+        max_tool_calls=ledger.state["request"].budget.max_tool_calls,
     )
     if not verdict.approved:
         return None, verdict.rejection
-    try:
-        impact = run_tool(
-            conn,
-            tool_name="estimate_action_impact",
-            arguments=verdict.arguments or {},
-            sim_run_id=request.sim_run_id,
-            as_of=request.as_of,
-        )
-    except Exception as error:  # noqa: BLE001 - 검증 실패가 조사를 버리게 하면 안 된다
-        return None, f"IMPACT_FAILED:{type(error).__name__}"
+    impact = ledger.run(
+        "estimate_action_impact",
+        arguments=verdict.arguments or {},
+        reason="후보 검증 — 숫자는 Tool 이 낸다",
+    )
+    if impact is None:
+        last = ledger.last
+        return None, (last.detail if last else None) or "IMPACT_FAILED"
     return impact, None
 
 
@@ -769,14 +886,21 @@ def finish(state: InvestigationState) -> dict[str, Any]:
         observed_as_of=derive_observed_as_of([record.observed_as_of for record in successes]),
         uncertainties=tuple(dict.fromkeys(uncertainties)),
         tool_call_count=int(state.get("tool_call_count") or 0),
+        planned_tool_call_count=int(state.get("planned_tool_call_count") or 0),
         replan_count=int(state.get("replan_count") or 0),
         llm_call_count=int(state.get("llm_call_count") or 0),
     )
     return {"result": result}
 
 
+#: `load_exception` 에서 **조사 자체가 성립하지 않는** 끝들. 더 캐지 않고 바로 닫는다.
+_STOPPED_AT_LOAD = frozenset(
+    {FinishReason.NOT_FOUND, FinishReason.TIMEOUT, FinishReason.BUDGET_EXCEEDED}
+)
+
+
 def route_after_load(state: InvestigationState) -> str:
-    return "finish" if state.get("finish_reason") is FinishReason.NOT_FOUND else "context"
+    return "finish" if state.get("finish_reason") in _STOPPED_AT_LOAD else "context"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -873,7 +997,7 @@ def run_investigation(
 
         # ⚠️ 조사 한 번에 client 하나 — 전송 예산이 인스턴스에 산다.
         default_plan, default_finalize = build_agent_llm(
-            max_sends=(budget or DEFAULT_BUDGET).max_llm_calls
+            max_sends=(budget or DEFAULT_BUDGET).max_llm_calls, clock=clock
         )
         plan_fn = plan_fn or default_plan
         finalize_fn = finalize_fn or default_finalize
@@ -895,6 +1019,7 @@ def run_investigation(
         "allowed_lot_ids": frozenset(),
         "allowed_item_ids": frozenset(),
         "tool_call_count": 0,
+        "planned_tool_call_count": 0,
         "replan_count": 0,
         "llm_call_count": 0,
         "sequence": 0,
