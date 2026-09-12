@@ -130,7 +130,34 @@ class _Cursor:
         elif "SUM(outstanding_amount_krw)" in text:
             self.row = {"amount": self.conn.outstanding_receivables}
         elif ".payables" in text:
-            self.rows = self.conn.payables
+            #  🔴 **실 질의의 뜻대로 자른다.** 기일이 왔고, 아직 귀속되지 않은 것만.
+            #     NOT EXISTS 를 대역이 무시하면 «두 번 실었다» 를 잡는 검사가 죽는다.
+            run, as_of_param = params[0], params[2]
+            self.rows = [
+                row
+                for row in self.conn.payables
+                if row["due_date"] <= as_of_param
+                and (run, row["payable_id"]) not in self.conn.recognized
+            ]
+        elif "INSERT INTO" in text and "finance_payable_closing_events" in text:
+            #  ★ (sim_run_id, payable_id) PK 를 대역도 지킨다 — ON CONFLICT DO NOTHING.
+            key = (params[0], params[1])
+            if key in self.conn.recognized:
+                self.rowcount = 0
+            else:
+                self.conn.recognized[key] = {
+                    "recognized_date": params[2],
+                    "recognized_amount_krw": params[3],
+                    "due_date": params[4],
+                }
+                self.rowcount = 1
+        elif "recognized_amount_krw" in text and "SELECT" in text:
+            run, recognized_date = params[0], params[1]
+            self.rows = [
+                {"recognized_amount_krw": event["recognized_amount_krw"]}
+                for (event_run, _), event in self.conn.recognized.items()
+                if event_run == run and event["recognized_date"] == recognized_date
+            ]
         elif ".expenses" in text:
             self.rows = self.conn.expenses
         elif "SUM(total_amount_krw)" in text:
@@ -170,7 +197,20 @@ class _Connection:
         period_start=date(2026, 1, 1),
         period_end=date(2026, 1, 31),
     ):
-        self.payables = payables
+        #  ★ 검사는 (기일, 금액) 두 값만 신경 쓴다. 채무 번호는 귀속 원장의 키라서
+        #    여기서 붙여 주되, 검사 본문이 그 이름을 알 필요는 없다.
+        self.payables = [
+            row
+            if isinstance(row, dict)
+            else {
+                "payable_id": f"PAY-{index}",
+                "due_date": row[0],
+                "outstanding_amount_krw": row[1],
+            }
+            for index, row in enumerate(payables)
+        ]
+        #  귀속 원장 대역. 키는 (sim_run_id, payable_id) — 실제 PK 와 같다.
+        self.recognized: dict[tuple[str, str], dict] = {}
         self.states = _default_states() if states is None else states
         self.prior_states = _default_prior_states() if prior_states is None else prior_states
         self.expenses = _default_expenses() if expenses is None else expenses
@@ -267,7 +307,7 @@ def test_weekend_due_date_is_not_rewritten_and_moves_cash_out_to_monday():
     _close(conn)
 
     assert _row(conn)["purchase_cash_out_krw"] == Decimal(200)
-    assert conn.payables[0][0] == sunday
+    assert conn.payables[0]["due_date"] == sunday
 
 
 def test_sim_run_id_is_bound_to_repository_query_not_interpreted_from_its_text():
@@ -484,13 +524,37 @@ def test_d0_payable_is_cash_out_on_the_same_day():
     assert _row(conn)["purchase_cash_out_krw"] == Decimal(200)
 
 
-def test_payable_due_on_another_business_day_is_not_counted_today():
-    """각 채무는 **자기 현금효과일 하루에만** 실린다 — 두 번 세지 않는다."""
+def test_an_overdue_payable_that_was_never_recognized_lands_today():
+    """🔴 **기일이 지났다는 이유로 버리지 않는다.**
+
+    승인 D일에는 payable 행이 아직 없고, pending transition 이 D+1 에 만들면서
+    `due_date = D` 로 적는다. 종전 조건(`effective_cash_date(due) == as_of`)은 그때
+    이미 D != D+1 이라 **어느 마감도 이것을 집지 않았다** — 실측 `SIM-CHAIN-V5` 에서
+    73건 27,484,900원이 그렇게 빠져 있었다.
+    """
     conn = _Connection(payables=[(date(2026, 1, 2), Decimal(200))])
 
     _close(conn)
 
-    assert _row(conn)["purchase_cash_out_krw"] == Decimal(0)
+    assert _row(conn)["purchase_cash_out_krw"] == Decimal(200)
+    #  ★ 귀속은 **한 번**이다. 실은 날과 계약 기일을 둘 다 적는다.
+    assert len(conn.recognized) == 1
+    event = next(iter(conn.recognized.values()))
+    assert event["recognized_date"] == AS_OF
+    assert event["due_date"] == date(2026, 1, 2)
+
+
+def test_a_recognized_payable_is_not_counted_again_the_next_day():
+    """🔴 `<= as_of` 로 여는 것만으로 고치면 여기서 무너진다 — 날마다 다시 실린다."""
+    conn = _Connection(payables=[(AS_OF, Decimal(200))])
+
+    _close(conn)
+    next_day = date(AS_OF.year, AS_OF.month, AS_OF.day + 1)
+    _close(conn, as_of=next_day)
+
+    assert _row(conn)["purchase_cash_out_krw"] == Decimal(200)
+    assert _row(conn, as_of=next_day)["purchase_cash_out_krw"] == Decimal(0)
+    assert len(conn.recognized) == 1
 
 
 def test_saturday_due_date_is_not_cash_out_on_saturday():
@@ -697,6 +761,10 @@ def test_every_ledger_query_is_scoped_to_the_run():
     for text, params in conn.executed:
         if "daily_closings" in text:
             assert params["sim_run_id"] == SIM_RUN_ID
+            continue
+        if "INSERT INTO" in text and "finance_payable_closing_events" in text:
+            #  ★ INSERT 는 `WHERE` 가 없다. 실행 축은 **첫 칸으로** 실린다.
+            assert params[0] == SIM_RUN_ID, text
             continue
         assert "sim_run_id = %s" in text, text
         assert SIM_RUN_ID in list(params or []), text

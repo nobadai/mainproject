@@ -107,6 +107,9 @@ class _Cursor:
             self.rows = [{"amount": self.conn.outstanding_by_run.get(params[0], Decimal(0))}]
         elif ".payables" in text or ".expenses" in text:
             self.rows = []
+        elif "recognized_amount_krw" in text:
+            #  이 파일의 대역에는 채무가 없다 — 귀속도 없다.
+            self.rows = []
         elif "SUM(total_amount_krw)" in text:
             self.rows = [{"amount": Decimal(0)}]
         elif "INSERT INTO" in text and "daily_closings" in text:
