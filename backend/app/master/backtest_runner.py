@@ -128,6 +128,11 @@ from app.master.backfill import (
     read_run_rules,
 )
 from app.master.bootstrap import wire_registries
+
+# 🔴 **어휘의 주인에서 들여온다. 여기서 네 이름을 안 적는다** (2026-09-12).
+#   손으로 적으면 어휘가 느는 날 요약만 옛말을 하고, 새로 든 값이 성적표에서
+#   조용히 사라진다 — `envelope` 가 `get_args` 로 한 벌만 만드는 이유 그대로다.
+from app.master.envelope import LLM_STATUSES
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.market_calendar import MarketCalendar, get_market_calendar
@@ -234,6 +239,40 @@ class WalkResult:
             for day in self.days
             for one in day.sales_items
         )
+
+    @property
+    def llm_outcomes(self) -> Mapping[str, int]:
+        """그 걷기에서 **LLM 이 실제로 돌았나** (2026-09-12). 🔴 **넷을 접지 않는다.**
+
+        ```text
+        DISABLED           설정으로 껐다 — 🟢 정상이다
+        SKIPPED_TEMPLATE   켜져 있는데 부를 조건이 아니었다 — 🟢 정상이다
+        SUCCESS            불렀고 쓸 수 있는 답을 받았다
+        FALLBACK           🔴 불렀는데 실패했다 — 규칙이 대신 답했다
+        ```
+
+        ★★ **이 줄이 없어서 71영업일을 `SUCCESS` 0건으로 걷고도 아무도 몰랐다**
+          (`SIM-CHAIN-V6` 실측 2026-09-12). 재무가 918건 전부 `FALLBACK` 이었고
+          2026-09-11 19시대 뒤로는 성공이 한 건도 없었는데, 원장에는 처음부터 다
+          적혀 있었고 **요약에 안 나와서 아무도 안 봤다.** `plan.py:62` 가 이미
+          적어 둔 위험 그대로다 — *"규칙 경로로 떨어져도 산출물은 멀쩡해 보인다."*
+
+        🔴 **0 인 어휘를 빼지 않는다.** 여기가 다른 어휘 줄과 갈리는 자리다.
+          저쪽은 *"그 사건이 없었다"* 를 빈 칸으로 말하지만, 이쪽에서 `SUCCESS` 가
+          없다는 것은 **그 자체가 사고**다 — 빼고 찍으면 오늘 이 사태의 모양이
+          그대로 다시 선다. 네 값은 늘 닫힌 집합이라 채울 수 있고, 채워야 한다.
+
+        ★ **부서별로 안 가른다.** 지금 필요한 것은 *"돌았나 안 돌았나"* 이고,
+          합계에서 `FALLBACK` 이 0 이 아니면 그때 파고들면 된다.
+
+        ★ **이름의 주인은 `envelope.LLMStatus` 다.** 여기서 새 이름을 안 붙이고
+          세기만 한다 — `end_codes` 가 `scheduler` 의 값을 그대로 세는 것과 같다.
+        """
+        total: Counter[str] = Counter(dict.fromkeys(LLM_STATUSES, 0))
+        for day in self.days:
+            for one in (*day.items, *day.sales_items):
+                total.update(one.llm_statuses)
+        return total
 
     @property
     def sales_statuses(self) -> Mapping[str, int]:
@@ -868,6 +907,11 @@ def format_summary(result: WalkResult) -> str:
         #    자리가 `SKIPPED_HELD_ALLOCATION` 이고, 접으면 그 줄이 사라진다.
         f"유지보수  {dict(sorted(result.maintenance_statuses.items()))}",
         f"유지어휘  {dict(sorted(result.maintenance_outcomes.items()))}",
+        # 🔴 **LLM 줄은 0 인 어휘도 찍는다** (2026-09-12). 다른 어휘 줄과 여기서
+        #    갈린다 — 저쪽의 0 은 *"그 사건이 없었다"* 이고 이쪽의 `SUCCESS` 0 은
+        #    **그 자체가 사고**다. 71영업일을 `SUCCESS` 0건으로 걷고도 아무도
+        #    모른 것이 「0이라 안 보임」의 모양이었다 (`SIM-CHAIN-V6`).
+        f"LLM어휘   {dict(sorted(result.llm_outcomes.items()))}",
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]

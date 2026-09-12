@@ -666,6 +666,24 @@ class ItemRunOutcome:
     end_code: str | None = None
     reason: str = ""
 
+    #: 그 실행이 부른 **부서별 호출마다 하나씩** — LLM 이 실제로 돌았나 (2026-09-12).
+    #:
+    #: 🔴 **값은 처음부터 `plan[].llm_status` 에 다 있었는데 여기서 끊겼다.**
+    #:   `run_scheduled_day` 는 부서 응답을 손에 쥐고 `end_code` 만 떼어 갔고,
+    #:   그래서 걷기 71영업일에 **재무 `FALLBACK` 918건 · `SUCCESS` 0건**이었는데
+    #:   성적표에는 한 글자도 안 올라왔다 (`SIM-CHAIN-V6` 실측 2026-09-12).
+    #:
+    #: ★★ `plan.py:62` 가 이미 그 위험을 적어 뒀다 — *"Planner 가 죽어 규칙 경로로
+    #:   떨어져도 **산출물은 멀쩡해 보인다**."* 멀쩡해 보이는 것을 멀쩡하지 않다고
+    #:   말할 수 있는 유일한 값이 이것이고, 그 경고가 요약까지 안 올라와 있었다.
+    #:
+    #: ★ **이름의 주인은 `envelope.LLMStatus` 다.** 여기서 새 이름을 안 붙이고
+    #:   부서가 낸 값을 그대로 나른다 (`end_code` 와 같은 규율).
+    #:
+    #: ⚠️ **못 돈 품목은 비었다.** 응답이 없으면 계획도 없다 — 그 자리는 `status`
+    #:   가 이미 `FAILED` 라고 말한다.
+    llm_statuses: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class DayRunOutcome:
@@ -1198,6 +1216,7 @@ def run_scheduled_day(
                 request_id=request_id,
                 status="RAN",
                 end_code=str(getattr(response, "end_code", "")) or None,
+                llm_statuses=_llm_statuses(response),
             )
         )
 
@@ -1279,6 +1298,7 @@ def run_scheduled_day(
                 # 🔴 **판매 어휘 그대로 싣는다.** `SL1_PRESENTED` 를 매입 어휘로
                 #    접으면 그 날 무슨 답이 났는지를 세는 자리가 통째로 거짓이 된다.
                 end_code=str(getattr(sales_response, "end_code", "")) or None,
+                llm_statuses=_llm_statuses(sales_response),
             )
         )
     sales_status = _fold_item_statuses(sales_results)
@@ -1493,6 +1513,25 @@ def _runs_of(request_ids: Sequence[str]) -> Callable[..., list[Any]]:
         return [row for row in list_runs(**kwargs) if row.get("request_id") in wanted]
 
     return runs_on
+
+
+def _llm_statuses(response: Any) -> tuple[str, ...]:
+    """그 응답의 실행 계획이 말하는 **부서 호출마다의 `llm_status`** (2026-09-12).
+
+    🔴 **세지 않고 나르기만 한다.** 접는 자리는 걷기 요약 하나이고, 여기서 미리
+      접으면 *"어느 부서가 떨어졌나"* 를 나중에 열 수 없다.
+
+    ★ **이름의 주인은 `envelope.LLMStatus` 다.** 부서가 낸 문자열을 그대로 옮긴다 —
+      `end_code` 를 `str(...)` 로 그대로 싣는 것과 같은 모양이다.
+
+    ⚠️ **계획이 없는 응답도 값이다.** 대역 응답이나 계획을 안 싣는 경로는 빈
+      튜플이고, 그것은 *"LLM 이 안 돌았다"* 가 아니라 **"셀 것이 없었다"** 다.
+    """
+    return tuple(
+        str(getattr(step, "llm_status", "") or "")
+        for step in (getattr(response, "plan", None) or ())
+        if getattr(step, "llm_status", "")
+    )
 
 
 def _fold_item_statuses(results: Sequence[ItemRunOutcome]) -> str:
