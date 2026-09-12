@@ -182,6 +182,9 @@ class _Cursor:
             self.rows = [{"amount": self.conn.outstanding_receivables}]
         elif ".payables" in text:
             self.rows = list(self.conn.payables)
+        elif "recognized_amount_krw" in text:
+            #  이 파일의 대역에는 채무가 없다 (payables=()) — 귀속도 없다.
+            self.rows = []
         elif ".expenses" in text:
             self.rows = list(self.conn.expenses)
         elif "SUM(total_amount_krw)" in text:
