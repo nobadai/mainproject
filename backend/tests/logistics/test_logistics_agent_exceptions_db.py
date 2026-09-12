@@ -15,6 +15,7 @@ D4  다시 참        → 새 행 + previous_exception_id  (재오픈하지 않�
 근거 없는 Exception 이 행이 될 수 있는가     (CHECK)
 갱신이 opened_as_of · status 를 안 건드리나
 입고 뒤 칸이 **닫지 않는가**
+가변 잔량의 관측일이 원장에서 나오는가        (§18.2 · 실제 inventory_moves)
 ```
 
 끝나면 **통째로 롤백한다** — 공유 `haetdeul` 에 아무것도 남지 않는다.
@@ -168,7 +169,21 @@ def _lot_row(
     received: date,
     sim_run_id: str = SIM,
     status: str = "ACTIVE",
+    original: str | None = None,
+    moves: list[tuple[str, str, date]] | None = None,
 ) -> None:
+    """Lot 한 줄과 **그 Lot 을 그 잔량으로 만든 원장 이동들.**
+
+    🔴 **이동 없는 Lot 을 만들지 않는다.** production 에서 Lot 은
+       `remaining_qty_kg = 0` 으로 서고(`inbound_stock._insert_lot`) 잔량을 올리는
+       길이 원장 하나뿐이라(`ledger._update_remaining`), 이동 0 건인 Lot 은 실제로
+       날 수 없는 상태다. 그런 fixture 로 재면 *"잔량의 관측일이 있다"* 는 계약이
+       검사에서만 안 서는 것처럼 보인다.
+
+    :param moves: `(move_type, quantity_kg, moved_at)` 들. 기본은 입고일의 `IN` 하나다.
+    """
+    최초 = Decimal(original if original is not None else qty)
+    이동들 = moves if moves is not None else [("IN", qty, received)]
     with conn.cursor() as cur:
         cur.execute(
             f"""INSERT INTO {TMP_SCHEMA}.inventory_lots (
@@ -176,7 +191,34 @@ def _lot_row(
                     original_qty_kg, remaining_qty_kg, unit_cost_krw_per_kg,
                     storage_zone, status
                 ) VALUES (%s, %s, 'PI-TEST', %s, %s, %s, %s, 1000, %s, %s)""",
-            (lot_id, sim_run_id, item_id, received, Decimal(qty), Decimal(qty), ZONE, status),
+            (lot_id, sim_run_id, item_id, received, 최초, Decimal(qty), ZONE, status),
+        )
+        for 번호, (유형, 수량, 날짜) in enumerate(이동들, start=1):
+            cur.execute(
+                f"""INSERT INTO {TMP_SCHEMA}.inventory_moves (
+                        move_id, sim_run_id, lot_id, move_type,
+                        quantity_kg, moved_at, reason_code
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'TEST')""",
+                (f"MOVE-{lot_id}-{번호}", sim_run_id, lot_id, 유형, Decimal(수량), 날짜),
+            )
+
+
+def _출고(
+    conn: psycopg.Connection, lot_id: str, *, qty: str, on: date, sim_run_id: str = SIM
+) -> None:
+    """원장 `OUT` 한 줄. **스냅샷에서 잔량이 줄면 원장에도 줄어야 한다.**
+
+    🔴 두 벌이 갈리면 관측이 `OBSERVATION_INCONSISTENT` 를 적고 그 Lot 의 잔량
+       관측일이 비워진다 — 그것이 맞는 동작이라, 그 상태를 fixture 기본으로 두면
+       **날짜가 서는 길** 자체를 한 번도 안 재게 된다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {TMP_SCHEMA}.inventory_moves (
+                    move_id, sim_run_id, lot_id, move_type,
+                    quantity_kg, moved_at, reason_code
+                ) VALUES (%s, %s, %s, 'OUT', %s, %s, 'TEST')""",
+            (f"MOVE-OUT-{lot_id}-{on:%Y%m%d}", sim_run_id, lot_id, Decimal(qty), on),
         )
 
 
@@ -310,7 +352,7 @@ def test_임계_아래면_아무_행도_안_생긴다(conn: psycopg.Connection) 
 
 def test_이미_다_잡힌_Lot_은_열지_않는다(conn: psycopg.Connection) -> None:
     """🔴 이미 판매 확정·할당된 재고를 또 «빨리 파세요» 로 올리지 않는다."""
-    _하루(conn, D1, remaining=3)
+    _하루(conn, D1, remaining=3, 무="300")
     snapshot = _snapshot(
         D1,
         lots=[
@@ -395,6 +437,7 @@ def test_살아_있는_같은_문제는_DB_가_둘째_행을_막는다(conn: psy
 def test_입고_뒤_칸은_닫지_않는다(conn: psycopg.Connection) -> None:
     """🔴 **그날 나갈 재고를 보기도 전에 «해결됐다» 고 적지 않는다.**"""
     _탐지(conn, _하루(conn, D1, remaining=3), phase="AFTER_INBOUND")
+    _출고(conn, "LOT-MU", qty="100", on=D2)
 
     out = _탐지(conn, _snapshot(
         D2,
@@ -411,6 +454,7 @@ def test_입고_뒤_칸은_닫지_않는다(conn: psycopg.Connection) -> None:
 def test_출고_뒤_칸이_조건이_사라진_문제를_닫는다(conn: psycopg.Connection) -> None:
     """할당이 잔량을 다 덮었으면 «위험 관리 상태» · 용량이 회복했으면 그냥 회복이다."""
     _탐지(conn, _하루(conn, D1, remaining=3), phase="AFTER_INBOUND")
+    _출고(conn, "LOT-MU", qty="100", on=D2)
 
     out = _탐지(conn, _snapshot(
         D3,
@@ -432,6 +476,7 @@ def test_출고_뒤_칸이_조건이_사라진_문제를_닫는다(conn: psycopg
 def test_잔량이_남은_채_신선도가_다하면_넘어갔다고_적고_닫는다(conn: psycopg.Connection) -> None:
     """§7.1 E. 🔴 **후속 Exception 을 만들지 않는다** — 그 탐지기는 이번 판에 없다."""
     _탐지(conn, _하루(conn, D1, remaining=3), phase="AFTER_INBOUND")
+    _출고(conn, "LOT-MU", qty="100", on=D2)
 
     _탐지(conn, _snapshot(
         D3,
@@ -450,6 +495,7 @@ def test_잔량이_남은_채_신선도가_다하면_넘어갔다고_적고_닫�
 def test_기준이_없는_날에는_닫지도_않는다(conn: psycopg.Connection) -> None:
     """🔴 **«기준이 없어 못 쟀다» 를 «해결됐다» 로 적으면 그 문제는 아무도 못 찾는다.**"""
     _탐지(conn, _하루(conn, D1, remaining=3), phase="AFTER_INBOUND")
+    _출고(conn, "LOT-MU", qty="100", on=D2)
 
     기준없음 = _snapshot(
         D3,
@@ -474,6 +520,7 @@ def test_닫힌_뒤_재발하면_새_행이_이전_행을_가리킨다(conn: psy
     """🔴 **재오픈하지 않는다.** 닫힌 날과 다시 열린 날이 한 행에 겹치면 «며칠째» 를
     셀 수 없다 — 그래서 새 행을 열고 고리로 잇는다."""
     _탐지(conn, _하루(conn, D1, remaining=3), phase="AFTER_INBOUND")
+    _출고(conn, "LOT-MU", qty="100", on=D2)
     _탐지(conn, _snapshot(
         D3,
         lots=[
@@ -577,3 +624,134 @@ def test_근거_없는_Exception_은_행이_될_수_없다(conn: psycopg.Connect
                           %s, %s, '[]'::jsonb, 'v1')""",
             (SIM, FRESHNESS_PRESSURE, D1, D1),
         )
+
+
+# ===========================================================================
+# F. 관측일 — **가변 사실은 원장이 날짜를 준다** (§18.2)
+# ===========================================================================
+
+입고일 = D1 - timedelta(days=7)
+첫출고 = D1 - timedelta(days=5)
+끝출고 = D1 - timedelta(days=2)
+
+
+def _움직인_하루(conn: psycopg.Connection) -> Any:
+    """```text
+    D-7  IN   1,000kg
+    D-5  OUT    300kg
+    D-2  OUT    200kg
+    현재 잔량 500kg
+    ```
+
+    🔴 500kg 이라는 **현재** 사실은 D-2 의 출고까지 반영된 뒤에야 알 수 있다.
+    """
+    _lot_row(
+        conn,
+        "LOT-BAECHU",
+        item_id=BAECHU,
+        qty="500",
+        original="1000",
+        received=입고일,
+        moves=[("IN", "1000", 입고일), ("OUT", "300", 첫출고), ("OUT", "200", 끝출고)],
+    )
+    _lot_row(conn, "LOT-MU", item_id=MU, qty="400", received=D1 - timedelta(days=2))
+    return _snapshot(
+        D1,
+        lots=[_배추(remaining=3, received=입고일), _무(qty="400", received=D1 - timedelta(days=2))],
+    )
+
+
+def _근거(행: dict[str, Any]) -> dict[str, Any]:
+    return {one["fact"]: one for one in 행["evidence_json"]}
+
+
+def test_잔량_근거의_관측일이_입고일이_아니라_마지막_이동일이다(conn: psycopg.Connection) -> None:
+    """🔴 **Lot 하나에 관측일 하나를 돌려쓰면 이 차이가 통째로 사라진다.**"""
+    out = _탐지(conn, _움직인_하루(conn), phase="AFTER_INBOUND")
+
+    신선도 = next(one for one in _행들(conn) if one["code"] == FRESHNESS_PRESSURE)
+    사실 = _근거(신선도)
+    assert 사실["remaining_qty_kg"]["observed_as_of"] == 끝출고.isoformat()
+    assert 사실["remaining_qty_kg"]["observed_as_of"] != 입고일.isoformat()
+    assert out.uncertainties == ()
+
+
+def test_정책과_예약_축이_섞인_칸은_여전히_None_이다(conn: psycopg.Connection) -> None:
+    """🔴 **잔량에 날짜가 붙었다고 나머지까지 붙이지 않는다.** 이번 보정의 성공 기준은
+    `None` 을 줄이는 것이 아니라 **잘못된 날짜를 없애는 것**이다."""
+    _탐지(conn, _움직인_하루(conn), phase="AFTER_INBOUND")
+
+    사실 = _근거(next(one for one in _행들(conn) if one["code"] == FRESHNESS_PRESSURE))
+    assert 사실["remaining_freshness_days"]["observed_as_of"] is None
+    assert 사실["effective_freshness_limit_days"]["observed_as_of"] is None
+    assert 사실["freshness_remaining_ratio"]["observed_as_of"] is None
+    assert 사실["freshness_pressure_ratio"]["observed_as_of"] is None
+    # 잔량 축은 섰는데(D-2) 예약·할당 축을 못 대서 미확정 물량은 여전히 «안 쟀다» 다.
+    assert 사실["uncommitted_kg"]["observed_as_of"] is None
+
+
+def test_행의_관측일은_근거들에서_유도되고_as_of_가_아니다(conn: psycopg.Connection) -> None:
+    """정책 축이 `None` 인 한 행 전체도 `None` 이다 — `as_of` 로 메우지 않는다."""
+    _탐지(conn, _움직인_하루(conn), phase="AFTER_INBOUND")
+
+    for 행 in _행들(conn):
+        assert 행["observed_as_of"] is None
+        assert 행["observed_as_of"] != D1
+    # 🔴 **미래를 본 근거가 없다** — 모든 관측일이 그날 이하다 (§18 look-ahead).
+    날짜들 = [
+        one["observed_as_of"] for 행 in _행들(conn) for one in 행["evidence_json"]
+    ]
+    assert [one for one in 날짜들 if one is not None and one > D1.isoformat()] == []
+
+
+def test_용량_근거의_점유는_Lot_들의_마지막_이동일을_따라간다(conn: psycopg.Connection) -> None:
+    """물리 점유는 그 Lot 들의 잔량 합이다 — 배추 D-2 · 무 D-2 중 늦은 쪽."""
+    _탐지(conn, _움직인_하루(conn), phase="AFTER_INBOUND")
+
+    사실 = _근거(next(one for one in _행들(conn) if one["code"] == CAPACITY_PRESSURE))
+    assert 사실["used_capacity_kg"]["observed_as_of"] == 끝출고.isoformat()
+    assert 사실["capacity_window_usage_ratio"]["observed_as_of"] is None
+
+
+def test_원장에_이동이_없는_Lot_은_사실로_적고_날짜를_비운다(conn: psycopg.Connection) -> None:
+    """production 경로면 날 수 없는 상태다 — 그래도 **지어내지 않는다.**"""
+    _lot_row(conn, "LOT-BAECHU", item_id=BAECHU, qty="500", received=입고일, moves=[])
+    _lot_row(conn, "LOT-MU", item_id=MU, qty="400", received=D1 - timedelta(days=2))
+    snapshot = _snapshot(
+        D1,
+        lots=[_배추(remaining=3, received=입고일), _무(qty="400", received=D1 - timedelta(days=2))],
+    )
+
+    out = _탐지(conn, snapshot, phase="AFTER_INBOUND")
+
+    assert "LEDGER_MOVE_UNRESOLVED:LOT-BAECHU" in out.uncertainties
+    사실 = _근거(next(one for one in _행들(conn) if one["code"] == FRESHNESS_PRESSURE))
+    assert 사실["remaining_qty_kg"]["observed_as_of"] is None
+    # 🔴 한 Lot 을 못 쟀으니 그 합계인 점유도 못 잰 것이다.
+    용량 = _근거(next(one for one in _행들(conn) if one["code"] == CAPACITY_PRESSURE))
+    assert 용량["used_capacity_kg"]["observed_as_of"] is None
+
+
+def test_캐시와_원장이_갈리면_사실만_적고_날짜를_비운다(conn: psycopg.Connection) -> None:
+    """🔴 **탐지를 막지는 않는다.** 문제는 열되 *"이 근거의 관측일은 모른다"* 를 남긴다."""
+    _lot_row(
+        conn,
+        "LOT-BAECHU",
+        item_id=BAECHU,
+        qty="500",
+        original="1000",
+        received=입고일,
+        # 원장은 480kg 이라는데 캐시는 500kg 이다.
+        moves=[("IN", "1000", 입고일), ("OUT", "520", 끝출고)],
+    )
+    _lot_row(conn, "LOT-MU", item_id=MU, qty="400", received=D1 - timedelta(days=2))
+    snapshot = _snapshot(
+        D1,
+        lots=[_배추(remaining=3, received=입고일), _무(qty="400", received=D1 - timedelta(days=2))],
+    )
+
+    out = _탐지(conn, snapshot, phase="AFTER_INBOUND")
+
+    assert "OBSERVATION_INCONSISTENT:LOT-BAECHU" in out.uncertainties
+    사실 = _근거(next(one for one in _행들(conn) if one["code"] == FRESHNESS_PRESSURE))
+    assert 사실["remaining_qty_kg"]["observed_as_of"] is None

@@ -12,6 +12,20 @@
    *"이 값을 언제부터 알 수 있었나"* 를 정하고, 4 Mode 회신(`adapter.py`)과
    Exception 근거가 **같은 함수**를 지난다. 두 벌로 적으면 같은 사실이 어느 자리를
    지나느냐에 따라 «쟀다» 와 «안 쟀다» 로 갈린다.
+
+🔴 **관측일은 Lot 이 아니라 «사실» 에 붙는다.** 한 Lot 안에서도 축마다 다르다.
+
+```text
+received_at        입고일        불변    ← 입고 그날 이후 안 바뀐다
+remaining_qty_kg   마지막 이동일  가변    ← D1 입고 · D5 출고 · D8 출고면 D8 이다
+status             아래 규칙      가변
+uncommitted_kg     둘의 늦은 쪽   가변    ← 지금은 예약 축을 못 대서 None
+정책값             없음                  ← 유효일 칸이 없다
+```
+
+   ⚠️ **Lot 하나에 관측일 하나**로 두면 저 다섯이 한 날짜로 뭉개진다. 그러면 D8 까지
+      출고된 500kg 이 *"D1 부터 알던 사실"* 로 적히고, 그 거짓은 값이 아니라 **날짜**에
+      남아 아무도 못 본다.
 """
 
 from __future__ import annotations
@@ -26,10 +40,12 @@ from app.logistics.schemas import InventoryLogisticsSnapshot
 
 __all__ = [
     "CAPACITY_PRESSURE",
+    "COMMITMENT_OBSERVED_AS_OF",
     "FRESHNESS_EXPIRED",
     "FRESHNESS_PRESSURE",
     "LIVE_STATUSES",
     "POLICY_OBSERVED_AS_OF",
+    "SNAPSHOT_QUANTITY_OBSERVED_AS_OF",
     "WAREHOUSE_SUBJECT_ID",
     "DetectOut",
     "DetectPhase",
@@ -94,6 +110,32 @@ WAREHOUSE_SUBJECT_ID = "WAREHOUSE"
 POLICY_OBSERVED_AS_OF: date | None = None
 
 
+#: 예약·할당 축의 관측일. 🔴 **`None` 이고, 그것이 사실이다.**
+#:
+#: `uncommitted_kg` 는 *"지금 이 Lot 에 살아 있는 할당"* 을 뺀 값인데, **그 그림이
+#: 언제부터 참이었나**를 댈 근거가 DB 에 없다.
+#:
+#: ```text
+#: 붙은 날   inventory_allocations.decided_at   ✅ 시뮬레이션 시각이다 (outbound._sim_day)
+#: 빠진 날   release_reservation                ✅ released_as_of 를 같은 UPDATE 에 적는다
+#:           cancel_allocation                  🔴 **날짜를 하나도 안 적는다**
+#: ```
+#:
+#: 🔴 **빠진 날 하나를 못 대면 전체를 못 댄다.** `outbound.cancel_allocation` 은
+#:    `status = 'CANCELLED'` 만 쓰고 업무 날짜를 남기지 않는다 — 그 한 번으로 그 Lot 의
+#:    미확정 물량이 늘어나는데, 늘어난 날을 아무도 모른다. 붙은 날들만 모아 max 를
+#:    내면 **실제보다 이른 날**이 적히고, 그것은 «안 쟀다» 가 «쟀다» 로 둔갑하는 것과
+#:    같은 종류의 거짓이다.
+#:
+#: ⚠️ **스냅샷 쪽에도 날짜가 없다.** `OutboundCommitment` 는 (품목 · Lot · 수량) 셋뿐이고
+#:    (`logistics.schemas`), `repository.get_outbound_commitments` 는 `as_of` 축 없이
+#:    **지금 status** 를 읽는다.
+#:
+#: ★ 이 값이 날짜를 내기 시작하려면 **`cancel_allocation` 이 날짜를 적어야 한다**
+#:   (`released_as_of` 가 선 것과 같은 판). 그때 바꿀 자리는 **여기 하나**다.
+COMMITMENT_OBSERVED_AS_OF: date | None = None
+
+
 def derive_observed_as_of(values: Iterable[date | None]) -> date | None:
     """파생값의 관측 기준일. **가장 늦은 것, 하나라도 모르면 `None`.**
 
@@ -120,21 +162,47 @@ def derive_observed_as_of(values: Iterable[date | None]) -> date | None:
     return None if empty else latest
 
 
+#: 스냅샷만 보고 잰 **물리 잔량 축**의 관측일. 🔴 `None` 이다 — 스냅샷은 원장을
+#: 싣지 않는다 (`InventoryLotSnapshot` 의 날짜는 `received_at` 하나뿐이다).
+#:
+#: 🔴 **`received_at` 으로 메우지 않는다.** 입고일이 재는 것은 *"이 Lot 이 있다"* 이지
+#:    *"지금 500kg 이다"* 가 아니다. 잔량의 관측일은 원장의 마지막 이동일이고
+#:    (`historical_repository.ledger_state_by_lot`), 스냅샷 경로에는 그 원장이 없다.
+#:
+#: ★ 탐지기 쪽은 원장을 읽으므로 Lot 별 잔량에 **진짜 날짜**가 붙는다
+#:   (`ObservedLot.remaining_qty_observed_as_of`). 이 상수는 **회신 경로만**의 한계다.
+SNAPSHOT_QUANTITY_OBSERVED_AS_OF: date | None = None
+
+
 def snapshot_observed_as_of(snapshot: InventoryLogisticsSnapshot | None) -> date | None:
     """물류 회신 하나의 관측 기준일 (`AgentReply.observed_at`).
 
-    🔴 **지금은 언제나 `None` 이고, 그것이 정직한 값이다.** 네 Mode 의 회신은 전부
-       정책값(용량 · 리드타임 · 임계 비율 · 보관한계)을 계산에 넣는데 그 표들에
-       유효일 칸이 없다 — `POLICY_OBSERVED_AS_OF` 참조.
+    🔴 **지금은 언제나 `None` 이고, 그것이 정직한 값이다.** 회신 하나가 싣는 사실은
+       세 축에 걸쳐 있고 **세 축 모두** 관측일을 못 댄다.
 
-    ★ **그래도 계산해서 낸다.** 기본값을 그대로 두는 것과 «재 봤더니 못 잰다» 는
-      다른 사실이고, 유효일 칸이 생기는 날 이 함수가 **저절로** 날짜를 내기 시작한다.
-      Lot 축은 이미 관측일이 있다(`inventory_lots.received_at`).
+    ```text
+    정책 축      용량 · 리드타임 · 임계 비율 · 보관한계   유효일 칸이 없다
+    예약·할당 축  inventory_by_item 에서 차감한 몫        빠진 날을 못 댄다
+    물리 잔량 축  lots[].available_qty_kg                스냅샷에 원장이 없다
+    ```
+
+    🔴 **`received_at` 을 이 셈에 넣지 않는다.** 넣어 두면 정책 표에 유효일 칸이
+       생기는 날 이 함수가 **입고일을 회신의 관측일로 내기 시작한다** — 그런데 회신의
+       주된 사실은 가변 잔량이라, 그 날짜는 «가장 늦은 것» 이 아니라 **가장 이른 것**에
+       가깝다. 지금 값이 같다고 틀린 셈을 남겨 두지 않는다.
+
+    ★ **그래도 계산해서 낸다.** 기본값을 그대로 두는 것과 «재 봤더니 못 잰다» 는 다른
+      사실이고, 세 축이 차례로 날짜를 얻는 날 이 함수가 **저절로** 따라온다.
     """
     if snapshot is None:
         return None
-    lot_dates: list[date | None] = [lot.received_at for lot in snapshot.on_hand_by_lot]
-    return derive_observed_as_of([*lot_dates, POLICY_OBSERVED_AS_OF])
+    return derive_observed_as_of(
+        [
+            POLICY_OBSERVED_AS_OF,
+            COMMITMENT_OBSERVED_AS_OF,
+            SNAPSHOT_QUANTITY_OBSERVED_AS_OF,
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +289,42 @@ class ObservedLot:
     #: 회전 정책의 판매우선 경계. 정책이 없는 품목이면 `None` (실측 3/5 품목만 있다).
     sell_priority_remaining_days: int | None
     storage_zone: str | None
-    #: 🔴 이 Lot 의 사실을 **언제부터 알 수 있었나** = `received_at`.
-    observed_as_of: date | None
+    #: 🔴 `remaining_qty_kg` 의 관측일 = **그 Lot 의 마지막 원장 이동일**
+    #: (`historical_repository.ledger_state_by_lot`). 원장에 이동이 없으면 `None` 이다.
+    #:
+    #: ⚠️ **`received_at` 이 아니다.** 잔량은 입고 뒤에도 출고·폐기로 계속 바뀌고
+    #:    (`ledger._update_remaining` 이 유일한 writer 이며 늘 같은 판에 `moved_at` 을
+    #:    남긴다), 입고일을 적으면 D8 까지 나간 재고를 D1 부터 알던 것으로 적게 된다.
+    remaining_qty_observed_as_of: date | None
+    #: 🔴 `status` 의 관측일. **어휘마다 근거가 다르다.**
+    #:
+    #: ```text
+    #: ACTIVE    received_at        Lot INSERT 가 적은 값이고 되돌리는 writer 가 없다
+    #: DISPOSED  마지막 이동일       잔량을 0 으로 만든 DISPOSE 의 날
+    #: 그 밖      None               DEPLETED · HOLD 는 production writer 가 없다
+    #: ```
+    status_observed_as_of: date | None
+
+    @property
+    def uncommitted_observed_as_of(self) -> date | None:
+        """`uncommitted_kg` 의 관측일 = **잔량 축과 예약·할당 축 중 늦은 쪽.**
+
+        🔴 **지금은 언제나 `None` 이다** — 예약·할당 축을 못 댄다
+           (`COMMITMENT_OBSERVED_AS_OF`). 그 축이 날짜를 얻는 날 이 값이 저절로 선다.
+        """
+        return derive_observed_as_of(
+            [self.remaining_qty_observed_as_of, COMMITMENT_OBSERVED_AS_OF]
+        )
+
+    @property
+    def freshness_observed_as_of(self) -> date | None:
+        """`remaining_freshness_days` 의 관측일 = **입고일과 보관 정책 중 늦은 쪽.**
+
+        🔴 **`received_at` 하나로 적지 않는다.** 잔여 신선도는 «한계 − 경과» 이고 그
+           한계가 `item_storage_policies` 에서 온다 — 정책이 언제부터 그 값이었는지를
+           모르면 잔여 일수도 언제부터 그 값이었는지 모른다. 그래서 지금은 `None` 이다.
+        """
+        return derive_observed_as_of([self.received_at, POLICY_OBSERVED_AS_OF])
 
     @property
     def freshness_remaining_ratio(self) -> Decimal | None:
@@ -276,10 +378,17 @@ class WarehouseObservation:
 
     sim_run_id: str
     as_of: date
-    #: Lot 축의 관측일(`received_at` 중 가장 늦은 것). 🔴 **용량 축은 안 든다** —
-    #: 정책에 유효일이 없어 그 축의 관측일은 `None` 이고, 그 사실은 각 Exception 의
-    #: 근거에서 다시 드러난다.
-    observed_as_of: date | None
+    #: **물리 재고 축**의 관측일 = 관측에 든 Lot 들의 `remaining_qty_observed_as_of`
+    #: 중 가장 늦은 것, **하나라도 못 대면 `None`**.
+    #:
+    #: ★ `used_capacity_kg` 가 바로 이 Lot 들의 잔량 합이라(`repository` 가 그렇게
+    #:   셈한다) 그 사실의 관측일이 곧 이 값이다.
+    #:
+    #: 🔴 **«창고 상태 전체» 의 관측일이 아니다.** 그것은 정책 축과 예약·할당 축까지
+    #:    합친 값이라 지금은 언제나 `None` 이다 (`POLICY_OBSERVED_AS_OF` ·
+    #:    `COMMITMENT_OBSERVED_AS_OF`). 이름을 «전체» 로 두면 재고 축 하나를 재 놓고
+    #:    창고를 다 잰 것처럼 읽힌다.
+    inventory_observed_as_of: date | None
     lots: tuple[ObservedLot, ...]
     capacity: ObservedCapacity
     policy: ObservedPolicy

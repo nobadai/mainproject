@@ -79,8 +79,10 @@ __all__ = [
     "HistoricalReceiptState",
     "HistoricalReservation",
     "HistoricalReservationState",
+    "LedgerLotState",
     "ReceiptLineageAmbiguous",
     "RuntimeSnapshotCoverage",
+    "ledger_state_by_lot",
     "lot_state_at",
     "onhand_by_lot_at",
     "onhand_total_by_day",
@@ -400,9 +402,14 @@ def _decimal(value: Any) -> Decimal:
 #: 🔴 **잔량을 0 으로 만든 날(= 마지막 이동일)의 종류를 함께 센다.** `_lot_state` 가
 #:    «폐기로 비었나» 를 가르는 데 그 하루가 필요하다 — 총 폐기량만 보면 **부분 폐기
 #:    뒤 판매로 소진된 Lot** 을 폐기된 Lot 과 구별할 수 없다 (실측 2건).
+#:
+#: 🔴 **그 하루를 날짜 자체로도 낸다 (`last_moved_at`).** 잔량은 파생 캐시라 자기
+#:    관측일이 없고, *"지금 500kg 이다"* 를 **언제부터 알 수 있었나**에 답하는 것은
+#:    이 원장의 마지막 이동일 하나다 (`agent.observe` · 상세설계 §18).
 _LEDGER_AGGREGATE = sql.SQL(
     """
     SELECT m.lot_id,
+           max(m.moved_at) AS last_moved_at,
            COALESCE(SUM(m.quantity_kg) FILTER (WHERE m.move_type = 'IN'), 0)
              - COALESCE(SUM(m.quantity_kg) FILTER (WHERE m.move_type IN ('OUT', 'DISPOSE')), 0)
                AS balance_kg,
@@ -426,6 +433,53 @@ _LEDGER_AGGREGATE = sql.SQL(
 )
 
 
+@dataclass(frozen=True)
+class LedgerLotState:
+    """한 Lot 의 원장 요약. **잔량과 그 잔량의 관측일을 한 벌로 낸다.**
+
+    ★ 둘을 따로 읽으면 두 번 질의하는 것이 아니라 **서로 다른 순간을 읽는** 것이 된다.
+    """
+
+    balance_kg: Decimal
+    #: 🔴 그 Lot 의 **마지막 이동일** (`moved_at <= as_of` 중 가장 늦은 것).
+    #: 잔량·상태가 *"언제부터 이 값이었나"* 에 답하는 유일한 업무 날짜다 —
+    #: `created_at` 은 벽시각이라 못 쓴다 (이 모듈 첫머리의 Cutoff 규칙).
+    last_moved_at: date
+
+
+def ledger_state_by_lot(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> dict[str, LedgerLotState]:
+    """`as_of` 시점의 Lot 별 원장 상태 — **잔량과 마지막 이동일.**
+
+    ```text
+    balance(lot, as_of)      = Σ IN − Σ OUT − Σ DISPOSE      (moved_at <= as_of)
+    last_moved_at(lot, as_of) = max(moved_at)                 (moved_at <= as_of)
+    ```
+
+    ★ **이동이 하나도 없는 Lot 은 키에 없다** (0 이 아니라 «움직인 적 없음»).
+      production 에서 잔량이 0 보다 큰 Lot 은 반드시 여기 있다 — Lot 은
+      `remaining_qty_kg = 0` 으로 서고(`inbound_stock._insert_lot`) 잔량을 올리는
+      길이 원장 `IN` 하나뿐이다(`ledger._update_remaining` 이 유일한 writer).
+      그래서 키에 없다는 것은 **손으로 넣은 행**이라는 뜻이고, 그때 관측일은 `None` 이다.
+
+    :raises AdjustMoveNotSupported: 범위 안에 `ADJUST` 가 있을 때.
+    """
+    rows = _rows(
+        conn,
+        _LEDGER_AGGREGATE.format(schema=_schema()),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    _reject_adjust(rows, sim_run_id=sim_run_id, as_of=as_of)
+    return {
+        row["lot_id"]: LedgerLotState(
+            balance_kg=_decimal(row["balance_kg"]),
+            last_moved_at=row["last_moved_at"],
+        )
+        for row in rows
+    }
+
+
 def onhand_by_lot_at(conn: Any, *, sim_run_id: str, as_of: date) -> dict[str, Decimal]:
     """`as_of` 시점의 Lot 별 잔량. **정본은 `inventory_moves` 다.**
 
@@ -436,15 +490,17 @@ def onhand_by_lot_at(conn: Any, *, sim_run_id: str, as_of: date) -> dict[str, De
     ★ 이동이 하나도 없는 Lot 은 **키에 없다** (0 이 아니라 «움직인 적 없음»).
       Lot 목록과 합칠 때 그 자리를 0 으로 읽을지 호출부가 정한다.
 
+    ★ **`ledger_state_by_lot` 의 잔량 축만 낸다.** 날짜까지 필요한 호출자는 저쪽을
+      부른다 — 같은 질의를 두 벌 적지 않는다.
+
     :raises AdjustMoveNotSupported: 범위 안에 `ADJUST` 가 있을 때.
     """
-    rows = _rows(
-        conn,
-        _LEDGER_AGGREGATE.format(schema=_schema()),
-        {"sim": sim_run_id, "as_of": as_of},
-    )
-    _reject_adjust(rows, sim_run_id=sim_run_id, as_of=as_of)
-    return {row["lot_id"]: _decimal(row["balance_kg"]) for row in rows}
+    return {
+        lot_id: state.balance_kg
+        for lot_id, state in ledger_state_by_lot(
+            conn, sim_run_id=sim_run_id, as_of=as_of
+        ).items()
+    }
 
 
 def _reject_adjust(rows: list[dict[str, Any]], *, sim_run_id: str, as_of: date) -> None:

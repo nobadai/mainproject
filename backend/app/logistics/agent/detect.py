@@ -200,6 +200,22 @@ def _freshness_severity(*, remaining: int, sell_priority_remaining_days: int | N
 def _freshness_condition(
     lot: ObservedLot, *, ratio: Decimal, threshold: Decimal, remaining: int
 ) -> DetectedCondition:
+    """근거 한 줄마다 **그 사실의** 관측일을 붙인다 (§18).
+
+    🔴 **Lot 하나에 관측일 하나를 돌려쓰지 않는다.** 입고일은 `received_at` 을 재는
+       날이지 잔량·상태·미확정 물량을 재는 날이 아니다 — 한 날짜로 뭉개면 D8 까지
+       나간 재고가 *"D1 부터 알던 사실"* 로 장부에 남는다.
+
+    ```text
+    remaining_freshness_days        입고일 + 보관정책   → 정책에 유효일이 없어 None
+    effective_freshness_limit_days  보관정책            → None
+    freshness_remaining_ratio       위 둘               → None
+    freshness_pressure_ratio        정책                → None
+    remaining_qty_kg                원장 마지막 이동일   ✅ 진짜 날짜가 붙는 유일한 칸
+    uncommitted_kg                  잔량 + 예약·할당 축 → 예약 축을 못 대서 None
+    sell_priority_remaining_days    회전정책            → None
+    ```
+    """
     한계 = lot.effective_freshness_limit_days
     assert 한계 is not None  # 비율이 섰다는 것이 곧 한계가 있다는 뜻이다
     근거 = [
@@ -209,7 +225,9 @@ def _freshness_condition(
             unit="일",
             source="inventory_lots+item_storage_policies",
             source_id=lot.lot_id,
-            observed_as_of=lot.observed_as_of,
+            # 🔴 **입고일이 아니다.** «한계 − 경과» 이고 그 한계가 정책에서 온다 —
+            #    `source` 가 두 표를 적는 그대로 관측일도 둘의 늦은 쪽이다.
+            observed_as_of=lot.freshness_observed_as_of,
         ),
         ExceptionEvidence(
             fact="effective_freshness_limit_days",
@@ -225,7 +243,8 @@ def _freshness_condition(
             unit="비율",
             source="tool_calc:collect_freshness_lot_census",
             source_id=lot.lot_id,
-            observed_as_of=POLICY_OBSERVED_AS_OF,
+            # 잔여 ÷ 유효 한계 — 분자·분모가 모두 정책을 지난다.
+            observed_as_of=lot.freshness_observed_as_of,
         ),
         ExceptionEvidence(
             fact="freshness_pressure_ratio",
@@ -241,7 +260,8 @@ def _freshness_condition(
             unit="kg",
             source="inventory_lots",
             source_id=lot.lot_id,
-            observed_as_of=lot.observed_as_of,
+            # ✅ 원장의 **마지막 이동일**. 이 Commit 에서 진짜 날짜가 붙는 유일한 칸이다.
+            observed_as_of=lot.remaining_qty_observed_as_of,
         ),
         ExceptionEvidence(
             fact="uncommitted_kg",
@@ -249,7 +269,9 @@ def _freshness_condition(
             unit="kg",
             source="tool_calc:_sellable_lot_contributions",
             source_id=lot.lot_id,
-            observed_as_of=POLICY_OBSERVED_AS_OF,
+            # 잔량 축과 예약·할당 축의 늦은 쪽. 뒤엣것을 못 대서 지금은 `None` 이다
+            #  (`COMMITMENT_OBSERVED_AS_OF` — `cancel_allocation` 이 날짜를 안 남긴다).
+            observed_as_of=lot.uncommitted_observed_as_of,
         ),
     ]
     if lot.sell_priority_remaining_days is not None:
@@ -314,7 +336,11 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
             unit="비율",
             source="tool_calc:calculate_window_capacity_usage",
             source_id=observation.sim_run_id,
-            observed_as_of=POLICY_OBSERVED_AS_OF,
+            # 창 사용률은 **재고 축과 정책 축이 함께** 만든 값이다 (보장 용량 ·
+            # 리드타임이 창을 세운다) — 정책에 유효일이 없어 지금은 `None` 이다.
+            observed_as_of=derive_observed_as_of(
+                [observation.inventory_observed_as_of, POLICY_OBSERVED_AS_OF]
+            ),
         ),
         ExceptionEvidence(
             fact="capacity_tight_ratio",
@@ -330,8 +356,10 @@ def detect_capacity_pressure(observation: WarehouseObservation) -> DetectorOutco
             unit="kg",
             source="inventory_lots",
             source_id=observation.sim_run_id,
-            # 🔴 물리 점유는 Lot 들이 만든 값이라 **Lot 축의 관측일**을 따라간다.
-            observed_as_of=observation.observed_as_of,
+            # ✅ 물리 점유는 **그 Lot 들의 잔량 합**이라(`repository`) 잔량 축의
+            #    관측일을 그대로 따라간다 — 한 Lot 이라도 못 대면 전체가 `None` 이다.
+            #    🔴 입고일 최댓값이 **아니다**: 입고 뒤 출고·폐기가 점유를 바꾼다.
+            observed_as_of=observation.inventory_observed_as_of,
         ),
     ]
     if observation.capacity.guaranteed_kg is not None:

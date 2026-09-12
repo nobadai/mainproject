@@ -1,11 +1,16 @@
 """Observe — 창고를 **읽기만** 한다. 판정도 계산식도 여기서 만들지 않는다.
 
 ```text
-스냅샷 (repository.get_current_logistics_read)   잔량 · 상태 · 신선도 · 예약/할당 · 용량
-회전   (turnover.load_lot_turnover)              품목 ID · 판매우선 경계
-원장   (historical_repository.onhand_by_lot_at)  대조용 as_of 잔량
-표     (agent.exceptions.live_exceptions)        지금 살아 있는 Exception
+스냅샷 (repository.get_current_logistics_read)     잔량 · 상태 · 신선도 · 예약/할당 · 용량
+회전   (turnover.load_lot_turnover)                품목 ID · 판매우선 경계
+원장   (historical_repository.ledger_state_by_lot)  잔량 대조 · **잔량의 관측일**
+표     (agent.exceptions.live_exceptions)          지금 살아 있는 Exception
 ```
+
+🔴 **원장을 읽는 이유가 둘이다.** 하나는 캐시 대조이고, 다른 하나는 **날짜**다.
+   `inventory_lots.remaining_qty_kg` 는 파생 캐시라 자기 관측일이 없다 — *"지금
+   500kg 이다"* 를 언제부터 알 수 있었나에 답하는 것은 그 Lot 의 마지막 이동일뿐이다
+   (상세설계 §18). 입고일로 메우면 D8 까지 나간 재고가 D1 부터 알던 사실이 된다.
 
 🔴 **재고 계산기를 다시 만들지 않는다.** 신선도는 `turnover.freshness_days_of`,
    미확정 물량은 `tools._sellable_lot_contributions`, 창고 사용률은
@@ -34,12 +39,17 @@ from app.logistics.agent.schemas import (
     WarehouseObservation,
     derive_observed_as_of,
 )
-from app.logistics.historical_repository import AdjustMoveNotSupported, onhand_by_lot_at
+from app.logistics.historical_repository import (
+    AdjustMoveNotSupported,
+    LedgerLotState,
+    ledger_state_by_lot,
+)
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     CAPACITY_TIGHT_POLICY_UNRESOLVED,
     FRESHNESS_PRESSURE_POLICY_UNRESOLVED,
 )
+from app.logistics.schemas import InventoryLotSnapshot
 from app.logistics.tools import (
     _commitment_axes,
     _sellable_lot_contributions,
@@ -50,6 +60,7 @@ from app.logistics.turnover import load_lot_turnover
 __all__ = [
     "CAPACITY_WINDOW_USAGE_UNRESOLVED",
     "LEDGER_ADJUST_UNSUPPORTED",
+    "LEDGER_MOVE_UNRESOLVED",
     "OBSERVATION_INCONSISTENT",
     "OUTBOUND_COMMITMENTS_UNRESOLVED",
     "SNAPSHOT_AS_OF_MISMATCH",
@@ -67,12 +78,23 @@ CAPACITY_WINDOW_USAGE_UNRESOLVED = "CAPACITY_WINDOW_USAGE_UNRESOLVED"
 #: 캐시 잔량(`inventory_lots.remaining_qty_kg`)과 원장 누계가 다르다 (상세설계 §5.1).
 #: 🔴 **예외를 내지 않는다** — 탐지를 세우는 대신 사실만 적는다.
 OBSERVATION_INCONSISTENT = "OBSERVATION_INCONSISTENT"
-#: 방향을 모르는 `ADJUST` 이동이 있어 원장 대조를 건너뛰었다.
+#: 방향을 모르는 `ADJUST` 이동이 있어 원장 대조를 건너뛰었다. 🔴 그날은 **모든 Lot 의
+#: 잔량 관측일이 `None`** 이다 — 대조도 날짜도 같은 원장에서 나온다.
 LEDGER_ADJUST_UNSUPPORTED = "LEDGER_ADJUST_UNSUPPORTED"
+#: 스냅샷에는 잔량이 있는데 원장에 그 Lot 의 이동이 하나도 없다.
+#: 🔴 **잔량의 관측일을 못 댄다** — production 경로로 선 Lot 이면 날 수 없는 일이다
+#: (`inbound_stock._insert_lot` 이 0 으로 세우고 `ledger` 만 잔량을 올린다).
+LEDGER_MOVE_UNRESOLVED = "LEDGER_MOVE_UNRESOLVED"
 #: 스냅샷에는 있는데 회전 조회에 없는 Lot — 품목 ID·판매우선 경계를 못 붙였다.
 TURNOVER_LOT_UNRESOLVED = "TURNOVER_LOT_UNRESOLVED"
 #: 스냅샷 기준일이 요청 기준일과 다르다.
 SNAPSHOT_AS_OF_MISMATCH = "SNAPSHOT_AS_OF_MISMATCH"
+
+
+#: Lot 상태 어휘 중 **관측일을 댈 수 있는 둘.** 나머지(`DEPLETED` · `HOLD`)는
+#: production writer 가 없어 되살릴 사건이 없다 (`historical_repository` 의 같은 주석).
+_ACTIVE = "ACTIVE"
+_DISPOSED = "DISPOSED"
 
 
 class ObservationNotReady(RuntimeError):
@@ -107,6 +129,13 @@ def observe(
 
     uncertainties: list[str] = []
 
+    # ── 원장 축 — 잔량의 **관측일**이 여기서 온다 ────────────────────────
+    #
+    # 🔴 Lot 루프보다 **먼저** 읽는다. 잔량과 그 잔량의 날짜는 한 사실의 두 면이라
+    #    따로 붙이면 서로 다른 순간을 읽게 된다.
+    원장, 원장사유 = _ledger_state(conn, sim_run_id=sim_run_id, as_of=as_of)
+    uncertainties.extend(원장사유)
+
     # ── 예약·할당 축 — **`build_inventory_by_item` 과 같은 눈** ───────────
     #
     # 🔴 `_sellable_lot_contributions` 를 그대로 부른다. 품목 합계(판매 가능량)와
@@ -137,6 +166,8 @@ def observe(
         회전행 = 회전.get(lot.lot_id)
         if 회전행 is None:
             uncertainties.append(f"{TURNOVER_LOT_UNRESOLVED}:{lot.lot_id}")
+        마지막이동, 이동사유 = _quantity_observed_as_of(원장, lot=lot)
+        uncertainties.extend(이동사유)
         lots.append(
             ObservedLot(
                 lot_id=lot.lot_id,
@@ -155,7 +186,10 @@ def observe(
                     None if 회전행 is None else 회전행.sell_priority_remaining_days
                 ),
                 storage_zone=lot.storage_zone,
-                observed_as_of=lot.received_at,
+                remaining_qty_observed_as_of=마지막이동,
+                status_observed_as_of=_status_observed_as_of(
+                    lot.status, received_at=lot.received_at, last_moved_at=마지막이동
+                ),
             )
         )
 
@@ -178,14 +212,15 @@ def observe(
         capacity_tight_ratio=snapshot.capacity_tight_ratio,
     )
 
-    uncertainties.extend(_ledger_disagreements(conn, sim_run_id=sim_run_id, as_of=as_of, lots=lots))
-
     return WarehouseObservation(
         sim_run_id=sim_run_id,
         as_of=as_of,
-        # 🔴 **Lot 축만 센다.** 용량 축은 정책에 유효일이 없어 관측일이 `None` 이고,
-        #    그 사실은 용량 Exception 의 근거에서 다시 드러난다 (§18).
-        observed_as_of=derive_observed_as_of([one.observed_as_of for one in lots]),
+        # 🔴 **잔량 축만 센다.** `used_capacity_kg` 가 이 Lot 들의 잔량 합이라
+        #    (`repository`) 그 사실의 관측일이 곧 이 값이다. 정책 축·예약 축은 여기
+        #    안 든다 — 그 축들의 `None` 은 각 근거에서 따로 드러난다 (§18).
+        inventory_observed_as_of=derive_observed_as_of(
+            [one.remaining_qty_observed_as_of for one in lots]
+        ),
         lots=tuple(lots),
         capacity=capacity,
         policy=policy,
@@ -194,26 +229,68 @@ def observe(
     )
 
 
-def _ledger_disagreements(
-    conn: Any, *, sim_run_id: str, as_of: date, lots: list[ObservedLot]
-) -> list[str]:
-    """캐시 잔량과 원장 누계를 맞대어 본다. 🔴 **탐지를 막지 않는다.**
+def _ledger_state(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[dict[str, LedgerLotState] | None, list[str]]:
+    """그날까지의 원장 한 벌. **못 읽으면 `None` 이고, 그때 잔량 관측일이 전부 없다.**
+
+    🔴 **`ADJUST` 를 만나면 날짜도 함께 포기한다.** 방향을 모르는 이동이 섞이면 그 Lot 의
+       잔량 자체가 못 세는 값이 되고, 못 세는 값의 «언제부터» 는 더 못 댄다.
+    """
+    try:
+        return ledger_state_by_lot(conn, sim_run_id=sim_run_id, as_of=as_of), []
+    except AdjustMoveNotSupported:
+        return None, [LEDGER_ADJUST_UNSUPPORTED]
+
+
+def _quantity_observed_as_of(
+    원장: dict[str, LedgerLotState] | None, *, lot: InventoryLotSnapshot
+) -> tuple[date | None, list[str]]:
+    """이 Lot 의 잔량을 **언제부터 알 수 있었나** = 마지막 원장 이동일.
+
+    ```text
+    원장을 못 읽었다           None            (사유는 이미 적혔다)
+    그 Lot 의 이동이 없다      None + 사유      production 경로면 날 수 없는 일이다
+    캐시 ≠ 원장 누계           None + 사유      갈린 값의 «언제부터» 는 못 댄다
+    그 밖                      max(moved_at)
+    ```
 
     ★ **`remaining_qty_kg` 는 파생 캐시다** (`repository` 가 적어 둔 경고). 정본은
       `inventory_moves` 이고, 둘이 갈리면 그날의 모든 판정이 조용히 틀린다 — 그래서
-      문제를 열기 전에 한 번 맞대어 보고, 다르면 **사실만 적는다.**
+      문제를 열기 전에 한 번 맞대어 보고, 다르면 **사실만 적고 날짜는 비운다.**
 
-    ⚠️ 원장에 이동이 없는 Lot 은 키에 없다 (0 이 아니라 «움직인 적 없음»). 그런 Lot 은
-       대조 대상이 아니다 — 입고 IN 이 아직 안 적힌 상태를 불일치로 세면, 입고 직후
-       점검 칸이 매일 같은 경고를 낸다.
+    🔴 **탐지를 막지는 않는다.** 날짜가 없다고 문제를 안 여는 것이 아니다 — 문제는
+       열되 *"이 근거의 관측일은 모른다"* 를 그대로 남긴다.
     """
-    try:
-        원장 = onhand_by_lot_at(conn, sim_run_id=sim_run_id, as_of=as_of)
-    except AdjustMoveNotSupported:
-        return [LEDGER_ADJUST_UNSUPPORTED]
-    갈림 = [
-        f"{OBSERVATION_INCONSISTENT}:{one.lot_id}"
-        for one in lots
-        if one.lot_id in 원장 and 원장[one.lot_id] != one.remaining_qty_kg
-    ]
-    return 갈림
+    if 원장 is None:
+        return None, []
+    행 = 원장.get(lot.lot_id)
+    if 행 is None:
+        return None, [f"{LEDGER_MOVE_UNRESOLVED}:{lot.lot_id}"]
+    if 행.balance_kg != lot.available_qty_kg:
+        return None, [f"{OBSERVATION_INCONSISTENT}:{lot.lot_id}"]
+    return 행.last_moved_at, []
+
+
+def _status_observed_as_of(
+    status: str, *, received_at: date | None, last_moved_at: date | None
+) -> date | None:
+    """이 Lot 의 **상태**를 언제부터 알 수 있었나. 어휘마다 근거가 다르다.
+
+    ```text
+    ACTIVE    received_at     Lot INSERT 가 적는 값이다 (inbound_stock._insert_lot).
+                              🔴 되돌리는 writer 가 없다 — 원장은 상태를 안 건드리고
+                                 (ledger._update_remaining), 잔량이 0 이 돼도 그대로다
+    DISPOSED  마지막 이동일    잔량을 0 으로 만든 DISPOSE 의 날
+                              (disposal._mark_disposed 가 같은 판에서 적는다)
+    그 밖      None            DEPLETED · HOLD 는 production writer 가 하나도 없다
+    ```
+
+    🔴 **없는 상태를 날짜로 메우지 않는다.** 쓰는 코드가 없는 어휘는 되살릴 사건도
+       없다 — `historical_repository.HistoricalLotState` 가 `HOLD` 를 빼는 것과 같은 판단이다.
+    """
+    if status == _ACTIVE:
+        return received_at
+    if status == _DISPOSED:
+        return last_moved_at
+    return None
