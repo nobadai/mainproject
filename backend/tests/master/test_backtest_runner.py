@@ -174,6 +174,10 @@ def _walk(
         run_day_fn=runner,
         max_consecutive_failures=max_consecutive_failures,
         ticks=_Ticks(),
+        # 🔴 **마감행을 읽는 자리도 대역이다** (2026-09-12). 안 꽂으면 이 파일의
+        #    맨 윗줄(*"DB 를 안 탄다"*)이 거짓이 된다 — 현금 축은
+        #    `test_cash_identity_visible_in_walk.py` 가 잰다.
+        closings_of=lambda **_: (),
     )
     return result, runner
 
