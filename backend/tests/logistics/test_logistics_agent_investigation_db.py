@@ -304,10 +304,14 @@ class TestNoWrite:
         _exception(conn)
         before = _writes(conn)
         with conn.cursor() as cur:
+            # ⚠️ `proposed_as_of` 가 함께 있어야 한다 (#628 Commit 5 의 CHECK) —
+            #    상태만 바꾸고 그날을 안 적는 행을 DB 가 막는다. 이 검사가 재는 것은
+            #    계측기이지 전이 규칙이 아니라, 유효한 쓰기 하나를 걸면 된다.
             cur.execute(
-                f"UPDATE {TMP_SCHEMA}.logistics_exceptions SET status = 'PROPOSED'"
-                " WHERE exception_id = %s",
-                (EXC,),
+                f"UPDATE {TMP_SCHEMA}.logistics_exceptions"
+                " SET status = 'PROPOSED', proposed_as_of = %(as_of)s"
+                " WHERE exception_id = %(exception)s",
+                {"as_of": D10, "exception": EXC},
             )
         assert _writes(conn) != before
 

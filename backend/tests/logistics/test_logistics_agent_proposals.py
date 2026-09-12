@@ -1,0 +1,754 @@
+"""대응안 — **DB 없이 잴 수 있는 것들** (#628 Commit 5).
+
+```text
+어떤 후보가 제안이 되나      순수 함수 — 추천 · 거부 · «못 쟀다» 와 «불가»
+누가 결정하나                결정론 표에서 다시 계산한다 (모델 값이 아니다)
+같은 제안을 알아보나          지문
+그날 상태                    과거 재현 · 미래 detail 누수
+트랜잭션의 주인               제안만 남는 반쪽 상태가 없나
+표를 누가 쓰나                소스를 읽어 막는다
+```
+
+🔴 **실제 PostgreSQL 로 재는 것은 여기 없다** — 원자성·동시성·제약·격리는
+   `test_logistics_agent_proposals_db.py` 가 실제 표로 잰다. 이 파일은 *"가짜로도
+   정직하게 잴 수 있는 것"* 만 든다.
+"""
+
+from __future__ import annotations
+
+import ast
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Self
+
+import pytest
+
+from app.logistics.agent import proposal_service as service
+from app.logistics.agent import proposals as repository
+from app.logistics.agent.investigation import (
+    ACTION_DECISION_OWNERS,
+    EvaluatedOption,
+    FinishReason,
+    InvestigationResult,
+    ToolCallRecord,
+    ToolCallStatus,
+)
+from app.logistics.agent.proposals import (
+    ProposalInvariantViolation,
+    ProposalRow,
+    project_proposal_at,
+    proposal_key_for,
+)
+from app.logistics.agent.tools import ActionImpact
+
+SIM = "SIM-PROPOSAL"
+EXC = "EX-SIM-PROPOSAL-FRESHNESS_PRESSURE-LOT-1-20260101"
+LOT = "LOT-1"
+PRP = f"PRP-{EXC}-1"
+
+D1 = date(2026, 1, 1)
+D5 = D1 + timedelta(days=4)
+D6 = D1 + timedelta(days=5)
+D8 = D1 + timedelta(days=7)
+D9 = D1 + timedelta(days=8)
+
+
+# ── 준비 도우미 ─────────────────────────────────────────────────────────
+
+
+def _impact(
+    feasibility: str = "FEASIBLE", *, action: str = "SALES_PRIORITY_REQUEST"
+) -> ActionImpact:
+    return ActionImpact(
+        sim_run_id=SIM,
+        as_of=D5,
+        observed_as_of=D1,
+        action=action,
+        feasibility=feasibility,  # type: ignore[arg-type]
+        affected_kg=None,
+        capacity_delta_kg=None,
+        candidate_kg=Decimal(500),
+        estimated_loss_krw=None,
+        freshness_days_left=2,
+    )
+
+
+#: 🔴 «영향을 안 줬다» 와 «영향이 없다» 를 가르는 자리. 기본값을 `None` 으로 두면
+#:    `impact=None` 을 시험할 방법이 사라진다.
+_DEFAULT_IMPACT = object()
+
+
+def _option(
+    *,
+    action: str = "SALES_PRIORITY_REQUEST",
+    parameters: dict[str, Any] | None = None,
+    impact: Any = _DEFAULT_IMPACT,
+    rejected_reason: str | None = None,
+    evidence_refs: tuple[int, ...] = (1,),
+) -> EvaluatedOption:
+    owner = ACTION_DECISION_OWNERS.get(action, "LOGISTICS")
+    if impact is _DEFAULT_IMPACT:
+        impact = None if rejected_reason is not None else _impact(action=action)
+    return EvaluatedOption(
+        action=action,
+        parameters={"lot_id": LOT} if parameters is None else parameters,
+        rationale="신선도 압박이라 우선 판매 후보로 올린다.",
+        evidence_refs=evidence_refs,
+        decision_owner=owner,
+        parameters_are_hypothesis=owner != "LOGISTICS",
+        impact=impact,
+        rejected_reason=rejected_reason,
+    )
+
+
+def _result(
+    *,
+    options: tuple[EvaluatedOption, ...] | None = None,
+    recommended_index: int | None = 0,
+    observed_as_of: date | None = D1,
+    as_of: date = D5,
+    finish_reason: FinishReason = FinishReason.FINISHED,
+) -> InvestigationResult:
+    return InvestigationResult(
+        sim_run_id=SIM,
+        as_of=as_of,
+        exception_id=EXC,
+        finish_reason=finish_reason,
+        llm_status="SUCCESS",
+        options=(_option(),) if options is None else options,
+        recommended_index=recommended_index,
+        observed_as_of=observed_as_of,
+        tool_calls=(
+            ToolCallRecord(
+                sequence=1,
+                tool_name="get_lot",
+                arguments={"lot_id": LOT},
+                status=ToolCallStatus.SUCCESS,
+                observed_as_of=D1,
+            ),
+            ToolCallRecord(
+                sequence=2,
+                tool_name="get_policy",
+                arguments={},
+                status=ToolCallStatus.SUCCESS,
+                observed_as_of=None,
+            ),
+        ),
+    )
+
+
+def _row(**overrides: Any) -> ProposalRow:
+    base: dict[str, Any] = {
+        "proposal_id": PRP,
+        "sim_run_id": SIM,
+        "exception_id": EXC,
+        "status": "PROPOSED",
+        "action_type": "SALES_PRIORITY_REQUEST",
+        "decision_owner": "SALES",
+        "parameters": {"lot_id": LOT},
+        "impact": {"feasibility": "FEASIBLE"},
+        "evidence_refs": (),
+        "proposed_as_of": D5,
+        "proposed_by": "operator",
+        "observed_as_of": D1,
+        "proposal_key": "key",
+    }
+    base.update(overrides)
+    return ProposalRow(**base)
+
+
+class _FakeCursor:
+    def __init__(self, owner: _FakeConn) -> None:
+        self._owner = owner
+        self.rowcount = 1
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, *_: Any, **__: Any) -> None:
+        self._owner.statements += 1
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return []
+
+
+class _FakeConn:
+    """커밋과 롤백만 센다. 🔴 **SQL 을 흉내 내지 않는다** — 그건 실제 표가 잰다."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+        self.statements = 0
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+@pytest.fixture
+def conn() -> _FakeConn:
+    return _FakeConn()
+
+
+def _stub_repository(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, list[Any]]:
+    """저장소 경계를 갈아 끼운다. **서비스의 판단만 남긴다.**"""
+    calls: dict[str, list[Any]] = {"insert": [], "mark": [], "reopen": [], "transition": []}
+    defaults: dict[str, Any] = {
+        "exception_status": lambda *_, **__: "OPEN",
+        "live_proposals_for": lambda *_, **__: (),
+        "next_proposal_id": lambda *_, **__: PRP,
+        "insert_proposal": lambda _conn, *, row: calls["insert"].append(row) or row,
+        "mark_exception_proposed": lambda *_, **__: calls["mark"].append(1) or 1,
+        "reopen_exception": lambda *_, **__: calls["reopen"].append(1) or 1,
+    }
+    defaults.update(overrides)
+    for name, value in defaults.items():
+        monkeypatch.setattr(repository, name, value)
+    return calls
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  어떤 후보가 제안이 되나
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestOptionSelection:
+    """🔴 **조사가 안 고른 안을 저장이 대신 고르지 않는다.**"""
+
+    def test_the_recommended_accepted_option_becomes_the_proposal(self) -> None:
+        option, reason = service.select_proposal_option(_result())
+        assert option is not None
+        assert reason == ""
+        assert option.action == "SALES_PRIORITY_REQUEST"
+
+    def test_no_recommendation_means_no_proposal(self) -> None:
+        option, reason = service.select_proposal_option(_result(recommended_index=None))
+        assert option is None
+        assert reason == service.NO_RECOMMENDED_OPTION
+
+    def test_a_rejected_option_is_never_stored(self) -> None:
+        """§15 — 결정론이 이미 버린 안을 사람 앞에 올리지 않는다."""
+        rejected = _option(rejected_reason="SUBJECT_OUT_OF_SCOPE:LOT-9")
+        option, reason = service.select_proposal_option(_result(options=(rejected,)))
+        assert option is None
+        assert reason.startswith(service.OPTION_REJECTED)
+
+    def test_it_does_not_slide_to_the_next_option(self) -> None:
+        """⚠️ 추천이 버려졌으면 **제안 0 건**이다 — 2번 후보로 미끄러지지 않는다.
+
+        미끄러지면 그 선택의 주인이 아무도 아니게 된다: 조사도 안 골랐고 사람도 안 봤다.
+        """
+        options = (
+            _option(rejected_reason="IMPACT_FAILED"),
+            _option(action="ACCEPT_RISK", parameters={"lot_id": LOT}),
+        )
+        option, reason = service.select_proposal_option(
+            _result(options=options, recommended_index=0)
+        )
+        assert option is None
+        assert reason.startswith(service.OPTION_REJECTED)
+
+    def test_an_out_of_range_recommendation_is_not_guessed(self) -> None:
+        option, reason = service.select_proposal_option(_result(recommended_index=7))
+        assert option is None
+        assert reason.startswith(service.RECOMMENDED_INDEX_OUT_OF_RANGE)
+
+    def test_an_unmeasured_impact_is_still_proposed(self) -> None:
+        """🔴 **«못 쟀다» 는 제안할 수 있다** (§15). 숫자를 지어내 FEASIBLE 로 안 바꾼다."""
+        unresolved = _option(impact=_impact("UNRESOLVED"))
+        option, reason = service.select_proposal_option(_result(options=(unresolved,)))
+        assert option is not None
+        assert option.impact is not None
+        assert option.impact.feasibility == "UNRESOLVED"
+        assert reason == ""
+
+    def test_an_impossible_action_is_not_proposed(self) -> None:
+        """🔴 **«불가» 는 «못 쟀다» 와 다르다.**
+
+        계산기가 재 보고 «안 된다» 고 답한 안을 승인 화면에 올리면, 사람이 불가능한
+        일을 승인한다.
+        """
+        infeasible = _option(impact=_impact("INFEASIBLE"))
+        option, reason = service.select_proposal_option(_result(options=(infeasible,)))
+        assert option is None
+        assert reason == service.IMPACT_INFEASIBLE
+
+    def test_an_unmeasured_option_without_impact_is_not_proposed(self) -> None:
+        naked = _option(impact=None)
+        option, reason = service.select_proposal_option(_result(options=(naked,)))
+        assert option is None
+        assert reason == service.IMPACT_MISSING
+
+    def test_an_action_outside_the_catalogue_is_not_proposed(self) -> None:
+        outside = _option(action="ZONE_MOVE", impact=_impact("UNSUPPORTED", action="ZONE_MOVE"))
+        option, reason = service.select_proposal_option(_result(options=(outside,)))
+        assert option is None
+        assert reason.startswith(service.ACTION_UNSUPPORTED)
+
+
+class TestDecisionOwner:
+    """🔴 **누가 결정하는가는 결정론이 정한다** (§3 · §49). 모델이 고르는 칸이 아니다."""
+
+    @pytest.mark.parametrize(
+        ("action", "owner"),
+        [
+            ("SALES_PRIORITY_REQUEST", "SALES"),
+            ("PURCHASE_ADJUST_REQUEST", "PURCHASE"),
+            ("ACCEPT_RISK", "LOGISTICS"),
+            ("DISPOSAL_REQUEST", "LOGISTICS"),
+        ],
+    )
+    def test_each_action_has_one_owner(self, action: str, owner: str) -> None:
+        assert ACTION_DECISION_OWNERS[action] == owner
+
+    def test_a_model_supplied_owner_is_overwritten(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """모델이 *"이건 물류가 정하면 됩니다"* 라고 적어도 표에는 `SALES` 가 적힌다."""
+        calls = _stub_repository(monkeypatch)
+        lying = EvaluatedOption(
+            action="SALES_PRIORITY_REQUEST",
+            parameters={"lot_id": LOT},
+            rationale="",
+            evidence_refs=(1,),
+            decision_owner="LOGISTICS",  # 🔴 거짓말이다
+            parameters_are_hypothesis=False,
+            impact=_impact(),
+        )
+        outcome = service.create_proposal(
+            conn, result=_result(options=(lying,)), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.created
+        assert calls["insert"][0].decision_owner == "SALES"
+
+
+class TestProposalKey:
+    """같은 뜻의 제안을 알아보는 지문 (§12)."""
+
+    def _key(self, **overrides: Any) -> str:
+        payload: dict[str, Any] = {
+            "sim_run_id": SIM,
+            "exception_id": EXC,
+            "action_type": "SALES_PRIORITY_REQUEST",
+            "parameters": {"lot_id": LOT},
+        }
+        payload.update(overrides)
+        return proposal_key_for(**payload)
+
+    def test_the_same_proposal_has_the_same_fingerprint(self) -> None:
+        assert self._key() == self._key()
+
+    def test_a_different_run_is_a_different_proposal(self) -> None:
+        assert self._key() != self._key(sim_run_id="SIM-OTHER")
+
+    def test_a_different_quantity_is_a_different_proposal(self) -> None:
+        first = self._key(parameters={"lot_id": LOT, "qty_kg": Decimal(100)})
+        second = self._key(parameters={"lot_id": LOT, "qty_kg": Decimal(200)})
+        assert first != second
+
+    def test_key_order_does_not_change_the_fingerprint(self) -> None:
+        first = self._key(parameters={"lot_id": LOT, "qty_kg": Decimal(100)})
+        second = self._key(parameters={"qty_kg": Decimal(100), "lot_id": LOT})
+        assert first == second
+
+    def test_a_decimal_and_its_text_are_the_same_quantity(self) -> None:
+        """⚠️ `Decimal` 이 `float` 을 지나면 같은 수량이 실행마다 다른 지문이 된다."""
+        assert self._key(parameters={"qty_kg": Decimal("100.5")}) == self._key(
+            parameters={"qty_kg": "100.5"}
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  그날 상태 — 순수 함수
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestHistoricalProjection:
+    """🔴 **지금 값을 과거로 쓰지 않는다** (§40 ~ §42)."""
+
+    def test_a_proposal_does_not_exist_before_it_was_proposed(self) -> None:
+        assert project_proposal_at(_row(), as_of=D1) is None
+
+    def test_on_the_day_it_was_proposed_it_exists(self) -> None:
+        at_date = project_proposal_at(_row(), as_of=D5)
+        assert at_date is not None
+        assert at_date.status == "PROPOSED"
+
+    def test_an_approval_is_invisible_the_day_before(self) -> None:
+        row = _row(status="APPROVED", approved_as_of=D8, approved_by="operator")
+        at_date = project_proposal_at(row, as_of=D6)
+        assert at_date is not None
+        assert at_date.status == "PROPOSED"
+        assert at_date.approved_by is None
+        assert at_date.approved_as_of is None
+
+    def test_an_approval_is_visible_the_day_after(self) -> None:
+        row = _row(
+            status="APPROVED", approved_as_of=D8, approved_by="operator", approval_note="확인"
+        )
+        at_date = project_proposal_at(row, as_of=D9)
+        assert at_date is not None
+        assert at_date.status == "APPROVED"
+        assert at_date.approved_by == "operator"
+        assert at_date.approval_note == "확인"
+
+    def test_a_future_rejection_reason_does_not_leak_into_the_past(self) -> None:
+        """🔴 §42 — D10 의 거절 사유가 D6 조회에 보이면 그날 없던 사실이 과거에 생긴다."""
+        row = _row(
+            status="REJECTED",
+            rejected_as_of=D8,
+            rejected_by="operator",
+            rejection_reason="가격 기준 불명확",
+        )
+        at_date = project_proposal_at(row, as_of=D6)
+        assert at_date is not None
+        assert at_date.status == "PROPOSED"
+        assert at_date.rejected_as_of is None
+        assert at_date.rejected_by is None
+        assert at_date.rejection_reason is None
+
+    def test_the_immutable_payload_survives_the_projection(self) -> None:
+        """⚠️ 제안 자체(행동 · 인자 · 영향 · 관측일)는 결정과 무관하게 그대로다 (§16)."""
+        row = _row(status="REJECTED", rejected_as_of=D8, rejected_by="x", rejection_reason="y")
+        at_date = project_proposal_at(row, as_of=D6)
+        assert at_date is not None
+        assert at_date.action_type == "SALES_PRIORITY_REQUEST"
+        assert at_date.parameters == {"lot_id": LOT}
+        assert at_date.impact == {"feasibility": "FEASIBLE"}
+        assert at_date.observed_as_of == D1
+        assert at_date.decision_owner == "SALES"
+
+    @pytest.mark.parametrize(
+        ("column", "expected"),
+        [
+            ("expired_as_of", "EXPIRED"),
+            ("superseded_as_of", "SUPERSEDED"),
+        ],
+    )
+    def test_every_terminal_date_projects_its_own_status(
+        self, column: str, expected: str
+    ) -> None:
+        at_date = project_proposal_at(_row(status=expected, **{column: D8}), as_of=D9)
+        assert at_date is not None
+        assert at_date.status == expected
+
+    def test_two_terminal_dates_are_refused_instead_of_guessed(self) -> None:
+        """🔴 fail-closed (§41). 하나를 골라 답하면 «그날 승인됐다» 는 거짓이 남는다."""
+        broken = _row(
+            status="APPROVED",
+            approved_as_of=D8,
+            approved_by="operator",
+            rejected_as_of=D8,
+            rejected_by="operator",
+            rejection_reason="둘 다 적혀 있다",
+        )
+        with pytest.raises(ProposalInvariantViolation):
+            project_proposal_at(broken, as_of=D9)
+
+    def test_an_execution_state_is_refused_until_commit_six(self) -> None:
+        """⚠️ `EXECUTED` 는 «언제» 됐는지 적는 칸이 없다 — 날짜 없이 과거로 접지 않는다."""
+        with pytest.raises(ProposalInvariantViolation):
+            project_proposal_at(_row(status="EXECUTED", approved_as_of=D8), as_of=D9)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  트랜잭션의 주인 — 반쪽 상태를 안 남긴다
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestTransactionOwnership:
+    """🔴 제안 INSERT 와 Exception UPDATE 는 **함께** 성공한다 (§24 · §25)."""
+
+    def test_a_created_proposal_commits_once(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _stub_repository(monkeypatch)
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.created
+        assert calls["mark"] == [1]
+        assert conn.commits == 1
+        assert conn.rollbacks == 0
+
+    def test_a_failing_exception_update_leaves_no_proposal(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§54 — Exception 이 그 사이에 닫혔다. **제안만 남기지 않는다.**"""
+
+        def vanished(*_: Any, **__: Any) -> int:
+            return 0
+
+        _stub_repository(monkeypatch, mark_exception_proposed=vanished)
+        with pytest.raises(service.ProposalStateConflict):
+            service.create_proposal(conn, result=_result(), as_of=D5, proposed_by="operator")
+        assert conn.commits == 0
+        assert conn.rollbacks == 1
+
+    def test_a_failing_insert_rolls_back(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken(*_: Any, **__: Any) -> Any:
+            raise RuntimeError("UniqueViolation")
+
+        _stub_repository(monkeypatch, insert_proposal=broken)
+        with pytest.raises(RuntimeError):
+            service.create_proposal(conn, result=_result(), as_of=D5, proposed_by="operator")
+        assert conn.commits == 0
+        assert conn.rollbacks == 1
+
+    @pytest.mark.parametrize(
+        ("kwargs", "reason"),
+        [
+            ({"recommended_index": None}, "NO_RECOMMENDED_OPTION"),
+            ({"options": (_option(rejected_reason="IMPACT_FAILED"),)}, "OPTION_REJECTED"),
+        ],
+    )
+    def test_nothing_is_written_when_there_is_nothing_to_propose(
+        self,
+        conn: _FakeConn,
+        monkeypatch: pytest.MonkeyPatch,
+        kwargs: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """§53 — 제안 0 건이면 **Exception 도 안 건드린다.**"""
+        calls = _stub_repository(monkeypatch)
+        outcome = service.create_proposal(
+            conn, result=_result(**kwargs), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason.startswith(reason)
+        assert calls["insert"] == []
+        assert calls["mark"] == []
+        assert conn.commits == 0
+
+
+class TestCreatePreconditions:
+    """제안이 서기 전에 확인하는 것들 (§49)."""
+
+    def test_a_closed_exception_gets_no_proposal(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _stub_repository(monkeypatch, exception_status=lambda *_, **__: "RESOLVED")
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason == f"{service.EXCEPTION_NOT_LIVE}:RESOLVED"
+        assert calls["insert"] == []
+
+    def test_a_missing_exception_gets_no_proposal(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_repository(monkeypatch, exception_status=lambda *_, **__: None)
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason.startswith(service.EXCEPTION_NOT_FOUND)
+
+    def test_a_retry_returns_the_proposal_that_already_stands(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§12 — 같은 지문의 살아 있는 제안이 있으면 **새 행을 안 만든다.**"""
+        key = proposal_key_for(
+            sim_run_id=SIM,
+            exception_id=EXC,
+            action_type="SALES_PRIORITY_REQUEST",
+            parameters={"lot_id": LOT},
+        )
+        standing = _row(proposal_key=key)
+        calls = _stub_repository(monkeypatch, live_proposals_for=lambda *_, **__: (standing,))
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.status == "REUSED"
+        assert outcome.proposal is standing
+        assert calls["insert"] == []
+        assert conn.commits == 0
+
+    def test_a_different_live_proposal_blocks_a_new_one(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§47 · §48 — 한 문제에 승인 대기 제안이 둘이면 사람이 무엇을 승인하는지 모른다."""
+        other = _row(proposal_key="아주-다른-지문", status="APPROVED")
+        calls = _stub_repository(monkeypatch, live_proposals_for=lambda *_, **__: (other,))
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason == f"{service.LIVE_PROPOSAL_EXISTS}:{other.proposal_id}"
+        assert calls["insert"] == []
+
+    def test_an_anonymous_proposal_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_repository(monkeypatch)
+        with pytest.raises(ValueError, match="proposed_by"):
+            service.create_proposal(conn, result=_result(), as_of=D5, proposed_by="   ")
+
+    def test_a_business_day_that_disagrees_with_the_investigation_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §20 — 다른 영업일의 조사로 오늘 제안을 세우지 않는다."""
+        _stub_repository(monkeypatch)
+        with pytest.raises(ValueError, match="as_of"):
+            service.create_proposal(conn, result=_result(), as_of=D8, proposed_by="operator")
+
+
+class TestStoredPayload:
+    """무엇을 저장하나 (§13 · §22 · §43 · §51)."""
+
+    def _stored(self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
+        calls = _stub_repository(monkeypatch)
+        outcome = service.create_proposal(
+            conn, result=_result(**kwargs), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.created
+        return calls["insert"][0]
+
+    def test_the_observation_date_is_carried_verbatim(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._stored(conn, monkeypatch).observed_as_of == D1
+
+    def test_an_unknown_observation_date_stays_unknown(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §22 — 제안일·승인일·현재시각으로 메우지 않는다."""
+        stored = self._stored(conn, monkeypatch, observed_as_of=None)
+        assert stored.observed_as_of is None
+
+    def test_the_business_day_is_the_proposal_date(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._stored(conn, monkeypatch).proposed_as_of == D5
+
+    def test_cited_evidence_is_stored_as_the_calls_themselves(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §43 — 번호만 적으면 가리킬 곳이 없는 포인터가 된다 (조사는 DB 에 안 남는다)."""
+        stored = self._stored(conn, monkeypatch)
+        assert [one["tool_name"] for one in stored.evidence_refs] == ["get_lot"]
+        assert stored.evidence_refs[0]["sequence"] == 1
+        assert stored.evidence_refs[0]["observed_as_of"] == D1.isoformat()
+
+    def test_the_impact_is_the_tool_answer_not_a_new_number(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §51 — `candidate_kg` 는 Tool 이 낸 값이고 문자열로 실린다 (float 금지)."""
+        stored = self._stored(conn, monkeypatch)
+        assert stored.impact["feasibility"] == "FEASIBLE"
+        assert stored.impact["candidate_kg"] == "500"
+
+    def test_the_investigation_outcome_is_recorded(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = self._stored(conn, monkeypatch, finish_reason=FinishReason.BUDGET_EXCEEDED)
+        assert stored.source_finish_reason == "BUDGET_EXCEEDED"
+        assert stored.source_llm_status == "SUCCESS"
+
+    def test_the_investigation_id_is_empty_because_nothing_stores_it(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """⚠️ Commit 4 의 조사는 DB 에 안 남는다 — 없는 값을 지어내 채우지 않는다 (§44)."""
+        assert self._stored(conn, monkeypatch).investigation_id is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  상태 어휘와 표 경계 — 소스를 읽어 막는다
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestTransitionVocabulary:
+    def test_commit_five_does_not_open_the_execution_transitions(self) -> None:
+        """🔴 §5 — `EXECUTED` · `FAILED` 는 어휘로만 있다. 옮기는 길을 안 연다."""
+        for forbidden in ("EXECUTED", "FAILED", "PROPOSED"):
+            with pytest.raises(ValueError, match="전이"):
+                repository.transition_proposal(
+                    None,
+                    sim_run_id=SIM,
+                    proposal_id=PRP,
+                    to_status=forbidden,
+                    as_of=D8,
+                )
+
+    def test_a_new_proposal_can_only_start_as_proposed(self) -> None:
+        """★ «처음부터 승인된» 제안을 넣는 길을 안 열어 둔다."""
+        with pytest.raises(ValueError, match="PROPOSED"):
+            repository.insert_proposal(None, row=_row(status="APPROVED"))
+
+    def test_the_status_vocabulary_matches_the_state_machine(self) -> None:
+        assert repository.LIVE_PROPOSAL_STATUSES == ("PROPOSED", "APPROVED")
+        assert set(repository.TERMINAL_DATE_STATUSES.values()) | {"PROPOSED"} | {
+            "EXECUTED",
+            "FAILED",
+        } == set(repository.PROPOSAL_STATUSES)
+
+
+class TestWriteBoundary:
+    """🔴 **이 표를 쓰는 자리가 하나뿐이어야 한다** (§61).
+
+    ⚠️ 소스를 읽어 막는다 — 경로를 밟아서 잡으려면 **밟지 않은 분기의 우회는 영원히
+       안 보인다.** Commit 4 의 `run_tool` 단일 호출 검사와 같은 규율이다.
+    """
+
+    WRITES = ("INSERT INTO", "UPDATE ", "DELETE FROM")
+    TABLE = "logistics_action_proposals"
+
+    def _writers(self) -> set[str]:
+        root = Path(repository.__file__).resolve().parents[3]
+        found: set[str] = set()
+        for path in (root / "app").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                text = node.value
+                if self.TABLE in text and any(verb in text for verb in self.WRITES):
+                    found.add(path.name)
+        return found
+
+    def test_only_the_proposal_repository_writes_the_table(self) -> None:
+        assert self._writers() == {"proposals.py"}, self._writers()
+
+    def test_the_service_owns_the_transaction_and_the_repository_does_not(self) -> None:
+        """🔴 저장소는 커밋도 롤백도 안 한다 — 그 약속의 반대편이 서비스다 (§33 · §34)."""
+        source = Path(repository.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        committed = [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"commit", "rollback"}
+        ]
+        assert committed == []
+
+    def test_no_llm_is_reachable_from_the_approval_path(self) -> None:
+        """🔴 §35 — 승인·거절은 사람이 이미 내린 결정이다. 모델에게 되묻지 않는다."""
+        for module in (repository, service):
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            imports = [
+                name.name
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.ImportFrom)
+                for name in node.names
+                if node.module is not None
+            ]
+            modules = [
+                node.module
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+            ]
+            assert not any("llm" in one for one in modules), (module.__name__, modules)
+            assert not any(one.endswith("LLMClient") for one in imports)
