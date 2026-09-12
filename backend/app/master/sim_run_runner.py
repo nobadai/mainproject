@@ -164,6 +164,38 @@ sim_run_open.delete_sim_run_row               다시 열 때 실행 행 삭제
 
 ---
 
+## 🔴 **어느 코드가 걸었는가**를 칸으로 받는다 (2026-09-12)
+
+```text
+--baseline-commit <sha>   →  config_json 의 provenance 칸에 그대로 앉는다
+안 주면                    →  그 칸이 안 선다 · 🟡 **요약이 「안 받았다」고 말한다**
+```
+
+```json
+{"baseline": {...}, "backfill": {...}, "provenance": {"commit": "..."}}
+```
+
+★★ **지금까지 그 값은 `note` 에 있었다** — 자유 문장이었다. 매입이 *"어느 커밋에서
+  걸었는지 원장에서 못 읽는다"* 고 통보했고, `config_json` 을 본 그 판단이 틀리지
+  않았다. **찾을 수 있는 자리에 없으면 없는 것과 같다.**
+
+🔴 **`baseline` 안에 넣지 않는다.** 그쪽은 *"어느 실행·어느 재무 상태에서
+  출발하는가"* 이고 이것은 *"어느 코드가 걸었는가"* 다 — **축이 다르다.** 한 칸에
+  뭉치면 출발점을 고치는 날 코드 자취까지 같이 움직인다.
+
+🔴 **필수로 안 만든다.** 위의 넷이 필수인 이유는 *"기본값을 두면 그 값이 곧 업무
+  규칙이 된다"* 인데, 커밋은 **기본값을 둘 수 있는 값이 아니라 모를 수 있는 값**이다.
+  필수로 두면 커밋을 모르는 정당한 호출(재현·시험)이 막힌다.
+
+⚠️ **그 대신 조용히 넘어가지 않는다.** 안 받았으면 요약이 그렇게 적는다 —
+  `--reset` 이 「안 지웠다」를 `None` 으로 구분해 찍는 것과 같은 모양이다.
+
+🔴 **문자열을 해석하지 않는다.** sha 인지 태그인지 가지 이름인지 안 본다
+  (`--backfill-rules` 내용을 안 읽는 것과 같은 이유). 🟡 빈 값과 공백만 있는 값은
+  막는다 — 그것은 **「안 줬다」와 다른 것을 가장한다.**
+
+---
+
 ## 🟡 걷기는 이 문이 안 한다
 
 ```text
@@ -205,6 +237,7 @@ from app.master.sim_run_open import (
 )
 
 __all__ = [
+    "PROVENANCE_CONFIG_KEY",
     "SimRunOpened",
     "format_summary",
     "main",
@@ -213,6 +246,16 @@ __all__ = [
 
 #: 열고 나서 걸으려면 부를 것. 🟡 **이 문은 안 부른다** — 사람이 고르는 두 번째 명령이다.
 WALK_ENTRYPOINT = "python -m app.master.backtest_runner"
+
+PROVENANCE_CONFIG_KEY = "provenance"
+"""`sim_runs.config_json` 안에서 **어느 코드가 걸었는가**가 앉는 칸 이름 (2026-09-12).
+
+🔴 **`BASELINE_CONFIG_KEY` 와 다른 칸이다.** 그쪽은 출발점(어느 실행·어느 재무 상태)
+  이고 이쪽은 코드 자취다 — 축이 다른 둘을 한 칸에 뭉치지 않는다.
+
+★ **읽는 쪽이 문자열을 두 벌로 들지 않게 상수로 둔다** (`BACKFILL_CONFIG_KEY` 와 같은
+  이유). 지금 쓰는 곳은 이 문 하나이고, 읽는 쪽이 생기면 이 이름을 가져다 쓴다.
+"""
 
 
 @dataclass(frozen=True)
@@ -243,6 +286,11 @@ class SimRunOpened:
     #:
     #: ⚠️ **받은 것을 그대로 든다.** 이 문은 규칙 이름도 라벨도 축 이름도 모른다.
     backfill_rules: Mapping[str, Any] | None = None
+    #: 이 실행이 **선 커밋**. 🔴 **`None` 은 「안 받았다」** — 요약이 그렇게 적는다.
+    #:
+    #: ⚠️ **`baseline` 과 이름만 나란하고 축이 다르다.** 그쪽은 어디서 출발하는가이고
+    #:   이쪽은 어느 코드가 걸었는가다.
+    baseline_commit: str | None = None
 
 
 def open_sim_run(
@@ -263,6 +311,7 @@ def open_sim_run(
     opening_fixture_id: str,
     opening_usage_scope: str,
     backfill_rules: Mapping[str, Any] | None = None,
+    baseline_commit: str | None = None,
     reset: bool = False,
     note: str | None = None,
     reset_fn: Callable[..., LedgerReset] = reset_sim_run_ledger,
@@ -281,6 +330,10 @@ def open_sim_run(
     :param backfill_rules: 그 실행이 쓸 백필 규칙 (2026-09-11). 🔴 **어휘의 주인은
         부서다** — 이 문은 규칙 이름도 라벨도 축 이름도 모르고, 받은 것을 그대로
         `config_json` 에 싣는다. 안 주면 그 칸이 아예 안 선다.
+    :param baseline_commit: 이 실행이 **선 커밋** (2026-09-12). 🔴 **선택이다** —
+        커밋은 기본값을 둘 수 있는 값이 아니라 모를 수 있는 값이고, 필수로 두면
+        커밋을 모르는 정당한 호출이 막힌다. 안 주면 그 칸이 안 서고 **요약이
+        「안 받았다」고 말한다.** 🟡 문자열을 해석하지 않는다 — 빈 값만 막는다.
     :param reset: 🔴 **기본이 거짓이다.** 거짓이면 지우는 함수 **둘 다 한 번도 안
         부른다** — 장부도 실행 행도 그대로 둔다.
     :raises ValueError: 실행이 이미 있는데 `reset` 을 안 줬을 때. **조용히 덮지 않는다.**
@@ -290,7 +343,7 @@ def open_sim_run(
         🔴 **여는 자리에서 터진다** — 179일을 걷고 나서 알면 늦다.
     """
     _assert_openable(conn, sim_run_id=sim_run_id, reset=reset)
-    config_json = _config_json(baseline, backfill_rules)
+    config_json = _config_json(baseline, backfill_rules, baseline_commit)
 
     try:
         # 🔴 **순서가 여기다.** 지우는 것이 맨 앞이고, 실행 행이 서야 시작 상태가
@@ -371,11 +424,14 @@ def open_sim_run(
         ledger_reset=ledger_reset,
         deleted_run_rows=deleted_run_rows,
         backfill_rules=backfill_rules,
+        baseline_commit=baseline_commit,
     )
 
 
 def _config_json(
-    baseline: BaselineLineage, backfill_rules: Mapping[str, Any] | None
+    baseline: BaselineLineage,
+    backfill_rules: Mapping[str, Any] | None,
+    baseline_commit: str | None = None,
 ) -> dict[str, Any]:
     """실행 행에 실을 설정. **계보 옆에 규칙 칸을 붙인다** (2026-09-11).
 
@@ -389,13 +445,42 @@ def _config_json(
 
     ★ **안 주면 칸이 아예 안 선다.** 빈 칸을 만들어 두면 *"규칙을 안 정했다"* 와
       *"규칙을 비워 뒀다"* 가 같아지고, 걷기가 그 둘을 못 가른다.
+
+    🔴 **코드 자취는 세 번째 칸이다** (2026-09-12). 계보 안에 얹지 않는다 — 출발점과
+      *"어느 코드가 걸었는가"* 는 축이 다르고, 뭉치면 한쪽을 고치는 날 다른 쪽이
+      같이 움직인다.
     """
+    자취 = _provenance_config(baseline_commit)
     if backfill_rules is None:
-        return dict(baseline.as_config())
+        return {**baseline.as_config(), **자취}
     # 🔴 **여는 자리에서 검사한다.** 179일을 걷고 나서 *"모르는 규칙이었다"* 를
     #    알면 늦다 — 그 사이 승인은 한 건도 안 서 있다.
     read_rules({BACKFILL_CONFIG_KEY: backfill_rules})
-    return {**baseline.as_config(), BACKFILL_CONFIG_KEY: dict(backfill_rules)}
+    return {**baseline.as_config(), BACKFILL_CONFIG_KEY: dict(backfill_rules), **자취}
+
+
+def _provenance_config(baseline_commit: str | None) -> dict[str, Any]:
+    """이 실행이 **선 커밋**이 앉을 칸 (2026-09-12).
+
+    🔴 **안 받았으면 칸이 안 선다.** 빈 값으로 메우면 *"커밋을 안 받았다"* 와
+      *"커밋이 비어 있다"* 가 같아지고, 나중에 원장을 읽는 사람이 그 둘을 못 가른다
+      (`--reset` 의 `None` 과 `0` 을 안 뭉치는 것과 같은 규율).
+
+    🔴 **문자열을 해석하지 않는다.** sha 인지 태그인지 가지 이름인지 안 본다 —
+      그것을 판정하는 순간 이 문이 사람이 쓰는 표기를 알게 되고, 표기가 바뀌는 날
+      멀쩡한 값이 거절된다 (`--backfill-rules` 내용을 안 읽는 것과 같은 이유).
+
+    ⚠️ **빈 값과 공백만 있는 값은 막는다.** 그것은 「안 줬다」와 **다른 것을
+      가장한다** — 칸은 섰는데 가리키는 커밋이 없는 실행이 남는다.
+    """
+    if baseline_commit is None:
+        return {}
+    if not baseline_commit.strip():
+        raise ValueError(
+            "기준 커밋이 비어 있다 — 안 줄 것이면 --baseline-commit 을 아예 빼라"
+            " (🔴 빈 값은 「안 받았다」와 다른 것을 가장한다)"
+        )
+    return {PROVENANCE_CONFIG_KEY: {"commit": baseline_commit}}
 
 
 def _assert_openable(conn: Any, *, sim_run_id: str, reset: bool) -> None:
@@ -488,6 +573,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--baseline-commit",
+        default=None,
+        help=(
+            "이 걷기가 선 커밋 (선택) · 🔴 필수가 아니다 — 커밋은 모를 수 있는 값이고"
+            " 필수로 두면 커밋을 모르는 호출이 막힌다"
+            " · 🟡 안 주면 요약이 「안 받았다」고 적는다"
+        ),
+    )
+    parser.add_argument(
         "--reset",
         action="store_true",
         default=False,
@@ -531,6 +625,14 @@ def format_summary(opened: SimRunOpened) -> str:
         if opened.backfill_rules is None
         else f"🔴 실었다 — {dict(sorted(opened.backfill_rules.items()))}"
     )
+    # 🔴 **「어느 코드가 걸었나」도 요약이 말한다** (2026-09-12). 안 받은 것을 조용히
+    #    넘기면 사람이 다 걷고 나서야 *"이 판이 어느 커밋이었지"* 를 묻게 되고,
+    #    그때는 답할 자리가 없다 — 지금까지 그 답이 자유 문장(`note`)에만 있었다.
+    기준커밋 = (
+        "🟡 안 받았다 — 이 실행이 어느 코드에서 걸렸는지 원장에 안 남는다"
+        if opened.baseline_commit is None
+        else opened.baseline_commit
+    )
     # ★ **켜는 것은 명시로만이라 명령줄에도 명시로 붙는다.** 규칙을 안 실은 실행에
     #   이 인자를 적어 주면 사람이 그대로 붙여 넣고 걷기 첫 줄에서 막힌다.
     승인인자 = "" if opened.backfill_rules is None else " --auto-approve"
@@ -545,6 +647,7 @@ def format_summary(opened: SimRunOpened) -> str:
             f"장부      {지움}",
             f"실행행    {실행행}",
             f"백필규칙  {규칙}",
+            f"기준커밋  {기준커밋}",
             "",
             "🟡 열었다. 걷지는 않았다 — 걸으려면 다음을 부른다:",
             (
@@ -604,6 +707,7 @@ def main(argv: Sequence[str]) -> int:
             opening_fixture_id=args.opening_fixture_id,
             opening_usage_scope=args.opening_usage_scope,
             backfill_rules=_load_backfill_rules(args.backfill_rules),
+            baseline_commit=args.baseline_commit,
             reset=args.reset,
             note=args.note,
         )

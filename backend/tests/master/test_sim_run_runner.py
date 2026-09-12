@@ -282,6 +282,16 @@ def test_인자에_기본값이_없다() -> None:
             assert action.default is None, "🔴 백필 규칙에 기본값이 있다"
             assert not action.required, "--backfill-rules 는 안 줘도 열려야 한다"
             continue
+        if 이름 == "--baseline-commit":
+            # 🔴 **기본값을 둘 수 없는 값이다** (2026-09-12). 어떤 커밋을 적어 두든
+            #    그것은 실제로 걸린 커밋이 아니고, 그 거짓이 원장에 남는다.
+            #
+            # ⚠️ **필수로도 안 만든다.** 위의 넷이 필수인 이유는 *"기본값이 곧 업무
+            #   규칙이 된다"* 인데, 커밋은 **모를 수 있는 값**이다 — 필수로 두면
+            #   커밋을 모르는 정당한 호출(재현·시험)이 막힌다.
+            assert action.default is None, "🔴 기준 커밋에 기본값이 있다"
+            assert not action.required, "--baseline-commit 은 안 줘도 열려야 한다"
+            continue
         assert action.required is True, f"{이름} 이 필수가 아니다"
         assert action.default is None, f"{이름} 에 기본값이 있다: {action.default!r}"
 
@@ -989,3 +999,157 @@ def test_요약이_규칙을_실었는지_말한다() -> None:
     assert "--auto-approve" in 실음.splitlines()[-1], (
         "규칙을 실었으면 걷는 명령에 그 인자가 보여야 한다"
     )
+
+
+# ── 🔴 어느 코드가 걸었는가를 칸으로 받는다 (2026-09-12) ────────────────
+#
+# ★★ 지금까지 그 값은 `sim_runs.note` 에 있었다 — **자유 문장**이었다. 매입이
+#    *"V7 이 어느 커밋에서 걸었는지 원장에서 못 읽는다"* 고 통보했고, `config_json`
+#    을 본 그 판단이 틀리지 않았다. **찾을 수 있는 자리에 없으면 없는 것과 같다.**
+#
+# 🔴 `baseline` 안에 넣지 않는다 — 그쪽은 *"어디서 출발하는가"*, 이쪽은 *"어느 코드가
+#    걸었는가"* 다. **축이 다르다.**
+
+기준커밋 = "9d96827"
+
+
+def test_안_주면_provenance_칸이_아예_안_선다() -> None:
+    """🔴 **빈 값으로 메우지 않는다.**
+
+    ★★ 빈 문자열을 넣어 두면 *"커밋을 안 받았다"* 와 *"커밋이 비어 있다"* 가 같아지고,
+      나중에 원장을 읽는 사람이 그 둘을 못 가른다 — `--reset` 의 `None` 과 `0` 을
+      안 뭉치는 것과 **같은 규율**이다.
+    """
+    _, 기록, 열림 = _연다()
+
+    assert "provenance" not in 기록.create인자["config_json"], "🔴 안 받았는데 칸이 섰다"
+    assert 열림.baseline_commit is None
+
+
+def test_주면_provenance_칸에_그대로_앉는다() -> None:
+    """🔴 **받은 글자를 그대로 싣는다.** 다듬지도 줄이지도 않는다."""
+    _, 기록, 열림 = _연다(baseline_commit=기준커밋)
+
+    assert 기록.create인자["config_json"]["provenance"] == {"commit": 기준커밋}
+    assert 열림.baseline_commit == 기준커밋
+
+
+def test_계보_칸_안에_커밋을_안_넣는다() -> None:
+    """🔴 **축이 다른 둘을 한 칸에 뭉치지 않는다.**
+
+    ⚠️ `baseline` 은 *"어느 실행·어느 재무 상태에서 출발하는가"* 다. 거기에 코드
+      자취를 얹으면 출발점을 고치는 날 자취까지 같이 움직이고, 그때 어느 쪽이 무엇을
+      말하는지 아무도 못 답한다.
+    """
+    _, 기록, _ = _연다(baseline_commit=기준커밋)
+
+    설정 = 기록.create인자["config_json"]
+    assert sorted(설정) == ["baseline", "provenance"]
+    assert 설정["baseline"] == {"from_sim_run_id": 출발실행, "finance_state_id": 출발상태}, (
+        "🔴 계보 칸이 커밋 때문에 달라졌다"
+    )
+
+
+def test_규칙과_커밋이_한_설정에_나란히_앉는다() -> None:
+    """🔴 **세 칸이 서로를 밀어내지 않는다.**"""
+    _, 기록, _ = _연다(backfill_rules=규칙, baseline_commit=기준커밋)
+
+    설정 = 기록.create인자["config_json"]
+    assert sorted(설정) == ["backfill", "baseline", "provenance"]
+    assert 설정["backfill"] == 규칙
+    assert 설정["provenance"] == {"commit": 기준커밋}
+
+
+@pytest.mark.parametrize("빈값", ["", " ", "\t", "  \n "])
+def test_빈_커밋은_막는다(빈값: str) -> None:
+    """⚠️ 빈 값은 **「안 줬다」와 다른 것을 가장한다.**
+
+    🔴 칸은 섰는데 가리키는 커밋이 없는 실행이 남으면, 그것은 *"안 적었다"* 보다
+      나쁘다 — 읽는 사람이 적힌 줄 알고 읽는다.
+    """
+    with pytest.raises(ValueError, match="비어 있다"):
+        _연다(baseline_commit=빈값)
+
+
+def test_빈_커밋이면_한_행도_안_세운다() -> None:
+    """🔴 **막았으면 아무것도 안 선다.** 반쪽 실행을 남기지 않는다."""
+    conn = _대역커넥션()
+    기록 = _순서기록()
+    with pytest.raises(ValueError):
+        open_sim_run(
+            conn,
+            sim_run_id=새실행,
+            company_persona_id="PERSONA-HAETDEUL",
+            run_type="WALK",
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 6, 29),
+            as_of=date(2026, 1, 1),
+            status="RUNNING",
+            financing_mode=새조달,
+            baseline=계보,
+            opening_finance_state_id=시작상태,
+            opening_state_date=date(2026, 1, 1),
+            opening_state_type="OPENING",
+            opening_fixture_id=물류씨앗,
+            opening_usage_scope=쓰임,
+            baseline_commit="   ",
+            reset_fn=기록.reset,
+            delete_run_fn=기록.실행행삭제,
+            create_fn=기록.create,
+            seed_fn=기록.seed,
+            logistics_seed_fn=기록.물류,
+        )
+
+    assert 기록.부른것 == []
+    assert conn.commits == 0
+
+
+@pytest.mark.parametrize(
+    "적은것",
+    [
+        "9d96827",
+        "9d968272f0f4e2c7a3f1b6d5c4e3a2b1f0e9d8c7",
+        "v1.2.3",
+        "feat/master-walk-shows-llm-vocabulary_lhs",
+        "dev@9d96827",
+    ],
+)
+def test_커밋_문자열을_해석하지_않는다(적은것: str) -> None:
+    """🔴 **sha 인지 태그인지 가지 이름인지 안 본다.**
+
+    ⚠️ 판정하는 순간 이 문이 사람이 쓰는 표기를 알게 되고, 표기가 바뀌는 날 멀쩡한
+      값이 거절된다 — `--backfill-rules` 내용을 안 읽는 것과 **같은 이유**다.
+
+    🟢 **빈 값 막기가 이 모두를 막아 버리는 것도 여기서 잡힌다** — 막는 검사가
+      아무거나 다 막으면 그것은 검사가 아니라 벽이다.
+    """
+    _, 기록, 열림 = _연다(baseline_commit=적은것)
+
+    assert 기록.create인자["config_json"]["provenance"] == {"commit": 적은것}
+    assert 열림.baseline_commit == 적은것
+
+
+def test_요약이_기준_커밋을_적는다() -> None:
+    """🔴 **안 받은 것을 조용히 넘기지 않는다.**
+
+    ★★ 다 걷고 나서 *"이 판이 어느 커밋이었지"* 를 물으면 그때는 답할 자리가 없다 —
+      지금까지 그 답이 자유 문장에만 있었던 것이 이 칸을 세운 이유다.
+    """
+    공통: dict[str, Any] = {
+        "sim_run_id": 새실행,
+        "financing_mode": 새조달,
+        "baseline": 계보,
+        "opening_finance_state_id": 시작상태,
+        "opening_logistics_fixture_id": 물류씨앗,
+        "period_start": date(2026, 1, 1),
+        "period_end": date(2026, 6, 29),
+        "ledger_reset": None,
+    }
+    안받음 = _NFC(format_summary(SimRunOpened(**공통)))
+    받음 = _NFC(format_summary(SimRunOpened(**공통, baseline_commit=기준커밋)))
+
+    assert _NFC("기준커밋") in 받음, "🔴 기준 커밋 줄이 요약에 없다"
+    assert 기준커밋 in 받음
+    assert _NFC("기준커밋") in 안받음, "🔴 안 받았을 때 줄이 통째로 빠진다"
+    assert _NFC("안 받았다") in 안받음
+    assert 기준커밋 not in 안받음
