@@ -99,6 +99,25 @@ CalendarNotCovered             → 🔴 멈추고 사유를 낸다
 
 ---
 
+🔴 **현금 축을 읽는다. 세지 않는다** (2026-09-12).
+
+```text
+현금        {매입유출: n · 물류유출: n · 인건이자: n · 수금: n · 순현금: n · 기말잔액: n}
+현금항등식  Δ잔액 n · Σ순현금 n · 차이 n · 어긋난 날 n일 → 🟢 성립 / 🔴 깨짐
+```
+
+★★ **걷기가 현금 축을 아예 안 보고 있었다.** 칸은 `daily_closings` 에 처음부터
+  있었고, V7 에서 매입 현금유출 27,122,228 원이 **흐름에는 잡히는데 잔액에서 안
+  빠지는데도** 179일 동안 아무 줄도 그 사실을 말하지 않았다.
+
+  ★ **고치는 것은 재무 몫이다** (recognition 과 settlement 사이 지급 전이). 이
+    파일이 하는 것은 **걷기가 그 불일치를 스스로 말하게** 하는 것뿐이다.
+
+🔴 **깨져도 `incidents` 에 안 넣는다.** 지급 전이가 서기 전에는 매일 깨지고, 사고로
+  세면 `MAX_CONSECUTIVE_FAILURES` 에 걸려 **걷기가 못 끝난다** — 그러면 정본 판을
+  못 돌린다. 🟢 센다 · 찍는다 · 판정을 낸다 / 🔴 멈추지 않는다 · `사고` 줄을 안
+  건드린다.
+
 ⚠️ **어휘를 새로 만들지 않았다.** 세는 값은 전부 `scheduler` 가 낸 것 그대로다
   (`DayRunOutcome.action` · `ItemRunOutcome.end_code` · `procurement_status` 의
   `NOT_ATTEMPTED` · `sales_status` 의 세 값 · `outbound_status` 의 네 값 ·
@@ -120,6 +139,9 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
+from itertools import pairwise
+from typing import Any
 
 from app.master.backfill import (
     BackfillRuleMissing,
@@ -135,6 +157,22 @@ from app.master.bootstrap import wire_registries
 from app.master.envelope import LLM_STATUSES
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
+
+# 🔴 **마감 칸 이름의 주인에서 들여온다. 여기서 칸 이름을 안 적는다** (2026-09-12).
+#   손으로 적으면 표가 바뀌는 날 요약만 옛 이름을 말하고, 그때 나는 것은 오류가
+#   아니라 **조용한 0** 이다 — 위 `LLM_STATUSES` 와 같은 결이다.
+#
+# ⚠️ **`LOAN_CASH_BALANCE` 는 안 들여온다.** 대출 포함 곡선은 이 항등식의 축이
+#   아니다 (아래 `cash_identity`).
+from app.master.ledger_repository import (
+    BASE_CASH_BALANCE,
+    COLLECTION_CASH_IN,
+    LOGISTICS_CASH_OUT,
+    NET_CASH,
+    PAYROLL_INTEREST_CASH_OUT,
+    PURCHASE_CASH_OUT,
+    read_walk_closings,
+)
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
@@ -146,12 +184,19 @@ from app.master.scheduler import (
 
 __all__ = [
     "MAX_CONSECUTIVE_FAILURES",
+    "CashIdentity",
     "WalkIncident",
     "WalkResult",
     "format_summary",
     "main",
     "walk",
 ]
+
+#: 같다고 보는 한계. `numeric(18,6)` 이라 소수점 찌꺼기가 남는다 — 그것을 사고로
+#: 세면 매일이 사고가 되고, 사고 목록이 아무것도 안 가리킨다.
+_ONE_WON = Decimal(1)
+
+_ZERO = Decimal(0)
 
 #: 연속 사고 상한. **닿으면 멈추고 사유를 낸다.**
 #:
@@ -177,6 +222,48 @@ class WalkIncident:
 
 
 @dataclass(frozen=True)
+class CashIdentity:
+    """현금 항등식 한 판 (2026-09-12). **잔액이 흐름만큼 움직였는가.**
+
+    ```text
+    기초잔액 = 첫 마감행의 잔액 − 첫 마감행의 순현금
+    Δ잔액    = 마지막 마감행의 잔액 − 기초잔액
+    Σ순현금  = 순현금 합
+    성립     = |Δ잔액 − Σ순현금| < 1원
+    ```
+
+    ★★ **V7 걷기에서 매입 현금유출 27,122,228 원이 흐름에는 잡히고 잔액에서는
+      안 빠졌다** (실측 2026-09-12). 재무가 *"recognition 과 settlement 사이에 빠진
+      계층"* 으로 정리했고 지급 전이를 세우는 중이다 — **그 수정은 재무 몫이고**
+      이 값이 하는 일은 그 불일치를 걷기가 **스스로 말하게** 하는 것뿐이다.
+
+    🔴 **여기서 아무것도 고치지 않는다.** 잔액을 다시 세지도, 맞춰 주지도 않는다.
+      마스터가 부서 값을 고치기 시작하면 같은 사실의 주인이 둘이 된다.
+    """
+
+    #: 걷기 앞에 서 있던 잔액. **첫 행이 말한다** — 표는 그 앞을 말하지 않는다.
+    opening_balance_krw: Decimal
+    #: 기초에서 기말까지 잔액이 움직인 폭.
+    balance_delta_krw: Decimal
+    #: 그 구간 순현금 합.
+    net_cash_krw: Decimal
+    #: 하루 단위로 어긋난 날 수. 🔴 **첫날은 안 센다** — 앞 잔액이 없다.
+    #:
+    #: ★ 합만 맞고 날마다 어긋나는 판이 있다. 그 둘은 다른 사실이라 따로 센다.
+    mismatched_days: int
+
+    @property
+    def gap_krw(self) -> Decimal:
+        """Δ잔액 − Σ순현금. **0 이면 성립이다.**"""
+        return self.balance_delta_krw - self.net_cash_krw
+
+    @property
+    def holds(self) -> bool:
+        """성립하는가. `|차이| < 1원`."""
+        return abs(self.gap_krw) < _ONE_WON
+
+
+@dataclass(frozen=True)
 class WalkResult:
     """걷기 한 번의 결과.
 
@@ -198,6 +285,19 @@ class WalkResult:
     stopped_reason: str | None = None
     #: 소요 시간(초). 벽시계가 아니라 단조 시계로 잰다 (아래 `ticks` 주석).
     elapsed_seconds: float = 0.0
+    #: 그 구간의 마감행 (2026-09-12). 🔴 **재무가 적은 값을 그대로 든다.**
+    #:
+    #: ★ **여기서 다시 세지 않는다.** 마스터가 부서 값을 재계산하면 같은 사실의
+    #:   주인이 둘이 되고, 재무가 세는 값과 갈리는 날 **에러 없이 손익만 틀린다.**
+    #:
+    #: ⚠️ **한 행도 없으면 빈 튜플이고 그것이 답이다** — 0 으로 메운 행을 지어내지
+    #:   않는다. *"마감이 안 돌았다"* 와 *"돌았는데 0 이다"* 는 다른 사실이다.
+    closings: tuple[Mapping[str, Any], ...] = ()
+    #: 마감행을 **못 읽었으면** 그 사유 (2026-09-12). 읽었으면 `None`.
+    #:
+    #: 🔴 **「0행」과 접지 않는다.** *"못 읽었다"* 를 *"없다"* 로 적으면 DB 가 죽은
+    #:   판과 마감이 한 번도 안 돈 판이 화면에서 같아진다.
+    closings_reason: str | None = None
 
     @property
     def completed(self) -> bool:
@@ -541,6 +641,96 @@ class WalkResult:
                     total.update(approval.label_outcomes)
         return total
 
+    @property
+    def cash(self) -> Mapping[str, Decimal] | None:
+        """그 구간의 현금 축 (2026-09-12). **마감행이 0행이면 `None`.**
+
+        ```text
+        네 유출·유입    그 구간 합
+        순현금          그 구간 합
+        기말잔액        🔴 합이 아니라 **마지막 날의 잔액**이다
+        ```
+
+        ★★ **걷기가 현금 축을 아예 안 보고 있었다.** 칸은 `daily_closings` 에
+          처음부터 있었고 아무도 안 봤다 — `llm_outcomes` 가 서기 전과 같은 모양이다.
+
+        🔴 **0 인 칸을 빼지 않는다.** 네 유출이 전부 0 인 채로 V4~V6 세 판이
+          「성립」을 통과했다. 그 0 이 안 보이면 그 성립이 **무엇을 통과시킨
+          것인지**를 성적표가 못 답한다.
+
+        ★ **이름의 주인은 `ledger_repository` 다.** 여기서 새 이름을 안 붙이고
+          나르기만 한다 — `end_codes` 가 `scheduler` 의 값을 그대로 세는 것과 같다.
+        """
+        if not self.closings:
+            return None
+        total = {
+            column: sum((_won(row, column) for row in self.closings), _ZERO)
+            for _, column in _CASH_FLOWS
+        }
+        # ★ **기말잔액만 합이 아니다.** 잔액은 그날의 상태이지 그날의 움직임이
+        #   아니다 — 더하면 179일치 잔액을 합한 뜻 없는 수가 나온다.
+        total[BASE_CASH_BALANCE] = _won(self.closings[-1], BASE_CASH_BALANCE)
+        return total
+
+    @property
+    def cash_identity(self) -> CashIdentity | None:
+        """현금 항등식 (2026-09-12). **마감행이 0행이면 `None`.**
+
+        🔴 **대출 포함 곡선(`loan_cash_balance_krw`)을 여기 안 넣는다.** 차입과
+          상환이 들어가 축이 다르다 — 대출이 실행된 날은 **잔액이 순현금과 달라야
+          맞다.** 지금 네 판 다 대출이 0 이라 두 곡선이 안 갈리지만, **안 갈린다고
+          한 축으로 접으면** 차입이 한 번 서는 날 항등식이 조용히 거짓말을 한다
+          (`end_codes` 와 `sales_end_codes` 를 가른 것과 같은 규율).
+
+        🔴 **깨져도 `incidents` 에 안 넣는다.** 재무 지급 전이가 서기 전에는 **매일
+          깨지고**, 사고로 세면 `max_consecutive_failures` 에 걸려 걷기가 못 끝난다 —
+          그러면 정본 판을 못 돌린다. 🟢 세고 찍고 판정은 낸다 · 🔴 걷기를 멈추지
+          않고 `사고` 줄 숫자를 안 건드린다. `사고` 는 자기 축을 그대로 지키고
+          현금항등식은 **자기 줄**을 갖는다.
+        """
+        rows = self.closings
+        if not rows:
+            return None
+        opening = _won(rows[0], BASE_CASH_BALANCE) - _won(rows[0], NET_CASH)
+        return CashIdentity(
+            opening_balance_krw=opening,
+            balance_delta_krw=_won(rows[-1], BASE_CASH_BALANCE) - opening,
+            net_cash_krw=sum((_won(row, NET_CASH) for row in rows), _ZERO),
+            # ★ **첫날은 안 센다** — 앞 잔액이 없다. 세면 기초를 아는 판마다
+            #   하루가 늘 어긋난 것으로 나온다.
+            mismatched_days=sum(
+                1
+                for 앞, 뒤 in pairwise(rows)
+                if abs(
+                    (_won(뒤, BASE_CASH_BALANCE) - _won(앞, BASE_CASH_BALANCE)) - _won(뒤, NET_CASH)
+                )
+                >= _ONE_WON
+            ),
+        )
+
+
+#: 현금 줄이 찍는 칸. **왼쪽은 사람이 읽는 이름 · 오른쪽은 재무의 칸이다.**
+#:
+#: 🔴 **다섯이 전부 합이고 기말잔액만 여기 없다** — 그쪽은 마지막 날의 값이라
+#:   같은 자리에 두면 합으로 읽힌다.
+_CASH_FLOWS = (
+    ("매입유출", PURCHASE_CASH_OUT),
+    ("물류유출", LOGISTICS_CASH_OUT),
+    ("인건이자", PAYROLL_INTEREST_CASH_OUT),
+    ("수금", COLLECTION_CASH_IN),
+    ("순현금", NET_CASH),
+)
+
+
+def _won(row: Mapping[str, Any], column: str) -> Decimal:
+    """마감행 한 칸을 원으로. **없는 칸은 터진다 — 0 으로 안 메운다.**
+
+    ⚠️ `numeric` 은 `Decimal` 로 온다. `float` 로 낮추면 179일을 더하는 동안
+      원 단위가 조용히 어긋나고, 그 어긋남이 **항등식의 판정**이 된다.
+    """
+    value = row[column]
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
 
 def walk(
     *,
@@ -560,6 +750,7 @@ def walk(
     rules_of: Callable[[str], BackfillRules] = read_run_rules,
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
     auto_maintain: bool = False,
+    closings_of: Callable[..., Sequence[Mapping[str, Any]]] = read_walk_closings,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -609,6 +800,15 @@ def walk(
 
         ⚠️ **`auto_approve` 처럼 걷기 전에 막는 관문이 없다.** 확인할 규칙 파일이
           없기 때문이다 — 버릴 것이 없는 날은 사고가 아니라 `NOTHING_DUE` 다.
+    :param closings_of: 그 구간의 마감행을 읽는 자리 (2026-09-12). 🔴 **걷기 한
+        판에 한 번, 다 걷고 나서 부른다** — 날마다 읽으면 같은 표를 179번 다시
+        읽고, 그 중 하루만 다른 답이 오는 날이 오면 왜인지를 못 읽는다.
+
+        🔴 **여기서 숫자를 만들지 않는다.** 읽은 값을 `WalkResult` 가 그대로 든다.
+
+        ⚠️ **못 읽어도 걷기를 안 터뜨린다.** 179일을 다 걷고 마지막 조회에서 죽으면
+          **성적을 통째로 잃는다** (`_use_utf8_output` 이 막은 그 모양). 못 읽은
+          사실은 `closings_reason` 이 든다 — *"없다"* 로 접지 않는다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
 
@@ -741,6 +941,21 @@ def walk(
 
         day += timedelta(days=1)
 
+    # ── ④ 🔴 **현금 축을 읽는다. 여기서 세지 않는다** (2026-09-12) ─────────
+    #
+    # ★ 다 걷고 한 번 읽는다 — 걷는 동안 읽으면 그날 마감이 아직 안 선 날의 행을
+    #   보게 되고, 그 빈 자리가 「마감이 안 돌았다」로 보인다.
+    #
+    # 🔴 **읽다 터져도 걷기를 안 터뜨린다.** 그리고 그 실패를 `incidents` 에도
+    #    안 넣는다 — 사고 줄은 **걸음의 축**이고, 조회 실패는 걸음이 아니다.
+    #    못 읽은 사실은 `closings_reason` 이 따로 든다.
+    closings: tuple[Mapping[str, Any], ...] = ()
+    closings_reason: str | None = None
+    try:
+        closings = tuple(closings_of(sim_run_id=sim_run_id, start=start, end=end))
+    except Exception as exc:  # noqa: BLE001 - 성적표를 통째로 잃는 것이 더 나쁘다.
+        closings_reason = f"{type(exc).__name__}: {exc}"
+
     return WalkResult(
         start=start,
         end=end,
@@ -750,6 +965,8 @@ def walk(
         stopped_at=stopped_at,
         stopped_reason=stopped_reason,
         elapsed_seconds=ticks() - started_ticks,
+        closings=closings,
+        closings_reason=closings_reason,
     )
 
 
@@ -871,6 +1088,55 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _krw(value: Decimal) -> str:
+    """금액 한 칸. **원 단위로 자리를 끊어 찍는다.**"""
+    return f"{value:,.0f}"
+
+
+def _cash_lines(result: WalkResult) -> list[str]:
+    """현금 두 줄 (2026-09-12). 🔴 **맞아도 찍고 · 0 도 찍고 · 없으면 「없음」이다.**
+
+    ```text
+    현금        {매입유출: n · 물류유출: n · 인건이자: n · 수금: n · 순현금: n · 기말잔액: n}
+    현금항등식  Δ잔액 n · Σ순현금 n · 차이 n · 어긋난 날 n일 → 🔴 깨짐
+    ```
+
+    🔴 **세 상태를 접지 않는다.**
+
+    ```text
+    마감행이 있다     숫자와 판정을 찍는다 (성립이어도 찍는다)
+    0행이다           「없음」 — 마감이 한 번도 안 돌았다
+    못 읽었다         「못 읽음」 — 0행과 다른 사실이다
+    ```
+
+    ⚠️ **0 으로 메우지 않는다.** *"마감이 안 돌았다"* 와 *"돌았는데 0 이다"* 를
+      같은 0 으로 적으면, 고칠 것이 있는 판과 없는 판이 화면에서 같아진다.
+    """
+    if result.closings_reason is not None:
+        못읽음 = f"못 읽음 — {result.closings_reason}"
+        return [f"현금        {못읽음}", f"현금항등식  {못읽음}"]
+
+    현금 = result.cash
+    항등식 = result.cash_identity
+    if 현금 is None or 항등식 is None:
+        없음 = "없음 — 그 구간에 마감행이 0행이다"
+        return [f"현금        {없음}", f"현금항등식  {없음}"]
+
+    # 🔴 **0 인 칸도 그대로 찍는다.** 빼면 V4~V6 세 판을 통과시킨 그 0 이 사라진다.
+    칸 = " · ".join(f"{이름}: {_krw(현금[column])}" for 이름, column in _CASH_FLOWS)
+    판정 = "🟢 성립" if 항등식.holds else "🔴 깨짐"
+    항등식줄 = (
+        f"Δ잔액 {_krw(항등식.balance_delta_krw)}"
+        f" · Σ순현금 {_krw(항등식.net_cash_krw)}"
+        f" · 차이 {_krw(항등식.gap_krw)}"
+        f" · 어긋난 날 {항등식.mismatched_days}일 → {판정}"
+    )
+    return [
+        f"현금        {{{칸} · 기말잔액: {_krw(현금[BASE_CASH_BALANCE])}}}",
+        f"현금항등식  {항등식줄}",
+    ]
+
+
 def format_summary(result: WalkResult) -> str:
     """걷기 결과를 사람이 읽을 줄로. **값을 새로 만들지 않는다.**"""
     lines = [
@@ -912,6 +1178,11 @@ def format_summary(result: WalkResult) -> str:
         #    **그 자체가 사고**다. 71영업일을 `SUCCESS` 0건으로 걷고도 아무도
         #    모른 것이 「0이라 안 보임」의 모양이었다 (`SIM-CHAIN-V6`).
         f"LLM어휘   {dict(sorted(result.llm_outcomes.items()))}",
+        # 🔴 **현금 두 줄을 접지 않는다** (2026-09-12). *"현금이 얼마 움직였나"* 와
+        #    *"그만큼 잔액이 움직였나"* 는 축이 다르다 — 이 줄이 없어서 V7 에서
+        #    매입 유출 27,122,228 원이 잔액에서 안 빠진 것을 179일 동안 아무도
+        #    못 봤다. 🔴 **맞아도 찍는다** — 0 이라 안 보이면 아무도 안 본다.
+        *_cash_lines(result),
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",
     ]
