@@ -24,7 +24,13 @@ from app.purchase_agent import mocks
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
-from app.purchase_agent.nodes.classify_situation import classify_situation
+from app.purchase_agent.nodes.classify_situation import (
+    SplitEntryCap,
+    classify_situation,
+    coverage_by_label,
+    estimate_daily_demand,
+    volume_gate_holds,
+)
 from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import (
     arrival_dates,
@@ -139,9 +145,14 @@ def test_entry_is_driven_by_trend_not_volume_in_the_mocks() -> None:
 
 
 def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
-    """**합성 입력** — 궤적을 죽이고 총량을 도착일 여유까지 올리면 수량 단독으로 진입한다.
+    """**합성 입력** — 궤적을 죽이고 총량을 도착일 여유 **위로** 올리면 수량 단독으로 진입한다.
 
     임계가 **검사가 주입한 물류 값**이라, 선언을 안 건드리고도 경계 양쪽을 잴 수 있다.
+
+    🔴 **경계가 ``>=`` 에서 ``>`` 로 옮겼다** (2026-09-12). 종전 기대는 *"총량 = 여유면
+      진입"* 이었는데, ⑦ ``check_arrival_capacity`` 의 컷이 ``occupied > cap`` 이라
+      **그날은 1회차로 정확히 들어간다.** 나눌 이유가 없는 날 나누면 회차만 늘고
+      ``timing`` 라벨이 timing 근거 없이 붙는다 — 그래서 같은 값이면 안 연다.
     """
     constraints = load_constraints()
     state = _staged()
@@ -149,12 +160,18 @@ def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
     cap = 9_000
     inject_arrival_cap(state, cap)
 
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap + 1
     decision = evaluate_split_entry(state, constraints)
     assert decision["by_trend"] is False
     assert decision["by_volume"] is True
     assert decision["cap_kg"] == cap
     assert decision["entered"] is True
+
+    # 🔴 **딱 맞는 날은 안 나눈다** — ⑦ 이 ``occupied > cap`` 으로 재므로 통과한다.
+    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap
+    exact = evaluate_split_entry(state, constraints)
+    assert exact["by_volume"] is False
+    assert exact["entered"] is False
 
     state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap - 1  # 경계 바로 아래
     blocked = evaluate_split_entry(state, constraints)
@@ -180,6 +197,80 @@ def test_the_volume_branch_never_opens_on_an_unknown_arrival_cap() -> None:
     assert decision["entered"] is False
     assert decision["arrival_date"]  # 도착일은 계산됐다 — 없는 것은 그날 여유뿐이다
     assert "여유" in decision["cap_unknown_reason"]
+
+
+def test_the_volume_branch_can_never_enter_on_an_axis_that_never_opened() -> None:
+    """🔴 **④ 가 수량으로 진입하는 날은 ① 이 반드시 timing 축을 열어 뒀다** (2026-09-12).
+
+    ④ 의 진입은 ``timing ∈ allowed_axes`` 를 **요구한다** (§4-④ 확정 1 — 분할은 timing
+    축을 받은 안에만). 그래서 ① 이 안 여는 날은 ④ 가 «나눠야 한다» 고 판단해도 못 나누고,
+    창고가 못 받는 계획이 1회차로 나가 ⑦ ``check_arrival_capacity`` 에서 통째로 컷된다.
+
+    ★ **두 노드가 다른 수를 본다.** ① 은 클립 **전** 추정 총량(일평균 × 최대 D), ④ 는
+      클립 **후** 안별 실제 총량이다. 그 차이는 의도된 것이고(``evaluate_split_entry``
+      docstring), 안전한 방향(① 이 더 크다)으로만 벌어져야 한다.
+
+    🔴 **그 «안전한 방향» 이 우연이 아니라 불변식이어야 한다.** ③ 의
+      ``demand_qty = round(일평균 × D)`` 가 올림으로 떨어지면 실제가 추정을 1kg 미만
+      넘어설 수 있고, 여유가 정확히 그 틈에 앉으면 함의가 깨진다. ①
+      ``volume_gate_holds`` 의 ``ceil`` 이 그 틈을 덮는다 — 이 검사가 그것을 잠근다.
+
+    ⚠️ **mock 앵커 전 품목 × 여유를 촘촘히 쓸어 본다.** 한 점만 재면 ``ceil`` 을 지워도
+       초록불이 유지된다.
+    """
+    constraints = load_constraints()
+    checked = 0
+    for as_of in ANCHORS:
+        for item in ("배추", "무", "양파"):
+            state = build_initial_state(item, as_of)
+            state.update(classify_situation(state))
+            state.update(draft_plan(state))
+            largest = largest_total_kg(state["base_plan"])
+            daily = estimate_daily_demand(state["confirmed_orders"], constraints)
+            estimated = daily * max(coverage_by_label(state["situation"], constraints).values())
+            caps = [largest - 1, largest - 0.5, largest, largest + 0.5, largest + 1]
+            caps += [estimated - 0.5, estimated, estimated + 0.5]
+            for cap_kg in (value for value in caps if value > 0):
+                checked += 1
+                opens = volume_gate_holds(estimated, SplitEntryCap(cap_kg=float(cap_kg)))
+                enters = largest > float(cap_kg)  # ④ 의 수량 가지와 같은 비교다
+                assert not enters or opens, (
+                    f"{as_of} {item}: 여유 {cap_kg} 에서 ④는 진입하는데 ①이 축을 안 열었다"
+                    f" (추정 {estimated} · 실제 {largest})"
+                )
+    assert checked > 0
+
+
+def test_the_volume_gate_covers_the_rounding_gap_between_the_two_nodes() -> None:
+    """🔴 **``round`` 가 올려 놓은 1kg 미만 틈을 ① 이 덮는다** (2026-09-12).
+
+    앞 검사는 **mock 값에서는 안 문다** — 추정(배추 15,428kg)과 실제(8,727kg)가 멀어
+    경계가 그 사이에 앉지 못한다. 틈은 클립도 차감도 없는 날에만 드러나므로 여기서
+    **그 날을 손으로 만든다.**
+
+    ```text
+    일평균 717.3 · D 12   ① 추정  717.3 × 12   = 8,607.6    (float)
+                          ③ 수량  round(8,607.6) = 8,608     (int · 올림으로 떨어졌다)
+    물류 여유 8,607.8 이면
+                          ④  8,608 > 8,607.8  → 나눠야 한다
+                          ① (ceil 없이) 8,607.6 > 8,607.8 → **축이 안 열린다**
+    ```
+
+    그 상태로는 창고가 못 받는 계획이 1회차로 나가 ⑦ 에서 통째로 컷된다. ``ceil`` 이
+    ①의 수를 ③이 실제로 만들 수 있는 최대치까지 올려 함의를 성립시킨다.
+    """
+    daily_demand, coverage_days = 717.3, 12
+    estimated = daily_demand * coverage_days
+    largest = round(estimated)  # ③ ``demand_qty`` 가 쓰는 그 식이다
+    assert largest > estimated, "이 검사는 round 가 올림으로 떨어지는 값에서만 뜻이 있다"
+
+    cap_kg = (estimated + largest) / 2  # 두 수 사이 — ④는 진입하고 ①은 갈린다
+    assert largest > cap_kg > estimated
+    assert volume_gate_holds(estimated, SplitEntryCap(cap_kg=cap_kg)) is True
+
+    # 경계 밖 두 방향은 그대로다 — ``ceil`` 이 게이트를 통째로 열어 두지 않는다.
+    assert volume_gate_holds(estimated, SplitEntryCap(cap_kg=float(largest))) is False
+    assert volume_gate_holds(estimated, SplitEntryCap(cap_kg=largest + 1.0)) is False
 
 
 def test_trend_trigger_enters_on_its_own_below_the_arrival_cap() -> None:
