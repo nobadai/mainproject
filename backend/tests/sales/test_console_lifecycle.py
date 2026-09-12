@@ -181,3 +181,106 @@ def test_every_query_carries_the_run(monkeypatch):
     for statement, params in stub.queries:
         assert "sim_run_id = %s" in statement
         assert params[0] == RUN_A
+
+
+# ---------------------------------------------------------------------------
+# 업무 키로 이어진 확정 앞 구간 (dev `cd74463` 이후)
+# ---------------------------------------------------------------------------
+
+
+class _LinkedStub(_Stub):
+    """업무 키가 실린 판매 + 마스터 실행/판단까지 답한다."""
+
+    def __call__(self, query, params):
+        statement = str(query)
+        self.queries.append((statement, list(params)))
+        if params and params[0] != self.run and params[0] != REQUEST:
+            return []
+        if "master_agent_runs" in statement:
+            return [
+                {
+                    "run_id": "RUN-1",
+                    "end_code": "SL1_PRESENTED",
+                    "runtime_status": "READY",
+                    "created_at": datetime(2026, 1, 2, 9, 0, tzinfo=UTC),
+                }
+            ]
+        if "master_decisions" in statement:
+            return [
+                {
+                    "decision_id": "DEC-1",
+                    "decision": "APPROVE",
+                    "scenario_label": "SALES-001-A",
+                    "end_code_at_decision": "SL1_PRESENTED",
+                    "decided_by": "AUTO-BACKFILL",
+                    "created_at": datetime(2026, 1, 2, 9, 5, tzinfo=UTC),
+                }
+            ]
+        return super().__call__(query, params)
+
+
+REQUEST = "REQ-DAILY-SALES-SIM-CONSOLE-A-20260102-배추"
+
+
+def _linked_sale_row() -> dict:
+    return {**_sale_row(), "source_order_id": REQUEST}
+
+
+def test_a_business_key_links_the_pre_confirmation_stages(monkeypatch):
+    """★ 마스터가 업무 키를 싣기 시작하면서 «어느 판단이 이 판매를 낳았나» 가 사실이 됐다."""
+    stub = _LinkedStub(sale=[_linked_sale_row()])
+    _patch(monkeypatch, stub)
+
+    lifecycle = get_console_sale_lifecycle(sim_run_id=RUN_A, sale_id=SALE, as_of=AS_OF)
+
+    assert lifecycle is not None
+    assert lifecycle.agent_lineage == "LIVE"
+    assert _stage(lifecycle, "candidate").status == "DONE"
+    assert _stage(lifecycle, "candidate").reference == REQUEST
+    assert "SL1_PRESENTED" in _stage(lifecycle, "candidate").detail
+    decision = _stage(lifecycle, "master_decision")
+    assert decision.status == "DONE"
+    assert decision.reference == "DEC-1"
+    assert "APPROVE" in decision.detail
+
+
+def test_the_master_run_lookup_is_run_scoped_and_deterministic(monkeypatch):
+    stub = _LinkedStub(sale=[_linked_sale_row()])
+    _patch(monkeypatch, stub)
+
+    get_console_sale_lifecycle(sim_run_id=RUN_A, sale_id=SALE, as_of=AS_OF)
+    statement, params = next(
+        (sql, p) for sql, p in stub.queries if "master_agent_runs" in sql
+    )
+
+    #  🔴 실행 축으로 걸러 찾는다 — 업무 키만으로 남의 실행 행을 집지 않는다.
+    assert "sim_run_id = %s" in statement
+    assert params[0] == RUN_A and params[1] == REQUEST
+    assert "ORDER BY run_seq DESC" in statement
+
+
+def test_a_seed_sale_without_a_business_key_stays_blocked(monkeypatch):
+    """🔴 업무 키가 없는 옛 행은 여전히 추정으로 잇지 않는다."""
+    _patch(monkeypatch, _LinkedStub(sale=[_sale_row()]))
+
+    lifecycle = get_console_sale_lifecycle(sim_run_id=RUN_A, sale_id=SALE, as_of=AS_OF)
+
+    assert lifecycle is not None
+    assert lifecycle.agent_lineage == "BLOCKED"
+    assert _stage(lifecycle, "candidate").status == "BLOCKED"
+    assert "추정" in _stage(lifecycle, "candidate").detail
+
+
+def test_department_verdicts_are_pointed_at_not_copied(monkeypatch):
+    """🔴 재무·물류 판정을 여기서 옮겨 적지 않는다 — 두 곳이 다른 말을 하게 된다."""
+    _patch(monkeypatch, _LinkedStub(sale=[_linked_sale_row()]))
+
+    lifecycle = get_console_sale_lifecycle(sim_run_id=RUN_A, sale_id=SALE, as_of=AS_OF)
+
+    assert lifecycle is not None
+    for name in ("finance_validation", "logistics_validation"):
+        stage = _stage(lifecycle, name)
+        assert stage.status == "DONE"
+        assert "정본" in stage.detail
+        #  판정 단어(PASS/FAIL)를 여기서 만들지 않는다.
+        assert "PASS" not in stage.detail and "FAIL" not in stage.detail

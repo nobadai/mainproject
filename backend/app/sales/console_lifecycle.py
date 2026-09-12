@@ -3,6 +3,9 @@
 실측(2026-09-11)으로 확인한 연결키다. 각 화살표는 표에 실제로 있는 칸이다:
 
 ```text
+sales.source_order_id  (= 마스터 업무 키)
+  → master_agent_runs.request_id          후보를 만든 판매 사이클 실행
+  → master_decisions.request_id           그 판단의 승인 기록
 sales.sale_id
   ← sale_items.sale_id
         ← inventory_moves.sale_item_id      (move_type = 'OUT')
@@ -11,16 +14,18 @@ sales.sale_id
         ← master_collection_events.receivable_id
 ```
 
-🔴 **확정 앞 단계로는 잇지 못한다.** `sales` 에는 `request_id` 도 `decision_id` 도
-   `scenario_id` 도 없다. 그래서 *"어느 후보가 이 판매가 됐는가"* 를 **아무도 저장하지
-   않았다.**
+★ **확정 앞 구간이 2026-09-11 에 이어졌다.** 마스터가 확정 때 업무 키를 `source_order_id`
+  로 싣기 시작하면서(`sales_approval` — *"확정이 업무 키를 원본 주문으로 싣는다"*),
+  *"어느 판단이 이 판매를 낳았나"* 가 **저장된 값**이 됐다. 실측에서 판매 51건이 그
+  키로 마스터 판단과 이어진다.
 
-   그 구간을 *"같은 날짜 · 같은 품목 · 같은 거래처 · 가장 최근 행"* 으로 이으면 화면은
-   그럴듯한 계보를 그린다. 그리고 그 계보는 **틀렸을 수 있는데, 틀렸다는 사실이 어디에도
-   남지 않는다.** 그래서 그 구간은 `BLOCKED` 로 두고 왜 막혔는지를 이름으로 말한다.
+🔴 **그 키가 없는 판매는 여전히 잇지 않는다.** 업무 키를 싣기 전에 만들어진 행과 사람이
+   심은 seed 행은 `source_order_id` 가 마스터 요청이 아니다(실측 23건). 그때는
+   *"같은 날짜 · 같은 품목 · 가장 최근 행"* 으로 이으면 그럴듯하고 틀린 계보가 서고,
+   틀렸다는 사실이 어디에도 남지 않는다. `BLOCKED` 로 두고 왜 막혔는지를 말한다.
 
-★ 부분 상태가 정상이다. 확정 이후는 `LIVE`, 확정 이전은 `BLOCKED` — 한 화면에서 두
-  사실이 같이 보이는 것이 *"전부 안 된다"* 보다 정확하다.
+★ 부분 상태가 정상이다. 한 화면에서 이어진 구간과 못 이은 구간이 같이 보이는 것이
+  *"전부 된다"* 나 *"전부 안 된다"* 보다 정확하다.
 """
 
 from datetime import date, datetime
@@ -60,8 +65,9 @@ class ConsoleSaleLifecycle(BaseModel):
     as_of: date
     #: 확정 이후 구간이 저장된 연결키로 이어졌는가.
     confirmed_lineage: Literal["LIVE", "PARTIAL"]
-    #: 후보 → 판매 구간. 저장된 연결키가 없어 늘 `BLOCKED` 다.
-    agent_lineage: Literal["BLOCKED"] = "BLOCKED"
+    #: 후보 → 판매 구간. 업무 키(`source_order_id`)가 마스터 요청을 가리키면 `LIVE`,
+    #: 그 키가 없는 옛 행이면 `BLOCKED` 다 — 추정으로 메우지 않는다.
+    agent_lineage: Literal["LIVE", "BLOCKED"]
     stages: list[LifecycleStage]
 
 
@@ -141,10 +147,126 @@ def _collections(*, sim_run_id: str, receivable_ids: list[str]) -> list[dict[str
 
 
 _UNLINKED = (
-    "이 단계와 확정 판매를 잇는 키가 저장되어 있지 않습니다. "
-    "`sales` 에 request_id · decision_id · scenario_id 칸이 없어, 어느 후보가 이 판매가 "
-    "됐는지는 기록에 없습니다. 날짜나 품목으로 추정해 잇지 않습니다."
+    "이 판매에는 마스터 업무 키가 실려 있지 않습니다. "
+    "`sales.source_order_id` 가 마스터 요청(REQ-…)이 아니라서 어느 판단이 이 판매를 "
+    "낳았는지 기록에 없습니다. 날짜나 품목으로 추정해 잇지 않습니다."
 )
+
+#: 마스터 업무 키의 모양. 이 접두사가 아니면 마스터 요청이 아니다.
+_REQUEST_PREFIX = "REQ-"
+
+
+def _master_run(*, sim_run_id: str, request_id: str) -> dict[str, object] | None:
+    """이 판매를 낳은 판매 사이클 실행. **업무 키로만 찾는다.**"""
+    schema = get_db_schema()
+    statement = sql.SQL(
+        """
+        SELECT run_id, end_code, runtime_status, created_at
+        FROM {}.master_agent_runs
+        WHERE sim_run_id = %s AND request_id = %s AND cycle = 'SALES'
+        ORDER BY run_seq DESC, created_at DESC
+        LIMIT 1
+        """
+    ).format(sql.Identifier(schema))
+    found = _rows(statement, [sim_run_id, request_id])
+    return found[0] if found else None
+
+
+def _master_decision(*, request_id: str) -> dict[str, object] | None:
+    """그 판단의 승인 기록.
+
+    ⚠️ `master_decisions` 에는 실행 축 칸이 없다. 업무 키가 실행 이름을 품고 있어
+      (`REQ-DAILY-SALES-{실행}-…`) 키 자체가 축을 나르지만, 여기서 **이름을 쪼개
+      뜻을 읽지 않는다** — 위 `_master_run` 이 이미 실행 축으로 걸렀고, 이 조회는
+      그 판단에 붙은 결정을 가져오는 것뿐이다.
+    """
+    schema = get_db_schema()
+    statement = sql.SQL(
+        """
+        SELECT decision_id, decision, scenario_label, end_code_at_decision,
+               decided_by, created_at
+        FROM {}.master_decisions
+        WHERE request_id = %s
+        ORDER BY decision_seq DESC
+        LIMIT 1
+        """
+    ).format(sql.Identifier(schema))
+    found = _rows(statement, [request_id])
+    return found[0] if found else None
+
+
+def _agent_stages(*, sim_run_id: str, request_id: str) -> list[LifecycleStage]:
+    """업무 키로 이어진 확정 앞 구간.
+
+    🔴 **부서 판정을 여기서 다시 세지 않는다.** 마스터가 그 실행에 적어 둔 `end_code` 와
+       판단 기록을 옮길 뿐이다 — 재무·물류 판정의 주인은 각 부서이고, 그 실행의 계획에
+       이미 남아 있다.
+    """
+    run = _master_run(sim_run_id=sim_run_id, request_id=request_id)
+    if run is None:
+        #  업무 키는 있는데 그 실행이 이 축에 없다 — 지어내지 않고 없다고 말한다.
+        return [
+            LifecycleStage(
+                stage=name,
+                status="MISSING",
+                reference=request_id,
+                detail="업무 키는 실려 있으나 이 실행에서 해당 판매 사이클 기록을 찾지 못했습니다.",
+            )
+            for name in (
+                "candidate",
+                "finance_validation",
+                "logistics_validation",
+                "master_decision",
+            )
+        ]
+    run_ref = str(run["run_id"])
+    evidence = [f"master_agent_runs/{run_ref}", f"request/{request_id}"]
+    end_code = str(run["end_code"])
+    stages = [
+        LifecycleStage(
+            stage="candidate",
+            status="DONE",
+            reference=request_id,
+            occurred_at=run["created_at"],
+            detail=f"판매 사이클 종료 코드 {end_code}",
+            evidence=evidence,
+        ),
+        #  ★ 부서 판정은 그 실행의 계획에 남아 있다. 여기서는 **어디를 보면 되는지**만
+        #    가리킨다 — 판정을 옮겨 적으면 두 곳이 서로 다른 말을 하게 된다.
+        LifecycleStage(
+            stage="finance_validation",
+            status="DONE",
+            reference=run_ref,
+            occurred_at=run["created_at"],
+            detail="재무 판정은 이 실행의 재무 회신이 정본입니다 (실행 이력 탭).",
+            evidence=evidence,
+        ),
+        LifecycleStage(
+            stage="logistics_validation",
+            status="DONE",
+            reference=run_ref,
+            occurred_at=run["created_at"],
+            detail="물류 판정은 이 실행의 물류 회신이 정본입니다 (실행 이력 탭).",
+            evidence=evidence,
+        ),
+    ]
+    decision = _master_decision(request_id=request_id)
+    stages.append(
+        LifecycleStage(
+            stage="master_decision",
+            status="DONE" if decision else "MISSING",
+            reference=None if decision is None else str(decision["decision_id"]),
+            occurred_at=None if decision is None else decision["created_at"],
+            detail=(
+                f"{decision['decision']} · {decision['scenario_label']}"
+                f" · {decision['decided_by']}"
+                if decision
+                else "이 업무 키에 붙은 승인 기록이 없습니다."
+            ),
+            evidence=evidence,
+        )
+    )
+    return stages
 
 
 def get_console_sale_lifecycle(
@@ -155,10 +277,21 @@ def get_console_sale_lifecycle(
     if sale is None:
         return None
 
-    stages: list[LifecycleStage] = [
-        LifecycleStage(stage=name, status="BLOCKED", detail=_UNLINKED)
-        for name in ("candidate", "finance_validation", "logistics_validation", "master_decision")
-    ]
+    business_key = sale["source_order_id"]
+    linked = isinstance(business_key, str) and business_key.startswith(_REQUEST_PREFIX)
+    stages: list[LifecycleStage] = (
+        _agent_stages(sim_run_id=sim_run_id, request_id=str(business_key))
+        if linked
+        else [
+            LifecycleStage(stage=name, status="BLOCKED", detail=_UNLINKED)
+            for name in (
+                "candidate",
+                "finance_validation",
+                "logistics_validation",
+                "master_decision",
+            )
+        ]
+    )
 
     stages.append(
         LifecycleStage(
@@ -266,10 +399,11 @@ def get_console_sale_lifecycle(
             )
         )
 
+    #  확정 이후 구간만 본다 — 확정 앞 구간의 상태는 `agent_lineage` 가 따로 말한다.
     confirmed = [
         stage
         for stage in stages
-        if stage.stage != "collection" and stage.status != "BLOCKED"
+        if stage.stage in {"sale", "reservation", "outbound", "receivable"}
     ]
     return ConsoleSaleLifecycle(
         sale_id=str(sale["sale_id"]),
@@ -278,5 +412,6 @@ def get_console_sale_lifecycle(
         confirmed_lineage=(
             "LIVE" if all(stage.status in {"DONE", "OPEN"} for stage in confirmed) else "PARTIAL"
         ),
+        agent_lineage="LIVE" if linked else "BLOCKED",
         stages=stages,
     )

@@ -433,8 +433,13 @@ export interface SaleLifecycle extends RunScope {
   sale_id: string;
   /** 확정 이후 구간이 저장된 연결키로 이어졌는가. */
   confirmed_lineage: "LIVE" | "PARTIAL";
-  /** 후보 → 판매 구간. 저장된 연결키가 없어 늘 BLOCKED 다. */
-  agent_lineage: "BLOCKED";
+  /**
+   * 후보 → 판매 구간.
+   *
+   * 확정에 실린 마스터 업무 키(`source_order_id`)로 이어지면 LIVE, 그 키가 없는 옛
+   * 행이면 BLOCKED 다. 화면이 추정으로 메우지 않는다.
+   */
+  agent_lineage: "LIVE" | "BLOCKED";
   stages: LifecycleStage[];
 }
 
