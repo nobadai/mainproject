@@ -63,8 +63,9 @@ def is_gate_excluded(row: Mapping[str, Any]) -> bool:
           보수(D=2) 창 21개  →  전부 100% gated (AUC 는 offset 1~5 가 lead_time)
           gated 를 빼면      →  max_price 가 21조합에서 None
 
-      ``max_price`` 는 컷 기준이라(규칙 5) ``None`` 이면 **보수안이 통째로 판정
+      ``max_price`` 는 재무 상한이라(규칙 5) ``None`` 이면 **보수안이 통째로 판정
       불가**가 된다. 사유를 안 보고 표시만 봤을 때 생기는 일이다.
+      🔴 컷 기준이 아니다 — 컷은 ``cut_unit_price`` 가 한다 (`#394` 로 갈라졌다).
 
     ★ **값이 없으면 제외하지 않는다** (규칙 3). mock 예측에는 이 칸이 아예 없고,
       *"게이트 정보가 없다"* 와 *"게이트가 quality 다"* 는 다른 사실이다.

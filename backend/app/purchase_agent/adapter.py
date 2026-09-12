@@ -356,7 +356,7 @@ def _unusable_forecast_names(forecast: Mapping[str, Any], daily: list[Any]) -> l
 
         use_recommended is False    ML: "FALSE 면 쓰지 마세요" — 조합 전체가 무효
         판정일 행이 quality 게이트   ci_width 를 그 행 하나로 재므로 판정이 성립 안 한다
-        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 컷 기준)
+        가장 짧은 커버 구간이 전부   max_price 를 정할 행이 남지 않는다 (규칙 5 재무 상한)
           quality 게이트
 
     ★ **세 번째가 가장 짧은 창인 이유**: 큰 창은 짧은 창을 포함하므로, 짧은 창에 쓸
@@ -1155,7 +1155,7 @@ def purchase_port(
           mock      배추 0안 · 무 0안   self_check 가 전부 컷
           실 경락가  배추 2안 · 무 2안   business=ok
 
-    ``max_price`` 는 실 ML 예측 q90 에서 오고 ``grade_unit_price`` 는 시세에서 온다.
+    ``max_price`` 는 실 ML 예측 밴드 상단에서 오고 ``grade_unit_price`` 는 시세에서 온다.
     한쪽만 mock 이면 **출처가 다른 두 값을 비교**하게 되고, 그 판정은 뜻이 없다.
 
     ★ 인자 기본값을 mock 으로 남겨 둔 이유는 테스트다 — 결정론 스위트가 DB 없이 돈다.
