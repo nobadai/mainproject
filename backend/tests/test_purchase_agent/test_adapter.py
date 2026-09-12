@@ -9,6 +9,7 @@
 
 from dataclasses import replace
 from datetime import date, timedelta
+from math import ceil, floor
 
 import pytest
 from _injection import declare_thresholds, force_situation
@@ -23,6 +24,7 @@ from app.purchase_agent import ports
 from app.purchase_agent.adapter import (
     SUPPORTED_MODES,
     UnsupportedMode,
+    _volume_gate_sentence,
     absorb_inventory,
     build_reasoning,
     purchase_port,
@@ -30,6 +32,7 @@ from app.purchase_agent.adapter import (
 )
 from app.purchase_agent.config import ci_width_threshold, load_constraints
 from app.purchase_agent.graph import run_purchase_agent
+from app.purchase_agent.nodes.classify_situation import SplitEntryCap, volume_gate_holds
 from app.purchase_agent.nodes.package_scenarios import split_quantities
 
 # "2025-12-31" 은 통합 시연 앵커 (#73) — 재무·물류 DB 데이터가 이 날에만 있다.
@@ -1772,3 +1775,33 @@ def test_답하는_목록과_문_앞_검사가_같은_선언을_본다(monkeypat
     request = _request_with_mode("AS_YET_UNOPENED_MODE", monkeypatch)
     reply, _ = purchase_port(request)
     assert reply.runtime_status == "RUNTIME_NOT_READY"  # 입력이 없어서다. 막힌 게 아니다
+
+
+def test_the_volume_gate_sentence_never_prints_a_false_inequality() -> None:
+    """🔴 **소수 여유에서 화면이 거짓인 줄을 내보내면 안 된다** (2026-09-12).
+
+    물류가 보내는 도착일 여유는 소수다 — 원장 실측에서 ``cap_by_date`` 값 79,291개 중
+    **16,861개가 소수**이고 대표값이 ``7,636.72`` 다. 근거 문장이 그 값을 ``:,.0f``
+    (**반올림**)로 적으면 게이트가 성립한 날::
+
+        추정 총량 7,637kg > 도착 여유 7,637kg → 총량 진입 조건 충족
+
+    이라는, 부등호가 눈으로 거짓인 줄이 나간다. ``_relation`` docstring 이 구간폭에서
+    막아 둔 것과 **같은 병**이다.
+
+    ★ **내림이 정답인 이유**: ⑦ ``check_arrival_capacity`` 가 ``int(cap)`` 으로 같은
+      값을 읽고, ``draft_plan.warehouse_cap_kg`` 도 같은 이유로 내린다. 적는 수와
+      쓰는 수가 같아야 한다.
+    """
+    cap_kg = 7_636.72  # 실측값
+    for estimated in (7_635.2, 7_636.1, 7_636.5, 7_636.72, 7_637.0, 9_000.0):
+        cap = SplitEntryCap(cap_kg=cap_kg, arrival_date="2026-08-23")
+        holds = volume_gate_holds(estimated, cap)
+        sentence = _volume_gate_sentence(estimated, cap)
+        left, right = ceil(estimated), floor(cap_kg)
+        assert f"{left:,}kg" in sentence, sentence
+        assert f"{right:,}kg" in sentence, sentence
+        # 화면에 적힌 두 수만으로도 부등호가 성립해야 한다
+        assert (left > right) is holds, sentence
+        assert ("충족" in sentence) is holds, sentence
+

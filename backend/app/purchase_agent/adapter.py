@@ -13,7 +13,7 @@
 from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
-from math import ceil, isfinite
+from math import ceil, floor, isfinite
 from typing import Any
 
 from app.contracts.core import Evidence
@@ -759,9 +759,17 @@ def _volume_gate_sentence(estimated_total_kg: float, cap: SplitEntryCap) -> str:
     #   ① 이 ``volume_gate_holds`` 로 옮겨 가면 근거 문장만 옛 방향에 남는다 — 이 함수의
     #   docstring 이 경고한 바로 그 병이다.
     holds = volume_gate_holds(estimated_total_kg, cap)
+    # 🔴 **여유는 내림해 적는다** (2026-09-12). 물류가 보내는 여유는 소수다 — 원장
+    #   실측에서 ``cap_by_date`` 값 79,291개 중 16,861개가 소수이고 대표값이 7,636.72 다.
+    #   ``:,.0f`` 는 **반올림**이라 7,637 로 적히고, 게이트가 성립한 날 화면이
+    #   *"7,637kg > 여유 7,637kg → 충족"* 이라는 **눈으로 거짓인 줄**을 내보낸다.
+    #
+    #   ★ 내림이 임의 선택이 아니다 — ⑦ ``check_arrival_capacity`` 가 ``int(cap)`` 으로
+    #     같은 값을 읽고, ``draft_plan.warehouse_cap_kg`` 도 *"이 값은 상한이라 올리면
+    #     못 넣는 양을 계획하게 된다"* 며 내린다. **쓰는 쪽과 적는 쪽이 같은 수를 본다.**
     return (
         f"{total} {'>' if holds else '≤'} {cap.arrival_date} 도착 여유 "
-        f"{cap.cap_kg:,.0f}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
+        f"{floor(cap.cap_kg):,}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
     )
 
 
