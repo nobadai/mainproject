@@ -1761,15 +1761,42 @@ def _no_quantity_reason(draft: dict) -> dict[str, Any]:
 
     ⚠️ ``not_needed`` 같은 **내부 이름을 문장에 흘리지 않는다.** 이 문장은 H1 화면과
       Critic 이 그대로 읽으므로 그 자체로 말이 되어야 한다.
+
+    🔴 **종전 문장은 같은 수를 두 번 적었다** (2026-09-12 정정). ``deducted_holdings_kg`` 를
+      「보유 재고」로 적고 바로 옆에 ``demand_qty_kg`` 를 적었는데, **둘은 이 문장이 나갈 때
+      반드시 같다** — 조건이 ``raw_qty ≤ 0`` 이고 차감이 ``일평균 × D`` 로 클램프되므로
+      ``round(차감) == demand_qty`` 가 성립한다. 실측: 걷기 8판 · 이 문장 **1,384건 중
+      1,384건**에서 두 수가 동일(차이 0건)이었다::
+
+          보유 재고 44kg이 커버 2일 수요 44kg을 이미 덮어 …      ← 같은 날 110/110 · 265/265
+
+      ★ 우연이 아니라 **구조**다. 읽는 사람에게는 *"44가 44를 덮는다"* 라는 동어반복이고,
+        창고에 44kg 이 있었다는 **실측처럼 보이는데 측정이 아니다.**
+
+    🟢 **그래서 「무엇이 덮었나」를 적는다.** 차감을 실제로 누른 값은 물류가 집계한
+      가용재고이고, 그 수는 수요와 **다르다** (``가용재고 ≥ 수요`` 는 보장되지만 같을 이유가
+      없다). 실측: V6 의 이 문장 263개 중 **80개(30%)가 「가용재고 < 수요」** 였다 — 종전
+      문면이 사실과 어긋나 있던 자리다.
+
+    🔴 **낱말은 봉투가 쓰는 것을 그대로 쓴다** — 물류 근거 문장이
+      *"{품목} 가용재고 합계 — 비-ACTIVE·신선도 만료 Lot 제외, **확정 출고 예약분 차감**"*
+      이다. 「자유재고」는 물류 docstring 2건에만 있고 밖으로 안 나가는 말이라 쓰지 않는다.
+      수식어를 붙이는 이유는 **이름이 같아서 난 사고**라서다 — 수식어 없는 「가용재고」는
+      우리 ``lots[].available_qty_kg`` 와 다시 구분되지 않는다.
+
+    ⚠️ **가용재고를 못 받은 날은 수 하나로 떨어진다.** 「못 봤다」와 「덮었다」를 같은 문면으로
+      내지 않는다 — 못 받은 사실은 ③이 ``risks`` 로 따로 고지한다.
     """
     if draft.get("raw_qty_kg", 0) <= 0 and draft.get("deducted_holdings_kg", 0) > 0:
+        free_stock = draft.get("free_stock_kg")
+        covered = f"커버 {draft['coverage_days']}일 수요 {draft['demand_qty_kg']:,}kg을"
+        if free_stock is None:
+            held = "보유가"
+        else:
+            held = f"확정 출고 예약분을 뺀 가용재고 {free_stock:,}kg이"
         return {
             "label": draft["label"],
-            "reason": (
-                f"보유 재고 {draft['deducted_holdings_kg']:,}kg이 "
-                f"커버 {draft['coverage_days']}일 수요 {draft['demand_qty_kg']:,}kg을 "
-                "이미 덮어 이날은 매입이 필요 없다"
-            ),
+            "reason": f"{held} {covered} 이미 덮어 이날은 매입이 필요 없다",
             "kind": "not_needed",
         }
     binding = ", ".join(clip["constraint"] for clip in draft["clipped_by"]) or "미상"

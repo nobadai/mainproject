@@ -4,7 +4,8 @@
 트레이드오프 판단이며 Epic 3에서 붙는다 — 그때도 아래 클립 결과를 **입력**으로 받는다.
 """
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, NamedTuple
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import (
@@ -202,12 +203,95 @@ def _freshness_cap_kg(
 ADJUSTMENT_CAP_NAME = "조정안"
 
 
-def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) -> float:
+#: 가용재고를 못 봤을 때의 고지 문면. ⑥이 ``risks`` 에 싣고 **H1 화면과 Critic 이 그대로
+#: 읽는다** — 내부 필드명을 흘리지 않는다. 두 문장이 다른 이유는 **사실이 다르기** 때문이다:
+#: 앞은 «안 왔다», 뒤는 «왔는데 로트와 어긋난다». 한 문장으로 합치면 고칠 곳이 갈린다.
+_FREE_STOCK_MISSING = (
+    "이미 팔린 몫을 뺀 재고 확인 보류 — 물류가 품목별 가용재고 집계를 보내지 않아 "
+    "보유 차감이 확정 출고 예약분을 반영하지 못한다"
+)
+_FREE_STOCK_CONTRADICTS_LOTS = (
+    "이미 팔린 몫을 뺀 재고 확인 보류 — 이 품목 로트는 있는데 물류 가용재고 집계에는 "
+    "품목이 없어 두 값이 어긋난다"
+)
+
+
+class FreeStock(NamedTuple):
+    """물류가 집계한 **확정 출고 예약분을 뺀 가용재고**. 값과 "못 봤다"를 나눠 담는다.
+
+    ``classify_situation.SplitEntryCap`` 과 같은 모양이고 이유도 같다 — 한 값으로 뭉치면
+    호출부가 *"0 인가 못 본 것인가"* 를 가르지 못하고, 규칙 3 이 문면에서만 지켜진다.
+    """
+
+    kg: float | None = None
+    """``inventory_by_item[이 품목].available_qty_kg``. ``None`` 이면 클램프를 걸지 않는다."""
+
+    unknown_reason: str | None = None
+    """값을 못 본 사유. 채워지면 ③이 risks 에 싣는다 — 컷 사유가 아니다."""
+
+
+def free_stock_for(inventory: Mapping[str, Any] | None, item: str) -> FreeStock:
+    """봉투의 ``inventory_by_item`` 에서 **이 품목** 가용재고를 고른다 (규칙 3 · 네 갈래).
+
+    ```text
+    칸 자체가 없다                   → 모름   클램프 안 건다 + 고지
+    이 품목이 실려 있다 (0 도 포함)    → 그 값   0 은 **확정된 0** 이다
+    이 품목이 없고 로트도 없다         → 0.0    둘이 일치한다 — 재고가 없는 날이다
+    🔴 이 품목이 없는데 로트는 있다     → 모름   **모순이다** · 클램프 안 건다 + 고지
+    ```
+
+    🔴 **``lots`` 로 대신 세지 않는다.** 그 합이 바로 이 함수가 막으려는 값이다 —
+      ``usable_holdings_kg`` docstring 의 「이름이 같아서 못 봤다」 절 참조.
+
+    ⚠️ **품목 필터가 여기 있다.** ``absorb_inventory`` 는 ``lots`` 만 거르고
+      ``inventory_by_item`` 은 **전 품목을 그대로 나른다** — 안 거르면 배추 가용재고로
+      무 차감을 클램프한다.
+
+    🟡 **넷째 갈래는 아직 0건이다** (V6 봉투 171셀 실측 2026-09-12 · 이 품목 항목이 없는
+      6셀은 로트도 전부 0건). 그래도 두는 이유는 0 과 모름을 뭉개지 않기 위해서다 —
+      로트가 있는데 집계에 없으면 **둘 중 하나가 틀린 것**이고, 그때 조용히 0 으로 읽으면
+      차감이 0 이 되어 원수요를 통째로 산다.
+    """
+    if not isinstance(inventory, Mapping):
+        return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
+    rows = inventory.get("inventory_by_item")
+    if not isinstance(rows, list):
+        return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("item") != item:
+            continue
+        value = row.get("available_qty_kg")
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return FreeStock(unknown_reason=_FREE_STOCK_MISSING)
+        return FreeStock(kg=float(value))
+    # 🔴 **로트도 품목으로 거른다.** 봉투의 ``lots`` 는 전 품목이 섞여 있고,
+    #   ``absorb_inventory`` 가 거른 뒤에만 이 품목 것이 된다. 안 거르면 *"배추 집계가
+    #   없는데 무 로트가 있다"* 를 모순으로 읽어 **고지가 허위로 선다** — 실제로 그랬다
+    #   (V6 봉투 재현에서 모순 3건이 났는데 셋 다 다른 품목 로트였다).
+    #
+    #   ★ ``item`` 키가 없는 로트는 **이 품목으로 센다** — ``absorb_inventory`` 가 쓰는
+    #     규칙(``lot.get("item", item) == item``) 그대로다. 품목 축을 못 밝힌 것과
+    #     "다른 품목"은 다르고, 거기서 갈리면 두 곳이 같은 로트를 다르게 센다.
+    lots = inventory.get("lots")
+    if isinstance(lots, list) and any(
+        isinstance(lot, Mapping) and lot.get("item", item) == item and lot.get("available_qty_kg")
+        for lot in lots
+    ):
+        return FreeStock(unknown_reason=_FREE_STOCK_CONTRADICTS_LOTS)
+    return FreeStock(kg=0.0)
+
+
+def usable_holdings_kg(
+    lots: list[dict] | None,
+    daily_demand: float,
+    days: int,
+    free_stock_kg: float | None = None,
+) -> float:
     """커버 창 ``days`` 안에서 **실제로 쓸 수 있는 보유**. 상세설계 §4-③.
 
     ```text
     usable = Σ_lot  min( available_qty_kg, 일평균 × min(remaining_freshness_days, days) )
-    차감보유 = min(usable, 일평균 × days)
+    차감보유 = min(usable, 가용재고, 일평균 × days)
     ```
 
     🔴 **이 값은 ``caps`` 가 아니다.** 창고·현금·신선도·조정안은 밖에서 씌운 천장이고,
@@ -220,9 +304,50 @@ def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) 
       합계와 이 식의 차감액이 142안에서 다르다 — 판정은 아직 한 건도 안 갈렸지만,
       데이터가 안 가르면 **규칙의 뜻으로** 정한다 (`#574` 와 같은 자리).
 
-    🟢 **이미 팔린 몫을 두 번 세지 않는다** — 물류가 만드는 ``available_qty_kg`` 는 기존
-      할당을 **뺀** 값이다 (``logistics/fefo_allocation``). 판매도 같은 칸에 서 있어
-      (`#567`), 물류가 그 뜻을 바꾸면 두 파트가 같이 틀린다 — 우리 detail 이 아니다.
+    🔴 ~~**이미 팔린 몫을 두 번 세지 않는다** — 물류가 만드는 ``available_qty_kg`` 는 기존
+      할당을 **뺀** 값이다. 판매도 같은 칸에 서 있어 (`#567`)~~ — **거짓이었다**
+      (2026-09-12). 우리는 **이미 팔린 재고를 우리 것으로 세고 있었다.**
+
+      ```text
+      lots[].available_qty_kg             물류 repository 가 ``remaining_qty_kg`` 를 그대로
+                                          싣는다 (``_inventory_lot_from_row``) — **물리 잔량**
+      inventory_by_item[].available_qty_kg  비-ACTIVE · 신선도 만료 · **확정 출고 예약분**을
+                                          뺀 값. 판매가 서 있는 칸은 **이쪽**이다 (`#567`)
+      ```
+
+      ★★ **이름이 같아서 못 봤다.** 두 칸 이름이 **둘 다 ``available_qty_kg``** 인데 정의가
+        다르다. *"판매도 같은 칸에 서 있다"* 가 그 착각의 증거다 — 같은 칸이 아니라
+        **이름만 같은 다른 칸**이었다.
+
+      ⚠️ **그래서 한동안 아무도 안 틀렸다.** 두 값이 실제로 같았기 때문이다. 마스터 `#612`
+        (2026-09-12 10:16 · 판매 확정 즉시 재고 예약)가 실제 예약을 만들면서 갈라졌다::
+
+            V4  격차 셀 **0 / 171**            ← `#612` 전
+            V5  61 / 171 · 31,933kg
+            V6  62 / 171 · 28,335kg · 「필요 없다」 보류 36건 중 **15건**이 팔린 재고 판단
+
+        최악 — `2026-03-11 무`: 보유를 **551kg** 으로 읽고 *"매입이 필요 없다"* 로 안을
+        0개 냈는데 물류 가용재고는 **0kg** 이었다.
+
+      🟢 **물류가 그 재합산을 금지해 뒀다** — ``logistics/adapter`` 가 ``inventory_by_item``
+        을 싣는 자리에 *"Lot 목록과 **별개로** 싣는다 (#111 A1). 매입/마스터가 Lot 을
+        재합산하면 가용재고 정의(… 확정 출고 예약분 차감)를 남의 도메인에서 재구현하게
+        된다"* 고 적혀 있다. 우리가 한 것이 정확히 그 재합산이다.
+
+    🟢 **그래서 ``free_stock_kg`` 로 한 번 더 클램프한다.** 창 계산은 그대로 두고 상한만
+      씌운다 — ``lots`` 는 **로트별 신선도**를 들고 있고 ``inventory_by_item`` 은 품목 집계라
+      창을 잴 수 없다. 둘 중 하나를 고르는 것이 아니라 **둘을 겹쳐 쓴다**.
+
+      ```text
+      집계만 쓰면   V6 로트 1,134개 중 **750개가 12일보다 짧은데** 전부 창을 덮는다고 센다
+                    → 예약이 **없는** 109셀 중 19셀을 깎는다 (−16,878kg · 실측)
+      겹쳐 쓰면     예약 없는 109셀을 **0개** 건드린다 (109/109 현행과 동일)
+      ```
+
+    🔴 **``free_stock_kg`` 가 ``None`` 이면 클램프를 걸지 않는다** (규칙 3). ``None`` 은
+      «물류가 그 칸을 안 보냈다» 이지 «가용이 0» 이 아니다. 0 으로 메우면 차감이 0 이 되어
+      **원수요를 통째로 산다** — 모르는 것이 판정을 만드는 자리다. 안 거는 쪽은 *아는 것만
+      쓰는 것*이라 값을 지어내지 않는다. 못 본 사실은 ③이 ``_deferred_checks`` 로 고지한다.
 
     ⚠️ **두 칸 중 하나라도 ``None`` 인 로트는 건너뛴다** (규칙 3). 0으로 채우면
       *"쓸 수 있는 게 없다"* 가 되어 안 깎이고, 큰 수로 채우면 없는 재고를 뺀다. 모르는
@@ -262,7 +387,11 @@ def usable_holdings_kg(lots: list[dict] | None, daily_demand: float, days: int) 
             continue
         covered_days = max(0, min(int(freshness), days))
         usable += min(float(available), daily_demand * covered_days)
-    return max(0.0, min(usable, daily_demand * days))
+    # 🔴 ``None`` 은 클램프에 **안 들어간다** — 위 docstring 의 규칙 3 절.
+    bounds = [usable, daily_demand * days]
+    if free_stock_kg is not None:
+        bounds.append(float(free_stock_kg))
+    return max(0.0, min(bounds))
 
 
 def adjustment_cap_kg(usable: list[dict], label: str, unit_price: int) -> int | None:
@@ -322,6 +451,10 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     #   조정안은 ``scenario_labels`` 로 «이 안» 을 겨냥한다 — 재무가 상한 2,000만에
     #   기본·공격만 넘겼으면 보수는 안 건드려야 한다.
     usable, _ = split_adjustments(state.get("adjustments"), constraints)
+    # 🔴 **차감을 예약 뺀 재고로 한 번 더 누른다** (2026-09-12). ``lots`` 합은 물리 잔량이라
+    #   이미 팔린 몫이 섞여 있다 — ``usable_holdings_kg`` docstring 의 「이름이 같아서 못
+    #   봤다」 절. 여기서 품목을 거른다 (``absorb_inventory`` 는 ``lots`` 만 거른다).
+    free_stock = free_stock_for(state["inventory"], state["item"])
 
     drafts = [
         _draft_one(
@@ -338,6 +471,10 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             # 🔴 **품목이 걸러진 로트다.** ``absorb_inventory`` 가 다른 품목을 이미 뺐다 —
             #   안 거르면 배추 보유로 무 수요를 깎는다.
             lots=state["inventory"].get("lots"),
+            # 🔴 ``caps`` 가 **아니다** — 차감 쪽이다 (§4-③-1). 여기 넣으면 ``clipped_by`` 에
+            #   실려 ⑥이 *"하드 제약으로 0까지 축소"* 를 낸다. 보유는 천장이 아니라
+            #   **필요가 줄어든 것**이고, 그 조항은 이 판에서 안 건드린다.
+            free_stock=free_stock,
         )
         for label in labels
     ]
@@ -418,6 +555,7 @@ def _draft_one(
     caps: dict,
     coverage: dict,
     lots: list[dict] | None = None,
+    free_stock: FreeStock | None = None,
 ) -> dict[str, Any]:
     """안 하나. 클립이 걸리면 어느 제약이 몇 kg으로 눌렀는지 남긴다.
 
@@ -442,8 +580,9 @@ def _draft_one(
         span = f"[{coverage['min']}, {coverage['max']}]"
         raise ValueError(f"coverage_days {days} for {label!r} is outside {span}")
 
+    free = free_stock or FreeStock()
     demand_qty = round(daily_demand * days)
-    deducted = usable_holdings_kg(lots, daily_demand, days)
+    deducted = usable_holdings_kg(lots, daily_demand, days, free.kg)
     raw_qty = max(0, demand_qty - round(deducted))
     binding = [(name, cap) for name, cap in caps.items() if cap is not None and cap < raw_qty]
     total_qty = min([raw_qty, *(cap for _, cap in binding)])
@@ -452,6 +591,9 @@ def _draft_one(
         "coverage_days": days,
         "demand_qty_kg": demand_qty,
         "deducted_holdings_kg": round(deducted),
+        # ⑥의 「필요 없다」 문장이 **이 수를 적는다**. ``None`` 이면 그 문장이 수 하나짜리로
+        # 떨어진다 — 「못 봤다」와 「덮었다」를 같은 문면으로 내지 않기 위해서다.
+        "free_stock_kg": None if free.kg is None else round(free.kg),
         "raw_qty_kg": raw_qty,
         "total_qty_kg": total_qty,
         "clipped_by": [
@@ -481,6 +623,11 @@ def _deferred_checks(
       risks 로 나가는 길이 없다 — 돌려주는 것이 ``situation`` 과 ``allowed_axes`` 둘뿐이다.
       같은 함수(``split_entry_cap``)를 여기서 한 번 더 불러 **못 본 사실만** 싣는다.
       값을 다시 만드는 것이 아니라 같은 답을 두 번 묻는 것이라 둘이 갈릴 수 없다.
+
+    🔴 **가용재고도 같은 규율이다** (2026-09-12). 못 받은 날은 차감이 ``lots`` 합으로
+      돌아가 **이미 팔린 몫을 우리 것으로 센다** — 안 막고 고지한다. 0 으로 메우면 차감이
+      0 이 되어 원수요를 통째로 사므로, 모르는 것이 판정을 만드는 자리가 된다 (규칙 3).
+      ``free_stock_for`` 를 여기서 한 번 더 부른다 — ③ 본체와 **같은 답**이라 갈릴 수 없다.
     """
     deferred = []
     # 분할 진입 게이트를 판정하지 못한 날 (`#308`). N4 미결은 아래 가지가 이미 말하므로
@@ -488,6 +635,9 @@ def _deferred_checks(
     arrival_cap = split_entry_cap(state, constraints)
     if arrival_cap.arrival_date is not None and arrival_cap.unknown_reason is not None:
         deferred.append(arrival_cap.unknown_reason)
+    free_stock = free_stock_for(state.get("inventory"), item)
+    if free_stock.unknown_reason is not None:
+        deferred.append(free_stock.unknown_reason)
     if pending_value(state, constraints, "inbound_lead_days") is None:
         deferred.append(
             "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정이라 "
