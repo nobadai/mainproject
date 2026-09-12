@@ -476,15 +476,20 @@ def test_요약_모듈이_칸_이름을_주인에게서_들여온다() -> None:
 
 
 def test_요약_모듈이_대출_칸을_아예_안_들여온다() -> None:
-    """🔴 **안 갈린다고 한 축으로 접지 않는다** — 들여올 이유가 없으면 안 들여온다."""
-    들여온것 = {
-        alias.asname or alias.name
+    """🔴 **안 갈린다고 한 축으로 접지 않는다** — 들여올 이유가 없으면 안 들여온다.
+
+    ⚠️ **별명도 같이 본다.** `LOAN_CASH_BALANCE as BASE_CASH_BALANCE` 한 줄이면
+      항등식 전체가 조용히 대출 곡선으로 갈아탄다 — 이름만 보면 못 잡는다.
+    """
+    원본이름 = {
+        alias.name
         for node in ast.walk(ast.parse(_요약파일.read_text(encoding="utf-8")))
         if isinstance(node, ast.ImportFrom) and node.module == "app.master.ledger_repository"
         for alias in node.names
     }
 
-    assert "LOAN_CASH_BALANCE" not in 들여온것, (
+    assert 원본이름, "스캐너가 들여온 이름을 하나도 못 찾았다 — 아래 단언은 공짜 초록이다"
+    assert "LOAN_CASH_BALANCE" not in 원본이름, (
         "요약이 대출 잔액 칸을 들여왔다 — 이 항등식은 무차입 축 하나다"
     )
 
