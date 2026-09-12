@@ -41,7 +41,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.contracts.sales_logistics import SalesOutboundReservationRequest
+from app.logistics.sales_outbound import reserve_confirmed_sale_available
 from app.master.envelope import Capability
+from app.sales.logistics_request import outbound_reservation_for_sale
 from app.sales.persistence import (
     SalesPersistenceConflict,
     confirm_sale,
@@ -413,6 +416,45 @@ class SaleConfirmationOut(BaseModel):
     #: 아직 안 나갔다"* 라는 상태가 사라진다 — 그 뒤는 기존 orchestration 이다.
     shipped: bool = False
 
+    # ── 확정분 예약 (2026-09-12) ────────────────────────────────────────
+    #
+    # 🔴 **확정만 서고 예약이 없으면 같은 재고를 두 번 판다** (`SIM-CHAIN-V4` 실측).
+    #
+    #   ```text
+    #   확정 (D일)   sales 행이 CONFIRMED 로 선다 · 예약이 없었다
+    #   출고 (D+1)   ship_due_sales 가 그때서야 reserve 를 불렀다
+    #   그 사이      available_qty_kg = remaining_qty_kg − held_qty_kg 인데 held 가
+    #                안 올라 **같은 재고가 다음 날 또 팔렸다**
+    #   ```
+    #
+    #   물류가 이 위험을 이미 적어 뒀다 (`app/logistics/outbound.py` 의
+    #   `item_free_stock_qty`): *"아직 Lot 을 안 고른 예약은 … Lot 가용량에서 안
+    #   빠진다 — 그것만 보면 같은 재고를 두 번 예약하게 된다."*
+
+    #: 물류가 이 확정분을 잡아 둔 예약 이름. 🔴 **여기서 짓지 않는다** —
+    #: `reservation_id_for_sale_item` 이 `sale_item_id` 에서 계산한 값 그대로다.
+    #: 출고가 같은 함수로 같은 값을 계산하므로 둘이 **같은 한 예약**을 가리킨다.
+    reservation_id: str | None = None
+
+    #: 판매가 정한 요구량. 🔴 **마스터도 물류도 안 고친다.**
+    required_qty_kg: Decimal | None = None
+
+    #: 물류가 **실제로 잡은 양.** 모자란 날 이 값만 작아진다.
+    reserved_qty_kg: Decimal | None = None
+
+    #: 확정분 예약 어휘. 🔴 **`status` 와 축이 다르다.**
+    #:
+    #: ```text
+    #: RESERVED  요구량만큼 잡았다
+    #: SHORT     모자랐다 — 🔴 그래도 확정은 CONFIRMED 다
+    #: None      예약이라는 사건 자체가 없었다 (확정이 안 섰다)
+    #: ```
+    #:
+    #: ★★ **모자랐다는 사실이 값으로 남아야 한다.** `BLOCKED` 로 되돌리면 이미 선
+    #:   확정을 거짓으로 만들고, 아무 데도 안 남기면 오늘 밤과 같은 일이 반복된다 —
+    #:   걷기 요약이 이 어휘를 센다 (`backtest_runner.format_summary` 의 「예약어휘」).
+    reservation_outcome: Literal["RESERVED", "SHORT"] | None = None
+
 
 def confirm_approved_sale(
     *,
@@ -425,6 +467,7 @@ def confirm_approved_sale(
     financial_summary: Mapping[str, Any] | None,
     sim_run_id: str,
     confirm: Callable[[Any, SalesConfirmationInput], Any] | None = None,
+    reserve: Callable[[Any, SalesOutboundReservationRequest], Any] | None = None,
     connect: Callable[[], Any] | None = None,
 ) -> SaleConfirmationOut:
     """승인된 판매안을 **판매 원장에 확정**한다.
@@ -439,7 +482,23 @@ def confirm_approved_sale(
     5. 업무 키 확인       source_order_id 가 될 값이다 — 없으면 지어내지 않는다
     6. 입력 계약 조립     커넥션 밖에서 (실패해도 DB 를 안 건드린다)
     7. confirm_sale       한 커넥션 · commit 한 번 · 실패하면 rollback
+    8. 확정분 예약        🔴 **7 이 성공한 뒤에만** — 같은 커넥션 · 같은 커밋
     ```
+
+    🔴 **확정이 서면 그 자리에서 재고를 잡는다** (2026-09-12). 전에는 예약을
+      `ship_due_sales` 가 출고 날(D+1)에야 걸었고, 그 사이 하루 동안 `held_qty_kg`
+      가 안 올라 **같은 재고가 다음 날 또 팔렸다** (`SIM-CHAIN-V4` 실측: 확정 34건
+      중 14건 15,474kg 미출고).
+
+      ★ **멱등이라 출고가 또 불러도 이중 예약이 안 난다.** 예약 이름을
+        `reservation_id_for_sale_item` 이 `sale_item_id` 에서 계산하고, 출고가 같은
+        함수로 같은 값을 계산한다 — 새로 지으면 번호가 갈려 **정확히 이중 예약**이
+        난다. 그래서 이름을 여기서 안 짓고 판매의 projection
+        (`outbound_reservation_for_sale`)이 만든 요청을 그대로 넘긴다.
+
+      🔴 **모자라도 `BLOCKED` 로 안 되돌린다.** 확정은 이미 일어난 사실이고 장부에
+        섰다 — 못 잡은 몫은 `reservation_outcome` 과 `reserved_qty_kg` 로 **보이게**
+        남는다 (물류의 `reserve_confirmed_sale_available` 과 같은 태도).
 
     🔴 **재검증이 막히면 부르지 않는다.** `CONDITIONAL` 도 통과가 아니다 — 사용자가
       승인한 대상은 **그때 화면에 있던 그 안**이고, 새 조건이 붙으면 다른 안이다
@@ -461,6 +520,10 @@ def confirm_approved_sale(
         터져야 한다. 부르는 쪽이 재검증에 넘긴 것과 **같은 한 값**이어야 한다:
         `decision_service.record_decision` 이 행에서 한 번 읽어 둘에 흘린다.
     :param confirm: 확정 함수. 안 주면 `app.sales.persistence.confirm_sale` 이다.
+    :param reserve: 확정분 예약 함수. 안 주면
+        `app.logistics.sales_outbound.reserve_confirmed_sale_available` 이다.
+        🔴 **`reserve_confirmed_sale` 이 아니다** — 저쪽은 전량 아니면 멈추고,
+        여기서 멈추면 이미 선 확정이 예외로 되돌아간다.
     :param connect: 커넥션 팩토리. 안 주면 `app.sales.db.get_connection` 이다.
     """
     if revalidation_outcome != "PASSED":
@@ -536,9 +599,22 @@ def confirm_approved_sale(
         return SaleConfirmationOut(status="BLOCKED", reason=f"판매 확정 입력을 만들 수 없다: {exc}")
 
     do_confirm = confirm_sale if confirm is None else confirm
+    do_reserve = reserve_confirmed_sale_available if reserve is None else reserve
     conn = _open(connect)
+    # 🔴 **어느 단계에서 터졌나.** 사유가 *"확정이 안 섰다"* 와 *"확정은 섰는데
+    #   재고를 못 잡았다"* 를 가르지 못하면 다음 사람이 또 손으로 재현해야 한다.
+    예약단계 = False
     try:
         result = do_confirm(conn, confirmation)
+        # 🔴 **여기부터가 8 이다.** `confirm_sale` 이 성공한 뒤에만 온다 —
+        #   순서를 바꾸면 안 선 확정의 재고를 잡는다.
+        예약단계 = True
+        # ★ **요청을 손으로 조립하지 않는다.** 예약 이름을 포함해 판매의 projection
+        #   이 만든다 — 여기서 문자열을 지으면 출고가 계산하는 이름과 갈린다.
+        예약요청 = outbound_reservation_for_sale(result, sim_run_id=sim_run_id, as_of=as_of)
+        예약 = do_reserve(conn, 예약요청)
+        요구량 = Decimal(str(예약.required_qty_kg))
+        확보량 = Decimal(str(예약.reserved_qty_kg))
         conn.commit()
     except SalesPersistenceConflict as exc:
         # ★ 판매가 *"이 사실로는 확정할 수 없다"* 고 말한 것이다. 문장은 판매가 쓴
@@ -547,15 +623,34 @@ def confirm_approved_sale(
         return SaleConfirmationOut(status="BLOCKED", reason=f"판매가 확정을 막았다: {exc}")
     except Exception as exc:  # noqa: BLE001 - 확정 실패가 적재된 결정을 지우면 안 된다.
         conn.rollback()
+        if 예약단계:
+            # 🔴 **확정까지 같이 물러난다.** 확정만 서고 예약이 없는 상태가 바로
+            #   같은 재고를 두 번 파는 자리라, 그 상태로 커밋하느니 안 선 것이 낫다.
+            return SaleConfirmationOut(
+                status="FAILED",
+                reason=f"확정분 예약 적재 실패 — 확정까지 롤백했다: {exc}",
+            )
         return SaleConfirmationOut(status="FAILED", reason=f"판매 확정 적재 실패: {exc}")
     finally:
         conn.close()
 
+    모자람 = 확보량 < 요구량
     return SaleConfirmationOut(
         status="CONFIRMED",
-        reason="판매를 확정했다 (CONFIRMED). 출고는 이 승인이 하지 않는다.",
+        reason=(
+            "판매를 확정했다 (CONFIRMED). 출고는 이 승인이 하지 않는다."
+            if not 모자람
+            else (
+                "판매를 확정했다 (CONFIRMED). 출고는 이 승인이 하지 않는다. "
+                f"확정분 예약이 모자란다 — 요구 {요구량}kg 중 {확보량}kg 만 잡혔다."
+            )
+        ),
         sale_id=getattr(result, "sale_id", None),
         sale_item_id=getattr(result, "sale_item_id", None),
+        reservation_id=예약요청.reservation_id,
+        required_qty_kg=요구량,
+        reserved_qty_kg=확보량,
+        reservation_outcome="SHORT" if 모자람 else "RESERVED",
     )
 
 

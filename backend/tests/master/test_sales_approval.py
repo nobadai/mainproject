@@ -176,8 +176,37 @@ class 확정_대역:
         class _결과:
             sale_id = "SALE-1"
             sale_item_id = "SI-SALE-1-1"
+            # 🔴 **확정 뒤 예약이 읽는 두 칸** (2026-09-12). `SaleWriteResult` 가
+            #    실제로 들고 오는 값이라, 대역에 없으면 예약 요청을 못 만든다.
+            item_id = "ITEM-BAECHU"
+            quantity_kg = Decimal(2000)
 
         return _결과()
+
+
+class 예약_대역:
+    """`reserve_confirmed_sale_available` 대역. **요구량만큼 잡았다고 답한다.**
+
+    🔴 **DB 를 안 친다.** 이 파일의 규율 그대로 — 불렸는가 · 무엇을 들고 불렸는가만
+      남긴다.
+    """
+
+    def __init__(self, 확보: Decimal | None = None) -> None:
+        self.호출: list[Any] = []
+        self.확보 = 확보
+
+    def __call__(self, conn: Any, request: Any) -> Any:
+        self.호출.append(request)
+        요구 = Decimal(str(request.quantity_kg))
+
+        class _예약:
+            applied = True
+            reservation_id = request.reservation_id
+            status = "ACTIVE"
+            required_qty_kg = 요구
+
+        _예약.reserved_qty_kg = 요구 if self.확보 is None else self.확보
+        return _예약()
 
 
 class 커넥션_대역:
@@ -201,9 +230,14 @@ def 확정(monkeypatch) -> 확정_대역:
     """`confirm_approved_sale` 이 실제로 여는 두 자리를 대역으로 바꾼다."""
     대역 = 확정_대역()
     conn = 커넥션_대역()
+    예약 = 예약_대역()
     monkeypatch.setattr(sales_approval, "confirm_sale", 대역)
+    # 🔴 **예약도 대역이다** (2026-09-12). 확정이 서면 그 자리에서 물류 예약이
+    #    불리므로, 안 갈아 끼우면 이 파일이 실 DB 를 친다.
+    monkeypatch.setattr(sales_approval, "reserve_confirmed_sale_available", 예약)
     monkeypatch.setattr(sales_approval, "_open", lambda connect: conn)
     대역.conn = conn  # type: ignore[attr-defined]
+    대역.예약 = 예약  # type: ignore[attr-defined]
     return 대역
 
 
@@ -480,6 +514,7 @@ def test_CONDITIONAL_도_통과가_아니다(monkeypatch):
         financial_summary=재무요약,
         sim_run_id=실행축,
         confirm=대역,
+        reserve=예약_대역(),
         connect=커넥션_대역,
     )
 
@@ -503,6 +538,7 @@ def _확정(scenario: Mapping[str, Any], 대역: 확정_대역 | None = None):
         financial_summary=재무요약,
         sim_run_id=실행축,
         confirm=대역 or 확정_대역(),
+        reserve=예약_대역(),
         connect=커넥션_대역,
     )
 

@@ -137,8 +137,31 @@ class 확정_대역:
         class _결과:
             sale_id = "SALE-1"
             sale_item_id = "SI-SALE-1-1"
+            #: 🔴 확정 뒤 예약이 읽는 두 칸 (2026-09-12).
+            item_id = "ITEM-BAECHU"
+            quantity_kg = Decimal(2000)
 
         return _결과()
+
+
+class 예약_대역:
+    """`reserve_confirmed_sale_available` 대역. **요구량만큼 잡았다고 답한다.**"""
+
+    def __init__(self) -> None:
+        self.호출: list[Any] = []
+
+    def __call__(self, conn: Any, request: Any) -> Any:
+        self.호출.append(request)
+        요구 = Decimal(str(request.quantity_kg))
+
+        class _예약:
+            applied = True
+            reservation_id = request.reservation_id
+            status = "ACTIVE"
+            required_qty_kg = 요구
+            reserved_qty_kg = 요구
+
+        return _예약()
 
 
 class 커넥션_대역:
@@ -232,6 +255,9 @@ def _판매_실행() -> dict[str, Any]:
 def 확정(monkeypatch) -> 확정_대역:
     대역 = 확정_대역()
     monkeypatch.setattr(sales_approval, "confirm_sale", 대역)
+    # 🔴 **예약도 대역이다** (2026-09-12). 확정이 서면 그 자리에서 물류 예약이
+    #    불리므로, 안 갈아 끼우면 이 파일이 실 DB 를 친다.
+    monkeypatch.setattr(sales_approval, "reserve_confirmed_sale_available", 예약_대역())
     monkeypatch.setattr(sales_approval, "_open", lambda connect: 커넥션_대역())
     return 대역
 

@@ -449,6 +449,16 @@ class BackfilledRun:
     #:   문장을 봐야 보인다.
     confirmation_reason: str | None = None
 
+    #: 확정분 예약 결과 (2026-09-12). `RESERVED` · `SHORT` · `None`.
+    #:
+    #: 🔴 **`confirmation_status` 의 다음 축이다.** 확정이 `CONFIRMED` 여도 재고를
+    #:   못 잡을 수 있고, 그때 그 판매는 **팔렸는데 잡은 것이 없는** 상태다 — 그
+    #:   사실이 `CONFIRMED` 에 가려 `SIM-CHAIN-V4` 에서 같은 재고가 두 번 팔렸다.
+    #:
+    #: ★ **확정이 안 선 행에서는 `None` 이다** — *"예약에 실패했다"* 가 아니라
+    #:   **"예약할 것이 없었다"** 다.
+    reservation_outcome: Literal["RESERVED", "SHORT"] | None = None
+
     #: 매입 규칙이 **순서에서 실제로 고른 라벨** (2026-09-11). 못 골랐으면 `None`.
     #:
     #: ★★ **`FIRST_OFFERED` 를 들이면서 같이 연 칸이다.** 순서가 생긴 순간 *"그날
@@ -514,6 +524,29 @@ class BackfillOut:
             one.confirmation_status
             for one in self.runs
             if one.confirmation_status is not None
+        )
+
+    @property
+    def reservation_outcomes(self) -> Mapping[str, int]:
+        """확정분 예약 어휘 분포 (2026-09-12). 🔴 **둘을 접지 않는다.**
+
+        ```text
+        RESERVED  요구량만큼 잡았다
+        SHORT     모자랐다 — 확정은 CONFIRMED 인데 재고는 그만큼 없었다
+        ```
+
+        ★★ **`confirmation_outcomes` 와 한 칸에 담지 않는다.** 축이 다르다 — 저쪽은
+          *"판매가 섰나"* 이고 이쪽은 *"그만큼 잡았나"* 다. `CONFIRMED` 가 곧 재고를
+          잡은 것이 아니라는 사실이 이 줄로 보여야 한다.
+
+        ★ **`None` 은 안 센다.** 확정이 안 선 행에는 예약이라는 사건 자체가 없다.
+
+        ★ **이름의 주인은 `sales_approval.SaleConfirmationOut` 이다.**
+        """
+        return Counter(
+            one.reservation_outcome
+            for one in self.runs
+            if one.reservation_outcome is not None
         )
 
     @property
@@ -997,6 +1030,10 @@ def _backfill_one(
         #    남았다 — *"승인이 적혔다"* 가 *"판매가 섰다"* 로 읽혔다.
         confirmation_status=None if saved.sale is None else saved.sale.status,
         confirmation_reason=None if saved.sale is None else (saved.sale.reason or None),
+        # 🔴 **확정이 재고를 잡았는지를 여기서 버리지 않는다** (2026-09-12).
+        #    `CONFIRMED` 만 세면 *"팔렸다"* 가 *"잡아 뒀다"* 로 읽히고, 그 사이에서
+        #    같은 재고가 다음 날 또 팔린다.
+        reservation_outcome=None if saved.sale is None else saved.sale.reservation_outcome,
         # 🔴 **순서에서 실제로 고른 것을 남긴다.** 규칙 파일에 적힌 순서와 그날 선
         #    라벨은 다른 사실이다 — 규칙만 보고 곡선을 읽으면 틀린다.
         #
