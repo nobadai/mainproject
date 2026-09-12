@@ -24,14 +24,17 @@ from pathlib import Path
 import pytest
 
 from app.logistics.agent import tools as agent_tools
+from app.logistics.agent.schemas import ExceptionEvidence, ExceptionRow
 from app.logistics.agent.tools import (
     ACTION_UNSUPPORTED,
     IMPACT_INPUT_MISSING,
+    MUTABLE_EXCEPTION_DETAILS,
     SUPPORTED_ACTIONS,
     InboundScheduleFact,
     LotFact,
     _allocated_by_lot,
     _as_of_snapshot,
+    _exception_fact,
     _quantity,
     _state_observed_as_of,
     estimate_action_impact,
@@ -239,6 +242,128 @@ def test_state_observed_at_is_none_without_the_ledger():
     assert observed is None
 
 
+def test_lot_observed_at_is_not_the_quantity_date_alone():
+    """🔴 **한 줄 전체를 잔량 날짜로 대표하지 않는다** (v0.8 보정).
+
+    한 줄에 잔량(원장 · 날짜 있음) · 신선도/회전(정책 · 날짜 없음) · 예약(날짜 없음)이
+    함께 실려 있다. 잔량 날짜만 내면 *"정책·예약까지 그날 기준으로 다 쟀다"* 가 된다.
+    """
+    lot = _lot()
+
+    assert lot.remaining_qty_observed_as_of == AS_OF - timedelta(days=2)
+    assert lot.freshness_observed_as_of is None, "정책 축은 유효일이 없다"
+    assert lot.uncommitted_observed_as_of is None, "예약 축은 빠진 날을 못 댄다"
+    assert lot.observed_as_of is None
+    assert lot.observed_as_of != lot.remaining_qty_observed_as_of
+
+
+def test_lot_facts_keep_their_own_dates_even_when_the_composite_is_none():
+    """★ **사실별 날짜는 그대로 남는다** — 합성이 `None` 이라고 축을 지우지 않는다."""
+    lot = _lot()
+
+    assert lot.remaining_qty_observed_as_of is not None
+    assert lot.status_observed_as_of is not None
+    assert lot.received_at is not None
+
+
+# ===========================================================================
+# B'. Exception 투영 — 그날 값과 지금 값을 가른다 (v0.8 보정)
+# ===========================================================================
+
+
+def _exception_row(
+    *,
+    severity: str = "HIGH",
+    status: str = "OPEN",
+    opened: date = date(2026, 1, 1),
+    last_detected: date,
+    observed: date | None = None,
+) -> ExceptionRow:
+    return ExceptionRow(
+        exception_id="EX-1",
+        sim_run_id=SIM,
+        code="FRESHNESS_PRESSURE",
+        subject_type="LOT",
+        subject_id="LOT-1",
+        severity=severity,
+        status=status,
+        opened_as_of=opened,
+        last_detected_as_of=last_detected,
+        observed_as_of=observed,
+        evidence=(
+            ExceptionEvidence(
+                fact="remaining_qty_kg",
+                value=Decimal(500),
+                unit="kg",
+                source="inventory_lots",
+                source_id="LOT-1",
+            ),
+        ),
+        detector_version="v1",
+        note="지금 값",
+    )
+
+
+def test_detail_touched_after_as_of_is_never_shown():
+    """```text
+    D1 OPEN · D5 severity=MEDIUM · D8 severity=HIGH + 새 근거
+    as_of=D5 조회에 HIGH 나 D8 근거가 실리면 look-ahead 다
+    ```
+
+    🔴 표가 과거 severity·근거를 안 들고 있다 — **지어내지 않고 비운다.**
+    """
+    row = _exception_row(severity="HIGH", last_detected=date(2026, 1, 8))
+
+    fact = _exception_fact(row, as_of=date(2026, 1, 5))
+
+    assert fact.detail_known is False
+    assert fact.severity is None
+    assert fact.evidence is None
+    assert fact.last_detected_as_of is None
+    assert fact.note is None
+    assert fact.evidence_observed_as_of is None
+    assert set(MUTABLE_EXCEPTION_DETAILS) <= set(fact.unresolved_details)
+
+
+def test_lifecycle_facts_survive_even_when_detail_is_unknown():
+    """★ *"그날 살아 있었다"* 와 *"그날 severity 가 무엇이었다"* 는 **다른 문제다.**"""
+    row = _exception_row(last_detected=date(2026, 1, 8))
+
+    fact = _exception_fact(row, as_of=date(2026, 1, 5))
+
+    assert fact.exception_id == "EX-1" and fact.code == "FRESHNESS_PRESSURE"
+    assert fact.opened_as_of == date(2026, 1, 1)
+    assert fact.open_days == 5, "D1 에 열렸으면 D5 는 닷새째다"
+    assert fact.status == "OPEN", "상태는 앞으로만 가므로 지금 OPEN 이면 그날에도 OPEN"
+    assert fact.detector_version == "v1"
+
+
+def test_detail_is_shown_when_nothing_touched_it_after_as_of():
+    """`last_detected_as_of <= as_of` 는 *"그 뒤로 손댄 적이 없다"* 는 **증명**이다."""
+    row = _exception_row(
+        severity="MEDIUM", last_detected=date(2026, 1, 5), observed=date(2026, 1, 4)
+    )
+
+    fact = _exception_fact(row, as_of=date(2026, 1, 5))
+
+    assert fact.detail_known is True
+    assert fact.severity == "MEDIUM"
+    assert fact.evidence is not None and len(fact.evidence) == 1
+    assert fact.last_detected_as_of == date(2026, 1, 5)
+    assert fact.evidence_observed_as_of == date(2026, 1, 4)
+    assert fact.unresolved_details == ()
+
+
+def test_status_is_unknown_when_the_row_already_moved_on():
+    """🔴 `PROPOSED` 로 넘어간 날을 적는 칸이 없다 (§26) — 그날 무엇이었는지 못 댄다."""
+    row = _exception_row(status="RESOLVED", last_detected=date(2026, 1, 3))
+
+    fact = _exception_fact(row, as_of=date(2026, 1, 5))
+
+    assert fact.status is None
+    assert "status" in fact.unresolved_details
+
+
 # ===========================================================================
 # C. 할당 축 — 무엇을 세고 무엇을 빼는가
 # ===========================================================================
@@ -358,6 +483,16 @@ def test_empty_lots_do_not_occupy_space(complete_logistics_snapshot):
 # ===========================================================================
 
 
+def _stub_schedules(monkeypatch, *, views: tuple, change_dates: tuple) -> None:
+    """일정 조회 둘을 함께 갈아 끼운다.
+
+    ★ **둘이 짝이다** — 목록을 내는 쪽과 «그 목록을 그렇게 만든 날» 을 내는 쪽이라,
+      하나만 바꾸면 검사가 실제 계약을 안 재게 된다.
+    """
+    monkeypatch.setattr(agent_tools, "load_schedule_views", lambda *a, **k: views)
+    monkeypatch.setattr(agent_tools, "schedule_fact_dates_at", lambda *a, **k: change_dates)
+
+
 def _schedule_view(inbound_id: str, *, arrives: date, created: date) -> InboundScheduleView:
     return InboundScheduleView(
         inbound_id=inbound_id,
@@ -387,7 +522,7 @@ def _schedule_view(inbound_id: str, *, arrives: date, created: date) -> InboundS
 def test_inbound_window_never_exceeds_the_capacity_window(
     monkeypatch, requested_days, expected_days
 ):
-    monkeypatch.setattr(agent_tools, "load_schedule_views", lambda *a, **k: ())
+    _stub_schedules(monkeypatch, views=(), change_dates=())
 
     result = get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF, days=requested_days)
 
@@ -397,7 +532,7 @@ def test_inbound_window_never_exceeds_the_capacity_window(
 def test_schedules_arriving_after_the_window_are_dropped(monkeypatch):
     inside = _schedule_view("INB-IN", arrives=AS_OF + timedelta(days=2), created=AS_OF)
     outside = _schedule_view("INB-OUT", arrives=AS_OF + timedelta(days=40), created=AS_OF)
-    monkeypatch.setattr(agent_tools, "load_schedule_views", lambda *a, **k: (inside, outside))
+    _stub_schedules(monkeypatch, views=(inside, outside), change_dates=(AS_OF,))
 
     result = get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF)
 
@@ -406,20 +541,52 @@ def test_schedules_arriving_after_the_window_are_dropped(monkeypatch):
 
 
 def test_inbound_schedule_carries_a_real_business_observed_at(monkeypatch):
-    """✅ **장부에 선 날**(`created_as_of`)이 있다 — 정책·예약 축과 다른 자리다."""
-    monkeypatch.setattr(
-        agent_tools,
-        "load_schedule_views",
-        lambda *a, **k: (
+    """✅ **장부를 바꾼 날**이 있다 — 정책·예약 축과 다른 자리다."""
+    _stub_schedules(
+        monkeypatch,
+        views=(
             _schedule_view("INB-1", arrives=AS_OF + timedelta(days=2), created=date(2026, 1, 10)),
             _schedule_view("INB-2", arrives=AS_OF + timedelta(days=3), created=date(2026, 1, 14)),
         ),
+        change_dates=(date(2026, 1, 10), date(2026, 1, 14)),
     )
 
     result = get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF)
 
     assert result.observed_as_of == date(2026, 1, 14)
     assert result.observed_as_of <= AS_OF
+
+
+def test_a_cancellation_survives_in_the_collection_observed_at(monkeypatch):
+    """🔴 **취소가 관측일에서 사라지면 안 된다.**
+
+    ```text
+    D10  A 생성 · D12  B 생성 · D17  B 취소
+    답 = [A]      ← 이 답은 **D17 부터** 참이다. D10 이라고 하면 거짓이다
+    ```
+
+    살아남은 `A` 의 `created_as_of` 만 모으면 D10 이 나온다 — 그것이 종전 버그다.
+    """
+    survivor = _schedule_view("INB-A", arrives=AS_OF + timedelta(days=2), created=date(2026, 1, 10))
+    _stub_schedules(
+        monkeypatch,
+        views=(survivor,),
+        # 생성 둘 · 취소 하나 — 취소가 가장 늦다.
+        change_dates=(date(2026, 1, 10), date(2026, 1, 12), date(2026, 1, 17)),
+    )
+
+    result = get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF)
+
+    assert [one.inbound_id for one in result.schedules] == ["INB-A"]
+    assert result.observed_as_of == date(2026, 1, 17)
+    assert result.observed_as_of != survivor.created_as_of
+
+
+def test_collection_observed_at_is_none_without_any_change_date(monkeypatch):
+    """잴 것이 없었던 날도 «안 쟀다» 다 — 빈 입력은 `None` 이다."""
+    _stub_schedules(monkeypatch, views=(), change_dates=())
+
+    assert get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF).observed_as_of is None
 
 
 # ===========================================================================

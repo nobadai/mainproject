@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -35,6 +36,7 @@ from app.logistics.db import get_db_schema
 __all__ = [
     "EXCEPTION_CLOSE_DATE_UNRESOLVED",
     "EmptyEvidence",
+    "LiveExceptionsAt",
     "exception_id_for",
     "live_exceptions",
     "live_exceptions_at",
@@ -141,9 +143,25 @@ def live_exceptions(conn: Any, *, sim_run_id: str) -> tuple[ExceptionRow, ...]:
 EXCEPTION_CLOSE_DATE_UNRESOLVED = "EXCEPTION_CLOSE_DATE_UNRESOLVED"
 
 
-def live_exceptions_at(
-    conn: Any, *, sim_run_id: str, as_of: date
-) -> tuple[tuple[ExceptionRow, ...], tuple[str, ...]]:
+@dataclass(frozen=True)
+class LiveExceptionsAt:
+    """그날 살아 있던 행 + **그 목록을 그렇게 만든 날들.**
+
+    ★ `membership_dates` 가 따로 있는 이유: 목록은 열린 날로만 정해지지 않는다.
+      *"D7 에 하나가 닫혀서 D8 목록이 이렇다"* 는 사실의 관측일은 **D7** 이다 —
+      살아남은 행들의 `opened_as_of` 만 모으면 그 D7 이 통째로 사라진다.
+
+    🔴 **`uncertainties` 가 비지 않으면 목록이 확정된 것이 아니다.** 닫힌 날을 못 댄
+       행이 하나라도 있으면 그날 목록을 증명할 수 없다.
+    """
+
+    rows: tuple[ExceptionRow, ...]
+    #: 그날까지 목록을 바꾼 모든 날 (열린 날 · 닫힌 날).
+    membership_dates: tuple[date, ...]
+    uncertainties: tuple[str, ...]
+
+
+def live_exceptions_at(conn: Any, *, sim_run_id: str, as_of: date) -> LiveExceptionsAt:
     """**그날** 살아 있던 Exception 과 못 가른 것들. 🔴 지금 값을 과거로 쓰지 않는다.
 
     ```text
@@ -164,7 +182,14 @@ def live_exceptions_at(
     ⚠️ **닫은 날을 모르는 닫힌 행은 뺀다.** 그날 살아 있었음을 증명할 수 없다 —
        사유를 함께 돌려준다 (`EXCEPTION_CLOSE_DATE_UNRESOLVED:{exception_id}`).
 
-    :returns: `(그날 살아 있던 행들, 못 가른 사유들)`. 🔴 **아무것도 쓰지 않는다.**
+    ⚠️ **행이 들고 있는 `severity` · `evidence_json` · `last_detected_as_of` ·
+       `observed_as_of` · `note` 는 «지금» 값이다.** `touch_exception` 이 매일 덮으므로
+       이 함수가 돌려주는 행의 그 칸들은 **과거 값이 아니다** — 그날 값으로 읽어도 되는지는
+       `last_detected_as_of <= as_of` 로 부르는 쪽이 가른다 (`agent.tools.get_open_exceptions`).
+       여기서 미리 비우지 않는 이유는, 이 함수가 표를 그대로 내는 자리이기 때문이다.
+
+    :returns: 그날 살아 있던 행들 · 목록을 바꾼 날들 · 못 가른 사유들.
+        🔴 **아무것도 쓰지 않는다.**
     """
     rows = _rows(
         conn,
@@ -184,19 +209,25 @@ def live_exceptions_at(
     )
     live: list[ExceptionRow] = []
     uncertainties: list[str] = []
+    # 열린 날은 전부 목록을 바꾼 날이다 (WHERE 가 이미 `<= as_of` 로 잘랐다).
+    membership_dates = {raw["opened_as_of"] for raw in rows}
     for raw in rows:
-        if raw["status"] in LIVE_STATUSES:
+        closed_as_of = raw["resolved_as_of"]
+        if closed_as_of is not None and closed_as_of <= as_of:
+            # 그날 이전에 닫혔다 — 목록에서 내려간 날도 목록을 바꾼 날이다.
+            membership_dates.add(closed_as_of)
+            continue
+        if raw["status"] in LIVE_STATUSES or closed_as_of is not None:
             # 상태는 앞으로만 간다 — 지금 살아 있고 그날 이미 열렸으면 그날에도 살아 있었다.
             live.append(_row(raw))
             continue
-        closed_as_of = raw["resolved_as_of"]
-        if closed_as_of is None:
-            # 닫힌 날을 모르면 그날 살아 있었음을 증명할 수 없다.
-            uncertainties.append(f"{EXCEPTION_CLOSE_DATE_UNRESOLVED}:{raw['exception_id']}")
-            continue
-        if closed_as_of > as_of:
-            live.append(_row(raw))
-    return tuple(live), tuple(uncertainties)
+        # 닫힌 행인데 닫힌 날이 없다 — 그날 살아 있었음을 증명할 수 없다.
+        uncertainties.append(f"{EXCEPTION_CLOSE_DATE_UNRESOLVED}:{raw['exception_id']}")
+    return LiveExceptionsAt(
+        rows=tuple(live),
+        membership_dates=tuple(sorted(membership_dates)),
+        uncertainties=tuple(uncertainties),
+    )
 
 
 def previous_exception_id_for(

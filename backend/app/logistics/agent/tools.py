@@ -36,6 +36,7 @@ from app.logistics.agent.observe import _status_observed_as_of
 from app.logistics.agent.schemas import (
     COMMITMENT_OBSERVED_AS_OF,
     POLICY_OBSERVED_AS_OF,
+    ExceptionEvidence,
     ExceptionRow,
     derive_observed_as_of,
 )
@@ -49,7 +50,11 @@ from app.logistics.historical_repository import (
     lot_state_at,
     reservation_state_at,
 )
-from app.logistics.inbound_schedules import InboundScheduleView, load_schedule_views
+from app.logistics.inbound_schedules import (
+    InboundScheduleView,
+    load_schedule_views,
+    schedule_fact_dates_at,
+)
 from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.repository import (
     LogisticsRead,
@@ -61,16 +66,20 @@ from app.logistics.turnover import ItemPolicy, fefo_sort_key, load_item_policy
 
 __all__ = [
     "ACTION_UNSUPPORTED",
+    "ARRIVAL_DATE_OUTSIDE_WINDOW",
     "CAPACITY_WINDOW_UNRESOLVED",
+    "EXCEPTION_DETAIL_UNRESOLVED",
     "IMPACT_INPUT_MISSING",
     "ITEM_NOT_FOUND",
     "LEDGER_ADJUST_UNSUPPORTED",
     "LOT_NOT_FOUND",
+    "MUTABLE_EXCEPTION_DETAILS",
     "POLICY_NOT_HISTORICAL",
     "SNAPSHOT_AS_OF_MISMATCH",
     "SUPPORTED_ACTIONS",
     "ActionImpact",
     "CapacityContext",
+    "ExceptionFact",
     "Feasibility",
     "InboundPlan",
     "InboundScheduleFact",
@@ -116,6 +125,24 @@ POLICY_NOT_HISTORICAL = "POLICY_NOT_HISTORICAL"
 ACTION_UNSUPPORTED = "ACTION_UNSUPPORTED"
 #: 그 행동의 영향을 셈할 입력이 모자란다.
 IMPACT_INPUT_MISSING = "IMPACT_INPUT_MISSING"
+#: 준 도착일이 `cap_by_date` 창 밖이다 — 그날 여유를 안 셈했으므로 판정하지 않는다.
+ARRIVAL_DATE_OUTSIDE_WINDOW = "ARRIVAL_DATE_OUTSIDE_WINDOW"
+#: 🔴 **그날의 severity·근거를 못 되살렸다.** 표가 과거 값을 안 들고 있어서다 —
+#: `touch_exception` 이 그 칸들을 매일 덮는다. 지금 값을 과거 답에 실으면 look-ahead 다.
+EXCEPTION_DETAIL_UNRESOLVED = "EXCEPTION_DETAIL_UNRESOLVED"
+
+#: `touch_exception` 이 **매일 덮는** 칸들. 그날 값을 증명할 수 없으면 전부 비운다.
+#:
+#: ★ *"그날 살아 있었다"* 와 *"그날 severity 가 무엇이었다"* 는 **다른 문제다.**
+#:   앞엣것은 두 날짜(`opened_as_of` · `resolved_as_of`)로 증명되지만, 뒤엣것은
+#:   표에 과거 값이 없어 증명할 길이 없다. 🔴 **지어내지 않고 비운다.**
+MUTABLE_EXCEPTION_DETAILS: tuple[str, ...] = (
+    "severity",
+    "evidence",
+    "last_detected_as_of",
+    "observed_as_of",
+    "note",
+)
 
 
 Feasibility = Literal["FEASIBLE", "INFEASIBLE", "UNRESOLVED", "UNSUPPORTED"]
@@ -201,6 +228,45 @@ class LotFact:
             return None
         return Decimal(remaining) / Decimal(limit)
 
+    @property
+    def freshness_observed_as_of(self) -> date | None:
+        """신선도·회전 파생값의 관측일 = **입고일과 정책 중 늦은 쪽.**
+
+        🔴 `ObservedLot.freshness_observed_as_of` 와 같은 규칙이다 — 「한계 − 경과」이고
+           그 한계가 `item_storage_policies` 에서 온다. 회전 상태(`turnover_status` ·
+           `sell_priority*` · `disposal_candidate`)도 같은 정책 축이라 여기 접힌다.
+        """
+        return derive_observed_as_of([self.received_at, POLICY_OBSERVED_AS_OF])
+
+    @property
+    def uncommitted_observed_as_of(self) -> date | None:
+        """`committed_kg` · `uncommitted_kg` 의 관측일 = **잔량 축과 예약 축 중 늦은 쪽.**
+
+        🔴 지금은 언제나 `None` 이다 (`COMMITMENT_OBSERVED_AS_OF` · §18.2).
+        """
+        return derive_observed_as_of(
+            [self.remaining_qty_observed_as_of, COMMITMENT_OBSERVED_AS_OF]
+        )
+
+    @property
+    def observed_as_of(self) -> date | None:
+        """이 Lot **한 줄 전체**를 언제부터 알 수 있었나 (v0.8 보정).
+
+        🔴 **잔량 날짜 하나로 대표하지 않는다.** 한 줄에 잔량·상태·신선도·회전·예약이
+           함께 실려 있고 축마다 관측일이 다르다 — 잔량 날짜만 내면 *"정책·예약까지 그날
+           기준으로 다 쟀다"* 는 거짓이 된다. 하나라도 못 대면 전체가 `None` 이다.
+        """
+        return derive_observed_as_of(
+            [
+                self.remaining_qty_observed_as_of,
+                self.status_observed_as_of,
+                self.freshness_observed_as_of,
+                self.uncommitted_observed_as_of,
+                # 취득단가는 입고 때 정해지는 정적 속성이라 입고일이 관측일이다.
+                self.received_at,
+            ]
+        )
+
 
 @dataclass(frozen=True, kw_only=True)
 class LotView(ToolAnswer):
@@ -218,10 +284,50 @@ class ItemLots(ToolAnswer):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ExceptionFact:
+    """그날 살아 있던 문제 하나. 🔴 **`ExceptionRow`(지금 값)를 그대로 내지 않는다.**
+
+    ```text
+    증명되는 것    exception_id · code · subject · opened_as_of · detector_version
+                  previous_exception_id · 며칠째           ← INSERT 뒤 안 바뀐다
+    못 되살리는 것  severity · evidence · last_detected_as_of · observed_as_of · note
+                  ← touch_exception 이 매일 덮는다. 표에 과거 값이 없다
+    ```
+
+    ★ **한 자리만 예외다.** `last_detected_as_of <= as_of` 면 *"그 뒤로 손댄 적이 없다"*
+      가 증명되므로 지금 값이 곧 그날 값이다 — 그때만 detail 을 싣는다.
+    """
+
+    exception_id: str
+    code: str
+    subject_type: str
+    subject_id: str
+    opened_as_of: date
+    detector_version: str
+    previous_exception_id: str | None
+    #: 그날 기준 며칠째인가. `opened_as_of` 가 불변이라 이 수는 언제나 정확하다.
+    open_days: int
+    #: 그날의 상태. 🔴 저장된 값이 `OPEN` 일 때만 확정된다 — 상태는 앞으로만 가므로
+    #: 지금 `OPEN` 이면 그 전에도 `OPEN` 이었다. `PROPOSED` 로 넘어간 날을 적는 칸이
+    #: 없어(§26) 그 밖의 행은 그날 무엇이었는지 못 댄다.
+    status: str | None
+    #: 🔴 그날의 detail 을 되살릴 수 있었나.
+    detail_known: bool
+    severity: str | None
+    evidence: tuple[ExceptionEvidence, ...] | None
+    last_detected_as_of: date | None
+    note: str | None
+    #: 근거가 적어 둔 관측일. detail 을 못 되살렸으면 `None` 이다.
+    evidence_observed_as_of: date | None
+    #: 못 되살린 칸 이름들. 빈 튜플이면 전부 그날 값이다.
+    unresolved_details: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
 class OpenExceptions(ToolAnswer):
     """`get_open_exceptions` — **그날 살아 있던** 문제들."""
 
-    exceptions: tuple[ExceptionRow, ...]
+    exceptions: tuple[ExceptionFact, ...]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -334,10 +440,15 @@ class ActionImpact(ToolAnswer):
 
     action: str
     feasibility: Feasibility
-    #: 이 행동이 실제로 움직이는 양.
+    #: 이 행동이 **실제로 움직이는** 양. 🔴 수량 계약이 없으면 `None` 이다 —
+    #: 상한 후보량을 여기에 적으면 «다 나간다» 는 실행계획이 된다 (v0.8 보정).
     affected_kg: Decimal | None
-    #: 창고 여유의 변화 (양수 = 자리가 는다).
+    #: 창고 여유의 변화 (양수 = 자리가 는다). `affected_kg` 와 같은 규율이다.
     capacity_delta_kg: Decimal | None
+    #: 🔴 **영향량이 아니다.** 그 행동이 건드릴 수 있는 **상한 후보량**이다 —
+    #: 판매 우선 요청이면 그 Lot 의 미확정 물량, 폐기 요청이면 그 Lot 의 잔량.
+    #: 실제로 얼마가 움직일지는 그 행동의 주인(Sales · Purchase · 사람)이 정한다.
+    candidate_kg: Decimal | None
     #: 🔴 물류 장부의 **취득단가**로만 셈한다 (`inventory_lots.unit_cost_krw_per_kg`).
     estimated_loss_krw: Decimal | None
     freshness_days_left: int | None
@@ -474,12 +585,20 @@ def _state_observed_as_of(
     return _status_observed_as_of(state, received_at=received_at, last_moved_at=last_moved_at)
 
 
-def _lots_observed_as_of(lots: Iterable[LotFact]) -> date | None:
-    """Lot 묶음의 물리 사실 관측일 = 잔량 관측일 중 **가장 늦은 것**.
+def _stock_observed_as_of(lots: Iterable[LotFact]) -> date | None:
+    """**물리 잔량 축**만의 관측일 = 잔량 관측일 중 가장 늦은 것.
+
+    ★ 용량 점유(`used_capacity_kg`)처럼 **잔량 합**인 사실이 쓰는 값이다. Lot 한 줄
+      전체를 대표하는 값이 아니다 — 그것은 `LotFact.observed_as_of` 다.
 
     🔴 하나라도 못 대면 전체가 `None` 이다 — 합계의 관측일은 가장 약한 고리를 따른다.
     """
     return derive_observed_as_of([lot.remaining_qty_observed_as_of for lot in lots])
+
+
+def _lots_observed_as_of(lots: Iterable[LotFact]) -> date | None:
+    """Lot 묶음 **전체**의 관측일 = 각 줄의 합성 관측일 중 가장 늦은 것."""
+    return derive_observed_as_of([lot.observed_as_of for lot in lots])
 
 
 # ---------------------------------------------------------------------------
@@ -495,17 +614,85 @@ def get_open_exceptions(conn: Any, *, sim_run_id: str, as_of: date) -> OpenExcep
        ② 그날 열려 있다가 그 뒤 닫힌 문제가 통째로 빠진다. 그래서 표를 두 날짜
        (`opened_as_of` · `resolved_as_of`)로 자르는 `live_exceptions_at` 을 쓴다.
 
-    ⚠️ 행의 `observed_as_of` 는 **탐지가 적어 둔 값**이다 (§18). 지금은 근거에 정책값이
-       섞여 전부 `NULL` 이라, 이 Tool 의 관측일도 `None` 이다 — 그것이 계산 결과다.
+    🔴 **행이 들고 있는 detail 도 그대로 내지 않는다 (v0.8 보정).** `severity` ·
+       `evidence_json` · `last_detected_as_of` · `observed_as_of` · `note` 는
+       `touch_exception` 이 **매일 덮는** 칸이라 지금 값이 그날 값이 아니다.
+
+    ```text
+    D1 OPEN · D5 severity=MEDIUM · D8 severity=HIGH + 새 근거
+    as_of=D5 조회에 HIGH 가 실리면 look-ahead 다
+    ```
+
+       표가 과거 값을 안 들고 있으므로 **지어내지 않고 비운다** —
+       `last_detected_as_of <= as_of` 인 행만 detail 을 싣는다(그 뒤로 손댄 적이 없다는
+       증명이다). 나머지는 `EXCEPTION_DETAIL_UNRESOLVED:{id}` 로 사실만 남긴다.
+
+    ⚠️ 목록의 관측일은 **목록을 바꾼 날들**(열린 날 · 닫힌 날)의 `max` 에 각 행의 근거
+       관측일을 더해 셈한다 — 살아남은 행의 `opened_as_of` 만 모으면 *"D7 에 하나가
+       닫혀서 오늘 목록이 이렇다"* 는 사실의 날짜가 통째로 사라진다.
     """
-    rows, uncertainties = live_exceptions_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+    found = live_exceptions_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+    facts = tuple(_exception_fact(row, as_of=as_of) for row in found.rows)
+    # 🔴 닫힌 날을 못 댄 행이 하나라도 있으면 그날 목록 자체가 확정된 것이 아니다.
+    membership = (
+        None if found.uncertainties else derive_observed_as_of(found.membership_dates)
+    )
+    uncertainties = [
+        *found.uncertainties,
+        *(
+            f"{EXCEPTION_DETAIL_UNRESOLVED}:{fact.exception_id}"
+            for fact in facts
+            if not fact.detail_known
+        ),
+    ]
     return OpenExceptions(
         sim_run_id=sim_run_id,
         as_of=as_of,
-        observed_as_of=derive_observed_as_of([row.observed_as_of for row in rows]),
-        uncertainties=uncertainties,
+        observed_as_of=derive_observed_as_of(
+            [
+                membership,
+                *(
+                    fact.evidence_observed_as_of if fact.detail_known else None
+                    for fact in facts
+                ),
+            ]
+        ),
+        uncertainties=tuple(dict.fromkeys(uncertainties)),
         source_refs=("logistics_exceptions",),
-        exceptions=rows,
+        exceptions=facts,
+    )
+
+
+def _exception_fact(row: ExceptionRow, *, as_of: date) -> ExceptionFact:
+    """표 한 행을 **그날 증명되는 것만** 남긴 투영으로 바꾼다.
+
+    🔴 `last_detected_as_of > as_of` 는 *"그 뒤에 갱신됐다"* 는 뜻이라 detail 을 못 쓴다.
+       그 사이 값이 무엇이었는지는 표 어디에도 없다 — 새 이력 표를 만들지 않는다(§26).
+    """
+    detail_known = row.last_detected_as_of <= as_of
+    # 상태는 앞으로만 간다 — 지금 `OPEN` 이면 그 전에도 `OPEN` 이었다.
+    # 그 밖(`PROPOSED` · 그날 뒤에 닫힌 행)은 넘어간 날을 적는 칸이 없어 못 댄다.
+    status = "OPEN" if row.status == "OPEN" else None
+    unresolved = [*(() if detail_known else MUTABLE_EXCEPTION_DETAILS)]
+    if status is None:
+        unresolved.append("status")
+    return ExceptionFact(
+        exception_id=row.exception_id,
+        code=row.code,
+        subject_type=row.subject_type,
+        subject_id=row.subject_id,
+        opened_as_of=row.opened_as_of,
+        detector_version=row.detector_version,
+        previous_exception_id=row.previous_exception_id,
+        open_days=(as_of - row.opened_as_of).days + 1,
+        status=status,
+        detail_known=detail_known,
+        severity=row.severity if detail_known else None,
+        evidence=row.evidence if detail_known else None,
+        last_detected_as_of=row.last_detected_as_of if detail_known else None,
+        note=row.note if detail_known else None,
+        evidence_observed_as_of=row.observed_as_of if detail_known else None,
+        unresolved_details=tuple(unresolved),
     )
 
 
@@ -530,7 +717,9 @@ def get_lot(conn: Any, *, sim_run_id: str, as_of: date, lot_id: str) -> LotView:
     return LotView(
         sim_run_id=sim_run_id,
         as_of=as_of,
-        observed_as_of=None if lot is None else lot.remaining_qty_observed_as_of,
+        # 🔴 **잔량 날짜 하나로 대표하지 않는다** (v0.8 보정) — 한 줄에 잔량·상태·
+        #    신선도·회전·예약이 함께 실려 있고 축마다 관측일이 다르다 (`LotFact`).
+        observed_as_of=None if lot is None else lot.observed_as_of,
         uncertainties=uncertainties,
         source_refs=(*_LOT_SOURCES, *_COMMITMENT_SOURCES),
         lot=lot,
@@ -761,8 +950,9 @@ def get_capacity_context(
         sim_run_id=sim_run_id,
         as_of=as_of,
         # 점유는 원장이 날짜를 주지만 창·임계는 정책이라 결과는 `None` 이다 (§18.2).
+        # ★ 여기서는 **잔량 축**만 접는다 — 이 답이 싣는 Lot 사실이 점유 합 하나다.
         observed_as_of=derive_observed_as_of(
-            [_lots_observed_as_of(warehouse.lots), POLICY_OBSERVED_AS_OF]
+            [_stock_observed_as_of(warehouse.lots), POLICY_OBSERVED_AS_OF]
         ),
         uncertainties=tuple(dict.fromkeys(uncertainties)),
         source_refs=(*_LOT_SOURCES, "agent_policy_config", "inbound_schedules", "sales"),
@@ -830,6 +1020,17 @@ def get_inbound_schedule(
        (`repository._schedule_lists` 가 그 표를 읽는다), 여기서 JSON 을 다시 읽으면
        취소된 일정이 살아 돌아온다.
 
+    🔴 **살아남은 일정의 `created_as_of` 만 모으지 않는다 (v0.8 보정).** 목록은 생성뿐
+       아니라 **취소**로도 바뀐다.
+
+    ```text
+    D1  A 생성 · D2  B 생성 · D7  B 취소
+    D8 의 답 = [A]        ← 이 답은 **D7 부터** 참이다. D1 이라고 하면 거짓이다
+    ```
+
+       그래서 목록을 바꾼 다섯 축(생성 · 취소 · 도착 · 재고화 · 원장 IN)의 날을 전부
+       모아 `max` 를 낸다 (`inbound_schedules.schedule_fact_dates_at`).
+
     :param days: 창 길이. 기본이자 상한이 `cap_by_date` 창(`18`)이다 — 용량 판정이
         보는 창보다 멀리 보면 «판정에 안 들어간 입고» 가 조사에 섞인다.
     """
@@ -844,11 +1045,14 @@ def get_inbound_schedule(
         for view in load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
         if view.expected_arrival_date <= window_end
     ]
+    # ★ 창 밖으로 거른 것은 관측일에 안 든다 — `expected_arrival_date` 는 불변이라
+    #   (바꾸면 `ScheduleConflict` 다) 그 거르기가 새 사건을 만들지 않는다.
+    changed_on = schedule_fact_dates_at(conn, sim_run_id=sim_run_id, as_of=as_of)
     return InboundPlan(
         sim_run_id=sim_run_id,
         as_of=as_of,
-        # ✅ 입고 일정은 **업무 날짜가 있다** — 장부에 선 날(`created_as_of`)이다.
-        observed_as_of=derive_observed_as_of([view.created_as_of for view in views]),
+        # ✅ 입고 축은 **업무 날짜가 있다** — 목록을 바꾼 날들의 `max` 다.
+        observed_as_of=derive_observed_as_of(changed_on),
         uncertainties=(),
         source_refs=("inbound_schedules", "purchase_items", "items"),
         days=window_days,
@@ -887,14 +1091,21 @@ def estimate_action_impact(
     """가정한 행동의 영향만 **읽는다**. 🔴 **아무것도 실행하지 않는다.**
 
     ```text
-    SALES_PRIORITY_REQUEST   그 Lot 의 미확정 물량이 나간다
+    SALES_PRIORITY_REQUEST   «이 Lot 을 우선 검토해 달라» 는 **요청**이다
+                             🔴 판매량은 Sales 소유 — qty_kg 를 안 주면 UNRESOLVED
     DISPOSAL_REQUEST         그 Lot 의 일부가 버려진다        ← 손실은 취득단가로만
-    PURCHASE_ADJUST_REQUEST  예정 입고가 늘거나 준다          ← 가능 여부는 cap_by_date
+    PURCHASE_ADJUST_REQUEST  예정 입고가 늘거나 준다
+                             🔴 도착일은 Purchase 소유 — arrival_date 를 안 주면 UNRESOLVED
     ACCEPT_RISK              **아무것도 안 움직인다** (기록형)
     ```
 
     🔴 **카탈로그 밖 행동의 영향을 지어내지 않는다** — `UNSUPPORTED` 로 답한다.
        모르는 행동에 그럴듯한 숫자를 붙이면 그 숫자가 제안의 근거가 된다.
+
+    🔴 **남의 부서가 정할 값을 물류가 정하지 않는다 (v0.8 보정).** *"얼마를 팔까"* 는
+       Sales, *"언제 받을까"* 는 Purchase 다. 그 값을 안 받았으면 **상한 후보량**
+       (`candidate_kg`)만 보이고 실제 영향량은 `None` · `UNRESOLVED` 다 —
+       후보량을 영향량 칸에 적는 순간 조사가 남의 실행계획을 대신 쓴 것이 된다.
 
     🔴 **판매가·매입가를 셈하지 않는다.** 물류 장부에 없는 값이라 `None` 이고,
        왜 `None` 인지를 `assumptions` 에 적는다 (0 은 «손실 없음» 이라는 주장이다).
@@ -948,9 +1159,13 @@ def _lot_action_impact(
             as_of=as_of,
             action=action,
             feasibility="FEASIBLE",
-            observed_as_of=lot.remaining_qty_observed_as_of,
+            # 싣는 사실은 «이 Lot 이 있고 신선도가 이렇다» 둘이다 — 정책 축이 섞인다.
+            observed_as_of=derive_observed_as_of(
+                [lot.remaining_qty_observed_as_of, lot.freshness_observed_as_of]
+            ),
             affected_kg=Decimal(0),
             capacity_delta_kg=Decimal(0),
+            candidate_kg=Decimal(0),
             estimated_loss_krw=Decimal(0),
             freshness_days_left=lot.remaining_freshness_days,
             assumptions=("위험을 안고 간다는 기록만 남는다 — 재고도 자리도 안 움직인다",),
@@ -979,39 +1194,99 @@ def _lot_action_impact(
             as_of=as_of,
             action=action,
             feasibility="FEASIBLE" if requested_kg <= lot.remaining_qty_kg else "INFEASIBLE",
-            observed_as_of=lot.remaining_qty_observed_as_of,
+            # 잔량(원장) · 취득단가(입고일) · 신선도(정책) 셋을 다 싣는다.
+            observed_as_of=derive_observed_as_of(
+                [
+                    lot.remaining_qty_observed_as_of,
+                    lot.received_at,
+                    lot.freshness_observed_as_of,
+                ]
+            ),
             affected_kg=affected_kg,
             capacity_delta_kg=affected_kg,
+            # 🔴 폐기는 **수량이 요청에 들어 있는** 유일한 행동이라 영향량이 선다.
+            candidate_kg=lot.remaining_qty_kg,
             estimated_loss_krw=None if unit_cost is None else affected_kg * unit_cost,
             freshness_days_left=lot.remaining_freshness_days,
             assumptions=tuple(assumptions),
             uncertainties=view.uncertainties,
         )
 
-    # SALES_PRIORITY_REQUEST
+    return _sales_priority_impact(
+        lot, view=view, sim_run_id=sim_run_id, as_of=as_of, parameters=parameters
+    )
+
+
+def _sales_priority_impact(
+    lot: LotFact,
+    *,
+    view: LotView,
+    sim_run_id: str,
+    as_of: date,
+    parameters: Mapping[str, Any],
+) -> ActionImpact:
+    """«이 Lot 을 우선 검토해 달라» 는 **요청**의 영향. 🔴 판매 실행계획이 아니다.
+
+    ```text
+    qty_kg 없음   UNRESOLVED   실제 판매량은 Sales 소유다 — 전량으로 지어내지 않는다
+    qty_kg 있음   그 수량이 이 Lot 에 미확정으로 남아 있나만 답한다 (물류 사실이다)
+    ```
+
+    🔴 **미확정 물량을 영향량으로 쓰지 않는다 (v0.8 보정).** 종전 구현은
+       `affected_kg = uncommitted_kg` 로 «전량이 나간다» 고 적었다 — 그것은 물류가 남의
+       부서 실행계획을 대신 쓴 것이다. 상한은 `candidate_kg` 로만 보인다.
+
+    ⚠️ **팔 수 있나** 는 여기서 답하지 않는다. 물류가 아는 것은 *"창고가 그만큼 댈 수
+       있나"* 까지고, 가격·수요·계약은 Sales 가 본다.
+    """
     uncommitted_kg = lot.uncommitted_kg
+    # 예약 축이 섞이므로 관측일은 그 축까지 접는다 (지금은 `None`).
+    observed_as_of = derive_observed_as_of(
+        [lot.uncommitted_observed_as_of, lot.freshness_observed_as_of]
+    )
     if uncommitted_kg is None:
         return _impact(
             sim_run_id=sim_run_id,
             as_of=as_of,
-            action=action,
+            action="SALES_PRIORITY_REQUEST",
             feasibility="UNRESOLVED",
             uncertainties=(*view.uncertainties, f"{IMPACT_INPUT_MISSING}:uncommitted_kg"),
             assumptions=("판매 가용이 아닌 Lot 이라 «아직 안 잡힌 몫» 이 성립하지 않는다",),
         )
+
+    requested_kg = _quantity(parameters.get("qty_kg"))
+    if requested_kg is None:
+        return _impact(
+            sim_run_id=sim_run_id,
+            as_of=as_of,
+            action="SALES_PRIORITY_REQUEST",
+            feasibility="UNRESOLVED",
+            observed_as_of=observed_as_of,
+            candidate_kg=uncommitted_kg,
+            freshness_days_left=lot.remaining_freshness_days,
+            assumptions=(
+                "실제 판매량은 Sales 가 정한다 — 수량 없이 영향량을 셈하지 않는다",
+                f"이 Lot 이 댈 수 있는 상한은 {uncommitted_kg}kg 이다 (영향량이 아니다)",
+                "판매가는 물류 장부에 없다 — 매출·이익 영향은 Sales 가 셈한다",
+            ),
+            uncertainties=(*view.uncertainties, f"{IMPACT_INPUT_MISSING}:qty_kg"),
+        )
+
+    affected_kg = min(requested_kg, uncommitted_kg)
     return _impact(
         sim_run_id=sim_run_id,
         as_of=as_of,
-        action=action,
-        feasibility="FEASIBLE" if uncommitted_kg > 0 else "INFEASIBLE",
-        observed_as_of=lot.remaining_qty_observed_as_of,
-        affected_kg=uncommitted_kg,
-        capacity_delta_kg=uncommitted_kg,
+        action="SALES_PRIORITY_REQUEST",
+        feasibility="FEASIBLE" if requested_kg <= uncommitted_kg else "INFEASIBLE",
+        observed_as_of=observed_as_of,
+        affected_kg=affected_kg,
+        capacity_delta_kg=affected_kg,
+        candidate_kg=uncommitted_kg,
         estimated_loss_krw=None,
         freshness_days_left=lot.remaining_freshness_days,
         assumptions=(
+            "물류가 답한 것은 «창고가 그 수량을 댈 수 있나» 까지다 — 팔릴지는 Sales 가 본다",
             "판매가는 물류 장부에 없다 — 매출·이익 영향은 Sales 가 셈한다",
-            "미확정 물량이 전부 나간다고 본 상한이다",
         ),
         uncertainties=view.uncertainties,
     )
@@ -1025,11 +1300,21 @@ def _purchase_adjust_impact(
     parameters: Mapping[str, Any],
     read_fn: Callable[..., LogisticsRead],
 ) -> ActionImpact:
-    """예정 입고를 늘리거나 줄인다. **가능 여부는 `cap_by_date` 가 답한다.**
+    """예정 입고를 늘리거나 줄인다. **도착일 하루의 `cap_by_date` 가 답한다.**
 
-    🔴 **새 용량 판정을 만들지 않는다.** `scenario_engine.validate_purchase_scenarios`
-       가 쓰는 그 `calculate_cap_by_date` 를 그대로 본다 — 매입 시나리오 판정과
-       조사가 서로 다른 여유를 말하면 안 된다.
+    ```text
+    arrival_date 없음   UNRESOLVED   도착일은 Purchase 소유다 — 창에서 하루를 골라 주지 않는다
+    arrival_date 있음   cap_by_date[그날] 과만 견준다
+    ```
+
+    🔴 **창에서 «가장 빡빡한 날» 을 골라 판정하지 않는다 (v0.8 보정).** 종전 구현이
+       `min(cap_by_date.values())` 와 견줬는데, 그 고르기 자체가 **분할 회차와 도착일을
+       정하는 일**이라 매입의 몫이다. 물류의 역할은 *"그날 이만큼 들어올 자리가 있나"* 를
+       답하는 데까지다 (`scenario_engine.validate_purchase_scenarios` 도 매입이 준
+       도착일마다 따로 견준다).
+
+    🔴 **새 용량 판정을 만들지 않는다.** 그 함수가 쓰는 `calculate_cap_by_date` 를
+       그대로 본다 — 매입 시나리오 판정과 조사가 서로 다른 여유를 말하면 안 된다.
 
     ⚠️ **매입 단가를 모른다.** 금액 영향은 `None` 이고 그 사실을 가정에 적는다.
     """
@@ -1043,33 +1328,46 @@ def _purchase_adjust_impact(
             uncertainties=(f"{IMPACT_INPUT_MISSING}:qty_delta_kg",),
         )
     capacity = get_capacity_context(conn, sim_run_id=sim_run_id, as_of=as_of, read_fn=read_fn)
-    if not capacity.cap_by_date:
+    arrival_date = parameters.get("arrival_date")
+    base = {
+        "sim_run_id": sim_run_id,
+        "as_of": as_of,
+        "action": "PURCHASE_ADJUST_REQUEST",
+        "observed_as_of": capacity.observed_as_of,
+        "affected_kg": abs(delta_kg),
+        # 자리의 변화는 요청량의 산술 결과라 도착일 없이도 선다 (양수 = 자리가 는다).
+        "capacity_delta_kg": -delta_kg,
+        "estimated_loss_krw": None,
+    }
+    if not isinstance(arrival_date, date):
         return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action="PURCHASE_ADJUST_REQUEST",
+            **base,
             feasibility="UNRESOLVED",
-            uncertainties=capacity.uncertainties,
-            capacity_delta_kg=-delta_kg,
-            assumptions=("창 여유를 못 셈해 가능 여부를 판정하지 않았다",),
+            uncertainties=(*capacity.uncertainties, f"{IMPACT_INPUT_MISSING}:arrival_date"),
+            assumptions=(
+                "도착일 없이 가능 여부를 판정하지 않는다 — 분할 회차와 도착일은 Purchase 가 정한다",
+                "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
+            ),
         )
-    # 🔴 **창에서 가장 빡빡한 날로 본다.** 도착일이 정해지지 않은 조정이라
-    #    특정 날짜를 골라 잡으면 그 선택이 곧 판정이 된다.
-    tightest_cap = min(capacity.cap_by_date.values())
-    feasibility: Feasibility = (
-        "FEASIBLE" if delta_kg <= 0 or delta_kg <= tightest_cap else "INFEASIBLE"
-    )
+    if arrival_date not in capacity.cap_by_date:
+        return _impact(
+            **base,
+            feasibility="UNRESOLVED",
+            uncertainties=(
+                *capacity.uncertainties,
+                f"{ARRIVAL_DATE_OUTSIDE_WINDOW}:{arrival_date}",
+            ),
+            assumptions=(
+                f"{arrival_date} 는 지금 셈한 창 밖이라 그날 여유를 모른다",
+                "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
+            ),
+        )
+    room_kg = capacity.cap_by_date[arrival_date]
     return _impact(
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        action="PURCHASE_ADJUST_REQUEST",
-        feasibility=feasibility,
-        observed_as_of=capacity.observed_as_of,
-        affected_kg=abs(delta_kg),
-        capacity_delta_kg=-delta_kg,
-        estimated_loss_krw=None,
+        **base,
+        feasibility="FEASIBLE" if delta_kg <= 0 or delta_kg <= room_kg else "INFEASIBLE",
         assumptions=(
-            f"창 {len(capacity.cap_by_date)}일 중 가장 빡빡한 날의 여유 {tightest_cap}kg 와 견줬다",
+            f"{arrival_date} 하루의 여유 {room_kg}kg 와만 견줬다 — 다른 날은 보지 않았다",
             "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
         ),
         uncertainties=capacity.uncertainties,
@@ -1103,6 +1401,7 @@ def _impact(
     observed_as_of: date | None = None,
     affected_kg: Decimal | None = None,
     capacity_delta_kg: Decimal | None = None,
+    candidate_kg: Decimal | None = None,
     estimated_loss_krw: Decimal | None = None,
     freshness_days_left: int | None = None,
     assumptions: tuple[str, ...] = (),
@@ -1118,6 +1417,7 @@ def _impact(
         feasibility=feasibility,
         affected_kg=affected_kg,
         capacity_delta_kg=capacity_delta_kg,
+        candidate_kg=candidate_kg,
         estimated_loss_krw=estimated_loss_krw,
         freshness_days_left=freshness_days_left,
         assumptions=assumptions,

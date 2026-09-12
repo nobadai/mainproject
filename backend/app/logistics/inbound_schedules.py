@@ -85,6 +85,7 @@ __all__ = [
     "pending_inbound_at",
     "receivable_at",
     "record_schedule",
+    "schedule_fact_dates_at",
 ]
 
 
@@ -663,6 +664,73 @@ def _reject_broken_reference(
             " 이 상태를 «입고 없음» 으로 읽지 않는다 —"
             " 승인은 났는데 도착 조회에 안 잡히는 입고가 되기 때문이다."
         )
+
+
+def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[date, ...]:
+    """그날까지 **일정 조회의 답을 바꾼 모든 날**. 🔴 읽기만 한다.
+
+    ```text
+    목록에 들고 남    created_as_of                    장부에 선 날
+                     cancelled_as_of                  내려간 날   ← 빼면 «취소가 사라진다»
+    줄의 내용이 바뀜  inbound_receipts.arrived_at      has_receipt 가 참이 된 날
+                     inventory_lots.received_at       stock_applied 가 ←
+                     inventory_moves.moved_at (IN)    〃
+    ```
+
+    ★ **왜 다섯 축을 다 세나.** 조회의 답은 «어느 일정이 있나» + «그 일정이 어디까지
+      왔나» 두 가지인데, 앞엣것만 세면 뒤엣것을 바꾼 날이 안 보인다.
+
+    ```text
+    D1  A 생성        D2  B 생성        D7  B 취소
+    D8 의 답 = [A]    ← 이 답은 D7 부터 참이다. D2 라고 하면 거짓이다
+    ```
+
+    ⚠️ **이 실행의 일정에 매달린 사건만 센다.** 실행 전체의 입고를 세면 답과 무관한
+       날이 섞여 관측일이 **실제보다 늦어진다** — 늦은 쪽으로 틀리는 것도 틀린 것이다.
+    """
+    schema = _schema()
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT s.created_as_of AS changed_on
+              FROM {schema}.inbound_schedules s
+             WHERE s.sim_run_id = %(sim)s AND s.created_as_of <= %(as_of)s
+            UNION
+            SELECT s.cancelled_as_of
+              FROM {schema}.inbound_schedules s
+             WHERE s.sim_run_id = %(sim)s
+               AND s.cancelled_as_of IS NOT NULL
+               AND s.cancelled_as_of <= %(as_of)s
+            UNION
+            SELECT r.arrived_at
+              FROM {schema}.inbound_receipts r
+              JOIN {schema}.inbound_schedules s
+                ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
+             WHERE r.sim_run_id = %(sim)s AND r.arrived_at <= %(as_of)s
+            UNION
+            SELECT l.received_at
+              FROM {schema}.inventory_lots l
+              JOIN {schema}.inbound_receipts r ON r.receipt_id = l.inbound_receipt_id
+              JOIN {schema}.inbound_schedules s
+                ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
+             WHERE l.sim_run_id = %(sim)s AND l.received_at <= %(as_of)s
+            UNION
+            SELECT mv.moved_at
+              FROM {schema}.inventory_moves mv
+              JOIN {schema}.inventory_lots l ON l.lot_id = mv.lot_id
+              JOIN {schema}.inbound_receipts r ON r.receipt_id = l.inbound_receipt_id
+              JOIN {schema}.inbound_schedules s
+                ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
+             WHERE mv.sim_run_id = %(sim)s
+               AND mv.move_type = 'IN'
+               AND mv.moved_at <= %(as_of)s
+             ORDER BY 1
+            """
+        ).format(schema=schema),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    return tuple(row["changed_on"] for row in rows)
 
 
 def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
