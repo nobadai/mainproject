@@ -13,7 +13,7 @@
 from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
-from math import isfinite
+from math import ceil, isfinite
 from typing import Any
 
 from app.contracts.core import Evidence
@@ -40,6 +40,7 @@ from app.purchase_agent.nodes.classify_situation import (
     estimate_daily_demand,
     is_gate_excluded,
     split_entry_cap,
+    volume_gate_holds,
 )
 from app.purchase_agent.quotes import QuoteSource
 from app.purchase_agent.state import PurchaseAgentState
@@ -746,13 +747,20 @@ def _volume_gate_sentence(estimated_total_kg: float, cap: SplitEntryCap) -> str:
     ⚠️ 판정과 **같은 함수**(``split_entry_cap``)가 낸 값만 인용한다. 여기서 다시 세면
       근거가 실제 판정과 다른 수치를 주장하게 된다 — 이 파일이 방금 그 병을 앓았다.
     """
-    total = f"추정 총량 {round(estimated_total_kg):,}kg"
+    # 🔴 **게이트가 «실제로 비교하는» 수를 적는다** (2026-09-12). ① 은 ③ 이 만들 수 있는
+    #   최대치(``round`` 가 올림으로 떨어질 수 있어 ``ceil``)를 여유와 견주는데, 문장이
+    #   ``round`` 를 적으면 1kg 미만 경계에서 **「8,607kg > 여유 8,608kg → 충족」** 처럼
+    #   눈으로 거짓인 줄이 나간다 — ``_relation`` docstring 이 막는 그 병이다.
+    total = f"추정 총량 {ceil(estimated_total_kg):,}kg"
     if cap.cap_kg is None:
         where = f"{cap.arrival_date} 도착" if cap.arrival_date else "도착일"
         return f"{total} — {where} 창고 여유를 못 봐 총량 진입 조건을 판정하지 않았다"
-    holds = estimated_total_kg >= cap.cap_kg
+    # 🔴 **판정과 같은 술어를 부른다** (2026-09-12). 전에는 여기서 부등호를 다시 적었고,
+    #   ① 이 ``volume_gate_holds`` 로 옮겨 가면 근거 문장만 옛 방향에 남는다 — 이 함수의
+    #   docstring 이 경고한 바로 그 병이다.
+    holds = volume_gate_holds(estimated_total_kg, cap)
     return (
-        f"{total} {'≥' if holds else '<'} {cap.arrival_date} 도착 여유 "
+        f"{total} {'>' if holds else '≤'} {cap.arrival_date} 도착 여유 "
         f"{cap.cap_kg:,.0f}kg → 총량 진입 조건 {'충족' if holds else '미달'}"
     )
 
@@ -868,7 +876,8 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             # 있다: timing은 ``by_volume OR by_trend``로 열리고 **by_volume은 situation과
             # 무관하다**. 이 근거가 없으면 uncertain인데 timing이 열린 날을 설명할 수 없다.
             ref_ids=ref("VOL"),
-            value=float(round(estimated_total_kg)),
+            # 문장과 **같은 수**여야 한다 — ``_volume_gate_sentence`` 참조.
+            value=float(ceil(estimated_total_kg)),
             unit="kg",
             evidence_grade="SIM_FIXED",
             # 🔴 **세 갈래다 — 「못 봤다」를 「미달」로 적지 않는다** (규칙 3 · `#308`).
