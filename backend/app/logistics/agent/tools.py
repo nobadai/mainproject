@@ -129,8 +129,9 @@ ACTION_UNSUPPORTED = "ACTION_UNSUPPORTED"
 IMPACT_INPUT_MISSING = "IMPACT_INPUT_MISSING"
 #: 준 도착일이 `cap_by_date` 창 밖이다 — 그날 여유를 안 셈했으므로 판정하지 않는다.
 ARRIVAL_DATE_OUTSIDE_WINDOW = "ARRIVAL_DATE_OUTSIDE_WINDOW"
-#: 🔴 **그날의 severity·근거를 못 되살렸다.** 표가 과거 값을 안 들고 있어서다 —
-#: `touch_exception` 이 그 칸들을 매일 덮는다. 지금 값을 과거 답에 실으면 look-ahead 다.
+#: 🔴 **그날 값을 못 되살린 detail 이 있다.** 표가 과거 값을 안 들고 있어서다 —
+#: `touch_exception` 이 `severity`·근거를, `resolve_exception` 이 `note` 를 덮는다.
+#: 지금 값을 과거 답에 실으면 look-ahead 다. 어느 칸인지는 `unresolved_details` 가 말한다.
 EXCEPTION_DETAIL_UNRESOLVED = "EXCEPTION_DETAIL_UNRESOLVED"
 
 #: `touch_exception` 이 덮는 칸들. **날짜는 `last_detected_as_of` 하나다.**
@@ -313,12 +314,16 @@ class ExceptionFact:
     ```text
     증명되는 것    exception_id · code · subject · opened_as_of · detector_version
                   previous_exception_id · 며칠째           ← INSERT 뒤 안 바뀐다
-    못 되살리는 것  severity · evidence · last_detected_as_of · observed_as_of · note
-                  ← touch_exception 이 매일 덮는다. 표에 과거 값이 없다
+    못 되살리는 것  severity · evidence · last_detected_as_of · observed_as_of
+                  ← touch_exception 이 덮는다.  날짜는 last_detected_as_of
+                  note
+                  ← resolve_exception 이 덮는다. 날짜는 resolved_as_of
     ```
 
-    ★ **한 자리만 예외다.** `last_detected_as_of <= as_of` 면 *"그 뒤로 손댄 적이 없다"*
-      가 증명되므로 지금 값이 곧 그날 값이다 — 그때만 detail 을 싣는다.
+    ★ **되살리는 게이트가 둘이다** — writer 가 둘이라서다. `last_detected_as_of <= as_of`
+      면 *"그 뒤로 `touch` 가 없었다"* 가, `resolved_as_of` 가 없거나 `as_of` 이하면
+      *"그 뒤로 `resolve` 가 없었다"* 가 증명된다. 각 칸은 **자기 writer 의 게이트**를
+      지날 때만 실린다 — `detail_known` 은 둘 다 지났을 때만 참이다.
     """
 
     exception_id: str
@@ -637,18 +642,31 @@ def get_open_exceptions(conn: Any, *, sim_run_id: str, as_of: date) -> OpenExcep
        ② 그날 열려 있다가 그 뒤 닫힌 문제가 통째로 빠진다. 그래서 표를 두 날짜
        (`opened_as_of` · `resolved_as_of`)로 자르는 `live_exceptions_at` 을 쓴다.
 
-    🔴 **행이 들고 있는 detail 도 그대로 내지 않는다 (v0.8 보정).** `severity` ·
-       `evidence_json` · `last_detected_as_of` · `observed_as_of` · `note` 는
-       `touch_exception` 이 **매일 덮는** 칸이라 지금 값이 그날 값이 아니다.
+    🔴 **행이 들고 있는 detail 도 그대로 내지 않는다.** 덮는 writer 가 **둘**이고
+       각자 **다른 날짜**를 남긴다 — 그래서 게이트도 둘이다 (v0.9 보정).
+
+    ```text
+    touch_exception    severity · evidence_json · last_detected_as_of · observed_as_of
+                       ← 게이트는 last_detected_as_of <= as_of
+    resolve_exception  status · resolved_as_of · resolved_by · note
+                       ← 게이트는 resolved_as_of 가 없거나 as_of 이하
+    ```
+
+       ⚠️ `resolve_exception` 은 `last_detected_as_of` 를 **안 건드린다.** 그래서 그 칸
+       하나로 묶으면 닫으면서 적은 `note` 가 과거 답에 샌다.
 
     ```text
     D1 OPEN · D5 severity=MEDIUM · D8 severity=HIGH + 새 근거
     as_of=D5 조회에 HIGH 가 실리면 look-ahead 다
+
+    D1 OPEN · D5 마지막 Detect(last_detected=D5) · D8 resolve(note="폐기 완료")
+    as_of=D5 조회에 «폐기 완료» 가 실리면 look-ahead 다 — last_detected 는 D5 그대로다
     ```
 
-       표가 과거 값을 안 들고 있으므로 **지어내지 않고 비운다** —
-       `last_detected_as_of <= as_of` 인 행만 detail 을 싣는다(그 뒤로 손댄 적이 없다는
-       증명이다). 나머지는 `EXCEPTION_DETAIL_UNRESOLVED:{id}` 로 사실만 남긴다.
+       표가 과거 값을 안 들고 있으므로 **지어내지 않고 비운다** — 단 **통째로 비우지는
+       않는다.** 각 칸은 자기 writer 의 게이트만 지나면 실리므로, 미래 `resolve` 뒤에
+       조회해도 `severity` 는 여전히 증명된다. 못 댄 칸은 `unresolved_details` 가
+       이름으로 말하고, 사유에는 `EXCEPTION_DETAIL_UNRESOLVED:{id}` 를 남긴다.
 
     ⚠️ 목록의 관측일은 **목록을 바꾼 날들**(열린 날 · 닫힌 날)의 `max` 에 각 행의 근거
        관측일을 더해 셈한다 — 살아남은 행의 `opened_as_of` 만 모으면 *"D7 에 하나가
@@ -693,8 +711,10 @@ def get_open_exceptions(conn: Any, *, sim_run_id: str, as_of: date) -> OpenExcep
 def _exception_fact(row: ExceptionRow, *, as_of: date) -> ExceptionFact:
     """표 한 행을 **그날 증명되는 것만** 남긴 투영으로 바꾼다.
 
-    🔴 `last_detected_as_of > as_of` 는 *"그 뒤에 갱신됐다"* 는 뜻이라 detail 을 못 쓴다.
-       그 사이 값이 무엇이었는지는 표 어디에도 없다 — 새 이력 표를 만들지 않는다(§26).
+    🔴 `last_detected_as_of > as_of` 는 *"그 뒤에 `touch` 가 있었다"* 는 뜻이라 그 writer 의
+       칸을 못 쓴다. `resolved_as_of > as_of` 는 *"그 뒤에 `resolve` 가 있었다"* 는 뜻이라
+       `note` 를 못 쓴다. 그 사이 값이 무엇이었는지는 표 어디에도 없다 — 새 이력 표를
+       만들지 않는다(§26).
     """
     # ── 게이트 둘 — **writer 가 둘이라 날짜도 둘이다** (v0.9 보정) ──────
     #
