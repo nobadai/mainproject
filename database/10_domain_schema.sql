@@ -1262,6 +1262,56 @@ COMMENT ON COLUMN haetdeul.expenses.note IS '추가 설명 및 주의사항.';
 
 
 --
+-- Name: finance_payable_closing_events; Type: TABLE; Schema: haetdeul; Owner: -
+--
+
+CREATE TABLE haetdeul.finance_payable_closing_events (
+    sim_run_id text NOT NULL,
+    payable_id text NOT NULL,
+    recognized_date date NOT NULL,
+    recognized_amount_krw numeric(18,6) NOT NULL,
+    due_date date NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT finance_payable_closing_events_amount_check CHECK ((recognized_amount_krw >= (0)::numeric))
+);
+
+
+--
+-- Name: TABLE finance_payable_closing_events; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON TABLE haetdeul.finance_payable_closing_events IS '매입대금이 일마감 현금곡선에 실린 사실. 한 실행에서 한 payable 은 한 번이다. 실제 지급(paid_amount_krw·status)과 다른 축이고, 여기는 현금곡선 귀속만 적는다.';
+
+
+--
+-- Name: COLUMN finance_payable_closing_events.sim_run_id; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.finance_payable_closing_events.sim_run_id IS '어느 실행의 장부인가. 이 칸이 있어야 sim-run reset 이 이 표를 자동으로 비운다.';
+
+
+--
+-- Name: COLUMN finance_payable_closing_events.recognized_date; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.finance_payable_closing_events.recognized_date IS '🔴 현금곡선에 실은 날이다. 계약 기일이 아니다 — payable 이 늦게 생기면 due_date 보다 뒤다.';
+
+
+--
+-- Name: COLUMN finance_payable_closing_events.recognized_amount_krw; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.finance_payable_closing_events.recognized_amount_krw IS '실은 금액. 마감 시점의 outstanding_amount_krw 다. original_amount_krw 를 쓰면 PARTIAL 에서 이미 나간 몫까지 다시 센다.';
+
+
+--
+-- Name: COLUMN finance_payable_closing_events.due_date; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.finance_payable_closing_events.due_date IS '계약 기일. 원장 그대로다. recognized_date 와 나란히 봐야 왜 이 날 실렸는지 되짚을 수 있다.';
+
+
+--
 -- Name: finance_states; Type: TABLE; Schema: haetdeul; Owner: -
 --
 
@@ -4412,6 +4462,14 @@ ALTER TABLE ONLY haetdeul.partners
 
 
 --
+-- Name: finance_payable_closing_events finance_payable_closing_events_pkey; Type: CONSTRAINT; Schema: haetdeul; Owner: -
+--
+
+ALTER TABLE ONLY haetdeul.finance_payable_closing_events
+    ADD CONSTRAINT finance_payable_closing_events_pkey PRIMARY KEY (sim_run_id, payable_id);
+
+
+--
 -- Name: payables payables_pkey; Type: CONSTRAINT; Schema: haetdeul; Owner: -
 --
 
@@ -4521,6 +4579,13 @@ ALTER TABLE ONLY haetdeul.agent_policy_config
 
 ALTER TABLE ONLY haetdeul.logistics_runtime_fixture
     ADD CONSTRAINT uq_log_runtime_fixture UNIQUE (sim_run_id, as_of, usage_scope);
+
+
+--
+-- Name: finance_payable_closing_events_run_date_idx; Type: INDEX; Schema: haetdeul; Owner: -
+--
+
+CREATE INDEX finance_payable_closing_events_run_date_idx ON haetdeul.finance_payable_closing_events USING btree (sim_run_id, recognized_date);
 
 
 --
@@ -4845,6 +4910,14 @@ ALTER TABLE ONLY haetdeul.partner_item_demands
 
 ALTER TABLE ONLY haetdeul.partner_item_demands
     ADD CONSTRAINT partner_item_demands_partner_id_fkey FOREIGN KEY (partner_id) REFERENCES haetdeul.partners(partner_id);
+
+
+--
+-- Name: finance_payable_closing_events finance_payable_closing_events_payable_fkey; Type: FK CONSTRAINT; Schema: haetdeul; Owner: -
+--
+
+ALTER TABLE ONLY haetdeul.finance_payable_closing_events
+    ADD CONSTRAINT finance_payable_closing_events_payable_fkey FOREIGN KEY (payable_id) REFERENCES haetdeul.payables(payable_id);
 
 
 --
