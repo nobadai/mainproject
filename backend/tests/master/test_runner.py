@@ -286,14 +286,31 @@ def test_계획에_실행_시각이_없다():
         # 부서가 스스로 남긴 관측 — 마스터는 읽지 않고 Critic 까지 나른다.
         # 재무의 `finance_dept_meta` 가 여기로 온다 (E-AUTHORITY · E-GRADE-LEAK).
         "observations",
+        # 🔴 **부서가 밝힌 관측 기준시점** (2026-09-12). 이름이 `_at` 으로 끝나는데
+        #    **시계가 아니다** — *"이 사실을 언제부터 알 수 있었나"* 이지 *"언제
+        #    돌렸나"* 가 아니다. `created_at` 과 다른 값이고, 같은 회신을 다시
+        #    기록하면 같은 값이 난다. 재현성 비교 대상이 아니라는 뜻이 아니라
+        #    **재현성을 안 깬다**는 뜻이다.
+        "observed_at",
     }
     # 목록을 고쳐 가며 늘리다 시계를 흘려 넣지 않도록, 이름으로도 한 번 막는다.
     # 🔴 부분 문자열로 재지 않는다 — "time" 은 `runtime_status` 를, "ts" 는
     #    `llm_attempts` 를 오탐한다. **시계를 뜻하는 이름만** 정확히 본다.
     clockish = {"timestamp", "created", "started", "finished", "elapsed", "duration", "clock"}
+    # 🔴 **`_at` 금지를 못 풀고 한 이름만 연다** (2026-09-12). 이 규칙이 잡으려던
+    #    것은 `created_at` · `recorded_at` 처럼 **실행 시각이 계획에 스며드는**
+    #    자리이고 그 덫은 그대로 있어야 한다. 규칙을 지우는 대신 **예외를 적어
+    #    남긴다** — 다음 `_at` 은 여기 이름을 적기 전에는 못 들어온다.
+    시계아님 = {"observed_at"}
     assert not [
-        f for f in fields if f.endswith("_at") or any(w in f.split("_") for w in clockish)
+        f
+        for f in fields
+        if (f.endswith("_at") and f not in 시계아님) or any(w in f.split("_") for w in clockish)
     ]
+    assert 시계아님 <= fields, (
+        f"예외 목록이 없는 이름을 열어 두고 있다: {sorted(시계아님 - fields)} —"
+        " 칸이 사라졌으면 예외도 같이 지운다"
+    )
 
 
 def test_부서가_LLM_을_썼는지_계획에_남는다():
