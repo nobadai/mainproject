@@ -208,6 +208,19 @@ _ZERO = Decimal(0)
 #:   걷는 상한"* 이고 축이 다르다 — 179일 걷기는 그 수를 당연히 넘긴다.
 MAX_CONSECUTIVE_FAILURES = 5
 
+#: 관측 기준시점을 세는 **두 칸의 이름** (2026-09-12). 🔴 **여기가 유일한 주인이다.**
+#:
+#: 요약 줄과 세는 자리가 각자 문자열을 적으면 한쪽만 고치는 날 이름이 갈리고,
+#: 성적표는 제가 안 세는 칸을 찍는다 — `llm_outcomes` 가 `envelope.LLM_STATUSES`
+#: 하나를 보는 것과 같은 규율이다.
+#:
+#: 🔴 **두 칸뿐이다.** 세 번째 칸(「미래를 봤다」)은 `observed_at > as_of` 를 막는
+#:   검사를 걸 때 생긴다 — 지금 만들면 아무도 안 채운 상태에서 전부 막힌다.
+#:
+#: ⚠️ **순서가 뜻이다.** 「실었다」가 먼저다 — 그 숫자가 늘어나는 것이 진도이고,
+#:   읽는 사람이 먼저 볼 자리다. 그래서 이 줄만 `sorted` 를 안 쓴다.
+_OBSERVED_AT_LABELS: tuple[str, str] = ("실었다", "안쟀다")
+
 
 @dataclass(frozen=True)
 class WalkIncident:
@@ -372,6 +385,43 @@ class WalkResult:
         for day in self.days:
             for one in (*day.items, *day.sales_items):
                 total.update(one.llm_statuses)
+        return total
+
+    @property
+    def observation_coverage(self) -> Mapping[str, int]:
+        """그 걷기에서 **부서가 관측 기준시점을 실었나** (2026-09-12). 두 칸뿐이다.
+
+        ```text
+        실었다   부서가 `AgentReply.observed_at` 을 채워 보냈다
+        안쟀다   🔴 안 채워 보냈다 — 그 사실을 **언제부터 알 수 있었는지 모른다**
+        ```
+
+        🔴 **0 이어도 찍는다.** `llm_outcomes` 와 같은 규율이다 — 처음에는
+          「실었다」가 0 이고, **그 숫자가 늘어나는 것이 이 일의 진도**다. 0 이라
+          빼면 진도가 안 보이고, 재무·물류가 연결한 날에도 성적표가 아무 말을
+          안 한다.
+
+        🔴 **세 번째 칸(「미래를 봤다」)이 없다.** 그것은 `observed_at > as_of` 를
+          막는 검사를 걸 때 생기는 칸이고, 아무도 안 채운 지금 걸면 전부 막힌다.
+          이 판은 **칸을 여는 데까지**다.
+
+        🔴 **「안 쟀다」를 「미래를 봤다」와 섞지 않는다.** 앞은 *"모른다"* 이고
+          뒤는 *"틀렸다"* 다 — 다음에 할 일이 다르다. 앞은 부서에 연결을 요청하는
+          일이고 뒤는 그 호출을 막는 일이다.
+
+        ★ **마스터가 값을 지어내지 않는다.** 여기서 `as_of` 로 메우면 이 줄은
+          첫날부터 「실었다」가 만 건이라고 말하고, 그 숫자는 한 건도 사실이 아니다.
+
+        ⚠️ **못 돈 품목은 안 세어진다.** 계획이 없으면 `observed_ats` 가 비고,
+          그 자리는 `status=FAILED` 가 이미 말한다 — 여기서 `None` 한 개로
+          채우면 **안 돈 품목이 안 잰 품목으로** 세어진다.
+        """
+        실었다, 안쟀다 = _OBSERVED_AT_LABELS
+        total: Counter[str] = Counter(dict.fromkeys(_OBSERVED_AT_LABELS, 0))
+        for day in self.days:
+            for one in (*day.items, *day.sales_items):
+                for 관측 in one.observed_ats:
+                    total[안쟀다 if 관측 is None else 실었다] += 1
         return total
 
     @property
@@ -1178,6 +1228,13 @@ def format_summary(result: WalkResult) -> str:
         #    **그 자체가 사고**다. 71영업일을 `SUCCESS` 0건으로 걷고도 아무도
         #    모른 것이 「0이라 안 보임」의 모양이었다 (`SIM-CHAIN-V6`).
         f"LLM어휘   {dict(sorted(result.llm_outcomes.items()))}",
+        # 🔴 **관측 줄도 0 인 칸을 찍는다** (2026-09-12). `LLM어휘` 와 같은 규율이다 —
+        #    처음에는 「실었다」가 0 이고 **그 숫자가 늘어나는 것이 이 일의 진도**다.
+        #    0 이라 빼면 부서가 연결한 날에도 성적표가 아무 말을 안 한다.
+        #
+        # ⚠️ **이 줄만 `sorted` 를 안 쓴다.** 순서가 뜻이라 `_OBSERVED_AT_LABELS` 가
+        #    정한 그대로 찍는다 — 가나다순으로 세우면 「안쟀다」가 앞에 온다.
+        f"관측시점  {dict(result.observation_coverage)}",
         # 🔴 **현금 두 줄을 접지 않는다** (2026-09-12). *"현금이 얼마 움직였나"* 와
         #    *"그만큼 잔액이 움직였나"* 는 축이 다르다 — 이 줄이 없어서 V7 에서
         #    매입 유출 27,122,228 원이 잔액에서 안 빠진 것을 179일 동안 아무도

@@ -85,6 +85,20 @@ class ExecutionStep:
     #: 있었다. "그날 무엇이 오래 걸렸나" 를 이력으로 볼 수 없던 이유 하나가 이것이다.
     replans: int = 0
 
+    #: 🔴 **그 부서가 밝힌 관측 기준시점.** 주인은 `AgentReply.observed_at` 이다.
+    #:
+    #: ★ **`llm_status` 와 출처가 다르다.** 저쪽은 `ExecutionMetadata`(실행 흔적)
+    #:   에서 오고 이쪽은 `AgentReply`(업무 결과)에서 온다 — 사실의 성질이지
+    #:   실행의 흔적이 아니다. 흔적에서 끌어오면 *"언제부터 알 수 있었나"* 가
+    #:   *"언제 돌렸나"* 로 바뀐다.
+    #:
+    #: 🔴 **`None` 을 `as_of` 로 메우지 않는다.** `ExecutionPlan.as_of` 가 바로 옆에
+    #:   있어서 메우기 쉬운 자리이고, 메우면 **안 잰 것이 잰 것으로 세어진다.**
+    #:   `None` 은 「안 쟀다」이고 그것도 값이다.
+    #:
+    #: ★ **재현성 비교에는 안 쓴다** — `plan_signature` 는 (agent, mode, call_seq) 뿐이다.
+    observed_at: date | None = None
+
     #: 부서가 스스로 남긴 관측. **마스터는 읽지 않고 나른다.**
     #:
     #: 부서만 아는 사실 중에는 봉투에 자리가 없는 것이 있다 — 재무가 cap 을 낼 때
@@ -130,6 +144,9 @@ class ExecutionPlan:
             llm_attempts=metadata.llm_attempts,
             llm_fallback_used=metadata.llm_fallback_used,
             replans=metadata.replans,
+            # 🔴 **회신에서 그대로 받는다.** 부서가 안 실으면 `None` 이고,
+            #    마스터는 `self.as_of` 로도 오늘 날짜로도 메우지 않는다.
+            observed_at=reply.observed_at,
             observations=tuple(metadata.observations),
         )
         self.steps.append(step)
