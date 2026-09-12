@@ -542,29 +542,117 @@ def _sum_receivables_outstanding(conn: Any, *, sim_run_id: str, as_of: date) -> 
 
 
 def _purchase_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
+    """이 날 현금곡선에 실린 매입대금.
+
+    ```text
+    ① 기일이 왔는데 아직 안 실은 payable 을 귀속 원장에 적는다
+    ② 이 실행에서 **이 날로 적힌** 귀속을 통째로 더한다
+    ```
+
+    🔴 **`status` 로 「실었나」를 읽지 않는다.** `OPEN`/`PARTIAL` 은 *"아직 안 갚았다"*
+       는 채무 상태이지 *"아직 현금곡선에 안 실었다"* 가 아니다. 그래서 종전 조건
+       `effective_cash_date(due_date) == as_of` 를 `<= as_of` 로 여는 것으로 고치지
+       않는다 — 그러면 기일 지난 채무가 갚을 때까지 **날마다** 다시 실린다.
+
+    🔴 **그런데 `== as_of` 로는 늦게 생긴 payable 을 영영 못 잡는다.** 승인 D일에는
+       행이 없고, pending transition 이 D+1 에 적용하면서 `due_date = D` 로 만든다.
+       그때는 이미 `effective_cash_date(D) != D+1` 이라 어느 마감도 집지 않는다
+       (실측 `SIM-CHAIN-V5` 에서 73건 27,484,900원이 그렇게 빠져 있었다).
+
+    ★ **②가 멱등의 핵심이다.** 같은 날을 두 번 닫으면 ①이 아무것도 안 적지만, ②가
+      이미 적힌 것을 다시 더하므로 `daily_closings` 값은 그대로다. 새로 적은 것만
+      더하면 재마감이 그 칸을 0 으로 덮는다.
+    """
+    _recognize_due_payables(conn, sim_run_id=sim_run_id, as_of=as_of)
+    return _recognized_total(conn, sim_run_id=sim_run_id, as_of=as_of)
+
+
+def _recognize_due_payables(conn: Any, *, sim_run_id: str, as_of: date) -> None:
+    """기일이 온 payable 중 **아직 안 실은 것**을 귀속 원장에 적는다.
+
+    ★ 주말 이월 규칙(`effective_cash_date`)은 파이썬 한 곳이 주인이다. SQL 로 옮겨
+      적으면 같은 규칙이 두 벌이 되고, 한쪽만 고치는 날 현금이 다른 날로 간다.
+
+    ★ **DB 가 최종 방어선이다.** 「없으면 넣는다」를 애플리케이션이 판단하면 같은 날을
+      동시에 두 번 닫는 경합에서 두 줄이 들어간다. `(sim_run_id, payable_id)` PK 와
+      `ON CONFLICT DO NOTHING` 이 그것을 막는다.
+    """
     schema = sql.Identifier(get_db_schema())
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                SELECT due_date, outstanding_amount_krw
-                FROM {}.payables
-                WHERE sim_run_id = %s
-                  AND issued_date <= %s
-                  AND due_date <= %s
-                  AND status IN ('OPEN', 'PARTIAL')
+                SELECT p.payable_id, p.due_date, p.outstanding_amount_krw
+                FROM {schema}.payables p
+                WHERE p.sim_run_id = %s
+                  AND p.issued_date <= %s
+                  AND p.due_date <= %s
+                  AND p.status IN ('OPEN', 'PARTIAL')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {schema}.finance_payable_closing_events e
+                      WHERE e.sim_run_id = p.sim_run_id AND e.payable_id = p.payable_id
+                  )
+                ORDER BY p.due_date, p.payable_id
+                """
+            ).format(schema=schema),
+            [sim_run_id, as_of, as_of],
+        )
+        candidates = cursor.fetchall()
+
+        for row in candidates:
+            due_date = _row_value(row, "due_date", 1)
+            if not isinstance(due_date, date):
+                raise FinanceDataNotReady("payable_due_date")
+            #  🔴 기일이 주말이면 현금은 다음 월요일에 나간다. 그 날이 아직 안 왔으면
+            #     이번 마감이 실을 것이 아니다.
+            if effective_cash_date(due_date) > as_of:
+                continue
+            payable_id = _row_value(row, "payable_id", 0)
+            if not isinstance(payable_id, str) or not payable_id.strip():
+                raise FinanceDataNotReady("payable_id")
+            cursor.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {}.finance_payable_closing_events (
+                        sim_run_id, payable_id, recognized_date,
+                        recognized_amount_krw, due_date
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (sim_run_id, payable_id) DO NOTHING
+                    """
+                ).format(schema),
+                [
+                    sim_run_id,
+                    payable_id,
+                    as_of,
+                    _daily_closing_amount(_row_value(row, "outstanding_amount_krw", 2)),
+                    due_date,
+                ],
+            )
+
+
+def _recognized_total(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
+    """이 실행에서 **이 날로 적힌** 귀속의 합.
+
+    ⚠️ 방금 적은 것만 세지 않는다. 재마감에서 새로 적히는 것이 없어도 이 합은 그대로라,
+      `daily_closings` 의 값이 두 번째 마감에 0 으로 덮이지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT recognized_amount_krw
+                FROM {}.finance_payable_closing_events
+                WHERE sim_run_id = %s AND recognized_date = %s
                 """
             ).format(schema),
-            [sim_run_id, as_of, as_of],
+            [sim_run_id, as_of],
         )
         rows = cursor.fetchall()
     total = _ZERO
     for row in rows:
-        due_date = _row_value(row, "due_date", 0)
-        if not isinstance(due_date, date):
-            raise FinanceDataNotReady("payable_due_date")
-        if effective_cash_date(due_date) == as_of:
-            total += _daily_closing_amount(_row_value(row, "outstanding_amount_krw", 1))
+        total += _daily_closing_amount(_row_value(row, "recognized_amount_krw", 0))
     return total
 
 
