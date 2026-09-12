@@ -60,6 +60,7 @@ __all__ = [
     "LotTurnover",
     "TurnoverStatus",
     "derive_turnover_status",
+    "effective_freshness_limit_days",
     "elapsed_days",
     "fefo_sort_key",
     "freshness_days_of",
@@ -112,6 +113,19 @@ class LotTurnover:
     sell_priority: bool
     #: Legacy 신선도 축. 정책이 없으면 `None`.
     remaining_freshness_days: int | None
+    #: `remaining_freshness_days` 계산에 **실제 쓴** 유효 보관한계 (등급 계수 반영).
+    #:
+    #: ★ **잔여와 함께 낸다** — `repository._inventory_lot_from_row` 가 스냅샷에
+    #:   같은 칸을 싣는 이유와 같다: 신선도 잔여 **비율**의 분모는 원값이 아니라 이
+    #:   값이어야 하고, 하나만 주면 받는 쪽이 남은 하나로 역산한다.
+    #:   🔴 **둘은 함께 없거나 함께 있다.**
+    effective_freshness_limit_days: int | None
+    #: 회전 정책의 판매우선 경계 원값. 정책이 없으면 `None`.
+    #:
+    #: ★ **`turnover_status` 로 접지 않는다** — 상태는 *"판매우선인가"* 이고 이 값은
+    #:   *"며칠 남았을 때부터 그렇게 보나"* 다. 파생 상태만 내면 그 경계를 쓰는
+    #:   소비자가 정책 표를 **다시 읽는다**(같은 값의 두 번째 조회).
+    sell_priority_remaining_days: int | None
     #: 🔴 **회전목표와 무관하다.** 근거는 Legacy 판매불가 기준 하나뿐이다.
     disposal_candidate: bool
 
@@ -232,6 +246,35 @@ def _cell(row: Any, index: int, name: str) -> Any:
     return row[index]
 
 
+def effective_freshness_limit_days(행: Mapping[str, Any]) -> int | None:
+    """이 Lot 에 **실제로 적용되는** 보관한계. 🔴 **새 공식이 아니라 꺼낸 것이다.**
+
+    ```text
+    operational_limit_days               기본
+    정규화 등급이 `중` 이고 계수가 있으면  × medium_grade_factor  (내림)
+    한계가 없으면                         None — 0 으로 메우지 않는다
+    ```
+
+    ★ **`freshness_days_of` 가 이 함수를 쓴다.** 종전에는 그 함수 안에 있던 세 줄이고,
+      꺼낸 이유는 **신선도 잔여 비율의 분모**를 쓰는 자리가 생겼기 때문이다
+      (`tools.collect_freshness_lot_census` 가 스냅샷의 `effective_freshness_limit_days`
+      로 재는 그 값 · Exception 탐지의 압박 비율). 분모를 부르는 쪽이 다시 적으면
+      **`중` 등급이 갓 입고돼도 임박으로 읽히는** 그 왜곡이 되살아난다.
+
+    ⚠️ 등급 판단은 raw 가 아니라 `repository._normalize_grade` 결과 기준이다 —
+       정규화표에 없는 `상품` 계열은 `None` 이 되어 계수가 안 걸린다.
+    """
+    limit = 행["operational_limit_days"]
+    if limit is None:
+        return None
+    from app.logistics.repository import _normalize_grade
+
+    factor = 행["medium_grade_factor"]
+    if _normalize_grade(행["grade"]) == "중" and factor is not None:
+        limit = int(Decimal(limit) * Decimal(factor))
+    return int(limit)
+
+
 def freshness_days_of(행: Mapping[str, Any], *, as_of: date) -> int | None:
     """Legacy 신선도 잔여. **`repository._inventory_lot_from_row` 와 같은 식이다.**
 
@@ -247,15 +290,10 @@ def freshness_days_of(행: Mapping[str, Any], *, as_of: date) -> int | None:
        ⚠️ **다만 raw `중` 은 정규화 어휘에 있어 그대로 통과하고, 그때 계수가 실제로
        걸린다** — 같은 품목 안에서 유효 한계가 갈리므로 FEFO 순서가 입고순과 달라진다.
     """
-    limit = 행["operational_limit_days"]
+    limit = effective_freshness_limit_days(행)
     if limit is None:
         return None
-    from app.logistics.repository import _normalize_grade
-
-    factor = 행["medium_grade_factor"]
-    if _normalize_grade(행["grade"]) == "중" and factor is not None:
-        limit = int(Decimal(limit) * Decimal(factor))
-    return int(limit) - elapsed_days(received_at=행["received_at"], as_of=as_of)
+    return limit - elapsed_days(received_at=행["received_at"], as_of=as_of)
 
 
 def _lot_turnover_from_row(행: Mapping[str, Any], *, as_of: date) -> LotTurnover:
@@ -282,6 +320,8 @@ def _lot_turnover_from_row(행: Mapping[str, Any], *, as_of: date) -> LotTurnove
         turnover_status=status,
         sell_priority=sell_priority_of(status),
         remaining_freshness_days=freshness,
+        effective_freshness_limit_days=effective_freshness_limit_days(행),
+        sell_priority_remaining_days=None if priority_days is None else int(priority_days),
         disposal_candidate=is_disposal_candidate(remaining_freshness_days=freshness),
     )
 

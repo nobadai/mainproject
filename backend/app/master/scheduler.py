@@ -217,6 +217,33 @@ close_day(as_of, …)       closing.py     ← 🔴 하루의 맨 끝이다
     않았고(*"물류가 지어내지 않는다"*), 그 빈칸을 채우는 것이 부르는 쪽의 일이다 —
     어휘의 주인은 `maintenance.py` 다.
 
+🔴 **물류 점검 두 칸은 입고 직후와 출고 직후다** (2026-09-12 · #628 Commit 2).
+
+```text
+… → 입고 → **물류 점검 #1** → 채권 → … → 출고 → **물류 점검 #2** → 마감
+```
+
+  ★★ **아무도 «안 팔리는 재고가 있다» 고 말하지 않던 자리다.** 물류는 물으면
+    답했지만(네 Mode), 스스로 *"이 Lot 은 사흘 뒤면 못 판다"* 를 **문제로 세워
+    다음 날까지 들고 가는** 자리가 없었다. 실측: `SIM-CHAIN-V8` 입고 35.8t 중
+    9.2t 이 신선도 만료로 폐기될 때까지 그 사실을 담은 행이 한 줄도 없다.
+
+  ★ **왜 입고 직후인가.** 그날 점유가 뛴 직후라 용량 압박이 거기서 보이고, 그날
+    **매입 판단이 그 사실을 보고 결정**할 수 있다. 뒤로 가면 하루 늦는다.
+
+  ★ **왜 출고 직후인가.** 조건을 없애는 사건(예약 · 출고 OUT · 폐기)이 다 끝난
+    뒤여야 **그날 안에 닫을 수 있다** — 닫는 자리는 이 칸 하나다.
+
+  🔴 **스위치가 없다.** 재시도와 같은 규율이다 — 상태를 안 바꾸고 표 하나에 행만
+    남기므로(폐기도 이동도 없다) 걷기 재현성을 안 해친다. 끄고 켜는 값을 두면
+    *"어제는 문제였는데 오늘은 아니다"* 가 설정으로 갈린다.
+
+  🔴 **걷기 안에 LLM 이 없다.** 점검이 하는 것은 관찰 · 탐지 · 해소 결정론뿐이다.
+    조사와 제안은 사람이 부르는 별도 요청이다 (#628 상세설계 §17).
+
+  🔴 **터져도 하루는 계속 간다.** 표가 아직 없는 DB 에서도 두 칸이 `FAILED` 한
+    줄을 남기고 나머지 열세 칸은 그대로 돈다.
+
   ★★ **끝에 몰지 않는다.** 몰면 판매 판단이 그날의 매입 결과를 못 보고, 다음 날이
     어제 산 것을 못 본다 — 그러면 179일을 걸어도 재고가 영영 안 쌓인다.
 
@@ -301,6 +328,12 @@ from app.master.day_open import open_day
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 from app.master.inbound import receive_arrivals
+from app.master.inspection import (
+    AFTER_INBOUND,
+    AFTER_OUTBOUND,
+    InspectionOut,
+    run_logistics_inspection,
+)
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.maintenance import MaintenanceOut, run_auto_maintenance
 from app.master.market_calendar import MarketCalendar, get_market_calendar
@@ -745,6 +778,24 @@ class DayRunOutcome:
     #: ```
     pending_transition_status: str = "NOT_ATTEMPTED"
     inbound_status: str = "NOT_ATTEMPTED"
+    #: 물류 점검 #1 — 입고 직후 (2026-09-12 · #628). 🔴 **그날 점유가 뛴 자리다.**
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `RAN` · `NOTHING_DUE` · `FAILED` 는
+    #:   `InspectionOut.status` 그대로이고, 칸을 안 탄 날은 `NOT_ATTEMPTED` 다.
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   거기까지 못 갔다 — WAIT · 휴장 · 개장 실패
+    #: RAN             문제를 열었거나 갱신했거나 닫았다
+    #: NOTHING_DUE     확인했고 손댈 것이 없었다 — 🟢 정상이다
+    #: FAILED          보려다 터졌다 — 🔴 **그래도 하루는 계속 간다**
+    #: ```
+    #:
+    #: 🔴 **스위치가 없다.** `auto_maintain` 과 다르다 — 이 칸은 **상태를 안 바꾸고**
+    #:   표 하나에 행만 남기므로(폐기도 이동도 없다) 걷기 재현성을 안 해친다.
+    #:   끄고 켜는 값을 두면 *"어제는 문제였는데 오늘은 아니다"* 가 설정으로 갈린다.
+    inspection_inbound_status: str = "NOT_ATTEMPTED"
+    #: 물류 점검 #2 — 출고 직후. 🔴 **닫히는 자리는 여기 하나다** (재탐지 → RESOLVED).
+    inspection_outbound_status: str = "NOT_ATTEMPTED"
     #: 채권 발행 단계. 🔴 **수금보다 앞이다** — 채권이 서야 수금할 것이 있다.
     #:
     #: ★ **어휘를 새로 만들지 않았다.** `ReceivableOut.status` 의 다섯 값을 그대로
@@ -826,6 +877,14 @@ class DayRunOutcome:
     #: 무엇을 버렸고 무엇을 사람에게 남겼는지의 주인은 `AutoMaintenanceResult` 다.
     #: 안 켠 날은 `None`.
     maintenance: MaintenanceOut | None = None
+    #: 물류 점검 두 칸이 낸 값 그대로 (2026-09-12). 🔴 **여기서 다시 세지 않는다** —
+    #: 연 것 · 갱신 · 닫은 것의 주인은 `DetectOut` 하나다. 칸을 안 탄 날은 `None`.
+    #:
+    #: ⚠️ **두 칸을 한 칸에 안 담는다.** 입고 뒤는 «무엇이 새로 문제인가» 이고 출고 뒤는
+    #:    «무엇이 해결됐나» 라, 섞으면 그날 닫힌 문제가 몇이었는지를 요약이 못 말한다
+    #:    (`items` 와 `sales_items` 를 가른 것과 같은 이유).
+    inspection_inbound: InspectionOut | None = None
+    inspection_outbound: InspectionOut | None = None
     procurement_approval: BackfillOut | None = None
     #: 판매 승인이 낸 값 그대로. ⚠️ **매입 것과 한 칸에 안 담는다** — 섞으면
     #: 어느 사이클의 승인이 안 섰는지를 요약이 못 말한다 (`items` 와 `sales_items`
@@ -857,6 +916,7 @@ def run_scheduled_day(
     maintain_fn: Callable[..., MaintenanceOut] = run_auto_maintenance,
     retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
+    inspect_fn: Callable[..., InspectionOut] = run_logistics_inspection,
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
@@ -873,8 +933,9 @@ def run_scheduled_day(
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
-    개장 → 물류 유지보수 → 미적용 전이 재시도 → 입고 → 채권 → 수금 → [장부 관문]
-         → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고 → 마감
+    개장 → 물류 유지보수 → 미적용 전이 재시도 → 입고 → **물류 점검 #1** → 채권 → 수금
+         → [장부 관문] → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고
+         → **물류 점검 #2** → 마감
     ```
 
     🔴 **물류 유지보수가 개장 바로 뒤다** (2026-09-11).
@@ -1102,6 +1163,20 @@ def run_scheduled_day(
 
     # ── 입고 ────────────────────────────────────────────────────────
     inbound_status, note = _stage("입고", lambda: receive_fn(as_of, sim_run_id=sim_run_id))
+    notes.append(note)
+
+    # ── 물류 점검 #1 — 🔴 **입고 바로 뒤** (2026-09-12 · #628) ──────
+    #
+    # ★ **그날 점유가 방금 뛰었다.** 용량 압박은 여기서 잡히고, 신선도는 하루가
+    #   지난 만큼 다시 잰다 — 그래야 **그날 매입 판단**이 그 사실을 보고 결정한다.
+    #
+    # 🔴 **여기서는 닫지 않는다.** 그날 나갈 재고를 보기도 전에 «해결됐다» 고
+    #    적으면 *"며칠째"* 가 틀린다. 닫는 자리는 출고 뒤 한 칸이다.
+    #
+    # 🔴 **터져도 하루는 계속 간다.** `_stage` 와 같은 태도다.
+    inspection_inbound_status, inspection_inbound, note = _inspect(
+        AFTER_INBOUND, as_of=as_of, sim_run_id=sim_run_id, inspect_fn=inspect_fn
+    )
     notes.append(note)
 
     # ── 채권 — 🔴 **수금보다 앞이다** ───────────────────────────────
@@ -1348,6 +1423,18 @@ def run_scheduled_day(
     outbound_status, note = _stage("출고", lambda: outbound_fn(as_of, sim_run_id=sim_run_id))
     notes.append(note)
 
+    # ── 물류 점검 #2 — 🔴 **출고 바로 뒤 · 마감 앞** (2026-09-12 · #628) ──
+    #
+    # ★ **닫는 자리는 여기 하나다.** 조건을 없애는 사건(예약 · 출고 OUT · 폐기)이
+    #   다 끝난 뒤라, 그날 안에 닫아야 *"N일째"* 가 정확하다.
+    #
+    # ★ **마감 앞인 이유는 출고가 마감 앞인 이유와 같다** — 마감이 그날 재고를
+    #   적는데, 그 뒤에 창고를 다시 보면 요약과 장부가 서로 다른 하루를 말한다.
+    inspection_outbound_status, inspection_outbound, note = _inspect(
+        AFTER_OUTBOUND, as_of=as_of, sim_run_id=sim_run_id, inspect_fn=inspect_fn
+    )
+    notes.append(note)
+
     # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
     #
     # ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 앞에서 닫으면 그날 재고가
@@ -1372,6 +1459,10 @@ def run_scheduled_day(
         pending_transition_status=pending_transition_status,
         pending_transition=pending_transition,
         inbound_status=inbound_status,
+        inspection_inbound_status=inspection_inbound_status,
+        inspection_inbound=inspection_inbound,
+        inspection_outbound_status=inspection_outbound_status,
+        inspection_outbound=inspection_outbound,
         receivable_status=receivable_status,
         collection_status=collection_status,
         procurement_status="RAN",
@@ -1386,6 +1477,37 @@ def run_scheduled_day(
         sales_approval=sales_approval,
         notes=tuple(notes),
     )
+
+
+def _inspect(
+    phase: str,
+    *,
+    as_of: date,
+    sim_run_id: str,
+    inspect_fn: Callable[..., InspectionOut],
+) -> tuple[str, InspectionOut | None, str]:
+    """물류 점검 한 칸 (2026-09-12 · #628). **예외를 값으로 옮긴다.**
+
+    🔴 **`_stage` 를 그대로 못 쓴다.** 저쪽은 `(상태, 사유)` 만 돌려주는데, 요약이
+       *"그날 문제를 몇 개 열고 몇 개 닫았나"* 를 세려면 **낸 값 자체**가 하루 결과에
+       실려야 한다 (`_maintain` · `_retry_pending` 과 같은 모양).
+
+    ★ **스위치가 없다.** `auto_maintain` 과 다르다 — 점검은 창고를 **안 바꾸고**
+      표 하나에 행만 남긴다. 끄고 켜는 값을 두면 *"어제는 문제였는데 오늘은
+      아니다"* 가 데이터가 아니라 설정으로 갈린다.
+
+    🔴 **터져도 하루는 계속 간다.** `run_logistics_inspection` 이 예외를 안 내겠다고
+       적어 뒀지만 여기서 한 번 더 잡는다 — 하루의 진행이 그 약속에 걸리면 안 된다.
+
+    :returns: `(칸 상태, 낸 값, 사유 한 줄)`.
+    """
+    try:
+        out = inspect_fn(as_of, sim_run_id=sim_run_id, phase=phase)
+    except Exception as exc:  # noqa: BLE001 - 점검이 터져도 하루는 계속 간다.
+        return "FAILED", None, f"물류 점검({phase})이 터졌다: {type(exc).__name__}: {exc}"
+    status = str(getattr(out, "status", "FAILED"))
+    # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇이 열리고 닫혔는지가 이 줄이다.
+    return status, out, f"물류 점검({phase}): {status} {getattr(out, 'reason', '')}".strip()
 
 
 def _maintain(
@@ -1658,6 +1780,7 @@ def wake_up(
     maintain_fn: Callable[..., MaintenanceOut] = run_auto_maintenance,
     retry_fn: Callable[..., RetryOut] = retry_pending_transitions,
     receive_fn: Callable[..., Any] = receive_arrivals,
+    inspect_fn: Callable[..., InspectionOut] = run_logistics_inspection,
     issue_fn: Callable[..., Any] = issue_receivables,
     collect_fn: Callable[..., Any] = collect_receipts,
     procure_fn: Callable[..., Any] = run_procurement,
@@ -1713,6 +1836,7 @@ def wake_up(
         maintain_fn=maintain_fn,
         retry_fn=retry_fn,
         receive_fn=receive_fn,
+        inspect_fn=inspect_fn,
         issue_fn=issue_fn,
         collect_fn=collect_fn,
         procure_fn=procure_fn,

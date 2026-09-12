@@ -49,6 +49,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.contracts.core import Evidence, SuggestedAdjustment
+from app.logistics.agent.schemas import snapshot_observed_as_of
 from app.logistics.interpretation import (
     build_sanitized_context,
     master_interpretation_service,
@@ -799,6 +800,11 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         business_status="ok",
         payload=payload,
         evidences=tuple(evidences),
+        # 🔴 **재 봤더니 못 쟀다** — 기본값을 그대로 둔 것이 아니다 (#628 Commit 2).
+        #    네 Mode 의 회신은 전부 정책값(용량 · 리드타임 · 임계 비율 · 보관한계)을
+        #    계산에 넣는데 그 표들에 유효일 칸이 없어, 규칙(§18)대로 결과가 `None` 이다.
+        #    ⚠️ **`as_of` 로 메우지 않는다** — 메우면 «안 쟀다» 가 «쟀다» 로 세어진다.
+        observed_at=snapshot_observed_as_of(snapshot),
         # 조회는 판정을 내지 않는다 — cap_by_date_policy 는 경계 해석이라 여기 없다
         judgment_fields=(),
         missing_data=tuple(missing),
@@ -1220,6 +1226,11 @@ def _pre_purchase(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         business_status="ok" if rules["runtime_status"] == "READY" else "skipped",
         payload=payload,
         evidences=tuple(evidences),
+        # 🔴 **재 봤더니 못 쟀다** — 기본값을 그대로 둔 것이 아니다 (#628 Commit 2).
+        #    네 Mode 의 회신은 전부 정책값(용량 · 리드타임 · 임계 비율 · 보관한계)을
+        #    계산에 넣는데 그 표들에 유효일 칸이 없어, 규칙(§18)대로 결과가 `None` 이다.
+        #    ⚠️ **`as_of` 로 메우지 않는다** — 메우면 «안 쟀다» 가 «쟀다» 로 세어진다.
+        observed_at=snapshot_observed_as_of(snapshot),
         judgment_fields=_JUDGMENT_FIELDS,
         missing_data=tuple(dict.fromkeys(missing)),
         reasoning="물류 경계를 산출했다.",
@@ -1779,6 +1790,11 @@ def _pre_sales(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         business_status="ok",
         payload=payload,
         evidences=tuple(evidences),
+        # 🔴 **재 봤더니 못 쟀다** — 기본값을 그대로 둔 것이 아니다 (#628 Commit 2).
+        #    네 Mode 의 회신은 전부 정책값(용량 · 리드타임 · 임계 비율 · 보관한계)을
+        #    계산에 넣는데 그 표들에 유효일 칸이 없어, 규칙(§18)대로 결과가 `None` 이다.
+        #    ⚠️ **`as_of` 로 메우지 않는다** — 메우면 «안 쟀다» 가 «쟀다» 로 세어진다.
+        observed_at=snapshot_observed_as_of(snapshot),
         # 판매 승인·거절을 내지 않는다 — 낸 것이 없으니 근거를 요구할 판정도 없다
         judgment_fields=(),
         missing_data=tuple(dict.fromkeys(missing)),
@@ -2303,6 +2319,11 @@ def _scenario_validation(request: AgentRequest) -> tuple[AgentReply, ExecutionMe
         business_status=payload["verdict"],
         payload=payload,
         evidences=evidences,
+        # 🔴 **재 봤더니 못 쟀다** — 기본값을 그대로 둔 것이 아니다 (#628 Commit 2).
+        #    네 Mode 의 회신은 전부 정책값(용량 · 리드타임 · 임계 비율 · 보관한계)을
+        #    계산에 넣는데 그 표들에 유효일 칸이 없어, 규칙(§18)대로 결과가 `None` 이다.
+        #    ⚠️ **`as_of` 로 메우지 않는다** — 메우면 «안 쟀다» 가 «쟀다» 로 세어진다.
+        observed_at=snapshot_observed_as_of(snapshot),
         suggested_adjustments=tuple(suggested),
         # 조정 제안이 있다는 것은 "이 안 그대로는 안 되고 재검토가 필요하다"다 —
         # 라우팅은 마스터 몫이고 여기서는 사실만 표시한다 (AgentReply docstring).
