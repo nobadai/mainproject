@@ -27,6 +27,7 @@ from app.logistics.agent import tools as agent_tools
 from app.logistics.agent.schemas import ExceptionEvidence, ExceptionRow
 from app.logistics.agent.tools import (
     ACTION_UNSUPPORTED,
+    DETECT_WRITTEN_DETAILS,
     IMPACT_INPUT_MISSING,
     MUTABLE_EXCEPTION_DETAILS,
     SUPPORTED_ACTIONS,
@@ -278,6 +279,7 @@ def _exception_row(
     opened: date = date(2026, 1, 1),
     last_detected: date,
     observed: date | None = None,
+    resolved: date | None = None,
 ) -> ExceptionRow:
     return ExceptionRow(
         exception_id="EX-1",
@@ -300,6 +302,7 @@ def _exception_row(
             ),
         ),
         detector_version="v1",
+        resolved_as_of=resolved,
         note="지금 값",
     )
 
@@ -320,9 +323,56 @@ def test_detail_touched_after_as_of_is_never_shown():
     assert fact.severity is None
     assert fact.evidence is None
     assert fact.last_detected_as_of is None
-    assert fact.note is None
     assert fact.evidence_observed_as_of is None
-    assert set(MUTABLE_EXCEPTION_DETAILS) <= set(fact.unresolved_details)
+    assert set(DETECT_WRITTEN_DETAILS) <= set(fact.unresolved_details)
+
+
+def test_a_future_resolve_never_leaks_its_note_backwards():
+    """```text
+    D5  마지막 Detect   last_detected_as_of = D5
+    D8  resolve         note = "폐기 완료"     ← 🔴 last_detected 는 D5 그대로다
+    as_of=D5 조회에 «폐기 완료» 가 실리면 미래 정보 누수다
+    ```
+
+    🔴 **게이트가 둘이어야 하는 이유다.** `resolve_exception` 은 `note` 를 덮으면서
+       `last_detected_as_of` 를 안 건드린다 — 그 하나만 보면 이 note 가 통과한다.
+    """
+    row = _exception_row(
+        severity="HIGH",
+        status="RESOLVED",
+        last_detected=date(2026, 1, 5),
+        resolved=date(2026, 1, 8),
+    )
+
+    fact = _exception_fact(row, as_of=date(2026, 1, 5))
+
+    assert fact.note is None
+    assert "note" in fact.unresolved_details
+    assert fact.detail_known is False
+    # ★ 그래도 `resolve` 가 **안 건드리는** 칸은 그대로 증명된다.
+    assert fact.severity == "HIGH"
+    assert fact.last_detected_as_of == date(2026, 1, 5)
+
+
+def test_both_gates_must_pass_for_detail_to_be_known():
+    """`detail_known` 은 **전부 증명됐을 때만** 참이다 — 어느 칸인지는 이름이 말한다."""
+    clean = _exception_fact(
+        _exception_row(last_detected=date(2026, 1, 5)), as_of=date(2026, 1, 5)
+    )
+    touched_later = _exception_fact(
+        _exception_row(last_detected=date(2026, 1, 8)), as_of=date(2026, 1, 5)
+    )
+    resolved_later = _exception_fact(
+        _exception_row(
+            status="RESOLVED", last_detected=date(2026, 1, 5), resolved=date(2026, 1, 8)
+        ),
+        as_of=date(2026, 1, 5),
+    )
+
+    assert clean.detail_known is True and clean.unresolved_details == ()
+    assert touched_later.detail_known is False
+    assert resolved_later.detail_known is False
+    assert set(MUTABLE_EXCEPTION_DETAILS) == set(DETECT_WRITTEN_DETAILS) | {"note"}
 
 
 def test_lifecycle_facts_survive_even_when_detail_is_unknown():

@@ -68,6 +68,7 @@ __all__ = [
     "ACTION_UNSUPPORTED",
     "ARRIVAL_DATE_OUTSIDE_WINDOW",
     "CAPACITY_WINDOW_UNRESOLVED",
+    "DETECT_WRITTEN_DETAILS",
     "EXCEPTION_DETAIL_UNRESOLVED",
     "IMPACT_INPUT_MISSING",
     "ITEM_NOT_FOUND",
@@ -75,6 +76,7 @@ __all__ = [
     "LOT_NOT_FOUND",
     "MUTABLE_EXCEPTION_DETAILS",
     "POLICY_NOT_HISTORICAL",
+    "RESOLVE_WRITTEN_DETAILS",
     "SNAPSHOT_AS_OF_MISMATCH",
     "SUPPORTED_ACTIONS",
     "ActionImpact",
@@ -131,17 +133,38 @@ ARRIVAL_DATE_OUTSIDE_WINDOW = "ARRIVAL_DATE_OUTSIDE_WINDOW"
 #: `touch_exception` 이 그 칸들을 매일 덮는다. 지금 값을 과거 답에 실으면 look-ahead 다.
 EXCEPTION_DETAIL_UNRESOLVED = "EXCEPTION_DETAIL_UNRESOLVED"
 
-#: `touch_exception` 이 **매일 덮는** 칸들. 그날 값을 증명할 수 없으면 전부 비운다.
+#: `touch_exception` 이 덮는 칸들. **날짜는 `last_detected_as_of` 하나다.**
+DETECT_WRITTEN_DETAILS: tuple[str, ...] = (
+    "severity",
+    "evidence",
+    "last_detected_as_of",
+    "observed_as_of",
+)
+
+#: `resolve_exception` 이 덮는 칸. **날짜는 `resolved_as_of` 다.**
+#:
+#: 🔴 **writer 가 둘이라 게이트도 둘이다 (v0.9 보정).** 닫는 문장은
+#:    `note = COALESCE(%(note)s, note)` 이고 **`last_detected_as_of` 를 안 건드린다** —
+#:    그래서 `last_detected_as_of <= as_of` 하나만 보면 그 뒤 `resolve` 가 적은 note 가
+#:    과거 답에 그대로 실린다.
+#:
+#: ```text
+#: D5  마지막 Detect   last_detected_as_of = D5
+#: D8  resolve         note = "폐기 완료"        ← last_detected 는 D5 그대로다
+#: as_of=D5 조회에 «폐기 완료» 가 실리면 미래 정보 누수다
+#: ```
+#:
+#: ⚠️ `COALESCE` 라 **덮였는지 아닌지조차** 행만 보고는 못 가른다 — fail-closed 다.
+RESOLVE_WRITTEN_DETAILS: tuple[str, ...] = ("note",)
+
+#: 표가 과거 값을 안 들고 있는 칸 **전부**. 그날 값을 증명할 수 없으면 비운다.
 #:
 #: ★ *"그날 살아 있었다"* 와 *"그날 severity 가 무엇이었다"* 는 **다른 문제다.**
 #:   앞엣것은 두 날짜(`opened_as_of` · `resolved_as_of`)로 증명되지만, 뒤엣것은
 #:   표에 과거 값이 없어 증명할 길이 없다. 🔴 **지어내지 않고 비운다.**
 MUTABLE_EXCEPTION_DETAILS: tuple[str, ...] = (
-    "severity",
-    "evidence",
-    "last_detected_as_of",
-    "observed_as_of",
-    "note",
+    *DETECT_WRITTEN_DETAILS,
+    *RESOLVE_WRITTEN_DETAILS,
 )
 
 
@@ -651,8 +674,12 @@ def get_open_exceptions(conn: Any, *, sim_run_id: str, as_of: date) -> OpenExcep
         observed_as_of=derive_observed_as_of(
             [
                 membership,
+                # ★ **비운 칸은 사실을 안 싣는다** — 관측일에도 안 든다. 근거를 실은
+                #   행만 그 근거의 관측일로 셈한다 (`detect_known` 이 그 게이트다).
                 *(
-                    fact.evidence_observed_as_of if fact.detail_known else None
+                    fact.evidence_observed_as_of
+                    if "evidence" not in fact.unresolved_details
+                    else None
                     for fact in facts
                 ),
             ]
@@ -669,11 +696,24 @@ def _exception_fact(row: ExceptionRow, *, as_of: date) -> ExceptionFact:
     🔴 `last_detected_as_of > as_of` 는 *"그 뒤에 갱신됐다"* 는 뜻이라 detail 을 못 쓴다.
        그 사이 값이 무엇이었는지는 표 어디에도 없다 — 새 이력 표를 만들지 않는다(§26).
     """
-    detail_known = row.last_detected_as_of <= as_of
+    # ── 게이트 둘 — **writer 가 둘이라 날짜도 둘이다** (v0.9 보정) ──────
+    #
+    # 🔴 `touch_exception` 과 `resolve_exception` 이 서로 다른 칸을 서로 다른 날짜로
+    #    덮는다. 한 게이트로 묶으면 둘 중 하나가 반드시 샌다 —
+    #    `last_detected_as_of` 만 보면 미래 `resolve` 의 note 가 새고,
+    #    `resolved_as_of` 만 보면 미래 `touch` 의 severity 가 샌다.
+    detect_known = row.last_detected_as_of <= as_of
+    # ★ 살아 있는 행이면 `resolved_as_of` 는 `None` 이거나 `as_of` 뒤다 — 뒤엣것이면
+    #   그 닫는 문장이 note 를 덮었는지 못 가른다(`COALESCE`). 일반형으로 적어 둔다.
+    note_known = row.resolved_as_of is None or row.resolved_as_of <= as_of
     # 상태는 앞으로만 간다 — 지금 `OPEN` 이면 그 전에도 `OPEN` 이었다.
     # 그 밖(`PROPOSED` · 그날 뒤에 닫힌 행)은 넘어간 날을 적는 칸이 없어 못 댄다.
     status = "OPEN" if row.status == "OPEN" else None
-    unresolved = [*(() if detail_known else MUTABLE_EXCEPTION_DETAILS)]
+
+    unresolved = [
+        *(() if detect_known else DETECT_WRITTEN_DETAILS),
+        *(() if note_known else RESOLVE_WRITTEN_DETAILS),
+    ]
     if status is None:
         unresolved.append("status")
     return ExceptionFact(
@@ -686,12 +726,14 @@ def _exception_fact(row: ExceptionRow, *, as_of: date) -> ExceptionFact:
         previous_exception_id=row.previous_exception_id,
         open_days=(as_of - row.opened_as_of).days + 1,
         status=status,
-        detail_known=detail_known,
-        severity=row.severity if detail_known else None,
-        evidence=row.evidence if detail_known else None,
-        last_detected_as_of=row.last_detected_as_of if detail_known else None,
-        note=row.note if detail_known else None,
-        evidence_observed_as_of=row.observed_as_of if detail_known else None,
+        # 🔴 **전부 증명됐을 때만 참이다.** 한 칸이라도 못 대면 거짓이고, 어느 칸인지는
+        #    `unresolved_details` 가 이름으로 말한다.
+        detail_known=detect_known and note_known,
+        severity=row.severity if detect_known else None,
+        evidence=row.evidence if detect_known else None,
+        last_detected_as_of=row.last_detected_as_of if detect_known else None,
+        note=row.note if note_known else None,
+        evidence_observed_as_of=row.observed_as_of if detect_known else None,
         unresolved_details=tuple(unresolved),
     )
 
@@ -1024,12 +1066,20 @@ def get_inbound_schedule(
        아니라 **취소**로도 바뀐다.
 
     ```text
-    D1  A 생성 · D2  B 생성 · D7  B 취소
-    D8 의 답 = [A]        ← 이 답은 **D7 부터** 참이다. D1 이라고 하면 거짓이다
+    D1  A 생성 (ETA D9) · D2  B 생성 (ETA D10) · D7  B 취소
+    D8 · 창 D8~D11 의 답 = [A]   ← 이 답은 **D7 부터** 참이다. D1 이라고 하면 거짓이다
     ```
 
        그래서 목록을 바꾼 다섯 축(생성 · 취소 · 도착 · 재고화 · 원장 IN)의 날을 전부
        모아 `max` 를 낸다 (`inbound_schedules.schedule_fact_dates_at`).
+
+    🔴 **그리고 그 셈을 이 답의 창으로 가둔다 (v0.9 보정).** 창 밖 일정의 사건은 이 답을
+       바꾸지 않는다 — 세면 관측일이 근거 없이 늦어진다.
+
+    ```text
+    D1  A 생성 (ETA D9) · D7  B 생성 (ETA D100)
+    D8 · 창 D8~D11 의 답 = [A]   ← B 는 애초에 이 답에 없다. D7 을 세면 거짓이다
+    ```
 
     :param days: 창 길이. 기본이자 상한이 `cap_by_date` 창(`18`)이다 — 용량 판정이
         보는 창보다 멀리 보면 «판정에 안 들어간 입고» 가 조사에 섞인다.
@@ -1045,9 +1095,12 @@ def get_inbound_schedule(
         for view in load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
         if view.expected_arrival_date <= window_end
     ]
-    # ★ 창 밖으로 거른 것은 관측일에 안 든다 — `expected_arrival_date` 는 불변이라
-    #   (바꾸면 `ScheduleConflict` 다) 그 거르기가 새 사건을 만들지 않는다.
-    changed_on = schedule_fact_dates_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+    # 🔴 **Reader 에게 같은 창을 준다 (v0.9 보정).** 창 밖 일정의 생성·취소는 이 답을
+    #    바꾸지 않으므로 관측일에 들면 안 된다 — 안 주면 `ETA D100` 짜리 일정 하나가
+    #    이 답의 관측일을 근거 없이 늦춘다.
+    changed_on = schedule_fact_dates_at(
+        conn, sim_run_id=sim_run_id, as_of=as_of, window_end=window_end
+    )
     return InboundPlan(
         sim_run_id=sim_run_id,
         as_of=as_of,

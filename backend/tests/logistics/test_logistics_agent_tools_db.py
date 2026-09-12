@@ -526,6 +526,68 @@ def test_a_cancellation_shapes_the_inbound_collection_observed_at(
     assert result.observed_as_of != D1
 
 
+def test_a_schedule_outside_the_window_never_delays_the_observed_at(
+    conn: psycopg.Connection,
+) -> None:
+    """```text
+    D1  A 생성 (ETA D9)     D7  B 생성 (ETA D100)
+    D8 · days=3 → 창 D8~D11 · 답 = [A]
+    ```
+
+    🔴 **B 는 애초에 이 답에 없다.** 그 D7 생성이 관측일을 늦추면 *"결과와 무관한
+       사건"* 이 provenance 를 바꾼 것이 된다.
+    """
+    _schedule_row(conn, inbound_id="INB-A", eta=D8 + timedelta(days=1), created=D1)
+    _schedule_row(conn, inbound_id="INB-FAR", eta=D8 + timedelta(days=92), created=D7)
+
+    result = get_inbound_schedule(conn, sim_run_id=SIM, as_of=D8, days=3)
+
+    assert [one.inbound_id for one in result.schedules] == ["INB-A"]
+    assert result.observed_as_of == D1
+    assert result.observed_as_of != D7
+
+
+def test_a_cancel_outside_the_window_never_delays_the_observed_at(
+    conn: psycopg.Connection,
+) -> None:
+    """```text
+    D1  A 생성 (ETA D9)     D2  B 생성 (ETA D100)     D7  B 취소
+    D8 · days=3 → 창 D8~D11 · 답 = [A]
+    ```
+
+    ⚠️ **취소라고 무조건 세지 않는다.** B 는 창 밖이라 있으나 없으나 이 답이 같다 —
+       그 취소는 이 답을 만든 사건이 아니다.
+    """
+    _schedule_row(conn, inbound_id="INB-A", eta=D8 + timedelta(days=1), created=D1)
+    _schedule_row(
+        conn, inbound_id="INB-FAR", eta=D8 + timedelta(days=92), created=D5, cancelled=D7
+    )
+
+    result = get_inbound_schedule(conn, sim_run_id=SIM, as_of=D8, days=3)
+
+    assert [one.inbound_id for one in result.schedules] == ["INB-A"]
+    assert result.observed_as_of == D1
+
+
+def test_a_cancel_inside_the_window_still_counts(conn: psycopg.Connection) -> None:
+    """🔴 **창 안 일정의 취소는 반대로 반드시 센다** — 그것이 이 답을 만든 사건이다.
+
+    ```text
+    D1  A 생성 (ETA D9)     D2  B 생성 (ETA D10)     D7  B 취소
+    D8 · days=3 → 창 D8~D11 · 답 = [A]   ← 이 답은 **D7 부터** 참이다
+    ```
+    """
+    _schedule_row(conn, inbound_id="INB-A", eta=D8 + timedelta(days=1), created=D1)
+    _schedule_row(
+        conn, inbound_id="INB-B", eta=D8 + timedelta(days=2), created=D5, cancelled=D7
+    )
+
+    result = get_inbound_schedule(conn, sim_run_id=SIM, as_of=D8, days=3)
+
+    assert [one.inbound_id for one in result.schedules] == ["INB-A"]
+    assert result.observed_as_of == D7
+
+
 def test_inbound_collection_observed_at_is_none_when_nothing_happened(
     conn: psycopg.Connection,
 ) -> None:
@@ -624,6 +686,63 @@ def test_mutable_exception_detail_never_leaks_backwards(conn: psycopg.Connection
     # ★ lifecycle 은 그대로 증명된다.
     assert fact.exception_id == "EX-1" and fact.opened_as_of == D1 and fact.open_days == 5
     assert fact.status == "OPEN"
+
+
+def test_a_future_resolve_note_never_leaks_backwards(conn: psycopg.Connection) -> None:
+    """```text
+    D1  OPEN
+    D5  마지막 Detect        last_detected_as_of = D5
+    D8  resolve              note = "resolved later"   ← 🔴 last_detected 는 D5 그대로다
+    ```
+
+    🔴 **`last_detected_as_of <= as_of` 하나만 보면 이 note 가 D5 답에 실린다.**
+       `resolve_exception` 이 `note` 를 덮으면서 `last_detected_as_of` 를 안 건드리기
+       때문이다 — 그래서 게이트가 둘이어야 한다.
+    """
+    _open_exception_row(conn, exception_id="EX-1", opened=D1)
+    touch_exception(
+        conn,
+        exception_id="EX-1",
+        severity="HIGH",
+        evidence=(
+            ExceptionEvidence(
+                fact="remaining_qty_kg",
+                value=Decimal(500),
+                unit="kg",
+                source="inventory_lots",
+                source_id="LOT-BAECHU",
+            ),
+        ),
+        last_detected_as_of=D5,
+        observed_as_of=None,
+    )
+    resolve_exception(
+        conn, exception_id="EX-1", as_of=D8, resolved_by="LOT_EMPTY", note="resolved later"
+    )
+
+    at_d5 = get_open_exceptions(conn, sim_run_id=SIM, as_of=D5)
+
+    # ★ 그 문제는 D5 에 **살아 있었다** — 목록에는 있어야 한다.
+    assert [one.exception_id for one in at_d5.exceptions] == ["EX-1"]
+    fact = at_d5.exceptions[0]
+    assert fact.note is None, "D8 에 적힌 note 가 D5 답에 실렸다"
+    assert "note" in fact.unresolved_details
+    assert fact.detail_known is False
+    assert f"{EXCEPTION_DETAIL_UNRESOLVED}:EX-1" in at_d5.uncertainties
+    # 🔴 `resolve` 가 안 건드리는 칸은 그대로 증명된다 — 통째로 비우지 않는다.
+    assert fact.severity == "HIGH"
+    assert fact.last_detected_as_of == D5
+
+
+def test_a_resolved_exception_is_gone_from_its_close_date(conn: psycopg.Connection) -> None:
+    """lifecycle 은 그대로다 — `as_of >= resolved_as_of` 면 살아 있는 목록에서 빠진다."""
+    _open_exception_row(conn, exception_id="EX-1", opened=D1)
+    resolve_exception(
+        conn, exception_id="EX-1", as_of=D8, resolved_by="LOT_EMPTY", note="resolved later"
+    )
+
+    assert get_open_exceptions(conn, sim_run_id=SIM, as_of=D8).exceptions == ()
+    assert get_open_exceptions(conn, sim_run_id=SIM, as_of=D10).exceptions == ()
 
 
 def test_detail_is_visible_once_the_day_catches_up(conn: psycopg.Connection) -> None:

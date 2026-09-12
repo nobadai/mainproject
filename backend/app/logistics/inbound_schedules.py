@@ -666,8 +666,10 @@ def _reject_broken_reference(
         )
 
 
-def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[date, ...]:
-    """그날까지 **일정 조회의 답을 바꾼 모든 날**. 🔴 읽기만 한다.
+def schedule_fact_dates_at(
+    conn: Any, *, sim_run_id: str, as_of: date, window_end: date
+) -> tuple[date, ...]:
+    """그날까지 **그 창의 답을 바꾼 모든 날**. 🔴 읽기만 한다.
 
     ```text
     목록에 들고 남    created_as_of                    장부에 선 날
@@ -681,9 +683,26 @@ def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[
       왔나» 두 가지인데, 앞엣것만 세면 뒤엣것을 바꾼 날이 안 보인다.
 
     ```text
-    D1  A 생성        D2  B 생성        D7  B 취소
-    D8 의 답 = [A]    ← 이 답은 D7 부터 참이다. D2 라고 하면 거짓이다
+    D1  A 생성 (ETA D9)   D2  B 생성 (ETA D10)   D7  B 취소
+    D8·창 D8~D11 의 답 = [A]   ← 이 답은 D7 부터 참이다. D2 라고 하면 거짓이다
     ```
+
+    🔴 **`window_end` 가 필수인 이유 (v0.9 보정).** 창 밖 일정의 사건은 그 답을 **바꾸지
+       않는다** — 세면 관측일이 근거 없이 늦어진다.
+
+    ```text
+    D1  A 생성 (ETA D9)   D7  B 생성 (ETA D100)
+    D8·창 D8~D11 의 답 = [A]   ← B 는 애초에 이 답에 없다. D7 을 세면 거짓이다
+    ```
+
+    ★ **취소된 일정도 창 안이면 센다.** 지금 목록에 없어도 *"D7 에 내려가서 오늘 답이
+      이렇다"* 를 만든 것이 그 취소다. 그래서 살아 있는 일정만 보지 않고 **그 창에
+      속했던 일정 전체**를 본다.
+
+    ⚠️ **창 기준은 Tool 과 글자 그대로 같아야 한다** — `expected_arrival_date <= window_end`
+       하나뿐이다. `>= as_of` 같은 하한을 여기서 더하면 연체된 미도착(overdue)을 Tool 은
+       세는데 Reader 는 안 세게 되어 **둘이 다른 집합을 본다.**
+       (`expected_arrival_date` 는 `ScheduleConflict` 가 지켜 사실상 불변이라 창 판정에 쓸 수 있다.)
 
     ⚠️ **이 실행의 일정에 매달린 사건만 센다.** 실행 전체의 입고를 세면 답과 무관한
        날이 섞여 관측일이 **실제보다 늦어진다** — 늦은 쪽으로 틀리는 것도 틀린 것이다.
@@ -695,11 +714,14 @@ def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[
             """
             SELECT s.created_as_of AS changed_on
               FROM {schema}.inbound_schedules s
-             WHERE s.sim_run_id = %(sim)s AND s.created_as_of <= %(as_of)s
+             WHERE s.sim_run_id = %(sim)s
+               AND s.expected_arrival_date <= %(window_end)s
+               AND s.created_as_of <= %(as_of)s
             UNION
             SELECT s.cancelled_as_of
               FROM {schema}.inbound_schedules s
              WHERE s.sim_run_id = %(sim)s
+               AND s.expected_arrival_date <= %(window_end)s
                AND s.cancelled_as_of IS NOT NULL
                AND s.cancelled_as_of <= %(as_of)s
             UNION
@@ -707,14 +729,18 @@ def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[
               FROM {schema}.inbound_receipts r
               JOIN {schema}.inbound_schedules s
                 ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
-             WHERE r.sim_run_id = %(sim)s AND r.arrived_at <= %(as_of)s
+             WHERE r.sim_run_id = %(sim)s
+               AND s.expected_arrival_date <= %(window_end)s
+               AND r.arrived_at <= %(as_of)s
             UNION
             SELECT l.received_at
               FROM {schema}.inventory_lots l
               JOIN {schema}.inbound_receipts r ON r.receipt_id = l.inbound_receipt_id
               JOIN {schema}.inbound_schedules s
                 ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
-             WHERE l.sim_run_id = %(sim)s AND l.received_at <= %(as_of)s
+             WHERE l.sim_run_id = %(sim)s
+               AND s.expected_arrival_date <= %(window_end)s
+               AND l.received_at <= %(as_of)s
             UNION
             SELECT mv.moved_at
               FROM {schema}.inventory_moves mv
@@ -723,12 +749,13 @@ def schedule_fact_dates_at(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[
               JOIN {schema}.inbound_schedules s
                 ON s.sim_run_id = r.sim_run_id AND s.inbound_id = r.inbound_id
              WHERE mv.sim_run_id = %(sim)s
+               AND s.expected_arrival_date <= %(window_end)s
                AND mv.move_type = 'IN'
                AND mv.moved_at <= %(as_of)s
              ORDER BY 1
             """
         ).format(schema=schema),
-        {"sim": sim_run_id, "as_of": as_of},
+        {"sim": sim_run_id, "as_of": as_of, "window_end": window_end},
     )
     return tuple(row["changed_on"] for row in rows)
 
