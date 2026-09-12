@@ -29,8 +29,8 @@ const TABS = [
   { href: "/console", label: "대시보드", mark: "D", group: "top" },
   { href: "/console/forecast", label: "가격 예측", mark: "ML", group: "dept" },
   { href: "/console/purchase", label: "매입", mark: "PU", group: "dept" },
-  { href: "/console/finance", label: "재무", mark: "FN", group: "dept" },
   { href: "/console/inventory", label: "재고 · 물류", mark: "LG", group: "dept" },
+  { href: "/console/finance", label: "재무", mark: "FN", group: "dept" },
   { href: "/console/sales", label: "판매", mark: "SL", group: "dept" },
 ] as const;
 

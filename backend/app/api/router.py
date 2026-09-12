@@ -20,11 +20,14 @@
 
 from fastapi import APIRouter
 
+from app.api.console.routes import router as console_router
 from app.api.dashboard.routes import router as dashboard_router
+from app.api.finance.console_routes import router as finance_console_router
 from app.api.finance.routes import router as finance_router
 from app.api.forecast.routes import router as forecast_router
 from app.api.logistics.routes import router as logistics_router
 from app.api.purchase.routes import router as purchase_router
+from app.api.sales.console_routes import router as sales_console_router
 from app.api.sales.routes import router as sales_router
 
 router = APIRouter(prefix="/api")
@@ -36,5 +39,8 @@ for _child in (
     finance_router,
     logistics_router,
     sales_router,
+    finance_console_router,
+    sales_console_router,
+    console_router,
 ):
     router.include_router(_child)

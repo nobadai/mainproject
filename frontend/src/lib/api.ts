@@ -196,3 +196,130 @@ export function runReport(requestId: string): Promise<RunReport> {
 export function health(): Promise<{ status: string }> {
   return call<{ status: string }>("/health");
 }
+
+/* ── 판매 후보 생성 ─────────────────────────────────────────────────────── */
+
+/**
+ * 운영 콘솔이 보내는 판매 요청.
+ *
+ * 🔴 **업무 요청 수준만 보낸다.** 원가·여신·마진·물류 판정·`end_code` 는 여기 없다 —
+ *    그것은 각 도메인이 답할 몫이고, 화면이 실어 보내면 판정이 화면에서 시작된다.
+ *
+ * ★ `source_ref` 는 *"이 상업조건을 누가 정했나"* 다. 콘솔에서 사람이 조건을 적었으니
+ *   출처는 **이 요청 자체**이고, 그 사실을 그대로 적는다. 없으면 재무가 입력 미비로
+ *   판정을 닫는다 (실측 2026-09-11 · `SALES_INPUT_INCOMPLETE`).
+ */
+export interface SalesRunRequest {
+  as_of: string;
+  sim_run_id: string;
+  business_mode: "SPOT_SALES" | "CONTRACT_FULFILLMENT" | "CONTRACT_PROPOSAL_NEW" | "CONTRACT_PROPOSAL_RENEWAL";
+  partner_id: string;
+  item: string;
+  requested_quantity_kg: string;
+  preferred_unit_price_krw?: string;
+  preferred_delivery_date?: string;
+  preferred_payment_days?: number;
+  preferred_payment_terms_type?: string;
+}
+
+export interface SalesCandidateOut {
+  scenario: Record<string, unknown>;
+  validations: Record<string, Record<string, unknown>>;
+  unroutable: string[];
+  missing_terms: string[];
+  passed: boolean;
+  unvalidated: boolean;
+  detail: string;
+}
+
+export interface SalesRunResponse {
+  request_id: string;
+  as_of: string;
+  end_code: string;
+  reason: string;
+  candidates: SalesCandidateOut[];
+  evidences: { claim?: string; source?: string; ref_id?: string | null }[];
+  report_text: string;
+  findings: string[];
+  concerns: string[];
+}
+
+/**
+ * 판매 후보를 만든다. **마스터가 순서를 소유한다** — 화면은 물류·재무를 직접 부르지
+ * 않는다.
+ *
+ * ⚠️ 상한은 실행(`execute`)과 같은 자리에 둔다. 물류 조회 → 판매 제안 → 재무 검증까지
+ *   한 번에 도는 호출이라 읽기 상한(20초)으로는 짧다.
+ */
+export function salesRun(request: SalesRunRequest): Promise<SalesRunResponse> {
+  return call<SalesRunResponse>(
+    "/master/sales/run",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...request,
+        policy_version: POLICY_VERSION,
+        trigger: "USER_REQUEST",
+        source_ref: `CONSOLE-SALES-REQUEST:${request.as_of}:${request.partner_id}:${request.item}`,
+      }),
+    },
+    EXECUTE_TIMEOUT_MS,
+  );
+}
+
+/* ── 거래처 기본정보 ────────────────────────────────────────────────────── */
+
+/**
+ * 거래처 원장 행.
+ *
+ * 🔴 **여신 한도가 없다.** 그 정본은 재무의 `partner_credit_limits` 이고, 여기에 칸을
+ *    하나 더 두면 두 곳이 서로 다른 한도를 말하는 날이 온다. `credit_source` 가 어디에
+ *    물어야 하는지를 말한다.
+ */
+export interface PartnerProfile {
+  partner_id: string;
+  partner_name: string;
+  partner_type: string;
+  client_type: string | null;
+  factory_region: string | null;
+  factory_city: string | null;
+  factory_area: string | null;
+  sales_collection_days: number | null;
+  pricing_contract_type: string | null;
+  active: boolean;
+  provisional: boolean;
+  note: string | null;
+  credit_source: string;
+}
+
+/** 보낸 칸만 고친다. **안 보낸 칸은 그대로다.** */
+export type PartnerProfileUpdate = Partial<
+  Pick<
+    PartnerProfile,
+    | "partner_name"
+    | "partner_type"
+    | "client_type"
+    | "factory_region"
+    | "factory_city"
+    | "factory_area"
+    | "sales_collection_days"
+    | "pricing_contract_type"
+    | "active"
+    | "note"
+  >
+>;
+
+export function partnerProfile(partnerId: string): Promise<PartnerProfile> {
+  return call<PartnerProfile>(`/sales/partners/${encodeURIComponent(partnerId)}/profile`);
+}
+
+/** 고친 뒤 **저장된 행**을 돌려받는다 — 화면이 믿는 값이 아니라 장부의 값이다. */
+export function savePartnerProfile(
+  partnerId: string,
+  update: PartnerProfileUpdate,
+): Promise<PartnerProfile> {
+  return call<PartnerProfile>(`/sales/partners/${encodeURIComponent(partnerId)}/profile`, {
+    method: "PATCH",
+    body: JSON.stringify(update),
+  });
+}
