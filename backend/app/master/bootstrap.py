@@ -72,7 +72,7 @@ def wire_registries() -> None:
     #
     #   mock 단가는 실 ML 예측에서 나온 상한을 못 넘는다 — 두 값의 출처가 달라서다.
     #
-    #       max_price          실 ML 예측 q90       배추 992 · 무 795
+    #       max_price          실 ML 예측 밴드 상단
     #       grade_unit_price   mock                 배추 1,650 · 무 1,100
     #
     #   그래서 self_check 가 전부 컷하고 `no_proposal_reason` 만 남았다. 실측으로
