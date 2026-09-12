@@ -465,6 +465,29 @@ class AgentReply:
     suggested_adjustments: tuple[SuggestedAdjustment, ...] = ()
     reasoning: str = ""
 
+    #: 🔴 **이 사실을 언제부터 알 수 있었나** (관측 기준시점 · 2026-09-12).
+    #:
+    #: `created_at` 이 **아니다.** DB 에 언제 적혔나는 적재의 사실이고, 이 칸은
+    #: *"그 값이 세상에 언제 드러났나"* 다. 9월 1일에 일어난 일을 9월 10일에
+    #: 적재했으면 `created_at` 은 9월 10일이고 `observed_at` 은 9월 1일이다.
+    #:
+    #: ★ **`ExecutionContext.as_of` 와 같은 `date` 다.** `datetime` 으로 넓히면
+    #:   비교 규칙이 둘로 갈린다 — 한쪽은 날짜로 자르고 한쪽은 시각으로 잘라서,
+    #:   같은 사실이 어느 자리를 지나느냐에 따라 룩어헤드가 됐다 안 됐다 한다.
+    #:
+    #: 🔴 **파생값은 가장 늦은 것을 따라간다.** 계산에 쓴 입력이 여럿이면 그중
+    #:   **가장 늦은** `observed_at` 이고, 하나라도 미지면 `None` 이다.
+    #:   ★ 이 칸은 안전을 재는 칸이 아니라 **위험을 드러내는** 칸이다 — 가장
+    #:   이른 것을 고르면 늦게 온 입력이 조용히 숨는다.
+    #:
+    #: 🔴 **`None` 은 「안 쟀다」이고 「미래를 봤다」와 다른 사실이다.**
+    #:   마스터가 `as_of` 로도 오늘 날짜로도 `created_at` 으로도 메우지 않는다 —
+    #:   메우는 순간 **안 잰 것이 잰 것으로 세어지고** 진도가 거짓이 된다.
+    #:
+    #: ⚠️ **아직 검사(게이트)를 걸지 않는다.** 아무도 안 실은 상태에서
+    #:   `observed_at > as_of` 를 막으면 전부 막힌다 — 이 판은 칸을 여는 데까지다.
+    observed_at: date | None = None
+
     needs_followup: bool = False
     additional_validation_required: bool = False
     missing_data: tuple[str, ...] = ()

@@ -1296,6 +1296,9 @@ def _steps(plan: ExecutionPlan) -> list[StepOut]:
             llm_attempts=s.llm_attempts,
             llm_fallback_used=s.llm_fallback_used,
             replans=s.replans,
+            # 🔴 **`None` 을 메우지 않는다.** 여기서 `plan.as_of` 를 넣으면
+            #    안 잰 부서가 잰 부서처럼 화면에 선다.
+            observed_at=s.observed_at,
             # 마스터는 읽지 않고 나른다 - 순서도 부서가 낸 그대로다
             observations=list(s.observations),
         )

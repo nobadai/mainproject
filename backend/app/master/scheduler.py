@@ -684,6 +684,22 @@ class ItemRunOutcome:
     #:   가 이미 `FAILED` 라고 말한다.
     llm_statuses: tuple[str, ...] = ()
 
+    #: 그 실행이 부른 **부서별 호출마다 하나씩** — 그 부서가 관측 기준시점을
+    #: 실었나 (2026-09-12). 주인은 `AgentReply.observed_at` 이다.
+    #:
+    #: 🔴 **`llm_statuses` 와 모양은 같은데 `None` 을 안 버린다.** 저쪽은 빈
+    #:   문자열을 걸러 내지만 이쪽의 `None` 은 **「안 쟀다」라는 값**이다 — 걸러
+    #:   내면 걷기가 *"몇 건이 아직 안 쟀는지"* 를 영영 못 센다. 이 칸이 생긴
+    #:   이유가 그 숫자다.
+    #:
+    #: ★ **`None` 은 「미래를 봤다」와 다른 사실이다.** 이 판은 세기만 한다 —
+    #:   `observed_at > as_of` 를 막는 검사는 여기 없다. 아무도 안 채운 상태에서
+    #:   걸면 전부 막힌다.
+    #:
+    #: ⚠️ **못 돈 품목은 비었다** — `llm_statuses` 와 같다. 계획이 없으면 셀
+    #:   자리도 없고, 그것은 *"안 쟀다"* 가 아니라 **"셀 것이 없었다"** 다.
+    observed_ats: tuple[date | None, ...] = ()
+
 
 @dataclass(frozen=True)
 class DayRunOutcome:
@@ -1217,6 +1233,7 @@ def run_scheduled_day(
                 status="RAN",
                 end_code=str(getattr(response, "end_code", "")) or None,
                 llm_statuses=_llm_statuses(response),
+                observed_ats=_observed_ats(response),
             )
         )
 
@@ -1299,6 +1316,7 @@ def run_scheduled_day(
                 #    접으면 그 날 무슨 답이 났는지를 세는 자리가 통째로 거짓이 된다.
                 end_code=str(getattr(sales_response, "end_code", "")) or None,
                 llm_statuses=_llm_statuses(sales_response),
+                observed_ats=_observed_ats(sales_response),
             )
         )
     sales_status = _fold_item_statuses(sales_results)
@@ -1531,6 +1549,31 @@ def _llm_statuses(response: Any) -> tuple[str, ...]:
         str(getattr(step, "llm_status", "") or "")
         for step in (getattr(response, "plan", None) or ())
         if getattr(step, "llm_status", "")
+    )
+
+
+def _observed_ats(response: Any) -> tuple[date | None, ...]:
+    """그 응답의 실행 계획이 말하는 **부서 호출마다의 `observed_at`** (2026-09-12).
+
+    🔴 **`None` 을 걸러 내지 않는다.** `_llm_statuses` 는 빈 값을 버리지만 여기서
+      버리면 *"몇 건이 아직 안 쟀는지"* 가 통째로 사라진다 — 안 실은 호출은
+      집계에서 빠지고, 걷기는 **실은 것만 세어 100% 라고 말한다.**
+
+    🔴 **마스터가 값을 지어내지 않는다.** 부서가 안 실으면 `None` 이고, `as_of`
+      로도 오늘 날짜로도 `created_at` 으로도 메우지 않는다. 메우는 순간 「안 쟀다」
+      가 「쟀다」로 세어지고 이 줄이 재려던 진도가 거짓이 된다.
+
+    ★ **주인은 `AgentReply.observed_at` 이다** — `llm_status` 가 `envelope` 의 값을
+      그대로 나르는 것과 같은 규율이다. 다만 출처가 다르다: 저쪽은 실행 흔적
+      (`ExecutionMetadata`)이고 이쪽은 **업무 결과**다.
+
+    ⚠️ **계획이 없는 응답은 빈 튜플이다.** *"안 쟀다"* 가 아니라 **"셀 것이
+      없었다"** 다 — 빈 자리를 `None` 한 개로 채우면 안 돈 품목이 안 잰 품목으로
+      세어진다.
+    """
+    return tuple(
+        getattr(step, "observed_at", None)
+        for step in (getattr(response, "plan", None) or ())
     )
 
 
