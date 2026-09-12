@@ -70,13 +70,21 @@ def wire_registries() -> None:
     register_agent("inventory", logistics_port)
     # 🔴 **실 경락가를 꽂는다** (2026-09-03). 기본값 mock 으로 두면 매입이 안을 못 낸다.
     #
-    #   mock 단가는 실 ML 예측에서 나온 상한을 못 넘는다 — 두 값의 출처가 달라서다.
+    #   mock 단가는 실 ML 예측에서 나온 컷 기준을 못 넘는다 — 두 값의 출처가 달라서다.
     #
-    #       max_price          실 ML 예측 q90       배추 992 · 무 795
+    #       cut_unit_price     실 ML 예측 밴드 상단   ← self_check 가 이 값으로 컷한다
     #       grade_unit_price   mock                 배추 1,650 · 무 1,100
     #
     #   그래서 self_check 가 전부 컷하고 `no_proposal_reason` 만 남았다. 실측으로
     #   같은 payload 를 두 시세로 돌려 확인했다.
+    #
+    #   ⚠️ **측정 당시 그 자리 이름은 `max_price` 였다.** 매입이 2026-09-08 에 컷 기준과
+    #   재무 STRESS 상한을 갈랐고 (`a615aa6` · 매입 `#394`), 지금 `max_price` 는
+    #   **재무 STRESS 전용**이다 (`amount_max_krw = qty × max_price`). 컷은
+    #   `self_check.check_max_price` 가 `cut_unit_price` 로 한다.
+    #
+    #   🟢 **위 관측은 지금도 그대로 재현된다.** `compute_cut_unit_price` 가 아직
+    #   `compute_max_price` 에 위임해서 두 값이 같다 — 갈라진 것은 경로뿐이다.
     #
     #       mock      배추 0안 · 무 0안   business=skipped
     #       실 경락가  배추 2안 · 무 2안   business=ok
