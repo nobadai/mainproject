@@ -319,7 +319,14 @@ def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
     """
     as_of = UNCERTAIN
     force_situation(monkeypatch, "uncertain")
-    payload = _payload("배추", as_of)
+    # 🔴 **총량 게이트의 기준이 물류 값이 됐다** (`#308`). 고정 임계였을 때는 주문만 키우면
+    #   열렸는데, 이제 **도착일 여유를 받아야** 판정 자체가 선다 — 안 주면 규칙 3 으로
+    #   «못 봤다» 가 되어 축이 안 열린다.
+    payload = _payload(
+        "배추",
+        as_of,
+        inventory={"inbound_lead_days": 2, "cap_by_date": {"2026-09-06": 50_000}},
+    )
     payload["confirmed_orders"] = {**payload["confirmed_orders"], "total_kg": 300_000}
     payload["constraints"]["finance"] = {
         **payload["constraints"]["finance"],
@@ -343,6 +350,34 @@ def test_volume_gate_evidence_explains_timing_opened_without_a_stable_situation(
     vol_gate = next(e for e in _axes_evidence(reply) if "VOL" in e.ref_ids[0])
     assert vol_gate.unit == "kg"
     assert "총량 진입 조건 충족" in vol_gate.evidence_detail
+    # 🔴 **근거가 판정과 같은 수를 인용한다** (`#308`). uncertain 이면 공격 라벨이 빠져
+    #   최대 D 가 5 다 — 이 줄이 옛 ``max(by_label)``(늘 12)에 남아 화면이 판정보다
+    #   2.4배 큰 수를 적고 있었다 (원장 2,747건 중 2,674건).
+    window = load_constraints()["demand"]["order_window_days"]
+    expected = round(300_000 / window * 5)
+    assert vol_gate.value == float(expected)
+    assert f"{expected:,}kg" in vol_gate.evidence_detail
+    assert "2026-09-06 도착 여유 50,000kg" in vol_gate.evidence_detail
+
+
+def test_the_volume_gate_says_it_did_not_judge_when_the_cap_never_arrived() -> None:
+    """🔴 **「못 봤다」를 「미달」로 적지 않는다** (`#308` · 규칙 3).
+
+    물류가 날짜별 여유를 안 보낸 날은 총량 게이트가 **판정을 안 한다.** 근거 문장이
+    *"미달"* 이라고 쓰면 화면에서 «여유가 넉넉해 안 열렸다» 와 구별이 안 되고, 읽는
+    사람은 물류 배선이 빠진 것을 영영 못 본다.
+
+    ⚠️ mock 재고에는 ``cap_by_date`` 도 N4 도 없다 — 이 길이 **회귀 픽스처 전량의 길**이다.
+    """
+    reply, _ = purchase_port(_request("배추", SPREAD_WIDE))
+
+    vol_gate = next(e for e in _axes_evidence(reply) if "VOL" in e.ref_ids[0])
+    assert "판정하지 않았다" in vol_gate.evidence_detail
+    assert "미달" not in vol_gate.evidence_detail
+    assert "충족" not in vol_gate.evidence_detail
+    # 값은 그대로 싣는다 — 게이트가 **무엇을 들고** 판정을 못 했는지가 근거의 값이다.
+    assert vol_gate.unit == "kg"
+    assert vol_gate.value > 0
 
 
 def test_empty_item_mix_ratio_is_refused_not_recorded_as_zero() -> None:
@@ -1159,9 +1194,13 @@ def test_split_quantities_and_the_risk_note_never_disagree() -> None:
     두 곳이 갈라지면 화면에 "재배분했다"고 적힌 옆에 균등 수량이 뜬다 — 어느 쪽이
     사실인지 소비자가 알 수 없다. 순수 함수라 갈라질 수 없다는 전제를 못박는다.
     """
-    # 공격안(D=12·2회차)의 실제 도착일이다 — 매입일 09-11·09-17 에 N4 2 를 더한 값.
+    # 공격안(D=12)의 실제 도착일이다 — 매입일에 N4 2 를 더한 값.
     # 1회차 상한을 낮게 걸어 **재배분이 실제로 일어나게** 한다.
-    cap = {"2026-09-13": 1_000, "2026-09-19": 100_000}
+    #
+    # 🔴 **회차가 2에서 3으로 늘었다** (`#308`). 회차 수가 `ceil(총량 / 도착일 여유)` 라,
+    #   1회차 여유를 1,000kg 으로 조인 것 자체가 **분할을 더 잘게** 만든다.
+    #   8,727 / 1,000 → 9 → 목록 상한 3. 그래서 도착일이 셋이다.
+    cap = {"2026-09-13": 1_000, "2026-09-17": 100_000, "2026-09-21": 100_000}
     received = purchase_port(
         _request("배추", SPREAD_WIDE, inventory={"inbound_lead_days": 2, "cap_by_date": cap})
     )[0].payload

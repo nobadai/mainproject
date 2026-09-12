@@ -26,6 +26,7 @@
 """
 
 from collections.abc import Callable, Mapping
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -241,3 +242,28 @@ def drop_holdings(monkeypatch: pytest.MonkeyPatch) -> None:
 def no_holdings(monkeypatch: pytest.MonkeyPatch) -> None:
     """``drop_holdings`` 의 함수 스코프 픽스처판. 뜻은 그쪽 docstring 에 있다."""
     drop_holdings(monkeypatch)
+
+
+def inject_arrival_cap(state: dict, cap_kg: float | None, *, lead_days: int = 2) -> str:
+    """④ — **도착일 창고 여유를 검사가 준다** (`#308`). 도착일 ISO 문자열을 돌려준다.
+
+    분할 진입 임계가 선언(``split_entry_qty_kg: 20000``)에서 **물류가 낸 그날 값**
+    (``cap_by_date[as_of + N4]``)으로 바뀌면서 필요해졌다. mock 경로는 N4 도
+    ``cap_by_date`` 도 없어서 — 둘 다 미결이다 — **수량 가지가 아예 판정되지 않는다.**
+    그래서 그 가지를 재려면 검사가 직접 넣어야 한다.
+
+    ⚠️ **N4 를 State 최상위에 넣는다.** ``pending_value`` 가 보는 자리가 거기다
+      (``inventory`` 안에만 넣으면 값이 있는데도 «미결» 로 읽힌다 — 실제로 났던 버그).
+
+    ``cap_kg`` 가 ``None`` 이면 **N4 만 주고 여유는 안 준다** — "못 봤다"(규칙 3)를
+    재는 자리다.
+
+    ⚠️ **하루치만 넣는다.** 진입 게이트가 보는 날은 ``as_of + N4`` 하나뿐이고, 창을 통째로
+      채우면 ⑥ ``cap_constrained_quantities`` 가 회차 물량을 재배분하기 시작해 **재려던
+      것과 다른 것이 바뀐다.** 여러 날이 필요한 검사는 그쪽에서 직접 채운다.
+    """
+    state["inbound_lead_days"] = lead_days
+    arrival = (date.fromisoformat(state["date"]) + timedelta(days=lead_days)).isoformat()
+    cap_by_date = {} if cap_kg is None else {arrival: cap_kg}
+    state["inventory"] = {**state["inventory"], "cap_by_date": cap_by_date}
+    return arrival

@@ -421,7 +421,10 @@ def test_rejected_scenario_is_recorded_with_label_and_reason(proposals: dict) ->
 
     broken = dict(proposals[RISING]["scenarios"][0])
     broken["total_qty_kg"] += 1  # 수량 축을 깬다 — split·sourcing 합과 어긋난다
-    state.update({"scenarios_final": [broken], "confidence": "high"})
+    # ④ 산출물도 같이 넣는다 — ⑦이 «실효 축»을 볼 때 읽는다 (`#308`). 일괄이라 1회차다.
+    state.update(
+        {"scenarios_final": [broken], "split_plan": [{"ratio": 1.0}], "confidence": "high"}
+    )
 
     result = self_check(state)
     assert result["scenarios_final"] == []

@@ -18,6 +18,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from _injection import inject_arrival_cap
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.classify_situation import compute_allowed_axes, coverage_by_label
@@ -76,19 +77,23 @@ def test_추정_총량이_그날_최대_D_를_쓴다(situation: str, expected_ma
 
     ``compute_allowed_axes`` 를 직접 부르고, 임계를 추정 총량 바로 아래·위로 옮겨
     **경계가 어디인지** 확인한다 — 값 비교가 아니라 판정이 따라 바뀌는지를 본다.
+
+    🔴 **임계를 옮기는 자리가 선언에서 주입으로 바뀌었다** (`#308` · 2026-09-12).
+      기준값이 이제 ``constraints.yaml`` 이 아니라 **물류가 보낸 도착일 여유**라,
+      사본 dict 를 덮어쓰는 대신 State 에 그 값을 넣는다. 재는 것은 같다.
     """
+    constraints = load_constraints()
+    window = constraints["demand"]["order_window_days"]
+
     state = build_initial_state("배추", date(2026, 9, 4))
-    window = load_constraints()["demand"]["order_window_days"]
     daily = state["confirmed_orders"]["total_kg"] / window
     estimated = daily * expected_max
 
-    just_under = load_constraints()
-    just_under["triggers"]["split_entry_qty_kg"] = int(estimated) - 1
-    assert "timing" in compute_allowed_axes(state, situation, just_under)
+    inject_arrival_cap(state, int(estimated) - 1)
+    assert "timing" in compute_allowed_axes(state, situation, constraints)
 
-    just_over = load_constraints()
-    just_over["triggers"]["split_entry_qty_kg"] = int(estimated) + 100
-    assert "timing" not in compute_allowed_axes(state, situation, just_over), (
+    inject_arrival_cap(state, int(estimated) + 100)
+    assert "timing" not in compute_allowed_axes(state, situation, constraints), (
         f"{situation} 인데 최대 D 가 {expected_max} 가 아니다 — 추정 총량 {estimated:,.0f}kg"
     )
 
