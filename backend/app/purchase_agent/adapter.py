@@ -41,7 +41,7 @@ from app.purchase_agent.nodes.classify_situation import (
     is_gate_excluded,
     split_entry_cap,
 )
-from app.purchase_agent.quotes import QuoteSource
+from app.purchase_agent.quotes import QuoteSource, observed_date, quote_block_reason
 from app.purchase_agent.state import PurchaseAgentState
 from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_capacity
 from app.purchase_agent.tracing import ToolRecorder
@@ -105,6 +105,56 @@ def _run_id(request: AgentRequest) -> str:
     return f"PUR-RUN-{request.context.request_id}-{request.call_seq}"
 
 
+def _observed_at(
+    quotes: list[dict[str, Any]],
+    item: str,
+    as_of: date,
+    constraints: Mapping[str, Any],
+) -> date | None:
+    """봉투에 실을 **관측 기준시점** (`#393` · `#626`).
+
+    봉투가 이 칸을 *"그 값이 세상에 언제 드러났나"* 로 규정한다 — ``created_at`` 이
+    아니고 ``as_of`` 도 아니다 (``master/envelope.py`` ``AgentReply.observed_at``).
+
+    🔴 **모수가 지금 하나다 — 시세뿐이다.** 봉투는 *"계산에 쓴 입력이 여럿이면 그중
+      가장 늦은 것"* 이라고 정하는데, 우리 입력 여섯 중 **우리가 직접 관측하는 것은
+      시세 하나**다 (``bootstrap`` 이 ``auction_quote_source`` 를 주입 · `#70`).
+      나머지 다섯은 봉투로 오고, **그 다섯에 실린 ``observed_at`` 은 아직 0건**이다.
+
+      ★ **그 다섯에 칸이 서면 여기가 ``max(...)`` 가 되는 자리다** — `#393` 이
+        그 칸을 기다리는 이슈다. 🔴 지금 ``max()`` 를 쓰지 않는다: 넣을 값이 없어서
+        원소 하나인 ``max()`` 가 되고, 그러면 «다섯을 본다» 를 구현한 것처럼 보인다.
+
+    🔴 **막힌 시세의 날짜는 싣지 않는다** (규칙 3). ``observed_date`` 는 ``max(dates)``
+      라 관측일이 여러 날 섞여도 **조용히 값을 낸다.** 그런데 그런 날 우리는 그 시세로
+      판단하지 않는다 — ③이 ``_no_quote_plan`` 으로 0안을 낸다. 안 쓴 값의 관측일을
+      실으면 *"우리가 이 시점 기준으로 판단했다"* 가 **거짓**이 된다. 「모른다」를
+      날짜로 메우는 것이다.
+
+      ⚠️ **``allocate_sourcing`` 의 ``observed_date(quotes) or state["date"]`` 를
+        베끼지 않는다.** 그쪽은 사람이 읽는 **사유 문장**의 표시용 폴백이고, 이 칸은
+        **계보**다 — 봉투가 ``as_of`` 로 메우는 것을 이름 걸고 금지한다.
+
+    ★★ **경계가 계약보다 하루 엄격하다 — 그대로 둔다.** 계약은 ``observed_at <= as_of``
+      를 허용하는데 우리 ``provenance_problem`` 은 ``observed >= as_of`` 를 막는다.
+      우리는 아침에 판정하고 경매는 저녁에 끝나므로 ``== as_of`` 인 값은 그 시각에
+      **존재하지 않았다.** 🔴 남의 계약에 맞추려고 이 검사를 느슨하게 하지 않는다.
+      ⇒ 그래서 여기서 나가는 값은 **항상 ``< as_of``** 이고, 마스터가 나중에
+        ``observed_at > as_of`` 게이트를 걸어도 우리는 한 건도 안 걸린다.
+
+    🟡 **mock 은 전부 ``None`` 이다** — mock 시세에 관측일 표기가 0건이고
+      ``observed_date`` 가 그것을 *"표기가 없으면 None"* 으로 규정한다. 값이 나는 것은
+      실 DB 직독뿐이라 회귀 경로는 이 함수가 생겨도 그대로다.
+
+    ⚠️ ``constraints`` 를 인자로 받는다 — ③·⑤와 **같은 판정**을 봐야 한다
+      (``quote_block_reason`` docstring 의 "각자 판단하면 한쪽만 바뀐다").
+    """
+    if quote_block_reason(quotes, item, as_of.isoformat(), constraints):
+        return None
+    text = observed_date(quotes)
+    return None if text is None else date.fromisoformat(text)
+
+
 def _reply(
     request: AgentRequest,
     *,
@@ -115,6 +165,7 @@ def _reply(
     reasoning: str = "",
     missing_data: tuple[str, ...] = (),
     judgment_fields: tuple[str, ...] = (),
+    observed_at: date | None = None,
 ) -> AgentReply:
     """봉투 4종(E-BIND)을 **한 곳에서** 채운다.
 
@@ -123,6 +174,11 @@ def _reply(
 
     ``suggested_adjustments``는 **넘기지 않는다** — 매입은 축 조정을 제안할 권한이 없고
     (제안자 ≠ 조언자), 하나라도 담으면 봉투 생성 시점에 ``ContractViolation``이다.
+
+    🔴 **``observed_at`` 기본값이 ``None`` 이고 그것이 「안 쟀다」다** (`#393`). 시세를
+      읽는 경로만 값을 넘긴다 — 안 읽는 경로(``STATUS_QUERY`` · 조기반환 둘)는 **정말
+      아무것도 관측하지 않았으므로** 여기서 ``request.context.as_of`` 로 메우면 안 잰
+      호출이 잰 호출로 세어진다. 봉투가 그 메움을 금지한다.
     """
     return AgentReply(
         request_id=request.context.request_id,
@@ -137,6 +193,7 @@ def _reply(
         reasoning=reasoning,
         missing_data=missing_data,
         judgment_fields=judgment_fields,
+        observed_at=observed_at,
     )
 
 
@@ -1191,8 +1248,11 @@ def _supply_capacity_query(
         return reply, _metadata(request, None)
 
     constraints = load_constraints()
+    # ★ **지역 변수로 뺀다** — 같은 시세를 ``_observed_at`` 도 봐야 한다. 두 번 읽으면
+    #   그 사이에 적재가 들어와 **경계와 관측일이 다른 조회에서 나온다.**
+    market_quotes = ports.get_market_quotes(item, request.context.as_of, source=quotes)
     capacity = compute_supply_capacity(
-        quotes=ports.get_market_quotes(item, request.context.as_of, source=quotes),
+        quotes=market_quotes,
         warehouse_free_kg=_read_optional_number(payload, "warehouse_free_kg"),
         finance_cap_amount_krw=_read_optional_number(payload, "finance_cap_amount_krw"),
         constraints=constraints,
@@ -1234,6 +1294,10 @@ def _supply_capacity_query(
         payload=body,
         evidences=_supply_capacity_evidences(body, capacity),
         reasoning=_supply_capacity_reasoning(item, capacity),
+        # 🔴 **이 경로는 시세를 실제로 읽으므로 관측일을 싣는다** (`#393`).
+        observed_at=_observed_at(
+            market_quotes, item, request.context.as_of, constraints
+        ),
     )
     # ⚠️ ``STATUS_QUERY`` 와 달리 **비워 두면 안 된다.** 그쪽은 봉투가
     #   ``_PLAN_EXEMPT_MODES`` 로 뺐지만 이 경로는 실제로 시세를 읽고 계산한다 —
@@ -1400,5 +1464,11 @@ def _generate_scenarios(
         evidences=build_evidences(final, payload),
         reasoning=build_reasoning(payload),
         judgment_fields=JUDGMENT_FIELDS,
+        # 🔴 **그래프가 본 시세를 그대로 본다** (`#393`). ``final`` 에서 꺼내야
+        #   ③·⑤가 판정에 쓴 것과 같은 조회다 — 여기서 다시 읽으면 그 사이 적재가
+        #   들어와 노드가 안 본 관측일이 계보에 실릴 수 있다.
+        observed_at=_observed_at(
+            final["market_quotes"], final["item"], as_of, load_constraints()
+        ),
     )
     return reply, _metadata(request, recorder, state=final)
