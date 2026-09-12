@@ -8,11 +8,11 @@
   실 경락가  배추 2안 · 무 2안   business=ok
 ```
 
-`max_price` 는 실 ML 예측 q90 에서 오고 `grade_unit_price` 는 시세에서 온다.
+`max_price` 는 실 ML 예측 밴드 상단에서 오고 `grade_unit_price` 는 시세에서 온다.
 한쪽만 mock 이면 **출처가 다른 두 값을 비교**하게 된다.
 
 ```text
-max_price          실 ML 예측 q90      배추 992 · 무 795
+max_price          실 ML 예측 상단      배추 992 · 무 795
 grade_unit_price   mock                배추 1,650 · 무 1,100
 ```
 
