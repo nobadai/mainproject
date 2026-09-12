@@ -24,7 +24,7 @@ import pytest
 from app.purchase_agent import ports
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
-from app.purchase_agent.nodes.draft_plan import usable_holdings_kg
+from app.purchase_agent.nodes.draft_plan import FreeStock, free_stock_for, usable_holdings_kg
 from app.purchase_agent.schemas import PurchaseProposal
 
 ITEM = "배추"
@@ -64,6 +64,41 @@ def _with_lots(monkeypatch: pytest.MonkeyPatch, lots: list[dict]) -> None:
 
     def patched(item: str, as_of: date) -> dict:
         return {**original(item, as_of), "lots": lots}
+
+    monkeypatch.setattr("app.purchase_agent.ports.get_inventory", patched)
+
+
+def _with_lots_and_free_stock(
+    monkeypatch: pytest.MonkeyPatch, lots: list[dict], rows: list[dict] | None
+) -> None:
+    """로트와 물류 **가용재고 집계**를 같이 준다. ``rows=None`` 이면 칸 자체를 안 싣는다.
+
+    ★ 둘을 한 함수로 둔 이유 — 패치 대상이 ``ports.get_inventory`` 하나라 따로 걸면
+      뒤엣것이 앞엣것을 덮는다.
+
+    🔴 **이 입력은 합성이다 — mock 에 예약 축이 없다** (2026-09-12 실측).
+      ``mocks/inventory.json`` 이 싣는 것은 ``lots``·``warehouse_free_kg``·``rental_cap_kg``
+      셋뿐이고 ``inventory_by_item`` 은 **아예 없다**. 검사 폴더 전체에도 그 이름이 0건이다.
+
+      ⚠️ 그래서 **이 파일 밖의 검사는 클램프를 타지 않는다** — 아무도 그 칸을 안 주므로
+        ``free_stock_kg`` 가 ``None`` 이고 차감이 종전 그대로다. 이 판이 기존 검사를
+        안 깨뜨리는 이유가 그것이다.
+
+      🔴 **mock 파일에 넣지 않았다.** 넣으면 앵커가 움직여 이 폴더 수십 개 검사의 기준이
+        같이 갈린다 — 「mock 앵커를 실측으로 쓰지 않는다」와 같은 자리다. 넣을지는 별건이다.
+
+    ★ 물류가 싣는 모양 그대로다 — ``{"item": …, "available_qty_kg": …}`` 두 칸
+      (V6 봉투 495항목 실측 · 칸이 그 둘뿐이고 **신선도 축이 없다**).
+    """
+    original = ports.get_inventory
+
+    def patched(item: str, as_of: date) -> dict:
+        inventory = {**original(item, as_of), "lots": lots}
+        if rows is None:
+            inventory.pop("inventory_by_item", None)
+        else:
+            inventory["inventory_by_item"] = rows
+        return inventory
 
     monkeypatch.setattr("app.purchase_agent.ports.get_inventory", patched)
 
@@ -141,11 +176,15 @@ def test_the_not_needed_sentence_reads_as_korean_not_as_a_field_name(
 
     ``kind`` 만 붙이고 문장을 안 고치면 데이터에는 갈라져 있는데 **보는 사람에게는 안
     갈린 상태**가 된다. 화면·마스터 리포트가 그리는 것은 ``reason`` 뿐이다.
+
+    🟡 **mock 은 가용재고를 안 보낸다**(아래 ⑦·⑧ 절 참조)라 이 날은 수 하나짜리 문면이다.
+      「보유 재고」를 단언하던 종전 줄을 「보유」로 고쳤다 — 그 낱말이 빠진 것이 아니라
+      **같은 수를 두 번 적던 자리가 사라졌다** (`_no_quantity_reason` docstring).
     """
     _with_lots(monkeypatch, [_lot(10**6, 30)])
     reason = _rejected(run_purchase_agent(ITEM, AS_OF), "보수")["reason"]
 
-    assert "보유 재고" in reason
+    assert "보유" in reason
     assert "매입이 필요 없다" in reason
     assert "하드 제약" not in reason, "막힌 것으로 읽히면 조치가 달라진다"
     for internal in ("not_needed", "blocked", "raw_qty", "kind"):
@@ -381,3 +420,220 @@ def test_a_lot_that_expired_while_the_walk_skipped_a_day_deducts_nothing(
     _with_lots(monkeypatch, delayed)
     plan = next(s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본")
     assert plan["total_qty_kg"] == demand - 1000
+
+
+# ── ⑤ 가용재고 클램프 — 「이미 팔린 몫을 우리 것으로 세지 않는다」 ──────────────
+#
+# 🔴 **고친 판의 본체다** (2026-09-12). ``lots[].available_qty_kg`` 는 물류 repository 가
+#   ``remaining_qty_kg`` 를 그대로 싣는 **물리 잔량**이라 이미 팔린 몫이 섞여 있다.
+#   예약을 뺀 값은 같은 봉투에 따로 오는 ``inventory_by_item`` 이고, 우리는 그것을 안 읽고
+#   있었다 — 두 칸 **이름이 둘 다 ``available_qty_kg``** 라서 아무도 못 봤다.
+#
+# 실측(V6 봉투 171셀 · 2026-09-12): 「필요 없다」 보류 36건 중 **15건**이 이미 팔린 재고로
+# 판단한 것이었고, 최악은 `2026-03-11 무` — 보유 551kg 으로 읽고 안을 0개 냈는데 물류
+# 가용재고는 **0kg** 이었다.
+#
+# ⚠️ 아래 입력은 **전부 합성이다** — ``_with_free_stock`` docstring 참조.
+
+
+def test_the_free_stock_clamp_actually_bites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 로트는 1,000kg 인데 물류 가용재고가 300kg 이면 **차감은 300kg 이다.**
+
+    차이가 700kg 이고 그만큼 **더 산다** — 그 700kg 은 이미 팔린 몫이라 우리가 못 쓴다.
+    """
+    daily = _daily_demand()
+    days = _coverage("기본")
+    demand = round(daily * days)
+
+    _with_lots_and_free_stock(
+        monkeypatch,
+        [_lot(1000, 30)],
+        [{"item": ITEM, "available_qty_kg": 300}],
+    )
+    plan = next(s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본")
+
+    assert demand > 1000, "차감이 원수요를 다 덮으면 이 검사가 재는 것이 사라진다"
+    assert plan["total_qty_kg"] == demand - 300
+
+
+def test_without_the_clamp_the_already_sold_stock_would_be_counted_as_ours() -> None:
+    """짝 검사 — 클램프를 **안 주면** 종전처럼 로트 합을 센다. 클램프가 **원인**임을 잠근다.
+
+    🔴 이 두 줄이 갈리는 것이 이 판 전체의 동작 변화다. 같은 로트·같은 창인데 답이 다르다.
+    """
+    daily = _daily_demand()
+    lots = [_lot(1000, 30)]
+
+    assert usable_holdings_kg(lots, daily, 5) == 1000
+    assert usable_holdings_kg(lots, daily, 5, 300) == 300
+
+
+def test_the_window_still_wins_when_it_is_the_smaller_bound() -> None:
+    """🔴 **집계로 창을 대신하지 않는다.** 신선도가 짧으면 가용재고가 커도 그만큼만 덮는다.
+
+    잔여신선도 1일 로트는 창(D=5)을 하루만 덮으므로 차감이 ``일평균 × 1`` 이다. 가용재고를
+    크게 줘도 그 수가 이기면 안 된다 — 이기면 **짧은 로트를 전부 덮는다고 세는 것**이다.
+
+    ★ 실측(V6 로트 1,134개)에서 **750개가 12일보다 짧다.** 집계만 쓰는 갈래로 가면 예약이
+      **없는** 109셀 중 19셀이 깎여 −16,878kg 이 된다 — 멀쩡한 셀을 건드리는 쪽이다.
+    """
+    daily = _daily_demand()
+
+    one_day = usable_holdings_kg([_lot(10**6, 1)], daily, 5, 10**6)
+    assert one_day == pytest.approx(daily * 1)
+
+
+def test_a_missing_aggregate_is_not_read_as_zero_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 칸이 안 오면 **클램프를 걸지 않고 고지한다** (규칙 3).
+
+    0 으로 메우면 차감이 0 이 되어 **원수요를 통째로 산다** — 모르는 것이 판정을 만드는
+    자리다. 안 거는 쪽은 *아는 것만 쓰는 것*이라 값을 지어내지 않는다.
+
+    ⚠️ 그리고 **못 본 사실이 화면에 남아야 한다.** 안 남기면 「예약을 반영한 차감」과
+      「반영 못 한 차감」이 같은 모양으로 나가고, 둘을 아무도 못 가른다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots_and_free_stock(monkeypatch, [_lot(1000, 30)], None)
+    scenario = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )
+
+    assert scenario["total_qty_kg"] == demand - 1000, "클램프가 안 걸려야 한다"
+    assert any("이미 팔린 몫을 뺀 재고 확인 보류" in risk for risk in scenario["risks"])
+
+
+def test_a_zero_aggregate_is_a_settled_zero_not_a_missing_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🟢 ``0`` 으로 실려 오면 **확정된 0** 이다 — 차감이 0 이고 고지는 안 한다.
+
+    로트는 1,000kg 인데 전량이 팔린 날이다. 그날 우리가 쓸 수 있는 것은 없으므로 원수요를
+    그대로 산다. 🔴 위 검사와 **결과가 같고 뜻이 반대다** — 그래서 고지 유무로 가른다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots_and_free_stock(
+        monkeypatch, [_lot(1000, 30)], [{"item": ITEM, "available_qty_kg": 0}]
+    )
+    scenario = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )
+
+    assert scenario["total_qty_kg"] == demand
+    assert not any("이미 팔린 몫을 뺀 재고 확인 보류" in risk for risk in scenario["risks"]), (
+        "0 은 확정된 답이다 — 「못 봤다」로 적으면 규칙 3 이 반대로 깨진다"
+    )
+
+
+def test_an_aggregate_that_omits_an_item_with_lots_is_a_contradiction_not_a_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 집계에 내 품목이 없는데 **내 로트는 있는** 날 — 모순이다. 0 으로 읽지 않는다.
+
+    로트가 있으면 집계에도 (0 이라도) 실려야 한다. 안 실렸으면 둘 중 하나가 틀린 것이고,
+    그때 조용히 0 으로 읽으면 차감이 0 이 되어 원수요를 통째로 산다.
+
+    🟡 **원장에는 아직 0건이다** (V6 171셀 중 내 품목 항목이 없는 6셀은 로트도 전부 0건).
+      방어로 둔 가지이고, 그 사실을 코드 docstring 에도 적었다.
+
+    🔴 **그리고 「다른 품목 로트」로 발화하면 안 된다** — 봉투의 ``lots`` 는 전 품목이 섞여
+      오므로 품목을 안 거르면 *"배추 집계가 없는데 무 로트가 있다"* 가 모순으로 읽힌다.
+      고친 함수에 V6 봉투를 대서 실제로 그 허위 3건을 잡았다. 아래 짝 단언이 그 자리다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("기본"))
+
+    _with_lots_and_free_stock(
+        monkeypatch, [_lot(1000, 30)], [{"item": "양파", "available_qty_kg": 500}]
+    )
+    scenario = next(
+        s for s in run_purchase_agent(ITEM, AS_OF)["scenarios"] if s["label"] == "기본"
+    )
+
+    assert scenario["total_qty_kg"] == demand - 1000, "모순인 날 클램프를 걸면 안 된다"
+    assert any("두 값이 어긋난다" in risk for risk in scenario["risks"])
+
+
+def test_an_item_with_no_lots_and_no_entry_is_a_settled_zero() -> None:
+    """🟢 로트도 없고 집계에도 없으면 **둘이 일치한다** — 재고가 없는 날이다.
+
+    그때는 0 으로 읽는 것이 값을 지어내는 것이 아니다. 두 칸이 같은 말을 하고 있다.
+    """
+    assert free_stock_for({"lots": [], "inventory_by_item": []}, ITEM) == FreeStock(kg=0.0)
+
+
+def test_another_items_lot_is_not_read_as_a_contradiction() -> None:
+    """🔴 짝 검사 — **다른 품목 로트로 모순이 발화하면 안 된다.**
+
+    봉투의 ``lots`` 는 전 품목이 섞여 오고 ``absorb_inventory`` 가 거른 뒤에야 이 품목 것이
+    된다. 거르지 않으면 *"배추 집계가 없는데 무 로트가 있다"* 가 모순으로 읽혀 **고지가
+    허위로 선다** — 고친 함수에 V6 봉투를 대서 실제로 그 3건을 잡았다.
+    """
+    envelope = {
+        "lots": [{**_lot(900, 30), "item": "무"}],
+        "inventory_by_item": [{"item": "무", "available_qty_kg": 900}],
+    }
+    assert free_stock_for(envelope, ITEM) == FreeStock(kg=0.0)
+
+    with_own_lot = {**envelope, "lots": [*envelope["lots"], _lot(500, 30)]}
+    assert free_stock_for(with_own_lot, ITEM).unknown_reason is not None, (
+        "내 품목 로트가 섞이면 그때는 진짜 모순이다"
+    )
+
+
+# ── ⑥ 사유 문구 — 같은 수를 두 번 적지 않는다 ──────────────────────────────
+
+
+def test_the_not_needed_sentence_names_what_covered_the_demand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 종전 문장은 **같은 수를 두 번** 적었다 — 걷기 8판 1,384건 중 1,384건.
+
+    조건이 ``raw_qty ≤ 0`` 이고 차감이 ``일평균 × D`` 로 클램프되므로 그때
+    ``round(차감) == demand_qty`` 가 **반드시** 성립한다. 우연이 아니라 구조였다::
+
+        보유 재고 44kg이 커버 2일 수요 44kg을 이미 덮어 …
+
+    🟢 가용재고를 받은 날은 **그 수**를 적는다. 수요와 같을 이유가 없어 동어반복이 사라진다.
+    """
+    daily = _daily_demand()
+    days = _coverage("보수")
+    demand = round(daily * days)
+
+    _with_lots_and_free_stock(
+        monkeypatch,
+        [_lot(10**6, 30)],
+        [{"item": ITEM, "available_qty_kg": 10**6}],
+    )
+    reason = _rejected(run_purchase_agent(ITEM, AS_OF), "보수")["reason"]
+
+    assert "확정 출고 예약분을 뺀 가용재고" in reason, "봉투가 쓰는 낱말을 그대로 쓴다"
+    assert f"{10**6:,}kg" in reason
+    assert f"{demand:,}kg" in reason
+    assert reason.count(f"{demand:,}kg") == 1, "같은 수가 두 번 나오면 동어반복으로 되돌아간다"
+    for internal in ("not_needed", "blocked", "raw_qty", "free_stock", "inventory_by_item"):
+        assert internal not in reason
+
+
+def test_the_sentence_falls_back_to_one_number_when_the_aggregate_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🟡 못 받은 날은 **수 하나**다 — 「못 봤다」와 「덮었다」를 같은 문면으로 내지 않는다.
+
+    ⚠️ 가용재고를 모르는데 그 자리에 다른 수를 적으면, 읽는 사람은 **물류가 확인해 준 수**로
+      읽는다. 못 본 사실은 ``risks`` 가 따로 말한다.
+    """
+    daily = _daily_demand()
+    demand = round(daily * _coverage("보수"))
+
+    _with_lots_and_free_stock(monkeypatch, [_lot(10**6, 30)], None)
+    reason = _rejected(run_purchase_agent(ITEM, AS_OF), "보수")["reason"]
+
+    assert "가용재고" not in reason, "못 본 값을 확인된 수처럼 적으면 안 된다"
+    assert reason.count("kg") == 1, "수가 하나여야 한다"
+    assert f"{demand:,}kg" in reason
