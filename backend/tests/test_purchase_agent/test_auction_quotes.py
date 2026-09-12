@@ -31,7 +31,7 @@ from app.purchase_agent.quotes import (
     krw_per_kg,
     min_trade_volume_kg,
     missing_quote_reason,
-    observed_date,
+    observed_at,
     observed_spec,
     provenance_problem,
     spec_for_item,
@@ -61,9 +61,9 @@ DOD_SIMPLE_AVERAGE = Decimal("2009.9")
 #: 쿼리가 as_of 이전 최신 거래일 하루를 고르므로 관측일은 12-30 이다 (12-31 이 아니다).
 OBSERVED = "2025-12-30"
 BAECHU_1231_ROWS = [
-    {"observed_date": OBSERVED, "grade": "특",
+    {"observed_at": OBSERVED, "grade": "특",
      "amount_krw": Decimal(247255700), "volume_kg": Decimal(265420)},
-    {"observed_date": OBSERVED, "grade": "특",
+    {"observed_at": OBSERVED, "grade": "특",
      "amount_krw": Decimal(9641800), "volume_kg": Decimal(9940)},
 ]
 
@@ -188,11 +188,11 @@ def test_variety_is_absent_from_the_whole_module() -> None:
 def test_grades_outside_the_declared_vocabulary_are_dropped() -> None:
     """``.``·5등·등외는 등급이 아니라 잡음이다. 양파는 그런 행이 하루 여섯 줄씩 온다."""
     rows = [
-        {"observed_date": OBSERVED, "grade": "특",
+        {"observed_at": OBSERVED, "grade": "특",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": ".",
+        {"observed_at": OBSERVED, "grade": ".",
          "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": "5등",
+        {"observed_at": OBSERVED, "grade": "5등",
          "amount_krw": Decimal(999999), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
@@ -204,11 +204,11 @@ def test_grades_come_out_in_the_declared_order() -> None:
     """⑥의 근거 문장이 ``market_quotes[0]``을 대표값으로 읽는다 — 순서가 흔들리면
     같은 날 근거 문구가 달라진다."""
     rows = [
-        {"observed_date": OBSERVED, "grade": "중",
+        {"observed_at": OBSERVED, "grade": "중",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": "특",
+        {"observed_at": OBSERVED, "grade": "특",
          "amount_krw": Decimal(300000), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": "상",
+        {"observed_at": OBSERVED, "grade": "상",
          "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
@@ -230,7 +230,7 @@ def test_the_real_1231_rows_become_one_weighted_quote() -> None:
             "grade": "특",
             "price": 933,
             "spec": "그물망·파렛트 10kg",
-            "observed_date": OBSERVED,
+            "observed_at": OBSERVED,
             # 시장 쪽 두 값도 시세에 실려 간다 — 노드는 DB 를 모르므로 여기서 가야
             # 순수 함수가 뒤처짐을 판정할 수 있다.
             "market_last_open": OBSERVED,
@@ -507,7 +507,7 @@ def test_a_missing_partner_grade_names_the_spec_it_looked_at() -> None:
     """
     only_top = [
         {"market": "가락", "grade": "특", "price": 824,
-         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+         "spec": "그물망·파렛트 10kg", "observed_at": "2025-12-30"}
     ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: only_top)
 
@@ -582,7 +582,7 @@ def test_the_source_reads_the_prior_trading_day_from_the_real_table() -> None:
             "grade": "특",
             "price": 824,
             "spec": "그물망·파렛트 10kg",
-            "observed_date": "2025-12-30",
+            "observed_at": "2025-12-30",
             # 관측일 = 시장 최신 개장일 → 뒤처지지 않았다.
             "market_last_open": "2025-12-30",
             "trading_days_behind": 0,
@@ -617,7 +617,7 @@ def test_the_real_source_never_returns_the_as_of_day_itself() -> None:
     for item in ("배추", "무", "양파"):
         result = auction_quote_source()(item, INTEGRATION)
         assert result, item
-        assert observed_date(result) < INTEGRATION.isoformat(), item
+        assert observed_at(result) < INTEGRATION.isoformat(), item
 
 
 @pytest.mark.db
@@ -627,7 +627,7 @@ def test_the_real_radish_query_uses_18kg_before_2018() -> None:
 
     assert result
     assert result[0]["spec"] == "상자·파렛트 18kg"
-    assert observed_date(result) < "2018-01-01"
+    assert observed_at(result) < "2018-01-01"
 
 
 @pytest.mark.db
@@ -637,7 +637,7 @@ def test_a_real_market_holiday_still_reaches_back_but_says_how_far() -> None:
     result = auction_quote_source()("배추", date(2026, 1, 3))
 
     assert result
-    assert observed_date(result) == "2025-12-31"
+    assert observed_at(result) == "2025-12-31"
     assert staleness_days(result, "2026-01-03") == 3
 
 
@@ -652,9 +652,9 @@ def test_a_null_aggregate_drops_the_grade_instead_of_crashing() -> None:
     적재되는 값이라 우리가 통제하지 못하고, **죽는 쪽은 사유를 못 내기** 때문이다.
     """
     rows = [
-        {"observed_date": OBSERVED, "grade": "특",
+        {"observed_at": OBSERVED, "grade": "특",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": "상", "amount_krw": None, "volume_kg": Decimal(100)},
+        {"observed_at": OBSERVED, "grade": "상", "amount_krw": None, "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
 
@@ -663,7 +663,7 @@ def test_a_null_aggregate_drops_the_grade_instead_of_crashing() -> None:
 
 def test_all_grades_unreadable_becomes_the_zero_quote_path() -> None:
     """읽을 수 있는 등급이 하나도 없으면 빈 목록이다 — ③이 사유를 남기고 0안으로 끝낸다."""
-    rows = [{"observed_date": OBSERVED, "grade": "특", "amount_krw": None, "volume_kg": None}]
+    rows = [{"observed_at": OBSERVED, "grade": "특", "amount_krw": None, "volume_kg": None}]
 
     assert _source(rows)("배추", INTEGRATION) == []
 
@@ -694,9 +694,9 @@ def test_a_non_positive_price_drops_the_grade() -> None:
     """``grade_unit_price``는 스키마가 ``gt=0``이라 0 이하가 한 줄만 섞여도 **제안 전체**가
     출력 경계에서 죽는다. 그 등급 하나를 빼는 쪽이 맞다."""
     rows = [
-        {"observed_date": OBSERVED, "grade": "특",
+        {"observed_at": OBSERVED, "grade": "특",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"observed_date": OBSERVED, "grade": "상",
+        {"observed_at": OBSERVED, "grade": "상",
          "amount_krw": Decimal(0), "volume_kg": Decimal(100)},
     ]
     result = _source(rows)("배추", INTEGRATION)
@@ -948,7 +948,7 @@ def test_real_auction_quotes_are_labelled_official_not_mock() -> None:
     """
     real = [
         {"market": "가락", "grade": "특", "price": 824,
-         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+         "spec": "그물망·파렛트 10kg", "observed_at": "2025-12-30"}
     ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: real)
 
@@ -1052,9 +1052,9 @@ def test_the_query_picks_one_day_not_one_day_per_grade() -> None:
 def test_two_observation_dates_in_one_db_result_are_refused() -> None:
     """DB 경로 — 쿼리가 하루로 좁히므로 정상 경로에선 안 생긴다."""
     mixed = [
-        {"observed_date": "2025-12-30", "grade": "특",
+        {"observed_at": "2025-12-30", "grade": "특",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
-        {"observed_date": "2025-11-12", "grade": "상",
+        {"observed_at": "2025-11-12", "grade": "상",
          "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
     ]
     with pytest.raises(ValueError, match="관측일이 하루가 아니다"):
@@ -1070,9 +1070,9 @@ def test_two_observation_dates_from_an_injected_source_are_refused() -> None:
     """
     mixed = [
         {"market": "가락", "grade": "상", "price": 800,
-         "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"},
+         "spec": "그물망·파렛트 10kg", "observed_at": "2025-12-30"},
         {"market": "가락", "grade": "중", "price": 600,
-         "spec": "그물망·파렛트 10kg", "observed_date": "2025-11-12"},
+         "spec": "그물망·파렛트 10kg", "observed_at": "2025-11-12"},
     ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: mixed)
 
@@ -1080,17 +1080,17 @@ def test_two_observation_dates_from_an_injected_source_are_refused() -> None:
     assert "관측일이 하루가 아니다" in proposal["rejected_reasons"][0]["reason"]
 
 
-def test_the_observed_date_rides_on_every_quote() -> None:
+def test_the_observed_at_rides_on_every_quote() -> None:
     result = _source(BAECHU_1231_ROWS)("배추", INTEGRATION)
 
-    assert all(quote["observed_date"] == OBSERVED for quote in result)
-    assert observed_date(result) == OBSERVED
+    assert all(quote["observed_at"] == OBSERVED for quote in result)
+    assert observed_at(result) == OBSERVED
     assert staleness_days(result, "2025-12-31") == 1
 
 
 def test_mock_quotes_carry_no_observation_date_so_staleness_is_not_measured() -> None:
     """회귀 경로가 이 검사를 만나지 않는 근거 — mock 은 표기가 없어 항상 None 이다."""
-    assert observed_date(mocks.load_quotes("배추", date(2026, 8, 21))) is None
+    assert observed_at(mocks.load_quotes("배추", date(2026, 8, 21))) is None
     assert staleness_days(mocks.load_quotes("배추", date(2026, 8, 21)), "2026-08-21") is None
 
 
@@ -1110,7 +1110,7 @@ def _wide_spread_on(observed: str):
     rows = [("특", 950), ("상", 900), ("중", 600)]
     return lambda item, as_of: [
         {"market": "가락", "grade": grade, "price": price,
-         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+         "spec": "그물망·파렛트 10kg", "observed_at": observed}
         for grade, price in rows
     ]
 
@@ -1150,7 +1150,7 @@ def test_an_observation_on_or_after_as_of_is_refused(observed: str) -> None:
     """
     ahead = [
         {"market": "가락", "grade": "특", "price": 933,
-         "spec": "그물망·파렛트 10kg", "observed_date": observed}
+         "spec": "그물망·파렛트 10kg", "observed_at": observed}
     ]
     proposal = run_purchase_agent("배추", INTEGRATION, quotes=lambda i, d: ahead)
 
@@ -1172,7 +1172,7 @@ def _aged(days: int, *, behind: int = 0, last_open: int | None = None) -> list[d
     market = INTEGRATION - timedelta(days=last_open if last_open is not None else days)
     return [
         {"market": "가락", "grade": "특", "price": 824,
-         "spec": "그물망·파렛트 10kg", "observed_date": observed.isoformat(),
+         "spec": "그물망·파렛트 10kg", "observed_at": observed.isoformat(),
          "market_last_open": market.isoformat(), "trading_days_behind": behind}
     ]
 
@@ -1301,7 +1301,7 @@ def test_market_marks_are_optional_so_the_mock_path_never_meets_the_check() -> N
     mock 이 그 경우이고, 회귀 테스트 전량이 이 길을 밟는다.
     """
     without = [{"market": "가락", "grade": "특", "price": 824,
-                "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-01"}]
+                "spec": "그물망·파렛트 10kg", "observed_at": "2025-12-01"}]
 
     assert stale_quote_reason(without, INTEGRATION.isoformat(), load_constraints()) is None
 
@@ -1419,7 +1419,7 @@ def test_the_radish_spec_switches_weight_before_2018() -> None:
     20kg 고정이면 2017년 244 거래일 중 **64일만** 잡힌다(18kg 는 227일).
     """
     captured: dict = {}
-    rows = [{"observed_date": "2017-06-01", "grade": "특",
+    rows = [{"observed_at": "2017-06-01", "grade": "특",
              "amount_krw": Decimal(100000), "volume_kg": Decimal(100)}]
     _source(rows, captured)("무", date(2017, 6, 2))
 
@@ -1447,7 +1447,7 @@ def test_items_without_a_weight_switch_keep_the_plain_condition() -> None:
 def test_the_spec_label_tells_which_weight_that_day_used(observed: str, expected: str) -> None:
     """라벨은 사유에 그대로 실린다 — 2017년 값을 보면서 "20kg"이라고 적으면 **무엇을
     봤는지가 거짓**이 된다."""
-    rows = [{"observed_date": observed, "grade": "특",
+    rows = [{"observed_at": observed, "grade": "특",
              "amount_krw": Decimal(100000), "volume_kg": Decimal(100)}]
     result = _source(rows)("무", date(2026, 1, 1))
 
@@ -1459,7 +1459,7 @@ def test_the_spec_label_tells_which_weight_that_day_used(observed: str, expected
 
 def _marked(**over: Any) -> list[dict]:
     base = {"market": "가락", "grade": "특", "price": 824,
-            "spec": "그물망·파렛트 10kg", "observed_date": "2025-12-30"}
+            "spec": "그물망·파렛트 10kg", "observed_at": "2025-12-30"}
     return [{**base, **over}]
 
 
@@ -1485,7 +1485,7 @@ def test_an_unparseable_observation_date_does_not_kill_the_graph() -> None:
     전에는 ``date.fromisoformat`` 이 ``ValueError`` 로 그래프 전체를 죽였다.
     """
     proposal = run_purchase_agent(
-        "배추", INTEGRATION, quotes=lambda i, d: _marked(observed_date="어제")
+        "배추", INTEGRATION, quotes=lambda i, d: _marked(observed_at="어제")
     )
 
     assert proposal["scenarios"] == []
@@ -1497,8 +1497,8 @@ def test_the_provenance_check_applies_to_injected_sources_too() -> None:
     constraints = load_constraints()
 
     assert provenance_problem(_marked(), "2025-12-31", constraints) is None
-    assert provenance_problem(_marked(observed_date="2026-01-05"), "2025-12-31", constraints)
-    assert provenance_problem(_marked(observed_date="2025-12-31"), "2025-12-31", constraints)
+    assert provenance_problem(_marked(observed_at="2026-01-05"), "2025-12-31", constraints)
+    assert provenance_problem(_marked(observed_at="2025-12-31"), "2025-12-31", constraints)
 
 
 def test_mock_quotes_pass_the_provenance_check_untouched() -> None:
@@ -1512,7 +1512,7 @@ def test_mock_quotes_pass_the_provenance_check_untouched() -> None:
 def test_a_row_without_an_observation_date_cannot_ride_along_in_the_db_path() -> None:
     """한 행만 날짜가 있으면 예전엔 "단일 날짜"로 인정해 **함께 합산**했다."""
     rows = [
-        {"observed_date": OBSERVED, "grade": "특",
+        {"observed_at": OBSERVED, "grade": "특",
          "amount_krw": Decimal(100000), "volume_kg": Decimal(100)},
         {"grade": "상", "amount_krw": Decimal(200000), "volume_kg": Decimal(100)},
     ]

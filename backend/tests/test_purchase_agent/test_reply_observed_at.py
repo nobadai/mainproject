@@ -4,7 +4,7 @@
 「실었다 / 안쟀다」 두 칸을 세는데, 이 파일이 지키는 것은 **그 두 칸이 서로를 삼키지 않게
 하는 것**이다 — `None` 은 「안 쟀다」이고 값으로 메우면 안 잰 호출이 잰 호출로 세어진다.
 
-🟡 **mock 시세에는 관측일 표기가 0건이다** (`observed_date` 가 *"mock 처럼 표기가 없으면
+🟡 **mock 시세에는 관측일 표기가 0건이다** (`observed_at` 가 *"mock 처럼 표기가 없으면
 None"* 으로 스스로 규정한다). 그래서 **회귀 경로 전부가 그대로 `None`** 이고, 값이 나는
 것은 실 DB 직독뿐이다 — 이 판이 작은 이유가 그것이다. 아래 검사들은 관측일을 **주입해서**
 그 경로를 억지로 만든 것이다.
@@ -22,7 +22,7 @@ from app.master.envelope import AgentRequest, ExecutionContext
 from app.purchase_agent import ports
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.quotes import observed_date
+from app.purchase_agent.quotes import observed_at
 
 # 통합 시연 앵커 — 재무·물류 mock 이 이 날에만 다 서 있다 (`#73`).
 INTEGRATION = date(2025, 12, 31)
@@ -69,7 +69,7 @@ def _quote(observed: str, **over: Any) -> dict:
         "grade": "특",
         "price": 824,
         "spec": "그물망·파렛트 10kg",
-        "observed_date": observed,
+        "observed_at": observed,
     }
     return {**base, **over}
 
@@ -161,7 +161,7 @@ def test_the_mock_path_reports_nothing_measured() -> None:
 def test_quotes_we_refused_do_not_leave_an_observation_date() -> None:
     """🔴 **관측일이 두 날 섞인 시세**는 우리가 판단에 쓰지 않는다 — 계보에도 안 싣는다.
 
-    ★★ 여기가 이 파일의 핵심이다. ``observed_date`` 는 ``max(dates)`` 라 **그 상태에서도
+    ★★ 여기가 이 파일의 핵심이다. ``observed_at`` 는 ``max(dates)`` 라 **그 상태에서도
       조용히 값을 낸다.** 그 값을 실으면 *"우리가 이 시점 기준으로 판단했다"* 가 되는데,
       그날 우리는 0안을 냈다 — 「모른다」를 날짜로 메우는 것이다.
 
@@ -174,14 +174,14 @@ def test_quotes_we_refused_do_not_leave_an_observation_date() -> None:
     ]
     reply, _ = purchase_port(_request("배추", INTEGRATION), quotes=_source(mixed))
 
-    assert observed_date(mixed) == "2025-12-30"  # 그 함수는 값을 낸다
+    assert observed_at(mixed) == "2025-12-30"  # 그 함수는 값을 낸다
     assert reply.observed_at is None  # 🔴 우리는 안 싣는다
 
 
 def test_half_written_provenance_leaves_no_observation_date() -> None:
     """규격은 있는데 관측일이 없는 시세 — 우리가 거부하는 상태다.
 
-    ``observed_date`` 는 표기 없는 줄을 건너뛰어 ``None`` 을 내므로 두 축이 같은 답이다.
+    ``observed_at`` 는 표기 없는 줄을 건너뛰어 ``None`` 을 내므로 두 축이 같은 답이다.
     """
     reply, _ = purchase_port(
         _request("배추", INTEGRATION),

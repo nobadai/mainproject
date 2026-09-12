@@ -27,7 +27,7 @@ from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_conte
 from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
-from app.purchase_agent.quotes import observed_date, observed_spec, quote_block_reason
+from app.purchase_agent.quotes import observed_at, observed_spec, quote_block_reason
 from app.purchase_agent.schemas import FIXED_MARKET
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -114,7 +114,7 @@ def missing_grade_reason(state: PurchaseAgentState, top_grade: str, mid_grade: s
     spec = observed_spec(quotes)
     # ⚠️ **as_of 가 아니라 관측일이다.** 12-30 시세로 돌면서 "가락 2025-12-31 … 그날 잡힌
     #   등급"이라고 적으면, 그날 열리지도 않은 경매 결과를 말하는 셈이다 (Codex 2차 지적).
-    when = observed_date(quotes) or state["date"]
+    when = observed_at(quotes) or state["date"]
     where = f"{FIXED_MARKET} {when}" + (f" {spec} 규격" if spec else " 당일 시세")
     return (
         f"{where}에서 {'·'.join(missing)} 등급 거래가 없다 "

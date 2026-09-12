@@ -44,7 +44,7 @@ ITEMS = ("배추", "무", "양파")
 #: ``_observations`` 가 **하나도 못 찾으면 실패**하게 해서 공허한 통과를 막는다.
 _OBSERVATION_FIELDS = (
     ("예측 배치", "forecast", None, "generated_at"),
-    ("시세 관측일", "market_quotes", "list", "observed_date"),
+    ("시세 관측일", "market_quotes", "list", "observed_at"),
     ("문서 발행일", "context_docs", "list", "published_at"),
 )
 
@@ -156,7 +156,7 @@ _FUTURE = "2099-01-01"
     ("label", "state"),
     [
         ("예측 배치", {"forecast": {"generated_at": f"{_FUTURE}T06:00:00+09:00"}}),
-        ("시세 관측일", {"market_quotes": [{"grade": "특", "observed_date": _FUTURE}]}),
+        ("시세 관측일", {"market_quotes": [{"grade": "특", "observed_at": _FUTURE}]}),
         ("문서 발행일", {"context_docs": [{"doc_id": 1, "published_at": _FUTURE}]}),
     ],
 )
