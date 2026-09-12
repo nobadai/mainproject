@@ -37,6 +37,7 @@ from app.logistics.agent.investigation import (
     DEFAULT_BUDGET,
     LLM_CONTRACT_VIOLATION,
     MAX_CANDIDATE_OPTIONS,
+    AgentDeadlineExceeded,
     AgentLLMBudgetExceeded,
     AgentLLMDisabled,
     InvestigationReport,
@@ -49,6 +50,7 @@ from app.logistics.llm.runtime import ProviderAuthError, ProviderConfigurationEr
 
 __all__ = [
     "FINISH_DECLARATION_NAME",
+    "AgentDeadlineExceeded",
     "AgentLLMClient",
     "AgentLLMSettings",
     "PlannerContractError",
@@ -67,8 +69,13 @@ _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 #: `mode: ANY` 아래에서는 함수 호출만 나오므로 종료도 함수여야 한다.
 FINISH_DECLARATION_NAME = "finish_investigation"
 
-#: 전송 timeout 의 하한. 🔴 **0 이나 음수를 소켓에 주지 않는다** — `urllib` 이 그걸
-#: «무한 대기» 로 읽는 구현이 있어, 마감을 지키려던 값이 정반대로 동작한다.
+#: 전송을 **시작할 가치가 있는** 최소 남은 시간.
+#:
+#: 🔴 **하한으로 «끌어올리지» 않는다.** 예전에는 남은 시간이 0 이어도 `max(0.1, …)` 로
+#:    올려 0.1초짜리 새 HTTP 전송을 시작했다 — 마감을 지키려던 값이 **마감을 넘기는
+#:    경로**를 만든 셈이다. 이제 이 값보다 적게 남았으면 **아예 안 보낸다.**
+#: ★ 0 을 소켓에 주지 않는 목적은 그대로다 — `urllib` 이 0 을 «무한 대기» 로 읽는
+#:   구현이 있다. 다만 그때 할 일은 «조여서 보내기» 가 아니라 «안 보내기» 다.
 MIN_SEND_TIMEOUT_SECONDS = 0.1
 
 
@@ -505,7 +512,11 @@ class AgentLLMClient:
         return self._sends
 
     def _spend(self, send: Any) -> Any:
-        """전송 한 번 = 예산 한 칸. 🔴 **재시도·교정도 똑같이 센다.**"""
+        """전송 한 번 = 예산 한 칸. 🔴 **재시도·교정도 똑같이 센다.**
+
+        ⚠️ **부르기 전에 마감을 먼저 본다** (`_timed_or_raise`). 여기 안에서 마감을 보면
+           칸은 이미 줄어든 뒤라 «HTTP 0건 · 예산 −1» 이 된다.
+        """
         if self._sends >= self.max_sends:
             raise AgentLLMBudgetExceeded(
                 f"Logistics agent LLM send budget exhausted ({self.max_sends})"
@@ -524,23 +535,31 @@ class AgentLLMClient:
             None if view.remaining_seconds is None else self._clock() + view.remaining_seconds
         )
 
-    def _timed(self) -> AgentLLMSettings:
-        """이번 전송에 쓸 설정 — timeout 을 **남은 시간 이하로** 조인다.
+    def _timed_or_raise(self) -> AgentLLMSettings:
+        """이번 전송에 쓸 설정 — 아니면 **안 보낸다.**
 
         ```text
-        설정 30s · 남은 3s   →  3s     조사 마감이 이긴다
-        설정 30s · 남은 90s  →  30s    노드 상한이 이긴다
-        마감 없음            →  30s
+        남은 3s   · 설정 30s   →  3s 로 조여 보낸다     조사 마감이 이긴다
+        남은 90s  · 설정 30s   →  30s                  노드 상한이 이긴다
+        남은 0.05s             →  🔴 안 보낸다 (TIMEOUT)
+        남은 0s 이하           →  🔴 안 보낸다 (TIMEOUT)
+        마감 없음              →  설정 그대로
         ```
 
-        🔴 이것으로 막는 것은 *"남은 시간보다 긴 호출을 **시작**하는 것"* 이다. 이미 열린
-           소켓을 밖에서 끊는 장치가 아니다 (§8.5).
+        🔴 **재시도와 스키마 교정도 «새 전송» 이다.** 그래서 시도마다 이 함수를 다시
+           지난다 — 첫 전송이 남은 시간을 다 먹었으면 재시도는 **시작되지 않는다.**
+
+        ⚠️ 막는 것은 *"남은 시간보다 긴 호출을 **시작**하는 것"* 뿐이다. 이미 열린 소켓을
+           밖에서 끊는 장치가 아니다 (§8.5).
         """
         if self._deadline is None:
             return self.settings
         left = self._deadline - self._clock()
-        capped = max(MIN_SEND_TIMEOUT_SECONDS, min(self.settings.timeout_seconds, left))
-        return replace(self.settings, timeout_seconds=capped)
+        if left < MIN_SEND_TIMEOUT_SECONDS:
+            raise AgentDeadlineExceeded(
+                f"Logistics agent investigation deadline reached ({left:.3f}s left)"
+            )
+        return replace(self.settings, timeout_seconds=min(self.settings.timeout_seconds, left))
 
     def plan(self, view: InvestigationView) -> InvestigationStep:
         """다음 한 수. 🔴 **호출이 정확히 하나가 아니면 계약 위반이다.**"""
@@ -582,28 +601,34 @@ class AgentLLMClient:
 
     def _send_tool_call(self, view: InvestigationView) -> list[dict[str, Any]]:
         transport = _gemini_tool_call if self.settings.provider == "gemini" else _ollama_tool_call
-        return _with_retry(
-            lambda: self._spend(
+
+        def attempt() -> list[dict[str, Any]]:
+            # 🔴 **순서가 계약이다** — 마감 검사 → 예산 소비 → 전송.
+            #    반대로 두면 «HTTP 는 0건인데 전송 예산은 1 줄어든» 기록이 남는다.
+            timed = self._timed_or_raise()
+            return self._spend(
                 lambda: transport(
-                    self._timed(),
+                    timed,
                     system_prompt=PLANNER_SYSTEM_PROMPT,
                     user_payload=_view_payload(view),
                     declarations=tool_declarations(),
                 )
-            ),
-            retries=self.settings.max_retries,
-        )
+            )
+
+        return _with_retry(attempt, retries=self.settings.max_retries)
 
     def _send_json(self, payload: Mapping[str, Any]) -> str:
         transport = _gemini_json if self.settings.provider == "gemini" else _ollama_json
-        return _with_retry(
-            lambda: self._spend(
+
+        def attempt() -> str:
+            timed = self._timed_or_raise()
+            return self._spend(
                 lambda: transport(
-                    self._timed(), system_prompt=FINALIZER_SYSTEM_PROMPT, user_payload=payload
+                    timed, system_prompt=FINALIZER_SYSTEM_PROMPT, user_payload=payload
                 )
-            ),
-            retries=self.settings.max_retries,
-        )
+            )
+
+        return _with_retry(attempt, retries=self.settings.max_retries)
 
 
 def _with_retry[T](send: Any, *, retries: int) -> T:
@@ -612,7 +637,8 @@ def _with_retry[T](send: Any, *, retries: int) -> T:
     for attempt in range(retries + 1):
         try:
             return send()
-        except (ProviderAuthError, ProviderConfigurationError):
+        except (AgentDeadlineExceeded, ProviderAuthError, ProviderConfigurationError):
+            # 🔴 마감은 **다시 걸 대상이 아니다** — 기다릴 시간이 없어서 안 보낸 것이다.
             raise
         except (TimeoutError, urllib.error.URLError, json.JSONDecodeError, TypeError) as error:
             last = error

@@ -57,6 +57,8 @@ from app.logistics.agent.investigation import (
     EXCEPTION_STATUS_UNRESOLVED,
     REPLAN_BUDGET_EXCEEDED,
     TOOL_BUDGET_EXCEEDED,
+    TOOL_FAILED,
+    AgentDeadlineExceeded,
     AgentLLMBudgetExceeded,
     AgentLLMDisabled,
     EvaluatedOption,
@@ -296,24 +298,28 @@ def load_exception(state: InvestigationState) -> dict[str, Any]:
     if answer is None:
         # 🔴 **«없다» 와 «못 봤다» 를 가른다.** 목록을 못 읽은 것을 `NOT_FOUND` 로 적으면
         #    *"그날 그 Exception 이 없었다"* 는 **거짓 사실**이 결과에 남는다.
+        #
+        # ```text
+        # 정상 조회 + id 없음   NOT_FOUND        ← 아래 `found is None` 갈래에서만 난다
+        # Tool 이 터졌다        TOOL_FAILED      ← 여기. 목록을 못 봤다
+        # 마감 초과            TIMEOUT
+        # 예산 소진            BUDGET_EXCEEDED
+        # ```
         last = ledger.last
         detail = (last.detail if last else "") or ""
         if detail.startswith(DEADLINE_EXCEEDED):
-            stopped = FinishReason.TIMEOUT
+            stopped, reason = FinishReason.TIMEOUT, detail
         elif detail.startswith(TOOL_BUDGET_EXCEEDED):
-            stopped = FinishReason.BUDGET_EXCEEDED
+            stopped, reason = FinishReason.BUDGET_EXCEEDED, detail
         else:
-            # Tool 이 터졌다 — 목록을 못 봤으니 «없다» 고 말할 수 없다.
-            stopped = FinishReason.NOT_FOUND
+            # ⚠️ 여기에 `EXCEPTION_NOT_FOUND` 를 적지 않는다 — 목록을 **보지도 못했다.**
+            stopped = FinishReason.TOOL_FAILED
+            reason = f"{TOOL_FAILED}:get_open_exceptions:{detail or 'UNKNOWN'}"
         return {
             **ledger.freeze(),
             "finish_reason": stopped,
             "llm_status": "SKIPPED_TEMPLATE",
-            "uncertainties": (
-                (f"{EXCEPTION_NOT_FOUND}:{request.exception_id}",)
-                if stopped is FinishReason.NOT_FOUND
-                else (detail,)
-            ),
+            "uncertainties": (reason,),
         }
 
     found = next(
@@ -445,6 +451,11 @@ def _llm_failure(error: Exception) -> dict[str, Any]:
     전송 실패   llm_status=FALLBACK   · finish_reason=LLM_FAILED
     ```
     """
+    if isinstance(error, AgentDeadlineExceeded):
+        # 🔴 **우리가 안 보낸 것이다.** `llm_error_kind` 를 붙이면 *"공급자가 응답을 못
+        #    했다"* 는 거짓이 남는다. `llm_status` 도 건드리지 않는다 — 여기까지 성공한
+        #    판단이 있었다면 그 사실이 그대로 남아야 한다.
+        return {"finish_reason": FinishReason.TIMEOUT}
     if isinstance(error, AgentLLMDisabled):
         # 🔴 꺼 둔 것은 **장애가 아니다.** `finish_reason` 을 건드리지 않는다 —
         #    그래프는 결정론으로 끝까지 가고 규칙 제안 하나를 낸다.
@@ -514,7 +525,7 @@ def guard(state: InvestigationState) -> dict[str, Any]:
     budget = state["request"].budget
     llm_left = budget.max_llm_calls - int(state.get("llm_call_count") or 0)
 
-    if state.get("finish_reason") in {FinishReason.TIMEOUT, FinishReason.NOT_FOUND}:
+    if state.get("finish_reason") in _NOTHING_LEFT_TO_PROPOSE:
         return {"route": "finish"}
 
     step: InvestigationStep | None = state.get("step")
@@ -893,9 +904,24 @@ def finish(state: InvestigationState) -> dict[str, Any]:
     return {"result": result}
 
 
+#: `guard` 에서 **규칙 제안조차 만들지 않고** 닫는 끝들.
+#:
+#: ⚠️ `BUDGET_EXCEEDED` 는 **여기 없다.** 예산이 끝났어도 선행 조회로 모은 사실은 있으니
+#:    규칙 제안 하나는 낼 수 있다 — 그쪽은 `fallback_rule` 로 간다. 반면 마감 초과·목록을
+#:    못 본 경우는 *"무엇에 대한 제안인지"* 조차 모른다.
+_NOTHING_LEFT_TO_PROPOSE = frozenset(
+    {FinishReason.TIMEOUT, FinishReason.NOT_FOUND, FinishReason.TOOL_FAILED}
+)
+
 #: `load_exception` 에서 **조사 자체가 성립하지 않는** 끝들. 더 캐지 않고 바로 닫는다.
+#: ★ 여기엔 `BUDGET_EXCEEDED` 가 있다 — 첫 조회조차 못 했다면 모은 사실이 **하나도** 없다.
 _STOPPED_AT_LOAD = frozenset(
-    {FinishReason.NOT_FOUND, FinishReason.TIMEOUT, FinishReason.BUDGET_EXCEEDED}
+    {
+        FinishReason.NOT_FOUND,
+        FinishReason.TOOL_FAILED,
+        FinishReason.TIMEOUT,
+        FinishReason.BUDGET_EXCEEDED,
+    }
 )
 
 

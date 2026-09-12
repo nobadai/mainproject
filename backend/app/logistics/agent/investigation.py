@@ -44,7 +44,9 @@ __all__ = [
     "REPLAN_BUDGET_EXCEEDED",
     "SUBJECT_OUT_OF_SCOPE",
     "TOOL_BUDGET_EXCEEDED",
+    "TOOL_FAILED",
     "UNKNOWN_TOOL",
+    "AgentDeadlineExceeded",
     "AgentLLMBudgetExceeded",
     "AgentLLMDisabled",
     "AllowedToolName",
@@ -120,6 +122,10 @@ DUPLICATE_TOOL_CALL = "DUPLICATE_TOOL_CALL"
 TOOL_BUDGET_EXCEEDED = "TOOL_BUDGET_EXCEEDED"
 #: 조사 마감을 넘겨 **새 실행을 시작하지 않았다.** 이미 도는 호출을 끊은 것이 아니다.
 DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+#: Tool 함수가 **터졌다.** `{TOOL_FAILED}:{tool}:{예외 이름}` 으로 적는다.
+#: 🔴 «못 봤다» 는 뜻이지 «없다» 가 아니다 — 그 둘을 한 어휘에 담으면 조회 실패가
+#:    *"그날 그것이 없었다"* 는 **거짓 사실**로 굳는다.
+TOOL_FAILED = "TOOL_FAILED"
 #: 재계획 예산을 다 썼다.
 REPLAN_BUDGET_EXCEEDED = "REPLAN_BUDGET_EXCEEDED"
 #: 모델이 계약을 깼다 — 호출 0건이거나 2건 이상이거나 스키마 위반이다.
@@ -136,6 +142,15 @@ class AgentLLMBudgetExceeded(RuntimeError):
     🔴 **재시도와 교정도 전송이다.** 노드 수(`llm_call_count`)만 세면 *"한 노드가 두 번
        보냈다"* 가 안 보이고, 그러면 «11회» 라는 약속이 최악의 경우 22회가 된다.
        약속한 숫자가 실제 상한이어야 한다.
+    """
+
+
+class AgentDeadlineExceeded(RuntimeError):
+    """조사 마감이 지나 **새 전송을 시작하지 않았다.**
+
+    🔴 **공급자 장애가 아니다.** Runtime 이 정한 실행 상한이라 `LLM_FAILED` 로 분류하면
+       *"AI 가 응답을 못 했다"* 는 거짓이 기록에 남는다 — 우리가 안 보낸 것이다.
+    ★ 그래서 `llm_error_kind` 를 붙이지 않고 `finish_reason` 만 `TIMEOUT` 으로 간다.
     """
 
 
@@ -184,8 +199,10 @@ class FinishReason(str, Enum):
 
     #: LLM finalize 까지 정상 도달했다.
     FINISHED = "FINISHED"
-    #: 그날 그 Exception 이 없다 — 조사 자체가 성립하지 않는다.
+    #: 그날 그 Exception 이 **없다.** 🔴 목록을 **정상으로 읽고** 못 찾았을 때만이다.
     NOT_FOUND = "NOT_FOUND"
+    #: 첫 조회 Tool 이 **터져서** 목록을 못 봤다. «없다» 고 말할 근거가 없다.
+    TOOL_FAILED = "TOOL_FAILED"
     #: Tool/LLM 예산을 다 써서 규칙 제안으로 닫았다.
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     #: 재계획을 다 써서 규칙 제안으로 닫았다.

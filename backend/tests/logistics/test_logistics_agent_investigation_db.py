@@ -41,6 +41,7 @@ from app.logistics.agent.investigation import (
     PINNED_ARGUMENT_OVERRIDE,
     SUBJECT_OUT_OF_SCOPE,
     TOOL_BUDGET_EXCEEDED,
+    TOOL_FAILED,
     AgentLLMDisabled,
     FinishReason,
     InvestigationBudget,
@@ -683,6 +684,27 @@ class TestTotalExecutionOverRealTools:
         assert all(
             str(option.rejected_reason).startswith(TOOL_BUDGET_EXCEEDED) for option in starved
         )
+
+    def test_a_broken_opening_query_is_not_reported_as_absence(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 실제 DB 오류로도 «없다» 가 아니라 «못 봤다» 로 적힌다.
+
+        임시 스키마를 지워 진짜 `UndefinedTable` 을 일으킨다 — 가짜 예외가 아니라
+        Production 이 실제로 만날 모양이다.
+        """
+        _lot(conn)
+        _exception(conn)
+        with conn.cursor() as cur:
+            cur.execute(f"ALTER TABLE {TMP_SCHEMA}.logistics_exceptions RENAME TO gone")
+        result = _investigate(conn)
+        assert result.finish_reason is FinishReason.TOOL_FAILED
+        assert result.finish_reason is not FinishReason.NOT_FOUND
+        assert not any(u.startswith("EXCEPTION_NOT_FOUND") for u in result.uncertainties)
+        assert result.uncertainties[0].startswith(f"{TOOL_FAILED}:get_open_exceptions:")
+        assert result.llm_call_count == 0
+        # 첫 조회 말고는 아무 Tool 도 돌지 않았다.
+        assert [r.tool_name for r in result.tool_calls] == ["get_open_exceptions"]
 
     def test_a_passed_deadline_touches_the_database_at_all(
         self, conn: psycopg.Connection

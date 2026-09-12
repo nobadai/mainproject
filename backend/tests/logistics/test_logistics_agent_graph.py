@@ -37,7 +37,9 @@ from app.logistics.agent.investigation import (
     PINNED_ARGUMENT_OVERRIDE,
     SUBJECT_OUT_OF_SCOPE,
     TOOL_BUDGET_EXCEEDED,
+    TOOL_FAILED,
     UNKNOWN_TOOL,
+    AgentDeadlineExceeded,
     AgentLLMBudgetExceeded,
     AgentLLMDisabled,
     FinishReason,
@@ -288,6 +290,17 @@ def _run(spy: _ToolSpy, *, plan_fn: Any, finalize_fn: Any = None, **kwargs: Any)
     )
 
 
+class _Counter:
+    """불린 횟수를 세는 계획자 — *"부르지 않았다"* 를 증명할 때 쓴다."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, view: Any) -> InvestigationStep:
+        self.calls += 1
+        return FINISH
+
+
 def _options(count: int) -> list[InvestigationOption]:
     return [
         InvestigationOption(action="ACCEPT_RISK", parameters={"lot_id": LOT}, rationale=str(i))
@@ -489,6 +502,47 @@ class TestGraphRun:
         # 계획자·정리자를 아예 부르지 않았다.
         assert result.llm_call_count == 0
         assert result.llm_status == "SKIPPED_TEMPLATE"
+
+    def test_a_broken_opening_query_is_not_reported_as_absence(
+        self, spy: _ToolSpy, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **«없다» 와 «못 봤다» 는 다른 사실이다.**
+
+        첫 조회가 터지면 목록을 **보지도 못했다** — 그걸 `NOT_FOUND` 로 적으면
+        *"그날 그 Exception 이 없었다"* 는 거짓이 결과에 굳는다.
+        """
+        broken = _ToolSpy(
+            _default_answers(),
+            failures={"get_open_exceptions": RuntimeError("OperationalError")},
+        )
+        monkeypatch.setattr(graph_module, "run_tool", broken)
+        planner = _Counter()
+        result = _run(spy, plan_fn=planner)
+
+        assert result.finish_reason is FinishReason.TOOL_FAILED
+        assert result.finish_reason is not FinishReason.NOT_FOUND
+        # 🔴 «없다» 는 사유를 적지 않는다.
+        assert not any(u.startswith("EXCEPTION_NOT_FOUND") for u in result.uncertainties)
+        # 무엇이 어떻게 터졌는지는 남긴다.
+        assert result.uncertainties == (f"{TOOL_FAILED}:get_open_exceptions:RuntimeError",)
+        # LLM 0회 · 후속 Tool 0회.
+        assert planner.calls == 0
+        assert result.llm_call_count == 0
+        assert broken.names == ["get_open_exceptions"]
+        assert result.options == ()
+
+    def test_a_genuinely_absent_exception_is_still_not_found(self, spy: _ToolSpy) -> None:
+        """★ 반대쪽도 지킨다 — **정상으로 읽고** 못 찾았으면 그건 `NOT_FOUND` 다."""
+        result = graph_module.run_investigation(
+            conn=None,
+            sim_run_id=RUN,
+            as_of=AS_OF,
+            exception_id="EXC-NOPE",
+            plan_fn=_plan(FINISH),
+            finalize_fn=_report(summary=""),
+        )
+        assert result.finish_reason is FinishReason.NOT_FOUND
+        assert result.uncertainties == ("EXCEPTION_NOT_FOUND:EXC-NOPE",)
 
     def test_a_warehouse_subject_preloads_capacity_and_inbound(
         self, spy: _ToolSpy, monkeypatch: pytest.MonkeyPatch
@@ -856,59 +910,42 @@ class TestDeadline:
 
     def test_the_provider_timeout_is_capped_by_the_time_left(self) -> None:
         """🔴 남은 시간이 3초면 전송 timeout 도 **3초 이하**다 — 30초를 그대로 쓰지 않는다."""
-        settings = AgentLLMSettings(
-            enabled=True,
-            provider="ollama",
-            model="m",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=30,
-            max_retries=0,
-        )
-        client = AgentLLMClient(settings, clock=lambda: 100.0)
+        client = _client(clock=lambda: 100.0)
         client._open(_view_with(remaining=3.0))
-        assert client._timed().timeout_seconds == 3.0
+        assert client._timed_or_raise().timeout_seconds == 3.0
 
     def test_a_generous_deadline_leaves_the_node_limit_alone(self) -> None:
-        settings = AgentLLMSettings(
-            enabled=True,
-            provider="ollama",
-            model="m",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=30,
-            max_retries=0,
-        )
-        client = AgentLLMClient(settings, clock=lambda: 0.0)
+        client = _client()
         client._open(_view_with(remaining=90.0))
-        assert client._timed().timeout_seconds == 30
+        assert client._timed_or_raise().timeout_seconds == 30
 
-    def test_the_socket_never_gets_a_zero_timeout(self) -> None:
-        """⚠️ `urllib` 은 `0` 을 «무한 대기» 로 읽는 구현이 있다 — 하한을 둔다."""
-        settings = AgentLLMSettings(
-            enabled=True,
-            provider="ollama",
-            model="m",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=30,
-            max_retries=0,
-        )
-        client = AgentLLMClient(settings, clock=lambda: 0.0)
+    def test_no_send_is_started_once_the_deadline_has_passed(self) -> None:
+        """🔴 **하한으로 «끌어올리지» 않는다.**
+
+        예전에는 남은 시간이 0 이어도 `max(0.1, …)` 로 올려 0.1초짜리 새 전송을 시작했다 —
+        마감을 지키려던 값이 **마감을 넘기는 경로**를 만든 셈이다. 이제 안 보낸다.
+        """
+        client = _client()
         client._open(_view_with(remaining=-5.0))
-        assert client._timed().timeout_seconds == MIN_SEND_TIMEOUT_SECONDS
+        with pytest.raises(AgentDeadlineExceeded):
+            client._timed_or_raise()
+
+    def test_a_sliver_of_time_is_not_enough_to_start(self) -> None:
+        """⚠️ `urllib` 은 `0` 을 «무한 대기» 로 읽는 구현이 있다. 그때 할 일은 «조여서
+
+        보내기» 가 아니라 **«안 보내기»** 다.
+        """
+        client = _client()
+        client._open(_view_with(remaining=MIN_SEND_TIMEOUT_SECONDS / 2))
+        with pytest.raises(AgentDeadlineExceeded):
+            client._timed_or_raise()
 
     def test_the_correction_resend_uses_the_time_left_then(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """교정 재전송은 **그때 남은 시간**을 받는다 — 처음 스냅샷을 되쓰지 않는다."""
-        settings = AgentLLMSettings(
-            enabled=True,
-            provider="ollama",
-            model="m",
-            base_url="http://127.0.0.1:11434",
-            timeout_seconds=30,
-            max_retries=0,
-        )
         ticks = iter([0.0, 0.0, 6.0, 6.0, 6.0])
-        client = AgentLLMClient(settings, clock=lambda: next(ticks, 6.0))
+        client = _client(clock=lambda: next(ticks, 6.0))
         seen: list[float] = []
 
         def record(settings_in: Any, **kwargs: Any) -> str:
@@ -919,6 +956,87 @@ class TestDeadline:
         with pytest.raises(PlannerContractError):
             client.finalize(_view_with(remaining=10.0))
         assert seen == [10.0, 4.0]
+
+
+class TestNoSendNoSpend:
+    """🔴 **HTTP 를 시작하지 않았으면 전송 예산도 안 줄어든다.**
+
+    순서가 계약이다 — 마감 검사 → 예산 소비 → 전송. 반대로 두면 «HTTP 0건인데 예산은
+    1 줄어든» 기록이 남고, 성적표가 «AI 를 11번 불렀다» 고 거짓말한다.
+    """
+
+    def test_a_passed_deadline_spends_no_send_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _client()
+        monkeypatch.setattr(llm_client, "_ollama_json", _never_called)
+        with pytest.raises(AgentDeadlineExceeded):
+            client.finalize(_view_with(remaining=0.0))
+        assert client.sends == 0
+
+    def test_a_retry_after_the_deadline_never_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """첫 전송이 남은 시간을 다 먹었다 — 재시도는 **시작되지 않는다.**"""
+        http: list[float] = []
+
+        def dead(settings: Any, **kwargs: Any) -> str:
+            http.append(settings.timeout_seconds)
+            raise TimeoutError("provider timed out")
+
+        monkeypatch.setattr(llm_client, "_ollama_json", dead)
+        # 눈금: 마감 계산 0 · 첫 시도 0 → 그 뒤로는 전부 99 (10초를 다 썼다).
+        ticks = iter([0.0, 0.0, 99.0])
+        client = _client(clock=lambda: next(ticks, 99.0), retries=1)
+        with pytest.raises(AgentDeadlineExceeded):
+            client.finalize(_view_with(remaining=10.0))
+        # 🔴 실제 HTTP 는 첫 번째 한 번뿐이고, 예산도 딱 그만큼만 줄었다.
+        assert len(http) == 1
+        assert client.sends == 1
+
+    def test_a_correction_after_the_deadline_never_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """스키마 교정 재전송도 **새 전송**이다 — 시작 직전에 마감을 다시 본다."""
+        http: list[float] = []
+
+        def violating(settings: Any, **kwargs: Any) -> str:
+            http.append(settings.timeout_seconds)
+            return _schema_violation(settings, **kwargs)
+
+        monkeypatch.setattr(llm_client, "_ollama_json", violating)
+        ticks = iter([0.0, 0.0, 99.0])
+        client = _client(clock=lambda: next(ticks, 99.0))
+        with pytest.raises(AgentDeadlineExceeded):
+            client.finalize(_view_with(remaining=10.0))
+        assert len(http) == 1
+        assert client.sends == 1
+
+    def test_a_deadline_is_not_reported_as_a_provider_failure(self, spy: _ToolSpy) -> None:
+        """🔴 마감은 공급자 장애가 아니다 — **우리가 안 보낸 것**이다."""
+
+        def late(view: Any) -> Any:
+            raise AgentDeadlineExceeded("out of time")
+
+        result = _run(spy, plan_fn=late)
+        assert result.finish_reason is FinishReason.TIMEOUT
+        assert result.llm_error_kind is None
+
+
+def _never_called(settings: Any, **kwargs: Any) -> str:
+    raise AssertionError("마감이 지났는데 전송이 시작됐다")
+
+
+def _client(*, clock: Any = None, retries: int = 0) -> AgentLLMClient:
+    settings = AgentLLMSettings(
+        enabled=True,
+        provider="ollama",
+        model="m",
+        base_url="http://127.0.0.1:11434",
+        timeout_seconds=30,
+        max_retries=retries,
+    )
+    return AgentLLMClient(settings, clock=clock or (lambda: 0.0))
 
 
 def _view_with(*, remaining: float | None) -> InvestigationView:
