@@ -25,7 +25,7 @@ from app.purchase_agent.nodes.draft_plan import (
     split_adjustments,
 )
 from app.purchase_agent.nodes.split_plan import effective_allowed_axes, split_decision
-from app.purchase_agent.quotes import observed_date, observed_spec
+from app.purchase_agent.quotes import observed_at, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -650,7 +650,7 @@ def _quote_provenance(market_quotes: list[dict], as_of: str) -> dict[str, str]:
             "evidence_grade": "SIM_FIXED",
             "evidence_detail": "가락시장 등급별 당일 실측 (mock)",
         }
-    observed = observed_date(market_quotes) or as_of
+    observed = observed_at(market_quotes) or as_of
     # 관측일이 as_of 와 다르면 **며칠 전 값인지**까지 적는다. "12-30 경락 실적"만 적으면
     # 읽는 사람이 오늘 값인지 아닌지를 스스로 계산해야 한다.
     gap = (date.fromisoformat(as_of) - date.fromisoformat(observed)).days
@@ -714,7 +714,7 @@ def _rationale(
             # ★ **관측일을 말한다.** 12-30 값을 "12-31 당일 경락가"라고 적으면 그것도
             #   거짓이다 — 우리는 아침에 돌아서 as_of 이전 최신 거래일을 읽는다.
             "claim": (
-                f"가락 {observed_date(state['market_quotes']) or as_of} 경락가 "
+                f"가락 {observed_at(state['market_quotes']) or as_of} 경락가 "
                 f"{state['market_quotes'][0]['price']:,}원/kg 등 "
                 f"{len(state['market_quotes'])}개 등급"
             ),
@@ -1842,7 +1842,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     split_facts = split_decision(split_choice)
     # 시세 근거 좌표는 **관측일 기준**이고 그날 하나뿐이다. 안 루프 안에서 만들면 같은
     # 시세에서 나온 근거들이 서로 다른 좌표를 갖게 된다 (실제로 그랬다 — Codex 2차 지적).
-    quote_ref = f"MQ-가락-{observed_date(state['market_quotes']) or state['date']}"
+    quote_ref = f"MQ-가락-{observed_at(state['market_quotes']) or state['date']}"
 
     scenarios = []
     dropped = []

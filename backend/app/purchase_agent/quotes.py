@@ -399,7 +399,7 @@ def _query(schema: str, table: str, weight_condition: sql.Composable) -> sql.Com
              AND auction_date    >= %(as_of)s::date - %(market_window_days)s
              AND market_category =  %(market_category)s
         )
-        SELECT usable.auction_date AS observed_date,
+        SELECT usable.auction_date AS observed_at,
                usable.grade_name   AS grade,
                sum(usable.trade_amount_krw) AS amount_krw,
                sum(usable.trade_volume_kg)  AS volume_kg,
@@ -478,7 +478,7 @@ def _materialize(
     #   것만 조용히 남는다**. 관통일 배추가 정확히 그 모양이다(그물망 10kg + 파렛트 10kg):
     #   합산이면 933원, 마지막 행만 집으면 970원 — 에러 없이 4% 어긋난다.
     #   여기서 합쳐두면 나중에 GROUP BY 축이 늘어도 물량가중이 유일한 정답으로 남는다.
-    observed = _single_observed_date(rows)
+    observed = _single_observed_at(rows)
     label = _spec_label_on(spec, observed)
     # 시장 쪽 두 값은 행마다 같다(스칼라 서브쿼리) — 첫 행에서 한 번만 읽는다.
     market_last_open = _iso_or_none(rows[0].get("market_last_open")) if rows else None
@@ -514,10 +514,10 @@ def _materialize(
                 "spec": label,
                 # ★ **as_of 가 아니라 실제 관측일이다.** 12-30 값을 12-31 시세라고 적으면
                 #   그것도 거짓이다 — 사유·근거·ref_id 가 전부 이 값을 가져간다.
-                "observed_date": observed,
+                "observed_at": observed,
                 # 시장이 마지막으로 열린 날과, 그 뒤로 우리가 놓친 개장일 수. 노드는 DB 를
                 # 모르므로 **값이 여기서 실려 가야** 순수 함수가 판정할 수 있다 — ``spec``·
-                # ``observed_date`` 를 같은 이유로 얹는 것과 같다.
+                # ``observed_at`` 를 같은 이유로 얹는 것과 같다.
                 "market_last_open": market_last_open,
                 "trading_days_behind": behind,
             }
@@ -532,7 +532,7 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if isinstance(value, date) else str(value)
 
 
-def _single_observed_date(rows: list[dict[str, Any]]) -> str | None:
+def _single_observed_at(rows: list[dict[str, Any]]) -> str | None:
     """쿼리가 고른 **하루**. 두 날짜가 섞여 오면 멈춘다.
 
     쿼리가 ``max(auction_date)`` 하나로 좁히므로 정상 경로에서는 항상 한 날이다. 그런데도
@@ -541,13 +541,13 @@ def _single_observed_date(rows: list[dict[str, Any]]) -> str | None:
     """
     # 🔴 **전 행에 있어야 한다.** ``if row.get(...)`` 로 걸러 읽으면, 한 행만 날짜가 있고
     #   나머지는 없을 때 "단일 날짜"로 인정해 **함께 합산**한다 (Codex 2차 지적).
-    missing = [row for row in rows if not row.get("observed_date")]
+    missing = [row for row in rows if not row.get("observed_at")]
     if rows and missing:
         raise ValueError(
             f"관측일 없는 행이 {len(missing)}건 섞였다 — 어느 날 값인지 모르는 행을 "
             f"합산하면 물량가중이 서로 다른 시점을 섞는다"
         )
-    dates = {str(row["observed_date"]) for row in rows}
+    dates = {str(row["observed_at"]) for row in rows}
     if not dates:
         return None
     if len(dates) > 1:
@@ -572,7 +572,7 @@ def _spec_label_on(spec: Mapping[str, Any], observed: str | None) -> str:
 
 #: 실측 시세임을 나타내는 표시 두 개. **한 묶음이다** — 반쪽만 있으면 계약 위반이다.
 #: mock 은 둘 다 없고, DB 공급자는 둘 다 싣는다.
-PROVENANCE_KEYS = ("spec", "observed_date")
+PROVENANCE_KEYS = ("spec", "observed_at")
 
 
 def provenance_problem(
@@ -603,7 +603,7 @@ def provenance_problem(
             f"— 관측일 없이 실측으로 분류하면 as_of 를 관측일인 것처럼 적게 된다"
         )
 
-    dates = sorted({str(q["observed_date"]) for q in quotes})
+    dates = sorted({str(q["observed_at"]) for q in quotes})
     if len(dates) > 1:
         return (
             f"관측일이 하루가 아니다: {dates} — 등급마다 다른 날의 가격을 쓰면 "
@@ -683,9 +683,9 @@ def _single_market_value(quotes: list[dict[str, Any]], key: str) -> Any:
     return None if value is None else value
 
 
-def observed_date(quotes: list[dict[str, Any]]) -> str | None:
+def observed_at(quotes: list[dict[str, Any]]) -> str | None:
     """받은 시세의 관측일. mock 처럼 표기가 없으면 None."""
-    dates = {str(q["observed_date"]) for q in quotes if q.get("observed_date")}
+    dates = {str(q["observed_at"]) for q in quotes if q.get("observed_at")}
     return max(dates) if dates else None
 
 
@@ -694,7 +694,7 @@ def staleness_days(quotes: list[dict[str, Any]], as_of: str) -> int | None:
 
     mock 은 표기가 없어 항상 None 이다 — 회귀 경로가 이 검사를 만나지 않는다.
     """
-    observed = observed_date(quotes)
+    observed = observed_at(quotes)
     if observed is None:
         return None
     return (date.fromisoformat(as_of) - date.fromisoformat(observed)).days

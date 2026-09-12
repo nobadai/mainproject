@@ -42,7 +42,7 @@ from app.purchase_agent.nodes.classify_situation import (
     split_entry_cap,
     volume_gate_holds,
 )
-from app.purchase_agent.quotes import QuoteSource, observed_date, quote_block_reason
+from app.purchase_agent.quotes import QuoteSource, observed_at, quote_block_reason
 from app.purchase_agent.state import PurchaseAgentState
 from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_capacity
 from app.purchase_agent.tracing import ToolRecorder
@@ -134,13 +134,13 @@ def _observed_at(
         ★ 마스터 통보(2026-09-12)가 그 이유를 적었다 — 이 칸은 *"안전을 재는 칸이 아니라
           **위험을 드러내는** 칸"* 이다. 미지를 빼고 최댓값을 내면 **모르는 것이 사라진다.**
 
-    🔴 **막힌 시세의 날짜는 싣지 않는다** (규칙 3). ``observed_date`` 는 ``max(dates)``
+    🔴 **막힌 시세의 날짜는 싣지 않는다** (규칙 3). ``observed_at`` 는 ``max(dates)``
       라 관측일이 여러 날 섞여도 **조용히 값을 낸다.** 그런데 그런 날 우리는 그 시세로
       판단하지 않는다 — ③이 ``_no_quote_plan`` 으로 0안을 낸다. 안 쓴 값의 관측일을
       실으면 *"우리가 이 시점 기준으로 판단했다"* 가 **거짓**이 된다. 「모른다」를
       날짜로 메우는 것이다.
 
-      ⚠️ **``allocate_sourcing`` 의 ``observed_date(quotes) or state["date"]`` 를
+      ⚠️ **``allocate_sourcing`` 의 ``observed_at(quotes) or state["date"]`` 를
         베끼지 않는다.** 그쪽은 사람이 읽는 **사유 문장**의 표시용 폴백이고, 이 칸은
         **계보**다 — 봉투가 ``as_of`` 로 메우는 것을 이름 걸고 금지한다.
 
@@ -152,7 +152,7 @@ def _observed_at(
         ``observed_at > as_of`` 게이트를 걸어도 우리는 한 건도 안 걸린다.
 
     🟡 **mock 은 전부 ``None`` 이다** — mock 시세에 관측일 표기가 0건이고
-      ``observed_date`` 가 그것을 *"표기가 없으면 None"* 으로 규정한다. 값이 나는 것은
+      ``observed_at`` 가 그것을 *"표기가 없으면 None"* 으로 규정한다. 값이 나는 것은
       실 DB 직독뿐이라 회귀 경로는 이 함수가 생겨도 그대로다.
 
     ⚠️ ``constraints`` 를 인자로 받는다 — ③·⑤와 **같은 판정**을 봐야 한다
@@ -160,7 +160,7 @@ def _observed_at(
     """
     if quote_block_reason(quotes, item, as_of.isoformat(), constraints):
         return None
-    text = observed_date(quotes)
+    text = observed_at(quotes)
     return None if text is None else date.fromisoformat(text)
 
 
