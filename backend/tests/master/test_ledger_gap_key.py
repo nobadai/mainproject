@@ -251,6 +251,16 @@ class _Calendar:
         return True
 
 
+class _배치가_도는_날:
+    """배치 축 대역 (2026-09-13). **이 파일의 날은 전부 예측 배치가 도는 날이다.**
+
+    ★ 배치가 없는 날의 하루는 `test_no_ml_batch_day.py` 가 잰다.
+    """
+
+    def has_ml_batch(self, day: date) -> bool:
+        return True
+
+
 def _적힌_관문행(monkeypatch) -> dict[str, Any]:
     """장부가 막힌 하루를 **진짜로 걸어서** 표에 적히려던 칸을 그대로 받아낸다.
 
@@ -274,6 +284,7 @@ def _적힌_관문행(monkeypatch) -> dict[str, Any]:
         now=datetime(평일.year, 평일.month, 평일.day, 9, 30, tzinfo=SEOUL),
         as_of=평일,
         calendar=_Calendar(),
+        ml_batch=_배치가_도는_날(),
         gate_result=준비,
     )
     scheduler.run_scheduled_day(

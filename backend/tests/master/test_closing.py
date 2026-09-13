@@ -778,7 +778,7 @@ def _하루(**kwargs) -> Any:
         reason="검사",
         deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
     )
-    assert action.should_run, "전제가 깨졌다 — 이 검사는 도는 날을 재려던 것이다"
+    assert action.scope == "FULL", "전제가 깨졌다 — 이 검사는 도는 날을 재려던 것이다"
     return run_scheduled_day(action, **defaults), defaults
 
 
