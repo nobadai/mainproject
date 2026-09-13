@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,7 @@ import pytest
 
 from app.logistics.agent import proposal_service as service
 from app.logistics.agent import proposals as repository
+from app.logistics.agent import tool_dispatch, tools
 from app.logistics.agent.investigation import (
     ACTION_DECISION_OWNERS,
     EvaluatedOption,
@@ -40,7 +42,7 @@ from app.logistics.agent.proposals import (
     project_proposal_at,
     proposal_key_for,
 )
-from app.logistics.agent.tools import ActionImpact
+from app.logistics.agent.tools import ActionImpact, CapacityContext, LotFact, LotView
 
 SIM = "SIM-PROPOSAL"
 EXC = "EX-SIM-PROPOSAL-FRESHNESS_PRESSURE-LOT-1-20260101"
@@ -71,6 +73,60 @@ def _impact(
         candidate_kg=Decimal(500),
         estimated_loss_krw=None,
         freshness_days_left=2,
+    )
+
+
+def _lot_view(**overrides: Any) -> LotView:
+    """진짜 `LotView` 한 벌. 🔴 **가짜 모양으로 재면 칸 이름이 바뀌어도 안 걸린다.**
+
+    ★ 근거 추림이 보는 것이 이 칸 이름들이라, 여기서 진짜 타입을 쓰는 것이 곧 계약이다.
+    """
+    fields: dict[str, Any] = {
+        "lot_id": LOT,
+        "item_id": "ITEM-BAECHU",
+        "item": "배추",
+        "grade": None,
+        "storage_zone": "COLD_HUMID_0_3",
+        "status": "ACTIVE",
+        "received_at": D1,
+        "remaining_qty_kg": Decimal(700),
+        "unit_cost_krw_per_kg": Decimal(1200),
+        "remaining_freshness_days": 2,
+        "effective_freshness_limit_days": 10,
+        "turnover_status": "SELL_PRIORITY",
+        "sell_priority": True,
+        "sell_priority_remaining_days": 3,
+        "disposal_candidate": False,
+        "committed_kg": Decimal(200),
+        "uncommitted_kg": Decimal(500),
+        "remaining_qty_observed_as_of": D1,
+        "status_observed_as_of": D1,
+    }
+    fields.update(overrides)
+    return LotView(
+        sim_run_id=SIM,
+        as_of=D5,
+        observed_as_of=D1,
+        uncertainties=("COMMITMENT_UNRESOLVED",),
+        lot=LotFact(**fields),
+    )
+
+
+def _capacity_view(window: dict[date, Decimal]) -> CapacityContext:
+    """진짜 `CapacityContext`. 🔴 18일 창을 통째로 들고 있는 바로 그 타입이다."""
+    return CapacityContext(
+        sim_run_id=SIM,
+        as_of=D5,
+        observed_as_of=None,
+        used_kg=Decimal(900),
+        guaranteed_kg=Decimal(1000),
+        burst_kg=Decimal(200),
+        available_kg=Decimal(100),
+        window_usage_ratio=Decimal("0.90"),
+        cap_by_date=window,
+        inbound_lead_days=2,
+        capacity_tight_ratio=Decimal("0.90"),
+        capacity_basis="CURRENT_ACTIVE_POLICY",
     )
 
 
@@ -109,6 +165,7 @@ def _result(
     observed_as_of: date | None = D1,
     as_of: date = D5,
     finish_reason: FinishReason = FinishReason.FINISHED,
+    tool_calls: Any = None,
 ) -> InvestigationResult:
     return InvestigationResult(
         sim_run_id=SIM,
@@ -119,15 +176,17 @@ def _result(
         options=(_option(),) if options is None else options,
         recommended_index=recommended_index,
         observed_as_of=observed_as_of,
-        tool_calls=(
+        tool_calls=tool_calls
+        if tool_calls is not None
+        else (
             ToolCallRecord(
                 sequence=1,
                 tool_name="get_lot",
                 arguments={"lot_id": LOT},
                 status=ToolCallStatus.SUCCESS,
-                # 🔴 **그때 Tool 이 낸 답.** 이것이 없으면 나중에 되짚으려고 Tool 을
-                #    다시 돌리게 되고, 그 값은 그날 값이 아니다.
-                answer={"lot_id": LOT, "remaining_qty_kg": Decimal(700)},
+                # 🔴 **그때 Tool 이 낸 답 그대로.** 근거는 여기서만 나온다 —
+                #    제안을 만들며 Tool 을 다시 부르지 않는다.
+                answer=_lot_view(),
                 observed_as_of=D1,
                 uncertainties=("COMMITMENT_UNRESOLVED",),
             ),
@@ -910,8 +969,9 @@ class TestStoredPayload:
 
     def _stored(self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
         calls = _stub_repository(monkeypatch)
+        result = _result(**kwargs)
         outcome = service.create_proposal(
-            conn, result=_result(**kwargs), as_of=D5, proposed_by="operator"
+            conn, result=result, as_of=result.as_of, proposed_by="operator"
         )
         assert outcome.created
         return calls["insert"][0]
@@ -942,18 +1002,44 @@ class TestStoredPayload:
         assert stored.evidence_refs[0]["sequence"] == 1
         assert stored.evidence_refs[0]["observed_as_of"] == D1.isoformat()
 
-    def test_the_tool_answer_itself_is_preserved(
+    def test_the_whole_tool_answer_is_not_copied(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """🔴 **그때 무슨 답이 왔는지**까지 남긴다.
+        """🔴 **제안은 조사 로그 저장소가 아니다.**
 
-        호출과 인자만 있으면 *"그때 잔량이 얼마였길래 이 제안이 나왔나"* 에 답하려고
-        **Tool 을 다시 돌리게** 된다 — 그 값은 오늘 값이지 그날 값이 아니다.
+        Tool 답 전체를 제안마다 복사하면 같은 데이터가 제안 수만큼 늘고, Tool 스키마가
+        바뀌면 과거 payload 해석이 얽히고, «조사 기록» 과 «승인 대상» 의 책임이 한 칸에
+        섞인다.
         """
         (cited,) = self._stored(conn, monkeypatch).evidence_refs
-        assert cited["answer"] == {"lot_id": LOT, "remaining_qty_kg": "700"}
+        assert "answer" not in cited, cited
+        assert set(cited) == {
+            "sequence",
+            "tool_name",
+            "arguments",
+            "facts",
+            "observed_as_of",
+            "uncertainties",
+        }
+
+    def test_only_the_facts_the_decision_used_are_kept(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """승인 판단에 실제로 쓴 칸만 남는다 — Lot 한 줄 20칸을 통째로 옮기지 않는다."""
+        (cited,) = self._stored(conn, monkeypatch).evidence_refs
+        assert cited["facts"] == {
+            "lot_id": LOT,
+            "item_id": "ITEM-BAECHU",
+            "status": "ACTIVE",
+            "remaining_qty_kg": "700",
+            "remaining_freshness_days": 2,
+            "uncommitted_kg": "500",
+        }
         # ⚠️ `Decimal` 은 문자열로 낮춘다 — `float` 을 지나면 값이 조용히 흔들린다.
-        assert isinstance(cited["answer"]["remaining_qty_kg"], str)
+        assert isinstance(cited["facts"]["remaining_qty_kg"], str)
+        # 🔴 원가 · 정책 한계 · 관측일 파생값 따위는 안 옮긴다.
+        assert "unit_cost_krw_per_kg" not in cited["facts"]
+        assert "freshness_remaining_ratio" not in cited["facts"]
 
     def test_what_the_tool_could_not_see_is_preserved_too(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
@@ -961,6 +1047,98 @@ class TestStoredPayload:
         """★ *"확인했고 문제 없음"* 과 *"확인을 못 했음"* 의 구별이 근거에도 남아야 한다."""
         (cited,) = self._stored(conn, monkeypatch).evidence_refs
         assert cited["uncertainties"] == ["COMMITMENT_UNRESOLVED"]
+
+    def test_an_unexpected_answer_shape_does_not_kill_the_proposal(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 Tool 모양이 달라졌다고 **제안을 버리지 않고, 없는 값을 지어내지도 않는다.**"""
+        drifted = _result()
+        moved = replace(drifted.tool_calls[0], answer={"lot_id": LOT, "잔량": 700})
+        stored = self._stored(
+            conn, monkeypatch, tool_calls=(moved, *drifted.tool_calls[1:])
+        )
+        (cited,) = stored.evidence_refs
+        assert cited["facts"] == {}
+        assert service.EVIDENCE_FACTS_UNAVAILABLE in cited["uncertainties"]
+        # ★ 그래도 제안은 섰다.
+        assert stored.action_type == "SALES_PRIORITY_REQUEST"
+
+    def test_no_tool_is_called_again_while_storing(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **근거는 조사 때 받아 둔 답에서만 나온다.**
+
+        지금 DB 를 다시 읽으면 **오늘 값**을 그날의 근거처럼 보여 주게 된다.
+        """
+        for name in tool_dispatch.TOOL_EXECUTORS:
+            monkeypatch.setitem(tool_dispatch.TOOL_EXECUTORS, name, _tool_must_not_run)
+        for name in ("get_lot", "get_item_lots", "get_capacity_context", "get_policy"):
+            monkeypatch.setattr(tools, name, _tool_must_not_run)
+        stored = self._stored(conn, monkeypatch)
+        assert stored.evidence_refs[0]["facts"]["lot_id"] == LOT
+
+    def test_the_impact_answer_is_not_copied_into_the_evidence(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §29 — 같은 숫자를 두 칸에 두면 갈라졌을 때 정본을 못 댄다.
+
+        영향의 정본은 `impact_json` 하나다. 근거에는 **봉투만** 남는다.
+        """
+        probe = ToolCallRecord(
+            sequence=9,
+            tool_name="estimate_action_impact",
+            arguments={"action": "SALES_PRIORITY_REQUEST"},
+            status=ToolCallStatus.SUCCESS,
+            answer=_impact(),
+            observed_as_of=D1,
+        )
+        base = _result()
+        stored = self._stored(
+            conn,
+            monkeypatch,
+            options=(_option(evidence_refs=(9,)),),
+            tool_calls=(*base.tool_calls, probe),
+        )
+        (cited,) = stored.evidence_refs
+        assert cited["tool_name"] == "estimate_action_impact"
+        assert cited["facts"] == {}
+        assert "candidate_kg" not in str(cited)
+        # ★ 숫자는 저쪽에 살아 있다.
+        assert stored.impact["candidate_kg"] == "500"
+
+    def test_the_capacity_window_is_not_copied_whole(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §5 — `cap_by_date` 18일 창을 통째로 옮기지 않는다. **그 하루만** 남긴다."""
+        window = {D5 + timedelta(days=offset): Decimal(100 + offset) for offset in range(18)}
+        probe = ToolCallRecord(
+            sequence=9,
+            tool_name="get_capacity_context",
+            arguments={},
+            status=ToolCallStatus.SUCCESS,
+            answer=_capacity_view(window),
+            observed_as_of=None,
+        )
+        base = _result()
+        stored = self._stored(
+            conn,
+            monkeypatch,
+            options=(
+                _option(
+                    action="PURCHASE_ADJUST_REQUEST",
+                    parameters={"qty_delta_kg": Decimal(-300), "arrival_date": D8},
+                    evidence_refs=(9,),
+                ),
+            ),
+            tool_calls=(*base.tool_calls, probe),
+        )
+        (cited,) = stored.evidence_refs
+        facts = cited["facts"]
+        assert facts["arrival_date"] == D8.isoformat()
+        assert facts["available_capacity_kg"] == "103"
+        assert facts["cap_window_days"] == 18
+        # 🔴 나머지 17일은 어디에도 없다.
+        assert (D5 + timedelta(days=1)).isoformat() not in str(cited)
 
     def test_the_impact_is_the_tool_answer_not_a_new_number(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
@@ -987,6 +1165,10 @@ class TestStoredPayload:
 # ══════════════════════════════════════════════════════════════════════════
 #  상태 어휘와 표 경계 — 소스를 읽어 막는다
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def _tool_must_not_run(*_: Any, **__: Any) -> Any:
+    raise AssertionError("제안을 저장하며 Tool 을 다시 불렀다")
 
 
 class TestTransitionVocabulary:

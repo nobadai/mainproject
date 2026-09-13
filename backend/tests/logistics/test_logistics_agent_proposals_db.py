@@ -10,6 +10,8 @@ stale 승인    이미 닫힌 문제의 제안이 승인되는가
 과거 재현     D6 조회에 D8 의 결정이 새어 나오는가
 제약          DB 가 «날짜 없는 승인» · «끝난 날 둘» · «빈 승인자» 를 막는가
 격리          남의 실행 제안이 보이는가
+실행 축       DB 가 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 거부하는가
+경합          동시에 들어온 같은 요청이 UniqueViolation 으로 터져 나가는가
 ```
 
 🔴 **가짜로는 원자성을 못 잰다.** 스텁을 꽂으면 *"우리가 롤백을 불렀다"* 까지만 확인되고,
@@ -918,8 +920,12 @@ class TestAtomicity:
 
         # 🔴 같은 이름으로 또 넣으려 한다 → PK 충돌.
         monkeypatch.setattr(repository, "next_proposal_id", lambda *_, **__: standing)
-        with pytest.raises(psycopg.errors.UniqueViolation):
+        # ⚠️ 부딪히면 **롤백하고 다시 읽는다**(경합 복구). 그런데 살아 있는 제안이 없다 —
+        #    부딪힌 상대가 이미 끝난 행이라 «같은 요청» 인지 «남의 안» 인지 못 가린다.
+        #    그때는 추측하지 않고 멈춘다(fail-closed). raw `UniqueViolation` 은 안 나간다.
+        with pytest.raises(service.ProposalStateConflict) as caught:
             _create(conn)
+        assert caught.value.code == "STATE_CONFLICT"
 
         assert len(_rows(conn)) == 1
         assert _exception_row(conn) == {"status": "OPEN", "proposed_as_of": None}
@@ -1302,6 +1308,235 @@ class TestRunIsolation:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+class TestRunAxisIsEnforcedByTheDatabase:
+    """🔴 **장부의 불변식은 응용에만 있으면 안 된다.**
+
+    홑 FK 둘(`sim_run_id` → `sim_runs` · `exception_id` → `logistics_exceptions`)은 각자
+    자기 칸만 본다 — 그래서 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 막지
+    못한다. 서비스가 이미 막고 있어도, 직접 SQL 한 줄이면 장부가 갈린다.
+    """
+
+    OTHER_EXC = "EXC-CAPACITY-2"
+    OTHER_LOT = "LOT-BAECHU-2"
+
+    def _insert(self, *, sim_run_id: str, exception_id: str, previous: str | None = None) -> str:
+        previous_sql = "NULL" if previous is None else f"'{previous}'"
+        return f"""INSERT INTO {TMP_SCHEMA}.logistics_action_proposals (
+                proposal_id, sim_run_id, exception_id, proposal_key, action_type,
+                decision_owner, parameters_json, impact_json, evidence_refs_json,
+                status, proposed_as_of, proposed_by, previous_proposal_id
+            ) VALUES ('PRP-DIRECT', '{sim_run_id}', '{exception_id}', 'k', 'ACCEPT_RISK',
+                'LOGISTICS', '{{}}'::jsonb, '{{}}'::jsonb, '[]'::jsonb, 'PROPOSED',
+                '{D5}', 'x', {previous_sql})"""
+
+    def test_a_proposal_cannot_point_at_another_runs_exception(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 서비스 검사에 **닿기도 전에** DB 가 막는다."""
+        _exception(conn)  # EXC 는 SIM 의 문제다
+        _refuses(
+            conn,
+            self._insert(sim_run_id=OTHER_SIM, exception_id=EXC),
+            psycopg.errors.ForeignKeyViolation,
+        )
+
+    def test_the_same_run_still_passes(self, conn: psycopg.Connection) -> None:
+        """★ 정상 조합을 막지 않는다 — 제약이 너무 세게 걸리지 않았다는 확인이다."""
+        _exception(conn)
+        with conn.cursor() as cur:
+            cur.execute(self._insert(sim_run_id=SIM, exception_id=EXC))
+        conn.rollback()
+
+    def test_a_replacement_cannot_point_at_another_exceptions_proposal(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """§14 — 대체 고리도 같은 실행 · 같은 문제 안에서만."""
+        _exception(conn)
+        standing = _create(conn)
+        assert standing.proposal is not None
+        _exception(conn, exception_id=self.OTHER_EXC, subject_id=self.OTHER_LOT)
+        _refuses(
+            conn,
+            self._insert(
+                sim_run_id=SIM,
+                exception_id=self.OTHER_EXC,
+                previous=standing.proposal.proposal_id,
+            ),
+            psycopg.errors.ForeignKeyViolation,
+        )
+
+    def test_a_replacement_cannot_point_across_runs(
+        self, conn: psycopg.Connection
+    ) -> None:
+        _exception(conn, exception_id="EXC-OTHER-RUN", sim_run_id=OTHER_SIM)
+        elsewhere = service.create_proposal(
+            conn,
+            result=_result(exception_id="EXC-OTHER-RUN", sim_run_id=OTHER_SIM),
+            as_of=D5,
+            proposed_by=OPERATOR,
+        )
+        assert elsewhere.proposal is not None
+        _exception(conn)
+        _refuses(
+            conn,
+            self._insert(
+                sim_run_id=SIM,
+                exception_id=EXC,
+                previous=elsewhere.proposal.proposal_id,
+            ),
+            psycopg.errors.ForeignKeyViolation,
+        )
+
+
+class TestConcurrentCreate:
+    """🔴 **동시에 들어온 같은 요청도 재시도다.**
+
+    ```text
+    A history 조회 → 없음        B history 조회 → 없음
+    A INSERT 성공                B INSERT → UniqueViolation
+    ```
+
+    B 가 그 예외를 그대로 흘려보내면 «같은 요청 재시도 = REUSED» 계약이 **경합에서만**
+    깨진다 — 가장 재현하기 어려운 자리에서.
+
+    ★ 커넥션 **둘**로 잰다. 이 파일의 임시 스키마는 커밋돼 있어 다른 커넥션에도 보인다.
+      «먼저 읽고 나중에 쓴다» 는 순간은 첫 목록 조회 한 번만 낡게 만들어 고정한다 —
+      스레드로 재면 검사가 흔들린다.
+    """
+
+    def _stale_history(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        """첫 목록 조회만 **경합 전 값**(빈 목록)으로 돌리고, INSERT 시도를 센다.
+
+        🔴 **시도 횟수를 세는 것이 중요하다.** 안 세면, 낡은 목록을 못 만들었을 때
+           중복 판정이 조용히 같은 답(`REUSED`)을 내고 검사는 **경합 경로를 한 번도
+           안 밟은 채** 초록불이 된다.
+        """
+        once = [()]
+        real_select = repository.select_proposals
+        monkeypatch.setattr(
+            repository,
+            "select_proposals",
+            lambda *args, **kwargs: once.pop() if once else real_select(*args, **kwargs),
+        )
+        attempts: list[Any] = []
+        real_insert = repository.insert_proposal
+
+        def counted(connection: Any, *, row: Any) -> Any:
+            attempts.append(row.proposal_id)
+            return real_insert(connection, row=row)
+
+        monkeypatch.setattr(repository, "insert_proposal", counted)
+        return attempts
+
+    def test_the_loser_of_an_identical_race_gets_the_winners_proposal(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _exception(conn)
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = service.create_proposal(
+                rival, result=_result(), as_of=D5, proposed_by=OPERATOR
+            )
+            assert winner.created
+            assert winner.proposal is not None
+
+            attempted = self._stale_history(monkeypatch)
+            outcome = service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by=OPERATOR
+            )
+        finally:
+            rival.rollback()
+            rival.close()
+
+        # 🔴 **실제로 부딪혔다** — 중복 판정에서 미리 걸린 것이 아니다.
+        assert attempted, "경합 경로를 안 지났다"
+        # 🔴 UniqueViolation 이 호출자에게 그대로 나가지 않았다.
+        assert outcome.status == "REUSED"
+        assert outcome.proposal is not None
+        assert outcome.proposal.proposal_id == winner.proposal.proposal_id
+        assert len(_rows(conn)) == 1
+        assert _exception_row(conn)["status"] == "PROPOSED"
+
+    def test_a_primary_key_collision_settles_the_same_way(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§18 — 부딪힌 제약이 PK 든 부분 유일 인덱스든 **다시 읽어** 뜻을 정한다."""
+        _exception(conn)
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = service.create_proposal(
+                rival, result=_result(), as_of=D5, proposed_by=OPERATOR
+            )
+            assert winner.proposal is not None
+
+            attempted = self._stale_history(monkeypatch)
+            # ⚠️ 낡은 목록을 본 쪽은 **같은 이름**(PRP-…-1)을 고른다.
+            monkeypatch.setattr(
+                repository, "next_proposal_id", lambda *_, **__: winner.proposal.proposal_id
+            )
+            outcome = service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by=OPERATOR
+            )
+        finally:
+            rival.rollback()
+            rival.close()
+
+        assert attempted == [winner.proposal.proposal_id]
+        assert outcome.status == "REUSED"
+        assert len(_rows(conn)) == 1
+
+    def test_a_race_between_different_proposals_is_never_reused(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 §34 — **남의 제안을 내 것이라고 답하지 않는다.**"""
+        _exception(conn)
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = service.create_proposal(
+                rival, result=_result(), as_of=D5, proposed_by=OPERATOR
+            )
+            assert winner.proposal is not None
+
+            attempted = self._stale_history(monkeypatch)
+            outcome = service.create_proposal(
+                conn,
+                result=_result(action="ACCEPT_RISK", parameters={"lot_id": LOT}),
+                as_of=D5,
+                proposed_by=OPERATOR,
+            )
+        finally:
+            rival.rollback()
+            rival.close()
+
+        assert attempted, "경합 경로를 안 지났다"
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason == f"{service.LIVE_PROPOSAL_EXISTS}:{winner.proposal.proposal_id}"
+        assert len(_rows(conn)) == 1
+        assert _rows(conn)[0].action_type == "SALES_PRIORITY_REQUEST"
+
+    def test_the_loser_leaves_no_half_state(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """§20 — 경합 복구가 원자성을 먹지 않는다. 진 쪽은 **한 줄도 안 남긴다.**"""
+        _exception(conn)
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            service.create_proposal(rival, result=_result(), as_of=D5, proposed_by=OPERATOR)
+            before = _snapshot(conn)
+            attempted = self._stale_history(monkeypatch)
+            service.create_proposal(conn, result=_result(), as_of=D5, proposed_by=OPERATOR)
+        finally:
+            rival.rollback()
+            rival.close()
+        assert attempted, "경합 경로를 안 지났다"
+        assert _snapshot(conn) == before
+        assert len(_rows(conn)) == 1
+
+
 class TestConstraints:
     def _update(self, fields: str) -> str:
         return (
@@ -1460,7 +1695,7 @@ class TestFromRealInvestigation:
         assert _rows(conn) == ()
         assert _exception_row(conn) == {"status": "OPEN", "proposed_as_of": None}
 
-    def test_the_evidence_keeps_what_the_tools_actually_answered(
+    def test_the_evidence_keeps_the_facts_the_decision_used(
         self, conn: psycopg.Connection
     ) -> None:
         """🔴 §43 — *"그때 잔량이 얼마였길래 이 제안이 나왔나"* 에 **다시 묻지 않고** 답한다.
@@ -1470,8 +1705,8 @@ class TestFromRealInvestigation:
         D8 출고 200 뒤 500kg  ← 오늘 Tool 을 다시 돌리면 이 값이 나온다
         ```
 
-        답을 안 남기면 되짚을 때 Tool 을 다시 돌리게 되고, 그러면 **오늘 값**을 그날의
-        근거처럼 보여 주게 된다.
+        🔴 그런데 **Tool 답 전체를 복사하지는 않는다.** 제안은 조사 로그가 아니다 —
+           승인 판단에 실제로 쓴 핵심 사실만 남는다.
         """
         _lot(conn)
         _exception(conn)
@@ -1484,17 +1719,62 @@ class TestFromRealInvestigation:
         (row,) = _rows(conn)
         cited = {one["tool_name"]: one for one in row.evidence_refs}
         assert "get_lot" in cited, sorted(cited)
-        # ★ `get_lot` 은 `LotView` 를 낸다 — 사실은 `lot` 안에 있고, «없다» 도 답이다.
-        answer = cited["get_lot"]["answer"]
-        assert answer is not None
-        assert answer["lot"]["lot_id"] == LOT
-        # 🔴 **그날** 값이 굳어 있다. Decimal 은 문자열로 — float 을 지나면 흔들린다.
-        assert answer["lot"]["remaining_qty_kg"] == "700.000000"
-        assert isinstance(answer["lot"]["remaining_qty_kg"], str)
-        # ⚠️ 계산된 사실(@property)도 함께 실린다 — `jsonable` 이 그것까지 낮춘다.
-        assert "freshness_remaining_ratio" in answer["lot"]
-        # ⚠️ 무엇을 못 봤는지도 함께 남는다.
-        assert isinstance(cited["get_lot"]["uncertainties"], list)
+        entry = cited["get_lot"]
+
+        # 🔴 답 전체가 통째로 실리지 않았다.
+        assert "answer" not in entry, entry
+        assert entry["facts"] == {
+            "lot_id": LOT,
+            "item_id": BAECHU,
+            "status": "ACTIVE",
+            # **그날** 값이 굳어 있다. Decimal 은 문자열로 — float 을 지나면 흔들린다.
+            "remaining_qty_kg": "700.000000",
+            "remaining_freshness_days": entry["facts"]["remaining_freshness_days"],
+            "uncommitted_kg": entry["facts"]["uncommitted_kg"],
+        }
+        assert isinstance(entry["facts"]["remaining_qty_kg"], str)
+        # 🔴 Lot 한 줄 20칸 · 파생 @property 는 안 옮긴다.
+        assert "unit_cost_krw_per_kg" not in entry["facts"]
+        assert "freshness_remaining_ratio" not in entry["facts"]
+        # ⚠️ 무엇을 못 봤는지는 그대로 남는다.
+        assert isinstance(entry["uncertainties"], list)
+
+    def test_the_impact_lives_in_one_place_only(self, conn: psycopg.Connection) -> None:
+        """🔴 §29 — 영향의 정본은 `impact_json` 하나다. 근거에 다시 복사하지 않는다."""
+        _lot(conn)
+        _exception(conn)
+        result = self._investigate(conn, qty_kg=300)
+        outcome = service.create_proposal(
+            conn, result=result, as_of=D5, proposed_by=OPERATOR
+        )
+        assert outcome.created
+
+        (row,) = _rows(conn)
+        assert row.impact["feasibility"] == "FEASIBLE"
+        for entry in row.evidence_refs:
+            assert "answer" not in entry
+            if entry["tool_name"] == "estimate_action_impact":
+                assert entry["facts"] == {}
+
+    def test_the_capacity_window_is_not_copied_whole(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 §5 — 18일 창을 통째로 옮기지 않는다.
+
+        ⚠️ 이 검사의 임시 스키마에서는 `get_capacity_context` 가 자기 커넥션을 새로 열어
+           읽으므로 창이 비어 있다 — 그래서 **«비었다» 도 정직하게 기록되는지**를 잰다
+           (`test_logistics_agent_tools_db` 가 같은 한계를 이미 적어 뒀다).
+        """
+        _lot(conn)
+        _exception(conn)
+        result = self._investigate(conn)
+        service.create_proposal(conn, result=result, as_of=D5, proposed_by=OPERATOR)
+        (row,) = _rows(conn)
+        for entry in row.evidence_refs:
+            if entry["tool_name"] != "get_capacity_context":
+                continue
+            assert "cap_by_date" not in entry["facts"]
+            assert isinstance(entry["facts"].get("cap_window_days"), int)
 
     def test_a_measurable_quantity_becomes_an_approvable_proposal(
         self, conn: psycopg.Connection

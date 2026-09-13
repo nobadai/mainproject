@@ -35,8 +35,14 @@
 -- 🔴 **다른 파트 표를 안 건드린다.** 이 파일이 남의 표에 하는 일은 `sim_runs` 를
 --    FK 로 가리키는 것뿐이다. DROP 은 한 줄도 없다.
 --
---   ⚠️ **ALTER 는 한 줄 생겼다 (§2 · Commit 5).** 대상은 이 파일이 만든 자기 표
---      (`logistics_exceptions`) 이고, 하는 일은 칸 하나 추가다 — 남의 표가 아니다.
+--   ⚠️ **ALTER 가 있다 (§2 · §4 · Commit 5).** 대상은 전부 이 파일이 만든 자기 표
+--      (`logistics_exceptions` · `logistics_action_proposals`) 이고, 하는 일은 칸 하나와
+--      제약 몇 개를 더하는 것뿐이다 — 남의 표가 아니고 DROP 도 없다.
+--
+--   🔴 **기존 운영 DB 가 §4 의 이유다.** `CREATE TABLE IF NOT EXISTS` 안의 제약을
+--      고쳐도 표가 이미 있는 DB 에는 **아무 일도 안 일어난다.** 그래서 새 제약은
+--      «CREATE 안» 과 «멱등 ALTER» **양쪽**에 적는다 — 신규 DB 는 앞엣것으로, 운영
+--      DB 는 뒤엣것으로 같은 자리에 도착한다.
 --
 -- ★ 멱등이다 — `CREATE TABLE IF NOT EXISTS` · `CREATE INDEX IF NOT EXISTS`.
 --   신규 구축 DB 와 운영 DB 에 같은 파일을 그대로 돌린다 (`30_` 과 같은 규율).
@@ -193,6 +199,24 @@ BEGIN
 END
 $ck_proposed$;
 
+-- 🔴 **대응안이 «같은 실행의» 문제만 가리키게 하려고** 둔다 (§4).
+--    `exception_id` 가 이미 PK 라 유일성은 더 안 보태지만, 복합 FK 는 «유일한 칸 묶음»
+--    만 가리킬 수 있어서 이 선언이 있어야 `(sim_run_id, exception_id)` 를 가리킬 수 있다.
+DO $exception_axis$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'uq_logistics_exceptions_run_axis'
+          AND conrelid = 'haetdeul.logistics_exceptions'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_exceptions
+            ADD CONSTRAINT uq_logistics_exceptions_run_axis
+            UNIQUE (sim_run_id, exception_id);
+    END IF;
+END
+$exception_axis$;
+
 COMMENT ON COLUMN haetdeul.logistics_exceptions.proposed_as_of IS
     '이 문제에 대응안이 **처음** 선 시뮬레이션 영업일. 🔴 한 번 적히면 불변이다 — 제안이 거절되어 status 가 OPEN 으로 돌아가도 지우지 않는다(일어난 사실이다). ⚠️ 상태 이력 전체가 아니다: OPEN↔PROPOSED 를 여러 번 오간 자취는 이 칸으로 복원되지 않는다.';
 
@@ -273,15 +297,31 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT logistics_action_proposals_pkey PRIMARY KEY (proposal_id),
+    -- 🔴 아래 자기참조 복합 FK 가 가리킬 자리. PK 가 이미 유일성을 주지만 복합 FK 는
+    --    «유일한 칸 묶음» 만 가리킬 수 있다.
+    CONSTRAINT uq_logistics_action_proposals_axis
+        UNIQUE (sim_run_id, exception_id, proposal_id),
 
     CONSTRAINT logistics_action_proposals_sim_run_id_fkey
         FOREIGN KEY (sim_run_id) REFERENCES haetdeul.sim_runs(sim_run_id),
     CONSTRAINT logistics_action_proposals_exception_fkey
         FOREIGN KEY (exception_id)
         REFERENCES haetdeul.logistics_exceptions(exception_id),
+    -- 🔴 **실행 축을 DB 가 지킨다.** 위의 홑 FK 만으로는 «RUN-B 의 제안이 RUN-A 의
+    --    문제를 가리키는» 조합을 못 막는다 — 두 FK 가 각자 자기 칸만 보기 때문이다.
+    --    응용이 이미 막고 있어도 장부의 불변식은 DB 에도 있어야 한다.
+    CONSTRAINT logistics_action_proposals_exception_axis_fkey
+        FOREIGN KEY (sim_run_id, exception_id)
+        REFERENCES haetdeul.logistics_exceptions (sim_run_id, exception_id),
     CONSTRAINT logistics_action_proposals_previous_fkey
         FOREIGN KEY (previous_proposal_id)
         REFERENCES haetdeul.logistics_action_proposals(proposal_id),
+    -- 🔴 **대체는 같은 실행 · 같은 문제 안에서만.** `previous_proposal_id` 가 NULL 이면
+    --    (MATCH SIMPLE) 검사하지 않는다 — 첫 제안은 가리킬 앞이 없다.
+    CONSTRAINT logistics_action_proposals_previous_axis_fkey
+        FOREIGN KEY (sim_run_id, exception_id, previous_proposal_id)
+        REFERENCES haetdeul.logistics_action_proposals
+                   (sim_run_id, exception_id, proposal_id),
 
     -- 🔴 카탈로그는 닫혀 있다 (상세설계 §10.1). 모델이 이름을 지어내도 행이 안 된다.
     CONSTRAINT ck_logistics_action_proposals_action
@@ -367,5 +407,66 @@ COMMENT ON COLUMN haetdeul.logistics_action_proposals.proposal_key IS
     'f(sim_run_id, exception_id, action_type, 정규화된 parameters) 지문. 재시도로 같은 제안이 두 번 들어오는 것을 알아보는 용도다. 🔴 유일 제약이 아니다 — 거절된 뒤 같은 안을 다시 올리는 것은 정상이다.';
 COMMENT ON COLUMN haetdeul.logistics_action_proposals.rationale IS
     '모델이 적은 이유 문장. 🔴 업무 사실이 아니라 기록이다 — 숫자와 판정의 주인은 impact_json 이다.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- §4  이미 표가 선 DB 를 §3 과 **같은 자리**로  (#628 Commit 5 close)
+--
+--     🔴 **`CREATE TABLE IF NOT EXISTS` 안의 제약은 기존 DB 에 안 닿는다.** 표가
+--        있으면 그 문장은 통째로 건너뛰므로, 위에서 제약을 더해도 운영 DB 는 예전
+--        모양 그대로다. 그래서 같은 제약을 여기서 한 번 더 — 멱등하게 — 건다.
+--
+--     ⚠️ **`NOT VALID` 를 쓰지 않는다.** `ADD CONSTRAINT` 는 기존 행을 전부 검사하고,
+--        축이 어긋난 행이 있으면 **여기서 큰 소리로 실패한다.** 그것이 맞다 —
+--        어긋난 장부를 조용히 통과시키고 «제약이 있다» 고 적는 것보다, 마이그레이션이
+--        멈추고 사람이 그 행을 보는 편이 낫다.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DO $proposal_axis$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'uq_logistics_action_proposals_axis'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT uq_logistics_action_proposals_axis
+            UNIQUE (sim_run_id, exception_id, proposal_id);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'logistics_action_proposals_exception_axis_fkey'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT logistics_action_proposals_exception_axis_fkey
+            FOREIGN KEY (sim_run_id, exception_id)
+            REFERENCES haetdeul.logistics_exceptions (sim_run_id, exception_id);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'logistics_action_proposals_previous_axis_fkey'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT logistics_action_proposals_previous_axis_fkey
+            FOREIGN KEY (sim_run_id, exception_id, previous_proposal_id)
+            REFERENCES haetdeul.logistics_action_proposals
+                       (sim_run_id, exception_id, proposal_id);
+    END IF;
+END
+$proposal_axis$;
+
+COMMENT ON CONSTRAINT logistics_action_proposals_exception_axis_fkey
+    ON haetdeul.logistics_action_proposals IS
+    '🔴 대응안은 **같은 실행의** 문제만 가리킨다. 홑 FK 둘(sim_run_id / exception_id)은 각자 자기 칸만 보므로 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 못 막는다.';
+COMMENT ON CONSTRAINT logistics_action_proposals_previous_axis_fkey
+    ON haetdeul.logistics_action_proposals IS
+    '🔴 대체는 같은 실행 · 같은 문제 안에서만. previous_proposal_id 가 NULL 이면 검사하지 않는다(MATCH SIMPLE) — 첫 제안은 가리킬 앞이 없다.';
 
 COMMIT;

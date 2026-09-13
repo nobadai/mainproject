@@ -53,6 +53,7 @@ from app.logistics.agent.tools import SUPPORTED_ACTIONS
 
 __all__ = [
     "ACTION_UNSUPPORTED",
+    "EVIDENCE_FACTS_UNAVAILABLE",
     "EXCEPTION_MISMATCH",
     "EXCEPTION_NOT_FOUND",
     "EXCEPTION_NOT_LIVE",
@@ -105,6 +106,9 @@ EXCEPTION_MISMATCH = "EXCEPTION_MISMATCH"
 EXCEPTION_NOT_LIVE = "EXCEPTION_NOT_LIVE"
 #: 같은 문제에 살아 있는 대응안이 **이미 있다** (§47 · §48).
 LIVE_PROPOSAL_EXISTS = "LIVE_PROPOSAL_EXISTS"
+#: 인용된 Tool 답에서 **핵심 사실을 못 뽑았다.** 🔴 그렇다고 제안을 버리지 않고,
+#:    없는 값을 지어내지도 않는다 — 못 뽑았다는 사실만 근거에 남긴다.
+EVIDENCE_FACTS_UNAVAILABLE = "EVIDENCE_FACTS_UNAVAILABLE"
 
 
 # ── 상태 충돌 어휘 (`ProposalStateConflict.code`) ────────────────────────
@@ -116,6 +120,10 @@ SUPERSEDE_TARGET_MISMATCH = "SUPERSEDE_TARGET_MISMATCH"
 STALE_PROPOSAL = "STALE_PROPOSAL"
 #: 🔴 이전 제안이 끝난 날보다 **앞선 날짜**로 새 제안을 세우려 한다.
 PROPOSAL_HISTORY_CONFLICT = "PROPOSAL_HISTORY_CONFLICT"
+
+
+class _ConcurrentInsert(RuntimeError):
+    """누가 먼저 같은 자리를 잡았다. 🔴 **밖으로 안 나간다** — 재조회가 뜻을 정한다."""
 
 
 class ProposalNotFound(LookupError):
@@ -218,40 +226,285 @@ def select_proposal_option(
     return option, ""
 
 
-def _evidence_snapshot(result: InvestigationResult, option: EvaluatedOption) -> list[Any]:
-    """인용된 근거를 **그때 Tool 이 낸 답까지** 남긴다.
+# ══════════════════════════════════════════════════════════════════════════
+#  근거 추림 — 🔴 **Proposal 은 조사 로그 저장소가 아니다**
+# ══════════════════════════════════════════════════════════════════════════
+#
+#  Tool 답 **전체**를 제안마다 복사하면 네 가지가 한꺼번에 나빠진다.
+#
+#  ```text
+#  같은 데이터가 제안 수만큼 늘어난다
+#  payload 가 비대해진다 (용량 문맥은 18일 창을 통째로 들고 온다)
+#  Tool 스키마가 바뀌면 과거 payload 해석이 얽힌다
+#  «조사 기록» 과 «승인 대상» 의 책임이 한 칸에 섞인다
+#  ```
+#
+#  그래서 **승인 판단에 실제로 쓴 핵심 사실만** 남긴다. 조사 전체를 저장할 자리가
+#  생기면(`investigation_id`) 그쪽으로 잇는다 — 이 칸을 로그로 키우지 않는다.
+
+
+@dataclass(frozen=True)
+class _Subject:
+    """근거를 추릴 때 **«무엇에 대한 제안인가»**. 🔴 여기서 값을 만들지 않는다.
+
+    ★ 전부 이미 확정된 입력에서 온다 — 조사의 `exception_id` 와, 스키마를 지난
+      `parameters`. 이 값들로 «어느 Lot · 어느 날 · 어느 입고» 를 고를 뿐이다.
+    """
+
+    exception_id: str
+    lot_id: str | None
+    item_id: str | None
+    arrival_date: date | None
+    inbound_id: str | None
+
+    @classmethod
+    def of(cls, *, exception_id: str, parameters: Mapping[str, Any]) -> _Subject:
+        arrival = parameters.get("arrival_date")
+        return cls(
+            exception_id=exception_id,
+            lot_id=_identifier(parameters.get("lot_id")),
+            item_id=_identifier(parameters.get("item_id")),
+            arrival_date=arrival if isinstance(arrival, date) else None,
+            inbound_id=_identifier(parameters.get("inbound_id")),
+        )
+
+
+def _identifier(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _pick(source: Any, *names: str) -> dict[str, Any] | None:
+    """그 객체에 **있는 칸만** 뽑는다. 하나도 없으면 `None` (모양이 달라졌다).
+
+    ⚠️ 값이 `None` 인 칸은 **뺀 것이 아니라 담는다** — *"봤는데 못 댔다"* 와
+       *"안 봤다"* 는 다른 사실이고, 키가 사라지면 그 구별이 사라진다.
+    """
+    if source is None:
+        return None
+    picked = {name: getattr(source, name) for name in names if hasattr(source, name)}
+    return picked or None
+
+
+def _exception_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """조사 대상 문제 **한 줄만.** 그날 목록 전체를 복사하지 않는다."""
+    found = getattr(answer, "exceptions", None)
+    if found is None:
+        return None
+    chosen = next(
+        (one for one in found if getattr(one, "exception_id", None) == subject.exception_id),
+        None,
+    )
+    if chosen is None:
+        return {"exception_count": len(found)}
+    return _pick(
+        chosen, "exception_id", "code", "subject_type", "subject_id", "opened_as_of",
+        "open_days",
+    )
+
+
+def _lot_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    if not hasattr(answer, "lot"):
+        return None
+    if answer.lot is None:
+        # Tool 이 «없다» 고 답했다 — 그 사유는 이미 `uncertainties` 에 있다.
+        return {}
+    return _pick(
+        answer.lot, "lot_id", "item_id", "status", "remaining_qty_kg",
+        "remaining_freshness_days", "uncommitted_kg",
+    )
+
+
+def _item_lots_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """🔴 **Lot 배열 전체를 복사하지 않는다.** 몇 개였는지 + 대상 Lot 한 줄이다."""
+    lots = getattr(answer, "lots", None)
+    if lots is None:
+        return None
+    facts: dict[str, Any] = {
+        "item_id": getattr(answer, "item_id", None),
+        "lot_count": len(lots),
+    }
+    chosen = next(
+        (one for one in lots if getattr(one, "lot_id", None) == subject.lot_id), None
+    )
+    facts.update(
+        _pick(
+            chosen, "lot_id", "remaining_qty_kg", "remaining_freshness_days",
+            "uncommitted_kg",
+        )
+        or {}
+    )
+    return facts
+
+
+def _commitment_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """🔴 **예약 객체 전체를 복사하지 않는다.** 몇 건이었나 + 합계 · 가장 이른 납기."""
+    facts = _pick(answer, "item_id", "unallocated_kg", "next_due_date")
+    if facts is None:
+        return None
+    reservations = getattr(answer, "live_reservations", None)
+    if reservations is not None:
+        facts["live_reservation_count"] = len(reservations)
+    return facts
+
+
+def _policy_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """🔴 **정책 객체 전체를 복사하지 않는다.** 판본과 이 Lot 에 걸리는 임계값뿐이다.
+
+    ⚠️ 전역 `agent_policy` 지도는 안 담는다 — 임계가 어떻게 걸렸는지는 Exception 의
+       근거와 `impact_json` 에 이미 있고, 여기 또 두면 같은 값이 세 곳에 산다.
+    """
+    facts = _pick(answer, "item_id", "policy_version")
+    if facts is None:
+        return None
+    facts.update(
+        _pick(
+            getattr(answer, "item_policy", None),
+            "operational_limit_days",
+            "sell_priority_remaining_days",
+        )
+        or {}
+    )
+    return facts
+
+
+def _capacity_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """🔴 **`cap_by_date` 18일 창을 통째로 복사하지 않는다.**
+
+    ```text
+    언제나        점유 · 보장 · 여유 · 창 사용률 · 기준
+    도착일이 있으면  **그 하루**의 여유만                 ← PURCHASE_ADJUST_REQUEST
+    ```
+    """
+    facts = _pick(
+        answer, "used_kg", "guaranteed_kg", "available_kg", "window_usage_ratio",
+        "capacity_basis",
+    )
+    if facts is None:
+        return None
+    window = getattr(answer, "cap_by_date", None)
+    if isinstance(window, Mapping):
+        facts["cap_window_days"] = len(window)
+        if subject.arrival_date is not None and subject.arrival_date in window:
+            facts["arrival_date"] = subject.arrival_date
+            facts["available_capacity_kg"] = window[subject.arrival_date]
+    return facts
+
+
+def _inbound_facts(answer: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """🔴 **예정 목록 전체를 복사하지 않는다.** 이 제안이 건드리는 한 건이다."""
+    schedules = getattr(answer, "schedules", None)
+    if schedules is None:
+        return None
+    facts: dict[str, Any] = {
+        "days": getattr(answer, "days", None),
+        "schedule_count": len(schedules),
+    }
+    chosen = next(
+        (
+            one
+            for one in schedules
+            if (
+                subject.inbound_id is not None
+                and getattr(one, "inbound_id", None) == subject.inbound_id
+            )
+            or (
+                subject.arrival_date is not None
+                and getattr(one, "expected_arrival_date", None) == subject.arrival_date
+            )
+        ),
+        None,
+    )
+    facts.update(
+        _pick(chosen, "inbound_id", "item_id", "quantity_kg", "expected_arrival_date") or {}
+    )
+    return facts
+
+
+def _impact_facts(answer: Any, subject: _Subject) -> Mapping[str, Any]:
+    """🔴 **비워 둔다.** 이 Tool 의 답은 `impact_json` 이 통째로 들고 있다.
+
+    같은 숫자를 두 칸에 두면 둘이 갈라졌을 때 어느 쪽이 정본인지 아무도 못 댄다.
+    업무 숫자의 정본은 `impact_json` 하나다 (§51).
+    """
+    del answer, subject
+    return {}
+
+
+#: Tool 이름 → **핵심 사실 추림**. 🔴 전부 결정론 매핑이다 — LLM 에게 «중요한 것만
+#: 골라 줘» 라고 묻지 않고, Tool 을 다시 부르지도 않는다.
+_EVIDENCE_FACTS: Mapping[str, Any] = {
+    "get_open_exceptions": _exception_facts,
+    "get_lot": _lot_facts,
+    "get_item_lots": _item_lots_facts,
+    "get_sales_commitments": _commitment_facts,
+    "get_policy": _policy_facts,
+    "get_capacity_context": _capacity_facts,
+    "get_inbound_schedule": _inbound_facts,
+    "estimate_action_impact": _impact_facts,
+}
+
+
+def _facts_of(record: Any, subject: _Subject) -> Mapping[str, Any] | None:
+    """한 호출에서 핵심 사실을 뽑는다. 못 뽑으면 `None`.
+
+    🔴 **터져도 제안을 버리지 않는다** — Tool 모양이 예상과 달라진 것은 그 제안이
+       틀렸다는 뜻이 아니다. 못 뽑았다는 사실만 근거에 남긴다.
+    """
+    project = _EVIDENCE_FACTS.get(record.tool_name)
+    if project is None:
+        return None
+    try:
+        return project(record.answer, subject)
+    except Exception:  # noqa: BLE001 - 근거 추림 실패가 제안을 죽이지 않는다.
+        return None
+
+
+def _evidence_snapshot(
+    result: InvestigationResult, option: EvaluatedOption, *, subject: _Subject
+) -> list[Any]:
+    """인용된 호출을 **승인에 필요한 만큼만** 남긴다.
 
     ```text
     sequence · tool_name · arguments   무엇을 어떻게 물었나
-    answer                             🔴 **그때 무슨 답이 왔나**
+    facts                              🔴 그 답에서 **판단에 쓴 핵심 사실만**
     observed_as_of · uncertainties     그 답이 언제 것이고 무엇을 못 봤나
     ```
 
     🔴 **번호만 적지 않는다.** `evidence_refs` 는 그 조사 안의 순번인데 조사 자체가 DB 에
-       안 남으므로(§44), 번호만 저장하면 나중에 *"왜 이 제안이 나왔나"* 를 되짚을 수
-       없다 — 가리킬 곳이 없는 포인터가 된다 (§43).
+       안 남으므로(§44), 번호만 저장하면 가리킬 곳이 없는 포인터가 된다 (§43).
 
-    🔴 **답까지 있어야 되짚을 수 있다.** 호출과 인자만 남기면 *"그때 잔량이 얼마였길래
-       이 제안이 나왔나"* 에 답하려고 **Tool 을 다시 돌리게** 된다 — 그 값은 그날 값이
-       아니라 오늘 값이고, 그것을 근거처럼 보여 주면 기록이 거짓이 된다.
+    🔴 **Tool 답 전체도 적지 않는다.** 제안은 조사 로그가 아니다 — 전체를 복사하면 같은
+       데이터가 제안 수만큼 늘고, 조사 기록과 승인 대상의 책임이 한 칸에 섞인다.
 
-    ⚠️ **여기서 다시 계산하지 않는다.** `jsonable(record.answer)` 로 **그때 그 답**을
-       모양만 낮춰 옮긴다 (`Decimal` 은 문자열로 — `float` 을 지나면 값이 흔들린다).
+    🔴 **여기서 Tool 을 다시 부르지 않는다.** 사실은 전부 조사 때 받아 둔
+       `ToolCallRecord.answer` 에서 나온다 — 지금 DB 를 다시 읽으면 **오늘 값**을 그날의
+       근거처럼 보여 주게 된다. LLM 에게 요약시키지도 않는다 (§4 · 결정론 매핑이다).
+
+    ⚠️ 못 뽑으면 `facts` 는 비고 `EVIDENCE_FACTS_UNAVAILABLE` 이 붙는다 — **없는 값을
+       지어내 채우지 않는다.**
     """
     cited = set(option.evidence_refs)
-    return [
-        {
-            "sequence": record.sequence,
-            "tool_name": record.tool_name,
-            "arguments": jsonable(dict(record.arguments)),
-            # 🔴 그때 Tool 이 낸 답 **그대로**. 다시 부르지 않는다.
-            "answer": jsonable(record.answer),
-            "observed_as_of": jsonable(record.observed_as_of),
-            "uncertainties": jsonable(record.uncertainties),
-        }
-        for record in result.tool_calls
-        if record.sequence in cited
-    ]
+    entries: list[Any] = []
+    for record in result.tool_calls:
+        if record.sequence not in cited:
+            continue
+        facts = _facts_of(record, subject)
+        uncertainties = list(record.uncertainties)
+        if facts is None:
+            facts = {}
+            if EVIDENCE_FACTS_UNAVAILABLE not in uncertainties:
+                uncertainties.append(EVIDENCE_FACTS_UNAVAILABLE)
+        entries.append(
+            {
+                "sequence": record.sequence,
+                "tool_name": record.tool_name,
+                "arguments": jsonable(dict(record.arguments)),
+                "facts": jsonable(facts),
+                "observed_as_of": jsonable(record.observed_as_of),
+                "uncertainties": jsonable(tuple(uncertainties)),
+            }
+        )
+    return entries
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -384,7 +637,15 @@ def create_proposal(
         decision_owner=owner,
         parameters=jsonable(parameters),
         impact=jsonable(option.impact),
-        evidence_refs=tuple(_evidence_snapshot(result, option)),
+        evidence_refs=tuple(
+            _evidence_snapshot(
+                result,
+                option,
+                subject=_Subject.of(
+                    exception_id=result.exception_id, parameters=parameters
+                ),
+            )
+        ),
         rationale=option.rationale,
         source_finish_reason=result.finish_reason.value,
         source_llm_status=result.llm_status,
@@ -409,10 +670,47 @@ def create_proposal(
                 f"{result.exception_id} 가 제안을 세우는 사이에 살아 있는 상태가 아니게 됐다",
             )
         conn.commit()
-    except Exception:
+    except Exception as error:
         conn.rollback()
+        # 🔴 **동시에 들어온 같은 요청**이었을 수 있다. 그때는 실패가 아니라 재시도다 —
+        #    다만 «무엇과 부딪혔는지» 는 예외 이름이 아니라 **다시 읽어서** 정한다.
+        if isinstance(error, _ConcurrentInsert) or repository.is_unique_violation(error):
+            return _settle_after_race(conn, result=result, key=key)
         raise
     return ProposalOutcome(status="CREATED", proposal=row)
+
+
+def _settle_after_race(
+    conn: Any, *, result: InvestigationResult, key: str
+) -> ProposalOutcome:
+    """부딪힌 뒤 **롤백하고 다시 읽어** 무슨 일이었는지로 답을 정한다.
+
+    ```text
+    살아 있는 제안의 지문이 같다   →  REUSED              같은 요청이 먼저 들어갔다
+    살아 있는 제안의 지문이 다르다  →  LIVE_PROPOSAL_EXISTS 남이 **다른 안**을 세웠다
+    살아 있는 제안이 없다          →  🔴 답하지 않는다     무엇과 부딪혔는지 못 댄다
+    ```
+
+    🔴 **유일 제약 위반을 곧바로 `REUSED` 로 옮기지 않는다.** PK 충돌과 «살아 있는 제안
+       하나» 충돌은 같은 종류의 예외로 오고, 그 이름만 보고 답하면 **남의 제안을 내
+       것이라고 답하게 된다.**
+
+    ⚠️ PostgreSQL 은 제약 위반 뒤 트랜잭션이 abort 상태라 **롤백 없이는 다시 못 읽는다.**
+       부르는 쪽이 이미 롤백한 뒤에 들어온다.
+    """
+    for existing in repository.live_proposals_for(
+        conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
+    ):
+        if existing.proposal_key == key:
+            return ProposalOutcome(status="REUSED", proposal=existing)
+        return ProposalOutcome(
+            status="SKIPPED", reason=f"{LIVE_PROPOSAL_EXISTS}:{existing.proposal_id}"
+        )
+    raise ProposalStateConflict(
+        "STATE_CONFLICT",
+        f"{result.exception_id} 에 제안을 넣다 부딪혔는데 다시 읽으니 살아 있는 제안이"
+        " 없다 — 무엇과 부딪혔는지 못 대므로 답하지 않는다",
+    )
 
 
 def _check_supersede_target(
@@ -526,8 +824,10 @@ def _supersede(conn: Any, *, sim_run_id: str, proposal_id: str, as_of: date) -> 
         from_status="PROPOSED",
     )
     if closed != 1:
-        raise ProposalStateConflict(
-            "STATE_CONFLICT", f"{proposal_id} 는 지금 PROPOSED 가 아니어서 대체할 수 없다"
+        # ⚠️ 여기 오는 것은 **경합뿐이다** — 대상이 `PROPOSED` 인 것은 방금 확인했다.
+        #    그러니 «부를 수 없는 요청» 이 아니라 «남이 먼저 움직였다» 로 다룬다.
+        raise _ConcurrentInsert(
+            f"{proposal_id} 를 대체하는 사이에 남이 먼저 그 제안을 옮겼다"
         )
 
 

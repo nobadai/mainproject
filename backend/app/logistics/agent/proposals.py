@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Literal
 
+from psycopg import errors as pg_errors
 from psycopg import sql
 
 from app.logistics.agent.investigation import jsonable
@@ -47,6 +48,7 @@ __all__ = [
     "ProposalStatus",
     "exception_status",
     "insert_proposal",
+    "is_unique_violation",
     "latest_terminal_as_of",
     "live_proposals_for",
     "mark_exception_proposed",
@@ -197,6 +199,19 @@ _COLUMNS = (
     "rejection_reason",
     "previous_proposal_id",
 )
+
+
+def is_unique_violation(error: BaseException) -> bool:
+    """이 실패가 **«누가 먼저 같은 자리를 잡았다»** 인가.
+
+    🔴 **이 값이 업무 답을 정하지 않는다.** 참이라는 것은 *"다시 읽어 봐야 한다"* 는
+       뜻일 뿐이다 — 같은 요청이 이미 들어갔을 수도, 남이 **다른** 안을 세웠을 수도
+       있고, 그 둘은 전혀 다른 답이다 (`proposal_service._settle_after_race`).
+
+    ★ 드라이버 예외를 아는 자리를 여기 하나로 묶는다. 서비스가 `psycopg` 를 직접
+      알게 되면 «SQL 은 저장소에만» 이라는 나눔이 조용히 새어 나간다.
+    """
+    return isinstance(error, pg_errors.UniqueViolation)
 
 
 def _schema() -> sql.Identifier:
