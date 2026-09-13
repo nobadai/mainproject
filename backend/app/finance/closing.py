@@ -22,6 +22,7 @@ from app.finance.db import (
     get_db_schema,
     load_inventory_snapshot_as_of,
 )
+from app.finance.settlement import settle_recognized_payables
 from app.finance.tools import effective_cash_date
 
 __all__ = ["FinanceDayClosing", "FinanceDayClosingResult", "close_day"]
@@ -211,6 +212,19 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
       (재무 확정 기준 ⑤).
     """
     axis = _load_run_axis(conn, sim_run_id=sim_run_id, as_of=as_of)
+
+    #  🔴 **인식 → 지급 → 사실 읽기 순서다** (#637).
+    #
+    #     ① 오늘 곡선에 실을 채무를 인식한다 (#615 · 여기서 상태를 건드리지 않는다)
+    #     ② 인식된 것을 **실제로 지급한다** — 현금과 미지급 채무가 줄어든다
+    #     ③ 그 뒤에 상태를 읽어 마감 사실을 만든다
+    #
+    #  ⚠️ ③이 ②보다 먼저면 마감이 **지급 전 현금**을 기말잔액으로 적는다. 그러면
+    #    그 날의 `Δ잔액` 과 `Σ순현금` 이 지급액만큼 어긋난 채로 장부에 남는다 —
+    #    실측(`SIM-CHAIN-V9`)에서 55일이 그 상태였다.
+    _recognize_due_payables(conn, sim_run_id=sim_run_id, as_of=as_of)
+    settle_recognized_payables(conn, sim_run_id=sim_run_id, as_of=as_of)
+
     state = _load_exact_state(
         conn, sim_run_id=sim_run_id, financing_mode=axis.financing_mode, as_of=as_of
     )

@@ -109,6 +109,8 @@ class _Cursor:
                     self.conn.config_json,
                 )
             ]
+        elif "finance_states" in text and "FOR UPDATE" in text:
+            self.rows = [dict(self.conn.settlement_state)]
         elif ".finance_states" in text and "state_date =" in text:
             # ★ 마감은 **실행축 하나**를 묻는다 — 그 축의 행만 돌려준다.
             mode = params[1]
@@ -129,6 +131,39 @@ class _Cursor:
             self.row = {"amount": self.conn.issued_receivables}
         elif "SUM(outstanding_amount_krw)" in text:
             self.row = {"amount": self.conn.outstanding_receivables}
+        elif "e.recognized_amount_krw" in text:
+            #  ★ 지급 대상: 오늘 인식됐고 아직 낼 돈이 남은 채무.
+            run, recognized_date = params[0], params[1]
+            self.rows = [
+                {
+                    "payable_id": row["payable_id"],
+                    "paid_amount_krw": row.get("paid_amount_krw", Decimal(0)),
+                    "outstanding_amount_krw": row["outstanding_amount_krw"],
+                    "recognized_amount_krw": event["recognized_amount_krw"],
+                }
+                for row in self.conn.payables
+                for (event_run, event_payable), event in self.conn.recognized.items()
+                if event_run == run
+                and event_payable == row["payable_id"]
+                and event["recognized_date"] == recognized_date
+                and row.get("status", "OPEN") in {"OPEN", "PARTIAL"}
+                and row["outstanding_amount_krw"] > 0
+            ]
+        elif "SET " in text and ".payables" in text:
+            paid, outstanding, status, settled_date, payable_id = params
+            row = next(r for r in self.conn.payables if r["payable_id"] == payable_id)
+            row.update(
+                paid_amount_krw=paid,
+                outstanding_amount_krw=outstanding,
+                status=status,
+                settled_date=settled_date,
+            )
+            self.rowcount = 1
+        elif "SET " in text and "finance_states" in text:
+            cash, unsettled, _state_id = params
+            self.conn.settlement_state["current_cash_krw"] = cash
+            self.conn.settlement_state["unsettled_purchase_payables_krw"] = unsettled
+            self.rowcount = 1
         elif ".payables" in text:
             #  🔴 **실 질의의 뜻대로 자른다.** 기일이 왔고, 아직 귀속되지 않은 것만.
             #     NOT EXISTS 를 대역이 무시하면 «두 번 실었다» 를 잡는 검사가 죽는다.
@@ -211,6 +246,12 @@ class _Connection:
         ]
         #  귀속 원장 대역. 키는 (sim_run_id, payable_id) — 실제 PK 와 같다.
         self.recognized: dict[tuple[str, str], dict] = {}
+        #  지급이 줄이는 재무 상태 대역 (#637).
+        self.settlement_state: dict = {
+            "finance_state_id": "FIN-SETTLE",
+            "current_cash_krw": Decimal(10_000_000),
+            "unsettled_purchase_payables_krw": Decimal(5_000_000),
+        }
         self.states = _default_states() if states is None else states
         self.prior_states = _default_prior_states() if prior_states is None else prior_states
         self.expenses = _default_expenses() if expenses is None else expenses
@@ -765,6 +806,12 @@ def test_every_ledger_query_is_scoped_to_the_run():
         if "INSERT INTO" in text and "finance_payable_closing_events" in text:
             #  ★ INSERT 는 `WHERE` 가 없다. 실행 축은 **첫 칸으로** 실린다.
             assert params[0] == SIM_RUN_ID, text
+            continue
+        if "SET " in text:
+            #  ★ 지급 쓰기는 **PK 한 행**만 고친다 (#637). 실행 축은 그 행을 고른
+            #    조회가 이미 걸었고, 여기서 축으로 다시 거르면 «축이 맞는 모든 행» 을
+            #    한 번에 고치는 문장이 되어 범위가 넓어진다.
+            assert "WHERE payable_id = %s" in text or "WHERE finance_state_id = %s" in text, text
             continue
         assert "sim_run_id = %s" in text, text
         assert SIM_RUN_ID in list(params or []), text
