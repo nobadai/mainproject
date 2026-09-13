@@ -186,7 +186,7 @@ def test_당일_배치가_없으면_run_procurement_이_E4_로_선다(monkeypatc
 
     patch(monkeypatch, lambda *a: _row(STALE_BATCH))  # 210일 전 배치만 있다
 
-    def 실제_적재(item: str, as_of: date) -> MasterInputs:
+    def 실제_적재(item: str, as_of: date, *, sim_run_id: str) -> MasterInputs:
         """conftest 가 꺼 둔 적재를 이 검사에서만 되살린다 — forecast 만 실물로 태운다."""
         return MasterInputs(
             forecast=inputs.load_forecast(item, as_of, target_kind=inputs.PROCUREMENT_TARGET_KIND),
