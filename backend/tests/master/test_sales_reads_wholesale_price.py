@@ -124,7 +124,7 @@ def test_매입과_판매가_다른_계열을_읽는다(본_조회, 판매_적�
 
     🔴 갈리지 않으면 경매가로 사서 경매가로 판다 — 마진이 설 자리가 없다.
     """
-    inputs.collect_inputs(ITEM, AS_OF)
+    inputs.collect_inputs(ITEM, AS_OF, sim_run_id="SIM-TEST-WHSL")
     매입 = 본_조회[-1]
 
     service_mod._sales_forecast(_요청())

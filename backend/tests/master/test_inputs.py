@@ -15,6 +15,8 @@ import pytest
 from app.master import inputs
 
 AS_OF = date(2025, 12, 31)
+#: 확정 주문은 실행마다 다르다. 축은 호출 자리가 넘긴다 (기본값 없음).
+SIM_RUN_ID = "SIM-TEST-INPUTS"
 
 #: ★ `as_of` 는 `AS_OF` 와 같아야 한다. 당일 배치만 쓴다.
 #: 🔴 전 판은 `2026-08-27` 이라 요청일보다 239일 미래였다.
@@ -94,7 +96,7 @@ def test_DB_가_터져도_Flow_를_죽이지_않는다(monkeypatch):
 def test_실제_납품_예정이_있으면_MEASURED_다(monkeypatch):
     rows = [{"sale_id": 7, "sale_date": date(2026, 1, 3), "quantity_kg": 12000}]
     patch(monkeypatch, many=lambda *a: rows)
-    got = inputs.load_confirmed_orders("배추", AS_OF)
+    got = inputs.load_confirmed_orders("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "MEASURED"
     assert got.payload["total_kg"] == 12000
@@ -114,7 +116,7 @@ def test_미출고_확정주문은_수요_fallback보다_우선한다(monkeypatc
         raise AssertionError("실제 확정 주문이 있으면 demand fallback 을 호출하지 않는다")
 
     patch(monkeypatch, one=one, many=many)
-    got = inputs.load_confirmed_orders("배추", AS_OF)
+    got = inputs.load_confirmed_orders("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "MEASURED"
     assert got.source == "sales + sale_items"
@@ -122,7 +124,7 @@ def test_미출고_확정주문은_수요_fallback보다_우선한다(monkeypatc
         {"sale_id": "SALE-1", "qty_kg": 12000, "due_date": "2026-01-03"}
     ]
     assert "order_status IN ('CONFIRMED', 'READY')" in captured["query"]
-    assert captured["params"] == ("배추", AS_OF, date(2026, 1, 14))
+    assert captured["params"] == ("배추", AS_OF, date(2026, 1, 14), SIM_RUN_ID)
 
 
 def test_납품_예정이_없으면_수요에서_파생하되_확정이라_부르지_않는다(monkeypatch):
@@ -138,7 +140,7 @@ def test_납품_예정이_없으면_수요에서_파생하되_확정이라_부�
     }
     calls = iter([demand, {"order_cycle_days": 2}])
     patch(monkeypatch, one=lambda *a: next(calls), many=lambda *a: [])
-    got = inputs.load_confirmed_orders("배추", AS_OF)
+    got = inputs.load_confirmed_orders("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "DERIVED"
     assert "확정 주문이 아니다" in got.note
@@ -151,7 +153,7 @@ def test_납품_예정이_없으면_수요에서_파생하되_확정이라_부�
 
 def test_수요도_없으면_지어내지_않고_비운다(monkeypatch):
     patch(monkeypatch)
-    got = inputs.load_confirmed_orders("배추", AS_OF)
+    got = inputs.load_confirmed_orders("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "MISSING"
     assert got.payload is None
@@ -196,7 +198,7 @@ def test_이제_mock_에서_오는_것이_없다(monkeypatch):
     새 다리가 생기면 여기가 운다 — 그리고 `ProcurementFlow` 가 실행을 세운다.
     """
     patch(monkeypatch, many=lambda *a: DEMAND_ROWS)
-    got = inputs.collect_inputs("배추", AS_OF)
+    got = inputs.collect_inputs("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.mocked == (), f"mock 다리가 다시 생겼다: {got.mocked}"
     assert got.sources()["forecast"].startswith("MISSING:")
