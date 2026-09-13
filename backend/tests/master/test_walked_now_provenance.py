@@ -223,10 +223,10 @@ def _다_온_게이트(as_of: date) -> DayForecastReadiness:
 class _순서:
     """기록과 하루 실행이 **어느 순서로** 불렸는지를 한 목록에 모은다."""
 
-    def __init__(self, *, 기록답: Any = "WRITTEN", 터지는날: frozenset[date] = frozenset()) -> None:
+    def __init__(self, *, 기록답: Any = "WRITTEN", 끊기는날: date | None = None) -> None:
         self.log: list[tuple[str, Any]] = []
         self.기록답 = 기록답
-        self.터지는날 = 터지는날
+        self.끊기는날 = 끊기는날
 
     def 기록(self, **kwargs: Any) -> str:
         self.log.append(("기록", kwargs))
@@ -236,8 +236,10 @@ class _순서:
 
     def 하루(self, action: Any, **_: Any) -> DayRunOutcome:
         self.log.append(("하루", action.as_of))
-        if action.as_of in self.터지는날:
-            raise RuntimeError("장부가 깨졌다")
+        if action.as_of == self.끊기는날:
+            # ★ **걷기가 못 잡는 끊김이다** (`except Exception` 밖). 사람이 179일 중간에
+            #   Ctrl+C 를 누르거나 프로세스가 죽은 그 모양이다.
+            raise KeyboardInterrupt
         return _돈_하루(action.as_of)
 
 
@@ -273,16 +275,22 @@ def test_걷기_첫_날_전에_적는다() -> None:
     assert 이름들.count("기록") == 1, f"기록을 여러 번 했다: {이름들}"
 
 
-def test_중간에_멈춘_판에도_기록이_남아_있다() -> None:
-    """★ 연속 사고 상한에 걸려 멈춘 판이 **정확히 그 판**이다 — 무엇으로 걸었는지를
-    가장 먼저 물어야 하는 판이 끝까지 못 간 판이다.
-    """
-    순서 = _순서(터지는날=frozenset({date(2026, 2, 9), date(2026, 2, 10)}))
-    결과 = _걷는다(순서, max_consecutive_failures=2)
+def test_걷다_끊긴_판에도_기록이_남아_있다() -> None:
+    """★ **끝까지 못 간 판이 무엇으로 걸었는지를 가장 먼저 묻는 판이다.**
 
-    assert not 결과.completed, "멈추지 않았다 — 이 검사의 전제가 안 섰다"
-    assert ("기록", {"sim_run_id": 실행축, "walked_now": 마감뒤}) in 순서.log
-    assert 결과.walked_now == 마감뒤
+    ⚠️ **연속 사고 상한으로는 이 자리를 못 잰다.** 상한에 걸리면 반복을 빠져나와
+      나머지 줄을 다 타므로, 다 걷고 나서 적어도 기록이 남는다. 그래서 여기서는
+      걷기가 못 잡는 끊김(`KeyboardInterrupt`)으로 둘째 날에 끊는다.
+    """
+    순서 = _순서(끊기는날=date(2026, 2, 10))
+
+    with pytest.raises(KeyboardInterrupt):
+        _걷는다(순서)
+
+    assert ("하루", date(2026, 2, 9)) in 순서.log, f"첫 날이 안 돌았다 — 전제가 안 섰다: {순서.log}"
+    assert ("기록", {"sim_run_id": 실행축, "walked_now": 마감뒤}) in 순서.log, (
+        f"끊긴 판에 기준 시각이 안 남았다: {순서.log}"
+    )
 
 
 def test_받은_문자열을_그대로_기록에_넘긴다() -> None:
