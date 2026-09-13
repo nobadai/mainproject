@@ -75,6 +75,17 @@ walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷
   ⚠️ 시간대는 받은 값의 것을 그대로 나른다 (`timetz()`). 여기서 `ZoneInfo` 를
     새로 만들지 않는다 — 시간대의 주인도 `clock.py` 하나다.
 
+  🔴 **받은 `--now` 를 요약에 찍고 원장에 남긴다** (2026-09-13).
+
+```text
+요약    기준시각  <받은 문자열> · 날마다 HH:MM · 마감 10:30 뒤 / 🔴 전
+원장    sim_runs.config_json.provenance.walked_now   ← 걷기 첫 날 전에 · 받은 문자열 그대로
+```
+
+  ★★ V8(16:00) 과 V9①(09:00) 이 같은 코드로 통째로 갈렸는데 그 값이 어디에도 안
+    남아 있었다. **적는 것은 걷기다** — 진짜 값을 아는 것은 걷기뿐이다
+    (`walk_provenance`). 이미 **다른** 값이 있으면 걷기 전에 막는다.
+
 ---
 
 🔴 **달력을 못 읽으면 멈춘다. 건너뛰지 않는다.**
@@ -178,9 +189,14 @@ from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
     DayRunOutcome,
+    # 🔴 **마감의 주인에서 읽는다. 여기서 10:30 을 다시 적지 않는다** (2026-09-13).
+    #   손으로 적으면 마감이 바뀌는 날 요약만 옛 마감을 말하고, 그 줄이 막으려던
+    #   「마감 전인데 모른다」 가 반대 방향으로 다시 선다.
+    deadline_at,
     plan_next_action,
     run_scheduled_day,
 )
+from app.master.walk_provenance import WalkedNowStamp, record_walked_now
 
 __all__ = [
     "MAX_CONSECUTIVE_FAILURES",
@@ -311,6 +327,12 @@ class WalkResult:
     #: 🔴 **「0행」과 접지 않는다.** *"못 읽었다"* 를 *"없다"* 로 적으면 DB 가 죽은
     #:   판과 마감이 한 번도 안 돈 판이 화면에서 같아진다.
     closings_reason: str | None = None
+    #: 걷기가 받은 `--now` **문자열 그대로** (2026-09-13). 안 받았으면 `None`.
+    #:
+    #: 🔴 **정규화하지 않는다.** 사람이 준 것과 코드가 쓰는 것(그 시각 부분)이 둘 다
+    #:   보여야 같은 코드로 건 두 판이 왜 갈렸는지가 읽힌다 — V8(16:00) 과
+    #:   V9①(09:00) 이 그 한 값으로 통째로 갈렸다.
+    walked_now: str | None = None
 
     @property
     def completed(self) -> bool:
@@ -801,6 +823,8 @@ def walk(
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
     auto_maintain: bool = False,
     closings_of: Callable[..., Sequence[Mapping[str, Any]]] = read_walk_closings,
+    walked_now: str | None = None,
+    record_now: Callable[..., WalkedNowStamp] = record_walked_now,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -859,6 +883,18 @@ def walk(
         ⚠️ **못 읽어도 걷기를 안 터뜨린다.** 179일을 다 걷고 마지막 조회에서 죽으면
           **성적을 통째로 잃는다** (`_use_utf8_output` 이 막은 그 모양). 못 읽은
           사실은 `closings_reason` 이 든다 — *"없다"* 로 접지 않는다.
+    :param walked_now: 사람이 준 `--now` **문자열 그대로** (2026-09-13). 주면
+        `record_now` 가 그 실행의 `config_json.provenance.walked_now` 에 남긴다.
+
+        🔴 **`now` 와 같은 시각이어야 한다.** 적은 값과 실제로 건 값이 갈리면 그
+          칸은 없는 것보다 나쁘다 — 갈리면 걷기 전에 막는다.
+
+        ⚠️ **안 주면 기록을 안 부른다.** 적을 문자열이 없다. 그 사실은 요약이
+          「안 받았다」로 말한다 — 진입점(`main`)은 늘 준다.
+    :param record_now: 기준 시각을 **재고 · 없으면 적는** 자리. 🔴 **걷기 첫 날
+        전에 한 번 부른다** — 다 걷고 나서 부르면 연속 사고 상한에 걸려 멈춘 판에
+        무엇으로 걸었는지가 안 남는다. 이미 **다른** 값이 있으면 그 자리가
+        `WalkedNowConflict` 로 막고, 걷기는 한 날도 안 걷는다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
 
@@ -887,6 +923,13 @@ def walk(
         raise ValueError(
             f"연속 사고 상한이 {max_consecutive_failures} 다 — 1 보다 작으면 한 날도 못 걷는다"
         )
+    if walked_now is not None and not _same_moment(walked_now, now):
+        # 🔴 **칸이 거짓말을 하게 두지 않는다.** 원장에 적는 문자열과 날마다 붙여
+        #    쓰는 시각이 갈리면, 그 칸을 믿고 읽은 사람이 오늘 같은 판을 또 버린다.
+        raise ValueError(
+            f"기준 시각 문자열 {walked_now!r} 과 걷는 시각 {now.isoformat()} 이 다르다"
+            " — 원장에 적는 값과 실제로 건 값이 갈리면 그 칸이 거짓말을 한다"
+        )
 
     # ── 🔴 **켰으면 걷기 전에 규칙을 확인한다** (2026-09-11) ────────────
     #
@@ -914,6 +957,18 @@ def walk(
     sales_terms = terms_of(sim_run_id)
 
     market = calendar()
+
+    # ── 🔴 **기준 시각을 걷기 첫 날 전에 남긴다** (2026-09-13) ─────────────
+    #
+    # ★ 재는 것(이미 다른 값이면 막는다)과 쓰는 것을 **한 자리에서 같이** 한다.
+    #   다 걷고 나서 쓰면 179일을 걷다 연속 사고 상한에 멈춘 판에 무엇으로 걸었는지가
+    #   안 남는다 — 그리고 그 판이 **가장 먼저 그 질문을 받는 판**이다.
+    #
+    # 🔴 **막히면 여기서 나간다.** 한 실행을 두 기준 시각으로 이어 걸으면 절반은 마감
+    #    전 · 절반은 마감 뒤인 판이 되고, 그 판은 아무것도 증명하지 않는다.
+    if walked_now is not None:
+        record_now(sim_run_id=sim_run_id, walked_now=walked_now)
+
     started_ticks = ticks()
 
     days: list[DayRunOutcome] = []
@@ -1017,6 +1072,26 @@ def walk(
         elapsed_seconds=ticks() - started_ticks,
         closings=closings,
         closings_reason=closings_reason,
+        walked_now=walked_now,
+    )
+
+
+def _same_moment(walked_now: str, now: datetime) -> bool:
+    """받은 문자열이 **걷는 시각과 같은 시각**을 말하는가.
+
+    ★ **시각과 시간대 오프셋을 둘 다 본다.** 같은 순간이라도 오프셋이 다르면
+      `timetz()` 가 다른 시각을 날마다 붙인다 — 그러면 걷기가 쓰는 시각이 갈린다.
+
+    ⚠️ **읽지 못하는 문자열은 다르다고 본다.** 적을 값이 시각이 아니면 칸이 거짓말을 한다.
+    """
+    try:
+        받은 = datetime.fromisoformat(walked_now)
+    except ValueError:
+        return False
+    return (
+        받은.tzinfo is not None
+        and 받은.replace(tzinfo=None) == now.replace(tzinfo=None)
+        and 받은.utcoffset() == now.utcoffset()
     )
 
 
@@ -1187,10 +1262,46 @@ def _cash_lines(result: WalkResult) -> list[str]:
     ]
 
 
+def _moment_line(result: WalkResult) -> str:
+    """기준 시각 한 줄 (2026-09-13). 🔴 **마감 전이면 그 사실을 찍는다.**
+
+    ```text
+    기준시각  2026-09-13T16:00+09:00 · 날마다 16:00 · 마감 10:30 뒤
+    기준시각  2026-09-13T09:00+09:00 · 날마다 09:00 · 🔴 마감 10:30 전
+              — 배치 없는 날이 통째로 안 돈다        (실제로는 한 줄이다)
+    ```
+
+    ★★ **이 한 줄이 없어서 한 판을 버렸다.** V9① 을 09:00 으로 걸었더니 ML 배치가
+      없는 날이 전부 `WAIT` 이 되어 14일이 영영 안 돌았고, 매입 셀 213 → 171 ·
+      `E4` 42 → 0 · 폐기 16 → 59 로 통째로 갈렸다. **코드가 아니라 입력 하나였다.**
+
+    ★ **받은 문자열을 먼저 찍는다.** 날짜 부분은 안 쓰이지만 사람이 준 것과 코드가
+      쓰는 것(`날마다`)이 둘 다 보여야 왜 갈렸는지 읽힌다.
+
+    🔴 **전/뒤를 여기서 따로 판정하지 않는다.** 걷기가 쓰는 그대로(`_moment_on`)
+      붙인 시각을 `scheduler.deadline_at` 과 비교한다 — `plan_next_action` 이
+      `now >= deadline` 을 뒤로 보는 그 경계 그대로다.
+    """
+    if result.walked_now is None:
+        return "기준시각  🟡 안 받았다 — 이 걷기가 어느 시각으로 걸렸는지 원장에 안 남는다"
+    날 = result.start
+    날마다 = _moment_on(날, datetime.fromisoformat(result.walked_now))
+    마감 = deadline_at(날)
+    시각 = f"{날마다:%H:%M}" if not (날마다.second or 날마다.microsecond) else f"{날마다:%H:%M:%S}"
+    머리 = f"기준시각  {result.walked_now} · 날마다 {시각} · "
+    if 날마다 < 마감:
+        return 머리 + f"🔴 마감 {마감:%H:%M} 전 — 배치 없는 날이 통째로 안 돈다"
+    return 머리 + f"마감 {마감:%H:%M} 뒤"
+
+
 def format_summary(result: WalkResult) -> str:
     """걷기 결과를 사람이 읽을 줄로. **값을 새로 만들지 않는다.**"""
     lines = [
         f"범위      {result.start.isoformat()} ~ {result.end.isoformat()}",
+        # 🔴 **기준시각 줄을 지우지 않는다** (2026-09-13). 「이 판이 무엇 위에
+        #    섰나」 자리다 — 걷기 요약에는 기준커밋 줄이 없어 범위 바로 아래다.
+        #    이 줄이 없어서 같은 코드로 건 두 판이 왜 갈렸는지 아무도 못 읽었다.
+        _moment_line(result),
         f"돈 날     {len(result.days)}일 · 휴장 {len(result.skipped_days)}일",
         f"판단      {dict(sorted(result.actions.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
@@ -1309,6 +1420,9 @@ def main(argv: Sequence[str]) -> int:
         max_consecutive_failures=args.max_consecutive_failures,
         auto_approve=args.auto_approve,
         auto_maintain=args.auto_maintain,
+        # 🔴 **받은 문자열 그대로 넘긴다** (2026-09-13). 위 `now` 는 파싱한 값이라
+        #    `16:00` 이 `16:00:00` 이 되고, 사람이 준 것이 원장에서 사라진다.
+        walked_now=args.now,
     )
     print(format_summary(result))
     return 0 if result.completed and not result.incidents else 1
