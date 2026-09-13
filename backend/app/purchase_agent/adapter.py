@@ -714,6 +714,36 @@ def build_state(request: AgentRequest, *, quotes: QuoteSource | None = None) -> 
         # ``or``를 쓰지 않는다 — 0은 "당일 도착"이라는 확정된 값이라 폴백 대상이 아니다 (규칙 3).
         "inbound_lead_days": inventory.get("inbound_lead_days"),
         "critical_payment_dates": list(finance.get("critical_payment_dates") or []),
+        # 🔴 **재무 봉투 열 칸 중 다섯만 읽는다. 안 읽는 다섯을 여기 적어 둔다** (`#630`).
+        #
+        #   ```text
+        #   🟢 읽는다 (5)   base_projected_cash_min · finance_cap_amount_krw ·
+        #                   margin_defense_floor_rate · purchase_payment_days ·
+        #                   critical_payment_dates
+        #   🔴 안 읽는다 (5) **payment_pressure** · available_cash ·
+        #                   minimum_cash_balance_krw · payroll_payment_day ·
+        #                   policy_version_used
+        #   ```
+        #
+        #   ⚠️ **다섯 중 하나만 계약이 「우리 행동을 바꾼다」고 적고 있다** —
+        #     ``master/envelope.py`` 의 ``_is_label`` docstring 이
+        #     *"`payment_pressure: "MEDIUM"` 은 숫자가 아니지만 **매입의 행동을 바꾼다**"*
+        #     라고 이름 걸고 적어 뒀는데, ``purchase_agent`` 전수에서 그 이름이 **0곳**이다.
+        #
+        # 🟡 **그래도 지금은 안 읽는다** (2026-09-14 · `#630` 갈래 ㉢).
+        #
+        #   재무가 정의를 확인해 줬다 — 그 칸은 *"거래처 여신 노출도를 직접 평가하는
+        #   신호가 아니다"*. 그리고 **읽었어도 그 열흘을 안 막았다**: 실측에서 그 구간
+        #   내내 ``LOW`` 였다. ⇒ **지금 읽으면 판정이 바뀌는데, 바뀔 근거가 없다.**
+        #
+        #   ★ 그 대신 **읽을 근거가 생기는 조건**을 적어 둔다 —
+        #     ``payment_pressure`` 가 ``LOW`` 가 아닌 날이 실행에 나타나면 그때 연다.
+        #     그날이 오기 전까지 읽는 것은 «압력이 늘 낮은 축» 을 판정에 얹는 것이다.
+        #
+        # 🔴 **여신·미수금 칸은 열 칸 중 0개다.** 그건 우리가 안 읽는 것이 아니라
+        #   **봉투에 없는 것**이다 (마스터가 여신 통보 §7 에서 *"칸을 안 연 것은 제 몫"*
+        #   이라고 적었다). ⚠️ 「AR 이 아무 곳에도 안 들어간다」는 **아니다** — 수금은
+        #   재무 현금 투영에 들어가고, 봉투에 없는 것은 **그 칸**이다.
         "feedback": dict(payload.get("prior_feedback") or {}) or None,
         # 🔴 **``or {}`` 로 접지 않는다.** 마스터는 지평을 다 못 덮으면 봉투를 **통째로
         #   안 싣고** 그 사유를 자기 ``skipped_checks`` 에 남긴다. 여기서 빈 dict 로
