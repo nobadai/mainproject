@@ -174,8 +174,11 @@ class MasterInputs:
         return tuple(s.key for s in self.all() if s.grade == "MOCK")
 
 
-def collect_inputs(item: str, as_of: date) -> MasterInputs:
+def collect_inputs(item: str, as_of: date, *, sim_run_id: str) -> MasterInputs:
     """세 입력을 모은다. **하나가 실패해도 나머지는 싣는다.**
+
+    🔴 **`sim_run_id` 에 기본값을 두지 않는다** (2026-09-13). 확정 주문은 실행마다
+      다른 사실이다. 안 넘긴 자리는 조용히 번인이나 전 실행을 읽지 말고 **여기서 터진다.**
 
     ★ **매입 전용이다.** 부르는 자리는 `service._inputs_for` 하나이고, 그래서
       시세 계열도 매입 것(`PROCUREMENT_TARGET_KIND`)으로 정해서 넘긴다. 판매는
@@ -183,7 +186,7 @@ def collect_inputs(item: str, as_of: date) -> MasterInputs:
     """
     return MasterInputs(
         forecast=load_forecast(item, as_of, target_kind=PROCUREMENT_TARGET_KIND),
-        confirmed_orders=load_confirmed_orders(item, as_of),
+        confirmed_orders=load_confirmed_orders(item, as_of, sim_run_id=sim_run_id),
         policy_values=load_policy_values(item, as_of),
     )
 
@@ -363,8 +366,15 @@ def _forecast_missing(why: str) -> SourcedInput:
 # ── confirmed_orders ────────────────────────────────────────────────────
 
 
-def load_confirmed_orders(item: str, as_of: date) -> SourcedInput:
+def load_confirmed_orders(item: str, as_of: date, *, sim_run_id: str) -> SourcedInput:
     """향후 납품 예정. **실제 주문이 있으면 그것을, 없으면 파트너 수요에서 파생한다.**
+
+    🔴 **실제 주문은 이 실행의 것만 읽는다** (2026-09-13). 축 없이 읽으면 앞 걷기가
+      구간 끝에 남긴 `CONFIRMED` 주문이 다음 걷기의 확정 수요로 샌다 — 같은 코드로
+      다시 걸 때마다 무 매입이 판마다 11~14kg 늘었다.
+
+    ★ **파생 경로(`_orders_from_demand`)에는 축을 붙이지 않는다.** `partner_item_demands`
+      는 실행 축 없는 기준표이고 실행마다 같아야 맞다.
 
     🔴 **파생분을 "확정 주문" 이라 부르지 않는다.** `sales` 에 앞으로 납품할 건이
       0건이라(전부 `DELIVERED`) 파트너 일수요로 메우는데, 그건 **예상 수요이지 확정이
@@ -372,7 +382,7 @@ def load_confirmed_orders(item: str, as_of: date) -> SourcedInput:
       값만 넘기면 매입도 사람도 확정으로 읽는다.
     """
     try:
-        booked = _orders_from_db(item, as_of)
+        booked = _orders_from_db(item, as_of, sim_run_id=sim_run_id)
     except Exception as error:  # noqa: BLE001
         booked = None
         why = f"DB 조회 실패 ({error})"
@@ -400,7 +410,7 @@ def load_confirmed_orders(item: str, as_of: date) -> SourcedInput:
         )
 
 
-def _orders_from_db(item: str, as_of: date) -> dict[str, Any] | None:
+def _orders_from_db(item: str, as_of: date, *, sim_run_id: str) -> dict[str, Any] | None:
     query = sql.SQL("""
         SELECT s.sale_id, s.sale_date, si.quantity_kg
           FROM {sch}.sales s
@@ -410,9 +420,10 @@ def _orders_from_db(item: str, as_of: date) -> dict[str, Any] | None:
            AND s.sale_date > %s
            AND s.sale_date <= %s
            AND s.order_status IN ('CONFIRMED', 'READY')
+           AND s.sim_run_id = %s
          ORDER BY s.sale_date
     """).format(sch=sql.Identifier(get_db_schema()))
-    rows = fetch_all(query, (item, as_of, as_of + timedelta(days=_ORDER_WINDOW_DAYS)))
+    rows = fetch_all(query, (item, as_of, as_of + timedelta(days=_ORDER_WINDOW_DAYS), sim_run_id))
     if not rows:
         return None
     orders = [

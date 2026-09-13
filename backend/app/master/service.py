@@ -187,7 +187,7 @@ def run_procurement(
         )
         return response
 
-    inputs = _inputs_for(request)
+    inputs = _inputs_for(request, sim_run_id=context.sim_run_id)
     commitments = _approved_commitments(request)
     # ⚠️ **달력이 출처표보다 먼저다** (`#300`). 출처표가 봉투를 실었는지도 적기 때문에,
     #   순서가 뒤집히면 아직 없는 것을 보고 매번 `MISSING` 이라고 적는다.
@@ -773,8 +773,11 @@ def _decision_collision(request_id: str) -> list[str]:
     return [head + tail]
 
 
-def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
+def _inputs_for(request: ProcurementRunRequest, *, sim_run_id: str) -> MasterInputs | None:
     """마스터가 실어 줄 셋을 모은다 (§3.2.5).
+
+    🔴 **`sim_run_id` 는 봉투(`context.sim_run_id`)에서 받는다** (2026-09-13). 새로
+      짓지 않고, 기본값도 두지 않는다 — 확정 주문이 이 실행의 판매만 읽게 하는 축이다.
 
     ★ **요청이 직접 준 값이 이긴다.** 백테스트는 그날의 값을 그대로 넣어야 하므로
       적재층이 현재 DB 를 읽어 덮으면 안 된다.
@@ -790,7 +793,7 @@ def _inputs_for(request: ProcurementRunRequest) -> MasterInputs | None:
     if request.forecast and request.confirmed_orders and request.policy_values:
         return None
     try:
-        return collect_inputs(request.item, request.as_of)
+        return collect_inputs(request.item, request.as_of, sim_run_id=sim_run_id)
     except Exception:  # noqa: BLE001
         return None
 
