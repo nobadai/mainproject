@@ -62,12 +62,48 @@ class _Cursor:
         self.conn.executed.append((text, params))
         if "sim_runs" in text:
             self.rows = [(PERIOD_START, PERIOD_END, "LOAN_BASELINE", None)]
+        elif "finance_states" in text and "FOR UPDATE" in text:
+            self.rows = [dict(self.conn.state)]
         elif ".finance_states" in text and "state_date =" in text:
             self.rows = [_state()]
         elif ".finance_states" in text and "state_date <" in text:
             self.rows = []
         elif "SUM(original_amount_krw)" in text or "SUM(outstanding_amount_krw)" in text:
             self.rows = [{"amount": Decimal(0)}]
+        elif "e.recognized_amount_krw" in text:
+            #  ★ 지급 대상: **오늘 인식됐고 아직 낼 돈이 남은** 채무.
+            run, recognized_date = params[0], params[1]
+            self.rows = [
+                {
+                    "payable_id": row["payable_id"],
+                    "paid_amount_krw": row["paid_amount_krw"],
+                    "outstanding_amount_krw": row["outstanding_amount_krw"],
+                    "original_amount_krw": row["outstanding_amount_krw"],
+                    "cancelled_amount_krw": Decimal(0),
+                    "recognized_amount_krw": event["recognized_amount_krw"],
+                }
+                for row in self.conn.payables
+                for (event_run, event_payable), event in self.conn.recognized.items()
+                if event_run == run
+                and event_payable == row["payable_id"]
+                and row["sim_run_id"] == run
+                and event["recognized_date"] == recognized_date
+                and row["status"] in {"OPEN", "PARTIAL"}
+                and row["outstanding_amount_krw"] > 0
+            ]
+        elif "UPDATE" in text and ".payables" in text:
+            paid, outstanding, status, settled_date, payable_id = params
+            row = next(r for r in self.conn.payables if r["payable_id"] == payable_id)
+            row["paid_amount_krw"] = paid
+            row["outstanding_amount_krw"] = outstanding
+            row["status"] = status
+            row["settled_date"] = settled_date
+            self.rowcount = 1
+        elif "UPDATE" in text and "finance_states" in text:
+            cash, unsettled, _state_id = params
+            self.conn.state["current_cash_krw"] = cash
+            self.conn.state["unsettled_purchase_payables_krw"] = unsettled
+            self.rowcount = 1
         elif ".payables" in text:
             run, _issued, due_ceiling = params[0], params[1], params[2]
             self.rows = [
@@ -125,6 +161,12 @@ class _Cursor:
 class _Connection:
     def __init__(self, payables: list[dict]):
         self.payables = payables
+        #  지급이 실제로 줄이는 재무 상태. 대역도 같이 움직여야 «줄었다» 를 잴 수 있다.
+        self.state: dict = {
+            "finance_state_id": f"FIN-{SIM_RUN_ID}",
+            "current_cash_krw": Decimal(10_000_000),
+            "unsettled_purchase_payables_krw": Decimal(5_000_000),
+        }
         self.recognized: dict[tuple[str, str], dict] = {}
         self.closings: dict[tuple[str, date], dict] = {}
         self.executed: list[tuple[str, object]] = []
@@ -146,6 +188,8 @@ def _payable(
         "sim_run_id": run,
         "due_date": due,
         "outstanding_amount_krw": Decimal(outstanding),
+        "paid_amount_krw": Decimal(0),
+        "settled_date": None,
         "status": status,
     }
 
@@ -355,17 +399,20 @@ def test_a_settled_payable_is_not_recognized():
     assert conn.recognized == {}
 
 
-def test_the_payable_ledger_is_never_written_by_closing():
-    """🔴 이번 판은 **귀속만** 적는다. 지급 처리(paid·status)는 건드리지 않는다."""
+def test_recognition_itself_never_settles_the_payable():
+    """🔴 **인식과 지급은 다른 축이다** (#615 대 #637).
+
+    인식 단계(`_recognize_due_payables`)만 돌리면 채무 원장은 그대로여야 한다. 둘을
+    합치면 곡선을 다시 그릴 때마다 돈이 또 나간다.
+    """
+    from app.finance.closing import _recognize_due_payables
+
     conn = _Connection([_payable("PAY-1", due=AS_OF, outstanding="300")])
 
-    _close(conn)
+    _recognize_due_payables(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
 
-    writes = [
-        text
-        for text, _ in conn.executed
-        if ("UPDATE" in text or "INSERT" in text) and ".payables" in text
-    ]
-    assert writes == []
+    assert len(conn.recognized) == 1
     assert conn.payables[0]["status"] == "OPEN"
+    assert conn.payables[0]["paid_amount_krw"] == Decimal(0)
     assert conn.payables[0]["outstanding_amount_krw"] == Decimal(300)
+    assert conn.state["current_cash_krw"] == Decimal(10_000_000)
