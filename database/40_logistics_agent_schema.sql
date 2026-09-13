@@ -262,8 +262,12 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     -- `estimate_action_impact` 의 답 그대로. feasibility ∈ FEASIBLE·UNRESOLVED.
     -- 🔴 `UNRESOLVED` 를 숫자로 메워 `FEASIBLE` 로 바꾸지 않는다 (상세설계 §27).
     impact_json           JSONB NOT NULL,
-    -- [{sequence, tool_name, arguments, observed_as_of}, …]
+    -- [{sequence, tool_name, arguments, facts, observed_as_of, uncertainties}, …]
     -- 🔴 번호만 적지 않는다 — 조사 실행이 저장되지 않으므로 번호는 가리킬 곳이 없다.
+    -- 🔴 **Tool 답 전체도 적지 않는다** — 제안은 조사 로그 저장소가 아니다.
+    --    `facts` 는 승인 판단에 실제로 쓴 칸만 담는다 (상세설계 §10.4 ⑧).
+    -- ⚠️ **실행 결과를 여기 섞지 않는다.** 이 칸은 *"왜 승인했나"* 이고, *"무엇이
+    --    실행됐나"* 는 `execution_result_json` 이다.
     evidence_refs_json    JSONB NOT NULL,
     -- 모델이 적은 문장. **업무 사실이 아니라 기록이다** — 숫자의 주인은 impact_json.
     rationale             TEXT NOT NULL DEFAULT '',
@@ -280,6 +284,10 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     rejected_as_of        DATE,
     expired_as_of         DATE,
     superseded_as_of      DATE,
+    -- 🔴 **승인은 끝이 아니다** (Commit 6). `approved_as_of` 와 `executed_as_of` 가 한
+    --    행에 함께 서는 것이 **정상 흐름**이다 — D5 제안 · D6 승인 · D8 실행.
+    executed_as_of        DATE,
+    failed_as_of          DATE,
     -- 🔴 조사 결과의 값을 **그대로** 옮긴다. 제안일·승인일·현재시각으로 메우지 않는다.
     observed_as_of        DATE,
 
@@ -288,6 +296,15 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     rejected_by           TEXT,
     approval_note         TEXT,
     rejection_reason      TEXT,
+    -- ⚠️ `decision_owner`(실행 책임 부서) 와 **다른 축이다.** 실제로 돌린 주체다.
+    --    예: decision_owner=LOGISTICS · executed_by=master-runner.
+    executed_by           TEXT,
+    -- 무엇을 실행했고 어느 정본 행을 가리키나. 🔴 **업무 표 snapshot 이 아니다** —
+    -- 실행 함수가 낸 authoritative 값만 담고, 여기서 숫자를 새로 만들지 않는다.
+    execution_result_json JSONB,
+    -- 🔴 **확정된 실패만.** «모른다» 를 실패로 적지 않는다 (상세설계 §10.5).
+    failure_code          TEXT,
+    failure_reason        TEXT,
 
     -- 이 제안이 대체한 이전 제안.
     previous_proposal_id  TEXT,
@@ -348,14 +365,48 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     CONSTRAINT ck_logistics_action_proposals_superseded
         CHECK (status <> 'SUPERSEDED' OR superseded_as_of IS NOT NULL),
 
-    -- 🔴 **끝난 날이 둘이면 그날 상태를 못 고른다.** 과거 재현의 전제다.
-    --    ⚠️ Commit 6 이 APPROVED → SUPERSEDED 를 열어야 한다면 이 제약과 과거 재현의
+    -- 🔴 **«결정» 의 날은 하나다.** 승인도 거절도 만료도 대체도 한 제안에 한 번뿐이다.
+    --    ★ **실행 날짜는 이 셈에 안 들어간다** (Commit 6). `executed_as_of` 는 결정이
+    --      아니라 그 결정을 **수행한** 날이라, `approved_as_of` 와 함께 서는 것이 정상
+    --      흐름이다 — 그래서 이 제약을 고칠 필요가 없었다(축이 다르다).
+    --    ⚠️ APPROVED → SUPERSEDED 를 열어야 한다면 그때는 이 제약과 과거 재현의
     --       우선순위를 **함께** 다시 정해야 한다 — 한쪽만 풀면 조회가 조용히 틀린다.
     CONSTRAINT ck_logistics_action_proposals_single_terminal
         CHECK ((approved_as_of    IS NOT NULL)::int
              + (rejected_as_of    IS NOT NULL)::int
              + (expired_as_of     IS NOT NULL)::int
              + (superseded_as_of  IS NOT NULL)::int <= 1),
+
+    -- ── 실행 축 (Commit 6) ────────────────────────────────────────────
+    -- 🔴 **실행은 승인 뒤에만 있다.** 승인 없이 실행된 행은 «누가 진행해도 좋다고
+    --    했나» 를 못 댄다.
+    CONSTRAINT ck_logistics_action_proposals_executed
+        CHECK (status <> 'EXECUTED'
+               OR (approved_as_of IS NOT NULL AND executed_as_of IS NOT NULL
+                   AND executed_by IS NOT NULL AND failed_as_of IS NULL)),
+    CONSTRAINT ck_logistics_action_proposals_failed
+        CHECK (status <> 'FAILED'
+               OR (approved_as_of IS NOT NULL AND failed_as_of IS NOT NULL
+                   AND failure_code IS NOT NULL AND executed_as_of IS NULL)),
+    -- 🔴 **실행 날짜를 드는 상태는 둘뿐이다.** `APPROVED` 인데 실행일이 적혀 있으면
+    --    그날 상태를 못 고른다.
+    CONSTRAINT ck_logistics_action_proposals_execution_owner
+        CHECK (status IN ('EXECUTED', 'FAILED')
+               OR (executed_as_of IS NULL AND failed_as_of IS NULL
+                   AND execution_result_json IS NULL AND failure_code IS NULL)),
+    -- 성공과 실패가 한 행에 같이 설 수 없다.
+    CONSTRAINT ck_logistics_action_proposals_execution_exclusive
+        CHECK (executed_as_of IS NULL OR failed_as_of IS NULL),
+    -- 승인보다 앞서 실행될 수 없다.
+    CONSTRAINT ck_logistics_action_proposals_execution_order
+        CHECK ((executed_as_of IS NULL OR executed_as_of >= approved_as_of)
+           AND (failed_as_of   IS NULL OR failed_as_of   >= approved_as_of)),
+    -- 🔴 사람·주체 칸을 빈 문자열로 채우지 않는다.
+    CONSTRAINT ck_logistics_action_proposals_execution_actor
+        CHECK ((executed_by   IS NULL OR length(btrim(executed_by)) > 0)
+           AND (failure_code  IS NULL OR length(btrim(failure_code)) > 0)
+           AND (execution_result_json IS NULL
+                OR jsonb_typeof(execution_result_json) = 'object')),
 
     -- 제안된 날보다 앞서 결정될 수 없다.
     CONSTRAINT ck_logistics_action_proposals_decided_order
@@ -405,6 +456,14 @@ COMMENT ON COLUMN haetdeul.logistics_action_proposals.observed_as_of IS
     '조사가 낸 값 그대로 — 근거 입력들이 알 수 있었던 가장 늦은 날. 🔴 하나라도 관측일이 없으면 NULL 이고 제안일·승인일·현재시각으로 메우지 않는다.';
 COMMENT ON COLUMN haetdeul.logistics_action_proposals.proposal_key IS
     'f(sim_run_id, exception_id, action_type, 정규화된 parameters) 지문. 재시도로 같은 제안이 두 번 들어오는 것을 알아보는 용도다. 🔴 유일 제약이 아니다 — 거절된 뒤 같은 안을 다시 올리는 것은 정상이다.';
+COMMENT ON COLUMN haetdeul.logistics_action_proposals.executed_as_of IS
+    '실제 실행이 **확인된** 시뮬레이션 영업일 (Commit 6). 🔴 approved_as_of 와 함께 서는 것이 정상 흐름이다 — 승인은 끝이 아니라 실행 대기다. ⚠️ 타 부서에 «요청을 접수시켰다» 는 것만으로는 적지 않는다(handoff accepted ≠ executed).';
+COMMENT ON COLUMN haetdeul.logistics_action_proposals.failed_as_of IS
+    '실행 실패가 **확정된** 날. 🔴 «실행됐는지 모른다» 를 여기 적지 않는다 — 모르는 것을 실패로 적으면 재시도가 이중 실행을 낳는다.';
+COMMENT ON COLUMN haetdeul.logistics_action_proposals.executed_by IS
+    '실제로 실행을 돌린 주체. ⚠️ decision_owner(실행 책임 부서)와 다른 축이다 — decision_owner=LOGISTICS 인데 executed_by=master-runner 일 수 있다.';
+COMMENT ON COLUMN haetdeul.logistics_action_proposals.execution_result_json IS
+    '무엇을 실행했고 어느 정본 행을 가리키나 (action · owner · reference_id · result 정도). 🔴 업무 표 snapshot 이 아니고, 여기서 숫자를 새로 만들지 않는다 — 실행 함수의 authoritative 반환이나 DB read-back 값만 담는다. ⚠️ evidence_refs_json(왜 승인했나)과 섞지 않는다.';
 COMMENT ON COLUMN haetdeul.logistics_action_proposals.rationale IS
     '모델이 적은 이유 문장. 🔴 업무 사실이 아니라 기록이다 — 숫자와 판정의 주인은 impact_json 이다.';
 
@@ -421,6 +480,89 @@ COMMENT ON COLUMN haetdeul.logistics_action_proposals.rationale IS
 --        어긋난 장부를 조용히 통과시키고 «제약이 있다» 고 적는 것보다, 마이그레이션이
 --        멈추고 사람이 그 행을 보는 편이 낫다.
 -- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── 실행 축 칸 (Commit 6) — 기존 DB 에도 같은 모양으로 ────────────────────
+ALTER TABLE haetdeul.logistics_action_proposals
+    ADD COLUMN IF NOT EXISTS executed_as_of        DATE,
+    ADD COLUMN IF NOT EXISTS failed_as_of          DATE,
+    ADD COLUMN IF NOT EXISTS executed_by           TEXT,
+    ADD COLUMN IF NOT EXISTS execution_result_json JSONB,
+    ADD COLUMN IF NOT EXISTS failure_code          TEXT,
+    ADD COLUMN IF NOT EXISTS failure_reason        TEXT;
+
+DO $execution_axis$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_executed'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_executed
+            CHECK (status <> 'EXECUTED'
+                   OR (approved_as_of IS NOT NULL AND executed_as_of IS NOT NULL
+                       AND executed_by IS NOT NULL AND failed_as_of IS NULL));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_failed'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_failed
+            CHECK (status <> 'FAILED'
+                   OR (approved_as_of IS NOT NULL AND failed_as_of IS NOT NULL
+                       AND failure_code IS NOT NULL AND executed_as_of IS NULL));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_execution_owner'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_execution_owner
+            CHECK (status IN ('EXECUTED', 'FAILED')
+                   OR (executed_as_of IS NULL AND failed_as_of IS NULL
+                       AND execution_result_json IS NULL AND failure_code IS NULL));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_execution_exclusive'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_execution_exclusive
+            CHECK (executed_as_of IS NULL OR failed_as_of IS NULL);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_execution_order'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_execution_order
+            CHECK ((executed_as_of IS NULL OR executed_as_of >= approved_as_of)
+               AND (failed_as_of   IS NULL OR failed_as_of   >= approved_as_of));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_execution_actor'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_execution_actor
+            CHECK ((executed_by   IS NULL OR length(btrim(executed_by)) > 0)
+               AND (failure_code  IS NULL OR length(btrim(failure_code)) > 0)
+               AND (execution_result_json IS NULL
+                    OR jsonb_typeof(execution_result_json) = 'object'));
+    END IF;
+END
+$execution_axis$;
 
 DO $proposal_axis$
 BEGIN

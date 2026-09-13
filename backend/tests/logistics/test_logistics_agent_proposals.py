@@ -52,6 +52,7 @@ PRP = f"PRP-{EXC}-1"
 D1 = date(2026, 1, 1)
 D5 = D1 + timedelta(days=4)
 D6 = D1 + timedelta(days=5)
+D7 = D1 + timedelta(days=6)
 D8 = D1 + timedelta(days=7)
 D9 = D1 + timedelta(days=8)
 
@@ -519,10 +520,114 @@ class TestHistoricalProjection:
         with pytest.raises(ProposalInvariantViolation):
             project_proposal_at(broken, as_of=D9)
 
-    def test_an_execution_state_is_refused_until_commit_six(self) -> None:
-        """⚠️ `EXECUTED` 는 «언제» 됐는지 적는 칸이 없다 — 날짜 없이 과거로 접지 않는다."""
+    def test_an_execution_state_without_its_date_is_refused(self) -> None:
+        """⚠️ 상태는 «실행됨» 인데 그날을 못 댄다 — 날짜 없이 과거로 접지 않는다."""
         with pytest.raises(ProposalInvariantViolation):
-            project_proposal_at(_row(status="EXECUTED", approved_as_of=D8), as_of=D9)
+            project_proposal_at(
+                _row(status="EXECUTED", approved_as_of=D6, approved_by="operator"), as_of=D9
+            )
+
+
+def _executed(**overrides: Any) -> ProposalRow:
+    """`D5 제안 · D6 승인 · D8 실행` — Commit 6 의 **정상 흐름** 한 줄."""
+    base: dict[str, Any] = {
+        "status": "EXECUTED",
+        "approved_as_of": D6,
+        "approved_by": "operator",
+        "approval_note": "신선도가 급하다",
+        "executed_as_of": D8,
+        "executed_by": "master-runner",
+        "execution_result": {"action": "ACCEPT_RISK", "reference_id": EXC},
+    }
+    base.update(overrides)
+    return _row(**base)
+
+
+class TestExecutionProjection:
+    """🔴 **승인은 끝이 아니다** — 한 행이 승인일과 실행일을 함께 든다 (Commit 6 · §20)."""
+
+    def test_the_day_of_the_proposal_shows_only_the_proposal(self) -> None:
+        at_date = project_proposal_at(_executed(), as_of=D5)
+        assert at_date is not None
+        assert at_date.status == "PROPOSED"
+        assert at_date.approved_by is None
+        assert at_date.executed_by is None
+
+    def test_between_approval_and_execution_it_is_approved(self) -> None:
+        """🔴 §77 — D7 조회에 실행 detail 이 한 칸도 안 보인다."""
+        at_date = project_proposal_at(_executed(), as_of=D7)
+        assert at_date is not None
+        assert at_date.status == "APPROVED"
+        # 승인은 이미 일어났다 — 그 사실은 보인다.
+        assert at_date.approved_as_of == D6
+        assert at_date.approved_by == "operator"
+        # 🔴 실행은 아직 안 일어났다.
+        assert at_date.executed_as_of is None
+        assert at_date.executed_by is None
+        assert at_date.execution_result == {}
+
+    def test_after_execution_it_is_executed(self) -> None:
+        at_date = project_proposal_at(_executed(), as_of=D9)
+        assert at_date is not None
+        assert at_date.status == "EXECUTED"
+        assert at_date.executed_as_of == D8
+        assert at_date.executed_by == "master-runner"
+        assert at_date.execution_result["reference_id"] == EXC
+
+    def test_the_approval_survives_the_execution(self) -> None:
+        """★ **칸 묶음마다 자기 날짜로 가린다.**
+
+        상태 하나만 보고 가리면 «실행됨» 조회에서 *누가 승인했나* 가 사라진다 — 그 일은
+        실제로 일어났고 기록에 남아야 한다.
+        """
+        at_date = project_proposal_at(_executed(), as_of=D9)
+        assert at_date is not None
+        assert at_date.approved_by == "operator"
+        assert at_date.approval_note == "신선도가 급하다"
+
+    def test_a_failure_projects_the_same_way(self) -> None:
+        failed = _executed(
+            status="FAILED",
+            executed_as_of=None,
+            execution_result={},
+            failed_as_of=D8,
+            failure_code="STALE_ACTION",
+            failure_reason="승인 뒤 잔량이 줄었다",
+        )
+        waiting = project_proposal_at(failed, as_of=D7)
+        assert waiting is not None
+        assert waiting.status == "APPROVED"
+        assert waiting.failure_code is None
+        assert waiting.failure_reason is None
+
+        decided = project_proposal_at(failed, as_of=D9)
+        assert decided is not None
+        assert decided.status == "FAILED"
+        assert decided.failure_code == "STALE_ACTION"
+
+    def test_an_execution_without_an_approval_is_refused(self) -> None:
+        """🔴 승인 없이 실행된 것으로 적힌 행은 «누가 진행해도 좋다고 했나» 를 못 댄다."""
+        broken = _executed(approved_as_of=None, approved_by=None)
+        with pytest.raises(ProposalInvariantViolation):
+            project_proposal_at(broken, as_of=D9)
+
+    def test_execution_and_failure_together_are_refused(self) -> None:
+        broken = _executed(failed_as_of=D8, failure_code="X")
+        with pytest.raises(ProposalInvariantViolation):
+            project_proposal_at(broken, as_of=D9)
+
+    def test_an_executed_proposal_no_longer_blocks_the_next_one(self) -> None:
+        """🔴 §17 — 실행이 끝난 제안의 «끝난 날» 은 실행일이다.
+
+        승인일을 끝으로 세면 `D6 승인 · D8 실행` 뒤에 오는 새 제안이 **D6 이후**면 된다고
+        답하게 되는데, 그러면 D7 조회에서 살아 있는 제안이 둘이 된다.
+        """
+        latest, unorderable = repository.latest_terminal_as_of([_executed()])
+        assert (latest, unorderable) == (D8, ())
+
+    def test_an_approved_proposal_has_no_end_yet(self) -> None:
+        waiting = _row(status="APPROVED", approved_as_of=D6, approved_by="operator")
+        assert repository.latest_terminal_as_of([waiting]) == (None, ())
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1191,10 +1296,21 @@ class TestTransitionVocabulary:
 
     def test_the_status_vocabulary_matches_the_state_machine(self) -> None:
         assert repository.LIVE_PROPOSAL_STATUSES == ("PROPOSED", "APPROVED")
-        assert set(repository.TERMINAL_DATE_STATUSES.values()) | {"PROPOSED"} | {
-            "EXECUTED",
-            "FAILED",
-        } == set(repository.PROPOSAL_STATUSES)
+        # 🔴 «끝난 상태» 와 «아직 안 끝난 상태» 가 합쳐 어휘 전부다.
+        assert set(repository.TERMINAL_DATE_STATUSES.values()) | {"PROPOSED", "APPROVED"} == set(
+            repository.PROPOSAL_STATUSES
+        )
+
+    def test_approval_is_not_a_terminal_outcome(self) -> None:
+        """🔴 **승인은 끝이 아니라 실행 대기다** (Commit 6 · §17).
+
+        `approved_as_of` 를 «끝난 날» 로 세면 `D6 승인 · D8 실행` 인 정상 흐름에서
+        새 제안의 날짜 하한이 승인일로 잡히고, 실행이 끝난 뒤에도 그 제안이 여전히
+        길을 막는 것처럼 보인다.
+        """
+        assert "approved_as_of" not in repository.TERMINAL_DATE_STATUSES
+        assert repository.TERMINAL_DATE_STATUSES["executed_as_of"] == "EXECUTED"
+        assert repository.TERMINAL_DATE_STATUSES["failed_as_of"] == "FAILED"
 
 
 class TestWriteBoundary:

@@ -12,6 +12,7 @@ stale 승인    이미 닫힌 문제의 제안이 승인되는가
 격리          남의 실행 제안이 보이는가
 실행 축       DB 가 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 거부하는가
 경합          동시에 들어온 같은 요청이 UniqueViolation 으로 터져 나가는가
+실행          Act 가 실제로 원장을 바꾸고 Verify 가 그것을 되읽는가 (Commit 6)
 ```
 
 🔴 **가짜로는 원자성을 못 잰다.** 스텁을 꽂으면 *"우리가 롤백을 불렀다"* 까지만 확인되고,
@@ -38,11 +39,20 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.logistics import historical_repository, inbound_schedules, turnover
+from app.logistics import (
+    disposal,
+    historical_repository,
+    inbound_schedules,
+    ledger,
+    outbound,
+    turnover,
+)
 from app.logistics.agent import exceptions as exception_repo
+from app.logistics.agent import execution
 from app.logistics.agent import proposal_service as service
 from app.logistics.agent import proposals as repository
 from app.logistics.agent.exceptions import open_exception
+from app.logistics.agent.execution import execute_approved_proposal
 from app.logistics.agent.graph import run_investigation
 from app.logistics.agent.investigation import (
     EvaluatedOption,
@@ -83,10 +93,14 @@ D5 = date(2026, 1, 5)
 D6 = date(2026, 1, 6)
 D8 = date(2026, 1, 8)
 D9 = date(2026, 1, 9)
+#: 🔴 **입고 + 보관한계(10일) 를 지난 날.** 폐기는 신선도가 다한 Lot 에만 선다 —
+#:    그 판정의 주인은 `turnover.is_disposal_candidate` 이고 우리가 안 정한다.
+D15 = date(2026, 1, 15)
 
 EXC = "EXC-FRESHNESS-1"
 LOT = "LOT-BAECHU"
 OPERATOR = "operator"
+RUNNER = "master-runner"
 
 DB_DIR = Path(__file__).resolve().parents[3] / "database"
 
@@ -175,6 +189,10 @@ def conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[psycopg.Connection]:
             exception_repo,
             inbound_schedules,
             repository,
+            # Commit 6 — 폐기가 실제로 원장을 바꾸는 경로.
+            disposal,
+            ledger,
+            outbound,
         ):
             monkeypatch.setattr(module, "get_db_schema", lambda: TMP_SCHEMA)
         yield connection
@@ -856,25 +874,23 @@ class TestChronology:
                   service.list_proposals(conn, sim_run_id=SIM, as_of=D6)}
         assert at_six == {first: "REJECTED", second.proposal.proposal_id: "PROPOSED"}
 
-    def test_a_proposal_whose_end_cannot_be_dated_stops_the_line(
+    def test_an_execution_state_without_its_date_is_refused_by_the_database(
         self, conn: psycopg.Connection
     ) -> None:
-        """🔴 `EXECUTED` 는 «언제» 됐는지 적는 칸이 없다 (Commit 6) — 앞뒤를 못 세운다.
+        """🔴 **Commit 6 이 이 구멍을 닫았다.**
 
-        ⚠️ DB 는 이 행을 받는다(제약이 상태 어휘만 본다). 그래서 응용이 멈춰야 한다.
+        Commit 5 에서는 `status='EXECUTED'` 인데 그날을 못 대는 행이 DB 를 통과했고,
+        응용이 fail-closed 로 멈추는 수밖에 없었다. 이제 실행 날짜 칸이 생겨 **DB 가
+        먼저 막는다** — 앞뒤를 못 세우는 행이 아예 서지 못한다.
         """
         _exception(conn)
         _create(conn)
-        with conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE {TMP_SCHEMA}.logistics_action_proposals SET status = 'EXECUTED'"
-            )
-        conn.commit()
-
-        with pytest.raises(service.ProposalStateConflict) as caught:
-            _create(conn, as_of=D9)
-        assert caught.value.code == service.PROPOSAL_HISTORY_CONFLICT
-        assert len(_rows(conn)) == 1
+        _refuses(
+            conn,
+            f"UPDATE {TMP_SCHEMA}.logistics_action_proposals SET status = 'EXECUTED'",
+            psycopg.errors.CheckViolation,
+        )
+        assert _rows(conn)[0].status == "PROPOSED"
 
 
 class TestAtomicity:
@@ -1535,6 +1551,349 @@ class TestConcurrentCreate:
         assert attempted, "경합 경로를 안 지났다"
         assert _snapshot(conn) == before
         assert len(_rows(conn)) == 1
+
+
+def _moves(conn: psycopg.Connection, lot_id: str = LOT) -> list[tuple[Any, ...]]:
+    """그 Lot 의 폐기 Move 들. **원장을 직접 읽어** 부작용을 센다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT move_id, quantity_kg, moved_at FROM {TMP_SCHEMA}.inventory_moves"
+            " WHERE lot_id = %s AND move_type = 'DISPOSE' ORDER BY move_id",
+            (lot_id,),
+        )
+        return [tuple(row.values()) for row in cur.fetchall()]
+
+
+def _approved(
+    conn: psycopg.Connection,
+    *,
+    action: str = "ACCEPT_RISK",
+    parameters: dict[str, Any] | None = None,
+) -> str:
+    """`D5 제안 · D6 승인` 까지 세운 제안 하나. 실행은 검사가 한다."""
+    _exception(conn)
+    outcome = _create(conn, action=action, parameters=parameters)
+    assert outcome.proposal is not None
+    service.approve_proposal(
+        conn,
+        sim_run_id=SIM,
+        proposal_id=outcome.proposal.proposal_id,
+        as_of=D6,
+        approved_by=OPERATOR,
+    )
+    return outcome.proposal.proposal_id
+
+
+class TestActAcceptRisk:
+    """🔴 **위험 수용은 위험 소멸이 아니다** (§39 · §62)."""
+
+    def test_the_risk_is_recorded_on_the_exception(self, conn: psycopg.Connection) -> None:
+        proposal_id = _approved(conn)
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        assert outcome.status == "EXECUTED"
+
+        # ── Verify 는 되읽기다 ────────────────────────────────────────
+        accepted = repository.exception_risk_accepted_as_of(
+            conn, sim_run_id=SIM, exception_id=EXC
+        )
+        assert accepted == D8
+
+        (row,) = _rows(conn)
+        assert row.status == "EXECUTED"
+        assert row.executed_as_of == D8
+        assert row.executed_by == RUNNER
+        assert row.execution_result["reference_id"] == EXC
+        assert row.execution_result["result"] == "RISK_ACCEPTED"
+        # ⚠️ 승인 사실은 그대로 남는다 — 실행이 그것을 지우지 않는다.
+        assert row.approved_as_of == D6
+        assert row.approved_by == OPERATOR
+
+    def test_the_exception_is_not_resolved(self, conn: psycopg.Connection) -> None:
+        """🔴 §39 · §82 — 위험을 안고 가기로 한 것이지 조건이 사라진 것이 아니다."""
+        proposal_id = _approved(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        assert _exception_row(conn)["status"] == "PROPOSED"
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT status, resolved_as_of FROM {TMP_SCHEMA}.logistics_exceptions"
+                " WHERE exception_id = %s",
+                (EXC,),
+            )
+            problem = dict(cur.fetchone())
+        assert problem["status"] != "RESOLVED"
+        assert problem["resolved_as_of"] is None
+
+    def test_no_business_table_moves(self, conn: psycopg.Connection) -> None:
+        _lot(conn)
+        conn.commit()
+        proposal_id = _approved(conn)
+        before = _snapshot(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        assert _snapshot(conn) == before
+
+    def test_running_it_twice_changes_nothing(self, conn: psycopg.Connection) -> None:
+        """§27 · §79 — 같은 제안 두 번 → 실제 행동 1회."""
+        proposal_id = _approved(conn)
+        first = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        again = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D9, executed_by=RUNNER
+        )
+        assert first.status == "EXECUTED"
+        assert again.status == "ALREADY_EXECUTED"
+        # 🔴 **처음 수용한 날**이 그대로다 — 두 번째 실행이 날짜를 안 덮었다.
+        assert repository.exception_risk_accepted_as_of(
+            conn, sim_run_id=SIM, exception_id=EXC
+        ) == D8
+        assert _rows(conn)[0].executed_as_of == D8
+
+
+class TestActDisposal:
+    """🔴 **재고를 없애는 길은 `disposal.confirm_disposal` 하나다** (§42 · §43)."""
+
+    def _disposal(self, conn: psycopg.Connection, qty: Any = 500) -> str:
+        return _approved(
+            conn,
+            action="DISPOSAL_REQUEST",
+            parameters={"lot_id": LOT, "qty_kg": Decimal(qty)},
+        )
+
+    def test_the_ledger_moves_and_the_lot_shrinks(self, conn: psycopg.Connection) -> None:
+        _lot(conn)
+        conn.commit()
+        proposal_id = self._disposal(conn)
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        assert outcome.status == "EXECUTED", outcome.failure_reason
+
+        # ── 원장에 DISPOSE 가 하나 섰다 ───────────────────────────────
+        moves = _moves(conn)
+        assert len(moves) == 1
+        assert moves[0][0] == f"MOVE-DISPOSE-{proposal_id}"
+        assert moves[0][1] == Decimal(500)
+
+        # ── 잔량이 실제로 줄었다 ──────────────────────────────────────
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT remaining_qty_kg, status FROM {TMP_SCHEMA}.inventory_lots"
+                " WHERE lot_id = %s",
+                (LOT,),
+            )
+            lot = dict(cur.fetchone())
+        assert lot["remaining_qty_kg"] == Decimal(0)
+        assert lot["status"] == "DISPOSED"
+
+        (row,) = _rows(conn)
+        assert row.status == "EXECUTED"
+        assert row.execution_result["reference_id"] == f"MOVE-DISPOSE-{proposal_id}"
+        assert row.execution_result["remaining_qty_kg"] == "0.000000"
+
+    def test_the_proposal_id_is_the_idempotency_key(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """§45 · §83 — 같은 제안 두 번 실행해도 Move 는 하나다."""
+        _lot(conn)
+        conn.commit()
+        proposal_id = self._disposal(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        again = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        assert again.status == "ALREADY_EXECUTED"
+        assert len(_moves(conn)) == 1
+
+    def test_a_quantity_the_lot_no_longer_has_is_stale(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 §13 · §44 — 승인 당시 수량을 현재 사실처럼 쓰지 않는다. 업무 mutation 0."""
+        _lot(conn)
+        conn.commit()
+        proposal_id = self._disposal(conn, qty=9999)
+        before = _snapshot(conn)
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        assert outcome.status == "FAILED"
+        assert outcome.failure_code == execution.STALE_ACTION
+        assert _moves(conn) == []
+        assert _snapshot(conn) == before
+        (row,) = _rows(conn)
+        assert row.status == "FAILED"
+        assert row.failed_as_of == D15
+        assert row.executed_as_of is None
+
+    def test_a_lot_that_is_not_a_disposal_candidate_is_stale(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 폐기 근거의 주인은 `turnover` 다 — 신선도가 남아 있으면 정본이 막는다."""
+        _lot(conn)
+        conn.commit()
+        proposal_id = self._disposal(conn)
+        # D8 은 아직 보관한계(10일) 안이다.
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        assert outcome.status == "FAILED"
+        assert outcome.failure_code == execution.STALE_ACTION
+        assert _moves(conn) == []
+
+    def test_a_proposal_without_a_quantity_is_not_guessed(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 수량을 지어내지 않는다 — «전량» 이라고 넘겨짚지도 않는다."""
+        _lot(conn)
+        conn.commit()
+        proposal_id = _approved(
+            conn, action="DISPOSAL_REQUEST", parameters={"lot_id": LOT}
+        )
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        assert outcome.status == "FAILED"
+        assert outcome.failure_code == execution.ACTION_PARAMETERS_INCOMPLETE
+        assert _moves(conn) == []
+
+
+class TestActWithoutABoundary:
+    """🔴 **경계가 없으면 실행하지 않고 승인 상태로 남긴다** (§4 · §86)."""
+
+    @pytest.mark.parametrize(
+        ("action", "parameters"),
+        [
+            ("SALES_PRIORITY_REQUEST", {"lot_id": LOT}),
+            ("PURCHASE_ADJUST_REQUEST", {"qty_delta_kg": Decimal(-300)}),
+        ],
+    )
+    def test_the_proposal_stays_approved(
+        self, conn: psycopg.Connection, action: str, parameters: dict[str, Any]
+    ) -> None:
+        _lot(conn)
+        conn.commit()
+        proposal_id = _approved(conn, action=action, parameters=parameters)
+        before = _snapshot(conn)
+
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        assert outcome.status == "BLOCKED"
+        assert outcome.failure_code == execution.ACTION_NOT_EXECUTABLE
+
+        (row,) = _rows(conn)
+        # 🔴 `FAILED` 가 아니다 — 계약이 생기면 이 제안은 그때 돌 수 있어야 한다.
+        assert row.status == "APPROVED"
+        assert row.executed_as_of is None
+        assert row.failed_as_of is None
+        assert _snapshot(conn) == before
+
+
+class TestExecutionHistorical:
+    """🔴 §76 — `D5 제안 · D6 승인 · D8 실행` 을 그대로 되살린다."""
+
+    def test_each_day_shows_what_was_true_then(self, conn: psycopg.Connection) -> None:
+        proposal_id = _approved(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        at = {
+            day: service.get_proposal(
+                conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=day
+            )
+            for day in (D1, D5, D6, D8, D9)
+        }
+        assert at[D1] is None
+        assert at[D5] is not None and at[D5].status == "PROPOSED"
+        assert at[D6] is not None and at[D6].status == "APPROVED"
+        assert at[D8] is not None and at[D8].status == "EXECUTED"
+        assert at[D9] is not None and at[D9].status == "EXECUTED"
+
+    def test_execution_detail_does_not_leak_into_the_past(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 §77 — D6 조회에 실행 detail 이 한 칸도 안 보인다."""
+        proposal_id = _approved(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        waiting = service.get_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D6
+        )
+        assert waiting is not None
+        assert waiting.status == "APPROVED"
+        assert waiting.executed_as_of is None
+        assert waiting.executed_by is None
+        assert waiting.execution_result == {}
+        # ★ 그날 이미 있던 승인 사실은 보인다.
+        assert waiting.approved_by == OPERATOR
+
+    def test_the_listing_filters_by_the_status_of_that_day(
+        self, conn: psycopg.Connection
+    ) -> None:
+        proposal_id = _approved(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        waiting = service.list_proposals(conn, sim_run_id=SIM, as_of=D6, statuses=["APPROVED"])
+        assert [one.proposal_id for one in waiting] == [proposal_id]
+        done = service.list_proposals(conn, sim_run_id=SIM, as_of=D9, statuses=["EXECUTED"])
+        assert [one.proposal_id for one in done] == [proposal_id]
+
+
+class TestConcurrentExecution:
+    """🔴 §80 — 두 worker 가 같은 제안을 동시에 돌려도 **부작용은 한 번**이다.
+
+    ★ 정본 함수의 멱등이 그것을 막는다 (`MOVE-DISPOSE-{proposal_id}`). 제안 쪽은
+      `WHERE status='APPROVED'` 조건부 UPDATE 로 늦은 쪽을 걸러 낸다.
+    """
+
+    def test_only_one_disposal_move_is_made(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _lot(conn)
+        conn.commit()
+        proposal_id = _approved(
+            conn,
+            action="DISPOSAL_REQUEST",
+            parameters={"lot_id": LOT, "qty_kg": Decimal(500)},
+        )
+        stale = repository.select_proposal(conn, sim_run_id=SIM, proposal_id=proposal_id)
+
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = execute_approved_proposal(
+                rival, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by="other"
+            )
+            assert winner.status == "EXECUTED"
+
+            # 🔴 늦은 쪽은 **경합 전에 읽은** 제안(아직 APPROVED)을 들고 들어온다.
+            once = [stale]
+            real = repository.select_proposal
+            monkeypatch.setattr(
+                repository,
+                "select_proposal",
+                lambda *a, **k: once.pop() if once else real(*a, **k),
+            )
+            loser = execute_approved_proposal(
+                conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+            )
+        finally:
+            rival.rollback()
+            rival.close()
+
+        assert loser.status == "ALREADY_EXECUTED"
+        # 🔴 **Move 는 하나다.**
+        assert len(_moves(conn)) == 1
+        assert _rows(conn)[0].executed_by == "other"
 
 
 class TestConstraints:

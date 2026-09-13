@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Literal
 
@@ -46,6 +46,8 @@ __all__ = [
     "ProposalInvariantViolation",
     "ProposalRow",
     "ProposalStatus",
+    "accept_exception_risk",
+    "exception_risk_accepted_as_of",
     "exception_status",
     "insert_proposal",
     "is_unique_violation",
@@ -55,6 +57,7 @@ __all__ = [
     "next_proposal_id",
     "project_proposal_at",
     "proposal_key_for",
+    "record_execution_outcome",
     "reopen_exception",
     "select_proposal",
     "select_proposals",
@@ -92,13 +95,36 @@ PROPOSAL_STATUSES: tuple[str, ...] = (
 #:    여기서 빼면 같은 문제에 승인 대기 제안과 새 제안이 동시에 서게 된다 (§47).
 LIVE_PROPOSAL_STATUSES: tuple[str, ...] = ("PROPOSED", "APPROVED")
 
-#: 끝난 날 칸 → 그 날이 뜻하는 상태. **과거 재현의 사전이다** (§41).
+#: 🔴 **끝난 날 칸 → 그 날이 뜻하는 상태.** 여기 `approved_as_of` 가 **없다** (Commit 6) —
+#:    승인은 끝이 아니라 **실행 대기**다. 이 사전은 «이 제안이 언제 살아 있기를 그쳤나» 를
+#:    답하고, 그것이 다음 제안의 날짜 하한이 된다 (`latest_terminal_as_of`).
 TERMINAL_DATE_STATUSES: Mapping[str, str] = {
-    "approved_as_of": "APPROVED",
     "rejected_as_of": "REJECTED",
     "expired_as_of": "EXPIRED",
     "superseded_as_of": "SUPERSEDED",
+    "executed_as_of": "EXECUTED",
+    "failed_as_of": "FAILED",
 }
+
+#: 🔴 **과거 재현의 우선순위다 — 순서가 곧 규칙이다** (§20).
+#:
+#: ```text
+#: D5 제안 · D6 승인 · D8 실행   →  D5 PROPOSED · D7 APPROVED · D9 EXECUTED
+#: ```
+#:
+#: ⚠️ `EXECUTED` 가 `APPROVED` 보다 **앞에** 있다. 실행된 행은 승인일도 함께 들고 있어서
+#:    (`executed_as_of >= approved_as_of`) 둘 다 «도착» 하는데, 그날 상태는 나중 것이다.
+_STATUS_PRECEDENCE: tuple[tuple[str, str], ...] = (
+    ("EXECUTED", "executed_as_of"),
+    ("FAILED", "failed_as_of"),
+    ("APPROVED", "approved_as_of"),
+    ("REJECTED", "rejected_as_of"),
+    ("EXPIRED", "expired_as_of"),
+    ("SUPERSEDED", "superseded_as_of"),
+)
+
+#: 한 제안에 **하나만** 올 수 있는 결정들. 승인과 실행은 서로 다른 축이라 여기 안 묶인다.
+_EXCLUSIVE_DECISIONS: frozenset[str] = frozenset({"APPROVED", "REJECTED", "EXPIRED", "SUPERSEDED"})
 
 #: 상태마다 «그 결정이 남긴 칸». 🔴 **그날 안 일어난 결정의 칸은 비워서 낸다** (§42) —
 #:    D10 의 거절 사유가 D6 조회에 보이면 그날 없던 사실이 과거에 생긴다.
@@ -107,7 +133,14 @@ DECISION_DETAIL_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "REJECTED": ("rejected_as_of", "rejected_by", "rejection_reason"),
     "EXPIRED": ("expired_as_of",),
     "SUPERSEDED": ("superseded_as_of",),
+    # Commit 6 — 실행도 «그날 안 일어났으면 안 보인다».
+    "EXECUTED": ("executed_as_of", "executed_by", "execution_result"),
+    "FAILED": ("failed_as_of", "failure_code", "failure_reason"),
 }
+
+#: 비울 때 넣는 값. 🔴 `execution_result` 만 `None` 이 아니라 **빈 사전**이다 — 그 칸의
+#:    타입이 «지도» 이고, 비었다는 것과 없다는 것을 굳이 가를 이유가 없다.
+_BLANK_VALUES: Mapping[str, Any] = {"execution_result": {}}
 
 
 class ProposalInvariantViolation(RuntimeError):
@@ -164,6 +197,17 @@ class ProposalRow:
     approval_note: str | None = None
     rejection_reason: str | None = None
     previous_proposal_id: str | None = None
+    # ── 실행 축 (Commit 6) ───────────────────────────────────────────
+    #: 🔴 `approved_as_of` 와 **함께** 선다 — 승인은 끝이 아니라 실행 대기다.
+    executed_as_of: date | None = None
+    failed_as_of: date | None = None
+    #: ⚠️ `decision_owner`(실행 책임 부서) 와 다른 축 — 실제로 돌린 주체다.
+    executed_by: str | None = None
+    #: 무엇을 실행했고 어느 정본 행을 가리키나. 🔴 업무 표 snapshot 이 아니다.
+    execution_result: Mapping[str, Any] = field(default_factory=dict)
+    #: 🔴 **확정된 실패만.** «모른다» 를 여기 적지 않는다.
+    failure_code: str | None = None
+    failure_reason: str | None = None
 
     @property
     def live(self) -> bool:
@@ -198,6 +242,12 @@ _COLUMNS = (
     "approval_note",
     "rejection_reason",
     "previous_proposal_id",
+    "executed_as_of",
+    "failed_as_of",
+    "executed_by",
+    "execution_result_json",
+    "failure_code",
+    "failure_reason",
 )
 
 
@@ -260,6 +310,12 @@ def _row(raw: Mapping[str, Any]) -> ProposalRow:
         approval_note=raw["approval_note"],
         rejection_reason=raw["rejection_reason"],
         previous_proposal_id=raw["previous_proposal_id"],
+        executed_as_of=raw["executed_as_of"],
+        failed_as_of=raw["failed_as_of"],
+        executed_by=raw["executed_by"],
+        execution_result=_json(raw["execution_result_json"], fallback={}),
+        failure_code=raw["failure_code"],
+        failure_reason=raw["failure_reason"],
     )
 
 
@@ -413,6 +469,8 @@ def project_proposal_at(row: ProposalRow, *, as_of: date) -> ProposalRow | None:
 
     ```text
     proposed_as_of > as_of      아직 없다                    → None
+    executed_as_of <= as_of     EXECUTED       ← 승인일도 함께 도착하지만 나중 것이 이긴다
+    failed_as_of   <= as_of     FAILED
     approved_as_of <= as_of     APPROVED
     rejected_as_of <= as_of     REJECTED
     expired_as_of  <= as_of     EXPIRED
@@ -420,42 +478,63 @@ def project_proposal_at(row: ProposalRow, *, as_of: date) -> ProposalRow | None:
     그 밖                        PROPOSED
     ```
 
-    🔴 **지금 값을 과거로 쓰지 않는다.** `row.status` 를 그대로 내면 D10 에 거절된 제안이
-       D6 조회에서도 거절로 보인다 — 그날 아직 사람이 안 본 제안이다.
+    🔴 **승인은 끝이 아니다** (Commit 6). `D5 제안 · D6 승인 · D8 실행` 이 정상 흐름이라
+       한 행이 승인일과 실행일을 **함께** 든다 — 그래서 «끝난 날은 하나» 로 접으면 안 되고
+       **우선순위**로 골라야 한다.
 
-    🔴 **미래 detail 을 안 흘린다** (§42). 그날 안 일어난 결정의 칸(`rejected_by` ·
-       `rejection_reason` · `approval_note` …)은 **비워서** 낸다. Commit 3 의 Exception
-       과거 조회가 세운 원칙 그대로다.
+    🔴 **지금 값을 과거로 쓰지 않는다.** `row.status` 를 그대로 내면 D8 에 실행된 제안이
+       D7 조회에서도 실행됨으로 보인다 — 그날은 아직 승인 대기였다.
+
+    🔴 **미래 detail 을 안 흘린다** (§21 · §42). **칸 묶음마다 자기 날짜로** 가린다 —
+       그래서 `EXECUTED` 조회에도 승인자는 보이고(그 일은 실제로 일어났다), `APPROVED`
+       조회에는 `executed_by` · `execution_result` 가 안 보인다.
 
     ⚠️ 못 고르면 **답하지 않는다** — `ProposalInvariantViolation` 을 올린다.
     """
     if row.proposed_as_of > as_of:
         return None
-    if row.status in {"EXECUTED", "FAILED"}:
-        # 🔴 그 상태가 «언제» 됐는지 적는 칸이 아직 없다 (Commit 6). 날짜 없이 상태만
-        #    옮기면 실행 전날 조회에도 «실행됨» 이 뜬다.
-        raise ProposalInvariantViolation(
-            f"{row.proposal_id} 의 상태 {row.status} 는 전이 날짜 칸이 없어 과거로 못 접는다"
-            " — 실행 상태는 Commit 6 의 것이다"
-        )
+    for status, column in _STATUS_PRECEDENCE:
+        if row.status == status and getattr(row, column) is None:
+            # 🔴 상태는 그 날인데 그날을 못 댄다 — 날짜 없이 상태만 옮기면 그 전날
+            #    조회에도 그 상태가 뜬다.
+            raise ProposalInvariantViolation(
+                f"{row.proposal_id} 의 상태 {status} 에 {column} 이 없다"
+                " — 언제 그렇게 됐는지를 못 대면 과거로 접을 수 없다"
+            )
 
-    landed = [
-        (status, when)
-        for column, status in TERMINAL_DATE_STATUSES.items()
+    landed = {
+        status
+        for status, column in _STATUS_PRECEDENCE
         if (when := getattr(row, column)) is not None and when <= as_of
-    ]
-    if len(landed) > 1:
+    }
+    if "EXECUTED" in landed and "FAILED" in landed:
         raise ProposalInvariantViolation(
-            f"{row.proposal_id} 에 {as_of} 까지 끝난 날이 {len(landed)} 개다"
-            f" ({sorted(status for status, _ in landed)}) — 그날 상태를 고를 수 없다"
+            f"{row.proposal_id} 는 {as_of} 까지 실행과 실패가 모두 적혀 있다"
+            " — 한 제안이 두 결말을 가질 수 없다"
+        )
+    exclusive = sorted(landed & _EXCLUSIVE_DECISIONS)
+    if len(exclusive) > 1:
+        raise ProposalInvariantViolation(
+            f"{row.proposal_id} 에 {as_of} 까지 결정이 {len(exclusive)} 개다"
+            f" ({exclusive}) — 그날 상태를 고를 수 없다"
+        )
+    if (landed & {"EXECUTED", "FAILED"}) and "APPROVED" not in landed:
+        raise ProposalInvariantViolation(
+            f"{row.proposal_id} 는 승인 없이 실행된 것으로 적혀 있다"
+            " — 누가 진행해도 좋다고 했는지를 못 댄다"
         )
 
-    status = landed[0][0] if landed else "PROPOSED"
+    status = next(
+        (one for one, _ in _STATUS_PRECEDENCE if one in landed),
+        "PROPOSED",
+    )
     blanked: dict[str, Any] = {}
     for decided, columns in DECISION_DETAIL_COLUMNS.items():
-        if decided == status:
+        if decided in landed:
+            # ★ 그날 **실제로 일어난** 결정의 칸은 남긴다 — 실행된 제안의 승인자도
+            #   그중 하나다. 상태 하나만 보고 가리면 그 사실이 사라진다.
             continue
-        blanked.update(dict.fromkeys(columns))
+        blanked.update({name: _BLANK_VALUES.get(name) for name in columns})
     return replace(row, status=status, **blanked)
 
 
@@ -647,6 +726,122 @@ def transition_proposal(
             params,
         )
         return cursor.rowcount
+
+
+def record_execution_outcome(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    proposal_id: str,
+    as_of: date,
+    executed_by: str,
+    executed: bool,
+    result: Mapping[str, Any] | None = None,
+    failure_code: str | None = None,
+    failure_reason: str | None = None,
+) -> int:
+    """실행 결과를 적는다. :returns: **바뀐 행 수** (0 이면 이미 `APPROVED` 가 아니다).
+
+    🔴 **`WHERE status = 'APPROVED'` 가 이 함수의 심장이다.** 두 worker 가 동시에 같은
+       제안을 실행해도 이 `UPDATE` 는 한 번만 먹는다 — 늦은 쪽은 `0` 을 받고, 그때
+       무엇을 할지는 서비스가 정한다 (§28 · §55).
+
+    ⚠️ **여기서 업무 표를 안 건드린다.** 실제 실행은 도메인 정본 함수가 이미 했고, 이
+       함수는 *"그 결과를 제안에 적는" 일*만 한다.
+    """
+    if executed and not (executed_by or "").strip():
+        raise ValueError("executed_by 가 비었다 — 누가 돌렸는지 못 대는 실행은 안 적는다")
+    if not executed and not (failure_code or "").strip():
+        raise ValueError("failure_code 가 비었다 — 사유 없는 실패는 «모른다» 와 구별되지 않는다")
+
+    assignments = sql.SQL(
+        """
+        status = 'EXECUTED',
+        executed_as_of = %(as_of)s,
+        executed_by = %(actor)s,
+        execution_result_json = %(result)s::jsonb
+        """
+    ) if executed else sql.SQL(
+        """
+        status = 'FAILED',
+        failed_as_of = %(as_of)s,
+        executed_by = %(actor)s,
+        failure_code = %(failure_code)s,
+        failure_reason = %(failure_reason)s
+        """
+    )
+    params: dict[str, Any] = {
+        "as_of": as_of,
+        "actor": executed_by,
+        "sim": sim_run_id,
+        "proposal_id": proposal_id,
+    }
+    if executed:
+        params["result"] = _dumps(dict(result or {}))
+    else:
+        params["failure_code"] = failure_code
+        params["failure_reason"] = failure_reason
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {schema}.logistics_action_proposals
+                   SET {assignments}, updated_at = now()
+                 WHERE sim_run_id = %(sim)s
+                   AND proposal_id = %(proposal_id)s
+                   AND status = 'APPROVED'
+                """
+            ).format(schema=_schema(), assignments=assignments),
+            params,
+        )
+        return cursor.rowcount
+
+
+def accept_exception_risk(
+    conn: Any, *, sim_run_id: str, exception_id: str, as_of: date
+) -> int:
+    """위험 수용을 Exception 에 적는다. :returns: 바뀐 행 수.
+
+    🔴 **닫지 않는다.** `status` 를 안 건드린다 — 위험을 안고 가기로 한 것이지 조건이
+       사라진 것이 아니다 (상세설계 §7.1 F). 재탐지는 계속 돈다.
+
+    🔴 **처음 수용한 날을 지킨다** (`COALESCE`). 두 번째 실행이 첫 날을 덮으면
+       *"언제부터 이 위험을 안고 갔나"* 가 사라진다 — `proposed_as_of` 와 같은 규율이고,
+       같은 제안을 두 번 실행해도 결과가 같게 만든다.
+
+    ⚠️ 이미 닫힌(`RESOLVED` · `DISMISSED`) 문제에는 안 적는다 — 그 사실을 `0` 으로 낸다.
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {schema}.logistics_exceptions
+                   SET risk_accepted_as_of = COALESCE(risk_accepted_as_of, %(as_of)s),
+                       updated_at = now()
+                 WHERE sim_run_id = %(sim)s
+                   AND exception_id = %(exception)s
+                   AND status IN ('OPEN', 'PROPOSED')
+                """
+            ).format(schema=_schema()),
+            {"as_of": as_of, "sim": sim_run_id, "exception": exception_id},
+        )
+        return cursor.rowcount
+
+
+def exception_risk_accepted_as_of(
+    conn: Any, *, sim_run_id: str, exception_id: str
+) -> date | None:
+    """**되읽기용.** 위험 수용이 실제로 표에 적혔나 (Verify · §38 · §47)."""
+    rows = _rows(
+        conn,
+        sql.SQL(
+            "SELECT risk_accepted_as_of FROM {schema}.logistics_exceptions"
+            " WHERE sim_run_id = %(sim)s AND exception_id = %(exception)s"
+        ).format(schema=_schema()),
+        {"sim": sim_run_id, "exception": exception_id},
+    )
+    return rows[0]["risk_accepted_as_of"] if rows else None
 
 
 def mark_exception_proposed(
