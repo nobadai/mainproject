@@ -58,7 +58,9 @@ __all__ = [
     "TRACE_FIELDS",
     "InvestigationStateConflict",
     "PersistedInvestigation",
+    "investigation_row_for",
     "run_and_persist_investigation",
+    "same_investigation_audit",
     "save_investigation",
     "snapshot_investigation_result",
     "snapshot_tool_trace",
@@ -195,8 +197,18 @@ def snapshot_investigation_result(result: InvestigationResult) -> Mapping[str, A
     }
 
 
-def _row_for(result: InvestigationResult, *, investigation_id: str) -> InvestigationRow:
-    """결과 하나를 행 하나로. 🔴 **여기서 값을 만들지 않는다** — 전부 옮기기만 한다."""
+def investigation_row_for(
+    result: InvestigationResult, *, investigation_id: str
+) -> InvestigationRow:
+    """결과 하나를 행 하나로. 🔴 **여기서 값을 만들지 않는다** — 전부 옮기기만 한다.
+
+    ★ **공개 helper 다** — 저장하는 쪽(`save_investigation`)과, 저장된 조사가 정말 이
+      결과의 저장본인지 **확인하는 쪽**(`proposal_service`)이 **같은 함수**를 지나야
+      한다. 확인하는 쪽이 자기 직렬화를 따로 적으면 두 규칙이 조용히 갈라지고, 그러면
+      «다르다» 가 실제 차이인지 직렬화 차이인지 아무도 못 댄다.
+
+    🔴 **순수 함수다** — DB 도 Tool 도 LLM 도 안 부른다.
+    """
     return InvestigationRow(
         investigation_id=investigation_id,
         sim_run_id=result.sim_run_id,
@@ -228,7 +240,7 @@ def save_investigation(
         *"아까 그 저장이 들어갔는지 모르겠다"* 를 위한 것이다.
     """
     identifier = investigation_id or repository.new_investigation_id()
-    row = _row_for(result, investigation_id=identifier)
+    row = investigation_row_for(result, investigation_id=identifier)
     try:
         repository.insert_investigation(conn, row=row)
         conn.commit()
@@ -270,7 +282,7 @@ def _settle_after_race(
             f"{row.investigation_id} 저장이 부딪혔는데 그 행을 다시 못 읽었다"
             " — 무엇과 부딪혔는지 못 대는 채로 «저장됐다» 고 답하지 않는다",
         )
-    if not _same_audit(stored, row):
+    if not same_investigation_audit(stored, row):
         raise InvestigationStateConflict(
             INVESTIGATION_PAYLOAD_CONFLICT,
             f"{row.investigation_id} 로 **다른 내용의** 조사 기록이 이미 있다"
@@ -286,8 +298,20 @@ def _settle_after_race(
     )
 
 
-def _same_audit(stored: InvestigationRow, fresh: InvestigationRow) -> bool:
-    """같은 저장 시도인가. 🔴 **감사에 실린 모든 칸이 같아야 한다.**
+def same_investigation_audit(stored: InvestigationRow, fresh: InvestigationRow) -> bool:
+    """두 감사 기록이 **같은 조사 실행**인가. 🔴 실린 칸이 전부 같아야 한다.
+
+    ```text
+    저장 재시도 판정   같은 ID 로 들어온 두 번째 저장이 같은 내용인가 (§36)
+    조사 연결 검증     제안이 가리키는 조사가 **이 결과의 저장본**인가
+    ```
+
+    ★ **두 질문이 같은 함수를 지난다.** 직렬화(`investigation_row_for`)와 비교를 한 벌로
+      두어야 «다르다» 가 실제 차이라고 말할 수 있다.
+
+    ⚠️ DB 에서 돌아온 JSONB 와 파이썬 snapshot 을 그대로 비교하면 `tuple` ↔ `list` ·
+       `date` ↔ 문자열 때문에 **거짓 «다름»** 이 난다. 그래서 비교 직전에 `jsonable` 로
+       한 번 더 낮춘다 — 값을 바꾸는 것이 아니라 **같은 모양으로 세우는** 것이다.
 
     ★ `created_at` 은 비교에 안 들어간다 — 애초에 행에 안 싣는다(벽시계다).
     """

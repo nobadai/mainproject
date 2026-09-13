@@ -19,8 +19,14 @@
 --               └── Investigation C ── Proposal B
 --
 --   Exception : Investigation = 1:N     같은 문제를 여러 번 조사할 수 있다
---   Investigation : Proposal   = 1:0..1  조사했다고 늘 제안이 나오지는 않는다
+--   Investigation : Proposal   = 1:0..1  조사했다고 늘 제안이 나오지는 않고,
+--                                        났다면 **하나**다
 --   ```
+--
+--   🔴 **«0..1» 의 1 을 DB 가 지킨다** (`uq_logistics_action_proposals_investigation`).
+--      한 조사는 **한 번 끝난 판단**이고 그 판단이 고른 대응안은 하나다
+--      (`recommended_index` 하나). 그 조사로 제안을 둘 만들 수 있으면, 끝난 판단 하나가
+--      승인 대상 둘을 낳는다 — 새 안이 필요하면 **새 조사**를 돌려야 한다.
 --
 -- 🔴 **`investigation_id` 가 드디어 가리킬 곳을 얻었다** (Commit 7). Commit 5 는 그
 --    칸을 NULL·FK 없음으로 두었다 — 조사가 DB 에 안 남던 때라 가리킬 행이 없어서다.
@@ -388,7 +394,11 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     sim_run_id            TEXT NOT NULL,
     exception_id          TEXT NOT NULL,
     -- 🔴 **이 제안을 낸 조사** (§3 · Commit 7). 아래 복합 FK 가 «같은 실행 · 같은
-    --    문제의» 조사만 가리키게 한다.
+    --    문제의» 조사만 가리키게 하고, 부분 유일 인덱스가 **한 조사 한 제안**을 지킨다.
+    -- ⚠️ **FK 가 못 막는 것이 하나 있다.** 같은 문제를 두 번 조사하면 `INV-A` 와 `INV-B`
+    --    가 나란히 서고 둘은 실행도 문제도 같다 — 그래서 «A 의 ID 에 B 의 결과» 를 매다는
+    --    호출은 FK 를 통과한다. 그 자리는 응용(`proposal_service._check_investigation`)이
+    --    저장된 조사 snapshot 과 넘어온 결과를 **대조해서** 막는다.
     -- ⚠️ **nullable 이다.** 손으로 세운 제안과 Commit 5 시절의 기존 행은 가리킬 조사가
     --    없다 — NOT NULL 로 막으면 그 행들이 통째로 불법이 된다. NULL 이면 복합 FK 도
     --    검사하지 않는다 (MATCH SIMPLE).
@@ -600,6 +610,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_logistics_action_proposals_live
     ON haetdeul.logistics_action_proposals (sim_run_id, exception_id)
     WHERE status IN ('PROPOSED', 'APPROVED');
 
+-- 🔴 **한 조사가 낸 대응안은 하나다** (Commit 7 보정 · 상세설계 §11).
+--    ⚠️ 일반 `UNIQUE (investigation_id)` 가 아니라 **부분** 유일 인덱스인 이유: 손으로
+--       세운 제안은 `investigation_id` 가 NULL 이고 그런 행은 여럿이어야 한다. (PostgreSQL
+--       의 UNIQUE 도 NULL 을 서로 다르게 보지만, 조건을 적어 두면 «NULL 은 예외» 가
+--       우연이 아니라 **의도**라고 읽힌다.)
+--
+--    🔴 **끝난 제안도 자리를 계속 차지한다.** `previous_proposal_id` 처럼 지워지는 칸이
+--       아니라, 제안이 `REJECTED` · `EXPIRED` · `SUPERSEDED` 가 돼도 «그 조사가 이 제안을
+--       냈다» 는 사실은 남기 때문이다 — 그래서 거절된 뒤 같은 조사로 새 제안을 세우는
+--       길이 여기서 닫힌다.
+--
+--    ⚠️ **기존 DB 에 이미 중복이 있으면 이 문장이 큰 소리로 실패한다. 그것이 맞다** —
+--       조용히 하나를 NULL 로 만들거나 지우지 않는다. 먼저 이렇게 확인한다:
+--
+--       SELECT investigation_id, count(*)
+--       FROM haetdeul.logistics_action_proposals
+--       WHERE investigation_id IS NOT NULL
+--       GROUP BY investigation_id HAVING count(*) > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_logistics_action_proposals_investigation
+    ON haetdeul.logistics_action_proposals (investigation_id)
+    WHERE investigation_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_logistics_action_proposals_run_status
     ON haetdeul.logistics_action_proposals (sim_run_id, status);
 
@@ -798,7 +830,9 @@ COMMENT ON CONSTRAINT ck_logistics_action_proposals_approval_provenance
     '🔴 승인에는 반드시 사람과 날이 있다 — **실행이 상태를 옮긴 뒤에도.** status 가 APPROVED 일 때만 보는 제약은 EXECUTED/FAILED 로 넘어간 순간 «누가 승인했나» 가 비어도 통과시킨다.';
 COMMENT ON CONSTRAINT logistics_action_proposals_investigation_axis_fkey
     ON haetdeul.logistics_action_proposals IS
-    '🔴 대응안은 **같은 실행 · 같은 문제를 조사한** 기록만 가리킨다 (Commit 7). 없는 조사 ID · RUN-B 의 조사 · EX-B 의 조사를 전부 막는다. ⚠️ investigation_id 가 NULL 이면 검사하지 않는다(MATCH SIMPLE) — 손으로 세운 제안에는 가리킬 조사가 없다.';
+    '🔴 대응안은 **같은 실행 · 같은 문제를 조사한** 기록만 가리킨다 (Commit 7). 없는 조사 ID · RUN-B 의 조사 · EX-B 의 조사를 전부 막는다. ⚠️ investigation_id 가 NULL 이면 검사하지 않는다(MATCH SIMPLE) — 손으로 세운 제안에는 가리킬 조사가 없다. ⚠️ 같은 실행·같은 문제의 **다른 조사**는 이 FK 가 못 막는다 — 그 대조는 proposal_service._check_investigation 이 저장된 snapshot 으로 한다.';
+COMMENT ON INDEX haetdeul.uq_logistics_action_proposals_investigation IS
+    '🔴 한 조사가 낸 대응안은 **최대 하나다** (Investigation : Proposal = 1:0..1). 한 조사는 한 번 끝난 판단이고 그 판단이 고른 안은 하나다 — 새 안이 필요하면 새 조사를 돌린다. ⚠️ 끝난 제안(REJECTED·EXPIRED·SUPERSEDED)도 자리를 계속 차지한다. investigation_id 가 NULL 인 수동 제안은 여럿 허용된다.';
 COMMENT ON CONSTRAINT logistics_action_proposals_exception_axis_fkey
     ON haetdeul.logistics_action_proposals IS
     '🔴 대응안은 **같은 실행의** 문제만 가리킨다. 홑 FK 둘(sim_run_id / exception_id)은 각자 자기 칸만 보므로 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 못 막는다.';

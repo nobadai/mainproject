@@ -35,6 +35,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from app.logistics.agent import investigation_repository, investigation_service
 from app.logistics.agent import proposals as repository
 from app.logistics.agent.investigation import (
     ACTION_DECISION_OWNERS,
@@ -59,6 +60,9 @@ __all__ = [
     "EXCEPTION_NOT_LIVE",
     "IMPACT_INFEASIBLE",
     "IMPACT_MISSING",
+    "INVESTIGATION_ALREADY_USED",
+    "INVESTIGATION_NOT_FOUND",
+    "INVESTIGATION_RESULT_MISMATCH",
     "LIVE_PROPOSAL_EXISTS",
     "NO_RECOMMENDED_OPTION",
     "OPTION_REJECTED",
@@ -118,6 +122,15 @@ EVIDENCE_FACTS_UNAVAILABLE = "EVIDENCE_FACTS_UNAVAILABLE"
 SUPERSEDE_TARGET_MISMATCH = "SUPERSEDE_TARGET_MISMATCH"
 #: 🔴 승인하려는데 **그 문제가 이미 다른 상태다.** 사람이 보던 화면이 낡았다.
 STALE_PROPOSAL = "STALE_PROPOSAL"
+
+#: 🔴 가리키라고 준 조사가 **DB 에 없다.** 저장되지 않은 조사에 제안을 매달지 않는다.
+INVESTIGATION_NOT_FOUND = "INVESTIGATION_NOT_FOUND"
+#: 🔴 그 조사는 **이 결과의 저장본이 아니다.** 축(실행·문제)은 맞는데 내용이 다르다 —
+#:    복합 FK 가 통과시키는 바로 그 자리다.
+INVESTIGATION_RESULT_MISMATCH = "INVESTIGATION_RESULT_MISMATCH"
+#: 🔴 그 조사는 **이미 제안 하나를 냈다.** 조사 하나에 제안은 최대 하나다 — 새 안이
+#:    필요하면 새 조사를 돌려야 한다. ⚠️ 그 제안이 끝났는지(거절·만료)와 무관하다.
+INVESTIGATION_ALREADY_USED = "INVESTIGATION_ALREADY_USED"
 #: 🔴 이전 제안이 끝난 날보다 **앞선 날짜**로 새 제안을 세우려 한다.
 PROPOSAL_HISTORY_CONFLICT = "PROPOSAL_HISTORY_CONFLICT"
 
@@ -531,11 +544,13 @@ def create_proposal(
     ① 어떤 후보인가        select_proposal_option (순수)
     ② 누가 결정하나        🔴 ACTION_DECISION_OWNERS 에서 **다시 계산** (§49)
     ③ 인자가 맞나          Commit 4 의 argument model 그대로 (§50)
-    ④ 문제가 살아 있나      RESOLVED · DISMISSED 에는 안 세운다
-    ⑤ 이미 있나            같은 지문이면 재시도 · 다른 안이면 안 세운다 (§47 · §48)
-    ⑥ 대체 대상이 맞나      🔴 **이 문제의 살아 있는 제안**인가 — 남의 문제를 안 닫는다
-    ⑦ 날짜가 앞서지 않나    🔴 이전 제안이 끝난 날보다 **뒤**여야 한다
-    ⑧ 한 트랜잭션          INSERT + Exception OPEN→PROPOSED  ← 반쪽 상태를 안 남긴다
+    ④ 그 조사가 맞나        🔴 **저장된 조사가 이 결과의 저장본인가** ← 모든 쓰기보다 앞
+    ⑤ 문제가 살아 있나      RESOLVED · DISMISSED 에는 안 세운다
+    ⑥ 그 조사를 이미 썼나    🔴 조사 하나에 제안은 **최대 하나**다
+    ⑦ 이미 있나            같은 지문이면 재시도 · 다른 안이면 안 세운다 (§47 · §48)
+    ⑧ 대체 대상이 맞나      🔴 **이 문제의 살아 있는 제안**인가 — 남의 문제를 안 닫는다
+    ⑨ 날짜가 앞서지 않나    🔴 이전 제안이 끝난 날보다 **뒤**여야 한다
+    ⑩ 한 트랜잭션          INSERT + Exception OPEN→PROPOSED  ← 반쪽 상태를 안 남긴다
     ```
 
     🔴 **`decision_owner` 를 모델 값으로 저장하지 않는다.** 누가 결정하는가는 역할 경계
@@ -547,9 +562,11 @@ def create_proposal(
 
     :param as_of: 시뮬레이션 영업일. 🔴 `date.today()` 를 안 쓴다 (§20).
     :param investigation_id: 이 제안을 낸 조사 (`logistics_investigations` · Commit 7).
-        🔴 **주면 DB 가 «같은 실행 · 같은 문제의» 조사인지 검사한다** — 없는 ID · 남의
-        실행 · 남의 문제의 조사는 복합 FK 가 거부한다. 안 주면 `None` 이고(손으로 세운
-        제안) 그때는 FK 가 검사하지 않는다.
+        🔴 **주면 그 조사가 «이 결과의 저장본» 인지 실제로 대조한다.** 복합 FK 는
+        «같은 실행 · 같은 문제» 까지만 보므로, 같은 문제를 두 번 조사한 뒤 **A 의 ID 에
+        B 의 결과**를 매다는 호출을 못 막는다 — 그러면 장부가 *"이 대응안은 어느 조사에서
+        나왔나"* 에 **거짓으로 답한다.** 안 주면 `None` 이고(손으로 세운 제안) 그때는
+        대조도 FK 도 하지 않는다.
     :param supersedes: 이 제안이 **대체할** 살아 있는 제안 (§29). 주면 그것을 먼저
         `SUPERSEDED` 로 닫고 새 행이 `previous_proposal_id` 로 가리킨다.
         🔴 **반드시 이 조사의 Exception 것이어야 한다** — 아니면 아무것도 안 쓰고
@@ -591,6 +608,11 @@ def create_proposal(
         )
     parameters = checked.parameters
 
+    # 🔴 **어떤 쓰기보다도 먼저** 조사를 대조한다. 뒤로 밀면 `_supersede` 가 남의 제안을
+    #    먼저 닫아 놓고 나서 «그 조사가 아니다» 를 알게 된다.
+    if investigation_id is not None:
+        _check_investigation(conn, result=result, investigation_id=investigation_id)
+
     status = repository.exception_status(
         conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
     )
@@ -613,6 +635,15 @@ def create_proposal(
         action_type=option.action,
         parameters=parameters,
     )
+    # 🔴 **조사 재사용 판정이 «살아 있는 제안» 판정보다 먼저다.** 아래 반복문은 살아
+    #    있는 제안만 보므로, 그 조사의 제안이 이미 **거절되어 끝났으면** 아무것도 못 보고
+    #    새 행을 만든다 — 끝난 판단 하나로 제안을 둘 만드는 자리가 거기다.
+    settled = _settle_investigation_reuse(
+        history, key=key, investigation_id=investigation_id
+    )
+    if settled is not None:
+        return settled
+
     for existing in (one for one in history if one.live):
         if existing.proposal_id == supersedes:
             continue
@@ -683,13 +714,95 @@ def create_proposal(
         # 🔴 **동시에 들어온 같은 요청**이었을 수 있다. 그때는 실패가 아니라 재시도다 —
         #    다만 «무엇과 부딪혔는지» 는 예외 이름이 아니라 **다시 읽어서** 정한다.
         if isinstance(error, _ConcurrentInsert) or repository.is_unique_violation(error):
-            return _settle_after_race(conn, result=result, key=key)
+            return _settle_after_race(
+                conn, result=result, key=key, investigation_id=investigation_id
+            )
         raise
     return ProposalOutcome(status="CREATED", proposal=row)
 
 
+def _check_investigation(
+    conn: Any, *, result: InvestigationResult, investigation_id: str
+) -> None:
+    """가리키라고 준 조사가 **정말 이 결과의 저장본**인가. 아니면 아무것도 안 쓰고 멈춘다.
+
+    ```text
+    복합 FK 가 막는 것     없는 ID · 남의 실행의 조사 · 남의 문제의 조사
+    FK 가 **못** 막는 것   같은 실행 · 같은 문제의 **다른 조사**   ← 여기를 막는다
+    ```
+
+    🔴 **같은 문제를 두 번 조사하는 것은 정상이다** (§35). 그래서 `INV-A`(우선판매로 끝난
+       조사)와 `INV-B`(폐기로 끝난 조사)가 나란히 설 수 있고, 둘은 실행도 문제도 같다 —
+       호출자가 `result=B` 를 들고 `investigation_id="INV-A"` 라고 적어도 **FK 는 통과한다.**
+       그러면 제안의 action·parameters·impact·근거는 B 에서 왔는데 장부에는 A 라고 적히고,
+       *"이 대응안은 어느 조사에서 나왔나"* 에 DB 가 **거짓으로 답하게 된다.**
+
+    ★ **감사 저장과 같은 함수로 대조한다** (`investigation_row_for` ·
+      `same_investigation_audit`). 제안 전용 지문을 새로 셈하지 않는다 — 규칙이 두 벌이면
+      «다르다» 가 실제 차이인지 직렬화 차이인지 아무도 못 댄다.
+
+    🔴 **Tool 도 LLM 도 안 부른다.** 저장된 감사 행을 한 번 읽을 뿐이다.
+    """
+    stored = investigation_repository.select_investigation(
+        conn, sim_run_id=result.sim_run_id, investigation_id=investigation_id
+    )
+    if stored is None:
+        raise ProposalStateConflict(
+            INVESTIGATION_NOT_FOUND,
+            f"{investigation_id} 는 이 실행({result.sim_run_id})에 저장된 조사가 아니다"
+            " — 저장되지 않은 조사에 제안을 매달지 않는다",
+        )
+    fresh = investigation_service.investigation_row_for(
+        result, investigation_id=investigation_id
+    )
+    if not investigation_service.same_investigation_audit(stored, fresh):
+        raise ProposalStateConflict(
+            INVESTIGATION_RESULT_MISMATCH,
+            f"{investigation_id} 에 저장된 조사와 넘어온 조사 결과가 다르다"
+            f" (문제 {result.exception_id} · {result.as_of}) — 같은 실행·같은 문제의"
+            " **다른 조사**를 가리키고 있다",
+        )
+
+
+def _settle_investigation_reuse(
+    history: Sequence[ProposalRow], *, key: str, investigation_id: str | None
+) -> ProposalOutcome | None:
+    """그 조사를 이미 쓴 제안이 있나. **조사 하나에 제안은 최대 하나다.**
+
+    ```text
+    그 조사를 쓴 제안이 없다           →  None            계속 진행한다
+    살아 있고 지문이 같다              →  REUSED          같은 요청의 재시도다
+    그 밖(끝났다 · 다른 안이다)        →  🔴 ALREADY_USED  새 조사를 돌려야 한다
+    ```
+
+    🔴 **끝난 제안도 «썼다» 이다** (§24). `INV-A → PRP-A → REJECTED` 뒤에 다시 `INV-A` 로
+       `PRP-B` 를 만들면, **한 번 끝난 판단 하나가 승인 대상 둘을 낳는다.** 거절은 그
+       조사의 결론이 받아들여지지 않았다는 뜻이지 조사를 안 한 것이 아니다 — 새 안이
+       필요하면 **새 조사**를 돌린다.
+
+    ⚠️ 그래서 «살아 있는 제안» 목록이 아니라 **이력 전체**를 본다.
+
+    ★ 재시도(같은 안을 한 번 더 보냄)만 예외다 — 그때 돌려주는 것은 **이미 선 그 행**이고
+      새 행은 안 만든다. 기존 멱등 계약(`REUSED`) 그대로다.
+    """
+    if investigation_id is None:
+        return None
+    earlier = next(
+        (one for one in history if one.investigation_id == investigation_id), None
+    )
+    if earlier is None:
+        return None
+    if earlier.live and earlier.proposal_key == key:
+        return ProposalOutcome(status="REUSED", reason="", proposal=earlier)
+    raise ProposalStateConflict(
+        INVESTIGATION_ALREADY_USED,
+        f"{investigation_id} 는 이미 {earlier.proposal_id}({earlier.status}) 를 냈다"
+        " — 조사 하나에 대응안은 하나다. 새 안이 필요하면 새 조사를 돌린다",
+    )
+
+
 def _settle_after_race(
-    conn: Any, *, result: InvestigationResult, key: str
+    conn: Any, *, result: InvestigationResult, key: str, investigation_id: str | None = None
 ) -> ProposalOutcome:
     """부딪힌 뒤 **롤백하고 다시 읽어** 무슨 일이었는지로 답을 정한다.
 
@@ -705,7 +818,22 @@ def _settle_after_race(
 
     ⚠️ PostgreSQL 은 제약 위반 뒤 트랜잭션이 abort 상태라 **롤백 없이는 다시 못 읽는다.**
        부르는 쪽이 이미 롤백한 뒤에 들어온다.
+
+    🔴 **부딪힌 자리가 둘이다** (Commit 7 보정). «한 문제에 살아 있는 제안 하나» 말고
+       «한 조사에 제안 하나» 로도 부딪힌다 — 같은 조사로 두 worker 가 동시에 들어온
+       경우다. 그래서 조사 축을 **먼저** 가린다: 조사 축 충돌을 «살아 있는 제안이 있다»
+       로 답하면 원인이 흐려지고, 무엇보다 그 조사의 제안이 이미 끝난 경우를 못 댄다.
     """
+    if investigation_id is not None:
+        settled = _settle_investigation_reuse(
+            repository.select_proposals(
+                conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
+            ),
+            key=key,
+            investigation_id=investigation_id,
+        )
+        if settled is not None:
+            return settled
     for existing in repository.live_proposals_for(
         conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
     ):

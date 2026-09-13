@@ -5,6 +5,8 @@
 감사 1        wrapper 를 불러야만 행이 서는가
 연결          제안이 «자기를 낳은 조사» 를 가리키는가
 축            DB 가 «남의 실행 · 남의 문제 · 없는 조사» 를 거부하는가
+동일성        FK 가 통과시키는 «같은 축의 다른 조사» 를 응용이 막는가
+1:0..1        한 조사가 대응안을 둘 내는가
 재조사        같은 문제를 같은 날 두 번 조사하면 두 행인가
 실패 감사     NOT_FOUND · TOOL_FAILED · TIMEOUT · LLM_FAILED 도 남는가
 번지지 않음   조사를 적었다고 Exception · 재고 · 판매가 움직이는가
@@ -47,6 +49,7 @@ from app.logistics.agent.investigation import (
     InvestigationReport,
     InvestigationStep,
 )
+from app.logistics.agent.proposal_service import ProposalStateConflict
 from app.logistics.agent.schemas import (
     FRESHNESS_PRESSURE,
     ExceptionEvidence,
@@ -339,15 +342,42 @@ def _proposal_sql(
     sim_run_id: str = SIM,
     exception_id: str = EXC,
     investigation_id: str | None,
+    status: str = "PROPOSED",
 ) -> str:
+    """⚠️ `status='REJECTED'` 는 «살아 있는 제안 하나» 인덱스를 비켜 가려고 쓴다 —
+    그래야 **조사 축 인덱스**가 막는지를 따로 잴 수 있다.
+    """
     pointer = "NULL" if investigation_id is None else f"'{investigation_id}'"
+    closed = status == "REJECTED"
+    columns = ", rejected_as_of, rejected_by, rejection_reason" if closed else ""
+    values = f", '{D5}', '{OPERATOR}', '지금은 아니다'" if closed else ""
     return f"""INSERT INTO {TMP_SCHEMA}.logistics_action_proposals (
             proposal_id, sim_run_id, exception_id, investigation_id, proposal_key,
             action_type, decision_owner, parameters_json, impact_json,
-            evidence_refs_json, status, proposed_as_of, proposed_by
+            evidence_refs_json, status, proposed_as_of, proposed_by{columns}
         ) VALUES ('{proposal_id}', '{sim_run_id}', '{exception_id}', {pointer}, 'k',
             'ACCEPT_RISK', 'LOGISTICS', '{{}}'::jsonb, '{{}}'::jsonb, '[]'::jsonb,
-            'PROPOSED', '{D5}', '{OPERATOR}')"""
+            '{status}', '{D5}', '{OPERATOR}'{values})"""
+
+
+def _exception_status(conn: psycopg.Connection) -> str:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT status FROM {TMP_SCHEMA}.logistics_exceptions WHERE exception_id = %s",
+            (EXC,),
+        )
+        return cur.fetchone()["status"]
+
+
+def _propose(conn: psycopg.Connection, persisted: Any, **kwargs: Any) -> Any:
+    options: dict[str, Any] = {
+        "result": persisted.result,
+        "as_of": persisted.row.as_of,
+        "proposed_by": OPERATOR,
+        "investigation_id": persisted.investigation_id,
+    }
+    options.update(kwargs)
+    return proposal_service.create_proposal(conn, **options)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -847,3 +877,288 @@ class TestSimResetAxis:
             ),
             psycopg.errors.NotNullViolation,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  🔴 조사 ↔ 결과 동일성 — **FK 가 통과시키는 자리**
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestInvestigationIdentity:
+    """🔴 같은 문제를 두 번 조사하면 두 조사의 **축이 똑같다.**
+
+    ```text
+    INV-A   sim_run=SIM · exception=EXC · 우선판매 300kg 로 끝났다
+    INV-B   sim_run=SIM · exception=EXC · 우선판매 200kg 로 끝났다
+
+    create_proposal(result=B, investigation_id="INV-A")
+        복합 FK   ✅ 통과한다 (실행도 문제도 같다)
+        장부      🔴 A 라고 적히는데 내용은 B 에서 왔다
+    ```
+    """
+
+    def test_another_investigation_of_the_same_problem_is_refused(
+        self, conn: psycopg.Connection
+    ) -> None:
+        _ready(conn)
+        first = _persist(conn, finalize_fn=_report(qty_kg=300))
+        second = _persist(conn, finalize_fn=_report(qty_kg=200))
+        assert first.investigation_id != second.investigation_id
+
+        before = _snapshot(conn)
+        with pytest.raises(ProposalStateConflict) as caught:
+            _propose(conn, second, investigation_id=first.investigation_id)
+        assert caught.value.code == proposal_service.INVESTIGATION_RESULT_MISMATCH
+        # 🔴 아무것도 안 썼다.
+        assert _proposals(conn) == ()
+        assert _exception_status(conn) == "OPEN"
+        assert _snapshot(conn) == before
+        # ★ 조사 둘은 그대로 남는다 — 잘못 연결하려 한 것이 조사를 지우지 않는다.
+        assert len(_stored(conn)) == 2
+
+    def test_an_investigation_that_was_never_stored_is_refused(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 저장되지 않은 조사에 제안을 매달지 않는다 — 가리킬 행이 없다."""
+        _ready(conn)
+        result = _investigate(conn)
+        conn.rollback()
+        with pytest.raises(ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn,
+                result=result,
+                as_of=D5,
+                proposed_by=OPERATOR,
+                investigation_id="INV-never-saved",
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_NOT_FOUND
+        assert _proposals(conn) == ()
+
+    def test_the_matching_investigation_passes(self, conn: psycopg.Connection) -> None:
+        """★ 반대편도 본다 — 대조가 과하면 정상 연결이 통째로 죽는다."""
+        _ready(conn)
+        persisted = _persist(conn)
+        outcome = _propose(conn, persisted)
+        assert outcome.created
+        (proposal,) = _proposals(conn)
+        assert proposal.investigation_id == persisted.investigation_id
+
+    def test_another_runs_investigation_is_still_refused(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """★ 기존 축 방어(§28)가 그대로다 — 응용 대조가 그것을 대신하지 않는다."""
+        _ready(conn)
+        persisted = _persist(conn)
+        with pytest.raises(ProposalStateConflict) as caught:
+            _propose(conn, persisted, investigation_id="INV-elsewhere")
+        assert caught.value.code == proposal_service.INVESTIGATION_NOT_FOUND
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  🔴 한 조사에 대응안 하나 — DB 가 지킨다
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestOneInvestigationOneProposal:
+    def test_a_second_proposal_on_one_investigation_is_refused_by_the_database(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 응용을 거치지 않는 직접 SQL 도 막힌다.
+
+        ⚠️ 첫 제안을 **끝난 상태**로 둔다 — 그래야 «살아 있는 제안 하나» 인덱스가 아니라
+           **조사 축 인덱스**가 막는지를 잴 수 있다.
+        """
+        _exception(conn)
+        with conn.cursor() as cur:
+            cur.execute(_investigation_sql(investigation_id="INV-ONE"))
+            cur.execute(
+                _proposal_sql(
+                    proposal_id="PRP-ONE", investigation_id="INV-ONE", status="REJECTED"
+                )
+            )
+        conn.commit()
+
+        with pytest.raises(psycopg.errors.UniqueViolation) as caught, conn.cursor() as cur:
+            cur.execute(_proposal_sql(proposal_id="PRP-TWO", investigation_id="INV-ONE"))
+        conn.rollback()
+        # 🔴 어느 인덱스가 막았는지까지 못 박는다.
+        assert (
+            caught.value.diag.constraint_name
+            == "uq_logistics_action_proposals_investigation"
+        )
+
+    def test_proposals_without_an_investigation_are_not_folded_together(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """⚠️ 수동 제안은 `investigation_id` 가 NULL 이고 그런 행은 여럿이어야 한다."""
+        _exception(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                _proposal_sql(
+                    proposal_id="PRP-MANUAL-1", investigation_id=None, status="REJECTED"
+                )
+            )
+            cur.execute(_proposal_sql(proposal_id="PRP-MANUAL-2", investigation_id=None))
+        conn.commit()
+        assert len(_proposals(conn)) == 2
+
+    def test_after_a_rejection_the_same_investigation_cannot_be_used_again(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 §24 — 끝난 판단 하나가 승인 대상 둘을 낳지 않는다."""
+        _ready(conn)
+        persisted = _persist(conn)
+        created = _propose(conn, persisted)
+        assert created.created
+        assert created.proposal is not None
+        proposal_service.reject_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=created.proposal.proposal_id,
+            as_of=D6,
+            rejected_by=OPERATOR,
+            rejection_reason="지금은 팔지 않는다",
+        )
+        assert _exception_status(conn) == "OPEN"
+
+        with pytest.raises(ProposalStateConflict) as caught:
+            _propose(conn, persisted)
+        assert caught.value.code == proposal_service.INVESTIGATION_ALREADY_USED
+        # 🔴 새 행이 안 생겼다.
+        assert len(_proposals(conn)) == 1
+        assert _exception_status(conn) == "OPEN"
+
+    def test_a_new_investigation_reopens_the_way(self, conn: psycopg.Connection) -> None:
+        """★ 막힌 것은 **그 조사**뿐이다 — 다시 조사하면 새 제안을 세울 수 있다."""
+        _ready(conn)
+        first = _persist(conn)
+        created = _propose(conn, first)
+        assert created.proposal is not None
+        proposal_service.reject_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=created.proposal.proposal_id,
+            as_of=D6,
+            rejected_by=OPERATOR,
+            rejection_reason="지금은 팔지 않는다",
+        )
+        second = _persist(conn, as_of=D6, finalize_fn=_report(qty_kg=200))
+        outcome = _propose(conn, second)
+        assert outcome.created
+        assert len(_proposals(conn)) == 2
+
+    def test_the_same_request_is_still_a_retry(self, conn: psycopg.Connection) -> None:
+        """🔴 §23 · §51 — 새 인덱스 때문에 raw UniqueViolation 으로 회귀하지 않는다."""
+        _ready(conn)
+        persisted = _persist(conn)
+        first = _propose(conn, persisted)
+        assert first.created
+        again = _propose(conn, persisted)
+        assert again.status == "REUSED"
+        assert again.proposal is not None
+        assert first.proposal is not None
+        assert again.proposal.proposal_id == first.proposal.proposal_id
+        assert len(_proposals(conn)) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  🔴 경합 — 같은 조사로 둘이 동시에 들어와도 제안은 하나
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestConcurrentInvestigationUse:
+    """★ 커넥션 **둘**로 잰다. 이 파일의 임시 스키마는 커밋돼 있어 남의 커넥션에도 보인다.
+
+    «먼저 읽고 나중에 쓴다» 는 순간은 첫 목록 조회 하나만 낡게 만들어 고정한다 —
+    스레드로 재면 검사가 흔들린다.
+    """
+
+    def _stale_history(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        """첫 제안 목록 조회만 **경합 전 값**(빈 목록)으로 돌리고 INSERT 시도를 센다.
+
+        🔴 **시도 횟수를 세는 것이 중요하다.** 안 세면, 낡은 목록을 못 만들었을 때 중복
+           판정이 조용히 같은 답을 내고 검사는 **경합 경로를 한 번도 안 밟은 채** 초록불이
+           된다.
+        """
+        once = [()]
+        real_select = proposal_repo.select_proposals
+        monkeypatch.setattr(
+            proposal_repo,
+            "select_proposals",
+            lambda *a, **k: once.pop() if once else real_select(*a, **k),
+        )
+        attempts: list[Any] = []
+        real_insert = proposal_repo.insert_proposal
+
+        def counted(connection: Any, *, row: Any) -> Any:
+            attempts.append(row.proposal_id)
+            return real_insert(connection, row=row)
+
+        monkeypatch.setattr(proposal_repo, "insert_proposal", counted)
+        return attempts
+
+    def test_two_workers_on_one_investigation_leave_one_proposal(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _ready(conn)
+        persisted = _persist(conn)
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = _propose(rival, persisted)
+            assert winner.created
+            assert winner.proposal is not None
+
+            attempted = self._stale_history(monkeypatch)
+            outcome = _propose(conn, persisted)
+        finally:
+            rival.rollback()
+            rival.close()
+
+        # 🔴 **실제로 부딪혔다** — 중복 판정에서 미리 걸린 것이 아니다.
+        assert attempted, "경합 경로를 안 지났다"
+        # 🔴 UniqueViolation 이 호출자에게 그대로 나가지 않았다.
+        assert outcome.status == "REUSED"
+        assert outcome.proposal is not None
+        assert outcome.proposal.proposal_id == winner.proposal.proposal_id
+        assert len(_proposals(conn)) == 1
+
+    def test_a_race_between_two_investigations_is_never_reused(
+        self, conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **남의 제안을 내 것이라고 답하지 않는다** — 조사가 다르면 재시도가 아니다."""
+        _ready(conn)
+        mine = _persist(conn, finalize_fn=_report(qty_kg=200))
+        theirs = _persist(conn, finalize_fn=_report(qty_kg=300))
+        rival = get_connection()
+        rival.autocommit = False
+        try:
+            winner = _propose(rival, theirs)
+            assert winner.created
+
+            attempted = self._stale_history(monkeypatch)
+            outcome = _propose(conn, mine)
+        finally:
+            rival.rollback()
+            rival.close()
+
+        assert attempted, "경합 경로를 안 지났다"
+        assert outcome.status == "SKIPPED"
+        assert outcome.reason.startswith(proposal_service.LIVE_PROPOSAL_EXISTS)
+        assert len(_proposals(conn)) == 1
+
+    def test_a_mismatch_is_not_settled_as_a_race(self, conn: psycopg.Connection) -> None:
+        """🔴 §53 — «저장된 조사와 결과가 다르다» 와 «동시에 같은 조사를 썼다» 는 다르다.
+
+        대조가 **INSERT 보다 먼저**라 mismatch 는 경합 복구 경로에 아예 닿지 않는다.
+        """
+        _ready(conn)
+        first = _persist(conn, finalize_fn=_report(qty_kg=300))
+        second = _persist(conn, finalize_fn=_report(qty_kg=200))
+        assert _propose(conn, first).created
+
+        with pytest.raises(ProposalStateConflict) as caught:
+            _propose(conn, second, investigation_id=first.investigation_id)
+        # 🔴 «이미 썼다» 도 «부딪혔다» 도 아니고 **다른 조사다**.
+        assert caught.value.code == proposal_service.INVESTIGATION_RESULT_MISMATCH
+        assert len(_proposals(conn)) == 1

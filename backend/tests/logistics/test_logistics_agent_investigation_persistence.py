@@ -25,9 +25,15 @@ from typing import Any, Self
 
 import pytest
 
+from app.logistics.agent import (
+    investigation_repository,
+    proposal_service,
+    proposals,
+    tool_dispatch,
+    tools,
+)
 from app.logistics.agent import investigation_repository as repository
 from app.logistics.agent import investigation_service as service
-from app.logistics.agent import proposal_service, proposals, tool_dispatch, tools
 from app.logistics.agent.investigation import (
     ACTION_DECISION_OWNERS,
     EvaluatedOption,
@@ -36,6 +42,7 @@ from app.logistics.agent.investigation import (
     ToolCallRecord,
     ToolCallStatus,
 )
+from app.logistics.agent.proposals import ProposalRow
 from app.logistics.agent.tools import ActionImpact, CapacityContext, LotFact, LotView
 from app.logistics.llm.schemas import LLMStatus
 from app.master.sim_run_open import AXIS_COLUMN
@@ -51,6 +58,14 @@ D5 = D1 + timedelta(days=4)
 DDL = (
     Path(__file__).resolve().parents[3] / "database" / "40_logistics_agent_schema.sql"
 ).read_text(encoding="utf-8")
+
+#: «이 검사는 안 준다» 를 «저장본이 없다» 와 가르는 자리.
+_MISSING = object()
+
+
+def _must_not_look_up(*_: Any, **__: Any) -> Any:
+    raise AssertionError("조사를 안 댔는데 조사 기록을 찾아봤다")
+
 
 #: 🔴 **큰 Tool 답 안에만 있는 값.** 이 문자열이 저장 payload 어디에도 안 나와야 한다 —
 #:    키 이름(`answer`)만 보면 칸 이름이 바뀌는 날 검사가 조용히 통과한다.
@@ -194,6 +209,7 @@ def _result(
     llm_status: LLMStatus = "SUCCESS",
     llm_error_kind: str | None = None,
     tool_calls: tuple[ToolCallRecord, ...] | None = None,
+    summary: str = "잔량 500kg 중 미확정 500kg 이다.",
 ) -> InvestigationResult:
     return InvestigationResult(
         sim_run_id=SIM,
@@ -202,7 +218,7 @@ def _result(
         finish_reason=finish_reason,
         llm_status=llm_status,
         llm_error_kind=llm_error_kind,  # type: ignore[arg-type]
-        summary="잔량 500kg 중 미확정 500kg 이다.",
+        summary=summary,
         findings=("신선도가 2일 남았다",),
         missing_or_uncertain=("예약 축의 관측일을 못 댄다",),
         options=(_option(),) if options is None else options,
@@ -763,23 +779,76 @@ class TestSchemaContract:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _stub_proposal_repository(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    stored: list[Any] = []
+def _proposal(**overrides: Any) -> ProposalRow:
+    """이미 서 있는 제안 한 줄. 🔴 진짜 타입을 쓴다 — 칸 이름이 곧 계약이다."""
+    fields: dict[str, Any] = {
+        "proposal_id": f"PRP-{EXC}-1",
+        "sim_run_id": SIM,
+        "exception_id": EXC,
+        "investigation_id": INV,
+        "proposal_key": proposals.proposal_key_for(
+            sim_run_id=SIM,
+            exception_id=EXC,
+            action_type="SALES_PRIORITY_REQUEST",
+            parameters={"lot_id": LOT},
+        ),
+        "status": "PROPOSED",
+        "action_type": "SALES_PRIORITY_REQUEST",
+        "decision_owner": "SALES",
+        "parameters": {"lot_id": LOT},
+        "impact": {"feasibility": "FEASIBLE"},
+        "evidence_refs": (),
+        "proposed_as_of": D5,
+        "proposed_by": "operator",
+    }
+    fields.update(overrides)
+    return ProposalRow(**fields)
+
+
+def _stub_proposal_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    history: tuple[ProposalRow, ...] = (),
+    investigation: Any = _MISSING,
+) -> dict[str, list[Any]]:
+    """제안 저장소와 **조사 조회**를 함께 갈아 끼운다.
+
+    ⚠️ `investigation` 기본값은 «저장본이 없다» 가 아니라 «이 검사는 안 준다» 이다 —
+       `None` 을 기본으로 두면 *"조사가 저장돼 있지 않다"* 를 시험할 방법이 사라진다.
+    """
+    calls: dict[str, list[Any]] = {"insert": [], "mark": [], "transition": []}
     monkeypatch.setattr(proposals, "exception_status", lambda *_, **__: "OPEN")
-    monkeypatch.setattr(proposals, "select_proposals", lambda *_, **__: ())
-    monkeypatch.setattr(proposals, "next_proposal_id", lambda *_, **__: f"PRP-{EXC}-1")
+    monkeypatch.setattr(proposals, "select_proposals", lambda *_, **__: history)
+    monkeypatch.setattr(proposals, "live_proposals_for", lambda *_, **__: ())
+    monkeypatch.setattr(proposals, "next_proposal_id", lambda *_, **__: f"PRP-{EXC}-2")
     monkeypatch.setattr(
-        proposals, "insert_proposal", lambda _conn, *, row: stored.append(row) or row
+        proposals, "insert_proposal", lambda _conn, *, row: calls["insert"].append(row) or row
     )
-    monkeypatch.setattr(proposals, "mark_exception_proposed", lambda *_, **__: 1)
-    return stored
+    monkeypatch.setattr(
+        proposals, "mark_exception_proposed", lambda *_, **__: calls["mark"].append(1) or 1
+    )
+    # 🔴 **대체는 쓰기다.** 조사 대조가 이것보다 먼저인지 재려면 여기를 세야 한다.
+    monkeypatch.setattr(
+        proposals,
+        "transition_proposal",
+        lambda *_, **kwargs: calls["transition"].append(kwargs) or None,
+    )
+    stored = (
+        service.investigation_row_for(_result(), investigation_id=INV)
+        if investigation is _MISSING
+        else investigation
+    )
+    monkeypatch.setattr(
+        investigation_repository, "select_investigation", lambda *_, **__: stored
+    )
+    return calls
 
 
 class TestProposalLinkage:
     def test_the_proposal_remembers_which_investigation_made_it(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        stored = _stub_proposal_repository(monkeypatch)
+        calls = _stub_proposal_repository(monkeypatch)
         outcome = proposal_service.create_proposal(
             conn,
             result=_result(),
@@ -788,17 +857,41 @@ class TestProposalLinkage:
             investigation_id=INV,
         )
         assert outcome.created
-        assert [row.investigation_id for row in stored] == [INV]
+        assert [row.investigation_id for row in calls["insert"]] == [INV]
 
     def test_a_proposal_raised_by_hand_has_no_investigation(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """⚠️ §27 — nullable 을 유지한다. 없는 조사를 지어내 채우지 않는다."""
-        stored = _stub_proposal_repository(monkeypatch)
+        """⚠️ 🔴 nullable 을 유지한다. 없는 조사를 지어내 채우지 않는다.
+
+        ★ 조사를 안 댔으면 **대조도 안 한다** — 조회 자체가 일어나면 터지게 해 둔다.
+        """
+        calls = _stub_proposal_repository(monkeypatch, investigation=None)
+        monkeypatch.setattr(
+            investigation_repository, "select_investigation", _must_not_look_up
+        )
         proposal_service.create_proposal(
             conn, result=_result(), as_of=D5, proposed_by="operator"
         )
-        assert [row.investigation_id for row in stored] == [None]
+        assert [row.investigation_id for row in calls["insert"]] == [None]
+
+    def test_the_matching_investigation_is_looked_up_on_this_run(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 조사를 **이 실행 축으로** 찾는다 — 남의 실행 기록이 보이면 안 된다."""
+        asked: list[Any] = []
+        _stub_proposal_repository(monkeypatch)
+        row = service.investigation_row_for(_result(), investigation_id=INV)
+
+        def _looked(_conn: Any, **kwargs: Any) -> Any:
+            asked.append(kwargs)
+            return row
+
+        monkeypatch.setattr(investigation_repository, "select_investigation", _looked)
+        proposal_service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+        )
+        assert asked == [{"sim_run_id": SIM, "investigation_id": INV}]
 
     def test_the_fingerprint_does_not_change_with_the_investigation(self) -> None:
         """🔴 §76 — 조사 ID 를 지문에 섞으면 재시도를 아무것도 못 막는다."""
@@ -812,3 +905,210 @@ class TestProposalLinkage:
         source = Path(proposals.__file__).read_text(encoding="utf-8")
         body = source[source.index("def proposal_key_for(") : source.index("def next_proposal_id(")]
         assert "investigation" not in body.split('"""')[2]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  🔴 조사 ↔ 결과 대조 — **FK 가 못 막는 자리**
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 저장본과 **한 칸씩** 어긋나게 만드는 변주들. 한 칸만 달라도 다른 조사다.
+_DIVERGENCES: dict[str, dict[str, Any]] = {
+    "finish_reason": {"finish_reason": FinishReason.BUDGET_EXCEEDED},
+    "llm_status": {"llm_status": "FALLBACK"},
+    "observed_as_of": {"observed_as_of": None},
+    "tool_trace": {"tool_calls": ()},
+    "result_json": {"summary": "다른 조사가 낸 다른 요약이다."},
+}
+
+
+class TestInvestigationIdentity:
+    """🔴 **복합 FK 는 «같은 실행 · 같은 문제» 까지만 본다.**
+
+    ```text
+    INV-A   같은 문제를 조사해서 우선판매로 끝났다
+    INV-B   같은 문제를 다시 조사해서 폐기로 끝났다   ← 둘 다 정상이다 (§35)
+
+    create_proposal(result=B, investigation_id="INV-A")   → FK 통과 🔴
+    ```
+
+    그러면 장부에는 A 라고 적혔는데 action·parameters·impact·근거는 B 에서 온 제안이
+    선다 — *"이 대응안은 어느 조사에서 나왔나"* 에 DB 가 **거짓으로 답한다.**
+    """
+
+    def test_an_investigation_that_was_never_stored_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _stub_proposal_repository(monkeypatch, investigation=None)
+        with pytest.raises(proposal_service.ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_NOT_FOUND
+        assert calls["insert"] == []
+        assert calls["mark"] == []
+        assert conn.commits == 0
+
+    @pytest.mark.parametrize("field", sorted(_DIVERGENCES))
+    def test_one_different_field_is_already_another_investigation(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        """🔴 한 칸만 달라도 **다른 조사다.** 일부만 보면 그만큼 거짓이 통과한다."""
+        calls = _stub_proposal_repository(monkeypatch)
+        with pytest.raises(proposal_service.ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn,
+                result=_result(**_DIVERGENCES[field]),
+                as_of=D5,
+                proposed_by="operator",
+                investigation_id=INV,
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_RESULT_MISMATCH
+        assert calls["insert"] == []
+        assert calls["mark"] == []
+
+    def test_the_same_result_passes(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 반대편도 본다 — 대조가 과하면 정상 연결이 통째로 막힌다."""
+        calls = _stub_proposal_repository(monkeypatch)
+        outcome = proposal_service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+        )
+        assert outcome.created
+        assert len(calls["insert"]) == 1
+
+    def test_nothing_is_superseded_before_the_investigation_is_checked(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **대조가 모든 쓰기보다 먼저다.**
+
+        뒤로 밀면 `_supersede` 가 남의 제안을 먼저 닫아 놓고 나서 «그 조사가 아니다» 를
+        알게 된다 — 그 제안은 이미 잃었고, 잃었다는 사실은 어디에도 안 적힌다.
+        """
+        standing = _proposal(investigation_id=None)
+        calls = _stub_proposal_repository(monkeypatch, history=(standing,))
+        with pytest.raises(proposal_service.ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn,
+                result=_result(summary="다른 조사"),
+                as_of=D5,
+                proposed_by="operator",
+                investigation_id=INV,
+                supersedes=standing.proposal_id,
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_RESULT_MISMATCH
+        assert calls["transition"] == []
+        assert calls["insert"] == []
+        assert conn.commits == 0
+
+    def test_the_comparison_reuses_the_audit_snapshot(self) -> None:
+        """🔴 §9 — 제안 전용 지문을 새로 셈하지 않는다. 같은 함수를 지난다."""
+        source = Path(proposal_service.__file__).read_text(encoding="utf-8")
+        body = source[
+            source.index("def _check_investigation(") : source.index(
+                "def _settle_investigation_reuse("
+            )
+        ]
+        assert "same_investigation_audit" in body
+        assert "investigation_row_for" in body
+        # 대조하려고 Tool 을 다시 돌리거나 새 해시를 만들지 않는다.
+        assert "sha256" not in body
+        assert "run_tool" not in body
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  🔴 한 조사에 대응안 하나
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestOneInvestigationOneProposal:
+    """🔴 **한 조사는 한 번 끝난 판단이고, 그 판단이 고른 안은 하나다.**
+
+    그 조사로 제안을 둘 만들 수 있으면 끝난 판단 하나가 승인 대상 둘을 낳는다.
+    """
+
+    def test_the_same_request_is_still_a_retry(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 기존 멱등 계약은 그대로다 — 같은 안을 한 번 더 보낸 것은 재시도다."""
+        standing = _proposal()
+        calls = _stub_proposal_repository(monkeypatch, history=(standing,))
+        outcome = proposal_service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+        )
+        assert outcome.status == "REUSED"
+        assert outcome.proposal is standing
+        assert calls["insert"] == []
+
+    def test_a_finished_proposal_still_holds_the_investigation(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **거절된 뒤에도 그 조사는 이미 썼다.**
+
+        «살아 있는 제안» 만 보면 `REJECTED` 는 안 보이고, 그 틈으로 같은 조사가 둘째
+        제안을 낸다. 거절은 그 조사의 결론이 안 받아들여졌다는 뜻이지 조사를 안 한 것이
+        아니다 — 새 안이 필요하면 **새 조사**를 돌린다.
+        """
+        finished = _proposal(
+            status="REJECTED",
+            rejected_as_of=D5,
+            rejected_by="operator",
+            rejection_reason="지금은 팔지 않는다",
+        )
+        calls = _stub_proposal_repository(monkeypatch, history=(finished,))
+        with pytest.raises(proposal_service.ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_ALREADY_USED
+        assert calls["insert"] == []
+        assert calls["mark"] == []
+
+    def test_another_action_from_the_same_investigation_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 같은 조사로 **다른 안**을 세우는 것도 둘째 제안이다."""
+        standing = _proposal(proposal_key="다른지문")
+        calls = _stub_proposal_repository(monkeypatch, history=(standing,))
+        with pytest.raises(proposal_service.ProposalStateConflict) as caught:
+            proposal_service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+            )
+        assert caught.value.code == proposal_service.INVESTIGATION_ALREADY_USED
+        assert calls["insert"] == []
+
+    def test_another_investigation_is_not_blocked_by_this_rule(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 막는 것은 **같은 조사**뿐이다 — 다른 조사는 기존 규칙이 가린다."""
+        finished = _proposal(
+            investigation_id="INV-somewhere-else",
+            status="REJECTED",
+            rejected_as_of=D5,
+            rejected_by="operator",
+            rejection_reason="다른 조사의 안이었다",
+        )
+        calls = _stub_proposal_repository(monkeypatch, history=(finished,))
+        outcome = proposal_service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator", investigation_id=INV
+        )
+        assert outcome.created
+        assert len(calls["insert"]) == 1
+
+    def test_manual_proposals_are_never_folded_together(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """⚠️ 조사를 안 댄 제안들이 서로를 «같은 조사» 로 읽히면 안 된다 (NULL ≠ NULL)."""
+        earlier = _proposal(
+            investigation_id=None,
+            status="REJECTED",
+            rejected_as_of=D5,
+            rejected_by="operator",
+            rejection_reason="손으로 세운 안이었다",
+        )
+        calls = _stub_proposal_repository(monkeypatch, history=(earlier,), investigation=None)
+        outcome = proposal_service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator"
+        )
+        assert outcome.created
+        assert [row.investigation_id for row in calls["insert"]] == [None]
