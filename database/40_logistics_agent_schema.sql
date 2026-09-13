@@ -356,6 +356,14 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     CONSTRAINT ck_logistics_action_proposals_approved
         CHECK (status <> 'APPROVED'
                OR (approved_as_of IS NOT NULL AND approved_by IS NOT NULL)),
+    -- 🔴 **승인 provenance 는 실행 뒤에도 남는다** (Commit 6 보정). 위 제약은 상태가
+    --    `APPROVED` 일 때만 보므로, 실행이 상태를 옮긴 순간 «누가 승인했나» 가 비어도
+    --    DB 가 통과시켰다 — *"승인은 됐는데 누가 했는지 모른다"* 는 행이 설 수 있었다.
+    --    ⚠️ 위 제약을 지우지 않고 **더한다** — 이 파일의 DROP 0 규율 그대로이고, 새
+    --       제약이 더 강해 둘이 충돌하지 않는다.
+    CONSTRAINT ck_logistics_action_proposals_approval_provenance
+        CHECK (status NOT IN ('APPROVED', 'EXECUTED', 'FAILED')
+               OR (approved_as_of IS NOT NULL AND approved_by IS NOT NULL)),
     CONSTRAINT ck_logistics_action_proposals_rejected
         CHECK (status <> 'REJECTED'
                OR (rejected_as_of IS NOT NULL AND rejected_by IS NOT NULL
@@ -530,6 +538,17 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_logistics_action_proposals_approval_provenance'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT ck_logistics_action_proposals_approval_provenance
+            CHECK (status NOT IN ('APPROVED', 'EXECUTED', 'FAILED')
+                   OR (approved_as_of IS NOT NULL AND approved_by IS NOT NULL));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
         WHERE conname = 'ck_logistics_action_proposals_execution_exclusive'
           AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
     ) THEN
@@ -604,6 +623,9 @@ BEGIN
 END
 $proposal_axis$;
 
+COMMENT ON CONSTRAINT ck_logistics_action_proposals_approval_provenance
+    ON haetdeul.logistics_action_proposals IS
+    '🔴 승인에는 반드시 사람과 날이 있다 — **실행이 상태를 옮긴 뒤에도.** status 가 APPROVED 일 때만 보는 제약은 EXECUTED/FAILED 로 넘어간 순간 «누가 승인했나» 가 비어도 통과시킨다.';
 COMMENT ON CONSTRAINT logistics_action_proposals_exception_axis_fkey
     ON haetdeul.logistics_action_proposals IS
     '🔴 대응안은 **같은 실행의** 문제만 가리킨다. 홑 FK 둘(sim_run_id / exception_id)은 각자 자기 칸만 보므로 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 못 막는다.';

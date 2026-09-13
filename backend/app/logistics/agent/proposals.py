@@ -135,7 +135,9 @@ DECISION_DETAIL_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "SUPERSEDED": ("superseded_as_of",),
     # Commit 6 — 실행도 «그날 안 일어났으면 안 보인다».
     "EXECUTED": ("executed_as_of", "executed_by", "execution_result"),
-    "FAILED": ("failed_as_of", "failure_code", "failure_reason"),
+    # 🔴 `executed_by` 가 **양쪽에** 있다. 실패에도 «돌리려 한 주체» 가 적히므로
+    #    실패 쪽에서 빠뜨리면 D8 의 사람이 D7 조회에 보인다 (future detail leak).
+    "FAILED": ("failed_as_of", "executed_by", "failure_code", "failure_reason"),
 }
 
 #: 비울 때 넣는 값. 🔴 `execution_result` 만 `None` 이 아니라 **빈 사전**이다 — 그 칸의
@@ -528,13 +530,25 @@ def project_proposal_at(row: ProposalRow, *, as_of: date) -> ProposalRow | None:
         (one for one, _ in _STATUS_PRECEDENCE if one in landed),
         "PROPOSED",
     )
-    blanked: dict[str, Any] = {}
-    for decided, columns in DECISION_DETAIL_COLUMNS.items():
-        if decided in landed:
-            # ★ 그날 **실제로 일어난** 결정의 칸은 남긴다 — 실행된 제안의 승인자도
-            #   그중 하나다. 상태 하나만 보고 가리면 그 사실이 사라진다.
-            continue
-        blanked.update({name: _BLANK_VALUES.get(name) for name in columns})
+    # ★ 그날 **실제로 일어난** 결정의 칸은 남긴다 — 실행된 제안의 승인자도 그중 하나다.
+    #   상태 하나만 보고 가리면 그 사실이 사라진다.
+    #
+    # 🔴 **먼저 «보일 칸» 을 다 모은 뒤에 지운다.** `executed_by` 처럼 두 묶음이 **같은
+    #    칸을 공유**하기 때문이다 — 묶음을 하나씩 돌며 지우면, 실행된 제안에서
+    #    «실패 묶음이 안 왔다» 는 이유로 그 칸이 지워진다.
+    visible = {
+        name
+        for decided, columns in DECISION_DETAIL_COLUMNS.items()
+        if decided in landed
+        for name in columns
+    }
+    blanked: dict[str, Any] = {
+        name: _BLANK_VALUES.get(name)
+        for decided, columns in DECISION_DETAIL_COLUMNS.items()
+        if decided not in landed
+        for name in columns
+        if name not in visible
+    }
     return replace(row, status=status, **blanked)
 
 
@@ -543,17 +557,32 @@ def latest_terminal_as_of(
 ) -> tuple[date | None, tuple[str, ...]]:
     """이 문제의 기존 제안들이 **마지막으로 끝난 날**. 없으면 `None`.
 
+    **«끝난 날» 은 그 제안이 더는 실행 대기가 아니게 된 날이다.**
+
     ```text
-    P1  D5 제안 · D6 거절      →  (D6, ())
-    P1  아직 살아 있다          →  (None, ())     ← 끝난 날이 없다
-    P1  EXECUTED (Commit 6)    →  (None, ('P1',)) ← 끝난 날을 못 댄다
+    REJECTED     rejected_as_of
+    EXPIRED      expired_as_of
+    SUPERSEDED   superseded_as_of
+    EXECUTED     executed_as_of      ← Commit 6 에서 칸이 섰다
+    FAILED       failed_as_of        ← 〃
     ```
+
+    ```text
+    P1  D5 제안 · D6 거절            →  (D6, ())
+    P1  D6 승인 · D8 실행            →  (D8, ())   ← 승인일이 아니라 **실행일**이다
+    P1  D6 승인 · 아직 실행 전        →  (None, ()) ← 끝난 날이 없다 (승인은 끝이 아니다)
+    ```
+
+    🔴 **`APPROVED` 는 여기 안 센다** (§17). 승인은 **실행 대기**라, 승인일을 끝으로 세면
+       `D6 승인 · D8 실행` 뒤에 오는 새 제안이 «D6 이후면 된다» 고 답하게 되고 그러면
+       D7 조회에서 살아 있는 제안이 둘이 된다.
 
     🔴 **새 제안이 그날보다 앞서면 «그날 살아 있던 제안» 이 둘이 된다.** 부분 유일
        인덱스는 «지금» 상태만 보므로 이 겹침을 못 막는다 — 과거로 접었을 때만 보인다.
 
-    ⚠️ **`EXECUTED` · `FAILED` 는 끝난 날 칸이 없다** (Commit 6). 그런 행이 섞이면 순서를
-       못 세우므로 **이름을 돌려주고 부르는 쪽이 멈춘다** — 추측해서 통과시키지 않는다.
+    ⚠️ **끝난 상태인데 그 날을 못 대는 행은 통과시키지 않는다.** production 에서는 DB
+       CHECK 가 그런 행을 막지만(`ck_…_executed` · `ck_…_failed`), 손으로 고친 행이
+       섞이면 순서를 못 세우므로 **이름을 돌려주고 부르는 쪽이 멈춘다.**
 
     :returns: `(마지막으로 끝난 날, 순서를 못 세우는 제안 ID 들)`.
         🔴 **아무것도 안 읽고 안 쓴다** — 순수 함수다.

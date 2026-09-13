@@ -1835,6 +1835,49 @@ class TestExecutionHistorical:
         # ★ 그날 이미 있던 승인 사실은 보인다.
         assert waiting.approved_by == OPERATOR
 
+    def test_a_real_failure_does_not_leak_its_actor_into_the_past(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 실제 실패 경로로 만든 행을 그대로 과거로 접는다.
+
+        ```text
+        D5 제안 · D6 승인 · D15 실패(잔량이 모자라 STALE_ACTION)
+        ```
+        """
+        _lot(conn)
+        conn.commit()
+        proposal_id = _approved(
+            conn,
+            action="DISPOSAL_REQUEST",
+            parameters={"lot_id": LOT, "qty_kg": Decimal(9999)},
+        )
+        outcome = execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15, executed_by=RUNNER
+        )
+        assert outcome.status == "FAILED"
+
+        waiting = service.get_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D9
+        )
+        assert waiting is not None
+        assert waiting.status == "APPROVED"
+        # 🔴 D15 에 시도한 주체가 D9 조회에 안 보인다.
+        assert waiting.executed_by is None
+        assert waiting.failed_as_of is None
+        assert waiting.failure_code is None
+        assert waiting.failure_reason is None
+        # ★ 그날 이미 있던 승인 사실은 보인다.
+        assert waiting.approved_by == OPERATOR
+
+        decided = service.get_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D15
+        )
+        assert decided is not None
+        assert decided.status == "FAILED"
+        assert decided.executed_by == RUNNER
+        assert decided.failure_code == execution.STALE_ACTION
+        assert decided.approved_by == OPERATOR
+
     def test_the_listing_filters_by_the_status_of_that_day(
         self, conn: psycopg.Connection
     ) -> None:
@@ -1894,6 +1937,80 @@ class TestConcurrentExecution:
         # 🔴 **Move 는 하나다.**
         assert len(_moves(conn)) == 1
         assert _rows(conn)[0].executed_by == "other"
+
+
+class TestApprovalProvenance:
+    """🔴 **승인에는 사람과 날이 있다 — 실행이 상태를 옮긴 뒤에도.**
+
+    `status = 'APPROVED'` 일 때만 보는 제약은 실행이 상태를 `EXECUTED`/`FAILED` 로
+    옮긴 순간 침묵한다 — 그 틈으로 *"승인은 됐는데 누가 했는지 모른다"* 는 행이 선다.
+    """
+
+    def _insert(self, *, status: str, approver: str | None, extra: str) -> str:
+        approved_by = "NULL" if approver is None else f"'{approver}'"
+        return f"""INSERT INTO {TMP_SCHEMA}.logistics_action_proposals (
+                proposal_id, sim_run_id, exception_id, proposal_key, action_type,
+                decision_owner, parameters_json, impact_json, evidence_refs_json,
+                status, proposed_as_of, proposed_by, approved_as_of, approved_by, {extra}
+            ) VALUES ('PRP-PROV', '{SIM}', '{EXC}', 'k', 'ACCEPT_RISK', 'LOGISTICS',
+                '{{}}'::jsonb, '{{}}'::jsonb, '[]'::jsonb, '{status}', '{D5}', 'x',
+                '{D6}', {approved_by}, """
+
+    EXECUTED_TAIL = (
+        "executed_as_of, executed_by, execution_result_json",
+        f"'{D8}', '{RUNNER}', '{{}}'::jsonb)",
+    )
+    FAILED_TAIL = (
+        "failed_as_of, executed_by, failure_code, failure_reason",
+        f"'{D8}', '{RUNNER}', 'STALE_ACTION', '잔량이 줄었다')",
+    )
+
+    def _statement(self, *, status: str, approver: str | None) -> str:
+        columns, values = (
+            self.EXECUTED_TAIL if status == "EXECUTED" else self.FAILED_TAIL
+        )
+        return self._insert(status=status, approver=approver, extra=columns) + values
+
+    @pytest.mark.parametrize("status", ["EXECUTED", "FAILED"])
+    def test_a_row_without_an_approver_is_refused(
+        self, conn: psycopg.Connection, status: str
+    ) -> None:
+        """🔴 **어느 제약이 막았는지까지 본다.**
+
+        `CheckViolation` 만 보면 다른 제약이 우연히 막아도 초록불이라, *"승인 provenance
+        를 실제로 강제했다"* 는 것을 증명하지 못한다.
+        """
+        _exception(conn)
+        with pytest.raises(psycopg.errors.CheckViolation) as caught, conn.cursor() as cur:
+            cur.execute(self._statement(status=status, approver=None))
+        conn.rollback()
+        assert (
+            caught.value.diag.constraint_name
+            == "ck_logistics_action_proposals_approval_provenance"
+        )
+
+    @pytest.mark.parametrize("status", ["EXECUTED", "FAILED"])
+    def test_a_row_with_its_approver_passes(
+        self, conn: psycopg.Connection, status: str
+    ) -> None:
+        """★ 반대편도 본다 — 제약이 정상 행까지 막으면 실행 경로가 통째로 죽는다."""
+        _exception(conn)
+        with conn.cursor() as cur:
+            cur.execute(self._statement(status=status, approver=OPERATOR))
+        conn.rollback()
+
+    def test_the_real_execution_path_still_writes_an_approver(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """★ 실제 경로가 그 제약을 지나는지도 본다 — 검사만 통과하는 제약은 의미가 없다."""
+        proposal_id = _approved(conn)
+        execute_approved_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposal_id, as_of=D8, executed_by=RUNNER
+        )
+        (row,) = _rows(conn)
+        assert row.status == "EXECUTED"
+        assert row.approved_by == OPERATOR
+        assert row.executed_by == RUNNER
 
 
 class TestConstraints:

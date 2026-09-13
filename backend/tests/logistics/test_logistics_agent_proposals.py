@@ -528,6 +528,20 @@ class TestHistoricalProjection:
             )
 
 
+def _failed(**overrides: Any) -> ProposalRow:
+    """`D5 제안 · D6 승인 · D8 실패` — 실패도 실행 시점의 사실을 남긴다."""
+    base: dict[str, Any] = {
+        "status": "FAILED",
+        "executed_as_of": None,
+        "execution_result": {},
+        "failed_as_of": D8,
+        "failure_code": "STALE_ACTION",
+        "failure_reason": "승인 뒤 잔량이 줄었다",
+    }
+    base.update(overrides)
+    return _executed(**base)
+
+
 def _executed(**overrides: Any) -> ProposalRow:
     """`D5 제안 · D6 승인 · D8 실행` — Commit 6 의 **정상 흐름** 한 줄."""
     base: dict[str, Any] = {
@@ -586,24 +600,58 @@ class TestExecutionProjection:
         assert at_date.approval_note == "신선도가 급하다"
 
     def test_a_failure_projects_the_same_way(self) -> None:
-        failed = _executed(
-            status="FAILED",
-            executed_as_of=None,
-            execution_result={},
-            failed_as_of=D8,
-            failure_code="STALE_ACTION",
-            failure_reason="승인 뒤 잔량이 줄었다",
-        )
-        waiting = project_proposal_at(failed, as_of=D7)
+        waiting = project_proposal_at(_failed(), as_of=D7)
         assert waiting is not None
         assert waiting.status == "APPROVED"
         assert waiting.failure_code is None
         assert waiting.failure_reason is None
 
-        decided = project_proposal_at(failed, as_of=D9)
+        decided = project_proposal_at(_failed(), as_of=D9)
         assert decided is not None
         assert decided.status == "FAILED"
         assert decided.failure_code == "STALE_ACTION"
+
+    def test_a_failure_hides_who_tried_until_the_day_it_failed(self) -> None:
+        """🔴 **실패에도 «누가 돌리려 했나» 가 적힌다** — 그 사람은 D8 의 사실이다.
+
+        `executed_by` 를 실패 묶음에서 빠뜨리면 D8 에 시도한 주체가 **D7 조회에 보인다.**
+        실행 성공 쪽만 가려 놓고 실패 쪽을 잊는 것이 딱 이 새는 자리다.
+        """
+        waiting = project_proposal_at(_failed(), as_of=D7)
+        assert waiting is not None
+        assert waiting.status == "APPROVED"
+        # 🔴 그날 아직 아무도 안 돌렸다.
+        assert waiting.executed_by is None
+        assert waiting.failed_as_of is None
+        assert waiting.failure_code is None
+        assert waiting.failure_reason is None
+        # ★ 그날 이미 있던 승인 사실은 보인다.
+        assert waiting.approved_as_of == D6
+        assert waiting.approved_by == "operator"
+
+    def test_after_the_failure_the_actor_is_visible(self) -> None:
+        decided = project_proposal_at(_failed(), as_of=D9)
+        assert decided is not None
+        assert decided.status == "FAILED"
+        assert decided.failed_as_of == D8
+        assert decided.executed_by == "master-runner"
+        assert decided.failure_reason == "승인 뒤 잔량이 줄었다"
+        # ★ 승인 provenance 는 실행 결과와 무관하게 남는다.
+        assert decided.approved_by == "operator"
+
+    def test_a_successful_execution_keeps_its_actor(self) -> None:
+        """⚠️ **`executed_by` 는 성공·실패 두 묶음이 공유하는 칸이다.**
+
+        묶음을 하나씩 돌며 지우면, 성공한 제안에서 «실패 묶음이 안 왔다» 는 이유로
+        실행 주체가 지워진다 — 가리기 전에 «보일 칸» 을 먼저 다 모아야 한다.
+        """
+        decided = project_proposal_at(_executed(), as_of=D9)
+        assert decided is not None
+        assert decided.status == "EXECUTED"
+        assert decided.executed_by == "master-runner"
+        # 그러면서 실패 쪽 칸은 비어 있다.
+        assert decided.failed_as_of is None
+        assert decided.failure_code is None
 
     def test_an_execution_without_an_approval_is_refused(self) -> None:
         """🔴 승인 없이 실행된 것으로 적힌 행은 «누가 진행해도 좋다고 했나» 를 못 댄다."""
