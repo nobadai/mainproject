@@ -183,6 +183,16 @@ class _달력:
         return True
 
 
+class _배치가_도는_날:
+    """배치 축 대역 (2026-09-13). **이 파일의 날은 전부 예측 배치가 도는 날이다.**
+
+    ★ 배치가 없는 날의 하루는 `test_no_ml_batch_day.py` 가 잰다.
+    """
+
+    def has_ml_batch(self, day: date) -> bool:
+        return True
+
+
 def _준비(as_of: date = AS_OF) -> DayForecastReadiness:
     return DayForecastReadiness(
         as_of=as_of,
@@ -196,7 +206,13 @@ def _준비(as_of: date = AS_OF) -> DayForecastReadiness:
 
 def _계획(as_of: date = AS_OF, *, now: datetime | None = None) -> ScheduledAction:
     순간 = now or datetime(as_of.year, as_of.month, as_of.day, 9, 30, tzinfo=SEOUL)
-    return plan_next_action(now=순간, as_of=as_of, calendar=_달력(), gate_result=_준비(as_of))
+    return plan_next_action(
+        now=순간,
+        as_of=as_of,
+        calendar=_달력(),
+        ml_batch=_배치가_도는_날(),
+        gate_result=_준비(as_of),
+    )
 
 
 def _인자(순서: list[str], **over: Any) -> dict[str, Any]:
@@ -361,7 +377,7 @@ def test_개장이_막힌_날은_유지보수를_아예_안_한다() -> None:
 
 
 def test_WAIT_인_날은_유지보수를_아예_안_한다() -> None:
-    """🔴 **`should_run` 이 아니면 아무것도 안 부른다.**
+    """🔴 **`scope` 가 `NONE` 이면 아무것도 안 부른다.**
 
     ★ 마감 전에 열두 번 깨어나며 열두 번 창고를 비우면 안 된다.
     """
@@ -371,6 +387,7 @@ def test_WAIT_인_날은_유지보수를_아예_안_한다() -> None:
         now=datetime(2026, 1, 12, 9, 30, tzinfo=SEOUL),
         as_of=AS_OF,
         calendar=_달력(),
+        ml_batch=_배치가_도는_날(),
         gate_result=DayForecastReadiness(
             as_of=AS_OF,
             readiness="NONE_READY",  # type: ignore[arg-type]

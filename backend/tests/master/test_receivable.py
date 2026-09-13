@@ -563,7 +563,7 @@ def _하루(**kwargs) -> Any:
         reason="검사",
         deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
     )
-    assert action.should_run, "전제가 깨졌다 — 이 검사는 도는 날을 재려던 것이다"
+    assert action.scope == "FULL", "전제가 깨졌다 — 이 검사는 도는 날을 재려던 것이다"
     return run_scheduled_day(action, **defaults), defaults["procure_fn"]
 
 
@@ -686,7 +686,7 @@ def test_성적표_사유가_채권_상태를_적는다() -> None:
             receivable_status="BLOCKED",
             collection_status="NOTHING_DUE",
         ),
-        ran=True,
+        scope="FULL",
     )
 
     assert 사유 is not None

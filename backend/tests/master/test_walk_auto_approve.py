@@ -171,6 +171,16 @@ class _달력:
         return True
 
 
+class _배치가_도는_날:
+    """배치 축 대역 (2026-09-13). **이 파일의 날은 전부 예측 배치가 도는 날이다.**
+
+    ★ 배치가 없는 날의 하루는 `test_no_ml_batch_day.py` 가 잰다.
+    """
+
+    def has_ml_batch(self, day: date) -> bool:
+        return True
+
+
 def _준비(as_of: date = AS_OF) -> DayForecastReadiness:
     return DayForecastReadiness(
         as_of=as_of,
@@ -187,6 +197,7 @@ def _계획(as_of: date = AS_OF) -> ScheduledAction:
         now=datetime(as_of.year, as_of.month, as_of.day, 9, 30, tzinfo=SEOUL),
         as_of=as_of,
         calendar=_달력(),
+        ml_batch=_배치가_도는_날(),
         gate_result=_준비(as_of),
     )
 

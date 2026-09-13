@@ -75,6 +75,17 @@ walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷
   ⚠️ 시간대는 받은 값의 것을 그대로 나른다 (`timetz()`). 여기서 `ZoneInfo` 를
     새로 만들지 않는다 — 시간대의 주인도 `clock.py` 하나다.
 
+  🔴 **받은 `--now` 를 요약에 찍고 원장에 남긴다** (2026-09-13).
+
+```text
+요약    기준시각  <받은 문자열> · 날마다 HH:MM · 마감 10:30 뒤 / 🔴 전
+원장    sim_runs.config_json.provenance.walked_now   ← 걷기 첫 날 전에 · 받은 문자열 그대로
+```
+
+  ★★ V8(16:00) 과 V9①(09:00) 이 같은 코드로 통째로 갈렸는데 그 값이 어디에도 안
+    남아 있었다. **적는 것은 걷기다** — 진짜 값을 아는 것은 걷기뿐이다
+    (`walk_provenance`). 이미 **다른** 값이 있으면 걷기 전에 막는다.
+
 ---
 
 🔴 **달력을 못 읽으면 멈춘다. 건너뛰지 않는다.**
@@ -174,13 +185,20 @@ from app.master.ledger_repository import (
     read_walk_closings,
 )
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
 from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
     DayRunOutcome,
+    DayScope,
+    # 🔴 **마감의 주인에서 읽는다. 여기서 10:30 을 다시 적지 않는다** (2026-09-13).
+    #   손으로 적으면 마감이 바뀌는 날 요약만 옛 마감을 말하고, 그 줄이 막으려던
+    #   「마감 전인데 모른다」 가 반대 방향으로 다시 선다.
+    deadline_at,
     plan_next_action,
     run_scheduled_day,
 )
+from app.master.walk_provenance import WalkedNowStamp, record_walked_now
 
 __all__ = [
     "MAX_CONSECUTIVE_FAILURES",
@@ -311,6 +329,12 @@ class WalkResult:
     #: 🔴 **「0행」과 접지 않는다.** *"못 읽었다"* 를 *"없다"* 로 적으면 DB 가 죽은
     #:   판과 마감이 한 번도 안 돈 판이 화면에서 같아진다.
     closings_reason: str | None = None
+    #: 걷기가 받은 `--now` **문자열 그대로** (2026-09-13). 안 받았으면 `None`.
+    #:
+    #: 🔴 **정규화하지 않는다.** 사람이 준 것과 코드가 쓰는 것(그 시각 부분)이 둘 다
+    #:   보여야 같은 코드로 건 두 판이 왜 갈렸는지가 읽힌다 — V8(16:00) 과
+    #:   V9①(09:00) 이 그 한 값으로 통째로 갈렸다.
+    walked_now: str | None = None
 
     @property
     def completed(self) -> bool:
@@ -425,6 +449,24 @@ class WalkResult:
         return total
 
     @property
+    def procurement_statuses(self) -> Mapping[str, int]:
+        """매입 판단 단계 분포 (2026-09-13). 🔴 **값을 접지 않고 그대로 센다.**
+
+        ```text
+        RAN            돌았다
+        NOT_ATTEMPTED  거기까지 못 갔다 — 개장 실패 · 장부 관문   ← 사고다
+        NO_ML_BATCH    배치가 원래 없는 날이라 안 돌렸다           ← 사고가 아니다
+        ```
+
+        ★★ **이 줄이 없으면 배치 없는 날이 매입 쪽에서 안 보인다.** 그 날은 품목이
+          없어 `종료코드` 줄에서 빠진다 — 종전 `E4` 42건이 0 이 되는데 그 42건이
+          어디 갔는지를 이 줄이 말한다.
+
+        ★ `sales_statuses` 와 같은 모양이다 — `scheduler` 가 낸 값을 세기만 한다.
+        """
+        return Counter(one.procurement_status for one in self.days)
+
+    @property
     def sales_statuses(self) -> Mapping[str, int]:
         """판매 판단 단계 분포. 🔴 **세 값을 접지 않고 그대로 센다.**
 
@@ -432,6 +474,7 @@ class WalkResult:
         RAN            돌았다
         FAILED         해 보고 터졌다 — 돈 품목이 하나도 없다   ← "못 했다"
         NOT_ATTEMPTED  거기까지 못 갔다                        ← "안 했다"
+        NO_ML_BATCH    배치가 원래 없는 날이라 안 돌렸다         ← 2026-09-13
         ```
 
         ⚠️ **값이 있는데 성적표가 안 읽으면 없는 것과 같다** — `outbound_status` 를
@@ -789,6 +832,7 @@ def walk(
     end: date,
     now: datetime,
     calendar: Callable[[], MarketCalendar] = get_market_calendar,
+    ml_batch: Callable[[], MlBatchCalendar] = get_ml_batch_calendar,
     readiness: Callable[[date], DayForecastReadiness] = lambda as_of: day_forecast_readiness(
         as_of=as_of
     ),
@@ -801,6 +845,8 @@ def walk(
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
     auto_maintain: bool = False,
     closings_of: Callable[..., Sequence[Mapping[str, Any]]] = read_walk_closings,
+    walked_now: str | None = None,
+    record_now: Callable[..., WalkedNowStamp] = record_walked_now,
 ) -> WalkResult:
     """`start` 부터 `end` 까지 하루씩 걷는다. **개장일마다 하루 실행을 부른다.**
 
@@ -820,6 +866,10 @@ def walk(
     :param now: 걷는 동안 쓸 시각. 🔴 **인자다 — 이 파일은 시계를 안 읽는다.**
         날짜는 안 쓰고 **시각만** 떼어 걷는 날마다 붙인다 (모듈 docstring).
     :param calendar: 개장 축. `is_market_open` 하나만 부른다.
+    :param ml_batch: 배치 축 (2026-09-13). `has_ml_batch` 하나만 부른다 — 하루마다
+        `scheduler.plan_next_action` 에 넘긴다. 🔴 **여기서 판정하지 않는다.** 걷기가
+        배치 없는 날을 제 손으로 건너뛰면 그 날 장부(입고 · 수금 · 출고 · 마감)가
+        통째로 빠진다 — 무엇을 돌지는 하루 실행이 `scope` 로 안다.
     :param readiness: 그날 예측 게이트. `wake_up` 과 같은 모양으로 받는다.
     :param run_day_fn: 하루 실행. 🔴 **기본값이 `run_scheduled_day` 자체다** —
         `None` 을 안 받는다 (`clock.py` · `verifier.py` 와 같은 규율).
@@ -859,6 +909,18 @@ def walk(
         ⚠️ **못 읽어도 걷기를 안 터뜨린다.** 179일을 다 걷고 마지막 조회에서 죽으면
           **성적을 통째로 잃는다** (`_use_utf8_output` 이 막은 그 모양). 못 읽은
           사실은 `closings_reason` 이 든다 — *"없다"* 로 접지 않는다.
+    :param walked_now: 사람이 준 `--now` **문자열 그대로** (2026-09-13). 주면
+        `record_now` 가 그 실행의 `config_json.provenance.walked_now` 에 남긴다.
+
+        🔴 **`now` 와 같은 시각이어야 한다.** 적은 값과 실제로 건 값이 갈리면 그
+          칸은 없는 것보다 나쁘다 — 갈리면 걷기 전에 막는다.
+
+        ⚠️ **안 주면 기록을 안 부른다.** 적을 문자열이 없다. 그 사실은 요약이
+          「안 받았다」로 말한다 — 진입점(`main`)은 늘 준다.
+    :param record_now: 기준 시각을 **재고 · 없으면 적는** 자리. 🔴 **걷기 첫 날
+        전에 한 번 부른다** — 다 걷고 나서 부르면 연속 사고 상한에 걸려 멈춘 판에
+        무엇으로 걸었는지가 안 남는다. 이미 **다른** 값이 있으면 그 자리가
+        `WalkedNowConflict` 로 막고, 걷기는 한 날도 안 걷는다.
     :raises ValueError: 범위가 거꾸로거나 `now` 에 시간대가 없거나 `sim_run_id` 가
         빈 문자열일 때. **막고 사유를 낸다** — 조용히 바로잡지 않는다.
 
@@ -887,6 +949,13 @@ def walk(
         raise ValueError(
             f"연속 사고 상한이 {max_consecutive_failures} 다 — 1 보다 작으면 한 날도 못 걷는다"
         )
+    if walked_now is not None and not _same_moment(walked_now, now):
+        # 🔴 **칸이 거짓말을 하게 두지 않는다.** 원장에 적는 문자열과 날마다 붙여
+        #    쓰는 시각이 갈리면, 그 칸을 믿고 읽은 사람이 오늘 같은 판을 또 버린다.
+        raise ValueError(
+            f"기준 시각 문자열 {walked_now!r} 과 걷는 시각 {now.isoformat()} 이 다르다"
+            " — 원장에 적는 값과 실제로 건 값이 갈리면 그 칸이 거짓말을 한다"
+        )
 
     # ── 🔴 **켰으면 걷기 전에 규칙을 확인한다** (2026-09-11) ────────────
     #
@@ -914,6 +983,20 @@ def walk(
     sales_terms = terms_of(sim_run_id)
 
     market = calendar()
+    # ★ 개장 축과 같은 자리 · 같은 횟수로 한 번 만든다. 표를 읽는 것은 첫 물음 때다.
+    batch = ml_batch()
+
+    # ── 🔴 **기준 시각을 걷기 첫 날 전에 남긴다** (2026-09-13) ─────────────
+    #
+    # ★ 재는 것(이미 다른 값이면 막는다)과 쓰는 것을 **한 자리에서 같이** 한다.
+    #   다 걷고 나서 쓰면 179일을 걷다 연속 사고 상한에 멈춘 판에 무엇으로 걸었는지가
+    #   안 남는다 — 그리고 그 판이 **가장 먼저 그 질문을 받는 판**이다.
+    #
+    # 🔴 **막히면 여기서 나간다.** 한 실행을 두 기준 시각으로 이어 걸으면 절반은 마감
+    #    전 · 절반은 마감 뒤인 판이 되고, 그 판은 아무것도 증명하지 않는다.
+    if walked_now is not None:
+        record_now(sim_run_id=sim_run_id, walked_now=walked_now)
+
     started_ticks = ticks()
 
     days: list[DayRunOutcome] = []
@@ -943,6 +1026,7 @@ def walk(
             now=_moment_on(day, now),
             as_of=day,
             calendar=market,
+            ml_batch=batch,
             gate_result=readiness(day),
         )
         try:
@@ -973,7 +1057,7 @@ def walk(
             in_a_row += 1
         else:
             days.append(outcome)
-            reason = _incident_reason(outcome, ran=action.should_run)
+            reason = _incident_reason(outcome, scope=action.scope)
             if reason is None:
                 in_a_row = 0
             else:
@@ -1017,6 +1101,26 @@ def walk(
         elapsed_seconds=ticks() - started_ticks,
         closings=closings,
         closings_reason=closings_reason,
+        walked_now=walked_now,
+    )
+
+
+def _same_moment(walked_now: str, now: datetime) -> bool:
+    """받은 문자열이 **걷는 시각과 같은 시각**을 말하는가.
+
+    ★ **시각과 시간대 오프셋을 둘 다 본다.** 같은 순간이라도 오프셋이 다르면
+      `timetz()` 가 다른 시각을 날마다 붙인다 — 그러면 걷기가 쓰는 시각이 갈린다.
+
+    ⚠️ **읽지 못하는 문자열은 다르다고 본다.** 적을 값이 시각이 아니면 칸이 거짓말을 한다.
+    """
+    try:
+        받은 = datetime.fromisoformat(walked_now)
+    except ValueError:
+        return False
+    return (
+        받은.tzinfo is not None
+        and 받은.replace(tzinfo=None) == now.replace(tzinfo=None)
+        and 받은.utcoffset() == now.utcoffset()
     )
 
 
@@ -1032,22 +1136,31 @@ def _moment_on(day: date, now: datetime) -> datetime:
     return datetime.combine(day, now.timetz())
 
 
-def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
+def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
     """이 날이 사고인가. 사고면 사유, 아니면 `None`.
 
     🔴 **`scheduler` 가 낸 값만 읽는다.** 여기서 상태 목록을 다시 세지 않는다 —
       세면 `_LEDGER_GAP_STATUSES` 가 두 곳에 생기고, 한쪽만 바뀌는 날이 온다.
 
     ```text
-    action == BLOCKED                       달력이든 게이트든 못 읽었다
+    action == BLOCKED                       달력이든 배치 축이든 게이트든 못 읽었다
     돌기로 했는데 procurement_status 가
       NOT_ATTEMPTED                         개장이 막혔거나 장부 관문이 돌아섰다
+                                            🔴 scope 가 FULL 이든 LEDGER_ONLY 든 같다
     failed_items 가 비지 않았다              품목이 터졌다 (나머지는 돌았다)
     outbound_status == FAILED               나가려다 못 나갔다
     ```
 
     ⚠️ **`WAIT` 은 사고가 아니다.** *"아직"* 이지 *"못"* 이 아니다. 그 구분이
       `scheduler` 가 다섯 어휘를 가른 이유이고, 여기서 접으면 그게 무의미해진다.
+
+    ⚠️ **`NO_ML_BATCH` 로 판단을 안 돈 것은 사고가 아니다** (2026-09-13). 그 날
+      `procurement_status` 는 `NOT_ATTEMPTED` 가 아니라 `NO_ML_BATCH` 이고, 그래서
+      아래 줄에 안 걸린다.
+
+      🔴 **그렇다고 `LEDGER_ONLY` 를 판정에서 통째로 빼지 않는다.** 그 날도 개장이
+        막히거나 장부 관문이 돌아서면 `NOT_ATTEMPTED` 로 남고, **그것은 사고다** —
+        빼면 배치 없는 토요일에 난 장부 사고가 안 세진다.
 
     ⚠️ **`NOT_A_MARKET_DAY` 도 사고가 아니다.** 달력 검사가 먼저 걸러서 여기까지
       오지도 않지만, 온다 해도 *"안 서는 날"* 은 정상이다.
@@ -1062,7 +1175,7 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
     """
     if outcome.action == "BLOCKED":
         return f"BLOCKED — {outcome.reason}"
-    if ran and outcome.procurement_status == "NOT_ATTEMPTED":
+    if scope != "NONE" and outcome.procurement_status == "NOT_ATTEMPTED":
         # ★ 개장 실패와 장부 관문을 한 값이 이미 가른다 — 둘 다 판단 단계를 안 탄다.
         return (
             f"판단 단계를 안 탔다 (개장: {outcome.day_open_status} ·"
@@ -1187,12 +1300,57 @@ def _cash_lines(result: WalkResult) -> list[str]:
     ]
 
 
+def _moment_line(result: WalkResult) -> str:
+    """기준 시각 한 줄 (2026-09-13). 🔴 **마감 전이면 그 사실을 찍는다.**
+
+    ```text
+    기준시각  2026-09-13T16:00+09:00 · 날마다 16:00 · 마감 10:30 뒤
+    기준시각  2026-09-13T09:00+09:00 · 날마다 09:00 · 🔴 마감 10:30 전
+              — 예측이 늦는 날이 통째로 안 돈다      (실제로는 한 줄이다)
+    ```
+
+    ★★ **이 한 줄이 없어서 한 판을 버렸다.** V9① 을 09:00 으로 걸었더니 ML 배치가
+      없는 날이 전부 `WAIT` 이 되어 14일이 영영 안 돌았고, 매입 셀 213 → 171 ·
+      `E4` 42 → 0 · 폐기 16 → 59 로 통째로 갈렸다. **코드가 아니라 입력 하나였다.**
+
+    🔴 **경고 문장이 「예측이 늦는 날」이다 · 「배치 없는 날」이 아니다** (2026-09-13).
+      배치 없는 날은 `NO_ML_BATCH` 가 되어 마감과 무관하게 장부가 돈다
+      (`scheduler.plan_next_action` 이 게이트 **앞**에서 가른다). 마감 전 시각에 안
+      도는 것은 **배치가 도는 날인데 예측이 아직 안 온 날**뿐이다 — 옛 문장을 두면
+      V9① 을 고친 판이 그 사실을 거꾸로 말한다.
+
+    ★ **받은 문자열을 먼저 찍는다.** 날짜 부분은 안 쓰이지만 사람이 준 것과 코드가
+      쓰는 것(`날마다`)이 둘 다 보여야 왜 갈렸는지 읽힌다.
+
+    🔴 **전/뒤를 여기서 따로 판정하지 않는다.** 걷기가 쓰는 그대로(`_moment_on`)
+      붙인 시각을 `scheduler.deadline_at` 과 비교한다 — `plan_next_action` 이
+      `now >= deadline` 을 뒤로 보는 그 경계 그대로다.
+    """
+    if result.walked_now is None:
+        return "기준시각  🟡 안 받았다 — 이 걷기가 어느 시각으로 걸렸는지 원장에 안 남는다"
+    날 = result.start
+    날마다 = _moment_on(날, datetime.fromisoformat(result.walked_now))
+    마감 = deadline_at(날)
+    시각 = f"{날마다:%H:%M}" if not (날마다.second or 날마다.microsecond) else f"{날마다:%H:%M:%S}"
+    머리 = f"기준시각  {result.walked_now} · 날마다 {시각} · "
+    if 날마다 < 마감:
+        return 머리 + f"🔴 마감 {마감:%H:%M} 전 — 예측이 늦는 날이 통째로 안 돈다"
+    return 머리 + f"마감 {마감:%H:%M} 뒤"
+
+
 def format_summary(result: WalkResult) -> str:
     """걷기 결과를 사람이 읽을 줄로. **값을 새로 만들지 않는다.**"""
     lines = [
         f"범위      {result.start.isoformat()} ~ {result.end.isoformat()}",
+        # 🔴 **기준시각 줄을 지우지 않는다** (2026-09-13). 「이 판이 무엇 위에
+        #    섰나」 자리다 — 걷기 요약에는 기준커밋 줄이 없어 범위 바로 아래다.
+        #    이 줄이 없어서 같은 코드로 건 두 판이 왜 갈렸는지 아무도 못 읽었다.
+        _moment_line(result),
         f"돈 날     {len(result.days)}일 · 휴장 {len(result.skipped_days)}일",
         f"판단      {dict(sorted(result.actions.items()))}",
+        # 🔴 **매입 줄을 판단 줄에 접지 않는다** (2026-09-13). 배치 없는 날은 품목이
+        #    없어 `종료코드` 줄에서 빠진다 — 그 날들이 어디 갔는지를 이 줄이 말한다.
+        f"매입      {dict(sorted(result.procurement_statuses.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
         f"채권      {dict(sorted(result.receivable_statuses.items()))}",
         f"판매      {dict(sorted(result.sales_statuses.items()))}",
@@ -1309,6 +1467,9 @@ def main(argv: Sequence[str]) -> int:
         max_consecutive_failures=args.max_consecutive_failures,
         auto_approve=args.auto_approve,
         auto_maintain=args.auto_maintain,
+        # 🔴 **받은 문자열 그대로 넘긴다** (2026-09-13). 위 `now` 는 파싱한 값이라
+        #    `16:00` 이 `16:00:00` 이 되고, 사람이 준 것이 원장에서 사라진다.
+        walked_now=args.now,
     )
     print(format_summary(result))
     return 0 if result.completed and not result.incidents else 1

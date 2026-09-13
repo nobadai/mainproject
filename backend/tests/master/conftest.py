@@ -174,6 +174,33 @@ def 공휴일_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr("app.master.service.get_market_calendar", lambda: _주말만_쉬는_시장())
 
 
+class _배치가_늘_도는_달력:
+    """**배치 축** 가짜 (`MlBatchCalendar`). 모든 날에 배치가 돈다고 답한다.
+
+    ⚠️ **실제 달력과 다르다** — 실 표에서는 토요일 대부분이 `is_survey=f` 다. 여기서
+      늘 참으로 두는 것은 **기존 검사들의 답을 안 바꾸려는 것**이고, 배치 축이 실제로
+      판단을 가르는 경로는 `test_no_ml_batch_day.py` 가 가짜를 직접 꽂아 본다.
+    """
+
+    def has_ml_batch(self, day: date) -> bool:
+        return True
+
+
+@pytest.fixture(autouse=True)
+def 배치_달력을_가짜로_준다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """스케줄러 · 걷기의 **배치 축**을 DB 대신 가짜로 준다 (2026-09-13).
+
+    ★ **`wake_up` · `walk` 의 기본값이 `get_ml_batch_calendar` 자체다.** 기본 인자로
+      이미 묶여 있어 모듈 속성으로는 못 바꾼다 — 그 함수가 부를 때마다 찾아가는
+      **프로세스 캐시(`_BATCH`)** 가 실제 문이고, 거기에 가짜를 앉힌다.
+
+    🔴 **안 막으면 배치 축을 안 넘긴 검사가 조용히 `ml_calendar_days` 를 친다.** `.env`
+      가 없는 자리에서는 `BLOCKED` 로 빨개지고, 있는 자리에서는 **그날 표에 따라** 답이
+      갈린다 — 둘 다 다른 사람 손에서 재현되지 않는다.
+    """
+    monkeypatch.setattr("app.master.ml_batch_calendar._BATCH", _배치가_늘_도는_달력())
+
+
 #: 미적용 전이를 찾는 두 조회가 **DB 로 나가는 문**. 🔴 **여기 하나만 막으면 된다.**
 #:
 #: ★ **`approved_decisions` 를 갈아 끼우지 않는 이유.** 그 이름은

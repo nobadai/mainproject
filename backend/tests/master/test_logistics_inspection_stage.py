@@ -7,6 +7,10 @@
 🔴 **재는 것은 배선이다.** 무엇이 문제인지는 물류가 정하고
    (`tests/logistics/test_logistics_agent_*`), 여기서는 *"불렀나 · 어느 자리에서 ·
    터져도 하루가 사나"* 만 본다.
+
+⚠️ **점검은 판단부(`_judge`) 밖에 있다** (2026-09-13 · dev 병합). 예측 배치가 없는 날
+   (`NO_ML_BATCH` · `scope=LEDGER_ONLY`)은 판단 넷을 건너뛰지만 **출고는 나간다** —
+   재고가 움직이는 날이라 점검도 따라가야 한다.
 """
 
 from __future__ import annotations
@@ -129,7 +133,7 @@ def _하루(**kwargs: Any) -> tuple[Any, dict[str, Any], list[str]]:
         reason="검사",
         deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
     )
-    assert action.should_run, "전제가 깨졌다 — 이 검사는 도는 날을 재려던 것이다"
+    assert action.scope == "FULL", "전제가 깨졌다 — 이 검사는 끝까지 도는 날을 재려던 것이다"
     out = run_scheduled_day(action, **defaults)
     return out, {**defaults, "_점검": 점검}, 순서
 
@@ -183,6 +187,50 @@ def test_안_도는_날에는_아예_안_부른다() -> None:
     assert 점검.phases == []
     assert out.inspection_inbound_status == "NOT_ATTEMPTED"
     assert out.inspection_outbound_status == "NOT_ATTEMPTED"
+
+
+def test_판단을_건너뛰는_날에도_출고_뒤_점검은_돈다() -> None:
+    """🔴 **`NO_ML_BATCH` 인 날은 판단 넷만 건너뛴다** (2026-09-13 · dev 병합).
+
+    ```text
+    건너뛴다   매입 판단 · 매입 승인 · 판매 판단 · 판매 승인
+    돈다       개장 · 유지보수 · 재시도 · 입고 · **점검 #1** · 채권 · 수금
+               · 출고 · **점검 #2** · 마감
+    ```
+
+    ★ 점검을 판단부 안에 두면 **재고가 움직인 날에 창고를 안 보게 된다** — 그날 나간
+      출고가 신선도·용량 조건을 바꿔 놓는데 그 사실을 아무도 안 잰다.
+    """
+    점검 = _Inspect()
+    action = ScheduledAction(
+        as_of=AS_OF,
+        now=datetime(2026, 1, 7, 9, 30, tzinfo=SEOUL),
+        action="NO_ML_BATCH",
+        reason="예측 배치가 없는 날",
+        deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
+    )
+    assert action.scope == "LEDGER_ONLY", "전제가 깨졌다"
+
+    out = run_scheduled_day(
+        action,
+        open_day_fn=_Spy(_Out("OPENED")),
+        retry_fn=_Retry(),
+        receive_fn=_Spy(_Out("RECEIVED")),
+        inspect_fn=점검,
+        issue_fn=_Spy(_Out("ISSUED")),
+        collect_fn=_Spy(_Out("COLLECTED")),
+        outbound_fn=_Spy(_Out("NOTHING_DUE")),
+        close_fn=_Spy(_Out("CLOSED")),
+        items=("배추",),
+        sim_run_id=SIM,
+    )
+
+    # 🔴 두 칸 다 돈다 — 판단만 빠진 날이다.
+    assert 점검.phases == [AFTER_INBOUND, AFTER_OUTBOUND]
+    assert out.inspection_inbound_status == "NOTHING_DUE"
+    assert out.inspection_outbound_status == "NOTHING_DUE"
+    # ★ 판단 넷은 실제로 건너뛰었다.
+    assert out.procurement_status == "NO_ML_BATCH"
 
 
 def test_스위치가_없다() -> None:
