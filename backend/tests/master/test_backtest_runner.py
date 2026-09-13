@@ -15,6 +15,7 @@ import inspect
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -23,7 +24,7 @@ from app.master.backtest_runner import WalkResult, format_summary, walk
 from app.master.clock import SEOUL
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, ItemForecastGate
-from app.master.scheduler import DayRunOutcome, ItemRunOutcome
+from app.master.scheduler import DayRunOutcome, ItemRunOutcome, SchedulerAction
 
 ITEMS = ("무", "배추", "양파")
 
@@ -444,13 +445,10 @@ def test_어휘를_새로_안_만든다():
     """★ **판단 분포는 `scheduler` 가 낸 값을 센다.** 새 이름을 붙이지 않는다."""
     result, _ = _walk(start=date(2026, 2, 7), end=date(2026, 2, 8))
 
-    assert set(result.actions) <= {
-        "RUN_NOW",
-        "WAIT",
-        "RUN_AND_RECORD",
-        "NOT_A_MARKET_DAY",
-        "BLOCKED",
-    }
+    # ★ **어휘의 주인에서 읽는다** (2026-09-13). 손으로 적으면 `NO_ML_BATCH` 가 든 날
+    #   이 검사만 옛 다섯을 들고 있다.
+    assert set(result.actions) <= set(get_args(SchedulerAction))
+    assert set(result.actions) == {"RUN_NOW"}, "0 건을 세고 초록이 되는 길을 막는다"
     assert set(result.end_codes) == {"E1_OK"}
 
 

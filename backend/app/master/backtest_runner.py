@@ -185,10 +185,12 @@ from app.master.ledger_repository import (
     read_walk_closings,
 )
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
 from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
     DayRunOutcome,
+    DayScope,
     # 🔴 **마감의 주인에서 읽는다. 여기서 10:30 을 다시 적지 않는다** (2026-09-13).
     #   손으로 적으면 마감이 바뀌는 날 요약만 옛 마감을 말하고, 그 줄이 막으려던
     #   「마감 전인데 모른다」 가 반대 방향으로 다시 선다.
@@ -447,6 +449,24 @@ class WalkResult:
         return total
 
     @property
+    def procurement_statuses(self) -> Mapping[str, int]:
+        """매입 판단 단계 분포 (2026-09-13). 🔴 **값을 접지 않고 그대로 센다.**
+
+        ```text
+        RAN            돌았다
+        NOT_ATTEMPTED  거기까지 못 갔다 — 개장 실패 · 장부 관문   ← 사고다
+        NO_ML_BATCH    배치가 원래 없는 날이라 안 돌렸다           ← 사고가 아니다
+        ```
+
+        ★★ **이 줄이 없으면 배치 없는 날이 매입 쪽에서 안 보인다.** 그 날은 품목이
+          없어 `종료코드` 줄에서 빠진다 — 종전 `E4` 42건이 0 이 되는데 그 42건이
+          어디 갔는지를 이 줄이 말한다.
+
+        ★ `sales_statuses` 와 같은 모양이다 — `scheduler` 가 낸 값을 세기만 한다.
+        """
+        return Counter(one.procurement_status for one in self.days)
+
+    @property
     def sales_statuses(self) -> Mapping[str, int]:
         """판매 판단 단계 분포. 🔴 **세 값을 접지 않고 그대로 센다.**
 
@@ -454,6 +474,7 @@ class WalkResult:
         RAN            돌았다
         FAILED         해 보고 터졌다 — 돈 품목이 하나도 없다   ← "못 했다"
         NOT_ATTEMPTED  거기까지 못 갔다                        ← "안 했다"
+        NO_ML_BATCH    배치가 원래 없는 날이라 안 돌렸다         ← 2026-09-13
         ```
 
         ⚠️ **값이 있는데 성적표가 안 읽으면 없는 것과 같다** — `outbound_status` 를
@@ -811,6 +832,7 @@ def walk(
     end: date,
     now: datetime,
     calendar: Callable[[], MarketCalendar] = get_market_calendar,
+    ml_batch: Callable[[], MlBatchCalendar] = get_ml_batch_calendar,
     readiness: Callable[[date], DayForecastReadiness] = lambda as_of: day_forecast_readiness(
         as_of=as_of
     ),
@@ -844,6 +866,10 @@ def walk(
     :param now: 걷는 동안 쓸 시각. 🔴 **인자다 — 이 파일은 시계를 안 읽는다.**
         날짜는 안 쓰고 **시각만** 떼어 걷는 날마다 붙인다 (모듈 docstring).
     :param calendar: 개장 축. `is_market_open` 하나만 부른다.
+    :param ml_batch: 배치 축 (2026-09-13). `has_ml_batch` 하나만 부른다 — 하루마다
+        `scheduler.plan_next_action` 에 넘긴다. 🔴 **여기서 판정하지 않는다.** 걷기가
+        배치 없는 날을 제 손으로 건너뛰면 그 날 장부(입고 · 수금 · 출고 · 마감)가
+        통째로 빠진다 — 무엇을 돌지는 하루 실행이 `scope` 로 안다.
     :param readiness: 그날 예측 게이트. `wake_up` 과 같은 모양으로 받는다.
     :param run_day_fn: 하루 실행. 🔴 **기본값이 `run_scheduled_day` 자체다** —
         `None` 을 안 받는다 (`clock.py` · `verifier.py` 와 같은 규율).
@@ -957,6 +983,8 @@ def walk(
     sales_terms = terms_of(sim_run_id)
 
     market = calendar()
+    # ★ 개장 축과 같은 자리 · 같은 횟수로 한 번 만든다. 표를 읽는 것은 첫 물음 때다.
+    batch = ml_batch()
 
     # ── 🔴 **기준 시각을 걷기 첫 날 전에 남긴다** (2026-09-13) ─────────────
     #
@@ -998,6 +1026,7 @@ def walk(
             now=_moment_on(day, now),
             as_of=day,
             calendar=market,
+            ml_batch=batch,
             gate_result=readiness(day),
         )
         try:
@@ -1028,7 +1057,7 @@ def walk(
             in_a_row += 1
         else:
             days.append(outcome)
-            reason = _incident_reason(outcome, ran=action.should_run)
+            reason = _incident_reason(outcome, scope=action.scope)
             if reason is None:
                 in_a_row = 0
             else:
@@ -1107,22 +1136,31 @@ def _moment_on(day: date, now: datetime) -> datetime:
     return datetime.combine(day, now.timetz())
 
 
-def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
+def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
     """이 날이 사고인가. 사고면 사유, 아니면 `None`.
 
     🔴 **`scheduler` 가 낸 값만 읽는다.** 여기서 상태 목록을 다시 세지 않는다 —
       세면 `_LEDGER_GAP_STATUSES` 가 두 곳에 생기고, 한쪽만 바뀌는 날이 온다.
 
     ```text
-    action == BLOCKED                       달력이든 게이트든 못 읽었다
+    action == BLOCKED                       달력이든 배치 축이든 게이트든 못 읽었다
     돌기로 했는데 procurement_status 가
       NOT_ATTEMPTED                         개장이 막혔거나 장부 관문이 돌아섰다
+                                            🔴 scope 가 FULL 이든 LEDGER_ONLY 든 같다
     failed_items 가 비지 않았다              품목이 터졌다 (나머지는 돌았다)
     outbound_status == FAILED               나가려다 못 나갔다
     ```
 
     ⚠️ **`WAIT` 은 사고가 아니다.** *"아직"* 이지 *"못"* 이 아니다. 그 구분이
       `scheduler` 가 다섯 어휘를 가른 이유이고, 여기서 접으면 그게 무의미해진다.
+
+    ⚠️ **`NO_ML_BATCH` 로 판단을 안 돈 것은 사고가 아니다** (2026-09-13). 그 날
+      `procurement_status` 는 `NOT_ATTEMPTED` 가 아니라 `NO_ML_BATCH` 이고, 그래서
+      아래 줄에 안 걸린다.
+
+      🔴 **그렇다고 `LEDGER_ONLY` 를 판정에서 통째로 빼지 않는다.** 그 날도 개장이
+        막히거나 장부 관문이 돌아서면 `NOT_ATTEMPTED` 로 남고, **그것은 사고다** —
+        빼면 배치 없는 토요일에 난 장부 사고가 안 세진다.
 
     ⚠️ **`NOT_A_MARKET_DAY` 도 사고가 아니다.** 달력 검사가 먼저 걸러서 여기까지
       오지도 않지만, 온다 해도 *"안 서는 날"* 은 정상이다.
@@ -1137,7 +1175,7 @@ def _incident_reason(outcome: DayRunOutcome, *, ran: bool) -> str | None:
     """
     if outcome.action == "BLOCKED":
         return f"BLOCKED — {outcome.reason}"
-    if ran and outcome.procurement_status == "NOT_ATTEMPTED":
+    if scope != "NONE" and outcome.procurement_status == "NOT_ATTEMPTED":
         # ★ 개장 실패와 장부 관문을 한 값이 이미 가른다 — 둘 다 판단 단계를 안 탄다.
         return (
             f"판단 단계를 안 탔다 (개장: {outcome.day_open_status} ·"
@@ -1268,12 +1306,18 @@ def _moment_line(result: WalkResult) -> str:
     ```text
     기준시각  2026-09-13T16:00+09:00 · 날마다 16:00 · 마감 10:30 뒤
     기준시각  2026-09-13T09:00+09:00 · 날마다 09:00 · 🔴 마감 10:30 전
-              — 배치 없는 날이 통째로 안 돈다        (실제로는 한 줄이다)
+              — 예측이 늦는 날이 통째로 안 돈다      (실제로는 한 줄이다)
     ```
 
     ★★ **이 한 줄이 없어서 한 판을 버렸다.** V9① 을 09:00 으로 걸었더니 ML 배치가
       없는 날이 전부 `WAIT` 이 되어 14일이 영영 안 돌았고, 매입 셀 213 → 171 ·
       `E4` 42 → 0 · 폐기 16 → 59 로 통째로 갈렸다. **코드가 아니라 입력 하나였다.**
+
+    🔴 **경고 문장이 「예측이 늦는 날」이다 · 「배치 없는 날」이 아니다** (2026-09-13).
+      배치 없는 날은 `NO_ML_BATCH` 가 되어 마감과 무관하게 장부가 돈다
+      (`scheduler.plan_next_action` 이 게이트 **앞**에서 가른다). 마감 전 시각에 안
+      도는 것은 **배치가 도는 날인데 예측이 아직 안 온 날**뿐이다 — 옛 문장을 두면
+      V9① 을 고친 판이 그 사실을 거꾸로 말한다.
 
     ★ **받은 문자열을 먼저 찍는다.** 날짜 부분은 안 쓰이지만 사람이 준 것과 코드가
       쓰는 것(`날마다`)이 둘 다 보여야 왜 갈렸는지 읽힌다.
@@ -1290,7 +1334,7 @@ def _moment_line(result: WalkResult) -> str:
     시각 = f"{날마다:%H:%M}" if not (날마다.second or 날마다.microsecond) else f"{날마다:%H:%M:%S}"
     머리 = f"기준시각  {result.walked_now} · 날마다 {시각} · "
     if 날마다 < 마감:
-        return 머리 + f"🔴 마감 {마감:%H:%M} 전 — 배치 없는 날이 통째로 안 돈다"
+        return 머리 + f"🔴 마감 {마감:%H:%M} 전 — 예측이 늦는 날이 통째로 안 돈다"
     return 머리 + f"마감 {마감:%H:%M} 뒤"
 
 
@@ -1304,6 +1348,9 @@ def format_summary(result: WalkResult) -> str:
         _moment_line(result),
         f"돈 날     {len(result.days)}일 · 휴장 {len(result.skipped_days)}일",
         f"판단      {dict(sorted(result.actions.items()))}",
+        # 🔴 **매입 줄을 판단 줄에 접지 않는다** (2026-09-13). 배치 없는 날은 품목이
+        #    없어 `종료코드` 줄에서 빠진다 — 그 날들이 어디 갔는지를 이 줄이 말한다.
+        f"매입      {dict(sorted(result.procurement_statuses.items()))}",
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
         f"채권      {dict(sorted(result.receivable_statuses.items()))}",
         f"판매      {dict(sorted(result.sales_statuses.items()))}",

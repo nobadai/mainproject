@@ -28,12 +28,16 @@ ML 이 매일 아침 09:23 쯤 예측을 적재한다. 이 모듈은 09:30 부�
 
 ---
 
-🔴 **두 축을 둘 다 본다.**
+🔴 **세 축을 이 순서로 본다.**
 
 ```text
 ① 달력   market_calendar.is_market_open(as_of)
            False               → NOT_A_MARKET_DAY
            CalendarNotCovered  → BLOCKED (fail-closed · 달력이 이미 그렇게 던진다)
+
+🟢 배치   ml_batch_calendar.has_ml_batch(as_of)          ← 2026-09-13 · 게이트 **앞**
+           False               → NO_ML_BATCH (장부만 돈다 · 판단은 안 돈다)
+           CalendarNotCovered  → BLOCKED
 
 ② 게이트  forecast_gate.day_forecast_readiness(...)
            ALL_READY / SOME_READY → RUN_NOW
@@ -46,23 +50,56 @@ ML 이 매일 아침 09:23 쯤 예측을 적재한다. 이 모듈은 09:30 부�
   이유가 없다. 휴장일에 열두 번 깨어나 열두 번 `NONE_READY` 를 보고 마지막에
   `E4` 를 적으면, 나중에 *"몇 날을 못 돌았나"* 를 셀 때 휴장일이 실패로 섞인다.
 
-★ **그래도 1년에 여섯 날은 헛기다린다.** 달력은 열렸는데(`is_open=true`) ML 배치가
-  없는 날이다 (노동절 · 어린이날 등 · 매입 실측). 두 축으로도 그 날은 못 가른다 —
-  달력이 *"장은 선다"* 고 하고 예측만 없기 때문이다. 받아들이되
-  **`RUN_AND_RECORD` 의 사유에 그 사실을 적는다** (`_NO_ML_BATCH`). 그래야 그
-  여섯 날이 나중에 눈에 띄고, 사람이 달력 쪽을 볼지 ML 쪽을 볼지 안다.
+★★ **왜 배치 축도 보나 (2026-09-13).** 개장 달력만으로는 **장은 서는데 ML 배치가
+  없는 날**을 못 갈랐다. 토요일이 대부분 그렇다 (`is_open=t` · `is_survey=f`).
+  스케줄러가 그 날을 *"ML 이 늦는 날"* 로 읽고 마감까지 기다린 뒤 `E4_NOT_STARTED`
+  로 적었다 — `SIM-CHAIN-V9` 1~3월에 그런 날이 **14일**, 매입 `E4` **42건**이었다.
+
+  ```text
+  그 14일에 돈 것   판단  확정 판매 0건 · 선 매입 0건              ← 아무것도 안 만들었다
+                    장부  입고 19건 · 출고 19건 · 폐기 3건 · 마감 14일 · 수금 4,938,729원
+  ```
+
+  ★ ML 이 **`is_survey` 가 「그날 예측 배치가 도는가」 축**이라고 확인했다 (걷기
+    구간 90일 · 그날 `ml_price_forecasts` 행 유무와 90/90 일치).
+
+  🔴 **게이트 앞이다.** 배치가 원래 없는 날은 기다릴 예측이 없으므로 게이트를 볼
+    이유가 없다. 게이트 뒤에 두면 `--now` 가 마감 전인 걷기에서 그 날이 `WAIT` 이
+    되어 **장부까지 통째로 안 돈다** — V9① 이 그 모양으로 수금 1,965만 → 1,166만원 ·
+    폐기 16 → 59건으로 무너졌다.
+
+  ⚠️ **달력과 배치가 어긋나도 조용히 안 넘긴다.** `is_survey=f` 인데 예측이 와 있는
+    날은 `NO_ML_BATCH` 로 가되 **사유에 그 어긋남을 적는다** (`_ML_BATCH_MISMATCH`).
+    90일 중 0일이지만 달력은 사람이 넣는 값이다.
 
 ---
 
-🔴 **다섯 어휘를 섞지 않는다.**
+🔴 **여섯 어휘를 섞지 않는다.**
 
 ```text
-RUN_NOW            예측이 왔다 → 지금 돈다
-WAIT               아직 안 왔고 **마감 전** → 5분 뒤 다시 · **판단을 안 돌린다**
-RUN_AND_RECORD     마감이 지났는데도 안 왔다 → 한 번 돌려 E4 로 확정 기록
+RUN_NOW            예측이 왔다 → 전부 돈다
+WAIT               예측이 늦고 **마감 전** → 5분 뒤 다시 · **아무것도 안 돌린다**
+RUN_AND_RECORD     예측이 늦고 마감 뒤 → 전부 돈다 · E4 로 확정 기록
+NO_ML_BATCH        배치가 **원래 없는 날** → **장부만 돈다 · 판단은 안 돈다**
 NOT_A_MARKET_DAY   달력이 "오늘 안 선다" → 아무것도 안 한다
-BLOCKED            달력이나 게이트를 **못 읽었다** → 재시도로 안 풀린다
+BLOCKED            달력 · 배치 축 · 게이트를 **못 읽었다** → 재시도로 안 풀린다
 ```
+
+🔴 **어휘마다 하루가 어디까지 도는지는 `DayScope` 가 정한다** (`scope_of`).
+
+```text
+FULL          RUN_NOW · RUN_AND_RECORD        개장부터 마감까지 전부
+LEDGER_ONLY   NO_ML_BATCH                     매입 판단 · 매입 승인 · 판매 판단 · 판매 승인만 뺀다
+NONE          WAIT · NOT_A_MARKET_DAY · BLOCKED   서비스 함수를 하나도 안 부른다
+```
+
+  ★★ **bool 에 안 끼운다.** 종전 `should_run` 은 참/거짓이었다. `NO_ML_BATCH` 를 참에
+    넣으면 판단까지 돌고, 거짓에 넣으면 장부까지 빠진다 — 둘 다 틀리고, 둘 다 에러가
+    안 난다.
+
+  🔴 **`LEDGER_ONLY` 도 출고를 돈다.** 출고는 판매 승인 뒤에 있지만 그날 나가는 것은
+    **앞선 날 확정된 주문**이다 (V9 의 그 14일에 19건 8,405kg). 판단을 건너뛴다고
+    출고까지 건너뛰면 곡선이 무너진다.
 
 🔴 **`WAIT` 중에는 판단을 절대 안 돌린다.** 돌리면 09:30 부터 10:30 까지 열두 번
   깨어나며 `E4_NOT_STARTED` 가 **열두 건** 쌓이고, *"몇 날을 못 돌았나"* 가 거짓이
@@ -304,6 +341,7 @@ from app.master.inbound import receive_arrivals
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.maintenance import MaintenanceOut, run_auto_maintenance
 from app.master.market_calendar import MarketCalendar, get_market_calendar
+from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
 from app.master.outbound_flow import ship_due_sales
 from app.master.pending_transition import RetryOut, retry_pending_transitions
 from app.master.receivable import issue_receivables
@@ -324,6 +362,7 @@ __all__ = [
     "SCHEDULE_START",
     "WALK_BUSINESS_MODE",
     "DayRunOutcome",
+    "DayScope",
     "ItemRunOutcome",
     "ScheduledAction",
     "SchedulerAction",
@@ -334,6 +373,7 @@ __all__ = [
     "plan_next_action",
     "run_scheduled_day",
     "scheduled_items",
+    "scope_of",
     "wake_up",
 ]
 
@@ -351,11 +391,28 @@ logger = logging.getLogger(__name__)
 #: 하루 실행이 싣는 정책 판. **부르는 쪽이 바꿀 수 있게 인자로도 열어 둔다.**
 DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
 
-#: `RUN_AND_RECORD` 사유에 반드시 들어가는 문장. **1년에 여섯 날을 눈에 띄게 한다.**
+#: `NO_ML_BATCH` 사유에 반드시 들어가는 문장.
 #:
 #: ★ 문자열을 상수로 둔 이유는 검사가 이 문장을 찾기 때문이다. 사유를 손으로 다시
-#:   쓰면 철자가 갈리고, 그러면 그 여섯 날을 나중에 못 센다.
+#:   쓰면 철자가 갈리고, 그러면 그 날들을 나중에 못 센다.
+#:
+#: 🔴 **종전에는 `RUN_AND_RECORD` 사유에 실렸다** (2026-09-13 에 옮겼다). 두 축으로는
+#:   그 날을 못 갈라서 *"마감까지 기다린 뒤 한 번 돌린 날"* 에 이 문장을 붙여 두었는데,
+#:   배치 축(`ml_batch_calendar`)이 서면서 그 날은 `NO_ML_BATCH` 가 되었다.
+#:   `RUN_AND_RECORD` 에 이 문장이 남으면 **배치가 도는 날인데 늦은 날**을 거꾸로 말한다.
 _NO_ML_BATCH = "달력은 열렸는데 ML 배치가 없었다"
+
+#: `RUN_AND_RECORD` 사유에 반드시 들어가는 문장 (2026-09-13).
+#:
+#: ★ 배치 축을 지난 날에만 이 어휘가 나오므로 **배치가 도는 날**이다 — 늦은 것이지
+#:   없는 것이 아니다. 사람이 볼 곳은 ML 적재 쪽이다.
+_ML_BATCH_LATE = "배치가 도는 날인데 마감까지 예측이 안 왔다"
+
+#: `NO_ML_BATCH` 인데 예측이 와 있을 때 사유에 붙는 문장 (2026-09-13).
+#:
+#: 🔴 **조용히 넘기지 않는다.** 달력은 사람이 넣는 값이고, 어긋나면 그날 판단이 빠진
+#:   채 정상처럼 보인다. 사람이 달력 쪽을 볼지 배치 쪽을 볼지 이 문장이 가른다.
+_ML_BATCH_MISMATCH = "🔴 달력은 배치가 없는 날이라는데 예측이 와 있다 — 달력과 배치가 어긋났다"
 
 #: 🔴 **하루 순서가 판매에 싣는 영업 모드. 한 곳에서만 바꾼다** (2026-09-10).
 #:
@@ -392,14 +449,49 @@ _LEDGER_GAP_STATUSES: frozenset[str] = frozenset({"BLOCKED", "FAILED"})
 _LEDGER_GAP = "장부가 안 서서 판단을 안 돌린다"
 
 
-#: 스케줄러가 답할 수 있는 **전부**. 여섯 번째를 만들지 않는다.
+#: 스케줄러가 답할 수 있는 **전부**. 일곱 번째를 만들지 않는다.
 SchedulerAction = Literal[
     "RUN_NOW",
     "WAIT",
     "RUN_AND_RECORD",
+    "NO_ML_BATCH",
     "NOT_A_MARKET_DAY",
     "BLOCKED",
 ]
+
+#: 그 답이면 하루가 **어디까지** 도는가 (2026-09-13). 세 값뿐이다.
+#:
+#: ```text
+#: FULL          개장부터 마감까지 전부 돈다
+#: LEDGER_ONLY   장부만 돈다 — 매입 판단 · 매입 승인 · 판매 판단 · 판매 승인만 뺀다
+#: NONE          서비스 함수를 하나도 안 부른다
+#: ```
+DayScope = Literal["FULL", "LEDGER_ONLY", "NONE"]
+
+#: 🔴 **어휘와 범위를 잇는 유일한 자리다.** `run_scheduled_day` 도 걷기의 사고 판정도
+#:   여기서 읽는다 — 두 곳이 각자 `action in (...)` 을 적으면 어휘가 느는 날 한쪽만
+#:   옛 목록을 들고, 새 어휘가 **조용히** 한쪽에서 돌고 다른 쪽에서 안 돈다.
+#:
+#: 🔴 **`NO_ML_BATCH` 는 `FULL` 도 `NONE` 도 아니다.** `FULL` 이면 배치가 없는 날에
+#:   판단이 돌아 `E4` 가 품목 수만큼 쌓이고, `NONE` 이면 장부까지 빠져 그날 출고 ·
+#:   수금 · 마감이 사라진다 — 둘 다 에러가 안 난다.
+_SCOPE_OF: dict[str, DayScope] = {
+    "RUN_NOW": "FULL",
+    "RUN_AND_RECORD": "FULL",
+    "NO_ML_BATCH": "LEDGER_ONLY",
+    "WAIT": "NONE",
+    "NOT_A_MARKET_DAY": "NONE",
+    "BLOCKED": "NONE",
+}
+
+
+def scope_of(action: SchedulerAction) -> DayScope:
+    """그 답이면 하루가 어디까지 도는가. **모르는 어휘는 터진다.**
+
+    ⚠️ **모르는 값을 `NONE` 으로 메우지 않는다.** 메우면 어휘를 하나 더 들인 날 그
+      날이 조용히 안 돌고, 걷기는 그것을 *"안 도는 날"* 로 정상 처리한다.
+    """
+    return _SCOPE_OF[action]
 
 
 def deadline_at(as_of: date) -> datetime:
@@ -522,13 +614,17 @@ class ScheduledAction:
     retry_after: timedelta | None = None
 
     @property
-    def should_run(self) -> bool:
-        """이번에 판단을 돌리는가.
+    def scope(self) -> DayScope:
+        """이번에 하루를 어디까지 돌리는가. **`scope_of` 를 그대로 읽는다.**
 
         🔴 **`WAIT` · `NOT_A_MARKET_DAY` · `BLOCKED` 는 안 돈다.** 특히 `WAIT` 은
           *"아직"* 이지 *"못"* 이 아니라, 여기서 돌면 `E4` 가 열두 건 쌓인다.
+
+        🔴 **`NO_ML_BATCH` 는 장부만 돈다** (2026-09-13). 종전 `should_run` 이
+          bool 이라 세 갈래를 못 담았고, 그래서 이름째 바꿨다 — 남겨 두면 누군가
+          그것을 읽어 `NO_ML_BATCH` 를 둘 중 한쪽으로 접는다.
         """
-        return self.action in ("RUN_NOW", "RUN_AND_RECORD")
+        return scope_of(self.action)
 
 
 def plan_next_action(
@@ -536,6 +632,7 @@ def plan_next_action(
     now: datetime,
     as_of: date,
     calendar: MarketCalendar,
+    ml_batch: MlBatchCalendar,
     gate_result: DayForecastReadiness,
 ) -> ScheduledAction:
     """이번에 깨어나서 무엇을 할지. **순수 함수다 — 아무것도 안 돌린다.**
@@ -544,10 +641,13 @@ def plan_next_action(
       10:35 를 한 스위트 안에서 전부 지날 수 있다. 여기서 시계를 읽으면 검사는
       *"지금 몇 시인가"* 에 답이 끌려가고, CI 가 도는 시각마다 결과가 달라진다.
 
-    ★ **두 축을 다 받는다.** 달력은 물어봐야 알아서 객체로 받고(`CalendarNotCovered`
-      가 여기서 튄다), 게이트는 이미 답이 나와 있어 값으로 받는다.
+    ★ **세 축을 다 받는다.** 달력 둘은 물어봐야 알아서 객체로 받고
+      (`CalendarNotCovered` 가 여기서 튄다), 게이트는 이미 답이 나와 있어 값으로 받는다.
 
     :param calendar: 개장 축. `is_market_open` 하나만 부른다.
+    :param ml_batch: 배치 축 (2026-09-13). `has_ml_batch` 하나만 부른다.
+        🔴 **기본값이 없다.** 이 함수는 순수 함수라 DB 를 타는 기본값을 둘 수 없고,
+        빠뜨린 호출이 조용히 *"배치가 있다"* 로 떨어지면 토요일이 다시 `E4` 가 된다.
     :param gate_result: `day_forecast_readiness` 의 답. **미리 계산해서 넘긴다** —
         이 함수가 DB 를 타면 순수 함수가 아니게 되고, 검사가 대역을 끼울 자리가
         인자가 아니라 monkeypatch 가 된다.
@@ -587,6 +687,50 @@ def plan_next_action(
     ready = gate_result.ready_items
     not_yet = gate_result.not_yet_items
     unreadable = gate_result.unreadable_items
+
+    # ── 🟢 배치 — 🔴 **달력 뒤 · 게이트 앞** (2026-09-13) ────────────────
+    #
+    # ★★ **토요일이 `E4` 로 적히던 자리다.** 장은 서는데(`is_open=t`) 배치가 없는
+    #   날(`is_survey=f`)을 게이트가 `NONE_READY` 로 보고, 스케줄러가 *"ML 이 늦는
+    #   날"* 로 읽어 마감까지 기다렸다.
+    #
+    # 🔴 **게이트 앞이다.** 기다릴 예측이 없는 날은 게이트를 볼 이유가 없다 — 뒤에
+    #    두면 마감 전 `--now` 로 건 걷기에서 그 날이 `WAIT` 이 되어 장부까지 빠진다.
+    #
+    # 🔴 **`is_survey` 를 읽는다. `is_open` 이 아니다.** 개장은 위에서 이미 봤고,
+    #    같은 칸을 두 번 보면 이 분기는 한 번도 안 선다.
+    try:
+        has_batch = ml_batch.has_ml_batch(as_of)
+    except CalendarNotCovered as exc:
+        # 🔴 **fail-closed.** 못 읽은 것을 *"배치가 없다"* 로 만들면 DB 가 죽은 날 판단이
+        #    통째로 빠지고, 그 사실이 `NO_ML_BATCH` 로 정상처럼 보인다.
+        return ScheduledAction(
+            as_of=as_of,
+            now=now,
+            action="BLOCKED",
+            reason=f"배치 달력을 못 읽었다: {exc}",
+            deadline=deadline,
+            ready_items=ready,
+            not_yet_items=not_yet,
+            unreadable_items=unreadable,
+        )
+    if not has_batch:
+        # ⚠️ **어긋남을 조용히 넘기지 않는다.** 달력은 배치가 없다는데 예측이 와 있으면
+        #    사유에 적는다 — 그래도 `NO_ML_BATCH` 로 간다. 달력이 이 축의 주인이다.
+        mismatch_note = f" · {_ML_BATCH_MISMATCH} (온 품목: {', '.join(ready)})" if ready else ""
+        return ScheduledAction(
+            as_of=as_of,
+            now=now,
+            action="NO_ML_BATCH",
+            reason=(
+                f"{_NO_ML_BATCH} — {as_of.isoformat()} 은 예측 배치가 원래 없는 날이라"
+                f" 장부만 돌리고 판단은 안 돌린다{mismatch_note}"
+            ),
+            deadline=deadline,
+            ready_items=ready,
+            not_yet_items=not_yet,
+            unreadable_items=unreadable,
+        )
 
     # ── ② 게이트 ────────────────────────────────────────────────────
     if gate_result.readiness == "UNREADABLE":
@@ -629,7 +773,7 @@ def plan_next_action(
             now=now,
             action="RUN_AND_RECORD",
             reason=(
-                f"{_NO_ML_BATCH} — 마감({deadline:%H:%M})까지 예측이 안 와서"
+                f"{_ML_BATCH_LATE} — 마감({deadline:%H:%M})이 지나"
                 " 한 번 돌려 E4_NOT_STARTED 로 확정 기록한다"
             ),
             deadline=deadline,
@@ -757,6 +901,19 @@ class DayRunOutcome:
     #: ★ **어휘를 새로 만들지 않았다.** `NOT_ATTEMPTED` 는 이 클래스가 이미 세 단계에
     #:   쓰는 말이고 `RAN` 은 `ItemRunOutcome` 이 이미 쓰는 말이다. 단계를 안 탄
     #:   사실을 `items == ()` 으로만 두면 *"품목 목록이 비었다"* 와 구별이 안 된다.
+    #:
+    #: 🔴 **`NO_ML_BATCH` 가 네 번째 값이다** (2026-09-13). *"배치가 원래 없는 날이라
+    #:   안 돌렸다"* — 값은 그날의 판단 어휘(`action`)를 그대로 싣는다. 새 문자열을
+    #:   따로 적지 않는다.
+    #:
+    #:   ★★ **`NOT_ATTEMPTED` 로 두지 않는다.** 걷기가 *"돌기로 했는데 `NOT_ATTEMPTED`
+    #:     → 사고"* 로 세므로 배치 없는 날 14일이 전부 사고가 된다. 그렇다고 그 날을
+    #:     사고 판정에서 통째로 빼면 **개장이 막힌 진짜 사고**가 그 날엔 안 세진다 —
+    #:     그래서 개장 실패 · 장부 관문은 그 날에도 `NOT_ATTEMPTED` 로 남는다.
+    #:
+    #: ⚠️ `sales_status` · `procurement_approval_status` · `sales_approval_status` 도
+    #:   같은 날 같은 값을 든다. 네 칸이 한 사실을 말하는 이유는 요약이 네 줄에서 각자
+    #:   세기 때문이다 — 한 줄에서만 사라지면 그 줄의 14일이 어디 갔는지 아무도 모른다.
     procurement_status: str = "NOT_ATTEMPTED"
     #: 판매 판단 단계를 **탔는가** (2026-09-10). 🔴 **매입 뒤 · 출고 앞이다.**
     #:
@@ -766,6 +923,7 @@ class DayRunOutcome:
     #: NOT_ATTEMPTED   안 했다 — 게이트가 WAIT 였다 · 관문이 막았다 · 품목이 없었다
     #: RAN             돌았다 — 좋은 답이었다는 뜻이 아니다
     #: FAILED          해 보고 터졌다 — 돈 품목이 **하나도** 없다
+    #: NO_ML_BATCH     배치가 원래 없는 날이라 안 돌렸다 (2026-09-13 · `procurement_status` 참고)
     #: ```
     #:
     #: 🔴 **`FAILED` 는 「전부 터졌다」다.** 한 품목이 터진 날은 `RAN` 이고, 터진
@@ -810,7 +968,11 @@ class DayRunOutcome:
     #: RAN             승인 문까지 돌았다 — 몇 건이 적혔는지는 outcomes 가 말한다
     #: NO_RULE         켰는데 그 실행이 규칙을 안 들었다
     #: FAILED          돌리다 터졌다 — 🔴 **그래도 하루는 계속 간다**
+    #: NO_ML_BATCH     배치가 원래 없는 날이라 판단도 승인도 안 돌렸다 (2026-09-13)
     #: ```
+    #:
+    #: ⚠️ **`NO_ML_BATCH` 는 `auto_approve` 를 안 본다.** 그날은 켰든 안 켰든 승인할
+    #:   판단이 없고, 안 켠 날에 `NOT_ATTEMPTED` 로 두면 승인 줄에서만 그 날이 사라진다.
     #:
     #: 🔴 **`NOT_ATTEMPTED` 와 `NO_RULE` 을 접지 않는다.** 앞은 *"안 켰다"* 이고
     #:   뒤는 *"켰는데 규칙이 없었다"* 다 — 승인 0건의 이유가 그 둘로 갈린다.
@@ -919,7 +1081,7 @@ def run_scheduled_day(
         도착이라 오늘 재고를 안 움직이지만, 둘의 순서를 매입-판매로 두면 *"하루의
         판단"* 이 한 덩어리로 읽히고 그 사이에 아무 단계도 안 끼어든다.
 
-      🔴 **예측 게이트 **안**이다.** `WAIT` 인 날은 판매도 안 돈다 — `should_run`
+      🔴 **예측 게이트 **안**이다.** `WAIT` 인 날은 판매도 안 돈다 — `scope`
         한 줄이 매입과 판매를 같이 막는다. `WAIT` 중에 판매를 부르면 매입이 피한
         그 문제(열두 번 깨어나며 미완 실행이 열두 건 쌓인다)를 판매가 그대로 다시 짓는다.
 
@@ -975,8 +1137,21 @@ def run_scheduled_day(
         **종전 그대로 아무것도 안 싣는다** — 두면 규칙을 안 적은 사람도 모르는
         거래처에 팔게 된다 (`sales_terms.apply_sales_terms`).
 
-    🔴 **`should_run` 이 아니면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
+    🔴 **`scope` 가 `NONE` 이면 아무것도 안 부른다.** `WAIT` 중에 판단을 돌리면
       `E4_NOT_STARTED` 가 열두 건 쌓인다 — 이 한 줄이 그것을 막는다.
+
+    🔴 **`scope` 가 `LEDGER_ONLY` 면 판단 넷만 안 부른다** (2026-09-13 · `NO_ML_BATCH`).
+
+      ```text
+      🟢 돈다     개장 · 유지보수 · 전이 재시도 · 입고 · 채권 · 수금 · 장부 관문 · 출고 · 마감
+      🔴 안 돈다  매입 판단 · 매입 승인 · 판매 판단 · 판매 승인
+      ```
+
+      ★★ **출고가 판매 승인 뒤에 있지만 돈다.** 그날 나가는 것은 앞선 날 확정된
+        주문이다. 판단을 건너뛴다고 출고를 건너뛰면 곡선이 무너진다.
+
+      🔴 **장부 관문은 그 날에도 선다.** 막히면 종전 그대로 `NOT_ATTEMPTED` 로 돌아서고
+        걷기가 사고로 센다 — 배치가 없는 날이라고 장부 사고가 안 세지면 안 된다.
 
     🔴 **개장이 실패하면 그 뒤를 안 한다.** 상태 행이 없으면 입고 · 수금 · 판단이
       적을 자리가 없고, 그런데도 부르면 `NOTHING_DUE` 가 나가 *"오늘은 올 게
@@ -1021,7 +1196,7 @@ def run_scheduled_day(
         `daily_closings` 의 PK 절반으로 쓴다. 기본값의 주인은
         `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 관문 행이 싣는 값과 같다.
     """
-    if not action.should_run:
+    if action.scope == "NONE":
         # 🔴 여기서 돌아선다. **서비스 함수를 하나도 안 부른다.**
         return DayRunOutcome(as_of=action.as_of, action=action.action, reason=action.reason)
 
@@ -1191,6 +1366,146 @@ def run_scheduled_day(
             notes=tuple(notes),
         )
 
+    # ── 판단 — 🔴 **`FULL` 인 날만 돈다** (2026-09-13) ─────────────────────
+    #
+    # ★★ **`NO_ML_BATCH` 인 날은 여기만 건너뛴다.** 매입 판단 · 매입 승인 · 판매 판단 ·
+    #   판매 승인 넷이다. 위의 장부(개장 · 유지보수 · 재시도 · 입고 · 채권 · 수금 · 관문)는
+    #   이미 돌았고 아래의 출고 · 마감도 돈다.
+    #
+    # 🔴 **안 돈 것도 값으로 남긴다.** 네 칸에 그날의 어휘(`NO_ML_BATCH`)가 실린다 —
+    #    `NOT_ATTEMPTED` 로 두면 걷기가 사고로 세고, 비워 두면 요약에서 그 날이 사라진다.
+    if action.scope == "FULL":
+        judged = _judge(
+            as_of=as_of,
+            policy_version=policy_version,
+            procure_fn=procure_fn,
+            sales_fn=sales_fn,
+            sim_run_id=sim_run_id,
+            items=items,
+            auto_approve=auto_approve,
+            approve_fn=approve_fn,
+            sales_terms=sales_terms,
+        )
+    else:
+        judged = _judgment_skipped(action)
+    notes.extend(judged.notes)
+
+    # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
+    #
+    # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
+    #   그것이 *"장부가 안 선 날에는 출고도 안 한다"* 이다.
+    #
+    # 🔴🔴 **`NO_ML_BATCH` 인 날에도 여기를 지난다** (2026-09-13). 판단을 건너뛴 날이라도
+    #    **앞선 날 확정된 주문**은 나가야 한다 — `SIM-CHAIN-V9` 의 그 14일에 19건
+    #    8,405kg 이 나갔다. 여기에 `scope` 조건을 달면 곡선이 무너진다.
+    #
+    # 🔴 **`sim_run_id` 를 흘려 준다** (2026-09-11). 출고 조회가 그 값으로 그날
+    #    판매를 거른다 — 안 넘기면 조회가 **모든 실행**의 그 날짜 판매를 보고,
+    #    남의 실행 판매가 내 창고에서 나간다. 채권·수금 두 줄과 같은 모양이다.
+    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of, sim_run_id=sim_run_id))
+    notes.append(note)
+
+    # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
+    #
+    # ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 앞에서 닫으면 그날 재고가
+    #   마감 뒤에 바뀌고 `inventory_qty_kg` 가 그날 장부와 안 맞는다 — 에러는 안 난다.
+    #
+    # 🔴 **마감이 터져도 위 결과를 안 바꾼다.** `_stage` 가 예외를 값으로 옮기고,
+    #    `procurement_status` 도 `items` 도 `outbound_status` 도 그대로 나간다.
+    #    이력 때문에 그날 걷기 결과가 달라지면 안 된다.
+    #
+    # 🔴 **`sim_run_id` 를 흘려 준다.** 마감이 그 값을 `daily_closings` 의 PK 절반
+    #    (`(sim_run_id, close_date)`)으로 쓴다 — 여기서 상수를 다시 적지 않는다.
+    closing_status, note = _stage("마감", lambda: close_fn(as_of, sim_run_id=sim_run_id))
+    notes.append(note)
+
+    return DayRunOutcome(
+        as_of=as_of,
+        action=action.action,
+        reason=action.reason,
+        day_open_status=day_open_status,
+        maintenance_status=maintenance_status,
+        maintenance=maintenance,
+        pending_transition_status=pending_transition_status,
+        pending_transition=pending_transition,
+        inbound_status=inbound_status,
+        receivable_status=receivable_status,
+        collection_status=collection_status,
+        procurement_status=judged.procurement_status,
+        sales_status=judged.sales_status,
+        outbound_status=outbound_status,
+        closing_status=closing_status,
+        items=judged.items,
+        sales_items=judged.sales_items,
+        procurement_approval_status=judged.procurement_approval_status,
+        sales_approval_status=judged.sales_approval_status,
+        procurement_approval=judged.procurement_approval,
+        sales_approval=judged.sales_approval,
+        notes=tuple(notes),
+    )
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """판단 네 단계가 낸 값. **하루 결과에 그대로 옮겨 싣는다.**
+
+    ★ 한 덩어리로 묶은 이유는 `FULL` 과 `LEDGER_ONLY` 가 **같은 칸을 다른 값으로**
+      채우기 때문이다. 칸마다 `if` 를 달면 한 칸만 옛 값을 드는 날이 온다.
+    """
+
+    procurement_status: str
+    items: tuple[ItemRunOutcome, ...]
+    procurement_approval_status: str
+    procurement_approval: BackfillOut | None
+    sales_status: str
+    sales_items: tuple[ItemRunOutcome, ...]
+    sales_approval_status: str
+    sales_approval: BackfillOut | None
+    notes: tuple[str, ...]
+
+
+def _judgment_skipped(action: ScheduledAction) -> _Judged:
+    """판단 네 단계를 **안 돌린** 날의 값 (2026-09-13).
+
+    🔴 **네 칸에 그날의 어휘를 그대로 싣는다.** 새 문자열을 적지 않는다 — 같은 사실
+      (*"배치가 원래 없는 날"*)의 주인은 `SchedulerAction` 하나다.
+
+    🔴 **`NOT_ATTEMPTED` 가 아니다.** 그 값은 *"돌기로 했는데 거기까지 못 갔다"* 이고
+      걷기가 사고로 센다 (`backtest_runner._incident_reason`).
+    """
+    skipped = action.action
+    return _Judged(
+        procurement_status=skipped,
+        items=(),
+        procurement_approval_status=skipped,
+        procurement_approval=None,
+        sales_status=skipped,
+        sales_items=(),
+        sales_approval_status=skipped,
+        sales_approval=None,
+        notes=(f"판단: {skipped} — 매입 판단 · 매입 승인 · 판매 판단 · 판매 승인을 안 돌린다",),
+    )
+
+
+def _judge(
+    *,
+    as_of: date,
+    policy_version: str,
+    procure_fn: Callable[..., Any],
+    sales_fn: Callable[..., Any],
+    sim_run_id: str,
+    items: Sequence[str] | None,
+    auto_approve: bool,
+    approve_fn: Callable[..., BackfillOut],
+    sales_terms: SalesTermsRule | None,
+) -> _Judged:
+    """매입 판단 → 매입 승인 → 판매 판단 → 판매 승인. **규율은 `run_scheduled_day` 가 적는다.**
+
+    ★ 종전 `run_scheduled_day` 본문에 있던 그대로 옮겼다 (2026-09-13). 옮긴 이유는
+      `NO_ML_BATCH` 인 날 **이 넷만** 건너뛰기 위해서다.
+    """
+    notes: list[str] = []
+
     # ── 판단 ────────────────────────────────────────────────────────
     #
     # ★ **품목 축을 한 번만 정한다.** 매입과 판매가 같은 튜플을 돈다 — 각자 세면
@@ -1337,52 +1652,14 @@ def run_scheduled_day(
     if note is not None:
         notes.append(note)
 
-    # ── 출고 — 🔴 **장부 관문 뒤 · 판단 뒤** ────────────────────────
-    #
-    # ★ 여기 오기 전에 관문이 이미 돌아섰을 수 있고, 그러면 이 줄에 아예 안 온다 —
-    #   그것이 *"장부가 안 선 날에는 출고도 안 한다"* 이다.
-    #
-    # 🔴 **`sim_run_id` 를 흘려 준다** (2026-09-11). 출고 조회가 그 값으로 그날
-    #    판매를 거른다 — 안 넘기면 조회가 **모든 실행**의 그 날짜 판매를 보고,
-    #    남의 실행 판매가 내 창고에서 나간다. 채권·수금 두 줄과 같은 모양이다.
-    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of, sim_run_id=sim_run_id))
-    notes.append(note)
-
-    # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
-    #
-    # ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 앞에서 닫으면 그날 재고가
-    #   마감 뒤에 바뀌고 `inventory_qty_kg` 가 그날 장부와 안 맞는다 — 에러는 안 난다.
-    #
-    # 🔴 **마감이 터져도 위 결과를 안 바꾼다.** `_stage` 가 예외를 값으로 옮기고,
-    #    `procurement_status` 도 `items` 도 `outbound_status` 도 그대로 나간다.
-    #    이력 때문에 그날 걷기 결과가 달라지면 안 된다.
-    #
-    # 🔴 **`sim_run_id` 를 흘려 준다.** 마감이 그 값을 `daily_closings` 의 PK 절반
-    #    (`(sim_run_id, close_date)`)으로 쓴다 — 여기서 상수를 다시 적지 않는다.
-    closing_status, note = _stage("마감", lambda: close_fn(as_of, sim_run_id=sim_run_id))
-    notes.append(note)
-
-    return DayRunOutcome(
-        as_of=as_of,
-        action=action.action,
-        reason=action.reason,
-        day_open_status=day_open_status,
-        maintenance_status=maintenance_status,
-        maintenance=maintenance,
-        pending_transition_status=pending_transition_status,
-        pending_transition=pending_transition,
-        inbound_status=inbound_status,
-        receivable_status=receivable_status,
-        collection_status=collection_status,
+    return _Judged(
         procurement_status="RAN",
-        sales_status=sales_status,
-        outbound_status=outbound_status,
-        closing_status=closing_status,
         items=tuple(results),
-        sales_items=tuple(sales_results),
         procurement_approval_status=procurement_approval_status,
-        sales_approval_status=sales_approval_status,
         procurement_approval=procurement_approval,
+        sales_status=sales_status,
+        sales_items=tuple(sales_results),
+        sales_approval_status=sales_approval_status,
         sales_approval=sales_approval,
         notes=tuple(notes),
     )
@@ -1650,6 +1927,7 @@ def wake_up(
     *,
     now: Callable[[], datetime] = clock.seoul_now,
     calendar: Callable[[], MarketCalendar] = get_market_calendar,
+    ml_batch: Callable[[], MlBatchCalendar] = get_ml_batch_calendar,
     readiness: Callable[[date], DayForecastReadiness] = lambda as_of: day_forecast_readiness(
         as_of=as_of
     ),
@@ -1704,6 +1982,7 @@ def wake_up(
         now=moment,
         as_of=as_of,
         calendar=calendar(),
+        ml_batch=ml_batch(),
         gate_result=readiness(as_of),
     )
     return run_scheduled_day(

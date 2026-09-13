@@ -57,6 +57,20 @@ class _Calendar:
         return self._is_open
 
 
+class _MlBatch:
+    """배치 축 대역 (2026-09-13). `has_batch` 가 `None` 이면 못 읽은 것으로 던진다."""
+
+    def __init__(self, has_batch: bool | None) -> None:
+        self._has_batch = has_batch
+        self.calls: list[date] = []
+
+    def has_ml_batch(self, day: date) -> bool:
+        self.calls.append(day)
+        if self._has_batch is None:
+            raise CalendarNotCovered(f"{day} 의 배치 여부를 모른다")
+        return self._has_batch
+
+
 def _one(item: str, readiness: str, grade: str | None) -> ItemForecastGate:
     return ItemForecastGate(item=item, as_of=AS_OF, readiness=readiness, grade=grade)  # type: ignore[arg-type]
 
@@ -91,9 +105,19 @@ UNREADABLE = _gate(not_yet=("무", "양파"), unreadable=("배추",))
 
 
 def _plan(
-    *, now: datetime, is_open: bool | None = True, gate: DayForecastReadiness = ALL_READY
+    *,
+    now: datetime,
+    is_open: bool | None = True,
+    gate: DayForecastReadiness = ALL_READY,
+    has_batch: bool | None = True,
 ) -> ScheduledAction:
-    return plan_next_action(now=now, as_of=AS_OF, calendar=_Calendar(is_open), gate_result=gate)
+    return plan_next_action(
+        now=now,
+        as_of=AS_OF,
+        calendar=_Calendar(is_open),
+        ml_batch=_MlBatch(has_batch),
+        gate_result=gate,
+    )
 
 
 @dataclass
@@ -306,6 +330,7 @@ def test_시간대_없는_시각은_거절한다():
             now=datetime(2026, 9, 8, 10, 0),  # noqa: DTZ001
             as_of=AS_OF,
             calendar=_Calendar(True),
+            ml_batch=_MlBatch(True),
             gate_result=NONE_READY,
         )
 
@@ -328,11 +353,17 @@ def test_휴장일은_BLOCKED_가_아니다():
     assert _plan(now=_at(9, 30), is_open=False, gate=NONE_READY).action == "NOT_A_MARKET_DAY"
 
 
-def test_RUN_AND_RECORD_사유에_ML_배치가_없었다는_말이_들어간다():
-    """★ 1년에 여섯 날 — 달력은 열렸는데 ML 배치가 없는 날을 나중에 눈에 띄게 한다."""
+def test_RUN_AND_RECORD_사유는_배치가_도는_날인데_늦었다고_말한다():
+    """🔴 **「ML 배치가 없었다」 는 이제 `NO_ML_BATCH` 의 말이다** (2026-09-13).
+
+    ★ 배치 축을 지나야 `RUN_AND_RECORD` 가 나오므로 그 날은 배치가 **도는** 날이다.
+      옛 문장이 남으면 늦은 날을 *"없는 날"* 로 거꾸로 말한다.
+    """
     action = _plan(now=_at(10, 40), gate=NONE_READY)
 
-    assert "달력은 열렸는데 ML 배치가 없었다" in action.reason
+    assert action.action == "RUN_AND_RECORD"
+    assert "배치가 도는 날인데 마감까지 예측이 안 왔다" in action.reason
+    assert "ML 배치가 없었다" not in action.reason, action.reason
 
 
 # ── 🔴 WAIT 중에는 판단을 안 돌린다 ───────────────────────────────────
