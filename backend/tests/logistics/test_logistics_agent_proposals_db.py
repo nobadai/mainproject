@@ -2,6 +2,9 @@
 
 ```text
 원자성        제안 INSERT 와 Exception UPDATE 가 **함께** 성공하는가
+대체 경계     남의 Exception 의 대응안을 닫는가
+stale 승인    이미 닫힌 문제의 제안이 승인되는가
+날짜 단조성   과거 날짜 제안으로 «그날 살아 있던 제안» 이 둘이 되는가
 승인 ≠ 실행   승인 뒤 재고·판매·매입 표가 한 줄이라도 바뀌는가
 동시성        두 번 눌러도 한 번만 먹는가 (lost update)
 과거 재현     D6 조회에 D8 의 결정이 새어 나오는가
@@ -211,8 +214,15 @@ def _lot(conn: psycopg.Connection, lot_id: str = LOT, *, sim_run_id: str = SIM) 
 
 
 def _exception(
-    conn: psycopg.Connection, *, exception_id: str = EXC, sim_run_id: str = SIM
+    conn: psycopg.Connection,
+    *,
+    exception_id: str = EXC,
+    sim_run_id: str = SIM,
+    subject_id: str = LOT,
 ) -> None:
+    """⚠️ `subject_id` 를 갈라야 둘째 Exception 이 선다 — 살아 있는 같은 축의 문제는
+    부분 유일 인덱스가 **하나로** 막는다.
+    """
     open_exception(
         conn,
         row=ExceptionRow(
@@ -220,7 +230,7 @@ def _exception(
             sim_run_id=sim_run_id,
             code=FRESHNESS_PRESSURE,
             subject_type="LOT",
-            subject_id=LOT,
+            subject_id=subject_id,
             severity="HIGH",
             status="OPEN",
             opened_as_of=D1,
@@ -232,7 +242,7 @@ def _exception(
                     value=Decimal(1),
                     unit="일",
                     source="inventory_lots",
-                    source_id=LOT,
+                    source_id=subject_id,
                 ),
             ),
             detector_version="v1",
@@ -264,6 +274,7 @@ def _result(
     observed_as_of: date | None = D1,
     exception_id: str = EXC,
     sim_run_id: str = SIM,
+    as_of: date = D5,
 ) -> InvestigationResult:
     """조사 결과 한 벌. ★ 그래프는 `test_logistics_agent_graph` 가 잰다 — 여기서는
     **저장 계약**만 본다.
@@ -279,7 +290,7 @@ def _result(
     )
     return InvestigationResult(
         sim_run_id=sim_run_id,
-        as_of=D5,
+        as_of=as_of,
         exception_id=exception_id,
         finish_reason=FinishReason.FINISHED,
         llm_status="SUCCESS",
@@ -299,8 +310,10 @@ def _result(
 
 
 def _create(conn: psycopg.Connection, **kwargs: Any) -> service.ProposalOutcome:
+    """★ `as_of` 는 조사와 **같은 날**이어야 한다 — 서비스가 그것을 요구한다."""
+    result = _result(**kwargs)
     return service.create_proposal(
-        conn, result=_result(**kwargs), as_of=D5, proposed_by=OPERATOR
+        conn, result=result, as_of=result.as_of, proposed_by=OPERATOR
     )
 
 
@@ -316,6 +329,34 @@ def _exception_row(conn: psycopg.Connection, exception_id: str = EXC) -> dict[st
             (exception_id,),
         )
         return dict(cur.fetchone())
+
+
+def _force_exception(
+    conn: psycopg.Connection, status: str, *, exception_id: str = EXC, closed: date | None = None
+) -> None:
+    """재탐지·사람이 그 사이에 문제를 옮겼다고 치고 상태를 **직접** 바꾼다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE {TMP_SCHEMA}.logistics_exceptions"
+            " SET status = %(status)s, resolved_as_of = %(closed)s,"
+            "     resolved_by = %(by)s WHERE exception_id = %(exception)s",
+            {
+                "status": status,
+                "closed": closed if status == "RESOLVED" else None,
+                "by": "REDETECT" if status == "RESOLVED" else None,
+                "exception": exception_id,
+            },
+        )
+    conn.commit()
+
+
+def _live_at(conn: psycopg.Connection, as_of: date) -> tuple[str, ...]:
+    """**그날** 살아 있던(PROPOSED·APPROVED) 제안들. 🔴 둘이면 장부가 갈린 것이다."""
+    return tuple(
+        one.proposal_id
+        for one in service.list_proposals(conn, sim_run_id=SIM, as_of=as_of)
+        if one.status in ("PROPOSED", "APPROVED")
+    )
 
 
 def _snapshot(conn: psycopg.Connection) -> dict[str, list[tuple[Any, ...]]]:
@@ -461,11 +502,13 @@ class TestCreate:
         # ⚠️ 거절로 OPEN 이 됐어도 «처음 제안된 날» 은 남아 있다.
         assert _exception_row(conn)["proposed_as_of"] == D5
 
-        second = service.create_proposal(
-            conn, result=_result(), as_of=D5, proposed_by=OPERATOR
-        )
+        # 🔴 **D5 로 되돌아가 세우지 않는다.** 거절이 D6 이므로 새 제안도 D6 이후다 —
+        #    D5 로 세우면 D5 조회에서 살아 있던 제안이 둘이 된다 (`TestChronology`).
+        second = _create(conn, as_of=D6)
         assert second.created
         assert _exception_row(conn) == {"status": "PROPOSED", "proposed_as_of": D5}
+        # ⚠️ 두 번째 제안이 섰어도 «처음 제안된 날» 은 여전히 D5 다.
+        assert _rows(conn)[1].proposed_as_of == D6
 
     def test_a_superseding_proposal_links_to_the_one_it_replaced(
         self, conn: psycopg.Connection
@@ -493,6 +536,343 @@ class TestCreate:
         assert replacement.proposal.previous_proposal_id == first.proposal.proposal_id
         # ★ 대체 뒤에도 살아 있는 제안은 여전히 하나다.
         assert len(repository.live_proposals_for(conn, sim_run_id=SIM, exception_id=EXC)) == 1
+
+
+class TestSupersedeBoundary:
+    """🔴 **남의 문제의 대응안을 닫지 않는다.**
+
+    `_supersede` 의 UPDATE 는 `sim_run_id` 와 `proposal_id` 만 본다 — 검증이 없으면 같은
+    실행의 **다른 Exception** 제안이 그대로 `SUPERSEDED` 가 되고, 그 문제는 대응안을
+    잃은 채 잃었다는 사실조차 안 남는다.
+    """
+
+    OTHER_EXC = "EXC-CAPACITY-2"
+    OTHER_LOT = "LOT-BAECHU-2"
+
+    def test_another_exceptions_proposal_is_never_closed(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """EX-A 에 제안 · EX-B 에는 없음 → EX-B 의 제안이 EX-A 의 것을 닫으려 한다."""
+        _exception(conn)
+        standing = _create(conn)
+        assert standing.proposal is not None
+        _exception(conn, exception_id=self.OTHER_EXC, subject_id=self.OTHER_LOT)
+
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(exception_id=self.OTHER_EXC),
+                as_of=D5,
+                proposed_by=OPERATOR,
+                supersedes=standing.proposal.proposal_id,
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+
+        # 🔴 EX-A 의 제안도 문제도 그대로다.
+        untouched = repository.select_proposal(
+            conn, sim_run_id=SIM, proposal_id=standing.proposal.proposal_id
+        )
+        assert untouched is not None
+        assert untouched.status == "PROPOSED"
+        assert untouched.superseded_as_of is None
+        assert _exception_row(conn)["status"] == "PROPOSED"
+
+        # 🔴 EX-B 에는 제안이 0 이고 상태도 안 움직였다.
+        assert repository.select_proposals(
+            conn, sim_run_id=SIM, exception_id=self.OTHER_EXC
+        ) == ()
+        assert _exception_row(conn, self.OTHER_EXC) == {
+            "status": "OPEN",
+            "proposed_as_of": None,
+        }
+
+    def test_another_runs_proposal_is_never_closed(self, conn: psycopg.Connection) -> None:
+        """다른 **실행**의 제안도 마찬가지다 — 축이 갈려 있어야 «다시 돌리기» 가 산다."""
+        _exception(conn, exception_id="EXC-OTHER-RUN", sim_run_id=OTHER_SIM)
+        elsewhere = service.create_proposal(
+            conn,
+            result=_result(exception_id="EXC-OTHER-RUN", sim_run_id=OTHER_SIM),
+            as_of=D5,
+            proposed_by=OPERATOR,
+        )
+        assert elsewhere.proposal is not None
+        _exception(conn)
+
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(),
+                as_of=D5,
+                proposed_by=OPERATOR,
+                supersedes=elsewhere.proposal.proposal_id,
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+
+        survivor = repository.select_proposal(
+            conn, sim_run_id=OTHER_SIM, proposal_id=elsewhere.proposal.proposal_id
+        )
+        assert survivor is not None
+        assert survivor.status == "PROPOSED"
+        assert _rows(conn) == ()
+        assert _exception_row(conn) == {"status": "OPEN", "proposed_as_of": None}
+
+    def test_a_replayed_supersede_is_a_retry_not_a_conflict(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 **성공한 대체 요청을 한 번 더 보낸 것은 충돌이 아니다.**
+
+        첫 호출이 커밋되며 대상이 `SUPERSEDED` 가 됐으므로, 검증을 중복 판정 앞에 두면
+        그 재시도가 «대체할 수 없다» 로 돌아간다 — 사람은 성공한 제안을 또 올린다.
+        """
+        _exception(conn)
+        first = _create(conn)
+        assert first.proposal is not None
+
+        replacement = service.create_proposal(
+            conn,
+            result=_result(action="ACCEPT_RISK", parameters={"lot_id": LOT}),
+            as_of=D5,
+            proposed_by=OPERATOR,
+            supersedes=first.proposal.proposal_id,
+        )
+        assert replacement.created
+        assert replacement.proposal is not None
+
+        # 🔴 응답이 유실돼 **똑같은 요청**이 한 번 더 온다.
+        again = service.create_proposal(
+            conn,
+            result=_result(action="ACCEPT_RISK", parameters={"lot_id": LOT}),
+            as_of=D5,
+            proposed_by=OPERATOR,
+            supersedes=first.proposal.proposal_id,
+        )
+        assert again.status == "REUSED"
+        assert again.proposal is not None
+        assert again.proposal.proposal_id == replacement.proposal.proposal_id
+        # ★ 행은 둘뿐이고, 살아 있는 것은 하나다.
+        assert len(_rows(conn)) == 2
+        assert len(repository.live_proposals_for(conn, sim_run_id=SIM, exception_id=EXC)) == 1
+
+    def test_an_already_finished_proposal_cannot_be_superseded(
+        self, conn: psycopg.Connection
+    ) -> None:
+        _exception(conn)
+        first = _create(conn)
+        assert first.proposal is not None
+        service.reject_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=first.proposal.proposal_id,
+            as_of=D6,
+            rejected_by=OPERATOR,
+            rejection_reason="아니다",
+        )
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(as_of=D6),
+                as_of=D6,
+                proposed_by=OPERATOR,
+                supersedes=first.proposal.proposal_id,
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+        assert len(_rows(conn)) == 1
+
+
+class TestStaleApproval:
+    """🔴 **이미 닫힌 문제의 제안을 승인하지 않는다.**
+
+    사람이 보던 목록이 낡았을 수 있다 — 그 사이 재탐지가 문제를 닫았는데 승인이
+    들어가면 *"없어진 문제에 대응하기로 했다"* 가 장부에 남는다.
+    """
+
+    @pytest.mark.parametrize("status", ["RESOLVED", "DISMISSED", "OPEN"])
+    def test_a_problem_that_is_not_waiting_refuses_the_approval(
+        self, conn: psycopg.Connection, proposed: str, status: str
+    ) -> None:
+        _force_exception(conn, status, closed=D6)
+        before = _snapshot(conn)
+
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.approve_proposal(
+                conn, sim_run_id=SIM, proposal_id=proposed, as_of=D8, approved_by=OPERATOR
+            )
+        assert caught.value.code == service.STALE_PROPOSAL
+
+        # 🔴 제안도 문제도 업무 표도 그대로다.
+        (row,) = _rows(conn)
+        assert row.status == "PROPOSED"
+        assert row.approved_as_of is None
+        assert row.approved_by is None
+        assert _exception_row(conn)["status"] == status
+        assert _snapshot(conn) == before
+
+    def test_the_sql_condition_is_what_actually_blocks_it(
+        self, conn: psycopg.Connection, proposed: str
+    ) -> None:
+        """🔴 읽기 쪽 검사만으로는 **읽고 쓰는 사이**를 못 막는다.
+
+        조건이 같은 `UPDATE` 문 안에 있어야 그 틈이 없다 — 저장소를 직접 불러 잰다.
+        """
+        _force_exception(conn, "RESOLVED", closed=D6)
+        blocked = repository.transition_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=proposed,
+            to_status="APPROVED",
+            as_of=D8,
+            actor=OPERATOR,
+            require_exception_status="PROPOSED",
+        )
+        conn.rollback()
+        assert blocked == 0
+
+        # ★ 조건을 안 걸면(거절·만료의 경로) 같은 UPDATE 가 먹는다.
+        allowed = repository.transition_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=proposed,
+            to_status="REJECTED",
+            as_of=D8,
+            actor=OPERATOR,
+            note="치운다",
+        )
+        conn.rollback()
+        assert allowed == 1
+
+    @pytest.mark.parametrize("status", ["RESOLVED", "DISMISSED"])
+    def test_a_closed_problem_can_still_be_tidied_up(
+        self, conn: psycopg.Connection, proposed: str, status: str
+    ) -> None:
+        """⚠️ 거절·만료는 막지 않는다 — 막으면 그 제안이 영원히 `PROPOSED` 로 남는다.
+
+        🔴 다만 그 문제를 `OPEN` 으로 **되살리지는 않는다.**
+        """
+        _force_exception(conn, status, closed=D6)
+        row = service.reject_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=proposed,
+            as_of=D8,
+            rejected_by=OPERATOR,
+            rejection_reason="문제가 사라졌다",
+        )
+        assert row.status == "REJECTED"
+        assert _exception_row(conn)["status"] == status
+
+    def test_a_waiting_problem_is_approved(
+        self, conn: psycopg.Connection, proposed: str
+    ) -> None:
+        """★ 정상 경로를 막지 않는다."""
+        assert _exception_row(conn)["status"] == "PROPOSED"
+        row = service.approve_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposed, as_of=D8, approved_by=OPERATOR
+        )
+        assert row.status == "APPROVED"
+
+    def test_a_retry_still_returns_after_the_problem_closed(
+        self, conn: psycopg.Connection, proposed: str
+    ) -> None:
+        """★ 이미 승인해 둔 것을 다시 보냈다 — 새로 쓰는 것이 없으니 그대로 돌려준다."""
+        first = service.approve_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposed, as_of=D8, approved_by=OPERATOR
+        )
+        _force_exception(conn, "RESOLVED", closed=D9)
+        again = service.approve_proposal(
+            conn, sim_run_id=SIM, proposal_id=proposed, as_of=D8, approved_by=OPERATOR
+        )
+        assert again.approved_as_of == first.approved_as_of
+        assert _exception_row(conn)["status"] == "RESOLVED"
+
+
+class TestChronology:
+    """🔴 **과거 날짜로 새 제안을 세우면 «그날 살아 있던 제안» 이 둘이 된다.**
+
+    ⚠️ 부분 유일 인덱스는 «지금» 상태만 본다 — D6 에 거절된 제안은 지금 살아 있지
+       않으므로 인덱스가 조용하고, **D5 조회에서야** 둘 다 `PROPOSED` 로 나타난다.
+    """
+
+    def _rejected_at(self, conn: psycopg.Connection, when: date) -> str:
+        _exception(conn)
+        first = _create(conn)
+        assert first.proposal is not None
+        service.reject_proposal(
+            conn,
+            sim_run_id=SIM,
+            proposal_id=first.proposal.proposal_id,
+            as_of=when,
+            rejected_by=OPERATOR,
+            rejection_reason="다른 안을 보고 싶다",
+        )
+        return first.proposal.proposal_id
+
+    def test_a_backdated_proposal_is_refused(self, conn: psycopg.Connection) -> None:
+        self._rejected_at(conn, D6)
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            _create(conn, as_of=D5)
+        assert caught.value.code == service.PROPOSAL_HISTORY_CONFLICT
+        assert len(_rows(conn)) == 1
+        # 🔴 거절로 OPEN 이 된 문제를 되돌리지도 않았다.
+        assert _exception_row(conn)["status"] == "OPEN"
+
+    def test_the_day_the_previous_one_ended_is_allowed(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """⚠️ 같은 날은 허용한다 — 그날 이전 것은 이미 끝났고 새 것이 그날 섰다."""
+        self._rejected_at(conn, D6)
+        assert _create(conn, as_of=D6).created
+        assert _live_at(conn, D6) == ("PRP-EXC-FRESHNESS-1-2",)
+
+    def test_a_later_day_is_allowed(self, conn: psycopg.Connection) -> None:
+        self._rejected_at(conn, D6)
+        assert _create(conn, as_of=D8).created
+
+    def test_no_day_ever_has_two_live_proposals(self, conn: psycopg.Connection) -> None:
+        """🔴 **이 파일의 핵심 불변식.**
+
+        ```text
+        D5  A PROPOSED
+        D6  A REJECTED · B PROPOSED
+        ```
+
+        어느 날로 접어도 살아 있는 제안은 **하나 이하**여야 한다.
+        """
+        first = self._rejected_at(conn, D6)
+        second = _create(conn, as_of=D6)
+        assert second.proposal is not None
+
+        assert _live_at(conn, D5) == (first,)
+        assert _live_at(conn, D6) == (second.proposal.proposal_id,)
+        for day in (D1, D5, D6, D8, D9):
+            assert len(_live_at(conn, day)) <= 1, day
+
+        # ★ 그날 상태도 맞는다 — D5 에는 B 가 아예 없고, D6 에는 A 가 거절이다.
+        at_five = {one.proposal_id: one.status for one in
+                   service.list_proposals(conn, sim_run_id=SIM, as_of=D5)}
+        assert at_five == {first: "PROPOSED"}
+        at_six = {one.proposal_id: one.status for one in
+                  service.list_proposals(conn, sim_run_id=SIM, as_of=D6)}
+        assert at_six == {first: "REJECTED", second.proposal.proposal_id: "PROPOSED"}
+
+    def test_a_proposal_whose_end_cannot_be_dated_stops_the_line(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 `EXECUTED` 는 «언제» 됐는지 적는 칸이 없다 (Commit 6) — 앞뒤를 못 세운다.
+
+        ⚠️ DB 는 이 행을 받는다(제약이 상태 어휘만 본다). 그래서 응용이 멈춰야 한다.
+        """
+        _exception(conn)
+        _create(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {TMP_SCHEMA}.logistics_action_proposals SET status = 'EXECUTED'"
+            )
+        conn.commit()
+
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            _create(conn, as_of=D9)
+        assert caught.value.code == service.PROPOSAL_HISTORY_CONFLICT
+        assert len(_rows(conn)) == 1
 
 
 class TestAtomicity:
@@ -1021,7 +1401,8 @@ class TestFromRealInvestigation:
             action="SALES_PRIORITY_REQUEST",
             parameters={"lot_id": LOT, **parameters},
             rationale="우선 판매 후보",
-            evidence_refs=[1],
+            # ★ 선행 조회 전부를 인용한다 — 없는 번호는 `evaluate_options` 가 지운다.
+            evidence_refs=[1, 2, 3, 4],
         )
         return run_investigation(
             conn,
@@ -1078,6 +1459,42 @@ class TestFromRealInvestigation:
         assert outcome.reason == service.IMPACT_INFEASIBLE
         assert _rows(conn) == ()
         assert _exception_row(conn) == {"status": "OPEN", "proposed_as_of": None}
+
+    def test_the_evidence_keeps_what_the_tools_actually_answered(
+        self, conn: psycopg.Connection
+    ) -> None:
+        """🔴 §43 — *"그때 잔량이 얼마였길래 이 제안이 나왔나"* 에 **다시 묻지 않고** 답한다.
+
+        ```text
+        D5 원장 잔량  700kg  (입고 1,000 − D5 출고 300)
+        D8 출고 200 뒤 500kg  ← 오늘 Tool 을 다시 돌리면 이 값이 나온다
+        ```
+
+        답을 안 남기면 되짚을 때 Tool 을 다시 돌리게 되고, 그러면 **오늘 값**을 그날의
+        근거처럼 보여 주게 된다.
+        """
+        _lot(conn)
+        _exception(conn)
+        result = self._investigate(conn)
+        outcome = service.create_proposal(
+            conn, result=result, as_of=D5, proposed_by=OPERATOR
+        )
+        assert outcome.created
+
+        (row,) = _rows(conn)
+        cited = {one["tool_name"]: one for one in row.evidence_refs}
+        assert "get_lot" in cited, sorted(cited)
+        # ★ `get_lot` 은 `LotView` 를 낸다 — 사실은 `lot` 안에 있고, «없다» 도 답이다.
+        answer = cited["get_lot"]["answer"]
+        assert answer is not None
+        assert answer["lot"]["lot_id"] == LOT
+        # 🔴 **그날** 값이 굳어 있다. Decimal 은 문자열로 — float 을 지나면 흔들린다.
+        assert answer["lot"]["remaining_qty_kg"] == "700.000000"
+        assert isinstance(answer["lot"]["remaining_qty_kg"], str)
+        # ⚠️ 계산된 사실(@property)도 함께 실린다 — `jsonable` 이 그것까지 낮춘다.
+        assert "freshness_remaining_ratio" in answer["lot"]
+        # ⚠️ 무엇을 못 봤는지도 함께 남는다.
+        assert isinstance(cited["get_lot"]["uncertainties"], list)
 
     def test_a_measurable_quantity_becomes_an_approvable_proposal(
         self, conn: psycopg.Connection

@@ -125,7 +125,11 @@ def _result(
                 tool_name="get_lot",
                 arguments={"lot_id": LOT},
                 status=ToolCallStatus.SUCCESS,
+                # 🔴 **그때 Tool 이 낸 답.** 이것이 없으면 나중에 되짚으려고 Tool 을
+                #    다시 돌리게 되고, 그 값은 그날 값이 아니다.
+                answer={"lot_id": LOT, "remaining_qty_kg": Decimal(700)},
                 observed_as_of=D1,
+                uncertainties=("COMMITMENT_UNRESOLVED",),
             ),
             ToolCallRecord(
                 sequence=2,
@@ -204,6 +208,8 @@ def _stub_repository(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[
     calls: dict[str, list[Any]] = {"insert": [], "mark": [], "reopen": [], "transition": []}
     defaults: dict[str, Any] = {
         "exception_status": lambda *_, **__: "OPEN",
+        # ★ 대체 대상 · 날짜 단조성 · 중복을 **한 번 읽은 목록**으로 다 가린다.
+        "select_proposals": lambda *_, **__: (),
         "live_proposals_for": lambda *_, **__: (),
         "next_proposal_id": lambda *_, **__: PRP,
         "insert_proposal": lambda _conn, *, row: calls["insert"].append(row) or row,
@@ -567,7 +573,7 @@ class TestCreatePreconditions:
             parameters={"lot_id": LOT},
         )
         standing = _row(proposal_key=key)
-        calls = _stub_repository(monkeypatch, live_proposals_for=lambda *_, **__: (standing,))
+        calls = _stub_repository(monkeypatch, select_proposals=lambda *_, **__: (standing,))
         outcome = service.create_proposal(
             conn, result=_result(), as_of=D5, proposed_by="operator"
         )
@@ -581,7 +587,7 @@ class TestCreatePreconditions:
     ) -> None:
         """§47 · §48 — 한 문제에 승인 대기 제안이 둘이면 사람이 무엇을 승인하는지 모른다."""
         other = _row(proposal_key="아주-다른-지문", status="APPROVED")
-        calls = _stub_repository(monkeypatch, live_proposals_for=lambda *_, **__: (other,))
+        calls = _stub_repository(monkeypatch, select_proposals=lambda *_, **__: (other,))
         outcome = service.create_proposal(
             conn, result=_result(), as_of=D5, proposed_by="operator"
         )
@@ -603,6 +609,300 @@ class TestCreatePreconditions:
         _stub_repository(monkeypatch)
         with pytest.raises(ValueError, match="as_of"):
             service.create_proposal(conn, result=_result(), as_of=D8, proposed_by="operator")
+
+
+class TestSupersedeBoundary:
+    """🔴 **남의 문제의 대응안을 닫지 않는다.**
+
+    `_supersede` 는 `sim_run_id` 와 `proposal_id` 만 보고 `UPDATE` 한다 — 검증이 없으면
+    같은 실행의 **다른 Exception** 제안을 그대로 `SUPERSEDED` 로 만들고, 그 문제는
+    대응안을 잃은 채 잃었다는 사실조차 안 남는다.
+    """
+
+    def test_a_proposal_from_another_exception_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        elsewhere = _row(proposal_id="PRP-OTHER-1", exception_id="EX-B")
+        calls = _stub_repository(
+            monkeypatch,
+            select_proposals=lambda *_, **__: (),
+            select_proposal=lambda *_, **__: elsewhere,
+        )
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(),
+                as_of=D5,
+                proposed_by="operator",
+                supersedes="PRP-OTHER-1",
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+        # 🔴 아무것도 안 썼다 — 남의 제안도, 이 문제의 제안도.
+        assert calls["insert"] == []
+        assert calls["mark"] == []
+        assert conn.commits == 0
+
+    def test_a_proposal_that_does_not_exist_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _stub_repository(monkeypatch, select_proposal=lambda *_, **__: None)
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn, result=_result(), as_of=D5, proposed_by="operator", supersedes="PRP-NOPE"
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+        assert calls["insert"] == []
+
+    def test_an_already_finished_proposal_cannot_be_superseded(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """닫을 것이 없다 — 이미 끝난 제안을 또 닫으면 끝난 날이 둘이 된다."""
+        done = _row(status="REJECTED", rejected_as_of=D5, rejected_by="x", rejection_reason="y")
+        calls = _stub_repository(monkeypatch, select_proposals=lambda *_, **__: (done,))
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(),
+                as_of=D5,
+                proposed_by="operator",
+                supersedes=done.proposal_id,
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+        assert calls["insert"] == []
+
+    def test_a_replayed_supersede_is_a_retry_not_a_conflict(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **성공한 요청의 재시도가 예외로 튀면 안 된다.**
+
+        첫 호출이 대체를 끝냈으므로 두 번째 호출이 보는 대상은 이미 `SUPERSEDED` 다.
+        대체 검증을 중복 판정 **앞**에 두면 그 재시도가 `SUPERSEDE_TARGET_MISMATCH` 로
+        돌아가고, 사람은 성공한 제안을 다시 올리려 한다.
+        """
+        key = proposal_key_for(
+            sim_run_id=SIM,
+            exception_id=EXC,
+            action_type="SALES_PRIORITY_REQUEST",
+            parameters={"lot_id": LOT},
+        )
+        closed = _row(proposal_id="PRP-1", status="SUPERSEDED", superseded_as_of=D5)
+        standing = _row(proposal_id="PRP-2", proposal_key=key, previous_proposal_id="PRP-1")
+        calls = _stub_repository(
+            monkeypatch, select_proposals=lambda *_, **__: (closed, standing)
+        )
+        outcome = service.create_proposal(
+            conn, result=_result(), as_of=D5, proposed_by="operator", supersedes="PRP-1"
+        )
+        assert outcome.status == "REUSED"
+        assert outcome.proposal is standing
+        assert calls["insert"] == []
+        assert conn.commits == 0
+
+    def test_a_replacement_cannot_predate_what_it_replaces(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """대체된 날이 제안된 날보다 앞설 수 없다. ⚠️ DB CHECK 도 막지만 «왜» 를 못 남긴다."""
+        later = _row(proposal_id="PRP-LATER", proposal_key="다른-지문", proposed_as_of=D8)
+        calls = _stub_repository(monkeypatch, select_proposals=lambda *_, **__: (later,))
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn,
+                result=_result(as_of=D5),
+                as_of=D5,
+                proposed_by="operator",
+                supersedes="PRP-LATER",
+            )
+        assert caught.value.code == service.SUPERSEDE_TARGET_MISMATCH
+        assert calls["insert"] == []
+
+    def test_the_live_proposal_of_this_exception_is_superseded(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 제대로 된 대체는 그대로 돈다 — 검증이 정상 경로를 막지 않는다."""
+        standing = _row(proposal_key="다른-지문")
+        moved: list[Any] = []
+        calls = _stub_repository(
+            monkeypatch,
+            select_proposals=lambda *_, **__: (standing,),
+            transition_proposal=lambda *_, **kw: moved.append(kw) or 1,
+        )
+        outcome = service.create_proposal(
+            conn,
+            result=_result(),
+            as_of=D5,
+            proposed_by="operator",
+            supersedes=standing.proposal_id,
+        )
+        assert outcome.created
+        assert moved[0]["to_status"] == "SUPERSEDED"
+        assert calls["insert"][0].previous_proposal_id == standing.proposal_id
+
+
+class TestChronology:
+    """🔴 **과거 날짜로 새 제안을 세우면 그날 살아 있던 제안이 둘이 된다.**
+
+    부분 유일 인덱스는 «지금» 상태만 보므로 이 겹침을 못 막는다 — 과거로 접었을 때만
+    드러난다.
+    """
+
+    def _history(self, *rows: ProposalRow) -> Any:
+        return lambda *_, **__: rows
+
+    def test_a_backdated_proposal_is_refused(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        closed = _row(status="REJECTED", rejected_as_of=D6, rejected_by="x", rejection_reason="y")
+        calls = _stub_repository(monkeypatch, select_proposals=self._history(closed))
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn, result=_result(as_of=D5), as_of=D5, proposed_by="operator"
+            )
+        assert caught.value.code == service.PROPOSAL_HISTORY_CONFLICT
+        assert calls["insert"] == []
+        assert conn.commits == 0
+
+    def test_the_day_the_previous_one_ended_is_allowed(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """⚠️ 같은 날은 허용한다 — 그날 이전 것은 이미 끝났고 새 것이 그날 섰다."""
+        closed = _row(status="REJECTED", rejected_as_of=D6, rejected_by="x", rejection_reason="y")
+        calls = _stub_repository(monkeypatch, select_proposals=self._history(closed))
+        outcome = service.create_proposal(
+            conn, result=_result(as_of=D6), as_of=D6, proposed_by="operator"
+        )
+        assert outcome.created
+        assert calls["insert"][0].proposed_as_of == D6
+
+    def test_a_later_day_is_allowed(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        closed = _row(status="EXPIRED", expired_as_of=D6)
+        _stub_repository(monkeypatch, select_proposals=self._history(closed))
+        assert service.create_proposal(
+            conn, result=_result(as_of=D8), as_of=D8, proposed_by="operator"
+        ).created
+
+    def test_a_proposal_whose_end_cannot_be_dated_stops_the_line(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 `EXECUTED` 는 «언제» 됐는지 적는 칸이 없다 (Commit 6) — 앞뒤를 못 세운다."""
+        executed = _row(status="EXECUTED", approved_as_of=None)
+        calls = _stub_repository(monkeypatch, select_proposals=self._history(executed))
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.create_proposal(
+                conn, result=_result(as_of=D8), as_of=D8, proposed_by="operator"
+            )
+        assert caught.value.code == service.PROPOSAL_HISTORY_CONFLICT
+        assert calls["insert"] == []
+
+
+class TestLatestTerminal:
+    """순수 함수 — 기존 제안들이 **마지막으로 끝난 날**."""
+
+    def test_nothing_finished_yet(self) -> None:
+        assert repository.latest_terminal_as_of([_row()]) == (None, ())
+
+    def test_the_latest_of_several(self) -> None:
+        rows = [
+            _row(proposal_id="A", status="REJECTED", rejected_as_of=D6, rejected_by="x",
+                 rejection_reason="y"),
+            _row(proposal_id="B", status="SUPERSEDED", superseded_as_of=D8),
+        ]
+        assert repository.latest_terminal_as_of(rows) == (D8, ())
+
+    def test_an_undateable_end_is_named(self) -> None:
+        rows = [_row(proposal_id="A", status="FAILED")]
+        assert repository.latest_terminal_as_of(rows) == (None, ("A",))
+
+    def test_an_empty_history_has_no_floor(self) -> None:
+        assert repository.latest_terminal_as_of([]) == (None, ())
+
+
+class TestStaleApproval:
+    """🔴 **이미 닫힌 문제의 제안을 승인하지 않는다.**
+
+    사람이 보던 목록이 낡았을 수 있다 — 그 사이 재탐지가 문제를 닫았는데 승인이
+    들어가면 *"없어진 문제에 대응하기로 했다"* 가 장부에 남는다.
+    """
+
+    def _approve(self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, status: Any) -> Any:
+        moved: list[Any] = []
+        monkeypatch.setattr(repository, "select_proposal", lambda *_, **__: _row())
+        monkeypatch.setattr(repository, "exception_status", lambda *_, **__: status)
+        monkeypatch.setattr(
+            repository, "transition_proposal", lambda *_, **kw: moved.append(kw) or 1
+        )
+        return moved
+
+    @pytest.mark.parametrize("status", ["RESOLVED", "DISMISSED", "OPEN", None])
+    def test_a_problem_that_is_not_waiting_refuses_the_approval(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, status: Any
+    ) -> None:
+        moved = self._approve(conn, monkeypatch, status)
+        with pytest.raises(service.ProposalStateConflict) as caught:
+            service.approve_proposal(
+                conn, sim_run_id=SIM, proposal_id=PRP, as_of=D8, approved_by="operator"
+            )
+        assert caught.value.code == service.STALE_PROPOSAL
+        # 🔴 UPDATE 를 **시작조차 안 했다.**
+        assert moved == []
+        assert conn.commits == 0
+
+    def test_a_waiting_problem_is_approved(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        moved = self._approve(conn, monkeypatch, "PROPOSED")
+        service.approve_proposal(
+            conn, sim_run_id=SIM, proposal_id=PRP, as_of=D8, approved_by="operator"
+        )
+        assert moved[0]["to_status"] == "APPROVED"
+        # 🔴 막는 것은 읽기가 아니라 **SQL 조건**이다 — 읽고 쓰는 사이의 틈을 없앤다.
+        assert moved[0]["require_exception_status"] == "PROPOSED"
+        assert conn.commits == 1
+
+    @pytest.mark.parametrize("decide", ["reject", "expire"])
+    def test_a_closed_problem_can_still_be_tidied_up(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch, decide: str
+    ) -> None:
+        """⚠️ 거절·만료는 이 검사를 **안 한다** — 막으면 그 제안이 영원히 `PROPOSED` 다."""
+        moved = self._approve(conn, monkeypatch, "RESOLVED")
+        monkeypatch.setattr(repository, "live_proposals_for", lambda *_, **__: ())
+        monkeypatch.setattr(repository, "reopen_exception", lambda *_, **__: 0)
+        if decide == "reject":
+            service.reject_proposal(
+                conn,
+                sim_run_id=SIM,
+                proposal_id=PRP,
+                as_of=D8,
+                rejected_by="operator",
+                rejection_reason="필요 없어졌다",
+            )
+        else:
+            service.expire_proposal(conn, sim_run_id=SIM, proposal_id=PRP, as_of=D8)
+        assert moved[0]["to_status"] == ("REJECTED" if decide == "reject" else "EXPIRED")
+        # 🔴 거절·만료의 UPDATE 에는 Exception 조건이 안 실린다.
+        assert moved[0]["require_exception_status"] is None
+
+    def test_a_retry_still_returns_even_after_the_problem_closed(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ 이미 같은 사람이 같은 날 승인해 둔 것을 다시 보냈다 — **새로 쓰는 것이 없다.**
+
+        여기서 막으면 사람은 *"승인이 안 됐나"* 하고 또 누른다.
+        """
+        already = _row(status="APPROVED", approved_as_of=D8, approved_by="operator")
+        monkeypatch.setattr(repository, "select_proposal", lambda *_, **__: already)
+        monkeypatch.setattr(repository, "exception_status", lambda *_, **__: "RESOLVED")
+        monkeypatch.setattr(repository, "transition_proposal", _never_transitions)
+        row = service.approve_proposal(
+            conn, sim_run_id=SIM, proposal_id=PRP, as_of=D8, approved_by="operator"
+        )
+        assert row is already
+        assert conn.commits == 0
+
+
+def _never_transitions(*_: Any, **__: Any) -> int:
+    raise AssertionError("재시도인데 UPDATE 를 걸었다")
 
 
 class TestStoredPayload:
@@ -641,6 +941,26 @@ class TestStoredPayload:
         assert [one["tool_name"] for one in stored.evidence_refs] == ["get_lot"]
         assert stored.evidence_refs[0]["sequence"] == 1
         assert stored.evidence_refs[0]["observed_as_of"] == D1.isoformat()
+
+    def test_the_tool_answer_itself_is_preserved(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """🔴 **그때 무슨 답이 왔는지**까지 남긴다.
+
+        호출과 인자만 있으면 *"그때 잔량이 얼마였길래 이 제안이 나왔나"* 에 답하려고
+        **Tool 을 다시 돌리게** 된다 — 그 값은 오늘 값이지 그날 값이 아니다.
+        """
+        (cited,) = self._stored(conn, monkeypatch).evidence_refs
+        assert cited["answer"] == {"lot_id": LOT, "remaining_qty_kg": "700"}
+        # ⚠️ `Decimal` 은 문자열로 낮춘다 — `float` 을 지나면 값이 조용히 흔들린다.
+        assert isinstance(cited["answer"]["remaining_qty_kg"], str)
+
+    def test_what_the_tool_could_not_see_is_preserved_too(
+        self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """★ *"확인했고 문제 없음"* 과 *"확인을 못 했음"* 의 구별이 근거에도 남아야 한다."""
+        (cited,) = self._stored(conn, monkeypatch).evidence_refs
+        assert cited["uncertainties"] == ["COMMITMENT_UNRESOLVED"]
 
     def test_the_impact_is_the_tool_answer_not_a_new_number(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch

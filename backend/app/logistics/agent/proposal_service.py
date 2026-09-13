@@ -62,6 +62,9 @@ __all__ = [
     "NO_RECOMMENDED_OPTION",
     "OPTION_REJECTED",
     "PARAMETERS_INVALID",
+    "PROPOSAL_HISTORY_CONFLICT",
+    "STALE_PROPOSAL",
+    "SUPERSEDE_TARGET_MISMATCH",
     "ProposalNotFound",
     "ProposalOutcome",
     "ProposalStateConflict",
@@ -104,6 +107,17 @@ EXCEPTION_NOT_LIVE = "EXCEPTION_NOT_LIVE"
 LIVE_PROPOSAL_EXISTS = "LIVE_PROPOSAL_EXISTS"
 
 
+# ── 상태 충돌 어휘 (`ProposalStateConflict.code`) ────────────────────────
+
+#: 🔴 대체하려는 제안이 **이 문제의 살아 있는 제안이 아니다.**
+#:    다른 Exception · 다른 실행 · 이미 끝난 제안 · 없는 ID 를 모두 덮는다.
+SUPERSEDE_TARGET_MISMATCH = "SUPERSEDE_TARGET_MISMATCH"
+#: 🔴 승인하려는데 **그 문제가 이미 다른 상태다.** 사람이 보던 화면이 낡았다.
+STALE_PROPOSAL = "STALE_PROPOSAL"
+#: 🔴 이전 제안이 끝난 날보다 **앞선 날짜**로 새 제안을 세우려 한다.
+PROPOSAL_HISTORY_CONFLICT = "PROPOSAL_HISTORY_CONFLICT"
+
+
 class ProposalNotFound(LookupError):
     """그 실행에 그 제안이 없다."""
 
@@ -112,10 +126,13 @@ class ProposalStateConflict(RuntimeError):
     """지금 상태에서 할 수 없는 결정이다.
 
     ```text
-    ALREADY_APPROVED   이미 승인됐다 — 다른 사람이거나 다른 날이다
-    ALREADY_REJECTED   이미 거절됐다 — 〃
-    ALREADY_EXPIRED    이미 만료됐다 — 〃
-    STATE_CONFLICT     그 밖 (거절된 것을 승인하려는 등)
+    ALREADY_APPROVED            이미 승인됐다 — 다른 사람이거나 다른 날이다
+    ALREADY_REJECTED            이미 거절됐다 — 〃
+    ALREADY_EXPIRED             이미 만료됐다 — 〃
+    STALE_PROPOSAL              그 문제가 이미 다른 상태다 (닫혔거나 대응 대기가 아니다)
+    SUPERSEDE_TARGET_MISMATCH   대체 대상이 이 문제의 살아 있는 제안이 아니다
+    PROPOSAL_HISTORY_CONFLICT   이전 제안이 끝난 날보다 앞선 날짜로 세우려 한다
+    STATE_CONFLICT              그 밖 (거절된 것을 승인하려는 등)
     ```
 
     ★ **같은 사람이 같은 날 같은 내용으로** 다시 부른 것은 충돌이 아니라 **재시도**다 —
@@ -202,11 +219,24 @@ def select_proposal_option(
 
 
 def _evidence_snapshot(result: InvestigationResult, option: EvaluatedOption) -> list[Any]:
-    """인용된 근거를 **실제 Tool 호출 한 벌로** 남긴다.
+    """인용된 근거를 **그때 Tool 이 낸 답까지** 남긴다.
+
+    ```text
+    sequence · tool_name · arguments   무엇을 어떻게 물었나
+    answer                             🔴 **그때 무슨 답이 왔나**
+    observed_as_of · uncertainties     그 답이 언제 것이고 무엇을 못 봤나
+    ```
 
     🔴 **번호만 적지 않는다.** `evidence_refs` 는 그 조사 안의 순번인데 조사 자체가 DB 에
        안 남으므로(§44), 번호만 저장하면 나중에 *"왜 이 제안이 나왔나"* 를 되짚을 수
        없다 — 가리킬 곳이 없는 포인터가 된다 (§43).
+
+    🔴 **답까지 있어야 되짚을 수 있다.** 호출과 인자만 남기면 *"그때 잔량이 얼마였길래
+       이 제안이 나왔나"* 에 답하려고 **Tool 을 다시 돌리게** 된다 — 그 값은 그날 값이
+       아니라 오늘 값이고, 그것을 근거처럼 보여 주면 기록이 거짓이 된다.
+
+    ⚠️ **여기서 다시 계산하지 않는다.** `jsonable(record.answer)` 로 **그때 그 답**을
+       모양만 낮춰 옮긴다 (`Decimal` 은 문자열로 — `float` 을 지나면 값이 흔들린다).
     """
     cited = set(option.evidence_refs)
     return [
@@ -214,7 +244,10 @@ def _evidence_snapshot(result: InvestigationResult, option: EvaluatedOption) -> 
             "sequence": record.sequence,
             "tool_name": record.tool_name,
             "arguments": jsonable(dict(record.arguments)),
+            # 🔴 그때 Tool 이 낸 답 **그대로**. 다시 부르지 않는다.
+            "answer": jsonable(record.answer),
             "observed_as_of": jsonable(record.observed_as_of),
+            "uncertainties": jsonable(record.uncertainties),
         }
         for record in result.tool_calls
         if record.sequence in cited
@@ -243,7 +276,9 @@ def create_proposal(
     ③ 인자가 맞나          Commit 4 의 argument model 그대로 (§50)
     ④ 문제가 살아 있나      RESOLVED · DISMISSED 에는 안 세운다
     ⑤ 이미 있나            같은 지문이면 재시도 · 다른 안이면 안 세운다 (§47 · §48)
-    ⑥ 한 트랜잭션          INSERT + Exception OPEN→PROPOSED  ← 반쪽 상태를 안 남긴다
+    ⑥ 대체 대상이 맞나      🔴 **이 문제의 살아 있는 제안**인가 — 남의 문제를 안 닫는다
+    ⑦ 날짜가 앞서지 않나    🔴 이전 제안이 끝난 날보다 **뒤**여야 한다
+    ⑧ 한 트랜잭션          INSERT + Exception OPEN→PROPOSED  ← 반쪽 상태를 안 남긴다
     ```
 
     🔴 **`decision_owner` 를 모델 값으로 저장하지 않는다.** 누가 결정하는가는 역할 경계
@@ -256,8 +291,14 @@ def create_proposal(
     :param as_of: 시뮬레이션 영업일. 🔴 `date.today()` 를 안 쓴다 (§20).
     :param supersedes: 이 제안이 **대체할** 살아 있는 제안 (§29). 주면 그것을 먼저
         `SUPERSEDED` 로 닫고 새 행이 `previous_proposal_id` 로 가리킨다.
+        🔴 **반드시 이 조사의 Exception 것이어야 한다** — 아니면 아무것도 안 쓰고
+        `SUPERSEDE_TARGET_MISMATCH` 로 멈춘다. 남의 문제의 대응안을 닫지 않는다.
         ⚠️ **자동 대체는 없다** — 부르는 쪽이 명시할 때만 일어난다.
-    :returns: 만들었나 · 재시도였나 · 안 만들었나 + 그 사유. 🔴 **예외를 안 쓴다.**
+    :returns: 만들었나 · 재시도였나 · 안 만들었나 + 그 사유.
+        ⚠️ **«안 만들었다» 는 값으로 돌려주고**(추천이 없다 · 이미 있다 …),
+        **«그렇게 부르면 안 된다» 는 예외로 올린다**(대체 대상이 틀렸다 · 날짜가
+        앞선다). 앞엣것은 정상적인 답이고 뒤엣것은 부르는 쪽의 실수다 — 둘을 한
+        갈래로 접으면 잘못된 호출이 «오늘은 제안할 것이 없었다» 로 조용히 묻힌다.
     """
     if not proposed_by.strip():
         raise ValueError("proposed_by 가 비었다 — 누가 올렸는지 못 대는 제안은 만들지 않는다")
@@ -301,16 +342,17 @@ def create_proposal(
         #    **값이 다르다.** 두 상태기계를 섞으면 RESOLVED 된 문제에 제안이 선다.
         return ProposalOutcome(status="SKIPPED", reason=f"{EXCEPTION_NOT_LIVE}:{status}")
 
+    # ★ 이 문제의 제안을 **한 번만** 읽어 대체 대상 · 날짜 · 중복 셋을 모두 가린다.
+    history = repository.select_proposals(
+        conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
+    )
     key = proposal_key_for(
         sim_run_id=result.sim_run_id,
         exception_id=result.exception_id,
         action_type=option.action,
         parameters=parameters,
     )
-    live = repository.live_proposals_for(
-        conn, sim_run_id=result.sim_run_id, exception_id=result.exception_id
-    )
-    for existing in live:
+    for existing in (one for one in history if one.live):
         if existing.proposal_id == supersedes:
             continue
         if existing.proposal_key == key:
@@ -319,6 +361,17 @@ def create_proposal(
         return ProposalOutcome(
             status="SKIPPED", reason=f"{LIVE_PROPOSAL_EXISTS}:{existing.proposal_id}"
         )
+
+    # ★ **대체 대상 검증과 날짜 검사는 둘 다 중복 판정 뒤다.** 순수한 재시도(REUSED)는
+    #   새 행을 안 만드니 따질 것이 없고, 앞에서 막으면 **성공한 요청의 재시도가 예외로
+    #   튄다** — 첫 호출이 대체를 이미 끝냈으므로 대상은 그때 `SUPERSEDED` 가 돼 있다.
+    #   ⚠️ 위 반복문이 `supersedes` 와 같은 ID 를 건너뛰는 것은 안전하다: `history` 는
+    #      **이 Exception 의** 제안뿐이라, 남의 제안 ID 로는 아무것도 안 건너뛴다.
+    if supersedes is not None:
+        _check_supersede_target(
+            conn, history=history, result=result, supersedes=supersedes, as_of=as_of
+        )
+    _check_chronology(history, as_of=as_of, exception_id=result.exception_id)
 
     row = ProposalRow(
         proposal_id=repository.next_proposal_id(conn, exception_id=result.exception_id),
@@ -360,6 +413,102 @@ def create_proposal(
         conn.rollback()
         raise
     return ProposalOutcome(status="CREATED", proposal=row)
+
+
+def _check_supersede_target(
+    conn: Any,
+    *,
+    history: Sequence[ProposalRow],
+    result: InvestigationResult,
+    supersedes: str,
+    as_of: date,
+) -> None:
+    """대체 대상이 **이 문제의 살아 있는 제안**인지 본다. 🔴 아니면 아무것도 안 쓴다.
+
+    ```text
+    이 문제의 PROPOSED        ✅ 대체한다
+    다른 Exception 의 제안    🔴 SUPERSEDE_TARGET_MISMATCH
+    다른 실행(sim_run) 의 제안 🔴 〃
+    없는 ID                   🔴 〃
+    이미 끝난 제안            🔴 〃  (닫을 것이 없다)
+    대상보다 앞선 날짜         🔴 〃  (대체된 날이 제안된 날보다 앞설 수 없다)
+    ```
+
+    🔴 **이 검사가 없으면 남의 문제의 대응안을 닫는다.** `_supersede` 는 `sim_run_id` 와
+       `proposal_id` 만 보고 `UPDATE` 하므로, 같은 실행 안의 **다른 Exception** 제안을
+       그대로 `SUPERSEDED` 로 만들어 버린다 — 그 문제는 대응안을 잃고, 잃었다는 사실이
+       어디에도 안 적힌다.
+
+    ★ `history` 는 **이 Exception 의** 제안 전부다. 거기 없으면 그 자체가 «남의 것»
+      이라는 증거라, 대부분의 경우 DB 를 더 안 읽는다.
+    """
+    for one in history:
+        if one.proposal_id != supersedes:
+            continue
+        if one.status != "PROPOSED":
+            raise ProposalStateConflict(
+                SUPERSEDE_TARGET_MISMATCH,
+                f"{supersedes} 는 {one.status} 라 대체할 수 없다 — 이미 끝난 제안이다",
+            )
+        if as_of < one.proposed_as_of:
+            # ⚠️ DB CHECK(`decided_order`)도 막지만, 그쪽은 제약 위반 문자열만 남긴다.
+            #    여기서 막아야 «왜» 안 되는지가 사람에게 간다.
+            raise ProposalStateConflict(
+                SUPERSEDE_TARGET_MISMATCH,
+                f"{supersedes} 는 {one.proposed_as_of} 에 섰는데 {as_of} 로 대체하려 한다"
+                " — 제안된 날보다 앞서 대체될 수 없다",
+            )
+        return
+
+    # 여기까지 왔으면 이 Exception 의 것이 아니다. **왜** 아닌지를 정확히 적는다.
+    elsewhere = repository.select_proposal(
+        conn, sim_run_id=result.sim_run_id, proposal_id=supersedes
+    )
+    if elsewhere is not None:
+        raise ProposalStateConflict(
+            SUPERSEDE_TARGET_MISMATCH,
+            f"{supersedes} 는 {elsewhere.exception_id} 의 제안이다 —"
+            f" {result.exception_id} 의 제안을 세우며 남의 문제의 대응안을 닫지 않는다",
+        )
+    raise ProposalStateConflict(
+        SUPERSEDE_TARGET_MISMATCH,
+        f"{result.sim_run_id} 에 {supersedes} 가 없다 — 대체할 대상이 없다",
+    )
+
+
+def _check_chronology(
+    history: Sequence[ProposalRow], *, as_of: date, exception_id: str
+) -> None:
+    """새 제안이 **이전 제안이 끝난 날보다 뒤**인지 본다.
+
+    ```text
+    이전 제안  D5 제안 · D6 거절
+    새 제안    D5  🔴 거부 — D5 로 접으면 «그날 살아 있던 제안» 이 둘이다
+               D6  ✅ 허용 — 그날 이전 것은 이미 거절이다
+               D7  ✅ 허용
+    ```
+
+    🔴 **부분 유일 인덱스가 이것을 못 막는다.** 그 인덱스는 «지금» 상태만 보는데,
+       겹침은 **과거로 접었을 때만** 드러난다 — D6 에 거절된 제안은 지금 살아 있지
+       않으므로 인덱스는 조용하고, D5 조회에서야 둘 다 `PROPOSED` 로 나타난다.
+
+    ⚠️ 끝난 날이 **같은 날**인 것은 허용한다. 그날 이전 제안은 이미 끝났고 새 제안이
+       그날 섰다 — 겹치지 않는다.
+    """
+    latest, unorderable = repository.latest_terminal_as_of(history)
+    if unorderable:
+        # 🔴 순서를 못 세우면 **통과시키지 않는다** (Commit 6 이 열어야 할 칸이다).
+        raise ProposalStateConflict(
+            PROPOSAL_HISTORY_CONFLICT,
+            f"{exception_id} 에 끝난 날을 못 대는 제안이 있다 ({', '.join(unorderable)}) —"
+            " 그 앞뒤를 모르면 새 제안의 날짜가 겹치는지 알 수 없다",
+        )
+    if latest is not None and as_of < latest:
+        raise ProposalStateConflict(
+            PROPOSAL_HISTORY_CONFLICT,
+            f"{exception_id} 의 이전 제안이 {latest} 에 끝났는데 새 제안을 {as_of} 로"
+            " 세우려 한다 — 그날로 접으면 살아 있던 제안이 둘이 된다",
+        )
 
 
 def _supersede(conn: Any, *, sim_run_id: str, proposal_id: str, as_of: date) -> None:
@@ -409,6 +558,20 @@ def approve_proposal(
 
     🔴 **타 부서를 부르지 않는다.** `SALES_PRIORITY_REQUEST` 승인은 *"영업에 우선판매를
        요청해도 좋다"* 까지다 — Sales · Purchase 모듈 호출은 Commit 6 이다.
+
+    🔴 **이미 닫힌 문제의 제안은 승인하지 않는다** (stale approval). 사람이 보던 목록이
+       낡았을 수 있다 — 그 사이에 재탐지가 문제를 `RESOLVED` 로 닫았는데 승인이 그대로
+       들어가면, *"없어진 문제에 대응하기로 했다"* 가 장부에 남는다.
+
+    ```text
+    Exception PROPOSED   ✅ 승인한다 — 대응을 기다리는 상태다
+    RESOLVED · DISMISSED 🔴 STALE_PROPOSAL — 대응할 문제가 이미 닫혔다
+    OPEN                 🔴 STALE_PROPOSAL — 대응 대기 상태가 아니다(장부가 어긋나 있다)
+    없다                 🔴 STALE_PROPOSAL
+    ```
+
+    ⚠️ **거절·만료는 이 검사를 안 한다.** 닫힌 문제에 남은 제안을 사람이 치우는 것은
+       정상이고, 막으면 그 제안이 영원히 `PROPOSED` 로 남는다.
     """
     return _decide(
         conn,
@@ -420,6 +583,8 @@ def approve_proposal(
         note=note,
         # ⚠️ 승인은 Exception 을 안 건드린다 — 되돌릴 것도 없다.
         reopen_exception=False,
+        # 🔴 다만 **지금도 대응 대기인지**는 본다 (stale approval).
+        require_exception_status="PROPOSED",
     )
 
 
@@ -464,6 +629,9 @@ def expire_proposal(
 
     ⚠️ 행위자 칸이 없다. 사람이 내린 결정이 아니라 기한 경과이고, 없는 사람 이름을
        지어내 적는 것보다 **비워 두는 것**이 정직하다.
+
+    ★ 승인과 달리 **문제가 닫혔는지 안 본다** — 닫힌 문제에 남은 제안을 치우는 것이
+      바로 이 함수의 쓸모다. 다만 그 문제를 `OPEN` 으로 되살리지는 않는다.
     """
     return _decide(
         conn,
@@ -487,19 +655,37 @@ def _decide(
     actor: str | None,
     note: str | None,
     reopen_exception: bool,
+    require_exception_status: str | None = None,
 ) -> ProposalRow:
-    """결정 하나. **세 갈래를 가린다: 재시도 · 충돌 · 정상.**
+    """결정 하나. **네 갈래를 가린다: 재시도 · 충돌 · stale · 정상.**
 
     ```text
     이미 그 상태 + 같은 사람 + 같은 날   →  기존 행 그대로 (재시도 · §38 · §39)
     이미 그 상태 + 다른 사람/다른 날      →  ALREADY_{상태}
     아예 다른 상태                        →  STATE_CONFLICT
+    문제가 요구 상태가 아니다              →  STALE_PROPOSAL
     PROPOSED                              →  옮긴다
     ```
 
     🔴 **옮기는 UPDATE 에 `AND status = 'PROPOSED'` 가 있다** (§37). 두 사람이 동시에
-       눌러도 한 번만 먹고, 늦은 쪽은 `0` 을 받아 위의 세 갈래로 다시 내려간다 —
+       눌러도 한 번만 먹고, 늦은 쪽은 `0` 을 받아 위의 갈래로 다시 내려간다 —
        읽고 나서 쓰는 사이의 lost update 를 응용 코드로는 못 막는다.
+
+    🔴 **`require_exception_status` 도 같은 UPDATE 안에 실린다.** 먼저 읽어서 보는 것은
+       *"사람에게 왜 안 되는지 정확히 말하기 위해서"* 이고, **막는 것은 SQL 조건**이다 —
+       읽기 쪽에만 두면 **먼저 읽고 나중에 쓰는 사이에 재탐지가 커밋한** 변경을 못 보고
+       승인이 들어간다.
+
+    ⚠️ **닫는 틈은 «커밋된 변경» 까지다.** 이 조건은 잠금을 안 걸므로, 아직 커밋 안 된
+       남의 트랜잭션이 그 문제를 닫는 중이면 막지 못한다 — 그때 결과는 «승인 먼저,
+       해소 나중» 이라는 **정상적인 순서**와 같다(승인은 Exception 을 안 닫으므로 §7.1
+       의 재탐지가 그 뒤에 닫는 것이 원래 흐름이다). 승인 시점의 잠금으로 막을 수 있는
+       종류의 문제가 아니고, *"승인된 대응을 실행해도 되나"* 는 **실행 시점**(Commit 6)에
+       다시 물어야 한다.
+
+    ⚠️ **재시도는 이 검사보다 앞선다.** 이미 같은 사람이 같은 날 승인해 둔 것을 다시
+       보냈다면, 그 사이 문제가 닫혔더라도 **새로 쓰는 것이 없으므로** 기존 행을 그대로
+       돌려준다. 여기서 막으면 *"승인이 안 됐나"* 하고 사람이 또 누른다.
     """
     if actor is not None and not actor.strip():
         raise ValueError("결정한 사람이 비었다 — 빈 문자열은 «모른다» 를 «있다» 로 위장한다")
@@ -518,6 +704,13 @@ def _decide(
         return settled
     if row.status != "PROPOSED":
         raise _conflict(row, to_status=to_status)
+    if require_exception_status is not None:
+        _refuse_if_stale(
+            conn,
+            sim_run_id=sim_run_id,
+            row=row,
+            required=require_exception_status,
+        )
 
     try:
         changed = repository.transition_proposal(
@@ -529,6 +722,7 @@ def _decide(
             from_status="PROPOSED",
             actor=actor,
             note=note,
+            require_exception_status=require_exception_status,
         )
         if changed == 0:
             # 🔴 읽고 나서 쓰는 사이에 남이 먼저 옮겼다. 바뀐 행이 0 이라 되돌릴
@@ -541,6 +735,11 @@ def _decide(
             raced = _settled(fresh, to_status=to_status, as_of=as_of, actor=actor, note=note)
             if raced is not None:
                 return raced
+            if fresh.status == "PROPOSED" and require_exception_status is not None:
+                # 제안은 그대로다 → 막은 것은 **Exception 조건**이다. 그 사이에 닫혔다.
+                _refuse_if_stale(
+                    conn, sim_run_id=sim_run_id, row=fresh, required=require_exception_status
+                )
             raise _conflict(fresh, to_status=to_status)
 
         if reopen_exception:
@@ -554,6 +753,27 @@ def _decide(
     if decided is None:  # pragma: no cover - 방금 1 행을 바꾸고 커밋했다.
         raise ProposalNotFound(f"{sim_run_id} 에 {proposal_id} 가 없다")
     return decided
+
+
+def _refuse_if_stale(
+    conn: Any, *, sim_run_id: str, row: ProposalRow, required: str
+) -> None:
+    """그 문제가 지금도 요구 상태인가. 🔴 아니면 **아무것도 안 쓰고** 멈춘다.
+
+    ★ 실제로 막는 것은 `transition_proposal` 의 SQL 조건이다. 이 함수는 *"왜 안 되는지"*
+      를 사람이 읽을 수 있게 만든다 — `rowcount 0` 만으로는 «남이 먼저 눌렀다» 와
+      «문제가 닫혔다» 를 구별할 수 없다.
+    """
+    current = repository.exception_status(
+        conn, sim_run_id=sim_run_id, exception_id=row.exception_id
+    )
+    if current == required:
+        return
+    raise ProposalStateConflict(
+        STALE_PROPOSAL,
+        f"{row.exception_id} 가 {current or '없음'} 이라 {row.proposal_id} 를 승인할 수 없다"
+        f" — 승인은 그 문제가 {required} 일 때만이다 (보던 화면이 낡았다)",
+    )
 
 
 def _reopen_if_nothing_lives(conn: Any, *, sim_run_id: str, exception_id: str) -> None:

@@ -47,6 +47,7 @@ __all__ = [
     "ProposalStatus",
     "exception_status",
     "insert_proposal",
+    "latest_terminal_as_of",
     "live_proposals_for",
     "mark_exception_proposed",
     "next_proposal_id",
@@ -443,6 +444,41 @@ def project_proposal_at(row: ProposalRow, *, as_of: date) -> ProposalRow | None:
     return replace(row, status=status, **blanked)
 
 
+def latest_terminal_as_of(
+    rows: Sequence[ProposalRow],
+) -> tuple[date | None, tuple[str, ...]]:
+    """이 문제의 기존 제안들이 **마지막으로 끝난 날**. 없으면 `None`.
+
+    ```text
+    P1  D5 제안 · D6 거절      →  (D6, ())
+    P1  아직 살아 있다          →  (None, ())     ← 끝난 날이 없다
+    P1  EXECUTED (Commit 6)    →  (None, ('P1',)) ← 끝난 날을 못 댄다
+    ```
+
+    🔴 **새 제안이 그날보다 앞서면 «그날 살아 있던 제안» 이 둘이 된다.** 부분 유일
+       인덱스는 «지금» 상태만 보므로 이 겹침을 못 막는다 — 과거로 접었을 때만 보인다.
+
+    ⚠️ **`EXECUTED` · `FAILED` 는 끝난 날 칸이 없다** (Commit 6). 그런 행이 섞이면 순서를
+       못 세우므로 **이름을 돌려주고 부르는 쪽이 멈춘다** — 추측해서 통과시키지 않는다.
+
+    :returns: `(마지막으로 끝난 날, 순서를 못 세우는 제안 ID 들)`.
+        🔴 **아무것도 안 읽고 안 쓴다** — 순수 함수다.
+    """
+    landed: list[date] = []
+    unorderable: list[str] = []
+    for row in rows:
+        dates = [
+            when
+            for column in TERMINAL_DATE_STATUSES
+            if (when := getattr(row, column)) is not None
+        ]
+        if dates:
+            landed.extend(dates)
+        elif row.status in {"EXECUTED", "FAILED"}:
+            unorderable.append(row.proposal_id)
+    return (max(landed) if landed else None, tuple(unorderable))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  쓰기 — 🔴 커밋하지 않는다
 # ══════════════════════════════════════════════════════════════════════════
@@ -516,15 +552,23 @@ def transition_proposal(
     from_status: str = "PROPOSED",
     actor: str | None = None,
     note: str | None = None,
+    require_exception_status: str | None = None,
 ) -> int:
-    """상태를 한 칸 옮긴다. :returns: **바뀐 행 수** (0 이면 이미 누가 옮겼다).
+    """상태를 한 칸 옮긴다. :returns: **바뀐 행 수** (0 이면 조건이 이미 안 맞는다).
 
-    🔴 **`WHERE ... AND status = {from_status}` 가 이 함수의 전부다** (§37). 두 사람이
+    🔴 **`WHERE ... AND status = {from_status}` 가 이 함수의 심장이다** (§37). 두 사람이
        동시에 승인을 눌러도 UPDATE 는 한 번만 먹고, 늦은 쪽은 `0` 을 받는다. 읽고 나서
        쓰는 사이에 남이 끼어드는 lost update 를 응용 코드로는 못 막는다.
 
+    :param require_exception_status: 주면 **그 Exception 이 지금 그 상태일 때만** 옮긴다.
+        🔴 승인이 이것을 쓴다 — 이미 닫힌 문제의 제안을 승인하는 것을 막는 조건이
+        읽기 쪽에만 있으면, 읽고 쓰는 사이에 재탐지가 문제를 닫아도 승인이 그대로
+        들어간다. 조건이 **같은 문장 안**에 있어야 그 틈이 없다.
+        ⚠️ 거절·만료·대체는 이 조건을 **안 건다** — 이미 닫힌 문제에 남은 제안을 사람이
+        정리하는 것은 정상이다.
+
     ⚠️ `0` 을 «실패» 로 읽지 않는다 — *"내가 보고 온 상태가 이미 아니다"* 라는 사실이다.
-       그것을 어떻게 다룰지(멱등인가 충돌인가)는 서비스가 정한다.
+       그것을 어떻게 다룰지(멱등인가 충돌인가 stale 인가)는 서비스가 정한다.
     """
     if to_status not in _TRANSITION_COLUMNS:
         raise ValueError(f"Commit 5 가 여는 전이가 아니다: {to_status}")
@@ -540,7 +584,7 @@ def transition_proposal(
         "as_of": as_of,
         "from_status": from_status,
         "sim": sim_run_id,
-        "proposal": proposal_id,
+        "proposal_id": proposal_id,
     }
     if actor_column is not None:
         assignments.append(
@@ -553,17 +597,38 @@ def transition_proposal(
         )
         params["note"] = note
 
+    gate = sql.SQL("")
+    if require_exception_status is not None:
+        # 🔴 **같은 문장 안**에서 건다 — 읽고 쓰는 사이의 틈을 없애는 것이 목적이다.
+        gate = sql.SQL(
+            """
+               AND EXISTS (
+                   SELECT 1
+                     FROM {schema}.logistics_exceptions AS problem
+                    WHERE problem.exception_id = proposal.exception_id
+                      AND problem.sim_run_id = proposal.sim_run_id
+                      AND problem.status = %(exception_status)s
+               )
+            """
+        ).format(schema=_schema())
+        params["exception_status"] = require_exception_status
+
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                UPDATE {schema}.logistics_action_proposals
+                UPDATE {schema}.logistics_action_proposals AS proposal
                    SET {assignments}
-                 WHERE sim_run_id = %(sim)s
-                   AND proposal_id = %(proposal)s
-                   AND status = %(from_status)s
+                 WHERE proposal.sim_run_id = %(sim)s
+                   AND proposal.proposal_id = %(proposal_id)s
+                   AND proposal.status = %(from_status)s
+                   {gate}
                 """
-            ).format(schema=_schema(), assignments=sql.SQL(", ").join(assignments)),
+            ).format(
+                schema=_schema(),
+                assignments=sql.SQL(", ").join(assignments),
+                gate=gate,
+            ),
             params,
         )
         return cursor.rowcount
