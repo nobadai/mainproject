@@ -1,22 +1,32 @@
--- 재고·물류 AI Agent Core — 운영 Exception · 대응안 표
---   (2026-09-12 · #628 Commit 2 / 2026-09-13 · #628 Commit 5)
+-- 재고·물류 AI Agent Core — 운영 Exception · 조사 실행 · 대응안 표
+--   (2026-09-12 · #628 Commit 2 / 2026-09-13 · #628 Commit 5 · Commit 7)
 --
 -- ══════════════════════════════════════════════════════════════════════════
--- 🔴 **표가 둘이다.**
+-- 🔴 **표가 셋이고, 한 줄로 이어진다.**
 --
---   Commit 2 는 **하나만** 세웠다 — 제안·승인 기능이 없는 판에 빈 표를 먼저 세우면
---   "있는데 아무도 안 쓴다" 가 사실로 굳어서다. 이제 그 기능이 서므로 둘째 표를
---   같은 파일에 잇는다.
+--   표는 필요해진 판에서 하나씩 섰다 — 빈 표를 먼저 세우면 "있는데 아무도 안 쓴다"
+--   가 사실로 굳어서다.
 --
 --   ```text
 --   logistics_exceptions        §1  Commit 2   운영 판단이 필요한 조건
---   logistics_action_proposals  §3  Commit 5   그 조건에 대한 **대응안 한 건**
+--   logistics_investigations    §3  Commit 7   그 조건을 **실제로 조사한 한 번**
+--   logistics_action_proposals  §4  Commit 5   그 조사가 낸 **대응안 한 건**
 --   ```
 --
--- 🔴 **조사 실행 표는 여전히 안 만든다.** Commit 4 의 조사는 DB 에 아무것도 안 쓰고,
---    범용 `agent_runs` 도 아직 물류가 쓰지 않는다 (상세설계 §11). 그래서 제안의
---    `investigation_id` 는 **가리킬 곳이 없는 지금 NULL 이고 FK 도 없다** — 없는 표를
---    가리키는 FK 를 먼저 박으면 제안을 아예 못 만든다.
+--   ```text
+--   Exception ──┬── Investigation A ── Proposal A
+--               ├── Investigation B ── (제안 없음)
+--               └── Investigation C ── Proposal B
+--
+--   Exception : Investigation = 1:N     같은 문제를 여러 번 조사할 수 있다
+--   Investigation : Proposal   = 1:0..1  조사했다고 늘 제안이 나오지는 않는다
+--   ```
+--
+-- 🔴 **`investigation_id` 가 드디어 가리킬 곳을 얻었다** (Commit 7). Commit 5 는 그
+--    칸을 NULL·FK 없음으로 두었다 — 조사가 DB 에 안 남던 때라 가리킬 행이 없어서다.
+--    이제 §3 이 그 정본을 세우고 §4 가 **실행·문제 축까지 묶어** 가리킨다.
+--    ⚠️ **칸은 여전히 nullable 이다.** 손으로 세운 제안과 Commit 5 시절의 기존 행은
+--       가리킬 조사가 없고, 그것을 NOT NULL 로 막으면 과거 행이 통째로 불법이 된다.
 --
 -- 🔴 **Core 에 없는 것** — 여기 만들지 않는다 (상세설계 §11 · §19.3 · §20):
 --   `logistics_tasks` · `warehouse_events` · `inventory_lots.disposition_since`
@@ -35,11 +45,12 @@
 -- 🔴 **다른 파트 표를 안 건드린다.** 이 파일이 남의 표에 하는 일은 `sim_runs` 를
 --    FK 로 가리키는 것뿐이다. DROP 은 한 줄도 없다.
 --
---   ⚠️ **ALTER 가 있다 (§2 · §4 · Commit 5).** 대상은 전부 이 파일이 만든 자기 표
---      (`logistics_exceptions` · `logistics_action_proposals`) 이고, 하는 일은 칸 하나와
---      제약 몇 개를 더하는 것뿐이다 — 남의 표가 아니고 DROP 도 없다.
+--   ⚠️ **ALTER 가 있다 (§2 · §5).** 대상은 전부 이 파일이 만든 자기 표
+--      (`logistics_exceptions` · `logistics_investigations` ·
+--      `logistics_action_proposals`) 이고, 하는 일은 칸 하나와 제약 몇 개를 더하는
+--      것뿐이다 — 남의 표가 아니고 DROP 도 없다.
 --
---   🔴 **기존 운영 DB 가 §4 의 이유다.** `CREATE TABLE IF NOT EXISTS` 안의 제약을
+--   🔴 **기존 운영 DB 가 §5 의 이유다.** `CREATE TABLE IF NOT EXISTS` 안의 제약을
 --      고쳐도 표가 이미 있는 DB 에는 **아무 일도 안 일어난다.** 그래서 새 제약은
 --      «CREATE 안» 과 «멱등 ALTER» **양쪽**에 적는다 — 신규 DB 는 앞엣것으로, 운영
 --      DB 는 뒤엣것으로 같은 자리에 도착한다.
@@ -199,7 +210,7 @@ BEGIN
 END
 $ck_proposed$;
 
--- 🔴 **대응안이 «같은 실행의» 문제만 가리키게 하려고** 둔다 (§4).
+-- 🔴 **조사와 대응안이 «같은 실행의» 문제만 가리키게 하려고** 둔다 (§3 · §4).
 --    `exception_id` 가 이미 PK 라 유일성은 더 안 보태지만, 복합 FK 는 «유일한 칸 묶음»
 --    만 가리킬 수 있어서 이 선언이 있어야 `(sim_run_id, exception_id)` 를 가리킬 수 있다.
 DO $exception_axis$
@@ -222,7 +233,137 @@ COMMENT ON COLUMN haetdeul.logistics_exceptions.proposed_as_of IS
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- §3  대응안 — "그 문제에 무엇을 할까" 한 줄  (#628 Commit 5)
+-- §3  조사 실행 — "이 문제를 언제 조사했고 무엇으로 끝났나"  (#628 Commit 7)
+--
+--     🔴 **끝난 실행의 기록이다 — 상태표가 아니다.**
+--
+--     ```text
+--     Exception      지금 참인 조건       상태가 오간다 (OPEN ↔ PROPOSED → RESOLVED)
+--     Investigation  조사 **한 번**       🔴 한 번 적히면 안 바뀐다
+--     Proposal       그 조사가 낸 대응안   상태가 오간다 (PROPOSED → APPROVED → …)
+--     ```
+--
+--        그래서 이 표에는 상태 칸도 결정 칸도 없다. 다시 조사했으면 **새 행**이다
+--        (`UPDATE result` · `UPDATE finish_reason` 을 하는 Production 코드가 없다).
+--
+--     🔴 **Tool 답 창고가 아니다.** `tool_trace_json` 은 *"무엇을 어떤 순서로 물었고
+--        그 호출이 어떻게 끝났나"* 만 담는다 — Tool 이 낸 답 전체는 **안 들어온다.**
+--        용량 문맥의 18일 창 · 품목 Lot 목록 · 예약 객체를 조사마다 통째로 복사하면
+--        이 표가 감사 기록이 아니라 조회 캐시가 된다 (Commit 5 가 제안의 근거 칸에
+--        내린 결정과 같다).
+--
+--     🔴 **같은 문제를 같은 날 두 번 조사할 수 있다.** 그래서
+--        `(sim_run_id, exception_id, as_of)` 에 유일 제약을 **안 건다** — 두 번
+--        조사했으면 두 번 실행한 것이고, 그 둘은 Tool 상황도 LLM 판단도 다를 수 있다.
+--        «중복» 으로 접으면 나중 조사가 앞 조사를 덮어 실행 이력이 사라진다.
+--
+--     ⚠️ **기존 `logistics_agent_runs` 를 늘려 쓰지 않았다.** 저 표는 Logistics API 의
+--        Request/Response 실행이력이다 — `cycle ∈ PROCUREMENT·SALES` ·
+--        `request_payload`/`response_payload` · 쓰는 자리는 `app/logistics/service.py`
+--        하나. 조사는 «Exception 하나 → Tool 조사 → 후보 action» 이라 축이 다르고,
+--        `cycle` 에 `INVESTIGATION` 을 끼워 넣으면 그 표의 뜻이 깨진다.
+--
+--     ⚠️ **범용 `agent_runs` 도 못 쓴다.** ① `exception_id` 칸이 없어 §4 가 요구하는
+--        «같은 실행 · 같은 문제» 복합 FK 의 대상이 될 수 없고, ② 상태 칸이
+--        `run_status` 하나뿐이라 `finish_reason`(그래프가 어디서 끝났나)과
+--        `llm_status`(AI 가 실제로 판단했나)를 한 칸에 뭉개야 하며, ③ **남의 표다** —
+--        매입 제안과 검토가 FK 로 매달려 있다.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS haetdeul.logistics_investigations (
+    -- INV-{uuid}. 🔴 **번호를 세서 짓지 않는다** — `MAX(n)+1` 은 동시에 두 조사가
+    --    시작하면 같은 이름을 낸다. 조사는 사람이 부를 때마다 서므로 채번이 경합한다.
+    investigation_id      TEXT NOT NULL,
+    -- 🔴 리셋 축. 이 칸이 있어서 `reset_sim_run_ledger` 가 표를 **자동으로 발견**해
+    --    `--reset` 때 지운다 (`master/sim_run_open.py` `_axis_tables`).
+    sim_run_id            TEXT NOT NULL,
+    exception_id          TEXT NOT NULL,
+    -- 시뮬레이션 영업일. 🔴 `created_at`(벽시계)과 다른 축이고, 조사 Runtime 이 받은
+    --    `as_of` 그대로다 — `date.today()` · `created_at::date` 로 대체하지 않는다.
+    as_of                 DATE NOT NULL,
+
+    -- 🔴 **두 축을 한 칸에 안 담는다.** 그래야 *"규칙 제안인데 조사는 정상 종료"*
+    --    같은 흔한 경우가 적힌다.
+    --    finish_reason  그래프가 **어디서** 끝났나
+    --    llm_status     AI 가 **실제로** 판단했나
+    finish_reason         TEXT NOT NULL,
+    llm_status            TEXT NOT NULL,
+    -- 공급자 전송이 최종 실패한 원인 분류. 성공했거나 애초에 안 보냈으면 NULL 이다.
+    llm_error_kind        TEXT,
+
+    -- 🔴 조사가 낸 값 **그대로**. `None` 이면 NULL 이다 — `as_of` · `created_at` 으로
+    --    메우지 않는다 (상세설계 §18 · 제안 표와 같은 규율).
+    observed_as_of        DATE,
+
+    -- [{sequence, tool_name, arguments, status, reason, detail, observed_as_of,
+    --   uncertainties}, …]
+    -- 🔴 **`answer` 키가 없다.** 이 칸이 답하는 것은 *"무엇을 시도했나"* 이지
+    --    *"그 답이 무엇이었나"* 가 아니다.
+    -- ⚠️ 제안의 `evidence_refs_json`(왜 이 대응안을 올렸나 · 핵심 facts)과 **다른
+    --    칸이다.** 둘을 같은 payload 로 만들지 않는다.
+    tool_trace_json       JSONB NOT NULL,
+    -- 조사의 **최종 판단** — 요약 · 발견 · 못 본 것 · 후보와 그 영향 · 추천 번호.
+    -- 🔴 여기서 숫자를 새로 만들지 않는다. `options[].impact` 는 Commit 3 의
+    --    결정론 계산기가 낸 답 그대로이고, 저장하며 다시 셈하는 값은 하나도 없다.
+    result_json           JSONB NOT NULL,
+
+    -- 🔴 DB 벽시계. 감사용이고 **영업 판단에 쓰지 않는다.**
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT logistics_investigations_pkey PRIMARY KEY (investigation_id),
+    -- 🔴 §4 의 복합 FK 가 가리킬 자리. PK 가 이미 유일성을 주지만 복합 FK 는
+    --    «유일한 칸 묶음» 만 가리킬 수 있다.
+    -- ⚠️ **이것이 «같은 날 한 번» 제약은 아니다.** `investigation_id` 가 묶음에 들어
+    --    있어서 같은 문제를 같은 날 두 번 조사해도 둘 다 선다.
+    CONSTRAINT uq_logistics_investigations_axis
+        UNIQUE (sim_run_id, exception_id, investigation_id),
+
+    CONSTRAINT logistics_investigations_sim_run_id_fkey
+        FOREIGN KEY (sim_run_id) REFERENCES haetdeul.sim_runs(sim_run_id),
+    -- 🔴 **조사는 «같은 실행의» 문제만 가리킨다.** 홑 FK 둘로는 «RUN-B 의 조사가
+    --    RUN-A 의 문제를 가리키는» 조합을 못 막는다 — 각자 자기 칸만 보기 때문이다.
+    CONSTRAINT logistics_investigations_exception_axis_fkey
+        FOREIGN KEY (sim_run_id, exception_id)
+        REFERENCES haetdeul.logistics_exceptions (sim_run_id, exception_id),
+
+    -- 🔴 어휘는 닫혀 있다 — `FinishReason` · `LLMStatus` 와 **글자 그대로** 같다.
+    CONSTRAINT ck_logistics_investigations_finish_reason
+        CHECK (finish_reason IN ('FINISHED', 'NOT_FOUND', 'TOOL_FAILED',
+                                 'BUDGET_EXCEEDED', 'GUARD_EXHAUSTED', 'TIMEOUT',
+                                 'LLM_FAILED')),
+    CONSTRAINT ck_logistics_investigations_llm_status
+        CHECK (llm_status IN ('SUCCESS', 'SKIPPED_TEMPLATE', 'FALLBACK', 'DISABLED')),
+    -- 🔴 «모른다» 를 빈 문자열로 적지 않는다. 안 실패했으면 NULL 이다.
+    CONSTRAINT ck_logistics_investigations_llm_error_kind
+        CHECK (llm_error_kind IS NULL OR length(btrim(llm_error_kind)) > 0),
+    -- 🔴 **모양이 틀린 감사 기록은 행이 될 수 없다.** trace 는 배열, 결과는 객체다.
+    CONSTRAINT ck_logistics_investigations_payload
+        CHECK (jsonb_typeof(tool_trace_json) = 'array'
+           AND jsonb_typeof(result_json) = 'object')
+);
+
+-- 🔴 **유일 인덱스가 아니다.** 한 문제를 며칠에 걸쳐 여러 번 조사한 이력을 그대로
+--    읽기 위한 것이다 (같은 날 두 행도 정상이다).
+CREATE INDEX IF NOT EXISTS idx_logistics_investigations_exception
+    ON haetdeul.logistics_investigations (sim_run_id, exception_id, as_of);
+
+CREATE INDEX IF NOT EXISTS idx_logistics_investigations_run_as_of
+    ON haetdeul.logistics_investigations (sim_run_id, as_of);
+
+COMMENT ON TABLE haetdeul.logistics_investigations IS
+    '재고·물류 Agent 가 Exception 하나를 **실제로 조사한 한 번** (#628 Commit 7). 🔴 끝난 실행의 감사 기록이라 상태 칸도 결정 칸도 없고, 다시 조사하면 새 행이다. 🔴 Tool 답 전체를 담지 않는다 — tool_trace_json 은 "무엇을 어떤 순서로 물었나" 까지다. ⚠️ 기존 logistics_agent_runs(Logistics API Request/Response 이력)와 다른 축이고, 범용 agent_runs 는 exception_id 칸이 없어 대응안의 복합 FK 대상이 될 수 없다.';
+COMMENT ON COLUMN haetdeul.logistics_investigations.tool_trace_json IS
+    '[{sequence, tool_name, arguments, status, reason, detail, observed_as_of, uncertainties}, …]. 🔴 answer 키가 없다 — 이 칸은 "무엇을 시도했나" 이지 "그 답이 무엇이었나" 가 아니다. ⚠️ 제안의 evidence_refs_json(왜 승인 대상으로 올렸나)과 다른 칸이다.';
+COMMENT ON COLUMN haetdeul.logistics_investigations.result_json IS
+    '조사의 최종 판단 — 요약 · 발견 · 못 본 것 · 후보와 그 영향 · 추천 번호. 🔴 저장하며 다시 셈하는 숫자가 하나도 없다: options[].impact 는 Commit 3 의 결정론 계산기가 낸 답 그대로다. 🔴 raw LLM prompt/response · system prompt · 공급자 payload 는 담지 않는다.';
+COMMENT ON COLUMN haetdeul.logistics_investigations.finish_reason IS
+    '그래프가 **어디서** 끝났나 (FINISHED · NOT_FOUND · TOOL_FAILED · BUDGET_EXCEEDED · GUARD_EXHAUSTED · TIMEOUT · LLM_FAILED). ⚠️ llm_status(AI 가 실제로 판단했나)와 다른 축이다 — 한 칸에 뭉개지 않는다.';
+COMMENT ON COLUMN haetdeul.logistics_investigations.observed_as_of IS
+    '조사가 낸 값 그대로 — 근거 입력들이 알 수 있었던 가장 늦은 날. 🔴 하나라도 관측일이 없으면 NULL 이고 as_of · created_at 으로 메우지 않는다.';
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- §4  대응안 — "그 문제에 무엇을 할까" 한 줄  (#628 Commit 5)
 --
 --     🔴 **APPROVED 는 EXECUTED 가 아니다.**
 --
@@ -246,8 +387,14 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     -- 🔴 리셋 축. 이 칸이 있어서 `reset_sim_run_ledger` 가 표를 **자동으로 발견**한다.
     sim_run_id            TEXT NOT NULL,
     exception_id          TEXT NOT NULL,
-    -- 🔴 **아직 가리킬 표가 없다** — Commit 4 의 조사는 DB 에 안 남는다. FK 도 안 건다.
-    --    Commit 7 에서 조사 실행이 기록되면 그때 값이 찬다.
+    -- 🔴 **이 제안을 낸 조사** (§3 · Commit 7). 아래 복합 FK 가 «같은 실행 · 같은
+    --    문제의» 조사만 가리키게 한다.
+    -- ⚠️ **nullable 이다.** 손으로 세운 제안과 Commit 5 시절의 기존 행은 가리킬 조사가
+    --    없다 — NOT NULL 로 막으면 그 행들이 통째로 불법이 된다. NULL 이면 복합 FK 도
+    --    검사하지 않는다 (MATCH SIMPLE).
+    -- 🔴 **지문(`proposal_key`)에는 안 들어간다.** 같은 안을 다시 조사해서 다시 올린
+    --    것도 «같은 뜻의 제안» 이다 — 조사 ID 를 섞으면 지문이 늘 달라져 재시도를
+    --    아무것도 못 막는다.
     investigation_id      TEXT,
     -- 재시도 식별용 지문 = f(sim_run_id, exception_id, action_type, 정규화된 parameters).
     -- 🔴 **유일 제약이 아니다** — 거절된 뒤 같은 안을 다시 올리는 것은 정상이다.
@@ -330,6 +477,14 @@ CREATE TABLE IF NOT EXISTS haetdeul.logistics_action_proposals (
     CONSTRAINT logistics_action_proposals_exception_axis_fkey
         FOREIGN KEY (sim_run_id, exception_id)
         REFERENCES haetdeul.logistics_exceptions (sim_run_id, exception_id),
+    -- 🔴 **제안은 «같은 실행 · 같은 문제를» 조사한 기록만 가리킨다** (Commit 7).
+    --    없는 조사 ID · RUN-B 의 조사 · EX-B 의 조사를 전부 여기서 막는다.
+    --    ⚠️ `investigation_id` 가 NULL 이면 검사하지 않는다 (MATCH SIMPLE) — 손으로
+    --       세운 제안에는 가리킬 조사가 없다.
+    CONSTRAINT logistics_action_proposals_investigation_axis_fkey
+        FOREIGN KEY (sim_run_id, exception_id, investigation_id)
+        REFERENCES haetdeul.logistics_investigations
+                   (sim_run_id, exception_id, investigation_id),
     CONSTRAINT logistics_action_proposals_previous_fkey
         FOREIGN KEY (previous_proposal_id)
         REFERENCES haetdeul.logistics_action_proposals(proposal_id),
@@ -477,7 +632,7 @@ COMMENT ON COLUMN haetdeul.logistics_action_proposals.rationale IS
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- §4  이미 표가 선 DB 를 §3 과 **같은 자리**로  (#628 Commit 5 close)
+-- §5  이미 표가 선 DB 를 §3 · §4 와 **같은 자리**로  (#628 Commit 5 close · Commit 7)
 --
 --     🔴 **`CREATE TABLE IF NOT EXISTS` 안의 제약은 기존 DB 에 안 닿는다.** 표가
 --        있으면 그 문장은 통째로 건너뛰므로, 위에서 제약을 더해도 운영 DB 는 예전
@@ -585,6 +740,21 @@ $execution_axis$;
 
 DO $proposal_axis$
 BEGIN
+    -- 🔴 조사 축 FK (Commit 7). §3 의 표는 `CREATE TABLE IF NOT EXISTS` 로 방금 섰고,
+    --    기존 DB 의 제안 표에는 이 제약이 없다.
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'logistics_action_proposals_investigation_axis_fkey'
+          AND conrelid = 'haetdeul.logistics_action_proposals'::regclass
+    ) THEN
+        ALTER TABLE haetdeul.logistics_action_proposals
+            ADD CONSTRAINT logistics_action_proposals_investigation_axis_fkey
+            FOREIGN KEY (sim_run_id, exception_id, investigation_id)
+            REFERENCES haetdeul.logistics_investigations
+                       (sim_run_id, exception_id, investigation_id);
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
@@ -626,6 +796,9 @@ $proposal_axis$;
 COMMENT ON CONSTRAINT ck_logistics_action_proposals_approval_provenance
     ON haetdeul.logistics_action_proposals IS
     '🔴 승인에는 반드시 사람과 날이 있다 — **실행이 상태를 옮긴 뒤에도.** status 가 APPROVED 일 때만 보는 제약은 EXECUTED/FAILED 로 넘어간 순간 «누가 승인했나» 가 비어도 통과시킨다.';
+COMMENT ON CONSTRAINT logistics_action_proposals_investigation_axis_fkey
+    ON haetdeul.logistics_action_proposals IS
+    '🔴 대응안은 **같은 실행 · 같은 문제를 조사한** 기록만 가리킨다 (Commit 7). 없는 조사 ID · RUN-B 의 조사 · EX-B 의 조사를 전부 막는다. ⚠️ investigation_id 가 NULL 이면 검사하지 않는다(MATCH SIMPLE) — 손으로 세운 제안에는 가리킬 조사가 없다.';
 COMMENT ON CONSTRAINT logistics_action_proposals_exception_axis_fkey
     ON haetdeul.logistics_action_proposals IS
     '🔴 대응안은 **같은 실행의** 문제만 가리킨다. 홑 FK 둘(sim_run_id / exception_id)은 각자 자기 칸만 보므로 «RUN-B 의 제안이 RUN-A 의 문제를 가리키는» 조합을 못 막는다.';

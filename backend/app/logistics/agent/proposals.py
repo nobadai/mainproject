@@ -149,8 +149,9 @@ class ProposalInvariantViolation(RuntimeError):
     """그날 상태를 **못 고른다.** 🔴 하나를 골라 답하지 않고 멈춘다 (fail-closed).
 
     ```text
-    끝난 날이 둘      DB CHECK 가 막지만, 손으로 고친 행이 있을 수 있다
-    EXECUTED/FAILED   그 상태가 «언제» 됐는지 적는 칸이 아직 없다 (Commit 6)
+    끝난 날이 둘           DB CHECK 가 막지만, 손으로 고친 행이 있을 수 있다
+    EXECUTED/FAILED 인데   `executed_as_of`/`failed_as_of` 가 비었다 — 칸은 Commit 6 에
+    그 날이 없다           섰고 production 에서는 DB CHECK 가 막는다
     ```
 
     ★ 추측해서 답하면 *"그날 이 제안은 승인 상태였다"* 는 **거짓 사실**이 조회에 실린다.
@@ -185,7 +186,8 @@ class ProposalRow:
     #: 조사가 낸 값 그대로. `None` 이면 `None` 이다 (§22).
     observed_as_of: date | None = None
     proposal_key: str = ""
-    #: Commit 4 의 조사는 DB 에 안 남는다 — 지금은 늘 `None` 이다 (§44).
+    #: 🔴 이 제안을 낸 조사 (`logistics_investigations` · Commit 7).
+    #: ⚠️ 손으로 세운 제안에는 가리킬 조사가 없어서 **여전히 nullable 이다.**
     investigation_id: str | None = None
     rationale: str = ""
     source_finish_reason: str | None = None
@@ -355,8 +357,10 @@ def proposal_key_for(
        그때는 같은 지문의 새 행이 선다. 이 값이 막는 것은 *"네트워크가 끊겨 한 번 더
        보낸"* 경우뿐이다.
 
-    ⚠️ **조사 식별자를 지문에 안 넣는다.** Commit 4 의 조사는 DB 에 안 남아서 실제로
-       존재하지 않는 값이다 — 없는 것을 키에 섞으면 지문이 늘 달라져 아무것도 못 막는다.
+    ⚠️ **조사 식별자를 지문에 안 넣는다** (Commit 7 에 조사가 DB 에 남게 된 뒤에도).
+       조사는 부를 때마다 새 ID 를 받으므로, 섞으면 **지문이 늘 달라져 아무것도 못
+       막는다** — 그런데 이 지문이 막아야 하는 것은 *"같은 뜻의 제안이 두 번 들어온"*
+       경우이고, 다시 조사해서 같은 안을 다시 올린 것도 그 «같은 뜻» 이다.
 
     ★ `Decimal` 은 `jsonable` 이 문자열로 낮춘다. `float` 로 낮추면 같은 수량이
       실행마다 다른 지문이 된다.

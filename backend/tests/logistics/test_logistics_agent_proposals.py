@@ -1308,10 +1308,16 @@ class TestStoredPayload:
         assert stored.source_finish_reason == "BUDGET_EXCEEDED"
         assert stored.source_llm_status == "SUCCESS"
 
-    def test_the_investigation_id_is_empty_because_nothing_stores_it(
+    def test_a_proposal_raised_without_an_investigation_says_so(
         self, conn: _FakeConn, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """⚠️ Commit 4 의 조사는 DB 에 안 남는다 — 없는 값을 지어내 채우지 않는다 (§44)."""
+        """⚠️ 부르는 쪽이 조사를 안 대면 `None` 이다 — 없는 값을 지어내 채우지 않는다.
+
+        ★ Commit 7 에서 조사가 DB 에 남게 된 뒤에도 그렇다. 값이 차는 것은 저장된 조사를
+          거친 경로뿐이고(`run_and_persist_investigation` → `create_proposal`), 손으로 세운
+          제안에는 가리킬 조사가 없다. 그 연결은
+          `test_logistics_agent_investigation_persistence*` 가 잰다.
+        """
         assert self._stored(conn, monkeypatch).investigation_id is None
 
 
