@@ -1,8 +1,28 @@
 """⑥ package_scenarios — 보수/기본/공격 묶기 + 근거 작성 (상세설계 §4-⑥).
 
-Epic 2는 rule_only 경로다. LLM 몫은 **문장을 다듬는 것**이고 숫자는 계산이 소유한다
-(규칙 6). Epic 3에서 붙일 때도 이 함수를 다시 쓰는 게 아니라, 아래가 만든 결과를
-입력으로 받아 rationale·risks의 서술만 손본다.
+숫자는 계산이 소유한다 (규칙 6). **LLM 이 닿는 것은 ``rationale`` 의 ``claim`` 뿐이다**
+(``_context_rationale`` 주석 참조).
+
+🔴 **``risks`` 는 LLM 이 안 다듬는다** (2026-09-13 정정).
+
+  전 판은 *"Epic 2는 rule_only 경로다. … Epic 3에서 붙일 때도 … ``rationale·risks`` 의
+  서술만 손본다"* 였다. **Epic 3 은 닫혔고, 붙은 LLM 은 ``risks`` 를 안 건드린다** —
+  그 문장은 **계획**이었는데 계획이 그대로 남아 **서술처럼 읽혔다.**
+
+  ``risks`` 는 순수 함수를 이어 붙인 결과다::
+
+      _risks · _forecast_risks · _adjustment_risks · _context_risks
+      _sourcing_risks · _split_risks · _payment_risks
+
+  ⚠️ ``_sourcing_risks`` 안에서 ``_mix_choice_risks`` 를 부르고, **그 하나만 LLM 상태를
+    읽는다** (``mix.applied`` · ``mix.llm_fallback_used``). 다만 문장 하나가 **붙었다
+    떨어질** 뿐이고, 다른 문장의 **문면을 바꾸지는 않는다.**
+
+★ **이 머리말이 남을 오도했다.** 마스터가 이 문장을 근거로 *"걷기 요약의 옛 문장 수를
+  셀 때 LLM 성공 날은 따로 보겠다"* 고 답했다 (2026-09-13 23:2x). ``risks`` 문자열을
+  세는 일은 **LLM 상태와 무관하므로 한 버킷으로 세도 된다.**
+
+  ⇒ 사실이 바뀌면 문장도 따라가야 한다. `#646` 이 같은 병을 화면 문면에서 고쳤다.
 """
 
 from collections.abc import Mapping
