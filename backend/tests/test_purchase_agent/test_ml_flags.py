@@ -185,10 +185,17 @@ def test_the_guard_reads_the_declaration_not_a_hard_coded_window(
 
 
 def test_a_copied_row_that_sets_the_ceiling_gets_a_notice() -> None:
+    """🔴 문면이 **「그 날짜 예측이 없어」** 다 — 「장이 서지 않아」가 아니다.
+
+    ML 회신(2026-09-13 §5)이 정정했다: ``is_filled`` 는 *"그 날짜에 예측이 없다"* 이고
+    *"시장이 닫혔다"* 가 아니다. 복사행 85일 중 **42일은 가락이 실제로 거래했다.**
+    ⇒ 아래 두 주장을 같이 잠근다 — **옛 문면이 없을 것** · **새 문면이 있을 것.**
+    """
     forecast = _forecast(daily=_daily({2: {"upper": 9_999, "is_filled": True}}))
     risks = _forecast_risks(forecast, 5)
     assert len(risks) == 1
-    assert "9999원" in risks[0] and "장이 서지 않아" in risks[0]
+    assert "9999원" in risks[0] and "그 날짜 예측이 없어" in risks[0]
+    assert "장이" not in risks[0] and "휴장" not in risks[0], risks[0]
 
 
 def test_a_copied_row_that_does_not_set_the_ceiling_stays_quiet() -> None:
@@ -203,7 +210,7 @@ def test_no_copy_column_means_no_notice() -> None:
 
 
 def test_the_notice_never_cuts_a_scenario() -> None:
-    """컷이 아니라 고지다 — ``is_filled`` 는 틀린 값이 아니라 그날 장이 안 선 사실이다."""
+    """컷이 아니라 고지다 — ``is_filled`` 는 틀린 값이 아니라 그 날짜 예측이 없었다는 사실이다."""
     forecast = _forecast(daily=_daily({2: {"upper": 9_999, "is_filled": True}}))
     assert compute_max_price(forecast, 5) == 9_999
 
