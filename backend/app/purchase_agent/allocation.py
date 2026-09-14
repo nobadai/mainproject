@@ -36,6 +36,7 @@ AST 로 증명할 수 없게 되고, 「옮긴 것」과 「고친 것」이 한
 
 from collections.abc import Mapping
 from datetime import date, timedelta
+from itertools import pairwise
 from typing import Any
 
 
@@ -72,6 +73,32 @@ def split_quantities(total_qty_kg: int, chosen: list[dict]) -> list[int]:
         quantities.append(qty)
         remaining -= qty
     return quantities
+
+def split_infeasible_reason(
+    total_qty_kg: int, chosen: list[dict], coverage_days: int
+) -> str | None:
+    """이 안이 이 분할을 감당하는가. 못 하면 **사유**를, 되면 ``None``을 돌려준다.
+
+    ④는 그날 하나의 유형을 정하고 안별 총량·D는 모른다. 감당 여부는 여기서 안별로 본다.
+
+    막는 것 둘:
+
+    1. **0kg 회차** — ``SplitPlanItem.qty_kg > 0``이라 하나만 나와도 스키마가 **제안 전체**를
+       죽인다. E3-1에서 등급 배분이 정확히 이 자리에서 터졌다 (Codex 교차검증 P1).
+    2. **겹치는 날짜** — 회차가 커버일수보다 많으면 같은 날 두 번이 되고, 그건 분할이 아니라
+       같은 매입을 두 줄로 적은 것이다.
+    """
+    rounds = len(chosen)
+    if rounds > coverage_days:
+        return f"커버일수 {coverage_days}일보다 회차 수({rounds})가 많다"
+    offsets = split_offsets(coverage_days, rounds)
+    if any(earlier >= later for earlier, later in pairwise(offsets)):
+        return f"회차 날짜가 겹친다 (오프셋 {offsets})"
+    quantities = split_quantities(total_qty_kg, chosen)
+    if any(qty < 1 for qty in quantities):
+        return f"회차당 최소 수량 미달 — {total_qty_kg:,}kg을 {rounds}회로 나누면 {quantities}"
+    return None
+
 
 def round_offsets(
     as_of: str,
