@@ -111,6 +111,11 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
 
     `base_dt` 를 같이 준다 — 「내일」이 며칠인지는 기준일이 있어야 정해진다.
     """
+    #   ★ 스위치를 **부르기 직전에** 본다. 예전에는 `enabled()` 를 만들어 놓고
+    #     아무도 안 불러서, `ML_LLM_ENABLED=0` 을 넣어도 그대로 호출했다.
+    #     끄는 스위치가 안 끄면 없느니만 못하다 — 껐다고 믿고 할당량을 쓴다.
+    if not enabled():
+        return None
     key = _api_key()
     if not key:
         return None

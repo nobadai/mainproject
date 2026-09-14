@@ -181,6 +181,21 @@ def test_LLM_을_못_부르면_해석하지_못했다고_답한다(도구를_갈
     assert out.meta.status == "LLM_UNAVAILABLE"
 
 
+def test_스위치를_끄면_해석기가_아예_안_부른다(monkeypatch):
+    """★ `ML_LLM_ENABLED=0` 이면 호출 자체가 없어야 한다.
+
+    발표 전에 할당량을 아끼려고 끄는 스위치다. 껐는데 부르면 «껐다» 고 믿은 채로
+    429 를 맞는다. 실제로 `enabled()` 를 만들어 두고 아무도 안 부르고 있었다.
+    """
+    def _절대_안_불려야_한다(*_a, **_k):
+        raise AssertionError("스위치를 껐는데 호출했다")
+
+    monkeypatch.setenv("ML_LLM_ENABLED", "0")
+    monkeypatch.setenv("ML_GEMINI_API_KEY", "있는-척-하는-키")
+    monkeypatch.setattr(qa_llm.urllib.request, "urlopen", _절대_안_불려야_한다)
+    assert qa_llm.interpret("내일 배추 얼마야?", BASE) is None
+
+
 def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():
     assert qa_llm._parse_dates(["2026-09-15", "내일", None, "2026-13-40"]) == [
         date(2026, 9, 15)
