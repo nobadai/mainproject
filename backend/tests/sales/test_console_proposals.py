@@ -343,7 +343,7 @@ def test_the_run_axis_and_the_day_are_both_carried(monkeypatch):
     get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
 
     query, params = reader.calls[0]
-    assert params == [RUN, AS_OF]
+    assert params == [RUN, AS_OF, RUN]
     assert "context'->>'sim_run_id' = %s" in query
     assert "run.as_of = %s" in query
 
@@ -358,6 +358,87 @@ def test_only_the_latest_run_of_each_request_is_shown(monkeypatch):
     query = reader.calls[0][0]
     assert "DISTINCT ON (run.response_payload->>'request_id')" in query
     assert "run.created_at DESC" in query
+
+
+def test_a_finance_verdict_from_another_run_never_reaches_this_proposal(monkeypatch):
+    """🔴 **같은 요청 키가 여러 실행에 걸쳐 있다.**
+
+    `REQ-DAILY-SALES-20260107-배추` 는 축을 담지 않는 키라 실측에서 네 실행에 걸쳐
+    있었다. 키만으로 이으면 남의 실행에서 내려진 판정이 이 안에 붙는다 — 같은 안이
+    한쪽 화면에서는 진행 가능, 다른 쪽에서는 진행 어려움이 된다.
+
+    ★ 축은 마스터가 안다. 재무 실행 행에는 `sim_run_id` 칸이 없으므로, 그 연결을 적어
+      둔 `master_agent_runs` 에 물어 **판정 쪽에도 같은 축을 건다.**
+    """
+    shared_request = "REQ-DAILY-SALES-20260107-배추"
+    shared_scenario = "SALES-001-A"
+
+    class _AxisAwareReader:
+        """실행 축까지 보는 가짜 저장소. **축이 맞는 판정만 돌려준다.**"""
+
+        def __init__(self) -> None:
+            self.verdicts = {
+                ("SIM-CHAIN-V13", shared_request, shared_scenario): "PASS",
+                ("SIM-WALK-2026-FINAL", shared_request, shared_scenario): "FAIL",
+            }
+            self.calls: list[tuple[str, list]] = []
+
+        def __call__(self, query, params=None):
+            params = list(params or [])
+            self.calls.append((str(query), params))
+            #  쿼리가 축을 두 번 실어야 여기서 고를 수 있다 — 하나는 판매, 하나는 재무다.
+            assert len(params) == 3, params
+            sales_axis, _as_of, finance_axis = params
+            assert sales_axis == finance_axis
+            verdict = self.verdicts.get((finance_axis, shared_request, shared_scenario))
+            return [
+                {
+                    "request_id": shared_request,
+                    "payload": {"recommended_scenario_id": None, "scenarios": []},
+                    "scenario": _scenario(scenario_id=shared_scenario),
+                    "finance_verdict": verdict,
+                    "finance_status": None if verdict is None else "EVALUATED",
+                    "rule_results": None
+                    if verdict != "FAIL"
+                    else [
+                        {
+                            "rule_id": "FIN-SALES-MARGIN",
+                            "verdict": "FAIL",
+                            "reason_codes": ["SALES_MARGIN_BELOW_MINIMUM"],
+                        }
+                    ],
+                    "financial_summary": None,
+                }
+            ]
+
+    reader = _AxisAwareReader()
+    _patch(monkeypatch, reader)
+
+    mine = get_console_sales_proposals(sim_run_id="SIM-CHAIN-V13", as_of=AS_OF).rows[0]
+    theirs = get_console_sales_proposals(
+        sim_run_id="SIM-WALK-2026-FINAL", as_of=AS_OF
+    ).rows[0]
+
+    #  같은 요청 키·같은 안인데 실행이 다르면 판정도 다르다.
+    assert mine.scenario_id == theirs.scenario_id == shared_scenario
+    assert mine.finance_verdict == "PASS"
+    assert theirs.finance_verdict == "FAIL"
+    assert mine.finance_reason_codes == []
+    assert theirs.finance_reason_codes == ["SALES_MARGIN_BELOW_MINIMUM"]
+
+
+def test_the_finance_verdict_lookup_carries_the_run_axis(monkeypatch):
+    """축을 거는 자리가 SQL 안에 실제로 있는지 본다."""
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+
+    get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    query, params = reader.calls[0]
+    #  🔴 키 문자열을 파싱하지 않는다 — 축은 마스터가 적어 둔 연결에서 온다.
+    assert "master_agent_runs" in query
+    assert "axis.sim_run_id = %s" in query
+    assert params == [RUN, AS_OF, RUN]
 
 
 def test_the_newest_finance_reply_wins(monkeypatch):

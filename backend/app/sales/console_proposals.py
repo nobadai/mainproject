@@ -137,6 +137,18 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
       저장되고, 그중 마지막이 그날의 답이다.
 
     ★ 재무 판정도 **가장 최근 것**을 읽는다. 재검증이 돌면 같은 키에 여러 회신이 쌓인다.
+
+    🔴 **재무 판정에도 실행 축을 건다.** `request_id` 만으로 잇는 것은 안전해 보이지만
+       아니다 — 축을 담지 않는 키가 실제로 있고(`REQ-DAILY-SALES-20260107-배추` 는 네
+       실행에 걸쳐 있다), 그때는 남의 실행 판정이 이 안에 붙는다.
+
+    ★ **축은 마스터가 안다.** `finance_agent_runs_v22` 에는 `sim_run_id` 칸이 없어,
+      그 연결을 기록한 `master_agent_runs` 에 묻는다 — 재무 자신의 실행 이력 read model
+      (`finance.console_runs`)이 같은 자리에서 같은 방법을 쓴다.
+
+    ⚠️ **키 문자열을 파싱하지 않는다.** `REQ-DAILY-SALES-{실행}-…` 모양에 기대면 그
+      모양이 바뀌는 날 화면이 오류 없이 남의 실행을 가리킨다. `request_id` 는 업무
+      키이지 스키마가 아니다.
     """
     schema = get_db_schema()
     statement = sql.SQL(
@@ -170,13 +182,20 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
             WHERE check_run.mode = 'SALES_VALIDATION'
               AND check_run.request_id = latest.request_id
               AND check_run.response_payload->>'scenario_id' = scenario.value->>'scenario_id'
+              AND EXISTS (
+                  SELECT 1
+                  FROM {schema}.master_agent_runs axis
+                  WHERE axis.request_id = check_run.request_id
+                    AND axis.sim_run_id = %s
+              )
             ORDER BY check_run.created_at DESC
             LIMIT 1
         ) AS finance ON TRUE
         ORDER BY latest.request_id ASC, scenario.value->>'scenario_id' ASC
         """
     ).format(schema=sql.Identifier(schema))
-    return fetch_all(statement, [sim_run_id, as_of])
+    #  ⚠️ `%s` 는 세 개다 — 판매 실행 축, 기준일, 그리고 재무 판정의 실행 축이다.
+    return fetch_all(statement, [sim_run_id, as_of, sim_run_id])
 
 
 def get_console_sales_proposals(
