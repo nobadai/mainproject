@@ -10,11 +10,10 @@
 from collections.abc import Callable
 
 from app.purchase_agent.llm.runtime import (
-    PROVIDERS,
     LLMProvider,
     LLMSettings,
     RoleSpec,
-    UnavailableProvider,
+    build_provider,
     get_llm_settings,
     run_with_fallback,
 )
@@ -199,8 +198,6 @@ def make_split_selector(
 
 def _service() -> SplitAllocationService:
     settings = get_llm_settings()
-    factory = PROVIDERS.get(settings.provider)
-    provider: LLMProvider = (
-        factory(settings, ROLE) if factory else UnavailableProvider(settings, ROLE)
-    )
-    return SplitAllocationService(settings, provider)
+    # 🔴 **조립은 ``build_provider`` 하나가 한다.** 역할마다 베끼면 모르는 provider 일
+    #   때만 갈라지는 길이 생긴다 — 그 클래스 docstring 에 실제로 밟은 자리가 있다.
+    return SplitAllocationService(settings, build_provider(settings, ROLE))

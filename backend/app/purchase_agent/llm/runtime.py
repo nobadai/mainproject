@@ -297,7 +297,19 @@ class OllamaProvider:
 
 
 class UnavailableProvider:
-    """미지원 ``LLM_PROVIDER`` 값. 조용히 무시하지 않고 **터뜨려 fallback으로 보낸다**."""
+    """미지원 ``LLM_PROVIDER`` 값. 조용히 무시하지 않고 **터뜨려 fallback으로 보낸다**.
+
+    🔴 **다른 셋과 같은 모양으로 받는다** ``(settings, spec)``. 안 쓰는 값이지만 받는다 —
+    부르는 쪽이 *"아는 provider 면 이렇게, 모르면 저렇게"* 로 두 모양을 쓰면 **모르는
+    provider 일 때만 터지는 길**이 생긴다. 실제로 그랬다: ④·⑧ 이 역할을 넘기는 모양으로
+    적었는데 이 클래스만 인자를 안 받아, ``LLM_PROVIDER`` 가 오타일 때 ``build_graph()``
+    자체가 ``TypeError`` 로 죽었다. **기본 경로가 돌아야 한다**는 이 파일의 전제가 거기서
+    깨진다 — 그래서 지금은 ``build_provider`` 하나로만 만든다.
+    """
+
+    def __init__(self, settings: "LLMSettings | None" = None, spec: RoleSpec = MIX_ROLE):
+        self.settings = settings
+        self.spec = spec
 
     def generate(
         self,
@@ -314,6 +326,23 @@ PROVIDERS: dict[str, type] = {
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
 }
+
+
+def build_provider(settings: LLMSettings, spec: RoleSpec = MIX_ROLE) -> LLMProvider:
+    """설정이 가리키는 프로바이더를 만든다. **모르는 이름이면 터뜨리는 것을 돌려준다.**
+
+    🔴 **역할마다 이 조립을 베끼지 않는다.** 베끼면 한 자리가 다른 모양으로 적히고, 그
+    차이는 **설정이 어긋난 날에만** 드러난다 — 평소 경로에서는 셋 다 같은 값을 돌려주기
+    때문이다. 조립을 한 함수로 모으는 것이 그 구간을 없애는 방법이다.
+
+    ⚠️ **여기서 예외를 내지 않는다.** 모르는 provider 는 «지금 못 부른다» 이지 «그래프를
+    세운다» 가 아니다. 터지는 자리는 호출 시점이고, 그 예외는 ``run_with_fallback`` 이
+    받아 **규칙 기본안**으로 보낸다.
+    """
+    factory = PROVIDERS.get(settings.provider)
+    if factory is None:
+        return UnavailableProvider(settings, spec)
+    return factory(settings, spec)
 
 
 class ValidationIssue(StrEnum):
@@ -603,6 +632,4 @@ def get_llm_settings() -> LLMSettings:
 
 def get_mix_selection_service() -> MixSelectionService:
     settings = get_llm_settings()
-    factory = PROVIDERS.get(settings.provider)
-    provider: LLMProvider = factory(settings) if factory else UnavailableProvider()
-    return MixSelectionService(settings, provider)
+    return MixSelectionService(settings, build_provider(settings, MIX_ROLE))

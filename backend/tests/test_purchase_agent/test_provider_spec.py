@@ -48,6 +48,19 @@ def test_기본_인자로_만들면_다섯번_역할이다(provider_name: str) -
     assert provider.spec is rt.MIX_ROLE
 
 
+def test_모든_프로바이더가_같은_모양으로_만들어진다() -> None:
+    """🔴 **미지원 프로바이더도 같은 모양이다.**
+
+    ``UnavailableProvider`` 만 인자를 안 받게 두었더니, ``LLM_PROVIDER`` 가 오타인 날
+    ``build_graph()`` 가 ``TypeError`` 로 죽었다 — 새 기능이 전부 꺼져 있는데도 그랬다.
+    표에 있는 셋만 재면 **표에 없을 때의 길**을 영영 안 재게 된다.
+    """
+    settings = rt.get_llm_settings()
+    후보 = [*rt.PROVIDERS.values(), rt.UnavailableProvider]
+    for factory in 후보:
+        assert factory(settings, rt.MIX_ROLE).spec is rt.MIX_ROLE
+
+
 def test_보내는_본문이_예전과_같다() -> None:
     """지시문·스키마가 아니라 **본문**도 안 바뀌었는지 본다."""
     context = _context()
