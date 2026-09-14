@@ -13,7 +13,8 @@ export type IntentAction =
   | "SELECT_SCENARIO"
   | "UNKNOWN";
 
-export type AgentName = "finance" | "inventory" | "purchase";
+//  백엔드 `app/master/envelope.py` 의 `AgentName` 과 같은 넷이다 (판매가 2026-09-06 에 들어왔다).
+export type AgentName = "finance" | "inventory" | "purchase" | "sales";
 
 /** LLM 이 돌려주는 것. **수량·금액 칸이 없는 것이 안전장치의 전부다.** */
 export interface Intent {

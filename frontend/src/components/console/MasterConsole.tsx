@@ -44,7 +44,14 @@ type Turn =
   | { kind: "me"; text: string }
   //   `trace` 는 **①(의도 분류)가 무엇을 했는지**다. 되묻는 답에도 실어야 한다 —
   //   "못 알아들었습니다" 만 적으면 모델이 안 돈 것처럼 보인다.
-  | { kind: "bot"; text: string; trace?: LlmTraceData; note?: string | null }
+  //   `via` 는 **분류를 건너뛴 답**에만 붙는다 (바로가기). 흔적 칸이 그 사실을 적는다.
+  | {
+      kind: "bot";
+      text: string;
+      trace?: LlmTraceData;
+      note?: string | null;
+      via?: "shortcut";
+    }
   // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
   //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
   //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
@@ -82,11 +89,48 @@ function traceOf(res: AskResponse): LlmTraceData {
   };
 }
 
-const SHORTCUT: Record<string, string> = {
-  purchase: "오늘 배추 얼마나 사야 해?",
-  inventory: "창고에 얼마나 남았어?",
-  finance: "지금 자금 상황 알려줘",
-  sales: "판매 진행 상황 알려줘",
+/**
+ * 바로가기 — **발화문이 아니라 이미 정해진 의도를 든다.**
+ *
+ * 🔴 전에는 문장을 `/ask` 로 보냈다. 분류 LLM 이 429 로 죽으면 규칙 대체도 못 알아듣고
+ *    *"무엇을 해 드릴지 알아듣지 못했습니다"* 가 나왔다 (2026-09-14 실측). 버튼은 무엇을
+ *    원하는지 이미 안다 — 알고 있는 것을 모델에게 다시 맞히라고 할 이유가 없다.
+ *
+ * ★ **의도는 분류기가 같은 문장에 내는 값과 같다.** `runtime.py` 의 `SYSTEM_PROMPT`
+ *   예시가 기준이다 — 자금·창고는 `STATUS_QUERY` 예시, 매입·판매는 부서 이름 칸의
+ *   *"진행 상황"* 이다. `utterance` 는 말풍선에만 쓰고 서버로 보내지 않는다.
+ *
+ * 🔴 **매입은 매입안 생성이 아니다.** *"오늘 배추 얼마나 사야 해?"* 는 `PROCUREMENT_RUN`
+ *    이라 확인을 받아야 하고, 확인 뒤에는 호출 예산 12회와 매입 LLM 을 태운다. 버튼
+ *    하나로 그 길에 들어가지 않게 매입도 상태 조회로 둔다 — 라벨도 그 사실대로 적는다.
+ *    매입안은 입력창에 말로 요청한다 (확인 흐름 그대로).
+ *
+ * ⚠️ 이 상수는 `backend/tests/master/test_ask_shortcut_intent.py` 가 읽어 백엔드
+ *   `Intent` 스키마로 검증한다. 모양을 바꾸면 그 검사도 같이 본다.
+ */
+type ShortcutKey = "purchase" | "inventory" | "finance" | "sales";
+
+const SHORTCUT: Record<ShortcutKey, { label: string; utterance: string; intent: Intent }> = {
+  purchase: {
+    label: "매입 상태",
+    utterance: "매입 진행 상황 알려줘",
+    intent: { action: "STATUS_QUERY", agents: ["purchase"], item: null, scenario_label: null, condition: null, confidence: "HIGH" },
+  },
+  inventory: {
+    label: "재고",
+    utterance: "창고에 얼마나 남았어?",
+    intent: { action: "STATUS_QUERY", agents: ["inventory"], item: null, scenario_label: null, condition: null, confidence: "HIGH" },
+  },
+  finance: {
+    label: "자금",
+    utterance: "지금 자금 상황 알려줘",
+    intent: { action: "STATUS_QUERY", agents: ["finance"], item: null, scenario_label: null, condition: null, confidence: "HIGH" },
+  },
+  sales: {
+    label: "판매",
+    utterance: "판매 진행 상황 알려줘",
+    intent: { action: "STATUS_QUERY", agents: ["sales"], item: null, scenario_label: null, condition: null, confidence: "HIGH" },
+  },
 };
 
 export function MasterConsole({ session }: { session: Session }) {
@@ -278,12 +322,38 @@ export function MasterConsole({ session }: { session: Session }) {
     }
   }
 
-  /** 지름길 — 부서 이름을 누르면 **같은 API 를 발화문 없이** 부른다. */
-  function shortcut(key: string) {
-    const canned = SHORTCUT[key];
-    if (canned) {
-      setTab("master");
-      void send(canned);
+  /**
+   * 지름길 — 부서 이름을 누르면 **분류(`/ask`)를 건너뛰고** 정해진 의도를 바로 실행한다.
+   *
+   * ★ `/ask/execute` 는 받은 의도를 재분류하지 않는다. 조회는 확인 없이 도는 종류라
+   *   `/ask` 가 분류에 성공했을 때 타는 길과 같은 조회가 돈다.
+   * 🔴 흔적의 `llm_status` 는 서버가 준 값(`SKIPPED_TEMPLATE`) 그대로다 — 꾸미지 않는다.
+   */
+  async function shortcut(key: ShortcutKey) {
+    const chosen = SHORTCUT[key];
+    if (busy) return;
+    setTab("master");
+    push({ kind: "me", text: chosen.utterance });
+    setBusy(true);
+    try {
+      const res = await execute({ intent: chosen.intent });
+      if (isProcurement(res)) {
+        // 조회 의도라 여기 올 수 없다. 오면 서버가 다른 것을 돌린 것이라 그대로 보인다.
+        rememberRun(res);
+        push({ kind: "run", run: res });
+      } else {
+        push({
+          kind: "bot",
+          text: res.answer?.text ?? res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+          trace: traceOf(res),
+          note: res.answer ? res.note : null,
+          via: "shortcut",
+        });
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -315,16 +385,16 @@ export function MasterConsole({ session }: { session: Session }) {
           </button>
         ))}
         <span className="ml-1 hidden gap-1 sm:flex">
-          {Object.keys(SHORTCUT).map((k) => (
+          {(Object.keys(SHORTCUT) as ShortcutKey[]).map((k) => (
             <button
               key={k}
               type="button"
-              onClick={() => shortcut(k)}
+              onClick={() => void shortcut(k)}
               disabled={busy}
               className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
-              {{ purchase: "오늘 매입", inventory: "재고", finance: "자금", sales: "판매" }[k]}
+              {SHORTCUT[k].label}
             </button>
           ))}
         </span>
@@ -468,7 +538,7 @@ function TurnView({
         {turn.note && (
           <p className="m-0 mt-1.5 font-mono text-[11px] text-muted">{turn.note}</p>
         )}
-        {turn.trace && <LlmTrace trace={turn.trace} />}
+        {turn.trace && <LlmTrace trace={turn.trace} via={turn.via} />}
       </div>
     );
 

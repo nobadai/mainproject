@@ -36,6 +36,7 @@ export const AGENT_LABEL: Record<string, string> = {
   finance: "재무",
   inventory: "물류",
   purchase: "매입",
+  sales: "판매",
 };
 
 /** 확신도는 **되묻는 이유 그 자체**라 등급마다 색을 다르게 준다. */
@@ -74,11 +75,18 @@ type Trace = Pick<
   "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
 >;
 
-export function LlmTrace({ trace }: { trace: Trace }) {
+/**
+ * 🔴 **바로가기는 분류를 거치지 않는다** (`MasterConsole` 의 `SHORTCUT`).
+ *   의도는 코드에 적힌 값이라 확신도도 모델도 없다. 그때 *"확신 높음"* 을 달면
+ *   **모델이 알아들은 것처럼** 읽힌다. 그 자리에 무엇을 보냈는지를 그대로 적는다.
+ */
+export function LlmTrace({ trace, via }: { trace: Trace; via?: "shortcut" }) {
   const confidence =
-    trace.intent.action === "UNKNOWN"
-      ? UNKNOWN_CONFIDENCE[trace.intent.confidence]
-      : CONFIDENCE[trace.intent.confidence];
+    via === "shortcut"
+      ? { text: "바로가기 · 분류 없이 조회", style: "bg-sunk text-muted" }
+      : trace.intent.action === "UNKNOWN"
+        ? UNKNOWN_CONFIDENCE[trace.intent.confidence]
+        : CONFIDENCE[trace.intent.confidence];
 
   return (
     <div className="mt-2 border-t border-line-soft pt-2">
