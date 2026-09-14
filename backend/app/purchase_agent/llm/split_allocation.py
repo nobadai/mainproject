@@ -46,6 +46,8 @@ REASON_MAX_CHARS = 300
 ROLE = RoleSpec(
     system_prompt=SYSTEM_PROMPT,
     response_schema=SplitAllocationChoice.model_json_schema(),
+    prompt_version="split-alloc-1",
+    schema_version="split-alloc-1",
 )
 
 #: ``(context, 기본 후보 id) -> SplitAllocationResult``

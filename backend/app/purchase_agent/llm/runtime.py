@@ -133,6 +133,13 @@ class RoleSpec:
 
     system_prompt: str
     response_schema: dict[str, Any]
+    #: 🔴 **지시문과 응답 계약의 판.** 같이 사는 값이라 같은 자리에 둔다 — 흔적에만 적어
+    #: 두면 지시문을 고치면서 판을 안 올리는 날이 온다.
+    #:
+    #: ⚠️ 이 값은 **부른 호출에만** 적힌다. 안 부른 호출(꺼짐·게이트·상한)에서는 빈
+    #: 문자열이고, 그 빈칸이 곧 «그 판이 없었다» 는 뜻이다 (``LLMCallMetadata``).
+    prompt_version: str = "0"
+    schema_version: str = "0"
 
 
 
@@ -146,7 +153,13 @@ def _response_schema() -> dict[str, Any]:
 
 
 #: ⑤ 등급 조합. 🔴 **값은 지금 쓰던 것 그대로다** — 이 판은 «따로 담았을 뿐» 이다.
-MIX_ROLE = RoleSpec(system_prompt=SYSTEM_PROMPT, response_schema=_response_schema())
+MIX_ROLE = RoleSpec(
+    system_prompt=SYSTEM_PROMPT,
+    response_schema=_response_schema(),
+    # 🔴 **E3-2 이후 안 바뀐 판이다.** 올리는 것은 지시문이나 응답 계약을 고치는 날이다.
+    prompt_version="mix-1",
+    schema_version="mix-1",
+)
 
 
 class AnthropicProvider:

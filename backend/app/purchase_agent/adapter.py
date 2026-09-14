@@ -34,7 +34,8 @@ from app.purchase_agent.config import (
     threshold_not_declared_reason,
 )
 from app.purchase_agent.graph import build_graph
-from app.purchase_agent.llm.runtime import get_llm_settings
+from app.purchase_agent.llm.runtime import MIX_ROLE, RoleSpec, get_llm_settings
+from app.purchase_agent.llm.split_allocation import ROLE as SPLIT_ROLE
 from app.purchase_agent.nodes.classify_situation import (
     SplitEntryCap,
     compute_ci_width,
@@ -292,8 +293,25 @@ def _self_review_calls(
     🔴 **게이트가 안 고른 안도 남긴다.** 지우면 *"봤는데 깨끗했다"* 와 구분되지 않는다 —
     검토율이 거짓이 되는 자리다.
     """
+    # 🔴 **판을 여기서 다시 안 붙인다.** ⑧ 은 안마다 한 줄을 만들면서 그때 적는다 —
+    #   두 곳에서 붙이면 한쪽만 고치는 날이 온다 (``review_rationale._기록``).
     기록 = ((state or {}).get("review_calls")) or ()
     return tuple(기록)
+
+
+def _판(role: "RoleSpec", attempts: int) -> dict[str, str]:
+    """**부른 호출에만** 지시문·응답 계약의 판을 적는다.
+
+    🔴 안 부른 호출(꺼짐·게이트·상한)에서는 **빈 문자열**이고, 그 빈칸이 곧 «그 판이
+    없었다» 는 뜻이다. 안 불렀는데 판을 적으면 *"이 판으로 물어봤다"* 로 읽힌다 —
+    ``LLMCallMetadata`` 가 그 등식을 계약으로 잠근다.
+    """
+    if attempts <= 0:
+        return {}
+    return {
+        "prompt_version": role.prompt_version,
+        "schema_version": role.schema_version,
+    }
 
 
 def _split_allocation_call(
@@ -318,6 +336,7 @@ def _split_allocation_call(
             fallback_used=판단.llm_fallback_used,
             provider=판단.llm_provider or None,
             model=판단.llm_model or None,
+            **_판(SPLIT_ROLE, 판단.llm_attempts),
             skip_reason=(
                 "배분 후보가 하나뿐이라 고를 것이 없었다"
                 if 판단.llm_status == "SKIPPED_TEMPLATE"
@@ -349,7 +368,11 @@ def _sourcing_call(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ..
             status=mix.llm_status,
             attempts=mix.llm_attempts,
             fallback_used=mix.llm_fallback_used,
+            # 🔴 **전에는 ⑤ 만 provider 가 비어 있었다** — 역할 셋 중 하나만 추적이
+            #   끊겨 있었고, 그 상태로는 「추적 가능하다」가 성립하지 않는다.
+            provider=mix.llm_provider or None,
             model=mix.llm_model or None,
+            **_판(MIX_ROLE, mix.llm_attempts),
             skip_reason=(
                 "규칙이 중품을 안 골라 후보가 하나였다"
                 if mix.llm_status == "SKIPPED_TEMPLATE"

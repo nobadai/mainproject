@@ -28,8 +28,16 @@ AS_OF = date(2026, 8, 21)
 
 
 def _호출(status: str, **칸) -> LLMCallMetadata:
+    """계약을 만족하는 **최소한**으로 채운다 — 재는 것은 접는 규칙이지 계약이 아니다."""
     if status.startswith("SKIPPED_"):
         칸.setdefault("skip_reason", "사유")
+    if status == "SUCCESS":
+        칸.setdefault("attempts", 1)
+        칸.setdefault("provider", "anthropic")
+        칸.setdefault("model", "haiku")
+    if 칸.get("attempts", 0) > 0:
+        칸.setdefault("prompt_version", "p-1")
+        칸.setdefault("schema_version", "s-1")
     return LLMCallMetadata(role="r", status=status, **칸)
 
 
@@ -129,3 +137,77 @@ def test_안_부른_호출에는_모델을_빈_문자열로_안_적는다() -> N
     호출 = _llm_calls(None)[0]
     assert 호출.model is None
     assert 호출.provider is None
+
+
+# ── 역할별 추적 가능성 ─────────────────────────────────────────
+
+
+def test_성공했는데_무엇으로_물었는지_비면_거부한다() -> None:
+    """🔴 **재현할 수 없는 성공은 추적 가능한 것이 아니다.**
+
+    네 칸 중 하나라도 비면 그 호출을 나중에 다시 세울 수 없다 — 「추적 가능하다」는
+    완료 보고가 그 상태에서는 성립하지 않는다.
+    """
+    온전한 = {
+        "role": "r",
+        "status": "SUCCESS",
+        "attempts": 1,
+        "provider": "anthropic",
+        "model": "haiku",
+        "prompt_version": "p-1",
+        "schema_version": "s-1",
+    }
+    LLMCallMetadata(**온전한)  # 다 있으면 선다
+    for 빼는_칸 in ("provider", "model", "prompt_version", "schema_version"):
+        with pytest.raises(ContractViolation):
+            LLMCallMetadata(**{**온전한, 빼는_칸: ""})
+        with pytest.raises(ContractViolation):
+            LLMCallMetadata(**{**온전한, 빼는_칸: None})
+
+
+def test_불렀으면_판을_적고_안_불렀으면_비운다() -> None:
+    """⚠️ 빈칸이 **「그 판이 없었다」** 는 뜻이다 — 양쪽으로 다 막는다."""
+    with pytest.raises(ContractViolation):
+        LLMCallMetadata(role="r", status="FALLBACK", attempts=2, fallback_used=True)
+    with pytest.raises(ContractViolation):
+        LLMCallMetadata(role="r", status="DISABLED", prompt_version="p-1")
+    # 부른 쪽은 판이 있으면 선다 — model 이 비어도 막지 않는다 (설정 실수가 예외가 되면 안 된다)
+    LLMCallMetadata(
+        role="r",
+        status="FALLBACK",
+        attempts=2,
+        fallback_used=True,
+        prompt_version="p-1",
+        schema_version="s-1",
+    )
+
+
+def test_역할_셋이_모두_판을_들고_있다() -> None:
+    """🔴 셋 중 하나만 비면 그 역할만 추적이 끊긴다 — ⑤ provider 가 그랬다."""
+    from app.purchase_agent.llm.runtime import MIX_ROLE
+    from app.purchase_agent.llm.self_review import ROLE as REVIEW_ROLE
+    from app.purchase_agent.llm.split_allocation import ROLE as SPLIT_ROLE
+
+    판 = [(r.prompt_version, r.schema_version) for r in (MIX_ROLE, SPLIT_ROLE, REVIEW_ROLE)]
+    assert all(p.strip() and s.strip() for p, s in 판)
+    # 역할마다 **다른** 판이다 — 같으면 어느 지시문이었는지 못 가른다.
+    assert len({p for p, _ in 판}) == 3
+
+
+def test_다섯번_호출에도_provider_가_적힌다() -> None:
+    """🔴 전에는 ⑤ 만 ``provider`` 가 비어 있었다 — 역할 셋 중 하나만 끊긴 상태였다."""
+    from app.purchase_agent.adapter import _sourcing_call
+    from app.purchase_agent.llm.mix import MixDecision
+
+    판단 = MixDecision(
+        candidate_id="BASE_ONLY",
+        reason="사유",
+        llm_status="SUCCESS",
+        llm_model="haiku",
+        llm_fallback_used=False,
+        llm_provider="anthropic",
+        llm_attempts=1,
+    )
+    줄 = _sourcing_call({"sourcing_plan": [{"decision": {"mix": 판단}}]})[0]
+    assert (줄.provider, 줄.model) == ("anthropic", "haiku")
+    assert 줄.prompt_version and 줄.schema_version

@@ -48,7 +48,10 @@ claim_text 의 <NUM>·<DATE>·<PCT>·<AMT> 는 가려진 값이다. 그 값을 �
 """
 
 ROLE = RoleSpec(
-    system_prompt=SYSTEM_PROMPT, response_schema=ReviewOutput.model_json_schema()
+    system_prompt=SYSTEM_PROMPT,
+    response_schema=ReviewOutput.model_json_schema(),
+    prompt_version="self-review-1",
+    schema_version="self-review-1",
 )
 
 #: ``(context) -> ReviewResult``

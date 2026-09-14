@@ -20,7 +20,7 @@ from typing import Any
 from app.master.envelope import LLMCallMetadata
 from app.purchase_agent.features import SELF_REVIEW, enabled
 from app.purchase_agent.llm.review_schemas import ClaimIn, ReviewContext
-from app.purchase_agent.llm.self_review import Reviewer
+from app.purchase_agent.llm.self_review import ROLE, Reviewer
 from app.purchase_agent.llm.text_guard import contains_number, sanitize_numerals
 from app.purchase_agent.review_gate import GateResult, ScenarioSignals, choose
 from app.purchase_agent.review_templates import FINDINGS, UnknownFinding, render
@@ -265,6 +265,13 @@ def _기록(
     🔴 **안 본 안도 남긴다.** 목록에서 빼면 *"봤는데 깨끗했다"* 와 구분되지 않고,
     검토율이 거짓이 된다.
     """
+    # 🔴 **부른 호출에만 판을 적는다.** 안 불렀는데 적으면 *"이 판으로 물어봤다"* 로
+    #   읽힌다 — ``LLMCallMetadata`` 가 그 등식을 계약으로 잠근다.
+    판 = (
+        {"prompt_version": ROLE.prompt_version, "schema_version": ROLE.schema_version}
+        if attempts > 0
+        else {}
+    )
     return LLMCallMetadata(
         role=RATIONALE_SELF_REVIEW,
         status=status,  # type: ignore[arg-type]
@@ -273,5 +280,6 @@ def _기록(
         target=label,
         provider=provider or None,
         model=model or None,
+        **판,
         skip_reason=skip_reason,
     )

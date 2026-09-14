@@ -37,6 +37,10 @@ class MixDecision:
     llm_status: LLMStatus
     llm_model: str | None
     llm_fallback_used: bool
+    #: 어느 프로바이더로 물었나. 🔴 **전에는 안 날랐다** — 그래서 ⑤ 호출 흔적만
+    #: ``provider`` 가 비어 있었고, 역할 셋 중 하나만 추적이 끊겼다.
+    #: 호출을 안 했으면 ``None`` 이다 (「안 불렀다」와 「빈 이름으로 불렀다」는 다르다).
+    llm_provider: str | None = None
     #: 실제 시도 횟수 (재시도 포함). 🔴 **전에는 안 날랐다** — 그래서 봉투의
     #: ``llm_attempts`` 가 LLM 이 두 번 시도한 날에도 **0** 으로 나갔다. 실행 흔적이
     #: 「안 불렀다」로 보이는 자리라 채운다.
@@ -56,6 +60,7 @@ def _decision(result: InterpretationResult) -> MixDecision:
         llm_model=result.llm_model,
         llm_fallback_used=result.llm_fallback_used,
         llm_attempts=result.llm_attempts,
+        llm_provider=result.llm_provider,
     )
 
 

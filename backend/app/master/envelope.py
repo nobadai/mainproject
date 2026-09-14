@@ -779,6 +779,43 @@ class LLMCallMetadata:
                 f"{self.role} 이 {self.status} 인데 skip_reason 이 비었다 — "
                 "「왜 안 돌았나」가 사라지면 「문제 없음」과 구분되지 않는다."
             )
+        # 🔴 **성공했으면 무엇으로 물었는지를 전부 안다.** 하나라도 비면 그 호출은
+        #   나중에 재현할 수 없고, 「추적 가능하다」가 성립하지 않는다.
+        if self.status == "SUCCESS":
+            빈칸 = [
+                이름
+                for 이름, 값 in (
+                    ("provider", self.provider),
+                    ("model", self.model),
+                    ("prompt_version", self.prompt_version),
+                    ("schema_version", self.schema_version),
+                )
+                if not (값 or "").strip()
+            ]
+            if 빈칸:
+                raise ContractViolation(
+                    f"{self.role} 이 SUCCESS 인데 {빈칸} 가 비었다 — 무엇으로 물었는지 "
+                    "모르면 그 성공을 다시 세울 수 없다."
+                )
+        # ⚠️ **판은 「부른 호출」의 것이다.** 안 불렀는데 적으면 *"이 판으로 물어봤다"* 로
+        #   읽히고, 불렀는데 안 적으면 어느 지시문이었는지가 사라진다. 둘 다 막는다.
+        #
+        # 🔴 model·provider 는 여기서 안 건다 — 그 둘은 **설정이 어긋난 날** 비는 값이라
+        #   (모델명 미설정으로 전면 실패한 FALLBACK 등) 계약으로 걸면 설정 실수가
+        #   예외로 바뀐다. 판은 우리가 코드에 든 상수라 그런 경우가 없다.
+        적힌_판 = bool((self.prompt_version or "").strip() or (self.schema_version or "").strip())
+        if self.attempts > 0 and not (
+            (self.prompt_version or "").strip() and (self.schema_version or "").strip()
+        ):
+            raise ContractViolation(
+                f"{self.role} 이 {self.attempts}회 불렀는데 판(prompt/schema version)이 "
+                "비었다 — 어느 지시문으로 물었는지가 사라진다."
+            )
+        if self.attempts == 0 and 적힌_판:
+            raise ContractViolation(
+                f"{self.role} 은 안 불렀는데 판이 적혀 있다 — 빈칸이 「그 판이 없었다」는 "
+                "뜻인데, 적어 두면 「이 판으로 물어봤다」로 읽힌다."
+            )
 
 
 #: 집계에서 **처음 맞는 것**을 고른다. 순서가 곧 규칙이다.
