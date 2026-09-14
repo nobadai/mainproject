@@ -140,7 +140,7 @@ def test_물류_build_가_보는_실행을_넘기고_출처에_적는다(monkeyp
     names = [name for name, _ in 잡은]
     assert names == ["coverage", "inventory", "inbound", "warehouse", "outbound"]
     assert {run for _, run in 잡은} == {SHOWN_SIM_RUN_ID}
-    assert f"보고 있는 실행: {SHOWN_SIM_RUN_ID}" in (result.tab.source.note or "")
+    assert f"보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {AS_OF}" in (result.tab.source.note or "")
 
 
 def test_물류_재고그래프가_보는_실행을_넘긴다(monkeypatch):

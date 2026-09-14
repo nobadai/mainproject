@@ -49,7 +49,7 @@ def build(as_of: date) -> DashboardTab:
     #  ★ 두 그래프는 **주인 부서가 만듭니다.** 여기서 만들면 같은 값을 두 군데서
     #    계산하게 되고, 실제로 갈라졌습니다 — 요약은 재고 4,550kg 인데 그래프
     #    끝은 14,600kg 이었습니다. 이제 둘 다 물류에서 나옵니다.
-    cash = finance_q.dashboard_cash(n, at)
+    cash = finance_q.dashboard_cash(axis)
     stock = logistics_q.dashboard_stock(n, at, as_of)
 
     return DashboardTab(
