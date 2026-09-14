@@ -380,14 +380,32 @@ def load_confirmed_orders(item: str, as_of: date, *, sim_run_id: str) -> Sourced
       0건이라(전부 `DELIVERED`) 파트너 일수요로 메우는데, 그건 **예상 수요이지 확정이
       아니다.** 등급을 `DERIVED` 로 두고 파생식을 `note` 에 적어 리포트에 내보낸다 —
       값만 넘기면 매입도 사람도 확정으로 읽는다.
+
+    🔴 **조회가 터지면 파생으로 넘어가지 않는다** (`#651` · 2026-09-14).
+
+      전 판은 예외를 `booked = None` 으로 받아 *"확정 건이 없다"* 와 같은 길로 보냈다.
+      그러면 DB 장애가 **파트너 명목 수요로 사는 정상 걷기**처럼 보인다.
+      `load_forecast` 가 조회 실패에 대해 이미 낸 결론과 같다 — 비운다.
+
+      .. code-block:: text
+
+          조회 성공 · 0건   DERIVED    파트너 일수요 × 기간 (그대로)
+          조회 성공 · N건   MEASURED   이 실행의 확정 주문 (그대로)
+          조회 실패         MISSING    메우지 않는다 → 매입 missing_data
+
+    ⚠️ 사유는 **원인을 단정하지 않는다.** 예외 클래스와 메시지만 적는다.
     """
     try:
         booked = _orders_from_db(item, as_of, sim_run_id=sim_run_id)
-    except Exception as error:  # noqa: BLE001
-        booked = None
-        why = f"DB 조회 실패 ({error})"
-    else:
-        why = "앞으로 납품할 확정 건이 없다"
+    except Exception as error:  # noqa: BLE001 — 적재 실패가 Flow 를 죽이면 안 된다
+        return SourcedInput(
+            key="confirmed_orders",
+            payload=None,
+            grade="MISSING",
+            source="-",
+            note=f"확정 주문 조회 실패 ({type(error).__name__}: {error})",
+        )
+    why = "앞으로 납품할 확정 건이 없다"
 
     if booked:
         return SourcedInput(
