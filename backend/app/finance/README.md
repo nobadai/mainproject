@@ -273,12 +273,21 @@ Finance 조정 축   amount 하나뿐
 ```
 
 `payment_terms` · `price` · `delivery` · `quantity` · `channel_mix` 축을 만들지 않는다.
-재무가 내는 결제일수 상한은 **payload 필드**다.
+재무가 내는 결제일수 상한과 여신 사실은 **payload 필드**다. 모두 경계/사실이지
+`SuggestedAdjustment`가 아니다. Sales가 이 값만으로 수량·단가·금액·결제조건을
+자동 변경하면 새 상업안이 되어 반드시 새 Finance 검증이 필요하다.
 
 ```text
-payload.max_finance_allowed_payment_terms_days   상한(경계)이지 조정이 아니다
-payload.max_finance_allowed_amount_krw
+payload.max_finance_allowed_payment_terms_days  결제일수 상한(경계)
+payload.max_finance_allowed_amount_krw          credit 기준 추가 외상판매 가능 경계
+payload.financial_summary.available_credit_krw  credit_limit - current_partner_ar
+payload.financial_summary.required_collection_before_sale_krw
+                                                 max(0, projected_partner_ar - credit_limit)
 ```
+
+`max_finance_allowed_amount_krw`는 마진·현금·납기 등 모든 Finance 제약을 합친
+절대 매출 상한이 아니다. 여신한도와 현재 AR을 모두 읽은 경우에만 계산하며, 어느
+한 사실이라도 없으면 `None`과 기존 `RUNTIME_NOT_READY` 의미를 유지한다.
 
 ### 실행 경로 상태
 

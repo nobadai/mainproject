@@ -38,6 +38,7 @@ def _finance_reply(**over):
         "reason_codes": ["SALES_MARGIN_BELOW_MINIMUM"],
         "max_finance_allowed_amount_krw": "5000000",
         "max_finance_allowed_payment_terms_days": 15,
+        "financial_summary": {"required_collection_before_sale_krw": "3000000"},
         "evidence_refs": ["FIN-AGENT:req-1:1:SALES-001-B:evaluate_sales_scenario"],
     }
     payload.update(over)
@@ -103,6 +104,7 @@ def test_finance_reply_payload_survives_untouched():
     assert finance.payload["finance_verdict"] == "PASS"
     assert finance.payload["reason_codes"] == ["SALES_MARGIN_BELOW_MINIMUM"]
     assert finance.payload["max_finance_allowed_amount_krw"] == "5000000"
+    assert finance.payload["financial_summary"]["required_collection_before_sale_krw"] == "3000000"
     assert finance.payload["evidence_refs"] == [
         "FIN-AGENT:req-1:1:SALES-001-B:evaluate_sales_scenario"
     ]
@@ -149,6 +151,32 @@ def test_finance_amount_boundary_does_not_shrink_sales_quantity():
     base_qty = _scenario_a(baseline).quantity_kg
     refed_qty = _scenario_a(refed).quantity_kg
     assert refed_qty == base_qty
+
+
+def test_credit_boundaries_do_not_create_a_new_commercial_candidate():
+    """여신 경계는 사실 전달이며, validation-only refeed의 상업조건을 바꾸지 않는다."""
+    baseline = run_proposal(_refeed_request(feedback=None, is_refeed=False, feedback_attempt=0))
+    refed = run_proposal(_refeed_request())
+    baseline_scenario = _scenario_a(baseline)
+    refed_scenario = _scenario_a(refed)
+
+    assert (
+        refed_scenario.quantity_kg,
+        refed_scenario.unit_price_krw,
+        refed_scenario.sales_amount_krw,
+        refed_scenario.delivery_date,
+        refed_scenario.payment_days,
+        refed_scenario.payment_terms_type,
+        refed_scenario.contract_term_days,
+    ) == (
+        baseline_scenario.quantity_kg,
+        baseline_scenario.unit_price_krw,
+        baseline_scenario.sales_amount_krw,
+        baseline_scenario.delivery_date,
+        baseline_scenario.payment_days,
+        baseline_scenario.payment_terms_type,
+        baseline_scenario.contract_term_days,
+    )
 
 
 def test_finance_payment_term_boundary_does_not_rewrite_payment_days():
