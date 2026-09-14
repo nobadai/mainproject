@@ -511,6 +511,7 @@ def test_경계_뒤_날짜는_BLOCKED_BY_BOUNDARY_로_센다(monkeypatch: pytest
             load_config=lambda _: 설정,
             decisions_of=lambda _: [],
             decide=문지기,
+            today=lambda: 넘은날.replace(day=넘은날.day + 1),
         )
 
     out, _, _ = _하루(as_of=넘은날, auto_approve=True, 문=승인)

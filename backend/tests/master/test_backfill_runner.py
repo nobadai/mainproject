@@ -17,7 +17,7 @@ from __future__ import annotations
 import ast
 import inspect
 import unicodedata
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -114,6 +114,7 @@ def _진짜_백필(행들: dict[date, list[dict[str, Any]]]):
         load_config=lambda _: 설정,
         runs_on=lambda *, sim_run_id, as_of, limit: 행들.get(as_of, []),
         decisions_of=lambda request_id: [],
+        today=lambda: 사흘 + timedelta(days=1),
     )
 
 
