@@ -25,7 +25,7 @@ import {
 } from "recharts";
 
 import type { ClosingItem } from "@/lib/console_api";
-import { manwon, shortDate, toNumber } from "./user_text";
+import { manwon, moneyWon, shortDate, toNumber } from "./user_text";
 
 type FlowPoint = {
   index: number;
@@ -99,7 +99,8 @@ export function FinanceFlowChart({ rows }: { rows: ClosingItem[] }) {
         </ResponsiveContainer>
       </div>
       <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
-        위쪽은 들어온 돈, 아래쪽은 나간 돈입니다.
+        위쪽은 들어온 돈, 아래쪽은 나간 돈입니다. 가로축은 마감된 날만 차례로 놓은 것이라,
+        칸 간격이 실제 날짜 간격을 뜻하지 않습니다.
         {empty.length > 0 && (
           <>
             {" "}
@@ -152,7 +153,7 @@ function Row({
         style={{ color: tone ? `var(--color-t-${tone})` : "var(--color-ink)" }}
       >
         {signed && value > 0 ? "+" : ""}
-        {Math.round(value).toLocaleString("ko-KR")} 원
+        {moneyWon(value)}
       </dd>
     </>
   );
