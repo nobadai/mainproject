@@ -14,6 +14,10 @@ from app.sales.console_partners import (
     get_console_partner_detail,
     get_console_partners,
 )
+from app.sales.console_proposals import (
+    ConsoleSalesProposalsResponse,
+    get_console_sales_proposals,
+)
 from app.sales.console_runs import ConsoleSalesRunsResponse, get_console_sales_runs
 from app.sales.console_trend import (
     MAX_TREND_DAYS,
@@ -33,6 +37,15 @@ def summary(
 ) -> SalesDashboardResponse:
     """Stored sales, receivable and item facts for exactly one simulation run."""
     return get_sales_dashboard(sim_run_id=sim_run_id, as_of=as_of)
+
+
+@router.get("/proposals", response_model=ConsoleSalesProposalsResponse)
+def proposals(
+    sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+) -> ConsoleSalesProposalsResponse:
+    """The sales proposals this run produced on exactly this day.  Reads only."""
+    return get_console_sales_proposals(sim_run_id=sim_run_id, as_of=as_of)
 
 
 @router.get("/trend", response_model=SalesTrendResponse)

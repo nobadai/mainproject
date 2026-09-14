@@ -1,0 +1,222 @@
+"""금일 판매안 — 저장된 안을 펴서 보여 주되, 판정은 재무 것을 읽는다."""
+
+from datetime import date
+from decimal import Decimal
+
+from app.sales.console_proposals import get_console_sales_proposals
+
+RUN = "SIM-CHAIN-V13"
+AS_OF = date(2026, 3, 10)
+REQUEST = "REQ-DAILY-SALES-SIM-CHAIN-V13-20260310-무"
+
+
+class _Reader:
+    def __init__(self, rows: list[dict] | None = None):
+        self.rows = rows or []
+        self.calls: list[tuple[str, list]] = []
+
+    def __call__(self, query, params=None):
+        self.calls.append((str(query), list(params or [])))
+        return [dict(row) for row in self.rows]
+
+
+def _scenario(**over) -> dict:
+    return {
+        "scenario_id": "SALES-001-A",
+        "scenario_type": "CONSERVATIVE",
+        "objective": "RISK_DEFENSE",
+        "item": "무",
+        "partner_id": "KIMCHI_FACTORY_001",
+        "quantity_kg": "463.0",
+        "unit_price_krw": "1033.0",
+        "reported_sales_amount_krw": "478279.0",
+        "payment_days": 30,
+        "delivery_date": "2026-03-11",
+        "status": "UNRESOLVED",
+        "rationale": ["전달된 계약만 사용해 구성했습니다."],
+        "risks": [],
+        "uncertainties": [],
+        **over,
+    }
+
+
+def _row(**over) -> dict:
+    return {
+        "request_id": REQUEST,
+        "payload": {"recommended_scenario_id": None, "scenarios": []},
+        "scenario": _scenario(),
+        "finance_verdict": "PASS",
+        "finance_status": "EVALUATED",
+        **over,
+    }
+
+
+def _patch(monkeypatch, reader: _Reader) -> None:
+    monkeypatch.setattr("app.sales.console_proposals.get_db_schema", lambda: "haetdeul")
+    monkeypatch.setattr("app.sales.console_proposals.fetch_all", reader)
+
+
+def test_a_stored_proposal_comes_back_as_stored(monkeypatch):
+    _patch(monkeypatch, _Reader([_row()]))
+
+    result = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    assert result.sim_run_id == RUN
+    assert result.as_of == AS_OF
+    assert result.request_count == 1
+    row = result.rows[0]
+    assert row.item == "무"
+    assert row.scenario_type == "CONSERVATIVE"
+    assert row.quantity_kg == Decimal("463.0")
+    assert row.unit_price_krw == Decimal("1033.0")
+    assert row.reported_sales_amount_krw == Decimal("478279.0")
+    assert row.payment_days == 30
+    assert row.delivery_date == date(2026, 3, 11)
+    assert row.rationale == ["전달된 계약만 사용해 구성했습니다."]
+
+
+def test_the_amount_is_read_not_recomputed(monkeypatch):
+    """🔴 수량×단가로 다시 만들지 않는다.
+
+    저장된 매출액과 곱셈이 어긋나면 그것은 화면이 고칠 일이 아니라 드러날 일이다.
+    """
+    _patch(monkeypatch, _Reader([_row(scenario=_scenario(reported_sales_amount_krw="1"))]))
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.reported_sales_amount_krw == Decimal(1)
+    assert row.quantity_kg == Decimal("463.0")
+
+
+def test_the_finance_verdict_is_read_rather_than_judged(monkeypatch):
+    """🔴 판매가 마진이나 여신으로 판정을 흉내 내지 않는다."""
+    _patch(monkeypatch, _Reader([_row(finance_verdict="FAIL")]))
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.finance_verdict == "FAIL"
+    assert row.finance_status == "EVALUATED"
+
+
+def test_a_missing_finance_verdict_stays_missing(monkeypatch):
+    """⚠️ 재무가 아직 안 봤으면 «없음» 이다. 통과도 거절도 아니다."""
+    _patch(monkeypatch, _Reader([_row(finance_verdict=None, finance_status=None)]))
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.finance_verdict is None
+    assert row.finance_status is None
+
+
+def test_a_request_that_made_no_proposal_still_counts_as_a_request(monkeypatch):
+    """그날 돌았지만 안을 못 만든 요청도 «돌았다» 는 사실이다."""
+    _patch(monkeypatch, _Reader([_row(scenario=None)]))
+
+    result = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    assert result.request_count == 1
+    assert result.rows == []
+
+
+def test_a_day_with_no_run_is_empty_rather_than_zero(monkeypatch):
+    _patch(monkeypatch, _Reader([]))
+
+    result = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    assert result.request_count == 0
+    assert result.rows == []
+
+
+def test_the_recommended_scenario_is_marked_only_when_it_matches(monkeypatch):
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(payload={"recommended_scenario_id": "SALES-001-A", "scenarios": []}),
+                _row(
+                    payload={"recommended_scenario_id": "SALES-001-A", "scenarios": []},
+                    scenario=_scenario(scenario_id="SALES-001-B"),
+                ),
+            ]
+        ),
+    )
+
+    rows = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows
+
+    assert [row.recommended for row in rows] == [True, False]
+
+
+def test_nothing_is_recommended_when_the_run_named_none(monkeypatch):
+    """🔴 추천이 없으면 첫 안을 추천으로 만들지 않는다."""
+    _patch(monkeypatch, _Reader([_row()]))
+
+    assert get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0].recommended is False
+
+
+def test_an_unreadable_amount_is_missing_rather_than_zero(monkeypatch):
+    """⚠️ 0원 제안과 «못 읽었다» 는 다른 사실이다."""
+    _patch(
+        monkeypatch,
+        _Reader([_row(scenario=_scenario(reported_sales_amount_krw="알 수 없음"))]),
+    )
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.reported_sales_amount_krw is None
+
+
+def test_a_real_zero_amount_is_kept(monkeypatch):
+    _patch(monkeypatch, _Reader([_row(scenario=_scenario(reported_sales_amount_krw="0"))]))
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.reported_sales_amount_krw == Decimal(0)
+
+
+def test_the_run_axis_and_the_day_are_both_carried(monkeypatch):
+    """🔴 실행 축이 빠지면 다른 실행의 판매안이 오늘 화면에 섞인다."""
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+
+    get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    query, params = reader.calls[0]
+    assert params == [RUN, AS_OF]
+    assert "context'->>'sim_run_id' = %s" in query
+    assert "run.as_of = %s" in query
+
+
+def test_only_the_latest_run_of_each_request_is_shown(monkeypatch):
+    """되먹임이 돌면 같은 요청이 여러 번 저장된다. 그중 마지막이 그날의 답이다."""
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+
+    get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    query = reader.calls[0][0]
+    assert "DISTINCT ON (run.response_payload->>'request_id')" in query
+    assert "run.created_at DESC" in query
+
+
+def test_the_newest_finance_reply_wins(monkeypatch):
+    """재검증이 돌면 같은 키에 회신이 쌓인다."""
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+
+    get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    query = reader.calls[0][0]
+    assert "check_run.created_at DESC" in query
+    assert "mode = 'SALES_VALIDATION'" in query
+
+
+def test_proposals_are_never_written_back(monkeypatch):
+    """🔴 화면이 안을 다시 만들지 않는다 — 읽기 전용이다."""
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+
+    get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    query = reader.calls[0][0].upper()
+    for word in ("INSERT", "UPDATE", "DELETE"):
+        assert word not in query

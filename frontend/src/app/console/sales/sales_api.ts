@@ -124,6 +124,10 @@ export const salesOverview = {
     send<SalesTrendResponse>(
       `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf })}`,
     ),
+  proposals: (simRun: string, asOf: string) =>
+    send<SalesProposalsResponse>(
+      `${CONSOLE_BASE}/sales/proposals?${query({ sim_run_id: simRun, as_of: asOf })}`,
+    ),
 };
 
 /* ── 거래처 등록 ───────────────────────────────────────────────────────── */
@@ -201,3 +205,35 @@ export type WithItemNames<T> = Omit<T, "recent_sales" | "item_summary"> & {
   recent_sales: (T extends { recent_sales: (infer R)[] } ? R & NamedItem : never)[];
   item_summary: (T extends { item_summary: (infer I)[] } ? I & NamedItem : never)[];
 };
+
+/* ── 금일 판매안 ───────────────────────────────────────────────────────── */
+
+export interface SalesProposal {
+  request_id: string;
+  scenario_id: string;
+  scenario_type: string | null;
+  objective: string | null;
+  item: string | null;
+  partner_id: string | null;
+  quantity_kg: Money | null;
+  unit_price_krw: Money | null;
+  /** 🔴 판매가 적어 보낸 매출액이다. 화면이 수량×단가로 다시 만들지 않는다. */
+  reported_sales_amount_krw: Money | null;
+  payment_days: number | null;
+  delivery_date: string | null;
+  status: string | null;
+  rationale: string[];
+  risks: string[];
+  uncertainties: string[];
+  /** 재무가 남긴 판정. `null` 은 아직 안 본 것이지 통과도 거절도 아니다. */
+  finance_verdict: string | null;
+  finance_status: string | null;
+  recommended: boolean;
+}
+
+export interface SalesProposalsResponse {
+  sim_run_id: string;
+  as_of: string;
+  request_count: number;
+  rows: SalesProposal[];
+}
