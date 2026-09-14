@@ -352,7 +352,7 @@ def test_표의_칸_이름이_행에_있다(client):
 
 
 def _sales_dashboard_stub(sim_run_id: str, as_of: date) -> SalesDashboardResponse:
-    assert sim_run_id == sales_query.BURN_IN_SIM_RUN_ID
+    assert sim_run_id == sales_query.SHOWN_SIM_RUN_ID
     return SalesDashboardResponse(
         meta=SalesDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
         summary=SalesDashboardSummary(
@@ -466,7 +466,7 @@ def _sales_dashboard_stub(sim_run_id: str, as_of: date) -> SalesDashboardRespons
 
 
 def _finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
-    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert sim_run_id == finance_query.SHOWN_SIM_RUN_ID
     return FinanceDashboardResponse(
         meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
         states=[
@@ -512,7 +512,7 @@ def _finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardRes
 
 
 def _empty_finance_dashboard_stub(sim_run_id: str, as_of: date) -> FinanceDashboardResponse:
-    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert sim_run_id == finance_query.SHOWN_SIM_RUN_ID
     assert as_of == date(2026, 1, 6)
     return FinanceDashboardResponse(
         meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
@@ -586,7 +586,7 @@ def _finance_cashflow_stub(
     as_of: date,
     days: int,
 ) -> FinanceCashflowResponse:
-    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert sim_run_id == finance_query.SHOWN_SIM_RUN_ID
     return FinanceCashflowResponse(
         meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),
         cashflow=[
@@ -601,7 +601,7 @@ def _prior_finance_cashflow_stub(
     as_of: date,
     days: int,
 ) -> FinanceCashflowResponse:
-    assert sim_run_id == finance_query.BURN_IN_SIM_RUN_ID
+    assert sim_run_id == finance_query.SHOWN_SIM_RUN_ID
     assert as_of == date(2026, 1, 20)
     return FinanceCashflowResponse(
         meta=FinanceDashboardMeta(sim_run_id=sim_run_id, as_of=as_of, data_type="SIMULATION"),

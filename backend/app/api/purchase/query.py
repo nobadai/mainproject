@@ -631,6 +631,9 @@ def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
         committed_note=Note(tone="neutral", text=committed_text),
         source=Source(
             filled=True, owner="매입",
-            note="master_agent_runs · master_decisions · purchases · purchase_items · items",
+            note=(
+                "master_agent_runs · master_decisions · purchases · purchase_items · items"
+                + ("" if sim_run_id is None else f" · 보고 있는 실행: {sim_run_id}")
+            ),
         ),
     )
