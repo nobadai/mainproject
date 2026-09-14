@@ -53,17 +53,19 @@ def _price_provenance(request: SalesProposalInput) -> str:
     )
     if request.business_mode == "CONTRACT_FULFILLMENT":
         return "LOCKED_CONTRACT"
+    # 갱신의 계약 가격 상속은 다른 상업조건 override와 무관하다. 가격 칸만 비었고
+    # 계약 가격이 있으면, 수량·납기·결제조건을 바꿨더라도 계약 가격을 다시 산정하지 않는다.
+    if (
+        request.business_mode == "CONTRACT_PROPOSAL_RENEWAL"
+        and contract is not None
+        and request.user_request.preferred_unit_price_krw is None
+        and contract.contract_unit_price_krw is not None
+    ):
+        return "LOCKED_CONTRACT"
     if source_ref and source_ref.endswith(f"/{_ML_CURRENT_PRICE}"):
         return "MARKET_ML"
     if source_ref and source_ref.endswith(f"/{_FIXED_PRICE}"):
         return "LOCKED_FIXED"
-    # 갱신 제안에서 사용자가 override 하지 않으면 _baseline 이 계약 ref 를 채운다.
-    if (
-        request.business_mode == "CONTRACT_PROPOSAL_RENEWAL"
-        and contract is not None
-        and not _user_overrides_contract(request)
-    ):
-        return "LOCKED_CONTRACT"
     if request.user_request.preferred_unit_price_krw is not None:
         return "LOCKED_USER" if source_ref else "UNKNOWN"
     return "BASELINE_ONLY"

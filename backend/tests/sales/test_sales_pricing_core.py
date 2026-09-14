@@ -29,6 +29,7 @@ def _request(
     upper=1600,
     priority="HIGH",
     severity="SEVERE",
+    feedback=True,
 ):
     payload = {
         "business_mode": business_mode,
@@ -78,7 +79,9 @@ def _request(
             },
             "delivery_feasibility": {"status": "READY", "earliest_delivery_date": DELIVERY},
         },
-        "feedback": {
+    }
+    if feedback:
+        payload["feedback"] = {
             "domain_replies": [
                 {
                     "source_agent": "logistics",
@@ -96,8 +99,7 @@ def _request(
                 {"scenario_id": f"SALES-001-{suffix}", "reply_refs": ["LOG-1"]}
                 for suffix in ("A", "B", "C")
             ],
-        },
-    }
+        }
     if contract is not None:
         payload["contract_context"] = contract
     return SalesProposalInput.model_validate(payload)
@@ -218,3 +220,77 @@ def test_sales_and_finance_use_the_same_immutable_policy_loader():
     assert first is second
     assert first.finance_minimum_margin_rate == Decimal("0.2642")
     assert first.finance_warning_margin_rate == Decimal("0.30")
+
+
+def _renewal_contract():
+    return {
+        "item": "배추",
+        "partner_id": "P-1",
+        "contract_quantity_kg": 100,
+        "contract_unit_price_krw": 2100,
+        "contract_delivery_date": DELIVERY,
+        "contract_payment_days": 30,
+        "source_ref": "CONTRACT:C-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"requested_quantity_kg": 80},
+        {"preferred_delivery_date": date(2026, 1, 3)},
+        {"preferred_payment_days": 45},
+    ],
+)
+def test_renewal_non_price_override_keeps_the_inherited_contract_price_locked(overrides):
+    request = _request(
+        business_mode="CONTRACT_PROPOSAL_RENEWAL",
+        preferred_price=None,
+        source_ref=None,
+        contract=_renewal_contract(),
+    )
+    user = request.user_request.model_dump()
+    user.update(overrides)
+    payload = request.model_dump()
+    payload["user_request"] = user
+    scenarios = _prices(SalesProposalInput.model_validate(payload))
+
+    assert {scenario.unit_price_krw for scenario in scenarios.values()} == {Decimal(2100)}
+    assert all("PRICE" not in scenario.sales_decision_axes for scenario in scenarios.values())
+
+
+def test_renewal_explicit_user_price_is_locked():
+    scenarios = _prices(
+        _request(
+            business_mode="CONTRACT_PROPOSAL_RENEWAL",
+            preferred_price=2300,
+            source_ref="USER-REQ:renewal-1",
+            contract=_renewal_contract(),
+        )
+    )
+
+    assert {scenario.unit_price_krw for scenario in scenarios.values()} == {Decimal(2300)}
+
+
+def test_renewal_explicit_market_price_keeps_existing_market_variant_semantics():
+    scenarios = _prices(
+        _request(
+            business_mode="CONTRACT_PROPOSAL_RENEWAL",
+            preferred_price=1400,
+            source_ref="sim_runs/SIM-1#sales_terms/ML_CURRENT_PRICE",
+            contract=_renewal_contract(),
+        )
+    )
+
+    assert [
+        scenarios[key].unit_price_krw for key in ("CONSERVATIVE", "BALANCED", "AGGRESSIVE")
+    ] == [Decimal(1600), Decimal(1450), Decimal(1360)]
+
+
+def test_first_pass_pre_sales_context_has_no_depletion_authority_to_discount_aggressive_price():
+    """PRE_SALES payload는 feedback reply가 아니라 SalesLogisticsContext 그대로다."""
+    scenarios = _prices(_request(feedback=False))
+
+    assert scenarios["AGGRESSIVE"].unit_price_krw == scenarios["BALANCED"].unit_price_krw
+    assert scenarios["AGGRESSIVE"].unit_price_krw == Decimal(1450)
+    assert all(scenario.sell_priority is None for scenario in scenarios.values())
