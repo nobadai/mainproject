@@ -766,7 +766,11 @@ class LLMCallMetadata:
     #: 호출을 안 했으면 ``None`` — 「안 불렀다」와 「빈 이름으로 불렀다」는 다르다.
     provider: str | None = None
     model: str | None = None
-    #: ``SKIPPED_*`` 이면 **반드시 채운다.** 이유 없는 「그 밖」 상태를 두면 거기로 다 흘러간다.
+    #: **왜 제 갈 길로 못 갔나.** ``SKIPPED_*`` 이면 **반드시 채운다** — 이유 없는
+    #: 「그 밖」 상태를 두면 거기로 다 흘러간다.
+    #:
+    #: ⚠️ ``FALLBACK`` 에도 적는다(아는 경우). 「부르고 실패했다」는 사유가 여럿이라,
+    #: 상태만으로는 **모델이 틀렸나 우리가 못 받았나**를 못 가른다.
     skip_reason: str | None = None
 
     def __post_init__(self) -> None:

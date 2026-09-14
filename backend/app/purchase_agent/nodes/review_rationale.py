@@ -210,27 +210,34 @@ def review_rationale(
             continue
         context = build_context(안, 보임[안["label"]], mix_reason=검토용_사유)
         결과 = reviewer(context)
+        상태, 사유, 문장 = 결과.llm_status, None, []
+        if 상태 == "SUCCESS":
+            try:
+                문장 = render(
+                    [(f.code, f.target_ref_id) for f in 결과.output.findings],
+                    {c.ref_id for c in context.claims},
+                )
+            except UnknownFinding as error:
+                # 🔴 **「검토 성공, 문제 없음」으로 안 적는다.** 지적을 버리고 SUCCESS 를
+                #   남기면 화면에는 아무 말이 없고 흔적에는 «봤는데 깨끗했다» 가 남는다 —
+                #   실제로는 **검토 결과를 적용하지 못한 것**이다.
+                #
+                # ⚠️ 예외를 그대로 올리지 않는 이유: ⑦ 이 이미 통과시킨 제안이 ⑧ 때문에
+                #   통째로 사라진다. 경고만 하는 자리가 산출물을 죽이면 경계가 뒤집힌다.
+                #   ★ 검증(``validate_output``)이 이미 막는 자리라 **여기 오면 내부 계약
+                #     위반**이고, 그래서 조용히 넘기지 않고 사유를 남긴다.
+                상태, 사유, 문장 = "FALLBACK", f"검토 결과를 문장으로 못 옮겼다 — {error}", []
         기록.append(
             _기록(
                 안["label"],
-                결과.llm_status,
+                상태,
+                사유,
                 attempts=결과.llm_attempts,
-                fallback_used=결과.llm_fallback_used,
+                fallback_used=결과.llm_fallback_used or 상태 == "FALLBACK",
                 provider=결과.llm_provider,
                 model=결과.llm_model,
             )
         )
-        if 결과.llm_status != "SUCCESS":
-            continue
-        try:
-            문장 = render(
-                [(f.code, f.target_ref_id) for f in 결과.output.findings],
-                {c.ref_id for c in context.claims},
-            )
-        except UnknownFinding:
-            # 🔴 **지어낸 지적은 안 싣는다.** 검증이 이미 막지만, 렌더링에서 한 번 더
-            #   걸리면 그 안은 지적 없이 지나간다 — 없는 지적을 적느니 안 적는다.
-            continue
         if 문장:
             안["risks"] = [*(안.get("risks") or []), *문장]
 

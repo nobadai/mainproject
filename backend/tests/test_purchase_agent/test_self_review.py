@@ -350,3 +350,38 @@ def test_판단자_사유가_검토_재료로_들어가고_지적이_왕복한�
     문면 = FINDINGS["MIX_REASON_LABEL_MISMATCH"].template.format(ref=None)
     실린_안 = [안 for 안 in final["proposal"]["scenarios"] if 문면 in (안["risks"] or [])]
     assert len(실린_안) == len(본_것)
+
+
+# ── 렌더링이 실패하면 성공으로 안 적는다 ──────────────────────────
+
+
+def test_문장으로_못_옮기면_성공으로_안_적는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 지적을 버리고 ``SUCCESS`` 를 남기면 «봤는데 깨끗했다» 로 읽힌다.
+
+    실제로는 **검토 결과를 적용하지 못한 것**이다. 검증이 이미 막는 자리라 여기 오면
+    내부 계약 위반이고, 그래서 조용히 넘기지 않고 ``FALLBACK`` 과 사유를 남긴다.
+
+    ⚠️ 예외를 그대로 올리지는 않는다 — ⑦ 이 통과시킨 제안이 ⑧ 때문에 통째로 사라지면
+    «경고만 하는 자리» 가 산출물을 죽이는 것이 된다.
+    """
+    def 모르는_코드를_준다(context: ReviewContext) -> ReviewResult:
+        return ReviewResult(
+            output=ReviewOutput(findings=[FindingOut(code="NOPE_UNKNOWN")]),
+            llm_status="SUCCESS",
+            llm_provider="anthropic",
+            llm_model="haiku",
+            llm_attempts=1,
+            llm_fallback_used=False,
+        )
+
+    제안, 기록 = _제안(monkeypatch, 켬=True, reviewer=모르는_코드를_준다)
+    부른_것 = [줄 for 줄 in 기록 if not 줄.status.startswith("SKIPPED_")]
+    assert 부른_것, "검토 대상이 하나도 없었다 — 이 검사가 아무것도 안 잰다"
+    for 줄 in 부른_것:
+        assert 줄.status == "FALLBACK"
+        assert 줄.fallback_used is True
+        assert (줄.skip_reason or "").strip()
+    # 지적을 못 옮겼으니 **아무 문장도 안 실린다.**
+    끈, _ = _제안(monkeypatch, 켬=False, reviewer=모르는_코드를_준다)
+    for 전, 후 in zip(끈["scenarios"], 제안["scenarios"], strict=True):
+        assert 전["risks"] == 후["risks"]
