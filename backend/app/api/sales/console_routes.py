@@ -15,6 +15,11 @@ from app.sales.console_partners import (
     get_console_partners,
 )
 from app.sales.console_runs import ConsoleSalesRunsResponse, get_console_sales_runs
+from app.sales.console_trend import (
+    MAX_TREND_DAYS,
+    SalesTrendResponse,
+    get_console_sales_trend,
+)
 from app.sales.dashboard import get_sales_dashboard
 from app.sales.schemas import SalesDashboardResponse
 
@@ -28,6 +33,16 @@ def summary(
 ) -> SalesDashboardResponse:
     """Stored sales, receivable and item facts for exactly one simulation run."""
     return get_sales_dashboard(sim_run_id=sim_run_id, as_of=as_of)
+
+
+@router.get("/trend", response_model=SalesTrendResponse)
+def trend(
+    sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+    days: Annotated[int, Query(ge=1, le=MAX_TREND_DAYS)] = MAX_TREND_DAYS,
+) -> SalesTrendResponse:
+    """Stored sales folded by date for exactly one run.  The screen never folds them."""
+    return get_console_sales_trend(sim_run_id=sim_run_id, as_of=as_of, days=days)
 
 
 @router.get("/partners", response_model=ConsolePartnersResponse)
