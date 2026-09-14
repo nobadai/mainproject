@@ -185,3 +185,26 @@ def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():
     assert qa_llm._parse_dates(["2026-09-15", "내일", None, "2026-13-40"]) == [
         date(2026, 9, 15)
     ]
+
+
+def test_Swagger_기본값이_와도_질문으로_답한다(도구를_갈아_끼운다, monkeypatch):
+    """★ 2026-09-14 실측 — Swagger «Try it out» 이 item 에 "string" 을 넣어 준다.
+
+    그것을 품목으로 읽고 거절하면 질문 문장을 쳐다보지도 않는다. 그리고 같이 온
+    **유효한 kind 는 살려야** 한다 — 버리면 답할 수 있는 질문에 되묻게 된다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "item": "배추", "kind": None, "dates": []})
+    out = qa_graph.answer(
+        QaRequest(question="배추값 알려줘", item="string", kind="AUC")
+    )
+    assert out.meta.status == "OK"
+    assert out.meta.item == "배추" and out.meta.kind == "AUC"   # 유효한 kind 는 살린다
+    assert "«string»" in out.markdown                          # 무시한 것을 밝힌다
+
+
+def test_질문이_없으면_잘못된_품목은_그대로_거절한다(도구를_갈아_끼운다):
+    """질문이 없으면 대신 읽을 것이 없다. 조용히 넘어가지 않는다."""
+    도구를_갈아_끼운다(rows=[_row(1)])
+    out = qa_graph.answer(QaRequest(item="string", kind="AUC"))
+    assert out.meta.status == "OUT_OF_SCOPE"

@@ -90,6 +90,7 @@ class QaState(TypedDict, total=False):
     usability: dict[str, Any] | None
     status: str
     message: str               # 되묻기·거절일 때 쓸 본문
+    note: str                  # 답 맨 앞에 붙일 한 줄 (무엇을 무시했는지)
     markdown: str
     meta: QaMeta
 
@@ -98,10 +99,19 @@ class QaState(TypedDict, total=False):
 def supervise(state: QaState) -> QaState:
     """질문 → 어느 도구·어떤 인자. **고르기만 한다.**"""
     req = state["request"]
-    if req.item and req.kind:
+    #   ★ 직접 준 값이 **우리 품목일 때만** 해석을 건너뛴다.
+    #     Swagger 기본 본문이 item 에 "string" 을 넣어 주는데, 그것을 품목으로 읽고
+    #     거절하면 질문 문장을 쳐다보지도 않는다 (2026-09-14 실측).
+    if req.item in QA_ITEMS and req.kind in QA_KINDS:
         return {"item": req.item, "kind": req.kind}
     if not req.question:
+        if req.item and req.item not in QA_ITEMS:
+            return {"status": "OUT_OF_SCOPE",
+                    "message": OUT_OF_SCOPE_ITEM.format(item=req.item)}
         return {"status": "NEED_CLARIFY", "message": OUT_OF_SCOPE_KIND}
+
+    #   질문이 같이 왔으면 질문으로 답하고, 무엇을 무시했는지 밝힌다.
+    ignored = req.item if (req.item and req.item not in QA_ITEMS) else None
 
     #   ★ 기준일을 먼저 잡는다 — 「내일」이 며칠인지는 기준일이 있어야 정해진다.
     try:
@@ -120,10 +130,19 @@ def supervise(state: QaState) -> QaState:
         return {"status": "OUT_OF_SCOPE", "message": message}
 
     picked: QaState = {"base_dt": base_dt}
-    if chosen.get("item"):
-        picked["item"] = chosen["item"]
-    if chosen.get("kind"):
-        picked["kind"] = chosen["kind"]
+    if ignored:
+        picked["note"] = (
+            f"> `item` 에 준 «{ignored}» 는 우리 품목이 아니어서 질문 문장으로 답했습니다."
+        )
+    #   ★ 질문에서 못 고른 칸은 **요청이 직접 준 유효한 값**으로 메운다.
+    #     item 하나가 엉터리라고 해서 제대로 준 kind 까지 버리면, 답할 수 있는
+    #     질문에 되묻게 된다 (2026-09-14 실측: item="string" · kind="AUC").
+    item = chosen.get("item") or (req.item if req.item in QA_ITEMS else None)
+    kind = chosen.get("kind") or (req.kind if req.kind in QA_KINDS else None)
+    if item:
+        picked["item"] = item
+    if kind:
+        picked["kind"] = kind
     if chosen.get("dates"):
         picked["asked"] = list(chosen["dates"])
     if not picked.get("kind"):
@@ -306,7 +325,14 @@ def _answer_markdown(state: QaState) -> QaState:
         band_method=(rows[0].get("band_method") if rows else (today or {}).get("band_method")),
         use_recommended=usab.get("use_recommended"),
     )
-    return {"markdown": "\n".join(head + body + tail), "meta": meta, "status": status}
+    #   ★ 무엇을 무시했는지는 답 맨 앞에 적는다. 조용히 무시하면 나중에
+    #     «왜 다른 걸 답했지» 가 된다.
+    note = [state["note"], ""] if state.get("note") else []
+    return {
+        "markdown": "\n".join(note + head + body + tail),
+        "meta": meta,
+        "status": status,
+    }
 
 
 # ───────────────────────────────────────────────────────────── 그래프

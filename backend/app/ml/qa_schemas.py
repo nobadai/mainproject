@@ -50,6 +50,18 @@ class QaRequest(BaseModel):
     있어야 하기 때문이다. 계약이 바뀌어도 버려지지 않는 부분이 여기다.
     """
 
+    #   ★ Swagger «Try it out» 이 채워 주는 기본 본문이다.
+    #     예시를 안 두면 화면이 item 에 "string" 을 넣어 주고, 그러면 우리가
+    #     그 값을 품목으로 읽어 «우리 소관이 아닙니다» 를 답한다. 실제로 그랬다.
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"question": "내일 배추 경락가 얼마야?"},
+                {"item": "무", "kind": "RTL", "dates": ["2026-09-15"]},
+            ]
+        }
+    }
+
     question: str | None = Field(default=None, description="사용자가 채팅에 친 그대로")
     item: str | None = Field(default=None, description="배추 · 무 · 양파")
     kind: TargetKind | None = Field(
