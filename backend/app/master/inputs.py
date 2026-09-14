@@ -473,11 +473,12 @@ class _DemandRow:
     provisional: bool
 
 
-def _demand_rows(item: str, until: date) -> list[_DemandRow]:
-    """`until` 까지 한 번이라도 유효해지는 거래처의 그 품목 일수요.
+def _demand_rows(item: str, as_of: date, until: date) -> list[_DemandRow]:
+    """`as_of` 에 이미 유입된 거래처의, `until` 까지 한 번이라도 유효해지는 그 품목 일수요.
 
-    ★ SQL 은 **창 끝**으로만 거른다. 날짜별 판정은 `_in_force` 가 한다 — 창 안에서
-      유효해지는 거래처는 SQL 한 줄로 표현이 안 된다.
+    ★ SQL 은 거래처를 `as_of` 로, 수요를 **창 끝**으로만 거른다. 날짜별 판정은
+      `_in_force` 가 한다 — 창 안에서 유효해지는 수요는 SQL 한 줄로 표현이 안 된다.
+      거래처 조건은 부르는 자리(`_orders_from_demand`)에서 한 번 더 건다.
 
     ★ 순서는 `active_from` · `partner_id` 다. 먼저 유효해진 거래처가 먼저 온다.
     """
@@ -495,7 +496,7 @@ def _demand_rows(item: str, until: date) -> list[_DemandRow]:
                AND d.effective_from <= %s
              ORDER BY p.active_from, p.partner_id, d.effective_from
         """).format(sch=schema),
-        (item, until, until),
+        (item, as_of, until),
     )
     return [
         _DemandRow(
@@ -533,6 +534,7 @@ def _orders_from_demand(item: str, as_of: date, why: str) -> SourcedInput:
 
       .. code-block:: text
 
+          거래처          as_of 에 이미 유입된 것만 (active_from <= as_of)
           창의 날 d 마다   active_from <= d 이고 effective_from <= d 인 거래처의 일수요 합
           주기            거래처마다 제 order_cycle_days (전 판: 뷰 LIMIT 1)
           창 길이         _ORDER_WINDOW_DAYS 그대로. 주기는 창 길이를 안 정한다
@@ -544,7 +546,11 @@ def _orders_from_demand(item: str, as_of: date, why: str) -> SourcedInput:
         하나뿐이면 `일수요 × 주기` 한 번의 곱이라 반올림 전 값까지 같다.
     """
     until = as_of + timedelta(days=_ORDER_WINDOW_DAYS)
-    rows = _demand_rows(item, until)
+    fetched = _demand_rows(item, as_of, until)
+    # 🔴 **거래처는 `as_of` 에 이미 유입돼 있어야 창에 들어온다** (2026-09-14 결정).
+    #    9/14 에 갑자기 생긴 거래처라, 9/13 까지의 매입 입력은 그 거래처를 모른다.
+    #    들어온 뒤로는 창 안의 날짜별 적용일(`_in_force`)을 따른다.
+    rows = [r for r in fetched if r.active_from <= as_of]
     if not rows:
         raise LookupError(f"{item} 파트너 일수요가 없다")
 

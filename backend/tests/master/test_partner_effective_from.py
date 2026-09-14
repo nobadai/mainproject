@@ -163,48 +163,93 @@ def test_창이_유입일_전에_끝나면_새_거래처가_안_보인다(monkey
     assert "거래처 1곳 합산" in got.note
 
 
-def test_창이_유입일을_걸치면_유입일_이후_날만_더해진다(monkeypatch):
-    """★ `2026-09-10` 의 창은 `09-11 ~ 09-24` 다. 새 거래처는 `09-14 ~ 09-24` 11일만 더한다.
+def _기존_1곳_비중(monkeypatch, as_of: date, *, 둘: bool) -> dict[str, float]:
+    rows = [
+        {"item_name": "배추", "partner_id": 기존, "active_from": 번인_시작,
+         "effective_from": 번인_시작, "daily_demand_kg": Decimal("717.300")},
+        {"item_name": "무", "partner_id": 기존, "active_from": 번인_시작,
+         "effective_from": 번인_시작, "daily_demand_kg": Decimal("154.400")},
+    ]  # fmt: skip
+    if 둘:
+        rows += [
+            {"item_name": "배추", "partner_id": 신규, "active_from": 유입일,
+             "effective_from": 유입일, "daily_demand_kg": Decimal("215.200")},
+            {"item_name": "무", "partner_id": 신규, "active_from": 유입일,
+             "effective_from": 유입일, "daily_demand_kg": Decimal("46.300")},
+        ]  # fmt: skip
+    monkeypatch.setattr(inputs, "fetch_all", lambda *a: list(rows))
+    monkeypatch.setattr(inputs, "get_db_schema", lambda: "haetdeul")
+    return inputs._mix_ratio_from_demand(as_of)
+
+
+@pytest.mark.parametrize("as_of", [date(2026, 9, 10), date(2026, 9, 13)])
+def test_유입일_전_as_of_는_창이_유입일을_걸쳐도_새_거래처가_0이다(monkeypatch, as_of):
+    """🔴🔴 **변이 대상** (2026-09-14 결정). 거래처는 `as_of` 에 이미 유입돼 있어야 창에 든다.
 
     ```text
-    due 09-12  09-11·09-12        새 거래처 0일   주문 없음
-    due 09-14  09-13·09-14        새 거래처 1일   215.2
-    due 09-16 ~ 09-24             새 거래처 2일씩 430.4
+    09-10  창 09-11 ~ 09-24   유입일을 걸치지만 새 거래처 0
+    09-13  창 09-14 ~ 09-27   창 전체가 유입일 이후지만 새 거래처 0
     ```
+
+    ★ 9/14 에 갑자기 생긴 거래처라, 9/13 까지의 매입 입력은 거래처 1곳일 때와 **바이트까지** 같다.
+    `_orders_from_demand` 의 `active_from <= as_of` 줄을 빼면 여기가 빨개진다.
     """
-    as_of = date(2026, 9, 10)
+    _DB(monkeypatch, _두_거래처())
+    got = _파생("배추", as_of)
+
+    assert _바이트(got.payload) == _바이트(_전판(717.3, 2, as_of)), got.note
+    assert "거래처 1곳 합산" in got.note
+
+
+def test_유입일_전_as_of_의_품목_비중이_거래처_1곳일_때와_같다(monkeypatch):
+    as_of = date(2026, 9, 13)
+    한곳 = _기존_1곳_비중(monkeypatch, as_of, 둘=False)
+    둘 = _기존_1곳_비중(monkeypatch, as_of, 둘=True)
+
+    assert _바이트(둘) == _바이트(한곳)
+
+
+def test_유입일_as_of_부터_새_거래처가_창_전체만큼_합산된다(monkeypatch):
+    """★ `2026-09-14` 의 창은 `09-15 ~ 09-28` 이고 새 거래처가 14일 전부 더한다."""
+    as_of = 유입일
     _DB(monkeypatch, _두_거래처())
 
     got = _파생("배추", as_of)
 
     기존분 = _전판(717.3, 2, as_of)["orders"]
     새분 = [o for o in got.payload["orders"] if o not in 기존분]
-    남은_기존분 = [o for o in got.payload["orders"] if o in 기존분]
-    assert 남은_기존분 == 기존분, "기존 거래처 주문이 바뀌었다"
+    assert [o for o in got.payload["orders"] if o in 기존분] == 기존분
     assert 새분 == [
-        {"sale_id": None, "qty_kg": 215.2, "due_date": "2026-09-14"},
-        *(
-            {"sale_id": None, "qty_kg": 430.4, "due_date": f"2026-09-{day}"}
-            for day in (16, 18, 20, 22, 24)
-        ),
+        {"sale_id": None, "qty_kg": 430.4, "due_date": (as_of + timedelta(days=k)).isoformat()}
+        for k in range(2, 15, 2)
     ]
-    assert got.payload["total_kg"] == round(717.3 * 14 + 215.2 * 11, 1)
+    assert got.payload["total_kg"] == round(717.3 * 14 + 215.2 * 14, 1)
     assert "거래처 2곳 합산" in got.note
-    assert "2026-09-14 부터" in got.note
+    # ⚠️ 새 거래처가 기존의 약 30% 비례라 비중 값은 4자리까지 우연히 같다 — 식으로 잰다.
+    assert _기존_1곳_비중(monkeypatch, as_of, 둘=True) == {
+        "배추": round((717.3 + 215.2) / (871.7 + 261.5), 4),
+        "무": round((154.4 + 46.3) / (871.7 + 261.5), 4),
+    }
 
 
-def test_창_전체가_유입일_이후면_창_전체만큼_더해진다(monkeypatch):
-    """★ `2026-09-13` 의 창은 `09-14 ~ 09-27` 이라 새 거래처가 14일 전부 더한다.
+def test_유입한_거래처도_수요_적용일_전_날은_안_더한다(monkeypatch):
+    """★ 날짜별 필터는 그대로다. 들어온 거래처라도 `effective_from` 이 창 안이면 그날부터만 센다.
 
-    ⚠️ 이 날 **매입 입력은 바뀐다.** 9/13 의 판매는 안 바뀐다(아래 ④).
+    `2026-09-15` 창 `09-16 ~ 09-29` · 새 수요 적용일 `09-20` → `09-20 ~ 09-29` 10일.
     """
-    as_of = date(2026, 9, 13)
-    _DB(monkeypatch, _두_거래처())
+    as_of = date(2026, 9, 15)
+    _DB(
+        monkeypatch,
+        [
+            _행(기존, "717.300"),
+            _행(신규, "215.200", active_from=유입일, effective_from=date(2026, 9, 20)),
+        ],
+    )
 
     got = _파생("배추", as_of)
 
-    assert got.payload["total_kg"] == round(717.3 * 14 + 215.2 * 14, 1)
-    assert "거래처 2곳 합산" in got.note
+    assert got.payload["total_kg"] == round(717.3 * 14 + 215.2 * 10, 1)
+    assert "2026-09-20 부터" in got.note
 
 
 def test_유입일_이후_창은_두_거래처_합이다(monkeypatch):
