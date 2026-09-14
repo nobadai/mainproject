@@ -2,7 +2,7 @@
 
 ```text
 python -m app.master.backfill_runner
-    --sim-run-id SIM-WALK-202601 --start 2026-02-07 --end 2026-09-09
+    --sim-run-id SIM-WALK-202601 --start 2026-02-07 --end 2026-09-13
         → 세어서 보여 준다 · 🟢 한 행도 안 쓴다
 
 같은 명령에 --commit 을 더하면
