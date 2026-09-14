@@ -646,7 +646,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                               f"{coverage.last_as_of}."),
                     ),
                     source_note=(
-                        f"logistics_runtime_fixture 없음 · 보고 있는 실행: {run} · {as_of}"
+                        f"logistics_runtime_fixture 없음 · 보고 있는 실행: {run} · 기준일: {as_of}"
                         f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
                     ),
                 ),
@@ -677,7 +677,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                           f"없습니다. {재시도}").strip(),
                 ),
                 source_note=(
-                    f"읽기 실패 ({type(error).__name__}) · 보고 있는 실행: {run} · {as_of}"
+                    f"읽기 실패 ({type(error).__name__}) · 보고 있는 실행: {run} · 기준일: {as_of}"
                 ),
             ),
             http_status=http_status,
@@ -695,7 +695,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                 note=(
                     "inventory_moves · inventory_lots · inbound_receipts · "
                     "inbound_inspections · pallet_events · inventory_reservations · "
-                    f"warehouse_zones · storage_locations · 보고 있는 실행: {run} · {as_of}"
+                    f"warehouse_zones · storage_locations · 보고 있는 실행: {run} · 기준일: {as_of}"
                 ),
             ),
         ),

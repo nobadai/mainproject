@@ -77,7 +77,7 @@ def build(as_of: date) -> SalesTab:
             owner="판매",
             note=(
                 f"판매 확정 내역과 수금 장부 기준 · {dash.meta.as_of}"
-                f" · 보고 있는 실행: {SHOWN_SIM_RUN_ID}"
+                f" · 보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {as_of.isoformat()}"
             ),
         ),
     )

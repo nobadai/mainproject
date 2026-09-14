@@ -311,3 +311,14 @@ def test_안별로_어느_걷기인지_싣는다(inject):
     axes = {p.key: p.sim_run_id for p in tab.plans}
     assert axes["배추 · 보수"] == AXIS
     assert axes["무 · 보수"] is None, "걷기 밖은 None 그대로다 — 빈 문자열로 채우지 않는다"
+
+
+def test_출처에_받은_실행과_요청_기준일을_적는다(inject):
+    """★ 매입은 받은 sim_run_id 를 그대로 적고, 기준일은 요청한 날을 따라간다."""
+    inject(_data([_run("REQ-축있음", "배추", AXIS, minute=10)]))
+    notes = []
+    for as_of in (AS_OF, date(2026, 1, 13)):
+        note = purchase_query.build(as_of, OTHER).source.note or ""
+        notes.append(note)
+        assert f"보고 있는 실행: {OTHER} · 기준일: {as_of.isoformat()}" in note
+    assert notes[0] != notes[1]

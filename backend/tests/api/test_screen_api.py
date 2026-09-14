@@ -269,6 +269,18 @@ def test_재무_화면은_요청_as_of를_service에_그대로_넘긴다(monkeyp
     }
 
 
+@pytest.mark.parametrize("path", ["/api/finance", "/api/sales"])
+def test_재무_판매_출처에_보는_실행과_요청_기준일을_적는다(client, path):
+    """★ 기준일은 주소로 바뀐다. 고정 문구가 아니라 **요청한 날**이 따라와야 한다."""
+    notes = []
+    for as_of in ("2025-12-31", "2026-01-13"):
+        params = {"as_of": as_of} | ({"state": "base"} if path == "/api/finance" else {})
+        note = client.get(path, params=params).json()["source"]["note"]
+        notes.append(note)
+        assert f"보고 있는 실행: {finance_query.SHOWN_SIM_RUN_ID} · 기준일: {as_of}" in note
+    assert notes[0] != notes[1]
+
+
 def test_재무_화면은_cashflow와_ledger를_쓴다(client):
     body = client.get("/api/finance", params={"as_of": FIN_AS_OF, "state": "base"}).json()
 
