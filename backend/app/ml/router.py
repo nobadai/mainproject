@@ -12,7 +12,9 @@
   되살리려면 아래 `# ` 를 지우면 됩니다.
 """
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Query
 
 from app.ml.qa_graph import answer as qa_answer
 from app.ml.qa_schemas import QaAnswer, QaRequest
@@ -103,3 +105,27 @@ router = APIRouter(prefix="/ml", tags=["ml"])
 def ask(request: QaRequest) -> QaAnswer:
     """질문 하나를 받아 마크다운 한 덩어리와 출처(meta)를 돌려준다."""
     return qa_answer(request)
+
+
+@router.get(
+    "/qa",
+    response_model=QaAnswer,
+    summary="예측 질의응답 — 질문 한 칸",
+    description=(
+        "말로 묻고 마크다운으로 받는다. 넣을 것은 질문 하나뿐이다. "
+        "읽기만 한다 — 예측을 새로 만들지 않고 어떤 표에도 쓰지 않는다. "
+        "예: 내일 배추 경락가 얼마야? · 오늘하고 10일 뒤 무 소매가 알려줘"
+    ),
+)
+def ask_simple(
+    q: Annotated[
+        str,
+        Query(
+            description="질문 그대로",
+            examples=["내일 배추 경락가 얼마야?"],
+            min_length=2,
+        ),
+    ],
+) -> QaAnswer:
+    """질문 한 칸짜리 입구. 값으로 직접 지정하려면 POST 를 쓴다."""
+    return qa_answer(QaRequest(question=q))

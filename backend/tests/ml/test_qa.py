@@ -208,3 +208,28 @@ def test_질문이_없으면_잘못된_품목은_그대로_거절한다(도구�
     도구를_갈아_끼운다(rows=[_row(1)])
     out = qa_graph.answer(QaRequest(item="string", kind="AUC"))
     assert out.meta.status == "OUT_OF_SCOPE"
+
+
+def test_질문_한_칸짜리_입구가_돈다(도구를_갈아_끼운다, monkeypatch):
+    """★ 프롬프트처럼 쓰는 입구다 — GET /ml/qa?q=... 에 질문만 넣는다."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "item": "배추", "kind": "AUC",
+                       "dates": [BASE + timedelta(days=1)]})
+    client = TestClient(app)
+    got = client.get("/ml/qa", params={"q": "내일 배추 경락가 얼마야?"})
+    assert got.status_code == 200
+    assert got.json()["meta"]["status"] == "OK"
+    assert "867" in got.json()["markdown"]
+
+
+def test_질문이_없으면_입구가_막는다():
+    """빈 질문을 받아 «해석 못 했다» 로 답하느니, 아예 안 받는 쪽이 낫다."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    assert TestClient(app).get("/ml/qa").status_code == 422
