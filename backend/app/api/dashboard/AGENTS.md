@@ -92,7 +92,7 @@ get_finance_dashboard(sim_run_id=..., as_of=as_of)
 화면이 읽는 실행은 `SHOWN_SIM_RUN_ID`, 기준일은 `SHOWN_AS_OF` 한 자리에서만 정합니다.
 재무 · 물류 · 판매 · 대시보드와 매입 라우터(쿼리에 축이 없을 때)가 이 값을 씁니다.
 각 탭 `Source.note` 에 「보고 있는 실행: 실행 이름」 을 적습니다.
-최종 실행 SIM-CHAIN-FINAL 이 끝나면 그 두 줄을 `"SIM-CHAIN-FINAL"` · `date(2026, 9, 21)` 로 바꾸고,
+최종 실행 SIM-CHAIN-FINAL 이 끝나면 그 두 줄을 `"SIM-CHAIN-FINAL"` · `date(2026, 9, 20)` 로 바꾸고,
 발표 뒤에는 ㉮ 주소 파라미터 방식으로 올립니다.
 🔴 화면에서 번인 상수를 다시 쓰지 마세요.
 

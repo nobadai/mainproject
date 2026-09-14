@@ -5,13 +5,13 @@
 
 ```text
 지금           SIM-CHAIN-V13     2026-01-26   1~3월 중간 정본
-최종 실행 뒤   SIM-CHAIN-FINAL   2026-09-21   2026-01-01~09-21 한 줄기
+최종 실행 뒤   SIM-CHAIN-FINAL   2026-09-20   2026-01-01~09-20 한 줄기
 ```
 
 ★ **최종 실행 SIM-CHAIN-FINAL 이 끝나면 아래 두 줄만 바꾼다.**
 
     SHOWN_SIM_RUN_ID = "SIM-CHAIN-FINAL"
-    SHOWN_AS_OF = date(2026, 9, 21)
+    SHOWN_AS_OF = date(2026, 9, 20)
 
   그 전까지는 1~3월 중간 정본 V13 을 본다.
 
