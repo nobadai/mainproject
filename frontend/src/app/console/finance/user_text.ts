@@ -98,3 +98,143 @@ export function shortDate(iso: string): string {
   const parts = iso.split("-");
   return parts.length === 3 ? `${Number(parts[1])}/${Number(parts[2])}` : iso;
 }
+
+/* ── 금액 · 비율 표기 ──────────────────────────────────────────────────── */
+
+/**
+ * 원 단위 금액. **소수점을 화면에서 지운다.**
+ *
+ * 🔴 **계산을 바꾸지 않는다.** DB 는 `numeric` 이라 `41375276.163` 처럼 소수가 딸려
+ *    오고, 백엔드 값도 그대로 둔다. 바꾸는 것은 **읽는 방식**뿐이다 — 원화에 0.163원은
+ *    없는 단위이고, 그 자리를 사용자가 유효숫자로 읽는다.
+ *
+ * ⚠️ **`null` 은 0 이 아니다.** 값이 없으면 «데이터 없음» 이고, 0 은 실제 0원이다.
+ */
+export function moneyWon(value: string | number | null | undefined): string {
+  const parsed = toNumber(value);
+  if (parsed === null) return "데이터 없음";
+  return `${Math.round(parsed).toLocaleString("ko-KR")} 원`;
+}
+
+/**
+ * **퍼센트 포인트**로 이미 계산된 값을 적는다. `35.77` → `35.8%`.
+ *
+ * 🔴 **비율 formatter 와 다른 계약이다.** 공용 `percent()` 는 `0.3577` 같은 0~1 비율을
+ *    받아 안에서 100 을 곱한다. 백엔드 `_pct()` 는 이미 곱해서 `35.77` 을 주므로,
+ *    거기에 `percent()` 를 쓰면 **3577.0%** 가 된다 — 실제로 그렇게 나왔다.
+ *    이름으로 계약을 가른다.
+ */
+export function percentPoint(value: string | number | null | undefined): string {
+  const parsed = toNumber(value);
+  if (parsed === null) return "데이터 없음";
+  return `${parsed.toFixed(1)}%`;
+}
+
+/* ── 저장된 코드값을 업무 말로 ──────────────────────────────────────────── */
+
+/**
+ * 🔴 **모르는 값을 «정상» 으로 만들지 않는다.** 표에 없으면 원본을 그대로 보여 준다.
+ *    새 상태가 생긴 날 그것이 조용히 성공으로 둔갑하면, 화면은 틀린 채로 멀쩡해 보인다.
+ */
+function label(table: Record<string, string>, value: string | null | undefined, blank: string) {
+  if (value === null || value === undefined || value === "") return blank;
+  return table[value] ?? value;
+}
+
+/** 채권 상태. 정본은 재무의 수금 전이 규칙이다. */
+const RECEIVABLE: Record<string, string> = {
+  OPEN: "수금 예정",
+  PARTIAL: "일부 수금",
+  COLLECTED: "수금 완료",
+};
+
+/** 채무 상태. */
+const PAYABLE: Record<string, string> = {
+  OPEN: "지급 예정",
+  PARTIAL: "일부 지급",
+  SETTLED: "정산 완료",
+};
+
+/** 거래처 유형. `partners_partner_type_check` 가 허용하는 다섯 값이다. */
+const PARTNER_TYPE: Record<string, string> = {
+  CUSTOMER: "고객사",
+  SUPPLIER: "공급처",
+  LOGISTICS_PROVIDER: "물류사",
+  MARKET_REFERENCE: "시세 참조처",
+  OTHER: "기타",
+};
+
+/** 거래 여부. `partners.active` 를 화면 말로 옮긴 값이다. */
+const PARTNER_STATUS: Record<string, string> = {
+  ACTIVE: "거래 중",
+  INACTIVE: "거래 중지",
+};
+
+/** 조달 방식. `finance_states.financing_mode` 가 쓰는 값이다. */
+const FINANCING_MODE: Record<string, string> = {
+  LOAN_BASELINE: "기준 차입 시나리오",
+  BASE_NO_LOAN: "무차입 기준",
+};
+
+/** 가격 계약 형태. */
+const PRICING_CONTRACT: Record<string, string> = {
+  MARKET_LINKED_COST_PLUS_CM: "시세 연동 원가 + 목표마진",
+};
+
+export const receivableStatusText = (v: string | null | undefined) =>
+  label(RECEIVABLE, v, "상태 없음");
+export const payableStatusText = (v: string | null | undefined) => label(PAYABLE, v, "상태 없음");
+export const partnerTypeText = (v: string | null | undefined) => label(PARTNER_TYPE, v, "유형 미상");
+export const partnerStatusText = (v: string | null | undefined) =>
+  label(PARTNER_STATUS, v, "상태 미상");
+export const financingModeText = (v: string | null | undefined) =>
+  label(FINANCING_MODE, v, "조달 방식 미상");
+export const pricingContractText = (v: string | null | undefined) =>
+  label(PRICING_CONTRACT, v, "계약 형태 미상");
+
+/**
+ * 사람이 읽는 품목 이름.
+ *
+ * ★ **백엔드가 주는 `item_name` 이 먼저다.** 화면에 표를 두는 것은 그 값이 없을 때의
+ *   마지막 수단이고, 그 표에도 없으면 **코드를 그대로** 보여 준다 — 이름을 지어내면
+ *   새 품목이 남의 이름으로 팔린다.
+ */
+const ITEM_NAMES: Record<string, string> = {
+  "ITEM-BAECHU": "배추",
+  "ITEM-MU": "무",
+  "ITEM-DAEPA": "대파",
+  "ITEM-YANGPA": "양파",
+  "ITEM-GAMJA": "감자",
+  "ITEM-MANEUL": "마늘",
+  "ITEM-PIMANUL": "피마늘",
+  "ITEM-GEONGOCHU": "건고추",
+};
+
+export function itemText(
+  itemName: string | null | undefined,
+  itemId: string | null | undefined,
+): string {
+  if (itemName) return itemName;
+  if (!itemId) return "품목 미상";
+  return ITEM_NAMES[itemId] ?? itemId;
+}
+
+/**
+ * 화면에 적을 거래처 이름.
+ *
+ * 🔴 **내부 시연 이름을 사용자 이름처럼 보여 주지 않는다.** 저장된 이름에 `Persona` ·
+ *    `demo` 같은 꼬리표가 붙어 있으면 그 꼬리표만 떼고 남은 이름을 쓴다. 이름이 통째로
+ *    내부 표기면 «이름 미등록» 으로 두되, **거래처를 뭉치지 않으려고** 코드를 짧게
+ *    덧붙인다 — 전부 같은 이름이면 어느 거래처인지 구분할 수 없다.
+ */
+const INTERNAL_NAME = /\s*(persona|demo|sample|dummy|test)\b[\w-]*/gi;
+
+export function partnerText(
+  partnerName: string | null | undefined,
+  partnerId: string | null | undefined,
+): string {
+  const cleaned = (partnerName ?? "").replace(INTERNAL_NAME, "").trim();
+  if (cleaned) return cleaned;
+  if (!partnerId) return "이름 미등록 거래처";
+  return `이름 미등록 거래처 (${partnerId})`;
+}
