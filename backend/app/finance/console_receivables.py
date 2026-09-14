@@ -1,4 +1,9 @@
-"""Finance operations-console receivable read model; strictly run-scoped."""
+"""Finance operations-console receivable read model; strictly run-scoped.
+
+🔴 **기준일 시점의 상태를 복원해서 읽는다** (`app.finance.receivable_history`).
+   `receivables` 행의 수금 칸은 덮여 쓰이므로 그대로 읽으면 과거 화면에 미래 수금이
+   실린다 — 그 모듈의 머리말에 V13 실측이 적혀 있다.
+"""
 
 from datetime import date
 from decimal import Decimal
@@ -8,6 +13,7 @@ from pydantic import BaseModel
 
 from app.finance.aging import AgingBucket, classify_receivable_aging
 from app.finance.db import fetch_all, get_db_schema
+from app.finance.receivable_history import history_columns, history_join, projected_status
 
 
 class ConsoleReceivableRow(BaseModel):
@@ -48,25 +54,39 @@ def get_console_receivables(
 ) -> ConsoleReceivablesResponse:
     """Read only receivables belonging to the caller's explicit simulation run."""
     schema = get_db_schema()
-    query = sql.SQL(
-        """
+    query = (
+        sql.SQL(
+            """
         SELECT r.receivable_id, r.sale_id, s.customer_partner_id AS partner_id,
-               p.partner_name, r.original_amount_krw, r.received_amount_krw,
-               r.outstanding_amount_krw, r.due_date, r.status
+               p.partner_name, r.original_amount_krw, r.due_date,
+        """
+        )
+        + history_columns()
+        + sql.SQL(
+            """
         FROM {}.receivables r
         LEFT JOIN {}.sales s ON s.sale_id = r.sale_id AND s.sim_run_id = r.sim_run_id
         LEFT JOIN {}.partners p ON p.partner_id = s.customer_partner_id
+        """
+        ).format(sql.Identifier(schema), sql.Identifier(schema), sql.Identifier(schema))
+        + history_join(schema)
+        + sql.SQL(
+            """
         WHERE r.sim_run_id = %s AND r.issued_date <= %s
         ORDER BY r.due_date ASC, r.receivable_id ASC
         """
-    ).format(sql.Identifier(schema), sql.Identifier(schema), sql.Identifier(schema))
+        )
+    )
     rows: list[ConsoleReceivableRow] = []
     summary = ConsoleReceivableSummary()
-    for raw in fetch_all(query, [sim_run_id, as_of]):
+    #  ⚠️ `%s` 는 세 개다 — LATERAL 의 기준일이 WHERE 보다 **먼저** 온다.
+    for raw in fetch_all(query, [as_of, sim_run_id, as_of]):
         outstanding = raw["outstanding_amount_krw"]
         if outstanding is None:
             raise ValueError("receivables.outstanding_amount_krw must not be null")
         amount = Decimal(str(outstanding))
+        original = Decimal(str(raw["original_amount_krw"]))
+        received = Decimal(str(raw["received_amount_krw"]))
         bucket, overdue = classify_receivable_aging(
             outstanding_amount_krw=amount, due_date=raw["due_date"], as_of=as_of
         )
@@ -79,13 +99,17 @@ def get_console_receivables(
                     sale_id=str(raw["sale_id"]),
                     partner_id=None if raw["partner_id"] is None else str(raw["partner_id"]),
                     partner_name=None if raw["partner_name"] is None else str(raw["partner_name"]),
-                    original_amount_krw=Decimal(str(raw["original_amount_krw"])),
-                    received_amount_krw=Decimal(str(raw["received_amount_krw"])),
+                    original_amount_krw=original,
+                    received_amount_krw=received,
                     outstanding_amount_krw=amount,
                     due_date=raw["due_date"],
                     days_overdue=overdue,
                     aging_bucket=bucket,
-                    status=str(raw["status"]),
+                    #  🔴 저장된 status 를 읽지 않는다. 그 칸도 덮여 쓰인다 —
+                    #     복원한 금액과 갈리면 «미수 282,426 인데 COLLECTED» 가 된다.
+                    status=projected_status(
+                        original_amount_krw=original, received_amount_krw=received
+                    ),
                 )
             )
         if bucket != "PAID":

@@ -132,6 +132,14 @@ def _sale(sale_id: str, sale_date: date) -> dict[str, object]:
 def _receivable(
     receivable_id: str, due_date: date, outstanding: Decimal, status: str
 ) -> dict[str, object]:
+    """🔴 **금액과 상태가 서로 맞는 행만 만든다.**
+
+    전에는 어느 상태든 `received 90 / original 100` 이라, «다 받았다» 고 적힌 행의
+    잔액이 10원이었다. 화면이 상태를 금액에서 다시 세게 되면서 그 모순이 드러난다 —
+    검사가 쓰는 사실부터 말이 되어야 한다.
+    """
+    original = Decimal(100)
+    received = original - outstanding
     return {
         "receivable_id": receivable_id,
         "sale_id": "SALE-1",
@@ -140,8 +148,8 @@ def _receivable(
         "partner_name": "거래처",
         "issued_date": date(2025, 12, 1),
         "due_date": due_date,
-        "original_amount_krw": Decimal(100),
-        "received_amount_krw": Decimal(90),
+        "original_amount_krw": original,
+        "received_amount_krw": received,
         "outstanding_amount_krw": outstanding,
         "status": status,
     }

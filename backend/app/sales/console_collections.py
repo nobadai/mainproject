@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from app.contracts.aging import AgingBucket, classify_receivable_aging
 from app.sales.db import fetch_all, get_db_schema
+from app.sales.receivable_history import history_columns, history_join, projected_status
 
 _ZERO = Decimal(0)
 
@@ -52,19 +53,31 @@ class ConsoleCollectionsResponse(BaseModel):
 def load_collection_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, object]]:
     """Receivables of one run, with the partner the sale was made to."""
     schema = get_db_schema()
-    statement = sql.SQL(
-        """
+    statement = (
+        sql.SQL(
+            """
         SELECT r.receivable_id, r.sale_id, r.due_date, r.original_amount_krw,
-               r.received_amount_krw, r.outstanding_amount_krw, r.status,
-               s.customer_partner_id AS partner_id, p.partner_name
+               s.customer_partner_id AS partner_id, p.partner_name,
+        """
+        )
+        + history_columns()
+        + sql.SQL(
+            """
         FROM {schema}.receivables r
         JOIN {schema}.sales s ON s.sale_id = r.sale_id AND s.sim_run_id = r.sim_run_id
         LEFT JOIN {schema}.partners p ON p.partner_id = s.customer_partner_id
+        """
+        ).format(schema=sql.Identifier(schema))
+        + history_join(schema)
+        + sql.SQL(
+            """
         WHERE r.sim_run_id = %s AND r.issued_date <= %s
         ORDER BY r.due_date ASC, r.receivable_id ASC
         """
-    ).format(schema=sql.Identifier(schema))
-    return fetch_all(statement, [sim_run_id, as_of])
+        )
+    )
+    #  ⚠️ `%s` 는 세 개다 — LATERAL 의 기준일이 WHERE 보다 **먼저** 온다.
+    return fetch_all(statement, [as_of, sim_run_id, as_of])
 
 
 def get_console_collections(
@@ -99,7 +112,11 @@ def get_console_collections(
             if overdue:
                 summary.overdue_krw += amount
         row_partner = None if raw["partner_id"] is None else str(raw["partner_id"])
-        row_status = str(raw["status"])
+        #  🔴 저장된 status 는 덮여 쓰인다. 복원한 금액에서 다시 세운다.
+        row_status = projected_status(
+            original_amount_krw=Decimal(str(raw["original_amount_krw"])),
+            received_amount_krw=received,
+        )
         if partner_id is not None and row_partner != partner_id:
             continue
         if aging_bucket is not None and bucket != aging_bucket:

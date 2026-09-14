@@ -6,6 +6,7 @@ from decimal import Decimal
 from psycopg import sql
 
 from app.sales.db import fetch_all, fetch_one, get_db_schema
+from app.sales.receivable_history import history_columns, history_join, projected_status
 from app.sales.schemas import (
     SalesCollectionStatusSummary,
     SalesDashboardMeta,
@@ -29,27 +30,45 @@ def load_sales_dashboard_meta(*, sim_run_id: str, as_of: date) -> dict[str, obje
 
 
 def load_sales_summary(*, sim_run_id: str, as_of: date) -> dict[str, object] | None:
+    """이 실행의 판매 합계. **미수는 기준일 시점으로 복원한다.**
+
+    🔴 `receivables` 의 수금 칸을 그대로 더하면 과거 기준일 KPI 에 미래 수금이 실린다
+       (`app.sales.receivable_history`).
+    """
     schema = get_db_schema()
-    query = sql.SQL(
-        """
+    query = (
+        sql.SQL(
+            """
         SELECT
             COUNT(*)::int AS sales_count,
             COUNT(DISTINCT s.customer_partner_id)::int AS customer_count,
             COALESCE(SUM(s.total_quantity_kg), 0) AS total_sales_quantity_kg,
             COALESCE(SUM(s.total_amount_krw), 0) AS total_sales_amount_krw,
             COALESCE(SUM(s.contribution_profit_krw), 0) AS contribution_profit_krw,
-            COALESCE(SUM(r.received_amount_krw), 0) AS received_amount_krw,
-            COALESCE(SUM(r.outstanding_amount_krw), 0) AS outstanding_receivables_krw
+            COALESCE(SUM(COALESCE(collected.target_received_total_krw, 0)), 0)
+                AS received_amount_krw,
+            COALESCE(
+                SUM(r.original_amount_krw - COALESCE(collected.target_received_total_krw, 0)),
+                0
+            ) AS outstanding_receivables_krw
         FROM {}.sales AS s
         LEFT JOIN {}.receivables AS r
           ON r.sale_id = s.sale_id
          AND r.sim_run_id = s.sim_run_id
          AND r.issued_date <= %s
+        """
+        )
+        .format(sql.Identifier(schema), sql.Identifier(schema))
+        + history_join(schema)
+        + sql.SQL(
+            """
         WHERE s.sim_run_id = %s
           AND s.sale_date <= %s
         """
-    ).format(sql.Identifier(schema), sql.Identifier(schema))
-    return fetch_one(query, [as_of, sim_run_id, as_of])
+        )
+    )
+    #  ⚠️ 발행일 · 수금 복원 기준일 · 실행 축 · 판매일 순이다.
+    return fetch_one(query, [as_of, as_of, sim_run_id, as_of])
 
 
 def load_collection_summary(*, sim_run_id: str, as_of: date) -> list[dict[str, object]]:
@@ -125,8 +144,9 @@ def load_recent_sales(*, sim_run_id: str, as_of: date, limit: int) -> list[dict[
 
 def load_sales_receivables(*, sim_run_id: str, as_of: date) -> list[dict[str, object]]:
     schema = get_db_schema()
-    query = sql.SQL(
-        """
+    query = (
+        sql.SQL(
+            """
         SELECT
             r.receivable_id,
             r.sale_id,
@@ -136,22 +156,31 @@ def load_sales_receivables(*, sim_run_id: str, as_of: date) -> list[dict[str, ob
             r.issued_date,
             r.due_date,
             r.original_amount_krw,
-            r.received_amount_krw,
-            r.outstanding_amount_krw,
-            r.status
+        """
+        )
+        + history_columns()
+        + sql.SQL(
+            """
         FROM {}.receivables AS r
         JOIN {}.sales AS s
           ON s.sale_id = r.sale_id
          AND s.sim_run_id = r.sim_run_id
         LEFT JOIN {}.partners AS p
           ON p.partner_id = s.customer_partner_id
+        """
+        ).format(sql.Identifier(schema), sql.Identifier(schema), sql.Identifier(schema))
+        + history_join(schema)
+        + sql.SQL(
+            """
         WHERE r.sim_run_id = %s
           AND r.issued_date <= %s
           AND s.sale_date <= %s
         ORDER BY r.due_date ASC, r.receivable_id ASC
         """
-    ).format(sql.Identifier(schema), sql.Identifier(schema), sql.Identifier(schema))
-    return fetch_all(query, [sim_run_id, as_of, as_of])
+        )
+    )
+    #  ⚠️ `%s` 는 네 개다 — LATERAL 의 기준일이 WHERE 보다 **먼저** 온다.
+    return fetch_all(query, [as_of, sim_run_id, as_of, as_of])
 
 
 _ZERO = Decimal(0)
@@ -264,7 +293,11 @@ def _recent_sales(rows: list[dict[str, object]]) -> list[SalesHistoryItem]:
 def _receivables(rows: list[dict[str, object]], *, as_of: date) -> list[SalesReceivableItem]:
     result = []
     for row in rows:
-        status = str(row["status"])
+        #  🔴 저장된 status 는 덮여 쓰인다. 복원한 금액에서 다시 세운다.
+        status = projected_status(
+            original_amount_krw=_decimal(row["original_amount_krw"]),
+            received_amount_krw=_decimal(row["received_amount_krw"]),
+        )
         due_date = row["due_date"]
         outstanding = _decimal(row["outstanding_amount_krw"])
         display_status = (

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from app.contracts.aging import AgingBucket, classify_receivable_aging
 from app.sales.db import fetch_all, get_db_schema
+from app.sales.receivable_history import history_columns, history_join, projected_status
 
 _ZERO = Decimal(0)
 
@@ -64,7 +65,10 @@ class ConsolePartnerSummary(BaseModel):
 class ConsolePartnerSaleRow(BaseModel):
     sale_id: str
     sale_date: date
+    #: 내부 품목 코드. 화면 기본값이 아니라 기술 상세용이다.
     item: str | None
+    #: 사람이 읽는 품목 이름. `items` 에 없으면 `None` — 코드로 대신 채우지 않는다.
+    item_name: str | None = None
     quantity_kg: Decimal
     unit_price_krw: Decimal | None
     sales_amount_krw: Decimal
@@ -72,7 +76,10 @@ class ConsolePartnerSaleRow(BaseModel):
 
 
 class ConsolePartnerItemRow(BaseModel):
+    #: 내부 품목 코드.
     item: str
+    #: 사람이 읽는 품목 이름. 없으면 `None` 이고 화면이 코드를 대신 쓴다.
+    item_name: str | None = None
     quantity_kg: Decimal
     sales_amount_krw: Decimal
     contribution_profit_krw: Decimal
@@ -129,8 +136,10 @@ def load_partner_rows(
     conditions: list[sql.Composable] = []
     # Placeholder order below, read top-to-bottom through the statement:
     #   sales sub-select      sim_run_id, as_of
-    #   receivable sub-select as_of (the overdue FILTER), sim_run_id, as_of
-    params: list[object] = [sim_run_id, as_of, as_of, sim_run_id, as_of]
+    #   receivable sub-select as_of (the overdue FILTER), as_of (the collection
+    #                         restore), sim_run_id, as_of (issued_date)
+    #  ⚠️ 하나라도 어긋나면 다른 실행이나 다른 날짜가 조용히 섞인다.
+    params: list[object] = [sim_run_id, as_of, as_of, as_of, sim_run_id, as_of]
     if query is not None:
         conditions.append(sql.SQL("(p.partner_id ILIKE %s OR p.partner_name ILIKE %s)"))
         params.extend([f"%{query}%", f"%{query}%"])
@@ -160,13 +169,28 @@ def load_partner_rows(
         ) s ON s.customer_partner_id = p.partner_id
         LEFT JOIN (
             SELECT sa.customer_partner_id,
-                   SUM(rc.outstanding_amount_krw) AS receivable_balance_krw,
-                   SUM(rc.outstanding_amount_krw)
+                   SUM(rc.original_amount_krw - rc.received_as_of_krw)
+                       AS receivable_balance_krw,
+                   SUM(rc.original_amount_krw - rc.received_as_of_krw)
                        FILTER (WHERE rc.due_date < %s) AS overdue_balance_krw
-            FROM {schema}.receivables rc
+            FROM (
+                SELECT r.sale_id, r.sim_run_id, r.due_date, r.original_amount_krw,
+                       COALESCE(collected.target_received_total_krw, 0) AS received_as_of_krw
+                FROM {schema}.receivables r
+                LEFT JOIN LATERAL (
+                    SELECT event.target_received_total_krw
+                    FROM {schema}.master_collection_events AS event
+                    WHERE event.sim_run_id = r.sim_run_id
+                      AND event.receivable_id = r.receivable_id
+                      AND event.collection_date <= %s
+                    ORDER BY event.collection_date DESC,
+                             event.target_received_total_krw DESC
+                    LIMIT 1
+                ) AS collected ON TRUE
+                WHERE r.sim_run_id = %s AND r.issued_date <= %s
+            ) rc
             JOIN {schema}.sales sa
               ON sa.sale_id = rc.sale_id AND sa.sim_run_id = rc.sim_run_id
-            WHERE rc.sim_run_id = %s AND rc.issued_date <= %s
             GROUP BY sa.customer_partner_id
         ) r ON r.customer_partner_id = p.partner_id
         """
@@ -227,7 +251,8 @@ def _load_sales(*, sim_run_id: str, as_of: date, partner_id: str, limit: int) ->
     statement = sql.SQL(
         """
         SELECT s.sale_id, s.sale_date, s.total_quantity_kg, s.total_amount_krw,
-               s.contribution_profit_krw, i.item_id, i.unit_price_krw_per_kg
+               s.contribution_profit_krw, i.item_id, it.item_name,
+               i.unit_price_krw_per_kg
         FROM {schema}.sales s
         LEFT JOIN LATERAL (
             SELECT item_id, unit_price_krw_per_kg
@@ -236,6 +261,7 @@ def _load_sales(*, sim_run_id: str, as_of: date, partner_id: str, limit: int) ->
             ORDER BY sale_item_id ASC
             LIMIT 1
         ) i ON TRUE
+        LEFT JOIN {schema}.items it ON it.item_id = i.item_id
         WHERE s.sim_run_id = %s AND s.customer_partner_id = %s AND s.sale_date <= %s
         ORDER BY s.sale_date DESC, s.sale_id DESC
         LIMIT %s
@@ -263,14 +289,15 @@ def _load_items(*, sim_run_id: str, as_of: date, partner_id: str) -> list[dict]:
     schema = get_db_schema()
     statement = sql.SQL(
         """
-        SELECT i.item_id,
+        SELECT i.item_id, it.item_name,
                COALESCE(SUM(i.quantity_kg), 0) AS quantity_kg,
                COALESCE(SUM(i.line_amount_krw), 0) AS sales_amount_krw,
                COALESCE(SUM(i.contribution_profit_krw), 0) AS contribution_profit_krw
         FROM {schema}.sale_items i
         JOIN {schema}.sales s ON s.sale_id = i.sale_id
+        LEFT JOIN {schema}.items it ON it.item_id = i.item_id
         WHERE s.sim_run_id = %s AND s.customer_partner_id = %s AND s.sale_date <= %s
-        GROUP BY i.item_id
+        GROUP BY i.item_id, it.item_name
         ORDER BY i.item_id ASC
         """
     ).format(schema=sql.Identifier(schema))
@@ -279,17 +306,29 @@ def _load_items(*, sim_run_id: str, as_of: date, partner_id: str) -> list[dict]:
 
 def _load_receivables(*, sim_run_id: str, as_of: date, partner_id: str) -> list[dict]:
     schema = get_db_schema()
-    statement = sql.SQL(
-        """
+    statement = (
+        sql.SQL(
+            """
         SELECT r.receivable_id, r.sale_id, r.due_date, r.original_amount_krw,
-               r.received_amount_krw, r.outstanding_amount_krw, r.status
+        """
+        )
+        + history_columns()
+        + sql.SQL(
+            """
         FROM {schema}.receivables r
         JOIN {schema}.sales s ON s.sale_id = r.sale_id AND s.sim_run_id = r.sim_run_id
+        """
+        ).format(schema=sql.Identifier(schema))
+        + history_join(schema)
+        + sql.SQL(
+            """
         WHERE r.sim_run_id = %s AND s.customer_partner_id = %s AND r.issued_date <= %s
         ORDER BY r.due_date ASC, r.receivable_id ASC
         """
-    ).format(schema=sql.Identifier(schema))
-    return fetch_all(statement, [sim_run_id, partner_id, as_of])
+        )
+    )
+    #  ⚠️ `%s` 는 네 개다 — LATERAL 의 기준일이 WHERE 보다 **먼저** 온다.
+    return fetch_all(statement, [as_of, sim_run_id, partner_id, as_of])
 
 
 def get_console_partner_detail(
@@ -336,7 +375,11 @@ def get_console_partner_detail(
                 outstanding_amount_krw=amount,
                 days_overdue=overdue,
                 aging_bucket=bucket,
-                status=str(raw["status"]),
+                #  🔴 저장된 status 는 덮여 쓰인다. 복원한 금액에서 다시 세운다.
+                status=projected_status(
+                    original_amount_krw=_decimal(raw["original_amount_krw"]),
+                    received_amount_krw=_decimal(raw["received_amount_krw"]),
+                ),
             )
         )
     recent = [
@@ -344,6 +387,7 @@ def get_console_partner_detail(
             sale_id=str(raw["sale_id"]),
             sale_date=raw["sale_date"],
             item=None if raw["item_id"] is None else str(raw["item_id"]),
+            item_name=None if raw.get("item_name") is None else str(raw["item_name"]),
             quantity_kg=_decimal(raw["total_quantity_kg"]),
             unit_price_krw=_optional_decimal(raw["unit_price_krw_per_kg"]),
             sales_amount_krw=_decimal(raw["total_amount_krw"]),
@@ -356,6 +400,7 @@ def get_console_partner_detail(
     items = [
         ConsolePartnerItemRow(
             item=str(raw["item_id"]),
+            item_name=None if raw.get("item_name") is None else str(raw["item_name"]),
             quantity_kg=_decimal(raw["quantity_kg"]),
             sales_amount_krw=_decimal(raw["sales_amount_krw"]),
             contribution_profit_krw=_decimal(raw["contribution_profit_krw"]),

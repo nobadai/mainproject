@@ -30,16 +30,19 @@ def test_paid_is_not_missing_and_none_is_rejected():
 
 
 def test_console_receivables_never_mix_runs(monkeypatch):
+    #  ⚠️ **자리로 찾지 않는다.** 수금 복원 JOIN 이 생기면서 기준일이 실행 축보다 먼저
+    #    오게 됐다. 자리에 기대면 SQL 을 고칠 때마다 이 검사가 이유 없이 빨개진다.
     def rows(_query, params):
+        run = next(value for value in params if str(value).startswith("SIM-CONSOLE"))
         return [
             {
-                "receivable_id": "AR-A" if params[0] == "SIM-CONSOLE-A" else "AR-B",
+                "receivable_id": "AR-A" if run == "SIM-CONSOLE-A" else "AR-B",
                 "sale_id": "S",
                 "partner_id": "P",
                 "partner_name": "P",
                 "original_amount_krw": Decimal(10),
                 "received_amount_krw": Decimal(0),
-                "outstanding_amount_krw": Decimal("10" if params[0] == "SIM-CONSOLE-A" else "20"),
+                "outstanding_amount_krw": Decimal("10" if run == "SIM-CONSOLE-A" else "20"),
                 "due_date": AS_OF,
                 "status": "OPEN",
             }
