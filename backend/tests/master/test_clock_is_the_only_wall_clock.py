@@ -100,7 +100,12 @@ _CLOCK_READERS = frozenset({"seoul_now", "today_in_seoul"})
 #:   무슨 일이 나는지부터 설명해야 한다.
 #: 🔴 **스케줄러 하나다** (2026-09-09). 전에는 `router.py` 도 있었는데, 승인 재검증이
 #: 서는 날을 **실행 이력 행**이 정하게 바꾸면서 진입점이 시계를 안 읽게 됐다.
-_CLOCK_READER_IMPORTERS = frozenset({"scheduler.py"})
+#: 🔴 **`backfill.py` 가 둘째다** (2026-09-14). 경계를 미래(09-18)로 옮기면서 **실제
+#: 서울 오늘 이후는 자동 승인 금지** 가드를 함께 뒀다. 그 가드는 `as_of` 가 아니라
+#: 실제 시계를 재야 뜻이 선다 — 걷기가 넘기는 날짜로 재면 걷기가 고른 날짜 하나로
+#: 가드가 풀린다. 그래서 `backfill_decisions(today=today_in_seoul)` 기본 인자로만
+#: 가져가고, 판단 · 재검증 쪽으로는 안 흘린다 (가드 한 줄만 쓴다).
+_CLOCK_READER_IMPORTERS = frozenset({"scheduler.py", "backfill.py"})
 
 
 def _clock_readers_used(path: Path) -> set[str]:

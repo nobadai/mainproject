@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.master import backfill, decision
+from app.master import backfill, clock, decision
 from app.master.backfill import (
     ALWAYS_BASE,
     ALWAYS_FIXED_TYPE,
@@ -45,6 +45,10 @@ from app.master.decision import SALES_CYCLE, DecisionIn, DecisionOut, DecisionRe
 
 규칙설정 = {"backfill": {"procurement": 매입규칙, "sales": 판매규칙}}
 매입만설정 = {"backfill": {"procurement": 매입규칙}}
+
+#: 🔴 **실제 서울 오늘을 고정한다** (2026-09-14). 백필에 실제 오늘 가드가 생겼다 —
+#:   고정하지 않으면 이 판의 결과가 **돌리는 날**에 따라 갈린다. FINAL 을 거는 날이다.
+고정오늘 = date(2026, 9, 19)
 
 
 # ── 대역 ────────────────────────────────────────────────────────────────
@@ -154,6 +158,7 @@ def 백필(
     end: date,
     설정: dict[str, object] | None = None,
     기존결정=결정없음,
+    오늘: date = 고정오늘,
 ):
     return backfill_decisions(
         sim_run_id="SIM-BACKFILL",
@@ -163,6 +168,7 @@ def 백필(
         runs_on=하루조회(행들),
         decisions_of=기존결정,
         decide=문,
+        today=lambda: 오늘,
     )
 
 
@@ -170,12 +176,12 @@ def 백필(
 
 
 def test_경계_밖_실행은_한_행도_안_쓰고_BLOCKED_BY_BOUNDARY_로_남는다() -> None:
-    """🔴 **`as_of >= 2026-09-14` 은 사람만이다.**
+    """🔴 **`as_of >= 2026-09-19` 은 사람만이다.**
 
     ⚠️ 값이 남는 것으로는 부족하다 — **승인 문을 한 번도 안 불렀는지**까지 잰다.
       결과에는 막혔다고 적으면서 문은 부르는 경우가 실제 사고의 모양이다.
     """
-    넘은날 = date(2026, 9, 14)
+    넘은날 = date(2026, 9, 19)
     문 = _승인문()
 
     결과 = 백필({넘은날: [실행행(넘은날)]}, 문, start=넘은날, end=넘은날)
@@ -185,7 +191,7 @@ def test_경계_밖_실행은_한_행도_안_쓰고_BLOCKED_BY_BOUNDARY_로_남�
 
 
 def test_경계_당일은_자동으로_채운다() -> None:
-    """🟢 **자기 생존 검사.** 경계가 `<=` 라 2026-09-13 은 안쪽이다.
+    """🟢 **자기 생존 검사.** 경계가 `<=` 라 2026-09-18 은 안쪽이다.
 
     ★ 이것이 없으면 *"경계 밖은 안 쓴다"* 는 **아무 날도 안 쓰는 코드**로도 통과한다.
     """
@@ -210,24 +216,100 @@ def test_경계를_넘는_범위는_조용히_안_잘리고_넘은_날이_결과
     """
     문 = _승인문()
 
-    결과 = 백필({}, 문, start=date(2026, 9, 12), end=date(2026, 9, 16))
+    결과 = 백필({}, 문, start=date(2026, 9, 17), end=date(2026, 9, 21), 오늘=date(2026, 12, 31))
 
-    assert 결과.blocked_days == (date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16))
+    assert 결과.blocked_days == (date(2026, 9, 19), date(2026, 9, 20), date(2026, 9, 21))
     assert 문.calls == []
 
 
 def test_경계는_설정이_아니라_코드에_있다() -> None:
     """🔴 **가드는 `config_json` 으로 안 내린다** — 옮기려면 diff 에 보여야 한다."""
-    assert BACKFILL_BOUNDARY_AS_OF == date(2026, 9, 13)
+    assert BACKFILL_BOUNDARY_AS_OF == date(2026, 9, 18)
 
     설정 = {"backfill": {"procurement": 매입규칙 | {"boundary_as_of": "2999-12-31"}}}
-    넘은날 = date(2026, 9, 14)
+    넘은날 = date(2026, 9, 19)
     문 = _승인문()
 
     결과 = 백필({넘은날: [실행행(넘은날)]}, 문, start=넘은날, end=넘은날, 설정=설정)
 
     assert [one.outcome for one in 결과.runs] == ["BLOCKED_BY_BOUNDARY"]
     assert 문.calls == []
+
+
+# ── 실제 오늘 가드 (2026-09-14) ─────────────────────────────────────────
+
+
+def _날마다_한_행(start: date, end: date) -> dict[date, list[dict[str, object]]]:
+    """날마다 매입 실행 한 행. 업무 키는 날짜로 가른다."""
+    행들: dict[date, list[dict[str, object]]] = {}
+    for n in range((end - start).days + 1):
+        날 = date.fromordinal(start.toordinal() + n)
+        행들[날] = [실행행(날, request_id=f"REQ-{날.isoformat()}")]
+    return 행들
+
+
+def test_오늘이_09_19_면_경계_당일_09_18_은_채우고_09_19_부터는_경계_밖으로_막는다() -> None:
+    """🟢 FINAL 을 거는 날의 모양. 09-18 까지가 과거 재현이다."""
+    문 = _승인문()
+    행들 = _날마다_한_행(date(2026, 9, 18), date(2026, 9, 20))
+
+    결과 = 백필(행들, 문, start=date(2026, 9, 18), end=date(2026, 9, 20), 오늘=date(2026, 9, 19))
+
+    assert [(one.as_of, one.outcome) for one in 결과.runs] == [
+        (date(2026, 9, 18), "RECORDED"),
+        (date(2026, 9, 19), "BLOCKED_BY_BOUNDARY"),
+        (date(2026, 9, 20), "BLOCKED_BY_BOUNDARY"),
+    ]
+    막힌사유 = [one.reason or "" for one in 결과.runs[1:]]
+    assert all("백필 경계" in 사유 for 사유 in 막힌사유), 막힌사유
+    assert len(문.calls) == 1
+
+
+def test_오늘이_09_16_이면_경계_안이어도_09_16_부터는_실제_오늘_가드로_막는다() -> None:
+    """🔴 **경계를 미래로 옮긴 대가를 여기서 막는다.**
+
+    09-15~09-18 사이에 누가 걷기를 걸면 경계 안이라도 **그날 · 그 뒤 안을 자동 승인**
+    할 수 있었다. 실제 오늘 가드가 그 자리를 막는지를, 경계 사유와 **다른 문장**으로
+    남는지까지 잰다.
+    """
+    문 = _승인문()
+    행들 = _날마다_한_행(date(2026, 9, 15), date(2026, 9, 18))
+
+    결과 = 백필(행들, 문, start=date(2026, 9, 15), end=date(2026, 9, 18), 오늘=date(2026, 9, 16))
+
+    assert [(one.as_of, one.outcome) for one in 결과.runs] == [
+        (date(2026, 9, 15), "RECORDED"),
+        (date(2026, 9, 16), "BLOCKED_BY_BOUNDARY"),
+        (date(2026, 9, 17), "BLOCKED_BY_BOUNDARY"),
+        (date(2026, 9, 18), "BLOCKED_BY_BOUNDARY"),
+    ]
+    for one in 결과.runs[1:]:
+        assert one.reason is not None
+        assert "실제 오늘" in one.reason and "당일·미래 자동 승인 금지" in one.reason, one.reason
+        assert "백필 경계" not in one.reason, "경계 안인데 경계 밖 사유로 막았다"
+    assert 결과.blocked_days == (date(2026, 9, 16), date(2026, 9, 17), date(2026, 9, 18))
+    assert len(문.calls) == 1, "실제 오늘 이후인데 승인 문을 불렀다"
+
+
+def test_오늘이_09_19_일_때_09_12_부터_09_20_까지의_결과_분포() -> None:
+    """★ FINAL 범위 끝자락. 경계 안 과거 일곱 날은 채우고, 두 날은 경계 밖이다."""
+    문 = _승인문()
+    행들 = _날마다_한_행(date(2026, 9, 12), date(2026, 9, 20))
+
+    결과 = 백필(행들, 문, start=date(2026, 9, 12), end=date(2026, 9, 20), 오늘=date(2026, 9, 19))
+
+    assert dict(결과.outcomes) == {"RECORDED": 7, "BLOCKED_BY_BOUNDARY": 2}
+    assert 결과.blocked_days == (date(2026, 9, 19), date(2026, 9, 20))
+    assert len(문.calls) == 7
+
+
+def test_실제_오늘의_기본은_clock_today_in_seoul_자체다() -> None:
+    """🔴 **실제 날짜를 새로 읽지 않는다.** 마스터 시각 정본을 그대로 쓴다.
+
+    ⚠️ `None` 이 아니다 — *"안 줬다"* 와 *"기본 시계"* 가 같은 값이 되면 안 된다.
+    """
+    기본값 = inspect.signature(backfill_decisions).parameters["today"].default
+    assert 기본값 is clock.today_in_seoul
 
 
 # ── 규칙 ────────────────────────────────────────────────────────────────
@@ -401,10 +483,10 @@ def test_결과를_한_통에_넣지_않는다() -> None:
         date(2026, 9, 1): [실행행(date(2026, 9, 1))],
         date(2026, 9, 2): [실행행(date(2026, 9, 2), end_code="E2_HELD", request_id="REQ-2")],
         date(2026, 9, 3): [실행행(date(2026, 9, 3), labels=(공격,), request_id="REQ-3")],
-        date(2026, 9, 14): [실행행(date(2026, 9, 14), request_id="REQ-4")],
+        date(2026, 9, 19): [실행행(date(2026, 9, 19), request_id="REQ-4")],
     }
 
-    결과 = 백필(행들, 문, start=date(2026, 9, 1), end=date(2026, 9, 14))
+    결과 = 백필(행들, 문, start=date(2026, 9, 1), end=date(2026, 9, 19))
 
     assert dict(결과.outcomes) == {
         "RECORDED": 1,
@@ -532,7 +614,7 @@ def test_판매도_승인이_안_서는_종료_코드는_NOT_APPROVABLE_이다()
 
 def test_판매_실행도_경계_밖이면_한_행도_안_쓴다() -> None:
     """🟢 경계는 사이클과 무관하다."""
-    넘은날 = date(2026, 9, 14)
+    넘은날 = date(2026, 9, 19)
     문 = _승인문()
 
     결과 = 백필({넘은날: [판매행(넘은날)]}, 문, start=넘은날, end=넘은날)
