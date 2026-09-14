@@ -237,6 +237,7 @@ def test_the_second_pass_walks_the_whole_graph():
         "evaluate_candidates",
         "rank_candidates",
         "self_check",
+        "interpret_recommendation",
         "final_recommendation",
     ]
     assert [stage for stage in stages if stage in expected] == expected, stages
@@ -500,3 +501,153 @@ def test_the_reported_amount_is_quantity_times_price(gemini):
         assert scenario.sales_amount_krw == (
             Decimal(scenario.quantity_kg) * Decimal(scenario.unit_price_krw)
         )
+
+
+# ── G. 설명은 별도 node 다 ────────────────────────────────────────────────
+#
+# ★ 결정론이 정하고 모델이 설명한다는 말은 **그래프에서 눈으로 보여야** 한다.
+#   예전에는 모델 호출이 최종 조립 함수 안에 숨어 있어서, 코드만 보고는 추천이
+#   모델보다 먼저 정해지는지 알 수 없었다. 아래 검사들이 그 순서를 잠근다.
+
+
+def _state_of(reply_input) -> Any:
+    from app.sales.graph import _graph
+
+    return _graph().invoke({"request": reply_input})
+
+
+def _pass_two_request(scenario_ids) -> SalesProposalInput:
+    return SalesProposalInput.model_validate(
+        _request_payload(
+            is_refeed=True, feedback_attempt=1, feedback=_feedback(scenario_ids)
+        )
+    )
+
+
+def test_the_first_pass_also_walks_through_the_explanation_node(gemini):
+    """첫 실행도 같은 길을 지난다 — 다만 설명할 후보가 없을 뿐이다."""
+    state = _state_of(SalesProposalInput.model_validate(_request_payload()))
+
+    assert [entry.get("stage") for entry in state["agent_trace"]] == [
+        "prepare_context",
+        "classify_situation",
+        "generate_candidates",
+        "determine_validations",
+        "self_check",
+        "interpret_recommendation",
+        "final_recommendation",
+    ]
+    #  🔴 **node 를 세웠다고 모델을 부르지 않는다.** 판정 전 안을 설명하면
+    #     보지 않은 안이 제안처럼 읽힌다.
+    assert gemini.calls == 0
+    assert state["reply"].llm.status == "SKIPPED_TEMPLATE"
+    assert state["reply"].llm.llm_attempts == 0
+
+
+def test_the_explanation_node_runs_after_ranking(gemini):
+    """순위가 먼저다. 모델은 이미 정해진 것을 말로 옮긴다."""
+    first = _pass_one()
+    ids = [scenario.scenario_id for scenario in first.scenarios]
+    stages = [
+        entry.get("stage") for entry in _state_of(_pass_two_request(ids))["agent_trace"]
+    ]
+
+    assert stages.index("rank_candidates") < stages.index("interpret_recommendation")
+    assert stages.index("self_check") < stages.index("interpret_recommendation")
+    assert stages.index("interpret_recommendation") < stages.index("final_recommendation")
+
+
+def test_the_recommendation_is_already_settled_when_the_node_starts(gemini):
+    """🔴 설명 node 가 받은 추천과 최종 답장의 추천이 같다.
+
+    ★ 모델이 추천을 **움직일 수 없다**는 것을 그래프 기록으로 확인한다.
+    """
+    first = _pass_one()
+    ids = [scenario.scenario_id for scenario in first.scenarios]
+    state = _state_of(_pass_two_request(ids))
+    entry = next(
+        item
+        for item in state["agent_trace"]
+        if item.get("stage") == "interpret_recommendation"
+    )
+
+    assert entry["recommended_scenario_id"] == state["reply"].recommended_scenario_id
+    assert entry["recommended_scenario_id"] == state["ranked_candidate_ids"][0]
+    assert entry["llm_status"] == state["reply"].llm.status
+    assert entry["llm_attempts"] == state["reply"].llm.llm_attempts
+
+
+def test_the_final_node_only_assembles_and_never_calls_the_model(monkeypatch):
+    """🔴 최종 조립은 모델을 부르지 않는다 — 앞에서 만든 설명을 옮겨 담을 뿐이다."""
+    from app.sales.graph import _final_recommendation
+    from app.sales.schemas import SalesRecommendation
+
+    monkeypatch.setenv("SALES_LLM_ENABLED", "true")
+    monkeypatch.setenv("SALES_GEMINI_API_KEY", "test-key")
+    spy = _GeminiSpy()
+    monkeypatch.setattr(llm_runtime, "_call_gemini", spy)
+
+    first = _pass_one()
+    ids = [scenario.scenario_id for scenario in first.scenarios]
+    state = _state_of(_pass_two_request(ids))
+    calls_before = spy.calls
+
+    sentinel = SalesRecommendation(
+        status="SUCCESS",
+        recommended_candidate_id=state["recommendation_id"],
+        summary="앞 node 가 만든 설명이다.",
+        recommendation_reason="이 문장이 그대로 답장에 실려야 한다.",
+        risk_explanation="바뀌면 최종 조립이 모델을 다시 부른 것이다.",
+        llm_attempts=1,
+    )
+    assembled = _final_recommendation({**state, "recommendation": sentinel})
+
+    assert spy.calls == calls_before
+    assert assembled["reply"].llm is sentinel
+    assert assembled["reply"].recommendation is sentinel
+    assert assembled["reply"].recommended_scenario_id == state["recommendation_id"]
+
+
+def _commercial_snapshot(scenarios) -> list[tuple]:
+    return [
+        (
+            scenario.scenario_id,
+            scenario.status,
+            scenario.finance_verdict,
+            scenario.quantity_kg,
+            scenario.unit_price_krw,
+            scenario.sales_amount_krw,
+            scenario.delivery_date,
+            scenario.payment_days,
+            scenario.payment_terms_type,
+        )
+        for scenario in scenarios
+    ]
+
+
+def test_the_explanation_node_does_not_touch_the_business_values(monkeypatch):
+    """설명 node 에 들어간 값과 답장에 실린 값이 같다.
+
+    ★ node 가 **불린 그 순간**의 후보를 찍어 두고 최종 답장과 맞춘다. 최종 상태끼리
+      비교하면 같은 객체를 두 번 보는 셈이라 아무것도 증명하지 못한다.
+    """
+    monkeypatch.setenv("SALES_LLM_ENABLED", "true")
+    monkeypatch.setenv("SALES_GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_runtime, "_call_gemini", _GeminiSpy())
+
+    seen: list[list[tuple]] = []
+    original = proposal_module._interpret_scenarios
+
+    def watching(scenarios, fixed_recommendation):
+        seen.append(_commercial_snapshot(scenarios))
+        return original(scenarios, fixed_recommendation)
+
+    monkeypatch.setattr(proposal_module, "_interpret_scenarios", watching)
+
+    first = _pass_one()
+    ids = [scenario.scenario_id for scenario in first.scenarios]
+    state = _state_of(_pass_two_request(ids))
+
+    #  첫 실행과 두 번째 실행에서 각각 한 번씩, 모두 두 번 불린다.
+    assert len(seen) == 2, seen
+    assert seen[-1] == _commercial_snapshot(state["reply"].scenarios)
