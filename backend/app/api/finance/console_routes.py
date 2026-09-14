@@ -30,11 +30,23 @@ def summary(
     return get_finance_dashboard(sim_run_id=sim_run_id, as_of=as_of)
 
 
+#: 자금 흐름 한 번에 볼 수 있는 최대 일수.
+#:
+#: ★ **30 에서 넓혔다** (2026-09-14). 실행이 한 분기(71일)를 도는데 상한이 30 이라
+#:   화면이 «전체 기간» 을 보여 줄 방법이 없었다. 실측에서 최근 30일만 보면 잔액
+#:   변동폭이 9,041,102 원으로 보이는데 전 기간은 20,832,701 원이다 — 같은 실행을
+#:   보고도 변동이 절반 이하로 읽힌다.
+#:
+#: 🔴 **읽기만 넓혔다.** `load_cashflow` 는 `LIMIT` 하나로 도는 SELECT 라 계약도
+#:    계산도 바뀌지 않는다. 화면이 기간을 늘려 숫자를 새로 만드는 것이 아니다.
+MAX_CASHFLOW_DAYS = 400
+
+
 @router.get("/cashflow", response_model=FinanceCashflowResponse)
 def cashflow(
     sim_run_id: Annotated[str, Query(min_length=1)],
     as_of: date,
-    days: Annotated[int, Query(ge=1, le=30)] = 30,
+    days: Annotated[int, Query(ge=1, le=MAX_CASHFLOW_DAYS)] = 30,
 ) -> FinanceCashflowResponse:
     return get_finance_cashflow(sim_run_id=sim_run_id, as_of=as_of, days=days)
 

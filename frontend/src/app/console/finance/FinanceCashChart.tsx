@@ -1,5 +1,19 @@
 "use client";
 
+/**
+ * 자금 흐름 그래프.
+ *
+ * 🔴 **화면이 금액을 만들지 않는다.** 일마감이 저장한 `base_cash_balance_krw` ·
+ *    `loan_cash_balance_krw` · `minimum_operating_cash_krw` 를 그대로 찍는다.
+ *
+ * ★ **계열을 켜고 끌 수 있어야 한다.** 실측(SIM-CHAIN-V13, 71일)에서 대출 포함과
+ *   제외가 **항상 45,272,104 원 상수 간격**이라, 둘을 한 축에 같이 그리면 축 폭이
+ *   66,104,805 원으로 벌어지고 각 계열 자체 변동(20,832,701 원)은 축의 31.5% 로
+ *   눌린다. 대출 제외만 그리면 같은 변동이 축의 74.3% 를 쓴다 — 선이 평평해 보이는
+ *   것은 데이터가 평평해서가 아니다.
+ */
+
+import { useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -12,79 +26,90 @@ import {
   YAxis,
 } from "recharts";
 
-import type { Chart } from "@/lib/screen";
+import type { ClosingItem } from "@/lib/console_api";
+import { manwon, shortDate, toNumber } from "./user_text";
+
+export type CashSeries = "base" | "loan";
 
 type CashPoint = {
   index: number;
   label: string;
-  current: number | null;
+  base: number | null;
   loan: number | null;
   minimum: number | null;
 };
 
 type TooltipEntry = { payload: CashPoint };
 
-const SERIES = {
-  current: "현재 자금만 사용",
-  loan: "대출 포함",
-  minimum: "최소 유지해야 할 현금",
+const LABEL: Record<CashSeries, string> = {
+  base: "대출 제외 현금",
+  loan: "대출 포함 현금",
 };
 
-export function FinanceCashChart({
-  chart,
-  availableStates,
-}: {
-  chart: Chart;
-  availableStates: string[];
-}) {
-  const currentSeries = chart.series.find((series) => series.name === SERIES.current);
-  const loanSeries = chart.series.find((series) => series.name === SERIES.loan);
-  const minimumSeries = chart.series.find((series) => series.name === SERIES.minimum);
-  const showCurrent = availableStates.includes("base") && Boolean(currentSeries);
-  const showLoan = availableStates.includes("loan") && Boolean(loanSeries);
-  const count = Math.max(
-    chart.x_labels.length,
-    currentSeries?.data.length ?? 0,
-    loanSeries?.data.length ?? 0,
-    minimumSeries?.data.length ?? 0,
-  );
-  const points: CashPoint[] = Array.from({ length: count }, (_, index) => ({
+const COLOR: Record<CashSeries, string> = {
+  base: "var(--color-t-info)",
+  loan: "var(--color-t-good)",
+};
+
+export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
+  //  ★ 기본은 **대출 제외만** 이다. 둘 다 켠 상태로 시작하면 첫 화면이 이미 눌려 있다.
+  const [shown, setShown] = useState<Set<CashSeries>>(new Set<CashSeries>(["base"]));
+  const [showMinimum, setShowMinimum] = useState(true);
+
+  function toggle(series: CashSeries) {
+    setShown((current) => {
+      const next = new Set(current);
+      if (next.has(series)) next.delete(series);
+      else next.add(series);
+      //  ⚠️ 둘 다 끄면 빈 그래프가 남는다. 마지막 하나는 끄지 않는다.
+      return next.size === 0 ? current : next;
+    });
+  }
+
+  const points: CashPoint[] = rows.map((row, index) => ({
     index,
-    label: chart.x_labels[index] ?? "",
-    current: showCurrent ? (currentSeries?.data[index] ?? null) : null,
-    loan: showLoan ? (loanSeries?.data[index] ?? null) : null,
-    minimum: minimumSeries?.data[index] ?? null,
+    label: shortDate(row.close_date),
+    base: shown.has("base") ? toNumber(row.base_cash_balance_krw) : null,
+    loan: shown.has("loan") ? toNumber(row.loan_cash_balance_krw) : null,
+    minimum: showMinimum ? toNumber(row.minimum_operating_cash_krw) : null,
   }));
-  const visibleValues = points.flatMap((point) =>
-    [point.current, point.loan, point.minimum].filter((value): value is number => value !== null),
+
+  const visible = points.flatMap((point) =>
+    [point.base, point.loan, point.minimum].filter((value): value is number => value !== null),
   );
+  if (visible.length === 0) return null;
 
-  if (visibleValues.length === 0) return null;
-
-  const [domainMin, domainMax] = chartDomain(visibleValues);
-  const minimumValues = points
+  const [low, high] = domain(visible);
+  const minimums = points
     .map((point) => point.minimum)
     .filter((value): value is number => value !== null);
-  const fixedMinimum =
-    minimumValues.length > 0 && minimumValues.every((value) => value === minimumValues[0])
-      ? minimumValues[0]
-      : null;
+  //  최소 운영현금이 기간 내내 한 값이면 선 대신 «부족 구간» 을 칠한다.
+  const flatMinimum =
+    minimums.length > 0 && minimums.every((value) => value === minimums[0]) ? minimums[0] : null;
 
   return (
-    <figure className="m-0" aria-labelledby="finance-cash-chart-title">
-      <figcaption id="finance-cash-chart-title" className="sr-only">
-        최근 30일의 보유 현금과 최소 운영자금 비교
-      </figcaption>
-      <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2 text-[12px] text-ink2" aria-label="그래프 범례">
-        {showCurrent && <LegendItem color="var(--color-t-info)" label="현재 자금" />}
-        {showLoan && <LegendItem color="var(--color-t-good)" label="대출 포함" />}
-        {minimumValues.length > 0 && (
-          <LegendItem color="var(--color-t-bad)" label="최소 운영자금" dashed />
-        )}
+    <figure className="m-0">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {(["base", "loan"] as CashSeries[]).map((series) => (
+          <SeriesToggle
+            key={series}
+            label={LABEL[series]}
+            color={COLOR[series]}
+            on={shown.has(series)}
+            onClick={() => toggle(series)}
+          />
+        ))}
+        <SeriesToggle
+          label="최소 운영현금"
+          color="var(--color-t-bad)"
+          dashed
+          on={showMinimum}
+          onClick={() => setShowMinimum((value) => !value)}
+        />
       </div>
-      <div className="h-[260px] w-full sm:h-[320px]">
+      <div className="h-[280px] w-full sm:h-[340px]">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={points} margin={{ top: 12, right: 12, bottom: 4, left: 12 }}>
+          <LineChart data={points} margin={{ top: 12, right: 12, bottom: 4, left: 8 }}>
             <CartesianGrid stroke="var(--color-grid)" vertical={false} />
             <XAxis
               dataKey="index"
@@ -92,37 +117,34 @@ export function FinanceCashChart({
               tickLine={false}
               tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
               tickFormatter={(index: number) => points[index]?.label ?? ""}
-              minTickGap={24}
+              minTickGap={28}
             />
             <YAxis
-              domain={[domainMin, domainMax]}
+              domain={[low, high]}
               axisLine={false}
               tickLine={false}
               tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
-              tickFormatter={(value: number) => `${formatNumber(value)}만원`}
-              width={92}
+              tickFormatter={(value: number) => manwon(value)}
+              width={72}
             />
             <Tooltip content={<CashTooltip />} cursor={{ stroke: "var(--color-hair)" }} />
-            {fixedMinimum !== null && (
+            {/* 0원 선 — 현금이 음수로 내려간 날을 눈으로 찾게 한다 */}
+            {low < 0 && <ReferenceLine y={0} stroke="var(--color-hair)" />}
+            {flatMinimum !== null && (
               <>
                 <ReferenceArea
-                  y1={domainMin}
-                  y2={fixedMinimum}
+                  y1={low}
+                  y2={flatMinimum}
                   fill="var(--color-t-bad-bg)"
                   fillOpacity={0.45}
                 />
-                <ReferenceLine
-                  y={fixedMinimum}
-                  stroke="var(--color-t-bad)"
-                  strokeDasharray="5 4"
-                />
+                <ReferenceLine y={flatMinimum} stroke="var(--color-t-bad)" strokeDasharray="5 4" />
               </>
             )}
-            {fixedMinimum === null && minimumValues.length > 0 && (
+            {flatMinimum === null && minimums.length > 0 && (
               <Line
                 type="linear"
                 dataKey="minimum"
-                name="최소 운영자금"
                 stroke="var(--color-t-bad)"
                 strokeDasharray="5 4"
                 dot={false}
@@ -130,37 +152,27 @@ export function FinanceCashChart({
                 isAnimationActive={false}
               />
             )}
-            {showCurrent && (
-              <Line
-                type="linear"
-                dataKey="current"
-                name="현재 자금"
-                stroke="var(--color-t-info)"
-                strokeWidth={2.5}
-                dot={false}
-                activeDot={{ r: 4 }}
-                connectNulls={false}
-                isAnimationActive={false}
-              />
-            )}
-            {showLoan && (
-              <Line
-                type="linear"
-                dataKey="loan"
-                name="대출 포함"
-                stroke="var(--color-t-good)"
-                strokeWidth={2.5}
-                dot={false}
-                activeDot={{ r: 4 }}
-                connectNulls={false}
-                isAnimationActive={false}
-              />
+            {(["base", "loan"] as CashSeries[]).map((series) =>
+              shown.has(series) ? (
+                <Line
+                  key={series}
+                  type="linear"
+                  dataKey={series}
+                  stroke={COLOR[series]}
+                  strokeWidth={2.5}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                  connectNulls={false}
+                  isAnimationActive={false}
+                />
+              ) : null,
             )}
           </LineChart>
         </ResponsiveContainer>
       </div>
       <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
-        현금이 최소 운영자금 아래로 내려가면 운영 여유가 부족한 상태입니다.
+        빨간 구간은 최소 운영현금에 못 미치는 범위입니다. 두 선을 함께 켜면 대출 금액만큼
+        간격이 벌어져 각 선의 하루 변화가 작게 보입니다 — 변화를 보려면 한쪽만 켜세요.
       </p>
     </figure>
   );
@@ -169,26 +181,24 @@ export function FinanceCashChart({
 function CashTooltip({ active, payload }: { active?: boolean; payload?: TooltipEntry[] }) {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
-  const referenceCash = point.current ?? point.loan;
-  const buffer =
-    referenceCash !== null && point.minimum !== null ? referenceCash - point.minimum : null;
-
+  const cash = point.base ?? point.loan;
+  const buffer = cash !== null && point.minimum !== null ? cash - point.minimum : null;
   return (
-    <div className="min-w-52 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
-      <p className="mb-2 mt-0 font-semibold">{formatChartDate(point.label)}</p>
+    <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
+      <p className="mb-2 mt-0 font-semibold">{point.label}</p>
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
-        {point.current !== null && <TooltipValue label="현재 자금" value={point.current} />}
-        {point.loan !== null && <TooltipValue label="대출 포함" value={point.loan} />}
-        {point.minimum !== null && <TooltipValue label="최소 운영자금" value={point.minimum} />}
+        {point.base !== null && <Row label={LABEL.base} value={point.base} />}
+        {point.loan !== null && <Row label={LABEL.loan} value={point.loan} />}
+        {point.minimum !== null && <Row label="최소 운영현금" value={point.minimum} />}
         {buffer !== null && (
-          <TooltipValue label="운영 여유" value={buffer} signed tone={buffer < 0 ? "bad" : "good"} />
+          <Row label="여유" value={buffer} signed tone={buffer < 0 ? "bad" : "good"} />
         )}
       </dl>
     </div>
   );
 }
 
-function TooltipValue({
+function Row({
   label,
   value,
   signed = false,
@@ -199,44 +209,58 @@ function TooltipValue({
   signed?: boolean;
   tone?: "good" | "bad";
 }) {
-  const color = tone ? `var(--color-t-${tone})` : "var(--color-ink)";
   return (
     <>
       <dt className="text-ink2">{label}</dt>
-      <dd className="m-0 text-right font-semibold tabular-nums" style={{ color }}>
-        {signed && value > 0 ? "+" : ""}{formatNumber(value)}만원
+      <dd
+        className="m-0 text-right font-semibold tabular-nums"
+        style={{ color: tone ? `var(--color-t-${tone})` : "var(--color-ink)" }}
+      >
+        {signed && value > 0 ? "+" : ""}
+        {Math.round(value).toLocaleString("ko-KR")} 원
       </dd>
     </>
   );
 }
 
-function LegendItem({ color, label, dashed = false }: { color: string; label: string; dashed?: boolean }) {
+function SeriesToggle({
+  label,
+  color,
+  on,
+  dashed = false,
+  onClick,
+}: {
+  label: string;
+  color: string;
+  on: boolean;
+  dashed?: boolean;
+  onClick: () => void;
+}) {
   return (
-    <span className="inline-flex items-center gap-2">
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11.5px]"
+      style={{
+        borderColor: on ? color : "var(--color-hair)",
+        opacity: on ? 1 : 0.5,
+      }}
+    >
       <span
         aria-hidden
-        className="block w-5 border-t-2"
+        className="block w-4 border-t-2"
         style={{ borderColor: color, borderStyle: dashed ? "dashed" : "solid" }}
       />
       {label}
-    </span>
+    </button>
   );
 }
 
-function chartDomain(values: number[]): [number, number] {
+function domain(values: number[]): [number, number] {
   const low = Math.min(...values);
   const high = Math.max(...values);
   const span = high - low;
   const padding = span > 0 ? span * 0.12 : Math.max(Math.abs(high) * 0.08, 1);
   return [Math.floor(low - padding), Math.ceil(high + padding)];
-}
-
-function formatNumber(value: number): string {
-  return Math.round(value).toLocaleString("ko-KR");
-}
-
-function formatChartDate(value: string): string {
-  if (!value.includes("/")) return "일별 마감";
-  const [month, day] = value.split("/");
-  return `${Number(month)}월 ${Number(day)}일`;
 }
