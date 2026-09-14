@@ -104,6 +104,7 @@ UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 
   finance     자금 · 현금 · 잔고 · 돈 · 예산 · 지급 · 결제 · 대금 · 자금 사정
   inventory   재고 · 창고 · 보관 · 입고 · 출고 · 용량 · 여유 · 신선도 · 남은 양
   purchase    매입 진행 상황 · 지금 만들어 둔 안
+  sales       판매 진행 상황 · 지금 만들어 둔 판매안
 
 ★ 부서가 여럿이면 여럿을 넣는다 ("자금이랑 창고 둘 다" → finance, inventory).
 ★ **어느 부서인지** 애매한 것은 UNKNOWN 이 아니다 — 가까운 부서를 넣고 confidence 를
@@ -641,7 +642,7 @@ _NO_CONFIRM_ACTIONS = frozenset({"STATUS_QUERY"})
 _UNKNOWN = Intent(action="UNKNOWN", confidence="LOW")
 
 #: 되묻는 말에 쓰는 부서 이름. `answer.py` 와 같은 어휘다.
-_DEPT_LABEL = {"finance": "재무", "inventory": "물류", "purchase": "매입"}
+_DEPT_LABEL = {"finance": "재무", "inventory": "물류", "purchase": "매입", "sales": "판매"}
 
 
 class IntentService:

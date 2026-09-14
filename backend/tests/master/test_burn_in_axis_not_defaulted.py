@@ -45,10 +45,6 @@ ALLOWED: dict[tuple[str, str, str], str] = {
         "이름부터 번인 전용 읽기다. `sim_runs` · `daily_closings` SELECT 둘뿐이고 쓰지 않는다."
         " 기본값을 쓰는 호출자는 번인 화면(`service.get_burn_in_history`) 하나다"
     ),
-    ("ask_service.py", "call", "ExecutionContext"): (
-        "발화문 조회 흐름(`_run_status`)이다. 부서에 묻기만 하고 장부를 안 바꾼다."
-        " 적는 것은 실행 이력 한 행이다. 요청(`AskRequest`)에 축 칸이 없어 따로 판단한다"
-    ),
 }
 
 
