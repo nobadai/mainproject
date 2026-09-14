@@ -1,10 +1,14 @@
 """Sales Proposal Core."""
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from pydantic import ValidationError
 
+from app.finance.sales_policy import (
+    FINANCE_SALES_MVP_POLICY_REF,
+    load_finance_sales_mvp_policy,
+)
 from app.sales.llm.runtime import interpret_candidates
 from app.sales.schemas import (
     AllocationLeg,
@@ -26,6 +30,138 @@ _TYPES = (
     ("B", "BALANCED", "BALANCE"),
     ("C", "AGGRESSIVE", "SALES_OPPORTUNITY"),
 )
+
+
+# 이 값은 입력의 ``source_ref`` 에 이미 남아 있는 단가 계보입니다. Sales는 Master
+# 상업조건을 import 하거나 새 field 를 만들지 않고, 그 계보만 결정론적으로 읽는다.
+_ML_CURRENT_PRICE = "ML_CURRENT_PRICE"
+_FIXED_PRICE = "FIXED"
+
+
+def _price_provenance(request: SalesProposalInput) -> str:
+    """가격을 바꿀 수 있는지를 한 곳에서만 판정한다.
+
+    ``preferred_unit_price_krw`` 자체는 lock 근거가 아니다. 자동 걷기가 WHSL
+    ``current_price`` 를 그 칸에 실어도, ``source_ref`` 가 ML 계보를 보존한다.
+    계보를 모르면서 사람이 준 가격을 덮어쓰는 것은 더 위험하므로 UNKNOWN 은 lock 한다.
+    """
+    contract = request.contract_context
+    source_ref = (
+        contract.source_ref
+        if request.business_mode == "CONTRACT_FULFILLMENT" and contract is not None
+        else request.user_request.source_ref
+    )
+    if request.business_mode == "CONTRACT_FULFILLMENT":
+        return "LOCKED_CONTRACT"
+    if source_ref and source_ref.endswith(f"/{_ML_CURRENT_PRICE}"):
+        return "MARKET_ML"
+    if source_ref and source_ref.endswith(f"/{_FIXED_PRICE}"):
+        return "LOCKED_FIXED"
+    # 갱신 제안에서 사용자가 override 하지 않으면 _baseline 이 계약 ref 를 채운다.
+    if (
+        request.business_mode == "CONTRACT_PROPOSAL_RENEWAL"
+        and contract is not None
+        and not _user_overrides_contract(request)
+    ):
+        return "LOCKED_CONTRACT"
+    if request.user_request.preferred_unit_price_krw is not None:
+        return "LOCKED_USER" if source_ref else "UNKNOWN"
+    return "BASELINE_ONLY"
+
+
+def _margin_price(unit_cost: Decimal, margin_rate: Decimal) -> Decimal:
+    """정수 KRW/kg을 안전 방향으로 올림해 margin floor를 깨지 않는다."""
+    return (unit_cost / (Decimal(1) - margin_rate)).quantize(
+        Decimal(1), rounding=ROUND_CEILING
+    )
+
+
+def _authoritative_unit_cost(basis: LogisticsInventoryCostBasis | None) -> Decimal | None:
+    """동일 Logistics basis의 총액과 정확한 수량만 단위화한다."""
+    if basis is None or basis.quantity_kg <= 0:
+        return None
+    return basis.amount_krw / basis.quantity_kg
+
+
+def _market_corridor(request: SalesProposalInput, relevant_date: date | None):
+    """사용 가능한 WHSL 예측 band만 돌려준다; is_gated는 use_recommended가 소유한다."""
+    forecast = request.ml_context
+    if (
+        forecast is None
+        or forecast.target_kind != "WHSL"
+        or forecast.use_recommended is not True
+        or relevant_date is None
+    ):
+        return None
+    point = next((point for point in forecast.daily if point.date == relevant_date), None)
+    if point is None:
+        return None
+    # DailyPoint가 이미 순서·양수를 검증하지만, 이 helper의 입력 조건도 명시한다.
+    if not (point.lower > 0 and point.lower <= point.predicted <= point.upper):
+        return None
+    return point
+
+
+def _depletion_pressure(sell_priority: str | None, severity: str | None) -> bool:
+    """Logistics가 이미 낸 강한 신호만 소비한다; freshness 숫자는 새 정책이 아니다."""
+    return sell_priority == "HIGH" or severity in {"SEVERE", "CRITICAL"}
+
+
+def _strategy_price(
+    *,
+    scenario_type: str,
+    baseline_price: Decimal | None,
+    provenance: str,
+    corridor: object | None,
+    unit_cost: Decimal | None,
+    depletion: bool,
+) -> tuple[Decimal | None, list[str]]:
+    """Finance policy guardrail과 authoritative market band로만 후보 가격을 만든다."""
+    if provenance.startswith("LOCKED") or provenance == "UNKNOWN":
+        return baseline_price, [provenance]
+
+    policy = load_finance_sales_mvp_policy()
+    minimum = _margin_price(unit_cost, policy.finance_minimum_margin_rate) if unit_cost else None
+    warning = _margin_price(unit_cost, policy.finance_warning_margin_rate) if unit_cost else None
+    point = corridor
+    lower = point.lower if point is not None else None
+    predicted = point.predicted if point is not None else None
+    upper = point.upper if point is not None else None
+
+    if scenario_type == "CONSERVATIVE":
+        candidates = [value for value in (upper, warning) if value is not None]
+        strategy = []
+        if upper is not None:
+            strategy.append("MARKET_UPPER")
+        if warning is not None:
+            strategy.append("MARGIN_DEFENSE")
+        return max(candidates) if candidates else baseline_price, strategy or ["BASELINE"]
+    if scenario_type == "BALANCED":
+        if predicted is not None:
+            candidates = [value for value in (predicted, minimum) if value is not None]
+            strategy = ["MARKET_PREDICTED"]
+            if minimum is not None:
+                strategy.append("MARGIN_FLOOR")
+            return max(candidates), strategy
+        if minimum is not None:
+            candidates = [value for value in (baseline_price, minimum) if value is not None]
+            return max(candidates), ["MARGIN_FLOOR"]
+        return baseline_price, ["BASELINE"]
+    if depletion:
+        if lower is not None:
+            candidates = [value for value in (lower, minimum) if value is not None]
+            return max(candidates), ["MARKET_LOWER", "MARGIN_FLOOR", "INVENTORY_DEPLETION"]
+        if minimum is not None:
+            return minimum, ["MARGIN_FLOOR", "INVENTORY_DEPLETION"]
+    # 소진 권위 신호가 없으면 공격안은 균형 가격으로 접는다.
+    return _strategy_price(
+        scenario_type="BALANCED",
+        baseline_price=baseline_price,
+        provenance=provenance,
+        corridor=corridor,
+        unit_cost=unit_cost,
+        depletion=False,
+    )
 
 
 def validate_context(request: SalesProposalInput) -> list[str]:
@@ -94,6 +230,8 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
     #   최초 납품일까지 받아들이고, 뒤는 **요청된 날짜**만 쓴다 — `_delivery_date` 가
     #   왜 그래야 하는지를 적었다.
     delivery = _delivery_date(request, requested_delivery)
+    provenance = _price_provenance(request)
+    corridor = _market_corridor(request, delivery)
     result: list[SalesScenario] = []
     for suffix, scenario_type, objective in _TYPES:
         scenario_quantity = quantity
@@ -139,6 +277,21 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
         risks, uncertainties, conditional = _feedback_effects(replies)
         finance = _finance_reply(replies)
         sell_priority, inventory_severity, remaining_freshness = _logistics_ranking_facts(replies)
+        basis = _inventory_cost_basis(
+            request,
+            item=request.user_request.item,
+            covered_quantity_kg=(None if confirmed is None else min(scenario_quantity, confirmed)),
+        )
+        scenario_price, price_strategy = _strategy_price(
+            scenario_type=scenario_type,
+            baseline_price=price,
+            provenance=provenance,
+            corridor=corridor,
+            unit_cost=_authoritative_unit_cost(basis),
+            depletion=_depletion_pressure(sell_priority, inventory_severity),
+        )
+        if scenario_price != price:
+            axes.append("PRICE")
         dependencies = _dependencies(request, supply, purchase, delivery, replies)
         if scenario_type == "BALANCED":
             payment, finance, finance_adjusted = _finance_payment_alternative(
@@ -150,7 +303,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                     ["USER_PAYMENT_TERM_ACCEPTANCE_REQUIRED", "FINANCE_REVALIDATION_REQUIRED"]
                 )
         uncertainties.extend(supply_uncertainties)
-        if price is None:
+        if scenario_price is None:
             uncertainties.append("PRICE_CONTEXT_REQUIRED")
         if request.logistics_context and request.logistics_context.delivery_feasibility:
             delivery_status = request.logistics_context.delivery_feasibility.status
@@ -182,8 +335,10 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 partner_id=request.user_request.partner_id
                 or (request.contract_context.partner_id if request.contract_context else None),
                 quantity_kg=scenario_quantity,
-                unit_price_krw=price,
-                sales_amount_krw=scenario_quantity * price if price is not None else None,
+                unit_price_krw=scenario_price,
+                sales_amount_krw=(
+                    scenario_quantity * scenario_price if scenario_price is not None else None
+                ),
                 delivery_date=delivery,
                 # MVP 계약 — 회수는 납품일부터 센다. 판매가 정한 의미를 재무 wire 에
                 # 명시한다 (마스터가 번역하지 않는다).
@@ -195,19 +350,23 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 supply=supply,
                 # ★ **이 안의 확정 물량**에 붙은 원가만 싣는다. 조건부로 더 채운 몫은
                 #   재고가 아니라 매입에서 오므로 여기 금액에 섞이지 않는다.
-                inventory_cost_basis=_inventory_cost_basis(
-                    request,
-                    item=request.user_request.item,
-                    covered_quantity_kg=(
-                        None if confirmed is None else min(scenario_quantity, confirmed)
-                    ),
-                ),
+                inventory_cost_basis=basis,
                 sales_decision_axes=axes,
                 required_validations=validations,
                 evidence_refs=_unique_refs(
-                    refs + _logistics_refs(request, confirmed) + _reply_refs(replies)
+                    refs
+                    + _logistics_refs(request, confirmed)
+                    + _reply_refs(replies)
+                    + (
+                        [FINANCE_SALES_MVP_POLICY_REF]
+                        if any(note.startswith("MARGIN_") for note in price_strategy)
+                        else []
+                    )
                 ),
-                rationale=["전달된 계약·사용자 요청·외부 컨텍스트만 사용해 구성했습니다."],
+                rationale=[
+                    "전달된 계약·사용자 요청·외부 컨텍스트만 사용해 구성했습니다.",
+                    f"가격 계보: {provenance}; 전략: {', '.join(price_strategy)}",
+                ],
                 risks=risks,
                 uncertainties=list(dict.fromkeys(uncertainties)),
                 conditional_purchase=conditional,
