@@ -385,3 +385,102 @@ def test_문장으로_못_옮기면_성공으로_안_적는다(monkeypatch: pyte
     끈, _ = _제안(monkeypatch, 켬=False, reviewer=모르는_코드를_준다)
     for 전, 후 in zip(끈["scenarios"], 제안["scenarios"], strict=True):
         assert 전["risks"] == 후["risks"]
+
+
+# ── ⑤ 라벨도 같이 가는가 ────────────────────────────────────────
+
+
+def test_라벨_판정이_다섯번과_같은_자리에서_나온다() -> None:
+    """🔴 **판정이 한 곳에 있어야 대조가 성립한다.**
+
+    ⑤ 가 묻는 라벨과 ⑧ 이 되읽는 라벨을 각자 계산하면, ⑧ 의 대조가 «남의 판단과의 대조»가
+    아니라 **자기 계산끼리의 대조**가 된다. 두 값이 늘 같은지 입력 격자로 잰다.
+    """
+    from app.purchase_agent.llm.mix import build_mix_context, context_labels
+    from app.purchase_agent.llm.schemas import MixCandidate
+
+    for widened in (True, False):
+        for shelf_days in (None, 6.0):
+            for cap_ratio in (0.4, 1.0):
+                판단 = {
+                    "widened": widened,
+                    "shelf_days": shelf_days,
+                    "cap_ratio": cap_ratio,
+                }
+                context = build_mix_context(
+                    "배추",
+                    spread_widened=widened,
+                    shelf_days=shelf_days,
+                    shelf_tight=cap_ratio < 1.0,
+                    signals=[],
+                    facts=[],
+                    candidates=[MixCandidate(candidate_id="BASE_ONLY", summary="기본")],
+                )
+                assert context_labels(판단)[:2] == (context.spread, context.freshness)
+
+
+def test_고른_후보도_라벨에_실린다() -> None:
+    """어느 후보를 골랐는지까지 봐야 *"사유가 그 선택과 맞나"* 를 물을 수 있다."""
+    from app.purchase_agent.llm.mix import MixDecision, context_labels
+
+    판단 = {
+        "widened": True,
+        "shelf_days": 6.0,
+        "cap_ratio": 0.4,
+        "mix": MixDecision(
+            candidate_id="BASE_ONLY",
+            reason="사유",
+            llm_status="SUCCESS",
+            llm_model="haiku",
+            llm_fallback_used=False,
+        ),
+    }
+    assert context_labels(판단) == ("SPREAD_WIDE", "SHELF_TIGHT", "BASE_ONLY")
+
+
+def test_판단자에게_사유와_라벨이_같이_간다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **사유만 주면 비교할 대상이 없다.**
+
+    ``MIX_REASON_LABEL_MISMATCH`` 의 뜻이 *"사유가 입력 라벨·선택 후보와 안 맞는다"* 라,
+    라벨이 빠지면 그 코드는 고를 수는 있는데 **무엇을 보고 고르는지가 없는** 상태가 된다.
+    """
+    from app.purchase_agent.graph import build_graph
+    from app.purchase_agent.state import build_initial_state
+
+    본_것: list[ReviewContext] = []
+
+    def 본다(context: ReviewContext) -> ReviewResult:
+        본_것.append(context)
+        return ReviewResult(
+            output=ReviewOutput(findings=[]),
+            llm_status="SUCCESS",
+            llm_provider="anthropic",
+            llm_model="haiku",
+            llm_attempts=1,
+            llm_fallback_used=False,
+        )
+
+    monkeypatch.setattr(rr, "enabled", lambda key, default=False: True)
+    build_graph(
+        selector=_사유를_고정한_mix("스프레드가 넓어 중품을 더 싣는다"), reviewer=본다
+    ).invoke(build_initial_state(ITEM, MIX_CALLED))
+
+    assert 본_것, "⑤ 가 안 불렸다 — 이 앵커가 더 이상 그 자리가 아니다"
+    for context in 본_것:
+        assert context.mix_labels, "사유는 갔는데 라벨이 안 갔다"
+        assert any(라벨.startswith("SPREAD_") for 라벨 in context.mix_labels)
+        assert any(라벨.startswith("SHELF_") for 라벨 in context.mix_labels)
+    # 그날 판단은 하나 — 안들이 **같은 라벨**을 받는다.
+    assert len({tuple(c.mix_labels) for c in 본_것}) == 1
+
+
+def test_다섯번이_안_돌면_라벨도_빈_목록이다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """사유가 없으면 라벨도 없다 — 안 한 판단에 라벨을 붙이지 않는다."""
+    _, 기록 = _제안(monkeypatch, 켬=True, reviewer=_모두지적)
+    assert 기록  # 흔적은 남는다
+    context = rr.build_context(
+        {"label": "기본", "strategy_type": "quantity", "rationale": [], "risks": []},
+        rr.ScenarioSignals(label="기본"),
+    )
+    assert context.mix_reason is None
+    assert context.mix_labels == []

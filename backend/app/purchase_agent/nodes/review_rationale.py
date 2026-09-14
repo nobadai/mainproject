@@ -19,6 +19,7 @@ from typing import Any
 
 from app.master.envelope import LLMCallMetadata
 from app.purchase_agent.features import SELF_REVIEW, enabled
+from app.purchase_agent.llm.mix import context_labels
 from app.purchase_agent.llm.review_schemas import ClaimIn, ReviewContext
 from app.purchase_agent.llm.self_review import ROLE, Reviewer
 from app.purchase_agent.llm.text_guard import contains_number, sanitize_numerals
@@ -104,14 +105,19 @@ def mix_reason_for_review(mix: Any) -> str | None:
 
 
 def build_context(
-    scenario: dict, signals: ScenarioSignals, *, mix_reason: str | None = None
+    scenario: dict,
+    signals: ScenarioSignals,
+    *,
+    mix_reason: str | None = None,
+    mix_labels: tuple[str, ...] = (),
 ) -> ReviewContext:
     """검토 재료. **숫자·날짜를 가려서** 넣는다.
 
     ⚠️ 가리기 전 원문이 새면 판단자가 그 값을 지적에 베껴 쓴다. 노드가 넣기 직전에 다시
     확인하고, 남아 있으면 그 근거를 **아예 안 넣는다** — 못 가린 것을 넣느니 안 본다.
 
-    ★ ``mix_reason`` 은 **그날 하나**라 부르는 쪽이 만들어 준다 (``mix_reason_for_review``).
+    ★ ``mix_reason`` · ``mix_labels`` 는 **그날 하나**라 부르는 쪽이 만들어 준다
+      (``mix_reason_for_review`` · ``llm.mix.context_labels``).
     """
     claims = []
     for 항목 in scenario.get("rationale") or []:
@@ -137,6 +143,7 @@ def build_context(
         ),
         signals=[이름 for 이름, 켜짐 in _SIGNAL_LABELS(signals) if 켜짐],
         mix_reason=mix_reason,
+        mix_labels=list(mix_labels),
         offered_findings=list(FINDINGS),
     )
 
@@ -185,7 +192,8 @@ def review_rationale(
         }
 
     drafts = ((state.get("base_plan") or {}).get("drafts")) or []
-    mix = ((state.get("sourcing_plan") or [{}])[0].get("decision") or {}).get("mix")
+    판단 = ((state.get("sourcing_plan") or [{}])[0].get("decision")) or {}
+    mix = 판단.get("mix")
     신호 = [
         scenario_signals(안, drafts, bool(mix is not None and mix.applied))
         for 안 in proposal["scenarios"]
@@ -203,12 +211,20 @@ def review_rationale(
     # ★ 그날 판단이 하나라 **루프 밖에서** 한 번 만든다 — 안마다 다시 만들면 같은 사유가
     #   안마다 달리 정제될 수 있고, 그러면 같은 판단을 세 번 다르게 검토하게 된다.
     검토용_사유 = mix_reason_for_review(mix)
+    # 🔴 **라벨을 같이 넘긴다.** 사유만 주면 「사유가 라벨과 맞나」를 물을 수 없다 —
+    #   그 지적이 비교할 대상이 없어진다. 안 돌았으면 빈 목록이다.
+    검토용_라벨 = context_labels(판단) if 검토용_사유 is not None else ()
     보임 = {s.label: s for s in 신호}
     바뀐 = [dict(안) for 안 in proposal["scenarios"]]
     for 안 in 바뀐:
         if 안["label"] not in 고른.selected:
             continue
-        context = build_context(안, 보임[안["label"]], mix_reason=검토용_사유)
+        context = build_context(
+            안,
+            보임[안["label"]],
+            mix_reason=검토용_사유,
+            mix_labels=검토용_라벨,
+        )
         결과 = reviewer(context)
         상태, 사유, 문장 = 결과.llm_status, None, []
         if 상태 == "SUCCESS":

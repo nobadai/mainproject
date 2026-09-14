@@ -61,6 +61,28 @@ def test_모든_프로바이더가_같은_모양으로_만들어진다() -> None
         assert factory(settings, rt.MIX_ROLE).spec is rt.MIX_ROLE
 
 
+def test_세_역할이_같은_provider_와_model_을_쓴다() -> None:
+    """🔴 **요약 칸 하나가 그 제한 위에 서 있다** (M-3).
+
+    ``ExecutionMetadata.llm_model`` 은 한 실행에 모델 하나를 전제한다. 지금은 세 역할이
+    **같은 ``get_llm_settings()``** 에서 나오므로 그 전제가 구조적으로 참이다 — 역할별
+    티어가 필요해지는 날 이 검사가 먼저 울고, 그때 M-3 계약을 고치는 것이 순서다.
+
+    ⚠️ 값 비교가 아니다 (규칙 8). **조립이 같은 설정에서 나오는지**를 잰다 — 세 서비스를
+    실제로 만들어 프로바이더가 든 설정 객체를 대조한다.
+    """
+    from app.purchase_agent.llm import self_review as sr
+    from app.purchase_agent.llm import split_allocation as sa
+
+    다섯 = rt.get_mix_selection_service()
+    넷 = sa._service()
+    여덟 = sr._service()
+    설정들 = [s.settings for s in (다섯, 넷, 여덟)]
+    assert len({(s.provider, s.model) for s in 설정들}) == 1
+    # 프로바이더 인스턴스도 같은 설정을 든다 — 조립이 한 자리(``build_provider``)라서다.
+    assert all(s.provider.settings is s.settings for s in (다섯, 넷, 여덟))
+
+
 def test_보내는_본문이_예전과_같다() -> None:
     """지시문·스키마가 아니라 **본문**도 안 바뀌었는지 본다."""
     context = _context()

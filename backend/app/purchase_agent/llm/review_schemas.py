@@ -58,6 +58,11 @@ class ReviewContext(BaseModel):
     signals: list[str]
     #: ⑤ 가 등급 조합을 고른 사유 (정제본). 안 돌았으면 ``None`` — **빈 문자열이 아니다.**
     mix_reason: str | None = None
+    #: 🔴 ⑤ 가 **그때 본 라벨과 고른 후보** (``SPREAD_*`` · ``SHELF_*`` · candidate_id).
+    #:
+    #: ⚠️ 사유만 주면 ``MIX_REASON_LABEL_MISMATCH`` 가 **비교할 대상이 없다** — 그 지적의
+    #: 뜻이 *"사유가 입력 라벨·선택 후보와 안 맞는다"* 이기 때문이다. 안 돌았으면 빈 목록.
+    mix_labels: list[str] = []
     #: 🔴 고를 수 있는 코드 목록. **이 밖은 거부한다.**
     offered_findings: list[str]
 
