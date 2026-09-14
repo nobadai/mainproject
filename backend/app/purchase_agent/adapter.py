@@ -53,6 +53,8 @@ AGENT_NAME = "purchase"
 #: ⑤ 등급 조합 판단자의 역할 이름 — 봉투 ``llm_calls[].role`` 에 그대로 실린다.
 #: 🔴 문자열을 두 곳에서 짓지 않는다. 역할이 늘면 여기 옆에 한 줄씩 는다.
 SOURCING_SELECTION = "sourcing_selection"
+#: ④ 회차 배분 판단자의 역할 이름.
+SPLIT_ALLOCATION_SELECTION = "split_allocation_selection"
 
 #: 이 어댑터가 **실제로 처리하는** mode. ``_status_query`` 가 답하는 목록이자 문 앞
 #: 검사의 기준이다 — **두 곳에 따로 적지 않는다.**
@@ -273,6 +275,42 @@ def _llm_calls(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
     ★ ⑤를 **부를 자리까지 못 간 실행**도 한 줄을 남긴다. 안 남기면 목록이 비어
       「설정이 꺼졌다」와 구분되지 않는다 — ``_uncalled_status`` 가 가르던 그 자리다.
     """
+    return (*_sourcing_call(state), *_split_allocation_call(state))
+
+
+def _split_allocation_call(
+    state: Mapping[str, Any] | None,
+) -> tuple[LLMCallMetadata, ...]:
+    """④ 배분 판단 한 줄. **안 전체에 걸리는 호출이라 ``target`` 이 ``None`` 이다.**
+
+    ⚠️ ④ 가 분할에 **진입조차 안 한 날**은 줄을 안 남긴다 — 그날은 배분이라는 판단 자체가
+    없었고, 「꺼졌다」도 「건너뛰었다」도 아니다. 없는 판단에 상태를 붙이면 «매일 뭔가를
+    건너뛴다» 로 읽힌다.
+    """
+    판단 = (((state or {}).get("split_plan") or [{}])[0].get("decision") or {}).get(
+        "allocation_judgment"
+    )
+    if 판단 is None:
+        return ()
+    return (
+        LLMCallMetadata(
+            role=SPLIT_ALLOCATION_SELECTION,
+            status=판단.llm_status,
+            attempts=판단.llm_attempts,
+            fallback_used=판단.llm_fallback_used,
+            provider=판단.llm_provider or None,
+            model=판단.llm_model or None,
+            skip_reason=(
+                "배분 후보가 하나뿐이라 고를 것이 없었다"
+                if 판단.llm_status == "SKIPPED_TEMPLATE"
+                else None
+            ),
+        ),
+    )
+
+
+def _sourcing_call(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
+    """⑤ 등급 조합 한 줄."""
     mix = _mix_decision(state)
     if mix is None:
         상태 = _uncalled_status()

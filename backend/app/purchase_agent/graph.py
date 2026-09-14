@@ -47,6 +47,10 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 
 from app.purchase_agent.llm.mix import MixSelector, make_mix_selector
+from app.purchase_agent.llm.split_allocation import (
+    SplitAllocationSelector,
+    make_split_selector,
+)
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.collect_context import collect_context
@@ -78,7 +82,10 @@ def route_after_classify(state: PurchaseAgentState) -> Literal["collect_context"
 
 
 def build_graph(
-    *, selector: MixSelector | None = None, recorder: ToolRecorder | None = None
+    *,
+    selector: MixSelector | None = None,
+    split_allocation_selector: SplitAllocationSelector | None = None,
+    recorder: ToolRecorder | None = None,
 ) -> Any:
     """7노드를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
 
@@ -90,11 +97,16 @@ def build_graph(
     **팀원이 브랜치만 받아도 산출물이 그대로 나온다**. 테스트는 가짜 선택자를 꽂는다.
     """
     mix_selector = selector or make_mix_selector()
+    # 🔴 ④ 배분 판단자도 **조립 시 한 번** 만든다 (⑤ 와 같은 방식). 기능 플래그가 꺼져
+    #   있으면 노드가 아예 안 부르므로, 여기서 만드는 것은 비용이 아니다.
+    split_selector = split_allocation_selector or make_split_selector()
     builder = StateGraph(PurchaseAgentState)
     for name, node in NODES.items():
         if name == "allocate_sourcing":
             # 부분 적용 — LLM 선택자는 **그래프 조립 시 한 번** 만들어 주입한다.
             node = partial(allocate_sourcing, selector=mix_selector)
+        elif name == "split_plan":
+            node = partial(split_plan, selector=split_selector)
         builder.add_node(name, wrap(node, name, recorder))
 
     builder.add_edge(START, "classify_situation")

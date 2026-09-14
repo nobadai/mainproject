@@ -22,7 +22,7 @@ from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 from app.purchase_agent.llm.mix import MixDecision, build_mix_context, make_mix_selector
 from app.purchase_agent.llm.runtime import (
-    _PROVIDERS,
+    PROVIDERS,
     LLMSettings,
     MixSelectionService,
     MixValidationError,
@@ -391,8 +391,8 @@ def test_unsupported_provider_falls_back_instead_of_crashing() -> None:
 
 def test_all_three_providers_are_registered() -> None:
     """세 프로바이더가 같은 프로토콜로 등록돼 있다 — 선택은 환경변수 한 줄이다."""
-    assert set(_PROVIDERS) == {"anthropic", "openai", "ollama"}
-    for factory in _PROVIDERS.values():
+    assert set(PROVIDERS) == {"anthropic", "openai", "ollama"}
+    for factory in PROVIDERS.values():
         assert hasattr(factory(_settings()), "generate")
 
 
@@ -602,7 +602,7 @@ def test_provider_without_a_key_raises_before_any_network_call(
 ) -> None:
     """키가 없으면 **호출 전에** 터진다 — 팀원 환경에서 이 경로가 fallback으로 이어진다."""
     monkeypatch.delenv(env_key, raising=False)
-    factory = _PROVIDERS[provider_name]
+    factory = PROVIDERS[provider_name]
     with pytest.raises(RuntimeError, match=env_key):
         factory(_settings(provider=provider_name)).generate(_context())
 
@@ -616,7 +616,7 @@ def test_provider_without_a_model_raises(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     settings = replace(_settings(provider="openai"), model="")
     with pytest.raises(RuntimeError, match="LLM_MODEL"):
-        _PROVIDERS["openai"](settings).generate(_context())
+        PROVIDERS["openai"](settings).generate(_context())
 
 
 def test_openai_provider_uses_strict_json_schema(monkeypatch) -> None:

@@ -44,7 +44,7 @@ def test_역할_명세가_기존_상수를_그대로_든다() -> None:
 @pytest.mark.parametrize("provider_name", ["anthropic", "openai", "ollama"])
 def test_기본_인자로_만들면_다섯번_역할이다(provider_name: str) -> None:
     """조립하던 자리(``get_mix_selection_service``)는 인자를 안 넘긴다 — 기본이 ⑤ 여야 한다."""
-    provider = rt._PROVIDERS[provider_name](rt.get_llm_settings())
+    provider = rt.PROVIDERS[provider_name](rt.get_llm_settings())
     assert provider.spec is rt.MIX_ROLE
 
 

@@ -26,6 +26,17 @@ from app.purchase_agent.allocation import (
     split_quantities,
 )
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.features import SPLIT_ALLOCATION, enabled
+from app.purchase_agent.llm.split_allocation import (
+    SplitAllocationSelector,
+)
+from app.purchase_agent.llm.split_allocation import (
+    build_context as build_split_context,
+)
+from app.purchase_agent.llm.split_schemas import (
+    SplitAllocationResult,
+    SplitCandidate,
+)
 from app.purchase_agent.nodes._guards import pending_value
 from app.purchase_agent.nodes.classify_situation import (
     coverage_by_label,
@@ -212,7 +223,63 @@ def safe_allocation_candidates(
     return 남긴다
 
 
-def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
+#: 후보 id → 사람이 읽는 설명. 🔴 **판단자에게도 이 말로 준다** — id 만 주면 무엇을
+#: 고르는지 모르고, 숫자를 주면 그 숫자를 사유에 베껴 쓴다 (규칙 6).
+CANDIDATE_SUMMARY = {
+    "BASE_EQUAL": "회차를 고르게 나눈다",
+    "FRONT_LOADED": "앞 회차에 더 싣는다",
+    "BACK_LOADED": "뒤 회차에 더 싣는다",
+}
+
+
+def _choose_allocation(
+    state: PurchaseAgentState,
+    constraints: dict,
+    decision: dict,
+    후보: dict[str, list[float]],
+    selector: SplitAllocationSelector | None,
+) -> tuple[str, SplitAllocationResult | None]:
+    """어느 배분으로 갈지 고른다. **기본은 늘 균등이다.**
+
+    🔴 **꺼져 있거나 후보가 하나면 판단자를 안 부른다.** 고를 것이 없는데 부르면 비용만
+      들고 상태만 흐려진다 — ⑤ 의 ``needs_llm`` 과 같은 자리다.
+
+    🔴 **고르는 것은 id 하나뿐이다.** 비율은 규칙이 이미 만들었고 안전 검사까지 끝냈다.
+      돌아온 id 가 후보 밖이면 검증이 막고 기본안으로 떨어진다.
+
+    ⚠️ 실패·비활성이면 ``BASE_EQUAL`` 이라 산출물이 **붙이기 전과 같다** — 회귀가 아니라
+      무변화다.
+    """
+    if selector is None or not enabled(SPLIT_ALLOCATION):
+        return "BASE_EQUAL", None
+    cap = split_entry_cap(state, constraints)
+    context = build_split_context(
+        state["item"],
+        rounds=decision["rounds"],
+        rising=bool(decision["by_trend"]),
+        cap_tight=None if cap.cap_kg is None else bool(decision["by_volume"]),
+        signals=[
+            이름
+            for 이름, 켜짐 in (
+                ("SPLIT_ENTERED_BY_VOLUME", decision["by_volume"]),
+                ("SPLIT_ENTERED_BY_TREND", decision["by_trend"]),
+            )
+            if 켜짐
+        ],
+        facts=["규칙이 만든 배분 후보 중 하나를 고른다."],
+        candidates=[
+            SplitCandidate(candidate_id=이름, summary=CANDIDATE_SUMMARY[이름])
+            for 이름 in 후보
+        ],
+    )
+    result = selector(context, "BASE_EQUAL")
+    고른 = result.interpretation.chosen_candidate_id
+    return (고른 if 고른 in 후보 else "BASE_EQUAL"), result
+
+
+def split_plan(
+    state: PurchaseAgentState, *, selector: SplitAllocationSelector | None = None
+) -> dict[str, Any]:
     """분할 유형을 고르고 회차 비율을 낸다. 진입하지 않으면 ``None``(일괄)이다.
 
     E3-2에서 LLM이 붙는 자리는 여기다: ``evaluate_split_entry``가 낸 사실들(트리거 종류·
@@ -233,11 +300,13 @@ def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
     constraints = load_constraints()
     decision = evaluate_split_entry(state, constraints)
     후보 = safe_allocation_candidates(state, constraints, decision["rounds"])
-    # 🔴 **지금은 늘 균등이다.** 고르는 자리(selector)는 아직 안 붙었고, 붙어도 실패하면
-    #   여기로 돌아온다 — ``BASE_EQUAL`` 이 후보 안에 있는 이유가 그것이다.
+    고른, 판단 = _choose_allocation(state, constraints, decision, 후보, selector)
     decision["allocation_candidates"] = sorted(후보)
-    decision["allocation_chosen"] = "BASE_EQUAL"
-    lines = [{"ratio": ratio} for ratio in 후보["BASE_EQUAL"]]
+    decision["allocation_chosen"] = 고른
+    # 🔴 판단 흔적을 **결과와 함께** 들고 다닌다 — ⑥ 이 그 사실을 risks 에 적고
+    #   어댑터가 실행 흔적에 역할별로 남긴다. 상태와 결과가 갈리면 서로를 부정한다.
+    decision["allocation_judgment"] = 판단
+    lines = [{"ratio": ratio} for ratio in 후보[고른]]
     # 판단 근거를 첫 줄에 싣는다 — State 필드를 늘리지 않기 위해서다 (§3 계약).
     # ⑥의 materialize가 계약 필드만 투영하므로 출력에는 새지 않는다 (⑤와 같은 방식).
     lines[0] = {**lines[0], "decision": decision}

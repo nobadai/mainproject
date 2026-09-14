@@ -309,7 +309,7 @@ class UnavailableProvider:
         raise RuntimeError("Configured purchase LLM provider is not supported")
 
 
-_PROVIDERS: dict[str, type] = {
+PROVIDERS: dict[str, type] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
@@ -603,6 +603,6 @@ def get_llm_settings() -> LLMSettings:
 
 def get_mix_selection_service() -> MixSelectionService:
     settings = get_llm_settings()
-    factory = _PROVIDERS.get(settings.provider)
+    factory = PROVIDERS.get(settings.provider)
     provider: LLMProvider = factory(settings) if factory else UnavailableProvider()
     return MixSelectionService(settings, provider)
