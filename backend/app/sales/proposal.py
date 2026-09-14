@@ -389,6 +389,11 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                     if finance and finance.financial_summary
                     else None
                 ),
+                required_collection_before_sale_krw=(
+                    finance.financial_summary.required_collection_before_sale_krw
+                    if finance and finance.financial_summary
+                    else None
+                ),
                 scenario_projected_cash_min=(
                     finance.financial_summary.scenario_projected_cash_min
                     if finance and finance.financial_summary

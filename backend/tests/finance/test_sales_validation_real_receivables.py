@@ -215,6 +215,21 @@ def test_available_credit_is_not_computed_without_a_limit():
     assert summary["available_credit_krw"] is None
 
 
+def test_credit_facts_expose_available_amount_and_required_collection():
+    """한도와 실채권이 모두 있을 때만 Sales가 소비할 조정 사실을 낸다."""
+    port = _LedgerPort(
+        _receivable("AR-1", due=date(2026, 1, 5), outstanding="250000"),
+        credit_limit=Decimal(1_000_000),
+    )
+
+    result = run_sales_validation(port, {}, _state())
+    summary = result["financial_summary"]
+
+    assert summary["available_credit_krw"] == Decimal(750000)
+    assert summary["required_collection_before_sale_krw"] == Decimal(250000)
+    assert result["max_finance_allowed_amount_krw"] == Decimal(750000)
+
+
 def test_the_real_ledger_rows_are_carried_as_evidence():
     port = _LedgerPort(
         _receivable("AR-1", due=date(2026, 1, 5)),
