@@ -174,3 +174,30 @@ export function createPartner(input: PartnerCreateInput): Promise<PartnerProfile
     body: JSON.stringify(input),
   });
 }
+
+/* ── 거래처 상세의 품목 이름 ────────────────────────────────────────────── */
+
+/**
+ * 백엔드가 내려주는 **품목 이름** 칸.
+ *
+ * ★ **왜 여기서 다시 적는가.** 공용 `lib/console_api.ts` 의 `PartnerDetail` 은 이번 판의
+ *   수정 범위 밖이고, 그 타입에는 `item_name` 이 아직 없다. 판매 화면만 쓰는 칸이라
+ *   판매 쪽에서 넓혀 읽는다 — 공용 파일을 건드리지 않고도 이름을 쓸 수 있다.
+ *
+ * 🔴 **`null` 을 허용한다.** `items` 에 없는 품목은 이름이 없고, 그때는 화면이 코드를
+ *    쓴다. 여기서 이름을 지어내면 새 품목이 남의 이름으로 팔린다.
+ */
+export interface NamedItem {
+  item_name?: string | null;
+}
+
+/**
+ * 품목 이름 칸까지 포함해 읽은 거래처 상세.
+ *
+ * ⚠️ **값 자체는 공용 계약 그대로다.** 넓히는 것은 두 목록의 원소 타입뿐이고, 나머지
+ *   칸은 `lib/console_api.ts` 의 `PartnerDetail` 이 정본이다.
+ */
+export type WithItemNames<T> = Omit<T, "recent_sales" | "item_summary"> & {
+  recent_sales: (T extends { recent_sales: (infer R)[] } ? R & NamedItem : never)[];
+  item_summary: (T extends { item_summary: (infer I)[] } ? I & NamedItem : never)[];
+};

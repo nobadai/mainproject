@@ -22,8 +22,8 @@ import {
   YAxis,
 } from "recharts";
 
-import { money, type PartnerRow } from "@/lib/console_api";
-import { manwon, shortDate, toNumber } from "../finance/user_text";
+import type { PartnerRow } from "@/lib/console_api";
+import { itemText, manwon, moneyWon, partnerText, shortDate, toNumber } from "../finance/user_text";
 import type { SalesSummaryResponse, SalesTrendResponse } from "./sales_api";
 
 const BAR_COLORS = [
@@ -88,8 +88,11 @@ export function SalesTrendChart({ data }: { data: SalesTrendResponse }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <p className="mb-0 mt-2 text-[12px] text-ink2">
+      <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
         판매가 있었던 {points.length}일만 표시합니다 — 판 날이 없는 날을 0원으로 채우지 않습니다.
+        {/* ⚠️ 가로축은 날짜가 아니라 «판매가 있었던 날» 의 차례다. 칸 간격을 실제 날짜
+            간격으로 읽으면 하루 차이와 열흘 차이가 같아 보인다. */}{" "}
+        칸 간격은 실제 날짜 간격을 뜻하지 않습니다.
       </p>
     </figure>
   );
@@ -101,7 +104,7 @@ type ItemPoint = { name: string; 매출: number; 공헌이익: number; 수량: n
 
 export function SalesItemChart({ data }: { data: SalesSummaryResponse }) {
   const points: ItemPoint[] = data.items.map((row) => ({
-    name: row.item_name ?? row.item_id,
+    name: itemText(row.item_name, row.item_id),
     매출: toNumber(row.sales_amount_krw) ?? 0,
     공헌이익: toNumber(row.contribution_profit_krw) ?? 0,
     수량: toNumber(row.total_quantity_kg) ?? 0,
@@ -126,7 +129,7 @@ export function SalesItemChart({ data }: { data: SalesSummaryResponse }) {
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
-            width={72}
+            width={96}
           />
           <Tooltip
             cursor={{ fill: "var(--color-grid)" }}
@@ -157,21 +160,25 @@ export function SalesItemChart({ data }: { data: SalesSummaryResponse }) {
 
 type PartnerPoint = { name: string; 매출: number; 미수: number; 건수: number };
 
+/** 화면에 담는 거래처 수. 잘린 것은 아래 문장이 **사실대로** 말한다. */
+const PARTNER_TOP_N = 8;
+
 export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
-  const points: PartnerPoint[] = rows
+  const selling = rows
     .map((row) => ({
-      name: row.partner_name ?? row.partner_id,
+      name: partnerText(row.partner_name, row.partner_id),
       매출: toNumber(row.total_sales_krw) ?? 0,
       미수: toNumber(row.receivable_balance_krw) ?? 0,
       건수: row.total_sales_count,
     }))
     .filter((point) => point.매출 > 0)
-    .sort((a, b) => b.매출 - a.매출)
-    //  화면에 담기는 만큼만. 잘린 것은 아래 문장이 말한다.
-    .slice(0, 8);
+    .sort((a, b) => b.매출 - a.매출);
+  const points: PartnerPoint[] = selling.slice(0, PARTNER_TOP_N);
+  const hidden = selling.length - points.length;
   if (points.length === 0) return null;
 
   return (
+    <>
     <div className="h-[220px] w-full sm:h-[260px]">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={points} layout="vertical" margin={{ top: 4, right: 16, bottom: 4, left: 8 }}>
@@ -212,7 +219,13 @@ export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-    </div>
+      </div>
+      <p className="mb-0 mt-2 text-[12px] text-ink2">
+        {hidden > 0
+          ? `매출이 있는 거래처 ${selling.length}곳 중 상위 ${points.length}곳입니다 - 나머지 ${hidden}곳은 표시하지 않았습니다.`
+          : `매출이 있는 거래처 ${selling.length}곳을 모두 표시했습니다.`}
+      </p>
+    </>
   );
 }
 
@@ -245,7 +258,7 @@ function Line({
         className="m-0 text-right font-semibold tabular-nums"
         style={{ color: tone ? `var(--color-t-${tone})` : "var(--color-ink)" }}
       >
-        {unit ? `${value.toLocaleString("ko-KR")} ${unit}` : money(value)}
+        {unit ? `${value.toLocaleString("ko-KR")} ${unit}` : moneyWon(value)}
       </dd>
     </>
   );
