@@ -30,7 +30,12 @@ from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
 
-from app.purchase_agent.allocation import split_offsets, split_quantities
+from app.purchase_agent.allocation import (
+    arrival_dates,
+    round_offsets,
+    split_offsets,
+    split_quantities,
+)
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
@@ -71,59 +76,6 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
         axes[labels[-1]] = next(axis for axis in allowed_axes if axis != "quantity")
     return axes
 
-
-def round_offsets(
-    as_of: str,
-    coverage_days: int,
-    rounds: int,
-    calendar: Mapping[str, Any] | None = None,
-) -> list[int]:
-    """회차 오프셋을 **장이 서는 날로 민다** (`#300` · `SHIFT`).
-
-    ``split_offsets`` 가 낸 자리가 휴장일이면 다음 개장일로 민다. 경계는 마스터가 봉투로
-    싣는 ``execution_calendar`` 하나이고, 여기서 요일도 공휴일도 다시 판정하지 않는다 —
-    **값은 아는 쪽이 공급하고 계산은 쓰는 쪽이 한다** (`master/execution_calendar.py`).
-
-    ★★ **소관이 우리다.** 마스터 모듈이 경계를 그렇게 적었다::
-
-        마스터   비영업일 목록 + 그 목록이 덮는 지평
-        매입     목록에 있으면 다음 날로 민다          ← 여기
-
-    ★ **미는 것이지 버리는 것이 아니다** (물류 회신 2026-09-10). 남은 회차로 재분배하면
-      그쪽 도착일이 ``cap_by_date`` 를 넘길 수 있어 ``DROP`` 을 안 쓴다.
-
-    🔴 **1회차는 안 민다.** ``seq 1`` 의 날짜는 ``as_of`` 라고 IO명세 §2 가 못박았고,
-      약정을 조립하는 마스터가 그 등식을 본다. ``as_of`` 자체가 휴장일이면 그날은
-      살 수 없는 날이므로 **미는 것이 아니라 안이 서면 안 되는 것**이고, 그 판정은
-      ⑦ ``market_open_days`` 가 컷으로 낸다.
-
-    🔴 **지평 밖이면 아무것도 안 민다.** 지평 밖은 «안 선다» 가 아니라 «모른다» 라서,
-      한 회차라도 그 밖으로 나가면 **밀기 전 자리를 그대로 돌려준다.** 절반만 민 계획은
-      민 이유도 안 민 이유도 설명할 수 없다 — ⑦ 이 같은 태도로 «못 봤다» 를 적는다.
-
-    ★ **순서를 지킨다.** 민 자리가 앞 회차와 같거나 앞서면 계속 민다. 회차가 겹치면
-      분할이 아니라 같은 매입을 두 줄로 적은 것이 된다 (``split_infeasible_reason``).
-    """
-    base = split_offsets(coverage_days, rounds)
-    closed = set((calendar or {}).get("non_execution_days") or ())
-    horizon_end = (calendar or {}).get("horizon_end")
-    if not closed or not horizon_end:
-        # 달력이 없거나 지평을 모르면 밀 근거가 없다. **빈 목록을 «안 서는 날이 없다»로
-        # 읽지 않는다** — 그 고지는 ⑦이 ``skipped`` 로 낸다.
-        return base
-    start = date.fromisoformat(as_of)
-    shifted: list[int] = []
-    for index, offset in enumerate(base):
-        if index == 0:
-            shifted.append(offset)
-            continue
-        candidate = max(offset, shifted[-1] + 1)
-        while (start + timedelta(days=candidate)).isoformat() in closed:
-            candidate += 1
-        if (start + timedelta(days=candidate)).isoformat() > horizon_end:
-            return base
-        shifted.append(candidate)
-    return shifted
 
 
 def shifted_rounds_note(
@@ -185,34 +137,6 @@ def split_infeasible_reason(
     if any(qty < 1 for qty in quantities):
         return f"회차당 최소 수량 미달 — {total_qty_kg:,}kg을 {rounds}회로 나누면 {quantities}"
     return None
-
-
-def arrival_dates(
-    as_of: str,
-    coverage_days: int,
-    rounds: int,
-    lead_days: int | None,
-    calendar: Mapping[str, Any] | None = None,
-) -> list[str] | None:
-    """회차별 **도착일** = 회차일 + N4 (상세설계 §5.5).
-
-    ``round_offsets``를 재사용한다 — 매입일을 두 곳에서 각자 계산하면 회차 날짜와
-    도착일이 어긋나고, 어긋난 쪽을 아무도 못 찾는다.
-
-    ★ **회차일이 밀리면 도착일도 따라 밀린다** (`#300`). 마스터 모듈이 *"도착일은 따라
-    밀린다 — 도착일 자체는 안 본다 (물류 축)"* 로 그 방향을 적었다. 여기서 도착일을
-    따로 밀면 매입이 물류 규약을 대신 정하는 것이 된다.
-
-    N4가 없으면 ``None``이다. **0으로 채우지 않는다** — 0은 "당일 도착"이라는 확정된
-    값이라, 미결을 0으로 적으면 "오늘 승인분이 오늘 도착"이 사실이 된다 (규칙 3).
-    """
-    if lead_days is None:
-        return None
-    start = date.fromisoformat(as_of)
-    return [
-        (start + timedelta(days=offset + lead_days)).isoformat()
-        for offset in round_offsets(as_of, coverage_days, rounds, calendar)
-    ]
 
 
 #: 회차 수량을 **재배분하지 못한** 사유. 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과

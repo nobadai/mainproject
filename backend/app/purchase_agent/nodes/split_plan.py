@@ -19,9 +19,19 @@
 from math import ceil
 from typing import Any
 
-from app.purchase_agent.allocation import equal_ratios
+from app.purchase_agent.allocation import (
+    allocation_candidates,
+    arrival_dates,
+    occupancy_fits,
+    split_quantities,
+)
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.nodes.classify_situation import is_sustained_rise, split_entry_cap
+from app.purchase_agent.nodes._guards import pending_value
+from app.purchase_agent.nodes.classify_situation import (
+    coverage_by_label,
+    is_sustained_rise,
+    split_entry_cap,
+)
 from app.purchase_agent.schemas import TIMING_AXIS
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -156,6 +166,52 @@ def effective_allowed_axes(allowed_axes: list[str], chosen: list[dict] | None) -
     return [axis for axis in allowed_axes if axis != TIMING_AXIS]
 
 
+def safe_allocation_candidates(
+    state: PurchaseAgentState, constraints: dict, rounds: int
+) -> dict[str, list[float]]:
+    """규칙이 만든 후보 중 **모든 안에서 설 수 있는 것만** 남긴다 (E3-9).
+
+    🔴 **선택 전에 거른다.** LLM 이 고른 뒤에 ⑦이 컷하면 그날 안이 통째로 사라지고,
+      사람은 *"판단자가 이상한 걸 골랐다"* 로 읽는다. 실제로는 **규칙이 못 서는 후보를
+      목록에 올린 것**이다. 그래서 목록에 올리기 전에 판정한다.
+
+    ★ **모든 라벨을 본다.** 보수·기본·공격은 총량이 다르고 커버 D 도 다르다. 한 라벨에서
+      서는 배분이 다른 라벨에서 안 설 수 있는데, 후보는 안마다 따로 고르는 것이 아니라
+      **그날 하나**다 (④는 유형을 정하고 ⑥이 안별로 편다).
+
+    ⚠️ **못 보면 안 올린다** (규칙 3). 도착일이나 날짜별 여유를 모르면 ``occupancy_fits``
+      가 거짓을 돌려주고, 그 후보는 빠진다 — 모르는 것을 「든다」로 읽지 않는다.
+      그 결과 균등 하나만 남고 LLM 은 안 불린다.
+
+    ⚠️ ``BASE_EQUAL`` 은 **안 거른다.** 그건 후보가 아니라 **되돌아갈 자리**다. 그것까지
+      걸러 목록이 비면 분할 자체를 못 만든다.
+    """
+    선언 = constraints["split"]["allocation_weights"]
+    후보 = allocation_candidates(선언, rounds)
+    if len(후보) == 1:
+        return 후보
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
+    calendar = (state.get("inventory") or {}).get("execution_calendar")
+    coverage = coverage_by_label(state["situation"], constraints)
+    남긴다 = {"BASE_EQUAL": 후보["BASE_EQUAL"]}
+    for 이름, 비율 in 후보.items():
+        if 이름 == "BASE_EQUAL":
+            continue
+        if all(
+            occupancy_fits(
+                split_quantities(draft["qty_kg"], [{"ratio": r} for r in 비율]),
+                arrival_dates(
+                    state["date"], coverage[draft["label"]], rounds, lead_days, calendar
+                ),
+                cap_by_date,
+            )
+            for draft in state["base_plan"]["drafts"]
+        ):
+            남긴다[이름] = 비율
+    return 남긴다
+
+
 def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
     """분할 유형을 고르고 회차 비율을 낸다. 진입하지 않으면 ``None``(일괄)이다.
 
@@ -176,7 +232,12 @@ def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
     """
     constraints = load_constraints()
     decision = evaluate_split_entry(state, constraints)
-    lines = [{"ratio": ratio} for ratio in equal_ratios(decision["rounds"])]
+    후보 = safe_allocation_candidates(state, constraints, decision["rounds"])
+    # 🔴 **지금은 늘 균등이다.** 고르는 자리(selector)는 아직 안 붙었고, 붙어도 실패하면
+    #   여기로 돌아온다 — ``BASE_EQUAL`` 이 후보 안에 있는 이유가 그것이다.
+    decision["allocation_candidates"] = sorted(후보)
+    decision["allocation_chosen"] = "BASE_EQUAL"
+    lines = [{"ratio": ratio} for ratio in 후보["BASE_EQUAL"]]
     # 판단 근거를 첫 줄에 싣는다 — State 필드를 늘리지 않기 위해서다 (§3 계약).
     # ⑥의 materialize가 계약 필드만 투영하므로 출력에는 새지 않는다 (⑤와 같은 방식).
     lines[0] = {**lines[0], "decision": decision}

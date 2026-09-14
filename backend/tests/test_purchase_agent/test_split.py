@@ -21,6 +21,7 @@ import pytest
 from _injection import drop_holdings, inject_arrival_cap
 
 from app.purchase_agent import mocks
+from app.purchase_agent.allocation import equal_ratios
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.graph import run_purchase_agent
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
@@ -52,7 +53,6 @@ from app.purchase_agent.nodes.self_check import (
 from app.purchase_agent.nodes.split_plan import (
     choose_rounds,
     effective_allowed_axes,
-    equal_ratios,
     evaluate_split_entry,
     largest_total_kg,
     split_decision,

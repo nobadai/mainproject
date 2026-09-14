@@ -39,14 +39,20 @@ def test_순수층은_노드를_import_하지_않는다() -> None:
     assert 노드를_가리키는_것 == []
 
 
-def test_순수층은_아무것도_import_하지_않는다() -> None:
-    """지금은 **완전히 비어 있다** — 설정도 스키마도 안 읽는다.
+def test_순수층은_표준_라이브러리만_읽는다() -> None:
+    """🔴 **저장소 안의 어느 모듈도 안 읽는다.** 날짜 산술에 필요한 표준만 쓴다.
 
-    ⚠️ 이 검사는 «영원히 0» 을 요구하는 것이 아니다. 뒤에 선언(``constraints.yaml``)을
-    읽는 함수가 들어오면 이 줄을 **의도적으로** 고치게 되고, 그때 «무엇이 늘었나» 가
-    리뷰에 뜬다. 조용히 늘어나는 것을 막는 자리다.
+    ⚠️ 이 검사는 «영원히 0» 을 요구하는 것이 아니다. 처음엔 import 가 **아예 0** 이었고,
+    ``round_offsets``·``arrival_dates`` 가 따라 들어오며 ``datetime`` 이 늘었다 — 그때
+    이 줄을 **의도적으로** 고쳤고, 그 사실이 리뷰에 떴다. 조용히 늘어나는 것을 막는
+    자리이지 늘어나면 안 되는 자리가 아니다.
+
+    ★ 🔴 **``app.`` 으로 시작하는 것이 하나라도 들어오면 안 된다** — 그 순간 이 층이
+      누군가의 «아래» 가 아니라 «옆» 이 되고, 순환이 돌아올 길이 생긴다.
     """
-    assert _imported_modules(SOURCE) == []
+    읽는_것 = _imported_modules(SOURCE)
+    assert [m for m in 읽는_것 if m.startswith("app.")] == []
+    assert set(읽는_것) <= {"datetime", "typing", "collections.abc"}
 
 
 def test_옮긴_이름이_원래_자리에서도_그대로_불린다() -> None:
@@ -56,9 +62,12 @@ def test_옮긴_이름이_원래_자리에서도_그대로_불린다() -> None:
     ``nodes.package_scenarios`` 에서 ``split_offsets`` 를 가져온다. 옮기면서 그 경로가
     끊기면 「옮기기만 했다」가 아니게 된다.
     """
-    assert split_plan.equal_ratios is allocation.equal_ratios
     assert package_scenarios.split_offsets is allocation.split_offsets
     assert package_scenarios.split_quantities is allocation.split_quantities
+    assert package_scenarios.arrival_dates is allocation.arrival_dates
+    # 🔄 equal_ratios 는 ④가 더 이상 직접 안 쓴다 — allocation_candidates 가
+    #   기본안으로 들고 있고, 검사도 제자리(allocation)에서 가져온다.
+    assert not hasattr(split_plan, "equal_ratios")
 
 
 def test_마지막_회차가_잔량을_흡수해_총량이_안_흔들린다() -> None:
