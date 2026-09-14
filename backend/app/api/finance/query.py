@@ -7,9 +7,9 @@ from decimal import Decimal
 
 from app.api.finance.schema import FinanceTab, FlowCell, StateOption
 from app.api.primitives import Card, Chart, Column, Marker, Note, Series, Source, Stat, Table
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 from app.finance.schemas import FinanceClosingItem, FinanceDashboardResponse, FinanceStateView
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 STATES = ("base", "loan")
 _STATE_TO_MODE = {"base": "BASE_NO_LOAN", "loan": "LOAN_BASELINE"}
@@ -25,8 +25,8 @@ _DASH_FLOOR = 30.0
 
 
 def build(as_of: date, state: str) -> FinanceTab:
-    dash = get_finance_dashboard(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
-    flow = get_finance_cashflow(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of, days=30)
+    dash = get_finance_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+    flow = get_finance_cashflow(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, days=30)
     selected_key, selected = _select_state(dash, state)
     state_as_of = None if selected is None else selected.state_date
     latest_closing_as_of = max((row.close_date for row in dash.recent_closings), default=None)
@@ -141,7 +141,7 @@ def build(as_of: date, state: str) -> FinanceTab:
         source=Source(
             filled=True,
             owner="재무",
-            note="근거 · 재무 마감 / 수금·지급 장부",
+            note=f"근거 · 재무 마감 / 수금·지급 장부 · 보고 있는 실행: {SHOWN_SIM_RUN_ID}",
         ),
     )
 

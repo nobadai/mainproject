@@ -23,6 +23,7 @@ from app.api.logistics import query as logistics_q
 from app.api.primitives import Badge, Column, Note, Stat, Table
 from app.api.purchase import query as purchase_q
 from app.api.sales import query as sales_q
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 
 
 def _pending(plans) -> int:
@@ -35,7 +36,9 @@ def build(as_of: date) -> DashboardTab:
     at = axis.as_of_index
 
     fc = forecast_q.build(as_of, "배추")
-    pu = purchase_q.build(as_of)
+    #  ★ 매입은 축을 안 주면 모든 실행을 섞는다. 다른 네 탭과 같은 실행을 넘긴다
+    #    (`app/api/shown_run.py` 한 자리).
+    pu = purchase_q.build(as_of, sim_run_id=SHOWN_SIM_RUN_ID)
     fi = finance_q.build(as_of, "base")
     lg = logistics_q.build(as_of, "stock")
     sl = sales_q.build(as_of)
