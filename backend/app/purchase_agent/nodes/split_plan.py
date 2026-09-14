@@ -23,6 +23,7 @@ from app.purchase_agent.allocation import (
     allocation_candidates,
     arrival_dates,
     occupancy_fits,
+    split_infeasible_reason,
     split_quantities,
 )
 from app.purchase_agent.config import load_constraints
@@ -39,7 +40,6 @@ from app.purchase_agent.llm.split_schemas import (
 )
 from app.purchase_agent.nodes._guards import pending_value
 from app.purchase_agent.nodes.classify_situation import (
-    coverage_by_label,
     is_sustained_rise,
     split_entry_cap,
 )
@@ -196,6 +196,12 @@ def safe_allocation_candidates(
 
     ⚠️ ``BASE_EQUAL`` 은 **안 거른다.** 그건 후보가 아니라 **되돌아갈 자리**다. 그것까지
       걸러 목록이 비면 분할 자체를 못 만든다.
+
+    🔴 **③·⑥ 이 쓰는 칸 이름을 그대로 읽는다** — 총량은 ``total_qty_kg``, 커버는 안이
+      들고 있는 ``coverage_days``, 달력은 **State 최상위** ``execution_calendar`` 다.
+      처음에는 ``qty_kg`` 와 ``inventory.execution_calendar`` 로 적었는데 **둘 다 없는
+      칸**이었고, 선언이 ``PROVISIONAL`` 이라 이 아래가 안 돌아 검사에도 안 걸렸다 —
+      승인되는 날 처음 터질 자리였다.
     """
     선언 = constraints["split"]["allocation_weights"]
     후보 = allocation_candidates(선언, rounds)
@@ -203,24 +209,50 @@ def safe_allocation_candidates(
         return 후보
     lead_days = pending_value(state, constraints, "inbound_lead_days")
     cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
-    calendar = (state.get("inventory") or {}).get("execution_calendar")
-    coverage = coverage_by_label(state["situation"], constraints)
+    # 🔴 **최상위에서 읽는다** — ⑥ ``package_scenarios`` 와 ⑦ ``self_check`` 가 읽는 자리와
+    #   같다. 다른 데서 읽으면 사전검사와 실제 회차일이 **다른 달력**을 보게 되고, 그때
+    #   ④는 «선다» 는데 ⑥이 민 날짜가 여유를 넘긴다.
+    calendar = state.get("execution_calendar")
     남긴다 = {"BASE_EQUAL": 후보["BASE_EQUAL"]}
     for 이름, 비율 in 후보.items():
         if 이름 == "BASE_EQUAL":
             continue
         if all(
-            occupancy_fits(
-                split_quantities(draft["qty_kg"], [{"ratio": r} for r in 비율]),
-                arrival_dates(
-                    state["date"], coverage[draft["label"]], rounds, lead_days, calendar
-                ),
-                cap_by_date,
-            )
+            _배분이_이_안에서_선다(state, draft, 비율, lead_days, cap_by_date, calendar)
             for draft in state["base_plan"]["drafts"]
         ):
             남긴다[이름] = 비율
     return 남긴다
+
+
+def _배분이_이_안에서_선다(
+    state: PurchaseAgentState,
+    draft: dict,
+    비율: list[float],
+    lead_days: int | None,
+    cap_by_date: dict | None,
+    calendar: dict | None,
+) -> bool:
+    """이 배분이 **이 안에서** 설 수 있는가. ⑥ 이 실제로 밟는 자리를 그대로 밟는다.
+
+    🔴 **⑥ 이 1회차로 되돌릴 안은 후보를 거를 근거가 못 된다.** 감당 못 하는 안
+    (``split_infeasible_reason``)은 어느 배분을 골랐든 단일 회차가 되므로, 거기서 다회차
+    도착일을 재서 후보를 빼면 **쓰이지도 않을 계산 때문에** 후보가 사라진다.
+
+    ⚠️ 총량·커버일수·달력은 ⑥ 이 ``materialize_split`` 에 넘기는 것과 **같은 값**이어야
+    한다. 하나라도 다른 자리에서 읽으면 「④는 된다는데 ⑦이 컷하는」 안이 생기고, 그 안은
+    왜 죽었는지 설명할 수 없다.
+    """
+    회차 = [{"ratio": r} for r in 비율]
+    total = draft["total_qty_kg"]
+    coverage = draft["coverage_days"]
+    if split_infeasible_reason(total, 회차, coverage):
+        return True
+    return occupancy_fits(
+        split_quantities(total, 회차),
+        arrival_dates(state["date"], coverage, len(회차), lead_days, calendar),
+        cap_by_date,
+    )
 
 
 #: 후보 id → 사람이 읽는 설명. 🔴 **판단자에게도 이 말로 준다** — id 만 주면 무엇을
