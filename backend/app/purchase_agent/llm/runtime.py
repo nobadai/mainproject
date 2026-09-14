@@ -40,12 +40,12 @@ from app.purchase_agent.llm.text_guard import contains_control_chars, contains_n
 
 #: 팀 4벌은 ``backend/.env``를 읽는데 이 저장소의 실제 파일은 루트에 있다.
 #: 어느 쪽에 두든 동작해야 하므로 **둘 다** 읽는다 (없는 파일은 무시된다).
-_ENV_FILES = (
+ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",  # backend/.env — 팀 규약 위치
     Path(__file__).resolve().parents[4] / ".env",  # 저장소 루트 — 실제 위치
 )
 #: 에이전트 전용 접두사 — ``PURCHASE_LLM_MODEL``로 다른 에이전트와 분리한다 (critic 선례).
-_ENV_PREFIX = "PURCHASE_"
+ENV_PREFIX = "PURCHASE_"
 
 SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
@@ -457,11 +457,11 @@ _DEFAULT_MODELS = {
 
 def _env(key: str, default: str) -> str:
     """``PURCHASE_<KEY>`` → ``<KEY>`` → default. 빈 문자열은 미설정으로 본다 (critic 선례)."""
-    return os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key) or default
+    return os.getenv(f"{ENV_PREFIX}{key}") or os.getenv(key) or default
 
 
 def _read_bool(key: str, *, default: bool) -> bool:
-    value = os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key)
+    value = os.getenv(f"{ENV_PREFIX}{key}") or os.getenv(key)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -499,7 +499,7 @@ def get_llm_settings() -> LLMSettings:
     경우 설정값의 두 배를 넘을 수 있다 (Codex 교차검증). 총 deadline이 필요해지면
     별도 장치가 있어야 하고, 이 값 하나로는 보장되지 않는다.
     """
-    for env_file in _ENV_FILES:
+    for env_file in ENV_FILES:
         load_dotenv(env_file)
     provider = _env("LLM_PROVIDER", "anthropic").strip().lower()
     return LLMSettings(

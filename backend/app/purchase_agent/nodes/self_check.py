@@ -13,6 +13,7 @@ from typing import Any, NamedTuple
 
 from app.purchase_agent import AGENT_VERSION
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.features import INFORMATION_REQUESTS, enabled
 from app.purchase_agent.nodes._guards import pending_value
 from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
 from app.purchase_agent.nodes.draft_plan import (
@@ -937,4 +938,16 @@ def _assemble(
     }
     if not survivors:
         raw["no_proposal_reason"] = _no_proposal_reason(rejected, cut_here)
-    return revalidate_for_output(PurchaseProposal.model_validate(raw)).model_dump(mode="json")
+    # 🔴 **플래그가 끄는 것은 이 한 칸뿐이다** (E3-11 · 착수 조건 ⑤). 같은 판정에서 나온
+    #   사람용 문장은 ③이 이미 ``risks`` 에 실었고 **플래그와 무관하게 나간다** — 플래그로
+    #   고지를 없애면 미결이 조용히 사라지고 규칙 3 이 출력 층에서 깨진다.
+    if enabled(INFORMATION_REQUESTS):
+        raw["information_requests"] = (state["base_plan"] or {}).get(
+            "information_requests"
+        ) or []
+    # ⚠️ 빈 목록이면 키째로 빠진다 — 그 규칙은 **타입에 있다**
+    #   (``PurchaseProposal.drop_empty_information_requests``). 여기서 dump 뒤에 지우면
+    #   ``revalidate_for_output`` 의 왕복 항등성이 깨진다.
+    return revalidate_for_output(PurchaseProposal.model_validate(raw)).model_dump(
+        mode="json"
+    )

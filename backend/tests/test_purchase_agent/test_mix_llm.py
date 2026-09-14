@@ -968,7 +968,7 @@ def test_load_dotenv_cannot_resurrect_a_cleared_key(monkeypatch, tmp_path) -> No
 
     env_file = tmp_path / ".env"
     env_file.write_text("ANTHROPIC_API_KEY=sk-ant-from-dotenv\n", encoding="utf-8")
-    monkeypatch.setattr(runtime, "_ENV_FILES", (env_file,))
+    monkeypatch.setattr(runtime, "ENV_FILES", (env_file,))
 
     # conftest가 하는 것과 같은 처리: 빈 문자열로 둔다
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
