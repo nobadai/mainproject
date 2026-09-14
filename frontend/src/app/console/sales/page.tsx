@@ -23,7 +23,6 @@ import {
   Failed,
   Metric,
   Metrics,
-  NoRunSelected,
   Skeleton,
   Table,
   useConsoleData,
@@ -34,7 +33,6 @@ import { PartnerProfileForm } from "@/components/console/PartnerProfileForm";
 import { SalesCandidatePanel } from "@/components/console/SalesCandidatePanel";
 import {
   AGING_LABELS,
-  money,
   percent,
   quantity,
   salesConsole,
@@ -49,11 +47,31 @@ import {
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
 import { AgingBars } from "../finance/AgingBars";
-import { DataBasis, TechDetails } from "../finance/TechDetails";
-import { DATA_SOURCE_NOTE, runtimeText, verdictText } from "../finance/user_text";
+import { DataBasis, NoRunChosen, TechDetails } from "../finance/TechDetails";
+import {
+  DATA_SOURCE_NOTE,
+  itemText,
+  moneyWon,
+  partnerStatusText,
+  partnerText,
+  partnerTypeText,
+  percentPoint,
+  pricingContractText,
+  receivableStatusText,
+  runtimeText,
+  verdictText,
+} from "../finance/user_text";
+import { ActionTable } from "./ActionTable";
 import { PartnerCreateForm } from "./PartnerCreateForm";
 import { SalesItemChart, SalesPartnerChart, SalesTrendChart } from "./SalesCharts";
-import { salesOverview, type SalesSummaryResponse, type SalesTrendResponse } from "./sales_api";
+import { TodayProposalsPanel } from "./TodayProposals";
+import {
+  salesOverview,
+  type WithItemNames,
+  type SalesProposalsResponse,
+  type SalesSummaryResponse,
+  type SalesTrendResponse,
+} from "./sales_api";
 
 type Tab = "overview" | "partners" | "orders" | "collections" | "agent" | "runs";
 const TABS: { key: Tab; label: string }[] = [
@@ -77,7 +95,7 @@ export default function SalesPage() {
       <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
         <RunPicker asOf={asOf} />
       </TechDetails>
-      {!simRun ? <NoRunSelected /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
     </div>
   );
 }
@@ -104,6 +122,11 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     () => salesOverview.trend(simRun, asOf),
     true,
   );
+  const proposals = useConsoleData<SalesProposalsResponse>(
+    `sales-proposals:${simRun}:${asOf}`,
+    () => salesOverview.proposals(simRun, asOf),
+    true,
+  );
   const collections = useConsoleData<CollectionsResponse>(
     `collections:${simRun}:${asOf}`,
     () => salesConsole.collections(simRun, asOf),
@@ -126,30 +149,38 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
           <EmptyRows what="판매" />
         ) : (
           <Metrics>
-            <Metric label="누적 매출" value={money(summary.data.summary.total_sales_amount_krw)} />
+            <Metric label="누적 매출" value={moneyWon(summary.data.summary.total_sales_amount_krw)} />
             <Metric label="판매 건수" value={`${summary.data.summary.sales_count}건`} />
             <Metric label="판매량" value={quantity(summary.data.summary.total_sales_quantity_kg)} />
             <Metric
               label="공헌이익"
-              value={money(summary.data.summary.contribution_profit_krw)}
-              hint={`이익률 ${percent(summary.data.summary.contribution_margin_pct)}`}
+              value={moneyWon(summary.data.summary.contribution_profit_krw)}
+              //  🔴 `contribution_margin_pct` 는 **퍼센트 포인트**다 (백엔드 `_pct`).
+              //     비율 formatter 를 쓰면 100 이 한 번 더 곱해져 3483.0% 가 된다.
+              hint={`이익률 ${percentPoint(summary.data.summary.contribution_margin_pct)}`}
             />
-            <Metric label="미수금" value={money(summary.data.summary.outstanding_receivables_krw)} />
+            <Metric label="미수금" value={moneyWon(summary.data.summary.outstanding_receivables_krw)} />
             <Metric
               label="연체금액"
-              value={money(collections.data?.summary.overdue_krw)}
+              value={moneyWon(collections.data?.summary.overdue_krw)}
               hint={collections.error ? "읽지 못했습니다" : undefined}
             />
           </Metrics>
         )}
       </Panel>
 
+      {/* ★ 매입 화면의 «금일 매입안» 과 같은 자리다. 통계 다음에 오늘의 안이 오고,
+          지난 흐름은 그 뒤에 온다. */}
+      <TodayProposalsPanel asOf={asOf} state={proposals} />
+
       <Panel title="기간별 매출" subtitle="판매가 있었던 날만 표시합니다">
         {trend.loading ? (
           <Skeleton what="매출 추이" />
         ) : trend.error ? (
           <Failed what="매출 추이" message={trend.error} />
-        ) : !trend.data || trend.data.rows.length === 0 ? (
+        ) : !trend.data ? (
+          <EmptyRows what="매출 추이" />
+        ) : trend.data.rows.length === 0 ? (
           <EmptyRows what="판매" />
         ) : (
           <SalesTrendChart data={trend.data} />
@@ -158,8 +189,11 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
 
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-2">
         <Panel title="품목별 매출" subtitle="어떤 품목이 잘 팔렸나">
+          {/* 🔴 같은 조회의 실패를 «품목 없음» 으로 보여 주지 않는다. */}
           {summary.loading ? (
             <Skeleton what="품목별 매출" />
+          ) : summary.error ? (
+            <Failed what="품목별 매출" message={summary.error} />
           ) : !summary.data || summary.data.items.length === 0 ? (
             <EmptyRows what="품목" />
           ) : (
@@ -189,9 +223,12 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         ) : (
           <>
             <Metrics>
-              <Metric label="수금액" value={money(collections.data.summary.collected_krw)} />
-              <Metric label="미수 잔액" value={money(collections.data.summary.total_outstanding_krw)} />
-              <Metric label="연체" value={money(collections.data.summary.overdue_krw)} />
+              <Metric label="수금액" value={moneyWon(collections.data.summary.collected_krw)} />
+              <Metric
+                label="미수 잔액"
+                value={moneyWon(collections.data.summary.total_outstanding_krw)}
+              />
+              <Metric label="연체" value={moneyWon(collections.data.summary.overdue_krw)} />
             </Metrics>
             <div className="mt-4">
               <AgingBars
@@ -254,12 +291,17 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
             <Table
               rows={state.data!.rows}
               columns={[
-                { key: "name", label: "거래처명", render: (row) => row.partner_name ?? "이름 없음" },
-                { key: "status", label: "상태", render: (row) => STATUS_LABELS[row.status] ?? row.status },
-                { key: "sales", label: "누적 매출", align: "right", render: (row) => money(row.total_sales_krw) },
+                {
+                  key: "name",
+                  label: "거래처명",
+                  render: (row) => partnerText(row.partner_name, row.partner_id),
+                },
+                { key: "type", label: "유형", render: (row) => partnerTypeText(row.partner_type) },
+                { key: "status", label: "상태", render: (row) => partnerStatusText(row.status) },
+                { key: "sales", label: "누적 매출", align: "right", render: (row) => moneyWon(row.total_sales_krw) },
                 { key: "count", label: "판매 건수", align: "right", render: (row) => `${row.total_sales_count}건` },
-                { key: "ar", label: "미수금", align: "right", render: (row) => money(row.receivable_balance_krw) },
-                { key: "overdue", label: "연체", align: "right", render: (row) => money(row.overdue_balance_krw) },
+                { key: "ar", label: "미수금", align: "right", render: (row) => moneyWon(row.receivable_balance_krw) },
+                { key: "overdue", label: "연체", align: "right", render: (row) => moneyWon(row.overdue_balance_krw) },
                 {
                   key: "last",
                   //  ⚠️ 이 실행에서 판매가 없으면 «없음» 이다. 0 원과 다른 사실이다.
@@ -277,7 +319,7 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
                   className="rounded-lg border px-3 py-1.5 text-[11.5px]"
                   style={{ borderColor: "var(--color-hair)" }}
                 >
-                  {row.partner_name ?? row.partner_id} 상세
+                  {partnerText(row.partner_name, row.partner_id)} 상세
                 </button>
               ))}
             </div>
@@ -288,7 +330,7 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
                   columns={[
                     { key: "id", label: "partner_id", mono: true, render: (row) => row.partner_id },
                     { key: "name", label: "거래처명", render: (row) => row.partner_name ?? "이름 없음" },
-                    { key: "type", label: "유형", render: (row) => row.partner_type ?? "미상" },
+                    { key: "type", label: "partner_type", mono: true, render: (row) => row.partner_type ?? "null" },
                     { key: "status", label: "status", mono: true, render: (row) => row.status },
                   ]}
                 />
@@ -302,11 +344,6 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
   );
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  ACTIVE: "거래 중",
-  INACTIVE: "거래 중지",
-};
-
 function PartnerDetailPanel({
   simRun,
   asOf,
@@ -316,9 +353,14 @@ function PartnerDetailPanel({
   asOf: string;
   partnerId: string;
 }) {
-  const state = useConsoleData<PartnerDetail>(
+  //  ★ 품목 이름 칸까지 포함해 읽는다 (`sales_api.WithItemNames`) — 공용 타입은
+  //    이번 판의 수정 범위 밖이라 판매 쪽에서 넓혀 읽는다.
+  const state = useConsoleData<WithItemNames<PartnerDetail>>(
     `partner:${simRun}:${asOf}:${partnerId}`,
-    () => salesConsole.partnerDetail(simRun, asOf, partnerId),
+    () =>
+      salesConsole.partnerDetail(simRun, asOf, partnerId) as Promise<
+        WithItemNames<PartnerDetail>
+      >,
     true,
   );
   if (state.loading) return <Skeleton what="거래처 상세" />;
@@ -329,35 +371,40 @@ function PartnerDetailPanel({
   return (
     <>
       <Panel
-        title={`${data.basic.partner_name ?? data.basic.partner_id} 상세`}
-        subtitle={`${data.basic.client_type ?? data.basic.partner_type ?? "유형 미상"} · ${data.basic.factory_region ?? "지역 미상"}`}
+        title={`${partnerText(data.basic.partner_name, data.basic.partner_id)} 상세`}
+        subtitle={`${data.basic.client_type ?? partnerTypeText(data.basic.partner_type)} · ${data.basic.factory_region ?? "지역 미상"}`}
       >
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Badge
-            text={hasOverdue ? `연체 ${money(data.summary.overdue_balance_krw)}` : "연체 없음"}
+            text={hasOverdue ? `연체 ${moneyWon(data.summary.overdue_balance_krw)}` : "연체 없음"}
             tone={hasOverdue ? "bad" : "good"}
           />
           <Badge
-            text={STATUS_LABELS[data.basic.status] ?? data.basic.status}
+            text={partnerStatusText(data.basic.status)}
             tone={data.basic.status === "ACTIVE" ? "good" : "neutral"}
           />
           {data.basic.sales_collection_days !== null && (
             <Badge text={`결제 ${data.basic.sales_collection_days}일`} tone="neutral" />
           )}
+          {data.basic.pricing_contract_type !== null && (
+            <Badge text={pricingContractText(data.basic.pricing_contract_type)} tone="neutral" />
+          )}
         </div>
         <Metrics>
           <Metric
             label="매출"
-            value={money(data.summary.total_sales_krw)}
+            value={moneyWon(data.summary.total_sales_krw)}
             hint={`${data.summary.sales_count}건`}
           />
-          <Metric label="공헌이익" value={money(data.summary.contribution_profit_krw)} />
+          <Metric label="공헌이익" value={moneyWon(data.summary.contribution_profit_krw)} />
           <Metric
             label="공헌이익률"
             //  ⚠️ 매출이 없으면 «데이터 없음» 이다. 0% 는 잰 값이라는 뜻이라 다르다.
+            //  ★ 이 칸은 `contribution_margin_rate` 로 **0~1 비율**이다. 판매 현황의
+            //    `contribution_margin_pct` 와 단위가 다르므로 formatter 도 다르다.
             value={percent(data.summary.contribution_margin_rate)}
           />
-          <Metric label="미수금" value={money(data.summary.receivable_balance_krw)} />
+          <Metric label="미수금" value={moneyWon(data.summary.receivable_balance_krw)} />
         </Metrics>
         <p className="mb-0 mt-3 text-[11.5px] text-ink2">
           여신 한도는 재무에서 관리합니다 — 판매 화면이 «한도 − 채권» 으로 만들지 않습니다.
@@ -371,7 +418,7 @@ function PartnerDetailPanel({
           <>
             <ItemBars
               rows={data.item_summary.map((row) => ({
-                label: row.item,
+                label: itemText(row.item_name, row.item),
                 value: row.sales_amount_krw,
               }))}
             />
@@ -379,14 +426,18 @@ function PartnerDetailPanel({
               <Table
                 rows={data.item_summary}
                 columns={[
-                  { key: "item", label: "품목", render: (row) => row.item },
+                  {
+                    key: "item",
+                    label: "품목",
+                    render: (row) => itemText(row.item_name, row.item),
+                  },
                   { key: "qty", label: "수량", align: "right", render: (row) => quantity(row.quantity_kg) },
-                  { key: "amount", label: "매출", align: "right", render: (row) => money(row.sales_amount_krw) },
+                  { key: "amount", label: "매출", align: "right", render: (row) => moneyWon(row.sales_amount_krw) },
                   {
                     key: "profit",
                     label: "공헌이익",
                     align: "right",
-                    render: (row) => money(row.contribution_profit_krw),
+                    render: (row) => moneyWon(row.contribution_profit_krw),
                   },
                 ]}
               />
@@ -403,15 +454,19 @@ function PartnerDetailPanel({
             rows={data.recent_sales}
             columns={[
               { key: "date", label: "판매일", mono: true, render: (row) => row.sale_date },
-              { key: "item", label: "품목", render: (row) => row.item ?? "품목 미상" },
+              {
+                key: "item",
+                label: "품목",
+                render: (row) => itemText(row.item_name, row.item),
+              },
               { key: "qty", label: "수량", align: "right", render: (row) => quantity(row.quantity_kg) },
-              { key: "price", label: "단가", align: "right", render: (row) => money(row.unit_price_krw) },
-              { key: "amount", label: "금액", align: "right", render: (row) => money(row.sales_amount_krw) },
+              { key: "price", label: "단가", align: "right", render: (row) => moneyWon(row.unit_price_krw) },
+              { key: "amount", label: "금액", align: "right", render: (row) => moneyWon(row.sales_amount_krw) },
               {
                 key: "profit",
                 label: "공헌이익",
                 align: "right",
-                render: (row) => money(row.contribution_profit_krw),
+                render: (row) => moneyWon(row.contribution_profit_krw),
               },
             ]}
           />
@@ -469,9 +524,9 @@ function Collections({ simRun, asOf }: { simRun: string; asOf: string }) {
   return (
     <Panel title="수금" subtitle="정본은 매출채권이며, 연체 구간은 재무 Aging 규칙을 그대로 씁니다">
       <Metrics>
-        <Metric label="미수 잔액" value={money(data.summary.total_outstanding_krw)} />
-        <Metric label="연체" value={money(data.summary.overdue_krw)} />
-        <Metric label="수금액" value={money(data.summary.collected_krw)} />
+        <Metric label="미수 잔액" value={moneyWon(data.summary.total_outstanding_krw)} />
+        <Metric label="연체" value={moneyWon(data.summary.overdue_krw)} />
+        <Metric label="수금액" value={moneyWon(data.summary.collected_krw)} />
       </Metrics>
       <div className="mt-4">
         <AgingBars
@@ -493,7 +548,7 @@ function Collections({ simRun, asOf }: { simRun: string; asOf: string }) {
               {
                 key: "partner",
                 label: "거래처",
-                render: (row) => row.partner_name ?? row.partner_id ?? "미지정",
+                render: (row) => partnerText(row.partner_name, row.partner_id),
               },
               { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
               { key: "bucket", label: "구간", render: (row) => AGING_LABELS[row.aging_bucket] },
@@ -507,9 +562,10 @@ function Collections({ simRun, asOf }: { simRun: string; asOf: string }) {
                 key: "outstanding",
                 label: "미수",
                 align: "right",
-                render: (row) => money(row.outstanding_amount_krw),
+                render: (row) => moneyWon(row.outstanding_amount_krw),
               },
-              { key: "received", label: "수금", align: "right", render: (row) => money(row.received_amount_krw) },
+              { key: "received", label: "수금", align: "right", render: (row) => moneyWon(row.received_amount_krw) },
+              { key: "status", label: "상태", render: (row) => receivableStatusText(row.status) },
             ]}
           />
         )}
@@ -537,30 +593,42 @@ function Orders({ simRun, asOf }: { simRun: string; asOf: string }) {
         ) : state.data!.rows.length === 0 ? (
           <EmptyRows what="확정 판매" />
         ) : (
-          <Table
+          // 🔴 **버튼을 표 밖에 묶어 두지 않는다.** 전에는 이름이 같은 «판매 흐름 보기»
+          //    버튼이 행 수만큼 나열돼, 어느 판매의 버튼인지 알 수 없었다. 행마다
+          //    액션 칸을 두면 누른 버튼과 그 행의 `sale_id` 가 눈으로 이어진다.
+          <ActionTable
             rows={state.data!.rows}
+            rowKey={(row) => row.receivable_id}
             columns={[
-              { key: "partner", label: "거래처", render: (row) => row.partner_name ?? "미지정" },
-              { key: "amount", label: "금액", align: "right", render: (row) => money(row.original_amount_krw) },
-              { key: "received", label: "수금", align: "right", render: (row) => money(row.received_amount_krw) },
+              {
+                key: "partner",
+                label: "거래처",
+                render: (row) => partnerText(row.partner_name, row.partner_id),
+              },
+              { key: "amount", label: "금액", align: "right", render: (row) => moneyWon(row.original_amount_krw) },
+              { key: "received", label: "수금", align: "right", render: (row) => moneyWon(row.received_amount_krw) },
               { key: "due", label: "회수 만기", mono: true, render: (row) => row.due_date },
-              { key: "status", label: "상태", render: (row) => row.status },
+              { key: "status", label: "상태", render: (row) => receivableStatusText(row.status) },
+              {
+                key: "action",
+                label: "상세",
+                render: (row) => (
+                  <button
+                    type="button"
+                    onClick={() => setSelected(row.sale_id)}
+                    aria-pressed={selected === row.sale_id}
+                    className="rounded-md border px-2 py-1 text-[11px]"
+                    style={{
+                      borderColor:
+                        selected === row.sale_id ? "var(--color-t-info)" : "var(--color-hair)",
+                    }}
+                  >
+                    흐름 보기
+                  </button>
+                ),
+              },
             ]}
           />
-        )}
-        {state.data && state.data.rows.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {[...new Set(state.data.rows.map((row) => row.sale_id))].map((saleId) => (
-              <button
-                key={saleId}
-                onClick={() => setSelected(saleId)}
-                className="rounded-lg border px-3 py-1.5 text-[11.5px]"
-                style={{ borderColor: "var(--color-hair)" }}
-              >
-                판매 흐름 보기
-              </button>
-            ))}
-          </div>
         )}
       </Panel>
       {selected && <Lifecycle simRun={simRun} asOf={asOf} saleId={selected} />}
@@ -647,7 +715,7 @@ function Agent({ simRun, asOf }: { simRun: string; asOf: string }) {
                 {
                   key: "partner",
                   label: "거래처",
-                  render: (row) => row.partner_name ?? row.partner_id ?? "미지정",
+                  render: (row) => partnerText(row.partner_name, row.partner_id),
                 },
                 { key: "verdict", label: "판단 결과", render: (row) => verdictText(row.verdict) },
                 { key: "runtime", label: "조회 상태", render: (row) => runtimeText(row.runtime_status) },
@@ -704,7 +772,7 @@ function Runs({ simRun }: { simRun: string }) {
               {
                 key: "partner",
                 label: "거래처",
-                render: (row) => row.partner_name ?? row.partner_id ?? "미지정",
+                render: (row) => partnerText(row.partner_name, row.partner_id),
               },
               { key: "runtime", label: "조회 상태", render: (row) => runtimeText(row.runtime_status) },
               //  🔴 판매는 자기 verdict 를 저장하지 않는다. 없는 것을 만들지 않는다.

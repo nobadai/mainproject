@@ -9,8 +9,7 @@
  * ⚠️ **`null` 은 0 이 아니다.** 값이 없는 구간은 막대에서 빼고, 그 사실을 적는다.
  */
 
-import { money } from "@/lib/console_api";
-import { toNumber } from "./user_text";
+import { moneyWon, toNumber } from "./user_text";
 
 export type AgingSlice = {
   label: string;
@@ -40,13 +39,13 @@ export function AgingBars({ slices, empty }: { slices: AgingSlice[]; empty: stri
         className="flex h-3 w-full overflow-hidden rounded-full"
         style={{ background: "var(--color-grid)" }}
         role="img"
-        aria-label={known.map((slice) => `${slice.label} ${money(slice.value)}`).join(", ")}
+        aria-label={known.map((slice) => `${slice.label} ${moneyWon(slice.value)}`).join(", ")}
       >
         {known.map((slice) =>
           slice.amount <= 0 ? null : (
             <span
               key={slice.label}
-              title={`${slice.label} · ${money(slice.value)}`}
+              title={`${slice.label} · ${moneyWon(slice.value)}`}
               style={{ width: `${(slice.amount / total) * 100}%`, background: slice.color }}
             />
           ),
@@ -64,7 +63,7 @@ export function AgingBars({ slices, empty }: { slices: AgingSlice[]; empty: stri
               {slice.label}
             </span>
             <span className="text-right">
-              <b className="tabular-nums">{money(slice.value)}</b>
+              <b className="tabular-nums">{moneyWon(slice.value)}</b>
               <span className="ml-2 text-ink2 tabular-nums">
                 {((slice.amount / total) * 100).toFixed(0)}%
               </span>

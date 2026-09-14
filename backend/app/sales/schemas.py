@@ -469,6 +469,7 @@ class SalesFinanceSummarySubset(BaseModel):
     scenario_projected_cash_min: Decimal | None = None
     depends_on_projected_inflow: bool | None = None
     overdue_ar_krw: Decimal | None = None
+    required_collection_before_sale_krw: Decimal | None = None
 
 
 class SalesFinanceReplySubset(BaseModel):
@@ -480,6 +481,8 @@ class SalesFinanceReplySubset(BaseModel):
     reason_codes: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    max_finance_allowed_amount_krw: Decimal | None = None
+    max_finance_allowed_payment_terms_days: int | None = None
 
 
 class SalesProposalInput(BaseModel):
@@ -629,6 +632,7 @@ class SalesScenario(BaseModel):
     finance_verdict: Literal["PASS", "REVIEW_REQUIRED", "FAIL"] | None = None
     contribution_margin_krw: Decimal | None = None
     contribution_margin_rate: Decimal | None = None
+    required_collection_before_sale_krw: Decimal | None = None
     scenario_projected_cash_min: Decimal | None = None
     depends_on_projected_inflow: bool | None = None
     sell_priority: str | None = None

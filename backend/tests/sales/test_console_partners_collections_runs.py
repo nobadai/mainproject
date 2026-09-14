@@ -67,9 +67,12 @@ def test_partner_aggregates_never_mix_runs(monkeypatch):
     assert b.rows[0].total_sales_krw == Decimal(2000)
     assert b.rows[0].overdue_balance_krw == Decimal(300)
     # 🔴 Both aggregate sub-selects must carry the run, not just one of them.
+    #  ⚠️ **자리로 세지 않는다.** 수금 복원 JOIN 이 자리표시자를 하나 더 쓰므로, 세는
+    #    것은 «실행 축이 몇 번 실렸나» 이지 «몇 번째 칸인가» 가 아니다.
     statement, params = capture.queries[0]
     assert statement.count("sim_run_id = %s") == 2
-    assert params[0] == RUN_A and params[3] == RUN_A
+    assert [value for value in params if value == RUN_A] == [RUN_A, RUN_A]
+    assert RUN_B not in params
 
 
 def test_a_partner_with_no_sales_in_this_run_reports_zero_and_no_date(monkeypatch):
@@ -244,7 +247,9 @@ def test_partner_detail_carries_the_run_into_every_aggregate(monkeypatch):
     # The partner master is run-independent; every other query is run-scoped.
     run_scoped = [params for statement, params in stub.queries if "sim_run_id" in statement]
     assert len(run_scoped) == 4
-    assert all(params[0] == RUN_A for params in run_scoped)
+    #  ⚠️ 실행 축이 **실려 있는지**를 본다. 자리표시자 순서는 SQL 이 자라면 바뀐다.
+    assert all(RUN_A in params for params in run_scoped)
+    assert all(RUN_B not in params for params in run_scoped)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +289,11 @@ def test_collections_never_mix_runs(monkeypatch):
     assert a.summary.total_outstanding_krw == Decimal(100)
     assert b.rows[0].receivable_id == "AR-B"
     assert b.summary.total_outstanding_krw == Decimal(200)
-    assert capture.queries[0][1] == [RUN_A, AS_OF]
+    #  ⚠️ 자리표시자 순서가 아니라 **무엇이 실렸는지**를 본다. 수금 복원 JOIN 이
+    #    기준일을 하나 더 쓰므로 순서는 SQL 이 자라면 바뀐다.
+    params = capture.queries[0][1]
+    assert RUN_A in params and RUN_B not in params
+    assert set(params) == {RUN_A, AS_OF}
 
 
 def test_collections_use_the_finance_aging_buckets(monkeypatch):

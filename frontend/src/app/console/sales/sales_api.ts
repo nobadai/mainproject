@@ -124,6 +124,10 @@ export const salesOverview = {
     send<SalesTrendResponse>(
       `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf })}`,
     ),
+  proposals: (simRun: string, asOf: string) =>
+    send<SalesProposalsResponse>(
+      `${CONSOLE_BASE}/sales/proposals?${query({ sim_run_id: simRun, as_of: asOf })}`,
+    ),
 };
 
 /* ── 거래처 등록 ───────────────────────────────────────────────────────── */
@@ -173,4 +177,84 @@ export function createPartner(input: PartnerCreateInput): Promise<PartnerProfile
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+/* ── 거래처 상세의 품목 이름 ────────────────────────────────────────────── */
+
+/**
+ * 백엔드가 내려주는 **품목 이름** 칸.
+ *
+ * ★ **왜 여기서 다시 적는가.** 공용 `lib/console_api.ts` 의 `PartnerDetail` 은 이번 판의
+ *   수정 범위 밖이고, 그 타입에는 `item_name` 이 아직 없다. 판매 화면만 쓰는 칸이라
+ *   판매 쪽에서 넓혀 읽는다 — 공용 파일을 건드리지 않고도 이름을 쓸 수 있다.
+ *
+ * 🔴 **`null` 을 허용한다.** `items` 에 없는 품목은 이름이 없고, 그때는 화면이 코드를
+ *    쓴다. 여기서 이름을 지어내면 새 품목이 남의 이름으로 팔린다.
+ */
+export interface NamedItem {
+  item_name?: string | null;
+}
+
+/**
+ * 품목 이름 칸까지 포함해 읽은 거래처 상세.
+ *
+ * ⚠️ **값 자체는 공용 계약 그대로다.** 넓히는 것은 두 목록의 원소 타입뿐이고, 나머지
+ *   칸은 `lib/console_api.ts` 의 `PartnerDetail` 이 정본이다.
+ */
+export type WithItemNames<T> = Omit<T, "recent_sales" | "item_summary"> & {
+  recent_sales: (T extends { recent_sales: (infer R)[] } ? R & NamedItem : never)[];
+  item_summary: (T extends { item_summary: (infer I)[] } ? I & NamedItem : never)[];
+};
+
+/* ── 금일 판매안 ───────────────────────────────────────────────────────── */
+
+export interface SalesProposal {
+  request_id: string;
+  scenario_id: string;
+  scenario_type: string | null;
+  objective: string | null;
+  item: string | null;
+  partner_id: string | null;
+  quantity_kg: Money | null;
+  unit_price_krw: Money | null;
+  /** 🔴 판매가 적어 보낸 매출액이다. 화면이 수량×단가로 다시 만들지 않는다. */
+  reported_sales_amount_krw: Money | null;
+  payment_days: number | null;
+  delivery_date: string | null;
+  status: string | null;
+  rationale: string[];
+  risks: string[];
+  uncertainties: string[];
+  /** 재무가 남긴 판정. `null` 은 아직 안 본 것이지 통과도 거절도 아니다. */
+  finance_verdict: string | null;
+  finance_status: string | null;
+  /** 🔴 판정을 **가른** 규칙의 사유다. 통과 사유는 들어 있지 않다. */
+  finance_reason_codes: string[];
+  contribution_margin_krw: Money | null;
+  contribution_margin_rate: Money | null;
+  available_credit_krw: Money | null;
+  projected_partner_ar_krw: Money | null;
+  credit_limit_krw: Money | null;
+  /** 판매가 «아직 못 받았다» 고 적어 둔 검증. 판정이 없는 이유가 여기 있다. */
+  missing_capabilities: string[];
+  evidence_refs: string[];
+  source_ref: string | null;
+  cost_basis_amount_krw: Money | null;
+  cost_basis_quantity_kg: Money | null;
+  cost_basis_method: string | null;
+  cost_basis_refs: string[];
+  confirmed_quantity_kg: Money | null;
+  conditional_quantity_kg: Money | null;
+  additional_supply_required: boolean | null;
+  ml_support_used: boolean | null;
+  recommended: boolean;
+}
+
+export interface SalesProposalsResponse {
+  sim_run_id: string;
+  as_of: string;
+  request_count: number;
+  /** 팔 물량이 0이라 목록에서 뺀 안의 수. 지운 것이 아니라 센 것이다. */
+  hidden_zero_quantity: number;
+  rows: SalesProposal[];
 }

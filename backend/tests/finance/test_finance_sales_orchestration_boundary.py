@@ -52,10 +52,11 @@ def test_finance_never_imports_the_sales_agent():
     assert offenders == set(), offenders
 
 
-def test_sales_never_imports_the_finance_agent():
+def test_sales_never_imports_finance_runtime():
+    """Sales는 실행 계층을 부르지 않고 immutable 판매 정책만 읽을 수 있다."""
     offenders = {name for name in _imported_modules(SALES) if name.startswith("app.finance")}
 
-    assert offenders == set(), offenders
+    assert offenders == {"app.finance.sales_policy"}, offenders
 
 
 def test_finance_touches_master_only_through_shared_contract_modules():

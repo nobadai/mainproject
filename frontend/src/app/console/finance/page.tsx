@@ -23,10 +23,8 @@ import {
   Failed,
   Metric,
   Metrics,
-  NoRunSelected,
   Skeleton,
   Table,
-  Unsupported,
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
@@ -34,7 +32,7 @@ import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import {
   AGING_LABELS,
   financeConsole,
-  money,
+  type ClosingItem,
   type FinanceCashflowResponse,
   type FinanceRun,
   type FinanceSummaryResponse,
@@ -48,9 +46,14 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { AgingBars } from "./AgingBars";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
-import { DataBasis, TechDetails } from "./TechDetails";
+import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
 import {
   DATA_SOURCE_NOTE,
+  financingModeText,
+  moneyWon,
+  partnerText,
+  payableStatusText,
+  receivableStatusText,
   runtimeText,
   toNumber,
   verdictText,
@@ -81,9 +84,29 @@ export default function FinancePage() {
       <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
         <RunPicker asOf={asOf} />
       </TechDetails>
-      {!simRun ? <NoRunSelected /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
     </div>
   );
+}
+
+/**
+ * 기준일까지의 **가장 최근** 일마감.
+ *
+ * 🔴 **`at(-1)` 은 가장 오래된 행이다.** 백엔드 `load_recent_closings` 가
+ *    `ORDER BY close_date DESC` 로 주기 때문에, 배열 끝을 «마지막 마감» 으로 읽으면
+ *    2026-01-26 화면이 2026-01-15 잔액을 적는다 (실측).
+ *
+ * ★ 순서 계약을 믿고 `[0]` 을 쓰는 대신 **날짜로 고른다.** 정렬이 바뀌는 날에도
+ *   이 화면은 틀리지 않는다. 미래 마감은 애초에 고르지 않는다.
+ */
+function latestClosing(rows: ClosingItem[] | undefined, asOf: string): ClosingItem | null {
+  if (!rows || rows.length === 0) return null;
+  let best: ClosingItem | null = null;
+  for (const row of rows) {
+    if (row.close_date > asOf) continue;
+    if (best === null || row.close_date > best.close_date) best = row;
+  }
+  return best;
 }
 
 function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
@@ -120,12 +143,15 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
   const state = summary.data?.states[0];
-  //  ⚠️ 마지막 마감 행의 «대출 포함» 잔액이다. 화면이 더하지 않고 저장된 칸을 읽는다.
-  const lastClosing = summary.data?.recent_closings.at(-1);
+  //  🔴 배열 끝이 아니라 **날짜로** 고른다 — 백엔드가 최신부터 주기 때문이다.
+  const closing = latestClosing(summary.data?.recent_closings, asOf);
 
   return (
     <>
-      <Panel title="지금 돈이 얼마나 있나" subtitle="저장된 재무 상태와 마지막 일마감 그대로입니다">
+      <Panel
+        title="지금 돈이 얼마나 있나"
+        subtitle="저장된 재무 상태와 일마감을 그대로 적습니다"
+      >
         {summary.loading ? (
           <Skeleton what="재무 상태" />
         ) : summary.error ? (
@@ -134,20 +160,29 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
           <EmptyRows what="재무 상태" />
         ) : (
           <>
-            <Metrics>
-              <Metric label="현재 현금" value={money(state.current_cash_krw)} hint={state.state_date} />
-              <Metric
-                label="대출 제외 현금"
-                value={money(lastClosing?.base_cash_balance_krw)}
-                hint={lastClosing?.close_date}
-              />
-              <Metric
-                label="대출 포함 현금"
-                value={money(lastClosing?.loan_cash_balance_krw)}
-                hint={lastClosing?.close_date}
-              />
-              <Metric label="최소 운영현금" value={money(state.minimum_operating_cash_krw)} />
-            </Metrics>
+            {/* 🔴 **두 기준일을 한 줄에 섞지 않는다.** 재무 상태와 일마감은 서로 다른
+                날짜를 가질 수 있고, 사용자는 같은 시점 숫자로 읽는다. 묶음을 나누고
+                각 묶음이 어느 날짜의 값인지 제목에 적는다. */}
+            <BasisGroup title="재무 상태" basis={state.state_date}>
+              <Metric label="현재 현금" value={moneyWon(state.current_cash_krw)} />
+              <Metric label="최소 운영현금" value={moneyWon(state.minimum_operating_cash_krw)} />
+            </BasisGroup>
+            {closing ? (
+              <BasisGroup title="일마감" basis={closing.close_date}>
+                <Metric label="대출 제외 현금" value={moneyWon(closing.base_cash_balance_krw)} />
+                <Metric label="대출 포함 현금" value={moneyWon(closing.loan_cash_balance_krw)} />
+              </BasisGroup>
+            ) : (
+              <p className="mb-0 text-[12px] text-ink2">
+                기준일까지 마감된 날이 없어 대출 제외·포함 현금을 적을 수 없습니다.
+              </p>
+            )}
+            {closing && closing.close_date !== state.state_date && (
+              <p className="mb-0 text-[11.5px] text-ink2">
+                재무 상태는 {state.state_date}, 마지막 일마감은 {closing.close_date} 입니다 - 두
+                숫자는 서로 다른 날의 값입니다.
+              </p>
+            )}
             <CashBufferNote
               cash={state.current_cash_krw}
               minimum={state.minimum_operating_cash_krw}
@@ -164,17 +199,22 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
           <Failed what="받을 돈" message={receivables.error} />
         ) : payables.error ? (
           <Failed what="줄 돈" message={payables.error} />
+        ) : !receivables.data || !payables.data ? (
+          <EmptyRows what="채권·채무" />
         ) : (
           <>
             <Metrics>
-              <Metric label="받을 돈" value={money(receivables.data?.summary.total_outstanding_krw)} />
+              <Metric
+                label="받을 돈"
+                value={moneyWon(receivables.data?.summary.total_outstanding_krw)}
+              />
               <Metric
                 label="그중 연체"
-                value={money(receivables.data?.summary.days_1_7_krw)}
-                hint="1–7일 구간"
+                value={moneyWon(overdueReceivable(receivables.data))}
+                hint="만기가 지난 금액"
               />
-              <Metric label="줄 돈" value={money(payables.data?.summary.total_outstanding_krw)} />
-              <Metric label="그중 연체" value={money(payables.data?.summary.overdue_krw)} />
+              <Metric label="줄 돈" value={moneyWon(payables.data?.summary.total_outstanding_krw)} />
+              <Metric label="그중 연체" value={moneyWon(payables.data?.summary.overdue_krw)} />
             </Metrics>
             <div className="mt-4 grid gap-5 sm:grid-cols-2">
               <div>
@@ -183,10 +223,10 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                   <AgingBars
                     empty="아직 받을 돈이 없습니다."
                     slices={[
-                      { label: "정상", value: receivables.data?.summary.current_krw, color: "var(--color-t-good)" },
-                      { label: "1–7일", value: receivables.data?.summary.days_1_7_krw, color: "var(--color-t-info)" },
-                      { label: "8–30일", value: receivables.data?.summary.days_8_30_krw, color: "var(--color-t-warn)" },
-                      { label: "30일 초과", value: receivables.data?.summary.days_30_plus_krw, color: "var(--color-t-bad)" },
+                      { label: "정상", value: receivables.data.summary.current_krw, color: "var(--color-t-good)" },
+                      { label: "1–7일", value: receivables.data.summary.days_1_7_krw, color: "var(--color-t-info)" },
+                      { label: "8–30일", value: receivables.data.summary.days_8_30_krw, color: "var(--color-t-warn)" },
+                      { label: "30일 초과", value: receivables.data.summary.days_30_plus_krw, color: "var(--color-t-bad)" },
                     ]}
                   />
                 </div>
@@ -197,9 +237,9 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                   <AgingBars
                     empty="아직 줄 돈이 없습니다."
                     slices={[
-                      { label: "오늘 만기", value: payables.data?.summary.due_today_krw, color: "var(--color-t-warn)" },
-                      { label: "7일 내 만기", value: payables.data?.summary.due_next_7d_krw, color: "var(--color-t-info)" },
-                      { label: "연체", value: payables.data?.summary.overdue_krw, color: "var(--color-t-bad)" },
+                      { label: "오늘 만기", value: payables.data.summary.due_today_krw, color: "var(--color-t-warn)" },
+                      { label: "7일 내 만기", value: payables.data.summary.due_next_7d_krw, color: "var(--color-t-info)" },
+                      { label: "연체", value: payables.data.summary.overdue_krw, color: "var(--color-t-bad)" },
                     ]}
                   />
                 </div>
@@ -211,6 +251,49 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
 
       <AgentCard state={latest} />
     </>
+  );
+}
+
+/**
+ * 연체된 받을 돈. **한 구간이 아니라 만기가 지난 구간 전부다.**
+ *
+ * ⚠️ 전에는 `1–7일` 한 칸만 «그중 연체» 로 적어, 8일 넘게 밀린 돈이 연체에서 빠졌다.
+ *   합치는 것은 표시용이고, 구간 금액 자체는 백엔드가 나눈 값 그대로다.
+ */
+function overdueReceivable(data: ReceivablesResponse | null): number | null {
+  if (!data) return null;
+  const parts = [
+    data.summary.days_1_7_krw,
+    data.summary.days_8_30_krw,
+    data.summary.days_30_plus_krw,
+  ].map(toNumber);
+  //  🔴 한 구간이라도 값이 없으면 합을 만들지 않는다 — 없는 것을 0 으로 읽지 않는다.
+  if (parts.some((value) => value === null)) return null;
+  return parts.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+}
+
+/**
+ * 같은 기준일을 공유하는 숫자 묶음. **날짜를 묶음 제목에 적는다.**
+ *
+ * ⚠️ 지표마다 작은 글씨로 날짜를 붙이면 사용자는 그것을 «부가 설명» 으로 읽고 넘긴다.
+ *   기준일이 다른 숫자를 한 줄에 섞지 않는 것이 목적이라, 묶음 자체를 나눈다.
+ */
+function BasisGroup({
+  title,
+  basis,
+  children,
+}: {
+  title: string;
+  basis: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <p className="m-0 mb-2 text-[11.5px] text-ink2">
+        {title} 기준 <b className="text-ink tabular-nums">{basis}</b>
+      </p>
+      <Metrics>{children}</Metrics>
+    </div>
   );
 }
 
@@ -242,12 +325,13 @@ function CashBufferNote({
     >
       {short ? (
         <>
-          현금 {money(cash)}이 최소 운영현금 {money(minimum)}보다{" "}
-          <b>{money(Math.abs(value))} 모자랍니다.</b> 자금이 부족한 상태입니다.
+          현금 {moneyWon(cash)}이 최소 운영현금 {moneyWon(minimum)}보다{" "}
+          <b>{moneyWon(Math.abs(value))} 모자랍니다.</b> 자금이 부족한 상태입니다.
         </>
       ) : (
         <>
-          최소 운영현금 {money(minimum)} 위로 <b>{money(value)}</b>의 여유가 있습니다.
+          최소 운영현금 {moneyWon(minimum)} 위로 <b>{moneyWon(value)}</b>의 여유가
+          있습니다.
         </>
       )}
     </p>
@@ -277,8 +361,15 @@ function AgentCard({
         <>
           <div className="grid gap-2 sm:grid-cols-2">
             <Metric label="판단 결과" value={verdictText(state.data.verdict)} />
-            <Metric label="조회 상태" value={runtimeText(state.data.runtime_status)} hint={state.data.as_of} />
+            <Metric label="조회 상태" value={runtimeText(state.data.runtime_status)} />
           </div>
+          {/* 🔴 **화면 위의 데이터 기준일과 다른 축이다.** 이 카드는 실행 전체에서 가장
+              최근 판단을 읽으므로, 날짜만 작게 붙여 두면 사용자가 같은 기준일로 읽는다. */}
+          <p className="mb-0 mt-2 text-[11.5px] text-ink2">
+            이 실행에서 가장 최근에 내려진 판단이며, 판단 기준일은{" "}
+            <b className="text-ink tabular-nums">{state.data.as_of}</b> 입니다 - 화면 위의 데이터
+            기준일과 다를 수 있습니다.
+          </p>
           {/* ⚠️ 실행별 LLM 설명은 저장되지 않는다. 없으면 없다고 적고 지어내지 않는다. */}
           {state.data.interpretation && (
             <p className="mb-0 mt-3 text-[12px] leading-relaxed text-ink2">
@@ -403,8 +494,13 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
       </Panel>
 
       <Panel title="돈이 어디서 들어오고 나갔나" subtitle="같은 일마감 행의 유입·유출 칸입니다">
+        {/* 🔴 **위 패널과 같은 조회다.** 실패했는데 여기서 «0건» 을 띄우면 같은 사고가
+            한 화면에서 오류와 빈 데이터로 갈려 보인다 — 순서는 loading, error,
+            empty, success 로 고정한다. */}
         {state.loading ? (
           <Skeleton what="유입·유출" />
+        ) : state.error ? (
+          <Failed what="유입·유출" message={state.error} />
         ) : rows.length === 0 ? (
           <EmptyRows what="일마감" />
         ) : (
@@ -413,25 +509,32 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
       </Panel>
 
       <TechDetails summary="일별 상세 표">
-        {rows.length === 0 ? (
+        {state.loading ? (
+          <Skeleton what="일별 상세" />
+        ) : state.error ? (
+          <Failed what="일별 상세" message={state.error} />
+        ) : rows.length === 0 ? (
           <EmptyRows what="일마감" />
         ) : (
           <Table
             rows={rows}
             columns={[
               { key: "date", label: "마감일", mono: true, render: (row) => row.close_date },
-              { key: "out", label: "매입 지출", align: "right", render: (row) => money(row.purchase_cash_out_krw) },
-              { key: "log", label: "물류비", align: "right", render: (row) => money(row.logistics_cash_out_krw) },
-              { key: "in", label: "수금", align: "right", render: (row) => money(row.collection_cash_in_krw) },
-              { key: "net", label: "순현금", align: "right", render: (row) => money(row.base_net_cash_krw) },
-              { key: "base", label: "대출 제외 잔액", align: "right", render: (row) => money(row.base_cash_balance_krw) },
-              { key: "loan", label: "대출 포함 잔액", align: "right", render: (row) => money(row.loan_cash_balance_krw) },
+              { key: "out", label: "매입대금", align: "right", render: (row) => moneyWon(row.purchase_cash_out_krw) },
+              { key: "log", label: "물류비", align: "right", render: (row) => moneyWon(row.logistics_cash_out_krw) },
+              //  🔴 그래프가 다루는 칸은 표에도 있어야 한다. 빠지면 그래프의 한 줄을
+              //     상세에서 되짚을 수 없다.
+              { key: "pay", label: "급여·이자", align: "right", render: (row) => moneyWon(row.payroll_interest_cash_out_krw) },
+              { key: "in", label: "수금", align: "right", render: (row) => moneyWon(row.collection_cash_in_krw) },
+              { key: "net", label: "순현금", align: "right", render: (row) => moneyWon(row.base_net_cash_krw) },
+              { key: "base", label: "대출 제외 잔액", align: "right", render: (row) => moneyWon(row.base_cash_balance_krw) },
+              { key: "loan", label: "대출 포함 잔액", align: "right", render: (row) => moneyWon(row.loan_cash_balance_krw) },
               {
                 key: "min",
                 //  ⚠️ 최소 운전자금은 없을 수 있다. 0 으로 적으면 «한도 0» 으로 읽힌다.
                 label: "최소 운영현금",
                 align: "right",
-                render: (row) => money(row.minimum_operating_cash_krw),
+                render: (row) => moneyWon(row.minimum_operating_cash_krw),
               },
             ]}
           />
@@ -451,53 +554,91 @@ function Receivables({ simRun, asOf }: { simRun: string; asOf: string }) {
   );
   if (state.loading) return <Skeleton what="받을 돈" />;
   if (state.error) return <Failed what="받을 돈" message={state.error} />;
-  const data = state.data!;
+  if (!state.data) return <EmptyRows what="받을 돈" />;
+  const data = state.data;
+  //  🔴 **지금 받을 돈과 이미 받은 돈을 가른다.** 둘을 한 표에 두면 «받을 돈 0원» 이라고
+  //     적은 화면 아래에 수금 완료 행이 잔뜩 남아 모순처럼 보인다. 지우는 것이 아니라
+  //     아래 이력으로 옮긴다.
+  const open = data.rows.filter((row) => (toNumber(row.outstanding_amount_krw) ?? 0) > 0);
+  const done = data.rows.filter((row) => (toNumber(row.outstanding_amount_krw) ?? 0) <= 0);
   return (
-    <Panel title="받을 돈" subtitle="연체 구간은 백엔드 규칙입니다 — 화면이 다시 나누지 않습니다">
-      <Metrics>
-        <Metric label="정상" value={money(data.summary.current_krw)} />
-        <Metric label="1–7일" value={money(data.summary.days_1_7_krw)} />
-        <Metric label="8–30일" value={money(data.summary.days_8_30_krw)} />
-        <Metric label="30일 초과" value={money(data.summary.days_30_plus_krw)} />
-      </Metrics>
-      <div className="mt-4">
-        <AgingBars
-          empty="아직 받을 돈이 없습니다."
-          slices={[
-            { label: "정상", value: data.summary.current_krw, color: "var(--color-t-good)" },
-            { label: "1–7일", value: data.summary.days_1_7_krw, color: "var(--color-t-info)" },
-            { label: "8–30일", value: data.summary.days_8_30_krw, color: "var(--color-t-warn)" },
-            { label: "30일 초과", value: data.summary.days_30_plus_krw, color: "var(--color-t-bad)" },
-          ]}
-        />
-      </div>
-      <div className="mt-4">
-        {data.rows.length === 0 ? (
-          <EmptyRows what="받을 돈" />
-        ) : (
-          <Table
-            rows={data.rows}
-            columns={[
-              { key: "partner", label: "거래처", render: (row) => row.partner_name ?? row.partner_id ?? "미지정" },
-              { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
-              { key: "bucket", label: "구간", render: (row) => AGING_LABELS[row.aging_bucket] },
-              {
-                key: "overdue",
-                label: "연체일",
-                align: "right",
-                render: (row) => (row.days_overdue === null ? "—" : `${row.days_overdue}일`),
-              },
-              {
-                key: "amount",
-                label: "잔액",
-                align: "right",
-                render: (row) => money(row.outstanding_amount_krw),
-              },
+    <>
+      <Panel title="받을 돈" subtitle="연체 구간은 백엔드 규칙입니다 — 화면이 다시 나누지 않습니다">
+        <Metrics>
+          <Metric label="정상" value={moneyWon(data.summary.current_krw)} />
+          <Metric label="1–7일" value={moneyWon(data.summary.days_1_7_krw)} />
+          <Metric label="8–30일" value={moneyWon(data.summary.days_8_30_krw)} />
+          <Metric label="30일 초과" value={moneyWon(data.summary.days_30_plus_krw)} />
+        </Metrics>
+        <div className="mt-4">
+          <AgingBars
+            empty="아직 받을 돈이 없습니다."
+            slices={[
+              { label: "정상", value: data.summary.current_krw, color: "var(--color-t-good)" },
+              { label: "1–7일", value: data.summary.days_1_7_krw, color: "var(--color-t-info)" },
+              { label: "8–30일", value: data.summary.days_8_30_krw, color: "var(--color-t-warn)" },
+              { label: "30일 초과", value: data.summary.days_30_plus_krw, color: "var(--color-t-bad)" },
             ]}
           />
-        )}
-      </div>
-    </Panel>
+        </div>
+        <div className="mt-4">
+          {open.length === 0 ? (
+            <EmptyRows what="아직 받지 못한 돈" />
+          ) : (
+            <Table
+              rows={open}
+              columns={[
+                {
+                  key: "partner",
+                  label: "거래처",
+                  render: (row) => partnerText(row.partner_name, row.partner_id),
+                },
+                { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
+                { key: "bucket", label: "구간", render: (row) => AGING_LABELS[row.aging_bucket] },
+                {
+                  key: "overdue",
+                  label: "연체일",
+                  align: "right",
+                  render: (row) => (row.days_overdue === null ? "—" : `${row.days_overdue}일`),
+                },
+                {
+                  key: "amount",
+                  label: "받을 금액",
+                  align: "right",
+                  render: (row) => moneyWon(row.outstanding_amount_krw),
+                },
+                { key: "status", label: "상태", render: (row) => receivableStatusText(row.status) },
+              ]}
+            />
+          )}
+        </div>
+      </Panel>
+      {done.length > 0 && (
+        <Panel
+          title="수금 완료 이력"
+          subtitle="기준일까지 다 받은 건입니다 — 지금 받을 돈에는 들어가지 않습니다"
+        >
+          <Table
+            rows={done}
+            columns={[
+              {
+                key: "partner",
+                label: "거래처",
+                render: (row) => partnerText(row.partner_name, row.partner_id),
+              },
+              { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
+              {
+                key: "received",
+                label: "받은 금액",
+                align: "right",
+                render: (row) => moneyWon(row.received_amount_krw),
+              },
+              { key: "status", label: "상태", render: (row) => receivableStatusText(row.status) },
+            ]}
+          />
+        </Panel>
+      )}
+    </>
   );
 }
 
@@ -511,53 +652,104 @@ function Payables({ simRun, asOf }: { simRun: string; asOf: string }) {
   );
   if (state.loading) return <Skeleton what="줄 돈" />;
   if (state.error) return <Failed what="줄 돈" message={state.error} />;
-  const data = state.data!;
+  if (!state.data) return <EmptyRows what="줄 돈" />;
+  const data = state.data;
+  //  🔴 **잔액이 남은 것과 정산이 끝난 것을 가른다.** 끝난 건에 «64일 초과» 를 붙이면
+  //     사용자는 지금 연체된 돈으로 읽는다 — 잔액은 0이고 이미 낸 돈이다.
+  const open = data.rows.filter((row) => (toNumber(row.outstanding_amount_krw) ?? 0) > 0);
+  const done = data.rows.filter((row) => (toNumber(row.outstanding_amount_krw) ?? 0) <= 0);
   return (
-    <Panel title="줄 돈" subtitle="기준일로 잰 만기입니다 — 오늘 시계가 아니라 이 실행의 기준일입니다">
-      <Metrics>
-        <Metric label="총 잔액" value={money(data.summary.total_outstanding_krw)} />
-        <Metric label="오늘 만기" value={money(data.summary.due_today_krw)} />
-        <Metric label="7일 내 만기" value={money(data.summary.due_next_7d_krw)} />
-        <Metric label="연체" value={money(data.summary.overdue_krw)} />
-      </Metrics>
-      <div className="mt-4">
-        <AgingBars
-          empty="아직 줄 돈이 없습니다."
-          slices={[
-            { label: "오늘 만기", value: data.summary.due_today_krw, color: "var(--color-t-warn)" },
-            { label: "7일 내 만기", value: data.summary.due_next_7d_krw, color: "var(--color-t-info)" },
-            { label: "연체", value: data.summary.overdue_krw, color: "var(--color-t-bad)" },
-          ]}
-        />
-      </div>
-      <div className="mt-4">
-        {data.rows.length === 0 ? (
-          <EmptyRows what="줄 돈" />
-        ) : (
-          <Table
-            rows={data.rows}
-            columns={[
-              { key: "src", label: "매입", mono: true, render: (row) => row.purchase_id ?? "출처 없음" },
-              { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
-              {
-                key: "days",
-                label: "만기까지",
-                align: "right",
-                render: (row) =>
-                  row.days_until_due < 0 ? `${-row.days_until_due}일 초과` : `${row.days_until_due}일`,
-              },
-              {
-                key: "amount",
-                label: "잔액",
-                align: "right",
-                render: (row) => money(row.outstanding_amount_krw),
-              },
-              { key: "status", label: "상태", render: (row) => row.status },
+    <>
+      <Panel title="줄 돈" subtitle="기준일로 잰 만기입니다 — 오늘 시계가 아니라 이 실행의 기준일입니다">
+        <Metrics>
+          <Metric label="총 잔액" value={moneyWon(data.summary.total_outstanding_krw)} />
+          <Metric label="오늘 만기" value={moneyWon(data.summary.due_today_krw)} />
+          <Metric label="7일 내 만기" value={moneyWon(data.summary.due_next_7d_krw)} />
+          <Metric label="연체" value={moneyWon(data.summary.overdue_krw)} />
+        </Metrics>
+        <div className="mt-4">
+          <AgingBars
+            empty="아직 줄 돈이 없습니다."
+            slices={[
+              { label: "오늘 만기", value: data.summary.due_today_krw, color: "var(--color-t-warn)" },
+              { label: "7일 내 만기", value: data.summary.due_next_7d_krw, color: "var(--color-t-info)" },
+              { label: "연체", value: data.summary.overdue_krw, color: "var(--color-t-bad)" },
             ]}
           />
-        )}
-      </div>
-    </Panel>
+        </div>
+        <div className="mt-4">
+          {open.length === 0 ? (
+            <EmptyRows what="아직 내지 않은 돈" />
+          ) : (
+            <Table
+              rows={open}
+              columns={[
+                { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
+                {
+                  key: "days",
+                  label: "만기까지",
+                  align: "right",
+                  render: (row) =>
+                    row.days_until_due < 0
+                      ? `${-row.days_until_due}일 초과`
+                      : `${row.days_until_due}일`,
+                },
+                {
+                  key: "amount",
+                  label: "낼 금액",
+                  align: "right",
+                  render: (row) => moneyWon(row.outstanding_amount_krw),
+                },
+                { key: "status", label: "상태", render: (row) => payableStatusText(row.status) },
+              ]}
+            />
+          )}
+        </div>
+      </Panel>
+      {done.length > 0 && (
+        <Panel
+          title="정산 완료 이력"
+          subtitle="기준일까지 다 낸 건입니다 — 지금 줄 돈에는 들어가지 않습니다"
+        >
+          <Table
+            rows={done}
+            columns={[
+              { key: "due", label: "만기", mono: true, render: (row) => row.due_date },
+              {
+                key: "amount",
+                label: "낸 금액",
+                align: "right",
+                render: (row) => moneyWon(row.original_amount_krw),
+              },
+              { key: "status", label: "상태", render: (row) => payableStatusText(row.status) },
+            ]}
+          />
+          {/* ⚠️ 며칠 늦게 정산됐는지는 업무상 필요할 수 있지만 기본 화면의 «연체» 와
+              같은 자리에 두지 않는다. 지금 밀린 돈이 아니다. */}
+          <div className="mt-3">
+            <TechDetails summary="정산 지연 일수">
+              <Table
+                rows={done}
+                columns={[
+                  { key: "id", label: "payable_id", mono: true, render: (row) => row.payable_id },
+                  { key: "due", label: "due_date", mono: true, render: (row) => row.due_date },
+                  {
+                    key: "days",
+                    label: "만기 기준 경과",
+                    align: "right",
+                    render: (row) =>
+                      row.days_until_due < 0
+                        ? `${-row.days_until_due}일 초과`
+                        : `${row.days_until_due}일`,
+                  },
+                  { key: "status", label: "status", mono: true, render: (row) => row.status },
+                ]}
+              />
+            </TechDetails>
+          </div>
+        </Panel>
+      )}
+    </>
   );
 }
 
@@ -571,12 +763,13 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
   );
   if (state.loading) return <Skeleton what="비용" />;
   if (state.error) return <Failed what="비용" message={state.error} />;
-  const data = state.data!;
+  if (!state.data) return <EmptyRows what="비용" />;
+  const data = state.data;
   return (
     <>
       <Panel title="비용" subtitle="분류는 장부가 저장한 이름 그대로입니다 — 화면이 재분류하지 않습니다">
         <Metrics>
-          <Metric label="누적 비용" value={money(data.summary.total_expenses_krw)} />
+          <Metric label="누적 비용" value={moneyWon(data.summary.total_expenses_krw)} />
         </Metrics>
         <div className="mt-4">
           {data.summary.category_totals.length === 0 ? (
@@ -599,7 +792,7 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
               columns={[
                 { key: "label", label: "분류", render: (row) => row.display_category },
                 { key: "count", label: "건수", align: "right", render: (row) => `${row.expense_count}건` },
-                { key: "sum", label: "합계", align: "right", render: (row) => money(row.total_amount_krw) },
+                { key: "sum", label: "합계", align: "right", render: (row) => moneyWon(row.total_amount_krw) },
               ]}
             />
           )}
@@ -614,7 +807,7 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
             columns={[
               { key: "date", label: "일자", mono: true, render: (row) => row.expense_date },
               { key: "cat", label: "분류", render: (row) => row.display_category },
-              { key: "amount", label: "금액", align: "right", render: (row) => money(row.amount_krw) },
+              { key: "amount", label: "금액", align: "right", render: (row) => moneyWon(row.amount_krw) },
             ]}
           />
         )}
@@ -654,15 +847,20 @@ function Loans({ simRun, asOf }: { simRun: string; asOf: string }) {
           <EmptyRows what="재무 상태" />
         ) : (
           <Metrics>
-            <Metric label="차입잔액" value={money(state.current_debt_krw)} hint={state.state_date} />
-            <Metric label="조달 방식" value={state.financing_mode} />
+            <Metric label="차입잔액" value={moneyWon(state.current_debt_krw)} hint={state.state_date} />
+            <Metric label="조달 방식" value={financingModeText(state.financing_mode)} />
           </Metrics>
         )}
       </Panel>
-      <Unsupported
-        what="차입 상세"
-        why="대출 건별 이자율·실행일·만기·상환 일정을 담은 원장이 아직 없습니다. 없는 값을 화면이 만들지 않습니다."
-      />
+      {/* 🔴 공용 `Unsupported` 는 «UNSUPPORTED» 를 화면에 찍는다. 뜻은 같지만 사용자
+          화면에 내부 상태 이름을 남기지 않으려고 같은 내용을 문장으로 적는다.
+          공용 컴포넌트는 이번 판의 수정 범위 밖이라 고치지 않고 쓰지 않는다. */}
+      <Panel title="차입 상세">
+        <p className="m-0 text-[12px] leading-relaxed text-ink2">
+          대출 건별 이자율·실행일·만기·상환 일정은 아직 기록되지 않습니다. 없는 값을 화면이
+          만들지 않으므로, 지금 답할 수 있는 것은 위의 차입잔액까지입니다.
+        </p>
+      </Panel>
     </>
   );
 }
@@ -677,9 +875,13 @@ function Runs({ simRun }: { simRun: string }) {
   );
   if (state.loading) return <Skeleton what="실행 이력" />;
   if (state.error) return <Failed what="실행 이력" message={state.error} />;
-  const data = state.data!;
+  if (!state.data) return <EmptyRows what="재무 판단" />;
+  const data = state.data;
   return (
-    <Panel title="재무 판단 이력" subtitle="이 실행에 속한 저장 기록만 — 다른 실행으로 넘어가지 않습니다">
+    <Panel
+      title="재무 판단 이력"
+      subtitle="이 실행 전체의 판단 기록입니다 — 화면 위의 데이터 기준일과 무관합니다"
+    >
       {data.rows.length === 0 ? (
         <>
           <EmptyRows what="재무 판단" />
@@ -692,12 +894,26 @@ function Runs({ simRun }: { simRun: string }) {
         <Table
           rows={data.rows}
           columns={[
-            { key: "as_of", label: "기준일", mono: true, render: (row) => row.as_of },
+            //  🔴 **«기준일» 이라고 부르지 않는다.** 화면 위의 데이터 기준일과 같은 말로
+            //     읽히지만, 이 값은 그 판단이 어느 날짜를 두고 내려졌는지다.
+            { key: "as_of", label: "판단 기준일", mono: true, render: (row) => row.as_of },
+            {
+              key: "created",
+              label: "실행 시각",
+              mono: true,
+              render: (row) => row.created_at.slice(0, 16).replace("T", " "),
+            },
             { key: "mode", label: "구분", render: (row) => MODE_LABELS[row.mode] ?? row.mode },
             { key: "verdict", label: "판단 결과", render: (row) => verdictText(row.verdict) },
             { key: "runtime", label: "조회 상태", render: (row) => runtimeText(row.runtime_status) },
           ]}
         />
+      )}
+      {data.rows.length > 0 && (
+        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+          판단 기준일은 그 판단이 어느 날짜를 두고 내려졌는지이고, 실행 시각은 시스템이 실제로
+          계산한 시점입니다 - 둘 다 화면 위의 데이터 기준일과 다른 축입니다.
+        </p>
       )}
     </Panel>
   );

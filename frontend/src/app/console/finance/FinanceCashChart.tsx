@@ -27,7 +27,7 @@ import {
 } from "recharts";
 
 import type { ClosingItem } from "@/lib/console_api";
-import { manwon, shortDate, toNumber } from "./user_text";
+import { manwon, moneyWon, shortDate, toNumber } from "./user_text";
 
 export type CashSeries = "base" | "loan";
 
@@ -173,16 +173,25 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
       <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
         빨간 구간은 최소 운영현금에 못 미치는 범위입니다. 두 선을 함께 켜면 대출 금액만큼
         간격이 벌어져 각 선의 하루 변화가 작게 보입니다 — 변화를 보려면 한쪽만 켜세요.
+        가로축은 마감된 날만 차례로 놓은 것이라, 칸 간격이 실제 날짜 간격을 뜻하지 않습니다.
       </p>
     </figure>
   );
 }
 
+/**
+ * 🔴 **«여유» 가 어느 현금 기준인지 숨기지 않는다.** 전에는 `base ?? loan` 으로 하나만
+ *    골라 «여유» 라고만 적어, 두 선을 함께 켜 놓은 사람은 그 숫자가 어느 선의 것인지
+ *    알 수 없었다. 켜져 있는 계열마다 따로 적는다.
+ */
 function CashTooltip({ active, payload }: { active?: boolean; payload?: TooltipEntry[] }) {
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
-  const cash = point.base ?? point.loan;
-  const buffer = cash !== null && point.minimum !== null ? cash - point.minimum : null;
+  const gap = (cash: number | null) =>
+    cash !== null && point.minimum !== null ? cash - point.minimum : null;
+  const baseGap = gap(point.base);
+  const loanGap = gap(point.loan);
+  const both = point.base !== null && point.loan !== null;
   return (
     <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
       <p className="mb-2 mt-0 font-semibold">{point.label}</p>
@@ -190,8 +199,21 @@ function CashTooltip({ active, payload }: { active?: boolean; payload?: TooltipE
         {point.base !== null && <Row label={LABEL.base} value={point.base} />}
         {point.loan !== null && <Row label={LABEL.loan} value={point.loan} />}
         {point.minimum !== null && <Row label="최소 운영현금" value={point.minimum} />}
-        {buffer !== null && (
-          <Row label="여유" value={buffer} signed tone={buffer < 0 ? "bad" : "good"} />
+        {baseGap !== null && (
+          <Row
+            label={both ? "대출 제외 기준 여유" : "운영 여유"}
+            value={baseGap}
+            signed
+            tone={baseGap < 0 ? "bad" : "good"}
+          />
+        )}
+        {loanGap !== null && (
+          <Row
+            label={both ? "대출 포함 기준 여유" : "운영 여유"}
+            value={loanGap}
+            signed
+            tone={loanGap < 0 ? "bad" : "good"}
+          />
         )}
       </dl>
     </div>
@@ -217,7 +239,7 @@ function Row({
         style={{ color: tone ? `var(--color-t-${tone})` : "var(--color-ink)" }}
       >
         {signed && value > 0 ? "+" : ""}
-        {Math.round(value).toLocaleString("ko-KR")} 원
+        {moneyWon(value)}
       </dd>
     </>
   );

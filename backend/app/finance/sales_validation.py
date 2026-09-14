@@ -355,6 +355,7 @@ class SalesFinancialSummary(BaseModel):
     projected_partner_ar_krw: Decimal | None = None
     credit_limit_krw: Decimal | None = None
     available_credit_krw: Decimal | None = None
+    required_collection_before_sale_krw: Decimal | None = None
     overdue_ar_krw: Decimal | None = None
     base_projected_cash_min: Decimal | None = None
     scenario_projected_cash_min: Decimal | None = None

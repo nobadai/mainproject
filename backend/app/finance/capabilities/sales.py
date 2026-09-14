@@ -353,6 +353,11 @@ def evaluate_receivable_capacity(
             credit_limit_krw=credit_limit_krw, current_partner_ar_krw=current_ar
         )
     )
+    required_collection = (
+        None
+        if projected_ar is None or credit_limit_krw is None
+        else max(Decimal(0), projected_ar - credit_limit_krw)
+    )
     if projected_ar is None:
         # ★ 채권 사실이 없으면 규칙에 0을 대신 넣지 않는다. 0원 채권은 사실이고,
         #   사실 없음은 사실이 아니다 — 자리를 메우면 둘이 같아진다.
@@ -372,6 +377,7 @@ def evaluate_receivable_capacity(
         "current_partner_ar_krw": current_ar,
         "projected_partner_ar_krw": projected_ar,
         "available_credit_krw": available,
+        "required_collection_before_sale_krw": required_collection,
         "rule": rule,
         "missing_data": tuple(missing_data),
         "evidence_refs": receivable_facts.source_refs if receivable_facts is not None else (),
@@ -529,6 +535,7 @@ def evaluate_sales_scenario(
         projected_partner_ar_krw=credit["projected_partner_ar_krw"],
         credit_limit_krw=credit_limit_krw,
         available_credit_krw=credit["available_credit_krw"],
+        required_collection_before_sale_krw=credit["required_collection_before_sale_krw"],
         overdue_ar_krw=risk["overdue_ar_krw"],
         base_projected_cash_min=(
             None if scenario_cashflow is None else scenario_cashflow.base_projected_cash_min
@@ -561,6 +568,11 @@ def evaluate_sales_scenario(
         financial_summary=summary,
         rule_results=aggregate["rule_results"],
         reason_codes=aggregate["reason_codes"],
+        max_finance_allowed_amount_krw=(
+            None
+            if credit["available_credit_krw"] is None
+            else max(Decimal(0), credit["available_credit_krw"])
+        ),
         max_finance_allowed_payment_terms_days=max_finance_allowed_payment_terms_days,
         missing_data=_unique_refs(missing_data),
         evidence_refs=_unique_refs(

@@ -268,30 +268,112 @@ def test_not_implemented_uses_disabled_llm_metadata(monkeypatch):
     assert reply.reasoning == "요청하신 판매 기능은 아직 연결되지 않았습니다."
 
 
+def _history_run(
+    run_id: UUID,
+    *,
+    sim_run_id: str = "SIM-SALES-ADAPTER",
+    scenarios: list[dict[str, Any]] | None = None,
+):
+    """저장된 판매 실행 하나. **봉투 안에 실행 축이 들어 있다.**"""
+
+    class Run:
+        def __init__(self) -> None:
+            self.run_id = run_id
+            self.as_of = date(2026, 1, 7)
+            self.runtime_status = "READY"
+            self.request_payload = {"context": {"sim_run_id": sim_run_id}}
+            self.response_payload = {
+                "request_id": "REQ-SALES-ADAPTER",
+                "payload": {
+                    "status": "SCENARIOS_GENERATED",
+                    "scenarios": scenarios
+                    if scenarios is not None
+                    else [{"item": "배추", "quantity_kg": "1000.0"}],
+                    "missing_capabilities": ["FINANCIAL_VALIDATION"],
+                },
+            }
+
+    return Run()
+
+
 def test_status_query_uses_sales_run_history(monkeypatch):
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
 
-    class Run:
-        run_id = UUID("11111111-1111-1111-1111-111111111111")
-
-        def model_dump(self, mode: str = "json") -> dict[str, str]:
-            return {"run_id": str(self.run_id), "as_of": "2026-01-07"}
-
-    runs = [Run()]
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: runs)
+    run = _history_run(UUID("11111111-1111-1111-1111-111111111111"))
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [run])
 
     reply, metadata = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
 
     assert reply.runtime_status == "READY"
     assert reply.business_status == "ok"
     assert reply.run_id == "11111111-1111-1111-1111-111111111111"
+    #  🔴 **원본 payload 를 통째로 싣지 않는다.** 전에는 요청·회신 JSONB 두 덩이를
+    #     그대로 냈고, 마스터가 그것을 한 줄로 펴서 ML 시세 18일치까지 화면에 쏟았다.
     assert reply.payload == {
         "as_of": "2026-01-07",
-        "recent_runs": [runs[0].model_dump(mode="json")],
+        "recent_runs": [
+            {
+                "as_of": "2026-01-07",
+                "request_id": "REQ-SALES-ADAPTER",
+                "runtime_status": "READY",
+                "status": "SCENARIOS_GENERATED",
+                "items": ["배추"],
+                "proposal_count": 1,
+                "no_stock_count": 0,
+                "pending_validations": ["FINANCIAL_VALIDATION"],
+            }
+        ],
     }
     assert metadata.used_tools == ("list_sales_runs",)
     assert metadata.run_id == reply.run_id
     assert metadata.llm_status == "DISABLED"
+
+
+def test_status_query_answers_only_for_this_run(monkeypatch):
+    """🔴 실행 축이 다른 이력을 «우리 판매 진행 상황» 으로 내지 않는다."""
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+
+    mine = _history_run(UUID("11111111-1111-1111-1111-111111111111"))
+    theirs = _history_run(
+        UUID("22222222-2222-2222-2222-222222222222"), sim_run_id="SIM-SOMEONE-ELSE"
+    )
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [theirs, mine])
+
+    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+
+    assert len(reply.payload["recent_runs"]) == 1
+    assert reply.run_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_status_query_does_not_count_proposals_with_nothing_to_sell(monkeypatch):
+    """⚠️ «물량이 없어 안이 서지 않은 것» 과 «안을 안 낸 것» 은 다른 사실이다."""
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+
+    run = _history_run(
+        UUID("11111111-1111-1111-1111-111111111111"),
+        scenarios=[
+            {"item": "배추", "quantity_kg": "0.0"},
+            {"item": "무", "quantity_kg": "463.0"},
+        ],
+    )
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [run])
+
+    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+
+    summary = reply.payload["recent_runs"][0]
+    assert summary["proposal_count"] == 1
+    assert summary["no_stock_count"] == 1
+    assert summary["items"] == ["무"]
+
+
+def test_status_query_says_so_when_this_run_has_no_history(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [])
+
+    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+
+    assert reply.payload["recent_runs"] == []
+    assert "없습니다" in reply.reasoning
 
 
 def test_generate_persists_actual_llm_metadata(monkeypatch):
@@ -344,14 +426,9 @@ def test_generate_then_status_query_uses_same_run_id(monkeypatch):
 
     generated, _ = adapter.sales_port(_request())
 
-    class Run:
-        def __init__(self, run_id: UUID) -> None:
-            self.run_id = run_id
-
-        def model_dump(self, mode: str = "json") -> dict[str, str]:
-            return {"run_id": str(self.run_id), "as_of": "2026-01-07"}
-
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [Run(saved["run_id"])])
+    monkeypatch.setattr(
+        adapter, "list_sales_runs", lambda **_kwargs: [_history_run(saved["run_id"])]
+    )
 
     queried, metadata = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
 

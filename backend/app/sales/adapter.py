@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -17,7 +18,11 @@ from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.sales.llm.runtime import load_settings
 from app.sales.proposal import run_proposal
 from app.sales.runs import list_sales_runs, save_sales_agent_run
-from app.sales.schemas import SalesProposalInput, SalesProposalReply
+from app.sales.schemas import (
+    SalesAgentRunResponse,
+    SalesProposalInput,
+    SalesProposalReply,
+)
 
 AGENT_NAME = "sales"
 
@@ -133,7 +138,10 @@ def _reasoning(proposal: SalesProposalReply) -> str:
 def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     run_id = _run_id()
     try:
-        runs = list_sales_runs(as_of=request.context.as_of, limit=5)
+        #  🔴 **거르기 전에 넓게 읽는다.** `list_sales_runs` 에는 실행 축 필터가 없어
+        #     5건만 받아 거르면, 그 5건이 전부 남의 실행일 때 «이력이 없습니다» 가 된다.
+        #     실제로 2026-01-26 이 그랬다 — 같은 날 다른 실행의 기록이 더 최신이었다.
+        runs = list_sales_runs(as_of=request.context.as_of, limit=_STATUS_SCAN_LIMIT)
     except Exception:  # noqa: BLE001
         reply = AgentReply(
             request_id=request.context.request_id,
@@ -148,21 +156,100 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         )
         return reply, _metadata(request, run_id, tools=("list_sales_runs",))
 
+    #  🔴 **이 실행의 이력만 답한다.** `list_sales_runs` 에는 실행 축 필터가 없어
+    #     그대로 내면 남의 실행 이력이 «우리 판매 진행 상황» 으로 나간다.
+    scoped = [run for run in runs if _run_axis(run) == request.context.sim_run_id][
+        :_STATUS_RUN_LIMIT
+    ]
     reply = AgentReply(
         request_id=request.context.request_id,
         as_of=request.context.as_of,
         agent=AGENT_NAME,
         mode=request.mode,
-        run_id=str(runs[0].run_id) if runs else run_id,
+        run_id=str(scoped[0].run_id) if scoped else run_id,
         runtime_status="READY",
         business_status="ok",
         payload={
             "as_of": request.context.as_of.isoformat(),
-            "recent_runs": [run.model_dump(mode="json") for run in runs],
+            "recent_runs": [_run_summary(run) for run in scoped],
         },
-        reasoning="최근 판매 판단 이력을 조회했습니다.",
+        reasoning=_status_reasoning(scoped),
     )
     return reply, _metadata(request, reply.run_id, tools=("list_sales_runs",))
+
+
+#: 실행 축으로 거르기 전에 훑는 범위. 같은 날 여러 실행이 섞여 있어도 우리 것이 남는다.
+_STATUS_SCAN_LIMIT = 200
+
+#: 답에 싣는 최대 실행 수. 사람이 읽는 요약이라 길게 낼 이유가 없다.
+_STATUS_RUN_LIMIT = 5
+
+
+def _run_axis(run: SalesAgentRunResponse) -> str | None:
+    """이 실행 기록이 어느 실행 축에 속하는지. **봉투 안에 적혀 있다.**"""
+    context = run.request_payload.get("context")
+    if not isinstance(context, dict):
+        return None
+    axis = context.get("sim_run_id")
+    return None if axis is None else str(axis)
+
+
+def _run_summary(run: SalesAgentRunResponse) -> dict[str, object]:
+    """실행 하나를 **사람이 읽을 만큼만** 줄인다.
+
+    🔴 **원본 payload 를 통째로 싣지 않는다.** 전에는 `model_dump()` 로 요청·회신
+       JSONB 두 덩이를 그대로 냈고, 마스터가 그것을 한 줄로 펴서 ML 시세 18일치와
+       lot 목록까지 화면에 쏟았다 — 질문은 *"판매 진행 상황"* 이었다.
+
+    ★ **자세히 볼 자리는 따로 있다.** 안의 전체 내용은 판매 화면의 금일 판매안이
+      카드로 펴 준다. 여기서 하는 일은 *"몇 건을 어떤 상태로 냈나"* 까지다.
+    """
+    payload = run.response_payload.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    scenarios = payload.get("scenarios")
+    scenarios = scenarios if isinstance(scenarios, list) else []
+    #  ⚠️ 팔 물량이 0인 안은 «낸 안» 으로 세지 않는다. 재무가 검토할 것도 없는 안이다.
+    sellable = [
+        scenario
+        for scenario in scenarios
+        if isinstance(scenario, dict) and _positive(scenario.get("quantity_kg"))
+    ]
+    items = []
+    for scenario in sellable:
+        item = scenario.get("item")
+        if item is not None and str(item) not in items:
+            items.append(str(item))
+    missing = payload.get("missing_capabilities")
+    return {
+        "as_of": run.as_of.isoformat(),
+        "request_id": run.response_payload.get("request_id"),
+        "runtime_status": run.runtime_status,
+        "status": payload.get("status"),
+        "items": items,
+        "proposal_count": len(sellable),
+        #  🔴 «물량이 없어 안이 서지 않은 것» 과 «안을 안 낸 것» 은 다른 사실이다.
+        "no_stock_count": len(scenarios) - len(sellable),
+        "pending_validations": list(missing) if isinstance(missing, list) else [],
+    }
+
+
+def _positive(value: object) -> bool:
+    if value is None:
+        return False
+    try:
+        return Decimal(str(value)) > 0
+    except (ArithmeticError, ValueError):
+        #  ⚠️ 못 읽는 값을 «있다» 로 세지 않는다.
+        return False
+
+
+def _status_reasoning(runs: list[SalesAgentRunResponse]) -> str:
+    if not runs:
+        return "이 실행에는 조회할 판매 판단 이력이 없습니다."
+    return (
+        f"최근 판매 판단 {len(runs)}건을 조회했습니다. "
+        "안의 자세한 내용과 재무 검토 결과는 판매 화면의 금일 판매안에서 볼 수 있습니다."
+    )
 
 
 def _invalid_input(

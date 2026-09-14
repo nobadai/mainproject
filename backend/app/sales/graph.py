@@ -29,6 +29,7 @@ def _graph():
     graph.add_node("evaluate_candidates", _evaluate_candidates)
     graph.add_node("rank_candidates", _rank_candidates)
     graph.add_node("self_check", _self_check)
+    graph.add_node("interpret_recommendation", _interpret_recommendation)
     graph.add_node("final_recommendation", _final_recommendation)
 
     graph.add_edge(START, "prepare_context")
@@ -54,8 +55,9 @@ def _graph():
     graph.add_conditional_edges(
         "self_check",
         _route_after_self_check,
-        {"rerank": "rank_candidates", "final": "final_recommendation"},
+        {"rerank": "rank_candidates", "final": "interpret_recommendation"},
     )
+    graph.add_edge("interpret_recommendation", "final_recommendation")
     graph.add_edge("final_recommendation", END)
     return graph.compile()
 
@@ -228,12 +230,18 @@ def _rank_candidates(state: SalesAgentState) -> SalesAgentState:
 
 
 def _self_check(state: SalesAgentState) -> SalesAgentState:
+    """**결정한 것을 스스로 되짚는다.** 여기를 지나면 추천이 확정된다.
+
+    설명하는 node 가 뒤에 따로 서 있으므로 그 앞에서 추천이 굳어 있어야 한다.
+    그래서 최종 조립이 아니라 이 자리에서 `_resolve_recommendation_id` 를 부른다.
+    다시 순위를 매기러 돌아가는 길에서는 부르지 않는다 — 곧 순위가 다시 정할 값이다.
+    """
     from app.sales.proposal import self_check_scenarios
 
     scenarios = state.get("validated_candidates", [])
     check = _agent_self_check(state, self_check_scenarios(scenarios))
     if check.passed or state.get("feedback_attempt", 0) >= 1:
-        return {
+        settled = {
             **state,
             "self_check": check,
             "agent_trace": [
@@ -241,6 +249,7 @@ def _self_check(state: SalesAgentState) -> SalesAgentState:
                 {"stage": "self_check", "passed": check.passed, "issues": check.issue_codes},
             ],
         }
+        return {**settled, "recommendation_id": _resolve_recommendation_id(settled)}
     filtered = [scenario for scenario in scenarios if not _is_rejected(scenario)]
     if len(filtered) != len(scenarios):
         return {
@@ -253,7 +262,7 @@ def _self_check(state: SalesAgentState) -> SalesAgentState:
                 {"stage": "self_check", "passed": False, "action": "RERANK_WITHOUT_REJECTED"},
             ],
         }
-    return {
+    cleared = {
         **state,
         "recommendation_id": None,
         "self_check": check,
@@ -263,6 +272,29 @@ def _self_check(state: SalesAgentState) -> SalesAgentState:
             {"stage": "self_check", "passed": False, "action": "CLEAR_RECOMMENDATION"},
         ],
     }
+    return {**cleared, "recommendation_id": _resolve_recommendation_id(cleared)}
+
+
+def _resolve_recommendation_id(state: SalesAgentState) -> str | None:
+    """**누가 추천인지 확정한다.** 숫자와 규칙만 쓴다 — 모델은 오지 않는다.
+
+    순위를 거쳐 온 길은 이미 첫 자리를 들고 있다. 순위를 건너뛴 길(입력 미비 ·
+    검증 대기)은 여기서 처음 추천을 정한다. 그리고 거절된 안이 추천에 앉아 있으면
+    추천을 **비운다** — 막힌 안을 권할 수는 없다.
+    """
+    scenarios = state.get("validated_candidates", state.get("candidates", []))
+    ranked_ids = state.get("ranked_candidate_ids", [])
+    recommendation_id = state.get("recommendation_id")
+    if recommendation_id is None and ranked_ids:
+        recommendation_id = ranked_ids[0]
+    if recommendation_id is None and not state.get("terminal_reason"):
+        recommendation_id = recommended_scenario_id(scenarios)
+    if any(
+        candidate.scenario_id == recommendation_id
+        for candidate in state.get("rejected_candidates", [])
+    ):
+        recommendation_id = None
+    return recommendation_id
 
 
 def _route_after_self_check(state: SalesAgentState) -> str:
@@ -277,23 +309,47 @@ def _route_after_self_check(state: SalesAgentState) -> str:
     return "final"
 
 
+def _interpret_recommendation(state: SalesAgentState) -> SalesAgentState:
+    """**정해진 추천을 말로 옮긴다.** 그래프에서 모델이 불리는 유일한 자리다.
+
+    이 node 는 아무것도 고르지 않는다. 추천은 `rank_candidates` 가 정하고
+    `self_check` 가 확정한 뒤 여기 도착한다. 수량·단가·금액·날짜·결제조건은
+    읽지도 넘기지도 않는다 — 모델에는 라벨만 간다.
+
+    ★ 검증이 끝나지 않은 안(`UNRESOLVED`)과 막힌 안(`INFEASIBLE`)은
+      `_interpret_scenarios` 가 애초에 후보에서 뺀다. 그래서 첫 실행에서는 설명할
+      것이 없어 `SKIPPED_TEMPLATE` 로 끝나고 모델을 부르지 않는다. **node 를 따로
+      세웠다는 이유로 판정 전 안을 설명하게 두면, 보지 않은 안이 제안처럼 읽힌다.**
+    """
+    from app.sales.proposal import _interpret_scenarios
+
+    scenarios = state.get("validated_candidates", state.get("candidates", []))
+    recommendation_id = state.get("recommendation_id")
+    recommendation = _interpret_scenarios(scenarios, recommendation_id)
+    return {
+        **state,
+        "recommendation": recommendation,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "interpret_recommendation",
+                "recommended_scenario_id": recommendation_id,
+                "llm_status": recommendation.status,
+                "llm_attempts": recommendation.llm_attempts,
+            },
+        ],
+    }
+
+
 def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
-    from app.sales.proposal import _interpret_scenarios, _missing_capabilities, _reply_refs
+    """**답장을 조립한다.** 새로 정하는 것은 없다 — 앞에서 정해진 것을 옮겨 담는다."""
+    from app.sales.proposal import _missing_capabilities, _reply_refs
 
     request = state["request"]
     scenarios = state.get("validated_candidates", state.get("candidates", []))
     ranked_ids = state.get("ranked_candidate_ids", [])
     recommendation_id = state.get("recommendation_id")
-    if recommendation_id is None and ranked_ids:
-        recommendation_id = ranked_ids[0]
-    if recommendation_id is None and not state.get("terminal_reason"):
-        recommendation_id = recommended_scenario_id(scenarios)
-    if any(
-        candidate.scenario_id == recommendation_id
-        for candidate in state.get("rejected_candidates", [])
-    ):
-        recommendation_id = None
-    recommendation = _interpret_scenarios(scenarios, recommendation_id)
+    recommendation = state["recommendation"]
     exclusions = state.get("excluded_reasons", {})
     trace = [
         SalesDecisionTrace(
