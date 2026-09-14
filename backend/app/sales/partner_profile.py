@@ -17,7 +17,7 @@
 from typing import Any
 
 from psycopg import sql
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.sales.db import execute_returning_one, fetch_all, get_db_schema
 
@@ -141,4 +141,96 @@ def update_partner_profile(
     except RuntimeError:
         #  `execute_returning_one` 은 행이 없으면 예외다 — 없는 거래처라는 뜻이다.
         return None
+    return PartnerProfile(**row)
+
+
+#: 새 거래처에 쓸 수 있는 칸. **`_EDITABLE` 에 `partner_id` 만 더한다.**
+#:
+#: ★ 두 목록이 갈리면 «수정은 되는데 생성은 안 되는 칸» 이 생긴다. 생성은 식별자를
+#:   받아야 하므로 그 하나만 다르다.
+_CREATABLE = ("partner_id", *_EDITABLE)
+
+#: `partners_partner_type_check` 가 실제로 허용하는 값 (2026-09-14 실측).
+#:
+#: 🔴 **여기 없는 값을 보내면 DB 제약이 거절한다.** 그 예외는 psycopg 원문이라
+#:    사용자에게 그대로 보이면 «CHECK constraint» 라는 말이 화면에 뜬다. 미리 거른다.
+PARTNER_TYPES = ("CUSTOMER", "SUPPLIER", "LOGISTICS_PROVIDER", "MARKET_REFERENCE", "OTHER")
+
+
+class PartnerAlreadyExists(ValueError):
+    """같은 `partner_id` 가 이미 있다. **덮어쓰지 않는다.**
+
+    ★ `INSERT … ON CONFLICT DO UPDATE` 로 조용히 덮으면 «새 거래처를 만들었다» 는
+      화면이 실제로는 **남의 거래처 이름을 바꾼 것**이 된다.
+    """
+
+
+class PartnerProfileCreate(BaseModel):
+    """새 거래처 입력. **표에 있는 칸만, 기본값은 DB 가 가진 것과 같게.**
+
+    🔴 **`provisional` 을 받지 않는다.** 그 칸은 «이 행이 잠정 자료인가» 라는 자료
+       등급이고, 화면에서 고를 값이 아니다 — DB 기본값(`false`) 그대로 둔다.
+
+    🔴 **여신 한도 칸이 없다.** 정본은 재무의 `partner_credit_limits` 다
+       (`FOREIGN_FIELDS` 가 이름으로 거절한다).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 사용자에게는 «내부 거래처 코드» 로 보인다. **형식을 코드가 만들지 않는다** —
+    #: 저장소에 `partner_id` 생성 규칙이 없어(2026-09-14 전수 확인) 임의 형식을
+    #: 지어내면 그날부터 그것이 규칙이 된다.
+    partner_id: str = Field(min_length=1, max_length=64)
+    partner_name: str = Field(min_length=1)
+    partner_type: str = Field(min_length=1)
+    client_type: str | None = None
+    factory_region: str | None = None
+    factory_city: str | None = None
+    factory_area: str | None = None
+    sales_collection_days: int | None = Field(default=None, ge=0, le=365)
+    pricing_contract_type: str | None = None
+    active: bool = True
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def partner_type_is_one_the_table_allows(self) -> "PartnerProfileCreate":
+        if self.partner_type not in PARTNER_TYPES:
+            raise ValueError(
+                "거래처 유형은 " + " · ".join(PARTNER_TYPES) + " 중 하나여야 합니다."
+            )
+        return self
+
+
+def create_partner_profile(*, create: PartnerProfileCreate) -> PartnerProfile:
+    """거래처 한 건을 만들고 **저장된 행을 돌려준다.**
+
+    ★ `update_partner_profile` 과 같은 규율이다 — 돌려주는 것은 입력이 아니라
+      `RETURNING` 이다. 기본값(`provisional`)은 DB 가 채우므로 그 값도 함께 온다.
+
+    🔴 **`ON CONFLICT` 를 쓰지 않는다.** 같은 코드가 이미 있으면 만들지 못한 것이고,
+       그 사실이 사용자에게 가야 한다 (`PartnerAlreadyExists`).
+    """
+    values = create.model_dump()
+    columns = [name for name in _CREATABLE if name in values]
+    statement = (
+        sql.SQL("INSERT INTO {}.partners (").format(sql.Identifier(get_db_schema()))
+        + sql.SQL(", ").join(sql.Identifier(name) for name in columns)
+        + sql.SQL(") VALUES (")
+        + sql.SQL(", ").join(sql.Placeholder() for _ in columns)
+        + sql.SQL(
+            """
+            )
+            ON CONFLICT (partner_id) DO NOTHING
+            RETURNING partner_id, partner_name, partner_type, client_type,
+                      factory_region, factory_city, factory_area,
+                      sales_collection_days, pricing_contract_type,
+                      active, provisional, note
+            """
+        )
+    )
+    try:
+        row = execute_returning_one(statement, [values[name] for name in columns])
+    except RuntimeError as error:
+        #  `DO NOTHING` 이라 충돌하면 행이 안 나온다 — 그것이 «이미 있다» 의 신호다.
+        raise PartnerAlreadyExists(create.partner_id) from error
     return PartnerProfile(**row)
