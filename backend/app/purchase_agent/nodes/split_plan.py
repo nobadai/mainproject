@@ -19,6 +19,7 @@
 from math import ceil
 from typing import Any
 
+from app.purchase_agent.allocation import equal_ratios
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.classify_situation import is_sustained_rise, split_entry_cap
 from app.purchase_agent.schemas import TIMING_AXIS
@@ -153,16 +154,6 @@ def effective_allowed_axes(allowed_axes: list[str], chosen: list[dict] | None) -
     if split_decision(chosen).get("entered"):
         return allowed_axes
     return [axis for axis in allowed_axes if axis != TIMING_AXIS]
-
-
-def equal_ratios(rounds: int) -> list[float]:
-    """균등 비율. 마지막을 ``1 − Σ앞``으로 **구성**한다.
-
-    각자 계산한 ``1/n``을 n번 더하면 부동소수점 합이 1에서 밀려 ⑥의 합계 검사(1e-9)에
-    걸릴 수 있다 — E3-1에서 등급 비율에 쓴 것과 같은 장치다.
-    """
-    head = [1 / rounds] * (rounds - 1)
-    return [*head, 1.0 - sum(head)]
 
 
 def split_plan(state: PurchaseAgentState) -> dict[str, Any]:

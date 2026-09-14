@@ -30,6 +30,7 @@ from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
 
+from app.purchase_agent.allocation import split_offsets, split_quantities
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
@@ -69,19 +70,6 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
     else:
         axes[labels[-1]] = next(axis for axis in allowed_axes if axis != "quantity")
     return axes
-
-
-def split_offsets(coverage_days: int, rounds: int) -> list[int]:
-    """회차별 **매입 실행일** 오프셋 = ``round(i × D / rounds)``.
-
-    첫 회차는 항상 0(= as_of)이다 — IO명세 §2 "seq 1의 date = as_of".
-    날짜를 ④가 아니라 여기서 만드는 이유: 안마다 D가 다르다 (§4-④ E3-3 확정 4).
-    보수(D=2)와 공격(D=12)에 같은 날짜를 박으면 보수안의 2회차가 커버 구간 밖으로 나간다.
-
-    ⚠️ 이 date는 **도착일이 아니다.** 도착일 = ``date + N4``이고 N4가 NULL이라 계산하지
-    않는다 (§5.5 · 규칙 3).
-    """
-    return [round(index * coverage_days / rounds) for index in range(rounds)]
 
 
 def round_offsets(
@@ -171,18 +159,6 @@ def shifted_rounds_note(
             f" (오프셋 {base[-1]} → {moved[-1]}) — 커버가 늘어난 만큼 판단이 달라진다"
         )
     return note
-
-
-def split_quantities(total_qty_kg: int, chosen: list[dict]) -> list[int]:
-    """회차별 수량. **마지막 회차가 잔량을 흡수한다** — 반올림이 총량을 흔들면
-    사중 일치가 깨진다."""
-    remaining = total_qty_kg
-    quantities = []
-    for index, part in enumerate(chosen, start=1):
-        qty = remaining if index == len(chosen) else round(total_qty_kg * part["ratio"])
-        quantities.append(qty)
-        remaining -= qty
-    return quantities
 
 
 def split_infeasible_reason(
