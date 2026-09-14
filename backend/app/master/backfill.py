@@ -411,7 +411,9 @@ class BackfillRules:
     #: 찾거나(`OrderedLabelRule`). 고르는 자리는 `labels_in_order` 하나만 본다.
     procurement: ProcurementRule | None = None
     sales: SalesBackfillRule | None = None
-    sales_terms: SalesTermsRule | None = None
+    #: 🔴 **두 모양 중 하나다** (2026-09-14 신규 거래처). 객체면 `SalesTermsRule` 하나
+    #: (기존 실행 그대로), 목록이면 거래처별 조건을 **적힌 순서 그대로** 든 튜플이다.
+    sales_terms: SalesTermsRule | tuple[SalesTermsRule, ...] | None = None
 
     def for_cycle(self, cycle: str) -> ProcurementRule | SalesBackfillRule | None:
         """그 실행 행의 `cycle` 에 걸리는 규칙.
@@ -739,8 +741,40 @@ def _terms_days(section: Mapping[str, Any], field: str) -> int:
     return value
 
 
-def _read_sales_terms(raw: Any) -> SalesTermsRule:
-    """`backfill.sales_terms` 칸. **적어 뒀으면 네 칸이 전부 서야 한다.**
+def _read_sales_terms(raw: Any) -> SalesTermsRule | tuple[SalesTermsRule, ...]:
+    """`backfill.sales_terms` 칸. **객체 하나 또는 목록이다** (2026-09-14 신규 거래처).
+
+    ```text
+    객체   {"partner_id": ..., ...}          기존 실행 그대로 SalesTermsRule 하나
+    목록   [{"partner_id": A, ...}, {B ...}]  거래처마다 조건 하나 · 적힌 순서가 판매 순서
+    ```
+
+    🔴 **목록은 비면 안 되고 `partner_id` 가 겹치면 안 된다.** 비면 *"조건을 적었는데
+      아무에게도 안 판다"* 가 되고, 겹치면 한 거래처에 어느 조건으로 팔았는지가 갈린다.
+
+    ⚠️ 옛 평면 모양이 터진다는 규칙(`read_rules`)은 `backfill` 칸 자체의 이야기다.
+      이 칸의 객체 모양은 옛 모양이 아니라 **지금 쓰는 모양**이라 그대로 읽는다.
+    """
+    if isinstance(raw, list | tuple):
+        if not raw:
+            raise BackfillRuleMissing(
+                f"{SALES_TERMS_KEY} 목록이 비었다 — 조건을 적었으면 거래처가 하나는 있어야 한다"
+            )
+        terms = tuple(_read_one_sales_terms(one) for one in raw)
+        seen: set[str] = set()
+        for one in terms:
+            if one.partner_id in seen:
+                raise BackfillRuleMissing(
+                    f"{SALES_TERMS_KEY} 목록에 거래처가 겹친다: {one.partner_id!r}"
+                    " — 한 거래처의 조건은 하나다"
+                )
+            seen.add(one.partner_id)
+        return terms
+    return _read_one_sales_terms(raw)
+
+
+def _read_one_sales_terms(raw: Any) -> SalesTermsRule:
+    """조건 한 벌. **적어 뒀으면 네 칸이 전부 서야 한다.**
 
     🔴 **여기서 기본값을 지어내지 않는다.** 거래처를 안 적었는데 코드가 하나
       고르면, 규칙을 안 적은 사람이 **모르는 거래처에 판다.** 그래서 빈 칸은

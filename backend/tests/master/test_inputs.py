@@ -35,9 +35,16 @@ FORECAST_ROW = {
     "quality_note": "세 구간 모두 양수",
 }
 
+#: ★ 2026-09-14: 비중 조회도 거래처 날짜를 든다. 기존 거래처 1곳 · 기본 날짜다.
+_거래처 = {
+    "partner_id": "KIMCHI_FACTORY_001",
+    "active_from": date(2025, 12, 1),
+    "effective_from": date(2025, 12, 1),
+}
+
 DEMAND_ROWS = [
-    {"item_name": "배추", "daily_demand_kg": Decimal("717.300")},
-    {"item_name": "무", "daily_demand_kg": Decimal("154.400")},
+    {"item_name": "배추", **_거래처, "daily_demand_kg": Decimal("717.300")},
+    {"item_name": "무", **_거래처, "daily_demand_kg": Decimal("154.400")},
 ]
 
 
@@ -133,13 +140,21 @@ def test_납품_예정이_없으면_수요에서_파생하되_확정이라_부�
     파생값을 "확정 주문" 으로 넘기면 매입도 사람도 확정으로 읽는다. 등급과 파생식을
     함께 실어 리포트에 드러낸다.
     """
+    # ★ 2026-09-14: 파생 수요는 거래처 날짜·주기와 함께 한 조회(`fetch_all`)로 읽는다.
     demand = {
+        "partner_id": "KIMCHI_FACTORY_001",
+        "order_cycle_days": 2,
+        "active_from": date(2025, 12, 1),
+        "effective_from": date(2025, 12, 1),
         "daily_demand_kg": Decimal("717.300"),
         "demand_basis": "통합 Persona v1.2 적용 일수요",
         "provisional": True,
     }
-    calls = iter([demand, {"order_cycle_days": 2}])
-    patch(monkeypatch, one=lambda *a: next(calls), many=lambda *a: [])
+
+    def many(query, params):
+        return [demand] if "partner_item_demands" in query.as_string(None) else []
+
+    patch(monkeypatch, many=many)
     got = inputs.load_confirmed_orders("배추", AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "DERIVED"

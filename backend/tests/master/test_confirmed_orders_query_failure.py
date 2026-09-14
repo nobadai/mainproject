@@ -29,6 +29,10 @@ AS_OF = date(2025, 12, 31)
 SIM_RUN_ID = "SIM-TEST-ORDERS-FAILURE"
 
 DEMAND = {
+    "partner_id": "KIMCHI_FACTORY_001",
+    "order_cycle_days": 2,
+    "active_from": date(2025, 12, 1),
+    "effective_from": date(2025, 12, 1),
     "daily_demand_kg": Decimal("717.300"),
     "demand_basis": "통합 Persona v1.2 적용 일수요",
     "provisional": True,
@@ -42,8 +46,23 @@ def _patch(monkeypatch: pytest.MonkeyPatch, *, many: Any, one: Any) -> None:
 
 
 def _demand_one() -> Any:
-    calls = iter([DEMAND, {"order_cycle_days": 2}])
-    return lambda *a: next(calls)
+    """🔴 파생 경로는 `fetch_one` 을 안 부른다 (2026-09-14 · 거래처 날짜). 부르면 터진다."""
+
+    def one(*_a: Any) -> Any:
+        raise AssertionError("파생 경로가 fetch_one 을 불렀다")
+
+    return one
+
+
+def _demand_many(orders: Any) -> Any:
+    """확정 주문 조회는 `orders` 로, 파생 수요 조회는 `DEMAND` 한 행으로 답한다."""
+
+    def many(query: Any, params: Any = None) -> Any:
+        if "partner_item_demands" in query.as_string(None):
+            return [DEMAND]
+        return orders(query, params)
+
+    return many
 
 
 # ── (a) 🔴 조회가 터지면 비운다 ─────────────────────────────────────────
@@ -75,15 +94,17 @@ def test_확정_주문_조회가_터지면_명목_수요로_메우지_않는다(
 
 def test_조회가_성공하고_0건이면_그대로_파생한다(monkeypatch):
     """🔴 **숫자 불변.** 정상 경로의 등급 · 사유 · 값이 전 판과 같다."""
-    _patch(monkeypatch, many=lambda *a: [], one=_demand_one())
+    _patch(monkeypatch, many=_demand_many(lambda *a: []), one=_demand_one())
 
     got = inputs.load_confirmed_orders(ITEM, AS_OF, sim_run_id=SIM_RUN_ID)
 
     assert got.grade == "DERIVED"
-    assert got.source == "partner_item_demands · v_current_partner_demand"
+    # ★ 2026-09-14: 주기를 뷰 LIMIT 1 이 아니라 거래처 행에서 읽고, 합산 거래처 수를 적는다.
+    #   payload 는 아래 그대로다.
+    assert got.source == "partner_item_demands · partners"
     assert got.note == (
         "앞으로 납품할 확정 건이 없다 → 일수요 717.3kg × 14일, 주기 2일로 분할 "
-        "(통합 Persona v1.2 적용 일수요, 잠정값) · 확정 주문이 아니다"
+        "(통합 Persona v1.2 적용 일수요, 잠정값) · 거래처 1곳 합산 · 확정 주문이 아니다"
     )
     assert got.payload == {
         "as_of": "2025-12-31",
@@ -135,7 +156,12 @@ def test_파생_조회가_터져도_지어내지_않고_비운다(monkeypatch):
     def boom(*_a: Any) -> Any:
         raise RuntimeError("뷰 없음")
 
-    _patch(monkeypatch, many=lambda *a: [], one=boom)
+    def many(query: Any, params: Any = None) -> Any:
+        if "partner_item_demands" in query.as_string(None):
+            boom()
+        return []
+
+    _patch(monkeypatch, many=many, one=boom)
 
     got = inputs.load_confirmed_orders(ITEM, AS_OF, sim_run_id=SIM_RUN_ID)
 

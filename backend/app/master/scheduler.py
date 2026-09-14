@@ -350,8 +350,8 @@ NOT_ATTEMPTED          단계를 안 탔다 — 앞 단계에서 이미 멈춘 �
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
@@ -383,7 +383,12 @@ from app.master.run_repository import (
     ledger_gap_request_id,
     list_runs,
 )
-from app.master.sales_terms import apply_sales_terms, read_run_sales_terms
+from app.master.sales_terms import (
+    SalesTerms,
+    active_partner_ids,
+    apply_sales_terms,
+    read_run_sales_terms,
+)
 from app.master.schemas import ProcurementRunRequest, SalesBusinessMode, SalesRunRequest
 from app.master.service import run_procurement, run_sales
 
@@ -586,7 +591,9 @@ def daily_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
     )
 
 
-def daily_sales_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
+def daily_sales_request_id(
+    as_of: date, item: str, *, sim_run_id: str, partner_id: str | None = None
+) -> str:
     """`REQ-DAILY-SALES-SIM-WALK-202601-20260908-배추`.
 
     🔴 **매입 키와 갈라야 한다** (2026-09-10).
@@ -606,9 +613,23 @@ def daily_sales_request_id(as_of: date, item: str, *, sim_run_id: str) -> str:
     🔴 **시각을 넣지 않는다.** 이유는 `daily_request_id` 가 적어 둔 그대로다 —
       넣으면 같은 날 두 번 깨어날 때 id 가 갈리고, 멱등이 인덱스가 아니라
       *"두 번 안 깨우기"* 에 걸리게 된다.
+
+    🔴 **거래처가 목록으로 적힌 실행은 꼬리에 거래처를 붙인다** (2026-09-14 신규 거래처).
+
+      ```text
+      partner_id 없음   REQ-DAILY-SALES-{실행}-{날짜}-{품목}           객체 규칙 · 규칙 없음
+      partner_id 있음   REQ-DAILY-SALES-{실행}-{날짜}-{품목}-{거래처}  목록 규칙의 거래처마다
+      ```
+
+      ★★ **안 붙이면 같은 날 같은 품목의 두 거래처가 한 업무 키에 앉는다.** 승인은
+        업무 키로 행을 좁히고(`_runs_of`) 결정도 업무 키에 붙으므로, 둘째 거래처의
+        판단이 첫째의 `ALREADY_DECIDED` 로 읽힌다.
+
+      ⚠️ 축은 여전히 꼬리 앞이다 — `build_request_id` 의 자리 배치를 안 바꾼다.
     """
+    tail = item if partner_id is None else f"{item}-{partner_id}"
     return build_request_id(
-        head=_SALES_REQUEST_HEAD, as_of=as_of, sim_run_id=sim_run_id, tail=item
+        head=_SALES_REQUEST_HEAD, as_of=as_of, sim_run_id=sim_run_id, tail=tail
     )
 
 
@@ -1088,8 +1109,9 @@ def run_scheduled_day(
     items: Sequence[str] | None = None,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
-    sales_terms: SalesTermsRule | None = None,
+    sales_terms: SalesTerms = None,
     auto_maintain: bool = False,
+    partners_active_fn: Callable[[date, Sequence[str]], Collection[str]] = active_partner_ids,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
@@ -1174,6 +1196,11 @@ def run_scheduled_day(
         `auto_approve` 가 거짓이면 이 값은 **한 번도 안 쓰인다.**
     :param sales_terms: 판매 요청에 실을 상업 조건. 🔴 **읽지 않고 받는다** —
         기본이 `None` 이고 그 뜻은 *"아무것도 안 싣는다"* 이다.
+        ★ 목록(튜플)이면 그날 유효한 거래처마다 **적힌 순서대로** 판매를 묻는다
+        (2026-09-14 신규 거래처). 객체 하나면 종전 그대로 거래처 날짜를 안 본다.
+    :param partners_active_fn: 목록 규칙의 거래처 중 그날 유효한 것을 묻는 자리.
+        기본이 `sales_terms.active_partner_ids` 자체다. 🔴 **목록 규칙이 아니면 안 불린다.**
+        터지면 그날 판매는 전부 `FAILED` 다 — 못 읽은 날에는 아무에게도 안 판다.
     :param auto_maintain: 🔴 **기본이 거짓이다. 거짓이면 유지보수 함수가 이름조차
         안 불린다.** 켜는 것은 **명시로만** — `--auto-maintain` 을 준 걷기 하나다.
 
@@ -1459,6 +1486,7 @@ def run_scheduled_day(
             auto_approve=auto_approve,
             approve_fn=approve_fn,
             sales_terms=sales_terms,
+            partners_active_fn=partners_active_fn,
         )
     else:
         judged = _judgment_skipped(action)
@@ -1594,7 +1622,8 @@ def _judge(
     items: Sequence[str] | None,
     auto_approve: bool,
     approve_fn: Callable[..., BackfillOut],
-    sales_terms: SalesTermsRule | None,
+    sales_terms: SalesTerms,
+    partners_active_fn: Callable[[date, Sequence[str]], Collection[str]],
 ) -> _Judged:
     """매입 판단 → 매입 승인 → 판매 판단 → 판매 승인. **규율은 `run_scheduled_day` 가 적는다.**
 
@@ -1682,9 +1711,128 @@ def _judge(
     #
     # 🔴 **한 품목이 터져도 하루를 안 세운다.** 매입 루프와 같은 모양이다 — 터진
     #    것은 `sales_items` 에 `FAILED` 로 남고 출고·마감은 그대로 돈다.
+    #
+    # 🔴 **거래처 목록이면 거래처마다 판단 → 승인을 한 벌씩 돈다** (2026-09-14 신규 거래처).
+    #
+    #    ```text
+    #    거래처 A 판단(품목 전부) → A 승인 → 거래처 B 판단 → B 승인
+    #    ```
+    #
+    #    ★★ **승인을 거래처 사이에 둔다.** 그래야 뒤 거래처의 판단이 앞 거래처가 잡은
+    #      재고를 본다 — 재고를 먼저 잡는 쪽이 목록 앞(기존 거래처)이다.
+    #    ★ 객체 규칙 · 규칙 없음은 한 벌뿐이라 종전과 같은 순서 · 같은 문장이다.
     sales_results: list[ItemRunOutcome] = []
+    approvals: list[tuple[str, BackfillOut | None, str | None]] = []
+    lanes, lane_error = _sales_lanes(as_of, sales_terms, partners_active_fn)
+    if lane_error is not None:
+        # 🔴 **fail-closed.** 유효한 거래처를 못 읽은 날에는 아무에게도 안 판다 —
+        #    조용히 0건으로 두지 않고 거래처 × 품목마다 `FAILED` 로 남긴다.
+        for rule in sales_terms if isinstance(sales_terms, tuple) else ():
+            for item in day_items:
+                sales_results.append(
+                    ItemRunOutcome(
+                        item=item,
+                        request_id=daily_sales_request_id(
+                            as_of, item, sim_run_id=sim_run_id, partner_id=rule.partner_id
+                        ),
+                        status="FAILED",
+                        reason=lane_error,
+                    )
+                )
+        approvals.append(
+            _approve(
+                "판매 승인",
+                as_of=as_of,
+                sim_run_id=sim_run_id,
+                request_ids=[one.request_id for one in sales_results],
+                approve_fn=approve_fn,
+                enabled=auto_approve,
+            )
+        )
+    for rule, partner_key in lanes:
+        lane_results = _sell(
+            as_of=as_of,
+            policy_version=policy_version,
+            sales_fn=sales_fn,
+            sim_run_id=sim_run_id,
+            day_items=day_items,
+            rule=rule,
+            partner_key=partner_key,
+        )
+        sales_results.extend(lane_results)
+        # ── 판매 승인 — 🔴 **판매 판단 바로 뒤. 출고 앞** (2026-09-11) ──
+        #
+        # ★ **매입 승인과 같은 자리·같은 모양이다.** 제 사이클이 낸 행만 본다 —
+        #   그래서 매입 행이 여기서 `ALREADY_DECIDED` 로 다시 세지지 않는다.
+        approvals.append(
+            _approve(
+                "판매 승인" if partner_key is None else f"판매 승인({partner_key})",
+                as_of=as_of,
+                sim_run_id=sim_run_id,
+                request_ids=[one.request_id for one in lane_results],
+                approve_fn=approve_fn,
+                enabled=auto_approve,
+            )
+        )
+    sales_status = _fold_item_statuses(sales_results)
+    notes.append(f"판매: {sales_status} ({len(sales_results)}품목)")
+    notes.extend(note for _, _, note in approvals if note is not None)
+    sales_approval_status, sales_approval = _fold_approvals(approvals)
+
+    return _Judged(
+        procurement_status="RAN",
+        items=tuple(results),
+        procurement_approval_status=procurement_approval_status,
+        procurement_approval=procurement_approval,
+        sales_status=sales_status,
+        sales_items=tuple(sales_results),
+        sales_approval_status=sales_approval_status,
+        sales_approval=sales_approval,
+        notes=tuple(notes),
+    )
+
+
+def _sales_lanes(
+    as_of: date,
+    sales_terms: SalesTerms,
+    partners_active_fn: Callable[[date, Sequence[str]], Collection[str]],
+) -> tuple[list[tuple[SalesTermsRule | None, str | None]], str | None]:
+    """그날 판매를 물을 **벌**들. `(조건, 업무 키에 붙일 거래처)` 를 순서대로 돌려준다.
+
+    ```text
+    규칙 없음 · 객체   한 벌 (조건, None)       종전 그대로 · 거래처 날짜를 안 본다
+    목록              유효한 거래처마다 한 벌   적힌 순서 그대로 · 업무 키에 거래처가 붙는다
+    조회 실패          벌 없음 + 사유           부르는 쪽이 FAILED 로 남긴다
+    ```
+
+    🔴 **순서를 바꾸지 않는다.** 목록 순서가 곧 재고를 잡는 순서다 — 정렬하면 새
+      거래처가 기존 거래처보다 먼저 재고를 잡는 날이 생긴다.
+    """
+    if not isinstance(sales_terms, tuple):
+        return [(sales_terms, None)], None
+    try:
+        live = partners_active_fn(as_of, [rule.partner_id for rule in sales_terms])
+    except Exception as exc:  # noqa: BLE001 - 조회가 터져도 하루는 계속 간다.
+        return [], f"유효 거래처 조회 실패 - 아무에게도 안 판다 ({type(exc).__name__}: {exc})"
+    return [(rule, rule.partner_id) for rule in sales_terms if rule.partner_id in live], None
+
+
+def _sell(
+    *,
+    as_of: date,
+    policy_version: str,
+    sales_fn: Callable[..., Any],
+    sim_run_id: str,
+    day_items: Sequence[str],
+    rule: SalesTermsRule | None,
+    partner_key: str | None,
+) -> list[ItemRunOutcome]:
+    """한 벌(거래처 하나 또는 종전 한 벌)의 품목별 판매 판단."""
+    results: list[ItemRunOutcome] = []
     for item in day_items:
-        sales_request_id = daily_sales_request_id(as_of, item, sim_run_id=sim_run_id)
+        sales_request_id = daily_sales_request_id(
+            as_of, item, sim_run_id=sim_run_id, partner_id=partner_key
+        )
         try:
             # ★ `budget` 과 `verifier` 를 안 준다. 판매 기본값 25 가 계약이고
             #   (매입 12 를 복사하면 요청이 골격의 `SALES_BUDGET` 을 이긴다),
@@ -1706,11 +1854,11 @@ def _judge(
                         #    매입 경계(`_procurement_boundary`)가 **남의 실행 것**이 된다.
                         sim_run_id=sim_run_id,
                     ),
-                    sales_terms,
+                    rule,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - 한 품목이 하루를 세우면 안 된다.
-            sales_results.append(
+            results.append(
                 ItemRunOutcome(
                     item=item,
                     request_id=sales_request_id,
@@ -1719,7 +1867,7 @@ def _judge(
                 )
             )
             continue
-        sales_results.append(
+        results.append(
             ItemRunOutcome(
                 item=item,
                 request_id=sales_request_id,
@@ -1731,35 +1879,45 @@ def _judge(
                 observed_ats=_observed_ats(sales_response),
             )
         )
-    sales_status = _fold_item_statuses(sales_results)
-    notes.append(f"판매: {sales_status} ({len(sales_results)}품목)")
+    return results
 
-    # ── 판매 승인 — 🔴 **판매 판단 바로 뒤. 출고 앞** (2026-09-11) ──
-    #
-    # ★ **매입 승인과 같은 자리·같은 모양이다.** 제 사이클이 낸 행만 본다 —
-    #   그래서 매입 행이 여기서 `ALREADY_DECIDED` 로 다시 세지지 않는다.
-    sales_approval_status, sales_approval, note = _approve(
-        "판매 승인",
-        as_of=as_of,
-        sim_run_id=sim_run_id,
-        request_ids=[one.request_id for one in sales_results],
-        approve_fn=approve_fn,
-        enabled=auto_approve,
-    )
-    if note is not None:
-        notes.append(note)
 
-    return _Judged(
-        procurement_status="RAN",
-        items=tuple(results),
-        procurement_approval_status=procurement_approval_status,
-        procurement_approval=procurement_approval,
-        sales_status=sales_status,
-        sales_items=tuple(sales_results),
-        sales_approval_status=sales_approval_status,
-        sales_approval=sales_approval,
-        notes=tuple(notes),
+def _fold_approvals(
+    approvals: Sequence[tuple[str, BackfillOut | None, str | None]],
+) -> tuple[str, BackfillOut | None]:
+    """거래처별 판매 승인을 하루 칸 하나로 접는다 (2026-09-14 신규 거래처).
+
+    ```text
+    벌 없음         NOT_ATTEMPTED · None
+    한 벌           그대로 (종전과 같다)
+    여러 벌         상태가 같으면 그 값 · 하나라도 FAILED 면 FAILED · 아니면 RAN
+                   값은 행(runs)을 이어 붙인다 — 분포는 거래처 합으로 센다
+    ```
+    """
+    if not approvals:
+        return "NOT_ATTEMPTED", None
+    if len(approvals) == 1:
+        status, out, _ = approvals[0]
+        return status, out
+    statuses = [status for status, _, _ in approvals]
+    if len(set(statuses)) == 1:
+        folded = statuses[0]
+    elif "FAILED" in statuses:
+        folded = "FAILED"
+    else:
+        folded = "RAN"
+    outs = [out for _, out, _ in approvals if out is not None]
+    if not outs:
+        return folded, None
+    first = outs[0]
+    merged = replace(
+        first,
+        status="RAN" if any(out.status == "RAN" for out in outs) else first.status,
+        reason=next((out.reason for out in outs if out.reason is not None), None),
+        runs=tuple(run for out in outs for run in out.runs),
+        blocked_days=tuple(dict.fromkeys(day for out in outs for day in out.blocked_days)),
     )
+    return folded, merged
 
 
 def _inspect(
@@ -2074,7 +2232,7 @@ def wake_up(
     sim_run_id: str,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
-    terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
+    terms_of: Callable[[str], SalesTerms] = read_run_sales_terms,
     auto_maintain: bool = False,
 ) -> DayRunOutcome:
     """한 번 깨어났다. **결정하고, 그 답을 따른다.**

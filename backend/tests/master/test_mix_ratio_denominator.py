@@ -28,6 +28,7 @@ partner_item_demands 5행
 from __future__ import annotations
 
 import ast
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -37,13 +38,20 @@ import pytest
 from app.contracts.core import ITEMS
 from app.master import inputs
 
+#: 거래처 칸 (2026-09-14). 기존 거래처 1곳 · 기본 날짜다 — 비중 값은 전 판과 같아야 한다.
+_거래처 = {
+    "partner_id": "KIMCHI_FACTORY_001",
+    "active_from": date(2025, 12, 1),
+    "effective_from": date(2025, 12, 1),
+}
+
 #: 매입이 실측한 다섯 행 그대로. 🔴 **뒤 둘은 계약 밖이다.**
 DEMAND_ROWS = [
-    {"item_name": "배추", "daily_demand_kg": Decimal("717.300")},
-    {"item_name": "무", "daily_demand_kg": Decimal("154.400")},
-    {"item_name": "양파", "daily_demand_kg": Decimal("14.300")},
-    {"item_name": "건고추", "daily_demand_kg": Decimal("30.300")},
-    {"item_name": "피마늘", "daily_demand_kg": Decimal("22.200")},
+    {"item_name": "배추", **_거래처, "daily_demand_kg": Decimal("717.300")},
+    {"item_name": "무", **_거래처, "daily_demand_kg": Decimal("154.400")},
+    {"item_name": "양파", **_거래처, "daily_demand_kg": Decimal("14.300")},
+    {"item_name": "건고추", **_거래처, "daily_demand_kg": Decimal("30.300")},
+    {"item_name": "피마늘", **_거래처, "daily_demand_kg": Decimal("22.200")},
 ]
 
 계약_밖 = ("건고추", "피마늘")
@@ -83,7 +91,7 @@ def 찍힌_질의(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
 
 def test_계약_밖_품목은_분모에_안_든다(찍힌_질의):
     """🔴 전에는 배추가 `0.7643` 이었다. 계약 셋만 분모면 `0.8096` 이다."""
-    ratios = inputs._mix_ratio_from_demand()
+    ratios = inputs._mix_ratio_from_demand(None)
 
     분모 = 717.3 + 154.4 + 14.3
     assert ratios["배추"] == pytest.approx(717.3 / 분모, abs=1e-4)
@@ -94,7 +102,7 @@ def test_계약_밖_품목은_분모에_안_든다(찍힌_질의):
 
 def test_계약_밖_품목은_표에도_안_나온다(찍힌_질의):
     """★ 분모에서 뺐는데 표에는 남으면 합이 1 을 넘어 받는 쪽이 다시 눌러 읽는다."""
-    ratios = inputs._mix_ratio_from_demand()
+    ratios = inputs._mix_ratio_from_demand(None)
 
     for 이름 in 계약_밖:
         assert 이름 not in ratios, f"계약 밖 품목이 비중표에 남았다: {이름}"
@@ -117,7 +125,7 @@ def test_정책값까지_눌리지_않고_간다(찍힌_질의):
 
 def test_질의가_계약_세_품목만_묻는다(찍힌_질의):
     """★ **원천에서 막는다.** 다 읽고 파이썬에서 거르면 분모가 이미 눌린 뒤다."""
-    inputs._mix_ratio_from_demand()
+    inputs._mix_ratio_from_demand(None)
 
     assert 찍힌_질의, "질의가 안 나갔다"
     query, params = 찍힌_질의[0]

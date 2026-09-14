@@ -460,43 +460,134 @@ def _orders_from_db(item: str, as_of: date, *, sim_run_id: str) -> dict[str, Any
     }
 
 
+@dataclass(frozen=True)
+class _DemandRow:
+    """거래처 한 곳의 품목 일수요 한 행. **언제부터 유효한지를 같이 든다** (2026-09-14)."""
+
+    partner_id: str
+    cycle: int
+    active_from: date
+    effective_from: date
+    daily: Any
+    basis: str
+    provisional: bool
+
+
+def _demand_rows(item: str, until: date) -> list[_DemandRow]:
+    """`until` 까지 한 번이라도 유효해지는 거래처의 그 품목 일수요.
+
+    ★ SQL 은 **창 끝**으로만 거른다. 날짜별 판정은 `_in_force` 가 한다 — 창 안에서
+      유효해지는 거래처는 SQL 한 줄로 표현이 안 된다.
+
+    ★ 순서는 `active_from` · `partner_id` 다. 먼저 유효해진 거래처가 먼저 온다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    rows = fetch_all(
+        sql.SQL("""
+            SELECT p.partner_id, p.order_cycle_days, p.active_from,
+                   d.effective_from, d.daily_demand_kg, d.demand_basis, d.provisional
+              FROM {sch}.partner_item_demands d
+              JOIN {sch}.items i ON i.item_id = d.item_id
+              JOIN {sch}.partners p ON p.partner_id = d.partner_id
+             WHERE i.item_name = %s
+               AND p.active = true
+               AND p.active_from <= %s
+               AND d.effective_from <= %s
+             ORDER BY p.active_from, p.partner_id, d.effective_from
+        """).format(sch=schema),
+        (item, until, until),
+    )
+    return [
+        _DemandRow(
+            partner_id=r["partner_id"],
+            cycle=max(1, int(r["order_cycle_days"] or 1)),
+            active_from=r["active_from"],
+            effective_from=r["effective_from"],
+            daily=_plain(r["daily_demand_kg"]),
+            basis=r["demand_basis"],
+            provisional=bool(r["provisional"]),
+        )
+        for r in rows
+    ]
+
+
+def _in_force(rows: list[_DemandRow], day: date) -> _DemandRow | None:
+    """그날 유효한 행 하나. **거래처가 유효해졌고 그 수요도 유효해진 것만.**
+
+    🔴 **이 한 줄이 「유효해지기 전 날에는 그 거래처가 안 보인다」 의 전부다.**
+      빼면 창 안의 모든 날이 아직 유효하지 않은 거래처 수요를 더한다.
+
+    ★ 같은 거래처에 행이 여럿이면 `effective_from` 이 가장 늦은 것이 이긴다.
+    """
+    live = [r for r in rows if r.active_from <= day and r.effective_from <= day]
+    return max(live, key=lambda r: r.effective_from) if live else None
+
+
 def _orders_from_demand(item: str, as_of: date, why: str) -> SourcedInput:
     """파트너 일수요 × 기간. **주문 주기 간격으로 쪼갠다.**
 
     ⑤ 노드가 `due_date` 별 분포로 등급-신선도를 맞추므로 총량 한 덩어리로 주면
     "전량을 첫날 납품" 으로 읽힌다. 주기(`order_cycle_days`)를 그대로 쓴다.
+
+    🔴 **거래처가 날짜를 갖는다** (2026-09-14 신규 거래처).
+
+      .. code-block:: text
+
+          창의 날 d 마다   active_from <= d 이고 effective_from <= d 인 거래처의 일수요 합
+          주기            거래처마다 제 order_cycle_days (전 판: 뷰 LIMIT 1)
+          창 길이         _ORDER_WINDOW_DAYS 그대로. 주기는 창 길이를 안 정한다
+
+      ★ 거래처마다 제 주기로 주문을 쪼갠다. 한 주문은 그 주기 구간의 날들 중
+        **유효한 날만** 더한다. 한 날도 유효하지 않은 구간은 주문을 안 낸다.
+
+      🔴 거래처 1곳 · 기본 날짜면 **payload 가 전 판과 같다.** 구간 안의 일수요가
+        하나뿐이면 `일수요 × 주기` 한 번의 곱이라 반올림 전 값까지 같다.
     """
-    schema = sql.Identifier(get_db_schema())
-    demand = fetch_one(
-        sql.SQL("""
-            SELECT d.daily_demand_kg, d.demand_basis, d.provisional
-              FROM {sch}.partner_item_demands d
-              JOIN {sch}.items i ON i.item_id = d.item_id
-             WHERE i.item_name = %s
-        """).format(sch=schema),
-        (item,),
-    )
-    if demand is None:
+    until = as_of + timedelta(days=_ORDER_WINDOW_DAYS)
+    rows = _demand_rows(item, until)
+    if not rows:
         raise LookupError(f"{item} 파트너 일수요가 없다")
 
-    cycle_row = fetch_one(
-        sql.SQL("SELECT order_cycle_days FROM {sch}.v_current_partner_demand LIMIT 1").format(
-            sch=schema
-        ),
-        (),
-    )
-    cycle = int(cycle_row["order_cycle_days"]) if cycle_row else 1
-    cycle = max(1, cycle)
+    by_partner: dict[str, list[_DemandRow]] = {}
+    for row in rows:
+        by_partner.setdefault(row.partner_id, []).append(row)
 
-    daily = _plain(demand["daily_demand_kg"])
-    orders = [
-        {
-            "sale_id": None,  # 실제 주문이 아니다 — id 를 지어내지 않는다
-            "qty_kg": round(daily * cycle, 1),
-            "due_date": (as_of + timedelta(days=offset)).isoformat(),
-        }
-        for offset in range(cycle, _ORDER_WINDOW_DAYS + 1, cycle)
-    ]
+    orders: list[dict[str, Any]] = []
+    fragments: list[str] = []
+    for partner_rows in by_partner.values():
+        cycle = partner_rows[0].cycle
+        contributed: _DemandRow | None = None
+        for offset in range(cycle, _ORDER_WINDOW_DAYS + 1, cycle):
+            # ★ 같은 일수요 행이 며칠 유효한지를 센다 — 행마다 곱 한 번이다.
+            segments: dict[int, tuple[_DemandRow, int]] = {}
+            for back in range(cycle - 1, -1, -1):
+                row = _in_force(partner_rows, as_of + timedelta(days=offset - back))
+                if row is None:
+                    continue
+                held = segments.get(id(row))
+                segments[id(row)] = (row, (held[1] if held else 0) + 1)
+                contributed = row
+            if not segments:
+                continue
+            orders.append(
+                {
+                    "sale_id": None,  # 실제 주문이 아니다 — id 를 지어내지 않는다
+                    "qty_kg": round(sum(r.daily * n for r, n in segments.values()), 1),
+                    "due_date": (as_of + timedelta(days=offset)).isoformat(),
+                }
+            )
+        if contributed is None:
+            continue
+        starts = max(contributed.active_from, contributed.effective_from)
+        fragments.append(
+            f"일수요 {contributed.daily}kg × {_ORDER_WINDOW_DAYS}일, 주기 {cycle}일로 분할 "
+            f"({contributed.basis}"
+            f"{', 잠정값' if contributed.provisional else ''}"
+            f"{f', {starts} 부터' if starts > as_of + timedelta(days=1) else ''})"
+        )
+
+    # ★ 날짜순. 같은 날이면 먼저 유효해진 거래처가 앞이다 (정렬이 안정적이다).
+    orders.sort(key=lambda o: o["due_date"])
     return SourcedInput(
         key="confirmed_orders",
         payload={
@@ -506,11 +597,10 @@ def _orders_from_demand(item: str, as_of: date, why: str) -> SourcedInput:
             "total_kg": round(sum(o["qty_kg"] for o in orders), 1),
         },
         grade="DERIVED",
-        source="partner_item_demands · v_current_partner_demand",
+        source="partner_item_demands · partners",
         note=(
-            f"{why} → 일수요 {daily}kg × {_ORDER_WINDOW_DAYS}일, 주기 {cycle}일로 분할 "
-            f"({demand['demand_basis']}"
-            f"{', 잠정값' if demand['provisional'] else ''}) · 확정 주문이 아니다"
+            f"{why} → {' + '.join(fragments)} · 거래처 {len(fragments)}곳 합산"
+            " · 확정 주문이 아니다"
         ),
     )
 
@@ -529,9 +619,10 @@ def load_policy_values(item: str, as_of: date) -> SourcedInput:
       필수가 아니다 — 없으면 `margin_warning` 이 `null` 로 나가는 것이 정상 경로다.
       **평균값으로 메우면 마진 경고가 조용히 틀린다.**
     """
-    del as_of  # 정책은 현재 유효분 하나뿐이다 (버전 축은 policy_version 이 갖는다)
     try:
-        ratios = _mix_ratio_from_demand()
+        # ★ 비중은 **그날(`as_of`) 유효한 거래처**의 일수요로 낸다 (2026-09-14).
+        #   정책은 여전히 현재 유효분 하나다 — 버전 축은 policy_version 이 갖는다.
+        ratios = _mix_ratio_from_demand(as_of)
     except Exception as error:  # noqa: BLE001
         return SourcedInput(
             key="policy_values", payload=None, grade="MISSING", source="-", note=str(error)
@@ -558,7 +649,7 @@ def load_policy_values(item: str, as_of: date) -> SourcedInput:
     )
 
 
-def _mix_ratio_from_demand() -> dict[str, float]:
+def _mix_ratio_from_demand(as_of: date | None) -> dict[str, float]:
     """품목 비중 — **분모는 계약 품목만이다** (`#286`).
 
     🔴 계약 밖 품목이 분모에 들면 비중이 눌린다 (매입 실측 2026-09-10 · 배추 0.7643 vs 0.8096).
@@ -570,20 +661,44 @@ def _mix_ratio_from_demand() -> dict[str, float]:
 
     ★ **품목 이름을 여기 다시 적지 않는다.** 정본은 `app.contracts.core.ITEMS` 하나다 —
       두 벌을 두면 계약이 늘거나 줄 때 한쪽만 바뀐다.
+
+    🔴 **거래처가 둘이면 품목별로 더한다** (2026-09-14). 전 판은 행마다 표에 넣어
+      같은 품목의 둘째 행이 첫째를 덮고 분모에는 둘 다 들었다.
+
+    ★ `as_of` 에 유효한 거래처(`active_from <= as_of`)와 수요(`effective_from <= as_of`)
+      만 센다. 날짜를 안 주면(`None`) 날짜로 거르지 않는다 — 전 판과 같은 모양이다.
+      같은 거래처·품목에 행이 여럿이면 `effective_from` 이 가장 늦은 것 하나만 센다.
     """
+    schema = sql.Identifier(get_db_schema())
     rows = fetch_all(
         sql.SQL("""
-            SELECT i.item_name, d.daily_demand_kg
+            SELECT i.item_name, d.partner_id, p.active_from, d.effective_from,
+                   d.daily_demand_kg
               FROM {sch}.partner_item_demands d
               JOIN {sch}.items i ON i.item_id = d.item_id
+              JOIN {sch}.partners p ON p.partner_id = d.partner_id
              WHERE i.item_name = ANY(%s)
-        """).format(sch=sql.Identifier(get_db_schema())),
+               AND p.active = true
+        """).format(sch=schema),
         (list(ITEMS),),
     )
-    total = sum(_plain(r["daily_demand_kg"]) for r in rows)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        if as_of is not None and not (r["active_from"] <= as_of and r["effective_from"] <= as_of):
+            continue
+        key = (r["item_name"], r["partner_id"])
+        held = latest.get(key)
+        if held is None or r["effective_from"] > held["effective_from"]:
+            latest[key] = r
+    by_item: dict[str, list[Any]] = {}
+    for r in latest.values():
+        by_item.setdefault(r["item_name"], []).append(r["daily_demand_kg"])
+    # ★ 한 품목에 한 값이면 그 값 그대로다 (`0 + x` 가 `x` 라 전 판과 같은 수가 나온다).
+    sums = {name: _plain(sum(values)) for name, values in by_item.items()}
+    total = sum(sums.values())
     if not total:
         return {}
-    return {r["item_name"]: round(_plain(r["daily_demand_kg"]) / total, 4) for r in rows}
+    return {name: round(value / total, 4) for name, value in sums.items()}
 
 
 # ── 값 정리 ─────────────────────────────────────────────────────────────

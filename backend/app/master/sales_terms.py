@@ -48,10 +48,13 @@ FIXED              규칙 파일이 적은 고정값을 쓴다
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from psycopg import sql
+
+from app.finance.db import fetch_all, get_db_schema
 from app.master.backfill import (
     FIXED_UNIT_PRICE,
     ML_CURRENT_PRICE,
@@ -63,7 +66,22 @@ from app.master.backfill import (
 from app.master.inputs import SALES_TARGET_KIND, SourcedInput, load_forecast
 from app.master.schemas import SalesRunRequest
 
-__all__ = ["apply_sales_terms", "read_run_sales_terms", "rules_source_ref"]
+__all__ = [
+    "SalesTerms",
+    "active_partner_ids",
+    "apply_sales_terms",
+    "read_run_sales_terms",
+    "rules_source_ref",
+]
+
+#: 규칙 파일의 `sales_terms` 가 읽힌 모양 (2026-09-14 신규 거래처).
+#:
+#: ```text
+#: None                         조건을 안 적었다. 종전 그대로 아무것도 안 싣는다
+#: SalesTermsRule               객체 하나. 기존 실행(V13 등) 그대로 · 거래처 날짜를 안 본다
+#: tuple[SalesTermsRule, ...]   목록. 그날 유효한 거래처마다 적힌 순서대로 판매를 묻는다
+#: ```
+SalesTerms = SalesTermsRule | tuple[SalesTermsRule, ...] | None
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +106,7 @@ def _sales_forecast(item: str, as_of: date) -> SourcedInput:
 
 def read_run_sales_terms(
     sim_run_id: str, *, rules_fn: Callable[[str], BackfillRules] = read_run_rules
-) -> SalesTermsRule | None:
+) -> SalesTerms:
     """그 실행이 정한 상업 조건. **없으면 `None` 이고 그것이 정상이다.**
 
     🔴 **부르는 자리는 걷기와 깨어남 둘뿐이다** (`backtest_runner.walk` ·
@@ -111,6 +129,33 @@ def read_run_sales_terms(
     except Exception:
         logger.exception("판매 상업조건을 못 읽었다 - 조건 없이 간다")
         return None
+
+
+def active_partner_ids(as_of: date, partner_ids: Sequence[str]) -> frozenset[str]:
+    """`partner_ids` 중 **그날 유효한 거래처** (2026-09-14 신규 거래처).
+
+    ```text
+    유효   partners.active = true 이고 partners.active_from <= as_of
+    ```
+
+    🔴 **조회가 터지면 예외를 그대로 낸다.** 삼켜서 빈 집합을 돌려주면 *"오늘은 유효한
+      거래처가 없다"* 와 *"못 읽었다"* 가 같아진다. 부르는 자리(`scheduler._judge`)가
+      그날 판매를 `FAILED` 로 남긴다 — 못 읽은 날에는 **아무에게도 안 판다.**
+
+    ★ 규칙 파일에 적힌 거래처만 묻는다. 마스터가 거래처를 고르지 않는다 —
+      고르는 것은 여전히 규칙 파일이고, 여기서는 그날 유효한지만 본다.
+    """
+    rows = fetch_all(
+        sql.SQL("""
+            SELECT partner_id
+              FROM {sch}.partners
+             WHERE partner_id = ANY(%s)
+               AND active = true
+               AND active_from <= %s
+        """).format(sch=sql.Identifier(get_db_schema())),
+        (list(partner_ids), as_of),
+    )
+    return frozenset(r["partner_id"] for r in rows)
 
 
 def rules_source_ref(sim_run_id: str, unit_price_source: str) -> str:
