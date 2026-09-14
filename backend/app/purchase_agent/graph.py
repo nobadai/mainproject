@@ -94,7 +94,9 @@ def build_graph(
     reviewer: Reviewer | None = None,
     recorder: ToolRecorder | None = None,
 ) -> Any:
-    """7노드를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
+    """**8노드**를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
+
+    🔄 ⑧ ``review_rationale`` 이 ⑦ 뒤에 서면서 여덟이 됐다 (2026-09-14 · E3-10).
 
     ``recorder``는 ⑦ 이후 ``used_tools``를 만들 통과 기록기다 (M-1 §6). ``None``이면
     노드를 감싸지 않는다 — **어댑터를 거치지 않는 호출은 이 층 자체를 만나지 않는다.**
