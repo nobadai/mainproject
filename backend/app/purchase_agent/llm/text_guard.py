@@ -42,3 +42,34 @@ def contains_control_chars(text: str) -> bool:
     return any(
         unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\t" for ch in text
     )
+
+
+#: 숫자·날짜·비율·금액을 가릴 표시. 🔴 **표시 자체에 숫자가 없다.**
+#:
+#: ⚠️ ``<N1>`` 처럼 번호를 붙이면 그 번호가 다시 숫자라, 정제 결과에 숫자가 남았는지
+#:   보는 검사가 **자기가 만든 표시에 걸린다.**
+PLACEHOLDERS = ("<NUM>", "<DATE>", "<PCT>", "<AMT>")
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_PCT = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?\s*%")
+_AMT = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:원|kg|KRW)")
+_NUM = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+
+
+def sanitize_numerals(text: str) -> str:
+    """자연어에서 **숫자·날짜를 표시로 바꾼다.** 문장의 뜻은 남기고 값만 가린다.
+
+    🔴 **왜 값을 가리나.** 근거 자기 검토에 문장을 넣어야 *"결론이 근거보다 센가"* 를
+    판정할 수 있는데, 원본 숫자를 같이 넣으면 판단자가 그 숫자를 사유에 베껴 쓴다 —
+    ⑤ 가 라벨만 넘기기로 한 이유와 같다 (규칙 6).
+
+    순서가 있다 — 날짜·비율·금액을 **먼저** 바꾸고 남은 숫자를 마지막에 바꾼다. 반대로 하면
+    ``2026-01-05`` 가 ``<NUM>-<NUM>-<NUM>`` 이 되어 무엇이었는지 알 수 없게 된다.
+
+    ⚠️ **자연어에만 쓴다.** ``ref_id``·후보 id·enum 에 쓰면 식별자가 뭉개진다 —
+    거기 든 숫자는 지어낸 값이 아니라 **이름의 일부**다.
+    """
+    text = _DATE.sub("<DATE>", text)
+    text = _PCT.sub("<PCT>", text)
+    text = _AMT.sub("<AMT>", text)
+    return _NUM.sub("<NUM>", text)
