@@ -21,8 +21,6 @@
 
 import json
 import os
-import re
-import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -38,6 +36,7 @@ from app.purchase_agent.llm.schemas import (
     LLMStatus,
     SanitizedLLMContext,
 )
+from app.purchase_agent.llm.text_guard import contains_control_chars, contains_number
 
 #: 팀 4벌은 ``backend/.env``를 읽는데 이 저장소의 실제 파일은 루트에 있다.
 #: 어느 쪽에 두든 동작해야 하므로 **둘 다** 읽는다 (없는 파일은 무시된다).
@@ -47,24 +46,6 @@ _ENV_FILES = (
 )
 #: 에이전트 전용 접두사 — ``PURCHASE_LLM_MODEL``로 다른 에이전트와 분리한다 (critic 선례).
 _ENV_PREFIX = "PURCHASE_"
-#: 출력에 숫자가 있으면 거부한다. 팀 4벌이 전부 쓰는 규칙이고, 정의서 §1.2-3("LLM은
-#: 가격·수량 숫자를 생성하지 않는다")을 프롬프트가 아니라 **검증기**로 강제하는 장치다.
-#: ``\d``는 ASCII와 전각(１２３)을 잡지만 ``½``·``²``·``Ⅻ`` 같은 유니코드 수치 문자는
-#: 놓친다 — ``str.isnumeric()``이 그쪽을 덮는다 (Codex 교차검증).
-#: ⚠️ 한글 수사("백삼십원")는 **정규식으로 못 막는다.** 그건 판단 영역이라 프롬프트가
-#: 맡고, 여기서 잡는 건 기계적으로 판별 가능한 것뿐이다 — 이 한계를 알고 쓴다.
-_NUMERIC_PATTERN = re.compile(r"\d")
-
-
-def _contains_number(text: str) -> bool:
-    return bool(_NUMERIC_PATTERN.search(text)) or any(ch.isnumeric() for ch in text)
-
-
-def _contains_control_chars(text: str) -> bool:
-    """제어문자·zero-width·bidi 문자. rationale에 그대로 실리므로 표시 안전성 문제다."""
-    return any(
-        unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\t" for ch in text
-    )
 
 SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
@@ -349,9 +330,9 @@ def _validation_issues(
     if interpretation.chosen_candidate_id not in known:
         issues.append(ValidationIssue.UNKNOWN_CANDIDATE)
     # chosen_candidate_id는 검사 대상이 아니다 — 후보 id에 숫자가 들어갈 수 있다.
-    if _contains_number(interpretation.reason):
+    if contains_number(interpretation.reason):
         issues.append(ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN)
-    if _contains_control_chars(interpretation.reason) or _contains_control_chars(
+    if contains_control_chars(interpretation.reason) or contains_control_chars(
         interpretation.chosen_candidate_id
     ):
         issues.append(ValidationIssue.CONTROL_CHARACTERS)
