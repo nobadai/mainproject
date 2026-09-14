@@ -232,3 +232,121 @@ def test_역할_이름이_어댑터와_같다() -> None:
     from app.purchase_agent.adapter import RATIONALE_SELF_REVIEW
 
     assert rr.RATIONALE_SELF_REVIEW == RATIONALE_SELF_REVIEW
+
+
+# ── ⑤ 사유가 실제로 들어가는가 ──────────────────────────────────
+#: ⑤ 가 **실제로 불리는** 앵커. 다른 앵커는 규칙이 중품을 안 골라 판단자를 안 부른다.
+MIX_CALLED = date(2026, 9, 11)
+
+
+class _가짜판단:
+    """``MixDecision`` 이 드는 칸만 흉내 낸다 — ``applied`` 가 갈림길이다."""
+
+    def __init__(self, reason: str, *, applied: bool = True):
+        self.reason = reason
+        self.llm_status = "SUCCESS" if applied else "FALLBACK"
+
+    @property
+    def applied(self) -> bool:
+        return self.llm_status == "SUCCESS"
+
+
+def test_안_돌았으면_사유를_안_넣는다() -> None:
+    """🔴 ``None`` 이다 — **빈 문자열이 아니다** (규칙 3 의 문자열 판)."""
+    assert rr.mix_reason_for_review(None) is None
+
+
+def test_규칙_기본안이면_사유를_안_넣는다() -> None:
+    """떨어진 날의 사유는 판단자가 쓴 문장이 아니라 **코드가 박은 상수**다."""
+    assert rr.mix_reason_for_review(_가짜판단("규칙 기본안", applied=False)) is None
+
+
+def test_사유의_숫자를_가려서_넣는다() -> None:
+    가린 = rr.mix_reason_for_review(_가짜판단("2026-09-11 기준 중품을 30% 더 싣는다"))
+    assert 가린 is not None
+    assert "2026-09-11" not in 가린 and "30%" not in 가린
+    assert "<DATE>" in 가린 and "<PCT>" in 가린
+
+
+def test_못_가린_숫자가_남으면_아예_안_넣는다() -> None:
+    """🔴 못 가린 것을 넣느니 **안 본다** — 근거 문장을 다루는 규율과 같다.
+
+    ``½`` 는 ``\\d`` 로는 안 잡히는데 ``isnumeric()`` 에는 걸린다. 정제가 못 덮는 자리다.
+    """
+    assert rr.mix_reason_for_review(_가짜판단("중품을 ½ 만큼 싣는다")) is None
+
+
+def test_사유가_있으면_그_지적을_고를_수_있다() -> None:
+    """왕복 — 사유가 실린 컨텍스트로 물어보고, 검증을 지나 그 코드가 돌아온다."""
+    context = _context()
+    실린 = context.model_copy(update={"mix_reason": "스프레드가 좁은데 중품을 늘린다"})
+    결과 = sr.SelfReviewService(
+        _설정(), _됨(_응답(("MIX_REASON_LABEL_MISMATCH", None)))
+    ).review(실린)
+    assert 결과.llm_status == "SUCCESS"
+    assert [f.code for f in 결과.output.findings] == ["MIX_REASON_LABEL_MISMATCH"]
+    assert sr.validate_output(_응답(("MIX_REASON_LABEL_MISMATCH", None)), 실린)
+
+
+def _사유를_고정한_mix(reason: str):
+    from app.purchase_agent.llm.mix import MixDecision
+
+    def selector(context, default_candidate_id: str) -> MixDecision:
+        return MixDecision(
+            candidate_id=default_candidate_id,
+            reason=reason,
+            llm_status="SUCCESS",
+            llm_model="haiku",
+            llm_fallback_used=False,
+            llm_attempts=1,
+        )
+
+    return selector
+
+
+def test_판단자_사유가_검토_재료로_들어가고_지적이_왕복한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **``MIX_REASON_LABEL_MISMATCH`` 를 실제로 검사할 수 있어야 한다.**
+
+    전에는 ``build_context`` 가 늘 ``mix_reason=None`` 이라, 그 코드가 목록에는 있는데
+    **볼 재료가 없었다** — 고를 수는 있지만 무엇을 보고 고르는지가 없는 상태였다.
+
+    ★ 사유는 **그날 하나**다. ⑤ 가 그날 한 번 돌고 ⑥ 이 같은 등급 비율을 모든 안에
+      곱하므로, 검토 대상 안들이 **같은 문장**을 받는다.
+    """
+    from app.purchase_agent.graph import build_graph
+    from app.purchase_agent.state import build_initial_state
+
+    본_것: list[ReviewContext] = []
+
+    def 지적한다(context: ReviewContext) -> ReviewResult:
+        본_것.append(context)
+        return ReviewResult(
+            output=ReviewOutput(
+                findings=[FindingOut(code="MIX_REASON_LABEL_MISMATCH")]
+            ),
+            llm_status="SUCCESS",
+            llm_provider="anthropic",
+            llm_model="haiku",
+            llm_attempts=1,
+            llm_fallback_used=False,
+        )
+
+    monkeypatch.setattr(rr, "enabled", lambda key, default=False: True)
+    state = build_initial_state(ITEM, MIX_CALLED)
+    final = build_graph(
+        selector=_사유를_고정한_mix("스프레드가 넓어 중품을 30% 더 싣는다"),
+        reviewer=지적한다,
+    ).invoke(state)
+
+    assert 본_것, "⑤ 가 안 불렸다 — 이 앵커가 더 이상 그 자리가 아니다"
+    for context in 본_것:
+        assert context.mix_reason == "스프레드가 넓어 중품을 <PCT> 더 싣는다"
+        assert "MIX_APPLIED" in context.signals
+    # 🔴 같은 판단이므로 **모든 안이 같은 문장**을 받는다.
+    assert len({c.mix_reason for c in 본_것}) == 1
+
+    문면 = FINDINGS["MIX_REASON_LABEL_MISMATCH"].template.format(ref=None)
+    실린_안 = [안 for 안 in final["proposal"]["scenarios"] if 문면 in (안["risks"] or [])]
+    assert len(실린_안) == len(본_것)

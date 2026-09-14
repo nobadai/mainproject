@@ -79,11 +79,39 @@ def _보류류(문장: str) -> bool:
     return any(말 in 문장 for 말 in ("보류", "읽지 못", "미확정", "못 받"))
 
 
-def build_context(scenario: dict, signals: ScenarioSignals) -> ReviewContext:
+def mix_reason_for_review(mix: Any) -> str | None:
+    """⑤ 가 등급 조합을 고른 사유를 **정제해서** 넘긴다. 안 돌았으면 ``None`` 이다.
+
+    🔴 **⑤ 가 실제로 적용된 날만 넘긴다** (``applied``). 규칙 기본안으로 떨어진 날의
+      사유는 판단자가 쓴 문장이 아니라 **코드가 박은 상수**다 — 그것을 넘기면 판단자가
+      «자기가 고른 사유» 로 읽고, 안 한 판단을 검토하게 된다.
+
+    🔴 **가린 뒤에도 숫자가 남으면 안 넘긴다.** 못 가린 것을 넣느니 안 본다 — 근거 문장을
+      다루는 규율(``build_context``)과 같다.
+
+    ⚠️ **빈 문자열로 안 적는다** (규칙 3 의 문자열 판). 「안 돌았다」와 「사유가 비었다」는
+      다른 사실이고, 계약이 그 둘을 ``None`` 과 ``str`` 로 가른다.
+
+    ★ **그날 판단은 하나다.** ⑤ 는 그날 한 번 돌고 ⑥ 이 같은 등급 비율을 **모든 안에**
+      곱한다. 그래서 이 사유는 안마다 다르지 않고, 안 루프 **밖에서 한 번** 만든다.
+    """
+    if mix is None or not getattr(mix, "applied", False):
+        return None
+    가린 = sanitize_numerals(mix.reason or "")
+    if not 가린.strip() or contains_number(가린):
+        return None
+    return 가린
+
+
+def build_context(
+    scenario: dict, signals: ScenarioSignals, *, mix_reason: str | None = None
+) -> ReviewContext:
     """검토 재료. **숫자·날짜를 가려서** 넣는다.
 
     ⚠️ 가리기 전 원문이 새면 판단자가 그 값을 지적에 베껴 쓴다. 노드가 넣기 직전에 다시
     확인하고, 남아 있으면 그 근거를 **아예 안 넣는다** — 못 가린 것을 넣느니 안 본다.
+
+    ★ ``mix_reason`` 은 **그날 하나**라 부르는 쪽이 만들어 준다 (``mix_reason_for_review``).
     """
     claims = []
     for 항목 in scenario.get("rationale") or []:
@@ -108,7 +136,7 @@ def build_context(scenario: dict, signals: ScenarioSignals) -> ReviewContext:
             {_위험범주(줄) for 줄 in (scenario.get("risks") or [])}
         ),
         signals=[이름 for 이름, 켜짐 in _SIGNAL_LABELS(signals) if 켜짐],
-        mix_reason=None,
+        mix_reason=mix_reason,
         offered_findings=list(FINDINGS),
     )
 
@@ -172,12 +200,15 @@ def review_rationale(
     if not 고른.selected:
         return {"review_calls": tuple(기록)}
 
+    # ★ 그날 판단이 하나라 **루프 밖에서** 한 번 만든다 — 안마다 다시 만들면 같은 사유가
+    #   안마다 달리 정제될 수 있고, 그러면 같은 판단을 세 번 다르게 검토하게 된다.
+    검토용_사유 = mix_reason_for_review(mix)
     보임 = {s.label: s for s in 신호}
     바뀐 = [dict(안) for 안 in proposal["scenarios"]]
     for 안 in 바뀐:
         if 안["label"] not in 고른.selected:
             continue
-        context = build_context(안, 보임[안["label"]])
+        context = build_context(안, 보임[안["label"]], mix_reason=검토용_사유)
         결과 = reviewer(context)
         기록.append(
             _기록(
