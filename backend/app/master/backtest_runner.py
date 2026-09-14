@@ -169,6 +169,10 @@ from app.master.envelope import LLM_STATUSES
 from app.master.execution_day import CalendarNotCovered
 from app.master.forecast_gate import DayForecastReadiness, day_forecast_readiness
 
+# 🔴 **점검 칸 이름과 어휘도 주인에서 들여온다** (2026-09-14). 위 `LLM_STATUSES` 와 같은
+#   결이다 — 손으로 적으면 어휘가 느는 날 요약만 옛말을 하고 새 값의 0 이 안 찍힌다.
+from app.master.inspection import AFTER_INBOUND, AFTER_OUTBOUND, INSPECTION_STATUSES
+
 # 🔴 **마감 칸 이름의 주인에서 들여온다. 여기서 칸 이름을 안 적는다** (2026-09-12).
 #   손으로 적으면 표가 바뀌는 날 요약만 옛 이름을 말하고, 그때 나는 것은 오류가
 #   아니라 **조용한 0** 이다 — 위 `LLM_STATUSES` 와 같은 결이다.
@@ -585,6 +589,61 @@ class WalkResult:
         total: Counter[str] = Counter()
         for day in self.days:
             total[day.maintenance_status] += 1
+        return total
+
+    @property
+    def inspection_statuses(self) -> Mapping[str, Mapping[str, int]]:
+        """물류 점검 **칸별** 상태 분포 (2026-09-14). 🔴 **넷을 접지 않는다 · 0 도 든다.**
+
+        ```text
+        NOT_ATTEMPTED  칸을 안 탔다 — 개장 실패 · 안 도는 날     ← "안 했다"
+        RAN            문제를 열었거나 갱신했거나 닫았다
+        NOTHING_DUE    확인했고 손댈 것이 없었다 — 🟢 정상이다
+        FAILED         보려다 터졌다 — 🔴 **그래도 하루는 계속 간다**  ← "못 했다"
+        ```
+
+        ★★ **이 줄이 없어서 걷기 끝에 「점검이 실패한 날이 있었나」 를 증명할 수
+          없었다.** 값은 `DayRunOutcome.inspection_*_status` 에 안 접힌 채 있었고
+          **재는 줄만 없었다** (`maintenance_statuses` 때와 같은 모양).
+
+        🔴 **`FAILED` 0 을 빼지 않는다.** 여기서 묻는 것은 *"실패가 없었다"* 이고, 키가
+          안 보이면 *"없었다"* 와 *"안 셌다"* 가 같아진다 (`llm_outcomes` 와 같은 규율).
+
+        🔴 **두 칸을 한 통에 담지 않는다.** 닫는 자리는 `AFTER_OUTBOUND` 하나라 둘을
+          합치면 *"입고 뒤는 늘 돌고 출고 뒤만 터진다"* 가 안 읽힌다.
+
+        ⚠️ **사고가 아니다.** `_incident_reason` 은 이 값을 안 본다 — 점검이 터진 날도
+          하루는 끝까지 갔고, 그것은 요약에 보이는 사실이다.
+
+        ★ **이름의 주인은 `inspection.py` 다** (`INSPECTION_STATUSES` · 칸 이름).
+          `NOT_ATTEMPTED` 는 `DayRunOutcome` 의 기본값을 그대로 읽는다.
+        """
+        어휘 = (*INSPECTION_STATUSES, DayRunOutcome.inspection_inbound_status)
+        칸별: dict[str, Counter[str]] = {
+            AFTER_INBOUND: Counter(dict.fromkeys(어휘, 0)),
+            AFTER_OUTBOUND: Counter(dict.fromkeys(어휘, 0)),
+        }
+        for day in self.days:
+            칸별[AFTER_INBOUND][day.inspection_inbound_status] += 1
+            칸별[AFTER_OUTBOUND][day.inspection_outbound_status] += 1
+        return 칸별
+
+    @property
+    def inspection_counts(self) -> Mapping[str, int]:
+        """물류 점검이 **연 · 갱신한 · 닫은** 문제 수 합계 (2026-09-14). 두 칸을 더한다.
+
+        ★ **여기서 다시 세지 않는다.** 주인은 `DetectOut.counts` 이고 이쪽은 날마다
+          `InspectionOut.counts` 를 더하기만 한다.
+
+        ⚠️ **결과가 한 번도 없었으면 빈 칸이다.** 전부 `FAILED` 거나 칸을 안 탄 걷기에서
+          `opened 0` 을 채우면 *"봤는데 없었다"* 로 읽힌다 — 실제로는 **못 봤다.**
+          그 사실은 `inspection_statuses` 가 말한다.
+        """
+        total: Counter[str] = Counter()
+        for day in self.days:
+            for out in (day.inspection_inbound, day.inspection_outbound):
+                if out is not None:
+                    total.update(out.counts)
         return total
 
     @property
@@ -1338,6 +1397,12 @@ def _moment_line(result: WalkResult) -> str:
     return 머리 + f"마감 {마감:%H:%M} 뒤"
 
 
+def _inspection_line(result: WalkResult) -> str:
+    """물류 점검 한 줄. **칸 순서는 하루 안의 순서 그대로**, 칸 안은 가나다순이다."""
+    칸별 = {칸: dict(sorted(분포.items())) for 칸, 분포 in result.inspection_statuses.items()}
+    return f"물류점검  {칸별} · 문제 {dict(sorted(result.inspection_counts.items()))}"
+
+
 def format_summary(result: WalkResult) -> str:
     """걷기 결과를 사람이 읽을 줄로. **값을 새로 만들지 않는다.**"""
     lines = [
@@ -1381,6 +1446,10 @@ def format_summary(result: WalkResult) -> str:
         #    자리가 `SKIPPED_HELD_ALLOCATION` 이고, 접으면 그 줄이 사라진다.
         f"유지보수  {dict(sorted(result.maintenance_statuses.items()))}",
         f"유지어휘  {dict(sorted(result.maintenance_outcomes.items()))}",
+        # 🔴 **물류점검 줄을 접지 않는다 · 0 도 찍는다** (2026-09-14). 이 줄이 없어서
+        #    걷기 끝에 「점검이 실패한 날이 있었나」 를 증명할 수 없었다. `FAILED` 0 이
+        #    안 보이면 *"없었다"* 와 *"안 셌다"* 가 같아진다.
+        _inspection_line(result),
         # 🔴 **LLM 줄은 0 인 어휘도 찍는다** (2026-09-12). 다른 어휘 줄과 여기서
         #    갈린다 — 저쪽의 0 은 *"그 사건이 없었다"* 이고 이쪽의 `SUCCESS` 0 은
         #    **그 자체가 사고**다. 71영업일을 `SUCCESS` 0건으로 걷고도 아무도
