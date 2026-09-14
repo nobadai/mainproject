@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from app.api.primitives import Card, Chart, Column, Note, Series, Source, Stat, Table
 from app.api.sales.schema import SalesTab
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.sales.dashboard import get_sales_dashboard
 
 _ORDER_STATUS_LABELS = {
@@ -19,7 +19,7 @@ _ORDER_STATUS_LABELS = {
 
 
 def build(as_of: date) -> SalesTab:
-    dash = get_sales_dashboard(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
+    dash = get_sales_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
     summary = dash.summary
     quantity_detail = f"고객 {summary.customer_count}곳 · 총 {_kg(summary.total_sales_quantity_kg)}"
     receivable_detail = (
@@ -75,7 +75,10 @@ def build(as_of: date) -> SalesTab:
         source=Source(
             filled=True,
             owner="판매",
-            note=f"판매 확정 내역과 수금 장부 기준 · {dash.meta.as_of}",
+            note=(
+                f"판매 확정 내역과 수금 장부 기준 · {dash.meta.as_of}"
+                f" · 보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {as_of.isoformat()}"
+            ),
         ),
     )
 

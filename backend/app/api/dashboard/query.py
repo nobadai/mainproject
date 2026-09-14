@@ -23,10 +23,39 @@ from app.api.logistics import query as logistics_q
 from app.api.primitives import Badge, Column, Note, Stat, Table
 from app.api.purchase import query as purchase_q
 from app.api.sales import query as sales_q
+from app.api.shown_run import SHOWN_SIM_RUN_ID
+from app.contracts.core import ITEMS
+
+#: 재무 선택 상태 키 → 같은 화면 현금 그래프 계열 이름(`finance_q.dashboard_cash`).
+#: ★ 「운영 여유」 칸과 그래프 선이 **같은 말**로 기준을 밝히게 한다. 모르는 키면
+#:   재무 탭이 준 상태 이름(`fi.states[].label`)을 그대로 쓴다.
+_BASIS = {"base": "대출 제외", "loan": "대출 포함"}
 
 
 def _pending(plans) -> int:
     return sum(1 for p in plans if p.pending)
+
+
+def _plan_item(key: str) -> str | None:
+    """안의 품목. 🔴 매입 `Plan` 스키마에 품목 칸이 없다 (2026-09-14 확인).
+
+    매입 `_plan()` 이 `key=f"{item} · {label}"` 로 품목을 이름 앞에 넣는다. 그 앞자리를
+    **계약 품목(`ITEMS`)과 맞춰** 읽는다 — 이름을 코드에 박지 않고, 계약 밖이면 공란.
+    매입 스키마에 품목 칸이 서는 날 이 함수를 그 칸 읽기로 바꾼다.
+    """
+    return next((item for item in ITEMS if key.startswith(f"{item} · ")), None)
+
+
+def _buffer_stat(fi):
+    """재무 「운영 여유」 에 **어느 기준인가** 를 붙인다. 값은 건드리지 않는다."""
+    if not fi.stats:
+        return None
+    stat = fi.stats[0]
+    label = next((s.label for s in fi.states if s.key == fi.selected), None)
+    basis = _BASIS.get(fi.selected, label)
+    if not basis:
+        return stat
+    return stat.model_copy(update={"label": f"{stat.label} · {basis}"})
 
 
 def build(as_of: date) -> DashboardTab:
@@ -35,25 +64,33 @@ def build(as_of: date) -> DashboardTab:
     at = axis.as_of_index
 
     fc = forecast_q.build(as_of, "배추")
-    pu = purchase_q.build(as_of)
+    #  ★ 매입은 축을 안 주면 모든 실행을 섞는다. 다른 네 탭과 같은 실행을 넘긴다
+    #    (`app/api/shown_run.py` 한 자리).
+    pu = purchase_q.build(as_of, sim_run_id=SHOWN_SIM_RUN_ID)
     fi = finance_q.build(as_of, "base")
     lg = logistics_q.build(as_of, "stock")
     sl = sales_q.build(as_of)
 
     cabbage = next(c for c in fc.cards if c.item == "배추")
+    cards = {c.item: c for c in fc.cards}
     pending = _pending(pu.plans)
+    today = axis.days[at] if 0 <= at < n else None
 
     #  ★ 두 그래프는 **주인 부서가 만듭니다.** 여기서 만들면 같은 값을 두 군데서
     #    계산하게 되고, 실제로 갈라졌습니다 — 요약은 재고 4,550kg 인데 그래프
     #    끝은 14,600kg 이었습니다. 이제 둘 다 물류에서 나옵니다.
-    cash = finance_q.dashboard_cash(n, at)
+    cash = finance_q.dashboard_cash(axis)
     stock = logistics_q.dashboard_stock(n, at, as_of)
 
     return DashboardTab(
         axis=axis,
         badges=[
-            Badge(text="장 열림 · ML 배치 06:10", tone="good"),
-            Badge(text="open_day 완료 · 전일 승계", tone="info"),
+            #  ★ 날짜축이 가진 사실만 적는다. 배치 시각·개장 처리 결과는 이 응답에
+            #    없으므로 적지 않는다 (예전 고정 문구를 뺐다 · 2026-09-14).
+            *([] if today is None else [
+                Badge(text=("장 열림" if today.market_open else "휴장"),
+                      tone=("good" if today.market_open else "neutral")),
+            ]),
             Badge(text=(f"승인 대기 {pending}건" if pending else "오늘 승인 완료"),
                   tone=("warn" if pending else "good")),
         ],
@@ -64,10 +101,11 @@ def build(as_of: date) -> DashboardTab:
                  value=f"{cabbage.predicted:,}", unit="원/kg",
                  detail=f"구간 {cabbage.lower:,}–{cabbage.upper:,} · 폭 {cabbage.ci_width}",
                  tone="info", raw=cabbage.predicted),
-            fi.stats[0],
+            *([s] if (s := _buffer_stat(fi)) is not None else []),
             lg.panes[0].stats[0],
             Stat(label="매입 승인 대기", value=str(pending), unit="건",
-                 detail=" · ".join(p.key for p in pu.plans) + " 두 안",
+                 detail=(", ".join(p.key for p in pu.plans) + f" · {len(pu.plans)}안"
+                         if pu.plans else "오늘 낸 안 없음"),
                  tone=("warn" if pending else "good"), raw=pending),
             sl.stats[0],
         ],
@@ -83,12 +121,16 @@ def build(as_of: date) -> DashboardTab:
             ],
             rows=[
                 {
-                    "item": "배추", "ml": f"{cabbage.predicted:,}", "plan": f"{p.key}안",
+                    "item": item,
+                    "ml": (None if (card := cards.get(item)) is None
+                           else f"{card.predicted:,}"),
+                    "plan": f"{p.key}안",
                     "unit_qty": f"{p.unit_price:,} × {p.qty_kg:,.0f}",
                     "amount": f"{p.amount_krw:,}",
                     "state": ("승인 대기" if p.pending else "후보"),
                 }
                 for p in pu.plans
+                for item in [_plan_item(p.key)]
             ],
             empty_text="오늘 낸 매입안이 없습니다",
         ),

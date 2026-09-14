@@ -40,6 +40,10 @@ from app.master.day_gate import DayGate
 from app.master.inbound import InboundPartOut, receive_arrivals
 
 AS_OF = date(2026, 1, 7)
+
+#: 이 검사가 넘기는 실행 축. 🔴 **운영값(번인)을 안 쓴다** — 부르는 쪽 축은 기본값이
+#: 없고(2026-09-14) 검사도 제 축을 명시해 넘긴다.
+축 = "SIM-TEST-INBOUND"
 토요일 = date(2026, 1, 10)
 
 
@@ -136,7 +140,7 @@ def test_안_열린_날은_받지_않는다(monkeypatch: pytest.MonkeyPatch) -> 
     물류 = _물류()
     inbound.register_inbound("logistics", 물류)
 
-    out = receive_arrivals(AS_OF, connect=_가짜커넥션)
+    out = receive_arrivals(AS_OF, connect=_가짜커넥션, sim_run_id=축)
 
     assert out.status == "NOT_OPENED"
     assert 물류.calls == [], "장부가 안 열렸는데 파트를 불렀다"
@@ -147,7 +151,7 @@ def test_안_열린_것과_받을_게_없는_것을_가른다(monkeypatch: pytes
     monkeypatch.setattr(inbound, "check_day_gate", _막힌_Gate)
     inbound.register_inbound("logistics", _물류())
 
-    out = receive_arrivals(AS_OF, connect=_가짜커넥션)
+    out = receive_arrivals(AS_OF, connect=_가짜커넥션, sim_run_id=축)
 
     assert out.status != "NOTHING_DUE"
     assert out.status != "BLOCKED", (
@@ -160,7 +164,7 @@ def test_다음에_할_일을_해석하지_않고_옮긴다(monkeypatch: pytest.
     monkeypatch.setattr(inbound, "check_day_gate", _막힌_Gate)
     inbound.register_inbound("logistics", _물류())
 
-    out = receive_arrivals(AS_OF, connect=_가짜커넥션)
+    out = receive_arrivals(AS_OF, connect=_가짜커넥션, sim_run_id=축)
 
     assert out.next_action == "OPEN_DAY_REQUIRED"
     assert out.reason == "한 번도 열린 적이 없다"
@@ -178,7 +182,7 @@ def test_열린_날은_평소대로_받는다(monkeypatch: pytest.MonkeyPatch) -
     물류 = _물류(InboundPartOut(part="logistics", status="RECEIVED", received=["INB-A-1"]))
     inbound.register_inbound("logistics", 물류)
 
-    out = receive_arrivals(AS_OF, connect=_가짜커넥션)
+    out = receive_arrivals(AS_OF, connect=_가짜커넥션, sim_run_id=축)
 
     assert out.status == "RECEIVED"
     assert 물류.calls == [AS_OF]
@@ -226,7 +230,7 @@ def test_토요일에도_받는다(monkeypatch: pytest.MonkeyPatch) -> None:
     물류 = _물류(InboundPartOut(part="logistics", status="RECEIVED", received=["INB-SAT-1"]))
     inbound.register_inbound("logistics", 물류)
 
-    out = receive_arrivals(토요일, connect=_가짜커넥션)
+    out = receive_arrivals(토요일, connect=_가짜커넥션, sim_run_id=축)
 
     assert out.status == "RECEIVED"
     assert 물류.calls == [토요일]
@@ -240,7 +244,7 @@ def test_엔드포인트가_실패도_200_으로_낸다(monkeypatch: pytest.Monk
     import app.main
 
     client = TestClient(app.main.app)
-    resp = client.post(f"/master/days/{AS_OF.isoformat()}/receive")
+    resp = client.post(f"/master/days/{AS_OF.isoformat()}/receive", params={"sim_run_id": 축})
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "NOT_OPENED"

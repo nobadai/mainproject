@@ -2,7 +2,7 @@
 
 ```text
 python -m app.master.backfill_runner
-    --sim-run-id SIM-WALK-202601 --start 2026-02-07 --end 2026-09-09
+    --sim-run-id SIM-WALK-202601 --start 2026-02-07 --end 2026-09-18
         → 세어서 보여 준다 · 🟢 한 행도 안 쓴다
 
 같은 명령에 --commit 을 더하면
@@ -238,11 +238,14 @@ def format_summary(run: BackfillRunOut) -> str:
     if result.rules is not None:
         lines.append(f"규칙      매입 {result.rules.procurement} · 판매 {result.rules.sales}")
     if result.blocked_days:
-        # ⚠️ **조용히 자르지 않는다.** 경계 밖이라 자동으로는 못 채우는 날이다 —
-        #    `backfill.py` 가 이미 막았고, 여기서는 그 사실을 보이기만 한다.
+        # ⚠️ **조용히 자르지 않는다.** 경계 밖이거나 실제 오늘 이후라 자동으로는 못
+        #    채우는 날이다 — `backfill.py` 가 이미 막았고, 여기서는 그 사실을 보이기만
+        #    한다. 둘 중 어느 쪽인지는 행마다 `reason` 이 가른다.
         first = result.blocked_days[0].isoformat()
         last = result.blocked_days[-1].isoformat()
-        lines.append(f"경계 밖   {len(result.blocked_days)}일 ({first} ~ {last}) — 사람만 승인한다")
+        lines.append(
+            f"경계 밖·오늘 이후   {len(result.blocked_days)}일 ({first} ~ {last}) — 사람만 승인한다"
+        )
     return "\n".join(lines)
 
 

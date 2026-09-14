@@ -93,7 +93,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(400px,1fr))]">
-        <Panel title="현금이 어떻게 움직이나" subtitle="점선부터는 아직 안 일어난 일">
+        <Panel title="현금이 어떻게 움직이나" subtitle="재무 일마감 현금 · 대출 제외/포함">
           <LineChart
             chart={data.cash_chart}
             days={data.axis.days}

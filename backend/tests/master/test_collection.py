@@ -52,6 +52,10 @@ from app.master.collection import CollectionPartOut, collect_receipts
 from app.master.day_gate import DayGate
 
 AS_OF = date(2026, 1, 7)
+
+#: 이 검사가 넘기는 실행 축. 🔴 **운영값(번인)을 안 쓴다** — 부르는 쪽 축은 기본값이
+#: 없고(2026-09-14) 검사도 제 축을 명시해 넘긴다.
+축 = "SIM-TEST-COLLECTION"
 토요일 = date(2026, 1, 10)
 
 
@@ -173,7 +177,7 @@ def test_미등록이면_사유가_남는다():
     """
     conn = _가짜커넥션()
 
-    out = collect_receipts(AS_OF, connect=lambda: conn)
+    out = collect_receipts(AS_OF, connect=lambda: conn, sim_run_id=축)
 
     assert out.status == "NOTHING_DUE"
     assert out.missing == ["finance"]
@@ -186,7 +190,7 @@ def test_들어올_것이_없는_것은_미등록이_아니다():
     collection.register_collection("finance", _재무())
     conn = _가짜커넥션()
 
-    out = collect_receipts(AS_OF, connect=lambda: conn)
+    out = collect_receipts(AS_OF, connect=lambda: conn, sim_run_id=축)
 
     assert out.status == "NOTHING_DUE"
     assert out.missing == [], "등록은 돼 있다"
@@ -202,7 +206,7 @@ def test_수금하면_한_번_커밋한다():
     collection.register_collection("finance", _재무(out=_수금("RCV-A-1")))
     conn = _가짜커넥션()
 
-    out = collect_receipts(AS_OF, connect=lambda: conn)
+    out = collect_receipts(AS_OF, connect=lambda: conn, sim_run_id=축)
 
     assert out.status == "COLLECTED"
     assert out.parts[0].collected == ["RCV-A-1"]
@@ -216,7 +220,7 @@ def test_터지면_통째로_롤백한다():
     collection.register_collection("finance", _재무(raises=RuntimeError("축이 안 맞는다")))
     conn = _가짜커넥션()
 
-    out = collect_receipts(AS_OF, connect=lambda: conn)
+    out = collect_receipts(AS_OF, connect=lambda: conn, sim_run_id=축)
 
     assert out.status == "FAILED"
     assert "축이 안 맞는다" in out.reason
@@ -236,7 +240,7 @@ def test_실패해도_예외가_안_오른다():
     """
     collection.register_collection("finance", _재무(raises=RuntimeError("boom")))
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "FAILED"
     assert out.parts == [], "실패했으면 파트 결과를 내지 않는다"
@@ -251,7 +255,7 @@ def test_안_열린_날은_수금하지_않는다(monkeypatch: pytest.MonkeyPatc
     재무 = _재무()
     collection.register_collection("finance", 재무)
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "NOT_OPENED"
     assert 재무.calls == [], "장부가 안 열렸는데 파트를 불렀다"
@@ -268,7 +272,7 @@ def test_안_열린_것을_BLOCKED_로_접지_않는다(monkeypatch: pytest.Monk
     monkeypatch.setattr(collection, "check_day_gate", _막힌_Gate)
     collection.register_collection("finance", _재무())
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status != "NOTHING_DUE"
     assert out.status != "BLOCKED", (
@@ -282,7 +286,7 @@ def test_다음에_할_일을_해석하지_않고_옮긴다(monkeypatch: pytest.
     monkeypatch.setattr(collection, "check_day_gate", _막힌_Gate)
     collection.register_collection("finance", _재무())
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.next_action == "OPEN_DAY_REQUIRED"
     assert out.reason == "한 번도 열린 적이 없다"
@@ -300,7 +304,7 @@ def test_열린_날은_평소대로_수금한다(monkeypatch: pytest.MonkeyPatch
     재무 = _재무(out=_수금("RCV-A-1"))
     collection.register_collection("finance", 재무)
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "COLLECTED"
     assert 재무.calls == [AS_OF]
@@ -326,7 +330,7 @@ def test_파트가_BLOCKED_면_전체도_BLOCKED_다():
     )
     collection.register_collection("finance", _재무(out=막힘))
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "BLOCKED"
     assert out.status != "NOTHING_DUE", "들어올 게 있는데 없다고 말했다"
@@ -343,7 +347,7 @@ def test_수금한_것이_있어도_막힌_것이_있으면_BLOCKED_다():
 
     collection.register_collection("finance", _둘을_내는_재무())
 
-    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션())
+    out = collect_receipts(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "BLOCKED"
 
@@ -361,7 +365,7 @@ def test_실행일_달력으로_as_of_를_보정하지_않는다():
     재무 = _재무(out=_수금("RCV-SAT-1"))
     collection.register_collection("finance", 재무)
 
-    out = collect_receipts(토요일, connect=lambda: _가짜커넥션())
+    out = collect_receipts(토요일, connect=lambda: _가짜커넥션(), sim_run_id=축)
 
     assert out.status == "COLLECTED"
     assert 재무.calls == [토요일], "실행일 달력으로 밀었다"
@@ -403,7 +407,7 @@ def test_엔드포인트가_실패도_200_으로_낸다(monkeypatch: pytest.Monk
     import app.main
 
     client = TestClient(app.main.app)
-    resp = client.post(f"/master/days/{AS_OF.isoformat()}/collect")
+    resp = client.post(f"/master/days/{AS_OF.isoformat()}/collect", params={"sim_run_id": 축})
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "NOT_OPENED"

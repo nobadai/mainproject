@@ -182,7 +182,7 @@ def test_안_도는_날에는_아예_안_부른다() -> None:
         deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
     )
 
-    out = run_scheduled_day(action, inspect_fn=점검, items=("배추",))
+    out = run_scheduled_day(action, inspect_fn=점검, items=("배추",), sim_run_id=SIM)
 
     assert 점검.phases == []
     assert out.inspection_inbound_status == "NOT_ATTEMPTED"

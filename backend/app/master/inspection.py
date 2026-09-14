@@ -44,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from app.logistics.agent.detect import detect_logistics_exceptions
 from app.logistics.agent.schemas import DetectOut, DetectPhase
@@ -53,7 +53,9 @@ from app.logistics.db import get_connection
 __all__ = [
     "AFTER_INBOUND",
     "AFTER_OUTBOUND",
+    "INSPECTION_STATUSES",
     "InspectionOut",
+    "InspectionStatus",
     "run_logistics_inspection",
 ]
 
@@ -62,6 +64,11 @@ __all__ = [
 AFTER_INBOUND: DetectPhase = "AFTER_INBOUND"
 #: 출고 직후. **그날 조건을 없앤 사건이 다 끝난 자리**라 해소(RESOLVED)가 여기서 난다.
 AFTER_OUTBOUND: DetectPhase = "AFTER_OUTBOUND"
+
+#: 점검 한 칸의 결과 어휘. 🔴 **주인은 이 한 줄이다** — `InspectionOut.status` 도 이것을
+#: 가리키고, 걷기 요약이 0건을 채울 때도 이것을 읽는다 (`envelope.LLM_STATUSES` 와 같은 모양).
+InspectionStatus = Literal["RAN", "NOTHING_DUE", "FAILED"]
+INSPECTION_STATUSES: frozenset[str] = frozenset(get_args(InspectionStatus))
 
 
 @dataclass(frozen=True)
@@ -83,7 +90,7 @@ class InspectionOut:
 
     as_of: date
     phase: str
-    status: Literal["RAN", "NOTHING_DUE", "FAILED"]
+    status: InspectionStatus
     reason: str = ""
     #: 물류가 낸 값 **그대로**. 🔴 **접지 않는다** — 무엇을 열고 갱신하고 닫았는지의
     #: 주인은 `DetectOut` 하나다.

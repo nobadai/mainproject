@@ -33,7 +33,7 @@ sales      0행               🔴
 from __future__ import annotations
 
 import unicodedata
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
 from uuid import uuid4
@@ -161,6 +161,7 @@ def _진짜_백필(sale: SaleConfirmationOut | None) -> BackfillOut:
         runs_on=lambda *, sim_run_id, as_of, limit: [_판매행()] if as_of == 오늘 else [],
         decisions_of=lambda request_id: [],
         decide=_승인문(sale),
+        today=lambda: 오늘 + timedelta(days=1),
     )(sim_run_id="SIM-SALESCHAIN-20260911", start=오늘, end=오늘)
 
 

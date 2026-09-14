@@ -85,6 +85,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from app.master.clock import today_in_seoul
 from app.master.decision import (
     SALES_CYCLE,
     DecisionIn,
@@ -110,15 +111,33 @@ AUTO_BACKFILL = "AUTO-BACKFILL"
   이것이다 — 자동일 때도 **「누가」를 정직하게** 적는다.
 """
 
-BACKFILL_BOUNDARY_AS_OF = date(2026, 9, 9)
-"""자동으로 채울 수 있는 마지막 날. **이 날까지 포함이다.**
+BACKFILL_BOUNDARY_AS_OF = date(2026, 9, 18)
+"""자동으로 채울 수 있는 마지막 날. **이 날까지 포함이다.** 🔴 **가드가 둘이다.**
 
 ```text
-as_of <= 2026-09-09   자동으로 채운다
-as_of >= 2026-09-10   🔴 사람만. 한 행도 안 쓴다
+as_of <= 2026-09-18  그리고  as_of < 실제 서울 오늘   자동으로 채운다
+둘 중 하나라도 아니면                                🔴 사람만. 한 행도 안 쓴다
 ```
 
-🔴 **`config_json` 으로 빼지 않는다.** 이건 규칙이 아니라 **가드**라, 옮기려면
+★ **2026-09-14 결정으로 09-13 에서 09-18 로 옮겼다.** 최종 실행 SIM-CHAIN-FINAL 을
+  2026-09-19(토) 아침에 01-01~09-20 · 판정 09-20 12시로 건다. 그 시점에 09-14~09-18
+  은 과거라 자동 승인이 「과거 재현」이다. 재무·물류가 동의했다.
+
+🔴 **그래서 실제 오늘 가드를 함께 둔다.** 경계 상수만 미래(09-18)로 옮기면 09-15~
+  09-18 사이에 누가 걷기를 걸 때 **그날 안을 자동 승인**할 수 있다 — 에이전트 자율
+  승인 금지가 뚫린다. `as_of >= today_in_seoul()` 이면 경계 안이어도 막는다.
+
+  ★ 실제 날짜는 새로 읽지 않고 마스터 시각 정본 `clock.today_in_seoul` 을 쓴다.
+
+  ⚠️ **걷기의 `--now`(판정 시각)로 가드하지 않는다.** `--now` 는 사람이 고르는 입력이라
+    그것으로 재면 미래 시각 하나로 가드가 풀린다 — 이 가드는 **실제 시계**다.
+
+이전(09-14 오전) · **2026-09-14 결정으로 09-09 에서 09-13 으로 옮겼다.** 오늘(09-14) 기준 어제까지의
+  과거만 자동이다. 09-12(토)·09-13(일)은 배치 없는 날이라 실제로 늘어나는 자동
+  승인일은 09-10·09-11 두 영업일이다. 🔴 **오늘 이후 자동 승인은 여전히 금지다**
+  (에이전트 자율 승인 금지) — 경계는 설정으로 빼지 않고 diff 로만 옮긴다.
+
+이전(09-14 오전) · 🔴 **`config_json` 으로 빼지 않는다.** 이건 규칙이 아니라 **가드**라, 옮기려면
   diff 에 보여야 한다. 설정으로 내리면 오늘 이후를 자동 승인하는 것이 **행 하나
   고치는 일**이 된다.
 """
@@ -261,7 +280,7 @@ NOT_APPROVABLE        승인이 성립하는 종료 코드가 아니다
 NO_RULE_FOR_CYCLE     그 사이클 규칙을 설정이 안 정했다
 LABEL_NOT_OFFERED     규칙이 가리키는 안이 그날 없다
 AMBIGUOUS_TYPE        규칙이 가리키는 축의 후보가 둘 이상이라 안 골랐다
-BLOCKED_BY_BOUNDARY   as_of 가 경계 밖이다
+BLOCKED_BY_BOUNDARY   as_of 가 경계 밖이거나 실제 서울 오늘 이후다 (사유 문장이 둘을 가른다)
 FAILED                해 봤는데 터졌다 (사유를 같이 적는다)
 ```
 
@@ -838,6 +857,7 @@ def backfill_decisions(
     decisions_of: Callable[[str], Sequence[DecisionOut]] = list_decisions,
     decide: Callable[[str, DecisionIn], DecisionOut] = record_decision,
     limit_per_day: int = 500,
+    today: Callable[[], date] = today_in_seoul,
 ) -> BackfillOut:
     """`start` 부터 `end` 까지, 규칙이 가리키는 안을 **승인 문으로** 승인한다.
 
@@ -855,6 +875,10 @@ def backfill_decisions(
     :param decisions_of: 그 업무 키에 이미 붙은 결정.
     :param decide: 🔴 **승인 문.** 기본값이 `record_decision` 자체다 — `None` 을
         안 받는다 (`backtest_runner.walk` 의 `run_day_fn` 과 같은 규율).
+    :param today: 🔴 **실제 서울 오늘.** 기본이 `clock.today_in_seoul` 자체다 — `None`
+        을 안 받는다 (`clock.py` 의 규율). 한 번만 읽어 모든 행에 같은 날을 쓴다 —
+        행마다 읽으면 자정을 넘기는 순간 한 백필 안에서 가드가 갈린다.
+        ⚠️ 걷기의 `--now` 가 아니다. 판정 시각으로는 이 가드를 안 연다.
     :raises ValueError: 범위가 거꾸로일 때. **막고 사유를 낸다.**
     :raises LookupError: 그 실행을 못 찾아 규칙을 **읽지도 못했을** 때.
         🔴 *"규칙이 없다"* 와 섞지 않는다 — 저쪽은 값(`NO_RULE`)이고 이쪽은 사고다.
@@ -875,13 +899,18 @@ def backfill_decisions(
 
     results: list[BackfilledRun] = []
     blocked: list[date] = []
+    real_today = today()
 
     day = start
     while day <= end:
-        if day > BACKFILL_BOUNDARY_AS_OF:
+        if day > BACKFILL_BOUNDARY_AS_OF or day >= real_today:
             blocked.append(day)
         for row in runs_on(sim_run_id=sim_run_id, as_of=day, limit=limit_per_day):
-            results.append(_backfill_one(row, rules, decisions_of=decisions_of, decide=decide))
+            results.append(
+                _backfill_one(
+                    row, rules, real_today=real_today, decisions_of=decisions_of, decide=decide
+                )
+            )
         day += timedelta(days=1)
 
     return BackfillOut(
@@ -899,6 +928,7 @@ def _backfill_one(
     row: Mapping[str, Any],
     rules: BackfillRules,
     *,
+    real_today: date,
     decisions_of: Callable[[str], Sequence[DecisionOut]],
     decide: Callable[[str, DecisionIn], DecisionOut],
 ) -> BackfilledRun:
@@ -926,6 +956,15 @@ def _backfill_one(
             "BLOCKED_BY_BOUNDARY",
             f"{as_of.isoformat()} 은 백필 경계({BACKFILL_BOUNDARY_AS_OF.isoformat()}) 밖이다"
             " — 그 뒤는 사람만 승인한다",
+        )
+    # 🔴 **경계 안이어도 실제 서울 오늘 이후면 막는다** (2026-09-14). 경계를 미래(09-18)
+    #    로 옮겼기 때문에 이 줄이 없으면 그 사이에 건 걷기가 그날 안을 자동 승인한다.
+    #    ⚠️ 걷기의 `--now` 가 아니라 실제 시계다.
+    if as_of >= real_today:
+        return 결과(
+            "BLOCKED_BY_BOUNDARY",
+            f"{as_of.isoformat()} 은 실제 오늘({real_today.isoformat()}) 이후다"
+            " — 당일·미래 자동 승인 금지 · 사람만 승인한다",
         )
 
     # ── ② 승인이 성립하는 실행인가 ──────────────────────────────────

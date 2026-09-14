@@ -9,8 +9,11 @@ from pydantic import ValidationError
 
 from app.sales.partner_profile import (
     FOREIGN_FIELDS,
+    PartnerAlreadyExists,
     PartnerProfile,
+    PartnerProfileCreate,
     PartnerProfileUpdate,
+    create_partner_profile,
     get_partner_profile,
     update_partner_profile,
 )
@@ -73,6 +76,66 @@ def get_sales_run_by_id(run_id: UUID) -> SalesAgentRunResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Sales Agent run was not found",
         ) from error
+
+
+@router.post(
+    "/partners",
+    response_model=PartnerProfile,
+    status_code=status.HTTP_201_CREATED,
+    summary="거래처 등록",
+)
+def add_partner_profile(body: dict[str, object]) -> PartnerProfile:
+    """새 거래처를 만들고 **저장된 행**을 돌려준다.
+
+    ★ 실행 축(`sim_run_id`)을 받지 않는다. 거래처는 실행과 무관한 원장 행이라
+      «A 실행의 거래처» 라는 개념이 없다 — `update_partner_profile` 과 같은 규율이다.
+
+    🔴 **여신 한도는 여기서 만들지 않는다.** 정본은 재무의 `partner_credit_limits`
+       이고, 같은 이름의 칸을 거래처 행에 두면 두 곳이 다른 한도를 말하는 날이 온다.
+    """
+    foreign = sorted(name for name in body if name in FOREIGN_FIELDS)
+    if foreign:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=" ".join(FOREIGN_FIELDS[name] for name in foreign),
+        )
+    try:
+        create = PartnerProfileCreate.model_validate(body)
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_readable(error)
+        ) from error
+    try:
+        return create_partner_profile(create=create)
+    except PartnerAlreadyExists as error:
+        #  🔴 409 다. 400 으로 내면 화면이 «입력이 틀렸다» 로 읽어 칸을 빨갛게 만든다 —
+        #     틀린 것은 칸이 아니라 이미 그 코드가 쓰이고 있다는 사실이다.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"이미 등록된 거래처 코드입니다: {create.partner_id}",
+        ) from error
+
+
+#: 칸 이름을 사용자가 읽는 말로 바꾼다. **값은 바꾸지 않는다.**
+_FIELD_LABELS = {
+    "partner_id": "내부 거래처 코드",
+    "partner_name": "거래처명",
+    "partner_type": "거래처 유형",
+    "sales_collection_days": "결제일수",
+}
+
+
+def _readable(error: ValidationError) -> str:
+    """Pydantic 오류를 사용자 문장으로 옮긴다. **원인을 숨기지 않는다.**
+
+    ⚠️ `str(error)` 를 그대로 내면 `1 validation error for PartnerProfileCreate` 같은
+      내부 모델 이름이 화면에 뜬다. 어느 칸이 왜 막혔는지는 그대로 나른다.
+    """
+    lines = []
+    for item in error.errors():
+        field = ".".join(str(part) for part in item["loc"]) or "입력"
+        lines.append(f"{_FIELD_LABELS.get(field, field)}: {item['msg']}")
+    return " / ".join(lines)
 
 
 @router.get(

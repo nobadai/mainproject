@@ -233,3 +233,103 @@ def 미적용_전이_조회를_막는다(monkeypatch: pytest.MonkeyPatch) -> Non
         return []
 
     monkeypatch.setattr(미적용_조회_문, 아무것도_없다)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  `db` 마크가 없는 검사는 실 DB 없이 돈다 (2026-09-14)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **아래 셋은 `@pytest.mark.db` 검사에는 안 걸린다.** 그 검사는 실제 표를 재는 것이
+#    목적이라, 여기서 막으면 초록인데 아무것도 안 잰 검사가 된다.
+#
+# ★ **`.env` 가 없는 자리에서 `tests/master` 만 돌리면 183건이 빨갰다** (측정 2026-09-14).
+#   전체 스위트에서는 41건으로 보였는데, `tests/finance` · `tests/sales` 의 어떤 모듈이
+#   **수집 때** `os.environ.setdefault("DB_SCHEMA", ...)` 를 불러 주기 때문이다. 남의
+#   폴더가 먼저 수집되느냐로 마스터 검사의 색이 갈리면 안 된다.
+
+
+def _실_DB_검사다(request: pytest.FixtureRequest) -> bool:
+    return request.node.get_closest_marker("db") is not None
+
+
+#: `tests/master` 가 이미 쓰는 스키마 이름 (`test_outbound_carries_run_axis.py` 와 같은 값).
+검사용_스키마 = "haetdeul"
+
+
+@pytest.fixture(autouse=True)
+def 스키마_이름을_환경에_둔다(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`get_db_schema()` 가 읽는 `DB_SCHEMA` 를 **환경에 둔다. 연결은 안 연다.**
+
+    ★ 이 이름으로 막히던 검사는 전부 가짜 커넥션에 실린 SQL 문장을 잰다. 스키마 이름은
+      문장에 붙는 글자일 뿐이고, 기대값도 같은 `get_db_schema()` 로 짓는다.
+    """
+    if _실_DB_검사다(request):
+        return
+    monkeypatch.setenv("DB_SCHEMA", 검사용_스키마)
+
+
+#: 매입 경계를 읽는 조회가 **DB 로 나가는 문**.
+매입_경계_조회_문 = "app.master.procurement_boundary.list_runs"
+
+
+@pytest.fixture(autouse=True)
+def 매입_경계_조회를_막는다(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """판매 진입점이 읽는 매입 경계를 **DB 대신 「그날 그 축에 행이 없다」로** 받는다.
+
+    🔴 **`run_sales` 가 `_procurement_boundary` 로 `master_agent_runs` 를 읽는다**
+       (2026-09-10 · 라우팅 개방). 안 막으면 판매 검사 41건이 조용히 실 DB 를 친다.
+
+    ★ **표 접근 하나만 막는다.** 판정(`①` 행 → `②` 관문 → `③` 실행일 → `④` 그 밖)은
+      진짜 코드가 돈다. 그래서 평일은 `NO_PROCUREMENT_RUN`, 토요일은
+      `NOT_EXECUTION_DAY` 로 그대로 나온다.
+
+    ★ **경계 판정 자체를 재는 검사는 `list_runs` 대역을 직접 꽂는다**
+      (`test_procurement_boundary.py` · `test_ledger_gap_key.py`) — 이 fixture 뒤에
+      꽂으므로 그쪽 대역이 이긴다.
+
+    🔴 **격리가 실제로 섰는지는 `test_db_isolation.py` 가 잰다.**
+    """
+    if _실_DB_검사다(request):
+        return
+
+    def 행이_없다(**kwargs: object) -> list[object]:
+        return []
+
+    monkeypatch.setattr(매입_경계_조회_문, 행이_없다)
+
+
+class 실_DB_연결을_열었다(AssertionError):
+    """`db` 마크가 없는 검사가 `psycopg.connect` 까지 갔다."""
+
+
+@pytest.fixture(autouse=True)
+def 실_DB_연결을_막는다(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **`db` 마크가 없는 검사가 연결을 열려 하면 그 자리에서 예외를 던진다.**
+
+    ★ **문이 하나다.** 재무 · 물류 · 매입 · 판매 · ML 의 `get_connection` 이 전부
+      `psycopg.connect` 를 부른다. 이름을 복사해 간 모듈이 많아도 끝은 여기라, 여기
+      하나를 막으면 새 경로가 생겨도 실 DB 까지는 안 간다.
+
+    ★ **`.env` 가 있는 자리를 없는 자리와 같게 만든다.** 없는 자리에서는 환경변수
+      확인이 먼저 터져 여기까지 안 온다. 있는 자리에서는 이 가드가 없으면 새는 검사가
+      **팀 공용 DB 를 조용히 치고** 답이 그날 표에 따라 갈린다.
+
+    ⚠️ **예외를 삼키는 경로는 이 가드로 빨개지지 않는다.** 검사 뒤에 「불렸다」로
+      실패시키면 기존 검사 204건이 빨개져서(측정 2026-09-14 · 가짜 접속 환경변수)
+      그 판정은 넣지 않았다. 삼키는 경로도 **실 DB 에는 닿지 않는다.**
+    """
+    if _실_DB_검사다(request):
+        return
+
+    import psycopg
+
+    def 막는다(*args: object, **kwargs: object) -> object:
+        raise 실_DB_연결을_열었다(
+            f"db 마크가 없는 검사가 실 DB 연결을 열었다: {request.node.nodeid}"
+        )
+
+    monkeypatch.setattr(psycopg, "connect", 막는다)

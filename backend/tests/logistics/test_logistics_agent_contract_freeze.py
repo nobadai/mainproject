@@ -538,11 +538,21 @@ def test_PRE_PURCHASE_payload_는_매입이_문_앞에서_거는_검사를_그�
     assert purchase_adapter._arrival_input_problems(payload) == []
     assert purchase_adapter._lot_shape_problems(payload["lots"]) == []
 
-    absorbed = purchase_adapter.absorb_inventory(payload, "배추")
-    assert {row["lot_id"] for row in absorbed["lots"]} == {"LOT-ACTIVE", "LOT-EXPIRED", "LOT-HOLD"}
+    # 🔴 **흡수한 품목으로 묻는다.** `build_state` 가 `absorb_inventory(inventory, item)` 와
+    #   `state["item"]` 에 **같은 값**을 넣으므로, 매입은 흡수한 품목만 되묻는다. 배추로
+    #   거른 봉투에 무를 물으면 그 품목 로트가 이미 빠져 있어 «집계가 로트 합보다 크다» 가
+    #   울고, 그것은 물류 계약이 아니라 이 검사가 만든 조합이다.
+    absorbed_cabbage = purchase_adapter.absorb_inventory(payload, "배추")
+    assert {row["lot_id"] for row in absorbed_cabbage["lots"]} == {
+        "LOT-ACTIVE",
+        "LOT-EXPIRED",
+        "LOT-HOLD",
+    }
+    absorbed_radish = purchase_adapter.absorb_inventory(payload, "무")
+    assert {row["lot_id"] for row in absorbed_radish["lots"]} == {"LOT-MU"}
     # 매입이 수요에서 빼는 가용재고는 `inventory_by_item` 에서 온다 — Lot 합이 아니다
-    assert free_stock_for(absorbed, "배추").kg == 500.0
-    assert free_stock_for(absorbed, "무").kg == 300.0
+    assert free_stock_for(absorbed_cabbage, "배추").kg == 500.0
+    assert free_stock_for(absorbed_radish, "무").kg == 300.0
 
 
 # ===========================================================================

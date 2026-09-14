@@ -123,3 +123,53 @@ def test_미적용_조회가_막힌_채로_빈_답을_준다() -> None:
 
     assert approved_decisions(sim_run_id="SIM-ANY") == []
     assert ledger_purchase_ids(sim_run_id="SIM-ANY") == []
+
+
+# ── 판매 진입점의 매입 경계 조회 (2026-09-14) ─────────────────────────────────
+
+
+def test_매입_경계_조회가_막혀_있다() -> None:
+    """🔴 **안 막히면 판매 검사가 `master_agent_runs` 를 실 DB 로 읽는다.**
+
+    ★ `run_sales` → `_procurement_boundary` → `read_procurement_boundary` →
+      `list_runs` 순서라, 판매를 부르는 검사는 전부 이 문을 지난다.
+    """
+    from app.master import procurement_boundary
+    from app.master.run_repository import list_runs as 진짜
+
+    assert procurement_boundary.list_runs is not 진짜, (
+        "매입 경계 조회가 안 막혔다 — 판매 검사가 실 DB 를 읽는다"
+    )
+
+
+def test_경계_조회가_막힌_채로_행이_없다고_답한다() -> None:
+    """🔴 **막혔는데 엉뚱한 행을 주면 판매 검사의 답이 바뀐다.**
+
+    ★ 행이 없으면 진짜 판정이 평일 `NO_PROCUREMENT_RUN` 으로 선다 — 번인 축에
+      2026-09 날짜 행이 없는 실 DB 와 같은 답이다.
+    """
+    from datetime import date
+
+    from app.master.procurement_boundary import read_procurement_boundary
+
+    경계 = read_procurement_boundary(as_of=date(2026, 9, 10), sim_run_id="SIM-ANY")
+
+    assert 경계.present is False
+    assert 경계.absent_reason == "NO_PROCUREMENT_RUN"
+
+
+# ── 마지막 문 — `psycopg.connect` ───────────────────────────────────────────
+
+
+def test_db_마크가_없으면_연결_자체가_막혀_있다() -> None:
+    """🔴 **대역을 빠뜨린 새 경로가 생겨도 실 DB 까지는 못 간다.**
+
+    ★ 접속 정보를 일부러 줘도 연결을 시도하지 않고 가드 예외가 난다. `.env` 가 있는
+      자리에서 조용히 공용 DB 를 치는 일을 막는 것이 이 가드의 일이다.
+    """
+    import psycopg
+
+    # ★ 예외 클래스를 `conftest` 에서 이름으로 가져오지 않는다
+    #   (`test_conftest_not_imported_by_name.py`). 문장으로 잰다.
+    with pytest.raises(AssertionError, match="db 마크가 없는 검사가 실 DB 연결을 열었다"):
+        psycopg.connect(host="127.0.0.1", port=9, dbname="guard", connect_timeout=1)

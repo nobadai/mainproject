@@ -66,6 +66,7 @@ from app.api.primitives import (
     Stat,
     Table,
 )
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.logistics.console_schemas import (
     ConsoleInboundResponse,
     ConsoleInventoryResponse,
@@ -85,7 +86,6 @@ from app.logistics.historical_repository import (
     runtime_coverage_at,
     snapshot_days_between,
 )
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 log = logging.getLogger(__name__)
 
@@ -629,7 +629,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
        그 판정은 **안 연 날을 열렸다고 하고(실측 31일) 열린 날을 모른다고 한다
        (실측 245일).** 입·출고가 0 건인 정상 하루는 물리 사실을 아예 안 남긴다.
     """
-    run = BURN_IN_SIM_RUN_ID
+    run = SHOWN_SIM_RUN_ID
     try:
         with get_connection() as conn:
             coverage = runtime_coverage_at(conn, sim_run_id=run, as_of=as_of)
@@ -646,7 +646,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                               f"{coverage.last_as_of}."),
                     ),
                     source_note=(
-                        f"logistics_runtime_fixture 없음 · {run} · {as_of}"
+                        f"logistics_runtime_fixture 없음 · 보고 있는 실행: {run} · 기준일: {as_of}"
                         f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
                     ),
                 ),
@@ -676,7 +676,9 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                           f"예시 숫자로 대신하지 않습니다 — 이 화면에는 지금 사실이 "
                           f"없습니다. {재시도}").strip(),
                 ),
-                source_note=f"읽기 실패 ({type(error).__name__}) · {run} · {as_of}",
+                source_note=(
+                    f"읽기 실패 ({type(error).__name__}) · 보고 있는 실행: {run} · 기준일: {as_of}"
+                ),
             ),
             http_status=http_status,
         )
@@ -693,7 +695,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                 note=(
                     "inventory_moves · inventory_lots · inbound_receipts · "
                     "inbound_inspections · pallet_events · inventory_reservations · "
-                    f"warehouse_zones · storage_locations · {run} · {as_of}"
+                    f"warehouse_zones · storage_locations · 보고 있는 실행: {run} · 기준일: {as_of}"
                 ),
             ),
         ),
@@ -755,10 +757,10 @@ def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
     start = as_of - timedelta(days=at)
     with get_connection() as conn:
         series = onhand_total_by_day(
-            conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
+            conn, sim_run_id=SHOWN_SIM_RUN_ID, start=start, end=as_of
         )
         열린_날 = snapshot_days_between(
-            conn, sim_run_id=BURN_IN_SIM_RUN_ID, start=start, end=as_of
+            conn, sim_run_id=SHOWN_SIM_RUN_ID, start=start, end=as_of
         )
     data: list[float | None] = [None] * n
     for index in range(at + 1):
@@ -785,7 +787,7 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
     try:
         with get_connection() as conn:
             coverage = runtime_coverage_at(
-                conn, sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of
+                conn, sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of
             )
         if not coverage.has_snapshot:
             return _empty_stock_chart(
@@ -797,7 +799,7 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
                 ),
             )
         data = _onhand_series(as_of, n, at)
-        inb = get_inbound_console(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
+        inb = get_inbound_console(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
     except Exception as error:  #  DB 미연결 · 표 없음 · 원장 이상 다 잡는다
         log.exception("재고 그래프를 못 읽었습니다")
         return _empty_stock_chart(

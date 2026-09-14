@@ -37,7 +37,14 @@ const KEY = "haetdeul.demo_as_of";
  * ★ `NEXT_PUBLIC_AS_OF` 갈래는 그대로 둔다 — 환경으로 덮을 수 있는 것이 맞다. 다만
  *   `frontend/` 에 `.env` 가 하나도 없어서(실측 2026-09-10) 지금 쓰이는 것은 이 코드값이다.
  */
-export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-01-30";
+/*
+ * 🔴 **백엔드 `app/api/shown_run.py` 의 `SHOWN_AS_OF` 와 같은 값이어야 한다** (2026-09-14).
+ *    화면 API 가 읽는 실행(`SHOWN_SIM_RUN_ID` = SIM-CHAIN-REH-0914)의 기준일이 `2026-08-31` 이다.
+ *    멘토링 시연(2026-09-15) 전용 리허설 값이다 (정본 아님).
+ *    발표 전 두 곳을 함께 V13 `2026-01-26` 또는 최종 실행(SIM-CHAIN-FINAL) `2026-09-20` 로 되돌린다.
+ *    `backend/tests/api/test_shown_run.py` 가 두 값이 갈리면 빨간불을 켠다.
+ */
+export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-08-31";
 
 const listeners = new Set<() => void>();
 

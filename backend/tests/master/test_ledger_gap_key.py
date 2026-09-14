@@ -296,6 +296,7 @@ def _적힌_관문행(monkeypatch) -> dict[str, Any]:
         procure_fn=_Spy(_Out("RAN")),
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
         items=ITEMS,
+        sim_run_id=축,
     )
     return 적힌것
 

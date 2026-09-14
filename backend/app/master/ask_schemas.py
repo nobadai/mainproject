@@ -152,5 +152,6 @@ class AskResponse(BaseModel):
     llm_attempts: int = 0
     llm_fallback_used: bool = False
 
-    #: 실행하지 않은 이유. `CLASSIFIED_ONLY` 일 때 사람이 읽는다.
+    #: 사람이 읽는 한 줄. `CLASSIFIED_ONLY` 면 실행하지 않은 이유이고,
+    #: `STATUS_ANSWERED` 면 조회가 읽은 실행·기준일이다 (`ask_service._shown_note`).
     note: str | None = None

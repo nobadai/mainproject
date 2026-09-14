@@ -731,7 +731,7 @@ def test_개장이_성공하면_사건을_만든다(등록소를_비운다: None
         return CollectionSeedOutcome(status="SEEDED", created=3, skipped=1)
 
     out = day_open.open_day(
-        AS_OF, connect=lambda: _개장커넥션(), seed_collection=대역
+        AS_OF, connect=lambda: _개장커넥션(), seed_collection=대역, sim_run_id=BURN_IN_SIM_RUN_ID
     )
 
     assert out.status == "ALREADY_OPENED"
@@ -752,7 +752,7 @@ def test_사건_생성이_터져도_하루는_열린다(등록소를_비운다: 
         raise RuntimeError("수금 사건 표가 없다")
 
     out = day_open.open_day(
-        AS_OF, connect=lambda: _개장커넥션(), seed_collection=터진다
+        AS_OF, connect=lambda: _개장커넥션(), seed_collection=터진다, sim_run_id=BURN_IN_SIM_RUN_ID
     )
 
     assert out.status == "ALREADY_OPENED", f"사건 생성이 하루를 막았다: {out.status}"
@@ -781,7 +781,7 @@ def test_하루가_안_열리면_시도하지_않는다(등록소를_비운다: 
         return CollectionSeedOutcome(status="SEEDED", created=1)
 
     out = day_open.open_day(
-        AS_OF, connect=lambda: _개장커넥션(), seed_collection=대역
+        AS_OF, connect=lambda: _개장커넥션(), seed_collection=대역, sim_run_id=BURN_IN_SIM_RUN_ID
     )
 
     assert out.status == "NOT_OPENED"
@@ -799,6 +799,7 @@ def test_낼_것이_없는_날은_NOTHING_DUE_로_실린다(등록소를_비운�
         AS_OF,
         connect=lambda: _개장커넥션(),
         seed_collection=lambda as_of, **_: CollectionSeedOutcome(status="NOTHING_DUE"),
+        sim_run_id=BURN_IN_SIM_RUN_ID,
     )
 
     assert out.status == "ALREADY_OPENED"

@@ -236,6 +236,7 @@ def _run(
         # ⚠️ **대역을 안 주면 진짜 `ship_due_sales` 가 DB 를 찾으러 간다.**
         "outbound_fn": _Spy(_Out("NOTHING_DUE")),
         "items": ITEMS,
+        "sim_run_id": 축,
     }
     defaults.update(kwargs)
     return run_scheduled_day(action, **defaults), procure_fn  # type: ignore[arg-type]
@@ -393,6 +394,7 @@ def test_안_도는_답이면_서비스_함수를_하나도_안_부른다(action
         sales_fn=sales,
         outbound_fn=shipped,
         items=ITEMS,
+        sim_run_id=축,
     )
 
     assert out.action == action_name
@@ -418,7 +420,7 @@ def test_열두_번_WAIT_해도_판단은_0회다():
     waits = 0
     while moment < scheduler.deadline_at(AS_OF):
         action = _plan(now=moment, gate=NONE_READY)
-        run_scheduled_day(action, procure_fn=procure, sales_fn=sales, items=ITEMS)
+        run_scheduled_day(action, procure_fn=procure, sales_fn=sales, items=ITEMS, sim_run_id=축)
         waits += action.action == "WAIT"
         moment += scheduler.SCHEDULE_INTERVAL
 
@@ -471,6 +473,7 @@ def _order_of_a_day(**kwargs) -> list[str]:
         "outbound_fn": note("출고", _Out("NOTHING_DUE")),
         "close_fn": note("마감", _Out("CLOSED")),
         "items": ITEMS,
+        "sim_run_id": 축,
     }
     defaults.update(kwargs)
     run_scheduled_day(_plan(now=_at(9, 30), gate=ALL_READY), **defaults)  # type: ignore[arg-type]
@@ -888,6 +891,7 @@ def test_wake_up_은_시계를_한_번만_읽는다():
         procure_fn=procure,
         sales_fn=_Sales(),
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
+        sim_run_id=축,
     )
 
     assert len(reads) == 1
@@ -905,6 +909,7 @@ def test_wake_up_은_안_잔다():
         procure_fn=_Procure(),
         sales_fn=_Sales(),
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
+        sim_run_id=축,
     )
 
     assert datetime.now(SEOUL) - started < timedelta(seconds=2)
@@ -1250,6 +1255,7 @@ def test_wake_up_이_판매를_흘려_준다():
         sales_fn=sales,
         outbound_fn=_Spy(_Out("NOTHING_DUE")),
         close_fn=_Spy(_Out("CLOSED")),
+        sim_run_id=축,
     )
 
     assert len(sales.requests) == len(scheduler.scheduled_items())

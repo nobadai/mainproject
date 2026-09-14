@@ -129,6 +129,7 @@ def _run(*, inbound="RECEIVED", receivable="ISSUED", collection="COLLECTED", **k
         "procure_fn": procure,
         "outbound_fn": _Spy(_Out("NOTHING_DUE")),
         "items": ITEMS,
+        "sim_run_id": 축,
     }
     defaults.update(kwargs)
     return run_scheduled_day(_plan(), **defaults), procure  # type: ignore[arg-type]

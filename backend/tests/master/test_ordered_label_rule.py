@@ -38,7 +38,7 @@
 from __future__ import annotations
 
 import unicodedata
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -129,6 +129,7 @@ def _돌린다(행들: dict[date, list[dict[str, Any]]], 설정: dict[str, Any])
         runs_on=lambda *, sim_run_id, as_of, limit: 행들.get(as_of, []),
         decisions_of=lambda request_id: [],
         decide=문,
+        today=lambda: max(행들) + timedelta(days=1),
     )
     return 결과, 문
 

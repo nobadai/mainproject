@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from decimal import Decimal
 
 from app.api.finance.schema import FinanceTab, FlowCell, StateOption
-from app.api.primitives import Card, Chart, Column, Marker, Note, Series, Source, Stat, Table
+from app.api.primitives import CalendarAxis, Card, Chart, Column, Note, Series, Source, Stat, Table
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 from app.finance.schemas import FinanceClosingItem, FinanceDashboardResponse, FinanceStateView
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 
 STATES = ("base", "loan")
 _STATE_TO_MODE = {"base": "BASE_NO_LOAN", "loan": "LOAN_BASELINE"}
@@ -18,15 +19,12 @@ _STATE_LABELS = {
     "loan": "대출 반영",
 }
 
-# 통합 대시보드에 얹을 현금 잔고 (백만원). 이 함수는 별도 화면에서 아직 사용한다.
-_DASH_ACTUAL = [52.4, 52.1, 51.8, 51.8, 49.6, 49.6, 49.6, 47.9, 47.9]
-_DASH_PROJ = [47.9, 40.6, 40.6, 35.7]
-_DASH_FLOOR = 30.0
+_MILLION = Decimal(1_000_000)
 
 
 def build(as_of: date, state: str) -> FinanceTab:
-    dash = get_finance_dashboard(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of)
-    flow = get_finance_cashflow(sim_run_id=BURN_IN_SIM_RUN_ID, as_of=as_of, days=30)
+    dash = get_finance_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+    flow = get_finance_cashflow(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, days=30)
     selected_key, selected = _select_state(dash, state)
     state_as_of = None if selected is None else selected.state_date
     latest_closing_as_of = max((row.close_date for row in dash.recent_closings), default=None)
@@ -141,43 +139,113 @@ def build(as_of: date, state: str) -> FinanceTab:
         source=Source(
             filled=True,
             owner="재무",
-            note="근거 · 재무 마감 / 수금·지급 장부",
+            note=(
+                "근거 · 재무 마감 / 수금·지급 장부 · "
+                f"보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {as_of.isoformat()}"
+            ),
         ),
     )
 
 
-def dashboard_cash(n: int, at: int) -> Chart:
-    """대시보드에 얹을 현금 그래프. **재무가 만듭니다** — 대시보드가 아닙니다."""
-    tail = [None] * at + list(_DASH_PROJ) + [None] * max(0, n - at - len(_DASH_PROJ))
-    return Chart(
-        label="현금 잔고",
-        y_min=25,
-        y_max=60,
-        y_ticks=[30, 40, 50, 60],
-        y_unit="M",
-        series=[
+def dashboard_cash(axis: CalendarAxis) -> Chart:
+    """대시보드에 얹을 현금 그래프. **재무가 만듭니다** — 대시보드가 아닙니다.
+
+    ★ 재무 탭 현금 그래프(`_cash_chart`)와 같은 일마감 행의 같은 칸을 씁니다.
+      대출 제외 = `base_cash_balance_krw` · 대출 포함 = `loan_cash_balance_krw` ·
+      최소 운영현금 = `minimum_operating_cash_krw` (행에 있을 때만).
+    🔴 날짜축 칸에 그날 마감 행이 없거나 기준일 뒤이면 공란(`None`)입니다.
+       앞 값으로 메우지 않고, 추정선을 지어내지 않습니다.
+    """
+    as_of = date.fromisoformat(axis.as_of)
+    run = SHOWN_SIM_RUN_ID
+    flow = get_finance_cashflow(sim_run_id=run, as_of=as_of, days=len(axis.days))
+    by_date = {row.close_date: row for row in flow.cashflow if row.close_date <= as_of}
+    rows = [by_date.get(date.fromisoformat(day.date)) for day in axis.days]
+
+    base = [None if row is None else _to_million(row.base_cash_balance_krw) for row in rows]
+    loan = [None if row is None else _to_million(row.loan_cash_balance_krw) for row in rows]
+    minimum = [
+        None if row is None else _to_million(row.minimum_operating_cash_krw) for row in rows
+    ]
+    series = [
+        Series(name="대출 제외", data=base, tone="info", width=2.2, end_dot=True),
+        Series(name="대출 포함", data=loan, tone="good", width=1.5, opacity=0.8),
+    ]
+    if any(value is not None for value in minimum):
+        series.append(
             Series(
                 name="최소 운영현금",
-                data=[_DASH_FLOOR] * n,
+                data=minimum,
                 tone="bad",
                 dashed=True,
                 width=1,
                 opacity=0.7,
-            ),
-            Series(
-                name="실적",
-                data=list(_DASH_ACTUAL) + [None] * (n - len(_DASH_ACTUAL)),
-                tone="warn",
-                end_dot=True,
-            ),
-            Series(name="추정", data=tail[:n], tone="warn", dashed=True),
-        ],
-        markers=[Marker(index=at + 1, value=40.6, label="지급 -7.3M", tone="warn")],
+            )
+        )
+
+    shown = f"보고 있는 실행: {run} · 기준일: {as_of.isoformat()}"
+    values = [value for s in series for value in s.data if value is not None]
+    if not values:
+        return Chart(
+            label="현금 잔고",
+            y_min=0,
+            y_max=10,
+            y_ticks=[0, 5, 10],
+            y_unit="M",
+            series=series,
+            note=Note(tone="warn", text=f"이 실행·기준일에 현금 기록이 없습니다. {shown}"),
+        )
+
+    y_min, y_max, y_ticks = _million_axis(min(values), max(values))
+    return Chart(
+        label="현금 잔고",
+        y_min=y_min,
+        y_max=y_max,
+        y_ticks=y_ticks,
+        y_unit="M",
+        series=series,
         note=Note(
             tone="neutral",
-            text="점선부터는 **아직 안 일어난 일**입니다. 승인한 매입의 지급 예정이 반영됩니다.",
+            text=(
+                "재무 일마감에 저장된 현금 잔액입니다. "
+                "**기준일 뒤와 마감이 없는 날은 공란**입니다. "
+                f"{shown}"
+            ),
         ),
     )
+
+
+def _to_million(value: Decimal | None) -> float | None:
+    if value is None:
+        return None
+    return float(value / _MILLION)
+
+
+def _million_axis(low: float, high: float) -> tuple[float, float, list[float]]:
+    """데이터를 덮는 눈금 3~5개. 음수도 그대로 둡니다."""
+    padding = max((high - low) * 0.1, abs(high) * 0.05, 0.5)
+    lo = low - padding
+    hi = high + padding
+    for step in _nice_steps(hi - lo):
+        start = math.floor(lo / step) * step
+        stop = math.ceil(hi / step) * step
+        count = round((stop - start) / step) + 1
+        if count <= 5:
+            while count < 3:
+                stop += step
+                count += 1
+            ticks = [round(start + step * i, 6) for i in range(count)]
+            return ticks[0], ticks[-1], ticks
+    raise AssertionError("눈금 간격을 못 정했습니다")
+
+
+def _nice_steps(span: float) -> list[float]:
+    exponent = math.floor(math.log10(span / 4))
+    return [
+        factor * 10**power
+        for power in (exponent, exponent + 1, exponent + 2)
+        for factor in (1, 2, 2.5, 5)
+    ]
 
 
 def _select_state(
