@@ -37,6 +37,10 @@ class MixDecision:
     llm_status: LLMStatus
     llm_model: str | None
     llm_fallback_used: bool
+    #: 실제 시도 횟수 (재시도 포함). 🔴 **전에는 안 날랐다** — 그래서 봉투의
+    #: ``llm_attempts`` 가 LLM 이 두 번 시도한 날에도 **0** 으로 나갔다. 실행 흔적이
+    #: 「안 불렀다」로 보이는 자리라 채운다.
+    llm_attempts: int = 0
 
     @property
     def applied(self) -> bool:
@@ -51,6 +55,7 @@ def _decision(result: InterpretationResult) -> MixDecision:
         llm_status=result.llm_status,
         llm_model=result.llm_model,
         llm_fallback_used=result.llm_fallback_used,
+        llm_attempts=result.llm_attempts,
     )
 
 

@@ -21,7 +21,9 @@ from app.master.envelope import (
     AgentReply,
     AgentRequest,
     ExecutionMetadata,
+    LLMCallMetadata,
     LLMStatus,
+    summarize_llm_calls,
 )
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import (
@@ -48,6 +50,9 @@ from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_ca
 from app.purchase_agent.tracing import ToolRecorder
 
 AGENT_NAME = "purchase"
+#: ⑤ 등급 조합 판단자의 역할 이름 — 봉투 ``llm_calls[].role`` 에 그대로 실린다.
+#: 🔴 문자열을 두 곳에서 짓지 않는다. 역할이 늘면 여기 옆에 한 줄씩 는다.
+SOURCING_SELECTION = "sourcing_selection"
 
 #: 이 어댑터가 **실제로 처리하는** mode. ``_status_query`` 가 답하는 목록이자 문 앞
 #: 검사의 기준이다 — **두 곳에 따로 적지 않는다.**
@@ -238,16 +243,63 @@ def _metadata(
     fallback ``false``로 나가 **두 값이 서로를 부정한다** (Codex 교차검증 P1).
     """
     used = recorder.used_tools if recorder is not None else tools
-    mix = _mix_decision(state)
+    calls = _llm_calls(state)
+    status, model, attempts, fallback = summarize_llm_calls(calls)
     return ExecutionMetadata(
         run_id=_run_id(request),
         request_id=request.context.request_id,
         agent=AGENT_NAME,
         used_tools=used,
         tool_order=tuple(range(1, len(used) + 1)),
-        llm_status=mix.llm_status if mix is not None else _uncalled_status(),
-        llm_model=(mix.llm_model or "") if mix is not None else "",
-        llm_fallback_used=mix.llm_fallback_used if mix is not None else False,
+        llm_status=status,
+        llm_model=model,
+        llm_attempts=attempts,
+        llm_fallback_used=fallback,
+        llm_calls=calls,
+    )
+
+
+def _llm_calls(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
+    """이 실행에서 **역할별로 무엇이 있었나**. 요약 칸 넷은 이것을 접은 값이다.
+
+    🔴 **역할이 하나뿐이던 때와 요약이 같아야 한다.** 지금은 ⑤ 등급 조합 하나이고,
+      단일 호출을 접으면 상태·모델·fallback 이 예전 식과 **같은 값**이 나온다
+      (``summarize_llm_calls`` 참조).
+
+    ⚠️ ``llm_attempts`` 만 달라진다 — 전에는 어느 실행에서나 **0** 이었다. 시도 수를
+      나르는 칸이 ``MixDecision`` 에 없어서였고, 그래서 LLM 이 두 번 시도한 날에도
+      실행 흔적이 「안 불렀다」로 보였다. 사실대로 적는 쪽으로 고쳤다.
+
+    ★ ⑤를 **부를 자리까지 못 간 실행**도 한 줄을 남긴다. 안 남기면 목록이 비어
+      「설정이 꺼졌다」와 구분되지 않는다 — ``_uncalled_status`` 가 가르던 그 자리다.
+    """
+    mix = _mix_decision(state)
+    if mix is None:
+        상태 = _uncalled_status()
+        return (
+            LLMCallMetadata(
+                role=SOURCING_SELECTION,
+                status=상태,
+                skip_reason=(
+                    None
+                    if 상태 == "DISABLED"
+                    else "등급 조합 후보가 서지 않아 판단자를 부를 자리까지 안 갔다"
+                ),
+            ),
+        )
+    return (
+        LLMCallMetadata(
+            role=SOURCING_SELECTION,
+            status=mix.llm_status,
+            attempts=mix.llm_attempts,
+            fallback_used=mix.llm_fallback_used,
+            model=mix.llm_model or None,
+            skip_reason=(
+                "규칙이 중품을 안 골라 후보가 하나였다"
+                if mix.llm_status == "SKIPPED_TEMPLATE"
+                else None
+            ),
+        ),
     )
 
 

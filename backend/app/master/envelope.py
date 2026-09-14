@@ -725,6 +725,116 @@ def forecast_is_clean(forecast: Mapping[str, Any] | None, as_of: date) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: 🔴 **역할별 상태는 공용 ``LLMStatus`` 보다 넓다.** 「안 돌았다」의 사유가 여럿인데
+#: 네 값으로는 *"켜져 있었는데 게이트가 안 골랐다"* 와 *"설정이 꺼졌다"* 를 못 가른다.
+#: 그렇다고 공용 ``LLMStatus`` 를 넓히면 그 Literal 을 복제해 든 일곱 파일이 다 걸린다 —
+#: 그래서 **여기만 넓힌다.**
+LLMCallStatus = Literal[
+    "SUCCESS",
+    "FALLBACK",
+    "SKIPPED_TEMPLATE",
+    "SKIPPED_BY_GATE",
+    "SKIPPED_BUDGET",
+    "DISABLED",
+]
+
+
+@dataclass(frozen=True)
+class LLMCallMetadata:
+    """**호출 하나**의 흔적. 한 실행에 역할이 여럿이면 이것이 여럿이다.
+
+    🔴 **왜 필요한가.** ``ExecutionMetadata`` 의 ``llm_*`` 넷은 **호출 하나를 전제**한다.
+    역할이 둘·셋으로 늘면 그 칸들은 요약밖에 못 되고, *"어느 역할이 fallback 이었나"* 를
+    영영 못 읽는다. 요약은 남기되 **정본은 이쪽**이다.
+
+    🔴 **빈 문자열을 안 쓴다.** ``target=""`` 은 「안 단위 호출이 아니다」와 「라벨이 빈
+    문자열이다」를 같게 만든다. 없는 것은 ``None`` 이다 (규칙 3 의 문자열 판).
+
+    ⚠️ ``SKIPPED_*`` 는 **「문제 없음」이 아니다.** 검토를 안 한 것이고, 그 사실이
+    집계에서 ``SUCCESS`` 로 접히면 *"봤는데 깨끗했다"* 로 읽힌다.
+    """
+
+    #: ``sourcing_selection`` · ``split_allocation_selection`` · ``rationale_self_review``
+    role: str
+    status: LLMCallStatus
+    attempts: int = 0
+    fallback_used: bool = False
+    prompt_version: str = ""
+    schema_version: str = ""
+    #: 안 단위 호출이면 시나리오 라벨, 안 전체에 걸리는 호출이면 ``None``.
+    target: str | None = None
+    #: 호출을 안 했으면 ``None`` — 「안 불렀다」와 「빈 이름으로 불렀다」는 다르다.
+    provider: str | None = None
+    model: str | None = None
+    #: ``SKIPPED_*`` 이면 **반드시 채운다.** 이유 없는 「그 밖」 상태를 두면 거기로 다 흘러간다.
+    skip_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status.startswith("SKIPPED_") and not (self.skip_reason or "").strip():
+            raise ContractViolation(
+                f"{self.role} 이 {self.status} 인데 skip_reason 이 비었다 — "
+                "「왜 안 돌았나」가 사라지면 「문제 없음」과 구분되지 않는다."
+            )
+
+
+#: 집계에서 **처음 맞는 것**을 고른다. 순서가 곧 규칙이다.
+#:
+#: ⚠️ ``SKIPPED_*`` 를 ``SUCCESS`` 로도 ``DISABLED`` 로도 안 접는다 — 앞은 「봤는데
+#:   깨끗했다」가 되고, 뒤는 「켜져 있었다」는 사실을 지운다.
+_STATUS_PRIORITY = ("FALLBACK", "SUCCESS")
+
+
+def summarize_llm_calls(
+    calls: tuple[LLMCallMetadata, ...],
+) -> tuple[LLMStatus, str, int, bool]:
+    """호출 목록을 기존 단수 칸 넷으로 **결정적으로** 접는다.
+
+    돌려주는 것은 ``(llm_status, llm_model, llm_attempts, llm_fallback_used)`` 다.
+
+    🔴 **임의의 한 호출을 대표로 세우지 않는다.** 그러면 역할 순서가 바뀔 때 요약이
+    따라 바뀌고, 그 변화가 무엇 때문인지 아무도 모른다.
+
+    ``llm_status`` 는 이 순서다::
+
+        ① 하나라도 FALLBACK                          → FALLBACK
+        ② FALLBACK 이 없고 하나라도 SUCCESS           → SUCCESS
+        ③ **전부 DISABLED**(= 설정이 꺼짐)            → DISABLED
+        ④ 그 밖(켜졌는데 게이트·예산·조건으로 미호출)   → SKIPPED_TEMPLATE
+
+    ★ ③과 ④를 가르는 것이 이 함수의 요점이다. 공용 계약에서 ``DISABLED`` 는 *"설정이
+      꺼짐"* 이고 ``SKIPPED_TEMPLATE`` 은 *"켜져 있는데 호출 조건이 아님"* 이다. 둘을
+      뭉치면 *"왜 안 돌았나"* 가 거짓이 된다.
+
+    🔴 **모델이 여럿이면 멈춘다.** 빈 문자열로 적으면 「모델 없음」과 「여러 모델」이
+      같아진다. 지금은 매입의 세 역할이 **같은 provider·model 을 쓰도록 제한**했고, 그
+      제한이 깨지는 날 이 등식을 고치는 것이 계약 변경(M-3)이다 — 조용히 빈칸으로
+      넘어가지 않게 여기서 막는다.
+
+    ⚠️ 목록이 비면 **예전 그대로**를 돌려준다. 이 칸을 안 채우는 파트는 아무것도 안 바뀐다.
+    """
+    if not calls:
+        return "DISABLED", "", 0, False
+    상태들 = {call.status for call in calls}
+    for 우선 in _STATUS_PRIORITY:
+        if 우선 in 상태들:
+            상태: LLMStatus = 우선  # type: ignore[assignment]
+            break
+    else:
+        상태 = "DISABLED" if 상태들 == {"DISABLED"} else "SKIPPED_TEMPLATE"
+    모델들 = {call.model for call in calls if call.model}
+    if len(모델들) > 1:
+        raise ContractViolation(
+            f"한 실행에서 모델이 여럿이다 {sorted(모델들)} — 요약 칸 하나로 못 적는다. "
+            "빈 문자열로 적으면 「모델 없음」과 구분되지 않는다 (M-3)."
+        )
+    return (
+        상태,
+        next(iter(모델들), ""),
+        sum(call.attempts for call in calls),
+        any(call.fallback_used for call in calls),
+    )
+
+
 @dataclass(frozen=True)
 class ExecutionMetadata:
     """실행 흔적. Business Reply 와 섞지 않는다.
@@ -743,10 +853,15 @@ class ExecutionMetadata:
     rules_applied: tuple[str, ...] = ()
     replans: int = 0
 
+    #: 🔴 아래 넷은 **요약이다.** 호출이 여럿이면 정본은 ``llm_calls`` 이고, 이 칸들은
+    #: 그것을 결정적으로 접은 값이다 (``summarize_llm_calls``). 기존 소비자를 위해 남긴다.
     llm_status: LLMStatus = "DISABLED"
     llm_model: str = ""
     llm_attempts: int = 0
     llm_fallback_used: bool = False
+    #: 🔴 **호출별 정본.** 비어 있으면 위 넷이 그대로 쓰이던 때와 같다 — 기존 파트는
+    #: 이 칸을 안 채우고, 안 읽어도 깨지지 않는다.
+    llm_calls: tuple[LLMCallMetadata, ...] = ()
 
     elapsed_ms: int = 0
 
