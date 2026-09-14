@@ -22,6 +22,9 @@ const nextConfig: NextConfig = isDev
           //  (`app/ml/console_proxy.py`). 브라우저가 직접 부르면 출처가 달라
           //  CORS 를 만나고 주소가 화면 코드에 박힌다.
           { source: "/api/ml/:path*", destination: `${backendOrigin}/ml/console/:path*` },
+          // 운영 콘솔 read API. 백엔드 route 자체가 `/api/console/...` 이므로
+          // generic `/api` 제거 규칙보다 먼저 원래 prefix를 보존한다.
+          { source: "/api/console/:path*", destination: `${backendOrigin}/api/console/:path*` },
           // 에이전트 API. 백엔드는 `/master`·`/finance` 처럼 `/api` 없이 받는다.
           { source: "/api/:path*", destination: `${backendOrigin}/:path*` },
         ];
