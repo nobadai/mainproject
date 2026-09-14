@@ -1555,6 +1555,11 @@ def _payment_schedule_field(
     return {"payment_schedule": schedule} if schedule else {}
 
 
+#: 지급일이 재무 집중일과 겹칠 때 문장에 들어가는 말. 🔴 **상수로 둔다** — 근거 자기
+#: 검토의 사전검사가 이 사실을 신호로 쓰는데, 문면을 두 곳에 적으면 한쪽만 바뀐다.
+PAYMENT_CONFLICT_NOTE = "재무의 지급 집중일과 겹친다"
+
+
 def _payment_risks(
     rounds: list[dict], payment_days: int | None, critical_dates: list[str] | None
 ) -> list[str]:
@@ -1579,7 +1584,7 @@ def _payment_risks(
         return []
     return [
         (
-            f"회차 지급일 {', '.join(overlap)}이 재무의 지급 집중일과 겹친다 — "
+            f"회차 지급일 {', '.join(overlap)}이 {PAYMENT_CONFLICT_NOTE} — "
             "해당 일자 현금 여력을 재무 검증에서 확인 필요"
         )
     ]

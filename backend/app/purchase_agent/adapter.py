@@ -55,6 +55,8 @@ AGENT_NAME = "purchase"
 SOURCING_SELECTION = "sourcing_selection"
 #: ④ 회차 배분 판단자의 역할 이름.
 SPLIT_ALLOCATION_SELECTION = "split_allocation_selection"
+#: ⑧ 근거 자기 검토의 역할 이름.
+RATIONALE_SELF_REVIEW = "rationale_self_review"
 
 #: 이 어댑터가 **실제로 처리하는** mode. ``_status_query`` 가 답하는 목록이자 문 앞
 #: 검사의 기준이다 — **두 곳에 따로 적지 않는다.**
@@ -275,7 +277,23 @@ def _llm_calls(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
     ★ ⑤를 **부를 자리까지 못 간 실행**도 한 줄을 남긴다. 안 남기면 목록이 비어
       「설정이 꺼졌다」와 구분되지 않는다 — ``_uncalled_status`` 가 가르던 그 자리다.
     """
-    return (*_sourcing_call(state), *_split_allocation_call(state))
+    return (
+        *_sourcing_call(state),
+        *_split_allocation_call(state),
+        *_self_review_calls(state),
+    )
+
+
+def _self_review_calls(
+    state: Mapping[str, Any] | None,
+) -> tuple[LLMCallMetadata, ...]:
+    """⑧ 근거 검토. **안마다 한 줄**이라 ``target`` 에 라벨이 실린다.
+
+    🔴 **게이트가 안 고른 안도 남긴다.** 지우면 *"봤는데 깨끗했다"* 와 구분되지 않는다 —
+    검토율이 거짓이 되는 자리다.
+    """
+    기록 = ((state or {}).get("review_calls")) or ()
+    return tuple(기록)
 
 
 def _split_allocation_call(

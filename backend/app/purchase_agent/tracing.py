@@ -19,6 +19,12 @@ NODE_TO_TOOL: dict[str, str] = {
     "allocate_sourcing": "allocate_grade_mix",
     "package_scenarios": "compose_and_verify_scenarios",
     "self_check": "compose_and_verify_scenarios",
+    # ⑧ 🔴 **새 Tool 로 안 올린다.** 마스터 Registry 는 6종이고, 소비자에게 ⑥⑦⑧ 은
+    #   한 덩어리다 — *"안을 만들고 검증해서 돌려준다"* 에 «근거를 한 번 더 읽는다» 가
+    #   더 붙은 것이지 다른 일을 하는 것이 아니다. 새 이름을 올리면 Registry 합의를
+    #   다시 받아야 하고, 그 합의의 값이 «이름이 하나 늘었다» 뿐이다.
+    #   ⚠️ 기록은 중복을 걷으므로 셋이 이어 지나가도 한 번만 담긴다.
+    "review_rationale": "compose_and_verify_scenarios",
 }
 
 

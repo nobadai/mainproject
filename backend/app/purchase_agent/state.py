@@ -256,6 +256,9 @@ class PurchaseAgentState(TypedDict):
     confidence: Literal["high", "medium", "low"]
     rejected_reasons: list[dict]  # {label, reason} — 출력 스키마와 동일 형 (v1.1 정정)
     proposal: dict | None  # ⑦이 조립·재검증한 최종 산출물
+    #: ⑧ 이 남긴 **안별 검토 흔적.** 🔴 안 본 안도 들어 있다 — 목록에서 빼면
+    #: 「봤는데 깨끗했다」와 구분되지 않는다. 어댑터가 실행 흔적으로 옮긴다.
+    review_calls: NotRequired[tuple]
 
 
 def build_initial_state(
