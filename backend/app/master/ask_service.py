@@ -39,6 +39,7 @@ import time
 from dataclasses import replace
 from datetime import date
 
+from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.master import persistence, wiring
 from app.master.answer import (
     AnswerFacts,
@@ -60,7 +61,6 @@ from app.master.decision import DecisionIn, DecisionRejected
 from app.master.decision_repository import link_follow_up
 from app.master.decision_service import record_decision
 from app.master.envelope import ExecutionContext
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import Intent, IntentResult
@@ -123,6 +123,7 @@ def ask(
         outcome="STATUS_ANSWERED",
         status=_to_answer(outcome),
         answer=_write_answer(facts_from_status(outcome), narrator),
+        note=_shown_note(request.as_of),
     )
 
 
@@ -157,6 +158,7 @@ def execute(
             answer=_write_answer(facts_from_status(outcome), narrator),
             # ①은 안 부른다 (이미 분류된 의도다). ⑥의 상태는 answer 안에 있다.
             llm_status="SKIPPED_TEMPLATE",
+            note=_shown_note(request.as_of),
         )
 
     if intent.action == "PROCUREMENT_RUN":
@@ -217,9 +219,10 @@ def _run_status(
         as_of=as_of,
         trigger="USER_REQUEST",
         policy_version=policy_version,
-        # ★ **조회도 같은 장부를 본다.** 판단 경로만 채우면 *"물어본 값과 돈 값이
-        #   다른"* 자리가 생긴다 — 조회는 부서를 실제로 부른다 (§ 위 docstring).
-        sim_run_id=BURN_IN_SIM_RUN_ID,
+        # ★ **조회는 화면이 보는 실행을 읽는다** (2026-09-14). 전에는 번인 상수라
+        #   2025-12 한 달치 장부를 읽었고, 2026 날짜는 기준일을 바꿔도 늘 같은 물려받은
+        #   상태가 나왔다. 화면 탭과 같은 한 자리(`app/api/shown_run.py`)를 가리킨다.
+        sim_run_id=SHOWN_SIM_RUN_ID,
     )
     asked = tuple(intent.agents)
     missing = set(wiring.missing())
@@ -258,9 +261,11 @@ def _run_status(
         intent=intent.model_dump(mode="json"),
         outcome=outcome,
         elapsed_ms=int((time.perf_counter() - started) * 1000),
-        # ★ **봉투에서 꺼낸다.** 위에서 만든 그 `context` 가 부서로 나간 값이고,
-        #   이력에는 그 값이 적혀야 한다 — 상수를 다시 적으면 둘이 갈릴 수 있다.
-        sim_run_id=context.sim_run_id,
+        # 🔴 **읽기 축과 기록 축을 나눈다** (2026-09-14). 봉투 축은 읽을 장부이고,
+        #   이 행은 걷기가 만든 행이 아니다. 정본 실행 축으로 적으면 그 실행의 이력
+        #   (`count_runs_by_day` · 실행 목록의 최근 활동)에 조회가 섞인다. 칸이
+        #   NULL 을 받으므로(`master_agent_runs_sim_run_id.sql`) «걷기 밖» 으로 적는다.
+        sim_run_id=None,
     )
     return outcome
 
@@ -414,6 +419,11 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
         answer=_rule_answer(facts),
         llm_status="SKIPPED_TEMPLATE",
     )
+
+
+def _shown_note(as_of: date) -> str:
+    """조회가 **어느 실행·기준일을 읽었나.** 재무 현금 그래프 문장과 같은 모양이다."""
+    return f"보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {as_of.isoformat()}"
 
 
 def _item_of(request_id: str) -> str | None:

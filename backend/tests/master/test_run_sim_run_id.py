@@ -269,13 +269,17 @@ def test_진입점이_봉투에서_축을_꺼낸다():
     값의 주인은 `ExecutionContext.sim_run_id` 하나다. 진입점이 상수를 다시 적거나
     아예 안 주면, 부서로 나간 값과 표에 적힌 값이 갈린다.
 
+    🔴 조회 적재(`ask_service` 의 `record_status`)는 반대로 **`None` 을 박아야** 한다
+    (2026-09-14). 조회는 화면이 보는 실행을 읽기만 하고, 그 이력 행을 정본 축으로 적으면
+    걷기 이력에 조회가 섞인다. 읽기 축(봉투)과 기록 축(이력 행)을 나눈 자리다.
+
     ★ 자기 생존: 적재 호출 줄을 하나도 못 찾으면 먼저 실패한다.
     """
     checked = 0
     offenders = []
-    for module, callees in (
-        (service, ("persistence.record(", "persistence.record_sales(")),
-        (ask_service, ("persistence.record_status(",)),
+    for module, callees, from_envelope in (
+        (service, ("persistence.record(", "persistence.record_sales("), True),
+        (ask_service, ("persistence.record_status(",), False),
     ):
         source = inspect.getsource(module)
         tree = ast.parse(source)
@@ -289,14 +293,17 @@ def test_진입점이_봉투에서_축을_꺼낸다():
             checked += 1
             if not any(
                 kw.arg == "sim_run_id"
-                and isinstance(kw.value, ast.Attribute)
-                and kw.value.attr == "sim_run_id"
+                and (
+                    isinstance(kw.value, ast.Attribute) and kw.value.attr == "sim_run_id"
+                    if from_envelope
+                    else isinstance(kw.value, ast.Constant) and kw.value.value is None
+                )
                 for kw in node.keywords
             ):
                 offenders.append(f"{module.__name__}:{node.lineno}")
 
     assert checked >= 8, f"적재 호출을 {checked} 개만 찾았다 — 스캐너가 죽었다"
-    assert not offenders, f"봉투에서 축을 안 꺼내는 적재 호출: {offenders}"
+    assert not offenders, f"봉투 축을 안 꺼내거나 조회를 정본 축으로 적는 적재 호출: {offenders}"
 
 
 # ── ③ 빈 문자열은 NULL 이다 ────────────────────────────────────────────────

@@ -43,6 +43,7 @@ _AGENT_LABEL: dict[str, str] = {
     "finance": "재무",
     "inventory": "물류",
     "purchase": "매입",
+    "sales": "판매",
 }
 
 #: 답이 아니라 **기준**인 키. 사실 줄이 아니라 꼬리말로 뺀다.

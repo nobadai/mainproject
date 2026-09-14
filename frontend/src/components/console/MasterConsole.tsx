@@ -44,7 +44,7 @@ type Turn =
   | { kind: "me"; text: string }
   //   `trace` 는 **①(의도 분류)가 무엇을 했는지**다. 되묻는 답에도 실어야 한다 —
   //   "못 알아들었습니다" 만 적으면 모델이 안 돈 것처럼 보인다.
-  | { kind: "bot"; text: string; trace?: LlmTraceData }
+  | { kind: "bot"; text: string; trace?: LlmTraceData; note?: string | null }
   // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
   //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
   //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
@@ -86,6 +86,7 @@ const SHORTCUT: Record<string, string> = {
   purchase: "오늘 배추 얼마나 사야 해?",
   inventory: "창고에 얼마나 남았어?",
   finance: "지금 자금 상황 알려줘",
+  sales: "판매 진행 상황 알려줘",
 };
 
 export function MasterConsole({ session }: { session: Session }) {
@@ -165,7 +166,8 @@ export function MasterConsole({ session }: { session: Session }) {
           trace: traceOf(res),
         });
       } else if (res.answer) {
-        push({ kind: "bot", text: res.answer.text, trace: traceOf(res) });
+        //   조회면 `note` 가 **어느 실행·기준일을 읽었나** 다. 답 아래에 같이 보인다.
+        push({ kind: "bot", text: res.answer.text, trace: traceOf(res), note: res.note });
       } else {
         push({
           kind: "bot",
@@ -224,7 +226,7 @@ export function MasterConsole({ session }: { session: Session }) {
           { kind: "run", run: res.run },
         );
       } else if (res.answer) {
-        push({ kind: "bot", text: res.answer.text });
+        push({ kind: "bot", text: res.answer.text, note: res.note });
       } else {
         push({
           kind: "bot",
@@ -322,7 +324,7 @@ export function MasterConsole({ session }: { session: Session }) {
               className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
-              {{ purchase: "오늘 매입", inventory: "재고", finance: "자금" }[k]}
+              {{ purchase: "오늘 매입", inventory: "재고", finance: "자금", sales: "판매" }[k]}
             </button>
           ))}
         </span>
@@ -463,6 +465,9 @@ function TurnView({
         <div className="whitespace-pre-wrap text-sm leading-relaxed">
           {turn.text}
         </div>
+        {turn.note && (
+          <p className="m-0 mt-1.5 font-mono text-[11px] text-muted">{turn.note}</p>
+        )}
         {turn.trace && <LlmTrace trace={turn.trace} />}
       </div>
     );
