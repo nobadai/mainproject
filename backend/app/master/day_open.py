@@ -52,7 +52,6 @@ from app.finance.db import get_connection
 from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.collection_seed import CollectionSeedOutcome, SeedStatus, seed_day
 from app.master.day_opening_repository import record_day_opening
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sim_run_binding import bind_sim_run
 
 __all__ = [
@@ -358,7 +357,7 @@ def open_day(
     connect: Callable[[], Any] | None = None,
     force: bool = False,
     seed_collection: Callable[..., CollectionSeedOutcome] = seed_day,
-    sim_run_id: str = BURN_IN_SIM_RUN_ID,
+    sim_run_id: str,
 ) -> DayOpenOut:
     """`as_of` 날 상태 행을 **파트마다** 보장한다. 한 트랜잭션이다.
 
@@ -412,10 +411,10 @@ def open_day(
     :param force: 관리자 강제 개장. **상한만 푼다.**
     :param seed_collection: 수금 사건을 만드는 방법. 기본값이 `collection_seed.seed_day`
                     이고, 검사가 대역을 끼울 자리다. **파트 트랜잭션 밖에서** 돈다.
-    :param sim_run_id: 어느 실행의 장부를 넘기는가 (`#531` 후속). 🔴 **여기는 기본값이
-                    있다** — `apply_approval` 과 다르다. 라우터
-                    (`POST /master/day/open`)가 이 칸을 안 주고 이번 판은 운영 동작을
-                    안 바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
+    :param sim_run_id: 어느 실행의 장부를 넘기는가 (`#531` 후속). 🔴 **기본값이 없다**
+                    (2026-09-14) — `apply_approval` 과 같다. 번인 상수로 메우면
+                    축을 안 준 호출이 번인 장부를 연다. 걷기는 `run_scheduled_day`
+                    가, 라우터(`POST /master/days/{as_of}/open`)는 요청이 준 축을 싣는다.
 
                     ★ **새 행에 적는 값이 아니다.** carry-forward 는 전날 행의
                       `sim_run_id` 를 그대로 옮긴다 — 이 값이 정하는 것은 *"어느 전날
