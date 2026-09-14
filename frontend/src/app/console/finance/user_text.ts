@@ -238,3 +238,42 @@ export function partnerText(
   if (!partnerId) return "이름 미등록 거래처";
   return `이름 미등록 거래처 (${partnerId})`;
 }
+
+/**
+ * 판매 재무 판정을 가른 사유. **왜 진행 가능하고 왜 어려운지를 한 줄로 말한다.**
+ *
+ * 🔴 **통과 사유는 여기 없다.** 백엔드가 이미 FAIL·REVIEW_REQUIRED 규칙의 사유만
+ *    골라 보내고, 표에 없는 코드가 오면 원본을 그대로 보여 준다.
+ */
+const SALES_REASONS: Record<string, string> = {
+  SALES_MARGIN_BELOW_MINIMUM: "기여이익률이 최소선에 못 미칩니다",
+  SALES_MARGIN_BELOW_WARNING: "기여이익률이 경고선 아래입니다",
+  SALES_MARGIN_RATE_UNCOMPUTABLE: "원가를 몰라 기여이익률을 계산하지 못했습니다",
+  SALES_CREDIT_LIMIT_EXCEEDED: "이 건을 실으면 거래처 여신한도를 넘습니다",
+  SALES_AMOUNT_MISMATCH: "제안한 매출액과 다시 계산한 금액이 다릅니다",
+  SALES_PAYMENT_TERM_EXCEEDS_LIMIT: "결제일수가 허용 범위를 넘습니다",
+  SALES_PAYMENT_TERM_TYPE_UNSUPPORTED: "지원하지 않는 결제 방식입니다",
+  SALES_PAYMENT_DAYS_ABSENT: "결제일수가 적혀 있지 않습니다",
+  SALES_PARTNER_HAS_OVERDUE_AR: "이 거래처에 연체된 미수금이 있습니다",
+  SALES_CASHFLOW_DEPENDS_ON_PROJECTED_INFLOW: "아직 들어오지 않은 수금에 기대는 계획입니다",
+  SALES_COLLECTION_OUTSIDE_HORIZON: "수금 예정일이 확인 가능한 기간 밖입니다",
+  SALES_COLLECTION_RISK_MODE_UNSUPPORTED: "회수 위험 판정 방식을 지원하지 않습니다",
+  SALES_COST_BASIS_UNAVAILABLE: "권위 있는 재고원가가 없어 판정을 닫았습니다",
+  SALES_INPUT_INCOMPLETE: "제안에 필요한 값이 빠져 있습니다",
+};
+
+export function salesReasonText(code: string): string {
+  return SALES_REASONS[code] ?? code;
+}
+
+/** 아직 받지 못한 검증. 왜 «재무 검토 전» 인지를 말한다. */
+const CAPABILITIES: Record<string, string> = {
+  FINANCIAL_VALIDATION: "재무 검토",
+  SELLABLE_SUPPLY_CONTEXT: "판매 가능 재고 확인",
+  DELIVERY_FEASIBILITY_CONTEXT: "납품 가능 여부 확인",
+  ADDITIONAL_SUPPLY_CONTEXT: "추가 조달 확인",
+};
+
+export function capabilityText(code: string): string {
+  return CAPABILITIES[code] ?? code;
+}

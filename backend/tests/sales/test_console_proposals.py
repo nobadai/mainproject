@@ -47,6 +47,14 @@ def _row(**over) -> dict:
         "scenario": _scenario(),
         "finance_verdict": "PASS",
         "finance_status": "EVALUATED",
+        "rule_results": [
+            {
+                "rule_id": "FIN-SALES-MARGIN",
+                "verdict": "PASS",
+                "reason_codes": ["SALES_MARGIN_MEETS_WARNING"],
+            },
+        ],
+        "financial_summary": {"contribution_margin_rate": "0.3349"},
         **over,
     }
 
@@ -166,11 +174,165 @@ def test_an_unreadable_amount_is_missing_rather_than_zero(monkeypatch):
 
 
 def test_a_real_zero_amount_is_kept(monkeypatch):
+    """매출액 0 은 사실이므로 그대로 둔다. 숨기는 기준은 **파는 양**이다."""
     _patch(monkeypatch, _Reader([_row(scenario=_scenario(reported_sales_amount_krw="0"))]))
 
     row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
 
     assert row.reported_sales_amount_krw == Decimal(0)
+
+
+def test_a_proposal_with_nothing_to_sell_is_hidden_and_counted(monkeypatch):
+    """🔴 팔 물량이 0이면 안이 선 것이 아니다.
+
+    재무도 검토할 것이 없어 판정이 영원히 안 붙고, 화면에서는 «재무 검토 전» 으로 남아
+    실제로 밀린 안처럼 보인다. 실측에서 판정 없는 안 287건이 **전부** 수량 0이었다.
+    """
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(scenario=_scenario(quantity_kg="0.0"), finance_verdict=None),
+                _row(scenario=_scenario(scenario_id="SALES-001-B")),
+            ]
+        ),
+    )
+
+    result = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    assert result.hidden_zero_quantity == 1
+    assert [row.scenario_id for row in result.rows] == ["SALES-001-B"]
+
+
+def test_only_the_failing_rules_become_reasons(monkeypatch):
+    """🔴 통과 사유를 거절 사유로 적지 않는다."""
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(
+                    finance_verdict="FAIL",
+                    rule_results=[
+                        {
+                            "rule_id": "FIN-SALES-AMOUNT",
+                            "verdict": "PASS",
+                            "reason_codes": ["SALES_AMOUNT_MATCH"],
+                        },
+                        {
+                            "rule_id": "FIN-SALES-MARGIN",
+                            "verdict": "FAIL",
+                            "reason_codes": ["SALES_MARGIN_BELOW_MINIMUM"],
+                        },
+                    ],
+                )
+            ]
+        ),
+    )
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.finance_reason_codes == ["SALES_MARGIN_BELOW_MINIMUM"]
+
+
+def test_a_review_required_rule_also_carries_its_reason(monkeypatch):
+    """«확인 필요» 도 왜 그런지 사유가 있어야 한다."""
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(
+                    finance_verdict="REVIEW_REQUIRED",
+                    rule_results=[
+                        {
+                            "rule_id": "FIN-SALES-MARGIN",
+                            "verdict": "REVIEW_REQUIRED",
+                            "reason_codes": ["SALES_MARGIN_BELOW_WARNING"],
+                        },
+                    ],
+                )
+            ]
+        ),
+    )
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.finance_reason_codes == ["SALES_MARGIN_BELOW_WARNING"]
+
+
+def test_the_evidence_the_proposal_leaned_on_comes_through(monkeypatch):
+    """근거를 펴 보려면 참조가 화면까지 와야 한다."""
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(
+                    scenario=_scenario(
+                        evidence_refs=[
+                            "DB:inventory_lots/sim_run_id=X",
+                            "MASTER-DAY-OPEN:2026-03-10",
+                        ],
+                        inventory_cost_basis={
+                            "amount_krw": "318081.0",
+                            "quantity_kg": "463.0",
+                            "cost_method": "ACTUAL",
+                            "source_refs": ["LOT-A", "LOT-B"],
+                        },
+                        supply={
+                            "confirmed_quantity_kg": "463.0",
+                            "conditional_quantity_kg": "0",
+                            "additional_supply_required": False,
+                        },
+                    )
+                )
+            ]
+        ),
+    )
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert len(row.evidence_refs) == 2
+    assert row.cost_basis_amount_krw == Decimal("318081.0")
+    assert row.cost_basis_method == "ACTUAL"
+    assert row.cost_basis_refs == ["LOT-A", "LOT-B"]
+    assert row.confirmed_quantity_kg == Decimal("463.0")
+    assert row.additional_supply_required is False
+
+
+def test_why_finance_has_not_judged_is_carried(monkeypatch):
+    """⚠️ «검토 전» 이면 왜 검토가 안 됐는지도 함께 와야 한다."""
+    _patch(
+        monkeypatch,
+        _Reader(
+            [
+                _row(
+                    finance_verdict=None,
+                    finance_status=None,
+                    rule_results=None,
+                    financial_summary=None,
+                    payload={
+                        "recommended_scenario_id": None,
+                        "scenarios": [],
+                        "missing_capabilities": ["FINANCIAL_VALIDATION"],
+                    },
+                )
+            ]
+        ),
+    )
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.finance_verdict is None
+    assert row.missing_capabilities == ["FINANCIAL_VALIDATION"]
+
+
+def test_an_unknown_supply_flag_stays_unknown(monkeypatch):
+    """🔴 `None` 은 «모른다» 다. `False` 로 바꾸면 «확인했고 아니다» 가 된다."""
+    _patch(monkeypatch, _Reader([_row(scenario=_scenario(supply={}))]))
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.additional_supply_required is None
+    assert row.confirmed_quantity_kg is None
 
 
 def test_the_run_axis_and_the_day_are_both_carried(monkeypatch):

@@ -228,6 +228,25 @@ export interface SalesProposal {
   /** 재무가 남긴 판정. `null` 은 아직 안 본 것이지 통과도 거절도 아니다. */
   finance_verdict: string | null;
   finance_status: string | null;
+  /** 🔴 판정을 **가른** 규칙의 사유다. 통과 사유는 들어 있지 않다. */
+  finance_reason_codes: string[];
+  contribution_margin_krw: Money | null;
+  contribution_margin_rate: Money | null;
+  available_credit_krw: Money | null;
+  projected_partner_ar_krw: Money | null;
+  credit_limit_krw: Money | null;
+  /** 판매가 «아직 못 받았다» 고 적어 둔 검증. 판정이 없는 이유가 여기 있다. */
+  missing_capabilities: string[];
+  evidence_refs: string[];
+  source_ref: string | null;
+  cost_basis_amount_krw: Money | null;
+  cost_basis_quantity_kg: Money | null;
+  cost_basis_method: string | null;
+  cost_basis_refs: string[];
+  confirmed_quantity_kg: Money | null;
+  conditional_quantity_kg: Money | null;
+  additional_supply_required: boolean | null;
+  ml_support_used: boolean | null;
   recommended: boolean;
 }
 
@@ -235,5 +254,7 @@ export interface SalesProposalsResponse {
   sim_run_id: string;
   as_of: string;
   request_count: number;
+  /** 팔 물량이 0이라 목록에서 뺀 안의 수. 지운 것이 아니라 센 것이다. */
+  hidden_zero_quantity: number;
   rows: SalesProposal[];
 }
