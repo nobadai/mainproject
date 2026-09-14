@@ -21,6 +21,8 @@ import { Panel } from "@/components/console/Blocks";
 import { Failed, Metric, Skeleton } from "@/components/console/ConsoleData";
 import { ApiError, salesRun, type SalesCandidateOut, type SalesRunResponse } from "@/lib/api";
 import { money, percent, quantity, type Money } from "@/lib/console_api";
+import { TechDetails } from "@/app/console/finance/TechDetails";
+import { runtimeText, verdictText } from "@/app/console/finance/user_text";
 
 /** 마스터가 낸 종료 코드의 뜻. **코드는 백엔드 값이고 여기서는 문장만 붙인다.** */
 const END_CODES: Record<string, string> = {
@@ -195,14 +197,20 @@ function Input({
 function Result({ data }: { data: SalesRunResponse }) {
   return (
     <>
-      <Panel title="Master 판정" subtitle="종료 코드는 마스터가 낸 값 그대로입니다">
-        <div className="grid gap-2 sm:grid-cols-3">
-          {/* 🔴 코드와 뜻을 같이 보여 준다 — 뜻만 남기면 되짚을 수 없다. */}
-          <Metric label="end_code" value={data.end_code} hint={END_CODES[data.end_code] ?? "정의되지 않은 코드"} />
-          <Metric label="요청" value={data.request_id} />
-          <Metric label="후보 수" value={`${data.candidates.length}건`} />
+      <Panel title="검토 결과" subtitle="아래 값은 각 부서가 낸 판정 그대로입니다">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Metric label="처리 결과" value={END_CODES[data.end_code] ?? "정의되지 않은 결과"} />
+          <Metric label="만들어진 후보" value={`${data.candidates.length}건`} />
         </div>
         <p className="mb-0 mt-3 text-[12px] text-ink2">{data.reason}</p>
+        <div className="mt-3">
+          <TechDetails>
+            {/* 🔴 코드와 뜻을 같이 보여 준다 — 뜻만 남기면 되짚을 수 없다. */}
+            <p className="m-0 font-mono text-[11px] text-ink2">
+              end_code {data.end_code} · request_id {data.request_id}
+            </p>
+          </TechDetails>
+        </div>
       </Panel>
       {data.candidates.map((candidate, index) => (
         <CandidateCard key={index} candidate={candidate} />
@@ -261,6 +269,11 @@ function CandidateCard({ candidate }: { candidate: SalesCandidateOut }) {
  *
  * 🔴 **Runtime 과 Verdict 를 합치지 않는다.** «못 돌았다» 와 «판정이 없다» 는 다른
  *    사실이고, 한 badge 로 뭉치면 그 둘을 구분할 수 없다.
+ *
+ * ⚠️ **`reason_codes` 는 실패 사유 목록이 아니다.** 그 배열에는 통과 사유까지 함께
+ *   들어 있다(2026-09-14 실측: PASS 판정에도 일곱 개가 실린다). «거절 사유» 라고
+ *   이름 붙여 보여 주면 통과한 규칙이 실패로 읽힌다 — 이름을 붙이지 않고 기술
+ *   상세 안에 그대로 둔다.
  */
 function Domain({
   title,
@@ -273,22 +286,27 @@ function Domain({
     <div className="rounded-lg border p-3" style={{ borderColor: "var(--color-hair)" }}>
       <b className="text-[12px]">{title}</b>
       {!state.present ? (
-        <p className="mb-0 mt-1 text-[11.5px] text-ink2">이 후보에 해당 검증이 호출되지 않았습니다.</p>
+        <p className="mb-0 mt-1 text-[11.5px] text-ink2">이 후보에 해당 검토가 호출되지 않았습니다.</p>
       ) : (
         <>
-          <div className="mt-1 flex gap-4 text-[11.5px]">
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px]">
             <span>
-              Runtime <b className="font-mono">{state.runtime}</b>
+              판단 <b>{verdictText(state.verdict)}</b>
             </span>
-            <span>
-              Verdict <b className="font-mono">{state.verdict ?? "판정 없음"}</b>
-            </span>
+            <span className="text-ink2">조회 {runtimeText(state.runtime)}</span>
           </div>
-          {state.reasons.length > 0 && (
-            <p className="mb-0 mt-1 break-all font-mono text-[10.5px] text-ink2">
-              {state.reasons.join(", ")}
-            </p>
-          )}
+          <div className="mt-2">
+            <TechDetails summary="적용된 규칙 사유">
+              <p className="m-0 font-mono text-[11px] text-ink2">
+                runtime {state.runtime} · verdict {state.verdict ?? "null"}
+              </p>
+              {state.reasons.length > 0 && (
+                <p className="mb-0 mt-2 break-all font-mono text-[10.5px] text-ink2">
+                  {state.reasons.join(", ")}
+                </p>
+              )}
+            </TechDetails>
+          </div>
         </>
       )}
     </div>
