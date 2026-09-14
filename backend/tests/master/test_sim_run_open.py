@@ -45,7 +45,6 @@ from app.master.sim_run_open import (
 )
 
 _MASTER = Path(__file__).resolve().parents[2] / "app" / "master"
-_스키마 = get_db_schema()
 
 #: 이 검사가 여는 새 실행. 🔴 **번인과 다르다** — 같으면 번인 가드를 걷은 뮤턴트가
 #:   전부 살아남는다.
@@ -446,6 +445,9 @@ def _심는다(**over: Any) -> tuple[_대역커넥션, str]:
 
 def _실린다(conn: _대역커넥션, 표: str = "finance_states") -> dict[str, Any]:
     """INSERT 한 문장에서 `칸 이름 → 실린 값` 을 되짚는다."""
+    # ★ 스키마 이름은 검사가 돌 때 읽는다. 모듈을 읽을 때 읽으면 `DB_SCHEMA` 가 없는
+    #   자리에서 수집부터 터진다 (`conftest.py` 의 `스키마_이름을_환경에_둔다`).
+    _스키마 = get_db_schema()
     실은것 = _문장들(conn, "INSERT INTO")
     assert len(실은것) == 1, f"한 행이 아니다: {실은것}"
     문장, params = 실은것[0]
@@ -845,6 +847,7 @@ def test_물류_칸_목록이_information_schema_에서_온다() -> None:
 def test_물류_칸을_information_schema_에_물을_때_그_표를_묻는다() -> None:
     """★ 재무 표의 칸으로 물류 행을 실으면 칸이 통째로 어긋난다."""
     conn, _ = _물류를_심는다()
+    _스키마 = get_db_schema()
 
     칸질의 = [params for 문장, params in conn.log if "is_generated" in 문장]
     assert len(칸질의) == 1
