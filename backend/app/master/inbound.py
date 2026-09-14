@@ -62,7 +62,6 @@ from pydantic import BaseModel, Field
 
 from app.finance.db import get_connection
 from app.master.day_gate import check_day_gate
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sim_run_binding import bind_sim_run
 
 __all__ = [
@@ -262,7 +261,7 @@ def reset() -> None:
 
 
 def receive_arrivals(
-    as_of: date, *, connect: Any = None, sim_run_id: str = BURN_IN_SIM_RUN_ID
+    as_of: date, *, connect: Any = None, sim_run_id: str
 ) -> InboundOut:
     """`as_of` 에 도착 예정인 것을 **한 트랜잭션으로** 받는다.
 
@@ -308,9 +307,10 @@ def receive_arrivals(
       ⚠️ **미등록은 PASS 다** (`day_gate` 계약). 정본 표가 없는 환경에서 이 Gate 가
         입고를 막지 않는다 — 없는 것과 안 열린 것은 다르다.
 
-    :param sim_run_id: 어느 실행의 장부인가 (`#531` 후속). 🔴 **여기는 기본값이
-                    있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
-                    바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
+    :param sim_run_id: 어느 실행의 장부인가 (`#531` 후속). 🔴 **기본값이 없다**
+                    (2026-09-14). 번인 상수로 메우면 축을 안 준 호출이 조용히
+                    번인 장부에 쓴다. 걷기는 `run_scheduled_day` 가, 라우터는
+                    요청이 준 축을 싣는다.
     """
     gate = check_day_gate(as_of, connect=connect, sim_run_id=sim_run_id)
     if gate.gate == "BLOCKED":

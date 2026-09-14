@@ -51,6 +51,35 @@ from app.master.walk_report import walk_report as build_walk_report
 router = APIRouter(prefix="/master", tags=["master"])
 
 
+def _walk_axis(sim_run_id: str) -> str:
+    """장부를 바꾸는 손 호출이 쓸 실행 축. **요청이 준 값만 쓴다.**
+
+    🔴 **기본값으로 메우지 않는다** (2026-09-14). 전에는 `/days/{as_of}/*` 가 축을
+       안 받아 번인 상수로 떨어졌고, 그래서 손으로 부른 하루가 **번인 장부에** 쌓였다.
+       실행 축 사고는 지금까지 전부 *"축이 빠졌거나 기본값으로 메워진"* 자리였다.
+
+    🔴 **번인은 거부한다.** 번인은 기초 상태 시드 전용이고 걷지 않는다
+       (`sim_run_open.reset_sim_run` · `backfill_runner.run_backfill` 과 같은 태도).
+
+    :raises HTTPException: 400 — 축이 비었거나 번인 실행일 때.
+    """
+    axis = sim_run_id.strip()
+    if not axis:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="sim_run_id 없이 장부를 바꿀 수 없다 — 어느 실행인지를 지어내지 않는다",
+        )
+    if axis == BURN_IN_SIM_RUN_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"번인 실행({BURN_IN_SIM_RUN_ID})의 장부는 손으로 안 바꾼다"
+                " — 모든 실행이 그 장부를 기초 상태로 읽는다. 걷는 실행의 축을 넘겨라"
+            ),
+        )
+    return axis
+
+
 @router.post(
     "/request",
     response_model=ProcurementRunResponse,
@@ -420,7 +449,7 @@ def master_decision_history(request_id: str) -> list[DecisionOut]:
     response_model=DayOpenOut,
     summary="하루를 연다 — 그날 상태 행을 파트마다 보장한다",
 )
-def master_open_day(as_of: date) -> DayOpenOut:
+def master_open_day(as_of: date, sim_run_id: str) -> DayOpenOut:
     """`as_of` 날 상태 행이 없으면 전날에서 물려받아 만든다.
 
     🔴 **명시적 호출이다. 실행의 부작용이 아니다.** `run_procurement` 이 시작할 때
@@ -433,11 +462,13 @@ def master_open_day(as_of: date) -> DayOpenOut:
     | 상태 | 언제 |
     |---|---|
     | 200 | 열었다 · 이미 열려 있었다 · 막혔다 · 미등록이다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
 
     ★ **실패도 200 이다** (`/master/request` 와 같은 태도). 미등록·상한 초과는 오류가
       아니라 상태이고, 적재 실패는 롤백되어 어제 그대로다 — 사유가 본문에 실린다.
     """
-    return run_open_day(as_of)
+    return run_open_day(as_of, sim_run_id=_walk_axis(sim_run_id))
 
 
 @router.post(
@@ -445,7 +476,7 @@ def master_open_day(as_of: date) -> DayOpenOut:
     response_model=InboundOut,
     summary="그날 도착분을 받는다 — 개장 다음이고 판단과는 별개다",
 )
-def master_receive_arrivals(as_of: date) -> InboundOut:
+def master_receive_arrivals(as_of: date, sim_run_id: str) -> InboundOut:
     """`as_of` 에 도착 예정인 것을 파트마다 받는다.
 
     🔴 **왜 자기 엔드포인트인가** (물류 물음 2026-09-07).
@@ -478,11 +509,13 @@ def master_receive_arrivals(as_of: date) -> InboundOut:
     | 상태 | 언제 |
     |---|---|
     | 200 | 받았다 · 받을 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
 
     ★ **실패도 200 이다** (`/days/{as_of}/open` 과 같은 태도). `FAILED` 는 롤백되어
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
-    return run_receive_arrivals(as_of)
+    return run_receive_arrivals(as_of, sim_run_id=_walk_axis(sim_run_id))
 
 
 @router.post(
@@ -490,7 +523,7 @@ def master_receive_arrivals(as_of: date) -> InboundOut:
     response_model=CollectionOut,
     summary="그날 수금 사건을 반영한다 — 개장 다음이고 판단과는 별개다",
 )
-def master_collect_receipts(as_of: date) -> CollectionOut:
+def master_collect_receipts(as_of: date, sim_run_id: str) -> CollectionOut:
     """`as_of` 의 수금 사건을 파트마다 반영한다.
 
     🔴 **왜 자기 엔드포인트인가.**
@@ -526,11 +559,13 @@ def master_collect_receipts(as_of: date) -> CollectionOut:
     | 상태 | 언제 |
     |---|---|
     | 200 | 수금했다 · 들어올 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
 
     ★ **실패도 200 이다** (`/days/{as_of}/receive` 와 같은 태도). `FAILED` 는 롤백되어
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
-    return run_collect_receipts(as_of)
+    return run_collect_receipts(as_of, sim_run_id=_walk_axis(sim_run_id))
 
 
 @router.post(
@@ -538,7 +573,7 @@ def master_collect_receipts(as_of: date) -> CollectionOut:
     response_model=ReceivableOut,
     summary="그날 확정된 판매를 채권으로 세운다 — 수금보다 앞이고 판단과는 별개다",
 )
-def master_issue_receivables(as_of: date) -> ReceivableOut:
+def master_issue_receivables(as_of: date, sim_run_id: str) -> ReceivableOut:
     """`as_of` 가 `sale_date` 인 확정 판매를 파트마다 채권으로 세운다.
 
     🔴 **왜 자기 엔드포인트인가.**
@@ -578,11 +613,13 @@ def master_issue_receivables(as_of: date) -> ReceivableOut:
     | 상태 | 언제 |
     |---|---|
     | 200 | 세웠다 · 세울 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
 
     ★ **실패도 200 이다** (`/days/{as_of}/collect` 와 같은 태도). `FAILED` 는 롤백되어
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
-    return run_issue_receivables(as_of)
+    return run_issue_receivables(as_of, sim_run_id=_walk_axis(sim_run_id))
 
 
 @router.post(
@@ -590,7 +627,7 @@ def master_issue_receivables(as_of: date) -> ReceivableOut:
     response_model=ClosingOut,
     summary="그날을 닫는다 — 하루의 맨 끝이다. 숫자는 재무가 낸다",
 )
-def master_close_day(as_of: date) -> ClosingOut:
+def master_close_day(as_of: date, sim_run_id: str) -> ClosingOut:
     """`as_of` 를 파트마다 닫는다. **출고 뒤이고 하루의 맨 끝이다.**
 
     🔴 **왜 자기 엔드포인트인가.**
@@ -616,10 +653,10 @@ def master_close_day(as_of: date) -> ClosingOut:
     🔴 **`run_scheduled_day` 가 부르는 함수와 사람이 부르는 함수가 같다.** 둘이
       갈리면 손으로 부른 결과와 걷기 결과가 다른 코드를 지난다.
 
-    ★ **`sim_run_id` 는 마스터가 정한다.** `daily_closings` 의 PK 가
+    🔴 **`sim_run_id` 는 요청이 준다** (2026-09-14). `daily_closings` 의 PK 가
       `(sim_run_id, close_date)` 라 **어느 실행의 장부인가**가 없으면 행이 어디에
-      앉을지 정해지지 않는다. 값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID`
-      하나이고, 같은 날 판단 행·관문 행이 싣는 값과 같다.
+      앉을지 정해지지 않는다. 전에는 번인 상수를 박아 손으로 부른 마감이 번인 장부에
+      앉았다. 번인은 거부한다 (`_walk_axis`).
 
     ★ **순서는 문장이 아니라 Gate 가 지킨다.** 안 열린 날 부르면 `NOT_OPENED` 로
       돌아서고 `next_action` 이 `OPEN_DAY_REQUIRED` 를 준다 —
@@ -632,8 +669,10 @@ def master_close_day(as_of: date) -> ClosingOut:
     | 상태 | 언제 |
     |---|---|
     | 200 | 닫았다 · 닫을 게 없었다 · 막혔다 · 안 열렸다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
 
     ★ **실패도 200 이다** (`/days/{as_of}/issue-receivables` 와 같은 태도). `FAILED` 는
       롤백되어 아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
-    return run_close_day(as_of, sim_run_id=BURN_IN_SIM_RUN_ID)
+    return run_close_day(as_of, sim_run_id=_walk_axis(sim_run_id))

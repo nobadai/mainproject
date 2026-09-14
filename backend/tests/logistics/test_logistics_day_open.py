@@ -755,7 +755,7 @@ def test_master_open_day_walks_logistics_after_registration():
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
     conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM))
 
-    결과 = master_day_open.open_day(AS_OF, connect=lambda: conn)
+    결과 = master_day_open.open_day(AS_OF, connect=lambda: conn, sim_run_id=SIM_A)
 
     assert 결과.status == "OPENED"
     assert [part.part for part in 결과.parts] == ["logistics"]
@@ -771,7 +771,7 @@ def test_master_open_day_is_idempotent_for_an_already_open_day():
     master_day_open.register_day_opening("logistics", LogisticsDayOpening())
     conn = 가짜커넥션(_한_실행이_연_날들(CARRY_FROM, AS_OF))
 
-    결과 = master_day_open.open_day(AS_OF, connect=lambda: conn)
+    결과 = master_day_open.open_day(AS_OF, connect=lambda: conn, sim_run_id=SIM_A)
 
     # 🔴 **`ALREADY_OPENED` 다** (계약 어휘 · 2026-09-06 정정). 멱등 no-op 은 실패가
     #    아니다 — `NOT_OPENED` 로 접으면 매일 도는 정상 상태가 실패로 보인다.
@@ -799,12 +799,12 @@ def test_master_open_day_walks_each_run_on_its_own_row():
     master_day_open.reset()
     master_day_open.register_day_opening("logistics", LogisticsDayOpening(sim_run_id=SIM_A))
     a_conn = 가짜커넥션(dict(열린_날))
-    a결과 = master_day_open.open_day(AS_OF, connect=lambda: a_conn)
+    a결과 = master_day_open.open_day(AS_OF, connect=lambda: a_conn, sim_run_id=SIM_A)
 
     master_day_open.reset()
     master_day_open.register_day_opening("logistics", LogisticsDayOpening(sim_run_id=SIM_B))
     b_conn = 가짜커넥션(dict(열린_날))
-    b결과 = master_day_open.open_day(AS_OF, connect=lambda: b_conn)
+    b결과 = master_day_open.open_day(AS_OF, connect=lambda: b_conn, sim_run_id=SIM_B)
 
     assert a결과.status == "ALREADY_OPENED"
     assert not [query for query in a_conn.커서.queries if "INSERT INTO" in query]

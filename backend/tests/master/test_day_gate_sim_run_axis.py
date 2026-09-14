@@ -356,18 +356,19 @@ def test_축이_비면_막고_사유를_낸다() -> None:
     assert "ValueError" in gate.reason
 
 
-def test_기본값이_있어_라우터_동작이_안_바뀐다() -> None:
-    """⚠️ **`open_day` · `seed_day` 와 같은 태도다.** 라우터가 이 칸을 안 준다.
+def test_기본값이_없어_축을_안_주면_부르지_못한다() -> None:
+    """🔴 **번인 상수로 메우지 않는다** (2026-09-14).
 
-    ★ 이번 판은 운영 라우터 동작을 안 바꾼다 — 안 주면 번인으로 묶인다.
+    전에는 기본값이 번인 상수였고, 축을 안 준 호출이 번인 장부를 물었다.
+    라우터도 이제 요청이 준 축을 싣는다.
     """
-    기본 = inspect.signature(check_day_gate).parameters["sim_run_id"].default
-    assert 기본 == BURN_IN_SIM_RUN_ID
+    칸 = inspect.signature(check_day_gate).parameters["sim_run_id"]
+    assert 칸.default is inspect.Parameter.empty
+    assert 칸.kind is inspect.Parameter.KEYWORD_ONLY
 
-    만든축 = _등록(AS_OF)
-    check_day_gate(AS_OF, connect=lambda: _가짜커넥션())
-
-    assert 만든축 == [BURN_IN_SIM_RUN_ID] * len(day_open.PARTS)
+    _등록(AS_OF)
+    with pytest.raises(TypeError, match="sim_run_id"):
+        check_day_gate(AS_OF, connect=lambda: _가짜커넥션())  # type: ignore[call-arg]
 
 
 def test_등록이_0건이면_축이_없어도_통과한다() -> None:
@@ -375,6 +376,26 @@ def test_등록이_0건이면_축이_없어도_통과한다() -> None:
     gate = check_day_gate(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id="")
 
     assert gate.gate == "PASS"
+
+
+def test_막힌_날_연속_실패도_받은_축의_개장_정본에서_센다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **번인 개장 기록을 읽지 않는다** (2026-09-14).
+
+    전에는 `_blocked` 가 `read_day_opening(sim_run_id=BURN_IN_SIM_RUN_ID)` 를 박아,
+    걷기 실행이 막힌 날 연속 실패 횟수를 **번인 실행의 개장 기록**에서 셌다.
+    """
+    읽은축: list[str] = []
+
+    def 정본(**kw: Any) -> None:
+        읽은축.append(kw["sim_run_id"])
+
+    monkeypatch.setattr(관문모듈, "read_day_opening", 정본)
+    _등록(AS_OF - timedelta(days=2))
+
+    gate = check_day_gate(AS_OF, connect=lambda: _가짜커넥션(), sim_run_id=걷기축)
+
+    assert gate.next_action == "RETRY_OPEN_DAY", "전제가 깨졌다 — 정본을 읽는 분기가 아니다"
+    assert 읽은축 == [걷기축], f"개장 정본을 남의 축으로 읽었다: {읽은축}"
 
 
 # ── 부르는 자리가 축을 넘기는가 ─────────────────────────────────────────

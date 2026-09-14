@@ -696,7 +696,7 @@ def test_엔드포인트가_부르는_함수가_하루_실행이_부르는_함�
     from app.master import scheduler
 
     사람_경로 = _inspect.getsource(router_module.master_close_day)
-    assert "run_close_day(as_of, sim_run_id=BURN_IN_SIM_RUN_ID)" in 사람_경로
+    assert "run_close_day(as_of, sim_run_id=_walk_axis(sim_run_id))" in 사람_경로
 
     assert router_module.run_close_day is closing.close_day
     assert (
@@ -713,7 +713,7 @@ def test_엔드포인트가_실패도_200_으로_낸다(monkeypatch: pytest.Monk
     import app.main
 
     client = TestClient(app.main.app)
-    resp = client.post(f"/master/days/{AS_OF.isoformat()}/close")
+    resp = client.post(f"/master/days/{AS_OF.isoformat()}/close", params={"sim_run_id": 축})
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "NOT_OPENED"
@@ -768,6 +768,7 @@ def _하루(**kwargs) -> Any:
         #   `ProcurementRunRequest` 가 거절하고, 그 거절이 `FAILED` 로 잡혀
         #   *"판단이 안 돌았다"* 와 구별이 안 된다.
         "items": ("배추",),
+        "sim_run_id": 축,
     }
     defaults.update(kwargs)
 
@@ -820,14 +821,17 @@ def test_마감에_실행_축을_흘려_준다() -> None:
     assert out.closing_status == "CLOSED"
 
 
-def test_기본_축의_주인은_ledger_repository_하나다() -> None:
-    """★ 관문 행이 싣는 값과 같아야 한다 — 갈리면 축으로 훑을 때 마감만 빠진다."""
-    from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+def test_하루_실행의_축에는_기본값이_없다() -> None:
+    """🔴 **번인 상수로 메우지 않는다** (2026-09-14).
+
+    전에는 기본값이 번인 상수였고, 축을 안 준 하루가 조용히 번인 장부에 썼다.
+    관문 행 · 마감 행이 싣는 값은 부르는 쪽이 준 축 하나다.
+    """
     from app.master.scheduler import run_scheduled_day
 
-    assert (
-        _inspect.signature(run_scheduled_day).parameters["sim_run_id"].default is BURN_IN_SIM_RUN_ID
-    )
+    칸 = _inspect.signature(run_scheduled_day).parameters["sim_run_id"]
+    assert 칸.default is _inspect.Parameter.empty
+    assert 칸.kind is _inspect.Parameter.KEYWORD_ONLY
 
 
 def test_장부_관문이_막은_날은_BLOCKED_다() -> None:
@@ -878,7 +882,7 @@ def test_안_도는_날은_마감을_아예_안_탄다() -> None:
         deadline=datetime(2026, 1, 7, 10, 30, tzinfo=SEOUL),
     )
 
-    out = run_scheduled_day(action, close_fn=close_fn, items=("배추",))
+    out = run_scheduled_day(action, close_fn=close_fn, items=("배추",), sim_run_id=축)
 
     assert out.closing_status == "NOT_ATTEMPTED"
     assert close_fn.calls == [], "안 도는 날에 마감을 불렀다"

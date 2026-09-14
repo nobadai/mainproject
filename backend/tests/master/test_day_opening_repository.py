@@ -226,7 +226,7 @@ def test_성공한_개장도_정본에_남긴다(monkeypatch: pytest.MonkeyPatch
     day_open.register_day_opening("finance", _이미열린파트())
     day_open.register_day_opening("logistics", _이미열린파트())
     try:
-        out = day_open.open_day(AS_OF, connect=lambda: _커넥션())
+        out = day_open.open_day(AS_OF, connect=lambda: _커넥션(), sim_run_id=SIM)
     finally:
         day_open.reset()
 
@@ -251,7 +251,7 @@ def test_open_day_가_파트_트랜잭션_밖에서_남긴다(monkeypatch: pytes
     )
     day_open.reset()
 
-    out = day_open.open_day(AS_OF, connect=lambda: _커넥션())
+    out = day_open.open_day(AS_OF, connect=lambda: _커넥션(), sim_run_id=SIM)
 
     assert out.status == "NOT_OPENED", "미등록이라 안 열린다"
     assert 남긴것, "🔴 미등록으로 돌아설 때도 남겨야 한다 — 그것도 사실이다"

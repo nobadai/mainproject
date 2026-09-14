@@ -342,8 +342,8 @@ NOT_ATTEMPTED          단계를 안 탔다 — 앞 단계에서 이미 멈춘 �
   ⚠️ **세는 것은 아직 안 된다.** `end_code='E4_NOT_STARTED'` 한 값에 예측 미도착 ·
     어댑터 미등록 · 장부 관문이 같이 앉는다. 그것은 `Master 상세 19.0` 이 풀 자리다.
 
-  🔴 **그 행에 실행 축(`sim_run_id`)을 같이 싣는다.** 값의 주인은
-    `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 같은 날 판단 행이 싣는 값과 같다.
+  🔴 **그 행에 실행 축(`sim_run_id`)을 같이 싣는다.** 값은 하루 실행이 받은 축이고,
+    같은 날 판단 행이 싣는 값과 같다.
     안 실으면 축으로 훑는 모든 조회에서 게이트 행만 빠져 **막힌 날이 도로 안 보인다.**
 """
 
@@ -371,7 +371,6 @@ from app.master.inspection import (
     InspectionOut,
     run_logistics_inspection,
 )
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.maintenance import MaintenanceOut, run_auto_maintenance
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
@@ -1085,7 +1084,7 @@ def run_scheduled_day(
     sales_fn: Callable[..., Any] = run_sales,
     outbound_fn: Callable[..., Any] = ship_due_sales,
     close_fn: Callable[..., Any] = close_day,
-    sim_run_id: str = BURN_IN_SIM_RUN_ID,
+    sim_run_id: str,
     items: Sequence[str] | None = None,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
@@ -1254,8 +1253,8 @@ def run_scheduled_day(
 
     :param items: 돌 품목. 안 주면 `scheduled_items()` — **목록을 다시 세지 않는다.**
     :param sim_run_id: 어느 실행의 장부인가. 🔴 **인자로 받아 흘린다** — 마감이
-        `daily_closings` 의 PK 절반으로 쓴다. 기본값의 주인은
-        `ledger_repository.BURN_IN_SIM_RUN_ID` 하나이고, 관문 행이 싣는 값과 같다.
+        `daily_closings` 의 PK 절반으로 쓴다. 🔴 **기본값이 없다** (2026-09-14) —
+        번인 상수로 메우면 축을 안 준 하루가 번인 장부에 쓴다. 관문 행이 싣는 값과 같다.
     """
     if action.scope == "NONE":
         # 🔴 여기서 돌아선다. **서비스 함수를 하나도 안 부른다.**
@@ -1388,9 +1387,9 @@ def run_scheduled_day(
         #    행만 없어서, **모두가 쓰는 축으로 훑을 때 막힌 날이 도로 안 보인다** — 이
         #    판이 존재하는 이유가 바로 그것이라 그 자리에서 무너진다.
         #
-        # ★ **값의 주인은 `ledger_repository.BURN_IN_SIM_RUN_ID` 하나다.** 여기서 문자열을
-        #   다시 적거나 새 상수를 만들지 않는다 — `service.run_procurement` 가 같은 날
-        #   판단 행에 싣는 값도 그 상수이고, 두 벌이 되면 한쪽만 고치는 날 두 행이 갈린다.
+        # ★ **값은 이 하루가 받은 축 하나다.** 여기서 문자열을 다시 적거나 새 상수를
+        #   만들지 않는다 — 같은 날 판단 행에 싣는 값도 그 축이고, 두 벌이 되면 한쪽만
+        #   고치는 날 두 행이 갈린다.
         try:
             persistence.record_ledger_gap(
                 request_id=ledger_gap_request_id(as_of, sim_run_id=sim_run_id),
@@ -2072,7 +2071,7 @@ def wake_up(
     sales_fn: Callable[..., Any] = run_sales,
     outbound_fn: Callable[..., Any] = ship_due_sales,
     close_fn: Callable[..., Any] = close_day,
-    sim_run_id: str = BURN_IN_SIM_RUN_ID,
+    sim_run_id: str,
     auto_approve: bool = False,
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,

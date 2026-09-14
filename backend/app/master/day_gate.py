@@ -58,7 +58,6 @@ from app.finance.db import get_connection
 from app.master.calendar_walk import MAX_WALK_DAYS
 from app.master.day_open import PARTS, registered
 from app.master.day_opening_repository import read_day_opening
-from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.sim_run_binding import bind_sim_run
 
 __all__ = ["DayGate", "FailedPart", "check_day_gate"]
@@ -126,7 +125,7 @@ def check_day_gate(
     as_of: date,
     *,
     connect: Callable[[], Any] | None = None,
-    sim_run_id: str = BURN_IN_SIM_RUN_ID,
+    sim_run_id: str,
 ) -> DayGate:
     """그날이 열렸는지 **물어보기만** 한다. 열지 않는다.
 
@@ -136,9 +135,9 @@ def check_day_gate(
     ⚠️ **예외를 밖으로 내지 않는다.** 관문이 500 을 내면 판단이 아예 안 도는데, 못 물어본
       것과 안 열린 것은 다르다 — 못 물어보면 `BLOCKED` + `CONTACT_OPERATOR` 다.
 
-    :param sim_run_id: 어느 실행의 장부를 묻는가 (`#531` 후속). 🔴 **여기는 기본값이
-                    있다** — 라우터가 이 칸을 안 주고 이번 판은 운영 동작을 안
-                    바꾼다. 걷기는 `run_scheduled_day` 가 자기 축을 실어 준다.
+    :param sim_run_id: 어느 실행의 장부를 묻는가 (`#531` 후속). 🔴 **기본값이 없다**
+                    (2026-09-14). 번인 상수로 메우면 축을 안 준 호출이 번인
+                    장부를 묻는다. 부르는 쪽이 자기 축을 싣는다.
     """
     present = [part for part in PARTS if part in registered()]
     if not present:
@@ -175,7 +174,9 @@ def check_day_gate(
     finally:
         conn.close()
 
-    return _blocked(as_of, closed=closed, last=last, gap=gap, connect=connect)
+    return _blocked(
+        as_of, closed=closed, last=last, gap=gap, connect=connect, sim_run_id=sim_run_id
+    )
 
 
 def _last_opened(
@@ -208,6 +209,7 @@ def _blocked(
     last: date | None,
     gap: int | None,
     connect: Callable[[], Any] | None = None,
+    sim_run_id: str,
 ) -> DayGate:
     """막힌 이유와 다음 걸음. **판정 규칙은 계약 §2 그대로다.**
 
@@ -245,7 +247,9 @@ def _blocked(
         #    실제로 그랬다: `master_day_openings` 를 공유 DB 에 적용한 날
         #    (2026-09-07) 대역을 쓰던 검사가 빨간불이 됐다. **안 터지던 이유가
         #    '표가 없다' 였고, 그 이유가 사라진 것이다.**
-        record = read_day_opening(as_of=as_of, sim_run_id=BURN_IN_SIM_RUN_ID, connect=connect)
+        # 🔴 **받은 축으로 읽는다** (2026-09-14). 전에는 번인 상수를 박아, 걷기
+        #    실행의 연속 실패 횟수를 번인 개장 기록에서 셌다.
+        record = read_day_opening(as_of=as_of, sim_run_id=sim_run_id, connect=connect)
         if record is None:
             # ⚠️ 못 읽었거나 한 번도 안 불렀다. **근사하되 근사라고 적는다.**
             꼬리 = " 개장 정본이 없어 첫 실패로 본다"
