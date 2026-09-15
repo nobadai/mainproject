@@ -188,7 +188,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["route"],
+    #   🔴 **칸을 전부 꼭 쓰게 한다** (2026-09-15 · 화면에서 발견).
+    #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
+    #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
+    #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
+    "required": ["route", "items", "kinds", "dates", "asks"],
 }
 
 

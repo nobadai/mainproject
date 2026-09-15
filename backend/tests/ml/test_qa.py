@@ -525,6 +525,22 @@ def test_모르는_표현이면_자르지_않는다():
     assert qa_llm._trim_kinds(["AUC", "WHSL"], "배추 값 알려줘") == ["AUC", "WHSL"]
 
 
+def test_응답_스키마는_칸을_전부_꼭_쓰게_한다():
+    """🔴 **화면에서 발견한 것** (2026-09-15).
+
+    `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds` 까지만
+    쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체기간」·「일주일치」가
+    전부 «날짜를 말씀하지 않으셨다» 로 떨어졌다. 뜻은 알아듣고 있었는데 칸을 안 썼다.
+
+    선택 칸이 늘면 모델은 뒤쪽 칸을 건너뛴다 — 비어도 되지만 칸은 반드시 쓰게 한다.
+    """
+    required = set(qa_llm._RESPONSE_SCHEMA["required"])
+    assert {"route", "items", "kinds", "dates", "asks"} <= required
+    #   날짜를 목록으로 묶는 판도 같은 필수 목록을 물려받는다
+    enum_schema = qa_llm._schema(BASE)
+    assert {"dates", "asks"} <= set(enum_schema["required"])
+
+
 def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():
     assert qa_llm._parse_dates(["2026-09-15", "내일", None, "2026-13-40"]) == [
         date(2026, 9, 15)
