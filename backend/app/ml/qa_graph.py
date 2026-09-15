@@ -84,6 +84,8 @@ class QaState(TypedDict, total=False):
     asked: list[date]          # LLM 이 고른 날짜 (요청이 직접 주면 그쪽이 이긴다)
     targets: list[date]        # 전달표에서 읽을 날 (D+1 ~ D+18)
     out_of_range: list[date]
+    used_default: bool         # 날짜를 안 말해 **오늘**을 기본값으로 썼다
+    default_fell_back: bool    # 그 오늘 값마저 없어 내일로 물러섰다
     rows: list[dict[str, Any]]
     today: dict[str, Any] | None
     accuracy: dict[str, Any] | None
@@ -212,7 +214,12 @@ def gate(state: QaState) -> QaState:
         return {"status": "NO_DATA", "message": "전달표에 예측이 아직 없습니다."}
 
     #   ★ 우선순위 — 요청이 직접 준 날짜 > LLM 이 고른 날짜 > 기본값(내일)
-    asked = list(req.dates or state.get("asked") or [base_dt + timedelta(days=1)])
+    #   ★ **날짜를 안 말했으면 오늘을 보여준다** (2026-09-15 · 사용자 지시로 바꿈).
+    #     전에는 말없이 «내일 하루» 였다. 값은 맞지만 왜 하루뿐인지 안 밝혀서,
+    #     사람이 «원래 하루치만 있나 보다» 하고 넘어간다 — 조용한 축소다.
+    #     기본값을 썼다는 것을 `used_default` 로 들고 가 답에 한 줄로 적는다.
+    used_default = not (req.dates or state.get("asked"))
+    asked = list(req.dates or state.get("asked") or [base_dt])
     wants_today = any(d == base_dt for d in asked)
     last = base_dt + timedelta(days=QA_MAX_OFFSET)
     targets = sorted({d for d in asked if base_dt < d <= last})
@@ -222,6 +229,7 @@ def gate(state: QaState) -> QaState:
         "wants_today": wants_today,
         "targets": targets,
         "out_of_range": out_of_range,
+        "used_default": used_default,
     }
 
 
@@ -236,11 +244,20 @@ def fetch(state: QaState) -> QaState:
     """표를 읽는다. 날짜 여러 개를 한 번에."""
     item, kind = state["item"], state["kind"]
     try:
-        rows = qa_tools.forecast_rows(item, kind, state["base_dt"], state.get("targets") or [])
+        base_dt = state["base_dt"]
+        targets = list(state.get("targets") or [])
+        rows = qa_tools.forecast_rows(item, kind, base_dt, targets)
         today = qa_tools.today_row(item, kind) if state.get("wants_today") else None
+        fell_back = False
+        if state.get("used_default") and today is None and not rows:
+            #   ★ 오늘 값이 없는 날도 있다 (원본 창고에 리드 0 이 안 들어온 아침).
+            #     그때는 **빈 답을 주지 말고 내일로 물러선다.** 물러섰다는 것도 적는다.
+            fell_back = True
+            rows = qa_tools.forecast_rows(item, kind, base_dt, [base_dt + timedelta(days=1)])
         return {
             "rows": rows,
             "today": today,
+            "default_fell_back": fell_back,
             "accuracy": qa_tools.accuracy(item, kind),
             "usability": qa_tools.usability(item, kind),
         }
@@ -289,13 +306,23 @@ def _answer_markdown(state: QaState) -> QaState:
     body: list[str] = []
     if today:
         body.append(
-            _line(f"오늘 {today['target_dt']}", today, unit, "당일 값은 내부 기록에서")
+            #   ★ 어느 창고에서 읽었는지는 **사람에게 알 바가 아니다** (2026-09-15).
+            #     기계가 볼 것은 `meta.source` 로 나간다 — 답 문장은 값만 말한다.
+            _line(f"오늘 {today['target_dt']}", today, unit)
         )
     for row in rows:
         body.append(_line(f"{row['target_dt']} (D+{row['offset_days']})", row, unit))
 
     missing = sorted(set(state.get("targets") or []) - {r["target_dt"] for r in rows})
     tail: list[str] = [""]
+    if state.get("used_default"):
+        #   ★ **기본값을 썼다는 것을 밝힌다.** 안 밝히면 「하루치만 있나 보다」로 읽힌다.
+        tail.append(
+            "> 날짜를 따로 말씀하지 않으셔서 "
+            + ("오늘 값이 아직 없어 **내일** 값을 보여드립니다."
+               if state.get("default_fell_back") else "**오늘** 값을 보여드립니다.")
+            + " 「전부」라고 하시면 오늘부터 18일 뒤까지 다 보여드립니다."
+        )
     if state.get("out_of_range"):
         last = base_dt + timedelta(days=QA_MAX_OFFSET)
         days = " · ".join(str(d) for d in state["out_of_range"])

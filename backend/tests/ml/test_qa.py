@@ -115,11 +115,13 @@ def test_당일을_물으면_원본_창고에서_읽고_출처를_밝힌다(도�
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC", dates=[BASE]))
     assert out.meta.status == "OK"
     assert out.meta.source == "prediction_log"
-    assert "내부 기록" in out.markdown
+    assert "오늘 2026-09-14" in out.markdown
     #   ★ 표 이름·모델 이름 같은 코드 낱말은 **문장에 안 나간다** (마스터 요청).
     #     기계가 읽을 값은 meta 로 간다 — 화면은 사람 말만 본다.
     for code_word in ("prediction_log", "ml_price_forecasts", "ops_auc"):
         assert code_word not in out.markdown
+    #   어느 창고에서 읽었는지도 문장에 안 적는다 — 사람에게 알 바가 아니다.
+    assert "내부 기록" not in out.markdown
 
 
 def test_쓰지_말라는_조합은_경고가_먼저_나간다(도구를_갈아_끼운다):
@@ -178,6 +180,55 @@ def test_가격_종류를_못_고르면_되묻는다(도구를_갈아_끼운다,
     out = qa_graph.answer(QaRequest(question="배추 가격 알려줘"))
     assert out.meta.status == "NEED_CLARIFY"
     assert "경락가" in out.markdown and "소매가" in out.markdown
+
+
+def test_날짜를_안_말하면_오늘_값과_그_이유를_준다(도구를_갈아_끼운다):
+    """★ 전에는 말없이 «내일 하루» 였다 (2026-09-15 고침).
+
+    값은 맞지만 왜 하루뿐인지 안 밝히면 «원래 하루치만 있나 보다» 로 읽힌다.
+    """
+    today = {
+        "base_dt": BASE, "target_dt": BASE, "lead_biz_d": 0,
+        "predicted": 962, "lower": 700, "upper": 1300, "current_price": 1001,
+        "unit": "원/kg", "is_gated": False, "gate_reason": None,
+        "band_method": "quantile", "model_version": "ops_auc",
+    }
+    도구를_갈아_끼운다(rows=[], today=today)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    assert out.meta.status == "OK"
+    assert out.meta.targets == [BASE]                        # 내일이 아니라 오늘
+    assert "날짜를 따로 말씀하지 않으셔서" in out.markdown
+    assert "전부" in out.markdown                            # 더 볼 수 있다고 알려준다
+
+
+def test_날짜를_말하면_그_줄이_안_나온다(도구를_갈아_끼운다):
+    """물어본 대로 답했으면 설명할 것이 없다."""
+    도구를_갈아_끼운다(rows=[_row(1)])
+    out = qa_graph.answer(
+        QaRequest(item="배추", kind="AUC", dates=[BASE + timedelta(days=1)])
+    )
+    assert "날짜를 따로 말씀하지" not in out.markdown
+
+
+def test_오늘_값이_없으면_내일로_물러서고_그렇게_말한다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 빈 답을 주느니 물러선다. 다만 **물러섰다고 적는다.**
+
+    ★ 첫 조회는 빈손이어야 한다 — 날짜를 안 말했을 때 읽을 것은 «오늘» 뿐이고
+      그건 전달표에 없다. 물러선 **뒤의** 조회에서만 내일 행이 나온다.
+    """
+    도구를_갈아_끼운다(rows=[], today=None)
+    calls: list[list] = []
+
+    def 두_번째부터_행이_나온다(item, kind, base_dt, targets):
+        calls.append(list(targets))
+        return [_row(1)] if len(calls) > 1 else []
+
+    monkeypatch.setattr(qa_graph.qa_tools, "forecast_rows", 두_번째부터_행이_나온다)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    assert out.meta.status == "OK"
+    assert "오늘 값이 아직 없어" in out.markdown and "내일" in out.markdown
+    assert calls[0] == []                                    # 첫 조회는 읽을 날이 없었다
+    assert calls[1] == [BASE + timedelta(days=1)]            # 물러선 뒤엔 내일을 읽는다
 
 
 def test_빠진_것만_묻는다(도구를_갈아_끼운다, monkeypatch):
