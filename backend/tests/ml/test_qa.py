@@ -190,6 +190,49 @@ def test_당일_값의_Decimal_출발점을_받아_낸다(도구를_갈아_끼�
     assert "962" in out.markdown
 
 
+def test_당일_값은_고른_기준일로_읽는다_미래를_안_본다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 **룩어헤드였다** (2026-09-15 · 화면에서 발견).
+
+    화면(3000)이 2026-07-01 을 걷는데 「오늘 2026-09-15 · 962원」이 나갔다.
+    당일 값이 as_of 를 안 받고 **원본 창고 전체 최신**을 읽었기 때문이다.
+    에러 없이 두 달 반 뒤의 값이 섞였다.
+    """
+    화면_기준일 = date(2026, 7, 1)
+    받은_기준일: list = []
+
+    def 당일(item, kind, base_dt=None):
+        받은_기준일.append(base_dt)
+        return {
+            "base_dt": base_dt, "target_dt": base_dt, "lead_biz_d": 0,
+            "predicted": 389, "lower": 277, "upper": 657, "current_price": 400,
+            "unit": "원/kg", "is_gated": False, "gate_reason": None,
+            "band_method": "quantile", "model_version": "ops_auc",
+        }
+
+    도구를_갈아_끼운다(rows=[], base=화면_기준일)
+    monkeypatch.setattr(qa_graph.qa_tools, "today_row", 당일)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC", as_of=화면_기준일))
+    assert 받은_기준일 == [화면_기준일]                      # 전체 최신이 아니라 그날
+    assert "오늘 2026-07-01" in out.markdown
+    assert "2026-09-15" not in out.markdown
+
+
+def test_오늘은_화면_기준일로_센다(도구를_갈아_끼운다, monkeypatch):
+    """★ 「오늘」·「내일」은 **화면의 기준일**로 센다. 벽시계가 아니다."""
+    화면_기준일 = date(2026, 7, 1)
+    받은_오늘: list = []
+
+    def 해석(question, today):
+        받은_오늘.append(today)
+        return {"route": "forecast", "items": ["배추"], "kinds": ["AUC"],
+                "item": "배추", "kind": "AUC", "dates": [], "asks": []}
+
+    도구를_갈아_끼운다(rows=[_row(1)], base=화면_기준일)
+    monkeypatch.setattr(qa_graph.qa_llm, "interpret", 해석)
+    qa_graph.answer(QaRequest(question="오늘 배추 경락가", as_of=화면_기준일))
+    assert 받은_오늘 == [화면_기준일]
+
+
 def test_쓰지_말라는_경고는_문장에_남는다(도구를_갈아_끼운다):
     """🔴 이건 설명이 아니라 **판정**이다. 못 보면 그대로 쓰게 된다."""
     도구를_갈아_끼운다(

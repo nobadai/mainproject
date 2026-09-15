@@ -135,7 +135,12 @@ def supervise(state: QaState) -> QaState:
     if base_dt is None:
         return {"status": "NO_DATA", "message": "전달표에 예측이 아직 없습니다."}
 
-    chosen = qa_llm.interpret(req.question, base_dt)
+    #   ★ **「오늘」은 화면의 기준일이다** (2026-09-15 · 사용자 지시).
+    #     화면(3000)은 날짜를 걸으며 채팅마다 그 날을 `as_of` 로 싣는다. 전에는
+    #     «as_of 이하 최신 예측일» 을 오늘로 셌다 — 그날 예측이 없으면(휴일 등)
+    #     하루 이틀 전 날이 「오늘」이 됐다. 해석기는 as_of 로 날을 센다.
+    today = req.as_of or base_dt
+    chosen = qa_llm.interpret(req.question, today)
     if chosen is None:
         return {"status": "LLM_UNAVAILABLE", "message": NEED_CLARIFY_LLM}
     if chosen["route"] == "out_of_scope":
@@ -246,7 +251,7 @@ def gate(state: QaState) -> QaState:
     #     기본값을 썼다는 것을 `used_default` 로 들고 가 답에 한 줄로 적는다.
     used_default = not (req.dates or state.get("asked")
                         or any(a.get("dates") for a in state.get("asks") or []))
-    fallback = list(req.dates or state.get("asked") or [base_dt])
+    fallback = list(req.dates or state.get("asked") or [req.as_of or base_dt])
     last = base_dt + timedelta(days=QA_MAX_OFFSET)
 
     #   ★ **묶음이 있으면 그것만 본다.** 없으면 품목 x 가격을 곱한다.
@@ -321,7 +326,8 @@ def fetch(state: QaState) -> QaState:
         for ask in asks[:MAX_ITEMS * MAX_KINDS]:
             item, kind = ask["item"], ask["kind"]
             rows = qa_tools.forecast_rows(item, kind, base_dt, ask["targets"])
-            today = qa_tools.today_row(item, kind) if ask["wants_today"] else None
+            today = (qa_tools.today_row(item, kind, base_dt)
+                     if ask["wants_today"] else None)
             if state.get("used_default") and today is None and not rows:
                 #   ★ 오늘 값이 없는 아침도 있다. **빈 답을 주지 말고 내일로 물러선다.**
                 fell_back = True
@@ -385,8 +391,9 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
     base_dt = state["base_dt"]
     unit = (rows[0]["unit"] if rows else (today or {}).get("unit")) or "원/kg"
 
+    as_of = state["request"].as_of or base_dt
     out = [
-        f"**{item} · {KIND_LABEL.get(kind, kind)} · 기준일 {base_dt}**",
+        f"**{item} · {KIND_LABEL.get(kind, kind)} · 기준일 {as_of}**",
         "",
         "| 날짜 | 예측 | 예상 구간 | 비고 |",
         "|---|---|---|---|",
@@ -394,7 +401,13 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
     if today:
         out.append(_line(f"오늘 {today['target_dt']}", today, unit))
     for row in rows:
-        out.append(_line(f"{row['target_dt']} (D+{row['offset_days']})", row, unit))
+        #   화면 기준일과 같은 날이면 「오늘」로 적는다 — 예측일이 하루 앞서 계산된
+        #   날(휴일 뒤 등)에도 사람이 보는 「오늘」은 화면 날짜다.
+        if row["target_dt"] == as_of:
+            label = f"오늘 {row['target_dt']}"
+        else:
+            label = f"{row['target_dt']} (D+{(row['target_dt'] - as_of).days})"
+        out.append(_line(label, row, unit))
 
     #   ★ **설명 줄을 문장에 안 적는다** (2026-09-15 · 화면을 깨끗이 하라는 지시).
     #     출발점 · 평균 오차 · 값의 정체는 `meta` 로 옮겼다 — 없앤 것이 아니다.

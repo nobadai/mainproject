@@ -110,13 +110,23 @@ def forecast_rows(item: str, kind: str, base_dt: date, targets: list[date]) -> l
     return fetch_all(_ROWS_SQL.format(schema=schema), (item, kind, base_dt, list(targets)))
 
 
-def today_row(item: str, kind: str) -> dict[str, Any] | None:
-    """당일(리드 0) 한 행. **원본 창고**에서 읽는다 — 전달표에는 없는 값이다."""
+def today_row(item: str, kind: str, base_dt: date | None = None) -> dict[str, Any] | None:
+    """당일(리드 0) 한 행. **원본 창고**에서 읽는다 — 전달표에는 없는 값이다.
+
+    🔴 **기준일을 받아 그날 것만 읽는다** (2026-09-15 · 룩어헤드를 막으려고 고침).
+      전에는 원본 창고의 **전체 최신 기준일**을 읽었다. 화면(3000)이 2월을 걷고
+      있어도 9월 15일 값이 나갔다 — 에러 없이 **미래 값이 섞이는** 자리였다.
+
+      `base_dt` 는 그래프가 `as_of` 이하에서 고른 기준일이다. 안 주면 예전처럼
+      최신을 읽는다 — 시험용 입구(`GET /ml/qa`)는 as_of 가 없어서다.
+    """
     model = OPS_MODEL[kind]
-    latest = fetch_one(_LATEST_SOURCE_BASE_SQL, (model,), source=True)
-    if not latest or not latest["base_dt"]:
-        return None
-    return fetch_one(_TODAY_SQL, (model, item, latest["base_dt"]), source=True)
+    if base_dt is None:
+        latest = fetch_one(_LATEST_SOURCE_BASE_SQL, (model,), source=True)
+        if not latest or not latest["base_dt"]:
+            return None
+        base_dt = latest["base_dt"]
+    return fetch_one(_TODAY_SQL, (model, item, base_dt), source=True)
 
 
 def accuracy(item: str, kind: str) -> dict[str, Any] | None:

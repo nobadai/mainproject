@@ -74,7 +74,9 @@ CASES: list[tuple[str, str, str | None, str | None, list[int] | None]] = [
      list(range(19))),
     ("배추 경락가 전부 다 보여줘", "forecast", "배추", "AUC", list(range(19))),
     ("무 소매가 5일 뒤까지 알려줘", "forecast", "무", "RTL", [1, 2, 3, 4, 5]),
-    ("양파 경락가 일주일치", "forecast", "양파", "AUC", [1, 2, 3, 4, 5, 6, 7]),
+    #   「N일치」 = 오늘부터 N개 (「모든 날」이 오늘을 넣는 것과 같은 뜻)
+    ("양파 경락가 일주일치", "forecast", "양파", "AUC", list(range(7))),
+    ("일주일치 배추 경락가 알려줘", "forecast", "배추", "AUC", list(range(7))),
 ]
 
 
