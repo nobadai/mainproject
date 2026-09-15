@@ -130,10 +130,79 @@ export interface Column<T> {
   render: (row: T) => string;
 }
 
-export function Table<T>({ columns, rows }: { columns: Column<T>[]; rows: T[] }) {
+/**
+ * 모든 업무 표의 읽기 도구. 표마다 검색 방식을 따로 만들면 고객·채권·실행 이력마다
+ * 조작법이 달라진다. 화면이 가진 행만 대상으로 하며 업무 값은 바꾸지 않는다.
+ */
+export function Table<T>({
+  columns,
+  rows,
+  controls = true,
+  pageSize = 10,
+}: {
+  columns: Column<T>[];
+  rows: T[];
+  /** 이미 화면 고유의 검색·페이지 UI가 있는 표는 중복 제어를 끈다. */
+  controls?: boolean;
+  pageSize?: number;
+}) {
+  const [search, setSearch] = useState("");
+  const [columnKey, setColumnKey] = useState("");
+  const [page, setPage] = useState(0);
+  const query = search.trim().toLocaleLowerCase("ko-KR");
+  const entries = rows.map((row) => ({
+    row,
+    values: Object.fromEntries(columns.map((column) => [column.key, column.render(row)])),
+  }));
+  const filtered = entries.filter(({ values }) => {
+    if (!query) return true;
+    const valuesToSearch = columnKey ? [values[columnKey]] : Object.values(values);
+    return valuesToSearch.some((value) => value.toLocaleLowerCase("ko-KR").includes(query));
+  });
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visible = controls
+    ? filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
+    : entries;
+
   return (
-    <div className="thin-scroll overflow-x-auto">
-      <table className="w-full border-collapse text-[12px]">
+    <div>
+      {controls && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
+          <label className="sr-only">표 검색</label>
+          <input
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
+            placeholder="표 내용 검색"
+            className="min-w-[180px] rounded-md border px-3 py-1.5"
+            style={{ borderColor: "var(--color-hair)" }}
+          />
+          <label className="sr-only">검색 항목</label>
+          <select
+            value={columnKey}
+            onChange={(event) => {
+              setColumnKey(event.target.value);
+              setPage(0);
+            }}
+            className="rounded-md border px-2 py-1.5"
+            style={{ borderColor: "var(--color-hair)" }}
+          >
+            <option value="">모든 항목에서 검색</option>
+            {columns.map((column) => <option key={column.key} value={column.key}>{column.label}</option>)}
+          </select>
+          <span className="text-ink2">검색 결과 {filtered.length}건</span>
+        </div>
+      )}
+      {controls && filtered.length === 0 ? (
+        <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+          조건에 맞는 항목이 없습니다. 검색어 또는 검색 항목을 바꿔 보세요.
+        </p>
+      ) : (
+        <div className="thin-scroll overflow-x-auto">
+          <table className="w-full border-collapse text-[12px]">
         <thead>
           <tr>
             {columns.map((column) => (
@@ -149,9 +218,9 @@ export function Table<T>({ columns, rows }: { columns: Column<T>[]; rows: T[] })
             ))}
           </tr>
         </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={index}>
+            <tbody>
+              {visible.map(({ values }, index) => (
+                <tr key={index}>
               {columns.map((column) => (
                 <td
                   key={column.key}
@@ -160,13 +229,27 @@ export function Table<T>({ columns, rows }: { columns: Column<T>[]; rows: T[] })
                   }`}
                   style={{ borderColor: "var(--color-hair)" }}
                 >
-                  {column.render(row)}
+                  {values[column.key]}
                 </td>
               ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {controls && filtered.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+          <span>
+            {currentPage * pageSize + 1}–{Math.min((currentPage + 1) * pageSize, filtered.length)} / {filtered.length}건
+          </span>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={currentPage === 0} className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-hair)" }}>이전</button>
+            <span>{currentPage + 1} / {pageCount}</span>
+            <button type="button" onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))} disabled={currentPage >= pageCount - 1} className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-hair)" }}>다음</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

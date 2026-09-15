@@ -50,7 +50,7 @@ const RUNTIME_TONE: Record<string, Tone> = {
 
 function say(table: Record<string, string>, value: string | null | undefined, blank: string) {
   if (value === null || value === undefined || value === "") return blank;
-  return table[value] ?? value;
+  return table[value] ?? blank;
 }
 
 export function runtimeText(value: string | null | undefined): string {
@@ -138,7 +138,7 @@ export function percentPoint(value: string | number | null | undefined): string 
  */
 function label(table: Record<string, string>, value: string | null | undefined, blank: string) {
   if (value === null || value === undefined || value === "") return blank;
-  return table[value] ?? value;
+  return table[value] ?? blank;
 }
 
 /** 채권 상태. 정본은 재무의 수금 전이 규칙이다. */
@@ -263,7 +263,7 @@ const SALES_REASONS: Record<string, string> = {
 };
 
 export function salesReasonText(code: string): string {
-  return SALES_REASONS[code] ?? code;
+  return SALES_REASONS[code] ?? "세부 조건을 확인해 주세요.";
 }
 
 /** 아직 받지 못한 검증. 왜 «재무 검토 전» 인지를 말한다. */
@@ -275,5 +275,5 @@ const CAPABILITIES: Record<string, string> = {
 };
 
 export function capabilityText(code: string): string {
-  return CAPABILITIES[code] ?? code;
+  return CAPABILITIES[code] ?? "필요한 확인";
 }

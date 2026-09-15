@@ -750,23 +750,91 @@ function Agent({ simRun, asOf }: { simRun: string; asOf: string }) {
 /* ── 실행 이력 ─────────────────────────────────────────────────────────── */
 
 function Runs({ simRun }: { simRun: string }) {
+  const [page, setPage] = useState(0);
+  const [search, setSearch] = useState("");
+  const [asOf, setAsOf] = useState("");
+  const [runtime, setRuntime] = useState("");
   const state = useConsoleData<SalesRunsResponse>(
     `runs-full:${simRun}`,
-    () => salesConsole.runs(simRun),
+    // 화면은 10개씩 나누되, 같은 실행의 오래된 기록도 페이지에서 찾을 수 있게 최대
+    // 읽기 한도까지 한 번에 받는다. 이력 조회는 read-only다.
+    () => salesConsole.runs(simRun, 500),
     true,
   );
   if (state.loading) return <Skeleton what="실행 이력" />;
   if (state.error) return <Failed what="실행 이력" message={state.error} />;
   const data = state.data!;
+  const normalizedSearch = search.trim().toLocaleLowerCase("ko-KR");
+  const runtimeChoices = [...new Set(data.rows.map((row) => row.runtime_status))];
+  const filteredRows = data.rows.filter((row) => {
+    const matchesSearch =
+      normalizedSearch === "" ||
+      (row.item ?? "").toLocaleLowerCase("ko-KR").includes(normalizedSearch) ||
+      partnerText(row.partner_name, row.partner_id).toLocaleLowerCase("ko-KR").includes(normalizedSearch);
+    return matchesSearch && (asOf === "" || row.as_of === asOf) && (runtime === "" || row.runtime_status === runtime);
+  });
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageRows = filteredRows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   return (
     <Panel title="판매 실행 이력" subtitle="이 실행에 속한 저장 기록만 표시합니다">
       {data.rows.length === 0 ? (
         <EmptyRows what="판매 실행" />
       ) : (
         <>
-          <Table
-            rows={data.rows}
-            columns={[
+          <div className="mb-3 flex flex-wrap gap-2">
+            <label className="sr-only" htmlFor="sales-run-search">품목 또는 거래처 검색</label>
+            <input
+              id="sales-run-search"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(0);
+              }}
+              placeholder="품목 또는 거래처 검색"
+              className="min-w-[190px] rounded-md border px-3 py-1.5 text-[12px]"
+              style={{ borderColor: "var(--color-hair)" }}
+            />
+            <label className="sr-only" htmlFor="sales-run-date">기준일 필터</label>
+            <select
+              id="sales-run-date"
+              value={asOf}
+              onChange={(event) => {
+                setAsOf(event.target.value);
+                setPage(0);
+              }}
+              className="rounded-md border px-2 py-1.5 text-[12px]"
+              style={{ borderColor: "var(--color-hair)" }}
+            >
+              <option value="">모든 기준일</option>
+              {[...new Set(data.rows.map((row) => row.as_of))].map((date) => <option key={date} value={date}>{date}</option>)}
+            </select>
+            <label className="sr-only" htmlFor="sales-run-status">조회 상태 필터</label>
+            <select
+              id="sales-run-status"
+              value={runtime}
+              onChange={(event) => {
+                setRuntime(event.target.value);
+                setPage(0);
+              }}
+              className="rounded-md border px-2 py-1.5 text-[12px]"
+              style={{ borderColor: "var(--color-hair)" }}
+            >
+              <option value="">모든 조회 상태</option>
+              {runtimeChoices.map((value) => <option key={value} value={value}>{runtimeText(value)}</option>)}
+            </select>
+          </div>
+          {filteredRows.length === 0 ? (
+            <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+              조건에 맞는 실행 이력이 없습니다. 검색어나 필터를 바꿔 보세요.
+            </p>
+          ) : (
+            <>
+              <Table
+                rows={pageRows}
+                controls={false}
+                columns={[
               { key: "as_of", label: "기준일", mono: true, render: (row) => row.as_of },
               { key: "item", label: "품목", render: (row) => row.item ?? "품목 미상" },
               {
@@ -781,13 +849,41 @@ function Runs({ simRun }: { simRun: string }) {
                 label: "판단 결과",
                 render: (row) => (row.verdict === null ? "판매가 판정을 보유하지 않음" : verdictText(row.verdict)),
               },
-            ]}
-          />
-          <div className="mt-4">
-            <TechDetails>
-              <Table
-                rows={data.rows}
-                columns={[
+                ]}
+              />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+            <span>
+              검색 결과 {filteredRows.length}건 중 {currentPage * pageSize + 1}–
+              {Math.min((currentPage + 1) * pageSize, filteredRows.length)}건
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.max(0, value - 1))}
+                disabled={currentPage === 0}
+                className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ borderColor: "var(--color-hair)" }}
+              >
+                이전
+              </button>
+              <span>{currentPage + 1} / {pageCount}</span>
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+                disabled={currentPage >= pageCount - 1}
+                className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ borderColor: "var(--color-hair)" }}
+              >
+                다음
+              </button>
+            </div>
+              </div>
+              <div className="mt-4">
+                <TechDetails>
+                  <Table
+                    rows={pageRows}
+                    controls={false}
+                    columns={[
                   { key: "runtime", label: "runtime_status", mono: true, render: (row) => row.runtime_status },
                   {
                     key: "end",
@@ -797,10 +893,12 @@ function Runs({ simRun }: { simRun: string }) {
                   },
                   { key: "req", label: "request_id", mono: true, render: (row) => row.request_id ?? "없음" },
                   { key: "run", label: "run_id", mono: true, render: (row) => row.run_id },
-                ]}
-              />
-            </TechDetails>
-          </div>
+                    ]}
+                  />
+                </TechDetails>
+              </div>
+            </>
+          )}
         </>
       )}
     </Panel>

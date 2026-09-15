@@ -13,6 +13,8 @@
  *    «검토 전» 이다 — 통과도 거절도 아니다.
  */
 
+import { useState, useSyncExternalStore } from "react";
+
 import { Panel } from "@/components/console/Blocks";
 import {
   capabilityText,
@@ -25,6 +27,8 @@ import {
   verdictTone,
 } from "../finance/user_text";
 import type { SalesProposal } from "./sales_api";
+import { approveSalesScenario, type SalesDecisionResponse } from "./sales_api";
+import { sessionSnapshot, serverSnapshot, subscribeSession } from "@/lib/session";
 
 /**
  * 안의 성격. 정본은 판매의 `ScenarioType` 세 값이다.
@@ -33,9 +37,9 @@ import type { SalesProposal } from "./sales_api";
  *    생긴 날 그것이 남의 이름으로 표시되면 안 된다.
  */
 const SCENARIO_TYPES: Record<string, string> = {
-  CONSERVATIVE: "보수",
+  CONSERVATIVE: "안정 우선",
   BALANCED: "균형",
-  AGGRESSIVE: "공격",
+  AGGRESSIVE: "판매 기회 우선",
 };
 
 /** 안이 무엇을 노리는가. 정본은 판매의 `ScenarioObjective` 세 값이다. */
@@ -47,7 +51,7 @@ const OBJECTIVES: Record<string, string> = {
 
 function label(table: Record<string, string>, value: string | null): string | null {
   if (!value) return null;
-  return table[value] ?? value;
+  return table[value] ?? "판매안";
 }
 
 export function TodayProposals({
@@ -59,18 +63,67 @@ export function TodayProposals({
   requestCount: number;
   hiddenZeroQuantity: number;
 }) {
+  const [selectedScenarioKey, setSelectedScenarioKey] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [decision, setDecision] = useState<SalesDecisionResponse | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
+  const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
+  const selected = rows.find((row) => `${row.request_id}:${row.scenario_id}` === selectedScenarioKey) ?? null;
   //  품목별로 묶는다. 매입 화면이 안을 나란히 놓는 것과 같은 읽기 순서다.
   const items = [...new Set(rows.map((row) => itemText(null, row.item)))];
   return (
     <>
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
-        {rows.map((row) => (
-          <ProposalCard key={`${row.request_id}:${row.scenario_id}`} row={row} />
-        ))}
+        {rows.map((row) => {
+          const key = `${row.request_id}:${row.scenario_id}`;
+          return (
+            <ProposalCard
+              key={key}
+              row={row}
+              selected={selectedScenarioKey === key}
+              onSelect={() => setSelectedScenarioKey(key)}
+            />
+          );
+        })}
       </div>
+      <ApprovalPanel
+        selected={selected}
+        sessionName={session?.name ?? null}
+        confirming={confirming}
+        submitting={submitting}
+        result={decision}
+        error={decisionError}
+        onStart={() => {
+          setDecision(null);
+          setDecisionError(null);
+          setConfirming(true);
+        }}
+        onCancel={() => setConfirming(false)}
+        onConfirm={async () => {
+          if (!selected || !selected.history_run_id || !session || submitting) return;
+          setSubmitting(true);
+          setDecisionError(null);
+          try {
+            setDecision(
+              await approveSalesScenario({
+                requestId: selected.request_id,
+                scenarioId: selected.scenario_id,
+                historyRunId: selected.history_run_id,
+                decidedBy: session.name,
+              }),
+            );
+            setConfirming(false);
+          } catch (error) {
+            setDecisionError(error instanceof Error ? error.message : "판매 확정 요청을 완료하지 못했습니다.");
+          } finally {
+            setSubmitting(false);
+          }
+        }}
+      />
       <p className="mb-0 mt-1 text-[12px] leading-relaxed text-ink2">
         오늘 판매가 {requestCount}건의 요청을 돌아 {rows.length}개의 안을 만들었습니다
-        {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 승인은 이 화면에서 하지 않습니다.
+        {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 추천과 선택은 다르며, 선택은 아직 판매 확정이 아닙니다.
         {/* 🔴 지운 것이 아니라 뺀 것이다. 몇 건인지 숫자로 남긴다. */}
         {hiddenZeroQuantity > 0 && (
           <>
@@ -83,7 +136,86 @@ export function TodayProposals({
   );
 }
 
-function ProposalCard({ row }: { row: SalesProposal }) {
+function ApprovalPanel({
+  selected,
+  sessionName,
+  confirming,
+  submitting,
+  result,
+  error,
+  onStart,
+  onCancel,
+  onConfirm,
+}: {
+  selected: SalesProposal | null;
+  sessionName: string | null;
+  confirming: boolean;
+  submitting: boolean;
+  result: SalesDecisionResponse | null;
+  error: string | null;
+  onStart: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const canApprove = selected !== null && selected.history_run_id !== null && sessionName !== null;
+  if (result) return <DecisionResult result={result} />;
+  return (
+    <section className="mt-4 rounded-xl border p-4" style={{ borderColor: "var(--color-hair)" }}>
+      <h3 className="m-0 text-[14px] font-semibold">선택한 안으로 판매 확정</h3>
+      {!selected ? (
+        <p className="mb-0 mt-2 text-[12px] text-ink2">판매안을 하나 선택하면 최종 확인을 진행할 수 있습니다.</p>
+      ) : (
+        <div className="mt-2 text-[12px] leading-relaxed text-ink2">
+          <p className="m-0">
+            <b className="text-ink">{label(SCENARIO_TYPES, selected.scenario_type)}</b> · {selected.quantity_kg === null ? "수량 정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`} · {moneyWon(selected.reported_sales_amount_krw)}
+          </p>
+          {!selected.history_run_id && <p className="mb-0 mt-1">이 실행 기록을 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
+          {!sessionName && <p className="mb-0 mt-1">승인자 정보를 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
+        </div>
+      )}
+      {confirming && selected ? (
+        <div className="mt-3 rounded-lg bg-[var(--color-desk)] p-3 text-[12px]">
+          <p className="m-0 font-semibold">선택한 조건으로 판매를 확정할까요?</p>
+          <p className="mb-0 mt-1 text-ink2">서버가 이 안만 다시 확인합니다. 통과하지 못하면 다른 안을 자동으로 선택하지 않습니다.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={onCancel} disabled={submitting} className="rounded-lg border px-3 py-2 font-semibold">취소</button>
+            <button type="button" onClick={onConfirm} disabled={submitting} className="rounded-lg border px-3 py-2 font-semibold" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>
+              {submitting ? "최종 확인 중..." : "판매 확정"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" onClick={onStart} disabled={!canApprove} className="mt-3 rounded-lg border px-3 py-2 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>
+          선택한 안으로 판매 확정
+        </button>
+      )}
+      {error && <p className="mb-0 mt-3 text-[12px] text-[var(--color-t-bad)]">판매 확정을 완료하지 못했습니다. {error}</p>}
+    </section>
+  );
+}
+
+function DecisionResult({ result }: { result: SalesDecisionResponse }) {
+  if (result.revalidation_outcome === "PASSED" && result.sale?.status === "CONFIRMED") {
+    return <p className="mt-4 rounded-xl border p-4 text-[12px] font-semibold" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>최종 확인을 마쳐 판매가 확정되었습니다.</p>;
+  }
+  const text: Record<string, string> = {
+    CONDITIONAL: "조건이 변경되어 다시 확인이 필요합니다.",
+    FAILED: "현재 조건으로는 판매를 확정할 수 없습니다.",
+    ERROR: "최종 확인을 완료하지 못했습니다.",
+  };
+  const detail = result.sale?.status === "BLOCKED" ? result.sale.reason ?? "판매 확정이 차단되었습니다." : null;
+  return <p className="mt-4 rounded-xl border p-4 text-[12px]" style={{ borderColor: "var(--color-t-warn)" }}>{text[result.revalidation_outcome ?? ""] ?? detail ?? "최종 확인 결과를 확인해 주세요."}{detail && ` ${detail}`}</p>;
+}
+
+function ProposalCard({
+  row,
+  selected,
+  onSelect,
+}: {
+  row: SalesProposal;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const tone = verdictTone(row.finance_verdict);
   const accent =
     row.finance_verdict === null
@@ -106,6 +238,7 @@ function ProposalCard({ row }: { row: SalesProposal }) {
         <strong className="text-[14px] font-semibold">{itemText(null, row.item)}</strong>
         {kind && <Tag text={kind} color="var(--color-t-info)" />}
         {row.recommended && <Tag text="추천" color="var(--color-t-good)" />}
+        {selected && <Tag text="선택됨" color="var(--color-t-info)" />}
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
           {/* ⚠️ 재무가 아직 안 본 안과 거절된 안은 다른 사실이다. */}
           {row.finance_verdict === null ? "재무 검토 전" : verdictText(row.finance_verdict)}
@@ -140,6 +273,15 @@ function ProposalCard({ row }: { row: SalesProposal }) {
 
         {/* 🔴 **왜 그 판정인지 말한다.** 결과만 적으면 사용자가 되짚을 수 없다. */}
         <FinanceReason row={row} />
+
+        <button
+          type="button"
+          onClick={onSelect}
+          className="rounded-lg border px-3 py-2 text-[12px] font-semibold"
+          style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
+        >
+          {selected ? "선택한 판매안" : "이 판매안 선택"}
+        </button>
 
         {(row.risks.length > 0 || row.uncertainties.length > 0) && (
           <Section title="걸리는 것" tone="var(--color-t-warn)">
@@ -240,24 +382,47 @@ function FinanceReason({ row }: { row: SalesProposal }) {
 function Evidence({ row }: { row: SalesProposal }) {
   const confirmed = toNumber(row.confirmed_quantity_kg);
   const conditional = toNumber(row.conditional_quantity_kg);
-  const facts: string[] = [];
+  const costAmount = toNumber(row.cost_basis_amount_krw);
+  const costQuantity = toNumber(row.cost_basis_quantity_kg);
+  const facts: { received: string; meaning: string }[] = [];
   if (confirmed !== null) {
-    facts.push(`확보된 물량 ${confirmed.toLocaleString("ko-KR")} kg`);
+    facts.push({
+      received: `확보된 판매 가능 물량 ${confirmed.toLocaleString("ko-KR")} kg`,
+      meaning: "현재 확보가 확인된 물량 범위에서 판매안을 만들었습니다.",
+    });
   }
   if (conditional !== null && conditional > 0) {
-    facts.push(`조건부 물량 ${conditional.toLocaleString("ko-KR")} kg`);
+    facts.push({
+      received: `조건부 추가 물량 ${conditional.toLocaleString("ko-KR")} kg`,
+      meaning: "추가 조달 조건이 충족될 때만 함께 사용할 수 있는 물량입니다.",
+    });
   }
-  if (row.additional_supply_required === true) facts.push("추가 조달이 필요한 안입니다");
-  if (toNumber(row.cost_basis_amount_krw) !== null) {
-    facts.push(
-      `재고원가 ${moneyWon(row.cost_basis_amount_krw)}` +
-        (row.cost_basis_method ? ` (${row.cost_basis_method === "ACTUAL" ? "실제 취득원가" : row.cost_basis_method})` : ""),
-    );
+  if (row.additional_supply_required === true) {
+    facts.push({
+      received: "추가 조달 필요 여부: 필요",
+      meaning: "현재 확보 물량만으로는 이 판매안을 이행할 수 없습니다.",
+    });
   }
-  if (row.ml_support_used === true) facts.push("가격 예측을 참고했습니다");
-  if (row.ml_support_used === false) facts.push("가격 예측을 쓰지 않았습니다");
-  row.rationale.forEach((text) => facts.push(text));
-
+  if (costAmount !== null) {
+    facts.push({
+      received: `재고 원가 ${moneyWon(row.cost_basis_amount_krw)}${
+        costQuantity !== null ? ` · 기준 물량 ${costQuantity.toLocaleString("ko-KR")} kg` : ""
+      }${row.cost_basis_method === "ACTUAL" ? " · 실제 취득원가" : ""}`,
+      meaning: "예상 이익과 재무 검토의 원가 기준으로 사용했습니다.",
+    });
+  }
+  if (row.ml_support_used === true) {
+    facts.push({
+      received: "시장 가격 예측",
+      meaning: "판매 단가를 검토할 때 최신 가격 전망을 함께 참고했습니다.",
+    });
+  }
+  if (row.ml_support_used === false) {
+    facts.push({
+      received: "시장 가격 예측",
+      meaning: "이 판매안에는 시장 가격 예측을 사용하지 않았습니다.",
+    });
+  }
   const refs = [...row.cost_basis_refs, ...row.evidence_refs];
   if (facts.length === 0 && refs.length === 0) return null;
 
@@ -267,26 +432,21 @@ function Evidence({ row }: { row: SalesProposal }) {
         ▸ 근거 {facts.length + refs.length}건
       </summary>
       <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0 leading-relaxed">
-        {facts.map((text, index) => (
+        {facts.map((fact, index) => (
           <li key={index} className="flex gap-2">
             <i aria-hidden style={{ color: "var(--color-mut2)" }}>
               ·
             </i>
-            <span className="min-w-0 flex-1">{text}</span>
+            <span className="min-w-0 flex-1">
+              <b className="font-semibold text-ink">받은 자료: {fact.received}</b>
+              <span className="mt-0.5 block text-ink2">어떻게 반영했나: {fact.meaning}</span>
+            </span>
           </li>
         ))}
       </ul>
       {refs.length > 0 && (
-        <>
-          <p className="mb-1 mt-2" style={{ color: "var(--color-mut)" }}>
-            참조한 자료 {refs.length}건
-          </p>
-          <p className="m-0 break-all font-mono text-[10.5px] text-ink2">{refs.join(", ")}</p>
-        </>
-      )}
-      {row.source_ref && (
-        <p className="mb-0 mt-2 break-all font-mono text-[10.5px] text-ink2">
-          출처 {row.source_ref}
+        <p className="mb-0 mt-2 text-ink2">
+          그 밖에 원가·재고·검증 자료 {refs.length}건을 함께 확인했습니다. 내부 연결번호는 표시하지 않습니다.
         </p>
       )}
     </details>
@@ -358,16 +518,16 @@ export function TodayProposalsPanel({
     error: string | null;
     loading: boolean;
   };
-  }) {
+}) {
   return (
     <Panel
       title="금일 판매안"
-      subtitle={`${asOf} 에 판매가 만든 안입니다 — 화면이 다시 만들지 않습니다`}
+      subtitle={`${asOf} 에 만든 판매안입니다. 금액과 판단은 저장된 결과 그대로 표시합니다.`}
     >
       {state.loading ? (
         <p className="m-0 text-[12px] text-ink2">판매안을 읽고 있습니다.</p>
       ) : state.error ? (
-        <p className="m-0 whitespace-pre-wrap font-mono text-[11.5px] text-ink2">
+          <p className="m-0 whitespace-pre-wrap text-[11.5px] text-ink2">
           판매안을 읽지 못했습니다 - {state.error}
         </p>
       ) : !state.data ? (

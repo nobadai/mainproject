@@ -31,6 +31,9 @@ class ConsoleSalesProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
+    #: 사용자가 보고 선택한 마스터 판매 실행. 승인 요청은 이 값을 반드시 함께 보낸다.
+    #: 없으면 최신 실행을 고르는 경합이 생기므로 화면은 확정을 열지 않는다.
+    history_run_id: str | None
     scenario_id: str
     #: 안의 성격. `CONSERVATIVE` · `BALANCED` · `AGGRESSIVE` 같은 저장값 그대로다.
     scenario_type: str | None
@@ -155,6 +158,7 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
         """
         SELECT latest.request_id,
                latest.payload,
+               history.run_id AS history_run_id,
                scenario.value AS scenario,
                finance.finance_verdict,
                finance.finance_status,
@@ -170,6 +174,15 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
               AND run.response_payload->>'request_id' IS NOT NULL
             ORDER BY run.response_payload->>'request_id', run.created_at DESC
         ) AS latest
+        LEFT JOIN LATERAL (
+            SELECT axis.run_id
+            FROM {schema}.master_agent_runs axis
+            WHERE axis.cycle = 'SALES'
+              AND axis.request_id = latest.request_id
+              AND axis.sim_run_id = %s
+            ORDER BY axis.run_seq DESC, axis.created_at DESC
+            LIMIT 1
+        ) AS history ON TRUE
         LEFT JOIN LATERAL jsonb_array_elements(
             COALESCE(latest.payload->'scenarios', '[]'::jsonb)
         ) AS scenario ON TRUE
@@ -194,8 +207,8 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
         ORDER BY latest.request_id ASC, scenario.value->>'scenario_id' ASC
         """
     ).format(schema=sql.Identifier(schema))
-    #  ⚠️ `%s` 는 세 개다 — 판매 실행 축, 기준일, 그리고 재무 판정의 실행 축이다.
-    return fetch_all(statement, [sim_run_id, as_of, sim_run_id])
+    #  ⚠️ `%s` 는 네 개다 — 판매 실행 축, 기준일, 화면이 본 마스터 실행, 재무 판정 축.
+    return fetch_all(statement, [sim_run_id, as_of, sim_run_id, sim_run_id])
 
 
 def get_console_sales_proposals(
@@ -229,6 +242,7 @@ def get_console_sales_proposals(
         rows.append(
             ConsoleSalesProposal(
                 request_id=request_id,
+                history_run_id=_text(raw.get("history_run_id")),
                 scenario_id="" if scenario_id is None else str(scenario_id),
                 scenario_type=_text(scenario.get("scenario_type")),
                 objective=_text(scenario.get("objective")),
