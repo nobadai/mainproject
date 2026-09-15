@@ -382,22 +382,47 @@ function FinanceReason({ row }: { row: SalesProposal }) {
 function Evidence({ row }: { row: SalesProposal }) {
   const confirmed = toNumber(row.confirmed_quantity_kg);
   const conditional = toNumber(row.conditional_quantity_kg);
-  const facts: string[] = [];
+  const costAmount = toNumber(row.cost_basis_amount_krw);
+  const costQuantity = toNumber(row.cost_basis_quantity_kg);
+  const facts: { received: string; meaning: string }[] = [];
   if (confirmed !== null) {
-    facts.push(`확보된 물량 ${confirmed.toLocaleString("ko-KR")} kg`);
+    facts.push({
+      received: `확보된 판매 가능 물량 ${confirmed.toLocaleString("ko-KR")} kg`,
+      meaning: "현재 확보가 확인된 물량 범위에서 판매안을 만들었습니다.",
+    });
   }
   if (conditional !== null && conditional > 0) {
-    facts.push(`조건부 물량 ${conditional.toLocaleString("ko-KR")} kg`);
+    facts.push({
+      received: `조건부 추가 물량 ${conditional.toLocaleString("ko-KR")} kg`,
+      meaning: "추가 조달 조건이 충족될 때만 함께 사용할 수 있는 물량입니다.",
+    });
   }
-  if (row.additional_supply_required === true) facts.push("추가 조달이 필요한 안입니다");
-  if (toNumber(row.cost_basis_amount_krw) !== null) {
-    facts.push(
-      `재고원가 ${moneyWon(row.cost_basis_amount_krw)}` +
-        (row.cost_basis_method ? ` (${row.cost_basis_method === "ACTUAL" ? "실제 취득원가" : row.cost_basis_method})` : ""),
-    );
+  if (row.additional_supply_required === true) {
+    facts.push({
+      received: "추가 조달 필요 여부: 필요",
+      meaning: "현재 확보 물량만으로는 이 판매안을 이행할 수 없습니다.",
+    });
   }
-  if (row.ml_support_used === true) facts.push("가격 예측을 참고했습니다");
-  if (row.ml_support_used === false) facts.push("가격 예측을 쓰지 않았습니다");
+  if (costAmount !== null) {
+    facts.push({
+      received: `재고 원가 ${moneyWon(row.cost_basis_amount_krw)}${
+        costQuantity !== null ? ` · 기준 물량 ${costQuantity.toLocaleString("ko-KR")} kg` : ""
+      }${row.cost_basis_method === "ACTUAL" ? " · 실제 취득원가" : ""}`,
+      meaning: "예상 이익과 재무 검토의 원가 기준으로 사용했습니다.",
+    });
+  }
+  if (row.ml_support_used === true) {
+    facts.push({
+      received: "시장 가격 예측",
+      meaning: "판매 단가를 검토할 때 최신 가격 전망을 함께 참고했습니다.",
+    });
+  }
+  if (row.ml_support_used === false) {
+    facts.push({
+      received: "시장 가격 예측",
+      meaning: "이 판매안에는 시장 가격 예측을 사용하지 않았습니다.",
+    });
+  }
   const refs = [...row.cost_basis_refs, ...row.evidence_refs];
   if (facts.length === 0 && refs.length === 0) return null;
 
@@ -407,16 +432,23 @@ function Evidence({ row }: { row: SalesProposal }) {
         ▸ 근거 {facts.length + refs.length}건
       </summary>
       <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0 leading-relaxed">
-        {facts.map((text, index) => (
+        {facts.map((fact, index) => (
           <li key={index} className="flex gap-2">
             <i aria-hidden style={{ color: "var(--color-mut2)" }}>
               ·
             </i>
-            <span className="min-w-0 flex-1">{text}</span>
+            <span className="min-w-0 flex-1">
+              <b className="font-semibold text-ink">받은 자료: {fact.received}</b>
+              <span className="mt-0.5 block text-ink2">어떻게 반영했나: {fact.meaning}</span>
+            </span>
           </li>
         ))}
       </ul>
-      {refs.length > 0 && <p className="mb-0 mt-2 text-ink2">확인한 자료 {refs.length}건</p>}
+      {refs.length > 0 && (
+        <p className="mb-0 mt-2 text-ink2">
+          그 밖에 원가·재고·검증 자료 {refs.length}건을 함께 확인했습니다. 내부 연결번호는 표시하지 않습니다.
+        </p>
+      )}
     </details>
   );
 }
