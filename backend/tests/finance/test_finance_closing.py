@@ -341,6 +341,24 @@ def test_persisted_payable_due_date_is_the_purchase_cash_authority():
     assert not any(".purchases" in text for text, _ in conn.executed)
 
 
+def test_sales_recognition_uses_first_open_day_contract_for_holiday_sales(_schema_and_inventory):
+    """휴장일 판매는 다음 첫 개장일에만 포함하도록 Master opening 정본을 읽는다."""
+    conn = _Connection(payables=[])
+
+    _close(conn)
+
+    sales_queries = [
+        (text, params) for text, params in conn.executed if "SUM(total_amount_krw)" in text
+    ]
+    assert len(sales_queries) == 1
+    text, params = sales_queries[0]
+    assert "master_day_openings" in text
+    assert "opening.as_of >= s.sale_date" in text
+    assert "opening.as_of < %s" in text
+    assert "opening.result IN ('OPENED', 'ALREADY_OPENED')" in text
+    assert params == [SIM_RUN_ID, AS_OF, AS_OF, AS_OF]
+
+
 def test_weekend_due_date_is_not_rewritten_and_moves_cash_out_to_monday():
     sunday = date(2026, 1, 4)
     conn = _Connection(payables=[(sunday, Decimal(200))])
