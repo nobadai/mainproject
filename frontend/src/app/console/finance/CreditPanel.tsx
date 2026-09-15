@@ -31,9 +31,9 @@ import {
   toNumber,
 } from "./user_text";
 
-export function CreditPanel({ simRun, asOf }: { simRun: string; asOf: string }) {
+export function CreditPanel({ simRun, asOf, refreshKey = 0 }: { simRun: string; asOf: string; refreshKey?: number }) {
   const state = useConsoleData<CreditResponse>(
-    `credit:${simRun}:${asOf}`,
+    `credit:${simRun}:${asOf}:${refreshKey}`,
     () => fetchCredit(simRun, asOf),
     true,
   );

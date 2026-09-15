@@ -45,6 +45,7 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
 import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
+import { CreditLimitForm } from "./CreditLimitForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
 import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
@@ -123,6 +124,7 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
 /* ── 재무 현황 ─────────────────────────────────────────────────────────── */
 
 function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [creditRefresh, setCreditRefresh] = useState(0);
   const summary = useConsoleData<FinanceSummaryResponse>(
     `summary:${simRun}:${asOf}`,
     () => financeConsole.summary(simRun, asOf),
@@ -251,7 +253,8 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
       </Panel>
 
       {/* ★ 판매 전에 묻는 질문 — «얼마까지 더 팔 수 있나» 에 답하는 자리다. */}
-      <CreditPanel simRun={simRun} asOf={asOf} />
+      <CreditPanel simRun={simRun} asOf={asOf} refreshKey={creditRefresh} />
+      <CreditLimitForm asOf={asOf} onSaved={() => setCreditRefresh((value) => value + 1)} />
 
       <AgentCard state={latest} />
     </>

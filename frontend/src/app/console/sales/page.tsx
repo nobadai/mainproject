@@ -65,6 +65,7 @@ import { ActionTable } from "./ActionTable";
 import { PartnerCreateForm } from "./PartnerCreateForm";
 import { SalesItemChart, SalesPartnerChart, SalesTrendChart } from "./SalesCharts";
 import { TodayProposalsPanel } from "./TodayProposals";
+import { SalesCandidateCreateForm } from "./SalesCandidateCreateForm";
 import {
   salesOverview,
   type WithItemNames,
@@ -112,6 +113,7 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
 /* ── 판매 현황 ─────────────────────────────────────────────────────────── */
 
 function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [proposalRefresh, setProposalRefresh] = useState(0);
   const summary = useConsoleData<SalesSummaryResponse>(
     `sales-summary:${simRun}:${asOf}`,
     () => salesOverview.summary(simRun, asOf),
@@ -123,7 +125,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
   const proposals = useConsoleData<SalesProposalsResponse>(
-    `sales-proposals:${simRun}:${asOf}`,
+    `sales-proposals:${simRun}:${asOf}:${proposalRefresh}`,
     () => salesOverview.proposals(simRun, asOf),
     true,
   );
@@ -172,6 +174,11 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
       {/* ★ 매입 화면의 «금일 매입안» 과 같은 자리다. 통계 다음에 오늘의 안이 오고,
           지난 흐름은 그 뒤에 온다. */}
       <TodayProposalsPanel asOf={asOf} state={proposals} />
+      <SalesCandidateCreateForm
+        asOf={asOf}
+        simRun={simRun}
+        onCreated={() => setProposalRefresh((value) => value + 1)}
+      />
 
       <Panel title="기간별 매출" subtitle="판매가 있었던 날만 표시합니다">
         {trend.loading ? (

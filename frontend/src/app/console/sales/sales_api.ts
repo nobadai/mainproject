@@ -179,6 +179,66 @@ export function createPartner(input: PartnerCreateInput): Promise<PartnerProfile
   });
 }
 
+/* ── 사용자가 만드는 판매 후보 ─────────────────────────────────────────── */
+
+export interface SalesCandidateRequest {
+  sim_run_id: string;
+  as_of: string;
+  item: string;
+  partner_id?: string;
+  quantity_kg?: string;
+  unit_price_krw?: string;
+  delivery_date?: string;
+  payment_days?: string;
+  allow_additional_sourcing: boolean;
+  note?: string;
+}
+
+export interface SalesCandidateReply {
+  status: string;
+  user_message?: string;
+  missing_data?: string[];
+  missing_capabilities?: string[];
+  scenarios?: { scenario_id: string; quantity_kg?: Money | null; unit_price_krw?: Money | null }[];
+}
+
+export interface SalesCandidateRunReply {
+  runtime_status: string;
+  business_status: string;
+  payload: SalesCandidateReply;
+  missing_data: string[];
+  missing_capability: string[];
+}
+
+/** 후보만 생성한다. 실제 판매 확정은 기존 Master 승인 흐름만 사용한다. */
+export function createSalesCandidates(input: SalesCandidateRequest): Promise<SalesCandidateRunReply> {
+  const quantity = input.quantity_kg?.trim();
+  const price = input.unit_price_krw?.trim();
+  const paymentDays = input.payment_days?.trim();
+  return send<SalesCandidateRunReply>(`${API_BASE}/sales/console-proposal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sim_run_id: input.sim_run_id,
+      as_of: input.as_of,
+      proposal: {
+        business_mode: "SPOT_SALES",
+        user_request: {
+          raw_text: input.note?.trim() || null,
+          item: input.item.trim(),
+          partner_id: input.partner_id?.trim() || null,
+          requested_quantity_kg: quantity || null,
+          preferred_unit_price_krw: price || null,
+          preferred_delivery_date: input.delivery_date || null,
+          preferred_payment_days: paymentDays || null,
+          allow_additional_sourcing: input.allow_additional_sourcing,
+        },
+        execution_identity: { as_of: input.as_of },
+      },
+    }),
+  });
+}
+
 /* ── 거래처 상세의 품목 이름 ────────────────────────────────────────────── */
 
 /**
