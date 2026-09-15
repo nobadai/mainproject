@@ -244,6 +244,7 @@ export interface SalesRunRequest {
   preferred_delivery_date?: string;
   preferred_payment_days?: number;
   preferred_payment_terms_type?: string;
+  allow_additional_sourcing?: boolean;
   user_request?: string;
 }
 
