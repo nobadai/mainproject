@@ -104,6 +104,19 @@ def _market_corridor(request: SalesProposalInput, relevant_date: date | None):
     return point
 
 
+def _ml_forecast_row_ref(request: SalesProposalInput, relevant_date: date | None) -> str | None:
+    """가격에 실제 사용 가능한 ML 행의 안정적인 근거 ref를 만든다."""
+    point = _market_corridor(request, relevant_date)
+    forecast = request.ml_context
+    if point is None or forecast is None:
+        return None
+    return (
+        "v_ml_price_forecast"
+        f"(item={forecast.item},target_kind={forecast.target_kind},base_dt:{forecast.as_of},"
+        f"forecast_date={point.date},model_version={forecast.model_version})"
+    )
+
+
 def _depletion_pressure(sell_priority: str | None, severity: str | None) -> bool:
     """Logistics가 이미 낸 강한 신호만 소비한다; freshness 숫자는 새 정책이 아니다."""
     return sell_priority == "HIGH" or severity in {"SEVERE", "CRITICAL"}
@@ -275,7 +288,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 unmet_quantity = quantity - scenario_quantity
                 if scenario_quantity != quantity:
                     axes.append("QUANTITY")
-        validations = _required_validations(request, supply, parent or scenario_id, delivery)
+        validations = _required_validations(request, scenario_type, supply, replies, delivery)
         risks, uncertainties, conditional = _feedback_effects(replies)
         finance = _finance_reply(replies)
         sell_priority, inventory_severity, remaining_freshness = _logistics_ranking_facts(replies)
@@ -312,6 +325,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             if delivery_status != "READY":
                 uncertainties.extend(request.logistics_context.delivery_feasibility.reason_codes)
         ml_support, ml_issue = _ml_support(request, delivery)
+        ml_row_ref = _ml_forecast_row_ref(request, delivery) if ml_support else None
         if ml_issue:
             uncertainties.append(ml_issue)
         status = _candidate_status(
@@ -324,6 +338,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             dependencies=dependencies,
             replies=replies,
             unmet_quantity=unmet_quantity,
+            requested_scenario_quantity=scenario_quantity,
         )
         result.append(
             SalesScenario(
@@ -359,6 +374,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                     refs
                     + _logistics_refs(request, confirmed)
                     + _reply_refs(replies)
+                    + ([ml_row_ref] if ml_row_ref else [])
                     + (
                         [FINANCE_SALES_MVP_POLICY_REF]
                         if any(note.startswith("MARGIN_") for note in price_strategy)
@@ -541,8 +557,35 @@ def _baseline(request: SalesProposalInput):
             #   사용자 ref 가 없으면 없는 채로 둔다 — 발명하지 않는다.
             if not _user_overrides_contract(request):
                 source_ref = contract.source_ref
-    refs = [contract.source_ref] if contract and contract.source_ref else []
+    refs = (
+        [contract.source_ref]
+        if contract and contract.source_ref and _uses_contract_commercial_fact(request)
+        else []
+    )
     return quantity, price, delivery, payment, terms_type, term, source_ref, refs
+
+
+def _uses_contract_commercial_fact(request: SalesProposalInput) -> bool:
+    """후보의 상업조건 중 하나라도 계약에서 실제 상속됐는지 판정한다."""
+    contract = request.contract_context
+    if contract is None:
+        return False
+    if request.business_mode == "CONTRACT_FULFILLMENT":
+        return True
+    if request.business_mode != "CONTRACT_PROPOSAL_RENEWAL":
+        return False
+    user = request.user_request
+    return any(
+        value is None
+        for value in (
+            user.requested_quantity_kg,
+            user.preferred_unit_price_krw,
+            user.preferred_delivery_date,
+            user.preferred_payment_days,
+            user.preferred_payment_terms_type,
+            user.preferred_contract_term_days,
+        )
+    )
 
 
 def _delivery_date(request: SalesProposalInput, requested: date | None) -> date | None:
@@ -712,10 +755,14 @@ def _purchase_result(replies: list[SalesDomainReply]) -> PurchaseAdditionalSuppl
 
 
 def _required_validations(
-    request: SalesProposalInput, supply: ScenarioSupply, original_id: str, delivery_date
+    request: SalesProposalInput,
+    scenario_type: str,
+    supply: ScenarioSupply,
+    replies: list[SalesDomainReply],
+    delivery_date,
 ) -> list[str]:
     validations: list[str] = []
-    if not _has_reply(request, "FINANCIAL_VALIDATION", original_id):
+    if not any(reply.capability == "FINANCIAL_VALIDATION" for reply in replies):
         validations.append("FINANCIAL_VALIDATION")
     if supply.confirmed_quantity_kg is None:
         validations.append("SELLABLE_SUPPLY_CONTEXT")
@@ -726,9 +773,10 @@ def _required_validations(
         request.business_mode == "SPOT_SALES" and not request.user_request.allow_additional_sourcing
     )
     if (
-        supply.additional_supply_required
+        scenario_type == "AGGRESSIVE"
+        and supply.additional_supply_required
         and sourcing_allowed
-        and not _has_reply(request, "ADDITIONAL_SUPPLY_CONTEXT", original_id)
+        and not _valid_additional_supply_replies(replies)
     ):
         validations.append("ADDITIONAL_SUPPLY_CONTEXT")
     return validations
@@ -923,11 +971,15 @@ def _candidate_status(
     dependencies,
     replies,
     unmet_quantity,
+    requested_scenario_quantity,
 ):
     if _has_ambiguous_additional_supply(replies):
         return "UNRESOLVED"
     if _logistics_revalidation_required(replies):
         return "REVIEW_REQUIRED"
+    logistics_feedback = _logistics_feedback_status(replies)
+    if logistics_feedback is not None:
+        return logistics_feedback
     delivery = request.logistics_context.delivery_feasibility if request.logistics_context else None
     if delivery and delivery.status == "FAIL":
         return "INFEASIBLE"
@@ -967,9 +1019,43 @@ def _candidate_status(
         return "INFEASIBLE"
     if unmet_quantity is not None and unmet_quantity > 0 and not dependencies:
         return "INFEASIBLE"
+    supply_status = _supply_support_status(
+        supply, scenario_quantity=requested_scenario_quantity
+    )
+    if supply_status is not None:
+        return supply_status
     if dependencies:
         return "CONDITIONAL"
     return "EXECUTABLE"
+
+
+def _logistics_feedback_status(replies: list[SalesDomainReply]) -> str | None:
+    """후보에 연결된 Logistics 판정만 status로 소비한다."""
+    relevant = [reply for reply in replies if reply.source_agent == "logistics"]
+    if any(reply.runtime_status != "READY" for reply in relevant):
+        return "UNRESOLVED"
+    statuses = {(reply.business_status or "").lower() for reply in relevant}
+    if statuses & {"fail", "reject"}:
+        return "INFEASIBLE"
+    if "skipped" in statuses:
+        return "UNRESOLVED"
+    return None
+
+
+def _supply_support_status(
+    supply: ScenarioSupply, *, scenario_quantity: Decimal
+) -> str | None:
+    """후보 수량이 후보-local 권위 공급으로 뒷받침되는지 판정한다."""
+    confirmed = supply.confirmed_quantity_kg
+    if confirmed is None:
+        return "UNRESOLVED"
+    required = max(scenario_quantity - confirmed, Decimal(0))
+    if required <= 0:
+        return None
+    conditional = supply.conditional_quantity_kg
+    if conditional is None or conditional < required or not supply.dependency_ref:
+        return "INFEASIBLE"
+    return "CONDITIONAL"
 
 
 def _ml_support(request: SalesProposalInput, relevant_date) -> tuple[bool, str | None]:
@@ -978,10 +1064,12 @@ def _ml_support(request: SalesProposalInput, relevant_date) -> tuple[bool, str |
         return False, None
     if relevant_date is None:
         return False, None
-    point = next((point for point in forecast.daily if point.date == relevant_date), None)
-    if point is None:
+    exact_point = next((point for point in forecast.daily if point.date == relevant_date), None)
+    if exact_point is None:
         return False, "ML_HORIZON_EXCEEDED"
-    return True, None
+    if forecast.target_kind != "WHSL":
+        return False, None
+    return _market_corridor(request, relevant_date) is not None, None
 
 
 def _purchase_effects(reply: SalesDomainReply) -> tuple[list[str], bool]:
@@ -1121,13 +1209,35 @@ def self_check_scenarios(scenarios: list[SalesScenario]) -> ProposalSelfCheck:
             and scenario.supply.required_additional_quantity_kg > 0
         ):
             issues.append("SUPPLY_DEPENDENCY_INCONSISTENT")
+        confirmed = scenario.supply.confirmed_quantity_kg
+        required = (
+            max((scenario.quantity_kg or Decimal(0)) - confirmed, Decimal(0))
+            if confirmed is not None
+            else Decimal(0)
+        )
+        conditional = scenario.supply.conditional_quantity_kg
+        if scenario.status == "EXECUTABLE" and (
+            confirmed is None or (scenario.quantity_kg or Decimal(0)) > confirmed
+        ):
+            issues.append("EXECUTABLE_WITH_UNSUPPORTED_QUANTITY")
+        if scenario.status == "CONDITIONAL" and required > 0:
+            if conditional is None or conditional <= 0 or not scenario.supply.dependency_ref:
+                issues.append("CONDITIONAL_SUPPLY_EVIDENCE_MISSING")
+            elif conditional < required:
+                issues.append("CONDITIONAL_SUPPLY_INSUFFICIENT")
+            if "PURCHASE_COMMITMENT_REQUIRED" not in scenario.execution_dependencies:
+                issues.append("CONDITIONAL_SUPPLY_DEPENDENCY_MISSING")
         if (
-            scenario.supply.additional_supply_required
-            and _ADDITIONAL_SUPPLY_CAPABILITY not in scenario.required_validations
+            scenario.scenario_type == "AGGRESSIVE"
+            and scenario.supply.additional_supply_required
+            and (
+                _ADDITIONAL_SUPPLY_CAPABILITY not in scenario.required_validations
+                or any(_is_additional_supply_reply(reply) for reply in scenario.domain_replies)
+            )
             # 🔴 답이 온 질문을 "안 물어봤다" 로 읽지 않는다. `required_validations` 는
             #    *아직 답이 없는 요청* 목록이라, 회신이 오면 사라지는 것이 정상이다.
             and not _answered_additional_supply(scenario)
-            and not (scenario.business_mode == "SPOT_SALES" and scenario.status == "INFEASIBLE")
+            and scenario.status != "INFEASIBLE"
         ):
             issues.append("ADDITIONAL_SUPPLY_VALIDATION_MISSING")
         issues.extend(_purchase_reference_issues(scenario))

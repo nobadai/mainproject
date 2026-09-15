@@ -358,7 +358,7 @@ from typing import Any, Literal
 from app.master import clock, persistence
 from app.master.backfill import BackfillOut, SalesTermsRule, backfill_decisions
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
-from app.master.closing import close_day
+from app.master.closing import ClosingOut, close_day
 from app.master.collection import collect_receipts
 from app.master.commitment import ITEM_CODES
 from app.master.day_open import open_day
@@ -1056,6 +1056,11 @@ class DayRunOutcome:
     #: 가리킬 뿐이다. 걷기 요약이 FAILED 품목마다 한 줄을 찍으려고 싣는다.
     #: 출고 단계를 안 탔거나 터져서 값이 없으면 `None`.
     outbound: OutboundOut | None = None
+    #: 마감이 낸 값 그대로 (2026-09-16). 🔴 **여기서 사유를 다시 짓지 않는다** — 사유의
+    #: 주인은 `ClosingOut.reason` 하나이고, 여기는 그것을 가리킬 뿐이다. 걷기 요약이
+    #: 첫 마감 실패의 사유를 찍으려고 싣는다 (`outbound` 와 같은 모양).
+    #: 마감 단계를 안 탔거나 예외로 터져서 값이 없으면 `None`.
+    closing: ClosingOut | None = None
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -1422,8 +1427,8 @@ def run_scheduled_day(
         #
         # ★ **사유를 다시 짓지 않는다.** 위에서 만든 `gap_reason` 을 그대로 넘긴다 —
         #   관문 행에 적은 문장과 같아야 화면과 이력이 안 갈린다.
-        closing_status, note = _stage(
-            "마감", lambda: close_fn(as_of, sim_run_id=sim_run_id, ledger_gap=gap_reason)
+        closing_status, closing, note = _closing(
+            as_of=as_of, sim_run_id=sim_run_id, close_fn=close_fn, ledger_gap=gap_reason
         )
         notes.append(note)
         return DayRunOutcome(
@@ -1442,6 +1447,7 @@ def run_scheduled_day(
             receivable_status=receivable_status,
             collection_status=collection_status,
             closing_status=closing_status,
+            closing=closing,
             notes=tuple(notes),
         )
 
@@ -1513,7 +1519,7 @@ def run_scheduled_day(
     #
     # 🔴 **`sim_run_id` 를 흘려 준다.** 마감이 그 값을 `daily_closings` 의 PK 절반
     #    (`(sim_run_id, close_date)`)으로 쓴다 — 여기서 상수를 다시 적지 않는다.
-    closing_status, note = _stage("마감", lambda: close_fn(as_of, sim_run_id=sim_run_id))
+    closing_status, closing, note = _closing(as_of=as_of, sim_run_id=sim_run_id, close_fn=close_fn)
     notes.append(note)
 
     return DayRunOutcome(
@@ -1539,6 +1545,7 @@ def run_scheduled_day(
         sales_status=judged.sales_status,
         outbound_status=outbound_status,
         closing_status=closing_status,
+        closing=closing,
         items=judged.items,
         sales_items=judged.sales_items,
         procurement_approval_status=judged.procurement_approval_status,
@@ -2060,6 +2067,37 @@ def _outbound(
     #   같아야 하고, `test_outbound_carries_run_axis` 가 그 모양을 AST 로 센다.
     status, note = _stage("출고", lambda: _kept(낸값, outbound_fn(as_of, sim_run_id=sim_run_id)))
     out = 낸값[0] if 낸값 and isinstance(낸값[0], OutboundOut) else None
+    return status, out, note
+
+
+def _closing(
+    *,
+    as_of: date,
+    sim_run_id: str,
+    close_fn: Callable[..., Any],
+    ledger_gap: str | None = None,
+) -> tuple[str, ClosingOut | None, str]:
+    """마감 한 단계 (2026-09-16). **`_stage` 를 그대로 타고, 낸 값을 같이 돌려준다.**
+
+    🔴 **상태 · 사유는 `_stage` 가 정한다.** 여기서 다시 짓지 않는다 (`_outbound` 와 같은 모양).
+
+    ★ **관문 사유는 받았을 때만 넘긴다.** 관문이 통과한 날 `ledger_gap` 을 `None` 으로라도
+      넘기면 마감 대역마다 인자 모양이 바뀐다 — 두 호출 모양을 그대로 지킨다.
+
+    ★ **낸 값이 `ClosingOut` 일 때만 싣는다.** 요약이 `reason` 을 읽는데, 다른 모양을
+      실으면 그 자리에서 요약이 터진다.
+
+    :returns: `(칸 상태, 낸 값 또는 None, 사유 한 줄)`.
+    """
+    낸값: list[Any] = []
+    if ledger_gap is None:
+        status, note = _stage("마감", lambda: _kept(낸값, close_fn(as_of, sim_run_id=sim_run_id)))
+    else:
+        status, note = _stage(
+            "마감",
+            lambda: _kept(낸값, close_fn(as_of, sim_run_id=sim_run_id, ledger_gap=ledger_gap)),
+        )
+    out = 낸값[0] if 낸값 and isinstance(낸값[0], ClosingOut) else None
     return status, out, note
 
 

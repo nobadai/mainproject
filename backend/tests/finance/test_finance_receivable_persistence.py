@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 os.environ.setdefault("DB_SCHEMA", "haetdeul")
 
@@ -14,7 +15,7 @@ from app.finance.receivables import (
     ReceivablePersistenceConflict,
     build_receivable_write_plan,
     confirm_receivable,
-    load_sale_date_finance_state_id,
+    load_finance_state_id_for_date,
     receivable_id_for,
 )
 from app.finance.sales_validation import ReceivableCreateInput
@@ -34,6 +35,7 @@ def _sale_row(**overrides) -> dict[str, object]:
         "customer_partner_id": "PARTNER-1",
         "order_date": date(2026, 9, 9),
         "sale_date": SALE_DATE,
+        "issued_date": SALE_DATE,
         "collection_due_date": DUEDATE,
         "total_quantity_kg": Decimal(8500),
         "total_amount_krw": Decimal(19550000),
@@ -188,6 +190,7 @@ def _request(**overrides) -> ReceivableCreateInput:
         "sim_run_id": SIM_RUN_ID,
         "financing_mode": MODE,
         "sale_date": SALE_DATE,
+        "issued_date": SALE_DATE,
         "customer_partner_id": "PARTNER-1",
         "due_date": DUEDATE,
         "original_amount_krw": Decimal(19550000),
@@ -205,16 +208,17 @@ def test_build_receivable_write_plan_uses_loaded_finance_state_id():
     assert plan.receivable_id == receivable_id_for(SALE_ID)
     assert plan.finance_state_id == "FIN-PROOF-20260910-LOAN"
     assert plan.original_amount_krw == Decimal(19550000)
+    assert plan.issued_date == SALE_DATE
     assert plan.due_date == DUEDATE
 
 
-def test_sale_date_finance_state_lookup_does_not_depend_on_id_naming():
+def test_finance_state_lookup_does_not_depend_on_id_naming():
     conn = _Connection()
     custom = _state()
     custom["finance_state_id"] = "FIN-PROOF-20260105-LOAN"
     conn.states_by_id = {custom["finance_state_id"]: custom}
 
-    state_id = load_sale_date_finance_state_id(
+    state_id = load_finance_state_id_for_date(
         conn,
         sim_run_id=SIM_RUN_ID,
         financing_mode=MODE,
@@ -224,12 +228,12 @@ def test_sale_date_finance_state_lookup_does_not_depend_on_id_naming():
     assert state_id == "FIN-PROOF-20260105-LOAN"
 
 
-def test_sale_date_finance_state_lookup_fails_closed_when_missing():
+def test_finance_state_lookup_fails_closed_when_missing():
     conn = _Connection()
     conn.states_by_id = {}
 
     with pytest.raises(FinanceDataNotReady, match="finance_state_for_receivable"):
-        load_sale_date_finance_state_id(
+        load_finance_state_id_for_date(
             conn,
             sim_run_id=SIM_RUN_ID,
             financing_mode=MODE,
@@ -237,7 +241,7 @@ def test_sale_date_finance_state_lookup_fails_closed_when_missing():
         )
 
 
-def test_sale_date_finance_state_lookup_fails_closed_when_ambiguous():
+def test_finance_state_lookup_fails_closed_when_ambiguous():
     conn = _Connection()
     first = _state()
     second = _state()
@@ -249,7 +253,7 @@ def test_sale_date_finance_state_lookup_fails_closed_when_ambiguous():
     }
 
     with pytest.raises(FinanceDataNotReady, match="finance_state_ambiguous"):
-        load_sale_date_finance_state_id(
+        load_finance_state_id_for_date(
             conn,
             sim_run_id=SIM_RUN_ID,
             financing_mode=MODE,
@@ -268,9 +272,8 @@ def test_confirm_receivable_persists_receivable_and_updates_exact_state():
     assert result.finance_state_updates == 1
     assert result.finance_state_id == "FIN-PROOF-20260910-LOAN"
     assert conn.receivables[result.receivable_id]["status"] == "OPEN"
-    assert conn.states_by_id[result.finance_state_id]["receivables_krw"] == Decimal(
-        29550000
-    )
+    assert conn.receivables[result.receivable_id]["issued_date"] == SALE_DATE
+    assert conn.states_by_id[result.finance_state_id]["receivables_krw"] == Decimal(29550000)
     assert conn.transaction_calls == []
 
 
@@ -300,3 +303,63 @@ def test_confirm_receivable_conflicting_sale_fields_fail_closed():
     wrong = _request(original_amount_krw=Decimal(19560000))
     with pytest.raises(ReceivablePersistenceConflict):
         confirm_receivable(conn, wrong)
+
+
+def test_receivable_create_input_requires_issued_date():
+    data = _request().model_dump()
+    data.pop("issued_date")
+
+    with pytest.raises(ValidationError, match="issued_date"):
+        ReceivableCreateInput.model_validate(data)
+
+
+def test_delayed_receivable_uses_issued_date_state_without_mutating_sale_date_state():
+    issued_date = date(2026, 9, 12)
+    conn = _Connection()
+    sale_date_state_id = daily_finance_state_id(
+        sim_run_id=SIM_RUN_ID, financing_mode=MODE, state_date=SALE_DATE
+    )
+    issued_state = _state(state_date=issued_date)
+    conn.states_by_id[issued_state["finance_state_id"]] = issued_state
+
+    result = confirm_receivable(conn, _request(issued_date=issued_date))
+
+    assert result.finance_state_id == issued_state["finance_state_id"]
+    assert conn.receivables[result.receivable_id]["issued_date"] == issued_date
+    assert conn.states_by_id[sale_date_state_id]["receivables_krw"] == Decimal(10000000)
+    assert conn.states_by_id[result.finance_state_id]["receivables_krw"] == Decimal(29550000)
+
+
+def test_delayed_receivable_retry_updates_issued_date_state_exactly_once():
+    issued_date = date(2026, 9, 12)
+    conn = _Connection()
+    issued_state = _state(state_date=issued_date)
+    conn.states_by_id[issued_state["finance_state_id"]] = issued_state
+    request = _request(issued_date=issued_date)
+
+    first = confirm_receivable(conn, request)
+    second = confirm_receivable(conn, request)
+
+    assert first.receivables_written == 1
+    assert first.finance_state_updates == 1
+    assert second.receivables_written == 0
+    assert second.finance_state_updates == 0
+    assert len(conn.receivables) == 1
+    assert conn.receivables[first.receivable_id]["issued_date"] == issued_date
+    assert conn.states_by_id[first.finance_state_id]["receivables_krw"] == Decimal(29550000)
+
+
+def test_delayed_receivable_allows_due_date_before_issued_date():
+    issued_date = date(2026, 9, 12)
+    conn = _Connection()
+    issued_state = _state(state_date=issued_date)
+    conn.states_by_id[issued_state["finance_state_id"]] = issued_state
+    conn.sales[SALE_ID]["collection_due_date"] = SALE_DATE
+
+    result = confirm_receivable(
+        conn,
+        _request(issued_date=issued_date, due_date=SALE_DATE),
+    )
+
+    assert conn.receivables[result.receivable_id]["issued_date"] == issued_date
+    assert conn.receivables[result.receivable_id]["due_date"] == SALE_DATE

@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.sales.proposal import run_proposal, self_check_scenarios
+from app.sales.proposal import _generate_scenarios, run_proposal, self_check_scenarios
 from app.sales.schemas import SalesProposalInput
 
 
@@ -1278,3 +1278,37 @@ def test_evidence_refs_are_deduplicated_and_carry_reply_refs():
 
     assert "PUR-1" in aggressive.evidence_refs
     assert len(aggressive.evidence_refs) == len(set(aggressive.evidence_refs))
+
+
+def test_balanced_requested_quantity_cannot_be_executable_above_confirmed_supply(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    request = _resolved_purchase_request(quantity=1000)
+    payload = request.model_dump()
+    payload["feedback"]["scenario_feedback"].append(
+        {"scenario_id": "SALES-001-B", "reply_refs": ["PUR-1", "FIN-1"]}
+    )
+    scenarios = _generate_scenarios(SalesProposalInput.model_validate(payload))
+    balanced = next(item for item in scenarios if item.scenario_type == "BALANCED")
+
+    assert balanced.quantity_kg == Decimal(5000)
+    assert balanced.supply.confirmed_quantity_kg == Decimal(3000)
+    assert balanced.supply.conditional_quantity_kg is None
+    assert balanced.status == "INFEASIBLE"
+    assert "PUR-1" not in balanced.evidence_refs
+    assert "ADDITIONAL_SUPPLY_CONTEXT" not in balanced.required_validations
+
+
+def test_self_check_rejects_executable_quantity_above_confirmed_supply():
+    request = _resolved_purchase_request(quantity=1000)
+    payload = request.model_dump()
+    payload["feedback"]["scenario_feedback"].append(
+        {"scenario_id": "SALES-001-B", "reply_refs": ["PUR-1", "FIN-1"]}
+    )
+    scenarios = _generate_scenarios(SalesProposalInput.model_validate(payload))
+    balanced = next(item for item in scenarios if item.scenario_type == "BALANCED")
+    invalid = balanced.model_copy(update={"status": "EXECUTABLE"})
+
+    check = self_check_scenarios([invalid])
+
+    assert check.passed is False
+    assert "EXECUTABLE_WITH_UNSUPPORTED_QUANTITY" in check.issue_codes

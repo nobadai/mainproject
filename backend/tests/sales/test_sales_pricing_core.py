@@ -294,3 +294,49 @@ def test_first_pass_pre_sales_context_has_no_depletion_authority_to_discount_agg
     assert scenarios["AGGRESSIVE"].unit_price_krw == scenarios["BALANCED"].unit_price_krw
     assert scenarios["AGGRESSIVE"].unit_price_krw == Decimal(1450)
     assert all(scenario.sell_priority is None for scenario in scenarios.values())
+
+
+def test_unsourced_user_price_is_not_repriced_as_market_ml():
+    scenarios = _prices(_request(source_ref=None, preferred_price=2300))
+
+    assert {scenario.unit_price_krw for scenario in scenarios.values()} == {Decimal(2300)}
+    assert all(scenario.ml_support_used for scenario in scenarios.values())
+    assert all(
+        any(ref.startswith("v_ml_price_forecast(") for ref in scenario.evidence_refs)
+        for scenario in scenarios.values()
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "recommended"),
+    [("AUC", True), ("WHSL", False)],
+)
+def test_unusable_forecast_is_not_recorded_as_candidate_ml_support(
+    target_kind, recommended
+):
+    request = _request(recommended=recommended)
+    payload = request.model_dump()
+    payload["ml_context"]["target_kind"] = target_kind
+    scenarios = _prices(SalesProposalInput.model_validate(payload))
+
+    assert all(scenario.ml_support_used is False for scenario in scenarios.values())
+    assert all(
+        not any(ref.startswith("v_ml_price_forecast(") for ref in scenario.evidence_refs)
+        for scenario in scenarios.values()
+    )
+
+
+def test_candidate_price_preserves_exact_ml_forecast_row_reference(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    from app.sales.proposal import run_proposal
+
+    reply = run_proposal(_request())
+    expected = (
+        "v_ml_price_forecast(item=배추,target_kind=WHSL,base_dt:2026-01-01,"
+        "forecast_date=2026-01-02,model_version=TEST-WHSL)"
+    )
+
+    assert all(expected in scenario.evidence_refs for scenario in reply.scenarios)
+    assert all(
+        trace.policy_model_refs == ["TEST-WHSL"] for trace in reply.decision_trace
+    )

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS haetdeul.partner_credit_limits (
     effective_to            date,
     evidence_grade          text NOT NULL,
     source_ref              text NOT NULL,
+    recorded_by             text NOT NULL,
     policy_version          text NOT NULL,
     usage_scope             text NOT NULL,
     is_active               boolean NOT NULL DEFAULT true,
@@ -64,6 +65,10 @@ COMMENT ON COLUMN haetdeul.partner_credit_limits.effective_to IS
     'NULL 이면 아직 종료되지 않은 구간.';
 COMMENT ON COLUMN haetdeul.partner_credit_limits.evidence_grade IS
     'SIM_FIXED 는 MVP 시뮬레이션 고정값이며 실제 계약 한도가 아니다.';
+COMMENT ON COLUMN haetdeul.partner_credit_limits.source_ref IS
+    '한도 값의 계약·확인 문서 등 업무 근거. 입력자와 섞지 않는다.';
+COMMENT ON COLUMN haetdeul.partner_credit_limits.recorded_by IS
+    '한도 값을 시스템에 입력한 기록자. source_ref 와 별개의 감사 정보다.';
 
 -- as-of 조회 축. `(partner_id, as_of)` 로 활성 구간을 찾는다.
 CREATE INDEX IF NOT EXISTS idx_partner_credit_limits_partner_period

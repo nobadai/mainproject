@@ -152,7 +152,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
-from typing import Any
+from typing import Any, get_args
 
 from app.master.backfill import (
     BackfillRuleMissing,
@@ -161,6 +161,10 @@ from app.master.backfill import (
     read_run_rules,
 )
 from app.master.bootstrap import wire_registries
+
+# 🔴 **마감 어휘도 주인에서 읽는다** (2026-09-16). `ClosingOut.status` 의 다섯 값을 여기서
+#   손으로 적으면 어휘가 느는 날 요약만 옛말을 하고 새 값의 0 이 안 찍힌다.
+from app.master.closing import ClosingOut
 
 # 🔴 **어휘의 주인에서 들여온다. 여기서 네 이름을 안 적는다** (2026-09-12).
 #   손으로 적으면 어휘가 느는 날 요약만 옛말을 하고, 새로 든 값이 성적표에서
@@ -242,6 +246,14 @@ MAX_CONSECUTIVE_FAILURES = 5
 #: ⚠️ **순서가 뜻이다.** 「실었다」가 먼저다 — 그 숫자가 늘어나는 것이 진도이고,
 #:   읽는 사람이 먼저 볼 자리다. 그래서 이 줄만 `sorted` 를 안 쓴다.
 _OBSERVED_AT_LABELS: tuple[str, str] = ("실었다", "안쟀다")
+
+#: 마감 줄이 찍는 어휘 (2026-09-16). 🔴 **여기서 이름을 안 적는다** — `ClosingOut.status`
+#: 의 다섯 값과, 단계를 안 탄 날 `DayRunOutcome` 이 두는 기본값 그대로다
+#: (`inspection_statuses` 가 `DayRunOutcome` 기본값을 읽는 것과 같은 결).
+_CLOSING_STATUSES: tuple[str, ...] = (
+    *get_args(ClosingOut.model_fields["status"].annotation),
+    DayRunOutcome.closing_status,
+)
 
 
 @dataclass(frozen=True)
@@ -522,6 +534,54 @@ class WalkResult:
         ★ `end_codes` 와 같은 모양이다 — `scheduler` 가 낸 값을 세기만 한다.
         """
         return Counter(one.outbound_status for one in self.days)
+
+    @property
+    def closing_statuses(self) -> Mapping[str, int]:
+        """재무 일마감 단계 분포 (2026-09-16). 🔴 **여섯 값을 접지 않는다 · 0 도 든다.**
+
+        ```text
+        CLOSED         그날을 닫았다
+        NOTHING_DUE    닫을 움직임이 없었다 · 또는 미등록이다
+        BLOCKED        장부가 안 서서 못 닫았다
+        NOT_OPENED     하루가 안 열려서 안 물었다
+        FAILED         닫아 보다 터졌다        ← 🔴 사고다 (`_incident_reason`)
+        NOT_ATTEMPTED  단계를 안 탔다
+        ```
+
+        ★★ **이 줄이 없어서 3월 초부터 마감이 멈춘 것을 아무도 못 봤다** (실측 2026-09-16).
+          `SIM-CHAIN-CHECK-0916` 요약은 「사고 0건 · 현금항등식 🟢」 이었는데
+          `daily_closings` 는 03-06 뒤로 0행이었다. 값은 `DayRunOutcome.closing_status` 에
+          안 접힌 채 있었고 **재는 줄만 없었다** (`maintenance_statuses` 때와 같은 모양).
+
+        🔴 **`FAILED` 0 을 빼지 않는다.** 키가 안 보이면 *"없었다"* 와 *"안 셌다"* 가 같아진다.
+        """
+        total: Counter[str] = Counter(dict.fromkeys(_CLOSING_STATUSES, 0))
+        for day in self.days:
+            total[day.closing_status] += 1
+        return total
+
+    @property
+    def last_closed_on(self) -> date | None:
+        """마지막으로 `CLOSED` 가 선 날. 한 번도 안 섰으면 `None`.
+
+        ★ **분포만으로는 언제 멈췄는지를 못 읽는다.** `CLOSED 45` 는 1월부터 45일인지
+          3월까지 45일인지를 말하지 않는다.
+        """
+        닫은날 = [day.as_of for day in self.days if day.closing_status == "CLOSED"]
+        return max(닫은날) if 닫은날 else None
+
+    @property
+    def first_closing_failure(self) -> tuple[date, str] | None:
+        """처음으로 마감이 `FAILED` 인 날과 그 사유. 없으면 `None`.
+
+        🔴 **사유를 짓지 않는다.** 주인은 `ClosingOut.reason` 이고, 낸 값이 없으면
+          (마감이 예외로 터졌으면) `모름` 이다 — 그날 사고 줄이 note 전체를 나른다.
+        """
+        for day in self.days:
+            if day.closing_status == "FAILED":
+                사유 = day.closing.reason if day.closing is not None else None
+                return day.as_of, _or_unknown(사유 or None)
+        return None
 
     @property
     def approval_statuses(self) -> Mapping[str, int]:
@@ -1254,7 +1314,16 @@ def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
                                             🔴 scope 가 FULL 이든 LEDGER_ONLY 든 같다
     failed_items 가 비지 않았다              품목이 터졌다 (나머지는 돌았다)
     outbound_status == FAILED               나가려다 못 나갔다
+    closing_status == FAILED                마감이 닫아 보다 터졌다 (2026-09-16)
     ```
+
+    🔴 **마감 `FAILED` 는 사고다** (2026-09-16). `SIM-CHAIN-CHECK-0916` 에서 03-09 부터
+      마감이 매일 `FAILED` 였는데 요약은 「사고 0건」 이었다. 그날 장부가 안 닫혔으면
+      다음 날 판단은 안 닫힌 장부 위에서 돈다 — 조용히 계속 가는 것보다 연속 사고
+      상한에 걸려 멈추는 쪽이 낫다.
+
+    ⚠️ **마감 `BLOCKED` · `NOT_OPENED` 는 여기서 안 센다.** 그 둘은 앞 단계(개장 · 장부
+      관문)가 이미 막힌 날의 결과이고, 그 사실은 위 줄이 이미 사고로 잡았다.
 
     ⚠️ **`WAIT` 은 사고가 아니다.** *"아직"* 이지 *"못"* 이 아니다. 그 구분이
       `scheduler` 가 다섯 어휘를 가른 이유이고, 여기서 접으면 그게 무의미해진다.
@@ -1294,6 +1363,9 @@ def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
         # ★ **사유를 여기서 짓지 않는다.** 무엇이 못 나갔는지는 `OutboundOut.reason`
         #   이 알고, `_stage` 가 그것을 note 로 실어 보냈다 — 그 값을 그대로 나른다.
         return "출고가 못 나갔다" + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
+    if outcome.closing_status == "FAILED":
+        # ★ **사유를 여기서 짓지 않는다.** `_stage` 가 `ClosingOut.reason` 을 note 로 실었다.
+        return "마감이 못 섰다" + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
     return None
 
 
@@ -1386,9 +1458,13 @@ def _cash_lines(result: WalkResult) -> list[str]:
 
     현금 = result.cash
     항등식 = result.cash_identity
+    # 🔴 **현금 합은 마감이 선 날만의 합이다** (2026-09-16). 그 사실을 줄에 드러낸다 —
+    #    `SIM-CHAIN-CHECK-0916` 에서 매입유출이 1,625만 으로 찍혔는데 purchases 는 5,586만
+    #    이었다. 03-06 뒤로 마감이 안 서서 합이 조용히 작아진 것이다.
+    일수 = f"마감이 선 날 {len(result.closings)}일 / 돈 날 {len(result.days)}일"
     if 현금 is None or 항등식 is None:
         없음 = "없음 — 그 구간에 마감행이 0행이다"
-        return [f"현금        {없음}", f"현금항등식  {없음}"]
+        return [f"현금        {없음} · {일수}", f"현금항등식  {없음}"]
 
     # 🔴 **0 인 칸도 그대로 찍는다.** 빼면 V4~V6 세 판을 통과시킨 그 0 이 사라진다.
     칸 = " · ".join(f"{이름}: {_krw(현금[column])}" for 이름, column in _CASH_FLOWS)
@@ -1400,7 +1476,7 @@ def _cash_lines(result: WalkResult) -> list[str]:
         f" · 어긋난 날 {항등식.mismatched_days}일 → {판정}"
     )
     return [
-        f"현금        {{{칸} · 기말잔액: {_krw(현금[BASE_CASH_BALANCE])}}}",
+        f"현금        {{{칸} · 기말잔액: {_krw(현금[BASE_CASH_BALANCE])}}} · {일수}",
         f"현금항등식  {항등식줄}",
     ]
 
@@ -1441,6 +1517,32 @@ def _moment_line(result: WalkResult) -> str:
     if 날마다 < 마감:
         return 머리 + f"🔴 마감 {마감:%H:%M} 전 — 예측이 늦는 날이 통째로 안 돈다"
     return 머리 + f"마감 {마감:%H:%M} 뒤"
+
+
+def _closing_line(result: WalkResult) -> str:
+    """재무 일마감 한 줄 (2026-09-16). 🔴 **0 인 칸도 찍는다.**
+
+    ⚠️ **빈 자리를 「없음」 으로 안 적는다.** 그 말은 현금 줄이 「마감행 0행」 에 쓰고, 「못
+      읽음」 과 안 섞이는지를 검사가 요약 전체에서 잰다 — 여기는 「안 섰다」·「안 났다」 다.
+
+    ```text
+    마감      {'BLOCKED': 0, 'CLOSED': 45, 'FAILED': 3, ...} · 마지막 마감일 2026-03-06
+              · 첫 실패일 2026-03-09 (마감 실패: ...)      (실제로는 한 줄이다)
+    ```
+
+    ★★ **이 줄이 없어서 마감이 3월 초에 멈춘 것을 아무도 못 봤다.**
+    """
+    마지막 = result.last_closed_on
+    첫실패 = result.first_closing_failure
+    return (
+        f"마감      {dict(sorted(result.closing_statuses.items()))}"
+        f" · 마지막 마감일 {마지막.isoformat() if 마지막 is not None else '안 섰다'}"
+        + (
+            f" · 첫 실패일 {첫실패[0].isoformat()} ({첫실패[1]})"
+            if 첫실패 is not None
+            else " · 첫 실패일 안 났다"
+        )
+    )
 
 
 def _inspection_line(result: WalkResult) -> str:
@@ -1512,6 +1614,10 @@ def format_summary(result: WalkResult) -> str:
         #    *"그만큼 잔액이 움직였나"* 는 축이 다르다 — 이 줄이 없어서 V7 에서
         #    매입 유출 27,122,228 원이 잔액에서 안 빠진 것을 179일 동안 아무도
         #    못 봤다. 🔴 **맞아도 찍는다** — 0 이라 안 보이면 아무도 안 본다.
+        # 🔴 **마감 줄을 현금 줄 바로 위에 둔다** (2026-09-16). 현금 합이 어느 날들의
+        #    합인지가 이 줄에 있다 — 이 줄이 없어서 03-06 뒤로 마감이 0행인 판을
+        #    「사고 0건 · 현금항등식 🟢」 으로 읽었다.
+        _closing_line(result),
         *_cash_lines(result),
         f"사고      {len(result.incidents)}건",
         f"소요      {result.elapsed_seconds:.1f}초",

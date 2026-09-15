@@ -372,7 +372,11 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
             exclusion_reasons=exclusions.get(scenario.scenario_id, []),
             unresolved_fields=scenario.uncertainties,
             reply_refs=_reply_refs(scenario.domain_replies),
-            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+            policy_model_refs=(
+                [request.ml_context.model_version]
+                if scenario.ml_support_used and request.ml_context
+                else []
+            ),
         )
         for scenario in scenarios
     ]
@@ -393,7 +397,11 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
             exclusion_reasons=exclusions[scenario.scenario_id],
             unresolved_fields=scenario.uncertainties,
             reply_refs=_reply_refs(scenario.domain_replies),
-            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+            policy_model_refs=(
+                [request.ml_context.model_version]
+                if scenario.ml_support_used and request.ml_context
+                else []
+            ),
         )
         for scenario in state.get("candidates", [])
         if scenario.scenario_id in exclusions
@@ -416,7 +424,11 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
             exclusion_reasons=["REJECTED_BY_FEEDBACK"],
             unresolved_fields=scenario.uncertainties,
             reply_refs=_reply_refs(scenario.domain_replies),
-            policy_model_refs=[request.ml_context.model_version] if request.ml_context else [],
+            policy_model_refs=(
+                [request.ml_context.model_version]
+                if scenario.ml_support_used and request.ml_context
+                else []
+            ),
         )
         for scenario in state.get("rejected_candidates", [])
         if scenario.scenario_id not in traced_ids
