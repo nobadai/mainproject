@@ -14,7 +14,8 @@
 
 const KEY = "haetdeul.session";
 
-export type Role = "purchase" | "finance" | "approver";
+/** ★ 역할은 관리자 하나다. 로그인 화면에서 역할을 고르지 않는다. */
+export type Role = "admin";
 
 export interface Session {
   employeeId: string;
@@ -23,16 +24,12 @@ export interface Session {
 }
 
 export const ROLE_LABEL: Record<Role, string> = {
-  purchase: "매입 담당",
-  finance: "재무 담당",
-  approver: "승인권자",
+  admin: "관리자",
 };
 
 /** 역할이 볼 수 있는 것. **화면에서만 가린다 — 서버는 누구든 부를 수 있다.** */
 export const CAN: Record<Role, { finance: boolean; approve: boolean; procure: boolean }> = {
-  purchase: { finance: false, approve: false, procure: true },
-  finance: { finance: true, approve: false, procure: false },
-  approver: { finance: true, approve: true, procure: true },
+  admin: { finance: true, approve: true, procure: true },
 };
 
 /* ── 외부 저장소 구독 ────────────────────────────────────────────────────
@@ -74,7 +71,10 @@ export function sessionSnapshot(): Session | null {
   if (raw === cachedRaw) return cachedSession;
   cachedRaw = raw;
   try {
-    cachedSession = raw ? (JSON.parse(raw) as Session) : null;
+    // 🔴 로그인 화면에서 역할을 고르던 때의 세션이 남아 있어도 권한이 줄면 안 된다.
+    //    원문은 그대로 두고 읽을 때만 관리자로 맞춘다 — 캐시는 원문 기준이라 그대로 돈다.
+    const parsed = raw ? (JSON.parse(raw) as Session | null) : null;
+    cachedSession = parsed ? { ...parsed, role: "admin" } : null;
   } catch {
     cachedSession = null;
   }

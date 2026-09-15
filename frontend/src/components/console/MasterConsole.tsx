@@ -429,7 +429,6 @@ export function MasterConsole({ session }: { session: Session }) {
                     <>
                     <ProcurementResult
                       run={turn.run}
-                      canApprove={can.approve}
                       onPick={(scenario) => {
                         setModalError(null);
                         setPicked({

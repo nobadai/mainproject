@@ -26,12 +26,10 @@ const won = (n: number) => n.toLocaleString("ko-KR");
 
 export function ProcurementResult({
   run,
-  canApprove,
   onPick,
   onRerun,
 }: {
   run: ProcurementRunResponse;
-  canApprove: boolean;
   onPick: (scenario: Scenario) => void;
   /** 조건을 붙여 다시 — 입력창에 문안을 채우고 커서를 준다. **보내는 것은 사람이다.** */
   onRerun?: () => void;
@@ -109,7 +107,6 @@ export function ProcurementResult({
               key={String(s.label ?? i)}
               scenario={s}
               recommended={i === 1}
-              canApprove={canApprove}
               onPick={() => onPick(s)}
             />
           ))}
@@ -146,12 +143,10 @@ export function ProcurementResult({
 function ScenarioCard({
   scenario,
   recommended,
-  canApprove,
   onPick,
 }: {
   scenario: Scenario;
   recommended: boolean;
-  canApprove: boolean;
   onPick: () => void;
 }) {
   const qty = scenario.total_qty_kg;
@@ -177,13 +172,11 @@ function ScenarioCard({
       <button
         type="button"
         onClick={onPick}
-        disabled={!canApprove}
-        title={canApprove ? undefined : "승인권자만 기록할 수 있습니다"}
         className={`mt-2.5 w-full rounded-md border px-2 py-1.5 text-[12.5px] ${
           recommended
             ? "border-accent bg-accent font-semibold text-white"
             : "border-line bg-surface text-muted"
-        } ${canApprove ? "" : "cursor-not-allowed opacity-45"}`}
+        }`}
       >
         이 안으로 진행
       </button>
