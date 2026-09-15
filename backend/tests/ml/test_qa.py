@@ -152,7 +152,18 @@ def test_상수표는_아홉_칸이_다_있다():
 
 
 def _llm(monkeypatch, answer):
-    """LLM 을 갈아 끼운다. `None` 이면 «못 불렀다» 는 뜻이다."""
+    """LLM 을 갈아 끼운다. `None` 이면 «못 불렀다» 는 뜻이다.
+
+    ★ 계약이 `items`·`kinds` **배열**로 바뀌었다 (2026-09-15). 검사는 예전처럼
+      `item`·`kind` 한 칸으로 적어도 되게, 여기서 배열로 감싸 준다 —
+      **읽기 쉬운 검사와 진짜 계약을 한 자리에서 잇는다.**
+    """
+    if isinstance(answer, dict):
+        answer = {
+            **answer,
+            "items": answer.get("items") or ([answer["item"]] if answer.get("item") else []),
+            "kinds": answer.get("kinds") or ([answer["kind"]] if answer.get("kind") else []),
+        }
     monkeypatch.setattr(qa_graph.qa_llm, "interpret", lambda q, base: answer)
 
 
@@ -164,6 +175,43 @@ def test_질문만_줘도_해석해서_답한다(도구를_갈아_끼운다, mon
     assert out.meta.status == "OK"
     assert out.meta.item == "배추" and out.meta.kind == "AUC"
     assert "867" in out.markdown
+
+
+def test_가격_종류가_여럿이면_표를_여러_개_준다(도구를_갈아_끼운다, monkeypatch):
+    """★ 「배추 경락가랑 도매가」에 **중도매가만** 나가고 경락가는 조용히 버려졌다.
+
+    한 칸짜리 계약(item·kind)의 한계였다 (2026-09-15 실측).
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추"],
+                       "kinds": ["AUC", "WHSL"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추 경락가랑 도매가 알려줘"))
+    assert out.meta.status == "OK"
+    assert out.meta.items == ["배추", "배추"]
+    assert out.meta.kinds == ["AUC", "WHSL"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2       # 표가 둘
+    assert "경락가" in out.markdown and "중도매가" in out.markdown
+
+
+def test_품목이_여럿이면_품목마다_표를_준다(도구를_갈아_끼운다, monkeypatch):
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추", "무"],
+                       "kinds": ["AUC"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추랑 무 내일 경락가"))
+    assert out.meta.items == ["배추", "무"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2
+    #   여러 조합이면 무엇을 답했는지 맨 앞에 밝힌다 — 표가 길어 눈에 안 들어온다.
+    assert "모두 보여드립니다" in out.markdown
+
+
+def test_조합마다_근거가_그_조합을_가리킨다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 하나로 뭉뚱그리면 배추 경락가 근거가 배추 중도매가를 가리키게 된다."""
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추"],
+                       "kinds": ["AUC", "WHSL"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추 경락가랑 도매가"))
+    kinds = {row["kind"] for row in out.rows_for_evidence}
+    assert kinds == {"AUC", "WHSL"}                          # 행마다 조합이 붙는다
 
 
 def test_LLM_이_범위_밖_값을_골라도_gate_가_막는다(도구를_갈아_끼운다, monkeypatch):

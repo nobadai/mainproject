@@ -32,6 +32,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from app.ml.qa_schemas import QA_ITEMS, QA_KINDS
+
 #: backend/.env 와 저장소 루트 .env 를 순서대로 읽는다 (마스터·물류와 같은 패턴).
 _ENV_FILES = (
     Path(__file__).resolve().parents[2] / ".env",
@@ -48,14 +50,16 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 고를 것
   route  forecast(값) · accuracy(얼마나 맞나) · usability(써도 되나)
          · clarify(못 고르겠다) · out_of_scope(우리 품목이 아님)
-  item   배추 · 무 · 양파 중 하나. 질문에 없으면 비운다
-  kind   AUC(경락가·매입) · WHSL(중도매가) · RTL(소매가) 중 하나. 질문에 없으면 비운다
+  items  배추 · 무 · 양파 중 **질문이 가리키는 것 전부**. 없으면 빈 배열
+         「배추랑 무」면 둘 다 적는다. 「전 품목」·「다」면 셋을 다 적는다
+  kinds  AUC(경락가·매입) · WHSL(중도매가) · RTL(소매가) 중 **전부**. 없으면 빈 배열
+         「경락가랑 도매가」면 둘 다 적는다. 「가격 전부」면 셋을 다 적는다
   dates  질문이 가리키는 날짜를 ISO 형식으로. 「오늘」은 기준일, 「내일」은 기준일+1,
          「10일 뒤」는 기준일+10 이다. 여러 개면 모두 적는다. 없으면 비운다
 
 규칙
   · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 route 를 out_of_scope 로 둔다
-  · 품목이나 가격 종류를 못 고르겠으면 비워 두고 route 는 forecast 로 둔다 —
+  · 품목이나 가격 종류를 못 고르겠으면 빈 배열로 두고 route 는 forecast 로 둔다 —
     되묻거나 전부 보여주는 판단은 우리 규칙이 한다
   · 날짜를 못 고르겠으면 비워 둔다. 임의로 채우지 마라
 """
@@ -72,10 +76,10 @@ and do not write any explanatory sentence.
 What to pick
   route  forecast (a value) · accuracy (how accurate it is) · usability (safe to use)
          · clarify (cannot decide) · out_of_scope (not one of our crops)
-  item   one of 배추 (napa cabbage) · 무 (radish) · 양파 (onion).
-         Leave empty if the question does not say.
-  kind   one of AUC (auction price, buying) · WHSL (wholesale price) · RTL (retail price).
-         Leave empty if the question does not say.
+  items  **every** crop the question refers to, from 배추 · 무 · 양파.
+         Empty array if the question does not say. List all of them if it names several.
+  kinds  **every** price series asked for, from AUC (auction) · WHSL (wholesale) ·
+         RTL (retail). Empty array if the question does not say.
   dates  the dates the question refers to, in ISO format. "today" is the base date,
          "tomorrow" is base date + 1, "in 10 days" is base date + 10. List all of them.
          Leave empty if there are none.
@@ -130,8 +134,13 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         },
         #   ★ enum 에 빈 문자열을 넣으면 Gemini 가 400 을 낸다 (enum[n]: cannot be empty).
         #     «못 골랐다» 는 값을 비워서(= 이 칸을 빼서) 말한다. required 에 없다.
-        "item": {"type": "string", "enum": ["배추", "무", "양파"], "nullable": True},
-        "kind": {"type": "string", "enum": ["AUC", "WHSL", "RTL"], "nullable": True},
+        #   ★ **배열이다** (2026-09-15). 「배추 경락가랑 도매가」처럼 여럿을 묻는 질문에
+        #     한 칸짜리로는 하나만 답하게 된다 — 실제로 중도매가만 나갔다.
+        #     «못 골랐다» 는 빈 배열로 말한다. nullable 이 필요 없어졌다.
+        "items": {"type": "array", "items": {"type": "string",
+                                             "enum": ["배추", "무", "양파"]}},
+        "kinds": {"type": "array", "items": {"type": "string",
+                                             "enum": ["AUC", "WHSL", "RTL"]}},
         "dates": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["route"],
@@ -272,9 +281,28 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         return None
     if not isinstance(chosen, dict):
         return None
+    items = _pick_all(chosen.get("items"), QA_ITEMS)
+    kinds = _pick_all(chosen.get("kinds"), QA_KINDS)
     return {
         "route": str(chosen.get("route") or "forecast"),
-        "item": (chosen.get("item") or "").strip() or None,
-        "kind": (chosen.get("kind") or "").strip() or None,
+        "items": items,
+        "kinds": kinds,
+        #   예전 이름 — 하나만 쓰는 자리가 아직 있다. 첫 값을 가리킨다.
+        "item": items[0] if items else None,
+        "kind": kinds[0] if kinds else None,
         "dates": _parse_dates(chosen.get("dates")),
     }
+
+
+def _pick_all(raw: Any, allowed: tuple[str, ...]) -> list[str]:
+    """목록에서 **우리가 아는 값만** 순서대로. 중복은 버린다.
+
+    🔴 enum 을 걸어도 한 번 더 거른다 — 스키마는 «형태» 를 보장할 뿐이고,
+      우리가 답할 수 있는 값인지는 우리 목록이 정한다.
+    """
+    out: list[str] = []
+    for value in raw if isinstance(raw, list) else []:
+        text = str(value).strip()
+        if text in allowed and text not in out:
+            out.append(text)
+    return out
