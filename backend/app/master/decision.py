@@ -102,6 +102,39 @@ PROCUREMENT_CYCLE = "PROCUREMENT"
   영영 재시도한다.
 """
 
+AUTO_BACKFILL = "AUTO-BACKFILL"
+"""자동으로 채운 승인의 `decided_by`.
+
+🔴 **사람 이름을 안 쓴다.** `master_decisions.decided_by` 는 지금 전부 사람 이름이라,
+  자동으로 채우면서 거기 사람 이름을 적으면 **사람이 안 눌렀는데 눌렀다고 기록**되고
+  그 표는 append-only 라 못 지운다.
+
+★ `ask_service` 가 적어 둔 *"승인자가 없는 승인은 승인이 아니다"* 를 지키는 길이
+  이것이다 — 자동일 때도 **「누가」를 정직하게** 적는다.
+
+★ **자리를 `backfill.py` 에서 여기로 옮겼다** (2026-09-15 · 실매입 기록 안 A).
+  이 값이 이제 *"승인이 전이를 바로 부르나"* 를 가르고, 그 판정을 `decision_service` ·
+  `pending_transition` 이 읽는다. `backfill` 은 `decision_service` 를 들여오므로 거기
+  두면 순환이 된다. `backfill` 은 여기서 들여와 그대로 쓴다 — 주인은 하나다.
+"""
+
+
+def awaits_purchase_record(decided_by: str | None) -> bool:
+    """이 승인이 **실매입 기록을 기다리나** (설계 260915 안 A §2).
+
+    ```text
+    AUTO-BACKFILL   규칙 승인   승인 즉시 · 계획값으로 전이 (지금 그대로)
+    그 밖           사람 승인   실매입 기록 뒤 · 기록값으로 전이
+    ```
+
+    🔴 **날짜로 가르지 않는다. 승인 경로로 가른다.** 09-10 이전 날짜라도 사람이
+       콘솔로 승인하면 기록을 기다린다.
+
+    ⚠️ **`decided_by` 가 없으면 사람으로 본다.** 계획값이 원장에 자동으로 앉는 쪽이
+      기록을 기다리는 쪽보다 되돌리기 어렵다.
+    """
+    return decided_by != AUTO_BACKFILL
+
 #: 판매 승인이 성립하는 종료 코드. 🔴 **`_APPROVE_END_CODES` 와 섞지 않는다.**
 #:
 #: `sales_flow.SalesEndCode` 가 적어 둔 D-3 합의가 그대로 여기에도 걸린다 —
@@ -338,6 +371,103 @@ class DecisionOut(BaseModel):
     #:
     #: ★ 응답 전용이라 이력 조회에는 안 실린다.
     sale: SaleConfirmationOut | None = None
+
+
+# ── 실매입 기록 (설계 260915 안 A) ─────────────────────────────────────
+
+
+class PurchaseRecordLegIn(BaseModel):
+    """실매입 한 회차. **선정안 회차(`seq`)마다 하나다** (§3)."""
+
+    seq: int
+    qty_kg: float = Field(gt=0)
+    amount_krw: float = Field(gt=0)
+    purchase_date: date
+    arrival_date: date
+
+    @model_validator(mode="after")
+    def _arrival_not_before_purchase(self) -> PurchaseRecordLegIn:
+        if self.arrival_date < self.purchase_date:
+            raise ValueError(
+                f"{self.seq}회차 도착일({self.arrival_date})이"
+                f" 매입일({self.purchase_date})보다 앞선다."
+            )
+        return self
+
+
+class PurchaseRecordIn(BaseModel):
+    """`POST /master/runs/{request_id}/purchase-record` 요청 본문.
+
+    ★ 회차 수와 `seq` 는 **선정안 그대로**다 — 사람은 값만 고친다. 회차 추가 ·
+      삭제 · 부분 기록 · 시장 · 메모는 받지 않는다 (§3 · 사용자 결정 9/15).
+    """
+
+    decision_seq: int
+    grade: str = Field(min_length=1)
+    recorded_by: str = Field(min_length=1)
+    legs: list[PurchaseRecordLegIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_leg_per_seq(self) -> PurchaseRecordIn:
+        if not self.grade.strip():
+            raise ValueError("등급이 비어 있다.")
+        if not self.recorded_by.strip():
+            raise ValueError("기록자가 비어 있다.")
+        seqs = [leg.seq for leg in self.legs]
+        if len(set(seqs)) != len(seqs):
+            raise ValueError(f"같은 회차가 두 번 적혔다: {seqs}")
+        return self
+
+
+class PurchaseRecordLegOut(BaseModel):
+    """회차 한 줄. 선정안 값(`plan`)과 기록값(`record`)이 같은 모양이다."""
+
+    seq: int
+    qty_kg: float
+    amount_krw: float | None = None
+    purchase_date: date
+    arrival_date: date
+
+
+class PurchaseRecordPlanOut(BaseModel):
+    """화면이 폼에 미리 채울 **선정안 값**."""
+
+    grade: str | None = None
+    legs: list[PurchaseRecordLegOut] = Field(default_factory=list)
+
+
+class PurchaseRecordValuesOut(BaseModel):
+    """적힌 실매입 기록."""
+
+    grade: str
+    recorded_by: str
+    recorded_at: datetime
+    legs: list[PurchaseRecordLegOut] = Field(default_factory=list)
+
+
+PurchaseRecordStatus = Literal["AWAITING_PURCHASE_RECORD", "APPLIED", "NOT_APPLIED", "NOT_REQUIRED"]
+
+#: 실매입 기록의 반영 상태 (`GET …/purchase-record`).
+#:
+#:   ```text
+#:   AWAITING_PURCHASE_RECORD   사람 승인 · 기록 없음 → 폼
+#:   APPLIED                    기록 있음 · 매입 원장에 닿았다
+#:   NOT_APPLIED                기록 있음 · 아직 원장에 없다 → 다음 개장 뒤 재시도가 기록값으로
+#:   NOT_REQUIRED               자동 승인(AUTO-BACKFILL) · 기록 대상이 아니다
+#:   ```
+
+
+class PurchaseRecordOut(BaseModel):
+    """`GET /master/runs/{request_id}/purchase-record` 응답 — 화면용."""
+
+    request_id: str
+    decision_seq: int
+    scenario_label: str | None = None
+    decided_by: str
+    status: PurchaseRecordStatus
+    reason: str = ""
+    plan: PurchaseRecordPlanOut
+    record: PurchaseRecordValuesOut | None = None
 
 
 # ── 판단 ────────────────────────────────────────────────────────────────

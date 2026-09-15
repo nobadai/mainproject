@@ -68,8 +68,10 @@ from datetime import date
 from typing import Any, Literal
 
 from app.master.commitment import ApprovedCommitment
+from app.master.decision import awaits_purchase_record
 from app.master.decision_service import current_approved_commitment
 from app.master.pending_transition_repository import approved_decisions, ledger_purchase_ids
+from app.master.purchase_record_repository import recorded_decision_keys
 from app.master.transition import TransitionOut, apply_approval, purchase_id_prefix_for
 
 __all__ = [
@@ -168,6 +170,7 @@ def pending_approvals(
     decisions: Iterable[Mapping[str, Any]],
     purchase_ids: Iterable[str],
     before: date,
+    recorded: Iterable[tuple[str, int]] = (),
 ) -> tuple[PendingApproval, ...]:
     """승인 목록과 원장 ID 목록을 **맞대어** 미적용을 고른다. 🔴 **순수 함수다.**
 
@@ -195,8 +198,13 @@ def pending_approvals(
         상태가 설 날은 승인일 **다음 날**이라(`transition._target_state_date`) 오늘
         승인은 오늘 세울 자리가 없다. 그리고 같은 범위를 **다시 걸을 때** 이 줄이
         없으면 첫날 재시도가 **아직 오지 않은 날의 승인**까지 장부에 밀어 넣는다.
+    :param recorded: 실매입 기록이 있는 승인 `(request_id, decision_seq)`.
+        🔴 **사람 승인은 여기 있을 때만 고른다** (설계 260915 안 A §4-4). 기록이 없는
+        사람 승인을 계획값으로 원장에 앉히면, 사람이 실제로 산 값을 적기도 전에 안의
+        계획값이 채무 · 입고 일정이 된다. 기본이 빈 목록인 이유가 그것이다.
     """
     applied = tuple(purchase_ids)
+    recorded_keys = frozenset(recorded)
     found: list[PendingApproval] = []
     for row in decisions:
         as_of = row["as_of"]
@@ -204,6 +212,11 @@ def pending_approvals(
             continue
         request_id = row["request_id"]
         decision_seq = int(row["decision_seq"])
+        key = (request_id, decision_seq)
+        if awaits_purchase_record(row.get("decided_by")) and key not in recorded_keys:
+            # 🔴 **사람 승인인데 실매입 기록이 없다 — 건너뛴다.** 기록이 들어오면 그날
+            #    `record_purchase` 가 세우고, 못 섰으면 다음 재시도가 기록값으로 세운다.
+            continue
         prefix = purchase_id_prefix_for(request_id, decision_seq)
         if any(one.startswith(prefix) for one in applied):
             # 🔴 **이미 닿았다. 다시 안 한다** — 멱등이 이 한 줄이다. 다시 하면
@@ -226,6 +239,7 @@ def retry_pending_transitions(
     sim_run_id: str,
     decisions_of: Callable[..., Sequence[Mapping[str, Any]]] = approved_decisions,
     purchase_ids_of: Callable[..., Sequence[str]] = ledger_purchase_ids,
+    recorded_of: Callable[..., Iterable[tuple[str, int]]] = recorded_decision_keys,
     commitment_of: Callable[[str], ApprovedCommitment | None] = current_approved_commitment,
     apply_fn: Callable[..., TransitionOut] = apply_approval,
 ) -> RetryOut:
@@ -254,12 +268,16 @@ def retry_pending_transitions(
     :param commitment_of: 약정을 재조립하는 자리. 🔴 **기본값이 실제 함수 자체다**
         (`clock.py` · `verifier.py` 와 같은 규율) — `None` 을 안 받는다.
     :param apply_fn: 전이 경계. 기본이 `apply_approval` 자체다.
+    :param recorded_of: 실매입 기록이 있는 승인 키. 기본이 저장소 함수 자체다.
+        🔴 사람 승인은 기록이 있을 때만 다시 세운다 · 기록이 있으면 `commitment_of`
+        (`current_approved_commitment`)가 **기록값으로 덮어** 조립한다.
     """
     try:
         found = pending_approvals(
             decisions=decisions_of(sim_run_id=sim_run_id),
             purchase_ids=purchase_ids_of(sim_run_id=sim_run_id),
             before=as_of,
+            recorded=recorded_of(sim_run_id=sim_run_id),
         )
     except Exception as exc:  # noqa: BLE001 - 조회가 터져도 하루는 계속 간다.
         # 🔴 **`NOTHING_DUE` 로 접지 않는다.** 미적용이 없는 것과 있었는지 못 물어본

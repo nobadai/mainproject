@@ -87,6 +87,7 @@ from typing import Any, Literal
 
 from app.master.clock import today_in_seoul
 from app.master.decision import (
+    AUTO_BACKFILL,
     SALES_CYCLE,
     DecisionIn,
     DecisionOut,
@@ -100,16 +101,9 @@ from app.master.decision_service import record_decision
 from app.master.ledger_repository import get_burn_in
 from app.master.run_repository import list_runs
 
-AUTO_BACKFILL = "AUTO-BACKFILL"
-"""자동으로 채운 승인의 `decided_by`.
-
-🔴 **사람 이름을 안 쓴다.** `master_decisions.decided_by` 는 지금 전부 사람 이름이라,
-  자동으로 채우면서 거기 사람 이름을 적으면 **사람이 안 눌렀는데 눌렀다고 기록**되고
-  그 표는 append-only 라 못 지운다.
-
-★ `ask_service` 가 적어 둔 *"승인자가 없는 승인은 승인이 아니다"* 를 지키는 길이
-  이것이다 — 자동일 때도 **「누가」를 정직하게** 적는다.
-"""
+# ★ `AUTO_BACKFILL` 의 자리는 `decision.py` 다 (2026-09-15 · 실매입 기록 안 A).
+#   그 값이 이제 승인이 전이를 바로 부르는지를 가르므로 결정 어휘 옆으로 옮겼다.
+#   여기서는 들여와 그대로 쓴다 — 이 모듈에서 들여오던 기존 호출부도 그대로 돈다.
 
 BACKFILL_BOUNDARY_AS_OF = date(2026, 9, 18)
 """자동으로 채울 수 있는 마지막 날. **이 날까지 포함이다.** 🔴 **가드가 둘이다.**

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -45,8 +45,10 @@ __all__ = [
     "ApprovedCommitment",
     "ArrivalLeg",
     "CommitmentNotBuildable",
+    "RecordedLeg",
     "SourcingLine",
     "build_commitment",
+    "with_purchase_record",
 ]
 
 #: 🔴 `contracts/core.py` 의 `ItemCode` 는 `str` 별칭이고 품목 목록은 **주석**이다.
@@ -263,6 +265,104 @@ def build_commitment(
         sourcing_plan=_sourcing(scenario.get("sourcing_plan")),
         inbound_lead_days=lead,
         notes=notes,
+    )
+
+
+@dataclass(frozen=True)
+class RecordedLeg:
+    """사람이 적은 **실매입 한 회차** (설계 260915 안 A §3).
+
+    ★ 칸이 넷뿐인 이유 — 지금 코드가 실제로 읽는 값만 받는다. 시장 · 메모 · 회차
+      추가는 없다 (사용자 결정 9/15).
+    """
+
+    seq: int
+    qty_kg: float
+    amount_krw: float
+    purchase_date: date
+    arrival_date: date
+
+
+def with_purchase_record(
+    commitment: ApprovedCommitment,
+    *,
+    legs: Sequence[RecordedLeg],
+    grade: str,
+    purchase_payment_days: Any,
+) -> ApprovedCommitment:
+    """선정안으로 조립한 약정의 **사본**에 실매입 값을 덮는다. 🔴 **순수 함수다.**
+
+    ```text
+    회차 qty_kg · amount_krw · purchase_date · arrival_date   기록값
+    회차 payment_due_date                                     기록 매입일 + N5
+    total_qty_kg · total_amount_krw                           기록 회차 합
+    sourcing_plan[].grade                                     기록 등급
+    ```
+
+    ★ **약정을 새로 짓지 않는다.** `build_commitment` 가 선정안으로 만든 것에서 값만
+      바꾼다 — `approval_id` · 품목 · 회차 수와 `seq` 는 선정안 그대로다.
+
+    ★ **지급일 식은 `_legs` 와 같다** (매입일 + N5). N5 가 없으면 `None` 으로 두고,
+      일수로 안 읽히면 멈춘다 — 지어낸 지급일이 원장에 남는 것보다 낫다.
+
+    :raises CommitmentNotBuildable: 회차 집합이 선정안과 다르거나 값이 모순일 때.
+        **고쳐 쓰지 않는다.**
+    """
+    if not isinstance(grade, str) or not grade.strip():
+        raise CommitmentNotBuildable("등급이 비어 있다.")
+    planned = {leg.seq for leg in commitment.arrival_schedule}
+    by_seq = {leg.seq: leg for leg in legs}
+    if len(by_seq) != len(legs):
+        raise CommitmentNotBuildable("같은 회차가 두 번 적혔다.")
+    if not planned:
+        raise CommitmentNotBuildable("선정안에 회차 일정이 없어 기록할 회차가 없다.")
+    if set(by_seq) != planned:
+        raise CommitmentNotBuildable(
+            f"기록 회차 {sorted(by_seq)} 가 선정안 회차 {sorted(planned)} 와 다르다."
+        )
+    for one in legs:
+        if one.qty_kg <= 0 or one.amount_krw <= 0:
+            raise CommitmentNotBuildable(f"{one.seq}회차 수량과 금액은 0 보다 커야 한다.")
+        if one.arrival_date < one.purchase_date:
+            raise CommitmentNotBuildable(
+                f"{one.seq}회차 도착일({one.arrival_date})이"
+                f" 매입일({one.purchase_date})보다 앞선다."
+            )
+
+    days = _number(purchase_payment_days)
+    if days is not None and (days < 0 or days != int(days)):
+        raise CommitmentNotBuildable(
+            f"purchase_payment_days 가 일수로 읽히지 않아({days:g}) 지급일을 계산하지 않았다."
+        )
+
+    new_legs = tuple(
+        replace(
+            leg,
+            qty_kg=float(by_seq[leg.seq].qty_kg),
+            amount_krw=float(by_seq[leg.seq].amount_krw),
+            purchase_date=by_seq[leg.seq].purchase_date,
+            arrival_date=by_seq[leg.seq].arrival_date,
+            payment_due_date=(
+                by_seq[leg.seq].purchase_date + timedelta(days=int(days))
+                if days is not None
+                else None
+            ),
+        )
+        for leg in commitment.arrival_schedule
+    )
+    # ★ 등급은 **줄마다 기록값으로 바꾼다.** 선정안이 등급 줄을 안 실었으면 한 줄을
+    #   세운다 — 사람이 적은 등급이 원장 `purchase_items.grade` 로 가야 한다.
+    sourcing = (
+        tuple(replace(line, grade=grade) for line in commitment.sourcing_plan)
+        if commitment.sourcing_plan
+        else (SourcingLine(grade=grade),)
+    )
+    return replace(
+        commitment,
+        total_qty_kg=sum(leg.qty_kg for leg in new_legs),
+        total_amount_krw=sum(float(leg.amount_krw or 0.0) for leg in new_legs),
+        arrival_schedule=new_legs,
+        sourcing_plan=sourcing,
     )
 
 

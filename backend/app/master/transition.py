@@ -200,9 +200,21 @@ class TransitionOut(BaseModel):
 
       `NOT_APPLIED` 를 `FAILED` 로 접으면 미구현이 장애로 읽히고, 반대로 접으면
       **실패한 전이가 "안 돌았다"로 조용히 묻힌다.**
+
+    ★ **넷째 값 `AWAITING_PURCHASE_RECORD`** (2026-09-15 · 설계 260915 안 A §4-2).
+      사람 승인은 전이를 **부르지 않고** 이 값을 싣는다 — 실매입을 기록하는 순간 그
+      값으로 전이가 선다. `apply_approval` 은 이 값을 **내지 않는다**; 내는 자리는
+      `decision_service.record_decision` 하나다.
+
+      ```text
+      AWAITING_PURCHASE_RECORD   전이를 부르지 않았다 — 실매입 기록을 기다린다
+      ```
+
+      🔴 `NOT_APPLIED` 로 접지 않는다. 저쪽은 *"불렀는데 쓸 것이 없었다"* 이고 이쪽은
+         *"아직 부를 차례가 아니다"* 다 — 화면이 할 일(폼을 연다)이 다르다.
     """
 
-    status: Literal["APPLIED", "NOT_APPLIED", "FAILED"]
+    status: Literal["APPLIED", "NOT_APPLIED", "FAILED", "AWAITING_PURCHASE_RECORD"]
     reason: str = ""
     #: 실제로 write 를 낸 파트. `APPLIED` 가 아니면 비어 있다.
     parts: list[str] = Field(default_factory=list)
