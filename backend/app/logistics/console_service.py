@@ -46,9 +46,16 @@ app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
 🔴 **커넥션은 화면 한 판에 하나이고, 이 파일은 열지 않는다** (2026-09-15).
    `build_result` 가 하나를 열어 `conn=` 으로 넘기고, 여기 함수 넷과 `load_console_runtime`
    은 그것을 빌려 쓴다. 종전에는 콘솔 호출마다 · FEFO 예약마다 · repository 읽기마다
-   커넥션을 새로 열어 **한 판에 23개 · 388 ms**(원격 DB · 연결당 14~22 ms)였고,
-   그 사이 원장이 바뀌면 *"같은 as_of 인데 칸마다 다른 시점"* 도 성립했다.
+   커넥션을 새로 열어 **한 판에 23개 · 388 ms**(원격 DB · 연결당 14~22 ms)였다.
+   커넥션 재사용이 줄이는 것은 **연결 비용과 중복 조회**다.
    `repository` 의 읽기 함수들도 같은 `conn` 을 받는다 (`get_current_logistics_read(conn=)`).
+
+   ⚠️ **커넥션 하나가 «모든 SELECT 가 같은 시점» 을 보장하지는 않는다.** `get_connection`
+      은 격리수준을 안 정해 PostgreSQL 기본값 `READ COMMITTED` 로 돈다 — 같은 트랜잭션
+      안이라도 SELECT 는 문장마다 새 스냅샷을 잡아, 사이에 다른 커밋이 있으면 두 조회가
+      다른 값을 볼 수 있다. 화면이 «같은 as_of» 로 서는 근거는 커넥션이 아니라 **각 SQL 의
+      `as_of` cutoff**(`historical_repository`)다. 조회 원자성이 필요하면 `REPEATABLE READ`
+      가 있어야 하고, 그것은 이 작업의 범위가 아니다.
 """
 
 from __future__ import annotations

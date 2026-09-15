@@ -665,15 +665,32 @@ flow = get_finance_cashflow(sim_run_id=..., as_of=as_of)
         tables="""\
 **★ SQL 을 새로 쓰지 마세요. 이미 만들어 둔 것을 부르세요** (#415).
 
+**★ 커넥션은 한 판에 하나입니다** (2026-09-15). `build()` 가 커넥션 하나를 열어
+콘솔 함수에 `conn=` 으로 넘기고, Runtime 읽기(판매가능량 축)는 `load_console_runtime`
+한 번으로 재고·입고 콘솔이 나눠 씁니다.
+
 ```python
-from app.logistics.console_service import get_inventory_console
-snap = get_inventory_console(sim_run_id=..., as_of=as_of)
+from app.logistics.console_service import (
+    get_inbound_console,
+    get_inventory_console,
+    get_outbound_console,
+    load_console_runtime,
+)
+from app.logistics.db import get_connection
+
+with get_connection() as conn:
+    runtime = load_console_runtime(conn=conn, sim_run_id=..., as_of=as_of)
+    inv = get_inventory_console(conn=conn, sim_run_id=..., as_of=as_of, runtime=runtime)
+    inb = get_inbound_console(conn=conn, sim_run_id=..., as_of=as_of, runtime=runtime)
+    ob = get_outbound_console(conn=conn, sim_run_id=..., as_of=as_of)
 ```
 
 `app/logistics/console_service.py` 에 `/logistics/inventory` · `/inbound` ·
-`/outbound` 가 쓰는 함수가 다 있습니다. 물류 문제 장부는
-`app/logistics/agent/exceptions.py` 가 주인입니다 (`live_exceptions_at` ·
-`resolved_exceptions_on`). **같은 쿼리를 두 벌 두면 언젠가 값이 갈라집니다.**
+`/outbound` 가 쓰는 함수가 다 있습니다. FEFO 후보는 예약마다가 아니라 품목마다
+한 번 묻습니다 (`get_fefo_candidates_by_item(conn=, sim_run_id=, item_ids=, as_of=)`).
+물류 문제 장부는 `app/logistics/agent/exceptions.py` 가 주인입니다
+(`live_exceptions_at` · `resolved_exceptions_on`). **같은 쿼리를 두 벌 두면 언젠가
+값이 갈라집니다.**
 
 이 `query.py` 가 할 일은 **읽는 것이 아니라 옮기는 것**입니다 —
 저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Card`)에 담습니다.
