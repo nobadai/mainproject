@@ -96,3 +96,13 @@ class QaAnswer(BaseModel):
 
     markdown: str
     meta: QaMeta
+
+    #: 🔴 **마스터 회신에 붙일 근거의 재료다** (`app/ml/adapter.py`). 읽은 예측 행을
+    #: 그대로 담는다 — 어댑터가 `Evidence.value` 와 `ref_ids` 를 여기서 만든다.
+    #:
+    #: ★ **API 응답에는 안 싣는다.** `/ml/qa` 는 마크다운을 보는 입구라 행을 통째로
+    #:   내보내면 답보다 부속이 커진다. `exclude=True` 로 직렬화에서 뺀다.
+    #:
+    #: 비어 있으면 «예측을 안 읽었다» 는 뜻이고, 어댑터는 그때 `observed_at` 을
+    #: 비운다 — 안 읽고 잰 척하지 않기 위해서다.
+    rows_for_evidence: list[dict] = Field(default_factory=list, exclude=True)

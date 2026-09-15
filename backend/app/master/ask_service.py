@@ -115,6 +115,7 @@ def ask(
         policy_version=request.policy_version,
         budget=request.budget,
         intent=intent,
+        question=request.utterance,
     )
     return _response(
         request_id,
@@ -148,6 +149,8 @@ def execute(
             policy_version=request.policy_version,
             budget=request.budget,
             intent=intent,
+            # 확인을 거친 조회는 발화문이 없다 — 화면이 원문을 되돌려 줄 때만 싣는다.
+            question=request.utterance,
         )
         return AskResponse(
             request_id=request_id,
@@ -206,6 +209,7 @@ def _run_status(
     policy_version: str,
     budget: int,
     intent: Intent,
+    question: str | None = None,
 ) -> StatusOutcome:
     """조회 Flow 를 돌린다. **어댑터 미등록도 결과로 접는다.**
 
@@ -229,7 +233,8 @@ def _run_status(
     registered = tuple(a for a in asked if a not in missing)
 
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=budget))
-    outcome = StatusFlow(runner, registered).run()
+    # ★ 발화 원문과 품목은 **ML 에만** 실린다 (`StatusFlow._payload_for`).
+    outcome = StatusFlow(runner, registered, question=question, item=intent.item).run()
 
     unregistered = tuple(a for a in asked if a in missing)
     if unregistered:
@@ -453,6 +458,15 @@ def _write_answer(facts: AnswerFacts, narrator: NarrativeService | None) -> Answ
     ★ **문장 생성이 실패해도 답은 나간다.** `narrative=None` 이면 규칙이 만든 사실
       줄만으로 완결된다 — LLM 을 답의 뼈대로 쓰지 않는 것이 이 설계의 요지다.
     """
+    if facts.markdown:
+        # 🔴 **부서가 완결한 본문이 있으면 ⑥을 부르지 않는다.** 가격 예측의 마크다운은
+        #   이미 사람에게 쓴 답이라, 문장을 얹으면 같은 말을 두 번 하거나 요약이 본문과
+        #   어긋난다 — 매입 머리말에 ⑥을 안 붙이는 것과 같은 이유다.
+        return AnswerOut(
+            text=render_answer(facts),
+            markdown=facts.markdown,
+            llm_status="SKIPPED_TEMPLATE",
+        )
     narrator = narrator or get_narrative_service()
     result = narrator.write(facts)
     return AnswerOut(

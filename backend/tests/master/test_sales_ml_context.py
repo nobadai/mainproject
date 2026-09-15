@@ -37,7 +37,7 @@ from app.master import (
 )
 from app.master import flow as procurement_flow
 from app.master import sales_flow as sales_flow_module
-from app.master.envelope import CAPABILITY_ROUTING, AgentName
+from app.master.envelope import CAPABILITY_ROUTING, AgentName, agent_allowed_modes
 from app.master.inputs import SourcedInput
 from app.master.sales_flow import SalesFlow
 from app.master.schemas import SalesRunRequest
@@ -329,13 +329,18 @@ def test_실었으면_사유가_비어_있다():
 # ---------------------------------------------------------------------------
 
 
-def test_ML_은_호출_대상_어휘에_없다():
-    """🔴 에이전트로 올리면 **데이터 조회에 CallBudget 과 생략 규칙이 걸린다.**
+def test_ML_은_사이클에서_호출_대상이_아니다():
+    """🔴 사이클이 ML 을 부르면 **데이터 조회에 CallBudget 과 생략 규칙이 걸린다.**
 
-    ML 은 호출 구조 밖의 독립 실행이라 부를 대상이 없다 (`inputs.py` 머리말 · §3.2.5).
+    사이클에서 ML 은 호출 구조 밖의 독립 실행이다 (`inputs.py` 머리말 · §3.2.5).
     마스터가 읽어서 싣는 값이지, 물어보는 상대가 아니다.
+
+    ★ **2026-09-15 부터 `AgentName` 에는 있다** — 사용자 가격 질문에 답하는 상태 조회
+      전용이다. 그래서 잠그는 것을 *"어휘에 없다"* 에서 *"사이클 mode 도 capability 도
+      없다"* 로 옮겼다.
     """
-    assert "ml" not in get_args(AgentName)
+    assert "ml" in get_args(AgentName)
+    assert agent_allowed_modes("ml") == frozenset({"STATUS_QUERY"})
     assert all(route is None or route[0] != "ml" for route in CAPABILITY_ROUTING.values())
 
 

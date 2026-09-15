@@ -44,7 +44,15 @@ _AGENT_LABEL: dict[str, str] = {
     "inventory": "물류",
     "purchase": "매입",
     "sales": "판매",
+    "ml": "가격 예측",
 }
+
+#: 🔴 **본문을 그대로 싣는 부서.** 사실 줄로 펴지 않는다 (2026-09-15).
+#:
+#: 가격 예측(`ml`)은 사용자 질문에 **완결된 마크다운 답**(`answer_markdown`)을 쓴다.
+#: 나머지 키(`forecasts` · `model_version` …)는 그 답의 재료라, 사실 줄로 늘어놓으면
+#: 같은 답이 두 번 · 사람이 못 읽는 모양으로 나간다. 구조화 값은 `status.answers` 에 남는다.
+_MARKDOWN_AGENTS: dict[str, str] = {"ml": "answer_markdown"}
 
 #: 답이 아니라 **기준**인 키. 사실 줄이 아니라 꼬리말로 뺀다.
 #:
@@ -158,6 +166,9 @@ class AnswerFacts:
     #: 답한 부서 · 답하지 못한 부서. **LLM 에게는 이 둘만 준다.**
     answered: tuple[str, ...] = ()
     unanswered: tuple[str, ...] = ()
+    #: 부서가 쓴 마크다운 본문 **그대로** (`_MARKDOWN_AGENTS`). `render_answer` 에 섞지
+    #: 않고 `to_prompt` 에도 싣지 않는다 — ⑥이 다시 요약할 재료가 아니다.
+    markdown: str | None = None
 
     def to_prompt(self) -> str:
         """LLM 에 넘길 요약. **부서 이름과 결론만 준다.**
@@ -193,9 +204,19 @@ def facts_from_status(outcome: StatusOutcome) -> AnswerFacts:
     """조회 결과를 사실 줄로. **못 답한 부서를 지우지 않는다.**"""
     facts: list[Fact] = []
     basis: list[str] = []
+    bodies: list[str] = []
+    empty_bodies: list[str] = []
 
     for agent, payload in outcome.answers.items():
         label = agent_label(agent)
+        body_key = _MARKDOWN_AGENTS.get(agent)
+        if body_key is not None:
+            body = payload.get(body_key)
+            if isinstance(body, str) and body.strip():
+                bodies.append(body)
+            else:
+                empty_bodies.append(f"{label}는 답했지만 본문이 비어 있습니다")
+            continue
         for key, value in payload.items():
             text = _format(key, value)
             if not text:
@@ -215,10 +236,11 @@ def facts_from_status(outcome: StatusOutcome) -> AnswerFacts:
     return AnswerFacts(
         headline=_status_headline(outcome),
         facts=tuple(facts),
-        gaps=_status_gaps(outcome),
+        gaps=(*_status_gaps(outcome), *empty_bodies),
         basis=tuple(basis),
         answered=tuple(agent_label(a) for a in outcome.answers),
         unanswered=tuple(agent_label(a) for a in outcome.unavailable),
+        markdown="\n\n".join(bodies) or None,
     )
 
 

@@ -71,9 +71,19 @@ class StatusOutcome:
 class StatusFlow:
     """조회 실행기. 요청마다 새로 만든다 (`MasterRunner` 가 요청 단위)."""
 
-    def __init__(self, runner: MasterRunner, agents: tuple[AgentName, ...]) -> None:
+    def __init__(
+        self,
+        runner: MasterRunner,
+        agents: tuple[AgentName, ...],
+        *,
+        question: str | None = None,
+        item: str | None = None,
+    ) -> None:
         self.runner = runner
         self.agents = agents
+        #: 사용자 발화 원문과 의도의 품목. **ML 에만 싣는다** (`_payload_for`).
+        self.question = question
+        self.item = item
 
     def run(self) -> StatusOutcome:
         try:
@@ -107,7 +117,14 @@ class StatusFlow:
                 missing[agent] = ("STATUS_QUERY_NOT_SUPPORTED",)
                 continue
 
-            reply = self.runner.call(agent, "STATUS_QUERY")
+            payload = self._payload_for(agent)
+            if payload is None:
+                # ML 은 질문 원문이 있어야 답한다. 없는 질문을 지어내지 않고 접는다.
+                unavailable.append(agent)
+                missing[agent] = ("질문 원문",)
+                continue
+
+            reply = self.runner.call(agent, "STATUS_QUERY", payload)
             if reply.runtime_status == "READY":
                 answers[agent] = dict(reply.payload)
                 continue
@@ -129,6 +146,24 @@ class StatusFlow:
             missing_data=missing,
             errors=errors,
         )
+
+    def _payload_for(self, agent: AgentName) -> dict[str, Any] | None:
+        """부서마다 싣는 조회 입력. **ML 만 질문을 받는다.**
+
+        ★ 다른 부서는 지금처럼 빈 payload 다 — 수신 계약을 바꾸지 않는다.
+        ★ ML 은 `{"question": 원문, "item": 품목}` 이다. 품목이 없으면 키를 뺀다
+          (비워 보내면 *"품목이 없다"* 가 아니라 *"빈 품목"* 을 물은 것이 된다).
+        🔴 질문 원문이 없으면 `None` 이다 — 부르지 않는다.
+        """
+        if agent != "ml":
+            return {}
+        question = (self.question or "").strip()
+        if not question:
+            return None
+        payload: dict[str, Any] = {"question": question}
+        if self.item:
+            payload["item"] = self.item
+        return payload
 
 
 def _code(*, answered: int, asked: int) -> StatusCode:

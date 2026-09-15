@@ -102,8 +102,11 @@ def test_보고서가_영어_코드를_그대로_찍지_않는다():
 
     markdown = render_report(run)
 
+    # 사용자 문서다 (2026-09-15). 판정이 없다는 사실은 사람 말로 남기고,
+    # 상태 코드와 영문 사유는 싣지 않는다.
     assert "판정을 내지 못함" in markdown
-    assert "as-of does not match" in markdown
+    assert "skipped" not in markdown
+    assert "as-of does not match" not in markdown
 
 
 def test_검증이_판정_못_받은_사실에_운다():
