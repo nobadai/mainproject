@@ -64,8 +64,14 @@ class QaRequest(BaseModel):
 
     question: str | None = Field(default=None, description="사용자가 채팅에 친 그대로")
     item: str | None = Field(default=None, description="배추 · 무 · 양파")
+    #   ★ 여럿을 직접 줄 수도 있다 (2026-09-15). `item` 은 하나짜리 옛 이름으로 남긴다 —
+    #     이미 그 이름으로 부르는 곳이 있어 지우면 조용히 안 먹는다.
+    items: list[str] | None = Field(default=None, description="품목 여럿. 없으면 item 을 본다")
     kind: TargetKind | None = Field(
         default=None, description="AUC 경락가 · WHSL 중도매가 · RTL 소매가"
+    )
+    kinds: list[TargetKind] | None = Field(
+        default=None, description="가격 종류 여럿. 없으면 kind 를 본다"
     )
     dates: list[date] | None = Field(default=None, description="대상일 목록. 없으면 내일 하루")
     as_of: date | None = Field(default=None, description="기준일. 없으면 전달표의 최신 기준일")
@@ -75,8 +81,12 @@ class QaMeta(BaseModel):
     """출처와 상태. **마스터는 이 값을 봉투에 싣는다.**"""
 
     status: QaStatus
+    #   하나짜리 옛 이름 — 조합이 하나면 그 값, 여럿이면 **첫 번째**를 가리킨다.
     item: str | None = None
     kind: str | None = None
+    #   ★ 실제로 답한 조합 전부 (2026-09-15). 「배추 경락가랑 도매가」면 둘이 들어온다.
+    items: list[str] = Field(default_factory=list)
+    kinds: list[str] = Field(default_factory=list)
     base_dt: date | None = None
     targets: list[date] = Field(default_factory=list)
     missing: list[date] = Field(default_factory=list, description="범위 안인데 행이 없던 날")

@@ -115,11 +115,13 @@ def test_당일을_물으면_원본_창고에서_읽고_출처를_밝힌다(도�
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC", dates=[BASE]))
     assert out.meta.status == "OK"
     assert out.meta.source == "prediction_log"
-    assert "내부 기록" in out.markdown
+    assert "오늘 2026-09-14" in out.markdown
     #   ★ 표 이름·모델 이름 같은 코드 낱말은 **문장에 안 나간다** (마스터 요청).
     #     기계가 읽을 값은 meta 로 간다 — 화면은 사람 말만 본다.
     for code_word in ("prediction_log", "ml_price_forecasts", "ops_auc"):
         assert code_word not in out.markdown
+    #   어느 창고에서 읽었는지도 문장에 안 적는다 — 사람에게 알 바가 아니다.
+    assert "내부 기록" not in out.markdown
 
 
 def test_쓰지_말라는_조합은_경고가_먼저_나간다(도구를_갈아_끼운다):
@@ -150,7 +152,18 @@ def test_상수표는_아홉_칸이_다_있다():
 
 
 def _llm(monkeypatch, answer):
-    """LLM 을 갈아 끼운다. `None` 이면 «못 불렀다» 는 뜻이다."""
+    """LLM 을 갈아 끼운다. `None` 이면 «못 불렀다» 는 뜻이다.
+
+    ★ 계약이 `items`·`kinds` **배열**로 바뀌었다 (2026-09-15). 검사는 예전처럼
+      `item`·`kind` 한 칸으로 적어도 되게, 여기서 배열로 감싸 준다 —
+      **읽기 쉬운 검사와 진짜 계약을 한 자리에서 잇는다.**
+    """
+    if isinstance(answer, dict):
+        answer = {
+            **answer,
+            "items": answer.get("items") or ([answer["item"]] if answer.get("item") else []),
+            "kinds": answer.get("kinds") or ([answer["kind"]] if answer.get("kind") else []),
+        }
     monkeypatch.setattr(qa_graph.qa_llm, "interpret", lambda q, base: answer)
 
 
@@ -162,6 +175,99 @@ def test_질문만_줘도_해석해서_답한다(도구를_갈아_끼운다, mon
     assert out.meta.status == "OK"
     assert out.meta.item == "배추" and out.meta.kind == "AUC"
     assert "867" in out.markdown
+
+
+def test_가격_종류가_여럿이면_표를_여러_개_준다(도구를_갈아_끼운다, monkeypatch):
+    """★ 「배추 경락가랑 도매가」에 **중도매가만** 나가고 경락가는 조용히 버려졌다.
+
+    한 칸짜리 계약(item·kind)의 한계였다 (2026-09-15 실측).
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추"],
+                       "kinds": ["AUC", "WHSL"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추 경락가랑 도매가 알려줘"))
+    assert out.meta.status == "OK"
+    assert out.meta.items == ["배추", "배추"]
+    assert out.meta.kinds == ["AUC", "WHSL"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2       # 표가 둘
+    assert "경락가" in out.markdown and "중도매가" in out.markdown
+
+
+def test_짝지어_물으면_안_물어본_조합은_안_나온다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를 품목 x 가격으로 곱하면
+    **배추 중도매가·무 경락가**가 따라 나가고 날짜도 뒤섞인다 (2026-09-15 실측).
+
+    묶음이 오면 그 묶음만 답한다.
+    """
+    seen: list[tuple] = []
+
+    def 읽은_것을_적는다(item, kind, base_dt, targets):
+        seen.append((item, kind, tuple(str(d) for d in targets)))
+        return [_row(5)] if targets else []
+
+    도구를_갈아_끼운다(rows=[_row(5)])
+    monkeypatch.setattr(qa_graph.qa_tools, "forecast_rows", 읽은_것을_적는다)
+    _llm(monkeypatch, {
+        "route": "forecast", "items": [], "kinds": [], "dates": [],
+        "asks": [
+            {"item": "배추", "kind": "AUC", "dates": [BASE + timedelta(days=5)]},
+            {"item": "무", "kind": "WHSL", "dates": [BASE + timedelta(days=7)]},
+        ],
+    })
+    out = qa_graph.answer(
+        QaRequest(question="5일뒤의 배추 경락가와 7일 뒤의 무 도매가를 알려줘")
+    )
+    assert out.meta.items == ["배추", "무"]
+    assert out.meta.kinds == ["AUC", "WHSL"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2       # 넷이 아니라 둘
+    #   ★ 묶음마다 **자기 날짜만** 읽는다 — 날짜가 섞이면 안 물어본 날이 나간다.
+    assert seen == [
+        ("배추", "AUC", ("2026-09-19",)),
+        ("무", "WHSL", ("2026-09-21",)),
+    ]
+
+
+def test_짝_물음이_오면_품목가격_목록은_안_쓴다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 **규칙이 막는 자리다** (2026-09-15).
+
+    해석기가 `kinds` 를 넉넉히 고르는 버릇이 있다 — 「배추 도매가」 하나를 물어도
+    `WHSL · RTL` 을 내놓는다. 지시문을 두 번 고쳐도 그대로였다.
+
+    그런데 `asks` 는 정확히 갈린다. 그래서 **짝 물음이 오면 그것만 쓴다** —
+    말로 부탁해서 안 되는 것은 규칙으로 막는다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {
+        "route": "forecast",
+        #   해석기가 넉넉히 고른 목록 — 이대로 곱하면 표가 여섯 개가 된다
+        "items": ["배추", "무"], "kinds": ["AUC", "WHSL", "RTL"], "dates": [],
+        "asks": [{"item": "배추", "kind": "AUC", "dates": [BASE + timedelta(days=1)]}],
+    })
+    out = qa_graph.answer(QaRequest(question="내일 배추 경락가"))
+    assert out.meta.items == ["배추"]
+    assert out.meta.kinds == ["AUC"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 1       # 여섯이 아니라 하나
+
+
+def test_품목이_여럿이면_품목마다_표를_준다(도구를_갈아_끼운다, monkeypatch):
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추", "무"],
+                       "kinds": ["AUC"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추랑 무 내일 경락가"))
+    assert out.meta.items == ["배추", "무"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2
+    #   여러 조합이면 무엇을 답했는지 맨 앞에 밝힌다 — 표가 길어 눈에 안 들어온다.
+    assert "모두 보여드립니다" in out.markdown
+
+
+def test_조합마다_근거가_그_조합을_가리킨다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 하나로 뭉뚱그리면 배추 경락가 근거가 배추 중도매가를 가리키게 된다."""
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "items": ["배추"],
+                       "kinds": ["AUC", "WHSL"], "dates": [BASE + timedelta(days=1)]})
+    out = qa_graph.answer(QaRequest(question="배추 경락가랑 도매가"))
+    kinds = {row["kind"] for row in out.rows_for_evidence}
+    assert kinds == {"AUC", "WHSL"}                          # 행마다 조합이 붙는다
 
 
 def test_LLM_이_범위_밖_값을_골라도_gate_가_막는다(도구를_갈아_끼운다, monkeypatch):
@@ -178,6 +284,94 @@ def test_가격_종류를_못_고르면_되묻는다(도구를_갈아_끼운다,
     out = qa_graph.answer(QaRequest(question="배추 가격 알려줘"))
     assert out.meta.status == "NEED_CLARIFY"
     assert "경락가" in out.markdown and "소매가" in out.markdown
+
+
+def test_날짜를_안_말하면_오늘_값과_그_이유를_준다(도구를_갈아_끼운다):
+    """★ 전에는 말없이 «내일 하루» 였다 (2026-09-15 고침).
+
+    값은 맞지만 왜 하루뿐인지 안 밝히면 «원래 하루치만 있나 보다» 로 읽힌다.
+    """
+    today = {
+        "base_dt": BASE, "target_dt": BASE, "lead_biz_d": 0,
+        "predicted": 962, "lower": 700, "upper": 1300, "current_price": 1001,
+        "unit": "원/kg", "is_gated": False, "gate_reason": None,
+        "band_method": "quantile", "model_version": "ops_auc",
+    }
+    도구를_갈아_끼운다(rows=[], today=today)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    assert out.meta.status == "OK"
+    assert out.meta.targets == [BASE]                        # 내일이 아니라 오늘
+    assert "날짜를 따로 말씀하지 않으셔서" in out.markdown
+    assert "전부" in out.markdown                            # 더 볼 수 있다고 알려준다
+
+
+def test_날짜를_말하면_그_줄이_안_나온다(도구를_갈아_끼운다):
+    """물어본 대로 답했으면 설명할 것이 없다."""
+    도구를_갈아_끼운다(rows=[_row(1)])
+    out = qa_graph.answer(
+        QaRequest(item="배추", kind="AUC", dates=[BASE + timedelta(days=1)])
+    )
+    assert "날짜를 따로 말씀하지" not in out.markdown
+
+
+def test_오늘_값이_없으면_내일로_물러서고_그렇게_말한다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 빈 답을 주느니 물러선다. 다만 **물러섰다고 적는다.**
+
+    ★ 첫 조회는 빈손이어야 한다 — 날짜를 안 말했을 때 읽을 것은 «오늘» 뿐이고
+      그건 전달표에 없다. 물러선 **뒤의** 조회에서만 내일 행이 나온다.
+    """
+    도구를_갈아_끼운다(rows=[], today=None)
+    calls: list[list] = []
+
+    def 두_번째부터_행이_나온다(item, kind, base_dt, targets):
+        calls.append(list(targets))
+        return [_row(1)] if len(calls) > 1 else []
+
+    monkeypatch.setattr(qa_graph.qa_tools, "forecast_rows", 두_번째부터_행이_나온다)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    assert out.meta.status == "OK"
+    assert "오늘 값이 아직 없어" in out.markdown and "내일" in out.markdown
+    assert calls[0] == []                                    # 첫 조회는 읽을 날이 없었다
+    assert calls[1] == [BASE + timedelta(days=1)]            # 물러선 뒤엔 내일을 읽는다
+
+
+def test_빠진_것만_묻는다(도구를_갈아_끼운다, monkeypatch):
+    """★ 품목이 없는데 «가격 종류» 만 물으면, 답해도 또 되묻게 된다 (2026-09-15).
+
+    한 번에 알려줬어야 할 것을 두 번에 나눠 묻는 셈이다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+
+    #   품목만 없다 — 가격 종류는 다시 안 묻는다
+    _llm(monkeypatch, {"route": "forecast", "item": None, "kind": "AUC", "dates": []})
+    out = qa_graph.answer(QaRequest(question="경락가 알려줘"))
+    assert out.meta.status == "NEED_CLARIFY"
+    assert "어느 품목인지" in out.markdown
+    assert "배추 · 무 · 양파" in out.markdown
+    assert "WHSL" not in out.markdown                        # 이미 안 것은 안 묻는다
+
+    #   둘 다 없다 — 한 번에 둘 다 묻는다
+    _llm(monkeypatch, {"route": "forecast", "item": None, "kind": None, "dates": []})
+    out = qa_graph.answer(QaRequest(question="가격 알려줘"))
+    assert "어느 품목의 어느 가격인지" in out.markdown
+    assert "배추 · 무 · 양파" in out.markdown and "경락가(AUC)" in out.markdown
+
+
+def test_되물을_때_알아들은_날짜를_밝힌다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 날짜를 제대로 골라 놓고 되묻기로 빠지면 그 값이 조용히 사라진다.
+
+    그러면 사람이 「오늘부터 8일」을 또 적어야 한다 — 알아들은 것은 말해 줘야 한다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {
+        "route": "forecast", "item": None, "kind": None,
+        "dates": [BASE + timedelta(days=d) for d in range(8)],
+    })
+    out = qa_graph.answer(QaRequest(question="오늘부터 8일동안의 가격을 알려줘"))
+    assert out.meta.status == "NEED_CLARIFY"
+    assert "알아들은 것" in out.markdown
+    assert "8일" in out.markdown
+    assert str(BASE) in out.markdown                         # 시작일을 그대로 적는다
 
 
 def test_LLM_을_못_부르면_해석하지_못했다고_답한다(도구를_갈아_끼운다, monkeypatch):

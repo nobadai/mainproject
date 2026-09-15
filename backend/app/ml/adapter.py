@@ -240,30 +240,56 @@ def _evidence(
     )
 
 
-def evidences_for(rows: list[dict[str, Any]], item: str, kind: str, base_dt: date) -> tuple:
+def evidences_for(
+    rows: list[dict[str, Any]],
+    item: str | None,
+    kind: str | None,
+    base_dt: date,
+) -> tuple:
     """`forecasts[]` 의 숫자 칸마다 근거 하나. **행 하나에 셋이다.**
 
     봉투가 배열 항목 안의 **숫자**에 근거를 요구한다 (`required_claims`). 라벨은
     면제라 `target_dt` · `kind` · `is_filled` 는 안 단다.
+
+    ★ 품목·가격 종류는 **행에 적힌 것**을 먼저 쓴다 (2026-09-15). 조합이 여럿이면
+      행마다 다르고, 그때 하나로 뭉뚱그리면 근거가 엉뚱한 조합을 가리킨다.
     """
     return tuple(
-        _evidence(index, row, field_name, item, kind, base_dt)
+        _evidence(
+            index, row, field_name,
+            row.get("item") or item or "?",
+            row.get("kind") or kind or "?",
+            base_dt,
+        )
         for index, row in enumerate(rows)
         for field_name in _EVIDENCE_FIELDS
         if row.get(field_name) is not None
     )
 
 
+def _read_note(out: Any) -> str:
+    """무엇을 읽었는지 한 줄. **조합이 여럿이면 다 적는다.**"""
+    pairs = list(zip(out.meta.items or [], out.meta.kinds or [], strict=False))
+    if not pairs:
+        return f"질문을 해석해 {out.meta.item or '?'} {out.meta.kind or '?'} 예측을 읽었다"
+    names = " · ".join(f"{item} {kind}" for item, kind in pairs)
+    return f"질문을 해석해 {names} 예측을 읽었다"
+
+
 def _forecast_rows(out: Any) -> list[dict[str, Any]]:
-    """예측 행을 payload 모양으로. **날짜는 문자열로** 내보낸다 (JSON 으로 나간다)."""
-    kind = out.meta.kind
+    """예측 행을 payload 모양으로. **날짜는 문자열로** 내보낸다 (JSON 으로 나간다).
+
+    ★ **행마다 품목·가격 종류를 적는다** (2026-09-15). 「배추 경락가랑 도매가」처럼
+      조합이 여럿이면 `meta.kind` 하나로는 어느 행이 어느 것인지 못 가린다.
+    """
     return [
         {
             "target_dt": str(row["target_dt"]),
             "predicted": row["predicted"],
             "lower": row["lower"],
             "upper": row["upper"],
-            "kind": kind,
+            "item": row.get("item") or out.meta.item,
+            "kind": row.get("kind") or out.meta.kind,
             #   ★ 복사값이라는 것은 **답의 일부**다. 감추면 그날 조사가 있었던 것으로
             #     읽힌다. 다만 «시장이 쉬었다» 는 뜻은 아니다 — 우리 조사 축이다.
             "is_filled": bool(row.get("is_filled")),
@@ -467,7 +493,8 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
 
     base_dt = out.meta.base_dt
     evidences: tuple[Evidence, ...] = ()
-    if out.rows_for_evidence and base_dt and out.meta.item and out.meta.kind:
+    if out.rows_for_evidence and base_dt:
+        #   ★ 조합이 여럿이면 행마다 품목·가격이 다르다 — 행 것을 쓴다.
         evidences = evidences_for(
             out.rows_for_evidence, out.meta.item, out.meta.kind, base_dt
         )
@@ -479,7 +506,7 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             business_status="conditional" if status in _PARTIAL_STATUSES else "ok",
             payload=_answer_payload(out),
             evidences=evidences,
-            reasoning=f"질문을 해석해 {out.meta.item or '?'} {out.meta.kind or '?'} 예측을 읽었다",
+            reasoning=_read_note(out),
             #   ★ 예측을 실제로 읽었을 때만 관측 시점을 적는다.
             observed_at=base_dt if evidences else None,
         ),
