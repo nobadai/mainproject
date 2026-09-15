@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ _DEFAULT_MODEL = "gemini-3.5-flash-lite"
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 _TIMEOUT_SECONDS = 8.0
 
-SYSTEM_PROMPT = """너는 농산물 가격 예측 질의응답의 해석 층이다.
+SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층이다.
 사용자 질문에서 **무엇을 물었는지만** 골라낸다. 가격을 추정하지 말고, 설명 문장도 쓰지 마라.
 
 고를 것
@@ -60,6 +60,64 @@ SYSTEM_PROMPT = """너는 농산물 가격 예측 질의응답의 해석 층이�
   · 날짜를 못 고르겠으면 비워 둔다. 임의로 채우지 마라
 """
 
+#: 같은 지시를 영어로 옮긴 것. **뜻을 바꾸지 않았다** — 순서·항목·규칙이 같다.
+#:
+#: 왜 두 벌을 두나: 「영어 프롬프트가 낫다」 는 말은 흔한데 우리는 한 번도 안 쟀다.
+#: 재려면 **지시문 언어만** 다르고 나머지가 같은 짝이 있어야 한다. 모델·온도·
+#: 응답 스키마·질문은 그대로 둔다. 채점은 `ops/qa_prompt_bench.py` 가 한다.
+SYSTEM_PROMPT_EN = """You are the interpretation layer of a crop price forecast Q&A system.
+From the user's question, pick out **only what was asked**. Do not estimate a price,
+and do not write any explanatory sentence.
+
+What to pick
+  route  forecast (a value) · accuracy (how accurate it is) · usability (safe to use)
+         · clarify (cannot decide) · out_of_scope (not one of our crops)
+  item   one of 배추 (napa cabbage) · 무 (radish) · 양파 (onion).
+         Leave empty if the question does not say.
+  kind   one of AUC (auction price, buying) · WHSL (wholesale price) · RTL (retail price).
+         Leave empty if the question does not say.
+  dates  the dates the question refers to, in ISO format. "today" is the base date,
+         "tomorrow" is base date + 1, "in 10 days" is base date + 10. List all of them.
+         Leave empty if there are none.
+
+Rules
+  · If the crop is not 배추, 무 or 양파 (garlic, spring onion and so on),
+    set route to out_of_scope
+  · If you cannot decide the crop or the price kind, leave it empty and set route to
+    forecast — whether to ask back or to show everything is decided by our own rules
+  · If you cannot decide a date, leave it empty. Do not fill one in arbitrarily
+
+The question may be written in Korean. Answer with the JSON schema only.
+"""
+
+
+def _prompt(base_dt: date) -> str:
+    """지시문. 언어는 기본 한국어이고, enum 판이면 **고를 수 있는 날을 붙인다.**
+
+    ★ 범위(「모든 날」·「5일 뒤까지」)를 코드가 세지 않는다. **LLM 이 목록에서 골라야
+      한다** — 그걸 얼마나 잘하는지가 이 실험에서 재려는 것이다.
+    """
+    lang = os.getenv(f"{_ENV_PREFIX}LLM_PROMPT_LANG", "ko").strip().lower()
+    prompt = SYSTEM_PROMPT_EN if lang == "en" else SYSTEM_PROMPT_KO
+    if not _date_enum_on():
+        return prompt
+    days = _selectable(base_dt)
+    return "\n".join(
+        [
+            prompt,
+            "고를 수 있는 날짜는 아래 19개뿐이다. **맨 앞이 오늘**이고 그 뒤가 내일부터다.",
+            "이 목록 밖의 날짜는 만들지 마라.",
+            "  " + " · ".join(days),
+            "「모든 날」·「전부」면 **오늘을 빼고 뒤의 18개**를 적는다.",
+            "「5일 뒤까지」면 내일부터 5개다. 맨 앞(오늘)은 「오늘」이라고 했을 때만 고른다.",
+            "",
+        ]
+    )
+
+
+#: 예전 이름으로 부르던 곳이 있으면 한국어판을 가리킨다.
+SYSTEM_PROMPT = SYSTEM_PROMPT_KO
+
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -75,6 +133,60 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["route"],
 }
+
+
+#: 전달표의 창. **늘 같다** — 2026년 1,557개 조합 전부 18칸 온전(2026-09-15 실측).
+#: 그래서 품목·가격종류를 고르기 전에도 «고를 수 있는 날» 목록을 만들 수 있다.
+_WINDOW_DAYS = 18
+
+
+def _date_enum_on() -> bool:
+    """날짜를 **목록에서 고르게** 할까. **기본이 켬이다** (2026-09-15 채점으로 정했다).
+
+    ```text
+    자유 판(free)   119/128  93.0%
+    목록 판(enum)   125/128  97.7%      +4.7%p
+    ```
+
+    갈린 자리는 범위 질문이었다 — 「모든 날」·「5일 뒤까지」를 자유 판은 빈 값이나
+    마지막 하루로 답했고, 목록 판은 다 맞혔다. `ML_LLM_DATE_ENUM=0` 으로 되돌릴 수 있다.
+    """
+    return os.getenv(f"{_ENV_PREFIX}LLM_DATE_ENUM", "1").strip() in {"1", "true", "True"}
+
+
+def _selectable(base_dt: date) -> list[str]:
+    """고를 수 있는 날. **오늘(기준일) + 1~18** = 19개.
+
+    ★ **오늘을 빼면 안 된다** (2026-09-15 실측으로 배웠다). 전달표는 D+1~D+18 이지만
+      우리는 오늘 값을 원본 창고(`prediction_log` 리드 0)에서 읽어 답한다. 목록에서
+      빼 두었더니 「오늘 양파 중도매가는?」에 **내일을 골랐다** — 없는 보기를 주면
+      모델은 답을 비우는 대신 **가장 가까운 것을 고른다.**
+    """
+    return [
+        (base_dt + timedelta(days=n)).isoformat() for n in range(_WINDOW_DAYS + 1)
+    ]
+
+
+def _schema(base_dt: date) -> dict[str, Any]:
+    """응답 스키마. enum 판이면 **날짜를 만들 수 없고 고르기만** 한다.
+
+    ★ 지금 판은 날짜를 자유 문자열로 받는다. 그래서 틀릴 자리가 셋이다 —
+      형식(「내일」이 그대로 옴) · 범위(19일 뒤) · 연도(2025). enum 으로 묶으면
+      **애초에 만들 수가 없어** 셋이 통째로 사라진다.
+
+    🔴 **그래도 `gate` 는 그대로 둔다.** 창 안이어도 그 행이 있는지는 표만 안다.
+      enum 은 «있을 법한 날» 까지만 보장한다.
+    """
+    if not _date_enum_on():
+        return _RESPONSE_SCHEMA
+    schema = {k: v for k, v in _RESPONSE_SCHEMA.items()}
+    props = {k: v for k, v in _RESPONSE_SCHEMA["properties"].items()}
+    props["dates"] = {
+        "type": "array",
+        "items": {"type": "string", "enum": _selectable(base_dt)},
+    }
+    schema["properties"] = props
+    return schema
 
 
 def _model() -> str:
@@ -120,7 +232,7 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
     if not key:
         return None
     payload = {
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "system_instruction": {"parts": [{"text": _prompt(base_dt)}]},
         "contents": [
             {
                 "role": "user",
@@ -137,7 +249,7 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         "generationConfig": {
             "temperature": 0,
             "responseMimeType": "application/json",
-            "responseSchema": _RESPONSE_SCHEMA,
+            "responseSchema": _schema(base_dt),
         },
     }
     base = (os.getenv(f"{_ENV_PREFIX}GEMINI_BASE_URL") or _BASE_URL).rstrip("/")
