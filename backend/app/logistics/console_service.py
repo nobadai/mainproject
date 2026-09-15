@@ -1,16 +1,15 @@
 """재고·물류 화면 조회 Service — 도메인 함수를 **조립만** 한다.
 
-🔴 **여기는 화면 계층이다** (2026-09-15 · 물류 문서 28). 종전에는
-   `app/logistics/console_service.py` 였다. 이름은 화면용인데 자리가 도메인 폴더라
-   다음 사람이 *"이게 물류 내부 정본인가"* 로 읽었고, 실제로 그 혼동에서 화면의
-   시간축이 섞였다 (현재고는 과거 · 판매가능량은 지금).
+🔴 **자리는 `app/logistics` 이고, 부르는 곳은 `app/api/logistics/query.py` 하나다**
+   (2026-09-15 · 물류 문서 28). 화면 HTTP 경계는 `app/api/logistics` 이고 이 파일은
+   그 화면이 읽는 조회를 도메인 쪽에서 조립한다.
 
 ```text
-app/api/logistics    화면 전용 — routes(HTTP) · query(탭 조립) · read_service(조회) · schema(DTO)
-app/logistics        물류 도메인 · Agent 전용
+app/api/logistics    화면 전용 — routes(HTTP) · query(탭 조립) · schema(LogisticsTab)
+app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
 ```
 
-   ⚠️ **의존은 한 방향이다.** 여기서 `app/logistics` 를 부르는 것은 정상이고,
+   ⚠️ **의존은 한 방향이다.** `app/api` 가 여기를 부르는 것은 정상이고,
       `app/logistics` 가 `app/api` 를 부르는 것은 **없다.**
 
 🔴 **이 파일은 업무 계산을 새로 만들지 않는다.** 판매가능량 · 신선도 · 회전 · FEFO ·
@@ -44,16 +43,24 @@ app/logistics        물류 도메인 · Agent 전용
       시뮬레이션 날짜 컬럼 없음 · `released_as_of` 는 WP-3 · 자리 정원 이력 없음).
       없는 것을 지어내지 않고 응답의 `*_time_basis` 로 그 사실을 말한다.
 
-★ **커넥션은 한 호출에 하나다.** 화면 한 판이 여러 커넥션에 걸치면 그 사이 원장이
-  바뀌어 *"같은 as_of 인데 칸마다 다른 시점"* 이 성립한다. 다만
-  `repository.get_current_logistics_read` 는 자기 커넥션을 여는 기존 구현이라
-  그 부분만 예외다 — 이 파일이 그 규약을 바꾸지 않는다.
+🔴 **커넥션은 화면 한 판에 하나이고, 이 파일은 열지 않는다** (2026-09-15).
+   `build_result` 가 하나를 열어 `conn=` 으로 넘기고, 여기 함수 넷과 `load_console_runtime`
+   은 그것을 빌려 쓴다. 종전에는 콘솔 호출마다 · FEFO 예약마다 · repository 읽기마다
+   커넥션을 새로 열어 **한 판에 23개 · 388 ms**(원격 DB · 연결당 14~22 ms)였다.
+   커넥션 재사용이 줄이는 것은 **연결 비용과 중복 조회**다.
+   `repository` 의 읽기 함수들도 같은 `conn` 을 받는다 (`get_current_logistics_read(conn=)`).
+
+   ⚠️ **커넥션 하나가 «모든 SELECT 가 같은 시점» 을 보장하지는 않는다.** `get_connection`
+      은 격리수준을 안 정해 PostgreSQL 기본값 `READ COMMITTED` 로 돈다 — 같은 트랜잭션
+      안이라도 SELECT 는 문장마다 새 스냅샷을 잡아, 사이에 다른 커밋이 있으면 두 조회가
+      다른 값을 볼 수 있다. 화면이 «같은 as_of» 로 서는 근거는 커넥션이 아니라 **각 SQL 의
+      `as_of` cutoff**(`historical_repository`)다. 조회 원자성이 필요하면 `REPEATABLE READ`
+      가 있어야 하고, 그것은 이 작업의 범위가 아니다.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
 from typing import Any, cast
@@ -61,9 +68,9 @@ from typing import Any, cast
 from psycopg import sql
 
 from app.logistics import arrival, historical_repository, outbound
-from app.logistics.db import get_connection, get_db_schema
+from app.logistics.db import get_db_schema
 from app.logistics.historical_repository import HistoricalAllocation, HistoricalLot
-from app.logistics.inbound_schedules import receivable_at
+from app.logistics.inbound_schedules import receivable_at, receivable_from
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
@@ -74,7 +81,6 @@ from app.logistics.outbound import (
 from app.logistics.repository import (
     LogisticsRead,
     get_active_logistics_policy,
-    get_active_logistics_runtime_fixture,
     get_current_logistics_read,
 )
 from app.logistics.schemas import (
@@ -82,7 +88,6 @@ from app.logistics.schemas import (
     ConsoleArrivalSummary,
     ConsoleCapacity,
     ConsoleFefoCandidate,
-    ConsoleFefoResponse,
     ConsoleInboundReceipt,
     ConsoleInboundResponse,
     ConsoleInTransitItem,
@@ -92,7 +97,6 @@ from app.logistics.schemas import (
     ConsoleOutboundResponse,
     ConsoleReservation,
     InventoryLogisticsSnapshot,
-    LogisticsRuntimeFixture,
 )
 from app.logistics.tools import build_inventory_by_item
 
@@ -108,24 +112,15 @@ from app.logistics.tools import build_inventory_by_item
 #:       `outbound.allocate_stock` · `ship_allocated_stock` · `release_reservation` ·
 #:       `warehouse.place_lot` 이고 그대로 있다 — 없앤 것은 감싼 껍질뿐이다.
 __all__ = [
+    "get_fefo_candidates_by_item",
     "get_inbound_console",
     "get_inventory_console",
     "get_outbound_console",
-    "get_reservation_fefo_console",
+    "load_console_runtime",
 ]
 
 
-# ── 커넥션 ──────────────────────────────────────────────────────────────
-
-
-@contextmanager
-def _read_connection() -> Iterator[Any]:
-    """읽기 전용 커넥션 하나. **commit 하지 않는다.**"""
-    conn = get_connection()
-    try:
-        yield conn
-    finally:
-        conn.close()
+# ── 공통 ────────────────────────────────────────────────────────────────
 
 
 def _rows(conn: Any, query: sql.Composed, params: Any = None) -> list[dict[str, Any]]:
@@ -278,32 +273,36 @@ def _console_lot(lot: HistoricalLot, names: dict[str, str]) -> ConsoleInventoryL
     )
 
 
-def _runtime_read_or_none(*, sim_run_id: str, as_of: date) -> LogisticsRead | None:
-    """그날의 Agent Runtime Snapshot. **없으면 `None` 이고 그것도 사실이다.**
+def load_console_runtime(*, conn: Any, sim_run_id: str, as_of: date) -> LogisticsRead | None:
+    """그날의 Agent Runtime 읽기 한 벌. **없으면 `None` 이고 그것도 사실이다.**
+
+    🔴 **한 화면에 한 번만 부른다** (2026-09-15). 종전에는 재고 콘솔이 `LogisticsRead`
+       를, 입고 콘솔이 fixture 를 **각자** 읽어 같은 `logistics_runtime_fixture` ·
+       `inbound_schedules` 질의가 한 요청에 두 번씩 나갔다 (일정 질의만 5번 · 421 ms).
+       이제 `build_result` 가 이 함수를 한 번 부르고 두 콘솔에 `runtime=` 으로 넘긴다 —
+       재고 콘솔은 Snapshot(판매가능량 축)을, 입고 콘솔은 `fixture`(운송 중 Header)와
+       `inbound_schedule_views`(도착 처리 대상)를 같은 한 벌에서 꺼낸다.
 
     🔴 **부재(`LookupError`)만 삼킨다.** 활성 fixture 가 둘인 무결성 위반
        (`ValueError`)은 그대로 올려 보낸다 — 깨진 데이터가 *"데이터를 주세요"* 로
        둔갑하면 안 된다 (`repository` 의 같은 규율).
 
     ★ 이 값이 없어도 **재고 수량은 답한다.** 수량 정본은 원장이고 fixture 가 아니다.
-      못 내는 것은 그 스냅샷의 확정 출고 축이 필요한 판매가능량뿐이다.
+      못 내는 것은 그 스냅샷의 확정 출고 축이 필요한 판매가능량과, 운송 중 목록뿐이다.
     """
     try:
-        return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id)
-    except LookupError:
-        return None
-
-
-def _runtime_fixture_or_none(*, sim_run_id: str, as_of: date) -> LogisticsRuntimeFixture | None:
-    """`_runtime_read_or_none` 과 같은 규율의 fixture 단독 조회."""
-    try:
-        return get_active_logistics_runtime_fixture(as_of=as_of, sim_run_id=sim_run_id)
+        return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id, conn=conn)
     except LookupError:
         return None
 
 
 def get_inventory_console(
-    *, sim_run_id: str, as_of: date, item_id: str | None = None
+    *,
+    conn: Any,
+    sim_run_id: str,
+    as_of: date,
+    runtime: LogisticsRead | None,
+    item_id: str | None = None,
 ) -> ConsoleInventoryResponse:
     """품목 카드 · Lot 목록 · 창고 kg Capacity 한 판. **기준일은 `as_of` 다.**
 
@@ -331,8 +330,11 @@ def get_inventory_console(
     ★ **보관정책이 없는 품목의 Lot 도 싣는다.** 종전 스냅샷 경로는
       `item_storage_policies` 를 `INNER JOIN` 해서 그런 Lot 을 통째로 떨어뜨렸다 —
       정책이 없다는 이유로 실물 재고를 조회에서 지우지 않는다.
+
+    :param runtime: `load_console_runtime` 이 그 `(sim_run_id, as_of)` 로 낸 한 벌.
+        `None` 은 그날 Runtime Snapshot 이 없다는 사실이다 — 여기서 다시 읽지 않는다.
     """
-    read = _runtime_read_or_none(sim_run_id=sim_run_id, as_of=as_of)
+    read = runtime
     policy = read.policy if read is not None else get_active_logistics_policy()
 
     inventory_by_item = None if read is None else build_inventory_by_item(read.snapshot)
@@ -348,11 +350,10 @@ def get_inventory_console(
         else {row.item: row.available_qty_kg for row in inventory_by_item}
     )
 
-    with _read_connection() as conn:
-        historical_lots = _historical_lots(conn, sim_run_id=sim_run_id, as_of=as_of)
-        names = _item_names(conn)
-        reservations = _reservation_totals_by_item(conn, sim_run_id=sim_run_id)
-        mvp_items = _mvp_item_ids(conn)
+    historical_lots = _historical_lots(conn, sim_run_id=sim_run_id, as_of=as_of)
+    names = _item_names(conn)
+    reservations = _reservation_totals_by_item(conn, sim_run_id=sim_run_id)
+    mvp_items = _mvp_item_ids(conn)
 
     # ★ 창고 점유는 **그날 실재한 모든 Lot** 의 합이다 — 화면 필터보다 앞선다.
     used_capacity = sum((lot.remaining_qty_kg for lot in historical_lots), start=Decimal(0))
@@ -463,7 +464,9 @@ def _inbound_receipts(conn: Any, *, sim_run_id: str, as_of: date) -> list[Consol
     ]
 
 
-def get_inbound_console(*, sim_run_id: str, as_of: date) -> ConsoleInboundResponse:
+def get_inbound_console(
+    *, conn: Any, sim_run_id: str, as_of: date, runtime: LogisticsRead | None
+) -> ConsoleInboundResponse:
     """운송 중 일정 · Receipt · 도착 자격 요약.
 
     ★ **운송 중 목록의 정본은 `inbound_schedules` 다 (W3-2).** fixture 는
@@ -484,20 +487,26 @@ def get_inbound_console(*, sim_run_id: str, as_of: date) -> ConsoleInboundRespon
     🔴 **fixture 가 없는 날도 답한다.** 종전에는 `LookupError` 가 그대로 올라가
        화면 전체가 예시값으로 떨어졌다. 운송 중을 모르는 것과 Receipt 를 모르는
        것은 다른 사실이므로, 앞은 `UNRESOLVED` 로 적고 뒤는 그대로 되살린다.
+
+    :param runtime: `load_console_runtime` 이 낸 한 벌. fixture(운송 중 Header)와
+        일정 views(도착 처리 대상)를 여기서 꺼내 쓴다 — **다시 읽지 않는다.**
+        `None` 은 그날 Runtime Snapshot 이 없다는 사실이다.
     """
-    fixture = _runtime_fixture_or_none(sim_run_id=sim_run_id, as_of=as_of)
+    fixture = None if runtime is None else runtime.fixture
     in_transit = None if fixture is None else fixture.in_transit
 
-    with _read_connection() as conn:
-        # ★ 도착 요약은 **받을 것이 남았나** 를 센다 — 운송 중 목록이 아니다.
-        #   fixture 가 없는 날(미확인)에는 그 판정도 세울 수 없어 `None` 을 넘긴다.
-        due_source = (
-            None
-            if fixture is None
-            else receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
-        )
-        selection = arrival.select_due_inbound(due_source, as_of=as_of)
-        receipts = _inbound_receipts(conn, sim_run_id=sim_run_id, as_of=as_of)
+    # ★ 도착 요약은 **받을 것이 남았나** 를 센다 — 운송 중 목록이 아니다.
+    #   fixture 가 없는 날(미확인)에는 그 판정도 세울 수 없어 `None` 을 넘긴다.
+    #   views 는 `runtime` 이 이미 읽은 것을 쓴다. 손수 만든 `LogisticsRead`(views
+    #   없음)만 종전처럼 표에서 다시 읽는다.
+    if fixture is None:
+        due_source = None
+    elif runtime is not None and runtime.inbound_schedule_views is not None:
+        due_source = receivable_from(runtime.inbound_schedule_views)
+    else:
+        due_source = receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+    selection = arrival.select_due_inbound(due_source, as_of=as_of)
+    receipts = _inbound_receipts(conn, sim_run_id=sim_run_id, as_of=as_of)
 
     return ConsoleInboundResponse(
         sim_run_id=sim_run_id,
@@ -560,7 +569,7 @@ def _console_allocation(allocation: HistoricalAllocation) -> ConsoleAllocation:
 
 
 def get_outbound_console(
-    *, sim_run_id: str, as_of: date, status: ReservationStatus | None = None
+    *, conn: Any, sim_run_id: str, as_of: date, status: ReservationStatus | None = None
 ) -> ConsoleOutboundResponse:
     """`as_of` 시점의 예약 목록과 그 아래 할당들. **네 조회와 같은 축이다.**
 
@@ -585,10 +594,9 @@ def get_outbound_console(
 
     ★ 0건이면 `reservations: []` 가 정상이다. 더미를 만들지 않는다.
     """
-    with _read_connection() as conn:
-        reservations = historical_repository.reservation_state_at(
-            conn, sim_run_id=sim_run_id, as_of=as_of
-        )
+    reservations = historical_repository.reservation_state_at(
+        conn, sim_run_id=sim_run_id, as_of=as_of
+    )
 
     return ConsoleOutboundResponse(
         sim_run_id=sim_run_id,
@@ -613,63 +621,30 @@ def get_outbound_console(
     )
 
 
-def _reservation_axis(conn: Any, *, reservation_id: str) -> dict[str, Any]:
-    """예약 하나의 실행 축과 잔여량. 🔴 **호출자가 sim_run_id 를 지어내지 않게 한다.**
+def get_fefo_candidates_by_item(
+    *, conn: Any, sim_run_id: str, item_ids: Iterable[str], as_of: date
+) -> dict[str, list[ConsoleFefoCandidate]]:
+    """품목별 FEFO 후보. 🔴 **추천만 한다 — 고르지도 쓰지도 않는다.**
 
-    🔴 **놓아준 예약의 남은 확보량은 0 이다 (WP-3 보정 2).** `release_reservation` 이
-       `reserved_qty_kg` 를 보존하게 되면서(과거 확보량을 안 지우려고) 그 값이 놓아준
-       뒤에도 남는다 — 여기서 그대로 빼면 FEFO 화면이 *"아직 60kg 붙일 수 있다"* 고
-       답한다. **잡고 있나는 `status` 가 답한다** (`_HOLDING_RESERVATION`).
+    ```text
+    후보 = outbound.recommend_fefo_candidates(conn, sim_run_id, item_id, as_of)   품목당 1회
+    ```
+
+    🔴 **예약마다 묻지 않는다** (2026-09-15). 후보는 예약과 무관한 함수다 — Lot 잔량에서
+       살아 있는 할당을 뺀 «물리 후보» 를 `(sim_run_id, item_id, as_of)` 만으로 내고, 정렬도
+       `turnover.fefo_sort_key` 하나다 (`outbound.recommend_fefo_candidates` · 잠금 없음 ·
+       쓰기 없음). 같은 품목의 예약 N 건에 N 번 물으면 같은 답을 N 번 받는다 — 종전에는
+       그 호출마다 커넥션까지 새로 열어 예약 164건에 8.6초가 걸렸다 (마스터 실측).
+       품목은 계약상 셋(`contracts.core.ITEMS`)이라 많아야 세 번이다.
+
+    ★ **`sim_run_id` 는 호출자가 지어내지 않는다.** 화면은 `get_outbound_console` 이
+      `reservation_state_at` 으로 이미 `r.sim_run_id = %(sim)s` 로 자른 그 축을 넘긴다 —
+      종전 `_reservation_axis` 가 예약 행에서 읽어 주던 값과 같은 값이다.
+
+    ★ 순서는 `item_id` 정렬이다 — 호출 순서가 결과를 바꾸지 않게.
     """
-    schema = _schema()
-    found = _rows(
-        conn,
-        sql.SQL(
-            """
-            SELECT r.reservation_id, r.sim_run_id, r.item_id, r.reserved_qty_kg,
-                   CASE WHEN r.status = ANY(%(holding_resv)s)
-                        THEN GREATEST(r.reserved_qty_kg - COALESCE(a.qty, 0), 0)
-                        ELSE 0 END
-                       AS remaining_reservation_qty_kg
-            FROM {schema}.inventory_reservations r
-            LEFT JOIN (
-                SELECT reservation_id, SUM(allocated_qty_kg) AS qty
-                FROM {schema}.inventory_allocations
-                WHERE status = ANY(%(assigned_alloc)s)
-                GROUP BY reservation_id
-            ) a ON a.reservation_id = r.reservation_id
-            WHERE r.reservation_id = %(reservation_id)s
-            """
-        ).format(schema=schema),
-        {
-            "reservation_id": reservation_id,
-            "assigned_alloc": sorted(_ASSIGNED_ALLOCATION),
-            "holding_resv": sorted(_HOLDING_RESERVATION),
-        },
-    )
-    if not found:
-        raise LookupError(f"없는 예약이다: {reservation_id!r}")
-    return found[0]
-
-
-def get_reservation_fefo_console(*, reservation_id: str, as_of: date) -> ConsoleFefoResponse:
-    """이 예약에 쓸 FEFO 후보. 🔴 **추천만 한다 — 고르지도 쓰지도 않는다.**
-
-    실행 축(`sim_run_id`)과 품목은 예약 행에서 읽는다. 호출자가 넘기게 하면
-    남의 실행 Lot 을 이 예약에 붙일 수 있다.
-    """
-    with _read_connection() as conn:
-        axis = _reservation_axis(conn, reservation_id=reservation_id)
-        candidates = outbound.recommend_fefo_candidates(
-            conn, sim_run_id=axis["sim_run_id"], item_id=axis["item_id"], as_of=as_of
-        )
-
-    return ConsoleFefoResponse(
-        reservation_id=reservation_id,
-        sim_run_id=axis["sim_run_id"],
-        item_id=axis["item_id"],
-        remaining_reservation_qty_kg=_decimal(axis["remaining_reservation_qty_kg"]),
-        candidates=[
+    return {
+        item_id: [
             ConsoleFefoCandidate(
                 lot_id=candidate.lot_id,
                 available_qty_kg=candidate.available_qty_kg,
@@ -677,8 +652,11 @@ def get_reservation_fefo_console(*, reservation_id: str, as_of: date) -> Console
                 received_at=candidate.received_at,
                 grade=candidate.grade,
             )
-            for candidate in candidates
-        ],
-    )
+            for candidate in outbound.recommend_fefo_candidates(
+                conn, sim_run_id=sim_run_id, item_id=item_id, as_of=as_of
+            )
+        ]
+        for item_id in sorted(set(item_ids))
+    }
 
 

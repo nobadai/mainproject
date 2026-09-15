@@ -412,7 +412,7 @@ def test_invalid_runtime_fixture_fails_closed(updates, message):
     with (
         patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
         patch("app.logistics.repository.fetch_all", return_value=[_fixture_row(**updates)]),
-        patch("app.logistics.repository._schedule_lists", return_value=([], [], [])),
+        patch("app.logistics.repository._schedule_lists", return_value=([], [], [], ())),
         pytest.raises((ValueError, ValidationError), match=message),
     ):
         get_active_logistics_runtime_fixture(
@@ -458,7 +458,7 @@ def test_runtime_fixture_carries_inbound_id_for_b1_validation():
         patch("app.logistics.repository.fetch_all", return_value=[_fixture_row()]),
         patch(
             "app.logistics.repository._schedule_lists",
-            return_value=([운송중], [미래점유], []),
+            return_value=([운송중], [미래점유], [], ()),
         ),
     ):
         fixture = get_active_logistics_runtime_fixture(as_of=date(2025, 12, 31))
@@ -470,6 +470,38 @@ def test_runtime_fixture_carries_inbound_id_for_b1_validation():
     # ★ 저장된 CONFIRMED_ZERO 를 읽어 쓰지 않는다 — 목록이 status 를 정한다.
     assert fixture.in_transit_status == "CONFIRMED"
     assert fixture.confirmed_inbound_status == "CONFIRMED"
+
+
+def test_runtime_read_carries_fixture_and_schedule_views():
+    """★ 읽기 한 벌이 fixture 와 일정 views 를 **같이** 든다 (2026-09-15).
+
+    화면(`console_service.load_console_runtime`)이 이 두 칸을 꺼내 써서 같은
+    `logistics_runtime_fixture` · `inbound_schedules` 질의를 한 판에 두 번 안 보낸다.
+    """
+    from app.logistics.repository import get_current_logistics_read
+
+    views = ("VIEW-1", "VIEW-2")  # 여기서는 «같은 객체가 그대로 실리나» 만 본다
+    with (
+        patch("app.logistics.repository.get_db_schema", return_value="configured_schema"),
+        patch(
+            "app.logistics.repository.fetch_all",
+            side_effect=[
+                [_fixture_row()],
+                _policy_rows(),
+                _inventory_rows(),
+                _storage_policy_rows(),
+                *_COMMITMENT_ROWS,
+            ],
+        ),
+        patch("app.logistics.repository._schedule_lists", return_value=([], [], [], views)),
+        patch("app.logistics.repository._delivery_route", return_value=(None, False)),
+    ):
+        read = get_current_logistics_read(as_of=date(2025, 12, 31))
+
+    assert read.fixture is not None
+    assert read.fixture.as_of == date(2025, 12, 31)
+    assert read.fixture.in_transit_status == "CONFIRMED_ZERO"
+    assert read.inbound_schedule_views is views
 
 
 def test_runtime_snapshot_combines_fixture_direct_lots_and_policy():

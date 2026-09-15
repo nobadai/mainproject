@@ -124,6 +124,8 @@ def _물류_대역(monkeypatch) -> list[tuple[str, str]]:
     monkeypatch.setattr(logistics_query, "runtime_coverage_at", 기록("coverage", 열림))
     monkeypatch.setattr(logistics_query, "onhand_total_by_day", 기록("onhand", {}))
     monkeypatch.setattr(logistics_query, "snapshot_days_between", 기록("days", set()))
+    #  ★ Runtime 읽기는 **한 판에 한 번** 이고 두 콘솔이 나눠 쓴다 (2026-09-15).
+    monkeypatch.setattr(logistics_query, "load_console_runtime", 기록("runtime", None))
     monkeypatch.setattr(
         logistics_query, "get_inbound_console", 기록("inbound", SimpleNamespace(in_transit=[]))
     )
@@ -145,6 +147,7 @@ def test_물류_build_가_보는_실행을_넘기고_출처에_적는다(monkeyp
     names = [name for name, _ in 잡은]
     assert names == [
         "coverage",
+        "runtime",
         "inventory",
         "inbound",
         "outbound",
@@ -159,7 +162,7 @@ def test_물류_재고그래프가_보는_실행을_넘긴다(monkeypatch):
     잡은 = _물류_대역(monkeypatch)
     logistics_query.dashboard_stock(10, 5, AS_OF)
     names = [name for name, _ in 잡은]
-    assert names == ["coverage", "onhand", "days", "inbound"]
+    assert names == ["coverage", "onhand", "days", "runtime", "inbound"]
     assert {run for _, run in 잡은} == {SHOWN_SIM_RUN_ID}
 
 
