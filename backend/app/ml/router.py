@@ -12,7 +12,12 @@
   되살리려면 아래 `# ` 를 지우면 됩니다.
 """
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Query
+
+from app.ml.qa_graph import answer as qa_answer
+from app.ml.qa_schemas import QaAnswer, QaRequest
 
 # from datetime import date
 # from typing import Annotated
@@ -83,3 +88,44 @@ router = APIRouter(prefix="/ml", tags=["ml"])
 #         raise HTTPException(
 #             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
 #         ) from error
+
+
+@router.post(
+    "/qa",
+    response_model=QaAnswer,
+    summary="예측 질의응답",
+    description=(
+        "값을 말로 묻고 마크다운으로 받는다. 읽기만 한다 — 예측을 새로 만들지 않고 "
+        "어떤 표에도 쓰지 않는다. 부르는 법은 두 가지다: item·kind·dates 를 직접 주면 "
+        "규칙 경로가 끝까지 돌고, question 만 주면 LLM 해석 자리로 간다(아직 안 붙여 "
+        "LLM_UNAVAILABLE 을 돌려준다 — 지어내지 않는다). status 가 OK 가 아니어도 "
+        "markdown 은 항상 찬다."
+    ),
+)
+def ask(request: QaRequest) -> QaAnswer:
+    """질문 하나를 받아 마크다운 한 덩어리와 출처(meta)를 돌려준다."""
+    return qa_answer(request)
+
+
+@router.get(
+    "/qa",
+    response_model=QaAnswer,
+    summary="예측 질의응답 — 질문 한 칸",
+    description=(
+        "말로 묻고 마크다운으로 받는다. 넣을 것은 질문 하나뿐이다. "
+        "읽기만 한다 — 예측을 새로 만들지 않고 어떤 표에도 쓰지 않는다. "
+        "예: 내일 배추 경락가 얼마야? · 오늘하고 10일 뒤 무 소매가 알려줘"
+    ),
+)
+def ask_simple(
+    q: Annotated[
+        str,
+        Query(
+            description="질문 그대로",
+            examples=["내일 배추 경락가 얼마야?"],
+            min_length=2,
+        ),
+    ],
+) -> QaAnswer:
+    """질문 한 칸짜리 입구. 값으로 직접 지정하려면 POST 를 쓴다."""
+    return qa_answer(QaRequest(question=q))
