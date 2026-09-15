@@ -243,7 +243,10 @@ def test_재무_요청일과_실제_state_날짜를_구분한다(monkeypatch):
     assert body["requested_as_of"] == "2026-01-20"
     assert body["state_as_of"] == "2026-01-18"
     assert body["latest_closing_as_of"] == "2026-01-15"
-    assert "선택한 날짜의 재무 상태가 없어 2026-01-18 최신 재무 상태를 표시합니다" in body["read_only"]["text"]
+    assert (
+        "선택한 날짜의 재무 상태가 없어 2026-01-18 최신 재무 상태를 표시합니다"
+        in body["read_only"]["text"]
+    )
     assert "최근 일마감 2026-01-15" in body["read_only"]["text"]
 
 
