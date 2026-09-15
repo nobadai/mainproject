@@ -18,8 +18,11 @@ import { useState, useSyncExternalStore } from "react";
 import { Panel } from "@/components/console/Blocks";
 import {
   capabilityText,
+  collectionNeedText,
   itemText,
+  longDate,
   moneyWon,
+  paymentTermText,
   percentPoint,
   salesReasonText,
   toNumber,
@@ -264,9 +267,7 @@ function ProposalCard({
           />
           <Line
             label="납품 · 결제"
-            value={`${row.delivery_date ?? "날짜 미정"} · ${
-              row.payment_days === null ? "결제일수 미정" : `${row.payment_days}일`
-            }`}
+            value={`${row.delivery_date ?? "날짜 미정"} · ${paymentTermText(row.payment_days)}`}
           />
           {aim && <Line label="노리는 것" value={aim} />}
         </dl>
@@ -360,16 +361,59 @@ function FinanceReason({ row }: { row: SalesProposal }) {
           </span>
         </li>
       )}
-      {toNumber(row.projected_partner_ar_krw) !== null && (
-        <li className="flex gap-2 text-ink2">
-          <i aria-hidden>·</i>
-          <span className="min-w-0 flex-1">
-            성사 후 거래처 미수 {moneyWon(row.projected_partner_ar_krw)} · 여신한도{" "}
-            {moneyWon(row.credit_limit_krw)}
-          </span>
-        </li>
-      )}
+      <CreditFacts row={row} />
     </Section>
+  );
+}
+
+/**
+ * 이 판매가 거래처 여신에 주는 영향.
+ *
+ * 🔴 **화면이 여신을 세지 않는다.** 한도·미수·남은 여신·판매 후 미수·선회수 필요액은 전부
+ *    재무가 이 안을 검토하며 센 값이다. 없으면 적지 않는다 — 0 으로 채우지 않는다.
+ *
+ * 🔴 **선회수 필요액은 안내다.** 이 화면이 미수를 줄이거나 가격·수량을 바꾸지 않는다.
+ */
+function CreditFacts({ row }: { row: SalesProposal }) {
+  if (toNumber(row.credit_limit_krw) === null && toNumber(row.current_partner_ar_krw) === null) {
+    return null;
+  }
+  const required = toNumber(row.required_collection_before_sale_krw);
+  const lines: [string, string][] = [
+    ["여신 한도", moneyWon(row.credit_limit_krw)],
+    ["현재 미수금", moneyWon(row.current_partner_ar_krw)],
+    ["남은 여신", moneyWon(row.available_credit_krw)],
+    ["이번 판매", moneyWon(row.reported_sales_amount_krw)],
+    ["판매 후 예상 미수금", moneyWon(row.projected_partner_ar_krw)],
+  ];
+  return (
+    <li className="mt-1 flex flex-col gap-1.5 rounded-lg border px-3 py-2" style={{ borderColor: "var(--color-hair)" }}>
+      <b className="text-[12px]">거래처 여신</b>
+      <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
+        {lines.map(([name, value]) => (
+          <div key={name} className="contents">
+            <dt className="text-ink2">{name}</dt>
+            <dd className="m-0 text-right tabular-nums">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <span
+        className="text-[12px]"
+        style={{ color: required !== null && required > 0 ? "var(--color-t-warn)" : "var(--color-t-good)" }}
+      >
+        {required !== null && required > 0 ? "현재 조건으로는 바로 판매하기 어렵습니다. " : ""}
+        {collectionNeedText(row.required_collection_before_sale_krw)}
+      </span>
+      {required !== null && required > 0 && (
+        <span className="text-[11.5px] text-ink2">
+          {row.expected_credit_recovery_date
+            ? `예상 여신 회복일 ${longDate(row.expected_credit_recovery_date)} — 계약상 결제 예정일을 기준으로 한 예상입니다.`
+            : //  ⚠️ «모이지 않는다» 로 단정하지 않는다. 이 칸이 생기기 전에 저장된 판정에는
+              //    회복일 자체가 없고, 그 경우와 «예정 채권으로 못 채움» 을 화면이 가를 수 없다.
+              "예상 여신 회복일을 알려 줄 수금 예정 정보가 없습니다."}
+        </span>
+      )}
+    </li>
   );
 }
 

@@ -11,6 +11,7 @@ from app.finance.sales_validation import (
     OPEN_RECEIVABLE_STATUSES,
     ConditionalSupplyCostBasis,
     InventoryCostBasis,
+    OpenReceivableDue,
     PartnerReceivable,
     PartnerReceivableFacts,
     SalesCostBasis,
@@ -720,6 +721,13 @@ def summarize_partner_receivables(
         raise ValueError("partner_id must not be blank")
     open_items = [item for item in receivables if item.status in OPEN_RECEIVABLE_STATUSES]
     overdue_items = [item for item in open_items if item.due_date < as_of]
+    schedule = tuple(
+        OpenReceivableDue(
+            due_date=item.due_date, outstanding_amount_krw=item.outstanding_amount_krw
+        )
+        for item in sorted(open_items, key=lambda item: (item.due_date, item.receivable_id))
+        if item.outstanding_amount_krw > 0
+    )
     return PartnerReceivableFacts(
         partner_id=partner_id,
         as_of=as_of,
@@ -730,7 +738,60 @@ def summarize_partner_receivables(
         open_receivable_count=len(open_items),
         overdue_receivable_count=len(overdue_items),
         source_refs=tuple(item.source_ref for item in open_items),
+        open_receivable_schedule=schedule,
     )
+
+
+def calculate_credit_utilization_rate(
+    *,
+    current_partner_ar_krw: Decimal,
+    credit_limit_krw: Decimal,
+) -> Decimal | None:
+    """여신 사용률 = 현재 거래처 채권 ÷ 여신한도.
+
+    🔴 **한도가 0원이면 `None` 이다.** 0원 한도는 사실이지만 그 위의 사용률은 정의되지
+       않는다 — 0 이나 100% 를 지어내면 «여유가 있다» 나 «꽉 찼다» 로 읽힌다.
+       판정은 이 값을 쓰지 않는다. 한도 초과 판정은 `required_collection_before_sale`
+       와 여신 규칙이 이미 한다.
+    """
+    if credit_limit_krw < 0:
+        raise ValueError("credit_limit_krw must not be negative")
+    if current_partner_ar_krw < 0:
+        raise ValueError("current_partner_ar_krw must not be negative")
+    if credit_limit_krw == 0:
+        return None
+    return current_partner_ar_krw / credit_limit_krw
+
+
+def estimate_credit_recovery_date(
+    *,
+    as_of: date,
+    schedule: Sequence[OpenReceivableDue],
+    required_collection_krw: Decimal,
+) -> date | None:
+    """필요 회수액이 **계약상 결제 예정대로 들어온다면** 모이는 가장 이른 날.
+
+    ```text
+    필요 회수액 0        → None   (회수할 것이 없다 — 판정 쪽 0원이 그 사실을 말한다)
+    예정일 순 누적 ≥ 필요 → 그 채권의 예정일 (이미 지난 예정일이면 기준일)
+    끝까지 모자람         → None   (예정 채권만으로는 여신이 안 풀린다)
+    ```
+
+    🔴 **입금 보장일이 아니다.** 연체된 채권은 예정일이 지났어도 안 들어올 수 있다 —
+       그래서 지난 날짜를 그대로 적지 않고 기준일로 올린다 («이미 풀렸어야 한다» 가
+       아니라 «지금 받으면 풀린다» 로 읽히게).
+    🔴 **판정에 쓰지 않는다.** 정보성 값이다.
+    """
+    if required_collection_krw < 0:
+        raise ValueError("required_collection_krw must not be negative")
+    if required_collection_krw == 0:
+        return None
+    collected = Decimal(0)
+    for due in sorted(schedule, key=lambda entry: entry.due_date):
+        collected += due.outstanding_amount_krw
+        if collected >= required_collection_krw:
+            return max(due.due_date, as_of)
+    return None
 
 
 def calculate_available_credit(

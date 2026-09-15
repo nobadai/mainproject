@@ -44,6 +44,7 @@ import {
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
 import { AgingBars } from "./AgingBars";
+import { CreditPanel } from "./CreditPanel";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
 import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
@@ -248,6 +249,9 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
           </>
         )}
       </Panel>
+
+      {/* ★ 판매 전에 묻는 질문 — «얼마까지 더 팔 수 있나» 에 답하는 자리다. */}
+      <CreditPanel simRun={simRun} asOf={asOf} />
 
       <AgentCard state={latest} />
     </>
@@ -563,6 +567,7 @@ function Receivables({ simRun, asOf }: { simRun: string; asOf: string }) {
   const done = data.rows.filter((row) => (toNumber(row.outstanding_amount_krw) ?? 0) <= 0);
   return (
     <>
+      <CreditPanel simRun={simRun} asOf={asOf} />
       <Panel title="받을 돈" subtitle="연체 구간은 백엔드 규칙입니다 — 화면이 다시 나누지 않습니다">
         <Metrics>
           <Metric label="정상" value={moneyWon(data.summary.current_krw)} />

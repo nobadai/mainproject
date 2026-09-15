@@ -239,6 +239,15 @@ class PartnerReceivable(BaseModel):
         return _reject_boolean(value)
 
 
+class OpenReceivableDue(BaseModel):
+    """미회수 채권 1건의 **계약상 결제 예정일과 남은 금액.** 수금 예정이지 수금이 아니다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    due_date: date
+    outstanding_amount_krw: Decimal = Field(ge=0)
+
+
 class PartnerReceivableFacts(BaseModel):
     """거래처 채권 집계 — **사실만이다.** 위험도 점수도, 판정도 들어있지 않다."""
 
@@ -251,6 +260,14 @@ class PartnerReceivableFacts(BaseModel):
     open_receivable_count: int = Field(ge=0)
     overdue_receivable_count: int = Field(ge=0)
     source_refs: tuple[str, ...] = ()
+    #: 미회수 채권의 결제 예정 일정. 결제 예정일 순이다.
+    #:
+    #: ★ **여신이 언제 풀릴지를 말하려면 금액 합계만으로는 모자란다.** 같은 800만원도
+    #:   내일 받을 돈인지 한 달 뒤 받을 돈인지에 따라 다음 판매가 달라진다.
+    #:
+    #: 🔴 **예정이지 사실이 아니다.** 여기서 채권을 줄이거나 현금을 늘리지 않는다 —
+    #:    실제 감소는 수금 사건으로만 일어난다.
+    open_receivable_schedule: tuple[OpenReceivableDue, ...] = ()
 
 
 class ReceivableCreateInput(BaseModel):
@@ -356,6 +373,13 @@ class SalesFinancialSummary(BaseModel):
     credit_limit_krw: Decimal | None = None
     available_credit_krw: Decimal | None = None
     required_collection_before_sale_krw: Decimal | None = None
+    #: 현재 미수금 ÷ 여신한도. **표시용 사실이다 — 판정에 쓰지 않는다.**
+    #: 한도가 없거나 0원이면 나눌 수 없으므로 `None` 이다 (0 이 아니다).
+    credit_utilization_rate: Decimal | None = None
+    #: 판매 전 회수가 필요할 때, 계약상 결제 예정일 기준으로 그 금액이 모일 것으로 보이는
+    #: 가장 이른 날. **입금 보장일이 아니다.** 회수가 필요 없거나(0원) 예정 채권으로
+    #: 채울 수 없으면 `None` 이다 — 두 경우는 `required_collection_before_sale_krw` 로 가른다.
+    expected_credit_recovery_date: date | None = None
     overdue_ar_krw: Decimal | None = None
     base_projected_cash_min: Decimal | None = None
     scenario_projected_cash_min: Decimal | None = None

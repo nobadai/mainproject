@@ -216,7 +216,10 @@ export function itemText(
 ): string {
   if (itemName) return itemName;
   if (!itemId) return "품목 미상";
-  return ITEM_NAMES[itemId] ?? itemId;
+  if (ITEM_NAMES[itemId]) return ITEM_NAMES[itemId];
+  //  🔴 모르는 **내부 품목 코드**만 가린다 — `ITEM-…` 이 사용자 이름처럼 보이면 안 된다.
+  //     판매안처럼 이미 사람이 읽는 이름(`배추`)이 오는 자리는 그대로 둔다.
+  return /^ITEM-/i.test(itemId) ? "등록되지 않은 품목" : itemId;
 }
 
 /**
@@ -249,7 +252,7 @@ const SALES_REASONS: Record<string, string> = {
   SALES_MARGIN_BELOW_MINIMUM: "기여이익률이 최소선에 못 미칩니다",
   SALES_MARGIN_BELOW_WARNING: "기여이익률이 경고선 아래입니다",
   SALES_MARGIN_RATE_UNCOMPUTABLE: "원가를 몰라 기여이익률을 계산하지 못했습니다",
-  SALES_CREDIT_LIMIT_EXCEEDED: "이 건을 실으면 거래처 여신한도를 넘습니다",
+  SALES_CREDIT_LIMIT_EXCEEDED: "거래처 여신 한도를 초과합니다",
   SALES_AMOUNT_MISMATCH: "제안한 매출액과 다시 계산한 금액이 다릅니다",
   SALES_PAYMENT_TERM_EXCEEDS_LIMIT: "결제일수가 허용 범위를 넘습니다",
   SALES_PAYMENT_TERM_TYPE_UNSUPPORTED: "지원하지 않는 결제 방식입니다",
@@ -276,4 +279,57 @@ const CAPABILITIES: Record<string, string> = {
 
 export function capabilityText(code: string): string {
   return CAPABILITIES[code] ?? "필요한 확인";
+}
+
+/* ── 여신 · 결제 조건 문구 ──────────────────────────────────────────────── */
+
+/**
+ * 0~1 비율을 퍼센트로 **적기만** 한다. 비율 자체는 백엔드가 센 값이다.
+ *
+ * ⚠️ `percentPoint` 와 계약이 다르다 — 그쪽은 이미 100 을 곱한 값을 받는다.
+ */
+export function ratioPercent(value: string | number | null | undefined): string {
+  const parsed = toNumber(value);
+  if (parsed === null) return "데이터 없음";
+  return `${(parsed * 100).toFixed(1)}%`;
+}
+
+/** `2026-01-15` → `2026년 1월 15일`. */
+export function longDate(iso: string | null | undefined): string {
+  if (!iso) return "날짜 없음";
+  const parts = iso.split("-");
+  if (parts.length !== 3) return iso;
+  return `${Number(parts[0])}년 ${Number(parts[1])}월 ${Number(parts[2])}일`;
+}
+
+/**
+ * 결제 조건 한 줄. 🔴 **0일은 «당일 결제» 라는 정해진 조건이고, `null` 은 모름이다.**
+ */
+export function paymentTermText(days: number | null | undefined): string {
+  if (days === null || days === undefined) return "결제 조건 미정";
+  if (days === 0) return "판매 당일 결제";
+  return `판매 후 ${days}일 내 결제 예정`;
+}
+
+/**
+ * 판매 전에 먼저 받아야 하는 미수금. **백엔드가 센 값을 문장으로만 옮긴다.**
+ *
+ * 🔴 **0 은 «추가 회수 필요 없음» 이고 `null` 은 «판단할 정보 없음» 이다.** 둘을 같게
+ *    적으면 여신 정보가 없는 거래처가 «바로 팔 수 있다» 로 읽힌다.
+ */
+export function collectionNeedText(required: string | number | null | undefined): string {
+  const parsed = toNumber(required);
+  if (parsed === null) return "여신 정보가 없어 선회수 필요 여부를 판단하지 못했습니다.";
+  if (parsed <= 0) return "추가 회수 필요 없음 — 현재 여신 범위에서 판매할 수 있습니다.";
+  return `기존 미수금 ${moneyWon(required)}을 먼저 회수하면 현재 여신한도 안에서 판매할 수 있습니다.`;
+}
+
+/** 여신 한도가 어떤 성격의 값인지. 모르는 등급은 원문을 적지 않는다. */
+const CREDIT_GRADE: Record<string, string> = {
+  SIM_FIXED: "시뮬레이션 고정 한도",
+  CONTRACT: "계약 한도",
+};
+
+export function creditGradeText(value: string | null | undefined): string {
+  return label(CREDIT_GRADE, value, "한도 근거 미상");
 }
