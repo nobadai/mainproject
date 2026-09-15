@@ -100,7 +100,7 @@ CREATE TABLE {TMP_SCHEMA}.partners (partner_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.sim_runs (sim_run_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.purchase_items (
     purchase_item_id text PRIMARY KEY, purchase_id text, item_id text);
-CREATE TABLE {TMP_SCHEMA}.sales (sale_id text PRIMARY KEY, sale_date date);
+CREATE TABLE {TMP_SCHEMA}.sales (sale_id text PRIMARY KEY, sale_date date, order_date date);
 CREATE TABLE {TMP_SCHEMA}.sale_items (sale_item_id text PRIMARY KEY);
 """
 
@@ -254,6 +254,9 @@ def _reservation_row(
     item_id: str = BAECHU,
     sale_id: str = "SALE-1",
     sale_date: date,
+    #: 판매 확정일 = 예약이 장부에 선 날 (`sales.order_date`). 🔴 **존재 축은 이것이다.**
+    #: 안 주면 납품일과 같게 둔다 — 그날 확정·그날 납품이라 종전 검사의 뜻이 안 바뀐다.
+    order_date: date | None = None,
     required: str = "400",
     reserved: str = "400",
     due: date | None = None,
@@ -262,9 +265,9 @@ def _reservation_row(
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            f"INSERT INTO {TMP_SCHEMA}.sales VALUES (%s, %s)"
-            " ON CONFLICT (sale_id) DO NOTHING",
-            (sale_id, sale_date),
+            f"INSERT INTO {TMP_SCHEMA}.sales (sale_id, sale_date, order_date)"
+            " VALUES (%s, %s, %s) ON CONFLICT (sale_id) DO NOTHING",
+            (sale_id, sale_date, sale_date if order_date is None else order_date),
         )
         cur.execute(
             f"""INSERT INTO {TMP_SCHEMA}.inventory_reservations (
@@ -611,10 +614,14 @@ def test_another_runs_schedule_never_shapes_this_runs_observed_at(
     assert result.observed_as_of == D1
 
 
-def test_reservation_is_invisible_before_its_sale_date(conn: psycopg.Connection) -> None:
-    """존재 축은 `sales.sale_date` 다 — 미래 납품 예약이 과거 조회에 나오면 실패."""
+def test_reservation_is_invisible_before_its_order_date(conn: psycopg.Connection) -> None:
+    """존재 축은 `sales.order_date`(확정일) 다 — 아직 확정 안 된 예약이 과거 조회에 나오면 실패.
+
+    ⚠️ 종전 이름은 `…before_its_sale_date` 였다. 여기서는 확정일 = 납품일(D10) 이라
+       뜻이 같고, 확정일과 납품일이 갈리는 판은 아래 검사가 본다.
+    """
     _moved_lot(conn)
-    _reservation_row(conn, sale_date=D10, due=D10)
+    _reservation_row(conn, sale_date=D10, order_date=D10, due=D10)
     _allocation_row(conn, decided_on=D10)
 
     at_d5 = get_sales_commitments(conn, sim_run_id=SIM, as_of=D5, item_id=BAECHU)
@@ -623,6 +630,56 @@ def test_reservation_is_invisible_before_its_sale_date(conn: psycopg.Connection)
     assert at_d5.live_reservations == ()
     assert [one.reservation_id for one in at_d10.live_reservations] == ["RSV-1"]
     assert at_d10.next_due_date == D10
+
+
+def test_reservation_confirmed_earlier_shows_from_its_order_date(
+    conn: psycopg.Connection,
+) -> None:
+    """🔴 **이 판의 핵심.** 확정일 D8 · 납품일 D10 — **D8 화면에 이미 있어야 한다.**
+
+    ```text
+    D7   아직 확정 전            → 예약 없음
+    D8   확정 · 예약이 선다       → 예약 보임 · 납품일은 그대로 D10
+    D10  납품일                  → 그대로 보임
+    ```
+
+    종전 규칙(`sale_date <= as_of`)은 이 예약을 D10 부터 보였다. 그 이틀 동안 Runtime 은
+    이미 그 몫을 잡고 있었으니(`outbound.item_free_stock_qty` 의 미할당 예약) 같은 화면의
+    예약 목록과 판매가능량이 서로 다른 날을 가리켰다.
+    """
+    _moved_lot(conn)
+    _reservation_row(conn, sale_date=D10, order_date=D8, due=D10)
+
+    at_d7 = get_sales_commitments(conn, sim_run_id=SIM, as_of=D7, item_id=BAECHU)
+    at_d8 = get_sales_commitments(conn, sim_run_id=SIM, as_of=D8, item_id=BAECHU)
+    at_d10 = get_sales_commitments(conn, sim_run_id=SIM, as_of=D10, item_id=BAECHU)
+
+    assert at_d7.live_reservations == (), "확정 전날인데 예약이 보인다"
+    assert [one.reservation_id for one in at_d8.live_reservations] == ["RSV-1"]
+    assert at_d8.next_due_date == D10, "납품일은 그대로 판매가 준 값이다"
+    #  ★ 존재일을 앞당긴 것이지 뒤를 자른 것이 아니다.
+    assert [one.reservation_id for one in at_d10.live_reservations] == ["RSV-1"]
+
+
+def test_released_reservation_still_drops_out_when_confirmed_earlier(
+    conn: psycopg.Connection,
+) -> None:
+    """⚠️ 소멸 축(`released_as_of`)은 안 건드렸다 — 존재를 옮겨도 그대로여야 한다.
+
+    ```text
+    확정 D1 · 납품 D10 · 놓아준 날 D7
+      D5  살아 있다        (확정 뒤 · 놓아주기 전)
+      D7  빠진다           (놓아준 날부터)
+    ```
+    """
+    _moved_lot(conn)
+    _reservation_row(conn, sale_date=D10, order_date=D1, due=D10, released=D7)
+
+    before = get_sales_commitments(conn, sim_run_id=SIM, as_of=D5, item_id=BAECHU)
+    after = get_sales_commitments(conn, sim_run_id=SIM, as_of=D7, item_id=BAECHU)
+
+    assert [one.reservation_id for one in before.live_reservations] == ["RSV-1"]
+    assert after.live_reservations == (), "놓아준 날부터 빠져야 한다"
 
 
 def test_released_reservation_drops_out_from_its_release_date(conn: psycopg.Connection) -> None:

@@ -10,7 +10,6 @@ from fastapi import FastAPI
 
 from app.api.router import router as screen_router
 from app.finance.router import router as finance_router
-from app.logistics.router import router as logistics_router
 from app.master.bootstrap import wire_registries
 from app.master.critic.router import router as critic_router
 from app.master.router import router as master_router
@@ -30,7 +29,13 @@ app.include_router(ml_router)
 # 재학습·에이전트는 학습 꾸러미가 있는 곳에서만 돌 수 있다.
 app.include_router(ml_console_router)
 app.include_router(finance_router)
-app.include_router(logistics_router)
+# 🔴 **물류에는 자기 HTTP 라우터가 없다** (2026-09-15). 종전 `/logistics/…` 16 경로는
+#    화면도 마스터도 안 불렀다 — 화면은 `/api/logistics`(`app/api/logistics/routes.py`)를
+#    치고, 마스터는 `app/logistics/adapter.logistics_port` 를 **파이썬으로** 부른다
+#    (`master/bootstrap.py` 의 `register_agent("inventory", logistics_port)`).
+#
+#    ⚠️ 같은 콘솔 조회가 두 주소로 나가면 어느 쪽이 정본인지 갈린다. 물류 HTTP 경계는
+#       `app/api/logistics` 하나다.
 app.include_router(master_router)
 
 # ── 등록소를 채운다 ────────────────────────────────────────────────────
