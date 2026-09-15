@@ -122,7 +122,7 @@ from app.contracts.sales_logistics import (
 )
 from app.finance.db import get_connection, get_db_schema
 from app.logistics.fefo_allocation import allocate_reserved_stock_fefo
-from app.logistics.outbound import ship_allocated_stock
+from app.logistics.outbound import release_reservation, ship_allocated_stock
 from app.logistics.sales_outbound import reserve_confirmed_sale_available
 from app.master.sim_time import SimPhase, phase_instant
 from app.sales.persistence import mark_sale_delivered
@@ -325,9 +325,13 @@ def fully_shipped_sales(results: Sequence[SaleItemOutcome]) -> tuple[str, ...]:
       나머지 40kg 이 영원히 안 나간다. **상태는 `RAN` 그대로 둔다** — 단계를 탄 것은
       사실이고, 부족한 것은 완납이 아니라는 사실뿐이다.
 
-    ★ 부분 출고된 판매는 `DELIVERED` 가 안 되고 다음 날
-      `order_status IN ('CONFIRMED','READY')` 필터에 **다시 잡혀** 나머지를 시도한다.
-      의도한 동작이다 (`reserve_available_stock` 의 top-up 이 그것을 받는다).
+    🔴 **부분 출고된 판매를 다음 날 다시 잡지 않는다** — 재출고(backorder)는 MVP 밖이다
+       (07 확정 구현결정서 §6 «부분출고: 재출고 없음» · §15 DEFER). `due_sale_items` 가
+       `sale_date = as_of` 로 그날 판매만 읽는 것이 그 정책이고, 미충족 몫은 예약의
+       미할당량으로 **보이게 남는다.** 그 어휘(부분 납품 `order_status`)는 판매 소유다.
+       ⚠️ 종전 주석은 «다음 날 다시 잡혀 나머지를 시도한다» 고 적었다 — 문서와 어긋난
+          낡은 문장이었고, 그 전제로 `sale_date <= as_of` 를 검토하면 WP-3 의
+          «예약이 선 날 = sale_date» 복원이 깨진다 (2026-09-15).
 
     ★ 순서를 지킨다. 먼저 나온 판매가 먼저다 — 같은 날을 두 번 돌려도 목록이 같다.
     """
@@ -359,8 +363,11 @@ def ship_due_sales(
     allocate_fn: Callable[..., Any] = allocate_reserved_stock_fefo,
     ship_fn: Callable[..., Any] = ship_allocated_stock,
     deliver_fn: Callable[..., Any] = mark_sale_delivered,
+    release_fn: Callable[..., Any] = release_reservation,
 ) -> OutboundOut:
     """`as_of` 에 나갈 판매를 **순서대로 내보낸다. Lot 은 안 고른다.**
+
+    :param release_fn: 할당이 터진 예약을 **그날 놓아주는** 자리 (`_ship_one` 참조).
 
     ★ **`receive_arrivals` · `collect_receipts` 와 같은 모양이다** — `as_of` 하나를
       받고, 예외를 밖으로 안 내고, 상태를 값으로 돌려준다.
@@ -413,6 +420,7 @@ def ship_due_sales(
                     reserve_fn=reserve_fn,
                     allocate_fn=allocate_fn,
                     ship_fn=ship_fn,
+                    release_fn=release_fn,
                 )
             )
 
@@ -447,6 +455,7 @@ def _ship_one(
     reserve_fn: Callable[..., Any],
     allocate_fn: Callable[..., Any],
     ship_fn: Callable[..., Any],
+    release_fn: Callable[..., Any] = release_reservation,
 ) -> SaleItemOutcome:
     """판매 품목 하나를 예약 → 할당 → 출고까지 태운다.
 
@@ -454,10 +463,22 @@ def _ship_one(
        *"어느 Lot 에서 뺄지 정했다"* 는 사실이 사라진다 — 출고가 실패한 것과 할당이
        없던 것은 다른 사실이다.
 
-    ★ **되돌리는 함수를 안 부른다.** `cancel_allocation` 은 이 파일에 임포트조차
+    ★ **할당을 되돌리는 함수는 안 부른다.** `cancel_allocation` 은 이 파일에 임포트조차
       없다 — 할당을 물리는 것은 물류의 판단이지 출고 실패의 자동 결과가 아니다.
+
+    🔴 **예약 뒤 커밋이 하나 더 있어서, 할당이 터지면 예약만 남는다.** 그 예약은
+       `sale_date == as_of` 라 다음 날 다시 안 잡히고(`due_sale_items`), 놓아주는 길도
+       없어 **영원히 그 품목의 가용재고를 잡는다** — REH-0914 실측 7건 · 6,436kg 이
+       판매가능량을 0 으로 깔았다 (2026-09-15). 그래서 **할당이 안 선 예약은 그날
+       놓아준다** (`release_fn` · `released_as_of = as_of`). WP-3 는 `released_as_of`
+       로 «그날 있다가 사라진 예약» 을 그대로 되살리므로 과거 장부가 안 어긋난다.
+
+       ⚠️ **출고가 터진 것은 안 놓아준다.** 할당이 서 있으면 재실행이 멱등하게 이어
+          나간다 — 놓아주면 그 할당까지 `CANCELLED` 로 내려간다.
     """
     reservation_id = reservation_id_for_sale_item(row.sale_item_id)
+    예약_섰다 = False
+    할당_섰다 = False
     try:
         reserved = reserve_fn(
             conn,
@@ -474,6 +495,8 @@ def _ship_one(
             ),
         )
         conn.commit()
+        # ★ 확보량을 못 읽은 것(None)도 «섰다» 로 본다 — 행이 있을 수 있어서다.
+        예약_섰다 = _reserved_qty_of(reserved) != 0
 
         if _reserved_qty_of(reserved) == 0:
             # 🔴 **없는 예약을 할당하지 않는다** (물류 §5.1). 예전에는 그대로
@@ -497,6 +520,7 @@ def _ship_one(
         )
         # 🔴 **여기가 그 커밋이다.** 아래 출고가 터져도 할당은 남는다.
         conn.commit()
+        할당_섰다 = True
 
         shipped = ship_fn(
             conn,
@@ -507,12 +531,17 @@ def _ship_one(
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - 한 판매가 하루를 세우면 안 된다.
         conn.rollback()
+        reason = f"{type(exc).__name__}: {exc}"
+        if 예약_섰다 and not 할당_섰다:
+            reason += _release_stranded(
+                conn, reservation_id=reservation_id, as_of=as_of, release_fn=release_fn
+            )
         return SaleItemOutcome(
             sale_id=row.sale_id,
             sale_item_id=row.sale_item_id,
             reservation_id=reservation_id,
             status="FAILED",
-            reason=f"{type(exc).__name__}: {exc}",
+            reason=reason,
             required_qty_kg=row.quantity_kg,
         )
 
@@ -524,6 +553,23 @@ def _ship_one(
         shipped_qty_kg=Decimal(getattr(shipped, "shipped_qty_kg", 0) or 0),
         required_qty_kg=row.quantity_kg,
     )
+
+
+def _release_stranded(
+    conn: Any, *, reservation_id: str, as_of: date, release_fn: Callable[..., Any]
+) -> str:
+    """할당이 안 선 예약을 **그날** 놓아준다. 🔴 예약은 이미 커밋됐다 — 롤백이 못 걷는다.
+
+    ★ 여기서 터져도 하루는 계속 간다. 못 놓아준 사실은 사유에 남긴다 — 그래야 다음
+      사람이 «왜 아직 잡고 있나» 를 되짚을 수 있다.
+    """
+    try:
+        release_fn(conn, reservation_id=reservation_id, released_as_of=as_of)
+        conn.commit()
+        return " · 할당이 안 서 예약을 놓아줬다"
+    except Exception as exc:  # noqa: BLE001 - 놓아주기 실패가 하루를 세우면 안 된다.
+        conn.rollback()
+        return f" · 예약을 못 놓아줬다 ({type(exc).__name__}: {exc})"
 
 
 def _reserved_qty_of(reserved: Any) -> Decimal | None:

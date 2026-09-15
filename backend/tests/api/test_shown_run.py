@@ -128,17 +128,29 @@ def _물류_대역(monkeypatch) -> list[tuple[str, str]]:
         logistics_query, "get_inbound_console", 기록("inbound", SimpleNamespace(in_transit=[]))
     )
     monkeypatch.setattr(logistics_query, "get_inventory_console", 기록("inventory", None))
-    monkeypatch.setattr(logistics_query, "get_warehouse_console", 기록("warehouse", None))
     monkeypatch.setattr(logistics_query, "get_outbound_console", 기록("outbound", None))
+    #  ★ **Exception 두 조회도 같은 축에 선다** (#675). 창고 배치(`warehouse`) 는
+    #    발표 화면에서 빠져 부르지 않는다.
+    monkeypatch.setattr(logistics_query, "live_exceptions_at", 기록("live_exceptions", None))
+    monkeypatch.setattr(
+        logistics_query, "resolved_exceptions_on", 기록("resolved_exceptions", ())
+    )
     return 잡은
 
 
 def test_물류_build_가_보는_실행을_넘기고_출처에_적는다(monkeypatch):
     잡은 = _물류_대역(monkeypatch)
     #  대역 콘솔이 빈 값이라 판 조립은 실패한다. 넘긴 축과 출처 글만 본다.
-    result = logistics_query.build_result(AS_OF, "stock")
+    result = logistics_query.build_result(AS_OF, "summary")
     names = [name for name, _ in 잡은]
-    assert names == ["coverage", "inventory", "inbound", "warehouse", "outbound"]
+    assert names == [
+        "coverage",
+        "inventory",
+        "inbound",
+        "outbound",
+        "live_exceptions",
+        "resolved_exceptions",
+    ]
     assert {run for _, run in 잡은} == {SHOWN_SIM_RUN_ID}
     assert f"보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {AS_OF}" in (result.tab.source.note or "")
 

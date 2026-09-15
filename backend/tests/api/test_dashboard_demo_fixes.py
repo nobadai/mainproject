@@ -86,7 +86,11 @@ def stub(monkeypatch):
     monkeypatch.setattr(
         dashboard_query.logistics_q, "build",
         lambda as_of, pane: SimpleNamespace(
-            panes=[SimpleNamespace(stats=[Stat(label="재고", value="1", raw=1)])],
+            #  ★ 대시보드는 **열쇠로** 재고 칸을 집는다 (#675). 자리로 집던 때의
+            #    대역이라 `key` 가 없었다.
+            panes=[
+                SimpleNamespace(key="stock", stats=[Stat(label="재고", value="1", raw=1)])
+            ],
             source=_source("물류")),
     )
     monkeypatch.setattr(

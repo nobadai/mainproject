@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from app.api.calendar import build_axis
 from app.api.dashboard.schema import DashboardTab
@@ -56,6 +57,21 @@ def _buffer_stat(fi):
     if not basis:
         return stat
     return stat.model_copy(update={"label": f"{stat.label} · {basis}"})
+
+
+def _현재고(lg: Any) -> Stat:
+    """물류 탭에서 **현재고 한 칸**만 꺼낸다.
+
+    🔴 **자리로 집지 않는다** (종전 `panes[0].stats[0]`). #675 에서 물류 탭 맨 앞이
+       「한눈에 보기」로 바뀌자 대시보드가 **문제 건수를 재고라고** 내보냈다 — 자리는
+       화면 사정으로 움직이고 열쇠는 안 움직인다.
+    """
+    재고칸 = next((p for p in lg.panes if p.key == "stock"), None)
+    if 재고칸 is not None and 재고칸.stats:
+        return 재고칸.stats[0]
+    #  ★ 못 찾으면 «모른다» 로 낸다 — 다른 칸을 재고인 척 올리지 않는다.
+    return Stat(label="현재고 합계", value="—", detail="물류 탭에서 못 읽었습니다",
+                tone="warn", raw=None)
 
 
 def build(as_of: date) -> DashboardTab:
@@ -102,7 +118,7 @@ def build(as_of: date) -> DashboardTab:
                  detail=f"구간 {cabbage.lower:,}–{cabbage.upper:,} · 폭 {cabbage.ci_width}",
                  tone="info", raw=cabbage.predicted),
             *([s] if (s := _buffer_stat(fi)) is not None else []),
-            lg.panes[0].stats[0],
+            _현재고(lg),
             Stat(label="매입 승인 대기", value=str(pending), unit="건",
                  detail=(", ".join(p.key for p in pu.plans) + f" · {len(pu.plans)}안"
                          if pu.plans else "오늘 낸 안 없음"),

@@ -25,7 +25,9 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { logistics, type LogisticsTab } from "@/lib/screen";
 
 export default function InventoryPage() {
-  const [pane, setPane] = useState("stock");
+  //  ★ 기본은 「한눈에 보기」다 (#675). 값의 주인은 백엔드 `PANES` 이고 여기서는
+  //    첫 요청에 실을 값만 고른다 — 탭 목록도 `data.panes` 가 그대로 준다.
+  const [pane, setPane] = useState("summary");
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   const { data, error } = useTab<LogisticsTab>(`${asOf}|${pane}`, () => logistics(asOf, pane));
 
