@@ -71,10 +71,12 @@ export function TodayProposals({
   rows,
   requestCount,
   hiddenZeroQuantity,
+  onConfirmed,
 }: {
   rows: SalesProposal[];
   requestCount: number;
   hiddenZeroQuantity: number;
+  onConfirmed?: () => void;
 }) {
   const [selectedScenarioKey, setSelectedScenarioKey] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -97,7 +99,13 @@ export function TodayProposals({
               key={key}
               row={row}
               selected={selectedScenarioKey === key}
-              onSelect={() => setSelectedScenarioKey(key)}
+              onSelect={() => {
+                setSelectedScenarioKey(key);
+                setDecision(null);
+                setDecisionError(null);
+                setConfirming(false);
+                setSubmitting(false);
+              }}
             />
           );
         })}
@@ -116,7 +124,7 @@ export function TodayProposals({
         }}
         onCancel={() => setConfirming(false)}
         onConfirm={async () => {
-          if (!selected || !selected.history_run_id || !session || inFlight.current) return;
+          if (!selected || selected.sale_status !== null || !selected.history_run_id || !session || inFlight.current) return;
           inFlight.current = true;
           setSubmitting(true);
           setDecisionError(null);
@@ -130,6 +138,7 @@ export function TodayProposals({
               }),
             );
             setConfirming(false);
+            onConfirmed?.();
           } catch (error) {
             setDecisionError(error instanceof Error ? error.message : "판매 확정 요청을 완료하지 못했습니다.");
           } finally {
@@ -174,7 +183,7 @@ function ApprovalPanel({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const canApprove = selected !== null && selected.history_run_id !== null && sessionName !== null;
+  const canApprove = selected !== null && selected.sale_status === null && selected.history_run_id !== null && sessionName !== null;
   if (result) return <DecisionResult result={result} />;
   return (
     <section className="mt-4 rounded-xl border p-4" style={{ borderColor: "var(--color-hair)" }}>
@@ -183,21 +192,31 @@ function ApprovalPanel({
         <p className="mb-0 mt-2 text-[12px] text-ink2">판매안을 하나 선택하면 최종 확인을 진행할 수 있습니다.</p>
       ) : (
         <div className="mt-2 text-[12px] leading-relaxed text-ink2">
-          <p className="m-0">
-            <b className="text-ink">{label(SCENARIO_TYPES, selected.scenario_type)}</b> · {selected.quantity_kg === null ? "수량 정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`} · {moneyWon(selected.reported_sales_amount_krw)}
-          </p>
+          <p className="m-0"><b className="text-ink">{label(SCENARIO_TYPES, selected.scenario_type)}</b> · {selected.quantity_kg === null ? "수량 정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`} · {moneyWon(selected.reported_sales_amount_krw)}</p>
+          {selected.sale_status !== null && <p className="mb-0 mt-1 font-semibold text-[var(--color-t-good)]">판매 확정 완료</p>}
           {!selected.history_run_id && <p className="mb-0 mt-1">이 실행 기록을 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
           {!sessionName && <p className="mb-0 mt-1">승인자 정보를 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
         </div>
       )}
       {confirming && selected ? (
         <div className="mt-3 rounded-lg bg-[var(--color-desk)] p-3 text-[12px]">
-          <p className="m-0 font-semibold">선택한 조건으로 판매를 확정할까요?</p>
+          <p className="m-0 font-semibold">판매 확정 전 마지막 확인</p>
           <p className="mb-0 mt-1 text-ink2">서버가 이 안만 다시 확인합니다. 통과하지 못하면 다른 안을 자동으로 선택하지 않습니다.</p>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-ink2">
+            <dt>거래처</dt><dd className="m-0 text-ink">{selected.partner_id ?? "정보 없음"}</dd>
+            <dt>품목</dt><dd className="m-0 text-ink">{itemText(null, selected.item)}</dd>
+            <dt>판매 수량</dt><dd className="m-0 text-ink">{selected.quantity_kg === null ? "정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`}</dd>
+            <dt>단가</dt><dd className="m-0 text-ink">{selected.unit_price_krw === null ? "정보 없음" : `${Number(selected.unit_price_krw).toLocaleString("ko-KR")} 원/kg`}</dd>
+            <dt>예상 매출</dt><dd className="m-0 text-ink">{moneyWon(selected.reported_sales_amount_krw)}</dd>
+            <dt>납품일</dt><dd className="m-0 text-ink">{selected.delivery_date ?? "날짜 미정"}</dd>
+            <dt>결제 조건</dt><dd className="m-0 text-ink">{paymentTermText(selected.payment_days)}</dd>
+            <dt>후보 상태</dt><dd className="m-0 text-ink">{selected.status ?? "정보 없음"}</dd>
+            <dt>재무</dt><dd className="m-0 text-ink">{selected.finance_verdict === null ? "재무 검토 전" : verdictText(selected.finance_verdict)}</dd>
+          </dl>
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" onClick={onCancel} disabled={submitting} className="rounded-lg border px-3 py-2 font-semibold">취소</button>
             <button type="button" onClick={onConfirm} disabled={submitting} className="rounded-lg border px-3 py-2 font-semibold" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>
-              {submitting ? "최종 확인 중..." : "판매 확정"}
+              {submitting ? "최종 확인 중..." : "이 조건으로 판매 확정"}
             </button>
           </div>
         </div>
@@ -572,6 +591,7 @@ function Tag({ text, color }: { text: string; color: string }) {
 export function TodayProposalsPanel({
   asOf,
   state,
+  onConfirmed,
 }: {
   asOf: string;
   state: {
@@ -583,6 +603,7 @@ export function TodayProposalsPanel({
     error: string | null;
     loading: boolean;
   };
+  onConfirmed?: () => void;
 }) {
   return (
     <Panel
@@ -610,6 +631,7 @@ export function TodayProposalsPanel({
           rows={state.data.rows}
           requestCount={state.data.request_count}
           hiddenZeroQuantity={state.data.hidden_zero_quantity}
+          onConfirmed={onConfirmed}
         />
       )}
     </Panel>
