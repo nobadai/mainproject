@@ -24,15 +24,16 @@
   ERROR    읽다가 실패했다                       ★ 숫자를 지어내지 않는다
   ```
 
-🔴 **부르는 함수 넷이 같은 `(sim_run_id, as_of)` 축에 섭니다.**
+🔴 **부르는 조회 다섯이 같은 `(sim_run_id, as_of)` 축에 섭니다.**
 
-    get_inventory_console(sim_run_id, as_of)    items · lots · capacity
-    get_inbound_console  (sim_run_id, as_of)    in_transit · receipts · arrival_summary
-    get_warehouse_console(sim_run_id, as_of)    zones · lot_locations
-    get_outbound_console (sim_run_id, as_of)    reservations
+    get_inventory_console (sim_run_id, as_of)   items · lots · capacity
+    get_inbound_console   (sim_run_id, as_of)   in_transit · receipts · arrival_summary
+    get_outbound_console  (sim_run_id, as_of)   reservations
+    live_exceptions_at    (sim_run_id, as_of)   그날 살아 있던 물류 문제
+    resolved_exceptions_on(sim_run_id, as_of)   그날 닫힌 물류 문제
 
   ⚠️ 그래도 **모든 칸이 그날 값인 것은 아닙니다.** 되살릴 정본이 아직 없는 축이
-     셋 남아 있고(판매가능량이 빼는 예약 축 · 예약 목록 · Zone 자리 정원),
+     남아 있고(판매가능량이 빼는 예약 축 · 용량 한도 정책),
      응답의 `*_time_basis` 가 그것을 말합니다. 그 사실을 pane 의 `Note` 에
      적습니다 — 안 적으면 "날짜가 안 먹네" 라는 의심을 그대로 받습니다.
 
@@ -67,18 +68,20 @@ from app.api.primitives import (
     Table,
 )
 from app.api.shown_run import SHOWN_SIM_RUN_ID
+from app.contracts.core import ITEMS
+from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
+from app.logistics.agent.schemas import ExceptionRow
 from app.logistics.console_schemas import (
     ConsoleInboundResponse,
     ConsoleInventoryResponse,
     ConsoleOutboundResponse,
-    ConsoleWarehouseResponse,
+    ConsoleReservation,
 )
 from app.logistics.console_service import (
     get_inbound_console,
     get_inventory_console,
     get_outbound_console,
     get_reservation_fefo_console,
-    get_warehouse_console,
 )
 from app.logistics.db import get_connection
 from app.logistics.historical_repository import (
@@ -89,11 +92,26 @@ from app.logistics.historical_repository import (
 
 log = logging.getLogger(__name__)
 
-PANES = ("stock", "inbound", "warehouse", "outbound")
+PANES = ("summary", "stock", "inbound", "outbound")
 
-#: 화면에 적는 Zone 종류. DB 어휘를 사람 말로만 바꾼다 — 뜻을 더하지 않는다.
-_ZONE_KIND = {"STORAGE_RACK": "보관 랙", "WORK_FLOOR": "작업 Floor"}
-_PLACEMENT = {"PLACED": "배치됨", "UNPLACED": "미배치", "UNRECORDED": "미기록"}
+#: 발표 화면이 그리는 품목. 🔴 **재고 축을 좁히는 것이 아니라 «보여 줄 칸» 을 고르는
+#: 것이다.** `app/contracts/core.py` 가 *"재고 축은 자유 문자열 — 좁히지 않는다"* 고
+#: 못박았고 `console_service` 도 «계약 밖 품목이라고 재고를 숨기지 않는다» 로 짜여
+#: 있다. 그 둘은 그대로 두고 **표시 범위만** 여기서 건다 (#675 · 발표 화면 결정).
+#:
+#: ⚠️ **창고 사용량은 이 필터보다 앞선다** — 그날 실재한 모든 Lot 의 합이다
+#:   (`console_service`: "창고 점유는 화면 필터보다 앞선다"). 그래서 품목 카드의
+#:   현재고 합과 창고 사용량이 갈릴 수 있고, 그 사실을 카드의 `Note` 에 적는다.
+_SCREEN_ITEMS = frozenset(ITEMS)
+
+#: 우선도 어휘. DB 값을 사람 말로만 바꾼다 — 등급을 새로 만들지 않는다.
+_SEVERITY = {"CRITICAL": "매우 높음", "HIGH": "높음", "MEDIUM": "보통", "LOW": "낮음"}
+
+#: 문제 어휘. `detect.py` 가 여는 코드 둘뿐이다.
+_EXCEPTION_LABEL = {
+    "FRESHNESS_PRESSURE": "신선도 압박",
+    "CAPACITY_PRESSURE": "용량 압박",
+}
 
 
 def _t(cols: list[tuple[str, str, str]], rows: list[dict], **kw) -> Table:
@@ -146,6 +164,217 @@ def _sum(values: list[Decimal | None]) -> Decimal | None:
 #  ── 실제 값 ──────────────────────────────────────────────────────────────
 
 
+def _on_screen(item_name: str | None) -> bool:
+    """발표 화면이 그리는 품목인가.
+
+    🔴 **이름을 못 읽으면 숨기지 않는다.** 분류를 못 한 것과 «범위 밖» 은 다른
+       사실이고, 못 분류한 재고를 조용히 지우면 그 재고는 아무 데도 안 남는다.
+    """
+    return item_name is None or item_name in _SCREEN_ITEMS
+
+
+def _still_working(r: ConsoleReservation) -> bool:
+    """그날 **아직 일이 남은** 예약인가 — 발표 화면이 그리는 모집단이다.
+
+    🔴 **«완료» 를 할당 0 · 미할당 0 두 칸만으로 짐작하지 않는다** (#675 지시 §10).
+       그날 유도한 상태(`status`)와 출고된 할당(`SHIPPED`)을 같이 본다.
+
+    ```text
+    RESERVED · PARTIALLY_ALLOCATED        아직 Lot 을 다 못 골랐다        → 남았다
+    잡고 있는 양(allocated + unallocated) > 0                            → 남았다
+    ALLOCATED 이고 잡은 양 0 · SHIPPED 할당 있음   전량 출고가 끝났다      → 끝났다
+    RELEASED · CANCELLED                   놓아줬다                       → 끝났다
+    ```
+
+    ⚠️ **숨기는 것이 아니다.** 뺀 건수를 카드 footer 에 적는다 — Historical 은 그대로다.
+    """
+    if r.status in ("RESERVED", "PARTIALLY_ALLOCATED"):
+        return True
+    if r.status in ("RELEASED", "CANCELLED"):
+        return False
+    if r.allocated_qty_kg > 0 or r.unallocated_qty_kg > 0:
+        return True
+    return not any(a.status == "SHIPPED" for a in r.allocations)
+
+
+def _severity_at(row: ExceptionRow, as_of: date) -> tuple[str, str | None]:
+    """그날 우선도. 🔴 **미래 값을 과거 화면으로 흘리지 않는다.**
+
+    `touch_exception` 이 `severity` 를 **덮어쓴다** (`SET severity = …`). 그래서 마지막
+    갱신이 `as_of` 뒤였다면 지금 행의 우선도는 **그날 우선도가 아니다.** 가르는 자는
+    부르는 쪽이라고 `live_exceptions_at` 이 적어 뒀고, 화면에서는 이 함수가 그 일을 한다.
+
+    ```text
+    last_detected_as_of <= as_of   그날 뒤로 안 만졌다 → 지금 값이 그날 값이다
+    그 밖                          증명 못 한다 → «—»
+    ```
+
+    :returns: `(보일 말, 아래 붙일 한 줄)`.
+    """
+    detected = row.last_detected_as_of
+    if detected is None or detected > as_of:
+        return "—", "기준일 당시 우선도 확인 불가"
+    return _SEVERITY.get(row.severity, row.severity), None
+
+
+def _summary_pane(
+    inv: ConsoleInventoryResponse,
+    live: tuple[ExceptionRow, ...],
+    resolved: tuple[ExceptionRow, ...],
+    uncertainties: tuple[str, ...],
+    as_of: date,
+) -> Pane:
+    """한눈에 보기. **점검이 장부에 남긴 것 → 창고 여유 → 품목별** 순서다.
+
+    🔴 **«오늘» 이라고 적지 않는다.** 이 화면은 과거 `as_of` 도 연다 — 실제 오늘과
+       요청받은 기준일이 다를 수 있다.
+
+    🔴 **입고 후 / 출고 후로 건수를 나누지 않는다.** `logistics_exceptions` 에 어느
+       점검이 만졌는지 적는 칸이 없고, 걷기의 점검 결과(`InspectionOut`)는 어느 표에도
+       안 남는다. 나누면 근거 없는 숫자가 된다 (#675 · 실측 2026-09-15).
+
+    ⚠️ **Lot 위험 수와 Exception 수는 다른 지표다.** 만료된 Lot 은 새 문제로 다시
+       열지 않으므로, 재고·신선도 탭의 «폐기 검토» 를 여기 건수에 더하지 않는다.
+    """
+    열린것 = [row for row in live if row.opened_as_of == as_of]
+    이어진것 = [row for row in live if row.opened_as_of < as_of]
+    용량압박 = [row for row in live if row.code == "CAPACITY_PRESSURE"]
+
+    #  Lot → 품목. 🔴 **못 찾으면 비워 둔다** — 지어내지 않는다.
+    lot_item = {lot.lot_id: lot.item_name for lot in inv.lots}
+
+    def 문제_행(row: ExceptionRow, 상태: str) -> dict[str, str | float | int | None]:
+        우선도, 단서 = _severity_at(row, as_of)
+        품목 = lot_item.get(row.subject_id)
+        본날 = row.last_detected_as_of
+        return {
+            "kind": _EXCEPTION_LABEL.get(row.code, row.code),
+            "subject": f"{품목} · {row.subject_id}" if 품목 else row.subject_id,
+            "sev": 우선도 if 단서 is None else f"{우선도} ({단서})",
+            "opened": _md(row.opened_as_of),
+            "seen": _md(본날) if 본날 is not None and 본날 <= as_of else "—",
+            "state": 상태,
+        }
+
+    문제_표 = [
+        *[문제_행(row, "신규") for row in 열린것],
+        *[문제_행(row, "지속 중") for row in 이어진것],
+        *[문제_행(row, "해소됨") for row in resolved],
+    ]
+
+    미확인 = (
+        None
+        if not uncertainties
+        else Note(
+            tone="warn",
+            text=(f"**목록이 확정되지 않았습니다** — 닫힌 날을 못 댄 문제 "
+                  f"{len(uncertainties)}건이 있어 이 건수를 단정하지 않습니다."),
+        )
+    )
+
+    cap = inv.capacity
+    보장 = cap.guaranteed_capacity_kg
+    사용률 = None if 보장 is None or 보장 <= 0 else float(cap.used_capacity_kg / 보장 * 100)
+    여유 = None if 보장 is None else 보장 - cap.used_capacity_kg
+
+    return Pane(
+        key="summary",
+        label="한눈에 보기",
+        stats=[
+            Stat(label="신규", value=f"{len(열린것):,}", unit="건",
+                 detail=f"기준일 {as_of} 에 새로 열린 문제",
+                 tone="bad" if 열린것 else "good", raw=float(len(열린것))),
+            Stat(label="지속 중", value=f"{len(이어진것):,}", unit="건",
+                 detail="그 전에 열려 아직 해소되지 않은 문제",
+                 tone="warn" if 이어진것 else "good", raw=float(len(이어진것))),
+            Stat(label="해소", value=f"{len(resolved):,}", unit="건",
+                 detail="기준일에 조건이 없어져 닫힌 문제",
+                 tone="good", raw=float(len(resolved))),
+            Stat(label="용량 압박", value=f"{len(용량압박):,}", unit="건",
+                 detail="창고 자리 부족으로 열린 문제",
+                 tone="bad" if 용량압박 else "good", raw=float(len(용량압박))),
+        ],
+        cards=[
+            Card(
+                key="exceptions", title="기준일 물류 이상 현황",
+                subtitle="입고 후와 출고 후 점검이 장부에 남긴 문제입니다",
+                source_ref="logistics_exceptions",
+                lead=미확인 or Note(
+                    tone="info",
+                    text=("물류 점검은 걷기에서 **입고 후와 출고 후** 각각 한 번씩 돕니다. "
+                          "어느 점검이 찾았는지는 장부에 남지 않아 **나누어 세지 않습니다.** "
+                          "감지와 기록까지가 자동이고, 대응 여부는 담당자가 정합니다."),
+                ),
+                table=_t(
+                    [("kind", "이상 유형", "left"), ("subject", "대상", "left"),
+                     ("sev", "우선도", "left"), ("opened", "최초 감지", "left"),
+                     ("seen", "최근 확인", "left"), ("state", "상태", "left")],
+                    문제_표,
+                    empty_text="기준일에 열려 있거나 해소된 물류 문제가 없습니다",
+                ),
+                footer=("우선도 · 최근 확인은 마지막 갱신이 기준일 뒤면 «—» 로 둡니다 — "
+                        "그날 값을 증명할 수 없기 때문입니다."),
+            ),
+            Card(
+                key="capacity", title="창고 수용 여유",
+                subtitle="압박 건수는 위 장부에서, 아래 수치는 재고·정책 정본에서 옵니다",
+                source_ref="inventory_moves · agent_policy_config",
+                stats=[
+                    Stat(label="현재 사용량", value=_kg(cap.used_capacity_kg), unit="kg",
+                         detail="기준일 원장 기준 · 화면 품목 필터보다 앞섭니다",
+                         raw=_raw(cap.used_capacity_kg)),
+                    Stat(label="보장 용량", value=_kg(보장) if 보장 is not None else "—",
+                         unit="kg" if 보장 is not None else None,
+                         detail="지금 활성 정책 값입니다 (기준일 정책 이력이 아닙니다)",
+                         raw=_raw(보장)),
+                    Stat(label="최대 수용량",
+                         value=_kg(cap.burst_capacity_kg) if cap.burst_capacity_kg else "—",
+                         unit="kg" if cap.burst_capacity_kg else None,
+                         detail="지금 활성 정책 값입니다", raw=_raw(cap.burst_capacity_kg)),
+                    Stat(label="추가 수용 가능량", value=_kg(여유) if 여유 is not None else "—",
+                         unit="kg" if 여유 is not None else None,
+                         detail=(f"보장 용량의 {사용률:.1f}% 사용" if 사용률 is not None
+                                 else "보장 용량을 못 읽어 계산하지 않습니다"),
+                         tone="good" if 여유 is not None and 여유 > 0 else "warn",
+                         raw=_raw(여유)),
+                ],
+            ),
+            Card(
+                key="items", title="품목별 재고 현황",
+                subtitle=f"발표 화면은 {' · '.join(ITEMS)} 를 그립니다",
+                source_ref="inventory_lots · inventory_reservations",
+                lead=Note(
+                    tone="info",
+                    text=("**현재고는 기준일 원장 값이고, 판매가능량 · 예약량은 «지금» "
+                          "기준입니다.** 시간축이 달라 이 값들을 서로 빼거나 더하지 "
+                          "않습니다. 창고 사용량은 화면에 안 그리는 품목까지 포함한 "
+                          "실물 합계입니다."),
+                ),
+                table=_t(
+                    [("item", "품목", "left"), ("onhand", "현재고", "right"),
+                     ("avail", "판매가능량", "right"), ("resv", "예약량", "right"),
+                     ("expired", "만료 수량", "right"), ("risk", "신선도 위험 Lot", "right")],
+                    [
+                        {
+                            "item": it.item_name,
+                            "onhand": _kg_cell(it.on_hand_qty_kg),
+                            "avail": _kg_cell(it.available_qty_kg),
+                            "resv": _kg_cell(it.reserved_qty_kg),
+                            "expired": _kg_cell(it.expired_qty_kg),
+                            "risk": it.sell_priority_lot_count + it.expired_lot_count,
+                        }
+                        for it in inv.items
+                        if _on_screen(it.item_name)
+                    ],
+                    empty_text="기준일에 그릴 품목이 없습니다",
+                ),
+                footer=("판매가능량이 «—» 면 못 읽은 축이 있다는 뜻입니다 — 0 이 아닙니다. "
+                        "신선도 위험 Lot 은 우선판매 신호와 만료 Lot 을 함께 센 수이고, "
+                        "위 이상 건수와 같은 지표가 아닙니다."),
+            ),
+        ],
+    )
+
 def _stock_pane(
     inv: ConsoleInventoryResponse,
     inb: ConsoleInboundResponse,
@@ -183,7 +412,7 @@ def _stock_pane(
 
     return Pane(
         key="stock",
-        label="재고 · 예약",
+        label="재고 · 신선도",
         stats=[
             Stat(
                 label="현재고 합계", value=_kg(on_hand, 1), unit="kg",
@@ -238,6 +467,7 @@ def _stock_pane(
                             "state": r.status,
                         }
                         for r in ob.reservations
+                        if _on_screen(r.item_name) and _still_working(r)
                     ],
                     empty_text="확보된 재고가 없습니다",
                 ),
@@ -264,6 +494,7 @@ def _stock_pane(
                             "signal": lo.turnover_status,
                         }
                         for lo in inv.lots
+                        if _on_screen(lo.item_name)
                     ],
                     empty_text="이 날짜에 살아 있는 Lot 이 없습니다",
                 ),
@@ -290,7 +521,7 @@ def _inbound_pane(inb: ConsoleInboundResponse) -> Pane:
 
     return Pane(
         key="inbound",
-        label="입고 처리",
+        label="입고 · 검수",
         stats=[
             Stat(label="오늘 도착 예정", value=f"{summary.due_count:,}", unit="건",
                  tone="good" if summary.due_count else "neutral",
@@ -368,94 +599,11 @@ def _inbound_pane(inb: ConsoleInboundResponse) -> Pane:
                             "applied": "반영됨" if r.stock_applied else "아직",
                         }
                         for r in inb.receipts
+                        if _on_screen(r.item_name)
                     ],
                     empty_text="이 날짜까지 도착한 Receipt 이 없습니다",
                 ),
                 footer="재고가 되는 것은 주문 수량이 아니라 **합격 수량**입니다.",
-            ),
-        ],
-    )
-
-
-def _warehouse_pane(wh: ConsoleWarehouseResponse, inv: ConsoleInventoryResponse) -> Pane:
-    cap = inv.capacity
-    unplaced = [lo for lo in wh.lot_locations if lo.placement == "UNPLACED"]
-
-    return Pane(
-        key="warehouse",
-        label="창고 배치",
-        stats=[
-            Stat(label="사용 중", value=_kg(cap.used_capacity_kg, 1), unit="kg",
-                 detail="창고 전체 합계 · 기준일 원장", tone="neutral",
-                 raw=_raw(cap.used_capacity_kg)),
-            Stat(label="보장 용량", value=_kg(cap.guaranteed_capacity_kg), unit="kg",
-                 detail="계약 baseline · 지금 활성 정책", tone="neutral",
-                 raw=_raw(cap.guaranteed_capacity_kg)),
-            Stat(label="최대 용량", value=_kg(cap.burst_capacity_kg), unit="kg",
-                 detail="일시 초과 허용치 · 지금 활성 정책", tone="neutral",
-                 raw=_raw(cap.burst_capacity_kg)),
-            Stat(label="자리 못 잡은 Lot", value=f"{len(unplaced):,}", unit="Lot",
-                 detail="입고됐지만 Pallet 자리가 없습니다",
-                 tone="warn" if unplaced else "good", raw=float(len(unplaced))),
-        ],
-        cards=[
-            Card(
-                key="zone", title="Zone 점유",
-                subtitle="Zone 의 물리 정본은 kg 이 아니라 Pallet 자리 수입니다",
-                #  🔴 `zone_capacity` 는 **표가 아니라 계약 필드명**이었다.
-                source_ref="warehouse_zones · storage_locations",
-                lead=Note(
-                    tone="info",
-                    text=("**자리(Position)와 kg 를 섞지 않습니다.** 아래 표는 자리 수이고, "
-                          "kg 한도는 Zone 별로 없이 **창고 전체 하나**뿐이라 "
-                          "위 요약에 적었습니다. 🔴 **이 표의 자리 수는 «지금» 창고입니다** — "
-                          "자리 정원에는 유효일이 없어 기준일로 되살릴 수 없습니다. "
-                          "아래 «Lot 배치» 는 기준일 값입니다."),
-                ),
-                table=_t(
-                    [("zone", "Zone", "left"), ("kind", "종류", "left"),
-                     ("used", "사용 자리", "right"), ("cap", "총 자리", "right"),
-                     ("free", "빈 자리", "right")],
-                    [
-                        {
-                            "zone": z.zone_name,
-                            "kind": _ZONE_KIND.get(z.zone_kind, z.zone_kind),
-                            "used": z.occupied_positions,
-                            "cap": z.total_positions,
-                            "free": z.free_positions,
-                        }
-                        for z in wh.zones
-                    ],
-                    empty_text="등록된 Zone 이 없습니다",
-                ),
-            ),
-            Card(
-                key="placement", title="Lot 배치",
-                subtitle="기준일까지의 Pallet 사건을 재생한 자리입니다",
-                source_ref="pallet_events · pallets · storage_locations",
-                lead=Note(
-                    tone="info",
-                    text=("«미기록» 은 «자리 없음» 이 아닙니다 — 그날까지 그 Lot 의 "
-                          "Pallet 사건이 하나도 없다는 뜻입니다. 없는 자리를 지어내지 않습니다."),
-                ),
-                table=_t(
-                    [("lot", "Lot", "left"), ("item", "품목", "left"),
-                     ("qty", "잔량", "right"), ("zone", "Zone", "left"),
-                     ("loc", "자리", "left"), ("state", "배치", "left")],
-                    [
-                        {
-                            "lot": lo.lot_id,
-                            "item": lo.item_name or lo.item_id,
-                            "qty": _kg_cell(lo.remaining_qty_kg),
-                            "zone": lo.zone_id,
-                            "loc": lo.location_id,
-                            "state": _PLACEMENT.get(lo.placement, lo.placement),
-                        }
-                        for lo in wh.lot_locations
-                    ],
-                    empty_text="배치된 Lot 이 없습니다",
-                ),
-                footer="자리가 «미배치» 인 Lot 은 입고는 됐지만 Pallet 을 못 잡은 것입니다.",
             ),
         ],
     )
@@ -466,7 +614,17 @@ def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
     #    예약이 없을 때 Lot 을 신선도순으로 늘어놓아 «후보» 라고 부르지 않는다 —
     #    그건 서비스에 없는 계산을 화면이 새로 만드는 것이다 (#415).
     fefo_rows: list[dict] = []
-    for resv in ob.reservations:
+    #  ★ 화면이 그리는 품목만 · 그날 아직 일이 남은 예약만 — 범위 밖 품목이나 이미 다
+    #    나간 예약에 FEFO 를 물을 이유가 없다.
+    품목_예약 = [r for r in ob.reservations if _on_screen(r.item_name)]
+    화면_예약 = [r for r in 품목_예약 if _still_working(r)]
+    끝난_예약 = len(품목_예약) - len(화면_예약)
+    #  🔴 **FEFO 는 «아직 Lot 을 안 고른 몫» 이 있는 예약에만 묻는다.** 목표량이 0 이면
+    #     `allocate_reserved_stock_fefo` 도 아무것도 안 하므로 후보를 구할 이유가 없다.
+    #     예약 164건에 164번 묻던 것이 대시보드 8.6초의 태반이었다 (마스터 실측 2026-09-15).
+    for resv in 화면_예약:
+        if resv.unallocated_qty_kg <= 0:
+            continue
         fefo = get_reservation_fefo_console(reservation_id=resv.reservation_id, as_of=as_of)
         for rank, cand in enumerate(fefo.candidates, start=1):
             fefo_rows.append(
@@ -482,11 +640,12 @@ def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
 
     return Pane(
         key="outbound",
-        label="출고 · 운송",
+        label="예약 · 출고",
         stats=[
-            Stat(label="예약", value=f"{len(ob.reservations):,}", unit="건",
-                 tone="good" if ob.reservations else "neutral",
-                 raw=float(len(ob.reservations))),
+            Stat(label="예약", value=f"{len(화면_예약):,}", unit="건",
+                 detail=(f"전량 출고·해제된 {끝난_예약}건은 뺐습니다" if 끝난_예약 else None),
+                 tone="good" if 화면_예약 else "neutral",
+                 raw=float(len(화면_예약))),
             Stat(label="FEFO 후보", value=f"{len(fefo_rows):,}", unit="건",
                  detail="예약이 있어야 후보가 나옵니다",
                  tone="neutral", raw=float(len(fefo_rows))),
@@ -565,16 +724,21 @@ def _empty_tab(*, status: SourceStatus, note: Note, source_note: str) -> Logisti
     return LogisticsTab(
         panes=[
             _empty_pane(
+                "summary",
+                "한눈에 보기",
+                note,
+                [Stat(label="신규", value="—", detail=note.text, tone="warn", raw=None)],
+            ),
+            _empty_pane(
                 "stock",
-                "재고 · 예약",
+                "재고 · 신선도",
                 note,
                 [Stat(label="현재고 합계", value="—", detail=note.text, tone="warn", raw=None)],
             ),
-            _empty_pane("inbound", "입고 처리", note),
-            _empty_pane("warehouse", "창고 배치", note),
-            _empty_pane("outbound", "출고 · 운송", note),
+            _empty_pane("inbound", "입고 · 검수", note),
+            _empty_pane("outbound", "예약 · 출고", note),
         ],
-        selected="stock",
+        selected="summary",
         principle=_PRINCIPLE,
         source=Source(filled=True, owner="물류", note=source_note, status=status),
     )
@@ -654,12 +818,18 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
             )
         inv = get_inventory_console(sim_run_id=run, as_of=as_of)
         inb = get_inbound_console(sim_run_id=run, as_of=as_of)
-        wh = get_warehouse_console(sim_run_id=run, as_of=as_of)
         ob = get_outbound_console(sim_run_id=run, as_of=as_of)
+        #  🔴 **문제 장부도 같은 `(sim_run_id, as_of)` 축이다.** 다른 실행의 문제를
+        #     섞지 않고 그날 뒤에 열린 문제도 싣지 않는다 — 그 두 규칙의 주인은
+        #     `live_exceptions_at` 하나다. 그날 닫힌 행은 저 함수가 안 내므로
+        #     `resolved_exceptions_on` 이 나머지 반쪽을 가져온다.
+        with get_connection() as conn:
+            live = live_exceptions_at(conn, sim_run_id=run, as_of=as_of)
+            resolved = resolved_exceptions_on(conn, sim_run_id=run, as_of=as_of)
         panes = [
+            _summary_pane(inv, live.rows, resolved, live.uncertainties, as_of),
             _stock_pane(inv, inb, ob),
             _inbound_pane(inb),
-            _warehouse_pane(wh, inv),
             _outbound_pane(ob, as_of),
         ]
     except Exception as error:  #  DB 미연결 · 표 없음 · 원장/계보 무결성 다 잡는다
@@ -694,8 +864,8 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                 status="OK",
                 note=(
                     "inventory_moves · inventory_lots · inbound_receipts · "
-                    "inbound_inspections · pallet_events · inventory_reservations · "
-                    f"warehouse_zones · storage_locations · 보고 있는 실행: {run} · 기준일: {as_of}"
+                    "inbound_inspections · inventory_reservations · "
+                    f"logistics_exceptions · 보고 있는 실행: {run} · 기준일: {as_of}"
                 ),
             ),
         ),

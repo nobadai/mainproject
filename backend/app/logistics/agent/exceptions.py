@@ -4,6 +4,7 @@
 읽기   live_exceptions          **지금** 살아 있는(OPEN·PROPOSED) 행
        live_exceptions_at       **그날** 살아 있던 행 — 과거 조사용 (Commit 3 Tool)
        previous_exception_id_for 같은 축의 가장 최근 닫힌 행 — 재발을 잇는 고리
+       resolved_exceptions_on   **그날 닫힌** 행 — 화면의 «해소» 칸
 쓰기   open_exception           INSERT (status=OPEN)
        touch_exception          UPDATE evidence · severity · last_detected · observed
        resolve_exception        UPDATE status=RESOLVED
@@ -43,6 +44,7 @@ __all__ = [
     "open_exception",
     "previous_exception_id_for",
     "resolve_exception",
+    "resolved_exceptions_on",
     "touch_exception",
 ]
 
@@ -228,6 +230,46 @@ def live_exceptions_at(conn: Any, *, sim_run_id: str, as_of: date) -> LiveExcept
         membership_dates=tuple(sorted(membership_dates)),
         uncertainties=tuple(uncertainties),
     )
+
+
+def resolved_exceptions_on(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[ExceptionRow, ...]:
+    """**그날 닫힌** Exception 들. 🔴 `live_exceptions_at` 이 못 내는 나머지 반쪽이다.
+
+    ```text
+    live_exceptions_at      그날 아직 살아 있던 행   ← 닫힌 행은 빠진다
+    resolved_exceptions_on  그날 닫힌 행            ← 이 함수
+    ```
+
+    ★ **두 목록은 겹치지 않는다.** 저쪽은 `resolved_as_of <= as_of` 를 빼고, 이쪽은
+      `resolved_as_of = as_of` 만 낸다. 그래서 «그날 화면» 은 둘을 이어 붙이면 된다.
+
+    🔴 **`DISMISSED` 는 세지 않는다.** 사람이 덮은 것과 조건이 없어진 것은 다른
+       사실이다 (`resolve_exception` 이 쓰는 것은 `RESOLVED` 뿐이다). 덮은 문제를
+       «해소» 로 세면 그날 창고가 나아진 것처럼 읽힌다.
+
+    ⚠️ **행이 들고 있는 «지금» 값들은 여기서도 그대로다** (`live_exceptions_at` 의
+       같은 주의). 그날 값으로 읽어도 되는지는 부르는 쪽이 가른다.
+
+    :returns: 그날 닫힌 행들. 🔴 **아무것도 쓰지 않는다.**
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT {columns}
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND status = 'RESOLVED'
+              AND resolved_as_of = %(as_of)s
+            ORDER BY exception_id
+            """
+        ).format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _COLUMNS),
+            schema=_schema(),
+        ),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    return tuple(_row(raw) for raw in rows)
 
 
 def previous_exception_id_for(

@@ -151,6 +151,7 @@ def _run(
         "allocate": _Spy("allocate", conn, boom_on=allocate_boom),
         "ship": _Spy("ship", conn, boom_on=ship_boom, result=_Shipped(shipped)),
         "deliver": _Spy("deliver", conn, boom_on=deliver_boom),
+        "release": _Spy("release", conn),
     }
     out = ship_due_sales(
         AS_OF,
@@ -161,6 +162,7 @@ def _run(
         allocate_fn=spies["allocate"],
         ship_fn=spies["ship"],
         deliver_fn=spies["deliver"],
+        release_fn=spies["release"],
     )
     return out, spies, conn
 
@@ -491,3 +493,61 @@ def test_전량_예약_함수를_안_부른다():
 
     기본값 = inspect.signature(ship_due_sales).parameters["reserve_fn"].default
     assert 기본값.__name__ == "reserve_confirmed_sale_available"
+
+
+# ── ⑨ 할당이 터진 예약은 그날 놓아준다 (고아 예약 방지 · 2026-09-15) ──────────
+
+
+def test_할당이_터지면_그_예약을_그날_놓아준다():
+    """🔴 예약 뒤 커밋이 있어 롤백이 예약을 못 걷는다 — 놓아주지 않으면 영원히 재고를 잡는다."""
+    out, spies, conn = _run([_row("SALE-A", 1)], allocate_boom="RSV-SI-SALE-A-1")
+    assert out.items[0].status == "FAILED"
+    assert spies["release"].calls == [
+        {"reservation_id": "RSV-SI-SALE-A-1", "released_as_of": AS_OF}
+    ]
+    assert "놓아줬다" in out.items[0].reason
+    #  놓아준 사실도 커밋된다 — reserve · commit · allocate(터짐) · rollback · release · commit
+    assert conn.events[-2:] == ["release", "commit"]
+
+
+def test_출고가_터진_예약은_놓아주지_않는다():
+    """할당은 서 있다 — 놓아주면 그 할당까지 CANCELLED 로 내려가 재실행이 못 이어 간다."""
+    out, spies, _ = _run([_row("SALE-A", 1)], ship_boom="RSV-SI-SALE-A-1")
+    assert out.items[0].status == "FAILED"
+    assert spies["release"].calls == []
+
+
+def test_확보_0kg_이면_놓아줄_예약이_없다():
+    out, spies, _ = _run([_row("SALE-A", 1)], reserved=Decimal(0))
+    assert out.items[0].status == "SHORT"
+    assert spies["release"].calls == []
+
+
+def test_예약_단계가_터지면_놓아줄_것이_없다():
+    out, spies, _ = _run([_row("SALE-A", 1)], reserve_boom="RSV-SI-SALE-A-1")
+    assert out.items[0].status == "FAILED"
+    assert spies["release"].calls == []
+
+
+def test_놓아주기가_터져도_하루는_계속_간다():
+    class _Boom(_Spy):
+        def __call__(self, conn, *a, **k):
+            super().__call__(conn, *a, **k)
+            raise RuntimeError("놓아주기 실패")
+    conn2 = _Conn()
+    spies2 = {
+        "reserve": _Spy("reserve", conn2, result=_Reserved(REQUIRED)),
+        "allocate": _Spy("allocate", conn2, boom_on="RSV-SI-SALE-A-1"),
+        "ship": _Spy("ship", conn2, result=_Shipped(REQUIRED)),
+        "deliver": _Spy("deliver", conn2),
+        "release": _Boom("release", conn2),
+    }
+    out2 = ship_due_sales(
+        AS_OF, sim_run_id=축, connect=lambda: conn2,
+        due_fn=lambda _c, *, as_of, sim_run_id: (_row("SALE-A", 1), _row("SALE-B", 1)),
+        reserve_fn=spies2["reserve"], allocate_fn=spies2["allocate"], ship_fn=spies2["ship"],
+        deliver_fn=spies2["deliver"], release_fn=spies2["release"],
+    )
+    assert out2.status == "RAN"
+    assert [one.status for one in out2.items] == ["FAILED", "RAN"]
+    assert "못 놓아줬다" in out2.items[0].reason

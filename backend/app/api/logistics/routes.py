@@ -17,7 +17,7 @@ router = APIRouter(prefix="/logistics", tags=["api:logistics"])
 def logistics_tab(
     as_of: Annotated[date, Query(description="기준일")],
     response: Response,
-    pane: Annotated[str, Query(description="안쪽 작은 탭")] = "stock",
+    pane: Annotated[str, Query(description="안쪽 작은 탭")] = "summary",
 ) -> LogisticsTab:
     """재고·물류 탭 한 판.
 

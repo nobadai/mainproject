@@ -20,7 +20,7 @@
 이 폴더는 이미 다 돌아갑니다. 주소도 화면도 있습니다.
 
 ```
-API     GET /api/logistics?as_of=2026-01-06&pane=stock
+API     GET /api/logistics?as_of=2026-01-06&pane=summary
 화면    http://localhost:3000/console/inventory
 ```
 
@@ -65,24 +65,29 @@ snap = get_inventory_console(sim_run_id=..., as_of=as_of)
 ```
 
 `app/logistics/console_service.py` 에 `/logistics/inventory` · `/inbound` ·
-`/warehouse` · `/outbound` 가 쓰는 함수가 다 있습니다. **같은 쿼리를 두 벌
-두면 언젠가 값이 갈라집니다.**
+`/outbound` 가 쓰는 함수가 다 있습니다. 물류 문제 장부는
+`app/logistics/agent/exceptions.py` 가 주인입니다 (`live_exceptions_at` ·
+`resolved_exceptions_on`). **같은 쿼리를 두 벌 두면 언젠가 값이 갈라집니다.**
 
 이 `query.py` 가 할 일은 **읽는 것이 아니라 옮기는 것**입니다 —
 저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Card`)에 담습니다.
 
 원래 표를 직접 봐야 하면: `inventory_lots` · `inventory_reservations` ·
 `inventory_allocations` · `inbound_receipts` · `inbound_inspections` ·
-`warehouse_zones` · `storage_locations`.
+`logistics_exceptions`.
 
 🔴 예전에 여기 적혀 있던 `arrival_schedule` · `zone_capacity` 는 **표가 아닙니다.**
 스키마에 없고 SQL 어디에도 안 나옵니다 — 각각 계약 필드명
 (`ApprovedPurchaseCommitment.arrival_schedule`)과 `day_open` 의
 `zone_capacity_status` 였습니다 (2026-09-08 카탈로그 전수 대조).
 
-**`panes` 는 넷 다 채워서 보냅니다** (`stock` `inbound` `warehouse`
+**`panes` 는 넷 다 채워서 보냅니다** (`summary` `stock` `inbound`
 `outbound`). `selected` 가 지금 보고 있는 것이고, 화면이 나머지를
 미리 들고 있어 탭을 눌러도 깜빡이지 않습니다.
+
+🔴 **창고 배치(`warehouse`) 는 발표 화면에서 뺐습니다** (#675). Zone · 팔레트
+자리는 표에만 있고 실제로 배정되지 않습니다 — 도메인 코드는 그대로 두고
+화면에서만 안 그립니다.
 
 ## ★ 아직 안 정한 것 — `sim_run_id`
 
@@ -104,6 +109,14 @@ get_finance_dashboard(sim_run_id=..., as_of=as_of)
 **혼자 정하지 말고 물어보세요.** 잘못 고르면 다른 실행의 값을 화면에
 띄우게 되고, 그건 **틀린 줄도 모르는** 오류입니다.
 급하면 ㉰ 로 두고 `Note` 에 «어느 실행을 보고 있는지» 를 적으세요.
+
+**발표용으로 ㉰ 로 정했습니다 (2026-09-14) — `app/api/shown_run.py`.**
+화면이 읽는 실행은 `SHOWN_SIM_RUN_ID`, 기준일은 `SHOWN_AS_OF` 한 자리에서만 정합니다.
+재무 · 물류 · 판매 · 대시보드와 매입 라우터(쿼리에 축이 없을 때)가 이 값을 씁니다.
+각 탭 `Source.note` 에 「보고 있는 실행: 실행 이름」 을 적습니다.
+최종 실행 SIM-CHAIN-FINAL 이 끝나면 그 두 줄을 `"SIM-CHAIN-FINAL"` · `date(2026, 9, 20)` 로 바꾸고,
+발표 뒤에는 ㉮ 주소 파라미터 방식으로 올립니다.
+🔴 화면에서 번인 상수를 다시 쓰지 마세요.
 
 ---
 
@@ -358,7 +371,7 @@ uv run ruff check app/api
 
 ```bash
 cd backend && uv run uvicorn app.main:app --port 8000
-curl "http://127.0.0.1:8000/api/logistics?as_of=2026-01-06&pane=stock"
+curl "http://127.0.0.1:8000/api/logistics?as_of=2026-01-06&pane=summary"
 ```
 
 브라우저로는 `http://127.0.0.1:8000/docs` 에서 눌러 볼 수 있습니다.

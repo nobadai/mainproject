@@ -658,7 +658,7 @@ flow = get_finance_cashflow(sim_run_id=..., as_of=as_of)
     ),
     Part(
         key="logistics", owner="물류", title="재고 · 물류",
-        route="/api/logistics?as_of=2026-01-06&pane=stock", screen="/console/inventory",
+        route="/api/logistics?as_of=2026-01-06&pane=summary", screen="/console/inventory",
         db_module="app.logistics.db", table="inventory_lots",
         model=LogisticsTab,
         signature="def build(as_of: date, pane: str) -> LogisticsTab:",
@@ -671,24 +671,29 @@ snap = get_inventory_console(sim_run_id=..., as_of=as_of)
 ```
 
 `app/logistics/console_service.py` 에 `/logistics/inventory` · `/inbound` ·
-`/warehouse` · `/outbound` 가 쓰는 함수가 다 있습니다. **같은 쿼리를 두 벌
-두면 언젠가 값이 갈라집니다.**
+`/outbound` 가 쓰는 함수가 다 있습니다. 물류 문제 장부는
+`app/logistics/agent/exceptions.py` 가 주인입니다 (`live_exceptions_at` ·
+`resolved_exceptions_on`). **같은 쿼리를 두 벌 두면 언젠가 값이 갈라집니다.**
 
 이 `query.py` 가 할 일은 **읽는 것이 아니라 옮기는 것**입니다 —
 저쪽이 준 업무 값을 화면 부품(`Stat` · `Table` · `Card`)에 담습니다.
 
 원래 표를 직접 봐야 하면: `inventory_lots` · `inventory_reservations` ·
 `inventory_allocations` · `inbound_receipts` · `inbound_inspections` ·
-`warehouse_zones` · `storage_locations`.
+`logistics_exceptions`.
 
 🔴 예전에 여기 적혀 있던 `arrival_schedule` · `zone_capacity` 는 **표가 아닙니다.**
 스키마에 없고 SQL 어디에도 안 나옵니다 — 각각 계약 필드명
 (`ApprovedPurchaseCommitment.arrival_schedule`)과 `day_open` 의
 `zone_capacity_status` 였습니다 (2026-09-08 카탈로그 전수 대조).
 
-**`panes` 는 넷 다 채워서 보냅니다** (`stock` `inbound` `warehouse`
+**`panes` 는 넷 다 채워서 보냅니다** (`summary` `stock` `inbound`
 `outbound`). `selected` 가 지금 보고 있는 것이고, 화면이 나머지를
 미리 들고 있어 탭을 눌러도 깜빡이지 않습니다.
+
+🔴 **창고 배치(`warehouse`) 는 발표 화면에서 뺐습니다** (#675). Zone · 팔레트
+자리는 표에만 있고 실제로 배정되지 않습니다 — 도메인 코드는 그대로 두고
+화면에서만 안 그립니다.
 """,
         notes="""\
 ## ★ 이 파트만의 규칙
