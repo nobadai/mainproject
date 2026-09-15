@@ -56,12 +56,27 @@ _원래값: dict[str, str | None] = {}
 
 
 def _덮을_것() -> dict[str, str]:
-    """이름 → 덮어쓸 값. 🔴 키는 ``""``, 스위치·플래그는 ``"false"`` 다 (아래 참조)."""
-    덮는다 = {key: "false" for key in _LLM_ENV_KEYS}
+    """세션 전체를 덮을 이름 → 값. 🔴 키는 ``""``, 스위치·플래그는 ``"false"`` 다.
+
+    🔴 **접두 없는 이름은 여기 안 넣는다.** ``LLM_ENABLED``·``GEMINI_API_KEY`` 같은
+    무접두 이름은 **다른 파트가 폴백으로 읽는 공용 칸**이다 (각 파트 ``_env`` 가
+    ``PREFIX + key or key or default``). 세션 환경을 덮는 자리에서 그걸 건드리면 우리
+    폴더 밖까지 꺼진다 — 실제로 ``LLM_ENABLED=false`` 를 세션에 박았더니 물류 검사
+    둘이 깨졌다(``test_logistics_service_repository``). 매입만 끄는 데는 **접두 쪽에
+    ``false`` 를 박는 것으로 충분하다** — 접두가 먼저 읽히기 때문이다.
+
+    ⚠️ 그래서 공용 ``GEMINI_API_KEY`` 는 이 목록에 없다. 키가 남아 있어도
+    ``PURCHASE_LLM_ENABLED=false`` 가 **부르지 않게** 막는 것이 1차 방어다.
+    아래 함수 스코프 fixture 는 우리 검사에만 걸리므로 거기서는 무접두까지 덮는다.
+    """
+    덮는다 = {f"{ENV_PREFIX}LLM_ENABLED": "false"}
     for key in _FEATURE_KEYS:
         덮는다[f"{ENV_PREFIX}{key}"] = "false"
-        덮는다[key] = "false"
-    덮는다.update({key: "" for key in _API_KEY_ENV_KEYS})
+    덮는다[f"{ENV_PREFIX}GEMINI_API_KEY"] = ""
+    # 🔴 이 둘은 접두가 없지만 **매입만 쓰는 이름**이고 ``.env`` 에도 없다 — 원본
+    #   conftest 가 이미 비우던 것을 그대로 둔다.
+    덮는다["ANTHROPIC_API_KEY"] = ""
+    덮는다["OPENAI_API_KEY"] = ""
     return 덮는다
 
 
