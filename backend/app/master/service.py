@@ -543,6 +543,9 @@ def _sales_user_request(request: SalesRunRequest) -> dict[str, Any] | None:
         # ★ **이 칸은 마스터가 짓지 않는다.** 되짚을 행이 있을 때만 부르는 쪽이
         #   채워 보내고, 여기서는 이름만 맞춰 옮긴다.
         payload["source_ref"] = request.source_ref
+    # 기본 false는 Sales 모델의 기본값에 맡기고, 사용자가 동의한 true만 전달한다.
+    if request.allow_additional_sourcing:
+        payload["allow_additional_sourcing"] = True
     return payload or None
 
 

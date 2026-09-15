@@ -13,6 +13,7 @@
   Master AgentRequest/AgentReply 에도 실리지 않는다. 밖으로 낼 것이 생기면 그때
   `schemas.py` 에 외부 계약을 따로 세운다.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -279,6 +280,9 @@ class ReceivableCreateInput(BaseModel):
     sim_run_id: str = Field(min_length=1)
     financing_mode: str = Field(min_length=1)
     sale_date: date
+    #: Finance 채권 원장에 실제로 발행한 날. 휴장일 판매의 다음 개장일 발행에서는
+    #: `sale_date`와 다를 수 있다.
+    issued_date: date
     customer_partner_id: str = Field(min_length=1)
     due_date: date
     original_amount_krw: Decimal = Field(ge=0)

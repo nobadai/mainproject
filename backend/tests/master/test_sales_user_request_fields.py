@@ -63,7 +63,7 @@ from typing import Any
 from app.master import wiring
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.master.schemas import SalesRunRequest
-from app.master.service import run_sales
+from app.master.service import _sales_user_request, run_sales
 from app.sales.schemas import SalesUserRequest
 from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
@@ -71,10 +71,6 @@ from tests.master.logistics_pre_sales import PRE_SALES_PAYLOAD
 
 안_나르는_칸: dict[str, str] = {
     "preferred_contract_term_days": "요구한 caller 가 없다",
-    "allow_additional_sourcing": (
-        "매입 라우팅(`ADDITIONAL_SUPPLY_CONTEXT`)이 아직 안 열렸다 — "
-        "허용해도 부를 대상이 없어 참을 실으면 안 여는 문을 연 것처럼 읽힌다"
-    ),
 }
 """**안 나르는 칸과 그 이유.** 이유 없이 이름만 늘리지 않는다 — 이유가 없으면
 나르지 않을 근거도 없다는 뜻이다."""
@@ -130,6 +126,7 @@ def _나르는_칸() -> set[str]:
             preferred_unit_price_krw=Decimal(2000),
             preferred_payment_terms_type="SINGLE",
             source_ref="sim_runs/TEST#sales_terms/FIXED",
+            allow_additional_sourcing=True,
         )
     )
 
@@ -220,3 +217,16 @@ def test_파생값은_마스터가_안_만든다():
     """
     assert "reported_sales_amount_krw" not in set(SalesUserRequest.model_fields)
     assert "reported_sales_amount_krw" not in set(SalesRunRequest.model_fields)
+
+
+def test_master_sales_run_preserves_allow_additional_sourcing() -> None:
+    disabled = SalesRunRequest(
+        as_of=평일,
+        policy_version="v1.3",
+        business_mode="SPOT_SALES",
+        item="배추",
+    )
+    enabled = disabled.model_copy(update={"allow_additional_sourcing": True})
+
+    assert "allow_additional_sourcing" not in (_sales_user_request(disabled) or {})
+    assert _sales_user_request(enabled)["allow_additional_sourcing"] is True

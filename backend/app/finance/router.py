@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from psycopg import sql
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.finance import user_messages as messages
 from app.finance.adapter import finance_port
@@ -31,8 +31,64 @@ class CreditLimitChange(BaseModel):
     credit_limit_krw: Decimal = Field(ge=0)
     effective_from: date
     evidence_grade: str = Field(pattern="^(OFFICIAL|VENDOR|SIM_FIXED)$")
-    recorded_by: str = Field(min_length=1, max_length=120)
+    source_ref: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+    ]
+    recorded_by: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+    ]
     note: str | None = Field(default=None, max_length=1000)
+
+
+class CreditLimitHistoryItem(BaseModel):
+    """거래처 여신한도 원장의 기간 이력 한 건."""
+
+    partner_credit_limit_id: str
+    partner_id: str
+    credit_limit_krw: Decimal
+    effective_from: date
+    effective_to: date | None
+    evidence_grade: str
+    source_ref: str
+    recorded_by: str
+    policy_version: str
+    usage_scope: str
+    note: str | None
+    is_active: bool
+    is_current: bool
+
+
+@router.get("/credit-limits", response_model=list[CreditLimitHistoryItem])
+def get_credit_limits(
+    partner_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+) -> list[CreditLimitHistoryItem]:
+    """한 거래처의 여신한도 이력을 최신 적용일부터 반환한다."""
+    schema = sql.Identifier(get_db_schema())
+    with get_connection() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("SELECT 1 FROM {}.partners WHERE partner_id = %s").format(schema),
+            [partner_id],
+        )
+        if cursor.fetchone() is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="거래처를 찾지 못했습니다.",
+            )
+        cursor.execute(
+            sql.SQL("""
+                SELECT partner_credit_limit_id, partner_id, credit_limit_krw,
+                       effective_from, effective_to, evidence_grade, source_ref,
+                       recorded_by, policy_version, usage_scope, note, is_active,
+                       (is_active AND effective_from <= %s
+                        AND (effective_to IS NULL OR effective_to >= %s)) AS is_current
+                FROM {}.partner_credit_limits
+                WHERE partner_id = %s
+                ORDER BY effective_from DESC, partner_credit_limit_id DESC
+            """).format(schema),
+            [as_of, as_of, partner_id],
+        )
+        return [CreditLimitHistoryItem.model_validate(row) for row in cursor.fetchall()]
 
 
 @router.post("/credit-limits", status_code=status.HTTP_201_CREATED)
@@ -61,7 +117,8 @@ def register_credit_limit(change: CreditLimitChange) -> dict[str, object]:
             )
             rows = cursor.fetchall()
             future_or_overlap = [
-                row for row in rows
+                row
+                for row in rows
                 if row["effective_from"] >= change.effective_from
                 or row["effective_to"] is None
                 or row["effective_to"] >= change.effective_from
@@ -85,12 +142,21 @@ def register_credit_limit(change: CreditLimitChange) -> dict[str, object]:
                 sql.SQL("""
                     INSERT INTO {}.partner_credit_limits (
                         partner_credit_limit_id, partner_id, credit_limit_krw, effective_from,
-                        evidence_grade, source_ref, policy_version, usage_scope, note
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        evidence_grade, source_ref, recorded_by, policy_version, usage_scope, note
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """).format(schema),
-                [credit_id, change.partner_id, change.credit_limit_krw, change.effective_from,
-                 change.evidence_grade, f"manual:{change.recorded_by}", "manual-v1",
-                 "USER_RECORDED", change.note],
+                [
+                    credit_id,
+                    change.partner_id,
+                    change.credit_limit_krw,
+                    change.effective_from,
+                    change.evidence_grade,
+                    change.source_ref,
+                    change.recorded_by,
+                    "manual-v1",
+                    "USER_RECORDED",
+                    change.note,
+                ],
             )
         return {
             "partner_credit_limit_id": credit_id,

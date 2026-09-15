@@ -244,6 +244,8 @@ export interface SalesRunRequest {
   preferred_delivery_date?: string;
   preferred_payment_days?: number;
   preferred_payment_terms_type?: string;
+  allow_additional_sourcing?: boolean;
+  user_request?: string;
 }
 
 export interface SalesCandidateOut {
@@ -259,6 +261,7 @@ export interface SalesCandidateOut {
 export interface SalesRunResponse {
   request_id: string;
   as_of: string;
+  history_run_id: string | null;
   end_code: string;
   reason: string;
   candidates: SalesCandidateOut[];

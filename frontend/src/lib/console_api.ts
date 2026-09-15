@@ -250,6 +250,16 @@ export interface PartnersResponse extends RunScope {
   rows: PartnerRow[];
 }
 
+export interface ConsoleItem {
+  item_id: string;
+  item_code: string;
+  item_name: string;
+  base_unit: string;
+}
+export interface ItemsResponse {
+  rows: ConsoleItem[];
+}
+
 export interface PartnerDetail extends RunScope {
   basic: {
     partner_id: string;
@@ -339,8 +349,16 @@ export interface SalesRunsResponse {
 }
 
 export const salesConsole = {
+  items: () => get<ItemsResponse>("/sales/items", {}),
   partners: (sim_run_id: string, as_of: string, query?: string) =>
     get<PartnersResponse>("/sales/partners", { sim_run_id, as_of, query }),
+  activeCustomers: (sim_run_id: string, as_of: string) =>
+    get<PartnersResponse>("/sales/partners", {
+      sim_run_id,
+      as_of,
+      status: "ACTIVE",
+      partner_type: "CUSTOMER",
+    }),
   partnerDetail: (sim_run_id: string, as_of: string, partner_id: string) =>
     get<PartnerDetail>(`/sales/partners/${encodeURIComponent(partner_id)}`, {
       sim_run_id,

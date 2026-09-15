@@ -160,11 +160,12 @@ def apply_sales_terms(
         filled["preferred_payment_terms_type"] = rule.payment_terms_type
     if request.preferred_payment_days is None:
         filled["preferred_payment_days"] = rule.payment_days
-    if request.preferred_unit_price_krw is None:
+    price_filled_from_rule = request.preferred_unit_price_krw is None
+    if price_filled_from_rule:
         price = _unit_price(rule, request, forecast_fn=forecast_fn)
         if price is not None:
             filled["preferred_unit_price_krw"] = price
-    if request.source_ref is None:
+    if request.source_ref is None and "preferred_unit_price_krw" in filled:
         filled["source_ref"] = rules_source_ref(
             _sim_run_id_of(request), rule.unit_price_source
         )

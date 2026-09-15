@@ -590,3 +590,12 @@ def test_조건은_걷기당_한_번만_읽는다() -> None:
 
     assert 부른것 == [실행], f"걷기가 조건을 {len(부른것)}번 읽었다"
     assert len(하루.받은것) > 1, "하루를 한 번만 걸어서는 이 검사가 아무것도 안 잰다"
+
+
+def test_apply_sales_terms_does_not_label_existing_user_price_as_rule_price() -> None:
+    request = _요청(preferred_unit_price_krw=Decimal(2300), source_ref=None)
+
+    result = apply_sales_terms(request, 조건규칙)
+
+    assert result.preferred_unit_price_krw == Decimal(2300)
+    assert result.source_ref is None
