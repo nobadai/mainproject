@@ -326,7 +326,7 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
     if not isinstance(chosen, dict):
         return None
     items = _pick_all(chosen.get("items"), QA_ITEMS)
-    kinds = _pick_all(chosen.get("kinds"), QA_KINDS)
+    kinds = _trim_kinds(_pick_all(chosen.get("kinds"), QA_KINDS), question)
     asks = _pick_asks(chosen.get("asks"))
     if asks and not items:
         items = _pick_all([a["item"] for a in asks], QA_ITEMS)
@@ -342,6 +342,35 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         "kind": kinds[0] if kinds else None,
         "dates": _parse_dates(chosen.get("dates")),
     }
+
+
+#: 가격 종류를 부르는 말. **질문에 이 낱말이 있어야 그 종류를 남긴다.**
+_KIND_WORDS: dict[str, tuple[str, ...]] = {
+    "AUC": ("경락", "경매", "낙찰", "매입"),
+    "WHSL": ("중도매", "도매"),
+    "RTL": ("소매", "마트", "소비자"),
+}
+
+#: 「가격 전부」처럼 **정말 다 달라는** 말. 이때는 안 자른다.
+_ALL_WORDS = ("전부", "모두", "다 ", "모든", "전체")
+
+
+def _trim_kinds(kinds: list[str], question: str) -> list[str]:
+    """해석기가 넉넉히 고른 가격 종류를 **질문에 나온 것만** 남긴다.
+
+    🔴 **지시문으로 두 번 실패한 자리다** (2026-09-15). 「배추 경락가」 하나를
+      물어도 `AUC·WHSL·RTL` 셋을 내놓고, 같은 질문에 세 번 물으면 셋·셋·하나로
+      흔들렸다. 낱말 풀이를 넣고 「나온 것만」이라고 적어도 그대로였다.
+
+    **말로 부탁해서 안 되는 것은 규칙이 자른다** — 우리 원칙 그대로다.
+
+    ★ 자르고 나서 **빈손이 되면 자르지 않는다.** 우리가 모르는 표현으로 물었을
+      수 있고, 그때는 해석기 쪽이 옳다. 규칙이 답을 없애면 안 된다.
+    """
+    if len(kinds) <= 1 or any(word in question for word in _ALL_WORDS):
+        return kinds
+    named = [k for k in kinds if any(w in question for w in _KIND_WORDS.get(k, ()))]
+    return named or kinds
 
 
 def _pick_asks(raw: Any) -> list[dict[str, Any]]:

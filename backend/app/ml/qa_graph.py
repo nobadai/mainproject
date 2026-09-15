@@ -39,6 +39,7 @@ from app.ml.qa_schemas import (
     QaMeta,
     QaRequest,
 )
+from app.ml.schemas import SPEC
 
 KIND_LABEL = {"AUC": "경락가", "WHSL": "중도매가", "RTL": "소매가"}
 
@@ -413,12 +414,29 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
 
 
 def _first_of(block: dict[str, Any], key: str) -> Any:
-    """블록의 첫 행에서 한 칸. 행이 없으면 당일 값에서, 그것도 없으면 `None`."""
+    """블록의 첫 행에서 한 칸. 없으면 당일 값에서, 그것도 없으면 규격표에서.
+
+    🔴 **당일 행에는 규격 칸이 아예 없다** (2026-09-15 실측). 원본 창고는
+      `market_name` · `grade_name` · `spec_desc` 를 담지 않는다. 그래서 오늘 값만
+      답할 때 규격이 통째로 비었다 — 문장에서 뺀 값이 **정말로 사라진** 것이다.
+
+      `SPEC` 은 우리가 쥔 상수이므로 거기서 채운다. 지어내는 것이 아니라
+      **같은 사실을 다른 자리에서** 가져오는 것이다.
+    """
     rows = block.get("rows") or []
     if rows and rows[0].get(key) is not None:
         return rows[0][key]
     today = block.get("today") or {}
-    return today.get(key)
+    if today.get(key) is not None:
+        return today[key]
+    spec = SPEC.get(block.get("kind") or "") or {}
+    if key == "market_name":
+        return spec.get("market")
+    if key == "grade_name":
+        return spec.get("grade")
+    if key == "spec_desc":
+        return (spec.get("desc") or {}).get(block.get("item"))
+    return None
 
 
 def _answer_markdown(state: QaState) -> QaState:
