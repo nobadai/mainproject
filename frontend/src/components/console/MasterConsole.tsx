@@ -10,6 +10,7 @@ import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
 import { BurnInPanel } from "@/components/BurnInPanel";
 import { LlmTrace } from "@/components/LlmTrace";
+import { SalesConversation } from "@/components/console/SalesConversation";
 import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
@@ -57,6 +58,13 @@ type Turn =
       done?: boolean;
     }
   | { kind: "run"; run: ProcurementRunResponse }
+  //   판매가 답한 조회. 요약 → 판매안 확인 → 카드 → 선택 → 최종 확인 → 확정까지 이 턴이 끈다.
+  //   마스터가 만든 원문 답 · 실행 축 · 분류 흔적은 지우지 않고 기술 상세로 접는다.
+  | {
+      kind: "sales";
+      asOf: string;
+      detail: { text: string; note?: string | null; trace?: LlmTraceData };
+    }
   //   승인 직후 "무엇을 하기로 한 것인가". **"오늘 산 것" 이 아니다** — 승인은
   //   기록이고 발주는 이 시스템 밖이다 (`ApprovedPlan` 이 그 사실을 적는다).
   | { kind: "approved"; scenario: Scenario; decision: DecisionOut }
@@ -70,6 +78,17 @@ type LlmTraceData = Pick<
   AskResponse,
   "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
 >;
+
+/**
+ * 판매가 답했는가. **구조화된 조회 답(`status.answers.sales`)으로 가른다** — 문장을 긁지 않는다.
+ *
+ * ⚠️ 화면 타입의 부서 목록(`AgentName`)에 판매가 아직 없다. 공용 계약이라 넓히지 않고 여기서 읽는다.
+ */
+function salesAnswered(intent: Intent | undefined, status: unknown): boolean {
+  const answers = (status as { answers?: Record<string, unknown> } | null | undefined)?.answers;
+  const agents = (intent?.agents ?? []) as readonly string[];
+  return Boolean(agents.includes("sales") && answers && "sales" in answers);
+}
 
 function traceOf(res: AskResponse): LlmTraceData {
   return {
@@ -165,6 +184,12 @@ export function MasterConsole({ session }: { session: Session }) {
           requestId: res.request_id,
           trace: traceOf(res),
         });
+      } else if (res.answer && salesAnswered(res.intent, res.status)) {
+        push({
+          kind: "sales",
+          asOf: String(res.as_of),
+          detail: { text: res.answer.text, note: res.note, trace: traceOf(res) },
+        });
       } else if (res.answer) {
         //   조회면 `note` 가 **어느 실행·기준일을 읽었나** 다. 답 아래에 같이 보인다.
         push({ kind: "bot", text: res.answer.text, trace: traceOf(res), note: res.note });
@@ -225,6 +250,8 @@ export function MasterConsole({ session }: { session: Session }) {
           { kind: "bot", text: res.answer?.text ?? "" },
           { kind: "run", run: res.run },
         );
+      } else if (res.answer && salesAnswered(turn.intent, (res as { status?: unknown }).status)) {
+        push({ kind: "sales", asOf, detail: { text: res.answer.text, note: res.note } });
       } else if (res.answer) {
         push({ kind: "bot", text: res.answer.text, note: res.note });
       } else {
@@ -352,6 +379,17 @@ export function MasterConsole({ session }: { session: Session }) {
                   onConfirm={confirm}
                   busy={busy}
                 >
+                  {turn.kind === "sales" && (
+                    <>
+                      <SalesConversation asOf={turn.asOf} canApprove={can.approve} />
+                      <details className="mt-3 text-[11px] text-muted">
+                        <summary className="cursor-pointer">기술 상세</summary>
+                        <div className="mt-1.5 whitespace-pre-wrap">{turn.detail.text}</div>
+                        {turn.detail.note && <p className="m-0 mt-1 font-mono">{turn.detail.note}</p>}
+                        {turn.detail.trace && <LlmTrace trace={turn.detail.trace} />}
+                      </details>
+                    </>
+                  )}
                   {turn.kind === "run" && (
                     <>
                     <ProcurementResult
@@ -502,7 +540,7 @@ function TurnView({
       </div>
     );
 
-  // kind === "run"
+  // kind === "run" · "sales" — 결과 카드는 부르는 쪽이 children 으로 넣는다
   return (
     <div className="rounded-xl border border-line bg-surface p-4">
       {children}

@@ -257,6 +257,10 @@ export interface SalesProposal {
   additional_supply_required: boolean | null;
   ml_support_used: boolean | null;
   recommended: boolean;
+  /** 추천한 안에 판매가 저장해 둔 이유. 없으면 `null` 이다 — 화면이 지어내지 않는다. */
+  recommendation_reason: string | null;
+  /** 실제 판매로 확정됐으면 주문 상태. `null` 은 «확정 안 됨» 이다 (추천·선택과 다르다). */
+  sale_status: string | null;
 }
 
 export interface SalesProposalsResponse {

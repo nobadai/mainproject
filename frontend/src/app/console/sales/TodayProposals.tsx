@@ -13,7 +13,7 @@
  *    «검토 전» 이다 — 통과도 거절도 아니다.
  */
 
-import { useState, useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/console/Blocks";
 import {
@@ -52,6 +52,16 @@ const OBJECTIVES: Record<string, string> = {
   SALES_OPPORTUNITY: "판매 기회",
 };
 
+/**
+ * 걸리는 점. 🔴 **코드 모양의 문장(`PRICE_CONTEXT_REQUIRED` 같은)은 원문으로 적지 않는다** —
+ * 사용자가 읽을 수 있는 문장만 남기고, 코드는 «세부 조건» 한 줄로 알린다.
+ */
+function concerns(row: SalesProposal): string[] {
+  const all = [...row.risks, ...row.uncertainties];
+  const readable = [...new Set(all.filter((text) => !/^[A-Z0-9_:.-]+$/.test(text.trim())))];
+  return readable.length < all.length ? [...readable, "세부 조건을 확인해 주세요."] : readable;
+}
+
 function label(table: Record<string, string>, value: string | null): string | null {
   if (!value) return null;
   return table[value] ?? "판매안";
@@ -69,6 +79,8 @@ export function TodayProposals({
   const [selectedScenarioKey, setSelectedScenarioKey] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  //  🔴 즉시 잠근다 — 상태만으로는 빠른 두 번 클릭이 같은 결정을 두 번 보낸다.
+  const inFlight = useRef(false);
   const [decision, setDecision] = useState<SalesDecisionResponse | null>(null);
   const [decisionError, setDecisionError] = useState<string | null>(null);
   const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
@@ -104,7 +116,8 @@ export function TodayProposals({
         }}
         onCancel={() => setConfirming(false)}
         onConfirm={async () => {
-          if (!selected || !selected.history_run_id || !session || submitting) return;
+          if (!selected || !selected.history_run_id || !session || inFlight.current) return;
+          inFlight.current = true;
           setSubmitting(true);
           setDecisionError(null);
           try {
@@ -120,6 +133,7 @@ export function TodayProposals({
           } catch (error) {
             setDecisionError(error instanceof Error ? error.message : "판매 확정 요청을 완료하지 못했습니다.");
           } finally {
+            inFlight.current = false;
             setSubmitting(false);
           }
         }}
@@ -210,7 +224,11 @@ function DecisionResult({ result }: { result: SalesDecisionResponse }) {
   return <p className="mt-4 rounded-xl border p-4 text-[12px]" style={{ borderColor: "var(--color-t-warn)" }}>{text[result.revalidation_outcome ?? ""] ?? detail ?? "최종 확인 결과를 확인해 주세요."}{detail && ` ${detail}`}</p>;
 }
 
-function ProposalCard({
+/**
+ * 판매안 카드 한 장. **판매 화면과 마스터 대화가 같은 카드를 쓴다** — 두 자리가 다른
+ * 숫자나 다른 추천을 말하지 않게 한 벌로 둔다.
+ */
+export function ProposalCard({
   row,
   selected,
   onSelect,
@@ -242,6 +260,8 @@ function ProposalCard({
         {kind && <Tag text={kind} color="var(--color-t-info)" />}
         {row.recommended && <Tag text="추천" color="var(--color-t-good)" />}
         {selected && <Tag text="선택됨" color="var(--color-t-info)" />}
+        {/* ★ 확정은 추천·선택과 다른 사실이다 — 같은 실행에 판매 기록이 있을 때만 붙는다. */}
+        {row.sale_status !== null && <Tag text="판매 확정" color="var(--color-t-good)" />}
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
           {/* ⚠️ 재무가 아직 안 본 안과 거절된 안은 다른 사실이다. */}
           {row.finance_verdict === null ? "재무 검토 전" : verdictText(row.finance_verdict)}
@@ -278,15 +298,16 @@ function ProposalCard({
         <button
           type="button"
           onClick={onSelect}
-          className="rounded-lg border px-3 py-2 text-[12px] font-semibold"
+          disabled={row.sale_status !== null}
+          className="rounded-lg border px-3 py-2 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-55"
           style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
         >
-          {selected ? "선택한 판매안" : "이 판매안 선택"}
+          {row.sale_status !== null ? "이미 확정된 판매" : selected ? "선택한 판매안" : "이 판매안 선택"}
         </button>
 
-        {(row.risks.length > 0 || row.uncertainties.length > 0) && (
+        {concerns(row).length > 0 && (
           <Section title="걸리는 것" tone="var(--color-t-warn)">
-            {[...row.risks, ...row.uncertainties].map((text, index) => (
+            {concerns(row).map((text, index) => (
               <li key={index} className="flex gap-2">
                 <i aria-hidden style={{ color: "var(--color-t-warn)" }}>
                   ·
