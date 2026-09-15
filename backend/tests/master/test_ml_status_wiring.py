@@ -281,3 +281,47 @@ def test_ml_이_없어도_매입_판매_필수_어댑터_검사는_통과한다(
     assert not wiring.registry().has("ml")
     assert wiring.missing(wiring.REQUIRED_FOR_PROCUREMENT) == ()
     assert wiring.missing(wiring.REQUIRED_FOR_SALES) == ()
+
+
+# ── (f) 조립 뿌리가 ml 을 건다 ──────────────────────────────────────────
+
+
+def test_조립_뿌리를_부르면_ml_이_등록된다():
+    """`wire_registries()` 한 번으로 `ml` 이 레지스트리에 선다.
+
+    ★ 에이전트 레지스트리는 `clean_wiring` 과 루트 `conftest` 가 되돌린다. 조립 뿌리는
+      다른 등록소도 채우므로 그것들은 `test_cli_bootstrap.py` 와 같은 방식으로 떠 두고
+      끝나면 되돌린다.
+    """
+    from app.master import (
+        cancellation,
+        closing,
+        collection,
+        day_open,
+        inbound,
+        receivable,
+        transition,
+    )
+    from app.master.bootstrap import wire_registries
+
+    되돌릴_것 = (
+        (transition, transition.registered, transition.register_transition),
+        (day_open, day_open.registered, day_open.register_day_opening),
+        (cancellation, cancellation.registered_cancellations, cancellation.register_cancellation),
+        (inbound, inbound.registered, inbound.register_inbound),
+        (collection, collection.registered, collection.register_collection),
+        (closing, closing.registered, closing.register_closing),
+        (receivable, receivable.registered, receivable.register_receivable),
+    )
+    저장 = [dict(read()) for _, read, _ in 되돌릴_것]
+    try:
+        assert not wiring.registry().has("ml")
+
+        wire_registries()
+
+        assert wiring.registry().has("ml")
+    finally:
+        for (module, _, register), saved in zip(되돌릴_것, 저장):
+            module.reset()
+            for part, impl in saved.items():
+                register(part, impl)
