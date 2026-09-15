@@ -35,7 +35,7 @@ from __future__ import annotations
 import ast
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.master import backtest_runner
@@ -151,7 +151,7 @@ def test_안_실은_부서는_None_그대로_남는다() -> None:
 
     assert step.observed_at is None, "마스터가 None 을 무언가로 메웠다"
     assert step.observed_at != plan.as_of, "as_of 를 베껴 넣었다 — 안 잰 것이 잰 것이 됐다"
-    assert step.observed_at != date.today(), "오늘 날짜로 메웠다"
+    assert step.observed_at != datetime.now(tz=UTC).date(), "오늘 날짜로 메웠다"
 
 
 def test_실행흔적에_관측시점이_있어도_업무결과의_None_을_안_메운다() -> None:
@@ -298,7 +298,8 @@ def test_칸_자체가_없는_옛_단계는_안_쟀다로_읽힌다() -> None:
         llm_status = "DISABLED"
 
     class _옛응답:
-        plan = [_옛단계()]
+        def __init__(self) -> None:
+            self.plan = [_옛단계()]
 
     assert _observed_ats(_옛응답()) == (None,)
 

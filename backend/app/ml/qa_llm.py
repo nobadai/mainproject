@@ -83,7 +83,7 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 #:
 #: 왜 두 벌을 두나: 「영어 프롬프트가 낫다」 는 말은 흔한데 우리는 한 번도 안 쟀다.
 #: 재려면 **지시문 언어만** 다르고 나머지가 같은 짝이 있어야 한다. 모델·온도·
-#: 응답 스키마·질문은 그대로 둔다. 채점은 `ops/qa_prompt_bench.py` 가 한다.
+#: 응답 스키마·질문은 그대로 둔다. 채점은 `app/ml/ops/qa_prompt_bench.py` 가 한다.
 SYSTEM_PROMPT_EN = """You are the interpretation layer of a crop price forecast Q&A system.
 From the user's question, pick out **only what was asked**. Do not estimate a price,
 and do not write any explanatory sentence.
@@ -142,6 +142,11 @@ def _prompt(base_dt: date) -> str:
             #     사정이지 묻는 사람의 뜻이 아니다. 「전부」라고 하면 오늘부터다.
             "「모든 날」·「전부」면 **오늘을 포함해 19개를 다** 적는다.",
             "「내일부터」라고 하면 오늘을 뺀다. 「5일 뒤까지」면 내일부터 5개다.",
+            #   ★ 「N일치」가 빠져 있었다 (2026-09-15 실측). 「일주일치 배추 경락가」에
+            #     날짜를 비워 내 «날짜를 안 말씀하셨다» 로 답했다. 뜻은 「모든 날」과
+            #     맞춰 **오늘부터 N개**로 둔다.
+            "「일주일치」·「앞으로 일주일」이면 **오늘부터 7개**, 「3일치」면 오늘부터 3개다.",
+            "「이번 주」도 오늘부터 7개로 본다. 기간을 말했으면 날짜를 **비우지 마라**.",
             "",
         ]
     )
@@ -183,7 +188,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["route"],
+    #   🔴 **칸을 전부 꼭 쓰게 한다** (2026-09-15 · 화면에서 발견).
+    #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
+    #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
+    #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
+    "required": ["route", "items", "kinds", "dates", "asks"],
 }
 
 
@@ -326,7 +335,7 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
     if not isinstance(chosen, dict):
         return None
     items = _pick_all(chosen.get("items"), QA_ITEMS)
-    kinds = _pick_all(chosen.get("kinds"), QA_KINDS)
+    kinds = _trim_kinds(_pick_all(chosen.get("kinds"), QA_KINDS), question)
     asks = _pick_asks(chosen.get("asks"))
     if asks and not items:
         items = _pick_all([a["item"] for a in asks], QA_ITEMS)
@@ -342,6 +351,35 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         "kind": kinds[0] if kinds else None,
         "dates": _parse_dates(chosen.get("dates")),
     }
+
+
+#: 가격 종류를 부르는 말. **질문에 이 낱말이 있어야 그 종류를 남긴다.**
+_KIND_WORDS: dict[str, tuple[str, ...]] = {
+    "AUC": ("경락", "경매", "낙찰", "매입"),
+    "WHSL": ("중도매", "도매"),
+    "RTL": ("소매", "마트", "소비자"),
+}
+
+#: 「가격 전부」처럼 **정말 다 달라는** 말. 이때는 안 자른다.
+_ALL_WORDS = ("전부", "모두", "다 ", "모든", "전체")
+
+
+def _trim_kinds(kinds: list[str], question: str) -> list[str]:
+    """해석기가 넉넉히 고른 가격 종류를 **질문에 나온 것만** 남긴다.
+
+    🔴 **지시문으로 두 번 실패한 자리다** (2026-09-15). 「배추 경락가」 하나를
+      물어도 `AUC·WHSL·RTL` 셋을 내놓고, 같은 질문에 세 번 물으면 셋·셋·하나로
+      흔들렸다. 낱말 풀이를 넣고 「나온 것만」이라고 적어도 그대로였다.
+
+    **말로 부탁해서 안 되는 것은 규칙이 자른다** — 우리 원칙 그대로다.
+
+    ★ 자르고 나서 **빈손이 되면 자르지 않는다.** 우리가 모르는 표현으로 물었을
+      수 있고, 그때는 해석기 쪽이 옳다. 규칙이 답을 없애면 안 된다.
+    """
+    if len(kinds) <= 1 or any(word in question for word in _ALL_WORDS):
+        return kinds
+    named = [k for k in kinds if any(w in question for w in _KIND_WORDS.get(k, ()))]
+    return named or kinds
 
 
 def _pick_asks(raw: Any) -> list[dict[str, Any]]:

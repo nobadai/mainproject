@@ -87,7 +87,10 @@ def test_기본은_내일_하루를_답한다(도구를_갈아_끼운다):
     assert out.meta.status == "OK"
     assert out.meta.targets == [BASE + timedelta(days=1)]
     assert "867" in out.markdown
-    assert "출발점" in out.markdown          # 앵커가 거래가가 아니라는 경고
+    #   ★ 출발점은 **문장에서 뺐다** (2026-09-15 · 화면을 깨끗이). meta 로 옮겼다 —
+    #     없앤 것이 아니다. 실제 거래가가 아니라는 사실은 여전히 전해져야 한다.
+    assert out.meta.current_price == 884
+    assert "출발점" not in out.markdown
 
 
 def test_범위_밖_날짜가_섞이면_나머지를_답하고_PARTIAL_로_적는다(도구를_갈아_끼운다):
@@ -101,7 +104,8 @@ def test_범위_밖_날짜가_섞이면_나머지를_답하고_PARTIAL_로_적�
     assert out.meta.status == "PARTIAL"
     assert out.meta.out_of_range == [BASE + timedelta(days=20)]
     assert "예측 범위 밖" in out.markdown
-    assert "복사값" in out.markdown          # is_filled 는 답에 드러난다
+    #   is_filled 는 답에 드러난다 — 문구는 사용자 지시로 바꿨다 (2026-09-15)
+    assert "직전 예측값을 사용합니다" in out.markdown
 
 
 def test_당일을_물으면_원본_창고에서_읽고_출처를_밝힌다(도구를_갈아_끼운다):
@@ -139,10 +143,118 @@ def test_평균_오차는_화면과_같은_값을_쓴다(도구를_갈아_끼운
     """★ prediction_log 를 다시 집계하지 않는다 — 한 사실에 두 숫자가 돌면 안 된다."""
     도구를_갈아_끼운다(rows=[_row(1)], acc=qa_tools.SEALED_ACCURACY[("AUC", "배추")])
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
-    assert "19.7%" in out.markdown          # 화면 _ACCURACY 와 같은 값
-    #   조건 없는 수치는 안 적는다. 다만 **사람 말로** 적는다 — 화면에 나가는 문장이라
-    #   «봉인 개봉 · 홀드아웃» 같은 우리끼리 쓰는 말을 쓰지 않는다 (마스터 요청).
-    assert "2026-09-01" in out.markdown and "486일치" in out.markdown
+    #   ★ 문장에서는 뺐고 meta 로 옮겼다. **값과 조건이 늘 같이 간다** —
+    #     조건 없는 수치는 어디에도 안 남긴다 (CLAUDE.md §11).
+    assert out.meta.accuracy_pct == "19.7"          # 화면 _ACCURACY 와 같은 값
+    assert "2026-09-01" in (out.meta.accuracy_note or "")
+    assert "486일치" in (out.meta.accuracy_note or "")
+    assert "19.7%" not in out.markdown
+
+
+def test_설명_줄을_문장에서_빼고_meta_로_옮겼다(도구를_갈아_끼운다):
+    """★ 화면은 깨끗하게, 값은 잃지 않게 (2026-09-15 지시).
+
+    🔴 **빼는 것이 아니라 옮기는 것이다.** 출발점·오차·규격이 통째로 사라지면
+       19.7% 틀리는 값을 확정값처럼 읽게 된다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)], acc=qa_tools.SEALED_ACCURACY[("AUC", "배추")])
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    for gone in ("출발점", "평균 오차", "값의 정체", "486일치"):
+        assert gone not in out.markdown, gone
+    assert out.meta.current_price == 884
+    assert out.meta.accuracy_pct == "19.7"
+    assert out.meta.market_name == "서울가락"
+    assert out.meta.grade_name == "특"
+    assert out.meta.spec_desc == "그물망·파렛트 10kg"
+
+
+def test_당일_값의_Decimal_출발점을_받아_낸다(도구를_갈아_끼운다):
+    """🔴 **자료형이 창고마다 다르다** (2026-09-15 실측).
+
+    전달표 행은 정수인데 원본 창고의 당일 행은 `Decimal('1001.090')` 이다.
+    meta 를 `int` 로 좁혀 뒀더니 당일 값을 물을 때마다 500 이 났고, 검사는
+    도구를 갈아 끼워 정수만 넣어서 **안 걸렸다.** 진짜 자료형으로 재현해 둔다.
+    """
+    from decimal import Decimal
+
+    today = {
+        "base_dt": BASE, "target_dt": BASE, "lead_biz_d": 0,
+        "predicted": Decimal("962.400"), "lower": Decimal("716.0"),
+        "upper": Decimal("1342.0"), "current_price": Decimal("1001.090"),
+        "unit": "원/kg", "is_gated": False, "gate_reason": None,
+        "band_method": "quantile", "model_version": "ops_auc",
+    }
+    도구를_갈아_끼운다(rows=[], today=today)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC", dates=[BASE]))
+    assert out.meta.status == "OK"
+    assert out.meta.current_price == 1001                    # 반올림해 받는다
+    assert "962" in out.markdown
+
+
+def test_당일_값은_고른_기준일로_읽는다_미래를_안_본다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 **룩어헤드였다** (2026-09-15 · 화면에서 발견).
+
+    화면(3000)이 2026-07-01 을 걷는데 「오늘 2026-09-15 · 962원」이 나갔다.
+    당일 값이 as_of 를 안 받고 **원본 창고 전체 최신**을 읽었기 때문이다.
+    에러 없이 두 달 반 뒤의 값이 섞였다.
+    """
+    화면_기준일 = date(2026, 7, 1)
+    받은_기준일: list = []
+
+    def 당일(item, kind, base_dt=None):
+        받은_기준일.append(base_dt)
+        return {
+            "base_dt": base_dt, "target_dt": base_dt, "lead_biz_d": 0,
+            "predicted": 389, "lower": 277, "upper": 657, "current_price": 400,
+            "unit": "원/kg", "is_gated": False, "gate_reason": None,
+            "band_method": "quantile", "model_version": "ops_auc",
+        }
+
+    도구를_갈아_끼운다(rows=[], base=화면_기준일)
+    monkeypatch.setattr(qa_graph.qa_tools, "today_row", 당일)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC", as_of=화면_기준일))
+    assert 받은_기준일 == [화면_기준일]                      # 전체 최신이 아니라 그날
+    assert "오늘 2026-07-01" in out.markdown
+    assert "2026-09-15" not in out.markdown
+
+
+def test_오늘은_화면_기준일로_센다(도구를_갈아_끼운다, monkeypatch):
+    """★ 「오늘」·「내일」은 **화면의 기준일**로 센다. 벽시계가 아니다."""
+    화면_기준일 = date(2026, 7, 1)
+    받은_오늘: list = []
+
+    def 해석(question, today):
+        받은_오늘.append(today)
+        return {"route": "forecast", "items": ["배추"], "kinds": ["AUC"],
+                "item": "배추", "kind": "AUC", "dates": [], "asks": []}
+
+    도구를_갈아_끼운다(rows=[_row(1)], base=화면_기준일)
+    monkeypatch.setattr(qa_graph.qa_llm, "interpret", 해석)
+    qa_graph.answer(QaRequest(question="오늘 배추 경락가", as_of=화면_기준일))
+    assert 받은_오늘 == [화면_기준일]
+
+
+def test_게이트_행에도_출발점_문구를_안_적는다(도구를_갈아_끼운다):
+    """★ 표 아래 «출발점» 줄을 뺄 때 **비고 칸의 같은 말을 놓쳤다** (2026-09-15 화면).
+
+    「모델 대신 출발점을 그대로 씀」이 비고에만 남아, 출발점이라는 말을 없앤
+    화면에서 뜻 모를 문구가 됐다. 정보는 meta.is_gated 로 옮긴다.
+    """
+    gated = {**_row(1), "is_gated": True}
+    도구를_갈아_끼운다(rows=[gated])
+    out = qa_graph.answer(QaRequest(item="무", kind="RTL"))
+    assert "출발점" not in out.markdown
+    assert out.meta.is_gated == [True]
+
+
+def test_쓰지_말라는_경고는_문장에_남는다(도구를_갈아_끼운다):
+    """🔴 이건 설명이 아니라 **판정**이다. 못 보면 그대로 쓰게 된다."""
+    도구를_갈아_끼운다(
+        rows=[_row(1)],
+        usab={"use_recommended": False, "quality_note": "앵커가 거의 완벽"},
+    )
+    out = qa_graph.answer(QaRequest(item="양파", kind="WHSL"))
+    assert "쓰지 마세요" in out.markdown
 
 
 def test_상수표는_아홉_칸이_다_있다():
@@ -394,6 +506,53 @@ def test_스위치를_끄면_해석기가_아예_안_부른다(monkeypatch):
     monkeypatch.setenv("ML_GEMINI_API_KEY", "있는-척-하는-키")
     monkeypatch.setattr(qa_llm.urllib.request, "urlopen", _절대_안_불려야_한다)
     assert qa_llm.interpret("내일 배추 얼마야?", BASE) is None
+
+
+def test_넘치게_고른_가격_종류를_규칙이_자른다():
+    """🔴 **지시문으로 두 번 실패한 자리다** (2026-09-15).
+
+    「내일 배추 경락가 얼마야?」 하나를 물어도 해석기가 `AUC·WHSL·RTL` 셋을
+    내놓았다. 같은 질문에 세 번 물으면 셋·셋·하나로 흔들렸다. 낱말 풀이를 넣고
+    「나온 것만」이라고 적어도 그대로였다.
+
+    **말로 부탁해서 안 되는 것은 규칙이 자른다.**
+    """
+    셋 = ["AUC", "WHSL", "RTL"]
+    assert qa_llm._trim_kinds(셋, "내일 배추 경락가 얼마야?") == ["AUC"]
+    assert qa_llm._trim_kinds(셋, "배추 소매가 내일") == ["RTL"]
+    #   둘을 물었으면 둘 다 남는다
+    assert qa_llm._trim_kinds(셋, "배추 경락가랑 도매가 내일") == ["AUC", "WHSL"]
+
+
+def test_전부_라고_하면_자르지_않는다():
+    """「가격 전부」는 정말 다 달라는 말이다. 그때 자르면 물어본 것을 못 준다."""
+    셋 = ["AUC", "WHSL", "RTL"]
+    for 문장 in ("배추 가격 전부 다", "배추 가격 모두", "배추 모든 가격"):
+        assert qa_llm._trim_kinds(셋, 문장) == 셋, 문장
+
+
+def test_모르는_표현이면_자르지_않는다():
+    """★ 규칙이 답을 **없애면** 안 된다.
+
+    우리가 모르는 말로 물었을 수 있다. 잘라서 빈손이 되면 해석기 쪽이 옳다.
+    """
+    assert qa_llm._trim_kinds(["AUC", "WHSL"], "배추 값 알려줘") == ["AUC", "WHSL"]
+
+
+def test_응답_스키마는_칸을_전부_꼭_쓰게_한다():
+    """🔴 **화면에서 발견한 것** (2026-09-15).
+
+    `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds` 까지만
+    쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체기간」·「일주일치」가
+    전부 «날짜를 말씀하지 않으셨다» 로 떨어졌다. 뜻은 알아듣고 있었는데 칸을 안 썼다.
+
+    선택 칸이 늘면 모델은 뒤쪽 칸을 건너뛴다 — 비어도 되지만 칸은 반드시 쓰게 한다.
+    """
+    required = set(qa_llm._RESPONSE_SCHEMA["required"])
+    assert {"route", "items", "kinds", "dates", "asks"} <= required
+    #   날짜를 목록으로 묶는 판도 같은 필수 목록을 물려받는다
+    enum_schema = qa_llm._schema(BASE)
+    assert {"dates", "asks"} <= set(enum_schema["required"])
 
 
 def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():

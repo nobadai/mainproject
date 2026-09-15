@@ -39,6 +39,7 @@ from app.ml.qa_schemas import (
     QaMeta,
     QaRequest,
 )
+from app.ml.schemas import SPEC
 
 KIND_LABEL = {"AUC": "경락가", "WHSL": "중도매가", "RTL": "소매가"}
 
@@ -134,7 +135,12 @@ def supervise(state: QaState) -> QaState:
     if base_dt is None:
         return {"status": "NO_DATA", "message": "전달표에 예측이 아직 없습니다."}
 
-    chosen = qa_llm.interpret(req.question, base_dt)
+    #   ★ **「오늘」은 화면의 기준일이다** (2026-09-15 · 사용자 지시).
+    #     화면(3000)은 날짜를 걸으며 채팅마다 그 날을 `as_of` 로 싣는다. 전에는
+    #     «as_of 이하 최신 예측일» 을 오늘로 셌다 — 그날 예측이 없으면(휴일 등)
+    #     하루 이틀 전 날이 「오늘」이 됐다. 해석기는 as_of 로 날을 센다.
+    today = req.as_of or base_dt
+    chosen = qa_llm.interpret(req.question, today)
     if chosen is None:
         return {"status": "LLM_UNAVAILABLE", "message": NEED_CLARIFY_LLM}
     if chosen["route"] == "out_of_scope":
@@ -245,7 +251,7 @@ def gate(state: QaState) -> QaState:
     #     기본값을 썼다는 것을 `used_default` 로 들고 가 답에 한 줄로 적는다.
     used_default = not (req.dates or state.get("asked")
                         or any(a.get("dates") for a in state.get("asks") or []))
-    fallback = list(req.dates or state.get("asked") or [base_dt])
+    fallback = list(req.dates or state.get("asked") or [req.as_of or base_dt])
     last = base_dt + timedelta(days=QA_MAX_OFFSET)
 
     #   ★ **묶음이 있으면 그것만 본다.** 없으면 품목 x 가격을 곱한다.
@@ -320,7 +326,8 @@ def fetch(state: QaState) -> QaState:
         for ask in asks[:MAX_ITEMS * MAX_KINDS]:
             item, kind = ask["item"], ask["kind"]
             rows = qa_tools.forecast_rows(item, kind, base_dt, ask["targets"])
-            today = qa_tools.today_row(item, kind) if ask["wants_today"] else None
+            today = (qa_tools.today_row(item, kind, base_dt)
+                     if ask["wants_today"] else None)
             if state.get("used_default") and today is None and not rows:
                 #   ★ 오늘 값이 없는 아침도 있다. **빈 답을 주지 말고 내일로 물러선다.**
                 fell_back = True
@@ -368,9 +375,10 @@ def compose(state: QaState) -> QaState:
 
 def _line(label: str, row: dict[str, Any], unit: str, note: str = "") -> str:
     if row.get("is_filled"):
-        note = (note + " · " if note else "") + "⚠ 복사값 — 그날 조사가 없어 앞 장날 값"
-    if row.get("is_gated"):
-        note = (note + " · " if note else "") + "모델 대신 출발점을 그대로 씀"
+        note = (note + " · " if note else "") + "휴일의 경우 직전 예측값을 사용합니다."
+    #   ★ 「모델 대신 출발점을 그대로 씀」은 **문장에서 뺐다** (2026-09-15 · 화면에서 발견).
+    #     표 아래 설명 줄(출발점)을 뺄 때 비고 칸의 이 문구를 놓쳤다. 출발점이라는 말을
+    #     화면에서 없앴는데 비고에만 남아 뜻 모를 말이 됐다. 값은 meta.is_gated 로 간다.
     return (
         f"| {label} | **{int(row['predicted']):,}{unit}** | "
         f"{int(row['lower']):,} ~ {int(row['upper']):,} | {note} |"
@@ -384,8 +392,9 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
     base_dt = state["base_dt"]
     unit = (rows[0]["unit"] if rows else (today or {}).get("unit")) or "원/kg"
 
+    as_of = state["request"].as_of or base_dt
     out = [
-        f"**{item} · {KIND_LABEL.get(kind, kind)} · 기준일 {base_dt}**",
+        f"**{item} · {KIND_LABEL.get(kind, kind)} · 기준일 {as_of}**",
         "",
         "| 날짜 | 예측 | 예상 구간 | 비고 |",
         "|---|---|---|---|",
@@ -393,26 +402,19 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
     if today:
         out.append(_line(f"오늘 {today['target_dt']}", today, unit))
     for row in rows:
-        out.append(_line(f"{row['target_dt']} (D+{row['offset_days']})", row, unit))
+        #   화면 기준일과 같은 날이면 「오늘」로 적는다 — 예측일이 하루 앞서 계산된
+        #   날(휴일 뒤 등)에도 사람이 보는 「오늘」은 화면 날짜다.
+        if row["target_dt"] == as_of:
+            label = f"오늘 {row['target_dt']}"
+        else:
+            label = f"{row['target_dt']} (D+{(row['target_dt'] - as_of).days})"
+        out.append(_line(label, row, unit))
 
-    #   ── 이 조합에만 해당하는 꼬리말 ──
-    anchor = (rows[0] if rows else today or {}).get("current_price")
-    if anchor:
-        out += [
-            "",
-            (
-                f"> 출발점 {int(anchor):,}{unit} — 실제 거래가가 아니라 "
-                "모델이 출발한 값입니다."
-            ),
-        ]
-    acc = block.get("accuracy")
-    if acc:
-        #   ★ 화면에 적힌 것과 **같은 값**이다. 다시 재지 않는다.
-        out.append(
-            f"> 이 조합의 평균 오차는 **{acc['pct']}%** 입니다 "
-            f"(평균 실제가 {acc['avg']} · 평균 오차 {acc['err']}). "
-            f"{qa_tools.SEALED_SOURCE}."
-        )
+    #   ★ **설명 줄을 문장에 안 적는다** (2026-09-15 · 화면을 깨끗이 하라는 지시).
+    #     출발점 · 평균 오차 · 값의 정체는 `meta` 로 옮겼다 — 없앤 것이 아니다.
+    #
+    #   🔴 하나만 문장에 남긴다: **쓰지 말라는 조합** 경고다. 그건 설명이 아니라
+    #     «이 값으로 판단하지 마세요» 라는 판정이고, 못 보면 그대로 쓰게 된다.
     usab = block.get("usability") or {}
     if usab.get("use_recommended") is False:
         out.insert(
@@ -420,15 +422,35 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
             "> 🔴 이 조합은 **판단에 쓰지 마세요.** 우리 모델보다 «어제 가격 그대로» 가 낫습니다."
             + (f" ({usab.get('quality_note')})" if usab.get("quality_note") else ""),
         )
-    spec = rows[0] if rows else None
-    if spec and spec.get("spec_desc"):
-        out.append(
-            f"> 값의 정체: {spec.get('market_name')} · {spec.get('grade_name')}등급"
-            f" · {spec['spec_desc']}"
-        )
     if many:
         out.append("")
     return out, unit
+
+
+def _first_of(block: dict[str, Any], key: str) -> Any:
+    """블록의 첫 행에서 한 칸. 없으면 당일 값에서, 그것도 없으면 규격표에서.
+
+    🔴 **당일 행에는 규격 칸이 아예 없다** (2026-09-15 실측). 원본 창고는
+      `market_name` · `grade_name` · `spec_desc` 를 담지 않는다. 그래서 오늘 값만
+      답할 때 규격이 통째로 비었다 — 문장에서 뺀 값이 **정말로 사라진** 것이다.
+
+      `SPEC` 은 우리가 쥔 상수이므로 거기서 채운다. 지어내는 것이 아니라
+      **같은 사실을 다른 자리에서** 가져오는 것이다.
+    """
+    rows = block.get("rows") or []
+    if rows and rows[0].get(key) is not None:
+        return rows[0][key]
+    today = block.get("today") or {}
+    if today.get(key) is not None:
+        return today[key]
+    spec = SPEC.get(block.get("kind") or "") or {}
+    if key == "market_name":
+        return spec.get("market")
+    if key == "grade_name":
+        return spec.get("grade")
+    if key == "spec_desc":
+        return (spec.get("desc") or {}).get(block.get("item"))
+    return None
 
 
 def _answer_markdown(state: QaState) -> QaState:
@@ -504,9 +526,17 @@ def _answer_markdown(state: QaState) -> QaState:
         source=("ml_price_forecasts · prediction_log" if (all_rows and todays)
                 else "prediction_log" if todays else "ml_price_forecasts"),
         is_filled=[bool(r.get("is_filled")) for r in (first.get("rows") or [])],
+        is_gated=[bool(r.get("is_gated")) for r in (first.get("rows") or [])],
         band_method=(all_rows[0].get("band_method") if all_rows
                      else (todays[0] if todays else {}).get("band_method")),
         use_recommended=(first.get("usability") or {}).get("use_recommended"),
+        #   ★ 문장에서 뺀 값들 — 여기로 옮겼다. 없앤 것이 아니다.
+        current_price=_first_of(first, "current_price"),
+        accuracy_pct=(first.get("accuracy") or {}).get("pct"),
+        accuracy_note=qa_tools.SEALED_SOURCE if first.get("accuracy") else None,
+        market_name=_first_of(first, "market_name"),
+        grade_name=_first_of(first, "grade_name"),
+        spec_desc=_first_of(first, "spec_desc"),
     )
     #   ★ 무엇을 무시했는지는 답 맨 앞에 적는다.
     note = [state["note"], ""] if state.get("note") else []
