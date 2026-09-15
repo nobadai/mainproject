@@ -15,7 +15,9 @@
 ④  seq 집합이 다르면 · 수량/금액 0 · 도착일 < 매입일 · 중복 기록 → 거부
 ⑤  재시도가 기록 없는 사람 승인을 건너뛰고, 기록 있는 것은 기록값으로
 ⑥  기록값이 선정안과 다르면 재검증 · 불통과면 저장 0 · 전이 0 · 같으면 재검증 안 부름
-⑦  매입일 < 승인 실행 as_of · 매입일 <= 마지막 재무 일마감일 → 거부
+⑦  매입일 < 승인 실행 as_of · 지급기일 <= 마지막 재무 일마감일 → 거부 (회차마다)
+    · D 마감 뒤 매입일 D 기록은 받는다 (지급기일이 마감일 뒤면)
+⑨  기록값 재검증이 재무 · 물류 SCENARIO_VALIDATION 의 실제 판정으로 갈린다
 ⑧  다른 sim_run_id 의 같은 request_id 기록은 별개
 ```
 
@@ -493,14 +495,21 @@ def test_재검증을_통과_못_하면_저장도_전이도_없다(세상: dict[
 
 
 def test_기록값_재검증은_승인_재검증과_같은_문을_지난다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ `revalidate_recorded` 가 받은 사본을 그 실행의 날 · 정책판 · 축으로 넘긴다."""
+    """★ `revalidate_recorded` 가 받은 사본을 그 실행의 날 · 정책판 · 축으로 넘긴다.
+
+    🔴 매입 실행이므로 **매입 재검증**으로 간다 (2026-09-16). 판매 재검증으로 가면
+      재무 `SALES_VALIDATION` 이 skipped 로 답해 늘 `FAILED` 다.
+    """
     seen: dict[str, Any] = {}
 
     def _revalidate(**kw: Any) -> Revalidation:
         seen.update(kw)
         return Revalidation(outcome="PASSED", request_id="REV-X")
 
-    monkeypatch.setattr(svc, "revalidate_scenario", _revalidate)
+    monkeypatch.setattr(svc, "revalidate_procurement_scenario", _revalidate)
+    monkeypatch.setattr(
+        svc, "revalidate_scenario", lambda **kw: pytest.fail("매입 안을 판매 재검증으로 보냈다")
+    )
     monkeypatch.setattr(svc, "list_decisions", lambda request_id: [_결정()])
     monkeypatch.setattr(svc, "_run_for", lambda request_id, history_run_id: _실행행())
     approval = svc.current_approval(업무키)
@@ -517,6 +526,7 @@ def test_기록값_재검증은_승인_재검증과_같은_문을_지난다(monk
         "v1.3",
     )
     assert seen["decision_seq"] == 1
+    assert seen["proposal"] == _응답()["judgment"], "제안 최상위를 원 실행 judgment 로 싣는다"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -528,27 +538,152 @@ def test_승인_실행_기준일보다_앞선_매입일은_거부한다(세상: 
     body = _본문()
     body["legs"][0]["purchase_date"] = "2026-09-10"
 
-    with pytest.raises(DecisionRejected, match=pr.CLOSED_DATE_MESSAGE) as caught:
+    with pytest.raises(DecisionRejected, match=pr.BEFORE_APPROVAL_MESSAGE) as caught:
         _기록한다(세상, body)
     assert caught.value.conflict is False
     assert 세상["store"] == []
 
 
-@pytest.mark.parametrize("마감일", [date(2026, 9, 11), date(2026, 9, 12)])
-def test_마지막_재무_일마감일_이하_매입일은_거부한다(세상: dict[str, Any], 마감일: date) -> None:
+@pytest.mark.parametrize("마감일", [date(2026, 9, 10), 기준일, date(2026, 9, 17)])
+def test_D_를_마감한_뒤에도_지급기일이_마감일_뒤면_받는다(
+    세상: dict[str, Any], 마감일: date
+) -> None:
+    """★ **걷기가 D 를 마감한 뒤 사람이 D 매입을 기록하는 것이 정상 순서다** (2026-09-16).
+
+    1회차 매입일 9/11 = 승인 기준일 · N5=7 → 지급기일 9/18. 마감일이 9/11(D) 이어도,
+    9/17 이어도 지급기일이 그 뒤라 받는다.
+    """
     세상["closed"] = 마감일
-
-    with pytest.raises(DecisionRejected, match=pr.CLOSED_DATE_MESSAGE):
-        _기록한다(세상, _본문())
-    assert 세상["store"] == []
-
-
-def test_마감일_다음_날_매입일은_받는다(세상: dict[str, Any]) -> None:
-    세상["closed"] = date(2026, 9, 10)
 
     out, _ = _기록한다(세상, _본문())
 
     assert out.status == "APPLIED"
+
+
+@pytest.mark.parametrize("마감일", [date(2026, 9, 18), date(2026, 9, 19)])
+def test_지급기일이_마지막_재무_일마감일_이하면_거부한다(
+    세상: dict[str, Any], 마감일: date
+) -> None:
+    """🔴 이미 지난 지급기일의 채무가 새로 생기면 그날 지급에 한 번도 안 잡힌다."""
+    세상["closed"] = 마감일
+
+    with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE) as caught:
+        _기록한다(세상, _본문())
+    assert caught.value.conflict is False, "본문이 틀린 것이다 (422)"
+    assert "1회차 지급기일 2026-09-18" in str(caught.value)
+    assert 세상["store"] == [] and 세상["conns"] == []
+
+
+def test_지급기일은_회차마다_잰다(세상: dict[str, Any]) -> None:
+    """★ 1회차는 마감일 뒤인데 2회차 지급기일이 마감일 이하면 거부한다."""
+    세상["closed"] = date(2026, 9, 20)
+    body = _본문()
+    body["legs"][0].update(purchase_date="2026-09-15", arrival_date="2026-09-16")  # 9/22
+    body["legs"][1].update(purchase_date="2026-09-12", arrival_date="2026-09-15")  # 9/19
+
+    with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE) as caught:
+        _기록한다(세상, body)
+    assert "2회차 지급기일 2026-09-19" in str(caught.value)
+    assert 세상["store"] == []
+
+
+def test_당일_지급이면_D_마감_뒤_D_매입은_거부한다(세상: dict[str, Any]) -> None:
+    """⚠️ N5=0 이면 지급기일 = 매입일이다 — 마감된 D 의 매입은 지급기일도 D 라 거부된다."""
+    세상["row"]["response_payload"]["constraints"]["finance"]["purchase_payment_days"] = 0
+    세상["closed"] = 기준일
+
+    with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE):
+        _기록한다(세상, _본문())
+    assert 세상["store"] == []
+
+
+def test_마감이_있는데_지급기일을_모르면_거부한다(세상: dict[str, Any]) -> None:
+    """🔴 못 잰 것을 통과로 두지 않는다."""
+    del 세상["row"]["response_payload"]["constraints"]["finance"]
+    세상["closed"] = date(2026, 9, 10)
+
+    with pytest.raises(DecisionRejected, match="지급기일을 계산할 수 없어"):
+        _기록한다(세상, _본문())
+    assert 세상["store"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑨ 기록값 재검증이 실제 판정으로 갈린다
+# ══════════════════════════════════════════════════════════════════════
+
+
+class _조언자:
+    """재무 · 물류 어댑터 대역. **무슨 mode 로 물었는지 남기고 정한 판정을 낸다.**"""
+
+    def __init__(self, business_status: str = "ok") -> None:
+        self.business_status = business_status
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, request: Any) -> Any:
+        from app.master.envelope import AgentReply, ExecutionMetadata
+
+        self.calls.append((request.mode, dict(request.payload)))
+        runtime = "RUNTIME_NOT_READY" if self.business_status == "skipped" else "READY"
+        reply = AgentReply(
+            request_id=request.context.request_id,
+            as_of=request.context.as_of,
+            agent=request.agent,
+            mode=request.mode,
+            run_id=f"{request.agent.upper()}-{request.call_seq}",
+            runtime_status=runtime,
+            business_status=self.business_status,
+            reasoning="대역",
+            missing_data=("대역",) if runtime == "RUNTIME_NOT_READY" else (),
+        )
+        return reply, ExecutionMetadata(
+            run_id=reply.run_id,
+            request_id=request.context.request_id,
+            agent=request.agent,
+            used_tools=("tool_a",),
+            tool_order=(1,),
+        )
+
+
+@pytest.fixture
+def 조언자들(세상: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, _조언자]:
+    """기록 재검증을 **대역 없이** 태운다. 부서만 대역이다."""
+    from app.master import wiring
+
+    wiring.reset()
+    등록 = {"finance": _조언자(), "inventory": _조언자()}
+    for 이름, 포트 in 등록.items():
+        wiring.register(이름, 포트)
+    monkeypatch.setattr(pr, "revalidate_recorded", svc.revalidate_recorded)
+    return 등록
+
+
+def test_기록값_재검증은_재무_물류_SCENARIO_VALIDATION_을_부른다(
+    세상: dict[str, Any], 조언자들: dict[str, _조언자]
+) -> None:
+    out, _ = _기록한다(세상, _실매입())
+
+    assert out.status == "APPLIED"
+    for 이름, 부 in 조언자들.items():
+        assert [mode for mode, _ in 부.calls] == ["SCENARIO_VALIDATION"], 이름
+        [(_, payload)] = 부.calls
+        assert payload["meta"] == {"item": "배추"}, "제안 최상위(judgment)가 안 실렸다"
+        [사본] = payload["scenarios"]
+        assert 사본["total_qty_kg"] == 290, "기록값 사본이 아니다"
+
+
+@pytest.mark.parametrize(("누가", "판정"), [("finance", "reject"), ("inventory", "skipped")])
+def test_기록값_재검증이_막히면_저장도_전이도_없다(
+    세상: dict[str, Any], 조언자들: dict[str, _조언자], 누가: str, 판정: str
+) -> None:
+    """★ skipped 도 통과가 아니다 — 검증을 안 했으면 통과가 아니다."""
+    조언자들[누가].business_status = 판정
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected, match="FAILED") as caught:
+        _기록한다(세상, _실매입(), 문)
+
+    assert 누가 in str(caught.value), "막은 조언자가 사유에 없다"
+    assert 세상["store"] == [] and 문.calls == []
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -723,7 +858,7 @@ def 손님(monkeypatch: pytest.MonkeyPatch):
     [
         (LookupError("승인 없음"), 404),
         (DecisionRejected("이미 기록", conflict=True), 409),
-        (DecisionRejected(pr.CLOSED_DATE_MESSAGE), 422),
+        (DecisionRejected(pr.CLOSED_DUE_DATE_MESSAGE), 422),
     ],
 )
 def test_기록_API_가_거부를_상태_코드로_접는다(

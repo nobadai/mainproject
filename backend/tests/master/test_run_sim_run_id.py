@@ -215,6 +215,7 @@ def test_재검증_적재가_축을_넘긴다(monkeypatch):
     captured = _capture(monkeypatch)
     persistence.record_revalidation(
         _context(),
+        cycle="SALES",
         outcome="PASSED",
         reason="",
         validations={},

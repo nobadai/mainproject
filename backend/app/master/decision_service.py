@@ -39,6 +39,7 @@ from app.master.revalidation import (
     Revalidation,
     conditions_of_original,
     find_scenario,
+    revalidate_procurement_scenario,
     revalidate_scenario,
 )
 from app.master.run_repository import get_run, get_run_by_request_id, list_runs
@@ -370,14 +371,42 @@ def _revalidate_scenario_of(
             reason="원 실행의 sim_run_id 를 못 읽어 재검증 봉투를 만들 수 없다.",
         )
 
+    item = row.get("item") if isinstance(row.get("item"), str) else None
+    original_conditions = conditions_of_original(response_payload, scenario_label)
+
+    # 🔴 **매입 안은 매입의 물음으로 다시 묻는다** (2026-09-16 실측). 판매 경로
+    #    (`revalidate_scenario`)로 보내면 재무 `SALES_VALIDATION` 이 판매 사실을 못 찾아
+    #    `READY/skipped` 로 답하고, 매입 재검증이 늘 `FAILED` · `cycle=SALES` 로 남는다.
+    #
+    #    ★ **사이클은 실행 행이 정한다** (`_cycle_of`). 안의 모양으로 짐작하지 않는다.
+    if _cycle_of(row) == PROCUREMENT_CYCLE:
+        proposal = response_payload.get("judgment")
+        if not isinstance(proposal, Mapping) or not proposal:
+            # 🔴 **제안 최상위 없이 안만 보내지 않는다.** 재무 · 물류가 `meta.as_of` ·
+            #   `meta.item` 을 거기서 읽는다 — 빠지면 판정 대신 입력 오류가 온다.
+            return Revalidation(
+                outcome="ERROR",
+                reason="원 실행의 매입 제안(judgment)을 못 읽어 재검증 요청을 만들 수 없다.",
+            )
+        return revalidate_procurement_scenario(
+            scenario=scenario,
+            proposal=proposal,
+            original_conditions=original_conditions,
+            decision_seq=decision_seq,
+            policy_version=policy_version,
+            as_of=as_of,
+            sim_run_id=sim_run_id,
+            item=item,
+        )
+
     return revalidate_scenario(
         scenario=scenario,
-        original_conditions=conditions_of_original(response_payload, scenario_label),
+        original_conditions=original_conditions,
         decision_seq=decision_seq,
         policy_version=policy_version,
         as_of=as_of,
         sim_run_id=sim_run_id,
-        item=row.get("item") if isinstance(row.get("item"), str) else None,
+        item=item,
     )
 
 
