@@ -35,6 +35,7 @@ const ACTION_LABEL: Record<IntentAction, string> = {
 export const AGENT_LABEL: Record<string, string> = {
   finance: "재무",
   inventory: "물류",
+  ml: "가격 예측",
   purchase: "매입",
   sales: "판매",
 };
@@ -61,10 +62,16 @@ const UNKNOWN_CONFIDENCE = {
 } as const;
 
 function summarize(intent: Intent): string {
-  const parts = [ACTION_LABEL[intent.action] ?? intent.action];
+  // ⚠️ 화면 타입(`AgentName`)에 가격 예측이 없다. 공용 계약이라 넓히지 않고 여기서 읽는다.
+  const agents = intent.agents as readonly string[];
+  // ★ 가격 전망만 물은 것은 "부서 상태 조회" 가 아니다. 부서 이름을 뒤에 또 붙이지 않는다.
+  const priceOnly =
+    intent.action === "STATUS_QUERY" && agents.length === 1 && agents[0] === "ml";
+  const parts = [priceOnly ? "가격 전망 조회" : (ACTION_LABEL[intent.action] ?? intent.action)];
   if (intent.item) parts.push(intent.item);
-  if (intent.agents.length > 0)
-    parts.push(intent.agents.map((a) => AGENT_LABEL[a] ?? a).join("·"));
+  // 🔴 표에 없는 부서 코드는 그 조각을 뺀다 — 코드 이름을 사람 화면에 내보내지 않는다.
+  const names = priceOnly ? [] : agents.map((a) => AGENT_LABEL[a]).filter(Boolean);
+  if (names.length > 0) parts.push(names.join("·"));
   if (intent.scenario_label) parts.push(`'${intent.scenario_label}'`);
   if (intent.condition) parts.push(`'${intent.condition}'`);
   return parts.join(" · ");
