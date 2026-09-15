@@ -555,6 +555,31 @@ def test_응답_스키마는_칸을_전부_꼭_쓰게_한다():
     assert {"dates", "asks"} <= set(enum_schema["required"])
 
 
+def test_범위_밖만_물으면_오늘_값을_주지_않고_안내만_한다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 **화면에서 발견한 것** (2026-09-15).
+
+    「30일 뒤의 배추 경락가」에 오늘 값과 «날짜를 따로 말씀하지 않으셔서» 가 나갔다.
+    날짜를 19개 목록에서만 고르게 한 뒤로 30일 뒤는 보기에 없어 모델이 날짜를 비웠고,
+    코드가 그걸 «안 물었다» 로 읽었다. 물은 날과 **다른 날**을 답한 것이다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {"route": "forecast", "item": "배추", "kind": "AUC",
+                       "dates": [BASE + timedelta(days=30)], "asks": []})
+    out = qa_graph.answer(QaRequest(question="30일 뒤의 배추 경락가를 알려줘", as_of=BASE))
+    assert out.meta.status == "OUT_OF_SCOPE"
+    assert "예측 범위 밖" in out.markdown
+    assert "날짜를 따로 말씀하지" not in out.markdown
+    assert "| 날짜 | 예측 |" not in out.markdown                 # 표가 없다
+    assert out.meta.out_of_range == [BASE + timedelta(days=30)]
+
+
+def test_목록_밖_날은_정수로_받아_날짜로_바꾼다():
+    """보기에 없는 날을 적을 칸이다. 정수가 아닌 것은 고쳐 쓰지 않고 버린다."""
+    오늘 = date(2026, 9, 15)
+    assert qa_llm._far_dates([30, -1], 오늘) == [date(2026, 10, 15), date(2026, 9, 14)]
+    assert qa_llm._far_dates(["30", 1.5, True, None], 오늘) == []
+
+
 def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():
     assert qa_llm._parse_dates(["2026-09-15", "내일", None, "2026-13-40"]) == [
         date(2026, 9, 15)
