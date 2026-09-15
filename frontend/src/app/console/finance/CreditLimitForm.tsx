@@ -7,14 +7,14 @@ import { registerCreditLimit } from "./credit_api";
 import { sessionSnapshot, serverSnapshot, subscribeSession } from "@/lib/session";
 import { useSyncExternalStore } from "react";
 
-export function CreditLimitForm({ asOf }: { asOf: string }) {
+export function CreditLimitForm({ asOf, onSaved }: { asOf: string; onSaved: () => void }) {
   const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
   const [partner, setPartner] = useState(""); const [amount, setAmount] = useState("");
   const [date, setDate] = useState(asOf); const [grade, setGrade] = useState<"OFFICIAL" | "VENDOR" | "SIM_FIXED">("VENDOR");
   const [note, setNote] = useState(""); const [message, setMessage] = useState<string | null>(null);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setMessage(null);
-    try { await registerCreditLimit({ partner_id: partner, credit_limit_krw: amount, effective_from: date, evidence_grade: grade, recorded_by: session?.name ?? "console-user", note }); setMessage("여신한도 이력을 저장했습니다. 새 적용일부터 판매 검증에 반영됩니다."); }
+    try { await registerCreditLimit({ partner_id: partner, credit_limit_krw: amount, effective_from: date, evidence_grade: grade, recorded_by: session?.name ?? "console-user", note }); onSaved(); setMessage("여신한도 이력을 저장했습니다. 새 적용일부터 판매 검증에 반영됩니다."); }
     catch (error) { setMessage(error instanceof Error ? error.message : "저장하지 못했습니다."); }
   }
   return <Panel title="여신한도 등록·변경" subtitle="기존 금액을 덮어쓰지 않고 새 적용일의 이력을 추가합니다."><form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>

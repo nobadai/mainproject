@@ -43,18 +43,33 @@ def register_credit_limit(change: CreditLimitChange) -> dict[str, object]:
         with get_connection() as conn, conn.cursor() as cursor:
             cursor.execute(
                 sql.SQL("""
-                    SELECT partner_credit_limit_id, effective_from
+                    SELECT 1 FROM {}.partners WHERE partner_id = %s
+                """).format(schema),
+                [change.partner_id],
+            )
+            if cursor.fetchone() is None:
+                raise LookupError("거래처를 찾지 못했습니다.")
+            cursor.execute(
+                sql.SQL("""
+                    SELECT partner_credit_limit_id, effective_from, effective_to
                     FROM {}.partner_credit_limits
-                    WHERE partner_id = %s AND is_active AND effective_to IS NULL
+                    WHERE partner_id = %s AND is_active
+                    ORDER BY effective_from
                     FOR UPDATE
                 """).format(schema),
                 [change.partner_id],
             )
-            open_rows = cursor.fetchall()
-            if len(open_rows) > 1:
-                raise ValueError("활성 여신한도 이력이 둘 이상이라 변경할 수 없습니다.")
-            if open_rows:
-                current = open_rows[0]
+            rows = cursor.fetchall()
+            future_or_overlap = [
+                row for row in rows
+                if row["effective_from"] >= change.effective_from
+                or row["effective_to"] is None
+                or row["effective_to"] >= change.effective_from
+            ]
+            if len(future_or_overlap) > 1:
+                raise ValueError("여신한도 기간이 겹치거나 미래 이력이 있어 변경할 수 없습니다.")
+            if future_or_overlap:
+                current = future_or_overlap[0]
                 if current["effective_from"] >= change.effective_from:
                     raise ValueError("새 적용일은 현재 한도 적용일보다 뒤여야 합니다.")
                 cursor.execute(
@@ -85,6 +100,8 @@ def register_credit_limit(change: CreditLimitChange) -> dict[str, object]:
         }
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
 
 
 @router.post("/agent", summary="Finance v2.2 Tool-Using Agent")
