@@ -87,7 +87,10 @@ def test_기본은_내일_하루를_답한다(도구를_갈아_끼운다):
     assert out.meta.status == "OK"
     assert out.meta.targets == [BASE + timedelta(days=1)]
     assert "867" in out.markdown
-    assert "출발점" in out.markdown          # 앵커가 거래가가 아니라는 경고
+    #   ★ 출발점은 **문장에서 뺐다** (2026-09-15 · 화면을 깨끗이). meta 로 옮겼다 —
+    #     없앤 것이 아니다. 실제 거래가가 아니라는 사실은 여전히 전해져야 한다.
+    assert out.meta.current_price == 884
+    assert "출발점" not in out.markdown
 
 
 def test_범위_밖_날짜가_섞이면_나머지를_답하고_PARTIAL_로_적는다(도구를_갈아_끼운다):
@@ -139,10 +142,62 @@ def test_평균_오차는_화면과_같은_값을_쓴다(도구를_갈아_끼운
     """★ prediction_log 를 다시 집계하지 않는다 — 한 사실에 두 숫자가 돌면 안 된다."""
     도구를_갈아_끼운다(rows=[_row(1)], acc=qa_tools.SEALED_ACCURACY[("AUC", "배추")])
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
-    assert "19.7%" in out.markdown          # 화면 _ACCURACY 와 같은 값
-    #   조건 없는 수치는 안 적는다. 다만 **사람 말로** 적는다 — 화면에 나가는 문장이라
-    #   «봉인 개봉 · 홀드아웃» 같은 우리끼리 쓰는 말을 쓰지 않는다 (마스터 요청).
-    assert "2026-09-01" in out.markdown and "486일치" in out.markdown
+    #   ★ 문장에서는 뺐고 meta 로 옮겼다. **값과 조건이 늘 같이 간다** —
+    #     조건 없는 수치는 어디에도 안 남긴다 (CLAUDE.md §11).
+    assert out.meta.accuracy_pct == "19.7"          # 화면 _ACCURACY 와 같은 값
+    assert "2026-09-01" in (out.meta.accuracy_note or "")
+    assert "486일치" in (out.meta.accuracy_note or "")
+    assert "19.7%" not in out.markdown
+
+
+def test_설명_줄을_문장에서_빼고_meta_로_옮겼다(도구를_갈아_끼운다):
+    """★ 화면은 깨끗하게, 값은 잃지 않게 (2026-09-15 지시).
+
+    🔴 **빼는 것이 아니라 옮기는 것이다.** 출발점·오차·규격이 통째로 사라지면
+       19.7% 틀리는 값을 확정값처럼 읽게 된다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)], acc=qa_tools.SEALED_ACCURACY[("AUC", "배추")])
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
+    for gone in ("출발점", "평균 오차", "값의 정체", "486일치"):
+        assert gone not in out.markdown, gone
+    assert out.meta.current_price == 884
+    assert out.meta.accuracy_pct == "19.7"
+    assert out.meta.market_name == "서울가락"
+    assert out.meta.grade_name == "특"
+    assert out.meta.spec_desc == "그물망·파렛트 10kg"
+
+
+def test_당일_값의_Decimal_출발점을_받아_낸다(도구를_갈아_끼운다):
+    """🔴 **자료형이 창고마다 다르다** (2026-09-15 실측).
+
+    전달표 행은 정수인데 원본 창고의 당일 행은 `Decimal('1001.090')` 이다.
+    meta 를 `int` 로 좁혀 뒀더니 당일 값을 물을 때마다 500 이 났고, 검사는
+    도구를 갈아 끼워 정수만 넣어서 **안 걸렸다.** 진짜 자료형으로 재현해 둔다.
+    """
+    from decimal import Decimal
+
+    today = {
+        "base_dt": BASE, "target_dt": BASE, "lead_biz_d": 0,
+        "predicted": Decimal("962.400"), "lower": Decimal("716.0"),
+        "upper": Decimal("1342.0"), "current_price": Decimal("1001.090"),
+        "unit": "원/kg", "is_gated": False, "gate_reason": None,
+        "band_method": "quantile", "model_version": "ops_auc",
+    }
+    도구를_갈아_끼운다(rows=[], today=today)
+    out = qa_graph.answer(QaRequest(item="배추", kind="AUC", dates=[BASE]))
+    assert out.meta.status == "OK"
+    assert out.meta.current_price == 1001                    # 반올림해 받는다
+    assert "962" in out.markdown
+
+
+def test_쓰지_말라는_경고는_문장에_남는다(도구를_갈아_끼운다):
+    """🔴 이건 설명이 아니라 **판정**이다. 못 보면 그대로 쓰게 된다."""
+    도구를_갈아_끼운다(
+        rows=[_row(1)],
+        usab={"use_recommended": False, "quality_note": "앵커가 거의 완벽"},
+    )
+    out = qa_graph.answer(QaRequest(item="양파", kind="WHSL"))
+    assert "쓰지 마세요" in out.markdown
 
 
 def test_상수표는_아홉_칸이_다_있다():
@@ -394,6 +449,37 @@ def test_스위치를_끄면_해석기가_아예_안_부른다(monkeypatch):
     monkeypatch.setenv("ML_GEMINI_API_KEY", "있는-척-하는-키")
     monkeypatch.setattr(qa_llm.urllib.request, "urlopen", _절대_안_불려야_한다)
     assert qa_llm.interpret("내일 배추 얼마야?", BASE) is None
+
+
+def test_넘치게_고른_가격_종류를_규칙이_자른다():
+    """🔴 **지시문으로 두 번 실패한 자리다** (2026-09-15).
+
+    「내일 배추 경락가 얼마야?」 하나를 물어도 해석기가 `AUC·WHSL·RTL` 셋을
+    내놓았다. 같은 질문에 세 번 물으면 셋·셋·하나로 흔들렸다. 낱말 풀이를 넣고
+    「나온 것만」이라고 적어도 그대로였다.
+
+    **말로 부탁해서 안 되는 것은 규칙이 자른다.**
+    """
+    셋 = ["AUC", "WHSL", "RTL"]
+    assert qa_llm._trim_kinds(셋, "내일 배추 경락가 얼마야?") == ["AUC"]
+    assert qa_llm._trim_kinds(셋, "배추 소매가 내일") == ["RTL"]
+    #   둘을 물었으면 둘 다 남는다
+    assert qa_llm._trim_kinds(셋, "배추 경락가랑 도매가 내일") == ["AUC", "WHSL"]
+
+
+def test_전부_라고_하면_자르지_않는다():
+    """「가격 전부」는 정말 다 달라는 말이다. 그때 자르면 물어본 것을 못 준다."""
+    셋 = ["AUC", "WHSL", "RTL"]
+    for 문장 in ("배추 가격 전부 다", "배추 가격 모두", "배추 모든 가격"):
+        assert qa_llm._trim_kinds(셋, 문장) == 셋, 문장
+
+
+def test_모르는_표현이면_자르지_않는다():
+    """★ 규칙이 답을 **없애면** 안 된다.
+
+    우리가 모르는 말로 물었을 수 있다. 잘라서 빈손이 되면 해석기 쪽이 옳다.
+    """
+    assert qa_llm._trim_kinds(["AUC", "WHSL"], "배추 값 알려줘") == ["AUC", "WHSL"]
 
 
 def test_해석기는_틀린_날짜를_고쳐_쓰지_않고_버린다():
