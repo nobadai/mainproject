@@ -9,7 +9,7 @@ import {
   type SalesCandidateReply,
 } from "./sales_api";
 
-export function SalesCandidateCreateForm({ asOf }: { asOf: string }) {
+export function SalesCandidateCreateForm({ asOf, simRun, onCreated }: { asOf: string; simRun: string; onCreated: () => void }) {
   const [item, setItem] = useState("");
   const [partnerId, setPartnerId] = useState("");
   const [quantity, setQuantity] = useState("");
@@ -32,8 +32,8 @@ export function SalesCandidateCreateForm({ asOf }: { asOf: string }) {
     setError(null);
     setReply(null);
     try {
-      setReply(
-        await createSalesCandidates({
+      const result = await createSalesCandidates({
+          sim_run_id: simRun,
           as_of: asOf,
           item,
           partner_id: partnerId,
@@ -43,8 +43,13 @@ export function SalesCandidateCreateForm({ asOf }: { asOf: string }) {
           payment_days: paymentDays,
           allow_additional_sourcing: additionalSupply,
           note,
-        }),
-      );
+      });
+      setReply({
+        ...result.payload,
+        missing_data: result.missing_data,
+        missing_capabilities: result.missing_capability,
+      });
+      onCreated();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "판매 후보를 만들지 못했습니다.");
     } finally {

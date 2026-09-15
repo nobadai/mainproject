@@ -182,6 +182,7 @@ export function createPartner(input: PartnerCreateInput): Promise<PartnerProfile
 /* ── 사용자가 만드는 판매 후보 ─────────────────────────────────────────── */
 
 export interface SalesCandidateRequest {
+  sim_run_id: string;
   as_of: string;
   item: string;
   partner_id?: string;
@@ -201,27 +202,39 @@ export interface SalesCandidateReply {
   scenarios?: { scenario_id: string; quantity_kg?: Money | null; unit_price_krw?: Money | null }[];
 }
 
+export interface SalesCandidateRunReply {
+  runtime_status: string;
+  business_status: string;
+  payload: SalesCandidateReply;
+  missing_data: string[];
+  missing_capability: string[];
+}
+
 /** 후보만 생성한다. 실제 판매 확정은 기존 Master 승인 흐름만 사용한다. */
-export function createSalesCandidates(input: SalesCandidateRequest): Promise<SalesCandidateReply> {
+export function createSalesCandidates(input: SalesCandidateRequest): Promise<SalesCandidateRunReply> {
   const quantity = input.quantity_kg?.trim();
   const price = input.unit_price_krw?.trim();
   const paymentDays = input.payment_days?.trim();
-  return send<SalesCandidateReply>(`${API_BASE}/sales/proposal`, {
+  return send<SalesCandidateRunReply>(`${API_BASE}/sales/console-proposal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      business_mode: "SPOT_SALES",
-      user_request: {
-        raw_text: input.note?.trim() || null,
-        item: input.item.trim(),
-        partner_id: input.partner_id?.trim() || null,
-        requested_quantity_kg: quantity || null,
-        preferred_unit_price_krw: price || null,
-        preferred_delivery_date: input.delivery_date || null,
-        preferred_payment_days: paymentDays || null,
-        allow_additional_sourcing: input.allow_additional_sourcing,
+      sim_run_id: input.sim_run_id,
+      as_of: input.as_of,
+      proposal: {
+        business_mode: "SPOT_SALES",
+        user_request: {
+          raw_text: input.note?.trim() || null,
+          item: input.item.trim(),
+          partner_id: input.partner_id?.trim() || null,
+          requested_quantity_kg: quantity || null,
+          preferred_unit_price_krw: price || null,
+          preferred_delivery_date: input.delivery_date || null,
+          preferred_payment_days: paymentDays || null,
+          allow_additional_sourcing: input.allow_additional_sourcing,
+        },
+        execution_identity: { as_of: input.as_of },
       },
-      execution_identity: { as_of: input.as_of },
     }),
   });
 }
