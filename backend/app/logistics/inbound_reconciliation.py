@@ -56,7 +56,7 @@ usage_scope
 
 🔴 **취소 규칙을 여기에 다시 적지 않는다.** 멱등·다른 날짜 충돌 판정은
    `inbound_schedules.cancel_schedule` 하나가 소유한다 — 두 곳이 각자 적으면 한쪽만
-   고쳐지는 날이 온다 (`console_service` 가 `outbound` 의 상태 어휘를 문자열로 다시
+   고쳐지는 날이 온다 (`api.logistics.read_service` 가 `outbound` 의 상태 어휘를 문자열로 다시
    적지 않는 것과 같은 이유다).
 
 ⚠️ **`cancellation.py` 를 import 하지 않는다.** 그쪽은 마스터가 임시로 얹은 모듈이라

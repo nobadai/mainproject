@@ -255,10 +255,10 @@ class HistoricalAllocation:
 
 @dataclass(frozen=True)
 class HistoricalReservation:
-    """`as_of` 시점의 예약 하나. **존재는 판매 납품일, 소멸은 `released_as_of` 다.**
+    """`as_of` 시점의 예약 하나. **존재는 판매 확정일, 소멸은 `released_as_of` 다.**
 
     ```text
-    존재    sales.sale_date <= as_of      ← 그 판매가 아직 안 선 날에는 예약도 없다
+    존재    sales.order_date <= as_of     ← 확정된 날부터다 (예약은 확정 직후 선다)
     소멸    released_as_of <= as_of
     진행도  할당(decided_at · OUT Move)에서 유도
     ```
@@ -288,12 +288,24 @@ class HistoricalReservation:
           놓아주기 **전** 날짜의 확보량이 함께 사라진다 — 01-10 에 60kg 을 잡고
           01-20 에 놓아준 예약을 01-15 로 조회하면 0kg 이 나오던 자리다.
 
-       ⚠️ **날짜를 넘긴 top-up 은 여전히 재현할 수 없다.** 확보량 변경 이력 표가 없어서다.
-          그런데 production 에서 그 일이 안 난다: 예약을 만드는 유일한 경로가 마스터
-          `outbound_flow` 이고 그것은 `_due_today`(`sale_date == as_of`)로 **그 판매의
-          납품일 하루에만** 돌며, 콘솔·라우터에는 예약 생성 문이 아예 없다. 그래서
-          `sale_date <= as_of` 인 모든 날에 이 값이 맞다. 그 전제가 깨지면
-          (예약 API 신설 · 마스터가 여러 날에 걸쳐 top-up) **이 칸부터 다시 본다.**
+       🔴 **날짜를 넘긴 top-up 은 재현할 수 없다 — 그리고 그 일이 날 수 있다.**
+          확보량 변경 이력 표가 없어서다. `reserve_available_stock` 이
+          `SET reserved_qty_kg = %s, updated_at = now()` 로 덮고, 남는 것은 벽시각뿐이다.
+
+       ```text
+       D    확정   sales_approval 이 예약을 세운다 · 모자라면 확보량이 요구량보다 작다
+       D+1  출고   outbound_flow._ship_one 이 같은 예약을 다시 불러 못 채운 몫을 채운다
+       조회         D 로 물어도 지금 행의 **최종 확보량**이 나온다   🔴 그날 값이 아니다
+       ```
+
+          ⚠️ **실측(2026-09-15)에서는 0건이다.** 판매가 물류가 준 판매가능량 안에서 주문을
+             만들고 확정도 같은 날 같은 기준으로 잡아, 확정일에 모자란 예약이 2026-09-12
+             이후 걷기에 하나도 없었다. 다만 **확정 예약 판정 기준일을 납품일로 옮기면서**
+             (`master/sales_approval.py`) 판매 판단과 확정이 다른 날을 보게 됐고, 신선도
+             절벽이 있는 날 모자란 예약이 날 수 있다.
+
+          ★ 막는 길은 «날짜를 넘긴 채움 금지» 이고 이 판의 범위 밖이다. 이력 표도 만들지
+            않는다 — **한계로 적어 두고**, 걷기에서 몇 건인지 세어 기록한다.
     """
 
     reservation_id: str
@@ -301,7 +313,8 @@ class HistoricalReservation:
     item_id: str
     item_name: str | None
     sale_id: str | None
-    #: 이 예약이 장부에 선 날 = 그 판매의 납품 기준일 (`sales.sale_date`).
+    #: 그 판매의 납품 기준일 (`sales.sale_date`). 🔴 **예약이 장부에 선 날이 아니다** —
+    #: 그것은 확정일(`sales.order_date`)이고 존재 판정은 그 칸으로 한다.
     sale_date: date
     required_qty_kg: Decimal
     reserved_qty_kg: Decimal
@@ -963,16 +976,34 @@ def reservation_state_at(
     """`as_of` 시점의 예약과 그 아래 할당 — **저장된 `status` 를 안 읽는다.**
 
     ```text
-    존재    sales.sale_date <= as_of      ← 판매가 아직 안 선 날에는 예약도 없다
+    존재    sales.order_date <= as_of     ← 판매가 확정된 날부터다 (납품일이 아니다)
     소멸    released_as_of <= as_of        그날부터 놓아준 것이다
     진행도  할당(decided_at) · 원장 OUT(moved_at) 에서 유도
     ```
 
-    🔴 **`sales.sale_date` 로 존재를 자른다.** 종전에는 `sim_run_id` 로만 골라
-       **미래 납품 예약이 과거 조회에 그대로 나왔다** (2026-01-20 납품 예약이
-       2026-01-10 화면에 있었다). 예약을 만드는 유일한 경로가 마스터
-       `outbound_flow` 이고 그것은 `_due_today`(`sale_date == as_of`)로 **그 판매의
-       납품일에만** 예약을 세우므로, 납품일이 곧 예약이 장부에 선 날이다.
+    🔴 **`sales.order_date` 로 존재를 자른다.** 종전에는 `sim_run_id` 로만 골라
+       **미래 납품 예약이 과거 조회에 그대로 나왔고**(2026-01-20 납품 예약이 2026-01-10
+       화면에 있었다), 그것을 `sale_date` 로 막았다. 그런데 **예약이 서는 날은 납품일이
+       아니라 확정일이다** — 마스터 `sales_approval.confirm_approved_sale` 이 확정 직후
+       같은 커밋으로 `reserve_confirmed_sale_available` 을 부른다 (2026-09-12). 그리고
+       `order_date` 가 그 확정 실행의 `as_of` 그 자체다 (`order_date=as_of`).
+
+       ⚠️ **`sale_date` 로 자르면 확정일 D 에 선 예약이 D 화면에서 사라진다.** 그날
+          Runtime 은 이미 그 몫을 잡고 있는데(`outbound.item_free_stock_qty` 의 미할당
+          예약) Historical 만 하루 늦었다 — 같은 화면의 예약 목록과 판매가능량이 서로
+          다른 날을 가리켰다.
+
+       ★ **실측 (2026-09-15 · 실 DB · `master_day_openings` 개장 벽시각 사이 판정).**
+         2026-09-12 이후 걷기 1,552행이 **전부 확정일 생성**이다. 그 이전 걷기
+         (`SIM-CHAIN-V3` · `V4` 40행)만 납품일에 섰고 이 규칙으로는 하루 이르게 보인다 —
+         되살릴 근거가 없어 그대로 둔다 (`shown_run` 이 가리키는 실행이 아니다).
+
+       ⚠️ **`reserved_as_of` 같은 칸을 새로 만들지 않는다.** 기존 행은 Backfill 금지라
+          `NULL` 이 되고 결국 `order_date` 로 유도해야 한다 — 새 칸이 이 규칙보다
+          정확해지는 실행이 없다. 예약 생성일이 `order_date` 와 갈리는 날 다시 본다.
+
+       🔴 **«그날 몇 kg 이었나» 는 이것이 안 고친다.** 존재 날짜와 확보량은 다른 축이고,
+          확보량 쪽 한계는 `HistoricalReservation.reserved_qty_kg` 에 적어 뒀다.
 
        ⚠️ **`sale_id` 가 `NULL` 인 예약은 안 낸다.** 그 행에는 존재일을 댈 근거가
           하나도 없다 — `created_at` 은 벽시각이라 못 쓰고, 없는 날짜를 지어내면
@@ -1025,7 +1056,7 @@ def reservation_state_at(
             JOIN {schema}.sales s ON s.sale_id = r.sale_id
             LEFT JOIN {schema}.items i ON i.item_id = r.item_id
             WHERE r.sim_run_id = %(sim)s
-              AND s.sale_date <= %(as_of)s
+              AND s.order_date <= %(as_of)s
             ORDER BY s.sale_date, r.reservation_id
             """
         ).format(schema=schema),
