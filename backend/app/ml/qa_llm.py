@@ -83,7 +83,7 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 #:
 #: 왜 두 벌을 두나: 「영어 프롬프트가 낫다」 는 말은 흔한데 우리는 한 번도 안 쟀다.
 #: 재려면 **지시문 언어만** 다르고 나머지가 같은 짝이 있어야 한다. 모델·온도·
-#: 응답 스키마·질문은 그대로 둔다. 채점은 `ops/qa_prompt_bench.py` 가 한다.
+#: 응답 스키마·질문은 그대로 둔다. 채점은 `app/ml/ops/qa_prompt_bench.py` 가 한다.
 SYSTEM_PROMPT_EN = """You are the interpretation layer of a crop price forecast Q&A system.
 From the user's question, pick out **only what was asked**. Do not estimate a price,
 and do not write any explanatory sentence.
@@ -142,6 +142,11 @@ def _prompt(base_dt: date) -> str:
             #     사정이지 묻는 사람의 뜻이 아니다. 「전부」라고 하면 오늘부터다.
             "「모든 날」·「전부」면 **오늘을 포함해 19개를 다** 적는다.",
             "「내일부터」라고 하면 오늘을 뺀다. 「5일 뒤까지」면 내일부터 5개다.",
+            #   ★ 「N일치」가 빠져 있었다 (2026-09-15 실측). 「일주일치 배추 경락가」에
+            #     날짜를 비워 내 «날짜를 안 말씀하셨다» 로 답했다. 뜻은 「모든 날」과
+            #     맞춰 **오늘부터 N개**로 둔다.
+            "「일주일치」·「앞으로 일주일」이면 **오늘부터 7개**, 「3일치」면 오늘부터 3개다.",
+            "「이번 주」도 오늘부터 7개로 본다. 기간을 말했으면 날짜를 **비우지 마라**.",
             "",
         ]
     )
@@ -183,7 +188,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["route"],
+    #   🔴 **칸을 전부 꼭 쓰게 한다** (2026-09-15 · 화면에서 발견).
+    #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
+    #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
+    #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
+    "required": ["route", "items", "kinds", "dates", "asks"],
 }
 
 
