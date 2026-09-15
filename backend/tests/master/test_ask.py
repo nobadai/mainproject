@@ -511,6 +511,31 @@ def test_조건이_반영되지_않았다는_사실을_답에_적는다(client, 
     assert "아직 이 조건으로 안을 바꾸지 않습니다" in data["answer"]["text"]
 
 
+def test_채팅_매입_실행은_화면_실행으로_판단한다(client, rerun):
+    """🔴 **안 실으면 번인으로 떨어진다** (`service.py` `given or BURN_IN_SIM_RUN_ID`).
+
+    2026-09-15 실측: 화면은 다른 실행을 보는데 채팅 매입이 번인 실행에 판단 22행을 쌓았다.
+    매입 실행 · 조건부 재요청 두 경로 모두 화면이 보는 실행을 싣는다.
+    """
+    from app.api.shown_run import SHOWN_SIM_RUN_ID
+    from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+
+    body = {
+        "intent": {"action": "PROCUREMENT_RUN", "agents": [], "item": "배추", "confidence": "HIGH"},
+        "as_of": AS_OF,
+        "policy_version": "v1.3",
+    }
+    client.post("/master/ask/execute", json=body)
+    first = rerun["request"]
+
+    client.post("/master/ask/execute", json=rerun_body())
+    second = rerun["request"]
+
+    assert first is not second
+    assert SHOWN_SIM_RUN_ID != BURN_IN_SIM_RUN_ID
+    assert [first.sim_run_id, second.sim_run_id] == [SHOWN_SIM_RUN_ID, SHOWN_SIM_RUN_ID]
+
+
 def test_조건이_비면_거절한다(client, rerun):
     body = rerun_body()
     body["intent"]["condition"] = None
