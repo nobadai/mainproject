@@ -193,6 +193,62 @@ def test_가격_종류가_여럿이면_표를_여러_개_준다(도구를_갈아
     assert "경락가" in out.markdown and "중도매가" in out.markdown
 
 
+def test_짝지어_물으면_안_물어본_조합은_안_나온다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를 품목 x 가격으로 곱하면
+    **배추 중도매가·무 경락가**가 따라 나가고 날짜도 뒤섞인다 (2026-09-15 실측).
+
+    묶음이 오면 그 묶음만 답한다.
+    """
+    seen: list[tuple] = []
+
+    def 읽은_것을_적는다(item, kind, base_dt, targets):
+        seen.append((item, kind, tuple(str(d) for d in targets)))
+        return [_row(5)] if targets else []
+
+    도구를_갈아_끼운다(rows=[_row(5)])
+    monkeypatch.setattr(qa_graph.qa_tools, "forecast_rows", 읽은_것을_적는다)
+    _llm(monkeypatch, {
+        "route": "forecast", "items": [], "kinds": [], "dates": [],
+        "asks": [
+            {"item": "배추", "kind": "AUC", "dates": [BASE + timedelta(days=5)]},
+            {"item": "무", "kind": "WHSL", "dates": [BASE + timedelta(days=7)]},
+        ],
+    })
+    out = qa_graph.answer(
+        QaRequest(question="5일뒤의 배추 경락가와 7일 뒤의 무 도매가를 알려줘")
+    )
+    assert out.meta.items == ["배추", "무"]
+    assert out.meta.kinds == ["AUC", "WHSL"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 2       # 넷이 아니라 둘
+    #   ★ 묶음마다 **자기 날짜만** 읽는다 — 날짜가 섞이면 안 물어본 날이 나간다.
+    assert seen == [
+        ("배추", "AUC", ("2026-09-19",)),
+        ("무", "WHSL", ("2026-09-21",)),
+    ]
+
+
+def test_짝_물음이_오면_품목가격_목록은_안_쓴다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 **규칙이 막는 자리다** (2026-09-15).
+
+    해석기가 `kinds` 를 넉넉히 고르는 버릇이 있다 — 「배추 도매가」 하나를 물어도
+    `WHSL · RTL` 을 내놓는다. 지시문을 두 번 고쳐도 그대로였다.
+
+    그런데 `asks` 는 정확히 갈린다. 그래서 **짝 물음이 오면 그것만 쓴다** —
+    말로 부탁해서 안 되는 것은 규칙으로 막는다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {
+        "route": "forecast",
+        #   해석기가 넉넉히 고른 목록 — 이대로 곱하면 표가 여섯 개가 된다
+        "items": ["배추", "무"], "kinds": ["AUC", "WHSL", "RTL"], "dates": [],
+        "asks": [{"item": "배추", "kind": "AUC", "dates": [BASE + timedelta(days=1)]}],
+    })
+    out = qa_graph.answer(QaRequest(question="내일 배추 경락가"))
+    assert out.meta.items == ["배추"]
+    assert out.meta.kinds == ["AUC"]
+    assert out.markdown.count("| 날짜 | 예측 |") == 1       # 여섯이 아니라 하나
+
+
 def test_품목이_여럿이면_품목마다_표를_준다(도구를_갈아_끼운다, monkeypatch):
     도구를_갈아_끼운다(rows=[_row(1)])
     _llm(monkeypatch, {"route": "forecast", "items": ["배추", "무"],

@@ -85,6 +85,7 @@ class QaState(TypedDict, total=False):
     kind: str
     items: list[str]           # ★ 답할 품목 전부 (2026-09-15)
     kinds: list[str]           # ★ 답할 가격 종류 전부
+    asks: list[dict[str, Any]]     # ★ 짝지어진 물음 [{item, kind, dates}]
     blocks: list[dict[str, Any]]   # 조합마다 읽어 온 것 — 표 하나가 블록 하나다
     base_dt: date
     wants_today: bool
@@ -149,8 +150,11 @@ def supervise(state: QaState) -> QaState:
     #   ★ 질문에서 못 고른 칸은 **요청이 직접 준 유효한 값**으로 메운다.
     #     item 하나가 엉터리라고 해서 제대로 준 kind 까지 버리면, 답할 수 있는
     #     질문에 되묻게 된다 (2026-09-14 실측: item="string" · kind="AUC").
-    items = chosen.get("items") or given_items
-    kinds = chosen.get("kinds") or given_kinds
+    #   ★ **짝 물음이 곧 답이다** (2026-09-15). `asks` 만 오고 `items`·`kinds` 가
+    #     비어 오면 답할 수 있는 질문에 되묻게 된다 — 목록을 거기서 채운다.
+    asks = chosen.get("asks") or []
+    items = chosen.get("items") or [a["item"] for a in asks] or given_items
+    kinds = chosen.get("kinds") or [a["kind"] for a in asks] or given_kinds
     item = items[0] if items else None
     kind = kinds[0] if kinds else None
     if items:
@@ -161,6 +165,11 @@ def supervise(state: QaState) -> QaState:
         picked["kind"] = kinds[0]
     if chosen.get("dates"):
         picked["asked"] = list(chosen["dates"])
+    if chosen.get("asks"):
+        #   ★ 짝지어진 물음이 오면 **곱하지 않는다** (2026-09-15).
+        #     「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를 곱하면 안 물어본
+        #     배추 중도매가·무 경락가가 나가고 날짜도 뒤섞인다.
+        picked["asks"] = list(chosen["asks"])
     if not item or not kind:
         #   ★ **빠진 것만 묻는다** (2026-09-15 · 사용자 지적으로 고침).
         #     전에는 품목이 없어도 «가격 종류를 알 수 없습니다» 만 적었다. 그러면
@@ -234,21 +243,42 @@ def gate(state: QaState) -> QaState:
     #     전에는 말없이 «내일 하루» 였다. 값은 맞지만 왜 하루뿐인지 안 밝혀서,
     #     사람이 «원래 하루치만 있나 보다» 하고 넘어간다 — 조용한 축소다.
     #     기본값을 썼다는 것을 `used_default` 로 들고 가 답에 한 줄로 적는다.
-    used_default = not (req.dates or state.get("asked"))
-    asked = list(req.dates or state.get("asked") or [base_dt])
-    wants_today = any(d == base_dt for d in asked)
+    used_default = not (req.dates or state.get("asked")
+                        or any(a.get("dates") for a in state.get("asks") or []))
+    fallback = list(req.dates or state.get("asked") or [base_dt])
     last = base_dt + timedelta(days=QA_MAX_OFFSET)
-    targets = sorted({d for d in asked if base_dt < d <= last})
-    out_of_range = sorted({d for d in asked if d < base_dt or d > last})
+
+    #   ★ **묶음이 있으면 그것만 본다.** 없으면 품목 x 가격을 곱한다.
+    raw_asks = state.get("asks") or [
+        {"item": item, "kind": kind} for item in items[:MAX_ITEMS] for kind in kinds[:MAX_KINDS]
+    ]
+    asks: list[dict[str, Any]] = []
+    out_of_range: set[date] = set()
+    for entry in raw_asks:
+        if entry.get("item") not in QA_ITEMS or entry.get("kind") not in QA_KINDS:
+            continue
+        wanted = list(entry.get("dates") or fallback)
+        asks.append({
+            "item": entry["item"],
+            "kind": entry["kind"],
+            "targets": sorted({d for d in wanted if base_dt < d <= last}),
+            "wants_today": any(d == base_dt for d in wanted),
+        })
+        out_of_range |= {d for d in wanted if d < base_dt or d > last}
+    if not asks:
+        return {"status": "OUT_OF_SCOPE", "message": OUT_OF_SCOPE_KIND}
+
     return {
         "base_dt": base_dt,
-        "items": items,
-        "kinds": kinds,
-        "item": items[0],
-        "kind": kinds[0],
-        "wants_today": wants_today,
-        "targets": targets,
-        "out_of_range": out_of_range,
+        "items": [a["item"] for a in asks],
+        "kinds": [a["kind"] for a in asks],
+        "item": asks[0]["item"],
+        "kind": asks[0]["kind"],
+        "asks": asks,
+        #   옛 이름 — 첫 묶음 기준. 한 묶음짜리 검사·분기가 아직 쓴다.
+        "wants_today": any(a["wants_today"] for a in asks),
+        "targets": sorted({d for a in asks for d in a["targets"]}),
+        "out_of_range": sorted(out_of_range),
         "used_default": used_default,
     }
 
@@ -279,30 +309,33 @@ def fetch(state: QaState) -> QaState:
     🔴 조합 수를 막아 둔다. 3품목 x 3가격 x 19일 = 171행이면 화면이 덮인다.
     """
     base_dt = state["base_dt"]
-    targets = list(state.get("targets") or [])
-    items = state.get("items") or [state["item"]]
-    kinds = state.get("kinds") or [state["kind"]]
+    asks = state.get("asks") or [
+        {"item": state["item"], "kind": state["kind"],
+         "targets": list(state.get("targets") or []),
+         "wants_today": bool(state.get("wants_today"))}
+    ]
     try:
         blocks: list[dict[str, Any]] = []
         fell_back = False
-        for item in items[:MAX_ITEMS]:
-            for kind in kinds[:MAX_KINDS]:
-                rows = qa_tools.forecast_rows(item, kind, base_dt, targets)
-                today = qa_tools.today_row(item, kind) if state.get("wants_today") else None
-                if state.get("used_default") and today is None and not rows:
-                    #   ★ 오늘 값이 없는 아침도 있다. **빈 답을 주지 말고 내일로 물러선다.**
-                    fell_back = True
-                    rows = qa_tools.forecast_rows(
-                        item, kind, base_dt, [base_dt + timedelta(days=1)]
-                    )
-                blocks.append({
-                    "item": item,
-                    "kind": kind,
-                    "rows": rows,
-                    "today": today,
-                    "accuracy": qa_tools.accuracy(item, kind),
-                    "usability": qa_tools.usability(item, kind),
-                })
+        for ask in asks[:MAX_ITEMS * MAX_KINDS]:
+            item, kind = ask["item"], ask["kind"]
+            rows = qa_tools.forecast_rows(item, kind, base_dt, ask["targets"])
+            today = qa_tools.today_row(item, kind) if ask["wants_today"] else None
+            if state.get("used_default") and today is None and not rows:
+                #   ★ 오늘 값이 없는 아침도 있다. **빈 답을 주지 말고 내일로 물러선다.**
+                fell_back = True
+                rows = qa_tools.forecast_rows(
+                    item, kind, base_dt, [base_dt + timedelta(days=1)]
+                )
+            blocks.append({
+                "item": item,
+                "kind": kind,
+                "targets": ask["targets"],
+                "rows": rows,
+                "today": today,
+                "accuracy": qa_tools.accuracy(item, kind),
+                "usability": qa_tools.usability(item, kind),
+            })
         first = blocks[0] if blocks else {}
         return {
             "blocks": blocks,
@@ -406,7 +439,11 @@ def _answer_markdown(state: QaState) -> QaState:
 
     all_rows = [r for b in blocks for r in b["rows"]]
     todays = [b["today"] for b in blocks if b["today"]]
-    missing = sorted(set(state.get("targets") or []) - {r["target_dt"] for r in all_rows})
+    missing = sorted({
+        d
+        for block in blocks
+        for d in (set(block.get("targets") or []) - {r["target_dt"] for r in block["rows"]})
+    })
 
     head: list[str] = []
     if many:

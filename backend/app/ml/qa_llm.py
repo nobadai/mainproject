@@ -50,12 +50,27 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 고를 것
   route  forecast(값) · accuracy(얼마나 맞나) · usability(써도 되나)
          · clarify(못 고르겠다) · out_of_scope(우리 품목이 아님)
-  items  배추 · 무 · 양파 중 **질문이 가리키는 것 전부**. 없으면 빈 배열
-         「배추랑 무」면 둘 다 적는다. 「전 품목」·「다」면 셋을 다 적는다
-  kinds  AUC(경락가·매입) · WHSL(중도매가) · RTL(소매가) 중 **전부**. 없으면 빈 배열
-         「경락가랑 도매가」면 둘 다 적는다. 「가격 전부」면 셋을 다 적는다
+  items  배추 · 무 · 양파 중 **질문에 실제로 나온 것만**. 없으면 빈 배열
+         🔴 질문에 없는 품목을 채우지 마라. 하나만 나왔으면 하나만 적는다
+         「배추랑 무」면 둘 · 「전 품목」·「다」라고 할 때만 셋
+  kinds  AUC · WHSL · RTL 중 **질문에 실제로 나온 것만**. 없으면 빈 배열
+         🔴 **가장 흔한 실수다.** 「도매가」 하나만 물었는데 셋을 다 적으면 안 된다.
+            나온 낱말 수만큼만 적는다 — 하나 나왔으면 하나, 둘 나왔으면 둘
+         ★ 낱말 풀이 — 사람마다 다르게 부른다. 이대로 고른다
+           경락가 · 경매가 · 낙찰가 · 매입가        → AUC
+           도매가 · 중도매가 · 도매시장가           → WHSL   (**소매가가 아니다**)
+           소매가 · 마트가 · 소비자가               → RTL
+         「경락가랑 도매가」    → ["AUC", "WHSL"]      두 개
+         「도매가」             → ["WHSL"]             한 개
+         「가격 전부」·「모든 가격」 → ["AUC","WHSL","RTL"]  이때만 셋
   dates  질문이 가리키는 날짜를 ISO 형식으로. 「오늘」은 기준일, 「내일」은 기준일+1,
          「10일 뒤」는 기준일+10 이다. 여러 개면 모두 적는다. 없으면 비운다
+  asks   ★ **품목·가격·날짜가 짝지어진 물음**이 여럿일 때 쓴다. 한 물음이 한 칸이다
+         「5일 뒤 배추 경락가와 7일 뒤 무 도매가」
+           → [{item:배추, kind:AUC, dates:[기준일+5]},
+              {item:무,   kind:WHSL, dates:[기준일+7]}]
+         짝이 안 갈리는 질문(「배추 경락가랑 도매가 내일」)은 asks 를 비우고
+         items·kinds·dates 만 채운다 — 그건 우리가 곱해서 본다
 
 규칙
   · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 route 를 out_of_scope 로 둔다
@@ -76,13 +91,23 @@ and do not write any explanatory sentence.
 What to pick
   route  forecast (a value) · accuracy (how accurate it is) · usability (safe to use)
          · clarify (cannot decide) · out_of_scope (not one of our crops)
-  items  **every** crop the question refers to, from 배추 · 무 · 양파.
-         Empty array if the question does not say. List all of them if it names several.
-  kinds  **every** price series asked for, from AUC (auction) · WHSL (wholesale) ·
-         RTL (retail). Empty array if the question does not say.
+  items  **only the crops actually named** in the question, from 배추 · 무 · 양파.
+         Empty array if none. Do not add a crop the question did not name.
+  kinds  **only the price series actually named**, from AUC (auction) ·
+         WHSL (wholesale) · RTL (retail). Empty array if none.
+         🔴 Most common mistake: naming one ("도매가") and answering with all three.
+         ★ Korean wording maps like this — 경락가·경매가·낙찰가·매입가 → AUC ·
+           도매가·중도매가 → WHSL (**not retail**) · 소매가·마트가 → RTL.
+         "경락가랑 도매가" is AUC and WHSL **only**, not all three.
   dates  the dates the question refers to, in ISO format. "today" is the base date,
          "tomorrow" is base date + 1, "in 10 days" is base date + 10. List all of them.
          Leave empty if there are none.
+  asks   ★ use this when the question pairs a crop, a price and a date **per ask**.
+         "배추 경락가 in 5 days and 무 도매가 in 7 days"
+           → [{item:배추, kind:AUC, dates:[base+5]},
+              {item:무,   kind:WHSL, dates:[base+7]}]
+         Leave `asks` empty when the parts are not paired — then fill items·kinds·dates
+         and we take every combination ourselves.
 
 Rules
   · If the crop is not 배추, 무 or 양파 (garlic, spring onion and so on),
@@ -142,6 +167,21 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "kinds": {"type": "array", "items": {"type": "string",
                                              "enum": ["AUC", "WHSL", "RTL"]}},
         "dates": {"type": "array", "items": {"type": "string"}},
+        #   ★ **짝지어진 물음** (2026-09-15). 「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를
+        #     items x kinds 로 곱으면 **안 물어본 조합**(배추 중도매가 · 무 경락가)이
+        #     나가고 날짜도 뒤섞인다. 실제로 그렇게 나갔다.
+        "asks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string", "enum": ["배추", "무", "양파"]},
+                    "kind": {"type": "string", "enum": ["AUC", "WHSL", "RTL"]},
+                    "dates": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["item", "kind"],
+            },
+        },
     },
     "required": ["route"],
 }
@@ -193,10 +233,14 @@ def _schema(base_dt: date) -> dict[str, Any]:
         return _RESPONSE_SCHEMA
     schema = {k: v for k, v in _RESPONSE_SCHEMA.items()}
     props = {k: v for k, v in _RESPONSE_SCHEMA["properties"].items()}
-    props["dates"] = {
-        "type": "array",
-        "items": {"type": "string", "enum": _selectable(base_dt)},
-    }
+    days = _selectable(base_dt)
+    props["dates"] = {"type": "array", "items": {"type": "string", "enum": days}}
+    #   asks 안의 날짜도 같은 목록으로 묶는다 — 한쪽만 묶으면 그쪽으로만 안 틀린다.
+    ask_item = {k: v for k, v in props["asks"]["items"].items()}
+    ask_props = {k: v for k, v in ask_item["properties"].items()}
+    ask_props["dates"] = {"type": "array", "items": {"type": "string", "enum": days}}
+    ask_item["properties"] = ask_props
+    props["asks"] = {"type": "array", "items": ask_item}
     schema["properties"] = props
     return schema
 
@@ -283,7 +327,13 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         return None
     items = _pick_all(chosen.get("items"), QA_ITEMS)
     kinds = _pick_all(chosen.get("kinds"), QA_KINDS)
+    asks = _pick_asks(chosen.get("asks"))
+    if asks and not items:
+        items = _pick_all([a["item"] for a in asks], QA_ITEMS)
+    if asks and not kinds:
+        kinds = _pick_all([a["kind"] for a in asks], QA_KINDS)
     return {
+        "asks": asks,
         "route": str(chosen.get("route") or "forecast"),
         "items": items,
         "kinds": kinds,
@@ -292,6 +342,23 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         "kind": kinds[0] if kinds else None,
         "dates": _parse_dates(chosen.get("dates")),
     }
+
+
+def _pick_asks(raw: Any) -> list[dict[str, Any]]:
+    """짝지어진 물음만 걸러 낸다. 품목·가격이 우리 것이 아니면 **그 칸을 버린다.**
+
+    🔴 한 칸이 엉터리라고 나머지를 버리지 않는다 — 답할 수 있는 물음까지 사라진다.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        item = str(entry.get("item") or "").strip()
+        kind = str(entry.get("kind") or "").strip()
+        if item not in QA_ITEMS or kind not in QA_KINDS:
+            continue
+        out.append({"item": item, "kind": kind, "dates": _parse_dates(entry.get("dates"))})
+    return out
 
 
 def _pick_all(raw: Any, allowed: tuple[str, ...]) -> list[str]:
