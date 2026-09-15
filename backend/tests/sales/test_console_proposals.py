@@ -16,6 +16,10 @@ class _Reader:
         self.calls: list[tuple[str, list]] = []
 
     def __call__(self, query, params=None):
+        #  ★ 확정 판매 조회(`load_sale_statuses`)는 따로 센다. 이 파일의 검사는 판매안 조회를 본다.
+        if "source_order_id" in str(query):
+            self.sale_calls = getattr(self, "sale_calls", []) + [list(params or [])]
+            return []
         self.calls.append((str(query), list(params or [])))
         return [dict(row) for row in self.rows]
 
@@ -387,6 +391,10 @@ def test_a_finance_verdict_from_another_run_never_reaches_this_proposal(monkeypa
 
         def __call__(self, query, params=None):
             params = list(params or [])
+            if "source_order_id" in str(query):
+                #  확정 판매 조회도 실행 축을 싣는다 — 남의 실행 판매가 «확정» 으로 붙지 않는다.
+                assert params[0] in {"SIM-CHAIN-V13", "SIM-WALK-2026-FINAL"}
+                return []
             self.calls.append((str(query), params))
             #  쿼리가 축을 세 번 실어야 여기서 고를 수 있다 — 판매, 화면 실행, 재무다.
             assert len(params) == 4, params
@@ -418,9 +426,7 @@ def test_a_finance_verdict_from_another_run_never_reaches_this_proposal(monkeypa
     _patch(monkeypatch, reader)
 
     mine = get_console_sales_proposals(sim_run_id="SIM-CHAIN-V13", as_of=AS_OF).rows[0]
-    theirs = get_console_sales_proposals(
-        sim_run_id="SIM-WALK-2026-FINAL", as_of=AS_OF
-    ).rows[0]
+    theirs = get_console_sales_proposals(sim_run_id="SIM-WALK-2026-FINAL", as_of=AS_OF).rows[0]
 
     #  같은 요청 키·같은 안인데 실행이 다르면 판정도 다르다.
     assert mine.scenario_id == theirs.scenario_id == shared_scenario
@@ -468,3 +474,85 @@ def test_proposals_are_never_written_back(monkeypatch):
     query = reader.calls[0][0].upper()
     for word in ("INSERT", "UPDATE", "DELETE"):
         assert word not in query
+
+
+# ── 추천 · 선택 · 확정 을 가른다 ───────────────────────────────────────────
+
+
+class _SalesAware(_Reader):
+    def __init__(self, rows, sales):
+        super().__init__(rows)
+        self.sales = sales
+
+    def __call__(self, query, params=None):
+        if "source_order_id" in str(query):
+            self.sale_params = list(params or [])
+            return [dict(row) for row in self.sales]
+        self.calls.append((str(query), list(params or [])))
+        return [dict(row) for row in self.rows]
+
+
+def test_a_confirmed_sale_is_marked_only_on_its_own_scenario(monkeypatch):
+    rows = [
+        _row(scenario=_scenario(scenario_id="SALES-001-A")),
+        _row(scenario=_scenario(scenario_id="SALES-001-B", scenario_type="BALANCED")),
+    ]
+    reader = _SalesAware(
+        rows,
+        [
+            {
+                "source_order_id": REQUEST,
+                "sale_id": "SALE-1e2d-SALES-001-A",
+                "order_status": "DELIVERED",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.sales.console_proposals.fetch_all", reader)
+    monkeypatch.setattr("app.sales.console_proposals.get_db_schema", lambda: "haetdeul")
+
+    response = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
+
+    assert [row.sale_status for row in response.rows] == ["DELIVERED", None]
+    #  🔴 확정 조회도 실행 축과 그날 요청 키로만 묻는다.
+    assert reader.sale_params == [RUN, [REQUEST]]
+
+
+def test_a_recommendation_reason_is_carried_only_for_the_recommended_scenario(monkeypatch):
+    payload = {
+        "recommended_scenario_id": "SALES-001-B",
+        "llm": {"recommendation_reason": "재무 검토를 통과한 안 중 이익이 가장 큽니다."},
+    }
+    rows = [
+        _row(payload=payload, scenario=_scenario(scenario_id="SALES-001-A")),
+        _row(
+            payload=payload, scenario=_scenario(scenario_id="SALES-001-B", scenario_type="BALANCED")
+        ),
+    ]
+    monkeypatch.setattr("app.sales.console_proposals.fetch_all", _SalesAware(rows, []))
+    monkeypatch.setattr("app.sales.console_proposals.get_db_schema", lambda: "haetdeul")
+
+    a, b = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows
+
+    assert (a.recommended, a.recommendation_reason) == (False, None)
+    assert (b.recommended, b.recommendation_reason) == (
+        True,
+        "재무 검토를 통과한 안 중 이익이 가장 큽니다.",
+    )
+
+
+def test_no_stored_reason_means_no_reason(monkeypatch):
+    rows = [
+        _row(
+            payload={
+                "recommended_scenario_id": "SALES-001-A",
+                "llm": {"recommendation_reason": "  "},
+            }
+        )
+    ]
+    monkeypatch.setattr("app.sales.console_proposals.fetch_all", _SalesAware(rows, []))
+    monkeypatch.setattr("app.sales.console_proposals.get_db_schema", lambda: "haetdeul")
+
+    row = get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF).rows[0]
+
+    assert row.recommended is True
+    assert row.recommendation_reason is None

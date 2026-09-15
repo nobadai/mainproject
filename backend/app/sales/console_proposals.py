@@ -87,6 +87,11 @@ class ConsoleSalesProposal(BaseModel):
     ml_support_used: bool | None
     #: 판매가 추천으로 표시한 안인지. 저장된 `recommended_scenario_id` 와 같을 때만 참이다.
     recommended: bool
+    #: 추천한 안에 판매가 **저장해 둔** 추천 이유. 없으면 `None` 이다 — 화면이 지어내지 않는다.
+    recommendation_reason: str | None = None
+    #: 이 안이 실제 판매로 확정됐는지. 같은 실행의 `sales` 행이 있을 때만 그 주문 상태다
+    #: (`CONFIRMED` · `DELIVERED`). **없으면 `None` 이고 «선택» 이나 «추천» 과 다르다.**
+    sale_status: str | None = None
 
 
 class ConsoleSalesProposalsResponse(BaseModel):
@@ -218,14 +223,71 @@ def load_proposal_rows(*, sim_run_id: str, as_of: date) -> list[dict[str, Any]]:
     return fetch_all(statement, [sim_run_id, as_of, sim_run_id, sim_run_id])
 
 
-def get_console_sales_proposals(
-    *, sim_run_id: str, as_of: date
-) -> ConsoleSalesProposalsResponse:
+def load_sale_statuses(*, sim_run_id: str, request_ids: list[str]) -> dict[tuple[str, str], str]:
+    """그날 요청에서 **실제로 확정된 판매**. `(요청 키, 안 번호) → 주문 상태`.
+
+    ★ 판매 확정은 `sales` 행으로 남는다 (`persistence.build_sale_confirmation_plan`).
+      `source_order_id` 가 요청 키이고 `sale_id` 끝이 안 번호다 (`sale_id_for`).
+
+    🔴 **실행 축을 건다.** 같은 요청 키가 다른 실행에도 있을 수 있다.
+    """
+    if not request_ids:
+        return {}
+    schema = get_db_schema()
+    statement = sql.SQL(
+        """
+        SELECT sale.source_order_id, sale.sale_id, sale.order_status
+        FROM {schema}.sales sale
+        WHERE sale.sim_run_id = %s
+          AND sale.source_order_id = ANY(%s)
+        """
+    ).format(schema=sql.Identifier(schema))
+    found: dict[tuple[str, str], str] = {}
+    for raw in fetch_all(statement, [sim_run_id, request_ids]):
+        request_id = str(raw["source_order_id"])
+        sale_id = str(raw["sale_id"])
+        found[(request_id, sale_id)] = str(raw["order_status"])
+    return found
+
+
+def _sale_status(
+    found: dict[tuple[str, str], str], request_id: str, scenario_id: str
+) -> str | None:
+    """`sale_id_for` 가 만든 번호는 `…-{안 번호}` 로 끝난다.
+
+    ★ **다른 안과 섞이지 않게 끝까지 맞춘다.**
+    """
+    suffix = f"-{scenario_id}"
+    for (request, sale_id), status in found.items():
+        if request == request_id and sale_id.endswith(suffix):
+            return status
+    return None
+
+
+def _recommendation_reason(payload: dict[str, Any], recommended: bool) -> str | None:
+    """추천한 안에만, 판매가 저장한 이유를 옮긴다. 비어 있으면 `None` 이다."""
+    if not recommended:
+        return None
+    for key in ("recommendation", "llm"):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            reason = block.get("recommendation_reason")
+            if isinstance(reason, str) and reason.strip():
+                return reason.strip()
+    return None
+
+
+def get_console_sales_proposals(*, sim_run_id: str, as_of: date) -> ConsoleSalesProposalsResponse:
     """그날의 판매안. **안이 없으면 빈 목록이지, 0원 제안이 아니다.**"""
     rows: list[ConsoleSalesProposal] = []
     requests: set[str] = set()
     hidden = 0
-    for raw in load_proposal_rows(sim_run_id=sim_run_id, as_of=as_of):
+    raw_rows = load_proposal_rows(sim_run_id=sim_run_id, as_of=as_of)
+    sale_statuses = load_sale_statuses(
+        sim_run_id=sim_run_id,
+        request_ids=sorted({str(raw["request_id"]) for raw in raw_rows}),
+    )
+    for raw in raw_rows:
         request_id = str(raw["request_id"])
         requests.add(request_id)
         scenario = raw["scenario"]
@@ -241,6 +303,7 @@ def get_console_sales_proposals(
         payload = raw["payload"] if isinstance(raw["payload"], dict) else {}
         recommended_id = payload.get("recommended_scenario_id")
         scenario_id = scenario.get("scenario_id")
+        is_recommended = recommended_id is not None and str(recommended_id) == str(scenario_id)
         summary = raw["financial_summary"] if isinstance(raw["financial_summary"], dict) else {}
         cost_basis = scenario.get("inventory_cost_basis")
         cost_basis = cost_basis if isinstance(cost_basis, dict) else {}
@@ -257,9 +320,7 @@ def get_console_sales_proposals(
                 partner_id=_text(scenario.get("partner_id")),
                 quantity_kg=quantity,
                 unit_price_krw=_decimal(scenario.get("unit_price_krw")),
-                reported_sales_amount_krw=_decimal(
-                    scenario.get("reported_sales_amount_krw")
-                ),
+                reported_sales_amount_krw=_decimal(scenario.get("reported_sales_amount_krw")),
                 payment_days=_int(scenario.get("payment_days")),
                 delivery_date=_date(scenario.get("delivery_date")),
                 status=_text(scenario.get("status")),
@@ -291,9 +352,9 @@ def get_console_sales_proposals(
                 conditional_quantity_kg=_decimal(supply.get("conditional_quantity_kg")),
                 additional_supply_required=_bool(supply.get("additional_supply_required")),
                 ml_support_used=_bool(scenario.get("ml_support_used")),
-                recommended=(
-                    recommended_id is not None and str(recommended_id) == str(scenario_id)
-                ),
+                recommended=is_recommended,
+                recommendation_reason=_recommendation_reason(payload, is_recommended),
+                sale_status=_sale_status(sale_statuses, request_id, str(scenario_id)),
             )
         )
     return ConsoleSalesProposalsResponse(

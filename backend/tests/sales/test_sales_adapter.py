@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import pytest
+
 from app.master.envelope import AgentRequest, ExecutionContext
 from app.sales import adapter
 from app.sales.schemas import SalesProposalReply
@@ -220,8 +222,7 @@ def test_input_incomplete_maps_to_not_ready_and_carries_missing(monkeypatch):
     assert reply.missing_capability == ("FINANCIAL_VALIDATION",)
     assert reply.additional_validation_required is True
     assert reply.reasoning == (
-        "판매안을 만들기 위해 필요한 정보가 부족합니다. "
-        "부족한 항목을 확인해 주세요."
+        "판매안을 만들기 위해 필요한 정보가 부족합니다. 부족한 항목을 확인해 주세요."
     )
 
 
@@ -296,84 +297,221 @@ def _history_run(
     return Run()
 
 
-def test_status_query_uses_sales_run_history(monkeypatch):
+def _proposal(item: str, scenario_type: str, **over: Any):
+    from app.sales.console_proposals import ConsoleSalesProposal
+
+    data: dict[str, Any] = {
+        "request_id": f"REQ-{item}",
+        "history_run_id": "RUN-1",
+        "scenario_id": f"SALES-001-{scenario_type[0]}",
+        "scenario_type": scenario_type,
+        "objective": None,
+        "item": item,
+        "partner_id": "KIMCHI_FACTORY_001",
+        "quantity_kg": "1000",
+        "unit_price_krw": "1500",
+        "reported_sales_amount_krw": "1500000",
+        "payment_days": 7,
+        "delivery_date": date(2026, 1, 8),
+        "status": "UNRESOLVED",
+        "rationale": [],
+        "risks": [],
+        "uncertainties": [],
+        "finance_verdict": "PASS",
+        "finance_status": "EVALUATED",
+        "finance_reason_codes": [],
+        "contribution_margin_krw": None,
+        "contribution_margin_rate": None,
+        "current_partner_ar_krw": None,
+        "available_credit_krw": None,
+        "projected_partner_ar_krw": None,
+        "credit_limit_krw": None,
+        "required_collection_before_sale_krw": None,
+        "credit_utilization_rate": None,
+        "expected_credit_recovery_date": None,
+        "missing_capabilities": ["FINANCIAL_VALIDATION"],
+        "evidence_refs": [],
+        "source_ref": None,
+        "cost_basis_amount_krw": None,
+        "cost_basis_quantity_kg": None,
+        "cost_basis_method": None,
+        "cost_basis_refs": [],
+        "confirmed_quantity_kg": None,
+        "conditional_quantity_kg": None,
+        "additional_supply_required": None,
+        "ml_support_used": None,
+        "recommended": False,
+    }
+    data.update(over)
+    return ConsoleSalesProposal.model_validate(data)
+
+
+def _proposals(rows, *, request_count: int | None = None, hidden: int = 0):
+    from app.sales.console_proposals import ConsoleSalesProposalsResponse
+
+    return ConsoleSalesProposalsResponse(
+        sim_run_id="SIM-SALES-ADAPTER",
+        as_of=date(2026, 1, 7),
+        request_count=len({row.request_id for row in rows})
+        if request_count is None
+        else request_count,
+        hidden_zero_quantity=hidden,
+        rows=rows,
+    )
+
+
+#: 사용자 말풍선에 나오면 안 되는 기계용 글자.
+_RAW = (
+    "request_id",
+    "runtime_status",
+    "READY",
+    "SCENARIOS_GENERATED",
+    "proposal_count",
+    "no_stock_count",
+    "pending_validations",
+    "FINANCIAL_VALIDATION",
+    "sim_run_id",
+    "recent_runs",
+    "REQ-",
+    "SIM-",
+    "PASS",
+    "REVIEW_REQUIRED",
+    "FAIL",
+    "CONSERVATIVE",
+    "BALANCED",
+    "AGGRESSIVE",
+)
+
+
+def _status(monkeypatch, proposals, runs=None):
     monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    monkeypatch.setattr(
+        adapter,
+        "list_sales_runs",
+        lambda **_kwargs: (
+            runs
+            if runs is not None
+            else [_history_run(UUID("11111111-1111-1111-1111-111111111111"))]
+        ),
+    )
+    monkeypatch.setattr(adapter, "get_console_sales_proposals", lambda **_kwargs: proposals)
+    return adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
 
-    run = _history_run(UUID("11111111-1111-1111-1111-111111111111"))
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [run])
 
-    reply, metadata = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+def test_status_query_answers_in_words_a_user_reads(monkeypatch):
+    """🔴 마스터는 부서 payload 의 키를 **이름 그대로** 편다. 그래서 키와 값이 곧 화면 글자다."""
+    reply, metadata = _status(
+        monkeypatch,
+        _proposals(
+            [
+                _proposal("양파", "CONSERVATIVE"),
+                _proposal("양파", "BALANCED", finance_verdict="REVIEW_REQUIRED"),
+                _proposal(
+                    "배추",
+                    "CONSERVATIVE",
+                    finance_verdict="FAIL",
+                    required_collection_before_sale_krw="1158615",
+                ),
+                _proposal("배추", "BALANCED", finance_verdict=None),
+            ]
+        ),
+    )
 
     assert reply.runtime_status == "READY"
-    assert reply.business_status == "ok"
     assert reply.run_id == "11111111-1111-1111-1111-111111111111"
-    #  🔴 **원본 payload 를 통째로 싣지 않는다.** 전에는 요청·회신 JSONB 두 덩이를
-    #     그대로 냈고, 마스터가 그것을 한 줄로 펴서 ML 시세 18일치까지 화면에 쏟았다.
     assert reply.payload == {
         "as_of": "2026-01-07",
-        "recent_runs": [
-            {
-                "as_of": "2026-01-07",
-                "request_id": "REQ-SALES-ADAPTER",
-                "runtime_status": "READY",
-                "status": "SCENARIOS_GENERATED",
-                "items": ["배추"],
-                "proposal_count": 1,
-                "no_stock_count": 0,
-                "pending_validations": ["FINANCIAL_VALIDATION"],
-            }
-        ],
+        "오늘 검토 중인 판매": "양파 판매안 2개 · 배추 판매안 2개",
+        "재무 검토": "재무 검토가 필요한 판매안이 있습니다 (진행 가능한 판매안 1개)",
+        "선회수 필요": (
+            "1개 안은 기존 미수금을 먼저 회수해야 현재 여신한도 안에서 판매할 수 있습니다"
+        ),
+        "확정된 판매": "아직 없습니다",
     }
-    assert metadata.used_tools == ("list_sales_runs",)
-    assert metadata.run_id == reply.run_id
-    assert metadata.llm_status == "DISABLED"
+    assert metadata.used_tools == ("list_sales_runs", "get_console_sales_proposals")
+
+
+def test_the_master_speech_bubble_carries_no_machine_words(monkeypatch):
+    """마스터가 실제로 렌더링한 문자열로 확인한다 — payload 만 보면 펴는 방식이 바뀐 날 놓친다."""
+    from app.master.answer import facts_from_status, render_answer
+    from app.master.status_flow import StatusOutcome
+
+    reply, _ = _status(
+        monkeypatch,
+        _proposals(
+            [
+                _proposal("무", "CONSERVATIVE", recommended=True, sale_status="CONFIRMED"),
+                _proposal("무", "AGGRESSIVE", finance_verdict="FAIL"),
+            ]
+        ),
+    )
+    outcome = StatusOutcome(
+        status_code="S1_ANSWERED",
+        reason="sales 상태를 조회했다.",
+        plan=None,  # 사실 줄을 펴는 데는 계획을 쓰지 않는다
+        answers={"sales": dict(reply.payload)},
+    )
+    text = render_answer(facts_from_status(outcome))
+
+    for raw in _RAW:
+        assert raw not in text, (raw, text)
+    assert "추천 판매안 무 안정 우선" in text
+    assert "확정된 판매 무 안정 우선" in text
+
+
+def test_finance_review_state_comes_from_finance_not_from_the_first_sales_reply(monkeypatch):
+    """1차 판매 회신은 늘 «재무 검토 미완» 이다. 재무가 이미 판정했으면 그 판정을 말한다."""
+    reply, _ = _status(monkeypatch, _proposals([_proposal("배추", "CONSERVATIVE")]))
+
+    assert reply.payload["재무 검토"] == "현재 조건에서 진행 가능한 판매안이 준비되어 있습니다"
+
+
+def test_status_query_says_so_when_this_run_has_no_history(monkeypatch):
+    reply, _ = _status(monkeypatch, _proposals([], request_count=0), runs=[])
+
+    assert reply.payload["오늘 판매안"] == "이 날짜에는 판매가 돌지 않았습니다."
+    assert "없습니다" in reply.reasoning
+
+
+def test_status_query_names_an_empty_day_with_nothing_to_sell(monkeypatch):
+    """⚠️ «물량이 없어 안이 서지 않은 것» 과 «안을 안 낸 것» 은 다른 사실이다."""
+    reply, _ = _status(monkeypatch, _proposals([], request_count=3, hidden=3))
+
+    assert reply.payload["오늘 판매안"] == "팔 수 있는 물량이 없어 판매안이 서지 않았습니다."
+
+
+def test_unreadable_proposals_are_not_reported_as_no_sales(monkeypatch):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [])
+
+    def broken(**_kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(adapter, "get_console_sales_proposals", broken)
+    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
+
+    assert reply.payload["오늘 판매안"].startswith("판매안 정보를 읽지 못했습니다")
 
 
 def test_status_query_answers_only_for_this_run(monkeypatch):
     """🔴 실행 축이 다른 이력을 «우리 판매 진행 상황» 으로 내지 않는다."""
-    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
-
     mine = _history_run(UUID("11111111-1111-1111-1111-111111111111"))
     theirs = _history_run(
         UUID("22222222-2222-2222-2222-222222222222"), sim_run_id="SIM-SOMEONE-ELSE"
     )
+    seen: dict[str, Any] = {}
+
+    def proposals(**kwargs):
+        seen.update(kwargs)
+        return _proposals([_proposal("배추", "CONSERVATIVE")])
+
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
     monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [theirs, mine])
-
+    monkeypatch.setattr(adapter, "get_console_sales_proposals", proposals)
     reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
 
-    assert len(reply.payload["recent_runs"]) == 1
     assert reply.run_id == "11111111-1111-1111-1111-111111111111"
-
-
-def test_status_query_does_not_count_proposals_with_nothing_to_sell(monkeypatch):
-    """⚠️ «물량이 없어 안이 서지 않은 것» 과 «안을 안 낸 것» 은 다른 사실이다."""
-    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
-
-    run = _history_run(
-        UUID("11111111-1111-1111-1111-111111111111"),
-        scenarios=[
-            {"item": "배추", "quantity_kg": "0.0"},
-            {"item": "무", "quantity_kg": "463.0"},
-        ],
-    )
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [run])
-
-    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
-
-    summary = reply.payload["recent_runs"][0]
-    assert summary["proposal_count"] == 1
-    assert summary["no_stock_count"] == 1
-    assert summary["items"] == ["무"]
-
-
-def test_status_query_says_so_when_this_run_has_no_history(monkeypatch):
-    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
-    monkeypatch.setattr(adapter, "list_sales_runs", lambda **_kwargs: [])
-
-    reply, _ = adapter.sales_port(_request(mode="STATUS_QUERY", payload={}))
-
-    assert reply.payload["recent_runs"] == []
-    assert "없습니다" in reply.reasoning
+    assert seen == {"sim_run_id": "SIM-SALES-ADAPTER", "as_of": date(2026, 1, 7)}
 
 
 def test_generate_persists_actual_llm_metadata(monkeypatch):
@@ -520,3 +658,24 @@ def _recommendation(candidate_id: str | None) -> dict[str, Any]:
         "risk_explanation": "risk",
         "user_message": "message",
     }
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "sentence"),
+    [
+        (["FAIL", "FAIL", "FAIL"], "현재 조건으로 바로 진행하기 어려운 판매안이 3개 있습니다"),
+        (["PASS", "PASS"], "현재 조건에서 진행 가능한 판매안이 준비되어 있습니다"),
+        (
+            ["PASS", "REVIEW_REQUIRED"],
+            "재무 검토가 필요한 판매안이 있습니다 (진행 가능한 판매안 1개)",
+        ),
+        ([None, "FAIL"], "재무 검토가 필요한 판매안이 있습니다"),
+        (["UNKNOWN_CODE"], "재무 검토가 필요한 판매안이 있습니다"),
+        (
+            ["PASS", "FAIL", "FAIL"],
+            "진행 가능한 판매안 1개와 현재 조건으로 진행하기 어려운 판매안 2개가 있습니다",
+        ),
+    ],
+)
+def test_the_review_sentence_is_chosen_from_the_finance_verdicts(verdicts, sentence):
+    assert adapter.review_sentence(verdicts) == sentence

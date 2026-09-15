@@ -333,3 +333,42 @@ const CREDIT_GRADE: Record<string, string> = {
 export function creditGradeText(value: string | null | undefined): string {
   return label(CREDIT_GRADE, value, "한도 근거 미상");
 }
+
+/* ── 판매 대화 문구 ─────────────────────────────────────────────────────── */
+
+/**
+ * 재무 검토 상태를 **한 문장으로.** 판정 코드를 세서 고르기만 한다.
+ *
+ * ★ 백엔드 `app/sales/adapter.py` 의 `review_sentence` 와 같은 규칙이다 — 대화 요약과
+ *   마스터 조회 답이 다른 말을 하지 않게 한다.
+ * 🔴 모르는 판정은 «검토 필요» 쪽으로 센다. 통과로 뭉치지 않는다.
+ */
+export function salesReviewSentence(verdicts: (string | null)[]): string {
+  const passed = verdicts.filter((v) => v === "PASS").length;
+  const failed = verdicts.filter((v) => v === "FAIL").length;
+  const pending = verdicts.length - passed - failed;
+  if (verdicts.length > 0 && failed === verdicts.length) {
+    return `현재 조건으로 바로 진행하기 어려운 판매안이 ${failed}개 있습니다.`;
+  }
+  if (verdicts.length > 0 && passed === verdicts.length) {
+    return "현재 조건에서 진행 가능한 판매안이 준비되어 있습니다.";
+  }
+  if (pending > 0) {
+    return passed > 0
+      ? `재무 검토가 필요한 판매안이 있습니다. 진행 가능한 판매안은 ${passed}개입니다.`
+      : "재무 검토가 필요한 판매안이 있습니다.";
+  }
+  return `진행 가능한 판매안 ${passed}개와 현재 조건으로 진행하기 어려운 판매안 ${failed}개가 있습니다.`;
+}
+
+/**
+ * 서버가 준 사유를 **사람이 읽을 수 있을 때만** 옮긴다.
+ * 🔴 한글이 없거나 코드 모양(`SALES_…`, `FAILED`)이 섞였으면 적지 않는다 — 원문은 기록에 남는다.
+ */
+export function readableReason(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (!/[가-힣]/.test(trimmed)) return null;
+  if (/[A-Z][A-Z0-9]*_[A-Z0-9_]+|\b[A-Z]{4,}\b/.test(trimmed)) return null;
+  return trimmed;
+}
