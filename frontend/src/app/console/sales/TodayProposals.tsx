@@ -13,6 +13,8 @@
  *    «검토 전» 이다 — 통과도 거절도 아니다.
  */
 
+import { useState } from "react";
+
 import { Panel } from "@/components/console/Blocks";
 import {
   capabilityText,
@@ -59,18 +61,28 @@ export function TodayProposals({
   requestCount: number;
   hiddenZeroQuantity: number;
 }) {
+  const [selectedScenarioKey, setSelectedScenarioKey] = useState<string | null>(null);
   //  품목별로 묶는다. 매입 화면이 안을 나란히 놓는 것과 같은 읽기 순서다.
   const items = [...new Set(rows.map((row) => itemText(null, row.item)))];
   return (
     <>
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
-        {rows.map((row) => (
-          <ProposalCard key={`${row.request_id}:${row.scenario_id}`} row={row} />
+        {rows.map((row) => {
+          const key = `${row.request_id}:${row.scenario_id}`;
+          return (
+          <ProposalCard
+            key={key}
+            row={row}
+            selected={selectedScenarioKey === key}
+            onSelect={() => setSelectedScenarioKey(key)}
+          />
+          );
+        })}
         ))}
       </div>
       <p className="mb-0 mt-1 text-[12px] leading-relaxed text-ink2">
         오늘 판매가 {requestCount}건의 요청을 돌아 {rows.length}개의 안을 만들었습니다
-        {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 승인은 이 화면에서 하지 않습니다.
+        {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 추천과 선택은 다르며, 선택은 아직 판매 확정이 아닙니다.
         {/* 🔴 지운 것이 아니라 뺀 것이다. 몇 건인지 숫자로 남긴다. */}
         {hiddenZeroQuantity > 0 && (
           <>
@@ -83,7 +95,15 @@ export function TodayProposals({
   );
 }
 
-function ProposalCard({ row }: { row: SalesProposal }) {
+function ProposalCard({
+  row,
+  selected,
+  onSelect,
+}: {
+  row: SalesProposal;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   const tone = verdictTone(row.finance_verdict);
   const accent =
     row.finance_verdict === null
@@ -106,6 +126,7 @@ function ProposalCard({ row }: { row: SalesProposal }) {
         <strong className="text-[14px] font-semibold">{itemText(null, row.item)}</strong>
         {kind && <Tag text={kind} color="var(--color-t-info)" />}
         {row.recommended && <Tag text="추천" color="var(--color-t-good)" />}
+        {selected && <Tag text="선택됨" color="var(--color-t-info)" />}
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
           {/* ⚠️ 재무가 아직 안 본 안과 거절된 안은 다른 사실이다. */}
           {row.finance_verdict === null ? "재무 검토 전" : verdictText(row.finance_verdict)}
@@ -140,6 +161,15 @@ function ProposalCard({ row }: { row: SalesProposal }) {
 
         {/* 🔴 **왜 그 판정인지 말한다.** 결과만 적으면 사용자가 되짚을 수 없다. */}
         <FinanceReason row={row} />
+
+        <button
+          type="button"
+          onClick={onSelect}
+          className="rounded-lg border px-3 py-2 text-[12px] font-semibold"
+          style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
+        >
+          {selected ? "선택한 판매안" : "이 판매안 선택"}
+        </button>
 
         {(row.risks.length > 0 || row.uncertainties.length > 0) && (
           <Section title="걸리는 것" tone="var(--color-t-warn)">
