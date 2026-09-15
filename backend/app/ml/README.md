@@ -146,9 +146,9 @@ reply = self.runner.call(agent, "STATUS_QUERY")
 reply = self.runner.call(agent, "STATUS_QUERY", payload={"question": utterance})
 ```
 
-저희는 `question` · `utterance` · `q` 세 이름을 다 받습니다. **어느 것으로 정하실지
-알려주시면 하나로 줄이겠습니다** — 셋을 열어 둔 채로 두면 나중에 어느 것이 정본인지
-아무도 모르게 됩니다.
+🟢 **`question` 하나로 정해졌습니다** (마스터 확정 · 2026-09-15). `utterance` · `q` 는
+**닫았습니다** — 여러 이름이 열려 있으면 나중에 어느 것이 정본인지 못 정하고, 두
+이름으로 다른 값이 오는 날 조용히 한쪽만 읽힙니다.
 
 `Intent.item` 이 있으면 `payload["item"]` 으로 같이 주셔도 됩니다. 어휘가 같습니다
 (`ItemName` = 배추·무·양파 = 저희 `ITEMS`).

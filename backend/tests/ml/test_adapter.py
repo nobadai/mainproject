@@ -149,12 +149,22 @@ def test_숫자_칸마다_근거가_하나씩_붙는다(monkeypatch):
     }
 
 
-def test_질문_이름_셋을_다_받는다(monkeypatch):
-    """마스터가 어느 이름으로 보낼지 아직 안 정해졌다. 정해지면 하나로 줄인다."""
-    for key in ("question", "utterance", "q"):
+def test_질문은_question_한_이름으로만_받는다(monkeypatch):
+    """★ 마스터가 `question` 으로 정했다 (2026-09-15). **나머지는 닫는다.**
+
+    여러 이름을 열어 두면 나중에 어느 것이 정본인지 아무도 못 정하고, 두 이름으로
+    다른 값이 오는 날 조용히 한쪽만 읽힌다.
+    """
+    _qa(monkeypatch, _answer())
+    reply, _ = adapter.ml_port(req(payload={"question": "내일 배추 경락가?"}))
+    assert reply.payload["item"] == "배추"
+
+    #   닫은 이름으로 오면 «질문이 안 온 것» 과 같다 — 조용히 읽지 않는다.
+    for closed in ("utterance", "q"):
         _qa(monkeypatch, _answer())
-        reply, _ = adapter.ml_port(req(payload={key: "내일 배추 경락가?"}))
-        assert reply.payload["item"] == "배추", key
+        reply, _ = adapter.ml_port(req(payload={closed: "내일 배추 경락가?"}))
+        assert "item" not in reply.payload, closed
+        assert reply.payload["forecast_available"] is True, closed
 
 
 def test_예측을_읽었을_때만_근거와_관측시점을_단다(monkeypatch):

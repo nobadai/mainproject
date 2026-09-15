@@ -103,9 +103,12 @@ _T_QA = "ml.qa_graph.answer"
 _T_LATEST = "ml.qa_tools.latest_base_date"
 _T_ROWS = "ml.qa_tools.forecast_rows"
 
-#: 질문이 실려 올 수 있는 칸. 마스터가 어느 이름을 쓸지 아직 안 정해져 **셋 다 본다.**
-#: 정해지면 하나로 줄인다 — 늘어난 채로 두면 «어느 것이 정본인가» 를 아무도 모른다.
-_QUESTION_KEYS = ("question", "utterance", "q")
+#: 질문이 실려 오는 칸. **하나뿐이다** (마스터 확정 · 2026-09-15).
+#:
+#: 처음에는 `question` · `utterance` · `q` 셋을 다 받았다. 어느 이름으로 올지 몰라서였다.
+#: 마스터가 `question` 으로 정했으므로 **나머지를 닫는다** — 열어 두면 나중에 어느 것이
+#: 정본인지 아무도 못 정하고, 두 이름으로 다른 값이 오는 날 조용히 한쪽만 읽힌다.
+_QUESTION_KEYS = ("question",)
 
 
 def _run_id(request: AgentRequest) -> str:
