@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.ml.schemas import ITEMS, TargetKind
 
@@ -97,8 +97,32 @@ class QaMeta(BaseModel):
         default=None, description="ml_price_forecasts | prediction_log | 둘 다"
     )
     is_filled: list[bool] = Field(default_factory=list)
+    #   모델 대신 어제 가격을 그대로 낸 행인가. 답 문장에서는 뺐고 여기로만 간다.
+    is_gated: list[bool] = Field(default_factory=list)
     band_method: str | None = None
     use_recommended: bool | None = None
+
+    #   ★ **답 문장에서 뺀 값들** (2026-09-15 · 화면을 깨끗이 하라는 지시).
+    #     빼는 것이 아니라 **옮기는** 것이다 — 없애면 다음 셋을 아무도 못 본다.
+    #
+    #       current_price   출발점. 실제 거래가가 아니라 모델이 출발한 값
+    #       accuracy_pct    그 조합의 평균 오차율 · accuracy_note 는 그 조건
+    #       spec_desc       무엇을 잰 값인가 (시장·등급·규격) — 매입 파트 요청 항목
+    #   🔴 **자료형이 창고마다 다르다** (2026-09-15 실측으로 배웠다).
+    #     전달표 행은 정수인데 원본 창고의 당일 행은 `Decimal('1001.090')` 이다.
+    #     `int` 로 좁혀 뒀더니 당일 값을 물을 때마다 500 이 났다 — 검사는 도구를
+    #     갈아 끼워 정수만 넣어서 안 걸렸다. **반올림해 받는다.**
+    current_price: int | None = None
+
+    @field_validator("current_price", mode="before")
+    @classmethod
+    def _round_price(cls, value):
+        return None if value is None else round(float(value))
+    accuracy_pct: str | None = None
+    accuracy_note: str | None = None
+    market_name: str | None = None
+    grade_name: str | None = None
+    spec_desc: str | None = None
 
 
 class QaAnswer(BaseModel):

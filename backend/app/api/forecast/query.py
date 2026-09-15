@@ -217,7 +217,10 @@ def _demo_tab(as_of: date, kind: str, item: str) -> ForecastTab:
         accuracy=_accuracy_table(), quality=_quality_table(False), caveat=_caveat(),
         source=Source(
             filled=False, owner="ML",
-            note="원본 데이터 저장소에 연결할 수 없어 예시값을 보여줍니다 — .env 파일의 ML_SOURCE_DB_* 설정을 확인하세요",
+            note=(
+                "원본 데이터 저장소에 연결할 수 없어 예시값을 보여줍니다 — "
+                ".env 파일의 ML_SOURCE_DB_* 설정을 확인하세요"
+            ),
         ),
     )
 

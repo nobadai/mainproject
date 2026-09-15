@@ -389,9 +389,20 @@ def test_unsupported_provider_falls_back_instead_of_crashing() -> None:
     assert result.llm_status == "FALLBACK"
 
 
-def test_all_three_providers_are_registered() -> None:
-    """세 프로바이더가 같은 프로토콜로 등록돼 있다 — 선택은 환경변수 한 줄이다."""
-    assert set(PROVIDERS) == {"anthropic", "openai", "ollama"}
+def test_all_registered_providers_share_one_protocol() -> None:
+    """등록된 프로바이더가 **전부** 같은 프로토콜이다 — 선택은 환경변수 한 줄이다.
+
+    🔄 **이름 목록을 고정하지 않는다** (2026-09-15 · `gemini` 를 열면서). 전에는
+    ``== {"anthropic","openai","ollama"}`` 였는데, 그 모양은 **프로바이더가 늘 때 같이
+    늘지 않는다** — 새 것을 등록해도 검사는 옛 셋만 보고 통과하거나, 목록을 손으로 고칠
+    때까지 빨개진다. 둘 다 «늘어난 것이 프로토콜을 지키나» 를 안 재는 상태다.
+
+    ★ 대신 **비어 있지 않은가**를 잠근다. 표가 통째로 비면 위 루프는 0번 돌고 조용히
+      통과한다 — 「빈 목록을 훑고 통과하지 않는다」(`test_every_anchor_produced_something_to_check`)
+      와 같은 자리다.
+    """
+    assert PROVIDERS, "등록된 프로바이더가 없다 — 훑을 것이 없으면 검사가 아니다"
+    assert "gemini" in PROVIDERS, "팀 다섯 파트가 쓰는 provider 가 표에 있어야 한다"
     for factory in PROVIDERS.values():
         assert hasattr(factory(_settings()), "generate")
 

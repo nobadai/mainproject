@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { ROLE_LABEL, type Role, saveSession } from "@/lib/session";
+import { saveSession } from "@/lib/session";
 
 /**
  * 로그인.
@@ -20,11 +20,10 @@ export default function LoginPage() {
   //    빈 칸은 `handleSubmit` 의 trim 검사가 이미 막는다.
   const [employeeId, setEmployeeId] = useState("");
   const [name, setName] = useState("");
-  const [role, setRole] = useState<Role>("approver");
 
   function signIn() {
     if (!employeeId.trim() || !name.trim()) return;
-    saveSession({ employeeId: employeeId.trim(), name: name.trim(), role });
+    saveSession({ employeeId: employeeId.trim(), name: name.trim(), role: "admin" });
     router.push("/console");
   }
 
@@ -54,7 +53,7 @@ export default function LoginPage() {
             />
           </label>
 
-          <label className="mb-2.5 block">
+          <label className="mb-1 block">
             <span className="mb-1 block text-xs text-muted">이름</span>
             <input
               value={name}
@@ -62,21 +61,6 @@ export default function LoginPage() {
               placeholder="이현서"
               className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
             />
-          </label>
-
-          <label className="mb-1 block">
-            <span className="mb-1 block text-xs text-muted">역할</span>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value as Role)}
-              className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
-            >
-              {(Object.keys(ROLE_LABEL) as Role[]).map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_LABEL[r]}
-                </option>
-              ))}
-            </select>
           </label>
 
           <button
