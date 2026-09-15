@@ -702,16 +702,36 @@ def _expense_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Decim
 
 
 def _sales_recognized(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
+    """오늘 판매와, 휴장 뒤 **첫 개장일**에 넘겨받은 판매만 인식한다.
+
+    ``sales.sale_date``는 납품 원장 날짜이므로 바꾸지 않는다. Master #714가
+    출고 처리에 쓰는 ``master_day_openings`` 정본을 같은 의미로 읽되, Master의
+    내부 helper를 import하지 않는다. 이전 성공 개장 행이 하나라도 있으면 그
+    휴장일 판매는 이미 처리 기회를 지났으므로 다음 마감에서 다시 인식하지 않는다.
+    """
     return _sum_query(
         conn,
         """
         SELECT COALESCE(SUM(total_amount_krw), 0) AS amount
-        FROM {schema}.sales
-        WHERE sim_run_id = %s
-          AND sale_date = %s
-          AND order_status IN ('CONFIRMED', 'DELIVERED')
+        FROM {schema}.sales AS s
+        WHERE s.sim_run_id = %s
+          AND (
+                s.sale_date = %s
+                OR (
+                    s.sale_date < %s
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM {schema}.master_day_openings AS opening
+                        WHERE opening.sim_run_id = s.sim_run_id
+                          AND opening.as_of >= s.sale_date
+                          AND opening.as_of < %s
+                          AND opening.result IN ('OPENED', 'ALREADY_OPENED')
+                    )
+                )
+          )
+          AND s.order_status IN ('CONFIRMED', 'DELIVERED')
         """,
-        [sim_run_id, as_of],
+        [sim_run_id, as_of, as_of, as_of],
     )
 
 
