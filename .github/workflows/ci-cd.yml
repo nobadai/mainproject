@@ -240,3 +240,4 @@ jobs:
           FINANCE_GEMINI_API_KEY: ${{ secrets.FINANCE_GEMINI_API_KEY }}
           SALES_GEMINI_API_KEY: ${{ secrets.SALES_GEMINI_API_KEY }}
           ML_GEMINI_API_KEY: ${{ secrets.ML_GEMINI_API_KEY }}
+          PURCHASE_GEMINI_API_KEY: ${{ secrets.PURCHASE_GEMINI_API_KEY }}
