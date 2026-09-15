@@ -60,9 +60,16 @@ class ConsoleSalesProposal(BaseModel):
     #: 판정을 뒷받침한 재무 숫자. 없으면 `None` 이고 화면이 0 으로 채우지 않는다.
     contribution_margin_krw: Decimal | None
     contribution_margin_rate: Decimal | None
+    #: 🔴 여신 칸은 **재무가 센 값**을 옮긴다. 판매·화면이 한도에서 미수를 빼지 않는다.
+    current_partner_ar_krw: Decimal | None
     available_credit_krw: Decimal | None
     projected_partner_ar_krw: Decimal | None
     credit_limit_krw: Decimal | None
+    #: 판매 전에 먼저 받아야 하는 미수금. **0 은 «더 받을 필요 없음» 이고 `None` 은 «모름» 이다.**
+    required_collection_before_sale_krw: Decimal | None
+    credit_utilization_rate: Decimal | None
+    #: 계약상 결제 예정일 기준의 예상. 입금 보장일이 아니다.
+    expected_credit_recovery_date: date | None
     #: 판매가 «이건 아직 못 받았다» 고 적어 둔 검증. 재무 판정이 없는 이유가 여기 있다.
     missing_capabilities: list[str]
     #: 이 안이 어디에 기대어 섰는지. 판매가 회신에 실은 참조를 그대로 나른다.
@@ -264,9 +271,15 @@ def get_console_sales_proposals(
                 finance_reason_codes=_failing_reasons(raw.get("rule_results")),
                 contribution_margin_krw=_decimal(summary.get("contribution_margin_krw")),
                 contribution_margin_rate=_decimal(summary.get("contribution_margin_rate")),
+                current_partner_ar_krw=_decimal(summary.get("current_partner_ar_krw")),
                 available_credit_krw=_decimal(summary.get("available_credit_krw")),
                 projected_partner_ar_krw=_decimal(summary.get("projected_partner_ar_krw")),
                 credit_limit_krw=_decimal(summary.get("credit_limit_krw")),
+                required_collection_before_sale_krw=_decimal(
+                    summary.get("required_collection_before_sale_krw")
+                ),
+                credit_utilization_rate=_decimal(summary.get("credit_utilization_rate")),
+                expected_credit_recovery_date=_date(summary.get("expected_credit_recovery_date")),
                 missing_capabilities=_texts(payload.get("missing_capabilities")),
                 evidence_refs=_texts(scenario.get("evidence_refs")),
                 source_ref=_text(scenario.get("source_ref")),

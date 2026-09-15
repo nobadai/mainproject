@@ -50,7 +50,9 @@ const EMPTY: Form = {
   requested_quantity_kg: "",
   preferred_unit_price_krw: "",
   preferred_delivery_date: "",
-  preferred_payment_days: "30",
+  //  🔴 결제일수를 화면이 미리 정하지 않는다. 비워 두면 판매가 **거래처 계약 결제일수**를
+  //     싣는다 — 여기 30 을 박아 두면 거래처와 7일 결제로 바꾼 뒤에도 안이 30일로 선다.
+  preferred_payment_days: "",
   preferred_payment_terms_type: "SINGLE",
 };
 
@@ -145,6 +147,7 @@ export function SalesCandidatePanel({ simRun, asOf }: { simRun: string; asOf: st
             label="결제일수"
             value={form.preferred_payment_days}
             onChange={(v) => setForm({ ...form, preferred_payment_days: v })}
+            placeholder="비우면 거래처 계약 결제일"
           />
         </div>
         <button

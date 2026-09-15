@@ -656,8 +656,8 @@ function Lifecycle({ simRun, asOf, saleId }: { simRun: string; asOf: string; sal
       <Table
         rows={data.stages}
         columns={[
-          { key: "stage", label: "단계", render: (row) => STAGE_LABELS[row.stage] ?? row.stage },
-          { key: "status", label: "상태", render: (row) => LIFECYCLE_LABELS[row.status] ?? row.status },
+          { key: "stage", label: "단계", render: (row) => STAGE_LABELS[row.stage] ?? "기타 단계" },
+          { key: "status", label: "상태", render: (row) => LIFECYCLE_LABELS[row.status] ?? "세부 상태를 확인해 주세요" },
           { key: "when", label: "시각", mono: true, render: (row) => row.occurred_at ?? "—" },
           { key: "detail", label: "설명", render: (row) => row.detail },
         ]}

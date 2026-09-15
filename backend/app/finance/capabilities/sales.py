@@ -58,10 +58,12 @@ from app.finance.tools import (
     calculate_collection_date,
     calculate_contribution_margin,
     calculate_contribution_margin_rate,
+    calculate_credit_utilization_rate,
     calculate_projected_partner_ar,
     calculate_sales_amount,
     compare_reported_sales_amount,
     compose_sales_cost_basis,
+    estimate_credit_recovery_date,
     project_sales_scenario_cashflow,
     summarize_partner_receivables,
 )
@@ -358,6 +360,23 @@ def evaluate_receivable_capacity(
         if projected_ar is None or credit_limit_krw is None
         else max(Decimal(0), projected_ar - credit_limit_krw)
     )
+    # ★ 아래 둘은 **표시용 사실**이다. 판정 규칙에 넘기지 않는다.
+    utilization = (
+        None
+        if credit_limit_krw is None or current_ar is None
+        else calculate_credit_utilization_rate(
+            current_partner_ar_krw=current_ar, credit_limit_krw=credit_limit_krw
+        )
+    )
+    recovery_date = (
+        None
+        if required_collection is None or receivable_facts is None
+        else estimate_credit_recovery_date(
+            as_of=receivable_facts.as_of,
+            schedule=receivable_facts.open_receivable_schedule,
+            required_collection_krw=required_collection,
+        )
+    )
     if projected_ar is None:
         # ★ 채권 사실이 없으면 규칙에 0을 대신 넣지 않는다. 0원 채권은 사실이고,
         #   사실 없음은 사실이 아니다 — 자리를 메우면 둘이 같아진다.
@@ -378,6 +397,8 @@ def evaluate_receivable_capacity(
         "projected_partner_ar_krw": projected_ar,
         "available_credit_krw": available,
         "required_collection_before_sale_krw": required_collection,
+        "credit_utilization_rate": utilization,
+        "expected_credit_recovery_date": recovery_date,
         "rule": rule,
         "missing_data": tuple(missing_data),
         "evidence_refs": receivable_facts.source_refs if receivable_facts is not None else (),
@@ -536,6 +557,8 @@ def evaluate_sales_scenario(
         credit_limit_krw=credit_limit_krw,
         available_credit_krw=credit["available_credit_krw"],
         required_collection_before_sale_krw=credit["required_collection_before_sale_krw"],
+        credit_utilization_rate=credit["credit_utilization_rate"],
+        expected_credit_recovery_date=credit["expected_credit_recovery_date"],
         overdue_ar_krw=risk["overdue_ar_krw"],
         base_projected_cash_min=(
             None if scenario_cashflow is None else scenario_cashflow.base_projected_cash_min
@@ -669,9 +692,10 @@ def _summary_payload(summary: SalesFinancialSummary) -> dict[str, Any]:
       받는 쪽(판매 · 마스터)이 읽던 값의 타입이 조용히 달라진다.
     """
     dumped = summary.model_dump()
-    collection = dumped.get("collection_date")
-    if collection is not None:
-        dumped["collection_date"] = collection.isoformat()
+    for key in ("collection_date", "expected_credit_recovery_date"):
+        value = dumped.get(key)
+        if value is not None:
+            dumped[key] = value.isoformat()
     return dumped
 
 

@@ -394,6 +394,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                     if finance and finance.financial_summary
                     else None
                 ),
+                **_finance_credit_facts(finance),
                 scenario_projected_cash_min=(
                     finance.financial_summary.scenario_projected_cash_min
                     if finance and finance.financial_summary
@@ -411,6 +412,23 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             )
         )
     return result
+
+
+#: 재무 회신에서 **그대로 옮기는** 여신 칸. 판매는 이 값을 세지 않는다.
+_FINANCE_CREDIT_FIELDS: tuple[str, ...] = (
+    "current_partner_ar_krw",
+    "projected_partner_ar_krw",
+    "credit_limit_krw",
+    "available_credit_krw",
+    "credit_utilization_rate",
+    "expected_credit_recovery_date",
+)
+
+
+def _finance_credit_facts(finance) -> dict[str, object]:
+    """재무가 센 여신 사실을 안에 싣는다. **회신이 없으면 전부 `None` 이다.**"""
+    summary = finance.financial_summary if finance else None
+    return {name: getattr(summary, name) if summary else None for name in _FINANCE_CREDIT_FIELDS}
 
 
 #: 사용자가 이 중 하나라도 명시하면 **사용자 제안**으로 본다 (갱신 override 판정).

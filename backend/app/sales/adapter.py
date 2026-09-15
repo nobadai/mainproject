@@ -6,7 +6,8 @@ Sales proposal core로 옮기고, typed Sales 결과를 AgentReply로 되돌리�
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from decimal import Decimal
 from typing import Any
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 from app.sales.llm.runtime import load_settings
+from app.sales.partner_profile import get_partner_profile
 from app.sales.proposal import run_proposal
 from app.sales.runs import list_sales_runs, save_sales_agent_run
 from app.sales.schemas import (
@@ -25,6 +27,7 @@ from app.sales.schemas import (
 )
 
 AGENT_NAME = "sales"
+logger = logging.getLogger(__name__)
 
 
 def sales_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
@@ -113,7 +116,59 @@ def _proposal_input(request: AgentRequest, run_id: str) -> SalesProposalInput:
         data["feedback_attempt"] = feedback_attempt
     if int(feedback_attempt or 0) > 0:
         data["is_refeed"] = True
-    return SalesProposalInput.model_validate(data)
+    return SalesProposalInput.model_validate(with_partner_payment_days(data))
+
+
+def with_partner_payment_days(
+    data: Mapping[str, Any],
+    *,
+    lookup: Callable[[str], int | None] | None = None,
+) -> dict[str, Any]:
+    """요청이 결제일수를 말하지 않았으면 **거래처 계약 결제일수**를 싣는다.
+
+    ```text
+    요청이 결제일수를 들고 있다             → 그대로 둔다 (사람·걷기 규칙이 정한 값이 이긴다)
+    계약 이행                               → 그대로 둔다 (계약서가 정본이다)
+    갱신인데 이전 계약이 결제일수를 들고 있다 → 그대로 둔다 (계약 상속이 이긴다)
+    그 밖, 거래처가 있고 계약 결제일수가 있다 → partners.sales_collection_days 를 싣는다
+    거래처 계약값을 못 읽었다                → 그대로 둔다 → 재무가 «결제일수 없음» 으로 닫는다
+    ```
+
+    ★ **정본은 거래처 계약이다** (`partners.sales_collection_days`). 화면 입력칸에 30 을
+      미리 채워 두거나 코드에 일수를 박으면, 거래처와 7일 결제로 계약을 바꾼 날에도
+      판매안은 30일로 선다.
+
+    🔴 **0일은 값이다** — «당일 결제» 라는 정해진 조건이라 `None` 과 가른다.
+    """
+    user = data.get("user_request")
+    if not isinstance(user, Mapping) or user.get("preferred_payment_days") is not None:
+        return dict(data)
+    mode = data.get("business_mode")
+    contract = data.get("contract_context")
+    contract = contract if isinstance(contract, Mapping) else {}
+    if mode == "CONTRACT_FULFILLMENT":
+        return dict(data)
+    if mode == "CONTRACT_PROPOSAL_RENEWAL" and contract.get("contract_payment_days") is not None:
+        return dict(data)
+    partner_id = user.get("partner_id") or contract.get("partner_id")
+    if not isinstance(partner_id, str) or not partner_id.strip():
+        return dict(data)
+    days = (lookup or _partner_contract_payment_days)(partner_id)
+    if days is None:
+        return dict(data)
+    return {**data, "user_request": {**user, "preferred_payment_days": days}}
+
+
+def _partner_contract_payment_days(partner_id: str) -> int | None:
+    """거래처 계약 결제일수. **못 읽으면 `None` 이고 지어내지 않는다.**"""
+    try:
+        profile = get_partner_profile(partner_id=partner_id)
+    except Exception:  # noqa: BLE001 - 못 읽은 계약을 기본값으로 메우지 않는다.
+        logger.warning("partner contract payment days unavailable: %s", partner_id)
+        return None
+    if profile is None:
+        return None
+    return profile.sales_collection_days
 
 
 def _proposal_payload(proposal: SalesProposalReply) -> Mapping[str, Any]:
