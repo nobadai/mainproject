@@ -353,6 +353,19 @@ def build_graph():
 
 
 def answer(request: QaRequest) -> QaAnswer:
-    """바깥에 드러내는 것은 이 함수 하나다. 그래프는 안쪽 사정이다."""
+    """바깥에 드러내는 것은 이 함수 하나다. 그래프는 안쪽 사정이다.
+
+    ★ **읽은 행을 같이 돌려준다** (2026-09-15). 마스터 어댑터가 회신에 붙일
+      `Evidence` 를 그 행에서 만든다 — 답 문장에서 숫자를 다시 뜯어내면
+      **같은 사실에 두 경로가 생긴다.** 값은 표에서 온 것 하나여야 한다.
+    """
     final = build_graph().invoke({"request": request})
-    return QaAnswer(markdown=final["markdown"], meta=final["meta"])
+    rows = list(final.get("rows") or [])
+    today = final.get("today")
+    if today:
+        rows = [*rows, today]
+    return QaAnswer(
+        markdown=final["markdown"],
+        meta=final["meta"],
+        rows_for_evidence=rows,
+    )
