@@ -399,14 +399,41 @@ def test_all_three_providers_are_registered() -> None:
 # ── 사중 일치: LLM이 무엇을 골라도 ─────────────────────────────────────────
 
 
+def 우열표를_끈다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """우열표를 ``PROVISIONAL`` 로 내려 **후보 셋이 그대로 제시되게** 한다 (E3-12).
+
+    🔴 **왜 끄나.** ``SPREAD_WIDE`` 픽스처는 신선도도 빡빡해 우열표가 **딱 걸리는 날**이고,
+    그날은 규칙이 후보를 하나로 좁힌다. 아래 불변들은 *"판단자가 무엇을 골라도 수량 축이
+    안 흔들린다"* 를 재는 것이라 **후보 폭이 필요하다** — 좁혀진 목록으로 재면 불변이
+    좁아진 채로만 지켜지는지 알 수 없다.
+
+    ⚠️ 값을 지어내지 않는다. 실제 선언을 읽어 ``status`` 한 칸만 내린 **사본**을 쓴다
+    (규칙 8 의 방식) — 그래야 다른 임계가 조용히 달라지지 않는다.
+    """
+    사본 = load_constraints()
+    사본["grade"] = {
+        **사본["grade"],
+        "mix_precedence": {**사본["grade"]["mix_precedence"], "status": "PROVISIONAL"},
+    }
+    monkeypatch.setattr(
+        "app.purchase_agent.nodes.allocate_sourcing.load_constraints", lambda: 사본
+    )
+
+
 @pytest.mark.parametrize("candidate_id", ["BASE_ONLY", "MID_HALF", "MID_CAPPED"])
 @pytest.mark.parametrize("item", ITEMS)
-def test_any_choice_keeps_the_quadruple_match(candidate_id: str, item: str) -> None:
+def test_any_choice_keeps_the_quadruple_match(
+    candidate_id: str, item: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """**어느 후보를 강제로 고르게 해도** 사중 일치가 유지된다 (4품목 전횡단).
 
     비율은 규칙이 만든 후보의 값이고 수량은 ⑥이 곱하므로, LLM의 선택이 수량 축에
     닿을 수단 자체가 없다. 그 사실을 강제 선택으로 확인한다.
+
+    🔄 **우열표를 끄고 잰다** (2026-09-15 · E3-12) — 위 ``우열표를_끈다`` 의 이유 참조.
+       켠 상태에서 무엇이 제시되는지는 ``test_mix_precedence`` 가 따로 잠근다.
     """
+    우열표를_끈다(monkeypatch)
     proposal = run_purchase_agent(item, SPREAD_WIDE, selector=_fixed_selector(candidate_id))
     assert proposal["scenarios"]
     for scenario in proposal["scenarios"]:
@@ -708,12 +735,19 @@ def test_candidate_outside_the_set_is_caught_at_the_adapter_boundary() -> None:
     assert scenario["sourcing_plan"] == rule_only["sourcing_plan"]
 
 
-def test_choosing_base_only_is_still_a_recorded_judgment() -> None:
+def test_choosing_base_only_is_still_a_recorded_judgment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """**Codex 교차검증 P2 회귀.** "확대됐지만 중품을 안 쓴다"도 판단이다.
 
     비율이 0이 되면서 rationale·risks가 조기 반환해 판단 사실이 통째로 사라졌다.
     소비자는 "평시라 애초에 후보가 없었다"와 구분할 수 없게 된다.
+
+    🔄 **우열표를 끄고 잰다** (2026-09-15 · E3-12). 켠 상태에서는 이 픽스처가 부딪히는
+       날이라 ``BASE_ONLY`` 가 아예 제시되지 않는다 — 그러면 이 검사가 재려는 *"안 쓰기로
+       한 판단도 근거에 남는가"* 를 물어볼 자리 자체가 없어진다.
     """
+    우열표를_끈다(monkeypatch)
 
     def base_only(context, default_candidate_id):
         del context, default_candidate_id

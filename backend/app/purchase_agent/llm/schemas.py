@@ -62,6 +62,17 @@ class GradeMixInterpretation(BaseModel):
     reason: str
 
 
+#: 우열표가 ⑤ 의 후보를 하나로 좁힌 날의 신호 (E3-12).
+#:
+#: 🔴 **여기 두는 이유는 import 방향이다.** 값을 세우는 곳은 ``nodes/allocate_sourcing``
+#: 이고 읽는 곳은 ``llm/runtime.needs_llm`` 인데, ``runtime`` 은 노드를 못 가져온다
+#: (노드가 ``runtime`` 을 가져온다). 둘 다 가져오는 가장 아래가 이 파일이다.
+#:
+#: ⚠️ 문자열을 두 곳에 적지 않는다 — 한쪽만 바뀌면 «좁혔는데 안 부르는» 날이 생기고,
+#: 그날은 근거 한 줄이 사라진 채 아무도 모른다.
+MIX_PRECEDENCE_SIGNAL = "MIX_PRECEDENCE_APPLIED"
+
+
 class SanitizedLLMContext(BaseModel):
     """LLM에 주는 판단 재료. **숫자가 하나도 없다.**"""
 
