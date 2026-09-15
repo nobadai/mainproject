@@ -21,8 +21,7 @@
 
 import json
 import os
-import re
-import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -38,33 +37,16 @@ from app.purchase_agent.llm.schemas import (
     LLMStatus,
     SanitizedLLMContext,
 )
+from app.purchase_agent.llm.text_guard import contains_control_chars, contains_number
 
 #: 팀 4벌은 ``backend/.env``를 읽는데 이 저장소의 실제 파일은 루트에 있다.
 #: 어느 쪽에 두든 동작해야 하므로 **둘 다** 읽는다 (없는 파일은 무시된다).
-_ENV_FILES = (
+ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",  # backend/.env — 팀 규약 위치
     Path(__file__).resolve().parents[4] / ".env",  # 저장소 루트 — 실제 위치
 )
 #: 에이전트 전용 접두사 — ``PURCHASE_LLM_MODEL``로 다른 에이전트와 분리한다 (critic 선례).
-_ENV_PREFIX = "PURCHASE_"
-#: 출력에 숫자가 있으면 거부한다. 팀 4벌이 전부 쓰는 규칙이고, 정의서 §1.2-3("LLM은
-#: 가격·수량 숫자를 생성하지 않는다")을 프롬프트가 아니라 **검증기**로 강제하는 장치다.
-#: ``\d``는 ASCII와 전각(１２３)을 잡지만 ``½``·``²``·``Ⅻ`` 같은 유니코드 수치 문자는
-#: 놓친다 — ``str.isnumeric()``이 그쪽을 덮는다 (Codex 교차검증).
-#: ⚠️ 한글 수사("백삼십원")는 **정규식으로 못 막는다.** 그건 판단 영역이라 프롬프트가
-#: 맡고, 여기서 잡는 건 기계적으로 판별 가능한 것뿐이다 — 이 한계를 알고 쓴다.
-_NUMERIC_PATTERN = re.compile(r"\d")
-
-
-def _contains_number(text: str) -> bool:
-    return bool(_NUMERIC_PATTERN.search(text)) or any(ch.isnumeric() for ch in text)
-
-
-def _contains_control_chars(text: str) -> bool:
-    """제어문자·zero-width·bidi 문자. rationale에 그대로 실리므로 표시 안전성 문제다."""
-    return any(
-        unicodedata.category(ch) in {"Cc", "Cf"} and ch not in "\n\t" for ch in text
-    )
+ENV_PREFIX = "PURCHASE_"
 
 SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
@@ -99,19 +81,29 @@ class LLMSettings:
     reason_max_chars: int
 
 
+class PromptContext(Protocol):
+    """프로바이더가 컨텍스트에 요구하는 것 — **직렬화되는 것** 하나뿐이다.
+
+    🔴 ``Any`` 로 두지 않는다. 역할마다 컨텍스트 모델이 다르지만 프로바이더가 쓰는 면은
+    이 한 줄이고, 넓게 열어 두면 «무엇을 보내는지» 가 타입에서 사라진다.
+    """
+
+    def model_dump(self, *, mode: str = ...) -> dict[str, Any]: ...
+
+
 class LLMProvider(Protocol):
     """문자열을 받아오는 것까지가 프로바이더의 일이다. 검증은 서비스가 한다."""
 
     def generate(
         self,
-        context: SanitizedLLMContext,
+        context: PromptContext,
         *,
         retry_guidance: list[str] | None = None,
     ) -> str: ...
 
 
 def _user_payload(
-    context: SanitizedLLMContext, retry_guidance: list[str] | None
+    context: PromptContext, retry_guidance: list[str] | None
 ) -> str:
     payload: dict[str, Any] = {"context": context.model_dump(mode="json")}
     if retry_guidance:
@@ -127,6 +119,30 @@ def _require_model(settings: "LLMSettings") -> None:
         )
 
 
+@dataclass(frozen=True)
+class RoleSpec:
+    """프로바이더가 알아야 하는 **역할의 전부**.
+
+    🔴 **역할별 분기를 프로바이더 안에 넣지 않는다.** 프로바이더는 *"이 지시문과 이 응답
+    스키마로 한 번 물어본다"* 까지만 하고, 무엇을 묻는지는 모른다. 분기를 안에 넣으면
+    역할이 늘 때마다 세 프로바이더를 다 고치게 되고, 그 셋은 SDK 사정으로 이미 서로 다르다.
+
+    ⚠️ **요청 모델·검증 함수는 여기 없다.** 그건 역할이 각자 갖는다 — 프로바이더는
+    받은 컨텍스트를 직렬화해 보내기만 한다.
+    """
+
+    system_prompt: str
+    response_schema: dict[str, Any]
+    #: 🔴 **지시문과 응답 계약의 판.** 같이 사는 값이라 같은 자리에 둔다 — 흔적에만 적어
+    #: 두면 지시문을 고치면서 판을 안 올리는 날이 온다.
+    #:
+    #: ⚠️ 이 값은 **부른 호출에만** 적힌다. 안 부른 호출(꺼짐·게이트·상한)에서는 빈
+    #: 문자열이고, 그 빈칸이 곧 «그 판이 없었다» 는 뜻이다 (``LLMCallMetadata``).
+    prompt_version: str = "0"
+    schema_version: str = "0"
+
+
+
 def _response_schema() -> dict[str, Any]:
     """구조화 출력에 넘길 JSON Schema.
 
@@ -136,15 +152,26 @@ def _response_schema() -> dict[str, Any]:
     return GradeMixInterpretation.model_json_schema()
 
 
+#: ⑤ 등급 조합. 🔴 **값은 지금 쓰던 것 그대로다** — 이 판은 «따로 담았을 뿐» 이다.
+MIX_ROLE = RoleSpec(
+    system_prompt=SYSTEM_PROMPT,
+    response_schema=_response_schema(),
+    # 🔴 **E3-2 이후 안 바뀐 판이다.** 올리는 것은 지시문이나 응답 계약을 고치는 날이다.
+    prompt_version="mix-1",
+    schema_version="mix-1",
+)
+
+
 class AnthropicProvider:
     """Messages API + 구조화 출력(``output_config.format``)."""
 
-    def __init__(self, settings: LLMSettings):
+    def __init__(self, settings: LLMSettings, spec: RoleSpec = MIX_ROLE):
         self.settings = settings
+        self.spec = spec
 
     def generate(
         self,
-        context: SanitizedLLMContext,
+        context: PromptContext,
         *,
         retry_guidance: list[str] | None = None,
     ) -> str:
@@ -160,7 +187,7 @@ class AnthropicProvider:
             max_retries=0,  # 재시도는 서비스가 소유한다 — 두 층이 각자 세면 상한이 곱해진다
         )
         output_config: dict[str, Any] = {
-            "format": {"type": "json_schema", "schema": _response_schema()}
+            "format": {"type": "json_schema", "schema": self.spec.response_schema}
         }
         if self.settings.effort:
             # **설정했을 때만 싣는다.** 지원하지 않는 모델에 실어 보내면 호출이 통째로
@@ -170,7 +197,7 @@ class AnthropicProvider:
         message = client.messages.create(
             model=self.settings.model,
             max_tokens=self.settings.max_output_tokens,
-            system=SYSTEM_PROMPT,
+            system=self.spec.system_prompt,
             output_config=output_config,
             messages=[{"role": "user", "content": _user_payload(context, retry_guidance)}],
         )
@@ -185,12 +212,13 @@ class AnthropicProvider:
 class OpenAIProvider:
     """Chat Completions + ``response_format`` json_schema(strict)."""
 
-    def __init__(self, settings: LLMSettings):
+    def __init__(self, settings: LLMSettings, spec: RoleSpec = MIX_ROLE):
         self.settings = settings
+        self.spec = spec
 
     def generate(
         self,
-        context: SanitizedLLMContext,
+        context: PromptContext,
         *,
         retry_guidance: list[str] | None = None,
     ) -> str:
@@ -208,7 +236,7 @@ class OpenAIProvider:
         completion = client.chat.completions.create(
             model=self.settings.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self.spec.system_prompt},
                 {"role": "user", "content": _user_payload(context, retry_guidance)},
             ],
             # 토큰 상한을 여기도 건다 — 안 걸면 설정값이 무시된 장문 생성이 가능하다
@@ -219,7 +247,7 @@ class OpenAIProvider:
                 "json_schema": {
                     "name": "grade_mix_interpretation",
                     "strict": True,
-                    "schema": _response_schema(),
+                    "schema": self.spec.response_schema,
                 },
             },
         )
@@ -232,12 +260,13 @@ class OpenAIProvider:
 class OllamaProvider:
     """팀 기존 4벌과 같은 로컬 경로. 표준 라이브러리만 쓴다 (SDK 없음)."""
 
-    def __init__(self, settings: LLMSettings):
+    def __init__(self, settings: LLMSettings, spec: RoleSpec = MIX_ROLE):
         self.settings = settings
+        self.spec = spec
 
     def generate(
         self,
-        context: SanitizedLLMContext,
+        context: PromptContext,
         *,
         retry_guidance: list[str] | None = None,
     ) -> str:
@@ -248,9 +277,9 @@ class OllamaProvider:
             "model": self.settings.model,
             "stream": False,
             "think": False,
-            "format": _response_schema(),
+            "format": self.spec.response_schema,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self.spec.system_prompt},
                 {"role": "user", "content": _user_payload(context, retry_guidance)},
             ],
             # ``num_predict``가 Ollama의 출력 토큰 상한이다 — 세 프로바이더가 같은
@@ -281,11 +310,23 @@ class OllamaProvider:
 
 
 class UnavailableProvider:
-    """미지원 ``LLM_PROVIDER`` 값. 조용히 무시하지 않고 **터뜨려 fallback으로 보낸다**."""
+    """미지원 ``LLM_PROVIDER`` 값. 조용히 무시하지 않고 **터뜨려 fallback으로 보낸다**.
+
+    🔴 **다른 셋과 같은 모양으로 받는다** ``(settings, spec)``. 안 쓰는 값이지만 받는다 —
+    부르는 쪽이 *"아는 provider 면 이렇게, 모르면 저렇게"* 로 두 모양을 쓰면 **모르는
+    provider 일 때만 터지는 길**이 생긴다. 실제로 그랬다: ④·⑧ 이 역할을 넘기는 모양으로
+    적었는데 이 클래스만 인자를 안 받아, ``LLM_PROVIDER`` 가 오타일 때 ``build_graph()``
+    자체가 ``TypeError`` 로 죽었다. **기본 경로가 돌아야 한다**는 이 파일의 전제가 거기서
+    깨진다 — 그래서 지금은 ``build_provider`` 하나로만 만든다.
+    """
+
+    def __init__(self, settings: "LLMSettings | None" = None, spec: RoleSpec = MIX_ROLE):
+        self.settings = settings
+        self.spec = spec
 
     def generate(
         self,
-        context: SanitizedLLMContext,
+        context: PromptContext,
         *,
         retry_guidance: list[str] | None = None,
     ) -> str:
@@ -293,11 +334,28 @@ class UnavailableProvider:
         raise RuntimeError("Configured purchase LLM provider is not supported")
 
 
-_PROVIDERS: dict[str, type] = {
+PROVIDERS: dict[str, type] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
 }
+
+
+def build_provider(settings: LLMSettings, spec: RoleSpec = MIX_ROLE) -> LLMProvider:
+    """설정이 가리키는 프로바이더를 만든다. **모르는 이름이면 터뜨리는 것을 돌려준다.**
+
+    🔴 **역할마다 이 조립을 베끼지 않는다.** 베끼면 한 자리가 다른 모양으로 적히고, 그
+    차이는 **설정이 어긋난 날에만** 드러난다 — 평소 경로에서는 셋 다 같은 값을 돌려주기
+    때문이다. 조립을 한 함수로 모으는 것이 그 구간을 없애는 방법이다.
+
+    ⚠️ **여기서 예외를 내지 않는다.** 모르는 provider 는 «지금 못 부른다» 이지 «그래프를
+    세운다» 가 아니다. 터지는 자리는 호출 시점이고, 그 예외는 ``run_with_fallback`` 이
+    받아 **규칙 기본안**으로 보낸다.
+    """
+    factory = PROVIDERS.get(settings.provider)
+    if factory is None:
+        return UnavailableProvider(settings, spec)
+    return factory(settings, spec)
 
 
 class ValidationIssue(StrEnum):
@@ -349,9 +407,9 @@ def _validation_issues(
     if interpretation.chosen_candidate_id not in known:
         issues.append(ValidationIssue.UNKNOWN_CANDIDATE)
     # chosen_candidate_id는 검사 대상이 아니다 — 후보 id에 숫자가 들어갈 수 있다.
-    if _contains_number(interpretation.reason):
+    if contains_number(interpretation.reason):
         issues.append(ValidationIssue.NUMERIC_OUTPUT_FORBIDDEN)
-    if _contains_control_chars(interpretation.reason) or _contains_control_chars(
+    if contains_control_chars(interpretation.reason) or contains_control_chars(
         interpretation.chosen_candidate_id
     ):
         issues.append(ValidationIssue.CONTROL_CHARACTERS)
@@ -388,8 +446,65 @@ def needs_llm(context: SanitizedLLMContext) -> bool:
     return len(context.candidates) >= 2
 
 
+def run_with_fallback[Interpretation](
+    *,
+    settings: LLMSettings,
+    provider: LLMProvider,
+    context: PromptContext,
+    template: Interpretation,
+    validate: Callable[[str], Interpretation],
+    needs_call: bool,
+    guidance_for: Callable[[Exception], list[str]],
+) -> tuple[Interpretation, LLMStatus, int, bool]:
+    """**재시도·오류 분류·fallback 골격.** 역할이 바뀌어도 이 층은 그대로다.
+
+    돌려주는 것은 ``(해석, 상태, 시도 수, fallback 썼나)`` 다.
+
+    🔴 **역할 로직이 여기 없다.** 무엇을 묻는지(``context``)·무엇이 옳은지(``validate``)·
+    실패했을 때 무엇으로 돌아갈지(``template``)는 전부 **부르는 쪽이 준다.** 여기 분기를
+    넣기 시작하면 역할이 늘 때마다 이 함수가 부풀고, 그때부터 한 역할의 버그가 다른
+    역할을 멈춘다.
+
+    상태 넷의 뜻은 봉투가 규정한다::
+
+        DISABLED           설정이 꺼져 있다
+        SKIPPED_TEMPLATE   켜져 있는데 이번엔 부를 조건이 아니었다 (``needs_call``)
+        SUCCESS            부르고 검증까지 통과했다
+        FALLBACK           부르고 다 실패해 **기본안으로 돌아갔다**
+
+    ⚠️ **모든 실패가 같은 자리로 떨어진다.** 키 없음·서버 없음·타임아웃·SDK 예외를 전부
+    받는다 — 팀원이 브랜치만 받아도 그래프가 도는 것이 이 한 줄에 걸려 있다.
+    """
+    if not settings.enabled:
+        return template, "DISABLED", 0, False
+    if not needs_call:
+        return template, "SKIPPED_TEMPLATE", 0, False
+
+    guidance: list[str] | None = None
+    attempts = 0
+    for _ in range(settings.max_retries + 1):
+        attempts += 1
+        try:
+            raw_output = provider.generate(context, retry_guidance=guidance)
+            return validate(raw_output), "SUCCESS", attempts, False
+        except Exception as error:  # noqa: BLE001 - 선택 실패가 그래프를 멈추면 안 된다
+            guidance = guidance_for(error)
+    return template, "FALLBACK", attempts, True
+
+
+def _mix_guidance(error: Exception) -> list[str]:
+    """⑤ 의 **오류 분류**. 검증 실패는 무엇이 틀렸는지 되돌려 주고, 그 밖은 형식만 짚는다.
+
+    🔴 역할마다 다르므로 골격에 안 넣는다 — 골격은 *"실패하면 이걸 불러 안내를 받는다"*
+    까지만 안다.
+    """
+    if isinstance(error, MixValidationError):
+        return retry_guidance(error.issues)
+    return ["지정된 규칙과 JSON 형식에 맞춰 다시 작성하세요."]
+
+
 class MixSelectionService:
-    """검증·재시도·fallback을 소유한다. **프로바이더가 바뀌어도 이 층은 그대로다.**"""
+    """⑤ 의 설정 — 재시도·fallback 골격은 ``run_with_fallback`` 이 소유한다."""
 
     def __init__(self, settings: LLMSettings, provider: LLMProvider):
         self.settings = settings
@@ -407,32 +522,21 @@ class MixSelectionService:
             chosen_candidate_id=default_candidate_id,
             reason="규칙 기본안",
         )
-        if not self.settings.enabled:
-            return self._result(template, status="DISABLED", attempts=0, fallback=False)
-        if not needs_llm(context):
-            return self._result(
-                template, status="SKIPPED_TEMPLATE", attempts=0, fallback=False
-            )
-
-        guidance: list[str] | None = None
-        attempts = 0
-        for _ in range(self.settings.max_retries + 1):
-            attempts += 1
-            try:
-                raw_output = self.provider.generate(context, retry_guidance=guidance)
-                interpretation = validate_interpretation(
-                    raw_output, context, reason_max_chars=self.settings.reason_max_chars
-                )
-                return self._result(
-                    interpretation, status="SUCCESS", attempts=attempts, fallback=False
-                )
-            except MixValidationError as error:
-                guidance = retry_guidance(error.issues)
-            except Exception:  # noqa: BLE001 - 선택 실패가 그래프를 멈추면 안 된다
-                # 키 없음·서버 없음·타임아웃·SDK 예외를 전부 여기서 받는다. **팀원이
-                # 브랜치만 받아도 877건이 그대로 도는 것**이 이 한 줄에 걸려 있다.
-                guidance = ["지정된 규칙과 JSON 형식에 맞춰 다시 작성하세요."]
-        return self._result(template, status="FALLBACK", attempts=attempts, fallback=True)
+        # 🔄 **골격은 ``run_with_fallback`` 이 소유한다** (2026-09-14). 재시도·오류 분류·
+        #   fallback 은 역할이 늘어도 같은데, 여기 두면 역할마다 같은 루프를 베끼게 된다
+        #   — 팀 4벌이 이미 그렇게 갈렸다. 아래 셋만 ⑤ 의 것이다.
+        해석, 상태, 시도, 떨어짐 = run_with_fallback(
+            settings=self.settings,
+            provider=self.provider,
+            context=context,
+            template=template,
+            validate=lambda raw: validate_interpretation(
+                raw, context, reason_max_chars=self.settings.reason_max_chars
+            ),
+            needs_call=needs_llm(context),
+            guidance_for=_mix_guidance,
+        )
+        return self._result(해석, status=상태, attempts=시도, fallback=떨어짐)
 
     def _result(
         self,
@@ -476,11 +580,11 @@ _DEFAULT_MODELS = {
 
 def _env(key: str, default: str) -> str:
     """``PURCHASE_<KEY>`` → ``<KEY>`` → default. 빈 문자열은 미설정으로 본다 (critic 선례)."""
-    return os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key) or default
+    return os.getenv(f"{ENV_PREFIX}{key}") or os.getenv(key) or default
 
 
 def _read_bool(key: str, *, default: bool) -> bool:
-    value = os.getenv(f"{_ENV_PREFIX}{key}") or os.getenv(key)
+    value = os.getenv(f"{ENV_PREFIX}{key}") or os.getenv(key)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -518,7 +622,7 @@ def get_llm_settings() -> LLMSettings:
     경우 설정값의 두 배를 넘을 수 있다 (Codex 교차검증). 총 deadline이 필요해지면
     별도 장치가 있어야 하고, 이 값 하나로는 보장되지 않는다.
     """
-    for env_file in _ENV_FILES:
+    for env_file in ENV_FILES:
         load_dotenv(env_file)
     provider = _env("LLM_PROVIDER", "anthropic").strip().lower()
     return LLMSettings(
@@ -541,6 +645,4 @@ def get_llm_settings() -> LLMSettings:
 
 def get_mix_selection_service() -> MixSelectionService:
     settings = get_llm_settings()
-    factory = _PROVIDERS.get(settings.provider)
-    provider: LLMProvider = factory(settings) if factory else UnavailableProvider()
-    return MixSelectionService(settings, provider)
+    return MixSelectionService(settings, build_provider(settings, MIX_ROLE))

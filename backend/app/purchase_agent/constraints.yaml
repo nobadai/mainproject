@@ -336,6 +336,41 @@ split:
   # 같은 사실을 두 곳에 적으면 한쪽만 바뀐다.
   types: [1, 2, 3]
 
+  # 회차별 배분 후보 (E3-9). **앞 회차부터의 가중치**이고 마지막은 안 적는다 —
+  # 마지막은 `1 − Σ앞` 으로 구성한다 (`allocation.weighted_ratios`). 각자 적은 수를
+  # 더하면 부동소수점 합이 1에서 밀려 ⑥의 합계 검사에 걸린다.
+  #
+  # 🔴 **PROVISIONAL — 정책 승인 전이다.** 아래 수에는 업무 근거가 없다. 여기 적는 것은
+  #   「어디서 읽는가」를 정할 뿐이고 「왜 그 값인가」를 정하지 않는다. 그래서 운영
+  #   기능(`PURCHASE_LLM_SPLIT_ALLOCATION_ENABLED`)은 **꺼 둔다**.
+  #   선례가 있다 — 물류 `inbound_lead_days` 가 PROVISIONAL 로 왔고 우리는
+  #   "확정 전에 이 수를 근거로 다른 계산을 세우지 않는다" 로 받았다.
+  #
+  # ⚠️ 확정 경로 셋. ㉠ 정책 소유자가 승인하고 source·version 을 적는다 ·
+  #   ㉡ 실험값으로 두고 운영은 계속 off (지금) · ㉢ 데이터에서 계산되는 식으로 바꾼다.
+  #   ㉢ 은 지금 못 한다 — 다회차가 안 서서 **맞춰 볼 관측이 0건**이다.
+  #
+  # 🔴 **균등(BASE_EQUAL)은 여기 없다.** `equal_ratios` 가 계속 소유한다 — 3회차를
+  #   [0.34, 0.33, 0.33] 으로 적으면 현행 1/3 산출과 바이트가 달라져 fallback 동일성이
+  #   깨진다. 기본안은 «선언이 아니라 계산» 이 낸다.
+  #
+  # ⚠️ `source`·`version` 을 **칸으로 두지 않는다.** 아무도 안 읽는 선언이 늘면
+  #   `test_constraints_has_no_new_unread_declaration` 이 운다 (`#379`) — 그 검사가
+  #   막으려는 것이 바로 «값이 같아서 안 아플 뿐인 죽은 선언» 이다. 출처는 주석에 적는다:
+  #     출처 = 매입 제안 · 승인자 미정 · 판 0.1 (2026-09-14)
+  #   `status` 는 코드가 읽는다 — PROVISIONAL 이면 후보를 안 세운다.
+  allocation_weights:
+    status: PROVISIONAL
+    # ⚠️ 회차 수를 **키 이름으로** 가른다. `{2: [...], 3: [...]}` 로 두면 잎 키가 숫자라
+    #   「선언을 코드가 읽는가」 검사가 그 잎을 못 본다 — 동적으로 읽는 것을 그 검사는
+    #   못 세기 때문이다. 이름으로 가르면 코드에 그 문자열이 그대로 있어 읽힌다.
+    two_rounds:
+      FRONT_LOADED: [0.60]
+      BACK_LOADED: [0.40]
+    three_rounds:
+      FRONT_LOADED: [0.50, 0.30]
+      BACK_LOADED: [0.20, 0.30]
+
 # mix 축 게이팅 — 한 품목이 이 비중을 넘으면 품목 조합의 의미가 사라진다
 concentration:
   item_threshold: 0.70              # item_concentration_threshold

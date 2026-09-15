@@ -87,9 +87,17 @@ def forced() -> dict[str, dict[date, dict]]:
 # ── E2-1: 그래프 골격 ───────────────────────────────────────────────────────
 
 
-def test_graph_compiles_with_all_seven_nodes() -> None:
-    """E2-1 DoD "LangGraph State + 그래프 골격(7노드) — 컴파일·통과 실행"."""
-    assert len(NODES) == 7
+def test_graph_compiles_with_all_nodes() -> None:
+    """E2-1 DoD "LangGraph State + 그래프 골격 — 컴파일·통과 실행".
+
+    🔄 **일곱에서 여덟이 됐다** (2026-09-14 · E3-10). ⑧ ``review_rationale`` 이 ⑦ 뒤에
+    섰다 — 계산 검사가 끝나고 살아남은 안의 근거를 한 번 더 읽는 자리이고, **컷 권한이
+    없다.**
+
+    ⚠️ 수를 여기 박아 두는 이유는 «노드가 조용히 느는 것»을 막기 위해서다. 늘 때마다
+    이 줄을 **의도적으로** 고치게 되고, 그때 「무엇이 늘었나」가 리뷰에 뜬다.
+    """
+    assert len(NODES) == 8
     nodes = build_graph().get_graph().nodes
     assert set(NODES) <= set(nodes)
 

@@ -23,7 +23,12 @@ from datetime import date
 from typing import Any
 
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.llm.mix import MixDecision, MixSelector, build_mix_context
+from app.purchase_agent.llm.mix import (
+    MixDecision,
+    MixSelector,
+    build_mix_context,
+    shelf_is_tight,
+)
 from app.purchase_agent.llm.schemas import MixCandidate
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
@@ -742,7 +747,8 @@ def _select_mix(
         state["item"],
         spread_widened=bool(facts.get("widened")),
         shelf_days=facts.get("shelf_days"),
-        shelf_tight=facts.get("cap_ratio", 1.0) < 1.0,
+        # 🔴 판정은 ``llm/mix`` 가 소유한다 — ⑧ 이 같은 판정을 되읽어야 대조가 성립한다.
+        shelf_tight=shelf_is_tight(facts),
         signals=signals,
         facts=facts_text,
         candidates=[

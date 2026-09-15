@@ -19,8 +19,30 @@
 from math import ceil
 from typing import Any
 
+from app.purchase_agent.allocation import (
+    allocation_candidates,
+    arrival_dates,
+    occupancy_fits,
+    split_infeasible_reason,
+    split_quantities,
+)
 from app.purchase_agent.config import load_constraints
-from app.purchase_agent.nodes.classify_situation import is_sustained_rise, split_entry_cap
+from app.purchase_agent.features import SPLIT_ALLOCATION, enabled
+from app.purchase_agent.llm.split_allocation import (
+    SplitAllocationSelector,
+)
+from app.purchase_agent.llm.split_allocation import (
+    build_context as build_split_context,
+)
+from app.purchase_agent.llm.split_schemas import (
+    SplitAllocationResult,
+    SplitCandidate,
+)
+from app.purchase_agent.nodes._guards import pending_value
+from app.purchase_agent.nodes.classify_situation import (
+    is_sustained_rise,
+    split_entry_cap,
+)
 from app.purchase_agent.schemas import TIMING_AXIS
 from app.purchase_agent.state import PurchaseAgentState
 
@@ -155,17 +177,141 @@ def effective_allowed_axes(allowed_axes: list[str], chosen: list[dict] | None) -
     return [axis for axis in allowed_axes if axis != TIMING_AXIS]
 
 
-def equal_ratios(rounds: int) -> list[float]:
-    """균등 비율. 마지막을 ``1 − Σ앞``으로 **구성**한다.
+def safe_allocation_candidates(
+    state: PurchaseAgentState, constraints: dict, rounds: int
+) -> dict[str, list[float]]:
+    """규칙이 만든 후보 중 **모든 안에서 설 수 있는 것만** 남긴다 (E3-9).
 
-    각자 계산한 ``1/n``을 n번 더하면 부동소수점 합이 1에서 밀려 ⑥의 합계 검사(1e-9)에
-    걸릴 수 있다 — E3-1에서 등급 비율에 쓴 것과 같은 장치다.
+    🔴 **선택 전에 거른다.** LLM 이 고른 뒤에 ⑦이 컷하면 그날 안이 통째로 사라지고,
+      사람은 *"판단자가 이상한 걸 골랐다"* 로 읽는다. 실제로는 **규칙이 못 서는 후보를
+      목록에 올린 것**이다. 그래서 목록에 올리기 전에 판정한다.
+
+    ★ **모든 라벨을 본다.** 보수·기본·공격은 총량이 다르고 커버 D 도 다르다. 한 라벨에서
+      서는 배분이 다른 라벨에서 안 설 수 있는데, 후보는 안마다 따로 고르는 것이 아니라
+      **그날 하나**다 (④는 유형을 정하고 ⑥이 안별로 편다).
+
+    ⚠️ **못 보면 안 올린다** (규칙 3). 도착일이나 날짜별 여유를 모르면 ``occupancy_fits``
+      가 거짓을 돌려주고, 그 후보는 빠진다 — 모르는 것을 「든다」로 읽지 않는다.
+      그 결과 균등 하나만 남고 LLM 은 안 불린다.
+
+    ⚠️ ``BASE_EQUAL`` 은 **안 거른다.** 그건 후보가 아니라 **되돌아갈 자리**다. 그것까지
+      걸러 목록이 비면 분할 자체를 못 만든다.
+
+    🔴 **③·⑥ 이 쓰는 칸 이름을 그대로 읽는다** — 총량은 ``total_qty_kg``, 커버는 안이
+      들고 있는 ``coverage_days``, 달력은 **State 최상위** ``execution_calendar`` 다.
+      처음에는 ``qty_kg`` 와 ``inventory.execution_calendar`` 로 적었는데 **둘 다 없는
+      칸**이었고, 선언이 ``PROVISIONAL`` 이라 이 아래가 안 돌아 검사에도 안 걸렸다 —
+      승인되는 날 처음 터질 자리였다.
     """
-    head = [1 / rounds] * (rounds - 1)
-    return [*head, 1.0 - sum(head)]
+    선언 = constraints["split"]["allocation_weights"]
+    후보 = allocation_candidates(선언, rounds)
+    if len(후보) == 1:
+        return 후보
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
+    # 🔴 **최상위에서 읽는다** — ⑥ ``package_scenarios`` 와 ⑦ ``self_check`` 가 읽는 자리와
+    #   같다. 다른 데서 읽으면 사전검사와 실제 회차일이 **다른 달력**을 보게 되고, 그때
+    #   ④는 «선다» 는데 ⑥이 민 날짜가 여유를 넘긴다.
+    calendar = state.get("execution_calendar")
+    남긴다 = {"BASE_EQUAL": 후보["BASE_EQUAL"]}
+    for 이름, 비율 in 후보.items():
+        if 이름 == "BASE_EQUAL":
+            continue
+        if all(
+            _배분이_이_안에서_선다(state, draft, 비율, lead_days, cap_by_date, calendar)
+            for draft in state["base_plan"]["drafts"]
+        ):
+            남긴다[이름] = 비율
+    return 남긴다
 
 
-def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
+def _배분이_이_안에서_선다(
+    state: PurchaseAgentState,
+    draft: dict,
+    비율: list[float],
+    lead_days: int | None,
+    cap_by_date: dict | None,
+    calendar: dict | None,
+) -> bool:
+    """이 배분이 **이 안에서** 설 수 있는가. ⑥ 이 실제로 밟는 자리를 그대로 밟는다.
+
+    🔴 **⑥ 이 1회차로 되돌릴 안은 후보를 거를 근거가 못 된다.** 감당 못 하는 안
+    (``split_infeasible_reason``)은 어느 배분을 골랐든 단일 회차가 되므로, 거기서 다회차
+    도착일을 재서 후보를 빼면 **쓰이지도 않을 계산 때문에** 후보가 사라진다.
+
+    ⚠️ 총량·커버일수·달력은 ⑥ 이 ``materialize_split`` 에 넘기는 것과 **같은 값**이어야
+    한다. 하나라도 다른 자리에서 읽으면 「④는 된다는데 ⑦이 컷하는」 안이 생기고, 그 안은
+    왜 죽었는지 설명할 수 없다.
+    """
+    회차 = [{"ratio": r} for r in 비율]
+    total = draft["total_qty_kg"]
+    coverage = draft["coverage_days"]
+    if split_infeasible_reason(total, 회차, coverage):
+        return True
+    return occupancy_fits(
+        split_quantities(total, 회차),
+        arrival_dates(state["date"], coverage, len(회차), lead_days, calendar),
+        cap_by_date,
+    )
+
+
+#: 후보 id → 사람이 읽는 설명. 🔴 **판단자에게도 이 말로 준다** — id 만 주면 무엇을
+#: 고르는지 모르고, 숫자를 주면 그 숫자를 사유에 베껴 쓴다 (규칙 6).
+CANDIDATE_SUMMARY = {
+    "BASE_EQUAL": "회차를 고르게 나눈다",
+    "FRONT_LOADED": "앞 회차에 더 싣는다",
+    "BACK_LOADED": "뒤 회차에 더 싣는다",
+}
+
+
+def _choose_allocation(
+    state: PurchaseAgentState,
+    constraints: dict,
+    decision: dict,
+    후보: dict[str, list[float]],
+    selector: SplitAllocationSelector | None,
+) -> tuple[str, SplitAllocationResult | None]:
+    """어느 배분으로 갈지 고른다. **기본은 늘 균등이다.**
+
+    🔴 **꺼져 있거나 후보가 하나면 판단자를 안 부른다.** 고를 것이 없는데 부르면 비용만
+      들고 상태만 흐려진다 — ⑤ 의 ``needs_llm`` 과 같은 자리다.
+
+    🔴 **고르는 것은 id 하나뿐이다.** 비율은 규칙이 이미 만들었고 안전 검사까지 끝냈다.
+      돌아온 id 가 후보 밖이면 검증이 막고 기본안으로 떨어진다.
+
+    ⚠️ 실패·비활성이면 ``BASE_EQUAL`` 이라 산출물이 **붙이기 전과 같다** — 회귀가 아니라
+      무변화다.
+    """
+    if selector is None or not enabled(SPLIT_ALLOCATION):
+        return "BASE_EQUAL", None
+    cap = split_entry_cap(state, constraints)
+    context = build_split_context(
+        state["item"],
+        rounds=decision["rounds"],
+        rising=bool(decision["by_trend"]),
+        cap_tight=None if cap.cap_kg is None else bool(decision["by_volume"]),
+        signals=[
+            이름
+            for 이름, 켜짐 in (
+                ("SPLIT_ENTERED_BY_VOLUME", decision["by_volume"]),
+                ("SPLIT_ENTERED_BY_TREND", decision["by_trend"]),
+            )
+            if 켜짐
+        ],
+        facts=["규칙이 만든 배분 후보 중 하나를 고른다."],
+        candidates=[
+            SplitCandidate(candidate_id=이름, summary=CANDIDATE_SUMMARY[이름])
+            for 이름 in 후보
+        ],
+    )
+    result = selector(context, "BASE_EQUAL")
+    고른 = result.interpretation.chosen_candidate_id
+    return (고른 if 고른 in 후보 else "BASE_EQUAL"), result
+
+
+def split_plan(
+    state: PurchaseAgentState, *, selector: SplitAllocationSelector | None = None
+) -> dict[str, Any]:
     """분할 유형을 고르고 회차 비율을 낸다. 진입하지 않으면 ``None``(일괄)이다.
 
     E3-2에서 LLM이 붙는 자리는 여기다: ``evaluate_split_entry``가 낸 사실들(트리거 종류·
@@ -185,7 +331,14 @@ def split_plan(state: PurchaseAgentState) -> dict[str, Any]:
     """
     constraints = load_constraints()
     decision = evaluate_split_entry(state, constraints)
-    lines = [{"ratio": ratio} for ratio in equal_ratios(decision["rounds"])]
+    후보 = safe_allocation_candidates(state, constraints, decision["rounds"])
+    고른, 판단 = _choose_allocation(state, constraints, decision, 후보, selector)
+    decision["allocation_candidates"] = sorted(후보)
+    decision["allocation_chosen"] = 고른
+    # 🔴 판단 흔적을 **결과와 함께** 들고 다닌다 — ⑥ 이 그 사실을 risks 에 적고
+    #   어댑터가 실행 흔적에 역할별로 남긴다. 상태와 결과가 갈리면 서로를 부정한다.
+    decision["allocation_judgment"] = 판단
+    lines = [{"ratio": ratio} for ratio in 후보[고른]]
     # 판단 근거를 첫 줄에 싣는다 — State 필드를 늘리지 않기 위해서다 (§3 계약).
     # ⑥의 materialize가 계약 필드만 투영하므로 출력에는 새지 않는다 (⑤와 같은 방식).
     lines[0] = {**lines[0], "decision": decision}

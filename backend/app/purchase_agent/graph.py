@@ -47,11 +47,17 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 
 from app.purchase_agent.llm.mix import MixSelector, make_mix_selector
+from app.purchase_agent.llm.self_review import Reviewer, make_reviewer
+from app.purchase_agent.llm.split_allocation import (
+    SplitAllocationSelector,
+    make_split_selector,
+)
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.collect_context import collect_context
 from app.purchase_agent.nodes.draft_plan import draft_plan
 from app.purchase_agent.nodes.package_scenarios import package_scenarios
+from app.purchase_agent.nodes.review_rationale import review_rationale
 from app.purchase_agent.nodes.self_check import self_check
 from app.purchase_agent.nodes.split_plan import split_plan
 from app.purchase_agent.quotes import QuoteSource
@@ -69,6 +75,10 @@ NODES = {
     "allocate_sourcing": allocate_sourcing,
     "package_scenarios": package_scenarios,
     "self_check": self_check,
+    # ⑧ 🔴 **⑦ 뒤에 선다.** 계산 검사가 끝나고 살아남은 안만 보고, 컷 권한은 없다.
+    #   ⑦ 안에 섞지 않는 이유는 경계다 — 컷하는 함수 안에 컷 못 하는 판단을 두면
+    #   나중에 누가 「이것도 컷하면 되지 않나」로 읽는다.
+    "review_rationale": review_rationale,
 }
 
 
@@ -78,9 +88,15 @@ def route_after_classify(state: PurchaseAgentState) -> Literal["collect_context"
 
 
 def build_graph(
-    *, selector: MixSelector | None = None, recorder: ToolRecorder | None = None
+    *,
+    selector: MixSelector | None = None,
+    split_allocation_selector: SplitAllocationSelector | None = None,
+    reviewer: Reviewer | None = None,
+    recorder: ToolRecorder | None = None,
 ) -> Any:
-    """7노드를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
+    """**8노드**를 배선해 컴파일한다 (백로그 E2-1 DoD: "컴파일·통과 실행").
+
+    🔄 ⑧ ``review_rationale`` 이 ⑦ 뒤에 서면서 여덟이 됐다 (2026-09-14 · E3-10).
 
     ``recorder``는 ⑦ 이후 ``used_tools``를 만들 통과 기록기다 (M-1 §6). ``None``이면
     노드를 감싸지 않는다 — **어댑터를 거치지 않는 호출은 이 층 자체를 만나지 않는다.**
@@ -90,11 +106,19 @@ def build_graph(
     **팀원이 브랜치만 받아도 산출물이 그대로 나온다**. 테스트는 가짜 선택자를 꽂는다.
     """
     mix_selector = selector or make_mix_selector()
+    # 🔴 ④ 배분 판단자도 **조립 시 한 번** 만든다 (⑤ 와 같은 방식). 기능 플래그가 꺼져
+    #   있으면 노드가 아예 안 부르므로, 여기서 만드는 것은 비용이 아니다.
+    split_selector = split_allocation_selector or make_split_selector()
+    rationale_reviewer = reviewer or make_reviewer()
     builder = StateGraph(PurchaseAgentState)
     for name, node in NODES.items():
         if name == "allocate_sourcing":
             # 부분 적용 — LLM 선택자는 **그래프 조립 시 한 번** 만들어 주입한다.
             node = partial(allocate_sourcing, selector=mix_selector)
+        elif name == "split_plan":
+            node = partial(split_plan, selector=split_selector)
+        elif name == "review_rationale":
+            node = partial(review_rationale, reviewer=rationale_reviewer)
         builder.add_node(name, wrap(node, name, recorder))
 
     builder.add_edge(START, "classify_situation")
@@ -108,7 +132,8 @@ def build_graph(
     builder.add_edge("split_plan", "allocate_sourcing")
     builder.add_edge("allocate_sourcing", "package_scenarios")
     builder.add_edge("package_scenarios", "self_check")
-    builder.add_edge("self_check", END)
+    builder.add_edge("self_check", "review_rationale")
+    builder.add_edge("review_rationale", END)
     return builder.compile()
 
 

@@ -8,6 +8,12 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.information_requests import (
+    MissingInfo,
+    missing_information,
+    risk_sentences,
+    to_requests,
+)
 from app.purchase_agent.nodes._guards import (
     pending_value,
     require_capacity_kg,
@@ -524,6 +530,15 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
         )
         for label in labels
     ]
+    # 🔴 **판정은 여기 한 번뿐이다.** 아래 두 칸(고지·구조화 요청)이 같은 결과를 편다.
+    #   ``deducted`` 는 차감이 **실제로 걸린 날**에만 참이다 — 안 깎인 날에 그 문장을
+    #   내면 "없는 일에 사과하는" 고지가 된다.
+    missing = collect_missing_information(
+        state,
+        constraints,
+        state["item"],
+        deducted=any(draft["deducted_holdings_kg"] > 0 for draft in drafts),
+    )
 
     return {
         "coverage_days": coverage["by_label"]["기본"],  # §3 State는 대표 D 하나를 담는다
@@ -531,15 +546,11 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             "daily_demand_kg": daily_demand,
             "reference_unit_price": unit_price,
             "drafts": drafts,
-            "deferred_checks": _deferred_checks(
-                state,
-                constraints,
-                freshness_cap,
-                state["item"],
-                # 차감이 **실제로 걸린 날**에만 리드타임 고지를 얹는다. 안 깎인 날에
-                # 그 문장을 내면 "없는 일에 사과하는" 고지가 된다.
-                deducted=any(draft["deducted_holdings_kg"] > 0 for draft in drafts),
-            ),
+            "deferred_checks": _deferred_checks(missing, freshness_cap, state["item"]),
+            # 🔴 **플래그와 무관하게 늘 만든다.** 끄는 것은 출력에 싣는 자리(⑦)이고,
+            #   판정과 고지는 그대로 돈다 — 플래그로 「못 판정했다」를 없애면 규칙 3이
+            #   출력 층에서 깨진다.
+            "information_requests": to_requests(missing),
         },
     }
 
@@ -568,6 +579,7 @@ def _no_quote_plan(
     ``reference_unit_price``를 **0이 아니라 None**으로 둔다 (규칙 3). 0으로 채우면
     ``cash_cap_kg``가 0으로 나누고, 그 전에 "단가 0원"이라는 없는 사실이 만들어진다.
     """
+    missing = collect_missing_information(state, constraints, state["item"], deducted=False)
     return {
         "coverage_days": constraints["coverage_days"]["by_label"]["기본"],
         "base_plan": {
@@ -575,9 +587,8 @@ def _no_quote_plan(
             "reference_unit_price": None,
             "drafts": [],
             # 시세를 모르는 날은 안이 0개라 차감 자체가 없다 — 고지할 것도 없다.
-            "deferred_checks": _deferred_checks(
-                state, constraints, None, state["item"], deducted=False
-            ),
+            "deferred_checks": _deferred_checks(missing, None, state["item"]),
+            "information_requests": to_requests(missing),
         },
         # 라벨마다 한 줄씩 남긴다 — 소비자가 "보수는 왜 없나"를 안별로 묻기 때문이고,
         # ⑦의 no_proposal_reason도 이 목록을 이어 붙여 만든다.
@@ -649,17 +660,45 @@ def _draft_one(
 
 
 def _deferred_checks(
-    state: PurchaseAgentState,
-    constraints: dict,
+    missing: tuple[MissingInfo, ...],
     freshness_cap: int | None,
     item: str,
-    *,
-    deducted: bool = False,
 ) -> list[str]:
     """미결값 때문에 **계산하지 않은** 검사들. ⑥이 안별 risks에 싣는다.
 
     ``rejected_reasons``가 아니라 risks로 가는 이유: 소비자는 rejected_reasons를 "컷된 안의
     이력"으로 읽는다. "검사를 건너뛰었다"는 다른 의미라 그 필드에 섞으면 계약이 오염된다.
+
+    🔴 **판정은 여기서 안 한다** (2026-09-14 · E3-11). 같은 사실을 「사람이 읽는 문장」과
+      「마스터가 읽는 구조」 둘로 내는데, 판정이 두 벌이면 한쪽만 고치는 날 조용히 갈린다.
+      그래서 판정은 ``collect_missing_information`` 한 곳이고 여기는 **그 결과를 편다.**
+      문면 정본은 ``information_requests`` 가 들고 있다.
+
+    ⚠️ **신선도 한 줄만 여기 남는다.** 그 협의(`#390`)는 물류가 «추가 변경하지 않겠다» 로
+      종료했고 우리도 청하지 않기로 정했다 — 요청으로 내보내면 **닫은 협의가 매일
+      되살아난다.** 그래서 구조화 대상이 아니고 고지로만 산다.
+    """
+    deferred = risk_sentences(missing)
+    if freshness_cap is None:
+        deferred.append(f"신선도 상한 검사 보류 — {item} 품목 보관한계가 설정에 미확정")
+    return deferred
+
+
+def collect_missing_information(
+    state: PurchaseAgentState,
+    constraints: dict,
+    item: str,
+    *,
+    deducted: bool = False,
+) -> tuple[MissingInfo, ...]:
+    """판정 입력을 모아 순수층에 넘긴다 — **판정은 여기 한 곳뿐이다.**
+
+    🔴 순수층(``information_requests``)이 이 함수를 못 부른다 — 부르면 순환이다
+    (③이 그쪽을 import 한다). 그래서 **값을 만드는 것은 여기**이고, 그쪽이 하는 일은
+    *"그 사실이 누구에게 어느 칸을 청하는 것인가"* 를 붙이는 것이다.
+
+    ⚠️ 분할 진입 게이트는 **도착일을 아는 날에만** 싣는다 (`#308`). N4 미결은 입고
+    소요일 가지가 이미 말하므로, 한 원인을 두 문장으로 내면 읽는 사람이 둘로 센다.
 
     ``deducted``는 그날 보유 차감이 실제로 걸렸는지다 (상세설계 §4-③-4). 걸렸는데 입고
     소요일이 미결이면 **보유가 덮는 창과 매입이 덮는 창이 같은지 못 맞춘다** — 차감은
@@ -675,30 +714,18 @@ def _deferred_checks(
       0 이 되어 원수요를 통째로 사므로, 모르는 것이 판정을 만드는 자리가 된다 (규칙 3).
       ``free_stock_for`` 를 여기서 한 번 더 부른다 — ③ 본체와 **같은 답**이라 갈릴 수 없다.
     """
-    deferred = []
-    # 분할 진입 게이트를 판정하지 못한 날 (`#308`). N4 미결은 아래 가지가 이미 말하므로
-    # **여기서는 여유 쪽만** 적는다 — 한 원인을 두 문장으로 내면 읽는 사람이 둘로 센다.
     arrival_cap = split_entry_cap(state, constraints)
-    if arrival_cap.arrival_date is not None and arrival_cap.unknown_reason is not None:
-        deferred.append(arrival_cap.unknown_reason)
     free_stock = free_stock_for(state.get("inventory"), item)
-    if free_stock.unknown_reason is not None:
-        deferred.append(free_stock.unknown_reason)
-    if pending_value(state, constraints, "inbound_lead_days") is None:
-        deferred.append(
-            "입고일 기준 창고 점유 검사 보류 — 물류 입고 소요일이 미확정이라 "
-            "회차별 도착일을 계산하지 않는다"
-        )
-        if deducted:
-            deferred.append(
-                "보유 재고를 뺀 창과 매입이 덮는 창이 맞는지 확인 보류 — 물류 입고 "
-                "소요일이 미확정이라 매입분 도착일을 놓지 못한다"
-            )
-    if pending_value(state, constraints, "purchase_payment_days") is None:
-        deferred.append(
-            "지급일 기준 현금 검사 보류 — 재무 대금 지급 소요일이 미확정이라 "
-            "회차별 지급일을 계산하지 않는다"
-        )
-    if freshness_cap is None:
-        deferred.append(f"신선도 상한 검사 보류 — {item} 품목 보관한계가 설정에 미확정")
-    return deferred
+    return missing_information(
+        split_entry_unknown=(
+            arrival_cap.unknown_reason if arrival_cap.arrival_date is not None else None
+        ),
+        free_stock_unknown=free_stock.unknown_reason,
+        inbound_lead_missing=(
+            pending_value(state, constraints, "inbound_lead_days") is None
+        ),
+        holdings_deducted=deducted,
+        payment_lead_missing=(
+            pending_value(state, constraints, "purchase_payment_days") is None
+        ),
+    )

@@ -54,6 +54,12 @@ from pydantic import (
 )
 
 from app.purchase_agent.config import load_constraints
+from app.purchase_agent.information_requests import (
+    BlockedCheck,
+    ReasonCode,
+    RequestedFrom,
+    RequiredField,
+)
 
 # 수량 단위가 kg이므로 금액은 ``qty_kg × grade_unit_price(원/kg)``로 곧바로 원이 된다.
 # ton 시절의 ``× 1000`` 변환 계수(KG_PER_TON)는 더 이상 필요하지 않다.
@@ -333,6 +339,29 @@ class RejectedReason(BaseModel):
     kind: RejectionKind | None = None
 
 
+class InformationRequest(BaseModel):
+    """**값이 없어서 판정하지 못한 것**을 누구에게 무엇으로 청하는가 (E3-11).
+
+    🔴 ``missing_data`` 와 뜻이 다르다. 그쪽은 봉투의 *"안 돌았다"* 채널이고
+    (``RUNTIME_NOT_READY`` 판정에 묶여 있다), 이쪽은 *"돌았는데 이 판정을 못 했다"* 다.
+    둘을 한 칸에 담으면 마스터가 「실행 실패」와 「부분 판정」을 못 가른다.
+
+    ⚠️ ``rerun_scope`` 가 ``FULL_AGENT`` 하나뿐인 것은 **지금 마스터가 그것만 하기
+    때문**이다 — 값이 오면 에이전트를 처음부터 다시 부른다. 부분 재진입을 계약에 적으면
+    받는 쪽이 있는 기능으로 읽는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested_from: RequestedFrom
+    required_field: RequiredField
+    reason_code: ReasonCode
+    #: 🔴 **복수다.** 같은 누락 하나가 여러 검사를 막는다 — 사유를 쪼개면 받는 쪽이
+    #: 두 번 청해야 하는 줄로 읽는다.
+    blocked_checks: tuple[BlockedCheck, ...]
+    rerun_scope: Literal["FULL_AGENT"]
+
+
 #: ``payment_schedule[].basis`` — ``amount_krw``의 추정 근거.
 #: 현재는 **오늘 등급별 시세로 계산한 값** 하나뿐이다. 예측 단가를 쓰기 시작하면 값이 는다.
 PaymentBasis = Literal["as_of_unit_price"]
@@ -594,6 +623,14 @@ class PurchaseProposal(BaseModel):
     situation: Situation | None = None
     context_docs_used: list[NonEmptyStr] = Field(default_factory=list)
     rejected_reasons: list[RejectedReason] = Field(default_factory=list)
+    #: 🔴 **값이 없어서 못 판정한 것**을 마스터가 기계적으로 받는 자리 (E3-11).
+    #:
+    #: ⚠️ **비어 있으면 직렬화에서 뺀다** (⑦ ``_assemble``). 플래그가 꺼졌는데 키가
+    #:   생기면 «끈 상태» 의 산출물이 켜기 전과 바이트가 달라져 회귀 게이트가 죽는다.
+    #:
+    #: 🟡 같은 사실의 사람용 문장은 안의 ``risks`` 에 그대로 있다 — **둘은 같은 판정에서
+    #:   나온다** (``information_requests.missing_information``). 문면은 안 바뀐다.
+    information_requests: tuple[InformationRequest, ...] = ()
     #: 제안 불가 사유. **"유효 시나리오 없음"이라는 사실만 반환한다** — 납품 의무 미충족
     #: 판정(has_unmet_obligation)은 오케스트레이터 몫이다. 매입 0 ≠ 납품 실패(IO명세 §2).
     no_proposal_reason: NonEmptyStr | None = None
@@ -664,12 +701,27 @@ class PurchaseProposal(BaseModel):
         ``null``이 실려 나가면 말과 결과가 어긋난다.
 
         ``margin_warning``의 ``null``은 **"아직 계산되지 않음"이라는 정보**를 담으므로
-        그대로 둔다 — 여기서 빼는 것은 이 필드 하나뿐이고, ``exclude_none``으로
-        일괄 처리하지 않는 이유가 그것이다.
+        그대로 둔다 — ``exclude_none``으로 일괄 처리하지 않는 이유가 그것이다.
+
+        🔴 **``information_requests`` 도 여기서 뺀다 — 직렬화기를 따로 두면 안 된다**
+        (2026-09-14 · E3-11). 한 모델에 ``@model_serializer`` 를 둘 달면 **뒤엣것이 이기고
+        앞엣것이 조용히 죽는다.** 따로 달았다가 그렇게 됐다 — 키가 안 빠지는데 검사는
+        「직렬화기가 있다」로 보였다.
+
+        ⚠️ 빈 목록과 「요청 없음」을 가르지 않는다. 이 칸은 *"청할 것이 있다"* 만 말하고,
+        없는 날은 아무 말도 안 하는 것이 맞다 — ``null`` 로 내보내면 *"판정을 못 했다"* 로
+        읽힐 자리가 생긴다. 키가 생기기만 해도 **이 기능을 넣기 전과 바이트가 달라져**
+        회귀 게이트가 죽는다.
+
+        ★ **후처리가 아니라 직렬화기인 이유**는 ``Scenario.drop_absent_payment_schedule``
+        이 이미 적어 뒀다 — ``_assemble`` 에서 dump 뒤에 지우면 ``revalidate_for_output``
+        의 왕복 항등성이 깨진다. 규칙이 타입에 있어야 어느 경로로 직렬화해도 같다.
         """
         data = handler(self)
         if data.get("no_proposal_reason") is None:
             data.pop("no_proposal_reason", None)
+        if not data.get("information_requests"):
+            data.pop("information_requests", None)
         return data
 
 

@@ -21,7 +21,9 @@ from app.master.envelope import (
     AgentReply,
     AgentRequest,
     ExecutionMetadata,
+    LLMCallMetadata,
     LLMStatus,
+    summarize_llm_calls,
 )
 from app.purchase_agent import AGENT_VERSION, mocks
 from app.purchase_agent.config import (
@@ -32,7 +34,8 @@ from app.purchase_agent.config import (
     threshold_not_declared_reason,
 )
 from app.purchase_agent.graph import build_graph
-from app.purchase_agent.llm.runtime import get_llm_settings
+from app.purchase_agent.llm.runtime import MIX_ROLE, RoleSpec, get_llm_settings
+from app.purchase_agent.llm.split_allocation import ROLE as SPLIT_ROLE
 from app.purchase_agent.nodes.classify_situation import (
     SplitEntryCap,
     compute_ci_width,
@@ -48,6 +51,13 @@ from app.purchase_agent.supply_capacity import SupplyCapacity, compute_supply_ca
 from app.purchase_agent.tracing import ToolRecorder
 
 AGENT_NAME = "purchase"
+#: ⑤ 등급 조합 판단자의 역할 이름 — 봉투 ``llm_calls[].role`` 에 그대로 실린다.
+#: 🔴 문자열을 두 곳에서 짓지 않는다. 역할이 늘면 여기 옆에 한 줄씩 는다.
+SOURCING_SELECTION = "sourcing_selection"
+#: ④ 회차 배분 판단자의 역할 이름.
+SPLIT_ALLOCATION_SELECTION = "split_allocation_selection"
+#: ⑧ 근거 자기 검토의 역할 이름.
+RATIONALE_SELF_REVIEW = "rationale_self_review"
 
 #: 이 어댑터가 **실제로 처리하는** mode. ``_status_query`` 가 답하는 목록이자 문 앞
 #: 검사의 기준이다 — **두 곳에 따로 적지 않는다.**
@@ -238,16 +248,137 @@ def _metadata(
     fallback ``false``로 나가 **두 값이 서로를 부정한다** (Codex 교차검증 P1).
     """
     used = recorder.used_tools if recorder is not None else tools
-    mix = _mix_decision(state)
+    calls = _llm_calls(state)
+    status, model, attempts, fallback = summarize_llm_calls(calls)
     return ExecutionMetadata(
         run_id=_run_id(request),
         request_id=request.context.request_id,
         agent=AGENT_NAME,
         used_tools=used,
         tool_order=tuple(range(1, len(used) + 1)),
-        llm_status=mix.llm_status if mix is not None else _uncalled_status(),
-        llm_model=(mix.llm_model or "") if mix is not None else "",
-        llm_fallback_used=mix.llm_fallback_used if mix is not None else False,
+        llm_status=status,
+        llm_model=model,
+        llm_attempts=attempts,
+        llm_fallback_used=fallback,
+        llm_calls=calls,
+    )
+
+
+def _llm_calls(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
+    """이 실행에서 **역할별로 무엇이 있었나**. 요약 칸 넷은 이것을 접은 값이다.
+
+    🔴 **역할이 하나뿐이던 때와 요약이 같아야 한다.** 지금은 ⑤ 등급 조합 하나이고,
+      단일 호출을 접으면 상태·모델·fallback 이 예전 식과 **같은 값**이 나온다
+      (``summarize_llm_calls`` 참조).
+
+    ⚠️ ``llm_attempts`` 만 달라진다 — 전에는 어느 실행에서나 **0** 이었다. 시도 수를
+      나르는 칸이 ``MixDecision`` 에 없어서였고, 그래서 LLM 이 두 번 시도한 날에도
+      실행 흔적이 「안 불렀다」로 보였다. 사실대로 적는 쪽으로 고쳤다.
+
+    ★ ⑤를 **부를 자리까지 못 간 실행**도 한 줄을 남긴다. 안 남기면 목록이 비어
+      「설정이 꺼졌다」와 구분되지 않는다 — ``_uncalled_status`` 가 가르던 그 자리다.
+    """
+    return (
+        *_sourcing_call(state),
+        *_split_allocation_call(state),
+        *_self_review_calls(state),
+    )
+
+
+def _self_review_calls(
+    state: Mapping[str, Any] | None,
+) -> tuple[LLMCallMetadata, ...]:
+    """⑧ 근거 검토. **안마다 한 줄**이라 ``target`` 에 라벨이 실린다.
+
+    🔴 **게이트가 안 고른 안도 남긴다.** 지우면 *"봤는데 깨끗했다"* 와 구분되지 않는다 —
+    검토율이 거짓이 되는 자리다.
+    """
+    # 🔴 **판을 여기서 다시 안 붙인다.** ⑧ 은 안마다 한 줄을 만들면서 그때 적는다 —
+    #   두 곳에서 붙이면 한쪽만 고치는 날이 온다 (``review_rationale._기록``).
+    기록 = ((state or {}).get("review_calls")) or ()
+    return tuple(기록)
+
+
+def _판(role: "RoleSpec", attempts: int) -> dict[str, str]:
+    """**부른 호출에만** 지시문·응답 계약의 판을 적는다.
+
+    🔴 안 부른 호출(꺼짐·게이트·상한)에서는 **빈 문자열**이고, 그 빈칸이 곧 «그 판이
+    없었다» 는 뜻이다. 안 불렀는데 판을 적으면 *"이 판으로 물어봤다"* 로 읽힌다 —
+    ``LLMCallMetadata`` 가 그 등식을 계약으로 잠근다.
+    """
+    if attempts <= 0:
+        return {}
+    return {
+        "prompt_version": role.prompt_version,
+        "schema_version": role.schema_version,
+    }
+
+
+def _split_allocation_call(
+    state: Mapping[str, Any] | None,
+) -> tuple[LLMCallMetadata, ...]:
+    """④ 배분 판단 한 줄. **안 전체에 걸리는 호출이라 ``target`` 이 ``None`` 이다.**
+
+    ⚠️ ④ 가 분할에 **진입조차 안 한 날**은 줄을 안 남긴다 — 그날은 배분이라는 판단 자체가
+    없었고, 「꺼졌다」도 「건너뛰었다」도 아니다. 없는 판단에 상태를 붙이면 «매일 뭔가를
+    건너뛴다» 로 읽힌다.
+    """
+    판단 = (((state or {}).get("split_plan") or [{}])[0].get("decision") or {}).get(
+        "allocation_judgment"
+    )
+    if 판단 is None:
+        return ()
+    return (
+        LLMCallMetadata(
+            role=SPLIT_ALLOCATION_SELECTION,
+            status=판단.llm_status,
+            attempts=판단.llm_attempts,
+            fallback_used=판단.llm_fallback_used,
+            provider=판단.llm_provider or None,
+            model=판단.llm_model or None,
+            **_판(SPLIT_ROLE, 판단.llm_attempts),
+            skip_reason=(
+                "배분 후보가 하나뿐이라 고를 것이 없었다"
+                if 판단.llm_status == "SKIPPED_TEMPLATE"
+                else None
+            ),
+        ),
+    )
+
+
+def _sourcing_call(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
+    """⑤ 등급 조합 한 줄."""
+    mix = _mix_decision(state)
+    if mix is None:
+        상태 = _uncalled_status()
+        return (
+            LLMCallMetadata(
+                role=SOURCING_SELECTION,
+                status=상태,
+                skip_reason=(
+                    None
+                    if 상태 == "DISABLED"
+                    else "등급 조합 후보가 서지 않아 판단자를 부를 자리까지 안 갔다"
+                ),
+            ),
+        )
+    return (
+        LLMCallMetadata(
+            role=SOURCING_SELECTION,
+            status=mix.llm_status,
+            attempts=mix.llm_attempts,
+            fallback_used=mix.llm_fallback_used,
+            # 🔴 **전에는 ⑤ 만 provider 가 비어 있었다** — 역할 셋 중 하나만 추적이
+            #   끊겨 있었고, 그 상태로는 「추적 가능하다」가 성립하지 않는다.
+            provider=mix.llm_provider or None,
+            model=mix.llm_model or None,
+            **_판(MIX_ROLE, mix.llm_attempts),
+            skip_reason=(
+                "규칙이 중품을 안 골라 후보가 하나였다"
+                if mix.llm_status == "SKIPPED_TEMPLATE"
+                else None
+            ),
+        ),
     )
 
 

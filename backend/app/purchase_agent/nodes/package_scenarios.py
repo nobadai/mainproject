@@ -22,14 +22,29 @@
   셀 때 LLM 성공 날은 따로 보겠다"* 고 답했다 (2026-09-13 23:2x). ``risks`` 문자열을
   세는 일은 **LLM 상태와 무관하므로 한 버킷으로 세도 된다.**
 
+  🟢 **그 답은 거둬졌다** (마스터 회신 2026-09-14) — *"제 「LLM 성공 날은 따로
+    세겠다」를 거둡니다. 확인 걷기에서 옛 문장·새 문장은 LLM 날과 규칙 날을 한 묶음으로
+    셉니다."* ⚠️ 위 ``_mix_choice_risks`` 단서도 같이 받았다: 그 문장은 `#646` 두 문장과
+    **다른 고정 문장이라 세기에 안 섞인다.**
+
   ⇒ 사실이 바뀌면 문장도 따라가야 한다. `#646` 이 같은 병을 화면 문면에서 고쳤다.
+
+  🔴 **그리고 이 자리가 그 병으로 두 번째다.** `#648` 은 «계획이 서술처럼 읽히는» 것을
+    고쳤고, 바로 위 🟢 줄이 없던 동안에는 «인용이 아직 살아 있는 답처럼 읽혔다».
+    ⇒ **인용을 적을 때는 그 답이 뒤집힌 날도 같이 적는다.** 인용만 남기면 시점이 안 보인다.
 """
 
 from collections.abc import Mapping
 from datetime import date, timedelta
-from itertools import pairwise
 from typing import Any
 
+from app.purchase_agent.allocation import (
+    arrival_dates,
+    round_offsets,
+    split_infeasible_reason,
+    split_offsets,
+    split_quantities,
+)
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
@@ -71,72 +86,6 @@ def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str
     return axes
 
 
-def split_offsets(coverage_days: int, rounds: int) -> list[int]:
-    """회차별 **매입 실행일** 오프셋 = ``round(i × D / rounds)``.
-
-    첫 회차는 항상 0(= as_of)이다 — IO명세 §2 "seq 1의 date = as_of".
-    날짜를 ④가 아니라 여기서 만드는 이유: 안마다 D가 다르다 (§4-④ E3-3 확정 4).
-    보수(D=2)와 공격(D=12)에 같은 날짜를 박으면 보수안의 2회차가 커버 구간 밖으로 나간다.
-
-    ⚠️ 이 date는 **도착일이 아니다.** 도착일 = ``date + N4``이고 N4가 NULL이라 계산하지
-    않는다 (§5.5 · 규칙 3).
-    """
-    return [round(index * coverage_days / rounds) for index in range(rounds)]
-
-
-def round_offsets(
-    as_of: str,
-    coverage_days: int,
-    rounds: int,
-    calendar: Mapping[str, Any] | None = None,
-) -> list[int]:
-    """회차 오프셋을 **장이 서는 날로 민다** (`#300` · `SHIFT`).
-
-    ``split_offsets`` 가 낸 자리가 휴장일이면 다음 개장일로 민다. 경계는 마스터가 봉투로
-    싣는 ``execution_calendar`` 하나이고, 여기서 요일도 공휴일도 다시 판정하지 않는다 —
-    **값은 아는 쪽이 공급하고 계산은 쓰는 쪽이 한다** (`master/execution_calendar.py`).
-
-    ★★ **소관이 우리다.** 마스터 모듈이 경계를 그렇게 적었다::
-
-        마스터   비영업일 목록 + 그 목록이 덮는 지평
-        매입     목록에 있으면 다음 날로 민다          ← 여기
-
-    ★ **미는 것이지 버리는 것이 아니다** (물류 회신 2026-09-10). 남은 회차로 재분배하면
-      그쪽 도착일이 ``cap_by_date`` 를 넘길 수 있어 ``DROP`` 을 안 쓴다.
-
-    🔴 **1회차는 안 민다.** ``seq 1`` 의 날짜는 ``as_of`` 라고 IO명세 §2 가 못박았고,
-      약정을 조립하는 마스터가 그 등식을 본다. ``as_of`` 자체가 휴장일이면 그날은
-      살 수 없는 날이므로 **미는 것이 아니라 안이 서면 안 되는 것**이고, 그 판정은
-      ⑦ ``market_open_days`` 가 컷으로 낸다.
-
-    🔴 **지평 밖이면 아무것도 안 민다.** 지평 밖은 «안 선다» 가 아니라 «모른다» 라서,
-      한 회차라도 그 밖으로 나가면 **밀기 전 자리를 그대로 돌려준다.** 절반만 민 계획은
-      민 이유도 안 민 이유도 설명할 수 없다 — ⑦ 이 같은 태도로 «못 봤다» 를 적는다.
-
-    ★ **순서를 지킨다.** 민 자리가 앞 회차와 같거나 앞서면 계속 민다. 회차가 겹치면
-      분할이 아니라 같은 매입을 두 줄로 적은 것이 된다 (``split_infeasible_reason``).
-    """
-    base = split_offsets(coverage_days, rounds)
-    closed = set((calendar or {}).get("non_execution_days") or ())
-    horizon_end = (calendar or {}).get("horizon_end")
-    if not closed or not horizon_end:
-        # 달력이 없거나 지평을 모르면 밀 근거가 없다. **빈 목록을 «안 서는 날이 없다»로
-        # 읽지 않는다** — 그 고지는 ⑦이 ``skipped`` 로 낸다.
-        return base
-    start = date.fromisoformat(as_of)
-    shifted: list[int] = []
-    for index, offset in enumerate(base):
-        if index == 0:
-            shifted.append(offset)
-            continue
-        candidate = max(offset, shifted[-1] + 1)
-        while (start + timedelta(days=candidate)).isoformat() in closed:
-            candidate += 1
-        if (start + timedelta(days=candidate)).isoformat() > horizon_end:
-            return base
-        shifted.append(candidate)
-    return shifted
-
 
 def shifted_rounds_note(
     as_of: str,
@@ -171,72 +120,6 @@ def shifted_rounds_note(
             f" (오프셋 {base[-1]} → {moved[-1]}) — 커버가 늘어난 만큼 판단이 달라진다"
         )
     return note
-
-
-def split_quantities(total_qty_kg: int, chosen: list[dict]) -> list[int]:
-    """회차별 수량. **마지막 회차가 잔량을 흡수한다** — 반올림이 총량을 흔들면
-    사중 일치가 깨진다."""
-    remaining = total_qty_kg
-    quantities = []
-    for index, part in enumerate(chosen, start=1):
-        qty = remaining if index == len(chosen) else round(total_qty_kg * part["ratio"])
-        quantities.append(qty)
-        remaining -= qty
-    return quantities
-
-
-def split_infeasible_reason(
-    total_qty_kg: int, chosen: list[dict], coverage_days: int
-) -> str | None:
-    """이 안이 이 분할을 감당하는가. 못 하면 **사유**를, 되면 ``None``을 돌려준다.
-
-    ④는 그날 하나의 유형을 정하고 안별 총량·D는 모른다. 감당 여부는 여기서 안별로 본다.
-
-    막는 것 둘:
-
-    1. **0kg 회차** — ``SplitPlanItem.qty_kg > 0``이라 하나만 나와도 스키마가 **제안 전체**를
-       죽인다. E3-1에서 등급 배분이 정확히 이 자리에서 터졌다 (Codex 교차검증 P1).
-    2. **겹치는 날짜** — 회차가 커버일수보다 많으면 같은 날 두 번이 되고, 그건 분할이 아니라
-       같은 매입을 두 줄로 적은 것이다.
-    """
-    rounds = len(chosen)
-    if rounds > coverage_days:
-        return f"커버일수 {coverage_days}일보다 회차 수({rounds})가 많다"
-    offsets = split_offsets(coverage_days, rounds)
-    if any(earlier >= later for earlier, later in pairwise(offsets)):
-        return f"회차 날짜가 겹친다 (오프셋 {offsets})"
-    quantities = split_quantities(total_qty_kg, chosen)
-    if any(qty < 1 for qty in quantities):
-        return f"회차당 최소 수량 미달 — {total_qty_kg:,}kg을 {rounds}회로 나누면 {quantities}"
-    return None
-
-
-def arrival_dates(
-    as_of: str,
-    coverage_days: int,
-    rounds: int,
-    lead_days: int | None,
-    calendar: Mapping[str, Any] | None = None,
-) -> list[str] | None:
-    """회차별 **도착일** = 회차일 + N4 (상세설계 §5.5).
-
-    ``round_offsets``를 재사용한다 — 매입일을 두 곳에서 각자 계산하면 회차 날짜와
-    도착일이 어긋나고, 어긋난 쪽을 아무도 못 찾는다.
-
-    ★ **회차일이 밀리면 도착일도 따라 밀린다** (`#300`). 마스터 모듈이 *"도착일은 따라
-    밀린다 — 도착일 자체는 안 본다 (물류 축)"* 로 그 방향을 적었다. 여기서 도착일을
-    따로 밀면 매입이 물류 규약을 대신 정하는 것이 된다.
-
-    N4가 없으면 ``None``이다. **0으로 채우지 않는다** — 0은 "당일 도착"이라는 확정된
-    값이라, 미결을 0으로 적으면 "오늘 승인분이 오늘 도착"이 사실이 된다 (규칙 3).
-    """
-    if lead_days is None:
-        return None
-    start = date.fromisoformat(as_of)
-    return [
-        (start + timedelta(days=offset + lead_days)).isoformat()
-        for offset in round_offsets(as_of, coverage_days, rounds, calendar)
-    ]
 
 
 #: 회차 수량을 **재배분하지 못한** 사유. 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과
@@ -1655,6 +1538,11 @@ def _payment_schedule_field(
     return {"payment_schedule": schedule} if schedule else {}
 
 
+#: 지급일이 재무 집중일과 겹칠 때 문장에 들어가는 말. 🔴 **상수로 둔다** — 근거 자기
+#: 검토의 사전검사가 이 사실을 신호로 쓰는데, 문면을 두 곳에 적으면 한쪽만 바뀐다.
+PAYMENT_CONFLICT_NOTE = "재무의 지급 집중일과 겹친다"
+
+
 def _payment_risks(
     rounds: list[dict], payment_days: int | None, critical_dates: list[str] | None
 ) -> list[str]:
@@ -1679,7 +1567,7 @@ def _payment_risks(
         return []
     return [
         (
-            f"회차 지급일 {', '.join(overlap)}이 재무의 지급 집중일과 겹친다 — "
+            f"회차 지급일 {', '.join(overlap)}이 {PAYMENT_CONFLICT_NOTE} — "
             "해당 일자 현금 여력을 재무 검증에서 확인 필요"
         )
     ]
