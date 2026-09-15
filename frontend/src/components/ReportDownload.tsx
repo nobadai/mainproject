@@ -11,9 +11,10 @@ import { userErrorText } from "@/lib/procurementLabels";
  * ★ **화면이 문서를 조립하지 않는다.** 서버가 낸 Markdown 을 그대로 파일로 만든다 —
  *   화면이 조립하기 시작하면 **화면과 문서가 다른 숫자**를 말하게 된다.
  *
- * 🔴 **문서에는 못 한 것도 들어간다.** 지적·확인 필요·못 돈 검사·입력 출처가 안
- *   옆에 있어야 들고 나간 사람이 그 숫자를 어떻게 읽어야 하는지 안다.
- *   **결론만 담은 문서가 가장 위험하다** — 읽는 사람은 그것을 확정으로 읽는다.
+ * ★ **문서는 실제 서비스 사용자가 읽는 매입 제안이다** (2026-09-15 결정).
+ *   안별 매입량·금액·등급·이유와 부서 검토만 사람 말로 싣고, 검증 기록·종료 코드·
+ *   입력 출처·참조 번호 같은 개발용 정보는 넣지 않는다. 그 기록은 실행 이력에 남는다.
+ *   무엇을 싣는지는 서버 `backend/app/master/report.py` 가 정한다.
  */
 export function ReportDownload({ requestId }: { requestId: string }) {
   const [busy, setBusy] = useState(false);

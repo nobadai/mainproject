@@ -1328,10 +1328,21 @@ def get_run_report(request_id: str) -> ReportOut:
     if not run:
         raise LookupError(f"실행 원문이 없어 보고서를 만들 수 없습니다: {request_id}")
     run.setdefault("request_id", request_id)
+    item = row.get("item")
+    # ★ 결정의 주인은 결정 표다. 문서는 **이 실행을 가리키는** 현재 결정만 상태로 적는다.
+    run_id = str(row.get("run_id") or "")
+    decision = next(
+        (
+            d.model_dump()
+            for d in get_decisions(request_id)
+            if d.is_current and (d.history_run_id is None or d.history_run_id == run_id)
+        ),
+        None,
+    )
     return ReportOut(
         request_id=request_id,
-        filename=report_filename(run),
-        markdown=render_report(run),
+        filename=report_filename(run, item=item),
+        markdown=render_report(run, item=item, decision=decision),
     )
 
 
