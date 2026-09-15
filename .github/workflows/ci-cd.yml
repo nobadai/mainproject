@@ -156,10 +156,10 @@ jobs:
       - name: Add Docker CLI to PATH
         shell: cmd
         env:
-          DOCKER_CLI_DIR: ${{ vars.DOCKER_CLI_DIR }}
+          DOCKER_CLI_DIR: ${{ secrets.DOCKER_CLI_DIR }}
         run: |
           if not defined DOCKER_CLI_DIR (
-            echo ::error title=Docker CLI path missing::Repository variable DOCKER_CLI_DIR is not configured.
+            echo ::error title=Docker CLI path missing::Repository Secret DOCKER_CLI_DIR is not configured.
             exit /b 1
           )
           if not exist "%DOCKER_CLI_DIR%\docker.exe" (
@@ -206,57 +206,37 @@ jobs:
           BACKEND_IMAGE: ${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
           FRONTEND_IMAGE: ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
           APP_VERSION: ${{ github.sha }}
-          DB_HOST: ${{ vars.DB_HOST }}
-          DB_PORT: ${{ vars.DB_PORT }}
-          DB_NAME: ${{ vars.DB_NAME }}
-          DB_USER: ${{ vars.DB_USER }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_SCHEMA: ${{ vars.DB_SCHEMA }}
-          # Keep the complete runtime provider profile in GitHub Secrets.
-          # compose.yml forwards the same names unchanged to the backend.
+          DB_SCHEMA: ${{ secrets.DB_SCHEMA }}
+          # These are exactly the runtime names currently registered as
+          # Secrets. compose.yml forwards the same names unchanged.
           LLM_ENABLED: ${{ secrets.LLM_ENABLED }}
           LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_TIMEOUT_SECONDS: ${{ secrets.LLM_TIMEOUT_SECONDS }}
           LLM_MAX_RETRIES: ${{ secrets.LLM_MAX_RETRIES }}
-          LLM_MAX_OUTPUT_TOKENS: ${{ secrets.LLM_MAX_OUTPUT_TOKENS }}
-          LLM_EFFORT: ${{ secrets.LLM_EFFORT }}
-          MASTER_LLM_ENABLED: ${{ secrets.MASTER_LLM_ENABLED }}
           MASTER_LLM_PROVIDER: ${{ secrets.MASTER_LLM_PROVIDER }}
-          MASTER_LLM_MODEL: ${{ secrets.MASTER_LLM_MODEL }}
-          MASTER_LLM_BASE_URL: ${{ secrets.MASTER_LLM_BASE_URL }}
-          CRITIC_LLM_ENABLED: ${{ secrets.CRITIC_LLM_ENABLED }}
           CRITIC_LLM_PROVIDER: ${{ secrets.CRITIC_LLM_PROVIDER }}
-          CRITIC_LLM_MODEL: ${{ secrets.CRITIC_LLM_MODEL }}
-          CRITIC_LLM_BASE_URL: ${{ secrets.CRITIC_LLM_BASE_URL }}
+          CRITIC_LLM_TIMEOUT_SECONDS: ${{ secrets.CRITIC_LLM_TIMEOUT_SECONDS }}
           FINANCE_LLM_ENABLED: ${{ secrets.FINANCE_LLM_ENABLED }}
           FINANCE_LLM_PROVIDER: ${{ secrets.FINANCE_LLM_PROVIDER }}
           FINANCE_LLM_MODEL: ${{ secrets.FINANCE_LLM_MODEL }}
-          FINANCE_LLM_BASE_URL: ${{ secrets.FINANCE_LLM_BASE_URL }}
-          FINANCE_OLLAMA_PLANNER_MODEL: ${{ secrets.FINANCE_OLLAMA_PLANNER_MODEL }}
           SALES_LLM_ENABLED: ${{ secrets.SALES_LLM_ENABLED }}
           SALES_LLM_PROVIDER: ${{ secrets.SALES_LLM_PROVIDER }}
           SALES_LLM_MODEL: ${{ secrets.SALES_LLM_MODEL }}
-          LOGISTICS_LLM_ENABLED: ${{ secrets.LOGISTICS_LLM_ENABLED }}
-          LOGISTICS_LLM_PROVIDER: ${{ secrets.LOGISTICS_LLM_PROVIDER }}
-          LOGISTICS_LLM_MODEL: ${{ secrets.LOGISTICS_LLM_MODEL }}
-          LOGISTICS_LLM_BASE_URL: ${{ secrets.LOGISTICS_LLM_BASE_URL }}
-          LOGISTICS_MASTER_LLM_ENABLED: ${{ secrets.LOGISTICS_MASTER_LLM_ENABLED }}
-          PURCHASE_LLM_ENABLED: ${{ secrets.PURCHASE_LLM_ENABLED }}
-          PURCHASE_LLM_PROVIDER: ${{ secrets.PURCHASE_LLM_PROVIDER }}
-          PURCHASE_LLM_MODEL: ${{ secrets.PURCHASE_LLM_MODEL }}
-          PURCHASE_LLM_BASE_URL: ${{ secrets.PURCHASE_LLM_BASE_URL }}
-          ML_LLM_ENABLED: ${{ secrets.ML_LLM_ENABLED }}
-          ML_LLM_MODEL: ${{ secrets.ML_LLM_MODEL }}
           ML_CONSOLE_ORIGIN: ${{ secrets.ML_CONSOLE_ORIGIN }}
-          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ML_SOURCE_DB_HOST: ${{ secrets.ML_SOURCE_DB_HOST }}
+          ML_SOURCE_DB_PORT: ${{ secrets.ML_SOURCE_DB_PORT }}
+          ML_SOURCE_DB_NAME: ${{ secrets.ML_SOURCE_DB_NAME }}
+          ML_SOURCE_DB_USER: ${{ secrets.ML_SOURCE_DB_USER }}
+          ML_SOURCE_DB_PASSWORD: ${{ secrets.ML_SOURCE_DB_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MASTER_GEMINI_API_KEY: ${{ secrets.MASTER_GEMINI_API_KEY }}
-          CRITIC_GEMINI_API_KEY: ${{ secrets.CRITIC_GEMINI_API_KEY }}
           FINANCE_GEMINI_API_KEY: ${{ secrets.FINANCE_GEMINI_API_KEY }}
           SALES_GEMINI_API_KEY: ${{ secrets.SALES_GEMINI_API_KEY }}
-          LOGISTICS_GEMINI_API_KEY: ${{ secrets.LOGISTICS_GEMINI_API_KEY }}
           ML_GEMINI_API_KEY: ${{ secrets.ML_GEMINI_API_KEY }}
