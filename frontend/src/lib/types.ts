@@ -137,6 +137,8 @@ export interface ProcurementRunResponse {
     allowed_axes?: string[];
     no_proposal_reason?: string | null;
     rejected_reasons?: { label?: string; reason?: string }[];
+    /** 매입이 이 판단을 내린 품목 · 기준일. 화면은 품목으로 근거를 거른다. */
+    meta?: { item?: string | null; as_of?: string | null };
   };
   scenarios: Scenario[];
   /**

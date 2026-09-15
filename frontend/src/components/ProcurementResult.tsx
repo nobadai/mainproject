@@ -2,19 +2,16 @@
 
 import { AdjustmentPanel } from "@/components/AdjustmentPanel";
 import { AdvisorVerdicts } from "@/components/AdvisorVerdicts";
-import { ConcernsFold } from "@/components/ConcernsFold";
 import { EvidencePanel } from "@/components/EvidencePanel";
-import { SourceBadges } from "@/components/Badges";
 import { AGENT_LABEL } from "@/components/LlmTrace";
 import type { ProcurementRunResponse, Scenario } from "@/lib/types";
-import { AXIS_LABEL, CONFIDENCE_LABEL, SITUATION_LABEL, vocab } from "@/lib/vocab";
 
 /**
  * 매입 제안 결과.
  *
- * ★ **이 화면의 절반은 "못 한 것"이다.** 입력이 어디서 왔는지 · 검증이 몇 개 돌았는지 ·
- *   무엇을 확인해야 하는지가 결론과 **같은 화면**에 있어야 한다. 수량만 크게 띄우면
- *   mock 으로 만든 안을 실측으로 읽는다.
+ * ★ 실제 서비스 사용자에게 필요한 것만 사람 말로 보인다 (2026-09-15 결정).
+ *   결론 · 안 · 부서 판정 · 숫자의 출처까지가 이 화면이다.
+ *   내부 코드 · 실행 id · 입력 출처 등급 · 검사 기록은 그리지 않는다.
  */
 
 const END_TONE: Record<string, string> = {
@@ -46,9 +43,6 @@ export function ProcurementResult({
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className={`m-0 text-base font-semibold ${END_TONE[run.end_code] ?? ""}`}>{headline}</h3>
-        <span className="font-mono text-[11.5px] text-faint">
-          {run.end_code} · 호출 {run.plan.length}단계 · {run.request_id}
-        </span>
       </div>
 
       {/*
@@ -84,10 +78,7 @@ export function ProcurementResult({
             <ul className="m-0 list-none space-y-1 p-0">
               {run.blocked_failures.map((f) => (
                 <li key={f.agent} className="text-[12.5px] text-warn">
-                  <b className="font-semibold">{AGENT_LABEL[f.agent] ?? f.agent}</b>
-                  <span className="ml-1 font-mono text-[11.5px] text-faint">
-                    {f.runtime_status}
-                  </span>
+                  <b className="font-semibold">{AGENT_LABEL[f.agent] ?? "부서"}</b>
                   {/* 부서가 쓴 문장 그대로 — 화면이 다시 쓰지 않는다 */}
                   <span className="ml-1.5">{f.detail}</span>
                 </li>
@@ -107,23 +98,6 @@ export function ProcurementResult({
                 </li>
               ))}
             </ul>
-          )}
-          {/*
-            매입이 준 닫힌 집합을 한국어로 옮긴다. **모르는 값은 원문 + `미등록`** 이라
-            매입이 어휘를 늘린 날 화면에서 바로 보인다 (매입 2026-08-31 회신 ④).
-          */}
-          {vocab(SITUATION_LABEL, run.judgment?.situation) && (
-            <p className="m-0 mt-2 text-[11.5px] text-faint">
-              매입 판단 · 상황 {vocab(SITUATION_LABEL, run.judgment?.situation)}
-              {vocab(CONFIDENCE_LABEL, run.judgment?.confidence)
-                ? ` · 확신 ${vocab(CONFIDENCE_LABEL, run.judgment?.confidence)}`
-                : ""}
-              {(run.judgment?.allowed_axes ?? []).length > 0
-                ? ` · 열린 축 ${(run.judgment.allowed_axes ?? [])
-                    .map((a) => vocab(AXIS_LABEL, a) ?? a)
-                    .join("·")}`
-                : ""}
-            </p>
           )}
         </div>
       )}
@@ -152,12 +126,7 @@ export function ProcurementResult({
         </button>
       )}
 
-      <SourceBadges sources={run.input_sources} />
-
-      {/*
-        🔴 판정 라벨 **밑에** 둔다. "조건부" 한 단어가 *"안에 문제가 있다"* 와
-        *"검사를 못 돌렸다"* 를 뭉개므로, 그 부서가 보낸 것을 열어 볼 수 있어야 한다.
-      */}
+      {/* 안 다음에 부서 판정 — "이 안이 통과인가" 를 사람 말로 요약한다 */}
       <AdvisorVerdicts verdicts={run.verdicts} />
       {/*
         판정 다음에 온다 — "이 안이 통과인가" 다음이 "그럼 무엇을 고치나" 다.
@@ -165,15 +134,11 @@ export function ProcurementResult({
       */}
       <AdjustmentPanel adjustments={run.adjustments} />
       {/* 판정 바로 아래에 둔다 — "왜 그 판정인가" 를 물은 다음에 보는 것이다 */}
-      <EvidencePanel evidences={run.evidences} />
-
-      {/*
-        🔴 **접는 것이지 빼는 것이 아니다** (화면 주인 2026-09-10). 두 판이 펼쳐진 채
-        안 하나에 글 600자를 먹어 결론 카드를 밀어냈다. 접히되 **배지 한 줄이 남아**
-        무엇이 몇 건 접혀 있는지 — 특히 mock 이 섞였는지 — 를 첫 화면에서 말한다.
-        문장은 하나도 안 줄었다. 펼치면 그대로 온다.
-      */}
-      <ConcernsFold run={run} />
+      <EvidencePanel
+        evidences={run.evidences}
+        scenarios={run.scenarios}
+        item={run.judgment?.meta?.item ?? null}
+      />
     </div>
   );
 }

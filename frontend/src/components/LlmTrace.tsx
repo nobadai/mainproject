@@ -92,26 +92,12 @@ export function LlmTrace({ trace }: { trace: Trace }) {
         >
           {confidence.text}
         </span>
-        {trace.llm_model && (
-          <span
-            title={trace.llm_provider ? `provider ${trace.llm_provider}` : undefined}
-            className="rounded bg-sunk px-1.5 py-px font-mono text-[11px] text-muted"
-          >
-            {trace.llm_model}
-          </span>
-        )}
-        {trace.llm_attempts > 1 && (
-          <span className="rounded bg-sunk px-1.5 py-px font-mono text-[11px] text-muted">
-            {trace.llm_attempts}회 시도
-          </span>
-        )}
       </div>
 
       {/* 🔴 모델이 낸 답과 규칙이 대신 낸 답은 다르다 — 같아 보이게 두지 않는다 */}
       {trace.llm_fallback_used && (
         <p className="m-0 mt-1.5 text-[11.5px] text-warn">
-          🔴 모델이 쓸 수 있는 답을 못 줘 규칙이 대신 정했습니다 (
-          {trace.llm_status})
+          요청을 정확히 알아듣지 못해 기본 규칙으로 정했습니다
         </p>
       )}
     </div>
