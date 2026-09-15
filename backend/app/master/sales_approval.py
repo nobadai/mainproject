@@ -611,7 +611,22 @@ def confirm_approved_sale(
         예약단계 = True
         # ★ **요청을 손으로 조립하지 않는다.** 예약 이름을 포함해 판매의 projection
         #   이 만든다 — 여기서 문자열을 지으면 출고가 계산하는 이름과 갈린다.
-        예약요청 = outbound_reservation_for_sale(result, sim_run_id=sim_run_id, as_of=as_of)
+        #
+        # 🔴 **as_of = 가용량 판정 기준일 = 납품일. 확정일이 아니다**
+        #    (D/D+1 신선도 절벽 · 2026-09-15 · 물류 문서 24).
+        #
+        #    ```text
+        #    예약이 서는 시점     확정일 D     그대로 — 하루 사이 이중판매를 막는 자리
+        #    재고를 보는 기준일   납품일 D+1   할당(`_ship_one`)이 보는 날과 같아야 한다
+        #    ```
+        #
+        #    ⚠️ 확정일로 보면 D 에 잔여 1일인 Lot 을 예약이 세고, D+1 에 0일이 되어 할당이
+        #       못 쓴다 — `OutboundIntegrityError` 로 터지고 그 판매는 못 나간다
+        #       (REH-0914 배추 02-10: 확보 3,586kg · 납품일 가용 2,870kg).
+        #    ★ 값은 판매 확정 입력의 `sale_date` 다 — 날짜를 여기서 다시 짓지 않는다.
+        예약요청 = outbound_reservation_for_sale(
+            result, sim_run_id=sim_run_id, as_of=confirmation.sale_date
+        )
         예약 = do_reserve(conn, 예약요청)
         요구량 = Decimal(str(예약.required_qty_kg))
         확보량 = Decimal(str(예약.reserved_qty_kg))
