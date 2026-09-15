@@ -833,6 +833,7 @@ function Runs({ simRun }: { simRun: string }) {
             <>
               <Table
                 rows={pageRows}
+                controls={false}
                 columns={[
               { key: "as_of", label: "기준일", mono: true, render: (row) => row.as_of },
               { key: "item", label: "품목", render: (row) => row.item ?? "품목 미상" },
@@ -881,6 +882,7 @@ function Runs({ simRun }: { simRun: string }) {
                 <TechDetails>
                   <Table
                     rows={pageRows}
+                    controls={false}
                     columns={[
                   { key: "runtime", label: "runtime_status", mono: true, render: (row) => row.runtime_status },
                   {
