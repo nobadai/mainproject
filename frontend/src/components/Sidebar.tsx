@@ -36,9 +36,6 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
    */
   const records = [
     { key: "runs", icon: "≡", label: "실행 이력", open: true },
-    //: 🔴 **결론 옆에 경로를 두기 위한 것이다.** 에이전트가 "살 안이 없다" 고
-    //: 답하는데 그 앞 30일을 안 보면 시스템이 고장 난 것처럼 읽힌다.
-    { key: "burnin", icon: "◷", label: "판단 전 30일", open: true },
   ];
 
   const item = (row: { key: string; icon: string; label: string; badge?: string; open: boolean }) => (
