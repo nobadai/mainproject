@@ -37,6 +37,11 @@ export interface AnswerOut {
   llm_status: string;
   llm_attempts: number;
   llm_fallback_used: boolean;
+  /**
+   * 가격 예측이 쓴 **마크다운 본문 그대로.** 없으면 `null` (선택 칸).
+   * `text` 와 섞이지 않는다 — 화면은 이 칸을 문서로 그린다.
+   */
+  markdown?: string | null;
 }
 
 export interface DecisionOut {

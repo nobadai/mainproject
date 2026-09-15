@@ -157,6 +157,8 @@ export function execute(args: {
   /** 화면이 **보고 있던 실행**. 없으면 서버가 최신을 고르고 경합이 남는다. */
   targetHistoryRunId?: string;
   decidedBy?: string;
+  /** `/ask` 에 보냈던 말 그대로. 가격 예측 조회만 이 원문으로 답한다 (재분류하지 않는다). */
+  utterance?: string;
 }): Promise<ExecuteResponse> {
   return call<ExecuteResponse>(
     "/master/ask/execute",
@@ -171,6 +173,7 @@ export function execute(args: {
         target_request_id: args.targetRequestId ?? null,
         target_history_run_id: args.targetHistoryRunId ?? null,
         decided_by: args.decidedBy ?? null,
+        utterance: args.utterance ?? null,
       }),
     },
     // 🔴 여기만 상한이 다르다 — 읽기가 아니라 **돌리는** 호출이다.
