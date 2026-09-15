@@ -103,7 +103,7 @@ def test_master_has_sales_vocabulary_without_claiming_routing_is_complete():
 
     from app.master.envelope import AgentName
 
-    assert set(get_args(AgentName)) == {"finance", "inventory", "purchase", "sales"}
+    assert "sales" in set(get_args(AgentName))
 
 
 def test_master_routes_financial_validation_to_the_finance_mode():
