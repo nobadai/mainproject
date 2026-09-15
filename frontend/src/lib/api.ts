@@ -13,7 +13,6 @@
 import { DEFAULT_AS_OF, asOfSnapshot } from "./demo_as_of";
 import type {
   AskResponse,
-  BurnIn,
   ExecuteResponse,
   Intent,
   RunHistory,
@@ -32,7 +31,7 @@ export class ApiError extends Error {
 }
 
 /**
- * 읽기 넷(`runHistory` · `burnIn` · `runReport` · `health`)과 `ask` 의 상한.
+ * 읽기 셋(`runHistory` · `runReport` · `health`)과 `ask` 의 상한.
  *
  * 2026-09-11 실측 (같은 LAN 의 DB · 걷기가 도는 중) — `/health` `0.12s` ·
  * `/master/burn-in` `0.09s` · `/master/runs/{id}` `0.07s` · `…/report` `0.04s`.
@@ -181,11 +180,6 @@ export function execute(args: {
 
 export function runHistory(requestId: string): Promise<RunHistory> {
   return call<RunHistory>(`/master/runs/${encodeURIComponent(requestId)}`);
-}
-
-/** 번인 구간 — 에이전트가 판단하기 전 30일. **읽기 전용이다.** */
-export function burnIn(): Promise<BurnIn> {
-  return call<BurnIn>("/master/burn-in");
 }
 
 /** 매입안 보고서. **서버가 만든 Markdown 을 그대로 받는다.** */

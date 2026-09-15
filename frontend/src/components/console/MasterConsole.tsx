@@ -8,7 +8,6 @@ import { ProcurementResult } from "@/components/ProcurementResult";
 import { ReportDownload } from "@/components/ReportDownload";
 import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
-import { BurnInPanel } from "@/components/BurnInPanel";
 import { LlmTrace } from "@/components/LlmTrace";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { ApiError, ask, execute } from "@/lib/api";
@@ -115,7 +114,7 @@ export function MasterConsole({ session }: { session: Session }) {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
   //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
   //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
-  const [tab, setTab] = useState<"master" | "runs" | "burnin">("master");
+  const [tab, setTab] = useState<"master" | "runs">("master");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -321,7 +320,6 @@ export function MasterConsole({ session }: { session: Session }) {
   }
 
   const isHistory = tab === "runs";
-  const isBurnIn = tab === "burnin";
 
   return (
     /**
@@ -334,7 +332,7 @@ export function MasterConsole({ session }: { session: Session }) {
      */
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
-        {(["master", "runs", "burnin"] as const).map((k) => (
+        {(["master", "runs"] as const).map((k) => (
           <button
             key={k}
             type="button"
@@ -344,7 +342,7 @@ export function MasterConsole({ session }: { session: Session }) {
               tab === k ? "bg-ink text-paper" : "text-muted hover:bg-sunk"
             }`}
           >
-            {{ master: "묻기", runs: "실행 이력", burnin: "판단 전 30일" }[k]}
+            {{ master: "묻기", runs: "실행 이력" }[k]}
           </button>
         ))}
         <span className="ml-1 hidden gap-1 sm:flex">
@@ -364,11 +362,7 @@ export function MasterConsole({ session }: { session: Session }) {
         <span className="ml-auto text-[11px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
       </header>
 
-        {isBurnIn ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-            <BurnInPanel />
-          </div>
-        ) : isHistory ? (
+        {isHistory ? (
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
             <RunHistoryPanel known={runIds} />
           </div>
