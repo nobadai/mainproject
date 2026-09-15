@@ -55,7 +55,7 @@ SCHEMA_VERSION = "1.0"
 # 1. 어휘
 # ---------------------------------------------------------------------------
 
-AgentName = Literal["finance", "inventory", "purchase", "sales"]
+AgentName = Literal["finance", "inventory", "purchase", "sales", "ml"]
 """★ `Dept` 와 다르다.
 
 `Dept` 는 **밴드에 기여하는 조언자**(sales·inventory·finance)이고,
@@ -73,7 +73,16 @@ AgentName = Literal["finance", "inventory", "purchase", "sales"]
   AgentName 의 sales    판매 사이클의 제안자 — 조언자가 아니다
   ```
 
-  `_AGENT_DEPT` 가 판매를 담지 않는 이유가 이것이다 (그 주석 참조)."""
+  `_AGENT_DEPT` 가 판매를 담지 않는 이유가 이것이다 (그 주석 참조).
+
+★ **ML 이 들어왔다 — 상태 조회 전용이다** (ML 2026-09-15 요청).
+  사용자가 *"내일 배추 경락가 얼마야?"* 처럼 물으면 마스터가 부를 대상이다.
+  받는 mode 는 `STATUS_QUERY` 하나뿐이다.
+
+  🔴 **매입·판매 사이클의 필수 부서가 아니다.** `wiring.REQUIRED_FOR_PROCUREMENT` ·
+  `REQUIRED_FOR_SALES` 에 넣지 않고, `CAPABILITY_ROUTING` 도 ML 로 가지 않는다.
+  사이클이 읽는 예측값은 여전히 **입력**이다 (`inputs.py`) — 등록 여부와 무관하게
+  걷기와 두 사이클이 돈다. `_AGENT_DEPT` 에도 없다 (조언자가 아니다)."""
 
 Mode = Literal[
     "PRE_PURCHASE",
@@ -206,6 +215,8 @@ _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     # 판매는 제안만 만든다. 판매 제안의 재무 검증(`SALES_VALIDATION`)은 재무가 받는다 —
     # 제안자가 자기 제안을 검증하면 검증이 아니다.
     "sales": frozenset({"GENERATE_SALES_PROPOSAL", "STATUS_QUERY"}),
+    # ML 은 사용자 질문(가격·시세 예측)에만 답한다. 사이클 mode 를 열면 없는 의존이 생긴다.
+    "ml": frozenset({"STATUS_QUERY"}),
 }
 
 _AGENT_DEPT: dict[AgentName, Dept] = {

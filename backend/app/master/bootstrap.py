@@ -49,6 +49,7 @@ from app.master.receivable import register_receivable
 from app.master.sim_run_binding import SimRunBound
 from app.master.transition import register_transition
 from app.master.wiring import register as register_agent
+from app.ml.wiring import register_ml_agent
 from app.purchase_agent.adapter import purchase_port
 from app.purchase_agent.quotes import auction_quote_source
 from app.sales.adapter import sales_port
@@ -111,6 +112,8 @@ def wire_registries() -> None:
     #   판매가 답을 낸 결과다. 이 줄이 그 둘을 가른다 —
     #   `tests/master/test_sales_registration.py` 가 등록과 그 경로를 같이 잰다.
     register_agent("sales", sales_port)
+    # ★ 가격 전망 조회 전용이다 — 못 붙으면 False 로 돌아오고 부팅은 계속된다.
+    register_ml_agent()
 
     # ── 승인 → 장부 상태전이 (C 형태 ⑦) ────────────────────────────────────
     #
