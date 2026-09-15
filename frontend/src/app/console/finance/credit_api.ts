@@ -45,6 +45,22 @@ export interface CreditResponse {
   partners: PartnerCredit[];
 }
 
+export interface CreditLimitHistoryItem {
+  partner_credit_limit_id: string;
+  partner_id: string;
+  credit_limit_krw: Money;
+  effective_from: string;
+  effective_to: string | null;
+  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED";
+  source_ref: string;
+  recorded_by: string;
+  policy_version: string;
+  usage_scope: string;
+  note: string | null;
+  is_active: boolean;
+  is_current: boolean;
+}
+
 export async function fetchCredit(simRun: string, asOf: string): Promise<CreditResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -72,7 +88,8 @@ export async function fetchCredit(simRun: string, asOf: string): Promise<CreditR
 
 export async function registerCreditLimit(input: {
   partner_id: string; credit_limit_krw: string; effective_from: string;
-  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED"; recorded_by: string; note?: string;
+  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED"; source_ref: string;
+  recorded_by: string; note?: string;
 }): Promise<void> {
   const res = await fetch(`${API_BASE}/finance/credit-limits`, {
     method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -82,4 +99,19 @@ export async function registerCreditLimit(input: {
     const body = await res.json().catch(() => null) as { detail?: string } | null;
     throw new Error(body?.detail ?? "여신한도를 저장하지 못했습니다.");
   }
+}
+
+export async function fetchCreditLimitHistory(
+  partnerId: string,
+  asOf: string,
+): Promise<CreditLimitHistoryItem[]> {
+  const search = new URLSearchParams({ partner_id: partnerId, as_of: asOf });
+  const res = await fetch(`${API_BASE}/finance/credit-limits?${search.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail ?? "여신한도 이력을 불러오지 못했습니다.");
+  }
+  return (await res.json()) as CreditLimitHistoryItem[];
 }

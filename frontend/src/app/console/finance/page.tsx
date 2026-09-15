@@ -254,7 +254,12 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
 
       {/* ★ 판매 전에 묻는 질문 — «얼마까지 더 팔 수 있나» 에 답하는 자리다. */}
       <CreditPanel simRun={simRun} asOf={asOf} refreshKey={creditRefresh} />
-      <CreditLimitForm asOf={asOf} onSaved={() => setCreditRefresh((value) => value + 1)} />
+      <CreditLimitForm
+        simRun={simRun}
+        asOf={asOf}
+        refreshKey={creditRefresh}
+        onSaved={() => setCreditRefresh((value) => value + 1)}
+      />
 
       <AgentCard state={latest} />
     </>
