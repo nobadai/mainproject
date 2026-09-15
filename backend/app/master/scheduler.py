@@ -374,7 +374,7 @@ from app.master.inspection import (
 from app.master.maintenance import MaintenanceOut, run_auto_maintenance
 from app.master.market_calendar import MarketCalendar, get_market_calendar
 from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
-from app.master.outbound_flow import ship_due_sales
+from app.master.outbound_flow import OutboundOut, ship_due_sales
 from app.master.pending_transition import RetryOut, retry_pending_transitions
 from app.master.receivable import issue_receivables
 from app.master.run_repository import (
@@ -1051,6 +1051,11 @@ class DayRunOutcome:
     #: 어느 사이클의 승인이 안 섰는지를 요약이 못 말한다 (`items` 와 `sales_items`
     #: 를 가른 것과 같은 이유).
     sales_approval: BackfillOut | None = None
+    #: 출고가 낸 값 그대로 (2026-09-15 · 물류 문서 24 §5-㉣). 🔴 **여기서 다시 세지
+    #: 않는다** — 품목별 결과의 주인은 `OutboundOut.items` 하나이고, 여기는 그것을
+    #: 가리킬 뿐이다. 걷기 요약이 FAILED 품목마다 한 줄을 찍으려고 싣는다.
+    #: 출고 단계를 안 탔거나 터져서 값이 없으면 `None`.
+    outbound: OutboundOut | None = None
     #: 단계별 사유. 사람이 읽을 자리다.
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -1476,7 +1481,9 @@ def run_scheduled_day(
     # 🔴 **`sim_run_id` 를 흘려 준다** (2026-09-11). 출고 조회가 그 값으로 그날
     #    판매를 거른다 — 안 넘기면 조회가 **모든 실행**의 그 날짜 판매를 보고,
     #    남의 실행 판매가 내 창고에서 나간다. 채권·수금 두 줄과 같은 모양이다.
-    outbound_status, note = _stage("출고", lambda: outbound_fn(as_of, sim_run_id=sim_run_id))
+    outbound_status, outbound, note = _outbound(
+        as_of=as_of, sim_run_id=sim_run_id, outbound_fn=outbound_fn
+    )
     notes.append(note)
 
     # ── 물류 점검 #2 — 🔴 **출고 바로 뒤 · 마감 앞** (2026-09-12 · #628) ──
@@ -1538,6 +1545,7 @@ def run_scheduled_day(
         sales_approval_status=judged.sales_approval_status,
         procurement_approval=judged.procurement_approval,
         sales_approval=judged.sales_approval,
+        outbound=outbound,
         notes=tuple(notes),
     )
 
@@ -2028,6 +2036,37 @@ def _ledger_gap_note(inbound_status: str, receivable_status: str, collection_sta
         f"{_LEDGER_GAP} (입고: {inbound_status} · 채권: {receivable_status}"
         f" · 수금: {collection_status})"
     )
+
+
+def _outbound(
+    *,
+    as_of: date,
+    sim_run_id: str,
+    outbound_fn: Callable[..., Any],
+) -> tuple[str, OutboundOut | None, str]:
+    """출고 한 단계 (2026-09-15). **`_stage` 를 그대로 타고, 낸 값을 같이 돌려준다.**
+
+    🔴 **상태 · 사유는 `_stage` 가 정한다.** 여기서 다시 짓지 않는다 — 두 벌이 되면
+       한쪽만 고치는 날 요약과 note 가 갈린다.
+
+    ★ **낸 값이 `OutboundOut` 일 때만 싣는다.** 요약이 `items` 를 읽는데, 다른 모양을
+      실으면 그 자리에서 요약이 터진다 (`_inspect` 가 `(상태, 낸 값, 사유)` 를 돌려주는
+      것과 같은 모양).
+
+    :returns: `(칸 상태, 낸 값 또는 None, 사유 한 줄)`.
+    """
+    낸값: list[Any] = []
+    # ★ `_stage("출고", lambda: …(sim_run_id=…))` 모양을 지킨다 — 채권·수금 두 줄과 눈으로
+    #   같아야 하고, `test_outbound_carries_run_axis` 가 그 모양을 AST 로 센다.
+    status, note = _stage("출고", lambda: _kept(낸값, outbound_fn(as_of, sim_run_id=sim_run_id)))
+    out = 낸값[0] if 낸값 and isinstance(낸값[0], OutboundOut) else None
+    return status, out, note
+
+
+def _kept(store: list[Any], value: Any) -> Any:
+    """`value` 를 `store` 에 남기고 그대로 돌려준다 — `_stage` 를 거친 낸 값을 줍는 자리."""
+    store.append(value)
+    return value
 
 
 def _stage(name: str, call: Callable[[], Any]) -> tuple[str, str]:

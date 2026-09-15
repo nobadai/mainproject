@@ -746,6 +746,47 @@ class WalkResult:
         return total
 
     @property
+    def outbound_failure_lines(self) -> tuple[str, ...]:
+        """출고가 **터진** 판매 품목마다 한 줄 (2026-09-15 · 물류 문서 24 §5-㉣).
+
+        ```text
+        as_of · sale_id · sale_item_id · reservation_id · item_id ·
+        required · reserved · 후보 n · 후보합 · error_type · message · release
+        ```
+
+        🔴 **`FAILED` 만.** `SHORT` 는 사업 결과이지 터진 것이 아니다 (`OutboundOut.failed_items`
+          와 같은 선).
+
+        ★ **값을 새로 만들지 않는다.** 칸의 주인은 `SaleItemOutcome` 이고 여기는 옮겨
+          적는다. 모르는 칸(`None`)은 `모름` 으로 적는다 — 0 으로 접으면 «후보 0건» 과
+          «후보를 못 읽었다» 가 같아진다. `message` 는 사유 문장 그대로다.
+        """
+        out: list[str] = []
+        for day in self.days:
+            출고 = day.outbound
+            if 출고 is None:
+                continue
+            for one in 출고.items:
+                if one.status != "FAILED":
+                    continue
+                칸 = [
+                    출고.as_of.isoformat(),
+                    one.sale_id,
+                    one.sale_item_id,
+                    one.reservation_id,
+                    _or_unknown(one.item_id),
+                    f"required {one.required_qty_kg}",
+                    f"reserved {_or_unknown(one.reserved_qty_kg)}",
+                    f"후보 {_or_unknown(one.candidate_lot_count)}",
+                    f"후보합 {_or_unknown(one.candidate_available_kg)}",
+                    _or_unknown(one.error_type),
+                    one.reason,
+                    f"release {_or_unknown(one.release_outcome)}",
+                ]
+                out.append(" · ".join(칸))
+        return tuple(out)
+
+    @property
     def confirmation_reasons(self) -> tuple[str, ...]:
         """확정이 못 선 이유들. **`CONFIRMED` 가 아닌 것만.**
 
@@ -1195,6 +1236,11 @@ def _moment_on(day: date, now: datetime) -> datetime:
     return datetime.combine(day, now.timetz())
 
 
+def _or_unknown(value: Any) -> str:
+    """모르는 칸은 `모름`. 🔴 **0 으로 접지 않는다** — 없는 것과 0 은 다른 사실이다."""
+    return "모름" if value is None else str(value)
+
+
 def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
     """이 날이 사고인가. 사고면 사유, 아니면 `None`.
 
@@ -1473,6 +1519,10 @@ def format_summary(result: WalkResult) -> str:
     # ⚠️ **사유를 코드 밑에 붙인다.** `{BLOCKED: 7}` 만으로는 무엇이 막았는지를
     #    못 읽고, 그것이 오늘 밤 사람이 손으로 재현해야 했던 이유다.
     lines += [f"  확정막힘  {사유}" for 사유 in result.confirmation_reasons]
+    # 🔴 **출고실패 줄을 사고 줄에 접지 않는다** (2026-09-15). 사고 줄은 날 단위이고
+    #    이 줄은 품목 단위다 — 고아 예약 미설명 6건을 되짚으려면 터진 순간의 후보가
+    #    몇 개 · 몇 kg 이었는지가 한 줄에 있어야 한다.
+    lines += [f"  출고실패  {줄}" for 줄 in result.outbound_failure_lines]
     lines += [f"  사고 {one.as_of.isoformat()}  {one.reason}" for one in result.incidents]
     if result.stopped_reason is not None:
         lines.append(f"멈춤      {result.stopped_at} — {result.stopped_reason}")

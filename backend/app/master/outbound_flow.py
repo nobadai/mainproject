@@ -108,6 +108,7 @@ SHORT         나갈 판매가 **있었는데** 확보가 0이었다
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -122,7 +123,11 @@ from app.contracts.sales_logistics import (
 )
 from app.finance.db import get_connection, get_db_schema
 from app.logistics.fefo_allocation import allocate_reserved_stock_fefo
-from app.logistics.outbound import release_reservation, ship_allocated_stock
+from app.logistics.outbound import (
+    recommend_fefo_candidates,
+    release_reservation,
+    ship_allocated_stock,
+)
 from app.logistics.sales_outbound import reserve_confirmed_sale_available
 from app.master.sim_time import SimPhase, phase_instant
 from app.sales.persistence import mark_sale_delivered
@@ -266,6 +271,29 @@ class SaleItemOutcome:
     #: 완납 판정(`fully_shipped_sales`)이 이 값과 `shipped_qty_kg` 를 맞대 본다.
     required_qty_kg: Decimal = Decimal(0)
 
+    # ── 관측 칸 (2026-09-15 · 물류 문서 24 §5-㉣) ─────────────────────────
+    #
+    # 🔴 **판정에 안 쓴다. 되짚기용이다.** 고아 예약 미설명 6건을 새 걷기에서 잡으려고
+    #    **터진 순간**을 값으로 남긴다 — 사유 문장만으로는 후보가 몇이었는지 못 읽는다.
+    #
+    # ★ **기본값이 전부 `None` 이다.** 모르는 것을 0 으로 채우지 않는다 — 후보 0건과
+    #   후보를 못 읽은 것은 다른 사실이다. 옛 생성 지점도 그대로 선다.
+
+    #: 판매 품목 (`sale_items.item_id`). `DueSaleItem` 에서 옮겨 싣는 사본이다 —
+    #: 걷기 요약의 FAILED 한 줄이 품목을 부르려고 둔다.
+    item_id: str | None = None
+    #: 물류가 실제로 확보한 양 (`ReservationResult.reserved_qty_kg`). 예약까지 못 갔거나
+    #: 못 읽었으면 `None`.
+    reserved_qty_kg: Decimal | None = None
+    #: 터진 뒤 **그날(`as_of`) FEFO 후보** 수 · 가용합. 후보 읽기가 터지면 둘 다 `None`.
+    candidate_lot_count: int | None = None
+    candidate_available_kg: Decimal | None = None
+    #: 터진 예외의 클래스 이름 (`type(exc).__name__`). 안 터졌으면 `None`.
+    error_type: str | None = None
+    #: 할당이 안 선 예약을 놓아줬는가 (`_release_stranded` 가 값으로 돌려준다).
+    #: 놓아주기를 안 했으면 `None`. 🔴 **사유 문장에서 뽑지 않는다.**
+    release_outcome: Literal["RELEASED", "RELEASE_FAILED"] | None = None
+
 
 @dataclass(frozen=True)
 class OutboundOut:
@@ -364,10 +392,12 @@ def ship_due_sales(
     ship_fn: Callable[..., Any] = ship_allocated_stock,
     deliver_fn: Callable[..., Any] = mark_sale_delivered,
     release_fn: Callable[..., Any] = release_reservation,
+    candidates_fn: Callable[..., Any] = recommend_fefo_candidates,
 ) -> OutboundOut:
     """`as_of` 에 나갈 판매를 **순서대로 내보낸다. Lot 은 안 고른다.**
 
     :param release_fn: 할당이 터진 예약을 **그날 놓아주는** 자리 (`_ship_one` 참조).
+    :param candidates_fn: 터진 순간의 FEFO 후보를 **읽기만** 하는 자리 (`_ship_one` 참조).
 
     ★ **`receive_arrivals` · `collect_receipts` 와 같은 모양이다** — `as_of` 하나를
       받고, 예외를 밖으로 안 내고, 상태를 값으로 돌려준다.
@@ -421,6 +451,7 @@ def ship_due_sales(
                     allocate_fn=allocate_fn,
                     ship_fn=ship_fn,
                     release_fn=release_fn,
+                    candidates_fn=candidates_fn,
                 )
             )
 
@@ -456,6 +487,7 @@ def _ship_one(
     allocate_fn: Callable[..., Any],
     ship_fn: Callable[..., Any],
     release_fn: Callable[..., Any] = release_reservation,
+    candidates_fn: Callable[..., Any] = recommend_fefo_candidates,
 ) -> SaleItemOutcome:
     """판매 품목 하나를 예약 → 할당 → 출고까지 태운다.
 
@@ -475,10 +507,15 @@ def _ship_one(
 
        ⚠️ **출고가 터진 것은 안 놓아준다.** 할당이 서 있으면 재실행이 멱등하게 이어
           나간다 — 놓아주면 그 할당까지 `CANCELLED` 로 내려간다.
+
+    🟡 **터지면 그날 후보를 읽어 값으로 남긴다** (2026-09-15 · 관측). `candidates_fn` 은
+       **읽기만** 한다 — 결과의 `status` · `reason` 을 안 바꾸고 칸만 채운다.
     """
     reservation_id = reservation_id_for_sale_item(row.sale_item_id)
     예약_섰다 = False
     할당_섰다 = False
+    # ★ 확보량을 기억해 둔다 — 터진 가지에서도 얼마를 잡고 있었는지가 보여야 한다.
+    확보량: Decimal | None = None
     try:
         reserved = reserve_fn(
             conn,
@@ -495,10 +532,11 @@ def _ship_one(
             ),
         )
         conn.commit()
+        확보량 = _reserved_qty_of(reserved)
         # ★ 확보량을 못 읽은 것(None)도 «섰다» 로 본다 — 행이 있을 수 있어서다.
-        예약_섰다 = _reserved_qty_of(reserved) != 0
+        예약_섰다 = 확보량 != 0
 
-        if _reserved_qty_of(reserved) == 0:
+        if 확보량 == 0:
             # 🔴 **없는 예약을 할당하지 않는다** (물류 §5.1). 예전에는 그대로
             #    `allocate` 로 가서 `OutboundIntegrityError` 가 났고, 그것이 `FAILED`
             #    로 적혔다 — **정상 사업 결과가 장애로 기록됐다.**
@@ -509,6 +547,8 @@ def _ship_one(
                 status="SHORT",
                 reason=f"확보 0kg — 요구 {row.quantity_kg}kg",
                 required_qty_kg=row.quantity_kg,
+                item_id=row.item_id,
+                reserved_qty_kg=확보량,
             )
 
         allocate_fn(
@@ -532,10 +572,24 @@ def _ship_one(
     except Exception as exc:  # noqa: BLE001 - 한 판매가 하루를 세우면 안 된다.
         conn.rollback()
         reason = f"{type(exc).__name__}: {exc}"
+        # 🟡 **후보는 놓아주기 전에 읽는다.** 알고 싶은 것은 «터진 순간의 후보» 다 —
+        #    놓아준 뒤에 읽으면 그 예약이 사라진 세상을 본다. Lot 후보(`_available_lots`)는
+        #    지금 예약이 아니라 할당만 빼므로 값이 같지만, 순서를 뒤로 두면 그 전제가
+        #    바뀌는 날 칸이 조용히 틀린다.
+        #
+        # ⚠️ **할당이 선 뒤(출고가 터진 것)는 안 읽는다.** 그때는 Lot 이 이미 정해져 후보가
+        #    답이 아니고, 출고 실패 뒤 트랜잭션 순서(`reserve · commit · allocate · commit ·
+        #    ship · rollback`)를 그대로 둔다.
+        후보수: int | None = None
+        후보합: Decimal | None = None
+        if not 할당_섰다:
+            후보수, 후보합 = _candidates_at(conn, row, as_of=as_of, candidates_fn=candidates_fn)
+        release_outcome: Literal["RELEASED", "RELEASE_FAILED"] | None = None
         if 예약_섰다 and not 할당_섰다:
-            reason += _release_stranded(
+            문장, release_outcome = _release_stranded(
                 conn, reservation_id=reservation_id, as_of=as_of, release_fn=release_fn
             )
+            reason += 문장
         return SaleItemOutcome(
             sale_id=row.sale_id,
             sale_item_id=row.sale_item_id,
@@ -543,6 +597,12 @@ def _ship_one(
             status="FAILED",
             reason=reason,
             required_qty_kg=row.quantity_kg,
+            item_id=row.item_id,
+            reserved_qty_kg=확보량,
+            candidate_lot_count=후보수,
+            candidate_available_kg=후보합,
+            error_type=type(exc).__name__,
+            release_outcome=release_outcome,
         )
 
     return SaleItemOutcome(
@@ -552,24 +612,56 @@ def _ship_one(
         status="RAN",
         shipped_qty_kg=Decimal(getattr(shipped, "shipped_qty_kg", 0) or 0),
         required_qty_kg=row.quantity_kg,
+        item_id=row.item_id,
+        reserved_qty_kg=확보량,
     )
+
+
+def _candidates_at(
+    conn: Any, row: DueSaleItem, *, as_of: date, candidates_fn: Callable[..., Any]
+) -> tuple[int | None, Decimal | None]:
+    """터진 순간 **그날의 FEFO 후보** 수 · 가용합. 🔴 **읽기만 한다.**
+
+    🔴 **여기서 터져도 결과를 안 바꾼다.** 관측이 판정을 흔들면 안 된다 — 칸만 `None`
+       이고 `status` · `reason` 은 부르는 쪽이 정한 그대로다.
+
+    ★ **읽은 뒤 롤백한다.** 읽기라도 트랜잭션을 열어 두면 뒤따르는 놓아주기가 그 안에서
+      돈다 — 깨끗한 트랜잭션에서 시작하게 둔다.
+    """
+    try:
+        후보 = tuple(
+            candidates_fn(conn, sim_run_id=row.sim_run_id, item_id=row.item_id, as_of=as_of)
+        )
+        수: int | None = len(후보)
+        합: Decimal | None = sum(
+            (Decimal(str(one.available_qty_kg)) for one in 후보), Decimal(0)
+        )
+    except Exception:  # noqa: BLE001 - 관측 실패가 출고 결과를 바꾸면 안 된다.
+        수, 합 = None, None
+    # ★ 롤백 실패도 관측의 일이다 — 결과는 그대로 나간다.
+    with contextlib.suppress(Exception):
+        conn.rollback()
+    return 수, 합
 
 
 def _release_stranded(
     conn: Any, *, reservation_id: str, as_of: date, release_fn: Callable[..., Any]
-) -> str:
+) -> tuple[str, Literal["RELEASED", "RELEASE_FAILED"]]:
     """할당이 안 선 예약을 **그날** 놓아준다. 🔴 예약은 이미 커밋됐다 — 롤백이 못 걷는다.
 
     ★ 여기서 터져도 하루는 계속 간다. 못 놓아준 사실은 사유에 남긴다 — 그래야 다음
       사람이 «왜 아직 잡고 있나» 를 되짚을 수 있다.
+
+    :returns: `(사유에 붙일 문장, 놓아주기 결과)`. 🔴 **결과를 문장에서 뽑지 않게 값으로
+        같이 돌려준다** (2026-09-15) — 문장을 고치는 날 칸이 조용히 틀리지 않도록.
     """
     try:
         release_fn(conn, reservation_id=reservation_id, released_as_of=as_of)
         conn.commit()
-        return " · 할당이 안 서 예약을 놓아줬다"
+        return " · 할당이 안 서 예약을 놓아줬다", "RELEASED"
     except Exception as exc:  # noqa: BLE001 - 놓아주기 실패가 하루를 세우면 안 된다.
         conn.rollback()
-        return f" · 예약을 못 놓아줬다 ({type(exc).__name__}: {exc})"
+        return f" · 예약을 못 놓아줬다 ({type(exc).__name__}: {exc})", "RELEASE_FAILED"
 
 
 def _reserved_qty_of(reserved: Any) -> Decimal | None:
