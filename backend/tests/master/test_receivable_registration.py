@@ -65,11 +65,14 @@ def _판매(
     *,
     due: date | None = date(2026, 2, 4),
     amount: str = "132000.000000",
+    #: 판매가 일어난 날. **그날(`as_of`)과 같을 필요가 없다** — 휴장일 판매는 그 뒤
+    #: 첫 개장일에 읽혀서 발행되므로 `sale_date < as_of` 가 된다.
+    sale_date: date = AS_OF,
 ) -> ConfirmedSale:
     return ConfirmedSale(
         sale_id=sale_id,
         sim_run_id=BURN_IN_SIM_RUN_ID,
-        sale_date=AS_OF,
+        sale_date=sale_date,
         customer_partner_id="KIMCHI_FACTORY_001",
         collection_due_date=due,
         total_amount_krw=Decimal(amount),
@@ -417,7 +420,7 @@ def test_판매가_정한_기일을_그대로_싣는다() -> None:
     assert 원장.requests[0].due_date == date(2026, 3, 17), (
         f"마스터가 기일을 계산했다: {원장.requests[0].due_date}"
     )
-    assert 원장.requests[0].sale_date == AS_OF, "issued_date 는 sale_date 다"
+    assert 원장.requests[0].sale_date == AS_OF, "판매일은 판매가 준 날 그대로다"
 
 
 def test_기일이_비어_있으면_지어내지_않고_막는다() -> None:
@@ -599,7 +602,69 @@ def test_DELIVERED_판매도_채권이_선다() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ⑥ 멱등 — **두 번 불러도 행이 안 는다**
+# ⑥ issued_date 는 **그날이다** — 판매일이 아니다
+#
+# 🔴 재무가 `issued_date` 를 required 로 열었다 (`4b50906` · `82d4ef0`). 재무는 이
+#   날짜의 상태에 AR 을 올린다 — 마스터가 이 칸을 안 실으면 계약 오류로 그날 채권
+#   발행이 통째로 죽고, `sale_date` 를 실으면 이미 지나간 날의 잔액이 뒤늦게 커진다.
+# ---------------------------------------------------------------------------
+
+
+def test_발행일은_판매일이_아니라_그날이다() -> None:
+    """🔴 **발행 요청의 `issued_date` 는 어댑터가 받은 `as_of` 다.**"""
+    원장 = _가짜원장()
+    adapter = FinanceReceivableAdapter(
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        read_axis=_축(financing_mode="LOAN_BASELINE"),
+        load_sales=_판매조회기록(_판매()),
+        confirm=원장,
+    )
+
+    out = adapter.issue(conn=None, as_of=AS_OF)
+
+    assert out.status == "ISSUED"
+    assert 원장.requests[0].issued_date == AS_OF, (
+        f"발행일이 그날이 아니다: as_of={AS_OF} 인데 "
+        f"{원장.requests[0].issued_date} 가 실렸다"
+    )
+
+
+def test_휴장일_판매도_발행일은_그날이고_판매일은_그대로다() -> None:
+    """🔴 **두 날짜가 갈리는 유일한 경로를 잰다** (`#714` · 재무 합의 2026-09-16).
+
+    ★ `read_confirmed_sales` 는 `sale_date <= as_of` 로 읽는다 — 휴장일 판매는 그 뒤
+      **첫 개장일**에 한 번 발행된다. 그 날 `sale_date` 를 발행일로 쓰면 재무가 이미
+      마감한 날의 AR 을 뒤늦게 올리고, 그 사고는 에러 없이 잔액만 바꾼다.
+
+    ⚠️ `sale_date` 는 **판매가 소유한 사실이라 안 움직인다** — 두 칸을 같이 재지
+      않으면 둘 다 `as_of` 로 덮는 뮤턴트가 살아남는다.
+    """
+    휴장일_판매일 = date(2026, 1, 3)
+    assert 휴장일_판매일 < AS_OF, "이 검사의 전제는 판매일이 그날보다 앞인 것이다"
+
+    원장 = _가짜원장()
+    adapter = FinanceReceivableAdapter(
+        sim_run_id=BURN_IN_SIM_RUN_ID,
+        read_axis=_축(financing_mode="LOAN_BASELINE"),
+        load_sales=_판매조회기록(_판매("SALE-HOLIDAY", sale_date=휴장일_판매일)),
+        confirm=원장,
+    )
+
+    out = adapter.issue(conn=None, as_of=AS_OF)
+
+    assert out.status == "ISSUED"
+    요청 = 원장.requests[0]
+    assert 요청.issued_date == AS_OF, (
+        f"휴장일 판매의 발행일이 첫 개장일이 아니다: {요청.issued_date}"
+    )
+    assert 요청.sale_date == 휴장일_판매일, (
+        f"마스터가 판매일을 발행일로 덮었다: {요청.sale_date}"
+    )
+    assert 요청.issued_date != 요청.sale_date, "두 칸이 같은 값이면 이 경로를 못 잰다"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 멱등 — **두 번 불러도 행이 안 는다**
 # ---------------------------------------------------------------------------
 
 
