@@ -72,8 +72,8 @@ __all__ = [
 BEFORE_APPROVAL_MESSAGE = "승인한 날보다 앞선 매입일은 기록할 수 없습니다 — 매입일을 확인해 주세요"
 """매입일이 승인 실행 기준일보다 앞설 때 화면에 나가는 한 줄 (§4-6 ②)."""
 
-CLOSED_DUE_DATE_MESSAGE = "지급기일이 이미 마감된 날짜입니다 — 매입일을 확인해 주세요"
-"""회차 지급기일이 마지막 재무 일마감일 이하일 때 화면에 나가는 한 줄 (§4-6 ② · 2026-09-16)."""
+CLOSED_DUE_DATE_MESSAGE = "지급기일이 이미 마감된 날보다 앞입니다 — 매입일을 확인해 주세요"
+"""회차 지급기일이 마지막 재무 일마감일보다 앞일 때 화면에 나가는 한 줄 (§4-6 ② · 2026-09-16)."""
 
 #: 승인 때 재검증을 통과로 보는 결과. `CONDITIONAL` · `FAILED` · `ERROR` 는 통과가 아니다
 #: (`decision.RevalidationOutcome` 의 표).
@@ -104,7 +104,7 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
-          회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 그 실행의 마지막 재무 일마감일
+          회차마다 매입일 >= 승인 실행 as_of · 지급기일 >= 그 실행의 마지막 재무 일마감일
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행
     ②    선정안 약정 사본에 기록값을 덮는다
@@ -223,13 +223,18 @@ def _check_purchase_dates(
 
     ```text
     매입일   >= 승인 실행 as_of
-    지급기일 >  그 sim_run_id 의 마지막 재무 일마감일   (지급기일 = 매입일 + N5)
+    지급기일 >= 그 sim_run_id 의 마지막 재무 일마감일   (지급기일 = 매입일 + N5)
     ```
 
     ★ **매입일이 아니라 지급기일로 마감일과 견준다** (마스터 확정 · 재무 요청 취지).
       걷기가 D 를 마감한 뒤 사람이 D 매입을 승인 · 기록하는 것이 정상 순서다. 막아야
       하는 것은 *"이미 지난 지급기일의 채무가 새로 생기는 것"* 이다 — 그 채무는 마감된
       날의 지급에 한 번도 안 잡힌다.
+
+    ★ **마감일과 같은 날 지급기일은 받는다** (2026-09-16 사용자 확정). 재무 마감
+      (`finance/closing._recognize_due_payables`)은 `issued_date <= as_of AND due_date <= as_of`
+      이고 아직 마감 사건이 없는 채무를 **다음 마감에서 한 번** 반영한다. 같은 날이면
+      현금은 다음 마감에 잡힌다 (하루 늦게). 마감일보다 앞선 지급기일만 거부한다.
 
     ★ **D 마감 숫자는 흔들리지 않는다.** 전이(`finance/transition.py`)는 as_of 날 상태를
       읽기만 하고 `as_of + 1` 상태에 쓴다 (`master/transition._target_state_date`).
@@ -255,7 +260,7 @@ def _check_purchase_dates(
                 "지급기일을 계산할 수 없어 마감 여부를 확인하지 못했습니다"
                 f" — 재무 지급 일수를 확인해 주세요 ({leg.seq}회차 · 마지막 마감일 {closed})"
             )
-        if due <= closed:
+        if due < closed:
             raise DecisionRejected(
                 f"{CLOSED_DUE_DATE_MESSAGE} ({leg.seq}회차 지급기일 {due} · 마지막 마감일 {closed})"
             )

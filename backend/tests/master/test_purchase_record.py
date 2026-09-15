@@ -15,8 +15,8 @@
 ④  seq 집합이 다르면 · 수량/금액 0 · 도착일 < 매입일 · 중복 기록 → 거부
 ⑤  재시도가 기록 없는 사람 승인을 건너뛰고, 기록 있는 것은 기록값으로
 ⑥  기록값이 선정안과 다르면 재검증 · 불통과면 저장 0 · 전이 0 · 같으면 재검증 안 부름
-⑦  매입일 < 승인 실행 as_of · 지급기일 <= 마지막 재무 일마감일 → 거부 (회차마다)
-    · D 마감 뒤 매입일 D 기록은 받는다 (지급기일이 마감일 뒤면)
+⑦  매입일 < 승인 실행 as_of · 지급기일 < 마지막 재무 일마감일 → 거부 (회차마다)
+    · D 마감 뒤 매입일 D 기록은 받는다 (지급기일이 마감일과 같거나 뒤면)
 ⑨  기록값 재검증이 재무 · 물류 SCENARIO_VALIDATION 의 실제 판정으로 갈린다
 ⑧  다른 sim_run_id 의 같은 request_id 기록은 별개
 ```
@@ -544,14 +544,16 @@ def test_승인_실행_기준일보다_앞선_매입일은_거부한다(세상: 
     assert 세상["store"] == []
 
 
-@pytest.mark.parametrize("마감일", [date(2026, 9, 10), 기준일, date(2026, 9, 17)])
-def test_D_를_마감한_뒤에도_지급기일이_마감일_뒤면_받는다(
+@pytest.mark.parametrize(
+    "마감일", [date(2026, 9, 10), 기준일, date(2026, 9, 17), date(2026, 9, 18)]
+)
+def test_D_를_마감한_뒤에도_지급기일이_마감일과_같거나_뒤면_받는다(
     세상: dict[str, Any], 마감일: date
 ) -> None:
     """★ **걷기가 D 를 마감한 뒤 사람이 D 매입을 기록하는 것이 정상 순서다** (2026-09-16).
 
     1회차 매입일 9/11 = 승인 기준일 · N5=7 → 지급기일 9/18. 마감일이 9/11(D) 이어도,
-    9/17 이어도 지급기일이 그 뒤라 받는다.
+    9/18(지급기일 당일) 이어도 받는다 — 같은 날이면 현금은 다음 마감에 잡힌다.
     """
     세상["closed"] = 마감일
 
@@ -560,8 +562,8 @@ def test_D_를_마감한_뒤에도_지급기일이_마감일_뒤면_받는다(
     assert out.status == "APPLIED"
 
 
-@pytest.mark.parametrize("마감일", [date(2026, 9, 18), date(2026, 9, 19)])
-def test_지급기일이_마지막_재무_일마감일_이하면_거부한다(
+@pytest.mark.parametrize("마감일", [date(2026, 9, 19), date(2026, 9, 20)])
+def test_지급기일이_마지막_재무_일마감일보다_앞이면_거부한다(
     세상: dict[str, Any], 마감일: date
 ) -> None:
     """🔴 이미 지난 지급기일의 채무가 새로 생기면 그날 지급에 한 번도 안 잡힌다."""
@@ -575,7 +577,7 @@ def test_지급기일이_마지막_재무_일마감일_이하면_거부한다(
 
 
 def test_지급기일은_회차마다_잰다(세상: dict[str, Any]) -> None:
-    """★ 1회차는 마감일 뒤인데 2회차 지급기일이 마감일 이하면 거부한다."""
+    """★ 1회차는 마감일 뒤인데 2회차 지급기일이 마감일보다 앞이면 거부한다."""
     세상["closed"] = date(2026, 9, 20)
     body = _본문()
     body["legs"][0].update(purchase_date="2026-09-15", arrival_date="2026-09-16")  # 9/22
@@ -587,14 +589,30 @@ def test_지급기일은_회차마다_잰다(세상: dict[str, Any]) -> None:
     assert 세상["store"] == []
 
 
-def test_당일_지급이면_D_마감_뒤_D_매입은_거부한다(세상: dict[str, Any]) -> None:
-    """⚠️ N5=0 이면 지급기일 = 매입일이다 — 마감된 D 의 매입은 지급기일도 D 라 거부된다."""
+def test_당일_지급이면_D_마감_뒤_D_매입도_받는다(세상: dict[str, Any]) -> None:
+    """★ N5=0 이면 지급기일 = 매입일 = D = 마감일이다 — 같은 날이라 받는다 (실측 01-05 모양).
+
+    재무 마감(`_recognize_due_payables`)이 기일이 지난 미반영 채무를 다음 마감(D+1)에서
+    한 번 반영한다.
+    """
     세상["row"]["response_payload"]["constraints"]["finance"]["purchase_payment_days"] = 0
     세상["closed"] = 기준일
 
-    with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE):
+    out, _ = _기록한다(세상, _본문())
+
+    assert out.status == "APPLIED"
+    assert len(세상["store"]) == 2
+
+
+def test_당일_지급인데_지급기일이_마감일_하루_앞이면_거부한다(세상: dict[str, Any]) -> None:
+    """🔴 N5=0 · 매입일 9/11 · 마감일 9/12 → 지급기일이 마감일 - 1 이라 거부한다."""
+    세상["row"]["response_payload"]["constraints"]["finance"]["purchase_payment_days"] = 0
+    세상["closed"] = date(2026, 9, 12)
+
+    with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE) as caught:
         _기록한다(세상, _본문())
-    assert 세상["store"] == []
+    assert "1회차 지급기일 2026-09-11" in str(caught.value)
+    assert 세상["store"] == [] and 세상["conns"] == []
 
 
 def test_마감이_있는데_지급기일을_모르면_거부한다(세상: dict[str, Any]) -> None:
