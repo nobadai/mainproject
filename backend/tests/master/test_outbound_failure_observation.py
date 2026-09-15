@@ -328,3 +328,50 @@ def test_출고_결과는_하루_결과에_그대로_실린다() -> None:
     status, 낸값, note = scheduler._outbound(as_of=AS_OF, sim_run_id=축, outbound_fn=_터짐)
     assert status == "FAILED"
     assert 낸값 is None
+
+
+def test_하루를_돌리면_출고가_낸_값이_하루_결과에_실린다() -> None:
+    """🔴 `_outbound` 가 값을 돌려줘도 `run_scheduled_day` 가 안 실으면 요약 줄은 늘 빈다.
+
+    ★ `test_outbound_carries_run_axis.py` 의 «실제로 하루를 돌려 본다» 와 같은 대역 결이다.
+    """
+    from datetime import datetime
+
+    from app.master.clock import SEOUL
+    from app.master.pending_transition import RetryOut
+    from app.master.scheduler import ScheduledAction, run_scheduled_day
+
+    @dataclass
+    class _단계결과:
+        status: str
+        reason: str = ""
+
+    def _단계(status: str):
+        return lambda _as_of, **_k: _단계결과(status)
+
+    출고 = OutboundOut(as_of=AS_OF, status="NOTHING_DUE")
+    action = ScheduledAction(
+        as_of=AS_OF,
+        now=datetime(2026, 2, 10, 9, 30, tzinfo=SEOUL),
+        action="RUN_NOW",
+        reason="검사",
+        deadline=datetime(2026, 2, 10, 10, 30, tzinfo=SEOUL),
+        ready_items=(),
+        retry_after=None,
+    )
+
+    out = run_scheduled_day(
+        action,
+        sim_run_id=축,
+        open_day_fn=_단계("OPENED"),
+        retry_fn=lambda _as_of, **_k: RetryOut(status="NOTHING_DUE", reason="없다"),
+        receive_fn=_단계("RECEIVED"),
+        issue_fn=_단계("ISSUED"),
+        collect_fn=_단계("COLLECTED"),
+        outbound_fn=lambda as_of, *, sim_run_id: 출고,
+        close_fn=_단계("CLOSED"),
+        items=(),
+    )
+
+    assert out.outbound_status == "NOTHING_DUE", f"출고 단계가 안 돌았다: {out.notes}"
+    assert out.outbound is 출고, "출고가 낸 값이 하루 결과에 안 실렸다"
