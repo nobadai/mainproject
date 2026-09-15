@@ -80,6 +80,13 @@ class AskExecuteRequest(BaseModel):
     #: 생기지는 않는다** — 발화문에는 신원이 없으므로 인증된 사용자를 화면이 싣는다.
     decided_by: str | None = None
 
+    #: 확인을 받은 **발화문 원문.** 선택 칸이다 (2026-09-15 신설).
+    #:
+    #: ★ 재분류에 쓰지 않는다. 가격 예측(`ml`) 조회는 질문 원문을 그대로 받아야 답하는데,
+    #:   확인을 거친 조회는 의도만 돌아와 원문이 없다. 화면이 `/ask` 에 보냈던 말을
+    #:   되돌려 줄 때만 ML 에 실린다. 다른 부서 조회에는 쓰이지 않는다.
+    utterance: str | None = Field(default=None, max_length=2000)
+
 
 class StatusAnswer(BaseModel):
     """조회 결과. **못 답한 부서를 감추지 않는다.**"""
@@ -114,6 +121,11 @@ class AnswerOut(BaseModel):
     llm_status: LLMStatus
     llm_attempts: int = 0
     llm_fallback_used: bool = False
+    #: 가격 예측(`ml`)이 쓴 **마크다운 본문 그대로.** 선택 칸이다 (2026-09-15 신설).
+    #:
+    #: ★ `text` 에 섞지 않는다. `text` 는 규칙이 만든 사실 줄과 LLM 문장이고, 이것은
+    #:   부서가 완결해 보낸 글이다. 사실 줄로 펴지도 않고 ⑥이 다시 요약하지도 않는다.
+    markdown: str | None = None
 
 
 class AskResponse(BaseModel):

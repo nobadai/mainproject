@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.master.answer import facts_from_status
-from app.master.llm.runtime import _clarification
+from app.master.llm.runtime import SYSTEM_PROMPT, _clarification
 from app.master.llm.schemas import Intent
 from app.master.plan import ExecutionPlan
 from app.master.status_flow import StatusOutcome
@@ -27,32 +27,23 @@ _UNKNOWN = Intent(action="UNKNOWN", confidence="HIGH")
 # ── 되묻는 말이 없는 이유를 이름으로 말한다 ──────────────────────────────
 
 
-def test_가격_질문에는_가격_자리가_없다고_말한다():
-    """*"못 알아들었습니다"* 만 적으면 사람은 **자기가 말을 잘못했다고 생각하고**
-    표현을 바꿔 다시 묻는다. 그래도 안 된다 — 없는 것이기 때문이다."""
-    말 = _clarification(_UNKNOWN, "오늘 배추 가격얼마야?")
+def test_가격_질문은_이제_빈자리가_아니다():
+    """🔴 **가격·시세 항목을 뺐다** (2026-09-15).
 
-    assert "가격" in 말
-    assert "없습니다" in 말
-    assert "재무 조회는 회사 자금" in 말, "왜 재무가 답이 아닌지까지 적어야 다시 안 묻는다"
-
-
-def test_남의_파트_상태를_문구에_적지_않는다():
-    """🔴 *"예측 가격은 mock 이라"* 고 적었다가 **거짓말이 됐다** (2026-08-31).
-
-    ML backfill 이 들어와 `forecast` 가 `MEASURED` 가 됐는데 이 문장이 안 따라왔다.
-    **화면 문구에 다른 파트의 상태를 적으면, 그 파트가 바뀔 때 거짓이 된다.**
-    변하지 않는 것(*"쓰는 자리가 다르다"*)만 말한다.
+    가격 예측(`ml`)이 상태 조회로 품목 가격에 답하게 되어, 되묻는 말이 *"가격을 조회하는
+    자리는 아직 없습니다"* 라고 하면 **거짓말**이 된다. 분류 지시문의 UNKNOWN 가격 예시와
+    같이 뺐다 — 한쪽만 남으면 지시문은 ml 로 보내는데 되묻는 말은 자리가 없다고 한다.
     """
-    말 = _clarification(_UNKNOWN, "배추 가격 알려줘")
+    for 발화 in ("오늘 배추 가격얼마야?", "배추 시세 알려줘", "단가 어떻게 돼", "오늘 시가 얼마"):
+        말 = _clarification(_UNKNOWN, 발화)
+        assert "자리는 아직 없습니다" not in 말, 발화
+        assert "알아듣지 못했습니다" in 말, 발화
 
-    assert "mock" not in 말.lower(), "다른 파트의 데이터 상태를 단정하지 않는다"
-    assert "매입안을 만드는 데 쓰고" in 말
 
-
-def test_시세_단가도_같은_말을_받는다():
-    for 발화 in ("배추 시세 알려줘", "단가 어떻게 돼", "오늘 시가 얼마"):
-        assert "가격" in _clarification(_UNKNOWN, 발화)
+def test_분류_지시문에도_가격_빈자리_예시가_없다():
+    """지시문과 되묻는 말이 **같은 사실**을 말하는지 대조한다."""
+    assert "품목 가격·시세를 답하는 부서는 없다" not in SYSTEM_PROMPT
+    assert "  ml  " in SYSTEM_PROMPT
 
 
 def test_이름_없는_것은_종전_안내로_간다():
