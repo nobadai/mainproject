@@ -145,11 +145,49 @@ def supervise(state: QaState) -> QaState:
         picked["kind"] = kind
     if chosen.get("dates"):
         picked["asked"] = list(chosen["dates"])
-    if not picked.get("kind"):
-        #   가격 종류를 못 고르면 되묻는다. 되묻는 문장에 다시 물을 예시를 심는다.
+    if not item or not kind:
+        #   ★ **빠진 것만 묻는다** (2026-09-15 · 사용자 지적으로 고침).
+        #     전에는 품목이 없어도 «가격 종류를 알 수 없습니다» 만 적었다. 그러면
+        #     「경락가요」라고 답해도 또 되묻게 된다 — 한 번에 알려줬어야 할 것을
+        #     두 번에 나눠 묻는 셈이다.
+        #
+        #   ★ **알아들은 것은 문장에 적는다.** 날짜를 제대로 골라 놓고 되묻기로
+        #     빠지면 그 값이 조용히 사라져, 사람이 「오늘부터 8일」을 또 적게 된다.
         picked["status"] = "NEED_CLARIFY"
-        picked["message"] = OUT_OF_SCOPE_KIND
+        picked["message"] = _ask_again(item, kind, picked.get("asked"))
     return picked
+
+
+def _ask_again(item: str | None, kind: str | None, dates: list[date] | None) -> str:
+    """되묻는 문장. **빠진 것만 묻고, 알아들은 것은 밝힌다.**"""
+    known: list[str] = []
+    if item:
+        known.append(f"품목 **{item}**")
+    if dates:
+        known.append(
+            f"날짜 **{dates[0]}**" if len(dates) == 1
+            else f"날짜 **{dates[0]} ~ {dates[-1]}** ({len(dates)}일)"
+        )
+
+    if not item and not kind:
+        need = "어느 품목의 어느 가격인지"
+        example = "배추 경락가"
+    elif not item:
+        need = "어느 품목인지"
+        example = f"배추 {KIND_LABEL.get(kind, kind)}"
+    else:
+        need = "어느 가격인지"
+        example = f"{item} 경락가"
+
+    lines = [f"{need} 알 수 없습니다."]
+    if known:
+        lines.append(f"알아들은 것 — {' · '.join(known)}. 이건 다시 안 적으셔도 됩니다.")
+    if not item:
+        lines.append("품목: **배추 · 무 · 양파**")
+    if not kind:
+        lines.append("가격: **경락가(AUC) · 중도매가(WHSL) · 소매가(RTL)**")
+    lines.append(f"예: `{example}` 라고 덧붙여 다시 물어봐 주세요.")
+    return "\n\n".join(lines)
 
 
 def gate(state: QaState) -> QaState:

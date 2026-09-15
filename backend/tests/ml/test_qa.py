@@ -180,6 +180,45 @@ def test_가격_종류를_못_고르면_되묻는다(도구를_갈아_끼운다,
     assert "경락가" in out.markdown and "소매가" in out.markdown
 
 
+def test_빠진_것만_묻는다(도구를_갈아_끼운다, monkeypatch):
+    """★ 품목이 없는데 «가격 종류» 만 물으면, 답해도 또 되묻게 된다 (2026-09-15).
+
+    한 번에 알려줬어야 할 것을 두 번에 나눠 묻는 셈이다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+
+    #   품목만 없다 — 가격 종류는 다시 안 묻는다
+    _llm(monkeypatch, {"route": "forecast", "item": None, "kind": "AUC", "dates": []})
+    out = qa_graph.answer(QaRequest(question="경락가 알려줘"))
+    assert out.meta.status == "NEED_CLARIFY"
+    assert "어느 품목인지" in out.markdown
+    assert "배추 · 무 · 양파" in out.markdown
+    assert "WHSL" not in out.markdown                        # 이미 안 것은 안 묻는다
+
+    #   둘 다 없다 — 한 번에 둘 다 묻는다
+    _llm(monkeypatch, {"route": "forecast", "item": None, "kind": None, "dates": []})
+    out = qa_graph.answer(QaRequest(question="가격 알려줘"))
+    assert "어느 품목의 어느 가격인지" in out.markdown
+    assert "배추 · 무 · 양파" in out.markdown and "경락가(AUC)" in out.markdown
+
+
+def test_되물을_때_알아들은_날짜를_밝힌다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 날짜를 제대로 골라 놓고 되묻기로 빠지면 그 값이 조용히 사라진다.
+
+    그러면 사람이 「오늘부터 8일」을 또 적어야 한다 — 알아들은 것은 말해 줘야 한다.
+    """
+    도구를_갈아_끼운다(rows=[_row(1)])
+    _llm(monkeypatch, {
+        "route": "forecast", "item": None, "kind": None,
+        "dates": [BASE + timedelta(days=d) for d in range(8)],
+    })
+    out = qa_graph.answer(QaRequest(question="오늘부터 8일동안의 가격을 알려줘"))
+    assert out.meta.status == "NEED_CLARIFY"
+    assert "알아들은 것" in out.markdown
+    assert "8일" in out.markdown
+    assert str(BASE) in out.markdown                         # 시작일을 그대로 적는다
+
+
 def test_LLM_을_못_부르면_해석하지_못했다고_답한다(도구를_갈아_끼운다, monkeypatch):
     도구를_갈아_끼운다(rows=[_row(1)])
     _llm(monkeypatch, None)
