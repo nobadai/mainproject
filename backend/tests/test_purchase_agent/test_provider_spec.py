@@ -41,9 +41,14 @@ def test_역할_명세가_기존_상수를_그대로_든다() -> None:
     )
 
 
-@pytest.mark.parametrize("provider_name", ["anthropic", "openai", "ollama"])
+@pytest.mark.parametrize("provider_name", sorted(rt.PROVIDERS))
 def test_기본_인자로_만들면_다섯번_역할이다(provider_name: str) -> None:
-    """조립하던 자리(``get_mix_selection_service``)는 인자를 안 넘긴다 — 기본이 ⑤ 여야 한다."""
+    """조립하던 자리(``get_mix_selection_service``)는 인자를 안 넘긴다 — 기본이 ⑤ 여야 한다.
+
+    🔄 **목록을 코드에서 뽑는다** (2026-09-15 · `gemini` 를 열면서). 전에는 이름 셋을
+    손으로 적었는데, 그러면 **프로바이더가 늘어도 재는 수가 안 는다** — 새로 등록한
+    것만 이 검사를 안 받는 구간이 생긴다. 표가 곧 목록이어야 그 구간이 없다.
+    """
     provider = rt.PROVIDERS[provider_name](rt.get_llm_settings())
     assert provider.spec is rt.MIX_ROLE
 

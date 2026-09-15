@@ -2,12 +2,18 @@
 
 **노드는 이 모듈을 직접 부르지 않는다** — ``mix.make_mix_selector()``만 안다.
 
-프로바이더는 3종이고 ``LLM_PROVIDER``로 고른다. **팀의 환경변수 규약이 이미 프로바이더
+프로바이더는 4종이고 ``LLM_PROVIDER``로 고른다. **팀의 환경변수 규약이 이미 프로바이더
 중립**이라 이름을 새로 만들지 않았다:
 
 * ``anthropic`` — Messages API + 구조화 출력(``output_config.format``)
 * ``openai``    — Chat Completions + ``response_format`` json_schema(strict)
 * ``ollama``    — 팀 기존 4벌과 같은 로컬 경로 (``format``에 JSON Schema)
+* ``gemini``    — REST + ``responseSchema`` (표준 라이브러리만 · 🔴 팀 다섯 파트가 쓰는 것)
+
+🔴 **``gemini``가 늦게 들어온 이유를 적어 둔다.** 마스터·critic·판매·재무·물류가 전부
+gemini를 쓰는데 매입만 표에 그 이름이 없어서, ``.env``에 ``GEMINI_API_KEY``가 있어도
+**매입만 그 키를 못 썼다.** 조립이 표(``PROVIDERS``)를 보고 도는 구조라 "키가 없다"가
+아니라 "이름이 없다"가 막고 있었고, 그 둘은 증상이 같다 — 둘 다 fallback이다.
 
 **검증 체인은 프로바이더 밖에 있다.** 프로바이더는 "문자열을 받아온다"까지만 하고,
 후보 대조·숫자 금지·재시도는 ``MixSelectionService``가 소유한다 — 프로바이더를 갈아끼워도
@@ -47,6 +53,13 @@ ENV_FILES = (
 )
 #: 에이전트 전용 접두사 — ``PURCHASE_LLM_MODEL``로 다른 에이전트와 분리한다 (critic 선례).
 ENV_PREFIX = "PURCHASE_"
+
+#: Gemini는 **자체 엔드포인트**를 쓴다.
+#:
+#: 🔴 ``LLM_BASE_URL``에서 읽지 않는다. 그 값의 기본이 Ollama(``127.0.0.1:11434``)라,
+#: provider만 ``gemini``로 바꾸면 **로컬 포트로 쏘고 연결 실패로만 보인다** — "키가
+#: 틀렸나"를 한참 보게 된다. 마스터가 같은 자리에 같은 경고를 적어 두었다.
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
@@ -309,6 +322,187 @@ class OllamaProvider:
         return content
 
 
+#: Gemini ``responseSchema``가 **거부하거나 무시하는** 키.
+#:
+#: ⚠️ ``minLength``/``maxLength``도 뺀다 — ``GradeMixInterpretation``이 그 둘을 안 쓰는
+#: 이유(Anthropic·OpenAI가 지원하지 않는다)와 같은 자리이고, ``ReviewOutput``의
+#: ``FindingOut.code``에는 아직 ``minLength``가 남아 있다. 빈 문자열 검사는 프로바이더
+#: 밖 공통 검증(``validate_output``)이 이미 한다.
+_GEMINI_SCHEMA_DROP = frozenset(
+    {"title", "default", "additionalProperties", "$schema", "examples", "minLength", "maxLength"}
+)
+
+
+def _to_gemini_schema(node: Any, defs: dict[str, Any] | None = None) -> Any:
+    """JSON Schema → Gemini ``responseSchema``. **버리고 · 바꾸고 · 편다.**
+
+    ``Ollama``는 JSON Schema를 그대로 먹지만 Gemini는 못 먹는다. 하는 일은 넷뿐이다::
+
+        버린다   title · default · additionalProperties · $schema · examples
+                 · minLength · maxLength                     Gemini가 거부하거나 무시한다
+        바꾼다   anyOf[X, null] → X + nullable: true          저쪽의 표현 방식이다
+        편다     $ref → $defs 의 정의를 그 자리에 펼친다
+        남긴다   description                                  아래 참조
+
+    🔴 **``description``을 남기는 것이 중요하다.** Ollama에는 스키마를 통째로 넘기고 있어
+    모델이 클래스 docstring을 이미 보고 있다. 여기서 빼면 **provider를 바꾼 것만으로
+    모델에게 보이는 지시가 달라진다** — 판단이 달라져도 그게 모델 탓인지 우리 탓인지
+    못 가른다.
+
+    🔴 **``$ref`` 를 펴는 것은 이 저장소에서 여기가 처음이다.** 팀의 다른 파트(마스터 ·
+    판매 · 물류 · 재무)는 전부 평면 스키마라 ``$ref``를 안 다룬다. 우리는 ⑧
+    ``ReviewOutput``이 ``$defs``/``$ref``(``FindingOut``)를 쓰므로, 그대로 보내면 **⑧만
+    gemini에서 터진다** — 그것도 ⑧을 켠 날에야 처음.
+
+    ⚠️ **재귀 참조는 이 세 스키마에 없다.** 있으면 여기서 무한히 펴진다. 그 사실을
+    ``test_gemini_provider``가 잠근다 — 스키마가 늘 때 같이 걸리라고 검사로 둔다.
+    """
+    if isinstance(node, list):
+        return [_to_gemini_schema(item, defs) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    # ``$defs``는 최상위에서 한 번만 집어 두고, 결과에서는 뺀다 — 펼친 뒤엔 참조가 없다.
+    defs = {**(defs or {}), **(node.get("$defs") or {})}
+
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        이름 = ref.rsplit("/", 1)[-1]
+        대상 = defs.get(이름)
+        if 대상 is None:
+            # 🔴 조용히 넘기지 않는다. 못 편 참조를 그대로 보내면 Gemini가 400을 내고,
+            #   그 400은 fallback에 삼켜져 "모델이 실패했다"로 읽힌다.
+            raise KeyError(f"gemini 스키마에서 못 펴는 참조다: {ref}")
+        # 형제 키(``description`` 등)가 있으면 펼친 것 위에 덮는다 — JSON Schema 관례다.
+        형제 = {k: v for k, v in node.items() if k not in {"$ref", "$defs"}}
+        return {**_to_gemini_schema(대상, defs), **_to_gemini_schema(형제, defs)}
+
+    converted: dict[str, Any] = {}
+    nullable = False
+    for key, value in node.items():
+        if key in _GEMINI_SCHEMA_DROP or key == "$defs":
+            continue
+        if key == "anyOf":
+            갈래 = [b for b in value if not (isinstance(b, dict) and b.get("type") == "null")]
+            nullable = len(갈래) != len(value)
+            if len(갈래) == 1:
+                converted.update(_to_gemini_schema(갈래[0], defs))
+            elif 갈래:
+                converted["anyOf"] = [_to_gemini_schema(b, defs) for b in 갈래]
+            continue
+        converted[key] = _to_gemini_schema(value, defs)
+    if nullable:
+        converted["nullable"] = True
+    return converted
+
+
+def _gemini_text(document: dict[str, Any]) -> str:
+    """응답에서 **첫 텍스트 조각**을 집는다.
+
+    🔴 **``parts[0]``이 아니다.** 사고(``thought``) 조각을 앞에 붙이는 모델이 있어, 첫
+    조각만 읽으면 ``text``가 없어 터진다 — 그러면 **호출은 성공했는데 FALLBACK으로**
+    떨어지고, 화면에는 "모델이 못 알아들었다"로 보인다. 마스터가 실측에서 12번 중 11번
+    이렇게 죽었다고 적어 두었고, ``AnthropicProvider``도 같은 주석을 들고 있다.
+    """
+    candidates = document.get("candidates") or []
+    parts = ((candidates[0] if candidates else {}).get("content") or {}).get("parts") or []
+    for part in parts:
+        text = part.get("text") if isinstance(part, dict) else None
+        if isinstance(text, str) and text.strip():
+            return text
+    raise TypeError("Gemini response contained no text part")
+
+
+class GeminiProvider:
+    """Gemini REST 호출. 표준 라이브러리만 쓴다 (``OllamaProvider``와 같은 규율).
+
+    **키를 어디서 읽나** — ``PURCHASE_GEMINI_API_KEY`` → ``GEMINI_API_KEY``.
+    팀 관례 그대로다 (마스터 ``MASTER_`` · 판매 ``SALES_`` · 재무 ``FINANCE_``가 모두
+    전용 키 → 공용 키 순서다).
+
+    🔴 **공용 키로 떨어지면 팀 공용 한도를 같이 쓴다.** 전용 키를 안 넣고 provider만
+    ``gemini``로 바꾸면 호출이 **조용히 성공하면서** 마스터·재무·판매가 쓰는 같은 한도를
+    깎는다. 그래서 전용 키를 넣는 것이 기본이고, 공용 폴백은 "브랜치만 받아도 돈다"를
+    위한 것이다 — ``.env.example``에 같은 말을 적어 두었다.
+
+    ⚠️ **키가 둘 다 없어도 여기서 그래프가 죽지 않는다.** 예외는 ``generate()`` 안에서
+    나고, ``run_with_fallback``이 받아 **규칙 기본안**으로 보낸다. 조립(``build_provider``)
+    은 키를 안 본다 — 미지원 provider에서 ``build_graph()``가 죽던 자리와 같은 결이다.
+
+    🔴 **``LLM_PROVIDER``만 바꾸면 모델 이름이 안 따라온다.** ``_DEFAULT_MODELS``의
+    provider별 기본값은 ``LLM_MODEL``이 **비어 있을 때만** 쓰인다 (``_env``가 환경값을
+    먼저 본다). ``.env``에 ``LLM_MODEL=gemma3:4b``가 있는 채로 provider만 ``gemini``로
+    바꾸면 **Gemini에게 ollama 모델 이름을 보내고 404**를 받는다.
+
+    ⚠️ 그 404는 ``HTTPError``라 **감싸지 않고 그대로 올린다**(아래) — 그래야 "모델
+    이름이 틀렸다"가 "키가 틀렸다"나 "서버가 죽었다"와 구분된다. 실제로 이 저장소에서
+    한 번 밟았고, ``.env.example``에 같은 경고를 적어 두었다.
+    """
+
+    def __init__(self, settings: LLMSettings, spec: RoleSpec = MIX_ROLE):
+        self.settings = settings
+        self.spec = spec
+
+    def generate(
+        self,
+        context: PromptContext,
+        *,
+        retry_guidance: list[str] | None = None,
+    ) -> str:
+        import urllib.error
+        import urllib.request
+
+        api_key = os.getenv(f"{ENV_PREFIX}GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            # 🔴 **어느 이름을 봤는지 적는다.** "키가 없다"만 적으면 받는 사람이 전용
+            #   키와 공용 키 중 무엇을 넣어야 하는지 모른다. 값은 싣지 않는다.
+            raise RuntimeError(
+                f"Neither {ENV_PREFIX}GEMINI_API_KEY nor GEMINI_API_KEY is set"
+            )
+        _require_model(self.settings)
+        payload = {
+            "system_instruction": {"parts": [{"text": self.spec.system_prompt}]},
+            "contents": [
+                {"role": "user", "parts": [{"text": _user_payload(context, retry_guidance)}]}
+            ],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": _to_gemini_schema(self.spec.response_schema),
+                "maxOutputTokens": self.settings.max_output_tokens,
+            },
+        }
+        base_url = (
+            os.getenv(f"{ENV_PREFIX}GEMINI_BASE_URL")
+            or os.getenv("GEMINI_BASE_URL")
+            or _GEMINI_BASE_URL
+        ).rstrip("/")
+        request = urllib.request.Request(
+            f"{base_url}/models/{self.settings.model}:generateContent",
+            data=json.dumps(payload).encode("utf-8"),
+            # 키는 **헤더로만** 간다 — URL에 실으면 예외 메시지·로그에 그대로 남는다.
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.settings.timeout_seconds
+            ) as response:
+                document = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            # 🔴 **감싸지 않는다.** ``HTTPError``는 ``URLError``의 하위라 아래 except가
+            #   같이 먹는데, 감싸면 **상태 코드가 사라진다** — 429(한도 초과)와 서버가
+            #   죽은 것이 로그에서 같아 보인다. 마스터·물류가 같은 이유로 그대로 흘린다.
+            #   어느 쪽이든 ``run_with_fallback``이 받으므로 동작은 같고, **원인을 꺼낼
+            #   수 있게만** 두는 것이다.
+            raise
+        except (TimeoutError, urllib.error.URLError, json.JSONDecodeError) as error:
+            # 키를 메시지에 싣지 않는다. urllib 예외는 URL을 담는데 키는 헤더라 안 끼지만,
+            # 새 메시지를 만들 때도 넣지 않는다.
+            raise RuntimeError("Purchase Gemini request failed") from error
+        return _gemini_text(document)
+
+
 class UnavailableProvider:
     """미지원 ``LLM_PROVIDER`` 값. 조용히 무시하지 않고 **터뜨려 fallback으로 보낸다**.
 
@@ -338,6 +532,7 @@ PROVIDERS: dict[str, type] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "ollama": OllamaProvider,
+    "gemini": GeminiProvider,
 }
 
 
@@ -575,6 +770,10 @@ class MixSelectionService:
 _DEFAULT_MODELS = {
     "anthropic": "claude-haiku-4-5-20251001",
     "ollama": "gemma3:4b",  # 팀 4벌의 기본값과 같다
+    #: 🔴 **팀이 고른 것과 같은 모델을 쓴다** — 마스터·재무·물류가 전부 이것을 pin 한다.
+    #: 파트마다 다른 모델을 쓰면 "모델이 달라서 그런가"가 모든 조사에 끼어든다.
+    #: `latest`·`preview` 같은 자동 갱신 별칭은 출력 성향이 예고 없이 바뀌므로 안 쓴다.
+    "gemini": "gemini-3.5-flash-lite",
 }
 
 
