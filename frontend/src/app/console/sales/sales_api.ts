@@ -210,6 +210,8 @@ export type WithItemNames<T> = Omit<T, "recent_sales" | "item_summary"> & {
 
 export interface SalesProposal {
   request_id: string;
+  /** 화면이 본 마스터 판매 실행. UI에 보이지 않으며 승인 때만 쓴다. */
+  history_run_id: string | null;
   scenario_id: string;
   scenario_type: string | null;
   objective: string | null;
@@ -257,4 +259,31 @@ export interface SalesProposalsResponse {
   /** 팔 물량이 0이라 목록에서 뺀 안의 수. 지운 것이 아니라 센 것이다. */
   hidden_zero_quantity: number;
   rows: SalesProposal[];
+}
+
+export interface SalesDecisionResponse {
+  revalidation_outcome: "PASSED" | "CONDITIONAL" | "FAILED" | "ERROR" | null;
+  sale: { status: "CONFIRMED" | "BLOCKED"; reason: string | null } | null;
+}
+
+/**
+ * 판매 전용 write endpoint를 만들지 않는다. 사용자의 결정은 기존 Master 결정 계약에
+ * 기록되고, 서버가 선택한 한 안만 재검증한 뒤 판매 확정을 판단한다.
+ */
+export function approveSalesScenario(input: {
+  requestId: string;
+  scenarioId: string;
+  historyRunId: string;
+  decidedBy: string;
+}): Promise<SalesDecisionResponse> {
+  return send<SalesDecisionResponse>(`${API_BASE}/master/runs/${encodeURIComponent(input.requestId)}/decision`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      decision: "APPROVE",
+      scenario_label: input.scenarioId,
+      decided_by: input.decidedBy,
+      history_run_id: input.historyRunId,
+    }),
+  });
 }

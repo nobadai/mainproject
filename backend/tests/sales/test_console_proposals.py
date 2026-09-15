@@ -43,6 +43,7 @@ def _scenario(**over) -> dict:
 def _row(**over) -> dict:
     return {
         "request_id": REQUEST,
+        "history_run_id": "0a1ea58e-7d77-4c2d-8f90-86776ac6c20f",
         "payload": {"recommended_scenario_id": None, "scenarios": []},
         "scenario": _scenario(),
         "finance_verdict": "PASS",
@@ -74,6 +75,7 @@ def test_a_stored_proposal_comes_back_as_stored(monkeypatch):
     assert result.request_count == 1
     row = result.rows[0]
     assert row.item == "무"
+    assert row.history_run_id == "0a1ea58e-7d77-4c2d-8f90-86776ac6c20f"
     assert row.scenario_type == "CONSERVATIVE"
     assert row.quantity_kg == Decimal("463.0")
     assert row.unit_price_krw == Decimal("1033.0")
@@ -343,7 +345,7 @@ def test_the_run_axis_and_the_day_are_both_carried(monkeypatch):
     get_console_sales_proposals(sim_run_id=RUN, as_of=AS_OF)
 
     query, params = reader.calls[0]
-    assert params == [RUN, AS_OF, RUN]
+    assert params == [RUN, AS_OF, RUN, RUN]
     assert "context'->>'sim_run_id' = %s" in query
     assert "run.as_of = %s" in query
 
@@ -386,9 +388,10 @@ def test_a_finance_verdict_from_another_run_never_reaches_this_proposal(monkeypa
         def __call__(self, query, params=None):
             params = list(params or [])
             self.calls.append((str(query), params))
-            #  쿼리가 축을 두 번 실어야 여기서 고를 수 있다 — 하나는 판매, 하나는 재무다.
-            assert len(params) == 3, params
-            sales_axis, _as_of, finance_axis = params
+            #  쿼리가 축을 세 번 실어야 여기서 고를 수 있다 — 판매, 화면 실행, 재무다.
+            assert len(params) == 4, params
+            sales_axis, _as_of, history_axis, finance_axis = params
+            assert sales_axis == history_axis
             assert sales_axis == finance_axis
             verdict = self.verdicts.get((finance_axis, shared_request, shared_scenario))
             return [
@@ -438,7 +441,9 @@ def test_the_finance_verdict_lookup_carries_the_run_axis(monkeypatch):
     #  🔴 키 문자열을 파싱하지 않는다 — 축은 마스터가 적어 둔 연결에서 온다.
     assert "master_agent_runs" in query
     assert "axis.sim_run_id = %s" in query
-    assert params == [RUN, AS_OF, RUN]
+    assert "axis.cycle = 'SALES'" in query
+    assert "axis.run_seq DESC" in query
+    assert params == [RUN, AS_OF, RUN, RUN]
 
 
 def test_the_newest_finance_reply_wins(monkeypatch):
