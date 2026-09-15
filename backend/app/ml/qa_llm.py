@@ -83,7 +83,7 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 #:
 #: 왜 두 벌을 두나: 「영어 프롬프트가 낫다」 는 말은 흔한데 우리는 한 번도 안 쟀다.
 #: 재려면 **지시문 언어만** 다르고 나머지가 같은 짝이 있어야 한다. 모델·온도·
-#: 응답 스키마·질문은 그대로 둔다. 채점은 `ops/qa_prompt_bench.py` 가 한다.
+#: 응답 스키마·질문은 그대로 둔다. 채점은 `app/ml/ops/qa_prompt_bench.py` 가 한다.
 SYSTEM_PROMPT_EN = """You are the interpretation layer of a crop price forecast Q&A system.
 From the user's question, pick out **only what was asked**. Do not estimate a price,
 and do not write any explanatory sentence.

@@ -32,7 +32,10 @@
 **진짜 호출이 나간다.** 12문제 x 2언어 x rounds 회 (기본 2회차 = 48회),
 간격 5초면 약 4분 걸린다.
 
-    python ops/qa_prompt_bench.py --rounds 2
+    python app/ml/ops/qa_prompt_bench.py --rounds 2
+
+★ **자리를 옮겼다** (2026-09-15). 처음엔 `backend/ops/` 에 뒀는데 그건 우리 폴더가
+  아니다 — 우리는 `backend/app/ml/` 안에서만 일한다.
 """
 
 from __future__ import annotations
@@ -44,7 +47,8 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+#   app/ml/ops/ 에서 backend/ 까지 세 칸 올라간다 (2026-09-15 · ops/ 에서 옮김).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from app.ml import qa_llm
 
