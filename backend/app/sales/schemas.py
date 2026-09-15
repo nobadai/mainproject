@@ -470,6 +470,13 @@ class SalesFinanceSummarySubset(BaseModel):
     depends_on_projected_inflow: bool | None = None
     overdue_ar_krw: Decimal | None = None
     required_collection_before_sale_krw: Decimal | None = None
+    #: 🔴 아래는 **재무가 센 여신 사실**이다. 판매는 옮겨 담기만 하고 다시 세지 않는다.
+    current_partner_ar_krw: Decimal | None = None
+    projected_partner_ar_krw: Decimal | None = None
+    credit_limit_krw: Decimal | None = None
+    available_credit_krw: Decimal | None = None
+    credit_utilization_rate: Decimal | None = None
+    expected_credit_recovery_date: date | None = None
 
 
 class SalesFinanceReplySubset(BaseModel):
@@ -633,6 +640,16 @@ class SalesScenario(BaseModel):
     contribution_margin_krw: Decimal | None = None
     contribution_margin_rate: Decimal | None = None
     required_collection_before_sale_krw: Decimal | None = None
+    #: 🔴 **여신 칸은 전부 재무 회신에서 옮긴다.** 판매가 미수금이나 가용 여신을 세면
+    #:    같은 사실의 주인이 둘이 되고, 두 화면이 다른 숫자를 말하는 날이 온다.
+    #:    회신이 없으면 전부 `None` 이다 — 0 은 «미수금 0원» 이라는 다른 사실이다.
+    current_partner_ar_krw: Decimal | None = None
+    projected_partner_ar_krw: Decimal | None = None
+    credit_limit_krw: Decimal | None = None
+    available_credit_krw: Decimal | None = None
+    credit_utilization_rate: Decimal | None = None
+    #: 계약상 결제 예정일 기준의 **예상**이다. 입금 보장일이 아니고 판정에 쓰지 않는다.
+    expected_credit_recovery_date: date | None = None
     scenario_projected_cash_min: Decimal | None = None
     depends_on_projected_inflow: bool | None = None
     sell_priority: str | None = None
