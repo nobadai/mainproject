@@ -8,6 +8,7 @@
  */
 
 const CONSOLE_BASE = process.env.NEXT_PUBLIC_CONSOLE_BASE ?? "/api/console";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 const TIMEOUT_MS = 20_000;
 
 export type Money = string | number;
@@ -66,5 +67,19 @@ export async function fetchCredit(simRun: string, asOf: string): Promise<CreditR
     return (await res.json()) as CreditResponse;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function registerCreditLimit(input: {
+  partner_id: string; credit_limit_krw: string; effective_from: string;
+  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED"; recorded_by: string; note?: string;
+}): Promise<void> {
+  const res = await fetch(`${API_BASE}/finance/credit-limits`, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail ?? "여신한도를 저장하지 못했습니다.");
   }
 }

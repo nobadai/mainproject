@@ -45,6 +45,7 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
 import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
+import { CreditLimitForm } from "./CreditLimitForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
 import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
@@ -252,6 +253,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
 
       {/* ★ 판매 전에 묻는 질문 — «얼마까지 더 팔 수 있나» 에 답하는 자리다. */}
       <CreditPanel simRun={simRun} asOf={asOf} />
+      <CreditLimitForm asOf={asOf} />
 
       <AgentCard state={latest} />
     </>
