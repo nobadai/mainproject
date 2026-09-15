@@ -260,6 +260,78 @@ export function statusLabel(status: unknown): string {
   return (typeof status === "string" && STATUS_LABEL[status]) || "판정 없음";
 }
 
+// ─── 실행 이력의 단계 ────────────────────────────────────────────────────
+
+/** 부서가 그 단계에서 한 일. `부서:단계` 가 먼저, 없으면 `단계` 로 찾는다. */
+const STEP_LABEL: Record<string, string> = {
+  "finance:PRE_PURCHASE": "매입 전 쓸 수 있는 돈 확인",
+  "inventory:PRE_PURCHASE": "창고·입고 여유 확인",
+  PRE_PURCHASE: "매입 전 여유 확인",
+  GENERATE_SCENARIOS: "매입안 만들기",
+  SCENARIO_VALIDATION: "매입안 검토",
+  GENERATE_SALES_PROPOSAL: "판매안 만들기",
+  SALES_VALIDATION: "판매안 검토",
+  PRE_SALES: "팔 수 있는 재고 확인",
+  SUPPLY_CAPACITY_QUERY: "공급 가능량 확인",
+  STATUS_QUERY: "현황 조회",
+};
+
+export function stepLabel(agent: unknown, mode: unknown): string {
+  const m = typeof mode === "string" ? mode : "";
+  const a = typeof agent === "string" ? agent : "";
+  return STEP_LABEL[`${a}:${m}`] ?? STEP_LABEL[m] ?? "확인";
+}
+
+/** 단계 결과. 부서가 답하지 못했거나 건너뛴 단계는 「확인 못 함」. */
+export function stepResultLabel(runtimeStatus: unknown, businessStatus: unknown): string {
+  if (runtimeStatus !== "READY") return "확인 못 함";
+  return (typeof businessStatus === "string" && STATUS_LABEL[businessStatus]) || "확인 못 함";
+}
+
+/** 한국 시간으로 「2026년 1월 13일 오후 3:05」. 읽을 수 없으면 `null`. */
+export function formatKoreanDateTime(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** `2026-01-13` → 「2026년 1월 13일」. 모양이 다르면 받은 그대로. */
+export function formatKoreanDate(ymd: string | null | undefined): string {
+  const m = (ymd ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return ymd ?? "";
+  return `${m[1]}년 ${Number(m[2])}월 ${Number(m[3])}일`;
+}
+
+/**
+ * 요청이 실패했을 때 사용자에게 보일 문장.
+ *
+ * 서버 문장이 한국어로만 된 4xx 답이면 그대로 쓴다 (예: 「이미 승인됐습니다」).
+ * 코드 · 영어 키 · 번호가 섞인 문장과 연결 실패 · 5xx 는 사람 말로 바꾼다.
+ */
+export function userErrorText(status: number | null, message: string, fallback: string): string {
+  if (status === 0) return "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
+  const readable =
+    /[가-힣]/.test(message) &&
+    !/[A-Za-z]+_[A-Za-z_]+|[A-Z]{3,}|REQ-|#\d+|\/|@|[a-z]+\.[a-z]+/.test(message);
+  if (status != null && status >= 400 && status < 500 && readable) return message;
+  return fallback;
+}
+
+/** 매입 판단 번호 `REQ-20260113-0001` → 「2026년 1월 13일 1번째 매입 판단」. 모양이 다르면 `null`. */
+export function requestLabel(requestId: string): string | null {
+  const m = requestId.match(/^REQ-(\d{4})(\d{2})(\d{2})-(\d+)$/);
+  if (!m) return null;
+  return `${m[1]}년 ${Number(m[2])}월 ${Number(m[3])}일 ${Number(m[4])}번째 매입 판단`;
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 

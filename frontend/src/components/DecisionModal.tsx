@@ -1,5 +1,6 @@
 "use client";
 
+import { requestLabel } from "@/lib/procurementLabels";
 import type { Scenario } from "@/lib/types";
 
 /**
@@ -49,8 +50,12 @@ export function DecisionModal({
         </p>
 
         <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3.5 gap-y-1 text-[13.5px]">
-          <dt className="text-muted">대상 실행</dt>
-          <dd className="tabular m-0 font-mono">{targetRequestId}</dd>
+          {requestLabel(targetRequestId) && (
+            <>
+              <dt className="text-muted">매입 판단</dt>
+              <dd className="m-0">{requestLabel(targetRequestId)}</dd>
+            </>
+          )}
           <dt className="text-muted">수량</dt>
           <dd className="tabular m-0 font-mono">
             {scenario.total_qty_kg == null ? "—" : `${won(scenario.total_qty_kg)} kg`}
@@ -60,7 +65,7 @@ export function DecisionModal({
             {scenario.total_amount_krw == null ? "—" : `${won(scenario.total_amount_krw)} 원`}
           </dd>
           <dt className="text-muted">승인자</dt>
-          <dd className="m-0 font-mono">{decidedBy}</dd>
+          <dd className="m-0">{decidedBy}</dd>
         </dl>
 
         <div className="mt-3.5 rounded-lg border border-warn/25 bg-warn-wash p-3">

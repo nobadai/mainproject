@@ -14,6 +14,7 @@ import { SalesConversation } from "@/components/console/SalesConversation";
 import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
 import { CAN, type Session } from "@/lib/session";
 import {
   isProcurement,
@@ -59,7 +60,7 @@ type Turn =
     }
   | { kind: "run"; run: ProcurementRunResponse }
   //   판매가 답한 조회. 요약 → 판매안 확인 → 카드 → 선택 → 최종 확인 → 확정까지 이 턴이 끈다.
-  //   마스터가 만든 원문 답 · 실행 축 · 분류 흔적은 지우지 않고 기술 상세로 접는다.
+  //   마스터가 만든 원문 답 · 실행 축 · 분류 흔적은 실제 서비스 화면에 싣지 않는다 (2026-09-15 결정).
   | {
       kind: "sales";
       asOf: string;
@@ -160,11 +161,14 @@ export function MasterConsole({ session }: { session: Session }) {
   }
 
   function fail(error: unknown) {
-    const message =
-      error instanceof ApiError
-        ? `[${error.status || "연결 실패"}] ${error.message}`
-        : String(error);
-    push({ kind: "error", text: message });
+    push({
+      kind: "error",
+      text: userErrorText(
+        error instanceof ApiError ? error.status : null,
+        error instanceof Error ? error.message : "",
+        "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+      ),
+    });
   }
 
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
@@ -294,11 +298,13 @@ export function MasterConsole({ session }: { session: Session }) {
       if (!isProcurement(res) && res.decision)
         push({ kind: "approved", scenario, decision: res.decision });
     } catch (error) {
-      // 🔴 서버 문장을 그대로 보인다 — "이미 승인됐다 (회차 1)" 같은 말이 답이다
+      // 한국어로만 된 서버 문장(「이미 승인됐다」 같은 말)은 그대로, 코드가 섞이면 사람 말로
       setModalError(
-        error instanceof ApiError
-          ? `[${error.status}] ${error.message}`
-          : String(error),
+        userErrorText(
+          error instanceof ApiError ? error.status : null,
+          error instanceof Error ? error.message : "",
+          "승인을 기록하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        ),
       );
     } finally {
       setModalBusy(false);
@@ -355,7 +361,7 @@ export function MasterConsole({ session }: { session: Session }) {
             </button>
           ))}
         </span>
-        <span className="ml-auto font-mono text-[11px] text-faint">기준일 {asOf}</span>
+        <span className="ml-auto text-[11px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
       </header>
 
         {isBurnIn ? (
@@ -382,12 +388,6 @@ export function MasterConsole({ session }: { session: Session }) {
                   {turn.kind === "sales" && (
                     <>
                       <SalesConversation asOf={turn.asOf} canApprove={can.approve} />
-                      <details className="mt-3 text-[11px] text-muted">
-                        <summary className="cursor-pointer">기술 상세</summary>
-                        <div className="mt-1.5 whitespace-pre-wrap">{turn.detail.text}</div>
-                        {turn.detail.note && <p className="m-0 mt-1 font-mono">{turn.detail.note}</p>}
-                        {turn.detail.trace && <LlmTrace trace={turn.detail.trace} />}
-                      </details>
                     </>
                   )}
                   {turn.kind === "run" && (
@@ -502,9 +502,6 @@ function TurnView({
         <div className="whitespace-pre-wrap text-sm leading-relaxed">
           {turn.text}
         </div>
-        {turn.note && (
-          <p className="m-0 mt-1.5 font-mono text-[11px] text-muted">{turn.note}</p>
-        )}
         {turn.trace && <LlmTrace trace={turn.trace} />}
       </div>
     );
