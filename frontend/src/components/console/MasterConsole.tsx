@@ -414,8 +414,7 @@ export function MasterConsole({ session }: { session: Session }) {
               </form>
               <p className="m-0 mt-2 text-[11.5px] text-faint">
                 매입 실행은{" "}
-                <b className="text-muted">확인을 한 번 더 받습니다</b> — 잘못
-                알아들으면 호출 예산 12회와 매입 LLM 을 태웁니다. 조회는 바로
+                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회는 바로
                 돕니다.
               </p>
             </div>
