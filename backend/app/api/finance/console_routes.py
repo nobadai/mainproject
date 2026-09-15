@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.finance.aging import AgingBucket
+from app.finance.console_credit import ConsoleCreditResponse, get_console_credit
 from app.finance.console_expenses import ConsoleExpensesResponse, get_console_expenses
 from app.finance.console_payables import ConsolePayablesResponse, get_console_payables
 from app.finance.console_receivables import ConsoleReceivablesResponse, get_console_receivables
@@ -49,6 +50,15 @@ def cashflow(
     days: Annotated[int, Query(ge=1, le=MAX_CASHFLOW_DAYS)] = 30,
 ) -> FinanceCashflowResponse:
     return get_finance_cashflow(sim_run_id=sim_run_id, as_of=as_of, days=days)
+
+
+@router.get("/credit", response_model=ConsoleCreditResponse)
+def credit(
+    sim_run_id: Annotated[str, Query(min_length=1)],
+    as_of: date,
+) -> ConsoleCreditResponse:
+    """거래처 여신 현황. 한도·미수·가용여신·수금 예정을 **기준일 시점으로** 읽는다."""
+    return get_console_credit(sim_run_id=sim_run_id, as_of=as_of)
 
 
 @router.get("/receivables", response_model=ConsoleReceivablesResponse)
