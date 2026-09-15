@@ -32,8 +32,8 @@ from typing import get_args
 
 import pytest
 
-from app.logistics.schemas import ConsoleAllocation
 from app.logistics.outbound import AllocationBasis, HumanAllocationBasis
+from app.logistics.schemas import ConsoleAllocation
 
 _HUMAN = ("FEFO_TOOL_CONFIRMED", "HUMAN_OVERRIDE")
 _AUTO = "FEFO_AUTO_SELECTED"
