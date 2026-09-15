@@ -234,9 +234,16 @@ export interface SalesProposal {
   finance_reason_codes: string[];
   contribution_margin_krw: Money | null;
   contribution_margin_rate: Money | null;
+  /** 🔴 여신 칸은 재무가 센 값이다. 화면이 한도에서 미수를 빼지 않는다. */
+  current_partner_ar_krw: Money | null;
   available_credit_krw: Money | null;
   projected_partner_ar_krw: Money | null;
   credit_limit_krw: Money | null;
+  /** 판매 전에 먼저 받아야 하는 미수금. `0` 은 필요 없음, `null` 은 모름이다. */
+  required_collection_before_sale_krw: Money | null;
+  credit_utilization_rate: Money | null;
+  /** 계약상 결제 예정일 기준의 예상 회복일. 입금 보장일이 아니다. */
+  expected_credit_recovery_date: string | null;
   /** 판매가 «아직 못 받았다» 고 적어 둔 검증. 판정이 없는 이유가 여기 있다. */
   missing_capabilities: string[];
   evidence_refs: string[];
