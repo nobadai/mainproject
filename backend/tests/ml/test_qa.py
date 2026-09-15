@@ -116,6 +116,10 @@ def test_당일을_물으면_원본_창고에서_읽고_출처를_밝힌다(도�
     assert out.meta.status == "OK"
     assert out.meta.source == "prediction_log"
     assert "내부 기록" in out.markdown
+    #   ★ 표 이름·모델 이름 같은 코드 낱말은 **문장에 안 나간다** (마스터 요청).
+    #     기계가 읽을 값은 meta 로 간다 — 화면은 사람 말만 본다.
+    for code_word in ("prediction_log", "ml_price_forecasts", "ops_auc"):
+        assert code_word not in out.markdown
 
 
 def test_쓰지_말라는_조합은_경고가_먼저_나간다(도구를_갈아_끼운다):
@@ -134,7 +138,9 @@ def test_평균_오차는_화면과_같은_값을_쓴다(도구를_갈아_끼운
     도구를_갈아_끼운다(rows=[_row(1)], acc=qa_tools.SEALED_ACCURACY[("AUC", "배추")])
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
     assert "19.7%" in out.markdown          # 화면 _ACCURACY 와 같은 값
-    assert "봉인 개봉" in out.markdown       # 조건 없는 수치는 안 적는다
+    #   조건 없는 수치는 안 적는다. 다만 **사람 말로** 적는다 — 화면에 나가는 문장이라
+    #   «봉인 개봉 · 홀드아웃» 같은 우리끼리 쓰는 말을 쓰지 않는다 (마스터 요청).
+    assert "2026-09-01" in out.markdown and "486일치" in out.markdown
 
 
 def test_상수표는_아홉_칸이_다_있다():

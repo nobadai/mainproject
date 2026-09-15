@@ -251,7 +251,7 @@ def _answer_markdown(state: QaState) -> QaState:
     body: list[str] = []
     if today:
         body.append(
-            _line(f"오늘 {today['target_dt']}", today, unit, "당일 값은 우리 내부 기록에서")
+            _line(f"오늘 {today['target_dt']}", today, unit, "당일 값은 내부 기록에서")
         )
     for row in rows:
         body.append(_line(f"{row['target_dt']} (D+{row['offset_days']})", row, unit))
@@ -298,10 +298,10 @@ def _answer_markdown(state: QaState) -> QaState:
             f" · {spec['spec_desc']}"
         )
     if rows:
-        tail.append(
-            f"\n*기준일 {base_dt} · 모델 {rows[0]['model_version']}"
-            f" · 예측 시각 {_kst(rows[0]['generated_at'])}*"
-        )
+        #   ★ **코드 이름을 문장에 넣지 않는다** (마스터 요청 · 2026-09-15).
+        #     화면이 «실제 서비스» 전제로 정리돼 영문 키가 보이면 안 된다.
+        #     `ops_auc` 같은 이름은 `meta.model_version` 으로만 나간다 — 기계가 읽는 칸이다.
+        tail.append(f"\n*{_kst(rows[0]['generated_at'])} 에 계산한 값입니다*")
 
     status = "OK"
     if state.get("out_of_range") or missing:
@@ -353,6 +353,19 @@ def build_graph():
 
 
 def answer(request: QaRequest) -> QaAnswer:
-    """바깥에 드러내는 것은 이 함수 하나다. 그래프는 안쪽 사정이다."""
+    """바깥에 드러내는 것은 이 함수 하나다. 그래프는 안쪽 사정이다.
+
+    ★ **읽은 행을 같이 돌려준다** (2026-09-15). 마스터 어댑터가 회신에 붙일
+      `Evidence` 를 그 행에서 만든다 — 답 문장에서 숫자를 다시 뜯어내면
+      **같은 사실에 두 경로가 생긴다.** 값은 표에서 온 것 하나여야 한다.
+    """
     final = build_graph().invoke({"request": request})
-    return QaAnswer(markdown=final["markdown"], meta=final["meta"])
+    rows = list(final.get("rows") or [])
+    today = final.get("today")
+    if today:
+        rows = [*rows, today]
+    return QaAnswer(
+        markdown=final["markdown"],
+        meta=final["meta"],
+        rows_for_evidence=rows,
+    )
