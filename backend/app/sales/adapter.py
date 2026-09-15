@@ -9,13 +9,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
-from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
+from app.sales.console_proposals import ConsoleSalesProposalsResponse, get_console_sales_proposals
 from app.sales.llm.runtime import load_settings
 from app.sales.partner_profile import get_partner_profile
 from app.sales.proposal import run_proposal
@@ -53,8 +53,7 @@ def _generate(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             run_id,
             payload={"validation_errors": ["scenarios"]},
             reason=(
-                "판매안을 생성했지만 표시할 수 있는 안이 없습니다. "
-                "실행 상태를 다시 확인해 주세요."
+                "판매안을 생성했지만 표시할 수 있는 안이 없습니다. 실행 상태를 다시 확인해 주세요."
             ),
         )
 
@@ -216,6 +215,7 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
     scoped = [run for run in runs if _run_axis(run) == request.context.sim_run_id][
         :_STATUS_RUN_LIMIT
     ]
+    proposals = _today_proposals(request)
     reply = AgentReply(
         request_id=request.context.request_id,
         as_of=request.context.as_of,
@@ -226,11 +226,133 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         business_status="ok",
         payload={
             "as_of": request.context.as_of.isoformat(),
-            "recent_runs": [_run_summary(run) for run in scoped],
+            **status_facts(proposals, has_history=bool(scoped)),
         },
         reasoning=_status_reasoning(scoped),
     )
-    return reply, _metadata(request, reply.run_id, tools=("list_sales_runs",))
+    return reply, _metadata(
+        request, reply.run_id, tools=("list_sales_runs", "get_console_sales_proposals")
+    )
+
+
+def _today_proposals(request: AgentRequest) -> ConsoleSalesProposalsResponse | None:
+    """그날의 판매안과 재무 판정. **못 읽으면 `None` 이다** — 빈 목록으로 바꾸지 않는다."""
+    sim_run_id = request.context.sim_run_id
+    if not sim_run_id:
+        return None
+    try:
+        return get_console_sales_proposals(sim_run_id=sim_run_id, as_of=request.context.as_of)
+    except Exception:  # noqa: BLE001 - 못 읽은 것을 «판매안 없음» 으로 말하지 않는다.
+        logger.warning("sales status could not read today's proposals: %s", sim_run_id)
+        return None
+
+
+#: 안의 성격을 사람 말로. 모르는 값은 원문 대신 «판매안» 이다.
+_SCENARIO_WORDS = {"CONSERVATIVE": "안정 우선", "BALANCED": "균형", "AGGRESSIVE": "판매 기회 우선"}
+
+
+def status_facts(
+    proposals: ConsoleSalesProposalsResponse | None, *, has_history: bool
+) -> dict[str, str]:
+    """판매 진행 상황을 **사람이 읽는 사실**로 만든다.
+
+    🔴 **키가 곧 화면 글자다.** 마스터는 부서가 낸 키를 이름 그대로 사실 줄로 편다
+       (`master/answer.py` · `_LABEL.get(key, key)`). 그래서 `request_id` ·
+       `SCENARIOS_GENERATED` · `FINANCIAL_VALIDATION` 같은 기계용 키와 값을 여기 실으면
+       그대로 사용자 말풍선에 나간다 — 실측으로 그렇게 나왔다.
+
+    🔴 **숫자를 지어내지 않는다.** 세는 것은 금일 판매안 read model 이 돌려준 행뿐이고,
+       재무 검토 상태는 판매 1차 회신의 «못 받은 검증» 이 아니라 **재무가 남긴 판정**이다.
+       (1차 회신은 되먹임 전이라 늘 «재무 검토 미완» 으로 남아, 이미 판정이 난 안까지
+       검토 전으로 읽혔다.)
+
+    ★ 비교 · 선택 · 확정은 대화의 판매안 카드와 판매 화면이 한다. 여기서는 요약만 한다.
+    """
+    if proposals is None:
+        return {"오늘 판매안": "판매안 정보를 읽지 못했습니다. 판매 화면에서 다시 확인해 주세요."}
+    rows = proposals.rows
+    if not rows:
+        if proposals.request_count == 0:
+            text = (
+                "이 날짜에는 판매가 돌지 않았습니다."
+                if not has_history
+                else "이 날짜에 만든 판매안이 없습니다."
+            )
+        elif proposals.hidden_zero_quantity > 0:
+            text = "팔 수 있는 물량이 없어 판매안이 서지 않았습니다."
+        else:
+            text = "판매가 돌았지만 판매안을 만들지 못했습니다."
+        return {"오늘 판매안": text}
+
+    per_item: dict[str, int] = {}
+    for row in rows:
+        name = row.item or "품목 미상"
+        per_item[name] = per_item.get(name, 0) + 1
+    facts: dict[str, str] = {
+        "오늘 검토 중인 판매": " · ".join(
+            f"{name} 판매안 {count}개" for name, count in per_item.items()
+        ),
+    }
+
+    facts["재무 검토"] = review_sentence([row.finance_verdict for row in rows])
+
+    need_collection = [
+        row
+        for row in rows
+        if row.required_collection_before_sale_krw is not None
+        and row.required_collection_before_sale_krw > 0
+    ]
+    if need_collection:
+        facts["선회수 필요"] = (
+            f"{len(need_collection)}개 안은 기존 미수금을 먼저 회수해야 현재 여신한도 안에서 "
+            "판매할 수 있습니다"
+        )
+
+    recommended = [row for row in rows if row.recommended]
+    if recommended:
+        facts["추천 판매안"] = " · ".join(
+            f"{row.item or '품목 미상'} {_SCENARIO_WORDS.get(row.scenario_type or '', '판매안')}"
+            for row in recommended
+        )
+
+    confirmed = [row for row in rows if row.sale_status is not None]
+    facts["확정된 판매"] = (
+        " · ".join(
+            f"{row.item or '품목 미상'} {_SCENARIO_WORDS.get(row.scenario_type or '', '판매안')}"
+            for row in confirmed
+        )
+        if confirmed
+        else "아직 없습니다"
+    )
+    return facts
+
+
+def review_sentence(verdicts: list[str | None]) -> str:
+    """재무 검토 상태를 **한 문장으로.** 판정 코드를 세서 고르기만 한다.
+
+    ```text
+    모두 진행 어려움            현재 조건으로 바로 진행하기 어려운 판매안이 N개 있습니다
+    모두 진행 가능              현재 조건에서 진행 가능한 판매안이 준비되어 있습니다
+    확인 필요 · 검토 전이 있다   재무 검토가 필요한 판매안이 있습니다 (+ 진행 가능 N개)
+    진행 가능과 어려움만 섞였다  진행 가능한 판매안 N개와 … 어려운 판매안 M개가 있습니다
+    ```
+
+    🔴 **모르는 판정은 «확인 필요» 쪽으로 센다** — 통과로 뭉치지 않는다.
+    """
+    passed = verdicts.count("PASS")
+    failed = verdicts.count("FAIL")
+    pending = len(verdicts) - passed - failed
+    if verdicts and failed == len(verdicts):
+        return f"현재 조건으로 바로 진행하기 어려운 판매안이 {failed}개 있습니다"
+    if verdicts and passed == len(verdicts):
+        return "현재 조건에서 진행 가능한 판매안이 준비되어 있습니다"
+    if pending:
+        extra = f" (진행 가능한 판매안 {passed}개)" if passed else ""
+        return f"재무 검토가 필요한 판매안이 있습니다{extra}"
+    return (
+        f"진행 가능한 판매안 {passed}개와 "
+        f"현재 조건으로 진행하기 어려운 판매안 {failed}개가 있습니다"
+    )
 
 
 #: 실행 축으로 거르기 전에 훑는 범위. 같은 날 여러 실행이 섞여 있어도 우리 것이 남는다.
@@ -247,55 +369,6 @@ def _run_axis(run: SalesAgentRunResponse) -> str | None:
         return None
     axis = context.get("sim_run_id")
     return None if axis is None else str(axis)
-
-
-def _run_summary(run: SalesAgentRunResponse) -> dict[str, object]:
-    """실행 하나를 **사람이 읽을 만큼만** 줄인다.
-
-    🔴 **원본 payload 를 통째로 싣지 않는다.** 전에는 `model_dump()` 로 요청·회신
-       JSONB 두 덩이를 그대로 냈고, 마스터가 그것을 한 줄로 펴서 ML 시세 18일치와
-       lot 목록까지 화면에 쏟았다 — 질문은 *"판매 진행 상황"* 이었다.
-
-    ★ **자세히 볼 자리는 따로 있다.** 안의 전체 내용은 판매 화면의 금일 판매안이
-      카드로 펴 준다. 여기서 하는 일은 *"몇 건을 어떤 상태로 냈나"* 까지다.
-    """
-    payload = run.response_payload.get("payload")
-    payload = payload if isinstance(payload, dict) else {}
-    scenarios = payload.get("scenarios")
-    scenarios = scenarios if isinstance(scenarios, list) else []
-    #  ⚠️ 팔 물량이 0인 안은 «낸 안» 으로 세지 않는다. 재무가 검토할 것도 없는 안이다.
-    sellable = [
-        scenario
-        for scenario in scenarios
-        if isinstance(scenario, dict) and _positive(scenario.get("quantity_kg"))
-    ]
-    items = []
-    for scenario in sellable:
-        item = scenario.get("item")
-        if item is not None and str(item) not in items:
-            items.append(str(item))
-    missing = payload.get("missing_capabilities")
-    return {
-        "as_of": run.as_of.isoformat(),
-        "request_id": run.response_payload.get("request_id"),
-        "runtime_status": run.runtime_status,
-        "status": payload.get("status"),
-        "items": items,
-        "proposal_count": len(sellable),
-        #  🔴 «물량이 없어 안이 서지 않은 것» 과 «안을 안 낸 것» 은 다른 사실이다.
-        "no_stock_count": len(scenarios) - len(sellable),
-        "pending_validations": list(missing) if isinstance(missing, list) else [],
-    }
-
-
-def _positive(value: object) -> bool:
-    if value is None:
-        return False
-    try:
-        return Decimal(str(value)) > 0
-    except (ArithmeticError, ValueError):
-        #  ⚠️ 못 읽는 값을 «있다» 로 세지 않는다.
-        return False
 
 
 def _status_reasoning(runs: list[SalesAgentRunResponse]) -> str:
@@ -315,8 +388,7 @@ def _invalid_input(
         run_id,
         payload={
             "validation_errors": [
-                ".".join(str(part) for part in item["loc"]) or item["type"]
-                for item in exc.errors()
+                ".".join(str(part) for part in item["loc"]) or item["type"] for item in exc.errors()
             ]
         },
         reason="판매 요청 정보를 확인하지 못했습니다. 입력한 판매 조건을 다시 확인해 주세요.",
