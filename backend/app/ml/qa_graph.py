@@ -274,6 +274,26 @@ def gate(state: QaState) -> QaState:
     if not asks:
         return {"status": "OUT_OF_SCOPE", "message": OUT_OF_SCOPE_KIND}
 
+    #   ★ **범위 안 날이 하나도 없으면 오늘 값을 주지 않는다** (2026-09-15 · 화면).
+    #     「30일 뒤」만 물었는데 오늘 값이 나가면, 물은 것과 다른 날을 답한 것이다.
+    #     범위 밖 안내만 준다.
+    if out_of_range and not any(a["targets"] or a["wants_today"] for a in asks):
+        today = req.as_of or base_dt
+        days = " · ".join(
+            f"{d} ({(d - today).days:+d}일)" for d in sorted(out_of_range)
+        )
+        return {
+            "status": "OUT_OF_SCOPE",
+            "base_dt": base_dt,
+            "out_of_range": sorted(out_of_range),
+            "items": [a["item"] for a in asks],
+            "kinds": [a["kind"] for a in asks],
+            "message": (
+                f"{days} 은 예측 범위 밖입니다. "
+                f"{today} 부터 {today + timedelta(days=QA_MAX_OFFSET)} 까지 답할 수 있습니다."
+            ),
+        }
+
     return {
         "base_dt": base_dt,
         "items": [a["item"] for a in asks],
@@ -493,8 +513,9 @@ def _answer_markdown(state: QaState) -> QaState:
         last = base_dt + timedelta(days=QA_MAX_OFFSET)
         days = " · ".join(str(d) for d in state["out_of_range"])
         tail.append(
-            f"> ⚠ {days} 은 예측 범위 밖입니다. 오늘 기준 {base_dt + timedelta(days=1)} ~ {last} "
-            "까지 답할 수 있습니다."
+            #   ★ 오늘 값도 답하므로 시작은 **오늘**이다 (범위 밖만 물었을 때 안내와 맞춘다).
+            f"> ⚠ {days} 은 예측 범위 밖입니다. "
+            f"{state['request'].as_of or base_dt} 부터 {last} 까지 답할 수 있습니다."
         )
     if missing:
         tail.append(f"> ⚠ {' · '.join(str(d) for d in missing)} 은 그 기준일에 예측이 없습니다.")

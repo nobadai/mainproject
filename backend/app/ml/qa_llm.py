@@ -147,6 +147,9 @@ def _prompt(base_dt: date) -> str:
             #     맞춰 **오늘부터 N개**로 둔다.
             "「일주일치」·「앞으로 일주일」이면 **오늘부터 7개**, 「3일치」면 오늘부터 3개다.",
             "「이번 주」도 오늘부터 7개로 본다. 기간을 말했으면 날짜를 **비우지 마라**.",
+            "★ 이 목록 **밖의 날**을 물었으면 dates 에 넣지 말고 **far_offsets** 에 오늘로부터",
+            "  며칠인지 정수로 적는다. 「30일 뒤」→ [30] · 「한 달 뒤」→ [30] · 「어제」→ [-1].",
+            "  목록 밖이라고 날짜를 **비우면 안 된다** — 비우면 «날짜를 안 물었다» 로 읽힌다.",
             "",
         ]
     )
@@ -172,6 +175,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "kinds": {"type": "array", "items": {"type": "string",
                                              "enum": ["AUC", "WHSL", "RTL"]}},
         "dates": {"type": "array", "items": {"type": "string"}},
+        #   ★ **목록 밖 날짜를 적는 칸** (2026-09-15 · 화면에서 발견).
+        #     날짜를 19개 목록에서만 고르게 한 뒤로 「30일 뒤」는 고를 보기가 없어
+        #     모델이 날짜를 비웠다. 코드는 그걸 «날짜를 안 말했다» 로 읽어 **오늘 값**을
+        #     줬고, «범위 밖입니다» 안내는 사라졌다. 기준일로부터 며칠인지를 정수로 받는다.
+        "far_offsets": {"type": "array", "items": {"type": "integer"}},
         #   ★ **짝지어진 물음** (2026-09-15). 「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를
         #     items x kinds 로 곱으면 **안 물어본 조합**(배추 중도매가 · 무 경락가)이
         #     나가고 날짜도 뒤섞인다. 실제로 그렇게 나갔다.
@@ -192,7 +200,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
     #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
     #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
-    "required": ["route", "items", "kinds", "dates", "asks"],
+    "required": ["route", "items", "kinds", "dates", "far_offsets", "asks"],
 }
 
 
@@ -349,8 +357,20 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         #   예전 이름 — 하나만 쓰는 자리가 아직 있다. 첫 값을 가리킨다.
         "item": items[0] if items else None,
         "kind": kinds[0] if kinds else None,
-        "dates": _parse_dates(chosen.get("dates")),
+        #   목록 밖 날(far_offsets)을 날짜로 바꿔 합친다. 범위 검사는 gate 가 한다 —
+        #   여기서 거르면 «범위 밖» 이라는 사실이 다시 사라진다.
+        "dates": _parse_dates(chosen.get("dates")) + _far_dates(chosen.get("far_offsets"), base_dt),
     }
+
+
+def _far_dates(raw: Any, today: date) -> list[date]:
+    """목록 밖 날을 날짜로. 정수가 아닌 것은 버린다 — 고쳐 쓰지 않는다."""
+    out: list[date] = []
+    for value in raw if isinstance(raw, list) else []:
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        out.append(today + timedelta(days=value))
+    return out
 
 
 #: 가격 종류를 부르는 말. **질문에 이 낱말이 있어야 그 종류를 남긴다.**
