@@ -8,6 +8,7 @@ import { ProcurementResult } from "@/components/ProcurementResult";
 import { ReportDownload } from "@/components/ReportDownload";
 import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
+import { PurchaseRecordCard } from "@/components/PurchaseRecordCard";
 import { LlmTrace } from "@/components/LlmTrace";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
@@ -548,7 +549,13 @@ function TurnView({
     );
 
   if (turn.kind === "approved")
-    return <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />;
+    return (
+      <div className="flex flex-col gap-3">
+        <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />
+        {/* 사람 승인 뒤 실제로 산 값을 적는 자리. 자동 승인 · 매입 승인이 아니면 카드가 스스로 숨는다. */}
+        <PurchaseRecordCard requestId={turn.decision.request_id} />
+      </div>
+    );
 
   if (turn.kind === "error")
     return (

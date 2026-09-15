@@ -14,8 +14,11 @@ import type {
   AskResponse,
   ExecuteResponse,
   Intent,
+  PurchaseRecordIn,
+  PurchaseRecordOut,
   RunHistory,
   RunReport,
+  TransitionOut,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
@@ -187,6 +190,31 @@ export function runHistory(requestId: string): Promise<RunHistory> {
 /** 매입안 보고서. **서버가 만든 Markdown 을 그대로 받는다.** */
 export function runReport(requestId: string): Promise<RunReport> {
   return call<RunReport>(`/master/runs/${encodeURIComponent(requestId)}/report`);
+}
+
+/** 실매입 기록 · 반영 상태. 선정안 회차(폼 기본값)와 기록(있으면)을 함께 받는다. */
+export function getPurchaseRecord(requestId: string): Promise<PurchaseRecordOut> {
+  return call<PurchaseRecordOut>(`/master/runs/${encodeURIComponent(requestId)}/purchase-record`);
+}
+
+/**
+ * 사람이 실제로 산 값을 적는다. 적는 순간 그 값으로 매입 원장 · 채무 · 입고 일정이 선다.
+ *
+ * ★ 422 · 409 의 사유(재검증 불통과 · 마감된 날짜 · 이미 기록함)는 `ApiError.message` 에 그대로 온다.
+ */
+export function postPurchaseRecord(
+  requestId: string,
+  body: PurchaseRecordIn,
+): Promise<TransitionOut> {
+  return call<TransitionOut>(
+    `/master/runs/${encodeURIComponent(requestId)}/purchase-record`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    // 값이 선정안과 다르면 서버가 재무 · 물류 재검증을 다시 부른다 — 읽기가 아니라 돌리는 호출이다.
+    EXECUTE_TIMEOUT_MS,
+  );
 }
 
 export function health(): Promise<{ status: string }> {

@@ -305,3 +305,72 @@ export interface RunReport {
   /** Markdown 전문. **화면이 조립하지 않는다** — 서버가 낸 것을 그대로 내려받는다. */
   markdown: string;
 }
+
+/* ── 실매입 기록 (설계 260915 안 A §3 · §5) ─────────────────────────────── */
+
+/**
+ * 실매입 기록의 반영 상태. 백엔드 `PurchaseRecordStatus` 의 거울.
+ *
+ * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 반영되지 않음)로 옮긴다.
+ */
+export type PurchaseRecordStatus =
+  | "AWAITING_PURCHASE_RECORD"
+  | "APPLIED"
+  | "NOT_APPLIED"
+  | "NOT_REQUIRED";
+
+/** 회차 한 줄. 선정안 값(`plan`)과 기록값(`record`)이 같은 모양이다. */
+export interface PurchaseRecordLeg {
+  seq: number;
+  qty_kg: number;
+  /** 선정안에 금액이 없으면 `null` — 화면이 0 으로 채우지 않는다. */
+  amount_krw: number | null;
+  purchase_date: string;
+  arrival_date: string;
+}
+
+/** `GET /master/runs/{request_id}/purchase-record` */
+export interface PurchaseRecordOut {
+  request_id: string;
+  decision_seq: number;
+  scenario_label: string | null;
+  decided_by: string;
+  status: PurchaseRecordStatus;
+  reason: string;
+  /** 폼에 미리 채울 선정안 값. */
+  plan: { grade: string | null; legs: PurchaseRecordLeg[] };
+  record: {
+    grade: string;
+    recorded_by: string;
+    recorded_at: string;
+    legs: PurchaseRecordLeg[];
+  } | null;
+}
+
+/**
+ * `POST /master/runs/{request_id}/purchase-record` 본문.
+ *
+ * ★ 회차 수와 `seq` 는 선정안 그대로다 — 사람은 값만 고친다.
+ */
+export interface PurchaseRecordIn {
+  decision_seq: number;
+  grade: string;
+  recorded_by: string;
+  legs: {
+    seq: number;
+    qty_kg: number;
+    amount_krw: number;
+    purchase_date: string;
+    arrival_date: string;
+  }[];
+}
+
+/** 승인 1건의 상태전이 결과. 백엔드 `TransitionOut` 의 거울. */
+export interface TransitionOut {
+  status: "APPLIED" | "NOT_APPLIED" | "FAILED" | "AWAITING_PURCHASE_RECORD";
+  reason: string;
+  parts: string[];
+  missing: string[];
+  carried_forward: string[];
+  carried_forward_status: "OK" | "UNREADABLE";
+}
