@@ -260,6 +260,7 @@ export interface SalesCandidateOut {
 export interface SalesRunResponse {
   request_id: string;
   as_of: string;
+  history_run_id: string | null;
   end_code: string;
   reason: string;
   candidates: SalesCandidateOut[];

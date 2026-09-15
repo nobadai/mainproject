@@ -18,9 +18,15 @@
 import { useState } from "react";
 
 import { Panel } from "@/components/console/Blocks";
-import { Failed, Metric, Skeleton } from "@/components/console/ConsoleData";
+import { Failed, Metric, Skeleton, useConsoleData } from "@/components/console/ConsoleData";
 import { ApiError, salesRun, type SalesCandidateOut, type SalesRunResponse } from "@/lib/api";
-import { money, percent, quantity, type Money } from "@/lib/console_api";
+import {
+  money,
+  percent,
+  quantity,
+  salesConsole,
+  type Money,
+} from "@/lib/console_api";
 import { TechDetails } from "@/app/console/finance/TechDetails";
 import { runtimeText, verdictText } from "@/app/console/finance/user_text";
 
@@ -85,6 +91,12 @@ function block(candidate: SalesCandidateOut, capability: string) {
 
 export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: string; asOf: string; onCreated?: () => void }) {
   const [form, setForm] = useState<Form>(EMPTY);
+  const partners = useConsoleData(
+    `sales-candidate-partners:${simRun}:${asOf}`,
+    () => salesConsole.activeCustomers(simRun, asOf),
+    true,
+  );
+  const items = useConsoleData("sales-candidate-items", () => salesConsole.items(), true);
   const [state, setState] = useState<{
     data: SalesRunResponse | null;
     error: string | null;
@@ -131,8 +143,28 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
     <>
       <Panel title="판매 후보 생성" subtitle="업무 요청만 보냅니다 — 원가·여신·판정은 각 도메인이 답합니다">
         <div className="grid gap-2 sm:grid-cols-3">
-          <Input label="거래처" value={form.partner_id} onChange={(v) => setForm({ ...form, partner_id: v })} mono />
-          <Input label="품목" value={form.item} onChange={(v) => setForm({ ...form, item: v })} />
+          <Select
+            label="거래처"
+            value={form.partner_id}
+            onChange={(value) => setForm({ ...form, partner_id: value })}
+            disabled={partners.loading || Boolean(partners.error)}
+            placeholder={partners.loading ? "거래처 조회 중" : "거래처 선택"}
+            options={(partners.data?.rows ?? []).map((partner) => ({
+              value: partner.partner_id,
+              label: `${partner.partner_name ?? "이름 없음"} (${partner.partner_id})`,
+            }))}
+          />
+          <Select
+            label="품목"
+            value={form.item}
+            onChange={(value) => setForm({ ...form, item: value })}
+            disabled={items.loading || Boolean(items.error)}
+            placeholder={items.loading ? "품목 조회 중" : "품목 선택"}
+            options={(items.data?.rows ?? []).map((item) => ({
+              value: item.item_name,
+              label: `${item.item_name} (${item.item_code})`,
+            }))}
+          />
           <Input
             label="요청 수량 (kg)"
             value={form.requested_quantity_kg}
@@ -163,6 +195,8 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
             placeholder="비우면 거래처 계약 결제일"
           />
         </div>
+        {partners.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">거래처 조회 실패: {partners.error}</p>}
+        {items.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">품목 조회 실패: {items.error}</p>}
         <button
           onClick={submit}
           disabled={!ready || state.running}
@@ -179,6 +213,40 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
       {state.error && <Failed what="판매 후보 생성" message={state.error} />}
       {state.data && <Result data={state.data} />}
     </>
+  );
+}
+
+function Select({
+  label,
+  value,
+  onChange,
+  options,
+  placeholder,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  placeholder: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className="flex flex-col gap-1 text-[11.5px]">
+      <span className="text-ink2">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        className="rounded-md border px-2 py-1 text-[12px] disabled:opacity-50"
+        style={{ borderColor: "var(--color-hair)" }}
+      >
+        <option value="">{options.length === 0 && !disabled ? `${placeholder} (없음)` : placeholder}</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -223,7 +291,8 @@ function Result({ data }: { data: SalesRunResponse }) {
           <TechDetails>
             {/* 🔴 코드와 뜻을 같이 보여 준다 — 뜻만 남기면 되짚을 수 없다. */}
             <p className="m-0 font-mono text-[11px] text-ink2">
-              end_code {data.end_code} · request_id {data.request_id}
+              end_code {data.end_code} · request_id {data.request_id} · history_run_id{" "}
+              {data.history_run_id ?? "null"}
             </p>
           </TechDetails>
         </div>
