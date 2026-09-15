@@ -53,7 +53,7 @@ sale_id               sales.sale_id
 🔴 **대상 판매에 `DELIVERED` 를 넣는다.**
 
 ```text
-WHERE sale_date = as_of
+WHERE 납품 처리일 = as_of   (당일, 휴장이면 그 뒤 첫 개장일 · handled_on_first_open_day)
   AND order_status IN ('CONFIRMED', 'READY', 'DELIVERED')
 ```
 
@@ -101,6 +101,7 @@ from app.finance.db import (
 )
 from app.finance.receivables import ReceivablePersistenceConflict, confirm_receivable
 from app.finance.sales_validation import ReceivableCreateInput
+from app.master.day_opening_repository import handled_on_first_open_day
 from app.master.receivable import ReceivablePartOut
 
 __all__ = [
@@ -163,13 +164,21 @@ def read_confirmed_sales(
                        collection_due_date,
                        total_amount_krw
                   FROM {}.sales
-                 WHERE sale_date = %s
+                 WHERE sale_date <= %s
                    AND sim_run_id = %s
                    AND order_status = ANY(%s)
+                   AND {}
                  ORDER BY sale_id
                 """
-            ).format(schema),
-            [as_of, sim_run_id, list(ISSUABLE_ORDER_STATUSES)],
+            ).format(
+                schema,
+                # 🔴 **출고와 같은 규칙이다** — 휴장일 납품은 그 뒤 첫 개장일에 한 번 발행한다.
+                #   실측 2026-03-07 · 04-04 · MISSING_RECEIVABLE 6. backorder 아님.
+                handled_on_first_open_day(
+                    sale_date=sql.SQL("sales.sale_date"), sim_run_id=sql.SQL("sales.sim_run_id")
+                ),
+            ),
+            [as_of, sim_run_id, list(ISSUABLE_ORDER_STATUSES), as_of, as_of, as_of],
         )
         rows = cursor.fetchall()
     return tuple(

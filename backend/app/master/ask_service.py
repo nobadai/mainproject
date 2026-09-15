@@ -172,6 +172,9 @@ def execute(
                 request_id=request_id,
                 item=intent.item,
                 budget=request.budget,
+                # 🔴 **화면이 보는 실행으로 판단한다.** 안 실으면 번인으로 떨어진다
+                #   (service.py `given or BURN_IN_SIM_RUN_ID`).
+                sim_run_id=SHOWN_SIM_RUN_ID,
             )
         )
         # ★ **여기에는 ⑥ 을 붙이지 않는다.** 매입 리포트의 머리말은 이미 완결된 판단
@@ -371,6 +374,7 @@ def _record_rerun(request: AskExecuteRequest) -> AskResponse:
             request_id=follow_up_id,
             item=intent.item or _item_of(request.target_request_id),
             budget=request.budget,
+            sim_run_id=SHOWN_SIM_RUN_ID,
             prior_feedback={
                 "condition_text": intent.condition,
                 # 🔴 **`attempt` 가 아니다** (#178 · 매입 실측 2026-09-03).
