@@ -334,6 +334,43 @@ def _as_number(value: float) -> int | float:
     return int(value) if float(value).is_integer() else value
 
 
+def _grade_lines(total_qty: float, total_amount: float) -> list[tuple[int | float, int | float]]:
+    """기록 총량 · 총액을 **등급 배분 줄**로 편다. `(수량, 단가)` 목록이다.
+
+    ```text
+    계약   sourcing_plan[].grade_unit_price 는 정수 원/kg (`SourcingPlanItem`)
+    검사   total_amount_krw == Σ(qty_kg × grade_unit_price)   (`Scenario.validate_quadruple_match`)
+    ```
+
+    🔴 **금액을 고치지 않는다.** 기록 총액은 사람이 실제로 낸 돈이고 그것이 정본이다.
+      그래서 총액 ÷ 총량이 정수로 안 떨어지면 **단가를 반올림해 총액을 흔드는 대신**
+      나머지를 한 줄 더 얹는다.
+
+      ```text
+      300kg · 271,000원   →  (197kg × 903) + (103kg × 904) = 271,000
+      ```
+
+      ★ 합이 **정확히** 총액이다 — `divmod` 의 몫과 나머지를 그대로 쓴다. 새 업무
+        숫자를 만든 것이 아니라, 기록한 한 사실을 계약이 요구하는 정수 단가 모양으로
+        적은 것이다.
+
+    ⚠️ **등급이 둘이 되는 것이 아니다.** 두 줄 다 기록한 그 등급이고, 부르는 쪽이
+      등급 이름을 얹는다 — 여기는 수량과 단가만 센다.
+
+    🔴 **정수가 아닌 기록은 그대로 흘린다** (kg 에 소수점이 있는 경우). 매입 계약의
+      수량 · 금액 칸이 정수라 부서 파싱에서 걸리는데, **여기서 반올림해 통과시키면
+      기록값과 다른 값이 검증을 지난다.** 못 적는 것은 못 적는 대로 막힌다.
+    """
+    if not (float(total_qty).is_integer() and float(total_amount).is_integer()):
+        return [(total_qty, total_amount / total_qty if total_qty else total_amount)]
+    qty = int(total_qty)
+    unit, rest = divmod(int(total_amount), qty)
+    if rest == 0:
+        return [(qty, unit)]
+    # `rest < qty` 라 앞 줄 수량은 항상 1 이상이다.
+    return [(qty - rest, unit), (rest, unit + 1)]
+
+
 def recorded_scenario(
     scenario: Mapping[str, Any],
     *,
@@ -348,11 +385,28 @@ def recorded_scenario(
     total_qty_kg · total_amount_krw   기록 회차 합
     payment_schedule[]   purchase_date · payment_date(매입일 + N5) · qty_kg · amount_krw
                          (amount_max_krw 는 qty_kg × max_price 로 다시 센다 · 안에 있을 때만)
-    sourcing_plan[]      grade (한 줄이면 qty_kg 도 총량으로)
+    sourcing_plan[]      grade · qty_kg · grade_unit_price 를 기록값으로 다시 놓는다
     ```
 
     ⚠️ **없는 칸을 만들지 않는다.** `payment_schedule` 이 없는 안(일괄 1회차)에는 싣지
       않는다 — 재무가 `split_plan` 에서 재구성한다.
+
+    🔴 **`sourcing_plan` 은 줄을 다시 놓는다** (2026-09-16 실측 · `#722` 뒤). 전에는
+      `grade` 만 덮고 줄이 하나일 때만 `qty_kg` 를 총량으로 바꿨다. `grade_unit_price`
+      는 선정안 값 그대로였으므로 **기록 총액과 등급 배분 금액이 어긋났고**, 두 부서가
+      이 payload 를 `PurchaseProposal` 로 파싱하다 그 자리에서 떨어졌다.
+
+      ```text
+      실측  SIM-TEST-PURREC-0916 · 01-05 배추 · 300kg 270,000원 기록
+            finance   ERROR  payload {"validation_errors": ["scenarios.0"]}
+            inventory RUNTIME_NOT_READY  missing_data ["purchase_proposal"]
+            Scenario.validate_quadruple_match
+              「total_amount_krw must equal sourcing_plan amount total」
+      ```
+
+      ★ **한 기록 = 한 등급이다** (`differs_from_plan` 과 같은 규율). 그래서 기록값
+        배분은 그 등급 한 줄이고, 총액이 정수 단가로 안 떨어질 때만 나머지 줄이 하나
+        더 붙는다 (`_grade_lines`).
     """
     by_seq = {leg.seq: leg for leg in legs}
     out: dict[str, Any] = copy.deepcopy(dict(scenario))
@@ -401,10 +455,23 @@ def recorded_scenario(
     sourcing = out.get("sourcing_plan")
     if isinstance(sourcing, list):
         lines = [line for line in sourcing if isinstance(line, dict)]
-        for line in lines:
-            line["grade"] = grade
-        if len(lines) == 1:
-            lines[0]["qty_kg"] = _as_number(total_qty)
+        if lines:
+            # ★ 등급 밖의 칸(지금은 `market`)은 선정안 첫 줄에서 그대로 온다 — 기록이
+            #   시장을 바꾸지 않는다 (`PurchaseRecordIn` 은 시장을 받지 않는다).
+            keep = {
+                key: value
+                for key, value in lines[0].items()
+                if key not in {"grade", "qty_kg", "grade_unit_price"}
+            }
+            out["sourcing_plan"] = [
+                {
+                    **keep,
+                    "grade": grade,
+                    "qty_kg": _as_number(qty),
+                    "grade_unit_price": _as_number(unit),
+                }
+                for qty, unit in _grade_lines(total_qty, sum(leg.amount_krw for leg in legs))
+            ]
     return out
 
 

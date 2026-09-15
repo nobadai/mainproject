@@ -73,6 +73,7 @@ __all__ = [
     "conditions_of_original",
     "find_scenario",
     "make_revalidation_request_id",
+    "procurement_validation_payload",
     "revalidate_procurement_scenario",
     "revalidate_scenario",
 ]
@@ -389,6 +390,22 @@ PROCUREMENT_REVALIDATION_MODE: Mode = "SCENARIO_VALIDATION"
 """매입 안 재검증이 조언자에게 묻는 mode. **매입 Flow ④ 와 같은 물음이다** (`flow._validate`)."""
 
 
+def procurement_validation_payload(
+    proposal: Mapping[str, Any], scenario: Mapping[str, Any]
+) -> dict[str, Any]:
+    """조언자에게 보내는 **매입 제안 한 벌.** 제안 최상위 + 고른 안 하나다.
+
+    ★ **두 부서가 이것을 `PurchaseProposal` 로 되살린다** (`finance/adapter._purchase_proposal`
+      · `logistics/adapter._as_proposal`). 그래서 `meta` · `situation` · `confidence`
+      같은 최상위 칸이 빠지면 판정 대신 입력 오류가 온다.
+
+    🔴 **이름이 붙은 이유는 검사다** (2026-09-16). 실매입 기록값 사본이 이 모양으로
+      안 갈 때 두 부서가 동시에 떨어졌는데, 검사가 이 조립을 손으로 다시 적으면
+      **검사와 운영이 다른 모양을 볼 수 있다.** 주인을 하나 둔다.
+    """
+    return {**proposal, "scenarios": [dict(scenario)]}
+
+
 def revalidate_procurement_scenario(
     *,
     scenario: Mapping[str, Any],
@@ -455,7 +472,7 @@ def revalidate_procurement_scenario(
         )
 
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=REVALIDATION_BUDGET))
-    payload = {**proposal, "scenarios": [dict(scenario)]}
+    payload = procurement_validation_payload(proposal, scenario)
     validations: dict[str, Mapping[str, Any]] = {}
     adjustments: list[Mapping[str, Any]] = []
 
