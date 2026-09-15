@@ -395,24 +395,11 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
     for row in rows:
         out.append(_line(f"{row['target_dt']} (D+{row['offset_days']})", row, unit))
 
-    #   ── 이 조합에만 해당하는 꼬리말 ──
-    anchor = (rows[0] if rows else today or {}).get("current_price")
-    if anchor:
-        out += [
-            "",
-            (
-                f"> 출발점 {int(anchor):,}{unit} — 실제 거래가가 아니라 "
-                "모델이 출발한 값입니다."
-            ),
-        ]
-    acc = block.get("accuracy")
-    if acc:
-        #   ★ 화면에 적힌 것과 **같은 값**이다. 다시 재지 않는다.
-        out.append(
-            f"> 이 조합의 평균 오차는 **{acc['pct']}%** 입니다 "
-            f"(평균 실제가 {acc['avg']} · 평균 오차 {acc['err']}). "
-            f"{qa_tools.SEALED_SOURCE}."
-        )
+    #   ★ **설명 줄을 문장에 안 적는다** (2026-09-15 · 화면을 깨끗이 하라는 지시).
+    #     출발점 · 평균 오차 · 값의 정체는 `meta` 로 옮겼다 — 없앤 것이 아니다.
+    #
+    #   🔴 하나만 문장에 남긴다: **쓰지 말라는 조합** 경고다. 그건 설명이 아니라
+    #     «이 값으로 판단하지 마세요» 라는 판정이고, 못 보면 그대로 쓰게 된다.
     usab = block.get("usability") or {}
     if usab.get("use_recommended") is False:
         out.insert(
@@ -420,15 +407,18 @@ def _block_table(block: dict[str, Any], state: QaState, many: bool) -> tuple[lis
             "> 🔴 이 조합은 **판단에 쓰지 마세요.** 우리 모델보다 «어제 가격 그대로» 가 낫습니다."
             + (f" ({usab.get('quality_note')})" if usab.get("quality_note") else ""),
         )
-    spec = rows[0] if rows else None
-    if spec and spec.get("spec_desc"):
-        out.append(
-            f"> 값의 정체: {spec.get('market_name')} · {spec.get('grade_name')}등급"
-            f" · {spec['spec_desc']}"
-        )
     if many:
         out.append("")
     return out, unit
+
+
+def _first_of(block: dict[str, Any], key: str) -> Any:
+    """블록의 첫 행에서 한 칸. 행이 없으면 당일 값에서, 그것도 없으면 `None`."""
+    rows = block.get("rows") or []
+    if rows and rows[0].get(key) is not None:
+        return rows[0][key]
+    today = block.get("today") or {}
+    return today.get(key)
 
 
 def _answer_markdown(state: QaState) -> QaState:
@@ -507,6 +497,13 @@ def _answer_markdown(state: QaState) -> QaState:
         band_method=(all_rows[0].get("band_method") if all_rows
                      else (todays[0] if todays else {}).get("band_method")),
         use_recommended=(first.get("usability") or {}).get("use_recommended"),
+        #   ★ 문장에서 뺀 값들 — 여기로 옮겼다. 없앤 것이 아니다.
+        current_price=_first_of(first, "current_price"),
+        accuracy_pct=(first.get("accuracy") or {}).get("pct"),
+        accuracy_note=qa_tools.SEALED_SOURCE if first.get("accuracy") else None,
+        market_name=_first_of(first, "market_name"),
+        grade_name=_first_of(first, "grade_name"),
+        spec_desc=_first_of(first, "spec_desc"),
     )
     #   ★ 무엇을 무시했는지는 답 맨 앞에 적는다.
     note = [state["note"], ""] if state.get("note") else []
