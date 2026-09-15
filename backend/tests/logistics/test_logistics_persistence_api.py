@@ -7,9 +7,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from app.logistics.run_repository import list_logistics_agent_runs, save_logistics_agent_run
-from app.logistics.schemas import LogisticsProcurementResponse, LogisticsSalesResponse
 from app.main import app
-from app.purchase_agent.schemas import PurchaseProposal
 
 
 def _run_row() -> dict[str, object]:
@@ -77,86 +75,27 @@ def test_run_repository_rejects_verdict_metadata_mismatch():
         )
 
 
-def test_logistics_post_endpoints(logistics_purchase_payload, logistics_sales_payload):
-    procurement = LogisticsProcurementResponse(
-        as_of="2026-08-21",
-        snapshot_id=None,
-        runtime_status="RUNTIME_NOT_READY",
-        verdict=None,
-        band={"cap_by_date": {}},
-        inbound_constraints={
-            "inbound_lead_days": None,
-            "daily_inbound_capacity_kg": None,
-            "inbound_transport_capacity_kg": None,
-        },
-        hard_constraints=[],
-        soft_warnings=[],
-        evidences=[],
-    )
-    sales = LogisticsSalesResponse(
-        snapshot_id=None,
-        approval_id="H1-20260821-001",
-        runtime_status="RUNTIME_NOT_READY",
-        verdict=None,
-        daily_outbound_capacity_kg=None,
-        lot_constraints=[],
-        hard_constraints=[],
-        soft_warnings=[],
-    )
-    client = TestClient(app)
-    purchase_json = PurchaseProposal.model_validate(logistics_purchase_payload).model_dump(
-        mode="json"
-    )
-    with patch("app.logistics.router.run_logistics_procurement", return_value=procurement):
-        response = client.post("/logistics/procurement", json=purchase_json)
-    assert response.status_code == 200
-    assert response.json()["interpretation"]["summary"]
-    assert response.json()["llm_status"] == "DISABLED"
-    with patch("app.logistics.router.run_logistics_sales", return_value=sales):
-        response = client.post("/logistics/sales", json=logistics_sales_payload)
-    assert response.status_code == 200
-    assert response.json()["interpretation"]["summary"]
-    assert response.json()["llm_status"] == "DISABLED"
+# ── 물류 HTTP 경계 ──────────────────────────────────────────────────────
 
 
-def test_logistics_runs_api_filters_and_detail():
-    row = _run_row()
-    client = TestClient(app)
-    with patch("app.logistics.router.list_logistics_runs", return_value=[row]) as list_runs:
-        response = client.get(
-            "/logistics/runs",
-            params={
-                "cycle": "PROCUREMENT",
-                "as_of": "2026-08-21",
-                "runtime_status": "RUNTIME_NOT_READY",
-                "verdict": "REVIEW_REQUIRED",
-                "limit": 25,
-            },
-        )
-    assert response.status_code == 200
-    assert list_runs.call_args.kwargs["limit"] == 25
-    assert list_runs.call_args.kwargs["verdict"] == "REVIEW_REQUIRED"
+def test_물류에는_자기_HTTP_라우터가_없다():
+    """🔴 **물류 HTTP 경계는 `/api/logistics` 하나다** (2026-09-15 · 물류 문서 28).
 
-    with patch("app.logistics.router.get_logistics_run", return_value=row):
-        response = client.get(f"/logistics/runs/{row['run_id']}")
-    assert response.status_code == 200
-    assert response.json()["verdict"] is None
+    종전에는 `app/logistics/router.py` 가 `/logistics/…` 16 경로를 냈다. 그런데
 
+    ```text
+    화면    /api/logistics 를 친다 (app/api/logistics/routes.py)   ← 프론트 진입점
+    마스터  adapter.logistics_port 를 **파이썬으로** 부른다          ← HTTP 가 아니다
+            (master/bootstrap.py 의 register_agent("inventory", logistics_port))
+    ```
 
-def test_logistics_runs_api_404_and_422():
-    client = TestClient(app)
-    with patch("app.logistics.router.get_logistics_run", side_effect=LookupError):
-        response = client.get("/logistics/runs/00000000-0000-0000-0000-000000000002")
-    assert response.status_code == 404
-    assert client.get("/logistics/runs", params={"cycle": "INVALID"}).status_code == 422
-    assert client.get("/logistics/runs", params={"verdict": "UNKNOWN"}).status_code == 422
-    assert client.get("/logistics/runs/not-a-uuid").status_code == 422
+    라서 그 16 경로를 **아무도 안 불렀다.** 같은 콘솔 조회가 두 주소로 나가면 어느 쪽이
+    정본인지 갈리므로 걷어냈다.
 
-
-def test_logistics_openapi_paths_are_registered():
+    ⚠️ 종전 이 자리의 검사는 `/logistics/procurement` 등이 **등록돼 있는지**를 봤다.
+       지금은 그 반대를 잠근다 — 되살아나면 경계가 다시 둘이 된다.
+    """
     paths = TestClient(app).get("/openapi.json").json()["paths"]
+    물류 = sorted(p for p in paths if "logistics" in p)
 
-    assert "/logistics/procurement" in paths
-    assert "/logistics/sales" in paths
-    assert "/logistics/runs" in paths
-    assert "/logistics/runs/{run_id}" in paths
+    assert 물류 == ["/api/logistics"], 물류

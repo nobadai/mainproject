@@ -82,7 +82,7 @@ CREATE TABLE {TMP_SCHEMA}.items (item_id text PRIMARY KEY, item_name text);
 CREATE TABLE {TMP_SCHEMA}.partners (partner_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.sim_runs (sim_run_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.purchase_items (purchase_item_id text PRIMARY KEY);
-CREATE TABLE {TMP_SCHEMA}.sales (sale_id text PRIMARY KEY, sale_date date);
+CREATE TABLE {TMP_SCHEMA}.sales (sale_id text PRIMARY KEY, sale_date date, order_date date);
 CREATE TABLE {TMP_SCHEMA}.sale_items (sale_item_id text PRIMARY KEY);
 """
 

@@ -17,6 +17,7 @@ FROM nginx:1.29-alpine
 COPY --from=builder /app/out /usr/share/nginx/html
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 
+COPY nginx/proxy_params /etc/nginx/proxy_params
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

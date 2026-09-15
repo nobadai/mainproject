@@ -71,12 +71,6 @@ from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.contracts.core import ITEMS
 from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
 from app.logistics.agent.schemas import ExceptionRow
-from app.logistics.console_schemas import (
-    ConsoleInboundResponse,
-    ConsoleInventoryResponse,
-    ConsoleOutboundResponse,
-    ConsoleReservation,
-)
 from app.logistics.console_service import (
     get_inbound_console,
     get_inventory_console,
@@ -89,6 +83,12 @@ from app.logistics.historical_repository import (
     runtime_coverage_at,
     snapshot_days_between,
 )
+from app.logistics.schemas import (
+    ConsoleInboundResponse,
+    ConsoleInventoryResponse,
+    ConsoleOutboundResponse,
+    ConsoleReservation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +96,11 @@ PANES = ("summary", "stock", "inbound", "outbound")
 
 #: 발표 화면이 그리는 품목. 🔴 **재고 축을 좁히는 것이 아니라 «보여 줄 칸» 을 고르는
 #: 것이다.** `app/contracts/core.py` 가 *"재고 축은 자유 문자열 — 좁히지 않는다"* 고
-#: 못박았고 `console_service` 도 «계약 밖 품목이라고 재고를 숨기지 않는다» 로 짜여
+#: 못박았고 `read_service` 도 «계약 밖 품목이라고 재고를 숨기지 않는다» 로 짜여
 #: 있다. 그 둘은 그대로 두고 **표시 범위만** 여기서 건다 (#675 · 발표 화면 결정).
 #:
 #: ⚠️ **창고 사용량은 이 필터보다 앞선다** — 그날 실재한 모든 Lot 의 합이다
-#:   (`console_service`: "창고 점유는 화면 필터보다 앞선다"). 그래서 품목 카드의
+#:   (`read_service`: "창고 점유는 화면 필터보다 앞선다"). 그래서 품목 카드의
 #:   현재고 합과 창고 사용량이 갈릴 수 있고, 그 사실을 카드의 `Note` 에 적는다.
 _SCREEN_ITEMS = frozenset(ITEMS)
 
@@ -689,7 +689,7 @@ _PRINCIPLE = Note(
 )
 
 #: **그날 값이 아닌** 칸들. 이유가 둘로 갈린다 — 되살릴 정본이 없거나(Zone 자리
-#: 정원), 축을 일부러 «지금» 에 둔 것이거나(판매가능량 · `console_schemas`
+#: 정원), 축을 일부러 «지금» 에 둔 것이거나(판매가능량 · `api.logistics.schema`
 #: `available_qty_time_basis` 주석). 화면이 그 사실을 읽고 적는다.
 _MIXED_AXIS_NOTE = Note(
     tone="warn",

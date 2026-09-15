@@ -1,7 +1,20 @@
-"""재고·물류 운영 콘솔 Service — 기존 도메인 함수를 **조립만** 한다.
+"""재고·물류 화면 조회 Service — 도메인 함수를 **조립만** 한다.
+
+🔴 **여기는 화면 계층이다** (2026-09-15 · 물류 문서 28). 종전에는
+   `app/logistics/console_service.py` 였다. 이름은 화면용인데 자리가 도메인 폴더라
+   다음 사람이 *"이게 물류 내부 정본인가"* 로 읽었고, 실제로 그 혼동에서 화면의
+   시간축이 섞였다 (현재고는 과거 · 판매가능량은 지금).
+
+```text
+app/api/logistics    화면 전용 — routes(HTTP) · query(탭 조립) · read_service(조회) · schema(DTO)
+app/logistics        물류 도메인 · Agent 전용
+```
+
+   ⚠️ **의존은 한 방향이다.** 여기서 `app/logistics` 를 부르는 것은 정상이고,
+      `app/logistics` 가 `app/api` 를 부르는 것은 **없다.**
 
 🔴 **이 파일은 업무 계산을 새로 만들지 않는다.** 판매가능량 · 신선도 · 회전 · FEFO ·
-   Capacity 는 전부 기존 모듈이 정본이고, 여기가 하는 일은 두 가지뿐이다.
+   Capacity 는 전부 도메인 모듈이 정본이고, 여기가 하는 일은 두 가지뿐이다.
 
 ```text
 ① 행 목록을 내는 SELECT      기존에 "단건 조회"만 있던 자리 (목록 함수가 없었다)
@@ -39,44 +52,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any, cast
 
 from psycopg import sql
 
-from app.logistics import arrival, historical_repository, outbound, transport, warehouse
-from app.logistics.console_schemas import (
-    ConsoleAllocateResponse,
-    ConsoleAllocation,
-    ConsoleAllocationRequestItem,
-    ConsoleArrivalSummary,
-    ConsoleCapacity,
-    ConsoleFefoCandidate,
-    ConsoleFefoResponse,
-    ConsoleFreeLocation,
-    ConsoleInboundReceipt,
-    ConsoleInboundResponse,
-    ConsoleInTransitItem,
-    ConsoleInventoryItem,
-    ConsoleInventoryLot,
-    ConsoleInventoryMove,
-    ConsoleInventoryMovesResponse,
-    ConsoleInventoryResponse,
-    ConsoleLotLocation,
-    ConsoleOutboundResponse,
-    ConsolePlacementOptionsResponse,
-    ConsolePlacementResponse,
-    ConsolePlacementZone,
-    ConsoleReleaseResponse,
-    ConsoleReservation,
-    ConsoleShipResponse,
-    ConsoleTransportQuoteResponse,
-    ConsoleWarehouseResponse,
-    ConsoleZone,
-)
+from app.logistics import arrival, historical_repository, outbound
 from app.logistics.db import get_connection, get_db_schema
 from app.logistics.historical_repository import HistoricalAllocation, HistoricalLot
 from app.logistics.inbound_schedules import receivable_at
@@ -85,7 +69,6 @@ from app.logistics.outbound import (
     _HOLDING_ALLOCATION,
     _HOLDING_RESERVATION,
     AllocationStatus,
-    HumanAllocationBasis,
     ReservationStatus,
 )
 from app.logistics.repository import (
@@ -94,23 +77,41 @@ from app.logistics.repository import (
     get_active_logistics_runtime_fixture,
     get_current_logistics_read,
 )
-from app.logistics.schemas import InventoryLogisticsSnapshot, LogisticsRuntimeFixture
+from app.logistics.schemas import (
+    ConsoleAllocation,
+    ConsoleArrivalSummary,
+    ConsoleCapacity,
+    ConsoleFefoCandidate,
+    ConsoleFefoResponse,
+    ConsoleInboundReceipt,
+    ConsoleInboundResponse,
+    ConsoleInTransitItem,
+    ConsoleInventoryItem,
+    ConsoleInventoryLot,
+    ConsoleInventoryResponse,
+    ConsoleOutboundResponse,
+    ConsoleReservation,
+    InventoryLogisticsSnapshot,
+    LogisticsRuntimeFixture,
+)
 from app.logistics.tools import build_inventory_by_item
-from app.logistics.warehouse import _OCCUPYING_PALLET
 
+#: 🔴 **화면(`app/api/logistics/query.py`)이 부르는 넷뿐이다** (2026-09-15).
+#:
+#:    종전에는 여기에 창고 조회 · 재고이동 조회 · 배치 후보 · 운송 견적과 쓰기 넷
+#:    (`place_lot` · `allocate_reservation` · `ship_reservation` ·
+#:    `release_reservation_console`)이 더 있었다. 그것들을 부르는 자리는
+#:    `app/logistics/router.py` 하나였고, 그 라우터를 **화면도 마스터도 안 불렀다** —
+#:    화면은 `/api/logistics`, 마스터는 `adapter.logistics_port` 를 파이썬으로 쓴다.
+#:
+#:    ⚠️ **쓰기 넷은 여기서 만든 것이 아니라 도메인 함수를 감싼 것이었다.** 정본은
+#:       `outbound.allocate_stock` · `ship_allocated_stock` · `release_reservation` ·
+#:       `warehouse.place_lot` 이고 그대로 있다 — 없앤 것은 감싼 껍질뿐이다.
 __all__ = [
-    "allocate_reservation",
     "get_inbound_console",
     "get_inventory_console",
-    "get_inventory_moves_console",
     "get_outbound_console",
-    "get_placement_options_console",
     "get_reservation_fefo_console",
-    "get_transport_quote_console",
-    "get_warehouse_console",
-    "place_lot",
-    "release_reservation_console",
-    "ship_reservation",
 ]
 
 
@@ -123,26 +124,6 @@ def _read_connection() -> Iterator[Any]:
     conn = get_connection()
     try:
         yield conn
-    finally:
-        conn.close()
-
-
-@contextmanager
-def _write_connection() -> Iterator[Any]:
-    """쓰기 커넥션 하나 — 성공하면 **한 번** commit, 실패하면 rollback.
-
-    🔴 **도메인 함수 안의 잠금 · 검증 · 멱등 · 무결성 검사를 여기서 복제하지 않는다.**
-       그것들은 이미 `outbound` · `warehouse` · `ledger` 안에 있고, 밖에서 한 벌 더
-       두면 두 판정이 갈린다. 이 자리가 하는 일은 트랜잭션 경계 하나뿐이다.
-    """
-    conn = get_connection()
-    try:
-        yield conn
-    except BaseException:
-        conn.rollback()
-        raise
-    else:
-        conn.commit()
     finally:
         conn.close()
 
@@ -438,55 +419,6 @@ def get_inventory_console(
     )
 
 
-# ── GET /logistics/inventory/moves ──────────────────────────────────────
-
-
-def get_inventory_moves_console(
-    *,
-    sim_run_id: str,
-    lot_id: str | None = None,
-    item_id: str | None = None,
-    moved_from: date | None = None,
-    moved_to: date | None = None,
-    limit: int = 100,
-) -> ConsoleInventoryMovesResponse:
-    """원장 이력. **읽기만 한다 — 이 경로는 Move 를 만들지 않는다.**"""
-    schema = _schema()
-    with _read_connection() as conn:
-        rows = _rows(
-            conn,
-            sql.SQL(
-                """
-                SELECT m.move_id, m.lot_id, l.item_id, i.item_name,
-                       m.move_type, m.quantity_kg, m.moved_at,
-                       m.reason_code, m.note, m.sale_item_id
-                FROM {schema}.inventory_moves m
-                LEFT JOIN {schema}.inventory_lots l ON l.lot_id = m.lot_id
-                LEFT JOIN {schema}.items i ON i.item_id = l.item_id
-                WHERE m.sim_run_id = %(sim)s
-                  AND (%(lot_id)s::text IS NULL OR m.lot_id = %(lot_id)s)
-                  AND (%(item_id)s::text IS NULL OR l.item_id = %(item_id)s)
-                  AND (%(moved_from)s::date IS NULL OR m.moved_at >= %(moved_from)s)
-                  AND (%(moved_to)s::date IS NULL OR m.moved_at <= %(moved_to)s)
-                ORDER BY m.moved_at DESC, m.move_id DESC
-                LIMIT %(limit)s
-                """
-            ).format(schema=schema),
-            {
-                "sim": sim_run_id,
-                "lot_id": lot_id,
-                "item_id": item_id,
-                "moved_from": moved_from,
-                "moved_to": moved_to,
-                "limit": limit,
-            },
-        )
-    return ConsoleInventoryMovesResponse(
-        sim_run_id=sim_run_id,
-        moves=[ConsoleInventoryMove(**row) for row in rows],
-    )
-
-
 # ── GET /logistics/inbound ──────────────────────────────────────────────
 
 
@@ -598,227 +530,6 @@ def get_inbound_console(*, sim_run_id: str, as_of: date) -> ConsoleInboundRespon
     )
 
 
-# ── GET /logistics/warehouse ────────────────────────────────────────────
-
-
-def _zones(conn: Any) -> list[ConsoleZone]:
-    """Zone 자리 사정. 🔴 **정원·점유·여유는 `warehouse.get_zone_capacity` 가 낸다.**
-
-    ```text
-    이 함수의 SQL    zone_id · zone_code · zone_name · zone_kind · purpose   이름표뿐
-    get_zone_capacity  total · occupied · free                                셈은 저쪽
-    ```
-
-    🔴 **같은 셈을 여기 한 벌 더 두지 않는다.** 종전에는 정원·점유를 직접 세면서
-       *"점유 > 정원이어도 `free_positions` 를 음수로 내보낸다"* 는 Console 전용
-       정책까지 들고 있었다. 그 순간 창고 무결성 판정이 두 벌이 되고, 도메인이
-       **오류로 막는 상태를 화면만 정상 응답으로 통과**시킨다.
-
-    ⚠️ **깨진 Zone 이 있으면 이 조회도 멈춘다** (`WarehouseIntegrityError` → 409).
-       화면 한 판을 못 보는 대신, 도메인과 같은 사실을 본다. 그것이 계약이다.
-
-    ★ Zone 수가 적어(실측 5) Zone 마다 한 번 부르는 구조로 충분하다. 성능을 이유로
-      Capacity 판정을 새로 만들지 않는다.
-    """
-    schema = _schema()
-    rows = _rows(
-        conn,
-        sql.SQL(
-            """
-            SELECT z.zone_id, z.zone_code, z.zone_name, z.zone_kind, z.purpose
-            FROM {schema}.warehouse_zones z
-            WHERE z.is_active
-            ORDER BY z.zone_kind, z.zone_id
-            """
-        ).format(schema=schema),
-        [],
-    )
-    zones: list[ConsoleZone] = []
-    for row in rows:
-        capacity = warehouse.get_zone_capacity(conn, zone_id=row["zone_id"])
-        zones.append(
-            ConsoleZone(
-                zone_id=row["zone_id"],
-                zone_code=row["zone_code"],
-                zone_name=row["zone_name"],
-                # ★ zone_kind 도 저쪽이 읽은 값을 쓴다 — 한 Zone 을 두 번 읽고
-                #   서로 다른 값을 싣는 일이 없게 한다.
-                zone_kind=capacity.zone_kind,
-                purpose=row["purpose"],
-                total_positions=capacity.total_positions,
-                occupied_positions=capacity.occupied_positions,
-                free_positions=capacity.free_positions,
-            )
-        )
-    return zones
-
-
-def _lot_locations(conn: Any, *, sim_run_id: str, as_of: date) -> list[ConsoleLotLocation]:
-    """그날 Lot 이 어디 있었나. 🔴 **`pallet_events` 재생 결과다.**
-
-    ```text
-    싣는다   그날 원장 잔량 > 0                     그날의 실재 재고
-             잔량 0 인데 Pallet 이 자리를 차지함     자리는 아직 안 돌아왔다
-    안 싣는다 잔량 0 이고 자리도 안 잡고 있음
-    ```
-
-    🔴 **`pallets.current_location_id` 를 과거 위치로 쓰지 않는다.** 실측 3장은
-       전부 2026-09-12 에 `EMPTIED` 되어 지금 자리가 없다 — 그 값을 2026-01 화면에
-       실으면 그때도 자리가 없었던 것으로 보인다.
-
-    🔴 **잔량 0 이라고 자리가 도는 것이 아니다.** 원장 `OUT` · `DISPOSE` 는 수량만
-       줄이고 Pallet 을 비우지 않는다 — 자리 반환은 `warehouse.empty_pallet` 이
-       따로 해야 하는 별개 사실이다.
-
-    ⚠️ **`UNRECORDED` 와 `UNPLACED` 는 다르다.** 앞은 그날까지 그 Lot 의 Pallet
-       사건이 하나도 없다는 뜻(모른다)이고, 뒤는 사건은 있는데 자리를 안 잡고
-       있었다는 뜻(확인했고 없다)이다. 없는 자리를 지어내지 않는다.
-    """
-    lots = historical_repository.lot_state_at(conn, sim_run_id=sim_run_id, as_of=as_of)
-    positions = historical_repository.pallet_position_at(
-        conn, sim_run_id=sim_run_id, as_of=as_of
-    )
-    by_lot: dict[str, list[Any]] = {}
-    for position in positions:
-        by_lot.setdefault(position.lot_id, []).append(position)
-
-    rows: list[ConsoleLotLocation] = []
-    for lot in sorted(lots, key=lambda row: row.lot_id):
-        recorded = sorted(by_lot.get(lot.lot_id, []), key=lambda row: row.pallet_id)
-        occupying = [position for position in recorded if position.occupies_position]
-        if occupying:
-            rows.extend(
-                ConsoleLotLocation(
-                    lot_id=lot.lot_id,
-                    item_id=lot.item_id,
-                    item_name=lot.item_name,
-                    remaining_qty_kg=lot.remaining_qty_kg,
-                    pallet_id=position.pallet_id,
-                    # 🔴 Pallet 상태는 사건으로 유도되지 않는다 (계약 주석 참조).
-                    pallet_status=None,
-                    zone_id=position.zone_id,
-                    location_id=position.location_id,
-                    placement="PLACED",
-                )
-                for position in occupying
-            )
-            continue
-        if lot.remaining_qty_kg <= Decimal(0):
-            continue
-        rows.append(
-            ConsoleLotLocation(
-                lot_id=lot.lot_id,
-                item_id=lot.item_id,
-                item_name=lot.item_name,
-                remaining_qty_kg=lot.remaining_qty_kg,
-                pallet_id=None,
-                pallet_status=None,
-                zone_id=None,
-                location_id=None,
-                placement=("UNPLACED" if recorded else "UNRECORDED"),
-            )
-        )
-    return rows
-
-
-def get_warehouse_console(*, sim_run_id: str, as_of: date) -> ConsoleWarehouseResponse:
-    """Zone 자리 사정과 Lot 물리 위치. 🔴 **단위는 Pallet Position 이다 (kg 아님).**
-
-    ⚠️ **두 목록의 시간축이 다르다** — 응답이 그것을 말한다.
-
-    ```text
-    lot_locations  HISTORICAL_AS_OF   pallet_events 재생
-    zones          CURRENT_ROW        지금 창고의 자리 정원 · 점유
-    ```
-
-       자리 정원(`storage_locations` · `warehouse_zones`)에 유효일이 없어 그날의
-       정원을 알 수 없다. **정원 이력 표를 새로 만들지 않는다** (`07 §15`) —
-       그 셈의 주인은 `warehouse.get_zone_capacity` 하나이며 여기서 복제하지 않는다.
-    """
-    with _read_connection() as conn:
-        return ConsoleWarehouseResponse(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            zones=_zones(conn),
-            lot_locations=_lot_locations(conn, sim_run_id=sim_run_id, as_of=as_of),
-        )
-
-
-def get_placement_options_console(
-    *, sim_run_id: str, lot_id: str
-) -> ConsolePlacementOptionsResponse:
-    """사람이 자리를 고를 때 보는 것. 🔴 **추천도 자동선택도 하지 않는다.**
-
-    ⚠️ 이 품목의 Zone 정책이 **아예 없으면** `UNRESOLVED` 로 답하고 목록을 비운다 —
-       *"전부 금지"* 가 아니라 *"먼저 정책을 정해야 한다"* 는 뜻이다
-       (`warehouse._zone_allowed` 가 두 상태를 가르는 것과 같은 규율이고,
-       실제로 그 상태에서 `place_lot_on_pallet` 은 `ZonePolicyUnresolved` 로 멈춘다).
-    """
-    schema = _schema()
-    with _read_connection() as conn:
-        found = _rows(
-            conn,
-            sql.SQL(
-                """
-                SELECT lot_id, item_id FROM {}.inventory_lots
-                WHERE lot_id = %s AND sim_run_id = %s
-                """
-            ).format(schema),
-            [lot_id, sim_run_id],
-        )
-        if not found:
-            raise LookupError(f"없는 Lot 이다 (sim_run_id={sim_run_id!r}, lot_id={lot_id!r})")
-        item_id = found[0]["item_id"]
-
-        zone_rows = _rows(
-            conn,
-            sql.SQL(
-                """
-                SELECT za.zone_id, z.zone_name, za.allowed, za.is_default
-                FROM {schema}.item_zone_assignments za
-                JOIN {schema}.warehouse_zones z ON z.zone_id = za.zone_id
-                WHERE za.item_id = %s
-                ORDER BY za.is_default DESC, za.allowed DESC, za.zone_id
-                """
-            ).format(schema=schema),
-            [item_id],
-        )
-        zones = [ConsolePlacementZone(**row) for row in zone_rows]
-        allowed_zones = [zone.zone_id for zone in zones if zone.allowed]
-
-        free_locations: list[ConsoleFreeLocation] = []
-        if allowed_zones:
-            location_rows = _rows(
-                conn,
-                sql.SQL(
-                    """
-                    SELECT sl.zone_id, sl.location_id, sl.location_kind,
-                           sl.lane_code, sl.rack_code, sl.bay_code,
-                           sl.level_no, sl.position_no
-                    FROM {schema}.storage_locations sl
-                    LEFT JOIN {schema}.pallets p
-                           ON p.current_location_id = sl.location_id
-                          AND p.status = ANY(%(occupying)s)
-                    WHERE sl.is_active
-                      AND p.pallet_id IS NULL
-                      AND sl.zone_id = ANY(%(zones)s)
-                    ORDER BY sl.zone_id, sl.location_id
-                    """
-                ).format(schema=schema),
-                {"occupying": sorted(_OCCUPYING_PALLET), "zones": allowed_zones},
-            )
-            free_locations = [ConsoleFreeLocation(**row) for row in location_rows]
-
-    return ConsolePlacementOptionsResponse(
-        sim_run_id=sim_run_id,
-        lot_id=lot_id,
-        item_id=item_id,
-        zone_policy_status="CONFIRMED" if zone_rows else "UNRESOLVED",
-        zones=zones,
-        free_locations=free_locations,
-    )
-
-
 # ── GET /logistics/outbound ─────────────────────────────────────────────
 
 
@@ -854,7 +565,7 @@ def get_outbound_console(
     """`as_of` 시점의 예약 목록과 그 아래 할당들. **네 조회와 같은 축이다.**
 
     ```text
-    예약 존재    sales.sale_date <= as_of
+    예약 존재    sales.order_date <= as_of    ← 확정일부터다 (예약은 확정 직후 선다)
     예약 소멸    released_as_of <= as_of
     할당 존재    decided_at < timestamp_cutoff(as_of)
     출고         MOVE-OUT-{allocation_id} · moved_at <= as_of
@@ -971,156 +682,3 @@ def get_reservation_fefo_console(*, reservation_id: str, as_of: date) -> Console
     )
 
 
-# ── GET /logistics/transport/quote ──────────────────────────────────────
-
-
-def get_transport_quote_console(
-    *,
-    shipment_qty_kg: Decimal,
-    logistics_contract_id: str | None = None,
-    body_type: str | None = None,
-) -> ConsoleTransportQuoteResponse:
-    """운송 견적. 🔴 **재고도 원장도 건드리지 않는다 — 읽기와 계산뿐이다.**"""
-    with _read_connection() as conn:
-        plan = transport.plan_fixed_route_transport(
-            conn,
-            shipment_qty_kg=shipment_qty_kg,
-            logistics_contract_id=logistics_contract_id,
-            body_type=body_type,
-        )
-    return ConsoleTransportQuoteResponse(
-        logistics_contract_id=plan.logistics_contract_id,
-        distance_km=plan.distance_km,
-        vehicle_class=plan.vehicle_class,
-        body_type=plan.body_type,
-        vehicle_operational_payload_kg=plan.vehicle_operational_payload_kg,
-        shipment_qty_kg=plan.shipment_qty_kg,
-        trip_count=plan.trip_count,
-        fixed_fee_per_trip_krw=plan.fixed_fee_per_trip_krw,
-        estimated_cost_krw=plan.estimated_cost_krw,
-        # 정본이 스키마에 없다. 항상 None 이고 여기서 지어내지 않는다.
-        standard_minutes=plan.standard_minutes,
-        contract_baseline_cost_krw=plan.contract_baseline_cost_krw,
-        contract_vehicle_class=plan.contract_vehicle_class,
-    )
-
-
-# ── Command ─────────────────────────────────────────────────────────────
-
-
-def place_lot(
-    *,
-    pallet_id: str,
-    sim_run_id: str,
-    lot_id: str,
-    location_id: str,
-    occurred_at: datetime,
-    recorded_by: str,
-    packaging_spec_id: str | None = None,
-    note: str | None = None,
-) -> ConsolePlacementResponse:
-    """Pallet 배치. Zone · 자리 수 검사는 **도메인 함수 안에 있다.**"""
-    with _write_connection() as conn:
-        result = warehouse.place_lot_on_pallet(
-            conn,
-            pallet_id=pallet_id,
-            sim_run_id=sim_run_id,
-            lot_id=lot_id,
-            location_id=location_id,
-            occurred_at=occurred_at,
-            recorded_by=recorded_by,
-            packaging_spec_id=packaging_spec_id,
-            note=note,
-        )
-    return ConsolePlacementResponse(
-        applied=result.applied,
-        pallet_id=result.pallet_id,
-        location_id=result.location_id,
-        zone_id=result.zone_id,
-        status=result.status,
-    )
-
-
-def allocate_reservation(
-    *,
-    reservation_id: str,
-    requests: Sequence[ConsoleAllocationRequestItem],
-    decided_by: str,
-    decided_at: datetime,
-    allocation_basis: HumanAllocationBasis,
-    as_of: date,
-) -> ConsoleAllocateResponse:
-    """사람이 고른 Lot 으로 할당을 확정한다. 🔴 **원장 OUT 은 나가지 않는다.**
-
-    🔴 **`HumanAllocationBasis` 만 받는다.** 이 문은 사람의 것이고
-       `FEFO_AUTO_SELECTED` 는 자동 경로가 스스로 적는 값이다 — 사람이 그 값을 넣으면
-       하지 않은 일이 장부에 선다.
-
-       ⚠️ **`outbound.allocate_stock` 의 타입은 안 좁힌다.** 그 코어는 사람 경로와
-          자동 경로가 함께 쓰는 자리라 셋을 다 받아야 한다. 좁히는 것은 **이 입구**다.
-    """
-    with _write_connection() as conn:
-        result = outbound.allocate_stock(
-            conn,
-            reservation_id=reservation_id,
-            requests=[
-                outbound.AllocationRequest(lot_id=item.lot_id, quantity_kg=item.quantity_kg)
-                for item in requests
-            ],
-            decided_by=decided_by,
-            decided_at=decided_at,
-            allocation_basis=allocation_basis,
-            as_of=as_of,
-        )
-    return ConsoleAllocateResponse(
-        applied=result.applied,
-        reservation_id=reservation_id,
-        allocation_ids=list(result.allocation_ids),
-        reservation_status=result.reservation_status,
-        allocated_qty_kg=result.allocated_qty_kg,
-    )
-
-
-def ship_reservation(
-    *, reservation_id: str, shipped_at: date, sale_item_id: str | None = None
-) -> ConsoleShipResponse:
-    """실출고. 🔴 **여기서만 원장 OUT 이 나가고 잔량이 준다.**
-
-    ⚠️ `remaining_qty_kg` UPDATE 를 이 경로가 따로 쓰지 않는다 — 잔량을 바꾸는 것은
-       `ledger` 하나이고 `ship_allocated_stock` 이 그것을 부른다.
-    """
-    with _write_connection() as conn:
-        result = outbound.ship_allocated_stock(
-            conn,
-            reservation_id=reservation_id,
-            shipped_at=shipped_at,
-            sale_item_id=sale_item_id,
-        )
-    return ConsoleShipResponse(
-        applied=result.applied,
-        reservation_id=reservation_id,
-        shipped_allocation_ids=list(result.shipped_allocation_ids),
-        move_ids=list(result.move_ids),
-        shipped_qty_kg=result.shipped_qty_kg,
-    )
-
-
-def release_reservation_console(
-    *, reservation_id: str, released_as_of: date, status: ReservationStatus
-) -> ConsoleReleaseResponse:
-    """예약을 **그날부터** 놓아준다. 이미 `SHIPPED` 인 할당이 있으면 도메인이 막는다.
-
-    🔴 **`released_as_of` 를 여기서 만들지 않는다** (WP-3 M3). 사람이 콘솔에서 어느
-       날짜의 사실로 놓아주는지 말해야 한다 — 서버 시계로 채우면 그 값이 시뮬레이션
-       날짜 행세를 하고 Historical 이 그것을 그대로 믿는다.
-    """
-    with _write_connection() as conn:
-        result = outbound.release_reservation(
-            conn, reservation_id=reservation_id, released_as_of=released_as_of, status=status
-        )
-    return ConsoleReleaseResponse(
-        applied=result.applied,
-        reservation_id=result.reservation_id,
-        status=result.status,
-        required_qty_kg=result.required_qty_kg,
-    )

@@ -122,7 +122,7 @@ from app.logistics.db import get_db_schema
 # 🔴 **폐기 규칙을 다시 적지 않고 가져다 쓴다.** `_lot_disposable_qty` 는 *"이 Lot 에서
 #    없애도 되는 양"* 의 정본이라, 여기서 같은 뜻을 다시 적으면 두 곳이 갈린다
 #    (같은 패키지의 밑줄 이름을 쓰는 것은 이미 있는 방식이다 —
-#    `console_service` ← `outbound._ASSIGNED_ALLOCATION`).
+#    `api.logistics.read_service` ← `outbound._ASSIGNED_ALLOCATION`).
 from app.logistics.disposal import DisposalError, _lot_disposable_qty, confirm_disposal
 from app.logistics.outbound import lock_outbound_writes
 from app.logistics.turnover import load_lot_turnover
