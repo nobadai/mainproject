@@ -106,6 +106,14 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
   const ready = form.partner_id.trim() !== "" && form.item.trim() !== "" && form.requested_quantity_kg.trim() !== "";
 
   function submit() {
+    const paymentDays = field(form.preferred_payment_days);
+    if (paymentDays !== undefined) {
+      const parsed = Number(paymentDays);
+      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+        setState({ data: null, error: "결제일수는 0 이상의 정수로 입력해 주세요.", running: false });
+        return;
+      }
+    }
     setState({ data: null, error: null, running: true });
     salesRun({
       as_of: asOf,
@@ -116,9 +124,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
       requested_quantity_kg: form.requested_quantity_kg.trim(),
       preferred_unit_price_krw: field(form.preferred_unit_price_krw),
       preferred_delivery_date: field(form.preferred_delivery_date),
-      preferred_payment_days: field(form.preferred_payment_days)
-        ? Number(form.preferred_payment_days)
-        : undefined,
+      preferred_payment_days: paymentDays === undefined ? undefined : Number(paymentDays),
       preferred_payment_terms_type: field(form.preferred_payment_terms_type),
       user_request: field(form.user_request),
     })
@@ -154,6 +160,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
               label: `${partner.partner_name ?? "이름 없음"} (${partner.partner_id})`,
             }))}
           />
+          <FieldHelp>판매 대상 고객사를 선택합니다.</FieldHelp>
           <Select
             label="품목"
             value={form.item}
@@ -165,48 +172,69 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
               label: `${item.item_name} (${item.item_code})`,
             }))}
           />
+          <FieldHelp>등록된 품목 원장에서 선택합니다.</FieldHelp>
           <Input
             label="요청 수량 (kg)"
             value={form.requested_quantity_kg}
             onChange={(v) => setForm({ ...form, requested_quantity_kg: v })}
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
           />
+          <FieldHelp>판매를 검토할 수량입니다.</FieldHelp>
           <label className="flex flex-col gap-1 text-[11.5px]">
             <span className="text-ink2">결제 방식</span>
             <select value={form.preferred_payment_terms_type} onChange={(event) => setForm({ ...form, preferred_payment_terms_type: event.target.value })} className="rounded-md border px-2 py-1 text-[12px]" style={{ borderColor: "var(--color-hair)" }}>
               <option value="">미지정</option><option value="SINGLE">일시 결제</option><option value="INSTALLMENT">분할 결제</option>
             </select>
           </label>
+          <FieldHelp>미지정은 일시 결제로 간주하지 않습니다.</FieldHelp>
           <Input label="요청 메모" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} />
+          <FieldHelp>수량·단가 대신 쓰는 입력이 아닙니다. 추가 상황 설명에 사용합니다.</FieldHelp>
           <Input
             label="희망 단가 (원/kg)"
             value={form.preferred_unit_price_krw}
             onChange={(v) => setForm({ ...form, preferred_unit_price_krw: v })}
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
           />
+          <FieldHelp>미입력 시 현재 요청만으로 재무 검증을 완료하지 못할 수 있습니다.</FieldHelp>
           <Input
             label="희망 납품일"
             value={form.preferred_delivery_date}
             onChange={(v) => setForm({ ...form, preferred_delivery_date: v })}
-            placeholder="YYYY-MM-DD"
+            type="date"
           />
+          <FieldHelp>판매를 희망하는 납품일입니다.</FieldHelp>
           <Input
             label="결제일수"
             value={form.preferred_payment_days}
             onChange={(v) => setForm({ ...form, preferred_payment_days: v })}
             placeholder="비우면 거래처 계약 결제일"
+            type="number"
+            inputMode="numeric"
+            min="0"
+            step="1"
           />
+          <FieldHelp>비우면 명시적인 결제일수를 요청하지 않습니다.</FieldHelp>
         </div>
         {partners.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">거래처 조회 실패: {partners.error}</p>}
         {items.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">품목 조회 실패: {items.error}</p>}
+        {!partners.loading && !partners.error && (partners.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[11px] text-ink2">선택 가능한 거래처가 없습니다.</p>}
+        {!items.loading && !items.error && (items.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[11px] text-ink2">등록된 품목이 없습니다.</p>}
         <button
           onClick={submit}
           disabled={!ready || state.running}
           className="mt-3 rounded-lg border px-3 py-2 text-[12px] disabled:opacity-50"
           style={{ borderColor: "var(--color-hair)" }}
         >
-          {state.running ? "후보를 만드는 중" : "후보 생성"}
+          {state.running ? "후보를 만드는 중" : "판매 후보 생성"}
         </button>
         <p className="mb-0 mt-2 text-[11px] text-ink2">
-          거래처·품목·수량은 필수입니다. 단가와 결제조건이 없으면 재무가 입력 미비로 판정을 닫습니다.
+          거래처·품목·수량은 필수입니다. 이 단계에서는 판매 후보만 생성되며 실제 판매 확정은 기존 승인 및 재검증 절차를 거쳐야 합니다.
         </p>
       </Panel>
       {state.running && <Skeleton what="판매 후보" />}
@@ -256,26 +284,42 @@ function Input({
   onChange,
   placeholder,
   mono,
+  type = "text",
+  inputMode,
+  min,
+  step,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   mono?: boolean;
+  type?: "text" | "number" | "date";
+  inputMode?: "decimal" | "numeric";
+  min?: string;
+  step?: string;
 }) {
   return (
     <label className="flex flex-col gap-1 text-[11.5px]">
       <span className="text-ink2">{label}</span>
       <input
+        type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         spellCheck={false}
+        inputMode={inputMode}
+        min={min}
+        step={step}
         className={`rounded-md border px-2 py-1 text-[12px] ${mono ? "font-mono text-[11px]" : ""}`}
         style={{ borderColor: "var(--color-hair)" }}
       />
     </label>
   );
+}
+
+function FieldHelp({ children }: { children: React.ReactNode }) {
+  return <p className="-mt-1 mb-0 text-[10.5px] leading-relaxed text-ink2">{children}</p>;
 }
 
 function Result({ data }: { data: SalesRunResponse }) {
@@ -286,7 +330,8 @@ function Result({ data }: { data: SalesRunResponse }) {
           <Metric label="처리 결과" value={END_CODES[data.end_code] ?? "정의되지 않은 결과"} />
           <Metric label="만들어진 후보" value={`${data.candidates.length}건`} />
         </div>
-        <p className="mb-0 mt-3 text-[12px] text-ink2">{data.reason}</p>
+        <p className="mb-0 mt-3 text-[12px] text-ink2">후보 {data.candidates.length}건을 생성했습니다. 아래 금일 판매안에서 검토할 수 있습니다.</p>
+        {data.reason && <p className="mb-0 mt-1 text-[12px] text-ink2">{data.reason}</p>}
         <div className="mt-3">
           <TechDetails>
             {/* 🔴 코드와 뜻을 같이 보여 준다 — 뜻만 남기면 되짚을 수 없다. */}
