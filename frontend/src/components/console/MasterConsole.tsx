@@ -10,6 +10,7 @@ import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
 import { LlmTrace } from "@/components/LlmTrace";
 import { SalesConversation } from "@/components/console/SalesConversation";
+import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
@@ -45,7 +46,16 @@ type Turn =
   | { kind: "me"; text: string }
   //   `trace` 는 **①(의도 분류)가 무엇을 했는지**다. 되묻는 답에도 실어야 한다 —
   //   "못 알아들었습니다" 만 적으면 모델이 안 돈 것처럼 보인다.
-  | { kind: "bot"; text: string; trace?: LlmTraceData; note?: string | null }
+  | {
+      kind: "bot";
+      text: string;
+      trace?: LlmTraceData;
+      note?: string | null;
+      //   가격 예측이 쓴 본문. 있으면 문서로 그린다 — 다른 부서 답 모양은 그대로다.
+      markdown?: string | null;
+      //   가격 예측만 물었으면 규칙 머리글(`text`)은 본문과 겹치므로 감춘다.
+      hideText?: boolean;
+    }
   // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
   //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
   //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
@@ -55,6 +65,8 @@ type Turn =
       intent: Intent;
       requestId: string;
       trace: LlmTraceData;
+      //   `/ask` 에 보낸 말. 확인 뒤 가격 예측 조회가 이 원문으로 답한다.
+      utterance: string;
       done?: boolean;
     }
   | { kind: "run"; run: ProcurementRunResponse }
@@ -90,6 +102,17 @@ function salesAnswered(intent: Intent | undefined, status: unknown): boolean {
   return Boolean(agents.includes("sales") && answers && "sales" in answers);
 }
 
+/**
+ * 가격 예측 본문이 있는 답의 화면 칸. **구조화된 `answer.markdown` 으로 가른다** — 문장을 긁지 않는다.
+ *
+ * ⚠️ 화면 타입의 부서 목록(`AgentName`)에 가격 예측이 없다. 판매와 같은 이유로 넓히지 않고 여기서 읽는다.
+ */
+function mlParts(intent: Intent | undefined, answer: AskResponse["answer"] | undefined) {
+  const markdown = answer?.markdown ?? null;
+  const agents = (intent?.agents ?? []) as readonly string[];
+  return { markdown, hideText: Boolean(markdown) && agents.every((a) => a === "ml") };
+}
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -106,6 +129,7 @@ const SHORTCUT: Record<string, string> = {
   inventory: "창고에 얼마나 남았어?",
   finance: "지금 자금 상황 알려줘",
   sales: "판매 진행 상황 알려줘",
+  ml: "내일 배추 경락가 얼마야?",
 };
 
 export function MasterConsole({ session }: { session: Session }) {
@@ -186,6 +210,7 @@ export function MasterConsole({ session }: { session: Session }) {
           intent: res.intent,
           requestId: res.request_id,
           trace: traceOf(res),
+          utterance,
         });
       } else if (res.answer && salesAnswered(res.intent, res.status)) {
         push({
@@ -195,7 +220,13 @@ export function MasterConsole({ session }: { session: Session }) {
         });
       } else if (res.answer) {
         //   조회면 `note` 가 **어느 실행·기준일을 읽었나** 다. 답 아래에 같이 보인다.
-        push({ kind: "bot", text: res.answer.text, trace: traceOf(res), note: res.note });
+        push({
+          kind: "bot",
+          text: res.answer.text,
+          trace: traceOf(res),
+          note: res.note,
+          ...mlParts(res.intent, res.answer),
+        });
       } else {
         push({
           kind: "bot",
@@ -241,6 +272,7 @@ export function MasterConsole({ session }: { session: Session }) {
         targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
         targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
         decidedBy: rerun ? session.name : undefined,
+        utterance: turn.utterance,
       });
 
       if (isProcurement(res)) {
@@ -256,7 +288,12 @@ export function MasterConsole({ session }: { session: Session }) {
       } else if (res.answer && salesAnswered(turn.intent, (res as { status?: unknown }).status)) {
         push({ kind: "sales", asOf, detail: { text: res.answer.text, note: res.note } });
       } else if (res.answer) {
-        push({ kind: "bot", text: res.answer.text, note: res.note });
+        push({
+          kind: "bot",
+          text: res.answer.text,
+          note: res.note,
+          ...mlParts(turn.intent, res.answer),
+        });
       } else {
         push({
           kind: "bot",
@@ -355,7 +392,11 @@ export function MasterConsole({ session }: { session: Session }) {
               className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
-              {{ purchase: "오늘 매입", inventory: "재고", finance: "자금", sales: "판매" }[k]}
+              {
+                { purchase: "오늘 매입", inventory: "재고", finance: "자금", sales: "판매", ml: "가격 전망" }[
+                  k
+                ]
+              }
             </button>
           ))}
         </span>
@@ -493,9 +534,16 @@ function TurnView({
   if (turn.kind === "bot")
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
-        <div className="whitespace-pre-wrap text-sm leading-relaxed">
-          {turn.text}
-        </div>
+        {!turn.hideText && (
+          <div className="whitespace-pre-wrap text-sm leading-relaxed">
+            {turn.text}
+          </div>
+        )}
+        {turn.markdown && (
+          <div className={turn.hideText ? "text-sm" : "mt-2 text-sm"}>
+            <Markdownish text={turn.markdown} />
+          </div>
+        )}
         {turn.trace && <LlmTrace trace={turn.trace} />}
       </div>
     );
