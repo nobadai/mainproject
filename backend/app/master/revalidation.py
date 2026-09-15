@@ -48,7 +48,7 @@ from typing import Any
 from app.master import wiring
 from app.master.budget import BudgetExhausted, CallBudget
 from app.master.day_gate import check_day_gate
-from app.master.decision import RevalidationOutcome
+from app.master.decision import PROCUREMENT_CYCLE, SALES_CYCLE, RevalidationOutcome
 from app.master.envelope import (
     PASSING_VERDICTS,
     AgentName,
@@ -60,6 +60,7 @@ from app.master.envelope import (
     wire_adjustment,
     wire_payload,
 )
+from app.master.flow import ADVISORS
 from app.master.persistence import record_revalidation
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
@@ -72,6 +73,7 @@ __all__ = [
     "conditions_of_original",
     "find_scenario",
     "make_revalidation_request_id",
+    "revalidate_procurement_scenario",
     "revalidate_scenario",
 ]
 
@@ -224,6 +226,10 @@ def revalidate_scenario(
     ⑤ 이력 적재       master_agent_runs (cycle=SALES)
     ```
 
+    🔴 **판매 안 전용이다** (2026-09-16). 매입 안은 `revalidate_procurement_scenario` 로
+      간다. 매입 안을 여기 넣으면 재무 `SALES_VALIDATION` 이 판매 사실을 못 찾아
+      `INPUT_INCOMPLETE`(READY/skipped) 로 답하고, 그 skipped 가 늘 `FAILED` 로 접힌다.
+
     🔴 **전체 후보를 다시 돌리지 않는다.** 사용자는 하나를 골랐고, 나머지는 이미 그
       시점의 판단으로 화면에 나갔다 (설계 §1).
 
@@ -345,6 +351,7 @@ def revalidate_scenario(
             ),
             runner=runner,
             item=item,
+            cycle=SALES_CYCLE,
         )
     except AgentNotRegistered as exc:
         # ★ ②에서 필수는 걸렀지만 **조건부 대상이 빠질 수 있다.** 그때도 못 돈 것이다.
@@ -359,6 +366,7 @@ def revalidate_scenario(
             ),
             runner=runner,
             item=item,
+            cycle=SALES_CYCLE,
         )
 
     outcome, reason = _verdict(validations, tuple(unroutable), adjustments, original_conditions)
@@ -373,6 +381,115 @@ def revalidate_scenario(
         ),
         runner=runner,
         item=item,
+        cycle=SALES_CYCLE,
+    )
+
+
+PROCUREMENT_REVALIDATION_MODE: Mode = "SCENARIO_VALIDATION"
+"""매입 안 재검증이 조언자에게 묻는 mode. **매입 Flow ④ 와 같은 물음이다** (`flow._validate`)."""
+
+
+def revalidate_procurement_scenario(
+    *,
+    scenario: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    original_conditions: frozenset[str],
+    decision_seq: int,
+    policy_version: str,
+    as_of: date,
+    sim_run_id: str,
+    item: str | None = None,
+) -> Revalidation:
+    """매입 안 **1안만** 그 실행의 날로 다시 검증한다 (매입 승인 · 실매입 기록 공용).
+
+    ```text
+    ① 개장 Gate      안 열렸으면 못 돈다                  → ERROR
+    ② 조언자 점검     재무 · 물류 중 등록 안 된 쪽이 있다    → ERROR
+    ③ 호출           조언자마다 SCENARIO_VALIDATION 한 번
+    ④ 매핑           PASSED · CONDITIONAL · FAILED (`_verdict` 공용)
+    ⑤ 이력 적재       master_agent_runs (cycle=PROCUREMENT)
+    ```
+
+    🔴 **판매 capability 로 묻지 않는다** (2026-09-16 실측).
+      전에는 매입 승인도 `revalidate_scenario` 를 탔다. 거기서 `FINANCIAL_VALIDATION` 은
+      재무 `SALES_VALIDATION` 으로 가는데, 매입 안에는 판매 사실이 없어 재무가
+      `INPUT_INCOMPLETE` → `READY/skipped` 로 답했다. 그 skipped 가 허용목록 밖이라
+      **매입 재검증은 늘 `FAILED`** 였고 이력 행은 `cycle=SALES` 로 남았다.
+
+    ★ **묻는 모양은 매입 Flow 가 정한 그대로다** (`flow._validate`). 제안 최상위
+      (응답 `judgment` · `meta.as_of` · `meta.item` 이 여기 있다)에 `scenarios` 를
+      고른 안 하나로 얹는다. 🔴 **안을 골라 담지 않는다** — 매입이 칸을 늘린 날
+      조용히 빠진다.
+
+    ★ **부를 조언자의 주인은 `flow.ADVISORS` 다.** 여기서 이름을 다시 적지 않는다.
+
+    ★ **skipped 는 통과가 아니다** (`_verdict`). 규칙 판정은 LLM 이 꺼져도 돈다 —
+      원 실행이 `E1_APPROVED` 로 올라온 것 자체가 두 조언자가 LLM 없이 판정을 냈다는
+      뜻이다. 그러니 재검증에서 skipped 가 오면 *"못 봤다"* 이지 *"원래 그렇다"* 가 아니다.
+
+    :param proposal: 원 실행 응답의 `judgment` (매입 제안에서 `scenarios` 를 뺀 최상위).
+    """
+    request_id = make_revalidation_request_id(sim_run_id, as_of, decision_seq)
+    context = ExecutionContext(
+        request_id=request_id,
+        as_of=as_of,
+        trigger="USER_REQUEST",
+        policy_version=policy_version,
+        sim_run_id=sim_run_id,
+    )
+
+    day_gate = check_day_gate(as_of, sim_run_id=sim_run_id)
+    if day_gate.gate == "BLOCKED":
+        return Revalidation(
+            outcome="ERROR",
+            reason=f"재검증할 날({as_of.isoformat()})이 안 열려 재검증을 못 돌렸다: "
+            f"{day_gate.reason or day_gate.result}",
+        )
+
+    missing = wiring.missing(ADVISORS)
+    if missing:
+        return Revalidation(
+            outcome="ERROR",
+            reason=f"매입 안을 검증할 조언자가 등록되지 않아 재검증을 못 돌렸다: "
+            f"{', '.join(missing)}",
+        )
+
+    runner = MasterRunner(context, wiring.registry(), CallBudget(limit=REVALIDATION_BUDGET))
+    payload = {**proposal, "scenarios": [dict(scenario)]}
+    validations: dict[str, Mapping[str, Any]] = {}
+    adjustments: list[Mapping[str, Any]] = []
+
+    try:
+        for agent in ADVISORS:
+            reply = runner.call(agent, PROCUREMENT_REVALIDATION_MODE, payload)
+            validations[agent] = _verdict_of(reply)
+            adjustments.extend(wire_adjustment(a) for a in reply.suggested_adjustments)
+    except (BudgetExhausted, AgentNotRegistered) as exc:
+        return _recorded(
+            context,
+            Revalidation(
+                outcome="ERROR",
+                request_id=request_id,
+                reason=f"매입 안 재검증이 끝나지 않았다: {exc}",
+                validations=validations,
+            ),
+            runner=runner,
+            item=item,
+            cycle=PROCUREMENT_CYCLE,
+        )
+
+    outcome, reason = _verdict(validations, (), adjustments, original_conditions)
+    return _recorded(
+        context,
+        Revalidation(
+            outcome=outcome,
+            request_id=request_id,
+            reason=reason,
+            validations=validations,
+        ),
+        runner=runner,
+        item=item,
+        cycle=PROCUREMENT_CYCLE,
     )
 
 
@@ -382,6 +499,7 @@ def _recorded(
     *,
     runner: MasterRunner,
     item: str | None,
+    cycle: str,
 ) -> Revalidation:
     """재검증 실행 1건을 이력에 남긴다 (설계 §4).
 
@@ -391,6 +509,7 @@ def _recorded(
     """
     record_revalidation(
         context,
+        cycle=cycle,
         outcome=result.outcome,
         reason=result.reason,
         validations=result.validations,

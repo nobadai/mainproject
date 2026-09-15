@@ -40,7 +40,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from app.master.envelope import ExecutionContext
 from app.master.plan import ExecutionPlan
@@ -237,6 +237,7 @@ def record_sales(
 def record_revalidation(
     context: ExecutionContext,
     *,
+    cycle: Literal["PROCUREMENT", "SALES"],
     outcome: str,
     reason: str,
     validations: Mapping[str, Mapping[str, Any]],
@@ -251,8 +252,15 @@ def record_revalidation(
       부른다** — `record_status` 가 조회를 남기는 것과 **같은 이유**다. 안 남기면 그
       호출이 이력에서 사라지고, M-16 이 막으려는 것이 정확히 *"안 보이는 호출"* 이다.
 
-    ★ **`cycle` 은 `SALES` 다** (설계 §4). 재검증이 부르는 것은 판매 사이클의
-      capability 둘이고, 표의 CHECK 이 이미 그 값을 받는다 — 마이그레이션이 없다.
+    ★ **`cycle` 은 재검증한 안의 사이클이다** (2026-09-16). 판매 안은 `SALES`, 매입
+      안은 `PROCUREMENT` 다. 표의 CHECK 이 두 값을 이미 받는다 — 마이그레이션이 없다.
+
+      🔴 전에는 `SALES` 로 박혀 있어 매입 승인 재검증도 `cycle=SALES` 로 남았다
+        (실측 `REV-SIM-TEST-PURREC-0916-20260105-0001`). 값은 부르는 쪽
+        (`revalidation._recorded`)이 정한다 — 무엇을 재검증했는지는 여기서 모른다.
+
+      ⚠️ 매입 사이클 행이 늘어도 매입 화면 조회(`scenarios` 가 있는 행만 고른다)와
+        경계 조회(`constraints` 가 있는 행만 본다)에는 안 걸린다. 재검증 행에는 둘 다 없다.
 
     ★ **`end_code` 에 재검증 결과를 그대로 적는다** (`PASSED` · `CONDITIONAL` ·
       `FAILED` · `ERROR`). 컬럼에 CHECK 이 없는 이유가 *"사이클마다 어휘가 다르다"*
@@ -271,7 +279,7 @@ def record_revalidation(
       숨기지 말라고 적은 자리다 (`history_run_id` 의 `None` 과 같은 태도).
     """
     run_id = try_save_run(
-        cycle=_SALES_CYCLE,
+        cycle=cycle,
         as_of=context.as_of,
         request_id=context.request_id,
         item=item,
