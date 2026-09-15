@@ -1,7 +1,7 @@
 "use client";
 
 import type { ProcurementRunResponse } from "@/lib/types";
-import { DEPT_AXIS_LABEL, DEPT_LABEL, UNIT_LABEL, vocab } from "@/lib/vocab";
+import { DEPT_AXIS_LABEL, DEPT_LABEL, UNIT_LABEL } from "@/lib/vocab";
 
 /**
  * 부서가 낸 조정안 — **무엇을 얼마로 고치라는 것인가.**
@@ -37,26 +37,28 @@ export function AdjustmentPanel({
 }: {
   adjustments: ProcurementRunResponse["adjustments"];
 }) {
-  if (!adjustments || adjustments.length === 0) return null;
+  // 실제 서비스 화면이라 사전에 없는 부서 · 축은 코드째 보이지 않고 빠진다 (2026-09-15 결정).
+  const rows = (adjustments ?? []).filter((a) => DEPT_LABEL[a.dept] && DEPT_AXIS_LABEL[a.axis]);
+  if (rows.length === 0) return null;
 
   return (
     <section className="rounded-lg border border-line bg-sunk p-3">
       <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted">
-        부서가 제안한 조정 {adjustments.length}건
+        부서가 제안한 조정 {rows.length}건
       </p>
       <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
         {/* 순서를 손대지 않는다 — 부서가 낸 순서가 그 부서의 설명 순서다 */}
-        {adjustments.map((a, i) => (
+        {rows.map((a, i) => (
           <li key={`${a.dept}-${a.axis}-${a.target_value}-${i}`} className="text-[12.5px]">
-            <span className="font-semibold text-ink">{vocab(DEPT_LABEL, a.dept) ?? a.dept}</span>
+            <span className="font-semibold text-ink">{DEPT_LABEL[a.dept]}</span>
             <span className="ml-1.5 text-muted">
-              {vocab(DEPT_AXIS_LABEL, a.axis) ?? a.axis}
+              {DEPT_AXIS_LABEL[a.axis]}
             </span>
             <span className="tabular ml-1.5 font-mono text-[12px] text-ink">
               {/* 반올림하지 않는다 — 화면이 원본과 다른 숫자를 말하면 안 된다 */}
               {a.target_value.toLocaleString("ko-KR", { maximumFractionDigits: 20 })}
               <span className="ml-0.5 text-[11px] text-muted">
-                {vocab(UNIT_LABEL, a.unit) ?? a.unit}
+                {UNIT_LABEL[a.unit] ?? ""}
               </span>
             </span>
             {/*

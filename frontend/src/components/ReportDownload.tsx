@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { ApiError, runReport } from "@/lib/api";
+import { userErrorText } from "@/lib/procurementLabels";
 
 /**
  * 매입안 보고서 내려받기.
@@ -37,8 +38,13 @@ export function ReportDownload({ requestId }: { requestId: string }) {
       // 브라우저가 저장을 시작한 뒤에 푼다 — 바로 풀면 파일이 비는 브라우저가 있다.
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
-      // 🔴 서버 문장을 덮지 않는다
-      setError(e instanceof ApiError ? `[${e.status}] ${e.message}` : String(e));
+      setError(
+        userErrorText(
+          e instanceof ApiError ? e.status : null,
+          e instanceof Error ? e.message : "",
+          "보고서를 내려받지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        ),
+      );
     } finally {
       setBusy(false);
     }

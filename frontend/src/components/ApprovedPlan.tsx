@@ -1,5 +1,6 @@
 "use client";
 
+import { formatKoreanDateTime } from "@/lib/procurementLabels";
 import type { DecisionOut, Scenario } from "@/lib/types";
 
 /**
@@ -62,8 +63,9 @@ export function ApprovedPlan({
         <h3 className="m-0 text-base font-semibold text-accent-ink">
           ‘{String(scenario.label ?? "")}’ 안으로 결정했습니다
         </h3>
-        <span className="font-mono text-[11.5px] text-faint">
-          {decision.decision_seq}회차 · {decision.decided_by} · {decision.request_id}
+        <span className="text-[11.5px] text-faint">
+          {decision.decided_by}님 승인
+          {formatKoreanDateTime(decision.created_at) && ` · ${formatKoreanDateTime(decision.created_at)}`}
         </span>
       </div>
 
@@ -127,9 +129,8 @@ export function ApprovedPlan({
 
       {/* 🔴 이 화면이 무엇이 아닌지 적는다 — 안 적으면 "오늘 산 것" 으로 읽힌다 */}
       <p className="m-0 rounded-lg border border-line-soft bg-sunk px-3 py-2 text-[12.5px] text-muted">
-        🔴 <b className="text-ink">여기 있는 것은 전부 계획입니다.</b> 승인은 기록이고
-        실제 발주는 이 시스템 밖입니다 — 재고와 현금은 아직 바뀌지 않았습니다. 하루가
-        지나 실제로 무엇이 들어왔는지는 <b className="text-ink">아직 볼 수 없습니다.</b>
+        <b className="text-ink">여기 있는 것은 전부 계획입니다.</b> 승인은 기록이고 실제
+        발주는 별도로 진행합니다.
       </p>
     </div>
   );

@@ -15,7 +15,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useSyncExternalStore } from "react";
 
 import { MasterDock } from "@/components/console/MasterDock";
-//  🔴 시연용 기준일 선택기 (`#431`). 시연이 끝나면 이 줄과 아래 <DemoAsOfPicker /> 를 지운다.
+//  기준일 선택기. 사용자가 날짜를 골라 그날 기준으로 본다.
 import { asOfSnapshot, serverAsOf, setDemoAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import {
   ROLE_LABEL,
@@ -35,11 +35,9 @@ const TABS = [
 ] as const;
 
 /**
- * 🔴 **임시다. 2026-09-08 시연이 끝나면 지운다** (`#431`).
+ * 기준일 선택기. 기능이라 남기고, 화면에는 「기준일」 라벨만 싣는다 (2026-09-15 결정).
  *
- * 운영에서 기준일은 스케줄러가 정한다 (`app/master/clock.py` · `#422`). 화면이 고르는
- * 동안에는 **시간축의 주인이 둘**이라, 화면에도 그렇게 적어 둔다 — 시연에서 누가 보고
- * *"이건 왜 있나"* 를 묻기 전에 답이 옆에 있어야 하고, 우리도 지우는 것을 안 잊는다.
+ * 운영에서 기준일은 스케줄러가 정한다 (`app/master/clock.py` · `#422`).
  */
 function DemoAsOfPicker() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
@@ -63,12 +61,6 @@ function DemoAsOfPicker() {
           style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
         />
       </label>
-      <small
-        className="rounded-md px-1.5 py-0.5 text-[10px]"
-        style={{ background: "rgba(190,120,40,.12)", color: "#9a6410" }}
-      >
-        시연용 · 곧 지웁니다 (#431)
-      </small>
     </span>
   );
 }
@@ -193,13 +185,6 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
               나가기
             </button>
           </div>
-          <p className="m-0 px-1 text-[10px] leading-relaxed" style={{ color: "var(--color-nav-cap)" }}>
-            마스터는 숫자를 만들지 않는다.
-            <br />
-            부서 값을 날짜 축에 놓고,
-            <br />
-            없으면 공란으로 둔다.
-          </p>
         </div>
       </nav>
 
@@ -209,7 +194,6 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
           style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
         >
           <h1 className="m-0 text-[17px] font-semibold tracking-[-0.02em]">{active.label}</h1>
-          {/* 🔴 시연용. 지울 때는 이 한 줄과 위 DemoAsOfPicker 정의를 같이 지운다 (`#431`) */}
           <DemoAsOfPicker />
         </header>
 

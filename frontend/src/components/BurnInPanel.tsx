@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError, burnIn } from "@/lib/api";
+import { formatKoreanDate } from "@/lib/procurementLabels";
 import type { BurnIn, DailyClosing } from "@/lib/types";
 
 /**
@@ -13,8 +14,8 @@ import type { BurnIn, DailyClosing } from "@/lib/types";
  * 5,820만원에서 -1,328만원까지 떨어지고 미수금이 7,305만원 잠긴 회사에게
  * *"지금 사지 마라"* 는 정상 판단이다. 결론 옆에 경로를 둔다.
  *
- * ★ **읽기 전용이다.** 하루를 진행시키려면 승인이 발주로 흘러가야 하고, 그건 각
- *   파트의 상태 전이 로직이다 — 아직 없다. 화면이 그 사실을 적는다.
+ * ★ **읽기 전용이다.** 실제 서비스 사용자에게 보이는 화면이라 개발 경고 · 코드는
+ *   싣지 않는다 (2026-09-15 결정).
  *
  * ★ **값을 만들지 않는다.** 증감·합계를 화면이 계산하기 시작하면 재무가 내는
  *   숫자와 갈릴 자리가 생긴다. 서버가 준 값만 그린다.
@@ -84,8 +85,11 @@ export function BurnInPanel() {
     burnIn()
       .then(setData)
       .catch((e) =>
-        // 🔴 서버 문장을 덮지 않는다
-        setError(e instanceof ApiError ? `[${e.status}] ${e.message}` : String(e)),
+        setError(
+          e instanceof ApiError && e.status === 0
+            ? "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+            : "지난 30일 기록을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        ),
       );
   }, []);
 
@@ -106,12 +110,12 @@ export function BurnInPanel() {
     <div className="flex flex-col gap-4">
       <header>
         <h2 className="m-0 text-base font-semibold">
-          에이전트가 판단하기 전 {rows.length}일
+          자동 판단을 시작하기 전 {rows.length}일
         </h2>
         <p className="m-0 mt-1 text-[12.5px] text-muted">
-          {data.period_start} ~ {data.period_end} · 이 기간은{" "}
-          <b className="text-ink">사람이 운영한 이력</b>입니다. 에이전트는{" "}
-          <b className="text-accent-ink">{data.as_of}</b> 부터 판단합니다.
+          {formatKoreanDate(data.period_start)} ~ {formatKoreanDate(data.period_end)} · 이 기간은{" "}
+          <b className="text-ink">사람이 운영한 기록</b>입니다. 자동 판단은{" "}
+          <b className="text-accent-ink">{formatKoreanDate(data.as_of)}</b>부터 시작합니다.
         </p>
       </header>
 
@@ -139,22 +143,11 @@ export function BurnInPanel() {
         ))}
       </div>
 
-      {/* 🔴 이 화면이 무엇이 아닌지 적는다 — 안 적으면 "매일 도는 중" 으로 읽힌다 */}
-      <div className="rounded-lg border border-line-soft bg-sunk px-3 py-2.5">
-        <p className="m-0 text-[12.5px] text-muted">
-          🔴 <b className="text-ink">여기는 아직 하루씩 나아가지 않습니다.</b> 위 30일은
-          미리 심긴 이력이고(<code className="font-mono text-[11.5px]">{data.status}</code>),
-          승인을 눌러도 재고·현금이 바뀌지 않습니다 — 승인은 기록이지 발주가 아닙니다.
-          날짜를 하루 넘기면 재무가{" "}
-          <code className="font-mono text-[11.5px]">finance_state@다음날</code> 이 없어
-          멈춥니다.
+      {안닫힌날 > 0 && (
+        <p className="m-0 rounded-lg border border-line-soft bg-sunk px-3 py-2.5 text-[12.5px] text-warn">
+          아직 마감되지 않은 날이 {안닫힌날}일 있습니다. 그날 숫자는 바뀔 수 있습니다.
         </p>
-        {안닫힌날 > 0 && (
-          <p className="m-0 mt-1.5 text-[12px] text-warn">
-            마감되지 않은 날 {안닫힌날}일 — 통계에 넣지 마십시오
-          </p>
-        )}
-      </div>
+      )}
 
       <details className="rounded-lg border border-line bg-surface">
         <summary className="cursor-pointer px-3 py-2 text-[13px] font-semibold">

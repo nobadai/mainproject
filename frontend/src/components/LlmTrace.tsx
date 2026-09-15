@@ -36,6 +36,7 @@ export const AGENT_LABEL: Record<string, string> = {
   finance: "재무",
   inventory: "물류",
   purchase: "매입",
+  sales: "판매",
 };
 
 /** 확신도는 **되묻는 이유 그 자체**라 등급마다 색을 다르게 준다. */

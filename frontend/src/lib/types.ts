@@ -288,6 +288,8 @@ export interface RunHistory {
   created_at: string;
   elapsed_ms: number | null;
   plan: Record<string, unknown>[];
+  /** 실행을 부른 요청 원문. 화면은 품목(`item`)만 읽는다. */
+  request_payload?: Record<string, unknown>;
   decisions: DecisionOut[];
 }
 
