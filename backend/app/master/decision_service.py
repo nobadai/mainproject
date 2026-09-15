@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -15,7 +16,9 @@ from uuid import UUID
 from app.master.commitment import (
     ApprovedCommitment,
     CommitmentNotBuildable,
+    RecordedLeg,
     build_commitment,
+    with_purchase_record,
 )
 from app.master.decision import (
     PROCUREMENT_CYCLE,
@@ -25,11 +28,13 @@ from app.master.decision import (
     DecisionOut,
     DecisionRejected,
     available_scenario_names,
+    awaits_purchase_record,
     check_decidable,
     check_scenario_exists,
     next_seq,
 )
 from app.master.decision_repository import list_decisions, save_decision
+from app.master.purchase_record_repository import list_purchase_record_legs
 from app.master.revalidation import (
     Revalidation,
     conditions_of_original,
@@ -150,14 +155,25 @@ def record_decision(request_id: str, payload: DecisionIn) -> DecisionOut:
             }
         )
     out, commitment = _commitment_parts(request_id, seq, payload, response_payload)
-    return saved.model_copy(
-        update={
-            "commitment": out,
-            # 🔴 **축은 실행 행에서 온다.** 여기서 상수를 읽지 않는다 —
-            #    `_sim_run_id_of` 가 왜인지를 적었다.
-            "transition": _transition_for(commitment, sim_run_id=sim_run_id),
-        }
-    )
+    # 🔴 **사람 승인은 전이를 부르지 않는다** (설계 260915 안 A §4-2). 선정만 적고,
+    #    실매입을 기록하는 순간 그 값으로 전이가 선다 (`purchase_record.record_purchase`).
+    #    자동 승인(`AUTO-BACKFILL`)은 지금 그대로 승인 즉시 계획값으로 전이한다.
+    if commitment is not None and awaits_purchase_record(payload.decided_by):
+        transition = _awaiting_purchase_record()
+    else:
+        # 🔴 **축은 실행 행에서 온다.** 여기서 상수를 읽지 않는다 —
+        #    `_sim_run_id_of` 가 왜인지를 적었다.
+        transition = _transition_for(commitment, sim_run_id=sim_run_id)
+    return saved.model_copy(update={"commitment": out, "transition": transition})
+
+
+def _awaiting_purchase_record() -> TransitionOut:
+    """사람 승인의 전이 자리. **전이를 부르지 않았다**는 사실을 값으로 싣는다.
+
+    ★ `None` 으로 비우지 않는다 — `None` 은 *"반영할 약정이 없다"* 이고, 이쪽은
+      약정이 섰는데 **기록을 기다린다**이다.
+    """
+    return TransitionOut(status="AWAITING_PURCHASE_RECORD", reason="실매입을 기록하면 반영됩니다")
 
 
 def _cycle_of(row: Mapping[str, Any]) -> str:
@@ -277,7 +293,50 @@ def _revalidation_for(
             outcome="ERROR",
             reason=f"승인한 안 '{payload.scenario_label}' 을 원 실행에서 유일하게 찾지 못했다.",
         )
+    return _revalidate_scenario_of(
+        row,
+        response_payload,
+        payload.scenario_label,
+        scenario,
+        decision_seq,
+        sim_run_id=sim_run_id,
+    )
 
+
+def revalidate_recorded(approval: CurrentApproval, scenario: Mapping[str, Any]) -> Revalidation:
+    """실매입 기록값으로 바꾼 **안 사본**을 승인 때와 같은 재검증에 태운다.
+
+    ★ **재검증 경로를 새로 만들지 않는다** (설계 260915 안 A §4-6 ①). 승인 재검증과
+      같은 함수(`_revalidate_scenario_of`)를 지나고, 다른 것은 넘기는 안 하나뿐이다 —
+      기록값이 재무 Cap · 현금흐름을 우회하지 못하게 하려는 것이다.
+
+    ★ 조건 비교의 기준(`original_conditions`)은 **원 실행의 그 안**이다. 기록값이 새
+      조건을 붙이면 승인 때와 같이 `CONDITIONAL` 로 잡힌다.
+    """
+    return _revalidate_scenario_of(
+        approval.run_row,
+        approval.response_payload,
+        approval.decision.scenario_label or "",
+        scenario,
+        approval.decision.decision_seq,
+        sim_run_id=approval.sim_run_id,
+    )
+
+
+def _revalidate_scenario_of(
+    row: Mapping[str, Any],
+    response_payload: Mapping[str, Any],
+    scenario_label: str,
+    scenario: Mapping[str, Any],
+    decision_seq: int,
+    *,
+    sim_run_id: str | None,
+) -> Revalidation:
+    """안 하나를 **그 실행의 날 · 정책판 · 축**으로 재검증한다 (승인 · 실매입 기록 공용).
+
+    ★ 2026-09-15 에 `_revalidation_for` 의 뒷부분을 떼어 냈다. 실매입 기록이 **같은
+      문**을 지나야 하는데, 두 벌로 두면 한쪽만 기준이 바뀌는 날이 온다.
+    """
     # 🔴 **재검증이 설 날은 그 실행의 날이다** (2026-09-09 · 마스터 판단).
     #    부르는 쪽에서 받지 않는다 — 받으면 화면이든 걷기든 아무 날이나 넣을 수 있고,
     #    그 순간 재검증이 자기가 언제 도는지를 남에게 맡기게 된다. 실행 행이 정한다.
@@ -313,7 +372,7 @@ def _revalidation_for(
 
     return revalidate_scenario(
         scenario=scenario,
-        original_conditions=conditions_of_original(response_payload, payload.scenario_label),
+        original_conditions=conditions_of_original(response_payload, scenario_label),
         decision_seq=decision_seq,
         policy_version=policy_version,
         as_of=as_of,
@@ -554,20 +613,122 @@ def _current_approval_parts(
       화면이 본 약정과 원장에 실린 약정이 갈리는 날이 온다.
 
     ★ 번복은 여기서 저절로 반영된다 — `is_current` 인 결정 하나만 본다.
+
+    🔴 **실매입 기록이 있으면 기록값으로 덮는다** (설계 260915 안 A §4-4). 재시도 ·
+       조회가 같은 값을 봐야 한다. 기록은 사람 승인에만 있으므로 자동 승인은 조회도
+       안 한다.
+    """
+    approval = current_approval(request_id)
+    if approval is None:
+        return None, None
+    if approval.plan is None or not awaits_purchase_record(approval.decision.decided_by):
+        return approval.plan_out, approval.plan
+    if approval.sim_run_id is None:
+        # ★ 기록은 실행 축으로 적힌다 (PK). 축을 못 읽은 승인에는 기록이 설 수 없다.
+        return approval.plan_out, approval.plan
+    rows = list_purchase_record_legs(
+        sim_run_id=approval.sim_run_id,
+        request_id=request_id,
+        decision_seq=approval.decision.decision_seq,
+    )
+    if not rows:
+        return approval.plan_out, approval.plan
+    try:
+        recorded = commitment_with_record(approval, recorded_legs_of(rows), str(rows[0]["grade"]))
+    except CommitmentNotBuildable as exc:
+        reason = f"실매입 기록을 약정에 덮지 못했다: {exc}"
+        return CommitmentOut(buildable=False, reason=reason), None
+    return CommitmentOut.of(recorded), recorded
+
+
+@dataclass(frozen=True)
+class CurrentApproval:
+    """현재 유효한 승인 하나와 **그 실행으로 재조립한 선정안 약정** (기록 덮기 전).
+
+    ★ 실매입 기록이 이것을 쓴다 — 폼의 기본값(선정안)과 기록을 덮을 바탕이 같은
+      재조립에서 나와야 둘이 안 갈린다.
+    """
+
+    decision: DecisionOut
+    cycle: str
+    #: 결정이 가리키는 실행 이력 행. 재검증이 정책판 · 품목을 여기서 읽는다.
+    run_row: dict[str, Any]
+    response_payload: dict[str, Any]
+    #: 그 실행의 기준일. 실매입 매입일의 하한이다.
+    as_of: date | None
+    #: N5 원문 (`constraints.finance.purchase_payment_days`). 약정 조립이 읽는 그 값이다.
+    purchase_payment_days: Any
+    sim_run_id: str | None
+    #: 선정안 약정의 응답 모양. 못 만들었으면 `buildable=False` 와 사유.
+    plan_out: CommitmentOut | None
+    #: 선정안 약정 객체. 못 만들었으면 `None`.
+    plan: ApprovedCommitment | None
+
+
+def current_approval(request_id: str) -> CurrentApproval | None:
+    """현재 유효한 승인. 결정이 없거나 현재 결정이 승인이 아니면 `None`.
+
+    ★ **재조립은 지금까지와 같은 한 줄기다** — 결정이 가리키는 실행을 읽어
+      `_commitment_parts` 로 선정안 약정을 만든다. 기록을 덮는 것은 이 뒤의 일이다.
     """
     current = next((row for row in list_decisions(request_id) if row.is_current), None)
     if current is None or current.decision != "APPROVE":
-        return None, None
+        return None
 
     row = _run_for(request_id, current.history_run_id)
+    response_payload = dict(row.get("response_payload") or {})
     replay = DecisionIn(
         decision="APPROVE",
         scenario_label=current.scenario_label,
         decided_by=current.decided_by,
         history_run_id=current.history_run_id,
     )
-    return _commitment_parts(
-        request_id, current.decision_seq, replay, dict(row.get("response_payload") or {})
+    plan_out, plan = _commitment_parts(request_id, current.decision_seq, replay, response_payload)
+    return CurrentApproval(
+        decision=current,
+        cycle=_cycle_of(row),
+        run_row=dict(row),
+        response_payload=response_payload,
+        as_of=_as_of_of(response_payload),
+        purchase_payment_days=_payment_days_of(response_payload),
+        sim_run_id=_sim_run_id_of(row),
+        plan_out=plan_out,
+        plan=plan,
+    )
+
+
+def recorded_legs_of(rows: Sequence[Mapping[str, Any]]) -> tuple[RecordedLeg, ...]:
+    """기록 행을 회차 값으로 옮긴다. **값을 고치지 않는다.**"""
+    return tuple(
+        RecordedLeg(
+            seq=int(row["leg_seq"]),
+            qty_kg=float(row["quantity_kg"]),
+            amount_krw=float(row["amount_krw"]),
+            purchase_date=row["purchase_date"],
+            arrival_date=row["arrival_date"],
+        )
+        for row in rows
+    )
+
+
+def commitment_with_record(
+    approval: CurrentApproval, legs: Sequence[RecordedLeg], grade: str
+) -> ApprovedCommitment:
+    """선정안 약정 **사본**에 실매입 값을 덮는다.
+
+    ★ **지급 일수는 약정 조립이 쓰던 그 값이다** (`_payment_days_of` · N5). 여기서
+      재무 정책을 다시 읽지 않는다.
+
+    :raises CommitmentNotBuildable: 선정안이 없거나 기록이 선정안 회차와 맞지 않는다.
+    """
+    if approval.plan is None:
+        reason = approval.plan_out.reason if approval.plan_out is not None else None
+        raise CommitmentNotBuildable(reason or "선정안 약정을 만들지 못했다.")
+    return with_purchase_record(
+        approval.plan,
+        legs=legs,
+        grade=grade,
+        purchase_payment_days=approval.purchase_payment_days,
     )
 
 

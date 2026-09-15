@@ -161,6 +161,9 @@ def test_라벨이_겹치면_첫_것을_고르지_않고_막는다(wired):
 
 def _current(monkeypatch, decisions, response):
     monkeypatch.setattr(svc, "list_decisions", lambda request_id: decisions)
+    # ★ 사람 승인은 실매입 기록을 찾아본다 (설계 260915 안 A §4-4). 여기서는 기록이
+    #   없는 상태 — 재조립이 선정안 그대로 나와야 한다.
+    monkeypatch.setattr(svc, "list_purchase_record_legs", lambda request_id, decision_seq: [])
     monkeypatch.setattr(
         svc,
         "_run_for",
