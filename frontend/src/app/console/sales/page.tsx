@@ -750,14 +750,21 @@ function Agent({ simRun, asOf }: { simRun: string; asOf: string }) {
 /* ── 실행 이력 ─────────────────────────────────────────────────────────── */
 
 function Runs({ simRun }: { simRun: string }) {
+  const [page, setPage] = useState(0);
   const state = useConsoleData<SalesRunsResponse>(
     `runs-full:${simRun}`,
-    () => salesConsole.runs(simRun),
+    // 화면은 10개씩 나누되, 같은 실행의 오래된 기록도 페이지에서 찾을 수 있게 최대
+    // 읽기 한도까지 한 번에 받는다. 이력 조회는 read-only다.
+    () => salesConsole.runs(simRun, 500),
     true,
   );
   if (state.loading) return <Skeleton what="실행 이력" />;
   if (state.error) return <Failed what="실행 이력" message={state.error} />;
   const data = state.data!;
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(data.rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageRows = data.rows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   return (
     <Panel title="판매 실행 이력" subtitle="이 실행에 속한 저장 기록만 표시합니다">
       {data.rows.length === 0 ? (
@@ -765,7 +772,7 @@ function Runs({ simRun }: { simRun: string }) {
       ) : (
         <>
           <Table
-            rows={data.rows}
+            rows={pageRows}
             columns={[
               { key: "as_of", label: "기준일", mono: true, render: (row) => row.as_of },
               { key: "item", label: "품목", render: (row) => row.item ?? "품목 미상" },
@@ -783,10 +790,37 @@ function Runs({ simRun }: { simRun: string }) {
               },
             ]}
           />
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+            <span>
+              전체 {data.rows.length}건 중 {currentPage * pageSize + 1}–
+              {Math.min((currentPage + 1) * pageSize, data.rows.length)}건
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.max(0, value - 1))}
+                disabled={currentPage === 0}
+                className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ borderColor: "var(--color-hair)" }}
+              >
+                이전
+              </button>
+              <span>{currentPage + 1} / {pageCount}</span>
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}
+                disabled={currentPage >= pageCount - 1}
+                className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ borderColor: "var(--color-hair)" }}
+              >
+                다음
+              </button>
+            </div>
+          </div>
           <div className="mt-4">
             <TechDetails>
               <Table
-                rows={data.rows}
+                rows={pageRows}
                 columns={[
                   { key: "runtime", label: "runtime_status", mono: true, render: (row) => row.runtime_status },
                   {
