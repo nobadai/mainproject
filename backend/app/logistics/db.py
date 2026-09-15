@@ -20,9 +20,23 @@ _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD
 #: 재무·매입·영업·ML 과 같은 값으로 맞춘다.
 CONNECT_TIMEOUT_SECONDS = 5
 
+#: ★ `.env` 는 프로세스에서 한 번만 읽는다.
+#: 🔴 대시보드 한 요청에 `_required_environment` 가 550회 불리고,
+#:    매번 파일을 다시 파싱하느라 7.8초를 썼다.
+#: 값은 아래에서 `os.getenv` 로 매번 읽으므로 검사가 환경변수를 바꿔도 그대로 따라간다.
+_env_file_loaded = False
+
+
+def _load_env_file_once() -> None:
+    global _env_file_loaded
+    if _env_file_loaded:
+        return
+    load_dotenv(_ENV_FILE)
+    _env_file_loaded = True
+
 
 def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
-    load_dotenv(_ENV_FILE)
+    _load_env_file_once()
     values = {key: os.getenv(key, "") for key in keys}
     missing = [key for key, value in values.items() if not value]
     if missing:
