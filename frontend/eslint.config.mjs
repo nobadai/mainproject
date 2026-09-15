@@ -5,5 +5,6 @@ import nextTypeScript from "eslint-config-next/typescript";
 export default defineConfig([
   ...nextVitals,
   ...nextTypeScript,
-  globalIgnores([".next/**", "out/**", "build/**", "next-env.d.ts"]),
+  // 개발 서버가 작업공간 루트에서 시작된 경우에도 생성물이 린트 대상이 되지 않게 한다.
+  globalIgnores([".next/**", "frontend/.next/**", "out/**", "build/**", "next-env.d.ts"]),
 ]);

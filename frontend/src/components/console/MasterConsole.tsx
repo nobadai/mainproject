@@ -1,0 +1,616 @@
+"use client";
+
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+
+import { Panel } from "@/components/Badges";
+import { DecisionModal } from "@/components/DecisionModal";
+import { ProcurementResult } from "@/components/ProcurementResult";
+import { ReportDownload } from "@/components/ReportDownload";
+import { RunHistoryPanel } from "@/components/RunHistory";
+import { ApprovedPlan } from "@/components/ApprovedPlan";
+import { LlmTrace } from "@/components/LlmTrace";
+import { SalesConversation } from "@/components/console/SalesConversation";
+import { Markdownish } from "@/components/console/ml/Markdownish";
+import { ApiError, ask, execute } from "@/lib/api";
+//  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
+import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
+import { CAN, type Session } from "@/lib/session";
+import {
+  isProcurement,
+  type AskResponse,
+  type DecisionOut,
+  type Intent,
+  type ProcurementRunResponse,
+  type Scenario,
+} from "@/lib/types";
+
+/**
+ * 마스터에게 묻는 자리 — **화면 아래 서랍(dock) 안에 들어간다.**
+ *
+ * ★ 예전에는 이것이 화면 전체였습니다 (`/console` 한 장). 데모 기준으로
+ *   바꾸면서 **주연과 조연이 바뀌었습니다** — 이제 표와 그래프가 화면을
+ *   차지하고, 대화는 필요할 때 아래에서 꺼내 씁니다.
+ *
+ * ★ **한 줄도 안 버렸습니다.** `/ask` → 되묻기 → `/ask/execute` 로 이어지는
+ *   흐름은 지금 mainproject 에서 실제로 도는 유일한 것이라, 자리만 옮겼습니다.
+ *
+ * ★ **2단계다.** `/ask` 가 `confirm_required` 로 되묻고, 사람이 누르면 `/ask/execute`
+ *   가 돈다. 그때 **받은 `intent` 를 그대로 되돌려보낸다** — 서버는 재분류하지 않고,
+ *   그래야 사용자가 확인한 것이 실행된다.
+ *
+ * ★ **값을 만들지 않는다.** 수량·금액·결론은 전부 서버가 정하고 화면은 그리기만 한다.
+ */
+
+type Turn =
+  | { kind: "me"; text: string }
+  //   `trace` 는 **①(의도 분류)가 무엇을 했는지**다. 되묻는 답에도 실어야 한다 —
+  //   "못 알아들었습니다" 만 적으면 모델이 안 돈 것처럼 보인다.
+  | {
+      kind: "bot";
+      text: string;
+      trace?: LlmTraceData;
+      note?: string | null;
+      //   가격 예측이 쓴 본문. 있으면 문서로 그린다 — 다른 부서 답 모양은 그대로다.
+      markdown?: string | null;
+      //   가격 예측만 물었으면 규칙 머리글(`text`)은 본문과 겹치므로 감춘다.
+      hideText?: boolean;
+    }
+  // 🔴 `done` 이 필요한 이유 — 누른 뒤에도 버튼이 살아 있으면 **같은 실행을 두 번**
+  //    돌릴 수 있다. 실측에서 첫 매입 확인을 다시 눌러 같은 업무 키로 재실행됐고,
+  //    그게 바로 `DECISION-COLLISION` 이 잡는 상황이다.
+  | {
+      kind: "confirm";
+      text: string;
+      intent: Intent;
+      requestId: string;
+      trace: LlmTraceData;
+      //   `/ask` 에 보낸 말. 확인 뒤 가격 예측 조회가 이 원문으로 답한다.
+      utterance: string;
+      done?: boolean;
+    }
+  | { kind: "run"; run: ProcurementRunResponse }
+  //   판매가 답한 조회. 요약 → 판매안 확인 → 카드 → 선택 → 최종 확인 → 확정까지 이 턴이 끈다.
+  //   마스터가 만든 원문 답 · 실행 축 · 분류 흔적은 실제 서비스 화면에 싣지 않는다 (2026-09-15 결정).
+  | {
+      kind: "sales";
+      asOf: string;
+      detail: { text: string; note?: string | null; trace?: LlmTraceData };
+    }
+  //   승인 직후 "무엇을 하기로 한 것인가". **"오늘 산 것" 이 아니다** — 승인은
+  //   기록이고 발주는 이 시스템 밖이다 (`ApprovedPlan` 이 그 사실을 적는다).
+  | { kind: "approved"; scenario: Scenario; decision: DecisionOut }
+  | { kind: "error"; text: string };
+
+/**
+ * 화면이 쥐고 있을 ① 분류 흔적. **응답에 이미 있던 것만 추린다** — 여기서 값을
+ * 만들면 화면이 서버와 다른 이야기를 하게 된다.
+ */
+type LlmTraceData = Pick<
+  AskResponse,
+  "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
+>;
+
+/**
+ * 판매가 답했는가. **구조화된 조회 답(`status.answers.sales`)으로 가른다** — 문장을 긁지 않는다.
+ *
+ * ⚠️ 화면 타입의 부서 목록(`AgentName`)에 판매가 아직 없다. 공용 계약이라 넓히지 않고 여기서 읽는다.
+ */
+function salesAnswered(intent: Intent | undefined, status: unknown): boolean {
+  const answers = (status as { answers?: Record<string, unknown> } | null | undefined)?.answers;
+  const agents = (intent?.agents ?? []) as readonly string[];
+  return Boolean(agents.includes("sales") && answers && "sales" in answers);
+}
+
+/**
+ * 가격 예측 본문이 있는 답의 화면 칸. **구조화된 `answer.markdown` 으로 가른다** — 문장을 긁지 않는다.
+ *
+ * ⚠️ 화면 타입의 부서 목록(`AgentName`)에 가격 예측이 없다. 판매와 같은 이유로 넓히지 않고 여기서 읽는다.
+ */
+function mlParts(intent: Intent | undefined, answer: AskResponse["answer"] | undefined) {
+  const markdown = answer?.markdown ?? null;
+  const agents = (intent?.agents ?? []) as readonly string[];
+  return { markdown, hideText: Boolean(markdown) && agents.every((a) => a === "ml") };
+}
+
+function traceOf(res: AskResponse): LlmTraceData {
+  return {
+    intent: res.intent,
+    llm_status: res.llm_status,
+    llm_provider: res.llm_provider,
+    llm_model: res.llm_model,
+    llm_attempts: res.llm_attempts,
+    llm_fallback_used: res.llm_fallback_used,
+  };
+}
+
+const SHORTCUT: Record<string, string> = {
+  purchase: "오늘 배추 얼마나 사야 해?",
+  inventory: "창고에 얼마나 남았어?",
+  finance: "지금 자금 상황 알려줘",
+  sales: "판매 진행 상황 알려줘",
+  ml: "내일 배추 경락가 얼마야?",
+};
+
+export function MasterConsole({ session }: { session: Session }) {
+  //  🔴 시연용 기준일 (`#431`). `ask` · `execute` 가 실제로 싣는 값과 같은 곳을 읽는다
+  //     — 머리에 적힌 날짜와 서버에 보내는 날짜가 갈리면 안 된다.
+  const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
+  //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
+  const [tab, setTab] = useState<"master" | "runs">("master");
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // 승인 모달 — 어느 실행의 어느 안인지 함께 들고 있어야 한다
+  const [picked, setPicked] = useState<{
+    scenario: Scenario;
+    requestId: string;
+    historyRunId: string | null;
+  } | null>(null);
+  // 🔴 재요청·승인은 **어느 실행에 대한 것인지**를 화면이 실어야 한다 — 발화문엔 없다.
+  //
+  //    업무 키만으로는 부족하다. 한 키에 실행이 여러 행이라(실측 75행) 그 사이
+  //    재실행이 있으면 **본 것과 다른 안이 승인된 것으로 남는다.** 그래서 업무 키와
+  //    실행 행 id 를 **짝으로** 들고 다닌다.
+  const [runs, setRuns] = useState<
+    { requestId: string; historyRunId: string | null }[]
+  >([]);
+  const runIds = runs.map((r) => r.requestId);
+  const last = runs.at(-1) ?? null;
+
+  function rememberRun(run: { request_id: string; history_run_id: string | null }) {
+    setRuns((prev) =>
+      prev.some((r) => r.requestId === run.request_id)
+        ? prev
+        : [...prev, { requestId: run.request_id, historyRunId: run.history_run_id }],
+    );
+  }
+  const [modalBusy, setModalBusy] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+
+  const tail = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    tail.current?.scrollIntoView({ behavior: "smooth" });
+  }, [turns]);
+
+  const can = CAN[session.role];
+
+  function push(...items: Turn[]) {
+    setTurns((prev) => [...prev, ...items]);
+  }
+
+  function fail(error: unknown) {
+    push({
+      kind: "error",
+      text: userErrorText(
+        error instanceof ApiError ? error.status : null,
+        error instanceof Error ? error.message : "",
+        "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+      ),
+    });
+  }
+
+  /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
+  async function send(text: string) {
+    const utterance = text.trim();
+    if (!utterance || busy) return;
+    setDraft("");
+    push({ kind: "me", text: utterance });
+    setBusy(true);
+    try {
+      const res: AskResponse = await ask(utterance);
+      if (res.confirm_required) {
+        push({
+          kind: "confirm",
+          text: res.clarification ?? "진행할까요?",
+          intent: res.intent,
+          requestId: res.request_id,
+          trace: traceOf(res),
+          utterance,
+        });
+      } else if (res.answer && salesAnswered(res.intent, res.status)) {
+        push({
+          kind: "sales",
+          asOf: String(res.as_of),
+          detail: { text: res.answer.text, note: res.note, trace: traceOf(res) },
+        });
+      } else if (res.answer) {
+        //   조회면 `note` 가 **어느 실행·기준일을 읽었나** 다. 답 아래에 같이 보인다.
+        push({
+          kind: "bot",
+          text: res.answer.text,
+          trace: traceOf(res),
+          note: res.note,
+          ...mlParts(res.intent, res.answer),
+        });
+      } else {
+        push({
+          kind: "bot",
+          text: res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+          trace: traceOf(res),
+        });
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
+  async function confirm(
+    turn: Extract<Turn, { kind: "confirm" }>,
+    index: number,
+  ) {
+    if (busy || !session || turn.done) return;
+    const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
+
+    // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
+    if (rerun && !last) {
+      push({
+        kind: "error",
+        text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
+      });
+      return;
+    }
+
+    // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
+    setTurns((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
+    );
+    push({ kind: "me", text: "네" });
+    setBusy(true);
+    try {
+      const res = await execute({
+        intent: turn.intent,
+        requestId: turn.requestId,
+        // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
+        targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
+        decidedBy: rerun ? session.name : undefined,
+        utterance: turn.utterance,
+      });
+
+      if (isProcurement(res)) {
+        rememberRun(res);
+        push({ kind: "run", run: res });
+      } else if (res.run) {
+        // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
+        rememberRun(res.run);
+        push(
+          { kind: "bot", text: res.answer?.text ?? "" },
+          { kind: "run", run: res.run },
+        );
+      } else if (res.answer && salesAnswered(turn.intent, (res as { status?: unknown }).status)) {
+        push({ kind: "sales", asOf, detail: { text: res.answer.text, note: res.note } });
+      } else if (res.answer) {
+        push({
+          kind: "bot",
+          text: res.answer.text,
+          note: res.note,
+          ...mlParts(turn.intent, res.answer),
+        });
+      } else {
+        push({
+          kind: "bot",
+          text: res.clarification ?? "실행했지만 답이 비었습니다.",
+        });
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ③ 안 선택 — 발화문에 없는 둘(대상 실행·승인자)을 화면이 싣는다. */
+  async function approve() {
+    if (!picked || !session) return;
+    setModalBusy(true);
+    setModalError(null);
+    try {
+      const res = await execute({
+        intent: {
+          action: "SELECT_SCENARIO",
+          agents: [],
+          item: null,
+          scenario_label: String(picked.scenario.label ?? ""),
+          condition: null,
+          confidence: "HIGH",
+        },
+        targetRequestId: picked.requestId,
+        targetHistoryRunId: picked.historyRunId ?? undefined,
+        decidedBy: session.name,
+      });
+      const scenario = picked.scenario;
+      setPicked(null);
+      if (!isProcurement(res) && res.answer)
+        push({ kind: "bot", text: res.answer.text });
+      // 화면은 방금 무엇을 승인했는지 안다 — 서버에 다시 묻지 않는다.
+      if (!isProcurement(res) && res.decision)
+        push({ kind: "approved", scenario, decision: res.decision });
+    } catch (error) {
+      // 한국어로만 된 서버 문장(「이미 승인됐다」 같은 말)은 그대로, 코드가 섞이면 사람 말로
+      setModalError(
+        userErrorText(
+          error instanceof ApiError ? error.status : null,
+          error instanceof Error ? error.message : "",
+          "승인을 기록하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        ),
+      );
+    } finally {
+      setModalBusy(false);
+    }
+  }
+
+  /** 지름길 — 부서 이름을 누르면 **같은 API 를 발화문 없이** 부른다. */
+  function shortcut(key: string) {
+    const canned = SHORTCUT[key];
+    if (canned) {
+      setTab("master");
+      void send(canned);
+    }
+  }
+
+  const isHistory = tab === "runs";
+
+  return (
+    /**
+     * ★ `h-full` 이다. 예전엔 `h-screen` 이었는데, 이제 서랍 안이라 **서랍이
+     *   정해 준 높이**를 채워야 한다. 화면 높이를 다시 잡으면 서랍 밖으로 넘친다.
+     *
+     * 아래 스크롤 영역의 `min-h-0` 은 그대로 둔다 — flex 아이템의 기본
+     * `min-height: auto` 는 내용 높이라, 없으면 `flex-1` 이 내용보다 작아지지
+     * 못해 `overflow-y-auto` 가 안 걸린다.
+     */
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
+        {(["master", "runs"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setTab(k)}
+            aria-pressed={tab === k}
+            className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition ${
+              tab === k ? "bg-ink text-paper" : "text-muted hover:bg-sunk"
+            }`}
+          >
+            {{ master: "묻기", runs: "실행 이력" }[k]}
+          </button>
+        ))}
+        <span className="ml-1 hidden gap-1 sm:flex">
+          {Object.keys(SHORTCUT).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => shortcut(k)}
+              disabled={busy}
+              className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
+                transition hover:bg-sunk disabled:opacity-40"
+            >
+              {
+                { purchase: "오늘 매입", inventory: "재고", finance: "자금", sales: "판매", ml: "가격 전망" }[
+                  k
+                ]
+              }
+            </button>
+          ))}
+        </span>
+        <span className="ml-auto text-[11px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
+      </header>
+
+        {isHistory ? (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+            <RunHistoryPanel known={runIds} />
+          </div>
+        ) : (
+          <>
+            <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
+              {turns.length === 0 && <Empty onPick={send} />}
+
+              {turns.map((turn, i) => (
+                <TurnView
+                  key={i}
+                  turn={turn}
+                  index={i}
+                  onConfirm={confirm}
+                  busy={busy}
+                >
+                  {turn.kind === "sales" && (
+                    <>
+                      <SalesConversation asOf={turn.asOf} canApprove={can.approve} />
+                    </>
+                  )}
+                  {turn.kind === "run" && (
+                    <>
+                    <ProcurementResult
+                      run={turn.run}
+                      onPick={(scenario) => {
+                        setModalError(null);
+                        setPicked({
+                          scenario,
+                          requestId: turn.run.request_id,
+                          historyRunId: turn.run.history_run_id,
+                        });
+                      }}
+                      onRerun={() => {
+                        rememberRun(turn.run);
+                        setDraft("예산 2천만원으로 낮춰서 다시 해줘");
+                        composer.current?.focus();
+                      }}
+                    />
+                    {/* 들고 나갈 수 있는 문서 — 안이 있든 없든 낸다.
+                        **안이 없는 실행도 기록으로 남길 값이 있다** (왜 없는지가 담긴다). */}
+                    <div className="mt-3">
+                      <ReportDownload requestId={turn.run.request_id} />
+                    </div>
+                    </>
+                  )}
+                </TurnView>
+              ))}
+
+              {busy && (
+                <p className="m-0 text-[13px] text-faint">
+                  마스터가 부서를 부르는 중…
+                </p>
+              )}
+              <div ref={tail} />
+            </div>
+
+            <div className="border-t border-line px-4 py-3">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void send(draft);
+                }}
+                className="flex items-center gap-2 rounded-xl border-[1.5px] border-accent bg-surface px-3.5 py-2.5"
+              >
+                <input
+                  ref={composer}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="무엇을 도와드릴까요"
+                  className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || !draft.trim()}
+                  className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
+                >
+                  보내기
+                </button>
+              </form>
+              <p className="m-0 mt-2 text-[11.5px] text-faint">
+                매입 실행은{" "}
+                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회는 바로
+                돕니다.
+              </p>
+            </div>
+          </>
+        )}
+
+      {picked && (
+        <DecisionModal
+          scenario={picked.scenario}
+          targetRequestId={picked.requestId}
+          decidedBy={session.name}
+          busy={modalBusy}
+          error={modalError}
+          onConfirm={approve}
+          onCancel={() => setPicked(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function TurnView({
+  turn,
+  index,
+  onConfirm,
+  busy,
+  children,
+}: {
+  turn: Turn;
+  index: number;
+  onConfirm: (t: Extract<Turn, { kind: "confirm" }>, index: number) => void;
+  busy: boolean;
+  children?: React.ReactNode;
+}) {
+  if (turn.kind === "me")
+    return (
+      <div className="flex justify-end">
+        <p className="m-0 max-w-[74%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-sm text-white">
+          {turn.text}
+        </p>
+      </div>
+    );
+
+  if (turn.kind === "bot")
+    return (
+      <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
+        {!turn.hideText && (
+          <div className="whitespace-pre-wrap text-sm leading-relaxed">
+            {turn.text}
+          </div>
+        )}
+        {turn.markdown && (
+          <div className={turn.hideText ? "text-sm" : "mt-2 text-sm"}>
+            <Markdownish text={turn.markdown} />
+          </div>
+        )}
+        {turn.trace && <LlmTrace trace={turn.trace} />}
+      </div>
+    );
+
+  if (turn.kind === "approved")
+    return <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />;
+
+  if (turn.kind === "error")
+    return (
+      <Panel tone="attn" title="실행하지 못했습니다" items={[turn.text]} />
+    );
+
+  if (turn.kind === "confirm")
+    return (
+      <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
+        <p className="m-0 text-sm">{turn.text}</p>
+        <LlmTrace trace={turn.trace} />
+        {turn.done ? (
+          <p className="m-0 mt-2 text-[12.5px] text-faint">
+            확인함 — 아래 결과를 보세요
+          </p>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onConfirm(turn, index)}
+            disabled={busy}
+            className="mt-2.5 rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
+          >
+            네, 진행합니다
+          </button>
+        )}
+      </div>
+    );
+
+  // kind === "run" · "sales" — 결과 카드는 부르는 쪽이 children 으로 넣는다
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      {children}
+    </div>
+  );
+}
+
+function Empty({ onPick }: { onPick: (text: string) => void }) {
+  const samples = [
+    "오늘 배추 얼마나 사야 해?",
+    "창고에 얼마나 남았어?",
+    "지금 자금 상황 알려줘",
+    "예산 2천만원으로 낮춰서 다시 해줘",
+  ];
+  return (
+    <div className="rounded-xl border border-dashed border-line p-6">
+      <p className="m-0 text-sm font-semibold">말로 물어보세요</p>
+      <p className="m-0 mt-1 text-[13px] text-muted">
+        마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
+        봤는지 함께 답합니다.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {samples.map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => onPick(s)}
+            className="rounded-full border border-line bg-sunk px-3 py-1 text-xs text-muted hover:border-accent hover:text-accent-ink"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}

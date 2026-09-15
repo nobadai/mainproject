@@ -1,0 +1,411 @@
+"""판매 재무 검증의 **Finance 내부 전용** 도메인 모델.
+
+이 파일이 소유하는 것
+    판매 원가 기준 구성요소 · 원가 산출방식 어휘 · 내부 계산 입력/결과 모양
+
+여기 **없는 것**
+    계산 · 판정 · 외부 계약
+    → `tools` · `rules` · `schemas` 소유다.
+
+★ `schemas.py` 와 갈라놓은 이유는 **읽는 사람이 다르기 때문이다.** `schemas.py` 는
+  프론트 · Master · Critic 이 읽는 요청/회신 계약이고, 거기 놓인 모양은 그것만으로
+  외부 정본처럼 굳는다. 이 파일의 모양은 Finance 안에서만 산다 — Router 응답에도,
+  Master AgentRequest/AgentReply 에도 실리지 않는다. 밖으로 낼 것이 생기면 그때
+  `schemas.py` 에 외부 계약을 따로 세운다.
+"""
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.contracts.core import EvidenceGrade
+from app.finance.rules import SalesRuleResult
+from app.finance.schemas import (
+    CashflowProjection,
+    FinalVerdict,
+    RuntimeStatus,
+    _reject_boolean,
+)
+
+# ---------------------------------------------------------------------------
+# 원가 산출방식 — EvidenceGrade 와 **다른 축이다**
+#
+# EvidenceGrade(OFFICIAL·VENDOR·SIM_FIXED·ASSUMED·INVALID_FOR_HARD) 는 "그 숫자를
+# 얼마나 믿을 수 있는 출처에서 얻었나"이고, 아래 어휘는 "그 원가를 어떤 방식으로
+# 산출했나"이다. 두 축은 동시에 성립한다 — 예를 들어
+#
+#     cost_method = ACTUAL, evidence_grade = OFFICIAL
+#
+# 은 모순이 아니라 가장 흔한 조합이다. 둘을 한 필드로 합치면 "실제원가인데 근거가
+# 약함"과 "표준원가인데 근거가 공식"을 구분할 수 없게 된다.
+#
+# ★ 여기서 우선순위(ACTUAL > STANDARD > …)로 후보를 **고르지 않는다.** 어느 원가가
+#   정본인지 정하는 계약이 아직 도메인 간에 없다. 이 어휘는 들어온 값이 무엇인지
+#   기록만 하고, 선택은 권위 있는 입력을 만드는 바깥이 한다.
+# ---------------------------------------------------------------------------
+
+#: 원가를 어떤 방식으로 산출했는지. UNKNOWN 은 "0원"이 아니라 "모른다"이다.
+SalesCostMethod = Literal["ACTUAL", "STANDARD", "SIM_FIXED", "UNKNOWN"]
+
+
+class InventoryCostBasis(BaseModel):
+    """이미 권위 있는 것으로 선택되어 Finance 에 들어온 재고원가.
+
+    Finance 가 후보를 고르지 않는다 — 어느 재고/매입 원가가 정본인지는 아직
+    도메인 간 계약이 없다. 이 모델은 **선택이 끝난 값**만 받는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Logistics/Sales가 선택한 basis의 identity와 covered quantity도 보존한다.
+    # Finance는 이를 이용해 Lot을 조회하거나 allocation을 다시 계산하지 않는다.
+    item: str | None = None
+    quantity_kg: Decimal | None = Field(default=None, ge=0)
+    allocation_method: str | None = None
+    amount_krw: Decimal = Field(ge=0)
+    cost_method: SalesCostMethod
+    #: 이 금액이 이미 품고 있는 원가 구성요소 이름. 직접비 중복 계상 차단에 쓴다.
+    included_components: tuple[str, ...] = ()
+    #: 🔴 **하위 호환용 단일 ref 다. 전체 계보가 아니다.**
+    #:
+    #:   금액이 여러 Lot 에서 배부돼 왔으면 이 칸은 그중 **첫 Lot 하나**만 가리킨다.
+    #:   이것을 provenance 로 읽으면 나머지 Lot 이 조용히 사라진다 — 나중에 *"이
+    #:   원가가 어느 재고에서 왔나"* 를 물었을 때 답이 틀린다.
+    source_ref: str = Field(min_length=1)
+    #: ★ **배부 근거의 정본.** Logistics 가 배부에 쓴 모든 Lot 을 **받은 순서대로**
+    #:   담는다. 현재 allocation contract 는 FEFO 이며 **Finance 는 이 순서를
+    #:   바꾸지 않는다.**
+    #:
+    #: ⚠️ **«출고된 Lot» 이 아니다.** Logistics 가 이 값을 내는 자리(PRE_SALES)는
+    #:    그 판매의 예약·할당이 서기 **전**이라, 담긴 것은 *"지금 출고한다면 FEFO 가
+    #:    집을 Lot"* 이다. 실제 출고 Lot 은 승인 뒤 `inventory_allocations` 가 말한다.
+    #:
+    #: ★ 안 주면 `source_ref` 하나로 채운다 — 예전 단일 Lot 입력이 그대로 돈다.
+    source_refs: tuple[str, ...] = ()
+    evidence_grade: EvidenceGrade
+
+    @field_validator("amount_krw", "quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def carry_the_single_ref_into_the_lineage(self) -> InventoryCostBasis:
+        """계보를 안 주면 단일 ref 가 곧 계보다. **비워 두지 않는다.**
+
+        ★ 빈 `source_refs` 를 그대로 두면 읽는 쪽이 *"계보가 없다"* 와 *"Lot 이
+          하나다"* 를 구분하지 못하고, 그때 `source_ref` 로 되돌아가는 코드가 생긴다.
+        """
+        if not self.source_refs:
+            object.__setattr__(self, "source_refs", (self.source_ref,))
+        return self
+
+    @field_validator("included_components")
+    @classmethod
+    def reject_blank_or_duplicate_components(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name.strip() for name in value):
+            raise ValueError("included_components must not contain blank names")
+        if len(set(value)) != len(value):
+            raise ValueError("included_components must not repeat a component")
+        return value
+
+
+class ConditionalSupplyCostBasis(BaseModel):
+    """Purchase/Master가 넘긴 조건부 공급분의 권위 원가."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount_krw: Decimal = Field(ge=0)
+    cost_method: SalesCostMethod
+    included_components: tuple[str, ...] = ()
+    source_ref: str = Field(min_length=1)
+    evidence_grade: EvidenceGrade
+
+    @field_validator("amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @field_validator("included_components")
+    @classmethod
+    def reject_blank_or_duplicate_components(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name.strip() for name in value):
+            raise ValueError("included_components must not contain blank names")
+        if len(set(value)) != len(value):
+            raise ValueError("included_components must not repeat a component")
+        return value
+
+
+class VerifiedDirectCost(BaseModel):
+    """재고원가 밖에서 검증된 직접비 1건. 추정치·LLM 산출값은 들어올 수 없다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    component: str = Field(min_length=1)
+    amount_krw: Decimal = Field(ge=0)
+    cost_method: SalesCostMethod
+    source_ref: str = Field(min_length=1)
+    evidence_grade: EvidenceGrade
+
+    @field_validator("amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @field_validator("component")
+    @classmethod
+    def reject_blank_component(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("component must not be blank")
+        return value
+
+
+class SalesCostBasis(BaseModel):
+    """합성된 판매 원가 기준. 어떤 숫자가 어디서 왔는지까지 같이 남긴다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    amount_krw: Decimal = Field(ge=0)
+    inventory_amount_krw: Decimal = Field(ge=0)
+    inventory_cost_method: SalesCostMethod
+    inventory_source_ref: str = Field(min_length=1)
+    inventory_evidence_grade: EvidenceGrade
+    conditional_supply_amount_krw: Decimal | None = None
+    conditional_supply_cost_method: SalesCostMethod | None = None
+    conditional_supply_source_ref: str | None = None
+    conditional_supply_evidence_grade: EvidenceGrade | None = None
+    #: 실제로 더해진 직접비만 남는다.
+    added_direct_costs: tuple[VerifiedDirectCost, ...] = ()
+    #: 이미 재고원가에 포함돼 있어 더하지 않은 구성요소 — 중복 계상을 막았다는 기록.
+    already_included_components: tuple[str, ...] = ()
+    included_components: tuple[str, ...] = ()
+    source_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class SalesScenarioCashflow(BaseModel):
+    """BASE 와 SCENARIO 를 나란히 보존하는 판매 시나리오 현금흐름 결과."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_projection: CashflowProjection
+    scenario_projection: CashflowProjection
+    base_projected_cash_min: Decimal
+    base_projected_cash_min_date: date
+    scenario_projected_cash_min: Decimal
+    scenario_projected_cash_min_date: date
+    collection_date: date
+    collection_amount_krw: Decimal = Field(ge=0)
+    proposed_collection_ref_id: str = Field(min_length=1)
+    #: 회수일이 현재 Finance projection horizon 안인가. 밖이면 SCENARIO 는 BASE 와 같다.
+    collection_within_horizon: bool
+    #: SCENARIO 최저 현금이 **제안 유입 덕분에** 올라갔는가.
+    #: 정의: scenario_projected_cash_min > base_projected_cash_min.
+    #: True 면 그 현금 여력은 아직 확정되지 않은 돈에 기대고 있다는 뜻이다.
+    depends_on_projected_inflow: bool
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 5 — 매출채권 사실
+#
+# ★ `receivables` 원장은 실재하고 Finance 가 이미 읽는다. 반면 **여신한도는 저장소
+#   어디에도 없다** — `partners` 에도, `agent_policy_config` 에도, 어떤 테이블에도
+#   credit_limit 컬럼이 없다. 그래서 채권 사실은 계산하되 여신 판정은 닫는다.
+#
+# ★ 빈 목록은 "채권이 없다"는 **사실**이고 "자료를 못 받았다"가 아니다. 둘을 섞지
+#   않으려고 목록을 항상 명시적으로 받는다.
+# ---------------------------------------------------------------------------
+
+#: 미회수로 남아 있는 채권 상태. COLLECTED·WRITEOFF 는 잔액에 넣지 않는다.
+OPEN_RECEIVABLE_STATUSES: frozenset[str] = frozenset({"OPEN", "PARTIAL"})
+
+
+class PartnerReceivable(BaseModel):
+    """거래처 채권 1건. `receivables` 원장 행을 Finance 안으로 옮긴 모양이다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    receivable_id: str = Field(min_length=1)
+    due_date: date
+    outstanding_amount_krw: Decimal = Field(ge=0)
+    status: Literal["OPEN", "PARTIAL", "COLLECTED", "WRITEOFF"]
+    source_ref: str = Field(min_length=1)
+
+    @field_validator("outstanding_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class OpenReceivableDue(BaseModel):
+    """미회수 채권 1건의 **계약상 결제 예정일과 남은 금액.** 수금 예정이지 수금이 아니다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    due_date: date
+    outstanding_amount_krw: Decimal = Field(ge=0)
+
+
+class PartnerReceivableFacts(BaseModel):
+    """거래처 채권 집계 — **사실만이다.** 위험도 점수도, 판정도 들어있지 않다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    partner_id: str = Field(min_length=1)
+    as_of: date
+    current_ar_krw: Decimal = Field(ge=0)
+    overdue_ar_krw: Decimal = Field(ge=0)
+    open_receivable_count: int = Field(ge=0)
+    overdue_receivable_count: int = Field(ge=0)
+    source_refs: tuple[str, ...] = ()
+    #: 미회수 채권의 결제 예정 일정. 결제 예정일 순이다.
+    #:
+    #: ★ **여신이 언제 풀릴지를 말하려면 금액 합계만으로는 모자란다.** 같은 800만원도
+    #:   내일 받을 돈인지 한 달 뒤 받을 돈인지에 따라 다음 판매가 달라진다.
+    #:
+    #: 🔴 **예정이지 사실이 아니다.** 여기서 채권을 줄이거나 현금을 늘리지 않는다 —
+    #:    실제 감소는 수금 사건으로만 일어난다.
+    open_receivable_schedule: tuple[OpenReceivableDue, ...] = ()
+
+
+class ReceivableCreateInput(BaseModel):
+    """Sales 확정분을 Finance 매출채권으로 옮기기 위한 최소 입력."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sale_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    sale_date: date
+    customer_partner_id: str = Field(min_length=1)
+    due_date: date
+    original_amount_krw: Decimal = Field(ge=0)
+
+
+# ---------------------------------------------------------------------------
+# Sales Core Phase 6 — Finance 내부 판매 검증 입력/결과
+#
+# ★ Sales 의 Pydantic API 모델을 Finance 정본으로 쓰지 않는다. 편해 보이지만 그
+#   순간 Sales 의 화면 계약이 Finance 판정의 계약이 된다 — 저쪽이 필드 하나를
+#   바꾸면 이쪽 판정이 조용히 바뀐다. Finance 는 **자기가 쓰는 사실만** 자기 모양
+#   으로 갖는다. Master 가 Sales 회신 payload 를 통째로 넘겨도 여기서 필요한
+#   부분집합만 엄격히 검증한다.
+# ---------------------------------------------------------------------------
+
+#: 결제 방식. INSTALLMENT 는 권위 있는 분할결제 정책이 없어 판정되지 않는다.
+SalesPaymentTermsType = Literal["SINGLE", "INSTALLMENT"]
+
+
+class SalesSupply(BaseModel):
+    """공급 확정/조건부 구분.
+
+    ★ 조건부 물량을 확정 재고인 것처럼 원가에 넣지 않으려고 나눠 받는다.
+      확정 재고원가는 확정 물량에 대한 사실이지 제안 전체에 대한 사실이 아니다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    confirmed_quantity_kg: Decimal = Field(ge=0)
+    #: 조건부로 **확보 가능하다고 확인된** 양.
+    #:
+    #: 🔴 `None` 은 0 이 아니다. 0 은 "조건부 물량이 없다"는 사실이고, `None` 은
+    #:   "조건부로 얼마를 확보할 수 있는지 아직 모른다"는 뜻이다. 둘을 같게 두면
+    #:   *모르는 상태*가 *확정 물량뿐인 상태*로 읽혀서, 확정 재고원가가 제안 전체를
+    #:   덮는 것을 막는 방어가 조용히 풀린다.
+    conditional_quantity_kg: Decimal | None = Field(default=None, ge=0)
+    dependency_ref: str | None = None
+
+    @field_validator("confirmed_quantity_kg", "conditional_quantity_kg", mode="before")
+    @classmethod
+    def reject_boolean_quantity(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesValidationInput(BaseModel):
+    """Finance 가 판매 제안 1건을 검증하는 데 실제로 쓰는 사실만 담는다.
+
+    envelope 이 소유하는 것(request_id · as_of · mode · call_seq · run 계보)은
+    여기 두지 않는다 — 정본을 두 벌 만들면 어느 쪽이 맞는지 알 수 없게 된다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str = Field(min_length=1)
+    partner_id: str = Field(min_length=1)
+    item: str = Field(min_length=1)
+    quantity_kg: Decimal = Field(ge=0)
+    unit_price_krw: Decimal = Field(ge=0)
+    reported_sales_amount_krw: Decimal = Field(ge=0)
+    payment_terms_type: SalesPaymentTermsType
+    #: null 은 0 도 "제한 없음"도 아니다 — 결제일수를 못 받았다는 사실이다.
+    payment_days: int | None = Field(default=None, ge=0)
+    #: 회수일 기준점. 그 의미(납품일·송장일·계약일)는 여전히 호출자가 소유한다.
+    collection_reference_date: date | None = None
+    supply: SalesSupply | None = None
+    inventory_cost_basis: InventoryCostBasis | None = None
+    conditional_supply_cost_basis: ConditionalSupplyCostBasis | None = None
+    direct_costs: tuple[VerifiedDirectCost, ...] = ()
+    source_ref: str = Field(min_length=1)
+
+    @field_validator("quantity_kg", "unit_price_krw", "reported_sales_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SalesFinancialSummary(BaseModel):
+    """계산된 사실만. 못 구한 값은 0이 아니라 None 이다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recalculated_sales_amount_krw: Decimal
+    reported_sales_amount_krw: Decimal
+    amount_difference_krw: Decimal
+    amount_match: bool
+    sales_cost_basis_krw: Decimal | None = None
+    contribution_margin_krw: Decimal | None = None
+    contribution_margin_rate: Decimal | None = None
+    collection_date: date | None = None
+    current_partner_ar_krw: Decimal | None = None
+    projected_partner_ar_krw: Decimal | None = None
+    credit_limit_krw: Decimal | None = None
+    available_credit_krw: Decimal | None = None
+    required_collection_before_sale_krw: Decimal | None = None
+    #: 현재 미수금 ÷ 여신한도. **표시용 사실이다 — 판정에 쓰지 않는다.**
+    #: 한도가 없거나 0원이면 나눌 수 없으므로 `None` 이다 (0 이 아니다).
+    credit_utilization_rate: Decimal | None = None
+    #: 판매 전 회수가 필요할 때, 계약상 결제 예정일 기준으로 그 금액이 모일 것으로 보이는
+    #: 가장 이른 날. **입금 보장일이 아니다.** 회수가 필요 없거나(0원) 예정 채권으로
+    #: 채울 수 없으면 `None` 이다 — 두 경우는 `required_collection_before_sale_krw` 로 가른다.
+    expected_credit_recovery_date: date | None = None
+    overdue_ar_krw: Decimal | None = None
+    base_projected_cash_min: Decimal | None = None
+    scenario_projected_cash_min: Decimal | None = None
+    depends_on_projected_inflow: bool | None = None
+    collection_within_horizon: bool | None = None
+
+
+class SalesValidationResult(BaseModel):
+    """Finance 내부 판매 검증 결과 — Master AgentReply 가 아니다.
+
+    Refeed 를 견디도록 **자기 완결적**으로 만든다. 판정을 만든 근거(개별 규칙 ·
+    reason code · 없는 데이터/정책 · Evidence 계보)를 임시 상태에 숨기지 않는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scenario_id: str | None
+    runtime_status: RuntimeStatus
+    #: INPUT_INCOMPLETE 는 Finance 고장이 아니라 제안에 사실이 빠졌다는 뜻이다.
+    status: Literal["EVALUATED", "INPUT_INCOMPLETE", "RUNTIME_NOT_READY", "ERROR"]
+    finance_verdict: FinalVerdict | None
+    financial_summary: SalesFinancialSummary | None = None
+    rule_results: tuple[SalesRuleResult, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    max_finance_allowed_amount_krw: Decimal | None = None
+    max_finance_allowed_payment_terms_days: int | None = None
+    missing_fields: tuple[str, ...] = ()
+    missing_data: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()

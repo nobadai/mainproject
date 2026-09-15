@@ -1,11 +1,66 @@
-"""Finance P0 요청 및 응답 스키마."""
+"""Finance 요청·응답 계약.
 
-from datetime import date
+이 파일이 소유하는 것
+    닫힌 어휘 · 숫자 입력 방어 · 현금흐름 · 정책/부채 · T0 상태 ·
+    매입 제안 입력 · 매입/판매 Cycle 응답 · 실행이력 조회 응답
+
+여기 **없는 것**
+    계산 · 판정 · 실행 통제 · 사람이 읽는 문장
+    → `tools` · `rules` · `application` · `messages` 소유다.
+
+★ 아홉 모듈을 한곳에 모았다. **늘 같이 열리는 것들**이라 파일이 갈려 있으면 하나를
+  고칠 때마다 나머지를 찾아다니게 된다. 계약은 서로를 참조하고(정책 → 상태 →
+  응답), 그 참조가 곧 이 파일의 절 순서다.
+
+★ **필드 이름 · JSON 모양 · Literal 값 · 검증 의미는 그대로다.** 이 파일은 프론트와
+  Master 와 Critic 이 읽는 계약이고, 옮겨 담는 것이 이름을 바꿀 이유는 되지 않는다.
+"""
+
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# ---------------------------------------------------------------------------
+# 공통 닫힌 어휘
+# ---------------------------------------------------------------------------
+
+#: Agent 가 지원하는 두 실행 mode. **Planner 계약이자 회신 계약이다.**
+#: ★ `SALES_VALIDATION` 은 **매입 시나리오 검증과 다른 책임이다.** Master 는
+#:   Sales 의 `FINANCIAL_VALIDATION` 요청을 `(finance, SALES_VALIDATION)` 으로 라우팅한다
+#:   (2026-09-02 Master 회신). 같은 mode 를 재사용하면 `(agent, mode, call_seq)` 로
+#:   매입 검증과 판매 검증을 구분할 수 없고, 그러면 payload 모양을 보고 무엇인지
+#:   추측하는 Adapter 가 생긴다.
+#:
+#:   🔴 **아직 Controller 경로에 연결되지 않았다.** `finance_agent_runs_v22.mode` 의
+#:   CHECK 제약이 두 매입 mode 만 허용해서, 연결하면 실행이력 저장이 전부 깨진다.
+#:   DB 마이그레이션과 Master capability 라우팅이 함께 와야 열 수 있다.
+FinanceMode = Literal["PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION"]
+FinalVerdict = Literal["PASS", "REVIEW_REQUIRED", "FAIL"]
+RuntimeStatus = Literal["READY", "RUNTIME_NOT_READY", "ERROR"]
+CashPriority = Literal["LOW", "MEDIUM", "HIGH"]
+FinanceCycle = Literal["PROCUREMENT", "SALES"]
+CashEventDirection = Literal["INFLOW", "OUTFLOW"]
+CashEventType = Literal[
+    "PURCHASE_PAYABLE",
+    "COMMITTED_OUTFLOW",
+    "RECEIVABLE",
+    "PAYROLL",
+    "DEBT_SERVICE",
+    "EXTRA_PURCHASE",
+    "H1_PURCHASE_PAYMENT",
+    # ★ 제안된 판매 회수. **확정 채권이 아니다** — 이름 자체가 확실성을 나른다.
+    #   BASE(확정 Event)에 섞이면 승인되지 않은 돈이 확정 현금처럼 읽히므로,
+    #   SCENARIO 투영에서만 쓰고 실제 채권으로 적재하지 않는다.
+    "PROPOSED_SALES_COLLECTION",
+]
+
+
+# ---------------------------------------------------------------------------
+# 공통 숫자 입력 방어
+# ---------------------------------------------------------------------------
 
 def _reject_boolean(value: object) -> object:
     if isinstance(value, bool):
@@ -13,31 +68,192 @@ def _reject_boolean(value: object) -> object:
     return value
 
 
-class PurchaseMeta(BaseModel):
-    """매입 Agent 출력의 ``meta``와 1:1 대응한다."""
+# ---------------------------------------------------------------------------
+# 현금 사건 · 현금흐름 투영
+# ---------------------------------------------------------------------------
+
+class CashEvent(BaseModel):
+    """T0에 확정된 날짜별 현금 유입/유출."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_date: date
+    event_type: CashEventType
+    amount_krw: Decimal = Field(ge=0)
+    direction: CashEventDirection
+    ref_id: str = Field(min_length=1)
+    source_ref: str | None = None
+    schedule_source_ref: str | None = None
+    principal_component_krw: Decimal | None = Field(default=None, ge=0)
+    interest_component_krw: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator(
+        "amount_krw", "principal_component_krw", "interest_component_krw", mode="before"
+    )
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class CashflowPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    projection_date: date
+    cash_balance_krw: Decimal
+
+
+class CashflowProjection(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: date
+    horizon_end: date
+    projected_cash_by_date: tuple[CashflowPoint, ...]
+    projected_cash_min: Decimal
+    projected_cash_min_date: date
+
+
+# ---------------------------------------------------------------------------
+# 운영 정책 · 부채 계약
+# ---------------------------------------------------------------------------
+
+class FinancePolicy(BaseModel):
+    """Finance MVP 실행에 사용하는 회사/Agent 운영 정책."""
 
     model_config = ConfigDict(extra="forbid")
 
-    as_of: date
-    item: str = Field(min_length=1)
-    agent_version: str = Field(min_length=1)
-    is_refeed: bool
-    feedback_attempt: int = Field(ge=0)
+    purchase_payment_days: int | None = Field(default=None, ge=0)
+    payroll_date: int = Field(ge=1, le=31)
+    margin_defense_floor_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    monthly_labor_cost_krw: Decimal | None = Field(default=None, ge=0)
+    minimum_cash_balance_krw: Decimal = Field(ge=0)
+    cashflow_projection_days: int = Field(gt=0)
+    cash_priority_reference: Literal["minimum_cash_balance_krw"]
+    cash_priority_high_ratio: Decimal = Field(ge=0)
+    cash_priority_medium_ratio: Decimal = Field(ge=0)
+    policy_version: Literal["v1.3-PROVISIONAL"]
+    usage_scope: Literal["AGENT_MVP_DEMO"]
+    source_refs: dict[str, str]
 
-    @field_validator("feedback_attempt", mode="before")
+    @field_validator(
+        "purchase_payment_days",
+        "payroll_date",
+        "monthly_labor_cost_krw",
+        "minimum_cash_balance_krw",
+        "cashflow_projection_days",
+        "cash_priority_high_ratio",
+        "cash_priority_medium_ratio",
+        "margin_defense_floor_rate",
+        mode="before",
+    )
     @classmethod
-    def reject_boolean_feedback_attempt(cls, value: object) -> object:
+    def reject_boolean_policy_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
 
+
+class FinanceDebtPolicy(BaseModel):
+    """AGENT_MVP_DEMO 전용 SIM_FIXED 실행 대출 계약."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    debt_runtime_status: Literal["SIM_FIXED_EXECUTED"]
+    debt_principal_krw: Decimal = Field(gt=0)
+    debt_execution_date: date
+    debt_annual_rate: Decimal = Field(gt=0)
+    debt_term_months: int = Field(gt=0)
+    debt_grace_months: int = Field(ge=0)
+    debt_grace_payment_mode: Literal["INTEREST_ONLY"]
+    debt_repayment_method: Literal["EQUAL_PRINCIPAL_AFTER_GRACE"]
+    debt_payment_frequency: Literal["MONTHLY"]
+    debt_payment_day_rule: Literal["MONTH_END"]
+    debt_first_payment_rule: Literal["EXECUTION_MONTH_END"]
+    debt_interest_method: Literal["OUTSTANDING_PRINCIPAL_ANNUAL_RATE_DIV_12"]
+    policy_version: Literal["v1.3-PROVISIONAL"]
+    usage_scope: Literal["AGENT_MVP_DEMO"]
+    source_refs: dict[str, str]
+
+    @field_validator(
+        "debt_principal_krw",
+        "debt_annual_rate",
+        "debt_term_months",
+        "debt_grace_months",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_debt_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_repayment_period(self) -> "FinanceDebtPolicy":
+        if self.debt_grace_months >= self.debt_term_months:
+            raise ValueError("debt_grace_months must be less than debt_term_months")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# T0 Snapshot · RuntimeContext
+# ---------------------------------------------------------------------------
+
+class FinanceRuntimeContext(BaseModel):
+    """DB read 이후 한 run 동안 고정되는 Finance T0 입력."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot: "FinanceSnapshot"
+    policy: FinancePolicy
+    debt_policy: FinanceDebtPolicy | None = None
+    cash_events: tuple[CashEvent, ...]
+    unresolved_sources: tuple[str, ...] = ()
+
+
+class FinanceSnapshot(BaseModel):
+    """한 Cycle 동안 고정해서 사용하는 T0 Finance Snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str | None
+    finance_state_id: str = Field(min_length=1)
+    sim_run_id: str = Field(min_length=1)
+    state_date: date
+    state_type: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    current_cash_krw: Decimal
+    minimum_operating_cash_krw: Decimal
+    committed_outflows_krw: Decimal
+    unsettled_purchase_payables_krw: Decimal
+    receivables_krw: Decimal = Decimal(0)
+    #: 부채는 음수일 수 없다. 음수는 **"빚 없음"으로 오독되어** 부채 정책 검증과 상환
+    #: 일정을 통째로 건너뛰게 한다 — 잘못된 상태가 정상 응답으로 둔갑한다.
+    #: 원천 행 검증(`repository._reject_negative_debt`)과 **함께** 쓰는 이중 방어다.
+    current_debt_krw: Decimal = Field(default=Decimal(0), ge=0)
+    financial_limit_krw: Decimal
+
+    @field_validator(
+        "current_cash_krw",
+        "minimum_operating_cash_krw",
+        "committed_outflows_krw",
+        "unsettled_purchase_payables_krw",
+        "receivables_krw",
+        "current_debt_krw",
+        "financial_limit_krw",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_amounts(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+# ---------------------------------------------------------------------------
+# 매입 제안 입력 계약
+# ---------------------------------------------------------------------------
 
 class SplitPlanItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     seq: int = Field(ge=1)
     date: date
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
 
-    @field_validator("seq", "quantity_ton", mode="before")
+    @field_validator("seq", "quantity_kg", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -48,10 +264,10 @@ class SourcingPlanItem(BaseModel):
 
     market: str = Field(min_length=1)
     grade: str = Field(min_length=1)
-    quantity_ton: Decimal = Field(gt=0)
+    quantity_kg: Decimal = Field(gt=0)
     unit_price: int = Field(gt=0)
 
-    @field_validator("quantity_ton", "unit_price", mode="before")
+    @field_validator("quantity_kg", "unit_price", mode="before")
     @classmethod
     def reject_boolean_numbers(cls, value: object) -> object:
         return _reject_boolean(value)
@@ -70,7 +286,7 @@ class PurchaseScenario(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1)
-    total_quantity_ton: Decimal = Field(gt=0)
+    total_quantity_kg: Decimal = Field(gt=0)
     max_price: int = Field(ge=0)
     timing: str = Field(min_length=1)
     split_plan: list[SplitPlanItem]
@@ -81,7 +297,7 @@ class PurchaseScenario(BaseModel):
     risks: list[str]
 
     @field_validator(
-        "total_quantity_ton",
+        "total_quantity_kg",
         "max_price",
         "expected_margin_rate",
         "expected_cost",
@@ -93,46 +309,218 @@ class PurchaseScenario(BaseModel):
 
     @model_validator(mode="after")
     def validate_quantity_totals(self) -> "PurchaseScenario":
-        split_quantity = sum((item.quantity_ton for item in self.split_plan), start=Decimal(0))
-        sourcing_quantity = sum(
-            (item.quantity_ton for item in self.sourcing_plan), start=Decimal(0)
-        )
-        if self.total_quantity_ton != split_quantity:
-            raise ValueError("total_quantity_ton must equal split_plan quantity total")
-        if self.total_quantity_ton != sourcing_quantity:
-            raise ValueError("total_quantity_ton must equal sourcing_plan quantity total")
+        split_quantity = sum((item.quantity_kg for item in self.split_plan), start=Decimal(0))
+        sourcing_quantity = sum((item.quantity_kg for item in self.sourcing_plan), start=Decimal(0))
+        if self.total_quantity_kg != split_quantity:
+            raise ValueError("total_quantity_kg must equal split_plan quantity total")
+        if self.total_quantity_kg != sourcing_quantity:
+            raise ValueError("total_quantity_kg must equal sourcing_plan quantity total")
         return self
 
 
-class FinanceReviewRequest(BaseModel):
-    """오케스트레이터가 Finance에 전달하는 단일 시나리오 검토 요청."""
+class ApprovedPurchaseCommitment(BaseModel):
+    """H1에서 승인된 매입 지급 의무."""
 
     model_config = ConfigDict(extra="forbid")
 
-    proposal_id: str = Field(min_length=1)
-    scenario_id: str = Field(min_length=1)
-    purchase_meta: PurchaseMeta
-    scenario: PurchaseScenario
+    approval_id: str = Field(min_length=1)
+    total_amount_krw: Decimal = Field(gt=0)
+    payment_date: date
+
+    @field_validator("total_amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
-class SuggestedAdjustment(BaseModel):
+# ---------------------------------------------------------------------------
+# 판매 Cycle 계약
+# ---------------------------------------------------------------------------
+
+class ChannelTerm(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    axis: Literal["amount"]
-    description: str = Field(min_length=1)
-    evidences: list[Evidence]
+    channel_type: str = Field(min_length=1)
+    partner_id: str = Field(min_length=1)
+    settlement_days: int = Field(ge=0)
+
+    @field_validator("settlement_days", mode="before")
+    @classmethod
+    def reject_boolean_days(cls, value: object) -> object:
+        return _reject_boolean(value)
 
 
-class FinanceReviewResponse(BaseModel):
+class CollectionPreference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    proposal_id: str = Field(min_length=1)
-    scenario_id: str = Field(min_length=1)
-    agent: Literal["finance"] = "finance"
-    verdict: Literal["ok", "conditional", "reject"]
-    max_feasible_amount_krw: Decimal | None = Field(ge=0)
-    hard_constraints: list[str]
-    soft_warnings: list[str]
-    reasoning: list[str]
-    evidences: list[Evidence]
-    suggested_adjustment: SuggestedAdjustment | None
+    channel_type: str
+    partner_id: str
+    settlement_days: int = Field(ge=0)
+    liquidity_rank: int = Field(ge=1)
+
+
+# ---------------------------------------------------------------------------
+# 실행이력 조회 응답
+# ---------------------------------------------------------------------------
+
+class FinanceAgentRunResponse(BaseModel):
+    """UI 조회용 Finance Agent 실행이력 응답."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: UUID
+    cycle: FinanceCycle
+    as_of: date
+    snapshot_id: str | None
+    runtime_status: RuntimeStatus
+    verdict: FinalVerdict | None
+    request_payload: dict[str, object]
+    response_payload: dict[str, object]
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Dashboard 조회 응답
+# ---------------------------------------------------------------------------
+
+class FinanceDashboardMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sim_run_id: str
+    as_of: date
+    data_type: str | None = None
+
+
+class FinanceStateView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finance_state_id: str
+    state_date: date
+    state_type: str
+    financing_mode: str
+    current_cash_krw: Decimal
+    minimum_operating_cash_krw: Decimal
+    operating_cash_buffer_krw: Decimal
+    committed_outflows_krw: Decimal
+    unsettled_purchase_payables_krw: Decimal
+    receivables_krw: Decimal
+    inventory_book_value_krw: Decimal
+    operational_inventory_value_krw: Decimal
+    current_debt_krw: Decimal
+    financial_limit_krw: Decimal
+    recommended_loan_amount_krw: Decimal | None = None
+    note: str | None = None
+
+
+class FinanceCashflowSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    purchase_cash_out_krw: Decimal
+    logistics_cash_out_krw: Decimal
+    payroll_interest_cash_out_krw: Decimal
+    sales_recognized_krw: Decimal
+    collection_cash_in_krw: Decimal
+    base_net_cash_krw: Decimal
+    loan_execution_krw: Decimal
+
+
+class FinanceReceivableSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    collected_count: int
+    partial_count: int
+    open_count: int
+    original_amount_krw: Decimal
+    received_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    overdue_amount_krw: Decimal
+
+
+class FinancePayableSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    count: int
+    original_amount_krw: Decimal
+    paid_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    overdue_amount_krw: Decimal
+
+
+class FinanceReceivableItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receivable_id: str
+    sale_id: str
+    issued_date: date
+    due_date: date
+    original_amount_krw: Decimal
+    received_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    status: str
+
+
+class FinancePayableItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payable_id: str
+    purchase_id: str
+    issued_date: date
+    due_date: date
+    original_amount_krw: Decimal
+    paid_amount_krw: Decimal
+    outstanding_amount_krw: Decimal
+    status: str
+
+
+class FinanceExpenseSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expense_category: str
+    status: str
+    expense_count: int
+    total_amount_krw: Decimal
+    fixed_amount_krw: Decimal
+    variable_amount_krw: Decimal
+
+
+class FinanceClosingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    close_date: date
+    day_no: int
+    purchase_cash_out_krw: Decimal
+    logistics_cash_out_krw: Decimal
+    payroll_interest_cash_out_krw: Decimal
+    sales_recognized_krw: Decimal
+    collection_cash_in_krw: Decimal
+    base_net_cash_krw: Decimal
+    base_cash_balance_krw: Decimal
+    loan_execution_krw: Decimal
+    loan_cash_balance_krw: Decimal
+    minimum_operating_cash_krw: Decimal | None = None
+    base_operating_buffer_krw: Decimal | None = None
+    loan_operating_buffer_krw: Decimal | None = None
+    receivables_balance_krw: Decimal
+    inventory_qty_kg: Decimal
+    accounting_inventory_cost_krw: Decimal
+
+
+class FinanceDashboardResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: FinanceDashboardMeta
+    states: list[FinanceStateView]
+    cashflow_summary: FinanceCashflowSummary
+    ledger_summary: dict[str, FinanceReceivableSummary | FinancePayableSummary]
+    receivables: list[FinanceReceivableItem]
+    payables: list[FinancePayableItem]
+    expenses: list[FinanceExpenseSummary]
+    recent_closings: list[FinanceClosingItem]
+
+
+class FinanceCashflowResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: FinanceDashboardMeta
+    cashflow: list[FinanceClosingItem]

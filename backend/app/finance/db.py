@@ -1,20 +1,55 @@
-"""Finance P0의 PostgreSQL 연결 및 조회 기능."""
+"""Finance 영속 계층 — 연결 · 경계 계약 · 조회 구현.
+
+이 파일이 소유하는 것
+    PostgreSQL 연결/조회 헬퍼 · `FinanceAsOfDataPort` 경계 계약 ·
+    `FinanceDataNotReady` · Finance State/Policy/부채 조회 · as-of DataPort 구현
+
+여기 **없는 것**
+    금액 공식 · 판정 · 실행 통제 · 사람이 읽는 문장
+
+★ 이 경로(`app.finance.db`)는 **재무 밖 도메인(master · orchestrator)이 이미 import
+  한다.** 그래서 옮길 수 없고, 옮길 수 없으므로 여기가 정본이다 — 같은 일을 하는
+  모듈을 옆에 새로 만들면 어느 쪽이 진짜인지 알 수 없게 된다.
+
+★ **경계는 폴더가 아니라 규율이다.** 아래 `FinanceAsOfDataPort` 절은 구현을 알지 못한다
+  — 계약이 먼저 오고 구현이 뒤에 온다는 순서가 그 규율을 눈으로 확인시킨다.
+
+★ as-of 재현성 보호는 그대로다. 과거 시점을 오늘 상태로 대신 답하지 않는다.
+"""
 
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, TypedDict, cast
 
 import psycopg
 from dotenv import load_dotenv
 from psycopg import sql
 from psycopg.rows import dict_row
 
+from app.finance.sales_validation import PartnerReceivable
+from app.finance.schemas import (
+    CashEvent,
+    FinanceDebtPolicy,
+    FinancePolicy,
+    FinanceRuntimeContext,
+    FinanceSnapshot,
+)
+from app.finance.tools import build_debt_service_schedule, effective_cash_date
+
+# ---------------------------------------------------------------------------
+# PostgreSQL 연결과 조회 헬퍼 (재무 밖 도메인도 쓴다)
+# ---------------------------------------------------------------------------
+
 Query = str | sql.Composed
 Params = Sequence[object] | Mapping[str, object] | None
 
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+CONNECT_TIMEOUT_SECONDS = 5
 
 
 def _load_environment() -> None:
@@ -44,6 +79,7 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
         dbname=config["DB_NAME"],
         user=config["DB_USER"],
         password=config["DB_PASSWORD"],
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
         row_factory=dict_row,
     )
 
@@ -60,3 +96,1105 @@ def fetch_all(query: Query, params: Params = None) -> list[dict[str, Any]]:
     with get_connection() as connection, connection.cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchall()
+
+
+def execute_returning_one(query: Query, params: Params = None) -> dict[str, Any]:
+    """변경 SQL을 실행하고 RETURNING으로 생성된 단건 결과를 반환한다."""
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Database write did not return a row")
+        return row
+
+
+def decimal_value(value: Any) -> Decimal:
+    """Finance 숫자 입력을 Decimal로 정규화한다."""
+    if isinstance(value, bool):
+        raise TypeError("boolean values are not valid numeric inputs")
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        raise TypeError("float is not an accepted business numeric input")
+    return Decimal(str(value))
+
+
+def money_amount(value: Any, field: str) -> Decimal:
+    """원장에서 읽은 **금액 한 칸**. 못 읽으면 값을 지어내지 않고 막는다.
+
+    ★ *"읽을 수 없다"* 와 *"0원이다"* 는 다른 사실이다. 못 읽은 칸을 0 으로 놓으면 그
+      0 이 마감·지급 계산에 그대로 들어가고, 그 뒤로는 아무도 그것이 실제 0 인지
+      못 읽은 값인지 구분할 수 없다.
+
+    ⚠️ 음수도 막는다. 원장에 적힌 금액 칸은 음수가 될 수 없고, 음수가 왔다는 것은
+      그 행이 이미 깨졌다는 뜻이다. **계산 결과**(예: 지급 뒤 현금)가 음수인 것은
+      다른 이야기이고 그것은 사실이므로 막지 않는다.
+    """
+    try:
+        amount = decimal_value(value)
+    except Exception as exc:  # pragma: no cover - adapter-dependent
+        raise FinanceDataNotReady(field) from exc
+    if not amount.is_finite() or amount < 0:
+        raise FinanceDataNotReady(field)
+    return amount
+
+
+def row_value(row: Any, name: str, index: int = 0) -> Any:
+    """dict row와 tuple row를 같은 방식으로 읽는다."""
+    if isinstance(row, Mapping):
+        return row[name]
+    return row[index]
+
+
+@dataclass(frozen=True)
+class InventorySnapshot:
+    """재고 원장을 특정 날짜까지 재생한 Finance용 파생 스냅샷."""
+
+    quantity_kg: Decimal
+    inventory_book_value_krw: Decimal
+    operational_inventory_value_krw: Decimal
+
+
+def load_inventory_snapshot_as_of(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    as_of: date,
+) -> InventorySnapshot:
+    """Inventory Ledger를 ``as_of``까지 재생해 재무 재고가치를 계산한다.
+
+    두 금액은 서로 다른 Finance 표현이지만 현재 저장 계약의 수량·원가 근거는 같다.
+    회계 재고원가는 남아 있는 취득원가이고, 운영 재고가치는 운영 시점의 Lot 잔량에
+    취득원가를 적용한 값이다. 수량 정본은 이동 원장, 역사 원가는 입고 때 확정되어
+    production에서 재평가되지 않는 Lot 원가다. 현재 잔량과 현재 상태값은 과거 계산에
+    사용하지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT
+                    lot.lot_id,
+                    lot.unit_cost_krw_per_kg,
+                    move.move_type,
+                    move.quantity_kg
+                FROM {schema}.inventory_lots lot
+                LEFT JOIN {schema}.inventory_moves move
+                  ON move.lot_id = lot.lot_id
+                 AND move.sim_run_id = lot.sim_run_id
+                 AND move.moved_at <= %(as_of)s
+                WHERE lot.sim_run_id = %(sim_run_id)s
+                  AND lot.received_at <= %(as_of)s
+                ORDER BY lot.lot_id, move.moved_at, move.move_id
+                """
+            ).format(schema=schema),
+            {"sim_run_id": sim_run_id, "as_of": as_of},
+        )
+        rows = cursor.fetchall()
+    return _inventory_snapshot_from_ledger_rows(rows)
+
+
+def _inventory_snapshot_from_ledger_rows(rows: Sequence[Any]) -> InventorySnapshot:
+    quantities: dict[str, Decimal] = {}
+    costs: dict[str, Decimal] = {}
+    for row in rows:
+        lot_id = str(row_value(row, "lot_id", 0))
+        unit_cost = decimal_value(row_value(row, "unit_cost_krw_per_kg", 1))
+        prior_cost = costs.setdefault(lot_id, unit_cost)
+        if prior_cost != unit_cost:
+            raise FinanceDataNotReady("inventory_lot_cost_ambiguous")
+        quantities.setdefault(lot_id, Decimal(0))
+
+        move_type = row_value(row, "move_type", 2)
+        if move_type is None:
+            continue
+        quantity = decimal_value(row_value(row, "quantity_kg", 3))
+        if move_type == "IN":
+            quantities[lot_id] += quantity
+        elif move_type in {"OUT", "DISPOSE"}:
+            quantities[lot_id] -= quantity
+        else:
+            raise FinanceDataNotReady(f"unsupported_inventory_move_type:{move_type}")
+        if quantities[lot_id] < 0:
+            raise FinanceDataNotReady(f"negative_inventory_lot_balance:{lot_id}")
+
+    total_quantity = sum(quantities.values(), Decimal(0))
+    acquisition_cost = sum(
+        (quantity * costs[lot_id] for lot_id, quantity in quantities.items()),
+        Decimal(0),
+    )
+    return InventorySnapshot(
+        quantity_kg=total_quantity,
+        inventory_book_value_krw=acquisition_cost,
+        operational_inventory_value_krw=acquisition_cost,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 데이터 경계 계약 — 구현을 import 하지 않는다
+# ---------------------------------------------------------------------------
+
+class FinanceDataNotReady(RuntimeError):
+    """필수 Finance 사실/Policy가 없거나 과거 시점으로 재현할 수 없다."""
+
+    def __init__(self, key: str):
+        # `key` 는 `missing_data` 식별자다 — 기계가 읽으므로 번역하지 않는다.
+        # 문장만 사람이 읽는 설명이다 (Controller 경로에서 `reasoning` 이 된다).
+        self.key = key
+        super().__init__(f"재무 데이터가 준비되지 않았습니다: {key}")
+
+
+class FinanceAsOfDataPort(Protocol):
+    """v2.2 Repository 경계. 모든 변경 가능 읽기에는 ``as_of``를 전달한다."""
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]: ...
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None: ...
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy: ...
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]: ...
+    def load_partner_receivables(
+        self, as_of: date, partner_id: str
+    ) -> list[PartnerReceivable]: ...
+    #: 그날 유효한 거래처 여신한도. **`None` 은 미확정이고 `0` 은 0원이다.**
+    def load_partner_credit_limit(
+        self, as_of: date, partner_id: str
+    ) -> Decimal | None: ...
+
+
+# ---------------------------------------------------------------------------
+# Finance State · Policy · 부채 조회
+# ---------------------------------------------------------------------------
+
+FINANCE_POLICY_VERSION = "v1.3-PROVISIONAL"
+FINANCE_POLICY_USAGE_SCOPE = "AGENT_MVP_DEMO"
+_NUMERIC_POLICY_KEYS = {
+    "purchase_payment_days",
+    "payroll_date",
+    "margin_defense_floor_rate",
+    "monthly_labor_cost_krw",
+    "minimum_cash_balance_krw",
+    "cashflow_projection_days",
+    "cash_priority_high_ratio",
+    "cash_priority_medium_ratio",
+}
+_TEXT_POLICY_KEYS = {"cash_priority_reference"}
+_OPTIONAL_POLICY_KEYS = {
+    "purchase_payment_days",
+    "margin_defense_floor_rate",
+    "monthly_labor_cost_krw",
+}
+_REQUIRED_POLICY_KEYS = (_NUMERIC_POLICY_KEYS | _TEXT_POLICY_KEYS) - _OPTIONAL_POLICY_KEYS
+_KNOWN_POLICY_KEYS = _REQUIRED_POLICY_KEYS | _OPTIONAL_POLICY_KEYS
+_DEBT_NUMERIC_POLICY_KEYS = {
+    "debt_principal_krw",
+    "debt_annual_rate",
+    "debt_term_months",
+    "debt_grace_months",
+}
+_DEBT_TEXT_POLICY_KEYS = {
+    "debt_runtime_status",
+    "debt_execution_date",
+    "debt_grace_payment_mode",
+    "debt_repayment_method",
+    "debt_payment_frequency",
+    "debt_payment_day_rule",
+    "debt_first_payment_rule",
+    "debt_interest_method",
+}
+_REQUIRED_DEBT_POLICY_KEYS = _DEBT_NUMERIC_POLICY_KEYS | _DEBT_TEXT_POLICY_KEYS
+
+
+class FinanceState(TypedDict):
+    finance_state_id: str
+    sim_run_id: str
+    state_date: date
+    state_type: str
+    financing_mode: str
+    current_cash_krw: Decimal
+    minimum_operating_cash_krw: Decimal
+    committed_outflows_krw: Decimal
+    unsettled_purchase_payables_krw: Decimal
+    financial_limit_krw: Decimal
+
+
+def get_current_finance_state() -> FinanceState:
+    """DB View가 지정한 현재 Finance State 한 건을 조회한다."""
+    return cast(FinanceState, _get_current_finance_state_row())
+
+
+def get_current_finance_snapshot(
+    as_of: date | None = None, *, sim_run_id: str | None = None
+) -> FinanceSnapshot:
+    """``as_of`` 시점의 Finance State를 T0 ID 미확정 Snapshot으로 변환한다."""
+    return FinanceSnapshot(
+        snapshot_id=None, **_get_current_finance_state_row(as_of, sim_run_id=sim_run_id)
+    )
+
+
+def get_current_finance_runtime_context(
+    as_of: date | None = None, *, sim_run_id: str | None = None
+) -> FinanceRuntimeContext:
+    """Snapshot, Policy, 확정 일정을 DB 경계에서 한 번 고정한다.
+
+    ★ ``as_of`` 는 **어느 상태 행을 고를지**만 정한다. 고른 뒤의 투영 기준일은
+      그대로 그 행의 ``state_date`` 다 — 상태가 적힌 날의 잔액을 다른 날 잔액으로
+      옮겨 쓰지 않는다. 어긋나면 위(`adapter._controller_boundary`)에서 닫는다.
+
+    ★ `sim_run_id` 를 주면 **그 실행의 상태**만 고른다. 실행이 여럿인 환경에서
+      축을 안 주면 어느 실행의 잔액인지 말할 수 없다.
+    """
+    snapshot = get_current_finance_snapshot(as_of, sim_run_id=sim_run_id)
+    policy = get_active_finance_policy()
+    horizon_end = snapshot.state_date + timedelta(days=policy.cashflow_projection_days)
+    events: list[CashEvent] = []
+    unresolved: list[str] = []
+
+    payable_rows, payable_events = _fetch_open_payable_events(
+        sim_run_id=snapshot.sim_run_id,
+        as_of=snapshot.state_date,
+        horizon_end=horizon_end,
+    )
+    events.extend(payable_events)
+    if snapshot.unsettled_purchase_payables_krw != 0 and not payable_rows:
+        unresolved.append("PURCHASE_PAYABLE")
+
+    expense_rows = _fetch_scheduled_rows(
+        table="expenses",
+        columns=("expense_id", "expense_date", "amount_krw"),
+        sim_run_id=snapshot.sim_run_id,
+        as_of=snapshot.state_date,
+        horizon_end=horizon_end,
+        status_column="status",
+        excluded_status="PAID",
+    )
+    events.extend(
+        _rows_to_events(
+            expense_rows,
+            id_column="expense_id",
+            date_column="expense_date",
+            amount_column="amount_krw",
+            event_type="COMMITTED_OUTFLOW",
+            direction="OUTFLOW",
+        )
+    )
+    if snapshot.committed_outflows_krw != 0 and not expense_rows:
+        unresolved.append("COMMITTED_OUTFLOW")
+
+    receivable_rows = _fetch_scheduled_rows(
+        table="receivables",
+        columns=("receivable_id", "due_date", "outstanding_amount_krw"),
+        sim_run_id=snapshot.sim_run_id,
+        as_of=snapshot.state_date,
+        horizon_end=horizon_end,
+        status_column="status",
+        active_status="OPEN",
+    )
+    events.extend(
+        _rows_to_events(
+            receivable_rows,
+            id_column="receivable_id",
+            date_column="due_date",
+            amount_column="outstanding_amount_krw",
+            event_type="RECEIVABLE",
+            direction="INFLOW",
+        )
+    )
+    if snapshot.receivables_krw != 0 and not receivable_rows:
+        unresolved.append("RECEIVABLE")
+
+    # 🔴 **부채가 없으면 부채 정책을 요구하지 않는다.**
+    #
+    #    예전에는 `current_debt_krw` 와 무관하게 부채 정책을 읽고, 행이 없으면
+    #    `DEBT_SERVICE` 를 unresolved 로 올렸다. 그러면 **빚이 없는 회사가 "부채 원천을
+    #    확인하지 못했다"** 고 말하게 된다 — 확인할 부채가 애초에 없는데도.
+    #    그 unresolved 는 아래로 흘러 *"재무가 뭔가 못 읽었다"* 로 읽히고, 실제로는
+    #    아무 문제가 없다. 없는 의무를 증명하라고 요구한 셈이다.
+    #
+    # ★ 부채가 있으면 규율은 그대로다 — 정책이 없거나 원금이 상태와 어긋나면
+    #   fail-closed 다. 부채 상환은 현금흐름에서 **가장 확실한 유출**이라, 그것을
+    #   빠뜨린 투영은 틀린 게 아니라 낙관적으로 틀린다.
+    debt_policy = None
+    if snapshot.current_debt_krw > 0:
+        try:
+            debt_policy = get_active_finance_debt_policy()
+        except (LookupError, TypeError, ValueError):
+            unresolved.append("DEBT_SERVICE")
+        if debt_policy is not None:
+            if abs(
+                debt_policy.debt_principal_krw - snapshot.current_debt_krw
+            ) > Decimal("0.000001"):
+                unresolved.append("DEBT_SERVICE")
+                debt_policy = None
+            else:
+                events.extend(
+                    build_debt_service_schedule(
+                        debt_policy=debt_policy,
+                        as_of=snapshot.state_date,
+                        horizon_end=horizon_end,
+                    )
+                )
+
+    return FinanceRuntimeContext(
+        snapshot=snapshot,
+        policy=policy,
+        debt_policy=debt_policy,
+        cash_events=tuple(events),
+        unresolved_sources=tuple(unresolved),
+    )
+
+
+def get_active_finance_policy() -> FinancePolicy:
+    """현재 Finance MVP 범위의 active policy를 typed contract로 조회한다."""
+    query = sql.SQL(
+        """
+        SELECT
+            policy_key,
+            value_kind,
+            value_numeric,
+            value_text,
+            value_json,
+            source_ref,
+            policy_version,
+            usage_scope
+        FROM {}.agent_policy_config
+        WHERE domain = %s
+          AND policy_version = %s
+          AND usage_scope = %s
+          AND is_active = TRUE
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(
+        query,
+        ["finance", FINANCE_POLICY_VERSION, FINANCE_POLICY_USAGE_SCOPE],
+    )
+    return _build_finance_policy(rows)
+
+
+def get_active_finance_debt_policy() -> FinanceDebtPolicy:
+    """현재 Finance MVP 범위의 SIM_FIXED debt contract를 조회한다."""
+    return _build_finance_debt_policy(_fetch_active_finance_policy_rows())
+
+
+def _fetch_active_finance_policy_rows() -> list[dict[str, object]]:
+    query = sql.SQL(
+        """
+        SELECT
+            policy_key,
+            value_kind,
+            value_numeric,
+            value_text,
+            value_json,
+            evidence_grade,
+            source_ref,
+            policy_version,
+            usage_scope
+        FROM {}.agent_policy_config
+        WHERE domain = %s
+          AND policy_version = %s
+          AND usage_scope = %s
+          AND is_active = TRUE
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    return fetch_all(
+        query,
+        ["finance", FINANCE_POLICY_VERSION, FINANCE_POLICY_USAGE_SCOPE],
+    )
+
+
+def _build_finance_policy(rows: list[dict[str, object]]) -> FinancePolicy:
+    values: dict[str, object] = {}
+    source_refs: dict[str, str] = {}
+
+    for row in rows:
+        key = row.get("policy_key")
+        if key not in _KNOWN_POLICY_KEYS:
+            continue
+        if key in values:
+            raise ValueError(f"Duplicate Finance policy key: {key}")
+        if row.get("policy_version") != FINANCE_POLICY_VERSION:
+            raise ValueError(f"Finance policy_version mismatch: {key}")
+        if row.get("usage_scope") != FINANCE_POLICY_USAGE_SCOPE:
+            raise ValueError(f"Finance policy usage_scope mismatch: {key}")
+
+        kind = row.get("value_kind")
+        expected_kind = "NUMERIC" if key in _NUMERIC_POLICY_KEYS else "TEXT"
+        if kind != expected_kind:
+            raise ValueError(f"Invalid value_kind for Finance policy {key}: {kind}")
+        selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
+        unused_columns = {"value_numeric", "value_text", "value_json"} - {selected_column}
+        value = row.get(selected_column)
+        if value is None and key in _OPTIONAL_POLICY_KEYS:
+            if any(row.get(column) is not None for column in unused_columns):
+                raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
+            values[key] = None
+            source_ref = row.get("source_ref")
+            if isinstance(source_ref, str) and source_ref:
+                source_refs[key] = source_ref
+            continue
+        if value is None or any(row.get(column) is not None for column in unused_columns):
+            raise ValueError(f"Inconsistent value columns for Finance policy: {key}")
+        if kind == "NUMERIC" and (isinstance(value, bool) or not isinstance(value, Decimal)):
+            raise TypeError(f"Invalid Python NUMERIC value for Finance policy: {key}")
+        if kind == "TEXT" and not isinstance(value, str):
+            raise TypeError(f"Invalid Python TEXT value for Finance policy: {key}")
+
+        source_ref = row.get("source_ref")
+        if not isinstance(source_ref, str) or not source_ref:
+            raise ValueError(f"Missing source_ref for Finance policy: {key}")
+        values[key] = value
+        source_refs[key] = source_ref
+
+    missing = _REQUIRED_POLICY_KEYS - values.keys()
+    if missing:
+        raise LookupError(f"Required Finance policies were not found: {', '.join(sorted(missing))}")
+
+    values.setdefault("purchase_payment_days", None)
+    values.setdefault("margin_defense_floor_rate", None)
+    values.setdefault("monthly_labor_cost_krw", None)
+    for key in ("purchase_payment_days", "payroll_date", "cashflow_projection_days"):
+        numeric = values[key]
+        if numeric is None:
+            continue
+        assert isinstance(numeric, Decimal)
+        if numeric != numeric.to_integral_value():
+            raise ValueError(f"Finance policy must be an integer: {key}")
+        values[key] = int(numeric)
+
+    return FinancePolicy(
+        **values,
+        policy_version=FINANCE_POLICY_VERSION,
+        usage_scope=FINANCE_POLICY_USAGE_SCOPE,
+        source_refs=source_refs,
+    )
+
+
+def _build_finance_debt_policy(rows: list[dict[str, object]]) -> FinanceDebtPolicy:
+    values: dict[str, object] = {}
+    source_refs: dict[str, str] = {}
+    for row in rows:
+        key = row.get("policy_key")
+        if key not in _REQUIRED_DEBT_POLICY_KEYS:
+            continue
+        if key in values:
+            raise ValueError(f"Duplicate Finance debt policy key: {key}")
+        if row.get("policy_version") != FINANCE_POLICY_VERSION:
+            raise ValueError(f"Finance debt policy_version mismatch: {key}")
+        if row.get("usage_scope") != FINANCE_POLICY_USAGE_SCOPE:
+            raise ValueError(f"Finance debt policy usage_scope mismatch: {key}")
+        if row.get("evidence_grade") != "SIM_FIXED":
+            raise ValueError(f"Finance debt policy must be SIM_FIXED: {key}")
+
+        kind = row.get("value_kind")
+        expected_kind = "NUMERIC" if key in _DEBT_NUMERIC_POLICY_KEYS else "TEXT"
+        if kind != expected_kind:
+            raise ValueError(f"Invalid value_kind for Finance debt policy {key}: {kind}")
+        selected_column = "value_numeric" if kind == "NUMERIC" else "value_text"
+        unused_columns = {"value_numeric", "value_text", "value_json"} - {selected_column}
+        value = row.get(selected_column)
+        if value is None or any(row.get(column) is not None for column in unused_columns):
+            raise ValueError(f"Inconsistent value columns for Finance debt policy: {key}")
+        if kind == "NUMERIC" and (isinstance(value, bool) or not isinstance(value, Decimal)):
+            raise TypeError(f"Invalid Python NUMERIC value for Finance debt policy: {key}")
+        if kind == "TEXT" and not isinstance(value, str):
+            raise TypeError(f"Invalid Python TEXT value for Finance debt policy: {key}")
+        source_ref = row.get("source_ref")
+        if not isinstance(source_ref, str) or not source_ref:
+            raise ValueError(f"Missing source_ref for Finance debt policy: {key}")
+        values[key] = value
+        source_refs[key] = source_ref
+
+    missing = _REQUIRED_DEBT_POLICY_KEYS - values.keys()
+    if missing:
+        raise LookupError(
+            f"Required Finance debt policies were not found: {', '.join(sorted(missing))}"
+        )
+    for key in ("debt_term_months", "debt_grace_months"):
+        numeric = values[key]
+        assert isinstance(numeric, Decimal)
+        if numeric != numeric.to_integral_value():
+            raise ValueError(f"Finance debt policy must be an integer: {key}")
+        values[key] = int(numeric)
+    return FinanceDebtPolicy(
+        **values,
+        policy_version=FINANCE_POLICY_VERSION,
+        usage_scope=FINANCE_POLICY_USAGE_SCOPE,
+        source_refs=source_refs,
+    )
+
+
+def _fetch_open_payable_events(
+    *, sim_run_id: str, as_of: date, horizon_end: date
+) -> tuple[list[dict[str, object]], list[CashEvent]]:
+    """미결제 매입채무를 **현금이 나가는 날**에 얹는다.
+
+    🔴 **하한을 `due_date > as_of` 로 두면 안 된다.** 계약 만기가 토·일인 채무는
+       실제 현금이 다음 월요일에 나가는데, 월요일에 실행하면 `due_date < as_of` 가
+       되어 그 의무가 미래 현금흐름에서 **통째로 사라졌다.** 원장에 이미 주말 만기
+       4건이 있다. 연체된 미결제 채무도 같은 이유로 버리지 않는다.
+
+    ★ 대신 상태를 믿는다 — `OPEN` 이면 아직 안 나간 돈이다. 지나간 만기를 임의로
+      `PAID` 로 바꾸지 않고, 현금 사건만 `as_of` 이후로 당겨 세운다.
+
+    ★ 채권·비용에는 손대지 않는다. 이 하한 완화는 **매입채무의 사실**이다.
+    """
+    query = sql.SQL(
+        """
+        SELECT payable_id, due_date, outstanding_amount_krw
+        FROM {}.payables
+        WHERE sim_run_id = %s
+          AND due_date <= %s
+          AND status = 'OPEN'
+        ORDER BY due_date, payable_id
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    rows = fetch_all(query, [sim_run_id, horizon_end])
+    events: list[CashEvent] = []
+    for event in _rows_to_events(
+        rows,
+        id_column="payable_id",
+        date_column="due_date",
+        amount_column="outstanding_amount_krw",
+        event_type="PURCHASE_PAYABLE",
+        direction="OUTFLOW",
+    ):
+        cash_date = max(effective_cash_date(event.event_date), as_of)
+        events.append(event.model_copy(update={"event_date": cash_date}))
+    return rows, events
+
+
+def _fetch_scheduled_rows(
+    *,
+    table: str,
+    columns: tuple[str, str, str],
+    sim_run_id: str,
+    as_of: date,
+    horizon_end: date,
+    status_column: str,
+    active_status: str | None = None,
+    excluded_status: str | None = None,
+) -> list[dict[str, object]]:
+    status_clause = sql.SQL("{} = %s").format(sql.Identifier(status_column))
+    status_value = active_status
+    if excluded_status is not None:
+        status_clause = sql.SQL("{} <> %s").format(sql.Identifier(status_column))
+        status_value = excluded_status
+    assert status_value is not None
+    query = sql.SQL(
+        """
+        SELECT {}, {}, {}
+        FROM {}.{}
+        WHERE sim_run_id = %s
+          AND {} > %s
+          AND {} <= %s
+          AND {}
+        ORDER BY {}, {}
+        """
+    ).format(
+        *(sql.Identifier(column) for column in columns),
+        sql.Identifier(get_db_schema()),
+        sql.Identifier(table),
+        sql.Identifier(columns[1]),
+        sql.Identifier(columns[1]),
+        status_clause,
+        sql.Identifier(columns[1]),
+        sql.Identifier(columns[0]),
+    )
+    return fetch_all(query, [sim_run_id, as_of, horizon_end, status_value])
+
+
+def _rows_to_events(
+    rows: list[dict[str, object]],
+    *,
+    id_column: str,
+    date_column: str,
+    amount_column: str,
+    event_type: str,
+    direction: str,
+) -> list[CashEvent]:
+    events: list[CashEvent] = []
+    for row in rows:
+        ref_id = row.get(id_column)
+        event_date = row.get(date_column)
+        amount = row.get(amount_column)
+        if not isinstance(ref_id, str) or not isinstance(event_date, date):
+            raise TypeError(f"Invalid scheduled cash event identity: {event_type}")
+        if isinstance(amount, bool) or not isinstance(amount, Decimal) or amount < 0:
+            raise TypeError(f"Invalid scheduled cash event amount: {ref_id}")
+        events.append(
+            CashEvent(
+                event_date=event_date,
+                event_type=event_type,
+                amount_krw=amount,
+                direction=direction,
+                ref_id=ref_id,
+            )
+        )
+    return events
+
+
+# ---------------------------------------------------------------------------
+# 거래처 매출채권 — 실 원장에서 읽는다
+#
+# ★ 이 절이 소유하는 것은 **조회와 옮겨 담기**뿐이다. 무엇이 미회수인지, 무엇이
+#   연체인지는 `tools.summarize_partner_receivables` 가 소유한다 — 어휘를 SQL 에도
+#   한 번 더 적으면 둘이 조용히 갈라진다.
+#
+# 🔴 **못 읽은 것을 "채권 없음" 으로 바꾸지 않는다.** 연결 실패 · 조회 실패 ·
+#    모양이 다른 값은 전부 `FinanceDataNotReady` 로 세운다. 0원 채권은 조회가
+#    성공했고 미회수 행이 0건일 때만 나오는 **사실**이다.
+# ---------------------------------------------------------------------------
+
+
+def _partner_receivable_rows(
+    *, sim_run_id: str, as_of: date, partner_id: str
+) -> list[dict[str, object]]:
+    """거래처 채권 행. **같은 sim_run 안에서만, as_of 까지만 본다.**
+
+    ★ `sim_run_id` 를 채권과 판매 양쪽에 모두 건다. 조인 한쪽만 걸면 다른 실행의
+      판매 Header 를 타고 남의 run 채권이 딸려 들어온다.
+
+    ★ `issued_date <= as_of` 와 `sale_date <= as_of` 를 함께 건다. 발행일만 막으면
+      아직 일어나지 않은 판매에 붙은 채권이 과거 시점 조회에 섞인다 — as-of 재현이
+      깨지는 순간이다.
+    """
+    schema = get_db_schema()
+    query = sql.SQL(
+        """
+        SELECT
+            r.receivable_id,
+            r.due_date,
+            r.outstanding_amount_krw,
+            r.status
+        FROM {}.{} AS r
+        JOIN {}.{} AS s
+          ON s.sale_id = r.sale_id
+         AND s.sim_run_id = r.sim_run_id
+        WHERE r.sim_run_id = %s
+          AND s.sim_run_id = %s
+          AND s.customer_partner_id = %s
+          AND r.issued_date <= %s
+          AND s.sale_date <= %s
+        ORDER BY r.receivable_id
+        """
+    ).format(
+        sql.Identifier(schema),
+        sql.Identifier("receivables"),
+        sql.Identifier(schema),
+        sql.Identifier("sales"),
+    )
+    return fetch_all(query, [sim_run_id, sim_run_id, partner_id, as_of, as_of])
+
+
+def load_partner_receivables(
+    *, sim_run_id: str, as_of: date, partner_id: str
+) -> list[PartnerReceivable]:
+    """거래처 채권 원장을 Finance 사실로 옮긴다.
+
+    ★ 상태를 여기서 거르지 않는다. `COLLECTED` · `WRITEOFF` 를 빼는 것은 집계의
+      판단이고, 그 판단은 한 곳에만 있어야 한다.
+
+    ★ `receivable_id` 를 그대로 `source_ref` 로 쓴다 — 이미 `load_receivables` 가
+      같은 값을 `ref_id` 로 쓰고 있다. 따라가면 실제 원장 행에 닿는다.
+    """
+    if not partner_id.strip():
+        raise ValueError("partner_id must not be blank")
+    try:
+        rows = _partner_receivable_rows(
+            sim_run_id=sim_run_id, as_of=as_of, partner_id=partner_id
+        )
+    except Exception as exc:  # 조회 실패는 "채권 없음" 이 아니다 — 세운다.
+        raise FinanceDataNotReady("partner_receivables") from exc
+
+    receivables: list[PartnerReceivable] = []
+    for row in rows:
+        amount = row.get("outstanding_amount_krw")
+        if isinstance(amount, bool) or not isinstance(amount, Decimal):
+            # 🔴 float 로 바꾸지 않는다. 못 읽은 금액은 못 읽은 것이다.
+            raise FinanceDataNotReady("partner_receivables")
+        try:
+            receivables.append(
+                PartnerReceivable(
+                    receivable_id=str(row["receivable_id"]),
+                    due_date=cast(date, row["due_date"]),
+                    outstanding_amount_krw=amount,
+                    status=cast(Any, row["status"]),
+                    source_ref=str(row["receivable_id"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("partner_receivables") from exc
+    return receivables
+
+
+def load_partner_credit_limit(*, as_of: date, partner_id: str) -> Decimal | None:
+    """그날 유효한 **거래처 여신한도**. 없으면 `None`.
+
+    ★ **한도는 정책이 아니라 거래처가 소유한 사실**이다. 그래서 Finance Policy 가
+      아니라 `partner_credit_limits` 에서 읽는다 — 실행마다 같은 값이 아니고 계약마다
+      다르다.
+
+    🔴 **`0` 과 `None` 은 다르다.**
+
+      ```text
+      Decimal(0)  여신한도가 0원이라는 사실   → 판정한다 (어떤 제안도 한도를 넘는다)
+      None        한도가 아직 확정되지 않음   → 판정하지 않는다 (RUNTIME_NOT_READY)
+      ```
+
+      그래서 행이 없을 때만 `None` 이다. 금액 컬럼은 `NOT NULL` 이라 "0 인지 모르는
+      지" 가 한 칸에 섞이지 않는다.
+
+    🔴 **겹치는 활성 구간이 있으면 고르지 않는다.** 어느 한도로 판정했는지 되짚을 수
+      없는 상태에서 하나를 집으면, 그 사고는 에러 없이 숫자만 바꾼다. 기간 겹침을
+      DB 제약으로 막지 않았으므로(`btree_gist` 를 공유 스키마에 더하지 않았다)
+      여기서 fail-closed 한다.
+
+    ★ **미래 구간을 읽지 않는다.** `effective_from <= as_of` 이고, 끝이 있으면
+      `as_of <= effective_to` 인 행만 그날의 사실이다.
+    """
+    if not partner_id.strip():
+        raise ValueError("partner_id must not be blank")
+    query = sql.SQL(
+        """
+        SELECT partner_credit_limit_id, credit_limit_krw
+        FROM {}.partner_credit_limits
+        WHERE partner_id = %s
+          AND is_active
+          AND effective_from <= %s
+          AND (effective_to IS NULL OR effective_to >= %s)
+        ORDER BY effective_from DESC
+        LIMIT 2
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    try:
+        rows = fetch_all(query, [partner_id, as_of, as_of])
+    except Exception as exc:  # 조회 실패는 "한도 없음" 이 아니다 — 세운다.
+        raise FinanceDataNotReady("partner_credit_limit") from exc
+    if not rows:
+        # ★ 없는 것은 없는 것이다. 0 으로도 무한대로도 바꾸지 않는다.
+        return None
+    if len(rows) > 1:
+        raise FinanceDataNotReady("partner_credit_limit_ambiguous")
+    amount = rows[0].get("credit_limit_krw")
+    if isinstance(amount, bool) or not isinstance(amount, Decimal):
+        # 🔴 float 로 바꾸지 않는다. 못 읽은 금액은 못 읽은 것이다.
+        raise FinanceDataNotReady("partner_credit_limit")
+    if not amount.is_finite() or amount < 0:
+        raise FinanceDataNotReady("partner_credit_limit")
+    return amount
+
+
+_FINANCE_STATE_COLUMNS = (
+    "finance_state_id",
+    "sim_run_id",
+    "state_date",
+    "state_type",
+    "financing_mode",
+    "current_cash_krw",
+    "minimum_operating_cash_krw",
+    "committed_outflows_krw",
+    "unsettled_purchase_payables_krw",
+    "receivables_krw",
+    "current_debt_krw",
+    "financial_limit_krw",
+)
+
+
+class FinanceRuntimeAxis(TypedDict):
+    """상태 한 건이 아니라 **어느 축 위에서 고르는가**."""
+
+    sim_run_id: str
+    financing_mode: str
+
+
+def get_finance_runtime_axis(*, sim_run_id: str | None = None) -> FinanceRuntimeAxis:
+    """**그 실행**이 서 있는 재무 축 — 시뮬레이션 실행과 조달 방식.
+
+    ★ `v_current_finance_state` 에서 축을 읽는다. 그 View 는 이제 상태 ID 에 매여
+      있지 않다 — `database/finance/finance_current_state_view.sql` 이 공유 기본
+      스키마의 `finance_state_id = 'FIN-DAY30-LOAN'` 고정을 걷어내고, `sim_runs` 가
+      정한 축에서 **가장 늦은 상태**를 돌려주도록 바꾼다.
+
+    🔴 **`sim_run_id` 를 주면 그 실행만 본다.** 예전에는 View 전체에 대고
+       *"시스템에 축이 하나뿐인가"* 를 물었다. 실행이 하나일 때는 같은 답이지만,
+       번인과 새 걷기가 **공존하는 순간** 그 질문은 늘 *"둘"* 이라고 답한다 —
+       실측으로 `SIM-BURNIN-202512` 와 `SIM-WALK-202601-LOAN` 이 함께 서자 새 걷기의
+       첫 개장이 `finance_runtime_axis_ambiguous` 로 막혔다. **남의 실행이 있다는
+       사실만으로 내 실행이 모호해지면 안 된다.**
+
+    🔴 `financing_mode` 를 축에서 빼면 안 된다. 같은 sim_run · 같은 날짜에
+       `BASE_NO_LOAN` 과 `LOAN_BASELINE` 두 행이 실제로 있다 — 날짜만으로 고르면
+       **무차입 상태가 대출 baseline 자리에 조용히 들어온다.**
+
+    🔴 **축이 여러 개면 고르지 않는다.** 좁혀 물었는데도 둘이면 그것은 *"같은 실행
+       안에서 축이 갈렸다"* 이고, 거기서 아무거나 집으면 **남의 축 위에서 판단**하게
+       된다. 그 사고는 에러 없이 숫자만 바꾼다.
+
+    ⚠️ `sim_run_id` 를 안 주는 경로는 *"지금 상태"* 를 묻는 레거시 조회(STATUS 화면)
+      뿐이다. 그때도 실행이 여럿이면 **고르지 않고 세운다** — 판단 경로는 전부
+      축을 명시한다.
+
+    ★ 현재 시점 조회는 여기까지다. 과거 시점 선택은 아래 as-of 질의가 한다 —
+      View 는 "지금", 질의는 "그때" 를 맡는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    if sim_run_id is None:
+        query = sql.SQL(
+            "SELECT DISTINCT sim_run_id, financing_mode FROM {}.v_current_finance_state"
+        ).format(schema)
+        rows = fetch_all(query)
+    else:
+        query = sql.SQL(
+            """
+            SELECT DISTINCT sim_run_id, financing_mode
+            FROM {}.v_current_finance_state
+            WHERE sim_run_id = %s
+            """
+        ).format(schema)
+        rows = fetch_all(query, [sim_run_id])
+    if not rows:
+        # 🔴 **없으면 없는 것이다.** 다른 실행의 축으로 대신하지 않는다.
+        raise LookupError("Current Finance State was not found")
+    if len(rows) > 1:
+        raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
+    row = rows[0]
+    return FinanceRuntimeAxis(
+        sim_run_id=str(row["sim_run_id"]), financing_mode=str(row["financing_mode"])
+    )
+
+
+def load_finance_state_row(
+    as_of: date, *, sim_run_id: str | None = None
+) -> dict[str, object]:
+    """``as_of`` 시점에 유효한 재무 상태 한 건. **미래를 읽지 않는다.**
+
+    ```text
+    같은 sim_run · 같은 financing_mode 안에서
+    state_date <= as_of 중 가장 늦은 행
+    ```
+
+    🔴 최신 행 두 건이 **같은 날짜**면 고르지 않고 세운다. 승인 전이가 같은 날에
+       상태를 하나 더 만들면 "가장 늦은 행" 이 둘이 되는데, 그중 하나를 말없이
+       집으면 어느 쪽이 답인지 아무도 모른 채 숫자가 달라진다.
+
+    ★ **`sim_run_id` 를 주면 그 실행의 축만 본다.** 판단·승인·전이 경로는 전부
+      명시한다 — 실행이 여럿인 환경에서 축을 안 주면 *"지금 축이 하나뿐인가"* 라는
+      다른 질문이 되고, 그 질문은 남의 실행 때문에 실패한다.
+    """
+    axis = get_finance_runtime_axis(sim_run_id=sim_run_id)
+    query = sql.SQL(
+        """
+        SELECT {}
+        FROM {}.finance_states
+        WHERE sim_run_id = %s
+          AND financing_mode = %s
+          AND state_date <= %s
+        ORDER BY state_date DESC
+        LIMIT 2
+        """
+    ).format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS),
+        sql.Identifier(get_db_schema()),
+    )
+    rows = fetch_all(query, [axis["sim_run_id"], axis["financing_mode"], as_of])
+    if not rows:
+        raise FinanceDataNotReady("historical_finance_position")
+    if len(rows) == 2 and rows[0]["state_date"] == rows[1]["state_date"]:
+        raise FinanceDataNotReady("finance_state_ambiguous")
+    row = rows[0]
+    _reject_negative_debt(row)
+    return row
+
+
+def _get_current_finance_state_row(
+    as_of: date | None = None, *, sim_run_id: str | None = None
+) -> dict[str, object]:
+    """``as_of`` 를 주면 그 시점의 행, 주지 않으면 View 가 고정한 현재 행.
+
+    ★ `as_of` 없는 경로는 "지금 상태" 를 묻는 조회(레거시 · STATUS 화면)다.
+      판단 경로는 모두 `as_of` 를 넘긴다.
+
+    🔴 **여러 실행 중 하나를 조용히 고르지 않는다.** 예전에는 `fetch_one` 이라
+       View 가 실행마다 한 행씩 돌려줄 때 **아무 행이나** 집혔다. 번인과 새 걷기가
+       공존하면 그 선택은 매번 달라질 수 있고, 그때 나오는 것은 오류가 아니라
+       **남의 실행 잔액**이다. 터지는 편이 낫다.
+    """
+    if as_of is not None:
+        return load_finance_state_row(as_of, sim_run_id=sim_run_id)
+    schema = sql.Identifier(get_db_schema())
+    columns = sql.SQL(", ").join(
+        sql.Identifier(column) for column in _FINANCE_STATE_COLUMNS
+    )
+    if sim_run_id is None:
+        query = sql.SQL("SELECT {} FROM {}.v_current_finance_state").format(
+            columns, schema
+        )
+        rows = fetch_all(query)
+    else:
+        query = sql.SQL(
+            "SELECT {} FROM {}.v_current_finance_state WHERE sim_run_id = %s"
+        ).format(columns, schema)
+        rows = fetch_all(query, [sim_run_id])
+    if not rows:
+        raise LookupError("Current Finance State was not found")
+    if len(rows) > 1:
+        raise FinanceDataNotReady("finance_runtime_axis_ambiguous")
+    row = rows[0]
+    _reject_negative_debt(row)
+    return row
+
+
+def _reject_negative_debt(row: Mapping[str, object]) -> None:
+    """부채는 음수일 수 없다. **원천 행에서 한 번 막는다.**
+
+    🔴 여기서 막지 않으면 음수 부채가 **"빚 없음"으로 읽힌다.** 부채 축의 판단은
+       `current_debt_krw > 0` 인지로 갈리는데, 음수는 그 분기에서 0 과 같은 쪽에
+       떨어진다 — 잘못된 DB 상태가 *"확인할 부채가 없다"* 는 정상 응답으로 둔갑하고,
+       부채 정책 검증도 상환 일정도 통째로 건너뛴다.
+
+    ★ **원천 행에 두는 이유**: 이 함수가 두 런타임 경로의 유일한 공통 입구다.
+
+        _get_current_finance_state_row
+          ├─ get_current_finance_snapshot → get_current_finance_runtime_context
+          └─ PostgresFinanceAsOfDataPort.load_finance_position → load_debt_schedule
+
+      `FinanceSnapshot` 검증만 믿으면 AsOf DataPort 는 **원시 dict 를 그대로** 쓰므로
+      그 경로로 음수가 빠져나간다. 스키마 제약은 이중 방어이지 대체가 아니다.
+
+    ★ 못 믿을 상태이지 프로그램 오류가 아니므로 `RUNTIME_NOT_READY` 로 접힌다.
+    """
+    debt = row.get("current_debt_krw")
+    if debt is not None and Decimal(str(debt)) < 0:
+        raise FinanceDataNotReady("finance_state_debt_invalid")
+
+
+# ---------------------------------------------------------------------------
+# as-of 재현성을 지키는 DataPort 구현
+# ---------------------------------------------------------------------------
+
+class PostgresFinanceAsOfDataPort:
+    """명시적인 재현성 보호 장치를 둔 현재 Schema용 Adapter.
+
+    상태 선택은 `load_finance_state_row` 가 ``as_of`` 로 한다 — 고정된 한 행이
+    아니라 그 시점에 유효한 행이다. 그 위에 **잔액을 옮겨 쓰지 않는** 보호를 한 겹
+    더 둔다: 고른 행의 날짜가 ``as_of`` 와 다르면 그날 잔액을 모르는 것이므로
+    준비되지 않은 것으로 보고한다.
+    """
+
+    def __init__(self, *, sim_run_id: str | None = None) -> None:
+        #: 이 DataPort 가 읽는 실행. **주면 그 실행만 본다** — 실행이 여럿인 환경에서
+        #: 축을 안 주면 어느 실행의 잔액인지 말할 수 없다.
+        self.sim_run_id = sim_run_id
+        self._position_cache: tuple[date, dict[str, object]] | None = None
+        self._policy_cache: tuple[date, str, FinancePolicy] | None = None
+
+    def load_finance_position(self, as_of: date) -> dict[str, object]:
+        if self._position_cache is not None and self._position_cache[0] == as_of:
+            return self._position_cache[1]
+        row = _get_current_finance_state_row(as_of, sim_run_id=self.sim_run_id)
+        if row.get("state_date") != as_of:
+            raise FinanceDataNotReady("historical_finance_position")
+        self._position_cache = (as_of, row)
+        return row
+
+    def load_policy(self, as_of: date, policy_version: str) -> FinancePolicy:
+        if self._policy_cache is not None and self._policy_cache[:2] == (
+            as_of,
+            policy_version,
+        ):
+            return self._policy_cache[2]
+        if policy_version != FINANCE_POLICY_VERSION:
+            raise FinanceDataNotReady("finance_policy_version")
+        try:
+            policy = get_active_finance_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("finance_policy") from exc
+        self._policy_cache = (as_of, policy_version, policy)
+        return policy
+
+
+    def load_partner_receivables(self, as_of: date, partner_id: str) -> list[PartnerReceivable]:
+        """이 실행의 sim_run 과 as_of 안에서만 거래처 채권을 읽는다.
+
+        ★ `load_finance_position` 을 먼저 통과한다 — 과거 시점을 오늘 상태로 대신
+          답하지 않는 보호가 채권에도 그대로 걸려야 한다.
+        """
+        position = self.load_finance_position(as_of)
+        return load_partner_receivables(
+            sim_run_id=str(position["sim_run_id"]), as_of=as_of, partner_id=partner_id
+        )
+
+    def load_partner_credit_limit(self, as_of: date, partner_id: str) -> Decimal | None:
+        """그날 유효한 거래처 여신한도.
+
+        ★ **실행 축을 걸지 않는다.** 여신한도는 거래처와 계약이 소유한 사실이고 어느
+          시뮬레이션에서 보든 같다 — `sim_run_id` 로 좁히면 실행마다 다른 한도가
+          있는 것처럼 읽힌다. 시점만 `as_of` 로 자른다.
+        """
+        return load_partner_credit_limit(as_of=as_of, partner_id=partner_id)
+
+    def load_obligations(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        _, payable_events = _fetch_open_payable_events(
+            sim_run_id=str(position["sim_run_id"]), as_of=as_of, horizon_end=horizon
+        )
+        expense_rows = _fetch_scheduled_rows(
+            table="expenses",
+            columns=("expense_id", "expense_date", "amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            excluded_status="PAID",
+        )
+        return [
+            *payable_events,
+            *_rows_to_events(
+                expense_rows,
+                id_column="expense_id",
+                date_column="expense_date",
+                amount_column="amount_krw",
+                event_type="COMMITTED_OUTFLOW",
+                direction="OUTFLOW",
+            ),
+        ]
+
+    def load_receivables(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        rows = _fetch_scheduled_rows(
+            table="receivables",
+            columns=("receivable_id", "due_date", "outstanding_amount_krw"),
+            sim_run_id=str(position["sim_run_id"]),
+            as_of=as_of,
+            horizon_end=horizon,
+            status_column="status",
+            active_status="OPEN",
+        )
+        return _rows_to_events(
+            rows,
+            id_column="receivable_id",
+            date_column="due_date",
+            amount_column="outstanding_amount_krw",
+            event_type="RECEIVABLE",
+            direction="INFLOW",
+        )
+
+    def load_payroll(self, as_of: date, horizon: date) -> Decimal | None:
+        del horizon
+        if self._policy_cache is None or self._policy_cache[0] != as_of:
+            raise FinanceDataNotReady("finance_policy_context")
+        policy = self._policy_cache[2]
+        return policy.monthly_labor_cost_krw
+
+    def load_debt_schedule(self, as_of: date, horizon: date) -> list[CashEvent]:
+        position = self.load_finance_position(as_of)
+        try:
+            debt = get_active_finance_debt_policy()
+        except (LookupError, TypeError, ValueError) as exc:
+            raise FinanceDataNotReady("debt_policy") from exc
+        if abs(
+            debt.debt_principal_krw - Decimal(str(position["current_debt_krw"]))
+        ) > Decimal("0.000001"):
+            raise FinanceDataNotReady("debt_policy_consistency")
+        return list(build_debt_service_schedule(debt_policy=debt, as_of=as_of, horizon_end=horizon))

@@ -1,0 +1,164 @@
+"""Logistics Local LLM contracts and response extension fields."""
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+LLMStatus = Literal["SUCCESS", "SKIPPED_TEMPLATE", "FALLBACK", "DISABLED"]
+
+#: LLM 호출이 최종적으로 실패한 원인 분류. 최종 상태만 기록한다 — 재시도 후 성공하면
+#: None 이다(중간 실패는 로그 몫). API Key 원문 같은 세부 정보는 어디에도 싣지 않는다.
+LLMErrorKind = Literal[
+    "TIMEOUT",
+    "NETWORK_ERROR",
+    "SERVER_ERROR",
+    "AUTH_ERROR",
+    "QUOTA_EXCEEDED",
+    "BAD_REQUEST",
+    "INVALID_RESPONSE",
+    "VALIDATION_FAILED",
+]
+
+
+class ContextFact(BaseModel):
+    """판정에 실제 사용된 수치의 확정 표기 (LLM 정책 결정서 v1.3 §5).
+
+    LLM에 계산을 시키지 않는다는 원칙은 그대로다 — LLM이 할 수 있는 것은
+    `display_value` 표기의 인용뿐이다. 1차에서 `raw_value`·`unit`·`date`·`source`
+    필드는 추가하지 않는다. 관계 수치(판정값과 임계)는 "91.7% (임계 90%)" 처럼
+    한 fact로 묶어 라벨-값 오용 위험을 줄인다 — 의미 관계의 semantic validation
+    은 v1.3 범위 밖이다.
+    `display_value`는 단일 formatter(interpretation.py)만 만든다 — 인용 검사가
+    exact 대조라 표기가 두 곳에서 만들어지면 검증이 흔들린다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 무숫자 명명 — 숫자 포함 코드는 검증기의 숫자 검사와 충돌한 전례가 있다.
+    fact_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    display_value: str = Field(min_length=1)
+
+
+class AgentInterpretation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1)
+    risks: list[str]
+    suggested_adjustment: str | None
+
+
+class SanitizedLLMContext(BaseModel):
+    """LLM에 전달하는 유일한 입력. 외부 Provider 전송 경계이기도 하다.
+
+    원본 숫자(재고 kg·날짜·비율·금액)·lot_id·거래처는 싣지 않는다 — LLM에 계산을
+    시키지 않는다는 역할 제한의 구조적 보장이자, 외부 API 전송 시 원본 업무 데이터가
+    나가지 않게 하는 경계다.
+
+    `signals`와 `missing_data`는 저장 위치가 아니라 **코드의 의미**로 분류한다:
+    업무 상태/위험 코드 → signals, 정보·정책 미확정 코드 → missing_data(무숫자 번역명).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: Literal["LOGISTICS"] = "LOGISTICS"
+    signals: list[str]
+    #: 판정에 실제 사용된 수치의 구조화 표기 (v1.3 — 결론 문장 폐기).
+    #: 상한: signal당 최대 3개 · Context 전체 최대 8개. 초과 시 조용한 절단 금지 —
+    #: LLM을 호출하지 않고 무숫자 Template을 유지한다 (조립기가 강제).
+    facts: list[ContextFact]
+    allowed_adjustments: list[str]
+    #: Rule/Scenario Engine이 이미 결정한 우선 조정 방향. LLM이 고르지 않는다 —
+    #: 값이 있으면 그 방향만 설명하고, None이면 추천하지 않는다(검증기가 강제).
+    preferred_adjustment: str | None = None
+    #: 시스템이 확정한 미확정 정보의 무숫자 번역명. LLM이 새로 만들지 않고
+    #: 여기 있는 이름만 설명할 수 있다. 빈 리스트는 "미확정 없음"이다.
+    missing_data: list[str] = Field(default_factory=list)
+
+
+class InterpretationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interpretation: AgentInterpretation
+    llm_status: LLMStatus
+    llm_provider: str | None
+    llm_model: str | None
+    llm_attempts: int = Field(ge=0)
+    llm_fallback_used: bool
+    #: 최종 실패 원인. SUCCESS(재시도 후 성공 포함)면 None.
+    llm_error_kind: LLMErrorKind | None = None
+    #: LLM 호출에 사용된 fact 목록. 기준은 수신이 아니라 **호출 확정**이다 —
+    #: provider.generate(context)의 입력으로 쓰였으면 기록한다. Key 없음(AUTH_ERROR)
+    #: 처럼 전송 전에 실패한 FALLBACK도 기록된다. "Gemini가 실제 수신한 값"을
+    #: 뜻하지 않는다. SUCCESS·FALLBACK → 기록 / SKIPPED_TEMPLATE·DISABLED → 빈 목록.
+    llm_context_facts: list[ContextFact] = Field(default_factory=list)
+    #: 실제로 발생한 **모든** Provider 호출 시간의 합 (재시도 포함 · #402).
+    #:
+    #: ```text
+    #: None    Provider 를 한 번도 부르지 않았다 (DISABLED · SKIPPED_TEMPLATE)
+    #: 0 이상  불렀고, 그 호출들의 실측 합이다 — 0 은 "쟀더니 0ms" 라는 뜻이다
+    #: ```
+    #:
+    #: 🔴 **미호출을 `0ms` 로 위장하지 않는다.** 두 사실은 다른 것이고, `llm_attempts`
+    #:   와 짝을 이룬다 (attempts 0 ⇔ 이 값 None). 마지막 성공 호출만 재지 않는 이유는
+    #:   재시도도 실제 시간과 비용을 쓰기 때문이다 — timeout 후 성공한 호출의 체감
+    #:   지연은 성공 호출 시간이 아니라 합이다.
+    #: ★ 이 값은 **Agent 전체 실행시간이 아니다.** 공통 `ExecutionMetadata.elapsed_ms`
+    #:   가 그 뜻이고(재무가 채운다), 둘을 섞으면 한 축에 비교 불가능한 두 값이 산다.
+    llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
+    #: Provider 가 **스스로 보고한** 입력 토큰 수의 합 (#406).
+    #:
+    #: ```text
+    #: None    이번 실행에서 이 값을 한 번도 관측하지 못했다
+    #: 0 이상  usage 를 관측한 호출들의 합 — 0 은 "Provider 가 0 이라고 했다"는 뜻이다
+    #: ```
+    #:
+    #: 🔴 **`llm_attempts` 전체의 완전한 청구량이 아니다.** 이름이 `observed` 인 이유가
+    #:   그것이다. timeout·network 실패로 응답 본문을 못 받은 호출은 usage 가 없고,
+    #:   그 호출의 토큰은 **모르는 값이라 지어내지 않는다.** 그래서 `attempts=2` 인데
+    #:   합이 1회분일 수 있다 — *"확인된 사용량의 합"* 이지 *"전부 안다"* 가 아니다.
+    #:   아는 값을 버리는 쪽(전체 None)도 택하지 않았다: 확인된 소비는 사실이고,
+    #:   FALLBACK 실행일수록 그 사실이 필요하다.
+    #: ★ Gemini `usageMetadata.promptTokenCount` · Ollama `prompt_eval_count` 의 합.
+    #:   원본 필드명은 Provider parser 안에서만 살고 여기까지 오지 않는다.
+    llm_observed_input_tokens: int | None = Field(default=None, ge=0)
+    #: Provider 가 보고한 출력 토큰 수의 합 — 위와 같은 의미 (#406).
+    #: Gemini `usageMetadata.candidatesTokenCount` · Ollama `eval_count`.
+    #: ★ 두 필드는 **독립**이다. 한쪽만 보고하는 Provider 응답이 공식 계약상 정상이라
+    #:   input 이 `None` 이어도 output 은 숫자일 수 있다.
+    llm_observed_output_tokens: int | None = Field(default=None, ge=0)
+
+
+def default_interpretation() -> AgentInterpretation:
+    return AgentInterpretation(
+        summary="결정론적 재고물류 결과를 유지합니다.",
+        risks=[],
+        suggested_adjustment=None,
+    )
+
+
+class LLMResponseFields(BaseModel):
+    interpretation: AgentInterpretation = Field(default_factory=default_interpretation)
+    llm_status: LLMStatus = "DISABLED"
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_attempts: int = Field(default=0, ge=0)
+    llm_fallback_used: bool = False
+    llm_error_kind: LLMErrorKind | None = None
+    #: LLM 호출에 사용된 Sanitized ContextFact 목록 — 독립 Response로 노출되고
+    #: response_payload 실행이력에 자동 기록된다 (저장 스키마 무변경).
+    llm_context_facts: list[ContextFact] = Field(default_factory=list)
+    #: 재시도 포함 Provider 총 호출 시간 (`InterpretationResult` 와 같은 뜻 · #402).
+    #:
+    #: 🔴 **`InterpretationResult` 와 필드 집합이 어긋나면 조용히 사라진다.**
+    #:   `enrich_logistics_response` 는 `result.model_dump()` 를 `model_copy(update=)`
+    #:   로 싣는데, 여기 없는 키는 예외 없이 `__dict__` 에만 들어갔다가
+    #:   `model_dump()` 에서 빠진다 — 독립 응답과 `response_payload` 실행이력에서
+    #:   값이 소리 없이 증발한다. 두 모델의 필드 집합 동일성은
+    #:   `test_logistics_context_facts.py` 의 구조 테스트가 잠근다.
+    llm_provider_elapsed_ms: int | None = Field(default=None, ge=0)
+    #: 관측된 Provider 호출들의 토큰 사용량 합 (`InterpretationResult` 와 같은 뜻 · #406).
+    #: 위 🔴 경고가 이 둘에도 그대로 적용된다 — 한쪽 모델에만 넣으면 독립 응답과
+    #: `response_payload` 실행이력에서 **소리 없이** 사라진다.
+    llm_observed_input_tokens: int | None = Field(default=None, ge=0)
+    llm_observed_output_tokens: int | None = Field(default=None, ge=0)

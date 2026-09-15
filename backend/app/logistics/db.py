@@ -1,0 +1,87 @@
+"""Logistics Agent의 PostgreSQL 접근 기능."""
+
+import os
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import psycopg
+from dotenv import load_dotenv
+from psycopg import sql
+from psycopg.rows import dict_row
+
+Query = str | sql.Composed
+Params = Sequence[object] | Mapping[str, object] | None
+
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
+_CONNECTION_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+
+#: 접속이 안 되면 이만큼 기다리고 포기한다 (초). libpq 기본은 0 = 무제한이다.
+#: 재무·매입·영업·ML 과 같은 값으로 맞춘다.
+CONNECT_TIMEOUT_SECONDS = 5
+
+#: ★ `.env` 는 프로세스에서 한 번만 읽는다.
+#: 🔴 대시보드 한 요청에 `_required_environment` 가 550회 불리고,
+#:    매번 파일을 다시 파싱하느라 7.8초를 썼다.
+#: 값은 아래에서 `os.getenv` 로 매번 읽으므로 검사가 환경변수를 바꿔도 그대로 따라간다.
+_env_file_loaded = False
+
+
+def _load_env_file_once() -> None:
+    global _env_file_loaded
+    if _env_file_loaded:
+        return
+    load_dotenv(_ENV_FILE)
+    _env_file_loaded = True
+
+
+def _required_environment(keys: tuple[str, ...]) -> dict[str, str]:
+    _load_env_file_once()
+    values = {key: os.getenv(key, "") for key in keys}
+    missing = [key for key, value in values.items() if not value]
+    if missing:
+        raise RuntimeError(f"Missing required database environment variables: {', '.join(missing)}")
+    return values
+
+
+def get_db_schema() -> str:
+    """설정된 PostgreSQL Schema 이름을 반환한다."""
+    return _required_environment(("DB_SCHEMA",))["DB_SCHEMA"]
+
+
+def get_connection() -> psycopg.Connection[dict[str, Any]]:
+    """환경변수 설정으로 새 PostgreSQL Connection을 생성한다."""
+    config = _required_environment(_CONNECTION_ENV_KEYS)
+    return psycopg.connect(
+        host=config["DB_HOST"],
+        port=config["DB_PORT"],
+        dbname=config["DB_NAME"],
+        user=config["DB_USER"],
+        password=config["DB_PASSWORD"],
+        row_factory=dict_row,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+    )
+
+
+def fetch_one(query: Query, params: Params = None) -> dict[str, Any] | None:
+    """Parameter binding을 사용해 단건 조회 결과를 반환한다."""
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(query, params)
+        return cursor.fetchone()
+
+
+def fetch_all(query: Query, params: Params = None) -> list[dict[str, Any]]:
+    """Parameter binding을 사용해 다건 조회 결과를 반환한다."""
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(query, params)
+        return cursor.fetchall()
+
+
+def execute_returning_one(query: Query, params: Params = None) -> dict[str, Any]:
+    """변경 SQL을 실행하고 RETURNING 단건 결과를 반환한다."""
+    with get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Database write did not return a row")
+        return row

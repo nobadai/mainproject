@@ -1,0 +1,871 @@
+"""판매 재무 검증 Capability — **결정론적이다. LLM 이 들어오지 않는다.**
+
+이 파일이 소유하는 것
+    Sales 회신 payload → Finance 내부 모델 파싱 · 없는 사실 식별 ·
+    계산(`tools`)과 판정(`rules`)의 조립 · 자기 완결적 내부 결과
+
+여기 **없는 것**
+    산술 공식 · 판정 임계값 · Master AgentReply · Planner/Finalizer 호출
+    → `tools` · `rules` · `adapter` 소유다.
+
+★ **없는 것을 채우지 않는다.** 판매 마진 정책 · 최대 결제일수 · 여신한도 ·
+  회수위험 임계값은 현재 저장소에 권위 있는 값이 없다. 그때 이 계층이 하는 일은
+  성공한 척이 아니라 **무엇이 없어서 못 했는지 이름을 대는 것**이다.
+
+★ 두 가지 "못 했다"를 섞지 않는다.
+
+  ```text
+  INPUT_INCOMPLETE    제안에 사실이 빠졌다 (Sales/Master 쪽) — Finance 는 멀쩡하다
+  RUNTIME_NOT_READY   Finance 가 가진 정책/데이터가 없다 (Finance 쪽)
+  ```
+
+  섞으면 영업이 못 고치는 것을 고치라는 말이 되고, 재무가 고쳐야 할 것이 영업
+  탓으로 넘어간다.
+"""
+
+from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from app.finance.capabilities.procurement import load_context
+from app.finance.db import FinanceAsOfDataPort, decimal_value
+from app.finance.rules import (
+    SalesRuleResult,
+    aggregate_sales_finance_rules,
+    evaluate_collection_risk_rule,
+    evaluate_receivable_capacity_rule,
+    evaluate_sales_amount_integrity,
+    evaluate_sales_cashflow_rule,
+    evaluate_sales_margin_rule,
+    evaluate_sales_payment_term_rule,
+)
+from app.finance.sales_policy import load_finance_sales_mvp_policy
+from app.finance.sales_validation import (
+    ConditionalSupplyCostBasis,
+    InventoryCostBasis,
+    PartnerReceivableFacts,
+    SalesFinancialSummary,
+    SalesScenarioCashflow,
+    SalesSupply,
+    SalesValidationInput,
+    SalesValidationResult,
+    VerifiedDirectCost,
+)
+from app.finance.tools import (
+    build_proposed_sales_collection_event,
+    calculate_available_credit,
+    calculate_collection_date,
+    calculate_contribution_margin,
+    calculate_contribution_margin_rate,
+    calculate_credit_utilization_rate,
+    calculate_projected_partner_ar,
+    calculate_sales_amount,
+    compare_reported_sales_amount,
+    compose_sales_cost_basis,
+    estimate_credit_recovery_date,
+    project_sales_scenario_cashflow,
+    summarize_partner_receivables,
+)
+
+#: Finance 가 판매 제안 하나를 판정하려면 반드시 있어야 하는 Sales 유래 사실.
+#: 이 중 하나라도 없으면 Finance 고장이 아니라 제안이 미완성이다.
+REQUIRED_SALES_INPUT_FIELDS: tuple[str, ...] = (
+    "scenario_id",
+    "partner_id",
+    "item",
+    "quantity_kg",
+    "unit_price_krw",
+    "reported_sales_amount_krw",
+    "payment_terms_type",
+    "source_ref",
+)
+
+
+# ---------------------------------------------------------------------------
+# 입력 파싱 — Sales 회신 payload 를 Finance 사실로 옮긴다
+# ---------------------------------------------------------------------------
+
+
+def parse_sales_validation_input(
+    payload: Mapping[str, Any],
+) -> tuple[SalesValidationInput | None, tuple[str, ...]]:
+    """Sales 회신 payload 에서 Finance 가 쓰는 부분집합만 엄격히 읽는다.
+
+    payload 에 Finance 가 안 쓰는 키가 더 있어도 된다 — Master 는 회신을 통째로
+    넘기고, 무엇이 필요한지는 Finance 가 정한다. 반환값의 두 번째 항목은 없는
+    필드 이름이며, 비어 있지 않으면 첫 항목은 ``None`` 이다.
+    """
+    missing = [
+        field
+        for field in REQUIRED_SALES_INPUT_FIELDS
+        if payload.get(field) is None or _is_blank(payload.get(field))
+    ]
+    if missing:
+        return None, tuple(missing)
+
+    try:
+        parsed = SalesValidationInput(
+            scenario_id=str(payload["scenario_id"]),
+            partner_id=str(payload["partner_id"]),
+            item=str(payload["item"]),
+            quantity_kg=decimal_value(payload["quantity_kg"]),
+            unit_price_krw=decimal_value(payload["unit_price_krw"]),
+            reported_sales_amount_krw=decimal_value(payload["reported_sales_amount_krw"]),
+            payment_terms_type=str(payload["payment_terms_type"]),
+            payment_days=_optional_int(payload.get("payment_days")),
+            collection_reference_date=_optional_date(payload.get("collection_reference_date")),
+            supply=_parse_supply(payload.get("supply")),
+            inventory_cost_basis=_parse_inventory_cost_basis(payload.get("inventory_cost_basis")),
+            conditional_supply_cost_basis=_parse_conditional_supply_cost_basis(
+                payload.get("conditional_supply_cost_basis")
+            ),
+            direct_costs=_parse_direct_costs(payload.get("direct_costs")),
+            source_ref=str(payload["source_ref"]),
+        )
+    except (ValueError, TypeError, InvalidOperation):
+        # 값이 있긴 한데 Finance 가 쓸 수 있는 모양이 아니다 — 지어내지 않는다.
+        return None, ("sales_payload_not_parseable",)
+    return parsed, ()
+
+
+def _is_blank(value: Any) -> bool:
+    return isinstance(value, str) and not value.strip()
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("boolean values are not valid numeric inputs")
+    return int(value)
+
+
+def _optional_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _parse_supply(value: Any) -> SalesSupply | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("supply must be a mapping")
+    raw_conditional = value.get("conditional_quantity_kg")
+    return SalesSupply(
+        confirmed_quantity_kg=decimal_value(value["confirmed_quantity_kg"]),
+        # 🔴 없는 칸을 0 으로 읽지 않는다. 보내는 쪽이 확정 물량만 알고 조건부 물량을
+        #   모를 수 있는데, 그것을 "조건부 0" 으로 바꾸면 모르는 것이 사실이 된다.
+        conditional_quantity_kg=(
+            None if raw_conditional is None else decimal_value(raw_conditional)
+        ),
+        dependency_ref=(
+            None if value.get("dependency_ref") is None else str(value["dependency_ref"])
+        ),
+    )
+
+
+def _parse_inventory_cost_basis(value: Any) -> InventoryCostBasis | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("inventory_cost_basis must be a mapping")
+    return InventoryCostBasis(
+        item=None if value.get("item") is None else str(value["item"]),
+        quantity_kg=(
+            None if value.get("quantity_kg") is None else decimal_value(value["quantity_kg"])
+        ),
+        allocation_method=(
+            None if value.get("allocation_method") is None else str(value["allocation_method"])
+        ),
+        amount_krw=decimal_value(value["amount_krw"]),
+        cost_method=str(value["cost_method"]),
+        included_components=tuple(str(item) for item in value.get("included_components", ())),
+        source_ref=str(value["source_ref"]),
+        # ★ 전체 재고 계보. 안 오면 DTO 가 `source_ref` 하나로 채운다 — 예전 단일
+        #   Lot payload 가 그대로 돈다.
+        source_refs=tuple(str(item) for item in value.get("source_refs", ())),
+        evidence_grade=str(value["evidence_grade"]),
+    )
+
+
+def _parse_conditional_supply_cost_basis(
+    value: Any,
+) -> ConditionalSupplyCostBasis | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("conditional_supply_cost_basis must be a mapping")
+    return ConditionalSupplyCostBasis(
+        amount_krw=decimal_value(value["amount_krw"]),
+        cost_method=str(value["cost_method"]),
+        included_components=tuple(str(item) for item in value.get("included_components", ())),
+        source_ref=str(value["source_ref"]),
+        evidence_grade=str(value["evidence_grade"]),
+    )
+
+
+def _parse_direct_costs(value: Any) -> tuple[VerifiedDirectCost, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise TypeError("direct_costs must be a sequence")
+    return tuple(
+        VerifiedDirectCost(
+            component=str(item["component"]),
+            amount_krw=decimal_value(item["amount_krw"]),
+            cost_method=str(item["cost_method"]),
+            source_ref=str(item["source_ref"]),
+            evidence_grade=str(item["evidence_grade"]),
+        )
+        for item in value
+    )
+
+
+# ---------------------------------------------------------------------------
+# 개별 Capability — 각자 자기 사실만 만든다
+# ---------------------------------------------------------------------------
+
+
+def assess_sales_finance_position(
+    sales_input: SalesValidationInput,
+) -> dict[str, Any]:
+    """매출액을 재계산하고 보고 금액과 대조한다 (Finance 가 숫자를 다시 만든다)."""
+    recalculated = calculate_sales_amount(
+        quantity_kg=sales_input.quantity_kg, unit_price_krw=sales_input.unit_price_krw
+    )
+    comparison = compare_reported_sales_amount(
+        reported_amount_krw=sales_input.reported_sales_amount_krw,
+        recalculated_amount_krw=recalculated,
+    )
+    return {
+        "recalculated_sales_amount_krw": recalculated,
+        "comparison": comparison,
+        "rule": evaluate_sales_amount_integrity(
+            reported_amount_krw=sales_input.reported_sales_amount_krw,
+            recalculated_amount_krw=recalculated,
+        ),
+        "evidence_refs": (sales_input.source_ref,),
+    }
+
+
+def evaluate_sales_margin(
+    sales_input: SalesValidationInput,
+    *,
+    sales_amount_krw: Decimal,
+    finance_minimum_margin_rate: Decimal | None,
+    finance_warning_margin_rate: Decimal | None,
+) -> dict[str, Any]:
+    """원가 기준을 합성해 공헌이익과 이익률을 구하고 정책에 견준다.
+
+    ★ 권위 있는 재고원가가 없으면 마진을 만들지 않는다. 조건부 물량이 섞여 있으면
+      확정 재고원가를 제안 **전체**의 원가처럼 쓰지 않는다 — 두 경우 모두 0으로
+      대체하지 않고 없는 사실의 이름을 남긴다.
+    """
+    missing_data: list[str] = []
+    supply = sales_input.supply
+
+    conditional_cost_basis = (
+        sales_input.conditional_supply_cost_basis
+        if supply is not None
+        and supply.conditional_quantity_kg is not None
+        and supply.conditional_quantity_kg > 0
+        else None
+    )
+    cost_basis = compose_sales_cost_basis(
+        inventory_cost_basis=sales_input.inventory_cost_basis,
+        conditional_supply_cost_basis=conditional_cost_basis,
+        direct_costs=sales_input.direct_costs,
+    )
+    if cost_basis is None:
+        missing_data.append("authoritative_inventory_cost_basis")
+    elif supply is None:
+        # 🔴 공급 자체를 못 받은 것은 **모름**이지 "조건부 공급 없음" 이 아니다.
+        #    예전에는 여기서 조건부 0 으로 읽어, 확정 재고원가가 제안 전체를 덮는 것을
+        #    막는 방어가 통째로 풀렸다. 공급을 모르면 그 판단을 할 수 없다 — fail closed.
+        missing_data.append("sales_supply_context")
+        cost_basis = None
+    elif supply.conditional_quantity_kg is None:
+        # 조건부 물량을 모르면 확정 재고원가가 제안 전체를 덮는지 알 수 없다.
+        # 모르는 채로 덮으면 역마진이 마진처럼 보인다 — fail closed.
+        missing_data.append("sales_supply_conditional_quantity")
+        cost_basis = None
+    elif supply.conditional_quantity_kg > 0 and sales_input.conditional_supply_cost_basis is None:
+        # 확정 재고원가는 조건부 물량까지 덮지 않는다.
+        missing_data.append("sales_cost_basis_for_conditional_supply")
+        cost_basis = None
+
+    margin: Decimal | None = None
+    margin_rate: Decimal | None = None
+    if cost_basis is not None:
+        margin = calculate_contribution_margin(
+            sales_amount_krw=sales_amount_krw,
+            sales_cost_basis_krw=cost_basis.amount_krw,
+        )
+        margin_rate = calculate_contribution_margin_rate(
+            sales_amount_krw=sales_amount_krw, contribution_margin_krw=margin
+        )
+
+    rule = evaluate_sales_margin_rule(
+        contribution_margin_rate=margin_rate,
+        finance_minimum_margin_rate=finance_minimum_margin_rate,
+        finance_warning_margin_rate=finance_warning_margin_rate,
+    )
+    if cost_basis is None and rule["runtime_status"] == "READY":
+        # 정책은 있는데 원가가 없다 — 판정할 사실이 없다는 것을 분명히 남긴다.
+        rule = {**rule, "reason_codes": ("SALES_COST_BASIS_UNAVAILABLE",), "verdict": None}
+    return {
+        "cost_basis": cost_basis,
+        "contribution_margin_krw": margin,
+        "contribution_margin_rate": margin_rate,
+        "rule": rule,
+        "missing_data": tuple(missing_data),
+        "evidence_refs": cost_basis.source_refs if cost_basis is not None else (),
+    }
+
+
+def evaluate_receivable_capacity(
+    *,
+    sales_amount_krw: Decimal,
+    receivable_facts: PartnerReceivableFacts | None,
+    credit_limit_krw: Decimal | None,
+) -> dict[str, Any]:
+    """제안 성사 후 거래처 채권을 권위 있는 여신한도에 견준다."""
+    missing_data: list[str] = []
+    if receivable_facts is None:
+        missing_data.append("partner_receivable_facts")
+    if credit_limit_krw is None:
+        missing_data.append("partner_credit_limit_krw")
+
+    current_ar = receivable_facts.current_ar_krw if receivable_facts is not None else None
+    projected_ar = (
+        None
+        if current_ar is None
+        else calculate_projected_partner_ar(
+            current_partner_ar_krw=current_ar, proposed_sales_amount_krw=sales_amount_krw
+        )
+    )
+    available = (
+        None
+        if credit_limit_krw is None or current_ar is None
+        else calculate_available_credit(
+            credit_limit_krw=credit_limit_krw, current_partner_ar_krw=current_ar
+        )
+    )
+    required_collection = (
+        None
+        if projected_ar is None or credit_limit_krw is None
+        else max(Decimal(0), projected_ar - credit_limit_krw)
+    )
+    # ★ 아래 둘은 **표시용 사실**이다. 판정 규칙에 넘기지 않는다.
+    utilization = (
+        None
+        if credit_limit_krw is None or current_ar is None
+        else calculate_credit_utilization_rate(
+            current_partner_ar_krw=current_ar, credit_limit_krw=credit_limit_krw
+        )
+    )
+    recovery_date = (
+        None
+        if required_collection is None or receivable_facts is None
+        else estimate_credit_recovery_date(
+            as_of=receivable_facts.as_of,
+            schedule=receivable_facts.open_receivable_schedule,
+            required_collection_krw=required_collection,
+        )
+    )
+    if projected_ar is None:
+        # ★ 채권 사실이 없으면 규칙에 0을 대신 넣지 않는다. 0원 채권은 사실이고,
+        #   사실 없음은 사실이 아니다 — 자리를 메우면 둘이 같아진다.
+        rule: SalesRuleResult = {
+            "rule_id": "FIN-SALES-CREDIT",
+            "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
+            "reason_codes": ("REQUIRED_FINANCE_POLICY_MISSING",),
+            "missing_policy": tuple(missing_data),
+        }
+    else:
+        rule = evaluate_receivable_capacity_rule(
+            projected_partner_ar_krw=projected_ar,
+            credit_limit_krw=credit_limit_krw,
+        )
+    return {
+        "current_partner_ar_krw": current_ar,
+        "projected_partner_ar_krw": projected_ar,
+        "available_credit_krw": available,
+        "required_collection_before_sale_krw": required_collection,
+        "credit_utilization_rate": utilization,
+        "expected_credit_recovery_date": recovery_date,
+        "rule": rule,
+        "missing_data": tuple(missing_data),
+        "evidence_refs": receivable_facts.source_refs if receivable_facts is not None else (),
+    }
+
+
+def evaluate_sales_cashflow(
+    *,
+    scenario_cashflow: SalesScenarioCashflow | None,
+    minimum_cash_balance_krw: Decimal | None,
+) -> dict[str, Any]:
+    """BASE 와 SCENARIO 를 최소 현금 정책에 견준다 (제안 유입은 확정 현금이 아니다)."""
+    missing_data: list[str] = []
+    if scenario_cashflow is None:
+        missing_data.append("sales_scenario_cashflow")
+    if minimum_cash_balance_krw is None:
+        missing_data.append("minimum_cash_balance_krw")
+    if scenario_cashflow is None or minimum_cash_balance_krw is None:
+        rule: SalesRuleResult = {
+            "rule_id": "FIN-SALES-CASHFLOW",
+            "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
+            "reason_codes": ("REQUIRED_FINANCE_POLICY_MISSING",),
+            "missing_policy": tuple(missing_data),
+        }
+        return {"rule": rule, "missing_data": tuple(missing_data), "evidence_refs": ()}
+
+    rule = evaluate_sales_cashflow_rule(
+        base_projected_cash_min=scenario_cashflow.base_projected_cash_min,
+        scenario_projected_cash_min=scenario_cashflow.scenario_projected_cash_min,
+        minimum_cash_balance_krw=minimum_cash_balance_krw,
+        depends_on_projected_inflow=scenario_cashflow.depends_on_projected_inflow,
+        collection_within_horizon=scenario_cashflow.collection_within_horizon,
+    )
+    return {
+        "rule": rule,
+        "missing_data": (),
+        "evidence_refs": (scenario_cashflow.proposed_collection_ref_id,),
+    }
+
+
+def assess_collection_risk(
+    *,
+    receivable_facts: PartnerReceivableFacts | None,
+    collection_risk_mode: str | None = None,
+) -> dict[str, Any]:
+    """연체 사실은 나르고, 위험 등급/점수는 정책이 없으면 만들지 않는다."""
+    overdue = receivable_facts.overdue_ar_krw if receivable_facts is not None else None
+    if overdue is None:
+        # ★ 연체액을 모르는 것과 연체가 0원인 것은 다른 사실이다. 0으로 메우지 않는다.
+        rule: SalesRuleResult = {
+            "rule_id": "FIN-SALES-COLLECTION-RISK",
+            "runtime_status": "RUNTIME_NOT_READY",
+            "verdict": None,
+            "reason_codes": ("REQUIRED_FINANCE_POLICY_MISSING",),
+            "missing_policy": ("partner_receivable_facts", "sales_collection_risk_policy"),
+        }
+    else:
+        rule = evaluate_collection_risk_rule(
+            overdue_ar_krw=overdue,
+            collection_risk_mode=collection_risk_mode,
+        )
+    missing_data = () if receivable_facts is not None else ("partner_receivable_facts",)
+    return {"overdue_ar_krw": overdue, "rule": rule, "missing_data": missing_data}
+
+
+# ---------------------------------------------------------------------------
+# 조립 — 위 결과만으로 종합한다
+# ---------------------------------------------------------------------------
+
+
+def evaluate_sales_scenario(
+    payload: Mapping[str, Any],
+    *,
+    finance_minimum_margin_rate: Decimal | None = None,
+    finance_warning_margin_rate: Decimal | None = None,
+    max_finance_allowed_payment_terms_days: int | None = None,
+    minimum_cash_balance_krw: Decimal | None = None,
+    credit_limit_krw: Decimal | None = None,
+    receivable_facts: PartnerReceivableFacts | None = None,
+    scenario_cashflow: SalesScenarioCashflow | None = None,
+    collection_risk_mode: str | None = None,
+) -> SalesValidationResult:
+    """Sales 제안 하나를 Finance 사실과 규칙으로 끝까지 검증한다.
+
+    정책/사실이 없으면 그 이름을 `missing_data` 에, 제안에 빠진 것은
+    `missing_fields` 에 남긴다. 둘 다 FAIL 이 아니다.
+    """
+    sales_input, missing_fields = parse_sales_validation_input(payload)
+    if sales_input is None:
+        return SalesValidationResult(
+            scenario_id=_optional_scenario_id(payload),
+            runtime_status="READY",
+            status="INPUT_INCOMPLETE",
+            finance_verdict=None,
+            missing_fields=missing_fields,
+            reason_codes=("SALES_INPUT_INCOMPLETE",),
+        )
+
+    position = assess_sales_finance_position(sales_input)
+    sales_amount: Decimal = position["recalculated_sales_amount_krw"]
+
+    margin = evaluate_sales_margin(
+        sales_input,
+        sales_amount_krw=sales_amount,
+        finance_minimum_margin_rate=finance_minimum_margin_rate,
+        finance_warning_margin_rate=finance_warning_margin_rate,
+    )
+    payment_rule = evaluate_sales_payment_term_rule(
+        payment_terms_type=sales_input.payment_terms_type,
+        payment_days=sales_input.payment_days,
+        max_finance_allowed_payment_terms_days=max_finance_allowed_payment_terms_days,
+    )
+    credit = evaluate_receivable_capacity(
+        sales_amount_krw=sales_amount,
+        receivable_facts=receivable_facts,
+        credit_limit_krw=credit_limit_krw,
+    )
+    cashflow = evaluate_sales_cashflow(
+        scenario_cashflow=scenario_cashflow,
+        minimum_cash_balance_krw=minimum_cash_balance_krw,
+    )
+    risk = assess_collection_risk(
+        receivable_facts=receivable_facts, collection_risk_mode=collection_risk_mode
+    )
+
+    rules: list[SalesRuleResult] = [
+        position["rule"],
+        margin["rule"],
+        payment_rule,
+        credit["rule"],
+        cashflow["rule"],
+        risk["rule"],
+    ]
+    aggregate = aggregate_sales_finance_rules(rules)
+
+    collection_date = None
+    if sales_input.collection_reference_date is not None and sales_input.payment_days is not None:
+        collection_date = calculate_collection_date(
+            reference_date=sales_input.collection_reference_date,
+            payment_days=sales_input.payment_days,
+        )
+
+    cost_basis = margin["cost_basis"]
+    summary = SalesFinancialSummary(
+        recalculated_sales_amount_krw=sales_amount,
+        reported_sales_amount_krw=sales_input.reported_sales_amount_krw,
+        amount_difference_krw=position["comparison"]["difference"],
+        amount_match=position["comparison"]["is_match"],
+        sales_cost_basis_krw=None if cost_basis is None else cost_basis.amount_krw,
+        contribution_margin_krw=margin["contribution_margin_krw"],
+        contribution_margin_rate=margin["contribution_margin_rate"],
+        collection_date=collection_date,
+        current_partner_ar_krw=credit["current_partner_ar_krw"],
+        projected_partner_ar_krw=credit["projected_partner_ar_krw"],
+        credit_limit_krw=credit_limit_krw,
+        available_credit_krw=credit["available_credit_krw"],
+        required_collection_before_sale_krw=credit["required_collection_before_sale_krw"],
+        credit_utilization_rate=credit["credit_utilization_rate"],
+        expected_credit_recovery_date=credit["expected_credit_recovery_date"],
+        overdue_ar_krw=risk["overdue_ar_krw"],
+        base_projected_cash_min=(
+            None if scenario_cashflow is None else scenario_cashflow.base_projected_cash_min
+        ),
+        scenario_projected_cash_min=(
+            None if scenario_cashflow is None else scenario_cashflow.scenario_projected_cash_min
+        ),
+        depends_on_projected_inflow=(
+            None if scenario_cashflow is None else scenario_cashflow.depends_on_projected_inflow
+        ),
+        collection_within_horizon=(
+            None if scenario_cashflow is None else scenario_cashflow.collection_within_horizon
+        ),
+    )
+
+    missing_data = (
+        *margin["missing_data"],
+        *credit["missing_data"],
+        *cashflow["missing_data"],
+        *risk["missing_data"],
+        *aggregate["missing_policy"],
+    )
+    return SalesValidationResult(
+        scenario_id=sales_input.scenario_id,
+        runtime_status=aggregate["runtime_status"],
+        status=(
+            "EVALUATED" if aggregate["runtime_status"] == "READY" else aggregate["runtime_status"]
+        ),
+        finance_verdict=aggregate["verdict"],
+        financial_summary=summary,
+        rule_results=aggregate["rule_results"],
+        reason_codes=aggregate["reason_codes"],
+        max_finance_allowed_amount_krw=(
+            None
+            if credit["available_credit_krw"] is None
+            else max(Decimal(0), credit["available_credit_krw"])
+        ),
+        max_finance_allowed_payment_terms_days=max_finance_allowed_payment_terms_days,
+        missing_data=_unique_refs(missing_data),
+        evidence_refs=_unique_refs(
+            (
+                *position["evidence_refs"],
+                *margin["evidence_refs"],
+                *credit["evidence_refs"],
+                *cashflow["evidence_refs"],
+            )
+        ),
+    )
+
+
+def _optional_scenario_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("scenario_id")
+    return None if value is None else str(value)
+
+
+def _unique_refs(values: Sequence[str]) -> tuple[str, ...]:
+    seen: dict[str, None] = {}
+    for value in values:
+        seen.setdefault(value, None)
+    return tuple(seen)
+
+
+# ---------------------------------------------------------------------------
+# 봉투 매핑 — 도메인 판정을 공통 어휘로 옮긴다
+#
+# ★ **마스터가 재무 판정을 다시 해석하지 않는다.** 재무가 PASS/REVIEW_REQUIRED/
+#   FAIL 로 말한 것을 봉투 어휘로 옮기는 일은 재무 소유다. 마스터가 옮기면 재무
+#   판정의 뜻이 마스터 코드에 흩어지고, 그때부터 두 곳을 같이 고쳐야 한다.
+#
+# ★ 원본을 지우지 않는다. `payload.finance_verdict` 는 봉투 상태와 **함께** 나간다 —
+#   `conditional` 만 남으면 "마진 경고"인지 "현금 의존"인지 되돌릴 수 없다.
+#
+# ★ 여기 사는 이유: Adapter 가 소유하는 계약이지만 Orchestration 도 같은 표를 읽어야
+#   한다. Adapter 는 Orchestration 을 import 하므로 반대 방향은 순환이 된다. 그래서
+#   **표는 상류(여기)에 한 벌 두고** Adapter 가 그것을 다시 내보낸다.
+# ---------------------------------------------------------------------------
+
+#: 재무 도메인 판정 → 공통 봉투 어휘. **이 방향으로만 쓴다.**
+SALES_VERDICT_TO_BUSINESS_STATUS: dict[str, str] = {
+    "PASS": "ok",
+    "REVIEW_REQUIRED": "conditional",
+    "FAIL": "reject",
+}
+
+
+def map_sales_finance_verdict(result: SalesValidationResult) -> tuple[str, str]:
+    """판매 검증 결과를 ``(runtime_status, business_status)`` 로 옮긴다.
+
+    판정이 없는 세 경우는 전부 `skipped` 다 — 없는 판정을 `reject` 로 바꾸면
+    "재무가 거절했다"가 되고, `ok` 로 바꾸면 보지 않은 것을 통과시킨 것이 된다.
+    """
+    if result.status == "INPUT_INCOMPLETE":
+        # Finance 는 멀쩡하다. 제안에 사실이 빠졌을 뿐이다.
+        return "READY", "skipped"
+    if result.status == "RUNTIME_NOT_READY":
+        return "RUNTIME_NOT_READY", "skipped"
+    if result.status == "ERROR":
+        return "ERROR", "skipped"
+    if result.finance_verdict is None:
+        return result.runtime_status, "skipped"
+    return result.runtime_status, SALES_VERDICT_TO_BUSINESS_STATUS[result.finance_verdict]
+
+
+def sales_business_status(payload: Mapping[str, Any]) -> str:
+    """이미 payload 로 굳은 판매 결과에서 봉투 업무 상태만 읽는다.
+
+    Orchestration 은 Tool 이 낸 payload 만 들고 있다 — 같은 표를 두 벌 만들지 않으려고
+    `map_sales_finance_verdict` 와 같은 규칙을 여기서 dict 입력으로 쓴다.
+    """
+    if payload.get("status") != "EVALUATED":
+        return "skipped"
+    verdict = payload.get("finance_verdict")
+    if verdict is None:
+        return "skipped"
+    return SALES_VERDICT_TO_BUSINESS_STATUS[str(verdict)]
+
+
+def _summary_payload(summary: SalesFinancialSummary) -> dict[str, Any]:
+    """요약을 payload 모양으로 옮긴다. **날짜는 문자열로 나간다.**
+
+    🔴 **payload 는 그대로 JSONB 이력에 실린다.** `date` 객체가 한 칸이라도 남아 있으면
+       실행 이력 저장이 `TypeError: Object of type date is not JSON serializable` 로
+       터지고, 그 예외는 *"재무 검토 기록을 저장하지 못했다"* (ERROR/skipped)로 바뀌어
+       **판정이 실제로 났는데도 판매 후보가 미결로 닫힌다.**
+
+    ⚠️ 2026-09-11 걷기에서 실제로 그렇게 됐다. 재고원가가 늘 없던 동안에는 회수일을
+      셈할 일이 없어 이 칸이 `None` 이었고, 그래서 이 자리가 한 번도 안 터졌다 —
+      원가가 오자 처음으로 회수일이 서면서 드러났다.
+
+    ★ **날짜만 손댄다.** 다른 칸은 이미 그대로 실려 왔고, 여기서 모양을 바꾸면
+      받는 쪽(판매 · 마스터)이 읽던 값의 타입이 조용히 달라진다.
+    """
+    dumped = summary.model_dump()
+    for key in ("collection_date", "expected_credit_recovery_date"):
+        value = dumped.get(key)
+        if value is not None:
+            dumped[key] = value.isoformat()
+    return dumped
+
+
+def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
+    """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
+
+    ★ 마스터는 이것을 **통째로** 나른다. 그래서 판정을 만든 근거가 전부 여기 있어야
+      한다 — 하나라도 내부 상태에 남겨두면 회송된 회신에서 그 사실이 사라진다.
+
+    ★ 결제일수 상한은 payload 필드다. 공통 `SuggestedAdjustment` 축이 아니다 —
+      재무의 조정 축은 `amount` 하나뿐이고, 상한은 조정이 아니라 경계다.
+    """
+    summary = result.financial_summary
+    return {
+        "status": result.status,
+        # 봉투 상태와 나란히 원본 판정을 남긴다.
+        "finance_verdict": result.finance_verdict,
+        "scenario_id": result.scenario_id,
+        "financial_summary": (None if summary is None else _summary_payload(summary)),
+        "rule_results": [dict(rule) for rule in result.rule_results],
+        "reason_codes": list(result.reason_codes),
+        "missing_fields": list(result.missing_fields),
+        "missing_data": list(result.missing_data),
+        "data_quality": (
+            "COMPLETE" if not result.missing_fields and not result.missing_data else "INCOMPLETE"
+        ),
+        "max_finance_allowed_amount_krw": result.max_finance_allowed_amount_krw,
+        "max_finance_allowed_payment_terms_days": (result.max_finance_allowed_payment_terms_days),
+        "evidence_refs": list(result.evidence_refs),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Harness 진입점 — 인자를 받지 않는다
+# ---------------------------------------------------------------------------
+
+
+def run_sales_validation(
+    data_port: FinanceAsOfDataPort, args: dict[str, Any], state: Any
+) -> dict[str, Any]:
+    """SALES_VALIDATION Tool 본체. **Planner 가 준 값을 쓰지 않는다.**
+
+    ★ `args` 는 비어 있어야 하고 실제로 버린다. 제안 숫자는 request payload 가,
+      정책은 Finance Policy 가 소유한다 — 모델이 수량·단가·원가·결제일수·여신을
+      만들거나 베껴 넣을 자리를 두지 않는다.
+
+    ★ **정책과 사실을 가른다.**
+        정책 — 마진 임계값 · 최대 결제일수 · 회수위험 판정 방식.
+               Finance/Sales MVP Policy v0.1 이 소유하고 실행마다 같다.
+        사실 — 여신한도 · 거래처 채권. 거래처/계약이 소유하는 권위 있는 값이라
+               재무가 기본값을 만들 수 없다. 아직 조회 계약이 없어 ``None`` 이고,
+               그때 판정은 값을 지어내는 대신 RUNTIME_NOT_READY 로 닫힌다.
+    """
+    del args
+    payload = state.request.payload
+    sales_input, _ = parse_sales_validation_input(payload)
+    policy = load_finance_sales_mvp_policy()
+
+    minimum_cash: Decimal | None = None
+    scenario_cashflow: SalesScenarioCashflow | None = None
+    receivable_facts: PartnerReceivableFacts | None = None
+    credit_limit: Decimal | None = None
+    if sales_input is not None:
+        minimum_cash, scenario_cashflow = _load_sales_cashflow_context(
+            data_port, state, sales_input
+        )
+        receivable_facts = _load_partner_receivable_facts(data_port, state, sales_input)
+        credit_limit = data_port.load_partner_credit_limit(
+            state.request.context.as_of, sales_input.partner_id
+        )
+
+    return build_sales_validation_payload(
+        evaluate_sales_scenario(
+            payload,
+            finance_minimum_margin_rate=policy.finance_minimum_margin_rate,
+            finance_warning_margin_rate=policy.finance_warning_margin_rate,
+            max_finance_allowed_payment_terms_days=(policy.max_finance_allowed_payment_terms_days),
+            collection_risk_mode=policy.collection_risk_mode,
+            # 🔴 여신한도는 정책이 아니라 **거래처가 소유한 사실**이다. 이제
+            #    `partner_credit_limits` 가 그 정본이고, 재무는 **읽기만** 한다 —
+            #    여기 기본값을 두면 없는 한도를 재무가 발명하게 된다.
+            #
+            # ★ 행이 없으면 `None` 이고, 그때 여신 판정은 닫힌다. `0` 은 **한도 0원
+            #   이라는 사실**이라 판정한다 — 둘을 같은 값으로 만들지 않는다.
+            credit_limit_krw=credit_limit,
+            # 채권은 실 원장에 있다. 그래서 이쪽만 실제 사실로 채운다 —
+            # 여신이 안 열렸다고 회수위험까지 눈을 감을 이유는 없다.
+            receivable_facts=receivable_facts,
+            # 여기 둘은 실재하는 Finance 자료다.
+            minimum_cash_balance_krw=minimum_cash,
+            scenario_cashflow=scenario_cashflow,
+        )
+    )
+
+
+def _load_partner_receivable_facts(
+    data_port: FinanceAsOfDataPort,
+    state: Any,
+    sales_input: SalesValidationInput,
+) -> PartnerReceivableFacts:
+    """거래처 채권 사실을 실 원장에서 만든다. **없으면 없는 채로 세운다.**
+
+    ★ 빈 목록은 **채권이 0원이라는 사실**이다 — 신규 거래처를 자료 미비로 다루지
+      않는다. 반대로 조회 자체가 실패하면 `load_partner_receivables` 가
+      `FinanceDataNotReady` 로 세우고, 그 실행은 `RUNTIME_NOT_READY` 가 된다.
+      "못 읽었다" 와 "0원이다" 가 같은 결과를 내면 안 된다.
+
+    ★ 기준일은 이 실행의 `as_of` 하나다. 연체 판정(`due_date < as_of`)도 같은 날을
+      쓴다 — 조회 기준일과 판정 기준일이 갈리면 어제 기준으로 읽은 채권을 오늘
+      기준으로 연체 판정하는 일이 생긴다.
+    """
+    as_of = state.request.context.as_of
+    return summarize_partner_receivables(
+        partner_id=sales_input.partner_id,
+        as_of=as_of,
+        receivables=data_port.load_partner_receivables(as_of, sales_input.partner_id),
+    )
+
+
+def _load_sales_cashflow_context(
+    data_port: FinanceAsOfDataPort,
+    state: Any,
+    sales_input: SalesValidationInput,
+) -> tuple[Decimal | None, SalesScenarioCashflow | None]:
+    """**재무 최소현금 정책**과, 확정 현금 Event 위에 제안 회수를 얹은 SCENARIO 투영.
+
+    ```text
+    최소현금 정책   실행마다 있는 재무 자료      제안과 무관하게 항상 읽는다
+    SCENARIO 투영   제안의 회수일이 있어야 선다  없으면 만들지 않는다
+    ```
+
+    ★ 둘은 없는 이유가 다르므로 한 `return` 에 묶지 않는다. 묶으면 제안에 날짜가
+      빠진 것이 *"최소현금 정책이 없다"* 로 보고된다.
+    """
+    ctx = state.request.context
+    # 🔴 **정책 조회를 날짜에 묶지 않는다.** 예전에는 회수 기준일이 없으면 여기서
+    #    곧장 `(None, None)` 으로 돌아섰고, 그래서 **판매 제안에 날짜가 빠진 것만으로
+    #    최소현금 정책까지 "없는 값"** 이 됐다. 정책은 실행마다 있는 재무 자료이고
+    #    제안에 무엇이 빠졌는지와 무관하다 — 둘을 한 `return` 에 묶으면 없는 이유가
+    #    서로를 가린다.
+    #
+    # ★ **정책만 읽는다.** `load_context` 는 급여·의무·채권까지 함께 읽고 급여 출처가
+    #   없으면 세운다 — 투영을 만들 때는 필요한 준비이지만, 최소현금 한 값을 읽으려고
+    #   그 문턱을 넘게 하면 **투영이 필요 없는 실행이 급여 출처 때문에 막힌다.**
+    minimum_cash = data_port.load_policy(ctx.as_of, ctx.policy_version).minimum_cash_balance_krw
+
+    if sales_input.collection_reference_date is None or sales_input.payment_days is None:
+        # 회수일을 못 구하면 투영만 만들지 않는다. 날짜를 지어내면 그 순간 없는
+        # 사실이 현금흐름에 들어간다 — 정책은 그대로 돌려준다.
+        return minimum_cash, None
+
+    position, policy, base_events = load_context(data_port, state)
+    horizon = ctx.as_of + timedelta(days=policy.cashflow_projection_days)
+    sales_amount = calculate_sales_amount(
+        quantity_kg=sales_input.quantity_kg, unit_price_krw=sales_input.unit_price_krw
+    )
+    proposed = build_proposed_sales_collection_event(
+        proposal_ref=sales_input.scenario_id,
+        collection_date=calculate_collection_date(
+            reference_date=sales_input.collection_reference_date,
+            payment_days=sales_input.payment_days,
+        ),
+        sales_amount_krw=sales_amount,
+        source_ref=sales_input.source_ref,
+    )
+    scenario_cashflow = project_sales_scenario_cashflow(
+        as_of=state.request.context.as_of,
+        current_cash_krw=Decimal(position["current_cash_krw"]),
+        horizon_end=horizon,
+        base_cash_events=base_events,
+        proposed_collection=proposed,
+    )
+    return minimum_cash, scenario_cashflow

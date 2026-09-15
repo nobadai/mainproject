@@ -1,0 +1,1120 @@
+"""mock 데이터 + ports 구현 검사 (백로그 E1-1·E1-2·E1-3).
+
+mock은 장식용 샘플이 아니라 **노드 단위 테스트 4종의 입력**이다. 그래서 여기서는
+"파일이 파싱되는가"가 아니라 **"시나리오 이름이 뜻하는 조건을 데이터가 실제로 만족하는가"**를
+검사한다. 누가 숫자를 만져 이름과 내용이 어긋나면 그 순간 빨간불이 뜬다.
+
+**운영 임계**(ci_width·트리거·비율)는 전부 ``load_constraints()``로 읽는다 — 테스트에
+하드코딩하면 규칙 7이 뚫린다. 반면 아래 자릿수 밴드는 운영 임계가 아니라 **테스트 sentinel**
+이다(constraints.yaml에 없고, 있어서도 안 된다). 그래서 이 파일에 직접 적는다.
+"""
+
+import json
+import operator
+from collections.abc import Callable
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from _ast_helpers import called_attributes
+from _fixtures import AS_OF, _proposal
+from _injection import INJECTED_THRESHOLD, declare_thresholds, swap_threshold
+
+from app.purchase_agent import mocks, ports
+from app.purchase_agent.config import (
+    ThresholdNotDeclared,
+    ci_width_threshold,
+    load_constraints,
+)
+from app.purchase_agent.nodes.classify_situation import classify_situation
+from app.purchase_agent.state import build_initial_state
+
+MOCK_DIR = Path(mocks.__file__).parent
+MOCK_FILES = sorted(MOCK_DIR.glob("*.json"))
+AGENT_DIR = Path(ports.__file__).parent
+
+# 앵커일 = 시나리오 키 (mocks/scenarios.json). 이름은 CLAUDE.md "작업 방식"의 4개 테스트명.
+RISING = date(2026, 8, 21)
+FALLING = date(2026, 8, 28)
+UNCERTAIN = date(2026, 9, 4)
+SPREAD_WIDE = date(2026, 9, 11)
+#: 통합 시연 앵커 (#73). 성격은 rising 과 같고 날짜만 다르다.
+INTEGRATION = date(2025, 12, 31)
+ANCHORS = (INTEGRATION, RISING, FALLING, UNCERTAIN, SPREAD_WIDE)
+
+DOC_TYPES = ["관측월보", "기상", "작년동기"]
+
+# 미결 파라미터(N4·N5). mock에 등장하면 안 된다 — 0으로 슬쩍 들어오는 경로 차단 (규칙 3).
+PENDING_KEYS = ("inbound_lead_days", "purchase_payment_days")
+
+# ── 단위 자릿수 밴드 ────────────────────────────────────────────────────────
+# 단위 사고는 타입 검사로 안 잡힌다. ton 값이 섞여도 int는 int라 조용히 통과하고
+# 숫자만 1000배 틀린다. 자릿수 범위가 유일한 방어선이다.
+QTY_MIN, QTY_MAX = 1_000, 1_000_000  # kg — ton이면 한 자리~세 자리로 떨어져 즉시 걸린다
+PRICE_MIN, PRICE_MAX = 100, 20_000  # 원/kg — 원/ton이면 100만 단위라 걸린다
+PRICE_KEYS = frozenset(
+    {"price", "predicted", "lower", "upper", "current_price", "grade_unit_price"}
+)
+
+
+def _scalar_leaves(node: object, key: str = "", path: str = "$") -> list[tuple[str, str, object]]:
+    """중첩 구조를 재귀 순회해 (경로, 키, 값)을 **타입 가리지 않고** 모은다.
+
+    정수만 모으면 ``qty_kg: 12.0``이나 ``price: "1650"``이 검사 대상에서 통째로 빠져
+    "전부 통과"라는 거짓 안심을 준다 — 타입 검사는 밴드 검사보다 먼저 와야 한다.
+
+    ``_``로 시작하는 키는 설명용이라 건너뛴다(포트 반환값에 실리지 않는다).
+    필드를 나중에 추가해도 자동으로 검사망에 들어오게 하려고 키 목록이 아니라 순회로 짰다.
+    """
+    if isinstance(node, dict):
+        return [
+            leaf
+            for k, v in node.items()
+            if not k.startswith("_")
+            for leaf in _scalar_leaves(v, k, f"{path}.{k}")
+        ]
+    if isinstance(node, list):
+        return [
+            leaf for i, v in enumerate(node) for leaf in _scalar_leaves(v, key, f"{path}[{i}]")
+        ]
+    return [(path, key, node)]
+
+
+def _assert_whole_number(value: object, where: str) -> int:
+    """``bool``을 먼저 거른다 — ``isinstance(True, int)``가 참이라 그냥 두면 1로 통과한다."""
+    assert not isinstance(value, bool), f"{where} = {value!r} — bool은 수량·가격이 될 수 없다"
+    assert isinstance(value, int), f"{where} = {value!r} ({type(value).__name__}) — 정수가 아니다"
+    return value
+
+
+def _assert_unit_bands(payload: object, where: str) -> None:
+    for path, key, value in _scalar_leaves(payload):
+        if key.endswith("_kg"):
+            _assert_whole_number(value, f"{where}{path}")
+            assert QTY_MIN <= value <= QTY_MAX, f"{where}{path} = {value} — kg 자릿수 이탈"
+        elif key in PRICE_KEYS:
+            _assert_whole_number(value, f"{where}{path}")
+            assert PRICE_MIN <= value <= PRICE_MAX, f"{where}{path} = {value} — 원/kg 자릿수 이탈"
+
+
+@pytest.mark.parametrize("path", MOCK_FILES, ids=lambda p: p.name)
+def test_mock_files_keep_kg_and_won_per_kg_magnitudes(path: Path) -> None:
+    """수량은 정수 kg, 가격은 정수 원/kg. ton 혼입 방어 — 저장된 JSON 쪽."""
+    _assert_unit_bands(json.loads(path.read_text(encoding="utf-8")), f"{path.name}:")
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_port_outputs_keep_kg_and_won_per_kg_magnitudes(as_of: date) -> None:
+    """같은 밴드를 **포트 반환값**에도 적용한다 — 로더가 단위를 망가뜨릴 여지까지 막는다."""
+    for item in mocks.ITEMS:
+        _assert_unit_bands(ports.get_forecast(item, as_of), f"forecast/{item}:")
+        _assert_unit_bands(ports.get_market_quotes(item, as_of), f"quotes/{item}:")
+        _assert_unit_bands(ports.get_inventory(item, as_of), f"inventory/{item}:")
+        _assert_unit_bands(ports.get_confirmed_orders(item, as_of), f"orders/{item}:")
+    assert ports.get_projected_cash_min(as_of, 30) >= 1_000_000
+
+
+@pytest.mark.parametrize("path", MOCK_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("key", PENDING_KEYS)
+def test_mock_never_carries_pending_parameters(path: Path, key: str) -> None:
+    """N4·N5는 mock에도 없어야 한다. 값이 아니라 **계산을 막는 장치**다 (규칙 3)."""
+    assert key not in path.read_text(encoding="utf-8")
+
+
+#: 벽시계. 이름 그대로 부르는 형태만 적는다 — ``from datetime import date`` 뒤의
+#: ``date.today()`` 와 ``datetime.datetime.now()`` 둘 다 점 표기가 이 안에 들어온다.
+_WALL_CLOCK_CALLS = frozenset({"date.today", "datetime.now", "datetime.date.today",
+                               "datetime.datetime.now"})
+
+
+def test_agent_sources_never_read_the_wall_clock() -> None:
+    """규칙 1 — 패키지 어디에도 벽시계 호출이 없다. 날짜는 항상 as_of로 주입된다.
+
+    ⚠️ **문자열로 훑던 것을 ast 로 바꿨다** (2026-09-08).
+
+      전에는 파일 전문을 ``read_text`` 해서 낱말을 셌다. 그러면 주석이나 docstring 에
+      *"``date.today()`` 를 쓰지 않는다"* 라고 적는 순간 검사가 운다 — **설명을 못 쓴다.**
+
+      🔴 그리고 ``docs/보관/260905_기록을_읽는_법.md`` ⑦ 이 그걸 금지한다.
+        ``#378`` 에서 같은 이유로 한 번 고쳤고, **이 자리를 놓쳤다.**
+
+    ★ 짝이 되는 동적 검사가 ``test_lookahead.py`` 에 있다 — *"안 부른다"* 와
+      *"산출물이 오늘에 안 물든다"* 는 다른 사실이라 둘 다 잰다.
+    """
+    offenders = {
+        path.relative_to(AGENT_DIR).as_posix(): sorted(hits)
+        for path in sorted(AGENT_DIR.rglob("*.py"))
+        if (hits := called_attributes(path) & _WALL_CLOCK_CALLS)
+    }
+    assert offenders == {}, f"벽시계 호출: {offenders}"
+
+
+# ── 시나리오 구분이 데이터에 드러나는가 ─────────────────────────────────────
+
+
+ITEM_KEYED_FILES = [
+    path
+    for path in MOCK_FILES
+    if path.name.startswith(("forecast_", "quotes_"))
+    or path.name in {"inventory.json", "orders.json"}
+]
+
+
+@pytest.mark.parametrize("path", ITEM_KEYED_FILES, ids=lambda p: p.name)
+def test_every_mock_file_covers_every_item(path: Path) -> None:
+    """품목 하나가 빠지면 그 품목의 포트만 조용히 KeyError를 낸다 — 데이터에서 먼저 막는다."""
+    items = json.loads(path.read_text(encoding="utf-8"))["items"]
+    assert set(items) == set(mocks.ITEMS)
+
+
+def test_anchor_days_match_the_scenarios_file() -> None:
+    """테스트 상수와 scenarios.json이 따로 놀지 않게 못 박는다."""
+    anchors = json.loads((MOCK_DIR / "scenarios.json").read_text(encoding="utf-8"))["anchors"]
+    assert sorted(anchors) == sorted(d.isoformat() for d in ANCHORS)
+    assert [anchors[d.isoformat()]["name"] for d in ANCHORS] == [
+        "integration_demo",
+        "mock_rising",
+        "mock_falling",
+        "mock_uncertain",
+        "grade_spread_wide",
+    ]
+
+
+#: 시나리오별 기대 판정. 판정은 **기준일(D+14) 한 줄**로 내려진다 (상세설계 §4-①).
+SITUATION_BY_ANCHOR = (
+    (RISING, "stable"),
+    (FALLING, "stable"),
+    (UNCERTAIN, "uncertain"),
+    (SPREAD_WIDE, "stable"),
+)
+
+#: constraints의 ``ci_width_comparison`` 문자열을 실제 연산으로. 테스트가 비교 방향까지
+#: 파일에서 읽어야 임계와 연산이 따로 노는 사고를 잡을 수 있다.
+_COMPARISONS = {">=": operator.ge, ">": operator.gt}
+
+
+def _judgment_row(item: str, as_of: date) -> dict:
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    return ports.get_forecast(item, as_of)["daily"][day - 1]
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_judgment_day_row_is_the_fourteenth_calendar_day(item: str, as_of: date) -> None:
+    """``ci_judgment_day: 14`` → ``daily[13]``. 이 매핑은 daily가 D+1 시작이라는 데 걸려 있다.
+
+    daily 시작이 D+0으로 바뀌면 index 13은 D+13이 되고, 상황 분류가 하루 밀린 채 조용히
+    돈다. 그래서 index를 믿지 않고 **날짜로 되짚어** 확인한다.
+    """
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    assert _judgment_row(item, as_of)["date"] == (as_of + timedelta(days=day)).isoformat()
+
+
+@pytest.mark.parametrize(("as_of", "expected"), SITUATION_BY_ANCHOR, ids=lambda v: str(v))
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_judgment_day_ci_width_classifies_each_scenario(
+    item: str, as_of: date, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """시나리오 이름이 뜻하는 판정을 **① 노드가 실제로** 내는가.
+
+    🔴 **임계는 검사가 주입한다** (현서님 §1.4-②). 예전엔 선언값을 읽어 mock 밴드와
+      비교했는데, 그러면 이 검사가 재는 것이 *"mock 분포가 선언값을 넘나"* 가 된다.
+      선언값은 아직 확정 전인 시연값이라(``constraints.yaml`` §situation · ``#127``)
+      그게 움직이는 날 시나리오 이름과 아무 상관 없이 무너진다 — 실제로 임계를 0.15 로
+      올리자 이 검사 4건이 함께 깨졌다 (2026-09-04 스윕).
+
+    지금 재는 것은 **임계보다 크면 uncertain, 작으면 stable 로 갈리는가** 다.
+    mock 값이 얼마인지는 이 검사의 관심이 아니다.
+
+    판정식을 여기서 다시 쓰지 않고 ① 노드를 부른다 — 재구현하면 노드가 비교 방향을
+    잘못 읽어도 검사는 자기 식으로 맞는 답을 내서 통과한다.
+    """
+    swap_threshold(monkeypatch, INJECTED_THRESHOLD)
+    assert classify_situation(build_initial_state(item, as_of))["situation"] == expected
+
+
+@pytest.mark.parametrize(
+    ("pick", "factor", "expected"),
+    [(max, 2.0, "stable"), (min, 0.5, "uncertain")],
+    ids=["전_밴드보다_높은_임계", "전_밴드보다_낮은_임계"],
+)
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_the_verdict_follows_the_declared_threshold(
+    as_of: date,
+    pick: Callable[[list[float]], float],
+    factor: float,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **선언을 바꾸면 판정이 따라 움직이는가** — 규칙 8 의 변이 검사.
+
+    이 검사가 없어서 **임계가 설정에서 온다는 것을 아무도 증명하지 않고 있었다.**
+    실측: ① 이 ``constraints`` 를 안 읽고 ``0.08`` 을 박도록 갈아 끼워도 **한 건도 울지
+    않았다** (2026-09-04 · ``dev@645a18d`` · ``pytest tests/test_purchase_agent`` ·
+    변이 전후 모두 ``1117 passed``). ``ci_width_threshold == 0.08`` 같은 값 비교는
+    선언이 있다는 것만 보여줄 뿐 코드가 그걸 쓴다는 증명이 아니다.
+
+    양쪽 방향을 다 흔든다. 한쪽만 두면 반대편이 죽어도 모른다 —
+    ``test_judgment_day.test_a_bad_declaration_makes_the_check_cry`` 와 같은 이유다.
+
+    ⚠️ **임계를 상수로 두면 이름(관계)과 값(고정)이 갈린다.** mock 밴드가 바뀌면
+      *"전 밴드보다 높은"* 이 거짓이 되는데 검사는 초록이다. 실 구간 ``0.254~1.107``
+      에서 ``0.5`` 는 **밴드 한가운데**다 (현서님 리뷰 · 2026-09-04). 그래서 그날 밴드
+      에서 뽑는다 — ``max × 2`` 와 ``min × 0.5`` 는 어떤 밴드에서도 밖에 선다.
+
+    ★ **비교 방향과 무관하게 성립한다.** ``>`` 든 ``>=`` 든 ``max × 2`` 는 전 구간폭보다
+      크고 ``min × 0.5`` 는 전부보다 작아서, 경계에 걸치는 값이 없다. 경계 자신은
+      바로 아래 ``test_the_boundary_value_itself_follows_the_declared_comparison`` 이 본다.
+    """
+    widths = [w for item in mocks.ITEMS for w in _ci_widths(item, as_of)]
+    swap_threshold(monkeypatch, pick(widths) * factor)
+    for item in mocks.ITEMS:
+        state = build_initial_state(item, as_of)
+        assert classify_situation(state)["situation"] == expected
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_the_boundary_value_itself_follows_the_declared_comparison(
+    item: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """경계값 **자신**이 어느 쪽인지는 ``ci_width_comparison`` 이 정한다 (``>=`` 면 uncertain).
+
+    임계를 그날 구간폭과 **똑같이** 맞춰 경계를 만든다. mock 에 경계 앵커를 새로 만들지
+    않고 경계를 보는 유일한 방법이고, 밴드를 안 건드린다는 조건과도 맞는다.
+
+    ⚠️ 값 비교(``comparison == ">="``)로는 이걸 못 잡는다 — 노드가 ``>`` 를 하드코딩해도
+      선언은 그대로 ``>=`` 라 통과한다. 선언을 읽어 **기대를 그 선언에서 만든다.**
+    """
+    row = _judgment_row(item, UNCERTAIN)
+    boundary = (row["upper"] - row["lower"]) / row["predicted"]
+    exceeds = _COMPARISONS[load_constraints()["situation"]["ci_width_comparison"]]
+    swap_threshold(monkeypatch, boundary)
+    expected = "uncertain" if exceeds(boundary, boundary) else "stable"
+    assert classify_situation(build_initial_state(item, UNCERTAIN))["situation"] == expected
+
+
+# ── 품목별 임계 (#67 · #127) ────────────────────────────────────────────────
+
+
+def _judgment_width(item: str, as_of: date) -> float:
+    """판정 기준일 **한 줄**의 구간폭 — ①이 실제로 재는 그 값.
+
+    ``_ci_widths`` 는 전 지평을 돌려주므로 여기 쓰면 안 된다. 판정은 한 줄로 한다
+    (``constraints.yaml`` §situation ``ci_judgment_day`` 의 세 번째 정정).
+    """
+    row = _judgment_row(item, as_of)
+    return (row["upper"] - row["lower"]) / row["predicted"]
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_each_item_reads_its_own_declared_threshold(
+    as_of: date, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **같은 날 같은 코드인데 품목마다 판정이 갈리는가** — 품목별 임계의 존재 이유.
+
+    스칼라 시절에는 이 질문 자체가 성립하지 않았다. ①이 ``state["item"]`` 을 안 읽었으니
+    품목이 무엇이든 임계가 같았고, 그래서 **색인을 빠뜨려도 아무 검사도 울지 않는다.**
+
+    임계를 그날 그 품목의 구간폭에서 뽑는다 — 선언값(현재 셋 다 0.08)으로는 갈림을
+    만들 수 없고, 상수를 적으면 mock 밴드가 움직이는 날 이유 없이 깨진다
+    (``test_the_verdict_follows_the_declared_threshold`` 와 같은 이유).
+    """
+    widths = {item: _judgment_width(item, as_of) for item in mocks.ITEMS}
+    # 번갈아 아래·위로 둔다. 한쪽으로 몰면 "갈린다"가 아니라 "전부 같다"를 재게 된다.
+    below = {item: index % 2 == 0 for index, item in enumerate(sorted(widths))}
+    swap_threshold(monkeypatch, {i: widths[i] * (0.5 if below[i] else 2.0) for i in widths})
+
+    expected = {item: "uncertain" if flag else "stable" for item, flag in below.items()}
+    assert set(expected.values()) == {"stable", "uncertain"}, (
+        "한 날에 두 판정이 다 나와야 '갈린다'를 잰 것이다 — mock 품목이 하나로 줄면 여기서 운다"
+    )
+    got = {i: classify_situation(build_initial_state(i, as_of))["situation"] for i in mocks.ITEMS}
+    assert got == expected
+
+
+@pytest.mark.parametrize("moved", mocks.ITEMS)
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+def test_moving_one_item_leaves_the_others_where_they_were(
+    as_of: date, moved: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **한 품목 임계를 흔들어도 나머지가 안 움직이는가.**
+
+    ``s``(#127)가 오면 셋이 갈라진다.
+
+    🔴 **그 순서 주장을 철회한다** (2026-09-07 · ML 회신). 여기 *"임계 순서는 양파
+      0.1032 < 배추 0.1048 < 무 0.1078"* 이라고 적혀 있었는데, ``δ×2`` 환산이 밴드
+      대칭을 전제하고 **실측은 대칭이 아니다.** ``s`` 가 와도 그 세 값이 이 칸에
+      들어가지는 않는다 — 표는 ``constraints.yaml`` §situation 주석에 있다.
+
+    그날 고치는 것은 **한 줄**인데, 그 한 줄이 다른 품목 판정까지 옮기면 고친 사람은
+    모른다. 값이 틀려서가 아니라 **색인이 없어서** 생기는 종류라, 값을 대조하는
+    검사로는 안 잡힌다 (규칙 8).
+
+    전 품목을 stable 로 눕혀 놓고 하나만 아래로 내린다. 기준선이 균일해야 움직인 것이
+    **그 한 품목뿐**임을 말할 수 있다.
+    """
+    widths = {item: _judgment_width(item, as_of) for item in mocks.ITEMS}
+    declared = {item: width * 2.0 for item, width in widths.items()}
+    declared[moved] = widths[moved] * 0.5
+    swap_threshold(monkeypatch, declared)
+
+    got = {i: classify_situation(build_initial_state(i, as_of))["situation"] for i in mocks.ITEMS}
+    assert got == {i: ("uncertain" if i == moved else "stable") for i in mocks.ITEMS}
+
+
+def _declared_thresholds() -> dict[str, float]:
+    """선언에 있는 임계를 **그대로 읽어 온다.**
+
+    🔴 **값을 베껴 적지 않는다** (규칙 8). 전에는 아래 둘이 ``0.08`` 을 손으로 들고
+      있었는데, 그것이 **그때의 선언값을 복사한 것**이었다. 그래서 2026-09-12 에 선언이
+      품목별로 갈리자(배추 0.55 · 무 0.65 · 양파 0.40) 두 검사가 같이 깨졌다 —
+      *"한 품목만 미결로 만든다"* 를 재려던 검사가 **다른 품목의 임계까지 몰래 바꾸고
+      있었던** 것이다.
+
+    ★ 읽는 대상이 ``mocks.ITEMS`` 가 아니라 **선언의 키**다. ``swap_threshold`` 가
+      같은 규율을 쓴다 — 선언에서 품목이 하나 빠져도 이 도구는 그대로 돈다.
+    """
+    return dict(load_constraints()["situation"]["ci_width_threshold"])
+
+
+def _without(item: str) -> dict[str, float]:
+    return {other: value for other, value in _declared_thresholds().items() if other != item}
+
+
+def _nulled(item: str) -> dict[str, float | None]:
+    return {
+        other: (None if other == item else value)
+        for other, value in _declared_thresholds().items()
+    }
+
+
+@pytest.mark.parametrize("build", [_without, _nulled], ids=["없는_키", "null"])
+def test_an_undeclared_threshold_stops_instead_of_falling_back(
+    build: Callable[[str], dict], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **없는 키를 기본값으로 채우지 않는다** (규칙 3).
+
+    ``declared.get(item, 0.08)`` 한 줄이면 그날 아무 일도 안 일어난 것처럼 판정이 나온다 —
+    **에러 없이 결과만 조용히 틀어지는** 종류다. 임계가 없다는 것은 *"0.08 이다"* 가 아니라
+    *"아직 안 정했다"* 이고, 안 정한 임계로 낸 stable/uncertain 은 근거가 없다.
+
+    ★ **없는 키와 ``null`` 을 같은 자리에서 본다.** 둘 다 미결이고 판정을 막는다는 결과도
+      같다 — ``shelf_life_days`` 의 ``null`` 과 같은 뜻이다. 조건을 둘로 가르면 한쪽만
+      고치는 날이 온다.
+
+    ⚠️ **다른 품목은 그대로 돈다.** 한 품목의 미결이 그날 전체를 세우면, 값을 하나씩
+      확정해 나가는 동안 아무도 아무것도 못 돌린다.
+    """
+    baseline = {
+        item: classify_situation(build_initial_state(item, UNCERTAIN))["situation"]
+        for item in mocks.ITEMS
+        if item != "배추"
+    }
+    declare_thresholds(monkeypatch, tmp_path, build("배추"))
+
+    with pytest.raises(ThresholdNotDeclared, match="배추"):
+        classify_situation(build_initial_state("배추", UNCERTAIN))
+    assert {
+        item: classify_situation(build_initial_state(item, UNCERTAIN))["situation"]
+        for item in baseline
+    } == baseline
+
+
+def test_a_scalar_declaration_stops_every_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """스칼라로 되돌아간 선언(``ci_width_threshold: 0.08``)은 **전 품목이 같이** 멈춘다.
+
+    🔴 한 품목이라도 통과시키면 나머지가 그 값을 물려받는 꼴이고, 그건 품목별로 가른
+      이유를 통째로 되돌린 것이다. 되돌린 사람에게 *"고쳤는데 안 고쳐졌다"* 가
+      조용히 성립한다.
+    """
+    declare_thresholds(monkeypatch, tmp_path, 0.08)
+    for item in mocks.ITEMS:
+        with pytest.raises(ThresholdNotDeclared, match=item):
+            classify_situation(build_initial_state(item, UNCERTAIN))
+
+
+def test_every_mock_item_has_a_declared_threshold() -> None:
+    """mock 품목이 늘면 임계도 같이 늘어야 한다 — 안 그러면 그 품목은 **아무 날도 못 돈다.**
+
+    ``ThresholdNotDeclared`` 가 크게 울기는 하지만 우는 자리가 그래프 한가운데다.
+    여기서 먼저 울면 *"임계를 안 정했다"* 가 목록으로 바로 보인다.
+
+    🔴 **반대 방향은 안 막는다.** 선언에 mock 에 없는 품목이 있어도 된다 — 실데이터로
+      가면 mock 목록이 먼저 사라지고, 선언은 계약(#216)을 따른다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    missing = set(mocks.ITEMS) - set(declared)
+    assert not missing, f"임계가 선언되지 않은 mock 품목: {sorted(missing)}"
+
+
+# ── 선언값 자체가 판정을 정하는가 (#67 실측값 · 2026-09-12) ──────────────────
+#
+# 🔴 **여기 둘만 실 선언값에 기댄다.** 위 검사들은 임계를 주입해서 선언과 무관하게
+#   돌지만(2026-09-04 스윕 뒤의 규율), 그러면 **선언에 무엇이 적혀 있든 아무도 안
+#   본다.** ``#67`` 이 값을 넣는 판에서 그 자리를 메운다.
+
+
+def _state_with_width(item: str, width: float) -> dict:
+    """판정 기준일 한 줄의 구간폭을 ``width`` 로 **합성한** State.
+
+    ⚠️ **입력이 합성이다 — mock 밴드가 아니다.** 그 사실과 이유를 적어 둔다::
+
+        mock 폭 (앵커 다섯 · 세 품목)   0.0594 ~ 0.1206
+        실 DB 폭 (2026-01~03 · AUC)    0.3180 ~ 0.8230
+        실 선언 (2026-09-12)            배추 0.55 · 무 0.65 · 양파 0.40
+
+    🔴 **mock 으로는 이 검사를 못 짠다.** mock 폭이 세 품목 다 0.12 언저리라 실 선언
+      어느 칸에도 안 걸리고, 그래서 **품목별 갈림이 한 건도 안 나온다.** 밴드를 새로
+      만들면 앵커를 타는 검사 수백 건의 지반이 흔들리므로(``#69`` 에서 겪은 자리),
+      밴드는 그대로 두고 **이 검사 안에서만** 한 줄을 합성한다.
+
+    ★ 합성하는 것은 ``upper``/``lower`` 뿐이다. ``predicted`` 와 ``date`` 는 mock 그대로라
+      ①이 실제로 읽는 경로(``judgment_row`` → 인덱스 ↔ 날짜)를 그대로 탄다.
+    """
+    state = build_initial_state(item, UNCERTAIN)
+    day = load_constraints()["situation"]["ci_judgment_day"]
+    row = state["forecast"]["daily"][day - 1]
+    predicted = row["predicted"]
+    half = predicted * width / 2
+    row["upper"] = predicted + half
+    row["lower"] = predicted - half
+    return state
+
+
+def test_the_declared_threshold_itself_decides_not_some_older_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **선언을 옛 값(``0.08``)으로 되돌리면 판정이 따라 뒤집히는가.**
+
+    ``#67`` 전에는 셋이 다 ``0.08`` 이었고 실측 분포가 통째로 그 위라 **판정이 100%
+    ``uncertain``** 이었다. 그 값이 어딘가에 남아 다시 쓰이면 ``#67`` 은 조용히 없던
+    일이 된다 — 에러 없이 판정만 옛 자리로 돌아간다.
+
+    ⚠️ 합성 입력이다 — ``_state_with_width`` 의 ⚠️ 를 볼 것.
+
+    ★ **값을 대조하지 않는다** (규칙 8). 선언을 진짜 YAML 로 갈아 끼우고
+      **판정이 갈리는지**를 본다. ①이 ``0.08`` 을 박아 두면 실 선언 쪽이 ``uncertain``
+      으로 나와 여기서 운다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    # 실 선언 셋 모두보다 좁고, 옛 값 0.08 보다는 넓은 폭. 두 선언이 반대 판정을 낸다.
+    width = min(declared.values()) * 0.9
+    assert width > 0.08, "이 검사는 옛 값이 새 선언보다 좁다는 것에 기댄다"
+
+    with_declared = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(with_declared.values()) == {"stable"}, (
+        "실 선언에서는 이 폭이 셋 다 stable 이어야 한다 — 아니면 이 검사가 재는 갈림이 없다"
+    )
+
+    declare_thresholds(monkeypatch, tmp_path, dict.fromkeys(declared, 0.08))
+    with_old = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(with_old.values()) == {"uncertain"}, (
+        f"선언을 0.08 로 되돌렸는데 판정이 안 따라왔다 — 임계가 안 읽히고 있다: {with_old}"
+    )
+
+
+def test_flattening_the_three_thresholds_erases_the_per_item_split(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🔴 **품목마다 «자기» 값을 읽는가** — 셋을 같은 값으로 만들면 갈림이 사라져야 한다.
+
+    ``#283`` 이 구조를 품목별로 바꿨고 ``#67`` 이 값을 갈랐다. ①이 ``state["item"]`` 을
+    안 읽고 아무 칸이나 (예: 첫 칸을) 쓰면 **갈림이 그대로 나와서 아무도 모른다** —
+    그 경우를 잡으려고 **평탄화 쪽을 단언**한다.
+
+    ⚠️ 합성 입력이다 — ``_state_with_width`` 의 ⚠️ 를 볼 것.
+
+    ★ **실 선언이 셋 다 달라야 성립하는 검사다.** 선언이 다시 한 값으로 합쳐지면 여기가
+      먼저 운다(첫 단언) — 그것도 알려야 할 변화다.
+    """
+    declared = load_constraints()["situation"]["ci_width_threshold"]
+    assert len(set(declared.values())) > 1, (
+        "선언이 셋 다 같은 값이 됐다 — 품목별로 둔 이유가 사라졌으니 의식적으로 확인할 것"
+    )
+    # 가장 좁은 칸과 가장 넓은 칸 사이의 폭. 한 품목은 넘고 다른 품목은 못 넘는다.
+    width = (min(declared.values()) + max(declared.values())) / 2
+
+    split = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert set(split.values()) == {"stable", "uncertain"}, (
+        f"같은 폭인데 품목 판정이 안 갈렸다 — 품목별 임계를 안 읽고 있다: {split}"
+    )
+
+    declare_thresholds(monkeypatch, tmp_path, dict.fromkeys(declared, max(declared.values())))
+    flat = {
+        item: classify_situation(_state_with_width(item, width))["situation"]
+        for item in mocks.ITEMS
+    }
+    assert len(set(flat.values())) == 1, (
+        f"셋을 같은 값으로 폈는데 판정이 여전히 갈린다 — 임계 말고 다른 것이 갈랐다: {flat}"
+    )
+
+
+def _ci_widths(item: str, as_of: date) -> list[float]:
+    """ci_width = (upper − lower) / predicted — 상세설계 §4-①."""
+    daily = ports.get_forecast(item, as_of)["daily"]
+    return [(row["upper"] - row["lower"]) / row["predicted"] for row in daily]
+
+
+def _rise_rate_2w(item: str, as_of: date) -> float:
+    """2주 후 상승률. 판정 기준일과 **같은 날**을 본다 — 상세설계 §4-①이 든 D+14 채택 근거가
+    "상황 분류와 상승률이 하나의 질문이 된다"였으므로, 여기서도 같은 상수를 읽는다."""
+    forecast = ports.get_forecast(item, as_of)
+    return _judgment_row(item, as_of)["predicted"] / forecast["current_price"] - 1
+
+
+def _predicted(item: str, as_of: date) -> list[int]:
+    return [row["predicted"] for row in ports.get_forecast(item, as_of)["daily"]]
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_rising_is_stable_and_clears_the_pre_purchase_trigger(item: str) -> None:
+    """mock_rising → 선매입(D 큰 안)이 나오려면 stable이면서 timing 축이 열려야 한다."""
+    constraints = load_constraints()
+    assert max(_ci_widths(item, RISING)) < ci_width_threshold(item, constraints)
+    assert _rise_rate_2w(item, RISING) >= constraints["triggers"]["pre_purchase_rise_rate"]
+    predicted = _predicted(item, RISING)
+    assert predicted == sorted(predicted)
+    assert len(set(predicted)) == len(predicted), "지속 상승이면 같은 값이 연달아 나오지 않는다"
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_falling_is_stable_and_misses_the_pre_purchase_trigger(item: str) -> None:
+    """mock_falling → 최소 매입(D=2). 하락 궤적이면 선매입 트리거가 열리면 안 된다."""
+    constraints = load_constraints()
+    assert max(_ci_widths(item, FALLING)) < ci_width_threshold(item, constraints)
+    rise = _rise_rate_2w(item, FALLING)
+    assert rise < 0
+    assert rise < constraints["triggers"]["pre_purchase_rise_rate"]
+    predicted = _predicted(item, FALLING)
+    assert predicted == sorted(predicted, reverse=True)
+    assert len(set(predicted)) == len(predicted)
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_the_two_mock_bands_never_overlap(item: str) -> None:
+    """mock 이 임계에 대해 하는 약속은 *"넘는다"* 가 아니라 **"갈라진다"** 이다.
+
+    예전엔 ``min(uncertain 구간폭) >= 선언 임계`` 를 봤다. 그건 mock 을 **선언값에**
+    묶는 단언이라, 선언이 움직이면 mock 을 안 건드렸는데도 깨진다. mock 이 실제로
+    보장해야 하는 것은 두 층위가 **겹치지 않는다** 는 것뿐이고, 그래야 그 사이 아무
+    임계나 주입해 판정을 가를 수 있다.
+
+    두 번째 단언이 ``INJECTED_THRESHOLD`` 를 그 틈에 못 박는다 — ② 검사들이 딛고 선
+    전제라, 밴드가 움직여 틈이 사라지면 저 검사들이 조용히 뜻을 잃기 전에 여기서 운다.
+
+    ⚠️ 밴드 값 자체는 **안 건드린다** (현서님 ④). ``upper`` 는 ``ci_width`` 말고
+      ``compute_max_price`` 도 먹이므로 넓히면 ⑦ 컷 기준이 함께 풀린다.
+
+      🔴 **그리고 선언 임계(0.08)로는 실제 폭이 전부 ``uncertain`` 이다** (2026-09-10
+      실측). **가장 좁은 한 줄**을 봐도 양파 ``ci_width`` 0.220 — 임계의 2.7배라, 넣으면
+      ``stable`` 이 한 줄도 안 남는다 — **이 검사가 딛고 선 「두 층위」가 한 층이 된다.**
+      표와 「언제 맞출 수 있나」는 ``mocks/README.md`` 의 「실측 밴드」 절.
+    """
+    stable = [
+        width
+        for as_of in (INTEGRATION, RISING, FALLING, SPREAD_WIDE)
+        for width in _ci_widths(item, as_of)
+    ]
+    uncertain = _ci_widths(item, UNCERTAIN)
+    assert max(stable) < min(uncertain), "두 층위가 겹치면 어떤 임계로도 못 가른다"
+    assert max(stable) < INJECTED_THRESHOLD < min(uncertain)
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_uncertain_does_not_also_trip_the_pre_purchase_trigger(item: str) -> None:
+    """uncertain 날에 timing 트리거까지 열리면 무엇 때문에 안이 줄었는지 알 수 없다."""
+    trigger = load_constraints()["triggers"]["pre_purchase_rise_rate"]
+    assert _rise_rate_2w(item, UNCERTAIN) < trigger
+
+
+def _grade_prices(item: str, as_of: date) -> dict[str, int]:
+    return {quote["grade"]: quote["price"] for quote in ports.get_market_quotes(item, as_of)}
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_wide_spread_clears_the_widening_threshold(item: str) -> None:
+    """grade_spread_wide → 중품 비중 상승. 상-중 격차가 평시 대비 임계를 넘어야 한다."""
+    ratio = load_constraints()["triggers"]["grade_spread_widening_ratio"]
+    normal, wide = _grade_prices(item, RISING), _grade_prices(item, SPREAD_WIDE)
+    normal_spread = (normal["상"] - normal["중"]) / normal["상"]
+    wide_spread = (wide["상"] - wide["중"]) / wide["상"]
+    assert wide_spread >= normal_spread * (1 + ratio)
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_wide_spread_moves_only_the_mid_grade(item: str) -> None:
+    """변수를 하나만 움직였는지 확인 — 특·상이 같이 흔들리면 ⑤ 노드 테스트의 인과가 흐려진다."""
+    normal, wide = _grade_prices(item, RISING), _grade_prices(item, SPREAD_WIDE)
+    assert wide["특"] == normal["특"]
+    assert wide["상"] == normal["상"]
+    assert wide["중"] < normal["중"]
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_spread_wide_day_stays_stable_so_the_grade_axis_is_isolated(item: str) -> None:
+    """등급만 보려면 그날이 uncertain이면 안 된다 — 안 개수가 줄어 배분을 볼 여지가 사라진다."""
+    threshold = ci_width_threshold(item, load_constraints())
+    assert max(_ci_widths(item, SPREAD_WIDE)) < threshold
+
+
+# ── 계약(IO명세 §1) 형태 1:1 ────────────────────────────────────────────────
+
+FORECAST_KEYS = {
+    "generated_at",
+    "item",
+    "unit",
+    "current_price",
+    "horizon_days",
+    "daily",
+    "model_version",
+}
+DAILY_KEYS = {"date", "predicted", "lower", "upper"}
+QUOTE_KEYS = {"market", "grade", "price"}
+INVENTORY_KEYS = {"as_of", "item", "lots", "warehouse_free_kg", "rental_cap_kg"}
+#: 물류가 싣는 여섯 키 + `shelf_life_days`.
+#: 마지막 하나만 **물류가 아직 안 주는 미결 필드**다 (#76) — ⑤가 품목 보관한계를 쓰는데
+#: 물류의 `remaining_freshness_days`(로트 잔여일)로는 대체할 수 없어서다. 전달 경로가
+#: 정해지면 이 집합에서 빠진다.
+LOT_KEYS = {
+    "lot_id",
+    "item",
+    "available_qty_kg",
+    "remaining_freshness_days",
+    "grade",
+    "status",
+    "shelf_life_days",
+}
+ORDERS_KEYS = {"as_of", "item", "orders", "total_kg"}
+ORDER_KEYS = {"sale_id", "qty_kg", "due_date"}
+#: 🔴 ``evidence_grade`` 는 **IO명세 §1-⑥ 에 없던 칸**이다 (2026-09-09 · E3-5).
+#:   코퍼스가 ``_evidence_grade`` 로 선언하고 로더가 문서마다 싣는다 — 전에는 ⑥이
+#:   ``"SIM_FIXED"`` 를 리터럴로 들고 있어서 «선언에서 읽는가» 를 증명할 수 없었다.
+#:   이 집합이 정확 비교라 칸을 늘리면 여기서 잡힌다 — 그게 이 검사의 값이다.
+DOCUMENT_KEYS = {
+    "doc_id",
+    "source",
+    "doc_type",
+    "item",
+    "title",
+    "published_at",
+    "content",
+    "evidence_grade",
+}
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_forecast_matches_the_io_spec_shape(item: str, as_of: date) -> None:
+    """E1-1 DoD — ML 스키마 1:1. 설명용 ``_`` 키가 새어나오지 않는 것까지 포함한다."""
+    forecast = ports.get_forecast(item, as_of)
+    assert set(forecast) == FORECAST_KEYS
+    assert forecast["item"] == item
+    assert forecast["unit"] == "원/kg"
+    assert forecast["horizon_days"] == 18 == len(forecast["daily"])
+    assert all(set(row) == DAILY_KEYS for row in forecast["daily"])
+    assert [row["date"] for row in forecast["daily"]] == [
+        (as_of + timedelta(days=n)).isoformat() for n in range(1, 19)
+    ]
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_forecast_batch_is_not_generated_after_as_of(item: str, as_of: date) -> None:
+    """``generated_at <= as_of`` — 미래 배치를 읽으면 백테스트 성적이 무효가 된다."""
+    generated_at = ports.get_forecast(item, as_of)["generated_at"]
+    stamp = datetime.fromisoformat(generated_at)  # 형식이 깨지면 여기서 터진다
+    assert stamp.tzinfo is not None, "타임존 없는 시각은 어느 시점인지 확정되지 않는다"
+    assert stamp.utcoffset() == timedelta(hours=9), "KST(+09:00) 고정 (IO명세 §1-①)"
+    assert stamp.date() <= as_of
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_quotes_match_the_io_spec_shape(item: str, as_of: date) -> None:
+    quotes = ports.get_market_quotes(item, as_of)
+    assert isinstance(quotes, list)
+    assert len(quotes) >= 2, "등급이 2개 미만이면 배분 판단이 무의미하다 (IO명세 §1-②)"
+    assert all(set(quote) == QUOTE_KEYS for quote in quotes)
+    assert {quote["market"] for quote in quotes} == {"가락"}
+    grades = [quote["grade"] for quote in quotes]
+    assert len(set(grades)) == len(grades), "같은 등급이 두 번 나오면 단가가 모호해진다"
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_inventory_and_orders_match_the_io_spec_shape(item: str, as_of: date) -> None:
+    inventory = ports.get_inventory(item, as_of)
+    assert set(inventory) == INVENTORY_KEYS
+    assert inventory["as_of"] == as_of.isoformat()
+    assert all(set(lot) == LOT_KEYS for lot in inventory["lots"])
+    # 날짜 필드가 사라져 look-ahead 검사 대상이 없다 — 물류가 계산한 잔여일을 그대로 받는다.
+    # 대신 **품목 축**을 본다: 실물은 4품목을 한 목록에 담아 보내므로 어느 품목 것인지가
+    # 로트 안에 있어야 하고, 없으면 어댑터가 가려낼 수 없다 (#76).
+    assert all(lot["item"] == item for lot in inventory["lots"])
+
+    orders = ports.get_confirmed_orders(item, as_of)
+    assert set(orders) == ORDERS_KEYS
+    assert all(set(order) == ORDER_KEYS for order in orders["orders"])
+    assert all(date.fromisoformat(order["due_date"]) >= as_of for order in orders["orders"])
+    assert orders["total_kg"] == sum(order["qty_kg"] for order in orders["orders"])
+
+
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_rental_cap_follows_the_constraints_ratio(item: str) -> None:
+    """외부임차 한도 = 창고 여유 × 30%. 상수는 constraints.yaml 단일 소스다 (규칙 7)."""
+    inventory = ports.get_inventory(item, RISING)
+    ratio = load_constraints()["warehouse"]["rental_cap_ratio"]
+    assert inventory["rental_cap_kg"] == round(inventory["warehouse_free_kg"] * ratio)
+
+
+# ── 문서 기준일(2026-08-21) 재현 ────────────────────────────────────────────
+
+
+def test_anchor_day_matches_the_fixture_as_of() -> None:
+    """픽스처와 mock이 같은 날을 가리키는지부터 못 박는다."""
+    assert AS_OF == RISING.isoformat()
+
+
+def test_inventory_reproduces_the_io_spec_example() -> None:
+    assert ports.get_inventory("배추", RISING) == {
+        "as_of": "2026-08-21",
+        "item": "배추",
+        "lots": [
+            {
+                "lot_id": "LOT-MOCK-BAECHU",
+                "item": "배추",
+                "available_qty_kg": 3000,
+                "remaining_freshness_days": 6,
+                "grade": "상",
+                "status": "ACTIVE",
+                "shelf_life_days": 10,
+            }
+        ],
+        "warehouse_free_kg": 12000,
+        "rental_cap_kg": 3600,
+    }
+
+
+def test_orders_reproduce_the_io_spec_example() -> None:
+    assert ports.get_confirmed_orders("배추", RISING) == {
+        "as_of": "2026-08-21",
+        "item": "배추",
+        "orders": [
+            {"sale_id": 7, "qty_kg": 12000, "due_date": "2026-08-24"},
+            {"sale_id": 9, "qty_kg": 6000, "due_date": "2026-08-29"},
+        ],
+        "total_kg": 18000,
+    }
+
+
+def test_remaining_freshness_is_the_six_days_the_fixture_talks_about() -> None:
+    """잔여신선도는 **물류가 계산해 보낸 값**이다. 픽스처 risks의 '6일'과 같은 6이어야 한다.
+
+    전에는 ``shelf_life − (as_of − stocked_at)``으로 파생했다. 물류가 이미 내는 값이라
+    받는 쪽으로 정리했고(#76), 같은 개념을 두 곳에서 계산하지 않는다.
+    """
+    lot = ports.get_inventory("배추", RISING)["lots"][0]
+    assert lot["remaining_freshness_days"] == 6
+    assert "6일" in _proposal()["scenarios"][0]["risks"][0]
+
+
+def test_fixture_sourcing_prices_exist_in_the_same_day_quotes() -> None:
+    """규칙 4 — sourcing_plan의 등급·단가는 **당일 시세에 실재하는 값만**.
+
+    계약(schemas)과 데이터(mock)를 잇는 다리다. 여기가 깨지면 ⑦ self_check가 즉시 컷한다.
+    """
+    quotes = {
+        (quote["grade"], quote["price"]) for quote in ports.get_market_quotes("배추", RISING)
+    }
+    lines = _proposal()["scenarios"][0]["sourcing_plan"]
+    assert lines
+    for line in lines:
+        assert line["market"] == "가락"
+        assert (line["grade"], line["grade_unit_price"]) in quotes
+
+
+# ── look-ahead 방어 (문서) ──────────────────────────────────────────────────
+
+
+def test_corpus_without_a_declared_grade_refuses_to_load(monkeypatch) -> None:
+    """🔴 **선언이 없으면 적재를 거부한다.** 기본값으로 떨어뜨리지 않는다.
+
+    ``SIM_FIXED`` 를 기본값으로 두면 *"아무도 선언한 적 없는 등급"* 이 근거에 실린다 —
+    ``published_at`` 없는 문서를 0 으로 안 채우고 거부하는 것과 같은 자리다 (규칙 3).
+
+    ⚠️ 이 검사가 없으면 코퍼스에서 ``_evidence_grade`` 한 줄을 지워도 아무도 안 운다.
+    """
+    from app.purchase_agent.mocks import _load
+
+    stripped = json.loads((Path(_load.__file__).parent / "documents.json").read_text("utf-8"))
+    stripped.pop("_evidence_grade")
+    monkeypatch.setattr(_load, "_read", lambda name: stripped)
+
+    with pytest.raises(KeyError, match="_evidence_grade"):
+        _load.load_documents("배추", date(2026, 9, 4), ["관측월보"])
+
+
+def test_declared_grade_travels_to_every_document(monkeypatch) -> None:
+    """🔴 **선언을 바꾸면 실린 등급이 따라 바뀐다** — 값 비교가 아니라 변이로 잰다 (규칙 8).
+
+    지금 선언과 코드가 **같은 값**(``SIM_FIXED``)이라, *"등급이 SIM_FIXED 다"* 를
+    확인하는 검사는 ⑥이 리터럴을 들고 있어도 통과한다. 선언을 실제로 바꿔서
+    **판정이 따라오는지**를 본다.
+
+    ★ 코퍼스를 진짜로 고치지 않는다 — 사본을 만들어 로더가 그것을 읽게 한다.
+    """
+    from app.purchase_agent.mocks import _load
+
+    swapped = json.loads((Path(_load.__file__).parent / "documents.json").read_text("utf-8"))
+    swapped["_evidence_grade"] = "OFFICIAL"
+    monkeypatch.setattr(_load, "_read", lambda name: swapped)
+
+    documents = _load.load_documents("배추", date(2026, 9, 4), ["관측월보", "기상", "작년동기"])
+
+    assert documents, "전제가 안 섰다 — 읽을 문서가 없다"
+    assert {doc["evidence_grade"] for doc in documents} == {"OFFICIAL"}, (
+        "선언을 바꿨는데 실린 등급이 안 따라왔다 — 어딘가 값이 박혀 있다"
+    )
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_documents_never_leak_future_publications(item: str, as_of: date) -> None:
+    """전 품목·전 앵커일. 배추만 검사하면 다른 품목의 빈 코퍼스를 못 본다.
+
+    ★ 통합 앵커(12-31)만 **0건이 정답**이다. ``documents.json`` 은 발행일이 절대 날짜
+      (2026-08~09)라 그날 보이는 문서가 없다 — 발행일이 ``as_of`` 를 따라 움직이면
+      아래 ``test_future_document_is_invisible_until_it_is_published`` 가 증명하려는
+      look-ahead 필터가 성립하지 않아 **의도적으로 고정해 둔 것**이다 (#73).
+      "비어도 통과"로 풀지 않고 **0건임을 못 박는다** — 느슨하게 두면 다른 앵커의
+      빈 코퍼스까지 같이 통과한다."""
+    documents = ports.get_context_docs(item, as_of, DOC_TYPES)
+    if as_of == INTEGRATION:
+        assert documents == [], "12-31은 발행된 문서가 없어야 한다 — 보이면 발행일이 밀린 것이다"
+        return
+    assert documents, f"{item}에 읽을 문서가 없으면 ② 컨텍스트 루프가 헛돈다"
+    assert all(set(doc) == DOCUMENT_KEYS for doc in documents)
+    assert all(date.fromisoformat(doc["published_at"]) <= as_of for doc in documents)
+    assert all(doc["item"] == item for doc in documents)
+
+
+def test_document_ids_are_unique_across_the_corpus() -> None:
+    """``DOC-{doc_id}`` 참조 규약(IO명세 §1-⑥)이 성립하려면 id가 유일해야 한다."""
+    corpus = json.loads((MOCK_DIR / "documents.json").read_text(encoding="utf-8"))["documents"]
+    ids = [doc["doc_id"] for doc in corpus]
+    assert len(set(ids)) == len(ids)
+
+
+def test_future_document_is_invisible_until_it_is_published() -> None:
+    """'보이면 안 되는 문서'를 코퍼스에 넣어둬야 필터가 작동함을 증명할 수 있다."""
+
+    def visible(as_of: date) -> set[int]:
+        return {doc["doc_id"] for doc in ports.get_context_docs("배추", as_of, ["관측월보"])}
+
+    assert 6 not in visible(RISING), "DOC-6(2026-09-05)이 8/21에 보이면 look-ahead다"
+    assert 6 in visible(SPREAD_WIDE)
+
+
+@pytest.mark.parametrize("record", [{"doc_id": 99}, {"doc_id": 99, "published_at": ""}])
+def test_document_without_published_at_is_refused(record: dict) -> None:
+    """건너뛰지 않고 **거부**한다 — 조용히 빠지면 근거가 비어도 아무도 모른다 (IO명세 §1-⑥)."""
+    with pytest.raises(ValueError, match="published_at"):
+        mocks.filter_by_published_at([record], RISING)
+
+
+def test_document_type_filter_selects_only_what_was_asked() -> None:
+    documents = ports.get_context_docs("배추", UNCERTAIN, ["기상"])
+    assert {doc["doc_type"] for doc in documents} == {"기상"}
+
+
+def test_empty_doc_types_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        ports.get_context_docs("배추", UNCERTAIN, [])
+
+
+def test_unknown_doc_type_is_rejected() -> None:
+    """오타를 빈 목록으로 돌려주면 '읽을 문서가 없었다'와 구분되지 않는다."""
+    with pytest.raises(ValueError, match="unknown doc_types"):
+        ports.get_context_docs("배추", UNCERTAIN, ["잡지"])
+
+
+# ── days 창 · 미지 입력 ─────────────────────────────────────────────────────
+
+
+def test_days_window_filters_orders_and_recomputes_the_total() -> None:
+    """``days``는 장식용 파라미터가 아니다 — 실제로 거르고 total_kg도 다시 더한다."""
+    full = ports.get_confirmed_orders("배추", RISING)
+    narrow = ports.get_confirmed_orders("배추", RISING, days=5)
+    assert full["total_kg"] == 18000
+    assert len(narrow["orders"]) == 1
+    assert narrow["total_kg"] == 12000 == sum(o["qty_kg"] for o in narrow["orders"])
+
+
+def test_negative_days_window_is_rejected() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        ports.get_confirmed_orders("배추", RISING, days=-1)
+
+
+def test_zero_days_window_returns_an_empty_order_book() -> None:
+    """0은 "확정된 0"이다 — 조회 창이 없으면 주문도 없고 합계도 0이다 (규칙 3)."""
+    orders = ports.get_confirmed_orders("배추", RISING, days=0)
+    assert orders["orders"] == []
+    assert orders["total_kg"] == 0
+
+
+def test_wide_days_window_keeps_every_order() -> None:
+    assert ports.get_confirmed_orders("배추", RISING, days=365)["total_kg"] == 18000
+
+
+@pytest.mark.parametrize("days", [True, False, 3.5, "5", None], ids=repr)
+def test_non_integer_days_window_is_rejected(days: object) -> None:
+    """``days=True``가 ``days=1``로 둔갑하면 주문이 통째로 사라진 채 조용히 통과한다."""
+    with pytest.raises(TypeError, match="days must be an int"):
+        ports.get_confirmed_orders("배추", RISING, days=days)
+
+
+@pytest.mark.parametrize("horizon", [True, 30.0, "30", None], ids=repr)
+def test_non_integer_cash_horizon_is_rejected(horizon: object) -> None:
+    """``"30"``이 통하면 지평 표기가 두 가지가 되어 조회 키가 갈라진다."""
+    with pytest.raises(TypeError, match="horizon_days must be an int"):
+        ports.get_projected_cash_min(RISING, horizon)
+
+
+@pytest.mark.parametrize("as_of", ANCHORS, ids=lambda d: d.isoformat())
+@pytest.mark.parametrize("item", mocks.ITEMS)
+def test_every_port_returns_data_on_every_anchor_day(item: str, as_of: date) -> None:
+    """6개 포트 × 4품목 × 5앵커일이 전부 살아 있다 (E1-3 DoD).
+
+    시그니처만 있던 단계의 ``NotImplementedError`` 검사를 대체한다. 한 품목만 돌면
+    나머지 품목의 mock이 비어 있어도 초록불이 뜬다 — 실제로 그런 구멍이 있었다.
+    """
+    assert ports.get_forecast(item, as_of)["daily"]
+    assert ports.get_market_quotes(item, as_of)
+    assert ports.get_inventory(item, as_of)["lots"]
+    assert ports.get_confirmed_orders(item, as_of)["orders"]
+    assert ports.get_projected_cash_min(as_of, 30) > 0
+    # 문서 포트만 앵커마다 기대가 다르다 — 12-31 은 0건이 정답이다 (위 테스트 참조).
+    docs = ports.get_context_docs(item, as_of, DOC_TYPES)
+    if as_of == INTEGRATION:
+        assert docs == []
+    else:
+        assert docs
+
+
+def test_unknown_item_is_rejected() -> None:
+    """빈 dict를 돌려주면 노드가 0으로 계산해버린다."""
+    with pytest.raises(ValueError, match="unknown item"):
+        ports.get_forecast("건고추", RISING)
+
+
+#: 앵커일이 아닌 날. **T0 포트**는 어느 쪽으로 들어와도 같은 대접을 받아야 한다.
+NOT_AN_ANCHOR = date(2026, 8, 22)
+
+#: T0(``build_initial_state``)가 한 번씩 부르는 포트. 앵커 밖이면 거부한다.
+#:
+#: 🔴 **``get_context_docs`` 는 여기 없다** (#151-② · 2026-09-03). 그 포트만 T0 밖에서
+#:   **런타임에** 불리고(정의서 §3.1.1 · IO명세 §0), 코퍼스가 앵커별로 갈리지 않아
+#:   앵커일을 알 필요가 없다. 아래 ``test_the_document_port_is_the_one_exception`` 이
+#:   그 예외를 따로 잠근다 — 목록에서 조용히 빠지면 "빠뜨린 것"과 구분되지 않는다.
+T0_PORT_CALLS = (
+    ("get_forecast", lambda as_of: ports.get_forecast("배추", as_of)),
+    ("get_market_quotes", lambda as_of: ports.get_market_quotes("배추", as_of)),
+    ("get_inventory", lambda as_of: ports.get_inventory("배추", as_of)),
+    ("get_confirmed_orders", lambda as_of: ports.get_confirmed_orders("배추", as_of)),
+    ("get_projected_cash_min", lambda as_of: ports.get_projected_cash_min(as_of, 30)),
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "call"), T0_PORT_CALLS, ids=[name for name, _ in T0_PORT_CALLS]
+)
+def test_unknown_as_of_is_rejected_by_every_t0_port(name: str, call: object) -> None:
+    """포트 하나만 날짜 검증을 빼먹으면 그 경로로 앵커 밖 데이터가 새어 들어온다."""
+    with pytest.raises(KeyError, match="no mock scenario"):
+        call(NOT_AN_ANCHOR)
+
+
+def test_the_document_port_is_the_one_exception() -> None:
+    """🔴 **문서 포트만 앵커 밖에서 산다** (#151-②).
+
+    ② ``collect_context`` 는 ``uncertain`` 인 날만 도는데 **실 예측은 거의 항상
+    uncertain** 이다 — 관문이 남아 있으면 앵커 밖 날짜가 통째로 죽는다.
+
+    ⚠️ **"안 죽는다" 만 보면 부족하다.** 관문을 빼면서 필터까지 같이 빠져도 안 죽기
+      때문이다. 그래서 **실제로 문서가 나오는지** 와 **발행일 필터가 살아 있는지** 를
+      같이 본다. `DOC-6`(2026-09-05 발행)이 그 리트머스다.
+    """
+    docs = ports.get_context_docs("배추", NOT_AN_ANCHOR, ["관측월보"])
+    ids = {doc["doc_id"] for doc in docs}
+    assert ids == {3}, f"앵커 밖(2026-08-22)에서 8월호만 보여야 한다: {ids}"
+
+    later = ports.get_context_docs("배추", date(2026, 9, 20), ["관측월보"])
+    assert {doc["doc_id"] for doc in later} == {3, 6}, "9-20 이면 9월호도 보인다"
+
+
+def test_unknown_cash_horizon_is_rejected() -> None:
+    """30일치 숫자를 60일 질문에 돌려주면 운전자본 갭을 놓친다 (IO명세 §1-⑤)."""
+    with pytest.raises(KeyError, match="no mock cash"):
+        ports.get_projected_cash_min(RISING, 60)
+
+
+# ── constraints 로더 ────────────────────────────────────────────────────────
+
+
+def test_load_constraints_returns_a_fresh_object_each_call() -> None:
+    """캐시하지 않는다 — feedback의 constraint 덮어쓰기가 다른 노드로 새면 안 된다."""
+    first, second = load_constraints(), load_constraints()
+    assert first == second
+    assert first is not second
+    # 🔴 **중첩 안쪽을 흔든다.** 최상위 키를 갈아 끼우는 것으로는 부족하다 —
+    #   ``{**real, ...}`` 같은 얕은 복사가 어딘가에 있어도 그건 통과하고, 실제로 새는
+    #   것은 **안쪽 dict 를 공유하는** 경우다. 임계가 품목별 dict 가 되면서 그 안쪽이
+    #   생겼다.
+    first["situation"]["ci_width_threshold"]["배추"] = 999
+    assert ci_width_threshold("배추", load_constraints()) != 999
+
+
+def test_load_constraints_rejects_a_file_missing_sections(tmp_path: Path) -> None:
+    """YAML 오타를 노드 실행 도중이 아니라 로드 시점에 잡는다."""
+    broken = tmp_path / "constraints.yaml"
+    broken.write_text('version: "1.1"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required sections"):
+        load_constraints(broken)
+
+
+@pytest.mark.parametrize("broken_value", ["[]", "{}", '"보수 2"'], ids=["list", "empty", "scalar"])
+def test_constraints_section_must_be_a_non_empty_mapping(
+    tmp_path: Path, broken_value: str
+) -> None:
+    """섹션 키만 있고 속이 무너진 파일은 존재 검사를 그대로 통과한다.
+
+    ``pending: []``이면 ``pending["inbound_lead_days"]``가 노드 안에서 늦게 터지고,
+    그때는 어느 파일이 문제인지 알기 어렵다.
+    """
+    live = Path(__file__).resolve().parents[2] / "app/purchase_agent/constraints.yaml"
+    source = live.read_text(encoding="utf-8")
+    broken = tmp_path / "constraints.yaml"
+    broken.write_text(
+        source.replace("pending:\n", f"pending: {broken_value}\n_pending_disabled:\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be a non-empty mapping"):
+        load_constraints(broken)
+
+
+def test_load_constraints_rejects_a_non_mapping_file(tmp_path: Path) -> None:
+    broken = tmp_path / "constraints.yaml"
+    broken.write_text("- 1\n- 2\n", encoding="utf-8")
+    with pytest.raises(TypeError, match="mapping"):
+        load_constraints(broken)

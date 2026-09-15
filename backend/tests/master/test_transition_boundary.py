@@ -1,0 +1,440 @@
+"""승인 → 상태전이의 **트랜잭션 경계** (C 형태 ⑦).
+
+재무·물류의 `persist` 구현은 아직 없다. 그래서 여기서 재는 것은 *"어떤 값이 어느
+칸에 들어갔나"* 가 아니라 **마스터가 소유한 것 하나** — 언제 커넥션을 열고, 어떤
+순서로 부르고, 언제 한 번 커밋하고, 터지면 무엇을 되돌리는가다.
+
+🔴 **구현이 없다고 검사를 미루면 그 자리가 영영 안 잠긴다.** 재무·물류가 들어온 뒤에
+   "커밋이 두 번 나간다"를 발견하면, 그때는 이미 장부에 반쪽짜리 행이 남아 있다.
+   가짜 커넥션은 그 순서를 **오늘** 잰다.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator, Mapping
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Self
+from uuid import uuid4
+
+import pytest
+
+from app.master import decision_service as svc
+from app.master import transition
+from app.master.commitment import ApprovedCommitment, ArrivalLeg
+from app.master.decision import DecisionIn, DecisionOut
+
+AS_OF = date(2025, 12, 31)
+
+#: 이 검사가 쓰는 실행 축. 🔴 **운영값(`BURN_IN_SIM_RUN_ID`)을 안 쓴다** — 축을
+#:   상수에서 다시 읽는 뮤턴트가 살아남는다.
+실행축 = "SIM-TEST-AXIS"
+
+
+@pytest.fixture(autouse=True)
+def 전이_등록소를_비운다() -> Iterator[None]:
+    """등록소는 프로세스 전역이다 — **앞뒤로 비운다.**
+
+    ★ 끝나고만 비우면 앞 테스트가 남긴 등록이 이 파일로 흘러든다.
+    """
+    transition.reset()
+    try:
+        yield
+    finally:
+        transition.reset()
+
+
+def _commitment() -> ApprovedCommitment:
+    return ApprovedCommitment(
+        approval_id="H1-REQ-1-1",
+        request_id="REQ-1",
+        as_of=AS_OF,
+        item="배추",
+        scenario_label="보수",
+        total_qty_kg=44.0,
+        total_amount_krw=228800.0,
+        arrival_schedule=(
+            ArrivalLeg(
+                item="배추",
+                qty_kg=44.0,
+                arrival_date=date(2026, 1, 2),
+                purchase_date=AS_OF,
+                seq=1,
+                # ★ 지급일이 있어야 매입 원장을 쓸 수 있다 — 없으면 전이가 앞에서
+                #   `NOT_APPLIED` 로 돌아서고 이 파일이 재는 순서에 닿지 못한다.
+                payment_due_date=AS_OF,
+            ),
+        ),
+        inbound_lead_days=2.0,
+    )
+
+
+class 가짜커서:
+    """`items` 조회만 답하고 나머지 SQL 은 센다. **진짜 DB 를 부르지 않는다.**"""
+
+    def __init__(self, log: list[tuple[str, Any]] | None = None) -> None:
+        self.executed: list[str] = []
+        self.rowcount = 1
+        self._row: dict[str, str] | None = None
+        self._log = log
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, query: Any, params: Any = None) -> None:
+        text = str(query)
+        self.executed.append(text)
+        if "INSERT INTO" in text and self._log is not None:
+            표 = "purchase_items" if "purchase_items" in text else "purchases"
+            self._log.append((f"ledger.{표}", None))
+        self._row = {"item_id": "ITEM-BAECHU"} if "FROM" in text and "items" in text else None
+
+    def fetchone(self) -> dict[str, str] | None:
+        return self._row
+
+
+class 가짜커넥션:
+    """세는 것만 한다 — commit · rollback · close 가 **몇 번** 불렸나."""
+
+    def __init__(self, log: list[tuple[str, Any]] | None = None) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = 0
+        self.cursors: list[가짜커서] = []
+        self._log = log
+
+    def cursor(self) -> 가짜커서:
+        cur = 가짜커서(self._log)
+        self.cursors.append(cur)
+        return cur
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class 가짜전이:
+    """재무·물류 자리에 들어가는 대역. **부름 순서와 받은 커넥션을 기록한다.**"""
+
+    def __init__(
+        self,
+        name: str,
+        log: list[tuple[str, Any]],
+        *,
+        build_raises: Exception | None = None,
+        persist_raises: Exception | None = None,
+    ) -> None:
+        self.name = name
+        self.log = log
+        self.build_raises = build_raises
+        self.persist_raises = persist_raises
+
+    def build(
+        self,
+        commitment: ApprovedCommitment,
+        *,
+        target_state_date: date,
+        purchase_ids: Mapping[int, str] | None = None,
+    ) -> Any:
+        # ★ 재무만 `purchase_ids` 를 받는다 — 물류 자리에 들어가는 대역은 안 받는다.
+        #   기본값을 둬 두 파트가 같은 대역을 쓴다.
+        self.log.append((f"{self.name}.build", target_state_date))
+        if self.build_raises is not None:
+            raise self.build_raises
+        return f"{self.name}-row"
+
+    def persist(self, conn: Any, rows: Any) -> None:
+        self.log.append((f"{self.name}.persist", conn))
+        if self.persist_raises is not None:
+            raise self.persist_raises
+
+
+def _connect_spy(conn: 가짜커넥션, calls: list[int]):
+    def _connect() -> 가짜커넥션:
+        calls.append(1)
+        return conn
+
+    return _connect
+
+
+# ── a·b. 미등록은 오류가 아니라 상태다 ──────────────────────────────────
+
+
+def test_둘_다_미등록이면_커넥션을_열지_않는다() -> None:
+    """🔴 열고 나서 아무 일도 안 하면 **빈 트랜잭션**이 승인마다 열렸다 닫힌다."""
+    calls: list[int] = []
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
+    )
+
+    assert out.status == "NOT_APPLIED"
+    assert "finance" in out.reason and "logistics" in out.reason
+    assert out.missing == ["finance", "logistics"]
+    assert calls == [], "미등록인데 커넥션을 열었다"
+
+
+def test_한쪽만_등록되면_반쪽으로_반영하지_않는다() -> None:
+    """★ 재무만 있는 날 현금만 나가면 **입고 예정 없는 장부**가 된다."""
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    calls: list[int] = []
+
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
+    )
+
+    assert out.status == "NOT_APPLIED"
+    assert out.missing == ["logistics"]
+    assert calls == []
+    assert log == [], "미등록인데 등록된 쪽을 불렀다"
+
+
+# ── c. 한 커넥션 · 한 커밋 ──────────────────────────────────────────────
+
+
+def test_둘_다_등록되면_한_커넥션으로_한_번_커밋한다() -> None:
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition("logistics", 가짜전이("logistics", log))
+    conn = 가짜커넥션()
+    calls: list[int] = []
+
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(conn, calls), sim_run_id=실행축
+    )
+
+    assert out.status == "APPLIED"
+    assert out.parts == ["finance", "logistics"]
+    # 🔴 **커넥션이 하나다.**
+    #
+    #   ② **뜻이 바뀌었다** (물류 `#484` · 2026-09-10).
+    #
+    #   ```text
+    #   ① 2026-09-07  둘   write 하나 + 개장 정본 읽기 하나
+    #                      `apply_approval` 이 트랜잭션을 열기 전에 앞질러 열린 날을
+    #                      읽었다 (`opened_days_after`) — 그 날들에 승인을 전파하려고.
+    #   ② 2026-09-10  하나 전파가 없어져 읽을 것이 없다. 커넥션은 write 하나뿐이다.
+    #   ```
+    #
+    # ★ **여기서 지키려는 것은 "write 가 한 트랜잭션"** 이지 "커넥션이 하나" 가
+    #   아니다. 아래 두 줄이 그것을 잰다. 다만 **여는 커넥션이 늘면 여기가 먼저 운다** —
+    #   전파가 되살아나는 첫 신호다.
+    assert len(calls) == 1, "write 하나뿐이어야 한다"
+    assert conn.commits == 1, "커밋은 한 번뿐이다"
+    assert conn.commits == 1, "커밋은 두 파트가 끝난 뒤 한 번이다"
+    assert conn.rollbacks == 0
+    assert conn.closed == 1
+
+    persisted = [(name, got) for name, got in log if name.endswith(".persist")]
+    assert [name for name, _ in persisted] == ["finance.persist", "logistics.persist"]
+    assert [got for _, got in persisted] == [conn, conn], "두 파트가 같은 커넥션을 써야 한다"
+
+
+def test_재무_build_는_상태가_설_날을_받는다() -> None:
+    """★ 재는 것은 그대로다 — 재무 `build` 가 마스터가 정한 날짜를 받는다.
+
+    ⚠️ 받는 값이 `as_of` 에서 **다음 날**로 바뀌었다 (`target_state_date`).
+      그 날짜 규칙 자체는 `test_transition_protocol.py` 가 잰다.
+    """
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition("logistics", 가짜전이("logistics", log))
+
+    transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), []), sim_run_id=실행축
+    )
+
+    assert ("finance.build", AS_OF + timedelta(days=1)) in log
+
+
+# ── d. 터지면 되돌린다 ──────────────────────────────────────────────────
+
+
+def test_물류_적재가_터지면_전부_되돌린다() -> None:
+    """🔴 재무만 커밋되면 **현금은 나갔는데 입고 예정이 없는** 장부가 된다."""
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition(
+        "logistics",
+        가짜전이("logistics", log, persist_raises=RuntimeError("로트 표가 없다")),
+    )
+    conn = 가짜커넥션()
+
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(conn, []), sim_run_id=실행축
+    )
+
+    assert out.status == "FAILED"
+    assert "로트 표가 없다" in out.reason, "사유를 남기지 않으면 무엇이 터졌는지 모른다"
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
+    # ② 하나로 바뀌었다 (물류 `#484`) — 개장 정본 읽기가 없어져 대역을 한 번만 닫는다.
+    assert conn.closed == 1
+
+
+def test_적재_실패가_예외로_올라가지_않는다() -> None:
+    """★ 결정은 **이미 적재됐다.** 전이 실패가 500 이 되면 승인이 실패로 보인다."""
+    log: list[tuple[str, Any]] = []
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition(
+        "logistics", 가짜전이("logistics", log, persist_raises=RuntimeError("끊겼다"))
+    )
+
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), []), sim_run_id=실행축
+    )
+
+    assert out.status == "FAILED"
+
+
+# ── e. 계산 실패는 DB 를 만나기 전에 끝난다 ─────────────────────────────
+
+
+def test_build_가_터지면_커넥션을_열지_않는다() -> None:
+    log: list[tuple[str, Any]] = []
+    transition.register_transition(
+        "finance", 가짜전이("finance", log, build_raises=ValueError("현금 상태가 없다"))
+    )
+    transition.register_transition("logistics", 가짜전이("logistics", log))
+    calls: list[int] = []
+
+    out = transition.apply_approval(
+        _commitment(), connect=_connect_spy(가짜커넥션(), calls), sim_run_id=실행축
+    )
+
+    assert out.status == "FAILED"
+    assert "현금 상태가 없다" in out.reason
+    assert calls == [], "계산 실패는 커넥션을 열기 전에 끝나야 한다"
+
+
+# ── f. 분담이 문자로 잠긴다 ─────────────────────────────────────────────
+
+
+def test_전이_모듈에_SQL_이_없다() -> None:
+    """🔴 여기에 `INSERT` 가 한 줄이라도 들어오면 마스터가 남의 칸 이름을 알게 된다.
+
+    ★ 원문을 읽어 검사한다. import 로는 안 잡힌다 — SQL 문자열은 실행되기 전까지
+      아무 흔적이 없다.
+    """
+    source = Path(transition.__file__).read_text(encoding="utf-8")
+
+    for 금지 in ("INSERT INTO", "UPDATE ", "DELETE "):
+        assert 금지 not in source, f"마스터 전이 경계에 SQL 이 있다: {금지}"
+
+
+# ── g. 승인 응답에 전이 결과가 실린다 ───────────────────────────────────
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """DB 를 걷어내고 결정 경로만 남긴다 (`test_decision_commitment.py` 와 같은 방식)."""
+    saved: dict[str, Any] = {}
+
+    def _run_for(request_id, history_run_id):
+        # 🔴 **축이 실행 행에 실려 있다** (2026-09-10 · `master_agent_runs.sim_run_id`).
+        #    안 실으면 승인이 원장을 못 쓴다 — 그것도 `test_sim_run_axis.py` 가 잰다.
+        return {
+            "run_id": uuid4(),
+            "request_id": request_id,
+            "response_payload": saved["response"],
+            "sim_run_id": 실행축,
+        }
+
+    def _save(**kw):
+        return DecisionOut(
+            decision_id=uuid4(),
+            created_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+            is_current=True,
+            **kw,
+        )
+
+    monkeypatch.setattr(svc, "_run_for", _run_for)
+    monkeypatch.setattr(svc, "list_decisions", lambda request_id: [])
+    monkeypatch.setattr(svc, "save_decision", _save)
+
+    def _record(response: dict[str, Any], **payload: Any) -> DecisionOut:
+        saved["response"] = response
+        body = {"decision": "APPROVE", "scenario_label": "보수", "decided_by": "lhs"}
+        body.update(payload)
+        return svc.record_decision("REQ-1", DecisionIn(**body))
+
+    return _record
+
+
+def _response(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "end_code": "E1_APPROVED",
+        "as_of": "2025-12-31",
+        "scenarios": [
+            {
+                "label": "보수",
+                "total_qty_kg": 44.0,
+                "total_amount_krw": 228800.0,
+                "split_plan": [{"seq": 1, "date": "2025-12-31", "qty_kg": 44.0}],
+            }
+        ],
+        "judgment": {"meta": {"item": "배추"}},
+        "constraints": {
+            "inventory": {"inbound_lead_days": 2.0},
+            # ★ N5 다. 재무가 봉투로 준다 — 없으면 지급일이 안 서고 원장을 못 쓴다.
+            "finance": {"purchase_payment_days": 0},
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_승인_응답에_전이_결과가_실린다(wired) -> None:
+    """★ 오늘은 미등록이라 `NOT_APPLIED` 다 — 그것도 **말해 주어야 하는 사실**이다."""
+    out = wired(_response())
+
+    assert out.transition is not None, "약정이 섰는데 전이가 침묵하면 반영 여부를 알 수 없다"
+    assert out.transition.status == "NOT_APPLIED"
+    assert out.transition.missing == ["finance", "logistics"]
+
+
+def test_승인이_아니면_전이도_없다(wired) -> None:
+    out = wired(_response(), decision="REJECT_ALL", scenario_label=None)
+
+    assert out.transition is None, "거절에 전이가 붙으면 무엇을 반영한 것인지 모른다"
+
+
+def test_약정을_못_만들면_전이를_시도하지_않는다(wired) -> None:
+    """★ `buildable=False` 와 `NOT_APPLIED` 는 다른 사실이다 — 섞지 않는다."""
+    out = wired(_response(judgment={"meta": {}}))  # 품목 없음
+
+    assert out.commitment is not None and out.commitment.buildable is False
+    assert out.transition is None, "반영할 약정이 없는데 전이를 만들면 안 된다"
+
+
+def test_등록되어_있으면_승인_경로가_커밋까지_간다(wired, monkeypatch) -> None:
+    """★ 재무·물류가 들어온 날 이 경로가 그대로 도는지 **미리** 잰다."""
+    log: list[tuple[str, Any]] = []
+    conn = 가짜커넥션()
+    transition.register_transition("finance", 가짜전이("finance", log))
+    transition.register_transition("logistics", 가짜전이("logistics", log))
+
+    real_apply = transition.apply_approval
+    monkeypatch.setattr(
+        svc,
+        "apply_approval",
+        # ★ **축은 그대로 흘린다.** 여기서 `**_` 로 삼키면 결정 경로가 축을 넘기는지가
+        #   이 검사에서 안 보인다.
+        lambda commitment, *, sim_run_id, **_: real_apply(
+            commitment, sim_run_id=sim_run_id, connect=lambda: conn
+        ),
+    )
+
+    out = wired(_response())
+
+    assert out.transition.status == "APPLIED"
+    assert conn.commits == 1
+    assert conn.rollbacks == 0

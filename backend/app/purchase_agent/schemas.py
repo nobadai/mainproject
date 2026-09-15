@@ -1,0 +1,740 @@
+"""매입 에이전트 출력 제안 JSON 스키마 (IO명세 v1.1 §2).
+
+오케스트레이터·Critic·재무가 함께 의존하는 **출력 계약**이다. 필드명과 불변조건의 단일
+소스는 ``docs/매입에이전트_IO명세_v1.1.md`` §2 "필드 규약" 표.
+
+read-only (CLAUDE.md 규칙 2): 반환값의 형태만 정의한다 — 이 모듈은 DB에 쓰지 않는다.
+
+이 스키마가 **강제하지 않는** 조항 (전부 ⑦ self_check 몫 — 런타임 컨텍스트가 있어야 판정 가능):
+
+* ``strategy_type`` 이 그날 ``allowed_axes`` 안의 값인가 → ① 노드가 계산한 목록 필요
+* 전 안이 동일 축이면 반려 → 시나리오 1개일 땐 무의미. variant_collapsed 판정은 T3
+* ``coverage_days`` 가 D 범위 안인가 → 임계는 ``constraints.yaml`` 단일 소스(규칙 7).
+  여기에 ``[2, 18]`` 을 박으면 임계가 두 곳에 존재하게 된다
+* ``grade_unit_price`` 가 당일 시세에 실재하는 값인가 → 당일 market_quotes 대조 필요
+* 재고·현금·재무 cap 대조 → 부서 밴드·T0 스냅샷 필요
+* 근거 환각 대조 → 원문 문서 필요
+
+★ **단위는 kg 다.** ton 대조표가 있었는데 전환이 끝나 걷었다 (2026-09-05).
+회귀는 ``tests/finance/test_finance_schemas.py``
+``test_purchase_agent_contract_rejects_legacy_ton_fields`` 가 막는다.
+
+🟢 **그 검사는 돈다** (2026-09-09 16:58 실측 · `dev@c288c1b` · 8 passed).
+
+  🔴 반나절 동안은 안 돌았다 — `#450` 이 재무에서 ``FinanceSalesRequest`` ·
+  ``PurchaseAgentOutput`` 을 지웠는데 그 파일이 여전히 import 해서 **수집 단계에서
+  ``ImportError``** 가 났다. `#462`·`#463` 이 고쳤다. 계약이 깨진 적은 없다 —
+  **재는 쪽이 꺼져 있었을 뿐**이고 우리 검사는 그 동안에도 그대로 돌았다.
+
+  ★ 지금은 재무 별칭을 안 거치고 **``PurchaseProposal`` 을 직접 import** 한다.
+  검사 이름은 그대로다.
+
+⚠️ **그 검사가 잠그는 것은 이 파일 쪽이다** — 이름이 *"부서가 ton 을 거부한다"* 로
+읽히지만, ``PurchaseAgentOutput`` 은 재무 DTO 가 아니라 아래 ``PurchaseProposal`` 이다.
+무는 기전도 ``extra="forbid"`` 가 아니라 **``total_qty_kg`` 가 필수**라는 쪽이다
+(변이 실측 2026-09-05: ``Scenario`` 의 ``extra`` 를 ``allow`` 로 풀어도 통과한다).
+부서 DTO 의 단위 회귀는 이 검사가 아니라 **필드명이 자기 validator 에 묶여 있어**
+지켜진다 — ``total_quantity_kg`` 를 되돌리면 ``reject_boolean_numbers`` 가
+``PydanticUserError`` 로 import 부터 깨진다.
+"""
+
+from datetime import date
+from itertools import pairwise
+from typing import Annotated, Any, Literal, get_args
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+from app.purchase_agent.config import load_constraints
+from app.purchase_agent.information_requests import (
+    BlockedCheck,
+    ReasonCode,
+    RequestedFrom,
+    RequiredField,
+)
+
+# 수량 단위가 kg이므로 금액은 ``qty_kg × grade_unit_price(원/kg)``로 곧바로 원이 된다.
+# ton 시절의 ``× 1000`` 변환 계수(KG_PER_TON)는 더 이상 필요하지 않다.
+#
+# 수량·금액을 Decimal이 아니라 **int**로 두는 이유: IO명세 §2가 ``total_qty_kg``를
+# ``integer``로, "정수 kg — 소수 불허"로 규정한다(도매 매입 단위). 정수 kg × 정수 원/kg은
+# 언제나 정수 원이므로, 사중 일치가 정수 연산으로 정확히 떨어지고 float 직렬화 오차가
+# 들어올 자리 자체가 없어진다. Decimal을 쓰던 시절 필요했던 커스텀 직렬화기도 사라진다.
+
+#: 공백만 든 문자열을 거부한다. ``min_length=1``은 "   "을 통과시켜 ref_id 필수 조항이
+#: 우회된다 — strip 후 길이를 재고, 값 자체도 trim된 상태로 보관한다.
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+# --- 고정 어휘 (IO명세 §2 필드 규약) ---
+ItemName = Literal["배추", "무", "양파"]
+ScenarioLabel = Literal["보수", "기본", "공격"]
+StrategyType = Literal["quantity", "timing", "mix"]
+RationaleSource = Literal["예측", "시세관측", "재고", "주문", "현금", "문서ID"]
+Confidence = Literal["high", "medium", "low"]
+Situation = Literal["stable", "uncertain"]
+#: market 고정값 (IO명세 §1-②, 8/20 결정 — 지방시장 데이터 파편화로 제외).
+#:
+#: 🔴 **``constraints.yaml`` 에서 읽는다 — 여기 박지 않는다** (#70 · Codex 교차검증
+#:   2026-08-31). 같은 값이 시세 조회(``market_quotes.market_category``)와 하류 필터에
+#:   따로 있으면, YAML 만 바꿨을 때 **정상 조회된 시세가 전부 필터에서 떨어져 "가락 휴장"
+#:   으로 보고된다.** 값이 아니라 사유가 틀리는 종류의 고장이라 아무도 원인을 못 찾는다.
+#:   N4(#58)와 medium_grade_factor(#79)에서 두 번 겪은 자리라 세 번째는 만들지 않는다.
+#:
+#: 아래 ``Market`` Literal 은 **출력 계약**이라 리터럴로 남는다(타입은 변수로 못 만든다).
+#: 둘이 갈라지면 import 시점에 멈춘다 — 조용히 다른 시장으로 도는 상태를 만들지 않는다.
+FIXED_MARKET: str = load_constraints()["market_quotes"]["market_category"]
+#: 분할 매입이 붙는 축 (상세설계 §4-④ · E3-3 확정 1 — "timing 축을 받은 안에만").
+#: ``allocation.aggressive_axis``와 값이 같지만 뜻이 다르다 — 그쪽은 "공격안이 어느 축을
+#: 가져가는가"이고 이건 "분할이 어느 축에 붙는가"다. 한 값으로 묶으면 축 배정을 바꾸는
+#: 순간 분할 대상까지 조용히 따라 움직인다.
+TIMING_AXIS: StrategyType = "timing"
+Market = Literal["가락"]
+
+if FIXED_MARKET not in get_args(Market):
+    # 선언을 바꾸려면 **둘 다** 바꿔야 한다는 사실을 여기서 말한다. 조회만 바뀌고 출력
+    # 계약이 그대로면 그날 산출물은 스키마에서 죽거나(운이 좋으면) 빈 시세로 돈다.
+    raise ValueError(
+        f"constraints.yaml market_quotes.market_category={FIXED_MARKET!r} 가 "
+        f"출력 계약 Market={get_args(Market)} 에 없다 — 시장을 넓히려면 스키마도 함께 연다"
+    )
+
+#: 문서 근거의 ``rationale[].source`` 값 (IO명세 §2 열거형).
+DOCUMENT_SOURCE: RationaleSource = "문서ID"
+#: 문서 참조 표기 접두어 (IO명세 §1-⑥ — "doc_id 3 → \"DOC-3\"").
+#: ``context_docs_used``와 ``rationale[].ref_id``가 **같은 변환**을 써야 두 필드를 대조할
+#: 수 있다. 세 곳(⑥ 근거 생성 · ⑦ 환각 대조 · ⑦ 출력 조립)에 복제돼 있었다.
+DOCUMENT_REF_PREFIX = "DOC-"
+
+
+def document_ref(doc_id: object) -> str:
+    """``doc_id`` → ``"DOC-{doc_id}"`` (IO명세 §1-⑥ 문서 참조 표기 규약).
+
+    정수 id와 문자열 참조의 변환 규칙을 한 곳에 고정한다. 규약이 바뀌면 여기만 바뀐다.
+    """
+    return f"{DOCUMENT_REF_PREFIX}{doc_id}"
+
+
+def is_document_ref(ref_id: str) -> bool:
+    """문서 참조인가. **접두어만 보고 판단한다** — ``source`` 필드와 독립이다.
+
+    ``source == "문서ID"``로만 문서 근거를 고르면, 출처를 "예측"으로 적고 ``ref_id``에
+    ``"DOC-999"``를 넣은 항목이 환각 대조를 통째로 빠져나간다 (Codex 교차검증 P1).
+    표기 규약상 ``DOC-``로 시작하는 참조는 **정의상 문서 참조**이므로 그것으로 건진다.
+    """
+    return ref_id.startswith(DOCUMENT_REF_PREFIX)
+
+#: 근거 등급 4단계 (정의서 §7.3). 서열: OFFICIAL > VENDOR > SIM_FIXED > ASSUMED
+#:
+#: * ``OFFICIAL``   공공기관·법령·공개 통계        → 하드 제약 사용 허용
+#: * ``VENDOR``     업체 공개 견적·계약서          → 허용
+#: * ``SIM_FIXED``  팀이 백테스트 전 확정 선언한 값 → 허용
+#: * ``ASSUMED``    근거 없는 임시값·파생값        → 소프트 경고만 (하드 제약 사용 불가)
+#:
+#: 우리는 등급을 **정확히 채우는 데까지** 책임진다. "낮은 등급으로 하드 제약을 계산했는가"의
+#: 검사는 오케스트레이터의 ``check_evidence_grade()`` 몫이다.
+#:
+#: ⚠️ SIM_FIXED 요건 4번 = 제약 독립성(정의서 §7.1). 매입 값 중 **수요에서 파생된 것은
+#: SIM_FIXED 자격을 잃고 ASSUMED가 된다.** 등급을 매길 때 "이 값이 규율 대상에서
+#: 파생됐는가"를 자문할 것.
+EvidenceGrade = Literal["OFFICIAL", "VENDOR", "SIM_FIXED", "ASSUMED"]
+
+
+def _reject_boolean(value: object) -> object:
+    """bool은 int의 서브클래스라 ge/gt 검사를 그냥 통과한다 — 숫자 자리에서 막는다."""
+    if isinstance(value, bool):
+        raise ValueError("boolean values are not valid numeric inputs")  # noqa: TRY004
+    return value
+
+
+class ProposalMeta(BaseModel):
+    """IO명세 §2 ``meta``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: date
+    item: ItemName
+    agent_version: NonEmptyStr
+    is_refeed: bool = False
+    feedback_attempt: int = Field(default=0, ge=0)
+    #: 🆕 마스터가 이번 회차에 실어 보낸 **부서 조정안 건수** (되먹임 계약 v0.2).
+    #:
+    #: ~~🔴 ``applied_`` 가 아니라 ``received_`` 다 — ``target_value`` 의 뜻이 미확정이라
+    #: 반영 규칙을 만들 수 없다.~~ 🟢 **2026-09-09 에 둘 다 생겼다** (E3-6). 뜻은
+    #: 마스터 IO Contract §4.4 가 *"넘지 말아야 할 값"* 으로 확정했다.
+    #:
+    #: ★ 0 은 "안 왔다" 다 — 1회차는 항상 0이다. "받았는데 0건" 과 구분할 필요가
+    #:   아직 없다(마스터가 빈 배열을 보내지 않는다). 생기면 그때 나눈다.
+    received_adjustments: int = Field(default=0, ge=0)
+    #: 🆕 그중 **실제로 반영한** 건수 (2026-09-09 · E3-6).
+    #:
+    #: 🔴 **``received_`` 와 같은 수가 아니다.** 항목·단위·대상 안으로 걸러진 것이
+    #:   빠진다(③ ``split_adjustments``). 두 수의 차가 곧 *"보냈는데 못 썼다"* 이고,
+    #:   한 칸으로 뭉치면 그 사실이 사라진다 — 사유는 안별 ``risks`` 에 있다.
+    #:
+    #: ★ 마스터 ``flow._adjustment_delivery`` 가 기다리던 칸이다 —
+    #:   *"이것은 «반영됐나» 가 아니라 «닿았나» 다. 반영은 매입이
+    #:   ``applied_adjustments`` 를 회신해야 알 수 있고 그 칸은 아직 없다."*
+    applied_adjustments: int = Field(default=0, ge=0)
+
+    @field_validator(
+        "feedback_attempt", "received_adjustments", "applied_adjustments", mode="before"
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SplitPlanItem(BaseModel):
+    """분할 매입 1회차.
+
+    ``date`` 는 **매입 실행일**이다 — 도착일이 아니다. 도착일은
+    ``date + inbound_lead_days(N4)`` 이고 그 값은 ``expected_arrival_date`` 가 싣는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seq: int = Field(ge=1)
+    date: date
+    qty_kg: int = Field(gt=0)
+    #: 이 회차의 **도착일** = ``date + N4``. ⑥ ``materialize_split`` 이 ``arrival_dates()``
+    #: 로 만든다 (상세설계 §5.5).
+    #:
+    #: 🔴 **N4가 없으면 ``None``이다. 0으로 채우지 않는다** — 0은 "당일 도착"이라는
+    #: 확정된 값이라, 미결을 0으로 적으면 "오늘 승인분이 오늘 도착"이 사실이 된다 (규칙 3).
+    #:
+    #: ⚠️ ``payment_schedule`` 처럼 **키를 빼지 않는다.** 마스터 약정
+    #: (``master/commitment.py``)이 ``null`` 을 *"N4 미결로 매입도 못 냈다"* 로 읽고
+    #: **자기도 계산하지 않는다**. 키가 없으면 그 구분이 사라진다. Critic 도 같은 이름의
+    #: 필드에서 ``None`` 을 세어 ``E-ARRIVAL-COLLAPSE`` 를 판정한다
+    #: (``critic/critic_v0_4.py``).
+    #:
+    #: **마스터가 이 값을 받으면 자기 계산을 건너뛴다** (2026-09-01 합의 · PR #138).
+    #: 같은 사실을 두 곳에서 각자 계산하면 어긋나는 날이 온다.
+    expected_arrival_date: date | None = None
+    #: 이 회차의 **매입 금액** = Σ(그 회차에 배분된 등급 kg × 등급 단가).
+    #: ⑥ ``with_round_amounts`` 가 ``_round_amounts`` 로 만든다.
+    #:
+    #: 🔴 **마스터가 이 칸을 읽는다** (``master/commitment.py`` ``_legs`` · PR #265).
+    #:   승인 약정의 ``ArrivalLeg.amount_krw`` 와 원장 ``purchase_items.line_amount_krw``
+    #:   가 여기서 온다. 마스터는 총액을 회차 수로 나누지 않는다 — 회차마다 등급 구성이
+    #:   달라 단가가 다르기 때문이다(재무 ``transition.py`` ``_single_purchase_date`` 가
+    #:   같은 이유로 비율 분배를 거부한다).
+    #:
+    #:   🟢 **Critic 까지 간다** — ``#296`` 이 통로 셋을 열었다 (2026-09-05):
+    #:   ``SplitLegIn.amount_krw`` (계약이 칸을 연다) → ``master/critic_bridge.py``
+    #:   ``_split_legs`` (스칼라에 실행 품목 이름표를 붙여 ``{품목: 금액}`` 으로 옮긴다)
+    #:   → ``critic/service.py`` ``_to_scenario``. 이제 **Critic 금액 변이가 실경로에서
+    #:   돈다** — ``#265`` 가 세운 검사가 그전까지 라이브에서 한 번도 안 돌았다.
+    #:
+    #: 🔴 **우리 산출물에는 항상 찬다. 그런데 스키마에서는 선택 필드다** — 이유가 있다.
+    #:
+    #:   이 모델은 **우리만 쓰는 것이 아니다.** 재무·물류가 이 모델을 **그대로 import
+    #:   해서 자기 API 의 요청 모델로 쓴다.**
+    #:
+    #:   🔴 **재수출 자리가 하나 없어졌다** (2026-09-09 · `#450`)::
+    #:
+    #:       물류   ``logistics/schemas.py``  ``PurchaseAgentOutput = PurchaseProposal``  🟢 그대로
+    #:       재무   ~~``finance/schemas.py``  ``PurchaseAgentOutput``~~  🔴 삭제됨
+    #:              지금은 ``finance/adapter.py`` 가 ``PurchaseProposal`` 을 직접 import 한다
+    #:
+    #:   ★ **계약은 그대로다** — 별칭이 없어졌을 뿐 재무가 여전히 이 모델로 받는다.
+    #:   여기서 필수로 만들면 **그 두 부서의 엔드포인트가 이 필드 없는 요청을 422 로
+    #:   거부한다** — 우리 필드 하나가 남의 런타임 계약을 좁힌다. 통보 없이 할 일이 아니다.
+    #:
+    #:   대신 **부분 공급을 금지**한다 (``validate_split_amount_axis``):
+    #:   전 회차에 있거나 전 회차에 없거나, 일부만 실리면 위반이다. 마스터 ``_legs`` 의
+    #:   ``carry_amounts`` 와 **같은 규칙**이고 ``contracts/core.py``
+    #:   ``_split_amount_problems`` 도 같다 — 출처가 섞인 금액을 만들지 않는다.
+    #:
+    #:   그리고 **우리 경로에서는 ⑦ ``check_split_amounts`` 가 ``None`` 을 위반으로 본다.**
+    #:   스키마는 공유 계약이라 관대하고, ⑦은 우리 산출물만 보므로 엄격하다 — 그 비대칭이
+    #:   각자의 역할이다. *"우리가 늘 채운다"* 는
+    #:   ``test_every_round_carries_an_amount`` 가 전 품목·전 앵커로 잠근다.
+    #:
+    #:   ⚠️ 필수로 올리려면 재무·물류 픽스처 19파일(81건)과 두 부서의 요청 계약을 함께
+    #:   바꿔야 한다. 그건 통보와 합의가 먼저다 (2026-09-04 · 답 대기).
+    #:
+    #: ⚠️ **일괄(1회차) 안에도 싣는다.** 그때 값은 ``total_amount_krw`` 와 같지만,
+    #:   빼면 마스터의 "전 회차 실림" 이 성립하지 않아 금액이 통째로 안 실린다.
+    #:
+    #: ⚠️ ``payment_schedule[].amount_krw`` 와 **같은 숫자다.** 나누지 않은 이유는
+    #:   실리는 조건이 다르기 때문이다 — 저쪽은 분할이고 N5(재무 지급일수)를 받은 날에만
+    #:   실리는데, 원장 금액은 지급일과 무관하게 승인 시점에 필요하다.
+    #:   둘이 갈라지지 않게 ⑦ ``check_payment_schedule`` 이 대조한다.
+    #:
+    #: ``ge=0`` 인 이유: 등급별 반올림 잔차가 한 회차로 몰리면 수량이 있어도 금액이 0원인
+    #: 회차가 나올 수 있다(등급 3종 이상 · 극단 수량 분포). ``gt=0`` 이면 그날 터진다.
+    amount_krw: int | None = Field(default=None, ge=0)
+
+    @field_validator("seq", "qty_kg", "amount_krw", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class SourcingPlanItem(BaseModel):
+    """등급 배분 1건. 등급·단가는 당일 시세에 실재하는 값만 쓴다 (대조는 self_check)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    market: Market = "가락"
+    #: 가락 경락 원문 기준(특/상/중/하). DB 담당과 표준화 진행 중이라 Literal로 굳히지 않는다.
+    grade: NonEmptyStr
+    qty_kg: int = Field(gt=0)
+    grade_unit_price: int = Field(gt=0)  # 원/kg
+
+    @field_validator("qty_kg", "grade_unit_price", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+
+class RationaleItem(BaseModel):
+    """근거 1건. **ref_id 없는 근거는 근거가 아니다** (규칙 4 · 정의서 §1.2-5)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: RationaleSource
+    claim: NonEmptyStr
+    ref_id: NonEmptyStr
+    evidence_grade: EvidenceGrade
+    #: 등급으로 정규화하기 전의 원본 값을 보존한다 — 나중에 재분류할 때 되돌릴 수 있도록.
+    evidence_detail: NonEmptyStr
+
+
+#: ``RejectedReason.kind`` — 이 안이 **왜** 안이 못 됐나. 상세설계 §4-③-3.
+#:
+#: ```text
+#: blocked       하드 제약(창고·현금·신선도·조정안)이 수량을 0까지 깎았다
+#: not_needed    보유 재고가 커버 D일 수요를 이미 덮어 살 필요가 없었다
+#: ```
+#:
+#: 🔴 **둘을 같은 「안 0개」로 읽으면 안 된다.** *"막혔다"* 와 *"필요 없다"* 는 조치가
+#: 다르다 — 앞은 창고를 비우거나 한도를 늘려야 하고, 뒤는 아무것도 안 해도 된다.
+#: 그래서 세는 축(이 필드)과 읽는 축(``reason`` 문장)을 **둘 다** 가른다.
+#:
+#: ⚠️ 바닥(최소 발주 단위)을 두면 *"너무 작아서 접었다"* 가 **세 번째 값**이 된다.
+#: 지금은 바닥을 안 두므로 둘이다 (근거는 상세설계 §4-③ 「열어 둔 것」).
+RejectionKind = Literal["blocked", "not_needed"]
+
+
+class RejectedReason(BaseModel):
+    """self_check가 컷한 이력. 데모에서 "검증이 실제로 작동한다"를 보이는 증거다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: NonEmptyStr
+    reason: NonEmptyStr
+    #: 🟡 **선택 필드다.** ⑥이 떨어뜨린 안에만 붙는다 — ⑦ self_check 의 컷은 성격이
+    #: 달라(규칙 위반이지 수량 0이 아니다) 이 갈래에 안 들어간다. 소비자(마스터 리포트·
+    #: 화면)는 ``label``·``reason`` 만 그리므로 이 칸이 없어도 안 깨진다.
+    kind: RejectionKind | None = None
+
+
+class InformationRequest(BaseModel):
+    """**값이 없어서 판정하지 못한 것**을 누구에게 무엇으로 청하는가 (E3-11).
+
+    🔴 ``missing_data`` 와 뜻이 다르다. 그쪽은 봉투의 *"안 돌았다"* 채널이고
+    (``RUNTIME_NOT_READY`` 판정에 묶여 있다), 이쪽은 *"돌았는데 이 판정을 못 했다"* 다.
+    둘을 한 칸에 담으면 마스터가 「실행 실패」와 「부분 판정」을 못 가른다.
+
+    ⚠️ ``rerun_scope`` 가 ``FULL_AGENT`` 하나뿐인 것은 **지금 마스터가 그것만 하기
+    때문**이다 — 값이 오면 에이전트를 처음부터 다시 부른다. 부분 재진입을 계약에 적으면
+    받는 쪽이 있는 기능으로 읽는다.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested_from: RequestedFrom
+    required_field: RequiredField
+    reason_code: ReasonCode
+    #: 🔴 **복수다.** 같은 누락 하나가 여러 검사를 막는다 — 사유를 쪼개면 받는 쪽이
+    #: 두 번 청해야 하는 줄로 읽는다.
+    blocked_checks: tuple[BlockedCheck, ...]
+    rerun_scope: Literal["FULL_AGENT"]
+
+
+#: ``payment_schedule[].basis`` — ``amount_krw``의 추정 근거.
+#: 현재는 **오늘 등급별 시세로 계산한 값** 하나뿐이다. 예측 단가를 쓰기 시작하면 값이 는다.
+PaymentBasis = Literal["as_of_unit_price"]
+
+
+class PaymentScheduleItem(BaseModel):
+    """회차별 지급 계획 한 줄 (재무 확정 7필드 · 2026-08-27 회신).
+
+    **분할 시나리오에만 실린다.** 일괄 안은 지급일 하나가 ``split_plan``에서 바로
+    파생되므로 같은 값을 두 벌 내보내지 않는다.
+
+    두 금액이 각각 다른 검증에 들어간다 (회신 §1) — 재무가 ``amount_krw``는 BASE
+    Cashflow로, ``amount_max_krw``는 STRESS Cashflow로 얹어 본다. 둘 다 안전하면 PASS,
+    STRESS만 위험하면 REVIEW_REQUIRED, BASE부터 위험하면 FAIL이다.
+
+    ``by_grade``는 **없다** — 등급별 수량·단가는 ``sourcing_plan``이 정본이다 (회신 §2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    seq: int = Field(ge=1)
+    purchase_date: date
+    #: 매입일 + N5. N5가 미결이면 이 항목 자체가 만들어지지 않는다 (규칙 3).
+    payment_date: date
+    qty_kg: int = Field(gt=0)
+    amount_krw: int = Field(ge=0)
+    #: ``qty_kg × max_price`` — 상한가로 샀을 때의 금액.
+    amount_max_krw: int = Field(ge=0)
+    #: ``amount_krw``를 **어떻게 추정했는가**. 재무의 BASE/STRESS는 두 금액을 각각 어느
+    #: Cashflow에 넣는지의 소비 프레이밍이라 축이 다르다.
+    #:
+    #: **열거형이다** — 자유 문자열이면 오타나 임의 값이 최종 재검증까지 통과한다
+    #: (Codex 교차검증). 추정 방식이 늘면 여기에 값을 추가한다.
+    basis: PaymentBasis
+
+    @field_validator("seq", "qty_kg", "amount_krw", "amount_max_krw", mode="before")
+    @classmethod
+    def _no_boolean_numbers(cls, value: object) -> object:
+        """인접한 ``SplitPlanItem``·``SourcingPlanItem``과 같은 방어 (Codex 교차검증).
+
+        bool은 int의 서브클래스라 ``ge``/``gt``를 그냥 통과하고 ``True``가 ``1``이 된다.
+        """
+        return _reject_boolean(value)
+
+
+class Scenario(BaseModel):
+    """시나리오 1안 (IO명세 §2 ``scenarios[]``)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: ScenarioLabel
+    strategy_type: StrategyType
+    #: 커버일수 D. 범위 검사는 constraints.yaml을 읽는 self_check 몫.
+    #:
+    #: 🔴 ~~수량 = 확정수요 × D~~ — **낡았다** (2026-09-11 · `#584`). 보유 재고를 뺀 뒤라
+    #:   그 등식은 **보유가 0인 날에만** 성립한다. 아래 ``total_qty_kg`` 를 볼 것.
+    coverage_days: int = Field(gt=0)
+    #: 실제로 살 양. 🔴 **차감 뒤 값이다** (`#584` · 2026-09-11)::
+    #:
+    #:     total_qty_kg = round(일평균 × D) − 차감보유   그 뒤 창고·현금·신선도·조정안 클립
+    #:
+    #: 🔴 **여기서 거꾸로 수요를 뽑으면 안 된다.** ``total_qty_kg ÷ coverage_days`` 는
+    #:   일평균 확정수요가 **아니라** 「그날 보유가 안 덮은 나머지」다. 보유가 그날그날
+    #:   달라서 그 몫도 같이 흔들린다 — 실측(``SIM-CHAIN-V2`` 배추 보수안)::
+    #:
+    #:       0.5 · 358.5 · 359.0 · 717.5     중앙 358.8  vs 정본 717.3  →  **0.50배**
+    #:
+    #:   ★ ``717.5`` 는 그날 보유가 0이라 **우연히 맞은** 행이고, ``0.5`` 는 보유가 거의
+    #:     다 덮은 날이다. 「절반」이라는 규칙이 있는 것이 아니다.
+    #:
+    #: 🟢 **일수요의 정본은 따로 있다** — ``haetdeul.partner_item_demands.daily_demand_kg``
+    #:   (배추 717.300 · 무 154.400 · 양파 14.300 · 합 886.000).
+    #:   ⚠️ ``v_current_partner_demand.daily_total_demand_kg`` 는 **938.5** 인데 계약 밖
+    #:   품목(건고추 30.3 · 피마늘 22.2)이 들어 있다 — 우리 셋은 886.0 이다.
+    #:
+    #: ⚠️ **이 칸은 장부에 남고 남이 읽는다.** 마스터가 실제로 이 값으로 일수요를 되잡아
+    #:   배추를 359 로 봤다 (2026-09-12 회신). 「원안」이 필요하면 ③의
+    #:   ``demand_qty_kg`` 이고, 그 값은 이 스키마로 안 나간다.
+    total_qty_kg: int = Field(gt=0)
+    total_amount_krw: int = Field(ge=0)
+    #: 예측 상단 기반 상한(경락가). **마진 방어선과 무관** — 마진 쪽 표시는 margin_warning.
+    #:
+    #: 🔴 **재무 STRESS 전용이다** (2026-09-08 · `#394` 기준). ``amount_max_krw = qty ×
+    #: max_price`` 를 **재무와 마스터가 검사한다** (``finance/capabilities/scenario.py`` 의
+    #: ``amount_max_krw`` 등식 · ``master/verifier.py`` 의 ``L-PAYSCHED-MAX``). 컷은 이 값이 아니라
+    #: ``cut_unit_price`` 가 한다.
+    max_price: int = Field(ge=0)
+    #: 매입 **컷 기준**. ``sourcing_plan`` 단가가 이걸 넘으면 ⑦이 컷한다.
+    #:
+    #: ⚠️ **지금은 ``max_price`` 와 같은 값이다** — 갈라만 두었다
+    #: (``nodes/package_scenarios.compute_cut_unit_price``). 하나였을 때는 밴드가
+    #: 좁아지면 **컷이 엄격해지고 재무 STRESS 는 느슨해졌다** — 방향이 반대인데 값이
+    #: 하나였다.
+    #:
+    #: ★ **``None`` 을 허용하는 이유는 남의 픽스처다.** 재무가 우리 스키마로 검증하는데
+    #: (``finance/adapter.py`` 의 ``_purchase_proposal``) 그쪽 픽스처는 이 필드를 모른다.
+    #: 우리 산출물은 항상 채우고, 없으면 ⑦이 **컷 사유를 남긴다** — 조용히 통과시키지
+    #: 않는다 (규칙 3).
+    cut_unit_price: int | None = Field(default=None, ge=0)
+    #: 매입단가가 contract_price 방어선을 넘었다는 **표시**. 컷이 아니다(영업이 T2에서 판정).
+    #:
+    #: 규칙 3(0/NULL 구분)을 bool에 적용한 것 — ``None``은 "아직 계산되지 않음"이다.
+    #: 계약단가·방어선은 T0 스냅샷이 주는 입력값이라 없을 수 있고, 그때 ``False``로 채우면
+    #: "확인했더니 문제 없음"과 구분되지 않아 경고가 조용히 사라진다.
+    margin_warning: bool | None = None
+    split_plan: list[SplitPlanItem] = Field(min_length=1)
+    sourcing_plan: list[SourcingPlanItem] = Field(min_length=1)
+    #: 분할 안에만 실린다. **일괄 안에는 키 자체가 없다** — ``None``으로 나가면 "지급
+    #: 계획이 비었다"로 읽히므로 ``_assemble``이 직렬화 후 키를 뺀다.
+    payment_schedule: list[PaymentScheduleItem] | None = Field(default=None, min_length=1)
+    #: v1.1 개정 — ``margin_warning``과 같은 정보 가족이다(둘 다 contract_price 파생).
+    #: 미계산이면 ``null``. **0.0으로 채우지 않는다** — "마진 0%"는 거짓이고, 이건
+    #: 규칙 3(0과 NULL 구분)의 float 판이다. 기본값이 None인 것도 같은 이유다.
+    expected_margin_rate: float | None = Field(default=None, ge=0, le=1)
+    rationale: list[RationaleItem] = Field(min_length=1)
+    risks: list[NonEmptyStr] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def drop_absent_payment_schedule(self, handler: Any) -> dict:
+        """일괄 안에서는 ``payment_schedule`` **키 자체를 뺀다.**
+
+        ``null``로 나가면 "지급 계획이 비었다"로 읽히는데 사실은 **분할이 아니라 실을
+        것이 없는 것**이다. 재무는 이 키의 유무로 회차별 Cashflow 검증 여부를 가른다.
+
+        ⚠️ ``model_dump(exclude_none=True)``를 **쓸 수 없다.** ``expected_margin_rate``·
+        ``margin_warning``은 계약상 **null로 나가야 하는 값**이라(IO명세 §2 동기화 규칙)
+        전역으로 빼면 그쪽 계약이 깨진다.
+
+        ⚠️ **후처리가 아니라 직렬화기인 이유**: ``_assemble``에서 dump 뒤에 키를 지웠더니
+        ``revalidate_for_output``의 **왕복 항등성이 깨졌다** — 모델은 ``null``을 뱉고
+        우리는 지운 값을 비교하게 된다. 규칙이 타입에 있어야 어느 경로로 직렬화해도 같다.
+        """
+        data = handler(self)
+        if data.get("payment_schedule") is None:
+            data.pop("payment_schedule", None)
+        return data
+
+    @field_validator(
+        "coverage_days", "max_price", "cut_unit_price", "expected_margin_rate", mode="before"
+    )
+    @classmethod
+    def reject_boolean_numbers(cls, value: object) -> object:
+        return _reject_boolean(value)
+
+    @model_validator(mode="after")
+    def validate_margin_fields_are_synchronised(self) -> "Scenario":
+        """``margin_warning``과 ``expected_margin_rate``의 null 여부가 일치해야 한다.
+
+        둘 다 ``contract_price``에서 나온다 — 계약단가를 받았으면 둘 다 계산되고, 못 받았으면
+        둘 다 미계산이다. **한쪽만 null이면 모순**이라 소비자가 어느 쪽을 믿어야 할지 알 수 없다
+        (IO명세 §2 "동기화 규칙").
+
+        이 판정은 스키마 몫이다 — 출력 문서 안의 두 필드만 보면 되고 런타임 값이 필요 없다.
+        (같은 이유로 축 중복 검사는 ⑦ self_check에 있다. 그쪽은 그날 ``allowed_axes``를
+        알아야 판정할 수 있어 문서만으로는 불가능하다.)
+        """
+        warning_missing = self.margin_warning is None
+        rate_missing = self.expected_margin_rate is None
+        if warning_missing != rate_missing:
+            computed = "margin_warning" if rate_missing else "expected_margin_rate"
+            missing = "expected_margin_rate" if rate_missing else "margin_warning"
+            raise ValueError(
+                f"margin_warning and expected_margin_rate must both be null or both set; "
+                f"{computed} is set but {missing} is null"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_quadruple_match(self) -> "Scenario":
+        """사중 일치 — 수량 3축 + 금액 1축 (규칙 4 · IO명세 §2).
+
+        금액 축이 없으면 T3가 재무 cap(금액)과 매입 제안(수량)을 결합할 수 없다.
+        등급 배분이 수량↔금액 변환 계수이기 때문이다.
+
+        ⚠️ **이 검사가 bool 가드의 그물 노릇도 한다 — 우연이다.**
+        ``qty_kg``·``amount_krw``·``grade_unit_price`` 에 ``True`` 가 들어오면 ``1`` 이
+        되어 합이 깨지므로 여기서 걸린다.
+
+        🔴 **설계가 아니다. 사중 일치를 손대면 그 방어가 같이 사라진다.**
+        합에 안 들어가는 필드(``seq``·``meta.*``)는 지금도 이 그물 밖이라
+        ``test_contracts.py`` 가 따로 잡는다 (2026-09-04 전수 변이).
+        """
+        split_total = sum(item.qty_kg for item in self.split_plan)
+        sourcing_total = sum(item.qty_kg for item in self.sourcing_plan)
+        if self.total_qty_kg != split_total:
+            raise ValueError("total_qty_kg must equal split_plan quantity total")
+        if self.total_qty_kg != sourcing_total:
+            raise ValueError("total_qty_kg must equal sourcing_plan quantity total")
+
+        # kg × 원/kg = 원. 단위가 맞아떨어져 변환 계수가 없다 (상세설계 §4-⑦).
+        amount_total = sum(item.qty_kg * item.grade_unit_price for item in self.sourcing_plan)
+        if self.total_amount_krw != amount_total:
+            raise ValueError("total_amount_krw must equal sourcing_plan amount total")
+        return self
+
+    @model_validator(mode="after")
+    def validate_split_amount_axis(self) -> "Scenario":
+        """``total_amount_krw == Σ split_plan[].amount_krw`` — **금액의 회차 변**.
+
+        🔴 **사중 일치와 별개로 센다.** 사중 일치(규칙 4)는 수량 3변 + 금액 1변
+        (``total ↔ sourcing``)이고, 이건 마스터 요청(PR #265)으로 새로 선 **다섯 번째
+        변**이다. 기존 항목에 끼워 넣으면 "사중" 이라는 이름이 조용히 다른 것을 뜻하게
+        된다 — 규칙 4를 고치려면 ``CLAUDE.md`` 를 먼저 고쳐야 한다.
+
+        ★ **왜 필요한가.** 이 어긋남은 그대로 원장으로 간다 —
+        ``purchases.total_amount_krw`` 와 ``purchase_items.line_amount_krw`` 가 각각
+        NOT NULL 이라, 합이 안 맞는 채로 승인되면 **재무 cap 검증을 통과한 안이 cap 을
+        넘는 원장을 만든다.** 그 상태를 아무도 에러로 만나지 않는다
+        (``contracts/core.py`` ``_split_amount_problems`` 가 같은 사실을 적고 있다).
+
+        ⑦ ``check_split_amounts`` 가 같은 검사를 **안 단위로** 한다 — 거기서는 그 안만
+        컷하고 여기서는 출력 경계의 백스톱이다. 사중 일치·분할 날짜와 같은 이중 배치다.
+        """
+        loaded = [item.amount_krw for item in self.split_plan if item.amount_krw is not None]
+        if not loaded:
+            # 아무 회차에도 안 실렸다 — 우리 산출물이 아니라 **외부 소비자가 만든 payload**다
+            # (재무·물류가 이 모델을 자기 요청 모델로 쓴다). 검사할 것이 없다.
+            return self
+        if len(loaded) < len(self.split_plan):
+            # 🔴 같은 안에서 회차마다 있고 없고는 자기모순이다. 실린 것만 더해 총액과
+            #   비교하면 **출처가 섞인 값**으로 판정하게 된다 — 마스터 ``_legs`` 와
+            #   ``contracts/core.py`` ``_split_amount_problems`` 가 같은 이유로 거부한다.
+            raise ValueError("split_plan amount must be present on every round or none")
+        if self.total_amount_krw != sum(loaded):
+            raise ValueError("total_amount_krw must equal split_plan amount total")
+        return self
+
+    @model_validator(mode="after")
+    def validate_split_sequence(self) -> "Scenario":
+        """분할 회차는 1부터 1씩 증가하고 **날짜도 함께 앞으로 간다**.
+
+        일괄 매입이면 seq 1개짜리 목록이다.
+
+        날짜 검사가 나중에 붙은 이유: 회차가 하나뿐이던 동안에는 순서를 어길 방법이 없었다.
+        ④가 실제로 분할하기 시작하면 "2분할인데 같은 날 두 번"이 통과할 수 있는데,
+        그건 분할이 아니라 같은 매입을 두 줄로 적은 것이다. ⑦도 같은 검사를 하지만
+        거기서는 그 안만 컷하고, 여기서는 출력 경계의 백스톱이다.
+        """
+        if [item.seq for item in self.split_plan] != list(range(1, len(self.split_plan) + 1)):
+            raise ValueError("split_plan seq must start at 1 and increase by 1")
+        dates = [item.date for item in self.split_plan]
+        if any(earlier >= later for earlier, later in pairwise(dates)):
+            raise ValueError("split_plan dates must strictly increase")
+        return self
+
+
+class PurchaseProposal(BaseModel):
+    """에이전트의 **유일한 산출물** (IO명세 §2).
+
+    소비 경로: 오케스트레이터(조정) → Critic(대조) → 승인 → proposals 적재.
+    적재는 실행 스크립트 몫이다 — 이 에이전트는 반환만 한다(규칙 2).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    meta: ProposalMeta
+    scenarios: list[Scenario] = Field(default_factory=list, max_length=3)
+    confidence: Confidence | None = None
+    situation: Situation | None = None
+    context_docs_used: list[NonEmptyStr] = Field(default_factory=list)
+    rejected_reasons: list[RejectedReason] = Field(default_factory=list)
+    #: 🔴 **값이 없어서 못 판정한 것**을 마스터가 기계적으로 받는 자리 (E3-11).
+    #:
+    #: ⚠️ **비어 있으면 직렬화에서 뺀다** (⑦ ``_assemble``). 플래그가 꺼졌는데 키가
+    #:   생기면 «끈 상태» 의 산출물이 켜기 전과 바이트가 달라져 회귀 게이트가 죽는다.
+    #:
+    #: 🟡 같은 사실의 사람용 문장은 안의 ``risks`` 에 그대로 있다 — **둘은 같은 판정에서
+    #:   나온다** (``information_requests.missing_information``). 문면은 안 바뀐다.
+    information_requests: tuple[InformationRequest, ...] = ()
+    #: 제안 불가 사유. **"유효 시나리오 없음"이라는 사실만 반환한다** — 납품 의무 미충족
+    #: 판정(has_unmet_obligation)은 오케스트레이터 몫이다. 매입 0 ≠ 납품 실패(IO명세 §2).
+    no_proposal_reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def validate_proposal_rules(self) -> "PurchaseProposal":
+        # scenarios와 no_proposal_reason은 상호 배타다 — "안이 있는데 제안 불가"는 모순이다.
+        if not self.scenarios:
+            if not self.no_proposal_reason:
+                raise ValueError("empty scenarios require no_proposal_reason")
+            return self
+        if self.no_proposal_reason:
+            raise ValueError("no_proposal_reason must be absent when scenarios exist")
+
+        if self.situation is None or self.confidence is None:
+            raise ValueError("situation and confidence are required when scenarios exist")
+
+        labels = [scenario.label for scenario in self.scenarios]
+        if len(labels) != len(set(labels)):
+            raise ValueError("scenario labels must be unique")
+
+        # 규칙 4: uncertain이면 공격안 금지 — 보수/기본 2안만 낸다.
+        if self.situation == "uncertain":
+            if len(self.scenarios) > 2:
+                raise ValueError("uncertain situation allows at most 2 scenarios")
+            if "공격" in labels:
+                raise ValueError("uncertain situation forbids the 공격 scenario")
+
+        # IO명세 §2: split_plan seq 1의 date는 as_of다 (첫 회차는 오늘 실행).
+        for scenario in self.scenarios:
+            if scenario.split_plan[0].date != self.meta.as_of:
+                raise ValueError("split_plan seq 1 date must equal meta.as_of")
+
+        # 문서 근거의 출력 경계 백스톱 (E3-4). ⑦ check_document_refs가 같은 검사를
+        # **안 단위로** 하고 여기서는 제안 전체를 죽인다 — 사중 일치·분할 날짜와 같은
+        # 이중 배치다. 여기서만 잡을 수 있는 게 하나 있다: ⑦은 시나리오 rationale만 보고
+        # context_docs_used를 만들지도 않으므로, **두 필드가 어긋난 상태**는 출력 경계에서만
+        # 보인다. "읽었는데 인용 안 함"은 위반이 아니라 허용 상태라 한 방향만 검사한다.
+        used = set(self.context_docs_used)
+        for scenario in self.scenarios:
+            for item in scenario.rationale:
+                if item.source != DOCUMENT_SOURCE and is_document_ref(item.ref_id):
+                    raise ValueError(
+                        f"document ref_id {item.ref_id} needs source {DOCUMENT_SOURCE}"
+                    )
+                if item.source == DOCUMENT_SOURCE and item.ref_id not in used:
+                    raise ValueError(f"cited document {item.ref_id} is not in context_docs_used")
+        return self
+
+    # 전 안 동일 축 검사는 여기 없다 — ⑦ self_check.check_axis_diversity() 몫이다.
+    #
+    # 정의서 §3.5.1이 "3) 코드가 최종 중복 검사 — 전 안이 동일 축이면 반려 (self_check)"로
+    # 소유자를 명시한다. 판정에 그날 ``allowed_axes``가 필요한 게 이유다: 하락일처럼 timing
+    # 트리거가 미달하고 mix가 편중으로 게이팅되면 남는 축이 quantity 하나뿐이라, 3안이 전부
+    # quantity인 게 정상이다. 출력 JSON만 보고는 그날 축이 하나였는지 알 수 없으므로 스키마는
+    # 이 판정을 내릴 자격이 없다.
+    #
+    # (이력: Epic 1에서 여기에 두었다가 Epic 2에서 mock_falling이 스키마에 막혀 제안 자체를
+    # 만들지 못하는 것으로 반증됐다.)
+
+    @model_serializer(mode="wrap")
+    def _omit_null_no_proposal_reason(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """정상 제안에는 ``no_proposal_reason`` 키 자체를 싣지 않는다 (IO명세 §2 정상 예시).
+
+        validator가 "시나리오가 있으면 이 필드는 없어야 한다"고 규정하는데 출력에는
+        ``null``이 실려 나가면 말과 결과가 어긋난다.
+
+        ``margin_warning``의 ``null``은 **"아직 계산되지 않음"이라는 정보**를 담으므로
+        그대로 둔다 — ``exclude_none``으로 일괄 처리하지 않는 이유가 그것이다.
+
+        🔴 **``information_requests`` 도 여기서 뺀다 — 직렬화기를 따로 두면 안 된다**
+        (2026-09-14 · E3-11). 한 모델에 ``@model_serializer`` 를 둘 달면 **뒤엣것이 이기고
+        앞엣것이 조용히 죽는다.** 따로 달았다가 그렇게 됐다 — 키가 안 빠지는데 검사는
+        「직렬화기가 있다」로 보였다.
+
+        ⚠️ 빈 목록과 「요청 없음」을 가르지 않는다. 이 칸은 *"청할 것이 있다"* 만 말하고,
+        없는 날은 아무 말도 안 하는 것이 맞다 — ``null`` 로 내보내면 *"판정을 못 했다"* 로
+        읽힐 자리가 생긴다. 키가 생기기만 해도 **이 기능을 넣기 전과 바이트가 달라져**
+        회귀 게이트가 죽는다.
+
+        ★ **후처리가 아니라 직렬화기인 이유**는 ``Scenario.drop_absent_payment_schedule``
+        이 이미 적어 뒀다 — ``_assemble`` 에서 dump 뒤에 지우면 ``revalidate_for_output``
+        의 왕복 항등성이 깨진다. 규칙이 타입에 있어야 어느 경로로 직렬화해도 같다.
+        """
+        data = handler(self)
+        if data.get("no_proposal_reason") is None:
+            data.pop("no_proposal_reason", None)
+        if not data.get("information_requests"):
+            data.pop("information_requests", None)
+        return data
+
+
+def revalidate_for_output(proposal: PurchaseProposal) -> PurchaseProposal:
+    """출력 직전, 원시 데이터에서 모델을 다시 세워 계약을 재확인한다.
+
+    ``frozen=True``가 필드 재대입을 막지만 **리스트 자체는 여전히 가변**이다.
+    ``proposal.scenarios[0].rationale.append({"source": ...})`` 처럼 리스트에 값을 끼워
+    넣는 경로는 어떤 validator도 거치지 않는다. 원시 dict로 내렸다가 다시 올리면 그렇게
+    끼어든 값도 전부 검증을 다시 통과해야 한다.
+
+    ⑦ self_check의 첫 단계로 재사용할 함수다 — 노드가 만든 제안을 내보내기 전에 통과시키고,
+    ``ValidationError``가 나면 **직렬화하지 않는다.** "검증을 통과한 객체"가 아니라
+    "지금 이 순간의 값"이 계약을 만족하는지가 판단 기준이어야 한다.
+    """
+    return PurchaseProposal.model_validate(proposal.model_dump())

@@ -35,6 +35,7 @@ $LegacyAppName      = if ($env:APP_NAME) { $env:APP_NAME } else { 'mainproject' 
 $LegacyAppPort      = if ($env:APP_PORT) { $env:APP_PORT } else { '8000' }
 $FrontendUrl        = 'http://127.0.0.1/'
 $BackendHealthUrl   = 'http://127.0.0.1:8000/health'
+$FrontendProxyHealthUrl = 'http://127.0.0.1/api/health'
 $LegacyTask         = "app-$LegacyAppName"
 $LegacyDir          = 'C:\apps\mainproject'
 
@@ -83,7 +84,8 @@ function Test-Deployment {
         try {
             $frontendResponse = Invoke-WebRequest -Uri $FrontendUrl -UseBasicParsing -TimeoutSec 5
             $backendResponse = Invoke-WebRequest -Uri $BackendHealthUrl -UseBasicParsing -TimeoutSec 5
-            if ($frontendResponse.StatusCode -eq 200 -and $backendResponse.StatusCode -eq 200) {
+            $proxyResponse = Invoke-WebRequest -Uri $FrontendProxyHealthUrl -UseBasicParsing -TimeoutSec 5
+            if ($frontendResponse.StatusCode -eq 200 -and $backendResponse.StatusCode -eq 200 -and $proxyResponse.StatusCode -eq 200) {
                 return $true
             }
         } catch {
@@ -183,7 +185,7 @@ try {
     Write-Host "컨테이너 '$BackendContainer', '$FrontendContainer' 기동됨."
 
     # ── 5. 헬스체크 (실패 시 롤백) ────────────────────────────────
-    Write-Step "헬스체크: $FrontendUrl / $BackendHealthUrl"
+    Write-Step "헬스체크: $FrontendUrl / $BackendHealthUrl / $FrontendProxyHealthUrl"
     $healthy = Test-Deployment
 } catch {
     Write-Host "컨테이너 반영 중 오류: $($_.Exception.Message)" -ForegroundColor Red
@@ -216,7 +218,7 @@ if (-not $healthy) {
     throw '배포 실패: 헬스체크가 통과하지 못했습니다.'
 }
 
-Write-Host "`n배포 성공. $FrontendUrl 및 $BackendHealthUrl 응답 정상." -ForegroundColor Green
+Write-Host "`n배포 성공. $FrontendUrl, $BackendHealthUrl 및 $FrontendProxyHealthUrl 응답 정상." -ForegroundColor Green
 
 # 기존 단일 Backend 컨테이너는 새 서비스 검증이 끝난 뒤 제거합니다.
 if ($legacyContainerExists) {

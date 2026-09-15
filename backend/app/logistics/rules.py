@@ -1,0 +1,540 @@
+"""재고·물류 Agent의 Runtime 및 Hard Constraint 규칙."""
+
+from datetime import date
+from decimal import Decimal
+from typing import TypedDict
+
+from app.logistics.schemas import (
+    ConstraintResult,
+    FinalVerdict,
+    InventoryLogisticsSnapshot,
+    RuntimeStatus,
+    ScenarioValidationResult,
+)
+from app.logistics.tools import (
+    calculate_window_capacity_usage,
+    collect_freshness_lot_census,
+    collect_freshness_pressure_inputs,
+    find_in_transit_schedule_gap,
+    has_unattributed_confirmed_outbound,
+    is_inbound_schedule_complete,
+)
+
+# ---------------------------------------------------------------------------
+# 업무 위험 Signal (LLM 정책 결정서 §3)
+# ---------------------------------------------------------------------------
+#
+# ★ 이름에 숫자를 넣지 않는다 — LLM 출력 검증기의 숫자 금지 검사와 충돌하지 않기
+#   위한 명명 규칙이다 (`LOG-H02` 같은 내부 코드가 겪은 함정).
+# ★ 데이터/정책 미확정 코드는 여기 넣지 않는다 — signals 와 missing_data 는
+#   저장 위치가 아니라 **코드의 의미**로 분류한다.
+
+CAPACITY_TIGHT = "CAPACITY_TIGHT"
+INVENTORY_FRESHNESS_PRESSURE = "INVENTORY_FRESHNESS_PRESSURE"
+FRESHNESS_QUALITY_RISK = "FRESHNESS_QUALITY_RISK"
+SCENARIO_ADJUSTMENT_REQUIRED = "SCENARIO_ADJUSTMENT_REQUIRED"
+
+#: LLM 해석 대상 업무 위험의 전체 집합. 여기 없는 코드는 전부 미확정 계열이다.
+BUSINESS_SIGNALS = frozenset(
+    {
+        CAPACITY_TIGHT,
+        INVENTORY_FRESHNESS_PRESSURE,
+        FRESHNESS_QUALITY_RISK,
+        SCENARIO_ADJUSTMENT_REQUIRED,
+    }
+)
+
+#: 정책값 부재로 판정을 건너뛴 사실의 무숫자 경고 — 조용한 off 금지 (결정서 §4).
+#: "검사해서 문제 없음"과 "기준이 없어 검사 안 함"을 구분한다.
+CAPACITY_TIGHT_POLICY_UNRESOLVED = "CAPACITY_TIGHT_POLICY_UNRESOLVED"
+FRESHNESS_PRESSURE_POLICY_UNRESOLVED = "FRESHNESS_PRESSURE_POLICY_UNRESOLVED"
+#: 잔여일·유효 한계 미확인으로 신선도 비율 계산에서 제외된 Lot 이 있다는 사실.
+LOT_FRESHNESS_UNRESOLVED = "LOT_FRESHNESS_UNRESOLVED"
+
+#: Sales 에서 Rule 이 정하는 우선 조정 어휘. Procurement 의 quantity/timing 과
+#: 사이클 어휘를 섞지 않는다 (결정서 §5).
+SALES_PRIORITY_ADJUSTMENT = "우선 출고 대상으로 검토합니다."
+
+#: Rule 이 `soft_warnings` 로 내는 **미확정 계열** 코드의 전체 집합 (#121 ⑤).
+#:
+#: ★ 이 코드들은 `interpretation._MISSING_DATA_NAMES` 가 사람용 이름으로 옮긴다.
+#:   발행처(여기)와 번역표가 따로 자라면 새 코드가 generic 이름으로 뭉개져
+#:   **무엇이 없는지가 사라진다** — 목록을 명시해 테스트가 대조할 수 있게 한다.
+#: ★ 업무 위험(BUSINESS_SIGNALS)은 여기 넣지 않는다. 미확정이 아니라 판정 결과다.
+UNRESOLVED_WARNING_CODES = frozenset(
+    {
+        # `_snapshot_warnings` 가 내는 스냅샷 계열
+        "SNAPSHOT_ID_UNRESOLVED",
+        "GRADE_VOCABULARY_UNRESOLVED",
+        "PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT",
+        "IN_TRANSIT_UNRESOLVED",
+        "CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED",
+        "CONFIRMED_OUTBOUND_SCHEDULE_UNRESOLVED",
+        # Sales 전용 — H1 미래 점유를 못 셈한 사실
+        "H1_FUTURE_OCCUPANCY_UNRESOLVED",
+        # 업무 위험 판정을 정책 부재·데이터 부재로 건너뛴 사실
+        CAPACITY_TIGHT_POLICY_UNRESOLVED,
+        FRESHNESS_PRESSURE_POLICY_UNRESOLVED,
+        LOT_FRESHNESS_UNRESOLVED,
+    }
+)
+
+
+class SignalMeasurements(TypedDict, total=False):
+    """판정에 실제 사용된 원값 — fact 조립이 같은 값을 재계산하지 않게 한다 (v1.3 §5).
+
+    signal이 발화했을 때만 채운다. 표기(display_value)는 여기서 만들지 않는다 —
+    반올림·단위는 단일 formatter(interpretation.py) 소유다.
+    """
+
+    capacity_window_usage: Decimal
+    capacity_tight_ratio: Decimal
+    freshness_risk_lot_count: int
+    freshness_min_remaining_ratio: Decimal
+    freshness_pressure_ratio: Decimal
+    scenario_conditional_count: int
+    scenario_total_count: int
+
+
+class BusinessSignalResult(TypedDict):
+    signals: list[str]
+    #: 판정 스킵·제외 사실 — 데이터/정책 미확정 계열. soft_warnings 로 나간다.
+    warnings: list[str]
+    #: 판정에 실제 사용된 수치 (signal 발화 시에만).
+    measurements: SignalMeasurements
+
+
+def evaluate_procurement_business_signals(
+    *,
+    as_of: date,
+    snapshot: InventoryLogisticsSnapshot | None,
+    scenario_results: list[ScenarioValidationResult],
+) -> BusinessSignalResult:
+    """PROCUREMENT 업무 위험 3종을 판정한다. 비교식은 여기(Rule)가 소유한다.
+
+    계산(사용률·신선도 비율)은 Tool 이 하고, 임계 비교와 signal 생성만 여기서 한다.
+    임계가 None(선택 정책 미등록)이면 판정을 지어내지 않고 SKIPPED + 경고다.
+    """
+    signals: list[str] = []
+    warnings: list[str] = []
+    measurements: SignalMeasurements = {}
+    if snapshot is not None:
+        usage = calculate_window_capacity_usage(snapshot, as_of)
+        if snapshot.capacity_tight_ratio is None:
+            warnings.append(CAPACITY_TIGHT_POLICY_UNRESOLVED)
+        elif usage is not None and usage >= snapshot.capacity_tight_ratio:
+            signals.append(CAPACITY_TIGHT)
+            measurements["capacity_window_usage"] = usage
+            measurements["capacity_tight_ratio"] = snapshot.capacity_tight_ratio
+
+        ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
+        if snapshot.freshness_pressure_ratio is None:
+            warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
+        elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
+            signals.append(INVENTORY_FRESHNESS_PRESSURE)
+            _record_freshness_measurements(measurements, ratios, snapshot.freshness_pressure_ratio)
+        if unresolved_lots:
+            warnings.append(LOT_FRESHNESS_UNRESOLVED)
+
+    # 조정 필요 = 이번 실행에서 실제로 conditional 이 나온 상태. ok-only 는 조정이
+    # 없고 reject-only 는 Rule 이 불가를 확정한 것이라 signal 을 만들지 않는다.
+    conditional_count = sum(1 for result in scenario_results if result.verdict == "conditional")
+    if conditional_count > 0:
+        signals.append(SCENARIO_ADJUSTMENT_REQUIRED)
+        measurements["scenario_conditional_count"] = conditional_count
+        measurements["scenario_total_count"] = len(scenario_results)
+    return {"signals": signals, "warnings": warnings, "measurements": measurements}
+
+
+def evaluate_sales_business_signals(
+    *,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> BusinessSignalResult:
+    """SALES 신선도 위험을 비율 Rule 로 판정한다.
+
+    기존에는 Lot `status = NEEDS_PRIORITY_SHIPMENT` 에 의존했는데, 그 상태를 만드는
+    코드가 물류에 없고 DB 생성 주체도 확인되지 않아 실데이터에서 트리거가 죽는다 —
+    매입 전과 같은 비율 계산을 쓰되 사이클 업무 의미에 따라 이름만 달리 붙인다.
+    """
+    signals: list[str] = []
+    warnings: list[str] = []
+    measurements: SignalMeasurements = {}
+    if snapshot is not None:
+        ratios, unresolved_lots = collect_freshness_pressure_inputs(snapshot)
+        if snapshot.freshness_pressure_ratio is None:
+            warnings.append(FRESHNESS_PRESSURE_POLICY_UNRESOLVED)
+        elif any(ratio <= snapshot.freshness_pressure_ratio for ratio in ratios):
+            signals.append(FRESHNESS_QUALITY_RISK)
+            _record_freshness_measurements(measurements, ratios, snapshot.freshness_pressure_ratio)
+        if unresolved_lots:
+            warnings.append(LOT_FRESHNESS_UNRESOLVED)
+    return {"signals": signals, "warnings": warnings, "measurements": measurements}
+
+
+def count_freshness_risk_lots(ratios: list[Decimal], threshold: Decimal) -> int:
+    """잔여 비율이 임계 **이하**인 Lot 수. 이 비교식의 유일한 주인이다.
+
+    ★ signal 판정(`evaluate_*_business_signals`)과 운영 Fact(`measure_freshness_facts`)가
+      같은 함수를 쓴다 — 비교가 두 곳에 있으면 *"위험 Lot 3개"* 라고 답한 회신과
+      signal 이 서로 다른 수를 세는 날이 온다.
+    ★ 경계는 `<=` 다. `any(ratio <= threshold)` 로 signal 을 세우는 자리와 같아야
+      *"signal 은 섰는데 위험 Lot 이 0건"* 이 성립하지 않는다.
+    """
+    return sum(1 for ratio in ratios if ratio <= threshold)
+
+
+def _record_freshness_measurements(
+    measurements: SignalMeasurements,
+    ratios: list[Decimal],
+    threshold: Decimal,
+) -> None:
+    """신선도 signal의 판정 사용 수치 — 위험 Lot 수와 최소 잔여비율(집계만, lot_id 미전송)."""
+    measurements["freshness_risk_lot_count"] = count_freshness_risk_lots(ratios, threshold)
+    measurements["freshness_min_remaining_ratio"] = min(ratios)
+    measurements["freshness_pressure_ratio"] = threshold
+
+
+class _FreshnessLotCounts(TypedDict):
+    """ACTIVE Lot 을 훑으면 **언제나** 나오는 건수 둘. 없을 수 없으므로 필수다."""
+
+    freshness_unresolved_lot_count: int
+    freshness_expired_lot_count: int
+
+
+class FreshnessOperationalFacts(_FreshnessLotCounts, total=False):
+    """신선도 운영 Fact — **signal 발화와 무관하게** 측정만 담는다 (#396).
+
+    `SignalMeasurements` 와 키 이름이 겹치는 것은 의도다. 저쪽은 *"판정에 실제 쓰인
+    수치"* 라 signal 이 섰을 때만 채워지고, 이쪽은 *"지금 재면 이렇다"* 라 상태 조회가
+    쓴다. **같은 값을 두 식으로 재지 않도록** 둘 다 같은 Tool·같은 비교 함수를 지난다.
+
+    ★ **필수와 선택을 타입으로 가른다.** 건수 둘은 훑으면 나오므로 항상 있고, 아래 둘은
+      조건이 있어 없을 수 있다 — 키가 없는 것은 0 이 아니라 **못 잰 것**이다 (§1.2-10).
+      임계 정책이 없으면 `freshness_risk_lot_count` 가 없고, 비율을 셈할 Lot 이 하나도
+      없으면 `freshness_min_remaining_ratio` 가 없다.
+    """
+
+    freshness_min_remaining_ratio: Decimal
+    freshness_risk_lot_count: int
+
+
+def measure_freshness_facts(
+    *,
+    snapshot: InventoryLogisticsSnapshot,
+) -> FreshnessOperationalFacts:
+    """가용 Lot 신선도의 운영 측정치. **signal 도 verdict 도 만들지 않는다** (#396).
+
+    ```text
+    freshness_unresolved_lot_count  항상 — ACTIVE Lot 을 훑으면 나오는 건수다
+    freshness_expired_lot_count     항상 — 〃
+    freshness_min_remaining_ratio   비율을 셈할 수 있는 Lot 이 하나라도 있을 때
+    freshness_risk_lot_count        임계 정책이 등록돼 있을 때
+    ```
+
+    🔴 **새 임계도 새 분류도 만들지 않는다.** 모집단 분류는
+      `tools.collect_freshness_lot_census`, 임계 비교는 `count_freshness_risk_lots` 로
+      둘 다 signal 판정이 쓰는 그 함수다. 여기서 하는 일은 **골라 담는 것**뿐이다.
+
+    🔴 **`freshness_expired_lot_count` 를 폐기 판정으로 읽지 않는다.** 잔여가 0 이하로
+      확인된 ACTIVE Lot 의 **측정값일 뿐이고, 이 건수가 폐기를 실행하지 않는다.**
+
+    ```text
+    expired count       측정값 — 여기(rules)
+    disposal_candidate  폐기대기 판단 — turnover
+    실제 폐기           confirm_disposal — disposal
+    자동 실행 가능 여부   auto_maintenance 의 엄격한 안전조건
+                        (폐기대기 · 살아있는 할당 없음 · 잔량 전량)
+    ```
+
+    ★ **`snapshot` 은 필수다.** `evaluate_*_business_signals` 가 `None` 을 받는 것은
+      독립 Service 가 스냅샷 부재에도 회신을 조립해야 해서인데, 이 함수의 호출자는
+      스냅샷을 이미 확인한 뒤다 — `None` 을 받아 빈 dict 를 돌려주면 *"측정했더니
+      아무것도 없었다"* 와 *"측정할 것이 없었다"* 가 같아진다.
+    """
+    census = collect_freshness_lot_census(snapshot)
+    facts: FreshnessOperationalFacts = {
+        "freshness_unresolved_lot_count": census.unresolved_lot_count,
+        "freshness_expired_lot_count": census.expired_lot_count,
+    }
+    if census.ratios:
+        facts["freshness_min_remaining_ratio"] = min(census.ratios)
+    # 임계가 없으면 위험 Lot 수를 세지 않는다 — 기준 없는 0 은 "확인했고 없음" 으로
+    # 읽혀 정책 미등재를 안전 신호로 둔갑시킨다 (결정서 §4 와 같은 태도).
+    if snapshot.freshness_pressure_ratio is not None:
+        facts["freshness_risk_lot_count"] = count_freshness_risk_lots(
+            census.ratios, snapshot.freshness_pressure_ratio
+        )
+    return facts
+
+
+class LogisticsRuleResult(TypedDict):
+    runtime_status: RuntimeStatus
+    hard_constraints: list[ConstraintResult]
+    soft_warnings: list[str]
+    calculation_ready: bool
+
+
+def merge_business_warnings(
+    rule_result: LogisticsRuleResult,
+    business: BusinessSignalResult,
+) -> list[str]:
+    """Runtime 경고 + 업무 위험 signal + 판정 스킵 사실을 한 채널로 합친다.
+
+    독립 경로(service)와 Master 어댑터가 같은 병합을 쓴다 — 두 입력의 소유 모듈인
+    여기에 두어 채널 구성이 두 곳에서 갈라지지 않게 한다 (#111).
+    """
+    merged = [*rule_result["soft_warnings"], *business["signals"], *business["warnings"]]
+    return list(dict.fromkeys(merged))
+
+
+def derive_logistics_verdict(result: LogisticsRuleResult) -> FinalVerdict | None:
+    """Runtime readiness와 개별 Hard Check 상태를 분리해 최종 판정을 집계한다."""
+    if result["runtime_status"] != "READY":
+        return None
+    statuses = {constraint.status for constraint in result["hard_constraints"]}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if "UNRESOLVED" in statuses:
+        return "REVIEW_REQUIRED"
+    return "PASS"
+
+
+_FINAL_VERDICT_SEVERITY: dict[FinalVerdict, int] = {
+    "PASS": 0,
+    "REVIEW_REQUIRED": 1,
+    "FAIL": 2,
+}
+#: 시나리오 판정 → FinalVerdict 심각도 매핑. `skipped`는 여기 없다 — 판정 불가는
+#: 안을 통과시키지도(올림) 죽이지도(낮춤) 않고, 그 사실은 Runtime/Constraint가 나른다.
+_SCENARIO_VERDICT_TO_FINAL: dict[str, FinalVerdict] = {
+    "ok": "PASS",
+    "conditional": "REVIEW_REQUIRED",
+    "reject": "FAIL",
+}
+
+
+def derive_procurement_verdict(
+    result: LogisticsRuleResult,
+    scenario_results: list[ScenarioValidationResult],
+) -> FinalVerdict | None:
+    """시나리오 집계와 하드 제약 판정의 **최악값 결합** (2026-09-01 마스터 확정 · #121 3단계).
+
+    확정 문구:
+
+    ```text
+    SCENARIO_VALIDATION 의 business_status 는 그 부서가 검증한 시나리오 전체의 집계다.
+      하나라도 reject → reject / 아니고 하나라도 conditional → conditional / 전부 ok → ok
+    ★ 조정안의 유무는 이 값을 바꾸지 않는다.
+    ★ 하드 제약 상태(PASS/UNRESOLVED)는 이 값을 낮출 수는 있어도 올릴 수 없다.
+    ```
+
+    최악값 결합이 두 별표를 그대로 구현한다 — 하드 UNRESOLVED 는 전-ok 를
+    REVIEW_REQUIRED 로 낮출 수 있지만, 하드 전부 PASS 가 시나리오 reject 를
+    되살리지는 못한다. 종전 `derive_logistics_verdict`(하드만)는 판매 경로와
+    이 결합의 하드 축으로 계속 쓰인다.
+    """
+    hard = derive_logistics_verdict(result)
+    if hard is None:
+        return None
+    worst = hard
+    for scenario in scenario_results:
+        mapped = _SCENARIO_VERDICT_TO_FINAL.get(scenario.verdict)
+        if mapped is None:
+            continue
+        if _FINAL_VERDICT_SEVERITY[mapped] > _FINAL_VERDICT_SEVERITY[worst]:
+            worst = mapped
+    return worst
+
+
+def evaluate_procurement_rules(
+    *,
+    as_of: date,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsRuleResult:
+    """Logistics A의 cap_by_date 계산 가능 여부를 fail-closed로 판단한다."""
+    boundary = _snapshot_boundary(as_of=as_of, snapshot=snapshot)
+    if boundary is not None:
+        return boundary
+    assert snapshot is not None
+
+    constraints = [
+        _known_constraint("LOG-H01", snapshot.guaranteed_capacity_kg, "N2_UNRESOLVED"),
+        _known_constraint(
+            "LOG-H02",
+            snapshot.guaranteed_capacity_by_zone_kg,
+            "ZONE_CAPACITY_UNRESOLVED",
+        ),
+        _known_constraint(
+            "LOG-H03",
+            snapshot.daily_inbound_capacity_kg,
+            "DAILY_INBOUND_CAPACITY_UNRESOLVED",
+        ),
+        _known_constraint(
+            "LOG-H04",
+            snapshot.inbound_transport_capacity_kg,
+            "INBOUND_TRANSPORT_CAPACITY_UNRESOLVED",
+        ),
+        _known_constraint("LOG-H05", snapshot.inbound_lead_days, "N4_UNRESOLVED"),
+    ]
+    inbound_gap = find_in_transit_schedule_gap(snapshot)
+    if inbound_gap is not None:
+        constraints.append(
+            ConstraintResult(
+                code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
+                status="UNRESOLVED",
+                skip_reason=inbound_gap,
+            )
+        )
+    # 확정 출고 행에 item이 없으면 품목별 예약 차감을 못 한다 — inventory_by_item만
+    # 생략하는 Partial Output이며 PRE 전체는 READY를 유지한다. Master Adapter는 이
+    # ConstraintResult로 누락을 식별해 M-1 missing_data로 번역한다.
+    if has_unattributed_confirmed_outbound(snapshot):
+        constraints.append(
+            ConstraintResult(
+                code="CONFIRMED_OUTBOUND_ITEM_UNRESOLVED",
+                status="UNRESOLVED",
+                skip_reason="CONFIRMED_OUTBOUND_ITEM_UNRESOLVED",
+            )
+        )
+    soft_warnings = _snapshot_warnings(snapshot)
+    # 1차 Hard Capacity는 guaranteed 하나다 — daily inbound/transport는 값이 없어도
+    # Runtime을 막지 않는다 (Policy 결정값 §3).
+    core_values = (
+        snapshot.guaranteed_capacity_kg,
+        snapshot.inbound_lead_days,
+        snapshot.confirmed_inbound_schedule,
+        snapshot.confirmed_outbound_schedule,
+    )
+    calculation_ready = all(value is not None for value in core_values) and inbound_gap is None
+    return {
+        "runtime_status": "READY" if calculation_ready else "RUNTIME_NOT_READY",
+        "hard_constraints": constraints,
+        "soft_warnings": soft_warnings,
+        "calculation_ready": calculation_ready,
+    }
+
+
+def evaluate_sales_rules(
+    *,
+    as_of: date,
+    snapshot: InventoryLogisticsSnapshot | None,
+    future_occupancy_by_date: dict[date, Decimal] | None,
+) -> LogisticsRuleResult:
+    """Logistics B의 outbound 및 H1 미래 점유 계산 가능 여부를 판단한다."""
+    boundary = _snapshot_boundary(as_of=as_of, snapshot=snapshot)
+    if boundary is not None:
+        return boundary
+    assert snapshot is not None
+
+    warehouse_constraint = _known_constraint(
+        "LOG-H01", snapshot.guaranteed_capacity_kg, "N2_UNRESOLVED"
+    )
+    if snapshot.guaranteed_capacity_kg is not None and future_occupancy_by_date is not None:
+        warehouse_constraint = ConstraintResult(
+            code="LOG-H01",
+            status="PASS"
+            if all(
+                value <= snapshot.guaranteed_capacity_kg
+                for value in future_occupancy_by_date.values()
+            )
+            else "FAIL",
+        )
+    outbound_constraint = _known_constraint(
+        "N17",
+        snapshot.shared_daily_outbound_capacity_kg,
+        "N17_UNRESOLVED",
+    )
+    lots_complete = all(lot.remaining_freshness_days is not None for lot in snapshot.on_hand_by_lot)
+    lot_constraint = ConstraintResult(
+        code="N17-LOT",
+        status="PASS" if lots_complete else "UNRESOLVED",
+        skip_reason=None if lots_complete else "N17_LOT_FRESHNESS_UNRESOLVED",
+    )
+    inbound_completeness_constraint = None
+    sales_inbound_gap = find_in_transit_schedule_gap(snapshot)
+    if sales_inbound_gap is not None:
+        inbound_completeness_constraint = ConstraintResult(
+            code="IN_TRANSIT_SCHEDULE_UNRESOLVED",
+            status="UNRESOLVED",
+            skip_reason=sales_inbound_gap,
+        )
+    soft_warnings = _snapshot_warnings(snapshot)
+    if future_occupancy_by_date is None:
+        soft_warnings.append("H1_FUTURE_OCCUPANCY_UNRESOLVED")
+    calculation_ready = (
+        snapshot.shared_daily_outbound_capacity_kg is not None
+        and snapshot.guaranteed_capacity_kg is not None
+        and future_occupancy_by_date is not None
+        and lots_complete
+        and is_inbound_schedule_complete(snapshot)
+    )
+    constraints = [warehouse_constraint, outbound_constraint, lot_constraint]
+    if inbound_completeness_constraint is not None:
+        constraints.append(inbound_completeness_constraint)
+    return {
+        "runtime_status": "READY" if calculation_ready else "RUNTIME_NOT_READY",
+        "hard_constraints": constraints,
+        "soft_warnings": soft_warnings,
+        "calculation_ready": calculation_ready,
+    }
+
+
+def _snapshot_boundary(
+    *,
+    as_of: date,
+    snapshot: InventoryLogisticsSnapshot | None,
+) -> LogisticsRuleResult | None:
+    if snapshot is None:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "hard_constraints": [
+                ConstraintResult(
+                    code="REQUIRED_LOGISTICS_SNAPSHOT_MISSING",
+                    status="FAIL",
+                )
+            ],
+            "soft_warnings": [],
+            "calculation_ready": False,
+        }
+    if as_of != snapshot.as_of:
+        return {
+            "runtime_status": "RUNTIME_NOT_READY",
+            "hard_constraints": [ConstraintResult(code="AS_OF_MISMATCH", status="FAIL")],
+            "soft_warnings": _snapshot_warnings(snapshot),
+            "calculation_ready": False,
+        }
+    return None
+
+
+def _known_constraint(
+    code: str,
+    value: object | None,
+    skip_reason: str,
+) -> ConstraintResult:
+    return ConstraintResult(
+        code=code,
+        status="PASS" if value is not None else "UNRESOLVED",
+        skip_reason=None if value is not None else skip_reason,
+    )
+
+
+def _snapshot_warnings(snapshot: InventoryLogisticsSnapshot) -> list[str]:
+    warnings: list[str] = []
+    # ★ 이 경고는 **상시 발동한다** — Repository 가 `snapshot_id` 를 채우지 않기
+    #   때문이다(폐지된 T0 스냅샷의 유산). 없앨지 실제 ID 를 줄지는 계약 결정이라
+    #   여기서 조용히 끄지 않는다 — 끄면 "검사했더니 문제 없음"으로 위장된다.
+    if snapshot.snapshot_id is None:
+        warnings.append("SNAPSHOT_ID_UNRESOLVED")
+    # 정규화 근거가 없어 등급 어휘를 해석하지 못한 Lot이 있다는 사실만 드러낸다 —
+    # 임의 매핑은 하지 않고, 이 경고만으로 Runtime을 중단시키지도 않는다.
+    if any(lot.grade is None for lot in snapshot.on_hand_by_lot):
+        warnings.append("GRADE_VOCABULARY_UNRESOLVED")
+    if any("provisional=true" in ref for ref in snapshot.evidence_refs):
+        warnings.append("PROVISIONAL_CAPACITY_EXCLUDED_FROM_HARD_LIMIT")
+    if snapshot.in_transit is None:
+        warnings.append("IN_TRANSIT_UNRESOLVED")
+    if snapshot.confirmed_inbound_schedule is None:
+        warnings.append("CONFIRMED_INBOUND_SCHEDULE_UNRESOLVED")
+    if snapshot.confirmed_outbound_schedule is None:
+        warnings.append("CONFIRMED_OUTBOUND_SCHEDULE_UNRESOLVED")
+    return warnings

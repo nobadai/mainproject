@@ -1,0 +1,307 @@
+/**
+ * 백엔드 `app/master` 스키마의 거울.
+ *
+ * ★ **여기서 값을 만들지 않는다.** 화면은 받은 것을 그리기만 하고, 수량·금액·결론은
+ *   전부 서버가 정한다. 프론트가 기본값을 채우기 시작하면 서버가 "모른다" 고 답한 것이
+ *   화면에서 0 이 되고, 그건 §1.2-10(0 과 모름은 다르다)을 화면이 어기는 것이다.
+ */
+
+export type IntentAction =
+  | "PROCUREMENT_RUN"
+  | "STATUS_QUERY"
+  | "RERUN_WITH_CONDITION"
+  | "SELECT_SCENARIO"
+  | "UNKNOWN";
+
+export type AgentName = "finance" | "inventory" | "purchase";
+
+/** LLM 이 돌려주는 것. **수량·금액 칸이 없는 것이 안전장치의 전부다.** */
+export interface Intent {
+  action: IntentAction;
+  agents: AgentName[];
+  item: string | null;
+  scenario_label: string | null;
+  condition: string | null;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+}
+
+export type AskOutcome =
+  | "CLASSIFIED_ONLY"
+  | "STATUS_ANSWERED"
+  | "DECISION_RECORDED"
+  | "NEEDS_CLARIFICATION";
+
+export interface AnswerOut {
+  text: string;
+  narrative: string | null;
+  llm_status: string;
+  llm_attempts: number;
+  llm_fallback_used: boolean;
+  /**
+   * 가격 예측이 쓴 **마크다운 본문 그대로.** 없으면 `null` (선택 칸).
+   * `text` 와 섞이지 않는다 — 화면은 이 칸을 문서로 그린다.
+   */
+  markdown?: string | null;
+}
+
+export interface DecisionOut {
+  decision_id: string;
+  request_id: string;
+  decision_seq: number;
+  decision: "APPROVE" | "REJECT_ALL" | "REQUEST_CHANGE";
+  scenario_label: string | null;
+  condition_text: string | null;
+  decided_by: string;
+  follow_up_request_id: string | null;
+  end_code_at_decision: string;
+  /** 이 결정이 가리키는 실행. `null` 은 **"어느 실행인지 기록되지 않았다"** 이다. */
+  history_run_id: string | null;
+  created_at: string;
+  is_current: boolean;
+}
+
+export interface AskResponse {
+  request_id: string;
+  as_of: string;
+  outcome: AskOutcome;
+  intent: Intent;
+  clarification: string | null;
+  confirm_required: boolean;
+  status: unknown;
+  decision: DecisionOut | null;
+  /** 조건부 재요청으로 **다시 돈 실행.** 없으면 고리가 끊긴다. */
+  run: ProcurementRunResponse | null;
+  answer: AnswerOut | null;
+  llm_status: string;
+  /** 어느 API 를 탔나 — `ollama`(로컬) 인지 `gemini`(외부) 인지 화면이 구분해 적는다. */
+  llm_provider: string | null;
+  llm_model: string | null;
+  llm_attempts: number;
+  llm_fallback_used: boolean;
+  note: string | null;
+}
+
+export interface Scenario {
+  label?: string;
+  total_qty_kg?: number;
+  total_amount_krw?: number;
+  coverage_days?: number;
+  split_plan?: { qty_kg?: number }[];
+  //: 승인 결과 화면이 편다. **모양은 매입이 정한다** — 여기서 좁게 잡으면
+  //: 매입이 칸을 늘릴 때 화면이 조용히 못 읽는다. 인덱스 시그니처로 받고
+  //: 쓰는 쪽에서 좁힌다 (`ApprovedPlan.tsx`).
+  sourcing_plan?: unknown[];
+  payment_schedule?: unknown[];
+  [key: string]: unknown;
+}
+
+export type EndCode =
+  | "E1_APPROVED"
+  | "E2_HELD"
+  | "E3_REJECTED"
+  | "E4_NOT_STARTED"
+  | "E5_NO_FEASIBLE_PLAN";
+
+export interface ProcurementRunResponse {
+  request_id: string;
+  as_of: string;
+  /**
+   * 🔴 **이 실행이 이력에 남은 행의 id.**
+   *
+   * `plan[].run_id` 와 **다른 것이다** — 저쪽은 그 *부서 호출* 의 id 이고 이것은
+   * *마스터 실행 한 번* 의 id 다.
+   *
+   * 승인·재요청 때 이 값을 **그대로 되돌려 준다.** 그래야 "내가 본 그것을
+   * 승인했다" 가 기록된다. 안 보내면 서버가 최신 실행을 고르는데, 그 사이
+   * 재실행이 있었으면 **본 것과 다른 안이 승인된 것으로 남는다** (라벨이 같아
+   * 눈에 안 띈다).
+   *
+   * 적재 실패 시 `null` — 이력이 없어도 계산 결과는 온다.
+   */
+  history_run_id: string | null;
+  end_code: EndCode;
+  /** 마스터가 내린 결론의 사유. **안이 없을 때는 이것이 답 자체다.** */
+  reason: string;
+  /**
+   * 매입 자신의 판정. `verdicts`(조언자 판정)와 다르다.
+   *
+   * 🔴 **안이 0개일 때 여기에 진짜 이유가 있다.** 마스터의 `reason` 은
+   * *"유효한 안이 없다"* 까지만 말하고, **왜 없는지**는 매입이 안다 —
+   * `no_proposal_reason` · `rejected_reasons`.
+   */
+  judgment: {
+    /**
+     * 닫힌 집합 — `stable` · `uncertain`. 매입 스키마의 `Literal` 이라
+     * **새 값이 생기면 스키마가 먼저 바뀐다** (매입 2026-08-31 회신 ④).
+     * 한국어 표기는 `lib/vocab.ts` 한 곳에 있고, 모르는 값은 원문 그대로 보인다.
+     */
+    situation?: string;
+    /** 닫힌 집합 — `high` · `medium` · `low`. `Intent.confidence` 와 **다른 값이다.** */
+    confidence?: string;
+    /** 닫힌 집합 — `quantity` · `timing` · `mix`. 매입이 **연** 축이다. */
+    allowed_axes?: string[];
+    no_proposal_reason?: string | null;
+    rejected_reasons?: { label?: string; reason?: string }[];
+    /** 매입이 이 판단을 내린 품목 · 기준일. 화면은 품목으로 근거를 거른다. */
+    meta?: { item?: string | null; as_of?: string | null };
+  };
+  scenarios: Scenario[];
+  /**
+   * 조언자(재무·물류)가 시나리오를 보고 낸 판정. `judgment`(매입 자신의 판정)와 다르다.
+   *
+   * 🔴 **"왜 조건부인지" 가 여기 말고는 없다.** 마스터는 판정 라벨까지만 알고 이유는
+   * `payload` 안에 있는데, 그 모양은 **부서마다 다르다** — 그래서 서버가 해석하지
+   * 않고 그대로 싣는다. 화면도 해석하지 않는다 (`AdvisorVerdicts`).
+   *
+   * ★ 실측 2026-08-31 — 물류 `verdict: "conditional"` 인데 시나리오 셋은 전부 `ok`
+   *   였다. 조건부의 원인은 안이 아니라 `hard_constraints` 의 `LOG-H02 UNRESOLVED`
+   *   (창고 구역 용량 정책 미비)였다. **"안에 문제가 있다" 와 "검사를 못 돌렸다" 가
+   *   같은 한 단어에 뭉쳐 있다.**
+   */
+  verdicts: Record<
+    string,
+    {
+      business_status: string;
+      runtime_status: string;
+      /** 부서가 보낸 것 그대로. 모양이 부서마다 다르다 — 타입을 좁히지 않는다. */
+      payload?: Record<string, unknown>;
+      needs_followup?: boolean;
+      /** 판정을 못 냈을 때 **유일하게 이유를 담는 칸**. */
+      reasoning?: string | null;
+    }
+  >;
+  /**
+   * 부서가 낸 근거 — **시나리오 숫자의 출처.**
+   *
+   * 🔴 **전에는 이 자리가 없었다** (2026-09-02 배선). 서버가 근거를 모아 검증에만
+   *   넘기고 응답에서 끊겨, 화면은 *"재무 상한 2,000만원"* 은 보여주면서 그 숫자가
+   *   어디서 왔는지는 못 보여줬다. `verdicts[].reasoning` 은 부서가 쓴 **설명
+   *   문장**이지 출처가 아니다.
+   *
+   * ★ **비어 있는 것은 "근거가 완비됐다" 가 아니라 "부서가 근거를 안 냈다" 이다.**
+   *   `skipped_checks` 를 감추지 않는 것과 같은 이유다.
+   */
+  evidences: Array<{
+    agent: string;
+    /** PRE_PURCHASE 는 경계("상한이 왜 그 값인가"), SCENARIO_VALIDATION 은 판정. */
+    mode: string;
+    claim: string;
+    source: string;
+    /** 🔴 숫자가 아닐 수 있다 — 재무 `policy_version_used` 가 버전 문자열을 싣는다. */
+    value: number | string;
+    unit: string;
+    /** OFFICIAL · VENDOR · SIM_FIXED · ASSUMED · INVALID_FOR_HARD. 값만큼 중요하다. */
+    evidence_grade: string;
+    evidence_detail?: string;
+    ref_ids: string[];
+  }>;
+  /**
+   * 기여하지 못한 부서가 **왜** 막았는가.
+   *
+   * 🔴 **전에는 이름조차 화면에 없었다** (2026-09-02 배선). `E4` 화면은
+   *   *"경계를 내지 못한 에이전트: finance"* 한 줄이 전부였고, 그것을 읽은 사람이
+   *   할 수 있는 것은 *"다시 돌려 본다"* 뿐이었다 — 그건 조사가 아니라 추측이다.
+   *
+   * ★ `detail` 은 **서버가 만든다.** `reason` 문장에 들어간 것과 같은 값이라
+   *   화면이 다시 조립하다 둘이 갈리는 일이 없다.
+   */
+  blocked_failures: {
+    agent: string;
+    /** ERROR · RUNTIME_NOT_READY, 그리고 아예 안 불린 경우 NOT_CALLED. */
+    runtime_status: string;
+    /** 부서가 쓴 문장 그대로. 마스터가 요약하지 않는다. */
+    reasoning: string;
+    /** `RUNTIME_NOT_READY` 일 때 **여기가 답이다** — 무엇이 없어서 못 냈는지. */
+    missing_data: string[];
+    detail: string;
+  }[];
+  /**
+   * 부서가 낸 조정안 — **개수가 아니라 내용이다.**
+   *
+   * 🔴 전에는 `verdicts[].suggested_adjustments` 에 **개수만** 왔고, 서버 문구는
+   *   *"실행 이력에서 보십시오"* 라고 안내했는데 **실행 이력에 그 칸이 없었다**
+   *   (2026-09-02). 가서 봐도 없는 곳을 알려 주고 있었다.
+   *
+   * ★ **`dept` 는 `verdicts` 의 키(`AgentName`)와 다른 어휘다.** 지금 글자가 같을
+   *   뿐이라, 화면이 둘을 이어 붙이지 않는다 — 부서 이름을 그대로 받아 쓴다.
+   *
+   * ★ **비어 있는 것이 곧 실패는 아니다.** 물류는 `reject` 안의 조정을 승격하지
+   *   않으므로(#121 · 2026-09-02 확정) 0건이 정답인 날이 있다.
+   */
+  adjustments: {
+    /** `Dept` — finance · inventory · sales. */
+    dept: string;
+    /** `_DEPT_AXES` 가 강제한다 — quantity · timing · channel_mix · amount. */
+    axis: string;
+    target_value: number;
+    /** 🔴 닫힌 집합이 아니다. 물류 타이밍 축은 봉투 `as_of` 로부터의 일수를 `d` 로 싣는다. */
+    unit: string;
+    /** 부서가 쓴 문장 그대로. 마스터가 요약하지 않는다. */
+    reason: string;
+    ref_ids: string[];
+    /**
+     * 🆕 이 조정이 어느 시나리오 대상인가 (2026-09-02).
+     *
+     * 전에는 `reason` 문장 안에만 있었다. 합쳐진 건이면 합쳐진 라벨이 다 들어온다 —
+     * 건수를 안 늘리면서 *"이 조정은 세 안 모두에 해당"* 이 값으로 드러난다.
+     *
+     * **비어 있으면 부서가 안 채운 것이다.** 화면이 지어내지 않는다.
+     */
+    scenario_labels: string[];
+    /**
+     * 🆕 어느 회차의 상한인가. **번호가 아니라 날짜다** — 물류에 회차 번호가 없다.
+     * 회차 개념이 없는 축(재무 `amount`)은 `null`.
+     */
+    split_date: string | null;
+  }[];
+  findings: string[];
+  concerns: string[];
+  skipped_checks: string[];
+  verification_skipped: boolean;
+  purchase_attempts: number;
+  single_option: boolean;
+  /** 사람이 읽는 리포트. **규칙만으로 만든다** (`answer.py`). */
+  report_text: string;
+  /** `등급:소스` — MEASURED / DERIVED / MOCK / MISSING */
+  input_sources: Record<string, string>;
+  /** 🔴 비어 있지 않으면 이 결론을 실측으로 읽으면 안 된다. */
+  mocked_inputs: string[];
+  plan: {
+    seq: number;
+    agent: AgentName;
+    mode: string;
+    runtime_status: string;
+    business_status: string;
+  }[];
+}
+
+/** `/ask/execute` 는 둘 중 하나를 돌려준다 — `end_code` 로 가른다. */
+export type ExecuteResponse = AskResponse | ProcurementRunResponse;
+
+export function isProcurement(r: ExecuteResponse): r is ProcurementRunResponse {
+  return "end_code" in r;
+}
+
+export interface RunHistory {
+  request_id: string;
+  /** 돌려받은 이 행의 id — 결정이 **이 실행**을 가리키는지 대조하는 데 쓴다. */
+  run_id: string | null;
+  as_of: string;
+  cycle: string;
+  runtime_status: string;
+  /** 이 계획을 만든 실행의 시각. **같은 업무 키에 실행이 여럿이라 필요하다.** */
+  created_at: string;
+  elapsed_ms: number | null;
+  plan: Record<string, unknown>[];
+  /** 실행을 부른 요청 원문. 화면은 품목(`item`)만 읽는다. */
+  request_payload?: Record<string, unknown>;
+  decisions: DecisionOut[];
+}
+
+/** `GET /master/runs/{id}/report` — 들고 나갈 수 있는 매입안 문서. */
+export interface RunReport {
+  request_id: string;
+  filename: string;
+  /** Markdown 전문. **화면이 조립하지 않는다** — 서버가 낸 것을 그대로 내려받는다. */
+  markdown: string;
+}

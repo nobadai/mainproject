@@ -1,0 +1,175 @@
+"""**격리가 실제로 섰는지**를 잰다 — 격리는 조용히 새기 때문이다.
+
+🔴 **fixture 가 안 먹어도 아무도 모른다.** `conftest.py` 의 `개장_정본_적재를_막는다`
+   가 뚫리면 검사는 실 DB 를 치고, 답은 **그날 팀 공용 DB 에 행이 있느냐로 갈린다.**
+   그때 나오는 빨간불은 **다른 사람 손에서 재현되지 않는다.**
+
+★ 그래서 *"막았다"* 를 믿지 않고 **막혔는지를 직접 잰다.** 여기가 빨개지면 fixture 가
+  뚫린 것이지, 잰 코드가 틀린 것이 아니다.
+"""
+
+from __future__ import annotations
+
+import pytest
+from 개장정본_격리 import (
+    개장_관문_이름을_가져간_모듈들,
+    개장_정본_이름을_가져간_모듈들,
+    진짜_개장_관문_함수,
+    진짜_개장_정본_함수,
+)
+
+
+@pytest.mark.parametrize("이름", sorted(진짜_개장_정본_함수))
+def test_개장_정본_함수를_들고_있는_모듈이_하나도_안_새어_있다(이름: str) -> None:
+    """⚠️ **이름을 가져간 모듈이 하나라도 안 막혀 있으면 빨개진다.**
+
+    ★ `from X import f` 는 이름을 **복사한다.** 원본 모듈만 막으면 복사본은 진짜
+      함수를 계속 부르고, 그 모듈은 실 DB 를 친다.
+    """
+    샌_모듈 = [
+        모듈.__name__
+        for 모듈 in 개장_정본_이름을_가져간_모듈들(이름)
+        if getattr(모듈, 이름) is 진짜_개장_정본_함수[이름]
+    ]
+
+    assert 샌_모듈 == [], f"{이름} 이 안 막힌 모듈이 있다 — 실 DB 를 친다: {샌_모듈}"
+
+
+def test_조회_이름을_가져간_모듈이_실제로_잡힌다() -> None:
+    """🔴 **위 검사가 빈 목록으로 통과하는 것을 막는다.**
+
+    ★ `day_gate` 가 `read_day_opening` 을 이름으로 가져가는 **바로 그 모듈**이다.
+      여기가 목록에서 빠지면 위 검사는 아무것도 안 재고도 초록이 된다.
+    """
+    잡힌_모듈 = {모듈.__name__ for 모듈 in 개장_정본_이름을_가져간_모듈들("read_day_opening")}
+
+    assert "app.master.day_gate" in 잡힌_모듈
+    assert "app.master.day_opening_repository" in 잡힌_모듈
+
+
+def test_적재_이름을_가져간_모듈도_실제로_잡힌다() -> None:
+    """★ 조회와 **같은 구조다.** `day_open` 이 `record_day_opening` 을 가져간다."""
+    잡힌_모듈 = {모듈.__name__ for 모듈 in 개장_정본_이름을_가져간_모듈들("record_day_opening")}
+
+    assert "app.master.day_open" in 잡힌_모듈
+    assert "app.master.day_opening_repository" in 잡힌_모듈
+
+
+# ── 개장 **관문** — 진입점마다 이름을 복사해 간다 ──────────────────────────────
+
+
+def test_개장_관문을_들고_있는_모듈이_하나도_안_새어_있다() -> None:
+    """🔴 **진입점이 셋이 됐다** (매입 · 판매 · 재검증 · 입고).
+
+    `check_day_gate` 는 안 막히면 `get_connection()` 으로 **실 DB 를 친다.** 전에는
+    `conftest` 가 `app.master.service` 한 줄만 막고 있었고, 그래서 새 진입점이 생길
+    때마다 그 모듈만 조용히 새 나갔다 — `read_day_opening` 이 겪은 것과 같은 함정이다.
+    """
+    샌_모듈 = [
+        모듈.__name__
+        for 모듈 in 개장_관문_이름을_가져간_모듈들()
+        if 모듈.check_day_gate is 진짜_개장_관문_함수
+    ]
+
+    assert 샌_모듈 == [], f"check_day_gate 가 안 막힌 모듈이 있다 — 실 DB 를 친다: {샌_모듈}"
+
+
+def test_관문_이름을_가져간_모듈이_실제로_잡힌다() -> None:
+    """🔴 **위 검사가 빈 목록으로 통과하는 것을 막는다.**
+
+    ★ 재검증(`revalidation`)이 **세 번째로** 이 이름을 가져간 모듈이다. 여기가 목록에서
+      빠지면 위 검사는 아무것도 안 재고도 초록이 된다.
+    """
+    잡힌_모듈 = {모듈.__name__ for 모듈 in 개장_관문_이름을_가져간_모듈들()}
+
+    assert "app.master.day_gate" in 잡힌_모듈
+    assert "app.master.service" in 잡힌_모듈
+    assert "app.master.revalidation" in 잡힌_모듈, (
+        "재검증 모듈이 안 잡힌다 — 승인 한 번이 실 DB 로 개장을 물으러 나간다"
+    )
+
+
+# ── 미적용 전이 재시도 — 🔴 **여기는 조회가 아니라 「쓰기」로 이어진다** ────────
+
+
+def test_미적용_전이_조회가_막혀_있다() -> None:
+    """🔴 **안 막히면 검사가 팀 공용 DB 에 행을 쓴다** (2026-09-11).
+
+    하루 순서의 재시도 단계는 찾은 미적용마다 `apply_approval` 을 부르고, 그 함수는
+    `purchases` · 재무 · 물류에 **쓰고 커밋한다.** 다른 격리는 조회를 막는 것이지만
+    이 자리는 쓰기까지 가므로, 새면 흔적이 **남는다.**
+
+    ★ 문이 하나라 한 줄로 잰다 — `approved_decisions` 도 `ledger_purchase_ids` 도
+      같은 `fetch_all` 을 지난다.
+    """
+    from app.finance.db import fetch_all as 진짜
+    from app.master import pending_transition_repository as 저장소
+
+    assert 저장소.fetch_all is not 진짜, (
+        "미적용 전이 조회가 안 막혔다 — 재시도가 실 DB 를 읽고 apply_approval 이 쓴다"
+    )
+
+
+def test_미적용_조회가_막힌_채로_빈_답을_준다() -> None:
+    """🔴 **위 검사가 「막히기만 하고 엉뚱한 값을 주는」 것을 막는다.**
+
+    ★ 빈 목록이어야 재시도가 `NOTHING_DUE` 로 돌아서고 `apply_approval` 이 이름조차
+      안 불린다.
+    """
+    from app.master.pending_transition_repository import (
+        approved_decisions,
+        ledger_purchase_ids,
+    )
+
+    assert approved_decisions(sim_run_id="SIM-ANY") == []
+    assert ledger_purchase_ids(sim_run_id="SIM-ANY") == []
+
+
+# ── 판매 진입점의 매입 경계 조회 (2026-09-14) ─────────────────────────────────
+
+
+def test_매입_경계_조회가_막혀_있다() -> None:
+    """🔴 **안 막히면 판매 검사가 `master_agent_runs` 를 실 DB 로 읽는다.**
+
+    ★ `run_sales` → `_procurement_boundary` → `read_procurement_boundary` →
+      `list_runs` 순서라, 판매를 부르는 검사는 전부 이 문을 지난다.
+    """
+    from app.master import procurement_boundary
+    from app.master.run_repository import list_runs as 진짜
+
+    assert procurement_boundary.list_runs is not 진짜, (
+        "매입 경계 조회가 안 막혔다 — 판매 검사가 실 DB 를 읽는다"
+    )
+
+
+def test_경계_조회가_막힌_채로_행이_없다고_답한다() -> None:
+    """🔴 **막혔는데 엉뚱한 행을 주면 판매 검사의 답이 바뀐다.**
+
+    ★ 행이 없으면 진짜 판정이 평일 `NO_PROCUREMENT_RUN` 으로 선다 — 번인 축에
+      2026-09 날짜 행이 없는 실 DB 와 같은 답이다.
+    """
+    from datetime import date
+
+    from app.master.procurement_boundary import read_procurement_boundary
+
+    경계 = read_procurement_boundary(as_of=date(2026, 9, 10), sim_run_id="SIM-ANY")
+
+    assert 경계.present is False
+    assert 경계.absent_reason == "NO_PROCUREMENT_RUN"
+
+
+# ── 마지막 문 — `psycopg.connect` ───────────────────────────────────────────
+
+
+def test_db_마크가_없으면_연결_자체가_막혀_있다() -> None:
+    """🔴 **대역을 빠뜨린 새 경로가 생겨도 실 DB 까지는 못 간다.**
+
+    ★ 접속 정보를 일부러 줘도 연결을 시도하지 않고 가드 예외가 난다. `.env` 가 있는
+      자리에서 조용히 공용 DB 를 치는 일을 막는 것이 이 가드의 일이다.
+    """
+    import psycopg
+
+    # ★ 예외 클래스를 `conftest` 에서 이름으로 가져오지 않는다
+    #   (`test_conftest_not_imported_by_name.py`). 문장으로 잰다.
+    with pytest.raises(AssertionError, match="db 마크가 없는 검사가 실 DB 연결을 열었다"):
+        psycopg.connect(host="127.0.0.1", port=9, dbname="guard", connect_timeout=1)

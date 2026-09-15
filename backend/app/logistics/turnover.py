@@ -1,0 +1,456 @@
+"""turnover.py — 회전관리 · 판매우선 Signal · 폐기대기 판정 (3-D1).
+
+```text
+received_at → 경과일 → remaining_turnover_days → turnover_status → sell_priority
+remaining_freshness_days <= 0                                   → disposal_candidate
+```
+
+🔴 **두 축을 섞지 않는다. 이것이 이 파일의 존재 이유다.**
+
+```text
+회전관리 (신규)                     물리·운영 신선도 (Legacy)
+item_turnover_policies              item_storage_policies
+operational_turnover_target_days    operational_limit_days
+remaining_turnover_days             remaining_freshness_days
+turnover_status                     freshness_pressure_ratio
+→ 판매를 언제 하고 싶은가            → 지금 팔 수 있는 재고인가
+```
+
+   ⚠️ 둘은 **동시에 다른 답을 낼 수 있어야 한다.**
+
+   ```text
+   remaining_turnover_days  = -2   → STORAGE_TARGET_EXCEEDED · sell_priority=true
+   remaining_freshness_days =  8   → 판매 가능 · disposal_candidate=false
+   ```
+
+🔴 **`STORAGE_TARGET_EXCEEDED` 는 판매불가가 아니다.**
+
+```text
+STORAGE_TARGET_EXCEEDED  ≠ 판매불가  ≠ 상함  ≠ Shelf-Life 종료  ≠ 폐기
+```
+
+   회사 내부 회전목표를 넘겼다는 뜻뿐이다 (Persona 05 §4). 그래서 이 상태만으로
+   가용재고에서 빼지도, `disposal_candidate` 로 잇지도 **않는다.**
+
+★ **어휘는 Persona 05 §4 그대로다.** 로직정의 v0.1 의 `PRESSURE` ·
+  `TARGET_EXCEEDED` 는 쓰지 않는다 — 같은 것을 두 이름으로 부르면 계약이 갈린다.
+
+⚠️ **`QUALITY_REVIEW_REQUIRED` 를 만들지 않는다.** Persona 어휘에는 있지만 그것은
+   사람이 품질을 보고 내리는 판단이고, 날짜로 자동 생성할 수 있는 값이 아니다.
+
+🔴 **정책이 없는 품목을 조회에서 떨어뜨리지 않는다.** `item_turnover_policies` 는
+   실측 **3품목뿐**이고(`ITEM-GEONGOCHU` · `ITEM-PIMANUL` 없음) DDL 주석도 그것을
+   경고한다. `LEFT JOIN` 으로 읽고, 정책이 없으면 `turnover_status=None` 으로 둔다 —
+   모르는 것을 `NORMAL` 로 적으면 *"확인했고 정상"* 이라는 하지 않은 확인이 남는다.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from typing import Any, Literal
+
+from psycopg import sql
+
+from app.logistics.db import get_db_schema
+
+__all__ = [
+    "ItemPolicy",
+    "LotTurnover",
+    "TurnoverStatus",
+    "derive_turnover_status",
+    "effective_freshness_limit_days",
+    "elapsed_days",
+    "fefo_sort_key",
+    "freshness_days_of",
+    "is_disposal_candidate",
+    "load_item_policy",
+    "load_lot_turnover",
+    "remaining_turnover_days",
+    "sell_priority_of",
+]
+
+
+#: 회전 상태. **Persona 05 §4 어휘 그대로다.**
+#:
+#: ```text
+#: NORMAL                   판매우선 없음
+#: SELL_PRIORITY            판매를 우선 검토해야 하는 물류 Signal
+#: STORAGE_TARGET_EXCEEDED  회사 내부 회전목표 초과 (판매불가 아님)
+#: ```
+TurnoverStatus = Literal["NORMAL", "SELL_PRIORITY", "STORAGE_TARGET_EXCEEDED"]
+
+#: `sell_priority` 가 참인 상태들. `NORMAL` 만 거짓이다.
+_SELL_PRIORITY_STATUSES: frozenset[str] = frozenset({"SELL_PRIORITY", "STORAGE_TARGET_EXCEEDED"})
+
+_LOT_TURNOVER_COLUMNS = (
+    "lot_id",
+    "item_id",
+    "received_at",
+    "remaining_qty_kg",
+    "grade",
+    "operational_limit_days",
+    "medium_grade_factor",
+    "turnover_target_days",
+    "sell_priority_remaining_days",
+)
+
+
+@dataclass(frozen=True)
+class LotTurnover:
+    """Lot 하나의 회전·신선도 파생값. **아무것도 바꾸지 않는 계산 결과다.**"""
+
+    lot_id: str
+    item_id: str
+    received_at: date
+    remaining_qty_kg: Decimal
+    #: `as_of − received_at`. **미래 입고일이면 음수다** — 0 으로 보정하지 않는다.
+    elapsed_days: int
+    #: 회전 정책이 없는 품목이면 `None`. 0 으로 채우지 않는다.
+    remaining_turnover_days: int | None
+    turnover_status: TurnoverStatus | None
+    #: 🔴 `turnover_status` 가 `None` 이면 **거짓**이다 — 모르는 것을 신호로 올리지 않는다.
+    sell_priority: bool
+    #: Legacy 신선도 축. 정책이 없으면 `None`.
+    remaining_freshness_days: int | None
+    #: `remaining_freshness_days` 계산에 **실제 쓴** 유효 보관한계 (등급 계수 반영).
+    #:
+    #: ★ **잔여와 함께 낸다** — `repository._inventory_lot_from_row` 가 스냅샷에
+    #:   같은 칸을 싣는 이유와 같다: 신선도 잔여 **비율**의 분모는 원값이 아니라 이
+    #:   값이어야 하고, 하나만 주면 받는 쪽이 남은 하나로 역산한다.
+    #:   🔴 **둘은 함께 없거나 함께 있다.**
+    effective_freshness_limit_days: int | None
+    #: 회전 정책의 판매우선 경계 원값. 정책이 없으면 `None`.
+    #:
+    #: ★ **`turnover_status` 로 접지 않는다** — 상태는 *"판매우선인가"* 이고 이 값은
+    #:   *"며칠 남았을 때부터 그렇게 보나"* 다. 파생 상태만 내면 그 경계를 쓰는
+    #:   소비자가 정책 표를 **다시 읽는다**(같은 값의 두 번째 조회).
+    sell_priority_remaining_days: int | None
+    #: 🔴 **회전목표와 무관하다.** 근거는 Legacy 판매불가 기준 하나뿐이다.
+    disposal_candidate: bool
+
+
+def elapsed_days(*, received_at: date, as_of: date) -> int:
+    """입고 후 경과 일수. **달력일 기준이다.**
+
+    ```text
+    received_at == as_of  → 0
+    미래 입고일            → 음수 (그대로 둔다)
+    ```
+
+    🔴 **음수를 0 으로 조용히 보정하지 않는다.** 미래 입고일은 데이터가 이상하다는
+       신호인데, 0 으로 뭉개면 그 Lot 이 *"오늘 들어온 정상 재고"* 로 보인다.
+    """
+    return (as_of - received_at).days
+
+
+def remaining_turnover_days(*, target_days: int, received_at: date, as_of: date) -> int:
+    """회전목표까지 남은 일수.
+
+    ```text
+    remaining = operational_turnover_target_days − (as_of − received_at)
+    ```
+
+    ⚠️ **`operational_limit_days` 를 쓰지 않는다.** 그 값은 Legacy 신선도 축이고,
+       두 값은 지금 숫자가 같아도 뜻이 다르다 (Persona 05 §8.1).
+    """
+    return target_days - elapsed_days(received_at=received_at, as_of=as_of)
+
+
+def derive_turnover_status(
+    *, remaining_days: int, sell_priority_remaining_days: int
+) -> TurnoverStatus:
+    """회전 상태를 정한다. **경계가 계약이다.**
+
+    ```text
+    remaining <= 0                              STORAGE_TARGET_EXCEEDED
+    0 < remaining <= sell_priority_remaining_days  SELL_PRIORITY
+    그 외                                        NORMAL
+    ```
+
+    ★ `remaining == 0` 은 **목표를 채운 날**이라 `STORAGE_TARGET_EXCEEDED` 다 —
+      그날부터 회전목표를 넘긴 것으로 본다.
+    """
+    if remaining_days <= 0:
+        return "STORAGE_TARGET_EXCEEDED"
+    if remaining_days <= sell_priority_remaining_days:
+        return "SELL_PRIORITY"
+    return "NORMAL"
+
+
+def sell_priority_of(status: TurnoverStatus | None) -> bool:
+    """이 상태가 판매우선 Signal 인가.
+
+    🔴 **가격·할인·판매량을 정하지 않는다.** 물류는 *"우선 검토해야 한다"* 는 사실만
+       내고, 그 다음 행동은 Sales 소유다 (Persona 05 §7.1).
+
+    ★ `None`(정책 없음)은 **거짓**이다 — 모르는 것을 신호로 올리지 않는다.
+    """
+    return status in _SELL_PRIORITY_STATUSES
+
+
+def is_disposal_candidate(*, remaining_freshness_days: int | None) -> bool:
+    """폐기 검토가 필요한 재고인가.
+
+    🔴 **회전목표와 아무 관계가 없다.** `STORAGE_TARGET_EXCEEDED` 를 여기 잇지 않는다.
+
+    ★ **근거는 이미 있는 판매불가 기준 하나뿐이다** —
+      `tools.build_inventory_by_item` 이 `remaining_freshness_days <= 0` Lot 을
+      가용재고에서 빼고 있다. 그 **기존 사실을 재사용**할 뿐, 새 물리 Shelf-Life
+      숫자를 만들지 않는다 (`item_turnover_policies.physical_storage_limit_days` 는
+      실측 전부 NULL · `NOT_FIXED` 다).
+
+    ⚠️ **뜻을 좁게 읽어야 한다.** *"과학적으로 부패했다"* 가 아니라
+       *"현재 Legacy 계약상 판매 대상에서 빠져 폐기 검토가 필요하다"* 다.
+
+    ★ `None` 은 **거짓**이다 — 확인되지 않은 것을 후보로 올리지 않는다 (`0 != null`).
+    """
+    return remaining_freshness_days is not None and remaining_freshness_days <= 0
+
+
+def fefo_sort_key(
+    *, remaining_freshness_days: int | None, received_at: date, lot_id: str
+) -> tuple[bool, int, date, str]:
+    """FEFO 한 줄의 정렬 키. **순수 계산이고 결정론이다.**
+
+    ```text
+    ① 신선도 UNKNOWN 은 맨 뒤    모르는 것을 «가장 급하다» 로도 «가장 여유롭다» 로도 안 읽는다
+    ② remaining_freshness_days   ASC — 먼저 만료되는 것부터
+    ③ received_at                ASC — 만료가 같으면 오래된 것부터
+    ④ lot_id                     ASC — 안정 정렬 (목록 순서에 안 흔들린다)
+    ```
+
+    ★ **공개해 둔 이유가 `freshness_days_of` 와 같다.** 실제 자동 출고
+      (`outbound.recommend_fefo_candidates`)와 PRE_SALES 의 예상 원가 배부
+      (`tools.fefo_inventory_cost_basis`)가 **같은 순서**를 봐야 *"나갈 Lot"* 과
+      *"원가를 배부한 Lot"* 이 갈리지 않는다. 두 벌로 적으면 한쪽만 고쳐지는 날이 오고,
+      그때 나오는 것은 오류가 아니라 **맞지 않는 원가**다.
+
+    🔴 **정렬만 한다.** 어느 Lot 이 후보인가(상태·신선도 만료·예약/할당 차감)는 여기서
+       정하지 않는다 — 부르는 쪽이 이미 거른 것을 순서만 세운다.
+
+    ⚠️ `received_at` 은 `None` 을 받지 않는다. 순서를 모르는 Lot 을 아무 자리에나
+       끼우지 않으려고, 부르는 쪽이 **키를 만들기 전에** 막는다.
+    """
+    return (
+        remaining_freshness_days is None,
+        remaining_freshness_days if remaining_freshness_days is not None else 0,
+        received_at,
+        lot_id,
+    )
+
+
+def _cell(row: Any, index: int, name: str) -> Any:
+    if isinstance(row, Mapping):
+        return row[name]
+    return row[index]
+
+
+def effective_freshness_limit_days(행: Mapping[str, Any]) -> int | None:
+    """이 Lot 에 **실제로 적용되는** 보관한계. 🔴 **새 공식이 아니라 꺼낸 것이다.**
+
+    ```text
+    operational_limit_days               기본
+    정규화 등급이 `중` 이고 계수가 있으면  × medium_grade_factor  (내림)
+    한계가 없으면                         None — 0 으로 메우지 않는다
+    ```
+
+    ★ **`freshness_days_of` 가 이 함수를 쓴다.** 종전에는 그 함수 안에 있던 세 줄이고,
+      꺼낸 이유는 **신선도 잔여 비율의 분모**를 쓰는 자리가 생겼기 때문이다
+      (`tools.collect_freshness_lot_census` 가 스냅샷의 `effective_freshness_limit_days`
+      로 재는 그 값 · Exception 탐지의 압박 비율). 분모를 부르는 쪽이 다시 적으면
+      **`중` 등급이 갓 입고돼도 임박으로 읽히는** 그 왜곡이 되살아난다.
+
+    ⚠️ 등급 판단은 raw 가 아니라 `repository._normalize_grade` 결과 기준이다 —
+       정규화표에 없는 `상품` 계열은 `None` 이 되어 계수가 안 걸린다.
+    """
+    limit = 행["operational_limit_days"]
+    if limit is None:
+        return None
+    from app.logistics.repository import _normalize_grade
+
+    factor = 행["medium_grade_factor"]
+    if _normalize_grade(행["grade"]) == "중" and factor is not None:
+        limit = int(Decimal(limit) * Decimal(factor))
+    return int(limit)
+
+
+def freshness_days_of(행: Mapping[str, Any], *, as_of: date) -> int | None:
+    """Legacy 신선도 잔여. **`repository._inventory_lot_from_row` 와 같은 식이다.**
+
+    ★ **공개해 둔 이유가 있다.** 출고(`outbound._available_lots`)도 같은 값을 봐야
+      판매 가용에서 빠진 Lot 을 예약·할당이 다시 잡지 않는다. 두 벌로 만들면
+      한쪽만 고쳐지는 날이 온다.
+
+    :param 행: `operational_limit_days` · `medium_grade_factor` · `grade` ·
+        `received_at` 을 가진 매핑.
+
+    🔴 **새 유통기한 공식을 만들지 않는다.** 등급 판단도 저쪽과 같이 정규화 결과
+       기준이라, 정규화표가 비어 있는 `상품` 계열은 `None` 이 되어 계수가 안 걸린다.
+       ⚠️ **다만 raw `중` 은 정규화 어휘에 있어 그대로 통과하고, 그때 계수가 실제로
+       걸린다** — 같은 품목 안에서 유효 한계가 갈리므로 FEFO 순서가 입고순과 달라진다.
+    """
+    limit = effective_freshness_limit_days(행)
+    if limit is None:
+        return None
+    return limit - elapsed_days(received_at=행["received_at"], as_of=as_of)
+
+
+def _lot_turnover_from_row(행: Mapping[str, Any], *, as_of: date) -> LotTurnover:
+    target = 행["turnover_target_days"]
+    priority_days = 행["sell_priority_remaining_days"]
+    지난날 = elapsed_days(received_at=행["received_at"], as_of=as_of)
+
+    remaining: int | None = None
+    status: TurnoverStatus | None = None
+    if target is not None and priority_days is not None:
+        remaining = int(target) - 지난날
+        status = derive_turnover_status(
+            remaining_days=remaining, sell_priority_remaining_days=int(priority_days)
+        )
+
+    freshness = freshness_days_of(행, as_of=as_of)
+    return LotTurnover(
+        lot_id=행["lot_id"],
+        item_id=행["item_id"],
+        received_at=행["received_at"],
+        remaining_qty_kg=행["remaining_qty_kg"],
+        elapsed_days=지난날,
+        remaining_turnover_days=remaining,
+        turnover_status=status,
+        sell_priority=sell_priority_of(status),
+        remaining_freshness_days=freshness,
+        effective_freshness_limit_days=effective_freshness_limit_days(행),
+        sell_priority_remaining_days=None if priority_days is None else int(priority_days),
+        disposal_candidate=is_disposal_candidate(remaining_freshness_days=freshness),
+    )
+
+
+@dataclass(frozen=True)
+class ItemPolicy:
+    """품목 하나의 보관·회전 정책 한 벌. **두 표를 한 번에 읽는다.**
+
+    ★ **`load_lot_turnover` 와 같은 두 표를 본다.** 다른 점은 축이다 — 저쪽은 Lot 이라
+      재고가 있는 품목만 나오고, 이쪽은 **품목**이라 재고 0kg 인 품목의 정책도 읽힌다
+      (`repository.get_item_storage_policies` 가 Lot 에서 역산하지 않는 것과 같은 이유).
+
+    🔴 **관측일이 없다.** 두 표에 유효일 칸이 없어 *"그날 그 정책이었나"* 를 알 수 없다
+       (`agent.schemas.POLICY_OBSERVED_AS_OF`). 그래서 `as_of` 를 받지 않는다 —
+       받으면 과거를 복원한 척이 된다.
+    """
+
+    item_id: str
+    item_name: str | None
+    #: 보관 (`item_storage_policies`). 정책이 없으면 `None` — 0 으로 채우지 않는다.
+    operational_limit_days: int | None
+    medium_grade_factor: Decimal | None
+    #: 회전 (`item_turnover_policies`). 실측 5 중 3 품목뿐이다.
+    operational_turnover_target_days: int | None
+    sell_priority_remaining_days: int | None
+
+    @property
+    def has_storage_policy(self) -> bool:
+        return self.operational_limit_days is not None
+
+    @property
+    def has_turnover_policy(self) -> bool:
+        return self.operational_turnover_target_days is not None
+
+
+def load_item_policy(conn: Any, *, item_id: str) -> ItemPolicy | None:
+    """품목 하나의 정책. **품목 자체가 없으면 `None`.**
+
+    🔴 **정책 두 표를 `LEFT JOIN` 한다.** `INNER JOIN` 하면 정책이 없는 품목이
+       *"그런 품목이 없다"* 로 보인다 — `load_lot_turnover` 가 같은 이유로 같은 조인을
+       쓴다. 없는 정책은 **없다고 답하는 것**이 이 함수의 일이다.
+
+    ⚠️ **읽기만 한다.** 커밋도 롤백도 안 하고, 없는 정책의 기본값을 지어내지 않는다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT i.item_id, i.item_name,
+                       sp.operational_limit_days, sp.medium_grade_factor,
+                       tp.operational_turnover_target_days, tp.sell_priority_remaining_days
+                FROM {schema}.items i
+                LEFT JOIN {schema}.item_storage_policies sp ON sp.item_id = i.item_id
+                LEFT JOIN {schema}.item_turnover_policies tp ON tp.item_id = i.item_id
+                WHERE i.item_id = %(item_id)s
+                """
+            ).format(schema=schema),
+            {"item_id": item_id},
+        )
+        rows = cursor.fetchall()
+    if not rows:
+        return None
+    columns = (
+        "item_id",
+        "item_name",
+        "operational_limit_days",
+        "medium_grade_factor",
+        "operational_turnover_target_days",
+        "sell_priority_remaining_days",
+    )
+    row = {name: _cell(rows[0], index, name) for index, name in enumerate(columns)}
+    return ItemPolicy(
+        item_id=row["item_id"],
+        item_name=row["item_name"],
+        operational_limit_days=row["operational_limit_days"],
+        medium_grade_factor=row["medium_grade_factor"],
+        operational_turnover_target_days=row["operational_turnover_target_days"],
+        sell_priority_remaining_days=row["sell_priority_remaining_days"],
+    )
+
+
+def load_lot_turnover(
+    conn: Any, *, sim_run_id: str, as_of: date, lot_id: str | None = None
+) -> tuple[LotTurnover, ...]:
+    """창고에 남아 있는 Lot 들의 회전·신선도 파생값. **읽기만 한다.**
+
+    🔴 **`item_turnover_policies` 를 `LEFT JOIN` 한다.** 그 표는 실측 3품목뿐이라
+       `INNER JOIN` 하면 계약 밖 품목의 재고가 **조회에서 통째로 사라진다**
+       (DDL 주석이 같은 경고를 적어 두었다).
+
+    ★ **`repository` 의 Lot 조회와 같은 눈으로 고른다** — `remaining_qty_kg > 0` ·
+      `received_at <= as_of`. 상태로 거르지 않는다: 검수·격리 재고도 공간을
+      점유하고 회전 시계도 돈다.
+
+    ⚠️ **아무것도 바꾸지 않는다.** 가용재고 판정도 여기서 하지 않는다 — 그것은
+       `tools.build_inventory_by_item` 몫이고, 이 함수는 **파생 사실만** 낸다.
+
+    :param lot_id: 주면 그 Lot 하나만 읽는다 (폐기 확정이 쓴다).
+    """
+    schema = sql.Identifier(get_db_schema())
+    조건 = sql.SQL("AND l.lot_id = %(lot_id)s") if lot_id else sql.SQL("")
+    query = sql.SQL(
+        """
+        SELECT l.lot_id, l.item_id, l.received_at, l.remaining_qty_kg, l.grade,
+               sp.operational_limit_days, sp.medium_grade_factor,
+               tp.operational_turnover_target_days AS turnover_target_days,
+               tp.sell_priority_remaining_days
+        FROM {schema}.inventory_lots l
+        LEFT JOIN {schema}.item_storage_policies sp ON sp.item_id = l.item_id
+        LEFT JOIN {schema}.item_turnover_policies tp ON tp.item_id = l.item_id
+        WHERE l.sim_run_id = %(sim)s
+          AND l.received_at <= %(as_of)s
+          AND l.remaining_qty_kg > 0
+          {조건}
+        ORDER BY l.lot_id
+        """
+    ).format(schema=schema, 조건=조건)
+
+    with conn.cursor() as cursor:
+        cursor.execute(query, {"sim": sim_run_id, "as_of": as_of, "lot_id": lot_id})
+        rows = cursor.fetchall()
+
+    return tuple(
+        _lot_turnover_from_row(
+            {name: _cell(row, index, name) for index, name in enumerate(_LOT_TURNOVER_COLUMNS)},
+            as_of=as_of,
+        )
+        for row in rows
+    )

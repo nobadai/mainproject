@@ -1,0 +1,460 @@
+"""`logistics_exceptions` 한 표만 읽고 쓴다. **업무 판단이 여기 없다.**
+
+```text
+읽기   live_exceptions          **지금** 살아 있는(OPEN·PROPOSED) 행
+       live_exceptions_at       **그날** 살아 있던 행 — 과거 조사용 (Commit 3 Tool)
+       previous_exception_id_for 같은 축의 가장 최근 닫힌 행 — 재발을 잇는 고리
+       resolved_exceptions_on   **그날 닫힌** 행 — 화면의 «해소» 칸
+쓰기   open_exception           INSERT (status=OPEN)
+       touch_exception          UPDATE evidence · severity · last_detected · observed
+       resolve_exception        UPDATE status=RESOLVED
+```
+
+🔴 **커밋도 롤백도 안 한다.** 트랜잭션의 주인은 부르는 쪽이다
+   (`master/inspection.py` — `auto_maintenance` ↔ `master/maintenance.py` 와 같은 나눔).
+
+🔴 **상태를 여기서 정하지 않는다.** 무엇을 열고 무엇을 닫을지는 `detect.py` 가 정하고,
+   이 파일은 그 결정을 표에 옮기기만 한다.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
+
+from psycopg import sql
+
+from app.logistics.agent.schemas import (
+    LIVE_STATUSES,
+    ExceptionEvidence,
+    ExceptionRow,
+)
+from app.logistics.db import get_db_schema
+
+__all__ = [
+    "EXCEPTION_CLOSE_DATE_UNRESOLVED",
+    "EmptyEvidence",
+    "LiveExceptionsAt",
+    "exception_id_for",
+    "live_exceptions",
+    "live_exceptions_at",
+    "open_exception",
+    "previous_exception_id_for",
+    "resolve_exception",
+    "resolved_exceptions_on",
+    "touch_exception",
+]
+
+_COLUMNS = (
+    "exception_id",
+    "sim_run_id",
+    "code",
+    "subject_type",
+    "subject_id",
+    "severity",
+    "status",
+    "opened_as_of",
+    "last_detected_as_of",
+    "observed_as_of",
+    "resolved_as_of",
+    "resolved_by",
+    "risk_accepted_as_of",
+    "evidence_json",
+    "detector_version",
+    "previous_exception_id",
+    "note",
+)
+
+
+class EmptyEvidence(ValueError):
+    """근거 0 건으로 Exception 을 만들려 했다. 🔴 **DB CHECK 보다 먼저 막는다.**
+
+    ★ 제약이 이미 막지만 여기서 한 번 더 막는 이유는 **어느 탐지기가** 근거를 안
+      냈는지를 사유에 적기 위해서다 — DB 오류 문자열에는 그것이 없다.
+    """
+
+
+def _schema() -> sql.Identifier:
+    return sql.Identifier(get_db_schema())
+
+
+def _rows(conn: Any, query: sql.Composed, params: Any) -> list[dict[str, Any]]:
+    with conn.cursor() as cursor:
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _row(raw: dict[str, Any]) -> ExceptionRow:
+    evidence_rows = raw["evidence_json"] or []
+    if isinstance(evidence_rows, str):  # jsonb 를 문자열로 돌려주는 드라이버 설정 대비
+        evidence_rows = json.loads(evidence_rows)
+    return ExceptionRow(
+        exception_id=raw["exception_id"],
+        sim_run_id=raw["sim_run_id"],
+        code=raw["code"],
+        subject_type=raw["subject_type"],
+        subject_id=raw["subject_id"],
+        severity=raw["severity"],
+        status=raw["status"],
+        opened_as_of=raw["opened_as_of"],
+        last_detected_as_of=raw["last_detected_as_of"],
+        observed_as_of=raw["observed_as_of"],
+        evidence=tuple(ExceptionEvidence.from_json(one) for one in evidence_rows),
+        detector_version=raw["detector_version"],
+        resolved_as_of=raw["resolved_as_of"],
+        resolved_by=raw["resolved_by"],
+        risk_accepted_as_of=raw["risk_accepted_as_of"],
+        previous_exception_id=raw["previous_exception_id"],
+        note=raw["note"],
+    )
+
+
+def live_exceptions(conn: Any, *, sim_run_id: str) -> tuple[ExceptionRow, ...]:
+    """지금 살아 있는 Exception 전부. **축은 실행 하나다.**
+
+    🔴 **`as_of` 로 자르지 않는다.** Exception 은 열린 뒤 닫힐 때까지 계속 살아 있는
+       상태이지 그날의 사건이 아니다 — 어제 열린 행을 오늘 못 보면 같은 문제로 새 행을
+       또 만든다.
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT {columns}
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND status = ANY(%(live)s)
+            ORDER BY exception_id
+            """
+        ).format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _COLUMNS),
+            schema=_schema(),
+        ),
+        {"sim": sim_run_id, "live": list(LIVE_STATUSES)},
+    )
+    return tuple(_row(raw) for raw in rows)
+
+
+#: 닫힌 행인데 **닫은 날이 없다.** 그날 살아 있었는지 증명할 수 없어 과거 조회에서
+#: 뺀다 — 넣으면 이미 끝난 문제를 조사하라고 올리는 것이 된다.
+#: 🔴 지금 production 에서는 안 난다 (`resolve_exception` 이 `resolved_as_of` 를 함께
+#:    적는다). 사람이 손으로 닫은 행을 대비해 규칙만 세워 둔다.
+EXCEPTION_CLOSE_DATE_UNRESOLVED = "EXCEPTION_CLOSE_DATE_UNRESOLVED"
+
+
+@dataclass(frozen=True)
+class LiveExceptionsAt:
+    """그날 살아 있던 행 + **그 목록을 그렇게 만든 날들.**
+
+    ★ `membership_dates` 가 따로 있는 이유: 목록은 열린 날로만 정해지지 않는다.
+      *"D7 에 하나가 닫혀서 D8 목록이 이렇다"* 는 사실의 관측일은 **D7** 이다 —
+      살아남은 행들의 `opened_as_of` 만 모으면 그 D7 이 통째로 사라진다.
+
+    🔴 **`uncertainties` 가 비지 않으면 목록이 확정된 것이 아니다.** 닫힌 날을 못 댄
+       행이 하나라도 있으면 그날 목록을 증명할 수 없다.
+    """
+
+    rows: tuple[ExceptionRow, ...]
+    #: 그날까지 목록을 바꾼 모든 날 (열린 날 · 닫힌 날).
+    membership_dates: tuple[date, ...]
+    uncertainties: tuple[str, ...]
+
+
+def live_exceptions_at(conn: Any, *, sim_run_id: str, as_of: date) -> LiveExceptionsAt:
+    """**그날** 살아 있던 Exception 과 못 가른 것들. 🔴 지금 값을 과거로 쓰지 않는다.
+
+    ```text
+    열렸다      opened_as_of <= as_of                    그날 이미 장부에 서 있었다
+    안 닫혔다   status 가 아직 살아 있다                  ← 상태는 앞으로만 간다
+             또는 resolved_as_of > as_of                 그날 뒤에 닫혔다
+    ```
+
+    🔴 **`live_exceptions` 만으로는 과거를 못 센다.** 저 함수는 *"지금"* 살아 있는 행을
+       내므로 두 가지로 틀린다 — ① `opened_as_of > as_of` 인 **미래 문제**가 섞이고
+       (look-ahead), ② 그날 열려 있다가 **그 뒤 닫힌** 문제가 통째로 빠진다.
+       ②는 조사에서 *"그날 아무 문제 없었다"* 로 읽혀 더 위험하다.
+
+    ★ **재오픈이 없어서 이 셈이 성립한다.** 재발은 새 행 + `previous_exception_id` 라
+      (§6.3) 한 행의 상태는 앞으로만 간다 — 지금 `OPEN` 인데 `opened_as_of <= as_of` 면
+      그날에도 `OPEN` 이었다.
+
+    ⚠️ **닫은 날을 모르는 닫힌 행은 뺀다.** 그날 살아 있었음을 증명할 수 없다 —
+       사유를 함께 돌려준다 (`EXCEPTION_CLOSE_DATE_UNRESOLVED:{exception_id}`).
+
+    ⚠️ **행이 들고 있는 `severity` · `evidence_json` · `last_detected_as_of` ·
+       `observed_as_of` · `note` 는 «지금» 값이다.** `touch_exception` 이 매일 덮으므로
+       이 함수가 돌려주는 행의 그 칸들은 **과거 값이 아니다** — 그날 값으로 읽어도 되는지는
+       `last_detected_as_of <= as_of` 로 부르는 쪽이 가른다 (`agent.tools.get_open_exceptions`).
+       여기서 미리 비우지 않는 이유는, 이 함수가 표를 그대로 내는 자리이기 때문이다.
+
+    :returns: 그날 살아 있던 행들 · 목록을 바꾼 날들 · 못 가른 사유들.
+        🔴 **아무것도 쓰지 않는다.**
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT {columns}
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND opened_as_of <= %(as_of)s
+            ORDER BY exception_id
+            """
+        ).format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _COLUMNS),
+            schema=_schema(),
+        ),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    live: list[ExceptionRow] = []
+    uncertainties: list[str] = []
+    # 열린 날은 전부 목록을 바꾼 날이다 (WHERE 가 이미 `<= as_of` 로 잘랐다).
+    membership_dates = {raw["opened_as_of"] for raw in rows}
+    for raw in rows:
+        closed_as_of = raw["resolved_as_of"]
+        if closed_as_of is not None and closed_as_of <= as_of:
+            # 그날 이전에 닫혔다 — 목록에서 내려간 날도 목록을 바꾼 날이다.
+            membership_dates.add(closed_as_of)
+            continue
+        if raw["status"] in LIVE_STATUSES or closed_as_of is not None:
+            # 상태는 앞으로만 간다 — 지금 살아 있고 그날 이미 열렸으면 그날에도 살아 있었다.
+            live.append(_row(raw))
+            continue
+        # 닫힌 행인데 닫힌 날이 없다 — 그날 살아 있었음을 증명할 수 없다.
+        uncertainties.append(f"{EXCEPTION_CLOSE_DATE_UNRESOLVED}:{raw['exception_id']}")
+    return LiveExceptionsAt(
+        rows=tuple(live),
+        membership_dates=tuple(sorted(membership_dates)),
+        uncertainties=tuple(uncertainties),
+    )
+
+
+def resolved_exceptions_on(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[ExceptionRow, ...]:
+    """**그날 닫힌** Exception 들. 🔴 `live_exceptions_at` 이 못 내는 나머지 반쪽이다.
+
+    ```text
+    live_exceptions_at      그날 아직 살아 있던 행   ← 닫힌 행은 빠진다
+    resolved_exceptions_on  그날 닫힌 행            ← 이 함수
+    ```
+
+    ★ **두 목록은 겹치지 않는다.** 저쪽은 `resolved_as_of <= as_of` 를 빼고, 이쪽은
+      `resolved_as_of = as_of` 만 낸다. 그래서 «그날 화면» 은 둘을 이어 붙이면 된다.
+
+    🔴 **`DISMISSED` 는 세지 않는다.** 사람이 덮은 것과 조건이 없어진 것은 다른
+       사실이다 (`resolve_exception` 이 쓰는 것은 `RESOLVED` 뿐이다). 덮은 문제를
+       «해소» 로 세면 그날 창고가 나아진 것처럼 읽힌다.
+
+    ⚠️ **행이 들고 있는 «지금» 값들은 여기서도 그대로다** (`live_exceptions_at` 의
+       같은 주의). 그날 값으로 읽어도 되는지는 부르는 쪽이 가른다.
+
+    :returns: 그날 닫힌 행들. 🔴 **아무것도 쓰지 않는다.**
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT {columns}
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND status = 'RESOLVED'
+              AND resolved_as_of = %(as_of)s
+            ORDER BY exception_id
+            """
+        ).format(
+            columns=sql.SQL(", ").join(sql.Identifier(name) for name in _COLUMNS),
+            schema=_schema(),
+        ),
+        {"sim": sim_run_id, "as_of": as_of},
+    )
+    return tuple(_row(raw) for raw in rows)
+
+
+def previous_exception_id_for(
+    conn: Any, *, sim_run_id: str, code: str, subject_type: str, subject_id: str
+) -> str | None:
+    """같은 축에서 **가장 최근에 닫힌** Exception 의 ID. 없으면 `None`.
+
+    ★ 재발을 새 행으로 열되 **이전 행을 가리킨다** (§6.3). 재오픈하지 않는 이유는
+      닫힌 날과 다시 열린 날이 한 행에 겹치면 *"며칠째"* 를 셀 수 없어서다.
+
+    ⚠️ `DISMISSED` 도 대상이다 — 사람이 한 번 덮은 문제가 다시 나왔다는 것은 이어서
+       보여야 할 사실이다.
+    """
+    rows = _rows(
+        conn,
+        sql.SQL(
+            """
+            SELECT exception_id
+            FROM {schema}.logistics_exceptions
+            WHERE sim_run_id = %(sim)s
+              AND code = %(code)s
+              AND subject_type = %(subject_type)s
+              AND subject_id = %(subject_id)s
+              AND status NOT IN ('OPEN', 'PROPOSED')
+            ORDER BY COALESCE(resolved_as_of, last_detected_as_of) DESC, exception_id DESC
+            LIMIT 1
+            """
+        ).format(schema=_schema()),
+        {
+            "sim": sim_run_id,
+            "code": code,
+            "subject_type": subject_type,
+            "subject_id": subject_id,
+        },
+    )
+    return rows[0]["exception_id"] if rows else None
+
+
+def exception_id_for(
+    conn: Any, *, sim_run_id: str, code: str, subject_id: str, opened_as_of: date
+) -> str:
+    """`EX-{실행}-{코드}-{대상}-{연월일}`. **업무 키다 — 같은 날 같은 대상은 하나.**
+
+    ⚠️ 그런데 하루 안에 닫고 다시 여는 일이 생기면 같은 이름이 두 번 필요하다.
+       production 흐름에서는 안 난다(닫는 판과 다시 잡는 판이 같은 탐지라 서로 배타다)
+       — 그래도 **이름이 겹치면 조용히 덮는 대신 뒤에 번호를 붙인다.** PK 충돌로
+       하루가 터지는 것보다 낫고, 번호가 붙었다는 것 자체가 그날의 이상 신호다.
+    """
+    base = f"EX-{sim_run_id}-{code}-{subject_id}-{opened_as_of:%Y%m%d}"
+    candidate = base
+    suffix = 1
+    while _exists(conn, exception_id=candidate):
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    return candidate
+
+
+def _exists(conn: Any, *, exception_id: str) -> bool:
+    rows = _rows(
+        conn,
+        sql.SQL(
+            "SELECT 1 AS 있음 FROM {schema}.logistics_exceptions WHERE exception_id = %s"
+        ).format(schema=_schema()),
+        [exception_id],
+    )
+    return bool(rows)
+
+
+def open_exception(conn: Any, *, row: ExceptionRow) -> ExceptionRow:
+    """새 Exception 한 행. 🔴 **근거가 비면 만들지 않는다.**"""
+    if not row.evidence:
+        raise EmptyEvidence(
+            f"{row.code}/{row.subject_id} 에 근거가 하나도 없다 —"
+            " 근거 없는 Exception 은 «판단» 이 아니라 «추측» 이다"
+        )
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                INSERT INTO {schema}.logistics_exceptions (
+                    exception_id, sim_run_id, code, subject_type, subject_id,
+                    severity, status, opened_as_of, last_detected_as_of, observed_as_of,
+                    evidence_json, detector_version, previous_exception_id, note
+                ) VALUES (
+                    %(exception_id)s, %(sim)s, %(code)s, %(subject_type)s, %(subject_id)s,
+                    %(severity)s, %(status)s, %(opened)s, %(detected)s, %(observed)s,
+                    %(evidence)s::jsonb, %(detector_version)s, %(previous)s, %(note)s
+                )
+                """
+            ).format(schema=_schema()),
+            {
+                "exception_id": row.exception_id,
+                "sim": row.sim_run_id,
+                "code": row.code,
+                "subject_type": row.subject_type,
+                "subject_id": row.subject_id,
+                "severity": row.severity,
+                "status": row.status,
+                "opened": row.opened_as_of,
+                "detected": row.last_detected_as_of,
+                "observed": row.observed_as_of,
+                "evidence": _evidence_json(row.evidence),
+                "detector_version": row.detector_version,
+                "previous": row.previous_exception_id,
+                "note": row.note,
+            },
+        )
+    return row
+
+
+def touch_exception(
+    conn: Any,
+    *,
+    exception_id: str,
+    severity: str,
+    evidence: Sequence[ExceptionEvidence],
+    last_detected_as_of: date,
+    observed_as_of: date | None,
+) -> None:
+    """같은 문제가 **오늘도** 참이다. 🔴 **`status` 와 `opened_as_of` 는 안 건드린다.**
+
+    ★ 그 둘이 불변인 것이 *"며칠째"* 의 근거다. 매일 새 행을 만들면 그 수가 사라지고,
+      `status` 를 되돌리면 조사·제안이 붙은 문제가 조용히 처음으로 돌아간다.
+    """
+    if not evidence:
+        raise EmptyEvidence(f"{exception_id} 를 근거 없이 갱신할 수 없다")
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {schema}.logistics_exceptions
+                   SET severity = %(severity)s,
+                       evidence_json = %(evidence)s::jsonb,
+                       last_detected_as_of = %(detected)s,
+                       observed_as_of = %(observed)s,
+                       updated_at = now()
+                 WHERE exception_id = %(exception_id)s
+                """
+            ).format(schema=_schema()),
+            {
+                "severity": severity,
+                "evidence": _evidence_json(evidence),
+                "detected": last_detected_as_of,
+                "observed": observed_as_of,
+                "exception_id": exception_id,
+            },
+        )
+
+
+def resolve_exception(
+    conn: Any,
+    *,
+    exception_id: str,
+    as_of: date,
+    resolved_by: str,
+    note: str | None = None,
+) -> None:
+    """조건이 사라졌다. **결정론이 닫는다 — 사람 확인을 기다리지 않는다.**
+
+    :param resolved_by: 무엇이 닫았나 (`REDETECT` · `LOT_EMPTY` · `COMMITTED` ·
+        `ESCALATED:FRESHNESS_EXPIRED`). 🔴 **사람 이름을 지어내지 않는다.**
+    """
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {schema}.logistics_exceptions
+                   SET status = 'RESOLVED',
+                       resolved_as_of = %(as_of)s,
+                       resolved_by = %(resolved_by)s,
+                       note = COALESCE(%(note)s, note),
+                       updated_at = now()
+                 WHERE exception_id = %(exception_id)s
+                   AND status = ANY(%(live)s)
+                """
+            ).format(schema=_schema()),
+            {
+                "as_of": as_of,
+                "resolved_by": resolved_by,
+                "note": note,
+                "exception_id": exception_id,
+                "live": list(LIVE_STATUSES),
+            },
+        )
+
+
+def _evidence_json(evidence: Sequence[ExceptionEvidence]) -> str:
+    return json.dumps([one.as_json() for one in evidence], ensure_ascii=False)
