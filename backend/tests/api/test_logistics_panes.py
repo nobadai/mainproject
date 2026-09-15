@@ -153,6 +153,8 @@ def 화면(monkeypatch):
             "runtime_coverage_at",
             lambda *a, **k: SimpleNamespace(has_snapshot=True, first_as_of=AS_OF, last_as_of=AS_OF),
         )
+        #  ★ Runtime 읽기는 한 판에 한 번 — 대역은 «그날 스냅샷 없음» 으로 둔다.
+        monkeypatch.setattr(logistics_query, "load_console_runtime", lambda **k: None)
         monkeypatch.setattr(logistics_query, "get_inventory_console", lambda **k: inv)
         monkeypatch.setattr(
             logistics_query,
@@ -370,15 +372,23 @@ def _resv(rid: str, *, status: str, allocated: str, unallocated: str, shipped: b
     )
 
 
-def test_FEFO_는_미할당이_남은_예약에만_묻고_끝난_예약은_표에서_뺀다(monkeypatch):
-    물은것: list[str] = []
+def _가짜_후보(물은것: list[tuple[str, ...]]):
+    """`get_fefo_candidates_by_item` 대역 — 어느 품목을 물었는지 적고 품목마다 후보 하나."""
 
-    def 가짜_fefo(*, reservation_id: str, as_of: date):
-        물은것.append(reservation_id)
-        return SimpleNamespace(candidates=[SimpleNamespace(
-            lot_id="LOT-1", grade="상", available_qty_kg=Decimal(10), remaining_freshness_days=3)])
+    def 대역(*, conn: Any, sim_run_id: str, item_ids: Any, as_of: date):
+        품목 = sorted(set(item_ids))
+        물은것.append(tuple(품목))
+        후보 = SimpleNamespace(
+            lot_id="LOT-1", grade="상", available_qty_kg=Decimal(10), remaining_freshness_days=3
+        )
+        return {item_id: [후보] for item_id in 품목}
 
-    monkeypatch.setattr(logistics_query, "get_reservation_fefo_console", 가짜_fefo)
+    return 대역
+
+
+def test_FEFO_는_미할당이_남은_예약에만_그리고_끝난_예약은_표에서_뺀다(monkeypatch):
+    물은것: list[tuple[str, ...]] = []
+    monkeypatch.setattr(logistics_query, "get_fefo_candidates_by_item", _가짜_후보(물은것))
     ob = SimpleNamespace(reservations=[
         #  전량 출고 · Lot 아직 안 고름 · 배정됐지만 미출고 · 놓아줌
         _resv("R-DONE", status="ALLOCATED", allocated="0", unallocated="0", shipped=True),
@@ -386,7 +396,61 @@ def test_FEFO_는_미할당이_남은_예약에만_묻고_끝난_예약은_표�
         _resv("R-HOLD", status="ALLOCATED", allocated="100", unallocated="0", shipped=False),
         _resv("R-GONE", status="RELEASED", allocated="0", unallocated="0", shipped=False),
     ])
-    pane = logistics_query._outbound_pane(ob, AS_OF)
-    assert 물은것 == ["R-WAIT"]                                  # 164번 묻던 자리
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
+    #  🔴 품목마다 한 번 묻고(164번 묻던 자리), 표에는 미할당이 남은 예약만 오른다.
+    assert 물은것 == [(ITEM_ON_SCREEN,)]
+    fefo = 카드(pane, "fefo").table
+    assert fefo is not None and [row["resv"] for row in fefo.rows] == ["R-WAIT"]
     예약 = next(s for s in pane.stats if s.label == "예약")
     assert 예약.value == "2" and "2건은 뺐습니다" in (예약.detail or "")  # 숨기지 않고 적는다
+
+
+def test_FEFO_는_같은_품목_예약_여럿에_한_번만_묻고_예약마다_순서를_다시_센다(monkeypatch):
+    물은것: list[tuple[str, ...]] = []
+    monkeypatch.setattr(logistics_query, "get_fefo_candidates_by_item", _가짜_후보(물은것))
+    ob = SimpleNamespace(reservations=[
+        _resv("R-1", status="RESERVED", allocated="0", unallocated="100", shipped=False),
+        _resv("R-2", status="RESERVED", allocated="0", unallocated="50", shipped=False),
+    ])
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
+    assert 물은것 == [(ITEM_ON_SCREEN,)]
+    fefo = 카드(pane, "fefo").table
+    assert fefo is not None
+    assert [(row["resv"], row["rank"]) for row in fefo.rows] == [("R-1", 1), ("R-2", 1)]
+
+
+def test_그릴_예약이_없으면_FEFO_를_묻지도_않는다(monkeypatch):
+    물은것: list[tuple[str, ...]] = []
+    monkeypatch.setattr(logistics_query, "get_fefo_candidates_by_item", _가짜_후보(물은것))
+    ob = SimpleNamespace(reservations=[
+        _resv("R-HOLD", status="ALLOCATED", allocated="100", unallocated="0", shipped=False),
+    ])
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
+    assert 물은것 == []
+    assert next(s for s in pane.stats if s.label == "FEFO 후보").value == "0"
+
+
+def test_화면_한_판은_커넥션_하나로_읽는다(화면, monkeypatch):
+    """🔴 조회마다 커넥션을 새로 열던 구조(한 판 23개)를 잠근다."""
+    열린것: list[int] = []
+
+    def 세는_커넥션():
+        열린것.append(1)
+        return _커넥션()
+
+    result = 화면(live=(), resolved=())
+    assert result.http_status == 200
+    monkeypatch.setattr(logistics_query, "get_connection", 세는_커넥션)
+    logistics_query.build_result(AS_OF, "summary")
+    assert len(열린것) == 1
+
+
+def test_console_service_는_커넥션을_열지_않는다() -> None:
+    """★ 커넥션의 주인은 `build_result` 다 — 조회 계층이 자기 것을 열면 다시 늘어난다."""
+    import inspect
+
+    from app.logistics import console_service
+
+    코드 = inspect.getsource(console_service)
+    assert "get_connection" not in 코드
+    assert "psycopg.connect" not in 코드

@@ -15,13 +15,18 @@
 import logging
 from datetime import date
 from decimal import Decimal
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import psycopg
 from psycopg import sql
 
 from app.logistics.db import fetch_all, get_connection, get_db_schema
-from app.logistics.inbound_schedules import in_transit_at, pending_inbound_at
+from app.logistics.inbound_schedules import (
+    InboundScheduleView,
+    in_transit_from,
+    load_schedule_views,
+    pending_inbound_from,
+)
 from app.logistics.outbound import (
     _ASSIGNED_ALLOCATION,
     _HOLDING_ALLOCATION,
@@ -77,7 +82,33 @@ _OPTIONAL_NUMERIC_POLICY_KEYS = {
 _INTEGER_POLICY_KEYS = {"inbound_lead_days", "outbound_prep_lead_days"}
 
 
-def get_active_logistics_policy() -> LogisticsPolicy:
+# ── 커넥션 ──────────────────────────────────────────────────────────────
+#
+#  ★ **이 모듈의 읽기 함수는 커넥션을 빌려 쓸 수 있다** (`conn=` · 2026-09-15). 화면 한 판이
+#    이 모듈을 거쳐 fixture · 정책 · Lot · 보관정책 · 예약 축 · 운송 계약 · 일정을 읽는데,
+#    종전에는 `fetch_all` 이 호출마다 `psycopg.connect` 를 해 **한 요청에 커넥션 9개**가
+#    여기서만 열렸다 (원격 DB · 연결당 14~22 ms). 이제 `build_result` 가 하나를 열어 넘긴다.
+#
+#  🔴 **`conn` 이 없으면 종전 그대로다.** 어댑터(Agent Runtime)는 커넥션을 안 넘기고
+#     (`adapter.py` 는 `app.logistics.db` 를 임포트하지 못하게 잠겨 있다), 그 경로는 지금처럼
+#     `fetch_all(query, params)` 를 **위치 인자 그대로** 부른다 — 그 호출을 파라미터 순서로
+#     재는 검사들(`test_logistics_service_repository`)이 있어 모양을 안 바꾼다.
+
+
+def _rows(conn: Any, query: Any, params: Any) -> list[dict[str, Any]]:
+    with conn.cursor() as cursor:
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _fetch(query: Any, params: Any, conn: Any | None) -> list[dict[str, Any]]:
+    """`conn` 이 있으면 그 커넥션으로, 없으면 `fetch_all`(자기 커넥션)로 읽는다."""
+    if conn is None:
+        return fetch_all(query, params)
+    return _rows(conn, query, params)
+
+
+def get_active_logistics_policy(*, conn: Any | None = None) -> LogisticsPolicy:
     """현재 Logistics MVP 범위의 active policy를 typed contract로 조회한다."""
     query = sql.SQL(
         """
@@ -97,9 +128,10 @@ def get_active_logistics_policy() -> LogisticsPolicy:
           AND is_active = TRUE
         """
     ).format(sql.Identifier(get_db_schema()))
-    rows = fetch_all(
+    rows = _fetch(
         query,
         ["logistics", LOGISTICS_POLICY_VERSION, LOGISTICS_POLICY_USAGE_SCOPE],
+        conn,
     )
     return _build_logistics_policy(rows)
 
@@ -164,9 +196,22 @@ def _build_logistics_policy(rows: list[dict[str, object]]) -> LogisticsPolicy:
 
 
 def get_active_logistics_runtime_fixture(
-    *, as_of: date, sim_run_id: str | None = None
+    *, as_of: date, sim_run_id: str | None = None, conn: Any | None = None
 ) -> LogisticsRuntimeFixture:
     """요청 기준일과 정확히 일치하는 active MVP runtime fixture 한 건을 조회한다.
+
+    ★ 몸통은 `_runtime_fixture_and_views` 다 — 같은 읽기가 일정 views 도 함께 내고,
+      `get_current_logistics_read` 는 그것을 `LogisticsRead` 에 실어 화면이 다시
+      안 읽게 한다. 이 함수는 Header 만 필요한 호출자를 위한 껍질이다.
+    """
+    fixture, _views = _runtime_fixture_and_views(as_of=as_of, sim_run_id=sim_run_id, conn=conn)
+    return fixture
+
+
+def _runtime_fixture_and_views(
+    *, as_of: date, sim_run_id: str | None = None, conn: Any | None = None
+) -> tuple[LogisticsRuntimeFixture, tuple[InboundScheduleView, ...]]:
+    """요청 기준일과 정확히 일치하는 active MVP runtime fixture 한 건 + 그날 일정 views.
 
     🔴 **조회 축은 `(sim_run_id, as_of, usage_scope)` 다** — DB 의 유일성 축
        (`uq_log_runtime_fixture`)과 **같은 축이다.** 다르면 유일해야 할 조회가 유일하지
@@ -199,7 +244,7 @@ def get_active_logistics_runtime_fixture(
     if sim_run_id is not None:
         실행조건 = sql.SQL("AND sim_run_id = %s")
         params.append(sim_run_id)
-    rows = fetch_all(
+    rows = _fetch(
         sql.SQL(
             """
             SELECT
@@ -222,6 +267,7 @@ def get_active_logistics_runtime_fixture(
             """
         ).format(schema, 실행조건),
         params,
+        conn,
     )
     # 🔴 0건과 2건 이상은 **다른 종류의 실패다** (#121 4단계 · 2026-09-01 교차검증 지적).
     #
@@ -246,14 +292,19 @@ def get_active_logistics_runtime_fixture(
             f"Expected exactly one active Logistics runtime fixture, found {len(rows)}{실행}"
         )
     return _build_logistics_runtime_fixture(
-        rows[0], expected_as_of=as_of, expected_sim_run_id=sim_run_id
+        rows[0], expected_as_of=as_of, expected_sim_run_id=sim_run_id, conn=conn
     )
 
 
 def _schedule_lists(
-    *, sim_run_id: str, as_of: date
-) -> tuple[list[InTransitItem], list[ScheduledQuantity], list[ScheduledQuantity]]:
-    """세 예정 목록을 **각자의 업무 정본에서** 읽는다 (W3-2 · WP-3).
+    *, sim_run_id: str, as_of: date, conn: Any | None = None
+) -> tuple[
+    list[InTransitItem],
+    list[ScheduledQuantity],
+    list[ScheduledQuantity],
+    tuple[InboundScheduleView, ...],
+]:
+    """세 예정 목록을 **각자의 업무 정본에서** 읽는다 (W3-2 · WP-3). 넷째는 그 원천 views.
 
     ```text
     in_transit           inbound_schedules   Receipt 가 생기면 빠진다     운송 중
@@ -271,22 +322,39 @@ def _schedule_lists(
        구조에서는 종료조건이 다르다. `in_transit ⊆ confirmed_inbound` 라 B-1
        (`tools.find_in_transit_schedule_gap`)은 그대로 통과한다.
 
-    ⚠️ **자기 커넥션을 연다.** 이 모듈은 `fetch_all` 로 호출마다 커넥션을 여는 기존
-       구현이고(`get_current_logistics_read` docstring 이 그 사실을 이미 적어 뒀다),
-       여기서 그 규약을 바꾸지 않는다.
+    ★ **일정 표는 한 번만 읽는다.** 앞의 두 목록은 같은 `load_schedule_views` 결과를
+      각자의 종료조건(`in_transit_from` · `pending_inbound_from`)으로 거른 것이라,
+      따로 읽으면 같은 289행 질의를 두 번 보낸다 (실측 2026-09-15 · 81 ms × 2).
+      규칙은 `inbound_schedules` 가 그대로 소유한다.
+
+    ⚠️ **`conn` 이 없으면 자기 커넥션을 연다** (어댑터 경로 · 종전 그대로). 화면은
+       `build_result` 가 연 하나를 넘긴다 (이 모듈 머리의 «커넥션» 절).
     """
-    with get_connection() as conn:
+
+    def 읽기(c: Any):
+        views = load_schedule_views(c, sim_run_id=sim_run_id, as_of=as_of)
         return (
-            in_transit_at(conn, sim_run_id=sim_run_id, as_of=as_of),
-            pending_inbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
-            confirmed_outbound_at(conn, sim_run_id=sim_run_id, as_of=as_of),
+            in_transit_from(views),
+            pending_inbound_from(views),
+            confirmed_outbound_at(c, sim_run_id=sim_run_id, as_of=as_of),
+            views,
         )
+
+    if conn is not None:
+        return 읽기(conn)
+    with get_connection() as own:
+        return 읽기(own)
 
 
 def _build_logistics_runtime_fixture(
-    row: dict[str, object], *, expected_as_of: date, expected_sim_run_id: str | None = None
-) -> LogisticsRuntimeFixture:
-    """fixture 행 하나를 계약 타입으로. **입고 예정 두 목록만 신규 표에서 온다 (W3-2).**
+    row: dict[str, object],
+    *,
+    expected_as_of: date,
+    expected_sim_run_id: str | None = None,
+    conn: Any | None = None,
+) -> tuple[LogisticsRuntimeFixture, tuple[InboundScheduleView, ...]]:
+    """fixture 행 하나를 계약 타입으로 (+ 그 목록을 만든 일정 views).
+    **입고 예정 두 목록만 신규 표에서 온다 (W3-2).**
 
     ```text
     업무 정본에서  in_transit · confirmed_inbound · confirmed_outbound
@@ -320,8 +388,8 @@ def _build_logistics_runtime_fixture(
 
     # ── W3-2 · WP-3: 세 목록의 정본이 전부 fixture JSON 밖으로 옮겨 왔다 ──
     run_id = str(row.get("sim_run_id"))
-    in_transit, confirmed_inbound, confirmed_outbound = _schedule_lists(
-        sim_run_id=run_id, as_of=expected_as_of
+    in_transit, confirmed_inbound, confirmed_outbound, views = _schedule_lists(
+        sim_run_id=run_id, as_of=expected_as_of, conn=conn
     )
     in_transit_status, in_transit_list = _schedule_source(
         row.get("in_transit_status"), in_transit
@@ -332,7 +400,7 @@ def _build_logistics_runtime_fixture(
     outbound_status, outbound_list = _schedule_source(
         row.get("confirmed_outbound_status"), confirmed_outbound
     )
-    return LogisticsRuntimeFixture(
+    fixture = LogisticsRuntimeFixture(
         fixture_id=row.get("fixture_id"),
         sim_run_id=row.get("sim_run_id"),
         as_of=row.get("as_of"),
@@ -347,6 +415,7 @@ def _build_logistics_runtime_fixture(
         source_ref=row.get("source_ref"),
         approved_by=row.get("approved_by"),
     )
+    return fixture, views
 
 
 def _schedule_source[Schedule: (InTransitItem, ScheduledQuantity)](
@@ -366,14 +435,14 @@ def _schedule_source[Schedule: (InTransitItem, ScheduledQuantity)](
     return ("CONFIRMED" if rows else "CONFIRMED_ZERO"), rows
 
 
-def get_item_storage_policies() -> list[ItemStoragePolicyFact]:
+def get_item_storage_policies(*, conn: Any | None = None) -> list[ItemStoragePolicyFact]:
     """품목 단위 보관 정책을 조회한다.
 
     Lot 목록에서 역산하지 않는다 — 새로 매입하려는 품목은 현재 재고가 0kg일 수 있고
     그때도 보관한계는 알아야 한다. 정책 테이블 자체를 기준으로 읽는다.
     """
     schema = sql.Identifier(get_db_schema())
-    rows = fetch_all(
+    rows = _fetch(
         sql.SQL(
             """
             SELECT
@@ -386,6 +455,7 @@ def get_item_storage_policies() -> list[ItemStoragePolicyFact]:
             """
         ).format(schema, schema),
         [],
+        conn,
     )
     return [_item_storage_policy_from_row(row) for row in rows]
 
@@ -421,6 +491,12 @@ class LogisticsRead(NamedTuple):
 
     ★ 두 읽기가 여전히 다른 connection 인 것(조회 원자성)은 별개 위험이며 여기서
       해결하지 않는다 — 이 타입이 닫는 것은 **같은 값의 중복 조회**다.
+
+    ★ **화면이 쓰는 두 칸이 뒤에 붙어 있다** (`fixture` · `inbound_schedule_views` ·
+      2026-09-15). 화면 한 판은 이 읽기 한 벌에서 판매가능량(Snapshot)도, 운송 중
+      Header(fixture)도, 도착 처리 대상(views)도 같이 꺼내 쓴다 — 셋을 따로 읽으면
+      같은 `logistics_runtime_fixture` · `inbound_schedules` 질의가 한 요청에 두세 번
+      나간다 (실측: 일정 질의 5번 · 421 ms). 어댑터 경로는 이 두 칸을 안 읽어도 된다.
     """
 
     snapshot: InventoryLogisticsSnapshot
@@ -432,6 +508,13 @@ class LogisticsRead(NamedTuple):
     #: 앞엣것은 `UNRESOLVED` 로 답할 사실이고 뒤엣것은 다시 부르면 될 수 있는
     #: 실행 오류다 (`transport.AmbiguousRoute` 는 무결성 위반이라 여기 들어온다).
     delivery_route_error: bool = False
+    #: 이 읽기가 본 Runtime Snapshot Header 그대로. 화면이 `in_transit_status` 를 읽는다.
+    #: `None` 은 손수 만든 `LogisticsRead`(검사 대역)뿐이다 — 이 모듈이 만들면 항상 있다.
+    fixture: LogisticsRuntimeFixture | None = None
+    #: 그날 살아 있던 입고 일정 + 계보 (`inbound_schedules.load_schedule_views` 결과).
+    #: `snapshot.in_transit` · `confirmed_inbound_schedule` 이 여기서 파생됐고, 화면의
+    #: 도착 처리 대상(`receivable_from`)도 같은 views 에서 나온다.
+    inbound_schedule_views: tuple[InboundScheduleView, ...] | None = None
 
 
 def get_current_inventory_logistics_snapshot(
@@ -441,8 +524,13 @@ def get_current_inventory_logistics_snapshot(
     return get_current_logistics_read(as_of=as_of, sim_run_id=sim_run_id).snapshot
 
 
-def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) -> LogisticsRead:
+def get_current_logistics_read(
+    *, as_of: date, sim_run_id: str | None = None, conn: Any | None = None
+) -> LogisticsRead:
     """Fixture, direct physical lots, Policy를 한 번 읽어 호출 중 고정될 값을 만든다.
+
+    :param conn: 빌려 쓸 커넥션. 화면(`console_service.load_console_runtime`)이 넘긴다.
+        `None` 이면 종전처럼 읽기마다 자기 커넥션을 연다 (어댑터 경로).
 
     "한 번"이 계약이다 (정의서 §1.2-13) — 같은 호출이 같은 값을 다시 읽으면 그 사이
     원장이 바뀌어 **같은 `as_of` 인데 값이 다른** 상태가 성립한다.
@@ -467,8 +555,8 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
        ⚠️ 이 함수에 `historical=True` 같은 분기를 넣지 않는다. 두 축이 한 함수
           안에 섞이는 순간 어느 호출이 어느 시점을 읽는지 아무도 말할 수 없다.
     """
-    fixture = get_active_logistics_runtime_fixture(as_of=as_of, sim_run_id=sim_run_id)
-    policy = get_active_logistics_policy()
+    fixture, views = _runtime_fixture_and_views(as_of=as_of, sim_run_id=sim_run_id, conn=conn)
+    policy = get_active_logistics_policy(conn=conn)
     schema = sql.Identifier(get_db_schema())
 
     # 물리 점유 대상: 잔량이 남아 실제 창고 안에 존재하는 모든 Lot.
@@ -480,7 +568,7 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
     #    이고 이 컬럼은 그 누계를 들고 있는 지금 값이다 (실측 불일치 0건 — 캐시가
     #    틀린 것이 아니라 **과거에 쓰면 안 되는 값**이다). 과거 잔량은
     #    `historical_repository.onhand_by_lot_at` 이 원장에서 되살린다.
-    inventory_rows = fetch_all(
+    inventory_rows = _fetch(
         sql.SQL(
             """
             SELECT
@@ -504,6 +592,7 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
             """
         ).format(schema, schema, schema),
         [fixture.sim_run_id, fixture.as_of],
+        conn,
     )
 
     lots = [_inventory_lot_from_row(row, as_of=fixture.as_of) for row in inventory_rows]
@@ -513,13 +602,13 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
         as_of=fixture.as_of,
         on_hand_by_lot=lots,
         # Lot 조회와 별도로 읽는다 — 재고가 0kg인 품목의 보관 정책도 필요하다.
-        item_storage_policies=get_item_storage_policies(),
+        item_storage_policies=get_item_storage_policies(conn=conn),
         in_transit=fixture.in_transit,
         confirmed_inbound_schedule=fixture.confirmed_inbound_schedule,
         confirmed_outbound_schedule=fixture.confirmed_outbound_schedule,
         # 🔴 예약·할당 축을 **여기서 한 번** 읽는다. 안 읽으면 매입에 나가는
         #    `inventory_by_item` 이 이미 팔린 재고를 다시 팔 수 있다고 답한다.
-        outbound_commitments=get_outbound_commitments(sim_run_id=fixture.sim_run_id),
+        outbound_commitments=get_outbound_commitments(sim_run_id=fixture.sim_run_id, conn=conn),
         used_capacity_kg=used_capacity,
         guaranteed_capacity_kg=policy.guaranteed_capacity_kg,
         burst_capacity_kg=policy.burst_capacity_kg,
@@ -538,16 +627,18 @@ def get_current_logistics_read(*, as_of: date, sim_run_id: str | None = None) ->
             *policy.source_refs.values(),
         ],
     )
-    노선, 노선오류 = _delivery_route()
+    노선, 노선오류 = _delivery_route(conn=conn)
     return LogisticsRead(
         snapshot=snapshot,
         policy=policy,
         delivery_route=노선,
         delivery_route_error=노선오류,
+        fixture=fixture,
+        inbound_schedule_views=views,
     )
 
 
-def _delivery_route() -> tuple[str | None, bool]:
+def _delivery_route(*, conn: Any | None = None) -> tuple[str | None, bool]:
     """운송 계약 하나를 읽는다. **문자열을 코드에 안 박는다.**
 
     ★ **정본은 `logistics_contracts` 표이고 Reader 는 `transport.resolve_fixed_route`
@@ -563,10 +654,20 @@ def _delivery_route() -> tuple[str | None, bool]:
     🔴 **어댑터가 아니라 여기서 읽는다.** 어댑터가 자기 커넥션을 열면 한 회신 안에서
        읽기가 두 시점으로 갈리고(`LogisticsRead` 가 닫으려는 바로 그 구멍), 어댑터의
        «DB 를 직접 안 만진다» 경계도 함께 깨진다.
+
+    🔴 **빌린 커넥션에서는 SAVEPOINT 안에서 읽는다.** 이 함수는 `psycopg.Error` 를
+       삼켜 `(None, True)` 로 답하는데, 공유 커넥션에서 SQL 이 실패하면 그 트랜잭션이
+       aborted 상태로 남아 **뒤따르는 모든 SELECT 가 `InFailedSqlTransaction` 으로
+       죽는다** — 운송 계약 하나를 못 읽은 것이 화면 한 판 전체의 500 이 된다.
+       `conn.transaction()` 은 이미 트랜잭션 안이면 SAVEPOINT 를 잡고 예외 때 거기로
+       되돌려, 삼킨 오류가 커넥션을 오염시키지 않게 한다.
     """
     try:
-        with get_connection() as conn:
-            return resolve_fixed_route(conn).logistics_contract_id, False
+        if conn is not None:
+            with conn.transaction():
+                return resolve_fixed_route(conn).logistics_contract_id, False
+        with get_connection() as own:
+            return resolve_fixed_route(own).logistics_contract_id, False
     except RouteNotFound:
         return None, False
     except (AmbiguousRoute, psycopg.Error, RuntimeError, TypeError, ValueError):
@@ -661,7 +762,9 @@ def _lot_unit_cost(row: object) -> Decimal | None:
     return value
 
 
-def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
+def get_outbound_commitments(
+    *, sim_run_id: str, conn: Any | None = None
+) -> list[OutboundCommitment]:
     """출고가 **이미 잡아 둔 몫**을 읽는다. `outbound.py` 와 같은 규율로 센다.
 
     ```text
@@ -687,7 +790,7 @@ def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
     """
     schema = sql.Identifier(get_db_schema())
     # ── 살아있는 할당: Lot 축 ──────────────────────────────────────────
-    allocation_rows = fetch_all(
+    allocation_rows = _fetch(
         sql.SQL(
             """
             SELECT a.lot_id, i.item_name, SUM(a.allocated_qty_kg) AS quantity_kg
@@ -701,9 +804,10 @@ def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
             """
         ).format(schema, schema, schema, schema),
         [sim_run_id, sorted(_HOLDING_ALLOCATION)],
+        conn,
     )
     # ── 미할당 예약: 품목 축 ──────────────────────────────────────────
-    reservation_rows = fetch_all(
+    reservation_rows = _fetch(
         sql.SQL(
             """
             SELECT i.item_name,
@@ -727,6 +831,7 @@ def get_outbound_commitments(*, sim_run_id: str) -> list[OutboundCommitment]:
             sim_run_id,
             sorted(_HOLDING_RESERVATION),
         ],
+        conn,
     )
     commitments = [
         OutboundCommitment(

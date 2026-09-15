@@ -29,12 +29,17 @@ export default function InventoryPage() {
   //    첫 요청에 실을 값만 고른다 — 탭 목록도 `data.panes` 가 그대로 준다.
   const [pane, setPane] = useState("summary");
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const { data, error } = useTab<LogisticsTab>(`${asOf}|${pane}`, () => logistics(asOf, pane));
+  //  🔴 **작은 탭을 바꿔도 다시 받지 않는다** (2026-09-15). 응답에는 네 pane 이 **다** 실려
+  //     있고 `pane` 은 서버가 `selected` 한 칸에 되돌려 줄 뿐이라, 키를 `asOf` 로만 두면
+  //     탭 클릭은 요청 0회다 — 종전엔 클릭마다 한 판(1.1 s)을 통째로 다시 받았다.
+  //     기준일이 바뀌면 키가 바뀌어 그때만 다시 받는다.
+  const { data, error } = useTab<LogisticsTab>(asOf, () => logistics(asOf, pane));
 
   if (error) return <ErrorBox message={error} />;
   if (!data) return <Loading what="재고 · 물류" />;
 
-  const current = data.panes.find((p) => p.key === data.selected) ?? data.panes[0];
+  //  ★ 고른 탭은 화면 상태다. `data.selected` 는 첫 요청 때 값이라 그 뒤로는 안 본다.
+  const current = data.panes.find((p) => p.key === pane) ?? data.panes[0];
 
   return (
     <>

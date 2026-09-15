@@ -971,14 +971,3 @@ class ConsoleFefoCandidate(ConsoleModel):
     received_at: date
     #: DB raw 등급 그대로다 — FEFO 후보는 정규화하지 않는다.
     grade: str | None
-
-
-class ConsoleFefoResponse(ConsoleModel):
-    """FEFO 추천. 🔴 **고르지 않는다 — 자동 Allocation 이 아니다.**"""
-
-    reservation_id: str
-    sim_run_id: str
-    item_id: str
-    #: 이 예약이 아직 Lot 을 안 고른 몫. `unallocated_qty_kg` 와 같은 식이다.
-    remaining_reservation_qty_kg: Decimal
-    candidates: list[ConsoleFefoCandidate]

@@ -476,6 +476,55 @@ def test_12_조회_경로가_쓰기를_만들지_않는다(conn: psycopg.Connect
     assert _쓰기흔적(conn) == 이전
 
 
+def test_12b_빌린_커넥션으로_읽어도_쓰기를_만들지_않고_답이_같다(conn: psycopg.Connection) -> None:
+    """★ 화면은 커넥션 하나를 빌려 준다 (2026-09-15). 그 경로도 읽기뿐이고, 자기 커넥션 경로와
+    같은 답을 낸다 — FEFO 후보는 품목당 한 번 물어도 예약마다 묻던 것과 같은 목록이다.
+    """
+    from app.logistics import console_service
+
+    _lot(conn, qty="700")
+    _예약(conn, "RSV-1", "300")
+    _할당(conn, "RSV-1", "LOT-A", "100")
+    이전 = _쓰기흔적(conn)
+
+    빌린것 = repository.get_outbound_commitments(sim_run_id=SIM_RUN_ID, conn=conn)
+    자기것 = repository.get_outbound_commitments(sim_run_id=SIM_RUN_ID)
+    assert 빌린것 == 자기것
+
+    후보 = console_service.get_fefo_candidates_by_item(
+        conn=conn, sim_run_id=SIM_RUN_ID, item_ids=[ITEM_ID, ITEM_ID], as_of=AS_OF
+    )
+    직접 = outbound.recommend_fefo_candidates(
+        conn, sim_run_id=SIM_RUN_ID, item_id=ITEM_ID, as_of=AS_OF
+    )
+    assert list(후보) == [ITEM_ID]
+    assert [(c.lot_id, c.available_qty_kg) for c in 후보[ITEM_ID]] == [
+        (c.lot_id, c.available_qty_kg) for c in 직접
+    ]
+
+    assert _쓰기흔적(conn) == 이전
+
+
+def test_12c_운송계약_읽기_실패가_빌린_커넥션을_오염시키지_않는다(
+    conn: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 `_delivery_route` 는 `psycopg.Error` 를 삼켜 `(None, True)` 로 답한다. 공유 커넥션에서
+    그 오류가 트랜잭션을 aborted 로 남기면 뒤따르는 SELECT 가 전부 죽어 화면 한 판이 500 이
+    된다 — SAVEPOINT 로 되돌려 다음 읽기가 살아 있어야 한다.
+    """
+
+    def 깨진_읽기(c: psycopg.Connection) -> object:
+        with c.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {TMP_SCHEMA}.없는_표")
+        raise AssertionError("여기 오면 안 된다")
+
+    monkeypatch.setattr(repository, "resolve_fixed_route", 깨진_읽기)
+    assert repository._delivery_route(conn=conn) == (None, True)
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 AS n")
+        assert cur.fetchall()[0]["n"] == 1
+
+
 def test_13_읽기_함수에_쓰기_SQL_이_없다() -> None:
     """★ 실행 경로뿐 아니라 **소스**로도 못박는다."""
     본문 = _코드만(Path(repository.__file__).read_text(encoding="utf-8"))
