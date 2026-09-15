@@ -205,9 +205,55 @@ def test_예약_요청이_판매가_정한_양_그대로다() -> None:
     요청 = 예약.호출[0]
     assert Decimal(str(요청.quantity_kg)) == 요구량
     assert 요청.sim_run_id == 실행축
-    assert 요청.as_of == 원_실행일
+    # 🔴 **판정 기준일은 납품일이다** (2026-09-15). 전에는 `원_실행일` 을 단언해 버그를
+    #    고정하고 있었다 — 아래 `test_예약_판정_기준일은_납품일이다_확정일이_아니다` 참고.
+    assert 요청.as_of == 납품일
     assert 요청.sale_id == "SALE-1"
     assert 요청.item_id == "ITEM-BAECHU"
+
+
+def test_예약_판정_기준일은_납품일이다_확정일이_아니다() -> None:
+    """🔴 **예약은 확정일 D 에 서지만, 재고는 납품일 D+1 의 신선도로 센다** (2026-09-15).
+
+    REH-0914 실측: 배추 02-09 확정 · 02-10 납품 — 확보 3,586kg vs 납품일 가용 2,870kg.
+
+    ```text
+    D  (확정일)   Lot 두 개 가용 · 하나는 잔여 신선도 1일 → 예약이 둘 다 셌다
+    D+1 (납품일)  그 Lot 이 0일 → 할당 후보에서 빠진다 → OutboundIntegrityError
+    ```
+
+    ★ **대역이 신선도 절벽을 흉내 낸다.** Lot 마다 «마지막으로 팔 수 있는 날» 을 두고,
+      요청의 `as_of` 로 가용합을 센다 — 물류 `_available_lots` 의 거르기와 같은 결.
+      확정일로 물으면 요구량 1,435 를 다 잡고, 납품일로 물으면 1,000 만 잡아 SHORT 가 보인다
+      (수량은 이 파일의 `요구량` 에 맞춘 것이고 모양은 위 실측과 같다).
+    """
+    #: (가용 kg, 마지막으로 팔 수 있는 날) — 둘째 Lot 은 D 까지만 팔린다.
+    lots = (
+        (Decimal(1000), date(2026, 1, 20)),
+        (Decimal(435), 원_실행일),
+    )
+
+    class 신선도_예약_대역(예약_대역):
+        def __call__(self, conn: Any, request: Any) -> Any:
+            결과 = super().__call__(conn, request)
+            가용 = sum((kg for kg, 마지막날 in lots if request.as_of <= 마지막날), Decimal(0))
+            결과.reserved_qty_kg = min(Decimal(str(request.quantity_kg)), 가용)
+            return 결과
+
+    확정 = 확정_대역()
+    예약 = 신선도_예약_대역()
+
+    결과 = _확정(확정, 예약)
+
+    assert len(예약.호출) == 1, "자기 생존: 예약이 아예 안 불렸다"
+    요청 = 예약.호출[0]
+    assert 요청.as_of != 원_실행일, "예약이 확정일(as_of) 기준으로 재고를 셌다"
+    assert 요청.as_of == 납품일
+    # ★ 확정일 D 에 서는 것은 그대로다 — 판매 확정 입력의 주문일이 원 실행일이다.
+    assert 확정.호출[0].order_date == 원_실행일
+    assert 결과.status == "CONFIRMED"
+    assert 결과.reserved_qty_kg == Decimal(1000), "납품일에 못 쓸 Lot 까지 잡았다"
+    assert 결과.reservation_outcome == "SHORT"
 
 
 # ---------------------------------------------------------------------------
