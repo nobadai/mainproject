@@ -97,6 +97,8 @@ class QaMeta(BaseModel):
         default=None, description="ml_price_forecasts | prediction_log | 둘 다"
     )
     is_filled: list[bool] = Field(default_factory=list)
+    #   모델 대신 어제 가격을 그대로 낸 행인가. 답 문장에서는 뺐고 여기로만 간다.
+    is_gated: list[bool] = Field(default_factory=list)
     band_method: str | None = None
     use_recommended: bool | None = None
 

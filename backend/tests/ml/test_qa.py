@@ -104,7 +104,8 @@ def test_범위_밖_날짜가_섞이면_나머지를_답하고_PARTIAL_로_적�
     assert out.meta.status == "PARTIAL"
     assert out.meta.out_of_range == [BASE + timedelta(days=20)]
     assert "예측 범위 밖" in out.markdown
-    assert "복사값" in out.markdown          # is_filled 는 답에 드러난다
+    #   is_filled 는 답에 드러난다 — 문구는 사용자 지시로 바꿨다 (2026-09-15)
+    assert "직전 예측값을 사용합니다" in out.markdown
 
 
 def test_당일을_물으면_원본_창고에서_읽고_출처를_밝힌다(도구를_갈아_끼운다):
@@ -231,6 +232,19 @@ def test_오늘은_화면_기준일로_센다(도구를_갈아_끼운다, monkey
     monkeypatch.setattr(qa_graph.qa_llm, "interpret", 해석)
     qa_graph.answer(QaRequest(question="오늘 배추 경락가", as_of=화면_기준일))
     assert 받은_오늘 == [화면_기준일]
+
+
+def test_게이트_행에도_출발점_문구를_안_적는다(도구를_갈아_끼운다):
+    """★ 표 아래 «출발점» 줄을 뺄 때 **비고 칸의 같은 말을 놓쳤다** (2026-09-15 화면).
+
+    「모델 대신 출발점을 그대로 씀」이 비고에만 남아, 출발점이라는 말을 없앤
+    화면에서 뜻 모를 문구가 됐다. 정보는 meta.is_gated 로 옮긴다.
+    """
+    gated = {**_row(1), "is_gated": True}
+    도구를_갈아_끼운다(rows=[gated])
+    out = qa_graph.answer(QaRequest(item="무", kind="RTL"))
+    assert "출발점" not in out.markdown
+    assert out.meta.is_gated == [True]
 
 
 def test_쓰지_말라는_경고는_문장에_남는다(도구를_갈아_끼운다):

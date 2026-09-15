@@ -375,9 +375,10 @@ def compose(state: QaState) -> QaState:
 
 def _line(label: str, row: dict[str, Any], unit: str, note: str = "") -> str:
     if row.get("is_filled"):
-        note = (note + " · " if note else "") + "⚠ 복사값 — 그날 조사가 없어 앞 장날 값"
-    if row.get("is_gated"):
-        note = (note + " · " if note else "") + "모델 대신 출발점을 그대로 씀"
+        note = (note + " · " if note else "") + "휴일의 경우 직전 예측값을 사용합니다."
+    #   ★ 「모델 대신 출발점을 그대로 씀」은 **문장에서 뺐다** (2026-09-15 · 화면에서 발견).
+    #     표 아래 설명 줄(출발점)을 뺄 때 비고 칸의 이 문구를 놓쳤다. 출발점이라는 말을
+    #     화면에서 없앴는데 비고에만 남아 뜻 모를 말이 됐다. 값은 meta.is_gated 로 간다.
     return (
         f"| {label} | **{int(row['predicted']):,}{unit}** | "
         f"{int(row['lower']):,} ~ {int(row['upper']):,} | {note} |"
@@ -525,6 +526,7 @@ def _answer_markdown(state: QaState) -> QaState:
         source=("ml_price_forecasts · prediction_log" if (all_rows and todays)
                 else "prediction_log" if todays else "ml_price_forecasts"),
         is_filled=[bool(r.get("is_filled")) for r in (first.get("rows") or [])],
+        is_gated=[bool(r.get("is_gated")) for r in (first.get("rows") or [])],
         band_method=(all_rows[0].get("band_method") if all_rows
                      else (todays[0] if todays else {}).get("band_method")),
         use_recommended=(first.get("usability") or {}).get("use_recommended"),
