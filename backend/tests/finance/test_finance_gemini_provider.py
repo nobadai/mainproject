@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import urllib.error
@@ -373,6 +374,22 @@ def test_wrapped_gemini_transport_failures_are_eligible_for_ollama(cause):
 )
 def test_gemini_availability_failure_reason_is_observable(error, reason):
     assert _gemini_availability_failure_reason(error) == reason
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"error": {"status": "PERMISSION_DENIED"}}, "HTTP_403_PERMISSION_DENIED"),
+        ({"error": {"message": "project access denied"}}, "HTTP_403_PERMISSION_DENIED"),
+        ({"error": {"status": "INVALID_ARGUMENT"}}, None),
+    ],
+)
+def test_gemini_403_falls_back_only_for_permission_availability(payload, expected):
+    error = urllib.error.HTTPError(
+        "https://gemini.invalid", 403, "forbidden", {}, io.BytesIO(json.dumps(payload).encode())
+    )
+
+    assert _gemini_availability_failure_reason(error) == expected
 
 
 @pytest.mark.parametrize(

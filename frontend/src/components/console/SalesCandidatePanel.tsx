@@ -42,6 +42,7 @@ interface Form {
   preferred_delivery_date: string;
   preferred_payment_days: string;
   preferred_payment_terms_type: string;
+  user_request: string;
 }
 
 const EMPTY: Form = {
@@ -53,7 +54,8 @@ const EMPTY: Form = {
   //  🔴 결제일수를 화면이 미리 정하지 않는다. 비워 두면 판매가 **거래처 계약 결제일수**를
   //     싣는다 — 여기 30 을 박아 두면 거래처와 7일 결제로 바꾼 뒤에도 안이 30일로 선다.
   preferred_payment_days: "",
-  preferred_payment_terms_type: "SINGLE",
+  preferred_payment_terms_type: "",
+  user_request: "",
 };
 
 function field(value: string): string | undefined {
@@ -81,7 +83,7 @@ function block(candidate: SalesCandidateOut, capability: string) {
   };
 }
 
-export function SalesCandidatePanel({ simRun, asOf }: { simRun: string; asOf: string }) {
+export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: string; asOf: string; onCreated?: () => void }) {
   const [form, setForm] = useState<Form>(EMPTY);
   const [state, setState] = useState<{
     data: SalesRunResponse | null;
@@ -106,8 +108,12 @@ export function SalesCandidatePanel({ simRun, asOf }: { simRun: string; asOf: st
         ? Number(form.preferred_payment_days)
         : undefined,
       preferred_payment_terms_type: field(form.preferred_payment_terms_type),
+      user_request: field(form.user_request),
     })
-      .then((data) => setState({ data, error: null, running: false }))
+      .then((data) => {
+        setState({ data, error: null, running: false });
+        onCreated?.();
+      })
       .catch((error: unknown) =>
         setState({
           data: null,
@@ -132,6 +138,13 @@ export function SalesCandidatePanel({ simRun, asOf }: { simRun: string; asOf: st
             value={form.requested_quantity_kg}
             onChange={(v) => setForm({ ...form, requested_quantity_kg: v })}
           />
+          <label className="flex flex-col gap-1 text-[11.5px]">
+            <span className="text-ink2">결제 방식</span>
+            <select value={form.preferred_payment_terms_type} onChange={(event) => setForm({ ...form, preferred_payment_terms_type: event.target.value })} className="rounded-md border px-2 py-1 text-[12px]" style={{ borderColor: "var(--color-hair)" }}>
+              <option value="">미지정</option><option value="SINGLE">일시 결제</option><option value="INSTALLMENT">분할 결제</option>
+            </select>
+          </label>
+          <Input label="요청 메모" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} />
           <Input
             label="희망 단가 (원/kg)"
             value={form.preferred_unit_price_krw}

@@ -202,6 +202,22 @@ def _gemini_generate(
 
 def _gemini_availability_failure_reason(error: Exception) -> str | None:
     if isinstance(error, urllib.error.HTTPError):
+        if error.code == 403:
+            # 403 전체를 가용성 장애로 낮추지 않는다. Gemini가 권한/프로젝트 접근을
+            # 명시한 경우만 Ollama로 넘긴다; 다른 403은 계약·요청 오류일 수 있다.
+            try:
+                document = json.loads(error.read().decode("utf-8"))
+                detail = document.get("error", {}) if isinstance(document, dict) else {}
+                status = str(detail.get("status", "")).upper()
+                message = str(detail.get("message", "")).lower()
+            except Exception:  # noqa: BLE001 - body를 못 읽으면 permission으로 추측하지 않는다.
+                return None
+            permission_phrases = ("project access", "api access", "permission denied")
+            is_permission_problem = status == "PERMISSION_DENIED" or any(
+                phrase in message for phrase in permission_phrases
+            )
+            if is_permission_problem:
+                return "HTTP_403_PERMISSION_DENIED"
         if error.code == 429:
             return "HTTP_429"
         if 500 <= error.code < 600:
