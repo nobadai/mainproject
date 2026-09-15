@@ -62,14 +62,24 @@ from app.master.revalidation import find_scenario
 from app.master.transition import TransitionOut, apply_approval, purchase_id_prefix_for
 
 __all__ = [
-    "CLOSED_DATE_MESSAGE",
+    "BEFORE_APPROVAL_MESSAGE",
+    "CLOSED_DUE_DATE_MESSAGE",
+    "SAME_DAY_DUE_DATE_MESSAGE",
     "get_purchase_record",
     "record_purchase",
     "recorded_scenario",
 ]
 
-CLOSED_DATE_MESSAGE = "이미 마감된 날짜로는 기록할 수 없습니다"
-"""매입일 경계에 걸렸을 때 화면에 나가는 한 줄 (§4-6 ②)."""
+BEFORE_APPROVAL_MESSAGE = "승인한 날보다 앞선 매입일은 기록할 수 없습니다 — 매입일을 확인해 주세요"
+"""매입일이 승인 실행 기준일보다 앞설 때 화면에 나가는 한 줄 (§4-6 ②)."""
+
+CLOSED_DUE_DATE_MESSAGE = "지급기일이 이미 마감된 날보다 앞입니다 — 매입일을 확인해 주세요"
+"""회차 지급기일이 마지막 재무 일마감일보다 앞일 때 화면에 나가는 한 줄 (§4-6 ② · 2026-09-16)."""
+
+SAME_DAY_DUE_DATE_MESSAGE = (
+    "지급기일이 이미 마감된 날과 같습니다 — 마감한 그날 승인한 그날 매입만 기록할 수 있습니다"
+)
+"""지급기일이 마감일과 같은데 동일일 예외(승인일 = 매입일 = 마감일)가 아닐 때의 한 줄."""
 
 #: 승인 때 재검증을 통과로 보는 결과. `CONDITIONAL` · `FAILED` · `ERROR` 는 통과가 아니다
 #: (`decision.RevalidationOutcome` 의 표).
@@ -100,7 +110,7 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
-          매입일 >= 승인 실행 as_of · 매입일 > 그 실행의 마지막 재무 일마감일
+          회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행
     ②    선정안 약정 사본에 기록값을 덮는다
@@ -161,11 +171,12 @@ def record_purchase(
         for leg in body.legs
     )
     grade = body.grade.strip()
-    _check_purchase_dates(approval, legs, sim_run_id=sim_run_id)
     try:
         recorded = commitment_with_record(approval, legs, grade)
     except CommitmentNotBuildable as exc:
         raise DecisionRejected(str(exc)) from exc
+    # ★ 경계는 **덮은 약정**으로 잰다 — 지급기일의 주인이 약정 덮기(`with_purchase_record`)다.
+    _check_purchase_dates(approval, recorded, sim_run_id=sim_run_id)
 
     if differs_from_plan(plan, legs, grade):
         _revalidate_or_reject(approval, legs, grade)
@@ -212,23 +223,61 @@ def record_purchase(
 
 
 def _check_purchase_dates(
-    approval: CurrentApproval, legs: Sequence[RecordedLeg], *, sim_run_id: str
+    approval: CurrentApproval, recorded: ApprovedCommitment, *, sim_run_id: str
 ) -> None:
-    """매입일 경계 (§4-6 ②). **승인 실행 as_of 이상 · 마지막 재무 일마감일 초과.**
+    """매입일 경계 (§4-6 ② · 2026-09-16 변경). **회차마다 두 줄.**
 
-    ★ 이미 마감된 날에 매입이 앉으면 그날 현금 · 채무 마감이 사후에 틀려진다.
+    ```text
+    매입일   >= 승인 실행 as_of
+    지급기일 >  그 sim_run_id 의 마지막 재무 일마감일   (지급기일 = 매입일 + N5)
+    지급기일 == 마지막 마감일   승인 기준일 == 매입일 == 마지막 마감일 일 때만 받는다
+    ```
+
+    ★ **매입일이 아니라 지급기일로 마감일과 견준다** (마스터 확정 · 재무 요청 취지).
+      걷기가 D 를 마감한 뒤 사람이 D 매입을 승인 · 기록하는 것이 정상 순서다. 막아야
+      하는 것은 *"이미 지난 지급기일의 채무가 새로 생기는 것"* 이다 — 그 채무는 마감된
+      날의 지급에 한 번도 안 잡힌다.
+
+    ★ **D 마감 뒤 입력되는 동일일 실매입만 예외다** (2026-09-16 재무 합의). 재무 마감
+      (`finance/closing._recognize_due_payables`)은 `issued_date <= as_of AND due_date <= as_of`
+      이고 아직 마감 사건이 없는 채무를 **다음 마감에서 한 번** 반영한다. 그래서 D 에
+      승인한 D 매입(D+0 지급)은 현금이 D+1 마감에서 한 번 잡힌다. 🔴 그 밖의 동일일
+      (과거 승인 · N5 가 있어 지급기일이 마침 마감일인 경우)은 거부한다.
+
+    ★ **D 마감 숫자는 흔들리지 않는다.** 전이(`finance/transition.py`)는 as_of 날 상태를
+      읽기만 하고 `as_of + 1` 상태에 쓴다 (`master/transition._target_state_date`).
+
+    ★ **지급기일의 주인은 덮은 약정이다** (`ArrivalLeg.payment_due_date`). 여기서 N5 를
+      다시 더하지 않는다.
+
+    🔴 **마감이 있는데 지급기일을 모르면 거부한다.** 못 잰 것을 통과로 두지 않는다.
     """
-    earliest = min(leg.purchase_date for leg in legs)
     as_of = approval.as_of
-    if as_of is not None and earliest < as_of:
-        raise DecisionRejected(
-            f"{CLOSED_DATE_MESSAGE} (매입일 {earliest} 이 승인 실행 기준일 {as_of} 보다 앞선다)"
-        )
     closed = last_closed_date(sim_run_id=sim_run_id)
-    if closed is not None and earliest <= closed:
-        raise DecisionRejected(
-            f"{CLOSED_DATE_MESSAGE} (매입일 {earliest} 이 마지막 재무 일마감일 {closed} 이하다)"
-        )
+    for leg in recorded.arrival_schedule:
+        if as_of is not None and leg.purchase_date < as_of:
+            raise DecisionRejected(
+                f"{BEFORE_APPROVAL_MESSAGE}"
+                f" ({leg.seq}회차 매입일 {leg.purchase_date} · 승인 기준일 {as_of})"
+            )
+        if closed is None:
+            continue
+        due = leg.payment_due_date
+        if due is None:
+            raise DecisionRejected(
+                "지급기일을 계산할 수 없어 마감 여부를 확인하지 못했습니다"
+                f" — 재무 지급 일수를 확인해 주세요 ({leg.seq}회차 · 마지막 마감일 {closed})"
+            )
+        if due < closed:
+            raise DecisionRejected(
+                f"{CLOSED_DUE_DATE_MESSAGE} ({leg.seq}회차 지급기일 {due} · 마지막 마감일 {closed})"
+            )
+        if due == closed and not (as_of == leg.purchase_date == closed):
+            raise DecisionRejected(
+                f"{SAME_DAY_DUE_DATE_MESSAGE}"
+                f" ({leg.seq}회차 승인 기준일 {as_of} · 매입일 {leg.purchase_date}"
+                f" · 지급기일 {due} · 마지막 마감일 {closed})"
+            )
 
 
 def differs_from_plan(plan: ApprovedCommitment, legs: Sequence[RecordedLeg], grade: str) -> bool:

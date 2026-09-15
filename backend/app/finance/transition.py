@@ -68,6 +68,12 @@ __all__ = [
 
 
 class ArrivalLegFacts(Protocol):
+    """회차에서 재무가 읽는 칸.
+
+    ★ `payment_due_date` 는 **선택 칸**이다 (`_due_date_of` 가 `getattr` 로 읽는다). 마스터
+      약정에 있으면 그 값이 채무 만기일이고, 없으면 매입일 + 정책 N5 로 계산한다.
+    """
+
     seq: int
     purchase_date: date
     amount_krw: float | None
@@ -177,7 +183,7 @@ def build_finance_transition(
             issued_date=commitment.as_of,
             # N5 는 계약 지급일까지의 달력일수다 (현재 0 = 매입 당일). 주말 보정은
             # 하지 않는다. 실제 현금일만 `tools.effective_cash_date`가 옮긴다.
-            due_date=leg.purchase_date + timedelta(days=int(policy.purchase_payment_days)),
+            due_date=_due_date_of(leg, payment_days=int(policy.purchase_payment_days)),
             amount_krw=leg.amount_krw,
         )
         for leg in legs
@@ -204,6 +210,20 @@ class _PaymentLeg:
     seq: int
     purchase_date: date
     amount_krw: Decimal
+    #: 마스터 약정 회차가 실어 준 지급기일. 없으면 `None` — 정책 N5 로 계산한다.
+    payment_due_date: date | None = None
+
+
+def _due_date_of(leg: _PaymentLeg, *, payment_days: int) -> date:
+    """채무 만기일. **약정 회차에 확정 지급기일이 있으면 그 값이다** (재무 요청 2026-09-16).
+
+    ★ 정책 주석(`finance_policy_seed.sql` purchase_payment_days)이 *"H1에 확정 payment_date가
+      존재하면 해당 값이 authoritative"* 라고 적어 두었다. 실매입 기록의 지급기일과 채무
+      `due_date` 가 한 값이어야 한다. 없을 때만 매입일 + N5 달력일로 계산한다.
+    """
+    if leg.payment_due_date is not None:
+        return leg.payment_due_date
+    return leg.purchase_date + timedelta(days=payment_days)
 
 
 def _payment_legs(
@@ -237,7 +257,10 @@ def _payment_legs(
         # NaN/Infinity는 원장 금액으로 쓸 수 없다.
         if not leg_amount.is_finite() or leg_amount < 0:
             raise FinanceDataNotReady("commitment_payment_amounts")
-        resolved.append(_PaymentLeg(leg.seq, leg.purchase_date, leg_amount))
+        due = getattr(leg, "payment_due_date", None)
+        if due is not None and not isinstance(due, date):
+            raise FinanceDataNotReady("commitment_payment_due_date")
+        resolved.append(_PaymentLeg(leg.seq, leg.purchase_date, leg_amount, due))
 
     if sum((leg.amount_krw for leg in resolved), Decimal(0)) != total_amount:
         raise FinanceDataNotReady("commitment_payment_amounts")
