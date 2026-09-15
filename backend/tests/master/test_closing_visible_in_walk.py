@@ -47,6 +47,13 @@ class _Open:
         return True
 
 
+class _Batch:
+    """배치가 늘 도는 축. 🔴 **표를 안 읽는다.**"""
+
+    def has_ml_batch(self, day: date) -> bool:
+        return True
+
+
 def _gate(as_of: date) -> DayForecastReadiness:
     return DayForecastReadiness(
         as_of=as_of,
@@ -106,7 +113,10 @@ def _걷기(마감들: list[str], *, 상한: int = 5) -> WalkResult:
         end=끝날,
         now=AFTER_DEADLINE,
         calendar=_Open,
+        ml_batch=_Batch,
         readiness=_gate,
+        # 🔴 **상업 조건 조회도 대역이다.** 안 꽂으면 기본값이 `sim_runs` 를 읽으러 간다.
+        terms_of=lambda _: None,
         run_day_fn=lambda action, **_: _하루(action.as_of, 상태[action.as_of]),
         max_consecutive_failures=상한,
         ticks=lambda: 0.0,
