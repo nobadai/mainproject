@@ -48,7 +48,12 @@ from psycopg.types.json import Jsonb
 
 from app.finance.db import get_connection, get_db_schema
 
-__all__ = ["DayOpeningRecord", "read_day_opening", "record_day_opening"]
+__all__ = [
+    "DayOpeningRecord",
+    "handled_on_first_open_day",
+    "read_day_opening",
+    "record_day_opening",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -272,3 +277,37 @@ def opened_days_after(
     finally:
         conn.close()
     return tuple(row["as_of"] if isinstance(row, Mapping) else row[0] for row in rows)
+
+
+def handled_on_first_open_day(
+    *, sale_date: sql.Composable, sim_run_id: sql.Composable
+) -> sql.Composable:
+    """「그 판매의 납품 처리일 = 납품일 당일, 그날이 개장일이 아니면 그 뒤 첫 개장일」.
+
+    `WHERE` 에 끼우는 조건 한 덩이다. **`as_of` 를 세 번 받는다** (`%s` 셋).
+
+    ```text
+    sale_date = as_of                                        당일
+    sale_date < as_of  AND  [sale_date, as_of) 에 개장 행 0   납품일 뒤 첫 개장일
+    ```
+
+    🔴 **휴장일에 걷기가 그날을 건너뛴다** (실측 SIM-CHAIN-CHECK-0915).
+      금요일 확정 · 토요일 납품(2026-03-07 · 04-04) 판매가 정확 일치에 걸려 다음
+      개장일에도 안 잡혔다 — 예약 6건이 할당 0 으로 재고를 잡고, 채권도 안 섰다.
+
+    🔴 **backorder 가 아니다.** 한 번 처리된 날(출고 · SHORT · 놓아줌) 뒤에는 그
+      사이에 개장 행이 서므로 **다음 날 다시 안 잡힌다.** `sale_date <= as_of AND
+      미출고` 로 넓히면 SHORT · 놓아준 예약을 매일 다시 집는다 — 쓰지 않는다.
+
+    ★ **성공한 개장만 센다** (`opened_days_after` 와 같은 표). `as_of` 자신의 행은
+      `< as_of` 라 안 센다 — 오늘 행이 먼저 섰든 나중에 서든 답이 같다.
+
+    ⚠️ 이 표가 생기기 전의 날은 모른다 (`opened_days_after` 참조).
+    """
+    return sql.SQL(
+        "({sale_date} = %s OR ({sale_date} < %s AND NOT EXISTS ("
+        "SELECT 1 FROM {table} AS o"
+        " WHERE o.sim_run_id = {sim_run_id}"
+        " AND o.as_of >= {sale_date} AND o.as_of < %s"
+        " AND (o.result = 'OPENED' OR o.result = 'ALREADY_OPENED'))))"
+    ).format(sale_date=sale_date, sim_run_id=sim_run_id, table=_table())

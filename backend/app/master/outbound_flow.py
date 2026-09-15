@@ -129,6 +129,7 @@ from app.logistics.outbound import (
     ship_allocated_stock,
 )
 from app.logistics.sales_outbound import reserve_confirmed_sale_available
+from app.master.day_opening_repository import handled_on_first_open_day
 from app.master.sim_time import SimPhase, phase_instant
 from app.sales.persistence import mark_sale_delivered
 
@@ -189,8 +190,14 @@ def due_sale_items(conn: Any, *, as_of: date, sim_run_id: str) -> tuple[DueSaleI
        나갔고 `CANCELLED` 는 나가면 안 된다 — `mark_sale_delivered` 가 받아 주는
        상태와 같은 표다.
 
-    ⚠️ **`WHERE s.sale_date = %s` 는 덜 읽으려는 것이다.** 나가고 안 나가고를 실제로
-       가르는 자리는 `_due_today` 한 줄이고, 그래서 그 판정이 DB 없이도 검사된다.
+    🔴 **납품 처리일은 납품일 당일, 휴장이면 그 뒤 첫 개장일이다** (2026-09-15).
+       `handled_on_first_open_day` 가 그 규칙의 한 자리다. 정확 일치(`sale_date = %s`)
+       였을 때 걷기가 건너뛴 토요일(2026-03-07 · 04-04) 납품이 다음 개장일에도 안
+       잡혀 예약 6건이 할당 0 으로 남았다. ⚠️ backorder 가 아니다 — 처리된 다음 날은
+       그 사이 개장 행이 서서 다시 안 잡힌다.
+
+    ⚠️ `_due_today` 는 **미래 날짜가 섞이지 않게** 막는 한 줄이다. 휴장 판정은 개장
+       표를 봐야 해서 조회가 한다.
 
     🔴 **축은 다르다. `WHERE` 가 거르는 자리 그 자체다.** 파이썬에서 다시 거르지
        않는다 — 파이썬에서 거르면 답은 맞아도 **DB 가 남의 실행 행을 전부 읽어
@@ -211,12 +218,20 @@ def due_sale_items(conn: Any, *, as_of: date, sim_run_id: str) -> tuple[DueSaleI
                   FROM {}.sales AS s
                   JOIN {}.sale_items AS si ON si.sale_id = s.sale_id
                  WHERE s.sim_run_id = %s
-                   AND s.sale_date = %s
+                   AND {}
                    AND s.order_status IN ('CONFIRMED', 'READY')
                  ORDER BY s.sale_id, si.sale_item_id
                 """
-            ).format(schema, schema),
-            [sim_run_id, as_of],
+            ).format(
+                schema,
+                schema,
+                # 🔴 **휴장일 납품은 그 뒤 첫 개장일에 한 번 잡는다** (실측 2026-03-07 · 04-04).
+                #   정확 일치면 걷기가 건너뛴 토요일 납품이 영원히 안 나간다. backorder 아님.
+                handled_on_first_open_day(
+                    sale_date=sql.SQL("s.sale_date"), sim_run_id=sql.SQL("s.sim_run_id")
+                ),
+            ),
+            [sim_run_id, as_of, as_of, as_of],
         )
         rows = cursor.fetchall()
     return tuple(
@@ -238,7 +253,8 @@ def _due_today(rows: Sequence[DueSaleItem], as_of: date) -> tuple[DueSaleItem, .
     ⚠️ 다른 날 것이 섞이면 **아직 안 팔 물건이 오늘 창고를 나간다.** 그러면 그날
       장부는 맞는데 그 앞뒤 날의 재고가 전부 틀린다 — 에러는 안 난다.
     """
-    return tuple(row for row in rows if row.sale_date == as_of)
+    # ★ `<=` 다 — 휴장일 납품이 그 뒤 첫 개장일에 오는 것은 조회가 이미 골랐다.
+    return tuple(row for row in rows if row.sale_date <= as_of)
 
 
 # ── ② 결과 어휘 ────────────────────────────────────────────────────────
@@ -355,7 +371,7 @@ def fully_shipped_sales(results: Sequence[SaleItemOutcome]) -> tuple[str, ...]:
 
     🔴 **부분 출고된 판매를 다음 날 다시 잡지 않는다** — 재출고(backorder)는 MVP 밖이다
        (07 확정 구현결정서 §6 «부분출고: 재출고 없음» · §15 DEFER). `due_sale_items` 가
-       `sale_date = as_of` 로 그날 판매만 읽는 것이 그 정책이고, 미충족 몫은 예약의
+       그날 판매(휴장이면 그 뒤 첫 개장일에 한 번)만 읽는 것이 그 정책이고, 미충족 몫은 예약의
        미할당량으로 **보이게 남는다.** 그 어휘(부분 납품 `order_status`)는 판매 소유다.
        ⚠️ 종전 주석은 «다음 날 다시 잡혀 나머지를 시도한다» 고 적었다 — 문서와 어긋난
           낡은 문장이었고, 그 전제로 `sale_date <= as_of` 를 검토하면 WP-3 의
@@ -499,7 +515,7 @@ def _ship_one(
       없다 — 할당을 물리는 것은 물류의 판단이지 출고 실패의 자동 결과가 아니다.
 
     🔴 **예약 뒤 커밋이 하나 더 있어서, 할당이 터지면 예약만 남는다.** 그 예약은
-       `sale_date == as_of` 라 다음 날 다시 안 잡히고(`due_sale_items`), 놓아주는 길도
+       처리한 날 뒤로는 다시 안 잡히고(`due_sale_items`), 놓아주는 길도
        없어 **영원히 그 품목의 가용재고를 잡는다** — REH-0914 실측 7건 · 6,436kg 이
        판매가능량을 0 으로 깔았다 (2026-09-15). 그래서 **할당이 안 선 예약은 그날
        놓아준다** (`release_fn` · `released_as_of = as_of`). WP-3 는 `released_as_of`
