@@ -307,6 +307,42 @@ def test_master_purchase_due_date_and_finance_payable_due_date_match():
     assert transition.payables[0].due_date == due_date
 
 
+def test_commitment_payment_due_date_is_the_payable_due_date():
+    """약정 회차에 확정 지급기일이 있으면 정책 N5 로 다시 세지 않고 그 값이 만기일이다.
+
+    실매입 기록의 지급기일과 채무 `due_date` 는 한 값이다 (재무 요청 2026-09-16 ·
+    정책 주석 "H1에 확정 payment_date가 존재하면 해당 값이 authoritative").
+    """
+    commitment = _Commitment(legs=[(1, WED)])
+    leg = commitment.arrival_schedule[0]
+    leg.payment_due_date = date(2026, 1, 9)
+
+    transition = _build(commitment, policy=_Policy(0))
+
+    assert transition.payables[0].due_date == date(2026, 1, 9)
+
+
+def test_missing_commitment_payment_due_date_falls_back_to_policy_n5():
+    """회차에 지급기일 칸이 없거나 None 이면 지금처럼 매입일 + 정책 N5 다."""
+    without = _Commitment(legs=[(1, WED)])
+    with_none = _Commitment(legs=[(1, WED)])
+    with_none.arrival_schedule[0].payment_due_date = None
+
+    for commitment in (without, with_none):
+        transition = _build(commitment, policy=_Policy(2))
+        assert transition.payables[0].due_date == WED + timedelta(days=2)
+
+
+def test_unreadable_commitment_payment_due_date_fails_closed():
+    commitment = _Commitment(legs=[(1, WED)])
+    commitment.arrival_schedule[0].payment_due_date = "2026-01-09"
+
+    with pytest.raises(FinanceDataNotReady) as raised:
+        _build(commitment)
+
+    assert raised.value.key == "commitment_payment_due_date"
+
+
 def test_approval_does_not_reduce_cash_only_unsettled_payables():
     """J **승인은 현금을 깎지 않는다.** 늘어나는 것은 미결제 매입채무다."""
     transition = _build(_Commitment(legs=[(1, WED)]))

@@ -64,6 +64,7 @@ from app.master.transition import TransitionOut, apply_approval, purchase_id_pre
 __all__ = [
     "BEFORE_APPROVAL_MESSAGE",
     "CLOSED_DUE_DATE_MESSAGE",
+    "SAME_DAY_DUE_DATE_MESSAGE",
     "get_purchase_record",
     "record_purchase",
     "recorded_scenario",
@@ -74,6 +75,11 @@ BEFORE_APPROVAL_MESSAGE = "승인한 날보다 앞선 매입일은 기록할 수
 
 CLOSED_DUE_DATE_MESSAGE = "지급기일이 이미 마감된 날보다 앞입니다 — 매입일을 확인해 주세요"
 """회차 지급기일이 마지막 재무 일마감일보다 앞일 때 화면에 나가는 한 줄 (§4-6 ② · 2026-09-16)."""
+
+SAME_DAY_DUE_DATE_MESSAGE = (
+    "지급기일이 이미 마감된 날과 같습니다 — 마감한 그날 승인한 그날 매입만 기록할 수 있습니다"
+)
+"""지급기일이 마감일과 같은데 동일일 예외(승인일 = 매입일 = 마감일)가 아닐 때의 한 줄."""
 
 #: 승인 때 재검증을 통과로 보는 결과. `CONDITIONAL` · `FAILED` · `ERROR` 는 통과가 아니다
 #: (`decision.RevalidationOutcome` 의 표).
@@ -104,7 +110,7 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
-          회차마다 매입일 >= 승인 실행 as_of · 지급기일 >= 그 실행의 마지막 재무 일마감일
+          회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행
     ②    선정안 약정 사본에 기록값을 덮는다
@@ -223,7 +229,8 @@ def _check_purchase_dates(
 
     ```text
     매입일   >= 승인 실행 as_of
-    지급기일 >= 그 sim_run_id 의 마지막 재무 일마감일   (지급기일 = 매입일 + N5)
+    지급기일 >  그 sim_run_id 의 마지막 재무 일마감일   (지급기일 = 매입일 + N5)
+    지급기일 == 마지막 마감일   승인 기준일 == 매입일 == 마지막 마감일 일 때만 받는다
     ```
 
     ★ **매입일이 아니라 지급기일로 마감일과 견준다** (마스터 확정 · 재무 요청 취지).
@@ -231,10 +238,11 @@ def _check_purchase_dates(
       하는 것은 *"이미 지난 지급기일의 채무가 새로 생기는 것"* 이다 — 그 채무는 마감된
       날의 지급에 한 번도 안 잡힌다.
 
-    ★ **마감일과 같은 날 지급기일은 받는다** (2026-09-16 사용자 확정). 재무 마감
+    ★ **D 마감 뒤 입력되는 동일일 실매입만 예외다** (2026-09-16 재무 합의). 재무 마감
       (`finance/closing._recognize_due_payables`)은 `issued_date <= as_of AND due_date <= as_of`
-      이고 아직 마감 사건이 없는 채무를 **다음 마감에서 한 번** 반영한다. 같은 날이면
-      현금은 다음 마감에 잡힌다 (하루 늦게). 마감일보다 앞선 지급기일만 거부한다.
+      이고 아직 마감 사건이 없는 채무를 **다음 마감에서 한 번** 반영한다. 그래서 D 에
+      승인한 D 매입(D+0 지급)은 현금이 D+1 마감에서 한 번 잡힌다. 🔴 그 밖의 동일일
+      (과거 승인 · N5 가 있어 지급기일이 마침 마감일인 경우)은 거부한다.
 
     ★ **D 마감 숫자는 흔들리지 않는다.** 전이(`finance/transition.py`)는 as_of 날 상태를
       읽기만 하고 `as_of + 1` 상태에 쓴다 (`master/transition._target_state_date`).
@@ -263,6 +271,12 @@ def _check_purchase_dates(
         if due < closed:
             raise DecisionRejected(
                 f"{CLOSED_DUE_DATE_MESSAGE} ({leg.seq}회차 지급기일 {due} · 마지막 마감일 {closed})"
+            )
+        if due == closed and not (as_of == leg.purchase_date == closed):
+            raise DecisionRejected(
+                f"{SAME_DAY_DUE_DATE_MESSAGE}"
+                f" ({leg.seq}회차 승인 기준일 {as_of} · 매입일 {leg.purchase_date}"
+                f" · 지급기일 {due} · 마지막 마감일 {closed})"
             )
 
 
