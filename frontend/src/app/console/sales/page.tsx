@@ -65,7 +65,6 @@ import { ActionTable } from "./ActionTable";
 import { PartnerCreateForm } from "./PartnerCreateForm";
 import { SalesItemChart, SalesPartnerChart, SalesTrendChart } from "./SalesCharts";
 import { TodayProposalsPanel } from "./TodayProposals";
-import { SalesCandidateCreateForm } from "./SalesCandidateCreateForm";
 import {
   salesOverview,
   type WithItemNames,
@@ -174,7 +173,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
       {/* ★ 매입 화면의 «금일 매입안» 과 같은 자리다. 통계 다음에 오늘의 안이 오고,
           지난 흐름은 그 뒤에 온다. */}
       <TodayProposalsPanel asOf={asOf} state={proposals} />
-      <SalesCandidateCreateForm
+      <SalesCandidatePanel
         asOf={asOf}
         simRun={simRun}
         onCreated={() => setProposalRefresh((value) => value + 1)}
