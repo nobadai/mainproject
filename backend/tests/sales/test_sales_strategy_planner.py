@@ -232,9 +232,7 @@ def test_신선도_위험에서_공격안이_실제_소진_전략이_된다():
 
 
 def test_소진_전략이_시장_하단_단가로_옮겨진다():
-    scenarios = {
-        s.scenario_type: s for s in _generate_scenarios(_freshness_request())
-    }
+    scenarios = {s.scenario_type: s for s in _generate_scenarios(_freshness_request())}
     aggressive = scenarios["AGGRESSIVE"]
 
     assert aggressive.unit_price_krw < scenarios["BALANCED"].unit_price_krw
@@ -246,9 +244,7 @@ def test_소진_전략도_마진_최저선_아래로는_안_간다():
     # 원가를 올려 마진 최저선이 시장 하단보다 높아지게 만든다.
     scenarios = {
         s.scenario_type: s
-        for s in _generate_scenarios(
-            _freshness_request(cost_amount=7_000_000 + 2_000_000)
-        )
+        for s in _generate_scenarios(_freshness_request(cost_amount=7_000_000 + 2_000_000))
     }
 
     assert scenarios["AGGRESSIVE"].unit_price_krw >= Decimal(1350)
@@ -273,17 +269,14 @@ def test_마진_최저선_때문에_같아지면_강제로_벌리지_않는다()
     그 사실은 `rationale` 의 가격 전략으로 되짚을 수 있다.
     """
     scenarios = {
-        s.scenario_type: s
-        for s in _generate_scenarios(
-            _freshness_request(cost_amount=11_000_000)
-        )
+        s.scenario_type: s for s in _generate_scenarios(_freshness_request(cost_amount=11_000_000))
     }
     단가 = {t: s.unit_price_krw for t, s in scenarios.items()}
 
     assert 단가["BALANCED"] == 단가["AGGRESSIVE"], "제약이 같은데 숫자가 갈렸다"
-    assert any(
-        "MARGIN_FLOOR" in line for line in scenarios["AGGRESSIVE"].rationale
-    ), "수렴 원인이 근거에 안 남았다"
+    assert any("MARGIN_FLOOR" in line for line in scenarios["AGGRESSIVE"].rationale), (
+        "수렴 원인이 근거에 안 남았다"
+    )
 
 
 def test_수렴하면_회신이_그_사실과_원인을_말한다():
@@ -318,10 +311,7 @@ def test_수렴_원인은_세_안을_다_묶은_코드만_적는다():
 def test_수렴해도_자세는_기록에_남는다():
     """숫자가 같아도 **무엇을 하려 했는지**는 다르다."""
     scenarios = {
-        s.scenario_type: s
-        for s in _generate_scenarios(
-            _freshness_request(cost_amount=11_000_000)
-        )
+        s.scenario_type: s for s in _generate_scenarios(_freshness_request(cost_amount=11_000_000))
     }
 
     assert scenarios["AGGRESSIVE"].strategy_profile.price_posture == "DEPLETION"
@@ -629,9 +619,7 @@ def test_모델은_판정을_보지_않는다(모델을_켠다, monkeypatch):
 
 def test_사용자가_말로_남긴_의도가_모델에_간다(모델을_켠다, monkeypatch):
     """§16 — raw_text 는 자세를 고르는 참고다. 가격·수량을 바꾸지 않는다."""
-    보낸것 = _sent_to_model(
-        monkeypatch, _request(raw_text="이번 주 안에 급하게 털고 싶다")
-    )
+    보낸것 = _sent_to_model(monkeypatch, _request(raw_text="이번 주 안에 급하게 털고 싶다"))
 
     assert 보낸것["user_intent_text"] == "이번 주 안에 급하게 털고 싶다"
     assert 보낸것["business_mode"] == "SPOT_SALES"

@@ -419,9 +419,7 @@ def template_profiles(signals: StrategySignals) -> list[StrategyProfile]:
     ★ 공격안의 가격 자세는 **신호가 있을 때만** `DEPLETION` 이다. 신호 없이 시장
       하단을 여는 것은 근거 없이 싸게 파는 것이다.
     """
-    aggressive_price: PricePosture = (
-        "DEPLETION" if signals.depletion_pressure else "MARKET_ALIGNED"
-    )
+    aggressive_price: PricePosture = "DEPLETION" if signals.depletion_pressure else "MARKET_ALIGNED"
     aggressive_reasons = list(signals.freshness_risk_codes)
     if signals.item_lot_ids and signals.freshness_risk_codes:
         # 창고 신호가 이 품목 로트에 걸린다는 사실. 로트 자체를 판정한 것이 아니다.
@@ -460,9 +458,7 @@ def template_profiles(signals: StrategySignals) -> list[StrategyProfile]:
             strategy="AGGRESSIVE",
             price_posture=aggressive_price,
             quantity_posture="EXPANDED",
-            inventory_posture=(
-                "FRESHNESS_RISK_FIRST" if signals.depletion_pressure else "FIFO"
-            ),
+            inventory_posture=("FRESHNESS_RISK_FIRST" if signals.depletion_pressure else "FIFO"),
             credit_posture="WITHIN_LIMIT",
             cash_posture="CASH_CONVERSION" if signals.cash_is_tight else "NORMAL",
             reason_codes=aggressive_reasons,
