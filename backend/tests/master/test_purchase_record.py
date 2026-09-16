@@ -27,6 +27,8 @@
 ⑪  🔴 전이가 롤백하며 FAILED 로 끝나도 기록 행은 남는다 · 응답은 201 FAILED 그대로 ·
     그 승인을 다시 적으면 409 · 기록 적재가 터지면 전이를 안 부른다
     (기록과 전이는 두 트랜잭션 · 2026-09-16 · `#729`)
+⑬  🔴 등급이 둘 이상인 안은 기록을 못 받는다 · 기록 행도 전이도 없다 ·
+    등급 줄이 없거나 같은 등급 두 줄인 안은 지금 그대로 (2026-09-16)
 ```
 
 ⚠️ **DB 를 안 탄다.** 결정 · 실행 행 · 기록 표 · 전이 · 재검증이 전부 대역이다.
@@ -978,6 +980,125 @@ def test_정수에_같은_날이면_선검사를_지나_기존_흐름대로_선�
     assert len(전이.calls) == 1
     assert len(세상["store"]) == 2
     assert len(세상["reval"].scenarios) == 1, "선정안과 다른데 재검증을 건너뛰었다"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑬ 등급이 둘 이상인 안에는 실매입을 못 적는다 (선검사 · 2026-09-16)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **왜.** 원장은 등급이 둘 이상인 약정을 일부러 막는다 (`ledger.ledger_block_reason`)
+#    — `purchase_items` 는 품목당 한 줄이고 `grade` 는 한 칸이라 담을 자리가 없다.
+#    그런데 기록의 `grade` 는 기록 전체에 하나라, 약정 덮기가 그 한 등급을 `sourcing_plan`
+#    의 **모든 줄에** 얹는다. 등급 줄이 둘인 안에 기록하면 두 줄이 한 등급으로 덮여
+#    `commitment.grades` 가 1개가 되고, **가드가 열려 에러 없이 틀린 등급이 원장에 선다.**
+#
+#    실측 2026-09-16 · 매입 안 8,809개 중 등급 2개인 안 31개 · 그 안이 속한 실행 20개가
+#    20/20 APPROVE · SIM-CHAIN-REH-0916 에서는 승인 6건이 원장 0행으로 막혀 있다.
+
+
+def _등급을(세상: dict[str, Any], *줄: dict[str, Any]) -> None:
+    """대역 세상이 내는 안의 `sourcing_plan` 을 바꿔 끼운다."""
+    세상["row"]["response_payload"]["scenarios"][0]["sourcing_plan"] = list(줄)
+
+
+def test_등급이_둘인_안에는_기록을_받지_않는다(세상: dict[str, Any]) -> None:
+    """🔴 **두 등급 이름이 다 문구에 있다** — 사람이 어느 안인지 알아봐야 한다."""
+    _등급을(
+        세상,
+        {"market": "가락", "grade": "상", "qty_kg": 200, "grade_unit_price": 5000},
+        {"market": "가락", "grade": "중", "qty_kg": 100, "grade_unit_price": 4000},
+    )
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, _본문(), 문)
+
+    말 = str(caught.value)
+    assert caught.value.conflict is False, "본문이 틀린 것이다 (422)"
+    assert 말 == pr.MULTI_GRADE_MESSAGE.format(세기="둘", 등급="상 · 중")
+    assert 말 == (
+        "이 안은 등급이 둘입니다 (상 · 중). 실매입 기록은 한 등급만 받습니다"
+        " — 매입 화면에서 등급이 하나인 다른 안을 골라 주세요."
+    )
+    assert "상" in 말 and "중" in 말, "어느 등급인지 안 적었다"
+    # 🔴 **코드 이름도 상태 코드도 안 나간다** — 사람이 읽는 줄이다.
+    assert "ledger" not in 말 and "422" not in 말 and "grade" not in 말
+
+
+def test_등급이_셋이어도_막힌다(세상: dict[str, Any]) -> None:
+    """★ 둘만 막으면 셋이 지나간다 — 가짓수가 하나를 넘는 순간부터 막는다."""
+    _등급을(
+        세상,
+        {"market": "가락", "grade": "특", "qty_kg": 100, "grade_unit_price": 6000},
+        {"market": "가락", "grade": "상", "qty_kg": 100, "grade_unit_price": 5000},
+        {"market": "가락", "grade": "중", "qty_kg": 100, "grade_unit_price": 4000},
+    )
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, _본문())
+
+    말 = str(caught.value)
+    assert caught.value.conflict is False
+    assert 말 == pr.MULTI_GRADE_MESSAGE.format(세기="셋", 등급="특 · 상 · 중")
+    assert "특" in 말 and "상" in 말 and "중" in 말
+
+
+def test_거절은_기록_행도_전이도_안_남긴다(세상: dict[str, Any]) -> None:
+    """🔴 **선검사라 아무것도 안 쓴다** — 커넥션조차 안 연다."""
+    _등급을(
+        세상,
+        {"market": "가락", "grade": "상", "qty_kg": 200, "grade_unit_price": 5000},
+        {"market": "가락", "grade": "중", "qty_kg": 100, "grade_unit_price": 4000},
+    )
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected):
+        _기록한다(세상, _본문(), 문)
+
+    assert 세상["store"] == [], "기록 행이 남았다"
+    assert 세상["conns"] == [], "커넥션을 열었다"
+    assert 문.calls == [], "전이를 불렀다"
+    assert 세상["reval"].scenarios == [], "선검사 전에 재검증을 태웠다"
+
+
+def test_등급이_하나인_안은_지금처럼_기록된다(세상: dict[str, Any]) -> None:
+    """★ 막는 것만 한다 — 등급이 하나인 안은 그대로 지난다 (`_안()` 이 '상' 한 줄)."""
+    out, 전이 = _기록한다(세상, _실매입())
+
+    assert out.status == "APPLIED"
+    assert len(세상["store"]) == 2
+    assert 전이.calls[0][0].grades == ("특",), "기록 등급이 약정에 안 실렸다"
+
+
+def test_같은_등급이_두_줄이면_등급은_하나라_기록된다(세상: dict[str, Any]) -> None:
+    """★ 시장이 달라 줄이 갈린 것뿐이다 — 등급 칸에 담길 값은 여전히 하나다.
+
+    (`ApprovedCommitment.grades` 가 중복을 접는 그 규율을 여기서도 따른다.)
+    """
+    _등급을(
+        세상,
+        {"market": "가락", "grade": "상", "qty_kg": 200, "grade_unit_price": 5000},
+        {"market": "강서", "grade": "상", "qty_kg": 100, "grade_unit_price": 5000},
+    )
+
+    out, 전이 = _기록한다(세상, _본문())
+
+    assert out.status == "APPLIED"
+    assert len(세상["store"]) == 2
+    assert 전이.calls[0][0].grades == ("상",)
+
+
+def test_등급_줄이_아예_없는_안은_기록_등급으로_한_줄이_선다(세상: dict[str, Any]) -> None:
+    """⚠️ **지금 동작 그대로다.** 덮을 줄이 없으니 우회할 가드도 없다 — 기록의 등급으로 선다."""
+    _등급을(세상)
+
+    out, 전이 = _기록한다(세상, _본문())
+
+    assert out.status == "APPLIED"
+    assert len(세상["store"]) == 2
+    commitment = 전이.calls[0][0]
+    assert len(commitment.sourcing_plan) == 1, "기록 등급 한 줄이 아니다"
+    assert commitment.grades == ("상",), "기록의 등급이 안 실렸다"
 
 
 # ══════════════════════════════════════════════════════════════════════
