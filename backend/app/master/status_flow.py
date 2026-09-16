@@ -81,7 +81,19 @@ class StatusFlow:
     ) -> None:
         self.runner = runner
         self.agents = agents
-        #: 사용자 발화 원문과 의도의 품목. **ML 에만 싣는다** (`_payload_for`).
+        #: 사용자 발화 원문과 의도의 품목. 싣는 자리가 다르다 (`_payload_for`).
+        #:
+        #: ```text
+        #: ml         question + item      원문과 품목을 둘 다 받는다
+        #: inventory  question 만          품목은 안 싣는다 (아래 이유)
+        #: 나머지     빈 payload           수신 계약을 바꾸지 않는다
+        #: ```
+        #:
+        #: 🔴 **물류에 품목을 싣지 않는 이유.** 품목 해석의 주인은 물류 하나다. 마스터가
+        #:   분류한 품목을 같이 보내면 주인이 둘이 되고, 마스터 쪽이 먼저 좁혀 버린다 —
+        #:   실측(2026-09-16 · 실 서버 · gemini-3.6-flash)에서 *"배추랑 양파 재고 얼마나
+        #:   남았어?"* 의 분류 결과가 `item="배추"` 하나였다. 그대로 실어 보내면 양파가
+        #:   떨어진다. 원문만 보내면 물류가 둘 다 읽는다.
         self.question = question
         self.item = item
 
@@ -148,22 +160,29 @@ class StatusFlow:
         )
 
     def _payload_for(self, agent: AgentName) -> dict[str, Any] | None:
-        """부서마다 싣는 조회 입력. **ML 만 질문을 받는다.**
+        """부서마다 싣는 조회 입력. **질문 원문은 ML 과 물류가 받는다.**
 
-        ★ 다른 부서는 지금처럼 빈 payload 다 — 수신 계약을 바꾸지 않는다.
         ★ ML 은 `{"question": 원문, "item": 품목}` 이다. 품목이 없으면 키를 뺀다
           (비워 보내면 *"품목이 없다"* 가 아니라 *"빈 품목"* 을 물은 것이 된다).
-        🔴 질문 원문이 없으면 `None` 이다 — 부르지 않는다.
+          🔴 ML 은 질문 원문이 없으면 `None` 이다 — 부르지 않는다.
+        ★ 물류(`inventory`)는 `{"question": 원문}` 이다. **품목은 안 싣는다** —
+          품목 해석의 주인은 물류 하나다 (`__init__` 주석의 실측이 그 이유다).
+          🔴 **원문이 없어도 부른다.** 빈 payload 로 부르는 기존 호출이 그대로 살아
+          있어야 한다 — 바로가기 버튼처럼 발화문 없이 오는 경로가 그 길이다.
+          여기서 `None` 을 돌려주면 그 경로가 통째로 `unavailable` 이 된다.
+        ★ 나머지 부서는 지금처럼 빈 payload 다 — 수신 계약을 바꾸지 않는다.
         """
-        if agent != "ml":
-            return {}
         question = (self.question or "").strip()
-        if not question:
-            return None
-        payload: dict[str, Any] = {"question": question}
-        if self.item:
-            payload["item"] = self.item
-        return payload
+        if agent == "ml":
+            if not question:
+                return None
+            payload: dict[str, Any] = {"question": question}
+            if self.item:
+                payload["item"] = self.item
+            return payload
+        if agent == "inventory" and question:
+            return {"question": question}
+        return {}
 
 
 def _code(*, answered: int, asked: int) -> StatusCode:

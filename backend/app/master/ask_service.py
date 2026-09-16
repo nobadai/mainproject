@@ -236,7 +236,8 @@ def _run_status(
     registered = tuple(a for a in asked if a not in missing)
 
     runner = MasterRunner(context, wiring.registry(), CallBudget(limit=budget))
-    # ★ 발화 원문과 품목은 **ML 에만** 실린다 (`StatusFlow._payload_for`).
+    # ★ 발화 원문은 ML 과 물류가 받고, 품목은 **ML 에만** 실린다
+    #   (`StatusFlow._payload_for` · 물류는 원문을 직접 읽어 품목을 푼다).
     outcome = StatusFlow(runner, registered, question=question, item=intent.item).run()
 
     unregistered = tuple(a for a in asked if a in missing)
