@@ -48,7 +48,6 @@ interface Form {
   preferred_delivery_date: string;
   preferred_payment_days: string;
   preferred_payment_terms_type: string;
-  allow_additional_sourcing: boolean;
   user_request: string;
 }
 
@@ -62,7 +61,6 @@ const EMPTY: Form = {
   //     싣는다 — 여기 30 을 박아 두면 거래처와 7일 결제로 바꾼 뒤에도 안이 30일로 선다.
   preferred_payment_days: "",
   preferred_payment_terms_type: "",
-  allow_additional_sourcing: false,
   user_request: "",
 };
 
@@ -128,7 +126,6 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
       preferred_delivery_date: field(form.preferred_delivery_date),
       preferred_payment_days: paymentDays === undefined ? undefined : Number(paymentDays),
       preferred_payment_terms_type: field(form.preferred_payment_terms_type),
-      allow_additional_sourcing: form.allow_additional_sourcing,
       user_request: field(form.user_request),
     })
       .then((data) => {
@@ -223,23 +220,6 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
             step="1"
           />
           <FieldHelp>비우면 명시적인 결제일수를 요청하지 않습니다.</FieldHelp>
-          <label className="flex items-start gap-2 text-[11.5px] sm:col-span-2">
-            <input
-              type="checkbox"
-              checked={form.allow_additional_sourcing}
-              onChange={(event) =>
-                setForm({ ...form, allow_additional_sourcing: event.target.checked })
-              }
-              className="mt-0.5"
-            />
-            <span>
-              재고가 부족하면 추가 매입 가능성을 검토
-              <small className="mt-1 block text-[10.5px] leading-relaxed text-ink2">
-                선택하면 부족분의 추가 매입 가능량을 확인합니다. 실제 매입이나 판매가
-                자동 확정되는 것은 아닙니다.
-              </small>
-            </span>
-          </label>
         </div>
         {partners.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">거래처 조회 실패: {partners.error}</p>}
         {items.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">품목 조회 실패: {items.error}</p>}

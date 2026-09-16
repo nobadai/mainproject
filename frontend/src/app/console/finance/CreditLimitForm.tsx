@@ -35,6 +35,7 @@ export function CreditLimitForm({ simRun, asOf, refreshKey, onSaved }: { simRun:
   const current = history.data?.find((row) => row.is_current) ?? null;
   const partnerName = (partners.data?.rows ?? []).find((row) => row.partner_id === partner)?.partner_name ?? partner;
   const hasDraft = amount !== "" || sourceRef !== "" || note !== "" || date !== asOf || grade !== DEFAULT_GRADE;
+  const evidenceHint = grade === "OFFICIAL" ? "계약서 번호 또는 공식 공문 번호를 입력하세요." : grade === "VENDOR" ? "거래처 확인서·메일·협의 기록의 식별값을 입력하세요." : "이 시뮬레이션에서 사용하기로 확정한 기준의 식별값을 입력하세요.";
 
   function resetDraft() {
     setAmount(""); setDate(asOf); setGrade(DEFAULT_GRADE); setSourceRef(""); setNote("");
@@ -73,7 +74,7 @@ export function CreditLimitForm({ simRun, asOf, refreshKey, onSaved }: { simRun:
           <label>근거 등급
             <select value={grade} onChange={(event) => setGrade(event.target.value as Grade)}><option value="OFFICIAL">공식 계약</option><option value="VENDOR">거래처 확인</option><option value="SIM_FIXED">시뮬레이션 고정값</option></select>
           </label>
-          <label className="sm:col-span-2">근거 참조 *<input required maxLength={240} value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} placeholder="CONTRACT-CUST-001-20260916" /></label>
+          <label className="sm:col-span-2">한도 근거 자료 *<input required maxLength={240} value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} placeholder={grade === "OFFICIAL" ? "예: 계약서-2026-0916" : grade === "VENDOR" ? "예: 거래처확인-메일-0916" : "예: 시뮬레이션기준-01"} /><small className="mt-1 block text-[11px] text-ink2">{evidenceHint}</small></label>
           <label className="sm:col-span-2">변경 사유<input maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
           <button disabled={saving} className="w-fit rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>{saving ? "저장 중" : "한도 변경"}</button>
         </form>
@@ -82,7 +83,7 @@ export function CreditLimitForm({ simRun, asOf, refreshKey, onSaved }: { simRun:
       {pendingPartner !== null && <ConfirmBox title="입력 중인 여신한도 정보가 있습니다." description="거래처를 변경하면 입력 내용이 초기화됩니다." onCancel={() => setPendingPartner(null)} onConfirm={() => { setPartner(pendingPartner); setPendingPartner(null); resetDraft(); setMessage(null); }} confirmText="거래처 변경" />}
       {confirming && <ConfirmBox title="여신한도를 변경할까요?" description="아래 조건을 다시 확인한 뒤 한도 변경을 누르세요." onCancel={() => setConfirming(false)} onConfirm={save} confirmText={saving ? "저장 중..." : "한도 변경"} disabled={saving}>
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12px] text-ink2">
-          <dt>거래처</dt><dd className="m-0 text-ink">{partnerName}</dd><dt>{asOf} 기준 적용 한도</dt><dd className="m-0 text-ink">{current ? moneyWon(current.credit_limit_krw) : "등록된 한도 없음"}</dd><dt>새 한도</dt><dd className="m-0 text-ink">{amount === "" ? "입력 없음" : moneyWon(amount)}</dd><dt>적용 시작일</dt><dd className="m-0 text-ink">{date}</dd><dt>근거 등급</dt><dd className="m-0 text-ink">{creditGradeText(grade)}</dd><dt>근거 참조</dt><dd className="m-0 break-all text-ink">{sourceRef}</dd>{note && <><dt>변경 사유</dt><dd className="m-0 text-ink">{note}</dd></>}
+          <dt>거래처</dt><dd className="m-0 text-ink">{partnerName}</dd><dt>{asOf} 기준 적용 한도</dt><dd className="m-0 text-ink">{current ? moneyWon(current.credit_limit_krw) : "등록된 한도 없음"}</dd><dt>새 한도</dt><dd className="m-0 text-ink">{amount === "" ? "입력 없음" : moneyWon(amount)}</dd><dt>적용 시작일</dt><dd className="m-0 text-ink">{date}</dd><dt>근거 등급</dt><dd className="m-0 text-ink">{creditGradeText(grade)}</dd><dt>한도 근거 자료</dt><dd className="m-0 break-all text-ink">{sourceRef}</dd>{note && <><dt>변경 사유</dt><dd className="m-0 text-ink">{note}</dd></>}
         </dl>
       </ConfirmBox>}
       {message && <p className="mb-0 mt-3 text-[13px]">{message}</p>}

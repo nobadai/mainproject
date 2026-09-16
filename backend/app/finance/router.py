@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -11,7 +11,12 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from app.finance import user_messages as messages
 from app.finance.adapter import finance_port
-from app.finance.db import get_connection, get_db_schema
+from app.finance.cash_adjustments import (
+    CashAdjustmentConflict,
+    record_cash_adjustment,
+)
+from app.finance.collection import FinanceCollectionConflict, apply_collection_event
+from app.finance.db import FinanceDataNotReady, get_connection, get_db_schema
 from app.finance.execution import get_finance_execution, get_finance_run, list_finance_runs
 from app.finance.schemas import (
     FinalVerdict,
@@ -168,6 +173,126 @@ def register_credit_limit(change: CreditLimitChange) -> dict[str, object]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except LookupError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+class ReceivableCollectionChange(BaseModel):
+    """사용자가 확인한 실제 수금. 금액은 이번 수금분이며 누적 target은 서버가 계산한다."""
+
+    sim_run_id: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    collection_date: date
+    receivable_id: str = Field(min_length=1)
+    collect_all: bool = False
+    amount_krw: Decimal | None = Field(default=None, gt=0)
+    source_ref: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+    ]
+    recorded_by: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+    ]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class CashAdjustmentChange(BaseModel):
+    sim_run_id: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    adjustment_date: date
+    direction: Literal["INFLOW", "OUTFLOW"]
+    category: Literal["OWNER_INJECTION", "OWNER_WITHDRAWAL", "OTHER"]
+    amount_krw: Decimal = Field(gt=0)
+    source_ref: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+    ]
+    recorded_by: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+    ]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+@router.post("/receivables/collections", status_code=status.HTTP_201_CREATED)
+def record_receivable_collection(change: ReceivableCollectionChange) -> dict[str, object]:
+    """한 채권의 실제 전액/부분 수금을 누적 전이로 기록한다."""
+    if not change.collect_all and change.amount_krw is None:
+        raise HTTPException(status_code=422, detail="부분 수금액을 입력해 주세요.")
+    schema = sql.Identifier(get_db_schema())
+    try:
+        with get_connection() as conn, conn.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("""SELECT original_amount_krw, received_amount_krw FROM {}.receivables
+                           WHERE receivable_id = %s AND sim_run_id = %s FOR UPDATE""").format(
+                    schema
+                ),
+                [change.receivable_id, change.sim_run_id],
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise LookupError("받을 돈을 찾지 못했습니다.")
+            original = Decimal(str(row["original_amount_krw"]))
+            received = Decimal(str(row["received_amount_krw"]))
+            target = original if change.collect_all else received + change.amount_krw
+            if target > original:
+                raise ValueError("받는 금액이 남은 받을 돈보다 큽니다.")
+            event_note = f"사용자 수금 · 입력자 {change.recorded_by} · 근거 {change.source_ref}"
+            if change.note:
+                event_note = f"{event_note} · {change.note}"
+            cursor.execute(
+                sql.SQL("""INSERT INTO {}.master_collection_events
+                           (sim_run_id, financing_mode, collection_date, receivable_id,
+                            target_received_total_krw, note)
+                           VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""").format(
+                    schema
+                ),
+                [
+                    change.sim_run_id,
+                    change.financing_mode,
+                    change.collection_date,
+                    change.receivable_id,
+                    target,
+                    event_note,
+                ],
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("같은 기준일에 이미 수금이 기록되어 있습니다.")
+            plan = apply_collection_event(
+                conn,
+                sim_run_id=change.sim_run_id,
+                financing_mode=change.financing_mode,
+                collection_date=change.collection_date,
+                receivable_id=change.receivable_id,
+                target_received_total_krw=target,
+            )
+        return {
+            "receivable_id": plan.receivable_id,
+            "received_delta_krw": plan.delta_received_krw,
+            "outstanding_amount_krw": plan.next_outstanding_amount_krw,
+            "status": plan.next_status,
+        }
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (ValueError, FinanceCollectionConflict) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FinanceDataNotReady as error:
+        raise HTTPException(
+            status_code=409, detail="해당 기준일의 재무 상태가 준비되지 않았습니다."
+        ) from error
+
+
+@router.post("/cash-adjustments", status_code=status.HTTP_201_CREATED)
+def create_cash_adjustment(change: CashAdjustmentChange) -> dict[str, object]:
+    """사용자 자금 입금·출금을 근거와 함께 기록한다."""
+    try:
+        with get_connection() as conn:
+            result = record_cash_adjustment(conn, **change.model_dump())
+        return {
+            "cash_adjustment_id": result.cash_adjustment_id,
+            "current_cash_krw": result.current_cash_krw,
+        }
+    except CashAdjustmentConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FinanceDataNotReady as error:
+        raise HTTPException(
+            status_code=409, detail="해당 기준일의 재무 상태가 준비되지 않았습니다."
+        ) from error
 
 
 @router.post("/agent", summary="Finance v2.2 Tool-Using Agent")
