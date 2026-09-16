@@ -24,6 +24,7 @@ from app.master.ledger_repository import (
     COLLECTION_CASH_IN,
     LOGISTICS_CASH_OUT,
     NET_CASH,
+    OPERATING_EXPENSE_CASH_OUT,
     PAYROLL_INTEREST_CASH_OUT,
     PURCHASE_CASH_OUT,
 )
@@ -96,6 +97,7 @@ def _마감행(day: date) -> dict[str, Any]:
         PURCHASE_CASH_OUT: Decimal(0),
         LOGISTICS_CASH_OUT: Decimal(0),
         PAYROLL_INTEREST_CASH_OUT: Decimal(0),
+        OPERATING_EXPENSE_CASH_OUT: Decimal(0),
         COLLECTION_CASH_IN: Decimal(0),
         NET_CASH: Decimal(0),
         BASE_CASH_BALANCE: Decimal(1000),
