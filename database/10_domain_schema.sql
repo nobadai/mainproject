@@ -818,7 +818,8 @@ CREATE TABLE haetdeul.daily_closings (
     receivables_balance_krw numeric(18,6) NOT NULL,
     inventory_qty_kg numeric(18,6) NOT NULL,
     accounting_inventory_cost_krw numeric(18,6) NOT NULL,
-    closed boolean DEFAULT true NOT NULL
+    closed boolean DEFAULT true NOT NULL,
+    operating_expense_cash_out_krw numeric(18,6)
 );
 
 
@@ -869,6 +870,13 @@ COMMENT ON COLUMN haetdeul.daily_closings.logistics_cash_out_krw IS '일별 물�
 --
 
 COMMENT ON COLUMN haetdeul.daily_closings.payroll_interest_cash_out_krw IS '일별 급여/이자 현금유출(원).';
+
+
+--
+-- Name: COLUMN daily_closings.operating_expense_cash_out_krw; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.daily_closings.operating_expense_cash_out_krw IS '일별 일반 운영비 현금유출(원). NULL 은 그 실행이 이 축을 기록하지 않았다는 뜻이고, 0원과 다르다.';
 
 
 --
@@ -1179,6 +1187,10 @@ CREATE TABLE haetdeul.expenses (
     evidence_id text,
     status text NOT NULL,
     note text,
+    due_date date,
+    paid_date date,
+    source_ref text,
+    recorded_by text,
     CONSTRAINT expenses_amount_krw_check CHECK ((amount_krw >= (0)::numeric)),
     CONSTRAINT expenses_status_check CHECK ((status = ANY (ARRAY['PAID'::text, 'ACCRUED'::text, 'CANCELLED'::text])))
 );
@@ -1259,6 +1271,34 @@ COMMENT ON COLUMN haetdeul.expenses.status IS '상태값.';
 --
 
 COMMENT ON COLUMN haetdeul.expenses.note IS '추가 설명 및 주의사항.';
+
+
+--
+-- Name: COLUMN expenses.due_date; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.expenses.due_date IS '지급 예정일. ACCRUED 비용의 미래 현금유출 투영 기준일이다. 신규 비용은 반드시 채운다.';
+
+
+--
+-- Name: COLUMN expenses.paid_date; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.expenses.paid_date IS '실제 지급일. PAID 비용의 현금 차감·일마감 기준일이다. 값이 없는 기존 PAID 행은 지급일 미상이다.';
+
+
+--
+-- Name: COLUMN expenses.source_ref; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.expenses.source_ref IS '앞선 작업이 남긴 칸. 비용 생명주기의 쓰기 계약이 아니다 — 비용 근거의 정본은 evidence_id 하나다.';
+
+
+--
+-- Name: COLUMN expenses.recorded_by; Type: COMMENT; Schema: haetdeul; Owner: -
+--
+
+COMMENT ON COLUMN haetdeul.expenses.recorded_by IS '앞선 작업이 남긴 칸. 비용 생명주기의 쓰기 계약이 아니다.';
 
 
 --
