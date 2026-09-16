@@ -17,8 +17,9 @@
 🔴 **기록값이 선정안과 다르면 승인 때와 같은 재검증을 다시 지난다** (§4-6 ①). 기록이
    재무 Cap · 현금흐름 검증을 우회하는 문이 되면 안 된다. 통과 못 하면 기록도 전이도 없다.
 
-🔴 **전이 코드를 안 고친다.** `transition.apply_approval` 을 그대로 부르고, 기록 행
-   적재와 **한 커넥션 · 한 커밋**으로 묶는다.
+🔴 **전이 코드를 안 고친다.** `transition.apply_approval` 을 그대로 부른다. 다만
+   **기록 행 적재와 묶지 않는다** — 기록이 제 트랜잭션으로 먼저 커밋되고, 전이는 그
+   뒤에 별도 커넥션으로 돈다 (`record_purchase` 독스트링 · 2026-09-16).
 
 ⚠️ **자동 승인(`AUTO-BACKFILL`)은 이 경로를 안 탄다** — 지금처럼 승인 즉시 계획값으로
   전이한다 (§2).
@@ -125,15 +126,40 @@ def record_purchase(
           선검사  첫 회차 매입일 == 승인 실행 as_of · 수량 · 금액이 정수
           회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
-    ①    master_purchase_records 에 회차 행
+    ①    master_purchase_records 에 회차 행 — **제 커넥션 · 제 커밋**
     ②    선정안 약정 사본에 기록값을 덮는다
-    ③    apply_approval(사본) — ① 과 같은 커넥션 · 한 커밋
+    ③    apply_approval(사본) — ① 이 커밋된 **뒤** · **별도 커넥션**
     ```
 
-    ★ **전이가 커넥션을 열지 않고 돌아서면**(`NOT_APPLIED` · 계산 단계 `FAILED`) 기록만
-      커밋한다 — 기록은 남고 다음 날 재시도가 기록값으로 다시 시도한다 (§4-3 ⚠️).
-    ⚠️ **전이가 적재하다 터지면**(`FAILED` · rollback) 기록도 함께 물린다. 한 커밋이기
-      때문이고, 사람은 같은 기록을 다시 보낼 수 있다.
+    🔴 **기록과 전이는 두 트랜잭션이다** (2026-09-16 · `#729`). 전에는 한 커넥션으로
+       묶었는데, `apply_approval` 은 적재하다 터지면 그 커넥션을 `rollback` 하므로
+       **전이가 실패하면 기록 행까지 사라졌다.**
+
+       ★ 그런데 **전이 실패는 예외가 아니라 정상 경로다.** 전이는 언제나 하루 앞
+         (도착일)의 물류 runtime fixture 행을 보는데 그 행은 다음 개장에 열린다 —
+         그래서 **승인 당일의 전이는 언제나 `FAILED` 이고 다음 날 「미적용 전이
+         재시도」가 세운다** (`pending_transition.py` 머리말).
+
+       ```text
+       실측  dev@983c85b · SIM-CHECK-HOLIDAY-0916 · 2026-04-13 무
+         POST .../purchase-record → 201 {"status":"FAILED","reason":"전이 적재 실패:
+           갱신할 물류 runtime fixture 행이 없다 (as_of=2026-04-14)..."}
+         SELECT ... FROM master_purchase_records WHERE sim_run_id='SIM-CHECK-HOLIDAY-0916'
+           → 0행                      🔴 사람이 적은 사실이 지워졌다
+         다음 날 걷기: 미적용 전이 재시도 NOTHING_DUE — 기록이 없어 재시도 대상에서도
+           빠지고(`#718`) 매입은 영영 안 선다
+       ```
+
+       ★ **기록은 사람이 진술한 사실이고 전이는 그 귀결이다.** 장부가 아직 준비되지
+         않았다는 이유로 사람의 진술이 지워지면 안 된다. 그 상태는 설계에 이미 있다 —
+         `PurchaseRecordStatus.NOT_APPLIED`("기록 있음 · 아직 원장에 없다 → 다음 개장
+         뒤 재시도가 기록값으로", `decision.py`).
+
+    ★ 그래서 **전이가 무엇을 돌려주든 기록은 남는다** — 커넥션 앞에서 돌아서든
+      (`NOT_APPLIED`) 적재하다 롤백하든(`FAILED`). 사람은 다시 보내지 않고, 다음
+      개장 뒤 재시도가 기록값으로 세운다.
+    🔴 **기록 삽입 자체가 실패하면 전이를 안 부른다** — 없는 기록의 귀결은 없다.
+      이미 기록된 승인이면 `UniqueViolation` 이 409 로 접힌다 (커밋이 앞당겨져도 같다).
 
     :raises LookupError: 승인이 없다 (404).
     :raises DecisionRejected: 지금 상태에서 받을 수 없다(409) · 기록이 선정안과 안 맞다 ·
@@ -198,44 +224,36 @@ def record_purchase(
         _revalidate_or_reject(approval, legs, grade)
 
     open_connection = get_connection if connect is None else connect
+    # ① 기록을 **먼저 · 제 트랜잭션으로** 커밋한다. 이 커넥션은 전이에 넘기지 않는다 —
+    #    넘기면 전이의 rollback 이 기록까지 되감는다 (위 독스트링 실측).
     conn = open_connection()
-    opened_by_transition = False
-
-    def _same_connection() -> Any:
-        nonlocal opened_by_transition
-        opened_by_transition = True
-        return conn
-
     try:
-        try:
-            insert_purchase_record_legs(
-                conn,
-                sim_run_id=sim_run_id,
-                request_id=request_id,
-                decision_seq=decision.decision_seq,
-                grade=grade,
-                recorded_by=body.recorded_by.strip(),
-                legs=legs,
-            )
-        except pg_errors.UniqueViolation as exc:
-            conn.rollback()
-            raise DecisionRejected(
-                f"이 승인(회차 {decision.decision_seq})에는 이미 실매입이 기록됐다.",
-                conflict=True,
-            ) from exc
-        out = apply_fn(recorded, sim_run_id=sim_run_id, connect=_same_connection)
-        if not opened_by_transition:
-            # ★ 전이가 커넥션 앞에서 돌아섰다 — 기록만 커밋한다.
-            conn.commit()
-        # ★ 열었으면 `apply_approval` 이 기록과 전이를 **한 번에** 커밋(또는 롤백)했다.
-        return out
-    except DecisionRejected:
-        raise
+        insert_purchase_record_legs(
+            conn,
+            sim_run_id=sim_run_id,
+            request_id=request_id,
+            decision_seq=decision.decision_seq,
+            grade=grade,
+            recorded_by=body.recorded_by.strip(),
+            legs=legs,
+        )
+        conn.commit()
+    except pg_errors.UniqueViolation as exc:
+        conn.rollback()
+        raise DecisionRejected(
+            f"이 승인(회차 {decision.decision_seq})에는 이미 실매입이 기록됐다.",
+            conflict=True,
+        ) from exc
     except Exception:
+        # 🔴 기록이 안 앉았으면 전이를 안 부른다 — 없는 기록의 귀결은 없다.
         conn.rollback()
         raise
     finally:
         conn.close()
+
+    # ③ 전이는 **커밋된 기록 뒤에** 제 커넥션으로 돈다. 실패해도 기록은 남고,
+    #    다음 개장 뒤 「미적용 전이 재시도」가 기록값으로 세운다.
+    return apply_fn(recorded, sim_run_id=sim_run_id, connect=connect)
 
 
 def _check_recordable_values(approval: CurrentApproval, legs: Sequence[RecordedLeg]) -> None:
