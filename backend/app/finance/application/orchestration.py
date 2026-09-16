@@ -621,6 +621,45 @@ def _stop(
     raise RuntimeError(message) from cause
 
 
+#: 이번 단계의 Tool 을 **누가 골랐는가.** Trace 전용 — 업무 결과에는 들어가지 않는다.
+SELECTION_LLM = "LLM"
+SELECTION_SINGLE = "DETERMINISTIC_SINGLE"
+SELECTION_FINALIZE = "DETERMINISTIC_FINALIZE"
+
+
+def _settled_action(capability_state: CapabilityState) -> tuple[ToolAction, str] | None:
+    """**고를 것이 하나뿐인 단계**를 결정론으로 넘긴다. 아니면 `None`.
+
+    Harness 는 이미 이번 단계에 합법인 Tool 집합을 결정론으로 계산해 두었다. 그 집합이
+    비었으면(= 남은 capability 없음) 남은 행동은 종료뿐이고, 하나뿐이면 고를 여지가
+    없다. **답이 정해진 자리에 모델을 부르면 왕복만 늘고 선택은 달라지지 않는다.**
+
+    ★ 문구도 순서도 `DeterministicFinancePlanner` 와 같게 둔다. LLM 을 껐을 때와 켰을
+      때의 Trace 가 갈라지면 같은 실행을 두 벌로 읽어야 한다.
+
+    🔴 **새 업무 규칙을 만들지 않는다.** 여기서 정하는 것은 "어느 Tool 을 부를까" 뿐이고
+       인자는 그대로 `source_owned_arguments` 가, 승인은 그대로 `harness.authorize` 가
+       맡는다. 생략되는 것은 **모델의 선택**뿐이다.
+    """
+    from app.finance.application.harness import CAPABILITY_OWNER
+
+    if not capability_state.missing:
+        return (
+            ToolAction(finalize=True, reason="capabilities complete"),
+            SELECTION_FINALIZE,
+        )
+    if len(capability_state.executable_tools) != 1:
+        return None
+    only = next(iter(capability_state.executable_tools))
+    for capability in capability_state.missing:
+        if CAPABILITY_OWNER[capability] == only:
+            return (
+                ToolAction(tool_name=only, reason=f"satisfies {capability}"),
+                SELECTION_SINGLE,
+            )
+    return None
+
+
 def _decide(
     state: FinanceAgentState,
     *,
@@ -628,12 +667,30 @@ def _decide(
     harness: FinanceHarness,
     capability_state: CapabilityState,
 ) -> ToolAction | None:
-    """Planner 를 한 번 부른다. 계약 위반이면 되묻고 `None` 을 돌려준다.
+    """이번 단계의 Tool 을 정한다. 계약 위반이면 되묻고 `None` 을 돌려준다.
 
     ★ 노출은 **이번 단계의 실행 가능 Tool 뿐**이다. 부를 수 없는 Tool 을 보여 주면
       모델이 그것을 고르고, 우리는 그 선택을 반려하느라 예산을 쓴다.
+
+    ★ **선택지가 둘 이상일 때만 모델을 부른다.** 하나뿐이거나 끝났으면 결정론으로
+      정하고 provider 로는 아무것도 보내지 않는다 — `planner.attempts` 도
+      `harness.llm_calls` 도 오르지 않아야 한다.
     """
+    settled = _settled_action(capability_state)
+    if settled is not None:
+        action, source = settled
+        harness.note_selection(source)
+        return action
+
+    if not capability_state.executable_tools:
+        # 남은 capability 는 있는데 부를 수 있는 Tool 이 없다. 모델에게 물어도 고를
+        # 것이 없다 — 결정론 Planner 가 같은 자리에서 내는 실패를 그대로 낸다.
+        raise FinancePlannerFailure(
+            "no allowed Finance tool can satisfy the missing capabilities"
+        )
+
     harness.count_llm_call()
+    harness.note_selection(SELECTION_LLM)
     try:
         return planner.decide(
             request=state.request,
@@ -730,6 +787,18 @@ class _BranchOutcome:
 
 
 @dataclass(frozen=True)
+class _LlmCalls:
+    """**실행 하나가 시작될 때** Planner/Finalizer 가 들고 있던 호출 수.
+
+    이 값과 끝난 뒤의 차이가 «이번 실행에서 실제로 부른 횟수» 다. 누적값을 그대로
+    보면 예전 실행의 호출이 이번 실행의 사실로 읽힌다.
+    """
+
+    planner: int
+    finalizer: int
+
+
+@dataclass(frozen=True)
 class _Explanation:
     """설명과 **그 설명이 어떻게 나왔는지.** 둘은 같이 다녀야 뜻이 통한다."""
 
@@ -790,6 +859,13 @@ class FinanceAgentController:
             )
         started = time.monotonic()
         run_id = str(uuid4())
+        #  🔴 **이번 실행의 호출만 센다.** Planner/Finalizer 의 `attempts` 는 객체에
+        #     쌓이는 값이라, 같은 Controller 로 두 번 돌리면 2차가 1차의 호출을 자기
+        #     것으로 읽는다. 그러면 한 번도 모델을 안 부른 실행이 `SUCCESS` 로 남는다.
+        #
+        #     지역 변수로 잰다 — 인스턴스에 두면 같은 Controller 를 동시에 돌릴 때
+        #     기준점이 서로를 덮는다.
+        before = _LlmCalls(self.planner.attempts, self.finalizer.attempts)
 
         outcome = self._execute_branches(request)
         payload, evidences, business_status, adjustments = build_business_result(
@@ -797,7 +873,7 @@ class FinanceAgentController:
         )
         _lift_sales_runtime_status(request, outcome, payload)
         explanation = self._explain(
-            request, outcome, payload, evidences, business_status, adjustments
+            request, outcome, payload, evidences, business_status, adjustments, before
         )
         elapsed = int((time.monotonic() - started) * 1000)
 
@@ -808,6 +884,7 @@ class FinanceAgentController:
             payload=payload,
             explanation=explanation,
             elapsed=elapsed,
+            before=before,
         )
         reply = self._build_reply(
             request,
@@ -917,6 +994,7 @@ class FinanceAgentController:
         evidences: list[Evidence],
         business_status: str,
         adjustments: list[SuggestedAdjustment] | None = None,
+        before: _LlmCalls | None = None,
     ) -> _Explanation:
         """검증된 Evidence 로 설명을 **고른다.** 설명이 결과를 바꾸지는 않는다.
 
@@ -926,7 +1004,9 @@ class FinanceAgentController:
            `DISABLED` 로 남는다 — 이력에는 *"LLM 을 안 켰다"* 고 적히고, 실제로는
            **켜 뒀는데 부를 일이 없었다** 이다. 둘은 다음 조치가 다르다.
         """
-        llm_status = self._llm_status(planner_failed=outcome.planner_failed)
+        llm_status = self._llm_status(
+            planner_failed=outcome.planner_failed, before=before
+        )
         if outcome.runtime_status != "READY":
             # 못 낸 이유를 말한다. Finalizer 를 부르지 않는다 — 검증된 결과가 없다.
             #
@@ -971,7 +1051,7 @@ class FinanceAgentController:
             )
         return _Explanation(
             reasoning,
-            self._llm_status(planner_failed=outcome.planner_failed),
+            self._llm_status(planner_failed=outcome.planner_failed, before=before),
             outcome.planner_failed,
         )
 
@@ -984,6 +1064,7 @@ class FinanceAgentController:
         payload: dict[str, Any],
         explanation: _Explanation,
         elapsed: int,
+        before: _LlmCalls | None = None,
     ) -> ExecutionMetadata:
         """실행 흔적. **Business Reply 와 섞지 않는다.**"""
         states = outcome.states
@@ -1027,9 +1108,13 @@ class FinanceAgentController:
             replans=sum(state.replans for state in states),
             llm_status=explanation.llm_status,
             llm_model=(
-                self.finalizer.model if self.finalizer.attempts else self.planner.model
+                self.finalizer.model
+                if self._calls_since(before).finalizer
+                else self.planner.model
             ),
-            llm_attempts=self.planner.attempts + self.finalizer.attempts,
+            llm_attempts=(
+                self._calls_since(before).planner + self._calls_since(before).finalizer
+            ),
             llm_fallback_used=explanation.llm_fallback_used,
             elapsed_ms=elapsed,
         )
@@ -1148,7 +1233,20 @@ class FinanceAgentController:
             )
         return reply
 
-    def _llm_status(self, *, planner_failed: bool) -> str:
+    def _calls_since(self, before: _LlmCalls | None) -> _LlmCalls:
+        """**이번 실행에서** Planner/Finalizer 를 몇 번 불렀나.
+
+        ★ `before` 가 없으면 누적값을 그대로 쓴다 — 기준점을 안 준 옛 호출 경로가
+          갑자기 0 을 보고 «부른 적 없음» 으로 읽는 것보다 낫다.
+        """
+        if before is None:
+            return _LlmCalls(self.planner.attempts, self.finalizer.attempts)
+        return _LlmCalls(
+            self.planner.attempts - before.planner,
+            self.finalizer.attempts - before.finalizer,
+        )
+
+    def _llm_status(self, *, planner_failed: bool, before: _LlmCalls | None = None) -> str:
         """공용 `LLMStatus` 의미를 재무 실행에 그대로 적용한다.
 
             DISABLED          설정으로 껐다
@@ -1163,6 +1261,7 @@ class FinanceAgentController:
             return "DISABLED"
         if planner_failed:
             return "FALLBACK"
-        if self.planner.attempts + self.finalizer.attempts == 0:
+        calls = self._calls_since(before)
+        if calls.planner + calls.finalizer == 0:
             return "SKIPPED_TEMPLATE"
         return "SUCCESS"

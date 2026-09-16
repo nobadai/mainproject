@@ -238,13 +238,17 @@ def _mock_successful_pre_purchase(monkeypatch, provider, finalizer_type):
     ★ Tool 순서는 합법이어야 한다. `analyze_payment_pressure` 와
       `calculate_purchase_finance_cap` 은 `cashflow_projection` 을 선행으로 요구한다.
     """
+    #: 🔴 **Planner 가 불리는 자리만 적는다.** 고를 것이 하나뿐인 단계와 종료 단계는
+    #:    Harness 가 결정론으로 정한다. 그 자리의 답까지 적어 두면 이미 실행한 Tool 을
+    #:    다시 요청하게 되어 중복 반려가 난다.
+    #:
+    #:    실행 순서는 `assess → project → pressure → cap` 으로 예전과 같다 —
+    #:    사이의 `project_cashflow` 와 마지막 `calculate_purchase_finance_cap` 은
+    #:    그때 유일한 합법 Tool 이다.
     actions = iter(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("analyze_payment_pressure"),
-            ToolAction("calculate_purchase_finance_cap"),
-            ToolAction(finalize=True),
         ]
     )
     original_decide = LangChainFinancePlanner.decide
@@ -424,7 +428,9 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     assert metadata.llm_status == "SUCCESS"
     assert metadata.llm_fallback_used is False
     assert metadata.llm_model == "gemma3:4b"
-    assert metadata.llm_attempts == 7
+    #  Planner 2 + Finalizer 2. 예전 7 에서 줄어든 3 은 **고를 것이 하나뿐이던 단계와
+    #  종료 단계**의 Planner 호출이다 — 대체 Provider 로 넘어가도 그 자리는 안 부른다.
+    assert metadata.llm_attempts == 4
     assert controller.planner.state.active is True
     assert _provider_observation(metadata) == {
         "effective_provider": "ollama",
