@@ -73,9 +73,10 @@ import {
   type SalesTrendResponse,
 } from "./sales_api";
 
-type Tab = "overview" | "partners" | "orders" | "collections" | "agent" | "runs";
+type Tab = "overview" | "candidates" | "partners" | "orders" | "collections" | "agent" | "runs";
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "판매 현황" },
+  { key: "candidates", label: "판매 후보" },
   { key: "partners", label: "거래처" },
   { key: "orders", label: "주문 · 판매" },
   { key: "collections", label: "수금" },
@@ -102,6 +103,7 @@ export default function SalesPage() {
 
 function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
   if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} />;
+  if (tab === "candidates") return <Candidates simRun={simRun} asOf={asOf} />;
   if (tab === "partners") return <Partners simRun={simRun} asOf={asOf} />;
   if (tab === "collections") return <Collections simRun={simRun} asOf={asOf} />;
   if (tab === "orders") return <Orders simRun={simRun} asOf={asOf} />;
@@ -109,9 +111,30 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
   return <Runs simRun={simRun} />;
 }
 
+
+function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [proposalRefresh, setProposalRefresh] = useState(0);
+  const proposals = useConsoleData<SalesProposalsResponse>(
+    `sales-proposals:${simRun}:${asOf}:${proposalRefresh}`,
+    () => salesOverview.proposals(simRun, asOf),
+    true,
+  );
+  return (
+    <>
+      <TodayProposalsPanel
+        asOf={asOf}
+        state={proposals}
+        onConfirmed={() => setProposalRefresh((value) => value + 1)}
+      />
+    </>
+  );
+}
 /* ── 판매 현황 ─────────────────────────────────────────────────────────── */
 
 function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [trendFrom, setTrendFrom] = useState("");
+  const [trendTo, setTrendTo] = useState("");
+  const [appliedTrendRange, setAppliedTrendRange] = useState({ from: "", to: "" });
   const [proposalRefresh, setProposalRefresh] = useState(0);
   const summary = useConsoleData<SalesSummaryResponse>(
     `sales-summary:${simRun}:${asOf}`,
@@ -119,8 +142,8 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
   const trend = useConsoleData<SalesTrendResponse>(
-    `sales-trend:${simRun}:${asOf}`,
-    () => salesOverview.trend(simRun, asOf),
+    `sales-trend:${simRun}:${asOf}:${appliedTrendRange.from}:${appliedTrendRange.to}`,
+    () => salesOverview.trend(simRun, asOf, appliedTrendRange.from || undefined, appliedTrendRange.to || undefined),
     true,
   );
   const proposals = useConsoleData<SalesProposalsResponse>(
@@ -177,13 +200,24 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         state={proposals}
         onConfirmed={() => setProposalRefresh((value) => value + 1)}
       />
-      <SalesCandidatePanel
-        asOf={asOf}
-        simRun={simRun}
-        onCreated={() => setProposalRefresh((value) => value + 1)}
-      />
 
-      <Panel title="기간별 매출" subtitle="판매가 있었던 날만 표시합니다">
+      <Panel title="기간별 매출" subtitle="선택한 기간의 저장된 판매를 날짜별로 보여줍니다">
+        <form
+          className="mb-4 flex flex-wrap items-end gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setAppliedTrendRange({ from: trendFrom, to: trendTo });
+          }}
+        >
+          <label className="flex flex-col gap-1 text-[12px] text-ink2">시작일
+            <input type="date" value={trendFrom} onChange={(event) => setTrendFrom(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1 text-[12px] text-ink2">종료일
+            <input type="date" value={trendTo} onChange={(event) => setTrendTo(event.target.value)} />
+          </label>
+          <button type="submit" className="rounded-lg border px-3 py-2 text-[12px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>기간 적용</button>
+          {(appliedTrendRange.from || appliedTrendRange.to) && <button type="button" onClick={() => { setTrendFrom(""); setTrendTo(""); setAppliedTrendRange({ from: "", to: "" }); }} className="rounded-lg border px-3 py-2 text-[12px]">전체 기간</button>}
+        </form>
         {trend.loading ? (
           <Skeleton what="매출 추이" />
         ) : trend.error ? (
@@ -262,7 +296,8 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
  *
  * ⚠️ **업무 값이 아니라 표시 조각이다.** 정본은 `total_outstanding_krw` 와
  *   `overdue_krw` 두 칸이고, 여기서는 그 둘의 차이를 **막대 폭**으로만 쓴다. 값이
- *   하나라도 없으면 `null` 이라 막대에서 빠진다 — 0 으로 채우지 않는다.
+ *   하나라도 없으면
+ull` 이라 막대에서 빠진다 — 0 으로 채우지 않는다.
  */
 function normalOutstanding(data: CollectionsResponse): number | null {
   const total = Number(data.summary.total_outstanding_krw);

@@ -73,7 +73,7 @@ def test_the_recent_window_is_cut_from_the_end_and_reordered(monkeypatch):
     get_console_sales_trend(sim_run_id=RUN, as_of=AS_OF, days=30)
 
     query, params = reader.calls[0]
-    assert params[2] == 30
+    assert params[-1] == 30
     #  안쪽은 최신부터 잘라 내고, 바깥쪽이 다시 오름차순으로 세운다.
     assert query.index("ORDER BY s.sale_date DESC") < query.index("ORDER BY sale_date ASC")
 
@@ -84,7 +84,7 @@ def test_an_oversized_window_is_capped_rather_than_passed_through(monkeypatch):
 
     get_console_sales_trend(sim_run_id=RUN, as_of=AS_OF, days=99_999)
 
-    assert reader.calls[0][1][2] == MAX_TREND_DAYS
+    assert reader.calls[0][1][-1] == MAX_TREND_DAYS
 
 
 def test_a_run_with_no_sales_is_empty_rather_than_zero_filled(monkeypatch):
@@ -100,8 +100,16 @@ def test_a_real_zero_day_is_kept(monkeypatch):
     """반대쪽도 지키자 — 저장된 0 은 0 으로 나른다."""
     _patch(
         monkeypatch,
-        _Reader([_row(31, sales_count=1, sales_amount_krw=Decimal(0),
-                      contribution_profit_krw=Decimal(0))]),
+        _Reader(
+            [
+                _row(
+                    31,
+                    sales_count=1,
+                    sales_amount_krw=Decimal(0),
+                    contribution_profit_krw=Decimal(0),
+                )
+            ]
+        ),
     )
 
     result = get_console_sales_trend(sim_run_id=RUN, as_of=AS_OF)
@@ -120,3 +128,36 @@ def test_amounts_stay_decimal_rather_than_becoming_float(monkeypatch):
     assert isinstance(point.sales_amount_krw, Decimal)
     assert isinstance(point.quantity_kg, Decimal)
     assert isinstance(point.contribution_profit_krw, Decimal)
+
+
+def test_requested_date_range_is_bound_in_the_backend_query(monkeypatch):
+    reader = _Reader([])
+    _patch(monkeypatch, reader)
+    start = date(2026, 3, 10)
+    end = date(2026, 3, 20)
+
+    get_console_sales_trend(
+        sim_run_id=RUN,
+        as_of=AS_OF,
+        from_date=start,
+        to_date=end,
+    )
+
+    _query, params = reader.calls[0]
+    assert params[1] == end
+    assert params[2:4] == [start, start]
+    assert params[4] == end
+
+
+def test_reversed_requested_date_range_fails_closed(monkeypatch):
+    _patch(monkeypatch, _Reader([]))
+
+    import pytest
+
+    with pytest.raises(ValueError, match="from_date"):
+        get_console_sales_trend(
+            sim_run_id=RUN,
+            as_of=AS_OF,
+            from_date=date(2026, 3, 20),
+            to_date=date(2026, 3, 10),
+        )

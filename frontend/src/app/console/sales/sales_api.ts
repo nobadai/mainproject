@@ -120,9 +120,9 @@ export const salesOverview = {
     send<SalesSummaryResponse>(
       `${CONSOLE_BASE}/sales/summary?${query({ sim_run_id: simRun, as_of: asOf })}`,
     ),
-  trend: (simRun: string, asOf: string) =>
+  trend: (simRun: string, asOf: string, fromDate?: string, toDate?: string) =>
     send<SalesTrendResponse>(
-      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf })}`,
+      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf, from_date: fromDate, to_date: toDate })}`,
     ),
   proposals: (simRun: string, asOf: string) =>
     send<SalesProposalsResponse>(
