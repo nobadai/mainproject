@@ -83,7 +83,7 @@ _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 안이 승인되
 #  DB 읽기
 # ══════════════════════════════════════════════════════════════════════════
 
-def _read(as_of: date) -> dict[str, Any]:
+def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
     """저장된 실행과 확정 매입을 읽는다. **SELECT 뿐이다.**
 
     🔴 **축(`sim_run_id`)으로 여기서 거르지 않는다.** 칸을 읽어 오기만 하고 고르는 것은
@@ -93,6 +93,26 @@ def _read(as_of: date) -> dict[str, Any]:
            WHERE 로 걸러 오면 뺀 수를 셀 수 없고, 그러면 조용히 없애는 것이 된다
         ② 검사가 이 함수를 대신 세워 상황을 주입한다. WHERE 에 두면 그 주입이
            필터를 건너뛰어 **축이 도는지를 못 잰다** (규칙 8)
+
+    🔵 **``window_days`` 는 도착일 조회(``arrivals``)의 날짜 창이다** (2026-09-16).
+
+    ``N`` 은 **``as_of`` 를 포함한 최근 N 일**이다 — ``0`` 이면 0일이라 **한 날도 안 읽고**,
+    ``1`` 이면 그날 하루, ``None`` 이면 **안 좁힌다**(지금까지의 동작).
+
+    ⚠️ **이 인자는 다른 넷(``runs`` · ``buys`` · ``decisions`` · ``items``)에 안 닿는다.**
+    좁히는 것은 도착일을 맞추려고 **다시 훑는** 실행 표 하나뿐이다.
+
+    🔴 **왜 생겼나.** 대시보드가 이 함수를 통째로 재사용하는데, 물류가 재 보니 그 왕복이
+    약 600ms 로 대시보드 단일 최대였다 (2026-09-16 회신). 우리 머신 실측으로도
+    ``arrivals`` 가 ``829.6ms`` · 7,700행이고 나머지 셋을 합쳐야 ``162.5ms`` 다.
+
+    ★★ **그런데 대시보드는 그 결과를 안 읽는다.** ``pu.plans`` · ``pu.source`` 만 읽고,
+    ``arrivals`` 가 먹이는 곳은 ``_committed`` 하나다. 그래서 대시보드가 넘길 값은
+    «12일» 이 아니라 **``0``** 이다 — 좁히는 게 아니라 **안 읽는 것**이 맞다.
+
+    🔴 **좁히면 그 사실을 화면이 말해야 한다** — ``arrivals_complete`` 를 같이 돌려준다.
+    도착일을 못 채운 채 「입고 예정 0kg」 을 적으면 «확정된 0» 과 «안 읽었다» 가 한 값이
+    된다 (규칙 3). 그 칸을 쓰는 자리는 ``build`` 다.
     """
     from psycopg import sql
 
@@ -134,7 +154,16 @@ def _read(as_of: date) -> dict[str, Any]:
     items = fetch_all(sql.SQL("SELECT item_id, item_name FROM {}").format(table("items")))
     #  확정 매입의 도착일은 원장에 없다. 그날 실행의 시나리오에서 **금액으로**
     #  맞춰 온다 — purchase_id 문자열을 쪼개면 이름 규칙에 묶인다.
-    dates = sorted({row["purchase_date"] for row in buys})
+    all_dates = sorted({row["purchase_date"] for row in buys})
+    #  🔵 날짜 창. `None` 이면 안 좁힌다 — 그때 `dates is all_dates` 라 아래 조회가
+    #     지금까지와 **한 글자도 다르지 않다.**
+    #
+    #  ★ `window_days=0` 에 분기를 따로 안 만든다. 창이 0이면 이 목록이 비고, 아래
+    #    `if dates else []` 가 **이미** 조회를 건너뛴다. 「0 이면 아예 안 돈다」는
+    #    새로 짓는 동작이 아니라 있던 단락이 하는 일이다.
+    dates = all_dates if window_days is None else [
+        d for d in all_dates if 0 <= (as_of - d).days < window_days
+    ]
     arrivals = fetch_all(
         sql.SQL(
             "SELECT as_of, item, sim_run_id, response_payload->'scenarios' AS scenarios"
@@ -148,6 +177,10 @@ def _read(as_of: date) -> dict[str, Any]:
         "decisions": decisions,
         "items": {row["item_id"]: row["item_name"] for row in items},
         "arrivals": arrivals,
+        #  🔴 **「전부 읽었나」를 값으로 돌려준다.** 창을 좁히면 도착일이 비는데, 그
+        #     공란이 «맞출 것이 없었다» 인지 «안 읽었다» 인지 여기서만 알 수 있다.
+        #     읽는 쪽(`build`)이 다시 계산하면 두 벌이 되고, 한쪽만 고치는 날이 온다.
+        "arrivals_complete": dates == all_dates,
     }
 
 
@@ -533,7 +566,9 @@ def _demo(note: str) -> PurchaseTab:
 #  본체
 # ══════════════════════════════════════════════════════════════════════════
 
-def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
+def build(
+    as_of: date, sim_run_id: str | None = None, window_days: int | None = None
+) -> PurchaseTab:
     """매입 탭. ``sim_run_id`` 는 **어느 걷기를 보는가**다.
 
     🔴 **안 주면 안 거른다.** 지금 DB 에는 축이 붙기 전 실행이 1,202건 있고, 그것을
@@ -541,16 +576,30 @@ def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
     두 세상을 섞지 않도록 **자리를 먼저 만들어 두는 것**이 이 인자다.
 
     ⚠️ 값을 여기서 짓지 않는다 — 받아서 그대로 흘린다 (마스터 당부 2026-09-10).
+
+    🔵 ``window_days`` 는 도착일 조회의 날짜 창이고 뜻은 ``_read`` 가 적는다
+    (2026-09-16). **매입 탭 자신은 안 넘긴다** — 이 인자는 이 함수를 재사용하는
+    대시보드를 위한 자리다.
+
+    🔴 **좁히면 「확정 입고 예정」을 숫자로 안 적는다.** 그 칸은 도착일에서 나오는데,
+    창을 좁히면 도착일이 비어 합계가 ``0`` 이 된다. 그건 «확정된 0» 이 아니라
+    «안 읽었다» 라 규칙 3 위반이다 — **미결로 낸다.**
     """
     #  ★ 통째로 잡는 것이 맞습니다 — 여기서 무슨 일이 나든 **화면은 떠야** 하고
     #    대신 「예시값」 딱지가 붙습니다. 예외 종류를 골라 잡으면 안 골라낸
     #    하나 때문에 화면이 통째로 죽습니다 (ML 이 forecast 에서 같은 판단).
     try:
-        data = _read(as_of)
+        data = _read(as_of, window_days=window_days)
     except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
         log.info("매입 값을 못 읽어 예시값을 씁니다: %s", error)
         return _demo(f"DB 를 못 읽었습니다 ({type(error).__name__})")
 
+    #  🔴 **기본이 「전부 읽었다」다.** 검사가 `_read` 를 대신 세울 때 이 칸을 안 넣는데,
+    #     그 주입은 자기가 준 `arrivals` 가 전부인 세상이라 «온전» 이 맞다.
+    #  ⚠️ 위 `except` 가 **통째로 잡는다** — 그래서 `_read` 시그니처가 안 맞으면
+    #     `TypeError` 도 삼켜져 조용히 예시값이 나간다. 스텁을 넓힐 때 그것이 실제
+    #     위험이었고, `tests/api/test_purchase_tab_window.py` 가 그 자리를 지킨다.
+    arrivals_complete = data.get("arrivals_complete", True)
     runs = data["runs"]
     decided = {
         (row["request_id"], row["scenario_label"]): row["decision"]
@@ -597,7 +646,16 @@ def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
         "승인(MASTER_APPROVAL)으로 원장에 남은 매입만 봅니다 — "
         f"{as_of.isoformat()} 까지 {len(committed.rows)}줄."
     )
-    if arrived_unknown:
+    if not arrivals_complete:
+        #  🔴 **「못 맞췄다」와 「안 읽었다」를 다른 문장으로 적는다.** 아래 문장은
+        #     *"맞출 것을 다 보고도 못 맞췄다"* 는 뜻이라, 창을 좁힌 날 그 말을 쓰면
+        #     읽는 사람이 없는 원인을 고치려 든다.
+        #  ★ E3-5 에서 같은 판단을 했다 — 「못 읽었다」와 「발간물 0건」을 갈랐다.
+        committed_text += (
+            f" 도착일은 이 호출에서 **안 읽었습니다** (날짜 창 {window_days}일) —"
+            " 공란이 «못 맞췄다» 라는 뜻이 아닙니다."
+        )
+    elif arrived_unknown:
         committed_text += f" 도착일을 못 맞춘 줄 {arrived_unknown}개는 **공란**입니다."
     #  🔴 뺀 것을 조용히 없애지 않는다 — 이번 주 매입액이 왜 작은지가 여기 있다.
     if committed_off_axis:
@@ -621,9 +679,18 @@ def build(as_of: date, sim_run_id: str | None = None) -> PurchaseTab:
             Stat(label="이번 주 확정 매입액", value=f"{week_amount:,}", unit="원",
                  detail=f"{week_start.isoformat()} ~ {as_of.isoformat()} · 승인분 줄 금액 합계",
                  tone="warn" if week_amount else "neutral", raw=week_amount),
+            #  🔴 **규칙 3 — 창을 좁힌 날 이 칸은 `0` 이 아니라 미결이다.**
+            #     이 수는 도착일에서 나온다(`_committed` 의 `arrive`). 창을 좁히면
+            #     도착일이 통째로 비어 합계가 0 이 되는데, 그건 «확정된 0» 이 아니라
+            #     «안 읽었다» 다. `raw=None` 이 그 구분을 나른다.
             Stat(label="확정 입고 예정", value=f"{sum(inbound):,.0f}", unit="kg",
                  detail=f"{as_of.isoformat()} 이후 도착 예정 {len(inbound)}건",
-                 tone="good" if inbound else "neutral", raw=sum(inbound)),
+                 tone="good" if inbound else "neutral", raw=sum(inbound))
+            if arrivals_complete else
+            Stat(label="확정 입고 예정", value="—", unit=None,
+                 detail=f"도착일을 안 읽었습니다 — 이 호출이 날짜 창을 좁혔습니다"
+                        f" (window_days={window_days})",
+                 tone="warn", raw=None),
         ],
         plans=plans,
         plans_note=plans_note,
