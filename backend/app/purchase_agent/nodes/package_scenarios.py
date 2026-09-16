@@ -36,14 +36,11 @@
 
 from collections.abc import Mapping
 from datetime import date, timedelta
-from functools import partial
 from typing import Any
 
 from app.purchase_agent.allocation import (
     arrival_dates,
     assign_axes,
-    cumulative_overflow,
-    equal_ratios,
     round_offsets,
     split_infeasible_reason,
     split_offsets,
@@ -51,6 +48,15 @@ from app.purchase_agent.allocation import (
 )
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes._guards import pending_value, require_positive
+from app.purchase_agent.nodes._split_outcome import (
+    AS_CHOSEN,
+    NOT_SPLIT,
+    ROLLED_BACK,
+    ROUNDS_CHANGED,
+    SplitOutcome,
+    cap_constrained_quantities,
+    settle_split,
+)
 from app.purchase_agent.nodes.allocate_sourcing import candidate_summary
 from app.purchase_agent.nodes.classify_situation import (
     compute_ci_width,
@@ -60,11 +66,14 @@ from app.purchase_agent.nodes.classify_situation import (
 )
 from app.purchase_agent.nodes.draft_plan import (
     ADJUSTMENT_CAP_NAME,
-    WAREHOUSE_CAP_NAME,
     purchase_budget_krw,
     split_adjustments,
 )
-from app.purchase_agent.nodes.split_plan import effective_allowed_axes, split_decision
+from app.purchase_agent.nodes.split_plan import (
+    CANDIDATE_SUMMARY,
+    effective_allowed_axes,
+    split_decision,
+)
 from app.purchase_agent.quotes import observed_at, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
@@ -103,267 +112,6 @@ def shifted_rounds_note(
             f" (오프셋 {base[-1]} → {moved[-1]}) — 커버가 늘어난 만큼 판단이 달라진다"
         )
     return note
-
-
-#: 회차 수량을 **재배분하지 못한** 사유. 넷을 갈라 적는 이유는 ``shelf_days_block_reason``과
-#: 같다 — 결과는 "균등 유지" 하나인데 원인이 넷이라, 뭉치면 무엇을 고쳐야 하는지가 사라진다.
-#:
-#: ⚠️ **더 이상 risks 로 나가지 않는다** (#93 · 2026-09-03). 날짜 축 고지는 ⑦
-#:   ``ARRIVAL_SKIP_REASONS`` 가 소유한다 — ⑥의 고지 경로가 timing 축 전용이라
-#:   quantity 축 안이 통째로 빠졌기 때문이다. 여기 남는 것은 ``cap_constrained_quantities``
-#:   가 *어느 갈래로 갔는지* 를 밝히는 **함수 자신의 반환값**이고, 그 갈래를 시험하는
-#:   단위 테스트가 소비자다.
-CAP_BLOCK_REASONS = {
-    "no_cap": (
-        "회차별 창고 여유 검사를 하지 않았다 — 물류에서 날짜별 입고 여유를 받지 못했다. "
-        "여유를 0으로 가정하지 않고 회차를 균등하게 나눴다"
-    ),
-    "no_lead": (
-        "회차별 창고 여유 검사를 하지 않았다 — 입고 소요일이 정해지지 않아 도착일을 "
-        "계산할 수 없다. 회차를 균등하게 나눴다"
-    ),
-}
-
-
-def _split_stands(
-    total_qty_kg: int,
-    chosen: list[dict] | None,
-    *,
-    coverage_days: int,
-    as_of: str,
-    lead_days: int | None,
-    cap_by_date: Mapping[str, float] | None,
-    calendar: Mapping[str, Any] | None,
-    widened: bool,
-) -> bool:
-    """이 분할이 **실제로 서는가** — 회차·비율·날짜·누적까지 밟아 본다 (E3-9 앞단).
-
-    🔴 **「④ 가 진입했다」는 안전을 보장하지 않는다.** 진입은 *"나눠 볼 만하다"* 이고,
-      성립은 회차 수와 배분 비율로 만든 **실제 도착일**이 날짜별 누적 여유를 지킬 때다.
-      그 사이에 ⑥ 의 재배분(``cap_constrained_quantities``)이 한 번 끼어든다.
-
-    막는 것 넷 (하나라도 걸리면 분할이 안 선다)::
-
-        ㉠ 회차가 없다/하나다                    chosen 이 비었거나 길이 1
-        ㉡ 회차·날짜가 안 선다                   split_infeasible_reason
-        ㉢ 실제 날짜를 못 놓는다                 arrival_dates 가 None · 여유 칸이 없다
-        ㉣ 재배분 뒤에도 누적이 넘는다            cumulative_overflow
-
-    🔴 ㉣ 는 ⑦ ``arrival_capacity`` 와 **같은 함수**를 부른다 — 두 곳이 각자 더하면
-      ⑥ 이 «선다» 고 본 분할을 ⑦ 이 컷하고, 그날 안은 왜 죽었는지 설명할 수 없다.
-
-    ⚠️ **여유를 못 보면 «선다» 로 읽지 않는다** (규칙 3). 넓힌 근거가 ``cap_by_date`` 인데
-      그것을 못 보면 넓힌 채로 둘 근거도 사라진다 — 일괄로 되돌리는 쪽이 보수적이다.
-    """
-    if not chosen or len(chosen) < 2:
-        return False
-    if split_infeasible_reason(total_qty_kg, chosen, coverage_days):
-        return False
-    arrivals = arrival_dates(as_of, coverage_days, len(chosen), lead_days, calendar)
-    if arrivals is None:
-        return False
-    if cap_by_date is None or any(cap_by_date.get(day) is None for day in arrivals):
-        # 🔴 **「못 봤다」는 「선다」가 아니다** (규칙 3 · 2026-09-16 검토).
-        #   다만 **넓힌 안과 안 넓힌 안의 처지가 다르다** —
-        #
-        #       안 넓힌 안   원래 서 있던 계획이다. 못 본 것을 이유로 우리가 먼저 깎으면
-        #                    ⑦ 이 컷하지도 않을 안을 죽인다 → 그대로 둔다 (⑦ 태도)
-        #       넓힌 안      넓힌 **근거가 바로 그 여유**다. 그 여유를 못 보면 넓힐 근거가
-        #                    사라진 것이라 **일괄로 되돌린다** — 「모르는 곳에 더 쌓는」
-        #                    계획을 내지 않는다 (``cap_constrained_quantities`` 와 같은 태도)
-        return not widened
-    quantities, _ = cap_constrained_quantities(
-        split_quantities(total_qty_kg, chosen), arrivals, cap_by_date
-    )
-    return cumulative_overflow(quantities, arrivals, cap_by_date) is None
-
-
-def _reclipped_to_bulk(draft: dict, single_round_cap_kg: int) -> dict:
-    """수량을 **일괄 상한으로 되돌리고** ``clipped_by`` 를 다시 계산한 새 draft.
-
-    🔴 **``clipped_by`` 를 같이 고치는 이유.** ⑥ 의 축소 문장 · ``_no_quantity_reason`` ·
-      ⑧ ``review_rationale`` 이 그 칸을 읽는다. 수량만 되돌리면 **문장이 틀린 수를 적는다.**
-
-    🔴 ``raw_qty_kg`` · ``demand_qty_kg`` · ``deducted_holdings_kg`` 는 **안 건드린다** —
-      그것은 사실이고, 되돌린 것은 «얼마나 살 수 있나» 뿐이다.
-    """
-    raw = draft["raw_qty_kg"]
-    남은 = [clip for clip in draft["clipped_by"] if clip["constraint"] != WAREHOUSE_CAP_NAME]
-    창고 = (
-        [{"constraint": WAREHOUSE_CAP_NAME, "cap_kg": single_round_cap_kg, "raw_qty_kg": raw}]
-        if single_round_cap_kg < raw
-        else []
-    )
-    return {
-        **draft,
-        "total_qty_kg": min(draft["total_qty_kg"], single_round_cap_kg),
-        # 창고를 맨 앞에 둔다 — ③ ``caps`` 의 선언 순서가 그렇고, 문장이 그 순서를 읽는다.
-        "clipped_by": [*창고, *남은],
-    }
-
-
-def bulk_fallback(
-    draft: dict,
-    axis: str,
-    split_choice: list[dict] | None,
-    *,
-    constraints: dict,
-    as_of: str,
-    lead_days: int | None,
-    cap_by_date: Mapping[str, float] | None,
-    calendar: Mapping[str, Any] | None,
-) -> tuple[dict, list[dict] | None, str | None]:
-    """분할이 안 서면 **다른 회차 수를 먼저 보고**, 그래도 안 서면 일괄로 되돌린다.
-
-    돌려주는 것은 ``(draft, 쓸 비율 목록, 사유)`` 다. 사유가 있으면 **되돌린 것**이고,
-    호출부는 그 안의 축을 ``quantity`` 로 내린다.
-
-    ★ **되돌릴 것이 없는 날이 대부분이다.** ③ 이 넓히지 않았으면(``single_round_cap_kg``
-      가 ``None`` 이거나 총량이 이미 그 이하면) 원본을 그대로 돌려준다.
-
-    🔴 ``single_round_cap_kg`` 가 ``None`` 인 것은 「날짜 축을 못 봤다」다 (규칙 3).
-      0 이나 무제한으로 바꾸지 않는다 — 못 본 날은 ③ 이 예전 기준(오늘 여유)으로 이미
-      깎았고, 여기서 다시 손대면 **못 본 것을 본 것처럼** 다루게 된다.
-
-    🔴 **다른 회차 수를 볼 때 판단자가 고른 비율을 재사용하지 않는다** (2026-09-16 검토).
-      그 비율은 **그 회차 수 전용**이다 — 2회차용 ``[0.6, 0.4]`` 를 3회차에 늘려 쓰면
-      판단자가 보지도 않은 배분이 «고른 것» 으로 나간다. 다른 회차 수는 **균등**으로만
-      본다 (``BASE_EQUAL`` — 되돌아갈 자리이지 후보가 아니다).
-    """
-    single = draft.get("single_round_cap_kg")
-    total = draft["total_qty_kg"]
-    widened = single is not None and total > single
-    if single is None:
-        return draft, split_choice, None
-    if axis != TIMING_AXIS:
-        # 축을 못 받은 안은 1회차로 나간다 — 넓힌 수량이 남아 있으면 ⑦ 이 컷한다.
-        if not widened:
-            return draft, split_choice, None
-        return _reclipped_to_bulk(draft, single), None, _되돌림_사유(total, single)
-
-    잰다 = partial(
-        _split_stands,
-        total,
-        coverage_days=draft["coverage_days"],
-        as_of=as_of,
-        lead_days=lead_days,
-        cap_by_date=cap_by_date,
-        calendar=calendar,
-        widened=widened,
-    )
-    if 잰다(split_choice):
-        # 🔴 **분할이 서더라도 «더 살 수 있을 때» 만 나눈다.** 한 번에 들어가는 양과 같은데
-        #   회차만 늘리면 실익 없이 ``timing`` 라벨이 붙는다 — §3.5.1-3 이 막는 모양이다.
-        #   ⚠️ **궤적으로 진입한 날은 예외다** — 가격이 오르는 날 나눠 사는 것은 수량이
-        #     안 늘어도 뜻이 있다 (그게 timing 축의 본래 이유다).
-        if not widened and not split_decision(split_choice).get("by_trend"):
-            return draft, None, (
-                f"분할 축이 열렸지만 한 번에 들어가는 {single:,}kg 과 총량이 같아 나누지 "
-                "않는다 — 회차를 늘려도 더 살 수 없다"
-            )
-        return draft, split_choice, None
-
-    # ④ 가 고른 회차 수가 안 선다 — **허용 목록의 다른 회차 수**를 균등으로 본다.
-    현재 = len(split_choice or [])
-    for rounds in sorted(constraints["split"]["types"]):
-        if rounds < 2 or rounds == 현재:
-            continue
-        대안 = [{"ratio": ratio} for ratio in equal_ratios(rounds)]
-        if 잰다(대안):
-            return draft, 대안, (
-                f"{현재}회 분할이 날짜별 여유를 못 지켜 {rounds}회 균등으로 바꿨다 — "
-                "고른 배분은 그 회차 수 전용이라 다시 쓰지 않는다"
-            )
-    return _reclipped_to_bulk(draft, single), None, _되돌림_사유(total, single)
-
-
-def _되돌림_사유(total_qty_kg: int, single_round_cap_kg: int) -> str:
-    return (
-        f"분할을 전제로 잡았던 {total_qty_kg:,}kg 을 한 번에 들어가는 "
-        f"{single_round_cap_kg:,}kg 으로 되돌렸다 — 회차를 나눠도 날짜별 창고 여유를 지키지 못한다"
-    )
-
-
-def cap_constrained_quantities(
-    quantities: list[int],
-    arrivals: list[str] | None,
-    cap_by_date: Mapping[str, float] | None,
-) -> tuple[list[int], str | None]:
-    """도착일 수용량으로 회차 수량을 재배분한다. **총합은 불변이다.**
-
-    상한을 넘는 만큼을 뒤 회차로 넘긴다. 넘길 곳이 없으면 재배분을 **포기하고**
-    균등 분할을 그대로 돌려준다 — 총량을 줄이면 사중 일치가 깨지고, 마지막 회차에
-    억지로 얹으면 상한을 지킨 척하면서 어긴 계획이 된다.
-
-    ⚠️ **받지 못한 날짜는 0이 아니라 "안 봤다"다.** ``cap_by_date``는 물류가 정한
-    조회 기간만큼만 계산해 보낸다 (기간 길이는 물류 소유값이라 여기 적지 않는다 —
-    같은 수를 두 곳에 적으면 한쪽만 바뀐다).
-    ``.get(d, 0)``으로 읽으면 창 밖 회차가 **수용량 0**이 되어 통째로 죽는다 —
-    이 함수가 막는 것이 그것이다 (규칙 3).
-
-    회차 하나라도 수용량을 모르면 **아무 회차도 조정하지 않는다.** 아는 날짜만 조이면
-    남은 물량이 모르는 날짜로 밀려가 "모르는 곳에 더 쌓는" 계획이 되고, 계획의 모양이
-    "어느 날짜가 우연히 창 안이었나"에 좌우돼 설명할 수 없게 된다.
-    """
-    if cap_by_date is None:
-        return quantities, CAP_BLOCK_REASONS["no_cap"]
-    if arrivals is None:
-        return quantities, CAP_BLOCK_REASONS["no_lead"]
-
-    unknown = [day for day in arrivals if cap_by_date.get(day) is None]
-    if unknown:
-        return quantities, (
-            f"회차별 창고 여유 검사를 하지 않았다 — 도착일 {', '.join(unknown)}의 여유를 "
-            "물류에서 받지 못했다(조회 기간 밖이거나 값이 비어 있다). 받지 못한 날을 "
-            "여유 0으로 읽지 않고 회차를 균등하게 나눴다"
-        )
-
-    adjusted: list[int] = []
-    carried = 0
-    occupied = 0
-    for quantity, day in zip(quantities, arrivals, strict=True):
-        want = quantity + carried
-        # 수용량은 **상한**이라 내림한다 — 올림하면 못 넣는 양을 계획하게 된다
-        # (``warehouse_cap_kg``와 같은 이유).
-        cap = int(cap_by_date[day])
-        # ★ **앞 회차가 아직 창고에 있다.** ``cap_by_date[d]``는 그날의 여유 공간인데,
-        #   물류는 **기존 일정만** 재생해 그 값을 낸다 (`logistics/tools.py`
-        #   ``calculate_cap_by_date``: guaranteed − projected_occupancy). 우리가 새로
-        #   넣을 회차는 거기 없다. 날짜마다 독립으로 비교하면 1회차 30kg이 남아 있는데도
-        #   2회차가 그날 상한을 통째로 쓰는 계획이 나온다 — 총합은 맞고 하드 제약은 깨진다.
-        room = max(0, cap - occupied)
-        take = min(want, room)
-        adjusted.append(take)
-        carried = want - take
-        occupied += take
-
-    if any(quantity < 1 for quantity in adjusted):
-        # 0kg·음수 회차는 ``SplitPlanItem.qty_kg > 0``이라 **제안 전체**를 죽인다.
-        # 균등 분할은 ``split_infeasible_reason``의 최소 수량 검사를 이미 통과한 값이라
-        # 되돌리면 안전하다. 재배분이 그 검사를 **사후에 깨는** 자리라 여기서 한 번 더 본다
-        # (음수 수용량이 섞이면 앞 회차가 음수가 되고 총합은 맞아 사중 일치는 통과한다 —
-        # 스키마에서야 터지는, 조용히 지나가는 구간이다).
-        return quantities, (
-            "🔴 회차별 창고 여유를 지킬 수 없다 — 여유에 맞추면 물량이 0인 회차가 생겨 "
-            "실행할 수 없는 계획이 된다. 회차를 균등하게 나눴으므로 "
-            "**이 계획은 날짜별 창고 여유를 넘는다**"
-        )
-    if carried:
-        return quantities, (
-            f"🔴 회차별 창고 여유를 지킬 수 없다 — 총량 중 {carried:,}kg을 넣을 자리가 없다 "
-            f"(마지막 도착일 {arrivals[-1]} 기준). 총량은 매입 수량 산정 단계가 정하므로 "
-            "여기서 줄이지 않았고, 회차를 균등하게 나눴다 — "
-            "**이 계획은 날짜별 창고 여유를 넘는다**"
-        )
-    if adjusted == quantities:
-        return quantities, None
-    moved = " · ".join(
-        f"{seq}회 {before:,}→{after:,}kg({day} 도착)"
-        for seq, (before, after, day) in enumerate(
-            zip(quantities, adjusted, arrivals, strict=True), 1
-        )
-    )
-    return adjusted, f"회차 물량을 날짜별 창고 여유에 맞춰 옮겼다 — {moved}"
 
 
 def materialize_split(
@@ -1452,20 +1200,165 @@ def _mix_choice_risks(decision: dict) -> list[str]:
     ]
 
 
-def _ratio_outcome(rounds: list[dict]) -> str:
-    """비율은 균등이어도 **수량은 다를 수 있다** — ⑥이 날짜별 창고 여유로 옮기기 때문이다.
+def _quantity_outcome(rounds: list[dict], total_qty_kg: int, ratios: list[dict] | None) -> str:
+    """회차 물량이 **적용한 비율 그대로인가, 창고 여유로 옮겨졌나.**
 
     이 한 줄이 없으면 화면에 [30, 70]이 떠 있는 옆에서 근거가 "균등"이라고 말한다.
     같은 안에서 근거와 수량이 서로를 부정하는 상태다.
+
+    🔴 **반올림 차이를 재배분으로 적지 않는다** (2026-09-17). 전에는 «회차 물량이 전부
+      같은가» 로 갈라서, 균등 2회차의 4,364 / 4,363 (1kg 반올림 차)을 「창고 여유에 맞춰
+      옮겨졌다」로 적었고 판단자가 앞으로 몬 5,236 / 3,491 도 같은 문장을 받았다 — 둘 다
+      옮긴 것이 없었다. 옮김은 **비율로 낸 수량**(``split_quantities``)과 최종 수량이 다를
+      때뿐이다. ``_split_risks`` 가 같은 대조를 하므로 두 문장이 갈라질 수 없다.
     """
     quantities = [line["qty_kg"] for line in rounds]
-    if len(set(quantities)) <= 1:
-        return "회차 물량도 균등하다."
+    if quantities == split_quantities(total_qty_kg, ratios or []):
+        return "회차 물량은 그 비율 그대로다."
     moved = " · ".join(f"{line['seq']}회 {line['qty_kg']:,}kg" for line in rounds)
     return f"다만 회차 물량은 날짜별 창고 여유에 맞춰 옮겨졌다 — {moved}."
 
 
-def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: str) -> list[dict]:
+def _judged(decision: dict) -> bool:
+    """④ 판단자가 **실제로 골랐나** — 부르고 검증까지 통과한 경우만 참이다.
+
+    ⚠️ ``allocation_chosen`` 만 보면 안 된다. 꺼짐 · 건너뜀 · 실패에서도 그 칸은
+      ``BASE_EQUAL`` 로 채워지는데, 그것은 **규칙 기본안**이지 판단자의 선택이 아니다.
+    """
+    judgment = decision.get("allocation_judgment")
+    return judgment is not None and judgment.llm_status == "SUCCESS"
+
+
+def _ratio_sentence(decision: dict, outcome: SplitOutcome) -> str:
+    """**실제로 적용한 비율**이 무엇인가 — 선택이 아니라 적용을 말한다."""
+    if outcome.kind == ROUNDS_CHANGED:
+        return (
+            f"회차 비율은 {len(outcome.ratios or [])}회 균등이다 — 처음 정한 회차 수가 "
+            "날짜별 창고 여유를 못 지켜 회차 수를 바꿨다"
+        )
+    if _judged(decision):
+        chosen = decision["allocation_chosen"]
+        return f"회차 비율은 판단자가 고른 배분({CANDIDATE_SUMMARY[chosen]})을 그대로 적용했다"
+    return "회차 비율은 균등이다"
+
+
+def _split_ref(decision: dict, forecast: dict, as_of: str) -> tuple[str, str]:
+    """분할 근거가 가리키는 좌표. 수량으로 진입했으면 재고, 아니면 예측이다."""
+    if decision.get("by_volume"):
+        return "재고", f"CAP-{as_of}"
+    return "예측", f"FC-{forecast['model_version']}-{as_of}"
+
+
+def _allocation_choice_rationale(
+    decision: dict,
+    outcome: SplitOutcome,
+    rounds: list[dict],
+    total_qty_kg: int,
+    forecast: dict,
+    as_of: str,
+) -> list[dict]:
+    """④ 판단자가 배분을 **고른 날**의 근거 1건 — 선택 후보 · 선택 사유 · 적용 여부를 가른다.
+
+    ⑤ ``_mix_choice_rationale`` 와 같은 자리다. 🔴 **전에는 이 자리가 없었다** — 판단자가
+      뒤로 싣는 배분을 골라 1,745 / 2,618 / 4,364 가 나가도 **왜 그 모양인지** 어디에도 안
+      적혔다 (1차 실호출 실험 · 2026-09-17).
+
+    ★ **세 사실을 다른 칸에 둔다**::
+
+        선택 후보   claim   사람 말 설명 + 후보 id (계약 값이라 그대로)
+        선택 사유   claim   판단자가 쓴 한 문장 (숫자 금지 검증을 지났다)
+        적용 여부   evidence_detail   «그대로 적용했다» / «적용하지 않았다 — 왜»
+
+    ⚠️ **고르지 않았으면 붙이지 않는다** — 꺼짐 · 건너뜀 · 실패는 선택이 아니다. 실패는
+      ``_allocation_risks`` 가 말한다.
+    ⚠️ 등급은 ``ASSUMED`` 다 — 비율 선언에 업무 근거가 없고, 판단자는 그중 하나를 골랐을 뿐이다.
+    """
+    if not _judged(decision) or outcome.kind == NOT_SPLIT:
+        return []
+    judgment = decision["allocation_judgment"]
+    chosen = decision["allocation_chosen"]
+    source, ref_id = _split_ref(decision, forecast, as_of)
+    if outcome.kind == AS_CHOSEN:
+        # ⚠️ 비율을 적용한 것과 물량이 그 비율대로 나간 것은 다르다 — 균등을 고른 날 ⑥ 이
+        #   날짜별 여유로 물량을 옮길 수 있다 (``_quantity_outcome`` 과 같은 대조).
+        by_ratio = split_quantities(total_qty_kg, outcome.ratios or [])
+        if [line["qty_kg"] for line in rounds] == by_ratio:
+            applied = "결과에 그대로 적용했다 — 회차 비율과 물량 모두 규칙 산출값이다"
+        else:
+            applied = (
+                "비율은 결과에 적용했고, 회차 물량은 날짜별 창고 여유에 맞춰 옮겼다 — "
+                "비율과 물량 모두 규칙 산출값이다"
+            )
+    elif outcome.kind == ROUNDS_CHANGED:
+        applied = (
+            f"적용하지 않았다 — 고른 배분은 {decision['rounds']}회 분할용인데 그 회차 수가 "
+            f"날짜별 창고 여유를 못 지켜 {len(outcome.ratios or [])}회 균등으로 바꿨다"
+        )
+    else:
+        applied = "적용하지 않았다 — 이 안은 분할을 접고 한 번에 산다"
+    return [
+        {
+            "source": source,
+            "claim": (
+                f"회차 배분 {CANDIDATE_SUMMARY[chosen]}({chosen}) 선택 — "
+                f"{judgment.interpretation.reason}"
+            ),
+            "ref_id": ref_id,
+            "evidence_grade": "ASSUMED",
+            "evidence_detail": (
+                f"규칙이 만든 배분 후보 중 판단자({judgment.llm_model or '모델 미상'})가 "
+                f"골랐다 · {applied}"
+            ),
+        }
+    ]
+
+
+def _allocation_risks(decision: dict, outcome: SplitOutcome) -> list[str]:
+    """배분 판단이 **이 안에 적용되지 않은** 상태의 고지 — ⑤ ``_mix_choice_risks`` 와 같은 자리.
+
+    성공해서 그대로 적용됐으면 아무 줄도 안 붙는다 — 그 사실은 근거가 싣는다.
+
+    🔴 **판단자가 쓴 문장을 여기 안 싣는다.** ``risks`` 는 순수 함수가 만든 고정 문장이고
+      (모듈 머리말), 선택 사유는 근거 ``claim`` 에만 산다. 여기 적는 후보 설명은 우리 상수다.
+    """
+    judgment = decision.get("allocation_judgment")
+    if judgment is None or outcome.kind == NOT_SPLIT:
+        return []
+    if judgment.llm_status == "FALLBACK":
+        if outcome.kind == AS_CHOSEN:
+            tail = (
+                "균등 배분(기본안)으로 나눴다. "
+                "비율·수량은 규칙 산출값이라 결과는 판단 없이도 유효하다"
+            )
+        elif outcome.kind == ROUNDS_CHANGED:
+            tail = f"기본안(균등)으로 돌아갔고, 회차 수도 {len(outcome.ratios or [])}회로 바꿨다"
+        else:
+            tail = "기본안(균등)으로 돌아갔고, 이 안은 분할을 접고 한 번에 산다"
+        return [f"회차 배분 판단 미적용(판단자 응답 실패) — {tail}"]
+    if not _judged(decision) or outcome.kind == AS_CHOSEN:
+        return []
+    summary = CANDIDATE_SUMMARY[decision["allocation_chosen"]]
+    if outcome.kind == ROUNDS_CHANGED:
+        what = f"{len(outcome.ratios or [])}회 균등으로 바꿨다"
+    else:
+        what = "분할을 접고 한 번에 산다"
+    return [
+        (
+            f"회차 배분 판단 미적용 — 판단자가 고른 배분({summary})은 {decision['rounds']}회 "
+            f"분할용인데, 이 안은 {what}"
+        )
+    ]
+
+
+def _split_rationale(
+    decision: dict,
+    rounds: list[dict],
+    forecast: dict,
+    as_of: str,
+    *,
+    total_qty_kg: int,
+    outcome: SplitOutcome,
+) -> list[dict]:
     """분할한 안의 근거. **선 트리거마다 한 건**이고 출처·ref_id·등급이 각각 다르다.
 
     한 건으로 뭉쳐 전부 "예측(FC-…)·SIM_FIXED"로 적었더니, 수량 단독 진입일 때
@@ -1509,10 +1402,13 @@ def _split_rationale(decision: dict, rounds: list[dict], forecast: dict, as_of: 
                 "claim": f"판정일까지 지속 상승 궤적 → {len(rounds)}회 분할로 로트 나이 분산",
                 "ref_id": f"FC-{forecast['model_version']}-{as_of}",
                 "evidence_grade": "SIM_FIXED",
+                # 🔴 **적용한 비율을 적는다** (2026-09-17). 전에는 «회차 비율은 균등으로
+                #   두었다» 가 고정이라, 판단자가 앞으로 싣는 배분을 골라 적용된 날에도
+                #   균등이라고 적었다.
                 "evidence_detail": (
                     "상승장 분할은 평균단가에 불리하고 로트 나이 분산에 유리하다 — "
-                    "그 절충 판단은 아직 사람·모델 몫이라 회차 비율은 균등으로 두었다. "
-                    f"{_ratio_outcome(rounds)}"
+                    f"{_ratio_sentence(decision, outcome)}. "
+                    f"{_quantity_outcome(rounds, total_qty_kg, outcome.ratios)}"
                 ),
             }
         )
@@ -1755,7 +1651,10 @@ def _split_risks(
     shift_note = shifted_rounds_note(as_of, coverage_days, len(rounds), calendar)
     moved = [shift_note] if shift_note else []
     if axis != TIMING_AXIS:
-        if timing_withdrawn:
+        # 🔴 **④ 가 진입한 날은 이 문장이 거짓이다** (2026-09-17). 진입한 날 timing 을 잃는
+        #   길은 ⑥ 의 되돌림뿐이고, 그 사유는 되돌림 문장이 이미 적었다. 전에는 같은 안에
+        #   «나누지 않는다» 와 «분할에 진입하지 않아» 가 나란히 붙었다.
+        if timing_withdrawn and not decision.get("entered"):
             return [
                 *moved,
                 (
@@ -1925,17 +1824,26 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         #   실제 도착일을 적용하고 누적을 통과해야 분할이 성립한다. 안 서면 **일괄 기준으로
         #   되돌린다** — 안 되돌리면 넓힌 수량이 1회차로 나가 ⑦ 이 통째로 컷하고,
         #   **원래 살아 있던 작은 일괄안까지 사라진다.**
-        draft, 쓸_비율, bulk_note = bulk_fallback(
+        #
+        # ★ **④ 가 판단자를 부를지 정할 때 같은 함수를 미리 돌린다** (2026-09-17 ·
+        #   ``settle_split``). 여기서 버릴 배분을 ④ 가 고르게 두지 않기 위해서다.
+        원래_축 = axes[draft["label"]]
+        결과 = settle_split(
             draft,
-            axes[draft["label"]],
+            원래_축,
             split_choice,
+            by_trend=bool(split_facts.get("by_trend")),
             constraints=constraints,
             as_of=state["date"],
             lead_days=lead_days,
             cap_by_date=cap_by_date,
             calendar=calendar,
         )
-        if bulk_note and 쓸_비율 is None:
+        draft, 쓸_비율, bulk_note = 결과.draft, 결과.ratios, 결과.note
+        # 🔴 **배분 판단의 적용 여부는 ④ 의 분할을 받을 안에만 적는다.** 축을 못 받은 안이
+        #   넓힌 수량 때문에 되돌아간 것은 배분 판단과 무관하다.
+        배분_대상 = 원래_축 == TIMING_AXIS and bool(split_facts.get("entered"))
+        if 결과.kind == ROLLED_BACK:
             # 되돌린 안은 timing 을 **잃는다** — 회차가 하나면 그것은 일괄안이고,
             # 라벨만 timing 으로 두면 §3.5.1-3 이 막는 "3안인데 사실 한 안"이 된다.
             # 🔴 **되돌린 라벨을 적어 둔다** — ⑦ 이 「축이 왜 안 쓰였나」를 가를 때
@@ -2005,7 +1913,21 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                     *_rationale(state, rationale_input, constraints, quote_ref),
                     *_context_rationale(state["context_docs"]),
                     *_sourcing_rationale(decision, quote_ref),
-                    *_split_rationale(split_facts, rounds, state["forecast"], state["date"]),
+                    *_split_rationale(
+                        split_facts,
+                        rounds,
+                        state["forecast"],
+                        state["date"],
+                        total_qty_kg=total,
+                        outcome=결과,
+                    ),
+                    *(
+                        _allocation_choice_rationale(
+                            split_facts, 결과, rounds, total, state["forecast"], state["date"]
+                        )
+                        if 배분_대상
+                        else []
+                    ),
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
@@ -2033,6 +1955,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                         state.get("context_unavailable"),
                     ),
                     *_sourcing_risks(sourcing, decision),
+                    *(_allocation_risks(split_facts, 결과) if 배분_대상 else []),
                     *_split_risks(
                         split_facts,
                         axis,

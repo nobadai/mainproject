@@ -323,9 +323,8 @@ def _split_allocation_call(
     없었고, 「꺼졌다」도 「건너뛰었다」도 아니다. 없는 판단에 상태를 붙이면 «매일 뭔가를
     건너뛴다» 로 읽힌다.
     """
-    판단 = (((state or {}).get("split_plan") or [{}])[0].get("decision") or {}).get(
-        "allocation_judgment"
-    )
+    결정 = ((state or {}).get("split_plan") or [{}])[0].get("decision") or {}
+    판단 = 결정.get("allocation_judgment")
     if 판단 is None:
         return ()
     return (
@@ -338,12 +337,24 @@ def _split_allocation_call(
             model=판단.llm_model or None,
             **_판(SPLIT_ROLE, 판단.llm_attempts),
             skip_reason=(
-                "배분 후보가 하나뿐이라 고를 것이 없었다"
-                if 판단.llm_status == "SKIPPED_TEMPLATE"
-                else None
+                _split_skip_reason(결정) if 판단.llm_status == "SKIPPED_TEMPLATE" else None
             ),
         ),
     )
+
+
+def _split_skip_reason(결정: Mapping[str, Any]) -> str:
+    """④ 판단자를 **왜 안 불렀나** — 승인 전과 «적용되지 않을 것이 확정» 을 가른다.
+
+    🔴 **한 문장으로 뭉치지 않는다** (2026-09-17). 둘은 여는 방법이 다르다 — 앞은 정책
+      승인이고, 뒤는 그날 입력(날짜별 여유 · 궤적)이다. 뭉치면 흔적만 보고 «비율을
+      승인하면 불리겠지» 로 읽는데, 승인해도 뒤쪽 날은 계속 안 불린다.
+    """
+    if not 결정.get("allocation_approved"):
+        return "배분 비율이 승인 전이라 후보가 균등 하나뿐이었다"
+    if 결정.get("allocation_excluded"):
+        return "다른 배분 후보가 결과에 그대로 적용되지 않을 것이 미리 확정돼 고를 것이 없었다"
+    return "배분 후보가 하나뿐이라 고를 것이 없었다"
 
 
 def _sourcing_call(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:

@@ -237,31 +237,42 @@ def occupancy_fits(
 #:   ``risks`` 문장도 그 이름으로 쓴다. 선언은 «얼마나» 를 정하고 «무엇이 있나» 는 여기다.
 WEIGHTED_CANDIDATES = ("FRONT_LOADED", "BACK_LOADED")
 
-#: 🔴 승인 전 상태. 이 값이면 **후보를 안 세운다** — 근거 없는 비율로 안을 만들면
-#: 나중에 그 배분이 「검증된 것」으로 보인다.
+#: 승인 전 상태. 선언 파일이 지금 이 값이다.
 PROVISIONAL = "PROVISIONAL"
+
+#: 🔴 **비균등 후보를 여는 유일한 값.** 정확히 이 문자열일 때만 연다 (2026-09-17).
+#:
+#: ⚠️ 전에는 ``PROVISIONAL`` 하나만 막았다 — **열린 쪽으로 실패하는 게이트**였다. 칸이
+#:   없거나 · ``APROVED`` 같은 오타거나 · ``approved`` 처럼 대소문자가 다르거나 ·
+#:   모르는 값이면 전부 열렸고, 실험에서 ``EXPERIMENT_ONLY_IN_MEMORY`` 로 실제로 열렸다.
+#:   근거 없는 비율로 안을 만들면 나중에 그 배분이 「검증된 것」으로 보인다.
+#:
+#: ★ ⑤ ``grade.mix_precedence`` 가 이미 ``!= "APPROVED"`` 로 닫는다 — 같은 규율로 맞춘다.
+APPROVED = "APPROVED"
 
 
 def allocation_candidates(
     declaration: Mapping[str, Any],
     rounds: int,
-    *,
-    approved_only: bool = True,
 ) -> dict[str, list[float]]:
     """규칙이 만드는 **배분 후보 집합**. LLM 은 이 중 하나를 고르기만 한다.
 
     돌려주는 것은 ``{candidate_id: 비율 목록}`` 이고 ``BASE_EQUAL`` 이 늘 들어 있다 —
     **fallback 대상이 후보 안에 있어야** 실패했을 때 고를 것이 남는다.
 
-    🔴 **승인 전 값으로는 후보를 안 세운다.** 선언이 ``PROVISIONAL`` 이면 균등 하나만
-    돌려준다. 근거 없는 비율로 안을 만들면 나중에 그 배분이 **「검증된 것」으로 보인다** —
+    🔴 **승인된 값으로만 후보를 세운다.** ``status`` 가 **정확히** ``APPROVED`` 가 아니면
+    균등 하나만 돌려준다 — ``PROVISIONAL`` · 칸 없음 · 오타 · 대소문자 · 모르는 값 전부다.
+    근거 없는 비율로 안을 만들면 나중에 그 배분이 **「검증된 것」으로 보인다** —
     `#390` 에서 무른 것과 같은 모양이다.
+
+    ⚠️ ``approved_only`` 인자를 **걷었다** (2026-09-17). 부르는 곳이 한 곳도 거짓을 안
+      넘겼고, 남겨 두면 승인 없이 여는 샛문이 된다.
 
     ⚠️ 후보가 하나면 부르는 쪽이 LLM 을 **안 부른다** (⑤ ``needs_llm`` 과 같은 게이트).
     고를 것이 없는데 부르면 비용만 들고 상태만 흐려진다.
     """
     후보 = {"BASE_EQUAL": equal_ratios(rounds)}
-    if approved_only and declaration.get("status") == PROVISIONAL:
+    if declaration.get("status") != APPROVED:
         return 후보
     판 = {2: "two_rounds", 3: "three_rounds"}.get(rounds)
     if 판 is None:
