@@ -1004,8 +1004,9 @@ def _candidate_train_end(state: QaState, label: str) -> str:
 def _update_lines(state: QaState) -> list[str]:
     """«바꿀 수 있는 후보가 있다» 와 그 버튼. **없으면 한 줄도 안 적는다.**
 
-    ★ 순서가 뜻이다 — 현재 모델 표 **바로 아래**다. «지금 이것이 돈다» 다음에
-      오는 말이 «이걸로 바꿀 수 있다» 라야 읽힌다.
+    ★ 자리는 **답의 맨 아래**다 (`_perf_section` 머리말). 현재 모델 · 성능 아홉 칸 ·
+      재학습 판정과 검증 표를 다 보인 **뒤에** 묻는다 — 누를지 정할 근거를 보기
+      전에 버튼이 먼저 나오면 안 된다.
     """
     read = state.get("pending_read")
     if read is None:
@@ -1061,10 +1062,17 @@ def _perf_section(state: QaState) -> tuple[str, str]:
       잰 값인지가 늘 같이 간다.
 
     ★ 순서가 뜻이다 — **지금 무엇이 도나**를 먼저 보이고, 그 다음이 그 모델이
-      얼마나 맞히나, 마지막이 바꿀 것이 있나다.
+      얼마나 맞히나, 그 다음이 그날 무엇을 견줬나, **맨 마지막이 그래서 바꿀
+      것이 있나**다.
+
+    🔴 **업데이트 줄과 버튼은 맨 아래다** (2026-09-16 · 사용자 지시). 처음에는
+      «현재 모델» 표 바로 아래에 뒀는데, 그러면 **누를지 정할 근거(검증 표)를
+      보기 전에 버튼이 먼저 나온다.** 숫자를 다 보이고 나서 묻는다.
+
+    ★ **나가는 문이 하나다.** 재학습 기록을 못 읽어도 그 줄 다음에 버튼이 붙게
+      중간에서 빠져나가지 않는다 — 갈라 두면 한쪽에만 버튼이 붙는다.
     """
     lines = _models_table(state)
-    lines += _update_lines(state)
     lines += [
         "",
         f"**모델 성능 — {qa_tools.SEALED_SOURCE}**",
@@ -1080,18 +1088,20 @@ def _perf_section(state: QaState) -> tuple[str, str]:
 
     if state.get("perf_read") == "error":
         lines += ["", "재학습 기록을 읽지 못했습니다."]
-        return "\n".join(lines), "ok"
-
-    rows = state.get("retrain_rows") or []
-    if not rows:
-        lines += ["", "재학습 후보 없음. 지금 모델을 그대로 씁니다."]
     else:
-        #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
-        #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
-        lines += _judge_table([r for r in rows if r.get("name") == "재학습판정"])
-        for report in rows:
-            if report.get("name") != "재학습판정":
-                lines += _retrain_block(report)
+        rows = state.get("retrain_rows") or []
+        if not rows:
+            lines += ["", "재학습 후보 없음. 지금 모델을 그대로 씁니다."]
+        else:
+            #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
+            #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
+            lines += _judge_table([r for r in rows if r.get("name") == "재학습판정"])
+            for report in rows:
+                if report.get("name") != "재학습판정":
+                    lines += _retrain_block(report)
+
+    #   ★ **맨 아래.** 숫자를 다 보인 뒤에 «그래서 바꿀까요» 를 묻는다
+    lines += _update_lines(state)
     return "\n".join(lines), "ok"
 
 

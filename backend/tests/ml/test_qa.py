@@ -936,9 +936,18 @@ def test_바꿀_후보가_있으면_한_줄과_버튼이_같이_나간다(
     out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
 
     한_줄 = "소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다"
+    버튼 = "[모델 업데이트 — 소매가](action:retrain-apply?kind=rtl)"
     assert 한_줄 in out.markdown
-    assert "[모델 업데이트 — 소매가](action:retrain-apply?kind=rtl)" in out.markdown
+    assert 버튼 in out.markdown
     assert qa_graph.UPDATE_UNREADABLE not in out.markdown
+
+    #   ★ **맨 아래다** (2026-09-16 · 사용자 지시). 누를지 정할 근거(검증 표)를
+    #     다 보인 뒤라야 한다 — 표보다 먼저 나오면 «보기 전에 누르라» 가 된다.
+    assert out.markdown.rstrip().endswith(버튼)
+    assert out.markdown.index(한_줄) > out.markdown.index("**현재 모델**")
+    assert out.markdown.index(한_줄) > out.markdown.index("**모델 성능 — ")
+    assert out.markdown.index(한_줄) > out.markdown.index("현행 WMAPE")
+    assert out.markdown.index(버튼) > out.markdown.index(한_줄)
 
 
 def test_학습_끝을_모르면_괄호째_뺀다_지어내지_않는다(
@@ -962,6 +971,27 @@ def test_학습_끝을_모르면_괄호째_뺀다_지어내지_않는다(
     assert "(학습 끝" not in out.markdown
     assert "20260916" not in out.markdown
     assert "[모델 업데이트 — 경락가](action:retrain-apply?kind=auc)" in out.markdown
+
+
+def test_재학습_기록을_못_읽어도_버튼은_그_줄_뒤에_붙는다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 나가는 문이 하나라야 한다.
+
+    보고서를 못 읽는 것과 «바꿀 후보가 있나» 는 **다른 창구**다 (앞은 DB, 뒤는
+    ML 콘솔). 중간에서 빠져나가면 보고서가 안 읽히는 날에만 버튼이 통째로
+    사라진다 — 정작 그날도 바꿀 것은 있을 수 있다.
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(boom_report=True, pending=[_pending("whsl")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    버튼 = "[모델 업데이트 — 중도매가](action:retrain-apply?kind=whsl)"
+    assert "재학습 기록을 읽지 못했습니다." in out.markdown
+    assert 버튼 in out.markdown
+    assert out.markdown.index(버튼) > out.markdown.index("재학습 기록을 읽지 못했습니다.")
+    assert out.markdown.rstrip().endswith(버튼)
 
 
 def test_바꿀_후보가_없으면_버튼도_문장도_없다(
