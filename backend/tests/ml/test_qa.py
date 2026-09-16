@@ -444,7 +444,18 @@ def test_날짜를_안_말하면_오늘_값과_그_이유를_준다(도구를_�
     assert out.meta.status == "OK"
     assert out.meta.targets == [BASE]                        # 내일이 아니라 오늘
     assert "날짜를 따로 말씀하지 않으셔서" in out.markdown
-    assert "전부" in out.markdown                            # 더 볼 수 있다고 알려준다
+    #   ★ 더 볼 수 있다고 알려준다. **「전부」라고 권하지 않는다** (2026-09-16 ·
+    #     사용자 지시) — 그 말은 우리 해석기만 알아듣고 마스터를 거쳐 오면
+    #     못 알아듣는다. 되는 말을 예로 보인다
+    assert qa_graph.ASK_DATE_HINT in out.markdown
+    assert "「전부」라고 하시면" not in out.markdown
+    #   🔴 **꼬리 한 줄을 글자 그대로** 잰다. 조각으로만 재면 문장이 어디서
+    #     끊기거나 띄어쓰기가 달라져도 통과한다 — 사람이 보는 것은 줄 전체다
+    assert (
+        "> 날짜를 따로 말씀하지 않으셔서 **오늘** 값을 보여드립니다. "
+        "원하는 날짜나 기간을 말씀해주시면 해당 기간에 대한 가격을 보여드립니다. "
+        "예) 일주일치의 가격 / 3일 뒤 가격"
+    ) in out.markdown
 
 
 def test_날짜를_말하면_그_줄이_안_나온다(도구를_갈아_끼운다):
@@ -473,6 +484,12 @@ def test_오늘_값이_없으면_내일로_물러서고_그렇게_말한다(도�
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
     assert out.meta.status == "OK"
     assert "오늘 값이 아직 없어" in out.markdown and "내일" in out.markdown
+    #   ★ 물러선 경우에도 **뒷문장은 같다** — 날짜를 말하면 그 날을 준다는 안내는
+    #     오늘을 줬든 내일로 물러섰든 똑같이 필요하다
+    assert (
+        "> 날짜를 따로 말씀하지 않으셔서 오늘 값이 아직 없어 **내일** 값을 보여드립니다. "
+        f"{qa_graph.ASK_DATE_HINT}"
+    ) in out.markdown
     assert calls[0] == []                                    # 첫 조회는 읽을 날이 없었다
     assert calls[1] == [BASE + timedelta(days=1)]            # 물러선 뒤엔 내일을 읽는다
 
