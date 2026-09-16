@@ -896,7 +896,7 @@ class WalkResult:
         return total
 
     @property
-    def cash(self) -> Mapping[str, Decimal] | None:
+    def cash(self) -> Mapping[str, Decimal | None] | None:
         """그 구간의 현금 축 (2026-09-12). **마감행이 0행이면 `None`.**
 
         ```text
@@ -914,13 +914,25 @@ class WalkResult:
 
         ★ **이름의 주인은 `ledger_repository` 다.** 여기서 새 이름을 안 붙이고
           나르기만 한다 — `end_codes` 가 `scheduler` 의 값을 그대로 세는 것과 같다.
+
+        🔴 **`_NULLABLE_CASH_COLUMNS` 의 칸은 하루라도 `None` 이면 합이 `None` 이다**
+          (2026-09-16). 그 `None` 은 「0원이었다」가 아니라 **「그날 이 축을 안 셌다」**다
+          (재무 `schemas.py` 의 뜻).
+
+        🔴 **기록된 날만 더해서 합으로 내지 않는다.** 그러면 구간 합인 척하는
+          **부분합**이 찍히고, 읽는 사람은 그 수가 며칠치인지 알 길이 없다 —
+          `SIM-CHAIN-CHECK-0916` 에서 매입유출이 조용히 작아졌던 그 모양이다.
+          모르는 것은 **모른다고 적는다.**
         """
         if not self.closings:
             return None
-        total = {
-            column: sum((_won(row, column) for row in self.closings), _ZERO)
-            for _, column in _CASH_FLOWS
-        }
+        total: dict[str, Decimal | None] = {}
+        for _, column in _CASH_FLOWS:
+            if column not in _NULLABLE_CASH_COLUMNS:
+                total[column] = sum((_won(row, column) for row in self.closings), _ZERO)
+                continue
+            값들 = [_won_or_none(row, column) for row in self.closings]
+            total[column] = None if any(one is None for one in 값들) else sum(값들, _ZERO)
         # ★ **기말잔액만 합이 아니다.** 잔액은 그날의 상태이지 그날의 움직임이
         #   아니다 — 더하면 179일치 잔액을 합한 뜻 없는 수가 나온다.
         total[BASE_CASH_BALANCE] = _won(self.closings[-1], BASE_CASH_BALANCE)
@@ -941,6 +953,12 @@ class WalkResult:
           그러면 정본 판을 못 돌린다. 🟢 세고 찍고 판정은 낸다 · 🔴 걷기를 멈추지
           않고 `사고` 줄 숫자를 안 건드린다. `사고` 는 자기 축을 그대로 지키고
           현금항등식은 **자기 줄**을 갖는다.
+
+        ★ **여기는 `_won` 을 그대로 쓴다** (2026-09-16). 이 항등식이 읽는 칸은
+          `BASE_CASH_BALANCE` 와 `NET_CASH` 둘뿐이고 **둘 다 `NOT NULL` 이다** —
+          `_NULLABLE_CASH_COLUMNS` 에 없다. 그래서 운영비 칸이 `None` 이 되어도
+          이 줄은 종전과 같은 값을 낸다. **다음 사람이 같은 걱정을 다시 하지 않게
+          여기 적어 둔다.**
         """
         rows = self.closings
         if not rows:
@@ -980,14 +998,56 @@ _CASH_FLOWS = (
     ("순현금", NET_CASH),
 )
 
+#: 🔴 **값이 `None` 으로 올 수 있는 현금 칸** (2026-09-16). 나머지 칸은 `NOT NULL` 이다.
+#:
+#: ★ **왜 이 칸만 다른가.** 운영비 유출은 **나중에 생긴 축**이다. 이 칸이 서기 전에
+#:   돈 실행들(SIM-CHAIN-V2~V13 · WALK-* · PREFINAL)이 DB 에 그대로 남아 있고,
+#:   **그 실행들은 이 축을 한 번도 안 셌다.** 그래서 그쪽의 빈 값은 「0원이 나갔다」가
+#:   아니라 **「안 셌다」**다 — 재무가 `finance/schemas.py` 에
+#:   `operating_expense_cash_out_krw: Decimal | None` 로, `api/finance/query.py` 에
+#:   `"기록 없음" if ... is None` 으로 적어 둔 그 뜻이다.
+#:
+#: ⚠️ **지금 이 갈래는 실제로 안 탄다.** `haetdeul.daily_closings` 의 이 칸은 아직
+#:   `NOT NULL DEFAULT 0` 이라 DB 가 `None` 을 못 준다 (실측 2026-09-16).
+#:   **그런데도 미리 세운다** — 칸의 주인은 재무이고, 재무가 코드 뜻대로 칸을
+#:   바로잡는 날 이쪽이 준비돼 있지 않으면 **그날 걷기 요약이
+#:   `decimal.InvalidOperation` 으로 통째로 죽는다.** 179일을 다 걷고 마지막 줄에서
+#:   죽으면 성적을 통째로 잃는다 — 우리는 그 자리를 이미 한 번 밟았다
+#:   (`_use_utf8_output`). 🔴 **여기는 「DB 가 언제 바뀌어도 안 죽는다」를 세우는 자리다.**
+#:
+#: 🔴 **여기에 칸을 늘리는 것은 «그 칸의 `None` 을 0 으로 안 읽겠다» 는 선언이다.**
+#:   NOT NULL 로 남을 칸을 넣으면 안 된다 — 넣는 순간 「안 셌다」가 없는 자리에 생긴다.
+_NULLABLE_CASH_COLUMNS = frozenset({OPERATING_EXPENSE_CASH_OUT})
+
 
 def _won(row: Mapping[str, Any], column: str) -> Decimal:
     """마감행 한 칸을 원으로. **없는 칸은 터진다 — 0 으로 안 메운다.**
 
     ⚠️ `numeric` 은 `Decimal` 로 온다. `float` 로 낮추면 179일을 더하는 동안
       원 단위가 조용히 어긋나고, 그 어긋남이 **항등식의 판정**이 된다.
+
+    🔴 **`NOT NULL` 칸 전용이다.** 값이 `None` 이면 `Decimal("None")` 을 만들려다
+      `InvalidOperation` 으로 터진다 — 그래야 맞다. `None` 이 올 수 있는 칸은
+      `_won_or_none` 을 쓴다 (`_NULLABLE_CASH_COLUMNS`).
     """
     value = row[column]
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def _won_or_none(row: Mapping[str, Any], column: str) -> Decimal | None:
+    """마감행 한 칸을 원으로. **값이 `None` 이면 `None` 이다 — 0 으로 안 메운다.**
+
+    ```text
+    칸이 없다        터진다        ← `_won` 과 같다. 표가 바뀐 것을 조용히 못 넘긴다
+    값이 None 이다   None          ← 「안 셌다」. 0 이 아니다
+    ```
+
+    🔴 **`row.get(column, 0)` 으로 바꾸지 않는다.** 그러면 칸이 사라진 날과
+      값이 0 인 날이 화면에서 같아진다 — `_won` 이 지키던 규율 그대로다.
+    """
+    value = row[column]
+    if value is None:
+        return None
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
@@ -1435,8 +1495,36 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _krw(value: Decimal) -> str:
-    """금액 한 칸. **원 단위로 자리를 끊어 찍는다.**"""
+    """금액 한 칸. **원 단위로 자리를 끊어 찍는다.** `Decimal` 전용이다."""
     return f"{value:,.0f}"
+
+
+def _krw_or_none(value: Decimal | None, *, recorded: int, total: int) -> str:
+    """금액 한 칸 — **`None` 은 「기록 없음」이다. 🔴 0 이 아니다** (2026-09-16).
+
+    ```text
+    값이 있다              1,234,567
+    한 날도 안 기록됐다    기록 없음
+    일부만 기록됐다        기록 없음 (179일 중 120일)
+    ```
+
+    🔴 **0 과 「기록 없음」을 한 글자로 접지 않는다.** *"0원이 나갔다"* 와
+      *"이 축을 안 셌다"* 를 같은 0 으로 적으면, 고칠 것이 있는 판과 없는 판이
+      화면에서 같아진다 — 이 함수가 있는 이유가 그것 하나다.
+
+    ★ **일부만 기록된 판은 몇 날인지까지 찍는다.** 「기록 없음」만 찍으면 «한 날도
+      안 셌다» 로 읽히는데, 사실은 **섞여 있다** 는 것이 그 판의 사실이다.
+    """
+    if value is not None:
+        return _krw(value)
+    if recorded == 0:
+        return "기록 없음"
+    return f"기록 없음 ({total}일 중 {recorded}일)"
+
+
+def _기록된_날수(rows: Sequence[Mapping[str, Any]], column: str) -> int:
+    """그 칸을 **실제로 기록한** 마감행이 몇 날인가. 🔴 **없는 칸은 터진다.**"""
+    return sum(1 for row in rows if row[column] is not None)
 
 
 def _cash_lines(result: WalkResult) -> list[str]:
@@ -1447,16 +1535,18 @@ def _cash_lines(result: WalkResult) -> list[str]:
     현금항등식  Δ잔액 n · Σ순현금 n · 차이 n · 어긋난 날 n일 → 🔴 깨짐
     ```
 
-    🔴 **세 상태를 접지 않는다.**
+    🔴 **네 상태를 접지 않는다.**
 
     ```text
-    마감행이 있다     숫자와 판정을 찍는다 (성립이어도 찍는다)
-    0행이다           「없음」 — 마감이 한 번도 안 돌았다
-    못 읽었다         「못 읽음」 — 0행과 다른 사실이다
+    마감행이 있다      숫자와 판정을 찍는다 (성립이어도 찍는다)
+    0행이다            「없음」 — 마감이 한 번도 안 돌았다
+    못 읽었다          「못 읽음」 — 0행과 다른 사실이다
+    칸을 안 셌다       「기록 없음」 — 마감은 섰는데 그 축을 안 센 것이다 (2026-09-16)
     ```
 
     ⚠️ **0 으로 메우지 않는다.** *"마감이 안 돌았다"* 와 *"돌았는데 0 이다"* 를
       같은 0 으로 적으면, 고칠 것이 있는 판과 없는 판이 화면에서 같아진다.
+      **「안 셌다」도 마찬가지다** — `_krw_or_none` 이 그 자리를 지킨다.
     """
     if result.closings_reason is not None:
         못읽음 = f"못 읽음 — {result.closings_reason}"
@@ -1473,7 +1563,18 @@ def _cash_lines(result: WalkResult) -> list[str]:
         return [f"현금        {없음} · {일수}", f"현금항등식  {없음}"]
 
     # 🔴 **0 인 칸도 그대로 찍는다.** 빼면 V4~V6 세 판을 통과시킨 그 0 이 사라진다.
-    칸 = " · ".join(f"{이름}: {_krw(현금[column])}" for 이름, column in _CASH_FLOWS)
+    # 🔴 **그리고 「기록 없음」을 0 으로 접지 않는다** (2026-09-16). 운영비 축은 나중에
+    #    생겨서 그 축을 안 센 실행이 DB 에 남아 있다 — 그쪽의 빈 값은 「0원」이 아니다.
+    #    ⚠️ 칸이 아직 `NOT NULL DEFAULT 0` 이라 이 갈래는 **오늘은 안 탄다.** 칸의 주인인
+    #       재무가 코드 뜻대로 바로잡는 날 탄다 — 그때 안 죽으려고 미리 세운다.
+    def _칸값(column: str) -> str:
+        return _krw_or_none(
+            현금[column],
+            recorded=_기록된_날수(result.closings, column),
+            total=len(result.closings),
+        )
+
+    칸 = " · ".join(f"{이름}: {_칸값(column)}" for 이름, column in _CASH_FLOWS)
     판정 = "🟢 성립" if 항등식.holds else "🔴 깨짐"
     항등식줄 = (
         f"Δ잔액 {_krw(항등식.balance_delta_krw)}"
@@ -1481,6 +1582,8 @@ def _cash_lines(result: WalkResult) -> list[str]:
         f" · 차이 {_krw(항등식.gap_krw)}"
         f" · 어긋난 날 {항등식.mismatched_days}일 → {판정}"
     )
+    # ★ **기말잔액은 `_krw` 그대로다** — `base_cash_balance_krw` 는 `NOT NULL` 이라
+    #   `_NULLABLE_CASH_COLUMNS` 에 없고, 「기록 없음」이 설 수 없는 칸이다.
     return [
         f"현금        {{{칸} · 기말잔액: {_krw(현금[BASE_CASH_BALANCE])}}} · {일수}",
         f"현금항등식  {항등식줄}",
