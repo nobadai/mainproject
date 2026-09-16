@@ -253,25 +253,22 @@ def test_a_failing_finalizer_still_answers_when_there_was_a_choice():
     )
 
 
-def test_no_candidate_at_all_is_not_quietly_accepted():
-    """후보가 0이면 **조용히 넘기지 않는다.**
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("status", STATUSES)
+@pytest.mark.parametrize("has_adjustment", [False, True])
+def test_no_input_is_left_without_an_explanation_key(mode, status, has_adjustment):
+    """🔴 **후보가 0인 입력은 없다.** `explanation_keys` 가 모든 입력을 닫는다.
 
-    지금 계약상 일어날 수 없는 상태다. 일어난다면 고를 문장이 없다는 뜻이고, 그때
-    아무 문장이나 고르면 보지도 않은 결과에 설명이 붙는다. 기존 실패 계약으로 닫힌다.
+    이것이 계약이라 `explanation_for` 도 `[0]` 을 그대로 읽는다. 그래서 «후보 0개일 때
+    무엇을 할까» 는 이 최적화가 답할 질문이 아니다 — 그 자리를 여기서 새로 정하면
+    호출을 줄이는 일과 무관한 **새 계약**이 하나 생긴다.
+
+    ★ 불변식은 이 검사가 지킨다. 깨지는 날 `explanation_keys` 쪽에서 먼저 드러난다.
     """
-    finalizer = _CountingFinalizer()
-    from app.finance import user_messages as messages
+    allowed = explanation_keys(mode, status, has_verified_adjustment=has_adjustment)
 
-    with patch(
-        "app.finance.application.orchestration.explanation_keys", return_value=[]
-    ):
-        reply, _metadata = _run("SCENARIO_VALIDATION", finalizer, llm_enabled=True)
-
-    #  모델을 부르지도, 없는 키로 문장을 만들지도 않는다.
-    assert finalizer.attempts == 0
-    #  업무 결과는 그대로 서 있고, 설명만 «말할 수 없다» 로 닫힌다.
-    assert reply.runtime_status == "READY"
-    assert reply.reasoning == messages.INTERNAL_FAILURE
+    assert allowed, (mode, status, has_adjustment)
+    assert allowed[0] in FINANCE_EXPLANATIONS
 
 
 # ── ④ 부르지 않은 실행의 provider 관측이 거짓이 되지 않는다 ─────────────

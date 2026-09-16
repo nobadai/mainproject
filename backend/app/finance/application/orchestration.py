@@ -1042,13 +1042,10 @@ class FinanceAgentController:
             business_status,
             has_verified_adjustment=has_verified_adjustment,
         )
-        if not allowed:
-            #  🔴 고를 문장이 **하나도 없다.** 지금 계약에서는 일어날 수 없다. 일어났다면
-            #     이 결과에 붙일 말이 없다는 뜻이고, 아무 문장이나 고르면 보지도 않은
-            #     결과에 설명이 붙는다. 업무 결과는 그대로 두고 설명만 닫는다.
-            return _Explanation(
-                _FAILURE_EXPLANATIONS["INTERNAL"], llm_status, outcome.planner_failed
-            )
+        #  ★ **후보가 0개인 경우를 여기서 새로 해석하지 않는다.** `explanation_keys` 의
+        #    계약은 모든 입력을 최소 한 개의 키로 닫는 것이고(`explanation_for` 도
+        #    `[0]` 을 그대로 읽는다), 그 불변식은 조합 전수 검사가 잠근다. 여기서
+        #    «0개면 이렇게» 를 정하면 최적화와 무관한 **새 계약**이 하나 생긴다.
         if len(allowed) == 1:
             #  ★ 정본은 `explanation_for` 하나다. 여기서 문장 표를 다시 뒤지지 않는다 —
             #    두 벌이 되면 모델 경로와 이 경로가 언젠가 다른 말을 한다.
