@@ -48,8 +48,10 @@ from pydantic import BaseModel, Field
 from app.finance.db import get_connection
 from app.master.commitment import ApprovedCommitment
 from app.master.ledger import (
+    BLOCK_NO_ARRIVAL,
+    LedgerBlock,
     build_purchase_rows,
-    ledger_block_reason,
+    ledger_block,
     persist_purchases,
 )
 from app.master.sim_run_binding import bind_sim_run
@@ -200,9 +202,21 @@ class TransitionOut(BaseModel):
 
       `NOT_APPLIED` 를 `FAILED` 로 접으면 미구현이 장애로 읽히고, 반대로 접으면
       **실패한 전이가 "안 돌았다"로 조용히 묻힌다.**
+
+    ★ **넷째 값 `AWAITING_PURCHASE_RECORD`** (2026-09-15 · 설계 260915 안 A §4-2).
+      사람 승인은 전이를 **부르지 않고** 이 값을 싣는다 — 실매입을 기록하는 순간 그
+      값으로 전이가 선다. `apply_approval` 은 이 값을 **내지 않는다**; 내는 자리는
+      `decision_service.record_decision` 하나다.
+
+      ```text
+      AWAITING_PURCHASE_RECORD   전이를 부르지 않았다 — 실매입 기록을 기다린다
+      ```
+
+      🔴 `NOT_APPLIED` 로 접지 않는다. 저쪽은 *"불렀는데 쓸 것이 없었다"* 이고 이쪽은
+         *"아직 부를 차례가 아니다"* 다 — 화면이 할 일(폼을 연다)이 다르다.
     """
 
-    status: Literal["APPLIED", "NOT_APPLIED", "FAILED"]
+    status: Literal["APPLIED", "NOT_APPLIED", "FAILED", "AWAITING_PURCHASE_RECORD"]
     reason: str = ""
     #: 실제로 write 를 낸 파트. `APPLIED` 가 아니면 비어 있다.
     parts: list[str] = Field(default_factory=list)
@@ -229,6 +243,18 @@ class TransitionOut(BaseModel):
     #:
     #: ★ `UNREADABLE` 이어도 승인은 선다. 못 읽는 것이 승인을 멈추면 안 된다.
     carried_forward_status: Literal["OK", "UNREADABLE"] = "OK"
+
+    #: 🔴 **원장에 한 행도 안 남은 이유의 갈래** (2026-09-16). 막힌 게 아니면 빈 값.
+    #:
+    #: ★★ **`reason` 만으로는 셀 수가 없다.** 문장에 등급 이름과 회차 번호가 박혀
+    #:   있어 약정마다 다른 키가 되고, 그래서 확인 걷기에서 6건 726kg 255,287원이
+    #:   `NOT_APPLIED` 한 값에 묻혀 **요약만 봐서는 안 보였다.**
+    #:
+    #: ★ **이름의 주인은 `ledger.LEDGER_BLOCK_KINDS` 다** — 여기서 안 짓는다.
+    #:
+    #: ⚠️ **이 칸은 흐름을 안 가른다.** 세는 쪽만 읽는다 — 자동 승인이 고르는 안도
+    #:   재시도가 도는 횟수도 이 칸으로 바뀌지 않는다.
+    block_kind: str = ""
 
 
 # ── 등록소 ──────────────────────────────────────────────────────────────
@@ -361,8 +387,8 @@ def purchase_item_id_for(purchase_id: str, item_code: str) -> str:
 # ── 원장을 쓸 수 있는 상태인가 ──────────────────────────────────────────
 
 
-def _ledger_blocked(commitment: ApprovedCommitment) -> str:
-    """매입 원장을 쓸 수 없는 사유. 쓸 수 있으면 **빈 문자열**이다.
+def _ledger_blocked(commitment: ApprovedCommitment) -> LedgerBlock | None:
+    """매입 원장을 쓸 수 없으면 그 **갈래와 사유**. 쓸 수 있으면 `None`.
 
     ★ **`FAILED` 가 아니라 `NOT_APPLIED` 로 가는 자리다.** 둘 다 아직 못 쓴 상태지만,
       여기 걸리는 것은 *"바꾸려다 실패했다"* 가 아니라 *"쓸 값이 아직 없다"* 다.
@@ -380,8 +406,12 @@ def _ledger_blocked(commitment: ApprovedCommitment) -> str:
     ★ 회차가 **하나도 없는** 경우는 여기서 가르지 않는다 — 그건 원장 이전에 재무가
       `commitment_arrival_schedule` 로 먼저 막는 상태이고, 그 사유를 여기서 다시
       쓰면 같은 사실이 두 문장으로 나간다.
+
+    ⚠️ **갈래를 문장과 같이 받는다** (2026-09-16). 요약이 사유별로 세려면 문장이
+      아니라 갈래가 필요한데, 갈래를 여기서 문장으로부터 되짚으면 **판정의 주인이
+      둘**이 된다. 그래서 주인에게 둘을 한 번에 받는다.
     """
-    return ledger_block_reason(commitment)
+    return ledger_block(commitment)
 
 
 def _still_incoming_on(
@@ -559,10 +589,14 @@ def apply_approval(
         )
 
     blocked = _ledger_blocked(commitment)
-    if blocked:
+    if blocked is not None:
         # ★ **`FAILED` 가 아니다.** 쓸 수 없다는 것은 우리가 아는 사실이지 실패가
         #   아니다. 그리고 여기서도 **커넥션을 열지 않는다.**
-        return TransitionOut(status="NOT_APPLIED", reason=blocked)
+        #
+        # 🔴 **갈래를 같이 싣는다** (2026-09-16). 문장만 실으면 세는 쪽이 약정마다
+        #    다른 키를 보고, 승인은 났는데 원장에 한 행도 안 남은 건수가 요약에서
+        #    안 보인다. **싣기만 한다 — 돌아서는 자리도 사유도 그대로다.**
+        return TransitionOut(status="NOT_APPLIED", reason=blocked.reason, block_kind=blocked.kind)
 
     target_state_date = _target_state_date(commitment)
     # 🔴 **`_ledger_blocked` 와 나란히 선다** — 트랜잭션 밖에서 막아야
@@ -570,7 +604,11 @@ def apply_approval(
     #    자리이고, 여기 걸리는 것은 오류가 아니라 **아무도 안 정한 상태**다.
     arrival_blocked = _arrival_blocked(commitment, target_state_date)
     if arrival_blocked:
-        return TransitionOut(status="NOT_APPLIED", reason=arrival_blocked)
+        # ★ **갈래 이름은 `ledger` 것을 가져다 쓴다** — 문장은 여기가 짓지만 이름까지
+        #   여기서 지으면 요약이 세는 갈래가 둘이 된다.
+        return TransitionOut(
+            status="NOT_APPLIED", reason=arrival_blocked, block_kind=BLOCK_NO_ARRIVAL
+        )
 
     try:
         # 🔴 **등록소가 든 축이 아니라 이 승인의 축으로 묶는다** (`#531` 후속).

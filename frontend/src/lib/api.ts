@@ -14,8 +14,11 @@ import type {
   AskResponse,
   ExecuteResponse,
   Intent,
+  PurchaseRecordIn,
+  PurchaseRecordOut,
   RunHistory,
   RunReport,
+  TransitionOut,
 } from "./types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
@@ -59,6 +62,8 @@ const READ_TIMEOUT_MS = 20_000;
  *
  * ⚠️ 15분 스피너가 좋다는 뜻이 아니다. 그건 진행 표시로 풀 일이고 여기 상한과 다른 판이다.
  * 🟡 위 표는 `2026-09-11` 기록이다. LLM·모델이 바뀌면 다시 재고 이 칸을 조인다.
+ * 🔴 **`next.config.ts` 의 `experimental.proxyTimeout` 과 같은 값이다.** 개발에서는 이 호출이
+ *   Next 프록시를 지나므로, 그쪽이 더 짧으면 여기 상한은 아무 의미가 없다 — 한쪽을 고치면 다른 쪽도.
  */
 const EXECUTE_TIMEOUT_MS = 900_000;
 
@@ -156,6 +161,8 @@ export function execute(args: {
   /** 화면이 **보고 있던 실행**. 없으면 서버가 최신을 고르고 경합이 남는다. */
   targetHistoryRunId?: string;
   decidedBy?: string;
+  /** 일반 Finance/Sales/Partner write 의 로그인 사용자. 승인 의미와 분리한다. */
+  actor?: string;
   /** `/ask` 에 보냈던 말 그대로. 가격 예측 조회만 이 원문으로 답한다 (재분류하지 않는다). */
   utterance?: string;
 }): Promise<ExecuteResponse> {
@@ -172,6 +179,7 @@ export function execute(args: {
         target_request_id: args.targetRequestId ?? null,
         target_history_run_id: args.targetHistoryRunId ?? null,
         decided_by: args.decidedBy ?? null,
+        actor: args.actor ?? null,
         utterance: args.utterance ?? null,
       }),
     },
@@ -187,6 +195,31 @@ export function runHistory(requestId: string): Promise<RunHistory> {
 /** 매입안 보고서. **서버가 만든 Markdown 을 그대로 받는다.** */
 export function runReport(requestId: string): Promise<RunReport> {
   return call<RunReport>(`/master/runs/${encodeURIComponent(requestId)}/report`);
+}
+
+/** 실매입 기록 · 반영 상태. 선정안 회차(폼 기본값)와 기록(있으면)을 함께 받는다. */
+export function getPurchaseRecord(requestId: string): Promise<PurchaseRecordOut> {
+  return call<PurchaseRecordOut>(`/master/runs/${encodeURIComponent(requestId)}/purchase-record`);
+}
+
+/**
+ * 사람이 실제로 산 값을 적는다. 적는 순간 그 값으로 매입 원장 · 채무 · 입고 일정이 선다.
+ *
+ * ★ 422 · 409 의 사유(재검증 불통과 · 마감된 날짜 · 이미 기록함)는 `ApiError.message` 에 그대로 온다.
+ */
+export function postPurchaseRecord(
+  requestId: string,
+  body: PurchaseRecordIn,
+): Promise<TransitionOut> {
+  return call<TransitionOut>(
+    `/master/runs/${encodeURIComponent(requestId)}/purchase-record`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    // 값이 선정안과 다르면 서버가 재무 · 물류 재검증을 다시 부른다 — 읽기가 아니라 돌리는 호출이다.
+    EXECUTE_TIMEOUT_MS,
+  );
 }
 
 export function health(): Promise<{ status: string }> {
@@ -216,6 +249,8 @@ export interface SalesRunRequest {
   preferred_delivery_date?: string;
   preferred_payment_days?: number;
   preferred_payment_terms_type?: string;
+  allow_additional_sourcing?: boolean;
+  user_request?: string;
 }
 
 export interface SalesCandidateOut {
@@ -231,6 +266,7 @@ export interface SalesCandidateOut {
 export interface SalesRunResponse {
   request_id: string;
   as_of: string;
+  history_run_id: string | null;
   end_code: string;
   reason: string;
   candidates: SalesCandidateOut[];

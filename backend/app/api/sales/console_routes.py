@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.contracts.aging import AgingBucket
 from app.sales.console_collections import ConsoleCollectionsResponse, get_console_collections
+from app.sales.console_items import ConsoleItemsResponse, get_console_items
 from app.sales.console_lifecycle import ConsoleSaleLifecycle, get_console_sale_lifecycle
 from app.sales.console_partners import (
     ConsolePartnerDetailResponse,
@@ -28,6 +29,12 @@ from app.sales.dashboard import get_sales_dashboard
 from app.sales.schemas import SalesDashboardResponse
 
 router = APIRouter(prefix="/console/sales", tags=["console:sales"])
+
+
+@router.get("/items", response_model=ConsoleItemsResponse)
+def items() -> ConsoleItemsResponse:
+    """공용 품목 원장에서 현재 활성인 판매 입력 선택지를 반환한다."""
+    return get_console_items()
 
 
 @router.get("/summary", response_model=SalesDashboardResponse)
@@ -53,9 +60,23 @@ def trend(
     sim_run_id: Annotated[str, Query(min_length=1)],
     as_of: date,
     days: Annotated[int, Query(ge=1, le=MAX_TREND_DAYS)] = MAX_TREND_DAYS,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> SalesTrendResponse:
-    """Stored sales folded by date for exactly one run.  The screen never folds them."""
-    return get_console_sales_trend(sim_run_id=sim_run_id, as_of=as_of, days=days)
+    """Stored sales folded by date for exactly one requested range."""
+    try:
+        return get_console_sales_trend(
+            sim_run_id=sim_run_id,
+            as_of=as_of,
+            days=days,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="시작일은 종료일보다 늦을 수 없습니다.",
+        ) from error
 
 
 @router.get("/partners", response_model=ConsolePartnersResponse)
@@ -83,9 +104,7 @@ def partner_detail(
     as_of: date,
 ) -> ConsolePartnerDetailResponse:
     """One partner seen through one run.  Credit stays Finance's to answer."""
-    detail = get_console_partner_detail(
-        sim_run_id=sim_run_id, as_of=as_of, partner_id=partner_id
-    )
+    detail = get_console_partner_detail(sim_run_id=sim_run_id, as_of=as_of, partner_id=partner_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="거래처를 찾지 못했습니다.")
     return detail
@@ -136,9 +155,7 @@ def sale_lifecycle(
     as_of: date,
 ) -> ConsoleSaleLifecycle:
     """판매 한 건의 흐름. 🔴 **저장된 연결키로만 잇는다** — 날짜·품목 추정 금지."""
-    lifecycle = get_console_sale_lifecycle(
-        sim_run_id=sim_run_id, sale_id=sale_id, as_of=as_of
-    )
+    lifecycle = get_console_sale_lifecycle(sim_run_id=sim_run_id, sale_id=sale_id, as_of=as_of)
     if lifecycle is None:
         raise HTTPException(status_code=404, detail="판매를 찾지 못했습니다.")
     return lifecycle

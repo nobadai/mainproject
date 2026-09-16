@@ -216,6 +216,29 @@ BEGIN
 END
 $ck_proposed$;
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- §3  Exception 감지 severity 의 «날짜별 이력»  (LOG-AGENT-005)
+--
+--     🔴 **`severity` 는 덮어써서 과거를 못 센다.** `touch_exception` 이 재감지마다
+--        `SET severity = …` 로 최신값을 덮으므로, 화면이 과거 `as_of` 를 보면 그날
+--        우선도를 증명할 수 없어 `—` 로 감춘다.
+--
+--     ⇒ 감지마다 «그날 · severity» 한 벌을 이 칸에 쌓는다.
+--        원소 = {"as_of": 감지날짜, "severity": …} · 하루 1원소(같은 날은 마지막
+--        감지값으로 교체) · Historical 은 as_of <= 기준일 중 max(as_of) 원소로 복원한다.
+--
+--     ⚠️ **backfill 하지 않는다.** 기존 행은 DEFAULT `[]` 로 남고 화면 fallback(`—`)을
+--        쓴다 — 지금 severity(덮어쓴 값)를 과거로 복제하지 않는다.
+--
+--     운영 중 DB 는 database/logistics_exceptions_detection_history.sql 로 같은 칸을 더한다.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE haetdeul.logistics_exceptions
+    ADD COLUMN IF NOT EXISTS detection_history_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+COMMENT ON COLUMN haetdeul.logistics_exceptions.detection_history_json IS
+    '[{as_of, severity}] 감지 이력 (LOG-AGENT-005). 하루 1원소 · 같은 날은 마지막 감지값으로 교체. 🔴 Historical 은 as_of <= 기준일 중 max(as_of) 원소의 severity 로 그날 우선도를 복원한다(배열 순서 비의존). severity 칸은 최신값 캐시로 그대로 두고, 이 칸이 날짜별 이력을 든다. 기존 행은 [] 이며 backfill 하지 않는다.';
+
 -- 🔴 **조사와 대응안이 «같은 실행의» 문제만 가리키게 하려고** 둔다 (§3 · §4).
 --    `exception_id` 가 이미 PK 라 유일성은 더 안 보태지만, 복합 FK 는 «유일한 칸 묶음»
 --    만 가리킬 수 있어서 이 선언이 있어야 `(sim_run_id, exception_id)` 를 가리킬 수 있다.

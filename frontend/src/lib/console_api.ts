@@ -101,6 +101,8 @@ export interface PayablesResponse extends RunScope {
   rows: PayableRow[];
 }
 
+export type ExpenseStatus = "ACCRUED" | "PAID" | "CANCELLED";
+
 export interface ExpenseRow {
   expense_id: string;
   expense_date: string;
@@ -109,10 +111,26 @@ export interface ExpenseRow {
   amount_krw: Money;
   source_ref: string | null;
   note: string | null;
+  /** 원장이 적어 둔 생명주기 상태. */
+  status: ExpenseStatus;
+  /** 지급하기로 한 날. 이 칸이 생기기 전 행은 `null` 이다. */
+  due_date: string | null;
+  /** 🔴 실제 지급일. **모르면 `null` 이고 화면이 발생일로 메우지 않는다.** */
+  paid_date: string | null;
+  /** 지급일을 아는가. `PAID` 인데 거짓이면 «지급일 미상» 인 기존 데이터다. */
+  paid_date_known: boolean;
+  related_delivery_id: string | null;
 }
 export interface ExpensesResponse extends RunScope {
   summary: {
     total_expenses_krw: Money;
+    /** 아직 안 나간 돈. */
+    accrued_krw: Money;
+    /** 실제로 나간 돈. */
+    paid_krw: Money;
+    /** 나가지 않기로 한 돈. **현금과 무관하다.** */
+    cancelled_krw: Money;
+    accrued_count: number;
     category_totals: {
       raw_category: string;
       display_category: string;
@@ -188,6 +206,13 @@ export interface ClosingItem {
   purchase_cash_out_krw: Money;
   logistics_cash_out_krw: Money;
   payroll_interest_cash_out_krw: Money;
+  /**
+   * 일반 운영비 현금유출.
+   *
+   * 🔴 **`null` 은 «그 실행이 이 축을 기록하지 않았다» 다 — 0원이 아니다.** 화면이 0 으로
+   *    적으면 «세어 보니 없었다» 가 되고, 아무도 그날 운영비를 다시 묻지 않는다.
+   */
+  operating_expense_cash_out_krw: Money | null;
   sales_recognized_krw: Money;
   collection_cash_in_krw: Money;
   base_net_cash_krw: Money;
@@ -248,6 +273,16 @@ export interface PartnerRow {
 }
 export interface PartnersResponse extends RunScope {
   rows: PartnerRow[];
+}
+
+export interface ConsoleItem {
+  item_id: string;
+  item_code: string;
+  item_name: string;
+  base_unit: string;
+}
+export interface ItemsResponse {
+  rows: ConsoleItem[];
 }
 
 export interface PartnerDetail extends RunScope {
@@ -339,8 +374,16 @@ export interface SalesRunsResponse {
 }
 
 export const salesConsole = {
+  items: () => get<ItemsResponse>("/sales/items", {}),
   partners: (sim_run_id: string, as_of: string, query?: string) =>
     get<PartnersResponse>("/sales/partners", { sim_run_id, as_of, query }),
+  activeCustomers: (sim_run_id: string, as_of: string) =>
+    get<PartnersResponse>("/sales/partners", {
+      sim_run_id,
+      as_of,
+      status: "ACTIVE",
+      partner_type: "CUSTOMER",
+    }),
   partnerDetail: (sim_run_id: string, as_of: string, partner_id: string) =>
     get<PartnerDetail>(`/sales/partners/${encodeURIComponent(partner_id)}`, {
       sim_run_id,

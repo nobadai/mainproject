@@ -41,8 +41,11 @@ def _card(item: str) -> ItemCard:
 
 
 def _plan(key: str, pending: bool = True) -> SimpleNamespace:
+    #  ★ 승인은 «결정이 났다» 와 같은 말이다 — 승인만 안 이름을 든다
+    #    (`master_decisions` 의 `scenario_required` CHECK).
     return SimpleNamespace(key=key, unit_price=900, qty_kg=1000.0,
-                           amount_krw=900_000, max_price=1_000, pending=pending)
+                           amount_krw=900_000, max_price=1_000, pending=pending,
+                           approved=not pending)
 
 
 def _chart() -> Chart:
@@ -80,7 +83,9 @@ def stub(monkeypatch):
     )
     monkeypatch.setattr(
         dashboard_query.purchase_q, "build",
-        lambda as_of, sim_run_id=None: SimpleNamespace(plans=plans, source=_source("매입")),
+        #  ⚠️ `**_` 다. 대시보드가 `window_days=0` 도 넘긴다 (2026-09-16) — 안 받으면
+        #     스텁이 `TypeError` 를 내고, 그건 이 검사가 재려는 것이 아니다.
+        lambda as_of, sim_run_id=None, **_: SimpleNamespace(plans=plans, source=_source("매입")),
     )
     monkeypatch.setattr(dashboard_query.finance_q, "build", lambda as_of, s: state["finance"])
     monkeypatch.setattr(
@@ -98,6 +103,8 @@ def stub(monkeypatch):
         lambda as_of: SimpleNamespace(stats=[Stat(label="판매", value="1", raw=1)],
                                       source=_source("판매")),
     )
+    #  🔴 실 DB 에 안 닿는다 — 실매입 기록 읽기도 대역으로 막는다.
+    monkeypatch.setattr(dashboard_query, "recorded_totals_by_plan", lambda **_: {})
     monkeypatch.setattr(dashboard_query.finance_q, "dashboard_cash", lambda axis: _chart())
     monkeypatch.setattr(dashboard_query.logistics_q, "dashboard_stock",
                         lambda n, at, as_of: _chart())

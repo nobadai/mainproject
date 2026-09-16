@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from http import HTTPStatus
+from typing import Any
 
 import psycopg
 
@@ -70,16 +71,18 @@ from app.api.primitives import (
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.contracts.core import ITEMS
 from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
-from app.logistics.agent.schemas import ExceptionRow
+from app.logistics.agent.schemas import DetectionRecord, ExceptionRow
 from app.logistics.console_service import (
+    get_fefo_candidates_by_item,
     get_inbound_console,
     get_inventory_console,
     get_outbound_console,
-    get_reservation_fefo_console,
+    load_console_runtime,
 )
 from app.logistics.db import get_connection
 from app.logistics.historical_repository import (
     onhand_total_by_day,
+    reservation_state_at,
     runtime_coverage_at,
     snapshot_days_between,
 )
@@ -200,17 +203,31 @@ def _still_working(r: ConsoleReservation) -> bool:
 def _severity_at(row: ExceptionRow, as_of: date) -> tuple[str, str | None]:
     """그날 우선도. 🔴 **미래 값을 과거 화면으로 흘리지 않는다.**
 
-    `touch_exception` 이 `severity` 를 **덮어쓴다** (`SET severity = …`). 그래서 마지막
-    갱신이 `as_of` 뒤였다면 지금 행의 우선도는 **그날 우선도가 아니다.** 가르는 자는
-    부르는 쪽이라고 `live_exceptions_at` 이 적어 뒀고, 화면에서는 이 함수가 그 일을 한다.
+    `touch_exception` 이 `severity` 를 **덮어쓴다** (`SET severity = …`) — 그래서 지금
+    행의 `severity` 는 마지막 감지값(캐시)이지 과거값이 아니다. LOG-AGENT-005 로
+    `detection_history` 가 «그날 severity» 를 쌓으므로, 그 이력에서 그날 값을 복원한다.
 
     ```text
-    last_detected_as_of <= as_of   그날 뒤로 안 만졌다 → 지금 값이 그날 값이다
-    그 밖                          증명 못 한다 → «—»
+    detection_history 에 as_of <= 기준일 원소 있음  → 그중 max(as_of) 원소의 severity
+                                                       🔴 배열 순서를 믿지 않는다 — 날짜로 고른다
+    이력 있으나 기준일 이하 감지 없음               → «—» (그날 우선도 증명 불가)
+    이력 없음(옛 행 · [])                          → 기존 fallback:
+        last_detected_as_of <= as_of   지금 값이 그날 값이다
+        그 밖                          «—»
     ```
 
     :returns: `(보일 말, 아래 붙일 한 줄)`.
     """
+    chosen: DetectionRecord | None = None
+    for record in row.detection_history:
+        if record.as_of <= as_of and (chosen is None or record.as_of > chosen.as_of):
+            chosen = record
+    if chosen is not None:
+        return _SEVERITY.get(chosen.severity, chosen.severity), None
+    if row.detection_history:
+        # 이력은 있으나 기준일 이하 감지가 없다 — 그날 우선도를 증명할 수 없다.
+        return "—", "기준일 당시 우선도 확인 불가"
+    # 이력 없는 옛 행(적용 전 생성) — 기존 규칙 그대로.
     detected = row.last_detected_as_of
     if detected is None or detected > as_of:
         return "—", "기준일 당시 우선도 확인 불가"
@@ -406,9 +423,9 @@ def _stock_pane(
     if available is None:
         avail_detail = f"못 읽은 축이 있습니다 — {inv.available_qty_unresolved_reason}"
     else:
-        #  ★ **«기준일 값» 이라고 적지 않는다.** 이 숫자가 빼는 예약·할당 축은
-        #    Runtime 축의 지금 값이다 (`available_qty_time_basis`).
-        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (예약 축은 «지금» 기준)"
+        #  ★ **예약·할당 축도 이제 기준일 값이다 (#760).** 그날 Lot(`lot_state_at`)과
+        #    그날 예약(`reservation_state_at`)으로 세운 스냅샷을 정본에 먹인다.
+        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (기준일 축)"
 
     return Pane(
         key="stock",
@@ -609,8 +626,10 @@ def _inbound_pane(inb: ConsoleInboundResponse) -> Pane:
     )
 
 
-def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
-    #  ★ FEFO 는 **예약 한 건마다** 묻는다. 예약이 없으면 물어볼 대상도 없다.
+def _outbound_pane(
+    ob: ConsoleOutboundResponse, as_of: date, *, conn: Any, sim_run_id: str
+) -> Pane:
+    #  ★ FEFO 후보는 **예약 한 건마다 그린다** — 예약이 없으면 그릴 대상도 없다.
     #    예약이 없을 때 Lot 을 신선도순으로 늘어놓아 «후보» 라고 부르지 않는다 —
     #    그건 서비스에 없는 계산을 화면이 새로 만드는 것이다 (#415).
     fefo_rows: list[dict] = []
@@ -619,14 +638,23 @@ def _outbound_pane(ob: ConsoleOutboundResponse, as_of: date) -> Pane:
     품목_예약 = [r for r in ob.reservations if _on_screen(r.item_name)]
     화면_예약 = [r for r in 품목_예약 if _still_working(r)]
     끝난_예약 = len(품목_예약) - len(화면_예약)
-    #  🔴 **FEFO 는 «아직 Lot 을 안 고른 몫» 이 있는 예약에만 묻는다.** 목표량이 0 이면
+    #  🔴 **FEFO 는 «아직 Lot 을 안 고른 몫» 이 있는 예약에만 그린다.** 목표량이 0 이면
     #     `allocate_reserved_stock_fefo` 도 아무것도 안 하므로 후보를 구할 이유가 없다.
     #     예약 164건에 164번 묻던 것이 대시보드 8.6초의 태반이었다 (마스터 실측 2026-09-15).
-    for resv in 화면_예약:
-        if resv.unallocated_qty_kg <= 0:
-            continue
-        fefo = get_reservation_fefo_console(reservation_id=resv.reservation_id, as_of=as_of)
-        for rank, cand in enumerate(fefo.candidates, start=1):
+    #  🔴 **묻는 것은 품목마다 한 번이다** (2026-09-15). 후보는 예약과 무관한 값이라
+    #     (`console_service.get_fefo_candidates_by_item`) 같은 품목 예약 여덟 건이 같은 답을
+    #     여덟 번 받고 커넥션도 여덟 번 열던 자리다. 예약이 없으면 **묻지도 않는다.**
+    물을_예약 = [r for r in 화면_예약 if r.unallocated_qty_kg > 0]
+    후보_by_item = (
+        get_fefo_candidates_by_item(
+            conn=conn, sim_run_id=sim_run_id,
+            item_ids=[r.item_id for r in 물을_예약], as_of=as_of,
+        )
+        if 물을_예약
+        else {}
+    )
+    for resv in 물을_예약:
+        for rank, cand in enumerate(후보_by_item.get(resv.item_id, ()), start=1):
             fefo_rows.append(
                 {
                     "resv": resv.reservation_id,
@@ -688,15 +716,14 @@ _PRINCIPLE = Note(
           "0 이 아니라 **공란**입니다 — 둘은 다릅니다."),
 )
 
-#: **그날 값이 아닌** 칸들. 이유가 둘로 갈린다 — 되살릴 정본이 없거나(Zone 자리
-#: 정원), 축을 일부러 «지금» 에 둔 것이거나(판매가능량 · `api.logistics.schema`
-#: `available_qty_time_basis` 주석). 화면이 그 사실을 읽고 적는다.
+#: **그날 값이 아닌** 칸은 이제 Zone 자리 수 하나뿐이다 — 되살릴 정본(자리 정원
+#: 유효일)이 없어서다. 판매가능량·예약 3칸은 #760(LOG-HIST-002)으로 기준일 축이 됐다.
+#: 화면이 그 사실을 읽고 적는다.
 _MIXED_AXIS_NOTE = Note(
-    tone="warn",
-    text=("**판매가능량 · Zone 자리 수는 «지금» 값입니다.** 판매가능량은 «지금 더 팔 "
-          "수 있나» 를 답하는 값이라 예약·할당의 지금 상태를 빼고, Zone 자리 정원에는 "
-          "유효일이 없어 기준일로 되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · "
-          "Receipt · Lot 자리 · 예약·할당 목록은 기준일 값입니다."),
+    tone="info",
+    text=("**Zone 자리 수만 «지금» 값입니다.** Zone 자리 정원에는 유효일이 없어 기준일로 "
+          "되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · Receipt · Lot 자리 · "
+          "예약·할당 · 판매가능량은 모두 기준일 값입니다."),
 )
 
 
@@ -795,43 +822,59 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
     """
     run = SHOWN_SIM_RUN_ID
     try:
+        #  🔴 **커넥션은 한 판에 하나다** (2026-09-15). 종전에는 조회마다 · FEFO 예약마다
+        #     새로 열어 한 판에 23개 · 388 ms 였다 (원격 DB · 연결당 14~22 ms). 읽기만
+        #     하므로 `with` 종료의 commit 은 아무것도 안 바꾼다.
         with get_connection() as conn:
             coverage = runtime_coverage_at(conn, sim_run_id=run, as_of=as_of)
-        if not coverage.has_snapshot:
-            return LogisticsTabResult(
-                tab=_empty_tab(
-                    status="NO_DATA",
-                    note=Note(
-                        tone="warn",
-                        text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** — 그날 "
-                              "Runtime Snapshot 이 없습니다. 0 이 아니라 "
-                              "**아직 모르는 날**입니다. "
-                              f"이 실행이 연 날: {coverage.first_as_of} ~ "
-                              f"{coverage.last_as_of}."),
+            if not coverage.has_snapshot:
+                return LogisticsTabResult(
+                    tab=_empty_tab(
+                        status="NO_DATA",
+                        note=Note(
+                            tone="warn",
+                            text=(f"**{as_of} 은 이 실행이 연 날이 아닙니다** — 그날 "
+                                  "Runtime Snapshot 이 없습니다. 0 이 아니라 "
+                                  "**아직 모르는 날**입니다. "
+                                  f"이 실행이 연 날: {coverage.first_as_of} ~ "
+                                  f"{coverage.last_as_of}."),
+                        ),
+                        source_note=(
+                            f"logistics_runtime_fixture 없음 · 보고 있는 실행: {run}"
+                            f" · 기준일: {as_of}"
+                            f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
+                        ),
                     ),
-                    source_note=(
-                        f"logistics_runtime_fixture 없음 · 보고 있는 실행: {run} · 기준일: {as_of}"
-                        f" (열린 구간 {coverage.first_as_of}~{coverage.last_as_of})"
-                    ),
-                ),
-                http_status=HTTPStatus.OK,
+                    http_status=HTTPStatus.OK,
+                )
+            #  ★ Runtime 읽기(Current 축)는 **한 판에 한 번**이다 — 재고 콘솔(판매가능량)과
+            #    입고 콘솔(운송 중 · 도착 처리 대상)이 같은 한 벌을 나눠 쓴다. 따로 읽으면
+            #    같은 fixture · 일정 질의가 두 번씩 나간다 (실측 2026-09-15 · 일정 5번 421 ms).
+            runtime = load_console_runtime(conn=conn, sim_run_id=run, as_of=as_of)
+            #  ★ 그날 예약(Historical)도 **한 판에 한 번** 읽는다 (#760). 재고 콘솔의
+            #    예약 3칸·판매가능량과 출고 콘솔의 예약 목록이 같은 한 벌을 나눠 쓴다 —
+            #    종전에는 출고 콘솔만 `reservation_state_at` 을 부르고 재고 3칸은
+            #    «지금 status» 를 세어 한 화면에 두 시간축이 섞였다.
+            reservations = reservation_state_at(conn, sim_run_id=run, as_of=as_of)
+            inv = get_inventory_console(
+                conn=conn, sim_run_id=run, as_of=as_of, runtime=runtime, reservations=reservations
             )
-        inv = get_inventory_console(sim_run_id=run, as_of=as_of)
-        inb = get_inbound_console(sim_run_id=run, as_of=as_of)
-        ob = get_outbound_console(sim_run_id=run, as_of=as_of)
-        #  🔴 **문제 장부도 같은 `(sim_run_id, as_of)` 축이다.** 다른 실행의 문제를
-        #     섞지 않고 그날 뒤에 열린 문제도 싣지 않는다 — 그 두 규칙의 주인은
-        #     `live_exceptions_at` 하나다. 그날 닫힌 행은 저 함수가 안 내므로
-        #     `resolved_exceptions_on` 이 나머지 반쪽을 가져온다.
-        with get_connection() as conn:
+            inb = get_inbound_console(conn=conn, sim_run_id=run, as_of=as_of, runtime=runtime)
+            ob = get_outbound_console(
+                conn=conn, sim_run_id=run, as_of=as_of, reservations=reservations
+            )
+            #  🔴 **문제 장부도 같은 `(sim_run_id, as_of)` 축이다.** 다른 실행의 문제를
+            #     섞지 않고 그날 뒤에 열린 문제도 싣지 않는다 — 그 두 규칙의 주인은
+            #     `live_exceptions_at` 하나다. 그날 닫힌 행은 저 함수가 안 내므로
+            #     `resolved_exceptions_on` 이 나머지 반쪽을 가져온다.
             live = live_exceptions_at(conn, sim_run_id=run, as_of=as_of)
             resolved = resolved_exceptions_on(conn, sim_run_id=run, as_of=as_of)
-        panes = [
-            _summary_pane(inv, live.rows, resolved, live.uncertainties, as_of),
-            _stock_pane(inv, inb, ob),
-            _inbound_pane(inb),
-            _outbound_pane(ob, as_of),
-        ]
+            panes = [
+                _summary_pane(inv, live.rows, resolved, live.uncertainties, as_of),
+                _stock_pane(inv, inb, ob),
+                _inbound_pane(inb),
+                _outbound_pane(ob, as_of, conn=conn, sim_run_id=run),
+            ]
     except Exception as error:  #  DB 미연결 · 표 없음 · 원장/계보 무결성 다 잡는다
         log.exception("물류 값을 못 읽었습니다")
         http_status = _http_status_for_error(error)
@@ -969,7 +1012,11 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
                 ),
             )
         data = _onhand_series(as_of, n, at)
-        inb = get_inbound_console(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+        with get_connection() as conn:
+            runtime = load_console_runtime(conn=conn, sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+            inb = get_inbound_console(
+                conn=conn, sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, runtime=runtime
+            )
     except Exception as error:  #  DB 미연결 · 표 없음 · 원장 이상 다 잡는다
         log.exception("재고 그래프를 못 읽었습니다")
         return _empty_stock_chart(

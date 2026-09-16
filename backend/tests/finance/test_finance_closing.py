@@ -10,7 +10,7 @@
   통과한 검사가 아무것도 증명하지 못한다.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -74,10 +74,27 @@ def _states_with_receivables(value):
     return [dict(row, receivables_krw=value) for row in _default_states()]
 
 
+def _expense(
+    category,
+    delivery_id,
+    amount,
+    *,
+    status="PAID",
+    paid_date=AS_OF,
+    expense_date=AS_OF,
+):
+    """마감이 읽는 비용 한 행.
+
+    ★ **지급일과 발생일을 따로 준다.** 둘을 한 값으로 묶으면 «발생일로 센다» 는 옛
+      버그가 검사에서 보이지 않는다.
+    """
+    return (category, delivery_id, amount, status, paid_date, expense_date)
+
+
 def _default_expenses():
     return [
-        ("PAYROLL", None, Decimal(100)),
-        (LOGISTICS_CATEGORY, "DELIVERY-1", Decimal(30)),
+        _expense("PAYROLL", None, Decimal(100)),
+        _expense(LOGISTICS_CATEGORY, "DELIVERY-1", Decimal(30)),
     ]
 
 
@@ -341,6 +358,24 @@ def test_persisted_payable_due_date_is_the_purchase_cash_authority():
     assert not any(".purchases" in text for text, _ in conn.executed)
 
 
+def test_sales_recognition_uses_first_open_day_contract_for_holiday_sales(_schema_and_inventory):
+    """휴장일 판매는 다음 첫 개장일에만 포함하도록 Master opening 정본을 읽는다."""
+    conn = _Connection(payables=[])
+
+    _close(conn)
+
+    sales_queries = [
+        (text, params) for text, params in conn.executed if "SUM(total_amount_krw)" in text
+    ]
+    assert len(sales_queries) == 1
+    text, params = sales_queries[0]
+    assert "master_day_openings" in text
+    assert "opening.as_of >= s.sale_date" in text
+    assert "opening.as_of < %s" in text
+    assert "opening.result IN ('OPENED', 'ALREADY_OPENED')" in text
+    assert params == [SIM_RUN_ID, AS_OF, AS_OF, AS_OF]
+
+
 def test_weekend_due_date_is_not_rewritten_and_moves_cash_out_to_monday():
     sunday = date(2026, 1, 4)
     conn = _Connection(payables=[(sunday, Decimal(200))])
@@ -508,9 +543,9 @@ def test_loan_interest_is_a_payroll_interest_cash_out():
     conn = _Connection(
         payables=[],
         expenses=[
-            ("PAYROLL", None, Decimal(100)),
-            (LOAN_INTEREST_CATEGORY, None, Decimal(7)),
-            (LOGISTICS_CATEGORY, "DELIVERY-1", Decimal(30)),
+            _expense("PAYROLL", None, Decimal(100)),
+            _expense(LOAN_INTEREST_CATEGORY, None, Decimal(7)),
+            _expense(LOGISTICS_CATEGORY, "DELIVERY-1", Decimal(30)),
         ],
     )
 
@@ -523,7 +558,7 @@ def test_loan_interest_is_a_payroll_interest_cash_out():
 
 def test_delivery_linked_expense_is_logistics_cash_out():
     conn = _Connection(
-        payables=[], expenses=[(LOGISTICS_CATEGORY, "DELIVERY-9", Decimal(55))]
+        payables=[], expenses=[_expense(LOGISTICS_CATEGORY, "DELIVERY-9", Decimal(55))]
     )
 
     _close(conn)
@@ -535,7 +570,7 @@ def test_delivery_linked_expense_is_logistics_cash_out():
 
 def test_unknown_expense_category_blocks_instead_of_guessing():
     """★ 모르는 분류를 어느 칸에도 넣지 않는다 — 틀린 값을 확정하느니 막는다."""
-    conn = _Connection(payables=[], expenses=[("MARKETING", None, Decimal(10))])
+    conn = _Connection(payables=[], expenses=[_expense("MARKETING", None, Decimal(10))])
 
     with pytest.raises(FinanceDataNotReady):
         _close(conn)
@@ -549,7 +584,85 @@ def test_only_paid_expenses_are_cash_out():
 
     expense_query = next(text for text, _ in conn.executed if ".expenses" in text)
     assert "status = 'PAID'" in expense_query
-    assert "expense_date = %s" in expense_query
+    #  🔴 **기준일은 지급일이다.** 발생일로 세면 아직 안 나간 돈이 나간 것으로 적힌다.
+    assert "COALESCE(paid_date, expense_date) = %s" in expense_query
+    assert "expense_date = %s" not in expense_query
+
+
+def test_a_general_operating_expense_lands_in_its_own_bucket():
+    """🔴 갈 칸이 없어 마감이 통째로 막히던 자리.
+
+    임차료는 물류비도 급여·이자도 아니다. 예전에는 그 한 건이 그날 마감 전체를
+    `daily_closing_expense_category` 로 막았다 — 원장이 받아 적을 수 있는 비용인데도.
+    """
+    conn = _Connection(payables=[], expenses=[_expense("RENT", None, Decimal(40))])
+
+    _close(conn)
+
+    row = _row(conn)
+    assert row["operating_expense_cash_out_krw"] == Decimal(40)
+    assert row["logistics_cash_out_krw"] == Decimal(0)
+    assert row["payroll_interest_cash_out_krw"] == Decimal(0)
+
+
+def test_the_cash_identity_subtracts_the_operating_expense_bucket():
+    """순현금은 네 유출을 모두 뺀 값이다. **주인은 마감 하나다.**"""
+    conn = _Connection(
+        payables=[],
+        expenses=[
+            _expense("PAYROLL", None, Decimal(100)),
+            _expense(LOGISTICS_CATEGORY, "DELIVERY-1", Decimal(30)),
+            _expense("UTILITY", None, Decimal(7)),
+        ],
+    )
+
+    _close(conn)
+
+    row = _row(conn)
+    assert row["operating_expense_cash_out_krw"] == Decimal(7)
+    assert row["base_net_cash_krw"] == (
+        row["collection_cash_in_krw"]
+        - row["purchase_cash_out_krw"]
+        - row["logistics_cash_out_krw"]
+        - row["payroll_interest_cash_out_krw"]
+        - row["operating_expense_cash_out_krw"]
+    )
+
+
+def test_an_expense_paid_later_than_it_arose_is_cash_out_on_the_payment_day():
+    """발생일과 지급일이 다르면 **현금은 지급일에 빠진다.**"""
+    conn = _Connection(
+        payables=[],
+        expenses=[
+            _expense(
+                "RENT",
+                None,
+                Decimal(40),
+                paid_date=AS_OF,
+                expense_date=AS_OF - timedelta(days=4),
+            )
+        ],
+    )
+
+    _close(conn)
+
+    assert _row(conn)["operating_expense_cash_out_krw"] == Decimal(40)
+
+
+def test_a_legacy_paid_expense_without_a_payment_day_still_closes():
+    """★ 이미 적힌 `PAID` 행은 지급일을 모른다 — 그 행만 발생일로 읽는다.
+
+    🔴 **읽기 전용 호환이다.** 원장에 `paid_date = expense_date` 로 적어 넣지 않는다.
+       추측한 날짜가 사실인 척하게 두면 화면이 틀린 지급일을 말한다.
+    """
+    conn = _Connection(
+        payables=[],
+        expenses=[_expense("PAYROLL", None, Decimal(100), paid_date=None)],
+    )
+
+    _close(conn)
+
+    assert _row(conn)["payroll_interest_cash_out_krw"] == Decimal(100)
 
 
 # ---------------------------------------------------------------------------

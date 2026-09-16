@@ -94,7 +94,10 @@ def inject(monkeypatch):
     """``_read`` 를 대신 세운다. **DB 없이 돈다.**"""
 
     def _inject(data: dict[str, Any]):
-        monkeypatch.setattr(purchase_query, "_read", lambda as_of: data)
+        #  🔴 `**_kwargs` 가 있어야 한다 (2026-09-16). `build` 가 `_read` 에
+        #     `window_days=` 를 넘기는데, 스텁이 안 받으면 `TypeError` 가 나고
+        #     `build` 의 `except Exception` 이 그것을 삼켜 **조용히 예시값**이 나간다.
+        monkeypatch.setattr(purchase_query, "_read", lambda as_of, **_kwargs: data)
 
     return _inject
 

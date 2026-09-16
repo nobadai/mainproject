@@ -43,6 +43,7 @@ import { useTab } from "@/components/console/useTab";
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { retrainPending } from "@/lib/mlConsole";
+import { useRetrainChanged } from "@/lib/retrainSignal";
 import { forecast, type ForecastTab } from "@/lib/screen";
 
 function ForecastPane() {
@@ -93,7 +94,13 @@ function ForecastPane() {
       <Note note={data.notice} />
 
       {/* ── 세 품목 카드 ──────────────────────────────────────────── */}
-      <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
+      {/* ★ **좁은 화면에서도 셋이 한 줄입니다** (2026-09-16).
+             전에는 `minmax(220px,1fr)` 이라 폭이 660px 아래로 내려가면 한 줄에
+             하나씩 세로로 쌓였습니다. 그러면 **품목을 고르는 버튼 셋이 한눈에
+             안 들어와** 무엇을 보고 있는지, 다른 품목이 있기는 한지 모릅니다.
+             칸 안쪽은 `min-w-0` 이라 좁아지면 글자가 줄로 접힙니다 — 넘치지
+             않습니다. */}
+      <div className="grid gap-2.5 [grid-template-columns:repeat(3,minmax(0,1fr))]">
         {data.cards.map((c) => (
           <button
             key={c.item}
@@ -281,6 +288,19 @@ export default function ForecastPage() {
       alive = false;
     };
   }, []);
+
+  //  🔴 **뜰 때 한 번만 세면 배지가 굳습니다** (2026-09-16 사용자 실측).
+  //     모델을 바꾸는 길이 둘인데(재학습 탭 · 아래 채팅 서랍) 둘 다 이 수를
+  //     못 건드려서, 바꾸고 나도 빨간 배지가 새로고침 전까지 남았습니다.
+  //     이제 어느 쪽에서 바꾸든 신호가 와서 **다시 셉니다.**
+  //
+  //  ★ 여기서도 «몇 건 남았나» 를 신호에서 받지 않고 **다시 물어봅니다.**
+  //     세는 곳은 ML 콘솔 하나여야 합니다 (`lib/retrainSignal.ts` 머리말).
+  useRetrainChanged(() => {
+    retrainPending()
+      .then((r) => setWaiting(r.pending.length))
+      .catch(() => undefined);
+  });
 
   //  ★ 탭은 **늘 있습니다** (2026-09-09 다시 바꿈). 없다가 생기니 사람이
   //    「어디로 들어가야 하나」 를 몰랐습니다. 갈리는 것은 탭 안입니다 —

@@ -793,17 +793,17 @@ class ConsoleInventoryResponse(ConsoleModel):
     capacity: ConsoleCapacity
     #: `available_qty_kg` 가 전부 `None` 일 때만 채워진다. 그 외에는 `None`.
     available_qty_unresolved_reason: AvailableQtyUnresolvedReason | None = None
-    #: 🔴 **`on_hand_qty_kg` 와 시간축이 다르다.** 현재고·Lot·`used_capacity_kg` 는
-    #:    `as_of` 원장에서 되살아나지만, 판매가능량은 **지금** 예약·할당을 뺀 값이다
-    #:    (`tools.build_inventory_by_item` ← `repository.get_outbound_commitments`).
+    #: 🔴 **`on_hand_qty_kg` 와 같은 시간축이다 (#760 · LOG-HIST-002).** 판매가능량도
+    #:    이제 `as_of` 로 되살린다 — 화면(콘솔) 경로가 그날 Lot(`lot_state_at`)과 그날
+    #:    예약(`reservation_state_at`)으로 세운 스냅샷을 정본 `tools.build_inventory_by_item`
+    #:    에 먹인다. 종전에는 `repository.get_outbound_commitments`(현재 행)를 쓴 Runtime
+    #:    스냅샷이라 «지금» 축이었다.
     #:
-    #:    ⚠️ **이제는 «못 되살려서» 가 아니다.** WP-3 이 예약 축의 시간 정본을 세워
-    #:       (`historical_repository.reservation_state_at`) 되살릴 수는 있게 됐다.
-    #:       그런데 이 값이 답하는 물음은 *"지금 더 팔 수 있나"* 이고 그 쪽은 Agent
-    #:       Runtime 과 같은 축이어야 한다 — **어느 화면 값을 과거로 옮길지는 별도
-    #:       결정**이라 WP-3 에서 정하지 않았다. 축이 다르다는 사실만 여기 적는다.
-    available_qty_time_basis: TimeBasis = "CURRENT_ROW"
-    #: 현재고 · Lot 상태 · 신선도 · 회전 · `used_capacity_kg` 의 시간축.
+    #:    ⚠️ **Agent Runtime 경로는 그대로 «지금» 축이다.** 그쪽은 *"지금 더 팔 수
+    #:       있나"* 를 묻는 자리라 현재 스냅샷을 쓴다(`ConsoleInventoryResponse` 를 안
+    #:       거친다) — 바뀐 것은 화면(콘솔)뿐이다.
+    available_qty_time_basis: TimeBasis = "HISTORICAL_AS_OF"
+    #: 현재고 · Lot 상태 · 신선도 · 회전 · `used_capacity_kg` · 예약·판매가능량의 시간축.
     on_hand_time_basis: TimeBasis = "HISTORICAL_AS_OF"
 
 
@@ -971,14 +971,3 @@ class ConsoleFefoCandidate(ConsoleModel):
     received_at: date
     #: DB raw 등급 그대로다 — FEFO 후보는 정규화하지 않는다.
     grade: str | None
-
-
-class ConsoleFefoResponse(ConsoleModel):
-    """FEFO 추천. 🔴 **고르지 않는다 — 자동 Allocation 이 아니다.**"""
-
-    reservation_id: str
-    sim_run_id: str
-    item_id: str
-    #: 이 예약이 아직 Lot 을 안 고른 몫. `unallocated_qty_kg` 와 같은 식이다.
-    remaining_reservation_qty_kg: Decimal
-    candidates: list[ConsoleFefoCandidate]

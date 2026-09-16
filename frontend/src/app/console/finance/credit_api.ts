@@ -8,6 +8,7 @@
  */
 
 const CONSOLE_BASE = process.env.NEXT_PUBLIC_CONSOLE_BASE ?? "/api/console";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api";
 const TIMEOUT_MS = 20_000;
 
 export type Money = string | number;
@@ -44,6 +45,22 @@ export interface CreditResponse {
   partners: PartnerCredit[];
 }
 
+export interface CreditLimitHistoryItem {
+  partner_credit_limit_id: string;
+  partner_id: string;
+  credit_limit_krw: Money;
+  effective_from: string;
+  effective_to: string | null;
+  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED";
+  source_ref: string;
+  recorded_by: string;
+  policy_version: string;
+  usage_scope: string;
+  note: string | null;
+  is_active: boolean;
+  is_current: boolean;
+}
+
 export async function fetchCredit(simRun: string, asOf: string): Promise<CreditResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -67,4 +84,115 @@ export async function fetchCredit(simRun: string, asOf: string): Promise<CreditR
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function registerCreditLimit(input: {
+  partner_id: string; credit_limit_krw: string; effective_from: string;
+  evidence_grade: "OFFICIAL" | "VENDOR" | "SIM_FIXED"; source_ref: string;
+  recorded_by: string; note?: string;
+}): Promise<void> {
+  const res = await fetch(`${API_BASE}/finance/credit-limits`, {
+    method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail ?? "여신한도를 저장하지 못했습니다.");
+  }
+}
+
+export async function fetchCreditLimitHistory(
+  partnerId: string,
+  asOf: string,
+): Promise<CreditLimitHistoryItem[]> {
+  const search = new URLSearchParams({ partner_id: partnerId, as_of: asOf });
+  const res = await fetch(`${API_BASE}/finance/credit-limits?${search.toString()}`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(body?.detail ?? "여신한도 이력을 불러오지 못했습니다.");
+  }
+  return (await res.json()) as CreditLimitHistoryItem[];
+}
+async function financePost<T>(path: string, input: object, fallback: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail ?? fallback);
+  }
+  return (await res.json()) as T;
+}
+
+export function recordCollection(input: {
+  sim_run_id: string; financing_mode: string; collection_date: string; receivable_id: string;
+  collect_all: boolean; amount_krw?: string; source_ref: string; recorded_by: string; note?: string;
+}): Promise<{ receivable_id: string; received_delta_krw: Money; outstanding_amount_krw: Money; status: string }> {
+  return financePost("/finance/receivables/collections", input, "수금을 기록하지 못했습니다.");
+}
+
+export function recordCashAdjustment(input: {
+  sim_run_id: string; financing_mode: string; adjustment_date: string;
+  direction: "INFLOW" | "OUTFLOW"; category: "OWNER_INJECTION" | "OWNER_WITHDRAWAL" | "OTHER";
+  amount_krw: string; source_ref: string; recorded_by: string; note?: string;
+}): Promise<{ cash_adjustment_id: string; current_cash_krw: Money }> {
+  return financePost("/finance/cash-adjustments", input, "자금 조정을 기록하지 못했습니다.");
+}
+
+/**
+ * 일반 운영비 생명주기.
+ *
+ * 🔴 **화면이 상태를 정하지 않는다.** 아래 셋은 백엔드에 «이렇게 해 달라» 고 말할 뿐이고,
+ *    실제 전이 가능 여부와 현금 차감은 재무가 원장 잠금 안에서 판단한다. 버튼을 비활성으로
+ *    두는 것은 **안내**이지 검증이 아니다.
+ */
+
+export interface ExpenseSettleResult {
+  expense_id: string;
+  status: "PAID";
+  paid_date: string;
+  amount_krw: Money;
+  /** 지급 뒤 남은 현금. **재무가 센 값이다** — 화면이 빼지 않는다. */
+  current_cash_krw: Money;
+}
+
+export async function fetchExpenseCategories(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/finance/expense-categories`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error("비용 분류를 불러오지 못했습니다.");
+  return ((await res.json()) as { categories: string[] }).categories;
+}
+
+export function createExpense(input: {
+  sim_run_id: string; expense_date: string; due_date: string; expense_category: string;
+  amount_krw: string; evidence_id: string; related_delivery_id?: string; note?: string;
+}): Promise<{ expense_id: string; status: "ACCRUED" }> {
+  return financePost("/finance/expenses", input, "비용을 등록하지 못했습니다.");
+}
+
+export function settleExpense(
+  expenseId: string,
+  input: { sim_run_id: string; financing_mode: string; paid_date: string },
+): Promise<ExpenseSettleResult> {
+  return financePost(
+    `/finance/expenses/${encodeURIComponent(expenseId)}/settle`,
+    input,
+    "비용을 지급 처리하지 못했습니다.",
+  );
+}
+
+export function cancelExpense(
+  expenseId: string,
+  input: { sim_run_id: string },
+): Promise<{ expense_id: string; status: "CANCELLED" }> {
+  return financePost(
+    `/finance/expenses/${encodeURIComponent(expenseId)}/cancel`,
+    input,
+    "비용을 취소하지 못했습니다.",
+  );
 }

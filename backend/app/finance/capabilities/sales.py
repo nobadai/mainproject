@@ -699,6 +699,59 @@ def _summary_payload(summary: SalesFinancialSummary) -> dict[str, Any]:
     return dumped
 
 
+#: 여신 초과 사유. **재무 규칙이 쓰는 코드 그대로다** (`evaluate_receivable_capacity_rule`).
+CREDIT_LIMIT_EXCEEDED = "SALES_CREDIT_LIMIT_EXCEEDED"
+
+
+def build_sales_adjustments(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """판매 검증 결과에서 **결정론으로 계산되는 조정안만** 만든다.
+
+    ★ 지금 낼 수 있는 것은 하나다 — 여신 초과일 때의 **금액 상한**이다.
+
+    ```text
+    한도 - 현재 거래처 채권 = 가용 여신 = 이 거래처에 지금 더 팔 수 있는 최대 금액
+    ```
+
+    그 값은 `evaluate_receivable_capacity` 가 이미 세어 `max_finance_allowed_amount_krw`
+    로 실어 두었다. 여기서 다시 세지 않는다 — 다시 세면 같은 사실의 주인이 둘이 된다.
+
+    🔴 **없는 근거로 조정을 만들지 않는다.** 근거 ref 가 없으면 조정도 없다. 억지로
+      만들면 *"따라가면 아무 데도 닿지 않는 조정"* 이 되고, 마스터는 그것을 권위 있는
+      대안으로 읽어 되먹임을 돈다.
+
+    🔴 **상한이 제안 금액보다 크면 조정이 아니다.** 그때는 줄일 것이 없다.
+
+    ★ **모델이 만들 수 없는 값이다.** 재무 규칙과 실제 원장 두 값의 뺄셈이고, 이
+      경로에 LLM 이 끼어들 자리가 없다 (§15).
+    """
+    if CREDIT_LIMIT_EXCEEDED not in (payload.get("reason_codes") or ()):
+        return []
+    allowed = payload.get("max_finance_allowed_amount_krw")
+    if allowed is None or isinstance(allowed, bool):
+        return []
+    summary = payload.get("financial_summary") or {}
+    reported = (
+        summary.get("recalculated_sales_amount_krw") if isinstance(summary, Mapping) else None
+    )
+    if reported is not None and Decimal(str(allowed)) >= Decimal(str(reported)):
+        # 상한이 제안을 이미 덮는다 — 줄일 것이 없으면 대안도 없다.
+        return []
+    refs = [ref for ref in (payload.get("evidence_refs") or ()) if isinstance(ref, str)]
+    if not refs:
+        # 근거 없는 조정은 내지 않는다.
+        return []
+    scenario_id = payload.get("scenario_id")
+    return [
+        {
+            "target_value": float(allowed),
+            "unit": "KRW",
+            "reason": CREDIT_LIMIT_EXCEEDED,
+            "ref_ids": refs,
+            "scenario_labels": [scenario_id] if isinstance(scenario_id, str) else [],
+        }
+    ]
+
+
 def build_sales_validation_payload(result: SalesValidationResult) -> dict[str, Any]:
     """Refeed 를 견디는 자기 완결적 Finance payload 를 만든다.
 

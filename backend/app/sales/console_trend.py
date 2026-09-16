@@ -43,13 +43,17 @@ class SalesTrendResponse(BaseModel):
 
 
 def get_console_sales_trend(
-    *, sim_run_id: str, as_of: date, days: int = MAX_TREND_DAYS
+    *,
+    sim_run_id: str,
+    as_of: date,
+    days: int = MAX_TREND_DAYS,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> SalesTrendResponse:
-    """이 실행의 날짜별 판매. **기준일까지만** 본다.
-
-    ⚠️ 최근 `days` 일을 자를 때 **뒤에서 자르고 다시 오름차순으로 세운다.** 앞에서
-      자르면 실행 초기만 나오고 화면은 «최근» 이라고 적는다.
-    """
+    """이 실행의 날짜별 판매를 요청한 기간 안에서 읽는다."""
+    if from_date is not None and to_date is not None and from_date > to_date:
+        raise ValueError("from_date must not be after to_date")
+    upper = as_of if to_date is None else min(to_date, as_of)
     schema = get_db_schema()
     query = sql.SQL(
         """
@@ -64,6 +68,8 @@ def get_console_sales_trend(
             FROM {}.sales AS s
             WHERE s.sim_run_id = %s
               AND s.sale_date <= %s
+              AND (%s::date IS NULL OR s.sale_date >= %s)
+              AND s.sale_date <= %s
             GROUP BY s.sale_date
             ORDER BY s.sale_date DESC
             LIMIT %s
@@ -71,7 +77,10 @@ def get_console_sales_trend(
         ORDER BY sale_date ASC
         """
     ).format(sql.Identifier(schema))
-    rows = fetch_all(query, [sim_run_id, as_of, min(days, MAX_TREND_DAYS)])
+    rows = fetch_all(
+        query,
+        [sim_run_id, upper, from_date, from_date, upper, min(days, MAX_TREND_DAYS)],
+    )
     return SalesTrendResponse(
         sim_run_id=sim_run_id,
         as_of=as_of,

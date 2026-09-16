@@ -73,6 +73,8 @@ def load_cashflow_summary(*, sim_run_id: str, as_of: date) -> dict[str, object] 
             COALESCE(SUM(logistics_cash_out_krw), 0) AS logistics_cash_out_krw,
             COALESCE(SUM(payroll_interest_cash_out_krw), 0)
                 AS payroll_interest_cash_out_krw,
+            COALESCE(SUM(operating_expense_cash_out_krw), 0)
+                AS operating_expense_cash_out_krw,
             COALESCE(SUM(sales_recognized_krw), 0) AS sales_recognized_krw,
             COALESCE(SUM(collection_cash_in_krw), 0) AS collection_cash_in_krw,
             COALESCE(SUM(base_net_cash_krw), 0) AS base_net_cash_krw,
@@ -293,6 +295,7 @@ def _cashflow_summary(row: dict[str, object] | None) -> FinanceCashflowSummary:
         purchase_cash_out_krw=_decimal(row.get("purchase_cash_out_krw")),
         logistics_cash_out_krw=_decimal(row.get("logistics_cash_out_krw")),
         payroll_interest_cash_out_krw=_decimal(row.get("payroll_interest_cash_out_krw")),
+        operating_expense_cash_out_krw=_decimal(row.get("operating_expense_cash_out_krw")),
         sales_recognized_krw=_decimal(row.get("sales_recognized_krw")),
         collection_cash_in_krw=_decimal(row.get("collection_cash_in_krw")),
         base_net_cash_krw=_decimal(row.get("base_net_cash_krw")),
@@ -353,6 +356,7 @@ def _closing_payload(row: dict[str, object]) -> dict[str, object]:
             "purchase_cash_out_krw",
             "logistics_cash_out_krw",
             "payroll_interest_cash_out_krw",
+            "operating_expense_cash_out_krw",
             "sales_recognized_krw",
             "collection_cash_in_krw",
             "base_net_cash_krw",

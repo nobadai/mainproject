@@ -40,15 +40,17 @@ revalidation.py — **최종 승인 시점 재검증** (설계 2026-09-07 · M-4
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 from app.master import wiring
+from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted, CallBudget
 from app.master.day_gate import check_day_gate
-from app.master.decision import RevalidationOutcome
+from app.master.decision import PROCUREMENT_CYCLE, SALES_CYCLE, RevalidationOutcome
 from app.master.envelope import (
     PASSING_VERDICTS,
     AgentName,
@@ -60,6 +62,7 @@ from app.master.envelope import (
     wire_adjustment,
     wire_payload,
 )
+from app.master.flow import ADVISORS
 from app.master.persistence import record_revalidation
 from app.master.ports import AgentNotRegistered
 from app.master.runner import MasterRunner
@@ -72,6 +75,8 @@ __all__ = [
     "conditions_of_original",
     "find_scenario",
     "make_revalidation_request_id",
+    "procurement_validation_payload",
+    "revalidate_procurement_scenario",
     "revalidate_scenario",
 ]
 
@@ -192,6 +197,42 @@ class Revalidation:
     #: 사람이 읽는 한 줄. 부서가 쓴 문장을 옮기거나 못 돈 이유를 적는다.
     reason: str = ""
 
+    #: 🔴 **원 실행에 없던 조건의 표지 원문** (`conditions_of` 가 만든 그대로).
+    #:
+    #: ★ **`reason` 과 다투는 칸이 아니다.** 둘은 묻는 사람이 다르다.
+    #:
+    #:   ```text
+    #:   reason      사람이 읽는다     「물류: 수량을 7,470kg 로 조정 제안」
+    #:   conditions  기계가 되만든다   adjust:{dept·axis·target_value·unit·…}
+    #:   ```
+    #:
+    #: 🔴 **이 칸이 없으면 표지 원문이 영영 사라진다** (2026-09-16). 전에는 표지를
+    #:   `reason` 문장에 이어 붙여 **그 문자열이 유일한 사본**이었는데, 그 문장을
+    #:   사람 말로 고치는 순간 원문이 어디에도 안 남는다:
+    #:
+    #:   ```text
+    #:   validations[cap]   `_verdict_of` 가 담는 칸에 suggested_adjustments 가 없다
+    #:                      (봉투에서 payload 의 **형제**라 payload 에도 안 들어온다)
+    #:   plan(ExecutionStep) 조정 제안 칸 자체가 없다
+    #:   master_decisions   revalidation_request_id · revalidation_outcome 뿐이다
+    #:   로그                이 모듈에도 `runner` 에도 로거가 없다
+    #:   ```
+    #:
+    #: 🔴 **발표 뒤 개발이 없다. 지금 안 남기면 영영 못 되만든다.**
+    #:
+    #: 🔴 **빈 자리가 아니다** — 30회 실행에 조정 45건이 실측됐다 (충환님 2026-09-16).
+    #:   살아 있는 데이터를 사람 말로 덮는 것이라 잃으면 티가 난다.
+    #:
+    #: ★ **`verdict:` 표지도 같이 싣는다.** `validations[cap].business_status` 로
+    #:   되만들 수는 있지만 **되만들 수 있다는 것과 남아 있다는 것은 다르다** —
+    #:   되만드는 규칙(`conditions_of`)이 바뀌는 날 두 값이 갈린다.
+    #:
+    #: ★ **오늘 세 파트가 각자 세운 같은 선이다.** 매입은 「확정 입고 예정」을 `0` 이
+    #:   아니라 `—` + `raw=None` 으로 냈고(`#740`), 재무는 운영비 축을 `None` =
+    #:   「기록 없음」으로 두었다. **사람 말과 정본을 나란히 둔다** — 사람 말이
+    #:   정본을 덮지 않는다.
+    conditions: tuple[str, ...] = ()
+
     #: capability → 이번 호출의 판정. **원 실행 회신이 아니다** (S-1 금지).
     validations: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
@@ -223,6 +264,10 @@ def revalidate_scenario(
     ④ 매핑           PASSED · CONDITIONAL · FAILED
     ⑤ 이력 적재       master_agent_runs (cycle=SALES)
     ```
+
+    🔴 **판매 안 전용이다** (2026-09-16). 매입 안은 `revalidate_procurement_scenario` 로
+      간다. 매입 안을 여기 넣으면 재무 `SALES_VALIDATION` 이 판매 사실을 못 찾아
+      `INPUT_INCOMPLETE`(READY/skipped) 로 답하고, 그 skipped 가 늘 `FAILED` 로 접힌다.
 
     🔴 **전체 후보를 다시 돌리지 않는다.** 사용자는 하나를 골랐고, 나머지는 이미 그
       시점의 판단으로 화면에 나갔다 (설계 §1).
@@ -345,6 +390,7 @@ def revalidate_scenario(
             ),
             runner=runner,
             item=item,
+            cycle=SALES_CYCLE,
         )
     except AgentNotRegistered as exc:
         # ★ ②에서 필수는 걸렀지만 **조건부 대상이 빠질 수 있다.** 그때도 못 돈 것이다.
@@ -359,20 +405,150 @@ def revalidate_scenario(
             ),
             runner=runner,
             item=item,
+            cycle=SALES_CYCLE,
         )
 
-    outcome, reason = _verdict(validations, tuple(unroutable), adjustments, original_conditions)
+    outcome, reason, conditions = _verdict(
+        validations, tuple(unroutable), adjustments, original_conditions
+    )
     return _recorded(
         context,
         Revalidation(
             outcome=outcome,
             request_id=request_id,
             reason=reason,
+            conditions=conditions,
             validations=validations,
             unroutable=tuple(unroutable),
         ),
         runner=runner,
         item=item,
+        cycle=SALES_CYCLE,
+    )
+
+
+PROCUREMENT_REVALIDATION_MODE: Mode = "SCENARIO_VALIDATION"
+"""매입 안 재검증이 조언자에게 묻는 mode. **매입 Flow ④ 와 같은 물음이다** (`flow._validate`)."""
+
+
+def procurement_validation_payload(
+    proposal: Mapping[str, Any], scenario: Mapping[str, Any]
+) -> dict[str, Any]:
+    """조언자에게 보내는 **매입 제안 한 벌.** 제안 최상위 + 고른 안 하나다.
+
+    ★ **두 부서가 이것을 `PurchaseProposal` 로 되살린다** (`finance/adapter._purchase_proposal`
+      · `logistics/adapter._as_proposal`). 그래서 `meta` · `situation` · `confidence`
+      같은 최상위 칸이 빠지면 판정 대신 입력 오류가 온다.
+
+    🔴 **이름이 붙은 이유는 검사다** (2026-09-16). 실매입 기록값 사본이 이 모양으로
+      안 갈 때 두 부서가 동시에 떨어졌는데, 검사가 이 조립을 손으로 다시 적으면
+      **검사와 운영이 다른 모양을 볼 수 있다.** 주인을 하나 둔다.
+    """
+    return {**proposal, "scenarios": [dict(scenario)]}
+
+
+def revalidate_procurement_scenario(
+    *,
+    scenario: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+    original_conditions: frozenset[str],
+    decision_seq: int,
+    policy_version: str,
+    as_of: date,
+    sim_run_id: str,
+    item: str | None = None,
+) -> Revalidation:
+    """매입 안 **1안만** 그 실행의 날로 다시 검증한다 (매입 승인 · 실매입 기록 공용).
+
+    ```text
+    ① 개장 Gate      안 열렸으면 못 돈다                  → ERROR
+    ② 조언자 점검     재무 · 물류 중 등록 안 된 쪽이 있다    → ERROR
+    ③ 호출           조언자마다 SCENARIO_VALIDATION 한 번
+    ④ 매핑           PASSED · CONDITIONAL · FAILED (`_verdict` 공용)
+    ⑤ 이력 적재       master_agent_runs (cycle=PROCUREMENT)
+    ```
+
+    🔴 **판매 capability 로 묻지 않는다** (2026-09-16 실측).
+      전에는 매입 승인도 `revalidate_scenario` 를 탔다. 거기서 `FINANCIAL_VALIDATION` 은
+      재무 `SALES_VALIDATION` 으로 가는데, 매입 안에는 판매 사실이 없어 재무가
+      `INPUT_INCOMPLETE` → `READY/skipped` 로 답했다. 그 skipped 가 허용목록 밖이라
+      **매입 재검증은 늘 `FAILED`** 였고 이력 행은 `cycle=SALES` 로 남았다.
+
+    ★ **묻는 모양은 매입 Flow 가 정한 그대로다** (`flow._validate`). 제안 최상위
+      (응답 `judgment` · `meta.as_of` · `meta.item` 이 여기 있다)에 `scenarios` 를
+      고른 안 하나로 얹는다. 🔴 **안을 골라 담지 않는다** — 매입이 칸을 늘린 날
+      조용히 빠진다.
+
+    ★ **부를 조언자의 주인은 `flow.ADVISORS` 다.** 여기서 이름을 다시 적지 않는다.
+
+    ★ **skipped 는 통과가 아니다** (`_verdict`). 규칙 판정은 LLM 이 꺼져도 돈다 —
+      원 실행이 `E1_APPROVED` 로 올라온 것 자체가 두 조언자가 LLM 없이 판정을 냈다는
+      뜻이다. 그러니 재검증에서 skipped 가 오면 *"못 봤다"* 이지 *"원래 그렇다"* 가 아니다.
+
+    :param proposal: 원 실행 응답의 `judgment` (매입 제안에서 `scenarios` 를 뺀 최상위).
+    """
+    request_id = make_revalidation_request_id(sim_run_id, as_of, decision_seq)
+    context = ExecutionContext(
+        request_id=request_id,
+        as_of=as_of,
+        trigger="USER_REQUEST",
+        policy_version=policy_version,
+        sim_run_id=sim_run_id,
+    )
+
+    day_gate = check_day_gate(as_of, sim_run_id=sim_run_id)
+    if day_gate.gate == "BLOCKED":
+        return Revalidation(
+            outcome="ERROR",
+            reason=f"재검증할 날({as_of.isoformat()})이 안 열려 재검증을 못 돌렸다: "
+            f"{day_gate.reason or day_gate.result}",
+        )
+
+    missing = wiring.missing(ADVISORS)
+    if missing:
+        return Revalidation(
+            outcome="ERROR",
+            reason=f"매입 안을 검증할 조언자가 등록되지 않아 재검증을 못 돌렸다: "
+            f"{', '.join(missing)}",
+        )
+
+    runner = MasterRunner(context, wiring.registry(), CallBudget(limit=REVALIDATION_BUDGET))
+    payload = procurement_validation_payload(proposal, scenario)
+    validations: dict[str, Mapping[str, Any]] = {}
+    adjustments: list[Mapping[str, Any]] = []
+
+    try:
+        for agent in ADVISORS:
+            reply = runner.call(agent, PROCUREMENT_REVALIDATION_MODE, payload)
+            validations[agent] = _verdict_of(reply)
+            adjustments.extend(wire_adjustment(a) for a in reply.suggested_adjustments)
+    except (BudgetExhausted, AgentNotRegistered) as exc:
+        return _recorded(
+            context,
+            Revalidation(
+                outcome="ERROR",
+                request_id=request_id,
+                reason=f"매입 안 재검증이 끝나지 않았다: {exc}",
+                validations=validations,
+            ),
+            runner=runner,
+            item=item,
+            cycle=PROCUREMENT_CYCLE,
+        )
+
+    outcome, reason, conditions = _verdict(validations, (), adjustments, original_conditions)
+    return _recorded(
+        context,
+        Revalidation(
+            outcome=outcome,
+            request_id=request_id,
+            reason=reason,
+            conditions=conditions,
+            validations=validations,
+        ),
+        runner=runner,
+        item=item,
+        cycle=PROCUREMENT_CYCLE,
     )
 
 
@@ -382,6 +558,7 @@ def _recorded(
     *,
     runner: MasterRunner,
     item: str | None,
+    cycle: str,
 ) -> Revalidation:
     """재검증 실행 1건을 이력에 남긴다 (설계 §4).
 
@@ -391,8 +568,13 @@ def _recorded(
     """
     record_revalidation(
         context,
+        cycle=cycle,
         outcome=result.outcome,
         reason=result.reason,
+        # 🔴 **사람 말(`reason`)과 표지 원문(`conditions`)을 같은 행에 나란히 남긴다.**
+        #   `reason` 만 남기면 조정 표지가 이 표에서 사라진다 — 근거는
+        #   `Revalidation.conditions` 에 적어 두었다.
+        conditions=result.conditions,
         validations=result.validations,
         unroutable=result.unroutable,
         plan=runner.plan,
@@ -565,7 +747,8 @@ def conditions_of_original(
     """원 실행에서 **그 후보에 붙어 있던** 조건 표지 집합.
 
     ```text
-    판정   candidates[].validations   판매 응답에만 있다 (매입 응답에는 없다)
+    판정   candidates[].validations   판매 응답
+           verdicts                   매입 응답 (후보가 없을 때만 본다)
     조건   adjustments[]              🔴 그 안의 라벨을 밝힌 것만 센다
     ```
 
@@ -582,14 +765,38 @@ def conditions_of_original(
       돌리므로 나온 조정이 전부 그 안의 것이다. 이 비대칭도 보수적인 방향이다 — 재검증
       집합이 더 크게 잡히므로 `PASSED` 로 접히기 어렵다.
 
-    ★ **못 읽으면 빈 집합이다.** 매입 응답처럼 후보 판정이 아예 없는 모양이면 원
-      조건을 0 으로 두고, 그러면 재검증에 조건이 하나라도 있는 순간 `CONDITIONAL` 이다.
+    ★ **못 읽으면 빈 집합이다.** 판정을 실은 칸이 아예 없는 모양이면 원 조건을 0 으로
+      두고, 그러면 재검증에 조건이 하나라도 있는 순간 `CONDITIONAL` 이다.
       *"모르면 통과"* 가 아니라 *"모르면 되돌린다"* 로 둔다.
+
+    🔴 **매입 응답의 판정은 최상위 `verdicts` 에 있다** (2026-09-16). 전에는 이 함수가
+      `candidates[].validations` **하나만** 읽어서, 매입에서는 원 조건 집합이 **항상 빈
+      집합**이었다. *"모르면 되돌린다"* 가 매입에서는 *"매번 되돌린다"* 가 된 것이다.
+
+      실측 (`dev@983c85b` · 실행 `SIM-CHECK-HOLIDAY-0916` · 2026-04-13 배추):
+
+      ```text
+      원 실행  verdicts.inventory.business_status = "conditional"   (ZONE_CAPACITY_UNRESOLVED)
+      재검증   validations.inventory.business_status = "conditional"  ← 원 실행과 똑같다
+      결과     added = {"verdict:inventory=conditional"} → CONDITIONAL
+      ```
+
+      **그 조건은 원 실행에도 똑같이 있었다.** 재고 판정은 구조적으로 매일
+      `conditional` 이라, `POST /master/runs/{id}/purchase-record` 가 기록값이 선정안과
+      하나라도 다르면 **항상 422** 로 막혔다 (`_revalidate_or_reject` 는 `PASSED` 만
+      받는다).
+
+    ⚠️ **매입의 `verdicts` 는 안 라벨로 거르지 않는다.** 그 칸은 안별로 갈라져 있지 않고
+      **그 실행 전체의 판정**이다. 사람이 승인할 때 화면에서 본 것이 바로 그 판정이라,
+      그대로 견주는 것이 맞다. 라벨로 거르면 셀 것이 하나도 안 남아 고치기 전과 같아진다.
     """
+    candidates = [
+        candidate
+        for candidate in response_payload.get("candidates") or ()
+        if isinstance(candidate, Mapping)
+    ]
     validations: Mapping[str, Mapping[str, Any]] = {}
-    for candidate in response_payload.get("candidates") or ():
-        if not isinstance(candidate, Mapping):
-            continue
+    for candidate in candidates:
         scenario = candidate.get("scenario")
         if not isinstance(scenario, Mapping) or not _labels_match(scenario, scenario_label):
             continue
@@ -597,6 +804,13 @@ def conditions_of_original(
         if isinstance(raw, Mapping):
             validations = {k: v for k, v in raw.items() if isinstance(v, Mapping)}
         break
+
+    if not candidates:
+        # 매입 응답. 후보가 있는 응답(판매)에서는 이 칸을 보지 않는다 — 판매의 판정은
+        # 후보마다 갈라져 있어, 최상위로 올라가면 다른 안의 조건까지 세게 된다.
+        raw = response_payload.get("verdicts")
+        if isinstance(raw, Mapping):
+            validations = {k: v for k, v in raw.items() if isinstance(v, Mapping)}
 
     adjustments = [
         adjustment
@@ -673,12 +887,174 @@ def _labels_match(scenario: Mapping[str, Any], scenario_label: str) -> bool:
     }
 
 
+# ---------------------------------------------------------------------------
+# 조건 표지를 사람 말로 — 🔴 **비교는 표지로, 문장은 사람 말로** (2026-09-16)
+# ---------------------------------------------------------------------------
+#
+# 🔴 **실측된 피해** (2026-09-16 · 실 서버 · `POST /master/runs/{id}/purchase-record`
+#   에 130kg → 50,000kg 를 넣음). 거부 사유가 이렇게 나갔다:
+#
+#   ```text
+#   기록값으로 다시 검증했더니 통과하지 못해 기록하지 않았습니다 (CONDITIONAL):
+#   통과했으나 원 실행에 없던 조건이 1건 붙었다:
+#   adjust:{"axis": "quantity", "dept": "inventory", "reason": "수량을 7470kg 로 조정 제안",
+#   "ref_ids": [...], "scenario_labels": ["기본"], "split_date": "2026-09-14",
+#   "target_value": 7470.0, "unit": "kg"}
+#   ```
+#
+#   **조정 제안 JSON 이 통째로 화면에 뜬다.** 그런데 그 JSON 안에 「수량을 7470kg 로
+#   조정 제안」이라는 **부서가 쓴 좋은 한국어**가 이미 있다 — 꺼내 쓰면 된다.
+#
+# 🔴 **`conditions_of` 는 한 줄도 안 바꿨다.** 표지 집합이 비교의 정본이고, 그것을
+#   건드리면 *"원래도 있던 조건"* 과 *"새로 붙은 조건"* 을 가르는 기준이 흔들린다.
+#   여기서 바뀌는 것은 `_verdict` 가 만드는 **문장뿐**이고, 판정 값
+#   (`PASSED`·`CONDITIONAL`·`FAILED`)과 `added` 집합은 그대로다.
+
+_VERDICT_PREFIX = "verdict:"
+_ADJUST_PREFIX = "adjust:"
+
+#: 판정 어휘 한국어. **닫힌 어휘 넷**(`Verdict`)이고 `skipped` 는 표에 없다 —
+#: `answer._VERDICT_LABEL` · `report._VERDICT_LABEL` 과 **같은 세 낱말**이다.
+#:
+#: ★ 두 곳 다 비공개라 임포트할 공개 주인이 없다. 어휘를 늘리지 않고 그 셋을 그대로
+#:   쓰고, 표 밖은 `report._verdict_line` 과 같은 말(「판정 없음」)로 떨어뜨린다.
+_VERDICT_LABEL: dict[str, str] = {"ok": "통과", "conditional": "조건부", "reject": "거절"}
+
+#: 조정 축 한국어. 어휘의 주인은 `contracts.core.AdjustAxis` 이고, 한국어는 화면
+#: `frontend/src/lib/vocab.ts` 의 `DEPT_AXIS_LABEL` 과 **같은 낱말**이다.
+_AXIS_LABEL: dict[str, str] = {
+    "quantity": "수량",
+    "timing": "시점",
+    "channel_mix": "채널 배분",
+    "amount": "금액",
+}
+
+
+def _spoken(marker: str) -> str:
+    """조건 표지 **하나**를 사람이 읽는 한 조각으로.
+
+    ```text
+    verdict:{capability}={business_status}   →  「재무 판정이 조건부」
+    adjust:{부서 표준형 JSON}                 →  「물류: 수량을 7,470kg 로 조정 제안」
+    ```
+
+    🔴 **모르는 표지는 그대로 흘린다.** 여기서 지어내면 *"무엇이 조건이었나"* 가
+      사라진다 — 지금 표지는 둘뿐이고, 셋째가 생기면 그 낱말이 그대로 화면에 뜬다.
+    """
+    if marker.startswith(_VERDICT_PREFIX):
+        return _spoken_verdict(marker[len(_VERDICT_PREFIX) :])
+    if marker.startswith(_ADJUST_PREFIX):
+        return _spoken_adjust(marker[len(_ADJUST_PREFIX) :])
+    return marker
+
+
+def _spoken_verdict(body: str) -> str:
+    """`{capability}={business_status}` 를 「{부서} 판정이 {상태}」로.
+
+    ★ **capability 이름을 화면에 안 쓴다.** 재검증이 담는 키는 경로에 따라 두 어휘다 —
+      판매 안은 capability(`FINANCIAL_VALIDATION`), 매입 안은 조언자 이름(`finance`).
+      **둘 다 부서로 옮긴다**: capability 는 라우팅 표(`route_capability`)가 이미 부서를
+      알고, 조언자 이름은 그 자체가 부서다. 여기서 표를 새로 적지 않는다.
+    """
+    name, _, status = body.partition("=")
+    label = _VERDICT_LABEL.get(status)
+    dept = _dept_label(name)
+    # ⚠️ 여기 올 수 있는 상태는 사실상 `conditional` 하나다 — 그 밖은 위에서
+    #   `FAILED` 로 떨어진다 (`PASSING_VERDICTS`). 그래도 표 밖을 말로 받는다.
+    return f"{dept} 판정이 {label}" if label else f"{dept} 판정이 없다"
+
+
+def _dept_label(name: str) -> str:
+    """capability 든 조언자 이름이든 **부서 한국어**로. 모르면 받은 이름 그대로."""
+    route = route_capability(name)
+    return agent_label(route[0] if route is not None else name)
+
+
+def _spoken_adjust(body: str) -> str:
+    """부서 표준형 JSON 을 「{부서}: {무엇}」으로. **`dept` 와 `reason` 만 쓴다.**
+
+    🔴 **`reason` 이 비면 지어내지 않는다.** `axis` · `target_value` · `unit` 로 짓고,
+      셋 다 없으면 「부서가 대안을 냈다」까지만 말한다. 조정의 나머지 칸(`ref_ids` ·
+      `split_date` · `scenario_labels`)은 **비교에는 쓰이지만 문장에는 안 나간다** —
+      사람이 읽을 것이 아니다.
+
+    ⚠️ **표지는 언제나 `json.dumps` 가 만든 것이다** (`conditions_of`). 그래도 못 읽는
+      경우를 값으로 받는다 — 여기서 터지면 거부 사유 대신 스택이 화면에 뜬다.
+    """
+    try:
+        raw = json.loads(body)
+    except ValueError:
+        raw = None
+    adjustment: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+
+    dept = agent_label(str(adjustment.get("dept") or "")) or "부서"
+    reason = str(adjustment.get("reason") or "").strip()
+    무엇 = _grouped(reason, adjustment) if reason else _what_from_fields(adjustment)
+    if not 무엇:
+        return f"{dept}{_particle(dept, '이', '가')} 대안을 냈다"
+    return f"{dept}: {무엇}"
+
+
+def _what_from_fields(adjustment: Mapping[str, Any]) -> str:
+    """`reason` 이 빈 조정을 **칸으로만** 편다. 🔴 없는 값을 지어내지 않는다."""
+    axis = _AXIS_LABEL.get(str(adjustment.get("axis") or ""), "")
+    값 = _grouped_amount(adjustment.get("target_value"), str(adjustment.get("unit") or ""))
+    if axis and 값:
+        return f"{axis}{_particle(axis, '을', '를')} {값} 로 조정 제안"
+    if axis:
+        return f"{axis} 조정 제안"
+    if 값:
+        return f"{값} 로 조정 제안"
+    return ""
+
+
+def _grouped_amount(value: Any, unit: str) -> str:
+    """수량·금액을 **자리를 끊어** 찍는다 (`report._kg` · `report._won` 과 같은 방식)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return ""
+    return f"{round(value):,}{unit}"
+
+
+def _grouped(reason: str, adjustment: Mapping[str, Any]) -> str:
+    """부서 문장 안 **그 숫자 하나만** 자리를 끊어 찍는다 (`7470kg` → `7,470kg`).
+
+    🔴 **문장을 훑어 숫자를 고치지 않는다.** 훑으면 물류의 시점 조정 문장
+      「도착일을 2026-09-14 로 조정 제안」의 연도가 `2,026` 이 된다. 그래서 **칸이
+      말해 주는 값과 단위로 만든 토큰**(`{target_value:g}{unit}`)이 문장에 그대로
+      있을 때만 바꾼다 — 시점 조정은 단위가 `d`(D+N)라 그 토큰이 문장에 없고,
+      따라서 날짜는 손대지 않는다.
+
+    ★ **못 찾으면 부서 문장 그대로다.** 부서가 표기를 바꾸는 날 이 자리는 조용히
+      아무것도 안 한다 — 문장이 안 예뻐질 뿐 **틀린 숫자가 나가지 않는다.**
+    """
+    target = adjustment.get("target_value")
+    unit = str(adjustment.get("unit") or "")
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not unit:
+        return reason
+    토큰 = f"{float(target):g}{unit}"
+    끊은_것 = f"{round(target):,}{unit}"
+    if 토큰 == 끊은_것:
+        return reason
+    # 앞자리가 숫자면 다른 수의 꼬리를 자르는 것이라 안 바꾼다.
+    return re.sub(rf"(?<!\d){re.escape(토큰)}", 끊은_것, reason)
+
+
+def _particle(word: str, 받침: str, 모음: str) -> str:
+    """받침 유무로 조사를 고른다 (`report._object_particle` 과 같은 규칙)."""
+    if not word:
+        return 받침
+    code = ord(word[-1]) - 0xAC00
+    if code < 0 or code > 11171:
+        return 받침
+    return 모음 if code % 28 == 0 else 받침
+
+
 def _verdict(
     validations: Mapping[str, Mapping[str, Any]],
     unroutable: tuple[str, ...],
     adjustments: Sequence[Mapping[str, Any]],
     original_conditions: frozenset[str],
-) -> tuple[RevalidationOutcome, str]:
+) -> tuple[RevalidationOutcome, str, tuple[str, ...]]:
     """네 값 중 무엇인가 (설계 §3).
 
     ```text
@@ -686,6 +1062,11 @@ def _verdict(
     CONDITIONAL  통과했으나 조건이 원 실행보다 늘었다
     PASSED       통과했고 조건이 같거나 줄었다
     ```
+
+    🔴 **셋째 칸이 표지 원문이다** (2026-09-16 · `Revalidation.conditions`).
+      **`reason` 문장이 접은 바로 그 표지**를 정렬 그대로 돌려준다 — 문장과 원문이
+      같은 것을 가리켜야 한 행 안에서 서로를 풀 수 있다. 여기서 한 번 만든 것을
+      두 곳이 나눠 쓰는 것이라, 부르는 쪽이 `conditions_of` 를 다시 돌리지 않는다.
 
     ★ **통과 판정은 허용목록으로 한다** (`PASSING_VERDICTS`). *"reject 가 아니면
       통과"* 로 정하면 봉투 어휘가 늘 때마다 새 값이 통과 쪽으로 샌다 (#173).
@@ -702,14 +1083,23 @@ def _verdict(
         if str(verdict.get("business_status") or "") not in PASSING_VERDICTS
     ]
     if blocked:
-        return "FAILED", f"재검증에서 막혔다: {', '.join(blocked)}"
+        # ★ **여기는 조건을 비교하지도 않았다** — 표지가 없는 것이 사실 그대로다.
+        return "FAILED", f"재검증에서 막혔다: {', '.join(blocked)}", ()
 
     now = conditions_of(validations, adjustments)
     added = sorted(now - original_conditions)
     if added:
-        return "CONDITIONAL", (
-            f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: {'; '.join(added)}"
+        # 🔴 **비교는 표지로, 문장은 사람 말로** (2026-09-16). `added` 는 그대로 표지
+        #   집합이고 세는 방식도 그대로다 — 펴는 것은 이 한 줄뿐이고, **편 것과 원문을
+        #   나란히 돌려준다** (`Revalidation.conditions`).
+        return (
+            "CONDITIONAL",
+            (
+                f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: "
+                f"{'; '.join(_spoken(표지) for 표지 in added)}"
+            ),
+            tuple(added),
         )
 
     꼬리 = f" (못 물어본 요구: {', '.join(unroutable)})" if unroutable else ""
-    return "PASSED", f"재검증 통과 — 조건이 원 실행보다 나빠지지 않았다{꼬리}"
+    return "PASSED", f"재검증 통과 — 조건이 원 실행보다 나빠지지 않았다{꼬리}", ()

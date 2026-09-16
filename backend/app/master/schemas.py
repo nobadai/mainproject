@@ -734,6 +734,13 @@ class SalesRunRequest(BaseModel):
         ),
     )
 
+    allow_additional_sourcing: bool = Field(
+        default=False,
+        description=(
+            "재고 부족 시 추가매입 가능량 검토에 대한 사용자 동의. 기본은 false이며 "
+            "실제 매입 확정 권한은 아니다."
+        ),
+    )
     #: 🔴 **매입과 같은 칸이다** (`ProcurementRunRequest.sim_run_id` · `#531` 후속).
     #:
     #:   판매도 `ExecutionContext` 에 축을 실어야 한다 — `_procurement_boundary` 가

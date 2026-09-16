@@ -5,21 +5,27 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
 import { ProcurementResult } from "@/components/ProcurementResult";
-import { ReportDownload } from "@/components/ReportDownload";
+import { DomainReportPreview, ReportDownload } from "@/components/ReportDownload";
 import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
+import { PurchaseRecordCard } from "@/components/PurchaseRecordCard";
 import { LlmTrace } from "@/components/LlmTrace";
+import { DomainReadResult } from "@/components/console/DomainReadResult";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
+//  🔴 말로 한 승인이 **그날 서 있는 안**을 짚을 때 읽는다. 매입 화면과 **같은 조회**라
+//     콘솔이 보는 안과 매입 탭이 보이는 안이 갈리지 않는다.
+import { purchase } from "@/lib/screen";
 import { CAN, type Session } from "@/lib/session";
 import {
   isProcurement,
   type AskResponse,
   type DecisionOut,
+  type DomainActionAnswer,
   type Intent,
   type ProcurementRunResponse,
   type Scenario,
@@ -79,7 +85,13 @@ type Turn =
     }
   //   승인 직후 "무엇을 하기로 한 것인가". **"오늘 산 것" 이 아니다** — 승인은
   //   기록이고 발주는 이 시스템 밖이다 (`ApprovedPlan` 이 그 사실을 적는다).
-  | { kind: "approved"; scenario: Scenario; decision: DecisionOut }
+  //
+  // 🔴 `scenario` 는 **있을 때만 온다.** 모달로 누른 승인은 안 전체를 들고 있지만,
+  //    말로 한 승인은 라벨만 안다 — 그때 빈 안을 지어내 넘기면 화면이 0 과 빈 칸을
+  //    «사실» 로 그린다. 없으면 `ApprovedPlan` 을 안 그리고 한 줄만 적는다.
+  //    `item` 은 그 한 줄에 쓸 품목이다 (그날 서 있던 안의 품목 또는 분류가 읽은 품목).
+  | { kind: "approved"; scenario?: Scenario; decision: DecisionOut; item?: string }
+  | { kind: "domain"; result: DomainActionAnswer; trace?: LlmTraceData; note?: string | null }
   | { kind: "error"; text: string };
 
 /**
@@ -113,6 +125,47 @@ function mlParts(intent: Intent | undefined, answer: AskResponse["answer"] | und
   return { markdown, hideText: Boolean(markdown) && agents.every((a) => a === "ml") };
 }
 
+/**
+ * **분류가 못 돌았는가.** 「못 알아들었다」와 갈라야 하는 것이 이것이다.
+ *
+ * 🔴 두 상태가 지금까지 한 화면이었다 (2026-09-16 실측 — 공용 키가 분당 한도에 걸려
+ *    5개 중 4개가 막혔다). 분류기가 못 돈 것인데 화면은 되묻는 문장만 보여 줘서,
+ *    사람이 **자기 말이 이상한 줄 알고 말을 바꿨다.** 말은 멀쩡했다.
+ *
+ *    llm_status="SUCCESS" + action="UNKNOWN"   진짜 못 알아들었다 → 말을 바꾸면 된다
+ *    llm_status="FALLBACK"                     분류기가 못 돌았다 → 말을 바꿔도 소용없다
+ *
+ * ⚠️ `DISABLED`(일부러 끈 것)는 여기 안 걸린다 — 서버가 그때 `fallback=False` 로 낸다
+ *    (`app/master/llm/runtime.py`). 끈 배포의 되묻기는 지금 동작이 맞다.
+ */
+function classifyFailed(res: Pick<AskResponse, "llm_status" | "llm_fallback_used">): boolean {
+  return res.llm_status === "FALLBACK" || res.llm_fallback_used === true;
+}
+
+/**
+ * 분류가 못 돌았을 때 화면에 내는 문장. **마지막 줄이 요점이다** — 사람이 말을
+ * 바꾸지 않게 해야 한다.
+ */
+const CLASSIFY_FAILED_TEXT =
+  "말을 알아듣는 기능이 잠시 멈췄습니다. 몇 초 뒤 다시 눌러 주세요.\n" +
+  "— 입력하신 말은 문제가 없습니다.";
+
+/**
+ * 되묻는 자리에 실제로 적을 문장. **`clarification` 을 그대로 쓰던 자리는 전부 여기를 지난다.**
+ *
+ * ★ 문구를 두 곳에 적지 않는다 — 이 함수 하나가 주인이고 부르는 쪽은 그대로 쓴다.
+ */
+function clarificationText(
+  res: Pick<AskResponse, "llm_status" | "llm_fallback_used" | "clarification">,
+  fallback: string,
+): string {
+  if (classifyFailed(res)) return CLASSIFY_FAILED_TEXT;
+  return res.clarification ?? fallback;
+}
+
+/** 분류가 못 돈 뒤 보내기를 더 잠가 두는 시간(초). **자동 재시도는 없다 — 사람이 누른다.** */
+const FALLBACK_COOLDOWN_SEC = 5;
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -122,6 +175,26 @@ function traceOf(res: AskResponse): LlmTraceData {
     llm_attempts: res.llm_attempts,
     llm_fallback_used: res.llm_fallback_used,
   };
+}
+
+/**
+ * 매입안 이름을 가른 자리. 매입 API 가 `key = "{품목} · {안 이름}"` 으로 짓는다
+ * (`app/api/purchase/query._plan` — 이 탭에 품목 축이 없어 이름 앞에 넣는다).
+ *
+ * 🔴 **맨 앞 하나만 가른다.** 안 이름에 같은 구분자가 들어와도 품목은 앞 한 칸이다.
+ * ⚠️ 이 규칙이 바뀌면 여기가 조용히 빗나간다. 매입 스키마에 품목 칸이 서는 날
+ *   이 둘을 그 칸 읽기로 바꾼다 — 서버 쪽 `app/api/plan_state.py` 가 같은 대기 중이다.
+ */
+const PLAN_KEY_SEP = " · ";
+
+function planItem(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? "" : key.slice(0, at);
+}
+
+function planLabel(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? key : key.slice(at + PLAN_KEY_SEP.length);
 }
 
 const SHORTCUT: Record<string, string> = {
@@ -142,6 +215,10 @@ export function MasterConsole({ session }: { session: Session }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  // 🔴 분류가 못 돈 뒤 남은 잠금 시간(초). **연타가 한도를 더 깎는다** — 실측에서
+  //    5개를 연달아 쏘니 4개가 막혔고, 8초씩 띄우니 4개 다 됐다 (2026-09-16).
+  //    **자동으로 다시 쏘지 않는다.** 기다렸다 사람이 누른다.
+  const [cooldown, setCooldown] = useState(0);
 
   // 승인 모달 — 어느 실행의 어느 안인지 함께 들고 있어야 한다
   const [picked, setPicked] = useState<{
@@ -177,19 +254,44 @@ export function MasterConsole({ session }: { session: Session }) {
     tail.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns]);
 
+  //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setTimeout(() => setCooldown((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+
+  //  보내기가 막혀 있나. 요청이 도는 동안과 분류 실패 뒤 몇 초. **Enter 도 이것을 본다.**
+  const locked = busy || cooldown > 0;
+
   const can = CAN[session.role];
 
   function push(...items: Turn[]) {
     setTurns((prev) => [...prev, ...items]);
   }
 
+  /**
+   * 실패를 화면에 적는다. **서버가 준 사유를 삼키지 않는다.**
+   *
+   * 🔴 사람 말로 된 사유는 **그대로 보인다** (`userErrorText` 가 가른다) —
+   *    「'초공격' 은 이 실행이 내놓은 안이 아니다. 제시된 안: 보수, 기본, 공격」 처럼
+   *    **무엇을 고쳐야 하는지 알려주는 문장**이 사라지면 사람이 손 쓸 데가 없다.
+   *
+   * ★ 코드가 섞인 사유는 그대로 올리지 않는다 (「사람 말만」). 다만 그때도
+   *   **「잠시 뒤 다시 시도해 주세요」 로 덮지 않는다** — 요청 자체가 틀린 것이라
+   *   기다렸다 다시 눌러도 같다. 그 문구는 **연결이 끊겼거나 서버가 탈 났을 때**의 말이다.
+   */
   function fail(error: unknown) {
+    const status = error instanceof ApiError ? error.status : null;
+    const wrongRequest = status !== null && status >= 400 && status < 500;
     push({
       kind: "error",
       text: userErrorText(
-        error instanceof ApiError ? error.status : null,
+        status,
         error instanceof Error ? error.message : "",
-        "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        wrongRequest
+          ? "요청을 처리하지 못했습니다 — 다시 눌러도 같습니다. 화면에서 직접 해 주세요."
+          : "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
       ),
     });
   }
@@ -197,21 +299,25 @@ export function MasterConsole({ session }: { session: Session }) {
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
   async function send(text: string) {
     const utterance = text.trim();
-    if (!utterance || busy) return;
+    if (!utterance || locked) return;
     setDraft("");
     push({ kind: "me", text: utterance });
     setBusy(true);
     try {
       const res: AskResponse = await ask(utterance);
+      //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
+      if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
       if (res.confirm_required) {
         push({
           kind: "confirm",
-          text: res.clarification ?? "진행할까요?",
+          text: clarificationText(res, "진행할까요?"),
           intent: res.intent,
           requestId: res.request_id,
           trace: traceOf(res),
           utterance,
         });
+      } else if (res.domain_result) {
+        push({ kind: "domain", result: res.domain_result, trace: traceOf(res), note: res.note });
       } else if (res.answer && salesAnswered(res.intent, res.status)) {
         push({
           kind: "sales",
@@ -228,9 +334,11 @@ export function MasterConsole({ session }: { session: Session }) {
           ...mlParts(res.intent, res.answer),
         });
       } else {
+        //  🔴 여기가 분류 실패가 떨어지는 자리다 (`outcome="NEEDS_CLARIFICATION"`).
+        //     되묻는 문장만 적으면 사람이 자기 말을 고치러 간다 — `clarificationText` 가 가른다.
         push({
           kind: "bot",
-          text: res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+          text: clarificationText(res, res.note ?? "답을 받지 못했습니다."),
           trace: traceOf(res),
         });
       }
@@ -241,6 +349,62 @@ export function MasterConsole({ session }: { session: Session }) {
     }
   }
 
+  /**
+   * 그날 매입 화면에 **서 있는 안** 중 말한 라벨의 안을 찾는다.
+   *
+   * 🔴 **라벨은 문자열 그대로 견준다.** 부분 일치나 비슷한 말 맞히기를 넣으면
+   *    「보수」를 말했는데 「보수적」 안이 승인되는 날이 온다 — 승인은 되돌리기가
+   *    기록으로 남는 일이라, 못 찾는 쪽이 낫다.
+   *
+   * 🔴 **못 찾거나 여럿이면 `null` 이고, 부르는 쪽은 실행하지 않는다.** 하나로 좁혀지지
+   *    않은 채 보내면 서버가 고르게 되는데, 그건 사람이 확인한 것과 다를 수 있다.
+   *
+   * ★ 기준일은 화면 머리에 적힌 그 날이고(`asOf`), 실행 축은 `GET /api/purchase` 가
+   *   다른 네 탭과 같은 자리에서 정한다 (`app/api/shown_run.py`). **화면이 축을
+   *   새로 지어내지 않는다.**
+   */
+  async function standingRun(intent: Intent) {
+    const label = (intent.scenario_label ?? "").trim();
+    if (!label) {
+      push({
+        kind: "error",
+        text: "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+      });
+      return null;
+    }
+
+    const plans = (await purchase(asOf)).plans;
+    const hits = plans.filter(
+      (plan) =>
+        plan.request_id !== null &&
+        plan.state !== "반려" &&
+        //  `key` 는 `"배추 · 기본"` 이라 라벨과 다르다. 안 이름은 라벨로만 견준다.
+        planLabel(plan.key) === label &&
+        (!intent.item || planItem(plan.key) === intent.item),
+    );
+
+    if (hits.length === 0) {
+      push({
+        kind: "error",
+        text: `그날 매입안에서 '${label}' 을 찾지 못했습니다. 매입 화면에서 골라 주세요.`,
+      });
+      return null;
+    }
+    if (hits.length > 1) {
+      push({
+        kind: "error",
+        text: `'${label}' 안이 여럿입니다 — 어느 품목인지 말씀해 주세요.`,
+      });
+      return null;
+    }
+    return {
+      requestId: hits[0].request_id as string,
+      historyRunId: hits[0].history_run_id,
+      //   승인한 뒤 "무엇을 승인했나" 한 줄에 쓸 품목. 찾아 온 안의 이름에서 그대로 읽는다.
+      item: planItem(hits[0].key),
+    };
+  }
+
   /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
   async function confirm(
     turn: Extract<Turn, { kind: "confirm" }>,
@@ -248,36 +412,71 @@ export function MasterConsole({ session }: { session: Session }) {
   ) {
     if (busy || !session || turn.done) return;
     const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
+    //   말로 한 승인. **모달로 누른 승인(`approve`)과 같은 셋을 실어야 한다** —
+    //   빠뜨리면 서버가 422 로 거절하고, 눌러서 한 승인과 말로 한 승인이 갈린다.
+    const select = turn.intent.action === "SELECT_SCENARIO";
+    /**
+     * 🔴 **발화문에 없어 화면이 실어야 하는 둘** — 어느 실행의 안인가(`target_*`)와
+     *    누가 승인하는가(`decided_by`). `lib/api.ts` 의 「SELECT · RERUN 필수」가
+     *    그것이고, 서버(`ask_service._record_selection`)도 없으면 거절한다.
+     */
+    const needsTarget = rerun || select;
 
-    // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
-    if (rerun && !last) {
-      push({
-        kind: "error",
-        text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
-      });
-      return;
-    }
-
-    // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
-    setTurns((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
-    );
-    push({ kind: "me", text: "네" });
     setBusy(true);
     try {
+      //   이 대화에서 방금 만든 안이 있으면 **그것이 먼저다.**
+      let target = last;
+      //   승인 뒤 한 줄에 쓸 품목. 분류가 읽어 낸 것이 먼저 서고, 그날 서 있는 안을
+      //   찾아오면 그 안의 품목으로 바뀐다. **둘 다 없으면 빈 채로 둔다** — 지어내지 않는다.
+      let item = (turn.intent.item ?? "").trim();
+
+      // 🔴 없으면 **그날 매입 화면에 서 있는 안**에서 라벨로 찾는다 (2026-09-16).
+      //
+      //    9/11 시연이 이 모양이다 — 걷기가 그날 안을 세워 두고, 사람이 콘솔을 새로
+      //    열어 말로 고른다. 전에는 `last` 가 없어 여기서 멈췄다.
+      //
+      //    ★ 찾는 것은 **화면**이다. 서버(`/ask/execute`)는 대상이 없으면 422 를 내고
+      //      추측하지 않는다 — 그 규칙은 그대로 산다.
+      if (select && !target) {
+        const found = await standingRun(turn.intent);
+        //   못 찾았으면 위에서 사람 말로 적었다. **실행하지 않는다.**
+        if (!found) return;
+        target = { requestId: found.requestId, historyRunId: found.historyRunId };
+        if (found.item) item = found.item;
+      }
+
+      // 🔴 그래도 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 다.
+      if (needsTarget && !target) {
+        push({
+          kind: "error",
+          text: rerun
+            ? "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다."
+            : "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+        });
+        return;
+      }
+
+      // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
+      setTurns((prev) =>
+        prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
+      );
+      push({ kind: "me", text: "네" });
       const res = await execute({
         intent: turn.intent,
         requestId: turn.requestId,
-        // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
-        targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
-        targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
-        decidedBy: rerun ? session.name : undefined,
+        // 재요청·안 선택에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
+        targetRequestId: needsTarget ? (target?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: needsTarget ? (target?.historyRunId ?? undefined) : undefined,
+        decidedBy: needsTarget ? session.name : undefined,
+        actor: session.name,
         utterance: turn.utterance,
       });
 
       if (isProcurement(res)) {
         rememberRun(res);
         push({ kind: "run", run: res });
+      } else if (res.domain_result) {
+        push({ kind: "domain", result: res.domain_result, note: res.note });
       } else if (res.run) {
         // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
         rememberRun(res.run);
@@ -285,6 +484,14 @@ export function MasterConsole({ session }: { session: Session }) {
           { kind: "bot", text: res.answer?.text ?? "" },
           { kind: "run", run: res.run },
         );
+      } else if (select && res.decision) {
+        // 🔴 말로 한 승인도 **모달로 누른 승인과 같은 자리에서 끝난다** (`approve`).
+        //    여기서 갈리면 어느 길로 승인했느냐에 따라 실매입을 적을 칸이 있고 없다 —
+        //    9/11 시연은 말로 승인하고 실매입을 적는 것이 전부다.
+        //
+        //    ★ `res.decision` 이 없으면 승인이 안 된 것이라 아래 분기로 그냥 흐른다.
+        if (res.answer) push({ kind: "bot", text: res.answer.text });
+        push({ kind: "approved", decision: res.decision, item });
       } else if (res.answer && salesAnswered(turn.intent, (res as { status?: unknown }).status)) {
         push({ kind: "sales", asOf, detail: { text: res.answer.text, note: res.note } });
       } else if (res.answer) {
@@ -297,7 +504,7 @@ export function MasterConsole({ session }: { session: Session }) {
       } else {
         push({
           kind: "bot",
-          text: res.clarification ?? "실행했지만 답이 비었습니다.",
+          text: clarificationText(res, "실행했지만 답이 비었습니다."),
         });
       }
     } catch (error) {
@@ -388,7 +595,7 @@ export function MasterConsole({ session }: { session: Session }) {
               key={k}
               type="button"
               onClick={() => shortcut(k)}
-              disabled={busy}
+              disabled={locked}
               className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
@@ -455,7 +662,7 @@ export function MasterConsole({ session }: { session: Session }) {
 
               {busy && (
                 <p className="m-0 text-[13px] text-faint">
-                  마스터가 부서를 부르는 중…
+                  데이터를 확인하고 있습니다.
                 </p>
               )}
               <div ref={tail} />
@@ -473,20 +680,21 @@ export function MasterConsole({ session }: { session: Session }) {
                   ref={composer}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder="무엇을 도와드릴까요"
+                  placeholder="자금 현황, 판매안, 거래처, 보고서를 자연어로 물어보세요"
                   className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
                 />
+                {/* 잠긴 동안 남은 초를 버튼이 적는다 — 왜 안 눌리는지 보여야 사람이 기다린다. */}
                 <button
                   type="submit"
-                  disabled={busy || !draft.trim()}
+                  disabled={locked || !draft.trim()}
                   className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
                 >
-                  보내기
+                  {cooldown > 0 ? `${cooldown}초 뒤 다시` : "보내기"}
                 </button>
               </form>
               <p className="m-0 mt-2 text-[11.5px] text-faint">
-                매입 실행은{" "}
-                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회는 바로
+                장부를 바꾸는 요청은{" "}
+                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회와 보고서는 바로
                 돕니다.
               </p>
             </div>
@@ -547,8 +755,42 @@ function TurnView({
       </div>
     );
 
-  if (turn.kind === "approved")
-    return <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />;
+  if (turn.kind === "domain") {
+    return (
+      <div className="max-w-[94%] rounded-xl border border-line bg-surface p-4">
+        <div className="whitespace-pre-wrap text-sm leading-relaxed">{turn.result.text}</div>
+        {turn.result.report_kind && (
+          <div className="mt-3">
+            <DomainReportPreview kind={turn.result.report_kind} facts={turn.result.data} />
+          </div>
+        )}
+        {!turn.result.report_kind && <DomainReadResult result={turn.result} />}
+        {turn.trace && <LlmTrace trace={turn.trace} />}
+      </div>
+    );
+  }
+
+  if (turn.kind === "approved") {
+    //  말로 한 승인은 안 전체를 들고 있지 않다. **없는 숫자를 0 으로 그리지 않고**
+    //  무엇을 승인했는지만 적는다 — 안의 값은 매입 화면에 그대로 서 있다.
+    const label = turn.decision.scenario_label;
+    const what = [(turn.item ?? "").trim(), label ? `'${label}' 안` : "고른 안"]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      <div className="flex flex-col gap-3">
+        {turn.scenario ? (
+          <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />
+        ) : (
+          <p className="m-0 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm">
+            {turn.decision.decided_by} 님이 {what}을 승인했습니다.
+          </p>
+        )}
+        {/* 사람 승인 뒤 실제로 산 값을 적는 자리. 자동 승인 · 매입 승인이 아니면 카드가 스스로 숨는다. */}
+        <PurchaseRecordCard requestId={turn.decision.request_id} />
+      </div>
+    );
+  }
 
   if (turn.kind === "error")
     return (
@@ -587,14 +829,15 @@ function TurnView({
 
 function Empty({ onPick }: { onPick: (text: string) => void }) {
   const samples = [
-    "오늘 배추 얼마나 사야 해?",
-    "창고에 얼마나 남았어?",
-    "지금 자금 상황 알려줘",
-    "예산 2천만원으로 낮춰서 다시 해줘",
+    "현재 자금 상황 알려줘",
+    "받을 돈 보여줘",
+    "오늘 판매안 보여줘",
+    "거래처 목록 보여줘",
+    "이번 주 재무 보고서 만들어줘",
   ];
   return (
     <div className="rounded-xl border border-dashed border-line p-6">
-      <p className="m-0 text-sm font-semibold">말로 물어보세요</p>
+      <p className="m-0 text-sm font-semibold">무엇을 도와드릴까요?</p>
       <p className="m-0 mt-1 text-[13px] text-muted">
         마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
         봤는지 함께 답합니다.

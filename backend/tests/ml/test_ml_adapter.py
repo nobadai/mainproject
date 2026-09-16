@@ -206,6 +206,158 @@ def test_축_조정을_제안하지_않는다(monkeypatch):
     assert reply.suggested_adjustments == ()
 
 
+# ── 갈래 둘 — 배치 결과 · 모델 성능 (2026-09-16) ────────────────────────
+
+
+def _batch_seen(*, read: str = "ok", report_read: str = "ok") -> dict:
+    """질의응답이 배치 갈래에서 읽어 온 것. **실측 모양 그대로** (2026-09-16 · run 75)."""
+    return {
+        "on": BASE,
+        "read": read,
+        "run_id": 75 if read == "ok" else None,
+        "status": "정상" if read == "ok" else None,
+        "n_ok": 11 if read == "ok" else None,
+        "n_fail": 0 if read == "ok" else None,
+        "report_read": report_read,
+        "report_ran_at": "2026-09-16 09:25" if report_read == "ok" else None,
+    }
+
+
+def _perf_seen() -> list[dict]:
+    from app.ml import qa_tools
+
+    return [
+        {"item": item, "kind": kind, "avg_price": cell["avg"],
+         "avg_error": cell["err"], "pct": float(cell["pct"])}
+        for (kind, item), cell in qa_tools.SEALED_ACCURACY.items()
+    ]
+
+
+def _route_answer(routes: list[str], **extra) -> QaAnswer:
+    """가격은 안 물은 답. 배치·성능만 담는다."""
+    return QaAnswer(
+        markdown="**배치 — 2026-09-16**",
+        meta=QaMeta(status="OK", routes=routes, base_dt=BASE),
+        rows_for_evidence=[],
+        **extra,
+    )
+
+
+def test_배치_갈래도_봉투_검증을_통과한다(monkeypatch):
+    """🔴 이 파일의 핵심 — 근거 없는 값이나 고아 근거가 하나도 없어야 한다."""
+    _qa(monkeypatch, _route_answer(["batch"], batch_for_evidence=_batch_seen()))
+    request = req(payload={"question": "오늘 데이터 처리 잘 됐어?"})
+    reply, meta = adapter.ml_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.payload["batch"]["run_id"] == 75
+    assert reply.payload["batch"]["status"] == "정상"
+    assert reply.payload["report"]["ran_at"] == "2026-09-16 09:25"
+    assert reply.payload["answer_routes"] == "batch"
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_배치_근거는_배치_기록을_가리킨다(monkeypatch):
+    """★ 주소를 사람 말로 적으면 **고아 근거**가 된다 — payload 를 그대로 가리킨다."""
+    _qa(monkeypatch, _route_answer(["batch"], batch_for_evidence=_batch_seen()))
+    reply, _ = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    by_claim = {evidence.claim: evidence for evidence in reply.evidences}
+    assert set(by_claim) == {"batch.run_id", "batch.n_ok", "batch.n_fail"}
+    assert by_claim["batch.n_ok"].value == 11.0
+    assert by_claim["batch.n_ok"].ref_ids[0] == "batch_run:run_id=75,column=n_ok"
+    #   예측을 안 읽었으면 «쟀다» 고 적지 않는다
+    assert reply.observed_at is None
+
+
+def test_성능_갈래는_아홉_칸마다_근거를_달고_조건을_같이_적는다(monkeypatch):
+    """🔴 조건 없는 수치는 안 남긴다 — 「19.7%」만 떨어져 나가면 아무도 못 읽는다."""
+    from app.ml import qa_tools
+
+    _qa(monkeypatch, _route_answer(["perf"], performance_for_evidence=_perf_seen()))
+    request = req(payload={"question": "모델 성능 어때?"})
+    reply, meta = adapter.ml_port(request)
+
+    assert len(reply.payload["performance"]) == 9
+    claims = {evidence.claim for evidence in reply.evidences}
+    assert claims == {f"performance[{i}].pct" for i in range(9)}
+    by_claim = {evidence.claim: evidence for evidence in reply.evidences}
+    assert by_claim["performance[0].pct"].value == 19.7
+    #   ★ 값과 조건이 **늘 같이 간다** — 근거에 언제·무엇으로 잰 값인지가 붙는다
+    assert by_claim["performance[0].pct"].evidence_detail == qa_tools.SEALED_SOURCE
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_업데이트_버튼이_실려도_봉투가_깨끗하고_글자가_안_깎인다(monkeypatch):
+    """★ 버튼은 **글 안에** 실린다 — `answer_markdown` 말고는 채팅까지 못 간다.
+
+    🔴 그래서 잴 것이 둘이다.
+      ① 봉투 검증이 그 링크를 트집 잡지 않는가 (`validate_reply` 가 비는가)
+      ② 링크가 **글자 그대로** 남는가 — 한 글자만 깎여도 화면이 버튼으로 못 그린다
+    """
+    from app.ml import qa_graph
+
+    버튼 = f"[모델 업데이트 — 소매가]({qa_graph.UPDATE_ACTION.format(kind='rtl')})"
+    줄 = [
+        "**현재 모델**",
+        "",
+        "**소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다**",
+        "",
+        버튼,
+    ]
+    답 = QaAnswer(
+        markdown="\n".join(줄),
+        meta=QaMeta(status="OK", routes=["perf"], base_dt=BASE),
+        rows_for_evidence=[],
+        performance_for_evidence=_perf_seen(),
+    )
+    _qa(monkeypatch, 답)
+    request = req(payload={"question": "모델 성능 어때?"})
+    reply, meta = adapter.ml_port(request)
+
+    assert E.validate_reply(request, reply, meta) == ()
+    assert 버튼 in reply.payload["answer_markdown"]
+    #   ★ 기존 칸도 그대로다 — 버튼을 실었다고 기계가 읽는 값이 사라지지 않는다
+    assert len(reply.payload["performance"]) == 9
+    assert reply.payload["answer_routes"] == "perf"
+
+
+def test_갈래_둘을_답해도_봉투가_깨끗하다(monkeypatch):
+    _qa(monkeypatch, _route_answer(
+        ["batch", "perf"],
+        batch_for_evidence=_batch_seen(),
+        performance_for_evidence=_perf_seen(),
+    ))
+    request = req(payload={"question": "오늘 상태 어때? 성능도"})
+    reply, meta = adapter.ml_port(request)
+    assert reply.payload["answer_routes"] == "batch,perf"
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_배치를_못_읽으면_그_표_이름을_밝힌다(monkeypatch):
+    """🔴 배치를 못 읽었는데 «예측표가 없다» 고 적으면 엉뚱한 표를 보러 간다."""
+    out = _route_answer(["batch"],
+                        batch_for_evidence=_batch_seen(read="error", report_read="error"))
+    out.meta.status = "SOURCE_UNAVAILABLE"
+    _qa(monkeypatch, out)
+    reply, _ = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert "batch_run" in reply.missing_data
+    assert "agent_report" in reply.missing_data
+    assert "ml_price_forecasts" not in reply.missing_data
+
+
+def test_안_부른_도구를_적지_않는다(monkeypatch):
+    """★ 실행 계획이 거짓이 되면 이력 전체를 못 믿는다."""
+    _qa(monkeypatch, _answer())                              # 가격만 물은 답
+    _, meta = adapter.ml_port(req(payload={"question": "내일 배추 경락가?"}))
+    assert "ml.qa_tools.batch_run" not in meta.used_tools
+
+    _qa(monkeypatch, _route_answer(["batch"], batch_for_evidence=_batch_seen()))
+    _, meta = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    assert "ml.qa_tools.batch_run" in meta.used_tools
+    assert len(meta.used_tools) == len(meta.tool_order)
+
+
 # ── 답을 못 낸 경우 ─────────────────────────────────────────────────────
 
 
@@ -338,3 +490,140 @@ def test_이름을_알면_등록된다():
 
     assert wiring.register_ml_agent() is True
     assert master_wiring.registry().has("ml")                # type: ignore[arg-type]
+
+
+# ── 현재 모델 (2026-09-16) ──────────────────────────────────────────────
+
+
+def _models_seen() -> list[dict]:
+    """질의응답이 «현재 모델» 로 읽어 온 것. **날짜는 이미 글자다** (JSON 으로 나간다).
+
+    ★ 이름은 교체해도 안 바뀐다 (매입 필터가 이름 일치). 그래서 만든 날과
+      학습 끝이 같이 있어야 «지금 무엇이 도는가» 가 구분된다.
+    """
+    return [
+        {"kind": "AUC", "model_ver": "ops_auc", "created_at": "2026-09-08",
+         "train_end": None, "last_swapped_at": None},
+        {"kind": "WHSL", "model_ver": "ops_whsl", "created_at": "2026-09-08",
+         "train_end": None, "last_swapped_at": None},
+        {"kind": "RTL", "model_ver": "ops_rtl", "created_at": "2026-09-12",
+         "train_end": "2025-12-31", "last_swapped_at": "2026-09-15 20:31"},
+    ]
+
+
+def test_현재_모델을_payload_에_싣는다(monkeypatch):
+    """★ «현재 모델» 표가 답 문장에 들어가므로 기계용 칸에도 같이 실어야 한다.
+
+    마스터가 마크다운을 그대로 못 써도 «지금 무엇이 도는가» 가 남아야 한다.
+    """
+    _qa(monkeypatch, _route_answer(
+        ["perf"],
+        performance_for_evidence=_perf_seen(),
+        models_for_payload=_models_seen(),
+    ))
+    reply, _ = adapter.ml_port(req(payload={"question": "모델 성능 어때?"}))
+    assert [row["kind"] for row in reply.payload["models"]] == ["AUC", "WHSL", "RTL"]
+    assert reply.payload["models"][2]["model_ver"] == "ops_rtl"
+    assert reply.payload["models"][2]["last_swapped_at"] == "2026-09-15 20:31"
+
+
+def test_현재_모델을_실어도_봉투가_깨끗하다(monkeypatch):
+    """🔴 숫자 칸이 없으므로 **근거를 억지로 달지 않는다.**
+
+    배열 항목 안의 라벨(`"AUC"`)은 봉투가 근거를 요구하지 않는다. 억지로 달면
+    «세어 본 것» 을 근거라고 적게 된다 (§1.2-3).
+    """
+    _qa(monkeypatch, _route_answer(
+        ["perf"],
+        performance_for_evidence=_perf_seen(),
+        models_for_payload=_models_seen(),
+    ))
+    request = req(payload={"question": "모델 성능 어때?"})
+    reply, meta = adapter.ml_port(request)
+    assert E.validate_reply(request, reply, meta) == ()
+    claims = {evidence.claim for evidence in reply.evidences}
+    assert not any(claim.startswith("models[") for claim in claims)
+
+
+def test_현재_모델을_못_읽었으면_칸을_안_만든다(monkeypatch):
+    """«안 읽었다» 와 «비어 있다» 를 같은 모양으로 내보내지 않는다."""
+    _qa(monkeypatch, _route_answer(["perf"], performance_for_evidence=_perf_seen()))
+    reply, _ = adapter.ml_port(req(payload={"question": "모델 성능 어때?"}))
+    assert "models" not in reply.payload
+
+
+def test_쓰지_말라는_판정은_payload_에_그대로_실린다(monkeypatch):
+    """★ 답 문장에서 «쓰지 마세요» 를 뺐다 (2026-09-16 · 결정 ⑦).
+
+    🔴 **판단은 마스터가 한다.** 문장에서 뺀 대신 `use_recommended` 가 payload 에
+      그대로 가야 한다 — 여기까지 빠지면 못 쓰는 조합을 저쪽이 조용히 쓰게 된다.
+    """
+    out = _answer()
+    out.meta.use_recommended = False
+    _qa(monkeypatch, out)
+    request = req(payload={"question": "양파 중도매가 내일?"})
+    reply, meta = adapter.ml_port(request)
+    assert reply.payload["use_recommended"] is False
+    assert "쓰지 마세요" not in reply.payload["answer_markdown"]
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+# ── 기록이 없는 날은 «고장» 이 아니다 (2026-09-16 · 사용자 결정 ①) ─────────
+
+
+def test_기록이_없는_날은_고장이_아니다(monkeypatch):
+    """🔴 `NO_DATA` 를 `RUNTIME_NOT_READY` 로 올리면 마스터가 **답을 버린다.**
+
+    화면 기준일 2026-08-03 에 «오늘 배치 상태» 를 물었을 때 실제로 그랬다 —
+    우리 답(«그날 배치 기록이 없습니다»)은 맞았는데 화면에는
+    «가격 예측는 ml_price_forecasts 를 쓸 수 없어…» 가 떴다.
+    """
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="empty", report_read="empty"),
+        reads={"batch_run": "empty", "agent_report": "empty"},
+    )
+    out.meta.status = "NO_DATA"
+    _qa(monkeypatch, out)
+    request = req(payload={"question": "오늘 배치 상태 알려줘"})
+    reply, meta = adapter.ml_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ()
+    assert reply.payload["answer_markdown"] == out.markdown
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_읽기_실패는_지금처럼_못_쓴다고_올린다(monkeypatch):
+    """★ «없다» 와 «못 읽었다» 를 가른다 — 뒤쪽은 진짜 고장이다."""
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="error", report_read="error"),
+        reads={"batch_run": "error", "agent_report": "error"},
+    )
+    out.meta.status = "SOURCE_UNAVAILABLE"
+    _qa(monkeypatch, out)
+    reply, _ = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert set(reply.missing_data) == {"batch_run", "agent_report"}
+
+
+def test_묻지_않은_갈래의_표_이름을_대지_않는다():
+    """🔴 배치를 물었는데 «예측표가 없다» 고 적으면 엉뚱한 표를 보러 간다."""
+    비었다 = _route_answer(["batch"], reads={"batch_run": "empty", "agent_report": "empty"})
+    비었다.meta.status = "NO_DATA"
+    assert adapter._missing_for(비었다) == ()
+
+    성능 = _route_answer(
+        ["perf"],
+        reads={"agent_report": "ok", "prediction_log": "error", "model_cutover": "error"},
+    )
+    성능.meta.status = "SOURCE_UNAVAILABLE"
+    assert set(adapter._missing_for(성능)) == {"prediction_log", "model_cutover"}
+    assert "ml_price_forecasts" not in adapter._missing_for(성능)
+
+    #   가격을 물었으면 예전 그대로다
+    가격 = _answer("NO_DATA")
+    가격.meta.routes = ["forecast"]
+    assert adapter._missing_for(가격) == ("ml_price_forecasts",)

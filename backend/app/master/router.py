@@ -20,12 +20,20 @@ from app.master.collection import CollectionOut
 from app.master.collection import collect_receipts as run_collect_receipts
 from app.master.day_open import DayOpenOut
 from app.master.day_open import open_day as run_open_day
-from app.master.decision import CommitmentOut, DecisionIn, DecisionOut, DecisionRejected
+from app.master.decision import (
+    CommitmentOut,
+    DecisionIn,
+    DecisionOut,
+    DecisionRejected,
+    PurchaseRecordIn,
+    PurchaseRecordOut,
+)
 from app.master.decision_service import current_commitment, get_decisions, record_decision
 from app.master.holiday_calendar import get_calendar
 from app.master.inbound import InboundOut
 from app.master.inbound import receive_arrivals as run_receive_arrivals
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.purchase_record import get_purchase_record, record_purchase
 from app.master.receivable import ReceivableOut
 from app.master.receivable import issue_receivables as run_issue_receivables
 from app.master.schemas import (
@@ -45,6 +53,7 @@ from app.master.service import (
     run_procurement,
     run_sales,
 )
+from app.master.transition import TransitionOut
 from app.master.walk_report import WalkReport
 from app.master.walk_report import walk_report as build_walk_report
 
@@ -428,6 +437,60 @@ def master_commitment(request_id: str) -> CommitmentOut:
             detail=f"업무 키 {request_id} 에 유효한 승인이 없다 — 약정은 승인에서만 나온다.",
         )
     return commitment
+
+
+@router.post(
+    "/runs/{request_id}/purchase-record",
+    response_model=TransitionOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="실매입 기록 — 사람이 실제로 산 값으로 전이를 세운다",
+)
+def master_purchase_record(request_id: str, body: PurchaseRecordIn) -> TransitionOut:
+    """사람 승인 뒤 **실제로 산 값**을 적는다 (설계 260915 안 A §4-3).
+
+    ★ 적는 순간 그 값으로 매입 원장 · 매입채무 · 입고 일정 전이가 선다. 응답은 승인
+      응답의 `transition` 과 같은 모양이다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 201 | 기록했다 — 전이 결과는 `status` 가 말한다 (`APPLIED` · `NOT_APPLIED` · `FAILED`) |
+    | 404 | 유효한 승인이 없다 |
+    | 409 | 자동 승인이다 · 현재 승인 회차가 아니다 · 이미 기록했다 · 선정안 약정이 없다 |
+    | 422 | 본문이 틀렸다 — 회차 집합이 선정안과 다르다 · 수량/단가 0 · 도착일 < 매입일 |
+    """
+    try:
+        return record_purchase(request_id, body)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except DecisionRejected as error:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_409_CONFLICT if error.conflict else status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
+            detail=str(error),
+        ) from error
+
+
+@router.get(
+    "/runs/{request_id}/purchase-record",
+    response_model=PurchaseRecordOut,
+    summary="실매입 기록 · 반영 상태 조회 (화면용)",
+)
+def master_purchase_record_status(request_id: str) -> PurchaseRecordOut:
+    """선정안 회차(폼 기본값) · 기록(있으면) · 반영 상태.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 현재 결정이 매입 승인이다 |
+    | 404 | 유효한 승인이 없다 |
+    | 409 | 매입 승인이 아니다 |
+    """
+    try:
+        return get_purchase_record(request_id)
+    except LookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except DecisionRejected as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @router.get(

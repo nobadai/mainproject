@@ -311,13 +311,22 @@ export function formatKoreanDate(ymd: string | null | undefined): string {
 }
 
 /**
- * 요청이 실패했을 때 사용자에게 보일 문장.
+ * 요청이 실패했을 때 사용자에게 보일 문장. **이 함수가 실패 문장의 유일한 주인이다.**
  *
  * 서버 문장이 한국어로만 된 4xx 답이면 그대로 쓴다 (예: 「이미 승인됐습니다」).
  * 코드 · 영어 키 · 번호가 섞인 문장과 연결 실패 · 5xx 는 사람 말로 바꾼다.
+ *
+ * 🔴 **전송 계층에서 막힌 것과 요청이 틀린 것은 다르다** (2026-09-16). 429 는 사람이
+ *    잘못 물어서가 아니라 **몰려서** 막힌 것이라, 말을 바꾸라고 하면 안 된다 —
+ *    몇 초 뒤 같은 말로 다시 누르면 된다. 502·503·504 도 같은 성질이다.
+ *
+ * ★ 부르는 쪽은 이 문장을 다시 적지 않는다. 새 문구가 필요하면 여기서 늘린다.
  */
 export function userErrorText(status: number | null, message: string, fallback: string): string {
   if (status === 0) return "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
+  if (status === 429) return "요청이 몰려 잠시 막혔습니다. 몇 초 뒤 다시 눌러 주세요.";
+  if (status === 502 || status === 503 || status === 504)
+    return "서버가 잠시 바빴습니다. 잠시 뒤 다시 눌러 주세요.";
   const readable =
     /[가-힣]/.test(message) &&
     !/[A-Za-z]+_[A-Za-z_]+|[A-Z]{3,}|REQ-|#\d+|\/|@|[a-z]+\.[a-z]+/.test(message);

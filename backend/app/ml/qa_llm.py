@@ -48,8 +48,14 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 사용자 질문에서 **무엇을 물었는지만** 골라낸다. 가격을 추정하지 말고, 설명 문장도 쓰지 마라.
 
 고를 것
-  route  forecast(값) · accuracy(얼마나 맞나) · usability(써도 되나)
-         · clarify(못 고르겠다) · out_of_scope(우리 품목이 아님)
+  routes ★ **무엇을 물었나. 여러 개면 여러 개를 다 적는다** (배열이다)
+         forecast  가격이 얼마인가 · 얼마나 맞나 · 써도 되나
+         batch     오늘 자료 처리(배치)가 잘 됐나 · 수집 · 점검 보고서 · 오늘 상태
+         perf      모델 성능 · 정확도 · 오차 · 재학습 · 모델 업데이트
+         clarify(못 고르겠다) · out_of_scope(우리 품목이 아님) 은 그대로 쓴다
+         「오늘 상태 어때? 성능도」 → ["batch","perf"]
+         「5일 뒤 배추 경락가랑 배치 상태」 → ["forecast","batch"]
+         ★ batch·perf 만 물었으면 items·kinds·dates 는 비워 둔다
   items  배추 · 무 · 양파 중 **질문에 실제로 나온 것만**. 없으면 빈 배열
          🔴 질문에 없는 품목을 채우지 마라. 하나만 나왔으면 하나만 적는다
          「배추랑 무」면 둘 · 「전 품목」·「다」라고 할 때만 셋
@@ -73,10 +79,15 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
          items·kinds·dates 만 채운다 — 그건 우리가 곱해서 본다
 
 규칙
-  · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 route 를 out_of_scope 로 둔다
-  · 품목이나 가격 종류를 못 고르겠으면 빈 배열로 두고 route 는 forecast 로 둔다 —
-    되묻거나 전부 보여주는 판단은 우리 규칙이 한다
-  · 날짜를 못 고르겠으면 비워 둔다. 임의로 채우지 마라
+  · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 routes 에 out_of_scope 를 넣는다
+  · ★ **질문에 품목이 없으면 items 를 빈 배열로 두고, 가격 종류가 없으면 kinds 를
+    빈 배열로 둔다. 되묻지 마라** — 빈 자리는 우리 규칙이 «배추·무·양파 전부» ·
+    «경락가·중도매가·소매가 전부» 로 채운다. 그러니 그때도 routes 는 ["forecast"] 다
+  · ★ **날짜가 없으면 dates 를 비워 둔다.** 임의로 채우지 마라 — 빈 날짜는 우리 규칙이
+    «오늘» 로 채운다
+  · ★ **이 셋이 없다는 이유로 clarify 를 쓰지 마라.** clarify 는 «가격인지 배치인지
+    성능인지조차 모르겠다» 일 때만 쓴다. 「가격 알려줘」는 clarify 가 아니라
+    routes=["forecast"] 에 items·kinds·dates 를 전부 빈 배열로 둔 것이다
 """
 
 #: 같은 지시를 영어로 옮긴 것. **뜻을 바꾸지 않았다** — 순서·항목·규칙이 같다.
@@ -89,8 +100,15 @@ From the user's question, pick out **only what was asked**. Do not estimate a pr
 and do not write any explanatory sentence.
 
 What to pick
-  route  forecast (a value) · accuracy (how accurate it is) · usability (safe to use)
-         · clarify (cannot decide) · out_of_scope (not one of our crops)
+  routes ★ **what was asked. List every one that applies** (it is an array)
+         forecast  a price value · how accurate it is · whether it is safe to use
+         batch     did today's data processing (the batch) go well · collection ·
+                   the daily check report · "how are things today"
+         perf      model performance · accuracy · error · retraining · model updates
+         clarify (cannot decide) · out_of_scope (not one of our crops) stay as they are
+         "오늘 상태 어때? 성능도" → ["batch","perf"]
+         "5일 뒤 배추 경락가랑 배치 상태" → ["forecast","batch"]
+         ★ If only batch·perf were asked, leave items·kinds·dates empty
   items  **only the crops actually named** in the question, from 배추 · 무 · 양파.
          Empty array if none. Do not add a crop the question did not name.
   kinds  **only the price series actually named**, from AUC (auction) ·
@@ -111,10 +129,17 @@ What to pick
 
 Rules
   · If the crop is not 배추, 무 or 양파 (garlic, spring onion and so on),
-    set route to out_of_scope
-  · If you cannot decide the crop or the price kind, leave it empty and set route to
-    forecast — whether to ask back or to show everything is decided by our own rules
-  · If you cannot decide a date, leave it empty. Do not fill one in arbitrarily
+    put out_of_scope in routes
+  · ★ **If the question names no crop, leave items as an empty array; if it names no
+    price kind, leave kinds as an empty array. Do not ask back** — our own rules fill
+    an empty slot with "배추·무·양파, all of them" and "AUC·WHSL·RTL, all of them".
+    So routes is still ["forecast"] in that case
+  · ★ **If there is no date, leave dates empty.** Do not fill one in arbitrarily —
+    our own rules fill an empty date with "today"
+  · ★ **Do not use clarify just because those three are missing.** clarify is only for
+    "I cannot even tell whether this is about a price, the batch, or performance".
+    "가격 알려줘" is not clarify — it is routes=["forecast"] with items, kinds and
+    dates all left as empty arrays
 
 The question may be written in Korean. Answer with the JSON schema only.
 """
@@ -131,12 +156,22 @@ def _prompt(base_dt: date) -> str:
     if not _date_enum_on():
         return prompt
     days = _selectable(base_dt)
+    past = _past_selectable(base_dt)
     return "\n".join(
         [
             prompt,
-            "고를 수 있는 날짜는 아래 19개뿐이다. **맨 앞이 오늘**이고 그 뒤가 내일부터다.",
+            "고를 수 있는 앞날은 아래 19개뿐이다. **맨 앞이 오늘**이고 그 뒤가 내일부터다.",
             "이 목록 밖의 날짜는 만들지 마라.",
             "  " + " · ".join(days),
+            #   ★ **지난 날 목록을 따로 둔다** (2026-09-16 · 사용자 결정 ②).
+            #     배치·성능은 지나간 날을 묻는다 — 「어제 배치 상태」가 그렇다.
+            #     오프셋으로 환산하게 두면 모델이 날짜 셈을 해야 하고, 그 자리에서
+            #     틀리면 **엉뚱한 날의 기록**이 답으로 나간다. 목록에서 고르게 한다.
+            "지난 날은 아래 30개에서 고른다. **맨 뒤가 어제**다.",
+            "  " + " · ".join(past),
+            "「어제」는 어제 · 「그저께」는 그 하루 앞 · 「N일 전」은 그만큼 앞이다.",
+            "「9월 10일」처럼 **절대 날짜**를 말했으면 위 두 목록에서 그 날을 찾아 적는다.",
+            "★ 지난 날은 **배치·성능을 물을 때만** 고른다. 가격(forecast)은 앞날만 답한다.",
             #   ★ 「모든 날」에 오늘을 **넣는다** (2026-09-15 · 사용자 지적으로 고침).
             #     전에는 빼게 했다 — 전달표가 D+1 부터라서였다. 그런데 그건 우리 창고
             #     사정이지 묻는 사람의 뜻이 아니다. 「전부」라고 하면 오늘부터다.
@@ -147,6 +182,10 @@ def _prompt(base_dt: date) -> str:
             #     맞춰 **오늘부터 N개**로 둔다.
             "「일주일치」·「앞으로 일주일」이면 **오늘부터 7개**, 「3일치」면 오늘부터 3개다.",
             "「이번 주」도 오늘부터 7개로 본다. 기간을 말했으면 날짜를 **비우지 마라**.",
+            "「사흘치 배치」·「지난 사흘 배치」면 **어제까지 지난 날 3개**를 적는다.",
+            "★ 두 목록 **밖의 날**을 물었으면 dates 에 넣지 말고 **far_offsets** 에 오늘로부터",
+            "  며칠인지 정수로 적는다. 「60일 뒤」→ [60] · 「석 달 전」→ [-90].",
+            "  목록 밖이라고 날짜를 **비우면 안 된다** — 비우면 «날짜를 안 물었다» 로 읽힌다.",
             "",
         ]
     )
@@ -158,9 +197,19 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_KO
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "route": {
-            "type": "string",
-            "enum": ["forecast", "accuracy", "usability", "clarify", "out_of_scope"],
+        #   ★ **한 칸이 아니라 목록이다** (2026-09-16). 「오늘 상태 어때? 성능도」처럼
+        #     한 문장이 두 가지를 묻는다. 한 칸짜리로는 하나를 조용히 버린다 —
+        #     `kinds` 에서 이미 같은 일을 겪었다 (2026-09-15).
+        #
+        #   🔴 **해석기를 하나 더 두지 않는다.** 갈래가 늘어도 LLM 호출은 **한 번**이고,
+        #     갈래를 나눠 처리하는 것은 코드가 한다 (`qa_graph`).
+        "routes": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["forecast", "batch", "perf",
+                         "accuracy", "usability", "clarify", "out_of_scope"],
+            },
         },
         #   ★ enum 에 빈 문자열을 넣으면 Gemini 가 400 을 낸다 (enum[n]: cannot be empty).
         #     «못 골랐다» 는 값을 비워서(= 이 칸을 빼서) 말한다. required 에 없다.
@@ -172,6 +221,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "kinds": {"type": "array", "items": {"type": "string",
                                              "enum": ["AUC", "WHSL", "RTL"]}},
         "dates": {"type": "array", "items": {"type": "string"}},
+        #   ★ **목록 밖 날짜를 적는 칸** (2026-09-15 · 화면에서 발견).
+        #     날짜를 19개 목록에서만 고르게 한 뒤로 「30일 뒤」는 고를 보기가 없어
+        #     모델이 날짜를 비웠다. 코드는 그걸 «날짜를 안 말했다» 로 읽어 **오늘 값**을
+        #     줬고, «범위 밖입니다» 안내는 사라졌다. 기준일로부터 며칠인지를 정수로 받는다.
+        "far_offsets": {"type": "array", "items": {"type": "integer"}},
         #   ★ **짝지어진 물음** (2026-09-15). 「5일 뒤 배추 경락가와 7일 뒤 무 도매가」를
         #     items x kinds 로 곱으면 **안 물어본 조합**(배추 중도매가 · 무 경락가)이
         #     나가고 날짜도 뒤섞인다. 실제로 그렇게 나갔다.
@@ -192,8 +246,12 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
     #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
     #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
-    "required": ["route", "items", "kinds", "dates", "asks"],
+    "required": ["routes", "items", "kinds", "dates", "far_offsets", "asks"],
 }
+
+#: 우리가 아는 갈래. 나머지 값(accuracy·usability·clarify)은 전부 가격 갈래로 접는다 —
+#: 예전부터 그렇게 다뤘고, 되묻는 판단은 우리 규칙이 한다.
+QA_ROUTES: tuple[str, ...] = ("forecast", "batch", "perf", "out_of_scope")
 
 
 #: 전달표의 창. **늘 같다** — 2026년 1,557개 조합 전부 18칸 온전(2026-09-15 실측).
@@ -228,6 +286,24 @@ def _selectable(base_dt: date) -> list[str]:
     ]
 
 
+#: 지난 날을 몇 개까지 목록에 둘까. **배치·성능 질문용이다** — 가격은 앞날만 답한다.
+#:
+#: 30 은 «지난달 10일」까지는 목록에서 고를 수 있는 길이다. 더 늘리면 목록이 길어져
+#: 앞날 19개가 묻히고, 줄이면 절대 날짜를 셈으로 환산하게 된다 (`far_offsets`).
+_PAST_DAYS = 30
+
+
+def _past_selectable(base_dt: date) -> list[str]:
+    """고를 수 있는 **지난 날**. 어제부터 30일 전까지, 오래된 것부터 적는다.
+
+    ★ 오늘은 여기 없다 — 위 목록의 **맨 앞**이 오늘이다. 두 목록에 같은 날을 두면
+      모델이 어느 쪽에서 골라야 하는지로 흔들린다.
+    """
+    return [
+        (base_dt - timedelta(days=n)).isoformat() for n in range(_PAST_DAYS, 0, -1)
+    ]
+
+
 def _schema(base_dt: date) -> dict[str, Any]:
     """응답 스키마. enum 판이면 **날짜를 만들 수 없고 고르기만** 한다.
 
@@ -243,7 +319,14 @@ def _schema(base_dt: date) -> dict[str, Any]:
     schema = {k: v for k, v in _RESPONSE_SCHEMA.items()}
     props = {k: v for k, v in _RESPONSE_SCHEMA["properties"].items()}
     days = _selectable(base_dt)
-    props["dates"] = {"type": "array", "items": {"type": "string", "enum": days}}
+    #   ★ **지난 30일을 같이 연다** (2026-09-16 · 사용자 결정 ②). 배치·성능은
+    #     지나간 날을 묻는다. 앞날만 열어 두면 「어제 배치」에 고를 보기가 없어
+    #     모델이 **가장 가까운 것**(오늘)을 고르고, 우리는 그걸 «오늘을 물었다» 로
+    #     읽는다 — 오늘을 목록에서 뺐을 때 겪은 것과 같은 일이다.
+    props["dates"] = {
+        "type": "array",
+        "items": {"type": "string", "enum": _past_selectable(base_dt) + days},
+    }
     #   asks 안의 날짜도 같은 목록으로 묶는다 — 한쪽만 묶으면 그쪽으로만 안 틀린다.
     ask_item = {k: v for k, v in props["asks"]["items"].items()}
     ask_props = {k: v for k, v in ask_item["properties"].items()}
@@ -341,16 +424,50 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         items = _pick_all([a["item"] for a in asks], QA_ITEMS)
     if asks and not kinds:
         kinds = _pick_all([a["kind"] for a in asks], QA_KINDS)
+    routes = _pick_routes(chosen)
     return {
         "asks": asks,
-        "route": str(chosen.get("route") or "forecast"),
+        #   ★ **목록이 정본이다.** `route` 는 첫 값을 가리키는 옛 이름으로 남긴다 —
+        #     그 이름으로 읽는 코드와 검사가 아직 있다.
+        "routes": routes,
+        "route": routes[0],
         "items": items,
         "kinds": kinds,
         #   예전 이름 — 하나만 쓰는 자리가 아직 있다. 첫 값을 가리킨다.
         "item": items[0] if items else None,
         "kind": kinds[0] if kinds else None,
-        "dates": _parse_dates(chosen.get("dates")),
+        #   목록 밖 날(far_offsets)을 날짜로 바꿔 합친다. 범위 검사는 gate 가 한다 —
+        #   여기서 거르면 «범위 밖» 이라는 사실이 다시 사라진다.
+        "dates": _parse_dates(chosen.get("dates")) + _far_dates(chosen.get("far_offsets"), base_dt),
     }
+
+
+def _pick_routes(chosen: dict[str, Any]) -> list[str]:
+    """고른 갈래를 우리 어휘로. **모르는 값은 가격 갈래로 접는다.**
+
+    `accuracy` · `usability` · `clarify` 는 예전부터 가격 갈래와 같은 자리로 갔다 —
+    되묻거나 오차를 붙이는 판단은 규칙이 한다. 빈손이면 가격 갈래 하나로 둔다.
+    """
+    raw = chosen.get("routes")
+    if not isinstance(raw, list) or not raw:
+        raw = [chosen.get("route")]
+    out: list[str] = []
+    for value in raw:
+        text = str(value or "").strip()
+        name = text if text in QA_ROUTES else "forecast"
+        if name not in out:
+            out.append(name)
+    return out or ["forecast"]
+
+
+def _far_dates(raw: Any, today: date) -> list[date]:
+    """목록 밖 날을 날짜로. 정수가 아닌 것은 버린다 — 고쳐 쓰지 않는다."""
+    out: list[date] = []
+    for value in raw if isinstance(raw, list) else []:
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        out.append(today + timedelta(days=value))
+    return out
 
 
 #: 가격 종류를 부르는 말. **질문에 이 낱말이 있어야 그 종류를 남긴다.**

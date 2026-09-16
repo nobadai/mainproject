@@ -87,6 +87,7 @@ from typing import Any, Literal
 
 from app.master.clock import today_in_seoul
 from app.master.decision import (
+    AUTO_BACKFILL,
     SALES_CYCLE,
     DecisionIn,
     DecisionOut,
@@ -100,16 +101,9 @@ from app.master.decision_service import record_decision
 from app.master.ledger_repository import get_burn_in
 from app.master.run_repository import list_runs
 
-AUTO_BACKFILL = "AUTO-BACKFILL"
-"""자동으로 채운 승인의 `decided_by`.
-
-🔴 **사람 이름을 안 쓴다.** `master_decisions.decided_by` 는 지금 전부 사람 이름이라,
-  자동으로 채우면서 거기 사람 이름을 적으면 **사람이 안 눌렀는데 눌렀다고 기록**되고
-  그 표는 append-only 라 못 지운다.
-
-★ `ask_service` 가 적어 둔 *"승인자가 없는 승인은 승인이 아니다"* 를 지키는 길이
-  이것이다 — 자동일 때도 **「누가」를 정직하게** 적는다.
-"""
+# ★ `AUTO_BACKFILL` 의 자리는 `decision.py` 다 (2026-09-15 · 실매입 기록 안 A).
+#   그 값이 이제 승인이 전이를 바로 부르는지를 가르므로 결정 어휘 옆으로 옮겼다.
+#   여기서는 들여와 그대로 쓴다 — 이 모듈에서 들여오던 기존 호출부도 그대로 돈다.
 
 BACKFILL_BOUNDARY_AS_OF = date(2026, 9, 18)
 """자동으로 채울 수 있는 마지막 날. **이 날까지 포함이다.** 🔴 **가드가 둘이다.**
@@ -492,6 +486,32 @@ class BackfilledRun:
     #:   `DecisionIn.scenario_label` 로 받는다). **그쪽이 장부의 정본이고** 이 칸은
     #:   걷기 한 번을 요약하려고 든 것이다 — 요약이 DB 를 다시 읽지 않게.
     picked_label: str | None = None
+
+    #: 그 승인의 **당일 전이**가 원장을 못 쓴 갈래 (2026-09-16). 안 막혔으면 빈 값.
+    #:
+    #: ★★ **막히는 경로가 둘이다.** 여기(당일 전이)와 다음 날 재시도
+    #:   (`pending_transition.RetriedTransition.block_kind`) — **한쪽만 세면 수가
+    #:   조용히 작아진다.** 확인 걷기에서 6건 726kg 255,287원이 이 칸이 없어 요약
+    #:   어디에도 안 남았다.
+    #:
+    #: 🔴 **`outcome` 과 섞지 않는다.** 저쪽은 *"승인을 적었나"* 라 `RECORDED` 이고,
+    #:    이 칸은 *"그 승인이 원장에 닿았나"* 다 — `RECORDED` 인 채로 원장은 0행일
+    #:    수 있고 그것이 이 판이 드러내려는 것이다.
+    #:
+    #: ★ **이름의 주인은 `ledger.LEDGER_BLOCK_KINDS` 다** — `TransitionOut.block_kind`
+    #:   를 그대로 옮긴다. 판매 행은 전이가 없어 늘 빈 값이다.
+    transition_block_kind: str = ""
+
+    #: 이 실행에 붙은 결정의 회차 (2026-09-16). 승인을 안 적었으면 `None`.
+    #:
+    #: 🔴 **`request_id` 하나로는 승인이 안 갈린다.** 같은 업무 키에 결정이 여러 번
+    #:    붙을 수 있고 (`decision_seq` 가 그래서 있다), 원장 행 ID 도
+    #:    `PUR-{request_id}-D{decision_seq}-S{회차}` 로 **둘을 같이** 쓴다
+    #:    (`transition.purchase_id_prefix_for`).
+    #:
+    #: ★ **세는 쪽이 「같은 승인인가」를 묻는 자리가 생겨서 연 칸이다.** 같은 승인이
+    #:   날마다 다시 막히는데 날짜별로 세면 한 건이 며칠치로 부푼다.
+    decision_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1079,4 +1099,12 @@ def _backfill_one(
         # ★ **판매는 `None` 이다** (`찾은순서` 가 비어 있다). 저쪽 `picked` 는
         #   라벨이 아니라 후보 `scenario_id` 라 라벨 어휘에 섞으면 안 된다.
         picked_label=picked if 찾은순서 else None,
+        # 🔴 **전이가 왜 원장을 못 썼는지를 여기서 버리지 않는다** (2026-09-16).
+        #    전에는 `saved.transition` 을 안 읽어서, 승인이 났는데 매입 원장에 한 행도
+        #    안 남아도 성적표에는 `RECORDED` 하나만 남았다 — `confirmation_status` 를
+        #    들일 때와 **똑같은 모양의 구멍**이다.
+        transition_block_kind="" if saved.transition is None else saved.transition.block_kind,
+        # 🔴 **동일성 키의 나머지 반쪽이다.** 이 칸이 없으면 세는 쪽이 `request_id`
+        #    하나로 접어야 하고, 같은 업무 키에 결정이 둘 붙은 날 수가 조용히 작아진다.
+        decision_seq=saved.decision_seq,
     )

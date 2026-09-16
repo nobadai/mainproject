@@ -92,6 +92,18 @@ export interface SalesSummaryResponse {
     received_amount_krw: Money;
     outstanding_receivables_krw: Money;
   };
+recent_sales: {
+    sale_id: string;
+    sale_date: string;
+    customer_partner_id: string;
+    partner_name: string | null;
+    total_quantity_kg: Money;
+    total_amount_krw: Money;
+    collection_due_date: string;
+    collection_status: string;
+    collection_status_label: string;
+    order_status: string;
+  }[];
   items: {
     item_id: string;
     item_name: string | null;
@@ -120,9 +132,9 @@ export const salesOverview = {
     send<SalesSummaryResponse>(
       `${CONSOLE_BASE}/sales/summary?${query({ sim_run_id: simRun, as_of: asOf })}`,
     ),
-  trend: (simRun: string, asOf: string) =>
+  trend: (simRun: string, asOf: string, fromDate?: string, toDate?: string) =>
     send<SalesTrendResponse>(
-      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf })}`,
+      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf, from_date: fromDate, to_date: toDate })}`,
     ),
   proposals: (simRun: string, asOf: string) =>
     send<SalesProposalsResponse>(
@@ -176,6 +188,66 @@ export function createPartner(input: PartnerCreateInput): Promise<PartnerProfile
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+  });
+}
+
+/* ── 사용자가 만드는 판매 후보 ─────────────────────────────────────────── */
+
+export interface SalesCandidateRequest {
+  sim_run_id: string;
+  as_of: string;
+  item: string;
+  partner_id?: string;
+  quantity_kg?: string;
+  unit_price_krw?: string;
+  delivery_date?: string;
+  payment_days?: string;
+  allow_additional_sourcing: boolean;
+  note?: string;
+}
+
+export interface SalesCandidateReply {
+  status: string;
+  user_message?: string;
+  missing_data?: string[];
+  missing_capabilities?: string[];
+  scenarios?: { scenario_id: string; quantity_kg?: Money | null; unit_price_krw?: Money | null }[];
+}
+
+export interface SalesCandidateRunReply {
+  runtime_status: string;
+  business_status: string;
+  payload: SalesCandidateReply;
+  missing_data: string[];
+  missing_capability: string[];
+}
+
+/** 후보만 생성한다. 실제 판매 확정은 기존 Master 승인 흐름만 사용한다. */
+export function createSalesCandidates(input: SalesCandidateRequest): Promise<SalesCandidateRunReply> {
+  const quantity = input.quantity_kg?.trim();
+  const price = input.unit_price_krw?.trim();
+  const paymentDays = input.payment_days?.trim();
+  return send<SalesCandidateRunReply>(`${API_BASE}/sales/console-proposal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sim_run_id: input.sim_run_id,
+      as_of: input.as_of,
+      proposal: {
+        business_mode: "SPOT_SALES",
+        user_request: {
+          raw_text: input.note?.trim() || null,
+          item: input.item.trim(),
+          partner_id: input.partner_id?.trim() || null,
+          requested_quantity_kg: quantity || null,
+          preferred_unit_price_krw: price || null,
+          preferred_delivery_date: input.delivery_date || null,
+          preferred_payment_days: paymentDays || null,
+          allow_additional_sourcing: input.allow_additional_sourcing,
+        },
+        execution_identity: { as_of: input.as_of },
+      },
+    }),
   });
 }
 
@@ -261,6 +333,34 @@ export interface SalesProposal {
   recommendation_reason: string | null;
   /** 실제 판매로 확정됐으면 주문 상태. `null` 은 «확정 안 됨» 이다 (추천·선택과 다르다). */
   sale_status: string | null;
+  /**
+   * 이 안이 사용자 앞에서 서는 자리.
+   *
+   * 🔴 **`UNRESOLVED` 와 `REJECTED` 는 다른 사실이다.** 탈락은 «다 봤는데 안 된다» 이고
+   *    미판정은 «아직 안 봤다» 다. 한 배지에 섞으면, 재무 자료를 채워야 할 날에
+   *    사용자가 판매 조건을 바꾼다.
+   */
+  presentation_state: "PRESENTABLE" | "REVIEW_REQUIRED" | "REJECTED" | "UNRESOLVED";
+  /** 확정으로 보낼 수 없는가. **판정을 받고 통과한 안만 거짓이다.** */
+  approval_blocked: boolean;
+  /** 판정이 왜 안 났는가. `UNRESOLVED` 일 때만 채워진다. */
+  unresolved_reason_codes: string[];
+  /** 그 요청의 전략이 어떻게 섰는가. 칸이 하나도 없던 실행은 `null` 이다. */
+  strategy: SalesStrategyView | null;
+}
+
+/**
+ * 전략이 어떻게 섰는가.
+ *
+ * 🔴 **저장된 라벨만 온다.** HTTP 원문도 provider 응답 본문도 이 계약에 없다.
+ */
+export interface SalesStrategyView {
+  source: string | null;
+  llm_status: string | null;
+  llm_failure_reason: string | null;
+  clamped_reason_codes: string[];
+  collapsed: boolean;
+  collapse_reason_codes: string[];
 }
 
 export interface SalesProposalsResponse {
@@ -269,6 +369,12 @@ export interface SalesProposalsResponse {
   request_count: number;
   /** 팔 물량이 0이라 목록에서 뺀 안의 수. 지운 것이 아니라 센 것이다. */
   hidden_zero_quantity: number;
+  /** 🔴 «후보가 없다» 와 «판정이 없다» 를 한 문구로 합치지 않는다. */
+  state: "EMPTY" | "UNRESOLVED" | "REJECTED" | "PRESENTABLE";
+  presentable_count: number;
+  unresolved_count: number;
+  rejected_count: number;
+  review_required_count: number;
   rows: SalesProposal[];
 }
 

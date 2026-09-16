@@ -531,6 +531,9 @@ def test_the_first_pass_also_walks_through_the_explanation_node(gemini):
     assert [entry.get("stage") for entry in state["agent_trace"]] == [
         "prepare_context",
         "classify_situation",
+        # ★ **전략 자세가 후보보다 먼저 선다** (2026-09-16). 모델이 전략에 참여하는
+        #   자리이고, 뒤쪽 `interpret_recommendation` 은 정해진 추천을 말로 옮긴다.
+        "plan_strategy",
         "generate_candidates",
         "determine_validations",
         "self_check",

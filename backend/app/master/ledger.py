@@ -58,15 +58,72 @@ from app.master.commitment import ApprovedCommitment, ArrivalLeg
 #    **주인은 그대로 두고 부르는 시점만 미룬다.**
 
 __all__ = [
+    "BLOCK_GRADES",
+    "BLOCK_LEG_AMOUNT",
+    "BLOCK_NO_ARRIVAL",
+    "BLOCK_PAYMENT_DUE",
+    "LEDGER_BLOCK_KINDS",
     "MASTER_PURCHASE_TYPE",
+    "PERMANENT_BLOCK_KINDS",
+    "LedgerBlock",
     "PurchaseLedgerNotWritable",
     "PurchaseWrite",
     "build_purchase_rows",
     "cancel_purchases",
+    "ledger_block",
     "ledger_block_reason",
     "persist_purchases",
     "sim_run_id_for",
 ]
+
+# ── 막는 갈래 ───────────────────────────────────────────────────────────
+#
+# 🔴 **사유 문장을 키로 세면 안 된다.** 문장에는 등급 이름과 회차 번호가 박혀 있어
+#    (`등급이 2개인데 매입 줄이 하나다 (특/상)`) 같은 갈래인데도 약정마다 다른 키가
+#    된다. 세는 쪽은 **이 이름으로 접는다.**
+#
+# ★ **이름의 주인은 여기 하나다.** 문장의 주인이 `ledger_block_reason` 인 것과 같은
+#   이유다 — 세는 쪽(`backtest_runner`)이 자기 이름을 지으면 갈래가 둘이 된다.
+
+#: 등급이 둘 이상이라 `purchase_items` 한 줄에 담을 자리가 없다.
+BLOCK_GRADES = "등급 둘"
+
+#: 회차가 둘 이상인데 어느 회차의 금액이 비어 있다.
+BLOCK_LEG_AMOUNT = "회차금액 없음"
+
+#: 지급일이 없다 (`purchases.payment_due_date` 는 NOT NULL).
+BLOCK_PAYMENT_DUE = "지급일 없음"
+
+#: 목표 상태일에 앞으로 올 도착분이 하나도 없다.
+#:
+#: ⚠️ **이 갈래의 문장은 여기서 안 짓는다.** 판정도 문장도 주인은
+#:   `transition._arrival_blocked` 다 — 여기 있는 것은 **이름뿐**이고, 그쪽이 이
+#:   이름을 가져다 붙인다. 이름까지 그쪽이 지으면 요약이 세는 갈래가 둘이 된다.
+BLOCK_NO_ARRIVAL = "도착분 없음"
+
+#: 승인이 났는데 매입 원장에 한 행도 안 남는 갈래 전부. **순서가 뜻이다** —
+#: 요약이 이 순서로 찍는다.
+LEDGER_BLOCK_KINDS = (
+    BLOCK_GRADES,
+    BLOCK_LEG_AMOUNT,
+    BLOCK_PAYMENT_DUE,
+    BLOCK_NO_ARRIVAL,
+)
+
+#: 🔴 **며칠을 재시도해도 같은 이유로 막히는 갈래.**
+#:
+#: ```text
+#: 등급이 둘        영영 안 된다 — 값이 오는 문제가 아니라 담을 칸이 없는 문제다
+#: 그 밖 셋          매입·재무·물류가 값을 보내면 다음 날 풀린다
+#: ```
+#:
+#: ★★ **이 구분이 없으면 「내일 되면 될 것」과 「영영 안 될 것」이 `NOT_APPLIED`
+#:   한 값에 섞인다.** 섞이면 재시도가 도는 것을 보고 *"곧 풀리겠지"* 로 읽는데,
+#:   등급 둘은 몇 달을 돌아도 안 풀린다.
+#:
+#: 🔴 **이것이 재시도를 멈추지 않는다.** 여기 있는 갈래도 그대로 다시 세운다 —
+#:    이 목록은 **세는 쪽이 읽는 사실**이지 흐름을 가르는 스위치가 아니다.
+PERMANENT_BLOCK_KINDS = (BLOCK_GRADES,)
 
 #: 매입 유형. `purchase_type` 에는 CHECK 가 없고 번인이 `SAFETY_STOCK_INIT` ·
 #: `BURNIN_REPLENISHMENT` 를 쓴다. 승인이 만든 매입은 그 둘 중 어느 것도 아니다.
@@ -105,6 +162,59 @@ def _seq_목록(seqs: Sequence[int]) -> str:
     return ", ".join(str(seq) for seq in seqs)
 
 
+@dataclass(frozen=True)
+class LedgerBlock:
+    """원장을 못 쓴 **한 건**. 갈래와 문장을 **같이** 든다.
+
+    🔴 **둘을 따로 재지 않는다.** 갈래를 내는 함수와 문장을 내는 함수를 따로 두면
+       분기 순서가 두 곳에 적히고, 한쪽만 바뀌는 날 *"등급 둘"* 이라고 세면서
+       회차 금액 문장을 찍는다.
+    """
+
+    #: `LEDGER_BLOCK_KINDS` 중 하나. **세는 쪽이 읽는 칸이다.**
+    kind: str
+    #: 사람이 읽는 한 줄. **수량·등급·회차가 박혀 있어 키로 쓰면 안 된다.**
+    reason: str
+
+
+def ledger_block(commitment: ApprovedCommitment) -> LedgerBlock | None:
+    """매입 원장을 쓸 수 없으면 그 **갈래와 문장**. 쓸 수 있으면 `None`.
+
+    ★ **판정의 주인은 이 함수 하나다.** `ledger_block_reason` 은 여기서 문장만
+      떼어 주는 겉면이고, 전이·최후 방어가 그것을 부른다.
+    """
+    grades = commitment.grades
+    if len(grades) > 1:
+        return LedgerBlock(
+            kind=BLOCK_GRADES,
+            reason=(
+                f"등급이 {len(grades)}개인데 매입 줄이 하나다 ({' · '.join(grades)})"
+                " — 아무 등급이나 고르거나 합치지 않는다"
+            ),
+        )
+    legs = tuple(commitment.arrival_schedule)
+    if len(legs) > 1:
+        빈금액 = [leg.seq for leg in legs if leg.amount_krw is None]
+        if 빈금액:
+            return LedgerBlock(
+                kind=BLOCK_LEG_AMOUNT,
+                reason=(
+                    f"{_seq_목록(빈금액)}회차 금액이 없어 원장을 쓸 수 없다"
+                    " — 매입이 그 회차 금액을 아직 안 보냈다"
+                ),
+            )
+    빈지급일 = [leg.seq for leg in legs if leg.payment_due_date is None]
+    if 빈지급일:
+        return LedgerBlock(
+            kind=BLOCK_PAYMENT_DUE,
+            reason=(
+                f"{_seq_목록(빈지급일)}회차 지급일이 없다"
+                " — 재무 purchase_payment_days(N5) 가 없어 만들 수 없다"
+            ),
+        )
+    return None
+
+
 def ledger_block_reason(commitment: ApprovedCommitment) -> str:
     """매입 원장을 쓸 수 없는 사유. 쓸 수 있으면 **빈 문자열**이다.
 
@@ -135,28 +245,12 @@ def ledger_block_reason(commitment: ApprovedCommitment) -> str:
     ⚠️ **줄을 등급별로 가르는 것은 여기가 아니다.** `purchase_item_id` 규칙이 바뀌고
       `inventory_lots` · `inbound_schedules` 두 FK 가 걸린다 — 매입·물류와 함께
       정해야 하는 자리다. 마스터는 **막는 데까지** 한다.
+
+    ⚠️ **판정은 `ledger_block` 이 한다** (2026-09-16). 갈래를 같이 내야 해서 한 칸
+      안으로 옮겼고, 이 함수는 **문장만 떼어 준다** — 부르는 쪽은 그대로다.
     """
-    grades = commitment.grades
-    if len(grades) > 1:
-        return (
-            f"등급이 {len(grades)}개인데 매입 줄이 하나다 ({' · '.join(grades)})"
-            " — 아무 등급이나 고르거나 합치지 않는다"
-        )
-    legs = tuple(commitment.arrival_schedule)
-    if len(legs) > 1:
-        빈금액 = [leg.seq for leg in legs if leg.amount_krw is None]
-        if 빈금액:
-            return (
-                f"{_seq_목록(빈금액)}회차 금액이 없어 원장을 쓸 수 없다"
-                " — 매입이 그 회차 금액을 아직 안 보냈다"
-            )
-    빈지급일 = [leg.seq for leg in legs if leg.payment_due_date is None]
-    if 빈지급일:
-        return (
-            f"{_seq_목록(빈지급일)}회차 지급일이 없다"
-            " — 재무 purchase_payment_days(N5) 가 없어 만들 수 없다"
-        )
-    return ""
+    blocked = ledger_block(commitment)
+    return "" if blocked is None else blocked.reason
 
 
 def sim_run_id_for(commitment: ApprovedCommitment, *, sim_run_id: str | None) -> str:

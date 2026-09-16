@@ -37,6 +37,7 @@ import pytest
 
 from app.master.backtest_runner import WalkResult, format_summary
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
+from app.master.decision import AUTO_BACKFILL
 from app.master.pending_transition import (
     RetriedTransition,
     RetryOut,
@@ -57,13 +58,25 @@ def _NFC(text: str) -> str:
 # ── 대역 ────────────────────────────────────────────────────────────────
 
 
-def _승인행(request_id: str, *, seq: int = 1, as_of: date = date(2026, 1, 9)) -> dict[str, Any]:
-    """`approved_decisions` 가 내는 행의 모양 그대로."""
+def _승인행(
+    request_id: str,
+    *,
+    seq: int = 1,
+    as_of: date = date(2026, 1, 9),
+    decided_by: str = AUTO_BACKFILL,
+) -> dict[str, Any]:
+    """`approved_decisions` 가 내는 행의 모양 그대로.
+
+    ★ 기본이 자동 승인이다 (2026-09-15 · 설계 260915 안 A). 사람 승인은 실매입 기록이
+      있을 때만 재시도 대상이라, 이 판의 기존 검사(찾는 식 · 순서 · 어휘)는 자동 승인으로
+      잰다. 사람 승인 쪽은 `test_purchase_record.py` 가 잰다.
+    """
     return {
         "request_id": request_id,
         "decision_seq": seq,
         "as_of": as_of,
         "sim_run_id": 실행,
+        "decided_by": decided_by,
     }
 
 
@@ -115,6 +128,7 @@ def _재시도(
     commitment_of: Any = None,
     전이: _전이 | None = None,
     as_of: date = 오늘,
+    recorded: list[tuple[str, int]] | None = None,
 ) -> tuple[RetryOut, _전이]:
     문 = 전이 or _전이()
     out = retry_pending_transitions(
@@ -122,6 +136,7 @@ def _재시도(
         sim_run_id=실행,
         decisions_of=lambda **kw: list(decisions or []),
         purchase_ids_of=lambda **kw: list(purchase_ids or []),
+        recorded_of=lambda **kw: list(recorded or []),
         commitment_of=commitment_of or (lambda request_id: _약정(request_id)),
         apply_fn=문,
     )

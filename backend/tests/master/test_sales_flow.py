@@ -573,7 +573,11 @@ def test_후보를_그대로_보낸다():
     본것: list[dict] = []
 
     def 재무(request: AgentRequest):
-        본것.append(dict(request.payload))
+        # ★ **판정 호출만 본다.** 재무는 이제 두 mode 로 불린다 — 후보를 만들기 전의
+        #   사실 조회(`PRE_SALES_FACTS`)와 만든 뒤의 판정(`SALES_VALIDATION`)이다.
+        #   여기서 재는 것은 뒤쪽이고, 앞쪽에는 후보가 아직 없다.
+        if request.mode == "SALES_VALIDATION":
+            본것.append(dict(request.payload))
         reply = _reply(request)
         return reply, _meta(request, reply)
 
@@ -751,4 +755,5 @@ def test_최악_경우가_실제로_예산_안에서_끝난다():
     ).run()
 
     assert out.end_code == "SL3_ALL_REJECTED"  # SL5 가 아니다 — 예산이 모자라지 않았다
-    assert len(out.plan.steps) == 13
+    # 물류 1 + 재무 선행 사실 1 + (판매 1 + 재무 판정 3) × 3 회차 = 14
+    assert len(out.plan.steps) == 14

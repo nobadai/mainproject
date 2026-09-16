@@ -84,7 +84,10 @@ def read(monkeypatch):
     """``_read`` 를 갈아끼운다. 돌려줄 값을 넣으면 그대로 읽힌다."""
 
     def install(data: dict | Exception) -> None:
-        def fake(_as_of: date) -> dict:
+        #  🔴 `**_kwargs` 가 있어야 한다 (2026-09-16). `build` 가 `window_days=` 를
+        #     넘기는데, 안 받으면 `TypeError` 가 나고 `build` 의 `except Exception` 이
+        #     그것을 삼켜 **조용히 예시값**이 나간다 — 검사가 이유를 못 말한다.
+        def fake(_as_of: date, **_kwargs) -> dict:
             if isinstance(data, Exception):
                 raise data
             return data

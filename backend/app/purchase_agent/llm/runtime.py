@@ -38,6 +38,7 @@ from pydantic import ValidationError
 
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.llm.schemas import (
+    MIX_PRECEDENCE_SIGNAL,
     GradeMixInterpretation,
     InterpretationResult,
     LLMStatus,
@@ -637,8 +638,17 @@ def needs_llm(context: SanitizedLLMContext) -> bool:
     무관하게 근접 납품량으로 계산되므로 평시에도 후보가 3개 나온다(실측). 비용 완화의
     본체는 노드 쪽 게이팅이다 — ``_select_mix``가 "규칙이 중품을 채택한 날"(rule_ratio > 0)
     에만 여기까지 온다. 이 함수는 그 뒤의 **마지막 안전장치**다.
+
+    🔴 **예외 하나 — 우열표가 좁힌 날은 하나여도 부른다** (2026-09-15 · E3-12). 그날은
+    «고를 게 없어서» 하나인 것이 아니라 **규칙이 정해서** 하나이고, 판단자가 할 일이
+    «고르기» 에서 «설명하기» 로 바뀐다. 안 부르면 산출물이 조용히 달라진다 — 근거에서
+    「등급 조합 … 선택 — <사유>」 한 줄이 빠지고 위험에 「판단 미적용」이 대신 뜬다
+    (``package_scenarios`` 가 ``mix`` 의 세 상태를 그렇게 가른다).
+
+    ⚠️ 원래 후보가 하나뿐이던 날은 여기까지 오지 않는다 — 노드가 «좁히기 전» 개수로
+    먼저 막는다. 두 경우를 한 조건으로 합치면 그 구분이 사라진다.
     """
-    return len(context.candidates) >= 2
+    return len(context.candidates) >= 2 or MIX_PRECEDENCE_SIGNAL in context.signals
 
 
 def run_with_fallback[Interpretation](

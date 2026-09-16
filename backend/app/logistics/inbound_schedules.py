@@ -80,10 +80,13 @@ __all__ = [
     "assert_cancellable",
     "cancel_schedule",
     "in_transit_at",
+    "in_transit_from",
     "load_inbound_schedules",
     "load_schedule_views",
     "pending_inbound_at",
+    "pending_inbound_from",
     "receivable_at",
+    "receivable_from",
     "record_schedule",
     "schedule_fact_dates_at",
 ]
@@ -760,8 +763,16 @@ def schedule_fact_dates_at(
     return tuple(row["changed_on"] for row in rows)
 
 
-def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
-    """**운송 중** — 아직 창고에 도착하지 않은 입고.
+#  ── 소비자별 종료조건 ────────────────────────────────────────────────────
+#
+#  ★ **세 Reader 는 같은 `load_schedule_views` 결과를 각자의 종료조건으로 거른 것이다.**
+#    그래서 거르는 규칙(`*_from`)과 읽기(`*_at`)를 갈라 둔다 — 한 호출이 세 목록을
+#    다 쓸 때 같은 질의를 세 번 보내지 않게 (실측 2026-09-15: 화면 한 판에 5번 · 421 ms).
+#    규칙의 주인은 여전히 이 파일이고, 부르는 쪽은 views 를 한 번 읽어 나눠 쓴다.
+
+
+def in_transit_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]:
+    """**운송 중** — 아직 창고에 도착하지 않은 입고. `in_transit_at` 의 거르기 규칙.
 
     ```text
     종료조건   Receipt 가 생기면 빠진다
@@ -771,12 +782,11 @@ def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitI
        그것은 사라진 입고가 아니라 **연체된 미도착**이다
        (`arrival.select_due_inbound` 이 `overdue_count` 로 세는 그 상태다).
     """
-    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
     return [view.as_in_transit() for view in views if not view.has_receipt]
 
 
-def receivable_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
-    """**도착 처리 대상** — 아직 재고가 서지 않은 입고.
+def receivable_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]:
+    """**도착 처리 대상** — 아직 재고가 서지 않은 입고. `receivable_at` 의 거르기 규칙.
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다
@@ -791,12 +801,11 @@ def receivable_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitI
       네 갈래(`due` · `blocked` · `not_due` · `unresolved`)로 나누며 소유한다.
       여기서 미리 자르면 *"아직 안 온 것"* 과 *"못 받은 것"* 이 구별되지 않는다.
     """
-    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
     return [view.as_in_transit() for view in views if not view.stock_applied]
 
 
-def pending_inbound_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[ScheduledQuantity]:
-    """**미래 점유로 셀 입고** — Capacity 가 읽는 일정.
+def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[ScheduledQuantity]:
+    """**미래 점유로 셀 입고** — Capacity 가 읽는 일정. `pending_inbound_at` 의 거르기 규칙.
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다 (그때부터 on_hand 가 센다)
@@ -812,6 +821,23 @@ def pending_inbound_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[Sched
        Receipt 만 있고 Lot 이 없는 1,000kg 을 여기서 빼면 **창고에 와 있는 물건이
        점유에서 사라져** 없는 여유가 생긴다. 반대로 Lot 이 선 뒤에도 남기면
        같은 수량을 두 번 센다.
+
+    ⚠️ `receivable_from` 과 **같은 행**을 고른다 — 다른 것은 DTO 모양뿐이다
+       (`ScheduledQuantity.date` vs `InTransitItem.expected_arrival_date`).
     """
-    views = load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
     return [view.as_scheduled_quantity() for view in views if not view.stock_applied]
+
+
+def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
+    """`load_schedule_views` + `in_transit_from`. 규칙은 저쪽에 있다."""
+    return in_transit_from(load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of))
+
+
+def receivable_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
+    """`load_schedule_views` + `receivable_from`. 규칙은 저쪽에 있다."""
+    return receivable_from(load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of))
+
+
+def pending_inbound_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[ScheduledQuantity]:
+    """`load_schedule_views` + `pending_inbound_from`. 규칙은 저쪽에 있다."""
+    return pending_inbound_from(load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of))

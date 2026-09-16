@@ -73,17 +73,20 @@ def approved_decisions(*, sim_run_id: str) -> list[dict[str, Any]]:
     ★ **축의 주인은 실행 이력 행이다** (`master_agent_runs.sim_run_id` ·
       `decision_service._sim_run_id_of` 와 같은 자리). 결정 표에는 그 칸이 없다.
 
-    :returns: `request_id` · `decision_seq` · `as_of` · `sim_run_id` 를 든 행들.
+    :returns: `request_id` · `decision_seq` · `as_of` · `sim_run_id` · `decided_by` 를 든 행들.
+        ★ `decided_by` 는 재시도가 사람 승인과 자동 승인을 가르는 데 쓴다
+        (설계 260915 안 A §4-4).
         승인이 없으면 **빈 목록** — 조회를 못 한 것과는 다르고, 그쪽은 예외로 오른다.
     """
     query = sql.SQL(
         """
-        SELECT request_id, decision_seq, as_of, sim_run_id
+        SELECT request_id, decision_seq, as_of, sim_run_id, decided_by
         FROM (
             SELECT DISTINCT ON (d.request_id)
                    d.request_id  AS request_id,
                    d.decision_seq AS decision_seq,
                    d.decision     AS decision,
+                   d.decided_by   AS decided_by,
                    r.as_of        AS as_of,
                    r.sim_run_id   AS sim_run_id
             FROM {} AS d

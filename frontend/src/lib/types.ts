@@ -11,17 +11,47 @@ export type IntentAction =
   | "STATUS_QUERY"
   | "RERUN_WITH_CONDITION"
   | "SELECT_SCENARIO"
+  | "DOMAIN_ACTION"
   | "UNKNOWN";
 
-export type AgentName = "finance" | "inventory" | "purchase";
+export type AgentName = "finance" | "inventory" | "purchase" | "sales" | "ml";
 
-/** LLM 이 돌려주는 것. **수량·금액 칸이 없는 것이 안전장치의 전부다.** */
+export type DomainAction =
+  | "FINANCE_SUMMARY_GET"
+  | "FINANCE_CASH_ADJUSTMENT_CREATE"
+  | "FINANCE_CREDIT_LIMIT_GET"
+  | "FINANCE_CREDIT_LIMIT_UPSERT"
+  | "FINANCE_COLLECTION_CREATE"
+  | "FINANCE_EXPENSE_LIST"
+  | "FINANCE_EXPENSE_CREATE"
+  | "FINANCE_EXPENSE_SETTLE"
+  | "FINANCE_EXPENSE_CANCEL"
+  | "FINANCE_CASHFLOW_GET"
+  | "FINANCE_RECEIVABLES_GET"
+  | "FINANCE_PAYABLES_GET"
+  | "FINANCE_REPORT_GENERATE"
+  | "SALES_PROPOSAL_CREATE"
+  | "SALES_PROPOSALS_TODAY"
+  | "SALES_CONFIRMED_TODAY"
+  | "SALES_REPORT_GENERATE"
+  | "PARTNER_LIST"
+  | "PARTNER_CREATE"
+  | "PARTNER_DETAIL_GET"
+  | "PARTNER_UPDATE";
+
+export interface DomainSlots {
+  [key: string]: string | boolean | null | undefined;
+}
+
+/** LLM 숫자·날짜 슬롯도 사용자 표현 문자열일 뿐 Domain 계산값이 아니다. */
 export interface Intent {
   action: IntentAction;
   agents: AgentName[];
   item: string | null;
   scenario_label: string | null;
   condition: string | null;
+  domain_action?: DomainAction | null;
+  slots?: DomainSlots | null;
   confidence: "HIGH" | "MEDIUM" | "LOW";
 }
 
@@ -29,6 +59,8 @@ export type AskOutcome =
   | "CLASSIFIED_ONLY"
   | "STATUS_ANSWERED"
   | "DECISION_RECORDED"
+  | "DOMAIN_ACTION_ANSWERED"
+  | "DOMAIN_ACTION_EXECUTED"
   | "NEEDS_CLARIFICATION";
 
 export interface AnswerOut {
@@ -60,6 +92,16 @@ export interface DecisionOut {
   is_current: boolean;
 }
 
+export interface DomainActionAnswer {
+  domain: "finance" | "sales" | "partner";
+  action: string;
+  text: string;
+  data: Record<string, unknown>;
+  /** 기존 Markdown은 debug/fallback 용이며 domain report의 본문은 data facts다. */
+  markdown?: string | null;
+  report_kind?: "FINANCE" | "SALES" | null;
+}
+
 export interface AskResponse {
   request_id: string;
   as_of: string;
@@ -72,6 +114,7 @@ export interface AskResponse {
   /** 조건부 재요청으로 **다시 돈 실행.** 없으면 고리가 끊긴다. */
   run: ProcurementRunResponse | null;
   answer: AnswerOut | null;
+  domain_result?: DomainActionAnswer | null;
   llm_status: string;
   /** 어느 API 를 탔나 — `ollama`(로컬) 인지 `gemini`(외부) 인지 화면이 구분해 적는다. */
   llm_provider: string | null;
@@ -304,4 +347,83 @@ export interface RunReport {
   filename: string;
   /** Markdown 전문. **화면이 조립하지 않는다** — 서버가 낸 것을 그대로 내려받는다. */
   markdown: string;
+}
+
+/* ── 실매입 기록 (설계 260915 안 A §3 · §5) ─────────────────────────────── */
+
+/**
+ * 실매입 기록의 반영 상태. 백엔드 `PurchaseRecordStatus` 의 거울.
+ *
+ * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 반영되지 않음)로 옮긴다.
+ */
+export type PurchaseRecordStatus =
+  | "AWAITING_PURCHASE_RECORD"
+  | "APPLIED"
+  | "NOT_APPLIED"
+  | "NOT_REQUIRED";
+
+/** 회차 한 줄. 선정안 값(`plan`)과 기록값(`record`)이 같은 모양이다. */
+export interface PurchaseRecordLeg {
+  seq: number;
+  qty_kg: number;
+  /**
+   * 원/kg. **사람이 적는 값이고 폼이 미리 채운다** (2026-09-16).
+   *
+   * 선정안에 단가가 없으면 `null` — 화면이 금액 ÷ 수량으로 지어내지 않고 빈 칸으로 연다.
+   */
+  unit_price_krw: number | null;
+  /** 수량 × 단가로 난 값. **입력칸이 아니다** — 화면이 확인용으로만 보여 준다. */
+  amount_krw: number | null;
+  purchase_date: string;
+  arrival_date: string;
+}
+
+/** `GET /master/runs/{request_id}/purchase-record` */
+export interface PurchaseRecordOut {
+  request_id: string;
+  decision_seq: number;
+  scenario_label: string | null;
+  decided_by: string;
+  status: PurchaseRecordStatus;
+  reason: string;
+  /** 폼에 미리 채울 선정안 값. */
+  plan: { grade: string | null; legs: PurchaseRecordLeg[] };
+  record: {
+    grade: string;
+    recorded_by: string;
+    recorded_at: string;
+    legs: PurchaseRecordLeg[];
+  } | null;
+}
+
+/**
+ * `POST /master/runs/{request_id}/purchase-record` 본문.
+ *
+ * ★ 회차 수와 `seq` 는 선정안 그대로다 — 사람은 값만 고친다.
+ *
+ * 🔴 **금액 칸이 없다** (2026-09-16). 수량과 단가를 보내면 금액은 서버가 수량 × 단가로
+ *    만든다 — 둘 다 보내면 어긋나는 날 어느 쪽이 산 값인지 알 수 없다.
+ */
+export interface PurchaseRecordIn {
+  decision_seq: number;
+  grade: string;
+  recorded_by: string;
+  legs: {
+    seq: number;
+    qty_kg: number;
+    /** 원/kg. **정수다** — 매입 원장 단가 칸의 모양이다. */
+    unit_price_krw: number;
+    purchase_date: string;
+    arrival_date: string;
+  }[];
+}
+
+/** 승인 1건의 상태전이 결과. 백엔드 `TransitionOut` 의 거울. */
+export interface TransitionOut {
+  status: "APPLIED" | "NOT_APPLIED" | "FAILED" | "AWAITING_PURCHASE_RECORD";
+  reason: string;
+  parts: string[];
+  missing: string[];
+  carried_forward: string[];
+  carried_forward_status: "OK" | "UNREADABLE";
 }

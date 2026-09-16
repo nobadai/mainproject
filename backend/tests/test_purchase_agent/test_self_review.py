@@ -484,3 +484,61 @@ def test_다섯번이_안_돌면_라벨도_빈_목록이다(monkeypatch: pytest.
     )
     assert context.mix_reason is None
     assert context.mix_labels == []
+
+
+# ── 어조 판정 — **어미로 가른다** (2026-09-15 · E3-12) ────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("기대", "문장"),
+    [
+        # 🔴 이것이 고친 자리다. 「전량」은 어조가 아니라 «총량» 이라는 명사다.
+        #   저장 기록 근거 문면 3,748종 중 ASSERTIVE 373건이 전부 이 한 단어였고,
+        #   안 6,295개 중 5,350개(85%)가 그 오탐을 달고 ⑧ 에게 갔다.
+        ("NEUTRAL", "날짜별 입고 여유 <AMT> (전량 <AMT> 중 <AMT> 이 예정)"),
+        ("NEUTRAL", "가락 <DATE> 경락가 <AMT>/kg 등 <NUM>개 등급"),
+        ("NEUTRAL", "최대 <AMT> 까지 잡아 둔 창고 여유"),
+        # 진짜 단정은 그대로 잡는다 — 서술어 끝에 붙는다.
+        ("ASSERTIVE", "중품을 상한만큼 취급하는 것이 위험을 최소화하는 전략이다."),
+        ("ASSERTIVE", "이 안이 오늘 낼 수 있는 최선이다"),
+        # 완화가 이긴다 — 순서는 예전 그대로다.
+        ("HEDGED", "향후 최저 현금 <AMT>의 <PCT>까지 매입 가능"),
+        ("HEDGED", "상승 추세가 이어질 것으로 예상된다"),
+        # 「…하다」는 단정이 아니다 — 예전 판정을 그대로 보존한다.
+        ("NEUTRAL", "중품 비중을 조절하는 것이 유리하다."),
+        ("NEUTRAL", "중품 비중을 조절하는 것이 유리합니다."),
+    ],
+)
+def test_어조는_마지막_절의_어미로_가른다(기대: str, 문장: str) -> None:
+    """🔴 **부분일치를 버렸다.** 문장 어디가 아니라 **끝**을 본다.
+
+    한국어에서 단정·완화는 서술어 끝에 붙고, 명사(전량·최대)는 문장 어디에나 나오면서
+    어조를 만들지 않는다. 그 구분이 없으면 규칙이 쓴 문장이 통째로 ``ASSERTIVE`` 가 되고,
+    지시문이 *"ASSERTIVE 인데 ASSUMED 면 결론이 근거보다 세다"* 로 판단자를 몰아
+    **없는 위반을 찾게** 한다.
+    """
+    assert rr.claim_strength(문장) == 기대
+
+
+def test_어미_선언을_바꾸면_판정이_따라_바뀐다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **규칙 8** — 어미 목록의 주인이 ``constraints.yaml`` 하나인지 본다.
+
+    ⚠️ 값 비교로는 못 잡는다. 코드가 같은 목록을 하드코딩해도 «선언과 같다» 는 통과한다.
+      선언에서 「이다」를 빼고 판정이 ``NEUTRAL`` 로 떨어지는지 본다.
+    """
+    from app.purchase_agent.config import load_constraints
+
+    문장 = "중품을 상한만큼 취급하는 것이 위험을 최소화하는 전략이다."
+    assert rr.claim_strength(문장) == "ASSERTIVE"
+
+    사본 = load_constraints()
+    어미 = 사본["review"]["claim_strength_endings"]
+    사본["review"] = {
+        **사본["review"],
+        "claim_strength_endings": {
+            **어미,
+            "assertive": [말 for 말 in 어미["assertive"] if 말 != "이다"],
+        },
+    }
+    monkeypatch.setattr(rr, "load_constraints", lambda: 사본)
+    assert rr.claim_strength(문장) == "NEUTRAL"

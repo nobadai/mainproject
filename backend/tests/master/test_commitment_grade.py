@@ -352,6 +352,49 @@ def test_등급이_셋이면_셋이라고_적는다() -> None:
     assert N("등급이 3개인데 매입 줄이 하나다") in N(사유)
 
 
+# ── ④' 갈래와 사유 문장이 한 함수에서 같이 나온다 (2026-09-16) ──────────
+#
+# 🔴 **걷기 요약이 사유별로 세려면 문장이 아니라 갈래가 필요하다.** 문장에는 등급
+#    이름과 회차 번호가 박혀 있어 (`등급이 2개인데 … (특 · 상)`) 약정마다 다른 키가
+#    되고, 그러면 세는 뜻이 없어진다.
+#
+# 🔴 **판정의 주인은 여전히 하나다.** 갈래를 내는 함수와 문장을 내는 함수를 따로
+#    두면 분기 순서가 두 곳에 적히고, 한쪽만 바뀌는 날 *"등급 둘"* 이라고 세면서
+#    회차 금액 문장을 찍는다.
+
+
+def test_등급이_둘이면_갈래가_등급_둘이다() -> None:
+    commitment = _약정(scenario=_안(sourcing_plan=_두등급()))
+
+    막힘 = ledger.ledger_block(commitment)
+
+    assert 막힘 is not None
+    assert 막힘.kind == ledger.BLOCK_GRADES
+    assert 막힘.reason == ledger.ledger_block_reason(commitment), (
+        "문장의 주인은 여전히 한 곳이다 — 갈래를 연다고 문장이 갈리면 안 된다"
+    )
+
+
+def test_막을_것이_없으면_갈래도_없다() -> None:
+    """🔴 **막는 판정이 넓어지면 걷기가 고르는 것이 바뀐다.** 종전 그대로여야 한다."""
+    commitment = _약정(scenario=_안())
+
+    assert ledger.ledger_block(commitment) is None
+    assert ledger.ledger_block_reason(commitment) == ""
+
+
+def test_영영_안_될_갈래는_등급_둘_하나다() -> None:
+    """🔴 **「내일 되면 될 것」과 「영영 안 될 것」은 다음에 할 일이 다르다.**
+
+    회차 금액 · 지급일 · 도착분은 매입·재무·물류가 값을 보내면 다음 날 풀린다.
+    등급이 둘인 것은 담을 칸이 없는 것이라 며칠을 재시도해도 같은 이유로 막힌다.
+    """
+    assert ledger.PERMANENT_BLOCK_KINDS == (ledger.BLOCK_GRADES,)
+    assert ledger.BLOCK_LEG_AMOUNT not in ledger.PERMANENT_BLOCK_KINDS
+    assert ledger.BLOCK_PAYMENT_DUE not in ledger.PERMANENT_BLOCK_KINDS
+    assert ledger.BLOCK_NO_ARRIVAL not in ledger.PERMANENT_BLOCK_KINDS
+
+
 # ── ⑤ 원문 잠금 — 넣지 않기로 한 것이 안 들어갔다 ───────────────────────
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -218,6 +219,52 @@ def test_키가_없어도_죽지_않고_되묻는다():
     assert result.intent.action == "UNKNOWN"
 
 
+# ── 프로바이더가 터진 사유 (2026-09-16) ──────────────────────────────────
+#
+# 🔴 **이 줄이 없어서 죽은 Gemini 키(403)를 「복수 topic 분류 결함」으로 잘못 짚고
+#    몇 시간을 팠다.** 화면에는 `FALLBACK` 만 떠서 403 인지 429 인지 타임아웃인지
+#    스키마 오류인지 구분이 안 됐다 — 한 줄만 남아 있었으면 즉시 키를 의심했다.
+
+
+def test_프로바이더가_터지면_경고가_한_줄_남는다(caplog):
+    """🔴 **사유를 통째로 버리지 않는다.** 예외 **종류와 문장**이 보여야 한다."""
+    with caplog.at_level(logging.WARNING, logger="app.master.llm.runtime"):
+        IntentService(SETTINGS, BoomProvider()).classify("오늘 배추 사야 해?")
+
+    경고 = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(경고) == 1, f"경고가 {len(경고)}줄이다 — 한 줄이어야 한다"
+    남은말 = 경고[0].getMessage()
+    assert "RuntimeError" in 남은말, f"예외 종류가 안 보인다: {남은말}"
+    assert "키가 없다" in 남은말, f"예외 문장이 안 보인다: {남은말}"
+
+
+def test_터져도_종전처럼_FALLBACK_으로_돌아온다(caplog):
+    """🔴 **동작은 그대로다.** 로그는 드러내기만 하고 흐름을 안 바꾼다.
+
+    ⚠️ `break` 가 그대로라 시도는 **한 번**이다 — 로그를 넣으면서 재시도가 늘거나
+      줄면 그 자체가 걷기 숫자를 바꾼다.
+    """
+    with caplog.at_level(logging.WARNING, logger="app.master.llm.runtime"):
+        result = IntentService(SETTINGS, BoomProvider()).classify("오늘 배추 사야 해?")
+
+    assert result.llm_status == "FALLBACK"
+    assert result.llm_fallback_used is True
+    assert result.intent.action == "UNKNOWN"
+    assert result.llm_attempts == 1, "터지면 첫 시도에서 멈춘다 — break 가 그대로여야 한다"
+
+
+def test_발화문_원문은_로그에_안_들어간다(caplog):
+    """🔴 **사용자가 친 문장이다.** 길이는 적어도 원문은 안 적는다."""
+    발화문 = "오늘 배추 300kg 쯤 사야 하나 고민인데 어떻게 할까"
+    with caplog.at_level(logging.WARNING, logger="app.master.llm.runtime"):
+        IntentService(SETTINGS, BoomProvider()).classify(발화문)
+
+    남은말 = caplog.records[0].getMessage()
+    assert 발화문 not in 남은말, f"발화문 원문이 로그에 실렸다: {남은말}"
+    assert "배추" not in 남은말, f"발화문 조각이 로그에 실렸다: {남은말}"
+    assert f"{len(발화문)}자" in 남은말, f"길이는 적어야 되짚을 수 있다: {남은말}"
+
+
 def test_꺼_두면_호출하지_않는다():
     settings = LLMSettings(**{**SETTINGS.__dict__, "enabled": False})
     svc = service(payload(action="STATUS_QUERY", confidence="HIGH"), settings=settings)
@@ -242,5 +289,14 @@ def test_빈_발화문은_부르지_않는다():
 def test_출력_스키마에_수량_금액_칸이_없다():
     """**안전장치의 전부다.** 만들 자리를 없앤다 (오케 selector · 매입 ⑤ 선례)."""
     fields = set(Intent.model_fields)
-    assert fields == {"action", "agents", "item", "scenario_label", "condition", "confidence"}
+    assert fields == {
+        "action",
+        "agents",
+        "item",
+        "scenario_label",
+        "condition",
+        "domain_action",
+        "slots",
+        "confidence",
+    }
     assert not {"qty_kg", "amount_krw", "budget", "payload"} & fields

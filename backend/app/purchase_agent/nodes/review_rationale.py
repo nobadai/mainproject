@@ -15,9 +15,11 @@
   값을 지적에 베껴 쓰고, 그 순간 규칙 6 이 깨진다 — 노드가 넣기 직전에 다시 확인한다.
 """
 
+import re
 from typing import Any
 
 from app.master.envelope import LLMCallMetadata
+from app.purchase_agent.config import load_constraints
 from app.purchase_agent.features import SELF_REVIEW, enabled
 from app.purchase_agent.llm.mix import context_labels
 from app.purchase_agent.llm.review_schemas import ClaimIn, ReviewContext
@@ -34,15 +36,42 @@ from app.purchase_agent.state import PurchaseAgentState
 #: (어댑터가 그래프를 부른다). 문자열을 두 곳에 적는 대신, 계약 검사가 둘이 같은지 잠근다.
 RATIONALE_SELF_REVIEW = "rationale_self_review"
 
-_ASSERTIVE = ("이다", "확실", "반드시", "전량", "최대")
-_HEDGED = ("가능", "예상", "보인다", "추정", "일 수")
+def _last_clause(text: str) -> str:
+    """마지막 절 — 마침표·줄바꿈으로 자른 뒤 **끝 조각**.
+
+    🔴 **문장 전체가 아니라 끝을 본다.** 한국어에서 단정·완화는 서술어 끝에 붙고,
+    명사(전량·최대)는 문장 어디에나 나오면서 어조를 만들지 않는다.
+    """
+    조각 = [토막.strip() for 토막 in re.split(r"[.\n]", text) if 토막.strip()]
+    return 조각[-1] if 조각 else ""
 
 
 def claim_strength(text: str) -> str:
-    """문장의 어조. 어휘로만 가른다 — 뜻을 재는 것이 아니다."""
-    if any(말 in text for 말 in _HEDGED):
+    """문장의 어조. **마지막 절의 어미로** 가른다 — 뜻을 재는 것이 아니다.
+
+    🔴 **부분일치를 버렸다** (2026-09-15). 전에는 문장 어디든 「전량·최대·확실·반드시·
+    이다」가 있으면 ``ASSERTIVE`` 였다. 그 결과 규칙이 쓴 문장이 통째로 오탐이 됐다::
+
+        "날짜별 입고 여유 <AMT> (전량 <AMT> 중 <AMT> 이 예정)"
+
+    여기 「전량」은 어조가 아니라 «총량» 이라는 명사다. 저장 기록 근거 문면 3,748종 중
+    ``ASSERTIVE`` 373건이 **전부 이 한 단어** 때문이었고, 안 6,295개 중 **5,350개(85%)**가
+    그 오탐을 달고 ⑧ 에게 갔다.
+
+    ⚠️ **왜 그게 나쁜가.** 지시문이 *"claim_strength 가 ASSERTIVE 인데 evidence_strength 가
+    ASSUMED 면 결론이 근거보다 세다"* 로 판단자를 몬다. 어조가 아닌 것을 어조라고 적어
+    주면 판단자는 **없는 위반을 찾게 된다.**
+
+    🔴 어미 목록은 ``constraints.yaml`` 이 소유한다 (규칙 7) — 언어 규칙이라도 값을 코드에
+    박으면 바꿀 때 어디를 고치는지가 두 곳이 된다.
+
+    ⚠️ **순서는 그대로다 — ``HEDGED`` 를 먼저 본다.** 완화 표현이 있으면 단정이 아니다.
+    """
+    끝 = _last_clause(text)
+    어미 = load_constraints()["review"]["claim_strength_endings"]
+    if any(끝.endswith(말) for 말 in 어미["hedged"]):
         return "HEDGED"
-    if any(말 in text for 말 in _ASSERTIVE):
+    if any(끝.endswith(말) for 말 in 어미["assertive"]):
         return "ASSERTIVE"
     return "NEUTRAL"
 

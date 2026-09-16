@@ -197,6 +197,17 @@ def agent_label(agent: str) -> str:
     return _AGENT_LABEL.get(agent, agent)
 
 
+def agent_labels() -> tuple[str, ...]:
+    """부서 이름 **전부**. 닫힌 목록으로 쓰는 쪽이 파생해 간다.
+
+    🔴 `llm/answer_runtime.py` 의 `_INVENTED_AGENT` 가 이것을 쓴다. 그 검사는
+    *"프롬프트에 없던 부서 이름이 문장에 나오면 지어낸 것"* 이라는 명제 위에 서 있고,
+    그 명제는 **목록이 닫혀 있을 때만** 참이다. 세어 보는 곳이 이름을 손으로 다시
+    적으면 목록이 열려 버린다.
+    """
+    return tuple(_AGENT_LABEL.values())
+
+
 # ── 조회 ────────────────────────────────────────────────────────────────
 
 

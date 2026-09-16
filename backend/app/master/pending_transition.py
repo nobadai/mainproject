@@ -68,8 +68,10 @@ from datetime import date
 from typing import Any, Literal
 
 from app.master.commitment import ApprovedCommitment
+from app.master.decision import awaits_purchase_record
 from app.master.decision_service import current_approved_commitment
 from app.master.pending_transition_repository import approved_decisions, ledger_purchase_ids
+from app.master.purchase_record_repository import recorded_decision_keys
 from app.master.transition import TransitionOut, apply_approval, purchase_id_prefix_for
 
 __all__ = [
@@ -139,6 +141,14 @@ class RetriedTransition:
     outcome: RetryOutcome
     #: 왜 그 결과가 됐나. `APPLIED` 에는 없다.
     reason: str = ""
+    #: 🔴 **원장에 한 행도 안 남은 이유의 갈래** (2026-09-16). 막힌 게 아니면 빈 값.
+    #:
+    #: ★ **이름의 주인은 `ledger.LEDGER_BLOCK_KINDS` 다** — 여기서 안 짓는다.
+    #:   `TransitionOut.block_kind` 를 **그대로 옮긴다**.
+    #:
+    #: ⚠️ **이 칸이 재시도를 멈추지 않는다.** 영영 안 될 갈래도 다음 날 또 세운다 —
+    #:   여기서 거르면 걷기가 고르는 것이 바뀐다. 이 칸은 **세는 쪽만 읽는다.**
+    block_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -168,6 +178,7 @@ def pending_approvals(
     decisions: Iterable[Mapping[str, Any]],
     purchase_ids: Iterable[str],
     before: date,
+    recorded: Iterable[tuple[str, int]] = (),
 ) -> tuple[PendingApproval, ...]:
     """승인 목록과 원장 ID 목록을 **맞대어** 미적용을 고른다. 🔴 **순수 함수다.**
 
@@ -195,8 +206,13 @@ def pending_approvals(
         상태가 설 날은 승인일 **다음 날**이라(`transition._target_state_date`) 오늘
         승인은 오늘 세울 자리가 없다. 그리고 같은 범위를 **다시 걸을 때** 이 줄이
         없으면 첫날 재시도가 **아직 오지 않은 날의 승인**까지 장부에 밀어 넣는다.
+    :param recorded: 실매입 기록이 있는 승인 `(request_id, decision_seq)`.
+        🔴 **사람 승인은 여기 있을 때만 고른다** (설계 260915 안 A §4-4). 기록이 없는
+        사람 승인을 계획값으로 원장에 앉히면, 사람이 실제로 산 값을 적기도 전에 안의
+        계획값이 채무 · 입고 일정이 된다. 기본이 빈 목록인 이유가 그것이다.
     """
     applied = tuple(purchase_ids)
+    recorded_keys = frozenset(recorded)
     found: list[PendingApproval] = []
     for row in decisions:
         as_of = row["as_of"]
@@ -204,6 +220,11 @@ def pending_approvals(
             continue
         request_id = row["request_id"]
         decision_seq = int(row["decision_seq"])
+        key = (request_id, decision_seq)
+        if awaits_purchase_record(row.get("decided_by")) and key not in recorded_keys:
+            # 🔴 **사람 승인인데 실매입 기록이 없다 — 건너뛴다.** 기록이 들어오면 그날
+            #    `record_purchase` 가 세우고, 못 섰으면 다음 재시도가 기록값으로 세운다.
+            continue
         prefix = purchase_id_prefix_for(request_id, decision_seq)
         if any(one.startswith(prefix) for one in applied):
             # 🔴 **이미 닿았다. 다시 안 한다** — 멱등이 이 한 줄이다. 다시 하면
@@ -226,6 +247,7 @@ def retry_pending_transitions(
     sim_run_id: str,
     decisions_of: Callable[..., Sequence[Mapping[str, Any]]] = approved_decisions,
     purchase_ids_of: Callable[..., Sequence[str]] = ledger_purchase_ids,
+    recorded_of: Callable[..., Iterable[tuple[str, int]]] = recorded_decision_keys,
     commitment_of: Callable[[str], ApprovedCommitment | None] = current_approved_commitment,
     apply_fn: Callable[..., TransitionOut] = apply_approval,
 ) -> RetryOut:
@@ -254,12 +276,16 @@ def retry_pending_transitions(
     :param commitment_of: 약정을 재조립하는 자리. 🔴 **기본값이 실제 함수 자체다**
         (`clock.py` · `verifier.py` 와 같은 규율) — `None` 을 안 받는다.
     :param apply_fn: 전이 경계. 기본이 `apply_approval` 자체다.
+    :param recorded_of: 실매입 기록이 있는 승인 키. 기본이 저장소 함수 자체다.
+        🔴 사람 승인은 기록이 있을 때만 다시 세운다 · 기록이 있으면 `commitment_of`
+        (`current_approved_commitment`)가 **기록값으로 덮어** 조립한다.
     """
     try:
         found = pending_approvals(
             decisions=decisions_of(sim_run_id=sim_run_id),
             purchase_ids=purchase_ids_of(sim_run_id=sim_run_id),
             before=as_of,
+            recorded=recorded_of(sim_run_id=sim_run_id),
         )
     except Exception as exc:  # noqa: BLE001 - 조회가 터져도 하루는 계속 간다.
         # 🔴 **`NOTHING_DUE` 로 접지 않는다.** 미적용이 없는 것과 있었는지 못 물어본
@@ -291,13 +317,14 @@ def _retry_one(
 ) -> RetriedTransition:
     """미적용 하나. **예외를 값으로 옮긴다** (`scheduler._stage` 와 같은 태도)."""
 
-    def 결과(outcome: RetryOutcome, reason: str = "") -> RetriedTransition:
+    def 결과(outcome: RetryOutcome, reason: str = "", block_kind: str = "") -> RetriedTransition:
         return RetriedTransition(
             request_id=pending.request_id,
             decision_seq=pending.decision_seq,
             as_of=pending.as_of,
             outcome=outcome,
             reason=reason,
+            block_kind=block_kind,
         )
 
     try:
@@ -315,4 +342,6 @@ def _retry_one(
         #   하루의 진행이 그 약속에 걸리면 안 된다.
         return 결과("FAILED", f"전이가 터졌다: {type(exc).__name__}: {exc}")
     # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇이 왜 안 닿았는지가 이 줄이다.
-    return 결과(str(out.status), out.reason)  # type: ignore[arg-type]
+    # 🔴 **갈래도 버리지 않는다** (2026-09-16). 이 한 칸이 없으면 다음 날 재시도에서
+    #    막힌 건이 요약에서 안 세어지고, **한쪽 경로만 세면 수가 조용히 작아진다.**
+    return 결과(str(out.status), out.reason, out.block_kind)  # type: ignore[arg-type]

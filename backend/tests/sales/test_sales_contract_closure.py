@@ -386,3 +386,38 @@ def test_scenario_quantity_is_clipped_to_authoritative_conditional_supply():
 
     assert _aggressive(refed).quantity_kg == Decimal(4500)
     assert _aggressive(baseline).quantity_kg == Decimal(5000)
+
+
+def test_full_renewal_user_override_does_not_claim_contract_as_direct_commercial_evidence():
+    reply = run_proposal(
+        _request(
+            "CONTRACT_PROPOSAL_RENEWAL",
+            user={
+                "requested_quantity_kg": 5000,
+                "preferred_unit_price_krw": 2500,
+                "preferred_delivery_date": "2026-09-11",
+                "preferred_payment_days": 10,
+                "preferred_payment_terms_type": "SINGLE",
+                "preferred_contract_term_days": 30,
+                "source_ref": "USER-REQ:FULL",
+            },
+        )
+    )
+
+    assert all(scenario.source_ref == "USER-REQ:FULL" for scenario in reply.scenarios)
+    assert all("CONTRACT:C-1" not in scenario.evidence_refs for scenario in reply.scenarios)
+
+
+def test_partial_renewal_override_keeps_inherited_contract_evidence():
+    reply = run_proposal(
+        _request(
+            "CONTRACT_PROPOSAL_RENEWAL",
+            user={
+                "preferred_unit_price_krw": 2500,
+                "source_ref": "USER-REQ:PRICE",
+            },
+        )
+    )
+
+    assert all(scenario.source_ref == "USER-REQ:PRICE" for scenario in reply.scenarios)
+    assert all("CONTRACT:C-1" in scenario.evidence_refs for scenario in reply.scenarios)

@@ -9,8 +9,8 @@ finance_receivable.py — 마스터 `ReceivableSource` 를 재무 채권 구현�
 ③ 한 건씩 confirm_receivable 에 넘긴다     채권 원장은 재무 것이다
 ```
 
-  마스터 Protocol 은 `as_of` 만 나르는데 `ReceivableCreateInput` 은 일곱 칸을
-  요구한다. 그 일곱의 **주인이 각각 누구인가**가 이 파일의 전부다.
+  마스터 Protocol 은 `as_of` 만 나르는데 `ReceivableCreateInput` 은 여덟 칸을
+  요구한다. 그 여덟의 **주인이 각각 누구인가**가 이 파일의 전부다.
 
 ---
 
@@ -20,6 +20,7 @@ finance_receivable.py — 마스터 `ReceivableSource` 를 재무 채권 구현�
 sim_run_id            🟢 마스터가 정한다 — ledger_repository.BURN_IN_SIM_RUN_ID 하나
 financing_mode        🔴 **마스터가 고르지 않는다** — get_finance_runtime_axis() 로 묻는다
 sale_date             sales.sale_date
+issued_date           🟢 마스터가 정한다 — 그날 `as_of` 다 (sale_date 와 다를 수 있다)
 customer_partner_id   sales.customer_partner_id
 due_date              🔴 **sales.collection_due_date 를 읽는다**
 original_amount_krw   sales.total_amount_krw
@@ -53,7 +54,7 @@ sale_id               sales.sale_id
 🔴 **대상 판매에 `DELIVERED` 를 넣는다.**
 
 ```text
-WHERE sale_date = as_of
+WHERE 납품 처리일 = as_of   (당일, 휴장이면 그 뒤 첫 개장일 · handled_on_first_open_day)
   AND order_status IN ('CONFIRMED', 'READY', 'DELIVERED')
 ```
 
@@ -101,6 +102,7 @@ from app.finance.db import (
 )
 from app.finance.receivables import ReceivablePersistenceConflict, confirm_receivable
 from app.finance.sales_validation import ReceivableCreateInput
+from app.master.day_opening_repository import handled_on_first_open_day
 from app.master.receivable import ReceivablePartOut
 
 __all__ = [
@@ -163,13 +165,21 @@ def read_confirmed_sales(
                        collection_due_date,
                        total_amount_krw
                   FROM {}.sales
-                 WHERE sale_date = %s
+                 WHERE sale_date <= %s
                    AND sim_run_id = %s
                    AND order_status = ANY(%s)
+                   AND {}
                  ORDER BY sale_id
                 """
-            ).format(schema),
-            [as_of, sim_run_id, list(ISSUABLE_ORDER_STATUSES)],
+            ).format(
+                schema,
+                # 🔴 **출고와 같은 규칙이다** — 휴장일 납품은 그 뒤 첫 개장일에 한 번 발행한다.
+                #   실측 2026-03-07 · 04-04 · MISSING_RECEIVABLE 6. backorder 아님.
+                handled_on_first_open_day(
+                    sale_date=sql.SQL("sales.sale_date"), sim_run_id=sql.SQL("sales.sim_run_id")
+                ),
+            ),
+            [as_of, sim_run_id, list(ISSUABLE_ORDER_STATUSES), as_of, as_of, as_of],
         )
         rows = cursor.fetchall()
     return tuple(
@@ -262,6 +272,11 @@ class FinanceReceivableAdapter:
                 # 🔴 **고르지 않는다. 재무가 읽은 값 그대로다.**
                 financing_mode=axis["financing_mode"],
                 sale_date=sale.sale_date,
+                # 🔴 **발행일은 판매일이 아니라 그날이다.** 휴장일 판매는 그 뒤 첫
+                #   개장일에 발행되므로 `sale_date` 보다 늦다. 재무는 이 날짜의 상태에
+                #   AR 을 올리므로, 여기에 `sale.sale_date` 를 실으면 이미 지나간 날의
+                #   잔액이 뒤늦게 커진다.
+                issued_date=as_of,
                 customer_partner_id=sale.customer_partner_id,
                 # 🔴 **판매가 정한 기일 그대로다.**
                 due_date=sale.collection_due_date,

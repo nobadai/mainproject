@@ -14,7 +14,7 @@ V7    18,557,854    -8,564,374    27,122,228     🔴 깨짐
   그 수정은 재무 몫이다 (recognition 과 settlement 사이에 빠진 계층). 이 파일이
   잠그는 것은 **걷기가 그 불일치를 스스로 말하는가** 하나다.
 
-🔴 **이 파일이 잡으려는 다섯.**
+🔴 **이 파일이 잡으려는 것들.**
 
 ```text
 ① 항등식이 판정을 낸다            맞아도 찍는다 — 0 이라 안 보이면 아무도 안 본다
@@ -22,6 +22,8 @@ V7    18,557,854    -8,564,374    27,122,228     🔴 깨짐
 ③ 대출 곡선은 안 섞는다            차입·상환이 들어가 축이 다르다 — 지금 0이라 안 갈릴 뿐이다
 ④ 깨져도 걷기를 안 멈춘다          사고 줄을 안 건드린다 — 멈추면 정본 판을 못 돌린다
 ⑤ 마감행이 0행이면 「없음」이다    「안 돌았다」와 「돌았는데 0이다」는 다른 사실이다
+⑥ 칸 이름을 요약이 안 짓는다      주인은 ledger_repository 하나다
+⑦ 「안 셌다」와 「0원이다」를 가른다  운영비 축이 None 으로 와도 안 죽고, 0 과 안 접힌다 (0916)
 ```
 
 ★ **DB 를 안 탄다.** 마감행은 손으로 세우고, 걷기가 그 행을 읽는 자리(`closings_of`)
@@ -38,6 +40,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from app.master import backtest_runner
 from app.master.backtest_runner import WalkResult, format_summary, walk
 from app.master.clock import SEOUL
@@ -48,6 +52,7 @@ from app.master.ledger_repository import (
     LOAN_CASH_BALANCE,
     LOGISTICS_CASH_OUT,
     NET_CASH,
+    OPERATING_EXPENSE_CASH_OUT,
     PAYROLL_INTEREST_CASH_OUT,
     PURCHASE_CASH_OUT,
     WALK_CASH_COLUMNS,
@@ -72,6 +77,7 @@ def _마감행(
     매입유출: int = 0,
     물류유출: int = 0,
     인건이자: int = 0,
+    운영비유출: int = 0,
     수금: int = 0,
     순현금: int,
     잔액: int,
@@ -87,6 +93,7 @@ def _마감행(
         PURCHASE_CASH_OUT: Decimal(매입유출),
         LOGISTICS_CASH_OUT: Decimal(물류유출),
         PAYROLL_INTEREST_CASH_OUT: Decimal(인건이자),
+        OPERATING_EXPENSE_CASH_OUT: Decimal(운영비유출),
         COLLECTION_CASH_IN: Decimal(수금),
         NET_CASH: Decimal(순현금),
         BASE_CASH_BALANCE: Decimal(잔액),
@@ -225,12 +232,12 @@ def test_유출이_0_이어도_칸이_빠지지_않는다() -> None:
     결과 = _걷기(_마감행(첫날, 수금=30, 순현금=30, 잔액=130))
     요약 = _NFC(format_summary(결과))
 
-    for 이름 in ("매입유출", "물류유출", "인건이자"):
+    for 이름 in ("매입유출", "물류유출", "인건이자", "운영비유출"):
         assert _NFC(f"{이름}: 0") in 요약, f"0 인 칸 '{이름}' 이 요약에서 빠졌다: {요약}"
 
 
 def test_현금_줄이_여섯_칸을_다_찍는다() -> None:
-    """★ 다섯은 그 구간 합이고 **기말잔액만 마지막 날의 값이다.**"""
+    """★ 여섯은 그 구간 합이고 **기말잔액만 마지막 날의 값이다.**"""
     결과 = _걷기(*_성립하는_두날())
     현금 = 결과.cash
     요약 = _NFC(format_summary(결과))
@@ -240,7 +247,7 @@ def test_현금_줄이_여섯_칸을_다_찍는다() -> None:
     assert 현금[COLLECTION_CASH_IN] == 30
     assert 현금[NET_CASH] == -20
     assert 현금[BASE_CASH_BALANCE] == 80, "기말잔액은 합이 아니라 마지막 날의 잔액이다"
-    for 이름 in ("매입유출", "물류유출", "인건이자", "수금", "순현금", "기말잔액"):
+    for 이름 in ("매입유출", "물류유출", "인건이자", "운영비유출", "수금", "순현금", "기말잔액"):
         assert _NFC(이름) in 요약, f"현금 줄에 '{이름}' 칸이 없다: {요약}"
 
 
@@ -383,7 +390,13 @@ def test_마감행을_못_읽으면_못_읽었다고_찍는다() -> None:
     assert 결과.incidents == (), "조회 실패가 사고 줄을 건드렸다"
     assert 결과.completed
     assert _NFC("못 읽음") in 요약, f"못 읽은 사실이 요약에 없다: {요약}"
-    assert _NFC("없음") not in 요약, "못 읽은 것을 「없음」으로 접었다"
+    # 🔴 **현금 두 줄에서만 잰다** (2026-09-16). 전에는 요약 전체를 봤는데, 다른 줄이
+    #    자기 어휘로 「없음」을 쓰면 (`원장못씀` 의 `회차금액 없음` 갈래) 이 검사가
+    #    **현금과 상관없는 글자에 걸린다.** 이 검사가 재는 사실은 *"마감을 못 읽은
+    #    것을 현금 줄이 「없음」으로 접지 않았나"* 하나다.
+    현금줄 = [줄 for 줄 in 요약.splitlines() if 줄.startswith(_NFC("현금"))]
+    assert len(현금줄) == 2, f"현금 줄이 {len(현금줄)}개다 — {요약}"
+    assert _NFC("없음") not in "\n".join(현금줄), "못 읽은 것을 「없음」으로 접었다"
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +524,9 @@ def test_읽는_칸_목록이_여섯을_다_든다() -> None:
         PURCHASE_CASH_OUT,
         LOGISTICS_CASH_OUT,
         PAYROLL_INTEREST_CASH_OUT,
+        #  🔴 이 칸이 빠지면 찍힌 유출의 합이 순현금과 안 맞고, 읽는 사람은 그 차이를
+        #     설명할 칸을 표에서 못 찾는다.
+        OPERATING_EXPENSE_CASH_OUT,
         COLLECTION_CASH_IN,
         NET_CASH,
         BASE_CASH_BALANCE,
@@ -518,3 +534,153 @@ def test_읽는_칸_목록이_여섯을_다_든다() -> None:
     assert LOAN_CASH_BALANCE in WALK_CASH_COLUMNS, (
         "대출 칸을 읽지도 않으면 「안 섞는다」를 잴 수가 없다"
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 🔴 **「안 셌다」와 「0원이다」를 가른다** — 2026-09-16
+#
+# 운영비 유출은 나중에 생긴 축이다. 재무 코드는 이미 `None` 을 「기록 없음」으로
+# 읽는데(`finance/schemas.py` · `api/finance/query.py`), DB 칸은 아직
+# `NOT NULL DEFAULT 0` 이라 그 갈래가 안 탄다.
+#
+# ⚠️ **칸의 주인은 재무다.** 언제 nullable 로 바로잡을지 마스터가 안 정한다.
+#   그래서 이 검사들이 잠그는 것은 *"DB 를 고쳤다"* 가 아니라
+#   **「그 칸이 어느 날 `None` 을 주기 시작해도 걷기 요약이 안 죽는다」** 하나다.
+#   손으로 세운 마감행만 쓴다 — DB 를 안 탄다.
+# ---------------------------------------------------------------------------
+
+
+def _안_센_마감행(day: date, **kw: Any) -> dict[str, Any]:
+    """운영비 축을 **안 센** 마감 한 줄. 🔴 `None` 은 0 이 아니다."""
+    return {**_마감행(day, **kw), OPERATING_EXPENSE_CASH_OUT: None}
+
+
+def _현금줄(결과: WalkResult) -> str:
+    """요약에서 현금 줄 한 줄만. **항등식 줄은 뺀다** — 축이 다르다."""
+    줄들 = [
+        one
+        for one in _NFC(format_summary(결과)).splitlines()
+        if one.startswith(_NFC("현금        "))
+    ]
+    assert len(줄들) == 1, f"현금 줄이 하나가 아니다: {줄들}"
+    return 줄들[0]
+
+
+def test_전_기간_안_셌으면_기록_없음이고_0_이_아니다() -> None:
+    """🔴 **이 검사가 이 판의 이유다.** 「안 셌다」를 0 으로 접으면 아무도 못 본다."""
+    결과 = _걷기(
+        _안_센_마감행(첫날, 수금=30, 순현금=30, 잔액=130),
+        _안_센_마감행(첫날 + timedelta(days=1), 매입유출=50, 순현금=-50, 잔액=80),
+    )
+    현금 = 결과.cash
+    줄 = _현금줄(결과)
+
+    assert 현금 is not None
+    assert 현금[OPERATING_EXPENSE_CASH_OUT] is None, "안 센 축을 합으로 만들었다"
+    assert _NFC("운영비유출: 기록 없음") in 줄, f"「기록 없음」이 안 찍혔다: {줄}"
+    assert _NFC("운영비유출: 0") not in 줄, f"안 센 축을 0 으로 찍었다: {줄}"
+    # ★ 한 날도 안 기록됐으면 날수를 안 붙인다 — 붙이면 「0일 중 0일」 같은 소리가 된다.
+    assert _NFC("운영비유출: 기록 없음 (") not in 줄, f"전부 안 셌는데 날수를 붙였다: {줄}"
+
+
+def test_일부만_셌으면_몇_날_셌는지까지_찍는다() -> None:
+    """🔴 **기록된 날만 더해서 합으로 안 낸다.** 그러면 구간 합인 척하는 부분합이다.
+
+    ★ 「기록 없음」만 찍으면 «한 날도 안 셌다» 로 읽힌다 — **섞여 있다** 가 이 판의
+      사실이고, 그 사실이 줄에 있어야 다음 사람이 어느 날을 볼지 안다.
+    """
+    결과 = _걷기(
+        _마감행(첫날, 운영비유출=7, 수금=30, 순현금=23, 잔액=123),
+        _안_센_마감행(첫날 + timedelta(days=1), 매입유출=50, 순현금=-50, 잔액=73),
+        _마감행(첫날 + timedelta(days=2), 운영비유출=11, 순현금=-11, 잔액=62),
+    )
+    현금 = 결과.cash
+    줄 = _현금줄(결과)
+
+    assert 현금 is not None
+    assert 현금[OPERATING_EXPENSE_CASH_OUT] is None, (
+        "하루라도 안 센 축을 합으로 냈다 — 18 은 사흘치가 아니라 이틀치다"
+    )
+    assert _NFC("운영비유출: 기록 없음 (3일 중 2일)") in 줄, f"몇 날 셌는지가 없다: {줄}"
+    assert "18" not in 줄, f"기록된 날만 더한 부분합이 찍혔다: {줄}"
+
+
+def test_전_기간_값이_있으면_종전과_같은_숫자가_찍힌다() -> None:
+    """★ **회귀 방지.** 없던 갈래를 세우면서 있던 갈래를 건드리지 않았는가."""
+    결과 = _걷기(
+        _마감행(첫날, 운영비유출=7, 수금=30, 순현금=23, 잔액=123),
+        _마감행(첫날 + timedelta(days=1), 운영비유출=11, 매입유출=50, 순현금=-61, 잔액=62),
+    )
+    현금 = 결과.cash
+    줄 = _현금줄(결과)
+
+    assert 현금 is not None
+    assert 현금[OPERATING_EXPENSE_CASH_OUT] == 18
+    assert _NFC("운영비유출: 18") in 줄, f"값이 있는 판에서 숫자가 사라졌다: {줄}"
+    assert _NFC("기록 없음") not in 줄, f"값이 다 있는데 「기록 없음」이 찍혔다: {줄}"
+
+
+def test_전부_진짜_0_이면_0_으로_찍고_기록_없음이_아니다() -> None:
+    """🔴 **이 판과 위 판을 가르는 것이 이 PR 의 전부다.**
+
+    *"그날 운영비가 한 푼도 안 나갔다"* 와 *"그날 이 축을 안 셌다"* 는 **다른
+    사실**이다. 같은 글자로 접으면 고칠 것이 있는 판과 없는 판이 화면에서 같아진다.
+    """
+    결과 = _걷기(*_성립하는_두날())
+    현금 = 결과.cash
+    줄 = _현금줄(결과)
+
+    assert 현금 is not None
+    assert 현금[OPERATING_EXPENSE_CASH_OUT] == 0, "진짜 0 을 None 으로 접었다"
+    assert _NFC("운영비유출: 0") in 줄, f"진짜 0 이 0 으로 안 찍혔다: {줄}"
+    assert _NFC("기록 없음") not in 줄, f"진짜 0 을 「기록 없음」으로 접었다: {줄}"
+
+
+def test_안_센_날이_섞여도_항등식은_종전과_같다() -> None:
+    """★ 항등식이 읽는 칸은 `BASE_CASH_BALANCE` · `NET_CASH` 둘뿐이고 **둘 다 NOT NULL** 이다.
+
+    ⚠️ 운영비가 `None` 이라고 항등식이 흔들리면, 재무가 칸을 바로잡는 날 **판정이
+      통째로 뒤집힌다.** 그 일이 없다는 것을 여기서 잠근다.
+    """
+    성립 = _걷기(*_성립하는_두날()).cash_identity
+    섞임 = _걷기(
+        _안_센_마감행(첫날, 수금=30, 순현금=30, 잔액=130),
+        _마감행(첫날 + timedelta(days=1), 매입유출=50, 순현금=-50, 잔액=80),
+    ).cash_identity
+
+    assert 성립 is not None
+    assert 섞임 is not None
+    assert 섞임 == 성립, f"운영비 None 이 항등식을 흔들었다: {섞임} vs {성립}"
+    assert 섞임.holds
+
+
+def test_안_센_판에서도_걷기가_안_죽는다() -> None:
+    """★★ **여기가 이 파일의 이유다** — 칸이 nullable 로 바뀌는 날 요약이 죽으면 안 된다.
+
+    🔴 `_won` 은 `None` 을 받으면 `Decimal("None")` 을 만들려다
+      `decimal.InvalidOperation` 으로 터진다. 179일을 다 걷고 마지막 줄에서 죽으면
+      **성적을 통째로 잃는다.**
+    """
+    결과 = _한판(
+        _안_센_마감행(첫날, 수금=30, 순현금=30, 잔액=130),
+        _안_센_마감행(첫날 + timedelta(days=1), 매입유출=50, 순현금=-50, 잔액=80),
+    )
+    요약 = _NFC(format_summary(결과))
+
+    assert 결과.completed, "안 센 축이 걷기를 멈췄다"
+    assert 결과.incidents == (), f"안 센 축이 사고 줄을 건드렸다: {결과.incidents}"
+    assert 결과.stopped_reason is None
+    assert _NFC("운영비유출: 기록 없음") in 요약, f"요약에 「기록 없음」이 없다: {요약}"
+
+
+def test_칸_자체가_없으면_여전히_터진다() -> None:
+    """🔴 **`None` 을 받아들이는 것과 칸이 사라진 것을 넘기는 것은 다른 일이다.**
+
+    ★ 표가 바뀌어 칸이 없어진 날은 **터져야 맞다** — 0 으로도 「기록 없음」으로도
+      안 메운다. `_won` 이 지키던 규율을 `_won_or_none` 도 그대로 지키는지 본다.
+    """
+    행 = _마감행(첫날, 수금=30, 순현금=30, 잔액=130)
+    del 행[OPERATING_EXPENSE_CASH_OUT]
+
+    with pytest.raises(KeyError):
+        _ = _걷기(행).cash

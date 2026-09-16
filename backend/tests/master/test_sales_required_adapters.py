@@ -299,7 +299,8 @@ def test_물류가_못_답해도_판매는_끝까지_돈다():
     assert response.end_code == "SL1_PRESENTED", (
         f"물류 회신 하나에 판매가 접혔다: {response.reason}"
     )
-    assert [agent for agent, _ in called] == ["inventory", "sales", "finance"]
+    # 재무는 두 번 불린다 — 후보 생성 전 사실(PRE_SALES_FACTS)과 생성 후 판정.
+    assert [agent for agent, _ in called] == ["inventory", "finance", "sales", "finance"]
 
 
 def test_셋이_다_있으면_점검이_막지_않는다():

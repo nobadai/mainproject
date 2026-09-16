@@ -124,6 +124,10 @@ def _물류_대역(monkeypatch) -> list[tuple[str, str]]:
     monkeypatch.setattr(logistics_query, "runtime_coverage_at", 기록("coverage", 열림))
     monkeypatch.setattr(logistics_query, "onhand_total_by_day", 기록("onhand", {}))
     monkeypatch.setattr(logistics_query, "snapshot_days_between", 기록("days", set()))
+    #  ★ Runtime 읽기는 **한 판에 한 번** 이고 두 콘솔이 나눠 쓴다 (2026-09-15).
+    monkeypatch.setattr(logistics_query, "load_console_runtime", 기록("runtime", None))
+    #  ★ 그날 예약(Historical)도 한 판에 한 번 — 재고·출고 콘솔이 나눠 쓴다 (#760).
+    monkeypatch.setattr(logistics_query, "reservation_state_at", 기록("reservations", ()))
     monkeypatch.setattr(
         logistics_query, "get_inbound_console", 기록("inbound", SimpleNamespace(in_transit=[]))
     )
@@ -145,6 +149,8 @@ def test_물류_build_가_보는_실행을_넘기고_출처에_적는다(monkeyp
     names = [name for name, _ in 잡은]
     assert names == [
         "coverage",
+        "runtime",
+        "reservations",
         "inventory",
         "inbound",
         "outbound",
@@ -159,7 +165,7 @@ def test_물류_재고그래프가_보는_실행을_넘긴다(monkeypatch):
     잡은 = _물류_대역(monkeypatch)
     logistics_query.dashboard_stock(10, 5, AS_OF)
     names = [name for name, _ in 잡은]
-    assert names == ["coverage", "onhand", "days", "inbound"]
+    assert names == ["coverage", "onhand", "days", "runtime", "inbound"]
     assert {run for _, run in 잡은} == {SHOWN_SIM_RUN_ID}
 
 
@@ -177,7 +183,11 @@ def test_대시보드가_매입_build_에_보는_실행을_넘긴다(monkeypatch
     monkeypatch.setattr(dashboard_query.purchase_q, "build", 매입)
     with pytest.raises(_멈춤):
         dashboard_query.build(AS_OF)
-    assert 잡은 == [{"args": (), "kwargs": {"sim_run_id": SHOWN_SIM_RUN_ID}}]
+    #  🔵 `window_days=0` — 대시보드는 도착일을 안 읽는다 (`#740` 의 인자 · 2026-09-16).
+    #     여기서 같이 잠근다: 축이 빠지는 것도, 창이 조용히 넓어지는 것도 사고다.
+    assert 잡은 == [
+        {"args": (), "kwargs": {"sim_run_id": SHOWN_SIM_RUN_ID, "window_days": 0}}
+    ]
 
 
 # ── ④ 매입 라우터 ───────────────────────────────────────────────────────

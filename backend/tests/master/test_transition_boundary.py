@@ -22,7 +22,7 @@ import pytest
 from app.master import decision_service as svc
 from app.master import transition
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
-from app.master.decision import DecisionIn, DecisionOut
+from app.master.decision import AUTO_BACKFILL, DecisionIn, DecisionOut
 
 AS_OF = date(2025, 12, 31)
 
@@ -179,6 +179,10 @@ def test_둘_다_미등록이면_커넥션을_열지_않는다() -> None:
     assert "finance" in out.reason and "logistics" in out.reason
     assert out.missing == ["finance", "logistics"]
     assert calls == [], "미등록인데 커넥션을 열었다"
+    # 🔴 **미등록은 원장못씀 갈래가 아니다** (2026-09-16). 배선이 없는 것과 쓸 값이
+    #    없는 것은 다른 사실이고, 접으면 걷기 요약의 「원장못씀」이 배선 문제까지
+    #    끌어안아 크기가 부푼다.
+    assert out.block_kind == "", "미등록을 원장못씀으로 세면 안 된다"
 
 
 def test_한쪽만_등록되면_반쪽으로_반영하지_않는다() -> None:
@@ -393,8 +397,12 @@ def _response(**over: Any) -> dict[str, Any]:
 
 
 def test_승인_응답에_전이_결과가_실린다(wired) -> None:
-    """★ 오늘은 미등록이라 `NOT_APPLIED` 다 — 그것도 **말해 주어야 하는 사실**이다."""
-    out = wired(_response())
+    """★ 오늘은 미등록이라 `NOT_APPLIED` 다 — 그것도 **말해 주어야 하는 사실**이다.
+
+    ★ **자동 승인으로 잰다** (2026-09-15 · 설계 260915 안 A). 사람 승인은 전이를 안
+      부르고 `AWAITING_PURCHASE_RECORD` 를 싣는다 — 그쪽은 `test_purchase_record.py`.
+    """
+    out = wired(_response(), decided_by=AUTO_BACKFILL)
 
     assert out.transition is not None, "약정이 섰는데 전이가 침묵하면 반영 여부를 알 수 없다"
     assert out.transition.status == "NOT_APPLIED"
@@ -433,7 +441,7 @@ def test_등록되어_있으면_승인_경로가_커밋까지_간다(wired, monk
         ),
     )
 
-    out = wired(_response())
+    out = wired(_response(), decided_by=AUTO_BACKFILL)
 
     assert out.transition.status == "APPLIED"
     assert conn.commits == 1

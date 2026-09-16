@@ -28,7 +28,7 @@ from app.master import decision_service as svc
 from app.master import ledger, transition
 from app.master.backtest_runner import walk
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
-from app.master.decision import DecisionIn, DecisionOut
+from app.master.decision import AUTO_BACKFILL, DecisionIn, DecisionOut
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
 from app.master.scheduler import DayRunOutcome, ScheduledAction
 from app.master.sim_run import build_sim_run_id, create_sim_run
@@ -321,9 +321,13 @@ def _승인한다(monkeypatch: pytest.MonkeyPatch, *, 실행행_축: str | None)
             commitment, sim_run_id=sim_run_id, connect=lambda: conn
         ),
     )
+    # ★ **자동 승인으로 태운다** (2026-09-15 · 설계 260915 안 A). 사람 승인은 이제
+    #   전이를 부르지 않고 실매입 기록을 기다린다 — 승인 즉시 원장까지 가는 경로는
+    #   자동 승인이고, 이 판이 재는 것은 그 경로의 축이다. 기록 경로의 축은
+    #   `test_purchase_record.py` 가 잰다.
     out = svc.record_decision(
         "REQ-1",
-        DecisionIn(decision="APPROVE", scenario_label="보수", decided_by="lhs"),
+        DecisionIn(decision="APPROVE", scenario_label="보수", decided_by=AUTO_BACKFILL),
     )
     transition.reset()
     return out, conn

@@ -68,6 +68,10 @@ Master    그날 확정분을 **운반하고 호출**한다.
 🔴 **날마다다. 실행일이 아니다.** `sales.sale_date` 는 판매가 정한 날이고, 마스터가
   실행일 달력으로 그것을 밀면 **토요일 판매의 채권이 월요일 장부에 선다**
   (`collection.py` · `inbound.py` 와 같은 결).
+
+  ★ **걷기가 휴장일을 건너뛰면 그 뒤 첫 개장일에 한 번 세운다** (2026-09-15 · 실측
+    2026-03-07 · 04-04 · MISSING_RECEIVABLE 6). 채권의 `sale_date` 는 판매 값 그대로라
+    장부의 날짜는 안 밀린다 — 세우는 날만 늦다 (`handled_on_first_open_day`).
 """
 
 from __future__ import annotations

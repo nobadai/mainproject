@@ -158,3 +158,56 @@ def test_sales_db_access_is_limited_to_its_own_run_history():
         if "haetdeul" in line or "FROM {}" in line or "INTO {}" in line:
             tables.add(line.strip())
     assert all("sales_agent_runs" in line or "{}" in line for line in tables), tables
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "business_status", "expected"),
+    [
+        ("READY", "reject", "INFEASIBLE"),
+        ("RUNTIME_NOT_READY", "skipped", "UNRESOLVED"),
+    ],
+)
+def test_logistics_feedback_failure_cannot_become_executable_after_other_domain_adjustment(
+    monkeypatch, runtime_status, business_status, expected
+):
+    monkeypatch.setenv("SALES_LLM_ENABLED", "false")
+    feedback = {
+        "attempt": 1,
+        "domain_replies": [
+            {
+                "source_agent": "finance",
+                "capability": "FINANCIAL_VALIDATION",
+                "reply_ref": "FIN-B",
+                "runtime_status": "READY",
+                "business_status": "ok",
+                "payload": {"finance_verdict": "PASS"},
+            },
+            {
+                "source_agent": "logistics",
+                "capability": "DELIVERY_FEASIBILITY_CONTEXT",
+                "reply_ref": "LOG-B",
+                "runtime_status": runtime_status,
+                "business_status": business_status,
+                "payload": {},
+            },
+        ],
+        "scenario_feedback": [
+            {"scenario_id": "SALES-001-B", "reply_refs": ["FIN-B", "LOG-B"]}
+        ],
+    }
+    context = _request().logistics_context.model_dump(mode="json")
+    context["delivery_feasibility"] = {"status": "READY"}
+    request = _request(
+        logistics_context=context,
+        feedback=feedback,
+        is_refeed=True,
+        feedback_attempt=1,
+    )
+
+    reply = run_proposal(request)
+    trace = next(
+        item for item in reply.decision_trace if item.candidate_id == "SALES-001-B-R1"
+    )
+
+    assert trace.status == expected
+    assert trace.status != "EXECUTABLE"

@@ -45,11 +45,11 @@ def confirm_receivable(conn: Any, request: ReceivableCreateInput) -> ReceivableW
     """확정된 Sale 을 읽어 receivable 과 Finance State 를 멱등 저장한다."""
 
     sale_row = load_sale_row(conn, request.sale_id)
-    finance_state_id = load_sale_date_finance_state_id(
+    finance_state_id = load_finance_state_id_for_date(
         conn,
         sim_run_id=request.sim_run_id,
         financing_mode=request.financing_mode,
-        state_date=request.sale_date,
+        state_date=request.issued_date,
     )
     plan = build_receivable_write_plan(
         request,
@@ -105,7 +105,7 @@ def build_receivable_write_plan(
         raise ReceivablePersistenceConflict("sale row original amount does not match the request")
 
     due_date = request.due_date
-    issued_date = request.sale_date
+    issued_date = request.issued_date
     if due_date is None or issued_date is None:
         raise ReceivablePersistenceConflict("sale row is missing receivable dates")
     return ReceivableWritePlan(
@@ -123,14 +123,17 @@ def build_receivable_write_plan(
     )
 
 
-def load_sale_date_finance_state_id(
+def load_finance_state_id_for_date(
     conn: Any, *, sim_run_id: str, financing_mode: str, state_date: date
 ) -> str:
-    """기존 Finance state는 ID 조립이 아니라 실행 축으로 찾는다.
+    """지정한 Finance state를 ID 조립이 아니라 실행 축으로 찾는다.
 
     ``daily_finance_state_id``는 새 일별 상태를 만들 때 쓰는 결정론 ID 규칙이다.
     이미 존재하는 상태 조회의 정본 키는 ``(sim_run_id, financing_mode, state_date)``이며,
     조회된 실제 ``finance_state_id``를 receivable lineage에 연결한다.
+
+    Receivable은 실제 원장 발행일의 State에만 반영한다. 따라서 휴장일 판매가
+    다음 개장일에 발행되더라도 과거 ``sale_date`` State를 소급 수정하지 않는다.
     """
 
     schema = sql.Identifier(get_db_schema())

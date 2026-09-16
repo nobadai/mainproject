@@ -656,6 +656,20 @@ class SalesScenario(BaseModel):
     authoritative_inventory_risk_severity: str | None = None
     remaining_freshness_days: int | None = None
     ml_support_used: bool = False
+    #: 이 안의 단가를 **무엇이 정했는가**. `MARKET_UPPER` · `MARGIN_FLOOR` 같은 코드다.
+    #:
+    #: ★ **rationale 문장에서 뽑아 쓰지 않으려고 칸으로 세웠다.** 세 안의 숫자가
+    #:   같아졌을 때 *"무엇이 묶었나"* 를 기계가 읽어야 하는데, 문장을 파싱하면
+    #:   판매가 낱말을 바꾸는 날 조용히 빈 목록이 된다.
+    price_strategy_codes: list[str] = Field(default_factory=list)
+    #: 이 안을 만든 **전략 자세**. 숫자가 아니라 기준이다 (`app/sales/strategy.py`).
+    #:
+    #: ★ **누가 골랐는지는 회신 최상위(`strategy_source`)가 말한다.** 안마다 적으면
+    #:   같은 사실이 세 벌이 되고, 한 안만 모델이 고른 것처럼 읽힌다.
+    #:
+    #: ⚠️ 관대한 모델로 받는다 — 자세 어휘의 주인은 `strategy.py` 이고, 이력에서
+    #:   되읽을 때 그 어휘가 늘어 있으면 옛 행이 통째로 거부된다.
+    strategy_profile: PassThrough | None = None
 
 
 class SalesDecisionTrace(BaseModel):
@@ -705,6 +719,47 @@ class SalesProposalReply(BaseModel):
     recommendation: SalesRecommendation
     self_check: ProposalSelfCheck
     decision_trace: list[SalesDecisionTrace] = Field(default_factory=list)
+    #: 🔴 **세 전략의 자세를 누가 만들었는가** (§10 — 장애를 숨기지 않는다).
+    #:
+    #:   `LLM`               모델이 자세를 골랐다
+    #:   `TEMPLATE_FALLBACK` 모델이 꺼져 있거나 실패해 규칙 템플릿이 섰다
+    #:
+    #: ★ `strategy_llm_status` 와 나눠 둔다. 앞은 *"무엇이 섰나"*, 뒤는 *"모델에
+    #:   무슨 일이 있었나"* 다 — `DISABLED` 와 `FALLBACK` 은 둘 다 템플릿이지만
+    #:   하나는 설정 문제이고 하나는 그날의 사고다 (envelope §LLMStatus).
+    strategy_source: Literal["LLM", "TEMPLATE_FALLBACK"] = "TEMPLATE_FALLBACK"
+    strategy_llm_status: Literal["SUCCESS", "SKIPPED_TEMPLATE", "FALLBACK", "DISABLED"] = (
+        "DISABLED"
+    )
+    #: 모델이 고른 자세를 사실이 내린 자리. 비어 있으면 깎인 것이 없다.
+    strategy_clamped_reason_codes: list[str] = Field(default_factory=list)
+    #: 🔴 **전략 모델이 왜 실패했나.** 성공했거나 안 켠 날은 `None`.
+    #:
+    #:   ```text
+    #:   HTTP_400              우리 요청이 틀렸다 - 고칠 것이 코드에 있다
+    #:   HTTP_429              저쪽이 쿼터로 막았다 - 기다리면 풀린다
+    #:   PROVIDER_UNREACHABLE  길이 막혔다
+    #:   CONTRACT_VIOLATION    모델이 어휘 밖을 냈다
+    #:   ```
+    #:
+    #: ★ 이 칸이 없던 동안 우리 스키마 버그가 «모델이 실패했다» 뒤에 숨어
+    #:   실환경에서 Planner 가 한 번도 안 돈 채로 지나갔다 (2026-09-16).
+    strategy_llm_failure_reason: str | None = None
+    #: 🔴 **자세는 갈렸는데 숫자가 수렴했는가** (2026-09-16).
+    #:
+    #:   ```text
+    #:   strategy_collapsed = true
+    #:   strategy_collapse_reason_codes = ["MARGIN_FLOOR"]
+    #:   ```
+    #:
+    #: ★ **숫자를 억지로 벌리지 않는다.** 마진 최저선·여신·확정 재고 같은 제약
+    #:   때문에 세 전략이 같은 값에 닿는 것은 정상이다. 버그처럼 숨기지 않고
+    #:   **무엇이 묶었는지**를 남긴다.
+    #:
+    #: ⚠️ `variant_collapsed` 와 다른 사실이다. 저쪽은 *"중간 수량 안을 못 만들었다"*
+    #:   이고 이쪽은 *"자세는 달랐는데 단가가 같아졌다"* 다.
+    strategy_collapsed: bool = False
+    strategy_collapse_reason_codes: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

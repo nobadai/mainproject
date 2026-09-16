@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
+from app.api import plan_state
 from app.api.calendar import build_axis
 from app.api.dashboard.schema import DashboardTab
 from app.api.finance import query as finance_q
@@ -25,26 +27,70 @@ from app.api.primitives import Badge, Column, Note, Stat, Table
 from app.api.purchase import query as purchase_q
 from app.api.sales import query as sales_q
 from app.api.shown_run import SHOWN_SIM_RUN_ID
-from app.contracts.core import ITEMS
+from app.master.purchase_record_repository import RecordedTotals, recorded_totals_by_plan
+
+log = logging.getLogger(__name__)
 
 #: 재무 선택 상태 키 → 같은 화면 현금 그래프 계열 이름(`finance_q.dashboard_cash`).
 #: ★ 「운영 여유」 칸과 그래프 선이 **같은 말**로 기준을 밝히게 한다. 모르는 키면
 #:   재무 탭이 준 상태 이름(`fi.states[].label`)을 그대로 쓴다.
 _BASIS = {"base": "대출 제외", "loan": "대출 포함"}
 
+#: 🔴 **상태 어휘와 판정은 `app/api/plan_state.py` 가 소유한다** (2026-09-16).
+#:
+#:   매입 탭도 같은 낱말을 싣게 되면서 규칙이 두 화면의 것이 됐다. 두 벌로 짜면
+#:   한쪽만 고치는 날 **같은 안이 화면마다 다른 상태**로 뜬다. 여기서는 그 이름을
+#:   가져다 쓰기만 하고, 부르는 자리는 아래 `_state` 하나다.
+PLAN_STATES = plan_state.PLAN_STATES
+
+#: 모르는 값 한 글자. 재고 칸(`_현재고`)이 쓰는 것과 **같은 글자**다.
+_UNKNOWN = "—"
+
+#: 안 이름에서 품목·안 이름을 읽는 규칙도 같은 자리에서 온다.
+_plan_item = plan_state.plan_item
+_recorded = plan_state.recorded_for
+
 
 def _pending(plans) -> int:
     return sum(1 for p in plans if p.pending)
 
 
-def _plan_item(key: str) -> str | None:
-    """안의 품목. 🔴 매입 `Plan` 스키마에 품목 칸이 없다 (2026-09-14 확인).
+def _state(plan: Any, recorded: RecordedTotals | None) -> str:
+    """안의 상태를 사람 말로. **판정은 `plan_state.state_of` 가 한다.**"""
+    return plan_state.state_of(approved=plan.approved, recorded=recorded)
 
-    매입 `_plan()` 이 `key=f"{item} · {label}"` 로 품목을 이름 앞에 넣는다. 그 앞자리를
-    **계약 품목(`ITEMS`)과 맞춰** 읽는다 — 이름을 코드에 박지 않고, 계약 밖이면 공란.
-    매입 스키마에 품목 칸이 서는 날 이 함수를 그 칸 읽기로 바꾼다.
+
+def _records(as_of: date) -> dict[tuple[str, str], RecordedTotals]:
+    """그날 · 보고 있는 실행의 **실매입 기록 합계**.
+
+    🔴 **여기서 숫자를 만들지 않는다.** 표를 읽는 자리는 마스터 한 곳이고
+       (`master/purchase_record_repository.recorded_totals_by_plan`) 이 함수는 그것을
+       부르기만 한다. 같은 SELECT 를 화면 층에 한 벌 더 두면 PK 가 바뀌는 날 갈린다.
+
+    ⚠️ 못 읽으면 **빈 표**다. 다섯 부서 탭이 저마다 DB 실패를 삼키고 「예시값」으로 뜨는
+      것과 같은 태도 — 기록 하나 때문에 대시보드가 통째로 죽으면 안 된다.
     """
-    return next((item for item in ITEMS if key.startswith(f"{item} · ")), None)
+    try:
+        return recorded_totals_by_plan(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+    except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
+        log.info("실매입 기록을 못 읽어 안의 값을 그대로 보입니다: %s", error)
+        return {}
+
+
+def _unit_qty(plan: Any, recorded: RecordedTotals | None) -> str:
+    """`단가 × 수량`. 🔴 기록이 있으면 **기록값**이다.
+
+    ★ 이 표에는 상태 칸이 있고, 상태가 「매입 기록됨」이면 사람이 보는 값은 **실제로 산
+      값**이어야 한다. 제안값은 지나간 값이고, 같은 화면의 「확정 매입액」이 이미 기록값으로
+      서 있다 — 한 화면에서 두 숫자가 다른 사실을 말하면 안 된다.
+
+    ⚠️ 단가가 정수로 안 떨어지면 「—」다. 반올림해 보이면 `단가 × 수량` 이 금액 칸과
+      어긋나고, 그건 틀린 줄도 모르는 오류다.
+    """
+    if recorded is None:
+        return f"{plan.unit_price:,} × {plan.qty_kg:,.0f}"
+    unit = _UNKNOWN if recorded.unit_price is None else f"{recorded.unit_price:,}"
+    return f"{unit} × {recorded.qty_kg:,.0f}"
 
 
 def _buffer_stat(fi):
@@ -82,7 +128,17 @@ def build(as_of: date) -> DashboardTab:
     fc = forecast_q.build(as_of, "배추")
     #  ★ 매입은 축을 안 주면 모든 실행을 섞는다. 다른 네 탭과 같은 실행을 넘긴다
     #    (`app/api/shown_run.py` 한 자리).
-    pu = purchase_q.build(as_of, sim_run_id=SHOWN_SIM_RUN_ID)
+    #
+    #  🔵 **`window_days=0` — 도착일을 안 읽는다** (2026-09-16 · `#740` 의 인자).
+    #     이 화면이 매입에서 읽는 것은 `pu.plans` · `pu.source` 둘뿐이다. 도착일
+    #     조회(`arrivals`)가 먹이는 곳은 매입 탭의 확정 매입 표 하나이고 여기서는
+    #     안 쓰는데, 그 왕복이 실측 `829.6ms` 로 이 화면의 단일 최대였다.
+    #
+    #  🔴 **좁히는 것이 아니라 안 읽는 것이다.** 그래서 `12` 가 아니라 `0` 이다.
+    #     매입 탭 쪽은 그 사실을 「확정 입고 예정 —」 으로 말하는데, 이 화면은 그
+    #     칸을 안 읽으므로 표시가 달라지지 않는다 —
+    #     `tests/api/test_dashboard_purchase_window.py` 가 그 자리를 지킨다.
+    pu = purchase_q.build(as_of, sim_run_id=SHOWN_SIM_RUN_ID, window_days=0)
     fi = finance_q.build(as_of, "base")
     lg = logistics_q.build(as_of, "stock")
     sl = sales_q.build(as_of)
@@ -97,6 +153,8 @@ def build(as_of: date) -> DashboardTab:
     #    끝은 14,600kg 이었습니다. 이제 둘 다 물류에서 나옵니다.
     cash = finance_q.dashboard_cash(axis)
     stock = logistics_q.dashboard_stock(n, at, as_of)
+    #  ★ 매입안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
+    records = _records(as_of)
 
     return DashboardTab(
         axis=axis,
@@ -141,12 +199,15 @@ def build(as_of: date) -> DashboardTab:
                     "ml": (None if (card := cards.get(item)) is None
                            else f"{card.predicted:,}"),
                     "plan": f"{p.key}안",
-                    "unit_qty": f"{p.unit_price:,} × {p.qty_kg:,.0f}",
-                    "amount": f"{p.amount_krw:,}",
-                    "state": ("승인 대기" if p.pending else "후보"),
+                    #  🔴 기록이 있으면 금액도 단가 × 수량도 **기록값**이다. 없으면
+                    #     안의 값 그대로다 — 0 으로도 «—» 로도 바꾸지 않는다.
+                    "unit_qty": _unit_qty(p, rec),
+                    "amount": f"{(p.amount_krw if rec is None else rec.amount_krw):,}",
+                    "state": _state(p, rec),
                 }
                 for p in pu.plans
                 for item in [_plan_item(p.key)]
+                for rec in [_recorded(records, p.key)]
             ],
             empty_text="오늘 낸 매입안이 없습니다",
         ),

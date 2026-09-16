@@ -39,7 +39,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.master.answer import AnswerFacts
+from app.master.answer import AnswerFacts, agent_labels
 from app.master.llm.runtime import (
     LLMSettings,
     TextProvider,
@@ -92,7 +92,17 @@ _NEGATIVE = ("못 ", "못했", "못한", "않았", "않은", "없었", "없습",
 #: 실측 — 물류 하나만 물은 요청에 *"재무 및 물류 부서는 확인되지 않았습니다"* 라고
 #: 썼다. 재무는 이 요청에 등장한 적이 없다. 부서 이름은 **닫힌 목록**이라
 #: 프롬프트에 없던 이름이 문장에 나오면 지어낸 것이 확실하다.
-_AGENT_WORDS = ("재무", "물류", "매입")
+#:
+#: 🔴 **손으로 적지 않고 `answer.py` 에서 파생한다.** 여기에 세 개(재무·물류·매입)를
+#: 손으로 적어 두었더니 이름표(`_AGENT_LABEL`) 다섯 개와 어긋났고, 판매·가격 예측에
+#: 대해서는 **가드가 아예 돌지 않았다** — *"판매 부서는 확인되지 않았습니다"* 를
+#: 묻지도 않은 요청에 써도 안 걸렸다. 닫힌 목록이라는 전제는 목록을 한 곳에서만
+#: 셀 때만 참이라, 세는 곳을 주인에게 돌려준다.
+#:
+#: 주인이 `answer.py` 인 이유는 대조 대상이 `AnswerFacts.to_prompt()` 이기 때문이다 —
+#: 거기 실리는 부서 이름은 `answer.py` 가 `agent_label()` 로 찍은 것이다. 프롬프트를
+#: 만든 곳과 프롬프트를 검사하는 곳이 같은 이름표를 봐야 한다.
+_AGENT_WORDS = agent_labels()
 
 SYSTEM_PROMPT = """당신은 햇들농산 매입 의사결정 시스템의 응답 문장 작성자다.
 아래에 주어진 결론과 부서 목록을 **한 문장으로 옮겨 적는** 것이 당신의 일이다.

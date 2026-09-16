@@ -96,3 +96,80 @@ def test_sales_gemini_model_does_not_inherit_common_ollama_model(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MODEL", "gemma3:4b")
     assert load_settings().model == "gemini-3.5-flash-lite"
+
+
+# ---------------------------------------------------------------------------
+# Gemini responseSchema 낮추기 — 중첩 모델
+# ---------------------------------------------------------------------------
+
+
+def test_nested_model_schema_has_no_ref_or_defs():
+    """🔴 **전략 Planner 가 이것 때문에 한 번도 안 돌았다** (2026-09-16 실측).
+
+    Pydantic 은 모델 안에 모델이 있으면 정의를 `$defs` 로 빼고 자리에는 `$ref` 만
+    남긴다. Gemini `responseSchema` 는 그 둘을 모르고 요청 자체를 거부한다.
+
+    ```text
+    HTTP 400  Unknown name "$defs" at 'generation_config.response_schema'
+              Unknown name "$ref"  at '...properties[0].value.items'
+    ```
+
+    상태 칸은 정직하게 `FALLBACK` 을 말하고 있었지만 원인이 호출 밖이 아니라
+    **우리 스키마**였다.
+    """
+    import json
+
+    from app.sales.llm.runtime import LlmStrategyPlanOutput, _gemini_safe_schema
+
+    raw = LlmStrategyPlanOutput.model_json_schema()
+    assert "$defs" in raw, "중첩이 사라졌다면 이 검사가 무엇을 막는지 다시 본다"
+
+    safe = _gemini_safe_schema(raw)
+    wire = json.dumps(safe, ensure_ascii=False)
+
+    assert "$defs" not in wire
+    assert "$ref" not in wire
+
+
+def test_nested_model_schema_keeps_the_contract():
+    """펴 넣되 **계약은 그대로다** — 자세 어휘가 살아 있어야 한다."""
+    from app.sales.llm.runtime import LlmStrategyPlanOutput, _gemini_safe_schema
+
+    safe = _gemini_safe_schema(LlmStrategyPlanOutput.model_json_schema())
+    item = safe["properties"]["strategies"]["items"]
+
+    assert item["properties"]["strategy"]["enum"] == [
+        "CONSERVATIVE",
+        "BALANCED",
+        "AGGRESSIVE",
+    ]
+    assert item["properties"]["price_posture"]["enum"] == [
+        "MARGIN_DEFENSE",
+        "MARKET_ALIGNED",
+        "DEPLETION",
+    ]
+
+
+def test_unresolvable_reference_is_not_silently_dropped():
+    """못 펴는 참조를 빈 칸으로 두면 **계약이 조용히 달라진다.**"""
+    import pytest as _pytest
+
+    from app.sales.llm.runtime import _gemini_safe_schema
+
+    with _pytest.raises(TypeError):
+        _gemini_safe_schema({"type": "object", "properties": {"x": {"$ref": "#/$defs/Missing"}}})
+
+
+def test_flat_model_schema_still_passes_through():
+    """해석 호출은 중첩이 없다 — 그 길이 안 바뀌었는지 같이 본다."""
+    from app.sales.llm.runtime import LlmInterpretationOutput, _gemini_safe_schema
+
+    safe = _gemini_safe_schema(LlmInterpretationOutput.model_json_schema())
+
+    assert set(safe["properties"]) == {
+        "recommended_candidate_id",
+        "summary",
+        "recommendation_reason",
+        "risk_explanation",
+        "user_message",
+    }

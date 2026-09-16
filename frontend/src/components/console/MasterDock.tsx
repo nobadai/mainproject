@@ -17,6 +17,23 @@
  *   🔴 리사이즈를 넣으면서 **위의 "지우지 않고 숨긴다" 구조는 그대로 둡니다.**
  *      손잡이는 판 *바깥*(위)에 붙는 남매 요소라 판 안의 대화를 건드리지 않습니다.
  *
+ * ★ **채팅 바깥을 누르면 닫힙니다.** 예전에는 탭을 누르면 높이만 `MIN_HEIGHT` 로
+ *   줄였습니다(«양보»). 화면 주인이 **"작아지는 게 아니라 닫혀야 한다"** 고 해서
+ *   바꿨습니다.
+ *
+ *   ★ **높이는 안 건드립니다.** 닫는 것은 보여 주는 일뿐이고, 사람이 손잡이로 정해
+ *     둔 높이(`lib/dock_size.ts`)는 그대로 남습니다. 다시 열면 그 높이로 돌아옵니다.
+ *
+ *   ★ **«바깥» 은 이 `aside` 바깥입니다.** 대화·손잡이·열기 버튼이 모두 이 안에
+ *     들어 있어 한 번에 걸립니다. 지금 화면에는 `createPortal` 이 한 군데도 없어서
+ *     (2026-09-16 실측) 판 안에서 뜨는 팝업도 전부 이 안에 그려집니다. 🔴 나중에
+ *     포털로 띄우는 달력·메뉴를 판 안에 넣거든 **여기 검사도 같이 고쳐야 합니다** —
+ *     안 고치면 달력을 누르는 순간 서랍이 닫힙니다.
+ *
+ *   ★ **누르기 시작한 자리로 판단합니다** (`pointerdown`). 판 안에서 글을 끌어
+ *     선택하다 손이 바깥으로 나가는 일은 흔한데, 그때 닫으면 쓰던 글이 사라집니다.
+ *     떼는 자리가 아니라 **잡는 자리**를 보므로 그런 일이 없습니다.
+ *
  * ★ **너비는 늘 꽉 찹니다 — 사람이 고르는 것이 아닙니다.**
  *   하루 동안 너비 상한 820px 과 그것을 푸는 「넓게」 버튼이 있었습니다. 화면 주인이
  *   그것을 보고 **"그게 아니라 네비 오른쪽을 다 채워라"** 고 해서 상한과 버튼을 함께
@@ -28,6 +45,7 @@
  *     글이 화면 끝에 딱 붙으면 읽기 나쁩니다.
  */
 
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MasterConsole } from "@/components/console/MasterConsole";
@@ -57,7 +75,7 @@ export function MasterDock({ session }: { session: Session }) {
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ startY: number; startHeight: number; height: number } | null>(null);
 
-  /** 지금 값. 손잡이·버튼은 열린 뒤에만 도니까 저장소를 다시 볼 일은 거의 없다. */
+  /** 지금 쓰는 값. 손잡이·버튼은 열린 뒤에만 도니까 저장소를 다시 볼 일은 거의 없다. */
   const current = useCallback((): DockSize => size ?? readDockSize(window.innerHeight), [size]);
 
   const commit = useCallback((next: DockSize) => {
@@ -65,10 +83,61 @@ export function MasterDock({ session }: { session: Session }) {
     writeDockSize(next);
   }, []);
 
+  /**
+   * 여닫기.
+   *
+   * 🔴 **높이는 여기서 안 건드린다.** 닫아도 `size` 는 그대로 남고 저장소도 안 지운다.
+   *    그래서 다시 열면 직전 높이 그대로다. 아직 저장소를 안 봤으면(첫 열기) 그때 읽는다.
+   */
   const toggleOpen = useCallback(() => {
     setSize((prev) => prev ?? readDockSize(window.innerHeight));
     setOpen((v) => !v);
   }, []);
+
+  /* ── 탭을 누르면 닫는다 ───────────────────────────────────────────────
+   *
+   * 탭을 누른 사람은 **그 화면을 보려는 것**이다. 아래 «바깥 누르기» 로도 대개
+   * 걸리지만, 뒤로 가기처럼 **누르지 않고 일어나는 이동**은 여기서만 잡힌다.
+   * ------------------------------------------------------------------ */
+
+  const pathname = usePathname();
+  const firstPath = useRef(true);
+  useEffect(() => {
+    // 🔴 첫 렌더에서는 아무것도 하지 않는다. 서랍은 어차피 접힌 채로 뜨고, 여기서
+    //    건드리면 뜨자마자 한 번 깜빡인다.
+    if (firstPath.current) {
+      firstPath.current = false;
+      return;
+    }
+    setOpen(false);
+  }, [pathname]);
+
+  /* ── 채팅 바깥을 누르면 닫는다 ────────────────────────────────────────
+   *
+   * ★ **떼는 자리가 아니라 잡는 자리**(`pointerdown`)로 판단한다 — 판 안에서 글을
+   *   끌어 선택하다 손이 밖으로 나가도 닫히지 않는다 (머리말 참고).
+   *
+   * ★ **캡처 단계**에서 듣는다. 판 안의 버튼이 `stopPropagation` 을 하든, 눌린 요소가
+   *   그 자리에서 화면에서 사라지든, 우리가 먼저 보므로 «안이었나» 를 틀리지 않는다.
+   * ------------------------------------------------------------------ */
+
+  const rootRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    // 접혀 있으면 닫을 것이 없다 — 듣지도 않는다
+    if (!open) return;
+
+    const onPointerDownAnywhere = (e: PointerEvent) => {
+      const root = rootRef.current;
+      const target = e.target;
+      // 🔴 판단할 수 없으면 **그대로 둔다.** 모르는 것을 닫는 쪽으로 해석하지 않는다
+      if (!root || !(target instanceof Node)) return;
+      if (root.contains(target)) return;
+      setOpen(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDownAnywhere, true);
+    return () => document.removeEventListener("pointerdown", onPointerDownAnywhere, true);
+  }, [open]);
 
   /* ── 손잡이 ──────────────────────────────────────────────────────────
    *
@@ -80,6 +149,7 @@ export function MasterDock({ session }: { session: Session }) {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const start = current();
       drag.current = { startY: e.clientY, startHeight: start.height, height: start.height };
+      setSize((prev) => (prev ? { ...prev, height: start.height } : { height: start.height }));
       // 끄는 동안 글자가 딸려 잡히지 않게
       e.preventDefault();
       setDragging(true);
@@ -140,10 +210,22 @@ export function MasterDock({ session }: { session: Session }) {
    */
   const consoleEl = useMemo(() => <MasterConsole session={session} />, [session]);
 
-  const height = !open ? 0 : size ? `min(${size.height}px, ${MAX_HEIGHT_CSS})` : DEFAULT_HEIGHT_CSS;
+  /**
+   * 눈에 보이는 높이.
+   *
+   * ★ **접히면 0 이다 — 저장된 높이는 그대로 남아 있고**, 여기서만 접는다.
+   *   그래서 다시 열면 직전 높이로 돌아온다.
+   */
+  const shownHeight = size?.height ?? null;
+  const height = !open
+    ? 0
+    : shownHeight !== null
+      ? `min(${shownHeight}px, ${MAX_HEIGHT_CSS})`
+      : DEFAULT_HEIGHT_CSS;
 
   return (
     <aside
+      ref={rootRef}
       className="fixed inset-x-0 bottom-0 z-40 flex flex-col md:left-[238px]"
       aria-label="마스터 에이전트"
     >

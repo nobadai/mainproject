@@ -29,7 +29,7 @@ from app.purchase_agent.llm.mix import (
     build_mix_context,
     shelf_is_tight,
 )
-from app.purchase_agent.llm.schemas import MixCandidate
+from app.purchase_agent.llm.schemas import MIX_PRECEDENCE_SIGNAL, MixCandidate
 from app.purchase_agent.nodes._guards import pending_value, require_positive
 from app.purchase_agent.nodes.draft_plan import fixed_market_quotes
 from app.purchase_agent.quotes import observed_at, observed_spec, quote_block_reason
@@ -682,6 +682,68 @@ def build_mix_candidates(
     return candidates
 
 
+#: 우열표의 ``winner`` 가 ``narrowed_to`` 와 **같은 방향인가**를 보는 잣대.
+#: 🔴 이 대조가 없으면 ``winner`` 는 아무도 안 읽는 설명 칸이 되고, 선언을 뒤집어도
+#: 판정이 안 따라 바뀐다 (규칙 8 이 막으려는 모양). 방향이 어긋난 선언은 **터뜨린다** —
+#: 조용히 한쪽을 따르면 YAML 이 말하는 것과 코드가 하는 것이 갈린다.
+_PRECEDENCE_DIRECTION = {
+    # 신선도가 이기면 중품을 **덜** 싣는다 — 상한 후보(cap 그 자체)는 고를 수 없다.
+    "SHELF_TIGHT": ("중품을 덜 싣는", lambda ratio, cap: ratio < cap),
+    # 스프레드가 이기면 중품을 **상한만큼** 싣는다.
+    "SPREAD_WIDE": ("중품을 상한만큼 싣는", lambda ratio, cap: ratio == cap),
+}
+
+
+def apply_mix_precedence(
+    candidates: list[tuple[str, float, str]],
+    *,
+    spread_widened: bool,
+    shelf_tight: bool,
+    cap_ratio: float,
+    declaration: Mapping[str, Any],
+) -> list[tuple[str, float, str]]:
+    """라벨 둘이 **같이 뜬 날**에만 후보를 하나로 좁힌다. 아니면 그대로 돌려준다.
+
+    🔴 **왜 규칙이 정하나.** ⑤ 의 지시문은 *"SPREAD_WIDE 면 단가 이득이 크다"* 와
+    *"SHELF_TIGHT 면 중품 비중을 낮추는 쪽이 유리하다"* 를 나란히 주면서 **둘이 부딪힐 때
+    무엇이 이기는지는 안 적는다.** 그 빈칸을 판단자가 매번 새로 메웠다 — 같은 입력에
+    ``MID_HALF`` 5 : ``MID_CAPPED`` 5 였다 (2026-09-15 · 앵커 N=10). 우열은 업무 판단이라
+    ``constraints.yaml`` 이 소유한다 (규칙 7).
+
+    ⚠️ **좁히기가 ``rule_ratio`` 도 바꾼다** — 부르는 쪽을 볼 것. 우열은 규칙이지 판단자가
+    아니므로, LLM 이 꺼진 날에도 같은 답이 나와야 한다.
+
+    🔴 **``status`` 가 ``APPROVED`` 가 아니면 아무것도 안 한다.** 그때는 판단자가 매번
+    정하던 예전 상태로 돌아간다 — ``allocation_weights`` 의 ``PROVISIONAL`` 과 뜻이
+    다르다는 것을 선언 주석이 적어 두었다.
+    """
+    if declaration.get("status") != "APPROVED":
+        return candidates
+    if not (spread_widened and shelf_tight):
+        return candidates
+
+    winner = declaration.get("winner")
+    방향 = _PRECEDENCE_DIRECTION.get(str(winner))
+    if 방향 is None:
+        raise ValueError(
+            f"grade.mix_precedence.winner 가 아는 라벨이 아니다: {winner!r} "
+            f"(아는 것: {sorted(_PRECEDENCE_DIRECTION)})"
+        )
+    설명, 맞나 = 방향
+    narrowed_to = declaration.get("narrowed_to")
+    남길것 = [entry for entry in candidates if entry[0] == narrowed_to]
+    if not 남길것:
+        # 후보에 없는 id 로 좁히라는 선언이면 **안 좁힌다.** 여기서 터뜨리면 그날 제안이
+        # 통째로 사라지는데, 우열은 «어느 안을 낼까» 이지 «안을 낼까» 가 아니다.
+        return candidates
+    if not 맞나(남길것[0][1], cap_ratio):
+        raise ValueError(
+            f"grade.mix_precedence 선언이 서로 어긋난다 — winner={winner!r} 는 {설명} "
+            f"쪽인데 narrowed_to={narrowed_to!r} 는 그 방향이 아니다"
+        )
+    return 남길것
+
+
 def _mix_signals(facts: dict) -> tuple[list[str], list[str]]:
     """LLM에 넘길 신호·사실. **숫자를 넣지 않는다** (§4-⑤ E3-2 "입력 컨텍스트도 기호화")."""
     signals: list[str] = []
@@ -732,17 +794,48 @@ def _select_mix(
     if rule_ratio <= 0:
         return rule_ratio, None
 
-    candidates = build_mix_candidates(state, cap_ratio, constraints)
+    지은_후보 = build_mix_candidates(state, cap_ratio, constraints)
+    # 🔴 **규칙이 먼저 좁힌다** (2026-09-15). 라벨 둘이 부딪히는 날의 우열은 업무 판단이라
+    #   선언이 소유하고, 판단자는 그 뒤에 남은 것을 «설명» 한다.
+    candidates = apply_mix_precedence(
+        지은_후보,
+        spread_widened=bool(facts.get("widened")),
+        shelf_tight=shelf_is_tight(facts),
+        cap_ratio=cap_ratio,
+        declaration=constraints["grade"]["mix_precedence"],
+    )
+    좁혔나 = len(candidates) < len(지은_후보)
     by_id = {candidate_id: ratio for candidate_id, ratio, _ in candidates}
     # 규칙이 고르던 비율에 해당하는 후보를 기본안으로 삼는다. 없으면 LLM을 부르지 않는다 —
     # 고를 목록에 기본안이 없으면 실패 시 돌아갈 자리가 사라진다.
     # 정확 비교다. 후보 비율이 ``cap × fraction``이고 규칙이 채택한 값이 ``cap``이므로
     # ``cap × 1.0``이 정확히 일치한다 — 반올림을 끼우면 그 등식이 깨진다.
-    default_id = next((cid for cid, ratio in by_id.items() if ratio == rule_ratio), None)
-    if default_id is None or len(candidates) < 2:
+    #
+    # 🔴 **좁힌 날은 기본안도 같이 옮긴다.** 우열은 규칙이지 판단자가 아니므로, LLM 이
+    #   꺼졌든 전면 실패했든 **같은 답**이 나와야 한다. ``rule_ratio`` 를 안 옮기면
+    #   fallback 이 옛 값으로 되돌아가 «우열표가 있는데 실패하면 무시되는» 자리가 된다.
+    if 좁혔나:
+        default_id, rule_ratio = candidates[0][0], candidates[0][1]
+    else:
+        default_id = next((cid for cid, ratio in by_id.items() if ratio == rule_ratio), None)
+    # 🔴 **«좁히기 전» 으로 잰다.** 원래 후보가 하나뿐이던 날은 지금 그대로 안 부른다 —
+    #   그날은 우열이 한 일이 없고, 부르면 산출물에 없던 줄이 생긴다.
+    if default_id is None or len(지은_후보) < 2:
         return rule_ratio, None
 
     signals, facts_text = _mix_signals(facts)
+    if 좁혔나:
+        # 🔴 **판단자에게 «왜 하나뿐인가» 를 준다.** 안 주면 사유가 라벨과 어긋난 말을
+        #   쓰고(⑧ 의 ``MIX_REASON_LABEL_MISMATCH`` 가 그것을 본다), 읽는 사람은
+        #   «판단자가 골랐다» 로 읽는다. 숫자는 안 넣는다 (규칙 6).
+        signals.append(MIX_PRECEDENCE_SIGNAL)
+        이긴_쪽 = _PRECEDENCE_DIRECTION[
+            str(constraints["grade"]["mix_precedence"]["winner"])
+        ][0]
+        facts_text.append(
+            f"스프레드와 신선도가 부딪혀, 규칙이 정한 우열에 따라 {이긴_쪽} 쪽으로 "
+            "중품 비중을 한 가지로 좁혔다."
+        )
     context = build_mix_context(
         state["item"],
         spread_widened=bool(facts.get("widened")),

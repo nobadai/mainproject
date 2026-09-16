@@ -29,6 +29,7 @@ from psycopg import sql
 
 from app.logistics.agent.schemas import (
     LIVE_STATUSES,
+    DetectionRecord,
     ExceptionEvidence,
     ExceptionRow,
 )
@@ -66,6 +67,7 @@ _COLUMNS = (
     "detector_version",
     "previous_exception_id",
     "note",
+    "detection_history_json",
 )
 
 
@@ -91,6 +93,9 @@ def _row(raw: dict[str, Any]) -> ExceptionRow:
     evidence_rows = raw["evidence_json"] or []
     if isinstance(evidence_rows, str):  # jsonb 를 문자열로 돌려주는 드라이버 설정 대비
         evidence_rows = json.loads(evidence_rows)
+    history_rows = raw.get("detection_history_json") or []
+    if isinstance(history_rows, str):  # jsonb 를 문자열로 돌려주는 드라이버 설정 대비
+        history_rows = json.loads(history_rows)
     return ExceptionRow(
         exception_id=raw["exception_id"],
         sim_run_id=raw["sim_run_id"],
@@ -109,6 +114,7 @@ def _row(raw: dict[str, Any]) -> ExceptionRow:
         risk_accepted_as_of=raw["risk_accepted_as_of"],
         previous_exception_id=raw["previous_exception_id"],
         note=raw["note"],
+        detection_history=tuple(DetectionRecord.from_json(one) for one in history_rows),
     )
 
 
@@ -352,11 +358,18 @@ def open_exception(conn: Any, *, row: ExceptionRow) -> ExceptionRow:
                 INSERT INTO {schema}.logistics_exceptions (
                     exception_id, sim_run_id, code, subject_type, subject_id,
                     severity, status, opened_as_of, last_detected_as_of, observed_as_of,
-                    evidence_json, detector_version, previous_exception_id, note
+                    evidence_json, detector_version, previous_exception_id, note,
+                    detection_history_json
                 ) VALUES (
                     %(exception_id)s, %(sim)s, %(code)s, %(subject_type)s, %(subject_id)s,
                     %(severity)s, %(status)s, %(opened)s, %(detected)s, %(observed)s,
-                    %(evidence)s::jsonb, %(detector_version)s, %(previous)s, %(note)s
+                    %(evidence)s::jsonb, %(detector_version)s, %(previous)s, %(note)s,
+                    -- 🔴 최초 감지 원소 하나로 이력을 연다 (LOG-AGENT-005). as_of = 감지날짜.
+                    jsonb_build_array(
+                        jsonb_build_object(
+                            'as_of', %(detected_str)s::text, 'severity', %(severity)s::text
+                        )
+                    )
                 )
                 """
             ).format(schema=_schema()),
@@ -375,6 +388,7 @@ def open_exception(conn: Any, *, row: ExceptionRow) -> ExceptionRow:
                 "detector_version": row.detector_version,
                 "previous": row.previous_exception_id,
                 "note": row.note,
+                "detected_str": row.last_detected_as_of.isoformat(),
             },
         )
     return row
@@ -393,6 +407,12 @@ def touch_exception(
 
     ★ 그 둘이 불변인 것이 *"며칠째"* 의 근거다. 매일 새 행을 만들면 그 수가 사라지고,
       `status` 를 되돌리면 조사·제안이 붙은 문제가 조용히 처음으로 돌아간다.
+
+    🔴 **`severity` 는 «지금» 값으로 덮되(캐시), `detection_history_json` 에는 «그날
+       severity» 를 쌓는다** (LOG-AGENT-005). 걷기는 하루에 AFTER_INBOUND ·
+       AFTER_OUTBOUND 두 번 감지할 수 있어 같은 날짜 원소는 **마지막 감지값으로
+       교체**한다(최고값이 아니다) — 그날 최종값 하나만 남긴다. 다른 날짜는 누적한다.
+       같은 UPDATE 안에서 옛 같은-날 원소를 빼고 새 원소를 얹는다.
     """
     if not evidence:
         raise EmptyEvidence(f"{exception_id} 를 근거 없이 갱신할 수 없다")
@@ -405,6 +425,16 @@ def touch_exception(
                        evidence_json = %(evidence)s::jsonb,
                        last_detected_as_of = %(detected)s,
                        observed_as_of = %(observed)s,
+                       -- 🔴 같은 날짜 원소를 지우고(마지막 감지가 이긴다) 새 원소를 얹는다.
+                       detection_history_json = (
+                           SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+                           FROM jsonb_array_elements(detection_history_json) AS elem
+                           WHERE elem->>'as_of' <> %(detected_str)s::text
+                       ) || jsonb_build_array(
+                           jsonb_build_object(
+                               'as_of', %(detected_str)s::text, 'severity', %(severity)s::text
+                           )
+                       ),
                        updated_at = now()
                  WHERE exception_id = %(exception_id)s
                 """
@@ -415,6 +445,7 @@ def touch_exception(
                 "detected": last_detected_as_of,
                 "observed": observed_as_of,
                 "exception_id": exception_id,
+                "detected_str": last_detected_as_of.isoformat(),
             },
         )
 

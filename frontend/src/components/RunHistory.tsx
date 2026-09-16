@@ -11,6 +11,7 @@ import {
   scenarioName,
   stepLabel,
   stepResultLabel,
+  userErrorText,
 } from "@/lib/procurementLabels";
 import type { DecisionOut, RunHistory as RunHistoryData } from "@/lib/types";
 
@@ -27,12 +28,22 @@ import type { DecisionOut, RunHistory as RunHistoryData } from "@/lib/types";
  *   봐야 하기 때문이다.
  */
 
+/**
+ * 못 불러왔을 때의 문장. **여기서 문구를 적지 않는다** — 404 만 이 화면이 알고,
+ * 나머지는 `userErrorText` 한 곳에서 온다 (2026-09-16).
+ *
+ * 🔴 전에는 연결 실패 문장이 여기 손으로 복제돼 있었다. 사전 한쪽만 고치면 화면에
+ *    따라 다른 말이 나오던 자리다.
+ */
 function loadErrorText(e: unknown): string {
-  if (e instanceof ApiError) {
-    if (e.status === 404) return "그 번호의 매입 판단을 찾지 못했습니다. 번호를 다시 확인해 주세요.";
-    if (e.status === 0) return "서버에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
-  }
-  return "매입 판단을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.";
+  const status = e instanceof ApiError ? e.status : null;
+  //  이 화면만 아는 것 — 번호를 잘못 적었다.
+  if (status === 404) return "그 번호의 매입 판단을 찾지 못했습니다. 번호를 다시 확인해 주세요.";
+  return userErrorText(
+    status,
+    e instanceof Error ? e.message : "",
+    "매입 판단을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+  );
 }
 
 export function RunHistoryPanel({ known }: { known: string[] }) {
