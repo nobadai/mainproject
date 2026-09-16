@@ -9,8 +9,8 @@ finance_receivable.py — 마스터 `ReceivableSource` 를 재무 채권 구현�
 ③ 한 건씩 confirm_receivable 에 넘긴다     채권 원장은 재무 것이다
 ```
 
-  마스터 Protocol 은 `as_of` 만 나르는데 `ReceivableCreateInput` 은 일곱 칸을
-  요구한다. 그 일곱의 **주인이 각각 누구인가**가 이 파일의 전부다.
+  마스터 Protocol 은 `as_of` 만 나르는데 `ReceivableCreateInput` 은 여덟 칸을
+  요구한다. 그 여덟의 **주인이 각각 누구인가**가 이 파일의 전부다.
 
 ---
 
@@ -20,6 +20,7 @@ finance_receivable.py — 마스터 `ReceivableSource` 를 재무 채권 구현�
 sim_run_id            🟢 마스터가 정한다 — ledger_repository.BURN_IN_SIM_RUN_ID 하나
 financing_mode        🔴 **마스터가 고르지 않는다** — get_finance_runtime_axis() 로 묻는다
 sale_date             sales.sale_date
+issued_date           🟢 마스터가 정한다 — 그날 `as_of` 다 (sale_date 와 다를 수 있다)
 customer_partner_id   sales.customer_partner_id
 due_date              🔴 **sales.collection_due_date 를 읽는다**
 original_amount_krw   sales.total_amount_krw
@@ -271,6 +272,11 @@ class FinanceReceivableAdapter:
                 # 🔴 **고르지 않는다. 재무가 읽은 값 그대로다.**
                 financing_mode=axis["financing_mode"],
                 sale_date=sale.sale_date,
+                # 🔴 **발행일은 판매일이 아니라 그날이다.** 휴장일 판매는 그 뒤 첫
+                #   개장일에 발행되므로 `sale_date` 보다 늦다. 재무는 이 날짜의 상태에
+                #   AR 을 올리므로, 여기에 `sale.sale_date` 를 실으면 이미 지나간 날의
+                #   잔액이 뒤늦게 커진다.
+                issued_date=as_of,
                 customer_partner_id=sale.customer_partner_id,
                 # 🔴 **판매가 정한 기일 그대로다.**
                 due_date=sale.collection_due_date,
