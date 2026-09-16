@@ -45,7 +45,9 @@ import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 
 import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
+import { CashAdjustmentForm } from "./CashAdjustmentForm";
 import { CreditLimitForm } from "./CreditLimitForm";
+import { ReceivableCollectionForm } from "./ReceivableCollectionForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
 import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
@@ -125,8 +127,9 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
 
 function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
   const [creditRefresh, setCreditRefresh] = useState(0);
+  const [cashRefresh, setCashRefresh] = useState(0);
   const summary = useConsoleData<FinanceSummaryResponse>(
-    `summary:${simRun}:${asOf}`,
+    `summary:${simRun}:${asOf}:${cashRefresh}`,
     () => financeConsole.summary(simRun, asOf),
     true,
   );
@@ -194,6 +197,8 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
           </>
         )}
       </Panel>
+
+      {summary.data && <CashAdjustmentForm simRun={simRun} asOf={asOf} states={summary.data.states} onSaved={() => setCashRefresh((value) => value + 1)} />}
 
       <Panel title="받을 돈 · 줄 돈" subtitle="두 장부가 낸 합계를 그대로 적습니다">
         {receivables.loading || payables.loading ? (
@@ -559,8 +564,12 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
 /* ── 받을 돈 ──────────────────────────────────────────────────────────── */
 
 function Receivables({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [refresh, setRefresh] = useState(0);
+  const summary = useConsoleData<FinanceSummaryResponse>(
+    `receivable-summary:${simRun}:${asOf}:${refresh}`, () => financeConsole.summary(simRun, asOf), true,
+  );
   const state = useConsoleData<ReceivablesResponse>(
-    `ar:${simRun}:${asOf}`,
+    `ar:${simRun}:${asOf}:${refresh}`,
     () => financeConsole.receivables(simRun, asOf),
     true,
   );
@@ -576,6 +585,7 @@ function Receivables({ simRun, asOf }: { simRun: string; asOf: string }) {
   return (
     <>
       <CreditPanel simRun={simRun} asOf={asOf} />
+      {state.data && summary.data && <ReceivableCollectionForm simRun={simRun} asOf={asOf} rows={state.data.rows} states={summary.data.states} onSaved={() => setRefresh((value) => value + 1)} />}
       <Panel title="받을 돈" subtitle="연체 구간은 백엔드 규칙입니다 — 화면이 다시 나누지 않습니다">
         <Metrics>
           <Metric label="정상" value={moneyWon(data.summary.current_krw)} />
