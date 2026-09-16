@@ -29,6 +29,7 @@ import {
   type HistoryItem,
 } from "@/lib/mlConsole";
 
+import { DateRange } from "./DateRange";
 import { en, REPORT_KIND } from "./labels";
 import { Markdownish } from "./Markdownish";
 import { ReportBody, Verdict } from "./Report";
@@ -280,10 +281,45 @@ function TodayClaude({
   );
 }
 
-/** 지난 보고서 — 날짜별로 묶여 온다. */
-function History({ days, err, skip }: { days: HistoryDay[] | null; err: string | null; skip: string | null }) {
+/**
+ * 지난 보고서 — 날짜별로 묶여 온다.
+ *
+ * ★ **기간은 이 카드가 따로 가집니다** (2026-09-16). 맨 위 「금일 Claude 점검」
+ *   은 늘 **가장 최근 것 하나**여야 하는데, 같은 목록을 같이 쓰면 사람이 지난
+ *   주를 고르는 순간 위 카드까지 그 주로 바뀝니다. 그래서 여기서만 다시
+ *   받아옵니다 — 요청이 하나 늘지만 두 카드의 뜻이 갈리지 않습니다.
+ */
+function History({ skip, tick }: { skip: string | null; tick: number }) {
   const [open, setOpen] = useState<string | null>(null);
   const [text, setText] = useState<string>("");
+  const [days, setDays] = useState<HistoryDay[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+
+  //  값이 같으면 같은 객체를 그대로 둡니다 — 새 객체면 아래 `useEffect` 가
+  //  다시 돌아 같은 것을 또 받아옵니다.
+  const onRange = useCallback((from: string, to: string) => {
+    setRange((r) => (r && r.from === from && r.to === to ? r : { from, to }));
+  }, []);
+
+  //  ★ 달력이 바뀔 때마다 다시 받아옵니다. 조회 버튼은 두지 않습니다.
+  useEffect(() => {
+    if (!range) return;
+    let alive = true;
+    agentHistory(range.from, range.to)
+      .then((r) => {
+        if (!alive) return;
+        setDays(r.dates);
+        //  받아왔으면 지난 오류 줄을 지웁니다 — 남겨 두면 «지금도 안 된다» 로 읽힙니다.
+        setErr(null);
+      })
+      .catch((e: unknown) => alive && setErr(say(e)));
+    return () => {
+      alive = false;
+    };
+    //  `tick` 은 «방금 새 보고서를 만들었다» 는 신호입니다 — 기간이 그대로라도
+    //  다시 받아옵니다. 안 그러면 만들어 놓고 목록에 안 보입니다.
+  }, [range, tick]);
 
   const show = (file: string) => {
     if (open === file) {
@@ -297,29 +333,35 @@ function History({ days, err, skip }: { days: HistoryDay[] | null; err: string |
       .catch((e: unknown) => setText(say(e)));
   };
 
-  if (err)
-    return (
-      <Card title="지난 진단 보고서" subtitle="날짜별">
+  //  ★ 오류가 나도 **달력은 남깁니다.** 카드를 통째로 오류로 바꾸면 기간을
+  //    다시 고를 수가 없습니다 — 받아오는 일이 달력에서 시작하기 때문입니다.
+  return (
+    <Card
+      title="지난 진단 보고서"
+      subtitle="AI가 남긴 점검 기록 — 날짜별 보기"
+      right={<DateRange onChange={onRange} />}
+    >
+      {err && (
         <p className="m-0 text-[12px]" style={{ color: "var(--color-t-bad)" }}>
           {err}
         </p>
-      </Card>
-    );
-
-  return (
-    <Card title="지난 진단 보고서" subtitle="AI가 남긴 점검 기록 — 날짜별 보기">
-      {!days && (
+      )}
+      {!days && !err && (
         <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
           불러오는 중…
         </p>
       )}
       {days?.length === 0 && (
+        //  ★ 빈 목록을 조용히 두지 않습니다 — «AI 가 아무 말도 안 했다» 가 아니라
+        //    «그 기간을 골랐다» 입니다.
         <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
-          남겨진 보고서가 없습니다.
+          이 기간에 남겨진 보고서가 없습니다
         </p>
       )}
       <div className="flex flex-col gap-2.5">
-        {days?.slice(0, 14).map((d) => {
+        {/*  ★ 14일에서 자르던 것을 뺐습니다 (2026-09-16) — 고른 기간이 곧
+               보이는 범위입니다. 자르면 고른 날이 말없이 사라집니다. */}
+        {days?.map((d) => {
           //  ★ 맨 위에 펼쳐 둔 것은 여기서 뺍니다 — 같은 것이 두 번 보이면
           //    어느 쪽이 최신인지 헷갈립니다.
           const reports = d.reports.filter((f) => f.file !== skip);
@@ -384,22 +426,28 @@ function History({ days, err, skip }: { days: HistoryDay[] | null; err: string |
 }
 
 export function AgentsTab() {
-  //  ★ 기록은 **한 번만** 받습니다. 맨 위 카드와 아래 목록이 따로 받으면
-  //    같은 것을 두 번 묻게 됩니다.
+  //  ★ 맨 위 카드는 **기간과 상관없이 가장 최근 것**입니다. 그래서 여기서는
+  //    기간 없이 받습니다 (아래 목록은 제 기간으로 따로 받습니다 — `History`).
   const [days, setDays] = useState<HistoryDay[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  //  아래 목록에게 «다시 받아라» 고 알리는 신호. 새 보고서를 만든 직후에 올립니다.
+  const [tick, setTick] = useState(0);
 
   const reload = useCallback(() => {
+    setTick((t) => t + 1);
     agentHistory()
       .then((r) => setDays(r.dates))
-      .catch((e: unknown) => setErr(say(e)));
+      .catch(() => {
+        /* 위 카드가 «없습니다» 라고 말합니다 */
+      });
   }, []);
 
   useEffect(() => {
     let alive = true;
     agentHistory()
       .then((r) => alive && setDays(r.dates))
-      .catch((e: unknown) => alive && setErr(say(e)));
+      .catch(() => {
+        /* 위 카드가 «없습니다» 라고 말합니다 */
+      });
     return () => {
       alive = false;
     };
@@ -413,7 +461,7 @@ export function AgentsTab() {
     <div className="flex flex-col gap-4">
       <TodayClaude day={today} pick={claude} onDone={reload} />
       <QualityCard onDone={reload} />
-      <History days={days} err={err} skip={claude?.file ?? null} />
+      <History skip={claude?.file ?? null} tick={tick} />
     </div>
   );
 }

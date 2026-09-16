@@ -93,7 +93,13 @@ function ForecastPane() {
       <Note note={data.notice} />
 
       {/* ── 세 품목 카드 ──────────────────────────────────────────── */}
-      <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
+      {/* ★ **좁은 화면에서도 셋이 한 줄입니다** (2026-09-16).
+             전에는 `minmax(220px,1fr)` 이라 폭이 660px 아래로 내려가면 한 줄에
+             하나씩 세로로 쌓였습니다. 그러면 **품목을 고르는 버튼 셋이 한눈에
+             안 들어와** 무엇을 보고 있는지, 다른 품목이 있기는 한지 모릅니다.
+             칸 안쪽은 `min-w-0` 이라 좁아지면 글자가 줄로 접힙니다 — 넘치지
+             않습니다. */}
+      <div className="grid gap-2.5 [grid-template-columns:repeat(3,minmax(0,1fr))]">
         {data.cards.map((c) => (
           <button
             key={c.item}
