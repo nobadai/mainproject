@@ -31,6 +31,14 @@ import {
 } from "../finance/user_text";
 import type { SalesProposal } from "./sales_api";
 import { approveSalesScenario, type SalesDecisionResponse } from "./sales_api";
+import {
+  presentationColor,
+  presentationHelp,
+  presentationText,
+  screenStateText,
+  strategyLines,
+  unresolvedReasonText,
+} from "./proposal_text";
 import { sessionSnapshot, serverSnapshot, subscribeSession } from "@/lib/session";
 
 /**
@@ -71,11 +79,18 @@ export function TodayProposals({
   rows,
   requestCount,
   hiddenZeroQuantity,
+  screenState,
+  unresolvedCount,
+  rejectedCount,
   onConfirmed,
 }: {
   rows: SalesProposal[];
   requestCount: number;
   hiddenZeroQuantity: number;
+  /** 🔴 «후보가 없다» · «판정이 없다» · «다 탈락» 을 한 문구로 합치지 않는다. */
+  screenState?: string;
+  unresolvedCount?: number;
+  rejectedCount?: number;
   onConfirmed?: () => void;
 }) {
   const [selectedScenarioKey, setSelectedScenarioKey] = useState<string | null>(null);
@@ -124,7 +139,9 @@ export function TodayProposals({
         }}
         onCancel={() => setConfirming(false)}
         onConfirm={async () => {
-          if (!selected || selected.sale_status !== null || !selected.history_run_id || !session || inFlight.current) return;
+          //  🔴 **판정을 받고 통과한 안만 확정으로 간다.** 미판정 후보를 화면에
+          //     보여주는 것과 확정 요청을 보내는 것은 다른 사실이다.
+          if (!selected || selected.approval_blocked || selected.sale_status !== null || !selected.history_run_id || !session || inFlight.current) return;
           inFlight.current = true;
           setSubmitting(true);
           setDecisionError(null);
@@ -147,6 +164,17 @@ export function TodayProposals({
           }
         }}
       />
+      {screenState && screenStateText(screenState) && (
+        <p
+          className="mb-0 mt-3 rounded-lg px-3 py-2 text-[12px] leading-relaxed"
+          style={{ background: "var(--color-desk)", color: presentationColor(screenState === "PRESENTABLE" ? "PRESENTABLE" : screenState === "REJECTED" ? "REJECTED" : "UNRESOLVED") }}
+        >
+          {screenStateText(screenState)}
+          {(unresolvedCount ?? 0) > 0 && ` 판정을 기다리는 안 ${unresolvedCount}개`}
+          {(rejectedCount ?? 0) > 0 && `, 확정할 수 없는 안 ${rejectedCount}개`}
+          {((unresolvedCount ?? 0) > 0 || (rejectedCount ?? 0) > 0) && "."}
+        </p>
+      )}
       <p className="mb-0 mt-1 text-[12px] leading-relaxed text-ink2">
         오늘 판매가 {requestCount}건의 요청을 돌아 {rows.length}개의 안을 만들었습니다
         {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 추천과 선택은 다르며, 선택은 아직 판매 확정이 아닙니다.
@@ -183,7 +211,12 @@ function ApprovalPanel({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const canApprove = selected !== null && selected.sale_status === null && selected.history_run_id !== null && sessionName !== null;
+  const canApprove =
+    selected !== null
+    && !selected.approval_blocked
+    && selected.sale_status === null
+    && selected.history_run_id !== null
+    && sessionName !== null;
   if (result) return <DecisionResult result={result} />;
   return (
     <section className="mt-4 rounded-xl border p-4" style={{ borderColor: "var(--color-hair)" }}>
@@ -194,6 +227,12 @@ function ApprovalPanel({
         <div className="mt-2 text-[12px] leading-relaxed text-ink2">
           <p className="m-0"><b className="text-ink">{label(SCENARIO_TYPES, selected.scenario_type)}</b> · {selected.quantity_kg === null ? "수량 정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`} · {moneyWon(selected.reported_sales_amount_krw)}</p>
           {selected.sale_status !== null && <p className="mb-0 mt-1 font-semibold text-[var(--color-t-good)]">판매 확정 완료</p>}
+          {/* ★ 왜 못 누르는지 말하지 않으면 사용자는 버튼이 고장 난 줄 안다. */}
+          {selected.approval_blocked && selected.sale_status === null && (
+            <p className="mb-0 mt-1" style={{ color: presentationColor(selected.presentation_state) }}>
+              <b>{presentationText(selected.presentation_state)}</b> — {presentationHelp(selected.presentation_state)}
+            </p>
+          )}
           {!selected.history_run_id && <p className="mb-0 mt-1">이 실행 기록을 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
           {!sessionName && <p className="mb-0 mt-1">승인자 정보를 확인할 수 없어 판매 확정을 진행할 수 없습니다.</p>}
         </div>
@@ -210,8 +249,10 @@ function ApprovalPanel({
             <dt>예상 매출</dt><dd className="m-0 text-ink">{moneyWon(selected.reported_sales_amount_krw)}</dd>
             <dt>납품일</dt><dd className="m-0 text-ink">{selected.delivery_date ?? "날짜 미정"}</dd>
             <dt>결제 조건</dt><dd className="m-0 text-ink">{paymentTermText(selected.payment_days)}</dd>
+            {/* ★ 세 축을 각자 적는다 — 한 칸에 섞으면 어느 축의 이야기인지 못 되짚는다. */}
+            <dt>제시 상태</dt><dd className="m-0 text-ink">{presentationText(selected.presentation_state)}</dd>
             <dt>후보 상태</dt><dd className="m-0 text-ink">{selected.status ?? "정보 없음"}</dd>
-            <dt>재무</dt><dd className="m-0 text-ink">{selected.finance_verdict === null ? "재무 검토 전" : verdictText(selected.finance_verdict)}</dd>
+            <dt>재무 판정</dt><dd className="m-0 text-ink">{selected.finance_verdict === null ? "재무 검토 전" : verdictText(selected.finance_verdict)}</dd>
           </dl>
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" onClick={onCancel} disabled={submitting} className="rounded-lg border px-3 py-2 font-semibold">취소</button>
@@ -244,6 +285,48 @@ function DecisionResult({ result }: { result: SalesDecisionResponse }) {
 }
 
 /**
+ * 판정이 왜 안 났는가.
+ *
+ * ★ **판매가 적어 둔 사실에서만 읽는다.** 없는 이유를 지어내면 사용자가 채울 수 없는
+ *   것을 채우려 한다.
+ */
+function UnresolvedReason({ row }: { row: SalesProposal }) {
+  if (row.presentation_state !== "UNRESOLVED") return null;
+  if (row.unresolved_reason_codes.length === 0) return null;
+  return (
+    <section className="rounded-lg px-3 py-2 text-[12px]" style={{ background: "var(--color-desk)" }}>
+      <p className="m-0 font-semibold">아직 판정을 받지 못했습니다</p>
+      <ul className="m-0 mt-1 list-disc pl-4 text-ink2">
+        {row.unresolved_reason_codes.map((code) => (
+          <li key={code}>{unresolvedReasonText(code)}</li>
+        ))}
+      </ul>
+      <p className="mb-0 mt-1 text-ink2">탈락한 것이 아닙니다 — 같은 조건으로 다시 확인할 수 있습니다.</p>
+    </section>
+  );
+}
+
+/**
+ * 전략이 어떻게 섰는가.
+ *
+ * 🔴 **저장된 라벨만 적는다.** HTTP 원문이나 provider 응답 본문은 계약에 없다.
+ */
+function StrategyNote({ row }: { row: SalesProposal }) {
+  const lines = strategyLines(row.strategy);
+  if (lines.length === 0) return null;
+  return (
+    <details className="text-[12px]">
+      <summary className="cursor-pointer text-ink2">이 안이 어떻게 만들어졌는지 보기</summary>
+      <ul className="m-0 mt-1.5 list-disc pl-4 text-ink2">
+        {lines.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/**
  * 판매안 카드 한 장. **판매 화면과 마스터 대화가 같은 카드를 쓴다** — 두 자리가 다른
  * 숫자나 다른 추천을 말하지 않게 한 벌로 둔다.
  */
@@ -256,11 +339,9 @@ export function ProposalCard({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const tone = verdictTone(row.finance_verdict);
-  const accent =
-    row.finance_verdict === null
-      ? "var(--color-hair)"
-      : `var(--color-t-${tone === "neutral" ? "info" : tone})`;
+  //  ★ 테두리는 **제시 상태**를 따른다 — 사용자가 먼저 알아야 하는 것은 «이 안으로 갈
+  //    수 있나» 이고, 재무 판정은 그 답의 근거다.
+  const accent = presentationColor(row.presentation_state);
   const kind = label(SCENARIO_TYPES, row.scenario_type);
   const aim = label(OBJECTIVES, row.objective);
   return (
@@ -281,9 +362,12 @@ export function ProposalCard({
         {selected && <Tag text="선택됨" color="var(--color-t-info)" />}
         {/* ★ 확정은 추천·선택과 다른 사실이다 — 같은 실행에 판매 기록이 있을 때만 붙는다. */}
         {row.sale_status !== null && <Tag text="판매 확정" color="var(--color-t-good)" />}
+        {/* 🔴 **제시 상태와 재무 판정을 한 배지에 섞지 않는다.** 앞은 «이 안으로 갈 수
+            있나» 이고 뒤는 «재무가 뭐라 했나» 다 — 미판정을 탈락으로 읽게 두지 않는다. */}
+        <Tag text={presentationText(row.presentation_state)} color={accent} />
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
           {/* ⚠️ 재무가 아직 안 본 안과 거절된 안은 다른 사실이다. */}
-          {row.finance_verdict === null ? "재무 검토 전" : verdictText(row.finance_verdict)}
+          재무 {row.finance_verdict === null ? "검토 전" : verdictText(row.finance_verdict)}
         </span>
       </header>
 
@@ -313,6 +397,13 @@ export function ProposalCard({
 
         {/* 🔴 **왜 그 판정인지 말한다.** 결과만 적으면 사용자가 되짚을 수 없다. */}
         <FinanceReason row={row} />
+
+        {/* 🔴 **판정이 안 났으면 무엇을 기다리는지 말한다.** 말하지 않으면 사용자가
+            할 수 있는 일이 없고, 그러면 조건을 바꾸는 엉뚱한 일을 한다. */}
+        <UnresolvedReason row={row} />
+
+        {/* ★ 이 안의 자세를 무엇이 골랐나. 모델이 실패했으면 왜 실패했는지까지. */}
+        <StrategyNote row={row} />
 
         <button
           type="button"
@@ -598,6 +689,9 @@ export function TodayProposalsPanel({
     data: {
       request_count: number;
       hidden_zero_quantity: number;
+      state?: string;
+      unresolved_count?: number;
+      rejected_count?: number;
       rows: SalesProposal[];
     } | null;
     error: string | null;
@@ -628,6 +722,9 @@ export function TodayProposalsPanel({
         </p>
       ) : (
         <TodayProposals
+          screenState={state.data.state}
+          unresolvedCount={state.data.unresolved_count}
+          rejectedCount={state.data.rejected_count}
           rows={state.data.rows}
           requestCount={state.data.request_count}
           hiddenZeroQuantity={state.data.hidden_zero_quantity}

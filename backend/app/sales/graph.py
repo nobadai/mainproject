@@ -611,6 +611,7 @@ def _strategy_fields(state: SalesAgentState) -> dict[str, object]:
         "strategy_source": plan.source,
         "strategy_llm_status": plan.llm_status,
         "strategy_clamped_reason_codes": list(plan.clamped_reason_codes),
+        "strategy_llm_failure_reason": plan.llm_failure_reason,
     }
 
 

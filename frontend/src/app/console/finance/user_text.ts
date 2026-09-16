@@ -372,3 +372,19 @@ export function readableReason(text: string | null | undefined): string | null {
   if (/[A-Z][A-Z0-9]*_[A-Z0-9_]+|\b[A-Z]{4,}\b/.test(trimmed)) return null;
   return trimmed;
 }
+
+/**
+ * 비용 생명주기 상태의 사용자 말.
+ *
+ * ★ «미지급» 이 아니라 «지급 예정» 이라고 부른다. 앞은 연체처럼 읽히고, 뒤는 아직
+ *   날짜가 오지 않았다는 뜻이다 — 원장이 말하는 것은 뒤쪽이다.
+ */
+const EXPENSE_STATUS: Record<string, string> = {
+  ACCRUED: "지급 예정",
+  PAID: "지급 완료",
+  CANCELLED: "취소됨",
+};
+
+export function expenseStatusText(value: string | null | undefined): string {
+  return say(EXPENSE_STATUS, value, "상태 없음");
+}

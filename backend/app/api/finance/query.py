@@ -477,6 +477,11 @@ def _flows(summary) -> list[FlowCell]:
             group="out",
         ),
         FlowCell(
+            label="운영비로 나간 돈",
+            value=_manwon_with_unit(summary.operating_expense_cash_out_krw),
+            group="out",
+        ),
+        FlowCell(
             label="판매로 잡힌 금액",
             value=_manwon_with_unit(summary.sales_recognized_krw),
             tone="good",
@@ -498,6 +503,7 @@ def _closings_table(rows: list[FinanceClosingItem]) -> Table:
             Column(key="buy", label="매입 지급", align="right", mono=True),
             Column(key="log", label="물류비", align="right", mono=True),
             Column(key="pay", label="급여 · 이자", align="right", mono=True),
+            Column(key="ope", label="운영비", align="right", mono=True),
             Column(key="sale", label="판매 인식", align="right", mono=True),
             Column(key="col", label="수금", align="right", mono=True),
             Column(key="base", label="대출 없음 현금", align="right", mono=True),
@@ -509,6 +515,13 @@ def _closings_table(rows: list[FinanceClosingItem]) -> Table:
                 "buy": _won(row.purchase_cash_out_krw),
                 "log": _won(row.logistics_cash_out_krw),
                 "pay": _won(row.payroll_interest_cash_out_krw),
+                #  🔴 **기록하지 않은 날을 0원이라고 적지 않는다.** 그 실행이 이 축을
+                #     세지 않았다는 사실과 세어 보니 없었다는 사실은 다르다.
+                "ope": (
+                    "기록 없음"
+                    if row.operating_expense_cash_out_krw is None
+                    else _won(row.operating_expense_cash_out_krw)
+                ),
                 "sale": _won(row.sales_recognized_krw),
                 "col": _won(row.collection_cash_in_krw),
                 "base": _won(row.base_cash_balance_krw),

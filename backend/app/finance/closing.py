@@ -22,6 +22,11 @@ from app.finance.db import (
     get_db_schema,
     load_inventory_snapshot_as_of,
 )
+from app.finance.expenses import (
+    OPERATING_EXPENSE_CATEGORIES,
+    PAYROLL_INTEREST_CATEGORIES,
+    effective_paid_date,
+)
 from app.finance.settlement import settle_recognized_payables
 from app.finance.tools import effective_cash_date
 
@@ -43,9 +48,16 @@ _ZERO = Decimal(0)
 #:
 #: ★ 목록 밖은 여전히 `FinanceDataNotReady` 다. 모르는 분류를 조용히 어느 칸에
 #:   넣으면 그 순간 마감이 **틀린 값을 확정한다** — 막히는 편이 낫다.
-_PAYROLL_INTEREST_CATEGORIES: frozenset[str] = frozenset(
-    {"PAYROLL", "INTEREST", "LOAN_INTEREST"}
-)
+#: ★ **이름의 주인은 `app.finance.expenses` 다.** 여기서 다시 적으면 새 분류가
+#:   생긴 날 쓰기는 받아 주는데 마감만 막히는, 원인 찾기 어려운 상태가 된다.
+_PAYROLL_INTEREST_CATEGORIES: frozenset[str] = PAYROLL_INTEREST_CATEGORIES
+
+#: `operating_expense_cash_out_krw` 에 들어가는 분류. 매입대금도 물류비도 급여·이자도
+#: 아닌 잔여 운영비다.
+#:
+#: 🔴 **이 칸이 없던 동안 임차료 한 건이 그날 마감을 통째로 막았다.** 원장이 받아 적을
+#:   수 있는 비용을 마감이 «모르는 분류» 로 거절하고 있었다 — 갈 곳이 없었기 때문이다.
+_OPERATING_EXPENSE_CATEGORIES: frozenset[str] = OPERATING_EXPENSE_CATEGORIES
 
 
 @dataclass(frozen=True)
@@ -138,6 +150,7 @@ class _ClosingFacts:
     purchase_cash_out_krw: Decimal
     logistics_cash_out_krw: Decimal
     payroll_interest_cash_out_krw: Decimal
+    operating_expense_cash_out_krw: Decimal
     sales_recognized_krw: Decimal
     collection_cash_in_krw: Decimal
     base_cash_balance_krw: Decimal
@@ -149,11 +162,13 @@ class _ClosingFacts:
 
     @property
     def base_net_cash_krw(self) -> Decimal:
+        """그날 순현금. **주인은 여기 하나다** — 화면도 마스터도 다시 세지 않는다."""
         return (
             self.collection_cash_in_krw
             - self.purchase_cash_out_krw
             - self.logistics_cash_out_krw
             - self.payroll_interest_cash_out_krw
+            - self.operating_expense_cash_out_krw
         )
 
 
@@ -254,14 +269,15 @@ def _load_closing_facts(conn: Any, *, as_of: date, sim_run_id: str) -> _ClosingF
 
     inventory = load_inventory_snapshot_as_of(conn, sim_run_id=sim_run_id, as_of=as_of)
     purchase_cash_out = _purchase_cash_out(conn, sim_run_id=sim_run_id, as_of=as_of)
-    logistics_cash_out, payroll_interest_cash_out = _expense_cash_out(
-        conn, sim_run_id=sim_run_id, as_of=as_of
+    logistics_cash_out, payroll_interest_cash_out, operating_expense_cash_out = (
+        _expense_cash_out(conn, sim_run_id=sim_run_id, as_of=as_of)
     )
     return _ClosingFacts(
         day_no=(as_of - axis.period_start).days + 1,
         purchase_cash_out_krw=purchase_cash_out,
         logistics_cash_out_krw=logistics_cash_out,
         payroll_interest_cash_out_krw=payroll_interest_cash_out,
+        operating_expense_cash_out_krw=operating_expense_cash_out,
         sales_recognized_krw=_sales_recognized(conn, sim_run_id=sim_run_id, as_of=as_of),
         collection_cash_in_krw=collection_cash_in,
         # 대출 제외 곡선 — 실행축 현금에서 **남은 원금**을 뺀 값.
@@ -670,17 +686,40 @@ def _recognized_total(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
     return total
 
 
-def _expense_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Decimal, Decimal]:
+def _expense_cash_out(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[Decimal, Decimal, Decimal]:
+    """그날 실제로 나간 운영비를 **세 칸으로 가른다.**
+
+    ```text
+    related_delivery_id 가 붙었다        → 물류비
+    급여 · 이자 분류                     → 급여·이자
+    그 밖의 아는 운영 분류               → 일반 운영비
+    모르는 분류                          → 막는다
+    ```
+
+    🔴 **기준일은 `paid_date` 다 — 발생일이 아니다.** 9월 16일에 생긴 임차료를 20일에
+       내면 현금은 20일에 빠진다. 발생일로 세면 마감이 «아직 안 나간 돈» 을 나갔다고
+       적는다.
+
+    ★ **이미 적힌 PAID 행은 지급일을 모른다.** 그 행들에 한해 `expense_date` 를 지급
+      기준일로 읽는다 (`effective_paid_date`). 읽기 전용 호환이고, 원장에 날짜를 채워
+      넣지 않는다 — 추측한 날짜가 사실인 척하게 두지 않는다.
+
+    ★ **모르는 분류에서 여전히 막는다.** 갈 칸이 생겼다고 해서 아무 이름이나 받으면,
+      그 순간 마감은 틀린 값을 «확정» 한다. 막히는 편이 낫다.
+    """
     schema = sql.Identifier(get_db_schema())
     with conn.cursor() as cursor:
         cursor.execute(
             sql.SQL(
                 """
-                SELECT expense_category, related_delivery_id, amount_krw
+                SELECT expense_category, related_delivery_id, amount_krw,
+                       status, paid_date, expense_date
                 FROM {}.expenses
                 WHERE sim_run_id = %s
-                  AND expense_date = %s
                   AND status = 'PAID'
+                  AND COALESCE(paid_date, expense_date) = %s
                 """
             ).format(schema),
             [sim_run_id, as_of],
@@ -688,17 +727,30 @@ def _expense_cash_out(conn: Any, *, sim_run_id: str, as_of: date) -> tuple[Decim
         rows = cursor.fetchall()
     logistics = _ZERO
     payroll_interest = _ZERO
+    operating = _ZERO
     for row in rows:
         category = _row_value(row, "expense_category", 0)
         delivery_id = _row_value(row, "related_delivery_id", 1)
         amount = _daily_closing_amount(_row_value(row, "amount_krw", 2))
+        status = _row_value(row, "status", 3)
+        paid_on = effective_paid_date(
+            status=str(status),
+            paid_date=_row_value(row, "paid_date", 4),  # type: ignore[arg-type]
+            expense_date=_row_value(row, "expense_date", 5),  # type: ignore[arg-type]
+        )
+        if paid_on != as_of:
+            #  ⚠️ SQL 이 이미 걸렀지만, 같은 규칙을 파이썬에서도 한 번 더 세운다 —
+            #     두 자리가 다른 날짜를 «지급일» 이라고 부르기 시작하면 아무도 못 찾는다.
+            continue
         if delivery_id is not None:
             logistics += amount
         elif category in _PAYROLL_INTEREST_CATEGORIES:
             payroll_interest += amount
+        elif category in _OPERATING_EXPENSE_CATEGORIES:
+            operating += amount
         else:
             raise FinanceDataNotReady("daily_closing_expense_category")
-    return logistics, payroll_interest
+    return logistics, payroll_interest, operating
 
 
 def _sales_recognized(conn: Any, *, sim_run_id: str, as_of: date) -> Decimal:
@@ -777,6 +829,7 @@ def _upsert_daily_closing(
         "purchase_cash_out_krw": facts.purchase_cash_out_krw,
         "logistics_cash_out_krw": facts.logistics_cash_out_krw,
         "payroll_interest_cash_out_krw": facts.payroll_interest_cash_out_krw,
+        "operating_expense_cash_out_krw": facts.operating_expense_cash_out_krw,
         "sales_recognized_krw": facts.sales_recognized_krw,
         "collection_cash_in_krw": facts.collection_cash_in_krw,
         "base_net_cash_krw": facts.base_net_cash_krw,
@@ -794,14 +847,16 @@ def _upsert_daily_closing(
                 INSERT INTO {schema}.daily_closings (
                     sim_run_id, close_date, day_no,
                     purchase_cash_out_krw, logistics_cash_out_krw,
-                    payroll_interest_cash_out_krw, sales_recognized_krw,
+                    payroll_interest_cash_out_krw, operating_expense_cash_out_krw,
+                    sales_recognized_krw,
                     collection_cash_in_krw, base_net_cash_krw, base_cash_balance_krw,
                     loan_execution_krw, loan_cash_balance_krw, receivables_balance_krw,
                     inventory_qty_kg, accounting_inventory_cost_krw, closed
                 ) VALUES (
                     %(sim_run_id)s, %(close_date)s, %(day_no)s,
                     %(purchase_cash_out_krw)s, %(logistics_cash_out_krw)s,
-                    %(payroll_interest_cash_out_krw)s, %(sales_recognized_krw)s,
+                    %(payroll_interest_cash_out_krw)s,
+                    %(operating_expense_cash_out_krw)s, %(sales_recognized_krw)s,
                     %(collection_cash_in_krw)s, %(base_net_cash_krw)s,
                     %(base_cash_balance_krw)s, %(loan_execution_krw)s,
                     %(loan_cash_balance_krw)s, %(receivables_balance_krw)s,
@@ -821,6 +876,7 @@ def _upsert_daily_closing(
                     purchase_cash_out_krw = %(purchase_cash_out_krw)s,
                     logistics_cash_out_krw = %(logistics_cash_out_krw)s,
                     payroll_interest_cash_out_krw = %(payroll_interest_cash_out_krw)s,
+                    operating_expense_cash_out_krw = %(operating_expense_cash_out_krw)s,
                     sales_recognized_krw = %(sales_recognized_krw)s,
                     collection_cash_in_krw = %(collection_cash_in_krw)s,
                     base_net_cash_krw = %(base_net_cash_krw)s,

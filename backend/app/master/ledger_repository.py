@@ -66,6 +66,13 @@ CLOSE_DATE = "close_date"
 PURCHASE_CASH_OUT = "purchase_cash_out_krw"
 LOGISTICS_CASH_OUT = "logistics_cash_out_krw"
 PAYROLL_INTEREST_CASH_OUT = "payroll_interest_cash_out_krw"
+#: 🔴 **이 칸을 안 읽으면 요약이 조용히 안 맞는다.** 걷기 현금 줄은 유출 칸들과
+#:   순현금을 나란히 찍는데, 일반 운영비만 빠지면 «찍힌 칸의 합 ≠ 순현금» 이 된다.
+#:   그때 나는 것은 오류가 아니라 **읽는 사람이 못 맞추는 표**다.
+#:
+#: ★ 마스터는 이 값을 **나르기만 한다.** 순현금은 재무가 이미 빼서 적어 놓은 값이고,
+#:   여기서 다시 세지 않는다.
+OPERATING_EXPENSE_CASH_OUT = "operating_expense_cash_out_krw"
 COLLECTION_CASH_IN = "collection_cash_in_krw"
 NET_CASH = "base_net_cash_krw"
 BASE_CASH_BALANCE = "base_cash_balance_krw"
@@ -80,6 +87,7 @@ WALK_CASH_COLUMNS = (
     PURCHASE_CASH_OUT,
     LOGISTICS_CASH_OUT,
     PAYROLL_INTEREST_CASH_OUT,
+    OPERATING_EXPENSE_CASH_OUT,
     COLLECTION_CASH_IN,
     NET_CASH,
     BASE_CASH_BALANCE,

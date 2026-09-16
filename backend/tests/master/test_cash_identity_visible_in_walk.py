@@ -48,6 +48,7 @@ from app.master.ledger_repository import (
     LOAN_CASH_BALANCE,
     LOGISTICS_CASH_OUT,
     NET_CASH,
+    OPERATING_EXPENSE_CASH_OUT,
     PAYROLL_INTEREST_CASH_OUT,
     PURCHASE_CASH_OUT,
     WALK_CASH_COLUMNS,
@@ -72,6 +73,7 @@ def _마감행(
     매입유출: int = 0,
     물류유출: int = 0,
     인건이자: int = 0,
+    운영비유출: int = 0,
     수금: int = 0,
     순현금: int,
     잔액: int,
@@ -87,6 +89,7 @@ def _마감행(
         PURCHASE_CASH_OUT: Decimal(매입유출),
         LOGISTICS_CASH_OUT: Decimal(물류유출),
         PAYROLL_INTEREST_CASH_OUT: Decimal(인건이자),
+        OPERATING_EXPENSE_CASH_OUT: Decimal(운영비유출),
         COLLECTION_CASH_IN: Decimal(수금),
         NET_CASH: Decimal(순현금),
         BASE_CASH_BALANCE: Decimal(잔액),
@@ -225,12 +228,12 @@ def test_유출이_0_이어도_칸이_빠지지_않는다() -> None:
     결과 = _걷기(_마감행(첫날, 수금=30, 순현금=30, 잔액=130))
     요약 = _NFC(format_summary(결과))
 
-    for 이름 in ("매입유출", "물류유출", "인건이자"):
+    for 이름 in ("매입유출", "물류유출", "인건이자", "운영비유출"):
         assert _NFC(f"{이름}: 0") in 요약, f"0 인 칸 '{이름}' 이 요약에서 빠졌다: {요약}"
 
 
 def test_현금_줄이_여섯_칸을_다_찍는다() -> None:
-    """★ 다섯은 그 구간 합이고 **기말잔액만 마지막 날의 값이다.**"""
+    """★ 여섯은 그 구간 합이고 **기말잔액만 마지막 날의 값이다.**"""
     결과 = _걷기(*_성립하는_두날())
     현금 = 결과.cash
     요약 = _NFC(format_summary(결과))
@@ -240,7 +243,7 @@ def test_현금_줄이_여섯_칸을_다_찍는다() -> None:
     assert 현금[COLLECTION_CASH_IN] == 30
     assert 현금[NET_CASH] == -20
     assert 현금[BASE_CASH_BALANCE] == 80, "기말잔액은 합이 아니라 마지막 날의 잔액이다"
-    for 이름 in ("매입유출", "물류유출", "인건이자", "수금", "순현금", "기말잔액"):
+    for 이름 in ("매입유출", "물류유출", "인건이자", "운영비유출", "수금", "순현금", "기말잔액"):
         assert _NFC(이름) in 요약, f"현금 줄에 '{이름}' 칸이 없다: {요약}"
 
 
@@ -511,6 +514,9 @@ def test_읽는_칸_목록이_여섯을_다_든다() -> None:
         PURCHASE_CASH_OUT,
         LOGISTICS_CASH_OUT,
         PAYROLL_INTEREST_CASH_OUT,
+        #  🔴 이 칸이 빠지면 찍힌 유출의 합이 순현금과 안 맞고, 읽는 사람은 그 차이를
+        #     설명할 칸을 표에서 못 찾는다.
+        OPERATING_EXPENSE_CASH_OUT,
         COLLECTION_CASH_IN,
         NET_CASH,
         BASE_CASH_BALANCE,

@@ -93,6 +93,7 @@ def expenses(
     from_date: date | None = None,
     to_date: date | None = None,
     category: str | None = None,
+    status: str | None = None,
 ) -> ConsoleExpensesResponse:
     """Stored expense rows; the ledger's own category is the one that groups them."""
     return get_console_expenses(
@@ -101,6 +102,7 @@ def expenses(
         from_date=from_date,
         to_date=to_date,
         category=category,
+        status=status,
     )
 
 

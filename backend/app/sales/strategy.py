@@ -95,6 +95,11 @@ class StrategyPlan(BaseModel):
     llm_model: str | None = None
     #: 모델이 고른 자세를 사실이 내린 자리. **내렸다는 사실 자체를 남긴다.**
     clamped_reason_codes: list[str] = Field(default_factory=list)
+    #: 🔴 **왜 템플릿으로 떨어졌나.** 성공했거나 설정이 꺼진 날은 `None`.
+    #:
+    #:   `HTTP_400` 은 우리가 고칠 것이 있다는 뜻이고 `HTTP_429` 는 기다리면
+    #:   풀린다는 뜻이다 — 사유가 없으면 그 둘이 화면에서 같아진다.
+    llm_failure_reason: str | None = None
 
     def of(self, strategy: str) -> StrategyProfile | None:
         return next((p for p in self.profiles if p.strategy == strategy), None)
@@ -522,6 +527,7 @@ def plan_strategies(
             llm_provider=outcome.llm_provider,
             llm_model=outcome.llm_model,
             clamped_reason_codes=notes,
+            llm_failure_reason=outcome.failure_reason,
         ),
         signals,
     )

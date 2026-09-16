@@ -188,6 +188,7 @@ from app.master.ledger_repository import (
     COLLECTION_CASH_IN,
     LOGISTICS_CASH_OUT,
     NET_CASH,
+    OPERATING_EXPENSE_CASH_OUT,
     PAYROLL_INTEREST_CASH_OUT,
     PURCHASE_CASH_OUT,
     read_walk_closings,
@@ -964,12 +965,17 @@ class WalkResult:
 
 #: 현금 줄이 찍는 칸. **왼쪽은 사람이 읽는 이름 · 오른쪽은 재무의 칸이다.**
 #:
-#: 🔴 **다섯이 전부 합이고 기말잔액만 여기 없다** — 그쪽은 마지막 날의 값이라
+#: 🔴 **여섯이 전부 합이고 기말잔액만 여기 없다** — 그쪽은 마지막 날의 값이라
 #:   같은 자리에 두면 합으로 읽힌다.
+#:
+#: 🔴 **운영비 칸이 빠져 있으면 찍힌 유출의 합이 순현금과 안 맞는다.** 재무가 순현금에서
+#:   이미 뺀 값이라 순현금은 맞는데, 그 차이를 설명하는 칸이 표에 없어서 읽는 사람이
+#:   «어디서 샜지» 를 되짚을 수가 없다.
 _CASH_FLOWS = (
     ("매입유출", PURCHASE_CASH_OUT),
     ("물류유출", LOGISTICS_CASH_OUT),
     ("인건이자", PAYROLL_INTEREST_CASH_OUT),
+    ("운영비유출", OPERATING_EXPENSE_CASH_OUT),
     ("수금", COLLECTION_CASH_IN),
     ("순현금", NET_CASH),
 )
