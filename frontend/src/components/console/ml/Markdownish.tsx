@@ -14,16 +14,29 @@
  *
  * ★ **코드칸 안은 손대지 않습니다.** 그 안에는 세로로 줄 맞춘 수치표가
  *   들어 있습니다. 굵은 글씨로 바꾸려 들면 줄 맞춤이 깨집니다.
+ *
+ * ★ **링크 하나만 예외입니다 — `action:` 으로 시작하는 것** (2026-09-16).
+ *   `[모델 업데이트 — 소매가](action:retrain-apply?kind=rtl)` 를 **버튼**으로
+ *   그립니다. 답변 글이 채팅까지 가는 유일한 통로라(`ActionButton` 머리말)
+ *   버튼을 글 안에 실을 자리가 여기밖에 없습니다.
+ *
+ *   🔴 **그 밖의 링크는 한 글자도 안 건드립니다.** 지금까지 이 그림판은 링크를
+ *     아예 몰랐고, 보고서에 `[…](…)` 가 있으면 글자 그대로 나왔습니다. 그것을
+ *     바꾸지 않습니다 — 바꾸면 여태 나오던 보고서의 모양이 같이 변합니다.
  */
 
 import type { ReactNode } from "react";
 
-/* ── 한 줄 안 ── `**굵게**` 와 `` `코드` `` 만 봅니다 ───────────────── */
+import { ActionButton } from "@/components/console/ml/ActionButton";
+
+/* ── 한 줄 안 ── `**굵게**` · `` `코드` `` · `action:` 링크만 봅니다 ── */
 
 function inline(text: string, keyBase: string): ReactNode[] {
   const out: ReactNode[] = [];
   //  코드가 먼저입니다 — 코드칸 안의 별표는 굵은 글씨가 아닙니다.
-  const re = /`([^`]+)`|\*\*([^*]+)\*\*/g;
+  //  `action:` 링크는 **스킴까지 정확히 맞을 때만** 걸립니다. 평범한 링크는
+  //  여기 안 걸려 예전처럼 글자로 나갑니다.
+  const re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]\n]+)\]\(action:([^)\s]*)\)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -39,12 +52,16 @@ function inline(text: string, keyBase: string): ReactNode[] {
           {m[1]}
         </code>,
       );
-    } else {
+    } else if (m[2] !== undefined) {
       out.push(
         <strong key={`${keyBase}-b${i}`} className="font-semibold" style={{ color: "var(--color-ink)" }}>
           {m[2]}
         </strong>,
       );
+    } else {
+      //  ★ 무엇을 하는 버튼인지는 `ActionButton` 이 정합니다. 모르는 동작이면
+      //    그쪽이 글자 그대로 돌려줍니다 — 여기서 가르지 않습니다.
+      out.push(<ActionButton key={`${keyBase}-a${i}`} href={m[4]} label={m[3]} />);
     }
     last = m.index + m[0].length;
     i += 1;

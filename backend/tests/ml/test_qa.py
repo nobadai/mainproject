@@ -444,7 +444,18 @@ def test_날짜를_안_말하면_오늘_값과_그_이유를_준다(도구를_�
     assert out.meta.status == "OK"
     assert out.meta.targets == [BASE]                        # 내일이 아니라 오늘
     assert "날짜를 따로 말씀하지 않으셔서" in out.markdown
-    assert "전부" in out.markdown                            # 더 볼 수 있다고 알려준다
+    #   ★ 더 볼 수 있다고 알려준다. **「전부」라고 권하지 않는다** (2026-09-16 ·
+    #     사용자 지시) — 그 말은 우리 해석기만 알아듣고 마스터를 거쳐 오면
+    #     못 알아듣는다. 되는 말을 예로 보인다
+    assert qa_graph.ASK_DATE_HINT in out.markdown
+    assert "「전부」라고 하시면" not in out.markdown
+    #   🔴 **꼬리 한 줄을 글자 그대로** 잰다. 조각으로만 재면 문장이 어디서
+    #     끊기거나 띄어쓰기가 달라져도 통과한다 — 사람이 보는 것은 줄 전체다
+    assert (
+        "> 날짜를 따로 말씀하지 않으셔서 **오늘** 값을 보여드립니다. "
+        "원하는 날짜나 기간을 말씀해주시면 해당 기간에 대한 가격을 보여드립니다. "
+        "예) 일주일치의 가격 / 3일 뒤 가격"
+    ) in out.markdown
 
 
 def test_날짜를_말하면_그_줄이_안_나온다(도구를_갈아_끼운다):
@@ -473,6 +484,12 @@ def test_오늘_값이_없으면_내일로_물러서고_그렇게_말한다(도�
     out = qa_graph.answer(QaRequest(item="배추", kind="AUC"))
     assert out.meta.status == "OK"
     assert "오늘 값이 아직 없어" in out.markdown and "내일" in out.markdown
+    #   ★ 물러선 경우에도 **뒷문장은 같다** — 날짜를 말하면 그 날을 준다는 안내는
+    #     오늘을 줬든 내일로 물러섰든 똑같이 필요하다
+    assert (
+        "> 날짜를 따로 말씀하지 않으셔서 오늘 값이 아직 없어 **내일** 값을 보여드립니다. "
+        f"{qa_graph.ASK_DATE_HINT}"
+    ) in out.markdown
     assert calls[0] == []                                    # 첫 조회는 읽을 날이 없었다
     assert calls[1] == [BASE + timedelta(days=1)]            # 물러선 뒤엔 내일을 읽는다
 
@@ -759,8 +776,8 @@ def _verify_report() -> dict:
 def 배치도구를_갈아_끼운다(monkeypatch: pytest.MonkeyPatch):
     """배치·보고서 도구를 갈아 끼운다. **기본은 «아무것도 없다» 다.**"""
 
-    def install(*, run=None, fails=None, reports=None,
-                boom_batch=False, boom_report=False):
+    def install(*, run=None, fails=None, reports=None, pending=None,
+                boom_batch=False, boom_report=False, boom_pending=False):
         def _raise(*_a, **_k):
             raise RuntimeError("connection refused")
 
@@ -784,6 +801,12 @@ def 배치도구를_갈아_끼운다(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             qa_graph.qa_tools, "agent_reports",
             _raise if boom_report else (lambda name, on: list(found.get(name) or [])),
+        )
+        #   🔴 **이건 HTTP 다.** 안 갈아 끼우면 검사가 진짜 8102 를 부른다 —
+        #     그 서버가 떠 있느냐에 따라 검사 결과가 달라진다. 기본은 «후보 없음».
+        monkeypatch.setattr(
+            qa_graph.qa_tools, "retrain_pending",
+            _raise if boom_pending else (lambda: list(pending or [])),
         )
 
     return install
@@ -900,6 +923,131 @@ def test_재학습_후보가_있으면_판정_문구를_그대로_적는다(
         assert 수치 in out.markdown
     assert "재학습 후보 없음" not in out.markdown
     assert "문제 없음" not in out.markdown
+
+
+def _pending(kind: str = "rtl") -> dict:
+    """실제 `/retrain/pending` 의 `pending[]` 한 줄 모양 (`agent/retrain_auto.py`).
+
+    🔴 **학습 끝 칸이 없다.** 후보 이름의 `20260916` 은 **만든 날**이지 학습 끝이
+      아니다 — 답은 그걸로 되짚지 않고, 검증 보고서에 적혀 있을 때만 적는다.
+    """
+    return {
+        "kind": kind,
+        "state": "pending",
+        "sec": 18.4,
+        "candidate": f"ops_{kind}_cand_20260916",
+        "items": [],
+        "verify": "",
+    }
+
+
+def test_바꿀_후보가_있으면_한_줄과_버튼이_같이_나간다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 버튼은 `action:` 스킴 링크로 싣는다 — 채팅까지 가는 것은 마크다운뿐이다.
+
+    ★ 학습 끝은 **검증 보고서가 가격 종류를 밝혔을 때만** 붙는다. 여기서는
+      `payload.kind` 를 넣어 «붙는 쪽» 을 잰다 — 안 붙는 쪽은 다음 검사다.
+    """
+    보고서 = _verify_report()
+    보고서["payload"] = dict(보고서["payload"], kind="rtl")
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={"재학습검증": 보고서}, pending=[_pending("rtl")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    한_줄 = "소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다"
+    버튼 = "[모델 업데이트 — 소매가](action:retrain-apply?kind=rtl)"
+    assert 한_줄 in out.markdown
+    assert 버튼 in out.markdown
+    assert qa_graph.UPDATE_UNREADABLE not in out.markdown
+
+    #   ★ **맨 아래다** (2026-09-16 · 사용자 지시). 누를지 정할 근거(검증 표)를
+    #     다 보인 뒤라야 한다 — 표보다 먼저 나오면 «보기 전에 누르라» 가 된다.
+    assert out.markdown.rstrip().endswith(버튼)
+    assert out.markdown.index(한_줄) > out.markdown.index("**현재 모델**")
+    assert out.markdown.index(한_줄) > out.markdown.index("**모델 성능 — ")
+    assert out.markdown.index(한_줄) > out.markdown.index("현행 WMAPE")
+    assert out.markdown.index(버튼) > out.markdown.index(한_줄)
+
+
+def test_학습_끝을_모르면_괄호째_뺀다_지어내지_않는다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 후보 이름의 날짜(`…_20260916`)로 학습 끝을 되짚지 않는다.
+
+    🔴 **오늘 실제 자료가 이 쪽이다** (2026-09-16 실측). 그날 검증 보고서 둘은
+      제목이 «견주는 창» · «배추 — …» 로 시작해 가격 종류가 어디에도 없고,
+      `payload.kind` 도 아직 안 붙었다 — `_report_kind` 가 «(가격 종류 미상)»
+      을 돌려준다. 그러면 후보와 보고서를 짝지을 수 없으므로 **괄호째 뺀다.**
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={"재학습검증": _verify_report()},
+                    pending=[_pending("auc")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert "경락가 후보 — 현행보다 나음 · 업데이트할 수 있습니다" in out.markdown
+    #   «(학습 끝 …)» 괄호가 통째로 없다. 표 머리의 «학습 끝» 칸과 섞지 않는다
+    assert "(학습 끝" not in out.markdown
+    assert "20260916" not in out.markdown
+    assert "[모델 업데이트 — 경락가](action:retrain-apply?kind=auc)" in out.markdown
+
+
+def test_재학습_기록을_못_읽어도_버튼은_그_줄_뒤에_붙는다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 나가는 문이 하나라야 한다.
+
+    보고서를 못 읽는 것과 «바꿀 후보가 있나» 는 **다른 창구**다 (앞은 DB, 뒤는
+    ML 콘솔). 중간에서 빠져나가면 보고서가 안 읽히는 날에만 버튼이 통째로
+    사라진다 — 정작 그날도 바꿀 것은 있을 수 있다.
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(boom_report=True, pending=[_pending("whsl")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    버튼 = "[모델 업데이트 — 중도매가](action:retrain-apply?kind=whsl)"
+    assert "재학습 기록을 읽지 못했습니다." in out.markdown
+    assert 버튼 in out.markdown
+    assert out.markdown.index(버튼) > out.markdown.index("재학습 기록을 읽지 못했습니다.")
+    assert out.markdown.rstrip().endswith(버튼)
+
+
+def test_바꿀_후보가_없으면_버튼도_문장도_없다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 없는 것이 정상이다. 그때 버튼을 그리면 누를 것이 없는 버튼이 나간다."""
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={}, pending=[])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert "action:" not in out.markdown
+    assert "모델 업데이트" not in out.markdown
+    assert "업데이트할 수 있습니다" not in out.markdown
+    assert qa_graph.UPDATE_UNREADABLE not in out.markdown
+
+
+def test_콘솔을_못_읽으면_확인_불가라고_적고_버튼은_안_그린다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 «못 읽었다» 를 «없다» 로 적지 않는다 — 앞은 고장이고 뒤는 정상이다.
+
+    ★ 그리고 **성능표는 그대로 나간다.** 콘솔 하나가 죽었다고 답을 비우지 않는다.
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={}, boom_pending=True)
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert qa_graph.UPDATE_UNREADABLE in out.markdown
+    assert "action:" not in out.markdown
+    assert "업데이트할 수 있습니다" not in out.markdown
+    #   성능표는 살아 있다
+    assert qa_tools.SEALED_SOURCE in out.markdown
+    assert "19.7" in out.markdown
 
 
 def test_보고서_제목의_가격종류_코드는_사람_말로_바꾼다():

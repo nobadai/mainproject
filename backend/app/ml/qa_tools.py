@@ -21,8 +21,10 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+import httpx
 from psycopg import errors as pg_errors
 
+from app.ml.console_proxy import console_origin
 from app.ml.db import fetch_all, fetch_one, get_db_schema
 
 #: 운영 번들만 읽는다. 실험 번들(`ops-*` 붙임표)이 섞이면 조용히 다른 값이 나온다.
@@ -344,3 +346,52 @@ def current_models() -> dict[str, Any]:
             "last_swap_time_known": cut.get("time_known"),
         })
     return {"models": models, "cutover_read": cutover_read}
+
+
+# ── 바꿀 모델이 있나 ──────────────────────────────────────────────────
+#
+# 🔴 **이것만 DB 가 아니라 HTTP 다.** 나머지는 전부 SELECT 인데, 이 물음의 답은
+#   우리 DB 에 없다. 재학습 그래프의 체크포인트와 배치가 남긴 파일이 ML 저장소
+#   쪽에 있고, 둘을 **겹쳐야** 답이 나온다.
+#
+#   ```text
+#   파일(_retrain_pending.json)   무엇을 견줬나 — 배치가 찍어 둔 그때의 사진
+#   그래프 체크포인트              아직 사람 답을 기다리나 — 지금 이 순간
+#   ```
+#
+#   사람이 「모델 업데이트」 를 누르면 **그래프만 바뀌고 파일은 그대로 남는다.**
+#   파일만 보면 누른 뒤에도 계속 «바꿔야 합니다» 가 뜬다 — 실제로 그랬고
+#   ML 쪽 `/retrain/pending` 이 2026-09-09 에 그것을 고쳤다. 그 창구를 그대로
+#   쓴다. 여기서 다시 판정하지 않는다.
+#
+#   그래서 `agent_report` 로는 대신할 수 없다. 보고서는 «후보가 낫다» 까지만
+#   말하고 «아직 안 눌렀다» 는 모른다.
+
+#: **짧게 기다린다.** 이건 사람이 채팅에서 답을 기다리는 길목이다. ML 콘솔이
+#: 안 떠 있을 때 30초를 붙들면 답 전체가 그만큼 늦는다 — 못 읽으면 한 줄로
+#: 말하고 넘어가는 편이 낫다 (`_perf_section`).
+PENDING_TIMEOUT = httpx.Timeout(connect=2.0, read=4.0, write=2.0, pool=2.0)
+
+#: 사람이 눌러야 할 결정이 있는 가격 종류. **여기 없는 값은 버린다** —
+#: 버튼을 만들 수 없는 종류를 답에 적으면 누를 수 없는 버튼이 나간다.
+PENDING_KINDS = ("auc", "whsl", "rtl")
+
+
+def retrain_pending() -> list[dict[str, Any]]:
+    """사람이 눌러야 할 재학습 결정. 없으면 빈 목록, **못 읽으면 터진다.**
+
+    🔴 **못 읽은 것을 «없다» 로 돌려주지 않는다.** 둘은 다른 사실이고, 답에
+      적는 말도 다르다 — 앞은 «확인 불가», 뒤는 «후보 없음» 이다. 여기서
+      섞으면 ML 콘솔이 죽어 있는 동안 화면이 «바꿀 것 없음» 으로 보인다.
+    """
+    origin, _hint = console_origin()
+    with httpx.Client(timeout=PENDING_TIMEOUT) as client:
+        response = client.get(f"{origin}/retrain/pending")
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict):
+        raise TypeError(f"/retrain/pending 이 사전이 아닌 것을 줬습니다: {type(body)}")
+    return [
+        row for row in (body.get("pending") or [])
+        if isinstance(row, dict) and str(row.get("kind") or "").lower() in PENDING_KINDS
+    ]

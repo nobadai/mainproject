@@ -287,6 +287,40 @@ def test_성능_갈래는_아홉_칸마다_근거를_달고_조건을_같이_적
     assert E.validate_reply(request, reply, meta) == ()
 
 
+def test_업데이트_버튼이_실려도_봉투가_깨끗하고_글자가_안_깎인다(monkeypatch):
+    """★ 버튼은 **글 안에** 실린다 — `answer_markdown` 말고는 채팅까지 못 간다.
+
+    🔴 그래서 잴 것이 둘이다.
+      ① 봉투 검증이 그 링크를 트집 잡지 않는가 (`validate_reply` 가 비는가)
+      ② 링크가 **글자 그대로** 남는가 — 한 글자만 깎여도 화면이 버튼으로 못 그린다
+    """
+    from app.ml import qa_graph
+
+    버튼 = f"[모델 업데이트 — 소매가]({qa_graph.UPDATE_ACTION.format(kind='rtl')})"
+    줄 = [
+        "**현재 모델**",
+        "",
+        "**소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다**",
+        "",
+        버튼,
+    ]
+    답 = QaAnswer(
+        markdown="\n".join(줄),
+        meta=QaMeta(status="OK", routes=["perf"], base_dt=BASE),
+        rows_for_evidence=[],
+        performance_for_evidence=_perf_seen(),
+    )
+    _qa(monkeypatch, 답)
+    request = req(payload={"question": "모델 성능 어때?"})
+    reply, meta = adapter.ml_port(request)
+
+    assert E.validate_reply(request, reply, meta) == ()
+    assert 버튼 in reply.payload["answer_markdown"]
+    #   ★ 기존 칸도 그대로다 — 버튼을 실었다고 기계가 읽는 값이 사라지지 않는다
+    assert len(reply.payload["performance"]) == 9
+    assert reply.payload["answer_routes"] == "perf"
+
+
 def test_갈래_둘을_답해도_봉투가_깨끗하다(monkeypatch):
     _qa(monkeypatch, _route_answer(
         ["batch", "perf"],

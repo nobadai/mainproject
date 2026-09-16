@@ -120,6 +120,20 @@ NEED_CLARIFY_LLM = (
 )
 SOURCE_DOWN = "지금 예측 창고를 읽지 못했습니다. 값을 지어내지 않기 위해 답을 비웁니다."
 
+#: 날짜를 안 물어봐 하루만 답했을 때, **더 볼 수 있다고 알려주는 뒷문장.**
+#:
+#: 🔴 **「전부」라고 권하지 않는다** (2026-09-16 · 사용자 지시). 그 말은 우리
+#:   해석기만 아는 말이고(`qa_llm.py` 의 지시문이 「전부」를 19일로 편다),
+#:   **마스터를 거쳐 오면 못 알아듣는다.** 시키는 대로 «전부» 라고 말한 사람이
+#:   답을 못 받는 안내였다.
+#:
+#: ★ 그래서 **되는 말을 예로 보인다.** 「일주일치」·「3일 뒤」는 날짜를 고르는
+#:   보통 말이라 어느 길로 들어와도 읽힌다.
+ASK_DATE_HINT = (
+    "원하는 날짜나 기간을 말씀해주시면 해당 기간에 대한 가격을 보여드립니다. "
+    "예) 일주일치의 가격 / 3일 뒤 가격"
+)
+
 
 class QaState(TypedDict, total=False):
     """그래프가 들고 다니는 것. 판정 결과만 담고 원본은 표에 둔다."""
@@ -172,6 +186,11 @@ class QaState(TypedDict, total=False):
     models: list[dict[str, Any]]
     models_read: str           # ok · error
     cutover_read: str          # ok · absent · error
+    #   ★ 바꿀 수 있는 후보가 있나 (2026-09-16). 이것만 DB 가 아니라 ML 콘솔에
+    #     서버가 직접 물어 온다 — 「아직 안 눌렀나」는 그래프만 안다
+    #     (`qa_tools.retrain_pending`).
+    pending: list[dict[str, Any]]
+    pending_read: str          # ok · error
     #   ★ 질문에 없어서 **전부로 채운** 자리 (2026-09-16 · 사용자 지시).
     filled_defaults: list[str]
 
@@ -715,6 +734,15 @@ def perf_node(state: QaState) -> QaState:
         read = "error"
     out["retrain_rows"] = rows
     out["perf_read"] = read
+
+    #   ★ **또 따로 감싼다.** ML 콘솔이 안 떠 있어도 위의 성능표와 보고서는
+    #     그대로 나가야 한다. 못 읽으면 답에 그렇게 한 줄 적는다.
+    try:
+        out["pending"] = qa_tools.retrain_pending()
+        out["pending_read"] = "ok"
+    except Exception:                                        # noqa: BLE001
+        out["pending"] = []
+        out["pending_read"] = "error"
     return out
 
 
@@ -1058,6 +1086,76 @@ def _models_table(state: QaState) -> list[str]:
     return lines
 
 
+#: 콘솔에 못 물었을 때 적는 한 줄. **«후보 없음» 과 다른 말이다** — 앞은
+#: 「모르겠다」, 뒤는 「봤는데 없다」다. 섞으면 콘솔이 죽은 동안 사람이
+#: «바꿀 것이 없구나» 로 읽는다.
+UPDATE_UNREADABLE = "업데이트 후보 확인 불가 (ML 콘솔 연결 안 됨)."
+
+#: 버튼을 마크다운에 싣는 방법. **평범한 링크가 아니라 `action:` 스킴**이다.
+#:
+#: ★ 채팅으로 가는 길에 살아남는 것은 `answer_markdown` **한 덩어리뿐**이다
+#:   (`master/answer.py::_MARKDOWN_AGENTS`). 나머지 payload 칸은 마스터가 사실
+#:   줄로 펴 버려 화면 거품 안으로 «구조» 가 못 들어온다. 그래서 버튼을 글 안에
+#:   싣는다 — 화면(`ml/Markdownish.tsx`)이 이 스킴만 버튼으로 그린다.
+#:
+#: 🔴 **경로를 여기서 지어내지 않는다.** 누르면 재학습 탭이 쓰는 그 함수
+#:   (`lib/mlConsole.ts::graphAct(kind, "apply")`)가 그대로 돈다.
+UPDATE_ACTION = "action:retrain-apply?kind={kind}"
+
+
+def _candidate_train_end(state: QaState, label: str) -> str:
+    """후보가 **어디까지 배웠나**. 그날 검증 보고서에 적혀 있을 때만 돌려준다.
+
+    🔴 `/retrain/pending` 에는 이 값이 **없다** (2026-09-16 실측 · 그 행은
+      `kind` · `state` · `sec` · `candidate` · `items` · `verify` 뿐이고,
+      같이 오는 `current_models` 의 `train_end` 는 **현행** 것이다).
+      후보 이름 `ops_rtl_cand_20260916` 의 날짜는 **만든 날**이지 학습 끝이
+      아니다. 그걸로 되짚으면 맞을 때도 있지만 그건 우리가 지어낸 것이다.
+
+    그래서 «후보 학습 끝» 이라고 **적혀 있는 곳**에서만 가져오고, 없으면
+    빈 글자를 돌려준다 — 부르는 쪽이 괄호째 뺀다.
+    """
+    for report in state.get("retrain_rows") or []:
+        if _report_kind(report) != label:
+            continue
+        for values in _numbers_of(report):
+            end = values.get("후보 학습 끝")
+            if end:
+                return str(end)
+    return ""
+
+
+def _update_lines(state: QaState) -> list[str]:
+    """«바꿀 수 있는 후보가 있다» 와 그 버튼. **없으면 한 줄도 안 적는다.**
+
+    ★ 자리는 **답의 맨 아래**다 (`_perf_section` 머리말). 현재 모델 · 성능 아홉 칸 ·
+      재학습 판정과 검증 표를 다 보인 **뒤에** 묻는다 — 누를지 정할 근거를 보기
+      전에 버튼이 먼저 나오면 안 된다.
+    """
+    read = state.get("pending_read")
+    if read is None:
+        return []                                 # 성능 갈래가 아니다 — 물어본 적도 없다
+    if read == "error":
+        return ["", UPDATE_UNREADABLE]
+
+    out: list[str] = []
+    for row in state.get("pending") or []:
+        kind = str(row.get("kind") or "").strip().lower()
+        label = _KIND_CODE.get(kind)
+        if not label:
+            #   버튼을 만들 수 없는 종류다. 누를 수 없는 버튼을 그리지 않는다.
+            continue
+        end = _candidate_train_end(state, label)
+        when = f" (학습 끝 {end})" if end else ""
+        out += [
+            "",
+            f"**{label} 후보{when} — 현행보다 나음 · 업데이트할 수 있습니다**",
+            "",
+            f"[모델 업데이트 — {label}]({UPDATE_ACTION.format(kind=kind)})",
+        ]
+    return out
+
+
 def _judge_table(reports: list[dict[str, Any]]) -> list[str]:
     """재학습 **판정**은 한 줄씩. 펼치면 하루 세 건이라 답을 덮는다.
 
@@ -1088,7 +1186,15 @@ def _perf_section(state: QaState) -> tuple[str, str]:
       잰 값인지가 늘 같이 간다.
 
     ★ 순서가 뜻이다 — **지금 무엇이 도나**를 먼저 보이고, 그 다음이 그 모델이
-      얼마나 맞히나, 마지막이 바꿀 것이 있나다.
+      얼마나 맞히나, 그 다음이 그날 무엇을 견줬나, **맨 마지막이 그래서 바꿀
+      것이 있나**다.
+
+    🔴 **업데이트 줄과 버튼은 맨 아래다** (2026-09-16 · 사용자 지시). 처음에는
+      «현재 모델» 표 바로 아래에 뒀는데, 그러면 **누를지 정할 근거(검증 표)를
+      보기 전에 버튼이 먼저 나온다.** 숫자를 다 보이고 나서 묻는다.
+
+    ★ **나가는 문이 하나다.** 재학습 기록을 못 읽어도 그 줄 다음에 버튼이 붙게
+      중간에서 빠져나가지 않는다 — 갈라 두면 한쪽에만 버튼이 붙는다.
     """
     lines = _models_table(state)
     lines += [
@@ -1109,22 +1215,24 @@ def _perf_section(state: QaState) -> tuple[str, str]:
 
     if state.get("perf_read") == "error":
         lines += ["", "재학습 기록을 읽지 못했습니다."]
-        return "\n".join(lines), "ok"
-
-    rows = state.get("retrain_rows") or []
-    if not rows:
-        #   ★ **«기록이 없다» 와 «후보가 없다» 는 다르다** (2026-09-16 · 결정 ①).
-        #     전에는 둘을 한 문장(«재학습 후보 없음»)으로 적었다. 그러면 배치가
-        #     아예 안 돈 날도 «검사해 봤더니 바꿀 게 없다» 로 읽힌다.
-        days = state.get("perf_days") or [_asked_on(state)]
-        lines += ["", NO_RETRAIN_ROW.format(on=" · ".join(str(d) for d in days))]
     else:
-        #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
-        #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
-        lines += _judge_table([r for r in rows if r.get("name") == "재학습판정"])
-        for report in rows:
-            if report.get("name") != "재학습판정":
-                lines += _retrain_block(report)
+        rows = state.get("retrain_rows") or []
+        if not rows:
+            #   ★ **«기록이 없다» 와 «후보가 없다» 는 다르다** (2026-09-16 · 결정 ①).
+            #     전에는 둘을 한 문장(«재학습 후보 없음»)으로 적었다. 그러면 배치가
+            #     아예 안 돈 날도 «검사해 봤더니 바꿀 게 없다» 로 읽힌다.
+            days = state.get("perf_days") or [_asked_on(state)]
+            lines += ["", NO_RETRAIN_ROW.format(on=" · ".join(str(d) for d in days))]
+        else:
+            #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
+            #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
+            lines += _judge_table([r for r in rows if r.get("name") == "재학습판정"])
+            for report in rows:
+                if report.get("name") != "재학습판정":
+                    lines += _retrain_block(report)
+
+    #   ★ **맨 아래.** 숫자를 다 보인 뒤에 «그래서 바꿀까요» 를 묻는다
+    lines += _update_lines(state)
     return "\n".join(lines), "ok"
 
 
@@ -1363,7 +1471,7 @@ def _answer_markdown(state: QaState) -> QaState:
             "> 날짜를 따로 말씀하지 않으셔서 "
             + ("오늘 값이 아직 없어 **내일** 값을 보여드립니다."
                if state.get("default_fell_back") else "**오늘** 값을 보여드립니다.")
-            + " 「전부」라고 하시면 오늘부터 18일 뒤까지 다 보여드립니다."
+            + f" {ASK_DATE_HINT}"
         )
     if state.get("out_of_range"):
         last = base_dt + timedelta(days=QA_MAX_OFFSET)
