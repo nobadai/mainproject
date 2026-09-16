@@ -578,3 +578,213 @@ def test_선택_응답에는_새_실행이_없다(client, decisions):
     data = client.post("/master/ask/execute", json=select_body()).json()
 
     assert data["run"] is None
+
+
+# ── DOMAIN_ACTION ───────────────────────────────────────────────────────────
+
+
+def test_DOMAIN_ACTION_조회는_확인없이_실행한다(monkeypatch):
+    from app.master import ask_service
+    from app.master.ask_schemas import DomainActionAnswer
+
+    monkeypatch.setattr(
+        ask_service,
+        "_run_domain_action",
+        lambda *args, **kwargs: DomainActionAnswer(
+            domain="finance",
+            action="FINANCE_SUMMARY_GET",
+            text="재무 현황입니다.",
+            data={"current_cash_krw": "100"},
+        ),
+    )
+    result = run(
+        "지금 돈 얼마 있어?",
+        intent_json(
+            action="DOMAIN_ACTION",
+            domain_action="FINANCE_SUMMARY_GET",
+            slots={},
+            confidence="HIGH",
+        ),
+    )
+    assert result.outcome == "DOMAIN_ACTION_ANSWERED"
+    assert result.confirm_required is False
+    assert result.domain_result is not None
+    assert result.domain_result.action == "FINANCE_SUMMARY_GET"
+
+
+def test_DOMAIN_ACTION_쓰기는_확인전_실행하지_않는다(monkeypatch):
+    from app.master import ask_service
+
+    called = False
+
+    def should_not_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("확인 전에 write가 실행되면 안 된다")
+
+    monkeypatch.setattr(ask_service, "_run_domain_action", should_not_run)
+    monkeypatch.setattr(
+        ask_service,
+        "_domain_preview",
+        lambda *args, **kwargs: "300만원 입금을 기록합니다. 진행할까요?",
+    )
+    result = run(
+        "300만원 입금해줘",
+        intent_json(
+            action="DOMAIN_ACTION",
+            domain_action="FINANCE_CASH_ADJUSTMENT_CREATE",
+            slots={"direction": "INFLOW", "amount": "300만원", "source_ref": "이체확인-1"},
+            confidence="HIGH",
+        ),
+    )
+    assert result.outcome == "CLASSIFIED_ONLY"
+    assert result.confirm_required is True
+    assert called is False
+
+
+def test_DOMAIN_ACTION_필수슬롯이_없으면_되묻고_실행하지_않는다():
+    result = run(
+        "거래처 여신한도 바꿔줘",
+        intent_json(
+            action="DOMAIN_ACTION",
+            domain_action="FINANCE_CREDIT_LIMIT_UPSERT",
+            slots={},
+            confidence="HIGH",
+        ),
+    )
+    assert result.outcome == "NEEDS_CLARIFICATION"
+    assert result.confirm_required is False
+    assert "거래처" in (result.clarification or "")
+
+
+def test_finance_report_domain_action_returns_structured_facts_without_markdown(monkeypatch):
+    from datetime import date
+
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    facts = {"kind": "FINANCE", "sim_run_id": "SIM-1", "start_date": "2026-09-01"}
+    monkeypatch.setattr(ask_service, "render_finance_chat_report", lambda **_kwargs: facts)
+    result = ask_service._domain_read(
+        Intent(
+            action="DOMAIN_ACTION",
+            agents=[],
+            item=None,
+            confidence="HIGH",
+            domain_action="FINANCE_REPORT_GENERATE",
+        ),
+        as_of=date(2026, 9, 1),
+    )
+    assert result.data == facts
+    assert result.markdown is None
+    assert result.report_kind == "FINANCE"
+
+
+def test_sales_report_domain_action_returns_structured_facts_without_markdown(monkeypatch):
+    from datetime import date
+
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    facts = {"kind": "SALES", "sim_run_id": "SIM-1", "start_date": "2026-09-01"}
+    monkeypatch.setattr(ask_service, "render_sales_chat_report", lambda **_kwargs: facts)
+    result = ask_service._domain_read(
+        Intent(
+            action="DOMAIN_ACTION",
+            agents=[],
+            item=None,
+            confidence="HIGH",
+            domain_action="SALES_REPORT_GENERATE",
+        ),
+        as_of=date(2026, 9, 1),
+    )
+    assert result.data == facts
+    assert result.markdown is None
+    assert result.report_kind == "SALES"
+
+
+def test_finance_report_facts_keep_null_operating_expense(monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    from app.finance import (
+        console_credit,
+        console_expenses,
+        console_payables,
+        console_receivables,
+        dashboard,
+    )
+    from app.master.report import render_finance_chat_report
+
+    dump = lambda **kwargs: SimpleNamespace(model_dump=lambda **_kwargs: kwargs, **kwargs)
+    closing = dump(close_date="2026-09-01", operating_expense_cash_out_krw=None)
+    monkeypatch.setattr(
+        dashboard,
+        "get_finance_dashboard",
+        lambda **_kwargs: dump(states=[], recent_closings=[closing]),
+    )
+    monkeypatch.setattr(dashboard, "get_finance_cashflow", lambda **_kwargs: dump())
+    empty_receivable = dump(
+        total_outstanding_krw=0, days_1_7_krw=0, days_8_30_krw=0, days_30_plus_krw=0
+    )
+    empty_payable = dump(total_outstanding_krw=0, due_today_krw=0, due_next_7d_krw=0, overdue_krw=0)
+    empty_expense = dump(accrued_krw=0, accrued_count=0, paid_krw=0, cancelled_krw=0)
+    monkeypatch.setattr(
+        console_receivables,
+        "get_console_receivables",
+        lambda **_kwargs: dump(summary=empty_receivable),
+    )
+    monkeypatch.setattr(
+        console_payables, "get_console_payables", lambda **_kwargs: dump(summary=empty_payable)
+    )
+    monkeypatch.setattr(
+        console_expenses,
+        "get_console_expenses",
+        lambda **_kwargs: dump(summary=empty_expense, rows=[]),
+    )
+    monkeypatch.setattr(console_credit, "get_console_credit", lambda **_kwargs: dump(partners=[]))
+    facts = render_finance_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 9, 1),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 1),
+    )
+    assert facts["kind"] == "FINANCE"
+    assert facts["closings"][0]["operating_expense_cash_out_krw"] is None
+
+
+def test_sales_report_facts_include_actual_confirmed_sales_only(monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    from app.master.report import render_sales_chat_report
+    from app.sales import console_partners, console_proposals, console_trend, dashboard
+
+    dump = lambda **kwargs: SimpleNamespace(model_dump=lambda **_kwargs: kwargs, **kwargs)
+    confirmed, presentable = (
+        dump(scenario_id="C", sale_status="CONFIRMED"),
+        dump(scenario_id="P", sale_status=None),
+    )
+    monkeypatch.setattr(dashboard, "get_sales_dashboard", lambda **_kwargs: dump())
+    monkeypatch.setattr(
+        console_proposals,
+        "get_console_sales_proposals",
+        lambda **_kwargs: dump(
+            rows=[confirmed, presentable],
+            state="PRESENTABLE",
+            presentable_count=1,
+            review_required_count=0,
+            unresolved_count=0,
+            rejected_count=0,
+        ),
+    )
+    monkeypatch.setattr(console_trend, "get_console_sales_trend", lambda **_kwargs: dump(rows=[]))
+    monkeypatch.setattr(console_partners, "get_console_partners", lambda **_kwargs: dump(rows=[]))
+    facts = render_sales_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 9, 1),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 1),
+    )
+    assert facts["kind"] == "SALES"
+    assert [row["scenario_id"] for row in facts["confirmed_sales"]] == ["C"]

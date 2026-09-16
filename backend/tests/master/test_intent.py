@@ -289,5 +289,14 @@ def test_빈_발화문은_부르지_않는다():
 def test_출력_스키마에_수량_금액_칸이_없다():
     """**안전장치의 전부다.** 만들 자리를 없앤다 (오케 selector · 매입 ⑤ 선례)."""
     fields = set(Intent.model_fields)
-    assert fields == {"action", "agents", "item", "scenario_label", "condition", "confidence"}
+    assert fields == {
+        "action",
+        "agents",
+        "item",
+        "scenario_label",
+        "condition",
+        "domain_action",
+        "slots",
+        "confidence",
+    }
     assert not {"qty_kg", "amount_krw", "budget", "payload"} & fields
