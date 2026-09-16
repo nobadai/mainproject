@@ -324,7 +324,9 @@ def test_나눠도_불가능하면_수량이_줄어든다() -> None:
 #: 이 검사가 통과한다고 그 비율이 «검증된 후보» 가 되지 않는다. 운영 승인은 **코드 문제와
 #: 다른 축**이고, 여기서 켜는 것은 그 아래 경로가 실제로 도는지 보기 위해서다.
 _승인_흉내 = {
-    "status": "FIXTURE_ONLY",
+    # 🔴 **검사 안에서만 ``APPROVED`` 다** (2026-09-17). 게이트가 정확히 이 값일 때만 열려
+    #   흉내 문자열(``FIXTURE_ONLY``)로는 이 아래가 안 돈다. 선언 파일은 ``PROVISIONAL`` 그대로다.
+    "status": "APPROVED",
     "two_rounds": {"FRONT_LOADED": [0.60], "BACK_LOADED": [0.40]},
     "three_rounds": {"FRONT_LOADED": [0.50, 0.30], "BACK_LOADED": [0.20, 0.30]},
 }

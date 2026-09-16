@@ -39,7 +39,9 @@ LEAD_DAYS = 2
 
 #: 🔴 **승인된 값이 아니다.** 잠복 오류가 드러나게 «승인 상태» 를 흉내 낸 것이다.
 승인된_선언 = {
-    "status": "FIXTURE_ONLY",
+    # 🔴 **검사 안에서만 ``APPROVED`` 다** (2026-09-17). 게이트가 정확히 이 값일 때만 열려
+    #   흉내 문자열(``FIXTURE_ONLY``)로는 이 아래가 안 돈다. 선언 파일은 ``PROVISIONAL`` 그대로다.
+    "status": "APPROVED",
     "two_rounds": {"FRONT_LOADED": [0.60], "BACK_LOADED": [0.40]},
     "three_rounds": {"FRONT_LOADED": [0.50, 0.30], "BACK_LOADED": [0.20, 0.30]},
 }
