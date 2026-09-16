@@ -12,6 +12,29 @@ const backendOrigin = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8000";
 
 const nextConfig: NextConfig = isDev
   ? {
+      experimental: {
+        /**
+         * 🔴 프록시 상한. **`lib/api.ts` 의 `EXECUTE_TIMEOUT_MS` 와 같은 값이다.**
+         *
+         * Next 의 기본값은 `30초`(`next/dist/server/lib/router-utils/proxy-request.js`
+         * 의 `proxyTimeout || 30000`) 인데, 마스터 승인 한 번이 그보다 오래 걸린다.
+         *
+         * 2026-09-16 실측 (실 서버 · 화면에서 직접) —
+         *
+         *     프록시 없이 직접   POST /master/ask/execute   200 · **31.4초** · 승인 정상 기록
+         *     화면(프록시 경유)  POST /api/master/ask/execute
+         *                       🔴 500 ·「요청을 처리하지 못했습니다」
+         *                       Next: Failed to proxy ... socket hang up { code: 'ECONNRESET' }
+         *                       uvicorn 접근 로그에 **그 요청이 아예 없다** (먼저 끊어서)
+         *
+         * 결과가 나빴던 이유는 실패해서가 아니다 — **DB 에는 승인이 남고 화면만 실패로 보여서**
+         * 실매입 기록 카드가 안 떴다. 09-11 시연이 이것 때문에 두 번 막혔다.
+         *
+         * ⚠️ 화면이 준 시간을 프록시가 30초로 잘라먹고 있었다. 두 값이 갈리면 어느 쪽이 끊었는지
+         *   못 가리므로 **`EXECUTE_TIMEOUT_MS` 와 같은 값을 유지한다** — 한쪽을 고치면 다른 쪽도.
+         */
+        proxyTimeout: 900_000,
+      },
       async rewrites() {
         return [
           // 화면용 API. 백엔드에서도 `/api` 로 시작하는데, 아래 규칙이 앞의
