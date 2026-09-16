@@ -161,6 +161,8 @@ export function execute(args: {
   /** 화면이 **보고 있던 실행**. 없으면 서버가 최신을 고르고 경합이 남는다. */
   targetHistoryRunId?: string;
   decidedBy?: string;
+  /** 일반 Finance/Sales/Partner write 의 로그인 사용자. 승인 의미와 분리한다. */
+  actor?: string;
   /** `/ask` 에 보냈던 말 그대로. 가격 예측 조회만 이 원문으로 답한다 (재분류하지 않는다). */
   utterance?: string;
 }): Promise<ExecuteResponse> {
@@ -177,6 +179,7 @@ export function execute(args: {
         target_request_id: args.targetRequestId ?? null,
         target_history_run_id: args.targetHistoryRunId ?? null,
         decided_by: args.decidedBy ?? null,
+        actor: args.actor ?? null,
         utterance: args.utterance ?? null,
       }),
     },

@@ -626,3 +626,252 @@ def report_filename(run: Mapping[str, Any], *, item: str | None = None) -> str:
     if seq > 1:
         stem += f"_{seq}"
     return f"{stem}.md"
+
+
+# ─── Finance/Sales chat reports (deterministic, LLM 0회) ─────────────────
+
+
+def _chat_won(value: Any) -> str:
+    """Report용 원 표시. None과 0을 절대 합치지 않는다."""
+    if value is None:
+        return "—"
+    try:
+        return f"{round(float(value)):,}원"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) -> dict[str, Any]:
+    """기존 Finance read model만으로 만드는 보고서. LLM/새 계산 없음."""
+    from app.finance.console_credit import get_console_credit
+    from app.finance.console_expenses import get_console_expenses
+    from app.finance.console_payables import get_console_payables
+    from app.finance.console_receivables import get_console_receivables
+    from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
+
+    dashboard = get_finance_dashboard(sim_run_id=sim_run_id, as_of=as_of)
+    receivables = get_console_receivables(sim_run_id=sim_run_id, as_of=as_of)
+    payables = get_console_payables(sim_run_id=sim_run_id, as_of=as_of)
+    expenses = get_console_expenses(
+        sim_run_id=sim_run_id,
+        as_of=as_of,
+        from_date=start_date,
+        to_date=end_date,
+    )
+    credit = get_console_credit(sim_run_id=sim_run_id, as_of=as_of)
+    days = max(1, min(400, (end_date - start_date).days + 1))
+    cashflow = get_finance_cashflow(sim_run_id=sim_run_id, as_of=end_date, days=days)
+
+    # Finance report 화면·PDF의 정본은 아래 read-model facts다. Markdown 조립은
+    # 더 이상 생성 경로가 아니며, 보고서가 표시값을 다시 계산하지 않는다.
+    return {
+        "kind": "FINANCE",
+        "sim_run_id": sim_run_id,
+        "as_of": as_of.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "summary": dashboard.model_dump(mode="json"),
+        "cashflow": cashflow.model_dump(mode="json"),
+        "closings": [row.model_dump(mode="json") for row in dashboard.recent_closings],
+        "receivables": receivables.model_dump(mode="json"),
+        "payables": payables.model_dump(mode="json"),
+        "expenses": expenses.model_dump(mode="json"),
+        "credit": credit.model_dump(mode="json"),
+    }
+
+    lines = [
+        "# 재무 보고서",
+        "",
+        f"- 기준 실행: `{sim_run_id}`",
+        f"- 기간: {start_date.isoformat()} ~ {end_date.isoformat()}",
+        "",
+        "## 현재 자금",
+    ]
+    if dashboard.states:
+        for state in dashboard.states:
+            lines.append(
+                f"- {state.financing_mode}: 현재 현금 {_chat_won(state.current_cash_krw)}"
+                f" · 운영 여유 {_chat_won(state.operating_cash_buffer_krw)}"
+                f" · 차입 잔액 {_chat_won(state.current_debt_krw)}"
+            )
+    else:
+        lines.append("- 기록 없음")
+
+    rs = receivables.summary
+    ps = payables.summary
+    es = expenses.summary
+    lines += [
+        "",
+        "## 채권 · 채무",
+        f"- 아직 받을 돈: {_chat_won(rs.total_outstanding_krw)}",
+        f"- 연체 1~7일: {_chat_won(rs.days_1_7_krw)}",
+        f"- 연체 8~30일: {_chat_won(rs.days_8_30_krw)}",
+        f"- 연체 30일 초과: {_chat_won(rs.days_30_plus_krw)}",
+        f"- 아직 지급할 매입대금: {_chat_won(ps.total_outstanding_krw)}",
+        f"- 오늘 지급 예정: {_chat_won(ps.due_today_krw)}",
+        f"- 7일 내 지급 예정: {_chat_won(ps.due_next_7d_krw)}",
+        f"- 연체 매입대금: {_chat_won(ps.overdue_krw)}",
+        "",
+        "## 비용",
+        f"- 미지급(ACCRUED): {_chat_won(es.accrued_krw)} · {es.accrued_count}건",
+        f"- 지급(PAID): {_chat_won(es.paid_krw)}",
+        f"- 취소(CANCELLED): {_chat_won(es.cancelled_krw)}",
+        "",
+        "## 거래처 여신",
+    ]
+    if credit.partners:
+        for row in credit.partners:
+            name = row.partner_name or row.partner_id
+            lines.append(
+                f"- {name}: 한도 {_chat_won(row.credit_limit_krw)}"
+                f" · 미수 {_chat_won(row.current_ar_krw)}"
+                f" · 가용 {_chat_won(row.available_credit_krw)}"
+            )
+    else:
+        lines.append("- 표시할 거래처 여신 기록 없음")
+
+    lines += ["", "## 일마감 현금 흐름"]
+    if dashboard.recent_closings:
+        for row in dashboard.recent_closings:
+            lines.append(
+                f"- {row.close_date}: 수금 {_chat_won(row.collection_cash_in_krw)}"
+                f" · 매입 {_chat_won(row.purchase_cash_out_krw)}"
+                f" · 물류 {_chat_won(row.logistics_cash_out_krw)}"
+                f" · 급여·이자 {_chat_won(row.payroll_interest_cash_out_krw)}"
+                f" · 운영비 {_chat_won(row.operating_expense_cash_out_krw)}"
+                f" · 순현금 {_chat_won(row.base_net_cash_krw)}"
+            )
+    else:
+        lines.append("- 기록 없음")
+
+    return {
+        "kind": "FINANCE",
+        "sim_run_id": sim_run_id,
+        "as_of": as_of.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "summary": dashboard.model_dump(mode="json"),
+        "cashflow": cashflow.model_dump(mode="json"),
+        "closings": [row.model_dump(mode="json") for row in dashboard.recent_closings],
+        "receivables": receivables.model_dump(mode="json"),
+        "payables": payables.model_dump(mode="json"),
+        "expenses": expenses.model_dump(mode="json"),
+        "credit": credit.model_dump(mode="json"),
+    }
+
+
+def render_sales_chat_report(*, sim_run_id: str, as_of, start_date, end_date) -> dict[str, Any]:
+    """기존 Sales read model만으로 만드는 보고서. LLM/재계산 없음."""
+    from app.sales.console_partners import get_console_partners
+    from app.sales.console_proposals import get_console_sales_proposals
+    from app.sales.console_trend import get_console_sales_trend
+    from app.sales.dashboard import get_sales_dashboard
+
+    dashboard = get_sales_dashboard(sim_run_id=sim_run_id, as_of=as_of)
+    proposals = get_console_sales_proposals(sim_run_id=sim_run_id, as_of=as_of)
+    days = max(1, min(400, (end_date - start_date).days + 1))
+    trend = get_console_sales_trend(
+        sim_run_id=sim_run_id,
+        as_of=as_of,
+        days=days,
+        from_date=start_date,
+        to_date=end_date,
+    )
+    partners = get_console_partners(sim_run_id=sim_run_id, as_of=as_of)
+
+    # 판매 보고서도 저장된 sales/read-model facts만 전달한다. 확정 여부는
+    # sale_status가 실제 CONFIRMED·DELIVERED인 행만으로 제한한다.
+    return {
+        "kind": "SALES",
+        "sim_run_id": sim_run_id,
+        "as_of": as_of.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "summary": dashboard.model_dump(mode="json"),
+        "proposals": proposals.model_dump(mode="json"),
+        "trend": trend.model_dump(mode="json"),
+        "partners": partners.model_dump(mode="json"),
+        "confirmed_sales": [
+            row.model_dump(mode="json")
+            for row in proposals.rows
+            if row.sale_status in {"CONFIRMED", "DELIVERED"}
+        ],
+        "confirmed_count": sum(
+            1 for row in proposals.rows if row.sale_status in {"CONFIRMED", "DELIVERED"}
+        ),
+    }
+
+    lines = [
+        "# 판매 보고서",
+        "",
+        f"- 기준 실행: `{sim_run_id}`",
+        f"- 기간: {start_date.isoformat()} ~ {end_date.isoformat()}",
+        "",
+        "## 금일 판매 후보",
+        f"- 전체 화면 상태: {proposals.state}",
+        f"- 제시 가능: {proposals.presentable_count}건",
+        f"- 검토 필요: {proposals.review_required_count}건",
+        f"- 판정 대기: {proposals.unresolved_count}건",
+        f"- 확정 불가: {proposals.rejected_count}건",
+    ]
+
+    confirmed = [row for row in proposals.rows if row.sale_status in {"CONFIRMED", "DELIVERED"}]
+    lines += ["", "## 금일 확정 판매", f"- {len(confirmed)}건"]
+    for row in confirmed:
+        lines.append(
+            f"- {row.item or '품목 미상'} · {row.partner_id or '거래처 미상'}"
+            f" · {row.quantity_kg if row.quantity_kg is not None else '—'}kg"
+            f" · 매출 {_chat_won(row.reported_sales_amount_krw)}"
+            f" · 상태 {row.sale_status}"
+        )
+
+    lines += ["", "## 기간 판매 추이"]
+    if trend.rows:
+        for row in trend.rows:
+            lines.append(
+                f"- {row.sale_date}: {row.sales_count}건"
+                f" · {row.quantity_kg}kg"
+                f" · 매출 {_chat_won(row.sales_amount_krw)}"
+                f" · 공헌이익 {_chat_won(row.contribution_profit_krw)}"
+            )
+    else:
+        lines.append("- 기록 없음")
+
+    lines += ["", "## 금일 전략 · 검증"]
+    if proposals.rows:
+        for row in proposals.rows:
+            strategy = row.strategy
+            strategy_text = (
+                "전략 기록 없음"
+                if strategy is None
+                else f"{strategy.source or '—'} / LLM {strategy.llm_status or '—'}"
+            )
+            lines.append(
+                f"- {row.scenario_type or row.scenario_id}: {row.presentation_state}"
+                f" · 재무 {row.finance_verdict or '—'}"
+                f" · {strategy_text}"
+            )
+            if row.presentation_state == "UNRESOLVED" and row.unresolved_reason_codes:
+                lines.append("  - 미판정: " + ", ".join(row.unresolved_reason_codes))
+    else:
+        lines.append("- 후보 없음")
+
+    return {
+        "kind": "SALES",
+        "sim_run_id": sim_run_id,
+        "as_of": as_of.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "summary": dashboard.model_dump(mode="json"),
+        "proposals": proposals.model_dump(mode="json"),
+        "trend": trend.model_dump(mode="json"),
+        "partners": partners.model_dump(mode="json"),
+        "confirmed_sales": [
+            row.model_dump(mode="json")
+            for row in proposals.rows
+            if row.sale_status in {"CONFIRMED", "DELIVERED"}
+        ],
+        "confirmed_count": sum(
+            1 for row in proposals.rows if row.sale_status in {"CONFIRMED", "DELIVERED"}
+        ),
+    }
