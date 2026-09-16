@@ -330,6 +330,93 @@ def test_판매안을_여러_번_만들어도_실판매는_안_생긴다(적재�
     assert 확정 == [], "승인하지 않은 판매안이 실판매를 만들었다"
 
 
+def test_사실_조회가_그_실행의_sim_run_id_축으로_나간다():
+    """어느 실행의 장부인가는 마스터가 정한다 — 재무가 추측하면 남의 잔액을 읽는다."""
+    called: list = []
+    본_축: list[str] = []
+    wiring.reset()
+    wiring.register("inventory", _port({"PRE_SALES": PRE_SALES_PAYLOAD}, called))
+    wiring.register("sales", _port({"GENERATE_SALES_PROPOSAL": _SCENARIOS}, called))
+
+    def finance(request: AgentRequest):
+        if request.mode == "PRE_SALES_FACTS":
+            본_축.append(request.context.sim_run_id)
+        reply = _reply(request, payload=FINANCE_FACTS)
+        meta = ExecutionMetadata(
+            run_id=reply.run_id, request_id=request.context.request_id, agent=request.agent
+        )
+        return reply, meta
+
+    wiring.register("finance", finance)
+
+    run_sales(_request(sim_run_id="SIM-AXIS-1"))
+
+    assert 본_축 == ["SIM-AXIS-1"]
+
+
+def test_새_사용자_실행은_되먹임_회차_0_부터_시작한다(적재를_지켜본다):
+    """🔴 Run B 가 Run A 의 `feedback_attempt` 를 이어받으면 안 된다 (§11).
+
+    한 Run 안의 재계획과 사용자가 다시 부른 새 Run 은 다른 개념이다.
+    """
+    called = _wire()
+
+    run_sales(_request(requested_quantity_kg=500))
+    run_sales(_request(requested_quantity_kg=300))
+
+    회차 = [
+        payload["feedback_attempt"]
+        for agent, mode, payload in called
+        if (agent, mode) == ("sales", "GENERATE_SALES_PROPOSAL")
+    ]
+    assert 회차 == [0, 0], f"새 실행이 앞 실행의 회차를 이어받았다: {회차}"
+
+
+def test_추가_판매는_그날_상태를_다시_읽는_새_run_이다(적재를_지켜본다):
+    """★ 과거 Run 을 재사용하지 않는다 — 새 실행은 재고·재무를 **다시 묻는다.**"""
+    called = _wire()
+
+    run_sales(_request(requested_quantity_kg=500))
+    앞선_호출 = len(called)
+    run_sales(_request(requested_quantity_kg=200))
+
+    새_호출 = [(agent, mode) for agent, mode, _ in called[앞선_호출:]]
+    assert ("inventory", "PRE_SALES") in 새_호출
+    assert ("finance", "PRE_SALES_FACTS") in 새_호출
+    assert len(적재를_지켜본다) == 2
+
+
+def test_같은_조건으로_다시_실행해도_새_run_이_선다(적재를_지켜본다):
+    """§28 Case B — 사용자가 같은 조건으로 다시 비교하고 싶을 수 있다."""
+    _wire()
+
+    첫번째 = run_sales(_request())
+    두번째 = run_sales(_request())
+
+    assert 첫번째.history_run_id != 두번째.history_run_id
+    assert len(적재를_지켜본다) == 2
+
+
+def test_같은_request_id_재전송도_이력을_덮어쓰지_않는다(적재를_지켜본다):
+    """★ **기존 idempotency 계약을 제거하지 않았다** — 애초에 없다.
+
+    `master_agent_runs` 는 `run_id` 가 기본키이고 실행마다 새로 난다.
+    같은 `request_id` 로 다시 불러도 **앞 행을 고치지 않고 새 행이 선다** —
+    네트워크 재시도 보호를 여기서 새로 만들지도, 없는 것을 있는 척하지도 않는다.
+
+    🔴 `partner_id + item + as_of` 로 1회 실행 제한을 만들지 않는다.
+    """
+    _wire()
+
+    run_sales(_request(request_id="REQ-FIXED-0001", requested_quantity_kg=500))
+    첫_요청 = dict(적재를_지켜본다[0]["request_payload"])
+    run_sales(_request(request_id="REQ-FIXED-0001", requested_quantity_kg=300))
+
+    assert len(적재를_지켜본다) == 2
+    assert 적재를_지켜본다[0]["request_payload"] == 첫_요청
+    assert 적재를_지켜본다[0]["request_id"] == 적재를_지켜본다[1]["request_id"]
+
+
 def test_적재_함수는_갱신이_아니라_추가다():
     """★ 저장소 계약을 이름으로 잠근다 — `record_sales` 는 UPDATE 를 부르지 않는다."""
     import inspect
