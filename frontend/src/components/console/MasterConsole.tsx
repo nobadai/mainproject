@@ -122,6 +122,47 @@ function mlParts(intent: Intent | undefined, answer: AskResponse["answer"] | und
   return { markdown, hideText: Boolean(markdown) && agents.every((a) => a === "ml") };
 }
 
+/**
+ * **분류가 못 돌았는가.** 「못 알아들었다」와 갈라야 하는 것이 이것이다.
+ *
+ * 🔴 두 상태가 지금까지 한 화면이었다 (2026-09-16 실측 — 공용 키가 분당 한도에 걸려
+ *    5개 중 4개가 막혔다). 분류기가 못 돈 것인데 화면은 되묻는 문장만 보여 줘서,
+ *    사람이 **자기 말이 이상한 줄 알고 말을 바꿨다.** 말은 멀쩡했다.
+ *
+ *    llm_status="SUCCESS" + action="UNKNOWN"   진짜 못 알아들었다 → 말을 바꾸면 된다
+ *    llm_status="FALLBACK"                     분류기가 못 돌았다 → 말을 바꿔도 소용없다
+ *
+ * ⚠️ `DISABLED`(일부러 끈 것)는 여기 안 걸린다 — 서버가 그때 `fallback=False` 로 낸다
+ *    (`app/master/llm/runtime.py`). 끈 배포의 되묻기는 지금 동작이 맞다.
+ */
+function classifyFailed(res: Pick<AskResponse, "llm_status" | "llm_fallback_used">): boolean {
+  return res.llm_status === "FALLBACK" || res.llm_fallback_used === true;
+}
+
+/**
+ * 분류가 못 돌았을 때 화면에 내는 문장. **마지막 줄이 요점이다** — 사람이 말을
+ * 바꾸지 않게 해야 한다.
+ */
+const CLASSIFY_FAILED_TEXT =
+  "말을 알아듣는 기능이 잠시 멈췄습니다. 몇 초 뒤 다시 눌러 주세요.\n" +
+  "— 입력하신 말은 문제가 없습니다.";
+
+/**
+ * 되묻는 자리에 실제로 적을 문장. **`clarification` 을 그대로 쓰던 자리는 전부 여기를 지난다.**
+ *
+ * ★ 문구를 두 곳에 적지 않는다 — 이 함수 하나가 주인이고 부르는 쪽은 그대로 쓴다.
+ */
+function clarificationText(
+  res: Pick<AskResponse, "llm_status" | "llm_fallback_used" | "clarification">,
+  fallback: string,
+): string {
+  if (classifyFailed(res)) return CLASSIFY_FAILED_TEXT;
+  return res.clarification ?? fallback;
+}
+
+/** 분류가 못 돈 뒤 보내기를 더 잠가 두는 시간(초). **자동 재시도는 없다 — 사람이 누른다.** */
+const FALLBACK_COOLDOWN_SEC = 5;
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -171,6 +212,10 @@ export function MasterConsole({ session }: { session: Session }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  // 🔴 분류가 못 돈 뒤 남은 잠금 시간(초). **연타가 한도를 더 깎는다** — 실측에서
+  //    5개를 연달아 쏘니 4개가 막혔고, 8초씩 띄우니 4개 다 됐다 (2026-09-16).
+  //    **자동으로 다시 쏘지 않는다.** 기다렸다 사람이 누른다.
+  const [cooldown, setCooldown] = useState(0);
 
   // 승인 모달 — 어느 실행의 어느 안인지 함께 들고 있어야 한다
   const [picked, setPicked] = useState<{
@@ -205,6 +250,16 @@ export function MasterConsole({ session }: { session: Session }) {
   useEffect(() => {
     tail.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns]);
+
+  //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setTimeout(() => setCooldown((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+
+  //  보내기가 막혀 있나. 요청이 도는 동안과 분류 실패 뒤 몇 초. **Enter 도 이것을 본다.**
+  const locked = busy || cooldown > 0;
 
   const can = CAN[session.role];
 
@@ -241,16 +296,18 @@ export function MasterConsole({ session }: { session: Session }) {
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
   async function send(text: string) {
     const utterance = text.trim();
-    if (!utterance || busy) return;
+    if (!utterance || locked) return;
     setDraft("");
     push({ kind: "me", text: utterance });
     setBusy(true);
     try {
       const res: AskResponse = await ask(utterance);
+      //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
+      if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
       if (res.confirm_required) {
         push({
           kind: "confirm",
-          text: res.clarification ?? "진행할까요?",
+          text: clarificationText(res, "진행할까요?"),
           intent: res.intent,
           requestId: res.request_id,
           trace: traceOf(res),
@@ -272,9 +329,11 @@ export function MasterConsole({ session }: { session: Session }) {
           ...mlParts(res.intent, res.answer),
         });
       } else {
+        //  🔴 여기가 분류 실패가 떨어지는 자리다 (`outcome="NEEDS_CLARIFICATION"`).
+        //     되묻는 문장만 적으면 사람이 자기 말을 고치러 간다 — `clarificationText` 가 가른다.
         push({
           kind: "bot",
-          text: res.clarification ?? res.note ?? "답을 받지 못했습니다.",
+          text: clarificationText(res, res.note ?? "답을 받지 못했습니다."),
           trace: traceOf(res),
         });
       }
@@ -437,7 +496,7 @@ export function MasterConsole({ session }: { session: Session }) {
       } else {
         push({
           kind: "bot",
-          text: res.clarification ?? "실행했지만 답이 비었습니다.",
+          text: clarificationText(res, "실행했지만 답이 비었습니다."),
         });
       }
     } catch (error) {
@@ -528,7 +587,7 @@ export function MasterConsole({ session }: { session: Session }) {
               key={k}
               type="button"
               onClick={() => shortcut(k)}
-              disabled={busy}
+              disabled={locked}
               className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
@@ -616,12 +675,13 @@ export function MasterConsole({ session }: { session: Session }) {
                   placeholder="무엇을 도와드릴까요"
                   className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
                 />
+                {/* 잠긴 동안 남은 초를 버튼이 적는다 — 왜 안 눌리는지 보여야 사람이 기다린다. */}
                 <button
                   type="submit"
-                  disabled={busy || !draft.trim()}
+                  disabled={locked || !draft.trim()}
                   className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
                 >
-                  보내기
+                  {cooldown > 0 ? `${cooldown}초 뒤 다시` : "보내기"}
                 </button>
               </form>
               <p className="m-0 mt-2 text-[11.5px] text-faint">
