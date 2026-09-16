@@ -327,3 +327,52 @@ def test_매입은_결론에_있으면_문장에_써도_된다():
     """`매입` 은 부서 이름이자 결론의 단어다. **본 것 안이면 허용한다.**"""
     facts = facts_from_procurement(procurement(scenarios=[{"label": "기본"}]))
     assert validate_narrative(summary("매입안을 준비했으니 확인해 주세요."), facts)
+
+
+def test_판매와_가격_예측도_묻지_않았으면_거부한다():
+    """🔴 가드가 절반만 돌던 자리다.
+
+    `_AGENT_WORDS` 를 손으로 셋(재무·물류·매입)만 적어 두어, 이름표 다섯 개 중
+    **판매·가격 예측은 지어내도 안 걸렸다.** 이제 `answer.py` 에서 파생하므로
+    다섯이 같이 걸린다.
+    """
+    facts = facts_from_status(
+        status(
+            status_code="S3_UNAVAILABLE",
+            answers={},
+            unavailable=("inventory",),
+            missing_data={"inventory": ("ADAPTER_NOT_REGISTERED",)},
+        )
+    )
+    with pytest.raises(NarrativeRejected) as error:
+        validate_narrative(summary("판매 부서는 확인되지 않았습니다."), facts)
+    assert "INVENTED_AGENT" in error.value.issues
+
+    with pytest.raises(NarrativeRejected) as error:
+        validate_narrative(summary("가격 예측 부서는 확인되지 않았습니다."), facts)
+    assert "INVENTED_AGENT" in error.value.issues
+
+
+def test_판매가_답한_요청이면_판매를_문장에_써도_된다():
+    """🔴 **오탐 방지.** 가드는 «프롬프트에 없을 때만» 걸린다.
+
+    낱말을 늘리면 거절이 느는데, 판매가 실제로 답한 요청에서까지 걸리면
+    사실을 옮겨 적은 문장이 fallback 으로 되돌아간다. 판매가 답하면 그 이름이
+    `to_prompt()` 의 "답한 부서" 에 실리므로 걸리지 않아야 한다.
+    """
+    facts = facts_from_status(status(answers={"sales": {"open_orders": 3}}))
+
+    assert "판매" in facts.to_prompt()
+    assert validate_narrative(summary("판매 상태를 확인했습니다."), facts) == (
+        "판매 상태를 확인했습니다."
+    )
+
+
+def test_부서_이름표는_한_곳에서만_센다():
+    """세는 곳이 둘이면 어긋난다 — 실제로 어긋나서 가드가 절반만 돌았다."""
+    from app.master.answer import agent_labels
+    from app.master.llm.answer_runtime import _AGENT_WORDS
+
+    assert set(_AGENT_WORDS) == set(agent_labels())
+    assert "판매" in _AGENT_WORDS
+    assert "가격 예측" in _AGENT_WORDS
