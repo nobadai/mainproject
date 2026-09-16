@@ -27,6 +27,27 @@ import { useTab } from "@/components/console/useTab";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { purchase, type Plan, type PurchaseTab } from "@/lib/screen";
 
+/**
+ * 이 안이 승인됐나.
+ *
+ * 🔴 **승인된 안에도 배지가 붙어야 한다.** 예전에는 `pending` 일 때만 배지를 달아서
+ *    **승인된 안이 아무 표시 없이** 떴고, 그래서 미결정 안과 구분이 안 됐다
+ *    (2026-09-16 실측 · 04-13 배추·무가 `approved:true` 인데 화면에 아무것도 없었다).
+ *
+ * ★ **`approved` 하나만 본다.** 매입 API 는 그 이상을 안 싣는다 — 「매입 기록됨」을
+ *   여기서 지어내지 않는다 (2026-09-16 결정). 그 사실은 대시보드가 말한다.
+ *
+ * ★ 색은 갈라 둔다. 기다리는 것과 끝난 것이 같은 색이면 눈으로 구분이 안 된다 —
+ *   **끝난 쪽이 「좋음」**이고 기다리는 쪽이 「살필 것」이다.
+ */
+function PlanState({ plan }: { plan: Plan }) {
+  return plan.approved ? (
+    <Pill text="승인됨" tone="good" />
+  ) : (
+    <Pill text="승인 대기" tone="warn" />
+  );
+}
+
 function PlanCard({ plan }: { plan: Plan }) {
   return (
     <article
@@ -42,7 +63,7 @@ function PlanCard({ plan }: { plan: Plan }) {
       >
         <strong className="text-[14px] font-semibold">{plan.key}</strong>
         <Pill text={plan.knob} tone="info" />
-        {plan.pending && <Pill text="승인 대기" tone="good" />}
+        <PlanState plan={plan} />
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
           {plan.coverage}
         </span>
