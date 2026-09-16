@@ -22,6 +22,9 @@
 ⑧  다른 sim_run_id 의 같은 request_id 기록은 별개
 ⑩  선검사 — 1회차 매입일 != 승인한 날 · 소수점 수량 · 소수점 금액을 사람 말로 거부
     (매입안 계약이 알기 어려운 말로 막기 전에 · 2026-09-16)
+⑪  🔴 전이가 롤백하며 FAILED 로 끝나도 기록 행은 남는다 · 응답은 201 FAILED 그대로 ·
+    그 승인을 다시 적으면 409 · 기록 적재가 터지면 전이를 안 부른다
+    (기록과 전이는 두 트랜잭션 · 2026-09-16 · `#729`)
 ```
 
 ⚠️ **DB 를 안 탄다.** 결정 · 실행 행 · 기록 표 · 전이 · 재검증이 전부 대역이다.
@@ -34,6 +37,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from psycopg import errors as pg_errors
 from pydantic import ValidationError
 
 from app.master import decision_service as svc
@@ -166,11 +170,22 @@ class _커넥션:
 
 
 class _전이:
-    """`apply_approval` 대역. **커넥션을 열고 커밋하는** 실제 모양을 흉내 낸다."""
+    """`apply_approval` 대역. **커넥션을 열고 커밋(또는 롤백)하는** 실제 모양을 흉내 낸다.
 
-    def __init__(self, out: TransitionOut | None = None, *, opens: bool = True) -> None:
+    ★ `rolls_back=True` 가 실제 실패 모양이다 — `transition.apply_approval` 은 적재하다
+      터지면 제가 연 커넥션을 `rollback` 하고 `FAILED` 를 돌려준다.
+    """
+
+    def __init__(
+        self,
+        out: TransitionOut | None = None,
+        *,
+        opens: bool = True,
+        rolls_back: bool = False,
+    ) -> None:
         self.out = out or TransitionOut(status="APPLIED", parts=["finance", "logistics"])
         self.opens = opens
+        self.rolls_back = rolls_back
         self.calls: list[tuple[ApprovedCommitment, str | None]] = []
 
     def __call__(self, commitment: ApprovedCommitment, *, sim_run_id: str | None, **kw: Any):
@@ -178,7 +193,10 @@ class _전이:
         connect = kw.get("connect")
         if self.opens and connect is not None:
             conn = connect()
-            conn.commit()
+            if self.rolls_back:
+                conn.rollback()
+            else:
+                conn.commit()
         return self.out
 
 
@@ -378,8 +396,10 @@ def test_기록하면_기록값으로_덮은_사본으로_전이가_한_번_선�
     assert commitment.grades == ("특",), "등급이 기록값이 아니다"
     assert commitment.approval_id == f"H1-{업무키}-1", "승인 id 는 선정안 그대로다"
 
-    [conn] = 세상["conns"]
-    assert conn.commits == 1, "기록과 전이가 한 커밋이 아니다"
+    기록커넥션, 전이커넥션 = 세상["conns"]
+    assert 기록커넥션 is not 전이커넥션, "전이가 기록 커넥션을 물려받았다 — 롤백이 기록을 지운다"
+    assert 기록커넥션.commits == 1, "기록이 제 커밋을 못 받았다"
+    assert 전이커넥션.commits == 1, "전이가 제 커밋을 못 받았다"
     assert len(세상["store"]) == 2, "회차마다 한 행이 남아야 한다"
 
 
@@ -390,6 +410,119 @@ def test_전이가_커넥션_앞에서_돌아서도_기록은_남는다(세상: 
 
     assert out.status == "NOT_APPLIED"
     assert len(세상["store"]) == 2
+
+
+def _실패전이() -> _전이:
+    """적재하다 터져 **커넥션을 롤백하고** `FAILED` 를 돌려주는 전이 — 승인 당일의 정상 모양.
+
+    ★ 전이는 언제나 하루 앞(도착일)의 물류 runtime fixture 행을 보는데 그 행은 다음
+      개장에 열린다 (`pending_transition.py` 머리말). 그래서 승인 당일 전이는 언제나
+      실패하고 다음 날 재시도가 세운다.
+    """
+    사유 = "전이 적재 실패: 갱신할 물류 runtime fixture 행이 없다"
+    return _전이(TransitionOut(status="FAILED", reason=사유), rolls_back=True)
+
+
+def test_전이가_롤백하며_실패해도_기록은_남는다(
+    세상: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **사람이 진술한 사실이 장부 사정으로 지워지면 안 된다** (2026-09-16 · `#729`).
+
+    ```text
+    실측 dev@983c85b  POST .../purchase-record → 201 FAILED
+         그 뒤 master_purchase_records → 0행        🔴 기록이 사라졌다
+         다음 날 걷기: 미적용 전이 재시도 NOTHING_DUE — 매입은 영영 안 선다
+    ```
+    """
+    out, 문 = _기록한다(세상, _본문(), _실패전이())
+
+    assert out.status == "FAILED", "전이 결과를 그대로 낸다"
+    assert len(문.calls) == 1
+    assert len(세상["store"]) == 2, "전이 실패가 기록 행을 같이 지웠다"
+    assert [행["leg_seq"] for 행 in 세상["store"]] == [1, 2]
+
+    monkeypatch.setattr(pr, "ledger_purchase_ids", lambda *, sim_run_id: [])
+    조회 = pr.get_purchase_record(업무키)
+    assert 조회.status == "NOT_APPLIED", "기록 있음 · 아직 원장에 없다"
+    assert 조회.record is not None and len(조회.record.legs) == 2
+
+
+def test_전이가_실패해도_응답은_201_에_FAILED_그대로다(
+    손님: Any, 세상: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **응답 모양은 안 바뀐다** — 커밋을 앞당긴 것이지 계약을 바꾼 것이 아니다."""
+    client, router_module = 손님
+    문 = _실패전이()
+    monkeypatch.setattr(
+        router_module,
+        "record_purchase",
+        lambda request_id, body: pr.record_purchase(
+            request_id, body, connect=세상["connect"], apply_fn=문
+        ),
+    )
+
+    res = client.post(f"/master/runs/{업무키}/purchase-record", json=_본문())
+
+    assert res.status_code == 201, res.text
+    assert res.json()["status"] == "FAILED"
+    assert len(세상["store"]) == 2, "201 은 났는데 기록이 없다"
+
+
+def test_전이가_실패해_기록만_남은_승인을_다시_적으면_409(세상: dict[str, Any]) -> None:
+    """★ 커밋이 앞당겨져도 **한 승인에 한 번**은 그대로다."""
+    _기록한다(세상, _본문(), _실패전이())
+    assert len(세상["store"]) == 2
+
+    문 = _실패전이()
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, _본문(), 문)
+
+    assert caught.value.conflict is True, "상태 충돌이다 (409)"
+    assert "이미 실매입이 기록됐다" in str(caught.value)
+    assert len(세상["store"]) == 2, "두 번째 기록이 앉았다"
+    assert 문.calls == [], "거부했는데 전이를 불렀다"
+
+
+def test_적재가_UniqueViolation_이면_409_고_전이를_안_부른다(
+    세상: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 선검사를 빠져나간 동시 기록도 PK 가 막는다 — 커밋 시점이 앞당겨져도 같다."""
+
+    def _boom(conn: Any, **_: Any) -> None:
+        raise pg_errors.UniqueViolation("duplicate key")
+
+    monkeypatch.setattr(pr, "insert_purchase_record_legs", _boom)
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, _본문(), 문)
+
+    assert caught.value.conflict is True, "상태 충돌이다 (409)"
+    assert "이미 실매입이 기록됐다" in str(caught.value)
+    assert 문.calls == [], "기록이 안 앉았는데 전이를 불렀다"
+    assert 세상["store"] == []
+    [conn] = 세상["conns"]
+    assert (conn.commits, conn.rollbacks) == (0, 1)
+
+
+def test_기록_적재가_터지면_전이를_안_부른다(
+    세상: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🔴 **없는 기록의 귀결은 없다.** 적재가 터지면 예외가 그대로 오르고 전이는 없다."""
+
+    def _boom(conn: Any, **_: Any) -> None:
+        raise RuntimeError("적재 실패")
+
+    monkeypatch.setattr(pr, "insert_purchase_record_legs", _boom)
+    문 = _전이()
+
+    with pytest.raises(RuntimeError):
+        _기록한다(세상, _본문(), 문)
+
+    assert 문.calls == [], "기록이 안 앉았는데 전이를 불렀다"
+    assert 세상["store"] == []
+    [conn] = 세상["conns"]
+    assert (conn.commits, conn.rollbacks) == (0, 1)
 
 
 # ══════════════════════════════════════════════════════════════════════
