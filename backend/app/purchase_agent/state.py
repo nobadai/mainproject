@@ -250,6 +250,11 @@ class PurchaseAgentState(TypedDict):
     base_plan: dict  # 수량·타이밍 초안
     split_plan: list[dict] | None  # 분할 계획 (timing 축)
     sourcing_plan: list[dict]  # 등급 배분
+    #: ⑥ 이 **분할을 일괄로 되돌린** 안의 라벨 (E3-9 앞단 · 2026-09-16).
+    #: 🔴 ⑦ 이 「축이 왜 안 쓰였나」를 가르는 데 쓴다 — 「되돌려서」와 「다른 검사에서
+    #: 탈락해서」는 다른 사실이고, 뒤쪽인데 축 목록을 좁히면 **그 탈락을 가린다.**
+    #: ⚠️ 빈 목록이 기본이다. 여기 이름이 없으면 좁히지 않는다.
+    split_rolled_back_labels: list[str]
 
     # ── 출력 ────────────────────────────────────────────────────────────────
     scenarios_final: list[dict]

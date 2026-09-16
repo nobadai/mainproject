@@ -107,44 +107,53 @@ def _state(cap_by_date=None, *, lead: int | None = None, window: int | None = No
 # ── #93 재현: 컷이 실제로 난다 ────────────────────────────────────────────
 
 
-def test_over_capacity_split_scenario_is_cut(no_holdings: None) -> None:
-    """🔴 여유 100kg 에 7,714kg — **전에는 통과했다.**
+def test_over_capacity_never_reaches_the_cut_now(no_holdings: None) -> None:
+    """🔴 여유 100kg 에 7,714kg — **이제 ③ 이 먼저 막는다.**
 
-    이슈 본문의 재현 그대로다: 살아남은 안 3 · 컷 0 이었다.
-    
+    이슈 본문의 재현은 «살아남은 안 3 · 컷 0» 이었고, `#93` 이 ⑦ 에 컷을 세워 «안 0 ·
+    컷 3» 으로 바꿨다. 🔄 **2026-09-16 에 한 번 더 바뀌었다** (E3-9 앞단) — ③ 의 창고
+    상한이 ``cap_by_date`` 위로 옮겨져 **안이 여유 안으로 깎여 들어온다.**
 
-    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
-      안이 서 있어야 그 컷이 밟힌다.
+    ```text
+    전전   안 3 · 컷 0     날짜 축을 아무도 안 봤다
+    전     안 0 · 컷 3     ⑦ 이 컷했다 — 그날 살 수 있는 100kg 까지 같이 사라졌다
+    후     안 3 · 컷 0     ③ 이 100kg 으로 깎는다 — **수량 축소가 탈락보다 낫다**
+    ```
+
+    🔴 **⑦ 의 컷이 없어진 것이 아니다.** 아래 단위 검사들(``test_earlier_rounds_...`` ·
+      ``test_the_first_round_alone_can_bust_it``)이 그 방어선을 그대로 잠근다. 바뀐 것은
+      **거기까지 가는 안이 안 만들어진다**는 것이다.
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜 축이고, 안이 서 있어야 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(100), lead=2)
-    labels = [s["label"] for s in proposal.get("scenarios", [])]
-    assert labels == [], f"여유 100kg 인데 살아남은 안이 있다: {labels}"
+    scenarios = proposal.get("scenarios", [])
+    assert scenarios, "여유 100kg 이면 100kg 짜리 안이 서야 한다 — 통째로 사라지면 안 된다"
+    for scenario in scenarios:
+        assert scenario["total_qty_kg"] <= 100, (
+            f"{scenario['label']}: {scenario['total_qty_kg']:,}kg 이 그날 여유 100kg 을 넘는다"
+        )
+    assert not proposal["rejected_reasons"], "③ 이 먼저 깎았으므로 컷될 안이 없다"
 
-    reasons = {r["label"]: r["reason"] for r in proposal["rejected_reasons"]}
-    assert set(reasons) == {"보수", "기본", "공격"}
-    for label, reason in reasons.items():
-        assert "날짜별 창고 초과" in reason, f"{label}: {reason}"
 
+def test_bulk_scenario_is_bounded_too(no_holdings: None) -> None:
+    """🔴 **일괄(1회차) 안도 날짜 축을 받는다** — 회차를 안 나눌수록 느슨해지면 안 된다.
 
-def test_bulk_scenario_is_cut_too(no_holdings: None) -> None:
-    """🔴 **이번 작업의 핵심** — 일괄(1회차) 안도 컷된다.
+    보수 2,571kg · 기본 6,429kg 은 회차가 하나라 ⑥의 재배분 경로를 안 탔고, `#93` 전에는
+    risks 줄조차 없이 나갔다. 🔄 지금은 ③ 이 그 안들도 ``cap_by_date`` 로 깎는다 —
+    **컷이 아니라 상한으로** 받는 것이고, 컷 자체는 ⑦ 에 그대로 있다.
 
-    보수 2,571kg · 기본 6,429kg 은 회차가 하나라 ⑥의 재배분 경로를 안 탔고,
-    그래서 risks 줄조차 없이 나갔다. 분할 안만 컷하면 **회차를 안 나눌수록 검사를
-    안 받는** 구조가 된다.
-    
-
-    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
-      안이 서 있어야 그 컷이 밟힌다.
+    🟡 **보유는 이 검사의 대상이 아니다** — 안이 서 있어야 축이 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(100), lead=2)
-    reasons = {r["label"]: r["reason"] for r in proposal["rejected_reasons"]}
+    안 = {s["label"]: s for s in proposal.get("scenarios", [])}
 
     for label in ("보수", "기본"):
-        assert label in reasons, f"{label} 안(1회차)이 컷되지 않았다"
-        assert "날짜별 창고 초과" in reasons[label]
-        # 1회차뿐이므로 누적 = 그 회차 수량이다
-        assert "1회차" in reasons[label], reasons[label]
+        assert label in 안, f"{label} 안(1회차)이 통째로 사라졌다"
+        assert len(안[label]["split_plan"]) == 1, "일괄 안이어야 이 검사가 뜻을 갖는다"
+        assert 안[label]["total_qty_kg"] <= 100, (
+            f"{label}: {안[label]['total_qty_kg']:,}kg 이 그날 여유 100kg 을 넘는다"
+        )
 
 
 def test_a_scenario_that_fits_survives() -> None:
@@ -163,14 +172,19 @@ def test_total_passes_but_a_date_does_not(no_holdings: None) -> None:
     총량만 보던 시절 이 안이 그대로 나갔다.
     
 
-    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜별 창고 초과 컷이고,
-      안이 서 있어야 그 컷이 밟힌다.
+    🔄 **2026-09-16 에 처방이 바뀌었다** (E3-9 앞단). 두 축이 **같은 칸**(``cap_by_date``)
+      을 보게 되면서, 총량 축이 먼저 깎고 날짜 축이 그 뒤를 확인한다 — 하루치 여유에 안
+      드는 안이 **만들어지지 않는다.**
+
+    🟡 **보유는 이 검사의 대상이 아니다** — 재려는 것은 날짜 축이고, 안이 서 있어야 밟힌다.
     """
     proposal = _proposal(cap_by_date=_caps(2_000), lead=2)
-    reasons = {r["label"]: r["reason"] for r in proposal["rejected_reasons"]}
-    assert reasons, "날짜 축에서 걸리는 안이 하나도 없으면 검사가 헛돈다"
-    for label, reason in reasons.items():
-        assert "날짜별 창고 초과" in reason, f"{label} 이 총량 축에서 먼저 걸렸다: {reason}"
+    scenarios = proposal.get("scenarios", [])
+    assert scenarios, "하루치 여유 2,000kg 이면 그만큼짜리 안이 서야 한다"
+    for scenario in scenarios:
+        assert scenario["total_qty_kg"] <= 2_000, (
+            f"{scenario['label']}: {scenario['total_qty_kg']:,}kg 이 하루치 여유를 넘는다"
+        )
 
 
 # ── 누적으로 본다 ─────────────────────────────────────────────────────────

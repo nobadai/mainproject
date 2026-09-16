@@ -278,3 +278,51 @@ def allocation_candidates(
         if 가중치:
             후보[이름] = weighted_ratios(list(가중치), rounds)
     return 후보
+
+
+def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str) -> dict[str, str]:
+    """안별 ``strategy_type``을 허용 축 안에서 고른다 (정의서 §3.5.1-2).
+
+    축이 하나뿐인 날은 전 안이 같은 축을 쓴다 — 그게 정상이고, ⑦의 중복 검사도 그날은
+    면제한다. 축이 여럿이면 겹치지 않게 배분해 "3안인데 사실 한 안"을 피한다.
+    """
+    if not labels:
+        # 안이 하나도 없는 날 — ③이 시세를 못 받아 초안을 만들지 않았다. 배정할 축이 없다.
+        # 이 줄이 없으면 아래 ``labels[-1]``이 IndexError로 죽고, 그러면 "왜 안이 없는가"라는
+        # 사유가 오케스트레이터에 도달하지 못한다.
+        return {}
+    if len(allowed_axes) == 1:
+        return dict.fromkeys(labels, allowed_axes[0])
+    axes = dict.fromkeys(labels, "quantity")
+    if aggressive_axis in allowed_axes and "공격" in labels:
+        axes["공격"] = aggressive_axis
+    else:
+        axes[labels[-1]] = next(axis for axis in allowed_axes if axis != "quantity")
+    return axes
+
+
+def cumulative_overflow(
+    quantities: list[int], arrivals: list[str], cap_by_date: Mapping[str, Any]
+) -> tuple[int, int, int] | None:
+    """도착일 순 **누적**이 그날 여유를 넘는 첫 자리. 안 넘으면 ``None``.
+
+    돌려주는 것은 ``(회차 index, 그때까지의 누적 kg, 그날 여유 kg)`` 다.
+
+    🔴 **⑦ ``arrival_capacity`` 와 ⑥ 의 되돌림 판정이 같은 셈을 쓰게 하려고 여기 둔다**
+      (2026-09-16). 두 곳이 각자 더하면 ⑥ 이 «선다» 고 판단한 분할을 ⑦ 이 컷하는 날이
+      생기고, 그날 안은 **왜 죽었는지 설명할 수 없다.**
+
+    ★ **누적으로 본다.** ``cap_by_date[d]`` 는 그날의 *여유 공간*이고 물류는 기존 일정만
+      재생해 그 값을 낸다 — 우리가 새로 넣을 회차는 거기 없다. 날짜마다 독립으로 비교하면
+      1회차가 아직 창고에 있는데도 2회차가 그날 상한을 통째로 쓰는 계획이 통과한다.
+
+    ⚠️ **중간 출고를 해제하지 않는다** — 더하기만 하고 빼지 않는다. 물류 ``_available_capacity``
+      도 같은 방식이고 **방향은 안전하다 (덜 사게 틀린다)**. 이 판에서 안 바꾼다.
+    """
+    occupied = 0
+    for index, (qty, day) in enumerate(zip(quantities, arrivals, strict=True)):
+        occupied += qty
+        cap = int(cap_by_date[day])
+        if occupied > cap:
+            return index, occupied, cap
+    return None
