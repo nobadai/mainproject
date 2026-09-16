@@ -82,6 +82,7 @@ from app.logistics.console_service import (
 from app.logistics.db import get_connection
 from app.logistics.historical_repository import (
     onhand_total_by_day,
+    reservation_state_at,
     runtime_coverage_at,
     snapshot_days_between,
 )
@@ -408,9 +409,9 @@ def _stock_pane(
     if available is None:
         avail_detail = f"못 읽은 축이 있습니다 — {inv.available_qty_unresolved_reason}"
     else:
-        #  ★ **«기준일 값» 이라고 적지 않는다.** 이 숫자가 빼는 예약·할당 축은
-        #    Runtime 축의 지금 값이다 (`available_qty_time_basis`).
-        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (예약 축은 «지금» 기준)"
+        #  ★ **예약·할당 축도 이제 기준일 값이다 (#760).** 그날 Lot(`lot_state_at`)과
+        #    그날 예약(`reservation_state_at`)으로 세운 스냅샷을 정본에 먹인다.
+        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (기준일 축)"
 
     return Pane(
         key="stock",
@@ -701,15 +702,14 @@ _PRINCIPLE = Note(
           "0 이 아니라 **공란**입니다 — 둘은 다릅니다."),
 )
 
-#: **그날 값이 아닌** 칸들. 이유가 둘로 갈린다 — 되살릴 정본이 없거나(Zone 자리
-#: 정원), 축을 일부러 «지금» 에 둔 것이거나(판매가능량 · `api.logistics.schema`
-#: `available_qty_time_basis` 주석). 화면이 그 사실을 읽고 적는다.
+#: **그날 값이 아닌** 칸은 이제 Zone 자리 수 하나뿐이다 — 되살릴 정본(자리 정원
+#: 유효일)이 없어서다. 판매가능량·예약 3칸은 #760(LOG-HIST-002)으로 기준일 축이 됐다.
+#: 화면이 그 사실을 읽고 적는다.
 _MIXED_AXIS_NOTE = Note(
-    tone="warn",
-    text=("**판매가능량 · Zone 자리 수는 «지금» 값입니다.** 판매가능량은 «지금 더 팔 "
-          "수 있나» 를 답하는 값이라 예약·할당의 지금 상태를 빼고, Zone 자리 정원에는 "
-          "유효일이 없어 기준일로 되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · "
-          "Receipt · Lot 자리 · 예약·할당 목록은 기준일 값입니다."),
+    tone="info",
+    text=("**Zone 자리 수만 «지금» 값입니다.** Zone 자리 정원에는 유효일이 없어 기준일로 "
+          "되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · Receipt · Lot 자리 · "
+          "예약·할당 · 판매가능량은 모두 기준일 값입니다."),
 )
 
 
@@ -837,9 +837,18 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
             #    입고 콘솔(운송 중 · 도착 처리 대상)이 같은 한 벌을 나눠 쓴다. 따로 읽으면
             #    같은 fixture · 일정 질의가 두 번씩 나간다 (실측 2026-09-15 · 일정 5번 421 ms).
             runtime = load_console_runtime(conn=conn, sim_run_id=run, as_of=as_of)
-            inv = get_inventory_console(conn=conn, sim_run_id=run, as_of=as_of, runtime=runtime)
+            #  ★ 그날 예약(Historical)도 **한 판에 한 번** 읽는다 (#760). 재고 콘솔의
+            #    예약 3칸·판매가능량과 출고 콘솔의 예약 목록이 같은 한 벌을 나눠 쓴다 —
+            #    종전에는 출고 콘솔만 `reservation_state_at` 을 부르고 재고 3칸은
+            #    «지금 status» 를 세어 한 화면에 두 시간축이 섞였다.
+            reservations = reservation_state_at(conn, sim_run_id=run, as_of=as_of)
+            inv = get_inventory_console(
+                conn=conn, sim_run_id=run, as_of=as_of, runtime=runtime, reservations=reservations
+            )
             inb = get_inbound_console(conn=conn, sim_run_id=run, as_of=as_of, runtime=runtime)
-            ob = get_outbound_console(conn=conn, sim_run_id=run, as_of=as_of)
+            ob = get_outbound_console(
+                conn=conn, sim_run_id=run, as_of=as_of, reservations=reservations
+            )
             #  🔴 **문제 장부도 같은 `(sim_run_id, as_of)` 축이다.** 다른 실행의 문제를
             #     섞지 않고 그날 뒤에 열린 문제도 싣지 않는다 — 그 두 규칙의 주인은
             #     `live_exceptions_at` 하나다. 그날 닫힌 행은 저 함수가 안 내므로
