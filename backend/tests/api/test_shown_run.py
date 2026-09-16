@@ -126,6 +126,8 @@ def _물류_대역(monkeypatch) -> list[tuple[str, str]]:
     monkeypatch.setattr(logistics_query, "snapshot_days_between", 기록("days", set()))
     #  ★ Runtime 읽기는 **한 판에 한 번** 이고 두 콘솔이 나눠 쓴다 (2026-09-15).
     monkeypatch.setattr(logistics_query, "load_console_runtime", 기록("runtime", None))
+    #  ★ 그날 예약(Historical)도 한 판에 한 번 — 재고·출고 콘솔이 나눠 쓴다 (#760).
+    monkeypatch.setattr(logistics_query, "reservation_state_at", 기록("reservations", ()))
     monkeypatch.setattr(
         logistics_query, "get_inbound_console", 기록("inbound", SimpleNamespace(in_transit=[]))
     )
@@ -148,6 +150,7 @@ def test_물류_build_가_보는_실행을_넘기고_출처에_적는다(monkeyp
     assert names == [
         "coverage",
         "runtime",
+        "reservations",
         "inventory",
         "inbound",
         "outbound",

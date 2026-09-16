@@ -156,6 +156,8 @@ def 화면(monkeypatch):
         )
         #  ★ Runtime 읽기는 한 판에 한 번 — 대역은 «그날 스냅샷 없음» 으로 둔다.
         monkeypatch.setattr(logistics_query, "load_console_runtime", lambda **k: None)
+        #  그날 예약을 한 판에 한 번 읽는다 (#760) — 콘솔 대역이 값을 무시하므로 빈 축.
+        monkeypatch.setattr(logistics_query, "reservation_state_at", lambda *a, **k: ())
         monkeypatch.setattr(logistics_query, "get_inventory_console", lambda **k: inv)
         monkeypatch.setattr(
             logistics_query,

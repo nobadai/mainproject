@@ -25,9 +25,10 @@ app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
       같은 계산을 SQL 로 한 벌 더 만들면 두 답이 갈리고, 갈린 날 어느 쪽이
       맞는지 아무도 말해 주지 않는다.
 
-🔴 **상태 어휘를 새로 적지 않는다.** `_HOLDING_RESERVATION` · `_HOLDING_ALLOCATION` ·
-   `_ASSIGNED_ALLOCATION` 은 `outbound.py` 에서 가져다 쓴다. 여기에 문자열로 다시
-   적으면 한쪽만 고쳐지는 날이 온다.
+🔴 **예약·할당 축은 `historical_repository.reservation_state_at` 하나가 정본이다** (#760).
+   예약 3칸(reserved · allocated · unallocated)도 판매가능량도 그 `as_of` 결과에서
+   나온다 — 이 파일은 현재 status 를 다시 세지 않는다(종전 `_reservation_totals_by_item`
+   현재-축 집계는 제거). 상태 어휘를 문자열로 다시 적으면 한쪽만 고쳐지는 날이 온다.
 
 🔴 **네 조회가 같은 시간축(`sim_run_id`, `as_of`)에 선다.** 화면이 고른 날짜의
    사실은 `historical_repository` 가 원장·사건에서 되살리고, 이 파일은
@@ -36,12 +37,14 @@ app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
 ```text
 되살린다 (HISTORICAL_AS_OF)   Lot 잔량 · Lot 상태 · 신선도 · 회전 · used_capacity_kg
                               Receipt 상태 · 검수 · 재고반영 · Pallet 자리
-지금 행 그대로 (CURRENT_ROW) 판매가능량(Runtime 축) · Zone 정원(되살릴 정본 없음)
+                              예약 3칸(reserved · allocated · unallocated) · 판매가능량 (#760)
+지금 행 그대로 (CURRENT_ROW) Zone 정원(되살릴 정본 없음)
 ```
 
-   ⚠️ 뒤엣것들은 **되살릴 정본 컬럼이 아직 없다** (`inventory_reservations` 에
-      시뮬레이션 날짜 컬럼 없음 · `released_as_of` 는 WP-3 · 자리 정원 이력 없음).
-      없는 것을 지어내지 않고 응답의 `*_time_basis` 로 그 사실을 말한다.
+   ⚠️ 예약·할당·판매가능량은 이제 `reservation_state_at` · `lot_state_at` 의 `as_of`
+      결과로 되살린다 (#760 · 종전엔 «되살릴 정본 없음» 이었으나 WP-3 이 예약 시간축
+      정본을 세웠다). Zone 정원만 되살릴 정본 컬럼이 없어(자리 정원 이력 없음) 지금
+      값을 쓰고, 응답의 `*_time_basis` 로 그 사실을 말한다.
 
 🔴 **커넥션은 화면 한 판에 하나이고, 이 파일은 열지 않는다** (2026-09-15).
    `build_result` 가 하나를 열어 `conn=` 으로 넘기고, 여기 함수 넷과 `load_console_runtime`
@@ -60,7 +63,7 @@ app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date
 from decimal import Decimal
 from typing import Any, cast
@@ -69,12 +72,13 @@ from psycopg import sql
 
 from app.logistics import arrival, historical_repository, outbound
 from app.logistics.db import get_db_schema
-from app.logistics.historical_repository import HistoricalAllocation, HistoricalLot
+from app.logistics.historical_repository import (
+    HistoricalAllocation,
+    HistoricalLot,
+    HistoricalReservation,
+)
 from app.logistics.inbound_schedules import receivable_at, receivable_from
 from app.logistics.outbound import (
-    _ASSIGNED_ALLOCATION,
-    _HOLDING_ALLOCATION,
-    _HOLDING_RESERVATION,
     AllocationStatus,
     ReservationStatus,
 )
@@ -97,6 +101,8 @@ from app.logistics.schemas import (
     ConsoleOutboundResponse,
     ConsoleReservation,
     InventoryLogisticsSnapshot,
+    InventoryLotSnapshot,
+    OutboundCommitment,
 )
 from app.logistics.tools import build_inventory_by_item
 
@@ -156,77 +162,125 @@ def _mvp_item_ids(conn: Any) -> list[str]:
     return [row["item_id"] for row in rows]
 
 
-def _reservation_totals_by_item(conn: Any, *, sim_run_id: str) -> dict[str, dict[str, Any]]:
-    """품목별 **지금 재고를 잡고 있는 양**. 🔴 예약 원래 확보량의 합이 아니다.
+def _reservation_totals_from_history(
+    reservations: Sequence[HistoricalReservation],
+) -> dict[str, dict[str, Any]]:
+    """품목별 **그날 재고를 잡고 있던 양** — Historical 예약 reader 결과를 집계한다 (#760).
+
+    ★ 의미는 종전 `_reservation_totals_by_item`(현재-status 축)과 **같다** — «그 시점에
+      실제로 재고를 잡고 있는 양»(holding). 다른 것은 시간축뿐이라, 이제 `as_of` 로
+      되살린 `reservation_state_at` 결과를 쓴다.
 
     ```text
-    allocated_qty_kg             ALLOCATED · PICKED                아직 안 나간 몫
-    unallocated_reserved_qty_kg  reserved − (ALLOCATED·PICKED·SHIPPED)   Lot 미지정 잔여
-    reserved_qty_kg              위 둘의 합                        ★ 정의가 곧 항등식이다
+    allocated_qty_kg             Σ 그날 ALLOCATED 할당           SHIPPED·RELEASED 제외
+    unallocated_reserved_qty_kg  Σ 그날 미할당 잔여              놓아준 날부터 0
+    reserved_qty_kg              위 둘의 합                      ★ 정의가 곧 항등식이다
+    active_reservation_count     위 합이 0 보다 큰 예약 수
     ```
 
-    🔴 **`SUM(r.reserved_qty_kg)` 를 쓰지 않는다.** `ship_allocated_stock` 은 할당을
-       `SHIPPED` 로 내리고 원장 OUT 을 내지만 **예약 행의 `reserved_qty_kg` 도
-       `status` 도 건드리지 않는다.** 그래서 원래 확보량을 그대로 합하면
-       *"500kg 전량 출고가 끝났는데 화면에는 아직 500kg 을 잡고 있다"* 가 된다.
+    🔴 **`HistoricalReservation.reserved_qty_kg`(원래 확보량)를 그대로 합하지 않는다.**
+       그건 «잡고 있는 양» 이 아니라 «확보했던 양» 이라 의미가 다르다 —
+       `ConsoleReservation.reserved_qty_kg`(행값)와 이 품목 축 값을 섞지 않는 것과
+       같은 규율이다.
 
-    ```text
-    예약 500 → 할당 500 → 전량 SHIPPED
-      종전  reserved 500 · allocated 0 · unallocated 0   🔴 셋이 안 맞는다
-      지금  reserved   0 · allocated 0 · unallocated 0
-    ```
-
-       ⚠️ **출고 쪽 상태 정책을 고쳐서 맞추지 않는다.** `ship_allocated_stock` 의
-          예약 상태 처리는 그대로 두고, 여기서 *"지금 잡고 있는 양"* 을 바로 센다.
-          이 함수는 읽기이고 저쪽은 장부다.
-
-    ★ `active_reservation_count` 도 같은 눈이다 — 상태가 `ALLOCATED` 로 남아 있어도
-      **잡고 있는 양이 0 이면 세지 않는다.** 상태 어휘가 아니라 수량이 기준이다.
-
-    ⚠️ **`ConsoleReservation.reserved_qty_kg` 와 뜻이 다르다.** 저쪽은 예약 행에
-       적힌 DB 값 그대로(그 예약이 확보했다고 적은 양)이고, 여기는 품목 축의
-       *"지금 잡고 있는 양"* 이다. 한 화면에 나란히 두지 않는다.
+    ⚠️ **cross-day top-up 한계(LOG-HIST-001)는 이 함수가 고치지 않는다.** `reserved`
+       행값이 다른 날 채워졌으면 그날 `unallocated` 복원은 그만큼 부정확할 수 있다 —
+       실측 0건이고, 이 이슈(#760)의 범위 밖이다.
     """
-    schema = _schema()
-    # ★ 두 파생식을 SELECT 에서 세 번 쓰므로 이름을 붙여 한 곳에서만 적는다.
-    잡은할당 = sql.SQL("COALESCE(h.qty, 0)")
-    미할당잔여 = sql.SQL("GREATEST(r.reserved_qty_kg - COALESCE(a.qty, 0), 0)")
-    rows = _rows(
-        conn,
-        sql.SQL(
-            """
-            SELECT r.item_id,
-                   count(*) FILTER (WHERE {잡은할당} + {미할당잔여} > 0)::int
-                       AS active_reservation_count,
-                   COALESCE(SUM({잡은할당} + {미할당잔여}), 0) AS reserved_qty_kg,
-                   COALESCE(SUM({잡은할당}), 0) AS allocated_qty_kg,
-                   COALESCE(SUM({미할당잔여}), 0) AS unallocated_reserved_qty_kg
-            FROM {schema}.inventory_reservations r
-            LEFT JOIN (
-                SELECT reservation_id, SUM(allocated_qty_kg) AS qty
-                FROM {schema}.inventory_allocations
-                WHERE status = ANY(%(holding_alloc)s)
-                GROUP BY reservation_id
-            ) h ON h.reservation_id = r.reservation_id
-            LEFT JOIN (
-                SELECT reservation_id, SUM(allocated_qty_kg) AS qty
-                FROM {schema}.inventory_allocations
-                WHERE status = ANY(%(assigned_alloc)s)
-                GROUP BY reservation_id
-            ) a ON a.reservation_id = r.reservation_id
-            WHERE r.sim_run_id = %(sim)s
-              AND r.status = ANY(%(holding_resv)s)
-            GROUP BY r.item_id
-            """
-        ).format(schema=schema, 잡은할당=잡은할당, 미할당잔여=미할당잔여),
-        {
-            "sim": sim_run_id,
-            "holding_alloc": sorted(_HOLDING_ALLOCATION),
-            "assigned_alloc": sorted(_ASSIGNED_ALLOCATION),
-            "holding_resv": sorted(_HOLDING_RESERVATION),
-        },
+    totals: dict[str, dict[str, Any]] = {}
+    for resv in reservations:
+        holding = resv.allocated_qty_kg + resv.unallocated_qty_kg
+        bucket = totals.setdefault(
+            resv.item_id,
+            {
+                "reserved_qty_kg": Decimal(0),
+                "allocated_qty_kg": Decimal(0),
+                "unallocated_reserved_qty_kg": Decimal(0),
+                "active_reservation_count": 0,
+            },
+        )
+        bucket["allocated_qty_kg"] += resv.allocated_qty_kg
+        bucket["unallocated_reserved_qty_kg"] += resv.unallocated_qty_kg
+        bucket["reserved_qty_kg"] += holding
+        if holding > Decimal(0):
+            bucket["active_reservation_count"] += 1
+    return totals
+
+
+def _historical_commitments(
+    reservations: Sequence[HistoricalReservation],
+) -> list[OutboundCommitment]:
+    """그날 출고가 이미 잡아 둔 몫 — Historical 예약에서 조립한다 (#760).
+
+    `repository.get_outbound_commitments`(현재축)와 **같은 의미**다. 시간축만 `as_of` 다.
+
+    ```text
+    lot_id 있음   그날 살아있는 할당(state == ALLOCATED)      SHIPPED·RELEASED 제외
+    lot_id 없음   그날 미할당 예약 잔여(unallocated_qty_kg)   놓아준 날부터 0
+    ```
+
+    🔴 **SHIPPED 는 넣지 않는다.** 나간 몫은 원장 OUT 이 `remaining_qty_kg` 에서 이미
+       덜어냈다 — 다시 빼면 이중 차감이다 (`OutboundCommitment` 규율).
+
+    ★ **품목 키는 `item_name` 이다** — Lot 축(`_historical_availability_snapshot`)이
+      같은 키를 써야 `build_inventory_by_item` 의 품목 차감이 맞는다.
+    """
+    out: list[OutboundCommitment] = []
+    for resv in reservations:
+        item = resv.item_name or resv.item_id
+        for alloc in resv.allocations:
+            if alloc.state == "ALLOCATED" and alloc.allocated_qty_kg > Decimal(0):
+                out.append(
+                    OutboundCommitment(
+                        item=item, lot_id=alloc.lot_id, quantity_kg=alloc.allocated_qty_kg
+                    )
+                )
+        if resv.unallocated_qty_kg > Decimal(0):
+            out.append(
+                OutboundCommitment(item=item, lot_id=None, quantity_kg=resv.unallocated_qty_kg)
+            )
+    return out
+
+
+def _historical_availability_snapshot(
+    base: InventoryLogisticsSnapshot,
+    *,
+    lots: Sequence[HistoricalLot],
+    reservations: Sequence[HistoricalReservation],
+    used_capacity_kg: Decimal,
+) -> InventoryLogisticsSnapshot:
+    """판매가능량 정본(`tools.build_inventory_by_item`)에 먹일 **그날** 스냅샷 (#760).
+
+    ★ 점유(Lot)축과 예약·할당(commitments)축만 `as_of` 값으로 바꾼다 — 나머지(정책·
+      용량 한도)는 `agent.tools._as_of_snapshot` 과 같은 규율로 base 를 그대로 둔다.
+      `build_inventory_by_item` 은 이 두 축만 읽는다.
+
+    🔴 **판매가능량 공식을 여기서 다시 쓰지 않는다.** 축만 그날 값으로 세워 정본
+       함수에 넘긴다 — 두 답이 갈리지 않게.
+    """
+    return base.model_copy(
+        update={
+            "on_hand_by_lot": [
+                InventoryLotSnapshot(
+                    lot_id=lot.lot_id,
+                    item=lot.item_name or lot.item_id,
+                    grade=lot.grade,
+                    available_qty_kg=lot.remaining_qty_kg,
+                    received_at=lot.received_at,
+                    unit_cost_krw_per_kg=lot.unit_cost_krw_per_kg,
+                    remaining_freshness_days=lot.turnover.remaining_freshness_days,
+                    effective_freshness_limit_days=lot.turnover.effective_freshness_limit_days,
+                    # 🔴 유도된 상태다 — `inventory_lots.status` 컬럼이 아니다.
+                    status=lot.state,
+                    storage_zone=lot.storage_zone,
+                )
+                for lot in lots
+                if lot.remaining_qty_kg > Decimal(0)
+            ],
+            "outbound_commitments": _historical_commitments(reservations),
+            "used_capacity_kg": used_capacity_kg,
+        }
     )
-    return {row["item_id"]: row for row in rows}
 
 
 # ── GET /logistics/inventory ────────────────────────────────────────────
@@ -302,15 +356,17 @@ def get_inventory_console(
     sim_run_id: str,
     as_of: date,
     runtime: LogisticsRead | None,
+    reservations: Sequence[HistoricalReservation] | None = None,
     item_id: str | None = None,
 ) -> ConsoleInventoryResponse:
     """품목 카드 · Lot 목록 · 창고 kg Capacity 한 판. **기준일은 `as_of` 다.**
 
     ```text
-    현재고 · Lot · Capacity 사용량   historical_repository.lot_state_at   ← as_of 원장
+    현재고 · Lot · Capacity 사용량   historical_repository.lot_state_at        ← as_of 원장
     신선도 · 회전                     turnover (같은 함수 · 잔량만 그 시점 값)
     Capacity 한도                     agent_policy_config (지금 활성 · capacity_basis 표기)
-    판매가능량                        tools.build_inventory_by_item        ← 예약 축은 현재 행
+    예약 3칸 · 건수                    reservation_state_at → 품목 집계          ← as_of (#760)
+    판매가능량                        tools.build_inventory_by_item(그날 스냅샷)  ← as_of (#760)
     ```
 
     🔴 **`inventory_lots.remaining_qty_kg` 를 과거 잔량으로 쓰지 않는다.** 종전에는
@@ -321,11 +377,11 @@ def get_inventory_console(
     🔴 **만료 Lot 은 `on_hand_qty_kg` 와 `used_capacity_kg` 에 남고 판매가능량에서만
        빠진다.** 판매불가는 창고에서 사라진 것이 아니다.
 
-    ⚠️ **`available_qty_kg` 는 아직 다른 시간축이다** (`available_qty_time_basis`).
-       그 값은 **지금** 예약·할당을 뺀 Runtime 축이다. WP-3 이 예약 축의 시간
-       정본을 세웠으니 되살릴 수는 있지만, 어느 화면 값을 과거로 옮길지는 별도
-       결정이라 여기서 바꾸지 않았다 (예약 목록은 `get_outbound_console` 이
-       `as_of` 로 낸다).
+    ★ **예약 3칸·판매가능량도 `as_of` 축이다 (#760 · LOG-HIST-002).** 예약·할당은
+      `reservation_state_at` 이 그날 값으로 되살리고(품목 집계 =
+      `_reservation_totals_from_history`), 판매가능량은 그 예약과 `lot_state_at` 으로
+      **그날 스냅샷**을 세워 정본 `tools.build_inventory_by_item` 에 그대로 먹인다 —
+      한 화면이 한 시간축에 선다.
 
     ★ **보관정책이 없는 품목의 Lot 도 싣는다.** 종전 스냅샷 경로는
       `item_storage_policies` 를 `INNER JOIN` 해서 그런 Lot 을 통째로 떨어뜨렸다 —
@@ -333,30 +389,48 @@ def get_inventory_console(
 
     :param runtime: `load_console_runtime` 이 그 `(sim_run_id, as_of)` 로 낸 한 벌.
         `None` 은 그날 Runtime Snapshot 이 없다는 사실이다 — 여기서 다시 읽지 않는다.
+    :param reservations: `build_result` 가 한 판에 한 번 읽어 넘긴 그날 예약 목록.
+        `None` 이면 여기서 직접 읽는다(단독 호출·테스트) — 화면 경로는 출고 콘솔과
+        **같은 한 벌**을 공유해 중복 조회를 피한다(#719 · #760).
     """
     read = runtime
     policy = read.policy if read is not None else get_active_logistics_policy()
 
-    inventory_by_item = None if read is None else build_inventory_by_item(read.snapshot)
+    historical_lots = _historical_lots(conn, sim_run_id=sim_run_id, as_of=as_of)
+    names = _item_names(conn)
+    resv = (
+        reservations
+        if reservations is not None
+        else historical_repository.reservation_state_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+    )
+    reservation_totals = _reservation_totals_from_history(resv)
+    mvp_items = _mvp_item_ids(conn)
+
+    # ★ 창고 점유는 **그날 실재한 모든 Lot** 의 합이다 — 화면 필터보다 앞선다.
+    used_capacity = sum((lot.remaining_qty_kg for lot in historical_lots), start=Decimal(0))
+
+    # 판매가능량 — 정본 `build_inventory_by_item` 에 «그날» 스냅샷을 먹인다 (#760).
+    #   축(Lot · 예약·할당)만 그날 값으로 세우고 계산은 정본이 한다.
     if read is None:
+        inventory_by_item = None
         unresolved_reason: str | None = "RUNTIME_SNAPSHOT_UNAVAILABLE"
-    elif inventory_by_item is None:
-        unresolved_reason = _available_unresolved_reason(read.snapshot)
     else:
-        unresolved_reason = None
+        avail_snapshot = _historical_availability_snapshot(
+            read.snapshot,
+            lots=historical_lots,
+            reservations=resv,
+            used_capacity_kg=used_capacity,
+        )
+        inventory_by_item = build_inventory_by_item(avail_snapshot)
+        unresolved_reason = (
+            None if inventory_by_item is not None
+            else _available_unresolved_reason(avail_snapshot)
+        )
     available_by_name = (
         None
         if inventory_by_item is None
         else {row.item: row.available_qty_kg for row in inventory_by_item}
     )
-
-    historical_lots = _historical_lots(conn, sim_run_id=sim_run_id, as_of=as_of)
-    names = _item_names(conn)
-    reservations = _reservation_totals_by_item(conn, sim_run_id=sim_run_id)
-    mvp_items = _mvp_item_ids(conn)
-
-    # ★ 창고 점유는 **그날 실재한 모든 Lot** 의 합이다 — 화면 필터보다 앞선다.
-    used_capacity = sum((lot.remaining_qty_kg for lot in historical_lots), start=Decimal(0))
 
     # 🔴 «살아 있는 Lot» 만 목록에 싣는다 — 종전 화면과 같은 모집단이다.
     #    잔량 0 이 된 Lot 까지 늘어놓으면 84 줄이 되고 그날의 재고가 안 보인다.
@@ -368,7 +442,7 @@ def get_inventory_console(
 
     # 품목 축: 재고가 있는 품목 ∪ 예약이 있는 품목 ∪ mvp_active 품목.
     # ★ mvp_active 가 아니어도 실물이 있으면 싣는다 — 계약 밖 품목이라고 재고를 숨기지 않는다.
-    item_ids = {lot.item_id for lot in lots} | set(reservations) | set(mvp_items)
+    item_ids = {lot.item_id for lot in lots} | set(reservation_totals) | set(mvp_items)
     if item_id is not None:
         item_ids = item_ids & {item_id}
 
@@ -378,7 +452,7 @@ def get_inventory_console(
         expired = [
             lot for lot in item_lots if lot.disposal_candidate and lot.remaining_qty_kg > Decimal(0)
         ]
-        totals = reservations.get(current, {})
+        totals = reservation_totals.get(current, {})
         name = names.get(current, current)
         items.append(
             ConsoleInventoryItem(
@@ -569,7 +643,12 @@ def _console_allocation(allocation: HistoricalAllocation) -> ConsoleAllocation:
 
 
 def get_outbound_console(
-    *, conn: Any, sim_run_id: str, as_of: date, status: ReservationStatus | None = None
+    *,
+    conn: Any,
+    sim_run_id: str,
+    as_of: date,
+    status: ReservationStatus | None = None,
+    reservations: Sequence[HistoricalReservation] | None = None,
 ) -> ConsoleOutboundResponse:
     """`as_of` 시점의 예약 목록과 그 아래 할당들. **네 조회와 같은 축이다.**
 
@@ -593,9 +672,17 @@ def get_outbound_console(
       기본으로 숨기는 정책을 여기서 새로 만들지 않는다. 화면이 골라 쓴다.
 
     ★ 0건이면 `reservations: []` 가 정상이다. 더미를 만들지 않는다.
+
+    :param reservations: `build_result` 가 한 판에 한 번 읽어 넘긴 그날 예약 목록.
+        `None` 이면 여기서 직접 읽는다 — 화면 경로는 재고 콘솔과 **같은 한 벌**을
+        공유해 `reservation_state_at` 을 두 번 조회하지 않는다 (#719 · #760).
     """
-    reservations = historical_repository.reservation_state_at(
-        conn, sim_run_id=sim_run_id, as_of=as_of
+    rows = (
+        reservations
+        if reservations is not None
+        else historical_repository.reservation_state_at(
+            conn, sim_run_id=sim_run_id, as_of=as_of
+        )
     )
 
     return ConsoleOutboundResponse(
@@ -615,7 +702,7 @@ def get_outbound_console(
                 status=cast(ReservationStatus, row.status),
                 allocations=[_console_allocation(a) for a in row.allocations],
             )
-            for row in reservations
+            for row in rows
             if status is None or row.status == status
         ],
     )
