@@ -427,10 +427,12 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     assert reply.runtime_status == "READY"
     assert metadata.llm_status == "SUCCESS"
     assert metadata.llm_fallback_used is False
-    assert metadata.llm_model == "gemma3:4b"
-    #  Planner 2 + Finalizer 2. 예전 7 에서 줄어든 3 은 **고를 것이 하나뿐이던 단계와
-    #  종료 단계**의 Planner 호출이다 — 대체 Provider 로 넘어가도 그 자리는 안 부른다.
-    assert metadata.llm_attempts == 4
+    #  🔴 Finalizer 는 이 실행에서 불리지 않았다(설명 후보 1개). 그래서 «이번 실행에서
+    #     실제로 답한 모델» 은 Planner 쪽이고, 가용성 대체가 걸렸으므로 대체 모델 이름이다.
+    assert metadata.llm_model == "llama3.2:3b"
+    #  Planner 3회(가용성 대체로 primary 1 + fallback 2). 예전 7 에서 줄어든 4 는
+    #  고를 것이 없던 Planner 자리 둘과 Finalizer 호출 둘이다.
+    assert metadata.llm_attempts == 3
     assert controller.planner.state.active is True
     assert _provider_observation(metadata) == {
         "effective_provider": "ollama",

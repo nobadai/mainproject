@@ -610,7 +610,8 @@ def test_llm_status_describes_this_run_not_the_controller_lifetime():
         _second, second_metadata = controller.run(_request_for("SALES_VALIDATION"))
 
     assert first_metadata.llm_status == "SUCCESS"
-    assert first_metadata.llm_attempts == 4  # planner 3 + finalizer 1
+    #  planner 3 + finalizer 0 — 설명 후보가 하나뿐이라 Finalizer 는 불리지 않는다.
+    assert first_metadata.llm_attempts == 3
 
     #  2차는 Planner 도 Finalizer 도 부르지 않았다.
     assert _trace(second_metadata)["llm_calls"] == 0
