@@ -34,8 +34,10 @@
 --    원소를 지우고 새로 얹는다.
 --
 -- 🔴 **CHECK 를 걸지 않는다.** *"배열이어야 한다"* 같은 제약은 매력적이지만, 이 칸이
---    생기기 전에 있던 행은 DEFAULT `[]` 로 남고 그 상태가 정상이다. NOT NULL DEFAULT
---    가 이미 모양을 보장하고, 규율은 writer 가 지킨다(항상 배열을 쓴다).
+--    생기기 전에 있던 행은 DEFAULT `[]` 로 남고 그 상태가 정상이다.
+--    ⚠️ JSONB · NOT NULL · DEFAULT 는 **JSON 타입과 NULL 여부만** 보장한다 — 배열이라는
+--       것도, 원소가 `{as_of, severity}` 라는 것도 DB 는 강제하지 않는다. 그 shape 는
+--       production writer 가 보장한다(항상 배열·원소를 쓴다).
 --
 -- 🔴 **INDEX 를 만들지 않는다.** 이 칸만으로 거르는 질의가 없다 — Historical 은 늘
 --    `sim_run_id` 로 먼저 좁히고, severity 선택은 파이썬이 배열에서 한다.
