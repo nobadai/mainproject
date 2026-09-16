@@ -23,8 +23,13 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.purchase_agent import adapter
-from app.purchase_agent.allocation import APPROVED, allocation_candidates, split_quantities
+from app.purchase_agent import adapter, features
+from app.purchase_agent.allocation import (
+    APPROVED,
+    PROVISIONAL,
+    allocation_candidates,
+    split_quantities,
+)
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.llm.runtime import get_llm_settings
 from app.purchase_agent.llm.split_allocation import (
@@ -246,9 +251,17 @@ def _강제_선택(state: dict, 후보_id: str, *, judged: bool) -> tuple[dict, 
 # ── ㉠ 부를지 말지 — ④ 와 ⑥ 이 같은 기준을 쓴다 ─────────────────────────────
 
 
+def _미승인_선언() -> dict:
+    """승인 전 상태를 **사본에 명시한다** — 선언 파일은 2026-09-17 에 승인됐다."""
+    사본 = load_constraints()
+    사본["split"]["allocation_weights"]["status"] = PROVISIONAL
+    return 사본
+
+
 def test_승인_전이면_판단자를_부르지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
-    """🔴 **플래그만 켜도 안 불린다** — 선언 파일은 ``PROVISIONAL`` 이다."""
+    """🔴 **플래그만 켜도 안 불린다** — 승인 전 선언이면 후보가 균등 하나다."""
     monkeypatch.setenv(FLAG, "true")
+    monkeypatch.setattr("app.purchase_agent.nodes.split_plan.load_constraints", _미승인_선언)
     provider = 세는_프로바이더("FRONT_LOADED")
     state, final = _펴고_검사(_state("넉넉_상승"), _선택자(provider))
     assert provider.calls == 0
@@ -257,6 +270,28 @@ def test_승인_전이면_판단자를_부르지_않는다(monkeypatch: pytest.M
     [흔적] = adapter._split_allocation_call(state)
     assert 흔적.status == "SKIPPED_TEMPLATE"
     assert "승인 전" in (흔적.skip_reason or "")
+    _일곱번이_통과시킨다(state, final)
+
+
+def test_승인만으로는_판단자를_부르지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **승인은 켬이 아니다** (2026-09-17). 선언 파일(승인됨) 그대로 · 플래그를 안 준다.
+
+    ⚠️ 이 프로세스의 env 와 ``.env`` 파일 **둘 다** 치운다 — 개발자 머신의 ``.env`` 에 플래그
+      줄이 있으면 «기본이 꺼짐» 을 못 잰다.
+    """
+    for key in (FLAG, features.SPLIT_ALLOCATION):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(features, "ENV_FILES", ())
+    assert features.enabled(features.SPLIT_ALLOCATION) is False, "전제 — 기본은 꺼짐"
+
+    provider = 세는_프로바이더("FRONT_LOADED")
+    state, final = _펴고_검사(_state("넉넉_상승"), _선택자(provider))
+    결정 = _결정(state)
+    assert 결정["allocation_approved"] is True, "선언 파일이 승인 상태여야 이 검사가 뜻이 있다"
+    assert provider.calls == 0
+    assert 결정["allocation_judgment"] is None
+    assert adapter._split_allocation_call(state) == ()
+    assert [leg["qty_kg"] for leg in _공격(state)["split_plan"]] == [4_364, 4_363]
     _일곱번이_통과시킨다(state, final)
 
 

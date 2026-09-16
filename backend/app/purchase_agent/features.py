@@ -29,7 +29,8 @@ from app.purchase_agent.llm.runtime import ENV_FILES, ENV_PREFIX
 
 #: 🔴 구조화 요청만 켠다 — 고지는 이 값과 무관하다 (위 머리말).
 INFORMATION_REQUESTS = "INFORMATION_REQUESTS_ENABLED"
-#: ④ 회차 배분 LLM. 🔴 비율이 아직 ``PROVISIONAL`` 이라 운영에서 안 켠다.
+#: ④ 회차 배분 LLM. 비율은 허용 후보로 승인됐다(2026-09-17) — 🔴 **승인은 켬이 아니다.**
+#: 기본은 여전히 꺼짐이고, 켤 환경은 따로 정한다.
 SPLIT_ALLOCATION = "LLM_SPLIT_ALLOCATION_ENABLED"
 #: 근거 자기 검토 LLM.
 SELF_REVIEW = "LLM_SELF_REVIEW_ENABLED"

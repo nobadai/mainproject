@@ -380,9 +380,13 @@ def test_승인_전에는_균등_하나뿐이다() -> None:
 
     ⚠️ 이것은 **운영 승인 문제**이고 코드 문제가 아니다. 이 판은 그 위(앞단)를 고쳤을 뿐,
       승인 상태를 바꾸지 않는다 — 공용 선언 파일도 ``.env`` 도 안 건드린다.
+
+    🔄 **미승인 상태를 사본에 명시한다** (2026-09-17). 선언 파일이 승인됐으므로 «진짜 선언 =
+      PROVISIONAL» 에 기대면 이 검사가 무엇을 재는지가 파일 상태에 따라 바뀐다.
     """
     state = _state(caps=_뒤로_커지는_창(2_000.0, 20_000.0), today_free=2_000.0)
-    선언 = copy.deepcopy(load_constraints())  # 진짜 선언 = PROVISIONAL
+    선언 = copy.deepcopy(load_constraints())
+    선언["split"]["allocation_weights"]["status"] = "PROVISIONAL"
     rounds = evaluate_split_entry(state, 선언)["rounds"]
     assert list(safe_allocation_candidates(state, 선언, rounds)) == ["BASE_EQUAL"]
 
