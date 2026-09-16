@@ -592,6 +592,37 @@ class ProcurementFlow:
         ★ 예외 셋(ML 예측·확정주문·정책값)은 마스터가 싣되 **`as_of` 대조는 한다.**
           직접 조회 시절 매입이 테스트로 강제하던 look-ahead 방어가 조립 시점으로 옮겨왔다.
           누수는 에러를 내지 않고 손익만 좋아지므로 여기서 막지 않으면 아무도 모른다.
+
+        🔴 **`adjustments` 키의 게이트는 조정안 건수가 아니라 회차다**
+          (매입 파트 지적 2026-09-16).
+
+        ```text
+        if feedback is not None:
+            payload["adjustments"] = [...]
+            payload["feedback_context"] = dict(feedback)
+
+        1회차  feedback 이 None → 조정안이 **있어도** 키를 안 만든다
+        2회차  feedback 이 있음 → 조정안이 **0건이어도** 빈 배열을 만든다
+        ```
+
+          받는 쪽에서 *"낼 조정안이 없어서 안 만들었다"* 와 *"1회차라 안 만들었다"* 가
+          **똑같이 키 없음**으로 보인다. 그런데 뜻이 다르다 — 앞은 부서 판단이고 뒤는
+          회차 배선이다. 이 구분을 안 해서 2026-09-16 에 마스터가 *"매입 검증의 조정안
+          자리는 비어 있다"* 는 **틀린 서신**을 보냈다. 조정안은 실려 나간 적이 있다.
+
+        ```text
+        실측 2026-09-16 · 실 DB · 읽기만 · master_agent_runs · cycle='PROCUREMENT'
+        응답에 조정안이 실린 실행       30개 (조정안 45건)
+        그 30개의 end_code             E1_APPROVED 30 / 30
+        그 30개의 재무 판정            business_status = conditional
+        조정안 내용                    axis=amount · unit=krw · target_value 15,730원
+                                       reason "Verified Finance amount alternative."
+        조정안이 났는데 통과 못 한 실행  0개
+        ```
+
+          ⚠️ **여기까지가 관측된 사실이다.** 재무가 `conditional` 로 낸 자리를 그대로
+          통과시킨 것이 결함인지 설계인지는 **아직 안 정했다.** 가르려면 `_acceptable`
+          이 `conditional` 을 어떻게 세는지 봐야 한다 — 발표 전에는 안 건드린다.
         """
         payload: dict[str, Any] = {"constraints": dict(constraints)}
         if self.item is not None:
@@ -900,8 +931,24 @@ class ProcurementFlow:
           사실은 그대로다 — 사람이 볼 것이지 재시도할 것이 아니다 (`04` §3.2).
 
         ⚠️ **이것은 "반영됐나" 가 아니라 "닿았나" 다.** 반영은 매입이
-          `applied_adjustments` 를 회신해야 알 수 있고 그 칸은 아직 없다
-          (매입 ①timing 에서 만든다). 두 사실을 한 문장으로 뭉개지 않는다.
+          `applied_adjustments` 를 회신해야 알 수 있다.
+
+        🔴 **그 칸은 있다.** 여기 적혀 있던 *"그 칸은 아직 없다"* 는 거짓이었다
+          (매입 파트 지적 2026-09-16).
+
+        ```text
+        실측 2026-09-16 · 실 DB · 읽기만
+        master_agent_runs · cycle='PROCUREMENT'
+          judgment.meta.applied_adjustments 칸이 있는 행    7,471
+          전체                                             11,529
+          그 칸의 값                                       전부 0
+        ```
+
+          값이 전부 0이라는 것은 **"반영할 것이 안 왔다"** 까지만 말한다.
+          🔴 **0을 봤다는 것과 반영을 확인했다는 것은 다르다** — 조정안이 실려 간
+          회차에서 매입이 그것을 반영했는지는 이 칸으로도 여전히 모른다.
+          **"반영됐는지 모른다" 는 결론은 그대로 산다.**
+          두 사실을 한 문장으로 뭉개지 않는다.
         """
         if not sent:
             return ""  # 안 보낸 회차는 대조할 것이 없다 (1회차가 늘 그렇다)
@@ -944,8 +991,13 @@ class ProcurementFlow:
         ```text
         그 지적이 매입에 갔는가        이 문장이 소유한다
         조정안이 닿았는가             _adjustment_delivery 가 concerns 로 낸다
-        조정안이 반영됐는가           applied_adjustments 가 와야 안다 (아직 없다)
+        조정안이 반영됐는가           applied_adjustments 가 와야 안다
         ```
+
+          🔴 `applied_adjustments` **칸은 있고 값이 전부 0이다** (실측 2026-09-16 ·
+          실 DB · 읽기만 · 11,529 행 중 7,471 행에 칸이 있고 값은 전부 0). 그래도
+          셋째 줄은 그대로다 — 0은 *"반영할 것이 안 왔다"* 이지 *"반영을 확인했다"* 가
+          아니다. 전에 여기 적혀 있던 *"(아직 없다)"* 만 거짓이었다.
 
           한 문장이 셋을 말하면 어느 것이 틀렸는지 못 가린다.
 
@@ -957,8 +1009,9 @@ class ProcurementFlow:
         sent = self._sent_to_purchase(verdicts, findings)
         if not sent:
             return head
-        # ⚠️ **보낸 것과 반영된 것은 다르다.** 매입이 `applied_adjustments` 를 회신하기
-        #   전까지 마스터가 아는 것은 "보냈다" 까지다. 문장이 그 이상을 말하면 안 된다.
+        # ⚠️ **보낸 것과 반영된 것은 다르다.** `applied_adjustments` 칸은 이미 오지만
+        #   값이 전부 0이라(실측 2026-09-16 · 실 DB · 읽기만) 마스터가 아는 것은
+        #   여전히 "보냈다" 까지다. 문장이 그 이상을 말하면 안 된다.
         return f"{head} — 매입에 전달한 것: {', '.join(sent)}(반영 여부는 매입 회신에 달림)"
 
     def _sent_to_purchase(
