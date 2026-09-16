@@ -25,27 +25,41 @@ import { useTab } from "@/components/console/useTab";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
-import { purchase, type Plan, type PurchaseTab } from "@/lib/screen";
+import { purchase, type Plan, type PurchaseTab, type Tone } from "@/lib/screen";
 
 /**
- * 이 안이 승인됐나.
+ * 상태 낱말 → 색. **낱말은 서버가 정한다** (`app/api/plan_state.py` 의 넷).
+ *
+ * ★ 색만 여기서 고른다. 낱말을 화면이 만들면 대시보드와 매입 화면이 같은 안을 다른
+ *   이름으로 부르게 된다 — 지금 둘이 같은 자리에서 낱말을 받는다.
+ *
+ * 🔴 **모르는 낱말은 감추지 않고 그대로 보인다** (`neutral`). 서버가 어휘를 늘리는 날
+ *    화면이 조용히 빈 배지를 내면, 사람은 상태가 없는 줄로 읽는다.
+ */
+const STATE_TONE: Record<string, Tone> = {
+  //  기다리는 것 — 사람이 아직 할 일이 남았다
+  후보: "warn",
+  //  결정이 났다
+  승인됨: "good",
+  //  결정 + 실제로 산 값까지 적혔다. 승인됨과 **색으로도** 갈라 둔다
+  "매입 기록됨": "info",
+  //  안 사기로 한 것
+  반려: "bad",
+};
+
+/**
+ * 이 안이 지금 어느 상태인가.
  *
  * 🔴 **승인된 안에도 배지가 붙어야 한다.** 예전에는 `pending` 일 때만 배지를 달아서
  *    **승인된 안이 아무 표시 없이** 떴고, 그래서 미결정 안과 구분이 안 됐다
  *    (2026-09-16 실측 · 04-13 배추·무가 `approved:true` 인데 화면에 아무것도 없었다).
  *
- * ★ **`approved` 하나만 본다.** 매입 API 는 그 이상을 안 싣는다 — 「매입 기록됨」을
- *   여기서 지어내지 않는다 (2026-09-16 결정). 그 사실은 대시보드가 말한다.
- *
- * ★ 색은 갈라 둔다. 기다리는 것과 끝난 것이 같은 색이면 눈으로 구분이 안 된다 —
- *   **끝난 쪽이 「좋음」**이고 기다리는 쪽이 「살필 것」이다.
+ * 🔴 **`approved` 하나로는 못 가른다.** 승인만 된 안과 실매입까지 적은 안이 둘 다
+ *    참이다. 이제 매입 API 가 `state` 를 실으므로 **받은 말을 그대로** 쓴다 —
+ *    여기서 「매입 기록됨」을 지어내던 자리가 아니라, 서버가 말해 준 것을 옮긴다.
  */
 function PlanState({ plan }: { plan: Plan }) {
-  return plan.approved ? (
-    <Pill text="승인됨" tone="good" />
-  ) : (
-    <Pill text="승인 대기" tone="warn" />
-  );
+  return <Pill text={plan.state} tone={STATE_TONE[plan.state] ?? "neutral"} />;
 }
 
 function PlanCard({ plan }: { plan: Plan }) {

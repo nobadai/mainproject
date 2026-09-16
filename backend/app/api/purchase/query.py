@@ -30,9 +30,11 @@ import logging
 from datetime import date, timedelta
 from typing import Any
 
+from app.api import plan_state
 from app.api.primitives import Column, Note, Source, Stat, Table
 from app.api.purchase.schema import Plan, PurchaseTab, Reason
 from app.contracts.core import ITEMS
+from app.master.purchase_record_repository import RecordedTotals, recorded_totals_by_plan
 
 log = logging.getLogger(__name__)
 
@@ -125,8 +127,11 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
 
     runs = fetch_all(
         sql.SQL(
-            "SELECT request_id, item, end_code, runtime_status, created_at, sim_run_id,"
-            " response_payload AS payload"
+            #  🔴 `run_id` 는 **말로 한 승인이 짚을 행**이다 (2026-09-16). 업무 키 하나에
+            #     실행이 여러 행이라(실측 75행) 키만으로는 본 것과 다른 안이 승인될 수
+            #     있다 — 마스터 승인 경로가 `history_run_id` 를 받는 이유와 같다.
+            "SELECT run_id, request_id, item, end_code, runtime_status, created_at,"
+            " sim_run_id, response_payload AS payload"
             " FROM {} WHERE as_of = %(as_of)s AND cycle = 'PROCUREMENT'"
             " ORDER BY created_at DESC"
         ).format(table("master_agent_runs")),
@@ -373,8 +378,33 @@ def _payments(scenario: dict[str, Any]) -> Table:
     )
 
 
+def _records(as_of: date, sim_run_id: str | None) -> dict[tuple[str, str], RecordedTotals]:
+    """그날 · 그 축의 **실매입 기록 합계.** 열쇠는 `(품목, 안 이름)`.
+
+    🔴 **여기서 숫자를 만들지 않는다.** 표를 읽는 자리는 마스터 한 곳이고
+       (`master/purchase_record_repository.recorded_totals_by_plan`) 이 함수는 그것을
+       부르기만 한다 — 대시보드(`api/dashboard/query._records`)와 **같은 함수**다.
+
+    🔴 **축이 없으면 안 맞춘다.** 그 조회는 `sim_run_id` 가 필수다 (PK 에 축이 있다).
+       아무 축이나 넣어 맞추면 **다른 걷기에서 산 값**이 이 안에 붙는다 — 틀린 줄도
+       모르는 오류다. 그때는 빈 표이고, 승인된 안은 「승인됨」에 머문다.
+
+    ⚠️ 못 읽으면 **빈 표**다. 이 탭은 DB 를 못 읽어도 떠야 하고, 기록 하나 때문에
+      안 목록이 통째로 죽으면 안 된다 (`build` 의 태도와 같다).
+    """
+    if sim_run_id is None:
+        return {}
+    try:
+        return recorded_totals_by_plan(sim_run_id=sim_run_id, as_of=as_of)
+    except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
+        log.info("실매입 기록을 못 읽어 안의 상태를 승인 여부까지만 적습니다: %s", error)
+        return {}
+
+
 def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], str],
-          request_id: str, sim_run_id: str | None = None) -> Plan | None:
+          request_id: str, sim_run_id: str | None = None, *,
+          run_id: Any = None,
+          records: dict[tuple[str, str], RecordedTotals] | None = None) -> Plan | None:
     label = str(scenario.get("label") or "")
     sourcing = _sourcing(scenario.get("sourcing_plan") or [])
     if sourcing is None:
@@ -382,10 +412,11 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
     grade, unit_price = sourcing
     decision = decided.get((request_id, label))
     coverage = scenario.get("coverage_days")
+    key = f"{item} · {label}"
     return Plan(
         #  🔴 품목을 이름에 넣는다. 이 탭에는 품목 축이 없는데 우리는 품목마다
         #     따로 도므로, 안 넣으면 여러 품목이 있는 날 이름이 겹친다.
-        key=f"{item} · {label}",
+        key=key,
         coverage="며칠치인지 모름" if coverage is None else f"{coverage}일치",
         knob=_KNOB.get(str(scenario.get("strategy_type")), "조절 축을 알 수 없음"),
         qty_kg=float(scenario.get("total_qty_kg") or 0),
@@ -409,6 +440,17 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
         risks=[str(x) for x in scenario.get("risks") or []],
         pending=decision is None,
         approved=decision == "APPROVE",
+        #  🔴 **`approved` 하나로는 못 가른다** — 승인만 된 안과 실매입까지 적은 안이
+        #     둘 다 참이다. 낱말과 판정의 주인은 `app/api/plan_state.py` 하나이고
+        #     (대시보드도 같은 것을 쓴다) 여기서는 부르기만 한다.
+        state=plan_state.state_of(
+            approved=decision == "APPROVE",
+            recorded=plan_state.recorded_for(records or {}, key),
+        ),
+        #  🔴 말로 한 승인이 이 둘을 짚어 `/master/ask/execute` 에 싣는다.
+        #     **못 읽으면 None 이다** — 지어내면 엉뚱한 실행이 승인된다.
+        request_id=request_id,
+        history_run_id=None if run_id is None else str(run_id),
         #  🔴 없으면 None 그대로 싣는다. «걷기 밖» 이라는 사실이고, 화면이 그것을
         #     보일 수 있어야 한다 (schema.Plan.sim_run_id 주석).
         sim_run_id=sim_run_id,
@@ -607,6 +649,8 @@ def build(
         if row["scenario_label"]
     }
     chosen, picked_text = _pick(runs, sim_run_id)
+    #  ★ 안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
+    records = _records(as_of, sim_run_id)
 
     plans: list[Plan] = []
     skipped = 0
@@ -614,7 +658,11 @@ def build(
         for scenario in (run["payload"] or {}).get("scenarios") or []:
             #  _pick 이 ITEMS 로 걸렀으므로 여기서 item 은 언제나 계약 품목이다
             plan = _plan(
-                str(run["item"]), scenario, decided, run["request_id"], run["sim_run_id"]
+                str(run["item"]), scenario, decided, run["request_id"], run["sim_run_id"],
+                #  ⚠️ `.get` 이다. 검사가 `_read` 를 대신 세울 때 이 칸을 안 넣는데,
+                #     그때 «못 읽었다» 로 두는 것이 맞다 — 지어내지 않는다.
+                run_id=run.get("run_id"),
+                records=records,
             )
             if plan is None:
                 skipped += 1

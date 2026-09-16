@@ -300,6 +300,26 @@ export interface Plan {
   risks: string[];
   pending: boolean;
   approved: boolean;
+  /**
+   * 이 안이 **실제로 어느 상태인가** — 「후보」·「승인됨」·「매입 기록됨」·「반려」.
+   *
+   * 🔴 `approved` 하나로는 못 가른다. 승인만 된 안과 실매입까지 적은 안이 **둘 다
+   * 참**이라, 참/거짓 한 칸으로는 같은 말이 된다.
+   *
+   * ★ 낱말의 주인은 서버다 (`app/api/plan_state.py`). 화면은 받은 말을 그대로 쓰고,
+   * 여기서 새 낱말을 만들지 않는다 — 만드는 순간 대시보드와 매입 화면이 같은 안을
+   * 다른 이름으로 부른다.
+   */
+  state: string;
+  /**
+   * 이 안을 낸 실행의 업무 키. **말로 한 승인이 이것을 짚는다.**
+   *
+   * ⚠️ `null` 이면 못 읽은 것이다. 그 안은 말로 승인할 수 없고, 화면은 그 사실을
+   * 사람 말로 적고 멈춘다 — 지어내면 엉뚱한 실행이 승인된다.
+   */
+  request_id: string | null;
+  /** 그 실행의 이력 행 id. 업무 키 하나에 실행이 여럿이라 **짝으로** 들고 다닌다. */
+  history_run_id: string | null;
 }
 export interface PurchaseTab {
   stats: Stat[];

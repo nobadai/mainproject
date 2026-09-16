@@ -180,7 +180,11 @@ def test_대시보드가_매입_build_에_보는_실행을_넘긴다(monkeypatch
     monkeypatch.setattr(dashboard_query.purchase_q, "build", 매입)
     with pytest.raises(_멈춤):
         dashboard_query.build(AS_OF)
-    assert 잡은 == [{"args": (), "kwargs": {"sim_run_id": SHOWN_SIM_RUN_ID}}]
+    #  🔵 `window_days=0` — 대시보드는 도착일을 안 읽는다 (`#740` 의 인자 · 2026-09-16).
+    #     여기서 같이 잠근다: 축이 빠지는 것도, 창이 조용히 넓어지는 것도 사고다.
+    assert 잡은 == [
+        {"args": (), "kwargs": {"sim_run_id": SHOWN_SIM_RUN_ID, "window_days": 0}}
+    ]
 
 
 # ── ④ 매입 라우터 ───────────────────────────────────────────────────────

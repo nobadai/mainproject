@@ -16,6 +16,9 @@ import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
+//  🔴 말로 한 승인이 **그날 서 있는 안**을 짚을 때 읽는다. 매입 화면과 **같은 조회**라
+//     콘솔이 보는 안과 매입 탭이 보이는 안이 갈리지 않는다.
+import { purchase } from "@/lib/screen";
 import { CAN, type Session } from "@/lib/session";
 import {
   isProcurement,
@@ -123,6 +126,26 @@ function traceOf(res: AskResponse): LlmTraceData {
     llm_attempts: res.llm_attempts,
     llm_fallback_used: res.llm_fallback_used,
   };
+}
+
+/**
+ * 매입안 이름을 가른 자리. 매입 API 가 `key = "{품목} · {안 이름}"` 으로 짓는다
+ * (`app/api/purchase/query._plan` — 이 탭에 품목 축이 없어 이름 앞에 넣는다).
+ *
+ * 🔴 **맨 앞 하나만 가른다.** 안 이름에 같은 구분자가 들어와도 품목은 앞 한 칸이다.
+ * ⚠️ 이 규칙이 바뀌면 여기가 조용히 빗나간다. 매입 스키마에 품목 칸이 서는 날
+ *   이 둘을 그 칸 읽기로 바꾼다 — 서버 쪽 `app/api/plan_state.py` 가 같은 대기 중이다.
+ */
+const PLAN_KEY_SEP = " · ";
+
+function planItem(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? "" : key.slice(0, at);
+}
+
+function planLabel(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? key : key.slice(at + PLAN_KEY_SEP.length);
 }
 
 const SHORTCUT: Record<string, string> = {
@@ -257,6 +280,60 @@ export function MasterConsole({ session }: { session: Session }) {
     }
   }
 
+  /**
+   * 그날 매입 화면에 **서 있는 안** 중 말한 라벨의 안을 찾는다.
+   *
+   * 🔴 **라벨은 문자열 그대로 견준다.** 부분 일치나 비슷한 말 맞히기를 넣으면
+   *    「보수」를 말했는데 「보수적」 안이 승인되는 날이 온다 — 승인은 되돌리기가
+   *    기록으로 남는 일이라, 못 찾는 쪽이 낫다.
+   *
+   * 🔴 **못 찾거나 여럿이면 `null` 이고, 부르는 쪽은 실행하지 않는다.** 하나로 좁혀지지
+   *    않은 채 보내면 서버가 고르게 되는데, 그건 사람이 확인한 것과 다를 수 있다.
+   *
+   * ★ 기준일은 화면 머리에 적힌 그 날이고(`asOf`), 실행 축은 `GET /api/purchase` 가
+   *   다른 네 탭과 같은 자리에서 정한다 (`app/api/shown_run.py`). **화면이 축을
+   *   새로 지어내지 않는다.**
+   */
+  async function standingRun(intent: Intent) {
+    const label = (intent.scenario_label ?? "").trim();
+    if (!label) {
+      push({
+        kind: "error",
+        text: "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+      });
+      return null;
+    }
+
+    const plans = (await purchase(asOf)).plans;
+    const hits = plans.filter(
+      (plan) =>
+        plan.request_id !== null &&
+        plan.state !== "반려" &&
+        //  `key` 는 `"배추 · 기본"` 이라 라벨과 다르다. 안 이름은 라벨로만 견준다.
+        planLabel(plan.key) === label &&
+        (!intent.item || planItem(plan.key) === intent.item),
+    );
+
+    if (hits.length === 0) {
+      push({
+        kind: "error",
+        text: `그날 매입안에서 '${label}' 을 찾지 못했습니다. 매입 화면에서 골라 주세요.`,
+      });
+      return null;
+    }
+    if (hits.length > 1) {
+      push({
+        kind: "error",
+        text: `'${label}' 안이 여럿입니다 — 어느 품목인지 말씀해 주세요.`,
+      });
+      return null;
+    }
+    return {
+      requestId: hits[0].request_id as string,
+      historyRunId: hits[0].history_run_id,
+    };
+  }
+
   /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
   async function confirm(
     turn: Extract<Turn, { kind: "confirm" }>,
@@ -274,36 +351,46 @@ export function MasterConsole({ session }: { session: Session }) {
      */
     const needsTarget = rerun || select;
 
-    // 🔴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
-    //
-    //    ⚠️ 말로 한 승인은 **이 대화에서 만든 안**만 짚을 수 있다. 「그날 서 있는 안을
-    //       목록에서 라벨로 찾아 싣는다」 가 지금은 안 된다 — `GET /api/purchase` 의
-    //       `plans[]`(`api/purchase/schema.Plan`) 에 `request_id` 칸이 없어서
-    //       라벨만으로는 어느 실행의 안인지 짚을 수 없다. 그 칸이 생기면 여기서
-    //       찾아 싣도록 넓힌다. **그때까지 서버에 추측시키지 않는다.**
-    if (needsTarget && !last) {
-      push({
-        kind: "error",
-        text: rerun
-          ? "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다."
-          : "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
-      });
-      return;
-    }
-
-    // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
-    setTurns((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
-    );
-    push({ kind: "me", text: "네" });
     setBusy(true);
     try {
+      //   이 대화에서 방금 만든 안이 있으면 **그것이 먼저다.**
+      let target = last;
+
+      // 🔴 없으면 **그날 매입 화면에 서 있는 안**에서 라벨로 찾는다 (2026-09-16).
+      //
+      //    9/11 시연이 이 모양이다 — 걷기가 그날 안을 세워 두고, 사람이 콘솔을 새로
+      //    열어 말로 고른다. 전에는 `last` 가 없어 여기서 멈췄다.
+      //
+      //    ★ 찾는 것은 **화면**이다. 서버(`/ask/execute`)는 대상이 없으면 422 를 내고
+      //      추측하지 않는다 — 그 규칙은 그대로 산다.
+      if (select && !target) {
+        target = await standingRun(turn.intent);
+        //   못 찾았으면 위에서 사람 말로 적었다. **실행하지 않는다.**
+        if (!target) return;
+      }
+
+      // 🔴 그래도 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 다.
+      if (needsTarget && !target) {
+        push({
+          kind: "error",
+          text: rerun
+            ? "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다."
+            : "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+        });
+        return;
+      }
+
+      // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
+      setTurns((prev) =>
+        prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
+      );
+      push({ kind: "me", text: "네" });
       const res = await execute({
         intent: turn.intent,
         requestId: turn.requestId,
         // 재요청·안 선택에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
-        targetRequestId: needsTarget ? (last?.requestId ?? undefined) : undefined,
-        targetHistoryRunId: needsTarget ? (last?.historyRunId ?? undefined) : undefined,
+        targetRequestId: needsTarget ? (target?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: needsTarget ? (target?.historyRunId ?? undefined) : undefined,
         decidedBy: needsTarget ? session.name : undefined,
         utterance: turn.utterance,
       });

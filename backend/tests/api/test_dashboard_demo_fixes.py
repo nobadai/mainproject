@@ -83,7 +83,9 @@ def stub(monkeypatch):
     )
     monkeypatch.setattr(
         dashboard_query.purchase_q, "build",
-        lambda as_of, sim_run_id=None: SimpleNamespace(plans=plans, source=_source("매입")),
+        #  ⚠️ `**_` 다. 대시보드가 `window_days=0` 도 넘긴다 (2026-09-16) — 안 받으면
+        #     스텁이 `TypeError` 를 내고, 그건 이 검사가 재려는 것이 아니다.
+        lambda as_of, sim_run_id=None, **_: SimpleNamespace(plans=plans, source=_source("매입")),
     )
     monkeypatch.setattr(dashboard_query.finance_q, "build", lambda as_of, s: state["finance"])
     monkeypatch.setattr(

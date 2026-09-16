@@ -92,7 +92,8 @@ def screen(monkeypatch):
     )
     monkeypatch.setattr(
         dashboard_query.purchase_q, "build",
-        lambda as_of, sim_run_id=None: SimpleNamespace(
+        #  ⚠️ `**_` 다. 대시보드가 `window_days=0` 도 넘긴다 (2026-09-16).
+        lambda as_of, sim_run_id=None, **_: SimpleNamespace(
             plans=state["plans"], source=_source("매입")),
     )
     monkeypatch.setattr(
