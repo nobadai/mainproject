@@ -13,15 +13,53 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from app.master.answer import facts_from_status
-from app.master.llm.runtime import SYSTEM_PROMPT, _clarification
+from app.master.llm.runtime import (
+    SYSTEM_PROMPT,
+    IntentService,
+    LLMSettings,
+    _clarification,
+    _known_gap,
+)
 from app.master.llm.schemas import Intent
 from app.master.plan import ExecutionPlan
 from app.master.status_flow import StatusOutcome
 
 _UNKNOWN = Intent(action="UNKNOWN", confidence="HIGH")
+
+_SETTINGS = LLMSettings(
+    enabled=True,
+    provider="fake",
+    model="fake-model",
+    base_url="",
+    timeout_seconds=1.0,
+    max_retries=1,
+    max_output_tokens=512,
+    effort=None,
+)
+
+
+class _FakeProvider:
+    """네트워크를 타지 않는다 — 지어 둔 분류 결과를 그대로 돌려준다."""
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+
+    def generate(self, system: str, user: str, schema: dict) -> str:
+        return self.response
+
+
+def payload(**kw) -> str:
+    base = {"action": "UNKNOWN", "agents": [], "confidence": "LOW"}
+    base.update(kw)
+    return json.dumps(base, ensure_ascii=False)
+
+
+def service(response: str) -> IntentService:
+    return IntentService(_SETTINGS, _FakeProvider(response))
 
 
 # ── 되묻는 말이 없는 이유를 이름으로 말한다 ──────────────────────────────
@@ -127,6 +165,71 @@ def test_되묻는_말은_UNKNOWN_에만_붙는다():
     )
 
     assert "매입안을 새로 만들까요" in 말
+
+
+# ── 제외 품목은 대상이 아니라고 말한다 ──────────────────────────────────
+#
+# 물류가 정했다 (「재고·물류 STATUS_QUERY 기능 정의서」 §3.2 · §3.3 · §16 · §18 · §19 ·
+# 물류 확정 2026-09-16). 정상 품목은 배추·무·양파 셋이고 피마늘·건고추는 대상이 아니다.
+#
+# ★ **분류 결과를 지어 넣는다.** 제외 품목을 UNKNOWN 으로 보내는 것은 지시문이 하는 일이고
+#   지시문은 LLM 이 읽는다 — 단위 검사로 못 잠근다. 여기서 재는 것은 *"UNKNOWN 으로 왔을 때
+#   무슨 말이 나가는가"* 와 *"섞인 질문이 부서까지 가는가"* 다.
+
+
+def test_피마늘_질문은_대상이_아니라고_말한다():
+    말 = _clarification(_UNKNOWN, "피마늘 재고 얼마나 남았어?")
+
+    assert "대상 품목이 아닙니다" in 말
+    assert "알아듣지 못했습니다" not in 말, "못 알아들은 것이 아니라 대상이 아닌 것이다"
+
+
+def test_건고추_질문도_대상이_아니라고_말한다():
+    말 = _clarification(_UNKNOWN, "건고추 재고 알려줘")
+
+    assert "대상 품목이 아닙니다" in 말
+    assert "알아듣지 못했습니다" not in 말
+
+
+def test_제외_품목이_없으면_빈자리로_이름_붙이지_않는다():
+    """목록에 없는 말은 종전 안내로 간다 — 목록을 늘려 가며 맞히는 것이 아니다."""
+    assert _known_gap("배추 재고 얼마나 남았어?") is None
+    assert _known_gap("오늘 무 얼마나 사야 해?") is None
+
+
+def test_섞인_질문은_부서까지_간다():
+    """🔴 **전체 실패가 아니다.**
+
+    원문이 물류에 실려 가므로(`#767`) 물류가 정상 품목을 답하고 제외 품목 안내를 붙인다.
+    마스터가 여기서 거르면 **배추 재고까지 막힌다.**
+    """
+    result = service(
+        payload(action="STATUS_QUERY", agents=["inventory"], item="배추", confidence="HIGH")
+    ).classify("배추랑 피마늘 재고 알려줘")
+
+    assert result.intent.action == "STATUS_QUERY"
+    assert result.intent.agents == ["inventory"]
+    assert result.needs_confirmation is False
+    assert result.clarification is None, "제외 품목 안내가 정상 조회를 덮으면 안 된다"
+
+
+def test_정상_품목_질문은_종전과_같다():
+    """회귀 — 제외 품목 규칙이 배추 조회에 번지면 안 된다."""
+    result = service(
+        payload(action="STATUS_QUERY", agents=["inventory"], item="배추", confidence="HIGH")
+    ).classify("배추 재고 얼마나 남았어?")
+
+    assert result.intent.action == "STATUS_QUERY"
+    assert result.intent.agents == ["inventory"]
+    assert result.needs_confirmation is False
+    assert result.clarification is None
+
+
+def test_분류_지시문에도_제외_품목_규칙이_있다():
+    """지시문과 되묻는 말이 **같은 사실**을 말하는지 대조한다."""
+    assert "피마늘 · 건고추는 이 프로젝트의 대상 품목이 아니다" in SYSTEM_PROMPT
+    assert '"피마늘 재고 얼마나 남았어?"  → UNKNOWN' in SYSTEM_PROMPT
+    assert '"배추랑 피마늘 재고 알려줘"   → STATUS_QUERY' in SYSTEM_PROMPT
 
 
 # ── 생존 확인은 능력 목록으로 나가지 않는다 ──────────────────────────────
