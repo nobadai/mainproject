@@ -201,8 +201,9 @@ def test_물류와_판매를_실제로_부른다(client: TestClient, 부른_부�
     본문 = _본문(client)
 
     걸음 = [(step["agent"], step["mode"]) for step in 본문["plan"]]
-    assert 걸음[:2] == [
+    assert 걸음[:3] == [
         ("inventory", "PRE_SALES"),
+        ("finance", "PRE_SALES_FACTS"),
         ("sales", "GENERATE_SALES_PROPOSAL"),
     ], f"판매 경로가 설계 순서대로 안 돌았다: {걸음}"
 
@@ -348,7 +349,9 @@ def test_수량을_실으면_재무_최종검증까지_간다(client: TestClient
 
     # 🔴 **순서까지 잠근다.** 판매는 실물이라 이 목록에 안 남는다 (대역만 기록한다) —
     #    판매 자리는 위 `test_물류와_판매를_실제로_부른다` 가 `plan` 으로 본다.
-    기대 = [("inventory", "PRE_SALES")] + [("finance", "SALES_VALIDATION")] * len(후보)
+    기대 = [("inventory", "PRE_SALES"), ("finance", "PRE_SALES_FACTS")] + [
+        ("finance", "SALES_VALIDATION")
+    ] * len(후보)
     assert 부른_부서 == 기대, (
         f"재무까지 가는 순서가 설계와 다르다: {부른_부서} (후보 {len(후보)}안)"
     )
