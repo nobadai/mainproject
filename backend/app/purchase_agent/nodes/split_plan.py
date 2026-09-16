@@ -48,13 +48,28 @@ from app.purchase_agent.state import PurchaseAgentState
 
 
 def largest_total_kg(base_plan: dict) -> int:
-    """가장 큰 안의 총량. 수량 트리거의 비교 대상이다.
+    """가장 큰 안의 **클립 전** 수량. 수량 트리거의 비교 대상이다.
 
     ①도 같은 트리거를 보지만 그때는 수량이 없어 **추정 총량**(일평균 × 최대 D)을 썼다.
-    ④는 ③ 뒤라 실제 안별 총량을 본다 — 추정으로 열린 축이 실제 수량에서 닫히는 것도
-    정상이다 (§4-④ E3-3 확정 2).
+    ④는 ③ 뒤라 실제 안별 수요를 본다.
+
+    🔴 **``total_qty_kg`` 가 아니라 ``raw_qty_kg`` 다** (2026-09-16 · E3-9 앞단).
+      전에는 클립 **뒤** 총량을 봤는데, 창고 상한이 곧 ``cap_by_date`` 이므로 클립이
+      걸린 날은 **총량 == 그 상한**이 되고 ``총량 > 상한`` 이 **구조적으로 거짓**이었다.
+      실측에서 그 등호가 REH-0914 163일 중 161일에 성립했다 — 분할이 필요한 날일수록
+      진입 판정이 막히는 모양이다.
+
+    ★ **묻는 질문이 「한 번에 다 들어가는가」다.** 그 답은 **깎기 전 수요**가 알고 있다.
+      깎은 뒤 수를 물으면 «깎았으니 들어간다» 라는 동어반복이 된다.
+
+    ⚠️ ``raw_qty_kg`` 는 **차감 뒤 · 클립 전**이다 (③ ``_draft_one``). 보유 차감은 필요가
+      줄어든 것이지 천장이 아니라서 빼는 것이 맞고, 창고·현금·신선도·조정안 클립만
+      되돌린 값이다.
+
+    🔴 ``volume_gate_holds`` 의 불변식은 그대로 선다 — ``raw_qty ≤ demand_qty =
+      round(일평균 × D) ≤ ceil(추정)`` 이라 ① 이 여전히 ④ 보다 먼저 열린다.
     """
-    return max((draft["total_qty_kg"] for draft in base_plan["drafts"]), default=0)
+    return max((draft["raw_qty_kg"] for draft in base_plan["drafts"]), default=0)
 
 
 def choose_rounds(total_kg: int, cap_kg: float | None, constraints: dict) -> int:

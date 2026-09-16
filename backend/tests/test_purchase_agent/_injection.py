@@ -244,6 +244,33 @@ def no_holdings(monkeypatch: pytest.MonkeyPatch) -> None:
     drop_holdings(monkeypatch)
 
 
+def inject_arrival_window(
+    state: dict, first_kg: float, later_kg: float, *, lead_days: int = 2, days: int = 30
+) -> str:
+    """④ — 첫 도착일만 빡빡하고 **그 뒤로 여유가 회복되는 창**을 준다 (E3-9 앞단).
+
+    🔴 ``inject_arrival_cap`` 은 **하루치만** 넣는다. 그러면 ③ 이 깎은 총량이 늘 첫
+      도착일 여유와 같아져 **분할로 더 살 수 있는 날이 만들어지지 않는다** — 나눠도
+      총량이 같으면 ⑥ 이 «실익 없음» 으로 되돌리는 것이 맞고, 그래서 그 헬퍼로는
+      분할이 실제로 서는 경로를 못 잰다.
+
+    ⚠️ 여기 입력은 **합성이다.** 저장 기록에는 날짜별로 갈리는 여유가 한 건도 없다.
+    """
+    state["inbound_lead_days"] = lead_days
+    start = date.fromisoformat(state["date"])
+    arrival = (start + timedelta(days=lead_days)).isoformat()
+    state["inventory"] = {
+        **state["inventory"],
+        "cap_by_date": {
+            (start + timedelta(days=offset)).isoformat(): (
+                first_kg if offset <= lead_days else later_kg
+            )
+            for offset in range(days)
+        },
+    }
+    return arrival
+
+
 def inject_arrival_cap(state: dict, cap_kg: float | None, *, lead_days: int = 2) -> str:
     """④ — **도착일 창고 여유를 검사가 준다** (`#308`). 도착일 ISO 문자열을 돌려준다.
 

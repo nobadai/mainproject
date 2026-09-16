@@ -40,6 +40,8 @@ from typing import Any
 
 from app.purchase_agent.allocation import (
     arrival_dates,
+    assign_axes,
+    cumulative_overflow,
     round_offsets,
     split_infeasible_reason,
     split_offsets,
@@ -56,6 +58,7 @@ from app.purchase_agent.nodes.classify_situation import (
 )
 from app.purchase_agent.nodes.draft_plan import (
     ADJUSTMENT_CAP_NAME,
+    WAREHOUSE_CAP_NAME,
     purchase_budget_krw,
     split_adjustments,
 )
@@ -63,28 +66,6 @@ from app.purchase_agent.nodes.split_plan import effective_allowed_axes, split_de
 from app.purchase_agent.quotes import observed_at, observed_spec
 from app.purchase_agent.schemas import DOCUMENT_SOURCE, TIMING_AXIS, document_ref
 from app.purchase_agent.state import PurchaseAgentState
-
-
-def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str) -> dict[str, str]:
-    """안별 ``strategy_type``을 허용 축 안에서 고른다 (정의서 §3.5.1-2).
-
-    축이 하나뿐인 날은 전 안이 같은 축을 쓴다 — 그게 정상이고, ⑦의 중복 검사도 그날은
-    면제한다. 축이 여럿이면 겹치지 않게 배분해 "3안인데 사실 한 안"을 피한다.
-    """
-    if not labels:
-        # 안이 하나도 없는 날 — ③이 시세를 못 받아 초안을 만들지 않았다. 배정할 축이 없다.
-        # 이 줄이 없으면 아래 ``labels[-1]``이 IndexError로 죽고, 그러면 "왜 안이 없는가"라는
-        # 사유가 오케스트레이터에 도달하지 못한다.
-        return {}
-    if len(allowed_axes) == 1:
-        return dict.fromkeys(labels, allowed_axes[0])
-    axes = dict.fromkeys(labels, "quantity")
-    if aggressive_axis in allowed_axes and "공격" in labels:
-        axes["공격"] = aggressive_axis
-    else:
-        axes[labels[-1]] = next(axis for axis in allowed_axes if axis != "quantity")
-    return axes
-
 
 
 def shifted_rounds_note(
@@ -140,6 +121,138 @@ CAP_BLOCK_REASONS = {
         "계산할 수 없다. 회차를 균등하게 나눴다"
     ),
 }
+
+
+def _split_stands(
+    total_qty_kg: int,
+    chosen: list[dict] | None,
+    coverage_days: int,
+    *,
+    as_of: str,
+    lead_days: int | None,
+    cap_by_date: Mapping[str, float] | None,
+    calendar: Mapping[str, Any] | None,
+) -> bool:
+    """이 분할이 **실제로 서는가** — 회차·비율·날짜·누적까지 밟아 본다 (E3-9 앞단).
+
+    🔴 **「④ 가 진입했다」는 안전을 보장하지 않는다.** 진입은 *"나눠 볼 만하다"* 이고,
+      성립은 회차 수와 배분 비율로 만든 **실제 도착일**이 날짜별 누적 여유를 지킬 때다.
+      그 사이에 ⑥ 의 재배분(``cap_constrained_quantities``)이 한 번 끼어든다.
+
+    막는 것 넷 (하나라도 걸리면 분할이 안 선다)::
+
+        ㉠ 회차가 없다/하나다                    chosen 이 비었거나 길이 1
+        ㉡ 회차·날짜가 안 선다                   split_infeasible_reason
+        ㉢ 실제 날짜를 못 놓는다                 arrival_dates 가 None · 여유 칸이 없다
+        ㉣ 재배분 뒤에도 누적이 넘는다            cumulative_overflow
+
+    🔴 ㉣ 는 ⑦ ``arrival_capacity`` 와 **같은 함수**를 부른다 — 두 곳이 각자 더하면
+      ⑥ 이 «선다» 고 본 분할을 ⑦ 이 컷하고, 그날 안은 왜 죽었는지 설명할 수 없다.
+
+    ⚠️ **여유를 못 보면 «선다» 로 읽지 않는다** (규칙 3). 넓힌 근거가 ``cap_by_date`` 인데
+      그것을 못 보면 넓힌 채로 둘 근거도 사라진다 — 일괄로 되돌리는 쪽이 보수적이다.
+    """
+    if not chosen or len(chosen) < 2:
+        return False
+    if split_infeasible_reason(total_qty_kg, chosen, coverage_days):
+        return False
+    arrivals = arrival_dates(as_of, coverage_days, len(chosen), lead_days, calendar)
+    if arrivals is None:
+        return False
+    if cap_by_date is None or any(cap_by_date.get(day) is None for day in arrivals):
+        # 🔴 **못 보면 판정하지 않는다 — ⑦ 과 같은 태도다** (규칙 3).
+        #   ⑦ ``arrival_capacity`` 는 그때 컷이 아니라 **skip** 하고 사유만 고지한다.
+        #   여기서 「안 선다」로 읽으면 ⑦ 이 컷하지도 않을 안을 우리가 먼저 되돌리게 되고,
+        #   **두 자리의 기준이 또 갈린다.** 못 본 사실은 ⑦ 의 고지가 이미 나른다.
+        return True
+    quantities, _ = cap_constrained_quantities(
+        split_quantities(total_qty_kg, chosen), arrivals, cap_by_date
+    )
+    return cumulative_overflow(quantities, arrivals, cap_by_date) is None
+
+
+def _reclipped_to_bulk(draft: dict, single_round_cap_kg: int) -> dict:
+    """수량을 **일괄 상한으로 되돌리고** ``clipped_by`` 를 다시 계산한 새 draft.
+
+    🔴 **``clipped_by`` 를 같이 고치는 이유.** ⑥ 의 축소 문장 · ``_no_quantity_reason`` ·
+      ⑧ ``review_rationale`` 이 그 칸을 읽는다. 수량만 되돌리면 **문장이 틀린 수를 적는다.**
+
+    🔴 ``raw_qty_kg`` · ``demand_qty_kg`` · ``deducted_holdings_kg`` 는 **안 건드린다** —
+      그것은 사실이고, 되돌린 것은 «얼마나 살 수 있나» 뿐이다.
+    """
+    raw = draft["raw_qty_kg"]
+    남은 = [clip for clip in draft["clipped_by"] if clip["constraint"] != WAREHOUSE_CAP_NAME]
+    창고 = (
+        [{"constraint": WAREHOUSE_CAP_NAME, "cap_kg": single_round_cap_kg, "raw_qty_kg": raw}]
+        if single_round_cap_kg < raw
+        else []
+    )
+    return {
+        **draft,
+        "total_qty_kg": min(draft["total_qty_kg"], single_round_cap_kg),
+        # 창고를 맨 앞에 둔다 — ③ ``caps`` 의 선언 순서가 그렇고, 문장이 그 순서를 읽는다.
+        "clipped_by": [*창고, *남은],
+    }
+
+
+def bulk_fallback(
+    draft: dict,
+    axis: str,
+    split_choice: list[dict] | None,
+    *,
+    as_of: str,
+    lead_days: int | None,
+    cap_by_date: Mapping[str, float] | None,
+    calendar: Mapping[str, Any] | None,
+) -> tuple[dict, str | None]:
+    """분할이 안 서면 **일괄 기준으로 되돌린** draft 와 사유를 돌려준다 (E3-9 앞단).
+
+    ★ **되돌릴 것이 없는 날이 대부분이다.** ③ 이 넓히지 않았으면(``single_round_cap_kg``
+      가 ``None`` 이거나 총량이 이미 그 이하면) 원본을 그대로 돌려준다 — 이 함수가
+      산출물을 바꾸는 것은 **넓혔는데 분할이 안 서는 날**뿐이다.
+
+    🔴 ``single_round_cap_kg`` 가 ``None`` 인 것은 「날짜 축을 못 봤다」다 (규칙 3).
+      0 이나 무제한으로 바꾸지 않는다 — 못 본 날은 ③ 이 예전 기준(오늘 여유)으로 이미
+      깎았고, 여기서 다시 손대면 **못 본 것을 본 것처럼** 다루게 된다.
+    """
+    single = draft.get("single_round_cap_kg")
+    total = draft["total_qty_kg"]
+    if single is None:
+        return draft, None
+    if axis != TIMING_AXIS:
+        # 축을 못 받은 안은 1회차로 나간다 — 넓힌 수량이 남아 있으면 ⑦ 이 컷한다.
+        if total <= single:
+            return draft, None
+        return _reclipped_to_bulk(draft, single), _되돌림_사유(total, single)
+    선다 = _split_stands(
+        total,
+        split_choice,
+        draft["coverage_days"],
+        as_of=as_of,
+        lead_days=lead_days,
+        cap_by_date=cap_by_date,
+        calendar=calendar,
+    )
+    if not 선다:
+        return _reclipped_to_bulk(draft, single), _되돌림_사유(total, single)
+    # 🔴 **분할이 서더라도 «더 살 수 있을 때» 만 나눈다** (2026-09-16). 한 번에 들어가는
+    #   양과 같은데 회차만 늘리면 실익 없이 ``timing`` 라벨이 붙는다 —
+    #   §3.5.1-3 이 막는 "3안인데 사실 한 안"의 다른 모양이다.
+    #   ⚠️ **궤적으로 진입한 날은 예외다** — 가격이 오르는 날 나눠 사는 것은 수량이
+    #     안 늘어도 뜻이 있다 (그게 timing 축의 본래 이유다).
+    if total <= single and not split_decision(split_choice).get("by_trend"):
+        return draft, (
+            f"분할 축이 열렸지만 한 번에 들어가는 {single:,}kg 과 총량이 같아 나누지 않는다 — "
+            "회차를 늘려도 더 살 수 없다"
+        )
+    return draft, None
+
+
+def _되돌림_사유(total_qty_kg: int, single_round_cap_kg: int) -> str:
+    return (
+        f"분할을 전제로 잡았던 {total_qty_kg:,}kg 을 한 번에 들어가는 "
+        f"{single_round_cap_kg:,}kg 으로 되돌렸다 — 회차를 나눠도 날짜별 창고 여유를 지키지 못한다"
+    )
 
 
 def cap_constrained_quantities(
@@ -1774,6 +1887,24 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
     scenarios = []
     dropped = []
     for draft in drafts:
+        # 🔴 **분할이 실제로 서는지 만들어 보고 정한다** (2026-09-16 · E3-9 앞단).
+        #   ③ 이 분할 전제로 넓힌 수량은 «후보» 지 «보증» 이 아니다 — 회차 수 · 배분 비율 ·
+        #   실제 도착일을 적용하고 누적을 통과해야 분할이 성립한다. 안 서면 **일괄 기준으로
+        #   되돌린다** — 안 되돌리면 넓힌 수량이 1회차로 나가 ⑦ 이 통째로 컷하고,
+        #   **원래 살아 있던 작은 일괄안까지 사라진다.**
+        draft, bulk_note = bulk_fallback(
+            draft,
+            axes[draft["label"]],
+            split_choice,
+            as_of=state["date"],
+            lead_days=lead_days,
+            cap_by_date=cap_by_date,
+            calendar=calendar,
+        )
+        if bulk_note:
+            # 되돌린 안은 timing 을 **잃는다** — 회차가 하나면 그것은 일괄안이고,
+            # 라벨만 timing 으로 두면 §3.5.1-3 이 막는 "3안인데 사실 한 안"이 된다.
+            axes[draft["label"]] = "quantity"
         total = draft["total_qty_kg"]
         if total <= 0:
             # 수량이 0이라 안이 될 수 없다 (스키마가 total_qty_kg > 0을 요구한다). 조용히
@@ -1841,6 +1972,10 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
                 ],
                 "risks": [
                     *_risks(draft, base["deferred_checks"], lots, state["date"]),
+                    # 🔴 **되돌린 사실은 숨기지 않는다** (E3-9 앞단). ③ 이 분할 전제로 넓힌
+                    #   수량이 실제로는 안 서서 일괄 기준으로 내려왔다는 것은, 읽는 사람이
+                    #   *"왜 이만큼밖에 안 사나"* 를 묻는 자리다.
+                    *([bulk_note] if bulk_note else []),
                     *_forecast_risks(state["forecast"], draft["coverage_days"]),
                     *_adjustment_risks(
                         state.get("adjustments"),
