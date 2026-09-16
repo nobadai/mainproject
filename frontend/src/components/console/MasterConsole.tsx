@@ -827,12 +827,32 @@ function TurnView({
   );
 }
 
+//: 하루가 도는 차례. **누르는 순서 그대로** 적는다 (2026-09-16).
+//
+//  ★ 시연에서 사람이 제일 자주 묻는 것이 «이제 뭘 눌러야 하나» 다. 화면이 그 답을
+//    들고 있으면 진행하는 사람이 순서를 외우지 않아도 된다.
+//  🔴 **여기에 없는 단계를 지어내지 않는다.** 네 자리 전부 사람이 실제로 누르는 것이다 —
+//     승인과 실매입 기록은 매입 화면, 판매 승인은 판매 화면에서 한다.
+const DAY_STEPS = [
+  "하루 열기",
+  "매입안 승인",
+  "실제 매입가 기록",
+  "판매안 승인",
+  "하루 닫기",
+];
+
 function Empty({ onPick }: { onPick: (text: string) => void }) {
+  //: 눌러서 바로 답이 나오는 말만 둔다. **순서가 뜻이다** — 잔액 같은 «점» 에서
+  //  «흐름» 을 거쳐 «보고서» 로 간다 (재무 요청 2026-09-16).
+  //
+  //  🔴 되묻는 말은 넣지 않는다. 「여신 한도 알려줘」는 거래처를 되물어 한 번
+  //     클릭으로 안 끝나고, 「오늘 확정된 판매」는 기준일이 어긋나면 빈손이다.
   const samples = [
     "현재 자금 상황 알려줘",
     "받을 돈 보여줘",
     "오늘 판매안 보여줘",
     "거래처 목록 보여줘",
+    "이번 달 현금 흐름 보여줘",
     "이번 주 재무 보고서 만들어줘",
   ];
   return (
@@ -842,6 +862,30 @@ function Empty({ onPick }: { onPick: (text: string) => void }) {
         마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
         봤는지 함께 답합니다.
       </p>
+
+      <div className="mt-4 rounded-lg border border-line bg-sunk p-3">
+        <p className="m-0 text-xs font-semibold">하루는 이 순서로 돕니다</p>
+        <ol className="m-0 mt-2 flex flex-wrap items-center gap-x-1 gap-y-1 p-0 text-[12px] text-muted">
+          {DAY_STEPS.map((step, i) => (
+            <li key={step} className="flex items-center gap-1 list-none">
+              <span className="rounded bg-surface px-1.5 py-0.5 tabular-nums">
+                {i + 1}
+              </span>
+              <span>{step}</span>
+              {i < DAY_STEPS.length - 1 && (
+                <span aria-hidden="true" className="px-1">
+                  ›
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+        <p className="m-0 mt-2 text-[12px] text-muted">
+          질문과 질문 사이에 몇 초를 두십시오. 말을 알아듣는 기능이 잠시 멈추면
+          말을 바꾸지 마시고 같은 말을 다시 눌러 주세요.
+        </p>
+      </div>
+
       <div className="mt-3 flex flex-wrap gap-2">
         {samples.map((s) => (
           <button
