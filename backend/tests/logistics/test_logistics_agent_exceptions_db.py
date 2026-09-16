@@ -34,6 +34,7 @@ from typing import Any, NamedTuple
 import psycopg
 import pytest
 
+from app.api.logistics.query import _SEVERITY, _severity_at
 from app.logistics import historical_repository, turnover
 from app.logistics.agent import exceptions as exception_repo
 from app.logistics.agent.detect import (
@@ -42,7 +43,13 @@ from app.logistics.agent.detect import (
     REDETECT,
     detect_logistics_exceptions,
 )
-from app.logistics.agent.exceptions import EmptyEvidence, open_exception
+from app.logistics.agent.exceptions import (
+    EmptyEvidence,
+    live_exceptions,
+    open_exception,
+    resolve_exception,
+    touch_exception,
+)
 from app.logistics.agent.observe import observe
 from app.logistics.agent.schemas import (
     CAPACITY_PRESSURE,
@@ -755,3 +762,178 @@ def test_캐시와_원장이_갈리면_사실만_적고_날짜를_비운다(conn
     assert "OBSERVATION_INCONSISTENT:LOT-BAECHU" in out.uncertainties
     사실 = _근거(next(one for one in _행들(conn) if one["code"] == FRESHNESS_PRESSURE))
     assert 사실["remaining_qty_kg"]["observed_as_of"] is None
+
+
+# ===========================================================================
+# G. 감지 severity 이력 (LOG-AGENT-005) — detection_history_json
+#    🔴 계약: 화면 Historical 우선도는 «최고값» 이 아니라 «그날 마지막 감지값» 이고,
+#       배열 순서가 아니라 as_of <= 기준일 중 max(as_of) 로 고른다.
+# ===========================================================================
+
+
+def _ev_one() -> ExceptionEvidence:
+    return ExceptionEvidence(
+        fact="remaining_freshness_days",
+        value=Decimal(2),
+        unit="일",
+        source="inventory_lots",
+        source_id="LOT-BAECHU",
+    )
+
+
+def _open_ex(conn: psycopg.Connection, *, exception_id: str, as_of: date, severity: str) -> None:
+    open_exception(
+        conn,
+        row=ExceptionRow(
+            exception_id=exception_id,
+            sim_run_id=SIM,
+            code=FRESHNESS_PRESSURE,
+            subject_type="LOT",
+            subject_id="LOT-BAECHU",
+            severity=severity,
+            status="OPEN",
+            opened_as_of=as_of,
+            last_detected_as_of=as_of,
+            observed_as_of=None,
+            evidence=(_ev_one(),),
+            detector_version="v1",
+        ),
+    )
+
+
+def _touch_ex(conn: psycopg.Connection, *, exception_id: str, as_of: date, severity: str) -> None:
+    touch_exception(
+        conn,
+        exception_id=exception_id,
+        severity=severity,
+        evidence=(_ev_one(),),
+        last_detected_as_of=as_of,
+        observed_as_of=None,
+    )
+
+
+def _one_live(conn: psycopg.Connection) -> ExceptionRow:
+    rows = live_exceptions(conn, sim_run_id=SIM)
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_감지_이력이_날짜별_severity를_복원한다(conn: psycopg.Connection) -> None:
+    """09-14 MEDIUM · 09-15 HIGH · 09-16 CRITICAL → 각 기준일이 그날 값을 낸다.
+
+    🔴 미래 감지(그날 뒤)는 과거 화면으로 새지 않는다.
+    """
+    ex = "EX-HIST-1"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="MEDIUM")
+    _touch_ex(conn, exception_id=ex, as_of=D2, severity="HIGH")
+    _touch_ex(conn, exception_id=ex, as_of=D3, severity="CRITICAL")
+
+    row = _one_live(conn)
+    assert {(r.as_of, r.severity) for r in row.detection_history} == {
+        (D1, "MEDIUM"),
+        (D2, "HIGH"),
+        (D3, "CRITICAL"),
+    }
+
+    assert _severity_at(row, D1) == (_SEVERITY["MEDIUM"], None)
+    assert _severity_at(row, D2) == (_SEVERITY["HIGH"], None)
+    assert _severity_at(row, D3) == (_SEVERITY["CRITICAL"], None)
+    # 🔴 D1 화면에 D3 의 CRITICAL 이 새지 않는다.
+    assert _severity_at(row, D1)[0] != _SEVERITY["CRITICAL"]
+
+
+def test_같은_날_상승은_마지막_감지값이다(conn: psycopg.Connection) -> None:
+    """AFTER_INBOUND MEDIUM → AFTER_OUTBOUND HIGH → 그날 최종값 HIGH (하루 1원소)."""
+    ex = "EX-HIST-UP"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="MEDIUM")
+    _touch_ex(conn, exception_id=ex, as_of=D1, severity="HIGH")
+
+    row = _one_live(conn)
+    assert [(r.as_of, r.severity) for r in row.detection_history] == [(D1, "HIGH")]
+    assert _severity_at(row, D1) == (_SEVERITY["HIGH"], None)
+
+
+def test_같은_날_하락은_마지막_감지값이다(conn: psycopg.Connection) -> None:
+    """🔴 **최고값이 아니라 마지막 감지값이다.** HIGH → MEDIUM → 그날 최종값 MEDIUM."""
+    ex = "EX-HIST-DOWN"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="HIGH")
+    _touch_ex(conn, exception_id=ex, as_of=D1, severity="MEDIUM")
+
+    row = _one_live(conn)
+    assert [(r.as_of, r.severity) for r in row.detection_history] == [(D1, "MEDIUM")]
+    assert _severity_at(row, D1) == (_SEVERITY["MEDIUM"], None)
+    assert _severity_at(row, D1)[0] != _SEVERITY["HIGH"]
+
+
+def test_이력_배열_순서와_무관하게_기준일_이하_최대날짜를_고른다(
+    conn: psycopg.Connection,
+) -> None:
+    """저장 순서를 일부러 섞어도(D1 · D3 · D2) as_of <= 기준일 중 max(as_of) 로 고른다."""
+    ex = "EX-HIST-SHUF"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="LOW")
+    _touch_ex(conn, exception_id=ex, as_of=D3, severity="CRITICAL")
+    _touch_ex(conn, exception_id=ex, as_of=D2, severity="HIGH")
+
+    # 저장된 배열은 날짜순이 아니다 — [D1, D3, D2].
+    raw = next(one for one in _행들(conn) if one["exception_id"] == ex)
+    stored = [rec["as_of"] for rec in raw["detection_history_json"]]
+    assert stored == [D1.isoformat(), D3.isoformat(), D2.isoformat()]
+
+    row = _one_live(conn)
+    # 🔴 history[-1] (=D2) 가 아니라 날짜 비교로 고른다.
+    assert _severity_at(row, D3) == (_SEVERITY["CRITICAL"], None)
+    assert _severity_at(row, D2) == (_SEVERITY["HIGH"], None)
+    assert _severity_at(row, D1) == (_SEVERITY["LOW"], None)
+
+
+def test_이력_없는_옛_행은_기존_fallback_을_유지한다() -> None:
+    """`detection_history = ()` 인 옛 행은 기존 규칙 그대로 — 순수 파이썬(파괴 없음)."""
+    row = ExceptionRow(
+        exception_id="EX-OLD",
+        sim_run_id=SIM,
+        code=FRESHNESS_PRESSURE,
+        subject_type="LOT",
+        subject_id="LOT-BAECHU",
+        severity="HIGH",
+        status="OPEN",
+        opened_as_of=D1,
+        last_detected_as_of=D2,
+        observed_as_of=None,
+        evidence=(_ev_one(),),
+        detector_version="v1",
+    )
+    assert row.detection_history == ()
+    # last_detected(D2) <= 기준일(D3) → 지금 값이 그날 값이다.
+    assert _severity_at(row, D3) == (_SEVERITY["HIGH"], None)
+    # last_detected(D2) > 기준일(D1) → 증명 불가.
+    assert _severity_at(row, D1) == ("—", "기준일 당시 우선도 확인 불가")
+
+
+def test_현재_severity_는_최신_감지_이력과_같다(conn: psycopg.Connection) -> None:
+    """severity(캐시) == max(as_of) 이력 원소 severity."""
+    ex = "EX-HIST-CACHE"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="MEDIUM")
+    _touch_ex(conn, exception_id=ex, as_of=D2, severity="HIGH")
+    _touch_ex(conn, exception_id=ex, as_of=D3, severity="CRITICAL")
+
+    raw = next(one for one in _행들(conn) if one["exception_id"] == ex)
+    row = _one_live(conn)
+    latest = max(row.detection_history, key=lambda r: r.as_of)
+    assert raw["severity"] == latest.severity == "CRITICAL"
+
+
+def test_resolve_흐름은_이력_추가로_깨지지_않는다(conn: psycopg.Connection) -> None:
+    """OPEN → (재감지) → RESOLVED 가 새 칸과 함께 그대로 돈다 · 이력은 resolve 로 안 바뀐다."""
+    ex = "EX-HIST-RESOLVE"
+    _open_ex(conn, exception_id=ex, as_of=D1, severity="HIGH")
+    _touch_ex(conn, exception_id=ex, as_of=D2, severity="CRITICAL")
+    resolve_exception(conn, exception_id=ex, as_of=D3, resolved_by=REDETECT, note=None)
+
+    raw = next(one for one in _행들(conn) if one["exception_id"] == ex)
+    assert raw["status"] == "RESOLVED"
+    assert raw["resolved_as_of"] == D3
+    # resolve 는 이력을 건드리지 않는다 — 감지 두 번이 그대로 남는다.
+    assert [(rec["as_of"], rec["severity"]) for rec in raw["detection_history_json"]] == [
+        (D1.isoformat(), "HIGH"),
+        (D2.isoformat(), "CRITICAL"),
+    ]
