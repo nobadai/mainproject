@@ -188,8 +188,8 @@ def weighted_ratios(weights: list[float], rounds: int) -> list[float]:
     각자 적은 수를 더하면 부동소수점 합이 1에서 밀려 ⑥의 합계 검사(1e-9)에 걸린다.
 
     🔴 **값을 여기 안 박는다.** 가중치는 선언(``constraints.yaml`` ``split.allocation_weights``)
-    이 소유한다 (규칙 7). 그리고 그 값은 지금 **``PROVISIONAL``** 이다 — 정책 승인 전이라
-    운영 기능은 꺼 둔다.
+    이 소유한다 (규칙 7). 그 값은 **허용 후보로 승인됐다** (2026-09-17 · 충환) — 최적성이나
+    사업 효과를 검증한 것이 아니고, 승인이 곧 켬도 아니다 (기능 플래그 기본 꺼짐).
     """
     if len(weights) != rounds - 1:
         raise ValueError(
@@ -237,7 +237,7 @@ def occupancy_fits(
 #:   ``risks`` 문장도 그 이름으로 쓴다. 선언은 «얼마나» 를 정하고 «무엇이 있나» 는 여기다.
 WEIGHTED_CANDIDATES = ("FRONT_LOADED", "BACK_LOADED")
 
-#: 승인 전 상태. 선언 파일이 지금 이 값이다.
+#: 승인 전 상태. 판 0.1 이 2026-09-14 ~ 09-17 이 값이었다.
 PROVISIONAL = "PROVISIONAL"
 
 #: 🔴 **비균등 후보를 여는 유일한 값.** 정확히 이 문자열일 때만 연다 (2026-09-17).

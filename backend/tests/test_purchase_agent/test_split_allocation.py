@@ -79,13 +79,18 @@ def test_정확히_APPROVED_일_때만_가중_후보가_선다(rounds: int) -> N
 def test_선언_파일의_상태를_실제로_읽는다() -> None:
     """🔴 **규칙 8** — 값 비교가 아니라 **선언을 바꾸면 판정이 따라 바뀌는지** 본다.
 
-    ⚠️ 첫 단언은 지금 선언이 닫혀 있다는 사실이다. **비율을 승인하는 PR 이 이 줄을 같이
-      고친다** — 승인과 이 검사가 같은 판에 들어가야 한다.
+    ⚠️ 첫 단언은 **지금 선언이 승인돼 있다**는 사실이다 (2026-09-17 · 승인자 충환 · 판 0.1 을
+      허용 후보로). 전에는 «닫혀 있다» 였고 승인하는 판이 이 줄을 같이 고쳤다. 승인을 거두는
+      판도 이 줄을 같이 고친다.
     """
     선언 = copy.deepcopy(load_constraints()["split"]["allocation_weights"])
+    assert sorted(al.allocation_candidates(선언, 2)) == [
+        "BACK_LOADED",
+        "BASE_EQUAL",
+        "FRONT_LOADED",
+    ]
+    선언["status"] = al.PROVISIONAL
     assert list(al.allocation_candidates(선언, 2)) == ["BASE_EQUAL"]
-    선언["status"] = al.APPROVED
-    assert len(al.allocation_candidates(선언, 2)) == 3
 
 
 def test_기본안이_늘_후보_안에_있다() -> None:
