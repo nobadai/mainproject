@@ -163,7 +163,7 @@ def _planner_context(signals: Any) -> StrategyPlanningInput:
         user_intent_text=signals.user_intent_text,
         depletion_pressure=signals.depletion_pressure,
         freshness_risk_codes=list(signals.freshness_risk_codes),
-        has_freshness_risk_lots=bool(signals.freshness_risk_lot_ids),
+        has_freshness_risk_lots=bool(signals.item_lot_ids) and bool(signals.freshness_risk_codes),
         sell_priority=signals.sell_priority,
         inventory_risk_severity=signals.inventory_risk_severity,
         inventory_available_kg=num(signals.inventory_available_kg),
