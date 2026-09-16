@@ -142,3 +142,57 @@ export function recordCashAdjustment(input: {
 }): Promise<{ cash_adjustment_id: string; current_cash_krw: Money }> {
   return financePost("/finance/cash-adjustments", input, "자금 조정을 기록하지 못했습니다.");
 }
+
+/**
+ * 일반 운영비 생명주기.
+ *
+ * 🔴 **화면이 상태를 정하지 않는다.** 아래 셋은 백엔드에 «이렇게 해 달라» 고 말할 뿐이고,
+ *    실제 전이 가능 여부와 현금 차감은 재무가 원장 잠금 안에서 판단한다. 버튼을 비활성으로
+ *    두는 것은 **안내**이지 검증이 아니다.
+ */
+
+export interface ExpenseSettleResult {
+  expense_id: string;
+  status: "PAID";
+  paid_date: string;
+  amount_krw: Money;
+  /** 지급 뒤 남은 현금. **재무가 센 값이다** — 화면이 빼지 않는다. */
+  current_cash_krw: Money;
+}
+
+export async function fetchExpenseCategories(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/finance/expense-categories`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error("비용 분류를 불러오지 못했습니다.");
+  return ((await res.json()) as { categories: string[] }).categories;
+}
+
+export function createExpense(input: {
+  sim_run_id: string; expense_date: string; due_date: string; expense_category: string;
+  amount_krw: string; evidence_id: string; related_delivery_id?: string; note?: string;
+}): Promise<{ expense_id: string; status: "ACCRUED" }> {
+  return financePost("/finance/expenses", input, "비용을 등록하지 못했습니다.");
+}
+
+export function settleExpense(
+  expenseId: string,
+  input: { sim_run_id: string; financing_mode: string; paid_date: string },
+): Promise<ExpenseSettleResult> {
+  return financePost(
+    `/finance/expenses/${encodeURIComponent(expenseId)}/settle`,
+    input,
+    "비용을 지급 처리하지 못했습니다.",
+  );
+}
+
+export function cancelExpense(
+  expenseId: string,
+  input: { sim_run_id: string },
+): Promise<{ expense_id: string; status: "CANCELLED" }> {
+  return financePost(
+    `/finance/expenses/${encodeURIComponent(expenseId)}/cancel`,
+    input,
+    "비용을 취소하지 못했습니다.",
+  );
+}

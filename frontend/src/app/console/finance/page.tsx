@@ -47,6 +47,7 @@ import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
 import { CashAdjustmentForm } from "./CashAdjustmentForm";
 import { CreditLimitForm } from "./CreditLimitForm";
+import { ExpenseActions, ExpenseCreateForm, paidDateText } from "./ExpenseOps";
 import { ReceivableCollectionForm } from "./ReceivableCollectionForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
@@ -58,6 +59,7 @@ import {
   partnerText,
   payableStatusText,
   receivableStatusText,
+  expenseStatusText,
   runtimeText,
   toNumber,
   verdictText,
@@ -542,6 +544,16 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
               //  🔴 그래프가 다루는 칸은 표에도 있어야 한다. 빠지면 그래프의 한 줄을
               //     상세에서 되짚을 수 없다.
               { key: "pay", label: "급여·이자", align: "right", render: (row) => moneyWon(row.payroll_interest_cash_out_krw) },
+              //  🔴 기록하지 않은 날을 0원으로 적지 않는다 — 두 사실이 다르다.
+              {
+                key: "ope",
+                label: "운영비",
+                align: "right",
+                render: (row) =>
+                  row.operating_expense_cash_out_krw === null
+                    ? "기록 없음"
+                    : moneyWon(row.operating_expense_cash_out_krw),
+              },
               { key: "in", label: "수금", align: "right", render: (row) => moneyWon(row.collection_cash_in_krw) },
               { key: "net", label: "순현금", align: "right", render: (row) => moneyWon(row.base_net_cash_krw) },
               { key: "base", label: "대출 제외 잔액", align: "right", render: (row) => moneyWon(row.base_cash_balance_krw) },
@@ -778,12 +790,27 @@ function Payables({ simRun, asOf }: { simRun: string; asOf: string }) {
 
 /* ── 비용 ─────────────────────────────────────────────────────────────── */
 
+/**
+ * 비용 탭.
+ *
+ * 🔴 **«아직 안 나간 돈» 과 «이미 나간 돈» 을 한 숫자로 합치지 않는다.** 예전에는
+ *    «누적 비용» 한 칸뿐이라 취소한 비용까지 그 안에 있었다 — 나가지 않기로 한 돈이
+ *    섞인 숫자로는 아무 판단도 못 한다. 합계는 모두 백엔드가 센 값이다.
+ */
 function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
+  const [reloadKey, setReloadKey] = useState(0);
   const state = useConsoleData<ExpensesResponse>(
-    `exp:${simRun}:${asOf}`,
+    `exp:${simRun}:${asOf}:${reloadKey}`,
     () => financeConsole.expenses(simRun, asOf),
     true,
   );
+  //  ★ 지급은 그 기준일 장부의 현금을 줄인다 — 어느 장부인지 사용자가 골라야 한다.
+  const summary = useConsoleData<FinanceSummaryResponse>(
+    `sum-for-exp:${simRun}:${asOf}`,
+    () => financeConsole.summary(simRun, asOf),
+    true,
+  );
+  const reload = () => setReloadKey((n) => n + 1);
   if (state.loading) return <Skeleton what="비용" />;
   if (state.error) return <Failed what="비용" message={state.error} />;
   if (!state.data) return <EmptyRows what="비용" />;
@@ -793,6 +820,9 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
       <Panel title="비용" subtitle="분류는 장부가 저장한 이름 그대로입니다 — 화면이 재분류하지 않습니다">
         <Metrics>
           <Metric label="누적 비용" value={moneyWon(data.summary.total_expenses_krw)} />
+          <Metric label="지급 예정" value={moneyWon(data.summary.accrued_krw)} />
+          <Metric label="지급 완료" value={moneyWon(data.summary.paid_krw)} />
+          <Metric label="취소됨" value={moneyWon(data.summary.cancelled_krw)} />
         </Metrics>
         <div className="mt-4">
           {data.summary.category_totals.length === 0 ? (
@@ -821,19 +851,38 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
           )}
         </div>
       </Panel>
-      <Panel title="비용 내역">
+      <ExpenseActions
+        simRun={simRun}
+        asOf={asOf}
+        rows={data.rows}
+        states={summary.data?.states ?? []}
+        onChanged={reload}
+      />
+      <ExpenseCreateForm simRun={simRun} asOf={asOf} onSaved={reload} />
+      <Panel title="비용 내역" subtitle="지급일을 모르는 기존 데이터는 «미상» 으로 적습니다 — 발생일을 지급일이라고 말하지 않습니다">
         {data.rows.length === 0 ? (
           <EmptyRows what="비용" />
         ) : (
           <Table
             rows={data.rows}
             columns={[
-              { key: "date", label: "일자", mono: true, render: (row) => row.expense_date },
+              //  ★ 공용 표는 글자만 받는다. 색 있는 표시는 지급 대기 목록이 맡는다 —
+              //    공용 컴포넌트 계약을 이 화면 하나 때문에 넓히지 않는다.
+              { key: "state", label: "상태", render: (row) => expenseStatusText(row.status) },
               { key: "cat", label: "분류", render: (row) => row.display_category },
               { key: "amount", label: "금액", align: "right", render: (row) => moneyWon(row.amount_krw) },
+              { key: "date", label: "발생일", mono: true, render: (row) => row.expense_date },
+              { key: "due", label: "지급 예정일", mono: true, render: (row) => row.due_date ?? "—" },
+              { key: "paid", label: "실제 지급일", mono: true, render: (row) => paidDateText(row) },
+              { key: "ev", label: "근거", render: (row) => row.source_ref ?? "—" },
+              { key: "dl", label: "관련 납품", render: (row) => row.related_delivery_id ?? "—" },
             ]}
           />
         )}
+        <p className="mb-0 mt-3 text-[11px] text-ink2">
+          상태 표기: {expenseStatusText("ACCRUED")} · {expenseStatusText("PAID")} · {expenseStatusText("CANCELLED")}.
+          취소한 비용은 현금에 영향을 주지 않으며 앞으로 나갈 돈에서도 빠집니다.
+        </p>
       </Panel>
     </>
   );
