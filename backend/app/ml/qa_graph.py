@@ -176,11 +176,14 @@ class QaState(TypedDict, total=False):
     batch_days: list[date]
     batch_blocks: list[dict[str, Any]]
     batch_trimmed: bool
+    #   ★ 기준일보다 **뒤인 날**을 물었나 (2026-09-16). 읽지 않고 한 줄로 밝힌다.
+    batch_ahead: list[date]
     #   ── 성능 갈래 ────────────────────────────────────────────────
     retrain_rows: list[dict[str, Any]]
     perf_read: str
     perf_days: list[date]
     perf_trimmed: bool
+    perf_ahead: list[date]
     #   ★ 지금 무엇이 도나 (2026-09-16). 이름은 교체해도 그대로라 만든 날·학습 끝이
     #     같이 있어야 가려진다.
     models: list[dict[str, Any]]
@@ -619,23 +622,35 @@ def _asked_on(state: QaState) -> date:
 MAX_REPORT_DAYS = 7
 
 
-def _report_days(state: QaState) -> tuple[list[date], bool]:
-    """배치·성능이 읽을 날. 돌려주는 것은 (날짜 목록, 잘랐나).
+def _report_days(state: QaState) -> tuple[list[date], list[date], bool]:
+    """배치·성능이 읽을 날. 돌려주는 것은 (읽을 날, 기준일 뒤인 날, 잘랐나).
 
-    ★ **지나간 날만 본다** (2026-09-16 · 사용자 결정 ②). 「5일 뒤 배추 경락가랑
-      배치 상태」의 배치는 **오늘**이지 닷새 뒤가 아니다 — 앞날에는 기록이 없다.
-      그래서 앞날만 말했으면 오늘(화면 기준일) 하루로 돌아간다.
+    ★ **날짜를 안 말했을 때만 오늘로 돌아간다** (2026-09-16 · 사용자 결정으로 고침).
+      전에는 «지난 날만 남기고, 남는 게 없으면 오늘» 이었다. 그 규칙은 「5일 뒤 배추
+      경락가랑 배치 상태」처럼 **배치의 날짜를 안 말한** 질문을 위한 것이었는데,
+      「내일 배치」처럼 **앞날을 콕 집은** 질문까지 오늘로 바꿔 버렸다 — 물은 것과
+      다른 날을 조용히 내민 것이다. 실제로 화면에서 그렇게 나왔다.
+
+    🔴 **기준일 뒤는 읽지 않고 그렇게 말한다** (`AHEAD_BATCH`). «아직 안 돌았다» 고
+      적지 않는다 — 화면 기준일은 진짜 오늘보다 과거일 수 있어서, 기준일을 09-14 로
+      두면 09-15 기록은 **DB 에 있는데도** 앞날이다. 그때 «아직 안 돌았다» 는 거짓이다.
+
+    ★ 갈래별로 날짜가 안 나뉘는 문제는 **해석기가 갈라 준다.** 가격에 붙은 날은
+      짝 물음(`asks`) 안에만 들어오고, 여기서 보는 `asked` 는 맨 위 `dates` 뿐이다
+      (2026-09-16 · 실제 응답 2건으로 확인. 검사 `test_가격_날짜만_있는_배치는_오늘을_본다`).
 
     🔴 **자르되 잘랐다고 말한다** (`_trimmed_line`). 조용히 줄이면 열흘을 물은
       사람이 이레만 보고 «열흘이 다 이렇구나» 로 읽는다.
     """
     on = _asked_on(state)
-    days = sorted({d for d in (state.get("asked") or []) if d <= on})
-    if not days:
-        return [on], False
+    asked = sorted(set(state.get("asked") or []))
+    if not asked:
+        return [on], [], False
+    days = [d for d in asked if d <= on]
+    ahead = [d for d in asked if d > on]
     if len(days) > MAX_REPORT_DAYS:
-        return days[-MAX_REPORT_DAYS:], True
-    return days, False
+        return days[-MAX_REPORT_DAYS:], ahead, True
+    return days, ahead, False
 
 
 def _worst(grades: list[str]) -> str:
@@ -659,7 +674,8 @@ def batch_node(state: QaState) -> QaState:
     """
     if "batch" not in (state.get("routes") or []):
         return {}
-    days, trimmed = _report_days(state)
+    #   ★ 기준일 뒤인 날은 **읽으러 가지도 않는다** — 없는 것이 아니라 안 보여주는 것이다.
+    days, ahead, trimmed = _report_days(state)
     blocks: list[dict[str, Any]] = []
     for on in days:
         block: dict[str, Any] = {"on": on, "row": None, "fails": [], "report": None}
@@ -678,9 +694,13 @@ def batch_node(state: QaState) -> QaState:
             block["report_read"] = "error"
         blocks.append(block)
 
-    first = blocks[0]
+    #   ★ 앞날만 물었으면 **블록이 하나도 없다.** 그때도 옛 이름 칸은 채워 둔다 —
+    #     읽은 것이 없다는 뜻으로 `empty` 다 (`_worst` 와 같은 말).
+    first = blocks[0] if blocks else {"on": ahead[0], "row": None,
+                                      "fails": [], "report": None}
     return {
         "batch_days": days,
+        "batch_ahead": ahead,
         "batch_blocks": blocks,
         "batch_trimmed": trimmed,
         #   옛 이름 — **첫 날**을 가리킨다. 근거(`_batch_evidence`)와 한 날짜짜리
@@ -688,9 +708,9 @@ def batch_node(state: QaState) -> QaState:
         "batch_on": first["on"],
         "batch_row": first["row"],
         "batch_fails": first["fails"],
-        "batch_read": _worst([b["read"] for b in blocks]),
+        "batch_read": _worst([b["read"] for b in blocks]) if blocks else "empty",
         "check_row": first["report"],
-        "check_read": _worst([b["report_read"] for b in blocks]),
+        "check_read": _worst([b["report_read"] for b in blocks]) if blocks else "empty",
     }
 
 
@@ -709,8 +729,8 @@ def perf_node(state: QaState) -> QaState:
         return {}
     #   ★ 재학습 보고서도 **물어본 날**을 읽는다 (2026-09-16 · 사용자 결정 ②).
     #     봉인 성능표와 현재 모델은 날짜와 무관하다 — 그건 늘 지금 것이다.
-    days, trimmed = _report_days(state)
-    out: QaState = {"perf_days": days, "perf_trimmed": trimmed}
+    days, ahead, trimmed = _report_days(state)
+    out: QaState = {"perf_days": days, "perf_ahead": ahead, "perf_trimmed": trimmed}
 
     try:
         found = qa_tools.current_models()
@@ -770,6 +790,14 @@ NO_BATCH_ROW = "기준일({on})에 대한 배치 기록이 없습니다."
 NO_CHECK_REPORT = "기준일({on})에 대한 점검 보고서{josa} 아직 없습니다."
 NO_RETRAIN_ROW = "기준일({on})에 대한 재학습 판정 기록이 없습니다."
 
+#: 기준일보다 **뒤인 날**을 물었을 때. 오늘 것을 대신 보여주지 않는다 (2026-09-16).
+#:
+#: 🔴 «아직 돌지 않았습니다» 라고 쓰지 않는다. 화면 기준일은 진짜 오늘보다 과거일 수
+#:   있어서(시연 중 09-14 로 두면 09-15 기록은 **DB 에 있는데도** 앞날이다), 그때
+#:   «아직 안 돌았다» 는 거짓이 된다. 맞는 말은 «기준일 뒤는 안 보여준다» 다.
+AHEAD_BATCH = "배치 관련 정보는 기준일 또는 기준일보다 과거의 데이터만 조회 가능합니다."
+AHEAD_PERF = "재학습 관련 정보는 기준일 또는 기준일보다 과거의 데이터만 조회 가능합니다."
+
 
 def _trimmed_line(days: list[date]) -> str:
     """이레를 넘겨 잘랐을 때 붙이는 한 줄. **자른 사실을 숨기지 않는다.**"""
@@ -782,15 +810,24 @@ def _batch_section(state: QaState) -> tuple[str, str]:
     """배치 갈래의 글 한 덩어리. 돌려주는 것은 (글, 성적).
 
     ★ **날짜마다 블록 하나다** (2026-09-16). 「사흘치 배치」면 블록이 셋이다.
+
+    ★ 기준일 뒤인 날은 블록을 안 만들고 **맨 끝에 한 줄**로 밝힌다 (`AHEAD_BATCH`).
+      「어제랑 내일 배치」면 어제는 표로 답하고 내일은 그 한 줄이다.
+
+    🔴 빈 목록(`[]`)과 없는 칸을 가른다. 앞날만 물으면 블록이 **정말 하나도 없고**,
+      그때 옛 길로 떨어지면 안 물어본 **오늘 표**가 나간다.
     """
-    blocks = state.get("batch_blocks") or [{
-        "on": state.get("batch_on") or _asked_on(state),
-        "row": state.get("batch_row"),
-        "fails": state.get("batch_fails") or [],
-        "read": state.get("batch_read") or "empty",
-        "report": state.get("check_row"),
-        "report_read": state.get("check_read") or "empty",
-    }]
+    blocks = state.get("batch_blocks")
+    if blocks is None:
+        #   옛 길 — 한 날짜짜리 상태를 그대로 받은 자리(검사·직접 호출)가 아직 있다.
+        blocks = [{
+            "on": state.get("batch_on") or _asked_on(state),
+            "row": state.get("batch_row"),
+            "fails": state.get("batch_fails") or [],
+            "read": state.get("batch_read") or "empty",
+            "report": state.get("check_row"),
+            "report_read": state.get("check_read") or "empty",
+        }]
     lines: list[str] = []
     grades: list[str] = []
     if state.get("batch_trimmed"):
@@ -801,6 +838,10 @@ def _batch_section(state: QaState) -> tuple[str, str]:
         body, grade = _batch_block(block)
         lines += body
         grades.append(grade)
+    if state.get("batch_ahead"):
+        #   ★ **한 번만** 적는다. 날짜마다 되풀이하면 같은 말이 답을 덮는다.
+        lines += ([""] if lines else []) + [AHEAD_BATCH]
+        grades.append("empty")
     return "\n".join(lines), _grade(grades)
 
 
@@ -1221,8 +1262,13 @@ def _perf_section(state: QaState) -> tuple[str, str]:
             #   ★ **«기록이 없다» 와 «후보가 없다» 는 다르다** (2026-09-16 · 결정 ①).
             #     전에는 둘을 한 문장(«재학습 후보 없음»)으로 적었다. 그러면 배치가
             #     아예 안 돈 날도 «검사해 봤더니 바꿀 게 없다» 로 읽힌다.
-            days = state.get("perf_days") or [_asked_on(state)]
-            lines += ["", NO_RETRAIN_ROW.format(on=" · ".join(str(d) for d in days))]
+            days = state.get("perf_days")
+            if days is None:
+                days = [_asked_on(state)]
+            #   ★ 앞날만 물었으면 읽을 날이 **하나도 없다.** 그때 오늘을 끼워 넣으면
+            #     안 물어본 날의 «기록 없음» 이 나간다 (2026-09-16).
+            if days:
+                lines += ["", NO_RETRAIN_ROW.format(on=" · ".join(str(d) for d in days))]
         else:
             #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
             #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
@@ -1230,6 +1276,11 @@ def _perf_section(state: QaState) -> tuple[str, str]:
             for report in rows:
                 if report.get("name") != "재학습판정":
                     lines += _retrain_block(report)
+
+    if state.get("perf_ahead"):
+        #   ★ 배치와 같은 규칙이다 — **봉인 성능표·현재 모델은 그대로** 나간다.
+        #     그건 날짜와 무관하고, 없는 것은 그날 재학습 기록뿐이다.
+        lines += ["", AHEAD_PERF]
 
     #   ★ **맨 아래.** 숫자를 다 보인 뒤에 «그래서 바꿀까요» 를 묻는다
     lines += _update_lines(state)
