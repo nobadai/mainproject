@@ -7,6 +7,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -361,11 +362,47 @@ def _gemini_response_text(document: dict[str, Any]) -> str:
     raise ValueError("empty Gemini response")
 
 
-def _gemini_safe_schema(node: Any) -> Any:
-    """Pydantic Schema를 Gemini가 받는 표현으로만 낮추고 계약 의미는 유지한다."""
+def _gemini_safe_schema(node: Any, defs: Mapping[str, Any] | None = None) -> Any:
+    """Pydantic Schema를 Gemini가 받는 표현으로만 낮추고 계약 의미는 유지한다.
+
+    🔴 **중첩 모델의 `$defs`·`$ref` 를 펴 넣는다** (2026-09-16 실측으로 고친 자리).
+
+      Pydantic 은 모델 안에 모델이 있으면 그 정의를 `$defs` 로 빼고 자리에는
+      `$ref` 만 남긴다. Gemini `responseSchema` 는 그 둘을 모르고 **요청 자체를
+      거부한다.**
+
+      ```text
+      HTTP 400  Unknown name "$defs" at 'generation_config.response_schema'
+                Unknown name "$ref"  at '...properties[0].value.items'
+      ```
+
+      ⚠️ **전략 Planner 가 그래서 한 번도 안 돌았다.** 해석 호출
+        (`LlmInterpretationOutput`)은 중첩이 없어 평면 스키마라 통과했고, 중첩이 있는
+        `LlmStrategyPlanOutput` 만 매번 400 을 받아 `FALLBACK` 으로 떨어졌다 —
+        상태 칸은 정직하게 `FALLBACK` 을 말하고 있었지만 **원인이 호출 밖이 아니라
+        우리 스키마였다.**
+
+    ★ **`$defs` 는 결과에서 지운다.** 펴 넣은 뒤에도 남겨 두면 Gemini 가 그 키를
+      모른다고 다시 거부한다.
+
+    ⚠️ **자기 자신을 참조하는 모델은 못 편다.** 지금 두 계약에는 없고, 생기면 여기서
+      무한히 돈다 — 그런 모델을 만들지 않는 것이 계약이다.
+    """
+    if defs is None and isinstance(node, dict):
+        defs = node.get("$defs") or {}
     if not isinstance(node, dict):
         return node
-    excluded = {"const", "anyOf", "additionalProperties"}
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        # ★ `#/$defs/Name` 의 마지막 조각이 정의 이름이다. 못 찾으면 펴지 않고
+        #   그대로 두는 대신 **비운다** — 없는 정의를 지어내면 계약이 달라진다.
+        target = (defs or {}).get(ref.rsplit("/", 1)[-1])
+        if not isinstance(target, Mapping):
+            raise TypeError(f"cannot resolve schema reference: {ref}")
+        # `$ref` 옆에 붙은 칸(description 등)은 정의를 덮어쓴다 — JSON Schema 관례다.
+        merged = {**target, **{k: v for k, v in node.items() if k != "$ref"}}
+        return _gemini_safe_schema(merged, defs)
+    excluded = {"const", "anyOf", "additionalProperties", "$defs"}
     safe = {key: value for key, value in node.items() if key not in excluded}
     if "const" in node:
         safe.update({"type": "string", "enum": [node["const"]]})
@@ -374,15 +411,15 @@ def _gemini_safe_schema(node: Any) -> Any:
         if len(branches) != len(node["anyOf"]):
             safe["nullable"] = True
         if len(branches) == 1:
-            safe.update(_gemini_safe_schema(branches[0]))
+            safe.update(_gemini_safe_schema(branches[0], defs))
         elif branches:
-            safe["anyOf"] = [_gemini_safe_schema(branch) for branch in branches]
+            safe["anyOf"] = [_gemini_safe_schema(branch, defs) for branch in branches]
     if "properties" in node:
         safe["properties"] = {
-            name: _gemini_safe_schema(child) for name, child in node["properties"].items()
+            name: _gemini_safe_schema(child, defs) for name, child in node["properties"].items()
         }
     if "items" in node:
-        safe["items"] = _gemini_safe_schema(node["items"])
+        safe["items"] = _gemini_safe_schema(node["items"], defs)
     return safe
 
 
