@@ -815,4 +815,113 @@ def test_매입에서_재검증에만_붙은_조건은_여전히_CONDITIONAL_이
     outcome, reason = revalidation._verdict(오늘_판정, (), (), 원_조건)
 
     assert outcome == "CONDITIONAL"
-    assert "verdict:finance=conditional" in reason
+    # ★ **새로 붙은 것이 재무 판정이라는 사실**을 잰다. 표지 원문(`verdict:finance=
+    #   conditional`)이 아니라 사람 말로 나가고, 그 갈래는 ⑩ 이 따로 잠근다.
+    assert "재무 판정이 조건부" in reason
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 거부 사유는 사람 말이다 — 🔴 조정안 JSON 이 화면에 뜨지 않는다 (2026-09-16)
+# ---------------------------------------------------------------------------
+#
+# 🔴 **실측 (실 서버 · 실매입 기록에 130kg → 50,000kg).** 422 의 `detail` 이 이랬다:
+#
+#   ```text
+#   통과했으나 원 실행에 없던 조건이 1건 붙었다:
+#   adjust:{"axis": "quantity", "dept": "inventory", "reason": "수량을 7470kg 로 조정 제안",
+#   "ref_ids": [...], "scenario_labels": ["기본"], "split_date": "2026-09-14",
+#   "target_value": 7470.0, "unit": "kg"}
+#   ```
+#
+#   9/2 에 사람이 실매입을 적다가 한도를 넘기면 이 문장을 본다.
+#
+# ⚠️ **판정 값과 `added` 집합은 안 잰다 — 위 ③ · ⑧ · ⑨ 가 이미 잠근다.**
+#   `test_조건이_늘면_CONDITIONAL` · `test_조정은_표준형_전체가_표지다` ·
+#   `test_매입에서_원_실행과_같은_조건이면_PASSED_다` 가 그 자리다. 여기는 **문장만**
+#   잰다 — 같은 사실을 두 곳에서 재면 한쪽만 고쳐지는 날이 온다.
+
+
+def _물류_수량_조정(reason: str = "수량을 7470kg 로 조정 제안") -> dict[str, Any]:
+    """🔴 **실측된 그 조정 그대로** (물류 `adapter._suggested` 가 만든 표준형)."""
+    return {
+        "dept": "inventory",
+        "axis": "quantity",
+        "target_value": 7470.0,
+        "unit": "kg",
+        "reason": reason,
+        "ref_ids": ["DB:logistics_runtime_fixture/LOG-RUNTIME-1"],
+        "scenario_labels": [LABEL],
+        "split_date": "2026-09-14",
+    }
+
+
+def test_조정이_붙은_거부_사유에_JSON_이_안_들어간다():
+    """🔴 **이것이 표적이다.** 중괄호가 하나라도 있으면 사람이 JSON 을 읽고 있는 것이다."""
+    _, reason = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
+
+    assert "{" not in reason
+    assert "ref_ids" not in reason
+    assert "scenario_labels" not in reason
+
+
+def test_조정_문장에_부서_한글과_조정_사유가_들어간다():
+    """★ **부서가 쓴 좋은 한국어가 이미 JSON 안에 있었다** — 꺼내 쓴다.
+
+    🔴 **숫자는 자리를 끊어 찍는다** (`7,470`). 저장소가 금액·수량에 쓰는 방식과 같다.
+    """
+    _, reason = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
+
+    assert "물류: 수량을 7,470kg 로 조정 제안" in reason
+
+
+def test_시점_조정의_날짜는_자릿수를_안_끊는다():
+    """🔴 **문장을 훑어 숫자를 고치면 연도가 `2,026` 이 된다.**
+
+    그래서 `target_value`·`unit` 이 말해 주는 토큰(`3d`)이 문장에 있을 때만 바꾼다 —
+    시점 조정 문장에는 그 토큰이 없으므로 **부서 문장 그대로** 나간다.
+    """
+    시점 = {
+        **_물류_수량_조정(reason="도착일을 2026-09-14 로 조정 제안"),
+        "axis": "timing",
+        "target_value": 3.0,
+        "unit": "d",
+    }
+
+    _, reason = revalidation._verdict({}, (), (시점,), frozenset())
+
+    assert "물류: 도착일을 2026-09-14 로 조정 제안" in reason
+    assert "2,026" not in reason
+
+
+def test_판정만_붙은_거부_사유도_사람_말이다():
+    """★ `verdict:` 표지도 화면에 그대로 뜨면 안 된다.
+
+    🔴 **capability 어휘까지 부서로 옮긴다.** 판매 안은 `FINANCIAL_VALIDATION` 을,
+      매입 안은 `finance` 를 키로 담는데 사람이 읽을 것은 둘 다 「재무」다.
+    """
+    _, reason = revalidation._verdict(
+        {"FINANCIAL_VALIDATION": {"business_status": "conditional"}}, (), (), frozenset()
+    )
+
+    assert "재무 판정이 조건부" in reason
+    assert "FINANCIAL_VALIDATION" not in reason
+    assert "conditional" not in reason
+
+
+def test_reason_이_빈_조정은_축과_값과_단위로_짓는다():
+    """🔴 **없는 값을 지어내지 않는다.** 칸이 말해 주는 것까지만 적는다."""
+    빈_사유 = {**_물류_수량_조정(reason="")}
+
+    _, reason = revalidation._verdict({}, (), (빈_사유,), frozenset())
+
+    assert "물류: 수량을 7,470kg 로 조정 제안" in reason
+
+
+def test_축도_값도_없으면_대안을_냈다까지만_말한다():
+    """★ **모르는 것을 모른다고 말한다.** 여기서 지어낸 숫자는 사람이 그대로 믿는다."""
+    빈_조정 = {"dept": "inventory", "reason": "", "ref_ids": [], "scenario_labels": [LABEL]}
+
+    _, reason = revalidation._verdict({}, (), (빈_조정,), frozenset())
+
+    assert "물류가 대안을 냈다" in reason
+    assert "{" not in reason

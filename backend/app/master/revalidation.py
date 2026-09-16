@@ -40,12 +40,14 @@ revalidation.py — **최종 승인 시점 재검증** (설계 2026-09-07 · M-4
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 from app.master import wiring
+from app.master.answer import agent_label
 from app.master.budget import BudgetExhausted, CallBudget
 from app.master.day_gate import check_day_gate
 from app.master.decision import PROCUREMENT_CYCLE, SALES_CYCLE, RevalidationOutcome
@@ -841,6 +843,168 @@ def _labels_match(scenario: Mapping[str, Any], scenario_label: str) -> bool:
     }
 
 
+# ---------------------------------------------------------------------------
+# 조건 표지를 사람 말로 — 🔴 **비교는 표지로, 문장은 사람 말로** (2026-09-16)
+# ---------------------------------------------------------------------------
+#
+# 🔴 **실측된 피해** (2026-09-16 · 실 서버 · `POST /master/runs/{id}/purchase-record`
+#   에 130kg → 50,000kg 를 넣음). 거부 사유가 이렇게 나갔다:
+#
+#   ```text
+#   기록값으로 다시 검증했더니 통과하지 못해 기록하지 않았습니다 (CONDITIONAL):
+#   통과했으나 원 실행에 없던 조건이 1건 붙었다:
+#   adjust:{"axis": "quantity", "dept": "inventory", "reason": "수량을 7470kg 로 조정 제안",
+#   "ref_ids": [...], "scenario_labels": ["기본"], "split_date": "2026-09-14",
+#   "target_value": 7470.0, "unit": "kg"}
+#   ```
+#
+#   **조정 제안 JSON 이 통째로 화면에 뜬다.** 그런데 그 JSON 안에 「수량을 7470kg 로
+#   조정 제안」이라는 **부서가 쓴 좋은 한국어**가 이미 있다 — 꺼내 쓰면 된다.
+#
+# 🔴 **`conditions_of` 는 한 줄도 안 바꿨다.** 표지 집합이 비교의 정본이고, 그것을
+#   건드리면 *"원래도 있던 조건"* 과 *"새로 붙은 조건"* 을 가르는 기준이 흔들린다.
+#   여기서 바뀌는 것은 `_verdict` 가 만드는 **문장뿐**이고, 판정 값
+#   (`PASSED`·`CONDITIONAL`·`FAILED`)과 `added` 집합은 그대로다.
+
+_VERDICT_PREFIX = "verdict:"
+_ADJUST_PREFIX = "adjust:"
+
+#: 판정 어휘 한국어. **닫힌 어휘 넷**(`Verdict`)이고 `skipped` 는 표에 없다 —
+#: `answer._VERDICT_LABEL` · `report._VERDICT_LABEL` 과 **같은 세 낱말**이다.
+#:
+#: ★ 두 곳 다 비공개라 임포트할 공개 주인이 없다. 어휘를 늘리지 않고 그 셋을 그대로
+#:   쓰고, 표 밖은 `report._verdict_line` 과 같은 말(「판정 없음」)로 떨어뜨린다.
+_VERDICT_LABEL: dict[str, str] = {"ok": "통과", "conditional": "조건부", "reject": "거절"}
+
+#: 조정 축 한국어. 어휘의 주인은 `contracts.core.AdjustAxis` 이고, 한국어는 화면
+#: `frontend/src/lib/vocab.ts` 의 `DEPT_AXIS_LABEL` 과 **같은 낱말**이다.
+_AXIS_LABEL: dict[str, str] = {
+    "quantity": "수량",
+    "timing": "시점",
+    "channel_mix": "채널 배분",
+    "amount": "금액",
+}
+
+
+def _spoken(marker: str) -> str:
+    """조건 표지 **하나**를 사람이 읽는 한 조각으로.
+
+    ```text
+    verdict:{capability}={business_status}   →  「재무 판정이 조건부」
+    adjust:{부서 표준형 JSON}                 →  「물류: 수량을 7,470kg 로 조정 제안」
+    ```
+
+    🔴 **모르는 표지는 그대로 흘린다.** 여기서 지어내면 *"무엇이 조건이었나"* 가
+      사라진다 — 지금 표지는 둘뿐이고, 셋째가 생기면 그 낱말이 그대로 화면에 뜬다.
+    """
+    if marker.startswith(_VERDICT_PREFIX):
+        return _spoken_verdict(marker[len(_VERDICT_PREFIX) :])
+    if marker.startswith(_ADJUST_PREFIX):
+        return _spoken_adjust(marker[len(_ADJUST_PREFIX) :])
+    return marker
+
+
+def _spoken_verdict(body: str) -> str:
+    """`{capability}={business_status}` 를 「{부서} 판정이 {상태}」로.
+
+    ★ **capability 이름을 화면에 안 쓴다.** 재검증이 담는 키는 경로에 따라 두 어휘다 —
+      판매 안은 capability(`FINANCIAL_VALIDATION`), 매입 안은 조언자 이름(`finance`).
+      **둘 다 부서로 옮긴다**: capability 는 라우팅 표(`route_capability`)가 이미 부서를
+      알고, 조언자 이름은 그 자체가 부서다. 여기서 표를 새로 적지 않는다.
+    """
+    name, _, status = body.partition("=")
+    label = _VERDICT_LABEL.get(status)
+    dept = _dept_label(name)
+    # ⚠️ 여기 올 수 있는 상태는 사실상 `conditional` 하나다 — 그 밖은 위에서
+    #   `FAILED` 로 떨어진다 (`PASSING_VERDICTS`). 그래도 표 밖을 말로 받는다.
+    return f"{dept} 판정이 {label}" if label else f"{dept} 판정이 없다"
+
+
+def _dept_label(name: str) -> str:
+    """capability 든 조언자 이름이든 **부서 한국어**로. 모르면 받은 이름 그대로."""
+    route = route_capability(name)
+    return agent_label(route[0] if route is not None else name)
+
+
+def _spoken_adjust(body: str) -> str:
+    """부서 표준형 JSON 을 「{부서}: {무엇}」으로. **`dept` 와 `reason` 만 쓴다.**
+
+    🔴 **`reason` 이 비면 지어내지 않는다.** `axis` · `target_value` · `unit` 로 짓고,
+      셋 다 없으면 「부서가 대안을 냈다」까지만 말한다. 조정의 나머지 칸(`ref_ids` ·
+      `split_date` · `scenario_labels`)은 **비교에는 쓰이지만 문장에는 안 나간다** —
+      사람이 읽을 것이 아니다.
+
+    ⚠️ **표지는 언제나 `json.dumps` 가 만든 것이다** (`conditions_of`). 그래도 못 읽는
+      경우를 값으로 받는다 — 여기서 터지면 거부 사유 대신 스택이 화면에 뜬다.
+    """
+    try:
+        raw = json.loads(body)
+    except ValueError:
+        raw = None
+    adjustment: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+
+    dept = agent_label(str(adjustment.get("dept") or "")) or "부서"
+    reason = str(adjustment.get("reason") or "").strip()
+    무엇 = _grouped(reason, adjustment) if reason else _what_from_fields(adjustment)
+    if not 무엇:
+        return f"{dept}{_particle(dept, '이', '가')} 대안을 냈다"
+    return f"{dept}: {무엇}"
+
+
+def _what_from_fields(adjustment: Mapping[str, Any]) -> str:
+    """`reason` 이 빈 조정을 **칸으로만** 편다. 🔴 없는 값을 지어내지 않는다."""
+    axis = _AXIS_LABEL.get(str(adjustment.get("axis") or ""), "")
+    값 = _grouped_amount(adjustment.get("target_value"), str(adjustment.get("unit") or ""))
+    if axis and 값:
+        return f"{axis}{_particle(axis, '을', '를')} {값} 로 조정 제안"
+    if axis:
+        return f"{axis} 조정 제안"
+    if 값:
+        return f"{값} 로 조정 제안"
+    return ""
+
+
+def _grouped_amount(value: Any, unit: str) -> str:
+    """수량·금액을 **자리를 끊어** 찍는다 (`report._kg` · `report._won` 과 같은 방식)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return ""
+    return f"{round(value):,}{unit}"
+
+
+def _grouped(reason: str, adjustment: Mapping[str, Any]) -> str:
+    """부서 문장 안 **그 숫자 하나만** 자리를 끊어 찍는다 (`7470kg` → `7,470kg`).
+
+    🔴 **문장을 훑어 숫자를 고치지 않는다.** 훑으면 물류의 시점 조정 문장
+      「도착일을 2026-09-14 로 조정 제안」의 연도가 `2,026` 이 된다. 그래서 **칸이
+      말해 주는 값과 단위로 만든 토큰**(`{target_value:g}{unit}`)이 문장에 그대로
+      있을 때만 바꾼다 — 시점 조정은 단위가 `d`(D+N)라 그 토큰이 문장에 없고,
+      따라서 날짜는 손대지 않는다.
+
+    ★ **못 찾으면 부서 문장 그대로다.** 부서가 표기를 바꾸는 날 이 자리는 조용히
+      아무것도 안 한다 — 문장이 안 예뻐질 뿐 **틀린 숫자가 나가지 않는다.**
+    """
+    target = adjustment.get("target_value")
+    unit = str(adjustment.get("unit") or "")
+    if not isinstance(target, (int, float)) or isinstance(target, bool) or not unit:
+        return reason
+    토큰 = f"{float(target):g}{unit}"
+    끊은_것 = f"{round(target):,}{unit}"
+    if 토큰 == 끊은_것:
+        return reason
+    # 앞자리가 숫자면 다른 수의 꼬리를 자르는 것이라 안 바꾼다.
+    return re.sub(rf"(?<!\d){re.escape(토큰)}", 끊은_것, reason)
+
+
+def _particle(word: str, 받침: str, 모음: str) -> str:
+    """받침 유무로 조사를 고른다 (`report._object_particle` 과 같은 규칙)."""
+    if not word:
+        return 받침
+    code = ord(word[-1]) - 0xAC00
+    if code < 0 or code > 11171:
+        return 받침
+    return 모음 if code % 28 == 0 else 받침
+
+
 def _verdict(
     validations: Mapping[str, Mapping[str, Any]],
     unroutable: tuple[str, ...],
@@ -875,8 +1039,11 @@ def _verdict(
     now = conditions_of(validations, adjustments)
     added = sorted(now - original_conditions)
     if added:
+        # 🔴 **비교는 표지로, 문장은 사람 말로** (2026-09-16). `added` 는 그대로 표지
+        #   집합이고 세는 방식도 그대로다 — 펴는 것은 이 한 줄뿐이다.
         return "CONDITIONAL", (
-            f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: {'; '.join(added)}"
+            f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: "
+            f"{'; '.join(_spoken(표지) for 표지 in added)}"
         )
 
     꼬리 = f" (못 물어본 요구: {', '.join(unroutable)})" if unroutable else ""
