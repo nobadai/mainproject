@@ -717,12 +717,17 @@ def test_라벨을_안_밝힌_조정은_그_안의_조건으로_세지_않는다
     )
 
 
-def test_원_실행_후보_판정을_못_읽으면_빈_집합이다():
+def test_판정_칸이_아예_없으면_빈_집합이다():
     """★ *"모르면 통과"* 가 아니라 *"모르면 되돌린다"* 로 둔다 — 빈 집합이면 재검증에
-    조건이 하나라도 붙는 순간 `CONDITIONAL` 이다."""
-    매입_응답 = {"scenarios": [{"label": LABEL}]}
+    조건이 하나라도 붙는 순간 `CONDITIONAL` 이다.
 
-    assert revalidation.conditions_of_original(매입_응답, LABEL) == frozenset()
+    ⚠️ **실제 매입 응답은 이 모양이 아니다** — 판정을 최상위 `verdicts` 에 싣는다
+      (아래 `test_매입_응답의_최상위_verdicts_를_원_조건으로_읽는다`). 여기서 재는 것은
+      두 칸이 **다 없는** 응답이다.
+    """
+    판정_없는_응답 = {"scenarios": [{"label": LABEL}]}
+
+    assert revalidation.conditions_of_original(판정_없는_응답, LABEL) == frozenset()
 
 
 def test_판매_후보_판정도_읽는다():
@@ -733,3 +738,81 @@ def test_판매_후보_판정도_읽는다():
     assert revalidation.conditions_of_original(판매_응답, LABEL) == frozenset(
         {"verdict:FINANCIAL_VALIDATION=conditional"}
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 매입 응답의 원 조건 — 최상위 `verdicts` (2026-09-16)
+# ---------------------------------------------------------------------------
+
+
+def _매입_응답(**판정: str) -> dict[str, Any]:
+    """매입 응답 모양 하나. **판정은 최상위 `verdicts` 에 있고 후보 칸이 없다.**
+
+    🔴 `verdicts` 는 **그 실행 전체의 판정**이라 안별로 갈라져 있지 않다
+      (`revalidate_procurement_scenario` 가 `ADVISORS` 이름으로 담는 것과 같은 칸).
+    """
+    return {
+        "scenarios": [{"label": LABEL}],
+        "verdicts": {
+            이름: {"business_status": 상태, "runtime_status": "READY"}
+            for 이름, 상태 in 판정.items()
+        },
+    }
+
+
+def test_매입_응답의_최상위_verdicts_를_원_조건으로_읽는다():
+    """🔴 **실측 (2026-09-16 · `dev@983c85b` · `SIM-CHECK-HOLIDAY-0916` · 4/13 배추).**
+
+    원 실행 `verdicts.inventory` 가 `conditional` 이었는데(`ZONE_CAPACITY_UNRESOLVED`)
+    이 함수가 `candidates[].validations` 만 읽어서 **원 조건 집합이 빈 집합**이었다.
+    """
+    원_조건 = revalidation.conditions_of_original(
+        _매입_응답(finance="ok", inventory="conditional"), LABEL
+    )
+
+    assert 원_조건 == frozenset({"verdict:inventory=conditional"})
+
+
+def test_매입_응답이_전부_ok_면_원_조건이_없다():
+    """★ 표지 규칙은 `conditions_of` 와 **같은 것 하나**다 — `ok` 만 *"조건 없음"* 이다.
+    매입이라고 다른 규칙을 만들면 같은 사실의 주인이 둘이 된다."""
+    assert revalidation.conditions_of_original(_매입_응답(finance="ok", inventory="ok"), LABEL) == (
+        frozenset()
+    )
+
+
+def test_매입에서_원_실행과_같은_조건이면_PASSED_다():
+    """🔴 **이것이 고치기 전 깨져 있던 자리다.**
+
+    재고 판정은 구조적으로 매일 `conditional` 이라, 원 조건이 빈 집합이면
+    `POST /master/runs/{id}/purchase-record` 가 **기록값이 선정안과 하나라도 다르면
+    항상 422** 로 막혔다 (`_revalidate_or_reject` 는 `PASSED` 만 받는다).
+    """
+    원_조건 = revalidation.conditions_of_original(
+        _매입_응답(finance="ok", inventory="conditional"), LABEL
+    )
+    오늘_판정 = {
+        "finance": {"business_status": "ok"},
+        "inventory": {"business_status": "conditional"},
+    }
+
+    outcome, _reason = revalidation._verdict(오늘_판정, (), (), 원_조건)
+
+    assert outcome == "PASSED"
+
+
+def test_매입에서_재검증에만_붙은_조건은_여전히_CONDITIONAL_이다():
+    """★ 위 검사의 짝. **원 실행보다 나빠진 것은 그대로 되돌려야 한다** — 원 조건을
+    읽게 되었다고 새 조건까지 접어 주면 사용자가 본 적 없는 조건이 승인으로 남는다."""
+    원_조건 = revalidation.conditions_of_original(
+        _매입_응답(finance="ok", inventory="conditional"), LABEL
+    )
+    오늘_판정 = {
+        "finance": {"business_status": "conditional"},
+        "inventory": {"business_status": "conditional"},
+    }
+
+    outcome, reason = revalidation._verdict(오늘_판정, (), (), 원_조건)
+
+    assert outcome == "CONDITIONAL"
+    assert "verdict:finance=conditional" in reason

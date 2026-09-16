@@ -701,7 +701,8 @@ def conditions_of_original(
     """원 실행에서 **그 후보에 붙어 있던** 조건 표지 집합.
 
     ```text
-    판정   candidates[].validations   판매 응답에만 있다 (매입 응답에는 없다)
+    판정   candidates[].validations   판매 응답
+           verdicts                   매입 응답 (후보가 없을 때만 본다)
     조건   adjustments[]              🔴 그 안의 라벨을 밝힌 것만 센다
     ```
 
@@ -718,14 +719,38 @@ def conditions_of_original(
       돌리므로 나온 조정이 전부 그 안의 것이다. 이 비대칭도 보수적인 방향이다 — 재검증
       집합이 더 크게 잡히므로 `PASSED` 로 접히기 어렵다.
 
-    ★ **못 읽으면 빈 집합이다.** 매입 응답처럼 후보 판정이 아예 없는 모양이면 원
-      조건을 0 으로 두고, 그러면 재검증에 조건이 하나라도 있는 순간 `CONDITIONAL` 이다.
+    ★ **못 읽으면 빈 집합이다.** 판정을 실은 칸이 아예 없는 모양이면 원 조건을 0 으로
+      두고, 그러면 재검증에 조건이 하나라도 있는 순간 `CONDITIONAL` 이다.
       *"모르면 통과"* 가 아니라 *"모르면 되돌린다"* 로 둔다.
+
+    🔴 **매입 응답의 판정은 최상위 `verdicts` 에 있다** (2026-09-16). 전에는 이 함수가
+      `candidates[].validations` **하나만** 읽어서, 매입에서는 원 조건 집합이 **항상 빈
+      집합**이었다. *"모르면 되돌린다"* 가 매입에서는 *"매번 되돌린다"* 가 된 것이다.
+
+      실측 (`dev@983c85b` · 실행 `SIM-CHECK-HOLIDAY-0916` · 2026-04-13 배추):
+
+      ```text
+      원 실행  verdicts.inventory.business_status = "conditional"   (ZONE_CAPACITY_UNRESOLVED)
+      재검증   validations.inventory.business_status = "conditional"  ← 원 실행과 똑같다
+      결과     added = {"verdict:inventory=conditional"} → CONDITIONAL
+      ```
+
+      **그 조건은 원 실행에도 똑같이 있었다.** 재고 판정은 구조적으로 매일
+      `conditional` 이라, `POST /master/runs/{id}/purchase-record` 가 기록값이 선정안과
+      하나라도 다르면 **항상 422** 로 막혔다 (`_revalidate_or_reject` 는 `PASSED` 만
+      받는다).
+
+    ⚠️ **매입의 `verdicts` 는 안 라벨로 거르지 않는다.** 그 칸은 안별로 갈라져 있지 않고
+      **그 실행 전체의 판정**이다. 사람이 승인할 때 화면에서 본 것이 바로 그 판정이라,
+      그대로 견주는 것이 맞다. 라벨로 거르면 셀 것이 하나도 안 남아 고치기 전과 같아진다.
     """
+    candidates = [
+        candidate
+        for candidate in response_payload.get("candidates") or ()
+        if isinstance(candidate, Mapping)
+    ]
     validations: Mapping[str, Mapping[str, Any]] = {}
-    for candidate in response_payload.get("candidates") or ():
-        if not isinstance(candidate, Mapping):
-            continue
+    for candidate in candidates:
         scenario = candidate.get("scenario")
         if not isinstance(scenario, Mapping) or not _labels_match(scenario, scenario_label):
             continue
@@ -733,6 +758,13 @@ def conditions_of_original(
         if isinstance(raw, Mapping):
             validations = {k: v for k, v in raw.items() if isinstance(v, Mapping)}
         break
+
+    if not candidates:
+        # 매입 응답. 후보가 있는 응답(판매)에서는 이 칸을 보지 않는다 — 판매의 판정은
+        # 후보마다 갈라져 있어, 최상위로 올라가면 다른 안의 조건까지 세게 된다.
+        raw = response_payload.get("verdicts")
+        if isinstance(raw, Mapping):
+            validations = {k: v for k, v in raw.items() if isinstance(v, Mapping)}
 
     adjustments = [
         adjustment
