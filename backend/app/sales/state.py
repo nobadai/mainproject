@@ -13,6 +13,7 @@ from app.sales.schemas import (
     SalesRecommendation,
     SalesScenario,
 )
+from app.sales.strategy import StrategyPlan
 
 
 class SalesAgentState(TypedDict, total=False):
@@ -36,4 +37,6 @@ class SalesAgentState(TypedDict, total=False):
     excluded_reasons: dict[str, list[str]]
     status: SalesCandidateStatus | str
     terminal_reason: str | None
+    #: 세 전략의 자세. **후보를 만들기 전에 선다** (`plan_strategy` 노드).
+    strategy_plan: StrategyPlan
     reply: SalesProposalReply

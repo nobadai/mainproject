@@ -16,6 +16,9 @@ import { ApiError, ask, execute } from "@/lib/api";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
+//  🔴 말로 한 승인이 **그날 서 있는 안**을 짚을 때 읽는다. 매입 화면과 **같은 조회**라
+//     콘솔이 보는 안과 매입 탭이 보이는 안이 갈리지 않는다.
+import { purchase } from "@/lib/screen";
 import { CAN, type Session } from "@/lib/session";
 import {
   isProcurement,
@@ -125,6 +128,26 @@ function traceOf(res: AskResponse): LlmTraceData {
   };
 }
 
+/**
+ * 매입안 이름을 가른 자리. 매입 API 가 `key = "{품목} · {안 이름}"` 으로 짓는다
+ * (`app/api/purchase/query._plan` — 이 탭에 품목 축이 없어 이름 앞에 넣는다).
+ *
+ * 🔴 **맨 앞 하나만 가른다.** 안 이름에 같은 구분자가 들어와도 품목은 앞 한 칸이다.
+ * ⚠️ 이 규칙이 바뀌면 여기가 조용히 빗나간다. 매입 스키마에 품목 칸이 서는 날
+ *   이 둘을 그 칸 읽기로 바꾼다 — 서버 쪽 `app/api/plan_state.py` 가 같은 대기 중이다.
+ */
+const PLAN_KEY_SEP = " · ";
+
+function planItem(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? "" : key.slice(0, at);
+}
+
+function planLabel(key: string): string {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0 ? key : key.slice(at + PLAN_KEY_SEP.length);
+}
+
 const SHORTCUT: Record<string, string> = {
   purchase: "오늘 배추 얼마나 사야 해?",
   inventory: "창고에 얼마나 남았어?",
@@ -184,13 +207,28 @@ export function MasterConsole({ session }: { session: Session }) {
     setTurns((prev) => [...prev, ...items]);
   }
 
+  /**
+   * 실패를 화면에 적는다. **서버가 준 사유를 삼키지 않는다.**
+   *
+   * 🔴 사람 말로 된 사유는 **그대로 보인다** (`userErrorText` 가 가른다) —
+   *    「'초공격' 은 이 실행이 내놓은 안이 아니다. 제시된 안: 보수, 기본, 공격」 처럼
+   *    **무엇을 고쳐야 하는지 알려주는 문장**이 사라지면 사람이 손 쓸 데가 없다.
+   *
+   * ★ 코드가 섞인 사유는 그대로 올리지 않는다 (「사람 말만」). 다만 그때도
+   *   **「잠시 뒤 다시 시도해 주세요」 로 덮지 않는다** — 요청 자체가 틀린 것이라
+   *   기다렸다 다시 눌러도 같다. 그 문구는 **연결이 끊겼거나 서버가 탈 났을 때**의 말이다.
+   */
   function fail(error: unknown) {
+    const status = error instanceof ApiError ? error.status : null;
+    const wrongRequest = status !== null && status >= 400 && status < 500;
     push({
       kind: "error",
       text: userErrorText(
-        error instanceof ApiError ? error.status : null,
+        status,
         error instanceof Error ? error.message : "",
-        "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        wrongRequest
+          ? "요청을 처리하지 못했습니다 — 다시 눌러도 같습니다. 화면에서 직접 해 주세요."
+          : "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
       ),
     });
   }
@@ -242,6 +280,60 @@ export function MasterConsole({ session }: { session: Session }) {
     }
   }
 
+  /**
+   * 그날 매입 화면에 **서 있는 안** 중 말한 라벨의 안을 찾는다.
+   *
+   * 🔴 **라벨은 문자열 그대로 견준다.** 부분 일치나 비슷한 말 맞히기를 넣으면
+   *    「보수」를 말했는데 「보수적」 안이 승인되는 날이 온다 — 승인은 되돌리기가
+   *    기록으로 남는 일이라, 못 찾는 쪽이 낫다.
+   *
+   * 🔴 **못 찾거나 여럿이면 `null` 이고, 부르는 쪽은 실행하지 않는다.** 하나로 좁혀지지
+   *    않은 채 보내면 서버가 고르게 되는데, 그건 사람이 확인한 것과 다를 수 있다.
+   *
+   * ★ 기준일은 화면 머리에 적힌 그 날이고(`asOf`), 실행 축은 `GET /api/purchase` 가
+   *   다른 네 탭과 같은 자리에서 정한다 (`app/api/shown_run.py`). **화면이 축을
+   *   새로 지어내지 않는다.**
+   */
+  async function standingRun(intent: Intent) {
+    const label = (intent.scenario_label ?? "").trim();
+    if (!label) {
+      push({
+        kind: "error",
+        text: "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+      });
+      return null;
+    }
+
+    const plans = (await purchase(asOf)).plans;
+    const hits = plans.filter(
+      (plan) =>
+        plan.request_id !== null &&
+        plan.state !== "반려" &&
+        //  `key` 는 `"배추 · 기본"` 이라 라벨과 다르다. 안 이름은 라벨로만 견준다.
+        planLabel(plan.key) === label &&
+        (!intent.item || planItem(plan.key) === intent.item),
+    );
+
+    if (hits.length === 0) {
+      push({
+        kind: "error",
+        text: `그날 매입안에서 '${label}' 을 찾지 못했습니다. 매입 화면에서 골라 주세요.`,
+      });
+      return null;
+    }
+    if (hits.length > 1) {
+      push({
+        kind: "error",
+        text: `'${label}' 안이 여럿입니다 — 어느 품목인지 말씀해 주세요.`,
+      });
+      return null;
+    }
+    return {
+      requestId: hits[0].request_id as string,
+      historyRunId: hits[0].history_run_id,
+    };
+  }
+
   /** ② 확인한 의도를 실행한다. `intent` 를 **그대로** 돌려보낸다. */
   async function confirm(
     turn: Extract<Turn, { kind: "confirm" }>,
@@ -249,30 +341,57 @@ export function MasterConsole({ session }: { session: Session }) {
   ) {
     if (busy || !session || turn.done) return;
     const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
+    //   말로 한 승인. **모달로 누른 승인(`approve`)과 같은 셋을 실어야 한다** —
+    //   빠뜨리면 서버가 422 로 거절하고, 눌러서 한 승인과 말로 한 승인이 갈린다.
+    const select = turn.intent.action === "SELECT_SCENARIO";
+    /**
+     * 🔴 **발화문에 없어 화면이 실어야 하는 둘** — 어느 실행의 안인가(`target_*`)와
+     *    누가 승인하는가(`decided_by`). `lib/api.ts` 의 「SELECT · RERUN 필수」가
+     *    그것이고, 서버(`ask_service._record_selection`)도 없으면 거절한다.
+     */
+    const needsTarget = rerun || select;
 
-    // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
-    if (rerun && !last) {
-      push({
-        kind: "error",
-        text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
-      });
-      return;
-    }
-
-    // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
-    setTurns((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
-    );
-    push({ kind: "me", text: "네" });
     setBusy(true);
     try {
+      //   이 대화에서 방금 만든 안이 있으면 **그것이 먼저다.**
+      let target = last;
+
+      // 🔴 없으면 **그날 매입 화면에 서 있는 안**에서 라벨로 찾는다 (2026-09-16).
+      //
+      //    9/11 시연이 이 모양이다 — 걷기가 그날 안을 세워 두고, 사람이 콘솔을 새로
+      //    열어 말로 고른다. 전에는 `last` 가 없어 여기서 멈췄다.
+      //
+      //    ★ 찾는 것은 **화면**이다. 서버(`/ask/execute`)는 대상이 없으면 422 를 내고
+      //      추측하지 않는다 — 그 규칙은 그대로 산다.
+      if (select && !target) {
+        target = await standingRun(turn.intent);
+        //   못 찾았으면 위에서 사람 말로 적었다. **실행하지 않는다.**
+        if (!target) return;
+      }
+
+      // 🔴 그래도 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 다.
+      if (needsTarget && !target) {
+        push({
+          kind: "error",
+          text: rerun
+            ? "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다."
+            : "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
+        });
+        return;
+      }
+
+      // 한 번 누른 확인은 닫는다 — 두 번 눌러 같은 실행이 두 번 도는 것을 막는다
+      setTurns((prev) =>
+        prev.map((t, i) => (i === index ? { ...t, done: true } : t)),
+      );
+      push({ kind: "me", text: "네" });
       const res = await execute({
         intent: turn.intent,
         requestId: turn.requestId,
-        // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
-        targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
-        targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
-        decidedBy: rerun ? session.name : undefined,
+        // 재요청·안 선택에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
+        targetRequestId: needsTarget ? (target?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: needsTarget ? (target?.historyRunId ?? undefined) : undefined,
+        decidedBy: needsTarget ? session.name : undefined,
         utterance: turn.utterance,
       });
 

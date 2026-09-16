@@ -235,6 +235,19 @@ S-1(기여 호출 재사용)은 *"판매가 요구한 capability 의 라우팅�
 `CAPABILITY_ROUTING` 이 바뀐 날 한쪽만 바뀐다 — 여기는 **경로 하나**만 안다.
 """
 
+FINANCE_FACTS_ROUTE: tuple[AgentName, Mode] = ("finance", "PRE_SALES_FACTS")
+"""②' 에서 부르는 재무 선행 사실. **판정이 아니다.**
+
+🔴 **`CAPABILITY_ROUTING` 을 거치지 않는다.** 저 표는 *"후보가 요구한 검증"* 을
+  대상으로 바꾸는 자리이고, 이 호출은 **후보가 생기기 전**이다. 표에 넣으면 후보가
+  `FINANCIAL_VALIDATION` 을 요구했을 때 S-1 재사용이 이 회신을 **판정으로 재사용**할
+  수 있게 되는데, 사실 조회는 판정이 아니다.
+
+★ **못 받아도 판매를 부른다** — 물류(`INITIAL_CONTEXT_ROUTE`)와 같은 태도다. 재무
+  사실이 없으면 후보의 질이 떨어질 뿐이고, 못 받았다는 사실은 칸을 안 만드는 것과
+  `finance_context_failure` 로 남는다 (§1.2-10).
+"""
+
 ADDITIONAL_SUPPLY_CAPABILITY = "ADDITIONAL_SUPPLY_CONTEXT"
 """🔴 **후보를 그대로 보내지 않는 유일한 capability** (2026-09-10 · 라우팅 개방).
 
@@ -479,6 +492,12 @@ class SalesOutcome:
     #: 나중에 읽는 사람이 볼 수 있어야 한다.
     context_failure: AgentFailure | None = None
 
+    #: 🔴 **재무가 선행 사실을 못 냈다는 사실** (②' · 2026-09-16).
+    #:
+    #: 위 물류 칸과 나란히 둔다 — 같은 종류의 사실이고, 한 칸에 합치면 *"물류가 못
+    #: 답했다"* 와 *"재무가 못 답했다"* 가 화면에서 같아진다.
+    finance_context_failure: AgentFailure | None = None
+
     #: 🔴 **ML 예측을 못 실은 이유. 실었으면 빈 문자열이다** (M-1).
     #:
     #:   판매 v1.7 은 *"ML missing 은 전체 Sales 실패가 아니다"* 라고 적었다. 그래서
@@ -608,6 +627,14 @@ class SalesFlow:
         self.supply_context: Mapping[str, Any] | None = None
         self.context_failure: AgentFailure | None = None
 
+        #: ②' 재무 선행 사실. **판정이 아니라 사실이다** (`FINANCE_FACTS_ROUTE`).
+        #:
+        #: 🔴 **`replies_by_ref` 에 넣지 않는다.** 그 색인은 되먹임에 실을 **판정
+        #:   회신**의 원본을 찾는 자리다. 사실 조회를 거기 넣으면 후보가 요구한 적
+        #:   없는 회신이 `domain_replies` 에 실릴 길이 생긴다.
+        self.finance_context: Mapping[str, Any] | None = None
+        self.finance_context_failure: AgentFailure | None = None
+
         #: 🔴 **품목 → 그 회차의 매입 회신.** 회차마다 비운다.
         #:
         #:   `_judge` 는 후보 단위인데 매입 호출은 **품목 단위**라, 후보를 돌기 전에
@@ -664,6 +691,12 @@ class SalesFlow:
 
         # ② 초기 물류 컨텍스트.
         self._collect_supply_context()
+
+        # ②' 재무 선행 사실. **후보를 만들기 전이다.**
+        #
+        # 🔴 순서가 계약이다. 후보가 만들어진 뒤에 부르면 그것은 판정이지 사실이
+        #   아니고, 판매는 자금 상황을 모른 채 수량과 가격을 정하게 된다.
+        self._collect_finance_context()
 
         candidates: tuple[CandidateVerdict, ...] = ()
         judgment: Mapping[str, Any] = {}
@@ -799,6 +832,53 @@ class SalesFlow:
             self.supply_context = _verdict_of(reply)
             self.context_failure = self._failure_of(agent, mode)
 
+    def _collect_finance_context(self) -> None:
+        """②' 재무에게 **후보를 만들기 전의** 자금·채무·채권·여신 사실을 받는다.
+
+        ★ **물류와 같은 태도다.** 못 답해도 판매는 시작한다 — 재무 사실이 없으면
+          후보의 질이 떨어질 뿐이고, 없는 것을 있는 척하지만 않으면 된다.
+
+        🔴 **못 받았으면 칸을 안 만든다** (§1.2-10). 빈 매핑을 실으면 판매가
+          *"현금도 여신도 0 이라고 재무가 말했다"* 로 읽는다.
+
+        🔴 **`suggested_adjustments` 를 모으지 않는다.** 사실 조회는 대안을 내는
+          자리가 아니고, 여기서 모으면 `fresh_adjustments` 가 되먹임 조건을 만족해
+          **후보를 보기도 전에** 되먹임이 도는 길이 생긴다.
+
+        ★ **미등록은 이 사이클을 세우지 않는다.** 재무는 `REQUIRED_FOR_SALES` 라
+          진입점이 이미 문 앞에서 봤지만, Flow 를 직접 만드는 자리(검사·재검증)까지
+          그 점검을 강제하지는 않는다 — 매입 경계 질의와 같은 처리다.
+        """
+        agent, mode = FINANCE_FACTS_ROUTE
+        try:
+            reply = self.runner.call(agent, mode, self._finance_facts_input())
+        except AgentNotRegistered:
+            self.finance_context_failure = AgentFailure(agent, "NOT_CALLED")
+            return
+        self.sourced_evidences.extend(SourcedEvidence(agent, mode, ev) for ev in reply.evidences)
+        if reply.contributes_to_band:
+            self.finance_context = dict(reply.payload)
+        else:
+            self.finance_context_failure = self._failure_of(agent, mode)
+
+    def _finance_facts_input(self) -> dict[str, Any]:
+        """②' 에 실어 보내는 것. **거래처와 품목뿐이다.**
+
+        ★ 재무가 채권·여신을 거래처 축으로 읽으므로 `partner_id` 가 필요하다.
+          `as_of`·`sim_run_id` 는 봉투가 이미 나른다 — payload 에 다시 적으면 같은
+          사실의 주인이 둘이 된다.
+
+        ★ **없으면 칸을 안 만든다.** 거래처를 안 밝힌 요청에 빈 문자열을 실으면
+          재무가 *"거래처 이름이 빈 문자열"* 을 조회한다.
+        """
+        payload: dict[str, Any] = {}
+        request = self.user_request or {}
+        for name in ("partner_id", "item"):
+            value = request.get(name)
+            if value is not None:
+                payload[name] = value
+        return payload
+
     def _context_input(self) -> dict[str, Any]:
         """② 에 실어 보내는 것. **사용자 조건을 그대로 나른다.**
 
@@ -878,6 +958,18 @@ class SalesFlow:
             context_payload = self.supply_context.get("payload")
             if isinstance(context_payload, Mapping):
                 payload["logistics_context"] = dict(context_payload)
+        if self.finance_context_failure is None and self.finance_context is not None:
+            # 🔴 **칸 이름은 `finance_context` 다** (`SalesProposalInput.finance_context`).
+            #   그 칸은 예전부터 스키마에 있었지만 **아무도 채우지 않았다** — 판매는
+            #   `has_finance` 로 없다는 것만 확인하고 있었다 (실측 0건 / 9,937).
+            #
+            # ★ **재무 payload 를 재조립하지 않는다.** 물류 컨텍스트와 같은 규율이다 —
+            #   골라 담으면 그 순간 마스터가 재무 사실의 주인이 된다 (§3.2.2).
+            # 🔴 **`wire_payload` 를 거친다** (#175). 회신 payload 의 튜플을 그대로
+            #   두면 JSON 을 한 번 왕복한 경로와 **같은 칸이 두 모양**이 된다.
+            #   물류 컨텍스트는 `_verdict_of` 가 이미 거쳐서 왔고, 이쪽은 회신
+            #   payload 를 직접 들고 오므로 여기서 거쳐야 한다.
+            payload["finance_context"] = wire_payload(dict(self.finance_context))
         if self.ml_context is not None:
             # ★ **칸 이름은 판매 것이다** (`app/sales/schemas.py` `SalesProposalInput`).
             #   매입은 같은 값을 `forecast` 로 받는다 — 받는 쪽 낱말에 맞춘다
@@ -1153,6 +1245,7 @@ class SalesFlow:
             adjustments=tuple(self.suggested_adjustments),
             supply_context=dict(self.supply_context or {}),
             context_failure=self.context_failure,
+            finance_context_failure=self.finance_context_failure,
             # ★ **모든 종료 코드에서 싣는다** — 근거와 같은 이유다. 후보가 안 나온 날
             #   *"예측을 못 실었다"* 가 그 이유의 일부일 수 있다.
             ml_context_note=self.ml_context_note,

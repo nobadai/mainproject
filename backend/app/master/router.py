@@ -456,7 +456,7 @@ def master_purchase_record(request_id: str, body: PurchaseRecordIn) -> Transitio
     | 201 | 기록했다 — 전이 결과는 `status` 가 말한다 (`APPLIED` · `NOT_APPLIED` · `FAILED`) |
     | 404 | 유효한 승인이 없다 |
     | 409 | 자동 승인이다 · 현재 승인 회차가 아니다 · 이미 기록했다 · 선정안 약정이 없다 |
-    | 422 | 본문이 틀렸다 — 회차 집합이 선정안과 다르다 · 수량/금액 0 · 도착일 < 매입일 |
+    | 422 | 본문이 틀렸다 — 회차 집합이 선정안과 다르다 · 수량/단가 0 · 도착일 < 매입일 |
     """
     try:
         return record_purchase(request_id, body)

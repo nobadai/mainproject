@@ -267,7 +267,8 @@ def test_주말에도_판매는_돈다():
     response = run_sales(_request(as_of=토요일))
 
     assert response.end_code == "SL1_PRESENTED", f"주말 판매가 접혔다: {response.reason}"
-    assert [agent for agent, _, _ in called] == ["inventory", "sales", "finance"]
+    # 재무는 두 번 불린다 — 후보 생성 전 사실(PRE_SALES_FACTS)과 생성 후 판정.
+    assert [agent for agent, _, _ in called] == ["inventory", "finance", "sales", "finance"]
 
 
 def test_주말_사유에_실행일_이야기가_없다():
@@ -348,8 +349,11 @@ def test_적재에_실행_계획이_실린다(적재를_지켜본다):
     run_sales(_request())
 
     plan = 적재를_지켜본다[0]["plan"]
+    # 🔴 **재무 사실이 판매 앞이다.** 뒤로 가면 그것은 판정이지 사실이 아니고,
+    #   판매는 자금 상황을 모른 채 수량과 가격을 정하게 된다.
     assert [(row["agent"], row["mode"]) for row in plan] == [
         ("inventory", "PRE_SALES"),
+        ("finance", "PRE_SALES_FACTS"),
         ("sales", "GENERATE_SALES_PROPOSAL"),
         ("finance", "SALES_VALIDATION"),
     ]

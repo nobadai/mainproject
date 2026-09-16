@@ -115,3 +115,30 @@ export async function fetchCreditLimitHistory(
   }
   return (await res.json()) as CreditLimitHistoryItem[];
 }
+async function financePost<T>(path: string, input: object, fallback: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail ?? fallback);
+  }
+  return (await res.json()) as T;
+}
+
+export function recordCollection(input: {
+  sim_run_id: string; financing_mode: string; collection_date: string; receivable_id: string;
+  collect_all: boolean; amount_krw?: string; source_ref: string; recorded_by: string; note?: string;
+}): Promise<{ receivable_id: string; received_delta_krw: Money; outstanding_amount_krw: Money; status: string }> {
+  return financePost("/finance/receivables/collections", input, "수금을 기록하지 못했습니다.");
+}
+
+export function recordCashAdjustment(input: {
+  sim_run_id: string; financing_mode: string; adjustment_date: string;
+  direction: "INFLOW" | "OUTFLOW"; category: "OWNER_INJECTION" | "OWNER_WITHDRAWAL" | "OTHER";
+  amount_krw: string; source_ref: string; recorded_by: string; note?: string;
+}): Promise<{ cash_adjustment_id: string; current_cash_krw: Money }> {
+  return financePost("/finance/cash-adjustments", input, "자금 조정을 기록하지 못했습니다.");
+}

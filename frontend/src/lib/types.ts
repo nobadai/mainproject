@@ -323,7 +323,13 @@ export type PurchaseRecordStatus =
 export interface PurchaseRecordLeg {
   seq: number;
   qty_kg: number;
-  /** 선정안에 금액이 없으면 `null` — 화면이 0 으로 채우지 않는다. */
+  /**
+   * 원/kg. **사람이 적는 값이고 폼이 미리 채운다** (2026-09-16).
+   *
+   * 선정안에 단가가 없으면 `null` — 화면이 금액 ÷ 수량으로 지어내지 않고 빈 칸으로 연다.
+   */
+  unit_price_krw: number | null;
+  /** 수량 × 단가로 난 값. **입력칸이 아니다** — 화면이 확인용으로만 보여 준다. */
   amount_krw: number | null;
   purchase_date: string;
   arrival_date: string;
@@ -351,6 +357,9 @@ export interface PurchaseRecordOut {
  * `POST /master/runs/{request_id}/purchase-record` 본문.
  *
  * ★ 회차 수와 `seq` 는 선정안 그대로다 — 사람은 값만 고친다.
+ *
+ * 🔴 **금액 칸이 없다** (2026-09-16). 수량과 단가를 보내면 금액은 서버가 수량 × 단가로
+ *    만든다 — 둘 다 보내면 어긋나는 날 어느 쪽이 산 값인지 알 수 없다.
  */
 export interface PurchaseRecordIn {
   decision_seq: number;
@@ -359,7 +368,8 @@ export interface PurchaseRecordIn {
   legs: {
     seq: number;
     qty_kg: number;
-    amount_krw: number;
+    /** 원/kg. **정수다** — 매입 원장 단가 칸의 모양이다. */
+    unit_price_krw: number;
     purchase_date: string;
     arrival_date: string;
   }[];

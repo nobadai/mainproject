@@ -63,6 +63,31 @@ class Plan(BaseModel):
     risks: list[str] = Field(description="걸리는 것. 비어 있으면 안 적는다")
     pending: bool = Field(description="아직 사람이 안 고른 안인가")
     approved: bool = Field(default=False, description="이미 승인된 안인가")
+    #  🔴 **`approved` 를 안 지운다** — 쓰는 화면이 있다 (`console/purchase/page.tsx`).
+    #     `state` 는 그것이 못 가르는 것(승인 vs 실매입 기록됨)을 마저 가른다.
+    state: str = Field(
+        default="후보",
+        description=(
+            "이 안이 실제로 어느 상태인가 — 후보 · 승인됨 · 매입 기록됨 · 반려. "
+            "🔴 낱말과 가르는 규칙의 주인은 `app/api/plan_state.py` 하나다 "
+            "(대시보드도 같은 것을 쓴다). 화면이 이 넷 밖의 말을 만들지 않는다."
+        ),
+    )
+    #  🔴 **말로 한 승인이 짚을 자리다** (2026-09-16). 콘솔에서 *"기본으로 해"* 라고
+    #     하면 화면이 이 목록에서 라벨로 안을 찾아 `target_request_id` 로 싣는다.
+    #     이 칸이 없던 동안에는 라벨만으로 어느 실행의 안인지 짚을 수 없어, 그 채팅
+    #     에서 방금 만든 안이 아니면 승인이 **멈췄다** (`MasterConsole.confirm`).
+    request_id: str | None = Field(
+        default=None,
+        description="이 안을 낸 실행의 업무 키. 못 읽으면 None 이고 지어내지 않는다",
+    )
+    #  ⚠️ 업무 키 하나에 실행이 여러 행이다 (실측 75행). 그 사이 재실행이 있으면
+    #     업무 키만으로는 **본 것과 다른 안**이 승인된 것으로 남는다 — 그래서 행 id 를
+    #     짝으로 싣는다 (`master/decision.py` 의 `history_run_id` 와 같은 값).
+    history_run_id: str | None = Field(
+        default=None,
+        description="이 안을 낸 실행 이력 행 id(master_agent_runs.run_id). 못 읽으면 None",
+    )
     #  🔴 **`None` 은 «못 읽었다» 가 아니라 «걷기 밖» 이다.** 축이 붙기 전에 만든
     #     실행이거나 손으로 돌린 것이고, 그 사실이 화면에 보여야 한다 (마스터 청구
     #     2026-09-10). 걷기와 손 실행이 **같아 보이면** 보는 사람이 둘을 한 세상으로

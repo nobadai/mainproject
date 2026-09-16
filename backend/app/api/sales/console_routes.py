@@ -60,9 +60,23 @@ def trend(
     sim_run_id: Annotated[str, Query(min_length=1)],
     as_of: date,
     days: Annotated[int, Query(ge=1, le=MAX_TREND_DAYS)] = MAX_TREND_DAYS,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> SalesTrendResponse:
-    """Stored sales folded by date for exactly one run.  The screen never folds them."""
-    return get_console_sales_trend(sim_run_id=sim_run_id, as_of=as_of, days=days)
+    """Stored sales folded by date for exactly one requested range."""
+    try:
+        return get_console_sales_trend(
+            sim_run_id=sim_run_id,
+            as_of=as_of,
+            days=days,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="시작일은 종료일보다 늦을 수 없습니다.",
+        ) from error
 
 
 @router.get("/partners", response_model=ConsolePartnersResponse)

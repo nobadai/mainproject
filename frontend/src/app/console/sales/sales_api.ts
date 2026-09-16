@@ -92,6 +92,18 @@ export interface SalesSummaryResponse {
     received_amount_krw: Money;
     outstanding_receivables_krw: Money;
   };
+recent_sales: {
+    sale_id: string;
+    sale_date: string;
+    customer_partner_id: string;
+    partner_name: string | null;
+    total_quantity_kg: Money;
+    total_amount_krw: Money;
+    collection_due_date: string;
+    collection_status: string;
+    collection_status_label: string;
+    order_status: string;
+  }[];
   items: {
     item_id: string;
     item_name: string | null;
@@ -120,9 +132,9 @@ export const salesOverview = {
     send<SalesSummaryResponse>(
       `${CONSOLE_BASE}/sales/summary?${query({ sim_run_id: simRun, as_of: asOf })}`,
     ),
-  trend: (simRun: string, asOf: string) =>
+  trend: (simRun: string, asOf: string, fromDate?: string, toDate?: string) =>
     send<SalesTrendResponse>(
-      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf })}`,
+      `${CONSOLE_BASE}/sales/trend?${query({ sim_run_id: simRun, as_of: asOf, from_date: fromDate, to_date: toDate })}`,
     ),
   proposals: (simRun: string, asOf: string) =>
     send<SalesProposalsResponse>(

@@ -23,6 +23,7 @@ def _graph():
     graph = StateGraph(SalesAgentState)
     graph.add_node("prepare_context", _prepare_context)
     graph.add_node("classify_situation", _classify_situation)
+    graph.add_node("plan_strategy", _plan_strategy)
     graph.add_node("generate_candidates", _generate_candidates)
     graph.add_node("plan_validations", _plan_validations)
     graph.add_node("apply_feedback", _apply_feedback)
@@ -37,8 +38,11 @@ def _graph():
     graph.add_conditional_edges(
         "classify_situation",
         _route_after_situation,
-        {"incomplete": "self_check", "generate": "generate_candidates"},
+        {"incomplete": "self_check", "generate": "plan_strategy"},
     )
+    # ★ 입력이 모자란 길에서는 전략을 세우지 않는다 — 만들 안이 없는데 모델을 부르면
+    #   그 호출은 아무것도 바꾸지 못하고 비용만 쓴다.
+    graph.add_edge("plan_strategy", "generate_candidates")
     graph.add_edge("generate_candidates", "plan_validations")
     graph.add_conditional_edges(
         "plan_validations",
@@ -111,10 +115,49 @@ def _route_after_situation(state: SalesAgentState) -> str:
     return "incomplete" if state.get("missing_data") else "generate"
 
 
+def _plan_strategy(state: SalesAgentState) -> SalesAgentState:
+    """**후보를 만들기 전에 세 전략의 자세를 정한다** (2026-09-16).
+
+    🔴 **모델이 불리는 두 번째 자리이고, 앞자리다.** 뒤쪽 `interpret_recommendation`
+      은 이미 정해진 추천을 말로 옮기는 자리라 전략에 참여하지 않는다 — 그래서
+      판매안이 *"모델이 만든 전략"* 인 적이 없었다.
+
+    🔴 **여기서도 숫자는 안 나온다.** 모델은 자세(닫힌 어휘)만 고르고, 그 자세가
+      실제 단가·수량이 되는 것은 `_generate_scenarios` 의 결정론 계산이다.
+
+    ★ **계획은 한 실행에 한 번 선다.** 노드를 따로 세운 이유가 이것이다 — 후보
+      생성 안에서 매번 만들면 모델을 여러 번 부르고, 회차마다 다른 자세가 나오면
+      같은 실행 안에서 세 안의 기준이 갈린다.
+    """
+    from app.sales.proposal import _all_feedback_replies
+    from app.sales.strategy import plan_strategies
+
+    request = state["request"]
+    plan, signals = plan_strategies(request, _all_feedback_replies(request))
+    return {
+        **state,
+        "strategy_plan": plan,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "plan_strategy",
+                "strategy_source": plan.source,
+                "llm_status": plan.llm_status,
+                "depletion_pressure": signals.depletion_pressure,
+                "postures": [
+                    {"strategy": p.strategy, "price_posture": p.price_posture}
+                    for p in plan.profiles
+                ],
+                "clamped": plan.clamped_reason_codes,
+            },
+        ],
+    }
+
+
 def _generate_candidates(state: SalesAgentState) -> SalesAgentState:
     from app.sales.proposal import _generate_scenarios
 
-    candidates = _generate_scenarios(state["request"])
+    candidates = _generate_scenarios(state["request"], state.get("strategy_plan"))
     terminal_reason = None if candidates else "NO_SALES_CANDIDATE"
     return {
         **state,
@@ -453,6 +496,11 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
         recommendation=recommendation,
         self_check=state["self_check"],
         decision_trace=trace,
+        # 🔴 **장애를 숨기지 않는다** (§10). 모델이 실패했는데 성공처럼 보이면 모델이
+        #   죽은 날과 산 날이 화면에서 같아진다.
+        **_strategy_fields(state),
+        # ★ 제약 때문에 숫자가 수렴한 사실은 **버그가 아니라 결과의 일부**다 (§8).
+        **_strategy_collapse(scenarios),
     )
     return {
         **state,
@@ -508,6 +556,62 @@ def _agent_self_check(
             else ["판매안의 추천 후보와 외부 검증 상태를 다시 확인해 주세요."],
         }
     )
+
+
+def _strategy_collapse(scenarios) -> dict[str, object]:
+    """자세는 갈렸는데 **숫자가 수렴했는가.** 숫자를 벌리지 않고 원인만 남긴다.
+
+    ```text
+    자세가 한 가지뿐이다          → 수렴이 아니다. 애초에 나뉜 적이 없다
+    자세는 여럿인데 단가가 한 가지 → 수렴이다. 무엇이 묶었는지를 적는다
+    ```
+
+    🔴 **수렴 원인을 지어내지 않는다.** 코드는 결정론 계산이 실제로 쓴 것
+      (`price_strategy_codes`)에서만 온다 — `MARGIN_FLOOR` 가 세 안을 다 묶었으면
+      그 이름이 거기 있다.
+
+    ★ **단가가 없는 안은 안 센다.** 가격을 못 만든 것과 같은 값에 닿은 것은 다르다.
+    """
+    by_price: dict[object, list] = {}
+    for scenario in scenarios:
+        if scenario.unit_price_krw is not None:
+            by_price.setdefault(scenario.unit_price_krw, []).append(scenario)
+
+    reasons: set[str] = set()
+    collapsed = False
+    for group in by_price.values():
+        if len(group) < 2 or len({_posture_of(s) for s in group}) < 2:
+            # 같은 자세끼리 같은 값인 것은 수렴이 아니다 — 애초에 안 나뉜 것이다.
+            continue
+        collapsed = True
+        # ★ **그 묶임을 다 설명하는 코드만** 원인이다. 한 안에만 있는 코드는
+        #   왜 둘이 같은 값에 닿았는지를 말해 주지 못한다.
+        reasons |= set.intersection(*(set(s.price_strategy_codes) for s in group))
+    if not collapsed:
+        return {}
+    return {"strategy_collapsed": True, "strategy_collapse_reason_codes": sorted(reasons)}
+
+
+def _posture_of(scenario) -> str | None:
+    profile = scenario.strategy_profile
+    return getattr(profile, "price_posture", None) if profile is not None else None
+
+
+def _strategy_fields(state: SalesAgentState) -> dict[str, object]:
+    """전략 출처 세 칸. **계획이 없으면 "꺼져 있었다" 가 아니라 "안 세웠다" 다.**
+
+    ★ 입력이 모자라 전략 노드를 지나지 않은 길에서는 계획 자체가 없다 — 그때는
+      `SKIPPED_TEMPLATE` 이다. `DISABLED` 로 적으면 설정을 안 켠 것처럼 읽힌다
+      (envelope §LLMStatus 가 가른 바로 그 둘).
+    """
+    plan = state.get("strategy_plan")
+    if plan is None:
+        return {"strategy_source": "TEMPLATE_FALLBACK", "strategy_llm_status": "SKIPPED_TEMPLATE"}
+    return {
+        "strategy_source": plan.source,
+        "strategy_llm_status": plan.llm_status,
+        "strategy_clamped_reason_codes": list(plan.clamped_reason_codes),
+    }
 
 
 def _is_rejected(candidate) -> bool:
