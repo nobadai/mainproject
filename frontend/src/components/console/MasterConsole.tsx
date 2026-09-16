@@ -184,13 +184,28 @@ export function MasterConsole({ session }: { session: Session }) {
     setTurns((prev) => [...prev, ...items]);
   }
 
+  /**
+   * 실패를 화면에 적는다. **서버가 준 사유를 삼키지 않는다.**
+   *
+   * 🔴 사람 말로 된 사유는 **그대로 보인다** (`userErrorText` 가 가른다) —
+   *    「'초공격' 은 이 실행이 내놓은 안이 아니다. 제시된 안: 보수, 기본, 공격」 처럼
+   *    **무엇을 고쳐야 하는지 알려주는 문장**이 사라지면 사람이 손 쓸 데가 없다.
+   *
+   * ★ 코드가 섞인 사유는 그대로 올리지 않는다 (「사람 말만」). 다만 그때도
+   *   **「잠시 뒤 다시 시도해 주세요」 로 덮지 않는다** — 요청 자체가 틀린 것이라
+   *   기다렸다 다시 눌러도 같다. 그 문구는 **연결이 끊겼거나 서버가 탈 났을 때**의 말이다.
+   */
   function fail(error: unknown) {
+    const status = error instanceof ApiError ? error.status : null;
+    const wrongRequest = status !== null && status >= 400 && status < 500;
     push({
       kind: "error",
       text: userErrorText(
-        error instanceof ApiError ? error.status : null,
+        status,
         error instanceof Error ? error.message : "",
-        "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
+        wrongRequest
+          ? "요청을 처리하지 못했습니다 — 다시 눌러도 같습니다. 화면에서 직접 해 주세요."
+          : "요청을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.",
       ),
     });
   }
@@ -249,12 +264,29 @@ export function MasterConsole({ session }: { session: Session }) {
   ) {
     if (busy || !session || turn.done) return;
     const rerun = turn.intent.action === "RERUN_WITH_CONDITION";
+    //   말로 한 승인. **모달로 누른 승인(`approve`)과 같은 셋을 실어야 한다** —
+    //   빠뜨리면 서버가 422 로 거절하고, 눌러서 한 승인과 말로 한 승인이 갈린다.
+    const select = turn.intent.action === "SELECT_SCENARIO";
+    /**
+     * 🔴 **발화문에 없어 화면이 실어야 하는 둘** — 어느 실행의 안인가(`target_*`)와
+     *    누가 승인하는가(`decided_by`). `lib/api.ts` 의 「SELECT · RERUN 필수」가
+     *    그것이고, 서버(`ask_service._record_selection`)도 없으면 거절한다.
+     */
+    const needsTarget = rerun || select;
 
-    // 🔴 다시 돌릴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
-    if (rerun && !last) {
+    // 🔴 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 를 낸다.
+    //
+    //    ⚠️ 말로 한 승인은 **이 대화에서 만든 안**만 짚을 수 있다. 「그날 서 있는 안을
+    //       목록에서 라벨로 찾아 싣는다」 가 지금은 안 된다 — `GET /api/purchase` 의
+    //       `plans[]`(`api/purchase/schema.Plan`) 에 `request_id` 칸이 없어서
+    //       라벨만으로는 어느 실행의 안인지 짚을 수 없다. 그 칸이 생기면 여기서
+    //       찾아 싣도록 넓힌다. **그때까지 서버에 추측시키지 않는다.**
+    if (needsTarget && !last) {
       push({
         kind: "error",
-        text: "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다.",
+        text: rerun
+          ? "다시 만들 대상이 없습니다 — 먼저 매입안을 한 번 만들어야 조건을 붙일 수 있습니다."
+          : "어느 안을 말씀하시는지 찾지 못했습니다. 매입 화면에서 골라 주세요.",
       });
       return;
     }
@@ -269,10 +301,10 @@ export function MasterConsole({ session }: { session: Session }) {
       const res = await execute({
         intent: turn.intent,
         requestId: turn.requestId,
-        // 재요청에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
-        targetRequestId: rerun ? (last?.requestId ?? undefined) : undefined,
-        targetHistoryRunId: rerun ? (last?.historyRunId ?? undefined) : undefined,
-        decidedBy: rerun ? session.name : undefined,
+        // 재요청·안 선택에만 싣는다 — 조회·매입 실행에는 대상 실행이 없다
+        targetRequestId: needsTarget ? (last?.requestId ?? undefined) : undefined,
+        targetHistoryRunId: needsTarget ? (last?.historyRunId ?? undefined) : undefined,
+        decidedBy: needsTarget ? session.name : undefined,
         utterance: turn.utterance,
       });
 

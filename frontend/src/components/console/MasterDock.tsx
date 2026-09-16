@@ -28,6 +28,7 @@
  *     글이 화면 끝에 딱 붙으면 읽기 나쁩니다.
  */
 
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MasterConsole } from "@/components/console/MasterConsole";
@@ -47,6 +48,17 @@ export function MasterDock({ session }: { session: Session }) {
   const [open, setOpen] = useState(false);
 
   /**
+   * 자리를 양보하고 있는가 — **탭을 누른 뒤의 상태**다.
+   *
+   * ★ 탭을 누른 사람은 **그 화면을 보려는 것**이다. 대화는 이어서 보되 자리를 양보한다
+   *   — 닫지 않고 `MIN_HEIGHT` 까지만 내린다. 닫아 버리면 되묻던 확인이 눈앞에서 사라진다.
+   *
+   * 🔴 **저장소를 건드리지 않는다.** 줄이는 것은 *보여 주는* 높이뿐이다. 사람이 손잡이로
+   *    정한 높이는 그대로 남아, 다시 끌거나 다음에 열면 자기 높이로 돌아온다.
+   */
+  const [ceded, setCeded] = useState(false);
+
+  /**
    * 정해 둔 크기. `null` 은 **아직 저장소를 안 봤다** 는 뜻이다.
    *
    * ★ 첫 렌더에서 `localStorage` 를 보면 서버 렌더와 값이 갈려 하이드레이션이
@@ -57,8 +69,16 @@ export function MasterDock({ session }: { session: Session }) {
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ startY: number; startHeight: number; height: number } | null>(null);
 
-  /** 지금 값. 손잡이·버튼은 열린 뒤에만 도니까 저장소를 다시 볼 일은 거의 없다. */
-  const current = useCallback((): DockSize => size ?? readDockSize(window.innerHeight), [size]);
+  /**
+   * 지금 **보이는** 값. 손잡이·버튼은 열린 뒤에만 도니까 저장소를 다시 볼 일은 거의 없다.
+   *
+   * ★ 양보 중이면 눈에 보이는 높이는 `MIN_HEIGHT` 다. 손잡이를 잡으면 **보이던 그 자리**
+   *   에서 이어 끌려야 하므로 여기서도 그 값을 준다 — 저장된 높이로 튀지 않는다.
+   */
+  const current = useCallback((): DockSize => {
+    const mine = size ?? readDockSize(window.innerHeight);
+    return ceded ? { ...mine, height: MIN_HEIGHT } : mine;
+  }, [ceded, size]);
 
   const commit = useCallback((next: DockSize) => {
     setSize(next);
@@ -67,8 +87,33 @@ export function MasterDock({ session }: { session: Session }) {
 
   const toggleOpen = useCallback(() => {
     setSize((prev) => prev ?? readDockSize(window.innerHeight));
+    // 다시 열면 사람이 정해 둔 높이로 돌아온다 — 양보는 거기서 끝난다
+    setCeded(false);
     setOpen((v) => !v);
   }, []);
+
+  /* ── 탭을 누르면 자리를 양보한다 ──────────────────────────────────────── */
+
+  const pathname = usePathname();
+  //  효과 안에서 `open` 을 읽되 의존성에는 넣지 않는다 — 여닫을 때마다 다시 돌면
+  //  방금 연 서랍을 그 자리에서 다시 줄여 버린다.
+  const openNow = useRef(open);
+  useEffect(() => {
+    openNow.current = open;
+  }, [open]);
+
+  const firstPath = useRef(true);
+  useEffect(() => {
+    // 🔴 첫 렌더에서는 아무것도 하지 않는다. 서랍은 어차피 접힌 채로 뜨고, 여기서
+    //    건드리면 뜨자마자 한 번 깜빡인다.
+    if (firstPath.current) {
+      firstPath.current = false;
+      return;
+    }
+    // 접혀 있으면 그대로 둔다 — 탭을 눌렀다고 서랍을 열어 주지는 않는다
+    if (!openNow.current) return;
+    setCeded(true);
+  }, [pathname]);
 
   /* ── 손잡이 ──────────────────────────────────────────────────────────
    *
@@ -80,6 +125,9 @@ export function MasterDock({ session }: { session: Session }) {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const start = current();
       drag.current = { startY: e.clientY, startHeight: start.height, height: start.height };
+      // 사람이 직접 잡았으면 양보는 끝이다 — 이제부터는 이 손이 높이를 정한다
+      setCeded(false);
+      setSize((prev) => (prev ? { ...prev, height: start.height } : { height: start.height }));
       // 끄는 동안 글자가 딸려 잡히지 않게
       e.preventDefault();
       setDragging(true);
@@ -140,7 +188,18 @@ export function MasterDock({ session }: { session: Session }) {
    */
   const consoleEl = useMemo(() => <MasterConsole session={session} />, [session]);
 
-  const height = !open ? 0 : size ? `min(${size.height}px, ${MAX_HEIGHT_CSS})` : DEFAULT_HEIGHT_CSS;
+  /**
+   * 눈에 보이는 높이.
+   *
+   * ★ 양보 중이면 `MIN_HEIGHT` 다 — **저장된 높이는 그대로 남아 있고**, 여기서만 낮춘다.
+   *   상한(`MAX_HEIGHT_CSS`)을 다시 걸지 않는 이유는 `MIN_HEIGHT` 가 이미 그 아래라서다.
+   */
+  const shownHeight = ceded ? MIN_HEIGHT : (size?.height ?? null);
+  const height = !open
+    ? 0
+    : shownHeight !== null
+      ? `min(${shownHeight}px, ${MAX_HEIGHT_CSS})`
+      : DEFAULT_HEIGHT_CSS;
 
   return (
     <aside
@@ -163,9 +222,9 @@ export function MasterDock({ session }: { session: Session }) {
               role="separator"
               aria-orientation="horizontal"
               aria-label="마스터 콘솔 높이"
-              aria-valuenow={size.height}
+              aria-valuenow={shownHeight ?? size.height}
               aria-valuemin={MIN_HEIGHT}
-              aria-valuetext={`${size.height}픽셀`}
+              aria-valuetext={`${shownHeight ?? size.height}픽셀`}
               tabIndex={0}
               title="끌어서 높이를 조절합니다 · 화살표 위아래로도 됩니다"
               onPointerDown={onPointerDown}
