@@ -1,5 +1,7 @@
 """Sales 후보 해석을 Gemini 구조화 출력으로 연결한다."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -7,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +25,140 @@ _ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",
     Path(__file__).resolve().parents[4] / ".env",
 )
+
+
+_PLANNER_SYSTEM_PROMPT = """당신은 판매 전략 자세만 정합니다.
+CONSERVATIVE · BALANCED · AGGRESSIVE 세 전략의 자세를 각각 한 번씩 고르세요.
+가격·수량·금액·마진·판정은 결정론 코드가 계산하므로 절대 만들지 마세요.
+숫자를 한 글자도 쓰지 말고, 주어진 어휘 밖의 값을 만들지 마세요.
+DEPLETION 자세는 소진 신호가 실제로 있을 때만 고르세요."""
+
+
+class StrategyPlanningInput(BaseModel):
+    """Planner 가 보는 **사실 라벨**. 금액도 수량도 없다.
+
+    🔴 **여신 여력을 금액으로 주지 않는다.** 금액을 보여 주면 모델이 그 값을 문장에
+      옮기고 싶어지고, 옮긴 순간 재무가 센 사실의 주인이 둘이 된다. 모델이 자세를
+      고르는 데 필요한 것은 *"남았나 / 찼나 / 모르나"* 뿐이다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    depletion_pressure: bool
+    freshness_risk_codes: list[str] = Field(default_factory=list)
+    has_freshness_risk_lots: bool = False
+    sell_priority: str | None = None
+    inventory_risk_severity: str | None = None
+    payment_pressure: str | None = None
+    credit_state: Literal["AVAILABLE", "EXHAUSTED", "UNKNOWN"] = "UNKNOWN"
+    finance_context_available: bool = False
+    ml_band_available: bool = False
+
+
+class LlmStrategyProfileOutput(BaseModel):
+    """모델이 돌려주는 자세 하나. **닫힌 어휘라 숫자가 들어올 칸이 없다.**"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"]
+    price_posture: Literal["MARGIN_DEFENSE", "MARKET_ALIGNED", "DEPLETION"]
+    quantity_posture: Literal["LIMITED", "NORMAL", "EXPANDED"]
+    inventory_posture: Literal["NORMAL", "FIFO", "FRESHNESS_RISK_FIRST"]
+    credit_posture: Literal["STRICT", "NORMAL", "WITHIN_LIMIT"]
+    cash_posture: Literal["DEFENSIVE", "NORMAL", "CASH_CONVERSION"]
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class LlmStrategyPlanOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strategies: list[LlmStrategyProfileOutput]
+
+
+@dataclass(frozen=True)
+class StrategyPlanOutcome:
+    """자세 셋과 **그것을 누가 만들었는가.** 실패를 숨기지 않는다 (§10)."""
+
+    source: str
+    llm_status: str
+    profiles: list[Any]
+    llm_provider: str | None = None
+    llm_model: str | None = None
+
+
+def plan_strategy_profiles(*, signals: Any, template: list[Any]) -> StrategyPlanOutcome:
+    """후보를 만들기 **전에** 세 전략의 자세를 정한다.
+
+    ```text
+    설정 꺼짐          DISABLED   → 템플릿
+    호출 실패·계약 위반 FALLBACK   → 템플릿
+    성공              SUCCESS    → 모델 자세 (호출부가 사실로 한 번 더 깎는다)
+    ```
+
+    🔴 **템플릿으로 떨어져도 세 전략은 선다.** 외부 모델 하나 때문에 판매안이
+      안 나오면, 그 모델이 없는 날 사업이 멈춘다.
+    """
+    settings = load_settings()
+    if not settings.enabled:
+        return StrategyPlanOutcome("TEMPLATE_FALLBACK", "DISABLED", template, None, settings.model)
+    try:
+        output = _call_gemini_planner(_planner_context(signals), settings)
+        profiles = _validated_profiles(output, template)
+    except Exception:  # noqa: BLE001 - 외부 호출 실패는 판매안 실패가 아니다.
+        return StrategyPlanOutcome(
+            "TEMPLATE_FALLBACK", "FALLBACK", template, settings.provider, settings.model
+        )
+    return StrategyPlanOutcome("LLM", "SUCCESS", profiles, settings.provider, settings.model)
+
+
+def _planner_context(signals: Any) -> StrategyPlanningInput:
+    """모델에 나가는 것 전부. **여기 없는 것은 모델이 못 본다.**"""
+    if signals.credit_available_krw is None:
+        credit_state = "UNKNOWN"
+    else:
+        credit_state = "EXHAUSTED" if signals.credit_available_krw <= 0 else "AVAILABLE"
+    return StrategyPlanningInput(
+        depletion_pressure=signals.depletion_pressure,
+        freshness_risk_codes=list(signals.freshness_risk_codes),
+        has_freshness_risk_lots=bool(signals.freshness_risk_lot_ids),
+        sell_priority=signals.sell_priority,
+        inventory_risk_severity=signals.inventory_risk_severity,
+        payment_pressure=signals.payment_pressure,
+        credit_state=credit_state,
+        finance_context_available=signals.has_finance_context,
+        ml_band_available=signals.ml_gate_open,
+    )
+
+
+def _call_gemini_planner(context: StrategyPlanningInput, settings: LLMSettings):
+    """해석 호출과 **같은 전선, 다른 계약**이다 — 스키마와 지시문만 다르다."""
+    return _gemini_structured(
+        system_prompt=_PLANNER_SYSTEM_PROMPT,
+        user_json=json.dumps(context.model_dump(), ensure_ascii=False),
+        schema_model=LlmStrategyPlanOutput,
+        settings=settings,
+    )
+
+
+def _validated_profiles(output: LlmStrategyPlanOutput, template: list[Any]) -> list[Any]:
+    """모델 자세를 받아들일지 정한다. **어긋나면 통째로 버린다.**
+
+    ★ 일부만 고쳐 쓰지 않는다. 세 전략 중 하나가 빠졌거나 두 번 왔으면 모델이 계약을
+      이해하지 못한 것이고, 그런 계획에서 한 줄만 건져 쓰면 **어디까지가 모델의
+      판단인지** 아무도 말할 수 없다.
+
+    🔴 **사유에 숫자가 있으면 버린다.** 자세는 라벨이고, 라벨에 숫자가 섞이는 순간
+      모델이 값을 말하기 시작한 것이다.
+    """
+    from app.sales.strategy import StrategyProfile
+
+    names = [item.strategy for item in output.strategies]
+    if sorted(names) != ["AGGRESSIVE", "BALANCED", "CONSERVATIVE"]:
+        raise ValueError("strategy set is not A/B/C exactly once")
+    for item in output.strategies:
+        if any(_NUMBER.search(code) for code in item.reason_codes):
+            raise ValueError("unsafe planner output")
+    del template
+    return [StrategyProfile.model_validate(item.model_dump()) for item in output.strategies]
 
 
 class CandidateInterpretationInput(BaseModel):
@@ -112,19 +248,34 @@ def _safe_context(candidates: list[SalesCandidate]) -> list[CandidateInterpretat
 
 def _call_gemini(context: list[CandidateInterpretationInput], settings: LLMSettings):
     """Gemini의 JSON Schema 응답을 받아 Sales 전용 계약으로 검증한다."""
+    return _gemini_structured(
+        system_prompt=_SYSTEM_PROMPT,
+        user_json=json.dumps([c.model_dump() for c in context], ensure_ascii=False),
+        schema_model=LlmInterpretationOutput,
+        settings=settings,
+    )
+
+
+def _gemini_structured(
+    *, system_prompt: str, user_json: str, schema_model: type[BaseModel], settings: LLMSettings
+):
+    """구조화 출력 한 번. **두 호출(해석·전략)이 같은 전선을 쓴다.**
+
+    ★ 전선을 두 벌로 두면 타임아웃·키·스키마 낮추기가 두 곳에서 갈린다 — 한쪽만
+      고치는 날이 오고, 그날 한쪽 호출만 조용히 다른 규칙으로 돈다.
+    """
     if settings.provider != "gemini":
         raise RuntimeError("unsupported Sales LLM provider")
     api_key = os.getenv("SALES_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("Sales Gemini API key is not set")
-    context_json = json.dumps([c.model_dump() for c in context], ensure_ascii=False)
     payload = {
-        "system_instruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-        "contents": [{"role": "user", "parts": [{"text": context_json}]}],
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_json}]}],
         "generationConfig": {
             "temperature": 0,
             "responseMimeType": "application/json",
-            "responseSchema": _gemini_safe_schema(LlmInterpretationOutput.model_json_schema()),
+            "responseSchema": _gemini_safe_schema(schema_model.model_json_schema()),
         },
     }
     request = urllib.request.Request(
@@ -135,7 +286,7 @@ def _call_gemini(context: list[CandidateInterpretationInput], settings: LLMSetti
     )
     with urllib.request.urlopen(request, timeout=settings.timeout_seconds) as response:
         document = json.loads(response.read().decode("utf-8"))
-    return LlmInterpretationOutput.model_validate_json(_gemini_response_text(document))
+    return schema_model.model_validate_json(_gemini_response_text(document))
 
 
 def _gemini_response_text(document: dict[str, Any]) -> str:

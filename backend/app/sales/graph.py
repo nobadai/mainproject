@@ -23,6 +23,7 @@ def _graph():
     graph = StateGraph(SalesAgentState)
     graph.add_node("prepare_context", _prepare_context)
     graph.add_node("classify_situation", _classify_situation)
+    graph.add_node("plan_strategy", _plan_strategy)
     graph.add_node("generate_candidates", _generate_candidates)
     graph.add_node("plan_validations", _plan_validations)
     graph.add_node("apply_feedback", _apply_feedback)
@@ -37,8 +38,11 @@ def _graph():
     graph.add_conditional_edges(
         "classify_situation",
         _route_after_situation,
-        {"incomplete": "self_check", "generate": "generate_candidates"},
+        {"incomplete": "self_check", "generate": "plan_strategy"},
     )
+    # ★ 입력이 모자란 길에서는 전략을 세우지 않는다 — 만들 안이 없는데 모델을 부르면
+    #   그 호출은 아무것도 바꾸지 못하고 비용만 쓴다.
+    graph.add_edge("plan_strategy", "generate_candidates")
     graph.add_edge("generate_candidates", "plan_validations")
     graph.add_conditional_edges(
         "plan_validations",
@@ -111,10 +115,49 @@ def _route_after_situation(state: SalesAgentState) -> str:
     return "incomplete" if state.get("missing_data") else "generate"
 
 
+def _plan_strategy(state: SalesAgentState) -> SalesAgentState:
+    """**후보를 만들기 전에 세 전략의 자세를 정한다** (2026-09-16).
+
+    🔴 **모델이 불리는 두 번째 자리이고, 앞자리다.** 뒤쪽 `interpret_recommendation`
+      은 이미 정해진 추천을 말로 옮기는 자리라 전략에 참여하지 않는다 — 그래서
+      판매안이 *"모델이 만든 전략"* 인 적이 없었다.
+
+    🔴 **여기서도 숫자는 안 나온다.** 모델은 자세(닫힌 어휘)만 고르고, 그 자세가
+      실제 단가·수량이 되는 것은 `_generate_scenarios` 의 결정론 계산이다.
+
+    ★ **계획은 한 실행에 한 번 선다.** 노드를 따로 세운 이유가 이것이다 — 후보
+      생성 안에서 매번 만들면 모델을 여러 번 부르고, 회차마다 다른 자세가 나오면
+      같은 실행 안에서 세 안의 기준이 갈린다.
+    """
+    from app.sales.proposal import _all_feedback_replies
+    from app.sales.strategy import plan_strategies
+
+    request = state["request"]
+    plan, signals = plan_strategies(request, _all_feedback_replies(request))
+    return {
+        **state,
+        "strategy_plan": plan,
+        "agent_trace": [
+            *state.get("agent_trace", []),
+            {
+                "stage": "plan_strategy",
+                "strategy_source": plan.source,
+                "llm_status": plan.llm_status,
+                "depletion_pressure": signals.depletion_pressure,
+                "postures": [
+                    {"strategy": p.strategy, "price_posture": p.price_posture}
+                    for p in plan.profiles
+                ],
+                "clamped": plan.clamped_reason_codes,
+            },
+        ],
+    }
+
+
 def _generate_candidates(state: SalesAgentState) -> SalesAgentState:
     from app.sales.proposal import _generate_scenarios
 
-    candidates = _generate_scenarios(state["request"])
+    candidates = _generate_scenarios(state["request"], state.get("strategy_plan"))
     terminal_reason = None if candidates else "NO_SALES_CANDIDATE"
     return {
         **state,
@@ -453,6 +496,9 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
         recommendation=recommendation,
         self_check=state["self_check"],
         decision_trace=trace,
+        # 🔴 **장애를 숨기지 않는다** (§10). 모델이 실패했는데 성공처럼 보이면 모델이
+        #   죽은 날과 산 날이 화면에서 같아진다.
+        **_strategy_fields(state),
     )
     return {
         **state,
@@ -508,6 +554,23 @@ def _agent_self_check(
             else ["판매안의 추천 후보와 외부 검증 상태를 다시 확인해 주세요."],
         }
     )
+
+
+def _strategy_fields(state: SalesAgentState) -> dict[str, object]:
+    """전략 출처 세 칸. **계획이 없으면 "꺼져 있었다" 가 아니라 "안 세웠다" 다.**
+
+    ★ 입력이 모자라 전략 노드를 지나지 않은 길에서는 계획 자체가 없다 — 그때는
+      `SKIPPED_TEMPLATE` 이다. `DISABLED` 로 적으면 설정을 안 켠 것처럼 읽힌다
+      (envelope §LLMStatus 가 가른 바로 그 둘).
+    """
+    plan = state.get("strategy_plan")
+    if plan is None:
+        return {"strategy_source": "TEMPLATE_FALLBACK", "strategy_llm_status": "SKIPPED_TEMPLATE"}
+    return {
+        "strategy_source": plan.source,
+        "strategy_llm_status": plan.llm_status,
+        "strategy_clamped_reason_codes": list(plan.clamped_reason_codes),
+    }
 
 
 def _is_rejected(candidate) -> bool:
