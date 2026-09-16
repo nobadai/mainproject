@@ -158,9 +158,15 @@ class QaState(TypedDict, total=False):
     batch_read: str            # ok · empty · error
     check_row: dict[str, Any] | None
     check_read: str
+    #   ★ 날짜가 여럿일 수 있다 (2026-09-16). 위 다섯 칸은 **첫 날**을 가리키는 옛 이름.
+    batch_days: list[date]
+    batch_blocks: list[dict[str, Any]]
+    batch_trimmed: bool
     #   ── 성능 갈래 ────────────────────────────────────────────────
     retrain_rows: list[dict[str, Any]]
     perf_read: str
+    perf_days: list[date]
+    perf_trimmed: bool
     #   ★ 지금 무엇이 도나 (2026-09-16). 이름은 교체해도 그대로라 만든 날·학습 끝이
     #     같이 있어야 가려진다.
     models: list[dict[str, Any]]
@@ -234,6 +240,11 @@ def supervise(state: QaState) -> QaState:
                 "message": _ask_again(None, None, chosen.get("dates"))}
 
     picked: QaState = {"routes": routes}
+    #   ★ **고른 날짜를 갈래보다 먼저 담는다** (2026-09-16 · 사용자 결정 ②).
+    #     전에는 가격 갈래 안쪽에서만 담아서, 「어제 배치 상태」의 «어제» 가
+    #     여기서 통째로 사라졌다 — 배치 노드는 늘 오늘만 봤다.
+    if chosen.get("dates"):
+        picked["asked"] = list(chosen["dates"])
     if base_dt is not None:
         picked["base_dt"] = base_dt
     if out_of_scope:
@@ -585,32 +596,83 @@ def _asked_on(state: QaState) -> date:
     return state["request"].as_of or today_in_seoul()
 
 
+#: 한 답에 담을 **지난 날** 상한. 열흘치를 다 펼치면 답이 배치 표로 덮인다.
+MAX_REPORT_DAYS = 7
+
+
+def _report_days(state: QaState) -> tuple[list[date], bool]:
+    """배치·성능이 읽을 날. 돌려주는 것은 (날짜 목록, 잘랐나).
+
+    ★ **지나간 날만 본다** (2026-09-16 · 사용자 결정 ②). 「5일 뒤 배추 경락가랑
+      배치 상태」의 배치는 **오늘**이지 닷새 뒤가 아니다 — 앞날에는 기록이 없다.
+      그래서 앞날만 말했으면 오늘(화면 기준일) 하루로 돌아간다.
+
+    🔴 **자르되 잘랐다고 말한다** (`_trimmed_line`). 조용히 줄이면 열흘을 물은
+      사람이 이레만 보고 «열흘이 다 이렇구나» 로 읽는다.
+    """
+    on = _asked_on(state)
+    days = sorted({d for d in (state.get("asked") or []) if d <= on})
+    if not days:
+        return [on], False
+    if len(days) > MAX_REPORT_DAYS:
+        return days[-MAX_REPORT_DAYS:], True
+    return days, False
+
+
+def _worst(grades: list[str]) -> str:
+    """여러 날의 읽기 결과를 하나로. **못 읽은 것이 있으면 그것이 이긴다.**
+
+    🔴 `_grade` 와 뜻이 다르다. 저쪽은 «답이 나갔나»(하나라도 ok 면 ok)이고,
+      이쪽은 «무엇이 고장인가» 다 — 어댑터가 표 이름을 댈 때 쓴다.
+    """
+    if "error" in grades:
+        return "error"
+    return "ok" if "ok" in grades else "empty"
+
+
 def batch_node(state: QaState) -> QaState:
-    """그날 배치 한 행 + 실패한 단계 + 그날 AI 점검 보고서. **셋 다 읽기만 한다.**
+    """날마다 배치 한 행 + 실패한 단계 + 그날 AI 점검 보고서. **셋 다 읽기만 한다.**
 
     🔴 **둘을 따로 감싼다.** 배치 행을 못 읽어도 보고서는 나갈 수 있고 그 반대도 된다.
       하나로 묶으면 한 번의 실패가 둘을 다 지운다.
+
+    ★ **날짜가 여럿이면 날마다 읽는다** (2026-09-16). 「사흘치 배치」가 그렇다.
     """
     if "batch" not in (state.get("routes") or []):
         return {}
-    on = _asked_on(state)
-    out: QaState = {"batch_on": on}
+    days, trimmed = _report_days(state)
+    blocks: list[dict[str, Any]] = []
+    for on in days:
+        block: dict[str, Any] = {"on": on, "row": None, "fails": [], "report": None}
+        try:
+            row = qa_tools.batch_run(on)
+            block["row"] = row
+            block["fails"] = qa_tools.failed_stages(row["run_id"]) if row else []
+            block["read"] = "ok" if row else "empty"
+        except Exception:                                    # noqa: BLE001
+            block["read"] = "error"
+        try:
+            report = qa_tools.agent_report(qa_tools.CHECK_REPORT, on)
+            block["report"] = report
+            block["report_read"] = "ok" if report else "empty"
+        except Exception:                                    # noqa: BLE001
+            block["report_read"] = "error"
+        blocks.append(block)
 
-    try:
-        row = qa_tools.batch_run(on)
-        out["batch_row"] = row
-        out["batch_fails"] = qa_tools.failed_stages(row["run_id"]) if row else []
-        out["batch_read"] = "ok" if row else "empty"
-    except Exception:                                        # noqa: BLE001
-        out["batch_read"] = "error"
-
-    try:
-        report = qa_tools.agent_report(qa_tools.CHECK_REPORT, on)
-        out["check_row"] = report
-        out["check_read"] = "ok" if report else "empty"
-    except Exception:                                        # noqa: BLE001
-        out["check_read"] = "error"
-    return out
+    first = blocks[0]
+    return {
+        "batch_days": days,
+        "batch_blocks": blocks,
+        "batch_trimmed": trimmed,
+        #   옛 이름 — **첫 날**을 가리킨다. 근거(`_batch_evidence`)와 한 날짜짜리
+        #   검사가 아직 이 이름으로 읽는다.
+        "batch_on": first["on"],
+        "batch_row": first["row"],
+        "batch_fails": first["fails"],
+        "batch_read": _worst([b["read"] for b in blocks]),
+        "check_row": first["report"],
+        "check_read": _worst([b["report_read"] for b in blocks]),
+    }
 
 
 def perf_node(state: QaState) -> QaState:
@@ -626,8 +688,10 @@ def perf_node(state: QaState) -> QaState:
     """
     if "perf" not in (state.get("routes") or []):
         return {}
-    on = _asked_on(state)
-    out: QaState = {}
+    #   ★ 재학습 보고서도 **물어본 날**을 읽는다 (2026-09-16 · 사용자 결정 ②).
+    #     봉인 성능표와 현재 모델은 날짜와 무관하다 — 그건 늘 지금 것이다.
+    days, trimmed = _report_days(state)
+    out: QaState = {"perf_days": days, "perf_trimmed": trimmed}
 
     try:
         found = qa_tools.current_models()
@@ -642,10 +706,11 @@ def perf_node(state: QaState) -> QaState:
     rows: list[dict[str, Any]] = []
     read = "ok"
     try:
-        for name in qa_tools.RETRAIN_REPORTS:
-            #   ★ **그날 것을 전부** 읽는다 (2026-09-16). 마지막 하나만 읽었더니
-            #     경락가 검증의 «후보가 나쁩니다» 가 답에서 통째로 빠졌다.
-            rows += qa_tools.agent_reports(name, on)
+        for on in days:
+            for name in qa_tools.RETRAIN_REPORTS:
+                #   ★ **그날 것을 전부** 읽는다 (2026-09-16). 마지막 하나만 읽었더니
+                #     경락가 검증의 «후보가 나쁩니다» 가 답에서 통째로 빠졌다.
+                rows += qa_tools.agent_reports(name, on)
     except Exception:                                        # noqa: BLE001
         read = "error"
     out["retrain_rows"] = rows
@@ -669,18 +734,60 @@ def _grade(grades: list[str]) -> str:
     return "error" if "error" in grades else "empty"
 
 
+#: 기록이 없는 날의 문구. **«고장» 이 아니라 «그날은 없다» 다** (2026-09-16 · 결정 ①).
+#:
+#: 🔴 이 문장이 화면에 그대로 나가야 한다. 어댑터가 이것을 `RUNTIME_NOT_READY` 로
+#:   올리면 마스터가 답을 버리고 «창고를 쓸 수 없다» 를 대신 띄운다 — 실제로 그랬다.
+NO_BATCH_ROW = "기준일({on})에 대한 배치 기록이 없습니다."
+NO_CHECK_REPORT = "기준일({on})에 대한 점검 보고서{josa} 아직 없습니다."
+NO_RETRAIN_ROW = "기준일({on})에 대한 재학습 판정 기록이 없습니다."
+
+
+def _trimmed_line(days: list[date]) -> str:
+    """이레를 넘겨 잘랐을 때 붙이는 한 줄. **자른 사실을 숨기지 않는다.**"""
+    return (
+        f"> 물어보신 날이 많아 **최근 7일**({days[0]} ~ {days[-1]})만 보여드립니다."
+    )
+
+
 def _batch_section(state: QaState) -> tuple[str, str]:
-    """배치 갈래의 글 한 덩어리. 돌려주는 것은 (글, 성적)."""
-    on = state.get("batch_on") or _asked_on(state)
+    """배치 갈래의 글 한 덩어리. 돌려주는 것은 (글, 성적).
+
+    ★ **날짜마다 블록 하나다** (2026-09-16). 「사흘치 배치」면 블록이 셋이다.
+    """
+    blocks = state.get("batch_blocks") or [{
+        "on": state.get("batch_on") or _asked_on(state),
+        "row": state.get("batch_row"),
+        "fails": state.get("batch_fails") or [],
+        "read": state.get("batch_read") or "empty",
+        "report": state.get("check_row"),
+        "report_read": state.get("check_read") or "empty",
+    }]
+    lines: list[str] = []
+    grades: list[str] = []
+    if state.get("batch_trimmed"):
+        lines += [_trimmed_line([b["on"] for b in blocks]), ""]
+    for index, block in enumerate(blocks):
+        if index:
+            lines.append("")
+        body, grade = _batch_block(block)
+        lines += body
+        grades.append(grade)
+    return "\n".join(lines), _grade(grades)
+
+
+def _batch_block(block: dict[str, Any]) -> tuple[list[str], str]:
+    """하루치 배치 글. 돌려주는 것은 (줄 목록, 성적)."""
+    on = block["on"]
     lines = [f"**배치 — {on}**", ""]
     grades: list[str] = []
 
-    row = state.get("batch_row")
-    if state.get("batch_read") == "error":
+    row = block.get("row")
+    if block.get("read") == "error":
         lines.append("배치 기록을 읽지 못했습니다.")
         grades.append("error")
     elif not row:
-        lines.append(f"{on} 배치 기록이 없습니다.")
+        lines.append(NO_BATCH_ROW.format(on=on))
         grades.append("empty")
     else:
         status = qa_tools.BATCH_STATUS_LABEL.get(str(row.get("status")), str(row.get("status")))
@@ -693,7 +800,7 @@ def _batch_section(state: QaState) -> tuple[str, str]:
             f"| 끝난 단계 | {row.get('n_ok')} |",
             f"| 실패한 단계 | {row.get('n_fail')} |",
         ]
-        fails = state.get("batch_fails") or []
+        fails = block.get("fails") or []
         if fails:
             #   ★ 실패는 **숨기지 않는다.** 단계 이름은 사람 말로 바꿔 적되,
             #     모르는 단계면 이름을 그대로 적는다 — 안 적는 것보다 낫다.
@@ -706,12 +813,15 @@ def _batch_section(state: QaState) -> tuple[str, str]:
                 )
         grades.append("ok")
 
-    report = state.get("check_row")
-    if state.get("check_read") == "error":
+    report = block.get("report")
+    if block.get("report_read") == "error":
         lines += ["", "점검 보고서를 읽지 못했습니다."]
         grades.append("error")
     elif not report or not report.get("body"):
-        lines += ["", f"{on} 점검 보고서가 아직 없습니다."]
+        #   ★ 배치 기록도 없던 날이면 «…보고서**도** 아직 없습니다» 다 (결정 ①).
+        #     조사 하나지만, 둘이 이어진 말인지 따로 선 말인지가 이걸로 갈린다.
+        josa = "도" if block.get("read") == "empty" else "가"
+        lines += ["", NO_CHECK_REPORT.format(on=on, josa=josa)]
         grades.append("empty")
     else:
         #   🔴 **요약하지 않는다.** 이 글은 이미 사람이 읽으라고 쓰인 것이고,
@@ -720,7 +830,7 @@ def _batch_section(state: QaState) -> tuple[str, str]:
                   str(report["body"]).strip()]
         grades.append("ok")
 
-    return "\n".join(lines), _grade(grades)
+    return lines, _grade(grades)
 
 
 #: 보고서가 제목 맨 앞에 쓰는 가격 종류 코드. **답 문장에서는 사람 말로 바꾼다.**
@@ -994,13 +1104,20 @@ def _perf_section(state: QaState) -> tuple[str, str]:
             f"| {cell['avg']} | {cell['err']} | {cell['pct']}% |"
         )
 
+    if state.get("perf_trimmed") and "batch" not in (state.get("routes") or []):
+        lines += ["", _trimmed_line(state.get("perf_days") or [])]
+
     if state.get("perf_read") == "error":
         lines += ["", "재학습 기록을 읽지 못했습니다."]
         return "\n".join(lines), "ok"
 
     rows = state.get("retrain_rows") or []
     if not rows:
-        lines += ["", "재학습 후보 없음. 지금 모델을 그대로 씁니다."]
+        #   ★ **«기록이 없다» 와 «후보가 없다» 는 다르다** (2026-09-16 · 결정 ①).
+        #     전에는 둘을 한 문장(«재학습 후보 없음»)으로 적었다. 그러면 배치가
+        #     아예 안 돈 날도 «검사해 봤더니 바꿀 게 없다» 로 읽힌다.
+        days = state.get("perf_days") or [_asked_on(state)]
+        lines += ["", NO_RETRAIN_ROW.format(on=" · ".join(str(d) for d in days))]
     else:
         #   ★ **판정은 요약, 검증은 표 전부** (2026-09-16 · 되물음 ① 결정).
         #     검증은 «현행 vs 후보» 숫자가 판단의 근거라 줄이면 못 읽는다.
@@ -1353,7 +1470,37 @@ def answer(request: QaRequest) -> QaAnswer:
         batch_for_evidence=_batch_evidence(final),
         performance_for_evidence=_performance_evidence(final),
         models_for_payload=_models_payload(final),
+        reads=_reads(final),
     )
+
+
+def _reads(final: dict[str, Any]) -> dict[str, str]:
+    """갈래마다 **어느 표를 어떻게 읽었나**. 키는 표 이름이다.
+
+    🔴 **물어본 갈래의 표만 적는다** (2026-09-16 · 사용자 결정 ①). 안 물어본 갈래의
+      표 이름이 «없는 것» 목록에 끼면, 고치러 간 사람이 멀쩡한 표를 들여다본다.
+
+    ★ `model_cutover` 의 `absent`(표가 아직 없다)는 **실패가 아니다.** 두 창고 다
+      그 표가 없는 상태로 잘 돌고 있다 — `ok` 와 같이 둔다.
+    """
+    routes = final.get("routes") or []
+    out: dict[str, str] = {}
+    if "batch" in routes:
+        out["batch_run"] = final.get("batch_read") or "empty"
+        out["agent_report"] = final.get("check_read") or "empty"
+    if "perf" in routes:
+        #   재학습 보고서가 **없는 날**은 «없다» 다 — 못 읽은 것과 가른다.
+        retrain = (
+            "error" if final.get("perf_read") == "error"
+            else "ok" if final.get("retrain_rows") else "empty"
+        )
+        out["agent_report"] = _worst([out.get("agent_report", retrain), retrain])
+        out["prediction_log"] = (
+            "error" if final.get("models_read") == "error"
+            else "ok" if final.get("models") else "empty"
+        )
+        out["model_cutover"] = "error" if final.get("cutover_read") == "error" else "ok"
+    return out
 
 
 def _models_payload(final: dict[str, Any]) -> list[dict[str, Any]]:

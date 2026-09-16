@@ -532,3 +532,64 @@ def test_쓰지_말라는_판정은_payload_에_그대로_실린다(monkeypatch)
     assert reply.payload["use_recommended"] is False
     assert "쓰지 마세요" not in reply.payload["answer_markdown"]
     assert E.validate_reply(request, reply, meta) == ()
+
+
+# ── 기록이 없는 날은 «고장» 이 아니다 (2026-09-16 · 사용자 결정 ①) ─────────
+
+
+def test_기록이_없는_날은_고장이_아니다(monkeypatch):
+    """🔴 `NO_DATA` 를 `RUNTIME_NOT_READY` 로 올리면 마스터가 **답을 버린다.**
+
+    화면 기준일 2026-08-03 에 «오늘 배치 상태» 를 물었을 때 실제로 그랬다 —
+    우리 답(«그날 배치 기록이 없습니다»)은 맞았는데 화면에는
+    «가격 예측는 ml_price_forecasts 를 쓸 수 없어…» 가 떴다.
+    """
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="empty", report_read="empty"),
+        reads={"batch_run": "empty", "agent_report": "empty"},
+    )
+    out.meta.status = "NO_DATA"
+    _qa(monkeypatch, out)
+    request = req(payload={"question": "오늘 배치 상태 알려줘"})
+    reply, meta = adapter.ml_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ()
+    assert reply.payload["answer_markdown"] == out.markdown
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_읽기_실패는_지금처럼_못_쓴다고_올린다(monkeypatch):
+    """★ «없다» 와 «못 읽었다» 를 가른다 — 뒤쪽은 진짜 고장이다."""
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="error", report_read="error"),
+        reads={"batch_run": "error", "agent_report": "error"},
+    )
+    out.meta.status = "SOURCE_UNAVAILABLE"
+    _qa(monkeypatch, out)
+    reply, _ = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert set(reply.missing_data) == {"batch_run", "agent_report"}
+
+
+def test_묻지_않은_갈래의_표_이름을_대지_않는다():
+    """🔴 배치를 물었는데 «예측표가 없다» 고 적으면 엉뚱한 표를 보러 간다."""
+    비었다 = _route_answer(["batch"], reads={"batch_run": "empty", "agent_report": "empty"})
+    비었다.meta.status = "NO_DATA"
+    assert adapter._missing_for(비었다) == ()
+
+    성능 = _route_answer(
+        ["perf"],
+        reads={"agent_report": "ok", "prediction_log": "error", "model_cutover": "error"},
+    )
+    성능.meta.status = "SOURCE_UNAVAILABLE"
+    assert set(adapter._missing_for(성능)) == {"prediction_log", "model_cutover"}
+    assert "ml_price_forecasts" not in adapter._missing_for(성능)
+
+    #   가격을 물었으면 예전 그대로다
+    가격 = _answer("NO_DATA")
+    가격.meta.routes = ["forecast"]
+    assert adapter._missing_for(가격) == ("ml_price_forecasts",)

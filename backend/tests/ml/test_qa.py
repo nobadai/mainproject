@@ -831,8 +831,10 @@ def test_배치_행이_없으면_기록이_없다고_적는다(
     배치도구를_갈아_끼운다(run=None, reports={})
     _routes(monkeypatch, ["batch"])
     out = qa_graph.answer(QaRequest(question="오늘 배치 어때?", as_of=date(2026, 9, 16)))
-    assert "2026-09-16 배치 기록이 없습니다" in out.markdown
-    assert "2026-09-16 점검 보고서가 아직 없습니다" in out.markdown
+    #   ★ 문구를 바꿨다 (2026-09-16 · 결정 ①) — «기준일(…)에 대한» 을 앞에 붙인다.
+    #     어느 날 이야기인지가 문장 안에 있어야 마스터가 그대로 실어도 말이 된다.
+    assert "기준일(2026-09-16)에 대한 배치 기록이 없습니다" in out.markdown
+    assert "기준일(2026-09-16)에 대한 점검 보고서도 아직 없습니다" in out.markdown
 
 
 def test_실패한_단계가_있으면_사람_말로_적는다(
@@ -877,7 +879,9 @@ def test_성능을_물으면_봉인_아홉칸과_조건을_적는다(
     assert qa_tools.SEALED_SOURCE in out.markdown
     for 숫자 in ("19.7", "9.0", "12.7", "8.3"):
         assert 숫자 in out.markdown
-    assert "재학습 후보 없음" in out.markdown
+    #   ★ «후보 없음» 이 아니라 «기록이 없다» 로 바꿨다 (2026-09-16 · 결정 ①).
+    #     배치가 아예 안 돈 날을 «검사해 봤더니 바꿀 게 없다» 로 읽으면 안 된다.
+    assert "기준일(2026-09-16)에 대한 재학습 판정 기록이 없습니다" in out.markdown
     assert len(out.performance_for_evidence) == 9
 
 
@@ -1537,3 +1541,155 @@ def test_막힌_것을_모르는_조합이_섞이면_단정하지_않는다(도�
                        "dates": [BASE + timedelta(days=1)]})
     out = qa_graph.answer(QaRequest(question="경락가 알려줘"))
     assert out.meta.use_recommended is None
+
+
+# ── 지난 날을 묻는다 · 기록이 없는 날은 «고장» 이 아니다 (2026-09-16) ──────────
+#
+# 🔴 두 가지가 한 사고에서 나왔다. 화면 기준일 2026-08-03 에 «오늘 배치 상태» 를
+#    물으니 답은 «그날 배치 기록이 없습니다» 로 맞았는데, 상태가 `NO_DATA` 라
+#    어댑터가 «창고를 못 쓴다» 로 올렸고 마스터가 그 답을 버렸다.
+#    **기록이 없는 날은 고장이 아니다.**
+
+
+AS_OF = date(2026, 9, 16)
+
+
+def _날짜를_적어_둔다(monkeypatch, *, runs=None, reports=None, retrains=None):
+    """배치·보고서 도구가 **어느 날을 읽었는지** 적어 둔다. 값은 날짜별로 준다."""
+    seen: dict[str, list[date]] = {"batch": [], "report": [], "retrain": []}
+    runs = runs or {}
+    reports = reports or {}
+    retrains = retrains or {}
+
+    def _batch_run(on):
+        seen["batch"].append(on)
+        return runs.get(on)
+
+    def _agent_report(name, on):
+        seen["report"].append(on)
+        return reports.get(on)
+
+    def _agent_reports(name, on):
+        seen["retrain"].append(on)
+        return list(retrains.get(on) or [])
+
+    monkeypatch.setattr(qa_graph.qa_tools, "batch_run", _batch_run)
+    monkeypatch.setattr(qa_graph.qa_tools, "failed_stages", lambda run_id: [])
+    monkeypatch.setattr(qa_graph.qa_tools, "agent_report", _agent_report)
+    monkeypatch.setattr(qa_graph.qa_tools, "agent_reports", _agent_reports)
+    return seen
+
+
+def test_기록이_없는_날은_기준일을_적어_말한다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 사용자 결정 ① — 이 문장이 화면에 **그대로** 나가야 한다."""
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(run=None, reports={})
+    _routes(monkeypatch, ["batch"])
+    out = qa_graph.answer(
+        QaRequest(question="오늘 배치 상태 알려줘", as_of=date(2026, 8, 3))
+    )
+    assert "기준일(2026-08-03)에 대한 배치 기록이 없습니다" in out.markdown
+    assert "기준일(2026-08-03)에 대한 점검 보고서도 아직 없습니다" in out.markdown
+    #   ★ 어댑터가 갈래별로 가릴 수 있게 **읽은 결과를 표 이름으로** 넘긴다
+    assert out.reads == {"batch_run": "empty", "agent_report": "empty"}
+
+
+def test_재학습_기록이_없는_날도_같은_꼴로_적는다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 봉인 성능표·현재 모델 표는 **그대로 나간다** — 없는 것은 그날 판정뿐이다."""
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={})
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=AS_OF))
+    assert "기준일(2026-09-16)에 대한 재학습 판정 기록이 없습니다" in out.markdown
+    assert qa_tools.SEALED_SOURCE in out.markdown
+    assert "19.7" in out.markdown
+
+
+def test_어제_배치를_물으면_어제_기록을_읽는다(도구를_갈아_끼운다, monkeypatch):
+    """★ 사용자 결정 ② — 배치·성능은 **지나간 날**을 받는다."""
+    도구를_갈아_끼운다(rows=[])
+    어제 = AS_OF - timedelta(days=1)
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"], dates=[어제])
+    out = qa_graph.answer(QaRequest(question="어제 배치 상태 알려줘", as_of=AS_OF))
+    assert seen["batch"] == [어제]
+    assert "배치 — 2026-09-15" in out.markdown
+    assert "2026-09-16" not in out.markdown
+
+
+def test_앞날을_말한_배치는_오늘을_본다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 «5일 뒤 배추 경락가랑 배치 상태» 의 배치는 **오늘**이다 — 앞날엔 기록이 없다."""
+    도구를_갈아_끼운다(rows=[_row(5)], base=BASE)
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["forecast", "batch"],
+            items=["배추"], kinds=["AUC"], dates=[BASE + timedelta(days=5)])
+    qa_graph.answer(QaRequest(question="5일 뒤 배추 경락가랑 배치 상태", as_of=AS_OF))
+    assert seen["batch"] == [AS_OF]
+
+
+def test_날짜가_여럿이면_날마다_블록을_만든다(도구를_갈아_끼운다, monkeypatch):
+    도구를_갈아_끼운다(rows=[])
+    날들 = [AS_OF - timedelta(days=n) for n in (2, 1, 0)]
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"], dates=list(reversed(날들)))
+    out = qa_graph.answer(QaRequest(question="사흘치 배치 어땠어", as_of=AS_OF))
+    assert seen["batch"] == 날들
+    for 날 in ("2026-09-14", "2026-09-15", "2026-09-16"):
+        assert f"배치 — {날}" in out.markdown
+
+
+def test_이레를_넘기면_최근_이레만_보여주고_밝힌다(도구를_갈아_끼운다, monkeypatch):
+    """★ 열흘치를 다 펼치면 답이 배치 표로 덮인다. **자르되 잘랐다고 말한다.**"""
+    도구를_갈아_끼운다(rows=[])
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"],
+            dates=[AS_OF - timedelta(days=n) for n in range(10)])
+    out = qa_graph.answer(QaRequest(question="열흘치 배치", as_of=AS_OF))
+    assert len(seen["batch"]) == 7
+    assert seen["batch"][-1] == AS_OF
+    assert seen["batch"][0] == AS_OF - timedelta(days=6)
+    assert "최근 7일" in out.markdown
+
+
+def test_성능도_같은_날을_읽는다(도구를_갈아_끼운다, monkeypatch):
+    도구를_갈아_끼운다(rows=[])
+    어제 = AS_OF - timedelta(days=1)
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["perf"], dates=[어제])
+    out = qa_graph.answer(QaRequest(question="어제 재학습 어땠어", as_of=AS_OF))
+    assert set(seen["retrain"]) == {어제}
+    assert "기준일(2026-09-15)에 대한 재학습 판정 기록이 없습니다" in out.markdown
+
+
+def test_지난_날의_가격은_범위_밖이라고_말한다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 가격 갈래는 **앞날만** 답한다. 지난 날을 주면 예전처럼 «범위 밖» 이다."""
+    도구를_갈아_끼운다(rows=[])
+    _routes(monkeypatch, ["forecast"], items=["배추"], kinds=["AUC"],
+            dates=[BASE - timedelta(days=1)])
+    out = qa_graph.answer(QaRequest(question="어제 배추 경락가 얼마였어?"))
+    assert out.meta.status == "OUT_OF_SCOPE"
+    assert "예측 범위 밖" in out.markdown
+
+
+def test_해석기가_지난_날도_고를_수_있다():
+    """★ 목록에 지난 30일을 더한다 — «9월 10일» 을 오프셋으로 환산하게 두지 않는다."""
+    schema = qa_llm._schema(BASE)
+    days = schema["properties"]["dates"]["items"]["enum"]
+    assert (BASE - timedelta(days=1)).isoformat() in days
+    assert (BASE - timedelta(days=30)).isoformat() in days
+    assert (BASE + timedelta(days=18)).isoformat() in days
+    assert (BASE - timedelta(days=31)).isoformat() not in days
+    #   🔴 짝 물음(asks)은 **가격**이라 앞날만 고른다
+    ask_days = schema["properties"]["asks"]["items"]["properties"]["dates"]["items"]["enum"]
+    assert (BASE - timedelta(days=1)).isoformat() not in ask_days
+    assert BASE.isoformat() in ask_days
+
+
+def test_지시문이_지난_날을_어떻게_고를지_말해_준다():
+    prompt = qa_llm._prompt(BASE)
+    for 낱말 in ("어제", "그저께", "지난 날"):
+        assert 낱말 in prompt, 낱말

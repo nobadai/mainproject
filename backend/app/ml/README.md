@@ -211,6 +211,13 @@ reply = self.runner.call(agent, "STATUS_QUERY", payload={"question": utterance})
 🔴 **한 갈래가 터져도 나머지는 나갑니다.** 못 읽은 갈래만 «…을 읽지 못했습니다» 한 줄로
 말하고, 전체 상태는 `partial` 이 됩니다. 전부 못 읽었을 때만 `source_unavailable` 입니다.
 
+★ **배치·성능은 지나간 날을 묻습니다** (2026-09-16). 「어제 배치 상태」·「9월 10일 배치」가
+그렇습니다 — 해석기 날짜 목록에 **지난 30일**을 더했고, 날짜가 여럿이면 **날마다 블록**
+(최대 7일 · 넘으면 최근 7일만 쓰고 그렇게 말합니다)입니다. 앞날만 말했으면 오늘을 봅니다.
+🔴 **그날 기록이 없는 것은 «고장» 이 아닙니다** — 답은 «기준일(2026-08-03)에 대한 배치
+기록이 없습니다» 로 나가고, 봉투는 `READY` · `skipped` · `missing_data` 는 비어 있습니다.
+표 이름은 **못 읽었을 때만**, 그것도 **물어본 갈래의 표만** 댑니다.
+
 **읽는 표** (전부 원본 창고 · `SELECT` 만): `batch_run` · `batch_run_stage` ·
 `agent_report` · `prediction_log` · `model_cutover`. 성능 아홉 칸은 표가 아니라
 **상수**입니다 (`qa_tools.SEALED_ACCURACY`) — `prediction_log` 로 다시 재지

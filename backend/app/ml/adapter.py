@@ -458,14 +458,14 @@ def _batch_payload(out: Any) -> dict[str, Any]:
     else:
         payload["batch_note"] = (
             "배치 기록을 읽지 못했다" if seen.get("read") == "error"
-            else f"{seen.get('on')} 배치 기록이 없다"
+            else f"기준일({seen.get('on')})에 대한 배치 기록이 없다"
         )
     if seen.get("report_ran_at"):
         payload["report"] = {"ran_at": seen["report_ran_at"]}
     else:
         payload["report_note"] = (
             "점검 보고서를 읽지 못했다" if seen.get("report_read") == "error"
-            else f"{seen.get('on')} 점검 보고서가 아직 없다"
+            else f"기준일({seen.get('on')})에 대한 점검 보고서가 아직 없다"
         )
     return payload
 
@@ -589,13 +589,33 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     tools = _tools_used(out)
 
     if status in _NOT_READY_MISSING:
+        missing = _missing_for(out)
+        if missing:
+            return (
+                _reply(
+                    request,
+                    runtime_status="RUNTIME_NOT_READY",
+                    business_status="skipped",
+                    missing_data=missing,
+                    reasoning=out.markdown,
+                ),
+                _metadata(request, tools=tools, elapsed_ms=elapsed,
+                          llm_called=llm_called),
+            )
+        #   ★ **기록이 없는 날은 고장이 아니다** (2026-09-16 · 사용자 결정 ①).
+        #     못 읽은 표가 하나도 없는데 `RUNTIME_NOT_READY` 로 올리면, 마스터가
+        #     우리 답을 버리고 «창고를 쓸 수 없다» 를 대신 띄운다. 화면 기준일
+        #     2026-08-03 에 «오늘 배치 상태» 를 물었을 때 실제로 그랬다 —
+        #     우리 답(«그날 배치 기록이 없습니다»)은 맞았는데 사람은 못 봤다.
+        #     `OUT_OF_SCOPE` 와 같은 길로 보낸다 — 답은 그대로 나가고, 업무
+        #     판정만 «건너뜀» 이다.
         return (
             _reply(
                 request,
-                runtime_status="RUNTIME_NOT_READY",
+                runtime_status="READY",
                 business_status="skipped",
-                missing_data=_missing_for(out),
-                reasoning=out.markdown,
+                payload=_answer_payload(out),
+                reasoning="물어보신 날의 기록이 없다 — 고장이 아니다",
             ),
             _metadata(request, tools=tools, elapsed_ms=elapsed, llm_called=llm_called),
         )
@@ -652,17 +672,30 @@ def _tools_used(out: Any) -> tuple[str, ...]:
 
 
 def _missing_for(out: Any) -> tuple[str, ...]:
-    """무엇이 없어서 못 답했나. **갈래마다 다른 표를 읽으므로 이름도 다르다.**
+    """무엇이 **못 읽어서** 못 답했나. 갈래마다 다른 표를 읽으므로 이름도 다르다.
 
     🔴 배치를 못 읽었는데 «예측표가 없다» 고 적으면, 고치러 간 사람이 엉뚱한 표를 본다.
+
+    🔴 **묻지 않은 갈래의 표 이름은 한 개도 대지 않는다** (2026-09-16 · 결정 ①).
+      예전에는 마지막 줄이 «이름이 하나도 없으면 상태표에서 가져온다» 였다. 그래서
+      배치만 물었는데 그날 기록이 없으면 `ml_price_forecasts` 가 튀어나왔고,
+      마스터가 «가격 예측는 ml_price_forecasts 를 쓸 수 없어…» 를 띄웠다.
+
+    ★ **비어 있으면 «못 읽은 것이 없다» 다** — 기록이 없는 날이지 고장이 아니다.
+      부르는 쪽이 그 값으로 두 경우를 가른다.
     """
     names: list[str] = []
     routes = list(out.meta.routes or ["forecast"])
     if "forecast" in routes and out.meta.status in _NOT_READY_MISSING:
         names += list(_NOT_READY_MISSING[out.meta.status])
+    #   ★ 갈래가 스스로 «어느 표를 어떻게 읽었나» 를 적어 준다 (`QaAnswer.reads`).
+    for table, grade in (getattr(out, "reads", None) or {}).items():
+        if grade == "error":
+            names.append(table)
+    #   옛 길 — `reads` 가 없던 시절의 배치 근거에서도 읽는다.
     seen = out.batch_for_evidence or {}
     if seen.get("read") == "error":
         names.append("batch_run")
     if seen.get("report_read") == "error":
         names.append("agent_report")
-    return tuple(dict.fromkeys(names)) or _NOT_READY_MISSING.get(out.meta.status, ())
+    return tuple(dict.fromkeys(names))

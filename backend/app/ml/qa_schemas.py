@@ -163,6 +163,19 @@ class QaAnswer(BaseModel):
     #: 성능 갈래의 근거 재료. 봉인 개봉 아홉 칸을 그대로 담는다 (조건은 `SEALED_SOURCE`).
     performance_for_evidence: list[dict] = Field(default_factory=list, exclude=True)
 
+    #: 🔴 **갈래마다 무엇을 읽었나** (2026-09-16). `{표 이름: ok · empty · error}`.
+    #:
+    #: 어댑터가 «무엇이 없어서 못 답했나» 를 적을 때 쓴다. 표 이름을 키로 두는 이유는,
+    #: 배치를 못 읽었는데 «예측표가 없다» 고 적으면 **고치러 간 사람이 엉뚱한 표를
+    #: 본다**는 것이다. **물어본 갈래의 표만** 들어간다.
+    #:
+    #: ```text
+    #: ok     읽었고 값이 있다
+    #: empty  읽었는데 그날 기록이 없다   <- 고장이 아니다. 답이 그대로 나가야 한다
+    #: error  못 읽었다                  <- 진짜 고장
+    #: ```
+    reads: dict[str, str] = Field(default_factory=dict, exclude=True)
+
     #: 🔴 **지금 도는 모델 셋** (2026-09-16). 이름·만든 날·학습 끝·최근 교체.
     #:
     #: 이름(`ops_rtl`)은 모델을 갈아 끼워도 **안 바뀐다** — 매입 파트 필터가 이름
