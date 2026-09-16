@@ -166,6 +166,11 @@ class QaState(TypedDict, total=False):
     models: list[dict[str, Any]]
     models_read: str           # ok · error
     cutover_read: str          # ok · absent · error
+    #   ★ 바꿀 수 있는 후보가 있나 (2026-09-16). 이것만 DB 가 아니라 ML 콘솔에
+    #     서버가 직접 물어 온다 — 「아직 안 눌렀나」는 그래프만 안다
+    #     (`qa_tools.retrain_pending`).
+    pending: list[dict[str, Any]]
+    pending_read: str          # ok · error
     #   ★ 질문에 없어서 **전부로 채운** 자리 (2026-09-16 · 사용자 지시).
     filled_defaults: list[str]
 
@@ -650,6 +655,15 @@ def perf_node(state: QaState) -> QaState:
         read = "error"
     out["retrain_rows"] = rows
     out["perf_read"] = read
+
+    #   ★ **또 따로 감싼다.** ML 콘솔이 안 떠 있어도 위의 성능표와 보고서는
+    #     그대로 나가야 한다. 못 읽으면 답에 그렇게 한 줄 적는다.
+    try:
+        out["pending"] = qa_tools.retrain_pending()
+        out["pending_read"] = "ok"
+    except Exception:                                        # noqa: BLE001
+        out["pending"] = []
+        out["pending_read"] = "error"
     return out
 
 
@@ -948,6 +962,75 @@ def _models_table(state: QaState) -> list[str]:
     return lines
 
 
+#: 콘솔에 못 물었을 때 적는 한 줄. **«후보 없음» 과 다른 말이다** — 앞은
+#: 「모르겠다」, 뒤는 「봤는데 없다」다. 섞으면 콘솔이 죽은 동안 사람이
+#: «바꿀 것이 없구나» 로 읽는다.
+UPDATE_UNREADABLE = "업데이트 후보 확인 불가 (ML 콘솔 연결 안 됨)."
+
+#: 버튼을 마크다운에 싣는 방법. **평범한 링크가 아니라 `action:` 스킴**이다.
+#:
+#: ★ 채팅으로 가는 길에 살아남는 것은 `answer_markdown` **한 덩어리뿐**이다
+#:   (`master/answer.py::_MARKDOWN_AGENTS`). 나머지 payload 칸은 마스터가 사실
+#:   줄로 펴 버려 화면 거품 안으로 «구조» 가 못 들어온다. 그래서 버튼을 글 안에
+#:   싣는다 — 화면(`ml/Markdownish.tsx`)이 이 스킴만 버튼으로 그린다.
+#:
+#: 🔴 **경로를 여기서 지어내지 않는다.** 누르면 재학습 탭이 쓰는 그 함수
+#:   (`lib/mlConsole.ts::graphAct(kind, "apply")`)가 그대로 돈다.
+UPDATE_ACTION = "action:retrain-apply?kind={kind}"
+
+
+def _candidate_train_end(state: QaState, label: str) -> str:
+    """후보가 **어디까지 배웠나**. 그날 검증 보고서에 적혀 있을 때만 돌려준다.
+
+    🔴 `/retrain/pending` 에는 이 값이 **없다** (2026-09-16 실측 · 그 행은
+      `kind` · `state` · `sec` · `candidate` · `items` · `verify` 뿐이고,
+      같이 오는 `current_models` 의 `train_end` 는 **현행** 것이다).
+      후보 이름 `ops_rtl_cand_20260916` 의 날짜는 **만든 날**이지 학습 끝이
+      아니다. 그걸로 되짚으면 맞을 때도 있지만 그건 우리가 지어낸 것이다.
+
+    그래서 «후보 학습 끝» 이라고 **적혀 있는 곳**에서만 가져오고, 없으면
+    빈 글자를 돌려준다 — 부르는 쪽이 괄호째 뺀다.
+    """
+    for report in state.get("retrain_rows") or []:
+        if _report_kind(report) != label:
+            continue
+        for values in _numbers_of(report):
+            end = values.get("후보 학습 끝")
+            if end:
+                return str(end)
+    return ""
+
+
+def _update_lines(state: QaState) -> list[str]:
+    """«바꿀 수 있는 후보가 있다» 와 그 버튼. **없으면 한 줄도 안 적는다.**
+
+    ★ 순서가 뜻이다 — 현재 모델 표 **바로 아래**다. «지금 이것이 돈다» 다음에
+      오는 말이 «이걸로 바꿀 수 있다» 라야 읽힌다.
+    """
+    read = state.get("pending_read")
+    if read is None:
+        return []                                 # 성능 갈래가 아니다 — 물어본 적도 없다
+    if read == "error":
+        return ["", UPDATE_UNREADABLE]
+
+    out: list[str] = []
+    for row in state.get("pending") or []:
+        kind = str(row.get("kind") or "").strip().lower()
+        label = _KIND_CODE.get(kind)
+        if not label:
+            #   버튼을 만들 수 없는 종류다. 누를 수 없는 버튼을 그리지 않는다.
+            continue
+        end = _candidate_train_end(state, label)
+        when = f" (학습 끝 {end})" if end else ""
+        out += [
+            "",
+            f"**{label} 후보{when} — 현행보다 나음 · 업데이트할 수 있습니다**",
+            "",
+            f"[모델 업데이트 — {label}]({UPDATE_ACTION.format(kind=kind)})",
+        ]
+    return out
+
+
 def _judge_table(reports: list[dict[str, Any]]) -> list[str]:
     """재학습 **판정**은 한 줄씩. 펼치면 하루 세 건이라 답을 덮는다.
 
@@ -981,6 +1064,7 @@ def _perf_section(state: QaState) -> tuple[str, str]:
       얼마나 맞히나, 마지막이 바꿀 것이 있나다.
     """
     lines = _models_table(state)
+    lines += _update_lines(state)
     lines += [
         "",
         f"**모델 성능 — {qa_tools.SEALED_SOURCE}**",

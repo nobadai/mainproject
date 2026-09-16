@@ -759,8 +759,8 @@ def _verify_report() -> dict:
 def 배치도구를_갈아_끼운다(monkeypatch: pytest.MonkeyPatch):
     """배치·보고서 도구를 갈아 끼운다. **기본은 «아무것도 없다» 다.**"""
 
-    def install(*, run=None, fails=None, reports=None,
-                boom_batch=False, boom_report=False):
+    def install(*, run=None, fails=None, reports=None, pending=None,
+                boom_batch=False, boom_report=False, boom_pending=False):
         def _raise(*_a, **_k):
             raise RuntimeError("connection refused")
 
@@ -784,6 +784,12 @@ def 배치도구를_갈아_끼운다(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             qa_graph.qa_tools, "agent_reports",
             _raise if boom_report else (lambda name, on: list(found.get(name) or [])),
+        )
+        #   🔴 **이건 HTTP 다.** 안 갈아 끼우면 검사가 진짜 8102 를 부른다 —
+        #     그 서버가 떠 있느냐에 따라 검사 결과가 달라진다. 기본은 «후보 없음».
+        monkeypatch.setattr(
+            qa_graph.qa_tools, "retrain_pending",
+            _raise if boom_pending else (lambda: list(pending or [])),
         )
 
     return install
@@ -896,6 +902,101 @@ def test_재학습_후보가_있으면_판정_문구를_그대로_적는다(
         assert 수치 in out.markdown
     assert "재학습 후보 없음" not in out.markdown
     assert "문제 없음" not in out.markdown
+
+
+def _pending(kind: str = "rtl") -> dict:
+    """실제 `/retrain/pending` 의 `pending[]` 한 줄 모양 (`agent/retrain_auto.py`).
+
+    🔴 **학습 끝 칸이 없다.** 후보 이름의 `20260916` 은 **만든 날**이지 학습 끝이
+      아니다 — 답은 그걸로 되짚지 않고, 검증 보고서에 적혀 있을 때만 적는다.
+    """
+    return {
+        "kind": kind,
+        "state": "pending",
+        "sec": 18.4,
+        "candidate": f"ops_{kind}_cand_20260916",
+        "items": [],
+        "verify": "",
+    }
+
+
+def test_바꿀_후보가_있으면_한_줄과_버튼이_같이_나간다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 버튼은 `action:` 스킴 링크로 싣는다 — 채팅까지 가는 것은 마크다운뿐이다.
+
+    ★ 학습 끝은 **검증 보고서가 가격 종류를 밝혔을 때만** 붙는다. 여기서는
+      `payload.kind` 를 넣어 «붙는 쪽» 을 잰다 — 안 붙는 쪽은 다음 검사다.
+    """
+    보고서 = _verify_report()
+    보고서["payload"] = dict(보고서["payload"], kind="rtl")
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={"재학습검증": 보고서}, pending=[_pending("rtl")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    한_줄 = "소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다"
+    assert 한_줄 in out.markdown
+    assert "[모델 업데이트 — 소매가](action:retrain-apply?kind=rtl)" in out.markdown
+    assert qa_graph.UPDATE_UNREADABLE not in out.markdown
+
+
+def test_학습_끝을_모르면_괄호째_뺀다_지어내지_않는다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 후보 이름의 날짜(`…_20260916`)로 학습 끝을 되짚지 않는다.
+
+    🔴 **오늘 실제 자료가 이 쪽이다** (2026-09-16 실측). 그날 검증 보고서 둘은
+      제목이 «견주는 창» · «배추 — …» 로 시작해 가격 종류가 어디에도 없고,
+      `payload.kind` 도 아직 안 붙었다 — `_report_kind` 가 «(가격 종류 미상)»
+      을 돌려준다. 그러면 후보와 보고서를 짝지을 수 없으므로 **괄호째 뺀다.**
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={"재학습검증": _verify_report()},
+                    pending=[_pending("auc")])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert "경락가 후보 — 현행보다 나음 · 업데이트할 수 있습니다" in out.markdown
+    #   «(학습 끝 …)» 괄호가 통째로 없다. 표 머리의 «학습 끝» 칸과 섞지 않는다
+    assert "(학습 끝" not in out.markdown
+    assert "20260916" not in out.markdown
+    assert "[모델 업데이트 — 경락가](action:retrain-apply?kind=auc)" in out.markdown
+
+
+def test_바꿀_후보가_없으면_버튼도_문장도_없다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 없는 것이 정상이다. 그때 버튼을 그리면 누를 것이 없는 버튼이 나간다."""
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={}, pending=[])
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert "action:" not in out.markdown
+    assert "모델 업데이트" not in out.markdown
+    assert "업데이트할 수 있습니다" not in out.markdown
+    assert qa_graph.UPDATE_UNREADABLE not in out.markdown
+
+
+def test_콘솔을_못_읽으면_확인_불가라고_적고_버튼은_안_그린다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """🔴 «못 읽었다» 를 «없다» 로 적지 않는다 — 앞은 고장이고 뒤는 정상이다.
+
+    ★ 그리고 **성능표는 그대로 나간다.** 콘솔 하나가 죽었다고 답을 비우지 않는다.
+    """
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={}, boom_pending=True)
+    _routes(monkeypatch, ["perf"])
+    out = qa_graph.answer(QaRequest(question="모델 성능 어때?", as_of=date(2026, 9, 16)))
+
+    assert qa_graph.UPDATE_UNREADABLE in out.markdown
+    assert "action:" not in out.markdown
+    assert "업데이트할 수 있습니다" not in out.markdown
+    #   성능표는 살아 있다
+    assert qa_tools.SEALED_SOURCE in out.markdown
+    assert "19.7" in out.markdown
 
 
 def test_보고서_제목의_가격종류_코드는_사람_말로_바꾼다():
