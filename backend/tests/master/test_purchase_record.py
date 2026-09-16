@@ -20,6 +20,8 @@
     · 지급기일 == 마감일 → 승인 기준일 == 매입일 == 마감일 일 때만 받는다 (재무 합의 9/16)
 ⑨  기록값 재검증이 재무 · 물류 SCENARIO_VALIDATION 의 실제 판정으로 갈린다
 ⑧  다른 sim_run_id 의 같은 request_id 기록은 별개
+⑩  선검사 — 1회차 매입일 != 승인한 날 · 소수점 수량 · 소수점 금액을 사람 말로 거부
+    (매입안 계약이 알기 어려운 말로 막기 전에 · 2026-09-16)
 ```
 
 ⚠️ **DB 를 안 탄다.** 결정 · 실행 행 · 기록 표 · 전이 · 재검증이 전부 대역이다.
@@ -36,7 +38,7 @@ from pydantic import ValidationError
 
 from app.master import decision_service as svc
 from app.master import purchase_record as pr
-from app.master.commitment import ApprovedCommitment
+from app.master.commitment import ApprovedCommitment, RecordedLeg
 from app.master.decision import (
     AUTO_BACKFILL,
     DecisionIn,
@@ -274,13 +276,19 @@ def _본문(**over: Any) -> dict[str, Any]:
 
 
 def _실매입(**over: Any) -> dict[str, Any]:
-    """선정안과 **다른** 기록 — 1회차 수량 · 금액 · 날짜 · 등급이 바뀌었다."""
+    """선정안과 **다른** 기록 — 1회차 수량 · 금액 · 도착일 · 등급이 바뀌었다.
+
+    🔴 **1회차 매입일은 승인 기준일 그대로다** (2026-09-16 선검사). 사람이 여기를 다른
+      날로 적으면 매입안 계약 `split_plan[0].date == meta.as_of` 가 재검증에서 떨어진다
+      — 그래서 입구에서 먼저 막는다 (`_check_recordable_values`). 실매입이 선정안과
+      다른 것은 수량 · 금액 · 도착일 · 등급으로 충분히 잰다.
+    """
     body = _본문(grade="특", **over)
     body["legs"][0] = {
         "seq": 1,
         "qty_kg": 90,
         "amount_krw": 480000,
-        "purchase_date": "2026-09-12",
+        "purchase_date": "2026-09-11",
         "arrival_date": "2026-09-13",
     }
     return body
@@ -362,8 +370,8 @@ def test_기록하면_기록값으로_덮은_사본으로_전이가_한_번_선�
 
     첫회, 둘째 = commitment.arrival_schedule
     assert (첫회.seq, 첫회.qty_kg, 첫회.amount_krw) == (1, 90.0, 480000.0)
-    assert (첫회.purchase_date, 첫회.arrival_date) == (date(2026, 9, 12), date(2026, 9, 13))
-    assert 첫회.payment_due_date == date(2026, 9, 19), "지급일 = 기록 매입일 + N5(7)"
+    assert (첫회.purchase_date, 첫회.arrival_date) == (date(2026, 9, 11), date(2026, 9, 13))
+    assert 첫회.payment_due_date == date(2026, 9, 18), "지급일 = 기록 매입일 + N5(7)"
     assert (둘째.qty_kg, 둘째.amount_krw) == (200.0, 1000000.0)
     assert commitment.total_qty_kg == 290.0
     assert commitment.total_amount_krw == 1480000.0
@@ -457,10 +465,10 @@ def test_선정안과_다르면_기록값_사본으로_재검증한다(세상: d
     [사본] = 세상["reval"].scenarios
     첫회 = 사본["split_plan"][0]
     assert (첫회["qty_kg"], 첫회["amount_krw"]) == (90, 480000)
-    assert (첫회["date"], 첫회["expected_arrival_date"]) == ("2026-09-12", "2026-09-13")
+    assert (첫회["date"], 첫회["expected_arrival_date"]) == ("2026-09-11", "2026-09-13")
     assert (사본["total_qty_kg"], 사본["total_amount_krw"]) == (290, 1480000)
     지급 = 사본["payment_schedule"][0]
-    assert (지급["purchase_date"], 지급["payment_date"]) == ("2026-09-12", "2026-09-19")
+    assert (지급["purchase_date"], 지급["payment_date"]) == ("2026-09-11", "2026-09-18")
     assert (지급["qty_kg"], 지급["amount_krw"]) == (90, 480000)
     assert 지급["amount_max_krw"] == 90 * 6000, "상한 금액은 기록 수량 × max_price"
     배분 = 사본["sourcing_plan"]
@@ -540,13 +548,39 @@ def test_기록값_재검증은_승인_재검증과_같은_문을_지난다(monk
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_승인_실행_기준일보다_앞선_매입일은_거부한다(세상: dict[str, Any]) -> None:
+def _경계한다(세상: dict[str, Any], body: dict[str, Any]) -> None:
+    """**경계 함수만** 부른다 (`_check_purchase_dates`).
+
+    ★ 선검사(`_check_recordable_values`)가 앞에 서면서 «1회차 매입일 != 승인한 날» 은
+      전체 경로로 더 갈 수 없게 됐다 (2026-09-16). 지급기일 · 동일일 예외 규칙 자체는
+      그대로 살아 있으므로 **경계 함수 단위로** 잰다 — 규칙이 지워진 것이 아니다.
+    """
+    approval = svc.current_approval(업무키)
+    assert approval is not None
+    one = PurchaseRecordIn(**body)
+    legs = tuple(
+        RecordedLeg(
+            seq=leg.seq,
+            qty_kg=leg.qty_kg,
+            amount_krw=leg.amount_krw,
+            purchase_date=leg.purchase_date,
+            arrival_date=leg.arrival_date,
+        )
+        for leg in one.legs
+    )
+    recorded = svc.commitment_with_record(approval, legs, one.grade)
+    pr._check_purchase_dates(approval, recorded, sim_run_id=실행축)
+
+
+def test_2회차_매입일이_승인_기준일보다_앞서면_경계가_거부한다(세상: dict[str, Any]) -> None:
+    """★ 선검사가 묶는 것은 1회차뿐이다 — 나머지 회차는 **기존 경계**가 그대로 잰다."""
     body = _본문()
-    body["legs"][0]["purchase_date"] = "2026-09-10"
+    body["legs"][1].update(purchase_date="2026-09-10", arrival_date="2026-09-11")
 
     with pytest.raises(DecisionRejected, match=pr.BEFORE_APPROVAL_MESSAGE) as caught:
         _기록한다(세상, body)
     assert caught.value.conflict is False
+    assert "2회차 매입일 2026-09-10" in str(caught.value)
     assert 세상["store"] == []
 
 
@@ -581,14 +615,18 @@ def test_지급기일이_마지막_재무_일마감일보다_앞이면_거부한
 
 
 def test_지급기일은_회차마다_잰다(세상: dict[str, Any]) -> None:
-    """★ 1회차는 마감일 뒤인데 2회차 지급기일이 마감일보다 앞이면 거부한다."""
+    """★ 1회차는 마감일 뒤인데 2회차 지급기일이 마감일보다 앞이면 거부한다.
+
+    ⚠️ **경계 함수 단위 검사다** — 1회차 매입일을 승인일 뒤로 밀어야 만들 수 있는 모양이라
+      선검사가 앞에서 막는다 (2026-09-16).
+    """
     세상["closed"] = date(2026, 9, 20)
     body = _본문()
     body["legs"][0].update(purchase_date="2026-09-15", arrival_date="2026-09-16")  # 9/22
     body["legs"][1].update(purchase_date="2026-09-12", arrival_date="2026-09-15")  # 9/19
 
     with pytest.raises(DecisionRejected, match=pr.CLOSED_DUE_DATE_MESSAGE) as caught:
-        _기록한다(세상, body)
+        _경계한다(세상, body)
     assert "2회차 지급기일 2026-09-19" in str(caught.value)
     assert 세상["store"] == []
 
@@ -634,21 +672,29 @@ def test_지급기일이_마감일과_같아도_과거_승인이면_거부한다
 
 
 def test_지급기일이_마감일과_같아도_매입일이_승인일_뒤면_거부한다(세상: dict[str, Any]) -> None:
-    """🔴 N5=0 · 승인 기준일 9/11 · 매입일 = 지급기일 = 마감일 9/12 → 동일일 예외가 아니다."""
+    """🔴 N5=0 · 승인 기준일 9/11 · 매입일 = 지급기일 = 마감일 9/12 → 동일일 예외가 아니다.
+
+    ⚠️ **경계 함수 단위 검사다** — 1회차 매입일이 승인일 뒤여야 서는 모양이라 선검사가
+      앞에서 막는다 (2026-09-16).
+    """
     세상["row"]["response_payload"]["constraints"]["finance"]["purchase_payment_days"] = 0
     세상["closed"] = date(2026, 9, 12)
     body = _본문()
     body["legs"][0].update(purchase_date="2026-09-12", arrival_date="2026-09-13")
 
     with pytest.raises(DecisionRejected, match=pr.SAME_DAY_DUE_DATE_MESSAGE) as caught:
-        _기록한다(세상, body)
+        _경계한다(세상, body)
     assert "매입일 2026-09-12 · 지급기일 2026-09-12" in str(caught.value)
     assert 세상["store"] == [] and 세상["conns"] == []
 
 
 def test_동일일_예외는_회차마다_따진다(세상: dict[str, Any]) -> None:
     """★ N5=0 · 승인 기준일 9/11 · 마감일 9/12. 1회차(9/14)는 마감일 뒤라 통과하고,
-    2회차(9/12)는 지급기일이 마감일과 같은데 승인일이 아니라 거부한다."""
+    2회차(9/12)는 지급기일이 마감일과 같은데 승인일이 아니라 거부한다.
+
+    ⚠️ **경계 함수 단위 검사다** — 1회차 매입일을 승인일 뒤로 밀어야 만들 수 있는 모양이라
+      선검사가 앞에서 막는다 (2026-09-16).
+    """
     세상["row"]["response_payload"]["constraints"]["finance"]["purchase_payment_days"] = 0
     세상["closed"] = date(2026, 9, 12)
     body = _본문()
@@ -656,7 +702,7 @@ def test_동일일_예외는_회차마다_따진다(세상: dict[str, Any]) -> N
     body["legs"][1].update(purchase_date="2026-09-12", arrival_date="2026-09-13")
 
     with pytest.raises(DecisionRejected, match=pr.SAME_DAY_DUE_DATE_MESSAGE) as caught:
-        _기록한다(세상, body)
+        _경계한다(세상, body)
     assert "2회차 승인 기준일 2026-09-11 · 매입일 2026-09-12" in str(caught.value)
     assert 세상["store"] == []
 
@@ -669,6 +715,90 @@ def test_마감이_있는데_지급기일을_모르면_거부한다(세상: dict
     with pytest.raises(DecisionRejected, match="지급기일을 계산할 수 없어"):
         _기록한다(세상, _본문())
     assert 세상["store"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑩ 입력 선검사 — 재검증 앞에서 사람 말로 막는다 (2026-09-16)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **왜.** 기록값 재검증은 안 사본을 매입안 계약으로 다시 읽는다. 계약이
+#    `split_plan[0].date == meta.as_of` 와 정수 수량 · 정수 등급 단가를 요구하는데,
+#    사본의 as_of 는 **승인 실행의 as_of** 다. 그래서 사람이 1회차 매입일을 다른 날로
+#    적거나 소수점을 적으면 계약에서 떨어지고, 화면에는 「재검증 통과 못 함」만 남는다.
+#    무엇을 고쳐야 하는지 알 수 없는 문장이다.
+
+
+def test_1회차_매입일이_승인한_날과_다르면_새_문구로_거부한다(세상: dict[str, Any]) -> None:
+    body = _본문()
+    body["legs"][0].update(purchase_date="2026-09-12", arrival_date="2026-09-13")
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, body, 문)
+
+    말 = str(caught.value)
+    assert caught.value.conflict is False, "본문이 틀린 것이다 (422)"
+    assert 말 == pr.PURCHASE_DATE_MESSAGE.format(as_of=기준일, seq=1)
+    assert 말 == "매입일은 승인한 날(2026-09-11)과 같아야 합니다 — 1회차"
+    # 🔴 **재검증 문구가 아니다.** 알기 어려운 말이 사람에게 가는 것이 이 판의 이유다.
+    assert "재검증" not in 말 and "다시 검증" not in 말
+    assert 세상["reval"].scenarios == [], "선검증 전에 재검증을 태웠다"
+    assert 세상["store"] == [] and 세상["conns"] == [] and 문.calls == []
+
+
+def test_2회차_매입일은_승인한_날과_달라도_받는다(세상: dict[str, Any]) -> None:
+    """★ 계약이 묶는 것은 `split_plan[0]` 하나다 — 분할 선정안을 그대로 못 적으면 안 된다.
+
+    선정안 2회차 매입일은 9/14 로 승인일(9/11)과 다르다.
+    """
+    out, _ = _기록한다(세상, _본문())
+
+    assert out.status == "APPLIED"
+    assert 세상["store"][1]["purchase_date"] == date(2026, 9, 14)
+
+
+@pytest.mark.parametrize("회차", [0, 1])
+def test_수량에_소수점이_있으면_거부한다(세상: dict[str, Any], 회차: int) -> None:
+    body = _본문()
+    body["legs"][회차]["qty_kg"] = 100.5
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, body, 문)
+
+    말 = str(caught.value)
+    assert caught.value.conflict is False
+    assert 말 == pr.WHOLE_QTY_MESSAGE.format(seq=회차 + 1)
+    assert 말 == f"수량은 1kg 단위로 적어 주세요 — {회차 + 1}회차"
+    assert "재검증" not in 말
+    assert 세상["store"] == [] and 세상["conns"] == [] and 문.calls == []
+
+
+@pytest.mark.parametrize("회차", [0, 1])
+def test_금액에_소수점이_있으면_거부한다(세상: dict[str, Any], 회차: int) -> None:
+    body = _본문()
+    body["legs"][회차]["amount_krw"] = 500000.5
+    문 = _전이()
+
+    with pytest.raises(DecisionRejected) as caught:
+        _기록한다(세상, body, 문)
+
+    말 = str(caught.value)
+    assert caught.value.conflict is False
+    assert 말 == pr.WHOLE_AMOUNT_MESSAGE.format(seq=회차 + 1)
+    assert 말 == f"금액은 원 단위 정수로 적어 주세요 — {회차 + 1}회차"
+    assert "재검증" not in 말
+    assert 세상["store"] == [] and 세상["conns"] == [] and 문.calls == []
+
+
+def test_정수에_같은_날이면_선검사를_지나_기존_흐름대로_선다(세상: dict[str, Any]) -> None:
+    """★ 선검사는 **막는 것만** 한다 — 지나가는 기록은 지금 그대로다."""
+    out, 전이 = _기록한다(세상, _실매입())
+
+    assert out.status == "APPLIED"
+    assert len(전이.calls) == 1
+    assert len(세상["store"]) == 2
+    assert len(세상["reval"].scenarios) == 1, "선정안과 다른데 재검증을 건너뛰었다"
 
 
 # ══════════════════════════════════════════════════════════════════════

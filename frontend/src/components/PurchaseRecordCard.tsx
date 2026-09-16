@@ -19,6 +19,12 @@ import type { PurchaseRecordLeg, PurchaseRecordOut, PurchaseRecordStatus } from 
  * ★ 회차 수와 회차 번호는 선정안 그대로다. 사람은 값만 고친다 (추가 · 삭제 없음).
  *
  * ★ 기록자는 로그인 이름이다. 화면에 입력칸으로 두지 않는다.
+ *
+ * ★ **매입일은 보여만 준다** (2026-09-16). 승인한 안에 적힌 날이 그대로 장부의 날이고,
+ *   다른 날로 적으면 서버가 되돌린다 — 되돌려받기 전에 화면이 먼저 말한다.
+ *
+ * ★ **수량 · 금액은 정수만 받는다.** 반 kg · 소수점 원은 장부가 받지 않는다. 보내 놓고
+ *   거절당하는 대신 적는 자리에서 알려 준다.
  */
 
 /** 🔴 상태 코드를 화면에 쓰지 않는다 — 사람 말로 옮긴다. */
@@ -206,6 +212,12 @@ function RecordForm({
         leg.arrival_date !== "",
     );
 
+  // ★ 장부의 수량은 kg, 금액은 원이고 둘 다 정수다. **보내기 전에** 알려 준다.
+  const 정수 = (text: string) => Number.isInteger(Number(text));
+  const 소수회차 = legs
+    .filter((leg) => !정수(leg.qty_kg) || !정수(leg.amount_krw))
+    .map((leg) => leg.seq);
+
   function update(index: number, patch: Partial<LegDraft>) {
     setLegs((prev) => prev.map((leg, i) => (i === index ? { ...leg, ...patch } : leg)));
   }
@@ -253,6 +265,10 @@ function RecordForm({
         실제로 산 값을 적어 주세요. 선정안 값을 미리 채워 두었습니다. 적는 순간 그 값으로 매입
         원장 · 매입채무 · 입고 일정이 섭니다.
       </p>
+      <p className="m-0 text-[11.5px] text-faint">
+        매입일은 승인한 안에 적힌 날 그대로라 여기서 바꿀 수 없습니다. 도착일은 실제로 들어온 날로
+        고쳐 주세요. 수량은 1kg, 금액은 1원 단위로 적습니다.
+      </p>
 
       <div className="overflow-x-auto rounded-lg border border-line bg-surface">
         <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
@@ -275,8 +291,8 @@ function RecordForm({
                     <input
                       type="number"
                       min={0}
-                      step="any"
-                      inputMode="decimal"
+                      step={1}
+                      inputMode="numeric"
                       aria-label={`${leg.seq}회차 수량`}
                       value={leg.qty_kg}
                       onChange={(e) => update(index, { qty_kg: e.target.value })}
@@ -287,7 +303,7 @@ function RecordForm({
                     <input
                       type="number"
                       min={0}
-                      step="any"
+                      step={1}
                       inputMode="numeric"
                       aria-label={`${leg.seq}회차 금액`}
                       value={leg.amount_krw}
@@ -295,14 +311,9 @@ function RecordForm({
                       className={inputClass(changed(leg.amount_krw, plan?.amount_krw))}
                     />
                   </td>
-                  <td className="px-2 py-1">
-                    <input
-                      type="date"
-                      aria-label={`${leg.seq}회차 매입일`}
-                      value={leg.purchase_date}
-                      onChange={(e) => update(index, { purchase_date: e.target.value })}
-                      className={inputClass(changed(leg.purchase_date, plan?.purchase_date))}
-                    />
+                  {/* 매입일은 승인한 안에 적힌 날 그대로다 — 보여만 준다. */}
+                  <td className="px-3 py-1.5 font-mono tabular-nums text-muted">
+                    {leg.purchase_date}
                   </td>
                   <td className="px-2 py-1">
                     <input
@@ -334,7 +345,7 @@ function RecordForm({
         <button
           type="button"
           onClick={() => void submit()}
-          disabled={busy || !filled || !session}
+          disabled={busy || !filled || 소수회차.length > 0 || !session}
           className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
         >
           {busy ? "기록하는 중" : "실매입 기록"}
@@ -345,6 +356,13 @@ function RecordForm({
           <b className="font-semibold text-gold">굵게</b> 표시한 칸은 선정안과 다릅니다
         </span>
       </div>
+
+      {소수회차.length > 0 && (
+        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+          {소수회차.join(" · ")}회차의 수량과 금액에 소수점이 있습니다. 수량은 1kg, 금액은 1원
+          단위로 적어 주세요.
+        </p>
+      )}
 
       {error && (
         <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
