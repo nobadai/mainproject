@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { graphAct, MlError, retrainPending, type PendingRetrain } from "@/lib/mlConsole";
+import { announceRetrainChanged, useRetrainChanged } from "@/lib/retrainSignal";
 
 import { en, KIND } from "./labels";
 import { VerifyTable } from "./VerifyTable";
@@ -206,6 +207,10 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
     };
   }, []);
 
+  //  ★ **어디서 바꿨든 여기도 다시 받습니다.** 채팅 서랍에서 바꾼 경우가
+  //    그렇습니다 — 그쪽은 이 탭의 존재를 모릅니다 (`lib/retrainSignal.ts`).
+  useRetrainChanged(() => void load());
+
   const update = async (kind: string) => {
     const label = en(KIND, kind);
     const ok = window.confirm(
@@ -223,7 +228,12 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
     try {
       await graphAct(kind as "auc" | "whsl" | "rtl", "apply");
       setDone((d) => [...d, kind]);
-      await load();
+      //   ★ **채팅에서 누른 것과 똑같이 알립니다.** 위의 `useRetrainChanged` 가
+      //     받아 이 탭을 다시 받고(전에는 여기서 `load()` 를 직접 불렀습니다),
+      //     같은 신호로 **페이지의 빨간 배지**도 같이 내려갑니다. 전에는 이
+      //     길로 바꿔도 배지가 안 사라졌습니다 — 길이 둘인데 갱신이 하나뿐
+      //     이면 안 됩니다.
+      announceRetrainChanged(kind);
     } catch (e) {
       setErr(say(e));
     } finally {

@@ -192,8 +192,26 @@ export const explain = (
 
 /** 배치 장애 조사 — 실패했을 때만 할 말이 있다. */
 export const batchAgent = () => call<AgentReport>("agent/batch");
-/** 최근 배치 실행 목록. **배열이 그대로 옵니다** — 감싼 껍데기가 없습니다. */
-export const batchRecent = () => call<BatchRun[]>("batch/recent");
+/**
+ * 기간을 `?from=&to=` 로 붙인다. **둘 다 없으면 물음표째 안 붙인다** —
+ * 빈 `?from=&to=` 를 보내면 서버가 «기간을 골랐다» 로 볼 수 있다.
+ */
+const span = (from?: string, to?: string) => {
+  const q = new URLSearchParams();
+  if (from) q.set("from", from);
+  if (to) q.set("to", to);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+};
+
+/**
+ * 최근 배치 실행 목록. **배열이 그대로 옵니다** — 감싼 껍데기가 없습니다.
+ *
+ * ★ 기간(`from`~`to` · `YYYY-MM-DD` · 양끝 포함)을 주면 그 기간만 옵니다.
+ *   안 주면 지금까지처럼 최근 몇 건입니다.
+ */
+export const batchRecent = (from?: string, to?: string) =>
+  call<BatchRun[]>(`batch/recent${span(from, to)}`);
 /**
  * **아침에 저장된** 점검 결과를 그대로 읽는다. 다시 안 돌린다 — 즉시 온다.
  *
@@ -215,8 +233,13 @@ export const qualityAgent = (days = 180) =>
 /** 오늘 기사에서 우리 품목 이야기를 골라 온다 (서버가 30분 캐시). */
 export const newsAgent = (date?: string) =>
   call<AgentReport>("agent/news" + (date ? `?date=${encodeURIComponent(date)}` : ""));
-/** 지난 보고서 목록 — 날짜별로 묶여 온다. */
-export const agentHistory = () => call<{ dates: HistoryDay[] }>("agent/history");
+/**
+ * 지난 보고서 목록 — 날짜별로 묶여 온다.
+ *
+ * ★ 기간을 주면 그 기간만 온다 (보고서 **파일 이름의 날짜** 기준).
+ */
+export const agentHistory = (from?: string, to?: string) =>
+  call<{ dates: HistoryDay[] }>(`agent/history${span(from, to)}`);
 /** 보고서 한 개의 내용. 파일 이름만 넘긴다 (경로는 서버가 막는다). */
 export const agentReport = (file: string) =>
   call<{ file: string; text: string; is_claude: boolean }>(

@@ -287,6 +287,40 @@ def test_성능_갈래는_아홉_칸마다_근거를_달고_조건을_같이_적
     assert E.validate_reply(request, reply, meta) == ()
 
 
+def test_업데이트_버튼이_실려도_봉투가_깨끗하고_글자가_안_깎인다(monkeypatch):
+    """★ 버튼은 **글 안에** 실린다 — `answer_markdown` 말고는 채팅까지 못 간다.
+
+    🔴 그래서 잴 것이 둘이다.
+      ① 봉투 검증이 그 링크를 트집 잡지 않는가 (`validate_reply` 가 비는가)
+      ② 링크가 **글자 그대로** 남는가 — 한 글자만 깎여도 화면이 버튼으로 못 그린다
+    """
+    from app.ml import qa_graph
+
+    버튼 = f"[모델 업데이트 — 소매가]({qa_graph.UPDATE_ACTION.format(kind='rtl')})"
+    줄 = [
+        "**현재 모델**",
+        "",
+        "**소매가 후보 (학습 끝 2025-12-31) — 현행보다 나음 · 업데이트할 수 있습니다**",
+        "",
+        버튼,
+    ]
+    답 = QaAnswer(
+        markdown="\n".join(줄),
+        meta=QaMeta(status="OK", routes=["perf"], base_dt=BASE),
+        rows_for_evidence=[],
+        performance_for_evidence=_perf_seen(),
+    )
+    _qa(monkeypatch, 답)
+    request = req(payload={"question": "모델 성능 어때?"})
+    reply, meta = adapter.ml_port(request)
+
+    assert E.validate_reply(request, reply, meta) == ()
+    assert 버튼 in reply.payload["answer_markdown"]
+    #   ★ 기존 칸도 그대로다 — 버튼을 실었다고 기계가 읽는 값이 사라지지 않는다
+    assert len(reply.payload["performance"]) == 9
+    assert reply.payload["answer_routes"] == "perf"
+
+
 def test_갈래_둘을_답해도_봉투가_깨끗하다(monkeypatch):
     _qa(monkeypatch, _route_answer(
         ["batch", "perf"],
@@ -532,3 +566,64 @@ def test_쓰지_말라는_판정은_payload_에_그대로_실린다(monkeypatch)
     assert reply.payload["use_recommended"] is False
     assert "쓰지 마세요" not in reply.payload["answer_markdown"]
     assert E.validate_reply(request, reply, meta) == ()
+
+
+# ── 기록이 없는 날은 «고장» 이 아니다 (2026-09-16 · 사용자 결정 ①) ─────────
+
+
+def test_기록이_없는_날은_고장이_아니다(monkeypatch):
+    """🔴 `NO_DATA` 를 `RUNTIME_NOT_READY` 로 올리면 마스터가 **답을 버린다.**
+
+    화면 기준일 2026-08-03 에 «오늘 배치 상태» 를 물었을 때 실제로 그랬다 —
+    우리 답(«그날 배치 기록이 없습니다»)은 맞았는데 화면에는
+    «가격 예측는 ml_price_forecasts 를 쓸 수 없어…» 가 떴다.
+    """
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="empty", report_read="empty"),
+        reads={"batch_run": "empty", "agent_report": "empty"},
+    )
+    out.meta.status = "NO_DATA"
+    _qa(monkeypatch, out)
+    request = req(payload={"question": "오늘 배치 상태 알려줘"})
+    reply, meta = adapter.ml_port(request)
+
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ()
+    assert reply.payload["answer_markdown"] == out.markdown
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_읽기_실패는_지금처럼_못_쓴다고_올린다(monkeypatch):
+    """★ «없다» 와 «못 읽었다» 를 가른다 — 뒤쪽은 진짜 고장이다."""
+    out = _route_answer(
+        ["batch"],
+        batch_for_evidence=_batch_seen(read="error", report_read="error"),
+        reads={"batch_run": "error", "agent_report": "error"},
+    )
+    out.meta.status = "SOURCE_UNAVAILABLE"
+    _qa(monkeypatch, out)
+    reply, _ = adapter.ml_port(req(payload={"question": "오늘 배치 어때?"}))
+    assert reply.runtime_status == "RUNTIME_NOT_READY"
+    assert set(reply.missing_data) == {"batch_run", "agent_report"}
+
+
+def test_묻지_않은_갈래의_표_이름을_대지_않는다():
+    """🔴 배치를 물었는데 «예측표가 없다» 고 적으면 엉뚱한 표를 보러 간다."""
+    비었다 = _route_answer(["batch"], reads={"batch_run": "empty", "agent_report": "empty"})
+    비었다.meta.status = "NO_DATA"
+    assert adapter._missing_for(비었다) == ()
+
+    성능 = _route_answer(
+        ["perf"],
+        reads={"agent_report": "ok", "prediction_log": "error", "model_cutover": "error"},
+    )
+    성능.meta.status = "SOURCE_UNAVAILABLE"
+    assert set(adapter._missing_for(성능)) == {"prediction_log", "model_cutover"}
+    assert "ml_price_forecasts" not in adapter._missing_for(성능)
+
+    #   가격을 물었으면 예전 그대로다
+    가격 = _answer("NO_DATA")
+    가격.meta.routes = ["forecast"]
+    assert adapter._missing_for(가격) == ("ml_price_forecasts",)

@@ -44,7 +44,17 @@ export default function DashboardPage() {
       </div>
 
       <SourceTag sources={data.sources} />
-      <StatRow items={data.stats} />
+      {/* ★ **맨 위 배추 예측 칸만 뺍니다** (2026-09-16 · 화면에서만).
+             같은 값이 바로 아래 「가격 예측」 판의 배추 카드에 또 있습니다 —
+             한 화면에 같은 숫자가 둘이면 사람이 «둘이 다른 값인가» 를 먼저
+             확인해야 합니다. 나머지 네 칸(운영 여유 · 현재고 · 승인 대기 ·
+             판매금액)은 그대로 둡니다.
+             **서버는 안 건드립니다** — 다시 보이려면 이 한 줄을 지우면 됩니다.
+             라벨이 «배추 특급 · 08-31 예측» 처럼 날짜가 박혀 있어(실측
+             2026-09-16) 앞뒤 두 군데를 같이 봅니다. */}
+      <StatRow
+        items={data.stats.filter((s) => !(s.label.startsWith("배추") && s.label.endsWith("예측")))}
+      />
 
       <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
         <Panel title="가격 예측" subtitle="세 품목 · 경락가 특등급 · 모델이 낸 첫 날">

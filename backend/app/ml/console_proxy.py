@@ -40,8 +40,13 @@ _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 _DEFAULT_ORIGIN = "http://127.0.0.1:8102"
 
 
-def _origin() -> tuple[str, str]:
+def console_origin() -> tuple[str, str]:
     """ML 백엔드 주소와, 그 주소를 어디서 가져왔는지.
+
+    ★ **이름이 공개다.** 프록시 말고도 서버 안에서 ML 콘솔에 직접 묻는 곳이
+      생겼다 — 채팅의 «모델 성능» 갈래가 `retrain/pending` 을 읽는다
+      (`qa_tools.retrain_pending`). 주소를 정하는 규칙이 두 군데로 갈리면
+      한쪽만 고쳐 놓고 «왜 저기서는 되는데 여기서는 안 되나» 가 된다.
 
     ★ **`.env` 를 여기서 직접 읽는다** (2026-09-10 고침).
 
@@ -126,7 +131,7 @@ WRITE = frozenset({
 
 
 async def _forward(method: str, path: str, request: Request) -> JSONResponse:
-    origin, hint = _origin()
+    origin, hint = console_origin()
     url = f"{origin}/{path}"
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
