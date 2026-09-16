@@ -463,8 +463,13 @@ def test_선정안과_다르면_기록값_사본으로_재검증한다(세상: d
     assert (지급["purchase_date"], 지급["payment_date"]) == ("2026-09-12", "2026-09-19")
     assert (지급["qty_kg"], 지급["amount_krw"]) == (90, 480000)
     assert 지급["amount_max_krw"] == 90 * 6000, "상한 금액은 기록 수량 × max_price"
-    assert [line["grade"] for line in 사본["sourcing_plan"]] == ["특"]
-    assert 사본["sourcing_plan"][0]["qty_kg"] == 290
+    배분 = 사본["sourcing_plan"]
+    assert {line["grade"] for line in 배분} == {"특"}, "한 기록 = 한 등급"
+    assert sum(line["qty_kg"] for line in 배분) == 290
+    # 🔴 **단가도 기록값에서 다시 난다** (2026-09-16). 선정안 단가를 그대로 두면
+    #   `Scenario.validate_quadruple_match` 가 깨져 두 부서가 payload 를 못 읽는다.
+    #   1,480,000 ÷ 290 이 정수로 안 떨어져 나머지 줄이 하나 붙는다 — **합은 정확하다.**
+    assert sum(line["qty_kg"] * line["grade_unit_price"] for line in 배분) == 1480000
 
 
 def test_등급만_달라도_재검증한다(세상: dict[str, Any]) -> None:
