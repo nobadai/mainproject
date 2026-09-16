@@ -69,7 +69,7 @@ from app.finance.llm.planner import (
     _configured_finance_llms,
 )
 from app.finance.state import FinanceAgentState
-from app.finance.user_messages import explanation_for
+from app.finance.user_messages import explanation_for, explanation_keys
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 
 # ---------------------------------------------------------------------------
@@ -1029,6 +1029,39 @@ class FinanceAgentController:
         #   실제로 실렸을 때만 그 사실을 말하는 문장이 후보가 된다 — LLM 경로든 대체
         #   경로든 같은 사실을 본다.
         has_verified_adjustment = bool(adjustments)
+
+        #  🔴 **고를 것이 하나뿐이면 묻지 않는다.** Finalizer 는 문장을 쓰지 않는다 —
+        #     `explanation_keys` 가 허용한 키 중 하나를 고를 뿐이고, 사용자가 읽는 문장은
+        #     `FINANCE_EXPLANATIONS` 가 가진다. 후보가 하나면 모델이 무엇을 답하든 나가는
+        #     문장이 같으므로, provider 왕복은 답을 바꾸지 않고 시간만 쓴다.
+        #
+        #  ★ **Finalizer 를 없애는 것이 아니다.** 후보가 둘 이상이 되는 날에는 아래 기존
+        #    경로가 그대로 살아난다 — 그때는 실제로 고를 것이 있다.
+        allowed = explanation_keys(
+            request.mode,
+            business_status,
+            has_verified_adjustment=has_verified_adjustment,
+        )
+        if not allowed:
+            #  🔴 고를 문장이 **하나도 없다.** 지금 계약에서는 일어날 수 없다. 일어났다면
+            #     이 결과에 붙일 말이 없다는 뜻이고, 아무 문장이나 고르면 보지도 않은
+            #     결과에 설명이 붙는다. 업무 결과는 그대로 두고 설명만 닫는다.
+            return _Explanation(
+                _FAILURE_EXPLANATIONS["INTERNAL"], llm_status, outcome.planner_failed
+            )
+        if len(allowed) == 1:
+            #  ★ 정본은 `explanation_for` 하나다. 여기서 문장 표를 다시 뒤지지 않는다 —
+            #    두 벌이 되면 모델 경로와 이 경로가 언젠가 다른 말을 한다.
+            return _Explanation(
+                explanation_for(
+                    request.mode,
+                    business_status,
+                    has_verified_adjustment=has_verified_adjustment,
+                ),
+                self._llm_status(planner_failed=outcome.planner_failed, before=before),
+                outcome.planner_failed,
+            )
+
         try:
             reasoning = self.finalizer.finalize(
                 mode=request.mode,
