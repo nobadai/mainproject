@@ -349,7 +349,7 @@ class LedgerBlocks:
     permanent: int
 
 
-def _approval_key(request_id: str | None, decision_seq: int | None, run_id: str) -> str:
+def _approval_key(request_id: str | None, decision_seq: int | None, run_id: str = "") -> str:
     """승인 하나를 가르는 키. 🔴 **여기서 규칙을 짓지 않는다.**
 
     ★ 주인은 `transition.purchase_id_prefix_for` 다 — 그 함수가 *"여기까지가 승인
@@ -753,8 +753,11 @@ class WalkResult:
                 for retried in day.pending_transition.retried:
                     if retried.block_kind:
                         재시도 += 1
+                        # 🔴 **당일 경로와 같은 문을 쓴다.** 여기서 키를 따로 지으면
+                        #    두 경로가 같은 승인을 다른 키로 보고, 같은 승인이 둘로
+                        #    세어지는 날이 온다.
                         담는다(
-                            purchase_id_prefix_for(retried.request_id, retried.decision_seq),
+                            _approval_key(retried.request_id, retried.decision_seq),
                             retried.block_kind,
                         )
 
