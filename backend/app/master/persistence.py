@@ -243,6 +243,7 @@ def record_revalidation(
     validations: Mapping[str, Mapping[str, Any]],
     unroutable: Sequence[str],
     plan: ExecutionPlan,
+    conditions: Sequence[str] = (),
     item: str | None = None,
     elapsed_ms: int | None = None,
 ) -> str | None:
@@ -301,6 +302,24 @@ def record_revalidation(
         response_payload={
             "outcome": outcome,
             "reason": reason,
+            # 🔴 **사람 말과 정본을 나란히 둔다** (2026-09-16). 두 칸은 같은 자리를
+            #   다투지 않는다 — 묻는 사람이 다르다.
+            #
+            #   ```text
+            #   reason      사람이 읽는다     「물류: 수량을 7,470kg 로 조정 제안」
+            #   conditions  기계가 되만든다   adjust:{dept·axis·target_value·unit·…}
+            #   ```
+            #
+            #   전에는 표지 원문이 `reason` 문장에 이어 붙어 **그 문자열이 유일한
+            #   사본**이었다. 그 문장을 사람 말로 고치면서 이 칸을 같이 세웠다 —
+            #   안 세웠으면 조정 표지가 이 표에서 영영 사라진다
+            #   (`revalidation.Revalidation.conditions` 에 근거를 적어 두었다).
+            #
+            # 🔴 **발표 뒤 개발이 없다. 지금 안 남기면 영영 못 되만든다.**
+            #
+            # ★ **비어 있어도 적는다.** `PASSED` 의 `[]` 는 *"새 조건이 없었다"* 이고
+            #   칸이 아예 없는 것과 다르다 — 옛 행과 새 행을 가르는 자리이기도 하다.
+            "conditions": list(conditions),
             "validations": {k: dict(v) for k, v in validations.items()},
             "unroutable": list(unroutable),
         },
