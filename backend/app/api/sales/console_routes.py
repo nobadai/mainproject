@@ -73,11 +73,13 @@ def trend(
             to_date=to_date,
         )
     except ValueError as error:
-        raise HTTPException(status_code=422, detail="시작일은 종료일보다 늦을 수 없습니다.") from (
-            error @ router.get("/partners", response_model=ConsolePartnersResponse)
-        )
+        raise HTTPException(
+            status_code=422,
+            detail="시작일은 종료일보다 늦을 수 없습니다.",
+        ) from error
 
 
+@router.get("/partners", response_model=ConsolePartnersResponse)
 def partners(
     sim_run_id: Annotated[str, Query(min_length=1)],
     as_of: date,

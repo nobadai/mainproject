@@ -107,7 +107,7 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
   if (tab === "partners") return <Partners simRun={simRun} asOf={asOf} />;
   if (tab === "collections") return <Collections simRun={simRun} asOf={asOf} />;
   if (tab === "orders") return <Orders simRun={simRun} asOf={asOf} />;
-  if (tab === "agent") return <Agent simRun={simRun} asOf={asOf} />;
+  if (tab === "agent") return <Agent simRun={simRun} />;
   return <Runs simRun={simRun} />;
 }
 
@@ -119,23 +119,21 @@ function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
     () => salesOverview.proposals(simRun, asOf),
     true,
   );
+  const refreshProposals = () => setProposalRefresh((value) => value + 1);
   return (
     <>
-      <TodayProposalsPanel
-        asOf={asOf}
-        state={proposals}
-        onConfirmed={() => setProposalRefresh((value) => value + 1)}
-      />
+      <SalesCandidatePanel simRun={simRun} asOf={asOf} onCreated={refreshProposals} />
+      <TodayProposalsPanel asOf={asOf} state={proposals} onConfirmed={refreshProposals} />
     </>
   );
 }
+
 /* ── 판매 현황 ─────────────────────────────────────────────────────────── */
 
 function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
   const [trendFrom, setTrendFrom] = useState("");
   const [trendTo, setTrendTo] = useState("");
   const [appliedTrendRange, setAppliedTrendRange] = useState({ from: "", to: "" });
-  const [proposalRefresh, setProposalRefresh] = useState(0);
   const summary = useConsoleData<SalesSummaryResponse>(
     `sales-summary:${simRun}:${asOf}`,
     () => salesOverview.summary(simRun, asOf),
@@ -146,11 +144,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     () => salesOverview.trend(simRun, asOf, appliedTrendRange.from || undefined, appliedTrendRange.to || undefined),
     true,
   );
-  const proposals = useConsoleData<SalesProposalsResponse>(
-    `sales-proposals:${simRun}:${asOf}:${proposalRefresh}`,
-    () => salesOverview.proposals(simRun, asOf),
-    true,
-  );
+
   const collections = useConsoleData<CollectionsResponse>(
     `collections:${simRun}:${asOf}`,
     () => salesConsole.collections(simRun, asOf),
@@ -161,6 +155,8 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     () => salesConsole.partners(simRun, asOf),
     true,
   );
+
+  const todayConfirmedSales = summary.data?.recent_sales.filter((sale) => sale.sale_date === asOf) ?? [];
 
   return (
     <>
@@ -193,13 +189,25 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         )}
       </Panel>
 
-      {/* ★ 매입 화면의 «금일 매입안» 과 같은 자리다. 통계 다음에 오늘의 안이 오고,
-          지난 흐름은 그 뒤에 온다. */}
-      <TodayProposalsPanel
-        asOf={asOf}
-        state={proposals}
-        onConfirmed={() => setProposalRefresh((value) => value + 1)}
-      />
+      <Panel title="금일 확정 판매안" subtitle="후보가 아닌, 이 기준일에 실제 판매 원장으로 확정된 건만 보여줍니다">
+        {summary.loading ? (
+          <Skeleton what="금일 확정 판매" />
+        ) : summary.error ? (
+          <Failed what="금일 확정 판매" message={summary.error} />
+        ) : todayConfirmedSales.length === 0 ? (
+          <EmptyRows what="금일 확정 판매" />
+        ) : (
+          <Table
+            rows={todayConfirmedSales}
+            columns={[
+              { key: "partner", label: "거래처", render: (row) => partnerText(row.partner_name, row.customer_partner_id) },
+              { key: "amount", label: "판매 금액", align: "right", render: (row) => moneyWon(row.total_amount_krw) },
+              { key: "quantity", label: "판매량", align: "right", render: (row) => quantity(row.total_quantity_kg) },
+              { key: "status", label: "판매 상태", render: (row) => row.order_status },
+            ]}
+          />
+        )}
+      </Panel>
 
       <Panel title="기간별 매출" subtitle="선택한 기간의 저장된 판매를 날짜별로 보여줍니다">
         <form
@@ -735,7 +743,7 @@ function Lifecycle({ simRun, asOf, saleId }: { simRun: string; asOf: string; sal
 
 /* ── 판단 결과 ────────────────────────────────────────────────────────── */
 
-function Agent({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Agent({ simRun }: { simRun: string }) {
   const state = useConsoleData<SalesRunsResponse>(
     `runs:${simRun}`,
     () => salesConsole.runs(simRun, 10),
@@ -787,7 +795,6 @@ function Agent({ simRun, asOf }: { simRun: string; asOf: string }) {
           </>
         )}
       </Panel>
-      <SalesCandidatePanel simRun={simRun} asOf={asOf} />
     </>
   );
 }
