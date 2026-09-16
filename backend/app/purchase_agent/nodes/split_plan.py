@@ -158,7 +158,19 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
     }
     facts["entered"] = facts["timing_allowed"] and (facts["by_volume"] or facts["by_trend"])
     if facts["entered"]:
-        facts["rounds"] = choose_rounds(total_kg, cap.cap_kg, constraints)
+        # 🔴 **회차 수는 «실제로 살 양» 으로 정한다** (2026-09-16). 진입 여부를 묻는 수와
+        #   몇 번에 나눌지를 정하는 수가 **다르다** —
+        #
+        #       진입   한 번에 다 들어가는가        ← 깎기 전 수요 (largest_total_kg)
+        #       회차   몇 번에 나눠야 들어가는가    ← 깎은 뒤 총량 (아래 clipped)
+        #
+        #   깎기 전 수요로 회차를 정하면 현금·신선도·조정안이 이미 줄여 놓은 양을
+        #   **필요보다 여러 번에** 나눈다 (실측: raw 12,429 · 실제 2,000 인데 3회차).
+        clipped = max(
+            (draft["total_qty_kg"] for draft in state["base_plan"]["drafts"]), default=0
+        )
+        facts["largest_clipped_kg"] = clipped
+        facts["rounds"] = choose_rounds(clipped, cap.cap_kg, constraints)
     return facts
 
 

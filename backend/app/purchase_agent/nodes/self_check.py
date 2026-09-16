@@ -847,8 +847,14 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
     #   E3-9 앞단). 분할이 실제로 안 서서 일괄로 내려온 안은 ``strategy_type`` 이
     #   ``quantity`` 이고, 그 목록을 안 맞추면 «축이 둘인데 전 안 동일» 로 **살아 있던
     #   안이 통째로 반려된다** — `#308` 이 막으려던 바로 그 20셀 모양이다.
+    #
+    # 🔴 **「timing 안이 없다」만 보지 않는다** (2026-09-16 검토). 그 안이 현금·등급 등
+    #   **다른 검사에서 탈락**해서 없을 수도 있고, 그때 축을 빼면 *"축이 둘인데 아무도
+    #   안 썼다"* 라는 사실이 조용히 사라진다. ⑥ 이 **실제로 되돌린 라벨**을 적어 보내고,
+    #   그것이 있을 때만 좁힌다.
     #   ⚠️ 목록을 **좁히기만** 한다. 안 쓴 축을 빼는 것이지 검사를 끄는 것이 아니다.
-    if survivors and all(s["strategy_type"] != TIMING_AXIS for s in survivors):
+    되돌린 = state.get("split_rolled_back_labels") or []
+    if 되돌린 and survivors and all(s["strategy_type"] != TIMING_AXIS for s in survivors):
         effective_axes = [axis for axis in effective_axes if axis != TIMING_AXIS]
     diversity = check_axis_diversity(survivors, effective_axes)
     if diversity:

@@ -36,12 +36,14 @@
 
 from collections.abc import Mapping
 from datetime import date, timedelta
+from functools import partial
 from typing import Any
 
 from app.purchase_agent.allocation import (
     arrival_dates,
     assign_axes,
     cumulative_overflow,
+    equal_ratios,
     round_offsets,
     split_infeasible_reason,
     split_offsets,
@@ -126,12 +128,13 @@ CAP_BLOCK_REASONS = {
 def _split_stands(
     total_qty_kg: int,
     chosen: list[dict] | None,
-    coverage_days: int,
     *,
+    coverage_days: int,
     as_of: str,
     lead_days: int | None,
     cap_by_date: Mapping[str, float] | None,
     calendar: Mapping[str, Any] | None,
+    widened: bool,
 ) -> bool:
     """이 분할이 **실제로 서는가** — 회차·비율·날짜·누적까지 밟아 본다 (E3-9 앞단).
 
@@ -160,11 +163,15 @@ def _split_stands(
     if arrivals is None:
         return False
     if cap_by_date is None or any(cap_by_date.get(day) is None for day in arrivals):
-        # 🔴 **못 보면 판정하지 않는다 — ⑦ 과 같은 태도다** (규칙 3).
-        #   ⑦ ``arrival_capacity`` 는 그때 컷이 아니라 **skip** 하고 사유만 고지한다.
-        #   여기서 「안 선다」로 읽으면 ⑦ 이 컷하지도 않을 안을 우리가 먼저 되돌리게 되고,
-        #   **두 자리의 기준이 또 갈린다.** 못 본 사실은 ⑦ 의 고지가 이미 나른다.
-        return True
+        # 🔴 **「못 봤다」는 「선다」가 아니다** (규칙 3 · 2026-09-16 검토).
+        #   다만 **넓힌 안과 안 넓힌 안의 처지가 다르다** —
+        #
+        #       안 넓힌 안   원래 서 있던 계획이다. 못 본 것을 이유로 우리가 먼저 깎으면
+        #                    ⑦ 이 컷하지도 않을 안을 죽인다 → 그대로 둔다 (⑦ 태도)
+        #       넓힌 안      넓힌 **근거가 바로 그 여유**다. 그 여유를 못 보면 넓힐 근거가
+        #                    사라진 것이라 **일괄로 되돌린다** — 「모르는 곳에 더 쌓는」
+        #                    계획을 내지 않는다 (``cap_constrained_quantities`` 와 같은 태도)
+        return not widened
     quantities, _ = cap_constrained_quantities(
         split_quantities(total_qty_kg, chosen), arrivals, cap_by_date
     )
@@ -200,52 +207,74 @@ def bulk_fallback(
     axis: str,
     split_choice: list[dict] | None,
     *,
+    constraints: dict,
     as_of: str,
     lead_days: int | None,
     cap_by_date: Mapping[str, float] | None,
     calendar: Mapping[str, Any] | None,
-) -> tuple[dict, str | None]:
-    """분할이 안 서면 **일괄 기준으로 되돌린** draft 와 사유를 돌려준다 (E3-9 앞단).
+) -> tuple[dict, list[dict] | None, str | None]:
+    """분할이 안 서면 **다른 회차 수를 먼저 보고**, 그래도 안 서면 일괄로 되돌린다.
+
+    돌려주는 것은 ``(draft, 쓸 비율 목록, 사유)`` 다. 사유가 있으면 **되돌린 것**이고,
+    호출부는 그 안의 축을 ``quantity`` 로 내린다.
 
     ★ **되돌릴 것이 없는 날이 대부분이다.** ③ 이 넓히지 않았으면(``single_round_cap_kg``
-      가 ``None`` 이거나 총량이 이미 그 이하면) 원본을 그대로 돌려준다 — 이 함수가
-      산출물을 바꾸는 것은 **넓혔는데 분할이 안 서는 날**뿐이다.
+      가 ``None`` 이거나 총량이 이미 그 이하면) 원본을 그대로 돌려준다.
 
     🔴 ``single_round_cap_kg`` 가 ``None`` 인 것은 「날짜 축을 못 봤다」다 (규칙 3).
       0 이나 무제한으로 바꾸지 않는다 — 못 본 날은 ③ 이 예전 기준(오늘 여유)으로 이미
       깎았고, 여기서 다시 손대면 **못 본 것을 본 것처럼** 다루게 된다.
+
+    🔴 **다른 회차 수를 볼 때 판단자가 고른 비율을 재사용하지 않는다** (2026-09-16 검토).
+      그 비율은 **그 회차 수 전용**이다 — 2회차용 ``[0.6, 0.4]`` 를 3회차에 늘려 쓰면
+      판단자가 보지도 않은 배분이 «고른 것» 으로 나간다. 다른 회차 수는 **균등**으로만
+      본다 (``BASE_EQUAL`` — 되돌아갈 자리이지 후보가 아니다).
     """
     single = draft.get("single_round_cap_kg")
     total = draft["total_qty_kg"]
+    widened = single is not None and total > single
     if single is None:
-        return draft, None
+        return draft, split_choice, None
     if axis != TIMING_AXIS:
         # 축을 못 받은 안은 1회차로 나간다 — 넓힌 수량이 남아 있으면 ⑦ 이 컷한다.
-        if total <= single:
-            return draft, None
-        return _reclipped_to_bulk(draft, single), _되돌림_사유(total, single)
-    선다 = _split_stands(
+        if not widened:
+            return draft, split_choice, None
+        return _reclipped_to_bulk(draft, single), None, _되돌림_사유(total, single)
+
+    잰다 = partial(
+        _split_stands,
         total,
-        split_choice,
-        draft["coverage_days"],
+        coverage_days=draft["coverage_days"],
         as_of=as_of,
         lead_days=lead_days,
         cap_by_date=cap_by_date,
         calendar=calendar,
+        widened=widened,
     )
-    if not 선다:
-        return _reclipped_to_bulk(draft, single), _되돌림_사유(total, single)
-    # 🔴 **분할이 서더라도 «더 살 수 있을 때» 만 나눈다** (2026-09-16). 한 번에 들어가는
-    #   양과 같은데 회차만 늘리면 실익 없이 ``timing`` 라벨이 붙는다 —
-    #   §3.5.1-3 이 막는 "3안인데 사실 한 안"의 다른 모양이다.
-    #   ⚠️ **궤적으로 진입한 날은 예외다** — 가격이 오르는 날 나눠 사는 것은 수량이
-    #     안 늘어도 뜻이 있다 (그게 timing 축의 본래 이유다).
-    if total <= single and not split_decision(split_choice).get("by_trend"):
-        return draft, (
-            f"분할 축이 열렸지만 한 번에 들어가는 {single:,}kg 과 총량이 같아 나누지 않는다 — "
-            "회차를 늘려도 더 살 수 없다"
-        )
-    return draft, None
+    if 잰다(split_choice):
+        # 🔴 **분할이 서더라도 «더 살 수 있을 때» 만 나눈다.** 한 번에 들어가는 양과 같은데
+        #   회차만 늘리면 실익 없이 ``timing`` 라벨이 붙는다 — §3.5.1-3 이 막는 모양이다.
+        #   ⚠️ **궤적으로 진입한 날은 예외다** — 가격이 오르는 날 나눠 사는 것은 수량이
+        #     안 늘어도 뜻이 있다 (그게 timing 축의 본래 이유다).
+        if not widened and not split_decision(split_choice).get("by_trend"):
+            return draft, None, (
+                f"분할 축이 열렸지만 한 번에 들어가는 {single:,}kg 과 총량이 같아 나누지 "
+                "않는다 — 회차를 늘려도 더 살 수 없다"
+            )
+        return draft, split_choice, None
+
+    # ④ 가 고른 회차 수가 안 선다 — **허용 목록의 다른 회차 수**를 균등으로 본다.
+    현재 = len(split_choice or [])
+    for rounds in sorted(constraints["split"]["types"]):
+        if rounds < 2 or rounds == 현재:
+            continue
+        대안 = [{"ratio": ratio} for ratio in equal_ratios(rounds)]
+        if 잰다(대안):
+            return draft, 대안, (
+                f"{현재}회 분할이 날짜별 여유를 못 지켜 {rounds}회 균등으로 바꿨다 — "
+                "고른 배분은 그 회차 수 전용이라 다시 쓰지 않는다"
+            )
+    return _reclipped_to_bulk(draft, single), None, _되돌림_사유(total, single)
 
 
 def _되돌림_사유(total_qty_kg: int, single_round_cap_kg: int) -> str:
@@ -1886,25 +1915,33 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
 
     scenarios = []
     dropped = []
+    # 🔴 **되돌려서 timing 을 잃은 라벨.** ⑦ 이 「축이 왜 안 쓰였나」를 가를 때 쓴다 —
+    #   «되돌려서» 와 «다른 검사에서 탈락해서» 는 다른 사실이고, 뒤쪽이면 축 목록을
+    #   좁히면 안 된다 (그 탈락을 가리게 된다).
+    되돌린_라벨: list[str] = []
     for draft in drafts:
         # 🔴 **분할이 실제로 서는지 만들어 보고 정한다** (2026-09-16 · E3-9 앞단).
         #   ③ 이 분할 전제로 넓힌 수량은 «후보» 지 «보증» 이 아니다 — 회차 수 · 배분 비율 ·
         #   실제 도착일을 적용하고 누적을 통과해야 분할이 성립한다. 안 서면 **일괄 기준으로
         #   되돌린다** — 안 되돌리면 넓힌 수량이 1회차로 나가 ⑦ 이 통째로 컷하고,
         #   **원래 살아 있던 작은 일괄안까지 사라진다.**
-        draft, bulk_note = bulk_fallback(
+        draft, 쓸_비율, bulk_note = bulk_fallback(
             draft,
             axes[draft["label"]],
             split_choice,
+            constraints=constraints,
             as_of=state["date"],
             lead_days=lead_days,
             cap_by_date=cap_by_date,
             calendar=calendar,
         )
-        if bulk_note:
+        if bulk_note and 쓸_비율 is None:
             # 되돌린 안은 timing 을 **잃는다** — 회차가 하나면 그것은 일괄안이고,
             # 라벨만 timing 으로 두면 §3.5.1-3 이 막는 "3안인데 사실 한 안"이 된다.
+            # 🔴 **되돌린 라벨을 적어 둔다** — ⑦ 이 「축이 왜 안 쓰였나」를 가를 때
+            #   «되돌려서» 와 «다른 검사에서 탈락해서» 를 구분해야 한다 (2026-09-16 검토).
             axes[draft["label"]] = "quantity"
+            되돌린_라벨.append(draft["label"])
         total = draft["total_qty_kg"]
         if total <= 0:
             # 수량이 0이라 안이 될 수 없다 (스키마가 total_qty_kg > 0을 요구한다). 조용히
@@ -1915,7 +1952,7 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         # 분할은 **timing 축을 받은 안에만** 붙는다 (§4-④ E3-3 확정 1). 전 안에 걸면
         # 세 안의 split 구조가 같아져 timing이 라벨로만 남는다 — §3.5.1-3이 막으려는 상태다.
         axis = axes[draft["label"]]
-        chosen = split_choice if axis == TIMING_AXIS else None
+        chosen = 쓸_비율 if axis == TIMING_AXIS else None
         coverage_days = draft["coverage_days"]
         # ★ 회차 금액을 여기서 얹는다 — ``sourcing`` 이 있어야 계산되므로
         #   ``materialize_split`` 안이 아니라 밖이다. 이후 ``split_plan`` 과
@@ -2026,4 +2063,8 @@ def package_scenarios(state: PurchaseAgentState) -> dict[str, Any]:
         "scenarios_final": scenarios,
         "rejected_reasons": [*state["rejected_reasons"], *dropped],
         "confidence": constraints["situation"]["confidence_by_situation"][state["situation"]],
+        # 🔴 **⑦ 이 「축이 왜 안 쓰였나」를 가르는 데 쓴다** (2026-09-16 검토).
+        #   이 목록이 비어 있으면 timing 을 안 쓴 이유가 되돌림이 아니라는 뜻이고,
+        #   그때 축 목록을 좁히면 **다른 검사에서의 탈락을 가린다.**
+        "split_rolled_back_labels": 되돌린_라벨,
     }

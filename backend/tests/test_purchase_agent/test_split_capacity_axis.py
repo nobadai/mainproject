@@ -64,7 +64,7 @@ def _평평한_예측(forecast: dict) -> dict:
     return 사본
 
 
-def _state(*, caps: dict[str, float], today_free: float) -> dict:
+def _state(*, caps: dict[str, float], today_free: float, cash: int | None = None) -> dict:
     """①③ 을 **실제로 태운** State.
 
     🔴 ``cap_by_date`` 와 N4 를 ① **전에** 꽂는다 — ① 도 ``split_entry_cap`` 을 보기 때문이다.
@@ -78,6 +78,8 @@ def _state(*, caps: dict[str, float], today_free: float) -> dict:
         "warehouse_free_kg": today_free,
         "rental_cap_kg": 0.0,
     }
+    if cash is not None:
+        state["projected_cash_min"] = cash
     state["forecast"] = _평평한_예측(state["forecast"])
     state.update(classify_situation(state))
     state.update(draft_plan(state))
@@ -363,3 +365,104 @@ def test_승인_전에는_균등_하나뿐이다() -> None:
     선언 = copy.deepcopy(load_constraints())  # 진짜 선언 = PROVISIONAL
     rounds = evaluate_split_entry(state, 선언)["rounds"]
     assert list(safe_allocation_candidates(state, 선언, rounds)) == ["BASE_EQUAL"]
+
+
+# ── 2026-09-16 검토에서 나온 셋 ─────────────────────────────────────────────
+
+
+def test_회차_수는_클립_뒤_총량으로_정한다() -> None:
+    """🔴 **진입과 회차 수는 다른 수를 본다** (검토 지적 1).
+
+    ```text
+    진입   한 번에 다 들어가는가        ← 깎기 전 수요 (raw_qty_kg)
+    회차   몇 번에 나눠야 들어가는가    ← 깎은 뒤 총량 (total_qty_kg)
+    ```
+
+    현금·신선도·조정안이 이미 줄여 놓은 양을 깎기 전 수요로 나누면 **필요보다 여러 번**에
+    나눈다 — 실측으로 raw 12,429kg · 실제 1,090kg 인데 3회차를 골랐다.
+    """
+    state = _state(
+        caps=_뒤로_커지는_창(2_000.0, 200_000.0), today_free=2_000.0, cash=3_000_000
+    )
+    facts = evaluate_split_entry(state, load_constraints())
+    assert facts["entered"], "전제 — 깎기 전 수요로는 진입한다"
+    최대_total = max(d["total_qty_kg"] for d in state["base_plan"]["drafts"])
+    필요 = -(-최대_total // int(facts["cap_kg"]))  # ceil
+    assert facts["rounds"] <= max(필요, 2), (
+        f"실제 총량 {최대_total:,}kg 이면 {필요}회차면 되는데 {facts['rounds']}회차를 골랐다"
+    )
+
+
+def test_넓힌_안은_여유를_못_보면_되돌린다() -> None:
+    """🔴 **「못 봤다」는 「선다」가 아니다** (검토 지적 2).
+
+    ⑦ 은 여유를 못 보면 컷이 아니라 **skip** 한다. 그 태도는 **원래 서 있던 계획**에
+    맞는 것이고, **분할을 전제로 넓힌 수량**은 처지가 다르다 — 넓힌 근거가 바로 그
+    여유이므로, 못 보면 넓힐 근거가 사라진 것이다.
+    """
+    # 창을 짧게 — 뒤 회차 도착일이 창 밖으로 나간다.
+    짧은_창 = {_날(offset): (500.0 if offset <= LEAD_DAYS else 200_000.0) for offset in range(6)}
+    state = _펴기(_state(caps=짧은_창, today_free=500.0))
+    for scenario in state["scenarios_final"]:
+        single = next(
+            d["single_round_cap_kg"]
+            for d in state["base_plan"]["drafts"]
+            if d["label"] == scenario["label"]
+        )
+        if single is None:
+            continue
+        창밖 = [
+            leg.get("expected_arrival_date")
+            for leg in scenario["split_plan"]
+            if leg.get("expected_arrival_date") not in 짧은_창
+        ]
+        if 창밖:
+            assert scenario["total_qty_kg"] <= single, (
+                f"{scenario['label']}: 도착일 {창밖} 여유를 못 보는데 넓힌 "
+                f"{scenario['total_qty_kg']:,}kg 이 그대로 나갔다"
+            )
+
+
+def test_되돌림이_아닌_이유로_timing_이_없으면_축을_안_좁힌다() -> None:
+    """🔴 **「timing 안이 없다」만 보면 다른 탈락을 가린다** (검토 지적 3).
+
+    timing 안이 현금·등급 등 **다른 검사에서 탈락**해서 없을 수도 있다. 그때 축을 빼면
+    *"축이 둘인데 아무도 안 썼다"* 라는 사실이 조용히 사라진다. ⑥ 이 **실제로 되돌린
+    라벨**을 적어 보내고, ⑦ 은 그것이 있을 때만 좁힌다.
+    """
+    # 되돌림이 일어나는 창(실익 없음) — 그때는 라벨이 실린다.
+    같은값 = 3_569.0
+    state = _펴기(_state(caps={_날(o): 같은값 for o in range(40)}, today_free=같은값))
+    assert state["split_rolled_back_labels"], "되돌린 날인데 라벨이 안 실렸다"
+    assert all(s["strategy_type"] != TIMING_AXIS for s in state["scenarios_final"])
+
+    # 되돌림이 없는 날 — 목록이 비어 있어야 한다.
+    넉넉 = {_날(offset): 1_000_000.0 for offset in range(40)}
+    깨끗 = _펴기(_state(caps=넉넉, today_free=1_000_000.0))
+    assert 깨끗["split_rolled_back_labels"] == [], (
+        "되돌린 적이 없는데 라벨이 실렸다 — ⑦ 이 축을 잘못 좁힌다"
+    )
+
+
+def test_다른_회차_수를_볼_때_고른_비율을_재사용하지_않는다() -> None:
+    """🔴 **판단자가 고른 비율은 그 회차 수 전용이다** (검토 지적 1 후속).
+
+    2회차용 ``[0.6, 0.4]`` 를 3회차에 늘려 쓰면 판단자가 보지도 않은 배분이 «고른 것» 으로
+    나간다. 다른 회차 수는 **균등**으로만 본다.
+    """
+    state = _펴기(_state(caps=_되돌아오는_창(), today_free=2_000.0))
+    바뀐_안 = [
+        s for s in state["scenarios_final"]
+        if any("회 균등으로 바꿨다" in risk for risk in s["risks"])
+    ]
+    assert 바뀐_안, "④ 가 고른 회차 수가 안 서는 창인데 다른 회차 수를 안 봤다"
+    for scenario in 바뀐_안:
+        legs = scenario["split_plan"]
+        # 🔴 **바꾼 뒤에도 총합은 불변이다** — 회차 수를 바꾸는 것이 수량을 바꾸는 일이
+        #   되면 사중 일치(규칙 4)가 깨진다.
+        assert sum(leg["qty_kg"] for leg in legs) == scenario["total_qty_kg"]
+        assert sum(leg["amount_krw"] for leg in legs) == scenario["total_amount_krw"]
+        # 🟡 회차 **수량**은 균등이 아닐 수 있다 — ⑥ cap_constrained_quantities 가
+        #   도착일 여유로 재배분하기 때문이다. 균등인 것은 **출발 비율**이고, 그 사실은
+        #   문면이 든다 ("균등으로 바꿨다").
+        assert len(legs) >= 2
