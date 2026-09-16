@@ -44,7 +44,7 @@ from app.finance.application.harness import (
     validate_finance_scenario_output,
     validate_planner_tool_arguments,
 )
-from app.finance.capabilities.sales import sales_business_status
+from app.finance.capabilities.sales import build_sales_adjustments, sales_business_status
 from app.finance.db import FinanceAsOfDataPort, FinanceDataNotReady
 from app.finance.execution import (
     _adjustment_from_dict,
@@ -205,24 +205,45 @@ def _sales_business_result(
     ★ **단일과 batch 의 모양을 섞지 않는다.** `scenarios` 로 들어온 요청만
       `scenario_results` 로 나간다. 단일 요청은 예전 모양 그대로다.
 
-    ★ 조정안을 만들지 않는다. 재무의 조정 축은 `amount` 하나인데, 판매 제안에 대한
-      권위 있는 금액 대안을 낼 근거(마진·여신 정책)가 아직 없다. 없는 근거로 조정을
-      제안하지 않는다.
+    ★★ **조정안이 열렸다** (2026-09-16). 여기 적혀 있던 조건이 *"권위 있는 금액
+      대안을 낼 근거가 아직 없다"* 였는데, 여신한도가 `partner_credit_limits` 정본으로
+      들어오면서 그 근거가 생겼다.
+
+      ```text
+      한도 - 현재 거래처 채권 = 가용 여신   ← 재무가 이미 세어 payload 에 실어 둔 값
+      ```
+
+      🔴 **낼 수 있을 때만 낸다.** 계산할 수 없거나 근거 ref 가 없으면 예전처럼
+        조정 없음이다 — 억지로 만들면 마스터가 그것을 권위 있는 대안으로 읽어
+        되먹임을 돌고, 그 되먹임은 아무것도 고치지 못한다.
+
+      ⚠️ **되먹임이 실제로 도는 조건이 이것 하나다.** 마스터는 *"통과 후보가 없고
+        부서가 낸 대안도 없으면 다시 묻지 않는다"* (`sales_flow._run`). 여기서
+        `[]` 만 돌려주던 동안 되먹임은 구조적으로 한 번도 돌 수 없었다 (실측:
+        판매 요청 9,937 건 전부 `feedback_attempt == 0`).
     """
     if "scenarios" not in request.payload:
         payload = _sales_branch_payload(states[0]) if states else {}
         if not payload:
             return {}, [], "skipped", []
-        return payload, [], sales_business_status(payload), []
+        adjustments = [
+            _adjustment_from_dict(item) for item in build_sales_adjustments(payload)
+        ]
+        return payload, [], sales_business_status(payload), adjustments
 
     results = [_sales_branch_payload(state) for state in states]
     if not any(results):
         return {}, [], "skipped", []
+    adjustments = [
+        _adjustment_from_dict(item)
+        for result in results
+        for item in build_sales_adjustments(result)
+    ]
     return (
         {"scenario_results": results},
         [],
         aggregate_sales_business_status(results),
-        [],
+        adjustments,
     )
 
 

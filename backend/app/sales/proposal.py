@@ -1,7 +1,10 @@
 """Sales Proposal Core."""
 
+from __future__ import annotations
+
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -25,11 +28,25 @@ from app.sales.schemas import (
     ScenarioSupply,
 )
 
+if TYPE_CHECKING:
+    from app.sales.strategy import StrategyPlan
+
 _TYPES = (
     ("A", "CONSERVATIVE", "RISK_DEFENSE"),
     ("B", "BALANCED", "BALANCE"),
     ("C", "AGGRESSIVE", "SALES_OPPORTUNITY"),
 )
+
+#: 계획이 그 전략의 자세를 안 들고 있을 때의 기본 가격 자세.
+#:
+#: 🔴 **공격안 기본이 `MARKET_ALIGNED` 다.** 소진 자세는 신호가 확인돼야 서고
+#:   (`strategy.clamp_profiles`), 계획이 비어 있다는 것은 신호를 확인한 적이 없다는
+#:   뜻이다 — 확인 없이 시장 하단을 여는 것은 근거 없이 싸게 파는 것이다.
+_DEFAULT_POSTURE: dict[str, str] = {
+    "CONSERVATIVE": "MARGIN_DEFENSE",
+    "BALANCED": "MARKET_ALIGNED",
+    "AGGRESSIVE": "MARKET_ALIGNED",
+}
 
 
 # 이 값은 입력의 ``source_ref`` 에 이미 남아 있는 단가 계보입니다. Sales는 Master
@@ -117,21 +134,27 @@ def _ml_forecast_row_ref(request: SalesProposalInput, relevant_date: date | None
     )
 
 
-def _depletion_pressure(sell_priority: str | None, severity: str | None) -> bool:
-    """Logistics가 이미 낸 강한 신호만 소비한다; freshness 숫자는 새 정책이 아니다."""
-    return sell_priority == "HIGH" or severity in {"SEVERE", "CRITICAL"}
-
-
 def _strategy_price(
     *,
-    scenario_type: str,
+    price_posture: str,
     baseline_price: Decimal | None,
     provenance: str,
     corridor: object | None,
     unit_cost: Decimal | None,
-    depletion: bool,
 ) -> tuple[Decimal | None, list[str]]:
-    """Finance policy guardrail과 authoritative market band로만 후보 가격을 만든다."""
+    """Finance policy guardrail과 authoritative market band로만 후보 가격을 만든다.
+
+    ★ **자세를 받는다** (2026-09-16). 전에는 `scenario_type` 과 `depletion` 두 값을
+      받아 안 이름으로 분기했는데, 그러면 *"공격안이면 소진 가격"* 이라는 규칙이 이
+      함수 안에 숨는다. 자세를 받으면 **누가 왜 그 자세를 골랐는지**가 호출부와
+      실행 이력에 남고, 여기는 그 자세를 값으로 옮기기만 한다.
+
+    🔴 **자세가 가드레일을 넘지 못한다.** `DEPLETION` 도 마진 최저선 아래로는 안
+      간다 — 세 갈래 전부 `max(..., minimum)` 을 거친다.
+
+    ★ **가격 계보가 잠겨 있으면 자세를 보지 않는다.** 계약가·사용자 지정가를 자세로
+      덮으면 그 순간 판매가 남이 정한 값을 바꾸는 것이 된다.
+    """
     if provenance.startswith("LOCKED") or provenance == "UNKNOWN":
         return baseline_price, [provenance]
 
@@ -143,7 +166,7 @@ def _strategy_price(
     predicted = point.predicted if point is not None else None
     upper = point.upper if point is not None else None
 
-    if scenario_type == "CONSERVATIVE":
+    if price_posture == "MARGIN_DEFENSE":
         candidates = [value for value in (upper, warning) if value is not None]
         strategy = []
         if upper is not None:
@@ -151,32 +174,25 @@ def _strategy_price(
         if warning is not None:
             strategy.append("MARGIN_DEFENSE")
         return max(candidates) if candidates else baseline_price, strategy or ["BASELINE"]
-    if scenario_type == "BALANCED":
-        if predicted is not None:
-            candidates = [value for value in (predicted, minimum) if value is not None]
-            strategy = ["MARKET_PREDICTED"]
-            if minimum is not None:
-                strategy.append("MARGIN_FLOOR")
-            return max(candidates), strategy
-        if minimum is not None:
-            candidates = [value for value in (baseline_price, minimum) if value is not None]
-            return max(candidates), ["MARGIN_FLOOR"]
-        return baseline_price, ["BASELINE"]
-    if depletion:
+    if price_posture == "DEPLETION":
+        # ★ 여기 오는 것 자체가 **소진 신호가 사실로 확인됐다**는 뜻이다.
+        #   신호가 없으면 `strategy.clamp_profiles` 가 자세를 이미 내렸다.
         if lower is not None:
             candidates = [value for value in (lower, minimum) if value is not None]
             return max(candidates), ["MARKET_LOWER", "MARGIN_FLOOR", "INVENTORY_DEPLETION"]
         if minimum is not None:
             return minimum, ["MARGIN_FLOOR", "INVENTORY_DEPLETION"]
-    # 소진 권위 신호가 없으면 공격안은 균형 가격으로 접는다.
-    return _strategy_price(
-        scenario_type="BALANCED",
-        baseline_price=baseline_price,
-        provenance=provenance,
-        corridor=corridor,
-        unit_cost=unit_cost,
-        depletion=False,
-    )
+        return baseline_price, ["BASELINE", "INVENTORY_DEPLETION"]
+    if predicted is not None:
+        candidates = [value for value in (predicted, minimum) if value is not None]
+        strategy = ["MARKET_PREDICTED"]
+        if minimum is not None:
+            strategy.append("MARGIN_FLOOR")
+        return max(candidates), strategy
+    if minimum is not None:
+        candidates = [value for value in (baseline_price, minimum) if value is not None]
+        return max(candidates), ["MARGIN_FLOOR"]
+    return baseline_price, ["BASELINE"]
 
 
 def validate_context(request: SalesProposalInput) -> list[str]:
@@ -235,12 +251,24 @@ def run_proposal(request: SalesProposalInput) -> SalesProposalReply:
     return run_sales_agent(request)
 
 
-def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
+def _generate_scenarios(
+    request: SalesProposalInput, plan: StrategyPlan | None = None
+) -> list[SalesScenario]:
+    """세 전략의 안을 만든다. **자세는 받고 숫자는 여기서 만든다.**
+
+    ★ `plan` 을 안 주면 여기서 만든다 — 그래프를 거치지 않는 호출(테스트·단독 실행)
+      에서도 세 전략이 같은 규칙으로 서야 하기 때문이다. 그래프는 자기가 만든 계획을
+      넘겨 **한 실행에서 계획이 두 번 서지 않게** 한다 (모델을 두 번 부르지 않는다).
+    """
+    from app.sales.strategy import plan_strategies
+
     quantity, price, requested_delivery, payment, terms_type, term, source_ref, refs = _baseline(
         request
     )
     if quantity is None:
         return []
+    if plan is None:
+        plan, _signals = plan_strategies(request, _all_feedback_replies(request))
     # ★ 상업조건의 납품일과 **공급 조회의 기준일**을 가른다. 앞은 물류가 확정한
     #   최초 납품일까지 받아들이고, 뒤는 **요청된 날짜**만 쓴다 — `_delivery_date` 가
     #   왜 그래야 하는지를 적었다.
@@ -297,13 +325,16 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
             item=request.user_request.item,
             covered_quantity_kg=(None if confirmed is None else min(scenario_quantity, confirmed)),
         )
+        profile = plan.of(scenario_type)
         scenario_price, price_strategy = _strategy_price(
-            scenario_type=scenario_type,
+            # ★ 자세가 없으면 그 전략의 **기본 자세**로 돈다. 계획이 비는 것은
+            #   모델이 실패한 것과 다른 사고(호출부 배선)라, 여기서 조용히
+            #   `MARKET_ALIGNED` 로 떨어뜨리지 않고 전략별 기본으로 간다.
+            price_posture=(profile.price_posture if profile else _DEFAULT_POSTURE[scenario_type]),
             baseline_price=price,
             provenance=provenance,
             corridor=corridor,
             unit_cost=_authoritative_unit_cost(basis),
-            depletion=_depletion_pressure(sell_priority, inventory_severity),
         )
         if scenario_price != price:
             axes.append("PRICE")
@@ -368,6 +399,7 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 # ★ **이 안의 확정 물량**에 붙은 원가만 싣는다. 조건부로 더 채운 몫은
                 #   재고가 아니라 매입에서 오므로 여기 금액에 섞이지 않는다.
                 inventory_cost_basis=basis,
+                price_strategy_codes=list(price_strategy),
                 sales_decision_axes=axes,
                 required_validations=validations,
                 evidence_refs=_unique_refs(
@@ -425,6 +457,9 @@ def _generate_scenarios(request: SalesProposalInput) -> list[SalesScenario]:
                 authoritative_inventory_risk_severity=inventory_severity,
                 remaining_freshness_days=remaining_freshness,
                 ml_support_used=ml_support,
+                strategy_profile=(
+                    None if profile is None else profile.model_dump()
+                ),
             )
         )
     return result
@@ -828,6 +863,15 @@ def _replies_for_scenario(request: SalesProposalInput, original_id: str) -> list
     )
     by_ref = {reply.reply_ref: reply for reply in request.feedback.domain_replies}
     return [by_ref[reply_ref] for reply_ref in refs if reply_ref in by_ref]
+
+
+def _all_feedback_replies(request: SalesProposalInput) -> list[SalesDomainReply]:
+    """되먹임으로 온 부서 회신 전부. **1차 호출에서는 빈 목록이다.**
+
+    ★ 전략 자세는 **요청 단위**로 한 번 정한다 — 후보마다 다른 신호를 보면 같은
+      실행 안에서 소진 판단이 안마다 갈린다.
+    """
+    return list(request.feedback.domain_replies) if request.feedback else []
 
 
 def _logistics_refs(request: SalesProposalInput, confirmed: Decimal | None) -> list[str]:
