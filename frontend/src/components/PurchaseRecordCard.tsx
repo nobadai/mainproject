@@ -23,7 +23,11 @@ import type { PurchaseRecordLeg, PurchaseRecordOut, PurchaseRecordStatus } from 
  * ★ **매입일은 보여만 준다** (2026-09-16). 승인한 안에 적힌 날이 그대로 장부의 날이고,
  *   다른 날로 적으면 서버가 되돌린다 — 되돌려받기 전에 화면이 먼저 말한다.
  *
- * ★ **수량 · 금액은 정수만 받는다.** 반 kg · 소수점 원은 장부가 받지 않는다. 보내 놓고
+ * ★ **사람은 금액이 아니라 단가(원/kg)를 적는다** (2026-09-16). 금액은 수량 × 단가로
+ *   여기서 바로 서고 읽기 전용으로 보여만 준다 — 매입 원장의 단가 칸이 정수여야 해서,
+ *   금액을 받아 나누면 소수 단가가 나고 장부가 그 자리에서 멈춘다.
+ *
+ * ★ **수량 · 단가는 정수만 받는다.** 반 kg · 소수점 원은 장부가 받지 않는다. 보내 놓고
  *   거절당하는 대신 적는 자리에서 알려 준다.
  */
 
@@ -148,7 +152,7 @@ function Shell({
 interface LegDraft {
   seq: number;
   qty_kg: string;
-  amount_krw: string;
+  unit_price_krw: string;
   purchase_date: string;
   arrival_date: string;
 }
@@ -156,11 +160,20 @@ interface LegDraft {
 const toDraft = (leg: PurchaseRecordLeg): LegDraft => ({
   seq: leg.seq,
   qty_kg: String(leg.qty_kg),
-  // 선정안에 금액이 없으면 비워 둔다 — 0 으로 채우지 않는다.
-  amount_krw: leg.amount_krw == null ? "" : String(leg.amount_krw),
+  // 선정안에 단가가 없으면 비워 둔다 — 0 으로도, 금액 ÷ 수량으로도 채우지 않는다.
+  unit_price_krw: leg.unit_price_krw == null ? "" : String(leg.unit_price_krw),
   purchase_date: leg.purchase_date,
   arrival_date: leg.arrival_date,
 });
+
+/** 금액은 **수량 × 단가로 난다** — 적는 칸이 아니다. 둘 중 하나가 비면 보여 줄 금액도 없다. */
+function legAmount(leg: LegDraft): number | null {
+  const qty = Number(leg.qty_kg);
+  const unit = Number(leg.unit_price_krw);
+  if (leg.qty_kg === "" || leg.unit_price_krw === "") return null;
+  if (!Number.isFinite(qty) || !Number.isFinite(unit)) return null;
+  return qty * unit;
+}
 
 /**
  * 서버 사유를 한 줄로.
@@ -207,15 +220,15 @@ function RecordForm({
     legs.every(
       (leg) =>
         Number(leg.qty_kg) > 0 &&
-        Number(leg.amount_krw) > 0 &&
+        Number(leg.unit_price_krw) > 0 &&
         leg.purchase_date !== "" &&
         leg.arrival_date !== "",
     );
 
-  // ★ 장부의 수량은 kg, 금액은 원이고 둘 다 정수다. **보내기 전에** 알려 준다.
+  // ★ 장부의 수량은 kg, 단가는 원/kg 이고 둘 다 정수다. **보내기 전에** 알려 준다.
   const 정수 = (text: string) => Number.isInteger(Number(text));
   const 소수회차 = legs
-    .filter((leg) => !정수(leg.qty_kg) || !정수(leg.amount_krw))
+    .filter((leg) => !정수(leg.qty_kg) || !정수(leg.unit_price_krw))
     .map((leg) => leg.seq);
 
   function update(index: number, patch: Partial<LegDraft>) {
@@ -231,10 +244,11 @@ function RecordForm({
         decision_seq: data.decision_seq,
         grade: grade.trim(),
         recorded_by: session.name,
+        // 🔴 금액을 같이 보내지 않는다 — 서버가 수량 × 단가로 만든다. 주인은 하나다.
         legs: legs.map((leg) => ({
           seq: leg.seq,
           qty_kg: Number(leg.qty_kg),
-          amount_krw: Number(leg.amount_krw),
+          unit_price_krw: Number(leg.unit_price_krw),
           purchase_date: leg.purchase_date,
           arrival_date: leg.arrival_date,
         })),
@@ -267,14 +281,14 @@ function RecordForm({
       </p>
       <p className="m-0 text-[11.5px] text-faint">
         매입일은 승인한 안에 적힌 날 그대로라 여기서 바꿀 수 없습니다. 도착일은 실제로 들어온 날로
-        고쳐 주세요. 수량은 1kg, 금액은 1원 단위로 적습니다.
+        고쳐 주세요. 수량은 1kg, 단가는 1원 단위로 적습니다. 금액은 수량 × 단가로 자동으로 섭니다.
       </p>
 
       <div className="overflow-x-auto rounded-lg border border-line bg-surface">
-        <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
+        <table className="w-full min-w-[660px] border-collapse text-[12.5px]">
           <thead>
             <tr className="bg-sunk text-[10.5px] uppercase tracking-wide text-muted">
-              {["회차", "수량(kg)", "금액(원)", "매입일", "도착일"].map((h) => (
+              {["회차", "수량(kg)", "단가(원/kg)", "금액(원)", "매입일", "도착일"].map((h) => (
                 <th key={h} className="px-3 py-1.5 text-left font-semibold">
                   {h}
                 </th>
@@ -290,7 +304,7 @@ function RecordForm({
                   <td className="px-2 py-1">
                     <input
                       type="number"
-                      min={0}
+                      min={1}
                       step={1}
                       inputMode="numeric"
                       aria-label={`${leg.seq}회차 수량`}
@@ -302,14 +316,18 @@ function RecordForm({
                   <td className="px-2 py-1">
                     <input
                       type="number"
-                      min={0}
+                      min={1}
                       step={1}
                       inputMode="numeric"
-                      aria-label={`${leg.seq}회차 금액`}
-                      value={leg.amount_krw}
-                      onChange={(e) => update(index, { amount_krw: e.target.value })}
-                      className={inputClass(changed(leg.amount_krw, plan?.amount_krw))}
+                      aria-label={`${leg.seq}회차 단가`}
+                      value={leg.unit_price_krw}
+                      onChange={(e) => update(index, { unit_price_krw: e.target.value })}
+                      className={inputClass(changed(leg.unit_price_krw, plan?.unit_price_krw))}
                     />
+                  </td>
+                  {/* 🔴 금액은 수량 × 단가로 난 값이다 — 사람이 고치는 칸이 아니다. */}
+                  <td className="px-3 py-1.5 font-mono tabular-nums text-muted">
+                    {원(legAmount(leg))}
                   </td>
                   {/* 매입일은 승인한 안에 적힌 날 그대로다 — 보여만 준다. */}
                   <td className="px-3 py-1.5 font-mono tabular-nums text-muted">
@@ -359,7 +377,7 @@ function RecordForm({
 
       {소수회차.length > 0 && (
         <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
-          {소수회차.join(" · ")}회차의 수량과 금액에 소수점이 있습니다. 수량은 1kg, 금액은 1원
+          {소수회차.join(" · ")}회차의 수량과 단가에 소수점이 있습니다. 수량은 1kg, 단가는 1원
           단위로 적어 주세요.
         </p>
       )}
