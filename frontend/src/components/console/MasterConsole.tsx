@@ -83,7 +83,12 @@ type Turn =
     }
   //   승인 직후 "무엇을 하기로 한 것인가". **"오늘 산 것" 이 아니다** — 승인은
   //   기록이고 발주는 이 시스템 밖이다 (`ApprovedPlan` 이 그 사실을 적는다).
-  | { kind: "approved"; scenario: Scenario; decision: DecisionOut }
+  //
+  // 🔴 `scenario` 는 **있을 때만 온다.** 모달로 누른 승인은 안 전체를 들고 있지만,
+  //    말로 한 승인은 라벨만 안다 — 그때 빈 안을 지어내 넘기면 화면이 0 과 빈 칸을
+  //    «사실» 로 그린다. 없으면 `ApprovedPlan` 을 안 그리고 한 줄만 적는다.
+  //    `item` 은 그 한 줄에 쓸 품목이다 (그날 서 있던 안의 품목 또는 분류가 읽은 품목).
+  | { kind: "approved"; scenario?: Scenario; decision: DecisionOut; item?: string }
   | { kind: "error"; text: string };
 
 /**
@@ -331,6 +336,8 @@ export function MasterConsole({ session }: { session: Session }) {
     return {
       requestId: hits[0].request_id as string,
       historyRunId: hits[0].history_run_id,
+      //   승인한 뒤 "무엇을 승인했나" 한 줄에 쓸 품목. 찾아 온 안의 이름에서 그대로 읽는다.
+      item: planItem(hits[0].key),
     };
   }
 
@@ -355,6 +362,9 @@ export function MasterConsole({ session }: { session: Session }) {
     try {
       //   이 대화에서 방금 만든 안이 있으면 **그것이 먼저다.**
       let target = last;
+      //   승인 뒤 한 줄에 쓸 품목. 분류가 읽어 낸 것이 먼저 서고, 그날 서 있는 안을
+      //   찾아오면 그 안의 품목으로 바뀐다. **둘 다 없으면 빈 채로 둔다** — 지어내지 않는다.
+      let item = (turn.intent.item ?? "").trim();
 
       // 🔴 없으면 **그날 매입 화면에 서 있는 안**에서 라벨로 찾는다 (2026-09-16).
       //
@@ -364,9 +374,11 @@ export function MasterConsole({ session }: { session: Session }) {
       //    ★ 찾는 것은 **화면**이다. 서버(`/ask/execute`)는 대상이 없으면 422 를 내고
       //      추측하지 않는다 — 그 규칙은 그대로 산다.
       if (select && !target) {
-        target = await standingRun(turn.intent);
+        const found = await standingRun(turn.intent);
         //   못 찾았으면 위에서 사람 말로 적었다. **실행하지 않는다.**
-        if (!target) return;
+        if (!found) return;
+        target = { requestId: found.requestId, historyRunId: found.historyRunId };
+        if (found.item) item = found.item;
       }
 
       // 🔴 그래도 대상이 없으면 **추측하지 않고 멈춘다.** 서버도 같은 이유로 422 다.
@@ -405,6 +417,14 @@ export function MasterConsole({ session }: { session: Session }) {
           { kind: "bot", text: res.answer?.text ?? "" },
           { kind: "run", run: res.run },
         );
+      } else if (select && res.decision) {
+        // 🔴 말로 한 승인도 **모달로 누른 승인과 같은 자리에서 끝난다** (`approve`).
+        //    여기서 갈리면 어느 길로 승인했느냐에 따라 실매입을 적을 칸이 있고 없다 —
+        //    9/11 시연은 말로 승인하고 실매입을 적는 것이 전부다.
+        //
+        //    ★ `res.decision` 이 없으면 승인이 안 된 것이라 아래 분기로 그냥 흐른다.
+        if (res.answer) push({ kind: "bot", text: res.answer.text });
+        push({ kind: "approved", decision: res.decision, item });
       } else if (res.answer && salesAnswered(turn.intent, (res as { status?: unknown }).status)) {
         push({ kind: "sales", asOf, detail: { text: res.answer.text, note: res.note } });
       } else if (res.answer) {
@@ -667,14 +687,27 @@ function TurnView({
       </div>
     );
 
-  if (turn.kind === "approved")
+  if (turn.kind === "approved") {
+    //  말로 한 승인은 안 전체를 들고 있지 않다. **없는 숫자를 0 으로 그리지 않고**
+    //  무엇을 승인했는지만 적는다 — 안의 값은 매입 화면에 그대로 서 있다.
+    const label = turn.decision.scenario_label;
+    const what = [(turn.item ?? "").trim(), label ? `'${label}' 안` : "고른 안"]
+      .filter(Boolean)
+      .join(" ");
     return (
       <div className="flex flex-col gap-3">
-        <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />
+        {turn.scenario ? (
+          <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />
+        ) : (
+          <p className="m-0 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm">
+            {turn.decision.decided_by} 님이 {what}을 승인했습니다.
+          </p>
+        )}
         {/* 사람 승인 뒤 실제로 산 값을 적는 자리. 자동 승인 · 매입 승인이 아니면 카드가 스스로 숨는다. */}
         <PurchaseRecordCard requestId={turn.decision.request_id} />
       </div>
     );
+  }
 
   if (turn.kind === "error")
     return (
