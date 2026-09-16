@@ -112,7 +112,8 @@ class StrategySignals:
     depletion_pressure: bool = False
     #: 그 판단의 근거가 된 코드·로트. 화면과 이력이 *"왜"* 를 말할 수 있게 남긴다.
     freshness_risk_codes: tuple[str, ...] = ()
-    freshness_risk_lot_ids: tuple[str, ...] = ()
+    #: 그 품목의 로트 이름. **위험 판정이 아니라 «이 품목이 창고에 있는가» 다.**
+    item_lot_ids: tuple[str, ...] = ()
     #: 되먹임 회신에서 온 보조 신호 (1차 생성에는 없다).
     sell_priority: str | None = None
     inventory_risk_severity: str | None = None
@@ -207,30 +208,40 @@ def _warning_codes(context: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(codes))
 
 
-def _freshness_risk_lots(context: Any, item: str) -> tuple[str, ...]:
-    """유효 신선도 한계에 닿은 로트. **물류가 낸 두 숫자를 비교만 한다.**
+def _item_lot_ids(context: Any, item: str) -> tuple[str, ...]:
+    """그 품목의 로트 이름. **판정하지 않는다 — 있는지만 센다.**
 
-    🔴 **새 임계값을 만들지 않는다.** 물류가 `remaining_freshness_days` 와 그것을
-      만든 분모(`effective_freshness_limit_days`)를 같이 보내는 이유가 이것이다 —
-      *"며칠 남았으면 위험"* 을 판매가 정하면 같은 판정의 주인이 둘이 된다.
+    🔴 **신선도 임계를 판매가 만들지 않는다** (2026-09-16 실측으로 되돌린 자리).
+
+      한때 여기서 `remaining_freshness_days <= effective_freshness_limit_days` 로
+      «한계에 닿은 로트» 를 골랐다. **그 비교는 거꾸로였다.** 뒤의 값은 임계가 아니라
+      **분모**(그 로트가 원래 며칠짜리인가)이고, 앞의 값은 남은 일수다. 그래서
+      `remaining == limit` 인 **갓 입고된 최상 로트**가 전부 위험으로 읽혔다.
+
+      실측 (`SIM-CHAIN-CHECK-0916` · 2026-09-10):
+
+      ```text
+      배추 LOT …20260909-배추-1-1   remaining 10 / limit 10   ← 갓 들어온 것
+      → 옛 비교로는 «한계 도달» → 공격안이 시장 하단 1,447원으로 내려갔다
+      ```
+
+      물류 `adapter.py` 가 그 두 칸을 같이 보내는 이유는 *"받는 쪽이 원값으로 역산해
+      갓 입고 Lot 을 임박으로 만드는 것"* 을 막기 위해서인데, 정확히 그 사고를 냈다.
+
+    ★ **위험 판정의 주인은 물류다.** 물류 `rules.py` 가 자기 임계로 재서
+      `FRESHNESS_QUALITY_RISK` 를 낸다. 판매는 그 신호를 읽고, 여기서는 **그 신호가
+      이 품목에 걸리는지**를 볼 재료(그 품목 로트의 존재)만 만든다.
 
     ★ **합산하지 않는다.** 로트를 더해 가용량을 만들면 판매가 물류의 가용 판정을
-      다시 하는 것이 된다 (`_confirmed_sellable_qty` 가 못박은 자리). 여기서는
-      **이름만** 센다.
+      다시 하는 것이 된다 (`_confirmed_sellable_qty` 가 못박은 자리).
     """
     if context is None or context.sellable_supply is None:
         return ()
-    lots: list[str] = []
-    for lot in context.sellable_supply.lot_constraints:
-        if lot.item != item:
-            continue
-        remaining = lot.remaining_freshness_days
-        limit = lot.effective_freshness_limit_days
-        if remaining is None or limit is None:
-            continue
-        if remaining <= limit:
-            lots.append(lot.lot_id)
-    return tuple(dict.fromkeys(lots))
+    return tuple(
+        dict.fromkeys(
+            lot.lot_id for lot in context.sellable_supply.lot_constraints if lot.item == item
+        )
+    )
 
 
 def _finance_number(context: Any, path: Sequence[str]) -> Decimal | None:
@@ -264,10 +275,28 @@ def derive_signals(request: Any, replies: Sequence[Any] = ()) -> StrategySignals
     item = request.user_request.item
     codes = _warning_codes(logistics)
     risk_codes = tuple(code for code in codes if code == FRESHNESS_RISK_CODE)
-    risk_lots = _freshness_risk_lots(logistics, item)
+    item_lots = _item_lot_ids(logistics, item)
+
+    # 🔴 **창고 신호를 품목으로 좁힌다** (2026-09-16 실측으로 고친 자리).
+    #
+    #   `soft_warnings` 는 코드만 있고 **어느 품목인지가 없다.** 그래서 종전에는
+    #   신호 하나로 이 요청의 품목까지 소진 대상이 됐다.
+    #
+    #   실측 (`SIM-CHAIN-REH-0914` · 2026-09-14):
+    #
+    #   ```text
+    #   soft_warnings   [FRESHNESS_QUALITY_RISK]     ← 양파 로트에서 난 신호
+    #   요청 품목        배추                          ← 그날 로트가 하나도 없다
+    #   → 배추 공격안이 시장 하단 1,321원으로 내려갔다
+    #   ```
+    #
+    # ★ **그 품목 로트가 창고에 있을 때만** 이 신호를 이 품목의 소진 압력으로 읽는다.
+    #   품목을 특정할 수 없는 신호로 가격을 내리는 것은 §7 이 막으려는 «근거 없이
+    #   싸게 파는 것» 그 자체다. 좁히는 방향이라 fail-closed 다.
+    warehouse_freshness_risk = bool(risk_codes) and bool(item_lots)
 
     sell_priority, severity, freshness = _reply_ranking_facts(replies)
-    depletion = bool(risk_codes or risk_lots)
+    depletion = warehouse_freshness_risk
     depletion = depletion or sell_priority == _HIGH_SELL_PRIORITY
     depletion = depletion or severity in _SEVERE_INVENTORY_RISK
 
@@ -283,7 +312,7 @@ def derive_signals(request: Any, replies: Sequence[Any] = ()) -> StrategySignals
     return StrategySignals(
         depletion_pressure=depletion,
         freshness_risk_codes=risk_codes,
-        freshness_risk_lot_ids=risk_lots,
+        item_lot_ids=item_lots,
         sell_priority=sell_priority,
         inventory_risk_severity=severity,
         remaining_freshness_days=freshness,
@@ -390,12 +419,11 @@ def template_profiles(signals: StrategySignals) -> list[StrategyProfile]:
     ★ 공격안의 가격 자세는 **신호가 있을 때만** `DEPLETION` 이다. 신호 없이 시장
       하단을 여는 것은 근거 없이 싸게 파는 것이다.
     """
-    aggressive_price: PricePosture = (
-        "DEPLETION" if signals.depletion_pressure else "MARKET_ALIGNED"
-    )
+    aggressive_price: PricePosture = "DEPLETION" if signals.depletion_pressure else "MARKET_ALIGNED"
     aggressive_reasons = list(signals.freshness_risk_codes)
-    if signals.freshness_risk_lot_ids:
-        aggressive_reasons.append("LOT_FRESHNESS_LIMIT_REACHED")
+    if signals.item_lot_ids and signals.freshness_risk_codes:
+        # 창고 신호가 이 품목 로트에 걸린다는 사실. 로트 자체를 판정한 것이 아니다.
+        aggressive_reasons.append("ITEM_LOT_UNDER_FRESHNESS_RISK")
     if not signals.depletion_pressure:
         aggressive_reasons.append("DEPLETION_SIGNAL_ABSENT")
 
@@ -430,9 +458,7 @@ def template_profiles(signals: StrategySignals) -> list[StrategyProfile]:
             strategy="AGGRESSIVE",
             price_posture=aggressive_price,
             quantity_posture="EXPANDED",
-            inventory_posture=(
-                "FRESHNESS_RISK_FIRST" if signals.depletion_pressure else "FIFO"
-            ),
+            inventory_posture=("FRESHNESS_RISK_FIRST" if signals.depletion_pressure else "FIFO"),
             credit_posture="WITHIN_LIMIT",
             cash_posture="CASH_CONVERSION" if signals.cash_is_tight else "NORMAL",
             reason_codes=aggressive_reasons,
