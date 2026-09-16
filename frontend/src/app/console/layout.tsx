@@ -88,7 +88,14 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
 
   return (
     <div
-      className="grid min-h-screen [grid-template-columns:1fr] md:[grid-template-columns:238px_minmax(0,1fr)]"
+      //  ★ **`content-start` 가 있어야 좁은 화면에서 배경이 안 갈립니다** (2026-09-16).
+      //    격자의 기본 `align-content` 는 «늘리기» 라, 화면보다 내용이 짧으면
+      //    남는 세로 공간을 **두 줄에 똑같이 나눠 줍니다.** 그런데 첫 줄에 든
+      //    왼쪽 띠(`nav`)는 좁은 화면에서 높이가 `h-14` 로 못 박혀 있어 늘어난
+      //    칸을 안 채웁니다 — 그 빈자리로 바탕색(`--color-desk`)이 드러나
+      //    **띠 바로 아래에 색이 다른 가로 줄**이 생깁니다.
+      //    `content-start` 는 칸을 내용 높이 그대로 두고 위로 붙입니다.
+      className="grid min-h-screen content-start [grid-template-columns:1fr] md:[grid-template-columns:238px_minmax(0,1fr)]"
       style={{ background: "var(--color-desk)" }}
     >
       <nav

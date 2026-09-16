@@ -24,6 +24,7 @@ import {
   type BatchRun,
 } from "@/lib/mlConsole";
 
+import { DateRange } from "./DateRange";
 import { ReportBody } from "./Report";
 import { RerunButton } from "./RerunButton";
 
@@ -59,18 +60,56 @@ export function BatchTab() {
   const [runs, setRuns] = useState<BatchRun[] | null>(null);
   const [report, setReport] = useState<AgentReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  //  ★ 고른 기간. `DateRange` 가 첫 렌더에서 기본값(기준일 −4일 ~ 기준일)을
+  //    알려주므로, 목록을 받아오는 것은 **전부 여기서** 시작합니다.
+  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+
+  //  값이 같으면 **같은 객체를 그대로 둡니다** — 새 객체를 만들면 아래
+  //  `useEffect` 가 다시 돌아 같은 것을 또 받아옵니다.
+  const onRange = useCallback((from: string, to: string) => {
+    setRange((r) => (r && r.from === from && r.to === to ? r : { from, to }));
+  }, []);
+
+  const fail = useCallback((e: unknown) => {
+    setErr(e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e));
+  }, []);
+
+  //  ★ **기간이 바뀔 때마다 다시 받아옵니다.** 달력을 건드리는 것이 곧 조회입니다.
+  useEffect(() => {
+    if (!range) return;
+    let alive = true;
+    batchRecent(range.from, range.to)
+      //  ★ 배열이 그대로 옵니다. `r.runs` 로 읽으면 `undefined` 가 되어
+      //    **오류 없이 「읽는 중…」 에서 멈춥니다.** 실제로 그랬습니다.
+      .then((r) => {
+        if (!alive) return;
+        setRuns(r);
+        //  받아왔으면 지난 오류 줄을 지웁니다 — 남겨 두면 «지금도 안 된다» 로 읽힙니다.
+        setErr(null);
+      })
+      .catch((e: unknown) => alive && fail(e));
+    return () => {
+      alive = false;
+    };
+  }, [range, fail]);
 
   //  ★ 다시 돌린 뒤에도 씁니다. 안 그러면 방금 돌린 결과가 안 보이고
   //    실패한 옛 기록이 그대로 남아 «또 실패했나» 로 읽힙니다.
   const load = useCallback(() => {
-    const fail = (e: unknown) =>
-      setErr(e instanceof MlError ? `[${e.status || "연결 안 됨"}] ${e.message}` : String(e));
-    batchRecent()
-      //  ★ 배열이 그대로 옵니다. `r.runs` 로 읽으면 `undefined` 가 되어
-      //    **오류 없이 「읽는 중…」 에서 멈춥니다.** 실제로 그랬습니다.
-      .then((r) => setRuns(r))
-      .catch(fail);
+    if (range)
+      batchRecent(range.from, range.to)
+        .then((r) => setRuns(r))
+        .catch(fail);
     //  조사는 실패했을 때만 내용이 있다. 없다고 오류가 아니다.
+    batchAgent()
+      .then((r) => setReport(r))
+      .catch(() => {
+        /* 조사가 안 돌아도 실행 목록은 보여야 한다 */
+      });
+  }, [range, fail]);
+
+  //  조사 보고서는 기간과 상관없이 **한 번만** 받습니다 (오늘 것 하나입니다).
+  useEffect(() => {
     batchAgent()
       .then((r) => setReport(r))
       .catch(() => {
@@ -78,27 +117,11 @@ export function BatchTab() {
       });
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  if (err)
-    return (
-      <p
-        className="m-0 rounded-lg px-4 py-3.5 text-[12.5px]"
-        style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
-      >
-        {err}
-      </p>
-    );
-  if (!runs)
-    return (
-      <p className="m-0 py-10 text-center text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
-        작업 기록을 불러오는 중…
-      </p>
-    );
-
-  const failed = runs.filter((r) => (r.status ?? "").toLowerCase().startsWith("fail")).length;
+  //  ★ **화면을 통째로 오류·「불러오는 중」 으로 덮지 않습니다** (2026-09-16).
+  //    덮으면 **달력이 같이 사라져** 기간을 다시 고를 수가 없습니다. 목록을
+  //    받아오는 일 자체가 달력에서 시작하므로, 달력이 없으면 영영 못 받습니다.
+  //    오류도 「읽는 중」 도 목록 자리 안에서만 말합니다.
+  const failed = (runs ?? []).filter((r) => (r.status ?? "").toLowerCase().startsWith("fail")).length;
 
   //  ★ 「오늘 것이 실패했나」 — 목록 전체가 아니라 **가장 최근 실행 하나**를
   //    봅니다. 지난주에 한 번 실패한 것 때문에 버튼이 계속 떠 있으면 안 됩니다.
@@ -114,7 +137,7 @@ export function BatchTab() {
       d.getDate() === today.getDate()
     );
   };
-  const last = runs[0] ?? null;
+  const last = runs?.[0] ?? null;
   const todayFailed =
     !!last && isToday(last.started_at) && (last.status ?? "").toLowerCase().startsWith("fail");
 
@@ -162,27 +185,49 @@ export function BatchTab() {
           <h2 className="m-0 text-[13.5px] font-semibold">최근 자동 작업 기록</h2>
           {failed > 0 && (
             <span
-              className="ml-auto rounded px-2 py-0.5 text-[11px] font-semibold"
+              className="rounded px-2 py-0.5 text-[11px] font-semibold"
               style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
             >
               {failed}건 실패
             </span>
           )}
+          {/*  달력을 건드리면 그 자리에서 다시 받아옵니다 — 조회 버튼이 없습니다. */}
+          <div className="ml-auto">
+            <DateRange onChange={onRange} />
+          </div>
         </header>
 
-        {runs.length === 0 ? (
+        {err && (
+          <p
+            className="m-0 rounded-lg px-3.5 py-2.5 text-[12px]"
+            style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
+          >
+            {err}
+          </p>
+        )}
+
+        {!runs ? (
+          <p className="m-0 py-6 text-center text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
+            작업 기록을 불러오는 중…
+          </p>
+        ) : runs.length === 0 ? (
+          //  ★ **빈 표를 그리지 않습니다.** 머리글만 있는 표는 «배치가 안 돌았다»
+          //    로 읽힙니다 — 실제로는 «그 기간을 안 골랐다» 입니다.
           <p
             className="m-0 rounded-lg border border-dashed px-4 py-6 text-center text-[12px]"
             style={{ borderColor: "var(--color-hair)", color: "var(--color-mut2)" }}
           >
-            작업 기록이 없습니다 — 아직 실행되지 않았거나 로그를 읽지 못했습니다
+            이 기간에 배치 기록이 없습니다
           </p>
         ) : (
           <div className="thin-scroll -mx-1 overflow-x-auto px-1">
             <table className="w-full border-collapse text-[12px]">
               <thead>
                 <tr>
-                  {["시작 시각", "종료 시각", "상태", "실행", "실행 서버"].map((h) => (
+                  {/*  ★ «실행»(run_id) 열은 뺐습니다 (2026-09-16). 사람이 볼 값이
+                         아니라 DB 안에서 줄을 잇는 번호입니다 — 좁은 화면에서
+                         자리만 차지했습니다. 서버는 그대로 보냅니다. */}
+                  {["시작 시각", "종료 시각", "상태", "실행 서버"].map((h) => (
                     <th
                       key={h}
                       scope="col"
@@ -195,7 +240,9 @@ export function BatchTab() {
                 </tr>
               </thead>
               <tbody>
-                {runs.slice(0, 20).map((r) => {
+                {/*  ★ 자르지 않습니다 — 고른 기간이 곧 보이는 범위입니다.
+                       20줄에서 자르면 닷새를 골라도 나흘만 보일 수 있습니다. */}
+                {runs.map((r) => {
                   const st = STATE[(r.status ?? "").toLowerCase()] ?? {
                     label: r.status ?? "—",
                     fg: "var(--color-mut)",
@@ -218,19 +265,19 @@ export function BatchTab() {
                       >
                         {when(r.finished_at)}
                       </td>
-                      <td className="border-b px-2.5 py-2" style={{ borderColor: "var(--color-hair-soft)" }}>
+                      {/*  ★ 배지가 **두 줄로 찢어지던** 것을 막습니다 (2026-09-16).
+                             칸에 `whitespace-nowrap`, 배지에 `inline-flex` 를 줍니다 —
+                             `inline` 이면 줄바꿈 자리에서 배경색이 반으로 갈립니다. */}
+                      <td
+                        className="whitespace-nowrap border-b px-2.5 py-2"
+                        style={{ borderColor: "var(--color-hair-soft)" }}
+                      >
                         <span
-                          className="rounded px-2 py-0.5 text-[11px] font-semibold"
+                          className="inline-flex items-center whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-semibold"
                           style={{ background: st.bg, color: st.fg }}
                         >
                           {st.label}
                         </span>
-                      </td>
-                      <td
-                        className="whitespace-nowrap border-b px-2.5 py-2 font-mono text-[11px]"
-                        style={{ borderColor: "var(--color-hair-soft)", color: "var(--color-mut2)" }}
-                      >
-                        {r.run_id}
                       </td>
                       <td
                         className="whitespace-nowrap border-b px-2.5 py-2 text-[11.5px]"
