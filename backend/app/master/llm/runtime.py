@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -32,6 +33,10 @@ from pydantic import ValidationError
 
 from app.master.envelope import agent_allowed_modes
 from app.master.llm.schemas import Intent, IntentResult, LLMStatus
+
+#: 🔴 **분류가 왜 실패했는지를 남기는 자리다** (2026-09-16). `day_opening_repository`
+#:    와 같은 형식이다 — 모듈 이름으로 받아 두고 삼킨 예외의 **종류와 문장**을 적는다.
+logger = logging.getLogger(__name__)
 
 _ENV_FILES = (
     Path(__file__).resolve().parents[3] / ".env",
@@ -707,7 +712,28 @@ class IntentService:
                 )
             except IntentValidationError as error:
                 guidance = retry_guidance(error.issues)
-            except Exception:  # noqa: BLE001 — 분류 실패가 API 를 죽이면 안 된다
+            except Exception as error:  # noqa: BLE001 — 분류 실패가 API 를 죽이면 안 된다
+                # 🔴 **사유를 버리지 않는다** (2026-09-16). 이 줄이 없어서 **죽은
+                #    Gemini 키(403)를 「복수 topic 분류 결함」으로 잘못 짚고 몇 시간을
+                #    팠다.** 화면에는 `FALLBACK` 만 떠서 403 인지 429 인지 타임아웃인지
+                #    스키마 오류인지 구분이 안 됐다 — 한 줄만 있었으면 즉시 키를
+                #    의심했다.
+                #
+                # 🔴 **발화문 원문은 안 싣는다.** 사용자가 친 문장이라 로그에 남길
+                #    것이 아니다 — 길이만 적는다.
+                #
+                # ⚠️ **`break` 는 그대로 둔다.** 분류 실패가 API 를 죽이면 안 된다는
+                #   앞선 판단은 맞다. 여기서 하는 일은 **드러내는 것뿐**이다.
+                logger.warning(
+                    "분류 프로바이더 실패 - FALLBACK 으로 되묻는다"
+                    " (provider=%s · model=%s · 시도 %d회 · 발화문 %d자): %s: %s",
+                    self.settings.provider,
+                    self.settings.model,
+                    attempts,
+                    len(text),
+                    type(error).__name__,
+                    error,
+                )
                 break
         return self._result(
             _UNKNOWN, status="FALLBACK", attempts=attempts, fallback=True, utterance=text

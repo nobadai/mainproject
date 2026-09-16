@@ -49,7 +49,7 @@ from typing import Any, Self
 
 import pytest
 
-from app.master import transition
+from app.master import ledger, transition
 from app.master.commitment import ApprovedCommitment, ArrivalLeg
 
 AS_OF = date(2026, 1, 13)
@@ -562,6 +562,9 @@ def test_리드타임0이면_NOT_APPLIED_이고_커넥션을_안_연다(
     out = transition.apply_approval(_리드타임0(), connect=_connect, sim_run_id=실행축)
 
     assert out.status == "NOT_APPLIED", f"물류만 빠진 채 {out.status} 가 나갔다"
+    # 🔴 **걷기 요약이 이 갈래로 센다** (2026-09-16). 문장은 여기가 짓고 **이름은
+    #    `ledger` 것을 가져다 쓴다** — 이름까지 여기서 지으면 세는 갈래가 둘이 된다.
+    assert out.block_kind == ledger.BLOCK_NO_ARRIVAL
     assert 열린횟수 == [], "쓸 수 없는데 커넥션을 열었다"
     assert 재무.persisted == [] and 물류.persisted == [], "물류만 빠진 채 다른 파트를 썼다"
     assert 물류.dates == [] and 재무.dates == [], "막았는데 build 를 불렀다"

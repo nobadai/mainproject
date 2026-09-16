@@ -141,6 +141,14 @@ class RetriedTransition:
     outcome: RetryOutcome
     #: 왜 그 결과가 됐나. `APPLIED` 에는 없다.
     reason: str = ""
+    #: 🔴 **원장에 한 행도 안 남은 이유의 갈래** (2026-09-16). 막힌 게 아니면 빈 값.
+    #:
+    #: ★ **이름의 주인은 `ledger.LEDGER_BLOCK_KINDS` 다** — 여기서 안 짓는다.
+    #:   `TransitionOut.block_kind` 를 **그대로 옮긴다**.
+    #:
+    #: ⚠️ **이 칸이 재시도를 멈추지 않는다.** 영영 안 될 갈래도 다음 날 또 세운다 —
+    #:   여기서 거르면 걷기가 고르는 것이 바뀐다. 이 칸은 **세는 쪽만 읽는다.**
+    block_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -309,13 +317,14 @@ def _retry_one(
 ) -> RetriedTransition:
     """미적용 하나. **예외를 값으로 옮긴다** (`scheduler._stage` 와 같은 태도)."""
 
-    def 결과(outcome: RetryOutcome, reason: str = "") -> RetriedTransition:
+    def 결과(outcome: RetryOutcome, reason: str = "", block_kind: str = "") -> RetriedTransition:
         return RetriedTransition(
             request_id=pending.request_id,
             decision_seq=pending.decision_seq,
             as_of=pending.as_of,
             outcome=outcome,
             reason=reason,
+            block_kind=block_kind,
         )
 
     try:
@@ -333,4 +342,6 @@ def _retry_one(
         #   하루의 진행이 그 약속에 걸리면 안 된다.
         return 결과("FAILED", f"전이가 터졌다: {type(exc).__name__}: {exc}")
     # ⚠️ **어휘를 접지 않고 그대로 적는다** — 무엇이 왜 안 닿았는지가 이 줄이다.
-    return 결과(str(out.status), out.reason)  # type: ignore[arg-type]
+    # 🔴 **갈래도 버리지 않는다** (2026-09-16). 이 한 칸이 없으면 다음 날 재시도에서
+    #    막힌 건이 요약에서 안 세어지고, **한쪽 경로만 세면 수가 조용히 작아진다.**
+    return 결과(str(out.status), out.reason, out.block_kind)  # type: ignore[arg-type]
