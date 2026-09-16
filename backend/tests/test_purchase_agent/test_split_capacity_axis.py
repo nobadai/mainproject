@@ -23,14 +23,19 @@
 import copy
 from datetime import date, timedelta
 
-from app.purchase_agent.allocation import assign_axes
+from app.purchase_agent.allocation import assign_axes, round_offsets
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.nodes.allocate_sourcing import allocate_sourcing
 from app.purchase_agent.nodes.classify_situation import classify_situation
 from app.purchase_agent.nodes.draft_plan import draft_plan
-from app.purchase_agent.nodes.package_scenarios import package_scenarios
+from app.purchase_agent.nodes.package_scenarios import (
+    PAYMENT_CONFLICT_NOTE,
+    package_scenarios,
+)
 from app.purchase_agent.nodes.self_check import (
     check_arrival_capacity,
+    check_cash_ceiling,
+    check_payment_schedule,
     check_warehouse_capacity,
     self_check,
 )
@@ -64,7 +69,14 @@ def _평평한_예측(forecast: dict) -> dict:
     return 사본
 
 
-def _state(*, caps: dict[str, float], today_free: float, cash: int | None = None) -> dict:
+def _state(
+    *,
+    caps: dict[str, float],
+    today_free: float,
+    cash: int | None = None,
+    n5: int | None = None,
+    critical: list[str] | None = None,
+) -> dict:
     """①③ 을 **실제로 태운** State.
 
     🔴 ``cap_by_date`` 와 N4 를 ① **전에** 꽂는다 — ① 도 ``split_entry_cap`` 을 보기 때문이다.
@@ -80,6 +92,12 @@ def _state(*, caps: dict[str, float], today_free: float, cash: int | None = None
     }
     if cash is not None:
         state["projected_cash_min"] = cash
+    # 🔴 **N5 는 ① 전에 싣는다** — 어댑터가 초기 State 에 싣는 자리와 같다. ③ 이 뒤에
+    #   받으면 「지급 소요일 미확정」 고지를 이미 만든 뒤라 문면과 일정이 갈린다.
+    if n5 is not None:
+        state["purchase_payment_days"] = n5
+    if critical is not None:
+        state["critical_payment_dates"] = critical
     state["forecast"] = _평평한_예측(state["forecast"])
     state.update(classify_situation(state))
     state.update(draft_plan(state))
@@ -466,3 +484,167 @@ def test_다른_회차_수를_볼_때_고른_비율을_재사용하지_않는다
         #   도착일 여유로 재배분하기 때문이다. 균등인 것은 **출발 비율**이고, 그 사실은
         #   문면이 든다 ("균등으로 바꿨다").
         assert len(legs) >= 2
+
+
+# ── 지급 일정 — 최종 회차 위에서 서는가 (2026-09-16) ─────────────────────────
+#
+# 🔴 **지급일 규칙은 새로 만들지 않는다** — 회차 ``date + N5`` (달력일 · 영업일 보정 없음 ·
+#   ``payment_dates`` / ``build_payment_schedule``). 여기서 보는 것은 회차 수가 **바뀌거나
+#   되돌아간 뒤에도** 그 규칙이 **최종 회차**에 걸리는가다.
+#
+# ⚠️ **날짜별 잔액 재계산은 매입에 없다** — 설계상 재무 ``SCENARIO_VALIDATION`` 몫이다
+#   (``_payment_risks`` docstring). 매입이 날짜로 보는 현금 제약은 **재무 집중일과의 겹침
+#   고지**이고, 총액 상한은 ``check_cash_ceiling`` 이다. 그 둘이 최종 일정을 보는지 잠근다.
+
+N5 = 7
+
+
+def _일괄_복귀_창() -> dict[str, float]:
+    """③ 은 넓히는데 **어느 회차 수로도** 분할이 안 서는 창.
+
+    ```text
+    +0~+2    2,000   첫 도착일 (일괄 기준)
+    +3~+7      500   3회차의 가운데 도착일이 여기 → 누적이 못 들어간다
+    +8       1,000   2회차의 마지막 도착일 → 누적이 못 들어간다
+    +9~     20,000   3회차의 마지막 도착일 → ③ 이 여기까지 넓힌다
+    ```
+    """
+
+    def 여유(offset: int) -> float:
+        if offset <= LEAD_DAYS:
+            return 2_000.0
+        if offset <= 7:
+            return 500.0
+        if offset == 8:
+            return 1_000.0
+        return 20_000.0
+
+    return {_날(offset): 여유(offset) for offset in range(40)}
+
+
+def _최종(caps: dict[str, float], *, n5: int | None = N5, critical=None) -> tuple[dict, dict]:
+    state = _펴기(_state(caps=caps, today_free=2_000.0, n5=n5, critical=critical))
+    return state, self_check(state)
+
+
+def _공격(final: dict) -> dict:
+    return next(s for s in final["scenarios_final"] if s["label"] == "공격")
+
+
+def _지급_규칙(scenario: dict, n5: int) -> list[str]:
+    """기존 규칙 그대로 — 최종 회차 date + N5."""
+    return [
+        (date.fromisoformat(leg["date"]) + timedelta(days=n5)).isoformat()
+        for leg in scenario["split_plan"]
+    ]
+
+
+def _지급_일관성(scenario: dict, state: dict, n5: int) -> None:
+    schedule = scenario["payment_schedule"]
+    legs = scenario["split_plan"]
+    assert [row["payment_date"] for row in schedule] == _지급_규칙(scenario, n5)
+    assert [row["purchase_date"] for row in schedule] == [leg["date"] for leg in legs]
+    assert [row["qty_kg"] for row in schedule] == [leg["qty_kg"] for leg in legs]
+    assert [row["amount_krw"] for row in schedule] == [leg["amount_krw"] for leg in legs]
+    assert sum(row["amount_krw"] for row in schedule) == scenario["total_amount_krw"]
+    assert sum(leg["amount_krw"] for leg in legs) == scenario["total_amount_krw"]
+    assert sum(row["qty_kg"] for row in schedule) == scenario["total_qty_kg"]
+    assert check_payment_schedule(scenario, state) is None
+    assert check_cash_ceiling(scenario, state, load_constraints()) is None
+    # 받은 N5 로 만들었으면 「미확정이라 보류」 문장이 남으면 안 된다 — 문면과 일정이 갈린다.
+    assert not [r for r in scenario["risks"] if "지급 소요일이 미확정" in r]
+
+
+def test_지급_정상_다회차() -> None:
+    """🟢 분할이 그대로 선 날 — 회차마다 ``date + N5`` 로 지급하고 합이 총액이다."""
+    state, final = _최종(_뒤로_커지는_창(2_000.0, 20_000.0))
+    공격 = _공격(final)
+    assert 공격["strategy_type"] == TIMING_AXIS and len(공격["split_plan"]) == 3
+    _지급_일관성(공격, state, N5)
+
+
+def test_지급_3회차_실패_뒤_2회차로_전환() -> None:
+    """🔴 **지급 일정이 버린 3회차가 아니라 최종 2회차를 따른다.**
+
+    3회차 일정이 남으면 재무가 **없는 회차의 돈**을 Cashflow 에 얹는다.
+    """
+    caps = _되돌아오는_창()
+    state, final = _최종(caps)
+    공격 = _공격(final)
+    assert any("회 균등으로 바꿨다" in r for r in 공격["risks"]), "전제 — 회차 수가 바뀐 날이다"
+    assert len(공격["split_plan"]) == 2
+    _지급_일관성(공격, state, N5)
+
+    # 버린 3회차 일정의 지급일은 어디에도 없어야 한다.
+    버린_3회 = [
+        (AS_OF + timedelta(days=offset + N5)).isoformat()
+        for offset in round_offsets(AS_OF.isoformat(), 공격["coverage_days"], 3, None)
+    ]
+    최종 = {row["payment_date"] for row in 공격["payment_schedule"]}
+    assert set(버린_3회) - 최종, "전제 — 두 일정이 달라야 잴 수 있다"
+    assert len(최종) == 2 and 최종 == set(_지급_규칙(공격, N5))
+
+
+def test_지급_분할_실패_뒤_일괄로_복귀() -> None:
+    """🔴 **일괄로 돌아오면 payment_schedule 키가 없다** — 기존 규칙 그대로다.
+
+    일괄 안의 지급일은 ``split_plan[0].date + N5`` 하나라 같은 값을 두 벌 내지 않는다
+    (``build_payment_schedule`` 의 «회차가 하나면 None»). 되돌린 뒤에도 그 규칙이 서고,
+    수량·금액은 **되돌린 수량** 위에서 맞아야 한다.
+    """
+    state, final = _최종(_일괄_복귀_창())
+    assert "공격" in state["split_rolled_back_labels"], "전제 — 되돌린 날이다"
+    공격 = _공격(final)
+    assert len(공격["split_plan"]) == 1 and 공격["strategy_type"] != TIMING_AXIS
+    assert "payment_schedule" not in 공격
+    assert check_payment_schedule(공격, state) is None
+    assert check_cash_ceiling(공격, state, load_constraints()) is None
+    assert 공격["split_plan"][0]["amount_krw"] == 공격["total_amount_krw"]
+    assert (
+        sum(x["qty_kg"] * x["grade_unit_price"] for x in 공격["sourcing_plan"])
+        == 공격["total_amount_krw"]
+    )
+
+
+def test_재무_집중일_겹침은_최종_일정으로_본다() -> None:
+    """🔴 **날짜로 보는 현금 제약이 버린 일정을 보면 안 된다.**
+
+    3회 → 2회로 바뀐 날, 버린 3회차의 지급일과 최종 2회차의 지급일을 **둘 다** 집중일로
+    준다. 고지는 **최종 일정의 날짜만** 적어야 한다.
+    """
+    caps = _되돌아오는_창()
+    _, final = _최종(caps)
+    공격 = _공격(final)
+    최종 = [row["payment_date"] for row in 공격["payment_schedule"]]
+    버린_3회 = [
+        (AS_OF + timedelta(days=offset + N5)).isoformat()
+        for offset in round_offsets(AS_OF.isoformat(), 공격["coverage_days"], 3, None)
+    ]
+    버린_것만 = sorted(set(버린_3회) - set(최종))
+    assert 버린_것만, "전제 — 버린 일정에만 있는 날짜가 있어야 잴 수 있다"
+
+    _, final = _최종(caps, critical=[버린_것만[0], 최종[-1]])
+    고지 = [r for r in _공격(final)["risks"] if PAYMENT_CONFLICT_NOTE in r]
+    assert len(고지) == 1
+    assert 최종[-1] in 고지[0]
+    assert 버린_것만[0] not in 고지[0], "버린 3회차의 지급일로 현금 겹침을 고지했다"
+
+
+def test_일괄로_돌아오면_집중일_겹침도_일괄_지급일로_본다() -> None:
+    """🔴 되돌린 안의 겹침 고지는 **일괄 지급일 하나**(``date + N5``)로만 선다."""
+    일괄_지급일 = (AS_OF + timedelta(days=N5)).isoformat()
+    넓힌_분할_지급일 = (AS_OF + timedelta(days=8 + N5)).isoformat()  # 3회차 마지막 회차
+    _, final = _최종(_일괄_복귀_창(), critical=[일괄_지급일, 넓힌_분할_지급일])
+    고지 = [r for r in _공격(final)["risks"] if PAYMENT_CONFLICT_NOTE in r]
+    assert len(고지) == 1 and 일괄_지급일 in 고지[0]
+    assert 넓힌_분할_지급일 not in 고지[0]
+
+
+def test_N5_미확정이면_지급_일정을_만들지_않고_보류를_알린다() -> None:
+    """🟢 **기존 보류 동작 유지** (규칙 3) — 회차 수가 바뀐 날에도 0 으로 채우지 않는다."""
+    state, final = _최종(_되돌아오는_창(), n5=None)
+    공격 = _공격(final)
+    assert len(공격["split_plan"]) == 2
+    assert "payment_schedule" not in 공격
+    assert check_payment_schedule(공격, state) is None
+    assert any("지급 소요일이 미확정" in r for r in 공격["risks"])
