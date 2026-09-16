@@ -5,11 +5,12 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
 import { ProcurementResult } from "@/components/ProcurementResult";
-import { ReportDownload } from "@/components/ReportDownload";
+import { DomainReportPreview, ReportDownload } from "@/components/ReportDownload";
 import { RunHistoryPanel } from "@/components/RunHistory";
 import { ApprovedPlan } from "@/components/ApprovedPlan";
 import { PurchaseRecordCard } from "@/components/PurchaseRecordCard";
 import { LlmTrace } from "@/components/LlmTrace";
+import { DomainReadResult } from "@/components/console/DomainReadResult";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
@@ -24,6 +25,7 @@ import {
   isProcurement,
   type AskResponse,
   type DecisionOut,
+  type DomainActionAnswer,
   type Intent,
   type ProcurementRunResponse,
   type Scenario,
@@ -89,6 +91,7 @@ type Turn =
   //    «사실» 로 그린다. 없으면 `ApprovedPlan` 을 안 그리고 한 줄만 적는다.
   //    `item` 은 그 한 줄에 쓸 품목이다 (그날 서 있던 안의 품목 또는 분류가 읽은 품목).
   | { kind: "approved"; scenario?: Scenario; decision: DecisionOut; item?: string }
+  | { kind: "domain"; result: DomainActionAnswer; trace?: LlmTraceData; note?: string | null }
   | { kind: "error"; text: string };
 
 /**
@@ -256,6 +259,8 @@ export function MasterConsole({ session }: { session: Session }) {
           trace: traceOf(res),
           utterance,
         });
+      } else if (res.domain_result) {
+        push({ kind: "domain", result: res.domain_result, trace: traceOf(res), note: res.note });
       } else if (res.answer && salesAnswered(res.intent, res.status)) {
         push({
           kind: "sales",
@@ -404,12 +409,15 @@ export function MasterConsole({ session }: { session: Session }) {
         targetRequestId: needsTarget ? (target?.requestId ?? undefined) : undefined,
         targetHistoryRunId: needsTarget ? (target?.historyRunId ?? undefined) : undefined,
         decidedBy: needsTarget ? session.name : undefined,
+        actor: session.name,
         utterance: turn.utterance,
       });
 
       if (isProcurement(res)) {
         rememberRun(res);
         push({ kind: "run", run: res });
+      } else if (res.domain_result) {
+        push({ kind: "domain", result: res.domain_result, note: res.note });
       } else if (res.run) {
         // 재요청 — 결정 기록과 **새로 나온 안**이 함께 온다
         rememberRun(res.run);
@@ -595,7 +603,7 @@ export function MasterConsole({ session }: { session: Session }) {
 
               {busy && (
                 <p className="m-0 text-[13px] text-faint">
-                  마스터가 부서를 부르는 중…
+                  데이터를 확인하고 있습니다.
                 </p>
               )}
               <div ref={tail} />
@@ -613,7 +621,7 @@ export function MasterConsole({ session }: { session: Session }) {
                   ref={composer}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder="무엇을 도와드릴까요"
+                  placeholder="자금 현황, 판매안, 거래처, 보고서를 자연어로 물어보세요"
                   className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
                 />
                 <button
@@ -625,8 +633,8 @@ export function MasterConsole({ session }: { session: Session }) {
                 </button>
               </form>
               <p className="m-0 mt-2 text-[11.5px] text-faint">
-                매입 실행은{" "}
-                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회는 바로
+                장부를 바꾸는 요청은{" "}
+                <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회와 보고서는 바로
                 돕니다.
               </p>
             </div>
@@ -687,6 +695,21 @@ function TurnView({
       </div>
     );
 
+  if (turn.kind === "domain") {
+    return (
+      <div className="max-w-[94%] rounded-xl border border-line bg-surface p-4">
+        <div className="whitespace-pre-wrap text-sm leading-relaxed">{turn.result.text}</div>
+        {turn.result.report_kind && (
+          <div className="mt-3">
+            <DomainReportPreview kind={turn.result.report_kind} facts={turn.result.data} />
+          </div>
+        )}
+        {!turn.result.report_kind && <DomainReadResult result={turn.result} />}
+        {turn.trace && <LlmTrace trace={turn.trace} />}
+      </div>
+    );
+  }
+
   if (turn.kind === "approved") {
     //  말로 한 승인은 안 전체를 들고 있지 않다. **없는 숫자를 0 으로 그리지 않고**
     //  무엇을 승인했는지만 적는다 — 안의 값은 매입 화면에 그대로 서 있다.
@@ -746,14 +769,15 @@ function TurnView({
 
 function Empty({ onPick }: { onPick: (text: string) => void }) {
   const samples = [
-    "오늘 배추 얼마나 사야 해?",
-    "창고에 얼마나 남았어?",
-    "지금 자금 상황 알려줘",
-    "예산 2천만원으로 낮춰서 다시 해줘",
+    "현재 자금 상황 알려줘",
+    "받을 돈 보여줘",
+    "오늘 판매안 보여줘",
+    "거래처 목록 보여줘",
+    "이번 주 재무 보고서 만들어줘",
   ];
   return (
     <div className="rounded-xl border border-dashed border-line p-6">
-      <p className="m-0 text-sm font-semibold">말로 물어보세요</p>
+      <p className="m-0 text-sm font-semibold">무엇을 도와드릴까요?</p>
       <p className="m-0 mt-1 text-[13px] text-muted">
         마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
         봤는지 함께 답합니다.
