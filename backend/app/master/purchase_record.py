@@ -64,7 +64,10 @@ from app.master.transition import TransitionOut, apply_approval, purchase_id_pre
 __all__ = [
     "BEFORE_APPROVAL_MESSAGE",
     "CLOSED_DUE_DATE_MESSAGE",
+    "PURCHASE_DATE_MESSAGE",
     "SAME_DAY_DUE_DATE_MESSAGE",
+    "WHOLE_AMOUNT_MESSAGE",
+    "WHOLE_QTY_MESSAGE",
     "get_purchase_record",
     "record_purchase",
     "recorded_scenario",
@@ -80,6 +83,15 @@ SAME_DAY_DUE_DATE_MESSAGE = (
     "지급기일이 이미 마감된 날과 같습니다 — 마감한 그날 승인한 그날 매입만 기록할 수 있습니다"
 )
 """지급기일이 마감일과 같은데 동일일 예외(승인일 = 매입일 = 마감일)가 아닐 때의 한 줄."""
+
+PURCHASE_DATE_MESSAGE = "매입일은 승인한 날({as_of})과 같아야 합니다 — {seq}회차"
+"""첫 회차 매입일이 승인 실행 as_of 와 다를 때의 한 줄 (선검사 · 2026-09-16)."""
+
+WHOLE_QTY_MESSAGE = "수량은 1kg 단위로 적어 주세요 — {seq}회차"
+"""수량에 소수점이 있을 때의 한 줄 (선검사 · 2026-09-16)."""
+
+WHOLE_AMOUNT_MESSAGE = "금액은 원 단위 정수로 적어 주세요 — {seq}회차"
+"""금액에 소수점이 있을 때의 한 줄 (선검사 · 2026-09-16)."""
 
 #: 승인 때 재검증을 통과로 보는 결과. `CONDITIONAL` · `FAILED` · `ERROR` 는 통과가 아니다
 #: (`decision.RevalidationOutcome` 의 표).
@@ -110,6 +122,7 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
+          선검사  첫 회차 매입일 == 승인 실행 as_of · 수량 · 금액이 정수
           회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행
@@ -170,6 +183,9 @@ def record_purchase(
         )
         for leg in body.legs
     )
+    # ★ **선검사가 재검증보다 앞이다** — 재검증이 계약에서 떨어지면 사람에게는
+    #   「재검증 통과 못 함」만 남는다 (2026-09-16).
+    _check_recordable_values(approval, legs)
     grade = body.grade.strip()
     try:
         recorded = commitment_with_record(approval, legs, grade)
@@ -220,6 +236,52 @@ def record_purchase(
         raise
     finally:
         conn.close()
+
+
+def _check_recordable_values(approval: CurrentApproval, legs: Sequence[RecordedLeg]) -> None:
+    """**선검사** — 재검증이 알기 어려운 말로 막기 전에 사람 말로 거부한다 (2026-09-16).
+
+    ```text
+    첫 회차 매입일 == 승인 실행 as_of
+    회차마다 수량 · 금액이 정수
+    ```
+
+    ★ **왜 매입일을 승인일에 묶는가.** 기록값 재검증은 안 사본을 매입안 계약
+      (`purchase_agent.schemas.PurchaseProposal.validate_proposal_rules`)으로 다시 읽는데,
+      그 계약이 `split_plan[0].date == meta.as_of` 를 요구한다. 사본의 `meta.as_of` 는
+      **승인 실행의 as_of** 라(`decision_service.revalidate_recorded`), 사람이 첫 회차
+      매입일을 승인일과 다른 날로 적으면 계약이 그 자리에서 떨어진다. 그때 사람이
+      보는 것은 「재검증 통과 못 함」뿐이라 무엇을 고쳐야 하는지 알 수 없다.
+
+      ★ 계약이 묶는 것은 **첫 회차 하나뿐이다.** 2회차 이후 매입일은 선정안대로
+        뒤 날짜여도 된다 — 여기서 같이 묶으면 분할 선정안을 그대로 기록하는 것조차
+        막힌다.
+
+      🔴 **발표 뒤 과제 — 계약을 넓힌다.** 실매입은 승인한 날과 다른 날에도 일어날 수
+        있다. 옳은 자리는 「기록 사본의 as_of 를 기록 매입일로 싣는다」이거나 「재검증
+        경로에서 첫 회차 날짜 규칙을 푼다」이고, 둘 다 매입 계약을 건드린다. 발표
+        전에는 입구에서 막아 사람이 알아볼 수 있는 말을 듣게 한다.
+
+    ★ **왜 정수인가.** 매입안 계약의 수량 · 등급 단가 칸이 정수라(`SourcingPlanItem`),
+      소수점 수량 · 금액은 재검증에서 떨어진다. 반올림해 통과시키면 **기록한 값과 다른
+      값이 검증을 지난다** — `#727` 이 그래서 반올림 대신 막아 두었고 그 판단을 유지한다.
+
+    ⚠️ **승인 실행 as_of 를 못 읽으면 매입일은 안 잰다.** 못 잰 것을 틀렸다고 하지 않는다
+      — 뒤의 경계(`_check_purchase_dates`)도 같은 규율이다.
+    """
+    for leg in legs:
+        if not float(leg.qty_kg).is_integer():
+            raise DecisionRejected(WHOLE_QTY_MESSAGE.format(seq=leg.seq))
+        if not float(leg.amount_krw).is_integer():
+            raise DecisionRejected(WHOLE_AMOUNT_MESSAGE.format(seq=leg.seq))
+    as_of = approval.as_of
+    if as_of is None or not legs:
+        return
+    # ★ 안의 `split_plan[0]` 에 얹히는 회차가 첫 회차다 (`recorded_scenario` 는 seq 로 짝짓고,
+    #   계약의 `validate_split_sequence` 가 seq 를 1부터 세게 한다).
+    first = min(legs, key=lambda one: one.seq)
+    if first.purchase_date != as_of:
+        raise DecisionRejected(PURCHASE_DATE_MESSAGE.format(as_of=as_of, seq=first.seq))
 
 
 def _check_purchase_dates(
@@ -360,6 +422,10 @@ def _grade_lines(total_qty: float, total_amount: float) -> list[tuple[int | floa
     🔴 **정수가 아닌 기록은 그대로 흘린다** (kg 에 소수점이 있는 경우). 매입 계약의
       수량 · 금액 칸이 정수라 부서 파싱에서 걸리는데, **여기서 반올림해 통과시키면
       기록값과 다른 값이 검증을 지난다.** 못 적는 것은 못 적는 대로 막힌다.
+
+      ⚠️ 이 갈래는 이제 사실상 안 불린다 — 입구(`_check_recordable_values`)가 소수점
+        수량 · 금액을 사람 말로 먼저 거부한다 (2026-09-16). **마지막 방어선으로 남긴다**:
+        입구를 안 지나는 부름이 생겨도 반올림한 값이 조용히 검증을 지나면 안 된다.
     """
     if not (float(total_qty).is_integer() and float(total_amount).is_integer()):
         return [(total_qty, total_amount / total_qty if total_qty else total_amount)]
