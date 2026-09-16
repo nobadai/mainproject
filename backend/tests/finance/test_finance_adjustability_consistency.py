@@ -17,9 +17,14 @@ from unittest.mock import patch
 import pytest
 
 from app.finance import user_messages as messages
-from app.finance.application.harness import _ADJUSTMENT_REQUIRED_VERDICTS
-from app.finance.application.orchestration import FinanceAgentController
+from app.finance.application.harness import (
+    _ADJUSTMENT_REQUIRED_VERDICTS,
+    FinanceHarness,
+    FinanceToolRegistry,
+)
+from app.finance.application.orchestration import FinanceAgentController, _settled_action
 from app.finance.llm.planner import ToolAction
+from app.finance.state import FinanceAgentState
 from tests.finance.test_finance_agent import Planner, Port, request, scenario
 
 
@@ -94,31 +99,55 @@ def test_conditional_requires_the_amount_adjustment_capability():
     assert _ADJUSTMENT_REQUIRED_VERDICTS == frozenset({"reject", "conditional"})
 
 
-def test_planner_skipping_the_tool_cannot_finalize_a_non_ok_scenario():
-    """Planner 가 금액 대안 Tool 을 안 골라도 그대로 끝나지 않는다.
+def test_a_non_ok_scenario_can_no_longer_skip_the_amount_adjustment_tool():
+    """🔴 **건너뛸 길 자체가 없어졌다.**
 
-    Tool 을 고르지 않고 바로 종료를 요청하면 Harness 가 되묻고, 상한까지 계속
-    거르면 실행이 실패로 접힌다 — 검증 안 된 상태가 정상 완료로 나가지 않는다.
+    예전에는 Planner 가 금액 대안 Tool 대신 종료를 고를 수 있었고, Harness 가 되물어
+    막았다. 이제 이 흐름은 단계마다 합법 Tool 이 하나뿐이라 **Planner 에게 묻지 않는다** —
+    남은 capability 가 있으면 그 Tool 이 곧 답이다.
+
+    지켜야 하는 것은 그대로다: 검증 안 된 `NOT_ADJUSTABLE` 이 사용자에게 나가지 않는다.
+    이제는 되물어서가 아니라 **애초에 그 상태가 만들어지지 않아서** 그렇다.
     """
-    reply, metadata = _run(
-        scenario("S1", 1000, payment_schedule=None),
-        [_EVALUATE, *[_FINALIZE] * 12],
+    planner = Planner([*[_FINALIZE] * 12])
+    with patch("app.finance.execution.save_finance_execution"):
+        reply, metadata = FinanceAgentController(Port(), planner).run(
+            request("SCENARIO_VALIDATION", scenario("S1", 1000, payment_schedule=None))
+        )
+
+    assert planner.attempts == 0
+    assert "validate_amount_adjustment" in metadata.used_tools
+    assert reply.runtime_status == "READY"
+    assert reply.payload["adjustability"] != "NOT_ADJUSTABLE"
+
+
+def test_the_deterministic_dispatch_never_finalizes_while_a_capability_is_missing():
+    """결정론 선택이 **종료를 고르는 조건**은 하나뿐이다 — 남은 capability 가 없을 때.
+
+    ★ 이 검사가 앞 검사의 근거다. 되묻기로 막던 것을 이제 여기서 막는다.
+    """
+    state = FinanceAgentState(
+        request("SCENARIO_VALIDATION", scenario("S1", 1000, payment_schedule=None)),
+        branch_id="S1",
     )
-
-    # 정상 완료가 아니다. 검증되지 않은 NOT_ADJUSTABLE 이 사용자에게 나가지 않는다.
-    assert reply.runtime_status != "READY"
-    assert reply.payload.get("adjustability") != "NOT_ADJUSTABLE"
-    assert "validate_amount_adjustment" not in metadata.used_tools
-
-
-def test_skipping_the_tool_is_recorded_as_a_replan_not_a_silent_pass():
-    _, metadata = _run(
-        scenario("S1", 1000, payment_schedule=None),
-        [_EVALUATE, *[_FINALIZE] * 12],
+    harness = FinanceHarness(
+        FinanceToolRegistry(Port()), max_tool_calls=8, max_replans=2
     )
+    capability_state = harness.capability_state(state)
 
-    # 되묻은 사실이 이력에 남는다 — 조용히 통과하지 않았다.
-    assert metadata.replans > 0
+    assert capability_state.missing
+    action, source = _settled_action(capability_state)
+    assert action.finalize is False
+    assert action.tool_name == "evaluate_purchase_scenario"
+    assert source == "DETERMINISTIC_SINGLE"
+
+    #  전부 찼을 때에만 종료다.
+    state.tool_order = ["evaluate_purchase_scenario", "validate_amount_adjustment"]
+    done = harness.capability_state(state)
+    assert done.missing == ()
+    finale, finale_source = _settled_action(done)
+    assert finale.finalize is True
+    assert finale_source == "DETERMINISTIC_FINALIZE"
 
 
 def test_unvalidated_non_ok_scenario_never_reaches_the_result_builder():

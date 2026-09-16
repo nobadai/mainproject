@@ -12,6 +12,7 @@ from app.finance.application.harness import (
     SCENARIO_VALIDATION_TOOLS,
     FinanceToolRegistry,
     validate_finance_scenario_output,
+    validate_planner_tool_arguments,
 )
 from app.finance.application.orchestration import (
     DEFAULT_MAX_REPLANS,
@@ -23,7 +24,7 @@ from app.finance.db import (
     PostgresFinanceAsOfDataPort,
 )
 from app.finance.execution import get_finance_execution, save_finance_execution
-from app.finance.llm.planner import ToolAction
+from app.finance.llm.planner import FinancePlannerContractViolation, ToolAction
 from app.finance.schemas import CashEvent, FinancePolicy
 from app.master.envelope import (
     AgentReply,
@@ -272,7 +273,6 @@ def test_pre_purchase_returns_margin_policy_with_evidence(save_run):
     planner = Planner(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -318,7 +318,6 @@ def test_different_legal_tool_orders_produce_the_same_finance_result(save_run):
     second = Planner(
         [
             ToolAction("assess_finance_position", reason="Read the Finance position."),
-            ToolAction("project_cashflow", reason="Project the base cashflow."),
             ToolAction("calculate_purchase_finance_cap", reason="Derive the purchase boundary."),
             ToolAction("analyze_payment_pressure", reason="Check payment concentration."),
             ToolAction(finalize=True),
@@ -587,7 +586,6 @@ def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_ru
     planner = Planner(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -611,7 +609,6 @@ def test_zero_debt_does_not_require_debt_policy(save_run):
     planner = Planner(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -928,23 +925,18 @@ def test_duplicate_tool_call_is_blocked():
 
 
 def test_non_amount_adjustment_axis_is_rejected():
-    planner = Planner(
-        [
-            ToolAction("evaluate_purchase_scenario"),
+    """금액이 아닌 축은 인자 계약에서 걸린다.
+
+    ★ 예전에는 Planner 대역이 이 인자를 들고 루프를 돌게 했다. 이제 이 흐름에서는
+      Planner 를 부르지 않으므로 그 길로는 들어올 수 없다 — 계약을 **경계에서** 본다.
+    """
+    with pytest.raises(FinancePlannerContractViolation):
+        validate_planner_tool_arguments(
             ToolAction(
                 "validate_amount_adjustment",
                 {"axis": "quantity", "candidate_amount_krw": 800},
-            ),
-        ]
-    )
-    with patch("app.finance.execution.save_finance_execution"):
-        reply, _ = FinanceAgentController(Port(), planner).run(
-            request(
-                "SCENARIO_VALIDATION",
-                scenario("S1", 1000),
             )
         )
-    assert reply.runtime_status == "ERROR"
 
 
 def test_postgres_port_fails_closed_for_historical_as_of():

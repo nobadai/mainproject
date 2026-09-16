@@ -620,6 +620,8 @@ class FinanceHarness:
         self.tool_calls = 0
         self.replans = 0
         self.llm_calls = 0
+        #: 이번 단계의 Tool 을 누가 골랐는가. 성능 분석용이라 업무 판단에 쓰지 않는다.
+        self.selection_source: str | None = None
         self.denials: list[dict[str, Any]] = []
         self._seen: set[str] = set()
         self._pending: tuple[FinanceAgentState, CapabilityState] | None = None
@@ -783,6 +785,10 @@ class FinanceHarness:
     def count_llm_call(self) -> None:
         self.llm_calls += 1
 
+    def note_selection(self, source: str) -> None:
+        """이번 단계의 선택 출처를 적어 둔다. **다음 Trace 항목이 이것을 싣는다.**"""
+        self.selection_source = source
+
     def note_denied(self, state: FinanceAgentState, tool: str | None, reason: str) -> None:
         self.denials.append(
             {"branch_id": state.branch_id, "denied_tool": tool, "denied_reason": reason}
@@ -826,6 +832,9 @@ class FinanceHarness:
                 "tool_calls": self.tool_calls,
                 "llm_calls": self.llm_calls,
                 "replans": self.replans,
+                # LLM / DETERMINISTIC_SINGLE / DETERMINISTIC_FINALIZE.
+                # 어느 단계에서 provider 왕복이 실제로 일어났는지 읽는 자리다.
+                "selection_source": self.selection_source,
             }
         )
 

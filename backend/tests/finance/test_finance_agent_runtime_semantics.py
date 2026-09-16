@@ -175,13 +175,18 @@ def request(mode="PRE_PURCHASE", payload=None):
     )
 
 
+#: Planner 가 **실제로 불리는 단계**의 답만 담은 대본.
+#:
+#: 🔴 고를 것이 하나뿐인 단계와 종료 단계에서는 Harness 가 결정론으로 정하고 Planner 를
+#:    부르지 않는다. 그 자리의 답까지 적어 두면 **이미 실행한 Tool 을 다시 요청**하게 되어
+#:    중복 반려로 되묻기 예산만 깎인다.
+#:
+#: 실행 순서는 `assess → project → cap → pressure` 그대로다. 사이의 두 자리는 그때
+#: 유일한 합법 Tool 이라 Harness 가 집는다.
 def pre_purchase_plan():
     return [
         ToolAction("assess_finance_position"),
-        ToolAction("project_cashflow"),
         ToolAction("calculate_purchase_finance_cap"),
-        ToolAction("analyze_payment_pressure"),
-        ToolAction(finalize=True),
     ]
 
 
@@ -380,7 +385,7 @@ def test_contract_violation_is_replanned_not_failed():
 
     assert reply.runtime_status == "READY"
     assert metadata.replans == 1
-    assert planner.attempts == 6  # 반려 1 + 정상 5
+    assert planner.attempts == 3  # 반려 1 + 정상 2
 
 
 def test_replan_guard_reaches_the_next_planner_prompt():
@@ -643,11 +648,17 @@ def _business_identity(reply):
 def test_planner_unavailability_preserves_each_scenario_business_result(
     payload, expected_status
 ):
-    """ok/conditional/reject와 검증된 조정은 Planner 상태가 아니라 Rule이 정한다."""
+    """ok/conditional/reject와 검증된 조정은 Planner 상태가 아니라 Rule이 정한다.
+
+    ★ **이제 더 강한 말이 성립한다.** 이 흐름은 단계마다 합법 Tool 이 하나뿐이라
+      Planner 를 **아예 부르지 않는다.** 그래서 Planner 가 죽어 있어도 대체로 넘어가는
+      것이 아니라 *애초에 닿지 않는다* — provider 장애가 이 mode 를 건드리지 못한다.
+    """
     expected, expected_metadata = FinanceAgentController(
         Port(), DeterministicFinancePlanner()
     ).run(request("SCENARIO_VALIDATION", payload))
-    actual, metadata = FinanceAgentController(Port(), UnavailablePlanner()).run(
+    unavailable = UnavailablePlanner()
+    actual, metadata = FinanceAgentController(Port(), unavailable).run(
         request("SCENARIO_VALIDATION", payload)
     )
 
@@ -655,16 +666,23 @@ def test_planner_unavailability_preserves_each_scenario_business_result(
     assert _business_identity(actual) == _business_identity(expected)
     assert metadata.used_tools == expected_metadata.used_tools
     assert metadata.rules_applied == expected_metadata.rules_applied
-    assert metadata.llm_status == "FALLBACK"
-    assert metadata.llm_fallback_used is True
+    #  🔴 죽은 Planner 가 **한 번도 불리지 않았다.** 대체 경로를 탄 것이 아니다.
+    assert unavailable.attempts == 0
+    assert metadata.llm_status == "SUCCESS"
+    assert metadata.llm_fallback_used is False
 
 
 def test_planner_unavailability_preserves_sales_runtime_not_ready_meaning():
-    """실제 여신/채권 사실 부재는 LLM fallback으로 READY가 되지 않는다."""
+    """실제 여신/채권 사실 부재는 LLM fallback으로 READY가 되지 않는다.
+
+    ★ 판매 검증도 단계마다 합법 Tool 이 하나뿐이라 Planner 를 부르지 않는다. 답을 내지
+      못한 이유는 여전히 **재무 사실이 없어서**이고, 모델 상태와는 무관하다.
+    """
     expected, expected_metadata = FinanceAgentController(
         Port(), DeterministicFinancePlanner()
     ).run(request("SALES_VALIDATION", sales_payload()))
-    actual, metadata = FinanceAgentController(Port(), UnavailablePlanner()).run(
+    unavailable = UnavailablePlanner()
+    actual, metadata = FinanceAgentController(Port(), unavailable).run(
         request("SALES_VALIDATION", sales_payload())
     )
 
@@ -673,7 +691,9 @@ def test_planner_unavailability_preserves_sales_runtime_not_ready_meaning():
     assert metadata.used_tools == expected_metadata.used_tools == (
         "evaluate_sales_scenario",
     )
-    assert metadata.llm_status == "FALLBACK"
+    assert unavailable.attempts == 0
+    #  답이 서지 않았으니 설명할 것도 없다 — 대체 문장이 아니라 **빈 자리**다.
+    assert metadata.llm_status == "SKIPPED_TEMPLATE"
 
 
 def test_planner_unavailability_does_not_hide_finance_data_failure():

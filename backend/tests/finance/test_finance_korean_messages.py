@@ -466,7 +466,6 @@ def _run(mode: str, payload: dict | None = None, *, port=None, finalizer=None):
     plan = (
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
