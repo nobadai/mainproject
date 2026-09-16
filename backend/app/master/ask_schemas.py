@@ -25,7 +25,9 @@ AskOutcome = Literal[
     "CLASSIFIED_ONLY",  # 확인이 필요해 실행하지 않음
     "STATUS_ANSWERED",  # 조회를 돌려 답을 담음
     "DECISION_RECORDED",  # 사람이 고른 안을 결정 이력에 적음
-    "NEEDS_CLARIFICATION",  # 못 알아들음 — 되묻는다
+    "DOMAIN_ACTION_ANSWERED",  # Finance/Sales/Partner 읽기
+    "DOMAIN_ACTION_EXECUTED",  # 확인 뒤 쓰기
+    "NEEDS_CLARIFICATION",  # 못 알아들음/필수 슬롯 부족 — 되묻는다
 ]
 
 
@@ -87,6 +89,9 @@ class AskExecuteRequest(BaseModel):
     #:   되돌려 줄 때만 ML 에 실린다. 다른 부서 조회에는 쓰이지 않는다.
     utterance: str | None = Field(default=None, max_length=2000)
 
+    #: 일반 Domain write 의 실행자. 승인 의미인 `decided_by` 와 섞지 않는다.
+    actor: str | None = Field(default=None, max_length=120)
+
 
 class StatusAnswer(BaseModel):
     """조회 결과. **못 답한 부서를 감추지 않는다.**"""
@@ -128,6 +133,19 @@ class AnswerOut(BaseModel):
     markdown: str | None = None
 
 
+class DomainActionAnswer(BaseModel):
+    """Finance/Sales/Partner 자연어 명령의 구조화 결과."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: Literal["finance", "sales", "partner"]
+    action: str
+    text: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    markdown: str | None = None
+    report_kind: Literal["FINANCE", "SALES"] | None = None
+
+
 class AskResponse(BaseModel):
     """분류 결과 + (실행했다면) 그 결과."""
 
@@ -155,6 +173,8 @@ class AskResponse(BaseModel):
     run: ProcurementRunResponse | None = None
     #: 사람이 읽는 답 (⑥). 실행한 경우에만 채운다 — 되묻는 경우는 `clarification` 이다.
     answer: AnswerOut | None = None
+    #: Finance/Sales/Partner 명령의 구조화된 실제 결과.
+    domain_result: DomainActionAnswer | None = None
 
     #: ★ 아래 다섯은 **①(의도 분류)의 상태다.** ⑥의 상태는 `answer` 안에 따로 있다 —
     #: 한 요청에 LLM 호출이 둘이라 한 칸에 담으면 어느 쪽이 죽었는지 알 수 없다.

@@ -85,15 +85,61 @@ PROCUREMENT_RUN — 살 안을 **만들어 달라**
   "오늘 배추 얼마나 사야 해?"   "무 매입안 뽑아줘"   "오늘 뭘 사면 좋을까"
   "배추 매입 계획 만들어줘"      "얼마나 들여와야 하지?"
 
-STATUS_QUERY — 부서의 **지금 상태만** 묻는다 (안을 만들지 않는다)
-  "지금 자금 상황 알려줘"   "창고에 얼마나 남았어?"   "재고 어때?"
-  "돈 얼마나 있어?"        "지금 창고 여유 있나?"
+STATUS_QUERY — 매입·재고·ML 등 기존 부서의 **지금 상태만** 묻는다 (안을 만들지 않는다)
+  "창고에 얼마나 남았어?"   "재고 어때?"   "지금 창고 여유 있나?"
+  ★ 회사의 현금·자금·미수·미지급·비용·여신은 STATUS_QUERY가 아니라 아래 FINANCE_* DOMAIN_ACTION이다.
 
 RERUN_WITH_CONDITION — **조건을 붙여 다시** 만들어 달라
   "예산 2천만원으로 낮춰서 다시"   "좀 적게 사는 걸로 다시 해줘"
 
 SELECT_SCENARIO — **이미 나와 있는 안 중 하나를 고른다**
   "기본안으로 진행해"   "보수안 선택할게"   "두 번째 걸로 해줘"
+
+DOMAIN_ACTION — 재무·판매·거래처의 구체적인 조회·등록·변경·보고서 요청
+  재무: 현금/미수/미지급/현금흐름 조회, 자금 입출금, 여신 조회·변경,
+        수금, 비용 조회·등록·지급·취소, 재무 보고서
+  판매: 판매 후보 생성, 오늘 판매안, 오늘 확정 판매, 판매 보고서
+  거래처: 목록, 등록, 상세, 수정
+  ★ domain_action은 허용 목록에서 하나만 고른다.
+  ★ slots는 사용자가 실제로 말한 표현만 옮긴다. 금액·수량·날짜를 계산하지 않는다.
+  ★ partner_id/expense_id/receivable_id를 발화에 없는데 지어내지 않는다.
+
+  자연어 예시 (의미가 분명하면 띄어쓰기·조사·일반 오타가 있어도 같은 action):
+  ★ Finance 조회는 회사의 저장된 재무 read model을 읽는다. 부서 상태 조회로 보내지 않는다.
+  FINANCE_SUMMARY_GET: "지금 돈 얼마나 있어?" · "우리 자금 괜찮아?" · "현재 현금 얼마야?"
+                       "자금 상황 보여줘" · "재무 상태 어때?" · "돈 얼마나 남았어?"
+                       "현재 자금 현황 알려줘"
+  FINANCE_CREDIT_LIMIT_GET: "<거래처명> 여신한도 얼마야?" · "<거래처명> 한도 보여줘"
+                           "<거래처명> 신용한도 알려줘" · "<거래처명> 얼마까지 외상 가능해?"
+                           "<거래처명> 가용 여신 얼마 남았어?"
+  FINANCE_CREDIT_LIMIT_UPSERT: "<거래처명> 여신한도 3000만원으로 바꿔줘"
+                              "<거래처명> 한도 5천만원으로 올려줘"
+                              "<거래처명> 신용한도 1000만원으로 설정해줘"
+                              "<거래처명> 여신한도 0원으로 변경해줘"
+  FINANCE_RECEIVABLES_GET: "받을 돈 보여줘" · "미수금얼마야" · "돈 못 받은 거 정리해줘"
+  FINANCE_PAYABLES_GET: "이번주 나갈돈" · "지급해야 할 돈 보여줘" · "미지급금 얼마야?"
+                        "오늘 줘야 하는 돈 있어?" · "이번 주 결제 예정 보여줘"
+                        "연체된 지급 건 있어?" · "앞으로 나갈 돈 정리해줘"
+  FINANCE_CASHFLOW_GET: "이번 주 현금 흐름 보여줘" · "돈 들어오고 나간 거 보여줘"
+                        "최근 자금 흐름 알려줘" · "이번달 현금흐름" · "최근 7일 자금 흐름 보여줘"
+  FINANCE_EXPENSE_LIST: "비용 내역 보여줘" · "이번달 쓴돈 보여줘" · "최근 지출 내역"
+                        "등록된 비용 뭐 있어?" · "아직 안 낸 비용 있어?"
+                        "미지급 비용 보여줘" · "오늘 비용 내역"
+  FINANCE_EXPENSE_CREATE: "임차료 200만원 비용 등록해줘" · "오늘 운영비 50만원 잡아줘"
+                         "비용 하나 등록할게" · "300만원 지출 예정으로 넣어줘"
+  FINANCE_EXPENSE_SETTLE: "<expense_id> 지급 처리해줘" · "<expense_id> 결제 완료로 처리해줘"
+  FINANCE_EXPENSE_CANCEL: "<expense_id> 비용 취소해줘" · "<expense_id> 지출 건 없던 걸로 해줘"
+  FINANCE_COLLECTION_CREATE: "<거래처명>에서 돈 들어왔어" · "<거래처명> 미수금 수금 처리해줘"
+                             "<거래처명> 받을 돈 중 100만원 들어왔어" · "이 미수금 전액 수금됐어"
+  FINANCE_CASH_ADJUSTMENT_CREATE: "300만원 입금 기록해줘" · "운영자금 300만원 들어왔어"
+                                  "50만원 출금 처리해줘" · "오늘 100만원 빠져나갔어"
+  FINANCE_REPORT_GENERATE: "재무리포트 보여줘" · "이번주 돈 보고서 뽑아줘" · "재무 보거서"
+  SALES_PROPOSALS_TODAY: "오늘판매안" · "오늘 팔 수 있는 거" · "판매 추천안 보여줘"
+  SALES_CONFIRMED_TODAY: "오늘 진짜 팔린 거" · "확정된 판매건" · "실제로 확정된 것만"
+  SALES_REPORT_GENERATE: "판매 리폿" · "이번 주 영업 보고서" · "판매 PDF 만들어줘"
+  PARTNER_LIST: "거래처목록" · "우리 거래처 뭐 있어" · "고객사 목록 보여줘"
+  PARTNER_DETAIL_GET: "<거래처명> 정보" · "<거래처명> 결제조건 알려줘"
+  ★ "보고서 만들어줘"처럼 재무/판매 대상을 못 정하면 UNKNOWN · LOW다.
 
 UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 없다
   "그거 있잖아 그거"   "음..."
@@ -144,6 +190,8 @@ UNKNOWN — 위 어디에도 속하지 않거나 무엇을 원하는지 알 수 
 - scenario_label 은 SELECT_SCENARIO 일 때만. 사용자가 부른 이름을 그대로 옮긴다.
 - condition 은 RERUN_WITH_CONDITION 일 때만. **사용자의 말 그대로** 옮긴다.
   발화문에 없는 숫자를 만들지 않는다.
+- domain_action · slots 는 DOMAIN_ACTION 일 때만 채운다.
+  slots의 문자열은 사용자가 말한 표현을 그대로 둔다. "3천만원"을 "30000000"으로 바꾸지 않는다.
 - confidence 는 분류가 얼마나 확실한지다. 발화문이 모호하면 낮춘다."""
 
 
@@ -370,53 +418,44 @@ class OllamaProvider:
 _GEMINI_SCHEMA_DROP = frozenset({"title", "default", "additionalProperties", "$schema", "examples"})
 
 
-def _to_gemini_schema(node: Any) -> Any:
-    """JSON Schema → Gemini `responseSchema`.
-
-    ★ **Ollama 는 JSON Schema 를 그대로 먹지만 Gemini 는 못 먹는다.** 그래서 변환이
-      필요하고, 변환은 **버리는 것과 바꾸는 것 둘뿐**이다.
-
-      ```text
-      버린다   title · default · additionalProperties     Gemini 가 거부한다
-      바꾼다   anyOf[X, null] → X + nullable: true         저쪽의 표현 방식이다
-      남긴다   description                                 Ollama 도 보고 있다
-      ```
-
-    🔴 **`description` 을 남기는 것이 중요하다.** Ollama 에는 스키마를 통째로
-      넘기고 있어 모델이 클래스 docstring 을 이미 보고 있다. 여기서 빼면 프로바이더를
-      바꾼 것만으로 **모델에게 보이는 지시가 달라진다** — 분류가 달라져도 그게
-      모델 탓인지 프롬프트 탓인지 가릴 수 없게 된다.
-
-    🔴 **모르는 `anyOf` 는 터뜨린다.** 조용히 흘려보내면 Gemini 가 400 을 주는데,
-      그건 "스키마가 틀렸다" 가 아니라 그냥 호출 실패로 보인다. 여기서 터지면
-      서비스가 fallback 으로 보내고 `llm_status` 에 남는다.
-    """
+def _to_gemini_schema(node: Any, defs: dict[str, Any] | None = None) -> Any:
+    """JSON Schema → Gemini responseSchema; nested `$defs`/`$ref` are inlined."""
+    if defs is None and isinstance(node, dict):
+        defs = node.get("$defs") or {}
     if isinstance(node, list):
-        return [_to_gemini_schema(item) for item in node]
+        return [_to_gemini_schema(item, defs) for item in node]
     if not isinstance(node, dict):
         return node
 
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        target = (defs or {}).get(ref.rsplit("/", 1)[-1])
+        if not isinstance(target, dict):
+            raise TypeError(f"cannot resolve schema reference: {ref}")
+        merged = {**target, **{k: v for k, v in node.items() if k != "$ref"}}
+        return _to_gemini_schema(merged, defs)
+
     if "anyOf" in node:
         branches = node["anyOf"]
-        concrete = [b for b in branches if b.get("type") != "null"]
+        concrete = [b for b in branches if isinstance(b, dict) and b.get("type") != "null"]
         nullable = len(concrete) != len(branches)
         if len(concrete) != 1:
             raise TypeError(
                 f"Gemini 로 옮길 수 없는 anyOf 다 (분기 {len(concrete)}개): {branches!r}"
             )
-        converted = _to_gemini_schema(concrete[0])
+        converted = _to_gemini_schema(concrete[0], defs)
         for key, value in node.items():
-            if key == "anyOf" or key in _GEMINI_SCHEMA_DROP:
+            if key == "anyOf" or key in _GEMINI_SCHEMA_DROP or key in {"$defs", "$ref"}:
                 continue
-            converted[key] = _to_gemini_schema(value)
+            converted[key] = _to_gemini_schema(value, defs)
         if nullable:
             converted["nullable"] = True
         return converted
 
     return {
-        key: _to_gemini_schema(value)
+        key: _to_gemini_schema(value, defs)
         for key, value in node.items()
-        if key not in _GEMINI_SCHEMA_DROP
+        if key not in _GEMINI_SCHEMA_DROP and key not in {"$defs", "$ref"}
     }
 
 
@@ -541,6 +580,7 @@ class IntentIssue(StrEnum):
     LABEL_MISSING = "LABEL_MISSING"
     CONDITION_MISSING = "CONDITION_MISSING"
     CONDITION_INVENTED_NUMBER = "CONDITION_INVENTED_NUMBER"
+    DOMAIN_ACTION_MISSING = "DOMAIN_ACTION_MISSING"
 
 
 class IntentValidationError(ValueError):
@@ -575,6 +615,10 @@ _GUIDANCE: dict[IntentIssue, str] = {
     IntentIssue.CONDITION_INVENTED_NUMBER: (
         "condition 에 발화문에 없는 숫자를 넣지 않는다. 사용자의 말 그대로 옮긴다."
     ),
+    IntentIssue.DOMAIN_ACTION_MISSING: (
+        "action 은 DOMAIN_ACTION 으로 그대로 두고 domain_action 만 허용 목록에서 고른다. "
+        "UNKNOWN 으로 바꾸지 마라."
+    ),
 }
 
 
@@ -595,6 +639,8 @@ def normalize_intent(intent: Intent) -> Intent:
             "agents": list(intent.agents) if action == "STATUS_QUERY" else [],
             "scenario_label": intent.scenario_label if action == "SELECT_SCENARIO" else None,
             "condition": intent.condition if action == "RERUN_WITH_CONDITION" else None,
+            "domain_action": intent.domain_action if action == "DOMAIN_ACTION" else None,
+            "slots": intent.slots if action == "DOMAIN_ACTION" else None,
             "item": None if action == "UNKNOWN" else intent.item,
         }
     )
@@ -641,6 +687,9 @@ def _issues(intent: Intent, utterance: str) -> list[IntentIssue]:
             out.append(IntentIssue.CONDITION_MISSING)
         elif _invents_digits(condition, utterance):
             out.append(IntentIssue.CONDITION_INVENTED_NUMBER)
+
+    if action == "DOMAIN_ACTION" and intent.domain_action is None:
+        out.append(IntentIssue.DOMAIN_ACTION_MISSING)
 
     return out
 
@@ -803,10 +852,7 @@ def _clarification(intent: Intent, utterance: str = "") -> str:
     if intent.action == "UNKNOWN":
         gap = _known_gap(utterance)
         if gap:
-            return (
-                f"{gap} "
-                "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택은 됩니다."
-            )
+            return f"{gap} 매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택은 됩니다."
         return (
             "무엇을 해 드릴지 알아듣지 못했습니다. "
             "매입안 생성 · 부서 상태 조회 · 조건 변경 재요청 · 안 선택 중 하나로 말씀해 주세요."

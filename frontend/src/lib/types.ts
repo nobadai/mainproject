@@ -11,17 +11,47 @@ export type IntentAction =
   | "STATUS_QUERY"
   | "RERUN_WITH_CONDITION"
   | "SELECT_SCENARIO"
+  | "DOMAIN_ACTION"
   | "UNKNOWN";
 
-export type AgentName = "finance" | "inventory" | "purchase";
+export type AgentName = "finance" | "inventory" | "purchase" | "sales" | "ml";
 
-/** LLM 이 돌려주는 것. **수량·금액 칸이 없는 것이 안전장치의 전부다.** */
+export type DomainAction =
+  | "FINANCE_SUMMARY_GET"
+  | "FINANCE_CASH_ADJUSTMENT_CREATE"
+  | "FINANCE_CREDIT_LIMIT_GET"
+  | "FINANCE_CREDIT_LIMIT_UPSERT"
+  | "FINANCE_COLLECTION_CREATE"
+  | "FINANCE_EXPENSE_LIST"
+  | "FINANCE_EXPENSE_CREATE"
+  | "FINANCE_EXPENSE_SETTLE"
+  | "FINANCE_EXPENSE_CANCEL"
+  | "FINANCE_CASHFLOW_GET"
+  | "FINANCE_RECEIVABLES_GET"
+  | "FINANCE_PAYABLES_GET"
+  | "FINANCE_REPORT_GENERATE"
+  | "SALES_PROPOSAL_CREATE"
+  | "SALES_PROPOSALS_TODAY"
+  | "SALES_CONFIRMED_TODAY"
+  | "SALES_REPORT_GENERATE"
+  | "PARTNER_LIST"
+  | "PARTNER_CREATE"
+  | "PARTNER_DETAIL_GET"
+  | "PARTNER_UPDATE";
+
+export interface DomainSlots {
+  [key: string]: string | boolean | null | undefined;
+}
+
+/** LLM 숫자·날짜 슬롯도 사용자 표현 문자열일 뿐 Domain 계산값이 아니다. */
 export interface Intent {
   action: IntentAction;
   agents: AgentName[];
   item: string | null;
   scenario_label: string | null;
   condition: string | null;
+  domain_action?: DomainAction | null;
+  slots?: DomainSlots | null;
   confidence: "HIGH" | "MEDIUM" | "LOW";
 }
 
@@ -29,6 +59,8 @@ export type AskOutcome =
   | "CLASSIFIED_ONLY"
   | "STATUS_ANSWERED"
   | "DECISION_RECORDED"
+  | "DOMAIN_ACTION_ANSWERED"
+  | "DOMAIN_ACTION_EXECUTED"
   | "NEEDS_CLARIFICATION";
 
 export interface AnswerOut {
@@ -60,6 +92,16 @@ export interface DecisionOut {
   is_current: boolean;
 }
 
+export interface DomainActionAnswer {
+  domain: "finance" | "sales" | "partner";
+  action: string;
+  text: string;
+  data: Record<string, unknown>;
+  /** 기존 Markdown은 debug/fallback 용이며 domain report의 본문은 data facts다. */
+  markdown?: string | null;
+  report_kind?: "FINANCE" | "SALES" | null;
+}
+
 export interface AskResponse {
   request_id: string;
   as_of: string;
@@ -72,6 +114,7 @@ export interface AskResponse {
   /** 조건부 재요청으로 **다시 돈 실행.** 없으면 고리가 끊긴다. */
   run: ProcurementRunResponse | null;
   answer: AnswerOut | null;
+  domain_result?: DomainActionAnswer | null;
   llm_status: string;
   /** 어느 API 를 탔나 — `ollama`(로컬) 인지 `gemini`(외부) 인지 화면이 구분해 적는다. */
   llm_provider: string | null;

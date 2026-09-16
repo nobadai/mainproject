@@ -36,6 +36,7 @@ IntentAction = Literal[
     "STATUS_QUERY",
     "RERUN_WITH_CONDITION",
     "SELECT_SCENARIO",
+    "DOMAIN_ACTION",
     "UNKNOWN",
 ]
 
@@ -45,6 +46,99 @@ IntentAction = Literal[
 ItemName = Literal["배추", "무", "양파"]
 
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
+
+
+# ★ 자연어 명령의 **업무 이름만** 닫힌 어휘로 둔다.
+# 숫자·날짜는 DomainSlots 에서 문자열 그대로 받는다. LLM 이 돈/날짜를 계산하거나
+# 정규화하지 않고, 실행 직전 ask_service 의 deterministic parser가 해석한다.
+DomainAction = Literal[
+    "FINANCE_SUMMARY_GET",
+    "FINANCE_CASH_ADJUSTMENT_CREATE",
+    "FINANCE_CREDIT_LIMIT_GET",
+    "FINANCE_CREDIT_LIMIT_UPSERT",
+    "FINANCE_COLLECTION_CREATE",
+    "FINANCE_EXPENSE_LIST",
+    "FINANCE_EXPENSE_CREATE",
+    "FINANCE_EXPENSE_SETTLE",
+    "FINANCE_EXPENSE_CANCEL",
+    "FINANCE_CASHFLOW_GET",
+    "FINANCE_RECEIVABLES_GET",
+    "FINANCE_PAYABLES_GET",
+    "FINANCE_REPORT_GENERATE",
+    "SALES_PROPOSAL_CREATE",
+    "SALES_PROPOSALS_TODAY",
+    "SALES_CONFIRMED_TODAY",
+    "SALES_REPORT_GENERATE",
+    "PARTNER_LIST",
+    "PARTNER_CREATE",
+    "PARTNER_DETAIL_GET",
+    "PARTNER_UPDATE",
+]
+
+
+class DomainSlots(BaseModel):
+    """DOMAIN_ACTION 이 옮기는 **사용자 원문 슬롯**.
+
+    금액·수량·날짜는 계산값이 아니라 사용자가 말한 표현 그대로 보존한다.
+    내부 실행축·로그인 사용자는 슬롯이 아니다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    partner_ref: str | None = None
+    partner_id: str | None = None
+    partner_name: str | None = None
+    partner_type: str | None = None
+    client_type: str | None = None
+    factory_region: str | None = None
+    factory_city: str | None = None
+    factory_area: str | None = None
+    sales_collection_days: str | None = None
+    pricing_contract_type: str | None = None
+    active: bool | None = None
+
+    amount: str | None = None
+    direction: Literal["INFLOW", "OUTFLOW"] | None = None
+    cash_category: Literal["OWNER_INJECTION", "OWNER_WITHDRAWAL", "OTHER"] | None = None
+    financing_mode: Literal["BASE_NO_LOAN", "LOAN_BASELINE"] | None = None
+
+    credit_limit: str | None = None
+    effective_from: str | None = None
+    evidence_grade: Literal["OFFICIAL", "VENDOR", "SIM_FIXED"] | None = None
+    source_ref: str | None = None
+
+    receivable_id: str | None = None
+    collect_all: bool | None = None
+
+    expense_id: str | None = None
+    expense_category: str | None = None
+    expense_date: str | None = None
+    due_date: str | None = None
+    paid_date: str | None = None
+    evidence_id: str | None = None
+    related_delivery_id: str | None = None
+    is_fixed: bool | None = None
+
+    business_mode: (
+        Literal[
+            "SPOT_SALES",
+            "CONTRACT_FULFILLMENT",
+            "CONTRACT_PROPOSAL_NEW",
+            "CONTRACT_PROPOSAL_RENEWAL",
+        ]
+        | None
+    ) = None
+    requested_quantity_kg: str | None = None
+    preferred_unit_price_krw: str | None = None
+    preferred_delivery_date: str | None = None
+    preferred_payment_days: str | None = None
+    preferred_payment_terms_type: str | None = None
+    allow_additional_sourcing: bool | None = None
+
+    start_date: str | None = None
+    end_date: str | None = None
+    period: Literal["TODAY", "YESTERDAY", "THIS_WEEK", "LAST_WEEK", "THIS_MONTH"] | None = None
+    note: str | None = None
 
 
 class Intent(BaseModel):
@@ -74,6 +168,11 @@ class Intent(BaseModel):
     #: `RERUN_WITH_CONDITION` 일 때 사용자가 붙인 조건. **사용자의 말 그대로** 옮긴다.
     #: 숫자를 지어내지 못하게 `runtime` 이 발화문과 대조한다.
     condition: str | None = None
+
+    #: Finance/Sales/Partner의 구체적인 읽기·쓰기. DOMAIN_ACTION이 아닐 때는 None.
+    domain_action: DomainAction | None = None
+    #: 사용자 발화에서 옮긴 최소 슬롯. 업무 계산값이 아니다.
+    slots: DomainSlots | None = None
 
     confidence: Confidence
 
