@@ -295,8 +295,20 @@ def test_재무_화면은_cashflow와_ledger를_쓴다(client):
         "대출 포함",
         "최소 유지해야 할 현금",
     ]
-    assert body["flows"][4]["value"] == "12만원"
-    assert [flow["group"] for flow in body["flows"]] == ["out", "out", "out", "in", "in"]
+    #  ★ **자리 번호가 아니라 이름으로 찾는다.** 유출 칸이 하나 늘 때마다 뒤 칸의
+    #    번호가 밀려서, 번호로 짚으면 «판매로 잡힌 금액» 을 검사하던 줄이 조용히 다른
+    #    칸을 검사하게 된다.
+    flows = {flow["label"]: flow for flow in body["flows"]}
+    assert flows["실제로 들어온 수금"]["value"] == "12만원"
+    assert flows["운영비로 나간 돈"]["group"] == "out"
+    assert [flow["group"] for flow in body["flows"]] == [
+        "out",
+        "out",
+        "out",
+        "out",
+        "in",
+        "in",
+    ]
     assert body["balances"][0]["label"] == "아직 받을 돈"
     assert body["balances"][0]["raw"] == 650
     assert body["balances"][2]["raw"] == 0

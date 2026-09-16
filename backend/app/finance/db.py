@@ -360,20 +360,16 @@ def get_current_finance_runtime_context(
     if snapshot.unsettled_purchase_payables_krw != 0 and not payable_rows:
         unresolved.append("PURCHASE_PAYABLE")
 
-    expense_rows = _fetch_scheduled_rows(
-        table="expenses",
-        columns=("expense_id", "expense_date", "amount_krw"),
+    expense_rows = _fetch_accrued_expense_rows(
         sim_run_id=snapshot.sim_run_id,
         as_of=snapshot.state_date,
         horizon_end=horizon_end,
-        status_column="status",
-        excluded_status="PAID",
     )
     events.extend(
         _rows_to_events(
             expense_rows,
             id_column="expense_id",
-            date_column="expense_date",
+            date_column="effective_due_date",
             amount_column="amount_krw",
             event_type="COMMITTED_OUTFLOW",
             direction="OUTFLOW",
@@ -702,6 +698,39 @@ def _fetch_scheduled_rows(
         sql.Identifier(columns[0]),
     )
     return fetch_all(query, [sim_run_id, as_of, horizon_end, status_value])
+
+
+def _fetch_accrued_expense_rows(
+    *, sim_run_id: str, as_of: date, horizon_end: date
+) -> list[dict[str, object]]:
+    """아직 안 나간 운영비 의무. **미래 현금유출 투영이 읽는 자리다.**
+
+    🔴 **`status = 'ACCRUED'` 를 직접 쓴다.** 예전에는 `status <> 'PAID'` 였고, 그러면
+       **취소된 비용이 의무로 들어온다.** 나가지 않기로 한 돈을 나갈 돈으로 세면 화면의
+       현금 여력이 실제보다 적어지고, 그 숫자로 판매가 막힌다.
+
+    🔴 **기준일은 `due_date` 다 — 발생일이 아니다.** 9월 16일에 생긴 임차료를 20일에
+       내기로 했으면 현금은 20일에 빠진다.
+
+    ★ **`due_date` 가 비어 있는 기존 행은 `expense_date` 로 읽는다.** 이 칸이 생기기
+      전에 적힌 `ACCRUED` 행이 있다면 그 의무는 조용히 사라지면 안 된다 (LEGACY READ
+      COMPATIBILITY ONLY). 원장에 날짜를 채워 넣지는 않는다 — 신규 비용은 `due_date`
+      를 필수로 받으므로 이 경로는 과거 데이터에만 닿는다.
+    """
+    query = sql.SQL(
+        """
+        SELECT expense_id,
+               COALESCE(due_date, expense_date) AS effective_due_date,
+               amount_krw
+        FROM {}.expenses
+        WHERE sim_run_id = %s
+          AND status = 'ACCRUED'
+          AND COALESCE(due_date, expense_date) > %s
+          AND COALESCE(due_date, expense_date) <= %s
+        ORDER BY COALESCE(due_date, expense_date), expense_id
+        """
+    ).format(sql.Identifier(get_db_schema()))
+    return fetch_all(query, [sim_run_id, as_of, horizon_end])
 
 
 def _rows_to_events(
@@ -1139,21 +1168,17 @@ class PostgresFinanceAsOfDataPort:
         _, payable_events = _fetch_open_payable_events(
             sim_run_id=str(position["sim_run_id"]), as_of=as_of, horizon_end=horizon
         )
-        expense_rows = _fetch_scheduled_rows(
-            table="expenses",
-            columns=("expense_id", "expense_date", "amount_krw"),
+        expense_rows = _fetch_accrued_expense_rows(
             sim_run_id=str(position["sim_run_id"]),
             as_of=as_of,
             horizon_end=horizon,
-            status_column="status",
-            excluded_status="PAID",
         )
         return [
             *payable_events,
             *_rows_to_events(
                 expense_rows,
                 id_column="expense_id",
-                date_column="expense_date",
+                date_column="effective_due_date",
                 amount_column="amount_krw",
                 event_type="COMMITTED_OUTFLOW",
                 direction="OUTFLOW",
