@@ -89,6 +89,7 @@ Mode = Literal[
     "PRE_SALES",
     "SCENARIO_VALIDATION",
     "SALES_VALIDATION",
+    "PRE_SALES_FACTS",
     "GENERATE_SCENARIOS",
     "GENERATE_SALES_PROPOSAL",
     "SUPPLY_CAPACITY_QUERY",
@@ -103,6 +104,22 @@ Mode = Literal[
   매입 `SCENARIO_VALIDATION` 과 나눠 둔 이유는 책임이 다르기 때문이다 — 합치면
   `(agent, mode, call_seq)` 로 매입 검증과 판매 검증을 구분할 수 없고, 그러면
   payload 모양을 보고 무엇인지 **추측하는** 코드가 생긴다.
+
+★ `PRE_SALES_FACTS` 는 **판매 후보를 만들기 전에 재무 사실을 받는 호출**이다
+  (2026-09-16). `SALES_VALIDATION` 을 이 자리에 재사용하지 않는다 — 두 호출은 묻는
+  것이 다르다.
+
+  ```text
+  PRE_SALES_FACTS    후보를 만들기 전  "지금 자금·채무·채권·여신이 어떤가"
+  SALES_VALIDATION   후보를 만든 뒤    "이 후보를 해도 되는가"
+  ```
+
+  🔴 합치면 `(agent, mode, call_seq)` 로 **사실 제공과 판정**을 구분할 수 없고, 앞의
+    것이 후보 없이 불린다는 이유로 판정 경로가 빈 payload 를 받아들이게 된다 —
+    그러면 판정이 안 난 실행이 판정된 것으로 읽힌다.
+
+  ★ **읽기 전용이다.** 재무 상태도 실행 이력도 쓰지 않는다 (`STATUS_QUERY` 와 같은
+    자리 — `finance/adapter.py` `_recorded` 의 `_CONTROLLER_MODES` 에 없다).
 
 ★ `GENERATE_SALES_PROPOSAL` 은 **판매가 시나리오를 만드는 호출**이다
   (판매 2026-09-06 통보). 매입 `GENERATE_SCENARIOS` 와 나눠 두는 이유는 바로 위
@@ -202,8 +219,15 @@ PASSING_VERDICTS: frozenset[str] = frozenset({"ok", "conditional"})
 
 _AGENT_MODES: dict[AgentName, frozenset[Mode]] = {
     # 판매 검증은 재무만 받는다 — 재고에 열면 없는 책임을 만든다.
+    # `PRE_SALES_FACTS` 도 재무만 받는다 — 판매 후보 생성 전 자금 사실의 주인이다.
     "finance": frozenset(
-        {"PRE_PURCHASE", "SCENARIO_VALIDATION", "SALES_VALIDATION", "STATUS_QUERY"}
+        {
+            "PRE_PURCHASE",
+            "SCENARIO_VALIDATION",
+            "SALES_VALIDATION",
+            "PRE_SALES_FACTS",
+            "STATUS_QUERY",
+        }
     ),
     # 물류는 두 사이클의 경계를 다 낸다 — `PRE_SALES` 가 판매 쪽 경계다.
     "inventory": frozenset({"PRE_PURCHASE", "PRE_SALES", "SCENARIO_VALIDATION", "STATUS_QUERY"}),
