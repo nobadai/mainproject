@@ -159,6 +159,15 @@ def test_보수안이_공격안보다_비싸다():
 
 _FRESHNESS = [{"code": "FRESHNESS_QUALITY_RISK"}]
 
+#: 그 품목의 로트가 창고에 있다는 사실. **위험 판정이 아니다** — 물류가 낸
+#: `FRESHNESS_QUALITY_RISK` 가 이 품목에 걸리는지를 가르는 재료다.
+_ITEM_LOTS = [_lot("LOT-배추-1", remaining=3, limit=10)]
+
+
+def _freshness_request(**over) -> SalesProposalInput:
+    """신선도 위험이 **이 품목에** 걸린 요청."""
+    return _request(soft_warnings=_FRESHNESS, lots=_ITEM_LOTS, **over)
+
 
 def test_신선도_위험이_소진_압력으로_읽힌다():
     """★★ **되먹임 없이 1차 입력에서 읽는다** — 여기가 끊겨 있던 자리다.
@@ -166,40 +175,64 @@ def test_신선도_위험이_소진_압력으로_읽힌다():
     종전에는 `sell_priority` 를 `domain_replies` 에서만 읽었는데 그 칸은 물류
     `PRE_SALES` payload 에 없다. 실측에서 판매 안 17,364 건 전부 NULL 이었다.
     """
-    signals = derive_signals(_request(soft_warnings=_FRESHNESS))
+    signals = derive_signals(_freshness_request())
 
     assert signals.depletion_pressure is True
     assert signals.freshness_risk_codes == ("FRESHNESS_QUALITY_RISK",)
     assert signals.sell_priority is None, "되먹임에 없던 값을 지어냈다"
 
 
-def test_로트_신선도_한계도_소진_압력이다():
-    """물류가 낸 두 숫자를 비교만 한다 — 새 임계값을 만들지 않는다."""
-    signals = derive_signals(_request(lots=[_lot("LOT-1", remaining=2, limit=3)]))
+def test_다른_품목_신선도_위험으로_이_품목을_싸게_팔지_않는다():
+    """★★ **실제 실행에서 잡은 사고다** (`SIM-CHAIN-REH-0914` · 2026-09-14).
 
-    assert signals.depletion_pressure is True
-    assert signals.freshness_risk_lot_ids == ("LOT-1",)
+    ```text
+    soft_warnings   [FRESHNESS_QUALITY_RISK]   ← 양파 로트에서 난 신호
+    요청 품목        배추                        ← 그날 배추 로트가 하나도 없다
+    → 배추 공격안이 시장 하단 1,321 원으로 내려갔다
+    ```
 
-
-def test_한계를_모르는_로트는_위험이_아니다():
-    """🔴 분모를 모르면 *"며칠 남았으면 위험"* 을 판매가 정하게 된다."""
-    signals = derive_signals(_request(lots=[_lot("LOT-1", remaining=2, limit=None)]))
+    `soft_warnings` 는 코드만 있고 **어느 품목인지가 없다.** 품목을 특정할 수 없는
+    신호로 가격을 내리는 것이 §7 이 막으려는 «근거 없이 싸게 파는 것» 이다.
+    """
+    signals = derive_signals(_request(soft_warnings=_FRESHNESS, lots=[]))
 
     assert signals.depletion_pressure is False
+    assert signals.freshness_risk_codes == ("FRESHNESS_QUALITY_RISK",), (
+        "신호가 있었다는 사실 자체는 남아야 한다"
+    )
+
+
+def test_신선도_신호_없이_로트만으로는_소진이_아니다():
+    """🔴 **신선도 임계의 주인은 물류다** (실측으로 되돌린 자리).
+
+    한때 판매가 `remaining_freshness_days <= effective_freshness_limit_days` 로
+    «한계 도달» 을 스스로 판정했다. 그 비교는 거꾸로였다 — 뒤의 값은 임계가 아니라
+    **분모**라서, 실제 실행에서 `remaining 10 / limit 10` 인 **갓 입고된 최상 로트**가
+    위험으로 읽혔다 (`SIM-CHAIN-CHECK-0916` · 2026-09-10 · 배추 491kg).
+    """
+    signals = derive_signals(_request(lots=[_lot("LOT-1", remaining=10, limit=10)]))
+
+    assert signals.depletion_pressure is False
+    assert signals.item_lot_ids == ("LOT-1",), "로트가 있다는 사실은 남는다"
+
+
+def test_그_품목_로트가_있을_때만_창고_신호를_소진으로_읽는다():
+    signals = derive_signals(_freshness_request())
+
+    assert signals.depletion_pressure is True
+    assert signals.item_lot_ids == ("LOT-배추-1",)
 
 
 def test_신선도_위험에서_공격안이_실제_소진_전략이_된다():
     """🔴 **BALANCED 로 접히지 않는다** — 그 접힘이 C 안을 죽여 온 자리다."""
-    plan, _signals = plan_strategies(_request(soft_warnings=_FRESHNESS))
+    plan, _signals = plan_strategies(_freshness_request())
 
     assert plan.of("AGGRESSIVE").price_posture == "DEPLETION"
     assert plan.of("AGGRESSIVE").inventory_posture == "FRESHNESS_RISK_FIRST"
 
 
 def test_소진_전략이_시장_하단_단가로_옮겨진다():
-    scenarios = {
-        s.scenario_type: s for s in _generate_scenarios(_request(soft_warnings=_FRESHNESS))
-    }
+    scenarios = {s.scenario_type: s for s in _generate_scenarios(_freshness_request())}
     aggressive = scenarios["AGGRESSIVE"]
 
     assert aggressive.unit_price_krw < scenarios["BALANCED"].unit_price_krw
@@ -211,9 +244,7 @@ def test_소진_전략도_마진_최저선_아래로는_안_간다():
     # 원가를 올려 마진 최저선이 시장 하단보다 높아지게 만든다.
     scenarios = {
         s.scenario_type: s
-        for s in _generate_scenarios(
-            _request(soft_warnings=_FRESHNESS, cost_amount=7_000_000 + 2_000_000)
-        )
+        for s in _generate_scenarios(_freshness_request(cost_amount=7_000_000 + 2_000_000))
     }
 
     assert scenarios["AGGRESSIVE"].unit_price_krw >= Decimal(1350)
@@ -221,7 +252,7 @@ def test_소진_전략도_마진_최저선_아래로는_안_간다():
 
 def test_세_안_모두_소진_전략에서도_단가가_세_가지다():
     """실측에서 A/B/C 단가가 세 가지였던 실행은 0 건이었다."""
-    scenarios = _generate_scenarios(_request(soft_warnings=_FRESHNESS))
+    scenarios = _generate_scenarios(_freshness_request())
 
     assert len({s.unit_price_krw for s in scenarios}) == 3
 
@@ -238,24 +269,21 @@ def test_마진_최저선_때문에_같아지면_강제로_벌리지_않는다()
     그 사실은 `rationale` 의 가격 전략으로 되짚을 수 있다.
     """
     scenarios = {
-        s.scenario_type: s
-        for s in _generate_scenarios(
-            _request(soft_warnings=_FRESHNESS, cost_amount=11_000_000)
-        )
+        s.scenario_type: s for s in _generate_scenarios(_freshness_request(cost_amount=11_000_000))
     }
     단가 = {t: s.unit_price_krw for t, s in scenarios.items()}
 
     assert 단가["BALANCED"] == 단가["AGGRESSIVE"], "제약이 같은데 숫자가 갈렸다"
-    assert any(
-        "MARGIN_FLOOR" in line for line in scenarios["AGGRESSIVE"].rationale
-    ), "수렴 원인이 근거에 안 남았다"
+    assert any("MARGIN_FLOOR" in line for line in scenarios["AGGRESSIVE"].rationale), (
+        "수렴 원인이 근거에 안 남았다"
+    )
 
 
 def test_수렴하면_회신이_그_사실과_원인을_말한다():
     """§8 — 숫자를 억지로 벌리지 않는 대신 **무엇이 묶었는지**를 남긴다."""
     from app.sales.proposal import run_proposal
 
-    reply = run_proposal(_request(soft_warnings=_FRESHNESS, cost_amount=11_000_000))
+    reply = run_proposal(_freshness_request(cost_amount=11_000_000))
 
     assert reply.strategy_collapsed is True
     assert "MARGIN_FLOOR" in reply.strategy_collapse_reason_codes
@@ -265,7 +293,7 @@ def test_자세가_갈리고_숫자도_갈리면_수렴이_아니다():
     """세 안이 서로 다른 값에 닿았으면 묶인 것이 없다."""
     from app.sales.proposal import run_proposal
 
-    reply = run_proposal(_request(soft_warnings=_FRESHNESS))
+    reply = run_proposal(_freshness_request())
 
     assert reply.strategy_collapsed is False
     assert reply.strategy_collapse_reason_codes == []
@@ -275,7 +303,7 @@ def test_수렴_원인은_세_안을_다_묶은_코드만_적는다():
     """한 안에만 있는 코드는 수렴을 설명하지 못한다."""
     from app.sales.proposal import run_proposal
 
-    reply = run_proposal(_request(soft_warnings=_FRESHNESS, cost_amount=11_000_000))
+    reply = run_proposal(_freshness_request(cost_amount=11_000_000))
 
     assert "MARKET_UPPER" not in reply.strategy_collapse_reason_codes
 
@@ -283,10 +311,7 @@ def test_수렴_원인은_세_안을_다_묶은_코드만_적는다():
 def test_수렴해도_자세는_기록에_남는다():
     """숫자가 같아도 **무엇을 하려 했는지**는 다르다."""
     scenarios = {
-        s.scenario_type: s
-        for s in _generate_scenarios(
-            _request(soft_warnings=_FRESHNESS, cost_amount=11_000_000)
-        )
+        s.scenario_type: s for s in _generate_scenarios(_freshness_request(cost_amount=11_000_000))
     }
 
     assert scenarios["AGGRESSIVE"].strategy_profile.price_posture == "DEPLETION"
@@ -473,7 +498,7 @@ def test_모델이_고른_자세가_후보_생성에_실제로_반영된다(모�
     """★ 여기가 *"LLM 이 전략에 참여한다"* 의 전부다."""
     _stub(monkeypatch, _llm_plan())
 
-    plan, _signals = plan_strategies(_request(soft_warnings=_FRESHNESS))
+    plan, _signals = plan_strategies(_freshness_request())
 
     assert plan.source == "LLM"
     assert plan.llm_status == "SUCCESS"
@@ -556,10 +581,7 @@ def test_모델이_재무_물류_ML_사실을_전부_본다(모델을_켠다, mo
     """
     보낸것 = _sent_to_model(
         monkeypatch,
-        _request(
-            soft_warnings=_FRESHNESS,
-            finance_context=_finance(pressure="HIGH", credit_available=0.0),
-        ),
+        _freshness_request(finance_context=_finance(pressure="HIGH", credit_available=0.0)),
     )
 
     # 재무
@@ -597,9 +619,7 @@ def test_모델은_판정을_보지_않는다(모델을_켠다, monkeypatch):
 
 def test_사용자가_말로_남긴_의도가_모델에_간다(모델을_켠다, monkeypatch):
     """§16 — raw_text 는 자세를 고르는 참고다. 가격·수량을 바꾸지 않는다."""
-    보낸것 = _sent_to_model(
-        monkeypatch, _request(raw_text="이번 주 안에 급하게 털고 싶다")
-    )
+    보낸것 = _sent_to_model(monkeypatch, _request(raw_text="이번 주 안에 급하게 털고 싶다"))
 
     assert 보낸것["user_intent_text"] == "이번 주 안에 급하게 털고 싶다"
     assert 보낸것["business_mode"] == "SPOT_SALES"
