@@ -14,7 +14,7 @@
 
 🔴 **업무 판단을 여기서 다시 적지 않는다.**
 
-  무엇이 문제이고 무엇이 해소인지는 물류가 정했다 (`logistics/agent/detect.py` —
+  무엇이 문제이고 무엇이 해소인지는 물류가 정했다 (`logistics/monitoring/detect.py` —
   신선도 압박 · 용량 압박 · 중복 방지 · 해소 갈래). 이 파일이 지는 것은
   **커넥션 · 트랜잭션 · 어휘**뿐이다. 신선도 식도 용량 식도 임계 비교도 여기 없다.
 
@@ -46,9 +46,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal, get_args
 
-from app.logistics.agent.detect import detect_logistics_exceptions
-from app.logistics.agent.schemas import DetectOut, DetectPhase
 from app.logistics.db import get_connection
+from app.logistics.monitoring.detect import detect_logistics_exceptions
+from app.logistics.monitoring.schemas import DetectOut, DetectPhase
 
 __all__ = [
     "AFTER_INBOUND",

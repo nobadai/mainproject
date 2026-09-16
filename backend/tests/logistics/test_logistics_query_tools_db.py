@@ -1,4 +1,4 @@
-"""공용 Read-only Tool 8개 — **실제 PostgreSQL 한 트랜잭션** (#628 Commit 3).
+"""공용 Read-only 조회 Tool 7개 — **실제 PostgreSQL 한 트랜잭션** (#628 Commit 3).
 
 ```text
 look-ahead   D5 조회에 D8 의 사실이 섞이지 않는가          ← 이 파일의 존재 이유
@@ -29,27 +29,25 @@ import pytest
 
 from app.logistics import historical_repository, inbound_schedules, turnover
 from app.logistics import tools as calc
-from app.logistics.agent import exceptions as exception_repo
-from app.logistics.agent import tools as agent_tools
-from app.logistics.agent.exceptions import (
+from app.logistics.db import get_connection
+from app.logistics.monitoring import exceptions as exception_repo
+from app.logistics.monitoring.exceptions import (
     live_exceptions_at,
     open_exception,
     resolve_exception,
     touch_exception,
 )
-from app.logistics.agent.schemas import (
+from app.logistics.monitoring.schemas import (
     COMMITMENT_OBSERVED_AS_OF,
     FRESHNESS_PRESSURE,
     ExceptionEvidence,
     ExceptionRow,
 )
-from app.logistics.agent.tools import (
-    ARRIVAL_DATE_OUTSIDE_WINDOW,
+from app.logistics.query import tools as agent_tools
+from app.logistics.query.tools import (
     EXCEPTION_DETAIL_UNRESOLVED,
-    IMPACT_INPUT_MISSING,
     ITEM_NOT_FOUND,
     LOT_NOT_FOUND,
-    estimate_action_impact,
     get_capacity_context,
     get_inbound_schedule,
     get_item_lots,
@@ -58,7 +56,6 @@ from app.logistics.agent.tools import (
     get_policy,
     get_sales_commitments,
 )
-from app.logistics.db import get_connection
 from app.logistics.schemas import (
     POLICY_VERSION,
     InventoryLogisticsSnapshot,
@@ -939,182 +936,6 @@ def test_uncommitted_matches_the_existing_sellable_calculation(
     assert result.lot.uncommitted_kg == existing["LOT-BAECHU"] == Decimal(100)
 
 
-def test_purchase_adjust_without_an_arrival_date_is_unresolved(
-    conn: psycopg.Connection,
-) -> None:
-    """🔴 **창에서 «가장 빡빡한 날» 을 골라 판정하지 않는다** (v0.8 보정).
-
-    그 고르기 자체가 분할 회차와 도착일을 정하는 일이라 **매입의 몫**이다.
-    """
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="PURCHASE_ADJUST_REQUEST",
-        parameters={"item_id": BAECHU, "qty_delta_kg": Decimal(100)},
-        read_fn=_read_fn(D8),
-    )
-
-    assert result.feasibility == "UNRESOLVED"
-    assert f"{IMPACT_INPUT_MISSING}:arrival_date" in result.uncertainties
-    # 요청량과 자리 변화는 산술이라 도착일 없이도 선다.
-    assert result.affected_kg == Decimal(100)
-    assert result.capacity_delta_kg == Decimal(-100)
-
-
-def test_purchase_adjust_compares_only_the_given_arrival_day(
-    conn: psycopg.Connection,
-) -> None:
-    """도착일을 받으면 **그 하루의 `cap_by_date`** 와만 견준다 — 다른 날은 안 본다."""
-    _moved_lot(conn)
-
-    capacity = get_capacity_context(conn, sim_run_id=SIM, as_of=D8, read_fn=_read_fn(D8))
-    arrival = min(capacity.cap_by_date)
-    room_kg = capacity.cap_by_date[arrival]
-
-    feasible = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="PURCHASE_ADJUST_REQUEST",
-        parameters={"qty_delta_kg": room_kg, "arrival_date": arrival},
-        read_fn=_read_fn(D8),
-    )
-    infeasible = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="PURCHASE_ADJUST_REQUEST",
-        parameters={"qty_delta_kg": room_kg + Decimal(1), "arrival_date": arrival},
-        read_fn=_read_fn(D8),
-    )
-
-    assert feasible.feasibility == "FEASIBLE"
-    assert infeasible.feasibility == "INFEASIBLE"
-    assert any(str(arrival) in one for one in feasible.assumptions)
-
-
-def test_purchase_adjust_outside_the_window_is_unresolved(conn: psycopg.Connection) -> None:
-    """창 밖 도착일은 여유를 안 셈했다 — 🔴 **모르는 날을 가능하다고 하지 않는다.**"""
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="PURCHASE_ADJUST_REQUEST",
-        parameters={"qty_delta_kg": Decimal(1), "arrival_date": D8 + timedelta(days=365)},
-        read_fn=_read_fn(D8),
-    )
-
-    assert result.feasibility == "UNRESOLVED"
-    assert any(one.startswith(ARRIVAL_DATE_OUTSIDE_WINDOW) for one in result.uncertainties)
-
-
-def test_disposal_loss_uses_only_the_book_unit_cost(conn: psycopg.Connection) -> None:
-    """🔴 판매 기회손실을 지어내지 않는다 — 물류 장부에 그 값이 없다."""
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="DISPOSAL_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU", "qty_kg": "200"},
-    )
-
-    assert result.feasibility == "FEASIBLE"
-    assert result.affected_kg == Decimal(200)
-    assert result.capacity_delta_kg == Decimal(200)
-    assert result.estimated_loss_krw == Decimal(200) * UNIT_COST
-
-
-def test_cannot_dispose_more_than_the_remaining_quantity(conn: psycopg.Connection) -> None:
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="DISPOSAL_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU", "qty_kg": "900"},
-    )
-
-    assert result.feasibility == "INFEASIBLE"
-    assert result.affected_kg == Decimal(500)
-
-
-def test_sales_priority_without_a_quantity_invents_no_impact(
-    conn: psycopg.Connection,
-) -> None:
-    """🔴 **미확정 물량을 «전량 나간다» 로 쓰지 않는다** (v0.8 보정).
-
-    `SALES_PRIORITY_REQUEST` 는 *"이 Lot 을 우선 검토해 달라"* 는 **요청**이지 판매
-    실행계획이 아니다 — 실제 판매량은 Sales 소유다.
-    """
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="SALES_PRIORITY_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU"},
-    )
-
-    assert result.feasibility == "UNRESOLVED"
-    assert result.affected_kg is None
-    assert result.capacity_delta_kg is None
-    assert result.estimated_loss_krw is None
-    # ★ 상한은 **혼동되지 않는 다른 칸**으로만 보인다.
-    assert result.candidate_kg == Decimal(500)
-    assert f"{IMPACT_INPUT_MISSING}:qty_kg" in result.uncertainties
-
-
-def test_sales_priority_with_a_quantity_answers_only_what_logistics_knows(
-    conn: psycopg.Connection,
-) -> None:
-    """수량을 받으면 *"창고가 그만큼 댈 수 있나"* 까지만 답한다 — 팔릴지는 Sales 다."""
-    _moved_lot(conn)
-
-    within = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="SALES_PRIORITY_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU", "qty_kg": "300"},
-    )
-    beyond = estimate_action_impact(
-        conn,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="SALES_PRIORITY_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU", "qty_kg": "900"},
-    )
-
-    assert within.feasibility == "FEASIBLE"
-    assert within.affected_kg == Decimal(300) and within.candidate_kg == Decimal(500)
-    assert beyond.feasibility == "INFEASIBLE"
-    assert beyond.affected_kg == Decimal(500)
-    # 🔴 어느 쪽도 금액을 셈하지 않는다.
-    assert within.estimated_loss_krw is None and beyond.estimated_loss_krw is None
-    assert any("Sales" in one for one in within.assumptions)
-
-
-def test_accept_risk_moves_nothing(conn: psycopg.Connection) -> None:
-    """§10.1 기록형 행동 — 여기서 0 은 추측이 아니라 사실이다."""
-    _moved_lot(conn)
-
-    result = estimate_action_impact(
-        conn, sim_run_id=SIM, as_of=D8, action="ACCEPT_RISK", parameters={"lot_id": "LOT-BAECHU"}
-    )
-
-    assert result.feasibility == "FEASIBLE"
-    assert result.affected_kg == Decimal(0) and result.capacity_delta_kg == Decimal(0)
-
-
 # ===========================================================================
 # C. 관측일 (§18.2)
 # ===========================================================================
@@ -1138,19 +959,7 @@ def test_no_tool_reports_an_observed_at_in_the_future(conn: psycopg.Connection) 
         get_inbound_schedule(conn, sim_run_id=SIM, as_of=D8),
     ]
 
-    impacts = [
-        estimate_action_impact(
-            conn,
-            sim_run_id=SIM,
-            as_of=D8,
-            action=action,
-            parameters={"lot_id": "LOT-BAECHU", "qty_kg": "100", "qty_delta_kg": Decimal(1)},
-            read_fn=_read_fn(D8),
-        )
-        for action in ("SALES_PRIORITY_REQUEST", "DISPOSAL_REQUEST", "ACCEPT_RISK")
-    ]
-
-    for answer in [*answers, *impacts]:
+    for answer in answers:
         assert answer.observed_as_of is None or answer.observed_as_of <= D8, answer
         assert answer.sim_run_id == SIM and answer.as_of == D8
 
@@ -1284,14 +1093,6 @@ def test_every_statement_the_tools_send_is_a_select(conn: psycopg.Connection) ->
     get_policy(recorder, sim_run_id=SIM, as_of=D8, item_id=BAECHU, policy_fn=_policy_fn())
     get_capacity_context(recorder, sim_run_id=SIM, as_of=D8, read_fn=_read_fn(D8))
     get_inbound_schedule(recorder, sim_run_id=SIM, as_of=D8)
-    estimate_action_impact(
-        recorder,
-        sim_run_id=SIM,
-        as_of=D8,
-        action="DISPOSAL_REQUEST",
-        parameters={"lot_id": "LOT-BAECHU", "qty_kg": "100"},
-        read_fn=_read_fn(D8),
-    )
 
     assert recorder.statements, "한 문장도 안 보냈다면 이 검사는 아무것도 잠그지 않는다"
     for statement in recorder.statements:

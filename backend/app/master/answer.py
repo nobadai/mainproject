@@ -54,6 +54,23 @@ _AGENT_LABEL: dict[str, str] = {
 #: 같은 답이 두 번 · 사람이 못 읽는 모양으로 나간다. 구조화 값은 `status.answers` 에 남는다.
 _MARKDOWN_AGENTS: dict[str, str] = {"ml": "answer_markdown"}
 
+#: 🔴 **payload 안에 «완결된 본문» 이 중첩된 경우** (부서 → (블록 키, 본문 키)).
+#:
+#: 물류 질문형 `STATUS_QUERY({"question": …})` 는 LLM 이 사용자에게 쓴 자연어 답을
+#: `status_query.answer` 에 담고, **같은 블록에 그 답의 재료**(`tool_trace` · `tools_used` ·
+#: `arguments` · `result` · `lots` · `excluded_items`)를 함께 싣는다. 재료까지 사실 줄로
+#: 펴면 `_format` 이 중첩 Mapping·Sequence 를 재귀 평탄화해 **Tool 이름 · 내부 item_id ·
+#: 잔량 0 인 소진 Lot 수십 건**이 사용자 본문으로 나간다 (실측 2026-09-17).
+#: `ml` 의 `answer_markdown` 과 **같은 문제이고 같은 해법**이다 — 완결된 답을 다시 펴지 않는다.
+#:
+#: ⚠️ `_MARKDOWN_AGENTS` 와 달리 **부서가 아니라 payload 모양으로 가른다.** 질문 없는
+#:    `STATUS_QUERY({})` Overview 는 이 블록이 없어 기존 사실 줄 렌더링을 **그대로** 탄다
+#:    (`used_capacity_kg` · `lot_count` … 는 `_LABEL` 에 이미 등록된 의도된 표현이다).
+#:
+#: ★ **지우는 것이 아니라 본문에서만 빼는 것이다** — 구조화 payload 는
+#:   `StatusAnswer.answers` 에 그대로 남아 추적·디버깅에 쓰인다 (`ask_service._to_answer`).
+_NESTED_BODY: dict[str, tuple[str, str]] = {"inventory": ("status_query", "answer")}
+
 #: 답이 아니라 **기준**인 키. 사실 줄이 아니라 꼬리말로 뺀다.
 #:
 #: ★ **부서마다 따로 적는다.** 재무와 물류의 기준일이 다를 수 있고, 그게 다르면
@@ -211,6 +228,21 @@ def agent_labels() -> tuple[str, ...]:
 # ── 조회 ────────────────────────────────────────────────────────────────
 
 
+def _nested_body(agent: str, payload: Mapping[str, Any]) -> str | None:
+    """payload 안에 **완결된 본문**이 있으면 그 본문. 없으면 `None`(= 기존 렌더링).
+
+    🔴 모양으로 가른다 — 질문형 물류 조회만 잡히고 Overview 는 안 잡힌다 (`_NESTED_BODY`).
+    """
+    nested = _NESTED_BODY.get(agent)
+    if nested is None:
+        return None
+    block = payload.get(nested[0])
+    if not isinstance(block, Mapping):
+        return None
+    body = block.get(nested[1])
+    return body if isinstance(body, str) and body.strip() else None
+
+
 def facts_from_status(outcome: StatusOutcome) -> AnswerFacts:
     """조회 결과를 사실 줄로. **못 답한 부서를 지우지 않는다.**"""
     facts: list[Fact] = []
@@ -227,6 +259,12 @@ def facts_from_status(outcome: StatusOutcome) -> AnswerFacts:
                 bodies.append(body)
             else:
                 empty_bodies.append(f"{label}는 답했지만 본문이 비어 있습니다")
+            continue
+        # 🔴 완결된 본문이 payload 안에 있으면 **그것만** 싣는다 — 같은 블록의 재료
+        #    (tool_trace · lots …)를 사실 줄로 펴면 사람이 못 읽는 답이 된다 (`_NESTED_BODY`).
+        body = _nested_body(agent, payload)
+        if body is not None:
+            bodies.append(body)
             continue
         for key, value in payload.items():
             text = _format(key, value)

@@ -70,8 +70,6 @@ from app.api.primitives import (
 )
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.contracts.core import ITEMS
-from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
-from app.logistics.agent.schemas import DetectionRecord, ExceptionRow
 from app.logistics.console_service import (
     get_fefo_candidates_by_item,
     get_inbound_console,
@@ -86,6 +84,8 @@ from app.logistics.historical_repository import (
     runtime_coverage_at,
     snapshot_days_between,
 )
+from app.logistics.monitoring.exceptions import live_exceptions_at, resolved_exceptions_on
+from app.logistics.monitoring.schemas import DetectionRecord, ExceptionRow
 from app.logistics.schemas import (
     ConsoleInboundResponse,
     ConsoleInventoryResponse,

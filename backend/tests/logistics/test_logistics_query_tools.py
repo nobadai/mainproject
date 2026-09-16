@@ -1,4 +1,4 @@
-"""공용 Read-only Tool 8개 — **DB 없이 재는 것들** (#628 Commit 3).
+"""공용 Read-only 조회 Tool 7개 — **DB 없이 재는 것들** (#628 Commit 3).
 
 ```text
 읽기 전용   쓰기 함수·쓰기 SQL 이 **소스에 아예 없는가** (AST · 문자열 둘 다)
@@ -23,32 +23,28 @@ from pathlib import Path
 
 import pytest
 
-from app.logistics.agent import tools as agent_tools
-from app.logistics.agent.schemas import ExceptionEvidence, ExceptionRow
-from app.logistics.agent.tools import (
-    ACTION_UNSUPPORTED,
+from app.logistics.historical_repository import HistoricalAllocation, HistoricalReservation
+from app.logistics.inbound_schedules import InboundScheduleView
+from app.logistics.monitoring.schemas import ExceptionEvidence, ExceptionRow
+from app.logistics.query import tools as agent_tools
+from app.logistics.query.tools import (
     DETECT_WRITTEN_DETAILS,
-    IMPACT_INPUT_MISSING,
     MUTABLE_EXCEPTION_DETAILS,
-    SUPPORTED_ACTIONS,
     InboundScheduleFact,
     LotFact,
     _allocated_by_lot,
     _as_of_snapshot,
     _exception_fact,
-    _quantity,
     _state_observed_as_of,
-    estimate_action_impact,
     get_inbound_schedule,
 )
-from app.logistics.historical_repository import HistoricalAllocation, HistoricalReservation
-from app.logistics.inbound_schedules import InboundScheduleView
 from app.logistics.tools import CAP_BY_DATE_WINDOW_DAYS
 
 AS_OF = date(2026, 1, 20)
 SIM = "SIM-TOOLS-TEST"
 
-#: Tool 8개. 🔴 **숫자가 계약이다** — 하나가 사라지거나 늘면 §9 와 갈린다.
+#: 공용 Read-only 조회 Tool 7개. 🔴 **숫자가 계약이다** — 하나가 사라지거나 늘면 갈린다.
+#: ★ `estimate_action_impact` 는 폐기한 Investigation/Proposal 흐름과 함께 제거됐다.
 TOOL_NAMES = (
     "get_open_exceptions",
     "get_lot",
@@ -57,7 +53,6 @@ TOOL_NAMES = (
     "get_policy",
     "get_capacity_context",
     "get_inbound_schedule",
-    "estimate_action_impact",
 )
 
 SOURCE = Path(agent_tools.__file__).read_text(encoding="utf-8")
@@ -68,12 +63,12 @@ def _tool(name: str):
 
 
 # ===========================================================================
-# A. 계층 계약 — 8개 · 읽기 전용 · 축 필수
+# A. 계층 계약 — 7개 · 읽기 전용 · 축 필수
 # ===========================================================================
 
 
-def test_exactly_eight_tools_are_exported():
-    """§9 의 목록 그대로다. 🔴 Registry 도 동적 탐색도 만들지 않는다."""
+def test_exactly_seven_tools_are_exported():
+    """공용 조회 Tool 목록 그대로다. 🔴 Registry 도 동적 탐색도 만들지 않는다."""
     exported = {name for name in agent_tools.__all__ if name in TOOL_NAMES}
 
     assert exported == set(TOOL_NAMES)
@@ -193,7 +188,7 @@ def test_this_layer_holds_no_sql_at_all():
 def test_observed_at_constants_are_not_redefined():
     """🔴 `agent.schemas` 가 규칙의 주인이다 — Tool 이 자기 상수를 들면 두 벌이 된다."""
     assert "OBSERVED_AS_OF: date" not in SOURCE
-    assert "from app.logistics.agent.schemas import" in SOURCE
+    assert "from app.logistics.monitoring.schemas import" in SOURCE
 
 
 def test_observed_at_has_no_convenience_fallback():
@@ -638,62 +633,3 @@ def test_collection_observed_at_is_none_without_any_change_date(monkeypatch):
 
     assert get_inbound_schedule(None, sim_run_id=SIM, as_of=AS_OF).observed_as_of is None
 
-
-# ===========================================================================
-# F. 영향 추정 — 모르는 것에 숫자를 붙이지 않는다
-# ===========================================================================
-
-
-def test_supported_actions_match_the_catalogue():
-    """§10.1 그대로다. 🔴 Proposal 을 여기서 만들지 않는다 — 이름만 공유한다."""
-    assert SUPPORTED_ACTIONS == (
-        "SALES_PRIORITY_REQUEST",
-        "PURCHASE_ADJUST_REQUEST",
-        "ACCEPT_RISK",
-        "DISPOSAL_REQUEST",
-    )
-
-
-def test_unknown_action_gets_no_numbers():
-    """🔴 **모르는 행동에 그럴듯한 숫자를 붙이면 그 숫자가 제안의 근거가 된다.**"""
-    result = estimate_action_impact(
-        None, sim_run_id=SIM, as_of=AS_OF, action="ZONE_MOVE", parameters={"lot_id": "LOT-1"}
-    )
-
-    assert result.feasibility == "UNSUPPORTED"
-    assert result.affected_kg is None and result.capacity_delta_kg is None
-    assert result.estimated_loss_krw is None
-    assert f"{ACTION_UNSUPPORTED}:ZONE_MOVE" in result.uncertainties
-
-
-def test_missing_lot_id_is_reported_as_unresolved():
-    result = estimate_action_impact(
-        None, sim_run_id=SIM, as_of=AS_OF, action="DISPOSAL_REQUEST", parameters={}
-    )
-
-    assert result.feasibility == "UNRESOLVED"
-    assert f"{IMPACT_INPUT_MISSING}:lot_id" in result.uncertainties
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (Decimal("10.5"), Decimal("10.5")),
-        (10, Decimal(10)),
-        ("10.5", Decimal("10.5")),
-        (0, None),
-        (-3, None),
-        (True, None),  # 🔴 bool 은 int 가 아니다 — 수량으로 읽지 않는다
-        (None, None),
-        ("십", None),
-        (1.5, None),  # float 은 안 받는다 — 통화·수량이 조용히 흔들린다
-    ],
-)
-def test_quantity_accepts_only_exact_values(value, expected):
-    assert _quantity(value) == expected
-
-
-def test_negative_delta_is_allowed_only_when_asked():
-    """매입 조정은 **줄이는 쪽**도 있다 — 그때 음수가 정상 입력이다."""
-    assert _quantity(Decimal(-200), allow_negative=True) == Decimal(-200)
-    assert _quantity(Decimal(-200)) is None
