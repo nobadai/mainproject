@@ -65,6 +65,7 @@ from app.master.transition import TransitionOut, apply_approval, purchase_id_pre
 __all__ = [
     "BEFORE_APPROVAL_MESSAGE",
     "CLOSED_DUE_DATE_MESSAGE",
+    "MULTI_GRADE_MESSAGE",
     "PURCHASE_DATE_MESSAGE",
     "SAME_DAY_DUE_DATE_MESSAGE",
     "WHOLE_QTY_MESSAGE",
@@ -90,6 +91,15 @@ PURCHASE_DATE_MESSAGE = "매입일은 승인한 날({as_of})과 같아야 합니
 
 WHOLE_QTY_MESSAGE = "수량은 1kg 단위로 적어 주세요 — {seq}회차"
 """수량에 소수점이 있을 때의 한 줄 (선검사 · 2026-09-16)."""
+
+MULTI_GRADE_MESSAGE = (
+    "이 안은 등급이 {세기}입니다 ({등급}). 실매입 기록은 한 등급만 받습니다"
+    " — 매입 화면에서 등급이 하나인 다른 안을 골라 주세요."
+)
+"""승인한 안의 등급이 둘 이상일 때 화면에 나가는 한 줄 (선검사 · 2026-09-16)."""
+
+#: 사람이 읽는 등급 가짓수. 없는 수는 `N개` 로 떨어진다 — 없는 말을 지어내지 않는다.
+_세기 = {2: "둘", 3: "셋", 4: "넷"}
 
 WHOLE_UNIT_PRICE_MESSAGE = "단가는 원 단위 정수로 적어 주세요 — {seq}회차"
 """단가가 원 단위 정수로 안 떨어질 때의 한 줄 (선검사 · 2026-09-16).
@@ -129,7 +139,8 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
-          선검사  첫 회차 매입일 == 승인 실행 as_of · 수량이 정수 · 금액 ÷ 수량(= 단가)이 정수
+          선검사  안의 등급이 하나 · 첫 회차 매입일 == 승인 실행 as_of
+                  · 수량이 정수 · 금액 ÷ 수량(= 단가)이 정수
           회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행 — **제 커넥션 · 제 커밋**
@@ -217,6 +228,7 @@ def record_purchase(
     )
     # ★ **선검사가 재검증보다 앞이다** — 재검증이 계약에서 떨어지면 사람에게는
     #   「재검증 통과 못 함」만 남는다 (2026-09-16).
+    _check_single_grade(plan)
     _check_recordable_values(approval, legs)
     grade = body.grade.strip()
     try:
@@ -260,6 +272,48 @@ def record_purchase(
     # ③ 전이는 **커밋된 기록 뒤에** 제 커넥션으로 돈다. 실패해도 기록은 남고,
     #    다음 개장 뒤 「미적용 전이 재시도」가 기록값으로 세운다.
     return apply_fn(recorded, sim_run_id=sim_run_id, connect=connect)
+
+
+def _check_single_grade(plan: ApprovedCommitment) -> None:
+    """**등급이 둘 이상인 안에는 실매입을 못 적는다** (선검사 · 2026-09-16).
+
+    🔴 **왜 막는가 — 기록이 원장 가드를 우회하기 때문이다.** 원장은 등급이 둘 이상인
+       약정을 일부러 막는다 (`ledger.ledger_block_reason`): `purchase_items` 는 품목당
+       한 줄이고 `grade` 는 그 한 줄에 한 칸이라, 아무 등급이나 고르면 어느 등급이
+       남는지가 줄 순서에 걸리고 합치면 없는 등급을 마스터가 지어낸 것이 된다.
+
+       ★ 그런데 **기록의 `grade` 는 기록 전체에 하나다.** 약정 덮기
+         (`commitment.with_purchase_record`)가 그 한 등급을 `sourcing_plan` 의 **모든
+         줄에** 얹으므로, 등급 줄이 둘인 안에 기록하면 두 줄이 사람이 적은 한 등급으로
+         덮인다. 그러면 `commitment.grades` 가 1개가 되어 **가드가 더는 안 막고, 에러
+         없이 틀린 등급이 원장에 선다.** 막히는 것보다 나쁘다 — 아무도 모른다.
+
+    ```text
+    실측  2026-09-16 · 실 DB 읽기만
+      매입 파트 전수   안 8,809개 중 등급 2개인 안 31개 (무 22 · 양파 9 · 전부 '상'·'중')
+                       그 31개가 속한 실행 20개가 **20/20 APPROVE** — 승인된 안이 바로 그 안
+      마스터 실측      SIM-CHAIN-REH-0916 에 2등급 안 8개 · 그중 6개는 승인까지 났는데
+                       **원장 0행** (`ledger_block_reason` 이 막아 매입이 아예 안 섰다)
+      지금 그 20건은 `decided_by = AUTO-BACKFILL` 이라 「사람 승인」 검사가 먼저 거른다
+        — 구멍이 막힌 것이 아니라 **아직 구멍에 닿지 않은 것**이다 (9/11 부터 사람 승인)
+    ```
+
+    🔴 **막는 규칙의 주인은 `ledger_block_reason` 이다.** 여기는 그 규칙을 **다시 쓰지도
+       부르지도 않는다** — 그 함수는 약정을 받는데 여기는 아직 기록 사본을 만들기 전이다.
+       기록이 그 규칙을 **우회하지 않는다**는 것만 입구에서 지킨다.
+
+    ⚠️ **등급 줄이 하나도 없는 안은 지금 그대로 지난다** (`sourcing_plan` 이 비었거나
+      등급이 없는 안 · 실측 6개). 덮을 줄이 없으니 우회할 가드도 없고, 그때는 기록의
+      `grade` 로 한 줄을 세우는 것이 맞다 (`with_purchase_record` 의 `else` 갈래).
+    """
+    grades = plan.grades
+    if len(grades) < 2:
+        return
+    raise DecisionRejected(
+        MULTI_GRADE_MESSAGE.format(
+            세기=_세기.get(len(grades), f"{len(grades)}개"), 등급=" · ".join(grades)
+        )
+    )
 
 
 def _check_recordable_values(approval: CurrentApproval, legs: Sequence[RecordedLeg]) -> None:
