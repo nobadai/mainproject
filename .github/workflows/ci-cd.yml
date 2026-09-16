@@ -236,6 +236,7 @@ jobs:
           ML_SOURCE_DB_USER: ${{ secrets.ML_SOURCE_DB_USER }}
           ML_SOURCE_DB_PASSWORD: ${{ secrets.ML_SOURCE_DB_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MASTER_LLM_MODEL: ${{ secrets.MASTER_LLM_MODEL }}
           MASTER_GEMINI_API_KEY: ${{ secrets.MASTER_GEMINI_API_KEY }}
           FINANCE_GEMINI_API_KEY: ${{ secrets.FINANCE_GEMINI_API_KEY }}
           SALES_GEMINI_API_KEY: ${{ secrets.SALES_GEMINI_API_KEY }}
