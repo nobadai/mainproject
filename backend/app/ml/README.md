@@ -56,14 +56,25 @@ register_ml_agent()
 | 키 | 뜻 |
 |---|---|
 | `answer_markdown` | **사람에게 그대로 보여줄 글** (표·굵은 글씨 포함) |
-| `qa_status` | `OK` · `PARTIAL` · `NEED_CLARIFY` · `OUT_OF_SCOPE` 등 |
-| `item` · `target_kind` | 배추·무·양파 / AUC·WHSL·RTL |
+| `answer_status` | `ok` · `partial` · `need_clarify` · `out_of_scope` 등 (**소문자**) |
+| `answer_routes` | 무엇을 답했나 — `forecast` · `batch` · `perf` (쉼표로 이음) |
+| `item` | 배추·무·양파 (가격 갈래일 때) |
 | `as_of` | 예측 기준일 |
-| `target_dates` | 답한 대상일 목록 |
+| `forecasts[]` | 답한 행 — `target_dt` · `predicted` · `lower` · `upper` · `item` · `kind` |
 | `model_version` · `forecast_source` | 어느 모델·어느 표에서 읽었나 |
-| `use_recommended` | 판단에 써도 되는 조합인가 |
-| `filled_count` | 복사값이 섞인 행 수 (있을 때만) |
-| `out_of_range_dates` | 예측 범위 밖이라 못 답한 날 (있을 때만) |
+| `use_recommended` | **답에 든 조합을 전부 써도 되나** — 하나라도 막혔으면 `false` (없으면 «모른다») |
+| `out_of_range_note` | 예측 범위 밖이라 못 답한 날 (있을 때만) |
+| `batch` | 그날 배치 — `status`(사람 말) · `run_id` · `n_ok` · `n_fail` |
+| `report` | 그날 AI 점검 보고서의 `ran_at` |
+| `performance[]` | 봉인 개봉 성능 아홉 칸 — `item` · `kind` · `avg_price` · `avg_error` · `pct` |
+| `models[]` | **지금 도는 모델 셋** — `kind` · `model_ver` · `created_at` · `train_end` · `last_swapped_at` |
+
+🔴 **대문자 라벨을 최상위에 두지 않습니다.** 봉투가 최상위 숫자·대문자 라벨에 근거를
+요구하는데(`required_claims`), `"OK"` · `"AUC"` 같은 값에는 댈 수치가 없습니다.
+같은 사실은 `forecasts[]` · `performance[]` 안으로 넣습니다.
+
+근거(`Evidence`)의 주소는 payload 를 **그대로** 가리킵니다 —
+`forecasts[0].predicted` · `batch.n_ok` · `performance[3].pct`.
 
 ---
 
@@ -163,6 +174,73 @@ reply = self.runner.call(agent, "STATUS_QUERY", payload={"question": utterance})
 날짜   오늘 ~ 18일 뒤
 질문   값이 얼마인가 · 얼마나 맞는가 · 믿고 써도 되는가
 ```
+
+### 5-1. 갈래가 셋입니다 ★ (2026-09-16)
+
+한 질문이 **여럿을 물을 수 있습니다.** 답은 물어본 차례대로 이어 붙입니다.
+
+| 갈래 | 이런 질문 | 답하는 것 |
+|---|---|---|
+| `forecast` | 「5일 뒤 배추 경락가?」 | 예측 표 · 예상 구간 |
+| `batch` | 「오늘 데이터 처리 잘 됐어?」 | 그날 배치 한 줄(상태·시각·단계 수) + 실패한 단계 + **그날 AI 점검 보고서 본문 그대로** |
+| `perf` | 「모델 성능 어때?」 | **현재 모델 셋** + 봉인 개봉 성능 아홉 칸 + 그날 재학습 보고서 전부 |
+
+```text
+「오늘 상태 어때? 성능도」       → batch · perf
+「5일 뒤 배추 경락가랑 배치 상태」 → forecast · batch
+```
+
+★ **품목·가격 종류를 안 말하면 되묻지 않고 전부 답합니다** (2026-09-16). 품목이 없으면
+배추·무·양파, 가격 종류가 없으면 경락가·중도매가·소매가, 둘 다 없으면 아홉 조합입니다.
+날짜가 없으면 예전처럼 오늘 하나입니다. **무엇을 채웠는지 답 첫 줄에 한 줄로 밝힙니다.**
+질문 문장으로 오든 `item`·`kind` 값으로 오든 **같은 규칙**입니다 — 값으로 부르는 쪽은
+프로그램이라 되물어도 다시 답할 수가 없습니다. 되묻기(`need_clarify`)는 이제 해석기가
+**갈래조차 못 고른 때**(`clarify`) 하나뿐입니다. 짝 물음(`asks`)이 오면 채우지 않습니다.
+범위 밖 품목(마늘·대파)도 전부로 바꾸지 않고 그대로 거절합니다.
+
+★ **가격 답은 표만 냅니다** (2026-09-16). 「이 조합은 판단에 쓰지 마세요」 경고를
+**문장에서 뺐습니다.** 🔴 **값은 그대로입니다** — `use_recommended` · `quality_note` ·
+`is_gated` 가 `meta` 와 payload 에 실려 나갑니다. 판단은 마스터가 그 값으로 합니다.
+그래서 `use_recommended` 의 뜻을 **«답에 든 조합을 전부 써도 되나»** 로 넓혔습니다 —
+하나라도 막혔으면 `false` 입니다. 「가격 알려줘」에 아홉 조합이 나가는데 **첫 조합만**
+보고 있어, 막힌 조합(양파 중도매가)이 조용히 묻혔습니다. **답 문장은 안 바뀝니다.**
+
+🔴 **해석기를 하나 더 두지 않았습니다.** LLM 호출은 예전처럼 **한 번**이고, 그 한 번이
+`routes` 목록을 돌려줍니다. 갈래를 나눠 읽는 것은 코드가 합니다.
+
+🔴 **한 갈래가 터져도 나머지는 나갑니다.** 못 읽은 갈래만 «…을 읽지 못했습니다» 한 줄로
+말하고, 전체 상태는 `partial` 이 됩니다. 전부 못 읽었을 때만 `source_unavailable` 입니다.
+
+**읽는 표** (전부 원본 창고 · `SELECT` 만): `batch_run` · `batch_run_stage` ·
+`agent_report` · `prediction_log` · `model_cutover`. 성능 아홉 칸은 표가 아니라
+**상수**입니다 (`qa_tools.SEALED_ACCURACY`) — `prediction_log` 로 다시 재지
+않습니다 (실험용 모델이 섞여 있습니다).
+
+★ **«현재 모델» 의 출처는 둘입니다** (`qa_tools.current_models()`). 이름·만든 날은
+`prediction_log` 의 **최신 기준일 행**(`model_ver` · `model_created_at`), 학습 끝·최근
+교체는 `model_cutover` 의 `kind` 별 최신 행(`new_train_end` · `swapped_at` · `note`)
+입니다. **`model_cutover` 가 아직 없어도 죽지 않습니다** — 그때 «최근 교체» 칸에
+«교체 이력 없음» 이라고 적습니다 (2026-09-16 실측: 두 창고 다 그 표가 없습니다).
+
+🔴 **이름으로는 교체를 알 수 없습니다.** `ops_auc` · `ops_whsl` · `ops_rtl` 은 모델을
+갈아 끼워도 그대로 둡니다 — 매입 파트 필터가 이름 정확히 일치라 바꾸면 에러 없이
+0건이 됩니다. 그래서 **만든 날**을 같이 적습니다.
+
+★ **교체 시각을 모를 수 있습니다.** `model_cutover.time_known` 이 `false` 면 «최근 교체»
+를 **날짜만 + «(시각 미상)»** 으로 적습니다. 되짚어 적은 기록은 백업 폴더 **이름**에서
+날짜만 건진 것이 있어 시각이 `00:00` 으로 앉아 있고, 그대로 보이면 «한밤중에 바꿨나» 로
+읽힙니다. **칸이 아직 없으면(`None`) 예전처럼 날짜·시각**입니다 — «모른다» 와
+«안 알려준다» 는 다릅니다. 긴 `note` 는 **답에 안 적습니다** (원문은 DB 에 그대로).
+
+🔴 **재학습 보고서는 그날 것을 전부 읽습니다** (`agent_reports()`). 하루에 판정 3건 ·
+검증 2건이 남는 날이 있고, 마지막 하나만 읽었더니 경락가 검증의 «후보가 나쁩니다» 가
+답에서 통째로 빠졌습니다. 판정은 한 줄 요약표, 검증은 비교표 전부입니다.
+**가격 종류는 `payload.kind` → 제목 맨 앞 낱말 → «(가격 종류 미상)» 순으로** 가립니다.
+
+★ **시간대가 표마다 다릅니다.** `batch_run.started_at` 은 UTC 라
+`AT TIME ZONE 'Asia/Seoul'` 로 돌려 날짜를 자르고, `agent_report.ran_at` 은 이미
+한국 시간이라 그대로 자릅니다. 한국 09:00 이 UTC 자정이라 안 돌리면 **09:00 배치가
+전날 것으로 세어집니다.**
 
 **못 하는 것도 적습니다.** 마늘·대파 같은 다른 품목, 19일 뒤 이상, 과거,
 평균·합계 같은 집계, 「왜 오르나」, 사라 말라 판단. 범위 밖이면 `qa_status` 에

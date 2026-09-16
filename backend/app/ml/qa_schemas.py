@@ -77,10 +77,20 @@ class QaRequest(BaseModel):
     as_of: date | None = Field(default=None, description="기준일. 없으면 전달표의 최신 기준일")
 
 
+#: 답할 수 있는 갈래. **한 질문이 여럿을 물을 수 있다.**
+#:
+#:   forecast  가격이 얼마인가 · 얼마나 맞나 · 써도 되나
+#:   batch     그날 배치가 어떻게 됐나 + 그날 AI 점검 보고서
+#:   perf      봉인 개봉 성능표 + 그날 재학습 후보 비교
+QA_ROUTES: tuple[str, ...] = ("forecast", "batch", "perf")
+
+
 class QaMeta(BaseModel):
     """출처와 상태. **마스터는 이 값을 봉투에 싣는다.**"""
 
     status: QaStatus
+    #   ★ 무엇을 답했나 (2026-09-16). 답 문장만 보면 표가 왜 둘인지 기계가 못 가린다.
+    routes: list[str] = Field(default_factory=list, description="forecast · batch · perf")
     #   하나짜리 옛 이름 — 조합이 하나면 그 값, 여럿이면 **첫 번째**를 가리킨다.
     item: str | None = None
     kind: str | None = None
@@ -100,6 +110,10 @@ class QaMeta(BaseModel):
     #   모델 대신 어제 가격을 그대로 낸 행인가. 답 문장에서는 뺐고 여기로만 간다.
     is_gated: list[bool] = Field(default_factory=list)
     band_method: str | None = None
+    #   🔴 **답에 든 조합을 전부 써도 되나** (2026-09-16 에 뜻을 넓혔다).
+    #     하나라도 막혔으면 `False` 다. 전에는 **첫 조합만** 봤는데, 「가격 알려줘」에
+    #     아홉 조합이 나가면서 막힌 조합(양파 중도매가)이 조용히 묻혔다.
+    #     `None` 은 «모른다» 다 — 「안 막혔다」가 아니다.
     use_recommended: bool | None = None
 
     #   ★ **답 문장에서 뺀 값들** (2026-09-15 · 화면을 깨끗이 하라는 지시).
@@ -140,3 +154,20 @@ class QaAnswer(BaseModel):
     #: 비어 있으면 «예측을 안 읽었다» 는 뜻이고, 어댑터는 그때 `observed_at` 을
     #: 비운다 — 안 읽고 잰 척하지 않기 위해서다.
     rows_for_evidence: list[dict] = Field(default_factory=list, exclude=True)
+
+    #: 🔴 **배치 갈래의 근거 재료** (2026-09-16). 읽은 배치 행과 보고서 시각을 담는다.
+    #: 비어 있으면 «배치를 안 읽었다» 는 뜻이다 — 못 읽은 것과 없는 것을 갈라 담는다
+    #: (`found` 칸). `rows_for_evidence` 와 같은 이유로 API 응답에는 안 싣는다.
+    batch_for_evidence: dict | None = Field(default=None, exclude=True)
+
+    #: 성능 갈래의 근거 재료. 봉인 개봉 아홉 칸을 그대로 담는다 (조건은 `SEALED_SOURCE`).
+    performance_for_evidence: list[dict] = Field(default_factory=list, exclude=True)
+
+    #: 🔴 **지금 도는 모델 셋** (2026-09-16). 이름·만든 날·학습 끝·최근 교체.
+    #:
+    #: 이름(`ops_rtl`)은 모델을 갈아 끼워도 **안 바뀐다** — 매입 파트 필터가 이름
+    #: 정확히 일치라 바꾸면 에러 없이 0건이 된다. 그래서 «만든 날» 이 같이 있어야
+    #: 교체를 알아볼 수 있다. 근거를 달 숫자 칸이 없어 `Evidence` 는 안 만든다.
+    #:
+    #: 비어 있으면 «안 읽었다» 는 뜻이고, 어댑터는 그때 payload 칸을 아예 안 만든다.
+    models_for_payload: list[dict] = Field(default_factory=list, exclude=True)

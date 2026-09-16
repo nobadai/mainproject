@@ -48,8 +48,14 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
 사용자 질문에서 **무엇을 물었는지만** 골라낸다. 가격을 추정하지 말고, 설명 문장도 쓰지 마라.
 
 고를 것
-  route  forecast(값) · accuracy(얼마나 맞나) · usability(써도 되나)
-         · clarify(못 고르겠다) · out_of_scope(우리 품목이 아님)
+  routes ★ **무엇을 물었나. 여러 개면 여러 개를 다 적는다** (배열이다)
+         forecast  가격이 얼마인가 · 얼마나 맞나 · 써도 되나
+         batch     오늘 자료 처리(배치)가 잘 됐나 · 수집 · 점검 보고서 · 오늘 상태
+         perf      모델 성능 · 정확도 · 오차 · 재학습 · 모델 업데이트
+         clarify(못 고르겠다) · out_of_scope(우리 품목이 아님) 은 그대로 쓴다
+         「오늘 상태 어때? 성능도」 → ["batch","perf"]
+         「5일 뒤 배추 경락가랑 배치 상태」 → ["forecast","batch"]
+         ★ batch·perf 만 물었으면 items·kinds·dates 는 비워 둔다
   items  배추 · 무 · 양파 중 **질문에 실제로 나온 것만**. 없으면 빈 배열
          🔴 질문에 없는 품목을 채우지 마라. 하나만 나왔으면 하나만 적는다
          「배추랑 무」면 둘 · 「전 품목」·「다」라고 할 때만 셋
@@ -73,10 +79,15 @@ SYSTEM_PROMPT_KO = """너는 농산물 가격 예측 질의응답의 해석 층�
          items·kinds·dates 만 채운다 — 그건 우리가 곱해서 본다
 
 규칙
-  · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 route 를 out_of_scope 로 둔다
-  · 품목이나 가격 종류를 못 고르겠으면 빈 배열로 두고 route 는 forecast 로 둔다 —
-    되묻거나 전부 보여주는 판단은 우리 규칙이 한다
-  · 날짜를 못 고르겠으면 비워 둔다. 임의로 채우지 마라
+  · 배추·무·양파가 아닌 품목(마늘·대파 등)이면 routes 에 out_of_scope 를 넣는다
+  · ★ **질문에 품목이 없으면 items 를 빈 배열로 두고, 가격 종류가 없으면 kinds 를
+    빈 배열로 둔다. 되묻지 마라** — 빈 자리는 우리 규칙이 «배추·무·양파 전부» ·
+    «경락가·중도매가·소매가 전부» 로 채운다. 그러니 그때도 routes 는 ["forecast"] 다
+  · ★ **날짜가 없으면 dates 를 비워 둔다.** 임의로 채우지 마라 — 빈 날짜는 우리 규칙이
+    «오늘» 로 채운다
+  · ★ **이 셋이 없다는 이유로 clarify 를 쓰지 마라.** clarify 는 «가격인지 배치인지
+    성능인지조차 모르겠다» 일 때만 쓴다. 「가격 알려줘」는 clarify 가 아니라
+    routes=["forecast"] 에 items·kinds·dates 를 전부 빈 배열로 둔 것이다
 """
 
 #: 같은 지시를 영어로 옮긴 것. **뜻을 바꾸지 않았다** — 순서·항목·규칙이 같다.
@@ -89,8 +100,15 @@ From the user's question, pick out **only what was asked**. Do not estimate a pr
 and do not write any explanatory sentence.
 
 What to pick
-  route  forecast (a value) · accuracy (how accurate it is) · usability (safe to use)
-         · clarify (cannot decide) · out_of_scope (not one of our crops)
+  routes ★ **what was asked. List every one that applies** (it is an array)
+         forecast  a price value · how accurate it is · whether it is safe to use
+         batch     did today's data processing (the batch) go well · collection ·
+                   the daily check report · "how are things today"
+         perf      model performance · accuracy · error · retraining · model updates
+         clarify (cannot decide) · out_of_scope (not one of our crops) stay as they are
+         "오늘 상태 어때? 성능도" → ["batch","perf"]
+         "5일 뒤 배추 경락가랑 배치 상태" → ["forecast","batch"]
+         ★ If only batch·perf were asked, leave items·kinds·dates empty
   items  **only the crops actually named** in the question, from 배추 · 무 · 양파.
          Empty array if none. Do not add a crop the question did not name.
   kinds  **only the price series actually named**, from AUC (auction) ·
@@ -111,10 +129,17 @@ What to pick
 
 Rules
   · If the crop is not 배추, 무 or 양파 (garlic, spring onion and so on),
-    set route to out_of_scope
-  · If you cannot decide the crop or the price kind, leave it empty and set route to
-    forecast — whether to ask back or to show everything is decided by our own rules
-  · If you cannot decide a date, leave it empty. Do not fill one in arbitrarily
+    put out_of_scope in routes
+  · ★ **If the question names no crop, leave items as an empty array; if it names no
+    price kind, leave kinds as an empty array. Do not ask back** — our own rules fill
+    an empty slot with "배추·무·양파, all of them" and "AUC·WHSL·RTL, all of them".
+    So routes is still ["forecast"] in that case
+  · ★ **If there is no date, leave dates empty.** Do not fill one in arbitrarily —
+    our own rules fill an empty date with "today"
+  · ★ **Do not use clarify just because those three are missing.** clarify is only for
+    "I cannot even tell whether this is about a price, the batch, or performance".
+    "가격 알려줘" is not clarify — it is routes=["forecast"] with items, kinds and
+    dates all left as empty arrays
 
 The question may be written in Korean. Answer with the JSON schema only.
 """
@@ -161,9 +186,19 @@ SYSTEM_PROMPT = SYSTEM_PROMPT_KO
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "route": {
-            "type": "string",
-            "enum": ["forecast", "accuracy", "usability", "clarify", "out_of_scope"],
+        #   ★ **한 칸이 아니라 목록이다** (2026-09-16). 「오늘 상태 어때? 성능도」처럼
+        #     한 문장이 두 가지를 묻는다. 한 칸짜리로는 하나를 조용히 버린다 —
+        #     `kinds` 에서 이미 같은 일을 겪었다 (2026-09-15).
+        #
+        #   🔴 **해석기를 하나 더 두지 않는다.** 갈래가 늘어도 LLM 호출은 **한 번**이고,
+        #     갈래를 나눠 처리하는 것은 코드가 한다 (`qa_graph`).
+        "routes": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["forecast", "batch", "perf",
+                         "accuracy", "usability", "clarify", "out_of_scope"],
+            },
         },
         #   ★ enum 에 빈 문자열을 넣으면 Gemini 가 400 을 낸다 (enum[n]: cannot be empty).
         #     «못 골랐다» 는 값을 비워서(= 이 칸을 빼서) 말한다. required 에 없다.
@@ -200,8 +235,12 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
     #     `route` 하나만 필수였을 때, `asks` 칸을 더한 뒤로 모델이 `items`·`kinds`
     #     까지만 쓰고 **`dates`·`asks` 를 통째로 빼먹었다.** 「5일뒤」·「전체」가 전부
     #     «날짜를 말씀하지 않으셨다» 로 떨어졌다. 비어도 되지만 칸은 반드시 쓴다.
-    "required": ["route", "items", "kinds", "dates", "far_offsets", "asks"],
+    "required": ["routes", "items", "kinds", "dates", "far_offsets", "asks"],
 }
+
+#: 우리가 아는 갈래. 나머지 값(accuracy·usability·clarify)은 전부 가격 갈래로 접는다 —
+#: 예전부터 그렇게 다뤘고, 되묻는 판단은 우리 규칙이 한다.
+QA_ROUTES: tuple[str, ...] = ("forecast", "batch", "perf", "out_of_scope")
 
 
 #: 전달표의 창. **늘 같다** — 2026년 1,557개 조합 전부 18칸 온전(2026-09-15 실측).
@@ -349,9 +388,13 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         items = _pick_all([a["item"] for a in asks], QA_ITEMS)
     if asks and not kinds:
         kinds = _pick_all([a["kind"] for a in asks], QA_KINDS)
+    routes = _pick_routes(chosen)
     return {
         "asks": asks,
-        "route": str(chosen.get("route") or "forecast"),
+        #   ★ **목록이 정본이다.** `route` 는 첫 값을 가리키는 옛 이름으로 남긴다 —
+        #     그 이름으로 읽는 코드와 검사가 아직 있다.
+        "routes": routes,
+        "route": routes[0],
         "items": items,
         "kinds": kinds,
         #   예전 이름 — 하나만 쓰는 자리가 아직 있다. 첫 값을 가리킨다.
@@ -361,6 +404,24 @@ def interpret(question: str, base_dt: date) -> dict[str, Any] | None:
         #   여기서 거르면 «범위 밖» 이라는 사실이 다시 사라진다.
         "dates": _parse_dates(chosen.get("dates")) + _far_dates(chosen.get("far_offsets"), base_dt),
     }
+
+
+def _pick_routes(chosen: dict[str, Any]) -> list[str]:
+    """고른 갈래를 우리 어휘로. **모르는 값은 가격 갈래로 접는다.**
+
+    `accuracy` · `usability` · `clarify` 는 예전부터 가격 갈래와 같은 자리로 갔다 —
+    되묻거나 오차를 붙이는 판단은 규칙이 한다. 빈손이면 가격 갈래 하나로 둔다.
+    """
+    raw = chosen.get("routes")
+    if not isinstance(raw, list) or not raw:
+        raw = [chosen.get("route")]
+    out: list[str] = []
+    for value in raw:
+        text = str(value or "").strip()
+        name = text if text in QA_ROUTES else "forecast"
+        if name not in out:
+            out.append(name)
+    return out or ["forecast"]
 
 
 def _far_dates(raw: Any, today: date) -> list[date]:

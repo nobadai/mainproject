@@ -102,6 +102,9 @@ SUPPORTED_MODES: tuple[str, ...] = ("STATUS_QUERY",)
 _T_QA = "ml.qa_graph.answer"
 _T_LATEST = "ml.qa_tools.latest_base_date"
 _T_ROWS = "ml.qa_tools.forecast_rows"
+#: 갈래를 둘 더하면서 붙은 도구 (2026-09-16). **그 갈래를 실제로 답했을 때만 적는다.**
+_T_BATCH = "ml.qa_tools.batch_run"
+_T_REPORT = "ml.qa_tools.agent_report"
 
 #: 질문이 실려 오는 칸. **하나뿐이다** (마스터 확정 · 2026-09-15).
 #:
@@ -267,13 +270,79 @@ def evidences_for(
     )
 
 
+#: 갈래를 사람 말로. `reasoning` 은 짧아야 해서(세 문장) 이름만 쓴다.
+_ROUTE_WORD = {"forecast": "예측", "batch": "배치 결과", "perf": "모델 성능"}
+
+
+#: 배치 기록에서 근거를 달 숫자 칸. 문자열 칸(`status`)은 뺀다 — `Evidence.value` 가
+#: 수치라 «정상» 에 붙일 값이 없다. 억지로 1 을 적으면 세어 본 것을 근거라고 적는 셈이다.
+_BATCH_FIELDS = ("run_id", "n_ok", "n_fail")
+
+
+def batch_evidences(seen: dict[str, Any] | None) -> tuple[Evidence, ...]:
+    """배치 갈래의 근거. **주소는 payload 를 그대로 가리킨다** (`batch.n_ok`).
+
+    등급은 `ASSUMED` 다 — 이 문으로 나가는 값은 전부 그렇다. 배치 기록이 약한
+    출처라서가 아니라, **우리는 하드 제약을 세우는 쪽이 아니기 때문**이다.
+    """
+    if not seen or seen.get("run_id") is None:
+        return ()
+    return tuple(
+        Evidence(
+            claim=f"batch.{field}",
+            source="tool_calc",
+            ref_ids=(f"batch_run:run_id={seen['run_id']},column={field}",),
+            value=float(seen[field]),
+            unit="건" if field != "run_id" else "회차",
+            evidence_grade="ASSUMED",
+            evidence_detail="배치 실행 기록 — 우리가 남긴 운영 기록이다",
+        )
+        for field in _BATCH_FIELDS
+        if seen.get(field) is not None
+    )
+
+
+def performance_evidences(rows: list[dict[str, Any]]) -> tuple[Evidence, ...]:
+    """성능표의 근거. **오차율마다 하나**, 조건은 `evidence_detail` 에 같이 간다.
+
+    🔴 조건 없는 수치는 어디에도 안 남긴다 (CLAUDE.md §11). 「19.7%」만 떨어져 나가면
+      **언제 · 무엇으로 잰 값인지** 아무도 모른 채 돌아다닌다.
+    """
+    return tuple(
+        Evidence(
+            claim=f"performance[{index}].pct",
+            source="tool_calc",
+            ref_ids=(
+                f"sealed_accuracy:kind={row['kind']},item={row['item']},column=pct",
+            ),
+            value=float(row["pct"]),
+            unit="%",
+            evidence_grade="ASSUMED",
+            evidence_detail=qa_tools.SEALED_SOURCE,
+        )
+        for index, row in enumerate(rows)
+    )
+
+
 def _read_note(out: Any) -> str:
-    """무엇을 읽었는지 한 줄. **조합이 여럿이면 다 적는다.**"""
+    """무엇을 읽었는지 한 줄. **조합이 여럿이면 다 적는다.**
+
+    🔴 `check_reasoning` 이 세 자리 이상 숫자를 막는다 (§1.2-3). 숫자를 적고 싶으면
+      `Evidence` 로 낸다 — 여기에는 **무엇을 읽었는지만** 적는다.
+    """
+    routes = list(out.meta.routes or ["forecast"])
     pairs = list(zip(out.meta.items or [], out.meta.kinds or [], strict=False))
-    if not pairs:
-        return f"질문을 해석해 {out.meta.item or '?'} {out.meta.kind or '?'} 예측을 읽었다"
-    names = " · ".join(f"{item} {kind}" for item, kind in pairs)
-    return f"질문을 해석해 {names} 예측을 읽었다"
+    if not pairs and (out.meta.item or out.meta.kind):
+        #   옛 한 칸짜리 이름만 채워져 오는 길이 아직 있다.
+        pairs = [(out.meta.item or "?", out.meta.kind or "?")]
+    words: list[str] = []
+    for route in routes:
+        if route == "forecast":
+            names = " · ".join(f"{item} {kind}" for item, kind in pairs)
+            words.append(f"{names} 예측" if names else "예측")
+        else:
+            words.append(_ROUTE_WORD.get(route, route))
+    return f"질문을 해석해 {' · '.join(words)} 을 읽었다"
 
 
 def _forecast_rows(out: Any) -> list[dict[str, Any]]:
@@ -344,6 +413,59 @@ def _answer_payload(out: Any) -> dict[str, Any]:
         #   "못 답한 날" 은 세어 본 것이지 근거를 댈 수치가 아니다.
         payload["out_of_range_note"] = (
             "예측 범위 밖: " + ", ".join(d.isoformat() for d in meta.out_of_range)
+        )
+    if meta.routes:
+        #   ★ 소문자 문자열로 싣는다. 배열로 실으면 «스칼라 배열» 이라 통째로 근거를
+        #     요구받는데(`required_claims`), 갈래 이름에 댈 수치가 없다.
+        payload["answer_routes"] = ",".join(meta.routes)
+    payload.update(_batch_payload(out))
+    perf = list(out.performance_for_evidence or [])
+    if perf:
+        payload["performance"] = perf
+    models = list(out.models_for_payload or [])
+    if models:
+        #   ★ **지금 무엇이 도나.** 이름은 교체해도 안 바뀌므로 만든 날·학습 끝이
+        #     같이 가야 한다 (2026-09-16).
+        #
+        #   🔴 여기에는 **숫자가 없다.** 근거를 억지로 달지 않는다 — 배열 항목 안의
+        #     라벨은 봉투가 근거를 요구하지 않고, 억지로 달면 «세어 본 것» 을
+        #     근거라고 적게 된다 (§1.2-3).
+        payload["models"] = models
+    return payload
+
+
+def _batch_payload(out: Any) -> dict[str, Any]:
+    """배치 갈래의 칸. **읽은 것만 싣는다.**
+
+    🔴 «못 읽었다» 와 «없다» 를 한 칸으로 적지 않는다. 뭉치면 마스터 이력에서
+      창고가 죽은 날과 배치가 안 돈 날이 같아 보인다.
+
+    ★ 중첩 매핑이라 봉투가 근거를 **요구하지는** 않는다 (`required_claims` 는 최상위와
+      배열 항목만 본다). 그래도 숫자 칸에는 근거를 단다 — 요구가 없다고 출처 없는
+      숫자를 싣는 것은 §1.2-3 의 뜻과 어긋난다.
+    """
+    seen = out.batch_for_evidence or {}
+    if not seen:
+        return {}
+    payload: dict[str, Any] = {}
+    if seen.get("run_id") is not None:
+        payload["batch"] = {
+            "status": seen.get("status"),
+            "run_id": seen["run_id"],
+            "n_ok": seen.get("n_ok"),
+            "n_fail": seen.get("n_fail"),
+        }
+    else:
+        payload["batch_note"] = (
+            "배치 기록을 읽지 못했다" if seen.get("read") == "error"
+            else f"{seen.get('on')} 배치 기록이 없다"
+        )
+    if seen.get("report_ran_at"):
+        payload["report"] = {"ran_at": seen["report_ran_at"]}
+    else:
+        payload["report_note"] = (
+            "점검 보고서를 읽지 못했다" if seen.get("report_read") == "error"
+            else f"{seen.get('on')} 점검 보고서가 아직 없다"
         )
     return payload
 
@@ -464,6 +586,7 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
     elapsed = int((time.perf_counter() - started) * 1000)
     status = out.meta.status
     llm_called = qa_llm.enabled()
+    tools = _tools_used(out)
 
     if status in _NOT_READY_MISSING:
         return (
@@ -471,7 +594,7 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
                 request,
                 runtime_status="RUNTIME_NOT_READY",
                 business_status="skipped",
-                missing_data=_NOT_READY_MISSING[status],
+                missing_data=_missing_for(out),
                 reasoning=out.markdown,
             ),
             _metadata(request, tools=tools, elapsed_ms=elapsed, llm_called=llm_called),
@@ -498,6 +621,8 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
         evidences = evidences_for(
             out.rows_for_evidence, out.meta.item, out.meta.kind, base_dt
         )
+    evidences += batch_evidences(out.batch_for_evidence)
+    evidences += performance_evidences(out.performance_for_evidence or [])
 
     return (
         _reply(
@@ -507,8 +632,37 @@ def ml_port(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]:
             payload=_answer_payload(out),
             evidences=evidences,
             reasoning=_read_note(out),
-            #   ★ 예측을 실제로 읽었을 때만 관측 시점을 적는다.
-            observed_at=base_dt if evidences else None,
+            #   ★ **예측을 읽었을 때만** 관측 시점을 적는다. 배치·성능 근거가 붙었다고
+            #     채우면 «예측을 쟀다» 로 이력에 남는다 (2026-09-16 · 갈래를 늘리며 고침).
+            observed_at=base_dt if (out.rows_for_evidence and base_dt) else None,
         ),
         _metadata(request, tools=tools, elapsed_ms=elapsed, llm_called=llm_called),
     )
+
+
+def _tools_used(out: Any) -> tuple[str, ...]:
+    """실제로 부른 도구만. **안 부른 것을 적으면 실행 계획이 거짓이 된다.**"""
+    tools = [_T_QA, _T_LATEST, _T_ROWS]
+    routes = list(out.meta.routes or [])
+    if "batch" in routes:
+        tools += [_T_BATCH, _T_REPORT]
+    elif "perf" in routes:
+        tools.append(_T_REPORT)
+    return tuple(dict.fromkeys(tools))
+
+
+def _missing_for(out: Any) -> tuple[str, ...]:
+    """무엇이 없어서 못 답했나. **갈래마다 다른 표를 읽으므로 이름도 다르다.**
+
+    🔴 배치를 못 읽었는데 «예측표가 없다» 고 적으면, 고치러 간 사람이 엉뚱한 표를 본다.
+    """
+    names: list[str] = []
+    routes = list(out.meta.routes or ["forecast"])
+    if "forecast" in routes and out.meta.status in _NOT_READY_MISSING:
+        names += list(_NOT_READY_MISSING[out.meta.status])
+    seen = out.batch_for_evidence or {}
+    if seen.get("read") == "error":
+        names.append("batch_run")
+    if seen.get("report_read") == "error":
+        names.append("agent_report")
+    return tuple(dict.fromkeys(names)) or _NOT_READY_MISSING.get(out.meta.status, ())
