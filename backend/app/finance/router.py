@@ -18,6 +18,13 @@ from app.finance.cash_adjustments import (
 from app.finance.collection import FinanceCollectionConflict, apply_collection_event
 from app.finance.db import FinanceDataNotReady, get_connection, get_db_schema
 from app.finance.execution import get_finance_execution, get_finance_run, list_finance_runs
+from app.finance.expenses import (
+    KNOWN_EXPENSE_CATEGORIES,
+    ExpenseConflict,
+    cancel_expense,
+    create_expense,
+    settle_expense,
+)
 from app.finance.schemas import (
     FinalVerdict,
     FinanceAgentRunResponse,
@@ -207,6 +214,95 @@ class CashAdjustmentChange(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
     ]
     note: str | None = Field(default=None, max_length=1000)
+
+
+class ExpenseCreate(BaseModel):
+    """새 운영비 한 건. **적는 순간의 상태는 언제나 `ACCRUED` 다.**
+
+    🔴 **지급 여부를 사용자가 고르지 않는다.** 고를 수 있게 하면 «적으면서 바로 지급» 이
+       생기고, 그 경로는 현금 차감을 건너뛴다. 지급은 지급 요청으로만 일어난다.
+    """
+
+    sim_run_id: str = Field(min_length=1)
+    expense_date: date
+    #: 지급하기로 한 날. 미래 현금유출 투영이 이 날짜로 이 돈을 센다.
+    due_date: date
+    expense_category: str = Field(min_length=1)
+    amount_krw: Decimal = Field(gt=0)
+    #: 비용 원장의 근거 정본. 다른 원장의 `source_ref` 와 이름이 다르다.
+    evidence_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+    ]
+    related_delivery_id: str | None = Field(default=None, max_length=120)
+    is_fixed: bool = False
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ExpenseSettle(BaseModel):
+    """지급 한 번. 이 요청만이 현금을 줄인다."""
+
+    sim_run_id: str = Field(min_length=1)
+    financing_mode: str = Field(min_length=1)
+    paid_date: date
+
+
+class ExpenseCancel(BaseModel):
+    """«나가지 않기로 한다». **현금은 변하지 않는다.**"""
+
+    sim_run_id: str = Field(min_length=1)
+
+
+@router.get("/expense-categories")
+def list_expense_categories() -> dict[str, object]:
+    """새 비용에 쓸 수 있는 분류. **화면이 이 목록을 손으로 다시 적지 않는다.**"""
+    return {"categories": sorted(KNOWN_EXPENSE_CATEGORIES)}
+
+
+@router.post("/expenses", status_code=status.HTTP_201_CREATED)
+def create_operating_expense(expense: ExpenseCreate) -> dict[str, object]:
+    """운영비 한 건을 `ACCRUED` 로 적는다."""
+    try:
+        with get_connection() as conn:
+            expense_id = create_expense(conn, **expense.model_dump())
+    except ExpenseConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"expense_id": expense_id, "status": "ACCRUED"}
+
+
+@router.post("/expenses/{expense_id}/settle")
+def settle_operating_expense(expense_id: str, request: ExpenseSettle) -> dict[str, object]:
+    """`ACCRUED` 비용을 지급하고 같은 거래에서 현금을 줄인다."""
+    try:
+        with get_connection() as conn:
+            result = settle_expense(conn, expense_id=expense_id, **request.model_dump())
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ExpenseConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FinanceDataNotReady as error:
+        raise HTTPException(
+            status_code=409, detail="해당 지급일의 재무 상태가 준비되지 않았습니다."
+        ) from error
+    return {
+        "expense_id": result.expense_id,
+        "status": "PAID",
+        "paid_date": result.paid_date,
+        "amount_krw": result.amount_krw,
+        "current_cash_krw": result.current_cash_krw,
+    }
+
+
+@router.post("/expenses/{expense_id}/cancel")
+def cancel_operating_expense(expense_id: str, request: ExpenseCancel) -> dict[str, object]:
+    """`ACCRUED` 비용을 취소한다. 이미 지급된 비용은 여기로 오지 못한다."""
+    try:
+        with get_connection() as conn:
+            cancel_expense(conn, expense_id=expense_id, **request.model_dump())
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ExpenseConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"expense_id": expense_id, "status": "CANCELLED"}
 
 
 @router.post("/receivables/collections", status_code=status.HTTP_201_CREATED)
