@@ -427,6 +427,22 @@ class DetectedCondition:
 
 
 @dataclass(frozen=True)
+class DetectionRecord:
+    """감지 한 번의 «그날 severity» (LOG-AGENT-005). `detection_history_json` 한 원소.
+
+    🔴 **날짜별 이력이지 상태머신이 아니다.** Historical 은 `as_of <= 기준일` 중
+       `max(as_of)` 원소의 severity 로 그날 우선도를 복원한다 — 배열 순서를 믿지 않는다.
+    """
+
+    as_of: date
+    severity: str
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> DetectionRecord:
+        return cls(as_of=date.fromisoformat(raw["as_of"]), severity=raw["severity"])
+
+
+@dataclass(frozen=True)
 class ExceptionRow:
     """`logistics_exceptions` 한 행. **칸 이름이 DB 와 같다.**"""
 
@@ -447,6 +463,8 @@ class ExceptionRow:
     risk_accepted_as_of: date | None = None
     previous_exception_id: str | None = None
     note: str | None = None
+    #: 감지별 «그날 severity» 이력 (LOG-AGENT-005). 옛 행·기록 없음이면 비어 있다.
+    detection_history: tuple[DetectionRecord, ...] = ()
 
     @property
     def dedupe_key(self) -> tuple[str, str, str]:

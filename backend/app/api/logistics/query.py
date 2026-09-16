@@ -71,7 +71,7 @@ from app.api.primitives import (
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.contracts.core import ITEMS
 from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
-from app.logistics.agent.schemas import ExceptionRow
+from app.logistics.agent.schemas import DetectionRecord, ExceptionRow
 from app.logistics.console_service import (
     get_fefo_candidates_by_item,
     get_inbound_console,
@@ -203,17 +203,31 @@ def _still_working(r: ConsoleReservation) -> bool:
 def _severity_at(row: ExceptionRow, as_of: date) -> tuple[str, str | None]:
     """그날 우선도. 🔴 **미래 값을 과거 화면으로 흘리지 않는다.**
 
-    `touch_exception` 이 `severity` 를 **덮어쓴다** (`SET severity = …`). 그래서 마지막
-    갱신이 `as_of` 뒤였다면 지금 행의 우선도는 **그날 우선도가 아니다.** 가르는 자는
-    부르는 쪽이라고 `live_exceptions_at` 이 적어 뒀고, 화면에서는 이 함수가 그 일을 한다.
+    `touch_exception` 이 `severity` 를 **덮어쓴다** (`SET severity = …`) — 그래서 지금
+    행의 `severity` 는 마지막 감지값(캐시)이지 과거값이 아니다. LOG-AGENT-005 로
+    `detection_history` 가 «그날 severity» 를 쌓으므로, 그 이력에서 그날 값을 복원한다.
 
     ```text
-    last_detected_as_of <= as_of   그날 뒤로 안 만졌다 → 지금 값이 그날 값이다
-    그 밖                          증명 못 한다 → «—»
+    detection_history 에 as_of <= 기준일 원소 있음  → 그중 max(as_of) 원소의 severity
+                                                       🔴 배열 순서를 믿지 않는다 — 날짜로 고른다
+    이력 있으나 기준일 이하 감지 없음               → «—» (그날 우선도 증명 불가)
+    이력 없음(옛 행 · [])                          → 기존 fallback:
+        last_detected_as_of <= as_of   지금 값이 그날 값이다
+        그 밖                          «—»
     ```
 
     :returns: `(보일 말, 아래 붙일 한 줄)`.
     """
+    chosen: DetectionRecord | None = None
+    for record in row.detection_history:
+        if record.as_of <= as_of and (chosen is None or record.as_of > chosen.as_of):
+            chosen = record
+    if chosen is not None:
+        return _SEVERITY.get(chosen.severity, chosen.severity), None
+    if row.detection_history:
+        # 이력은 있으나 기준일 이하 감지가 없다 — 그날 우선도를 증명할 수 없다.
+        return "—", "기준일 당시 우선도 확인 불가"
+    # 이력 없는 옛 행(적용 전 생성) — 기존 규칙 그대로.
     detected = row.last_detected_as_of
     if detected is None or detected > as_of:
         return "—", "기준일 당시 우선도 확인 불가"
